@@ -95,6 +95,46 @@
 不出现——两条通路症状相同、成因不同，只有这条日志分得开。它同时是「新 DLL 是否真的编进/
 部署上」的自证串（`tr -d '\000' < wind_tsf_dev.dll | grep -ao smart_punct_digit_fallback`）。
 
+### 5. macOS 上数字后智能标点从未生效（`prevChar` 恒 0）
+
+macOS 侧 `KeyHandler.encodeKeyEvent` 一直写死 `prevChar: 0`（注释 "M2.1 暂不取 caret 前字符"），
+服务端 `is_smart_punct_after_digit` 的最后一道判据是 `(0x30..=0x39).contains(&prev_char)`，
+于是该功能在 macOS 上**从未接通过**——不是回归，是未实装。
+
+**决定只做备用通路，不做「现读文档」主路径。** IMKit 有 `selectedRange` + `attributedSubstring`
+（`InputController.selectedClientText` 已在用），但那是跨进程同步调用：项目里已经为它的开销
+把取选中文本挪出了 `activateServer`（实测 1191/4643 个采样点），且宿主支持度参差。只跟踪
+「我们自己送进文档的东西」换来的是**所有 app 里行为一致**，代价是光标被外部移动（鼠标点击、
+⌘V）时会漂——判据因此一律取保守侧：拿不准就清零，回落「按中文标点出」。
+
+实现：`SmartPunctDigitTracker`（`wind_macos/Sources/WindInputKit/IPC/`），语义逐条对齐 Windows
+的 `_DigitCharFromVk` / `_TrackCommittedTextForSmartPunct`，含本文第 4、4b 两条的教训（小键盘
+VK 必须认；消费点不许抄 `smart_list` 白名单）。三个记录点，缺一不可：
+
+| 记录点 | 位置 | 语义 |
+|---|---|---|
+| 透传的按键 | `InputController.passThroughToHost` | 宿主拿这一键去改文档，按「这一键产出什么」推断 |
+| 上屏的文本 | `BridgeResponseRouter.insertCommitted` | 经引擎写进文档的末位字符 |
+| marked text | `BridgeResponseRouter.applyMarkedText` | 组合/待定符号也摆在光标前（光标不在串尾则清零） |
+
+还有三条**改了文档却不经 `insertText`** 的路，各自单独清账——`insertCommitted` 那个收口
+拦不住它们，评审时一并补齐：`moveCursor`（智能跳过合成右方向键）、`replaceBackward` 的
+空文本（`ime.undo_commit` 的纯删除）、合成按键四路（`key.tap/hold/release/seq` 经
+`PushResponder.invalidateDigitTracking`）。判据都是「拿不准就清零」。
+
+⚠️ `digitChar` 的修饰键守卫比 Windows 的 `_DigitCharFromVk` **多挡 ⌘/⌃/⌥**，不是抄漏了：
+TSF 的 `OnTestKeyDown` 在记录点之前就滤掉了宿主快捷键，而 IMKit 把每个 keyDown 都交给
+`handle`，⌘2 切标签页照样走到透传记录点。不挡就会记进一个根本没进文档的幻影数字——
+比漏记更糟，漏记只是少触发一次，这个是**多**触发。
+
+第三个记录点是**智能符号自己的**必需项，不只是为数字后智能：press1 走 HoldComposition 时符号
+只进 marked、不 `insertText`，漏记的话 tracker 残留数字 → press2 时服务端拿 `prev_char` 与武装串
+末位比对失配 → 第二次按键被当成全新 press1，连按替换静默失效。第 3 条那个 `prev_char == 0`
+容错正是靠这里清零才够得着。
+
+「删掉数字再打标点应回落中文标点」是这套记账的自然结果：退格透传 = 非数字键 = 清零，
+不为它写特判。
+
 ## 已知但决定不修的问题：TSF 报告成功但实际渲染未生效（Tabby / 微信）
 
 实测发现 Tabby（Electron/Chromium 内核终端）、微信（Qt 内核）这两个宿主自制的 TSFTextStore，对 `CReplaceBackwardEditSession` 的 `ShiftStart`+`SetText` 会**全程报告成功**（`hr`、`hrSession`、`GetSuccess()` 皆 `S_OK`），但实际画面上旧符号没删掉、新符号又插入了一份。同一段代码在 Notepad/Office 等原生编辑控件里结果是对的——不是我们这边 range 算错，是宿主自己的 TSFTextStore 内部模型跟它真实渲染的内容对不上，单靠更严格检查 TSF 返回码无法识别。
@@ -238,6 +278,7 @@ if (holdActiveBeforeResponse && !(*pfEaten)
 
 ## 相关代码位置
 
+- `wind_macos/Sources/WindInputKit/IPC/SmartPunctDigitTracker.swift`：macOS 侧 `prevChar` 记账（无主路径，见第 5 条）；喂食点在 `BridgeResponseRouter.insertCommitted` / `applyMarkedText` 与 `InputController.passThroughToHost`。
 - `wind_input/crates/wind-coordinator/src/handle_punct.rs`：`try_smart_symbol_replace`（press1 武装 + press2 分发）、`smart_symbol_press2`（press2 状态机、`prev_char` 判定、方向分歧点）、`smart_symbol_arm_str`（中文输入模式的两种上下文 + 方向判定）、`english_mode_smart_symbol`（英文输入模式通路）、`arm_smart_symbol_after_commit`（模式进入键武装）、`press1_committed_str`（武装串的唯一真相源）
 - `wind_input/crates/wind-coordinator/src/handle_lifecycle.rs`：`try_activate_mode` 开头的 press2 拦截、`is_any_mode_trigger`
 - `wind_input/crates/wind-coordinator/src/coordinator.rs`：`ConfigBundle::build`（吃键集合并）、`push_custom_en_punct_config`（推送时机：配置热重载广播 + 新客户端连接）

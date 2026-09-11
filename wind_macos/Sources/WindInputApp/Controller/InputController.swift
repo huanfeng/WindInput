@@ -99,6 +99,9 @@ public class InputController: IMKInputController {
         super.activateServer(sender)
         currentClient = sender as? (IMKTextInput & NSObjectProtocol)
         CandidatePanelHost.shared.activeResponder = self
+        // 数字后智能标点的记账只对「这一个文本框里我们自己打出去的东西」有效，换了焦点
+        // 就全部作废 —— 不清的话，在 A 框敲完 "3" 切到 B 框打标点会错出半角。
+        router.digitTracker.reset()
         // 激活即确保连上 (装完首次激活 / 重启后并发竞态时 init 那次可能没连上)。
         ensureConnected()
         sendFocusGained()
@@ -343,8 +346,12 @@ public class InputController: IMKInputController {
         // 插入点 (否则会显示在上一次组字的旧位置)。
         sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
         keySeq &+= 1
+        // prevChar 如实带上: 修饰键 tap 不走标点通路, 正确性上带不带都一样, 但服务端
+        // `key_event:` 日志会把这一帧印成 `prev_char=0x0000` —— 而恒 0 正是「客户端没接
+        // prevChar」这个故障的特征值, 留着就是给下次排查埋一个假阳性。
         let frame = BinaryCodec.encodeKeyEventFrame(KeyEventPayload(
-            keyCode: vk, scanCode: 0, modifiers: 0, eventType: .up, eventSeq: keySeq, prevChar: 0))
+            keyCode: vk, scanCode: 0, modifiers: 0, eventType: .up, eventSeq: keySeq,
+            prevChar: router.digitTracker.prevChar))
         do {
             try bridge.send(frame)
             let resp = try bridge.readFrame()
@@ -443,7 +450,7 @@ public class InputController: IMKInputController {
         pendingModSawOther = true
         guard ensureConnected(), let bridge = bridge else {
             NSLog("WindInput[handle] bridge not connected (重连失败), pass through")
-            return false
+            return passThroughToHost(event)
         }
 
         // 密码框实时跟随: 在发本键前同步系统安全输入状态(同一 client 内字段切换补偿),
@@ -452,8 +459,12 @@ public class InputController: IMKInputController {
         syncSecureInputIfChanged()
 
         keySeq &+= 1
-        guard let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq) else {
-            return false
+        // prevChar 取自本端记账 (macOS 无现读文档通路), 供服务端判「数字后智能标点」。
+        // 必须在处理本键**之前**取: 本键的响应回来后 tracker 就被更新成新的光标前字符了。
+        guard let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq,
+                                                    prevChar: router.digitTracker.prevChar) else {
+            // VK 未映射 → 这一键 IMKit 自行透传给宿主, 同样要记账。
+            return passThroughToHost(event)
         }
 
         // 无 composition 时本端 caret 可能是上一次组字的旧位置 (换行/移动光标后未更新)。
@@ -468,7 +479,8 @@ public class InputController: IMKInputController {
         let hostShortcut = KeyHandler.isHostShortcut(event.modifierFlags)
 
         do {
-            return try sendAndApply(frame, on: bridge, sender: sender, hostShortcut: hostShortcut)
+            let consumed = try sendAndApply(frame, on: bridge, sender: sender, hostShortcut: hostShortcut)
+            return consumed ? true : passThroughToHost(event)
         } catch {
             // 服务重启/卡死后这条连接已死 (write→EPIPE 或 read→EOF/超时)。重连到新服务
             // 并**用新连接重试当前键一次**, 让服务重启后第一个键就自愈, 不丢字、不需手动
@@ -476,14 +488,31 @@ public class InputController: IMKInputController {
             NSLog("WindInput[handle] bridge io error: \(error), 重连后重试本键")
             reconnect()
             // 注意: 上方 guard 把属性 bridge 遮蔽为非可选局部量, 这里须取重连后的 self.bridge。
-            guard let fresh = self.bridge else { return false }
+            guard let fresh = self.bridge else { return passThroughToHost(event) }
             do {
-                return try sendAndApply(frame, on: fresh, sender: sender, hostShortcut: hostShortcut)
+                let consumed = try sendAndApply(frame, on: fresh, sender: sender, hostShortcut: hostShortcut)
+                return consumed ? true : passThroughToHost(event)
             } catch {
                 NSLog("WindInput[handle] 重连后重试仍失败: \(error)")
-                return false
+                return passThroughToHost(event)
             }
         }
+    }
+
+    /// 本键最终**交回宿主**: 记账后返回 false (handle 的「未消费」)。
+    ///
+    /// 数字后智能标点在 macOS 上只有备用通路 —— 宿主拿这一键去改文档, 我们看不见结果,
+    /// 只能按「这一键产出什么」推断光标前字符 (数字则记, 否则清零)。见
+    /// [`SmartPunctDigitTracker`]。**每一条透传出口都要走这里**, 漏一条的症状是
+    /// 「某种情形下打的数字后面标点仍出中文」。
+    ///
+    /// 上屏侧 (经引擎写进文档的文本) 由 `BridgeResponseRouter.insertCommitted` 记, 两侧成对。
+    @discardableResult
+    private func passThroughToHost(_ event: NSEvent) -> Bool {
+        router.digitTracker.noteKeyPassthrough(
+            vk: KeyHandler.toWindowsVK(event.keyCode),
+            modifiers: KeyHandler.toModifiers(event.modifierFlags))
+        return false
     }
 
     /// 在指定连接上发一帧、读响应并应用; composition 非空时上报 caret。
@@ -559,6 +588,12 @@ public class InputController: IMKInputController {
 
     /// 应用 push 通道帧 (鼠标选词的 commit/composition 异步到达, 非 KeyEvent 同步响应)。
     /// 路由到当前焦点 client。在主线程调用 (CandidatePanelHost 已 dispatch)。
+    /// 见 `PushResponder.invalidateDigitTracking`。合成按键改了文档、我们不知道改成什么,
+    /// 作废记账回落默认行为 (标点按中文出), 好过拿着陈旧的数字错出半角。
+    public func invalidateDigitTracking() {
+        router.digitTracker.reset()
+    }
+
     public func applyPushResponse(_ frame: Frame) {
         guard let client = currentClient else {
             NSLog("WindInput[applyPushResponse] no current client, drop cmd=\(frame.cmd)")

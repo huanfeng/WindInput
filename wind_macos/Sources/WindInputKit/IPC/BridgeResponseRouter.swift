@@ -59,10 +59,30 @@ public final class BridgeResponseRouter {
     /// 每次状态变化自增；计时器只在"代"没变时才动手，避免过期回调误伤新一轮输入。
     private var holdGeneration: UInt64 = 0
 
+    /// 数字后智能标点的 prevChar 记账（macOS 无主路径，全靠它）。见
+    /// [`SmartPunctDigitTracker`]。**上屏侧**的喂食统一收口在 `insertCommitted`，
+    /// 按键侧由 app 层 (`InputController.handle`) 在透传时喂。
+    public let digitTracker = SmartPunctDigitTracker()
+
     public init() {}
+
+    /// 真写进文档的唯一出口：`insertText` + 记账。
+    ///
+    /// ⚠️ router 里**任何**上屏都必须走这里，绕过去就是漏一条记录点——症状是「某条
+    /// 路径打出的数字后面标点仍出中文」，且只在那条路径上复现，看着像随机。
+    /// `client == nil`（宿主已销毁/测试桩未提供）时什么都没写进文档，**也就不记账** ——
+    /// 记了就是凭空捏造一个光标前字符。与 `applyMarkedText` 的 `guard` 同一条理。
+    private func insertCommitted(_ text: String,
+                                 replacementRange: NSRange,
+                                 client: TextInputClient?) {
+        guard let client = client else { return }
+        client.insertText(text, replacementRange: replacementRange)
+        digitTracker.noteCommittedText(text)
+    }
 
     public func reset() {
         composition.clear()
+        digitTracker.reset()
         heldSymbol = nil
         pendingCommitPrefix = ""
         cancelHoldTimer()
@@ -148,7 +168,7 @@ public final class BridgeResponseRouter {
             // (不经 composition, 与 commitText 一样落到当前光标处)。
             if let text = try? BinaryCodec.decodeKeyTypePayload(frame.payload), !text.isEmpty {
                 let notFound = NSRange(location: NSNotFound, length: NSNotFound)
-                client?.insertText(text, replacementRange: notFound)
+                insertCommitted(text, replacementRange: notFound, client: client)
             }
             return true
 
@@ -157,6 +177,10 @@ public final class BridgeResponseRouter {
             // 经合成方向键实现 (moveHostCursor); 未注入则降级为仅消费按键 (旧行为)。
             if let p = try? BinaryCodec.decodeMoveCursorPayload(frame.payload), p.direction == 1 {
                 moveHostCursor?(.right(1))
+                // 光标跨过了那个已补全的右标点 → 光标前字符换人了，且这条路**不经
+                // insertText**，`insertCommitted` 收口不到。跳过后光标前必是标点（恒非
+                // 数字），清零即准确，不是保守近似。
+                digitTracker.reset()
             }
             return true
 
@@ -171,13 +195,19 @@ public final class BridgeResponseRouter {
             // 时序与修饰键问题)。无法取得光标时降级为仅插入 (不删除), 保证不误删。
             if let p = try? BinaryCodec.decodeReplaceBackwardPayload(frame.payload), let client = client {
                 let count = Int(p.count)
+                // `text` 为空 = **纯删除**（命令直通车 `ime.undo_commit` 走这条）。
+                // `noteCommittedText` 的「空串不动状态」对普通上屏是对的（没写东西进文档），
+                // 在这里却会让被删掉的那个数字幸存下来 —— 文档确实变了。
+                if p.text.isEmpty && count > 0 {
+                    digitTracker.reset()
+                }
                 let sel = client.selectedRange()
                 if count > 0, sel.location != NSNotFound, sel.location >= count {
                     let range = NSRange(location: sel.location - count, length: count)
-                    client.insertText(p.text, replacementRange: range)
+                    insertCommitted(p.text, replacementRange: range, client: client)
                 } else {
                     let notFound = NSRange(location: NSNotFound, length: NSNotFound)
-                    client.insertText(p.text, replacementRange: notFound)
+                    insertCommitted(p.text, replacementRange: notFound, client: client)
                 }
             }
             return true
@@ -248,7 +278,7 @@ public final class BridgeResponseRouter {
                                   replacementRange: notFound)
             composition.clear()
         }
-        client?.insertText(prefix + p.text, replacementRange: notFound)
+        insertCommitted(prefix + p.text, replacementRange: notFound, client: client)
 
         if !p.newComposition.isEmpty {
             // 内联 preedit: commit 后立即开始新一轮 marked text
@@ -266,7 +296,7 @@ public final class BridgeResponseRouter {
                                           client: TextInputClient?) {
         let notFound = NSRange(location: NSNotFound, length: NSNotFound)
         // 同 applyCommitText: 待定符号并入前缀一起上屏, 否则智能配对插入时它会被吃掉。
-        client?.insertText(takePendingPrefix() + p.text, replacementRange: notFound)
+        insertCommitted(takePendingPrefix() + p.text, replacementRange: notFound, client: client)
         composition.clear()
         // 自动配对插入 `（）` 后, cursorOffset 是从文本末尾向左偏移的字符数 (通常 1),
         // 把光标退回到配对中间。IMKit 无移动宿主光标的标准 API → 经 moveHostCursor
@@ -310,7 +340,7 @@ public final class BridgeResponseRouter {
                               replacementRange: notFound)
         composition.clear()
         if !prefix.isEmpty {
-            client?.insertText(prefix, replacementRange: notFound)
+            insertCommitted(prefix, replacementRange: notFound, client: client)
         }
     }
 
@@ -331,7 +361,7 @@ public final class BridgeResponseRouter {
                                   replacementRange: notFound)
             composition.clear()
         }
-        client?.insertText(prefix, replacementRange: notFound)
+        insertCommitted(prefix, replacementRange: notFound, client: client)
     }
 
     /// 到点把待定标点定稿成正文（内容不变，只收掉 marked 的下划线）。
@@ -367,6 +397,20 @@ public final class BridgeResponseRouter {
         let caret = CompositionState(text: text, caretUTF16: caretUTF16InText).caretInUTF16()
         let selRange = NSRange(location: caret, length: 0)
         client.setMarkedText(text, selectionRange: selRange, replacementRange: notFound)
+        // marked text 也是**看得见地摆在光标前**的东西，同样要记账。漏掉它会咬两处：
+        //   1. 组字中: 打完 "3" 再打拼音, 光标前其实是编码末位, 却仍报着 '3'。
+        //   2. 智能符号 press1 走 HoldComposition (符号只进 marked、不 insertText):
+        //      tracker 残留 '3' → press2 时服务端拿 prev_char 与武装串末位比对失配,
+        //      第二次按键被当成全新 press1, 连按替换静默失效。prev_char==0 那条容错
+        //      (见 docs/architecture/smart-symbol-compat-notes.md) 正是靠这里清零才够得着。
+        // 取串尾**仅当光标确实在串尾**。组字中把光标移到编码串中间时，串尾那个字符
+        // 不再是「光标前字符」——码表方案可以把 `0-9` 配成码元（`a-z0-9` 打 `Win10`，
+        // 见 message_handler 的非字母码元闸门），所以这不是纯理论。拿不准就清零。
+        if caretUTF16InText >= utf16Len(text) {
+            digitTracker.noteCommittedText(text)
+        } else {
+            digitTracker.reset()
+        }
     }
 
     /// 「光标在串尾」的取值。单位须与服务端 `caret_pos` 一致 (UTF-16 单元), 见

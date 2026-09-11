@@ -17,6 +17,12 @@ import WindInputKit
 /// 应用到当前焦点文本框 (鼠标选词的 commit 不是 KeyEvent 同步响应, 走 push)。
 public protocol PushResponder: AnyObject {
     func applyPushResponse(_ frame: Frame)
+
+    /// 作废「光标前一字符」的记账（数字后智能标点用，见 `SmartPunctDigitTracker`）。
+    ///
+    /// 供**绕过 router 直接改文档**的路径调用：合成按键往宿主打字符/退格，文档变了而
+    /// 我们的记账一无所知。这类路径拿不到「改成了什么」，只能作废，回落默认行为。
+    func invalidateDigitTracking()
 }
 
 public final class CandidatePanelHost {
@@ -399,21 +405,28 @@ public final class CandidatePanelHost {
             }
         case DownstreamCmd.toastHide:
             DispatchQueue.main.async { [weak self] in self?.toast.hidePanel() }
+        // 合成按键四路: 往宿主打任意键 (含数字、退格), 文档被改而 router 完全不经手 ——
+        // 「光标前一字符」的记账够不到这里, 只能作废。用户自定义宏才触发, 量级小于按键/
+        // 上屏两条主路, 但漏了就是「打完宏再打标点出错形」这种查无可查的偶发。
         case DownstreamCmd.keyTap:
             if let p = try? BinaryCodec.decodeKeyComboPayload(frame.payload) {
-                DispatchQueue.main.async { KeySynthesizer.tap(p) }
+                let responder = activeResponder
+                DispatchQueue.main.async { responder?.invalidateDigitTracking(); KeySynthesizer.tap(p) }
             }
         case DownstreamCmd.keyHold:
             if let p = try? BinaryCodec.decodeKeyComboPayload(frame.payload) {
-                DispatchQueue.main.async { KeySynthesizer.hold(p) }
+                let responder = activeResponder
+                DispatchQueue.main.async { responder?.invalidateDigitTracking(); KeySynthesizer.hold(p) }
             }
         case DownstreamCmd.keyRelease:
             if let p = try? BinaryCodec.decodeKeyComboPayload(frame.payload) {
-                DispatchQueue.main.async { KeySynthesizer.release(p) }
+                let responder = activeResponder
+                DispatchQueue.main.async { responder?.invalidateDigitTracking(); KeySynthesizer.release(p) }
             }
         case DownstreamCmd.keySeq:
             if let p = try? BinaryCodec.decodeKeySeqPayload(frame.payload) {
-                DispatchQueue.main.async { KeySynthesizer.sequence(p.combos) }
+                let responder = activeResponder
+                DispatchQueue.main.async { responder?.invalidateDigitTracking(); KeySynthesizer.sequence(p.combos) }
             }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition,
              DownstreamCmd.keyType:
