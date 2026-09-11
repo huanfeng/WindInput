@@ -30,7 +30,19 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID pvReserved)
             break;
 
         case DLL_PROCESS_DETACH:
-            WIND_LOG_INFO_FMT(L"DllMain PROCESS_DETACH pid=%lu tid=%lu", GetCurrentProcessId(), GetCurrentThreadId());
+            // reason=exit|unload 是「进程死了」与「DLL 被卸了」的唯一分水岭：DllMain 的
+            // pvReserved 非 NULL 表示进程正在退出（加载器统一派发，COM 不做清理），为 NULL
+            // 表示有人主动 FreeLibrary（COM 正常回收，或被第三方强制卸载）。缺了这一位，
+            // 「宿主进程退出」与「输入法被卸载后再没被请求」在日志里长得一模一样——
+            // 2026-09-11 分析 #115 彩虹六号（BattlEye）日志时正卡在这里分不开。
+            // 配合本行判读：正常 TSF 收尾一定先有 TextService::Deactivate，
+            // 只有 DETACH 没有 Deactivate ⇒ 宿主是被掐掉的，不是正常切走输入法。
+            WIND_LOG_INFO_FMT(
+                L"DllMain PROCESS_DETACH pid=%lu tid=%lu reason=%ls",
+                GetCurrentProcessId(),
+                GetCurrentThreadId(),
+                pvReserved != nullptr ? L"exit" : L"unload"
+            );
             CFileLogger::Instance().Shutdown();
             break;
     }
