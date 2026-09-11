@@ -59,7 +59,10 @@ param(
     [string]$Branch,
     # 只演练: push 走 --dry-run, 不打 tag、不写文件
     [switch]$DryRun,
-    # 覆盖已存在的同名 tag (本地 -f + 远端 --force)
+    # 覆盖已存在的同名 tag (本地 -f + 远端 --force)。
+    # 远端 tag 已经指向本轮 HEAD 的仓库会被跳过 —— 那种"覆盖"只是换个 tagger 时间戳,
+    # 引用一个字节都不变, 不值得冒 force push 的险。代价是不产生新的 release.yml run,
+    # 脚本会据此不再提议守 CI (要重跑构建请去 Actions 手动 re-run)。
     [switch]$Force,
     # 非交互: 所有确认自动通过 (预检硬失败仍中止)
     [switch]$Yes,
@@ -322,6 +325,8 @@ function Get-RepoState ([pscustomobject]$repo, [string]$branch, [string]$tag, [b
         Head = ""; HeadShort = ""; Subject = ""; Branch = ""
         Ahead = 0; Behind = 0
         LocalTagOnHead = $false; RemoteHasTag = $false
+        RemoteTagCommit = ""; TagUpToDate = $false
+        TagPushed = $false      # 本轮是否真的把 tag 推上去了(决定 CI 会不会起新 run)
     }
 
     if (-not (Test-Path (Join-Path $path ".git"))) {
@@ -383,7 +388,22 @@ function Get-RepoState ([pscustomobject]$repo, [string]$branch, [string]$tag, [b
     if ($needTag -and $st.Tag) {
         $localTagCommit = Get-GitValue $path @("rev-list", "-n", "1", $tag)
         $st.LocalTagOnHead = ($localTagCommit -eq $st.Head -and $localTagCommit -ne "")
-        $st.RemoteHasTag = [bool](Get-GitValue $path @("ls-remote", "--tags", "origin", "refs/tags/$tag"))
+        # ls-remote 的输出是 "<sha>\trefs/tags/<tag>"; 别只取存在性 —— 远端 tag 指向
+        # 哪个 commit 决定了 -Force 到底是「危险地移动引用」还是「原地重推」。
+        # annotated tag 要看 peeled 行(refs/tags/<tag>^{})才是 commit, 裸的那行是 tag
+        # 对象自身的 SHA; lightweight tag 没有 peeled 行, 裸行就是 commit。
+        $lsRemote = Get-GitValue $path @("ls-remote", "--tags", "origin", "refs/tags/$tag", "refs/tags/$tag^{}")
+        $st.RemoteHasTag = [bool]$lsRemote
+        if ($lsRemote) {
+            $bare = ""
+            foreach ($l in ($lsRemote -split "`n")) {
+                if ($l -match '^(\S+)\s+refs/tags/\S+\^\{\}$') { $st.RemoteTagCommit = $Matches[1] }
+                elseif ($l -match '^(\S+)\s+refs/tags/')        { $bare = $Matches[1] }
+            }
+            if (-not $st.RemoteTagCommit) { $st.RemoteTagCommit = $bare }
+        }
+        # 远端 tag 已经指向本轮要发布的 commit —— 推它不会改变任何引用指向。
+        $st.TagUpToDate = ($st.RemoteTagCommit -ne "" -and $st.RemoteTagCommit -eq $st.Head)
 
         # 演练模式不会真的打 tag, 故 tag 冲突降级为警告, 让健康检查能跑完整流程
         if ($st.RemoteHasTag -and -not $Force) {
@@ -499,7 +519,11 @@ function Invoke-Release {
     foreach ($st in $states) {
         $ops = @()
         if ($st.Ahead -gt 0) { $ops += "push $branch ($($st.Ahead) 提交)" } else { $ops += "跳过 push(无新提交)" }
-        if ($needTag -and $st.Tag) { $ops += $(if ($st.RemoteHasTag) { "覆盖 $tag" } else { "打 $tag" }) }
+        if ($needTag -and $st.Tag) {
+            $ops += $(if ($st.TagUpToDate)   { "跳过 $tag(远端已一致)" }
+                      elseif ($st.RemoteHasTag) { "覆盖 $tag" }
+                      else                   { "打 $tag" })
+        }
         Write-Host ("  {0,-16} {1,-10} {2,-6} {3,-6} {4}" -f `
             $st.Name, $st.HeadShort, $st.Ahead, $st.Dirty.Count, ($ops -join " + "))
     }
@@ -509,10 +533,28 @@ function Invoke-Release {
         Gray "  $branch 最新提交参与构建, 故附属仓库必须先到位。"
     }
 
-    if ($Force -and ($states | Where-Object { $_.RemoteHasTag })) {
+    # 真正危险的只有「远端 tag 指向别的 commit」—— 那才会移动引用。远端已指向本轮
+    # HEAD 的仓库会被整个跳过, 不该拿它去吓唬人(见上面计划表里的「跳过」)。
+    $moving = @($states | Where-Object { $_.RemoteHasTag -and -not $_.TagUpToDate })
+    if ($Force -and $moving) {
         Write-Host ""
         Warn "[!!] -Force 将强制覆盖远端已存在的 tag。若他人已拉取该 tag, 会造成引用不一致。"
+        foreach ($m in $moving) {
+            $rs = if ($m.RemoteTagCommit) { $m.RemoteTagCommit.Substring(0, 7) } else { "?" }
+            Warn ("     {0,-16} {1} → {2}" -f $m.Name, $rs, $m.HeadShort)
+        }
         if (-not (Confirm-Step "     确认强制覆盖?" $false)) { ErrMsg "已取消。"; return 1 }
+    }
+
+    # 全部仓库的 tag 都已在远端就位: 本轮不会推任何 tag, 也就不会有新的 release.yml
+    # run。这一步必须说在执行前 —— 否则用户会守着一个永远等不来的构建。
+    $taggedRepos = @($states | Where-Object { $_.Tag })
+    if ($needTag -and -not $dryRun -and $taggedRepos -and
+        -not ($taggedRepos | Where-Object { -not $_.TagUpToDate })) {
+        Write-Host ""
+        Warn "[!] 所有 tag 在远端均已指向本轮 HEAD, 本次不会推送任何 tag。"
+        Gray "    故 CI 不会起新的构建。要重跑构建请去 GitHub Actions 手动 re-run,"
+        Gray "    或用 .\scripts\release.ps1 auto-sign 直接收尾上一轮已成功的构建。"
     }
 
     Write-Host ""
@@ -554,7 +596,12 @@ function Invoke-Release {
                 if ($dryRun) { Say "  [OK] 分支推送校验通过" } else { Say "  [OK] 分支已推送" }
             }
 
-            if ($needTag -and $st.Tag -and -not $dryRun) {
+            if ($needTag -and $st.Tag -and -not $dryRun -and $st.TagUpToDate) {
+                # 远端 tag 已指向本轮的 HEAD: 重打只会换一个 tagger 时间戳、让 tag 对象
+                # 换个 SHA, 引用指向一个字节都不变, 却要冒 force push 的风险。跳过。
+                # 代价: 不产生新的 release.yml run —— 由调用方据 TagPushed 决定不等 CI。
+                Gray "  远端 tag $tag 已指向 $($st.HeadShort), 跳过打 tag / 推 tag"
+            } elseif ($needTag -and $st.Tag -and -not $dryRun) {
                 if ($st.LocalTagOnHead -and -not $Force) {
                     Gray "  本地 tag $tag 已指向 HEAD, 跳过创建"
                 } else {
@@ -568,6 +615,7 @@ function Invoke-Release {
                 if ($Force) { $tagPush += "--force" }
                 Invoke-GitOrDie $st.Path $tagPush "推送 tag" | Out-Null
                 $createdTags = @($createdTags | Where-Object { $_ -ne $st.Path })
+                $st.TagPushed = $true
                 Say "  [OK] tag $tag 已推送"
             } elseif ($needTag -and $st.Tag -and $dryRun) {
                 Gray "  (演练) 跳过打 tag / 推 tag"
@@ -600,6 +648,9 @@ function Invoke-Release {
         return 1
     }
 
+    # 触发 release.yml 的是【主仓】的 tag; 它没被推, 后面就没有新 run 可等。
+    $mainTagPushed = [bool](@($states | Where-Object { $_.Name -eq $MainRepo -and $_.TagPushed }))
+
     if ($dryRun) {
         Say "演练完成: $($done.Count) 个仓库校验通过, 未做任何改动。"
     } elseif ($noTag) {
@@ -614,7 +665,11 @@ function Invoke-Release {
         # tag 已是 CI 的版本真源; 这里只是让本地 dev.ps1 构建的产物版本号跟上。
         Sync-LocalVersionFile ($tag -replace '^v', '')
         Write-Host ""
-        Gray "CI: 推送 $tag 已触发 release.yml, 去 GitHub Actions 查看构建与草稿 Release。"
+        if ($mainTagPushed) {
+            Gray "CI: 推送 $tag 已触发 release.yml, 去 GitHub Actions 查看构建与草稿 Release。"
+        } else {
+            Warn "CI: 未推送 $MainRepo 的 tag (远端已一致), 本轮【没有】新的 release.yml run。"
+        }
     }
     Cyan "=============================================================="
 
@@ -622,7 +677,13 @@ function Invoke-Release {
     # 只在「真打了 tag」时提供 —— push/演练都没有可等的构建。
     # -Yes 是「别拿确认打断我」, 不是「替我决定要不要多等 20 分钟」, 故它不隐含自动签名;
     # 要无人值守请显式 -AutoSign。
-    if ($needTag -and -not $dryRun) {
+    # 没推主仓 tag 就没有新 run —— 此时守 CI 只会空等到超时(Wait-ForCiBuild 的 notBefore
+    # 会把上一轮的旧 run 一律当作"还没排上队"), 所以连问都不该问。
+    if ($needTag -and -not $dryRun -and -not $mainTagPushed) {
+        Write-Host ""
+        Gray "未推送 tag, 无新构建可等。要收尾上一轮已成功的构建:"
+        Gray "  .\scripts\release.ps1 sign-draft   (或 auto-sign)"
+    } elseif ($needTag -and -not $dryRun) {
         $auto = $false
         if ($AutoSign) { $auto = $true }
         elseif (-not $Yes) {
