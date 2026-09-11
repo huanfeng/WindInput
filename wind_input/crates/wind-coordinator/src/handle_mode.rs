@@ -2755,8 +2755,10 @@ mod comment_dict_scope_tests {
     #[test]
     fn mix_without_a_matching_member_falls_back() {
         let c = Coordinator::new_headless(Config::default(), None);
-        let mut state = State::default();
-        state.active = Some(crate::pipeline::ModeKind::Mix(0));
+        let state = State {
+            active: Some(crate::pipeline::ModeKind::Mix(0)),
+            ..Default::default()
+        };
         // 短语等来源在 `mix_candidate_owner` 里本就返回 None（无词库归属可言），
         // 此时必须回落到调用方算好的那份 —— 否则快捷输入里的短语候选会连注释一起丢。
         assert_eq!(
