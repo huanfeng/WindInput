@@ -316,9 +316,14 @@ pub struct CandidateWindow {
     /// 上一次上报给协调器的「候选是否反转」，用于只在变化时发事件（渲染每帧都会走判定）。
     reported_flip: bool,
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。
-    pager_display: String,
+    ///
+    /// **横竖各一份**（`.0`＝横排、`.1`＝竖排）：协调器按 `ByLayout` 下发两档，这边按
+    /// [`Self::vertical`] 取。⚠️ 旋转态的 `vertical` 是 false ⇒ 落横排那份，与候选注释
+    /// 模板的分档口径一致（见 `wind-config` 的 `comment_template`）。
+    pager_display: (String, String),
     /// 页码文字显示覆盖（""跟随主题/"show"/"hide"）。来自 ui.candidate.page_number_display。
-    page_number_display: String,
+    /// 横竖各一份，口径同 [`Self::pager_display`]。
+    page_number_display: (String, String),
     /// 候选窗在光标上方时交换编码栏与候选栏位置（编码区整体沉底贴光标）。
     /// 与 flip_when_above 正交：可单独或叠加使用。来自 ui.candidate.swap_preedit_when_above。
     swap_preedit_when_above: bool,
@@ -397,8 +402,8 @@ impl CandidateWindow {
             placed_above: false,
             events: self_events,
             reported_flip: false,
-            pager_display: String::new(),
-            page_number_display: String::new(),
+            pager_display: (String::new(), String::new()),
+            page_number_display: (String::new(), String::new()),
             swap_preedit_when_above: false,
             pager_in_preedit: false,
             fixed_pos: None,
@@ -858,19 +863,37 @@ impl CandidateWindow {
         self.pager_in_preedit = on;
     }
 
-    /// 设置翻页栏显示覆盖。来自 ui.candidate.pager_bar_display。
-    pub fn set_pager_display(&mut self, mode: String) {
-        self.pager_display = mode;
+    /// 设置翻页栏显示覆盖（横排档、竖排档）。来自 ui.candidate.pager_bar_display。
+    pub fn set_pager_display(&mut self, h: String, v: String) {
+        self.pager_display = (h, v);
     }
 
-    /// 设置页码文字显示覆盖。来自 ui.candidate.page_number_display。
-    pub fn set_page_number_display(&mut self, mode: String) {
-        self.page_number_display = mode;
+    /// 设置页码文字显示覆盖（横排档、竖排档）。来自 ui.candidate.page_number_display。
+    pub fn set_page_number_display(&mut self, h: String, v: String) {
+        self.page_number_display = (h, v);
+    }
+
+    /// 当前排布该用的翻页栏覆盖档。
+    fn pager_display_now(&self) -> &str {
+        if self.vertical {
+            &self.pager_display.1
+        } else {
+            &self.pager_display.0
+        }
+    }
+
+    /// 当前排布该用的页码覆盖档。
+    fn page_number_display_now(&self) -> &str {
+        if self.vertical {
+            &self.page_number_display.1
+        } else {
+            &self.page_number_display.0
+        }
     }
 
     /// 是否显示翻页栏（覆盖优先；""跟随主题 behavior）。
     fn pager_visible(&self) -> bool {
-        match self.pager_display.as_str() {
+        match self.pager_display_now() {
             "hide" => false,
             "always" => true,
             "auto" => self.total_pages > 1,
@@ -890,7 +913,7 @@ impl CandidateWindow {
 
     /// 翻页栏可见时是否显示页码文字（覆盖优先；""跟随主题 behavior.show_page_number）。
     fn page_number_visible(&self) -> bool {
-        match self.page_number_display.as_str() {
+        match self.page_number_display_now() {
             "show" => true,
             "hide" => false,
             _ => self.theme.behavior.show_page_number,

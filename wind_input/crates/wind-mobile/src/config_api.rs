@@ -83,7 +83,7 @@ fn type_name(ty: &FieldType) -> &'static str {
         FieldType::Int => "int",
         FieldType::Float => "float",
         FieldType::Str => "str",
-        FieldType::Enum(_) => "enum",
+        FieldType::Enum(_) | FieldType::LayoutEnum(_) => "enum",
         FieldType::StrList => "str_list",
         FieldType::Map(_) => "map",
         FieldType::StructList => "struct_list",

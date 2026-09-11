@@ -4,6 +4,7 @@
 //! 层序 `L1 默认 < L2 data < L2.5 data_custom < L3 用户层`，见 `docs/design/data-custom-layer.md`。
 
 pub mod app_compat;
+pub mod by_layout;
 pub mod change_hook;
 pub mod charset_def;
 pub mod code_charset;

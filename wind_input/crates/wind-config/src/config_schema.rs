@@ -36,6 +36,16 @@ pub enum FieldType {
     Map(&'static [&'static str]),
     /// 结构体数组（如 mix_modes），整体作不透明叶子。
     StructList,
+    /// **可按候选窗排布分档**的枚举（见 `crate::by_layout::ByLayout`）。
+    ///
+    /// 值域与 [`Self::Enum`] 相同，差别只在：值可以是 `"h:hide v:always"` 这样的标签式，
+    /// 或 `{ h = "hide", v = "always" }` 这样的表——**每一档都要落在同一个值域里**。
+    ///
+    /// ★ 之所以是独立变体而不是给 `Enum` 加个 bool：值域校验要拆开逐档验（`Enum` 那条
+    /// 路直接拿整串比对，`"h:hide v:always"` 会被判越界），叶子展开也要在这里停住
+    /// （表写法会被下钻成 `….pager_bar_display.h` 这种注册表里没有的键）。两处行为都变了，
+    /// 不是一个开关能表达的。
+    LayoutEnum(&'static [&'static str]),
 }
 
 impl FieldType {
@@ -61,7 +71,14 @@ impl FieldType {
     pub fn is_whole_value_leaf(&self) -> bool {
         match self {
             Self::Map(_) | Self::StrList | Self::StructList => true,
-            Self::Bool | Self::Int | Self::Float | Self::Str | Self::Enum(_) => false,
+            // LayoutEnum 与 Enum 同侧：设置端写它时发的是**一个标量**（标签式字符串），
+            // 与「读回来的旧值 ⊕ 本次编辑」那种整份写回无关。
+            Self::Bool
+            | Self::Int
+            | Self::Float
+            | Self::Str
+            | Self::Enum(_)
+            | Self::LayoutEnum(_) => false,
         }
     }
 }
@@ -79,7 +96,7 @@ const fn f(key: &'static str, ty: FieldType) -> ConfigField {
     ConfigField { key, ty }
 }
 
-use FieldType::{Bool, Enum, Float, Int, Map, Str, StrList, StructList};
+use FieldType::{Bool, Enum, Float, Int, LayoutEnum, Map, Str, StrList, StructList};
 
 /// 候选无效按键三策（number_key/select_key/select_char_key 共用）。
 const OVERFLOW_VALUES: &[&str] = &["ignore", "commit", "commit_and_input"];
@@ -478,13 +495,15 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.candidate.fast_first_show_fallback_ms", Int),
     f("ui.candidate.font_size", Float),
     f("ui.candidate.font_size_follow_theme", Bool),
+    // 这两项可按候选窗排布分档（`"h:hide v:always"`），故是 LayoutEnum 而非 Enum——
+    // 值域不变，只是每一档各过一遍。
     f(
         "ui.candidate.pager_bar_display",
-        Enum(&["", "hide", "auto", "always"]),
+        LayoutEnum(&["", "hide", "auto", "always"]),
     ),
     f(
         "ui.candidate.page_number_display",
-        Enum(&["", "show", "hide"]),
+        LayoutEnum(&["", "show", "hide"]),
     ),
     f("ui.candidate.max_chars", Int),
     f("ui.candidate.min_window_width_horizontal", Int),
@@ -742,7 +761,11 @@ pub fn parse_str_value(key: &str, raw: &str) -> Result<toml::Value, String> {
             Ok(f) if f.is_finite() => toml::Value::Float(f),
             _ => return Err(format!("'{raw}' 不是有限数字")),
         },
-        FieldType::Str | FieldType::Enum(_) => toml::Value::String(raw.to_string()),
+        // LayoutEnum 同 Enum：命令行给的就是那一串（可能是 `"h:hide v:always"`），
+        // 原样收下，值域与语法由 `validate` 判。
+        FieldType::Str | FieldType::Enum(_) | FieldType::LayoutEnum(_) => {
+            toml::Value::String(raw.to_string())
+        }
         FieldType::StrList => toml::Value::Array(
             raw.split(',')
                 .map(str::trim)
@@ -811,6 +834,7 @@ fn type_label(ty: FieldType) -> &'static str {
         FieldType::Float => "float",
         FieldType::Str => "string",
         FieldType::Enum(_) => "string(enum)",
+        FieldType::LayoutEnum(_) => "string(enum, 可按排布分档)",
         FieldType::StrList => "string[]",
         FieldType::Map(_) => "table",
         FieldType::StructList => "array",
@@ -836,6 +860,25 @@ pub fn validate(key: &str, value: &toml::Value) -> Result<(), ValidateError> {
                     allowed,
                     got: s.to_string(),
                 });
+            }
+            true
+        }
+        // 可分档枚举：把值摊成「每一档的实际取值」，逐档过同一个值域。
+        //
+        // ★ 这一层正是「拼错档位名」的兜底：`"x:hide"` 在解析那边不算分档语法（与
+        // `"C:\path"` 同形，分辨不了），会原样落成标量到这里 ⇒ 不在值域内 ⇒ 报
+        // EnumOutOfRange。用户照样看得到错误，且真·路径值不被误伤。
+        FieldType::LayoutEnum(allowed) => {
+            let parts = crate::by_layout::domain_parts(value).ok_or({
+                ValidateError::TypeMismatch {
+                    expected: "string",
+                    got: toml_type_name(value),
+                }
+            })?;
+            for s in parts {
+                if !allowed.contains(&s.as_str()) {
+                    return Err(ValidateError::EnumOutOfRange { allowed, got: s });
+                }
             }
             true
         }
@@ -872,7 +915,12 @@ fn collect_leaf_keys(prefix: &str, value: &toml::Value, out: &mut Vec<String>) {
         // 此前没暴露只是因为出厂配置里所有 Map 都是空表（`= {}`），没有子键可下钻。
         toml::Value::Table(_)
             if !prefix.is_empty()
-                && matches!(field(prefix).map(|f| f.ty), Some(FieldType::Map(_))) =>
+                && matches!(
+                    field(prefix).map(|f| f.ty),
+                    // LayoutEnum 的表写法（`{ h = …, v = … }`）同理：下钻会把 `.h` / `.v`
+                    // 当成注册表键去比对，两个方向同时报错（孤立键 + 本键缺失）。
+                    Some(FieldType::Map(_) | FieldType::LayoutEnum(_))
+                ) =>
         {
             out.push(prefix.to_string())
         }
@@ -1363,6 +1411,8 @@ mod tests {
             FieldType::Int => value.is_integer(),
             FieldType::Float => value.is_float(),
             FieldType::Str | FieldType::Enum(_) => value.is_str(),
+            // 可分档枚举：标签式是字符串，表写法是表，两种都合法。
+            FieldType::LayoutEnum(_) => value.is_str() || value.is_table(),
             FieldType::StrList | FieldType::StructList => value.is_array(),
             FieldType::Map(_) => value.is_table(),
         }
@@ -1515,5 +1565,79 @@ mod tests {
                 f.ty
             );
         }
+    }
+}
+
+/// 可分档枚举（`LayoutEnum`）的校验：每一档都要落在同一个值域里。
+#[cfg(test)]
+mod layout_enum_tests {
+    use super::*;
+
+    const KEY: &str = "ui.candidate.pager_bar_display";
+
+    fn v(s: &str) -> toml::Value {
+        toml::Value::String(s.to_string())
+    }
+
+    #[test]
+    fn scalar_value_still_validates() {
+        assert!(validate(KEY, &v("hide")).is_ok());
+        assert!(validate(KEY, &v("")).is_ok(), "空串＝跟随主题，是合法值");
+    }
+
+    #[test]
+    fn each_side_of_a_tagged_value_is_checked() {
+        assert!(validate(KEY, &v("h:hide v:always")).is_ok());
+        assert!(validate(KEY, &v("v:always")).is_ok(), "只覆盖一侧");
+    }
+
+    #[test]
+    fn a_bad_value_on_one_side_is_caught() {
+        // 分档不是绕过值域的后门：任一档越界都要报出来，且报的是那一档的值。
+        let e = validate(KEY, &v("h:hide v:alwys")).unwrap_err();
+        assert!(
+            matches!(&e, ValidateError::EnumOutOfRange { got, .. } if got == "alwys"),
+            "实得：{e:?}"
+        );
+    }
+
+    #[test]
+    fn misspelled_dim_falls_through_to_the_value_domain() {
+        // ★ 「拼错档位名」的兜底就在这里：`"x:hide"` 在解析层与 `"C:\path"` 同形、
+        // 分辨不了，于是原样当标量落到值域比对 ⇒ 报越界。错误照样看得见。
+        let e = validate(KEY, &v("x:hide")).unwrap_err();
+        assert!(
+            matches!(&e, ValidateError::EnumOutOfRange { got, .. } if got == "x:hide"),
+            "实得：{e:?}"
+        );
+    }
+
+    #[test]
+    fn table_form_validates_per_side() {
+        let mut t = toml::map::Map::new();
+        t.insert("h".into(), v("hide"));
+        t.insert("v".into(), v("always"));
+        assert!(validate(KEY, &toml::Value::Table(t.clone())).is_ok());
+        t.insert("v".into(), v("nope"));
+        assert!(
+            validate(KEY, &toml::Value::Table(t)).is_err(),
+            "表写法同样逐档验"
+        );
+    }
+
+    #[test]
+    fn table_form_is_a_leaf_not_drilled_into() {
+        // 下钻的话 `….pager_bar_display.h` 会被当成注册表里没有的键，两个方向同时报错。
+        let mut t = toml::map::Map::new();
+        t.insert("h".into(), v("hide"));
+        let mut out = Vec::new();
+        collect_leaf_keys(KEY, &toml::Value::Table(t), &mut out);
+        assert_eq!(out, vec![KEY.to_string()]);
+    }
+
+    #[test]
+    fn is_not_a_whole_value_leaf() {
+        // 设置端写它时发的是一个标量（标签式），不该落进写盘闸的「整体一份」那一类。
+        assert!(!field(KEY).unwrap().ty.is_whole_value_leaf());
     }
 }

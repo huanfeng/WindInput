@@ -419,7 +419,8 @@ fn schema_json() -> Value {
                 FieldType::Int => ("int", None),
                 FieldType::Float => ("float", None),
                 FieldType::Str => ("string", None),
-                FieldType::Enum(vs) => ("enum", Some(vs)),
+                // 同 capabilities::type_name：分档枚举对外仍是 enum。
+                FieldType::Enum(vs) | FieldType::LayoutEnum(vs) => ("enum", Some(vs)),
                 FieldType::StrList => ("string[]", None),
                 FieldType::Map(_) => ("map", None),
                 FieldType::StructList => ("array", None),

@@ -1042,11 +1042,11 @@ impl UiManager {
                     UiCommand::SetPagerInPreedit(on) => {
                         candidate_window.set_pager_in_preedit(on);
                     }
-                    UiCommand::SetPagerDisplay(mode) => {
-                        candidate_window.set_pager_display(mode);
+                    UiCommand::SetPagerDisplay { h, v } => {
+                        candidate_window.set_pager_display(h, v);
                     }
-                    UiCommand::SetPageNumberDisplay(mode) => {
-                        candidate_window.set_page_number_display(mode);
+                    UiCommand::SetPageNumberDisplay { h, v } => {
+                        candidate_window.set_page_number_display(h, v);
                     }
                     UiCommand::SetTooltipChaiziFont { path, family } => {
                         candidate_window.set_chaizi_font(&path, &family);

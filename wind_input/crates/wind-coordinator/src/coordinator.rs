@@ -4293,12 +4293,16 @@ impl Coordinator {
                 .collect(),
         });
         // 翻页栏 / 页码显示覆盖（ui.candidate.pager_bar_display / page_number_display）
-        let _ = self
-            .ui_tx
-            .send(UiCommand::SetPagerDisplay(cand.pager_bar_display.clone()));
-        let _ = self.ui_tx.send(UiCommand::SetPageNumberDisplay(
-            cand.page_number_display.clone(),
-        ));
+        let (pager_h, pager_v) = cand.pager_bar_display.both_str();
+        let _ = self.ui_tx.send(UiCommand::SetPagerDisplay {
+            h: pager_h.to_string(),
+            v: pager_v.to_string(),
+        });
+        let (num_h, num_v) = cand.page_number_display.both_str();
+        let _ = self.ui_tx.send(UiCommand::SetPageNumberDisplay {
+            h: num_h.to_string(),
+            v: num_v.to_string(),
+        });
         // 上方时反转候选顺序 / 交换编码候选栏 / 翻页栏并入编码栏
         let _ = self
             .ui_tx

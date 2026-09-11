@@ -191,9 +191,14 @@ pub enum UiCommand {
     /// 翻页栏并入编码栏行右对齐显示。来自 ui.candidate.pager_in_preedit。
     SetPagerInPreedit(bool),
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。
-    SetPagerDisplay(String),
+    ///
+    /// ★ **横竖各下发一份**，由渲染端按自己的排布取：排布是渲染端的状态（随
+    /// `set_orientation` 变，还有旋转态），协调器发出这条的那一刻并不知道稍后会用哪一档。
+    /// 与既有的最小窗口尺寸一次下发四个值是同一套做法。
+    SetPagerDisplay { h: String, v: String },
     /// 页码文字显示覆盖（""跟随主题/"show"/"hide"）。来自 ui.candidate.page_number_display。
-    SetPageNumberDisplay(String),
+    /// 同样横竖各一份，理由见上。
+    SetPageNumberDisplay { h: String, v: String },
     /// 拆字字根字体（PUA 字根字符渲染）：TTF 文件路径 + DWrite 家族名（取自方案 [engine.chaizi]）。
     SetTooltipChaiziFont { path: String, family: String },
     /// 显示菜单（候选右键菜单 / 功能主菜单；UI 自管导航与子菜单）。

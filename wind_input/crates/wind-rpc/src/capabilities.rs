@@ -15,7 +15,10 @@ fn type_name(ty: FieldType) -> &'static str {
         FieldType::Int => "int",
         FieldType::Float => "float",
         FieldType::Str => "str",
-        FieldType::Enum(_) => "enum",
+        // ★ 可分档枚举对设置端**仍是 enum**：值域一样、单值写法一样，只是额外允许
+        // 分档写法。报成一个新 type 会让设置端既有的 select 控件与清单校验全部落空，
+        // 而它们本来就该继续工作 —— 分档能力另由 `byLayout` 标记位表达。
+        FieldType::Enum(_) | FieldType::LayoutEnum(_) => "enum",
         FieldType::StrList => "strlist",
         FieldType::Map(_) => "map",
         FieldType::StructList => "structlist",
@@ -47,10 +50,18 @@ pub fn generate(data_dir: Option<&Path>) -> anyhow::Result<serde_json::Value> {
         // `enum` → 合法取值；`map` → 合法**键名**（值仍自由）。键名域为空的 map 不带此字段，
         // 设置端据此区分「自由命名的表」（自定义标点）与「类别固定的表」（字体脚本类）。
         let restricted: Option<&[&str]> = match f.ty {
-            FieldType::Enum(allowed) => Some(allowed),
+            FieldType::Enum(allowed) | FieldType::LayoutEnum(allowed) => Some(allowed),
             FieldType::Map(keys) if !keys.is_empty() => Some(keys),
             _ => None,
         };
+        // `byLayout` = 这个键的值可以按候选窗排布分档（`"h:hide v:always"`，见 core 的
+        // `by_layout` 模块）。设置端据此决定给一个控件还是横竖两个。
+        //
+        // 与 `values` / `schemaOverride` 同风格：**不适用的键不带这个字段**（而不是给
+        // false），设置端 `if let Some` 即可。
+        if matches!(f.ty, FieldType::LayoutEnum(_)) {
+            entry.insert("byLayout".into(), serde_json::Value::Bool(true));
+        }
         if let Some(allowed) = restricted {
             entry.insert(
                 "values".into(),

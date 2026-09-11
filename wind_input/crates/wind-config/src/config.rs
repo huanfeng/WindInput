@@ -11,6 +11,7 @@
 //! 按进程名的兼容性规则（HostRender 白名单、caret 定位等）不在这里，见
 //! `app_compat.rs`（独立的 `compat.toml` 文件，字段级合并，键名不受本文件四层合并约束）。
 
+use crate::by_layout::ByLayout;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -4938,11 +4939,15 @@ pub struct UiCandidateConfig {
     #[serde(default)]
     pub font_size_follow_theme: bool,
     /// 翻页栏显示覆盖："" 跟随主题 / "hide" / "auto"(>1页) / "always"。
+    ///
+    /// **可按排布分档**（见 [`ByLayout`]）：`"hide"` 横竖共用，`"h:hide v:always"` 分设。
+    /// 横排的翻页栏要挤占本就被全部候选共享的那一行，竖排本来就是多行、多一行代价小
+    /// ——「横排简洁、竖排信息多」是用户实际会提的诉求（论坛 #121）。
     #[serde(default)]
-    pub pager_bar_display: String,
+    pub pager_bar_display: ByLayout<String>,
     /// 页码文字显示覆盖："" 跟随主题 / "show" / "hide"。
     #[serde(default)]
-    pub page_number_display: String,
+    pub page_number_display: ByLayout<String>,
     /// 首显容差系数（**内部选项**，不进设置页）：首帧用了非权威坐标时，随后到达的权威
     /// 坐标与它相差在 `行高 × 本系数` 以内就**不再校正**——校正本身才是抖动的观感来源，
     /// 十几像素的偏差不动比"跳一下修正"更稳（多数输入法也是这么做的）。
@@ -5195,8 +5200,8 @@ impl Default for UiCandidateConfig {
             hide_window: false,
             font_size: 18.0,
             font_size_follow_theme: true,
-            pager_bar_display: String::new(),
-            page_number_display: String::new(),
+            pager_bar_display: ByLayout::default(),
+            page_number_display: ByLayout::default(),
             max_chars: 16,
             // 五项下限均出厂关闭：任何非零默认都会让存量用户升级后候选窗突然变宽/变高。
             min_window_width_horizontal: 0,

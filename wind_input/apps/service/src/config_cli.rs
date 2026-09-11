@@ -556,6 +556,8 @@ fn type_label(ty: FieldType) -> String {
         FieldType::Float => "float".into(),
         FieldType::Str => "string".into(),
         FieldType::Enum(vals) => format!("enum({})", vals.join("|")),
+        // 标明可分档，否则用户在 `config describe` 里看不出这个键还能写 "h:… v:…"。
+        FieldType::LayoutEnum(vals) => format!("enum({})｜可按排布分档", vals.join("|")),
         FieldType::StrList => "string[]".into(),
         FieldType::Map(_) => "map".into(),
         FieldType::StructList => "array".into(),
