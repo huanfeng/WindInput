@@ -417,15 +417,29 @@ rbuild_sync_tree() {
 #   变成「部署了一个远端根本没编的文件」。build[_dev]/ 完全由构建产出, 清空是安全的。
 # ⛔ dist/ 不镜像: 那里攒的是历次打包成品, 不是本次构建的产出。
 # ★ 清空放在【下载成功之后】, 失败时本机产物原样保留, 不会两头空。
+# $4=filter: 非空时【只取文件名含该串的文件】(外加 latest*.json / *.app.toml 这类不带
+#    版本号的本次产物)。给 dist/ 用 ——
+# ⚠️ 编译机上的 dist/ 在排除清单里、永不被 prune, 于是跨版本的 Setup/Portable 在那边
+#    越攒越多。整目录拉回来实测 201MB, 而本次产物只有 20MB, 且把 0.115/0.117/0.120 的
+#    旧包一并倒进本机 dist/ —— 它们看上去与本地刚产的毫无区别, 发版时极易拿错。
 rbuild_fetch_dir() {
-    local packPath="$1" label="$2" mirror="${3:-}" rnd tgz rtgz
+    local packPath="$1" label="$2" mirror="${3:-}" filter="${4:-}" rnd tgz rtgz
     rnd="$(tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 6)"; rnd="${rnd:-$$}"
     rtgz="C:/Windows/Temp/wi-out-$rnd.tar.gz"
     tgz="$(mktemp -t "wi-out-$rnd-XXXX.tar.gz")"; RBUILD_TMPFILES+=("$tgz")
 
     # 远端目录不存在时 tar 会失败 —— 对 dist/ 这类「可能没产出」的目录要能容忍, 由调用方判读。
-    rbuild_ps "if (-not (Test-Path '$WIND_BUILD_ROOT/$packPath')) { exit 9 }; \
-tar -czf '$rtgz' -C '$WIND_BUILD_ROOT' '$packPath'; exit \$LASTEXITCODE" >/dev/null 2>&1
+    local pick="tar -czf '$rtgz' -C '$WIND_BUILD_ROOT' '$packPath'"
+    if [ -n "$filter" ]; then
+        pick="\$sel = @(Get-ChildItem -LiteralPath '$WIND_BUILD_ROOT/$packPath' -File -EA SilentlyContinue |
+      Where-Object { \$_.Name -like '*$filter*' -or \$_.Name -like 'latest*.json' -or \$_.Name -like '*.app.toml' } |
+      ForEach-Object { '$packPath/' + \$_.Name })
+if (-not \$sel) { exit 9 }
+tar -czf '$rtgz' -C '$WIND_BUILD_ROOT' @sel"
+    fi
+    rbuild_ps "if (-not (Test-Path '$WIND_BUILD_ROOT/$packPath')) { exit 9 }
+$pick
+exit \$LASTEXITCODE" >/dev/null 2>&1
     local rc=$?
     [ "$rc" = 9 ] && { rm -f "$tgz"; return 9; }
     [ "$rc" = 0 ] || { err "  远程打包 $label 失败"; rm -f "$tgz"; return 1; }
@@ -475,7 +489,8 @@ rbuild_fetch_artifacts() {
     local extra; extra="$(rbuild_extra_dirs_for "$cmd")"
     local e rc
     for e in $extra; do
-        rbuild_fetch_dir "$e" "$e/"; rc=$?
+        # dist/ 只取本次版本的产物, 理由见 rbuild_fetch_dir 头部。
+        rbuild_fetch_dir "$e" "$e/ (v$VERSION)" "" "$VERSION"; rc=$?
         [ "$rc" = 9 ] && warn "  ! 编译机上没有 $e/ —— 打包步骤可能未产出任何东西"
         [ "$rc" = 1 ] && return 1
     done
