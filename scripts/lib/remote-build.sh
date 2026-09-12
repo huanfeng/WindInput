@@ -345,7 +345,7 @@ rbuild_sync_tree() {
     ps="$ps     if (\$q -and -not \$q.EndsWith('\')) { \$probe += \$q } }; "
     ps="$ps   \$miss=@(\$probe | Where-Object { -not (Test-Path -LiteralPath (Join-Path '$rdir' \$_)) }); "
     ps="$ps   if (\$probe.Count -gt 0 -and \$miss.Count -gt 0) { "
-    ps="$ps     Write-Error (\"解压未生效: 抽查 \$(\$probe.Count) 条, \$(\$miss.Count) 条不存在 (例: \$(\$miss[0]))\"); "
+    ps="$ps     [Console]::Error.WriteLine(\"解压未生效: 抽查 \$(\$probe.Count) 条, \$(\$miss.Count) 条不存在 (例: \$(\$miss[0]))\"); "
     ps="$ps     Remove-Item '$rtgz' -Force -EA SilentlyContinue; exit 3 } }; "
     ps="$ps if (\$c -eq 0) { "
     ps="$ps   \$k=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); "
@@ -495,7 +495,7 @@ _rbuild_run_body() {
     #   命令时 $LASTEXITCODE 是 $null, `exit $null` 退 0。于是「dev.ps1 压根没被调用」会被
     #   报成构建成功, 随后把编译机上【上一次】的 build/ 整个盖回本机。
     rbuild_ps "\$env:WIND_NO_REMOTE='1'; \$LASTEXITCODE=0; \
-if (-not (Test-Path '$WIND_BUILD_ROOT/scripts/dev.ps1')) { Write-Error '编译机上找不到 scripts/dev.ps1 —— 源码同步没生效?'; exit 66 }; \
+if (-not (Test-Path '$WIND_BUILD_ROOT/scripts/dev.ps1')) { [Console]::Error.WriteLine('编译机上找不到 scripts/dev.ps1 —— 源码同步没生效?'; exit 66 }; \
 Set-Location -LiteralPath '$WIND_BUILD_ROOT' -EA Stop; \
 & '$WIND_BUILD_ROOT/scripts/dev.ps1' $cmd; exit \$LASTEXITCODE"
     rc=$?

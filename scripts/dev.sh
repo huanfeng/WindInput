@@ -1264,7 +1264,7 @@ diag_need_path() {
 # rcat <路径>  读靶机上的文本文件 (全文)
 do_rcat() {
     require_diag_remote || return 1; diag_need_path "$1" rcat || return 1
-    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { Write-Error '文件不存在: $(ps_quote "$1")'; exit 1 }; \
+    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { [Console]::Error.WriteLine('文件不存在: $(ps_quote "$1")'); exit 1 }; \
 Get-Content -LiteralPath '$(ps_quote "$1")' -Raw -Encoding UTF8"
 }
 
@@ -1273,14 +1273,14 @@ do_rtail() {
     require_diag_remote || return 1; diag_need_path "$1" rtail || return 1
     local n="${N:-100}"
     gray "(末尾 $n 行; 用 N=500 dev.sh rtail <路径> 改行数)"
-    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { Write-Error '文件不存在: $(ps_quote "$1")'; exit 1 }; \
+    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { [Console]::Error.WriteLine('文件不存在: $(ps_quote "$1")'); exit 1 }; \
 Get-Content -LiteralPath '$(ps_quote "$1")' -Tail $n -Encoding UTF8"
 }
 
 # rls <路径>  列目录 (按修改时间倒序 —— 找"最新那个日志"是这条命令的主要用途)
 do_rls() {
     require_diag_remote || return 1; diag_need_path "$1" rls || return 1
-    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { Write-Error '路径不存在: $(ps_quote "$1")'; exit 1 }; \
+    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { [Console]::Error.WriteLine('路径不存在: $(ps_quote "$1")'); exit 1 }; \
 Get-ChildItem -LiteralPath '$(ps_quote "$1")' -Force | Sort-Object LastWriteTime -Descending | \
 ForEach-Object { '{0}  {1,10}  {2}' -f \$_.LastWriteTime.ToString('MM-dd HH:mm:ss'), \
 (\$(if (\$_.PSIsContainer) { '<DIR>' } else { \$_.Length })), \$_.Name }"
@@ -1307,7 +1307,7 @@ do_rgrep() {
     [ -n "$path" ] || { err "未配置 WIND_LOCAL_DIR（deploy.local）且未给 P=<路径>"; return 1; }
     local n="${N:-80}"
     say "\n在 $path 搜 '$pat' (最多 $n 条)"
-    remote_ps "if (-not (Test-Path '$(ps_quote "$path")')) { Write-Error '路径不存在: $(ps_quote "$path")'; exit 1 }; \
+    remote_ps "if (-not (Test-Path '$(ps_quote "$path")')) { [Console]::Error.WriteLine('路径不存在: $(ps_quote "$path")'); exit 1 }; \
 Get-ChildItem -LiteralPath '$(ps_quote "$path")' -File -Recurse -EA SilentlyContinue | \
 Sort-Object LastWriteTime -Descending | \
 Select-String -Pattern '$(ps_quote "$pat")' -Encoding UTF8 -EA SilentlyContinue | \
