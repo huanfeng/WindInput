@@ -1,0 +1,69 @@
+# 远程构建配置 (Linux 开发机 → Windows 编译机)
+# 复制为 scripts/build.local 后生效 (该文件已 gitignore)。
+#
+# 【与 dev.ps1 的 build.local.ps1 不是一回事】: 那份是 Windows 本机 → 编译机, PowerShell
+# 语法, 未配置时回落本机编。这份是 Linux → 编译机, shell 语法, **未配置时硬失败** ——
+# Linux 上编出来的东西按下述理由不能用, 安静地回落只会产出一堆废品。
+#
+# ── 为什么 Linux 不能自己编 ────────────────────────────────────────────────
+# clang / cargo-xwin 交叉编出的 wind_tsf.dll 在带安全加固的宿主 (企业微信 / TIM / QQ /
+# UU浏览器) 里 COM 激活失败, 同 commit 的原生 MSVC 版正常 —— A/B 实测把唯一变量锁定在
+# 工具链上 (6dbc8595)。两份 DLL 的 PE 安全元数据 (DllCharacteristics/SafeSEH) 逐位相同,
+# 差异落在【代码生成层】, 换 cargo-xwin 的用法或版本都无效, 也不是 32 位专有问题。
+# ⇒ Linux 侧的 cargo-xwin/clang 只剩 check/clippy 一个正当用途 (不链接、不出交付物)。
+#
+# ── 编译机一次性准备 ──────────────────────────────────────────────────────
+# 与 build.local.ps1.example 的「一、编译机一次性准备」完全相同 (同一台机器, 同一套
+# 要求): OpenSSH Server + 免密、VS Build Tools (VCTools 工作负载)、CMake、Rust MSVC
+# 工具链 + i686-pc-windows-msvc target、Git。详见那份模板, 此处不重复。
+# ⚠️ 管理员账户的公钥要放 %ProgramData%\ssh\administrators_authorized_keys 而不是
+#    %USERPROFILE%\.ssh\authorized_keys, 放错会【静默失效】仍问密码。
+
+# ── 必填 ──────────────────────────────────────────────────────────────────
+
+# 编译机 SSH 目标。不设 = 所有构建类命令直接报错。
+WIND_BUILD_REMOTE="admin@192.168.5.39"
+
+# 编译机上的仓库路径。会被本机源码【镜像】覆盖同步 (见下方陷阱), 不存在则自动创建。
+# 正斜杠写法 (scp/ssh 目标路径的惯例); 脚本会在需要时自行转反斜杠。
+WIND_BUILD_ROOT="C:/build/WindInput"
+
+# ── 可选 ──────────────────────────────────────────────────────────────────
+
+# 编译机上用哪个 PowerShell 跑 dev.ps1。默认 pwsh (7.x); 只有 5.1 时改成 powershell。
+# WIND_BUILD_PS="powershell"
+
+# 需要一并同步的伴生仓 (与产品仓平级的目录名, 空格分隔)。
+# ⚠️ wind-setting 必须连 wind-ui-rust 一起列 —— 它是 path 依赖
+#    (windui = { path = "../wind-ui-rust" }), 仓不在就直接「系统找不到指定的路径
+#    (os error 3)」, 而且不会有任何更明确的提示。
+# WIND_BUILD_SIBLINGS="wind-setting wind-ui-rust wind-portable wind-installer"
+
+# ── 临时覆盖 (环境变量, 不写进本文件) ──────────────────────────────────────
+#
+#   WIND_NO_REMOTE=1 ./scripts/dev.sh k
+#       跳过远程。对 k/check、l/clippy、t/test 无影响 (它们本来就在本机跑);
+#       对构建类命令会直接报错而不是回落 —— 这是刻意的, 理由见文件头。
+#
+# ── 已知陷阱 ──────────────────────────────────────────────────────────────
+#
+# ⚠️ 同步是【镜像】: 解压后会清掉编译机上多余的文件 (prune)。理由: cargo 把 tests/
+#    benches/ examples/ 下的每个 .rs 自动发现为独立编译目标, 不需要任何 mod 引用, 所以
+#    本机删掉的测试文件留在编译机上就会继续参与构建并报出「找不到该文件」的怪错。
+#    清理范围严格等于同步范围, target/ build[_dev]/ dist/ .cache/ 一律不碰, 且只删文件
+#    不删目录。
+#
+# ⚠️ 编译机上那份【不是 git 仓】—— .git/ 在排除清单里。别在上面跑 git 命令, 也别在上面
+#    改源码 (下次同步会覆盖)。它只当编译器用。
+#
+# ⚠️ docs/VERSION 变化会触发 dev.ps1 的 Sync-VersionStamp: cargo clean + 删 tsf-cmake
+#    缓存 ⇒ 下一次是【全量重编】(~9 分钟)。编译机上残留的是上一次同步者的版本号, 故
+#    首次从 Linux 同步过去时几乎必然触发一次全量重编, 属正常。
+#
+# ⚠️ 编译机与 Windows 本机共用同一个互斥锁文件 (<仓库路径>.buildlock), 两条路会互相
+#    排队。锁被 Ctrl+C 中断卡死时, 手动清:
+#      ssh <目标> "del C:\build\WindInput.buildlock"
+#
+# ⚠️ 签名不在编译机上做 —— 证书会话只在 Windows 本机。远程回传的安装包/便携包是
+#    【未签名】的, 只能自测。发版链路: dev.sh 1 → dev.sh stage → scp 到本机 →
+#    dev.ps1 unstage → dev.ps1 sign 8s / sign 9s。

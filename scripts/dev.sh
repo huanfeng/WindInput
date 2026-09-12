@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# WindInput 开发菜单 (Linux → Windows 交叉编译)
+# WindInput 开发菜单 (Linux 开发机)
+#
+# ★ 构建不在本机进行 —— 凡会写进 build[_dev]/ 或 dist/ 的命令都转发到 Windows 编译机,
+#   用原生 MSVC 编, 产物回传本机。理由: clang/cargo-xwin 交叉编出的 wind_tsf.dll 在带
+#   安全加固的宿主里 COM 激活失败, 根因在工具链代码生成层 (6dbc8595)。本机的 cargo-xwin
+#   只剩 check/clippy 一个正当用途 —— 那两个不链接、不产出交付物。
+#   配置: cp scripts/build.local.example scripts/build.local; 未配置时构建类命令硬失败。
 #
 # 用法:
 #   ./scripts/dev.sh            # 交互式菜单 (对齐 dev.ps1)
@@ -31,6 +37,9 @@
 #   pm1/pm2      push 单模块 (tsf/核心, release)
 #   pdm1/pdm2    push 单模块 (dev)
 #   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活pre-commit)  clean
+#     ↑ 这几个【在本机跑】: 不产出交付物, cargo-xwin 在 Linux 上仅存的正当用途就是它们;
+#       t/test 更是原生 cargo test。想在本机直接出二进制看看链接过不过: WIND_BUILD_LOCAL=1
+#       (⚠️ 产物不能部署也不能发版, 见 lib/remote-build.sh)
 #   gd=gen-data  r=repl  dl=pull-data  pc=pull-config  pl=pull-log(pla=全部)
 #
 # 部署配置 scripts/deploy.local（SSH 推送到 Windows 实测机）:
@@ -124,6 +133,13 @@ fsize() { ls -lh "$1" 2>/dev/null | awk '{print $5}'; }
 # XWIN_BIN / WIND_LLVM_VER / setup_xwin_env 定义在共享环境桥里 —— pack-installer.sh
 # 写同一个 $XWIN_BIN 目录，两处各存一份实现会互相覆盖（原委见 lib/xwin-env.sh 头部）。
 . "$SCRIPT_DIR/lib/xwin-env.sh"
+
+# ---------- 远程构建 (Linux → Windows 编译机) ----------
+# 凡会写进 build[_dev]/ 或 dist/ 的命令一律推到编译机上用原生 MSVC 编 —— 本机 cargo-xwin
+# /clang 的产物在加固宿主里 COM 激活失败 (6dbc8595), 只剩 check/clippy 一个正当用途。
+# 配置: scripts/build.local (模板 build.local.example); 未配置时构建类命令【硬失败】。
+[ -f "$SCRIPT_DIR/build.local" ] && . "$SCRIPT_DIR/build.local"
+. "$SCRIPT_DIR/lib/remote-build.sh"
 
 # 统一 MSVC 构建入口:确保工具链就绪,并注入 +crt-static(静态链 MSVC 运行时,
 # 产物自包含,无需目标机装 VC++ 运行库)。RUSTFLAGS 仅作用于此次 cargo-xwin 调用,
@@ -1222,7 +1238,14 @@ show_menu() {
 pause() { printf '\n'; read -e -r -p "按回车继续..." _; }
 
 # 统一分发：菜单与命令行直调共用，命令已转小写。返回 1 表示无效命令。
+DISPATCH_UNKNOWN=0
 dispatch() {
+    DISPATCH_UNKNOWN=0
+    # 构建类命令一律推到 Windows 编译机 —— 拦在 case 之前, 菜单与命令行直调因此共用
+    # 同一条转发路径, 不会漏掉其中一条。分类与理由见 lib/remote-build.sh。
+    if rbuild_is_forwarded "$1"; then
+        rbuild_run "$1"; return $?
+    fi
     case "$1" in
         1|release)        do_full release ;;
         d1|dev)         do_full dev ;;
@@ -1260,7 +1283,10 @@ dispatch() {
         pc|pull-config)   do_pull_config ;;
         pl|pull-log)      do_pull_log "${2:-}" ;;
         pla)              do_pull_log all ;;
-        *)                return 127 ;;   # 哨兵:未知命令（区别于命令执行失败的非 0 返回）
+        # 「未知命令」不能再用某个退出码当哨兵: rbuild_run 会把【编译机上任意进程的
+        # 退出码】原样透传上来(ssh 透传远端状态), 撞上哨兵值就会把一次远程构建失败报成
+        # 「未知命令, 请看 --help」—— 最大化误导。改用独立标志, 与退出码空间彻底分开。
+        *)                DISPATCH_UNKNOWN=1; return 1 ;;
     esac
 }
 

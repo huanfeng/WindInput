@@ -11,6 +11,10 @@ scripts/deploy.local.ps1
 # 脚本本体 (remote-build.ps1 / rc.ps1) 与模板 (.example) 均已入库 —— 没有这个文件时
 # 它们一律回落本机执行, 见 AGENTS.md「远程编译机」。
 scripts/build.local.ps1
+# 同上, Linux 开发机侧的那一份 (shell 语法; 模板 scripts/build.local.example)。
+# ⚠️ 与 .ps1 那份的回落语义相反: 没有它时构建类命令【硬失败】而不是回落本机 ——
+#    Linux 交叉编的产物在加固宿主里 COM 激活失败 (6dbc8595), 回落只会产出废品。
+scripts/build.local
 # 代码签名的【本机配置】: 只含证书指纹 (指纹本身不是秘密), 但一机一份、随证书更换而变,
 # 故与其它 *.local.ps1 同样不入库。模板见 scripts/sign.local.ps1.example。
 # 真正的秘密 (签名服务口令 / 二次验证 TOTP 种子) 不在任何文件里, 见 docs/design/code-signing.md。
