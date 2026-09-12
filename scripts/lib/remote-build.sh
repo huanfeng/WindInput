@@ -49,6 +49,43 @@ WIND_BUILD_PS="${WIND_BUILD_PS:-pwsh}"         # 编译机上跑 dev.ps1 的 Pow
 #    仓不在就直接「系统找不到指定的路径 (os error 3)」。
 WIND_BUILD_SIBLINGS="${WIND_BUILD_SIBLINGS:-wind-setting wind-ui-rust wind-portable wind-installer}"
 
+# ---------- worktree 槽位 ----------
+# 每个 linked worktree 在编译机上占一份【自己的父目录】, 否则多个 worktree 全映射到同一个
+# WIND_BUILD_ROOT: 同步是镜像, 于是每次切 worktree 都要把对方的树 prune 掉再铺自己的,
+# 而 docs/VERSION 一有差异 dev.ps1 的 Sync-VersionStamp 还会 cargo clean + 删 tsf-cmake
+# ⇒ 每换一次 worktree 就是一次 ~9 分钟全量重编。锁只保证不并发踩踏, 挡不住这个。
+#
+# ★★ 换的是【父目录】而不是主仓目录名: 伴生仓与主仓平级, 而 wind-setting/Cargo.toml 里
+#    写死了三条相对 path 依赖 (../WindInput/wind_input/crates/...)。只改主仓名, wind-setting
+#    仍会去 ../WindInput 取那三个 crate —— 取到的是【主树】代码, 编译照样成功, 错得毫无提示。
+#        默认     C:/build/{WindInput, wind-setting, wind-ui-rust, ...}
+#        槽位 fx  C:/build-fx/{WindInput, wind-setting, wind-ui-rust, ...}
+#
+# 判据与 remote-build.ps1 一致: git-dir != git-common-dir 即 linked worktree。主树两者相同
+# (本仓虽是 repo 工具布局, 但在仓内 rev-parse 返回的都是相对 .git —— 已实测), 派生不出槽位,
+# 行为与从前逐字不变。「忘了设 → 静默互相覆盖」这坑踩过太多次, 默认值必须是安全的那个。
+# ⚠️ 每个槽位各带一份 target/ (几十 GB), 用完记得删掉编译机上的整个槽位目录。
+rbuild_apply_slot() {
+    local slot="${WIND_BUILD_SLOT:-}" gd cd
+    case "$slot" in
+        0|none|off) return 0 ;;                       # 显式关掉: 与主树共用(串台风险自负)
+        "") gd="$(git -C "$PRODUCT_ROOT" rev-parse --git-dir 2>/dev/null)"
+            cd="$(git -C "$PRODUCT_ROOT" rev-parse --git-common-dir 2>/dev/null)"
+            # 没装 git / 不是仓库 ⇒ 两者都空 ⇒ 当作主树, 不派生。
+            [ -n "$gd" ] && [ -n "$cd" ] && [ "$gd" != "$cd" ] && slot="$(basename "$PRODUCT_ROOT")"
+            ;;
+    esac
+    [ -n "$slot" ] || return 0
+    # 分支名里的 / : 之类会把路径打断, 非安全字符一律折成 '-'
+    slot="$(printf '%s' "$slot" | tr -c 'A-Za-z0-9._-' '-')"
+    slot="${slot#-}"; slot="${slot%-}"
+    [ -n "$slot" ] || return 0
+    WIND_BUILD_ROOT="$(dirname "$WIND_BUILD_ROOT")-$slot/$(basename "$WIND_BUILD_ROOT")"
+    WIND_BUILD_SLOT_ACTIVE="$slot"
+}
+WIND_BUILD_SLOT_ACTIVE=""
+[ -n "$WIND_BUILD_ROOT" ] && rbuild_apply_slot
+
 # SSH 选项: 关掉交互, 避免脚本里卡在 known_hosts 询问。
 # ★ ServerAlive* 与 remote-build.ps1 的 $SshOpts 对齐, 不是可省的: 远端 tar 打包整个
 #   build/(含 data/ 22MB) 与 cargo 的长链接阶段都会有【数分钟一个字节都不往回吐】,
@@ -453,7 +490,12 @@ rbuild_run() {
     rbuild_require_ready "$raw" || return 1
     t0=$SECONDS
 
-    say "\n========== 远程构建 '$cmd' @ $WIND_BUILD_REMOTE =========="
+    if [ -n "$WIND_BUILD_SLOT_ACTIVE" ]; then
+        say "\n========== 远程构建 '$cmd' @ $WIND_BUILD_REMOTE [槽位 $WIND_BUILD_SLOT_ACTIVE] =========="
+        gray "  → $WIND_BUILD_ROOT (worktree 专用; 各带一份 target/, 用完记得删)"
+    else
+        say "\n========== 远程构建 '$cmd' @ $WIND_BUILD_REMOTE =========="
+    fi
     rbuild_trap_on
     rbuild_lock || { rbuild_trap_off; return 1; }
     # 锁的获取与释放收口在这一层, 主体的任何一条失败路径都不会把锁留在编译机上 ——
@@ -495,7 +537,7 @@ _rbuild_run_body() {
     #   命令时 $LASTEXITCODE 是 $null, `exit $null` 退 0。于是「dev.ps1 压根没被调用」会被
     #   报成构建成功, 随后把编译机上【上一次】的 build/ 整个盖回本机。
     rbuild_ps "\$env:WIND_NO_REMOTE='1'; \$LASTEXITCODE=0; \
-if (-not (Test-Path '$WIND_BUILD_ROOT/scripts/dev.ps1')) { [Console]::Error.WriteLine('编译机上找不到 scripts/dev.ps1 —— 源码同步没生效?'; exit 66 }; \
+if (-not (Test-Path '$WIND_BUILD_ROOT/scripts/dev.ps1')) { [Console]::Error.WriteLine('编译机上找不到 scripts/dev.ps1 —— 源码同步没生效?'); exit 66 }; \
 Set-Location -LiteralPath '$WIND_BUILD_ROOT' -EA Stop; \
 & '$WIND_BUILD_ROOT/scripts/dev.ps1' $cmd; exit \$LASTEXITCODE"
     rc=$?
