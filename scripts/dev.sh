@@ -25,6 +25,8 @@
 #   9            生成便携包 (= 1 + 打 zip → dist/WindInput-Portable-<版本>.zip + sha256)
 #                (免安装；不依赖 wind-installer；内含便携标记，不含 userdata/)
 #   9s           跳过编译，直接打包现有 build/
+#   stage/dstage 打发布中转产物 → dist/WindInput[Dev]-Stage-<版本>.zip (release / dev)
+#                (build/ + 安装器三件套 + stage.json；拷到本机 dev.ps1 unstage 后签名打包)
 #   p1 / pd1     push 全部 build[_dev]/ → Windows 安装目录 (release / dev)
 #   pm1/pm2      push 单模块 (tsf/核心, release)
 #   pdm1/pdm2    push 单模块 (dev)
@@ -59,10 +61,15 @@ PROJECT_ROOT="$PRODUCT_ROOT/wind_input"
 TSF_DIR="$PRODUCT_ROOT/wind_tsf"
 SETTING_DIR="$(cd "$PRODUCT_ROOT/.." && pwd)/wind-setting"
 PORTABLE_DIR="$(cd "$PRODUCT_ROOT/.." && pwd)/wind-portable"
+# wind-installer: 通用安装器生成器（兄弟仓库, app.toml 驱动）。默认值与覆盖用的环境变量
+# 都与 pack-installer.sh 的 WIND_INSTALLER_DIR 保持一致, 免得两个脚本各找各的安装器。
+INSTALLER_DIR="${WIND_INSTALLER_DIR:-$(cd "$PRODUCT_ROOT/.." && pwd)/wind-installer}"
 VERSION="$(tr -d '[:space:]' < "$PRODUCT_ROOT/docs/VERSION" 2>/dev/null || echo '?')"
 # 发布产物目录在【项目根】（内容 == 安装到 Program Files 的内容，无中间产物）
 BUILD_DIR="$PRODUCT_ROOT/build"
 BUILD_DEV_DIR="$PRODUCT_ROOT/build_dev"
+# 打包输出目录（gitignore）：便携包 zip、发布中转产物 zip
+DIST_DIR="$PRODUCT_ROOT/dist"
 # 外部下载/生成的词库缓存目录（不入库）
 CACHE_DIR="$PRODUCT_ROOT/.cache"
 # Rust 工具链根目录（wind_input/ workspace）
@@ -102,6 +109,12 @@ say()  { printf '%b%b%b\n' "$C_GREEN" "$1" "$C_RESET"; }
 warn() { printf '%b%b%b\n' "$C_YELLOW" "$1" "$C_RESET"; }
 err()  { printf '%b%b%b\n' "$C_RED" "$1" "$C_RESET"; }
 gray() { printf '%b%b%b\n' "$C_GRAY" "$1" "$C_RESET"; }
+
+# 文件大小 (人类可读)。
+# ⚠️ 不用 `du -h`: 它报的是【磁盘占用】而非文件大小, 取值依赖文件系统的块分配策略 ——
+#    在开发机的文件系统上对一个 5 MB 的文件稳定报 "512" (实测, ls -lh 同一文件报 5.0M)。
+#    于是「已同步 (512)」「打包完成 (512)」这类输出会让人以为什么都没传出去/没打进去。
+fsize() { ls -lh "$1" 2>/dev/null | awk '{print $5}'; }
 
 # ---------- cargo-xwin / clang (统一 MSVC 交叉编译工具链) ----------
 # Rust/Tauri 经 cargo-xwin、C++ TSF 经 clang+llvm-rc,均交叉编 *-pc-windows-msvc,
@@ -173,7 +186,7 @@ build_core() {
     local src="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_input${suffix}.exe"
-    gray "已构建: wind_input${suffix}.exe ($(du -h "$outdir/wind_input${suffix}.exe" | cut -f1))"
+    gray "已构建: wind_input${suffix}.exe ($(fsize "$outdir/wind_input${suffix}.exe"))"
     # CLI 包装器 (wind_input config ...; 运行时自辨 dev/release exe, 两变体共用一份)
     [ -f "$PROJECT_ROOT/scripts/wind_cli.bat" ] && cp -f "$PROJECT_ROOT/scripts/wind_cli.bat" "$outdir/wind_cli.bat" && gray "已复制: wind_cli.bat"
 }
@@ -204,7 +217,7 @@ build_setting() {
     local src="$(cargo_target_dir "$SETTING_DIR")/$TARGET/$target_dir/wind_setting.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_setting${suffix}.exe"
-    gray "已构建: wind_setting${suffix}.exe ($(du -h "$outdir/wind_setting${suffix}.exe" | cut -f1))"
+    gray "已构建: wind_setting${suffix}.exe ($(fsize "$outdir/wind_setting${suffix}.exe"))"
 }
 
 # 模块三：wind-portable 便携启动器。
@@ -224,7 +237,7 @@ build_portable() {
     local src="$(cargo_target_dir "$PORTABLE_DIR")/$TARGET/release/wind_portable.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_portable.exe"
-    gray "已构建: wind_portable.exe ($(du -h "$outdir/wind_portable.exe" | cut -f1))"
+    gray "已构建: wind_portable.exe ($(fsize "$outdir/wind_portable.exe"))"
 }
 
 do_check() {
@@ -988,7 +1001,7 @@ do_portable_zip() {
     local has_launcher=0
     [ -f "$stage/$name/wind_portable.exe" ] && has_launcher=1
     rm -rf "$stage"
-    say "便携版打包完成: $zipfile ($(du -h "$zipfile" | cut -f1))"
+    say "便携版打包完成: $zipfile ($(fsize "$zipfile"))"
     if [ "$has_launcher" = 1 ]; then
         gray "使用: 解压后运行 wind_portable.exe（注册组件并拉起服务）"
     else
@@ -996,6 +1009,183 @@ do_portable_zip() {
         gray "      (x86 版用 %SystemRoot%\\SysWOW64\\regsvr32.exe)，再手动运行 wind_input.exe"
     fi
 }
+
+# ---------- 发布中转产物 (stage) ----------
+# 「Linux 交叉编译 → 本机签名打包」的载体, 与 dev.ps1 的 Do-Stage 是同一件事的两侧:
+# 编译在别处, 签名和打包必须在本机同一次里做完。还原侧 (unstage) 只有 dev.ps1 有。
+#
+# ⚠️ 为什么不能在这边直接出包、本机只补签外壳:
+#    签名【夹在打包中间】—— PE 签在封进压缩块之前, Setup.exe 签在 pack 之后、
+#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 5 个 PE 仍是全裸的, 而
+#    signtool verify 验 Setup.exe 照样通过 —— 从外面完全看不出来。所以中转的必须是
+#    打包【之前】的散件。
+#
+# 包内结构必须与 Do-Stage 一致, 否则本机 unstage 的版本硬校验直接拦下:
+#   build/      全构建产物; 内容 == 安装内容, 是安装包与便携包的共同上游
+#   installer/  wind-installer 的 stub / packer / uninstaller
+#   stage.json  版本号等清单, unstage 时硬校验
+# 带上 installer/ 是为了让本机【一行代码都不编译】—— Do-Installer 见三件套已在, 会给
+# pack.ps1 透传 -SkipBuild; 少了它们本机仍会 cargo build 一遍安装器。
+#
+# ⚠️ 与 dev.sh 里其它 stage 无关: do_portable_zip 的 .portable-stage 是便携包的临时组装
+#    目录, 不是发布中转产物。
+STAGE_MANIFEST_NAME="stage.json"
+
+# 安装器三件套的路径 (名字|路径)。
+#
+# ⚠️ 与 dev.ps1 的 Get-InstallerBinaries 同名同义但【不同层】: 本机原生构建落
+#    target/release/, 这边一律 cargo-xwin 交叉编, 落 target/<三元组>/release/。
+# ⚠️ 三件套必须都是 Windows PE —— 本机 unstage 后是直接拿去跑的。pack-installer.sh 目前
+#    把 wind-packer 编成【原生 Linux ELF】(target/release/wind-packer, 无 .exe), 那个绝
+#    不能改名塞进包里: 本机 pack.ps1 调它会失败, 而包本身看不出任何异常。故这里只认
+#    交叉编出来的 .exe, 找不到就走下面的缺失警告。
+# ⚠️ 现状: pack-installer.sh 只交叉编 stub 与 uninstaller, packer 编的是原生 ELF ⇒
+#    在 Linux 上三件套【永远凑不齐】, stage.json 的 installer 恒为 false, 「本机零编译」
+#    这个目标达不成(本机 unstage 后 pack.ps1 会自行编一遍安装器, 只是慢, 不影响正确性)。
+#    要补齐得给 packer 加一条 `cargo xwin build --release --target <三元组> --bin wind-packer
+#    --features packer` —— 它的依赖都是跨平台的(见 wind-installer/Cargo.toml 的 cfg(windows) 隔离)。
+installer_binaries() {
+    local t
+    t="$(cargo_target_dir "$INSTALLER_DIR")/$TARGET/release"
+    printf '%s\n' "wind-installer.exe|$t/wind-installer.exe" \
+                  "wind-packer.exe|$t/wind-packer.exe" \
+                  "wind-uninstaller.exe|$t/wind-uninstaller.exe"
+}
+
+# 单个 PE 是不是【原生 MSVC】链接器产出的。
+#
+# 判据 = Rich header: cl.exe/link.exe 一定在 DOS stub 尾部写这段(记录参与链接的各 obj
+# 的编译器版本与数量), lld-link 一定不写。双向实测过 —— MSVC 编的
+# Microsoft.VisualC.STLCLR.dll 有, clang-19+lld-link 交叉编的 x64/x86 DLL 都没有。
+# 纯字节检测, 只用 head/od/grep, 不引入新依赖。
+#
+# 返回: 0=原生 MSVC, 1=交叉编译, 2=不是 PE 或读不出(不做判定)
+pe_is_native_msvc() {
+    local f="$1" lfanew
+    [ "$(head -c 2 "$f" 2>/dev/null)" = "MZ" ] || return 2
+    # e_lfanew: 0x3c(=60) 处 4 字节小端; od 按 host 字节序读, x86 上即小端。
+    # Rich header 夹在 DOS stub 与 PE 头之间, 即 [0, e_lfanew) 区间内。
+    lfanew=$(od -An -tu4 -j 60 -N 4 "$f" 2>/dev/null | tr -d ' ')
+    [ -n "$lfanew" ] && [ "$lfanew" -gt 0 ] 2>/dev/null && [ "$lfanew" -lt 4096 ] || return 2
+    head -c "$lfanew" "$f" | LC_ALL=C grep -qa 'Rich'
+}
+
+# ★ 发版产物必须是原生 MSVC 编的 —— stage 的消费侧硬闸门。
+#
+# 原委 (6dbc8595): 交叉编译(clang+lld-link)的 wind_tsf.dll 在部分启用进程级缓解策略的
+# 宿主中 COM 激活失败。实测两份 DLL 的 PE 安全元数据(DllCharacteristics/SafeSEH)【逐位
+# 相同】, 差异落在【工具链代码生成层】(clang vs cl.exe) —— 换 cargo-xwin 的用法或版本
+# 都解决不了, 也不是 32 位专有(SafeSEH 那条线当时查过, 被排除了)。故 release.yml 的整个
+# Windows job 已钉死 windows-2022 + dev.ps1(CMake / "Visual Studio 17 2022")。
+#
+# ⚠️ 为什么必须拦死而不是警告: 签名只是给产物盖章, 不改变代码生成; 而 unstage 只硬校验
+#    版本号, 验不出产物是谁编的。一个拿交叉编译产物做的中转包, 从解包到签名到 signtool
+#    verify 全程无任何异常 —— 与「对成品补签」是同一类静默坏包。
+#
+# 构建端转发 Win VM 之后本闸门自动放行; 长期保留作防回归。
+check_native_msvc() {
+    local outdir="$1" f cross=() unknown=() extra
+    # 除 build/ 外, 安装器三件套也要查 —— 它们是在闸门【之后】才拷进包的(见 do_stage),
+    # 不在这里一并查就会原样穿过去。三件套同样是要分发给用户的 PE。
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        pe_is_native_msvc "$f"
+        case $? in
+            1) cross+=("${f#"$outdir"/}") ;;
+            # ⚠️ fail-closed: find 只挑 *.exe/*.dll, 一个「读不出 PE 头的 .dll」本身就是可疑
+            #    对象。一道拦发版坏包的闸门在自己解析失败时放行, 与它存在的理由相反。
+            #    逃生口已经有了(WIND_STAGE_ALLOW_CROSS=1), 不需要在这里再留一个。
+            2) unknown+=("${f#"$outdir"/}") ;;
+        esac
+    done < <( { find "$outdir" -type f \( -name '*.exe' -o -name '*.dll' \) | sort
+                while IFS='|' read -r _n extra; do printf '%s\n' "$extra"; done < <(installer_binaries); } )
+
+    if [ "${#unknown[@]}" -gt 0 ]; then
+        err "有 ${#unknown[@]} 个 PE 读不出文件头, 无法判定工具链, 拒绝出中转包:"
+        for f in "${unknown[@]}"; do err "    $f"; done
+        gray "  逃生口(明知此包不用于发版时): WIND_STAGE_ALLOW_CROSS=1 ./scripts/dev.sh stage"
+        return 1
+    fi
+    [ "${#cross[@]}" -eq 0 ] && return 0
+
+    err "发版产物不是原生 MSVC 编的, 拒绝出中转包。交叉编译产物 ${#cross[@]} 个:"
+    for f in "${cross[@]}"; do err "    $f"; done
+    err "  判据: PE 无 Rich header ⇒ lld-link 链接(cargo-xwin / clang), 不是 cl.exe。"
+    err "  原委: 6dbc8595 —— 交叉编的 wind_tsf.dll 在加固宿主 COM 激活失败, 根因在工具链"
+    err "        代码生成层; 签名不改变代码生成, unstage 也验不出来, 故在此拦死。"
+    err "  出路: build/ 须来自 Win VM 或本机 dev.ps1; dev.sh 1 的产物只能自测, 不能发版。"
+    gray "  逃生口(明知此包不用于发版时): WIND_STAGE_ALLOW_CROSS=1 ./scripts/dev.sh stage"
+    return 1
+}
+
+do_stage() {
+    local profile="${1:-release}"
+    local outdir suffix="" full_cmd="1"
+    outdir="$(out_for "$profile")"
+    [ "$profile" = dev ] && { suffix="_dev"; full_cmd="d1"; }
+
+    if [ ! -f "$outdir/wind_input$suffix.exe" ]; then
+        err "无 $outdir 产物; 先跑全构建 ('$full_cmd')。"
+        return 1
+    fi
+    command -v zip >/dev/null 2>&1 || { err "需要 zip 命令（Debian/Ubuntu: apt install zip）"; return 1; }
+
+    # 闸门放在打印标题之前: 早失败, 不先报「正在打包 → xxx.zip」再翻脸。
+    if [ "${WIND_STAGE_ALLOW_CROSS:-}" = 1 ]; then
+        warn "WIND_STAGE_ALLOW_CROSS=1: 跳过原生 MSVC 闸门 —— 此包【不可用于发版】。"
+    else
+        check_native_msvc "$outdir" || return 1
+    fi
+
+    local base="WindInput"
+    [ "$profile" = dev ] && base="WindInputDev"
+    local zipfile="$DIST_DIR/$base-Stage-$VERSION.zip"
+    local stage="$DIST_DIR/.stage-pack"
+
+    say "\n========== 打包中转产物 ($profile) → $zipfile =========="
+    rm -rf "$stage"; mkdir -p "$stage/build" "$DIST_DIR"
+    cp -a "$outdir/." "$stage/build/" || { err "复制 $outdir/ 失败"; rm -rf "$stage"; return 1; }
+
+    # 安装器三件套缺失不算硬错误 —— 本机 unstage 后 pack.ps1 会自行编译, 只是「本机零
+    # 编译」这个目标达不成。故明确警告而不是静默放过。
+    local missing=() name path
+    while IFS='|' read -r name path; do
+        [ -f "$path" ] || missing+=("$name")
+    done < <(installer_binaries)
+
+    local has_installer=false
+    if [ "${#missing[@]}" -eq 0 ]; then
+        mkdir -p "$stage/installer"
+        while IFS='|' read -r name path; do
+            cp -f "$path" "$stage/installer/$name" || { err "复制安装器二进制失败: $path"; rm -rf "$stage"; return 1; }
+        done < <(installer_binaries)
+        has_installer=true
+        gray "  安装器: 3 个二进制"
+    else
+        warn "wind-installer 二进制不全 (缺: ${missing[*]}), 中转包不含安装器"
+        warn "  → 本机还原后 pack.ps1 会自行编译安装器, 不再是零编译"
+    fi
+
+    # 清单字段与 Do-Stage 逐个对齐; unstage 读 version(硬校验) 与 profile。
+    cat > "$stage/$STAGE_MANIFEST_NAME" <<EOF
+{
+  "version": "$VERSION",
+  "profile": "$profile",
+  "createdAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "installer": $has_installer
+}
+EOF
+
+    rm -f "$zipfile"
+    ( cd "$stage" && zip -qr9 "$zipfile" ./* ) || { err "zip 打包失败"; rm -rf "$stage"; return 1; }
+    rm -rf "$stage"
+
+    say "\n中转产物打包完成: $zipfile ($(fsize "$zipfile"))"
+    gray "  拷到本机: scp '$zipfile' <user>@<靶机>:/<路径>/"
+    gray "  本机还原: .\\scripts\\dev.ps1 unstage <zip>, 再 dev.ps1 sign 8s / sign 9s"
+    gray "  ⚠️ unstage 硬校验版本: 本机那份代码须 git checkout 到同一 tag, 别用文件镜像"
+}
+
 
 show_menu() {
     clear 2>/dev/null || true
@@ -1015,6 +1205,8 @@ show_menu() {
     echo  "    8s   跳过编译, 直接打包现有 build/"
     echo  "    9    生成便携包 (= 1 + 打包 → dist/WindInput-Portable-<版本>.zip + sha256)"
     echo  "    9s   跳过编译, 直接打包现有 build/"
+    printf '\n%b  发布中转 (→ 本机签名打包):%b\n' "$C_YELLOW" "$C_RESET"
+    echo  "    stage   打中转产物 → dist/WindInput-Stage-<版本>.zip   dstage (dev)"
     printf '\n%b  部署 → Windows (deploy.local 配 RELEASE/DEV 路径; SSH → %s):%b\n' "$C_YELLOW" "${WIND_REMOTE:-未配置}" "$C_RESET"
     echo  "    p1   push 全部 (release)        pd1   push 全部 (dev)"
     echo  "    pm1/pm2  push 模块(tsf/核心)    pdm1/pdm2 (dev)"
@@ -1046,6 +1238,8 @@ dispatch() {
         8s|installer-skip) do_installer skip ;;
         9|portable-zip)   do_portable_zip ;;
         9s|portable-zip-skip) do_portable_zip skip ;;
+        stage)            do_stage release ;;
+        dstage)           do_stage dev ;;
         p1)               do_push_full release ;;
         pd1)              do_push_full dev ;;
         pm1)              do_push_module release tsf ;;
