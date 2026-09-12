@@ -41,6 +41,13 @@
 #       t/test 更是原生 cargo test。想在本机直接出二进制看看链接过不过: WIND_BUILD_LOCAL=1
 #       (⚠️ 产物不能部署也不能发版, 见 lib/remote-build.sh)
 #   gd=gen-data  r=repl  dl=pull-data  pc=pull-config  pl=pull-log(pla=全部)
+#   远程诊断(靶机现场, 配置见 deploy.local):
+#     rwhere  常用位置    rproc  进程+部署产物时间戳    rls/rcat/rtail <路径>    rgrep <模式>
+#
+# 三机分工:
+#   Linux 本机   代码、编辑、check/clippy/test
+#   Win 编译机   原生 MSVC 出 exe/DLL  (build.local;  凡产出交付物的命令自动转发过去)
+#   Win 靶机     部署、实机运行、日志现场 (deploy.local; p*/pd* 推送, r* 诊断)
 #
 # 部署配置 scripts/deploy.local（SSH 推送到 Windows 实测机）:
 #   WIND_REMOTE              = user@host             # SSH 目标
@@ -629,17 +636,35 @@ resolve_remote_dir() {
     REMOTE_DIR="${REMOTE_DIR%/}"
 }
 
-# 在远端跑 PowerShell：脚本经 UTF-16LE+base64 编码传入，彻底避开 bash/ssh/cmd 多层引号。
+# 在远端(实测靶机)跑 PowerShell：脚本经 UTF-16LE+base64 编码传入，彻底避开 bash/ssh/cmd
+# 多层引号。★ 这是【靶机】通道；编译机那条走 lib/remote-build.sh 的 rbuild_ps，别混用。
+#
+# ⚠️ 三个开关缺一不可，都是为了让【返回值可读】：
+#   $ProgressPreference  Windows PowerShell 5.1 即使给了 -OutputFormat Text，仍会把
+#                        progress 记录序列化成 `#< CLIXML <Objs...>` 吐到 stderr(实测:
+#                        一句 Get-ChildItem 就带出两坨"正在准备首次使用模块")。取单个
+#                        值的调用(如 pull-log 找最新文件名)会被这堆 XML 污染成垃圾。
+#   -OutputFormat Text   同上，抑制 stdout 侧的对象序列化。
+#   OutputEncoding UTF8  中文 Windows 默认代码页 936(GBK)，不设则中文路径/报错全乱码。
 remote_ps() {
     command -v iconv >/dev/null 2>&1 || { err "需要 iconv（编码远端 PowerShell 脚本）"; return 1; }
-    local b64; b64="$(printf '%s' "$1" | iconv -t UTF-16LE | base64 | tr -d '\n')"
-    ssh "$WIND_REMOTE" "powershell -NoProfile -EncodedCommand $b64"
+    local script b64
+    script="\$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; $1"
+    b64="$(printf '%s' "$script" |  iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')"
+    ssh "$WIND_REMOTE" "powershell -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand $b64"
 }
 
 # 本 profile 的二进制基名（exe/dll）。data/ 不在此（不会被锁，直接 scp 覆盖）。
+#
+# ⚠️ x86 那个是 wind_tsf_x86_dev.dll 而不是 wind_tsf_dev_x86.dll —— 后缀顺序是
+#    base + _x86 + _dev，真源是 wind_tsf/Makefile 的 TARGET := wind_tsf$(ARCHSUFFIX)$(DBGSUFFIX)。
+#    写反了【只在 dev 变体上发作】(release 的 sfx 为空，两种写法碰巧同名)，且是静默的:
+#    remote_rename_aside 的 Test-Path 为假就跳过，不报错；于是它从不让路，仅当恰好有
+#    32 位宿主正加载着它时 scp 覆盖才失败。判据: 靶机 dev 目录里 wind_tsf_dev.dll 攒了
+#    一堆 .old_*，而 wind_tsf_x86_dev.dll 一个都没有 —— 那就是它从没被让路过。
 bins_for() {
     local sfx=""; [ "$1" = dev ] && sfx="_dev"
-    printf '%s\n' "wind_input${sfx}.exe" "wind_tsf${sfx}.dll" "wind_tsf${sfx}_x86.dll"
+    printf '%s\n' "wind_input${sfx}.exe" "wind_tsf${sfx}.dll" "wind_tsf_x86${sfx}.dll"
 }
 
 # 把 bash 列表转成 PowerShell 字符串数组字面量： a b → 'a','b'
@@ -731,7 +756,11 @@ do_push_module() {
     local sfx=""; [ "$profile" = dev ] && sfx="_dev"
     local files=()
     case "$mod" in
-        tsf)     files=("wind_tsf${sfx}.dll" "wind_tsf${sfx}_x86.dll") ;;
+        # ★ 名字取自 bins_for 而不是在这里再拼一遍 —— 这两处曾各写一份拼写规则, x86 的
+        #   后缀顺序在此处写反过(wind_tsf_dev_x86 ≠ 真产物 wind_tsf_x86_dev), 修 bins_for
+        #   时又漏掉了这一份。同一个事实只留一个出处。
+        tsf)     local b; mapfile -t b < <(bins_for "$profile")
+                 files=("${b[1]}" "${b[2]}") ;;                    # [0]=exe [1]=x64 dll [2]=x86 dll
         core)    files=("wind_input${sfx}.exe")
                  [ -f "$outdir/wind_cli.bat" ] && files+=("wind_cli.bat") ;;  # CLI 包装器随核心
         *)       err "未知模块: $mod（tsf|core）"; return 1 ;;
@@ -810,7 +839,9 @@ do_pull_log() {
     fi
     say "\n查询远程最新日志 ← $WIND_REMOTE:$WIND_LOCAL_DIR/logs/"
     local latest
-    latest="$(ssh "$WIND_REMOTE" "powershell -NoProfile -Command \"Get-ChildItem -Path '$WIND_LOCAL_DIR/logs' -Filter 'wind_input.log*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty Name\"" 2>/dev/null | tr -d '\r')"
+    # 走 remote_ps 而不是自己拼 ssh+powershell：那样绕开了 $ProgressPreference 与
+    # -OutputFormat Text，5.1 会把 CLIXML 混进来，$latest 就变成一串 XML 而不是文件名。
+    latest="$(remote_ps "Get-ChildItem -Path '$WIND_LOCAL_DIR/logs' -Filter 'wind_input*.log*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty Name" 2>/dev/null | tr -d '\r' | tail -1)"
     if [ -z "$latest" ]; then
         err "未找到日志文件（或用 'pull-log all' 整目录拉取）"
         return 1
@@ -1203,11 +1234,135 @@ EOF
 }
 
 
+# ---------- 远程诊断 (靶机上的文件 / 日志 / 进程) ----------
+# 日志与现场都在实测靶机上, 而开发在 Linux —— 没有这组命令就只能每次临时拼
+# ssh+powershell, 每次都要重新对付编码与多层引号。
+#
+# ⚠️ 路径一律【原样】传给 PowerShell 的单引号字符串, 因此:
+#   · 正反斜杠都认 (PowerShell 两者通用), 不必转换;
+#   · 含空格的 C:\Program Files\... 不用加引号 —— dispatch 已把剩余参数合成一个串;
+#   · 唯一需要转义的是路径里的单引号 (PowerShell 里 '' 表示一个 ')。
+ps_quote() { printf "%s" "${1//\'/\'\'}"; }
+
+# 未配 deploy.local 时这组命令没有意义, 提前说清楚而不是让 ssh 报一句空主机名。
+require_diag_remote() {
+    [ -n "$WIND_REMOTE" ] && return 0
+    err "未配置 WIND_REMOTE（scripts/deploy.local）—— 远程诊断命令需要靶机地址。"
+    err "  cp scripts/deploy.local.example scripts/deploy.local 然后填 WIND_REMOTE"
+    return 1
+}
+
+# 缺参时给出可直接抄的例子, 而不是一句"用法错误"。
+diag_need_path() {
+    [ -n "$1" ] && return 0
+    err "用法: dev.sh $2 <靶机路径>"
+    gray "  例: dev.sh $2 'C:/Users/Cartech/AppData/Local/WindInputDev/logs/wind_input.log'"
+    gray "  常用位置见 'dev.sh rwhere'"
+    return 1
+}
+
+# rcat <路径>  读靶机上的文本文件 (全文)
+do_rcat() {
+    require_diag_remote || return 1; diag_need_path "$1" rcat || return 1
+    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { Write-Error '文件不存在: $(ps_quote "$1")'; exit 1 }; \
+Get-Content -LiteralPath '$(ps_quote "$1")' -Raw -Encoding UTF8"
+}
+
+# rtail <路径>  读末尾 N 行 (默认 100, 用 N=<行数> 覆盖)。日志动辄几十 MB, 默认别全拉。
+do_rtail() {
+    require_diag_remote || return 1; diag_need_path "$1" rtail || return 1
+    local n="${N:-100}"
+    gray "(末尾 $n 行; 用 N=500 dev.sh rtail <路径> 改行数)"
+    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { Write-Error '文件不存在: $(ps_quote "$1")'; exit 1 }; \
+Get-Content -LiteralPath '$(ps_quote "$1")' -Tail $n -Encoding UTF8"
+}
+
+# rls <路径>  列目录 (按修改时间倒序 —— 找"最新那个日志"是这条命令的主要用途)
+do_rls() {
+    require_diag_remote || return 1; diag_need_path "$1" rls || return 1
+    remote_ps "if (-not (Test-Path '$(ps_quote "$1")')) { Write-Error '路径不存在: $(ps_quote "$1")'; exit 1 }; \
+Get-ChildItem -LiteralPath '$(ps_quote "$1")' -Force | Sort-Object LastWriteTime -Descending | \
+ForEach-Object { '{0}  {1,10}  {2}' -f \$_.LastWriteTime.ToString('MM-dd HH:mm:ss'), \
+(\$(if (\$_.PSIsContainer) { '<DIR>' } else { \$_.Length })), \$_.Name }"
+}
+
+# rgrep <模式>  在靶机日志里搜; 默认搜【当前 profile 的整个 logs 目录】。
+# 用 Select-String 而不是把文件拉回来 grep: 日志几十 MB, 而命中通常只有几行。
+#
+# ⚠️ 路径走 P= 环境变量而不是第二个位置参数: 参数已被 dispatch 合成【一个】串, 再按
+#    空格切一刀的话 `rgrep 'COM activation'` 就会把 activation 当成路径, 而报错只会是
+#    「路径不存在」, 完全看不出是模式被截断了。与 N= 同风格。
+do_rgrep() {
+    require_diag_remote || return 1
+    local pat="$1" path="${P:-}"
+    if [ -z "$pat" ]; then
+        err "用法: dev.sh rgrep <模式>            # 搜当前 profile 的 logs/"
+        gray "  例: dev.sh rgrep panic"
+        gray "  例: dev.sh rgrep 'COM activation failed'   # 模式含空格要加引号"
+        gray "  指定路径: P='C:/xxx.log' dev.sh rgrep panic"
+        gray "  改条数:   N=200 dev.sh rgrep panic"
+        return 1
+    fi
+    [ -n "$path" ] || path="${WIND_LOCAL_DIR:+$WIND_LOCAL_DIR/logs}"
+    [ -n "$path" ] || { err "未配置 WIND_LOCAL_DIR（deploy.local）且未给 P=<路径>"; return 1; }
+    local n="${N:-80}"
+    say "\n在 $path 搜 '$pat' (最多 $n 条)"
+    remote_ps "if (-not (Test-Path '$(ps_quote "$path")')) { Write-Error '路径不存在: $(ps_quote "$path")'; exit 1 }; \
+Get-ChildItem -LiteralPath '$(ps_quote "$path")' -File -Recurse -EA SilentlyContinue | \
+Sort-Object LastWriteTime -Descending | \
+Select-String -Pattern '$(ps_quote "$pat")' -Encoding UTF8 -EA SilentlyContinue | \
+Select-Object -First $n | ForEach-Object { '{0}:{1}: {2}' -f \$_.Filename, \$_.LineNumber, \$_.Line.Trim() }"
+}
+
+# rproc  靶机上 WindInput 相关进程 + 两个变体的部署时间戳。
+# ★ 判「部署到底生效没有」看的是 exe 的 LastWriteTime 与进程启动时间, 不是 push 那句
+#   "已推送" —— 二进制被占用时改名让路会失败, 而 scp 仍然报成功。
+do_rproc() {
+    require_diag_remote || return 1
+    remote_ps "
+'--- 进程 ---'
+\$p = Get-Process -EA SilentlyContinue | Where-Object { \$_.ProcessName -like 'wind*' }
+if (\$p) { \$p | ForEach-Object { '  {0,-22} pid={1,-7} 启动={2}' -f \$_.ProcessName, \$_.Id, \$_.StartTime.ToString('MM-dd HH:mm:ss') } }
+else { '  (无 wind* 进程)' }
+'--- 部署产物时间戳 ---'
+foreach (\$d in @('$(ps_quote "${WIND_REMOTE_DIR_RELEASE:-}")','$(ps_quote "${WIND_REMOTE_DIR_DEV:-}")')) {
+  if (\$d -and (Test-Path \$d)) {
+    \"  \$d\"
+    Get-ChildItem -LiteralPath \$d -Filter '*.exe' -EA SilentlyContinue |
+      ForEach-Object { '    {0,-26} {1}  {2}' -f \$_.Name, \$_.LastWriteTime.ToString('MM-dd HH:mm:ss'), \$_.Length }
+    Get-ChildItem -LiteralPath \$d -Filter '*.dll' -EA SilentlyContinue |
+      ForEach-Object { '    {0,-26} {1}  {2}' -f \$_.Name, \$_.LastWriteTime.ToString('MM-dd HH:mm:ss'), \$_.Length }
+  }
+}"
+}
+
+# rwhere  打印靶机上的常用路径 (存在性已核过), 省得每次问"日志到底在哪"。
+do_rwhere() {
+    require_diag_remote || return 1
+    say "\n靶机 $WIND_REMOTE 上的常用位置"
+    remote_ps "
+foreach (\$x in @(
+  @('release 安装目录','$(ps_quote "${WIND_REMOTE_DIR_RELEASE:-}")'),
+  @('dev 安装目录    ','$(ps_quote "${WIND_REMOTE_DIR_DEV:-}")'),
+  @('配置 (当前 profile)','$(ps_quote "${WIND_DATA_DIR:-}")'),
+  @('日志 (当前 profile)','$(ps_quote "${WIND_LOCAL_DIR:-}")/logs')
+)) {
+  if (\$x[1] -and \$x[1] -ne '/logs') {
+    \$mark = if (Test-Path \$x[1]) { '✓' } else { '✗' }
+    '  {0} {1}  {2}' -f \$mark, \$x[0], \$x[1]
+  }
+}
+'--- %APPDATA% / %LOCALAPPDATA% 下的全部 WindInput* ---'
+Get-ChildItem \$env:APPDATA,\$env:LOCALAPPDATA -Filter 'WindInput*' -Directory -EA SilentlyContinue |
+  ForEach-Object { '    ' + \$_.FullName }"
+}
 show_menu() {
     clear 2>/dev/null || true
     printf '%b============================================%b\n' "$C_CYAN" "$C_RESET"
     printf '%b  WindInput 开发菜单  v%s  (Linux→Win, MSVC)%b\n' "$C_CYAN" "$VERSION" "$C_RESET"
     printf '%b============================================%b\n\n' "$C_CYAN" "$C_RESET"
+    printf '%b  构建 → %s (原生 MSVC; 产物回传本机)%b\n' "$C_GRAY" "${WIND_BUILD_REMOTE:-未配置 build.local}" "$C_RESET"
+    printf '\n'
     printf '%b  全构建 (→ 项目根 build/，内容 == 安装到 Program Files):%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    1    Release 全构建: wind_input + tsf(x64/x86) + setting + portable + 词库数据"
     echo  "    d1   Debug 全构建 (→ build_dev/)"
@@ -1230,6 +1385,10 @@ show_menu() {
     echo  "    k=check  l=clippy  t=test  f=fmt  ci=fmt+clippy+test"
     printf '\n%b  远程数据 / 实测:%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    r=repl(本机)  dl=pull-data  pc=pull-config  pl=pull-log(pla=全部)"
+    printf '\n%b  远程诊断 (靶机现场; 路径直接给 Windows 路径, 含空格不用加引号):%b\n' "$C_YELLOW" "$C_RESET"
+    echo  "    rwhere  常用位置一览      rproc  进程 + 部署产物时间戳"
+    echo  "    rls <路径>  列目录(按时间倒序)     rcat <路径>  读全文"
+    echo  "    rtail <路径>  末尾100行(N=500 改)  rgrep <模式>  搜日志(P=路径 指定)"
     printf '\n%b  杂项:%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    gd=gen-data  clean  q=退出"
     printf '%b============================================%b\n' "$C_CYAN" "$C_RESET"
@@ -1283,6 +1442,12 @@ dispatch() {
         pc|pull-config)   do_pull_config ;;
         pl|pull-log)      do_pull_log "${2:-}" ;;
         pla)              do_pull_log all ;;
+        rcat)             do_rcat  "${2:-}" ;;
+        rtail)            do_rtail "${2:-}" ;;
+        rls)              do_rls   "${2:-}" ;;
+        rgrep)            do_rgrep "${2:-}" ;;
+        rproc)            do_rproc ;;
+        rwhere)           do_rwhere ;;
         # 「未知命令」不能再用某个退出码当哨兵: rbuild_run 会把【编译机上任意进程的
         # 退出码】原样透传上来(ssh 透传远端状态), 撞上哨兵值就会把一次远程构建失败报成
         # 「未知命令, 请看 --help」—— 最大化误导。改用独立标志, 与退出码空间彻底分开。
@@ -1295,15 +1460,22 @@ menu_loop() {
     while true; do
         show_menu
         printf '\n'
-        read -e -r -p "请输入选项: " choice
-        [ -n "$choice" ] && history -s "$choice"
-        choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
+        read -e -r -p "请输入选项: " line
+        [ -n "$line" ] && history -s "$line"
+        # 只把【命令词】转小写, 其余原样保留 —— 远程诊断命令的参数是 Windows 路径,
+        # 整串小写化会让 'C:/Users/Cartech/...' 变成找不到的路径(NTFS 不区分大小写,
+        # 但经 PowerShell 传回的文件名与 grep 模式是区分的)。
+        local choice rest
+        choice="$(printf '%s' "${line%% *}" | tr '[:upper:]' '[:lower:]')"
+        rest=""; [ "$line" != "${line%% *}" ] && rest="${line#* }"
+        rest="${rest#"${rest%%[![:space:]]*}"}"   # 剥前导空白: 菜单里 `pl  all`(双空格)
+                                                 # 会让 rest=" all" 而与 all 不等, 静默走错分支
         case "$choice" in
             q) exit 0 ;;
             "") ;;
             *)
-                dispatch "$choice"; local rc=$?
-                if [ "$rc" -eq 127 ]; then
+                dispatch "$choice" "$rest"; local rc=$?
+                if [ "$DISPATCH_UNKNOWN" = 1 ]; then
                     err "无效选项: $choice"; sleep 1     # 未知命令:短暂提示后刷新菜单
                 else
                     [ "$rc" -ne 0 ] && err "\n命令 '$choice' 失败 (退出码 $rc)"
@@ -1323,8 +1495,10 @@ case "$cmd" in
         grep '^#' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         ;;
     *)
-        dispatch "$cmd" "${2:-}"; rc=$?
-        if [ "$rc" -eq 127 ]; then
+        # 剩余参数拼成【一个】字符串再传: 远程诊断命令的参数是可能含空格的 Windows
+        # 路径 (C:\Program Files\...), 逐个位置参数传过去会在第一个空格处断开。
+        dispatch "$cmd" "${*:2}"; rc=$?
+        if [ "$DISPATCH_UNKNOWN" = 1 ]; then
             err "未知命令: $1"
             echo "运行 './scripts/dev.sh --help' 查看可用命令"
             exit 1
