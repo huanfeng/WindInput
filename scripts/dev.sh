@@ -43,6 +43,9 @@
 #   gd=gen-data  r=repl  dl=pull-data  pc=pull-config  pl=pull-log(pla=全部)
 #   远程诊断(靶机现场, 配置见 deploy.local):
 #     rwhere  常用位置    rproc  进程+部署产物时间戳    rls/rcat/rtail <路径>    rgrep <模式>
+#   GUI 验证(设置界面离屏截图, 进程内合成事件、不走 SendInput, 故 SSH 会话可用):
+#     shot [--size W H] [--click X Y] [--rclick X Y] [--drag X0 Y0 X1 Y1] [--hover X Y]
+#          [--type <文本>] [--key <键名>]   → .remote/shots/  (SHOT_ON=vm 截编译机那份)
 #
 # 三机分工:
 #   Linux 本机   代码、编辑、check/clippy/test
@@ -1357,6 +1360,70 @@ Get-ChildItem \$env:APPDATA,\$env:LOCALAPPDATA -Filter 'WindInput*' -Directory -
   ForEach-Object { '    ' + \$_.FullName }"
 }
 
+# ---------- GUI 验证: 设置界面离屏截图 ----------
+# 设置程序在 Linux 【编都编不过】(wind-ui-rust 的 platform/mod.rs 有 compile_error!),
+# 于是 UI 改动在这台机器上没有任何自查手段 —— 只能编好推过去、人眼去看。
+#
+# windui 自带的截图通路补上了这个缺口, 而且不止是出图: --click/--rclick/--drag/--hover/
+# --type/--key 可重复且【按出现顺序混合回放】, --size 还会把 min_size 的下限一并放开
+# (要测的正是下限处的布局)。
+# ★★ 这些是【进程内合成事件】, 不走 SendInput —— 所以在 SSH 会话里可用。靶机的 SSH 会话
+#    拿不到交互桌面, SendInput 那条路是死的([[project_e2e_realmachine_test]]), 而离屏渲染
+#    实测可行(Start-Process -Wait, exit=0, 出图 1100x760)。
+#
+# WIND_RPC_MOCK=1 让设置程序自带假数据, 不需要 core 在跑 —— 因此 VM 上也能截, 不必先部署。
+#
+# 落点二选一 (SHOT_ON):
+#   target  靶机上【已部署】的那份 (默认): 真实配置、真实 DPI/字体/主题
+#   vm      编译机 build_dev/ 里【刚编出来】的那份: 不用部署、不打扰靶机, 适合改完 UI 立刻看
+do_shot() {
+    local on="${SHOT_ON:-target}" prof="${SHOT_PROFILE:-dev}"
+    local sfx=""; [ "$prof" = dev ] && sfx="_dev"
+    local exe rhost rtmp
+    case "$on" in
+        target)
+            require_diag_remote || return 1
+            resolve_remote_dir "$prof" || return 1
+            exe="$REMOTE_DIR/wind_setting${sfx}.exe"; rhost="$WIND_REMOTE" ;;
+        vm)
+            rbuild_require_ready shot || return 1
+            local od; od="$([ "$prof" = dev ] && echo build_dev || echo build)"
+            exe="$WIND_BUILD_ROOT/$od/wind_setting${sfx}.exe"; rhost="$WIND_BUILD_REMOTE" ;;
+        *)  err "SHOT_ON 只能是 target 或 vm (给的是 '$on')"; return 1 ;;
+    esac
+
+    # 参数直通 wind_setting。按空格拆 —— dispatch 已把它们合成一个串, 原始引号边界没了,
+    # 故 --type 的文本别带空格(要打空格用 --key Space)。
+    local extra=() a
+    for a in $1; do extra+=("$a"); done
+    [ "${#extra[@]}" -gt 0 ] || extra=(--size 1100 760)
+
+    local ts name lo
+    ts="$(date +%H%M%S)"; name="setting-$prof-$ts.png"
+    rtmp="C:/Windows/Temp/wi-shot-$ts.png"
+    lo="$PRODUCT_ROOT/.remote/shots/$name"
+    mkdir -p "$(dirname "$lo")"
+
+    say "\n=== 截设置界面 @ $on ($prof) ==="
+    gray "  $exe ${extra[*]}"
+    local ps="\$ErrorActionPreference='Stop'
+\$exe='$(ps_quote "$exe")'
+if (-not (Test-Path \$exe)) { [Console]::Error.WriteLine('设置程序不存在: ' + \$exe); exit 2 }
+Remove-Item '$rtmp' -Force -EA SilentlyContinue
+\$env:WIND_RPC_MOCK='1'
+\$p = Start-Process -FilePath \$exe -ArgumentList @('--screenshot','$rtmp',$(ps_list "${extra[@]}")) -Wait -PassThru -NoNewWindow
+if (-not (Test-Path '$rtmp')) { [Console]::Error.WriteLine('没有产出截图 (设置程序退出码 ' + \$p.ExitCode + ')'); exit 3 }
+'ok ' + (Get-Item '$rtmp').Length"
+
+    if [ "$on" = vm ]; then rbuild_ps "$ps" || return 1; else remote_ps "$ps" || return 1; fi
+    scp "${RBUILD_SSH_OPTS[@]}" -q "$rhost:$rtmp" "$lo" || { err "回传截图失败"; return 1; }
+    ssh "${RBUILD_SSH_OPTS[@]}" "$rhost" "del \"${rtmp//\//\\}\"" >/dev/null 2>&1 || true
+
+    say "截图已回传: $lo ($(fsize "$lo"))"
+    gray "  换尺寸/加交互: dev.sh shot --size 1400 900 --click 120 300"
+    gray "  可用: --click X Y  --rclick X Y  --drag X0 Y0 X1 Y1  --hover X Y  --type <文本>  --key <键名>"
+    gray "  换落点: SHOT_ON=vm dev.sh shot   (编译机上刚编的那份, 不用先部署)"
+}
 show_menu() {
     clear 2>/dev/null || true
     printf '%b============================================%b\n' "$C_CYAN" "$C_RESET"
@@ -1390,6 +1457,10 @@ show_menu() {
     echo  "    rwhere  常用位置一览      rproc  进程 + 部署产物时间戳"
     echo  "    rls <路径>  列目录(按时间倒序)     rcat <路径>  读全文"
     echo  "    rtail <路径>  末尾100行(N=500 改)  rgrep <模式>  搜日志(P=路径 指定)"
+    printf '\n%b  GUI 验证 (设置界面离屏截图 → .remote/shots/):%b\n' "$C_YELLOW" "$C_RESET"
+    echo  "    shot                        截当前部署的设置界面"
+    echo  "    shot --size 1400 900 --click 120 300    带尺寸/交互 (还有 --type/--key/--hover/--drag)"
+    echo  "    SHOT_ON=vm shot             截编译机上刚编的那份 (不用先部署)"
     printf '\n%b  杂项:%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    gd=gen-data  clean  q=退出"
     printf '%b============================================%b\n' "$C_CYAN" "$C_RESET"
@@ -1449,6 +1520,7 @@ dispatch() {
         rgrep)            do_rgrep "${2:-}" ;;
         rproc)            do_rproc ;;
         rwhere)           do_rwhere ;;
+        shot)             do_shot  "${2:-}" ;;
         # 「未知命令」不能再用某个退出码当哨兵: rbuild_run 会把【编译机上任意进程的
         # 退出码】原样透传上来(ssh 透传远端状态), 撞上哨兵值就会把一次远程构建失败报成
         # 「未知命令, 请看 --help」—— 最大化误导。改用独立标志, 与退出码空间彻底分开。
@@ -1498,7 +1570,7 @@ menu_loop() {
 #    只能放在整条链的末尾 —— 'd1 rtail <路径>' 可以, 'rtail <路径> d1' 不行。
 cmd_takes_arg() {
     case "$1" in
-        r|repl|dl|pull-data|pl|pull-log|rcat|rtail|rls|rgrep) return 0 ;;
+        r|repl|dl|pull-data|pl|pull-log|rcat|rtail|rls|rgrep|shot) return 0 ;;
         *) return 1 ;;
     esac
 }
