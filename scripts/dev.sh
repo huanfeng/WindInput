@@ -1356,6 +1356,7 @@ foreach (\$x in @(
 Get-ChildItem \$env:APPDATA,\$env:LOCALAPPDATA -Filter 'WindInput*' -Directory -EA SilentlyContinue |
   ForEach-Object { '    ' + \$_.FullName }"
 }
+
 show_menu() {
     clear 2>/dev/null || true
     printf '%b============================================%b\n' "$C_CYAN" "$C_RESET"
@@ -1488,21 +1489,46 @@ menu_loop() {
 
 # ---------- 命令行直调 ----------
 # 与菜单同一套命令（如 './dev.sh 1'、'./dev.sh p1'、'./dev.sh m2'）；命令转小写以容错。
-cmd="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
-case "$cmd" in
+# 支持连续命令: './dev.sh d1 pd1' —— 前者失败则后者不执行（对齐 dev.ps1 的 $Commands）。
+
+# 哪些命令要【吃参数】。这是「多个命令」与「命令+参数」的唯一区分方式, 与 dev.ps1 同法
+# (它列的是 r/repl/unstage)。
+# ⚠️ 白名单里的命令吃掉【剩余全部】而不是只吃一个 token: 远程诊断的参数是可能含空格的
+#    Windows 路径 (C:\Program Files\...), 只吃一个 token 会在第一个空格处断开。因此它们
+#    只能放在整条链的末尾 —— 'd1 rtail <路径>' 可以, 'rtail <路径> d1' 不行。
+cmd_takes_arg() {
+    case "$1" in
+        r|repl|dl|pull-data|pl|pull-log|rcat|rtail|rls|rgrep) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     ""|menu) menu_loop ;;
     -h|--help|help)
         grep '^#' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         ;;
     *)
-        # 剩余参数拼成【一个】字符串再传: 远程诊断命令的参数是可能含空格的 Windows
-        # 路径 (C:\Program Files\...), 逐个位置参数传过去会在第一个空格处断开。
-        dispatch "$cmd" "${*:2}"; rc=$?
-        if [ "$DISPATCH_UNKNOWN" = 1 ]; then
-            err "未知命令: $1"
-            echo "运行 './scripts/dev.sh --help' 查看可用命令"
-            exit 1
-        fi
+        rc=0
+        while [ $# -gt 0 ]; do
+            cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+            if cmd_takes_arg "$cmd"; then
+                shift
+                dispatch "$cmd" "$*"; rc=$?
+                set --                      # 参数已被吃光, 链到此为止
+            else
+                dispatch "$cmd"; rc=$?
+                shift
+            fi
+            if [ "$DISPATCH_UNKNOWN" = 1 ]; then
+                err "未知命令: $cmd"
+                echo "运行 './scripts/dev.sh --help' 查看可用命令"
+                exit 1
+            fi
+            # ★ 前者失败则后者不执行: 'd1 pd1' 里构建没成功就去部署, 推上去的是【上一次】
+            #   的旧产物, 而部署本身会报成功 —— 正是「改了没生效」最难查的那种成因。
+            [ "$rc" -ne 0 ] && exit "$rc"
+        done
         exit "$rc"   # 透传命令真实退出码（CLI/CI 用）
         ;;
 esac
