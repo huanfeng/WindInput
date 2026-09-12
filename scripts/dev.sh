@@ -31,6 +31,7 @@
 #   9            生成便携包 (= 1 + 打 zip → dist/WindInput-Portable-<版本>.zip + sha256)
 #                (免安装；不依赖 wind-installer；内含便携标记，不含 userdata/)
 #   9s           跳过编译，直接打包现有 build/
+#   instbins     从编译机取安装器三件套(原生 MSVC) → .cache/installer-bins/
 #   stage/dstage 打发布中转产物 → dist/WindInput[Dev]-Stage-<版本>.zip (release / dev)
 #                (build/ + 安装器三件套 + stage.json；拷到本机 dev.ps1 unstage 后签名打包)
 #   p1 / pd1     push 全部 build[_dev]/ → Windows 安装目录 (release / dev)
@@ -91,6 +92,10 @@ BUILD_DEV_DIR="$PRODUCT_ROOT/build_dev"
 DIST_DIR="$PRODUCT_ROOT/dist"
 # 外部下载/生成的词库缓存目录（不入库）
 CACHE_DIR="$PRODUCT_ROOT/.cache"
+# 安装器三件套的落点：由 `dev.sh instbins` 从编译机取回的【原生 MSVC】版本。
+# 刻意不放进 cargo 的 target/ —— 那里会被下一次本地 cargo xwin build 覆盖成交叉编版本,
+# 而同一路径此前是原生、此后是交叉编, 肉眼分不出来。理由全文见 do_instbins 头部。
+INSTALLER_BIN_DIR="$CACHE_DIR/installer-bins"
 # Rust 工具链根目录（wind_input/ workspace）
 RUST_WORKSPACE="$PRODUCT_ROOT/wind_input"
 
@@ -1083,23 +1088,15 @@ STAGE_MANIFEST_NAME="stage.json"
 
 # 安装器三件套的路径 (名字|路径)。
 #
-# ⚠️ 与 dev.ps1 的 Get-InstallerBinaries 同名同义但【不同层】: 本机原生构建落
-#    target/release/, 这边一律 cargo-xwin 交叉编, 落 target/<三元组>/release/。
-# ⚠️ 三件套必须都是 Windows PE —— 本机 unstage 后是直接拿去跑的。pack-installer.sh 目前
-#    把 wind-packer 编成【原生 Linux ELF】(target/release/wind-packer, 无 .exe), 那个绝
-#    不能改名塞进包里: 本机 pack.ps1 调它会失败, 而包本身看不出任何异常。故这里只认
-#    交叉编出来的 .exe, 找不到就走下面的缺失警告。
-# ⚠️ 现状: pack-installer.sh 只交叉编 stub 与 uninstaller, packer 编的是原生 ELF ⇒
-#    在 Linux 上三件套【永远凑不齐】, stage.json 的 installer 恒为 false, 「本机零编译」
-#    这个目标达不成(本机 unstage 后 pack.ps1 会自行编一遍安装器, 只是慢, 不影响正确性)。
-#    要补齐得给 packer 加一条 `cargo xwin build --release --target <三元组> --bin wind-packer
-#    --features packer` —— 它的依赖都是跨平台的(见 wind-installer/Cargo.toml 的 cfg(windows) 隔离)。
+# 落点是 .cache/installer-bins/ —— 由 `dev.sh instbins` 从【编译机】取回的原生 MSVC 版。
+# ★ 为什么不能在 Linux 上交叉编它们, 以及为什么落点不放在 cargo 的 target 里, 见
+#   do_instbins 头部那段。简言之: wind-installer.exe 是 Setup.exe 的外壳、
+#   wind-uninstaller.exe 装到用户机器上, 两者都进最终产物, 受 6dbc8595 约束必须原生
+#   MSVC; 而放进 target/ 会被下一次本地 cargo xwin build 悄悄覆盖成交叉编版本。
 installer_binaries() {
-    local t
-    t="$(cargo_target_dir "$INSTALLER_DIR")/$TARGET/release"
-    printf '%s\n' "wind-installer.exe|$t/wind-installer.exe" \
-                  "wind-packer.exe|$t/wind-packer.exe" \
-                  "wind-uninstaller.exe|$t/wind-uninstaller.exe"
+    printf '%s\n' "wind-installer.exe|$INSTALLER_BIN_DIR/wind-installer.exe" \
+                  "wind-packer.exe|$INSTALLER_BIN_DIR/wind-packer.exe" \
+                  "wind-uninstaller.exe|$INSTALLER_BIN_DIR/wind-uninstaller.exe"
 }
 
 # 单个 PE 是不是【原生 MSVC】链接器产出的。
@@ -1133,6 +1130,15 @@ pe_is_native_msvc() {
 #    verify 全程无任何异常 —— 与「对成品补签」是同一类静默坏包。
 #
 # 构建端转发 Win VM 之后本闸门自动放行; 长期保留作防回归。
+# 闸门里显示用的短路径: build/ 下的去掉 outdir 前缀, 三件套标成 installer-bins/xxx ——
+# 否则三件套会打印成一长串绝对路径, 看不出它跟 build/ 里的产物不是一回事。
+rel_for_gate() {
+    case "$1" in
+        "$INSTALLER_BIN_DIR"/*) printf 'installer-bins/%s\n' "${1##*/}" ;;
+        *) printf '%s\n' "${1#"$2"/}" ;;
+    esac
+}
+
 check_native_msvc() {
     local outdir="$1" f cross=() unknown=() extra
     # 除 build/ 外, 安装器三件套也要查 —— 它们是在闸门【之后】才拷进包的(见 do_stage),
@@ -1141,11 +1147,11 @@ check_native_msvc() {
         [ -f "$f" ] || continue
         pe_is_native_msvc "$f"
         case $? in
-            1) cross+=("${f#"$outdir"/}") ;;
+            1) cross+=("$(rel_for_gate "$f" "$outdir")") ;;
             # ⚠️ fail-closed: find 只挑 *.exe/*.dll, 一个「读不出 PE 头的 .dll」本身就是可疑
             #    对象。一道拦发版坏包的闸门在自己解析失败时放行, 与它存在的理由相反。
             #    逃生口已经有了(WIND_STAGE_ALLOW_CROSS=1), 不需要在这里再留一个。
-            2) unknown+=("${f#"$outdir"/}") ;;
+            2) unknown+=("$(rel_for_gate "$f" "$outdir")") ;;
         esac
     done < <( { find "$outdir" -type f \( -name '*.exe' -o -name '*.dll' \) | sort
                 while IFS='|' read -r _n extra; do printf '%s\n' "$extra"; done < <(installer_binaries); } )
@@ -1163,7 +1169,8 @@ check_native_msvc() {
     err "  判据: PE 无 Rich header ⇒ lld-link 链接(cargo-xwin / clang), 不是 cl.exe。"
     err "  原委: 6dbc8595 —— 交叉编的 wind_tsf.dll 在加固宿主 COM 激活失败, 根因在工具链"
     err "        代码生成层; 签名不改变代码生成, unstage 也验不出来, 故在此拦死。"
-    err "  出路: build/ 须来自 Win VM 或本机 dev.ps1; dev.sh 1 的产物只能自测, 不能发版。"
+    err "  出路: build/ 下的 → 须来自编译机 (dev.sh 1/d1); 本机 dev.sh 1 的产物只能自测。"
+    err "        installer-bins/ 下的 → dev.sh instbins 重取 (那条路就是去编译机原生编的)。"
     gray "  逃生口(明知此包不用于发版时): WIND_STAGE_ALLOW_CROSS=1 ./scripts/dev.sh stage"
     return 1
 }
@@ -1214,6 +1221,7 @@ do_stage() {
     else
         warn "wind-installer 二进制不全 (缺: ${missing[*]}), 中转包不含安装器"
         warn "  → 本机还原后 pack.ps1 会自行编译安装器, 不再是零编译"
+        gray "  → 要凑齐: dev.sh instbins (在编译机上原生编好再回传, 约 1~2 分钟)"
     fi
 
     # 清单字段与 Do-Stage 逐个对齐; unstage 读 version(硬校验) 与 profile。
@@ -1360,6 +1368,79 @@ Get-ChildItem \$env:APPDATA,\$env:LOCALAPPDATA -Filter 'WindInput*' -Directory -
   ForEach-Object { '    ' + \$_.FullName }"
 }
 
+
+# ---------- 安装器三件套: 从编译机取原生 MSVC 版 ----------
+# stage 包要带上 wind-installer 的三件套, 好让本机 unstage 后【一行代码都不编译】。
+#
+# ★★ 为什么必须从编译机取, 而不是在 Linux 上交叉编:
+#    本机 unstage 后 `sign 8s` 会给 pack.ps1 透传 -SkipBuild, 直接拿这三个 exe 打包 ——
+#    其中 wind-installer.exe 就是【Setup.exe 的外壳】, wind-uninstaller.exe 会【装到用户
+#    机器上】。两者都进最终产物、都要签名、都被杀软扫, 因此和 wind_tsf.dll 一样受
+#    6dbc8595 约束: 必须原生 MSVC。交叉编它们等于把已判死的工具链重新放回发版链,
+#    而 check_native_msvc 闸门正会在出口拦下 —— 那时「三件套齐了」反而变成出不了包。
+#    (三个里只有 wind-packer.exe 是纯打包工具、不进产物, 但既然另外两个必须从编译机来,
+#     顺手一起取最省事, 也免得三个文件来路不一。)
+#
+# 落点刻意【不是】cargo 的 target 目录: 放进去的话, 下一次本地 `cargo xwin build` 会把
+# 它们覆盖成交叉编版本, 而同一个路径此前是原生、此后是交叉编, 肉眼分不出来。独立目录
+# 的语义是明确的 ——「这里放的是从编译机取回的原生 MSVC 三件套」。
+# 在编译机上编三件套并回传。走 rbuild_* (编译机通道), 不是 remote_* (靶机通道)。
+do_instbins() {
+    rbuild_require_ready instbins || return 1
+    command -v scp >/dev/null 2>&1 || { err "需要 scp"; return 1; }
+
+    local sibRoot rdir
+    sibRoot="$(dirname "$WIND_BUILD_ROOT")"
+    rdir="$sibRoot/wind-installer"
+
+    say "\n========== 取安装器三件套 @ $WIND_BUILD_REMOTE =========="
+    rbuild_trap_on
+    rbuild_lock || { rbuild_trap_off; return 1; }
+
+    gray "[1/3] 同步 wind-installer → $rdir"
+    rbuild_sync_tree "$INSTALLER_DIR" "$rdir" "wind-installer" \
+        || { rbuild_cleanup; rbuild_trap_off; return 1; }
+
+    # 原生编 (不带 --target): 与 pack.ps1 的 -SkipBuild 判据同一落点 <target>/release/。
+    # packer 要 --features packer (editpe 写 EXE 图标), 另外两个不要 —— 照搬 pack.ps1。
+    gray "[2/3] 编译 (原生 MSVC)"
+    rbuild_ps "\$env:WIND_NO_REMOTE='1'; \$LASTEXITCODE=0
+Set-Location -LiteralPath '$rdir' -EA Stop
+\$env:RUSTFLAGS='-C target-feature=+crt-static'
+cargo build --release --bin wind-installer --bin wind-uninstaller
+if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
+cargo build --release --bin wind-packer --features packer
+if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
+# 产物目录向 cargo 自己要 —— 编译机若设了共享 target-dir, 硬拼出来的路径是个空壳。
+\$j = cargo metadata --format-version 1 --no-deps 2>\$null | ConvertFrom-Json
+\$t = if (\$j) { \$j.target_directory } else { Join-Path '$rdir' 'target' }
+\$t = Join-Path \$t 'release'
+foreach (\$n in @('wind-installer.exe','wind-packer.exe','wind-uninstaller.exe')) {
+  if (-not (Test-Path (Join-Path \$t \$n))) { [Console]::Error.WriteLine('编出来了但找不到: ' + \$n); exit 4 }
+}
+\$t" || { err "编译机上编安装器失败"; rbuild_cleanup; rbuild_trap_off; return 1; }
+
+    # 上面那段的最后一行输出就是产物目录; 单独再问一次省得解析混在编译日志里的路径。
+    local rt
+    rt="$(rbuild_ps "\$j = cargo metadata --format-version 1 --no-deps --manifest-path '$rdir/Cargo.toml' 2>\$null | ConvertFrom-Json
+if (\$j) { Join-Path \$j.target_directory 'release' } else { '$rdir/target/release' }" 2>/dev/null | tr -d '\r' | tail -1)"
+    [ -n "$rt" ] || { err "取不到编译机上的产物目录"; rbuild_cleanup; rbuild_trap_off; return 1; }
+
+    gray "[3/3] 回传 → $INSTALLER_BIN_DIR"
+    mkdir -p "$INSTALLER_BIN_DIR"
+    local n ok=1
+    for n in wind-installer.exe wind-packer.exe wind-uninstaller.exe; do
+        rbuild_scp "$WIND_BUILD_REMOTE:${rt//\\//}/$n" "$INSTALLER_BIN_DIR/$n" "回传 $n" || { err "回传 $n 失败"; ok=0; }
+    done
+    rbuild_cleanup; rbuild_trap_off
+    [ "$ok" = 1 ] || return 1
+
+    say "\n三件套已就位:"
+    for n in wind-installer.exe wind-packer.exe wind-uninstaller.exe; do
+        gray "  $n  $(fsize "$INSTALLER_BIN_DIR/$n")"
+    done
+    gray "  下一步: dev.sh stage —— 中转包这次会带上 installer/, 本机 unstage 后零编译"
+}
 # ---------- GUI 验证: 设置界面离屏截图 ----------
 # 设置程序在 Linux 【编都编不过】(wind-ui-rust 的 platform/mod.rs 有 compile_error!),
 # 于是 UI 改动在这台机器上没有任何自查手段 —— 只能编好推过去、人眼去看。
@@ -1446,6 +1527,7 @@ show_menu() {
     echo  "    9s   跳过编译, 直接打包现有 build/"
     printf '\n%b  发布中转 (→ 本机签名打包):%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    stage   打中转产物 → dist/WindInput-Stage-<版本>.zip   dstage (dev)"
+    echo  "    instbins  从编译机取安装器三件套(原生 MSVC), 让中转包零编译"
     printf '\n%b  部署 → Windows (deploy.local 配 RELEASE/DEV 路径; SSH → %s):%b\n' "$C_YELLOW" "${WIND_REMOTE:-未配置}" "$C_RESET"
     echo  "    p1   push 全部 (release)        pd1   push 全部 (dev)"
     echo  "    pm1/pm2  push 模块(tsf/核心)    pdm1/pdm2 (dev)"
@@ -1521,6 +1603,7 @@ dispatch() {
         rproc)            do_rproc ;;
         rwhere)           do_rwhere ;;
         shot)             do_shot  "${2:-}" ;;
+        instbins)         do_instbins ;;
         # 「未知命令」不能再用某个退出码当哨兵: rbuild_run 会把【编译机上任意进程的
         # 退出码】原样透传上来(ssh 透传远端状态), 撞上哨兵值就会把一次远程构建失败报成
         # 「未知命令, 请看 --help」—— 最大化误导。改用独立标志, 与退出码空间彻底分开。
