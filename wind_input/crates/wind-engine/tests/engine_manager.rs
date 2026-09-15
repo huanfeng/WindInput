@@ -480,7 +480,11 @@ fn disabled_extra_dict_leaves_no_wdat_cache() {
 fn delete_file_win32(p: &std::path::Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    let w: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let w: Vec<u16> = p
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe { windows::Win32::Storage::FileSystem::DeleteFileW(PCWSTR(w.as_ptr())) }
         .map_err(|e| e.to_string())
 }

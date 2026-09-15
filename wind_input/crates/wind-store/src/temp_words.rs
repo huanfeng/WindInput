@@ -10,7 +10,9 @@
 
 use crate::abbrev_index;
 use crate::store::{Store, TEMP_ABBREV, TEMP_WORDS, USER_ABBREV, USER_WORDS};
-use crate::user_words::{UserWordRecord, dec_val, enc_key, enc_val, enc_val_ordered, dec_val_ordered, now_secs};
+use crate::user_words::{
+    UserWordRecord, dec_val, dec_val_ordered, enc_key, enc_val, enc_val_ordered, now_secs,
+};
 use crate::wdict;
 use redb::ReadableTable;
 

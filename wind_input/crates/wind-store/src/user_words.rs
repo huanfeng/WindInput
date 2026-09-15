@@ -9,7 +9,7 @@
 //! key 编码：`"{schema}\0{code}\0{text}"`（store.md §2）。
 
 use crate::abbrev_index;
-use crate::store::{Store, META, USER_ABBREV, USER_WORDS};
+use crate::store::{META, Store, USER_ABBREV, USER_WORDS};
 use crate::wdict;
 use redb::{ReadableTable, WriteTransaction};
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,10 @@ pub(crate) fn take_word_orders(txn: &WriteTransaction, n: u32) -> anyhow::Result
         .and_then(|g| <[u8; 4]>::try_from(g.value()).ok())
         .map(u32::from_le_bytes)
         .unwrap_or(1);
-    t.insert(NEXT_ORDER_KEY, cur.saturating_add(n).to_le_bytes().as_slice())?;
+    t.insert(
+        NEXT_ORDER_KEY,
+        cur.saturating_add(n).to_le_bytes().as_slice(),
+    )?;
     Ok(cur)
 }
 
@@ -218,7 +221,9 @@ impl Store {
             let txn = db.begin_write()?;
             {
                 let mut t = txn.open_table(USER_WORDS)?;
-                let existing = t.get(key.as_str())?.and_then(|g| dec_val_ordered(g.value()));
+                let existing = t
+                    .get(key.as_str())?
+                    .and_then(|g| dec_val_ordered(g.value()));
                 let (w, c, ca, b) = match existing {
                     Some((ow, oc, oca, ob, _)) => {
                         (ow.max(weight), oc, oca, if ob != 0 { ob } else { boundary })
@@ -347,11 +352,16 @@ impl Store {
             let updated;
             {
                 let mut t = txn.open_table(USER_WORDS)?;
-                let existing = t.get(key.as_str())?.and_then(|g| dec_val_ordered(g.value()));
+                let existing = t
+                    .get(key.as_str())?
+                    .and_then(|g| dec_val_ordered(g.value()));
                 match existing {
                     // 仅改权重：boundary 与 order 均沿用（切分、入库先后都与权重无关）。
                     Some((_, c, ca, b, o)) => {
-                        t.insert(key.as_str(), enc_val_ordered(new_weight, c, ca, b, o).as_slice())?;
+                        t.insert(
+                            key.as_str(),
+                            enc_val_ordered(new_weight, c, ca, b, o).as_slice(),
+                        )?;
                         updated = true;
                     }
                     None => updated = false,
@@ -378,7 +388,9 @@ impl Store {
             {
                 let mut t = txn.open_table(USER_WORDS)?;
                 // 不存在则创建 weight=0 记录（隐性造词路径）：此处只有扁平 code，无边界可算 → 0。
-                let existing = t.get(key.as_str())?.and_then(|g| dec_val_ordered(g.value()));
+                let existing = t
+                    .get(key.as_str())?
+                    .and_then(|g| dec_val_ordered(g.value()));
                 let is_new = existing.is_none();
                 // 本路径会凭空造词（见下），新词同样要领入库序号；已有的原样保留。
                 let order = match existing {
@@ -392,7 +404,10 @@ impl Store {
                 } else {
                     w
                 };
-                t.insert(key.as_str(), enc_val_ordered(nw, nc, ca, b, order).as_slice())?;
+                t.insert(
+                    key.as_str(),
+                    enc_val_ordered(nw, nc, ca, b, order).as_slice(),
+                )?;
                 // ⚠️ **本路径会凭空造出用户词**（上面那句注释说的「隐性造词」），故必须建索引。
                 // 改权重不用动索引（value 空），但新增必须——漏了这一处，靠选词自动产生的
                 // 词就永远进不了简拼索引，且只在「用过一段时间后」才显形。
@@ -464,7 +479,9 @@ impl Store {
                     // join→split 会退化成 0），故导入闸口求解出的边界走 `WordIo::boundary`。
                     let in_b = r.boundary.unwrap_or(spaced_b);
                     let key = enc_key(schema, &code, &r.text);
-                    let existing = t.get(key.as_str())?.and_then(|g| dec_val_ordered(g.value()));
+                    let existing = t
+                        .get(key.as_str())?
+                        .and_then(|g| dec_val_ordered(g.value()));
                     match existing {
                         None => {
                             t.insert(
@@ -656,8 +673,11 @@ mod tests {
     fn import_assigns_order_following_row_sequence() {
         let p = tmp("wind_uw_order_import.redb");
         let s = Store::open(&p).unwrap();
-        s.import_user_words("pinyin", &[row("abc", "甲"), row("abc", "乙"), row("abc", "丙")])
-            .unwrap();
+        s.import_user_words(
+            "pinyin",
+            &[row("abc", "甲"), row("abc", "乙"), row("abc", "丙")],
+        )
+        .unwrap();
 
         let mut recs = s.get_user_words("pinyin", "abc").unwrap();
         assert_eq!(recs.len(), 3);
@@ -684,8 +704,11 @@ mod tests {
     fn word_order_survives_export_clear_import() {
         let p = tmp("wind_uw_order_roundtrip.redb");
         let s = Store::open(&p).unwrap();
-        s.import_user_words("pinyin", &[row("abc", "甲"), row("abc", "乙"), row("abc", "丙")])
-            .unwrap();
+        s.import_user_words(
+            "pinyin",
+            &[row("abc", "甲"), row("abc", "乙"), row("abc", "丙")],
+        )
+        .unwrap();
 
         let text = s.export_user_words_wdict("pinyin", "2026-09-14").unwrap();
         s.clear_user_words("pinyin").unwrap();
@@ -720,14 +743,20 @@ mod tests {
         // 第二次导入：权重抬高以确保真的走了写盘分支（否则 unchanged 不写，测不到东西）。
         let bumped: Vec<wdict::WordIo> = rows
             .iter()
-            .map(|r| wdict::WordIo { weight: 900, ..r.clone() })
+            .map(|r| wdict::WordIo {
+                weight: 900,
+                ..r.clone()
+            })
             .collect();
         s.import_user_words("pinyin", &bumped).unwrap();
 
         let after: Vec<u32> = {
             let mut r = s.get_user_words("pinyin", "abc").unwrap();
             r.sort_by_key(|x| x.text.clone());
-            assert!(r.iter().all(|x| x.weight == 900), "前提：第二次导入应已写盘");
+            assert!(
+                r.iter().all(|x| x.weight == 900),
+                "前提：第二次导入应已写盘"
+            );
             r.iter().map(|x| x.order).collect()
         };
         assert_eq!(before, after, "重复导入不得改变既有词条的入库序号");
@@ -787,11 +816,8 @@ mod tests {
         let p = tmp("wind_uw_order_abbrev.redb");
         let s = Store::open(&p).unwrap();
         // 按「拟好 你好」导入；text 字典序恰好相反（你 U+4F60 < 拟 U+62DF），两者可区分。
-        s.import_user_words(
-            "pinyin",
-            &[row("ni hao", "拟好"), row("ni hao", "你好")],
-        )
-        .unwrap();
+        s.import_user_words("pinyin", &[row("ni hao", "拟好"), row("ni hao", "你好")])
+            .unwrap();
 
         let mut recs = s.search_user_words_by_abbrev("pinyin", "nh", 0).unwrap();
         assert_eq!(recs.len(), 2, "简拼 nh 应召回两条，实际 {recs:?}");
@@ -834,7 +860,10 @@ mod tests {
 
         let v3 = enc_val_ordered(123, 7, 1_700_000_000, 0b101, 42);
         assert_eq!(v3.len(), 28);
-        assert_eq!(dec_val_ordered(&v3), Some((123, 7, 1_700_000_000, 0b101, 42)));
+        assert_eq!(
+            dec_val_ordered(&v3),
+            Some((123, 7, 1_700_000_000, 0b101, 42))
+        );
 
         // 薄壳与全量版对同一条记录必须给出一致的前四项。
         assert_eq!(dec_val(&v3), Some((123, 7, 1_700_000_000, 0b101)));

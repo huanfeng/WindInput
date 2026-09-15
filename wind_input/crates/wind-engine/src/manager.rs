@@ -4763,7 +4763,10 @@ impl EngineManager {
             }
             let enabled = e.is_enabled();
             if !enabled {
-                info!("  codetable extra: {} (id={}, 未启用，跳过加载)", e.path, e.id);
+                info!(
+                    "  codetable extra: {} (id={}, 未启用，跳过加载)",
+                    e.path, e.id
+                );
                 continue;
             }
             if let Some(d) = load_one(e) {

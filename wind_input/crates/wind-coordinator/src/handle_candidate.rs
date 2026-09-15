@@ -2636,10 +2636,12 @@ impl Coordinator {
             Some(t) => t.to_string(),
             None => self.maybe_convert(state, text),
         };
-        if self.english_appends_space(state, source, text, crate::preedit_cursor::cased_or_buffer(
-                &state.input_buffer,
-                &state.input_buffer_cased,
-            )) {
+        if self.english_appends_space(
+            state,
+            source,
+            text,
+            crate::preedit_cursor::cased_or_buffer(&state.input_buffer, &state.input_buffer_cased),
+        ) {
             out.push(' ');
         }
         state.input_buffer.clear();
@@ -3150,10 +3152,15 @@ impl Coordinator {
             //
             // 补在 s2t 之后：空格不参与简繁转换，且提前补会让 STPhrases 的词级最长匹配断在
             // 空格上。
-            if self.english_appends_space(state, cand.source, &cand.text, crate::preedit_cursor::cased_or_buffer(
-                &state.input_buffer,
-                &state.input_buffer_cased,
-            )) {
+            if self.english_appends_space(
+                state,
+                cand.source,
+                &cand.text,
+                crate::preedit_cursor::cased_or_buffer(
+                    &state.input_buffer,
+                    &state.input_buffer_cased,
+                ),
+            ) {
                 out.push(' ');
             }
             // 下一轮联想的**上文**：取简体域的完整文本，而不是上屏的 `out`。
