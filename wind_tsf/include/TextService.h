@@ -466,8 +466,9 @@ private:
     // 它在画，本次激活期间不再翻回。判定点见 _NoteHostReadCandidates。
     BOOL  _uiHostReadsCandidates;
     // 「宿主在画候选」：声明接管（pbShow=FALSE / Show(FALSE) / UI-less 线程）**或**
-    // 实际来读过候选串。后者是推断，core 侧可经 compat 规则 host_drawn_candidates 关掉；
-    // 这里不做覆盖——DLL 只负责如实报告，压不压窗由 core 决定。
+    // 实际来读过候选串。后者是推断，core 侧**默认不据它收窗**（2026-09-15 起 opt-in：
+    // 要收的宿主得在 compat 写 host_drawn_candidates = true）；这里不做覆盖——DLL 只负责
+    // 如实报告「宿主读没读」这个观测事实，怎么用由 core 决定。
     BOOL  _UiElementHostDraws() const
     {
         return wind::uielement::HostDraws(_uiHostDraws != FALSE, _uiHostReadsCandidates != FALSE)
@@ -480,10 +481,11 @@ private:
     // caret 探测重试循环（OnLayoutChange burst + 50ms timer + 异步 edit session），
     // 间隔 5→187→298ms 后线程冻死。ui_less 从 ActivateEx 起已知、host_draws 从首个
     // BeginUIElement 起已知，取或覆盖首键到组合全程。
-    // ⚠ 只看**声明**（_uiHostDraws / _uiLessThread），不看读取闩：读取闩的结论可由 core
-    // 的 compat 规则 host_drawn_candidates 关掉，那时我们自己的候选窗照弹、就还需要坐标。
-    // 把闩算进来会让「关掉了覆盖」的用户拿到一个没有坐标、只能贴在窗口角落的候选窗——
-    // 而那个覆盖正是推断误判时的唯一退路，不能连它一起削弱。
+    // ⚠ 只看**声明**（_uiHostDraws / _uiLessThread），不看读取闩：读取闩只是推断，而
+    // core 侧对它**默认就不收窗**（2026-09-15 起 opt-in，见 AppCompatRule 的字段文档）
+    // ⇒ 绝大多数读过候选串的宿主，我们自己的候选窗照弹、就还需要坐标。把闩算进来会让
+    // 这些宿主拿到一个没有坐标、只能贴在窗口角落的候选窗。
+    // 反转之前这条理由挂在「用户可能关掉覆盖」这个边缘情形上，如今它是默认路径，更该只看声明。
     //
     // ⚠ **已知缺口（刻意留着）**：推断生效、core 已收窗时，这里仍为 FALSE，于是照常向
     // 宿主探 caret——收了窗却没省掉收窗本该省掉的开销，在全屏游戏上与 Dota 2 那条

@@ -2598,7 +2598,7 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
             //   - 抹账方若恰是真正在打字的那个线程，本线程可能再也不起组合 ⇒ 永不自愈；
             //   - 同进程两线程持**不同位**时（A 声明接管、B 只是读过），双方都满足下面
             //     这个条件，会在各自组合起手互相翻牌，使收窗理由在「声明/推断」之间跳动
-            //     ——而只有推断那条受 compat `host_drawn_candidates` 管 ⇒ 逃生口时灵时不灵。
+            //     ——而推断那条 core 侧默认就不收窗（opt-in）⇒ 收不收窗随翻牌抖动。
             // 根因是载荷里没有 tid、服务端按**裸 pid** 记账（UiElementStatePayload）。
             // 真正的修法是载荷加 tid、服务端按 (pid, tid) 记账、pid 级判据对同 pid 各线程
             // 做按位或——那是协议变更，单列跟进，见设计文档 §1.4。

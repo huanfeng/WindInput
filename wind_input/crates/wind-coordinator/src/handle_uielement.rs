@@ -190,19 +190,27 @@ impl Coordinator {
         None
     }
 
-    /// 推断那条判据：宿主读走了候选串，**且**没在 compat 里被显式关掉。
+    /// 推断那条判据：宿主读走了候选串，**且**在 compat 里被显式开启（`= true`）。
+    ///
+    /// ⚠ 2026-09-15 起是 **opt-in**：默认不据此收窗，理由见函数体末尾 `unwrap_or(false)`
+    /// 处的长注释（三个反证样本 + 两种误判的代价不对称）。此前是默认开启、靠 compat
+    /// 写 `false` 逐个关，那个方向在拿到反证后不成立了。
     ///
     /// 查名用**命中的那个 pid**（见 [`Self::current_pid_in`]）：不能图省事走
     /// `active_process_name()`，它只认 `active_compat.pid`，而游戏宿主恰恰常常靠
-    /// `focus_pid` 才命中——那样写的话，用户给游戏配的逃生口会静默失效，而误判的表现
-    /// 是「两个候选框都没了」，等于把兜底也押上。
+    /// `focus_pid` 才命中——那样写的话查到的是**上一个进程**的名字，用户给游戏配的
+    /// opt-in 规则静默失效 ⇒ 不收窗 ⇒ 新枫之谷又变回两个候选框。
     ///
-    /// 覆盖查两层：先查本进程名，再回落到通配规则 `process = "*"`。后者是**故障半径的
-    /// 配套**——推断若在某一类宿主上普遍误判（例如某个常驻的读屏/辅助工具在读候选串），
-    /// 用户面对的是「所有应用的候选框都没了」，这时不该只有逐个 exe 枚举这一条路。
+    /// （opt-out 时代这里的后果是反过来的：查错 pid ⇒ 关不掉推断 ⇒「两个候选框都没了」。
+    /// 反转成 opt-in 之后，查错 pid 的代价从「彻底不能用」降成「多一个框」，但规则该生效
+    /// 而不生效仍是 bug，判据不变。）
     ///
-    /// 查不到进程名时按默认（收窗）走——名字查不到多半是宿主受限/短命进程，那恰恰是更
-    /// 需要「别在人家画面上弹窗」的一类；此时通配规则仍然生效，全局逃生口不受影响。
+    /// 覆盖查两层：先查本进程名，再回落到通配规则 `process = "*"`。通配那层保留下来是给
+    /// 反方向用的——某类宿主普遍需要收窗时可一行开到全局；opt-in 之后它不再是「故障半径
+    /// 的配套」，因为默认已经不会出现「所有应用候选框都没了」。
+    ///
+    /// 查不到进程名时按默认（**不**收窗）走：查不到名字就等于查不到规则，而 opt-in 的前提
+    /// 是「有人明确说过这个宿主要收」——查不出是谁，就谈不上它被指名过。
     pub(crate) fn uielement_host_draws_by_inference(&self) -> bool {
         let Some(pid) = self.uielement_reader_pid() else {
             return false;
@@ -220,7 +228,25 @@ impl Coordinator {
                     .get_rule(HOST_DRAWN_WILDCARD)
                     .and_then(|r| r.host_drawn_candidates)
             })
-            .unwrap_or(true)
+            // ★★★ 没有规则 ⇒ **不**据此收窗（2026-09-15 反转，原为 `unwrap_or(true)`）。
+            //
+            // 「读走候选串 ⇒ 它在画」这条推断立案时自陈「至今没有反证样本」——那份日志里
+            // 7 个宿主只有新枫之谷读过，另外 6 个一次候选都没出过，构不成负对照。反证样本
+            // 2026-09-15 在靶机上一次到齐：**Notepad / Illustrator / EverEdit 三个宿主都把
+            // 候选串整串读走（`GetString(0..4)`），却都不画候选窗**。同一台机器上新旧两版
+            // DLL 的对照（旧版也记录到记事本读了 96 次、但不据此收窗）说明读取是这些宿主的
+            // 常态行为，不是自绘的标志。
+            //
+            // 反转的是**默认值**而不是判据本身：新枫之谷那类宿主（CUAS 的 IMM32 桥替它读走
+            // 候选、画出旧版系统候选窗）仍可经 compat 写 `host_drawn_candidates = true` 保住
+            // 修复，见 data/compat.toml 的出厂规则。
+            //
+            // 为什么默认值该站在「不收窗」这一侧——**两种误判的代价不对称**：
+            //   判错成「宿主在画」（实际没画）⇒ 两个候选框一个都没有，输入法完全不能用，
+            //     且用户无从知道要去 compat 里配什么；
+            //   判错成「宿主没画」（实际在画）⇒ 最多多出一个框，字照打、能用，配一行即可收。
+            // 一个明确标着「是推断不是事实」的判据，不该把不可用那一侧设成默认。
+            .unwrap_or(false)
     }
 
     /// 本进程的浮窗（候选窗 / 状态气泡 / 工具栏）是否该被压住。返回原因（供日志），
@@ -254,9 +280,12 @@ impl Coordinator {
     /// 比我们在全屏游戏里靠 caret 猜的位置准。
     ///
     /// ⚠ 判据一二是**事实**（宿主声明 / 物理独占），判据三是**推断**——读候选串的不一定
-    /// 都在画（读屏软件也读）。故只有它可经 compat 规则 `host_drawn_candidates = false`
-    /// 逐宿主关掉，见 [`Self::uielement_host_draws_by_inference`]。这正是 config-design-rules
-    /// R1 说的「可由程序判定 ⇒ 自动判定 + compat 覆盖，不加用户键」。
+    /// 都在画。故只有它受 compat 规则 `host_drawn_candidates` 管，且 2026-09-15 起改成
+    /// **opt-in**：写 `= true` 的宿主才据此收窗，不写一律照弹我们的窗。
+    ///
+    /// 反转的由来：立案时「只有真要画的宿主才会来读候选串」这条假设自陈没有反证样本，
+    /// 而反证在靶机上一次到齐——Notepad / Illustrator / EverEdit 都整串读走候选却都不画。
+    /// 详见 [`Self::uielement_host_draws_by_inference`]。
     ///
     /// 判据一二**不设任何覆盖**：都是可由程序判定的物理事实，按 R1 处理。
     pub(crate) fn ui_suppressed_by_host(&self) -> Option<&'static str> {
@@ -494,24 +523,66 @@ mod tests {
         *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(vec![rule]);
     }
 
-    /// 宿主没声明接管（`pbShow=TRUE`）却把候选串读走了 ⇒ 判定它在自绘，收掉我们的窗。
+    /// ★★★ 默认不因「读走候选串」收窗：**普通应用一定要看得见候选框**。
+    ///
+    /// 这是 2026-09-15 的反转所钉的那一条。反证样本（同一台靶机、同一轮实测）：
+    /// Notepad / Illustrator / EverEdit 都把候选串整串读走（`GetString(0..4)`），却都不画
+    /// 候选窗 —— 读取是这些宿主的常态，不是自绘的标志。误判成「宿主在画」的代价是两个框
+    /// 一个都没有、完全不能用，故默认值必须站在「照弹我们的窗」这一侧。
+    ///
+    /// 变异检验：把 `uielement_host_draws_by_inference` 末尾改回 `unwrap_or(true)` ⇒ 本条红。
+    #[test]
+    fn reading_our_candidates_does_not_by_itself_hide_the_window() {
+        let (c, rx) = coord();
+        fill(&c, 5);
+        focus_pid(&c, 42);
+        name_pid(&c, 42, "notepad.exe"); // compat 里没有它的规则
+
+        c.set_uielement_host_reads(42, true);
+        assert!(!c.uielement_host_draws(), "它并没有声明接管——两张账不能混");
+        // 前置对照：本条唯一的正向断言是 `None`，而「读取账根本没命中」同样得 `None`
+        // ⇒ 不先钉住这一条，将来 set_uielement_host_reads 静默失效时本用例会继续绿。
+        assert!(c.uielement_host_reads(), "前置：读取账必须真的命中");
+        assert_eq!(
+            c.ui_suppressed_by_host(),
+            None,
+            "没配规则的宿主读了候选串也照弹我们的窗"
+        );
+        let _ = drain(&rx);
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        assert!(drain(&rx).contains(&"update"), "普通应用必须看得见候选框");
+    }
+
+    /// 反过来：compat 显式写 `= true` 的宿主，读走候选串就收掉我们的窗。
     ///
     /// 2026-09-11 新枫之谷实测形态：CUAS 的 IMM32 桥替宿主读走候选、由宿主/DefWindowProc
     /// 画出旧版候选窗，屏幕上两个框。宿主画的那个贴着它自己的输入框，位置比我们靠 caret
-    /// 猜的准（全屏游戏根本给不出 caret），所以该退的是我们。
+    /// 猜的准（全屏游戏根本给不出 caret），所以该退的是我们。出厂 compat.toml 给
+    /// MapleStory.exe 配的就是这一行 —— opt-in 化之后它是保住那份修复的唯一通路。
     #[test]
-    fn a_host_that_reads_our_candidates_is_treated_as_drawing_them() {
+    fn a_host_opted_in_is_treated_as_drawing_them() {
         let (c, rx) = coord();
         fill(&c, 5);
         focus_pid(&c, 42);
         name_pid(&c, 42, "maplestory.exe");
+        compat_rule(
+            &c,
+            wind_config::app_compat::AppCompatRule {
+                process: "MapleStory.exe".into(), // 大小写无关
+                host_drawn_candidates: Some(true),
+                ..Default::default()
+            },
+        );
 
         c.set_uielement_host_reads(42, true);
         assert!(!c.uielement_host_draws(), "它并没有声明接管——两张账不能混");
         assert_eq!(
             c.ui_suppressed_by_host(),
             Some("uielement_host_reads"),
-            "读走候选串即判定自绘"
+            "显式 opt-in 的宿主读走候选串即判定自绘"
         );
         let _ = drain(&rx);
         {
@@ -525,12 +596,21 @@ mod tests {
         );
     }
 
-    /// compat 的 `host_drawn_candidates = false` 只关掉**推断**那条，我们的窗照弹。
+    /// `host_drawn_candidates` 只管**推断**那条，管不着宿主的**声明**。
     ///
-    /// 这是推断误判时的唯一自救口——读候选串的不一定都在画（读屏软件也读），
-    /// 误判的表现是「两个候选框都没了」，彻底不能用。
+    /// 本条的鉴别力**全在后半段**：宿主一旦声明接管（`pbShow=FALSE`），无论本字段写什么
+    /// 都得收 —— 声明是事实，不是推断，不该被一个推断开关否决。
+    ///
+    /// ⚠ 前半段（`Some(false)` ⇒ 照弹）**在本用例的构造下**鉴别力很弱：这里没有出厂层、
+    /// 没有通配规则，`false` 与不写恰好同结果，那个 `None` 断言在 `get_rule` 整个失效时
+    /// 照样成立。（`false` 与不写在一般情况下**并不同义** —— 它挡住出厂层继承、也压过
+    /// `"*"` 通配，见 `AppCompatRule::host_drawn_candidates` 的字段文档；压过通配那条由
+    /// `a_wildcard_rule_applies_everywhere_and_a_process_rule_wins` 钉着。）
+    /// 真正钉 `= true` 生效的是
+    /// `a_host_opted_in_is_treated_as_drawing_them`，钉查名落点的是
+    /// `the_compat_rule_follows_the_key_source_pid`。
     #[test]
-    fn compat_can_turn_off_the_inference_but_not_the_declaration() {
+    fn compat_governs_the_inference_but_not_the_declaration() {
         let (c, rx) = coord();
         fill(&c, 5);
         focus_pid(&c, 42);
@@ -545,17 +625,13 @@ mod tests {
         );
 
         c.set_uielement_host_reads(42, true);
-        assert_eq!(
-            c.ui_suppressed_by_host(),
-            None,
-            "显式关掉推断后照弹我们的窗"
-        );
+        assert_eq!(c.ui_suppressed_by_host(), None, "显式 false ⇒ 照弹我们的窗");
         let _ = drain(&rx);
         {
             let st = c.state.lock().unwrap();
             c.notify_ui_update(&st);
         }
-        assert!(drain(&rx).contains(&"update"), "关掉推断后候选窗必须回来");
+        assert!(drain(&rx).contains(&"update"), "不启用推断时候选窗必须在");
 
         // 但宿主**声明**接管时，本开关管不着：宿主明说了不要我们的 UI。
         c.set_uielement_host_draws(42, true);
@@ -566,15 +642,23 @@ mod tests {
         );
     }
 
-    /// ★★★ 逃生口必须对「靠按键来源才命中的宿主」生效——而那正是游戏宿主的常态。
+    /// ★★★ compat 规则必须落在「靠按键来源才命中的宿主」上——而那正是游戏宿主的常态。
     ///
     /// `focus_pid`（按键来源）与 `active_compat.pid`（焦点事件）在游戏上会分岔：游戏常常
     /// 没有可编辑 TSF 上下文、`focus_gained` 一次都不来，`active_compat` 停在上一个进程
     /// （既有测试 `key_source_pid_alone_matches_host_draws` 钉的就是这个）。
-    /// 查覆盖时若另取一次 `active_compat.pid`，查到的是**上一个进程**的名字：
-    /// 用户给游戏配的逃生口静默失效，而误判的表现是「两个候选框都没了」。
+    /// 查覆盖时若另取一次 `active_compat.pid`，查到的是**上一个进程**的名字，游戏那条
+    /// opt-in 规则静默失效 —— 新枫之谷又变回两个候选框。
+    ///
+    /// ⚠ 用 `Some(true)` 而不是 `Some(false)` 来钉：opt-in 化之后 `false` 与不写同义，
+    /// 断言 `None` 在「查名落到了 explorer.exe」时**照样成立**，测试会绿着失去鉴别力。
+    ///
+    /// 变异检验：把 `uielement_host_draws_by_inference` 的查名换成 `active_process_name()`
+    /// ⇒ 本条立刻红。（⛔ 调换 `current_pid_in` 两支的先后**不会**让本条红——这里读取账里
+    /// 只有 42 一个 pid，`active_compat.pid=1` 压根不在集合里，两种顺序都落到 42。钉分支
+    /// 先后的是 `the_key_source_pid_wins_when_both_pids_are_readers`，那条两个 pid 都在账里。）
     #[test]
-    fn the_escape_hatch_works_when_only_the_key_source_pid_identifies_the_host() {
+    fn the_compat_rule_follows_the_key_source_pid() {
         let (c, _rx) = coord();
         fill(&c, 5);
         focus_pid(&c, 1); // 焦点事件停在上一个进程
@@ -585,7 +669,7 @@ mod tests {
             &c,
             wind_config::app_compat::AppCompatRule {
                 process: "MapleStory.exe".into(),
-                host_drawn_candidates: Some(false),
+                host_drawn_candidates: Some(true),
                 ..Default::default()
             },
         );
@@ -593,8 +677,8 @@ mod tests {
         c.set_uielement_host_reads(42, true);
         assert_eq!(
             c.ui_suppressed_by_host(),
-            None,
-            "逃生口必须落到真正在输入的那个进程上，不能另取一次 active_compat.pid"
+            Some("uielement_host_reads"),
+            "规则必须落到真正在输入的那个进程上，不能另取一次 active_compat.pid"
         );
     }
 
@@ -614,46 +698,45 @@ mod tests {
         name_pid(&c, 42, "maplestory.exe");
         c.set_uielement_host_reads(1, true); // 两个都在读取账里
         c.set_uielement_host_reads(42, true);
-        // 只给按键来源那个配逃生口：生效 ⇒ 说明查名用的是它。
+        // 只给按键来源那个 opt-in：生效 ⇒ 说明查名用的是它。
         compat_rule(
             &c,
             wind_config::app_compat::AppCompatRule {
                 process: "maplestory.exe".into(),
-                host_drawn_candidates: Some(false),
+                host_drawn_candidates: Some(true),
                 ..Default::default()
             },
         );
-        // 前置对照：唯一的断言是 `None`（三条判据全不命中），而「读取账根本没命中」
-        // 也会得到 None ⇒ 不先钉住这一条，将来 set_uielement_host_reads 静默失效时
-        // 本用例会继续绿。
         assert!(c.uielement_host_reads(), "前置：读取账必须真的命中");
         assert_eq!(
             c.ui_suppressed_by_host(),
-            None,
+            Some("uielement_host_reads"),
             "两个 pid 都命中时应取 focus_pid（按键来源）去查覆盖"
         );
 
-        // 反向对照：把逃生口改挂到 active_compat.pid 那个名字上就**不该**生效——
+        // 反向对照：把规则改挂到 active_compat.pid 那个名字上就**不该**生效——
         // 一正一反锁死方向，只有「查名用的是 focus_pid」能同时满足两条。
         compat_rule(
             &c,
             wind_config::app_compat::AppCompatRule {
                 process: "explorer.exe".into(),
-                host_drawn_candidates: Some(false),
+                host_drawn_candidates: Some(true),
                 ..Default::default()
             },
         );
         assert_eq!(
             c.ui_suppressed_by_host(),
-            Some("uielement_host_reads"),
-            "逃生口挂在 active_compat.pid 的名字上不该生效"
+            None,
+            "规则挂在 active_compat.pid 的名字上不该生效"
         );
     }
 
-    /// 通配规则 `process = "*"` 一行关掉全局推断——推断若在某一类宿主上普遍误判，
-    /// 用户不该只有逐个 exe 枚举这一条路。
+    /// 通配规则 `process = "*"` 一行套到全局，而本进程自己的规则**优先于**通配。
+    ///
+    /// ⚠ 两半都用「与默认相反」的那个值来钉：opt-in 之后默认是不收窗，若第一半仍写
+    /// `Some(false)` 断言 `None`，那条通配就算完全没被读到也照样绿。
     #[test]
-    fn a_wildcard_rule_turns_the_inference_off_everywhere() {
+    fn a_wildcard_rule_applies_everywhere_and_a_process_rule_wins() {
         let (c, _rx) = coord();
         fill(&c, 5);
         focus_pid(&c, 42);
@@ -662,55 +745,59 @@ mod tests {
             &c,
             wind_config::app_compat::AppCompatRule {
                 process: crate::handle_uielement::HOST_DRAWN_WILDCARD.into(),
-                host_drawn_candidates: Some(false),
+                host_drawn_candidates: Some(true),
                 ..Default::default()
             },
         );
         c.set_uielement_host_reads(42, true);
-        assert_eq!(c.ui_suppressed_by_host(), None, "通配规则应关掉推断");
+        assert_eq!(
+            c.ui_suppressed_by_host(),
+            Some("uielement_host_reads"),
+            "通配规则应套到没有自己规则的宿主上"
+        );
 
-        // 本进程自己的规则优先于通配：通配关、本进程显式开 ⇒ 照收窗。
+        // 本进程自己的规则优先于通配：通配开、本进程显式关 ⇒ 照弹我们的窗。
         *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(vec![
             wind_config::app_compat::AppCompatRule {
                 process: crate::handle_uielement::HOST_DRAWN_WILDCARD.into(),
-                host_drawn_candidates: Some(false),
+                host_drawn_candidates: Some(true),
                 ..Default::default()
             },
             wind_config::app_compat::AppCompatRule {
                 process: "some-unknown-host.exe".into(),
-                host_drawn_candidates: Some(true),
+                host_drawn_candidates: Some(false),
                 ..Default::default()
             },
         ]);
-        assert_eq!(
-            c.ui_suppressed_by_host(),
-            Some("uielement_host_reads"),
-            "本进程规则应压过通配"
-        );
+        assert_eq!(c.ui_suppressed_by_host(), None, "本进程规则应压过通配");
     }
 
-    /// 查不到进程名时按默认（收窗）走，但**通配逃生口仍然管用**——否则受限/短命宿主
-    /// 上就彻底没有退路了。
+    /// 查不到进程名时按默认（**不**收窗）走，而通配规则**仍然管用**——受限/短命宿主
+    /// 查不出名字，但「所有应用都收窗」这类需求仍要能一行套到它们头上。
     #[test]
-    fn an_unnamed_process_still_honours_the_wildcard_escape_hatch() {
+    fn an_unnamed_process_still_honours_the_wildcard_rule() {
         let (c, _rx) = coord();
         fill(&c, 5);
         focus_pid(&c, 42); // 不登记 pid_names
         c.set_uielement_host_reads(42, true);
         assert_eq!(
             c.ui_suppressed_by_host(),
-            Some("uielement_host_reads"),
-            "查不到名字时默认收窗"
+            None,
+            "查不到名字 ⇒ 查不到规则 ⇒ 按 opt-in 的默认照弹我们的窗"
         );
         compat_rule(
             &c,
             wind_config::app_compat::AppCompatRule {
                 process: crate::handle_uielement::HOST_DRAWN_WILDCARD.into(),
-                host_drawn_candidates: Some(false),
+                host_drawn_candidates: Some(true),
                 ..Default::default()
             },
         );
-        assert_eq!(c.ui_suppressed_by_host(), None, "通配对无名进程也要生效");
+        assert_eq!(
+            c.ui_suppressed_by_host(),
+            Some("uielement_host_reads"),
+            "通配对无名进程也要生效"
+        );
     }
 
     /// 「声明接管」→「只是读过」的过渡不得把候选窗闪出来一帧。
@@ -723,6 +810,16 @@ mod tests {
         fill(&c, 5);
         focus_pid(&c, 42);
         name_pid(&c, 42, "maplestory.exe");
+        // 本条钉的是 opt-in 宿主（新枫之谷那类）身上的过渡不变量，故先把规则配上：
+        // 没有它，撤销声明后本就该把窗弹回来，「过渡不闪窗」这件事无从谈起。
+        compat_rule(
+            &c,
+            wind_config::app_compat::AppCompatRule {
+                process: "maplestory.exe".into(),
+                host_drawn_candidates: Some(true),
+                ..Default::default()
+            },
+        );
         // ⚠ 必须从「只有声明账」起步：若先报过一次 draws+reads，读取账里已经有这个 pid，
         // 拆开写也不会露出空窗，测试就成了永远绿的。可达路径是中间那次 0x5 上报丢了
         // （SendAsync 失败会留着 _uiElementStateSent 下次重报），core 直接收到 0x4。
@@ -748,6 +845,16 @@ mod tests {
         fill(&c, 3);
         focus_pid(&c, 42);
         name_pid(&c, 42, "maplestory.exe");
+        // opt-in 之后推断要靠规则才生效；不配这一行，下面两个断言都会是 None，
+        // 「未命中 7」那条就分不清是作用域对了还是推断整个没开。
+        compat_rule(
+            &c,
+            wind_config::app_compat::AppCompatRule {
+                process: "maplestory.exe".into(),
+                host_drawn_candidates: Some(true),
+                ..Default::default()
+            },
+        );
         c.set_uielement_host_reads(7, true); // 别的进程读过
         assert_eq!(c.ui_suppressed_by_host(), None, "焦点在 42，未命中 7");
         focus_pid(&c, 7);

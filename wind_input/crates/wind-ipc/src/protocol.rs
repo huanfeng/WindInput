@@ -152,8 +152,12 @@ pub const UIELEMENT_FLAG_UI_LESS_THREAD: u32 = 0x0002;
 /// 画的那个还停在第一个码的候选上。
 ///
 /// ⚠ 与 bit0 **分开报**：bit0 是宿主的声明（事实），本位是「读了就是在画」的推断。
-/// 推断可能误伤（读屏软件也订阅 UI 元素并读候选串），故 core 侧对本位单独记账、
-/// 可经 compat 规则 `host_drawn_candidates = false` 逐宿主关掉。合并成一位就关不掉了。
+/// 推断已被证伪为普遍规律——Notepad / Illustrator / EverEdit 都整串读走却都不画
+/// （2026-09-15 实测），故 core 侧对本位单独记账，且**默认不据此收窗**：要收的宿主得在
+/// compat 里写 `host_drawn_candidates = true`（opt-in，见 `AppCompatRule` 的字段文档）。
+/// 合并成一位就没法只让推断那一半改默认。
+///
+/// DLL 侧照常如实上报本位——「宿主读没读」是观测事实，怎么用是 core 的判断。
 pub const UIELEMENT_FLAG_HOST_READS: u32 = 0x0004;
 
 /// [`UiElementActionPayload::action`]：把高亮移到**页内**下标 `arg`（`SetSelection`；

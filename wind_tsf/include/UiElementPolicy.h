@@ -20,7 +20,8 @@ namespace uielement
 /// 两个入参语气不同，合并只发生在这一个函数里：`declared` 是宿主自己说的
 /// （`BeginUIElement` 回 `pbShow=FALSE` / `Show(FALSE)`），是事实；
 /// `readCandidates` 是「它把候选文本取走了」的推断。上报给服务端时**必须分两位**，
-/// 因为推断那一半可被 compat 规则 `host_drawn_candidates` 关掉。
+/// 因为推断那一半在 core 侧默认就不收窗（opt-in，compat 写 `host_drawn_candidates = true`
+/// 才生效）。
 /// ⚠ `declared` **刻意不含 `_uiLessThread`**（调用方只传 `_uiHostDraws`）：UI-less 线程的
 /// `BeginUIElement` 按规范必回 `pbShow=FALSE`，`_uiHostDraws` 随即置真，这里无须再并一次；
 /// 并进来反而会在「UI-less 线程的 Begin 意外回了 TRUE」时改变行为。
