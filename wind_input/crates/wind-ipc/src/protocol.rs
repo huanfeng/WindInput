@@ -631,8 +631,45 @@ pub mod caret_source {
     /// 拿它更新缓存有益。故独立成一个 source 值，由消费端按用途区分，而不是放开来源。
     pub const PRE_REFLOW: i32 = 7;
 
+    /// 宿主对本 context 报「**这里没有插入点可给**」——`GetTextExt` 返回一个高度为 0 的
+    /// 退化矩形，且**重试窗口过完仍是它**（C++ `CaretProbeKind::RetryDeadline`）。
+    ///
+    /// Illustrator 30.8 画布文字实测恒为 `(2559,1367,2560,1367)`：选区矩形、组合起点、
+    /// 组合矩形三者同值，正是工作区（2560×1368）右下角最后一个像素；同一台机器上 10 个
+    /// 宿主给的都是这一个值——它是 TSF 的一句通用惯用语，不是某个宿主的脏数据。
+    ///
+    /// ★ **丢弃它比采信它更糟**。其它输入法直接采信，候选窗于是都落在屏幕右下角任务栏
+    /// 之上；我们按「退化 ⇒ 宿主还没排完版」把它丢掉，回退链就跌到 [`GUI_CARET`] —— 那是
+    /// Illustrator 界面里某个无关控件的 Win32 光标 `(10,30)`，候选窗被钉死在屏幕左上角。
+    /// 采信之后无需任何「修正到屏幕内」的新代码：`place_window` 现有的「下方放不下则上翻
+    /// + 右溢出左移 + 钳到 rcWork」会把它落到右下角，与其它输入法一致。
+    ///
+    /// ⚠ **不属于 TSF 语义域**（[`is_tsf`] 返回 `false`），尽管它确实出自 TSF context。
+    /// 判据不是「来源在哪个域」而是「它是不是一个真插入点」：它明说这里没有插入点。
+    /// 实际拦住它的是两道看来源的闸：焦点气泡的权威坐标闸门、以及大偏移逃生阀重锁时
+    /// 「reported compStart 可不可信」那一支。
+    ///
+    /// ⚠⚠ 跟行（`pin_anchor_when_start_drifts` 把锚点 y 换成 `caret.y`）**不看来源**，
+    /// 本值一样会被它用上——这里如实记下，别把它当成已有保护。之所以不补一道来源闸：
+    /// 跟行只在 `pin_anchor_when_start_drifts` 的宿主上生效（per-app 显式声明，目前是
+    /// WPS 一类给不出组合矩形的），而本值只在「三者全同的退化矩形」指纹下产出、且此时
+    /// `caret.y` 恒等于已锁锚点的 y，换与不换结果相同。构造不出可达的失败，补闸属于
+    /// 无依据的行为变更。
+    ///
+    /// ⚠ 但「非 TSF」不等于「不能定位」。它**照常走首显**：`handle_caret_update` 的
+    /// `pending_first_show` 消费不看来源，正是这一点让首显立即发生，不再空等 600ms
+    /// （闸门 arm 了最长档，而到期时拿到的还是同一个退化矩形——没有东西可等）。
+    /// 组合起点锚定也照常锁上：它走的是「caret 非 TSF ⇒ 跳过 500px 同源校验」那一支，
+    /// 而此处 compStart 与 caret 本就同值，两支结果相同。
+    pub const TSF_DEFAULT_POS: i32 = 8;
+
     /// 是否属 TSF 语义域——即「这个坐标和组合起点出自同一个 context」。
     /// 只有这一类才可作权威坐标，也只有这一类才可与组合起点做距离比较。
+    ///
+    /// ⚠ [`TSF_DEFAULT_POS`] 是**刻意的例外**：它出自 TSF context，却在这里返回 `false`。
+    /// 本函数问的从来不是「来源在哪个域」，而是「手上这个点是不是真插入点」——宿主用那个
+    /// 退化矩形回答的恰恰是「没有插入点」。放进来它就会被当权威坐标参与跟行与漂移校正，
+    /// 而它根本不随插入点移动（整场组合恒为同一个屏幕角落像素）。
     pub fn is_tsf(source: i32) -> bool {
         matches!(source, TSF_SELECTION | TSF_COMPOSITION | TSF_CACHED)
     }
@@ -646,6 +683,7 @@ pub mod caret_source {
             CONSOLE => "console",
             LAST_KNOWN => "last_known",
             PRE_REFLOW => "pre_reflow",
+            TSF_DEFAULT_POS => "tsf_default_pos",
             _ => "unknown",
         }
     }
@@ -1972,5 +2010,103 @@ mod tests {
         assert!(!caret_source::is_tsf(caret_source::CONSOLE));
         assert!(!caret_source::is_tsf(caret_source::LAST_KNOWN));
         assert!(!caret_source::is_tsf(caret_source::UNKNOWN));
+        assert!(!caret_source::is_tsf(caret_source::PRE_REFLOW));
+        // ★ TSF_DEFAULT_POS 是**出自 TSF context 却判否**的那一个：宿主用退化矩形回答的
+        // 正是「这里没有插入点」。放进 TSF 域它就会被当权威坐标参与跟行与漂移校正，而它
+        // 整场组合恒为同一个屏幕角落像素，根本不随插入点移动。
+        assert!(!caret_source::is_tsf(caret_source::TSF_DEFAULT_POS));
+    }
+
+    /// 来源名必须逐个有对应分支：`name()` 的 `_ => "unknown"` 兜底会把漏加的新来源静默
+    /// 显示成 `unknown`，日志上与「旧 DLL / macOS 短包」无从区分——而定位问题恰恰全靠日志
+    /// 里的 `src=` 分辨走的是哪条通道。
+    #[test]
+    fn every_caret_source_has_its_own_name() {
+        let named = [
+            (caret_source::TSF_SELECTION, "tsf_selection"),
+            (caret_source::TSF_COMPOSITION, "tsf_composition"),
+            (caret_source::TSF_CACHED, "tsf_cached"),
+            (caret_source::GUI_CARET, "gui_caret"),
+            (caret_source::CONSOLE, "console"),
+            (caret_source::LAST_KNOWN, "last_known"),
+            (caret_source::PRE_REFLOW, "pre_reflow"),
+            (caret_source::TSF_DEFAULT_POS, "tsf_default_pos"),
+        ];
+        for (src, want) in named {
+            assert_eq!(
+                caret_source::name(src),
+                want,
+                "来源 {src} 的名字不对——漏加分支时它会静默变成 unknown"
+            );
+        }
+        assert_eq!(caret_source::name(caret_source::UNKNOWN), "unknown");
+    }
+
+    /// 坐标来源常量必须与 C++ 头文件逐值一致。
+    ///
+    /// 与 [`status_bits_match_the_cpp_header`] 同一条理由，但后果更隐蔽：状态位错了会整片
+    /// 状态乱套，来源值错了只是**某一类坐标被当成了另一类**——例如 DLL 发 8
+    /// （`TSF_DEFAULT_POS`）而 Rust 把 8 读成别的，`is_tsf` 就会给出相反的答案，候选窗定位
+    /// 悄悄走错分支而日志一切正常。
+    #[test]
+    fn caret_sources_match_the_cpp_header() {
+        let header = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../wind_tsf/include/BinaryProtocol.h");
+        let src = std::fs::read_to_string(&header)
+            .unwrap_or_else(|e| panic!("读不到 {}: {e}", header.display()));
+
+        // constexpr int32_t CARET_SRC_XXX = 7; —— 只认这一种形态，等号两侧空格随意。
+        let mut cpp = std::collections::BTreeMap::new();
+        for line in src.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("constexpr int32_t CARET_SRC_") else {
+                continue;
+            };
+            let Some((name, tail)) = rest.split_once('=') else {
+                continue;
+            };
+            // 分号后多半跟着行尾注释（`= 0; // 旧协议 …`），先切掉再解析。
+            let Some((val, _)) = tail.split_once(';') else {
+                continue;
+            };
+            let Ok(v) = val.trim().parse::<i32>() else {
+                continue;
+            };
+            cpp.insert(format!("CARET_SRC_{}", name.trim()), v);
+        }
+        assert!(
+            cpp.len() >= 9,
+            "只从头文件解析出 {} 个 CARET_SRC_* —— 多半是那边的写法变了，本测试已失效: {cpp:?}",
+            cpp.len()
+        );
+
+        let rust: std::collections::BTreeMap<&str, i32> = [
+            ("CARET_SRC_UNKNOWN", caret_source::UNKNOWN),
+            ("CARET_SRC_TSF_SELECTION", caret_source::TSF_SELECTION),
+            ("CARET_SRC_TSF_COMPOSITION", caret_source::TSF_COMPOSITION),
+            ("CARET_SRC_TSF_CACHED", caret_source::TSF_CACHED),
+            ("CARET_SRC_GUI_CARET", caret_source::GUI_CARET),
+            ("CARET_SRC_CONSOLE", caret_source::CONSOLE),
+            ("CARET_SRC_LAST_KNOWN", caret_source::LAST_KNOWN),
+            ("CARET_SRC_PRE_REFLOW", caret_source::PRE_REFLOW),
+            ("CARET_SRC_TSF_DEFAULT_POS", caret_source::TSF_DEFAULT_POS),
+        ]
+        .into_iter()
+        .collect();
+
+        for (name, rv) in &rust {
+            let cv = cpp
+                .get(*name)
+                .unwrap_or_else(|| panic!("C++ 侧没有 {name} —— 新增坐标来源时两侧都要加"));
+            assert_eq!(rv, cv, "{name} 两侧取值不一致: Rust={rv} C++={cv}");
+        }
+        // 反向：C++ 加了来源而 Rust 没跟上，同样要红 —— 否则那一类坐标会落进
+        // `name()` 的 unknown 兜底，而 `is_tsf` 会按「非 TSF」静默处理它。
+        for name in cpp.keys() {
+            assert!(
+                rust.contains_key(name.as_str()),
+                "C++ 侧有 {name} 而 Rust 侧没有 —— 新增坐标来源时两侧都要加"
+            );
+        }
     }
 }

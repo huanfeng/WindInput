@@ -1178,7 +1178,12 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
                 // 标题等非正文样式行上它指向别处，候选窗因此错位数百像素。
                 // 故这条路径改用异步 edit session：宿主会把请求排队，等文档可用时回调。
                 // 发不出去才退回同步路径（非 TSF 宿主仍需要 GUIThreadInfo 那条链）。
-                if (!pThis->_pTextService->RequestCaretPositionUpdateAsync())
+                //
+                // kind 必须显式给 RetryDeadline，不能沿用默认的 Composition：本次取坐标是
+                // 「**重试窗口已经过完**」这个判决的唯一载体，回调据此把仍然退化的矩形当作
+                // 宿主的「本 context 没有插入点可报」采信（CARET_SRC_TSF_DEFAULT_POS），
+                // 而不是继续丢弃、跌到 GUIThreadInfo 的无关光标上。见 CaretProbeKind。
+                if (!pThis->_pTextService->RequestCaretPositionUpdateAsync(CaretProbeKind::RetryDeadline))
                 {
                     WIND_LOG_DEBUG(L"CARET_RETRY timer: async request not issued, falling back to sync path\n");
                     pThis->_pTextService->SendCaretPositionUpdate();

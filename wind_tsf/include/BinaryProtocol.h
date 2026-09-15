@@ -296,6 +296,28 @@ constexpr int32_t CARET_SRC_LAST_KNOWN     = 6; // 上次已知好值
 // OnLayoutChange 被 debounce 压住、整段没有权威坐标，它是唯一的位置来源（详见 Rust 侧
 // `caret_source::PRE_REFLOW` 的注释）。
 constexpr int32_t CARET_SRC_PRE_REFLOW     = 7;
+// 宿主对本 context 报「没有插入点可给」的惯用语：GetTextExt 返回一个高度为 0 的**退化**
+// 矩形，且**重试窗口过完仍是它**。Illustrator 30.8 画布文字实测恒为
+// (2559,1367,2560,1367)——选区矩形 / 组合起点 / 组合矩形三者同值，正是工作区右下角
+// 最后一个像素；同机 10 个宿主给的是同一个值。
+//
+// ★ 它不是垃圾值，是**一句答复**。其它输入法直接采信，候选窗因此都落在屏幕右下角
+// （任务栏之上）；我们此前按「退化 ⇒ 宿主还没排完版」一律丢弃，回退链于是跌到
+// CARET_SRC_GUI_CARET —— 那是 Illustrator 界面里某个无关控件的 Win32 光标 (10,30)，
+// 候选窗被钉在屏幕左上角。丢弃比采信更糟。
+//
+// ⚠ 判据必须是「**重试窗口过完**仍退化」，不能一见退化就当默认位置：实测存在只退化
+// 30ms 随后变成 (473,189,478,217) 的混合场景，50ms 的 CARET_RETRY 定时器正好救得回来，
+// 提前采信只会凭空多出一次闪跳。故它只由 CaretProbeKind::RetryDeadline 那条路产出，
+// 以及同一次组合内被该判决闩住之后的同步路径。
+//
+// ⚠ 高度是**合成**的（WIND_DEFAULT_CARET_HEIGHT）：原值 h=0 会被服务端的
+// `caret_is_valid`（要求 height > 0）整条丢掉，等于修了个寂寞。
+//
+// ⚠ 它**不属于** TSF 语义域（Rust 侧 `caret_source::is_tsf` 返回 false）：虽出自 TSF
+// context，但它明说「这里没有插入点」，不得用于跟行、漂移校正那类需要真插入点的逻辑。
+// 详见 Rust 侧 `caret_source::TSF_DEFAULT_POS` 的注释。
+constexpr int32_t CARET_SRC_TSF_DEFAULT_POS = 8;
 
 // Caret position payload v2 (24 bytes) = CaretPayload + source
 //

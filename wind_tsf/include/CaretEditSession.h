@@ -19,6 +19,20 @@ enum class CaretProbeKind
     // 走 probe 通道意味着 wait 档一律忽略、fast 档才读，因此本探测**不改变任何现有行为**。
     // 作废判据同 Composition（靠 _pComposition 判活）。
     FirstShowProbe,
+    // CARET_RETRY 定时器到期后的那一次取坐标——即「**重试窗口已经过完**」。
+    //
+    // 它与 Composition 的**唯一**区别是对退化矩形的处置：普通 probe 见到 h<=0 一律丢弃
+    // （宿主还在排版，等下一帧就是了），而走到这里意味着已经等过一整个重试窗口，宿主给的
+    // 还是那个退化矩形——那就不是「还没算完」，是它在答「本 context 没有插入点可报」。
+    // 此时采信其位置并上报 CARET_SRC_TSF_DEFAULT_POS（见 BinaryProtocol.h 该常量的注释）。
+    //
+    // ⚠ 必须与 Composition 分开，不能让定时器沿用默认 kind：OnLayoutChange 驱动的那些
+    // probe 与定时器这一次混在同一个 kind 上就无从区分，于是「一见退化就当默认位置」——
+    // 实测存在只退化 30ms 随后变成 (473,189,478,217) 的混合场景，本定时器正好救得回来，
+    // 提前采信只会凭空多出一次闪跳。
+    //
+    // 作废判据同 Composition（靠 _pComposition 判活）。
+    RetryDeadline,
 };
 
 // 异步取坐标的回调结果。

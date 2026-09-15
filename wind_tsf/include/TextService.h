@@ -7,6 +7,8 @@
 // AsyncCaretResult / CaretProbeKind 按值出现在 OnAsyncCaretRectReady 签名里，需要完整定义。
 // 反向不成立（CaretEditSession.h 只前置声明 CTextService），故无循环包含。
 #include "CaretEditSession.h"
+// 「宿主没有插入点可报」的纯判据（可单测，见 tests/caret_default_pos_policy_test.cpp）。
+#include "CaretDefaultPosPolicy.h"
 #include <string>
 #include <mutex>
 #include <vector>
@@ -267,7 +269,8 @@ public:
     // OnAsyncCaretRectReady 回调发出。同步锁在这些上下文里会被宿主合法拒绝
     // （TS_E_SYNCHRONOUS），详见 CCaretEditSession::RequestCaretRectAsync。
     // kind 决定回调怎么处理结果：Composition 发正式 caret_update；
-    // FirstShowProbe 只发 CMD_CARET_PROBE（wait 档忽略），用于零风险观测时序。
+    // FirstShowProbe 只发 CMD_CARET_PROBE（wait 档忽略），用于零风险观测时序；
+    // RetryDeadline 同 Composition，但退化矩形不再丢弃而是按宿主默认位置采信。
     BOOL RequestCaretPositionUpdateAsync(CaretProbeKind kind = CaretProbeKind::Composition);
 
     // OnSetFocus 专用：焦点刚到达、**尚无 composition** 时取一次插入点。
@@ -287,8 +290,11 @@ public:
     // Get caret position using TSF APIs (more accurate for browsers)
     // pUsedCompStart: 非空时输出「caret 是否由组合起点降级顶替」，用于区分两种 TSF 来源
     // pCompRect/pHasCompRect：整个组合 range 的包围矩形，见 BinaryProtocol.h 的 CaretPayloadV3
+    // pIsDefaultPos: 非空时输出「本次返回的是宿主的『没有插入点』默认位置」
+    //                （CARET_SRC_TSF_DEFAULT_POS，高度为合成值）。为真时 pUsedCompStart 无意义。
     BOOL GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart = nullptr,
-                                 RECT* pCompRect = nullptr, BOOL* pHasCompRect = nullptr);
+                                 RECT* pCompRect = nullptr, BOOL* pHasCompRect = nullptr,
+                                 BOOL* pIsDefaultPos = nullptr);
     BOOL GetCompositionStartPosition(LONG* px, LONG* py);
 
     // Input mode control
@@ -709,6 +715,25 @@ private:
     // 首帧 reflow 期间已发出的试探采样次数（见 OnLayoutChange 与 CMD_CARET_PROBE）。
     // 每次 StartComposition 归零；限次上报，防 burst 长的宿主刷 IPC。
     int  _firstShowProbeSeq = 0;
+    // 本次组合已判定「宿主对本 context 没有插入点可报」（CARET_SRC_TSF_DEFAULT_POS）。
+    //
+    // 由 CARET_RETRY 定时器那次异步取坐标（CaretProbeKind::RetryDeadline）作出判决，
+    // 判据是「重试窗口过完仍是退化矩形」。**闩住是为了同步路径**：此后每个按键都会走
+    // GetCaretPositionFromTSF，那里拿到的是同一个退化矩形，不闩住它就照旧 return FALSE
+    // 跌到 GUI_CARET（Illustrator 实测 (10,30)，界面上某个无关控件的 Win32 光标），
+    // 服务端的大偏移逃生阀随即把刚锁好的锚点重锁过去——首显对了、第二个键又跳回左上角。
+    //
+    // 生命周期：**只有 StartComposition 置 FALSE**（新组合重新判；那时 _pComposition 又非空，
+    // 上一轮的判决若残留就会套到新组合头上——Illustrator 画布恒退化、面板输入框正常，
+    // 同一进程内两种都有）。此后的作废**不靠各个出口复位**：组合的结束出口有四个
+    // （EndComposition、CommitText 自己把 _pComposition 置空、OnCompositionTerminated、
+    // 焦点切换），逐个补就是等着漏掉其中一个。改由读闩处的
+    // wind::caret::LatchApplies(_caretDefaultPosLatched, _pComposition != nullptr) 加作用域，
+    // 四个出口一个都不用管。见该函数注释里的失败场景。
+    //
+    // 另有一条作废口径：任何一帧**有效矩形**（h>0）都撤销判决——宿主证明了它有插入点。
+    // 同步与异步两条路同口径，唯 FirstShowProbe 除外（它立过「不改变任何现有行为」的规矩）。
+    BOOL _caretDefaultPosLatched = FALSE;
     BOOL _needsFocusRecovery;
     LONG _lastFocusCaretX;
     LONG _lastFocusCaretY;

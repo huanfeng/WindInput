@@ -157,6 +157,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME uielement_policy COMMAND uielement_policy_test)
 
+    add_executable(caret_default_pos_policy_test tests/caret_default_pos_policy_test.cpp)
+    target_include_directories(caret_default_pos_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(caret_default_pos_policy_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME caret_default_pos_policy COMMAND caret_default_pos_policy_test)
+
     add_executable(installer_guard_test tests/installer_guard_test.cpp)
     target_include_directories(installer_guard_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)

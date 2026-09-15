@@ -719,6 +719,14 @@ public:
             // 50ms timer 兜底（应对不发 OnLayoutChange 的应用，如某些 CUAS 路径）。
             _pTextService->_compositionJustStarted = TRUE;
             _pTextService->_firstShowProbeSeq = 0; // 新组合开始：试探采样计数归零
+            // 「宿主没有插入点可报」是上一轮组合的判决，新组合重新判。Illustrator 同一
+            // 进程内画布文字恒退化、面板输入框却正常（21 次组合里 5 次全程有效），
+            // 判决若跨组合残留，就会把面板里本来正确的坐标也按默认位置处理。
+            //
+            // ★ 这是该闩**唯一的复位点**，也必须有：读闩处的组合作用域
+            // （wind::caret::LatchApplies）挡的是「组合已经没了」，而这里新组合刚建好、
+            // _pComposition 又非空，作用域拦不住上一轮的残留判决。两者各管一头。
+            _pTextService->_caretDefaultPosLatched = FALSE;
         }
 
         // 2. Get range from composition
@@ -4796,11 +4804,15 @@ static thread_local CTextService* g_holdTimerInstance = nullptr;
 
 // Get caret position using TSF APIs (for browsers and modern apps)
 BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart,
-                                           RECT* pCompRect, BOOL* pHasCompRect)
+                                           RECT* pCompRect, BOOL* pHasCompRect, BOOL* pIsDefaultPos)
 {
     if (pUsedCompStart)
     {
         *pUsedCompStart = FALSE;
+    }
+    if (pIsDefaultPos)
+    {
+        *pIsDefaultPos = FALSE;
     }
 
     if (_pThreadMgr == nullptr)
@@ -4857,8 +4869,47 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
         // GetGUIThreadInfo which tracks the Win32 caret independently of composition.
         if (*pHeight <= 0)
         {
-            WIND_LOG_DEBUG(L"GetCaretPositionFromTSF: Degenerate rect (height=0), falling back\n");
-            return FALSE;
+            // 唯一的例外：本次组合已被判定为「宿主对本 context 没有插入点可报」
+            // （CARET_RETRY 定时器那次异步取坐标在重试窗口过完后仍拿到退化矩形）。
+            //
+            // 此后每个按键都会走到这里、拿到同一个退化矩形。继续 return FALSE 就会跌到
+            // GUI_CARET —— Illustrator 实测 (10,30)，是界面上某个无关控件的 Win32 光标；
+            // 服务端的大偏移逃生阀会拿它把刚锁好的锚点重锁过去，于是首显落对了、第二个键
+            // 又跳回屏幕左上角。采信宿主自己给的那个角落坐标，两半症状才一起消失。
+            //
+            // ⚠ 没有闩住判决时**一字不改**：那时退化只意味着「宿主还没排完版」，丢弃、
+            // 等下一帧才是对的（详见 CaretProbeKind::RetryDeadline 的注释）。
+            //
+            // ⚠⚠ 判决的作用域是**同一次组合**，而组合的结束出口有四个（EndComposition、
+            // CommitText 自己把 _pComposition 置空、OnCompositionTerminated、焦点切换）。
+            // 作用域做在这里、不在各个出口复位——理由与失败场景见 LatchApplies 的注释。
+            if (!wind::caret::LatchApplies(_caretDefaultPosLatched, _pComposition != nullptr))
+            {
+                WIND_LOG_DEBUG(L"GetCaretPositionFromTSF: Degenerate rect (height=0), falling back\n");
+                return FALSE;
+            }
+            // 高度必须合成：0 会被服务端 caret_is_valid（要求 height > 0）整条丢掉。
+            *pHeight = DEFAULT_CARET_HEIGHT;
+            if (pIsDefaultPos)
+            {
+                *pIsDefaultPos = TRUE;
+            }
+            WIND_LOG_DEBUG_FMT(L"GetCaretPositionFromTSF: 退化矩形 (%ld,%ld,%ld,%ld)，"
+                               L"本次组合已判定宿主无插入点，按默认位置采信 h=%ld\n",
+                               rc.left, rc.top, rc.right, rc.bottom, *pHeight);
+        }
+        else if (_caretDefaultPosLatched)
+        {
+            // 宿主排完版了 ⇒ 上一轮「没有插入点」的判决作废，回到常规语义。
+            //
+            // ⚠ 这行日志不可省，理由同 LangBarItemButton.cpp 的 CARET_RETRY 定时器：
+            // **判决点必须自己说话，不能靠周围的沉默去猜**。清闩不打日志的话，
+            // 「闩是谁清的」就只能从别的行反推——而 `OnAsyncCaretRectReady(...)` 那行是
+            // 在清闩**之后**才打的，它只证明回调到达、证明不了有没有清闩；下游那一跳
+            // `src=gui_caret` 又有好几个同形成因（二级降级失手、越界校验、宿主真恢复了）。
+            // 2026-08-03 查 Excel 680ms 重排窗口就是因为成功路径零日志绕了一大圈。
+            WIND_LOG_DEBUG_FMT(L"退化判决作废: by=sync_valid_rect h=%ld\n", *pHeight);
+            _caretDefaultPosLatched = FALSE;
         }
 
         // 坐标越界保护：坐标不落在任何显示器上时判定不可信，返回 FALSE，让 GetCaretPosition
@@ -5321,11 +5372,16 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
     // Method 1: Try TSF APIs first - this is the most reliable for browsers and modern apps
     // ITfContextView::GetTextExt provides accurate caret position in Chrome, Edge, etc.
     BOOL usedCompStart = FALSE;
-    if (GetCaretPositionFromTSF(px, py, pHeight, &usedCompStart, pCompRect, pHasCompRect))
+    BOOL isDefaultPos = FALSE;
+    if (GetCaretPositionFromTSF(px, py, pHeight, &usedCompStart, pCompRect, pHasCompRect, &isDefaultPos))
     {
         if (pSource)
         {
-            *pSource = usedCompStart ? CARET_SRC_TSF_COMPOSITION : CARET_SRC_TSF_SELECTION;
+            // 默认位置优先：它答的是「这里没有插入点」，与另外两级的「插入点在这儿」
+            // 语义相反，标成 TSF 权威源会让服务端拿它做跟行/漂移校正。
+            *pSource = isDefaultPos ? CARET_SRC_TSF_DEFAULT_POS
+                       : usedCompStart ? CARET_SRC_TSF_COMPOSITION
+                                       : CARET_SRC_TSF_SELECTION;
         }
         return TRUE;
     }
@@ -5732,12 +5788,78 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
         return;
     }
 
+    const wchar_t* kindName = isFocusProbe                                      ? L"focus"
+                              : (result.kind == CaretProbeKind::FirstShowProbe) ? L"first_show_probe"
+                              : (result.kind == CaretProbeKind::RetryDeadline)  ? L"retry_deadline"
+                                                                                : L"composition";
+
     LONG height = caretRect.bottom - caretRect.top;
+    // 「本 context 没有插入点可报」——退化矩形在**重试窗口过完之后**仍然是它。
+    //
+    // 普通 probe 见到退化矩形一律丢弃（宿主还在排版，等下一帧即可），这条不变；
+    // 而 RetryDeadline 这一次是 CARET_RETRY 定时器到期后发起的，走到这里说明已经等过
+    // 一整个重试窗口，宿主给的还是同一个退化矩形。那不是「还没算完」，是宿主在答
+    // 「这里没有插入点」——Illustrator 30.8 画布文字恒为 (2559,1367,2560,1367)。
+    // 丢弃它的代价是回退链跌到 GUIThreadInfo 的无关光标 (10,30)，候选窗钉死在屏幕左上角，
+    // 比采信这个屏幕角落坐标糟得多（详见 BinaryProtocol.h 的 CARET_SRC_TSF_DEFAULT_POS）。
+    //
+    // ⚠ 高度必须**合成**一个：原值 0 会被服务端 `caret_is_valid`（要求 height > 0）整条
+    // 丢掉。补 WIND_DEFAULT_CARET_HEIGHT，与 GUI 回退路径补高度的口径一致。
+    //
+    // ⚠⚠ 判据**不是**「退化就采信」，而是一条指纹：选区矩形 / 组合起点 / 组合整体矩形
+    // 三者全同（见 wind::caret::IsHostDefaultPosition）。证据只来自 Illustrator 一家，
+    // 而「形态相同、期望相反」在本仓翻过车——compat.toml:261 的
+    // pin_anchor_when_start_drifts 2026-09-05 全局化当场弄坏 Excel。同一类风险，
+    // 所以要指纹而不是全局放行。
+    BOOL isDefaultPos = FALSE;
     if (height <= 0)
     {
-        // 退化矩形 = 宿主尚未完成排版，判据同 GetCaretPositionFromTSF。
-        WIND_LOG_DEBUG(L"OnAsyncCaretRectReady: degenerate rect (height=0), dropping\n");
-        return;
+        const BOOL fingerprint = wind::caret::IsHostDefaultPosition(
+            caretRect, result.hasCompStart, compStartRect, result.hasCompRect, result.compRect);
+        if (result.kind != CaretProbeKind::RetryDeadline || !fingerprint)
+        {
+            // 退化矩形 = 宿主尚未完成排版，判据同 GetCaretPositionFromTSF。
+            WIND_LOG_DEBUG_FMT(L"OnAsyncCaretRectReady: degenerate rect (height=0), dropping"
+                               L" (retry_deadline=%d fingerprint=%d)\n",
+                               result.kind == CaretProbeKind::RetryDeadline ? 1 : 0,
+                               fingerprint ? 1 : 0);
+            return;
+        }
+        isDefaultPos = TRUE;
+        height = DEFAULT_CARET_HEIGHT;
+        // 闩住这个判决，供本次组合内的**同步**路径复用：宿主每来一个按键都会走
+        // GetCaretPositionFromTSF，那里拿到的是同一个退化矩形。不闩住的话它照旧
+        // return FALSE 跌到 GUI_CARET (10,30)，服务端的大偏移逃生阀会把刚锁好的锚点
+        // 重锁过去 —— 首显对了、第二个键又跳回左上角。StartComposition 处复位。
+        _caretDefaultPosLatched = TRUE;
+        WIND_LOG_INFO_FMT(L"OnAsyncCaretRectReady(retry_deadline): 重试窗口过完仍退化 "
+                          L"rect=(%ld,%ld,%ld,%ld)，按宿主默认位置采信，补高度 h=%ld\n",
+                          caretRect.left, caretRect.top, caretRect.right, caretRect.bottom,
+                          height);
+    }
+    else if (result.kind == CaretProbeKind::Composition || result.kind == CaretProbeKind::RetryDeadline)
+    {
+        // 宿主拿得出一个有高度的矩形 ⇒ 它是有插入点的，之前那条「没有插入点」的判决
+        // （若有）就此作废。判据与同步路径同口径：**任何一帧有效矩形都撤销判决**，
+        // 而不是只认 RetryDeadline 那一次——两处不同口径迟早各自漂移。
+        //
+        // ⚠ **白名单，不是黑名单**：只有「本组合的正式取坐标」这两个 kind 有资格作废判决。
+        // 与本次改动在 LatchApplies 上用的是同一条教训——不要逐个排除，那种写法会漏掉
+        // 下一个新增项。两个被排除者各有各的理由：
+        //   FirstShowProbe —— CaretEditSession.h 给它立的规矩是「本探测**不改变任何现有
+        //     行为**」，它只发 CMD_CARET_PROBE、不走正式 caret_update。在这里清闩就是一次
+        //     悄悄的行为改变，而且极其隐蔽：它是组合刚启动就发的，若与 RetryDeadline 的
+        //     回调交错到达，会把刚作出的判决无声撤销，症状是「有时好有时钉在左上角」。
+        //   Focus —— 它讲的是**另一个 context** 的事。拿它的有效高度去作废旧组合的判决
+        //     没有依据（可达性很窄：要焦点回调在旧组合仍活着时返回，但窄不等于没有）。
+        //
+        // 内层再判一次「闩着没」只为日志：这是每帧都走的热路径，无条件打就是刷屏，
+        // 而这行的全部价值在于**它出现的那一刻**。
+        if (_caretDefaultPosLatched)
+        {
+            WIND_LOG_DEBUG_FMT(L"退化判决作废: by=async_valid_rect(%s) h=%ld\n", kindName, height);
+            _caretDefaultPosLatched = FALSE;
+        }
     }
 
     // 本路径丢弃即终点（没有回退链），误伤一次候选窗就定位失败。
@@ -5758,10 +5880,11 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
         compStartY = compStartRect.bottom;
     }
 
-    const int source = result.usedCompStartAsCaret ? CARET_SRC_TSF_COMPOSITION : CARET_SRC_TSF_SELECTION;
-    const wchar_t* kindName = isFocusProbe                                    ? L"focus"
-                              : (result.kind == CaretProbeKind::FirstShowProbe) ? L"first_show_probe"
-                                                                                : L"composition";
+    // 默认位置优先级最高：它说的是「这里根本没有插入点」，比 selection / 组合起点降级
+    // 都更靠后（走到这里两者都已退化），标错会让服务端把它当真插入点参与跟行。
+    const int source = isDefaultPos              ? CARET_SRC_TSF_DEFAULT_POS
+                       : result.usedCompStartAsCaret ? CARET_SRC_TSF_COMPOSITION
+                                                     : CARET_SRC_TSF_SELECTION;
     WIND_LOG_DEBUG_FMT(L"OnAsyncCaretRectReady(%s): caret(%ld,%ld h=%ld) compStart=(%ld,%ld) src=%d\n",
                        kindName,
                        caretRect.left, caretRect.bottom, height, compStartX, compStartY, source);

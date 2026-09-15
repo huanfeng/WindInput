@@ -8675,6 +8675,102 @@ mod caret_compat_tests {
         );
     }
 
+    /// 宿主默认位置（`TSF_DEFAULT_POS`）同样跳过 500px 同源校验。
+    ///
+    /// 它出自 TSF context 却刻意判为**非** TSF 域（见 `caret_source::is_tsf` 的注释）。
+    /// 本测试把那条判定钉在行为上：把 `TSF_DEFAULT_POS` 划进 TSF 域，这里就会走 500px
+    /// 那一支而丢掉组合起点——与上面 `tsf_caret_still_rejects_far_composition_start` 恰好
+    /// 互为反例，两条一起才能区分「按来源放行」与「干脆不再校验」。
+    #[test]
+    fn tsf_default_pos_caret_skips_composition_start_distance_check() {
+        assert!(
+            lock_comp_start_with(wind_ipc::protocol::caret_source::TSF_DEFAULT_POS),
+            "宿主默认位置不是真插入点，与组合起点不同源，须跳过距离校验直接锁定"
+        );
+    }
+
+    /// Illustrator 30.8 画布文字实测形态：宿主对本 context 报「这里没有插入点」，
+    /// `GetTextExt` 恒返回 `(2559,1367,2560,1367)`——选区矩形 / 组合起点 / 组合矩形
+    /// 三者同值，正是工作区（2560×1368）右下角最后一个像素。
+    ///
+    /// `height` 由 DLL **合成**后上报（原值是 0），本参数用来把这一点单独测出来。
+    fn illustrator_default_pos(height: i32) -> CaretData {
+        CaretData {
+            x: 2559,
+            y: 1367,
+            height,
+            composition_start_x: 2559,
+            composition_start_y: 1367,
+            source: wind_ipc::protocol::caret_source::TSF_DEFAULT_POS,
+            composition_rect: Some((2559, 1367, 2560, 1367)),
+        }
+    }
+
+    fn composing_and_awaiting_first_show() -> Arc<Coordinator> {
+        let c = coord();
+        c.state.lock().unwrap().input_buffer = "ab".to_string();
+        *c.pending_first_show.lock().unwrap() = true;
+        c
+    }
+
+    /// 宿主默认位置必须**当场**消费首显等待，而不是被丢弃后空等兜底到期。
+    ///
+    /// 这是 D-3 那 600ms 空等的根：闸门 arm 了最长档，而到期时手里的还是同一个退化矩形
+    /// ——没有任何东西可等。此前 DLL 把这一帧整条丢掉，服务端因此连「等不到」都不知道。
+    #[test]
+    fn tsf_default_pos_consumes_pending_first_show_at_once() {
+        let c = composing_and_awaiting_first_show();
+        c.handle_caret_update(&illustrator_default_pos(20));
+        assert!(
+            !*c.pending_first_show.lock().unwrap(),
+            "首显等待必须被这一帧消费掉，否则又要空等一整个兜底窗口"
+        );
+        assert!(
+            *c.candidate_shown.lock().unwrap(),
+            "消费首显等待就要真的把候选窗下发出去，否则等待白消费了"
+        );
+        assert_eq!(
+            *c.composition_start.lock().unwrap(),
+            (2559, 1367, true),
+            "锚点要锁到宿主给的那个位置——候选窗落到右下角任务栏之上靠的就是它\
+             （place_window 的上翻 + 左移 + 钳到 rcWork 会自己把它收进屏内）。\
+             ⚠ 本条**区分不了走的是哪一支**：Illustrator 的 compStart 与 caret 同值，\
+             跳过校验与通过 500px 校验结果相同。哪一支由 \
+             `tsf_default_pos_caret_skips_composition_start_distance_check` 单独钉"
+        );
+        let st = c.state.lock().unwrap();
+        assert_eq!(
+            (st.caret_x, st.caret_y, st.caret_source),
+            (
+                2559,
+                1367,
+                wind_ipc::protocol::caret_source::TSF_DEFAULT_POS
+            ),
+            "坐标与来源都要如实落缓存：来源一旦被改写成 TSF 权威源，\
+             跟行/漂移校正就会拿这个恒定不动的屏幕角落像素当插入点"
+        );
+    }
+
+    /// 高度 0 的帧照旧整条丢弃 —— 这正是 DLL 侧**必须合成一个高度**的理由。
+    ///
+    /// 退化矩形原样上报（h=0）会被服务端吃掉，等于修了个寂寞。**两道闸门各自都能吃掉它**：
+    /// `handle_caret_update` 入口的 `data.height == 0` 与 `caret_is_valid` 的 `height > 0`，
+    /// 所以只放宽其中一道本测试不会变色——要两道一起放宽才变红。两道都在，正说明「h=0
+    /// 上不去」不是某一处的偶然，改任何一处都别指望它能过。
+    #[test]
+    fn a_zero_height_frame_is_dropped_even_for_tsf_default_pos() {
+        let c = composing_and_awaiting_first_show();
+        c.handle_caret_update(&illustrator_default_pos(0));
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "h=0 是退化矩形的原值，服务端必须照旧丢弃；DLL 得自己补高度"
+        );
+        assert!(
+            !*c.candidate_shown.lock().unwrap(),
+            "被丢弃的帧不得把候选窗下发出去"
+        );
+    }
+
     #[test]
     fn overflow_sentinel_composition_start_is_rejected_without_panicking() {
         let c = coord();
