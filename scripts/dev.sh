@@ -724,6 +724,47 @@ Unregister-ScheduledTask -TaskName 'WindInputDeployBoot' -Confirm:\$false" >/dev
     fi
 }
 
+# TSF DLL 的**系统副本**同步：<System32|SysWOW64>\IME\<App>\。
+#
+# ★ 为什么必须有这一步：TSF 由 COM 按注册表 InprocServer32 加载，而现行部署注册的是
+#   系统副本（见 dev.ps1 的 Get-TsfSystemDir / Register-Tsf，DLL 必须在系统目录才能被
+#   CS2 等 Trusted Mode 宿主放行）。只推安装目录 = 宿主加载的还是上一次 install 时的
+#   那份旧 DLL，**且全程没有任何报错**：scp 成功、进程重启成功、MD5 与本地一致 ——
+#   一致的是没人加载的那份。2026-09-15 靶机实测因此空转了四轮，判据全落在 Program Files
+#   那份上，而 Notepad 里跑的是三天前的 DLL（真凭据是 TSF 日志首行的 build=<日期>，
+#   以及 Get-Process 的 Modules 里 wind_tsf*.dll 的 FileName）。
+#
+# 源取远端安装目录里刚推上去的那份（不二次 scp）；改名让路后覆盖，再回校 hash。
+remote_sync_tsf_system_copy() {
+    local profile="$1" sfx="" app="WindInput"
+    [ "$profile" = dev ] && { sfx="_dev"; app="WindInputDev"; }
+    say "同步 TSF 系统副本 → %SystemRoot%\\{System32,SysWOW64}\\IME\\$app\\ ..."
+    # ⚠ 必须在 64 位 PowerShell 里跑：32 位进程访问 System32 会被 WOW64 文件系统重定向
+    # 静默改写到 SysWOW64 —— x64 DLL 装错地方，而下面的 Get-FileHash 比的是**重定向后的
+    # 同一个文件**，校验照样通过。又是一次「全程零报错但换错了文件」，正是本函数要根治的
+    # 那类故障。判据与 dev.ps1 的 Get-TsfSystemDir 同源（那边也是 throw，不做自动纠正：
+    # 静默纠正会掩盖调用方本身跑错了架构这一事实）。
+    remote_ps "\$ErrorActionPreference='Stop'; \
+if(-not [Environment]::Is64BitProcess){ throw '需要 64 位 PowerShell（32 位进程访问 System32 会被 WOW64 重定向到 SysWOW64）' }; \
+\$stamp=Get-Date -Format 'yyyyMMddHHmmss'; \
+\$pairs=@( \
+ @{src=Join-Path '$REMOTE_DIR' 'wind_tsf${sfx}.dll'; dst=Join-Path \$env:SystemRoot 'System32\\IME\\$app\\wind_tsf${sfx}.dll'; required=\$true}, \
+ @{src=Join-Path '$REMOTE_DIR' 'wind_tsf_x86${sfx}.dll'; dst=Join-Path \$env:SystemRoot 'SysWOW64\\IME\\$app\\wind_tsf_x86${sfx}.dll'; required=\$false} ); \
+\$fail=0; \
+foreach(\$p in \$pairs){ try { \
+ if(-not (Test-Path \$p.src)){ \
+   if(\$p.required){ \"FAIL  无源文件 \$(\$p.src)\"; \$fail++ } else { \"SKIP  无源文件 \$(\$p.src)\" } continue } \
+ \$dir=Split-Path \$p.dst -Parent; if(-not (Test-Path \$dir)){ New-Item -ItemType Directory -Force -Path \$dir | Out-Null } \
+ if(Test-Path \$p.dst){ Rename-Item -LiteralPath \$p.dst -NewName ((Split-Path \$p.dst -Leaf)+'.old_'+\$stamp) -Force } \
+ Copy-Item -LiteralPath \$p.src -Destination \$p.dst -Force; \
+ \$a=(Get-FileHash -Algorithm MD5 \$p.src).Hash; \$b=(Get-FileHash -Algorithm MD5 \$p.dst).Hash; \
+ if(\$a -eq \$b){ \"OK    \$(\$p.dst)\" } else { \"FAIL  hash 不符 \$(\$p.dst)\"; \$fail++ } \
+} catch { \"FAIL  \$(\$p.dst) :: \$(\$_.Exception.Message)\"; \$fail++ } } \
+if(\$fail -gt 0){ exit 1 }" || {
+        err "TSF 系统副本同步失败（需要管理员权限的 SSH 会话）"; return 1; }
+    remote_ps "\$ErrorActionPreference='SilentlyContinue'; foreach(\$d in @((Join-Path \$env:SystemRoot 'System32\\IME\\$app'),(Join-Path \$env:SystemRoot 'SysWOW64\\IME\\$app'))){ Get-ChildItem -Path \$d -Filter '*.old_*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue }" >/dev/null 2>&1 || true
+}
+
 # 清理历史改名残留 .old_*（仍被占用的会自动跳过，下次部署再清）。
 remote_cleanup_old() {
     remote_ps "Get-ChildItem -Path '$REMOTE_DIR' -Filter '*.old_*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue" >/dev/null 2>&1 || true
@@ -745,6 +786,8 @@ do_push_full() {
     remote_rename_aside "${bins[@]}"
     say "全量推送 $outdir/ → $WIND_REMOTE:$REMOTE_DIR/"
     if scp -r "$outdir"/* "$WIND_REMOTE:$REMOTE_DIR/"; then
+        # ★ 与 do_push_module 同理：不同步系统副本，新 TSF DLL 不会被任何宿主加载。
+        remote_sync_tsf_system_copy "$profile" || return 1
         remote_start_main "$profile"
         remote_cleanup_old
         say "已全量部署并启动（$profile）。"
@@ -787,6 +830,16 @@ do_push_module() {
         scp "$outdir/$f" "$WIND_REMOTE:$REMOTE_DIR/$f" || { err "scp $f 失败"; ok=0; }
     done
     if [ "$ok" = 1 ]; then
+        # ★ TSF 必须同步系统副本：宿主按注册表 InprocServer32 加载的是那一份，
+        #   只推安装目录等于什么都没换（且全程不报错，见 remote_sync_tsf_system_copy）。
+        #
+        # ⚠ 这里**必须 return**，不能只置 ok=0：本段整个在 `if [ "$ok" = 1 ]` 内部，
+        #   置位之后没有任何人再读 ok，函数就此结束 —— 结果是同步失败仍旧重启主进程、
+        #   仍旧打印「模块部署完成」、仍旧返回 0。那正是本函数要根治的那类故障换了张脸：
+        #   从「全程零报错」变成「报了一行错、最后仍说成功」。与 do_push_full 保持一致。
+        case "$mod" in
+            tsf) remote_sync_tsf_system_copy "$profile" || return 1 ;;
+        esac
         # 推了核心/TSF 则重启主进程让其立即生效
         case "$mod" in core|tsf) remote_start_main "$profile" ;; esac
         remote_cleanup_old
