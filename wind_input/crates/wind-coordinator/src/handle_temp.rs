@@ -1505,11 +1505,18 @@ impl Coordinator {
         self.notify_ui_update(state);
         let prefix = state.temp_pinyin_prefix.clone();
         match committed {
+            // 顶字进入（按下时有半成品可上屏）：**这条不看开关**，因为它本来就不会插占位
+            // —— prefix 为空时 `commit_then_new_composition` 走的是
+            // `InsertText { new_composition: None }`，压根不建 composition，与开关想避免的
+            // 「为取坐标而插占位」不是一回事。
+            //
+            // ⚠️ 直达热键的典型用法恰恰是**打了一半再按**，也就是说走的多半是这一支；
+            // 开关只管下面那支（按下时缓冲是空的）。这一点在 `temp_pinyin_via_composition`
+            // 的文档里也写着，改判据时两处要一起改。
             Some(text) => self.commit_then_new_composition(text, prefix),
-            None => KeyAction::UpdateComposition {
-                text: prefix.clone(),
-                caret_pos: prefix.chars().count() as u32,
-            },
+            // 直达热键进入时 prefix 为空（`key_code == 0` 不写引导符），此时是否建占位
+            // composition 取坐标由 `[input.caret]` 决定；引导键进入时 prefix 非空，开关不参与。
+            None => self.temp_pinyin_entry_composition(key_code, prefix),
         }
     }
 }

@@ -412,6 +412,12 @@ impl MessageHandler for Coordinator {
 
     fn preedit_uses_placeholder(&self) -> bool {
         // 非 app_inline（候选窗自显 preedit）→ 应用侧用占位空格，不重复显示编码。
+        //
+        // ⚠️ 这里**只看 preedit 显示模式**，不要把 `[input.caret]` 的逐模式开关叠进来。
+        // 叠过一次（2026-09-15），两个毛病：① 本函数在出厂 app_inline 下恒为 false，
+        // 那几个开关因此完全惰性，配了也不生效；② 它是全局出口，某一个模式的开关会顺带
+        // 改写所有路径的 preedit 形态。开关各自在 `enter_*` 里决定发什么，见
+        // `enter_add_word_mode`。
         self.preedit_display
             .lock()
             .map(|m| !m.in_app())
@@ -3790,5 +3796,74 @@ mod ext_envelope_tests {
         ] {
             assert_eq!(decode_ext_point(bad), None, "body={:?} 应被拒", bad);
         }
+    }
+}
+
+impl Coordinator {
+    /// 热键进入的 overlay 模式（临拼 / 特殊 / 生僻字）该发什么组合区。
+    ///
+    /// # 为什么只在 `display` 为空时看开关
+    ///
+    /// 这几个模式有两条进入方式，组合区形态完全不同：
+    /// - **引导键**（`\`、`z` 等）⇒ `display` 含引导符，是**真实内容**，必须建 composition
+    ///   才显示得出来。此刻替换选中内容本就是标准行为，开关不该、也不能干预。
+    /// - **直达热键**（`key_code == 0` ⇒ 不写引导符）⇒ `display` 为空。这时建 composition
+    ///   的唯一目的是**撑开 range 取坐标**（空组合区由 C++ 侧补一个占位空格），而那个占位
+    ///   建在当前 selection 上，用户选中着文字时会被替换掉（t123）。开关管的就是这一种。
+    ///
+    /// 关掉时返回 `Consumed`：**根本不发** `UpdateComposition`，DLL 收不到东西也就不会建
+    /// composition，选中内容原样保留；坐标退到 `GetCaretPosition` 的回退链。代价是那条回退
+    /// 链在很多宿主上不准——这正是开关按模式分设、默认全开的原因（见 `CaretPlacementConfig`）。
+    fn hotkey_entry_composition(
+        &self,
+        key_code: u32,
+        display: String,
+        via_composition: bool,
+    ) -> KeyAction {
+        // ⚠️ 判据是 `key_code == 0` 这个**显式哨兵**，不是 `display.is_empty()`。
+        // 后者是派生值，双向都会失真：
+        //   正向 —— 引导键映射不出字符时（`vk_to_prefix_char_with_letters` 只认标点表
+        //     和 A-Z，其余回 None ⇒ 前缀空 ⇒ display 空），会把一次**引导键**进入误判成
+        //     直达热键而返回 `Consumed`，表现为引导键被吞：模式进了、候选窗弹了，组合区
+        //     却没建、引导符不显示。
+        //   反向 —— 将来 `update_special_candidates` 让 `state.preedit` 在进入瞬间带上
+        //     任何东西（模式标签、show_all_on_enter 的提示、注释模板），开关就静默失效，
+        //     配了不生效且没有任何一条测试会红。
+        // 哨兵的出处见 `commit_and_enter_temp_pinyin` 与 `enter_special_mode`：直达热键
+        // 分派时一律传 0，「不写引导符」正是靠它。
+        debug_assert!(
+            key_code != 0 || display.is_empty(),
+            "直达热键（key_code==0）不写引导符，组合区理应为空，实际 display={display:?}"
+        );
+        if key_code == 0 && !via_composition {
+            return KeyAction::Consumed;
+        }
+        let caret_pos = display.chars().count() as u32;
+        KeyAction::UpdateComposition {
+            text: display,
+            caret_pos,
+        }
+    }
+
+    /// 临拼直达热键进入时是否用占位 composition 取坐标。
+    pub(crate) fn temp_pinyin_entry_composition(
+        &self,
+        key_code: u32,
+        display: String,
+    ) -> KeyAction {
+        let on = self.rt().config.input.caret.temp_pinyin_via_composition;
+        self.hotkey_entry_composition(key_code, display, on)
+    }
+
+    /// 特殊模式直达热键进入时是否用占位 composition 取坐标。
+    pub(crate) fn special_entry_composition(&self, key_code: u32, display: String) -> KeyAction {
+        let on = self.rt().config.input.caret.special_via_composition;
+        self.hotkey_entry_composition(key_code, display, on)
+    }
+
+    /// 生僻字直达热键进入时是否用占位 composition 取坐标。
+    pub(crate) fn rare_char_entry_composition(&self, key_code: u32, display: String) -> KeyAction {
+        let on = self.rt().config.input.caret.rare_char_via_composition;
+        self.hotkey_entry_composition(key_code, display, on)
     }
 }

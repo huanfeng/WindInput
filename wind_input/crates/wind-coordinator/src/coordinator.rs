@@ -7873,6 +7873,273 @@ mod mode_comment_e2e_tests {
         (c, rx)
     }
 
+    /// ★★★ 占位 composition 的逐模式开关（`[input.caret]`），**在出厂配置下**逐条验。
+    ///
+    /// # 这个开关在管什么
+    ///
+    /// 加词/临拼/特殊/生僻字由**直达热键**进入时组合区为空（`key_code == 0` ⇒ 不写引导符），
+    /// 却要立刻显示候选窗，于是发一个占位 composition 让 TSF 把 range 撑开、好取坐标。
+    /// 而占位建在**当前 selection** 上 —— 用户选中着文字时会被它替换掉（t123：Ctrl+= 造词
+    /// 吃掉编辑器里选中的文字）。关掉即不发，坐标退到 GUITHREADINFO/GetCaretPos 回退链。
+    ///
+    /// # ⚠ 为什么必须用出厂配置来测
+    ///
+    /// 上一版把开关叠在 `preedit_uses_placeholder()` 上，而那个判据在 `app_inline` 下**恒为
+    /// false** —— 出厂 `data/config.toml` 正是 `preedit_display = "app_inline"`。上一版两条
+    /// 测试都先把它改成 `candidate_top`（还写着「否则基线判据就是 false，测不到开关」），
+    /// 正好把出厂路径整条绕开：开关在出厂配置下完全惰性，而加词的占位空格被
+    /// 「协调器不发 + 出口不补 + C++ 侧刚移除隐式补空格」三处同时放掉，谁都没红。
+    ///
+    /// 所以这里**一律用 `Config::default()`**，不动 `preedit_display`。
+    ///
+    /// 变异检验：把任一 `enter_*` 里的开关判断去掉 ⇒ 对应那条立刻红。
+    ///
+    /// # TODO（结构，无正确性风险）
+    ///
+    /// 本用例里断言具体值的那两处，钉的其实**不是开关**，而是「占位归谁造」这个契约：
+    /// 加词开着那半钉「由协调器造」（`assert_eq!(text, COMPOSITION_PLACEHOLDER)`），
+    /// `overlay_...` 那半钉「由 C++ 兜底补、协调器不许自己补」（断言 text 为空）。
+    /// 它们住在一个名为「开关是否被读到」的用例里，将来有人整理开关测试时完全有理由
+    /// 把它们当冗余删掉 —— 而那恰恰是唯一会红在 C1（占位来源被三处同时放掉）上的部分，
+    /// 注释拦不住重构。根治是拆成不带开关的独立用例
+    /// （`factory_add_word_sends_the_placeholder_itself` /
+    /// `hotkey_entry_leaves_the_placeholder_to_the_dll`），那样即便四个开关将来整个下线
+    /// （实测下来都该关、于是硬编码），契约仍有独立守卫。本轮改动面已不小，单列跟进。
+    #[test]
+    fn caret_switches_are_read_in_the_factory_config() {
+        // 前提先钉死：出厂就是 app_inline。这条若变了，本测试的前提说明也要跟着改。
+        assert_eq!(
+            Config::default().ui.candidate.preedit_display,
+            "app_inline",
+            "出厂 preedit_display 变了，请重新审视本组测试的前提"
+        );
+
+        // ── 加词：display 恒为空，开关直接决定发不发占位 ──
+        let enter_add_word = |c: &Arc<Coordinator>| {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            c.enter_add_word_mode(&mut st)
+        };
+
+        // ★ 出厂加词是 **false**（2026-09-15 定，见 `CaretPlacementConfig::default`）：
+        // t123 报的就是 Ctrl+= 造词吃掉选中文字，而加词弹的是预览窗、对坐标精度的敏感度
+        // 低于候选列表，靶机实测回退链够用 ⇒ 这一项上「保住用户的字」赢过「坐标最准」。
+        // 前提钉在这里：有人改回 true 会红在本行，提示他重新审视上面那段取舍，而不是
+        // 默默让 t123 回来。
+        assert!(
+            !Config::default().input.caret.add_word_via_composition,
+            "出厂加词开关变了，请重新审视 t123 的取舍与本组测试的前提"
+        );
+
+        let (c, _rx) = coord_with_ui(Config::default());
+        match enter_add_word(&c) {
+            // 出厂 false ⇒ **完全不碰 composition**。不能退而发空组合区：admin 2026-09-15
+            // 实测「只要对 composition 做操作，选中内容就会被清空（且与宿主有关）」。
+            KeyAction::Consumed => {}
+            other => {
+                panic!("出厂加词应不建任何组合区（否则仍会吃掉选中的文字），实际: {other:?}")
+            }
+        }
+
+        let mut on = Config::default();
+        on.input.caret.add_word_via_composition = true;
+        let (c_on, _rx) = coord_with_ui(on);
+        match enter_add_word(&c_on) {
+            // 打开 ⇒ 必须发**非空**占位：空组合区在 WPS 等宿主上拿到退化矩形（height=0），
+            // 预览窗就没有坐标来源了。
+            //
+            // ⚠ 断言到**具体的值**而不只是「非空」：加词的 display 恒为空，占位是协调器
+            // 自己造出来的 —— 这一半钉的是「占位归谁造」这个契约，不只是开关。只断言
+            // 「非空」的话，「占位来源又漂回别处」就挡不住（它历史上在 C++ 侧、在出口
+            // 后处理里各待过一次，C1 就是这么来的）。
+            KeyAction::UpdateComposition { text, .. } => assert_eq!(
+                text,
+                wind_bridge::handler::COMPOSITION_PLACEHOLDER,
+                "开关打开 ⇒ 须由协调器自己发占位空格撑开 range"
+            ),
+            other => panic!("开关打开 ⇒ 应发占位 composition，实际: {other:?}"),
+        }
+    }
+
+    /// 三个 overlay 模式（临拼 / 特殊 / 生僻字）的开关：**只对直达热键那条生效**。
+    ///
+    /// 直达热键传 `key_code = 0` ⇒ 不写引导符 ⇒ 组合区为空 ⇒ 建 composition 的唯一目的就是
+    /// 撑开 range 取坐标，开关管的正是它。引导键（`\`、`z`）进入时组合区有真实内容，必须
+    /// 建 composition 才显示得出来，开关不该也不能干预 —— 下半段钉的就是这条边界。
+    #[test]
+    fn overlay_caret_switches_only_gate_the_hotkey_entry() {
+        // special / rare_char 共用一个形状：关掉开关 + 直达热键 ⇒ Consumed。
+        // 临拼的进入点签名不同（还要区分「有没有半成品可上屏」），单列在下面。
+        let cases: [(&str, fn(&mut Config), fn(&Arc<Coordinator>) -> KeyAction); 2] = [
+            (
+                "special",
+                |c: &mut Config| c.input.caret.special_via_composition = false,
+                |c: &Arc<Coordinator>| {
+                    let mut st = c.state.lock().unwrap();
+                    st.chinese_mode = true;
+                    c.enter_special_mode(&mut st, 0, 0) // key_code=0 = 直达热键
+                },
+            ),
+            (
+                "rare_char",
+                |c: &mut Config| c.input.caret.rare_char_via_composition = false,
+                |c: &Arc<Coordinator>| {
+                    let mut st = c.state.lock().unwrap();
+                    st.chinese_mode = true;
+                    c.enter_rare_char_mode(&mut st, 0)
+                },
+            ),
+        ];
+
+        for (name, turn_off, enter) in cases {
+            let (c_on, _rx) = coord_with_ui(Config::default());
+            // ⚠ 这一半连 text **为空**一起钉：这三个模式与加词不同，占位不在协调器造，
+            // 而是发一个空组合区、由 C++ 侧的兜底补空格（`TextService.cpp` 的
+            // `isPlaceholder` 分支）。若哪天有人在 Rust 侧也补一次，就成了双重占位
+            // （range 里两个空格），这一条会红。
+            match enter(&c_on) {
+                KeyAction::UpdateComposition { text, .. } => assert!(
+                    text.is_empty(),
+                    "{name}: 直达热键进入应发空组合区（占位由 C++ 兜底补），实际 text={text:?}"
+                ),
+                other => {
+                    panic!("{name}: 出厂开关为 true ⇒ 应建 composition 取坐标，实际: {other:?}")
+                }
+            }
+
+            let mut off = Config::default();
+            turn_off(&mut off);
+            let (c_off, _rx) = coord_with_ui(off);
+            match enter(&c_off) {
+                KeyAction::Consumed => {}
+                other => panic!("{name}: 开关关闭 + 直达热键 ⇒ 应 Consumed，实际: {other:?}"),
+            }
+        }
+
+        // ── 临拼：调用点签名与上面两个不同，单列 ──
+        //
+        // ⚠ 这一条是补上来的：`temp_pinyin_via_composition` 此前**零覆盖** —— 终审做过变异，
+        // 把 `temp_pinyin_entry_composition` 里的 `let on = ...config...` 换成 `let on = true;`
+        // ⇒ 728 套件一条都不红。而它恰恰是四个里最容易被误接的：调用点在
+        // `commit_and_enter_temp_pinyin` 的 `match committed` 里，两支待遇不同
+        // （`Some` 那支刻意不看开关），没有测试钉住的话，将来动那个函数很容易把 `None`
+        // 那支一并改掉而无人察觉。
+        {
+            let mut off = Config::default();
+            off.input.caret.temp_pinyin_via_composition = false;
+            let (c_tp, _rx) = coord_with_ui(off);
+            let act = {
+                let mut st = c_tp.state.lock().unwrap();
+                st.chinese_mode = true;
+                // 缓冲为空 ⇒ take_committed_with_highlight 回 None ⇒ 走看开关的那一支。
+                assert!(
+                    st.input_buffer.is_empty(),
+                    "前提：缓冲必须为空，否则走的是顶字那一支"
+                );
+                c_tp.commit_and_enter_temp_pinyin(&mut st, 0, "pinyin".to_string())
+            };
+            match act {
+                KeyAction::Consumed => {}
+                other => panic!("临拼：开关关闭 + 直达热键 ⇒ 应 Consumed，实际: {other:?}"),
+            }
+
+            let (c_on, _rx) = coord_with_ui(Config::default());
+            let act_on = {
+                let mut st = c_on.state.lock().unwrap();
+                st.chinese_mode = true;
+                c_on.commit_and_enter_temp_pinyin(&mut st, 0, "pinyin".to_string())
+            };
+            assert!(
+                matches!(act_on, KeyAction::UpdateComposition { .. }),
+                "临拼：出厂开关为 true ⇒ 应建 composition 取坐标，实际: {act_on:?}"
+            );
+        }
+
+        // ── 边界三：有半成品可上屏时，临拼开关**不参与** ──
+        //
+        // 直达热键的典型用法是打了一半再按，走的是 `Some(committed)` 那一支 ——
+        // 它本来就不插占位（prefix 为空 ⇒ `InsertText { new_composition: None }`），
+        // 与开关想避免的「为取坐标而插占位」不是一回事。这条边界此前只活在注释里。
+        {
+            let mut off = Config::default();
+            off.input.caret.temp_pinyin_via_composition = false;
+            let (c, _rx) = coord_with_ui(off);
+            let act = {
+                let mut st = c.state.lock().unwrap();
+                st.chinese_mode = true;
+                // 「有半成品可上屏」= `committed_text` 非空（已确认的转换前缀），
+                // **不是** input_buffer 非空 —— `take_committed` 取的是前者。
+                st.committed_text = "你好".to_string();
+                st.candidates.clear(); // 无候选 ⇒ 直接回 committed_text
+                c.commit_and_enter_temp_pinyin(&mut st, 0, "pinyin".to_string())
+            };
+            // 断言到**具体类型**而不是「不是 Consumed」：顶字那支发的是
+            // `InsertText { new_composition: None }`（prefix 为空 ⇒ 不带新组合区）。
+            // 只否定 Consumed 的话，哪天这支漂成别的 KeyAction 也照样绿。
+            match act {
+                KeyAction::InsertText {
+                    text,
+                    new_composition,
+                    ..
+                } => {
+                    assert_eq!(text, "你好", "顶字那支应把已确认的前缀上屏");
+                    assert!(
+                        new_composition.is_none(),
+                        "prefix 为空 ⇒ 不该带新组合区（带了就是又插了一次占位），实际: {new_composition:?}"
+                    );
+                }
+                other => panic!(
+                    "有半成品可上屏时走的是顶字那一支，开关不该干预（干预会丢掉已打的码），实际: {other:?}"
+                ),
+            }
+        }
+
+        // ── 边界一：引导键进入（display 非空）时，开关**不得**干预 ──
+        // 关掉开关，但用真实引导键 `z`（VK 0x5A）进入 ⇒ 组合区有内容，必须照常建。
+        let mut off = Config::default();
+        off.input.caret.rare_char_via_composition = false;
+        let (c, _rx) = coord_with_ui(off);
+        let act = {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            c.enter_rare_char_mode(&mut st, 0x5A)
+        };
+        match act {
+            KeyAction::UpdateComposition { text, .. } => assert!(
+                !text.is_empty(),
+                "引导键进入时组合区是真实内容，开关不该把它清空"
+            ),
+            other => panic!("引导键进入 ⇒ 必须建 composition 显示引导符，实际: {other:?}"),
+        }
+
+        // ── 边界二：★ 引导键**映射不出前缀字符**时，不得被当成直达热键吞掉 ──
+        //
+        // `vk_to_prefix_char_with_letters` 只认标点表和 A-Z，其余一律 `None`
+        // ⇒ `special_prefix` 为空 ⇒ `display` 为空。判据若用 `display.is_empty()`
+        // 当「直达热键」的代理，这里就会误判成热键进入并返回 `Consumed`，表现为
+        // **引导键被吞**：模式进了、候选窗弹了，组合区却没建、引导符不显示。
+        // 真判据是 `key_code == 0` 这个显式哨兵，本条钉的就是两者的分离。
+        //
+        // 变异检验：把 `hotkey_entry_composition` 的判据换回 `display.is_empty()`
+        // ⇒ 本条立刻红。
+        assert!(
+            wind_keys::keymap::vk_to_prefix_char_with_letters(0x70).is_none(),
+            "前提：VK_F1(0x70) 映射不出前缀字符，否则本用例选错了键"
+        );
+        let mut off2 = Config::default();
+        off2.input.caret.rare_char_via_composition = false;
+        let (c2, _rx) = coord_with_ui(off2);
+        let act2 = {
+            let mut st = c2.state.lock().unwrap();
+            st.chinese_mode = true;
+            c2.enter_rare_char_mode(&mut st, 0x70) // 非 0 ⇒ 是引导键进入，只是映射不出字符
+        };
+        assert!(
+            matches!(act2, KeyAction::UpdateComposition { .. }),
+            "key_code != 0 是引导键进入，哪怕映射不出前缀也不得吞键，实际: {act2:?}"
+        );
+    }
+
     /// 写一个只声明注释模板的方案文件，返回它的 data_dir。
     ///
     /// ⚠️ **内置方案一项都不声明**（见 `short_code_yield` 那轮的结论），所以方案级路径

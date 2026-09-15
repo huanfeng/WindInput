@@ -375,6 +375,11 @@ static REGISTRY: &[ConfigField] = &[
     f("input.temp_english.space_as_input", Bool),
     f("input.temp_english.raw_candidate", Bool),
     f("input.temp_english.commit_space", Bool),
+    // 候选窗定位方式（内部配置，不进设置页 —— 见 wind-setting 的 uncovered allowlist）。
+    f("input.caret.add_word_via_composition", Bool),
+    f("input.caret.temp_pinyin_via_composition", Bool),
+    f("input.caret.special_via_composition", Bool),
+    f("input.caret.rare_char_via_composition", Bool),
     f("input.temp_english.case_variants", Bool),
     f("input.temp_english.case_follow_input", Bool),
     f(

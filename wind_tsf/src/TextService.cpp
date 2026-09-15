@@ -672,6 +672,25 @@ public:
                 return E_FAIL;
             }
 
+            // ⚠️ 这里**不再对 selection 做任何加工**（不折叠、不改写）：`StartComposition`
+            // 拿到的就是当前 selection 本身，用户选中着文字时它是非退化的。
+            //
+            // 曾试过「空文本时折叠成插入点，再照常建 composition」来救 t123，靶机上不成立：
+            // admin 实测**只要对 composition 做操作，选中的内容就会被清空，且与宿主有关**
+            // （2026-09-15）。故那条路整个作废 —— 开关关掉的模式改为**根本不发**
+            // `UpdateComposition`（见 `input.caret.*`），压根走不到这里。
+            //
+            // ⛔ **但这不等于 selection 安全**，别把上面那句读成「t123 已修」：
+            // 开关为 **true**（出厂）时协调器发来的是一个占位空格，下面的 `SetText` 会把
+            // 这个 range（＝当前 selection）整体替换成它 —— **t123 的「吃掉选中文字」在
+            // 出厂配置下依然发生**，躲开的唯一办法是把对应开关关成 false。
+            //
+            // ⚠️ 这两件事机制不同，别混为一谈：
+            //   · 上面 admin 那条 —— 空文本、只 StartComposition 不 SetText，选中内容被
+            //     清空，**与宿主有关**（所以那条路不可靠、被作废）；
+            //   · 这里说的 —— `SetText` 往一个覆盖着选中文字的 range 里写入，是 TSF 的
+            //     标准语义，**必然发生、与宿主无关**。
+
             ITfContextComposition* pContextComp = nullptr;
             if (FAILED(_pContext->QueryInterface(IID_ITfContextComposition, (void**)&pContextComp)))
             {
@@ -715,6 +734,15 @@ public:
         // apps like WPS return a degenerate rect (height=0) for zero-length ranges.
         // The cursor is positioned before the space (step 5), so visually there's
         // no offset. The placeholder is cleared on EndComposition/CommitText.
+        // 空文本 ⇒ 补一个占位空格把 range 撑开。**这是覆盖所有路径的全局兜底，别删。**
+        //
+        // ⚠️ 2026-09-15 曾以「让 `[input.caret]` 的逐模式开关能管住占位」为由删掉这一段，
+        // 是误判：开关为 false 时协调器返回 `Consumed`、**根本不发** UpdateComposition，
+        // 这里收不到东西也就无从补起，开关照样生效。而删掉它波及的是**所有**发空组合区的
+        // 路径 —— 临拼 / 特殊 / 生僻字经直达热键进入时（`key_code == 0` ⇒ 无引导符）组合区
+        // 就是空的，`commit_then_new_composition(text, String::new())` 一类同样如此，它们
+        // 全靠这一段兜住。删掉后这些路径拿到零长度 range，而 WPS 等宿主对零长度 range 回的
+        // 是退化矩形（height=0），候选窗失去坐标来源。
         BOOL isPlaceholder = _text.empty();
         static const wchar_t PLACEHOLDER[] = L" ";
         const wchar_t* textPtr = isPlaceholder ? PLACEHOLDER : _text.c_str();

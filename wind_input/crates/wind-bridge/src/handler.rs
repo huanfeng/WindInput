@@ -182,6 +182,14 @@ impl KeyAction {
     /// （避免与候选窗 preedit 重复）。对齐 Go 版"模拟空格 + 光标移前"。
     pub fn with_composition_placeholder(self) -> KeyAction {
         match self {
+            // ⚠️ `!text.is_empty()` 这个守卫**必须留着**：空组合区意味着「这一刻不该有
+            // 组合区」，本函数是 preedit 的显示策略（把编码换成占位、避免与候选窗重复显示
+            // 编码），不是「谁需要占位」的决定者。
+            //
+            // 曾短暂去掉过它，想让热键进入的几个模式（加词等）借这条路拿到占位 —— 方向错了：
+            // 本函数只在**非 app_inline** 时被调用，而出厂 `preedit_display = "app_inline"`，
+            // 那些模式在出厂路径上根本走不到这里。占位是那几个模式自己的需求，已各自在
+            // `enter_*` 里显式发出（见 `enter_add_word_mode`）。
             KeyAction::UpdateComposition { text, .. } if !text.is_empty() => {
                 KeyAction::UpdateComposition {
                     text: COMPOSITION_PLACEHOLDER.to_string(),
@@ -480,7 +488,8 @@ pub trait MessageHandler: Send + Sync {
 
     /// DLL 报告某进程的 UIElement 状态。两个判据分开传，因为消费端对它们的态度不同：
     /// - `host_draws`：宿主**声明**接管候选绘制（`pbShow=FALSE` / UI-less 线程）——事实，无覆盖；
-    /// - `host_reads`：宿主没声明却把候选串读走了——推断，可经 compat `host_drawn_candidates` 关掉。
+    /// - `host_reads`：宿主没声明却把候选串读走了——推断，**默认不据此收窗**，
+    ///   compat 写 `host_drawn_candidates = true` 才生效（opt-in）。
     ///
     /// 消费方按 pid 记账，该进程聚焦期间不弹自己的候选窗。默认空实现。
     fn handle_uielement_state(&self, _pid: u32, _host_draws: bool, _host_reads: bool) {}

@@ -129,10 +129,9 @@ impl Coordinator {
         self.notify_ui_update(state);
         let display = state.preedit.clone();
         debug!("Entered special mode idx={}", idx);
-        KeyAction::UpdateComposition {
-            text: display.clone(),
-            caret_pos: display.chars().count() as u32,
-        }
+        // 直达热键进入时 display 为空（无引导符），此时是否建占位 composition 取坐标由
+        // `[input.caret]` 决定；引导键进入时 display 非空，开关不参与。
+        self.special_entry_composition(key_code, display)
     }
 
     /// 进入生僻字模式：用**当前活跃方案**的编码输入，候选只留生僻字。
@@ -157,10 +156,8 @@ impl Coordinator {
         self.notify_ui_update(state);
         let display = state.preedit.clone();
         debug!("Entered rare-char mode");
-        KeyAction::UpdateComposition {
-            text: display.clone(),
-            caret_pos: display.chars().count() as u32,
-        }
+        // 同 `enter_special_mode`：只有直达热键（display 为空）那条看开关。
+        self.rare_char_entry_composition(key_code, display)
     }
 
     /// 顶掉当前半成品并进入生僻字模式（引导键 / 直达热键共用）。

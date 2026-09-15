@@ -3009,6 +3009,85 @@ impl SingleCharAction {
     }
 }
 
+/// 候选窗定位方式（**内部配置**，不进设置页）。
+///
+/// 这几个模式的共同处境：**由热键激活，激活瞬间没有任何输入内容**，却要立刻显示候选窗
+/// / 预览窗，因而需要一个光标坐标。当前做法是发一个占位 composition —— C++ 侧据此
+/// `StartComposition` 并 `SetText(" ")` 把 range 撑开，再用 `GetTextExt` 取矩形。
+///
+/// # 为什么要能关
+///
+/// 占位 composition 建在**当前 selection** 上。用户选中了文字时，那个空格会把选中内容
+/// **替换掉** —— 这就是 t123 报的「Ctrl+= 造词吃掉编辑器里选中的文字」，Qt / Electron /
+/// QQ 全中，因为这是 TSF 标准语义而非某个宿主的怪癖。
+///
+/// # 为什么不干脆一律关掉
+///
+/// 实践结论（admin）：**很多应用的 `GetTextExt` 与其它 Win32 取坐标 API 都给不出正确
+/// 坐标，只有基于 TSF composition 的才准**。占位空格正是为兼容那些应用而存在的。
+/// 一律关掉会让候选窗在那些宿主上错位 —— 拿「吃字」换「错位」，不是改善。
+///
+/// 故做成**逐模式开关**而非一个总开关：这几个模式的 UI 形态不同（加词是预览窗、临拼与
+/// 特殊模式是候选列表），对定位精度的敏感度未必一致，实测下来很可能要分别取值。
+///
+/// # ⚠️ 出厂值不统一：加词 `false`，另三个 `true`
+///
+/// 开关为 `true` 时 **t123 依然会发生**：`StartComposition` 拿的就是当前
+/// `tfSelection.range`（C++ 侧不折叠、不改写它），用户选中着文字时 composition 罩住选中
+/// 内容，`SetText(" ")` 随即把它替换掉 —— 字照吃。所以这几个开关本身不是 t123 的修复，
+/// 是给它一个出口；**加词那一项出厂就走了这个出口**。
+///
+/// 为什么只关加词：t123 报的就是 Ctrl+= 造词这一个场景；加词弹的是预览窗，对坐标精度的
+/// 敏感度低于候选列表；2026-09-15 靶机实测关掉后选中内容保住、记事本下预览窗位置仍然
+/// 正确 ⇒ 这一项上「保住用户的字」赢过「坐标最准」。
+///
+/// 为什么另三个不跟着关：它们弹的是候选列表，错位的观感与代价更大，而且尚无实测数据说明
+/// 各自宿主上的回退链够不够用。一律关掉是拿「吃字」换「错位」，而错位影响的是**所有**
+/// 用户的日常输入，吃字只在「选中着文字又去按热键」时发生。等实测再逐个调 —— 这正是做成
+/// 四个开关而不是一个总开关的理由。
+///
+/// - `true` = 占位 composition 取坐标，最准，但选中态会吃掉选中的文字。
+/// - `false` = 协调器返回 `Consumed`，**完全不发 `UpdateComposition`** ⇒ DLL 不建
+///   composition ⇒ 选中内容原样保留；坐标退到 `GetCaretPosition` 的回退链
+///   （GUITHREADINFO → GetCaretPos → 上次已知位置 → 窗口中心估计）。
+///   ⛔ 不是「建了 composition 再折叠成插入点」—— 那条路试过且已作废：admin 2026-09-15
+///   实测「只要对 composition 做操作，选中内容就会被清空，且与宿主有关」。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CaretPlacementConfig {
+    /// 快捷加词（`keys.add_word`，出厂 Ctrl+=）。**t123 报的就是这一个。**
+    pub add_word_via_composition: bool,
+    /// 临时拼音直达热键（`enter_temp_pinyin`）。热键进入时 `key_code=0` ⇒ 前缀为空 ⇒ 空组合区。
+    /// ⚠️ 只管「按下热键时缓冲是空的」那一种进入。打了一半再按直达热键（最常见的用法）
+    /// 走的是顶字上屏那条，它本来就不插占位（`InsertText { new_composition: None }`，
+    /// 压根不建 composition），与本开关无关，配 false 也看不出差别。
+    pub temp_pinyin_via_composition: bool,
+    /// 特殊模式直达热键（`enter_special:<id>`）。同上，`key_code=0` ⇒ 前缀空。
+    pub special_via_composition: bool,
+    /// 生僻字模式热键（`enter_rare_char`）。同上。
+    pub rare_char_via_composition: bool,
+}
+
+impl Default for CaretPlacementConfig {
+    fn default() -> Self {
+        // ⚠️ **加词出厂为 false，其余三个为 true** —— 不是笔误，是实测驱动的逐个取值。
+        //
+        // 加词关掉：t123 报的就是 Ctrl+= 造词吃掉选中文字这一个场景，而加词弹的是**预览窗**、
+        // 对坐标精度的敏感度低于候选列表；2026-09-15 靶机实测关掉后选中内容保住、记事本下
+        // 预览窗位置仍然正确（回退链够用）⇒ 这一项上「保住用户的字」赢过「坐标最准」。
+        //
+        // 另三个保持 true：它们弹的是候选列表，错位的观感与代价都更大，而且尚无实测数据
+        // 说明各自宿主上的回退链够不够用。等实测再逐个调 —— 这正是做成四个开关而不是一个
+        // 总开关的理由。
+        Self {
+            add_word_via_composition: false,
+            temp_pinyin_via_composition: true,
+            special_via_composition: true,
+            rare_char_via_composition: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
     #[serde(default = "default_filter_mode")]
@@ -3132,6 +3211,10 @@ pub struct InputConfig {
     /// 联想（上屏后按上文推荐下一个词/标点）。默认关。
     #[serde(default)]
     pub association: AssociationConfig,
+    /// 候选窗定位方式（内部配置，见 [`CaretPlacementConfig`]）。
+    /// `serde(default)`：旧配置文件无此段，缺省即全 true（与改动前逐位一致）。
+    #[serde(default)]
+    pub caret: CaretPlacementConfig,
 }
 
 impl InputConfig {
@@ -3188,6 +3271,7 @@ impl Default for InputConfig {
             phrase: PhraseConfig::default(),
             top_commit_mode: TopCommitMode::default(),
             association: AssociationConfig::default(),
+            caret: CaretPlacementConfig::default(),
         }
     }
 }

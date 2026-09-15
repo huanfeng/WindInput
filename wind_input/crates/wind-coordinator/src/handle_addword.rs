@@ -4,7 +4,7 @@
 
 use crate::coordinator::{Coordinator, LEARN_ADD_WEIGHT, State};
 use tracing::{debug, warn};
-use wind_bridge::handler::{KeyAction, KeyEventData};
+use wind_bridge::handler::{COMPOSITION_PLACEHOLDER, KeyAction, KeyEventData};
 use wind_candidate::CandidateSource;
 use wind_ipc::protocol::MOD_CTRL;
 use wind_keys::keymap;
@@ -861,10 +861,40 @@ impl Coordinator {
 
         self.show_add_word_preview(state);
 
-        // 占位 composition：激活 C++ 侧 composition，转发后续 ↑↓/Enter/Esc 给我们处理。
-        KeyAction::UpdateComposition {
-            text: " ".to_string(),
-            caret_pos: 0,
+        // 组合区：两条路，由 `input.caret.add_word_via_composition` 选。
+        //
+        // **true（出厂）**：**在这里就把占位空格发出去**，不依赖出口的任何后处理。
+        // TSF 据此把 range 撑开，`GetTextExt` 给出最准的坐标 —— 很多宿主的其它取坐标 API
+        // 都不可靠，这是历史上选它的原因。代价：占位建在当前 selection 上，用户选中着文字时
+        // 会被替换掉（t123）。
+        //
+        // ⚠️ 曾经写成「发空组合区、由 `preedit_uses_placeholder` 在出口补占位」，那是错的：
+        // 出口那条（`with_composition_placeholder`）只在**非 app_inline** 时才走，而出厂
+        // `preedit_display = "app_inline"`（data/config.toml）—— 于是出厂路径上占位被
+        // 「协调器不发、出口不补、C++ 侧刚移除隐式补空格」三处同时放掉，加词在 WPS 这类
+        // 对零长度 range 回退化矩形（height=0）的宿主上直接失去坐标来源。占位是这个模式
+        // 自己的需求，就该由它自己决定、自己发，不叠在一个与 preedit 显示策略绑定的开关上。
+        //
+        // **false**：**完全不碰 composition**，返回 `Consumed`。坐标退到
+        // `GetCaretPosition` 的回退链（GUITHREADINFO → GetCaretPos → 上次已知位置）。
+        // 后续 ↑↓/Enter/Esc 的转发改由 C++ 侧的 `_hotkeyModeSession` 撑起输入会话
+        // （置位见 `CKeyEventSink::SetCandidateSessionActive`，判据见 `_HasInputSession()`）。
+        //
+        // ⚠️ **不是** `_hasCandidates` —— 那个方案试过且失败了：加词窗一弹出，宿主文档就
+        // 丢焦点 ⇒ `CleanupInputStateForDocChange` → `ResetComposingState()` 把
+        // `_hasCandidates` 当场清零，那三个键又全透传给宿主（2026-09-15 靶机实测）。
+        // 分成独立一位的全部理由就在这里，见 `KeyEventSink.h` 的成员注释。
+        //
+        // ⚠️ 为什么不是「折叠 selection 后照建 composition」：试过，不成立 ——
+        // admin 实测「只要对 composition 做操作就会被清空，且与宿主有关」（2026-09-15）。
+        // 所以这条路不是「小心地建」，而是**根本不建**。
+        if self.rt().config.input.caret.add_word_via_composition {
+            KeyAction::UpdateComposition {
+                text: COMPOSITION_PLACEHOLDER.to_string(),
+                caret_pos: 0,
+            }
+        } else {
+            KeyAction::Consumed
         }
     }
 
