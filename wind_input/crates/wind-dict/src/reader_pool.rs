@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 /// 池中一条记录：弱引用 + 打开时的文件标识。
 struct Entry<T> {
     weak: Weak<T>,
-    /// `(大小, 修改时间)`。复用前必须比对——**仅凭路径复用会交出陈旧数据**。
+    /// `(大小, 修改时间, 替换代数)`。复用前必须比对——**仅凭路径复用会交出陈旧数据**。
     ///
     /// 实测（见 `rebuilt_file_is_not_served_from_stale_entry`）：词库重建走 tmp + rename，
     /// 在 Windows 上即便目标正被 mmap 也会**成功**（Rust 的 `File::open` 带
@@ -49,15 +49,122 @@ struct Entry<T> {
     /// 这与 `cache_fp` 坚持内容指纹而非 mtime 并不矛盾：那里要判定的是「缓存是否需要
     /// 重建」，须避免部署刷新 mtime 导致误重建；这里要判定的是「手里的 reader 是否还
     /// 对应磁盘上的当前文件」，恰恰需要能察觉文件被替换。目的不同，判据也就不同。
+    ///
+    /// # 为什么 `(大小, 修改时间)` 不够，要再加一个代数
+    ///
+    /// 重建**内容变了而大小不变**时（同构小词库），判据只剩 mtime；而 Linux 的 inode
+    /// 时间戳取自粗粒度时钟（`current_time()`，刻度以毫秒计），两次写入落在同一刻度内
+    /// 就得到**逐纳秒相同**的 mtime。实证（2026-09-14，本机）：重建前后 stamp 完全相同
+    /// ——`(1157, tv_sec=1789399678, tv_nsec=478103444)`，于是陈旧 reader 被当成新鲜的
+    /// 交了出去。这不是假想，`rebuilt_file_is_not_served_from_stale_entry` 稳定复现。
+    ///
+    /// 换成内容指纹并不可行：这里的文件动辄 62MB，为一次 `open_wdat` 全量哈希太贵；
+    /// 只采样头尾则漏掉「码集不变、只改权重或词条文本」的重建（那种改动全落在中段的
+    /// 权重与字符串池里，头部的计数/偏移与尾部的 CharMap 都可以纹丝不动）。
+    /// 而 inode / `file_index` 在 Windows 上要 `windows_by_handle`（至今未稳定），
+    /// 拿不到统一的文件标识。
+    ///
+    /// 故改为让**替换方**说话：替换池中文件的写侧用 [`replacing`] 圈住替换动作，
+    /// 该路径的代数随之递增。走这道协议的重建与时钟精度无关；**没走的替换**
+    /// （assemble 工具等别的进程、用户手动覆盖）仍只靠 `(大小, 修改时间)`——
+    /// 那类替换与本进程上次读取隔着人的操作时间，不会撞进同一个 mtime 刻度。
     stamp: FileStamp,
 }
 
-type FileStamp = (u64, Option<std::time::SystemTime>);
+type FileStamp = (u64, Option<std::time::SystemTime>, u64);
+
+/// 路径 → 替换代数。条目数与池中文件数同阶（数十个）。
+///
+/// ⛔ **不要给这张表加清理**。清掉某条会让代数退回 0，而池里那条记的可能**正好也是 0**
+/// （缓存新鲜时启动 ⇒ 建条目时还没人替换过 ⇒ 记的就是 0），此后的重建把代数推到 1，
+/// 清理再把它抹回 0 —— 三栏全对上，陈旧 reader 原样交出去，A2-14 就此复活。
+/// 「代数退回 0 是安全方向」只在池中那条记着的代数 > 0 时才成立，而那不是能假定的。
+static REPLACE_GEN: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+/// 会进本池的文件后缀。给「按后缀决定要不要通知」的调用方（方案导入、备份还原）用，
+/// 免得这份清单在两处各写一遍然后悄悄漂移。
+pub const POOLED_EXTENSIONS: [&str; 3] = ["wdat", "wcmt", "wemj"];
+
+/// `path` 是否是会进本池的文件（按后缀判，见 [`POOLED_EXTENSIONS`]）。
+pub fn is_pooled(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| POOLED_EXTENSIONS.iter().any(|p| e.eq_ignore_ascii_case(p)))
+}
+
+fn replace_gen(path: &Path) -> u64 {
+    REPLACE_GEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn bump_gen(path: &Path) {
+    let mut map = REPLACE_GEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *map.entry(path.to_path_buf()).or_insert(0) += 1;
+}
+
+/// 圈住一次「替换池中文件」的动作：**建时给代数 +1，落时再 +1**。
+///
+/// 凡是会替换 `.wdat` / `.wcmt` / `.wemj` 的写侧都要走它——不只是本 crate 的三个写盘口，
+/// 方案导入与备份还原同样在用户 schemas 目录里覆盖这些文件（那里的 sidecar `.wdat`
+/// 也是直接走本池打开的）。
+///
+/// # 为什么是前后各 +1，而不是替换完记一次
+///
+/// 记一次的话，`rename` 与 `+1` 之间有个窗口：窗口里别的线程取到的是「旧代数 + 新文件的
+/// metadata」，若大小与 mtime 都没变（正是 A2-14 的前提），它就命中了陈旧条目。把 `+1`
+/// 挪到 `rename` 之前也只是把窗口镜像到另一侧。前后各记一次，窗口里读到的是一个**中间
+/// 代数**，与替换前、替换后都不同 ⇒ 无论落在哪一侧都拒绝复用，最坏不过多开一份映射。
+///
+/// 这道自足性是有意的：别把正确性寄托在「调用方都持着 [`file_lock`]」上。现在确实多数
+/// 写侧都在那把锁下，但 `cached.rs` 的 sidecar `open_wdat` 与导入/还原都不在，靠锁的论证
+/// 会在下一次重构时无声垮掉。
+///
+/// # 用代数而不是直接删池中条目
+///
+/// 删条目挡不住这个交错：线程 A 取完 stamp、正在 `open`（映射的是旧文件）时，线程 B
+/// 完成替换并删条目——A 随后插入的那条就成了「B 删除之后才写进来的陈旧条目」，再无人
+/// 能把它清掉。记代数则不然：A 带的是取 stamp 那一刻的旧代数，与当前对不上，自然不被复用。
+///
+/// # 替换失败怎么办
+///
+/// 照样 +2。代价是之后多开一份映射（失败方向安全），换来的是守卫无需知道替换成没成功
+/// ——`rename` 失败时目标文件的状态本就不确定（先删后改名的路径上它可能已经没了）。
+#[must_use = "守卫一旦落地就记完了第二次，必须活到替换动作结束"]
+pub struct Replacing<'a> {
+    path: &'a Path,
+}
+
+/// 宣告即将替换 `path`，见 [`Replacing`]。守卫必须活到替换动作（含先删后 rename）结束。
+pub fn replacing(path: &Path) -> Replacing<'_> {
+    bump_gen(path);
+    Replacing { path }
+}
+
+impl Drop for Replacing<'_> {
+    fn drop(&mut self) {
+        bump_gen(self.path);
+    }
+}
 
 fn file_stamp(path: &Path) -> FileStamp {
+    // 代数**必须先取**：若在 open 之后才取，就会把「open 期间发生的替换」算成自己已经
+    // 读到的，给陈旧映射盖上新代数的章。先取则该替换落在自己的代数之后，下次比对必不命中。
+    //
+    // ⚠️ 这条顺序**没有测试兜住**——现有测试都是单线程的，`replacing` 早已落完才轮到
+    // `open`，代数在哪一步读都是同一个值，把这行挪到 `open` 之后测试照样全绿。要真测它
+    // 得在 `open` 中途插桩。改动本函数的取值次序时请人工复核上面这段推理。
+    let generation = replace_gen(path);
     match std::fs::metadata(path) {
-        Ok(m) => (m.len(), m.modified().ok()),
-        Err(_) => (0, None),
+        Ok(m) => (m.len(), m.modified().ok(), generation),
+        Err(_) => (0, None, generation),
     }
 }
 
@@ -183,6 +290,37 @@ mod tests {
         std::env::temp_dir().join(format!("wind-reader-pool-{}-{}", std::process::id(), tag))
     }
 
+    /// 把 `path` 的 mtime 拨回 `before` 那一刻，并断言「大小 + mtime」与之逐字段相同。
+    ///
+    /// 「重建前后 stamp 恰好一致」在生产上是时序赌局（同一 mtime 刻度内完成两次写入），
+    /// 让测试去赌就会得到假绿——曾实证：`note_replaced` 注释掉后三条测试照样全过。
+    /// 这里把赌局改成前提：拨回 mtime，并当场校验前提确已成立（大小若变了就直接报错，
+    /// 免得测试悄悄退化成「在测 stamp 判据还灵不灵」）。
+    ///
+    /// ⚠️ 这几条测试守的是 Windows 语义（被 mmap 的文件照样能被 rename 覆盖），而本函数
+    /// 要对一个**正被 mmap 的文件**再开一个写句柄去 `SetFileTime`。理论上不冲突
+    /// （std 开文件带 `FILE_SHARE_WRITE`，section 不挡写句柄，改的又只是元数据），
+    /// Linux 上实测全绿，但尚无 Windows 运行证据——Windows 上若在此处失败，是夹具的
+    /// 问题而非被测逻辑的问题。
+    fn force_same_stamp(path: &Path, before: &std::fs::Metadata) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(before.accessed().unwrap())
+                    .set_modified(before.modified().unwrap()),
+            )
+            .unwrap();
+        let after = std::fs::metadata(path).unwrap();
+        assert_eq!(
+            (before.len(), before.modified().unwrap()),
+            (after.len(), after.modified().unwrap()),
+            "前提没造出来：重建后大小或 mtime 仍有差别，本测试会退化成在测 stamp 判据"
+        );
+    }
+
     #[test]
     fn same_path_shares_one_reader() {
         let dir = temp_dir("share");
@@ -303,21 +441,34 @@ mod tests {
     ///
     /// 前提事实（本测试同时锁定）：Windows 上 rename 覆盖一个正被 mmap 的文件是**会成功**
     /// 的，旧 view 继续看到旧数据——所以不能指望"重建失败"来兜底。
+    ///
+    /// # 为什么要人为把 mtime 拨回去
+    ///
+    /// 这一条曾是**时序相关**的假绿：两次写入落在同一个 mtime 刻度内才暴露缺陷，机器慢一点
+    /// 就自动变绿。变异检验实证——把 `note_replaced` 注释掉，它照样通过。所以这里不靠运气
+    /// 制造「stamp 相同」，而是重建后显式把 mtime 拨回替换前的值，再断言新旧 stamp 确实
+    /// 逐字段相同：判据的两个字段就此**双双失效**，只剩替换代数能救。
     #[test]
     fn rebuilt_file_is_not_served_from_stale_entry() {
         let dir = temp_dir("rebuild");
         let p = make_wdat(&dir, "r.wdat", "aa", "旧");
+        let before = std::fs::metadata(&p).unwrap();
 
         let held = open_wdat(&p).unwrap(); // 模拟另一个方案的引擎仍持有
         assert_eq!(held.search("aa").len(), 1);
 
-        // 持有期间重建该词库（WdatWriter 内部走 tmp + rename）
+        // 持有期间重建该词库（WdatWriter 内部走 tmp + rename）。
+        // 码长与字数刻意与旧内容一致 → 文件大小不变 → 判据的「大小」一栏先失效。
         let mut d = CodetableDict::empty();
         d.merge_single("bb".into(), "新".into(), 1, 0);
         let mut w = WdatWriter::new();
         d.export_to_wdat(&mut w);
         w.write(&p)
             .expect("被 mmap 持有不影响 rename 覆盖（Windows 亦然）");
+
+        // 再把 mtime 拨回替换前，让「修改时间」一栏也失效——这是生产上「同一刻度内两次
+        // 写入」的确定化复现，不是人造的极端场景。
+        force_same_stamp(&p, &before);
 
         // 旧持有者继续看旧数据——这是 OS 语义，不是缺陷
         assert_eq!(held.search("aa").len(), 1, "旧 view 应继续指向替换前的数据");
@@ -334,6 +485,62 @@ mod tests {
 
         drop(held);
         drop(fresh);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 注释库同理：`write_comment_wcmt` 也必须通知本池，否则挂载着注释库的方案重建后
+    /// 仍供出旧释义。与上一条分开写，是因为三个写盘口各挂各的钩子，漏一个测不出来。
+    #[test]
+    fn rebuilt_comment_dict_is_not_served_from_stale_entry() {
+        let dir = temp_dir("rebuild-wcmt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("c.wcmt");
+        let row = |c: &str| vec![("啊".to_string(), c.to_string(), String::new())];
+
+        crate::commentdict::write_comment_wcmt(&p, &row("旧释")).unwrap();
+        let before = std::fs::metadata(&p).unwrap();
+        let held = open_comment(&p).unwrap();
+        assert_eq!(held.lookup_first("啊"), Some("旧释"));
+
+        // 释义字数相同 → 文件大小不变；再拨回 mtime → stamp 两栏双双失效。
+        crate::commentdict::write_comment_wcmt(&p, &row("新释")).unwrap();
+        force_same_stamp(&p, &before);
+
+        let fresh = open_comment(&p).unwrap();
+        assert_eq!(
+            fresh.lookup_first("啊"),
+            Some("新释"),
+            "注释库重建后必须读到新释义"
+        );
+        drop((held, fresh));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// emoji 表同理：功能开关一关一开会重新解析并 rename 覆盖，`write_emoji_wemj`
+    /// 同样得通知本池。
+    #[test]
+    fn rebuilt_emoji_dict_is_not_served_from_stale_entry() {
+        let dir = temp_dir("rebuild-wemj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("e.wemj");
+        let row = |e: &str| vec![("你好".to_string(), vec![e.to_string()])];
+
+        crate::emojidict::write_emoji_wemj(&p, &row("😊")).unwrap();
+        let before = std::fs::metadata(&p).unwrap();
+        let held = open_emoji(&p).unwrap();
+        assert_eq!(held.lookup("你好"), Some("😊"));
+
+        // 两个 emoji 都是 4 字节 → 文件大小不变。
+        crate::emojidict::write_emoji_wemj(&p, &row("👋")).unwrap();
+        force_same_stamp(&p, &before);
+
+        let fresh = open_emoji(&p).unwrap();
+        assert_eq!(
+            fresh.lookup("你好"),
+            Some("👋"),
+            "emoji 表重建后必须读到新内容"
+        );
+        drop((held, fresh));
         std::fs::remove_dir_all(&dir).ok();
     }
 

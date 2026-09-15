@@ -280,10 +280,19 @@ fn write_file(
     }
     let tmp = target.with_extension("windinput.tmp");
     std::fs::write(&tmp, bytes)?;
-    if target.exists() {
-        std::fs::remove_file(target)?;
-    }
-    std::fs::rename(&tmp, target)?;
+    // 还原的 schema_file 来自 `walk_dir(user_schemas_dir)`,同样囊括 sidecar `.wdat`
+    // ——那种词库直接走 `wind_dict::reader_pool` 打开,运行中的引擎可能还攥着旧映射。
+    // 与 `scheme::write_staged` 同一个理由,守卫圈住「先删后 rename」整段。
+    let replacing = wind_dict::reader_pool::is_pooled(target)
+        .then(|| wind_dict::reader_pool::replacing(target));
+    let renamed = (|| {
+        if target.exists() {
+            std::fs::remove_file(target)?;
+        }
+        std::fs::rename(&tmp, target)
+    })();
+    drop(replacing);
+    renamed?;
     Ok(true)
 }
 
@@ -469,6 +478,102 @@ pub fn restore_backup(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// 造一份最小可用的 wdat 字节流（供下面两条「替换后不得复用旧 reader」用）。
+    fn wdat_bytes(code: &str, text: &str) -> Vec<u8> {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("x.wdat");
+        let mut d = wind_dict::codetable::CodetableDict::empty();
+        d.merge_single(code.into(), text.into(), 1, 0);
+        let mut w = wind_dict::datformat::WdatWriter::new();
+        d.export_to_wdat(&mut w);
+        w.write(&p).unwrap();
+        fs::read(&p).unwrap()
+    }
+
+    /// 把 mtime 拨回替换前，并校验「大小 + mtime」确已逐字段相同。
+    ///
+    /// 与 `wind_dict::reader_pool` 里那个同名夹具同一个理由：池的 `(大小, mtime)` 判据
+    /// 在正常时序下本就能认出替换，不把前提做成确定的，测试就只是在测那道判据，
+    /// 把这里的通知删掉照样绿。
+    fn force_same_stamp(path: &std::path::Path, before: &std::fs::Metadata) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(before.accessed().unwrap())
+                    .set_modified(before.modified().unwrap()),
+            )
+            .unwrap();
+        let after = fs::metadata(path).unwrap();
+        assert_eq!(
+            (before.len(), before.modified().unwrap()),
+            (after.len(), after.modified().unwrap()),
+            "前提没造出来：替换后大小或 mtime 仍有差别，本测试会退化成在测 stamp 判据"
+        );
+    }
+
+    /// 方案导入覆盖 sidecar `.wdat` 后，运行中的引擎不得再拿到旧内容。
+    ///
+    /// 包里可以只带 `.wdat`（见 `collect_packs_wdat_only_dict`），而那种词库是**直接走
+    /// `reader_pool` 打开**的——导入时正在跑的引擎手里还攥着旧映射。
+    #[test]
+    fn importing_a_pooled_wdat_invalidates_the_reader() {
+        let t = tempfile::tempdir().unwrap();
+        let user = t.path().join("u");
+        fs::create_dir_all(user.join("wb")).unwrap();
+        let target = user.join("wb/main.wdat");
+        fs::write(&target, wdat_bytes("aa", "旧")).unwrap();
+        let before = fs::metadata(&target).unwrap();
+
+        let held = wind_dict::reader_pool::open_wdat(&target).unwrap();
+        assert_eq!(held.search("aa").len(), 1);
+
+        crate::scheme::write_staged(
+            &[("wb/main.wdat".to_string(), wdat_bytes("bb", "新"))],
+            &user,
+            crate::merge::Strategy::Replace,
+        )
+        .unwrap();
+        force_same_stamp(&target, &before);
+
+        let fresh = wind_dict::reader_pool::open_wdat(&target).unwrap();
+        assert_eq!(fresh.search("bb").len(), 1, "导入后必须读到新词库");
+        assert!(fresh.search("aa").is_empty(), "旧内容不该还在");
+    }
+
+    /// 备份还原覆盖 sidecar `.wdat` 后同理——还原的 `schema_file` 来自
+    /// `walk_dir(user_schemas_dir)`，同样囊括 `.wdat`。
+    ///
+    /// 与上一条分开写：导入与还原是**两个**写盘口，各挂各的通知，合成一条就会「漏一个
+    /// 还能过」。两条共用夹具故同住一个模块。
+    #[test]
+    fn restoring_a_pooled_wdat_invalidates_the_reader() {
+        let t = tempfile::tempdir().unwrap();
+        let target = t.path().join("wb/main.wdat");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, wdat_bytes("aa", "旧")).unwrap();
+        let before = fs::metadata(&target).unwrap();
+
+        let held = wind_dict::reader_pool::open_wdat(&target).unwrap();
+        assert_eq!(held.search("aa").len(), 1);
+
+        assert!(
+            write_file(
+                &target,
+                &wdat_bytes("bb", "新"),
+                crate::merge::Strategy::Replace
+            )
+            .unwrap()
+        );
+        force_same_stamp(&target, &before);
+
+        let fresh = wind_dict::reader_pool::open_wdat(&target).unwrap();
+        assert_eq!(fresh.search("bb").len(), 1, "还原后必须读到新词库");
+        assert!(fresh.search("aa").is_empty(), "旧内容不该还在");
+    }
 
     fn seed_store(dir: &std::path::Path) -> wind_store::store::Store {
         let s = wind_store::store::Store::open(dir.join("t.redb")).unwrap();

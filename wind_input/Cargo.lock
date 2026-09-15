@@ -2693,6 +2693,7 @@ dependencies = [
  "tempfile",
  "toml 0.8.23",
  "wind-config",
+ "wind-dict",
  "wind-store",
  "zip",
 ]

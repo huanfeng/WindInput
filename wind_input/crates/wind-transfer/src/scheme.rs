@@ -780,11 +780,21 @@ pub(crate) fn write_staged(
         }
         let tmp = target.with_extension("windinput.tmp");
         std::fs::write(&tmp, bytes)?;
-        // Windows: rename 到已存在目标会失败,Replace 先移除旧文件。
-        if target.exists() {
-            std::fs::remove_file(&target)?;
-        }
-        std::fs::rename(&tmp, &target)?;
+        // 包里可以只带 sidecar `.wdat`(见 `wdat_rel`),而那种词库是**直接走
+        // `wind_dict::reader_pool` 打开**的——正在运行的引擎手里可能还攥着指向旧内容的
+        // mmap。池的 `(大小, mtime)` 判据在「大小不变 + 同一 mtime 刻度」时认不出替换,
+        // 故这里也要走替换协议。守卫圈住「先删后 rename」整段。
+        let replacing = wind_dict::reader_pool::is_pooled(&target)
+            .then(|| wind_dict::reader_pool::replacing(&target));
+        let renamed = (|| {
+            // Windows: rename 到已存在目标会失败,Replace 先移除旧文件。
+            if target.exists() {
+                std::fs::remove_file(&target)?;
+            }
+            std::fs::rename(&tmp, &target)
+        })();
+        drop(replacing);
+        renamed?;
         imported.push(rel.clone());
     }
     Ok((imported, conflicts))

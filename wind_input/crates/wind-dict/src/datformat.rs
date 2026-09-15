@@ -681,7 +681,12 @@ impl WdatWriter {
 
         f.flush()?;
         drop(f);
-        if let Err(e) = std::fs::rename(&tmp, path) {
+        // 池里可能还存着指向替换前那份数据的 mmap reader，且 (大小, mtime) 未必看得出
+        // 差别（同构词库 + 同一 mtime 刻度）。守卫圈住 rename，见 `reader_pool::replacing`。
+        let replacing = crate::reader_pool::replacing(path);
+        let renamed = std::fs::rename(&tmp, path);
+        drop(replacing);
+        if let Err(e) = renamed {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 wind-store = { path = "../wind-store" }
+wind-dict = { path = "../wind-dict" }
 wind-config = { path = "../wind-config" }
 anyhow = { workspace = true }
 serde = { workspace = true }

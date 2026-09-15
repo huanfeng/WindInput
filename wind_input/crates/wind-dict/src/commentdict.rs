@@ -233,7 +233,11 @@ pub fn write_comment_wcmt(
         f.write_all(&index)?;
         f.write_all(&pool)?;
     }
-    std::fs::rename(&tmp, path.as_ref())?;
+    // 见 `reader_pool::replacing`：池中可能还有指向替换前数据的 mmap reader。
+    let replacing = crate::reader_pool::replacing(path.as_ref());
+    let renamed = std::fs::rename(&tmp, path.as_ref());
+    drop(replacing);
+    renamed?;
     info!("Wrote comment dict: {} entries", written);
     Ok(())
 }
