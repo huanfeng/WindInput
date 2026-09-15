@@ -2266,6 +2266,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_DEBUG(L"Received ClearComposition from service\n");
         _isComposing = FALSE;
         _hasCandidates = FALSE;
+        _hotkeyModeSession = FALSE; // 加词等热键模式的四个出口都发 ClearComposition
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition();
         return TRUE;
@@ -2282,6 +2283,12 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_DEBUG(L"Received ClearCompositionThenPassThrough from service\n");
         _isComposing = FALSE;
         _hasCandidates = FALSE;
+        // 与孪生分支 ClearComposition 对位：同样是「收掉会话」，区别只在这一键要还给宿主，
+        // 那就同样清掉热键模式位。当前不清也不会出事（紧接着的
+        // NotifyCandidatesVisibilityChanged(FALSE) 会经 EndUIElement 清一次），但那是**间接
+        // 依赖**——一旦候选窗此刻没开着（`_uiElementId == -1`），EndUIElement 整支都不走，
+        // 位就留下了。两个分支的状态清理必须逐位对齐，别让其中一个靠副作用兜底。
+        _hotkeyModeSession = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition();
         _pendingReplayToHost = TRUE;
@@ -2837,6 +2844,9 @@ BOOL CKeyEventSink::_HasInputSession()
 {
     return _pTextService->HasActiveComposition()
         || _hasCandidates
+        // 热键激活的模式（如 add_word_via_composition=false 的加词）没有 composition、
+        // 也会因宿主丢焦点而被 ResetComposingState 清掉 _hasCandidates —— 单独一位撑着。
+        || _hotkeyModeSession
         || _IsResyncActive()
         || _pTextService->HasDeferredComposition();
 }

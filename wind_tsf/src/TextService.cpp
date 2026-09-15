@@ -2139,11 +2139,27 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
                         break;
                     }
                 }
-                // WM_HOTKEY 通路不经过 OnKeyDown 的 caret 更新；加词会建立占位 composition +
-                // 预览候选窗，先补一次 caret 更新确保定位准确（对齐原 OnKeyDown 通路）。
+                // WM_HOTKEY 通路不经过 OnKeyDown 的 caret 更新；加词要弹预览候选窗，
+                // 先补一次 caret 更新确保定位准确（对齐原 OnKeyDown 通路）。
                 if (vk != 0)
                 {
                     self->SendCaretPositionUpdate();
+                    // ★ 同时开启「候选驱动的输入会话」。
+                    //
+                    // 加词把 `input.caret.add_word_via_composition` 关掉时**根本不建
+                    // composition**（协调器返回 Consumed），于是 `NotifyCandidatesVisibilityChanged`
+                    // → `BeginUIElement` 这条链整个不走 —— 而 Backspace/Enter/Escape 的拦截判据
+                    // `_HasInputSession()` 原本四个来源全挂在 composition 上，结果那三个键一律
+                    // 透传给宿主：↑↓ 还能用（它们是 RegisterCandidateHotkeys 全局注册的），
+                    // Enter/Esc/Backspace 全废（2026-09-15 靶机实测）。
+                    //
+                    // 这里置位、`ClearComposition` 到达时清位（加词的四个出口都发它）。
+                    // 开关开着时也置位无妨：那条路本就有 composition，`_HasInputSession()`
+                    // 早已成立，多置一次不改变任何判定。
+                    if (self->_pKeyEventSink != nullptr)
+                    {
+                        self->_pKeyEventSink->SetCandidateSessionActive(TRUE);
+                    }
                 }
             }
             if (vk != 0)
@@ -2613,6 +2629,14 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
             _uiElementShown = bShow;
             _uiHostDraws = !bShow;
             WIND_LOG_DEBUG_FMT(L"BeginUIElement ok id=%u show=%d\n", _uiElementId, (int)bShow);
+            // 候选窗起来了 ⇒ 输入会话成立，**与组合区在不在无关**。不置这一位的话，
+            // 「不建 composition 的模式」（如 add_word_via_composition=false 的加词）
+            // 收不到 Backspace/Enter/Escape —— 那几个键的拦截判据是 `_HasInputSession()`，
+            // 而它此前的来源全挂在 composition 上。见该函数的声明处注释。
+            if (_pKeyEventSink != nullptr)
+            {
+                _pKeyEventSink->SetCandidateSessionActive(TRUE);
+            }
             // ⚠ 有位要主张就**强制重报一次**，绕过 _uiElementStateSent 的去重。
             // CTextService 是每 TSF 线程一个实例、各有一份 _uiElementStateSent，而服务端
             // 按**裸 pid** 记账：同进程另一个 UI 线程首次 Begin 报 flags=0，会把本线程
@@ -2658,6 +2682,12 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
         WIND_LOG_DEBUG_FMT(L"EndUIElement id=%u hr=0x%08X\n", _uiElementId, (uint32_t)hr);
         _uiElementId = (DWORD)-1;
         _uiElementShown = FALSE;
+        // 候选窗收了 ⇒ 撤掉「候选驱动的输入会话」（与 BeginUIElement 处成对）。
+        // 不清会让 Backspace/Enter/Escape 在候选早已消失后继续被吃掉，键就丢了。
+        if (_pKeyEventSink != nullptr)
+        {
+            _pKeyEventSink->SetCandidateSessionActive(FALSE);
+        }
         // 只清快照，**不动** _uiHostDraws：它记录的是宿主的意愿（谁画），下一次
         // BeginUIElement 会重新问；服务端那边的记账也照旧，避免每次组合结束都收/弹一次。
         _uiSnapshot = UiElementSnapshot();

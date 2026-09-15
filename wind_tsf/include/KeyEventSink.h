@@ -135,6 +135,31 @@ public:
     // vk: 虚拟键码（Win32 VK_*）；mods: 内部 KEYMOD_* 修饰位（不是 TSF MOD_*）。
     BOOL DispatchHotkey(uint32_t vk, uint32_t mods);
 
+    /// 候选窗显隐直接驱动「输入会话」，**不经 composition**。
+    ///
+    /// `_HasInputSession()` 此前的四个来源全都挂在 composition 上，于是「不建 composition
+    /// 的模式」（加词把 `input.caret.add_word_via_composition` 关掉时就是这种）虽然候选窗
+    /// 开着，`Backspace/Enter/Escape` 却一律被判为「无会话」而透传给宿主 —— 加词要靠 Enter
+    /// 确认、Esc 取消，收不到就等于废了。
+    ///
+    /// 候选窗开着本就是「用户正在输入」的充分证据，与组合区在不在无关。
+    ///
+    /// 置位两处：`BeginUIElement`（候选窗起）、`WM_HOTKEY` 的加词 id 段；
+    /// 清位两处：`EndUIElement`（候选窗收）、`ClearComposition` 响应。
+    ///
+    /// ⛔ **已知缺陷（待修，2026-09-15）**：`WM_HOTKEY` 那处置位**过宽**。它挂在
+    /// `kHotkeyIdAddWordBase` 这一 id 段上，而 `_RegisterAddWordHotkeys` 注册的是
+    /// `GlobalHotkeys()` —— 除加词外还有 `softkeyboard`、`open_add_word_dialog`、
+    /// `enter_special:*`、`enter_rare_char`、临拼直达键。其中软键盘与
+    /// `open_add_word_dialog` **不产候选、也不发 `ClearComposition`**，两条清位路径都不走
+    /// ⇒ 本位卡在 TRUE，此后 `Backspace/Enter/Escape` 一律被判为有会话而吃下转发，
+    /// 协调器那边却没有任何会话 ⇒ 「吃了再吐」，严格宿主（EverEdit 类）直接丢键。
+    /// 出厂配置下按一次软键盘开关即可复现；重开宿主可恢复。
+    ///
+    /// DLL 侧修不了：这里只有 `(vk, keymod)`，动作名在协调器。正解是由协调器在模式真正
+    /// 激活/退出时权威驱动置位（status flag），单列跟进。
+    void SetCandidateSessionActive(BOOL active) { _hotkeyModeSession = active; }
+
     // 供 CTextService 的 SendInput 兜底路径（CommitText/InsertText/ReplacePrecedingChars）
     // 调用：把即将注入的按键标记为"自生成"，OnTestKeyDown/OnTestKeyUp 见到后直接放行，
     // 不会被本 IME 自己的按键逻辑当成真实用户按键二次处理。用于 TSF EditSession 兜底
@@ -183,6 +208,13 @@ private:
     BOOL _pendingReplayToHost = FALSE;
     BOOL _isComposing;
     BOOL _hasCandidates;         // True if there are candidates to select
+    /// 热键激活的模式（加词等）撑起的输入会话，**独立于 composition 与焦点变更**。
+    ///
+    /// ⚠️ 不能复用 `_hasCandidates`：加词窗一弹出，宿主文档就丢焦点 ⇒
+    /// `CleanupInputStateForDocChange` → `ResetComposingState()` 把 `_hasCandidates` 清零，
+    /// 刚置的位当场没了，Backspace/Enter/Escape 又全透传给宿主（2026-09-15 靶机实测）。
+    /// 故本位单独存放，只由 `SetCandidateSessionActive` 置/清。
+    BOOL _hotkeyModeSession = FALSE;
     // 配对跳出键（VK 码集合，由 core 经 CONFIG_KEY_JUMP_OUT_KEYS 推送）。英文模式配对直接
     // 据此跳出；中文模式仅用于「有待跳出配对」时放行 Enter 等被会话门控的键转发给协调器。
     std::set<UINT> _jumpOutKeys;
