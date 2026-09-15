@@ -539,6 +539,7 @@ pub fn encode_status_update(
     host_render_avail: bool,
     soft_keyboard: bool,
     soft_keyboard_keys: bool,
+    hotkey_session: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -553,6 +554,7 @@ pub fn encode_status_update(
         host_render_avail,
         soft_keyboard,
         soft_keyboard_keys,
+        hotkey_session,
         key_down_hashes,
         key_up_hashes,
         icon_label,
@@ -576,6 +578,7 @@ pub fn encode_activation_status_push(
     host_render_avail: bool,
     soft_keyboard: bool,
     soft_keyboard_keys: bool,
+    hotkey_session: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -590,6 +593,7 @@ pub fn encode_activation_status_push(
         host_render_avail,
         soft_keyboard,
         soft_keyboard_keys,
+        hotkey_session,
         key_down_hashes,
         key_up_hashes,
         icon_label,
@@ -609,6 +613,7 @@ pub fn encode_state_push(
     caps_lock: bool,
     soft_keyboard: bool,
     soft_keyboard_keys: bool,
+    hotkey_session: bool,
     icon_label: &str,
 ) -> Vec<u8> {
     encode_status_update_ex(
@@ -621,6 +626,7 @@ pub fn encode_state_push(
         false, // host_render_avail
         soft_keyboard,
         soft_keyboard_keys,
+        hotkey_session,
         &[], // no hotkeys
         &[],
         icon_label,
@@ -651,6 +657,7 @@ fn encode_status_update_ex(
     host_render_avail: bool,
     soft_keyboard: bool,
     soft_keyboard_keys: bool,
+    hotkey_session: bool,
     key_down_hashes: &[u32],
     key_up_hashes: &[u32],
     icon_label: &str,
@@ -679,6 +686,9 @@ fn encode_status_update_ex(
     }
     if soft_keyboard_keys {
         flags |= STATUS_SOFT_KEYBOARD_KEYS;
+    }
+    if hotkey_session {
+        flags |= STATUS_HOTKEY_SESSION;
     }
 
     let key_down_count = key_down_hashes.len() as u32;
@@ -976,6 +986,94 @@ mod shell_exec_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 从三种状态编码里取出 flags 字段（三者布局相同：header 之后第一个 u32）。
+    fn flags_of(buf: &[u8]) -> u32 {
+        // 三种状态编码共用 `encode_status_update_ex`，布局相同：8 字节 header 之后
+        // 第一个 u32 就是 flags（小端）。偏移写错的话下面 `on ^ off` 那条断言会红 ——
+        // 取到别处的字节不可能恰好只差 STATUS_HOTKEY_SESSION 这一位。
+        u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]])
+    }
+
+    /// ★★★ 三条状态通路**都**必须把 `hotkey_session` 编进 flags。
+    ///
+    /// 这一位是 level-triggered 的：C++ 侧收到任何一条状态响应都会无条件镜像它。所以
+    /// 「漏带」不等于「带 false 无害」——它会把一个正活着的会话当场清掉。可达场景：
+    /// 加词开着时按 lshift 切中英，那条走 `encode_status_update` 的同步响应若不带本位，
+    /// 加词的 Enter/Esc 立刻失灵。
+    ///
+    /// 三个入口的参数全是 bool 且相邻，漏传/错位编译器不会报错，只能靠本条钉住。
+    #[test]
+    fn every_status_encoding_carries_the_hotkey_session_bit() {
+        let cases: [(&str, Box<dyn Fn(bool) -> Vec<u8>>); 3] = [
+            (
+                "encode_status_update",
+                Box::new(|on| {
+                    encode_status_update(
+                        true,
+                        false,
+                        true,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        on,
+                        &[],
+                        &[],
+                        "中",
+                    )
+                }),
+            ),
+            (
+                "encode_activation_status_push",
+                Box::new(|on| {
+                    encode_activation_status_push(
+                        true,
+                        false,
+                        true,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        on,
+                        &[],
+                        &[],
+                        "中",
+                    )
+                }),
+            ),
+            (
+                "encode_state_push",
+                Box::new(|on| {
+                    encode_state_push(true, false, true, true, false, false, false, on, "中")
+                }),
+            ),
+        ];
+
+        for (name, enc) in cases {
+            let on = flags_of(&enc(true));
+            let off = flags_of(&enc(false));
+            assert_ne!(
+                on & STATUS_HOTKEY_SESSION,
+                0,
+                "{name}: hotkey_session=true 时必须置 STATUS_HOTKEY_SESSION（flags=0x{on:08X}）"
+            );
+            assert_eq!(
+                off & STATUS_HOTKEY_SESSION,
+                0,
+                "{name}: hotkey_session=false 时不得置位（flags=0x{off:08X}）"
+            );
+            // 只有这一位变——防止参数错位把别的状态位一起改了。
+            assert_eq!(
+                on ^ off,
+                STATUS_HOTKEY_SESSION,
+                "{name}: 切换 hotkey_session 只应改变这一位，实际差异=0x{:08X}",
+                on ^ off
+            );
+        }
+    }
 
     /// 拼一份 macOS `.app` 形态的 FOCUS_GAINED 载荷（39 定长 + bundleID 段）。
     fn focus_payload_with_bundle(id: &str) -> Vec<u8> {

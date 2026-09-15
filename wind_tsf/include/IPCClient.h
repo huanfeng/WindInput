@@ -121,6 +121,7 @@ struct ServiceResponse
     // 软键盘的数字行需要它们被吃下来。
     bool IsSoftKeyboard() const { return (statusFlags & STATUS_SOFT_KEYBOARD) != 0; }
     bool IsSoftKeyboardKeys() const { return (statusFlags & STATUS_SOFT_KEYBOARD_KEYS) != 0; }
+    bool IsHotkeySession() const { return (statusFlags & STATUS_HOTKEY_SESSION) != 0; }
     bool HasHotkeys() const { return !keyDownHotkeys.empty() || !keyUpHotkeys.empty(); }
 };
 

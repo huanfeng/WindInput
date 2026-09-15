@@ -2266,7 +2266,6 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_DEBUG(L"Received ClearComposition from service\n");
         _isComposing = FALSE;
         _hasCandidates = FALSE;
-        _hotkeyModeSession = FALSE; // 加词等热键模式的四个出口都发 ClearComposition
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition();
         return TRUE;
@@ -2283,12 +2282,6 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_DEBUG(L"Received ClearCompositionThenPassThrough from service\n");
         _isComposing = FALSE;
         _hasCandidates = FALSE;
-        // 与孪生分支 ClearComposition 对位：同样是「收掉会话」，区别只在这一键要还给宿主，
-        // 那就同样清掉热键模式位。当前不清也不会出事（紧接着的
-        // NotifyCandidatesVisibilityChanged(FALSE) 会经 EndUIElement 清一次），但那是**间接
-        // 依赖**——一旦候选窗此刻没开着（`_uiElementId == -1`），EndUIElement 整支都不走，
-        // 位就留下了。两个分支的状态清理必须逐位对齐，别让其中一个靠副作用兜底。
-        _hotkeyModeSession = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition();
         _pendingReplayToHost = TRUE;
@@ -2299,6 +2292,12 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         // 的标准响应类型 (自包含 mode + iconLabel + hotkeys), 走 UpdateFullStatus 一并
         // 同步 _bChineseMode mirror + TSF compartments + LangBar UI。
         WIND_LOG_DEBUG(L"Received StatusUpdate as final response\n");
+        // 热键模式会话位：`UpdateFullStatus` 的签名只有 5 个 BOOL + label、收不到
+        // statusFlags，所以这一位得在这里单独镜像。**这是第三条纠正路径**——
+        // level-triggered 「漏一次由下一次纠正」的可靠性正比于纠正路径的条数，而本分支
+        // 覆盖的是切中英 / 焦点切换 / 激活这些高频动作：加词开着时按一次 lshift，
+        // 这里就会把权威值重新灌一遍。不接的话 `encode_status_update` 带的那一位是死码。
+        SetCandidateSessionActive(response.IsHotkeySession());
         _pTextService->UpdateFullStatus(
             response.IsChineseMode(),
             response.IsFullWidth(),
@@ -2844,8 +2843,10 @@ BOOL CKeyEventSink::_HasInputSession()
 {
     return _pTextService->HasActiveComposition()
         || _hasCandidates
-        // 热键激活的模式（如 add_word_via_composition=false 的加词）没有 composition、
-        // 也会因宿主丢焦点而被 ResetComposingState 清掉 _hasCandidates —— 单独一位撑着。
+        // 热键激活的模式（加词 / 临拼 / 特殊 / 生僻字）：它们在
+        // `input.caret.*_via_composition = false` 时根本不建 composition，上面两个来源全
+        // 落空。本位由**服务端**经 STATUS_HOTKEY_SESSION 权威驱动（level-triggered），
+        // DLL 侧只镜像不推断 —— 见 SetCandidateSessionActive 的声明处。
         || _hotkeyModeSession
         || _IsResyncActive()
         || _pTextService->HasDeferredComposition();

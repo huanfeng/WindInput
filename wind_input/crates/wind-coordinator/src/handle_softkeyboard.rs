@@ -655,8 +655,13 @@ pub(crate) struct SoftKeyboardPushOnDrop<'a>(pub(crate) &'a Coordinator);
 impl Drop for SoftKeyboardPushOnDrop<'_> {
     fn drop(&mut self) {
         if self.0.softkeyboard_dirty.swap(false, Ordering::Relaxed) {
+            // 这一支内部已 push_state_update（推的是完整快照，热键会话位自然在内），
+            // 不必再推一次；但缓存要跟着对齐，否则下一次按键会据陈旧缓存白推一次。
             self.0.after_softkeyboard_change();
+            self.0.sync_hotkey_session_cache();
+            return;
         }
+        let _pushed = self.0.push_hotkey_session_if_changed();
     }
 }
 

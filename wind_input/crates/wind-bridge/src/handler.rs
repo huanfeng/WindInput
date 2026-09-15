@@ -54,6 +54,16 @@ pub struct StatusUpdateData {
     /// 当前面是**键盘面**（`send_keys`）：按键交还输入法，C++ 不启用软键盘总闸。
     /// 只在 `soft_keyboard` 为真时有意义。
     pub soft_keyboard_keys: bool,
+    /// 热键激活的模式（加词 / 临拼 / 特殊 / 生僻字）当前活着。
+    ///
+    /// C++ 的 `_HasInputSession()` 要用它：这几个模式在
+    /// `input.caret.*_via_composition = false` 时根本不建 composition，DLL 侧四个会话来源
+    /// 全落空，Backspace/Enter/Escape 会被判「无会话」而透传给宿主。
+    ///
+    /// ⚠️ **level-triggered**：每一条携带状态的响应都必须带上当前值，DLL 无条件镜像。
+    /// 漏带（而不是带 false）的后果是把正活着的会话清掉 —— 例如加词开着时按 lshift 切
+    /// 中英，那条 StatusUpdate 若不带本位，加词的 Enter/Esc 当场失灵。
+    pub hotkey_session: bool,
     pub icon_label: String,
     pub key_down_hotkeys: Vec<u32>,
     pub key_up_hotkeys: Vec<u32>,

@@ -1435,6 +1435,22 @@ pub const STATUS_SOFT_KEYBOARD: u32 = 0x0080;
 /// 而常规链路在英文态返回 PassThrough，键彻底消失。
 /// 位值必须与 `BinaryProtocol.h` 的 `STATUS_SOFT_KEYBOARD_KEYS` 一致。
 pub const STATUS_SOFT_KEYBOARD_KEYS: u32 = 0x0100;
+/// 热键激活的模式（加词 / 临拼 / 特殊 / 生僻字）当前活着。
+///
+/// ★ C++ 侧 `_HasInputSession()` 的权威来源之一。这几个模式在
+/// `input.caret.*_via_composition = false` 时**根本不建 composition**，DLL 那边四个会话
+/// 来源全落空，Backspace/Enter/Escape 一律判「无会话」透传给宿主 —— 加词要靠 Enter 确认、
+/// Esc 取消，收不到就等于废了。
+///
+/// 为什么由服务端告知而不是 DLL 自己判：DLL 只有 `(vk, keymod)`，动作名在这边。它那条
+/// `WM_HOTKEY` 通路能看到的 id 段涵盖**所有** `HOTKEY_POLICY_GLOBAL` 热键（软键盘、
+/// `open_add_word_dialog` 也在内），据它置位必然过宽。
+///
+/// ⚠️ **level-triggered**：每次状态推送都带完整值，DLL 无条件镜像，漏一次推送由下一次
+/// 纠正。前一版是边沿驱动（某事件置、某事件清），漏一次清位就永久卡住——软键盘按一次
+/// 即可复现（它在那个 id 段内，却不产候选也不发 ClearComposition）。
+/// 位值必须与 `BinaryProtocol.h` 的 `STATUS_HOTKEY_SESSION` 一致。
+pub const STATUS_HOTKEY_SESSION: u32 = 0x0200;
 
 // ──────────────────────────────────────────────
 // 模式切换来源（CMD_SYSTEM_MODE_SWITCH 的 flags 高 4 位）
@@ -1646,6 +1662,81 @@ mod input_diag_wire_tests {
 mod tests {
     use super::*;
 
+    /// ★★★ 每一个 `STATUS_*` 的位值都必须与 C++ 侧 `BinaryProtocol.h` 逐位相同。
+    ///
+    /// 这两份常量各写各的，靠的一直是注释里那句「位值必须与 XX 一致」—— 而注释挡不住
+    /// 漂移：加位的人在一侧加完、另一侧忘了，或者两侧选了同一个空位给不同含义，**症状
+    /// 全是静默的**（状态位被读成另一个状态，例如「热键会话」被读成「软键盘开着」）。
+    ///
+    /// 所以这里不比注释，直接解析头文件。新增 `STATUS_*` 时两侧都要加，本条会替你记住。
+    #[test]
+    fn status_bits_match_the_cpp_header() {
+        let header = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../wind_tsf/include/BinaryProtocol.h");
+        let src = std::fs::read_to_string(&header)
+            .unwrap_or_else(|e| panic!("读不到 {}: {e}", header.display()));
+
+        // constexpr uint32_t STATUS_XXX = 0x0001; —— 只认这一种形态，多余空格随意。
+        let mut cpp = std::collections::BTreeMap::new();
+        for line in src.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("constexpr uint32_t STATUS_") else {
+                continue;
+            };
+            let Some((name, tail)) = rest.split_once('=') else {
+                continue;
+            };
+            let Some(val) = tail.trim().trim_end_matches(';').split(';').next() else {
+                continue;
+            };
+            let val = val.trim();
+            let Some(hex) = val.strip_prefix("0x") else {
+                continue;
+            };
+            let Ok(v) = u32::from_str_radix(hex, 16) else {
+                continue;
+            };
+            cpp.insert(format!("STATUS_{}", name.trim()), v);
+        }
+        assert!(
+            cpp.len() >= 9,
+            "只从头文件解析出 {} 个 STATUS_* —— 多半是那边的写法变了，本测试已失效: {cpp:?}",
+            cpp.len()
+        );
+
+        let rust: std::collections::BTreeMap<&str, u32> = [
+            ("STATUS_CHINESE_MODE", STATUS_CHINESE_MODE),
+            ("STATUS_FULL_WIDTH", STATUS_FULL_WIDTH),
+            ("STATUS_CHINESE_PUNCT", STATUS_CHINESE_PUNCT),
+            ("STATUS_TOOLBAR_VISIBLE", STATUS_TOOLBAR_VISIBLE),
+            ("STATUS_MODE_CHANGED", STATUS_MODE_CHANGED),
+            ("STATUS_CAPS_LOCK", STATUS_CAPS_LOCK),
+            ("STATUS_HOST_RENDER_AVAIL", STATUS_HOST_RENDER_AVAIL),
+            ("STATUS_SOFT_KEYBOARD", STATUS_SOFT_KEYBOARD),
+            ("STATUS_SOFT_KEYBOARD_KEYS", STATUS_SOFT_KEYBOARD_KEYS),
+            ("STATUS_HOTKEY_SESSION", STATUS_HOTKEY_SESSION),
+        ]
+        .into_iter()
+        .collect();
+
+        for (name, rv) in &rust {
+            let cv = cpp
+                .get(*name)
+                .unwrap_or_else(|| panic!("C++ 侧没有 {name} —— 新增状态位时两侧都要加"));
+            assert_eq!(
+                rv, cv,
+                "{name} 两侧位值不一致: Rust=0x{rv:04X} C++=0x{cv:04X}"
+            );
+        }
+        // 反向：C++ 加了位而 Rust 没跟上，同样要红 —— 否则服务端永远不会置那一位。
+        for name in cpp.keys() {
+            assert!(
+                rust.contains_key(name.as_str()),
+                "C++ 侧有 {name} 而 Rust 侧没有 —— 新增状态位时两侧都要加"
+            );
+        }
+    }
+
     /// 来源位不得与任何 `STATUS_*` 状态位重叠——两者共用 `CMD_SYSTEM_MODE_SWITCH`
     /// 的同一个 u32。重叠的后果是静默的：来源编码会被读成「中文模式」等状态位。
     #[test]
@@ -1658,7 +1749,8 @@ mod tests {
             | STATUS_CAPS_LOCK
             | STATUS_HOST_RENDER_AVAIL
             | STATUS_SOFT_KEYBOARD
-            | STATUS_SOFT_KEYBOARD_KEYS;
+            | STATUS_SOFT_KEYBOARD_KEYS
+            | STATUS_HOTKEY_SESSION;
         assert_eq!(status_bits & MODE_SWITCH_SOURCE_MASK, 0);
         assert_eq!(MODE_SWITCH_SOURCE_MASK >> MODE_SWITCH_SOURCE_SHIFT, 0xF);
     }

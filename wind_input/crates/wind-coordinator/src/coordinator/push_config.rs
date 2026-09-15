@@ -57,6 +57,7 @@ impl Coordinator {
             host_render_avail,
             s.soft_keyboard,
             s.soft_keyboard_keys,
+            s.hotkey_session,
             &s.key_down_hotkeys,
             &s.key_up_hotkeys,
             &s.icon_label,
@@ -65,6 +66,9 @@ impl Coordinator {
         // 按别的进程计算的 hostRenderAvail 位污染给无关客户端（真机踩坑：开始菜单弹出时
         // StartMenuExperienceHost 等兄弟实例的激活推送被 SearchHost 收到，avail=0 触发
         // Band 窗口销毁重建循环）。事件源无 push 连接时丢弃，绝不兜底转发。
+        // 这条也把本位发了出去 ⇒ 缓存跟着对齐（语义是「对端收到了什么」）。
+        // 不对齐会让下一次按键的比较基于陈旧值，最坏是漏推，见 sync_hotkey_session_cache。
+        self.sync_hotkey_session_cache();
         if client_token != 0 {
             if !self.push_server.push_to_token(client_token, &encoded) {
                 debug!("activation push: 事件源 token 无 push 连接，丢弃（防污染不广播）");
@@ -378,6 +382,66 @@ impl Coordinator {
         self.push_server.push_to_active(&msg);
     }
 
+    /// 「热键模式会话」位变了才推一次状态。**这一位的发送边沿**。
+    ///
+    /// # 为什么需要它
+    ///
+    /// `STATUS_HOTKEY_SESSION` 是 level-triggered 的 —— 但那说的是**载荷**语义（每条状态
+    /// 响应都带完整值、DLL 无条件镜像），**发送本身仍然需要一个边沿**。而四个热键模式的
+    /// 进出路径（`enter_add_word_mode` / `exit_add_word_mode` / `enter_special_mode` /
+    /// `enter_rare_char_mode` / `exit_special_mode` / 临拼进出）一个都不推状态：它们只调
+    /// `notify_ui_update` / `notify_ui_hide` / `notify_toolbar`，这三个都不碰状态通道。
+    ///
+    /// 漏了这一步的后果（2026-09-15 审查抓到，出厂配置即可复现）：
+    /// Ctrl+= → DLL 乐观置位 → 协调器进加词、回 `Consumed`（不推状态）→ 用户按 Esc →
+    /// 协调器退出加词、回 `ClearComposition`（不推状态）→ 而 DLL 侧的清位逻辑已随本次
+    /// 改动删除 ⇒ **位永久卡在 TRUE**，此后 Backspace/Enter/Escape 一律吃下转发而协调器
+    /// 无会话 ⇒「吃了再吐」丢键。那正是本次要修的 C2，只是从软键盘支路搬到了加词主流程。
+    ///
+    /// # 为什么比较前后值而不是置 dirty 标志
+    ///
+    /// 置位点分散在四个模式的进出路径上（还有「热键置错了但根本没进模式」这种没有
+    /// 对应修改点的情形）。让每个调用点各记一次注定要漏 —— 这正是
+    /// [`Self::after_softkeyboard_change`] 那段注释里说的同一件事。比较前后值不依赖任何
+    /// 修改点的配合：状态怎么变的不重要，变了就推。
+    /// 回「这一次是否真的推了」——给测试用的可观察点。headless 下 `push_state_update`
+    /// 没有真实 push 连接、观察不到，而「推没推」正是本函数唯一的行为。生产路径忽略返回值。
+    pub(crate) fn push_hotkey_session_if_changed(&self) -> bool {
+        let now = self.hotkey_session_now();
+        let prev = self
+            .last_pushed_hotkey_session
+            .swap(now, std::sync::atomic::Ordering::Relaxed);
+        // 命中过 key_down 热键 ⇒ 无条件推，**不看有没有变**。
+        //
+        // C++ 那边在 WM_HOTKEY 上乐观置位、且不看动作，制造的是一个协调器观察不到的
+        // DLL 侧状态；比较法只看协调器自己变没变，够不着它。`open_add_word_dialog`
+        // 就落在这个缝里（置了位，而协调器前后都是 false）。见置位处的长注释。
+        let forced = self
+            .hotkey_session_force_push
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        if forced || prev != now {
+            self.push_state_update();
+            return true;
+        }
+        false
+    }
+
+    /// 别处已经推过一次完整状态时，把本位的缓存对齐过去（**只记账，不推送**）。
+    ///
+    /// `push_state_update` 推的是 `build_status()` 的完整快照，本位自然在内。但
+    /// [`Self::push_hotkey_session_if_changed`] 的去重靠 `last_pushed_hotkey_session`
+    /// 这份缓存，别的路径推送时它不会自己更新。
+    ///
+    /// ⚠️ 不对齐的真正风险是**漏推**，不是「白推一次 IPC」：缓存停在 A 而 DLL 已经收到
+    /// B，此后状态从 B 变回 A 时 `prev == now` 被判成「没变」而不推，DLL 就永远停在 B
+    /// —— 那正是 C2 的形状。缓存的语义是「对端收到了什么」，所以每一条发出这一位的
+    /// 路径都必须对齐它。
+    pub(crate) fn sync_hotkey_session_cache(&self) {
+        let now = self.hotkey_session_now();
+        self.last_pushed_hotkey_session
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn push_state_update(&self) {
         // 推的是标点态等状态位，先让方案级覆盖落地，否则切方案后工具栏要等下一次按键才更新。
         self.sync_schema_scope_locked();
@@ -392,6 +456,7 @@ impl Coordinator {
             s.caps_lock,
             s.soft_keyboard,
             s.soft_keyboard_keys,
+            s.hotkey_session,
             &s.icon_label,
         );
         self.push_server.push_to_active(&encoded);

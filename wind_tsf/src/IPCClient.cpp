@@ -1596,6 +1596,13 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             }
 
             const StatusHeader* syncHeader = reinterpret_cast<const StatusHeader*>(payload.data());
+            // ⚠️ 本分支把 type 报成 StatusUpdate，而 `_HandleServiceResponse` 的那个分支
+            // 会据 statusFlags 镜像 STATUS_HOTKEY_SESSION —— 留 0 就是**无声误清**（把正
+            // 活着的热键模式会话清掉，Enter/Esc/Backspace 随即透传给宿主）。服务端本来就
+            // 在 StatusHeader 里发了 flags，如实填上。
+            // （本命令当前是 Go 时代遗留的死码：Rust 侧没有任何发送点。但既然 type 声明成
+            //   StatusUpdate，就得满足那个类型的契约，否则哪天复活是静默故障。）
+            response.statusFlags = syncHeader->flags;
 
             // Extract hotkeys（防溢出，同 CMD_STATUS_UPDATE 注释）
             size_t hotkeysOffset = sizeof(StatusHeader);

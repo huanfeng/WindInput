@@ -2144,18 +2144,24 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
                 if (vk != 0)
                 {
                     self->SendCaretPositionUpdate();
-                    // ★ 同时开启「候选驱动的输入会话」。
+                    // ★ 「热键模式会话」的**乐观置位**——只为盖住 IPC 空窗，不是权威。
                     //
-                    // 加词把 `input.caret.add_word_via_composition` 关掉时**根本不建
-                    // composition**（协调器返回 Consumed），于是 `NotifyCandidatesVisibilityChanged`
-                    // → `BeginUIElement` 这条链整个不走 —— 而 Backspace/Enter/Escape 的拦截判据
-                    // `_HasInputSession()` 原本四个来源全挂在 composition 上，结果那三个键一律
-                    // 透传给宿主：↑↓ 还能用（它们是 RegisterCandidateHotkeys 全局注册的），
-                    // Enter/Esc/Backspace 全废（2026-09-15 靶机实测）。
+                    // 权威是服务端的 STATUS_HOTKEY_SESSION（level-triggered，见
+                    // _SyncStateFromResponse）。但 DispatchHotkey 是同步 IPC（真机实测
+                    // 16~75ms），状态推送还在它之后；这段空窗里按下 Esc 会被判「无会话」
+                    // 而透传给宿主。先乐观置上，随后第一条状态推送就会以权威值覆盖。
                     //
-                    // 这里置位、`ClearComposition` 到达时清位（加词的四个出口都发它）。
-                    // 开关开着时也置位无妨：那条路本就有 composition，`_HasInputSession()`
-                    // 早已成立，多置一次不改变任何判定。
+                    // ⚠️ 正因为它**过宽**才必须是乐观的而非权威的：这里能看到的 id 段是
+                    // `_RegisterAddWordHotkeys` 注册的 GlobalHotkeys() 全集 —— 除加词外还有
+                    // softkeyboard、open_add_word_dialog、enter_special:*、enter_rare_char、
+                    // 临拼直达键，而 DLL 这边只有 (vk, keymod)、分不出是哪个动作。
+                    //
+                    // 前一版把它当权威用（置位 + 靠 ClearComposition 清位），于是按一次
+                    // 软键盘开关就卡死：软键盘在这个 id 段内，却不产候选也不发
+                    // ClearComposition，两条清位路径都不走，此后 Enter/Esc/Backspace 全被
+                    // 吃下转发而协调器无会话 —— 「吃了再吐」，严格宿主直接丢键。
+                    // 现在置错了也会被下一条状态推送纠正回来（软键盘那条推送里本位为
+                    // false），不再需要 DLL 侧任何清位逻辑。
                     if (self->_pKeyEventSink != nullptr)
                     {
                         self->_pKeyEventSink->SetCandidateSessionActive(TRUE);
@@ -2629,14 +2635,10 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
             _uiElementShown = bShow;
             _uiHostDraws = !bShow;
             WIND_LOG_DEBUG_FMT(L"BeginUIElement ok id=%u show=%d\n", _uiElementId, (int)bShow);
-            // 候选窗起来了 ⇒ 输入会话成立，**与组合区在不在无关**。不置这一位的话，
-            // 「不建 composition 的模式」（如 add_word_via_composition=false 的加词）
-            // 收不到 Backspace/Enter/Escape —— 那几个键的拦截判据是 `_HasInputSession()`，
-            // 而它此前的来源全挂在 composition 上。见该函数的声明处注释。
-            if (_pKeyEventSink != nullptr)
-            {
-                _pKeyEventSink->SetCandidateSessionActive(TRUE);
-            }
+            // ⛔ 这里**不再**置「热键模式会话」位。它现在由服务端经 STATUS_HOTKEY_SESSION
+            // 权威驱动（见 _SyncStateFromResponse），DLL 侧只镜像、不推断 —— 多一个本地
+            // 写入方就多一个真相源，而「候选窗起/收」与「热键模式活着」本就不是同一件事
+            // （普通打字也会走这里，那时根本没有热键模式）。
             // ⚠ 有位要主张就**强制重报一次**，绕过 _uiElementStateSent 的去重。
             // CTextService 是每 TSF 线程一个实例、各有一份 _uiElementStateSent，而服务端
             // 按**裸 pid** 记账：同进程另一个 UI 线程首次 Begin 报 flags=0，会把本线程
@@ -2682,12 +2684,10 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
         WIND_LOG_DEBUG_FMT(L"EndUIElement id=%u hr=0x%08X\n", _uiElementId, (uint32_t)hr);
         _uiElementId = (DWORD)-1;
         _uiElementShown = FALSE;
-        // 候选窗收了 ⇒ 撤掉「候选驱动的输入会话」（与 BeginUIElement 处成对）。
-        // 不清会让 Backspace/Enter/Escape 在候选早已消失后继续被吃掉，键就丢了。
-        if (_pKeyEventSink != nullptr)
-        {
-            _pKeyEventSink->SetCandidateSessionActive(FALSE);
-        }
+        // ⛔ 同 BeginUIElement：不再在这里清「热键模式会话」位。服务端权威驱动之后，
+        // 在这里清反而危险 —— 加词开着时若候选窗因任何原因收一次（例如宿主自绘判定
+        // 命中），会把仍然活着的会话当场清掉，而服务端那边没有状态变化、不会再推一次
+        // 来纠正，位就一直是错的，直到下一次任何状态推送。
         // 只清快照，**不动** _uiHostDraws：它记录的是宿主的意愿（谁画），下一次
         // BeginUIElement 会重新问；服务端那边的记账也照旧，避免每次组合结束都收/弹一次。
         _uiSnapshot = UiElementSnapshot();
@@ -3172,6 +3172,12 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
     _bFullWidth = response.IsFullWidth();
     _bSoftKeyboard = response.IsSoftKeyboard();
     _bSoftKeyboardKeys = response.IsSoftKeyboardKeys();
+    // 热键模式会话：**无条件镜像**服务端的值（level-triggered，见 STATUS_HOTKEY_SESSION）。
+    // 服务端是这一位的唯一权威，DLL 这边不做任何本地推断——本地推断正是前一版卡死的根因。
+    if (_pKeyEventSink != nullptr)
+    {
+        _pKeyEventSink->SetCandidateSessionActive(response.IsHotkeySession());
+    }
 
     // compartment 如实反映中英模式（值语义），见 _SetOpenCloseCompartment 定义处的说明。
     _SetOpenCloseCompartment(_bChineseMode);
@@ -4440,6 +4446,12 @@ BOOL CTextService::_InitIPCClient()
         pThis->_bFullWidth = response.IsFullWidth();
         pThis->_bSoftKeyboard = response.IsSoftKeyboard();
         pThis->_bSoftKeyboardKeys = response.IsSoftKeyboardKeys();
+        // 同 _SyncStateFromResponse：本位由服务端权威驱动，这里无条件镜像。
+        // 两条路都要写——只写一条的话，另一条通路来的状态推送会让镜像停在旧值。
+        if (pThis->_pKeyEventSink != nullptr)
+        {
+            pThis->_pKeyEventSink->SetCandidateSessionActive(response.IsHotkeySession());
+        }
 
         // Update language bar button using thread-safe PostUpdateFullStatus
         // This posts a message to the UI thread instead of calling COM directly

@@ -135,29 +135,35 @@ public:
     // vk: 虚拟键码（Win32 VK_*）；mods: 内部 KEYMOD_* 修饰位（不是 TSF MOD_*）。
     BOOL DispatchHotkey(uint32_t vk, uint32_t mods);
 
-    /// 候选窗显隐直接驱动「输入会话」，**不经 composition**。
+    /// 「热键模式会话」镜像位的写入口。**服务端是唯一权威，这里只镜像、不推断。**
     ///
-    /// `_HasInputSession()` 此前的四个来源全都挂在 composition 上，于是「不建 composition
+    /// `_HasInputSession()` 原本四个来源全挂在 composition 上，于是「不建 composition
     /// 的模式」（加词把 `input.caret.add_word_via_composition` 关掉时就是这种）虽然候选窗
     /// 开着，`Backspace/Enter/Escape` 却一律被判为「无会话」而透传给宿主 —— 加词要靠 Enter
     /// 确认、Esc 取消，收不到就等于废了。
     ///
-    /// 候选窗开着本就是「用户正在输入」的充分证据，与组合区在不在无关。
+    /// # 谁来调
     ///
-    /// 置位两处：`BeginUIElement`（候选窗起）、`WM_HOTKEY` 的加词 id 段；
-    /// 清位两处：`EndUIElement`（候选窗收）、`ClearComposition` 响应。
+    /// - **权威**（三处，都无条件镜像 `STATUS_HOTKEY_SESSION`；level-triggered：每条状态
+    ///   响应都带完整值，漏一次由下一次纠正）：
+    ///   `CTextService::_SyncStateFromResponse`（激活/焦点推送）、StatePush 回调、
+    ///   以及本类 `_HandleServiceResponse` 的 `ResponseType::StatusUpdate` 分支
+    ///   （切中英 / SystemModeSwitch / FocusGained 等同步操作走这条 —— `UpdateFullStatus`
+    ///   的签名收不到 statusFlags，故那一位在那里单独镜像）。
+    /// - **乐观置位**：`WM_HOTKEY` 的加词 id 段，只为盖住 `DispatchHotkey` 那 16~75ms 的
+    ///   同步 IPC 空窗（那段时间里按 Esc 会透传）。它**过宽**（那个 id 段涵盖所有
+    ///   `HOTKEY_POLICY_GLOBAL` 热键，软键盘也在内），但置错了会被随后的状态推送纠正。
     ///
-    /// ⛔ **已知缺陷（待修，2026-09-15）**：`WM_HOTKEY` 那处置位**过宽**。它挂在
-    /// `kHotkeyIdAddWordBase` 这一 id 段上，而 `_RegisterAddWordHotkeys` 注册的是
-    /// `GlobalHotkeys()` —— 除加词外还有 `softkeyboard`、`open_add_word_dialog`、
-    /// `enter_special:*`、`enter_rare_char`、临拼直达键。其中软键盘与
-    /// `open_add_word_dialog` **不产候选、也不发 `ClearComposition`**，两条清位路径都不走
-    /// ⇒ 本位卡在 TRUE，此后 `Backspace/Enter/Escape` 一律被判为有会话而吃下转发，
-    /// 协调器那边却没有任何会话 ⇒ 「吃了再吐」，严格宿主（EverEdit 类）直接丢键。
-    /// 出厂配置下按一次软键盘开关即可复现；重开宿主可恢复。
+    /// # ⚠️ 为什么 DLL 侧不再有任何清位逻辑
     ///
-    /// DLL 侧修不了：这里只有 `(vk, keymod)`，动作名在协调器。正解是由协调器在模式真正
-    /// 激活/退出时权威驱动置位（status flag），单列跟进。
+    /// 前一版是边沿驱动：`WM_HOTKEY`/`BeginUIElement` 置位，`ClearComposition`/`EndUIElement`
+    /// 清位。**按一次软键盘开关就卡死** —— 软键盘在那个 id 段内，却不产候选也不发
+    /// `ClearComposition`，两条清位路径都不走，位卡在 TRUE，此后 `Backspace/Enter/Escape`
+    /// 一律被判有会话而吃下转发，协调器那边却没有任何会话 ⇒「吃了再吐」，严格宿主
+    /// （EverEdit 类）直接丢键。
+    ///
+    /// 根因是拿边沿去表达一个**持续状态**：漏一个事件就永久错。改成服务端权威 +
+    /// level-triggered 之后，DLL 侧再加任何本地清位都是第二个真相源，会把这个毛病请回来。
     void SetCandidateSessionActive(BOOL active) { _hotkeyModeSession = active; }
 
     // 供 CTextService 的 SendInput 兜底路径（CommitText/InsertText/ReplacePrecedingChars）
@@ -208,12 +214,21 @@ private:
     BOOL _pendingReplayToHost = FALSE;
     BOOL _isComposing;
     BOOL _hasCandidates;         // True if there are candidates to select
-    /// 热键激活的模式（加词等）撑起的输入会话，**独立于 composition 与焦点变更**。
+    /// 热键激活的模式（加词 / 临拼 / 特殊 / 生僻字）当前活着 —— 服务端
+    /// `STATUS_HOTKEY_SESSION` 的本地镜像，**独立于 composition 与焦点变更**。
     ///
     /// ⚠️ 不能复用 `_hasCandidates`：加词窗一弹出，宿主文档就丢焦点 ⇒
     /// `CleanupInputStateForDocChange` → `ResetComposingState()` 把 `_hasCandidates` 清零，
     /// 刚置的位当场没了，Backspace/Enter/Escape 又全透传给宿主（2026-09-15 靶机实测）。
-    /// 故本位单独存放，只由 `SetCandidateSessionActive` 置/清。
+    /// 故本位单独存放，且**刻意不进** `ResetComposingState`：它的生死由服务端决定，
+    /// 焦点变化不是它的终点（加词窗弹出本身就会让宿主丢焦点）。
+    /// 写入口只有 `SetCandidateSessionActive`。
+    ///
+    /// ⚠️ **可从 AsyncReader 线程写**（StatePush 回调那条），TSF 线程在 `_HasInputSession()`
+    /// 里读。与紧邻的 `_bSoftKeyboard` 同形，x64 上对齐的 32 位写不会撕裂，实务上安全；
+    /// 但别沿用「这一位只在 TSF 线程上动」的旧印象 —— 改动前确实如此，现在不是了。
+    /// （对照：`IPCClient.h` 要求 ModePush 回调必须用 `InterlockedExchange` 写
+    ///   `_bChineseMode`，那是因为它参与更细的时序判定。）
     BOOL _hotkeyModeSession = FALSE;
     // 配对跳出键（VK 码集合，由 core 经 CONFIG_KEY_JUMP_OUT_KEYS 推送）。英文模式配对直接
     // 据此跳出；中文模式仅用于「有待跳出配对」时放行 Enter 等被会话门控的键转发给协调器。

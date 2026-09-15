@@ -1279,6 +1279,19 @@ pub struct Coordinator {
     pub(crate) softkeyboard_page_saved: std::sync::Mutex<String>,
     /// 软键盘状态有变、待推给 C++。由 `SoftKeyboardPushOnDrop` 在按键返回时消费。
     pub(crate) softkeyboard_dirty: std::sync::atomic::AtomicBool,
+    /// **DLL 最后收到的** `STATUS_HOTKEY_SESSION` 取值。
+    ///
+    /// ⚠️ 语义是「对端收到了什么」，不是「我上次算出什么」—— 每一条把这一位发出去的
+    /// 路径都必须对齐它（`push_hotkey_session_if_changed` 自己对齐，其余路径调
+    /// `sync_hotkey_session_cache`）。脱节的后果是**漏推**：缓存停在 A 而 DLL 已收到 B，
+    /// 此后状态从 B 变回 A 时 `prev == now` 被判成「没变」而不推，DLL 就永远停在 B。
+    /// 那正是 C2 的形状 —— 不是「白推一次 IPC」那种良性代价。
+    pub(crate) last_pushed_hotkey_session: std::sync::atomic::AtomicBool,
+    /// 本次按键命中过 key_down 热键 ⇒ 返回时**无条件**推一次状态（不走比较）。
+    ///
+    /// 与 C++ `WM_HOTKEY` 那一处乐观置位一一对称：那边置位不看动作，这边就不看状态有没有
+    /// 变。详见 `message_handler.rs` 里置位处的长注释。
+    pub(crate) hotkey_session_force_push: std::sync::atomic::AtomicBool,
     /// 软键盘打开时刻，供焦点路径的关闭守卫用。**必须与开启成对写入**，理由同
     /// `State::menu_opened_at`：漏写会让守卫读到上一次的时间戳，于是刚弹出的面板
     /// 被一条迟到的焦点事件当场关掉。
@@ -2359,6 +2372,8 @@ impl Coordinator {
                 runtime_state.last_softkeyboard_page.clone(),
             ),
             softkeyboard_dirty: std::sync::atomic::AtomicBool::new(false),
+            last_pushed_hotkey_session: std::sync::atomic::AtomicBool::new(false),
+            hotkey_session_force_push: std::sync::atomic::AtomicBool::new(false),
             softkeyboard_opened_at: std::sync::Mutex::new(None),
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
             // 而 store 在本结构体构造之后才可用）。headless 无 store 时保持空 = 出厂顺序。
@@ -6309,6 +6324,26 @@ impl Coordinator {
         }
     }
 
+    /// 「热键激活的模式活着吗」—— `STATUS_HOTKEY_SESSION` 的判据，**单一真相源**。
+    ///
+    /// 抽出来是因为它落在**每一次按键**的返回路径上（`push_hotkey_session_if_changed`），
+    /// 而走整个 `build_status()` 只为取这一个 bool 太贵：那边还要 `mode_icon_label()`
+    /// 造一个 String、`key_down_tsf_hashes()` / `key_up_tsf_hashes()` 各 collect 一个全量
+    /// `Vec<u32>`，三次分配白白落在热路径上。
+    ///
+    /// ⚠️ 判据**刻意不含「且没有 composition」**：C++ 侧 `_HasInputSession()` 是 OR，
+    /// 有 composition 时本位多余但无害；加上那个条件反而要在这里复算一份「有没有
+    /// composition」，与 DLL 的 `HasActiveComposition()` 成为两个真相源 —— 那正是前一版
+    /// （边沿驱动）出问题的形态。宁可多置一位。
+    pub(crate) fn hotkey_session_now(&self) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.add_word_active
+            || matches!(
+                s.active,
+                Some(ModeKind::TempPinyin | ModeKind::Special(_) | ModeKind::RareChar)
+            )
+    }
+
     pub(crate) fn build_status(&self) -> StatusUpdateData {
         let (chinese_mode, full_width, chinese_punct, toolbar_visible, caps_lock) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -6320,6 +6355,9 @@ impl Coordinator {
                 s.caps_lock,
             )
         };
+        // 判据收在 `hotkey_session_now()` 一处（它也在每次按键的返回路径上被调）。
+        // ⚠️ 必须在上面那个 guard 释放**之后**取：`std::sync::Mutex` 不可重入。
+        let hotkey_session = self.hotkey_session_now();
         let soft_keyboard = self
             .softkeyboard_active
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -6340,6 +6378,7 @@ impl Coordinator {
             caps_lock,
             soft_keyboard,
             soft_keyboard_keys,
+            hotkey_session,
             icon_label,
             key_down_hotkeys: self.rt().compiled_hotkeys.key_down_tsf_hashes(),
             key_up_hotkeys: self.rt().compiled_hotkeys.key_up_tsf_hashes(),
@@ -7871,6 +7910,236 @@ mod mode_comment_e2e_tests {
         *c.last_valid_caret.lock().unwrap() = (100, 200, 20);
         *c.composition_start.lock().unwrap() = (100, 200, true);
         (c, rx)
+    }
+
+    /// ★★★ 会话位的**发送边沿**：按键返回时状态变了就得推一次。
+    ///
+    /// # 这条钉的是什么
+    ///
+    /// `STATUS_HOTKEY_SESSION` 是 level-triggered 的 —— 那说的是**载荷**（每条状态响应
+    /// 都带完整值、DLL 无条件镜像）。但**发送本身仍然需要一个边沿**，而四个热键模式的
+    /// 进出路径一个都不推状态（只调 `notify_ui_update` / `notify_ui_hide` /
+    /// `notify_toolbar`，三个都不碰状态通道）。
+    ///
+    /// 漏掉这一步的后果（2026-09-15 审查抓到，出厂配置即可复现）：Ctrl+= → DLL 乐观置位
+    /// → 协调器进加词回 `Consumed`（不推）→ 按 Esc → 协调器退出回 `ClearComposition`
+    /// （不推）→ 而 DLL 侧的清位逻辑已被本轮删除 ⇒ **位永久卡在 TRUE** ⇒ 此后
+    /// Backspace/Enter/Escape 一律吃下转发而协调器无会话 ⇒「吃了再吐」丢键。
+    /// 那正是本轮要修的 C2，只是从软键盘支路搬到了加词主流程 —— 比原来更糟。
+    ///
+    /// # 为什么观察 `last_pushed_hotkey_session`
+    ///
+    /// headless 测试里没有真实 push 连接，观察不到「有没有发出去」。但这个缓存值是
+    /// 推送的前置：按键返回后它必须等于当前 `build_status().hotkey_session`，不等就说明
+    /// 边沿没触发。它同时钉住了两件事——RAII 有没有接线、边沿检测对不对。
+    ///
+    /// 变异检验：删掉 `SoftKeyboardPushOnDrop::drop` 里那行
+    /// `push_hotkey_session_if_changed()` ⇒ 本条立刻红。
+    #[test]
+    fn the_hotkey_session_flag_is_pushed_when_it_changes() {
+        use crate::handle_softkeyboard::SoftKeyboardPushOnDrop;
+        let (c, _rx) = coord_with_ui(Config::default());
+        let cached = |c: &Arc<Coordinator>| {
+            c.last_pushed_hotkey_session
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        assert!(!cached(&c), "基线：空闲态缓存应为 false");
+
+        // 进加词 —— 按键出口的 RAII 析构时应把缓存推到 true。
+        c.state.lock().unwrap().add_word_active = true;
+        {
+            let _g = SoftKeyboardPushOnDrop(&c);
+        }
+        assert!(
+            cached(&c),
+            "进入加词后必须推一次状态，否则 DLL 侧的乐观置位没有权威值来确认"
+        );
+
+        // 退出加词 —— 这一半才是 C2 的要害：DLL 侧已无清位逻辑，全靠这次推送。
+        c.state.lock().unwrap().add_word_active = false;
+        {
+            let _g = SoftKeyboardPushOnDrop(&c);
+        }
+        assert!(
+            !cached(&c),
+            "退出加词后必须推一次状态，否则 DLL 侧的位永久卡在 TRUE（C2 复发）"
+        );
+
+        // 没变化就不推：缓存值不动，且不该白跑一次状态推送。
+        {
+            let _g = SoftKeyboardPushOnDrop(&c);
+        }
+        assert!(!cached(&c), "状态没变时不该改动缓存");
+
+        // 临拼同理 —— 它连焦点变化都没有，改动前靠 ClearComposition 自愈，现在只剩这条路。
+        c.state.lock().unwrap().active = Some(ModeKind::TempPinyin);
+        {
+            let _g = SoftKeyboardPushOnDrop(&c);
+        }
+        assert!(cached(&c), "进入临拼后必须推");
+        c.state.lock().unwrap().active = None;
+        {
+            let _g = SoftKeyboardPushOnDrop(&c);
+        }
+        assert!(!cached(&c), "退出临拼后必须推");
+
+        // ── ★ 命中 key_down 热键 ⇒ **无条件**推，哪怕状态前后都没变 ──
+        //
+        // C++ 在 WM_HOTKEY 上乐观置位且**不看动作**（它只有 (vk, keymod)），制造的是一个
+        // 协调器观察不到的 DLL 侧状态。比较法只看协调器自己变没变，够不着它 —— 于是
+        // 「置了位、而协调器前后都是 false」的热键落进缝里：不推 ⇒ DLL 停在 TRUE ⇒
+        // Enter/Esc/Backspace 全被吃下转发而协调器无会话，「吃了再吐」丢键。
+        // 出厂就有一个落在缝里：`open_add_word_dialog`（拉起设置端，既不改
+        // `add_word_active` 也不推状态）。它实际靠设置端窗口的焦点往返被顺带纠正 ——
+        // 那是**副作用不是机制**，设置端拉不起来就卡住。
+        //
+        // 变异检验：把 `push_hotkey_session_if_changed` 里的 `forced ||` 去掉 ⇒ 本段红。
+        {
+            // 状态前后都是 false（模拟 open_add_word_dialog），但命中过热键。
+            assert!(!c.build_status().hotkey_session, "前提：此刻不该有会话");
+            c.last_pushed_hotkey_session
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            c.hotkey_session_force_push
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                c.push_hotkey_session_if_changed(),
+                "命中过热键 ⇒ 必须推，哪怕协调器这边状态前后都没变（DLL 侧那个乐观置位\
+                 只有这一次推送能纠正）"
+            );
+            assert!(
+                !c.hotkey_session_force_push
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "force_push 必须被消费掉（swap 而非 load），否则会一直强推"
+            );
+            // 消费之后，状态没变就不该再推。
+            assert!(
+                !c.push_hotkey_session_if_changed(),
+                "标志已消费且状态没变 ⇒ 不该再推"
+            );
+        }
+
+        // ── 不变量：**两条支路**走完，缓存都必须等于当前实际值 ──
+        //
+        // `drop` 有两条出路：软键盘变了走 `after_softkeyboard_change`（内部自己推完整
+        // 状态、随后对齐缓存），否则走 `push_hotkey_session_if_changed`。前一条早期
+        // 写法是推完直接 `return`、不碰缓存 —— 值仍然是对的（推的是完整快照），但缓存
+        // 就此陈旧，下一次按键会据它白推一次 IPC，且字段文档「上一次推给 C++ 的取值」
+        // 名不副实。这里把两条出路一起钉住。
+        for (name, sk_dirty) in [("常规支路", false), ("软键盘支路", true)] {
+            c.state.lock().unwrap().add_word_active = true;
+            c.softkeyboard_dirty
+                .store(sk_dirty, std::sync::atomic::Ordering::Relaxed);
+            {
+                let _g = SoftKeyboardPushOnDrop(&c);
+            }
+            assert_eq!(
+                cached(&c),
+                c.build_status().hotkey_session,
+                "{name}: 走完之后缓存必须与实际值一致"
+            );
+            c.state.lock().unwrap().add_word_active = false;
+            c.softkeyboard_dirty
+                .store(sk_dirty, std::sync::atomic::Ordering::Relaxed);
+            {
+                let _g = SoftKeyboardPushOnDrop(&c);
+            }
+            assert_eq!(
+                cached(&c),
+                c.build_status().hotkey_session,
+                "{name}: 退出后缓存同样要与实际值一致"
+            );
+        }
+    }
+
+    /// ★★★ `STATUS_HOTKEY_SESSION` 的判据：四个热键模式算会话，别的都不算。
+    ///
+    /// C++ 侧 `_HasInputSession()` 无条件镜像这一位，所以判据漏一个模式 ⇒ 那个模式下
+    /// Backspace/Enter/Escape 被判「无会话」透传给宿主；多算一个 ⇒ 那个状态下这三个键被
+    /// 吃下转发而协调器无会话，「吃了再吐」丢键。两个方向都要钉。
+    ///
+    /// ⚠️ 特别要钉住**软键盘不算** —— 前一版正是因为软键盘落进了 DLL 侧那个过宽的
+    /// `WM_HOTKEY` id 段（`GlobalHotkeys()` 全集）才卡死的。判据搬到服务端之后，这里是
+    /// 唯一能挡住同类错误的地方。
+    #[test]
+    fn hotkey_session_flag_covers_exactly_the_four_hotkey_modes() {
+        let (c, _rx) = coord_with_ui(Config::default());
+
+        // 基线：什么都没有 ⇒ 不是会话。
+        assert!(
+            !c.build_status().hotkey_session,
+            "空闲态不该报「热键模式活着」"
+        );
+
+        // 普通打字（有 input_buffer、有候选）也不算 —— 那条路由 composition 撑会话。
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "abc".to_string();
+        }
+        assert!(
+            !c.build_status().hotkey_session,
+            "普通打字不是热键模式，会话由 composition 撑"
+        );
+        c.state.lock().unwrap().input_buffer.clear();
+
+        // 四个模式逐个开、逐个关。
+        let cases: [(&str, Box<dyn Fn(&mut State)>); 4] = [
+            ("加词", Box::new(|st: &mut State| st.add_word_active = true)),
+            (
+                "临拼",
+                Box::new(|st: &mut State| st.active = Some(ModeKind::TempPinyin)),
+            ),
+            (
+                "特殊",
+                Box::new(|st: &mut State| st.active = Some(ModeKind::Special(0))),
+            ),
+            (
+                "生僻字",
+                Box::new(|st: &mut State| st.active = Some(ModeKind::RareChar)),
+            ),
+        ];
+        for (name, enter) in cases {
+            {
+                let mut st = c.state.lock().unwrap();
+                enter(&mut st);
+            }
+            assert!(
+                c.build_status().hotkey_session,
+                "{name}模式活着时必须报会话，否则该模式下 Enter/Esc/Backspace 会透传给宿主"
+            );
+            {
+                let mut st = c.state.lock().unwrap();
+                st.add_word_active = false;
+                st.active = None;
+            }
+            assert!(
+                !c.build_status().hotkey_session,
+                "{name}模式退出后必须清掉，否则那三个键会被吃下转发而协调器无会话"
+            );
+        }
+
+        // ⛔ 软键盘**不算**热键模式会话。
+        c.softkeyboard_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let st = c.build_status();
+        assert!(
+            st.soft_keyboard,
+            "前提：软键盘该报开着（否则下面那条断言测不到东西）"
+        );
+        assert!(
+            !st.hotkey_session,
+            "软键盘不是热键模式 —— 它正是前一版 DLL 侧判据卡死的那个来源"
+        );
+        c.softkeyboard_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // 临英也不算：它有自己的 composition，不走占位那条路。
+        c.state.lock().unwrap().active = Some(ModeKind::TempEnglish);
+        assert!(
+            !c.build_status().hotkey_session,
+            "临英由 composition 撑会话，不该算进本位"
+        );
+        c.state.lock().unwrap().active = None;
     }
 
     /// ★★★ 占位 composition 的逐模式开关（`[input.caret]`），**在出厂配置下**逐条验。

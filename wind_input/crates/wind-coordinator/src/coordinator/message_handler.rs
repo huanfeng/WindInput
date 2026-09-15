@@ -758,6 +758,26 @@ impl MessageHandler for Coordinator {
                 action, norm_hash
             );
             let action = action.to_string();
+            // ★ 与 DLL 侧那唯一一处「乐观置位」一一对称的记账点。
+            //
+            // C++ 在 `WM_HOTKEY` 收到**任何** HOTKEY_POLICY_GLOBAL 热键时都会乐观地把
+            // `_hotkeyModeSession` 置 TRUE（它只有 (vk, keymod)、分不出动作，见
+            // `TextService.cpp` 那段注释）。那是一个**协调器不知道的 DLL 侧状态**，而
+            // `push_hotkey_session_if_changed` 的边沿检测只看协调器自己前后变没变 ——
+            // 于是「置了位、但协调器这边前后都是 false」的热键会落进缝里：`prev == now`
+            // 判成没变 ⇒ 不推 ⇒ DLL 停在 TRUE ⇒ 此后 Enter/Esc/Backspace 全被吃下转发
+            // 而协调器无会话，「吃了再吐」丢键。出厂就有一个落在缝里：
+            // `open_add_word_dialog`（它拉起设置端、既不改 add_word_active 也不推状态）。
+            //
+            // ⚠️ 别指望「总会有别的推送来纠正」：`open_add_word_dialog` 那条实际靠的是
+            // 设置端窗口带来的焦点往返（activation push 顺带纠正），那是**副作用不是机制**
+            // —— 设置端拉不起来就没有焦点变化。而且以后任何新增的 GLOBAL 动作只要不改
+            // 这一位，都会自动落进同一个缝。
+            //
+            // 故在此记一笔：只要 match_key_down 命中过，本次按键返回时就**无条件**推一次
+            // 状态，不走比较。记账点只有这一个（不是「每个调用点各记一次」那种形态）。
+            self.hotkey_session_force_push
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             // 加词热键需返回占位 composition（激活 C++ 转发全部按键），不符 dispatch_hotkey
             // 的「bool→StatusUpdate」契约，故在此特判直接返回 KeyAction。仅中文模式响应。
             if action == "add_word" {
