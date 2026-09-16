@@ -323,6 +323,15 @@ impl ShuangpinConverter {
 
     /// 转换一对键为全拼音节候选列表（对齐 Go convertPair，逐分支同序）。
     fn convert_pair(&self, key1: u8, key2: u8) -> Vec<String> {
+        self.convert_pair_inner(key1, key2, true)
+    }
+
+    /// [`Self::convert_pair`] 的本体，多一个「要不要并入模糊对偶声母」的开关。
+    ///
+    /// 参数化而不是让建表方自己抄一遍规则：模糊音只影响**一个分支的候选列表**
+    /// （下方第 2 步），其余零声母三路径、`zero_pairs`、单韵母重复键全都与它无关。
+    /// 反向表建表走 `use_fuzzy = false`，理由见 [`ShuangpinReverse`]。
+    fn convert_pair_inner(&self, key1: u8, key2: u8, use_fuzzy: bool) -> Vec<String> {
         let mut results: Vec<String> = Vec::new();
 
         if self.layout.has_zero_pairs() {
@@ -376,7 +385,7 @@ impl ShuangpinConverter {
         // 2. 常规声母+韵母（原始声母在前，模糊对偶声母在后）。
         if let Some(initial) = self.layout.initial_of(key1) {
             let mut initial_candidates: Vec<&str> = vec![initial];
-            if let Some(alt) = self.fuzzy_initial_partners(initial) {
+            if use_fuzzy && let Some(alt) = self.fuzzy_initial_partners(initial) {
                 initial_candidates.push(alt);
             }
             for init in initial_candidates {
@@ -546,6 +555,132 @@ impl ShuangpinConverter {
         result.full_pinyin = full;
         result.preedit_display = preedit;
         result
+    }
+
+    /// 建立音节 → 双拼键对的反向表（见 [`ShuangpinReverse`]）。
+    ///
+    /// 建表成本是 O(首码键 × 韵母键) 次 `convert_pair`（现有布局约 676 次，每次含若干
+    /// trie 查询），**故必须缓存**，绝不在按键链路上现建。
+    pub fn build_reverse(&self) -> ShuangpinReverse {
+        // 首码键 = 声母键 ∪ 零声母引导键 ∪ `zero_pairs` 的首字节；
+        // 次码键 = 韵母键 ∪ `zero_pairs` 的次字节。
+        // 与 [`Layout::code_char_set`] 的「首码集按这个键出现在第几码分」是同一判据——
+        // 那里回答「哪些键能起头」，这里回答「枚举时第一位该试哪些键」。
+        let mut leading: Vec<u8> = self
+            .layout
+            .initials
+            .keys()
+            .chain(self.layout.zero_initials.keys())
+            .copied()
+            .chain(self.layout.zero_pairs.keys().map(|k| k[0]))
+            .collect();
+        leading.sort_unstable();
+        leading.dedup();
+
+        let mut trailing: Vec<u8> = self
+            .layout
+            .finals
+            .keys()
+            .copied()
+            .chain(self.layout.zero_pairs.keys().map(|k| k[1]))
+            .collect();
+        trailing.sort_unstable();
+        trailing.dedup();
+
+        // ★ 排序后枚举，表才是**确定**的。直接遍历 HashMap 的话「哪个键对抢到某音节」
+        // 会随哈希序漂移，而那恰是往返测试要钉住的东西——漂移后测试时绿时红，
+        // 且真机上同一个字今天显示 `vh` 明天显示别的。
+        let mut pairs: Vec<([u8; 2], Vec<String>)> =
+            Vec::with_capacity(leading.len() * trailing.len());
+        for &k1 in &leading {
+            for &k2 in &trailing {
+                // `use_fuzzy = false`：理由见 [`ShuangpinReverse`] 的「建表必须关掉模糊音」。
+                let res = self.convert_pair_inner(k1, k2, false);
+                if !res.is_empty() {
+                    pairs.push(([k1, k2], res));
+                }
+            }
+        }
+
+        let mut map: HashMap<String, [u8; 2]> = HashMap::new();
+        // 第一遍：只认 `results[0]`——敲这个键对**实际得到**的那个音节。
+        for (keys, res) in &pairs {
+            map.entry(res[0].clone()).or_insert(*keys);
+        }
+        // 第二遍：给「只能作次选出现」的音节兜底。合成一遍的话次选会抢在首选前面占位，
+        // 反向表给出的键对敲下去得到的是另一个字。
+        for (keys, res) in &pairs {
+            for syl in res.iter().skip(1) {
+                map.entry(syl.clone()).or_insert(*keys);
+            }
+        }
+
+        ShuangpinReverse { map }
+    }
+}
+
+/// 音节 → 双拼键对的反向表：把 [`ShuangpinConverter`] 的解码规则**反演**出来。
+///
+/// 回答的是「这个词在当前双拼方案下要敲哪些键」，供候选注释的 `${code_schema}` 使用。
+/// 与 `${code_rev}`（拿候选文本去码表词库查反向索引）不是一回事：那边是**查表**，
+/// 这边是**算**——双拼编码不存在于任何词库里，双拼只是「全拼词库 + 一张键盘布局」。
+///
+/// # 为什么是枚举反演而不是手写反向规则
+///
+/// 双拼的取码规则——零声母三路径、`zero_pairs` 显式键对、单韵母重复键 `aa→a`、
+/// j/q/x/y 的 ü 归一化、以及「哪个流派允许 `aa` 当零声母」这类方案差异——全部集中在
+/// [`ShuangpinConverter::convert_pair`] 一个函数里。手写一份反向规则等于把同一套规则
+/// 誊抄第二遍，而 `convert_pair` 里单韵母重复键那段注释记的正是上一次「方案规则一半
+/// 写在 TOML、一半写在引擎里」留下的伤：微软双拼把 `[zero_initials]` 收敛成纯 `o` 引导，
+/// `aa`/`ee` 照样出「啊/额」，数据说了不算。
+///
+/// 枚举反演没有这个问题：规则只有一处，反向表是它的**产物**而不是副本。
+/// 新增布局、改 TOML、改取码规则，反向表自动跟上。
+///
+/// # 建表必须关掉模糊音
+///
+/// 开着模糊音时 `convert_pair` 会把对偶声母（z↔zh / c↔ch / s↔sh）的结果并进候选末尾。
+/// 小鹤下 `zh` 这个键对，`z`+`uang` 不是合法音节被 trie 拒掉，模糊对偶 `zh`+`uang`
+/// = `zhuang` 却合法，于是 `zhuang` 成了 `zh` 的 `results[0]`；而枚举序 `z` 在 `v`
+/// 之前，`zhuang → zh` 会抢在真值 `vh`（小鹤 `v` = `zh`）之前登记。
+///
+/// 后果不是「显示得不够好」而是**显示的编码是错的**：用户照着 `zh` 敲下去得到的是
+/// 「臓」而不是「装」。模糊音是输入时的宽容，不是这个字的打法。
+pub struct ShuangpinReverse {
+    map: HashMap<String, [u8; 2]>,
+}
+
+impl ShuangpinReverse {
+    /// 单个音节 → 两个击键；表里没有返回 `None`。
+    pub fn encode(&self, syllable: &str) -> Option<[u8; 2]> {
+        self.map.get(syllable).copied()
+    }
+
+    /// 整串音节 → 击键串（`["ni", "hao"]` → `"nihc"`）。
+    ///
+    /// **任一音节查不到即整体返回 `None`**，不做「查得到的拼上、查不到的跳过」：
+    /// 半截击键串是**错**的答案而不是不完整的答案，用户照着敲会得到别的字。
+    /// 注释是装饰，这一次不显示即可。
+    pub fn encode_all(&self, syllables: &[&str]) -> Option<String> {
+        if syllables.is_empty() {
+            return None;
+        }
+        let mut out = String::with_capacity(syllables.len() * 2);
+        for syl in syllables {
+            let [a, b] = self.encode(syl)?;
+            out.push(a as char);
+            out.push(b as char);
+        }
+        Some(out)
+    }
+
+    /// 表里收录的音节数。
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 
@@ -1319,6 +1454,296 @@ mod converter_tests {
                 want,
                 "小鹤 convert({input:?}) 回归"
             );
+        }
+    }
+
+    // ========================================================================
+    // 反向表（音节 → 双拼键对）
+    // ========================================================================
+
+    /// 全部内置布局。新增布局文件后这里会自动带上——`schema_dir` 下的每个 `.toml`。
+    fn all_builtin_ids() -> Vec<String> {
+        let mut ids: Vec<String> = std::fs::read_dir(schema_dir())
+            .expect("读取双拼布局目录")
+            .filter_map(|e| {
+                let p = e.ok()?.path();
+                (p.extension()? == "toml").then(|| p.file_stem()?.to_str().map(str::to_string))?
+            })
+            .collect();
+        ids.sort();
+        assert!(ids.len() >= 8, "内置布局应至少 8 个，实得 {}", ids.len());
+        ids
+    }
+
+    /// ★ 反向表的**正确性定义**：表里说音节 S 敲 `[k1,k2]`，那么敲下这个键对就必须
+    /// 能得到 S —— 即 S ∈ `convert_pair(k1, k2)`。
+    ///
+    /// 用「包含」而非「恒等」作全量判据，是因为建表第二遍会给「只能作次选出现」的
+    /// 冷僻音节兜底（它们在该键对的候选列表里排第二及以后）。对这些音节，用户敲出
+    /// 键对后要往下翻一格才选得到，但编码本身没有错。恒等那一档由下面的
+    /// `reverse_common_syllables_are_first_choice` 单独钉。
+    #[test]
+    fn reverse_table_is_decodable_for_all_builtin_layouts() {
+        for id in all_builtin_ids() {
+            let c = conv(&id);
+            let rev = c.build_reverse();
+            assert!(!rev.is_empty(), "{id}：反向表不应为空");
+            // 实测全部内置布局恒为 411 个音节。留一点余量给将来的布局差异，
+            // 但掉到 400 以下就不是差异而是枚举漏了键。
+            assert!(
+                rev.len() >= 400,
+                "{id}：反向表只收录了 {} 个音节，疑似枚举漏键",
+                rev.len()
+            );
+            for (syl, keys) in &rev.map {
+                let decoded = c.convert_pair(keys[0], keys[1]);
+                assert!(
+                    decoded.iter().any(|d| d == syl),
+                    "{id}：反向表说 {syl:?} 敲 {:?}，但该键对解出的是 {decoded:?}",
+                    std::str::from_utf8(keys).unwrap()
+                );
+            }
+        }
+    }
+
+    /// 常用音节必须是**首选**（敲完即得，不用往下翻）。
+    ///
+    /// 上一条只保证「选得到」，这条保证「一敲就是它」。注释里显示的编码若要用户
+    /// 翻一格才对得上，用户会认为编码显示错了。
+    #[test]
+    fn reverse_common_syllables_are_first_choice() {
+        // 覆盖各条取码路径：常规声母韵母、zh/ch/sh 独立键、ü 归一化、零声母、整体认读。
+        const COMMON: &[&str] = &[
+            "ni", "hao", "wo", "men", "zhong", "guo", "shi", "chi", "zhuang", "chuang", "shuang",
+            "nv", "lv", "ju", "qu", "xu", "yu", "jue", "que", "xue", "yue", "jun", "qun", "xun",
+            "a", "e", "o", "ai", "ei", "ou", "an", "en", "ang", "eng", "er", "ao", "ying", "yin",
+        ];
+        for id in all_builtin_ids() {
+            let c = conv(&id);
+            let rev = c.build_reverse();
+            for syl in COMMON {
+                let Some(keys) = rev.encode(syl) else {
+                    panic!("{id}：常用音节 {syl:?} 不在反向表里");
+                };
+                let decoded = c.convert_pair(keys[0], keys[1]);
+                assert_eq!(
+                    decoded.first().map(String::as_str),
+                    Some(*syl),
+                    "{id}：{syl:?} 编码为 {:?}，但该键对的首选是 {:?}",
+                    std::str::from_utf8(&keys).unwrap(),
+                    decoded.first()
+                );
+            }
+        }
+    }
+
+    /// 整串往返：`encode_all` 出来的击键串喂回 `convert`，必须还原成同一串全拼。
+    ///
+    /// 这一条比逐音节判据更接近真机——它连带验证了「每音节恒 2 键」这个隐含前提，
+    /// 若哪天有布局的零声母要敲 3 键，这里会红。
+    #[test]
+    fn reverse_roundtrip_through_convert() {
+        const WORDS: &[(&[&str], &str)] = &[
+            (&["ni", "hao"], "nihao"),
+            (&["wo", "men"], "women"),
+            (&["zhong", "guo"], "zhongguo"),
+            (&["shu", "ru", "fa"], "shurufa"),
+            (&["a", "yi"], "ayi"),
+        ];
+        for id in all_builtin_ids() {
+            let c = conv(&id);
+            let rev = c.build_reverse();
+            for (syls, want_full) in WORDS {
+                let keys = rev
+                    .encode_all(syls)
+                    .unwrap_or_else(|| panic!("{id}：{syls:?} 编码失败"));
+                assert_eq!(
+                    keys.len(),
+                    syls.len() * 2,
+                    "{id}：{syls:?} 应得 {} 键，实得 {keys:?}",
+                    syls.len() * 2
+                );
+                assert_eq!(
+                    c.convert(&keys).full_pinyin(),
+                    *want_full,
+                    "{id}：{syls:?} → {keys:?} → 回解不符"
+                );
+            }
+        }
+    }
+
+    /// ★ 建表必须无视模糊音开关。
+    ///
+    /// `chua` 在小鹤下的真值键对是 `ix`（`i` = ch，`x` = ua）。但开着 ch↔c 模糊音时，
+    /// `cx` 这个键对的 `c`+`ua` = "cua" 不是合法音节被 trie 拒掉，模糊对偶 `ch`+`ua`
+    /// = "chua" 却合法，于是 "chua" 成了 `cx` 的首选；而枚举序 `c` 在 `i` 之前，
+    /// 若建表跟随模糊开关，"chua" 就会被登记成 `cx`。
+    ///
+    /// 那不是「显示得不够好」，是**显示的编码是错的**：模糊音是输入时的宽容，
+    /// 不是这个字的打法。
+    #[test]
+    fn reverse_ignores_fuzzy_initials() {
+        let plain = conv("xiaohe").build_reverse();
+
+        let mut fuzzy_conv = conv("xiaohe");
+        fuzzy_conv.set_fuzzy(true, true, true);
+        let fuzzy = fuzzy_conv.build_reverse();
+
+        for syl in [
+            "chua", "shua", "zhuang", "chuang", "shuang", "zhi", "chi", "shi",
+        ] {
+            assert_eq!(
+                plain.encode(syl),
+                fuzzy.encode(syl),
+                "{syl:?}：模糊音开关不应影响反向表"
+            );
+        }
+        // 钉死具体值，免得两边一起错还互相印证。
+        assert_eq!(plain.encode("chua"), Some(*b"ix"), "小鹤 chua 应为 ix");
+        assert_eq!(plain.encode("shua"), Some(*b"ux"), "小鹤 shua 应为 ux");
+        assert_eq!(plain.encode("zhuang"), Some(*b"vl"), "小鹤 zhuang 应为 vl");
+    }
+
+    /// 三个零声母流派各自按自己的规矩出码，数据说了算。
+    ///
+    /// 小鹤=首字母引导(`aa`)、微软=O 引导(`oa`)、首道=显式 `zero_pairs`(`aa`)。
+    /// 这条同时守着 `convert_pair` 里「单韵母重复键只对把该键配成零声母引导键的方案
+    /// 生效」那道闸——若它退回无条件放行，微软的 `a` 会变成 `aa`，这里立刻红。
+    #[test]
+    fn reverse_zero_initial_schools() {
+        assert_eq!(
+            conv("xiaohe").build_reverse().encode("a"),
+            Some(*b"aa"),
+            "小鹤：首字母引导"
+        );
+        assert_eq!(
+            conv("mspy").build_reverse().encode("a"),
+            Some(*b"oa"),
+            "微软：O 引导"
+        );
+        assert_eq!(
+            conv("shoudao").build_reverse().encode("a"),
+            Some(*b"aa"),
+            "首道：显式 zero_pairs"
+        );
+    }
+
+    /// 查不到的音节返回 `None`；整串里**任一**音节查不到即整串 `None`。
+    ///
+    /// 不做「查得到的拼上、查不到的跳过」：半截击键串是错的答案而不是不完整的答案。
+    #[test]
+    fn reverse_rejects_unknown_syllables() {
+        let rev = conv("xiaohe").build_reverse();
+        assert_eq!(rev.encode("zzz"), None);
+        assert_eq!(rev.encode(""), None);
+        assert_eq!(rev.encode_all(&[]), None, "空串没有编码可言");
+        assert_eq!(
+            rev.encode_all(&["ni", "zzz"]),
+            None,
+            "一个音节查不到，整串就不该给答案"
+        );
+        assert!(rev.encode_all(&["ni", "hao"]).is_some());
+    }
+
+    /// 建表第二遍（给「只能作次选出现」的音节兜底）的**唯一**受益者：`lo`。
+    ///
+    /// `o` 键在全部 8 个内置布局下都配着 `["uo", "o"]` 两个韵母，于是 `l` + `o` 解出
+    /// 两个都合法的音节 `["luo", "lo"]`——「罗」占了首选，「咯」只能从第二遍拿到
+    /// 同一个键对。实测这是全部内置布局中**有且仅有**的一个多解键对。
+    ///
+    /// ⚠️ 没有这条测试，第二遍扫描就是一段**无法被任何测试区分**的代码：删掉它，
+    /// 反向表从 411 个音节掉到 410，而其余每一条断言照常全绿。这一点是实测出来的
+    /// （变异检验：合并两遍扫描后 6 条测试全过），不是推演。
+    #[test]
+    fn reverse_second_pass_rescues_secondary_syllables() {
+        for id in all_builtin_ids() {
+            let c = conv(&id);
+            assert_eq!(
+                c.convert_pair(b'l', b'o'),
+                vec!["luo".to_string(), "lo".to_string()],
+                "{id}：`lo` 键对应解出两个音节，luo 在前"
+            );
+            assert_eq!(
+                c.build_reverse().encode("lo"),
+                Some(*b"lo"),
+                "{id}：次选音节 lo 也要能反查到键对"
+            );
+        }
+    }
+
+    /// 两遍扫描的**顺序**保障：同一个音节既是 A 键对的次选、又是 B 键对的首选时，
+    /// 反向表必须给 B。
+    ///
+    /// ⚠️ 现有 8 个内置布局**触发不了**这个差异——实测它们各自只有一个多解键对
+    /// （`lo → [luo, lo]`），而 `lo` 在别处并不是谁的首选，故两遍与一遍结果完全相同。
+    /// 所以这里用一份构造布局把差异造出来，否则「先扫首选、再扫次选」这个顺序就是
+    /// 一段无法被任何测试区分的代码（变异检验实测：合并两遍后其余测试全绿）。
+    ///
+    /// 差异的实际后果：用户照着注释显示的编码敲下去，出来的是**另一个字**，
+    /// 要往下翻一格才是他要的那个。
+    #[test]
+    fn reverse_prefers_first_choice_pair_over_secondary() {
+        // `a` 键配两个韵母（ang 在前、a 在后），`z` 键只配 `a`。
+        // 于是 "ba" 是 `ba` 键对的**次选**（首选是 "bang"），却是 `bz` 键对的首选。
+        // 而枚举序里 `ba` 在 `bz` 之前。
+        const DUAL: &str = r#"
+[meta]
+id = "test_dual"
+name = "测试夹具：同一音节既是次选又是首选"
+
+[finals]
+a = ["ang", "a"]
+z = ["a"]
+"#;
+        let c = ShuangpinConverter::new(Layout::from_toml_str(DUAL).unwrap());
+        assert_eq!(
+            c.convert_pair(b'b', b'a'),
+            vec!["bang".to_string(), "ba".to_string()],
+            "夹具前提：`ba` 键对解出两个音节，ba 排第二"
+        );
+        assert_eq!(
+            c.convert_pair(b'b', b'z'),
+            vec!["ba".to_string()],
+            "夹具前提：`bz` 键对只解出 ba，是首选"
+        );
+
+        let rev = c.build_reverse();
+        assert_eq!(
+            rev.encode("ba"),
+            Some(*b"bz"),
+            "ba 应取「一敲即得」的 bz，而不是要翻一格的 ba"
+        );
+        assert_eq!(rev.encode("bang"), Some(*b"ba"), "bang 本就是 ba 的首选");
+    }
+
+    /// 枚举必须按**排序后**的键走，否则反向表随哈希序漂移。
+    ///
+    /// 实测每个内置布局都有 5~10 个音节被多个键对同时当作首选。最典型的是 ü 归一化
+    /// 造成的 `ju ← [ju, jv]`（`normalize_pinyin` 把 j/q/x/y 后的 `v` 转成 `u`，
+    /// 于是 `j`+`u` 与 `j`+`v` 殊途同归）；微软/搜狗那边是 `[ju, jy]`。
+    /// 零声母也有：abc 的 `ou ← [ob, ou]`、微软的 `ai ← [ai, ol]`。
+    ///
+    /// 这些音节取哪个键对**完全由枚举顺序决定**。不排序就是由 `HashMap` 的哈希序
+    /// 决定，而那个序**跨进程随机** —— 后果不是测试时绿时红那么轻：同一个字，
+    /// 用户今天看到编码是 `ju`，重启输入法后变成 `jv`。编码显示不稳定，用户就没法信它。
+    #[test]
+    fn reverse_table_is_deterministic_under_first_choice_conflicts() {
+        for id in all_builtin_ids() {
+            let rev = conv(&id).build_reverse();
+            for syl in ["ju", "qu", "xu", "yu"] {
+                let keys = rev
+                    .encode(syl)
+                    .unwrap_or_else(|| panic!("{id}：{syl} 不在反向表里"));
+                let initial = syl.as_bytes()[0];
+                assert_eq!(keys[0], initial, "{id}：{syl} 的首码应是声母键本身");
+                // 排序后字典序小者胜：`u` < `v`（abc/佳佳/首道）、`u` < `y`（微软/搜狗）。
+                // 这也正是各方案文档里写的标准打法。
+                assert_eq!(
+                    keys[1], b'u',
+                    "{id}：{syl} 应取 {}u，而不是 v/y 键那条等价路径",
+                    initial as char
+                );
+            }
         }
     }
 }
