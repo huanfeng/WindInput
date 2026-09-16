@@ -91,12 +91,31 @@ impl MixedPattern {
     /// 过滤（文档 §5 约束 3）：扁平码有损，`xian` 既是「西安」的 xi|an 也是「先」的 xian，
     /// 不按音节数卡住就会捞出一串权重高得多的单字。混合形态下的口径即**段数**。
     pub fn matches<S: AsRef<str>>(&self, syllables: &[S]) -> bool {
+        self.matches_with(syllables, |seg, syl| seg == syl)
+    }
+
+    /// 同 [`Self::matches`]，但音节段的比较交给调用方 —— 供模糊音放宽。
+    ///
+    /// **只有 `Syllable` 段需要这个钩子**：`Initial` 段比的是首字母，而模糊音的声母组
+    /// （`sh↔s`、`zh↔z`、`ch↔c`）恰好共享首字母，`starts_with` 天然就是宽松的
+    /// —— 用户敲 `s`，词典里的 `sheng` 本来就匹配得上。
+    ///
+    /// 真机现场：`senrikl` 想要「生日快乐」。声母投影键两边都是 `srkl`，
+    /// `search_abbrev` 已经把 `shengrikuaile` 召回来了，却在这里被
+    /// `"sen" == "sheng"` 判否丢弃 —— 模糊音在召回侧生效、在校验侧不生效，
+    /// 于是整条路白走。判据的方向必须与 `lookup_with_fuzzy::expand_code` 一致：
+    /// 对**用户输入段**做扩展，去匹配**词典音节**。
+    pub fn matches_with<S: AsRef<str>>(
+        &self,
+        syllables: &[S],
+        syl_eq: impl Fn(&str, &str) -> bool,
+    ) -> bool {
         if syllables.len() != self.segs.len() {
             return false;
         }
         self.segs.iter().zip(syllables).all(|(seg, syl)| match seg {
             AbbrevSeg::Initial(c) => syl.as_ref().starts_with(*c),
-            AbbrevSeg::Syllable(s) => syl.as_ref() == s,
+            AbbrevSeg::Syllable(s) => syl_eq(s, syl.as_ref()),
         })
     }
 }

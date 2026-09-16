@@ -137,6 +137,74 @@ fn sentence_weight(log_prob: f64, word_count: usize) -> i32 {
     geometric_mean.exp().clamp(1.0, i32::MAX as f64) as i32
 }
 
+/// 简拼候选的**保底配额分母**：截断时至少给 `is_abbrev` 留 `max_candidates / 此值` 席
+/// （生产 `max_candidates = 300` ⇒ 30 席）。见 [`truncate_with_abbrev_quota`]。
+const ABBREV_QUOTA_DIVISOR: usize = 10;
+
+/// 截断到 `max_candidates`，但**保证简拼候选至少留 `max / ABBREV_QUOTA_DIVISOR` 席**。
+///
+/// **为什么需要**：`is_abbrev` 在 [`wind_candidate::cmp_match_layers`] 里是最沉的一层，
+/// 简拼候选因此恒排在全部候选之后 —— 它一直靠「候选总数碰巧没超过 `max_candidates`」
+/// 侥幸存活，而这是**数据的性质，不是代码的保证**。
+///
+/// 真机现场：`shengrikl`（sheng + ri + k + l）关模糊音时候选共 121 条、「生日快乐」
+/// 第 121 位，刚好活在协调器的 limit=300 之内；一开 `sh_s + en_eng`，模糊变体把总数推到
+/// 337 条，「生日快乐」随之落到第 337 位 —— **整条被 `truncate` 丢掉**。用户看到的是
+/// 「开了模糊音，混合简拼就不好使了」，而这两件事在功能上毫无关系。
+///
+/// 同型事故本仓已有先例：全拼降级候选带 `is_prefix` 被沉底、落在 595 位被同一个 300
+/// 截断（见 [`wind_candidate::cmp_match_layers`] 的 `fp_demoted` 注释）。那次的修法是
+/// 改层级键，本次不行 —— 简拼候选质量确实低于全拼精确匹配，把它提上来会污染正常输入的
+/// 候选面。**沉底是对的，被整批截掉不对**，所以解法是配额而不是排序。
+///
+/// `pinyin/mod.rs` 的截断处注释早已写明「要下沉 P0 必须先给 `truncate` 配一套按消费长度
+/// 分档的保底配额（参考混输 `PINYIN_QUOTA_DIVISOR`），本轮未做」——本函数即那件未做的事，
+/// 与 `mixed/engine.rs` 的 `truncate_with_pinyin_quota` 逐条同构。
+///
+/// **只补不挤空**：尾部确实没有简拼候选时 `extra` 为空，一条都不会被挤掉，行为与改动前
+/// 完全一致（`quota_does_not_displace_when_no_abbrev_candidate` 守这一条）。
+///
+/// ⚠️ 补进来的候选**追加在尾部、不保证有序** —— 与混输侧同一套依赖：协调器
+/// `candidate_display_order` 会无条件重排全部候选（见 candidate-sorting-rules.md §6）。
+/// 本函数的职责只是「让候选进得来」，不是「排好序」。
+fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize) {
+    if cands.len() <= max_candidates {
+        return;
+    }
+    let quota = max_candidates / ABBREV_QUOTA_DIVISOR;
+    if quota == 0 {
+        cands.truncate(max_candidates);
+        return;
+    }
+    let kept = cands[..max_candidates]
+        .iter()
+        .filter(|c| c.is_abbrev)
+        .count();
+    if kept >= quota {
+        cands.truncate(max_candidates);
+        return;
+    }
+    // 被截掉的那段同样是排好序的，故前几条即权重最高的简拼候选。
+    let extra: Vec<Candidate> = cands[max_candidates..]
+        .iter()
+        .filter(|c| c.is_abbrev)
+        .take(quota - kept)
+        .cloned()
+        .collect();
+    cands.truncate(max_candidates);
+    // 腾位：从尾部往前挤掉等量的非简拼候选（排序后尾部即层级最低的那些）。
+    let mut to_remove = extra.len();
+    let mut i = cands.len();
+    while to_remove > 0 && i > 0 {
+        i -= 1;
+        if !cands[i].is_abbrev {
+            cands.remove(i);
+            to_remove -= 1;
+        }
+    }
+    cands.extend(extra);
+}
+
 /// 模糊音命中的权重折扣（对齐 Go `ranker.go` 的 `IsFuzzy → score -= 100`）。
 ///
 /// **为何是惩罚而非层级**：模糊命中是「召回来源」，不是「匹配质量」——`si` 经 s↔sh 命中的
@@ -1009,7 +1077,12 @@ impl PinyinEngine {
                         else {
                             continue;
                         };
-                        if !pats.iter().any(|p| p.key() == key && p.matches(&syls)) {
+                        if !pats.iter().any(|p| {
+                            p.key() == key
+                                && p.matches_with(&syls, |seg, syl| {
+                                    self.syllable_matches_fuzzy(seg, syl)
+                                })
+                        }) {
                             continue;
                         }
                         push(cands, h.text, abbr_code.clone(), h.weight, h.boundary);
@@ -1026,8 +1099,15 @@ impl PinyinEngine {
             for c in self.recall_store_by_abbrev(store_dm, stroke, plain, &pats) {
                 let plain = self.abbrev_of_code(&c.code, c.boundary).as_deref() == Some(stroke);
                 let mixed = !plain
-                    && mixed_abbrev::syllables_from_boundary(&c.code, c.boundary)
-                        .is_some_and(|syls| pats.iter().any(|p| p.matches(&syls)));
+                    && mixed_abbrev::syllables_from_boundary(&c.code, c.boundary).is_some_and(
+                        |syls| {
+                            pats.iter().any(|p| {
+                                p.matches_with(&syls, |seg, syl| {
+                                    self.syllable_matches_fuzzy(seg, syl)
+                                })
+                            })
+                        },
+                    );
                 if plain || mixed {
                     push(cands, c.text, c.code, c.weight, c.boundary);
                 }
@@ -1477,6 +1557,33 @@ impl PinyinEngine {
     /// fuzzy 全 false 时 fuzzy_variants 返回空 → 天然退化为纯 `dict.search`（无需 enabled 判断）。
     /// 返回 `(text, weight, order, is_fuzzy)`：原 code 精确命中 is_fuzzy=false；
     /// 模糊变体命中 is_fuzzy=true（供排序时整体降到精确候选之后）。
+    /// 混合简拼段校验的音节比较：精确相等，或（模糊音开启时）`seg` 的模糊变体命中 `syl`。
+    ///
+    /// `seg` 是**用户敲的那一段**、`syl` 是**词典里的音节**，方向不可颠倒 —— 与
+    /// [`Self::lookup_with_fuzzy`] 的 `expand_code` 同向（对输入扩展去撞词典）。
+    ///
+    /// **只有 `Syllable` 段经过这里**：`Initial` 段比的是首字母，而模糊音的声母组
+    /// （`sh↔s`、`zh↔z`、`ch↔c`）恰好共享首字母，`starts_with` 天然就是宽松的。
+    ///
+    /// 真机现场：`senrikl` 想要「生日快乐」。声母投影键两边都是 `srkl`、`search_abbrev`
+    /// 已经把 `shengrikuaile` 召回来了，却在段校验被 `"sen" == "sheng"` 判否丢弃 ——
+    /// 模糊音在召回侧生效、在校验侧不生效，整条路白走。
+    ///
+    /// 两道短路都在热路径上：段校验跑在 `keys × abbr_code × hit` 的三重循环里，而绝大多数
+    /// 段本就精确相等（`senrikl` 的 `ri` 段），真正要展开变体的只有失配的那一段；模糊音
+    /// 全关时 `any_enabled()` 挡在变体生成之前，整条链路一次都不执行。
+    fn syllable_matches_fuzzy(&self, seg: &str, syl: &str) -> bool {
+        if seg == syl {
+            return true;
+        }
+        if !self.fuzzy_config.any_enabled() {
+            return false;
+        }
+        fuzzy::FuzzyMatcher::fuzzy_variants_scored(seg, &self.fuzzy_config)
+            .into_iter()
+            .any(|(variant, _)| variant == syl)
+    }
+
     fn lookup_with_fuzzy(&self, code: &str, syllables: &[String]) -> Vec<LookupHit> {
         // 精确匹配：候选码即查询码 `code`，故词典 boundary 与之同域，可直接采信。
         // 注意此处必须用 search_with_boundary——拼音引擎直接持有 CachedDict、不经
@@ -2654,10 +2761,12 @@ impl Engine for PinyinEngine {
                         else {
                             continue;
                         };
-                        if !mixed_pats
-                            .iter()
-                            .any(|p| p.key() == key && p.matches(&syls))
-                        {
+                        if !mixed_pats.iter().any(|p| {
+                            p.key() == key
+                                && p.matches_with(&syls, |seg, syl| {
+                                    self.syllable_matches_fuzzy(seg, syl)
+                                })
+                        }) {
                             continue;
                         }
                         let before = candidates.len();
@@ -2844,8 +2953,15 @@ impl Engine for PinyinEngine {
                     // 与系统词侧走同一批 `mixed_pats`，判据完全一致，只是这边不经索引——
                     // 用户词规模小，现算即可（与 `abbrev_of_code` 那条注释同理）。
                     let mixed = !plain
-                        && mixed_abbrev::syllables_from_boundary(&c.code, c.boundary)
-                            .is_some_and(|syls| mixed_pats.iter().any(|p| p.matches(&syls)));
+                        && mixed_abbrev::syllables_from_boundary(&c.code, c.boundary).is_some_and(
+                            |syls| {
+                                mixed_pats.iter().any(|p| {
+                                    p.matches_with(&syls, |seg, syl| {
+                                        self.syllable_matches_fuzzy(seg, syl)
+                                    })
+                                })
+                            },
+                        );
                     if !plain && !mixed {
                         continue;
                     }
@@ -3357,7 +3473,7 @@ impl Engine for PinyinEngine {
                 .then(b.weight.cmp(&a.weight))
                 .then(a.natural_order.cmp(&b.natural_order))
         });
-        candidates.truncate(max_candidates);
+        truncate_with_abbrev_quota(&mut candidates, max_candidates);
 
         let (mut preedit_display, completed_syllables, partial_syllable) =
             self.compute_composition(input);
