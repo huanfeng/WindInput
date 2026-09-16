@@ -90,11 +90,21 @@ impl MixedPattern {
     /// **音节数相等是硬条件**，这继承自纯简拼那条「字母数 == `boundary.count_ones()`」的
     /// 过滤（文档 §5 约束 3）：扁平码有损，`xian` 既是「西安」的 xi|an 也是「先」的 xian，
     /// 不按音节数卡住就会捞出一串权重高得多的单字。混合形态下的口径即**段数**。
+    /// ⚠️ **生产代码已无调用点**，四处段校验全部走 [`Self::matches_with`]（要拿模糊处数
+    /// 施加折扣）。保留它是作为「精确比较」的语义锚点与本模块单测的入口；若哪天单测也不用了，
+    /// 直接删掉即可，不要为了「保持对称」再给它接回生产路径。
     pub fn matches<S: AsRef<str>>(&self, syllables: &[S]) -> bool {
-        self.matches_with(syllables, |seg, syl| seg == syl)
+        self.matches_with(syllables, |seg, syl| (seg == syl).then_some(0))
+            .is_some()
     }
 
     /// 同 [`Self::matches`]，但音节段的比较交给调用方 —— 供模糊音放宽。
+    ///
+    /// 闭包返回 `Some(edits)`（该段的模糊改动处数，`0` = 精确相等）或 `None`（不匹配）；
+    /// 整条模式的返回值是各段 `edits` 之和。**调用方必须据此施加
+    /// [`fuzzy_penalized`](crate::pinyin) 折扣并标 `is_fuzzy`** —— 模糊命中恒低精确命中一档
+    /// 是全仓不变量（见 `FUZZY_WEIGHT_SCALE` 那段论证），本路径不是例外。
+    /// 返回处数而非 `bool`，正是为了让这个不变量在类型上没法被忽略。
     ///
     /// **只有 `Syllable` 段需要这个钩子**：`Initial` 段比的是首字母，而模糊音的声母组
     /// （`sh↔s`、`zh↔z`、`ch↔c`）恰好共享首字母，`starts_with` 天然就是宽松的
@@ -108,15 +118,23 @@ impl MixedPattern {
     pub fn matches_with<S: AsRef<str>>(
         &self,
         syllables: &[S],
-        syl_eq: impl Fn(&str, &str) -> bool,
-    ) -> bool {
+        syl_match: impl Fn(&str, &str) -> Option<usize>,
+    ) -> Option<usize> {
         if syllables.len() != self.segs.len() {
-            return false;
+            return None;
         }
-        self.segs.iter().zip(syllables).all(|(seg, syl)| match seg {
-            AbbrevSeg::Initial(c) => syl.as_ref().starts_with(*c),
-            AbbrevSeg::Syllable(s) => syl_eq(s, syl.as_ref()),
-        })
+        let mut edits = 0usize;
+        for (seg, syl) in self.segs.iter().zip(syllables) {
+            match seg {
+                AbbrevSeg::Initial(c) => {
+                    if !syl.as_ref().starts_with(*c) {
+                        return None;
+                    }
+                }
+                AbbrevSeg::Syllable(s) => edits += syl_match(s, syl.as_ref())?,
+            }
+        }
+        Some(edits)
     }
 }
 

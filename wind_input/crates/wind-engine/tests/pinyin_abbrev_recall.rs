@@ -56,8 +56,19 @@ fn fixture(tag: &str) -> CachedDict {
             .map(|(i, c)| ((*c).into(), 9000 - i as i32 * 100, i as u32, 0b1))
             .collect(),
     );
+    // 与「生日快乐」**同一个声母投影键 `srkl`** 的精确解：sen|ri|kuai|le，权重刻意低一截。
+    // 支点在于「不打折时模糊那条反而更高」：1806 > 1000，一旦模糊命中不吃 fuzzy_penalized
+    // 折扣，它就会把这条精确命中压下去 —— 那正是要守住的不变量。
+    // sen(0..3) ri(3..5) kuai(5..9) le(9..11) → bit 0/3/5/9
+    w.add_with_boundary(
+        "senrikuaile".into(),
+        vec![("森日快乐".into(), 1000, 0, 0b1000101001)],
+    );
     w.add_abbrev("hpl".into(), vec![("haopiaoliang".into(), 120)]);
-    w.add_abbrev("srkl".into(), vec![("shengrikuaile".into(), 1806)]);
+    w.add_abbrev(
+        "srkl".into(),
+        vec![("shengrikuaile".into(), 1806), ("senrikuaile".into(), 1000)],
+    );
     w.write(&wdat).unwrap();
 
     CachedDict::load_at(&dir.join("t.dict.yaml"), &wdat).expect("加载 wdat 夹具")
@@ -102,12 +113,38 @@ fn abbrev_candidate_survives_truncation() {
 }
 
 /// 配额**只补不挤空**：没有简拼候选可补时，截断行为与改动前逐条一致。
+///
+/// ⚠️ **limit 的取值是本用例的全部要害**，两侧各有一个会让它退化成假护栏的早退分支：
+/// - `limit < ABBREV_QUOTA_DIVISOR`(10) ⇒ `quota == 0` ⇒ 第二个早退，测到的是短路；
+/// - `limit >= 候选总数`（夹具里 `hao` 恰好 20 条）⇒ `cands.len() <= max` ⇒ 第一个早退。
+///
+/// 只有 `10 <= limit < 20` 能真正走进腾位逻辑。取 10：`quota = 1`、总数 20 > 10，
+/// 于是 `kept == 0`、`extra` 为空 —— 正是「该补的没有，于是一条都不许挤」那条路径。
 #[test]
 fn quota_does_not_displace_when_no_abbrev_candidate() {
     let e = engine("trunc_noop");
-    let t = texts(&e, "hao", 5);
-    assert_eq!(t.len(), 5, "无简拼候选时须恰好截到 limit: {t:?}");
-    assert_eq!(t[0], "好", "首选不受配额影响");
+    let r = e.convert("hao", 10).expect("convert 成功");
+    let c = &r.candidates;
+    // 前提自检：夹具确实产出了超过 limit 的候选，且其中没有简拼候选。
+    // 任一条不成立，下面的断言就测不到腾位逻辑（见上方 doc）。
+    assert_eq!(
+        e.convert("hao", 40).unwrap().candidates.len(),
+        20,
+        "前提：hao 的候选总数须 > limit(10)，否则走 len <= max 的早退"
+    );
+    assert!(
+        !c.iter().any(|x| x.is_abbrev),
+        "前提：hao 是完整音节，不该有简拼候选"
+    );
+
+    assert_eq!(c.len(), 10, "无简拼可补时须恰好截到 limit，不得少一条");
+    assert_eq!(c[0].text, "好", "首选不受配额影响");
+    // 腾位一条都没发生：10 席仍全是 hao 的同音字，没被替换成别的东西。
+    assert!(
+        c.iter().all(|x| x.code == "hao"),
+        "不得挤掉任何候选: {:?}",
+        c.iter().map(|x| (&x.text, &x.code)).collect::<Vec<_>>()
+    );
 }
 
 // ── Stage 2：混合简拼走模糊音 ──────────────────────────────────────────
@@ -140,14 +177,101 @@ fn fuzzy_off_keeps_mixed_abbrev_strict() {
 /// 不含模糊音的混合简拼照旧命中（回归护栏：改段校验不能动到精确路径）。
 #[test]
 fn exact_mixed_abbrev_still_hits() {
-    for (tag, e) in [
-        ("exact_off", engine("exact_off")),
-        ("exact_on", fuzzy_engine("exact_on")),
-    ] {
+    for tag in ["exact_off", "exact_on"] {
+        let e = if tag == "exact_off" {
+            engine(tag)
+        } else {
+            fuzzy_engine(tag)
+        };
         let t = texts(&e, "shengrikl", 50);
         assert!(
             t.contains(&"生日快乐".to_string()),
             "[{tag}] shengrikl 应恒命中「生日快乐」: {t:?}"
         );
     }
+}
+
+// ── Stage 2 的不变量：模糊命中必须比精确命中低一档 ────────────────────────
+
+/// 模糊命中的简拼候选须吃 `fuzzy_penalized` 折扣并标 `is_fuzzy`。
+///
+/// 「模糊命中恒低精确命中一档」是全仓不变量（`FUZZY_WEIGHT_SCALE` 那段论证，
+/// 词图侧另有同轴的 `FUZZY_SYLLABLE_LOG_PENALTY`）。混合简拼的段校验是后开的一条
+/// 召回通路，**不是这条不变量的例外** —— 否则同一个投影键下，一条权重更高的模糊命中
+/// 会盖过精确命中。
+#[test]
+fn fuzzy_mixed_abbrev_is_penalized_and_marked() {
+    let e = fuzzy_engine("penalty");
+    let r = e.convert("senrikl", 50).expect("convert 成功");
+
+    let fz = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "生日快乐")
+        .expect("senrikl 应召回模糊命中的「生日快乐」");
+    // sen→sheng 改了声母与韵母两处 ⇒ 1806 × 0.5² = 452（四舍五入）
+    assert!(fz.is_fuzzy, "模糊命中须标 is_fuzzy");
+    assert_eq!(fz.weight, 452, "模糊命中须按改动处数折扣(1806 × 0.5² )");
+
+    let ex = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "森日快乐")
+        .expect("senrikl 对 sen|ri|kuai|le 是精确解，应同时召回");
+    assert!(!ex.is_fuzzy, "精确命中不得标 is_fuzzy");
+    assert_eq!(ex.weight, 1000, "精确命中不得被折扣");
+
+    // 折扣的意义：精确解压过原始权重更高的模糊解。不打折时 1806 > 1000，顺序会反。
+    let pos = |t: &str| r.candidates.iter().position(|c| c.text == t).unwrap();
+    assert!(
+        pos("森日快乐") < pos("生日快乐"),
+        "精确命中须排在模糊命中之前: {:?}",
+        r.candidates
+            .iter()
+            .map(|c| (&c.text, c.weight, c.is_fuzzy))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 精确路径不受本次改动影响：`shengrikl` 命中「生日快乐」时权重原样、不标 fuzzy。
+#[test]
+fn exact_mixed_abbrev_keeps_raw_weight() {
+    let e = fuzzy_engine("exact_weight");
+    let r = e.convert("shengrikl", 50).expect("convert 成功");
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "生日快乐")
+        .expect("应命中");
+    assert!(!c.is_fuzzy, "精确段校验不得标 is_fuzzy");
+    assert_eq!(c.weight, 1806, "精确命中权重须原样");
+}
+
+/// step 6.2 **简拼族前缀回退**路径同样要走模糊段校验。
+///
+/// 那条路是另一组调用点（`recall_abbrev_prefix`，与 step 5b 的系统词库路径各走各的），
+/// 只测 step 5b 会让它改回精确比较也不报警。它还是最值得盯的一处：候选自带**击键域**的
+/// `consumed_length`，而模糊命中让击键与词典音节对不齐。
+#[test]
+fn fuzzy_mixed_abbrev_hits_via_prefix_fallback() {
+    let e = fuzzy_engine("prefix_fb");
+    // 整串 `senriklx` 无解（`x` 成不了音节也配不上任何段）⇒ 退到最长可命中前缀 `senrikl`。
+    let r = e.convert("senriklx", 50).expect("convert 成功");
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "生日快乐")
+        .unwrap_or_else(|| {
+            panic!(
+                "前缀回退路径应召回模糊命中的「生日快乐」，实际: {:?}",
+                r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+            )
+        });
+    assert!(c.is_fuzzy, "前缀回退路径的模糊命中同样须标 is_fuzzy");
+    assert_eq!(c.weight, 452, "前缀回退路径同样须吃折扣(1806 × 0.5²)");
+    assert!(
+        c.consumed_length > 0 && c.consumed_length < "senriklx".len(),
+        "前缀回退须只消费前缀、留残码续输，实际 consumed={}",
+        c.consumed_length
+    );
 }
