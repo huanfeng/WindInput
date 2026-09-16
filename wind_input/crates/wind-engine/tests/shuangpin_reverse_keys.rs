@@ -24,6 +24,7 @@ fn mgr(active: &str) -> EngineManager {
         "shuangpin".to_string(),
         "pinyin".to_string(),
         "wubi86".to_string(),
+        "wubi86_pinyin".to_string(),
     ];
     cfg.schema.active = active.to_string();
     EngineManager::new(&cfg, Some(&data_dir()))
@@ -62,6 +63,18 @@ fn full_pinyin_schema_has_no_keystroke_code() {
 #[test]
 fn codetable_schema_has_no_keystroke_code() {
     assert_eq!(mgr("wubi86").schema_keys_of("nihao", NIHAO), None);
+}
+
+/// 混输方案（`engine.type = "mixed"`）恒空——这是**取舍**，不是遗漏。
+///
+/// 混输下用户敲的是「主码表码 + 拼音码」的混合流，给出单一的双拼击键串会误导：
+/// 那不是他在这个模式里实际要敲的东西。对照 `code_source_schema` 对 Mixed 是有转发的，
+/// 因为「这个词的码表编码是什么」与输入方式无关，而击键恰恰就是输入方式本身。
+///
+/// 这条测试的作用是把这个取舍钉成可见的决定——否则下一个读者无从判断恒空是设计还是 bug。
+#[test]
+fn mixed_schema_has_no_keystroke_code() {
+    assert_eq!(mgr("wubi86_pinyin").schema_keys_of("nihao", NIHAO), None);
 }
 
 /// ★ `boundary == 0` 不出编码。

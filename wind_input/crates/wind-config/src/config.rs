@@ -951,9 +951,13 @@ pub enum CodeHintSource {
 impl CodeHintSource {
     /// 认不出的值回落出厂档。与仓里其它字符串枚举（`first_show_mode` 等）同一取舍：
     /// 配置是用户手打的，写错一个字母不该让整个功能消失，更不该弹错误框。
+    ///
+    /// ⚠️ match 臂必须与 `config_schema::CODE_HINT_SOURCE_VALUES` **逐项对齐**。这里多认
+    /// 一个别名（比如让 `none` 也算 `off`），就会变成「注册表说它非法、运行时却认」——
+    /// CLI 校验与设置页下拉都按注册表办事，用户会撞上「明明能用却填不进去」。
     pub fn from_config(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "off" | "none" => Self::Off,
+            "off" => Self::Off,
             "codetable" => Self::CodeTable,
             "schema" => Self::Schema,
             _ => Self::Auto,
@@ -968,6 +972,21 @@ impl CodeHintSource {
     /// 允许 `${code_schema}`（本方案击键）求值吗？
     pub fn allows_schema(self) -> bool {
         matches!(self, Self::Schema | Self::Auto)
+    }
+
+    /// 在本档基础上**强制放行反查**，其余照旧。
+    ///
+    /// 给 overlay 反查模式（临时拼音 / 快捷输入内拼音）用：那些模式本身就是「用拼音反查
+    /// 码表编码」，出不了码就失去意义，所以无视用户把来源关掉的配置。
+    ///
+    /// ★ 是**并集**不是替换。直接改写成 `CodeTable` 的话，一个把来源设成 `Schema`
+    /// （「我只要看双拼码」）的用户一进快捷输入，看到的反而只剩他选择不看的那种码。
+    /// 强制放行 A 不该顺手关掉 B —— 旧的 `pinyin_hint = force_hint || ...` 也只做加法。
+    pub fn forcing_reverse(self) -> Self {
+        match self {
+            Self::Off | Self::CodeTable => Self::CodeTable,
+            Self::Schema | Self::Auto => Self::Auto,
+        }
     }
 }
 
@@ -5300,7 +5319,7 @@ fn default_candidate_position_mode() -> String {
     "follow_caret".to_string()
 }
 
-/// 注释段默认模板：`${code_hint|code}` **精确等价于本功能引入前的硬编码行为**
+/// 注释段默认模板。前两段（`${code_hint|code_rev}`）**精确等价于本功能引入前的硬编码行为**
 /// （引擎产的剩余编码优先，为空则回退到拼音候选的主码表反查码）。
 ///
 /// 出厂默认能用模板原样表达，是 `${a|b}` 回退语法存在的主要理由 —— 没有它，出厂行为
@@ -6471,9 +6490,10 @@ impl Config {
         // 位置固定在 L2 之后、L3 之前：定制者可以覆盖出厂值，但绝不能压过终端用户。
         if let Some(custom_dir) = Self::custom_data_dir() {
             let custom_config = custom_dir.join("config.toml");
-            if let Some(v) =
+            if let Some(mut v) =
                 Self::read_toml_value_reporting(&custom_config, "custom", &mut unparsable)
             {
+                Self::migrate_user_layer_value(&mut v);
                 merge_value(&mut merged, v);
                 info!("Loaded custom config: {}", custom_config.display());
             }
@@ -6483,9 +6503,10 @@ impl Config {
         match Self::user_config_dir() {
             Some(user_dir) => {
                 let user_config = user_dir.join("config.toml");
-                if let Some(v) =
+                if let Some(mut v) =
                     Self::read_toml_value_reporting(&user_config, "user", &mut unparsable)
                 {
+                    Self::migrate_user_layer_value(&mut v);
                     merge_value(&mut merged, v);
                     info!("Loaded user config: {}", user_config.display());
                 }
@@ -6498,9 +6519,11 @@ impl Config {
         Self::migrate_enable_english_value(&mut merged);
         Self::migrate_force_vertical_value(&mut merged);
         Self::migrate_index_labels_value(&mut merged);
-        Self::migrate_comment_max_chars_value(&mut merged);
-        Self::migrate_show_code_hint_value(&mut merged);
         Self::migrate_empty_code_behavior_value(&mut merged);
+        // ⚠️ `migrate_comment_max_chars_value` / `migrate_show_code_hint_value` **不在这里**，
+        // 它们在各层合并前就地跑（见 [`Self::migrate_user_layer_value`]）。判据不同：
+        // 那两条要问「用户写过新键吗」，而合并结果里的新键必然存在（L1 就是
+        // `Config::default()` 序列化出来的），在这里问永远得到「写过」，迁移一次都不会执行。
         // 位置刻意在**四层合并之后、`try_into` 之前**：定制层 (L2.5) 里的旧值因此与用户层
         // 一样被这一批迁移救到，白捡的——迁移作用在合并结果上，不认值来自哪一层。
         // ⛔ 段级降级**不能**顶替上面这一族 `migrate_*_value`：迁移是「把旧值无损搬到新形态」，
@@ -6753,6 +6776,29 @@ impl Config {
         if !copied.is_empty() {
             info!("Migrated ui.candidate.comment_max_chars={old} → {copied:?}");
         }
+    }
+
+    /// **层内**迁移：作用在单独一层的 `toml::Value` 上，在 `merge_value` **之前**跑。
+    ///
+    /// 与 [`Self::load`] 末尾那一族合并后迁移刻意分开，因为**判据不同**：
+    ///
+    /// 合并后那批问的是「合并结果里有没有这个键」。而 L1 是
+    /// `toml::Value::try_from(Config::default())` —— 凡是**仍在结构体里**的字段，它必然
+    /// 都在。于是任何「新键还不存在才写」的迁移放到那里，`contains_key` 永远命中，
+    /// 一次都不会执行。这不是理论风险：`migrate_comment_max_chars_value` 就这么静默失效过
+    /// （配了 `comment_max_chars = 12` 的用户升级后两个新键仍是 0），
+    /// `migrate_show_code_hint_value` 起初照抄了同一个模式，也一样。
+    ///
+    /// 只有在**单独一层**上问 `contains_key`，答案才真正是「这一层的作者写过这个键吗」。
+    /// 对用户层来说就是「用户自己写过吗」—— 设置页写回时只写它管的那个键、不会顺手删掉
+    /// 旧键，于是新旧两键会在用户配置里长期并存。少了这个区分，要么迁移不执行（旧键被
+    /// 忽略），要么改成旧键优先（用户在设置页的每次修改都在下次启动被打回），两条路都错。
+    ///
+    /// custom 层（L2.5）也跑一遍，保住「定制层里的旧值同样被救到」这个既有性质
+    /// —— 那是合并后迁移白捡的好处，换成层内跑就得显式保留。
+    fn migrate_user_layer_value(layer: &mut toml::Value) {
+        Self::migrate_show_code_hint_value(layer);
+        Self::migrate_comment_max_chars_value(layer);
     }
 
     /// 存量迁移（**须在反序列化前**跑，字段已改名）：`schema.pinyin.show_code_hint`(bool)
@@ -10606,6 +10652,54 @@ scripts = { latin = 42 }
         );
     }
 
+    /// ★★ 端到端：**带着 L1 默认层**跑迁移。
+    ///
+    /// 上面几条迁移测试喂的是「只有旧键的裸 Value」，那个形态在生产里一次都不会出现——
+    /// `Config::load` 的 L1 是 `toml::Value::try_from(Config::default())`，所有字段必然
+    /// 已经在合并结果里了。只测裸 Value 的话，迁移即便**一次都不执行**，那几条测试照样全绿。
+    ///
+    /// 这条测试就是补上那个缺口：按真实链路走一遍「用户层 ⊕ L1 默认」，断言最终
+    /// 反序列化出来的值。关过编码提示的用户升级后提示自己回来，属于本仓反复出现的那类
+    /// 「配了没反应 / 自己变回来」的静默失效。
+    #[test]
+    fn migrate_show_code_hint_works_through_the_real_layering() {
+        for (old, want) in [(false, "off"), (true, "codetable")] {
+            let mut user: toml::Value =
+                toml::from_str(&format!("[schema.pinyin]\nshow_code_hint = {old}\n")).unwrap();
+            Config::migrate_user_layer_value(&mut user);
+
+            let mut merged = toml::Value::try_from(Config::default()).unwrap();
+            merge_value(&mut merged, user);
+            let cfg: Config = merged.try_into().expect("反序列化");
+
+            assert_eq!(
+                cfg.schema.pinyin.code_hint_source, want,
+                "show_code_hint={old} 应迁移为 {want}"
+            );
+        }
+    }
+
+    /// 用户在设置页显式选过新键之后，旧键**不得**再把它顶回去。
+    ///
+    /// 这是「层内迁移」相对「合并后迁移」的全部意义所在：设置页写回时只写它管的那个键，
+    /// 不会顺手删掉旧键，于是用户配置里两个键长期并存。判据若是在**合并结果**上问
+    /// 「有没有新键」，那永远是有（L1 注入的），迁移一次都不会跑；判据若改成「旧键优先」，
+    /// 用户在设置页的每一次修改都会在下次启动时被打回。只有在**用户层那一份**上问，
+    /// `contains_key` 才真正表示「用户自己写过」。
+    #[test]
+    fn explicit_new_key_wins_over_stale_old_key() {
+        let mut user: toml::Value = toml::from_str(
+            "[schema.pinyin]\nshow_code_hint = true\ncode_hint_source = \"schema\"\n",
+        )
+        .unwrap();
+        Config::migrate_user_layer_value(&mut user);
+
+        let mut merged = toml::Value::try_from(Config::default()).unwrap();
+        merge_value(&mut merged, user);
+        let cfg: Config = merged.try_into().expect("反序列化");
+        assert_eq!(cfg.schema.pinyin.code_hint_source, "schema");
+    }
+
     /// ★ `show_code_hint`(bool) → `code_hint_source`(枚举)。
     ///
     /// `true → "codetable"` 而**不是** `"auto"`：旧的 true 只表达「显示反查来的码表
@@ -10674,6 +10768,25 @@ scripts = { latin = 42 }
         assert_eq!(PinyinGlobalConfig::default().code_hint_source, "auto");
     }
 
+    /// `forcing_reverse` 是并集：强制放行反查，但不动 schema 那一列。
+    ///
+    /// 替换式实现（恒返回 `CodeTable`）会让「只要双拼码」的用户一进快捷输入模式，
+    /// 看到的反而只剩他明确选择不看的码表反查码。
+    #[test]
+    fn forcing_reverse_is_a_union_not_a_replacement() {
+        use CodeHintSource::*;
+        for src in [Off, CodeTable, Schema, Auto] {
+            let forced = src.forcing_reverse();
+            assert!(forced.allows_reverse(), "{src:?}：强制后必须放行反查");
+            assert!(
+                !src.allows_schema() || forced.allows_schema(),
+                "{src:?}：强制放行反查不该顺手关掉 code_schema"
+            );
+        }
+        assert_eq!(Schema.forcing_reverse(), Auto);
+        assert_eq!(Off.forcing_reverse(), CodeTable);
+    }
+
     /// 四档各自允许哪些变量求值——「开关管允许哪些来源、模板管怎么摆」的全部含义。
     #[test]
     fn code_hint_source_gates() {
@@ -10703,6 +10816,28 @@ scripts = { latin = 42 }
             CodeHintSource::CodeTable
         );
         assert_eq!(CodeHintSource::from_config("OFF"), CodeHintSource::Off);
+    }
+
+    /// 注册表值域与 `from_config` 的 match 臂必须逐项对齐。
+    ///
+    /// 不对齐 = 注册表说非法、运行时却认（或反过来）。CLI 校验与设置页下拉都按注册表
+    /// 办事，漂移的表现是「明明能用却填不进去」，或「填进去了却没反应」。
+    #[test]
+    fn code_hint_source_values_match_registry() {
+        for v in crate::config_schema::CODE_HINT_SOURCE_VALUES {
+            let parsed = CodeHintSource::from_config(v);
+            assert_ne!(
+                (parsed, *v),
+                (CodeHintSource::Auto, "off"),
+                "注册表列出的 {v} 不该落到兜底档"
+            );
+            // 每个列出的值都要能被解析回它自己（`auto` 兜底档同样成立）。
+            assert_eq!(
+                format!("{parsed:?}").to_ascii_lowercase(),
+                v.replace('_', ""),
+                "{v} 解析结果与自身不符"
+            );
+        }
     }
 
     /// ★ `comment_max_chars`（横竖共用）→ 两个方向各一份。配过非 0 值的用户升级后

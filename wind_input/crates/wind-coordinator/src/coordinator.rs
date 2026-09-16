@@ -5572,7 +5572,7 @@ impl Coordinator {
         let scope_prefix = rt.config.input.scope_relax.prefix.as_str();
         // 编码提示(反查):对拼音来源候选,用主码表真实反查索引填 comment(实际填充见下方候选构造,
         // 受 source==Pinyin 守卫)。门控两类:
-        //  - 普通拼音/混输方案:跟随方案 show_code_hint(pinyin_show_code_hint 解析,混输取次方案);
+        //  - 普通拼音/混输方案:跟随全局 schema.pinyin.code_hint_source(四档,见 CodeHintSource);
         //  - overlay 反查模式(临时拼音 / 快捷输入(mix)内拼音):**无视开关强制显示**
         //    (对齐 Go AddCodeHintsForced)——这些模式本身就是"用拼音反查码表编码",必须出码。
         // 码表类方案/候选的剩余编码由码表引擎在 convert 内填,不在此处理。
@@ -5580,12 +5580,15 @@ impl Coordinator {
             state.active,
             Some(ModeKind::TempPinyin) | Some(ModeKind::Mix(_))
         );
-        // overlay 反查模式无视用户的来源配置，强制走 CodeTable 档：这些模式本身就是
-        // 「用拼音反查码表编码」，出不了码就失去了意义（对齐 Go AddCodeHintsForced）。
+        // overlay 反查模式强制放行反查：这些模式本身就是「用拼音反查码表编码」，出不了码
+        // 就失去了意义（对齐 Go AddCodeHintsForced）。
+        // ★ 并集而非替换，见 `CodeHintSource::forcing_reverse` —— 改写成恒 CodeTable 会把
+        // 「只要双拼码」的用户在快捷输入里想看的那一列一并关掉。
+        let configured = self.engine_mgr.code_hint_source();
         let hint_source = if force_hint {
-            wind_config::config::CodeHintSource::CodeTable
+            configured.forcing_reverse()
         } else {
-            self.engine_mgr.code_hint_source()
+            configured
         };
         let tip_opts = wind_reverse::TooltipOptions {
             code: tip_cfg.code_enabled,

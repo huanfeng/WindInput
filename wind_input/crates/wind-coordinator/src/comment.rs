@@ -600,9 +600,6 @@ impl crate::coordinator::Coordinator {
             "chaizi_code" if single => reverse.chaizi_code_of(text),
             "chaizi_code" => String::new(),
             "chaizi_all" => reverse.radicals_of(text, arg.unwrap_or(" ")),
-            // 作用域取活跃方案：本入口（cmdbar `dict.rev`）是**低频**路径，就地取一次
-            // 比给整条求值链加一个参数划算；且它没有候选身份，也就没有临英那种
-            // 「数据归 english 桶」的语境可言。
             // `code_schema` —— 这段文本在当前方案下要敲的键。
             //
             // 与注释段同义但取音节的路子不同：那边有候选身份，直接用词条真值
@@ -616,6 +613,9 @@ impl crate::coordinator::Coordinator {
                     .schema_keys_of_syllables(&syls)
                     .unwrap_or_default()
             }
+            // 作用域取活跃方案：本入口（cmdbar `dict.rev`）是**低频**路径，就地取一次
+            // 比给整条求值链加一个参数划算；且它没有候选身份，也就没有临英那种
+            // 「数据归 english 桶」的语境可言。
             "dict" => reverse.comment_of(text, None, &self.engine_mgr.active_schema_id()),
             _ => return None,
         })
@@ -1578,6 +1578,18 @@ mod eval_var_tests {
         );
     }
 
+    /// ⚠️ **本入口的 `code_schema` 只有「是不是已知变量名」被测到，产出的值没有。**
+    ///
+    /// 上面两条测试用仓库自带的 `data/` 建 Coordinator，而那里没有任何拼音词库
+    /// （词库在 `build_dev/data`，本机构建产物）。于是 `word_pinyin_syllables("你好")`
+    /// 推不出读音、返回空，`code_schema` 在裸文本入口恒为空串——断言只能比较
+    /// `Some("") == Some("")`，抓得住「match arm 被删」，抓不住「算出来的值是错的」。
+    ///
+    /// 代码路径本身是对的（`generate_word_pinyin` 经 `SpacedCode` 产出空格分隔的**无声调**
+    /// 音节，与 `ShuangpinReverse::encode_all` 的输入契约吻合），但那是读出来的结论，
+    /// 不是测试钉住的。要真正覆盖，得照 `shuangpin_separator.rs` 的做法 gate 在
+    /// `build_dev/data` 上另写一条。
+    ///
     /// 裸文本入口的别名同样要等价。
     #[test]
     fn text_entry_legacy_names_are_aliases() {

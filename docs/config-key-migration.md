@@ -23,7 +23,7 @@
 | 旧 | 现行 |
 |---|---|
 | `schema.active` / `available` / `primary_codetable` / `primary_pinyin` | 不变 |
-| `pinyin.show_code_hint` | `schema.pinyin.show_code_hint` |
+| `pinyin.show_code_hint` | `schema.pinyin.code_hint_source`（0.122 起由布尔改为四档枚举，值迁移见 `Config::migrate_show_code_hint_value`） |
 | `pinyin.use_smart_compose` | `schema.pinyin.use_smart_compose` |
 | `pinyin.candidate_order` | `schema.pinyin.candidate_order` |
 | `input.pinyin_separator` | `schema.pinyin.separator` |

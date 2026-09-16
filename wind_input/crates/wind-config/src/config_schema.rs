@@ -147,6 +147,13 @@ const RARE_PHRASE_VALUES: &[&str] = &["keep", "filter"];
 const PUNCT_EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear", "clear_no_input"];
 
 /// 码表词频应用策略。
+/// `schema.pinyin.code_hint_source` 的值域。
+///
+/// ⚠️ 必须与 [`wind_config::config::CodeHintSource::from_config`] 的 match 臂**逐项对齐**。
+/// 不对齐的表现是第二种漂移：注册表说某个值非法（CLI/设置页据此校验、生成下拉），
+/// 运行时却认它——或者反过来。
+pub(crate) const CODE_HINT_SOURCE_VALUES: &[&str] = &["off", "codetable", "schema", "auto"];
+
 const FREQ_STRATEGY_VALUES: &[&str] = &["top", "step", "position"];
 
 /// 前缀补全参与词频位置提升的范围（按语义单元数判定）。
@@ -260,7 +267,10 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.auto_phrase.idle_timeout_ms", Int),
     f("schema.codetable.auto_phrase.temp_max_entries", Int),
     // 全局拼音
-    f("schema.pinyin.code_hint_source", Str),
+    f(
+        "schema.pinyin.code_hint_source",
+        Enum(CODE_HINT_SOURCE_VALUES),
+    ),
     f("schema.pinyin.use_smart_compose", Bool),
     f("schema.pinyin.separator", Str),
     // 单字输入（拼音侧）。与码表那份是两件独立的事、不共享取值——两种引擎对「只出单字」

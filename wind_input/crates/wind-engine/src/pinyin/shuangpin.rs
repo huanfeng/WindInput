@@ -331,6 +331,11 @@ impl ShuangpinConverter {
     /// 参数化而不是让建表方自己抄一遍规则：模糊音只影响**一个分支的候选列表**
     /// （下方第 2 步），其余零声母三路径、`zero_pairs`、单韵母重复键全都与它无关。
     /// 反向表建表走 `use_fuzzy = false`，理由见 [`ShuangpinReverse`]。
+    ///
+    /// ★ 这是**预防**不是修复：当前唯一的生产建表方 `EngineManager::shuangpin_reverse`
+    /// 现建一个从未调用 `set_fuzzy` 的转换器，所以两条路径眼下同值。参数留着是因为
+    /// 「顺手复用引擎已有的 converter 来建表」是很现实的重构方向，那一天它就是错的了
+    /// （守卫测试 `reverse_ignores_fuzzy_initials` 手动开模糊音，钉的正是那一天）。
     fn convert_pair_inner(&self, key1: u8, key2: u8, use_fuzzy: bool) -> Vec<String> {
         let mut results: Vec<String> = Vec::new();
 

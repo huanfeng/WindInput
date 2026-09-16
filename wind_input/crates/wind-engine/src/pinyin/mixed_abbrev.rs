@@ -253,7 +253,13 @@ fn walk(
 /// （那边取的正是这里每段的首字母）。改动其一时同步核对另一处。
 pub fn syllables_from_boundary(code: &str, boundary: u64) -> Option<Vec<&str>> {
     // bit0 未置位 = 第一个音节不从 0 开始 —— 坏数据，不猜。
-    if boundary & 1 == 0 || code.is_empty() {
+    //
+    // `!code.is_ascii()`：下面按**字节**下标切片，`i` 落在多字节字符内部会 panic。
+    // 同文件的 `render_keystroke_preedit` 早就带着同款守卫，说明本模块不把 ASCII 当
+    // 可假设的前提。此前本函数的调用方都带 `is_abbrev` 一类的窄化守卫，`schema_keys_of`
+    // 把调用面扩到了**每条拼音候选**、且处在按键线程持 state 锁的位置 —— 那里 panic
+    // 就是整个输入法崩掉，而这行的成本是零。
+    if boundary & 1 == 0 || code.is_empty() || !code.is_ascii() {
         return None;
     }
     let mut out = Vec::new();

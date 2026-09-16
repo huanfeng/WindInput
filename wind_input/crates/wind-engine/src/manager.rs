@@ -437,7 +437,7 @@ pub struct EngineManager {
     /// 服务悬停 `[编码]` 的打法列表展示;这份要的是「按权重挑全码」,两种排序需求互斥。
     /// **只缓存一份**:造词恒对活跃方案(混输则其主码表)进行,切方案即弃,无需两份护栏。
     single_char_codes: Mutex<Option<SingleCharCodeCache>>,
-    /// 全局拼音配置（fuzzy/show_code_hint/...）。Mutex 以支持热重载。
+    /// 全局拼音配置（fuzzy/code_hint_source/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
     /// 双拼韵母键集缓存：(已缓存的活跃方案 id, Option<HashSet<u8>>)。
     /// None = 当前活跃方案不是双拼；Some = 双拼布局的 finals 键集合。
@@ -446,10 +446,13 @@ pub struct EngineManager {
     /// 双拼**反向表**缓存：(已缓存的活跃方案 id, Option<Arc<ShuangpinReverse>>)。
     /// None = 该方案不是双拼；Some = 音节 → 击键表，供 `${code_schema}` 出编码。
     ///
-    /// 与上面的 `shuangpin_finals_cache` **分开**而不是合并：那份服务
-    /// `pinyin_is_shuangpin_of`，其注释写明「临拼与主方案交替询问会来回刷」，
-    /// 而建反向表比解析一份布局贵两个数量级（实测 ~310µs）。合并的话，每次交替
-    /// 询问「是不是双拼」都要付一次全表重建的钱。
+    /// 与上面的 `shuangpin_finals_cache` **分开**而不是合并，理由是两者的重建成本差两个
+    /// 数量级（建反向表实测 ~310µs，解析一份布局远低于此），键控又各自独立——合并只会
+    /// 让便宜的那个被贵的拖着走。
+    ///
+    /// ⚠️ 别照搬「那份缓存的注释说临拼与主方案交替询问会来回刷」这条论据：
+    /// `pinyin_is_shuangpin` / `pinyin_is_shuangpin_of` 现已**全仓零调用方**，那个 thrash
+    /// 场景当前并不存在。真要给两份缓存的分合下结论，先把那条死路径清掉再谈。
     ///
     /// ⚠️ 两者失效条件**完全相同**（方案/布局可能变更），故统一走
     /// [`Self::invalidate_shuangpin_caches`]，不要在别处单独清其中一个。
@@ -825,10 +828,20 @@ impl EngineManager {
     /// 非双拼方案、或方案读不出来返回 `None`。方案没写 `layout` 时给缺省的
     /// [`DEFAULT_SHUANGPIN_LAYOUT`]。
     ///
-    /// ★ 这是「哪个方案用哪份布局」的**唯一**判据。此前 `build_shuangpin_finals` 与
-    /// `shuangpin_layout_of` 各抄了一遍，后者的文档注释还专门写下过那句担忧——
-    /// 「两处若分叉，设置页会显示一个和实际生效的不是同一个布局」。收口之后那句话
-    /// 不必再写，因为分叉已无处发生。
+    /// `build_shuangpin_finals` 与 `shuangpin_layout_of` 此前各抄了一遍这段决策，后者的
+    /// 文档注释还专门写下过那句担忧——「两处若分叉，设置页会显示一个和实际生效的不是
+    /// 同一个布局」。两者现已收口到这里。
+    ///
+    /// ⚠️ **引擎构建路径（`build_engine` 里那段 `Layout::from_toml`）仍是第二份同构实现**，
+    /// 本轮只统一了缺省常量（`DEFAULT_SHUANGPIN_LAYOUT`），没有统一分支逻辑——那段带着
+    /// 自己的 `warn!` 回退（布局加载失败就退回全拼），并入这里会把那条日志吞掉。
+    /// 常量同源之后剩余风险很低，但别把这里写成「唯一判据」，它不是。
+    ///
+    /// ★ **混输方案（`engine.type = "mixed"`）恒返回 `None`**，这是取舍不是遗漏：它只认
+    /// 顶层 `engine.pinyin.scheme`，而混输的拼音在 `engine.mixed.secondary_schema` 里。
+    /// 混输下用户敲的是「主码表码 + 拼音码」混合流，给出单一的双拼击键串会误导——
+    /// 那不是他在这个模式里实际要敲的东西。对照 `code_source_schema` 对 `Mixed` 有转发，
+    /// 是因为「这个词的码表编码是什么」与输入方式无关，而击键恰恰就是输入方式本身。
     fn shuangpin_layout_id_of(&self, schema_id: &str) -> Option<String> {
         let data_dir = self.data_dir.as_deref()?;
         let schema = Self::read_schema(schema_id, Some(data_dir), self.override_dir.as_deref())?;
@@ -929,7 +942,8 @@ impl EngineManager {
     /// # 不读盘、不阻塞
     ///
     /// 这是按键处理链路（每次候选刷新 × 当前页 5~9 条），且调用方正持有 state 锁。
-    /// 反向表按活跃方案缓存，命中即无 IO；miss 时也只是解析一份布局 TOML 加建表，
+    /// 反向表按活跃方案缓存。命中路径是一次 `active_schema_id()`（锁 + String 克隆）、
+    /// 一次 HashMap 查询、一次 Arc 克隆，无 IO；miss 时也只是解析一份布局 TOML 再建表，
     /// 不像 `word_codes_in` 那样可能撞上秒级的词库反查索引构建。
     pub fn schema_keys_of(&self, code: &str, boundary: u64) -> Option<String> {
         let syllables = crate::pinyin::mixed_abbrev::syllables_from_boundary(code, boundary)?;
@@ -2507,7 +2521,7 @@ impl EngineManager {
             }
         }
         // 反查索引依赖「启用词库合并」，启用集变了须失效（懒重建）。
-        // 注：编码提示开关已改读全局 config.pinyin.show_code_hint，无方案级缓存需失效。
+        // 注：编码提示开关已改读全局 schema.pinyin.code_hint_source，无方案级缓存需失效。
         self.reverse_index
             .lock()
             .unwrap_or_else(|e| e.into_inner())
