@@ -928,7 +928,20 @@ impl EngineManager {
     /// 不像 `word_codes_in` 那样可能撞上秒级的词库反查索引构建。
     pub fn schema_keys_of(&self, code: &str, boundary: u64) -> Option<String> {
         let syllables = crate::pinyin::mixed_abbrev::syllables_from_boundary(code, boundary)?;
-        self.shuangpin_reverse()?.encode_all(&syllables)
+        self.schema_keys_of_syllables(&syllables)
+    }
+
+    /// 音节序列 → 活跃方案的双拼击键串；非双拼方案、或任一音节查不到返回 `None`。
+    ///
+    /// [`Self::schema_keys_of`] 走候选自带的 `code`+`boundary`（词条真值）。本方法给
+    /// **没有候选身份**的路径用——剪贴板反查（cmdbar `dict.rev`）手上只有一段裸文本，
+    /// 音节得先由 [`Self::word_pinyin_syllables`] 按词推断（那条路会做多音字消歧，
+    /// 「行长」得 `hang zhang` 而不是逐字最常用读音的 `xing chang`）。
+    ///
+    /// 两条路径汇到同一张反向表，故 `${code_schema}` 在注释段与反查两个入口同义——
+    /// 用户在注释模板里学会的写法能原样用在 `dict.rev(format=…)` 里。
+    pub fn schema_keys_of_syllables(&self, syllables: &[&str]) -> Option<String> {
+        self.shuangpin_reverse()?.encode_all(syllables)
     }
 
     /// 拼音方案编码提示:返回主码表中 `text` 实际对应的编码(多码取最长者=全码,简码可能
