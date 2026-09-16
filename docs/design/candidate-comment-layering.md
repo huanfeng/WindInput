@@ -18,7 +18,7 @@
 | 4 | config.toml | `schema.mix_modes[].comment_template_*` | 实例级三态 |
 | 5 | 方案文件 | `[overlay].comment_template_*` | overlay **激活期间** |
 | 6 | config.toml | `[[ui.comment_dicts]]`（含 `schemas`） | 全局表 + 方案过滤 |
-| 7 | config.toml | `schema.pinyin.show_code_hint` | 全局，门控 `${code}` 的**求值** |
+| 7 | config.toml | `schema.pinyin.code_hint_source` | 全局四档，门控 `${code_rev}` / `${shuangpin}` 的**求值** |
 | 8 | 方案文件 | `[engine.codetable].show_code_hint` | 方案级，门控 `${code_hint}` 的**生产** |
 | 9 | 主题 | `[comment]` ViewNode | 主题级（样式） |
 | 10 | config.toml | `ui.tooltip.*` | 全局，相邻但独立的悬停提示 |
@@ -34,9 +34,16 @@
    一个数量级」，那么长度预算更该分开。这是遗漏，不是取舍。
 3. **注释库的方案过滤判据源错了**。`sync_comment_dicts` 用 `active_schema_id()`，
    临英背后是硬编码的 `english` 方案 ⇒ `schemas = ["english"]` 在五笔方案下不生效。
-4. **`show_code_hint` 同名双键**。两个键在设置页都叫「显示编码提示」，作用域相反、
-   管的变量不同（见表 7/8）；且 7 已与模板层功能重叠——模板里不写 `${code}` 本来就等于
-   关掉，而且是**零开销**的关法。⏸ **本轮不动**，只记录在此（见 §7）。
+4. ~~**`show_code_hint` 同名双键**~~ ✅ **已消解**（GH#128 那轮）。7 改名为
+   `schema.pinyin.code_hint_source`（四档枚举），8 保持原名——两者管的本就是两件事
+   （一个是「显示哪种编码」，一个是「码表引擎要不要产剩余编码」），重名只是历史巧合。
+   设置页两个都叫「显示编码提示」的重影也一并消掉了。
+
+   ★ **P3 的方向被推翻了**，记下来免得日后有人照着做：原案是「让 `${code}` 只由模板
+   决定、开关退役」。但 GH#128 证明这个开关有**模板表达不了**的职责——用户要的第三种
+   编码（本方案击键）得先有人决定「允许它出现吗」，而模板只能决定「出现的话摆哪」。
+   现在的分工是「开关管允许哪些来源求值、模板管按什么顺序和格式摆」，两层不重叠，
+   谁也不是谁的重复。
 
 ### 1.2 三条「看着散但不要合并」
 
@@ -258,11 +265,21 @@ comment_template_horizontal = ""            # 本方案横排不显示注释
 ★ 除 grep 新键名外，还要反着问「这次改动让哪些**既有陈述**失效了」——凡写「注释模板是全局的」
 「模式级覆盖全局」的句子都变成半对，而这类句子不含任何新键名，grep 找不出来。
 
-### P3 消解 `show_code_hint` 双真相源（需拍板）
+### ~~P3 消解 `show_code_hint` 双真相源~~ ✅ 已办，但走的是相反的路
 
-让 `${code}` 只由模板决定，全局 `schema.pinyin.show_code_hint` 退役。代价是迁移：
-关过该开关的存量用户，其出厂模板要自动改写成 `${code_hint}`，否则升级后突然多出编码。
-属 R4 破坏性变更，不宜与 P0 混轮。
+原案是「让 `${code}` 只由模板决定、全局开关退役」，判据是「模板里不写 `${code}` 本来
+就等于关掉，而且是零开销的关法」。
+
+**GH#128 推翻了这个判据。** 用户要的是第三种编码——双拼编码（`${shuangpin}`），
+它既不在码表词库里、也不是「关掉」能表达的。于是「显示哪一类编码」成了一个模板表达不了
+的问题：模板只能回答「出现的话摆在哪、和什么拼在一起」。
+
+最终改成四档枚举 `schema.pinyin.code_hint_source`（`off` / `codetable` / `schema` /
+`auto`），分工是**开关管允许哪些来源求值、模板管按什么顺序和格式摆**，两层不重叠。
+迁移代价比原案小得多：`true → codetable`、`false → off`，存量用户所见分毫不变，
+不必改写任何人的模板。
+
+顺带把 §1.1 缺陷 4 的同名双键消掉了——改名之后 7 与 8 不再重名。
 
 ## 8 跨仓 checklist
 
@@ -273,6 +290,83 @@ comment_template_horizontal = ""            # 本方案横排不显示注释
 | WindInput | `comment_of` 加 schema 过滤 + 挂载去方案化 | ✅ P0 |
 | wind-setting | `comment_max_chars` 改名的**被动同步**：manifest 拆成两项、`capabilities.snapshot.json`、`mockdata/config.json`（769 测试过，含快照对账） | ✅ P0 |
 | WindInputDocs | `comment_max_chars` 改名 + 方案级两键（`guides/config/ui.mdx`、`guides/schemas.mdx`） | ✅ P0 |
+
+### GH#128（`${shuangpin}` / `code_hint_source`）
+
+| 仓 | 事项 | 状态 |
+|---|---|---|
+| WindInput | `ShuangpinReverse` 反向表（枚举 `convert_pair` 反演） | ✅ |
+| WindInput | `EngineManager::schema_keys_of` + 单槽缓存 + 布局解析收口 | ✅ |
+| WindInput | `${shuangpin}` 新变量；`${code}`→`${code_rev}` 改名 + 永久别名 | ✅ |
+| WindInput | `show_code_hint`(bool) → `code_hint_source`(四档) + 值迁移 | ✅ |
+| WindInput | 出厂模板 `${code_hint|code_rev|shuangpin}`（`data/config.toml` 与 `default_comment_template()` 两处） | ✅ |
+| wind-setting | manifest 改 select、`mockdata/config.json` | ✅ |
+| wind-setting | `capabilities.snapshot.json` + `mockdata/config.json` 由生成器重出 | ✅ 编译机独立槽位，全量 1038 passed |
+| WindInput | `docs/config-key-migration.md` 键名映射表 | ✅ |
+| WindInputDocs | `candidate-comment.mdx` / `config/schema.mdx` / `config/ui.mdx` / `special-modes.mdx` | ✅ |
+| 真机 | 双拼方案下候选注释显示双拼码；升级迁移后老用户所见不变 | ⏸ **待验** |
+
+⚠️ wind-setting 在 Linux 上构建不了（`rfd` 缺 gtk3/xdg-portal 后端），两个生成器
+（`regenerate_capabilities_snapshot` / `regenerate_mock_config`）只能上编译机跑，用独立
+槽位 `C:/build-<tag>/` 避开共享的主构建树，用完删掉（一份 target 约 2.6 GB）。
+手改那两份产物是 `capabilities.rs` 明令禁止的。
+
+★ 上编译机前**先 `git rebase main`**：跨仓对账测试（`uncovered_capability_keys_match_allowlist`、
+`mock_config_matches_core_system_preset`）会因为 core worktree 落后于 main 而红，
+那不是自己的改动坏了。这次就撞上了一次（并发会话新增的 `input.commit_newline`）。
+
+### 命名与范围各错了一次，都是同一个来源
+
+**第一次：变量曾叫 `${code_schema}`、界面曾叫「本方案击键」（均已改名）。** 当时刻意避开 `shuangpin`
+这个名字，理由是「不把实现绑进名字」，改用「本方案 vs 他方案」作语义轴。那条轴站不住：
+**本方案是全拼时这一档恒空**，用户在全拼下选中它什么也不会发生——名字承诺了一件它做
+不到的事。真正的语义从来只是「双拼编码」，也就是 GH#128 标题里提问者自己的词。
+
+**第二次：范围只认活跃方案。** 全拼下恒空，理由写的是「全拼的击键就是拼音本身，显示是
+冗余」。那句话对「本方案击键」成立，对「双拼编码」不成立。
+
+两次错的根子是同一个：**把 issue 读成了「双拼用户要看自己的码」**。但原话是「有时忘记
+了还能看下」——正在用双拼打字的人刚敲完码不会忘；会忘并且想看一眼的，多半是用全拼打字、
+正往双拼迁移的人。issue 里没写作者用什么方案，这个信息缺口当时没被当回事，于是拿一个
+未经检验的读法定了名字和范围。
+
+现在：变量 `${shuangpin}`、配置值 `shuangpin`、界面「双拼编码」三处同名；布局来源走
+「活跃方案 → `primary_pinyin` → `available` 首个双拼」的回退链，与
+`resolve_primary_codetable` 同构，不新增配置键。
+
+★ 下次遇到「用户要 X」这类需求，先问**他在什么场景下要 X**。这次如果一开始就问「他用
+什么方案打字」，名字和范围都不会错。
+
+### 这轮踩到的坑：值迁移的判据不能问合并结果
+
+`Config::load` 的 L1 是 `toml::Value::try_from(Config::default())` —— **凡是仍在结构体里
+的字段，合并结果里必然都有**。于是任何「新键还不存在才写」的迁移，放在 `load` 末尾那批
+合并后迁移里，`contains_key` 永远命中，**一次都不会执行**。
+
+这不是理论风险，两条都中招了：
+
+- `migrate_comment_max_chars_value` —— 早已静默失效（配过 `comment_max_chars` 的用户升级
+  后两个新键仍是 0）。本轮的 `migrate_show_code_hint_value` 照抄了它的模式，同样失效。
+- 两条现已移进 `Config::migrate_user_layer_value`，在各层合并**之前**就地跑。只有在单独
+  一层上问 `contains_key`，答案才真正是「这一层的作者写过吗」。
+
+⚠️ **判据不能简单反转成「旧键优先」**：设置页写回时只写它管的那个键、不会顺手删掉旧键，
+于是新旧两键在用户配置里长期并存。旧键优先的话，用户在设置页的每次修改都会在下次启动
+被打回。
+
+**为什么原有那批测试没抓住**：它们喂的是「只有旧键的裸 `toml::Value`」，那个形态在生产
+中一次都不会出现。迁移即便完全不执行，测试照样全绿。新增的
+`migrate_show_code_hint_works_through_the_real_layering` 按真实链路走「用户层 ⊕ L1 默认」。
+
+### ⏸ 顺带发现（**未处理**，不属本轮范围）
+
+`migrate_force_vertical_value` 是**相反方向**的同类缺陷：它对 `mix_modes[].candidate_layout`
+**无条件 `insert`**，没有任何「用户是否显式设过」的判据。用户配置里若还留着旧的
+`schema.quick_input.force_vertical`，他在设置页给 quick_mix 设的候选排布会在每次启动被
+那个旧键打回。`migrate_enable_english_value` 的写入形态相同，需一并核。
+
+修法现成——挪进 `migrate_user_layer_value` 并补 `contains_key` 守卫即可——但那会改变已
+发布的行为，该单独排期、单独测。
 | wind-setting | 方案级三态行（并入「本方案行为」节）+ 注释库列表编辑器 + 销 UNCOVERED ⑮（781 测试过，含截图自查） | ✅ P1 |
 | WindInputDocs | 三层优先级表（`settings/appearance/candidate-comment`）+ 反向审查既有陈述 | P2 |
 | WindInputTools | **不涉及**：工具站的方案模型只覆盖码表/编码字段，`[punct]`/`[candidate]`/`[phrases]` 这三段行为段本就不在其中（已核 `src/lib/schema/model.ts`） | — |
