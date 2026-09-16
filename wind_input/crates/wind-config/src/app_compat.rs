@@ -9,6 +9,7 @@
 
 use crate::config::SmartMethod;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -92,6 +93,98 @@ impl FirstShowMode {
             Self::Wait => "wait",
             Self::Fast => "fast",
             Self::Instant => "instant",
+        }
+    }
+}
+
+/// 上屏文本里的换行**用什么字符表达**。
+///
+/// # 为什么必须按应用配，而不能定一个全局正确值
+///
+/// 「换行」在不同的文本模型里根本不是同一个东西：
+///
+/// · **富文本模型**（Word / WPS / RichEdit / TOM）——文档存储里的段落边界**就是** CR。
+///   LF 在这个模型里不是「另一种换行写法」，而是一个**不构成换行**的控制字符。
+///   2026-08-23 真机现场：同一段带换行的文本，记事本与 WPS 正常分段，Word 里每个换行
+///   处渲染成一段类似 Tab 的空白（见 7c9da37a）。⇒ 对这类宿主转 CR 不是偏好，而是
+///   唯一能成为换行的形式，「保留原样」在它们身上根本不成立。
+///
+/// · **字节即存储的宿主**（VS Code / 终端 / 浏览器 textarea / Edit 控件）——写进去什么
+///   就存什么。这里做任何转换都是在**改写用户的数据**：t112 的「正则直通后行尾从 `\n`
+///   变成 `\r`」正是这么来的，而且这种失败是静默的，用户往往很久之后才发现。
+///
+/// ⇒ 没有哪个值对所有宿主都对，故本项按应用配置（见 [`CommitNewlineRule`]），出厂默认
+///   [`Keep`](Self::Keep)：**不知道宿主要什么的时候，不动用户的数据**。漏配一个富文本
+///   宿主的代价是用户立刻看得见的显示异常（能反馈、加名单即可），漏配的反方向则是静默
+///   改写行尾——可见的失败优于静默的失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewlineStyle {
+    /// 原样透传，一个字符都不改。**出厂默认**。
+    #[default]
+    Keep,
+    /// 一律折成单个 CR（`\r`）——Windows 富文本模型的段落分隔符。
+    Cr,
+    /// 一律折成单个 LF（`\n`）。
+    Lf,
+    /// 一律折成 CRLF（`\r\n`）。
+    Crlf,
+}
+
+impl NewlineStyle {
+    /// 按本档位改写 `text` 里的换行。
+    ///
+    /// 三种行尾都认（`\r\n` / 孤立 `\n` / 孤立 `\r`），且 **`\r\n` 算一个换行**——
+    /// 逐字符转会把一个换行变成两个（同 `key.type` 的 `split_type_text`）。
+    ///
+    /// [`Keep`](Self::Keep) 与「文本里压根没有换行」两种情况零拷贝返回。
+    pub fn apply<'a>(self, text: &'a str) -> Cow<'a, str> {
+        let eol = match self {
+            Self::Keep => return Cow::Borrowed(text),
+            Self::Cr => "\r",
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        };
+        if !text.contains(['\r', '\n']) {
+            return Cow::Borrowed(text);
+        }
+        let mut out = String::with_capacity(text.len() + 8);
+        let mut it = text.chars().peekable();
+        while let Some(ch) = it.next() {
+            match ch {
+                '\r' => {
+                    // CRLF：吃掉紧随的 LF，整体只产出一个换行。
+                    if it.peek() == Some(&'\n') {
+                        it.next();
+                    }
+                    out.push_str(eol);
+                }
+                '\n' => out.push_str(eol),
+                c => out.push(c),
+            }
+        }
+        Cow::Owned(out)
+    }
+
+    /// 配置串 → 枚举。无法识别返回 `None`——同 [`FirstShowMode::from_config`] 的理由：
+    /// per-app 层认不出的值退化为「没配」＝跟随全局，不把拼错的值固化成显式覆盖。
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "keep" => Some(Self::Keep),
+            "cr" => Some(Self::Cr),
+            "lf" => Some(Self::Lf),
+            "crlf" => Some(Self::Crlf),
+            _ => None,
+        }
+    }
+
+    /// 枚举 → 配置串（写回 compat.toml 用）。
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Cr => "cr",
+            Self::Lf => "lf",
+            Self::Crlf => "crlf",
         }
     }
 }
@@ -208,6 +301,20 @@ where
 {
     let raw = Option::<String>::deserialize(d)?;
     Ok(raw.as_deref().and_then(FirstShowMode::from_config))
+}
+
+/// 容错反序列化 `Option<NewlineStyle>`：无法识别的值退化为 `None`（＝跟随全局）。
+///
+/// ⚠ 与 [`de_first_show_mode`] 同理，不能直接让 serde 认这个枚举：`load_file` 解析失败会
+/// **整份 compat.toml 静默跳过**，用户照着 compat.toml 的注释手加一条规则、`style` 拼错
+/// 一个字母，就会让该文件里所有应用的所有规则一起失效——而症状与 compat.toml 毫无关联，
+/// 极难归因。
+fn de_newline_style<'de, D>(d: D) -> Result<Option<NewlineStyle>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(raw.as_deref().and_then(NewlineStyle::from_config))
 }
 
 /// 单个应用的兼容性规则。
@@ -592,16 +699,21 @@ fn is_empty_override(rule: &AppCompatRule) -> bool {
 
 /// 把规则集渲染成用户层 compat.toml 全文（含固定文件头）。纯函数，便于单测断言产物。
 ///
-/// ⚠ `initial_mode_scope` 必须原样带回：本函数是**整份重写**，漏掉哪一段哪一段就没了。
-/// 用户手写的 `[[initial_mode_scope]]` 覆盖会在下一次菜单开关时静默消失，而那种缺陷
-/// 「配置改了不生效」的现场与写回路径隔着一次重启，极难归因。
+/// ⚠ 除 `[[apps]]` 之外的每一段都必须原样带回：本函数是**整份重写**，漏掉哪一段哪一段
+/// 就没了。用户手写的 `[[initial_mode_scope]]` / `[[commit_newline]]` 覆盖会在下一次菜单
+/// 开关时静默消失，而那种缺陷「配置改了不生效」的现场与写回路径隔着一次重启，极难归因。
+///
+/// ⛔ 新增段时**改本函数的签名**，不要另开一个「完整版」而把旧签名留着转发：留着的那个
+/// 就是个漏段陷阱，下一个调用方照着它写，新段当场丢失。
 pub fn render_user_compat(
     rules: &[AppCompatRule],
     initial_mode_scope: &[InitialModeScopeRule],
+    commit_newline: &[CommitNewlineRule],
 ) -> Result<String, toml::ser::Error> {
     let file = AppCompatFile {
         apps: rules.to_vec(),
         initial_mode_scope: initial_mode_scope.to_vec(),
+        commit_newline: commit_newline.to_vec(),
     };
     Ok(format!("{USER_COMPAT_HEADER}{}", toml::to_string(&file)?))
 }
@@ -629,8 +741,8 @@ pub fn update_user_rule(
     // 「跟随全局」必须真的等于「这条规则不存在」，否则它就是个静默的屏蔽器。同一个病
     // 在 config.toml 那层记过一次：写回不剔除「等于默认」的键 ⇒ 默认值升级对老用户失效。
     file.apps.retain(|r| !is_empty_override(r));
-    // initial_mode_scope 原样透传：菜单只管 [[apps]]，另一段不属于它，不能顺手抹掉。
-    let text = render_user_compat(&file.apps, &file.initial_mode_scope)
+    // 其余各段原样透传：菜单只管 [[apps]]，别的段不属于它，不能顺手抹掉。
+    let text = render_user_compat(&file.apps, &file.initial_mode_scope, &file.commit_newline)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::create_dir_all(user_dir)?;
     std::fs::write(&path, text)?;
@@ -792,6 +904,41 @@ pub struct InitialModeScopeRule {
     pub classes: Vec<String>,
 }
 
+/// 按应用指定上屏文本的换行形式（值域与理由见 [`NewlineStyle`]）。
+///
+/// **为什么独立成段而不是做成 `[[apps]]` 的字段**
+///
+/// ⚠️ 先澄清一个**不成立**的理由，免得下一个维护者照着推理：本项并非「因为
+/// `merge_rules` 是整条覆盖所以只能独立成段」。`merge_rules` 有 [`ProtocolFields`] 这条
+/// 字段级继承通道，而且 `protocol_fields_cover_every_host_protocol_option` 那条扫源码的守门测试**强制**
+/// 新增的宿主协议级字段必须登记进去。按本仓的分类法，「Word 的文档存储段落边界是 CR」
+/// 是已确认的宿主行为形态、不是用户偏好 ⇒ `commit_newline` 确实够格做成 `[[apps]]` 字段
+/// 并登记 `ProtocolFields`，那是一条现成的、有守门测试保护的路。
+///
+/// 真正的理由是三条与合并语义无关的事：
+/// 1. 本项的值域是**四态枚举**，而 `ProtocolFields` 那组处理的是 `Option<bool>` 三态；
+/// 2. 本项不参与右键菜单的写回（`update_user_rule` 只管 `[[apps]]`），塞进去会让
+///    `is_empty_override` 的「空壳规则」判定多一个要考虑的字段；
+/// 3. `AppCompatRule` 已有 20+ 字段，再加一个与候选窗定位毫无关系的文本项只会让它更难读。
+///
+/// ⚠️ **代价要记清楚**：独立成段绕开了 `protocol_fields_cover_every_host_protocol_option` 的守门测试，
+/// 同一个进程的配置也从此分散在两个 section。将来再加宿主协议级的 per-app 项时，
+/// 「开新段」与「加字段并登记」之间**没有判据**——那时该回到上面三条逐条对照。
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct CommitNewlineRule {
+    /// 进程映像名（不区分大小写），如 `WINWORD.EXE`。
+    #[serde(default)]
+    pub process: String,
+    /// 说明（仅文档用途）。与 [`AppCompatRule::comment`] 同理**必须存在于结构体里**：
+    /// serde 默认静默忽略未知字段，只声明在 TOML 注释里的话，用户层写回时会被丢掉。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// 该应用上屏时换行用什么字符表达。**认不出的值退化为 `None`＝跟随全局**，
+    /// 而不是让整份文件解析失败——理由见 [`de_newline_style`]。
+    #[serde(default, deserialize_with = "de_newline_style")]
+    pub style: Option<NewlineStyle>,
+}
+
 /// 所有应用兼容性规则 + 运行时查找表。
 #[derive(Debug, Clone, Default)]
 pub struct AppCompat {
@@ -801,6 +948,9 @@ pub struct AppCompat {
     /// 小写进程名 → 该进程允许重算初始模式的窗口类名集合（小写）。
     /// **进程不在表内 = 不受限制**（绝大多数应用走这条路，零行为变化）。
     mode_scope: HashMap<String, std::collections::HashSet<String>>,
+    /// 小写进程名 → 该进程的上屏换行形式。
+    /// **进程不在表内 = 跟随全局**（绝大多数应用走这条路）。
+    commit_newline: HashMap<String, NewlineStyle>,
 }
 
 /// 序列化中间体：承载 TOML 的两个顶层数组表，避免把 `lookup` 暴露给 TOML。
@@ -817,6 +967,10 @@ pub(crate) struct AppCompatFile {
     /// 必须一并渲染回去，否则用户写的覆盖会在下一次菜单开关时被静默删掉。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) initial_mode_scope: Vec<InitialModeScopeRule>,
+    /// ⚠ 与 `initial_mode_scope` 同理：`render_user_compat` 是整份重写，本字段漏了
+    /// 用户手写的 `[[commit_newline]]` 就会在下一次菜单开关时静默消失。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) commit_newline: Vec<CommitNewlineRule>,
 }
 
 impl AppCompat {
@@ -825,16 +979,45 @@ impl AppCompat {
         Self::from_parts(apps, Vec::new())
     }
 
-    /// 从两段规则构建（含查找表）。
+    /// 从两段规则构建（含查找表）。换行清单为空 ⇒ 所有进程都跟随全局。
     pub fn from_parts(apps: Vec<AppCompatRule>, scope: Vec<InitialModeScopeRule>) -> Self {
         let mut c = AppCompat {
             apps,
             lookup: HashMap::new(),
             mode_scope: HashMap::new(),
+            commit_newline: HashMap::new(),
         };
         c.build_lookup();
         c.build_mode_scope(scope);
         c
+    }
+
+    /// 补上 `[[commit_newline]]` 那一段。
+    ///
+    /// 做成链式而不是给 [`Self::from_parts`] 加第三个参数：那个签名已有跨 crate 的
+    /// 调用方，加参数要改一圈与本特性无关的代码。
+    pub fn with_commit_newline(mut self, rules: Vec<CommitNewlineRule>) -> Self {
+        self.commit_newline = rules
+            .into_iter()
+            .filter(|r| !r.process.is_empty())
+            // `style` 没写或认不出 ⇒ 这条规则什么都没说，等价于不存在（跟随全局）。
+            .filter_map(|r| Some((r.process.to_ascii_lowercase(), r.style?)))
+            .collect();
+        self
+    }
+
+    /// 该进程上屏时换行用什么表达；**没配返回 `None` = 跟随全局**。
+    ///
+    /// 返回 `Option` 而不是回落到 [`NewlineStyle::default()`]：回落动作只应发生在
+    /// 全局层那一处（同 [`FirstShowMode::from_config`] 的取舍），否则 per-app 的
+    /// 「没配」与「显式配成默认档」就分不开了。
+    pub fn commit_newline_for(&self, process_name: &str) -> Option<NewlineStyle> {
+        if process_name.is_empty() {
+            return None;
+        }
+        self.commit_newline
+            .get(&process_name.to_ascii_lowercase())
+            .copied()
     }
 
     /// 该焦点窗口是否落在「允许重算 per-app 初始模式」的作用域内。
@@ -923,11 +1106,13 @@ impl AppCompat {
     ) -> Self {
         let mut apps: Vec<AppCompatRule> = Vec::new();
         let mut scope: Vec<InitialModeScopeRule> = Vec::new();
+        let mut newline: Vec<CommitNewlineRule> = Vec::new();
         if let Some(d) = data_dir
             && let Some(sys) = load_file(&d.join(COMPAT_FILE_NAME))
         {
             apps = sys.apps;
             scope = sys.initial_mode_scope;
+            newline = sys.commit_newline;
         }
         // ⚠️ 两段**各自独立**合并（下同）：用户/定制者为某进程写 [[apps]] 规则不会连带
         // 丢掉更低层给该进程配的 [[initial_mode_scope]]，反之亦然。合并语义相同
@@ -937,14 +1122,16 @@ impl AppCompat {
         {
             apps = merge_rules(apps, custom.apps);
             scope = merge_mode_scope(scope, custom.initial_mode_scope);
+            newline = merge_commit_newline(newline, custom.commit_newline);
         }
         if let Some(u) = user_dir
             && let Some(user) = load_file(&u.join(COMPAT_FILE_NAME))
         {
             apps = merge_rules(apps, user.apps);
             scope = merge_mode_scope(scope, user.initial_mode_scope);
+            newline = merge_commit_newline(newline, user.commit_newline);
         }
-        Self::from_parts(apps, scope)
+        Self::from_parts(apps, scope).with_commit_newline(newline)
     }
 }
 
@@ -1060,6 +1247,363 @@ fn merge_mode_scope(
         .collect();
     merged.extend(user);
     merged
+}
+
+/// 合并两组上屏换行规则：结构上同 [`merge_mode_scope`]——同名进程整条覆盖，没有
+/// [`merge_rules`] 那套 [`ProtocolFields`] 字段级继承。
+///
+/// 本段每条只有一个有效字段（`style`），所以「整条覆盖」与「字段级合并」在这里恰好
+/// 同结果；保持与另外两段一致的语义，是为了不给用户第三套心智模型。
+fn merge_commit_newline(
+    base: Vec<CommitNewlineRule>,
+    user: Vec<CommitNewlineRule>,
+) -> Vec<CommitNewlineRule> {
+    if user.is_empty() {
+        return base;
+    }
+    let user_keys: std::collections::HashSet<String> = user
+        .iter()
+        .map(|r| r.process.to_ascii_lowercase())
+        .collect();
+    let mut merged: Vec<CommitNewlineRule> = base
+        .into_iter()
+        .filter(|r| !user_keys.contains(&r.process.to_ascii_lowercase()))
+        .collect();
+    merged.extend(user);
+    merged
+}
+
+#[cfg(test)]
+mod commit_newline_rule_tests {
+    use super::*;
+
+    fn rule(process: &str, style: NewlineStyle) -> CommitNewlineRule {
+        CommitNewlineRule {
+            process: process.into(),
+            comment: String::new(),
+            style: Some(style),
+        }
+    }
+
+    /// 没配 = 跟随全局（`None`），不是「回落到 Keep」——两者在上层的处理不同。
+    #[test]
+    fn unlisted_process_follows_global() {
+        let c =
+            AppCompat::default().with_commit_newline(vec![rule("WINWORD.EXE", NewlineStyle::Cr)]);
+        assert_eq!(c.commit_newline_for("winword.exe"), Some(NewlineStyle::Cr));
+        assert_eq!(c.commit_newline_for("Code.exe"), None);
+        assert_eq!(c.commit_newline_for(""), None, "空进程名不该命中任何规则");
+    }
+
+    /// 进程名大小写不敏感——两侧都要归一，只归一一侧是常见的半拉子实现。
+    #[test]
+    fn process_match_is_case_insensitive() {
+        let c =
+            AppCompat::default().with_commit_newline(vec![rule("WINWORD.EXE", NewlineStyle::Cr)]);
+        assert_eq!(c.commit_newline_for("WinWord.Exe"), Some(NewlineStyle::Cr));
+        let c =
+            AppCompat::default().with_commit_newline(vec![rule("winword.exe", NewlineStyle::Cr)]);
+        assert_eq!(c.commit_newline_for("WINWORD.EXE"), Some(NewlineStyle::Cr));
+    }
+
+    /// 两段互不牵连：用户为某进程写 `[[apps]]` 规则，不会把出厂给同一进程配的
+    /// `[[commit_newline]]` 一起顶掉。
+    ///
+    /// ⚠️ 这条**不是**「必须独立成段」的证据——做成 `[[apps]]` 字段并登记进
+    /// `ProtocolFields` 的话它照样绿（那组字段享有字段级继承）。它钉的只是当前实现的
+    /// 合并行为本身。选择独立成段的真实理由见 [`CommitNewlineRule`] 的文档。
+    #[test]
+    fn user_apps_override_does_not_drop_commit_newline() {
+        let sys_newline = vec![rule("WINWORD.EXE", NewlineStyle::Cr)];
+        let user_apps = vec![AppCompatRule {
+            process: "WINWORD.EXE".into(),
+            caret_offset_y: 3,
+            ..Default::default()
+        }];
+        let merged = AppCompat::from_parts(merge_rules(Vec::new(), user_apps), Vec::new())
+            .with_commit_newline(merge_commit_newline(sys_newline, Vec::new()));
+        assert_eq!(
+            merged.commit_newline_for("winword.exe"),
+            Some(NewlineStyle::Cr),
+            "用户只调了 caret_offset，出厂的换行设置必须还在"
+        );
+    }
+
+    /// 反方向同样成立：用户配换行，不能把出厂给该进程的 `[[apps]]` 修正顶掉。
+    #[test]
+    fn user_commit_newline_does_not_drop_apps_rule() {
+        let sys_apps = vec![AppCompatRule {
+            process: "WINWORD.EXE".into(),
+            caret_offset_y: 3,
+            ..Default::default()
+        }];
+        let merged = AppCompat::from_parts(merge_rules(sys_apps, Vec::new()), Vec::new())
+            .with_commit_newline(merge_commit_newline(
+                Vec::new(),
+                vec![rule("WINWORD.EXE", NewlineStyle::Crlf)],
+            ));
+        assert_eq!(
+            merged.get_rule("winword.exe").map(|r| r.caret_offset_y),
+            Some(3),
+            "用户只配了换行，出厂的 caret 修正必须还在"
+        );
+        assert_eq!(
+            merged.commit_newline_for("winword.exe"),
+            Some(NewlineStyle::Crlf)
+        );
+    }
+
+    /// 同名进程整条覆盖，语义与另外两段一致。
+    #[test]
+    fn user_layer_overrides_same_process() {
+        let merged = merge_commit_newline(
+            vec![
+                rule("WINWORD.EXE", NewlineStyle::Cr),
+                rule("Code.exe", NewlineStyle::Keep),
+            ],
+            vec![rule("winword.exe", NewlineStyle::Crlf)],
+        );
+        let c = AppCompat::default().with_commit_newline(merged);
+        assert_eq!(
+            c.commit_newline_for("WINWORD.EXE"),
+            Some(NewlineStyle::Crlf),
+            "用户层应覆盖系统层"
+        );
+        assert_eq!(
+            c.commit_newline_for("Code.exe"),
+            Some(NewlineStyle::Keep),
+            "没被用户提到的进程不受影响"
+        );
+    }
+
+    /// ★★★ 写回是**整份重写**：用户手写的 `[[commit_newline]]` 必须原样回到文件里。
+    ///
+    /// 漏掉这一段的症状是「配了一次，开关一下菜单就没了」，现场与写回路径隔着一次重启。
+    #[test]
+    fn write_back_preserves_commit_newline_section() {
+        let dir = std::env::temp_dir().join(format!("wind_compat_nl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(COMPAT_FILE_NAME),
+            "[[commit_newline]]\nprocess = \"WINWORD.EXE\"\nstyle = \"cr\"\n",
+        )
+        .unwrap();
+
+        // 菜单改的是 [[apps]]，不该碰另一段。
+        set_user_first_show_mode(&dir, "et.exe", Some(FirstShowMode::Wait)).unwrap();
+
+        let text = std::fs::read_to_string(dir.join(COMPAT_FILE_NAME)).unwrap();
+        assert!(
+            text.contains("commit_newline") && text.contains("WINWORD.EXE"),
+            "菜单开关一次就把用户写的 [[commit_newline]] 抹掉了：\n{text}"
+        );
+        let reloaded = AppCompat::load_layered(None, None, Some(&dir));
+        assert_eq!(
+            reloaded.commit_newline_for("winword.exe"),
+            Some(NewlineStyle::Cr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 守随发布的 `data/compat.toml` 里的 `[[commit_newline]]` 段。
+    ///
+    /// 必要性同 `shipped_system_compat_parses_and_scopes_explorer_to_desktop`：段名或值域串
+    /// 写错不会报错，只会**静默地什么都不做**——Word 里的换行照旧不对，而配置文件看上去
+    /// 完全正常。这条测试是那种缺陷唯一的早期信号。
+    #[test]
+    fn shipped_system_compat_configures_word() {
+        let data_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data"));
+        let file = load_file(&data_dir.join(COMPAT_FILE_NAME))
+            .expect("随发布的 data/compat.toml 必须能解析");
+        let c = AppCompat::from_parts(file.apps, file.initial_mode_scope)
+            .with_commit_newline(file.commit_newline);
+
+        assert_eq!(
+            c.commit_newline_for("winword.exe"),
+            Some(NewlineStyle::Cr),
+            "Word 的文档存储段落边界是 CR，出厂必须给它配上（2026-08-23 真机实测）"
+        );
+        // ⚠ 同一次实测说的是「记事本与 WPS 文字正常分段」——按「富文本模型」推理很容易
+        // 想当然地把 wps.exe 也加进来，实测恰恰相反。这条断言钉住那个反直觉的事实。
+        assert_eq!(
+            c.commit_newline_for("wps.exe"),
+            None,
+            "WPS 文字实测用 LF 正常分段，不该出现在出厂名单里"
+        );
+    }
+
+    /// ★★★ 拼错的 `style` 不得让整份 compat.toml 失效。
+    ///
+    /// `load_file` 是 `toml::from_str(..).ok()` —— 解析失败**静默跳过整份文件**，该层的
+    /// `[[apps]]`、`[[initial_mode_scope]]`、`[[commit_newline]]` 会一起消失。而 compat.toml
+    /// 的注释明确邀请用户「照下面的格式加一条即可」，拼错一个字母就丢掉全部应用兼容规则、
+    /// 且症状与 compat.toml 毫无关联。同一形态的既有测试见
+    /// `unknown_mode_in_toml_degrades_to_follow_global`。
+    #[test]
+    fn unknown_style_in_toml_degrades_to_follow_global() {
+        let toml = r#"
+            [[apps]]
+            process = "Foo.exe"
+            caret_use_top = true
+
+            [[commit_newline]]
+            process = "Bar.exe"
+            style = "rn"
+        "#;
+        let file: AppCompatFile = toml::from_str(toml).expect("style 拼错不得让整份文件解析失败");
+        assert_eq!(file.commit_newline[0].style, None, "认不出 = 跟随全局");
+        assert!(
+            file.apps[0].caret_use_top,
+            "别的段必须不受牵连——这正是整份静默跳过最致命的地方"
+        );
+
+        // 缺字段同理：只写 process、不写 style 也不能炸。
+        let toml2 = r#"
+            [[commit_newline]]
+            process = "Baz.exe"
+        "#;
+        let file2: AppCompatFile = toml::from_str(toml2).expect("缺 style 不得解析失败");
+        assert_eq!(file2.commit_newline[0].style, None);
+
+        // 认不出/没写的条目进不了查找表，等于这条规则不存在。
+        let c = AppCompat::default().with_commit_newline(file.commit_newline);
+        assert_eq!(c.commit_newline_for("bar.exe"), None);
+    }
+
+    /// TOML 往返：值域用 snake_case 字符串，和别的枚举一致。
+    #[test]
+    fn toml_roundtrip_uses_config_strings() {
+        let text = render_user_compat(&[], &[], &[rule("WINWORD.EXE", NewlineStyle::Crlf)])
+            .expect("渲染失败");
+        assert!(
+            text.contains("style = \"crlf\""),
+            "应写成配置串而非枚举名：\n{text}"
+        );
+        let parsed: AppCompatFile = toml::from_str(&text).expect("回读失败");
+        assert_eq!(parsed.commit_newline.len(), 1);
+        assert_eq!(parsed.commit_newline[0].style, Some(NewlineStyle::Crlf));
+    }
+}
+
+#[cfg(test)]
+mod newline_style_tests {
+    use super::*;
+
+    /// 出厂默认必须是「不动用户的数据」。改这一条等于改产品语义，不是调参。
+    #[test]
+    fn default_is_keep() {
+        assert_eq!(NewlineStyle::default(), NewlineStyle::Keep);
+    }
+
+    /// `keep` 一个字符都不许改——混合行尾也原样留着。
+    #[test]
+    fn keep_passes_everything_through() {
+        let cr = char::from_u32(13).unwrap();
+        let lf = char::from_u32(10).unwrap();
+        let src = format!("a{cr}{lf}b{lf}c{cr}d");
+        assert_eq!(NewlineStyle::Keep.apply(&src), src);
+    }
+
+    /// 三种行尾都要认，且 **CRLF 算一个换行**：逐字符转会把一个换行变成两个。
+    #[test]
+    fn every_eol_form_folds_into_one() {
+        let cr = char::from_u32(13).unwrap();
+        let lf = char::from_u32(10).unwrap();
+        let src = format!("a{cr}{lf}b{lf}c{cr}d");
+
+        assert_eq!(
+            NewlineStyle::Cr.apply(&src),
+            format!("a{cr}b{cr}c{cr}d"),
+            "三处换行都该折成单个 CR"
+        );
+        assert_eq!(NewlineStyle::Lf.apply(&src), format!("a{lf}b{lf}c{lf}d"));
+        assert_eq!(
+            NewlineStyle::Crlf.apply(&src),
+            format!("a{cr}{lf}b{cr}{lf}c{cr}{lf}d"),
+            "已经是 CRLF 的那处不能翻倍"
+        );
+    }
+
+    /// 连续换行是**多个**换行，不许合并——空行是用户的内容。
+    #[test]
+    fn consecutive_newlines_are_not_merged() {
+        let cr = char::from_u32(13).unwrap();
+        let lf = char::from_u32(10).unwrap();
+        let src = format!("a{lf}{lf}{lf}b");
+        assert_eq!(NewlineStyle::Cr.apply(&src), format!("a{cr}{cr}{cr}b"));
+        assert_eq!(
+            NewlineStyle::Crlf.apply(&format!("a{cr}{lf}{cr}{lf}b")),
+            format!("a{cr}{lf}{cr}{lf}b"),
+            "两个 CRLF 是两个换行，不是一个"
+        );
+    }
+
+    /// 首尾换行不能丢，也不该产出多余内容。
+    #[test]
+    fn leading_and_trailing_newlines_survive() {
+        let cr = char::from_u32(13).unwrap();
+        let lf = char::from_u32(10).unwrap();
+        assert_eq!(
+            NewlineStyle::Cr.apply(&format!("{lf}a{lf}")),
+            format!("{cr}a{cr}")
+        );
+    }
+
+    /// 上屏文本绝大多数不含换行（逐字上屏），这条路必须零拷贝。
+    #[test]
+    fn text_without_newline_is_borrowed() {
+        for style in [
+            NewlineStyle::Keep,
+            NewlineStyle::Cr,
+            NewlineStyle::Lf,
+            NewlineStyle::Crlf,
+        ] {
+            assert!(
+                matches!(style.apply("你好世界"), Cow::Borrowed(_)),
+                "{style:?}: 无换行的文本不该产生分配"
+            );
+        }
+    }
+
+    /// `keep` 即使文本里有换行也不拷贝。
+    #[test]
+    fn keep_never_allocates() {
+        let lf = char::from_u32(10).unwrap();
+        let src = format!("a{lf}b");
+        assert!(matches!(NewlineStyle::Keep.apply(&src), Cow::Borrowed(_)));
+    }
+
+    /// 多字节字符紧贴换行时切片边界必须落在字符边界上（否则 panic）。
+    #[test]
+    fn multibyte_around_newline() {
+        let lf = char::from_u32(10).unwrap();
+        let cr = char::from_u32(13).unwrap();
+        let src = format!("中{lf}文");
+        assert_eq!(NewlineStyle::Cr.apply(&src), format!("中{cr}文"));
+    }
+
+    /// 配置串往返：认得的值原样回来，认不得的退化为「没配」而不是某个默认档。
+    #[test]
+    fn config_string_roundtrip() {
+        for style in [
+            NewlineStyle::Keep,
+            NewlineStyle::Cr,
+            NewlineStyle::Lf,
+            NewlineStyle::Crlf,
+        ] {
+            assert_eq!(NewlineStyle::from_config(style.as_config()), Some(style));
+        }
+        assert_eq!(
+            NewlineStyle::from_config("  CRLF "),
+            Some(NewlineStyle::Crlf)
+        );
+        assert_eq!(
+            NewlineStyle::from_config("rn"),
+            None,
+            "拼错的值必须是 None（跟随全局），不能悄悄固化成显式覆盖"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1197,7 +1741,7 @@ mod tests {
         set_auto_pair(&mut rules, "EXCEL.EXE", Some(false));
         set_caret_offset(&mut rules, "WindowsTerminal.exe", 0, -4);
 
-        let out = render_user_compat(&rules, &[]).unwrap();
+        let out = render_user_compat(&rules, &[], &[]).unwrap();
         assert!(out.contains("auto_pair = false"));
         assert!(out.contains("caret_offset_y = -4"));
         // dx 为 0：不落盘。
@@ -1211,7 +1755,7 @@ mod tests {
 
         // 清除规则（回到跟随全局）后该字段整个消失，而不是写成 auto_pair = true。
         set_auto_pair(&mut rules, "EXCEL.EXE", None);
-        let cleared = render_user_compat(&rules, &[]).unwrap();
+        let cleared = render_user_compat(&rules, &[], &[]).unwrap();
         assert!(
             !cleared.contains("auto_pair"),
             "清除后不应残留该键: {cleared}"
@@ -1600,7 +2144,7 @@ mod tests {
             first_show_mode: Some(FirstShowMode::Fast),
             ..Default::default()
         }];
-        let text = render_user_compat(&rules, &[]).expect("渲染失败");
+        let text = render_user_compat(&rules, &[], &[]).expect("渲染失败");
         assert!(text.contains(r#"first_show_mode = "fast""#), "产物: {text}");
         assert!(
             !text.contains("caret_use_top"),
@@ -1786,7 +2330,7 @@ mod tests {
         set_ignore_host_ime_close(&mut rules, "X60_Toolbox.exe", Some(true));
         assert!(!is_empty_override(&rules[0]), "配了这一项就不是空壳");
 
-        let text = render_user_compat(&rules, &[]).expect("渲染失败");
+        let text = render_user_compat(&rules, &[], &[]).expect("渲染失败");
         assert!(
             text.contains("ignore_host_ime_close = true"),
             "产物: {text}"
@@ -1802,7 +2346,7 @@ mod tests {
             initial_mode: Some(InitialMode::English),
             ..Default::default()
         }];
-        let text = render_user_compat(&rules, &[]).expect("渲染失败");
+        let text = render_user_compat(&rules, &[], &[]).expect("渲染失败");
         assert!(text.contains(r#"initial_mode = "english""#), "产物: {text}");
         assert!(!text.contains("initial_punct"), "None 字段不应写出: {text}");
 
@@ -1825,7 +2369,7 @@ mod tests {
             process: "Foo.exe".into(),
             ..Default::default()
         }];
-        let text = render_user_compat(&rules, &[]).expect("渲染失败");
+        let text = render_user_compat(&rules, &[], &[]).expect("渲染失败");
         assert!(!text.contains("host_render"), "false 开关不应写出: {text}");
     }
 
@@ -1869,7 +2413,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let text = render_user_compat(&rules, &[]).expect("渲染失败");
+        let text = render_user_compat(&rules, &[], &[]).expect("渲染失败");
         assert!(text.contains("host_render = true"), "产物: {text}");
 
         let parsed: AppCompatFile = toml::from_str(&text).expect("产物应可解析");
@@ -1989,7 +2533,7 @@ mod tests {
             caret_use_top: true,
             ..Default::default()
         }];
-        let text = render_user_compat(&rules, &sample_scope()).expect("渲染失败");
+        let text = render_user_compat(&rules, &sample_scope(), &[]).expect("渲染失败");
         let parsed: AppCompatFile = toml::from_str(&text).expect("产物应可解析");
         assert_eq!(parsed.initial_mode_scope, sample_scope());
 
@@ -2000,7 +2544,7 @@ mod tests {
     /// 没有作用域时不该在用户层文件里留下空的 `[[initial_mode_scope]]` 噪声。
     #[test]
     fn empty_mode_scope_is_not_serialized() {
-        let text = render_user_compat(&[], &[]).expect("渲染失败");
+        let text = render_user_compat(&[], &[], &[]).expect("渲染失败");
         assert!(!text.contains("initial_mode_scope"), "产物: {text}");
     }
 

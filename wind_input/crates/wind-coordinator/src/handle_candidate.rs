@@ -3776,7 +3776,9 @@ impl Coordinator {
         if text.is_empty() {
             return;
         }
-        let encoded = wind_ipc::codec::encode_commit_text(text, None, false, true, false);
+        // push 路不经 `handle_key_event_policed`，换行改写要在这里各自接一次（A3-3）。
+        let text = self.convert_commit_newline(text.to_string());
+        let encoded = wind_ipc::codec::encode_commit_text(&text, None, false, true, false);
         self.push_server.push_commit_to_active(&encoded);
     }
 
@@ -4271,7 +4273,10 @@ impl Coordinator {
         drop(state);
 
         self.notify_ui_hide();
-        let encoded = wind_ipc::codec::encode_commit_text(&out, None, false, chinese_mode, false);
+        // 同 push_commit_text：push 路不经按键收口，换行改写在此接一次（A3-3）。
+        let out_nl = self.convert_commit_newline(out.clone());
+        let encoded =
+            wind_ipc::codec::encode_commit_text(&out_nl, None, false, chinese_mode, false);
         // 仅推给活动客户端，避免广播导致多个 TSF 端重复上屏
         self.push_server.push_commit_to_active(&encoded);
         debug!(
@@ -4317,8 +4322,11 @@ impl Coordinator {
                 debug!("push_no_key_ctx: 分步提交，组合区留活 preedit='{}'", text);
             }
             KeyAction::InsertText { text, .. } => {
+                // 同 push_commit_text：push 路不经按键收口（A3-3）。组合区那一臂
+                // （UpdateComposition）**不参与**——它推的是编码不是正文。
+                let text = self.convert_commit_newline(text.clone());
                 let encoded =
-                    wind_ipc::codec::encode_commit_text(text, None, false, chinese_mode, false);
+                    wind_ipc::codec::encode_commit_text(&text, None, false, chinese_mode, false);
                 self.push_server.push_commit_to_active(&encoded);
                 debug!("push_no_key_ctx: committed '{}'", text);
             }

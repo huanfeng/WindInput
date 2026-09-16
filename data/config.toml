@@ -426,6 +426,19 @@ exclude_blocks = []
 
 [input]
 filter_mode = "smart"
+# commit_newline：上屏文本里的换行**用什么字符表达**。keep(出厂) | cr | lf | crlf
+#   keep  原样透传，用户词条里写什么就上屏什么。
+#   cr    折成单个 CR —— Windows 富文本模型(Word/WPS/RichEdit/TOM)的段落分隔符。
+#   lf / crlf  折成 LF / CRLF。
+#
+# 为什么出厂是 keep：「换行」在不同文本模型里不是同一个东西。富文本宿主的段落边界**就是**
+# CR，LF 在那里是个不构成换行的控制字符(Word 里会渲染成一段类似 Tab 的空白)；而 VS Code /
+# 终端 / 浏览器输入框是「写进去什么就存什么」，在那里做任何转换都是改写用户的数据。
+# 不知道宿主要什么的时候，不动用户的数据；富文本宿主由 compat.toml 的 [[commit_newline]]
+# 出厂名单单独配 cr。
+#
+# ⚠️ 仅 Windows 生效：macOS 的 IMKit 用 LF，不参与本项。
+commit_newline = "keep"
 # english_case_cycle_key：打英文时(英文方案/临时英文)，临时夺取哪个键来切换候选的大小写档位
 #   ——「跟随输入 → 全大写 → 全小写 → 跟随输入」，一次组合结束即复位。留空 = 关闭(出厂)。
 #   可用值：capslock / tab / enter / space / escape。**键即开关**，没有第二个开关。

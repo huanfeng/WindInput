@@ -963,6 +963,10 @@ impl Coordinator {
         // 循环合成 VK_LEFT），**不是**从文本开头的偏移。而「把光标退回到右段之前」与
         // 「跳出时越过右段」本就是同一段距离的正反两向，故两端共用 `jump_steps` 一个量：
         // 用户在自己宿主上调准了 `jump=N`，进出就自动对称，不会出现「进得去、出不来」。
+        //
+        // 换行改写在此接一次（push 路不经按键收口，A3-3）。不影响 `jump_steps`：它是用户
+        // 配的**格数**，不是从文本长度算出来的，改写行尾不会让它失配。
+        let text = self.convert_commit_newline(text);
         let encoded = wind_ipc::codec::encode_commit_text_with_cursor(&text, jump_steps);
         self.push_server.push_commit_to_active(&encoded);
         self.push_pair_text(left.to_string(), right.to_string(), jump_steps);

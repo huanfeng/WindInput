@@ -110,6 +110,13 @@ const OVERFLOW_VALUES: &[&str] = &["ignore", "commit", "commit_and_input"];
 /// 且无任何测试拦得住。值域进注册表后，设置端的守门测试即可比对。
 const EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear"];
 
+/// 上屏文本的换行形式。四态，语义与「为什么必须按应用配」见
+/// `app_compat::NewlineStyle`（本常量是它的值域在配置注册表里的镜像）。
+///
+/// ⚠️ 与 `NewlineStyle` 的变体集是两处独立事实，必须一致——由
+/// `newline_style_values_match_enum` 钉住。
+const NEWLINE_STYLE_VALUES: &[&str] = &["keep", "cr", "lf", "crlf"];
+
 /// 标点键的空码处置——比回车/空格**多一态**，故不能与 [`EMPTY_CODE_BEHAVIOR_VALUES`] 共用。
 ///
 /// ★ 这一族配置描述的行为其实是**两根轴**，而值域只有一维：
@@ -321,6 +328,9 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.frequency.exclude_blocks", StrList),
     // -- input（输入行为）--
     f("input.filter_mode", Str),
+    // 上屏换行形式的全局默认档；per-app 覆盖在 compat.toml 的 [[commit_newline]] 段，
+    // 不在本注册表（那是另一份文件的 schema）。
+    f("input.commit_newline", Enum(NEWLINE_STYLE_VALUES)),
     f("input.english_case_cycle_key", Str),
     // 检索范围放宽（智能档增强，见 docs/design/smart-filter-scope-relax.md）
     f("input.scope_relax.page_end_key", Bool),
@@ -985,6 +995,34 @@ pub fn leaf_entries(value: &toml::Value) -> Vec<(String, toml::Value)> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// 注册表里的值域与 `NewlineStyle` 的变体集是两处独立事实。
+    ///
+    /// 不一致的后果有先例：值域不受约束时，设置端 manifest 抄错了选项，用户选的那一档
+    /// 被静默当成另一档，界面与行为不一致且没有任何测试拦得住（见
+    /// `EMPTY_CODE_BEHAVIOR_VALUES` 的注释）。
+    #[test]
+    fn newline_style_values_match_enum() {
+        use crate::app_compat::NewlineStyle;
+        for v in NEWLINE_STYLE_VALUES {
+            assert!(
+                NewlineStyle::from_config(v).is_some(),
+                "注册表登记了 {v:?}，但 NewlineStyle 不认得它"
+            );
+        }
+        // 反方向：枚举新增变体后，注册表不能漏登记。
+        for style in [
+            NewlineStyle::Keep,
+            NewlineStyle::Cr,
+            NewlineStyle::Lf,
+            NewlineStyle::Crlf,
+        ] {
+            assert!(
+                NEWLINE_STYLE_VALUES.contains(&style.as_config()),
+                "NewlineStyle::{style:?} 没有登记进 NEWLINE_STYLE_VALUES"
+            );
+        }
+    }
 
     /// 跨仓契约：`Float` 键必须吃得下 **TOML 整数**。
     ///

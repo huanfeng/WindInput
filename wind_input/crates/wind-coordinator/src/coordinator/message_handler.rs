@@ -4,6 +4,154 @@
 //!（coordinator 子模块，自 coordinator.rs 平移，纯搬运。）
 
 use super::*;
+use wind_config::app_compat::NewlineStyle;
+
+impl Coordinator {
+    /// 当前焦点应用的上屏换行档位：per-app（compat `[[commit_newline]]`）→ 全局
+    /// （`input.commit_newline`）→ 出厂 [`NewlineStyle::Keep`]。
+    ///
+    /// 只有 Windows 消费这一项：macOS 的 IMKit 用 LF，跨平台的协调器不该背 Windows 的
+    /// 文本约定；Android 同理。非 Windows 上本函数是编译期常量，`apply` 随即走
+    /// `Cow::Borrowed` 快路径，运行时零成本。
+    #[cfg(windows)]
+    pub(crate) fn commit_newline_style(&self) -> NewlineStyle {
+        let proc_name = self.active_process_name();
+        if let Some(style) = self
+            .app_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .commit_newline_for(&proc_name)
+        {
+            return style;
+        }
+        // 全局层是**唯一**做回落的地方：认不出的值按出厂档处理，per-app 层认不出的值
+        // 已在 compat 侧退化为「没配」（见 NewlineStyle::from_config 的取舍）。
+        NewlineStyle::from_config(&self.rt().config.input.commit_newline).unwrap_or_default()
+    }
+
+    /// 见 Windows 版的说明：非 Windows 平台不参与换行改写。
+    #[cfg(not(windows))]
+    pub(crate) fn commit_newline_style(&self) -> NewlineStyle {
+        NewlineStyle::Keep
+    }
+
+    /// 按当前档位改写一段**最终写入宿主文档**的文本。
+    ///
+    /// 先做「压根没有换行」的短路：逐字上屏是绝对多数，那条路不查表、不加锁、不分配。
+    pub(crate) fn convert_commit_newline(&self, text: String) -> String {
+        if !text.contains(['\r', '\n']) {
+            return text;
+        }
+        match self.commit_newline_style().apply(&text) {
+            std::borrow::Cow::Borrowed(_) => text,
+            std::borrow::Cow::Owned(s) => s,
+        }
+    }
+
+    /// 改写 action 里所有最终写入宿主文档的文本字段。
+    ///
+    /// 先做「这个 action 压根没有带换行的正文」的短路，与 [`Self::convert_commit_newline`]
+    /// 同一理由：本函数挂在**每一次按键**上（`handle_key_event_policed`），而绝大多数按键
+    /// （透传 / 消费 / 方向键 / 逐字上屏）都不带换行。档位求值要取两把锁、做几次字符串
+    /// 分配，不能让它们白跑一遍——`apply_newline_style` 里的 `Keep` 短路发生在档位**求出
+    /// 来之后**，挡不住这个开销。
+    pub(crate) fn apply_commit_newline(&self, action: KeyAction) -> KeyAction {
+        if !commit_text_has_newline(&action) {
+            return action;
+        }
+        apply_newline_style(action, self.commit_newline_style())
+    }
+}
+
+/// `action` 里是否有**带换行的正文**。判据必须与 [`apply_newline_style`] 改写的字段集
+/// 保持一致：这里少看一个字段，那个字段就永远不会被改写（而且是静默的）。
+fn commit_text_has_newline(action: &KeyAction) -> bool {
+    let has = |t: &str| t.contains(['\r', '\n']);
+    match action {
+        KeyAction::InsertText { text, .. }
+        | KeyAction::InsertTextWithCursor { text, .. }
+        | KeyAction::ReplaceBackward { text, .. }
+        | KeyAction::CommitReplacingHeld { text, .. } => has(text),
+        KeyAction::CommitAndHoldComposition { commit_text, .. }
+        | KeyAction::CommitThenDeferComposition { commit_text, .. } => has(commit_text),
+        _ => false,
+    }
+}
+
+/// 按档位改写 `action` 里所有**最终写入宿主文档**的文本字段。
+///
+/// ⚠ **组合区文本一律不动**：`UpdateComposition` / `HoldComposition` 的 text、
+/// `new_composition`、`deferred_composition` 都是还在组合里的编码或预览，它们不是写进
+/// 文档的正文，换行在那里既不该出现、改了也只会让编码栏显示错乱。
+///
+/// ⛔ 抽成自由函数而不是方法，是为了**能在任何平台单测**：`commit_newline_style` 在非
+/// Windows 上编译期就是 `Keep`，挂在它上面的测试在开发机（Linux / macOS）跑起来一路绿，
+/// 却一个字符都没验到——那种测试比没有更坏。
+pub(crate) fn apply_newline_style(action: KeyAction, style: NewlineStyle) -> KeyAction {
+    // 档位是 Keep 时整棵树都不必走：`Keep.apply` 虽然也零拷贝，但这里还能省下逐字段的
+    // 解构与重建。
+    if style == NewlineStyle::Keep {
+        return action;
+    }
+    let conv = |text: String| -> String {
+        if !text.contains(['\r', '\n']) {
+            return text;
+        }
+        match style.apply(&text) {
+            std::borrow::Cow::Borrowed(_) => text,
+            std::borrow::Cow::Owned(s) => s,
+        }
+    };
+    match action {
+        KeyAction::InsertText {
+            text,
+            new_composition,
+            mode_changed,
+            chinese_mode,
+            has_new_composition,
+        } => KeyAction::InsertText {
+            text: conv(text),
+            new_composition,
+            mode_changed,
+            chinese_mode,
+            has_new_composition,
+        },
+        KeyAction::InsertTextWithCursor {
+            text,
+            cursor_offset,
+        } => KeyAction::InsertTextWithCursor {
+            text: conv(text),
+            cursor_offset,
+        },
+        KeyAction::ReplaceBackward { count, text } => KeyAction::ReplaceBackward {
+            count,
+            text: conv(text),
+        },
+        KeyAction::CommitReplacingHeld { text, chinese_mode } => KeyAction::CommitReplacingHeld {
+            text: conv(text),
+            chinese_mode,
+        },
+        KeyAction::CommitAndHoldComposition {
+            commit_text,
+            hold_text,
+            timeout_ms,
+        } => KeyAction::CommitAndHoldComposition {
+            commit_text: conv(commit_text),
+            hold_text,
+            timeout_ms,
+        },
+        KeyAction::CommitThenDeferComposition {
+            commit_text,
+            deferred_composition,
+            timeout_ms,
+        } => KeyAction::CommitThenDeferComposition {
+            commit_text: conv(commit_text),
+            deferred_composition,
+            timeout_ms,
+        },
+        other => other,
+    }
+}
 
 impl Coordinator {
     /// 失焦类事件的归属校验：`client_token` 不是当前活动客户端时判为**陈旧事件**并丢弃。
@@ -429,6 +577,10 @@ impl MessageHandler for Coordinator {
     /// HandleKeyEvent 末尾的 recordCommitFallback 思路）。
     fn handle_key_event_policed(&self, data: &KeyEventData) -> KeyAction {
         let action = self.handle_key_event(data);
+        // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
+        // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
+        // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
+        let action = self.apply_commit_newline(action);
         self.record_input_stats(&action);
         // 自提交打点 + 码表自动造词投喂。与 record_input_stats 同一收口理由：上屏路径有
         // 40+ 个返回点，且约 10 处绕过 commit_action 直接构造 InsertText，散点接线必漏。
@@ -3919,5 +4071,267 @@ impl Coordinator {
     pub(crate) fn rare_char_entry_composition(&self, key_code: u32, display: String) -> KeyAction {
         let on = self.rt().config.input.caret.rare_char_via_composition;
         self.hotkey_entry_composition(key_code, display, on)
+    }
+}
+
+#[cfg(test)]
+mod commit_newline_action_tests {
+    use super::*;
+
+    fn lf() -> char {
+        char::from_u32(10).unwrap()
+    }
+    fn cr() -> char {
+        char::from_u32(13).unwrap()
+    }
+
+    fn insert(text: &str, composition: Option<&str>) -> KeyAction {
+        KeyAction::InsertText {
+            text: text.into(),
+            new_composition: composition.map(|c| c.into()),
+            mode_changed: false,
+            chinese_mode: true,
+            has_new_composition: composition.is_some(),
+        }
+    }
+
+    fn text_of(a: &KeyAction) -> String {
+        match a {
+            KeyAction::InsertText { text, .. }
+            | KeyAction::InsertTextWithCursor { text, .. }
+            | KeyAction::ReplaceBackward { text, .. }
+            | KeyAction::CommitReplacingHeld { text, .. }
+            | KeyAction::HoldComposition { text, .. }
+            | KeyAction::UpdateComposition { text, .. } => text.clone(),
+            KeyAction::CommitAndHoldComposition { commit_text, .. }
+            | KeyAction::CommitThenDeferComposition { commit_text, .. } => commit_text.clone(),
+            other => panic!("没有上屏文本的 action: {other:?}"),
+        }
+    }
+
+    /// `Keep` 必须是彻底的 no-op——这是出厂档，绝大多数用户走这条路。
+    #[test]
+    fn keep_is_a_noop() {
+        let src = format!("一{}二", lf());
+        let out = apply_newline_style(insert(&src, None), NewlineStyle::Keep);
+        assert_eq!(text_of(&out), src);
+    }
+
+    /// 每一个「最终写入宿主文档」的字段都要被覆盖到。
+    ///
+    /// 漏掉任何一个的症状都是「换行有时对有时不对」——取决于用户走的是哪条上屏路径，
+    /// 是本特性最难查的失败形态，故逐个变体钉住。
+    #[test]
+    fn every_commit_text_field_is_converted() {
+        let src = format!("一{}二", lf());
+        let want = format!("一{}二", cr());
+
+        let cases: Vec<KeyAction> = vec![
+            insert(&src, None),
+            KeyAction::InsertTextWithCursor {
+                text: src.clone(),
+                cursor_offset: 1,
+            },
+            KeyAction::ReplaceBackward {
+                count: 2,
+                text: src.clone(),
+            },
+            KeyAction::CommitReplacingHeld {
+                text: src.clone(),
+                chinese_mode: true,
+            },
+            KeyAction::CommitAndHoldComposition {
+                commit_text: src.clone(),
+                hold_text: src.clone(),
+                timeout_ms: 500,
+            },
+            KeyAction::CommitThenDeferComposition {
+                commit_text: src.clone(),
+                deferred_composition: src.clone(),
+                timeout_ms: 500,
+            },
+        ];
+
+        for case in cases {
+            let label = format!("{case:?}");
+            let out = apply_newline_style(case, NewlineStyle::Cr);
+            assert_eq!(text_of(&out), want, "未转换上屏文本: {label}");
+        }
+    }
+
+    /// ★★★ 组合区文本**一律不动**。
+    ///
+    /// 它们是还在组合里的编码或预览，不是写进文档的正文。改了不会让上屏更对，只会让
+    /// 编码栏显示错乱——而且那种错乱只在带换行的词条上出现，极难复现。
+    #[test]
+    fn composition_text_is_never_touched() {
+        let src = format!("一{}二", lf());
+
+        // InsertText 的 new_composition
+        let out = apply_newline_style(insert(&src, Some(&src)), NewlineStyle::Cr);
+        match out {
+            KeyAction::InsertText {
+                new_composition, ..
+            } => assert_eq!(new_composition.unwrap(), src, "new_composition 被改写了"),
+            other => panic!("{other:?}"),
+        }
+
+        // CommitAndHoldComposition 的 hold_text
+        let out = apply_newline_style(
+            KeyAction::CommitAndHoldComposition {
+                commit_text: src.clone(),
+                hold_text: src.clone(),
+                timeout_ms: 500,
+            },
+            NewlineStyle::Cr,
+        );
+        match out {
+            KeyAction::CommitAndHoldComposition { hold_text, .. } => {
+                assert_eq!(hold_text, src, "hold_text 被改写了")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // CommitThenDeferComposition 的 deferred_composition
+        let out = apply_newline_style(
+            KeyAction::CommitThenDeferComposition {
+                commit_text: src.clone(),
+                deferred_composition: src.clone(),
+                timeout_ms: 500,
+            },
+            NewlineStyle::Cr,
+        );
+        match out {
+            KeyAction::CommitThenDeferComposition {
+                deferred_composition,
+                ..
+            } => assert_eq!(deferred_composition, src, "deferred_composition 被改写了"),
+            other => panic!("{other:?}"),
+        }
+
+        // 纯组合区的两个变体整体不动
+        for case in [
+            KeyAction::UpdateComposition {
+                text: src.clone(),
+                caret_pos: 0,
+            },
+            KeyAction::HoldComposition {
+                text: src.clone(),
+                timeout_ms: 500,
+            },
+        ] {
+            let out = apply_newline_style(case, NewlineStyle::Cr);
+            assert_eq!(text_of(&out), src, "组合区 action 被改写了");
+        }
+    }
+
+    /// 不带文本的 action 原样穿过，不因为加了这一层而改变。
+    #[test]
+    fn textless_actions_pass_through() {
+        for case in [
+            KeyAction::ClearComposition,
+            KeyAction::PassThrough,
+            KeyAction::Consumed,
+            KeyAction::NotHandled,
+            KeyAction::DeletePair,
+            KeyAction::MoveCursorRight { count: 1 },
+        ] {
+            let label = format!("{case:?}");
+            let out = apply_newline_style(case, NewlineStyle::Crlf);
+            assert_eq!(format!("{out:?}"), label);
+        }
+    }
+
+    /// ★★★ 短路判据的字段集必须与改写函数**完全一致**。
+    ///
+    /// `apply_commit_newline` 先用 `commit_text_has_newline` 决定要不要查档位。判据里少看
+    /// 一个字段，那个字段就永远等不到改写——而且是静默的：改写函数本身仍然正确，测它也是
+    /// 绿的，只是那条路再也走不到。故两边逐个变体对齐着测。
+    #[test]
+    fn newline_detector_covers_exactly_the_converted_fields() {
+        let src = format!("一{}二", lf());
+        let plain = "一二";
+
+        let with_newline: Vec<KeyAction> = vec![
+            insert(&src, None),
+            KeyAction::InsertTextWithCursor {
+                text: src.clone(),
+                cursor_offset: 1,
+            },
+            KeyAction::ReplaceBackward {
+                count: 1,
+                text: src.clone(),
+            },
+            KeyAction::CommitReplacingHeld {
+                text: src.clone(),
+                chinese_mode: true,
+            },
+            KeyAction::CommitAndHoldComposition {
+                commit_text: src.clone(),
+                hold_text: plain.into(),
+                timeout_ms: 0,
+            },
+            KeyAction::CommitThenDeferComposition {
+                commit_text: src.clone(),
+                deferred_composition: plain.into(),
+                timeout_ms: 0,
+            },
+        ];
+        for case in with_newline {
+            let label = format!("{case:?}");
+            assert!(
+                commit_text_has_newline(&case),
+                "带换行正文却没被判据识别，这个字段将永远漏改: {label}"
+            );
+            // 判据说有，改写就必须真的改到。
+            let out = apply_newline_style(case, NewlineStyle::Cr);
+            assert!(text_of(&out).contains(cr()), "判据与改写不一致: {label}");
+        }
+
+        // 组合区带换行**不算**——它们不参与改写，判据也不该为它们唤起查表。
+        for case in [
+            KeyAction::UpdateComposition {
+                text: src.clone(),
+                caret_pos: 0,
+            },
+            KeyAction::HoldComposition {
+                text: src.clone(),
+                timeout_ms: 0,
+            },
+            KeyAction::CommitAndHoldComposition {
+                commit_text: plain.into(),
+                hold_text: src.clone(),
+                timeout_ms: 0,
+            },
+            KeyAction::CommitThenDeferComposition {
+                commit_text: plain.into(),
+                deferred_composition: src.clone(),
+                timeout_ms: 0,
+            },
+            KeyAction::PassThrough,
+            KeyAction::Consumed,
+        ] {
+            let label = format!("{case:?}");
+            assert!(!commit_text_has_newline(&case), "不该唤起查表: {label}");
+        }
+    }
+
+    /// `cursor_offset` 是用户配的**格数**，不随文本长度变化——CRLF 让文本变长也不能动它。
+    #[test]
+    fn cursor_offset_survives_length_change() {
+        let src = format!("（{}）", lf());
+        let out = apply_newline_style(
+            KeyAction::InsertTextWithCursor {
+                text: src,
+                cursor_offset: 1,
+            },
+            NewlineStyle::Crlf,
+        );
+        match out {
+            KeyAction::InsertTextWithCursor { cursor_offset, .. } => {
+                assert_eq!(cursor_offset, 1)
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

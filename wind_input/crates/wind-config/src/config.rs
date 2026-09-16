@@ -3092,6 +3092,19 @@ impl Default for CaretPlacementConfig {
 pub struct InputConfig {
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
+    /// 上屏文本里的换行**用什么字符表达**的全局默认档；per-app 覆盖见 compat.toml 的
+    /// `[[commit_newline]]` 段。值域与「为什么必须按应用配」见
+    /// [`crate::app_compat::NewlineStyle`]：`keep`（出厂）/ `cr` / `lf` / `crlf`。
+    ///
+    /// 认不出的值按出厂档处理——回落只发生在**全局层这一处**，per-app 层认不出的值
+    /// 退化为「没配」＝跟随全局（同 `first_show_mode` 的取舍）。
+    ///
+    /// ⚠ 与 `NewlineStyle` 的 `#[default]` 是两处独立事实，必须一致——由
+    /// `commit_newline_global_default_matches_enum_default` 钉住。
+    ///
+    /// **仅 Windows 消费**：macOS 的 IMKit 用 LF，协调器在非 Windows 上编译期即 `Keep`。
+    #[serde(default = "default_commit_newline")]
+    pub commit_newline: String,
     /// 英文输入态（英文方案 / 临时英文）下，**临时夺取哪个键**来切换候选的大小写档位：
     /// 默认 → 全大写 → 全小写 → 默认，一次组合结束即复位。空串 = 关闭（出厂）。
     ///
@@ -3246,6 +3259,7 @@ impl Default for InputConfig {
     fn default() -> Self {
         Self {
             filter_mode: "smart".to_string(),
+            commit_newline: default_commit_newline(),
             english_case_cycle_key: String::new(),
             scope_relax: ScopeRelaxConfig::default(),
             enter_behavior: "commit".to_string(),
@@ -5745,6 +5759,39 @@ fn is_invisible_troublemaker(c: char) -> bool {
             | '\u{FEFF}') // BOM / 零宽不断行空格
 }
 
+/// 「全局默认字符串」与「枚举 `#[default]`」是两处独立事实，各自都能单独改动。
+///
+/// 不一致的症状极其隐蔽：per-app 没配的应用走全局串、代码里直接 `NewlineStyle::default()`
+/// 的路径走枚举默认，两条路给出不同的行为，而两处单看都「没写错」。
+#[cfg(test)]
+mod global_default_guards {
+    use super::*;
+    use crate::app_compat::{FirstShowMode, NewlineStyle};
+
+    #[test]
+    fn commit_newline_global_default_matches_enum_default() {
+        assert_eq!(
+            NewlineStyle::from_config(&default_commit_newline()),
+            Some(NewlineStyle::default()),
+            "input.commit_newline 的出厂串与 NewlineStyle 的 #[default] 必须是同一档"
+        );
+    }
+
+    /// 同一条不变式，`first_show_mode` 那一对。
+    ///
+    /// ⚠ `default_first_show_mode` 的文档从一开始就写着「由
+    /// `global_first_show_mode_matches_enum_default` 钉住」，但那个测试**从未存在**——
+    /// 注释承诺的守门测试不写出来，就只是一句没有约束力的话。
+    #[test]
+    fn global_first_show_mode_matches_enum_default() {
+        assert_eq!(
+            FirstShowMode::from_config(&default_first_show_mode()),
+            Some(FirstShowMode::default()),
+            "ui.candidate.first_show_mode 的出厂串与 FirstShowMode 的 #[default] 必须是同一档"
+        );
+    }
+}
+
 #[cfg(test)]
 mod dota2_alias_tests {
     use super::*;
@@ -5910,6 +5957,17 @@ fn default_english_smart_chars() -> String {
 
 fn default_filter_mode() -> String {
     "smart".to_string()
+}
+
+/// 上屏换行形式的**全局默认档**。
+///
+/// `keep` = 原样透传：不知道宿主的文本模型要什么时，不动用户的数据。富文本宿主
+/// （Word / WPS / RichEdit）由 compat.toml 的 `[[commit_newline]]` 出厂名单配 `cr`。
+///
+/// ⚠ 与 `app_compat::NewlineStyle` 的 `#[default]` 是两处独立事实，必须一致——
+/// 由 `commit_newline_global_default_matches_enum_default` 钉住。
+fn default_commit_newline() -> String {
+    "keep".to_string()
 }
 
 fn default_smart_punct_list() -> String {

@@ -6844,51 +6844,30 @@ BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
 // Commit text atomically: end composition + insert text in a single EditSession.
 // This avoids race conditions in browsers where async EndComposition could clear
 // text that was inserted by a subsequent synchronous InsertText.
-// 把上屏文本里的换行统一规范化为 CR（U+000D），就地改写 `text`，返回换行个数。
-// `\r\n` 折成一个 CR（它是一个换行的两字符写法，逐个转会多出一行），孤立的 `\n`
-// 转成 `\r`，已经是 `\r` 的原样保留。
 //
-// # 为什么是 CR 而不是 LF
+// 换行形式（CR / LF / CRLF）**不在这一层决定**，本层收到什么就写什么。
 //
-// CR 是 **Windows 文本模型的段落分隔符**，不是 Word 的个别癖好：RichEdit / TOM /
-// TSF 这条线上，宿主文本存储里的段落边界历来就是 CR，`ITfRange::SetText` 写进去的
-// 正是那个存储。纯文本类宿主（记事本、终端、Edit 控件）对 CR/LF/CRLF 三种都宽容，
-// 所以此前一路用 LF 也没露出问题——**是它们宽容，不是 LF 正确**。
+// # 为什么挪走了
 //
-// 真机现场（2026-08-23）：同一段带换行的文本，记事本与 WPS 正常分段，Word 里每个
-// 换行处渲染成一段类似 Tab 的空白——LF 落进 Word 的文本流里根本不构成段落边界。
-// 词条改写成 `\r` 后 Word 立刻正常，据此定位。
+// 这里曾有一个 `NormalizeNewlinesToCR`，把提交文本里所有换行**无条件**折成 CR。
+// 起因是 2026-08-23 的真机现场：LF 在 Word 里不构成段落边界，每个换行处渲染成一段
+// 类似 Tab 的空白（见 7c9da37a）。那个观察是对的，无条件是错的——
 //
-// # 为什么规范化在这一层
+// · 「换行用什么字符表达」取决于**宿主的文本模型**：富文本模型（Word / WPS / RichEdit /
+//   TOM）的段落边界就是 CR；而 VS Code / 终端 / 浏览器输入框是「写进去什么就存什么」，
+//   在那里做转换就是改写用户的数据（论坛 t112：正则直通后行尾从 \n 变成 \r）。
+// · 宿主是**服务端**才认得全的东西（compat 表按进程名配置、用户可覆盖），DLL 这一侧
+//   没有也不该有那份名单。
+// · 挂在 CommitText 一条出口上还带来了不一致：InsertText / ReplacePrecedingChars /
+//   pair commit 都绕过了它，同一段文本走哪条出口决定它最后是 CR 还是 LF。
 //
-// 词库/cmdbar 的转义层不做这件事：那里遵循「真实文本是唯一事实、转义只在系统边界
-// 发生」——词条写 `\n` 就该得到真实的 LF。CR 是 Windows 这个**平台**的表达方式，
-// 换算属于平台边界的职责，所以落在 TSF 出口。Rust 侧同样不做：macOS 的 IMKit 用
-// LF，跨平台的协调器不该背 Windows 的文本约定。
+// ⇒ 改写统一发生在服务端推送之前（协调器 `apply_commit_newline`，档位来自
+//   `input.commit_newline` 与 compat 的 `[[commit_newline]]`），四条出口天然一致，
+//   macOS / Android 也不必背 Windows 的文本约定。
 //
-// 于是用户在任何词条里都只写 `\n`，在所有宿主上都正确；普通短语也不必为此单独
-// 支持 `\r` 转义。
-static int NormalizeNewlinesToCR(std::wstring& text)
-{
-    int count = 0;
-    size_t write = 0;
-    for (size_t read = 0; read < text.length(); read++)
-    {
-        wchar_t ch = text[read];
-        if (ch == L'\r' || ch == L'\n')
-        {
-            // CRLF：跳过紧随的 LF，整体只产出一个 CR。
-            if (ch == L'\r' && read + 1 < text.length() && text[read + 1] == L'\n')
-                read++;
-            text[write++] = L'\r';
-            count++;
-            continue;
-        }
-        text[write++] = ch;
-    }
-    text.resize(write);
-    return count;
-}
+// ⚠️ 仍有一处**未解决**、且不属于本层策略的问题：SendInput 兜底路径把换行当 Unicode
+//   字符注入，多数控件既不换行也不报错（key.type 8/22 的实测，见 wind-keys 的
+//   `split_type_text`）。那是那条出口的物理限制，修法是拆成 VK_RETURN，单独立案。
 
 BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL replacingHeld)
 {
@@ -6914,17 +6893,22 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
     std::wstring full = _pendingCommitPrefix + text;
     _pendingCommitPrefix.clear();
 
-    // **换行规范化：一律转成 CR**。见 NormalizeNewlinesToCR 的说明。放在这里是因为
-    // 本行之后 full 会分发给 EditSession 与 SendInput 兜底两条路，一处规范化两条都覆盖；
-    // 也在诊断日志之前，让日志统计的就是真正交给宿主的那份。
-    int convertedNewlines = NormalizeNewlinesToCR(full);
+    // 只**数**换行，不改写（改写在服务端完成，见本文件上方那段说明）。
+    int newlineCount = 0;
+    for (size_t i = 0; i < full.length(); i++)
+    {
+        if (full[i] != L'\r' && full[i] != L'\n') continue;
+        // CRLF 是一个换行的两字符写法，跳过紧随的 LF 只算一次。
+        if (full[i] == L'\r' && i + 1 < full.length() && full[i + 1] == L'\n') i++;
+        newlineCount++;
+    }
 
     // 诊断用：只统计换行符个数、不打印正文（日志隐私红线）。用来确认到本函数为止
     // 换行是否还完整——如果这里已经是 0，说明丢字发生在 Rust/IPC 一侧；如果这里
     // 不为 0 但宿主里没体现出分段，说明问题出在 TSF/宿主对本次提交的处理上。
     {
         WIND_LOG_DEBUG_FMT(L"CommitText: textLen=%zu, newlines=%d, nonKeyContext=%d, replacingHeld=%d\n",
-                           full.length(), convertedNewlines, (int)nonKeyContext, (int)replacingHeld);
+                           full.length(), newlineCount, (int)nonKeyContext, (int)replacingHeld);
     }
 
     LARGE_INTEGER startTime, endTime, freq;

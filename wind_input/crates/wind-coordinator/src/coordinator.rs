@@ -7384,7 +7384,19 @@ impl Coordinator {
 
     /// 切换中英文时取消当前输入：清空缓冲/候选/preedit，并按 `hotkeys.commit_on_switch`
     /// 决定是否把已输入的原始编码上屏（仅在切到英文且有待输入时）。返回待上屏文本。
+    ///
+    /// ★ **换行改写收口在这里**（A3-3）。本函数产出的文本经 `CMD_TOGGLE_MODE` /
+    /// `CMD_SYSTEM_MODE_SWITCH` 的**同步回包**直接上屏（`wind-bridge/src/server.rs` 里
+    /// 各自 `encode_commit_text`），既不走 `handle_key_event_policed`，也不在 push 那几条
+    /// 路上——三个调用方（切中英 / 系统切换 / CapsLock）都从这里取文本，收在此处一处覆盖。
+    /// 漏了它的症状是「同一个词，回车上屏对、切中英上屏不对」。
     pub(crate) fn take_input_on_mode_switch(&self, state: &mut State, chinese: bool) -> String {
+        let text = self.take_input_on_mode_switch_raw(state, chinese);
+        self.convert_commit_newline(text)
+    }
+
+    /// [`Self::take_input_on_mode_switch`] 的本体，不含换行改写。
+    fn take_input_on_mode_switch_raw(&self, state: &mut State, chinese: bool) -> String {
         // 切中英 / CapsLock / 系统切换三条路径全部经此。语境变了，上一句中文后面的联想
         // 已无意义。三个调用方随后都会 `notify_ui_hide`，故此处只清状态不动 UI。
         self.exit_assoc(state, crate::handle_assoc::AssocExit::ModeSwitch);
