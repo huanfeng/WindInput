@@ -389,6 +389,10 @@ impl MixedEngine {
             allow_partial_final: Some(false),
             // 混输不筛候选：它的两侧配额与截断另有一套（`merge_sort_dedup`）。
             admit: None,
+            // 保留子引擎的简拼配额：混输的候选最终交给协调器 `candidate_display_order`
+            // 重排，补在尾部是安全的。（本函数与 `overflow_opts` 刻意列全字段、不用
+            // `..Default::default()`，见下方那条「两套取值表摆在一起才看得出差异」。）
+            no_abbrev_quota: false,
         }
     }
 
@@ -404,6 +408,7 @@ impl MixedEngine {
             require_full_match: !self.pinyin_partial_candidates_overflow,
             allow_partial_final: Some(true),
             admit: None,
+            no_abbrev_quota: false,
         }
     }
 

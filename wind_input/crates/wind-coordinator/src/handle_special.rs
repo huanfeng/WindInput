@@ -234,6 +234,12 @@ impl Coordinator {
     fn rare_convert_opts(&self, state: &State) -> wind_engine::ConvertOptions {
         wind_engine::ConvertOptions {
             admit: self.rare_admit_fn(state),
+            // 本路径**不重排**：`finalize_candidates` 只做 `$` 语法展开，之后只有生僻字
+            // 准入与 shadow，没有 `candidate_display_order`。简拼保底配额会把候选补在尾部
+            // 并腾位挤掉等量的既有候选 —— 而引擎按常用度排序、尾部正是生僻字所在，
+            // 补进来的简拼词又会被「只出单字」全数删掉，净效果是白丢几个生僻字。
+            // 详见 `ConvertOptions::no_abbrev_quota`。
+            no_abbrev_quota: true,
             ..Default::default()
         }
     }

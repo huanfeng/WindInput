@@ -181,10 +181,17 @@ const ABBREV_QUOTA_DIVISOR: usize = 10;
 /// 由 `quota <= max` 知前者恒不大于后者 ⇒ 结果长度恒 `<= max`，不会溢出上限。
 ///
 /// ⚠️ 补进来的候选**追加在尾部、不保证有序**，依赖调用方重排。已核的调用路径：
-/// 主输入路 `handle_candidate.rs` 与临拼路 `handle_temp.rs` 都走
-/// `candidate_display_order`（见 candidate-sorting-rules.md §6）；`apps/repl` 与混输
-/// 子引擎调用传的 limit 都 < `ABBREV_QUOTA_DIVISOR` ⇒ `quota == 0` ⇒ 走原样截断，
-/// 不产生乱序。本函数的职责只是「让候选进得来」，不是「排好序」。
+/// - 主输入路 `handle_candidate.rs`、临拼路 `handle_temp.rs`：都走
+///   `candidate_display_order`（见 candidate-sorting-rules.md §6），安全；
+/// - 特殊模式 / overlay `handle_special.rs`：**不重排**，故由
+///   [`ConvertOptions::no_abbrev_quota`] 显式关掉配额；
+/// - `apps/repl`（limit=9）与混输的几处探测调用（limit 8/1）：`quota == 0`，走原样截断。
+///
+/// ⚠️ 混输主路径给子引擎传的是**满值** `max_candidates`（`mixed/engine.rs` 有六处），
+/// 配额在那里照常生效 —— 混输随后自己还有一道 `truncate_with_pinyin_quota`，
+/// 见那边 doc 记的已知缺口。
+///
+/// 本函数的职责只是「让候选进得来」，不是「排好序」。
 fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize) {
     if cands.len() <= max_candidates {
         return;
@@ -1967,6 +1974,7 @@ impl Engine for PinyinEngine {
         opts: ConvertOptions,
     ) -> anyhow::Result<ConvertResult> {
         let require_full_match = opts.require_full_match;
+        let abbrev_quota = !opts.no_abbrev_quota;
         // 未覆写时用引擎自身配置（纯拼音方案即走这条）。
         let allow_partial_final = opts
             .allow_partial_final
@@ -3570,7 +3578,12 @@ impl Engine for PinyinEngine {
                 .then(b.weight.cmp(&a.weight))
                 .then(a.natural_order.cmp(&b.natural_order))
         });
-        truncate_with_abbrev_quota(&mut candidates, max_candidates);
+        if abbrev_quota {
+            truncate_with_abbrev_quota(&mut candidates, max_candidates);
+        } else {
+            // 调用方声明了不重排（见 `ConvertOptions::no_abbrev_quota`）：补位在那边是净损失。
+            candidates.truncate(max_candidates);
+        }
 
         let (mut preedit_display, completed_syllables, partial_syllable) =
             self.compute_composition(input);

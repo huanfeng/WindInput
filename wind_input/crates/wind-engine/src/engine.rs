@@ -183,6 +183,27 @@ pub struct ConvertOptions {
     /// （同 `MixedEngine::truncate_with_pinyin_quota` 的既有教训）。
     /// 实测 `gedw`：`ge` 的残码同音字 219 条，把混合简拼「各单位」压到第 221 位。
     pub require_full_match: bool,
+    /// 本次转换**不要简拼保底配额**（见 `pinyin::truncate_with_abbrev_quota`）。
+    ///
+    /// ## 为什么要能关掉
+    ///
+    /// 配额把简拼候选补在**尾部、不保证有序**，前提是调用方随后会重排 —— 主输入路
+    /// (`handle_candidate`) 与临拼路 (`handle_temp`) 都走 `candidate_display_order`，
+    /// 它们是安全的。**不重排的调用方拿到的是净损失**：尾部多了几条简拼词，而原本排在
+    /// 那儿的候选被腾位挤掉了，且挤掉的名额不会回来。
+    ///
+    /// 生僻字模式就是这条的现场（`handle_special`，`SPECIAL_CONVERT_LIMIT = 100` ⇒ 配额
+    /// 10 席、`RARE_REFILL_LIMIT = 1000` ⇒ 100 席，两者都 > 0 所以补位真的会发生，而
+    /// `finalize_candidates` 只做 `$` 展开、不排序）。它**刻意**不排序：候选恒为词库原序、
+    /// 用户本就要翻页找字。而引擎按常用度排序 ⇒ 尾部正是生僻字所在。补进来的简拼词随后
+    /// 被 `rare_admits` 的「只出单字」全数删掉（`MixedPattern` ≥2 段 ⇒ ≥2 字），被挤掉的
+    /// 生僻字却不会回来 —— **丢的恰好是它唯一想要的东西**。实测 `yigekl`（`yi` 码下 300 字
+    /// + 一条混合简拼词，limit=100）：末位的「乢」被挤掉，对照组 `yi` 的末位是「乣」。
+    ///
+    /// ⚠️ 不能改用 [`admit`](Self::admit) 代替：那个判据只在 `push_unique` 上生效
+    /// （见其文档里 Viterbi 整句绕过的说明），而简拼候选另有两条 push 路径；且
+    /// `rare_admit_fn` 只对生僻字模式给闭包，overlay 引用拼音方案时依然漏。
+    pub no_abbrev_quota: bool,
     /// 覆写 [`crate::pinyin::Config::enable_partial_final`]（尾部残码参与整句解码，step 2c）。
     /// `None` = 不覆写，用引擎自身配置。
     ///

@@ -13,9 +13,9 @@
 
 use wind_dict::cached::CachedDict;
 use wind_dict::datformat::WdatWriter;
-use wind_engine::Engine;
 use wind_engine::pinyin::fuzzy::FuzzyConfig;
 use wind_engine::pinyin::{Config as PyConfig, PinyinEngine};
+use wind_engine::{ConvertOptions, Engine};
 
 /// 夹具。两组词各自支撑一个 Stage：
 ///
@@ -274,4 +274,47 @@ fn fuzzy_mixed_abbrev_hits_via_prefix_fallback() {
         "前缀回退须只消费前缀、留残码续输，实际 consumed={}",
         c.consumed_length
     );
+}
+
+/// 调用方声明不重排时，配额必须**整个让路**，等价于裸 `truncate`。
+///
+/// 补位把简拼候选放在尾部并腾位挤掉等量的既有候选，这在会重排的调用方那里是「进得来」，
+/// 在不重排的调用方那里就是**净损失** —— 挤掉的名额不会回来。生僻字模式是现场：
+/// 它刻意不排序，而引擎按常用度排序 ⇒ 尾部正是它要的生僻字；补进来的简拼词又会被
+/// 「只出单字」删光。详见 `ConvertOptions::no_abbrev_quota`。
+#[test]
+fn no_abbrev_quota_is_equivalent_to_plain_truncate() {
+    let e = engine("no_quota");
+    let no_quota = ConvertOptions {
+        no_abbrev_quota: true,
+        ..Default::default()
+    };
+
+    // 前提：默认配额下「好漂亮」确实是靠补位才进来的（同
+    // `abbrev_candidate_survives_truncation`）。这条不成立则下面测不到东西。
+    let with = e.convert("haopl", 10).expect("convert 成功");
+    assert!(
+        with.candidates.iter().any(|c| c.text == "好漂亮"),
+        "前提：默认配额会把简拼候选补进来"
+    );
+
+    let without = e
+        .convert_with_opts("haopl", 10, no_quota)
+        .expect("convert 成功");
+    assert!(
+        !without.candidates.iter().any(|c| c.text == "好漂亮"),
+        "关掉配额后不得补位: {:?}",
+        without
+            .candidates
+            .iter()
+            .map(|c| &c.text)
+            .collect::<Vec<_>>()
+    );
+
+    // 要害断言：**也不得腾位**。关掉配额的结果须与「不截断时取前 N 条」逐条相同 ——
+    // 只验「没补进来」会漏掉「补了又挤掉别的」这种更糟的形态。
+    let full = e.convert("haopl", 100).expect("convert 成功");
+    let expect: Vec<&String> = full.candidates.iter().take(10).map(|c| &c.text).collect();
+    let actual: Vec<&String> = without.candidates.iter().map(|c| &c.text).collect();
+    assert_eq!(actual, expect, "关掉配额须逐条等价于裸 truncate");
 }
