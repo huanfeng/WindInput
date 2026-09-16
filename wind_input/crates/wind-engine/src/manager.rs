@@ -443,6 +443,20 @@ pub struct EngineManager {
     /// None = 当前活跃方案不是双拼；Some = 双拼布局的 finals 键集合。
     /// 活跃方案 id 变化时按需重建（惰性），避免每键读盘。
     shuangpin_finals_cache: Mutex<(String, Option<std::collections::HashSet<u8>>)>,
+    /// 双拼**反向表**缓存：(已缓存的活跃方案 id, Option<Arc<ShuangpinReverse>>)。
+    /// None = 该方案不是双拼；Some = 音节 → 击键表，供 `${code_schema}` 出编码。
+    ///
+    /// 与上面的 `shuangpin_finals_cache` **分开**而不是合并：那份服务
+    /// `pinyin_is_shuangpin_of`，其注释写明「临拼与主方案交替询问会来回刷」，
+    /// 而建反向表比解析一份布局贵两个数量级（实测 ~310µs）。合并的话，每次交替
+    /// 询问「是不是双拼」都要付一次全表重建的钱。
+    ///
+    /// ⚠️ 两者失效条件**完全相同**（方案/布局可能变更），故统一走
+    /// [`Self::invalidate_shuangpin_caches`]，不要在别处单独清其中一个。
+    shuangpin_reverse_cache: Mutex<(
+        String,
+        Option<Arc<crate::pinyin::shuangpin::ShuangpinReverse>>,
+    )>,
     /// 每方案构建锁（single-flight）：同一方案的引擎/缓存构建串行，避免后台预热与首次
     /// 切换并发时重复构建同一份大缓存；不同方案可并行构建（缓存在各自子目录，互不冲突）。
     build_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -691,6 +705,7 @@ impl EngineManager {
             single_char_codes: Mutex::new(None),
             pinyin: Mutex::new(config.schema.pinyin.clone()),
             shuangpin_finals_cache: Mutex::new((String::new(), None)),
+            shuangpin_reverse_cache: Mutex::new((String::new(), None)),
             build_locks: Mutex::new(HashMap::new()),
             index_build_locks: Mutex::new(HashMap::new()),
         };
@@ -801,8 +816,15 @@ impl EngineManager {
     // 单点仲裁：`PinyinEngine::input_chars` 从双拼布局推导，协调器的 `try_code_char_gate`
     // 抢在选词/引导键/标点**全部三条**之前接管。本处缓存仍为 `pinyin_is_shuangpin` 服务。
 
-    /// 内部辅助：为指定方案 id 构建双拼韵母键集（非双拼返回 None）。
-    fn build_shuangpin_finals(&self, schema_id: &str) -> Option<std::collections::HashSet<u8>> {
+    /// 指定方案**当前生效**的双拼布局 id（已合并 `schema_overrides/<id>.toml`）；
+    /// 非双拼方案、或方案读不出来返回 `None`。方案没写 `layout` 时给缺省的
+    /// [`DEFAULT_SHUANGPIN_LAYOUT`]。
+    ///
+    /// ★ 这是「哪个方案用哪份布局」的**唯一**判据。此前 `build_shuangpin_finals` 与
+    /// `shuangpin_layout_of` 各抄了一遍，后者的文档注释还专门写下过那句担忧——
+    /// 「两处若分叉，设置页会显示一个和实际生效的不是同一个布局」。收口之后那句话
+    /// 不必再写，因为分叉已无处发生。
+    fn shuangpin_layout_id_of(&self, schema_id: &str) -> Option<String> {
         let data_dir = self.data_dir.as_deref()?;
         let schema = Self::read_schema(schema_id, Some(data_dir), self.override_dir.as_deref())?;
         if !schema
@@ -813,46 +835,100 @@ impl EngineManager {
         {
             return None;
         }
-        let layout_id = if schema.engine.pinyin.shuangpin.layout.is_empty() {
+        Some(if schema.engine.pinyin.shuangpin.layout.is_empty() {
             DEFAULT_SHUANGPIN_LAYOUT.to_string()
         } else {
             schema.engine.pinyin.shuangpin.layout.clone()
-        };
-        // 用户目录优先（resolve_schema_file）：%APPDATA%/…/schemas/shuangpin/<id>.toml
-        // 存在即覆盖安装目录，使用户自带/覆盖的双拼布局生效。
-        let lp = Self::resolve_schema_file(&format!("shuangpin/{layout_id}.toml"), data_dir);
-        crate::pinyin::shuangpin::Layout::from_toml(&lp)
-            .map(|lay| lay.final_key_set())
-            .ok()
+        })
     }
 
-    /// 指定方案**当前生效**的双拼布局 id（已合并 `schema_overrides/<id>.toml`）。
+    /// 加载指定方案当前生效的双拼布局；非双拼、或布局文件读不出来返回 `None`。
     ///
-    /// 非双拼方案、或方案读不出来时返回空串。方案没写 `layout` 时返回缺省的 `xiaohe`
-    /// ——与 [`build_shuangpin_finals`](Self::build_shuangpin_finals) 的兜底同源，
-    /// 两处若分叉，设置页会显示一个和实际生效的不是同一个布局。
+    /// 用户目录优先（`resolve_schema_file`）：`%APPDATA%/…/schemas/shuangpin/<id>.toml`
+    /// 存在即覆盖安装目录，使用户自带/覆盖的双拼布局生效。
+    fn load_shuangpin_layout(&self, schema_id: &str) -> Option<crate::pinyin::shuangpin::Layout> {
+        let data_dir = self.data_dir.as_deref()?;
+        let layout_id = self.shuangpin_layout_id_of(schema_id)?;
+        let lp = Self::resolve_schema_file(&format!("shuangpin/{layout_id}.toml"), data_dir);
+        crate::pinyin::shuangpin::Layout::from_toml(&lp).ok()
+    }
+
+    /// 内部辅助：为指定方案 id 构建双拼韵母键集（非双拼返回 None）。
+    fn build_shuangpin_finals(&self, schema_id: &str) -> Option<std::collections::HashSet<u8>> {
+        self.load_shuangpin_layout(schema_id)
+            .map(|lay| lay.final_key_set())
+    }
+
+    /// 指定方案当前生效的双拼布局 id；非双拼方案或读不出来返回空串（供设置页）。
     pub fn shuangpin_layout_of(&self, schema_id: &str) -> String {
-        let Some(data_dir) = self.data_dir.as_deref() else {
-            return String::new();
-        };
-        let Some(schema) =
-            Self::read_schema(schema_id, Some(data_dir), self.override_dir.as_deref())
-        else {
-            return String::new();
-        };
-        if !schema
-            .engine
-            .pinyin
-            .scheme
-            .eq_ignore_ascii_case("shuangpin")
+        self.shuangpin_layout_id_of(schema_id).unwrap_or_default()
+    }
+
+    /// 失效双拼布局的**全部**派生缓存（韵母键集 + 反向表）。
+    ///
+    /// 两者失效条件完全相同，分开清迟早会漏一个；而漏掉反向表的后果是切换布局后
+    /// 仍按旧表出编码——一个只在「改过布局的用户」身上出现、且看起来像「编码显示
+    /// 错了」的 bug。收在一处，漏不掉。
+    fn invalidate_shuangpin_caches(&self) {
+        *self
+            .shuangpin_finals_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (String::new(), None);
+        *self
+            .shuangpin_reverse_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (String::new(), None);
+    }
+
+    /// 活跃方案的双拼反向表（惰性建 + 单槽缓存）；非双拼方案返回 `None`。
+    ///
+    /// 建表实测 ~310µs（release），只发生在切方案后的第一次求值；命中时只是一次
+    /// `HashMap` 查询加一次 `Arc` 克隆。
+    fn shuangpin_reverse(&self) -> Option<Arc<crate::pinyin::shuangpin::ShuangpinReverse>> {
+        let id = self.active_schema_id();
         {
-            return String::new();
+            let cache = self
+                .shuangpin_reverse_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if cache.0 == id {
+                return cache.1.clone();
+            }
         }
-        if schema.engine.pinyin.shuangpin.layout.is_empty() {
-            DEFAULT_SHUANGPIN_LAYOUT.to_string()
-        } else {
-            schema.engine.pinyin.shuangpin.layout.clone()
-        }
+        let table = self.load_shuangpin_layout(&id).map(|lay| {
+            Arc::new(crate::pinyin::shuangpin::ShuangpinConverter::new(lay).build_reverse())
+        });
+        *self
+            .shuangpin_reverse_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (id, table.clone());
+        table
+    }
+
+    /// 候选的全拼 `code` + `boundary` → **当前活跃方案**的双拼击键串
+    /// （`nihao` + `ni|hao` → 小鹤下 `nihc`）。供候选注释的 `${code_schema}`。
+    ///
+    /// # 三种 `None`，都按「这一次不显示」处理
+    ///
+    /// - **活跃方案不是双拼**（全拼、码表、混输…）。全拼方案下击键就是 `code` 本身，
+    ///   显示它是冗余——与 `${code_rev}` 在码表方案下恒空是同一条理由。
+    /// - **`boundary == 0`**：音节切分不可靠。模糊音变体命中与用户手输码的词条一律
+    ///   置 0（见 `pinyin/mod.rs` 那句「模糊变体命中一律 boundary=0（不设防）」），
+    ///   拿 DAG 去猜切分会偏向少音节（`xian` 猜成一个音节）。切错了显示出来的编码
+    ///   就是**错的**，用户照着敲得到别的字，所以宁可不显示。这道闸由
+    ///   [`syllables_from_boundary`](crate::pinyin::mixed_abbrev::syllables_from_boundary)
+    ///   自己把着（`boundary & 1 == 0` 即 `None`），不在这里重复判断。
+    /// - **任一音节不在反向表里**：见 `ShuangpinReverse::encode_all`——半截击键串是
+    ///   错的答案而不是不完整的答案。
+    ///
+    /// # 不读盘、不阻塞
+    ///
+    /// 这是按键处理链路（每次候选刷新 × 当前页 5~9 条），且调用方正持有 state 锁。
+    /// 反向表按活跃方案缓存，命中即无 IO；miss 时也只是解析一份布局 TOML 加建表，
+    /// 不像 `word_codes_in` 那样可能撞上秒级的词库反查索引构建。
+    pub fn schema_keys_of(&self, code: &str, boundary: u64) -> Option<String> {
+        let syllables = crate::pinyin::mixed_abbrev::syllables_from_boundary(code, boundary)?;
+        self.shuangpin_reverse()?.encode_all(&syllables)
     }
 
     /// 拼音方案编码提示:返回主码表中 `text` 实际对应的编码(多码取最长者=全码,简码可能
@@ -2527,11 +2603,8 @@ impl EngineManager {
             .single_char_codes
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        // 双拼布局可能变更：失效韵母键缓存，下次按新布局重建。
-        *self
-            .shuangpin_finals_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = (String::new(), None);
+        // 双拼布局可能变更：失效其全部派生缓存，下次按新布局重建。
+        self.invalidate_shuangpin_caches();
     }
 
     /// 强制重建全部词库缓存：失效所有已装方案的引擎与解析缓存（释放 mmap
@@ -2694,11 +2767,8 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        // 双拼布局可能变更：失效韵母键缓存，下次按新布局重建。
-        *self
-            .shuangpin_finals_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = (String::new(), None);
+        // 双拼布局可能变更：失效其全部派生缓存，下次按新布局重建。
+        self.invalidate_shuangpin_caches();
 
         // 切换活跃方案（即便 id 未变，引擎已被清空，这里立即重建避免首键延迟）。
         let changed = {
@@ -4477,7 +4547,9 @@ impl EngineManager {
                 .eq_ignore_ascii_case("shuangpin")
             {
                 let layout_id = if schema.engine.pinyin.shuangpin.layout.is_empty() {
-                    "xiaohe".to_string()
+                    // 与 `shuangpin_layout_id_of` 同源；硬编码过一次，分叉了就是
+                    // 「引擎按 A 布局打字、设置页显示 B 布局」。
+                    DEFAULT_SHUANGPIN_LAYOUT.to_string()
                 } else {
                     schema.engine.pinyin.shuangpin.layout.clone()
                 };
