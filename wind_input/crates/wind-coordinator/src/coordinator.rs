@@ -1386,6 +1386,11 @@ pub struct Coordinator {
     ///
     /// - **置位**：[`Coordinator::handle_caret_update`] 采纳一帧权威坐标（与
     ///   `last_authoritative_caret` 同一处，同一条「够格当基准」的判据）。
+    ///   ⛔ 唯一例外是 [`wind_ipc::protocol::caret_source::TSF_DEFAULT_POS`]：它虽被采纳为
+    ///   定位坐标，却按定义**不对应任何插入点**（宿主答的是「我不知道插入点在哪」）。
+    ///   置位会让下一次组合错走 25ms 短兜底 ⇒ 先在旧坐标处闪一下再跳到默认位置。
+    ///   ⚠ 该来源有**两个**入口能置位本标志，组合前那处靠 `is_tsf` 天然挡住，组合期那处
+    ///   原本是无条件置位、需要单独挡——挡一处不等于挡住了。
     /// - **清位**：焦点到达（换 DocMgr，坐标属于上一个文档/单元格/应用）、
     ///   用户移动光标（[`Coordinator::handle_selection_changed`] 的非回声分支，
     ///   同一 DocMgr 内点到别处）。
@@ -8711,6 +8716,78 @@ mod caret_compat_tests {
         c.state.lock().unwrap().input_buffer = "ab".to_string();
         *c.pending_first_show.lock().unwrap() = true;
         c
+    }
+
+    /// 宿主默认位置**不得**置 `caret_cache_verified`——否则下一次组合会闪一下。
+    ///
+    /// 该标志问的是「缓存对应当前插入点吗」，而这条来源按定义是「宿主不知道插入点在哪」。
+    /// 置真 ⇒ 下次 `first_show_needs_long_wait` 判否 ⇒ fast 档只 arm 25ms ⇒ 兜底先拿组合前
+    /// 那次 `gui_caret` 空闲上报首显，几十毫秒后默认位置才到、再 reshow。
+    ///
+    /// ⚠ 本条与 `is_tsf` 判否**不是同一件事**：该来源有两个入口能置位本标志，组合前那处
+    /// 靠 `is_tsf` 天然挡住，组合期这处原本无条件置位。**挡住一处不等于挡住了**——
+    /// 2026-09-15 靶机实测的那一闪（36.368 显示 (1257,459)、36.394 跳到 (3839,2063)，
+    /// 历时 26ms）正是从这第二个入口漏进去的。
+    ///
+    /// ★★ `was_verified=true` 那两组是本测试的**核心**：只拦置真（`if ... { store(true) }`）
+    /// 的单向写法在 `false` 起步时同样全绿，唯有从 `true` 起步才区分得开。而「先真后假」
+    /// 正是本宿主的日常路径——面板输入给真插入点，切回画布就只剩默认位置。
+    ///
+    /// 对照组用同一份坐标、只改 `source`，证明差别确实来自 source。
+    #[test]
+    fn host_default_pos_must_not_verify_the_caret_cache() {
+        let after = |source: i32, was_verified: bool| {
+            let c = coord();
+            c.state.lock().unwrap().input_buffer = "a".to_string(); // composing ⇒ 走组合期那条路
+            c.caret_cache_verified
+                .store(was_verified, std::sync::atomic::Ordering::Relaxed);
+            // ⚠ 另两个标志必须**预置成 true**，否则下面那两条断言是假的：它们的初值就是
+            // false，`store(false)` 被跳过时结果一样，断言照样绿（变异检验实测过这一点）。
+            c.caret_cache_is_idle_report
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            c.awaiting_first_authority_after_focus
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut data = illustrator_default_pos(20);
+            data.source = source;
+            c.handle_caret_update(&data);
+            (
+                c.caret_cache_verified
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                c.caret_cache_is_idle_report
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                c.awaiting_first_authority_after_focus
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        };
+        const DEFAULT_POS: i32 = wind_ipc::protocol::caret_source::TSF_DEFAULT_POS;
+        const REAL: i32 = wind_ipc::protocol::caret_source::TSF_SELECTION;
+
+        assert!(
+            !after(DEFAULT_POS, false).0,
+            "宿主默认位置不对应任何插入点；置真会让下一次组合退化成 25ms 短兜底、先闪一下旧坐标"
+        );
+        assert!(
+            !after(DEFAULT_POS, true).0,
+            "★ 更要紧的一半：上一帧真插入点留下的 true 必须被**清掉**——走到那一行时缓存已被\
+             默认位置覆盖，留着 true 就是同一句谎换个来路，闪跳照旧（画布↔面板来回切必踩）"
+        );
+        assert!(
+            after(REAL, false).0,
+            "对照组：真插入点照常置真（否则本测试证明不了差别来自 source）"
+        );
+
+        // 同段另两个标志**刻意保持无条件**，各自问的都不是「是不是插入点」。
+        // 没有这两条，后人把三者一起挪进条件里不会有任何测试变红，而后果是默认位置宿主上
+        // `awaiting_first_authority_after_focus` 永久为真 ⇒ idle_anchor 逃生口永久锁死。
+        let (_, idle_report, awaiting) = after(DEFAULT_POS, false);
+        assert!(
+            !idle_report,
+            "缓存自此装的是本次组合的位置，不再是「组合前的空闲上报」——与来源无关"
+        );
+        assert!(
+            !awaiting,
+            "默认位置同样是「本次焦点下已拿到过一帧组合期坐标」，不清位会白丢 idle_anchor 提速"
+        );
     }
 
     /// 宿主默认位置必须**当场**消费首显等待，而不是被丢弃后空等兜底到期。

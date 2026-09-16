@@ -2895,8 +2895,42 @@ impl MessageHandler for Coordinator {
             .unwrap_or_else(|e| e.into_inner()) = (data.x, data.y, true);
         // 同一条「够格」判据的第二个消费者：坐标缓存自此对应当前插入点，fast 档的短兜底
         // 可以放心拿它首显（见 caret_cache_verified 的字段注释）。
-        self.caret_cache_verified
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        //
+        // ⛔ `TSF_DEFAULT_POS` 例外：本标志的语义是「缓存**对应当前插入点**」，而这条来源
+        // 按定义是「宿主不知道插入点在哪」。组合前空闲上报那处有 `is_tsf` 闸门挡着，本处
+        // 原本是无条件置位，于是它从这个入口漏进去——**挡住一处不等于挡住了**。
+        //
+        // 漏进去的后果是**下一次**组合退化成短兜底：`first_show_needs_long_wait` 判否 ⇒
+        // fast 档只 arm 25ms ⇒ 兜底先拿组合前那次 `gui_caret` 空闲上报首显，几十毫秒后默认
+        // 位置才到、再 reshow。用户看到的就是「先在光标附近闪一下，再跳到右下角」。
+        // 实测现场（2026-09-15 靶机 Illustrator 画布）：
+        //   36.331 gui_caret(1257,459) → 36.343 arm 25ms → 36.368 兜底首显 (1257,459)
+        //   → 36.394 tsf_default_pos(3839,2063) → 立刻 reshow。**那一闪是 26ms**。
+        //
+        // ★★ 必须写成**双向赋值**，不能只用 `if` 拦住置真：走到这一行时 `state.caret_x/y`
+        // 已被本帧无条件改写成默认位置，缓存内容**一定**不再是插入点。若上一帧真插入点
+        // （面板输入）留下的 `true` 还停在那里，它断言的就是同一句谎、只是换了来路——
+        // 而画布↔面板来回切正是本宿主的日常路径。旧的 `true` 此刻已不描述任何现存数据，
+        // 清掉不损失信息。
+        //
+        // 另两个标志照常置位：它们问的不是「是不是插入点」。尤其
+        // `awaiting_first_authority_after_focus` 必须清，否则默认位置宿主永远解禁不了
+        // `idle_anchor` 逃生口，白丢一截提速。
+        //
+        // ⚠ 本处只关掉了 `TSF_DEFAULT_POS` 这一个来源，`GUI_CARET` 在本站点**仍照常置真**
+        // （与 `last_authoritative_caret` 共用「这一帧够格当基准」的判据，口径本就比空闲
+        // 上报那处宽）。别把这段读成「本站点已经干净了」。
+        //
+        // ⚠ 代价（已知、已接受）：该宿主此后恒 arm 600ms 长兜底。2026-09-16 实测 21 次 arm
+        // 全部在 48~65ms 被下面那段消费掉、定时器一次未到期——但那是**观测不是结构保证**：
+        // `IsHostDefaultPosition` 是失败关闭的（指纹三维缺任一即整帧丢弃，含组合 range 的
+        // `GetTextExt` 回 `TS_E_NOLAYOUT` 这种与降级无关的来源）。那样的一次组合里默认位置
+        // 压根不会发出来，于是等满 600ms 才显示，比改动前慢 575ms。取这条是因为改动前那
+        // 25ms 显示的**也是错位置**——慢而同样错，不是慢换对。
+        self.caret_cache_verified.store(
+            data.source != wind_ipc::protocol::caret_source::TSF_DEFAULT_POS,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // 缓存自此装的是**本次组合**的位置，不再是「组合前的空闲上报」——那条判据的前提
         // 到此为止。清位必须和上面的置位同处：两者都以「这一帧够格当基准」为条件，分开
         // 写就会在某条 early return 上分叉（本函数上游有五处提前返回）。
