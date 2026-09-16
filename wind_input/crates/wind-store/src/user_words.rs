@@ -200,9 +200,23 @@ pub(crate) fn dec_val_ordered(b: &[u8]) -> Option<(i32, u32, i64, u64, u32)> {
     ))
 }
 
+/// 手动加词文本长度上限（字符数）。
+///
+/// `add_user_word` 是所有**手动加词**路径的共同写入闸口（Ctrl+= 快捷加词、命令栏
+/// `dict.add` 显式给码、设置页词库管理），本上限加在那一处即等价于加在全部手动入口，
+/// 不必在每个调用点重复。⚠️ 批量导入（`import_user_words`）走独立写入逻辑、不经过
+/// 此处，库里仍可能存在历史导入的超长词条——这不是本上限的覆盖范围。
+///
+/// 数值不追求精确：`ADD_WORD_MAX_LEN=10`（wind-coordinator `handle_addword.rs`）已经拦住了
+/// 推导编码的正常场景，但**显式给码**（`dict.add(text, code)`）与设置页手动加词两条路径不
+/// 经过那道校验，此前无任何长度限制（用户实测提交过 7500 字词条，未必是本上限拦住的现象——
+/// 这里只是兜底防线，防止病态输入，不代表 7500 字场景本身已被诊断清楚）。10000 字对真实
+/// 使用场景足够宽松。
+pub(crate) const USER_WORD_TEXT_MAX_CHARS: usize = 10000;
+
 impl Store {
     /// 新增/合并用户词：已存在则权重取 max、保留原 created_at；新词记 created_at=now。
-    /// 用户词**无权重上限**（store.md §3）。
+    /// 用户词**无权重上限**（store.md §3），但文本长度有 `USER_WORD_TEXT_MAX_CHARS` 兜底上限。
     ///
     /// `boundary`：该 code 的音节边界（见 `wind_dict::binformat::DictEntry::boundary`）。
     /// 造词路径（`generate_word_pinyin`）算得；用户手输码/wdict 导入无从得知，传 0
@@ -216,6 +230,10 @@ impl Store {
         weight: i32,
         boundary: u64,
     ) -> anyhow::Result<()> {
+        let n = text.chars().count();
+        if n > USER_WORD_TEXT_MAX_CHARS {
+            anyhow::bail!("词条过长（{n} 字，上限 {USER_WORD_TEXT_MAX_CHARS}）");
+        }
         let key = enc_key(schema, code, text);
         self.with_db(|db| {
             let txn = db.begin_write()?;
@@ -652,6 +670,30 @@ mod tests {
             count: 0,
             boundary: None,
         }
+    }
+
+    /// 超长文本（> `USER_WORD_TEXT_MAX_CHARS`）一律拒绝——覆盖显式给码/设置页手动加词这
+    /// 两条不经过 `check_derivable_word`（wind-coordinator）的路径，兜住此前无上限的空档
+    /// （用户实测提交过 7500 字词条）。恰好等于上限的文本应正常写入，被拒绝的词不落库
+    /// （校验须在 `enc_key`/写事务之前，不留部分写入痕迹）。
+    #[test]
+    fn add_user_word_rejects_text_over_max_chars() {
+        let p = tmp("wind_uw_text_max_len.redb");
+        let s = Store::open(&p).unwrap();
+
+        let ok_text: String = "汉".repeat(USER_WORD_TEXT_MAX_CHARS);
+        s.add_user_word("pinyin", "abc", &ok_text, 100, 0)
+            .expect("恰好等于上限应写入成功");
+
+        let too_long: String = "汉".repeat(USER_WORD_TEXT_MAX_CHARS + 1);
+        let err = s
+            .add_user_word("pinyin", "abd", &too_long, 100, 0)
+            .expect_err("超过上限应被拒绝");
+        assert!(err.to_string().contains("过长"), "错误信息应提示过长: {err}");
+        assert!(
+            s.get_user_words("pinyin", "abd").unwrap().is_empty(),
+            "拒绝的词不得落库"
+        );
     }
 
     /// **同码词条按导入文件的先后出**（t80 的验收标准）。
