@@ -69,7 +69,7 @@
 use crate::coordinator::State;
 use crate::pipeline::ModeKind;
 use wind_candidate::{Candidate, CandidateSource};
-use wind_config::config::CommentTemplateOverride;
+use wind_config::config::{CodeHintSource, CommentTemplateOverride};
 use wind_config::{Config, OverlaySpec};
 
 /// 一次变量引用：名字 + 可选参数（`${chaizi_all:／}` 的 `／`）。
@@ -487,11 +487,11 @@ impl crate::coordinator::Coordinator {
         tpl: &str,
         max_chars: usize,
         reverse: &wind_reverse::ReverseLookup,
-        pinyin_hint: bool,
+        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> String {
         render(tpl, max_chars, |name, arg| {
-            self.eval_var(name, arg, c, reverse, pinyin_hint, dict_schema)
+            self.eval_var(name, arg, c, reverse, hint_source, dict_schema)
         })
     }
 
@@ -537,7 +537,7 @@ impl crate::coordinator::Coordinator {
     ///
     /// 变量语义与 [`Self::eval_var`] 逐项对齐，仅两点差异：
     /// - `char` —— 本入口独有：注释段不需要它（候选文本已在注释左边），而反查产物要自带被查的字；
-    /// - `code_rev` —— 恒取主码表反查，**不带**注释段那道 `pinyin_hint && source==Pinyin`
+    /// - `code_rev` —— 恒取主码表反查，**不带**注释段那道 `hint_source && source==Pinyin`
     ///   门控。那道门控的理由是「码表方案下候选的码就是用户自己打的，反查是冗余」，而剪贴板
     ///   文本不是用户打出来的，反查正是这里的全部目的。
     /// - `code_schema` —— 同义，但音节来路不同：那边有候选身份可用词条真值 `code`+`boundary`，
@@ -684,7 +684,7 @@ impl crate::coordinator::Coordinator {
         arg: Option<&str>,
         c: &Candidate,
         reverse: &wind_reverse::ReverseLookup,
-        pinyin_hint: bool,
+        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> Option<String> {
         // 判据是 `chars().count()` 而非 `len()`：扩展区汉字走代理对，按字节数会被当成词组。
@@ -707,7 +707,7 @@ impl crate::coordinator::Coordinator {
             // 用 `?` 的话，切到大词库方案后的头几秒里，候选右边会挂着字面的
             // `${code_rev}` 四个字符。
             "code_rev" | "code" => {
-                if pinyin_hint && c.source == CandidateSource::Pinyin {
+                if hint_source.allows_reverse() && c.source == CandidateSource::Pinyin {
                     self.engine_mgr
                         .codetable_reverse_hint(&c.text)
                         .unwrap_or_default()
@@ -726,7 +726,7 @@ impl crate::coordinator::Coordinator {
             // 出厂注释模板不含它 —— 三个码位会把候选行推得很宽，横排尤甚。它是给愿意
             // 用竖排、想一眼看全简码的用户的选项，不是默认。
             "code_rev_all" | "code_all" => {
-                if pinyin_hint && c.source == CandidateSource::Pinyin {
+                if hint_source.allows_reverse() && c.source == CandidateSource::Pinyin {
                     let sid = self.engine_mgr.code_source_schema();
                     let codes = self
                         .engine_mgr
@@ -753,7 +753,7 @@ impl crate::coordinator::Coordinator {
             // 非双拼方案恒空，由 `schema_keys_of` 那边把着：全拼下击键就是 `code` 本身，
             // 显示它是冗余 —— 与 `code_rev` 在码表方案下恒空是同一条理由。
             "code_schema" => {
-                if pinyin_hint && c.source == CandidateSource::Pinyin {
+                if hint_source.allows_schema() && c.source == CandidateSource::Pinyin {
                     self.engine_mgr
                         .schema_keys_of(&c.code, c.boundary)
                         .unwrap_or_default()
@@ -1010,16 +1010,63 @@ mod tests {
     /// 这是整个改动的零回归闸门 —— 存量用户升级后不该看到任何变化。
     #[test]
     fn default_template_reproduces_legacy_behavior() {
-        const T: &str = "${code_hint|code}";
+        const T: &str = "${code_hint|code_rev|code_schema}";
         // ① 引擎给了剩余码 → 用它（此时反查码即便存在也不参与，旧逻辑正是 if/else if）
         assert_eq!(
-            render(T, 0, ev(&[("code_hint", "kao"), ("code", "wq")])),
+            render(
+                T,
+                0,
+                ev(&[
+                    ("code_hint", "kao"),
+                    ("code_rev", "wq"),
+                    ("code_schema", "nihc")
+                ])
+            ),
             "kao"
         );
         // ② 引擎没给 → 回退反查码
-        assert_eq!(render(T, 0, ev(&[("code_hint", ""), ("code", "wq")])), "wq");
-        // ③ 都没有 → 不显示
-        assert_eq!(render(T, 0, ev(&[("code_hint", ""), ("code", "")])), "");
+        assert_eq!(
+            render(T, 0, ev(&[("code_hint", ""), ("code_rev", "wq")])),
+            "wq"
+        );
+        // ③ 都没有 → 不显示。
+        // ⚠️ 三个变量**都要列出来**：`ev()` 对未列出的名字返回 `None`，而 `None` 的语义是
+        // 「未知变量名」，渲染层会原样回显 ${code_schema} 让人看见拼写错误。漏列一个，
+        // 这条断言拿到的就是那串字面文本 —— 与真机行为无关，纯属夹具没喂全。
+        assert_eq!(
+            render(
+                T,
+                0,
+                ev(&[("code_hint", ""), ("code_rev", ""), ("code_schema", "")])
+            ),
+            ""
+        );
+
+        // ★ 第三段 `code_schema` 是本轮新加的，必须证明它**不打扰老用户**：
+        // 只要前两段任一非空，它就不参与。配了主码表的用户升级后所见分毫不变。
+        assert_eq!(
+            render(
+                T,
+                0,
+                ev(&[
+                    ("code_hint", ""),
+                    ("code_rev", "wq"),
+                    ("code_schema", "nihc")
+                ])
+            ),
+            "wq",
+            "有反查码时不该被击键码顶掉"
+        );
+        // ④ 前两段皆空时才轮到它 —— 那一格此前是空的（没配主码表的双拼用户），
+        // 所以这不是回归，是把空白填上。
+        assert_eq!(
+            render(
+                T,
+                0,
+                ev(&[("code_hint", ""), ("code_rev", ""), ("code_schema", "nihc")])
+            ),
+            "nihc"
+        );
     }
 
     // ---------------- 语法 ----------------
@@ -1344,7 +1391,7 @@ mod tests {
 /// `eval_var` 的变量分发与门控。
 ///
 /// ⚠️ 上面那三个测试模块全部走 **mock 求值闭包**，验的是模板语法；`eval_var` 本身
-/// （变量名 → 数据源的分发、`pinyin_hint && source==Pinyin` 那道门控）此前**一条测试
+/// （变量名 → 数据源的分发、`hint_source && source==Pinyin` 那道门控）此前**一条测试
 /// 都没有**。别名、`code_schema` 这些都落在这里，所以补上。
 ///
 /// 用仓库自带的 `data/` 作数据目录，不是 `build_dev/data`：这些用例只需要方案定义与
@@ -1383,7 +1430,7 @@ mod eval_var_tests {
         }
     }
 
-    fn eval(co: &Coordinator, name: &str, c: &Candidate, hint: bool) -> Option<String> {
+    fn eval(co: &Coordinator, name: &str, c: &Candidate, hint: CodeHintSource) -> Option<String> {
         let rev = wind_reverse::ReverseLookup::default();
         co.eval_var(name, None, c, &rev, hint, "shuangpin")
     }
@@ -1393,7 +1440,7 @@ mod eval_var_tests {
     fn code_schema_gives_keystrokes_under_shuangpin() {
         let co = coord("shuangpin");
         assert_eq!(
-            eval(&co, "code_schema", &nihao(), true).as_deref(),
+            eval(&co, "code_schema", &nihao(), CodeHintSource::Auto).as_deref(),
             Some("nihc")
         );
     }
@@ -1403,7 +1450,7 @@ mod eval_var_tests {
     fn code_schema_empty_under_full_pinyin() {
         let co = coord("pinyin");
         assert_eq!(
-            eval(&co, "code_schema", &nihao(), true).as_deref(),
+            eval(&co, "code_schema", &nihao(), CodeHintSource::Auto).as_deref(),
             Some(""),
             "应是「已知变量但为空」，不是未知变量"
         );
@@ -1419,12 +1466,12 @@ mod eval_var_tests {
         let c = nihao();
         for (old, new) in [("code", "code_rev"), ("code_all", "code_rev_all")] {
             assert_eq!(
-                eval(&co, old, &c, true),
-                eval(&co, new, &c, true),
+                eval(&co, old, &c, CodeHintSource::Auto),
+                eval(&co, new, &c, CodeHintSource::Auto),
                 "{old} 应与 {new} 等价"
             );
             assert!(
-                eval(&co, old, &c, true).is_some(),
+                eval(&co, old, &c, CodeHintSource::Auto).is_some(),
                 "{old} 必须是已知变量名（None 会让候选旁显示字面 ${{{old}}}）"
             );
         }
@@ -1440,7 +1487,7 @@ mod eval_var_tests {
         let c = nihao();
         for name in ["code_rev", "code_rev_all", "code_schema"] {
             assert_eq!(
-                eval(&co, name, &c, false).as_deref(),
+                eval(&co, name, &c, CodeHintSource::Off).as_deref(),
                 Some(""),
                 "{name}：开关关掉应为空串"
             );
@@ -1452,9 +1499,35 @@ mod eval_var_tests {
         };
         for name in ["code_rev", "code_rev_all", "code_schema"] {
             assert_eq!(
-                eval(&co, name, &codetable_cand, true).as_deref(),
+                eval(&co, name, &codetable_cand, CodeHintSource::Auto).as_deref(),
                 Some(""),
                 "{name}：非拼音来源候选应为空串"
+            );
+        }
+    }
+
+    /// ★ 四档开关各自放行哪个变量——`code_schema` 这一列。
+    ///
+    /// 要害是 **CodeTable 档下 `code_schema` 必须为空**：用户把来源设成「只看码表反查」，
+    /// 哪怕模板里写着 `${code_schema}` 也不该冒出来。这正是「开关管允许哪些来源求值、
+    /// 模板管按什么顺序和格式摆」那句分工的可验证形态。
+    ///
+    /// （`code_rev` 那一列在这里验不了：测试环境没有码表词库，它恒空，分不清是门控关掉
+    /// 还是查不到。纯判据由 `wind-config` 侧的 `code_hint_source_gates` 钉。）
+    #[test]
+    fn hint_source_gates_code_schema() {
+        let co = coord("shuangpin");
+        let c = nihao();
+        for (src, expect) in [
+            (CodeHintSource::Off, ""),
+            (CodeHintSource::CodeTable, ""),
+            (CodeHintSource::Schema, "nihc"),
+            (CodeHintSource::Auto, "nihc"),
+        ] {
+            assert_eq!(
+                eval(&co, "code_schema", &c, src).as_deref(),
+                Some(expect),
+                "{src:?} 档下 code_schema"
             );
         }
     }
@@ -1467,7 +1540,10 @@ mod eval_var_tests {
             boundary: 0,
             ..nihao()
         };
-        assert_eq!(eval(&co, "code_schema", &c, true).as_deref(), Some(""));
+        assert_eq!(
+            eval(&co, "code_schema", &c, CodeHintSource::Auto).as_deref(),
+            Some("")
+        );
     }
 
     /// ★ 两个入口的**词汇表必须一致**：注释段认得的变量名，cmdbar 反查
@@ -1521,7 +1597,10 @@ mod eval_var_tests {
     #[test]
     fn unknown_name_is_none() {
         let co = coord("shuangpin");
-        assert_eq!(eval(&co, "code_rev_typo", &nihao(), true), None);
-        assert_eq!(eval(&co, "shuangpin", &nihao(), true), None);
+        assert_eq!(
+            eval(&co, "code_rev_typo", &nihao(), CodeHintSource::Auto),
+            None
+        );
+        assert_eq!(eval(&co, "shuangpin", &nihao(), CodeHintSource::Auto), None);
     }
 }

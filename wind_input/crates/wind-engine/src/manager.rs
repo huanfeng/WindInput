@@ -715,14 +715,19 @@ impl EngineManager {
         mgr
     }
 
-    /// 当前拼音方案是否显示编码提示(反查)。
-    /// Task 1.5：改为直接读全局 [pinyin] 配置，不再读 schema 级 show_code_hint。
-    /// (码表类方案的「剩余编码」由码表引擎在 convert 内处理，不走此路径。)
-    pub fn pinyin_show_code_hint(&self) -> bool {
-        self.pinyin
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .show_code_hint
+    /// 拼音方案下，候选注释里的编码从哪来（`schema.pinyin.code_hint_source`）。
+    ///
+    /// 直接读全局 `[schema.pinyin]`，没有方案级 override。
+    /// （码表类方案的「剩余编码」由码表引擎在 convert 内处理，走的是
+    /// `schema.codetable.show_code_hint`，与本键同名过一阵子，现已各归各名。）
+    pub fn code_hint_source(&self) -> wind_config::config::CodeHintSource {
+        wind_config::config::CodeHintSource::from_config(
+            &self
+                .pinyin
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .code_hint_source,
+        )
     }
 
     /// 当前活跃引擎是否开启整句输入（当前只有码表引擎会返回 true）。
@@ -4493,7 +4498,6 @@ impl EngineManager {
                 uan_uang: pg.fuzzy.enabled && pg.fuzzy.uan_uang,
             };
             let pcfg = PinyinConfig {
-                show_code_hint: pg.show_code_hint,
                 use_smart_compose: pg.use_smart_compose,
                 // 无覆盖（纯拼音方案）时保持历史行为：简拼开。
                 enable_abbrev: mix_secondary.map(|o| o.abbrev).unwrap_or(true),

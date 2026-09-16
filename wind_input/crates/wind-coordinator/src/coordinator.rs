@@ -5580,7 +5580,13 @@ impl Coordinator {
             state.active,
             Some(ModeKind::TempPinyin) | Some(ModeKind::Mix(_))
         );
-        let pinyin_hint = force_hint || self.engine_mgr.pinyin_show_code_hint();
+        // overlay 反查模式无视用户的来源配置，强制走 CodeTable 档：这些模式本身就是
+        // 「用拼音反查码表编码」，出不了码就失去了意义（对齐 Go AddCodeHintsForced）。
+        let hint_source = if force_hint {
+            wind_config::config::CodeHintSource::CodeTable
+        } else {
+            self.engine_mgr.code_hint_source()
+        };
         let tip_opts = wind_reverse::TooltipOptions {
             code: tip_cfg.code_enabled,
             pinyin: tip_cfg.pinyin_enabled,
@@ -5692,7 +5698,7 @@ impl Coordinator {
                     comment_tpl,
                     comment_max,
                     &reverse,
-                    pinyin_hint,
+                    hint_source,
                     &dict_schema,
                 );
                 // 调试段：独立一行 [调试] + 来源/方案/编码/权重/序/词频。全关时不再兜底回填编码

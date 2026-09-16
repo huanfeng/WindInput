@@ -700,7 +700,10 @@ fn should_promote_user_completion(
 /// 拼音引擎配置
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub show_code_hint: bool,
+    // 注：曾有 `show_code_hint: bool`。**已删** —— 引擎侧从未读过它，编码提示的门控
+    // 早在 387ffa60「移除死状态 code_hint_cache」那次就改成协调器直接读全局配置了
+    // （见 `EngineManager::code_hint_source`），这个字段是那次重构漏下的残留：
+    // manager 每次建引擎都老实赋值，而引擎内部一个消费点都没有。
     pub use_smart_compose: bool,
     /// 是否产出简拼候选（声母缩写，nh→你好）。默认 true = 历史行为（简拼此前恒开、无开关）。
     ///
@@ -794,7 +797,6 @@ fn completion_syllable_cap(started: u32, min_syllables: u32, max_extra: u32) -> 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            show_code_hint: false,
             use_smart_compose: true,
             enable_abbrev: true,
             enable_partial_final: true,

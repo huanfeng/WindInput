@@ -260,7 +260,7 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.auto_phrase.idle_timeout_ms", Int),
     f("schema.codetable.auto_phrase.temp_max_entries", Int),
     // 全局拼音
-    f("schema.pinyin.show_code_hint", Bool),
+    f("schema.pinyin.code_hint_source", Str),
     f("schema.pinyin.use_smart_compose", Bool),
     f("schema.pinyin.separator", Str),
     // 单字输入（拼音侧）。与码表那份是两件独立的事、不共享取值——两种引擎对「只出单字」
