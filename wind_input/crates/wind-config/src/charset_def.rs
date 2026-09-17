@@ -342,6 +342,14 @@ pub fn parse_docs(text: &str) -> anyhow::Result<Vec<CharsetDoc>> {
 
 /// 按 `...` 把文件切成 meta 头与列表体（`---` 行跳过）。
 fn split_head_body(text: &str) -> (String, String) {
+    // 行尾规整放在这里而不是各个 pub 入口：`parse_doc` / `parse_docs` 都经过它，
+    // 而它们各有多个调用方（用户导入字符类、备份恢复、方案装载）。在共同下游做
+    // 一次，全链路只扫一遍。
+    //
+    // 不归一化的话孤立 \r 会让整份文件算成一行：找不到 `...` 分隔行 ⇒ 整份都当 head
+    // ⇒ 一个类都解析不出来，而日志里只有一行「解析失败，已跳过」。
+    let normalized = wind_utils::text::normalize_input(text);
+    let text = normalized.as_ref();
     let (mut head, mut body) = (String::new(), String::new());
     let mut in_head = true;
     for line in text.lines() {
@@ -1391,5 +1399,34 @@ mod tests {
         assert_eq!(back.def.ranges, parsed.def.ranges);
         assert_eq!(back.added, parsed.added);
         assert_eq!(back.def.replace, None);
+    }
+
+    /// 行尾不挑食：字符类文件无论 LF / CRLF / 孤立 CR，解析结果一致。
+    ///
+    /// 不规整的话孤立 `\r` 会让整份文件算成一行 → 找不到 `...` 分隔行 → 整份都当 head
+    /// → 一个类都出不来，而日志里只有一行「解析失败，已跳过」。归一化放在
+    /// `split_head_body`（`parse_doc` / `parse_docs` 的共同下游），全链路只扫一遍。
+    ///
+    /// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+    #[test]
+    fn line_endings_do_not_change_the_result() {
+        // 带 `...` 分隔行：head 是 YAML、body 是逐行成员，两边都依赖分行
+        let lf = "key: 测试类\nranges:\n  - U+4E00-U+4E05\n...\n甲\n乙\n";
+        let want = parse_doc(lf).expect("LF 版应能解析");
+        // 精确比，不能用 contains——孤立 \r 会把整份挤成一行，key 变成一长串，
+        // 那串里照样「包含」类名，contains 判不出来
+        assert_eq!(want.def.key, "测试类", "样本本身要能解析出干净的 key");
+        for (tag, text) in [
+            ("CRLF", lf.replace('\n', "\r\n")),
+            ("CR", lf.replace('\n', "\r")),
+        ] {
+            let got = parse_doc(&text).unwrap_or_else(|e| panic!("{tag}: 解析失败 {e}"));
+            assert_eq!(got.def.key, want.def.key, "{tag}: key 与 LF 版不同");
+            assert_eq!(
+                (&got.added, &got.removed),
+                (&want.added, &want.removed),
+                "{tag}: 成员与 LF 版不同"
+            );
+        }
     }
 }

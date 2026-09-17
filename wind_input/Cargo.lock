@@ -2463,6 +2463,7 @@ dependencies = [
  "tracing",
  "unicode-segmentation",
  "wind-quick-input",
+ "wind-utils",
 ]
 
 [[package]]
@@ -2516,6 +2517,7 @@ dependencies = [
  "tracing",
  "wind-candidate",
  "wind-store",
+ "wind-utils",
 ]
 
 [[package]]
@@ -2625,6 +2627,7 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "wind-dict",
+ "wind-utils",
 ]
 
 [[package]]

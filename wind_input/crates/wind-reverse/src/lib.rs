@@ -559,6 +559,11 @@ fn merge_chaizi_pinyin(sections: Vec<Section>) -> Vec<Section> {
 /// 保持格式**兼容**（用户能拿 rime 形态的文件直接用）与共用**实现**是两件事，这里只要前者。
 fn parse_comment_dict(path: &std::path::Path) -> std::io::Result<Vec<(String, String, String)>> {
     let content = std::fs::read_to_string(path)?;
+    // 行尾规整：下面靠 `content.find("\n...")` 找正文起点，孤立 \r 会让整份文件算成
+    // 一行 ⇒ 找不到分隔行 ⇒ 整个文件被当成正文再逐行解析，结果是一条注释都出不来。
+    // 无孤立 \r 时零拷贝（注释库可以很大），\r\n 原样留着——下面本来就剥了它。
+    let normalized = wind_utils::text::normalize_input(&content);
+    let content: &str = &normalized;
     // 正文起点：首个独占一行的 `...` 之后。无该行 → 整个文件都是正文（容许无 YAML 头的裸表）。
     let (header, body) = match content.find("\n...") {
         Some(i) if content[i + 1..].starts_with("...") => {
@@ -567,7 +572,7 @@ fn parse_comment_dict(path: &std::path::Path) -> std::io::Result<Vec<(String, St
             (&content[..i], body.strip_prefix('\n').unwrap_or(body))
         }
         _ if content.starts_with("...") => (&content[..0], &content[3..]),
-        _ => (&content[..0], content.as_str()),
+        _ => (&content[..0], content),
     };
     let Some((text_col, comment_col, code_col)) = comment_columns(header) else {
         tracing::warn!(
@@ -2105,6 +2110,25 @@ mod tests {
         let r = parse_comment_dict(&p).unwrap();
         let _ = std::fs::remove_file(&p);
         r
+    }
+
+    /// 行尾不挑食：注释库无论 LF / CRLF / 孤立 CR，解析结果一致。
+    ///
+    /// 不规整的话孤立 `\r` 会让整份文件算成一行 → `content.find("\n...")` 找不到
+    /// 正文起点 → 整个文件被当成正文再逐行解析 → 一条注释都出不来。
+    ///
+    /// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+    #[test]
+    fn line_endings_do_not_change_the_result() {
+        let lf = "name: x\n...\n苹果\tapple\n香蕉\tbanana\n";
+        let want = parse_str(lf);
+        assert_eq!(want.len(), 2, "样本本身要能解析出两条");
+        for (tag, text) in [
+            ("CRLF", lf.replace('\n', "\r\n")),
+            ("CR", lf.replace('\n', "\r")),
+        ] {
+            assert_eq!(parse_str(&text), want, "{tag}: 结果与 LF 版不同");
+        }
     }
 
     /// 默认列序 `[text, comment]`（无 columns 声明）。

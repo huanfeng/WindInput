@@ -20,9 +20,9 @@
 //! `normalize_input`；确实不该有的，进下面的白名单并写清楚理由。白名单不是豁免
 //! 清单，是**「这一处我们看过了」的记录**——它的长度就是全仓审视过的范围。
 //!
-//! 已知抓不到的：`BufReader::lines()` 那一类**流式**读取（`wind-reverse`、
-//! `wind-webdata`、`wind-engine/manager.rs` 各有一处）。它们同样只认 `\n`，但
-//! `normalize_input` 需要全文，修法不同，得单独处理——见白名单里的 `STREAMING`。
+//! 已知抓不到的：`BufReader::lines()` 那一类**流式**读取。它同样只认 `\n`，但
+//! `normalize_input` 要全文，对「只读头部、正文几百 MB」的场景是内存回归，修法
+//! 不同——见 `KNOWN_GAPS` 里的 `manager.rs`。
 
 use std::path::{Path, PathBuf};
 
@@ -93,6 +93,12 @@ const ALLOWED: &[(&str, &str)] = &[
         "TOML 宽容解析的错误恢复路径（逐行剔除坏行重试）。TOML 规范本身不认孤立 \r，\
          toml::from_str 会**明确报错**而不是静默失效——这个守卫要防的是「不报错的失效」。",
     ),
+    (
+        "apps/service/src/config_cli/custom_check.rs",
+        "它的 .lines() 是 print_block——把多行文案按行打出来做缩进对齐，不是文件解析；\
+         读文件那条是 read_toml，同 config.rs 的理由。\
+         （2026-09-17 审查曾把它列为待修，是判错了，核对代码后移到这里。）",
+    ),
     // ---- 另案：修法与其余几处不同 ----
     (
         "crates/wind-dict/src/codetable.rs",
@@ -106,31 +112,15 @@ const ALLOWED: &[(&str, &str)] = &[
 ///
 /// 与 `ALLOWED` 的区别：那边是「看过了，不需要」，这边是「看过了，需要但还没做」。
 /// 留在这里是为了让它可见且可数，而不是散在某个 TODO 注释里。
-const KNOWN_GAPS: &[(&str, &str)] = &[
-    (
-        "crates/wind-config/src/charset_def.rs",
-        "用户自定义字符类 charsets/*.yaml，按行切 head/body",
-    ),
-    (
-        "crates/wind-reverse/src/lib.rs",
-        "注释词库（rime .dict.yaml 形态）。它刻意不复用 wind_dict::codetable\
-         （怕连累缓存失效判定），但自己是普通 read_to_string + lines()，\
-         codetable 那条「零拷贝 offset」的豁免理由在这里不适用。",
-    ),
-    (
-        "crates/wind-dict/src/emojidict.rs",
-        "运行时加载 emoji_word.txt / emoji_category.txt",
-    ),
-    (
-        "apps/service/src/config_cli/custom_check.rs",
-        "配置体检 CLI，按行读用户的自定义方案文件",
-    ),
-    (
-        "crates/wind-engine/src/manager.rs",
-        "STREAMING：BufReader::lines() 流式读整句词频词库。同样只认 \n，但 normalize_input \
-         要全文，修法不同（要么先 read_to_string，要么换个按行读取器）。",
-    ),
-];
+const KNOWN_GAPS: &[(&str, &str)] = &[(
+    "crates/wind-engine/src/manager.rs",
+    "read_dict_head：读 .dict.yaml 的**头部**。normalize_input 要全文，而这里\
+         「主词库正文动辄几百 MB，本函数每次启动对每张表都要跑一遍」，还有 \
+         DICT_HEAD_SCAN_LIMIT 卡着——换成 read_to_string 是明确的内存与启动耗时回归。\
+         要修得换读取策略（先读有上限的一段字节再在内存里分行）。\
+         ⇒ 它读的就是 .dict.yaml，与 codetable.rs 是**同一种文件的另一条读取路径**，\
+         归入同一个案子一起处理，别分开改。见 .omc A3-9。",
+)];
 
 /// 截掉第一个行首 `#[cfg(test)]` 之后的内容——测试里的 `.lines()` 不算。
 fn strip_tests(src: &str) -> &str {

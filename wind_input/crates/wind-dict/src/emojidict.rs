@@ -282,6 +282,9 @@ pub fn parse_upstream(
     content: &str,
     normalize: impl Fn(&str) -> String,
 ) -> Vec<(String, Vec<String>)> {
+    // 行尾规整：孤立 \r 会让整份表算成一行，`#` 开头的表整个被当成注释跳过 → 0 条
+    let normalized = wind_utils::text::normalize_input(content);
+    let content = normalized.as_ref();
     let mut out = Vec::new();
     for line in content.lines() {
         let line = line.trim();
@@ -617,6 +620,23 @@ mod tests {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
+        }
+    }
+
+    /// 行尾不挑食：emoji 表带 `#` 注释头时，孤立 `\r` 会让整份被当成一条注释 → 0 条。
+    ///
+    /// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+    #[test]
+    fn line_endings_do_not_change_the_result() {
+        let lf = "# emoji 表\n笑脸\t笑脸 😀\n大笑\t大笑 😂 🤣\n";
+        let want = format!("{:?}", parse_upstream(lf, str::to_string));
+        for (tag, text) in [
+            ("CRLF", lf.replace('\n', "\r\n")),
+            ("CR", lf.replace('\n', "\r")),
+        ] {
+            let got = format!("{:?}", parse_upstream(&text, str::to_string));
+            assert_eq!(got, want, "{tag}: 结果与 LF 版不同");
+            assert!(got.contains("😀"), "{tag}: 应解析出条目，实际 {got}");
         }
     }
 }
