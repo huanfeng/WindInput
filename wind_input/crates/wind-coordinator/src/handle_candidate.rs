@@ -1773,8 +1773,14 @@ impl Coordinator {
         if mode == wind_candidate::FilterMode::Gb18030 || table_missing {
             return;
         }
+        // 含生僻字的词怎么处置（`input.rare_phrase`）。**每次现读配置、不进 `State`**：
+        // 它没有菜单入口、也没有 `scope_relaxed` 那种一次组合内的临时态，进 State 就多出
+        // 一处「记得跟着热重载同步」的地方（`filter_mode` 在 State 里是因为菜单能切换，
+        // 见 `set_filter_mode`）。读的是内存里的配置，无 IO。
+        let phrase =
+            wind_candidate::RarePhrasePolicy::from_config(&self.rt().config.input.rare_phrase);
         let taken = std::mem::take(candidates);
-        let outcome = wind_candidate::filter_candidates(taken, mode);
+        let outcome = wind_candidate::filter_candidates(taken, mode, phrase);
         *candidates = outcome.kept;
         // 临时放宽（末页再按向后翻页键触发）：把被滤候选带 `is_scope_filtered` 标记
         // **追加到末尾**，原有候选顺序纹丝不动。标记不可省——自动上屏计数靠它排除，

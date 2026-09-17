@@ -117,6 +117,14 @@ const EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear"];
 /// `newline_style_values_match_enum` 钉住。
 const NEWLINE_STYLE_VALUES: &[&str] = &["keep", "cr", "lf", "crlf"];
 
+/// 含生僻字的词在检索范围过滤下的处置。语义见 `wind_candidate::RarePhrasePolicy`
+/// （本常量是它的值域在配置注册表里的镜像）。
+///
+/// ⚠️ 与那个枚举的变体集是两处独立事实，必须一致——由 `registry_values_match_the_policy_enum`
+/// 钉住（在 `wind-coordinator/tests/rare_phrase_contract.rs`，理由同 `input.rare_phrase` 的
+/// 默认值对照：本 crate 看不见 `wind_candidate`）。
+const RARE_PHRASE_VALUES: &[&str] = &["keep", "filter"];
+
 /// 标点键的空码处置——比回车/空格**多一态**，故不能与 [`EMPTY_CODE_BEHAVIOR_VALUES`] 共用。
 ///
 /// ★ 这一族配置描述的行为其实是**两根轴**，而值域只有一维：
@@ -328,6 +336,8 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.frequency.exclude_blocks", StrList),
     // -- input（输入行为）--
     f("input.filter_mode", Str),
+    // 含生僻字的词要不要吃 filter_mode 那一刀（与它正交，不是它的第四个档）。
+    f("input.rare_phrase", Enum(RARE_PHRASE_VALUES)),
     // 上屏换行形式的全局默认档；per-app 覆盖在 compat.toml 的 [[commit_newline]] 段，
     // 不在本注册表（那是另一份文件的 schema）。
     f("input.commit_newline", Enum(NEWLINE_STYLE_VALUES)),

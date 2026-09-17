@@ -300,7 +300,11 @@ impl CommonChars {
     /// 这个答「用户是不是明确说过不要它」。智能档的孤儿码位保底对后者不适用——
     /// 详见 [`crate::Candidate::user_rare`]。
     ///
-    /// 词组里只要有一个字被降级就算——那个词整体也就不该再冒到前面来。
+    /// 词组里只要有一个字被降级就算（**存在性**，与 `is_string_common` 的全称语义相反）。
+    ///
+    /// ⚠️ 「所以那个词也该被滤掉」这个推论**出厂档下不再成立**：`input.rare_phrase = "keep"`
+    /// 让多字候选整条放行，`user_rare` 因此只管得着**单字**（见 `filter_smart` 里两条判据的
+    /// 先后）。本函数本身没变——它答的仍是「用户是不是对这串文本里的某个字表过态」。
     pub fn has_user_rare(&self, text: &str) -> bool {
         self.units_of(text)
             .any(|u| match self.override_of_cluster(u) {

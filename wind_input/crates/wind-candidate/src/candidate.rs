@@ -135,6 +135,9 @@ pub struct Candidate {
     ///
     /// 滤掉不等于打不出：被滤的候选进 `FilterOutcome::filtered`，末页再按一次翻页键即可
     /// 放宽调出（`is_scope_filtered` 那条通路）。
+    ///
+    /// ⚠️ **只对单字成立**：出厂 `input.rare_phrase = "keep"` 下多字候选在这条判据之前就被
+    /// 放行了（`RarePhrasePolicy`），故「标了就一定滤」对词组不成立——那是 2026-09-17 拍的板。
     pub user_rare: bool,
     /// 该候选**按当前检索范围本应被滤掉**，是因用户按翻页键**临时放宽**才留在列表里
     /// （设计见 `docs/design/smart-filter-scope-relax.md`）。

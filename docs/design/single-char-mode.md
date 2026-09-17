@@ -139,7 +139,8 @@ emoji 是单字素、本就算「单字」，受不受管辖结果一样。**删
 
 ### 3.3 ★★★ 豁免判据是 `is_user_authored`，**不是** `is_common_like`
 
-`is_common_like`（检索范围过滤用的那个）＝ `is_common || 那三项`。带上 `is_common` 的话，
+`is_common_like`（检索范围过滤的**常用性**判据；那条链上还或着 `rare_phrase_admits`，
+即出厂档下多字候选整条放行）＝ `is_common || 那三项`。带上 `is_common` 的话，
 常用**词**（「中国」「时候」——`mark_common` 对逐字皆常用的词同样置 `is_common = true`）
 会一并豁免，**就只剩生僻词被滤掉，整个功能失效**，而候选窗看着还挺正常。
 

@@ -79,6 +79,80 @@ pub fn is_user_authored(c: &Candidate) -> bool {
     c.is_phrase || c.is_command || c.is_group
 }
 
+/// 含生僻字的**多字候选**（词组）在检索范围过滤下的处置。
+///
+/// # 要解决什么
+///
+/// [`crate::CommonChars::is_string_common`] 是**全称**判据：整串每字都常用才算常用。
+/// 于是「苯磺酸」（磺）、「馎饦」、五笔的「磳碟」这类**词库正常收录的词**，只因某一个字
+/// 不在通用规范汉字表（8105 字）里，整条就被判非常用 —— 常用字档直接滤掉、智能档在同码
+/// 有常用候选时滤掉（五笔 4 码词位几乎必然同码有常用字，故默认档同样命中）。论坛 t103。
+///
+/// ⚠️ 举例别想当然：「饕餮」「耄耋」「旮旯」「貔貅」**全在表内**（三级字表收了它们），
+/// 拿它们当素材两档结果相同。真正落在表外的是异体字、日韩汉字与冷僻化学 / 人名用字。
+///
+/// # 一般输入法怎么做
+///
+/// RIME 的 `charset_filter` 同样是「有一即滤」的全称判据（`FilterText` 逐字扫描整条候选），
+/// 社区的 gbk/gb2312 lua 过滤器亦然。但它们的判据是**编码字符集**（GBK 21003 字），词库里
+/// 的正常词几乎都落在范围内；而 gb2312 档（6763 字）在社区公认「过紧、很多词打不出」，
+/// 通行解法正是换用更宽的集合。搜狗 / 微软拼音一类则根本不拿常用字表去裁词库词 —— 字符集
+/// 设置影响的是**单字**可用性，生僻词靠词频沉底而非硬过滤。
+///
+/// ⇒ 行业共识是「过滤作用在单字层，多字词由词库收录背书」，出厂档 [`Keep`](Self::Keep)
+/// 取的就是这个语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RarePhrasePolicy {
+    /// 整词放行：多字候选不受检索范围裁剪（出厂）。
+    #[default]
+    Keep,
+    /// 与单字同判：整串每字都常用才留（0.121 及以前的行为）。
+    Filter,
+}
+
+impl RarePhrasePolicy {
+    /// 从配置值（`input.rare_phrase`）解析。未知值回退 [`Keep`](Self::Keep)，
+    /// **与 `Default` 同源**——理由同 [`FilterMode::from_config`]：「没配」与「配错」
+    /// 若落到不同档，差异极难被想到。
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "filter" => Self::Filter,
+            _ => Self::Keep,
+        }
+    }
+
+    /// 配置值（`input.rare_phrase`）。与 [`from_config`](Self::from_config) 成对。
+    pub fn as_config(&self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Filter => "filter",
+        }
+    }
+}
+
+/// 这条候选是否吃「整词放行」豁免：[`Keep`](RarePhrasePolicy::Keep) 档下的**多字**候选。
+///
+/// # 「多字」按字素簇算
+///
+/// 与 [`single_char_admits`] 同一把尺子（UAX #29），故 `⚽️`(2 码位)、`👨‍👩‍👧`(5 码位)
+/// 都只算一个字、不吃豁免。⛔ 别退回 `chars().count() > 1` 去数码位 —— 那会把单个 emoji
+/// 当成「词」放行，而 issue #83 的教训就是自己列举 Unicode 规则必随版本静默漏一类。
+///
+/// # 热路径：两个调用点的位置**不同**，都不能随手挪
+///
+/// `nth(1)` 最多推进两簇就停，不是整串切分，故代价本就不大。
+///
+/// - `filter_common_only` 排在 `is_common_like` **之后**：常用候选本就该留，不必问豁免。
+/// - `filter_smart` **必须排在最前**（`user_rare` 判据之前）：词里含用户亲手标成生僻的字
+///   也要放行（2026-09-17 拍板）。挪到 `is_common_like` 之后，「常用多字词 + `user_rare`」
+///   那一格就从放行翻成滤掉，与那条拍板相反。
+///
+/// ⇒ 出厂档下智能档**每条候选**都会跑一次 `nth(1)`，这是明知的代价，不是漏写了短路。
+pub fn rare_phrase_admits(c: &Candidate, policy: RarePhrasePolicy) -> bool {
+    use unicode_segmentation::UnicodeSegmentation;
+    policy == RarePhrasePolicy::Keep && c.text.graphemes(true).nth(1).is_some()
+}
+
 /// 单条候选在**单字输入模式**（`single_char`）下是否放行。
 ///
 /// 五笔系输入法的传统功能。用途不止「练习拆字」：五笔单字恒 ≤ 全码长，只出单字时
@@ -110,21 +184,28 @@ pub fn single_char_admits(c: &Candidate) -> bool {
     is_user_authored(c) || crate::single_markable_char(&c.text).is_some()
 }
 
-/// 按模式过滤候选词
-pub fn filter_candidates(candidates: Vec<Candidate>, mode: FilterMode) -> FilterOutcome {
+/// 按模式过滤候选词。`phrase` 是含生僻字的**词**怎么处置，见 [`RarePhrasePolicy`]——
+/// 它与 `mode` 正交：`mode` 决定「什么算该滤」，`phrase` 决定「词要不要吃这一刀」。
+pub fn filter_candidates(
+    candidates: Vec<Candidate>,
+    mode: FilterMode,
+    phrase: RarePhrasePolicy,
+) -> FilterOutcome {
     match mode {
         FilterMode::Gb18030 => FilterOutcome {
             kept: candidates,
             filtered: Vec::new(),
         },
-        FilterMode::General => filter_common_only(candidates),
-        FilterMode::Smart => filter_smart(candidates),
+        FilterMode::General => filter_common_only(candidates, phrase),
+        FilterMode::Smart => filter_smart(candidates, phrase),
     }
 }
 
-/// 只保留常用词、短语、命令、分组
-fn filter_common_only(candidates: Vec<Candidate>) -> FilterOutcome {
-    let (kept, filtered) = candidates.into_iter().partition(is_common_like);
+/// 只保留常用词、短语、命令、分组（外加 [`Keep`](RarePhrasePolicy::Keep) 档下的多字候选）
+fn filter_common_only(candidates: Vec<Candidate>, phrase: RarePhrasePolicy) -> FilterOutcome {
+    let (kept, filtered) = candidates
+        .into_iter()
+        .partition(|c| is_common_like(c) || rare_phrase_admits(c, phrase));
     FilterOutcome { kept, filtered }
 }
 
@@ -159,9 +240,20 @@ fn build_has_common(
 }
 
 /// 智能过滤：同一来源+编码下有常用词则过滤非常用词
-fn filter_smart(candidates: Vec<Candidate>) -> FilterOutcome {
+fn filter_smart(candidates: Vec<Candidate>, phrase: RarePhrasePolicy) -> FilterOutcome {
+    // ⚠️ 「该组有没有常用词」的统计**不吃词豁免**（`build_has_common` 只问 `is_common_like`）。
+    // 若把放行的词也算作「常用」，它就会遮蔽同码位的生僻**单字**，把孤儿码位保底顶掉——
+    // 打某个码原本字、词都在，修完反而只剩词。本次改的是「词要不要被滤」，不该顺手改单字。
     let has_common = build_has_common(&candidates);
     let (kept, filtered) = candidates.into_iter().partition(|c| {
+        // 整词放行（`input.rare_phrase = "keep"`，出厂）：多字候选直接留下。
+        //
+        // ★ 位置在 `user_rare` **之前**是用户 2026-09-17 拍板的：词里含一个被亲手标成
+        // 生僻的字，整条词照样放行。下面那条 `user_rare` 因此只管**单字**——它要挡的现象
+        // （把同码位唯一的常用字降级后，保底又把它原样放回第一位）本就只发生在单字上。
+        if rare_phrase_admits(c, phrase) {
+            return true;
+        }
         // 用户**亲手**标成生僻的字：无条件滤掉，不吃下面那条「孤儿编码」保底。
         //
         // 那条保底本意是别让人打不出字，但它对用户显式降级的字会起反作用：把同码位唯一的
@@ -248,6 +340,15 @@ mod tests {
             out.kept.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             vec!["档"]
         );
+    }
+
+    /// 出厂档（`Keep`）下的过滤，遮蔽同名的三参版本。
+    ///
+    /// 本模块的既有用例几乎全用**单字**做素材，而词豁免只认多字候选 ⇒ 它们在两档下结果
+    /// 相同，走出厂档即可。需要区分档位的用例（下方 `rare_phrase_*` 一族）直接调
+    /// [`super::filter_candidates`]，把档位写在调用处。
+    fn filter_candidates(candidates: Vec<Candidate>, mode: FilterMode) -> FilterOutcome {
+        super::filter_candidates(candidates, mode, RarePhrasePolicy::Keep)
     }
 
     fn cand(text: &str, code: &str, source: CandidateSource, is_common: bool) -> Candidate {
@@ -454,6 +555,170 @@ mod tests {
             FilterMode::Smart,
         );
         assert!(out.iter().any(|c| c.text == "佢"));
+    }
+
+    // ── 含生僻字的词（input.rare_phrase）──────────────────────────────────
+    mod rare_phrase {
+        use super::*;
+
+        /// 词库正常收录、但含一个表外字的词（「苯磺酸」——「磺」不在通用规范汉字表内，
+        /// 故 `mark_common` 给整条置 `is_common = false`；真实现场见
+        /// `wind-coordinator/tests/rare_phrase_scope.rs`）。
+        fn rare_word(code: &str, source: CandidateSource) -> Candidate {
+            cand("苯磺酸", code, source, false)
+        }
+
+        /// 常用字档：出厂 `Keep` 放行整词，`Filter` 档才是旧行为。
+        #[test]
+        fn general_keeps_the_word_but_filter_policy_drops_it() {
+            let input = vec![rare_word("taotie", CandidateSource::Pinyin)];
+            let keep = super::super::filter_candidates(
+                input.clone(),
+                FilterMode::General,
+                RarePhrasePolicy::Keep,
+            );
+            assert_eq!(
+                keep.kept
+                    .iter()
+                    .map(|c| c.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["苯磺酸"],
+                "出厂档：词库收录的词整条打得出来（论坛 t103）"
+            );
+            let strict = super::super::filter_candidates(
+                input,
+                FilterMode::General,
+                RarePhrasePolicy::Filter,
+            );
+            assert!(
+                strict.kept.is_empty() && strict.filtered.len() == 1,
+                "Filter 档须原样保留 0.121 及以前的行为，否则这个配置项没有意义"
+            );
+        }
+
+        /// 智能档的真实现场：五笔 4 码位上，词与常用单字同码 ⇒ 旧行为把词滤掉。
+        #[test]
+        fn smart_keeps_the_word_even_when_common_char_shares_the_code() {
+            let input = vec![
+                cand("档", "sivg", CandidateSource::CodeTable, true),
+                rare_word("sivg", CandidateSource::CodeTable),
+            ];
+            let keep = super::super::filter_candidates(
+                input.clone(),
+                FilterMode::Smart,
+                RarePhrasePolicy::Keep,
+            );
+            assert!(
+                keep.kept.iter().any(|c| c.text == "苯磺酸"),
+                "同码有常用字时词也要留下——这正是默认档下 A2-6 的触发路径"
+            );
+            let strict =
+                super::super::filter_candidates(input, FilterMode::Smart, RarePhrasePolicy::Filter);
+            assert!(
+                !strict.kept.iter().any(|c| c.text == "苯磺酸"),
+                "Filter 档下仍按同码遮蔽滤掉（反向对照，防止豁免写成无条件放行）"
+            );
+        }
+
+        /// ★★★ 最容易写错的一条：放行的词**不得**把同码位的生僻**单字**顶掉。
+        ///
+        /// 若把豁免顺手写进 `build_has_common`（让词也算「该组有常用词」），这一组就从
+        /// 「无常用字 ⇒ 孤儿码位保底放行全部」变成「有常用词 ⇒ 只留常用」，生僻单字当场
+        /// 消失。现象是「修完词能打了，可原来打得出的字反而没了」，而两处都没人写过要滤它。
+        #[test]
+        fn admitted_word_does_not_shadow_rare_single_chars() {
+            let out = super::super::filter_candidates(
+                vec![
+                    rare_word("sivg", CandidateSource::CodeTable),
+                    cand("桜", "sivg", CandidateSource::CodeTable, false),
+                ],
+                FilterMode::Smart,
+                RarePhrasePolicy::Keep,
+            );
+            assert_eq!(
+                out.kept.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+                vec!["苯磺酸", "桜"],
+                "词靠豁免留下、生僻单字仍靠孤儿码位保底留下，两条互不影响"
+            );
+        }
+
+        /// 词里含**用户亲手标成生僻**的字时一并放行（用户 2026-09-17 拍板）。
+        ///
+        /// 反向对照钉住边界：同一个降级动作对**单字**仍然照滤——`user_rare` 那条判据是
+        /// 为单字写的，词豁免不该把它一起松掉。
+        #[test]
+        fn user_rare_chars_do_not_block_the_word() {
+            let mut word = rare_word("sivg", CandidateSource::CodeTable);
+            word.user_rare = true;
+            let mut demoted_char = cand("桜", "sivg", CandidateSource::CodeTable, false);
+            demoted_char.user_rare = true;
+            let out = super::super::filter_candidates(
+                vec![word, demoted_char],
+                FilterMode::Smart,
+                RarePhrasePolicy::Keep,
+            );
+            assert_eq!(
+                out.kept.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+                vec!["苯磺酸"],
+                "词照放行；用户亲手降级的单字仍照滤（设了要有反应）"
+            );
+        }
+
+        /// 「多字」按**字素簇**算：单个 emoji 不是词，不吃豁免。
+        ///
+        /// ⛔ 判据退回 `chars().count() > 1` 的话这一条会红——`⚽️` 是 2 码位、`👨‍👩‍👧` 是 5 个，
+        /// 屏幕上却都是一个图形，把它们当「词」放行等于悄悄绕开检索范围。
+        #[test]
+        fn counts_grapheme_clusters_not_code_points() {
+            for t in ["⚽️", "👍🏻", "👨‍👩‍👧", "🇨🇳", "1️⃣"] {
+                let c = cand(t, "x", CandidateSource::CodeTable, false);
+                assert!(
+                    !rare_phrase_admits(&c, RarePhrasePolicy::Keep),
+                    "{t:?} 在屏幕上是一个字，不该按词豁免"
+                );
+            }
+            let word = cand("😀😀", "x", CandidateSource::CodeTable, false);
+            assert!(
+                rare_phrase_admits(&word, RarePhrasePolicy::Keep),
+                "两个字素簇才算词（反向对照，防止把上一条写成「凡 emoji 皆不豁免」）"
+            );
+        }
+
+        /// 划分不重不漏在**两档**下都成立：放宽靠被滤集回补，漏一条就补不回来。
+        #[test]
+        fn kept_and_filtered_still_partition_the_input() {
+            let input = vec![
+                cand("档", "sivg", CandidateSource::CodeTable, true),
+                rare_word("sivg", CandidateSource::CodeTable),
+                cand("桜", "sivg", CandidateSource::CodeTable, false),
+            ];
+            for mode in [FilterMode::Smart, FilterMode::General, FilterMode::Gb18030] {
+                for policy in [RarePhrasePolicy::Keep, RarePhrasePolicy::Filter] {
+                    let out = super::super::filter_candidates(input.clone(), mode, policy);
+                    assert_eq!(
+                        out.kept.len() + out.filtered.len(),
+                        input.len(),
+                        "{mode:?}/{policy:?}: 保留集+被滤集须等于原集合"
+                    );
+                }
+            }
+        }
+
+        /// 配置往返互逆 + 未知值回落 `Keep`（与 `Default` 同源）。
+        #[test]
+        fn config_round_trip() {
+            for p in [RarePhrasePolicy::Keep, RarePhrasePolicy::Filter] {
+                assert_eq!(RarePhrasePolicy::from_config(p.as_config()), p);
+            }
+            // 值集须与 wind-setting 的 select options 一致（keep/filter）。
+            assert_eq!(RarePhrasePolicy::Keep.as_config(), "keep");
+            assert_eq!(RarePhrasePolicy::Filter.as_config(), "filter");
+            assert_eq!(
+                RarePhrasePolicy::from_config("拼错了"),
+                RarePhrasePolicy::default(),
+                "配错的值与没配的值必须落到同一档"
+            );
+        }
     }
 
     // ── 单字输入（single_char）─────────────────────────────────────────────

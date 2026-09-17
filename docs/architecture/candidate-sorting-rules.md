@@ -43,7 +43,7 @@
 | 4.5 | **`mark_common`（常用字判定）** | `handle_candidate.rs` | 无条件填 `is_common`（**不看 `filter_mode`**）；混输拼音精确档拿它当提档准入，见 §6 ③ |
 | 5 | **`candidate_display_order` 排序** | 同上 | **无条件重排全部候选**（七级链，见 §6） |
 | 6 | **按 `text` 去重** | `retain(seen.insert)` | 保留排序后第一条 |
-| 7 | **`apply_filter`** | `handle_candidate.rs` | 检索范围过滤（常用字/GB18030）；**短语恒保留**（`is_common` 已由第 4.5 步填好） |
+| 7 | **`apply_filter`** | `handle_candidate.rs` | 检索范围过滤（常用字/GB18030）；**短语恒保留**（`is_common` 已由第 4.5 步填好）；含生僻字的**多字候选**另由 `input.rare_phrase` 决定（出厂整词放行，见 §9） |
 | 8 | **`apply_freq_rerank`** | 同上 | 开自动调频**且有词频记录**时重排（见 §7）——**首要键压过第 5 步** |
 | 9 | **`apply_shadow`** | 同上 | 用户 shadow 规则：删除 + 置顶到指定位（**最高优先级**，见 §8） |
 | 9.5 | **`short_code_yield::apply`** | `short_code_yield.rs` | 出简让全：有简码的字在更长码位上把首选让给词并沉底。**排在 shadow 之后**（第 8 步的硬约束所迫），故对「用户排过序的码」整码停手，见 §8 |
@@ -475,7 +475,10 @@
 
 ## 9. `apply_filter` 与 `expand_s2t_variants`
 
-- **`apply_filter`（第 7 步）**：按检索范围（常用字表 / GB18030）过滤；**`is_phrase` 候选恒保留**。
+- **`apply_filter`（第 7 步）**：按检索范围（常用字表 / GB18030）过滤。放行判据是
+  `is_common_like(c) || rare_phrase_admits(c, phrase)`：前者＝ `is_common` 或用户自己配的
+  短语/命令/分组（故 **`is_phrase` 候选恒保留**）；后者＝ `input.rare_phrase = "keep"`（出厂）
+  下的**多字**候选，「多字」按字素簇算，与 `is_phrase` 无关（单个 emoji 不是词）。
 - **`expand_s2t_variants`（第 11 步）**：简繁 1对多变体紧跟单字原字插入。**硬约束**：必须在
   去重/排序/词频/shadow **全部完成后**（否则去重按 text 误删变体、重排拆散原字与变体）、且在
   **自动上屏判定之后**（否则变体会让「唯一候选」误判为不唯一，静默否决自动上屏）。

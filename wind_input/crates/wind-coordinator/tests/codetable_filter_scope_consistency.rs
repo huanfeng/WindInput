@@ -52,6 +52,10 @@ fn wubi_config(filter_mode: &str) -> Config {
     cfg.schema.active = "wubi86".into();
     cfg.input.default.chinese_mode = true;
     cfg.input.filter_mode = filter_mode.into();
+    // 含生僻字的**词**怎么处置，显式钉住出厂档（见 `rare_phrase_scope.rs`）。本族素材全是
+    // 单字，两档结果相同 —— 正因如此，跟着 `Config::default()` 走的话，将来出厂档一变，
+    // 这一族的语义会**静默**换成另一档而断言照绿。
+    cfg.input.rare_phrase = "keep".into();
     cfg
 }
 

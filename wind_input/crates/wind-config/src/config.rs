@@ -3092,6 +3092,15 @@ impl Default for CaretPlacementConfig {
 pub struct InputConfig {
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
+    /// 含生僻字的**词**要不要吃 `filter_mode` 这一刀：`keep`（出厂，整词放行）/ `filter`
+    /// （与单字同判，0.121 及以前的行为）。值域与语义见 `wind_candidate::RarePhrasePolicy`，
+    /// 那里也记着「一般输入法怎么做」的调研。
+    ///
+    /// ⚠️ 与 `filter_mode` **正交**：那个决定「什么算该滤」，本项决定「词要不要吃这一刀」。
+    /// 故不是给 `filter_mode` 加第四个档——档位是互斥的单选，而这两件事要能任意组合
+    /// （常用字档 + 整词放行，正是楼主 t103 要的那一格）。
+    #[serde(default = "default_rare_phrase")]
+    pub rare_phrase: String,
     /// 上屏文本里的换行**用什么字符表达**的全局默认档；per-app 覆盖见 compat.toml 的
     /// `[[commit_newline]]` 段。值域与「为什么必须按应用配」见
     /// [`crate::app_compat::NewlineStyle`]：`keep`（出厂）/ `cr` / `lf` / `crlf`。
@@ -3259,6 +3268,7 @@ impl Default for InputConfig {
     fn default() -> Self {
         Self {
             filter_mode: "smart".to_string(),
+            rare_phrase: default_rare_phrase(),
             commit_newline: default_commit_newline(),
             english_case_cycle_key: String::new(),
             scope_relax: ScopeRelaxConfig::default(),
@@ -5957,6 +5967,16 @@ fn default_english_smart_chars() -> String {
 
 fn default_filter_mode() -> String {
     "smart".to_string()
+}
+
+/// 含生僻字的词的出厂处置：整词放行。
+///
+/// ⚠ 与 `wind_candidate::RarePhrasePolicy` 的 `#[default]`（以及它 `from_config` 的未知值
+/// 回落）是三处独立事实，必须一致——由 `config_default_matches_policy_default` 钉住
+/// （在 `wind-coordinator/tests/rare_phrase_contract.rs`：判据与配置两个 crate 互不依赖，
+/// 只有协调器同时看得见两边）。
+fn default_rare_phrase() -> String {
+    "keep".to_string()
 }
 
 /// 上屏换行形式的**全局默认档**。

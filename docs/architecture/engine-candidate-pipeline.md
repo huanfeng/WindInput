@@ -623,6 +623,11 @@ step 2c（尾部残码参与整句解码）此前在混输下**整体关闭**（
      平(w=58 part=true)＞平摊(w=4 part=false)，前者插到词组前）
 ④ 按 text 去重（保留首个）+ **把被弃条目所占码位并入幸存者**（merged_codes，见 §8.1.2）
 ⑤ apply_filter：填充 is_common（常用字表；短语豁免，判定作用域见 §8.1.1）→ wind_candidate::filter_candidates
+     含生僻字的**词**吃不吃这一刀由 `input.rare_phrase` 定（keep 出厂＝整词放行；「多字」按
+     字素簇算，单个 emoji 不算词）。与 filter_mode **正交**——那个定「什么算该滤」，这个定
+     「词吃不吃」，两者要能任意组合，故不是给档位加第四个值。判据见 `RarePhrasePolicy`。
+     ⚠️ 豁免**不进** `build_has_common`：放行的词若算作「该组有常用词」，会遮蔽同码位的生僻
+     单字、顶掉 §8.1.2 的孤儿码位保底 ⇒「词能打了、原来打得出的字反而没了」。
 ⑤' apply_single_char：单字输入（只出单字），与⑤**正交**——那个按字符常用度裁剪，
      这个按候选长度裁剪。豁免判据是 `is_user_authored`（短语/命令/分组），⛔ **不是**
      `is_common_like`（那个连常用词一起豁免 ⇒ 功能失效）。见 design/single-char-mode.md
@@ -639,6 +644,15 @@ step 2c（尾部残码参与整句解码）此前在混输下**整体关闭**（
 `wind-candidate/src/filter.rs`。`FilterMode`：`Gb18030`（不过滤）/ `General`（仅常用）/
 `Smart`（智能）。Smart 规则：**按 `(CandidateSource, code)` 分组**，同组内存在常用词
 （is_common/is_phrase/is_command/is_group）则滤掉非常用，无常用则整组保留。
+
+⚠️ 这两档讲的都是**单字层**的裁剪口径。含生僻字的**多字候选**另有一根正交的轴
+`input.rare_phrase`（判据 `RarePhrasePolicy`，出厂 `keep` ＝ 整词放行），故签名是
+`filter_candidates(candidates, mode, phrase)`——`mode` 定「什么算该滤」，`phrase` 定
+「词要不要吃这一刀」。
+
+★ 那道豁免**不进**本节的分组统计（`build_has_common` 只问 `is_common_like`）：放行的词若
+一并算作「该组有常用词」，就会遮蔽同组的生僻**单字**、顶掉「无常用则整组保留」这条保底，
+表现为「词能打了、原来打得出的字反而没了」。
 按来源分组是提交 19d580f 的修复：混输下码表与拼音候选常共用同一 code 串（如 wang），
 原先只按 code 分组会让拼音常用字误杀同码的码表生僻字（佢），导致混输码表表现与纯五笔不一致。
 
@@ -736,6 +750,9 @@ JSONL 的字段名保持 `ch`，老备份照旧读得回来。
 > `c.is_common = c.meta.is_user_dict || self.common_chars.is_string_common(&c.text)`。
 > **豁免范围须止于 `is_user_dict`**：`is_temp_dict` 是码表自动造词的产物（连续单字+终止符
 > 自动成词，杂词率高），一并豁免等于让自动造出的杂词绕过这层过滤，而那正是它该管的。
+> ⚠️ 与 `input.rare_phrase`（2026-09-17，含生僻字的词整词放行）是**两根不同的轴**：那个按
+> 候选**长度**豁免（多字词），本条按**来源**豁免（用户自己加的词条）。单字的用户词条只有本条
+> 管得着 —— 前者对它不成立，别拿它顶替这一条。
 
 #### 8.1.2 分组键的完整性：去重不得吃掉码位（`Candidate::merged_codes`）
 
