@@ -1,9 +1,14 @@
 //! 背景图解码与填充缓存（九宫格/拉伸/平铺/center）。
 //!
 //! 与 Go 版 `internal/ui/viewbox_image_resolver.go` 对齐（精简）。线程局部使用（UI 单线程）。
-//! 源图解码后保留 unpremult RGBA 供采样；按 (path, mode, slice, dest_w, dest_h) 缓存合成后的
+//! 源图解码后保留 unpremult RGBA 供采样；按 (源图, mode, slice, dest_w, dest_h) 缓存合成后的
 //! 目标位图（tiny-skia Pixmap，**BGRA 序 + 预乘**，可直接作 Pattern 填到 BGRA 缓冲）。
+//!
+//! 图片源有两种形态：**文件路径**，以及主题里内嵌的 **`data:` URI**——主题编辑器上传的
+//! 图片会被打包成后者随 theme.toml 一起发布。两种形态在 `wind_theme` 的求值层与
+//! `theme_assets::asset_path` 里一路同等放行，最终都落到本模块解码。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
@@ -29,10 +34,27 @@ fn compose(r: u8, g: u8, b: u8, a: u8, tint: [u8; 4], premult: bool) -> Premulti
     }
 }
 
+/// 解析 SVG 源为 usvg 树。**外部引用一律不解析**。
+///
+/// usvg 默认的 href 解析器会把 `<image href="C:/...">` 当本地文件读进来渲染（其文档
+/// 明写 "forbid access to local files (which is allowed by default)"）。主题可以来自
+/// 市场，是不可信内容——在内嵌 SVG 放行之前它到不了这里（导入只收 TOML 文本，图片
+/// 不落盘），放行之后这条路就通了，必须当场堵死。
+fn svg_tree(src: &str) -> Option<resvg::usvg::Tree> {
+    let data = read_source_bytes(src)?;
+    let opts = resvg::usvg::Options {
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_string: Box::new(|_, _| None),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    resvg::usvg::Tree::from_data(&data, &opts).ok()
+}
+
 /// 栅格化 SVG 到 w×h，返回预乘 RGBA 字节（resvg 输出）。
-fn rasterize_svg(path: &str, w: u32, h: u32) -> Option<Vec<u8>> {
-    let data = std::fs::read(path).ok()?;
-    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
+fn rasterize_svg(src: &str, w: u32, h: u32) -> Option<Vec<u8>> {
+    let tree = svg_tree(src)?;
     let size = tree.size();
     let mut pm = resvg::tiny_skia::Pixmap::new(w, h)?;
     let sx = w as f32 / size.width().max(1.0);
@@ -71,6 +93,74 @@ pub fn rasterize_svg_str_tinted(svg: &str, w: u32, h: u32, tint: [u8; 4]) -> Opt
     Some(pm)
 }
 
+/// `data:` URI 的 MIME（不解码载荷）。非 data: 源返回 None。
+fn data_uri_mime(src: &str) -> Option<&str> {
+    // split 的迭代器至少产出一项，两处 next() 都不会是 None。
+    let head = src
+        .strip_prefix("data:")?
+        .split(',')
+        .next()
+        .unwrap_or_default();
+    Some(head.split(';').next().unwrap_or_default())
+}
+
+/// 解码 `data:<mime>[;...];base64,<载荷>` 的载荷字节。
+///
+/// 只认**标准字母表 + 带填充**的 base64：内嵌图片的唯一生产者是主题编辑器的
+/// `FileReader.readAsDataURL`，它产出的一定是这种。百分号编码与 URL-safe 变体没有
+/// 生产者，不实现——撞上时返回 None 走上层的「解码失败」告警，而不是静默画一块
+/// 空白让人无从查起。
+fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let rest = src.strip_prefix("data:")?;
+    let (head, payload) = rest.split_once(',')?;
+    if !head.split(';').any(|p| p.eq_ignore_ascii_case("base64")) {
+        return None;
+    }
+    // TOML 多行字符串里的 data: URI 可能带换行，base64 解码器不接受空白，先剔除。
+    let cleaned: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(cleaned)
+        .ok()
+}
+
+/// 读取图片源的原始字节：`data:` URI 就地解码，否则按文件路径读。
+fn read_source_bytes(src: &str) -> Option<Vec<u8>> {
+    if src.starts_with("data:") {
+        return decode_data_uri(src);
+    }
+    std::fs::read(src).ok()
+}
+
+/// 解码位图源：`data:` URI 走内存解码，否则按文件路径打开。
+fn decode_bitmap(src: &str) -> Option<image::DynamicImage> {
+    if src.starts_with("data:") {
+        return image::load_from_memory(&decode_data_uri(src)?).ok();
+    }
+    image::open(src).ok()
+}
+
+/// 是否 SVG：文件看扩展名，`data:` 看 MIME。
+///
+/// 只看扩展名会漏掉 `data:image/svg+xml;base64,...`（它不以 `.svg` 结尾），把矢量图
+/// 丢进位图解码器 —— 那是必然失败且看不出原因的一条路。
+fn is_svg(src: &str) -> bool {
+    match data_uri_mime(src) {
+        Some(mime) => mime.eq_ignore_ascii_case("image/svg+xml"),
+        None => src.to_ascii_lowercase().ends_with(".svg"),
+    }
+}
+
+/// 日志用的短标识：`data:` URI 动辄数百 KB，整条打进日志会把日志撑爆且毫无可读性。
+fn brief(src: &str) -> Cow<'_, str> {
+    if src.starts_with("data:") {
+        let head: String = src.chars().take(48).collect();
+        Cow::Owned(format!("{head}…（共 {} 字节）", src.len()))
+    } else {
+        Cow::Borrowed(src)
+    }
+}
+
 /// 填充模式码：0=stretch（默认）1=nine_slice 2=tile 3=center。
 pub fn mode_code(mode: &str) -> u8 {
     match mode {
@@ -88,11 +178,30 @@ struct Src {
     rgba: Vec<u8>,
 }
 
-type FillKey = (String, u8, [u32; 4], u32, u32, [u8; 4]);
+/// 图片源的内部句柄：把源字符串驻留成一个小整数，缓存键只带它。
+///
+/// 源字符串可能是一条数百 KB 的 `data:` URI，而 `fill` 是每次重绘都要查一次的路径：
+/// 拿它直接作键，每次命中都要重新分配并拷贝整条 URI（旧实现的 `path.to_string()` 正是
+/// 如此）。驻留后每次仍要对源串哈希一遍（省掉的是那次拷贝，不是数量级），彻底摘掉得
+/// 在主题求值期就把句柄解析好塞进 `RvImage`，那是另一件事。
+///
+/// 用驻留句柄而非内容哈希：`ImgId` 是精确相等的，不存在两张图撞到同一张的可能。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct ImgId(u32);
+
+type FillKey = (ImgId, u8, [u32; 4], u32, u32, [u8; 4]);
 
 #[derive(Default)]
 pub struct ImageCache {
-    src: HashMap<String, Option<Src>>,
+    ids: HashMap<String, ImgId>,
+    /// 下一个待分配句柄。**必须与 `ids` 的表长解耦**：三张表现在都不回收，用表长当
+    /// id 恰好也唯一，但一旦给 `ids` 加上回收，id 就会被复用，而 `src`/`fills` 里按旧
+    /// id 索引的条目还在——背景图会串成另一张，且一声不响。
+    next_id: u32,
+    src: HashMap<ImgId, Option<Src>>,
+    /// SVG 源的文档尺寸。SVG 没有位图源进不了 `src`，而 layer 未写 size 时每次重绘都
+    /// 要问一遍原始尺寸，不缓存就是每次重新解析一遍 SVG。
+    svg_sizes: HashMap<ImgId, Option<(u32, u32)>>,
     fills: HashMap<FillKey, Option<Pixmap>>,
 }
 
@@ -101,28 +210,57 @@ impl ImageCache {
         Self::default()
     }
 
-    /// 解码源图（缓存；失败缓存 None 避免反复重试）。
-    fn decode(&mut self, path: &str) -> Option<&Src> {
-        if !self.src.contains_key(path) {
-            let decoded = image::open(path).ok().map(|img| {
-                let rgba = img.to_rgba8();
-                Src {
-                    w: rgba.width(),
-                    h: rgba.height(),
-                    rgba: rgba.into_raw(),
-                }
-            });
-            if decoded.is_none() {
-                tracing::warn!("主题背景图解码失败: {}", path);
-            }
-            self.src.insert(path.to_string(), decoded);
+    /// 源字符串 → 驻留句柄（首见时登记）。
+    fn id_of(&mut self, src: &str) -> ImgId {
+        if let Some(id) = self.ids.get(src) {
+            return *id;
         }
-        self.src.get(path).and_then(|o| o.as_ref())
+        let id = ImgId(self.next_id);
+        self.next_id += 1;
+        self.ids.insert(src.to_string(), id);
+        id
     }
 
-    /// 源图原始尺寸（解码后；用于 layer size=0 时取原尺寸）。
+    /// 解码源图（缓存；失败缓存 None 避免反复重试）。
+    fn decode(&mut self, id: ImgId, src: &str) -> Option<&Src> {
+        self.src
+            .entry(id)
+            .or_insert_with(|| {
+                let decoded = decode_bitmap(src).map(|img| {
+                    let rgba = img.to_rgba8();
+                    Src {
+                        w: rgba.width(),
+                        h: rgba.height(),
+                        rgba: rgba.into_raw(),
+                    }
+                });
+                if decoded.is_none() {
+                    tracing::warn!("主题背景图解码失败: {}", brief(src));
+                }
+                decoded
+            })
+            .as_ref()
+    }
+
+    /// 源图原始尺寸（用于 layer size=0 时取原尺寸）。
+    ///
+    /// SVG 单独一条路：它进不了 `src`（没有位图可解码），而调用方拿不到尺寸就整层不
+    /// 画——`.svg` 文件早先就是这样，内嵌 SVG 放行后这个洞会落到市场主题上。
     pub fn src_size(&mut self, path: &str) -> Option<(u32, u32)> {
-        self.decode(path).map(|s| (s.w, s.h))
+        let id = self.id_of(path);
+        if is_svg(path) {
+            return *self.svg_sizes.entry(id).or_insert_with(|| {
+                let size = svg_tree(path).map(|t| {
+                    let s = t.size();
+                    (s.width().ceil() as u32, s.height().ceil() as u32)
+                });
+                if size.is_none() {
+                    tracing::warn!("主题背景图（SVG）解析失败: {}", brief(path));
+                }
+                size
+            });
+        }
+        self.decode(id, path).map(|s| (s.w, s.h))
     }
 
     /// 取（或构建）目标尺寸填充位图（BGRA 序 + 预乘）。
@@ -136,30 +274,27 @@ impl ImageCache {
         h: u32,
         tint: [u8; 4],
     ) -> Option<&Pixmap> {
-        let key = (path.to_string(), mode, slice, w, h, tint);
+        let key = (self.id_of(path), mode, slice, w, h, tint);
         if !self.fills.contains_key(&key) {
-            let built = self.build_fill(path, mode, slice, w, h, tint);
-            self.fills.insert(key.clone(), built);
+            let built = self.build_fill(key, path);
+            self.fills.insert(key, built);
         }
         self.fills.get(&key).and_then(|o| o.as_ref())
     }
 
-    fn build_fill(
-        &mut self,
-        path: &str,
-        mode: u8,
-        slice: [u32; 4],
-        w: u32,
-        h: u32,
-        tint: [u8; 4],
-    ) -> Option<Pixmap> {
+    fn build_fill(&mut self, key: FillKey, path: &str) -> Option<Pixmap> {
+        let (id, mode, slice, w, h, tint) = key;
         if w == 0 || h == 0 {
             return None;
         }
         let mut pm = Pixmap::new(w, h)?;
-        if path.to_ascii_lowercase().ends_with(".svg") {
+        if is_svg(path) {
             // SVG：按目标尺寸栅格化（resvg 输出预乘 RGBA），逐像素 tint/直通 + R/B 交换。
-            let rgba = rasterize_svg(path, w, h)?;
+            // 告警与位图侧对齐：静默画不出来正是这次要消灭的病症，别在这一侧留一份。
+            let Some(rgba) = rasterize_svg(path, w, h) else {
+                tracing::warn!("主题背景图（SVG）栅格化失败: {}", brief(path));
+                return None;
+            };
             let px = pm.pixels_mut();
             for (i, p) in px.iter_mut().enumerate() {
                 let b = i * 4;
@@ -168,7 +303,7 @@ impl ImageCache {
             return Some(pm);
         }
         // 位图：image 解码（未预乘）→ 按模式采样 → tint/预乘 + R/B 交换。
-        let src = self.decode(path)?;
+        let src = self.decode(id, path)?;
         let (sw, sh, data) = (src.w, src.h, &src.rgba);
         if sw == 0 || sh == 0 {
             return None;
@@ -250,5 +385,212 @@ fn nine_axis(d: u32, dlen: u32, slen: u32, s0: u32, s1: u32) -> Option<u32> {
         let dmid_len = dlen - s0 - s1;
         let smid_len = slen - s0 - s1;
         Some((s0 + (dmid as u64 * smid_len as u64 / dmid_len as u64) as u32).min(slen - 1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    /// 把一张纯色图编码成 `data:image/png;base64,...`——主题编辑器发布图片的形态。
+    fn png_data_uri(w: u32, h: u32, rgba: [u8; 4]) -> String {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba(rgba));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("PNG 编码");
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+        )
+    }
+
+    /// 把一段纯色矩形 SVG 编码成 `data:image/svg+xml;base64,...`。
+    fn svg_data_uri(w: u32, h: u32, fill: &str) -> String {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"><rect width="{w}" height="{h}" fill="{fill}"/></svg>"##
+        );
+        format!(
+            "data:image/svg+xml;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(svg)
+        )
+    }
+
+    /// 编辑器发布的主题把图片内嵌在 theme.toml 里，必须一路解码到像素。
+    ///
+    /// 这条是「市场主题导入后没有背景图」的回归护栏：曾经解码走的是
+    /// `image::open(path)`，拿 data: URI 当文件名打开，必然失败且只留一行 warn。
+    #[test]
+    fn fill_decodes_inline_png_data_uri() {
+        let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
+        let mut cache = ImageCache::new();
+
+        assert_eq!(cache.src_size(&uri), Some((2, 2)));
+        let pm = cache
+            .fill(&uri, mode_code("stretch"), [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("内嵌 PNG 应当能填充");
+        let px = pm.pixel(0, 0).expect("像素");
+        // 输出是 BGRA 序（见 compose）：源的红落在 blue 通道上。
+        assert_eq!(
+            (px.blue(), px.green(), px.red(), px.alpha()),
+            (255, 0, 0, 255)
+        );
+    }
+
+    /// 内嵌 SVG 同样要认出来：它不以 `.svg` 结尾，只看扩展名会被丢进位图解码器。
+    #[test]
+    fn fill_decodes_inline_svg_data_uri() {
+        let uri = svg_data_uri(4, 4, "#0000ff");
+        let mut cache = ImageCache::new();
+
+        let pm = cache
+            .fill(&uri, mode_code("stretch"), [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("内嵌 SVG 应当能填充");
+        let px = pm.pixel(0, 0).expect("像素");
+        // BGRA 序：源的蓝落在 red 通道上。
+        assert_eq!(
+            (px.red(), px.green(), px.blue(), px.alpha()),
+            (255, 0, 0, 255)
+        );
+    }
+
+    /// 缓存键是驻留出来的 `ImgId`，两条不同的 data: URI 必须各自成键，不能互相顶替。
+    #[test]
+    fn distinct_data_uris_do_not_share_cache() {
+        let red = png_data_uri(2, 2, [255, 0, 0, 255]);
+        let green = png_data_uri(2, 2, [0, 255, 0, 255]);
+        let mut cache = ImageCache::new();
+
+        let r = cache
+            .fill(&red, 0, [0; 4], 2, 2, [0, 0, 0, 0])
+            .expect("红图")
+            .pixel(0, 0)
+            .expect("像素");
+        let g = cache
+            .fill(&green, 0, [0; 4], 2, 2, [0, 0, 0, 0])
+            .expect("绿图")
+            .pixel(0, 0)
+            .expect("像素");
+
+        assert_eq!((r.blue(), r.green()), (255, 0), "红图被别的图顶替了");
+        assert_eq!((g.blue(), g.green()), (0, 255), "绿图被别的图顶替了");
+    }
+
+    /// 文件路径是内置主题资产的唯一形态，改造不能碰坏它。
+    #[test]
+    fn fill_still_reads_file_path_sources() {
+        let dir = std::env::temp_dir().join(format!("wind-ui-imgcache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("solid.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .expect("写 PNG");
+        let p = path.to_string_lossy().into_owned();
+
+        let mut cache = ImageCache::new();
+        assert_eq!(cache.src_size(&p), Some((2, 2)));
+        let px = cache
+            .fill(&p, 0, [0; 4], 2, 2, [0, 0, 0, 0])
+            .expect("文件图应当能填充")
+            .pixel(0, 0)
+            .expect("像素");
+        assert_eq!((px.blue(), px.green()), (255, 0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TOML 的多行字符串能让 data: URI 带上换行，base64 解码器不收空白——去空白那步
+    /// 是承重的，这条正着测它（删掉那行 filter 就红）。
+    #[test]
+    fn data_uri_payload_tolerates_embedded_newlines() {
+        let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
+        let (head, payload) = uri.split_once(",").expect("data: URI");
+        let wrapped: String = payload
+            .as_bytes()
+            .chunks(64)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let folded = format!("{head},{wrapped}");
+
+        assert!(folded.contains('\n'), "构造的载荷必须真的折了行");
+        assert_eq!(ImageCache::new().src_size(&folded), Some((2, 2)));
+    }
+
+    /// SVG 没有位图源，原始尺寸只能问文档自己。拿不到尺寸时 `view.rs` 的 layer
+    /// 分支会整层不画——`.svg` 文件早先就是这样，内嵌 SVG 不能再走一遍。
+    #[test]
+    fn src_size_reads_svg_document_size() {
+        let mut cache = ImageCache::new();
+        assert_eq!(cache.src_size(&svg_data_uri(7, 3, "#0000ff")), Some((7, 3)));
+        // 解析不了的 SVG 如实返回 None（并留下告警），不是 0×0。
+        assert_eq!(cache.src_size("data:image/svg+xml;base64,####"), None);
+    }
+
+    /// 主题可以来自市场，是不可信内容：SVG 里的 `<image href="本地绝对路径">` 绝不能
+    /// 被 usvg 读进来渲染（那是 usvg 的默认行为，本模块显式关掉了）。
+    #[test]
+    fn inline_svg_does_not_load_local_files() {
+        let dir = std::env::temp_dir().join(format!("wind-ui-svghref-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let secret = dir.join("secret.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))
+            .save(&secret)
+            .expect("写 PNG");
+
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4" height="4"><image xlink:href="{}" width="4" height="4"/></svg>"##,
+            secret.to_string_lossy()
+        );
+        let uri = format!(
+            "data:image/svg+xml;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&svg)
+        );
+
+        let mut cache = ImageCache::new();
+        let pm = cache
+            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("SVG 本身仍应栅格化成功（只是那张图不该被读进来）");
+        let px = pm.pixel(0, 0).expect("像素");
+        assert_eq!(
+            px.alpha(),
+            0,
+            "本地文件被 usvg 读进来渲染了：{:?}",
+            (px.red(), px.green(), px.blue(), px.alpha())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn svg_detection_covers_both_source_forms() {
+        assert!(is_svg("chevron.svg"));
+        assert!(is_svg("Chevron.SVG"));
+        assert!(!is_svg("panel.png"));
+        assert!(is_svg("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="));
+        assert!(!is_svg("data:image/png;base64,iVBORw0KGgo="));
+    }
+
+    /// 无法解码的 data: 形态走「解码失败」这条既有路径（告警 + 缓存 None），不 panic。
+    #[test]
+    fn undecodable_data_uris_yield_none() {
+        // 百分号编码形态：没有生产者，不实现。
+        assert!(decode_data_uri("data:image/svg+xml,%3Csvg%3E").is_none());
+        assert!(decode_data_uri("data:image/png;base64,!!!not-base64!!!").is_none());
+        assert!(
+            ImageCache::new()
+                .src_size("data:image/png;base64,####")
+                .is_none()
+        );
+    }
+
+    /// data: URI 有数百 KB，日志里只能留一个短标识。
+    #[test]
+    fn brief_truncates_data_uri_for_logs() {
+        let long = format!("data:image/png;base64,{}", "A".repeat(10_000));
+        let s = brief(&long);
+        assert!(s.len() < 200, "日志标识不该带上整条 data: URI：{s}");
+        assert_eq!(brief("/themes/x/panel.png"), "/themes/x/panel.png");
     }
 }

@@ -28,6 +28,9 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 image = { workspace = true }
 resvg = "0.44"
+# 主题内嵌图片（`data:image/...;base64,` 形态）的载荷解码，见 image_cache。
+# 版本跟随 wind-cmdbar 里既有的那一份。
+base64 = "0.22"
 # 截图文件名的本地时间戳（非 Windows 分支；Windows 用 GetLocalTime）
 chrono = "0.4"
 

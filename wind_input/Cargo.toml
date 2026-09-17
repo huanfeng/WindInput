@@ -74,7 +74,8 @@ redb = "2"
 # Unicode 规则必随版本静默漏一类。
 unicode-segmentation = "1"
 # Image processing。features 裁到主题背景图实际支持的格式（消费点唯一：
-# wind-ui image_cache 的 `image::open` + screenshot 的 PNG 编码）。默认全格式会把
+# wind-ui image_cache 的 `image::open` / `load_from_memory`（主题内嵌的 data: URI）
+# + screenshot 的 PNG 编码）。默认全格式会把
 # avif(rav1e)/exr/tiff 全家桶拖进依赖闭包，编译重且无消费者——新增格式支持时在此追加。
 image = { version = "0.25", default-features = false, features = [
     "png",
