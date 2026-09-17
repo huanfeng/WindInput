@@ -73,6 +73,10 @@ impl FuzzyGroup {
 }
 
 /// 声母模糊组
+/// [`INITIAL_GROUPS`] 的条目数。**导出仅供测试**：那边按 `2^N` 枚举全部标志位组合，
+/// 组数一旦变化而测试没跟上，新组就是零覆盖且全绿。断言它，改了就红。
+pub const INITIAL_GROUP_COUNT: usize = 6;
+
 const INITIAL_GROUPS: &[FuzzyGroup] = &[
     FuzzyGroup {
         a: "zh",
@@ -182,8 +186,17 @@ pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
 ///
 /// ⚠️ **超过 [`MAX_ABBREV_KEY_VARIANTS`] 时只返回原键**，不做部分展开 —— 截一半等于
 /// 按字母表顺序随机挑几个变体放行，用户看到的是「有时出得来有时出不来」，比一致地
-/// 出不来更难排查。触发它需要 5 个以上的位都落在 n/l/f/h/r 上，是罕见输入。
+/// 出不来更难排查。
+///
+/// ⚠️ **规模检查必须边乘边判、用 `checked_mul`**，不能先 `product()` 再比：
+/// `product()` 在 debug 下会 panic（实测 41 个 `l` + n_l/r_l ⇒ `3^41` 溢出 usize），
+/// 而 **release 下更糟** —— 乘法 wrapping 后 `total` 可能绕回一个小值、通过上限检查，
+/// 于是真的去铺 `3^41` 个变体。溢出与超限在这里是同一种处置（只查原键），
+/// 所以一个 `match` 就够，不必分开。
 pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<(String, usize)> {
+    // `any_enabled()` 这道是**早退优化、不是语义保证**：全关时 `initial_alternatives`
+    // 每位也只返回原字母 ⇒ `total == 1` ⇒ 下面那条同样返回原键。删掉它行为不变，
+    // 省下的是 `per_pos` 的分配。改这里时别把它当成正确性依赖。
     if key.is_empty() || !config.any_enabled() {
         return vec![(key.to_string(), 0)];
     }
@@ -191,8 +204,15 @@ pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<(String, usize)
         .chars()
         .map(|c| initial_alternatives(c, config))
         .collect();
-    let total: usize = per_pos.iter().map(|v| v.len()).product();
-    if total <= 1 || total > MAX_ABBREV_KEY_VARIANTS {
+    // 边乘边判：溢出与超限同样处置（见上方 ⚠️），且超限时不必把剩下的位乘完。
+    let mut total: usize = 1;
+    for opts in &per_pos {
+        match total.checked_mul(opts.len()) {
+            Some(t) if t <= MAX_ABBREV_KEY_VARIANTS => total = t,
+            _ => return vec![(key.to_string(), 0)],
+        }
+    }
+    if total <= 1 {
         return vec![(key.to_string(), 0)];
     }
     // 原键恒在首位，处数 0：各位的 alternatives[0] 就是原字母，笛卡尔积的第一项即原键。

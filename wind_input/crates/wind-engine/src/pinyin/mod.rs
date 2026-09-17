@@ -1763,8 +1763,12 @@ impl PinyinEngine {
             return None;
         }
         match seg {
-            // 声母段只约束首字母 ⇒ 判据是首字母的模糊等价集，计 1 处改动。
+            // 声母段只约束首字母 ⇒ 判据是首字母的模糊等价集，计 **1 处**改动。
             // 不能套 `fuzzy_variants_scored`：那个要完整音节，而这里只有一个字母。
+            //
+            // 「1 处」与 `Syllable` 段**同量纲**：那边 `sen → sheng` 计 2（声母 + 韵母各一），
+            // 而声母段本就只表达了一个声母、最多错一处，给 1 恰好是它能错的全部。
+            // 两者相加后一起喂 `fuzzy_penalized`，故量纲必须一致。
             AbbrevSeg::Initial(c) => {
                 let first = syl.chars().next()?;
                 fuzzy::initials_fuzzy_equal(*c, first, &self.fuzzy_config).then_some(1)

@@ -53,6 +53,11 @@ fn fixture(tag: &str) -> CachedDict {
     w.add_with_boundary("nanqucai".into(), vec![("南区菜".into(), 800, 0, 0b101001)]);
     // ni(0..2) hao(2..5) → bit 0/2
     w.add_with_boundary("nihao".into(), vec![("你好".into(), 5328, 0, 0b101)]);
+    // ni(0..2) fa(2..4) a(4..5) → bit 0/2/4，简拼键 `nfa`。
+    // 取自真实词库的实例：输入 `nhao` 开 f_h 时，键 `nha` 的变体含 `nfa` ⇒ 这条被召回，
+    // 全靠 `Initial` 段校验把它挡掉。它是本文件唯一的**负向**护栏（见那条测试）。
+    w.add_with_boundary("nifaa".into(), vec![("你发啊".into(), 1, 0, 0b10101)]);
+    w.add_abbrev("nfa".into(), vec![("nifaa".into(), 1)]);
     w.add_abbrev("lqc".into(), vec![("lanqiuchang".into(), 1191)]);
     w.add_abbrev("nqc".into(), vec![("nanqucai".into(), 800)]);
     w.add_abbrev("fbm".into(), vec![("fangbianmian".into(), 3140)]);
@@ -219,7 +224,14 @@ fn exact_key_still_hits_with_fuzzy_on() {
 #[test]
 fn initial_alternatives_matches_pairwise_equal() {
     let letters: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
-    // 六组标志位的全部 2^6 组合，逐对交叉验证。
+    // ⚠️ 下面把组数**写死**成 6（`2^6` 种标志位组合）。加第 7 个 `INITIAL_GROUPS` 条目后
+    // 本测试仍会全绿、而新组零覆盖 —— 先断言组数，改了就红，提醒把 64 与下面的
+    // `FuzzyConfig` 字面量一起补。
+    assert_eq!(
+        fuzzy::INITIAL_GROUP_COUNT,
+        6,
+        "新增声母模糊组后，请把 2^6 的枚举与下面的 FuzzyConfig 字面量一起补上"
+    );
     for bits in 0u8..64 {
         let cfg = FuzzyConfig {
             zh_z: bits & 1 != 0,
@@ -367,5 +379,71 @@ fn fuzzy_abbrev_keys_variant_counts_match_doc() {
         fuzzy::fuzzy_abbrev_keys("llll", &all),
         vec![("llll".to_string(), 0)],
         "3^4 = 81 > 64 ⇒ 降级为只查原键"
+    );
+}
+
+/// 超长键不得 panic，也不得去铺天量变体。
+///
+/// `product()` 在 debug 下对 `3^41`（41 个 `l` + n_l/r_l）直接
+/// 「attempt to multiply with overflow」panic；release 下乘法 wrapping 后
+/// `total` 可能绕回小值、通过上限检查，于是真去铺 `3^41` 个变体 —— 那比 panic 更糟。
+/// 现在边乘边 `checked_mul`，溢出与超限同样降级为只查原键。
+#[test]
+fn fuzzy_abbrev_keys_survives_overflow_length() {
+    let cfg = FuzzyConfig {
+        n_l: true,
+        r_l: true,
+        ..Default::default()
+    };
+    for len in [17usize, 41, 64, 200] {
+        let key: String = "l".repeat(len);
+        let r = fuzzy::fuzzy_abbrev_keys(&key, &cfg);
+        assert_eq!(
+            r,
+            vec![(key.clone(), 0)],
+            "{len} 个 l：须降级为只查原键，不得 panic 也不得展开"
+        );
+    }
+    // 边界：恰好在限内的那一档仍照常展开（64 = 2^6，六个 2 选位）。
+    let nl = FuzzyConfig {
+        n_l: true,
+        ..Default::default()
+    };
+    assert_eq!(fuzzy::fuzzy_abbrev_keys(&"n".repeat(6), &nl).len(), 64);
+    assert_eq!(
+        fuzzy::fuzzy_abbrev_keys(&"n".repeat(7), &nl).len(),
+        1,
+        "2^7 = 128 > 64 ⇒ 降级"
+    );
+}
+
+/// **负向护栏**：召回侧放宽后，`Initial` 段校验是唯一还在挡错误候选的那道。
+///
+/// 此前本文件 8 条行为测试全是「应该出现 X」，把 `seg_matches_fuzzy` 的 `Initial` 分支
+/// 改成无条件 `Some(1)`（即放弃该判据）**两个测试文件 38 项全绿** —— 判据没有任何护栏。
+///
+/// 实例取自真实词库：输入 `nhao`、开 `f_h`，模式的键 `nha` 变体含 `nfa`，
+/// 于是「你发啊」(`ni|fa|a`) 被 `search_abbrev` 召回；它能不能进候选，全看 `Initial`
+/// 段校验肯不肯放行。放弃该判据后它就出现在「你好」旁边。
+#[test]
+fn initial_seg_check_rejects_unrelated_word() {
+    let e = engine_with(
+        "negative",
+        FuzzyConfig {
+            n_l: true,
+            f_h: true,
+            r_l: true,
+            ..Default::default()
+        },
+    );
+    let t = texts(&e, "nhao");
+    assert!(
+        !t.contains(&"你发啊".to_string()),
+        "Initial 段校验须挡住被变体键捞回的无关词: {t:?}"
+    );
+    // 前提：这条词确实进了召回（否则本用例什么都没测）—— 用它自己的精确键验证。
+    assert!(
+        texts(&e, "nfa").contains(&"你发啊".to_string()),
+        "前提：「你发啊」须能被自己的精确键 nfa 召回"
     );
 }
