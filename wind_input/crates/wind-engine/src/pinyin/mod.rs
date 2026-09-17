@@ -1171,9 +1171,20 @@ impl PinyinEngine {
                             .min()
                     })
                 };
-                // 取**处数最少**的解释计罚，与 step5b「同一个键下多条解释取 min」同口径 ——
-                // `plain` 与 `mixed` 就是同一个词的两种解释。⚠️ **不能用 `or`**：它在两边
-                // 都有值时返回左边，也就是取了**更差**的那个解释。
+                // 取**处数最少**的解释计罚，与 mod.rs 上方 step5b「同一个键下多条解释取 min」
+                // 同口径 —— `plain` 与 `mixed` 就是同一个词的两种解释。
+                // ⚠️ **不能用 `or`**：它在两边都有值时返回左边，取的是更差的那个。
+                //
+                // 全拼下 `plain_edits <= mixed_edits` 恒成立：两者同时命中 ⇒ 模式段数 ==
+                // 击键长度 ⇒ 每段恰好 1 字母 ⇒ `Initial` 段与 plain 的键逐位走**同一条**
+                // 判据；单字母 `Syllable` 段（只可能是 a/e/o）精确命中时 plain 该位亦为 0。
+                // 故 min 在全拼下恒等于 `plain_edits`。
+                //
+                // **保留 min 是因为双拼 + 手动分隔符下这条证明不成立**：那时
+                // `mixed_pattern_source` 取 `query`（转换后的全拼）而 plain 用 `abbr_query`
+                // （击键），不同域也不同长，段与击键位不再一一对应，逐位论证失去前提。
+                // 这不是「防御未知」，是不把一条**只在全拼域成立**的推理写进代码形状 ——
+                // 文档 §5 约束 4 与「双拼下 query 已是转换结果」那条注释立的就是这条规矩。
                 let Some(edits) = [plain_edits, mixed_edits].into_iter().flatten().min() else {
                     continue;
                 };
@@ -1686,15 +1697,32 @@ impl PinyinEngine {
     /// 不是在这里乘个 `fuzzy_penalized` 就完事的，属另一笔改动。
     /// `Lattice::build` 本就接 `fuzzy_config`（全拼节点支持模糊、简拼节点不支持），
     /// 这个不对称在本次改动后变成「整串支持、前缀回退支持、整句不支持」。
+    /// ⚠️ 只给**纯简拼**路径与 [`Self::abbrev_matches_stroke`] 用。混合路径走
+    /// [`Self::abbrev_recall_keys_only`]，那里有两类的分工表与用错的后果。
     fn abbrev_recall_keys(&self, key: &str) -> Vec<(String, usize)> {
         fuzzy::fuzzy_abbrev_keys(key, &self.fuzzy_config)
     }
 
-    /// 同 [`Self::abbrev_recall_keys`]，只要键、丢掉处数。
+    /// 同 [`Self::abbrev_recall_keys`]，只要键、丢掉处数。**刻意实现成前者的投影**
+    /// 而非另写一份枚举：两份枚举日后改了一个忘了另一个，召回面就会分叉 ——
+    /// 表现为「某个词在 `nanqc` 下出不来但 `nqc` 下出得来」，看着像模式枚举的毛病，
+    /// 排查会走错方向。比罚分错更隐蔽。
     ///
-    /// 供**混合**路径用：那边的模糊处数由逐段校验（`seg_matches_fuzzy`）给出，已经涵盖
-    /// `Initial` 段，键的处数是同一件事的重复计量，取了会罚两遍。纯简拼路径反过来 ——
-    /// 它没有段校验，键的处数就是唯一来源。
+    /// ## 五个召回点分两类，用错哪一类都**不会报错**
+    ///
+    /// | 路径 | 该用 | 用错的后果 |
+    /// |---|---|---|
+    /// | step5 纯简拼、step6.2 前缀回退① | [`Self::abbrev_recall_keys`] | 漏罚，退回「模糊解排到精确解前面」 |
+    /// | step5b 混合、前缀回退②、`recall_store_by_abbrev` | 本函数 | 罚两遍 |
+    ///
+    /// **混合路径丢掉键处数不会漏罚**：键第 i 位变了 ⇒ 词第 i 个音节首字母变了 ⇒
+    /// 该段的 `matches_exact` 必然失败（`Initial` 比首字母、`Syllable` 比全等，都钉死首字母）
+    /// ⇒ 校验侧必走模糊分支、必计处数。而校验侧**比键更准**：`Syllable` 段的
+    /// `sen → sheng` 是 2 处（声母 + 韵母），键位只看首字母只能给 1。
+    /// 取键处数反而罚轻，取两者之和才是罚两遍。
+    ///
+    /// ⚠️ [`Self::abbrev_matches_stroke`] 必须用**带处数**的那个（它要自己算出 plain 的
+    /// 处数），别顺手写成本函数。
     fn abbrev_recall_keys_only(&self, key: &str) -> Vec<String> {
         self.abbrev_recall_keys(key)
             .into_iter()
@@ -3167,7 +3195,10 @@ impl Engine for PinyinEngine {
                         )
                     };
                     // 取**处数最少**的解释计罚（同 step5b）。⚠️ 不能用 `or`：两边都有值时
-                    // 它返回左边，等于取了更差的解释。
+                    // 它返回左边，等于取了更差的解释。全拼下已证 `plain <= mixed`、min 恒等于
+                    // plain；保留 min 是因为**这一处**正是那条证明失效的地方 —— plain 用
+                    // `abbr_query`（击键域）而 `mixed_pats` 来自 `mixed_pattern_source`，
+                    // 双拼带手动分隔符时后者是转换后的全拼，两者不同域。详见前缀回退那处的论证。
                     let Some(edits) = [plain_edits, mixed_edits].into_iter().flatten().min() else {
                         continue;
                     };

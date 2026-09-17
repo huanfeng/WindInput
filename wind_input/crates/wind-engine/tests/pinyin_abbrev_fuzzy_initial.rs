@@ -136,11 +136,28 @@ fn plain_abbrev_hits_through_r_l() {
 #[test]
 fn mixed_abbrev_hits_through_initial_fuzzy() {
     let e = nl("mixed_nl");
-    let t = texts(&e, "nanqc");
-    assert!(
-        t.contains(&"篮球场".to_string()),
-        "开 n_l 后 nanqc 应出「篮球场」: {t:?}"
-    );
+    let r = e.convert("nanqc", 50).expect("convert 成功");
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "篮球场")
+        .unwrap_or_else(|| {
+            panic!(
+                "开 n_l 后 nanqc 应出「篮球场」: {:?}",
+                r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+            )
+        });
+
+    // **罚一遍, 不是两遍。** 混合路径的处数只取逐段校验那一份:
+    //   [Syllable("nan")] vs lan → fuzzy_variants_scored 给 1 处
+    //   [Initial('q')] vs qiu、[Initial('c')] vs chang → 精确, 各 0 处
+    // ⇒ edits=1 ⇒ 1191 × 0.5 = 595.5 → 596。
+    //
+    // 键处数(nqc→lqc 也是 1)**不再叠加** —— 叠了就是 edits=2 ⇒ 1191 × 0.25 = 298。
+    // 这条断言是「混合路径误用带处数的 abbrev_recall_keys」的唯一探测器:
+    // 那种用错既不报错也不影响召回，只是候选悄悄沉了一档。
+    assert!(c.is_fuzzy, "混合路径的模糊命中须标 is_fuzzy");
+    assert_eq!(c.weight, 596, "须只罚一遍(校验侧 1 处), 不得叠加键处数");
 }
 
 /// `lqiuc` = l + qiu(音节段) + c → 篮球场。声母段在**开头**、音节段在中间。
