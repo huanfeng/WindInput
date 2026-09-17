@@ -155,7 +155,7 @@ temp_max_entries = 5000
 # 拼音方案下，候选注释里的编码从哪来。四档：
 #   off        两种都不显示
 #   codetable  只显示主码表反查编码（${code_rev} / ${code_rev_all}）
-#   schema     只显示本方案击键，即双拼码（${code_schema}）
+#   shuangpin  只显示双拼编码（${shuangpin}）
 #   auto       两者都允许，谁先出由下方注释模板的回退链决定（出厂）
 # 开关管「允许哪些来源求值」，模板管「按什么顺序和格式摆」——两层不重叠。
 # 认不出的值按出厂档处理。
@@ -1044,8 +1044,9 @@ min_rows = 0
 # 可用变量：
 #   code_hint          引擎产的编码提示（码表前缀候选的剩余编码 si→sikao 标 kao；混输标记「拼」）
 #   code_rev           主码表整词反查编码（仅拼音来源候选，受 schema.pinyin.code_hint_source 门控）
-#   code_schema        本方案击键，即双拼码（你好 → 小鹤 nihc）。非双拼方案下恒空——
-#                      全拼的击键就是拼音本身，显示它是冗余。同受上述门控
+#   shuangpin          双拼编码（你好 → 小鹤 nihc）。同受上述门控。
+#                      **全拼方案下照样有值**：布局按「活跃方案→主拼音方案→已装的首个
+#                      双拼方案」回退，一个双拼方案都没装才恒空
 #   pinyin             带声调注音 nǐ hǎo（多音字按词典消歧：「行长」得 háng zhǎng 而非 xíng cháng）
 #   chaizi             拆字字根串，仅单字候选（需方案配了 [engine.chaizi]）
 #   chaizi_code        该字在拆字库里的编码，仅单字候选
@@ -1053,15 +1054,15 @@ min_rows = 0
 #   code_rev_all[:分隔符] 主码表全部码位（我 → q/trn/trnt），默认 / 连接
 #   dict               挂载的注释词库里该词的注释（见下方 [[ui.comment_dicts]]）
 #
-# 出厂值 ${code_hint|code_rev|code_schema} 的回退链含义：优先显示引擎产的编码提示，
-# 没有就显示主码表反查编码，再没有（例如没配主码表的双拼用户）就显示本方案的击键。
+# 出厂值 ${code_hint|code_rev|shuangpin} 的回退链含义：优先显示引擎产的编码提示，
+# 没有就显示主码表反查编码，再没有（例如没配主码表的用户）就显示双拼编码。
 # 前两段等价于本功能引入前的固定行为，故配了主码表的用户升级后所见不变。
 # ${code} / ${code_all} 是 ${code_rev} / ${code_rev_all} 的兼容别名，老模板照常可用。
 # 例：竖排显示字根与注音 → "{〔${chaizi}〕}{ ${pinyin}}"
-# 例：同时看码表码与双拼码 → "${code_hint|code_rev}{ [${code_schema}]}"
+# 例：同时看码表码与双拼码 → "${code_hint|code_rev}{ [${shuangpin}]}"
 # 完整说明与更多示例：https://windinput.com/docs/settings/appearance/candidate-comment
-comment_template_vertical = "${code_hint|code_rev|code_schema}"
-comment_template_horizontal = "${code_hint|code_rev|code_schema}"
+comment_template_vertical = "${code_hint|code_rev|shuangpin}"
+comment_template_horizontal = "${code_hint|code_rev|shuangpin}"
 # 注释段最大字数（0=不限），超出截断并加省略号。横竖各一份：横排全部候选共享一行宽度，
 # 竖排每行独占，能放多少本就不是同一个答案。
 comment_max_chars_vertical = 0

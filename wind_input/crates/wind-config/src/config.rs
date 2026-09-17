@@ -927,10 +927,9 @@ impl Default for EnglishFrequency {
 ///
 /// # 为什么从 bool 改成四档
 ///
-/// 旧的 `show_code_hint` 只能回答「要不要显示反查来的码表编码」。双拼用户要的是第三种
-/// 东西——**自己方案的击键**（GH#128「字或词的后面能不能显示双拼的编码」），它既不在
-/// 码表词库里、也不是「关掉」能表达的。硬塞进 bool 只会变成「开关开着，却显示着我不想要
-/// 的那种码」。
+/// 旧的 `show_code_hint` 只能回答「要不要显示反查来的码表编码」。用户要的是第三种东西
+/// ——**双拼编码**（GH#128「字或词的后面能不能显示双拼的编码」），它既不在码表词库里、
+/// 也不是「关掉」能表达的。硬塞进 bool 只会变成「开关开着，却显示着我不想要的那种码」。
 ///
 /// ★ 改名顺带消解了一处长期的同名冲突：`schema.codetable.show_code_hint` 管的是**码表
 /// 引擎**给前缀候选标剩余编码（敲 `si` 时给 `sikao` 标 `kao`），与本键毫无关系却一直同名。
@@ -941,8 +940,8 @@ pub enum CodeHintSource {
     Off,
     /// 只反查主码表（旧 `show_code_hint = true`）。
     CodeTable,
-    /// 只显示本方案击键（双拼码）。
-    Schema,
+    /// 只显示双拼编码。
+    Shuangpin,
     /// 两者都求值，谁先出由模板的回退链决定。出厂档。
     #[default]
     Auto,
@@ -959,7 +958,7 @@ impl CodeHintSource {
         match s.trim().to_ascii_lowercase().as_str() {
             "off" => Self::Off,
             "codetable" => Self::CodeTable,
-            "schema" => Self::Schema,
+            "shuangpin" => Self::Shuangpin,
             _ => Self::Auto,
         }
     }
@@ -969,9 +968,9 @@ impl CodeHintSource {
         matches!(self, Self::CodeTable | Self::Auto)
     }
 
-    /// 允许 `${code_schema}`（本方案击键）求值吗？
-    pub fn allows_schema(self) -> bool {
-        matches!(self, Self::Schema | Self::Auto)
+    /// 允许 `${shuangpin}`（双拼编码）求值吗？
+    pub fn allows_shuangpin(self) -> bool {
+        matches!(self, Self::Shuangpin | Self::Auto)
     }
 
     /// 在本档基础上**强制放行反查**，其余照旧。
@@ -979,13 +978,13 @@ impl CodeHintSource {
     /// 给 overlay 反查模式（临时拼音 / 快捷输入内拼音）用：那些模式本身就是「用拼音反查
     /// 码表编码」，出不了码就失去意义，所以无视用户把来源关掉的配置。
     ///
-    /// ★ 是**并集**不是替换。直接改写成 `CodeTable` 的话，一个把来源设成 `Schema`
+    /// ★ 是**并集**不是替换。直接改写成 `CodeTable` 的话，一个把来源设成 `Shuangpin`
     /// （「我只要看双拼码」）的用户一进快捷输入，看到的反而只剩他选择不看的那种码。
     /// 强制放行 A 不该顺手关掉 B —— 旧的 `pinyin_hint = force_hint || ...` 也只做加法。
     pub fn forcing_reverse(self) -> Self {
         match self {
             Self::Off | Self::CodeTable => Self::CodeTable,
-            Self::Schema | Self::Auto => Self::Auto,
+            Self::Shuangpin | Self::Auto => Self::Auto,
         }
     }
 }
@@ -5332,7 +5331,7 @@ fn default_comment_template() -> String {
     // 回退链：引擎产的编码提示 → 主码表反查 → 本方案击键。前两段等价于本功能引入前的
     // 固定行为，故配了主码表的用户升级后所见不变；第三段只在前两段都空时才出（没配主
     // 码表的双拼用户，此前那里是空的）。
-    "${code_hint|code_rev|code_schema}".to_string()
+    "${code_hint|code_rev|shuangpin}".to_string()
 }
 
 /// 编码显示方式（解析自 ui.candidate.preedit_display）。
@@ -10689,7 +10688,7 @@ scripts = { latin = 42 }
     #[test]
     fn explicit_new_key_wins_over_stale_old_key() {
         let mut user: toml::Value = toml::from_str(
-            "[schema.pinyin]\nshow_code_hint = true\ncode_hint_source = \"schema\"\n",
+            "[schema.pinyin]\nshow_code_hint = true\ncode_hint_source = \"shuangpin\"\n",
         )
         .unwrap();
         Config::migrate_user_layer_value(&mut user);
@@ -10697,7 +10696,7 @@ scripts = { latin = 42 }
         let mut merged = toml::Value::try_from(Config::default()).unwrap();
         merge_value(&mut merged, user);
         let cfg: Config = merged.try_into().expect("反序列化");
-        assert_eq!(cfg.schema.pinyin.code_hint_source, "schema");
+        assert_eq!(cfg.schema.pinyin.code_hint_source, "shuangpin");
     }
 
     /// ★ `show_code_hint`(bool) → `code_hint_source`(枚举)。
@@ -10743,7 +10742,7 @@ scripts = { latin = 42 }
     #[test]
     fn migrate_show_code_hint_keeps_explicit_new_key() {
         let mut v: toml::Value = toml::from_str(
-            "[schema.pinyin]\nshow_code_hint = true\ncode_hint_source = \"schema\"\n",
+            "[schema.pinyin]\nshow_code_hint = true\ncode_hint_source = \"shuangpin\"\n",
         )
         .unwrap();
         Config::migrate_show_code_hint_value(&mut v);
@@ -10754,7 +10753,7 @@ scripts = { latin = 42 }
                 .unwrap()
                 .get("code_hint_source")
                 .and_then(toml::Value::as_str),
-            Some("schema")
+            Some("shuangpin")
         );
     }
 
@@ -10775,15 +10774,15 @@ scripts = { latin = 42 }
     #[test]
     fn forcing_reverse_is_a_union_not_a_replacement() {
         use CodeHintSource::*;
-        for src in [Off, CodeTable, Schema, Auto] {
+        for src in [Off, CodeTable, Shuangpin, Auto] {
             let forced = src.forcing_reverse();
             assert!(forced.allows_reverse(), "{src:?}：强制后必须放行反查");
             assert!(
-                !src.allows_schema() || forced.allows_schema(),
-                "{src:?}：强制放行反查不该顺手关掉 code_schema"
+                !src.allows_shuangpin() || forced.allows_shuangpin(),
+                "{src:?}：强制放行反查不该顺手关掉 shuangpin"
             );
         }
-        assert_eq!(Schema.forcing_reverse(), Auto);
+        assert_eq!(Shuangpin.forcing_reverse(), Auto);
         assert_eq!(Off.forcing_reverse(), CodeTable);
     }
 
@@ -10794,11 +10793,11 @@ scripts = { latin = 42 }
         for (src, rev, sch) in [
             (Off, false, false),
             (CodeTable, true, false),
-            (Schema, false, true),
+            (Shuangpin, false, true),
             (Auto, true, true),
         ] {
             assert_eq!(src.allows_reverse(), rev, "{src:?}.allows_reverse");
-            assert_eq!(src.allows_schema(), sch, "{src:?}.allows_schema");
+            assert_eq!(src.allows_shuangpin(), sch, "{src:?}.allows_shuangpin");
         }
     }
 
@@ -10808,7 +10807,10 @@ scripts = { latin = 42 }
     /// 的静默失效——本仓记忆里反复出现的那一类。
     #[test]
     fn unknown_code_hint_source_falls_back_to_auto() {
-        assert_eq!(CodeHintSource::from_config("schama"), CodeHintSource::Auto);
+        assert_eq!(
+            CodeHintSource::from_config("shuangping"),
+            CodeHintSource::Auto
+        );
         assert_eq!(CodeHintSource::from_config(""), CodeHintSource::Auto);
         // 大小写与空白不敏感（设置页写回的值与用户手打的都认）。
         assert_eq!(

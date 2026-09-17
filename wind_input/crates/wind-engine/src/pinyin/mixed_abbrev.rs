@@ -256,7 +256,7 @@ pub fn syllables_from_boundary(code: &str, boundary: u64) -> Option<Vec<&str>> {
     //
     // `!code.is_ascii()`：下面按**字节**下标切片，`i` 落在多字节字符内部会 panic。
     // 同文件的 `render_keystroke_preedit` 早就带着同款守卫，说明本模块不把 ASCII 当
-    // 可假设的前提。此前本函数的调用方都带 `is_abbrev` 一类的窄化守卫，`schema_keys_of`
+    // 可假设的前提。此前本函数的调用方都带 `is_abbrev` 一类的窄化守卫，`shuangpin_code_of`
     // 把调用面扩到了**每条拼音候选**、且处在按键线程持 state 锁的位置 —— 那里 panic
     // 就是整个输入法崩掉，而这行的成本是零。
     if boundary & 1 == 0 || code.is_empty() || !code.is_ascii() {

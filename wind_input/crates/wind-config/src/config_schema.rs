@@ -152,7 +152,7 @@ const PUNCT_EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear", "clear_no
 /// ⚠️ 必须与 [`wind_config::config::CodeHintSource::from_config`] 的 match 臂**逐项对齐**。
 /// 不对齐的表现是第二种漂移：注册表说某个值非法（CLI/设置页据此校验、生成下拉），
 /// 运行时却认它——或者反过来。
-pub(crate) const CODE_HINT_SOURCE_VALUES: &[&str] = &["off", "codetable", "schema", "auto"];
+pub(crate) const CODE_HINT_SOURCE_VALUES: &[&str] = &["off", "codetable", "shuangpin", "auto"];
 
 const FREQ_STRATEGY_VALUES: &[&str] = &["top", "step", "position"];
 

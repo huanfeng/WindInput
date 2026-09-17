@@ -898,7 +898,49 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner()) = (String::new(), None);
     }
 
-    /// 活跃方案的双拼反向表（惰性建 + 单槽缓存）；非双拼方案返回 `None`。
+    /// 双拼编码（`${shuangpin}`）用**哪个方案**的布局。回退链，与
+    /// [`Self::resolve_primary_codetable`] 同构（显式的优先，否则按 `available` 顺序找）：
+    ///
+    /// | 顺位 | 取谁 |
+    /// |---|---|
+    /// | 1 | 活跃方案本身是双拼 → 用它 |
+    /// | 2 | `schema.primary_pinyin` 是双拼 → 用它 |
+    /// | 3 | `available` 里首个双拼方案 |
+    /// | — | 都不是 ⇒ `None`（没装双拼方案，无从谈起） |
+    ///
+    /// ★ **全拼方案下也给值，是刻意的。** 早先只认活跃方案，全拼下恒空，理由是「全拼的
+    /// 击键就是拼音本身，显示是冗余」—— 那句话对「本方案击键」成立，对「双拼编码」不成立。
+    /// GH#128 的原话是「有时忘记了还能看下」：正在用双拼打字的人刚敲完码不会忘，会忘并且
+    /// 想看一眼的，多半是**用全拼打字、正在往双拼迁移**的人。只认活跃方案的话，那批人
+    /// 装上新版什么也看不到，而他们恰恰是这个功能最主要的受众。
+    ///
+    /// 读盘（`read_schema` × 最多 available 条），故**只在反向表缓存 miss 时走**，
+    /// 即切换方案后的第一次求值。
+    fn shuangpin_hint_schema(&self) -> Option<String> {
+        let active = self.active_schema_id();
+        if self.shuangpin_layout_id_of(&active).is_some() {
+            return Some(active);
+        }
+        let primary = self
+            .primary_pinyin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !primary.is_empty() && self.shuangpin_layout_id_of(&primary).is_some() {
+            return Some(primary);
+        }
+        // available 的顺序即用户的偏好顺序 —— 与 `resolve_primary_codetable` 同一判据。
+        let available = self
+            .available
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        available
+            .into_iter()
+            .find(|id| self.shuangpin_layout_id_of(id).is_some())
+    }
+
+    /// 双拼反向表（惰性建 + 单槽缓存）；没有可用的双拼布局时返回 `None`。
     ///
     /// 建表实测 ~310µs（release），只发生在切方案后的第一次求值；命中时只是一次
     /// `HashMap` 查询加一次 `Arc` 克隆。
@@ -913,9 +955,15 @@ impl EngineManager {
                 return cache.1.clone();
             }
         }
-        let table = self.load_shuangpin_layout(&id).map(|lay| {
-            Arc::new(crate::pinyin::shuangpin::ShuangpinConverter::new(lay).build_reverse())
-        });
+        // 布局来源不一定是活跃方案本身（全拼方案会回退到某个双拼方案），见
+        // `shuangpin_hint_schema`。缓存仍以活跃方案 id 作键：来源是活跃方案的函数，
+        // 活跃方案不变、来源就不会变。
+        let table = self
+            .shuangpin_hint_schema()
+            .and_then(|src| self.load_shuangpin_layout(&src))
+            .map(|lay| {
+                Arc::new(crate::pinyin::shuangpin::ShuangpinConverter::new(lay).build_reverse())
+            });
         *self
             .shuangpin_reverse_cache
             .lock()
@@ -928,8 +976,8 @@ impl EngineManager {
     ///
     /// # 三种 `None`，都按「这一次不显示」处理
     ///
-    /// - **活跃方案不是双拼**（全拼、码表、混输…）。全拼方案下击键就是 `code` 本身，
-    ///   显示它是冗余——与 `${code_rev}` 在码表方案下恒空是同一条理由。
+    /// - **找不到任何双拼布局**（没装双拼方案）。见 [`Self::shuangpin_hint_schema`] 的回退链
+    ///   ——全拼方案下**不**恒空，它会回退到用户装着的双拼方案。
     /// - **`boundary == 0`**：音节切分不可靠。模糊音变体命中与用户手输码的词条一律
     ///   置 0（见 `pinyin/mod.rs` 那句「模糊变体命中一律 boundary=0（不设防）」），
     ///   拿 DAG 去猜切分会偏向少音节（`xian` 猜成一个音节）。切错了显示出来的编码
@@ -945,21 +993,21 @@ impl EngineManager {
     /// 反向表按活跃方案缓存。命中路径是一次 `active_schema_id()`（锁 + String 克隆）、
     /// 一次 HashMap 查询、一次 Arc 克隆，无 IO；miss 时也只是解析一份布局 TOML 再建表，
     /// 不像 `word_codes_in` 那样可能撞上秒级的词库反查索引构建。
-    pub fn schema_keys_of(&self, code: &str, boundary: u64) -> Option<String> {
+    pub fn shuangpin_code_of(&self, code: &str, boundary: u64) -> Option<String> {
         let syllables = crate::pinyin::mixed_abbrev::syllables_from_boundary(code, boundary)?;
-        self.schema_keys_of_syllables(&syllables)
+        self.shuangpin_code_of_syllables(&syllables)
     }
 
     /// 音节序列 → 活跃方案的双拼击键串；非双拼方案、或任一音节查不到返回 `None`。
     ///
-    /// [`Self::schema_keys_of`] 走候选自带的 `code`+`boundary`（词条真值）。本方法给
+    /// [`Self::shuangpin_code_of`] 走候选自带的 `code`+`boundary`（词条真值）。本方法给
     /// **没有候选身份**的路径用——剪贴板反查（cmdbar `dict.rev`）手上只有一段裸文本，
     /// 音节得先由 [`Self::word_pinyin_syllables`] 按词推断（那条路会做多音字消歧，
     /// 「行长」得 `hang zhang` 而不是逐字最常用读音的 `xing chang`）。
     ///
     /// 两条路径汇到同一张反向表，故 `${code_schema}` 在注释段与反查两个入口同义——
     /// 用户在注释模板里学会的写法能原样用在 `dict.rev(format=…)` 里。
-    pub fn schema_keys_of_syllables(&self, syllables: &[&str]) -> Option<String> {
+    pub fn shuangpin_code_of_syllables(&self, syllables: &[&str]) -> Option<String> {
         self.shuangpin_reverse()?.encode_all(syllables)
     }
 
