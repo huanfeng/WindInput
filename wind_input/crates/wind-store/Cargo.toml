@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 redb = { workspace = true }
+wind-utils = { path = "../wind-utils" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

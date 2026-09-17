@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 wind-candidate = { path = "../wind-candidate" }
 tracing = { workspace = true }
+wind-utils = { path = "../wind-utils" }
 
 [lints]
 workspace = true

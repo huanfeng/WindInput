@@ -2409,6 +2409,7 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "wind-candidate",
+ "wind-utils",
 ]
 
 [[package]]
@@ -2430,6 +2431,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "unicode-segmentation",
+ "wind-utils",
 ]
 
 [[package]]
@@ -2660,6 +2662,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wind-cmdbar",
+ "wind-utils",
 ]
 
 [[package]]
@@ -2746,6 +2749,10 @@ dependencies = [
  "wind-bridge",
  "wind-theme",
 ]
+
+[[package]]
+name = "wind-utils"
+version = "0.1.0"
 
 [[package]]
 name = "wind-webdata"

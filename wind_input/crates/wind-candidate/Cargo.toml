@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+wind-utils = { path = "../wind-utils" }
 unicode-segmentation = { workspace = true }
 
 [lints]

@@ -1,0 +1,10 @@
+[package]
+name = "wind-utils"
+version.workspace = true
+edition.workspace = true
+
+# ⚠️ 这里**刻意为空**，见 lib.rs 的「零依赖」约定。要加依赖之前先读那段。
+[dependencies]
+
+[lints]
+workspace = true

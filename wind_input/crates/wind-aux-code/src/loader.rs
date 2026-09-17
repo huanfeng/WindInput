@@ -68,13 +68,16 @@ fn parse_name_from_first_line(first_line: &str) -> Option<String> {
 /// `阿=ek`、`厑=ib`、`厑=ii`。
 ///
 /// - 空行与 `#` 注释行跳过；无 `=`、左侧非单字或右侧为空码的行整行跳过
-/// - 开头剥掉 UTF-8 BOM（Windows 记事本保存的 txt 常见），避免首行字被当成非单字跳掉
+/// - 开头剥掉 UTF-8 BOM、孤立 `\r` 行尾折成 `\n`（见 [`wind_utils::text::normalize_input`]）：
+///   前者避免首行字被当成非单字跳掉，后者避免整份文件被当成一行——带 `# name:` 头的
+///   出厂表在那种情况下会被整个当成一条注释，0 条且无任何提示
 /// - **第 1 行**提取方法名（`# name: 笔画`，见模块文档）；其余元数据一律当注释
 ///
 /// 内容来源（文件 / 网络 / 内嵌）由调用方决定，本函数只做纯解析，不接触文件系统。
 /// crate 内部用（`load_from_file`）；如需对外暴露纯解析入口再提升为 `pub`。
 pub(crate) fn parse_str(content: &str) -> AuxCodeTable {
-    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let normalized = wind_utils::text::normalize_input(content);
+    let content = normalized.as_ref();
     let mut name = String::new();
     let mut rows: Vec<(char, &str)> = Vec::new();
     for (i, line) in content.lines().enumerate() {
@@ -227,5 +230,37 @@ mod tests {
         assert_eq!(t.codes_of('李').collect::<Vec<_>>(), vec!["mz"]);
         assert_eq!(t.codes_of('河').collect::<Vec<_>>(), vec!["sk", "dk"]);
         assert_eq!(t.codes_of('樱').collect::<Vec<_>>(), vec!["mn"]);
+    }
+
+    /// 行尾不挑食：同一份表无论 LF / CRLF / 孤立 CR，解析结果必须一致。
+    ///
+    /// 修之前带 `# name:` 头的 CR 文件整份被当成一条注释 → **0 字、无任何提示**；
+    /// 不带头的则只认出 1 个字，且它的码是 `mz\r樱=my\r河=sk` 这种含 CR 的垃圾串。
+    /// 出厂的 flypy_full.txt / stroke.txt 都带 `# name:` 头，所以前一种才是常态。
+    ///
+    /// ⚠️ 样本在代码里构造，不要改用仓库里的 fixture：git 的 core.autocrlf 会按平台
+    /// 改写文件行尾，那样这条测的就是 git 配置而不是解析器。
+    #[test]
+    fn line_endings_do_not_change_the_result() {
+        for lf in [
+            "李=mz\n樱=my\n河=sk\n",
+            "# name: 飞键\n李=mz\n樱=my\n河=sk\n",
+        ] {
+            let want = parse_str(lf);
+            for (tag, text) in [
+                ("CRLF", lf.replace('\n', "\r\n")),
+                ("CR", lf.replace('\n', "\r")),
+            ] {
+                let got = parse_str(&text);
+                assert_eq!(got.name, want.name, "{tag}: 方法名");
+                for ch in ['李', '樱', '河'] {
+                    assert_eq!(
+                        got.codes_of(ch).collect::<Vec<_>>(),
+                        want.codes_of(ch).collect::<Vec<_>>(),
+                        "{tag}: {ch} 的码与 LF 版不同"
+                    );
+                }
+            }
+        }
     }
 }

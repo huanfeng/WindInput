@@ -74,13 +74,18 @@ impl CommonChars {
 
     /// 从文件加载（一字一行，`#` 注释行跳过；空白与控制字符外全收，见 [`is_markable`]）。
     ///
+    /// 入口过一道 [`wind_utils::text::normalize_input`]：剥 BOM、抹平行尾。
+    ///
     /// ⚠️ **出厂已不走这条路**（常用字表在 `charsets/common_han.yaml`）。保留它是给
     /// 「用户自己的类引用了一个外部字表」那种情形，以及本模块的测试。
     /// 失败（文件缺失）返回空集；上层应在空集时退化为"不过滤"。
     pub fn load(path: &Path) -> Self {
         let mut base = HashSet::new();
         let mut base_order = Vec::new();
-        if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            // 行尾规整：孤立 \r 会让整份文件算成一行，带 `#` 注释头的表就被整个
+            // 当成注释跳过 → 空表 → 上层退化成不过滤，用户的字表悄无声息地没生效
+            let content = wind_utils::text::normalize_input(&raw);
             for line in content.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
@@ -969,5 +974,32 @@ mod tests {
         );
         // 没被表过态的域外字符照旧忽略：零回归是放开的前提。
         assert!(cc.is_string_common("我，", &cs));
+    }
+
+    /// 行尾不挑食：带 `#` 注释头的 CR 文件，修之前整份被当成注释 → 空表 →
+    /// 上层退化成「不过滤」，用户的字表悄无声息地没生效。
+    ///
+    /// ⚠️ 样本在代码里构造，不要改用仓库里的 fixture（git core.autocrlf 会改行尾）。
+    #[test]
+    fn line_endings_do_not_change_the_result() {
+        let dir = std::env::temp_dir().join(format!("wind-common-eol-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for lf in ["李\n樱\n河\n", "# 我的常用字表\n李\n樱\n河\n"] {
+            for (tag, text) in [
+                ("LF", lf.to_string()),
+                ("CRLF", lf.replace('\n', "\r\n")),
+                ("CR", lf.replace('\n', "\r")),
+            ] {
+                let p = dir.join(format!("{tag}.txt"));
+                std::fs::write(&p, &text).unwrap();
+                let c = CommonChars::load(&p);
+                let _ = std::fs::remove_file(&p);
+                assert!(!c.is_empty(), "{tag}: 字表不该是空的（样本 {lf:?}）");
+                for ch in ['李', '樱', '河'] {
+                    assert!(c.base.contains(&ch), "{tag}: 缺字 {ch}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir(&dir);
     }
 }

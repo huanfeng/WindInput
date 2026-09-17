@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/wind-utils",
     "crates/wind-ipc",
     "crates/wind-bridge",
     "crates/wind-config",

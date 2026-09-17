@@ -18,7 +18,6 @@ pub mod stat_collector;
 pub mod stats;
 pub mod store;
 pub mod temp_words;
-pub mod text_source;
 pub mod user_words;
 pub mod wdict;
 

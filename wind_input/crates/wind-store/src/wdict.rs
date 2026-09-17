@@ -8,7 +8,7 @@
 //! 命令栏语法条目在那里只保护分隔符、反斜杠原样穿过。编码域（code / action / cand_id）
 //! 不可能是命令栏语法，仍用下面这对原始函数。
 
-use crate::text_source::normalize_import_text;
+use wind_utils::text::normalize_input;
 
 /// TSV 字段转义（与 Go EscapeField 一致）。
 pub fn escape_field(s: &str) -> String {
@@ -161,7 +161,7 @@ pub fn export_phrases_wdict(rows: &[PhraseIo], exported_at: &str) -> String {
 /// 解析 wdict 文本的 phrases 段。返回 (行, 跳过的非法行数)。
 /// 只认 version==1；无 phrases 段返回空。列按 header 声明顺序解析，缺 header 用默认列。
 pub fn parse_phrases_wdict(text: &str) -> Result<(Vec<PhraseIo>, usize), String> {
-    let normalized = normalize_import_text(text);
+    let normalized = normalize_input(text);
     let text = normalized.as_ref();
     // 1. 头部 = 第一个 "\n---" 之前
     let header = text.split("\n---").next().unwrap_or("");
@@ -338,14 +338,14 @@ fn check_wdict_header(header: &str) -> Result<(), String> {
 
 /// 解析 wdict 文本的 words 段。返回 (行, 跳过的非法行数)。只认 version==1。
 pub fn parse_words_wdict(text: &str) -> Result<(Vec<WordIo>, usize), String> {
-    let normalized = normalize_import_text(text);
+    let normalized = normalize_input(text);
     let text = normalized.as_ref();
     parse_word_rows(text, "words")
 }
 
 /// 解析 wdict 文本的 temp_words 段（临时词库；列与 words 相同 code/text/weight/count）。
 pub fn parse_temp_words_wdict(text: &str) -> Result<(Vec<WordIo>, usize), String> {
-    let normalized = normalize_import_text(text);
+    let normalized = normalize_input(text);
     let text = normalized.as_ref();
     parse_word_rows(text, "temp_words")
 }
@@ -402,7 +402,7 @@ pub struct FreqIo {
 
 /// 解析 wdict 文本的 freq 段。返回 (行, 跳过的非法行数)。无该段返回空。
 pub fn parse_freq_wdict(text: &str) -> Result<(Vec<FreqIo>, usize), String> {
-    let normalized = normalize_import_text(text);
+    let normalized = normalize_input(text);
     let text = normalized.as_ref();
     let header = text.split("\n---").next().unwrap_or("");
     check_wdict_header(header)?;
@@ -512,7 +512,7 @@ pub fn export_dict_wdict(words: &[WordIo], shadow: &[ShadowActionIo], exported_a
 /// 解析 wdict 文本的 shadow 段。返回 (行, 跳过的非法行数)。
 /// 无 shadow 段返回空；version 非 1 报错（与 words 段一致）。
 pub fn parse_shadow_wdict(text: &str) -> Result<(Vec<ShadowActionIo>, usize), String> {
-    let normalized = normalize_import_text(text);
+    let normalized = normalize_input(text);
     let text = normalized.as_ref();
     let header = text.split("\n---").next().unwrap_or("");
     if !header.contains("wind_dict:") {
@@ -728,7 +728,7 @@ pub fn export_dict_sections(
 /// 读取头部标量字段（`  key: value`，第一个 `\n---` 之前）。用于取 schema_id / engine_type。
 /// 只匹配以 `key:` 打头的行（trim 后），返回其值；无则 None。
 pub fn read_header_field(text: &str, key: &str) -> Option<String> {
-    let normalized = normalize_import_text(text);
+    let normalized = normalize_input(text);
     let text = normalized.as_ref();
     let header = text.split("\n---").next().unwrap_or("");
     let prefix = format!("{key}:");
@@ -746,7 +746,7 @@ pub fn read_header_field(text: &str, key: &str) -> Option<String> {
 
 /// 文件中实际出现的段标签（`--- !<tag>`），保序去重。用于导入预览"文件含哪些段"。
 pub fn sections_present(text: &str) -> Vec<String> {
-    let normalized = normalize_import_text(text);
+    let normalized = normalize_input(text);
     let text = normalized.as_ref();
     let mut out = Vec::new();
     for line in text.lines() {

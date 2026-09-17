@@ -5,7 +5,7 @@
 //! 顺带剥掉紧邻其前的 `\r`），孤立 `\r` 因此不算换行，整份文件被当成一行。
 //! 2026-09-17 实测的三种症状没有一种会提到行尾，最坏的一种还是**静默成功**：
 //! TSV 提示「导入成功、只进 1 条」、`skipped` 仍是 0。修法见
-//! `text_source::normalize_import_text`。
+//! `wind_utils::text::normalize_input`。
 //!
 //! 末尾的 `every_text_entry_point_normalizes` 是守卫：新增一个吃全文的 `pub fn`
 //! 却忘了归一化，它会红。
@@ -197,8 +197,6 @@ fn every_text_entry_point_normalizes() {
         // 字符计数：归一化会把 \r\n 折成一个字符，统计值就变了
         "classify_chars",
         "classify_chars_full",
-        // 归一化函数自己
-        "normalize_import_text",
     ];
 
     let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -235,9 +233,10 @@ fn every_text_entry_point_normalizes() {
                 continue;
             }
             checked.push(format!("{file}::{name}"));
-            // 函数体开头附近应当出现归一化调用
-            let body_head = &rest[brace..rest.len().min(brace + 220)];
-            if !body_head.contains("normalize_import_text") {
+            // 函数体开头附近应当出现归一化调用。按**行**取而不是按字节切——
+            // 字节切片会切进中文注释的字符中间直接 panic。
+            let body_head: String = rest[brace..].lines().take(5).collect::<Vec<_>>().join("\n");
+            if !body_head.contains("normalize_input") {
                 missing.push(format!("{file}::{name}"));
             }
         }
@@ -247,7 +246,7 @@ fn every_text_entry_point_normalizes() {
         missing.is_empty(),
         "这些吃全文的入口没有归一化行尾，孤立 \\r 会让整份文件算成一行：{missing:#?}\n\
          修法：函数体第一行加\n  \
-         let normalized = normalize_import_text(text);\n  \
+         let normalized = normalize_input(text);\n  \
          let text = normalized.as_ref();\n\
          确实不按行解析的，加进 NOT_LINE_BASED 并写明理由。"
     );
