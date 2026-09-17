@@ -2845,9 +2845,21 @@ impl Engine for PinyinEngine {
             syllable_cap,
             completed_len,
         ) {
-            // 候选比已完成音节多出的音节数（`boundary == 0` → 0）。同时供「是否降级」判据
-            // 与 `completion_penalized` 的折扣指数使用。
-            let distance = h.boundary.count_ones().saturating_sub(completed_syls);
+            // 候选比已完成音节多出的音节数。同时供「是否降级」判据与
+            // `completion_penalized` 的折扣指数使用。
+            //
+            // ⚠️ **必须过 `effective_boundary`**：`boundary == 0`（导入词库 / 手输码 /
+            // 旧数据）时 `count_ones()` 也是 0，`saturating_sub` 一减就是 0 —— 于是不管几个
+            // 音节，全部算作「与输入完全对齐」，既躲过分档、又白拿残码上浮特权、还免掉
+            // `completion_penalized` 的折扣。真机现场：用户导入扩展词库后打 `meiy`，
+            // 3 音节词涌进候选把单字「没」压到第 59 位。
+            //
+            // 同一个漏网口简拼路径堵过（见 step5 那条「boundary=0 不再直接放行」的注释），
+            // 这里当时漏了。`effective_boundary` 只在 `boundary == 0` 时才对码现切，
+            // 正常候选零成本。
+            let distance = effective_boundary(&h.code, h.boundary, trie)
+                .count_ones()
+                .saturating_sub(completed_syls);
             let demote_to_prefix_layer = if trailing_partial {
                 // ⚠️ 门槛比的是**原始** weight：COMPLETION_FAR_WEIGHT_FLOOR 按原始权重分布
                 // 标定（合理项下界「中国人民解放军」252 / 噪音上界 60），拿折后值比会让这条
@@ -3178,14 +3190,15 @@ impl Engine for PinyinEngine {
                         c.weight = c.weight.min(cap);
                     }
                 }
-                // 显示序档位，口径同 step4（`boundary == 0` ⇒ count_ones() 为 0 ⇒ 档位 0，
-                // 即手输码用户词不降档 —— 与全仓「无边界信息一律降级放行」一致）。
+                // 显示序档位，口径同 step4 —— 连同那条「boundary == 0 要过
+                // `effective_boundary` 现切」一起（理由见 step4 的 `distance`）。
+                // 用户词里手输码条目最多，这一处漏掉的话，导入词库绕过分档的路就没堵上。
                 if c.is_prefix {
-                    c.completion_extra_syllables =
-                        c.boundary
-                            .count_ones()
-                            .saturating_sub(started_syllables)
-                            .min(u8::MAX as u32) as u8;
+                    c.completion_extra_syllables = effective_boundary(&c.code, c.boundary, trie)
+                        .count_ones()
+                        .saturating_sub(started_syllables)
+                        .min(u8::MAX as u32)
+                        as u8;
                 }
                 candidates.push(c);
             }
