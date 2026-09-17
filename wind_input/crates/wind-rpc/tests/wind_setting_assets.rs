@@ -160,8 +160,9 @@ fn every_core_key_is_either_in_the_manifest_or_exempt() {
     let Some(repo) = setting_repo() else {
         return skip("设置清单覆盖对账");
     };
-    let manifest: toml::Value = toml::from_str(&read(&repo.join("src/assets/settings_manifest.toml")))
-        .expect("settings_manifest.toml 不是合法 TOML");
+    let manifest: toml::Value =
+        toml::from_str(&read(&repo.join("src/assets/settings_manifest.toml")))
+            .expect("settings_manifest.toml 不是合法 TOML");
     let covered: BTreeSet<&str> = manifest
         .get("items")
         .and_then(|v| v.as_array())
@@ -172,10 +173,15 @@ fn every_core_key_is_either_in_the_manifest_or_exempt() {
                 .collect()
         })
         .unwrap_or_default();
-    assert!(!covered.is_empty(), "设置清单里一个 key 都没解析出来，对账无意义");
+    assert!(
+        !covered.is_empty(),
+        "设置清单里一个 key 都没解析出来，对账无意义"
+    );
 
     let Some(exempt) = parse_uncovered_by_design(&read(&repo.join("src/capabilities.rs"))) else {
-        eprintln!("跳过设置清单覆盖对账：没能从 capabilities.rs 抠出 UNCOVERED_BY_DESIGN（它改结构了？）");
+        eprintln!(
+            "跳过设置清单覆盖对账：没能从 capabilities.rs 抠出 UNCOVERED_BY_DESIGN（它改结构了？）"
+        );
         return;
     };
 
