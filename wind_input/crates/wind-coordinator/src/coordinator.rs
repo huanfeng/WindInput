@@ -8141,7 +8141,11 @@ mod mode_comment_e2e_tests {
         c.state.lock().unwrap().input_buffer.clear();
 
         // 四个模式逐个开、逐个关。
-        let cases: [(&str, Box<dyn Fn(&mut State)>); 4] = [
+        //
+        // 抽成别名是为了躲开 clippy::type_complexity；四个用例共用一个形状，
+        // 给它一个名字反而把这件事写明白了。
+        type StateMutator = Box<dyn Fn(&mut State)>;
+        let cases: [(&str, StateMutator); 4] = [
             ("加词", Box::new(|st: &mut State| st.add_word_active = true)),
             (
                 "临拼",
@@ -8297,7 +8301,11 @@ mod mode_comment_e2e_tests {
     fn overlay_caret_switches_only_gate_the_hotkey_entry() {
         // special / rare_char 共用一个形状：关掉开关 + 直达热键 ⇒ Consumed。
         // 临拼的进入点签名不同（还要区分「有没有半成品可上屏」），单列在下面。
-        let cases: [(&str, fn(&mut Config), fn(&Arc<Coordinator>) -> KeyAction); 2] = [
+        // 两个别名同样是为躲开 clippy::type_complexity：signature 一致正是本用例
+        // 能把 special / rare_char 并成一张表的前提。
+        type ConfigMutator = fn(&mut Config);
+        type HotkeyProbe = fn(&Arc<Coordinator>) -> KeyAction;
+        let cases: [(&str, ConfigMutator, HotkeyProbe); 2] = [
             (
                 "special",
                 |c: &mut Config| c.input.caret.special_via_composition = false,

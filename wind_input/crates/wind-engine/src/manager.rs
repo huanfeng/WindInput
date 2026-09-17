@@ -2541,14 +2541,14 @@ impl EngineManager {
                 info!("启用词库 {}：失效混输方案 {} 待重建", dict_id, mixed_id);
                 self.invalidate_schema(&mixed_id);
             }
-        } else if let Some(e) = engine {
-            if !e.set_dict_enabled(dict_id, false) {
-                info!(
-                    "方案 {} 不支持即时翻转词库 {}，已失效待重建",
-                    schema_id, dict_id
-                );
-                self.invalidate_schema(schema_id);
-            }
+        } else if let Some(e) = engine
+            && !e.set_dict_enabled(dict_id, false)
+        {
+            info!(
+                "方案 {} 不支持即时翻转词库 {}，已失效待重建",
+                schema_id, dict_id
+            );
+            self.invalidate_schema(schema_id);
         }
         // 引擎不在表里也算数（故本函数**恒返回 true**，见函数末尾）：那意味着「从未加载」，
         // 或者「刚被本批次前一次调用失效掉」—— 后者是常态，设置页一次勾选多个扩展库会

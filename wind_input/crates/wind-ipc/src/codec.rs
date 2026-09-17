@@ -1003,9 +1003,15 @@ mod tests {
     /// 加词的 Enter/Esc 立刻失灵。
     ///
     /// 三个入口的参数全是 bool 且相邻，漏传/错位编译器不会报错，只能靠本条钉住。
+    /// 「把会话位编码进一条状态消息」的三个入口的共同形状。
+    ///
+    /// 抽成别名只为躲开 clippy::type_complexity——三个入口签名一致正是本用例的前提，
+    /// 写成一个名字反而更说明这件事。
+    type StatusEncoder = Box<dyn Fn(bool) -> Vec<u8>>;
+
     #[test]
     fn every_status_encoding_carries_the_hotkey_session_bit() {
-        let cases: [(&str, Box<dyn Fn(bool) -> Vec<u8>>); 3] = [
+        let cases: [(&str, StatusEncoder); 3] = [
             (
                 "encode_status_update",
                 Box::new(|on| {
