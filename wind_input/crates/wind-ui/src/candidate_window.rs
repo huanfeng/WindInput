@@ -1972,6 +1972,7 @@ impl CandidateWindow {
             // 该小节点再居中于更大的触摸盒内，从而"图标尺寸不变、操作区放大"。
             mode: "stretch".into(),
             slice: [0.0; 4],
+            slice_repeat: [false; 2],
             opacity: 1.0,
             tint,
         })

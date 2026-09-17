@@ -198,6 +198,8 @@ pub struct ViewImage {
     pub path: String,
     pub mode: String,
     pub slice: [f32; 4],
+    /// 仅 nine_slice：中段沿 [x, y] 轴平铺而非拉伸。
+    pub slice_repeat: [bool; 2],
     pub opacity: f32,
     /// 单色染色（None=图原样）；非 None 时把图当 alpha mask、用此色填充（单色 SVG/图标随主题变色）。
     pub tint: Option<[u8; 4]>,
@@ -1315,20 +1317,14 @@ fn paint_bg_image(buf: &mut [u8], buf_w: u32, buf_h: u32, r: Rect, radius: f32, 
     let y = r.y.round();
     let rw = r.w.round().max(1.0);
     let rh = r.h.round().max(1.0);
-    let slice = [
-        img.slice[0].round().max(0.0) as u32,
-        img.slice[1].round().max(0.0) as u32,
-        img.slice[2].round().max(0.0) as u32,
-        img.slice[3].round().max(0.0) as u32,
-    ];
-    let mode = crate::image_cache::mode_code(&img.mode);
+    let spec = fill_spec_of(img);
     let tint = img.tint.unwrap_or([0, 0, 0, 0]);
     let Some(path) = round_rect_path(x, y, rw, rh, radius.round().max(0.0)) else {
         return;
     };
     IMAGE_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
-        let Some(fill) = cache.fill(&img.path, mode, slice, rw as u32, rh as u32, tint) else {
+        let Some(fill) = cache.fill(&img.path, spec, rw as u32, rh as u32, tint) else {
             return;
         };
         let Some(mut pm) = PixmapMut::from_bytes(buf, buf_w, buf_h) else {
@@ -1357,6 +1353,24 @@ fn paint_bg_image(buf: &mut [u8], buf_w: u32, buf_h: u32, r: Rect, radius: f32, 
     });
 }
 
+/// `ViewImage` → 填充规格。
+///
+/// 单拎出来是为了能直接测：这是主题数据走到光栅化前的**最后一环**，而绘制本身在单测里
+/// 验不了。漏传一个字段的表现是「主题里配了却没效果」，上游每一层的测试都照样绿。
+fn fill_spec_of(img: &ViewImage) -> crate::image_cache::FillSpec {
+    let px = |v: f32| v.round().max(0.0) as u32;
+    crate::image_cache::FillSpec {
+        mode: crate::image_cache::mode_code(&img.mode),
+        slice: [
+            px(img.slice[0]),
+            px(img.slice[1]),
+            px(img.slice[2]),
+            px(img.slice[3]),
+        ],
+        repeat: img.slice_repeat,
+    }
+}
+
 /// 绘制 z 层覆盖图：按 anchor 九宫定位 + offset（dp + 百分比）置于 host 内，stretch 到目标尺寸 + opacity。
 fn paint_layer(buf: &mut [u8], buf_w: u32, buf_h: u32, host: Rect, layer: &ViewLayer) {
     IMAGE_CACHE.with(|c| {
@@ -1376,8 +1390,7 @@ fn paint_layer(buf: &mut [u8], buf_w: u32, buf_h: u32, host: Rect, layer: &ViewL
         let ly = (ay + layer.off_y + layer.off_y_pct / 100.0 * host.h).round();
         let Some(fill) = cache.fill(
             &layer.path,
-            crate::image_cache::mode_code("stretch"),
-            [0; 4],
+            crate::image_cache::FillSpec::stretch(),
             lw as u32,
             lh as u32,
             [0, 0, 0, 0],
@@ -2022,6 +2035,46 @@ pub fn fill_ring(
 // 以 mock 的确定尺寸做精确断言；纯几何与形状用例则跨平台运行。
 
 /// 几何与形状绘制测试（跨平台真实：tiny-skia 纯 Rust 光栅化，不依赖文本后端）。
+#[cfg(test)]
+mod fill_spec_tests {
+    use super::*;
+
+    /// 主题数据到光栅化的最后一环。这里漏一个字段，`wind-theme` 那侧测得再全也白搭——
+    /// 画出来还是旧行为，而且一声不响。
+    #[test]
+    fn fill_spec_carries_every_field() {
+        let img = ViewImage {
+            path: "p.png".to_string(),
+            mode: "nine_slice".to_string(),
+            slice: [1.4, 2.5, 3.0, -1.0],
+            slice_repeat: [true, false],
+            opacity: 1.0,
+            tint: None,
+        };
+
+        let spec = fill_spec_of(&img);
+
+        assert_eq!(spec.mode, crate::image_cache::mode_code("nine_slice"));
+        // 切片取整到源图纹理像素；负值夹到 0（主题写反了不该变成天文数字）。
+        assert_eq!(spec.slice, [1, 3, 3, 0]);
+        assert_eq!(spec.repeat, [true, false], "中段重复没传到光栅化");
+    }
+
+    /// 不写 mode/repeat 的图 = 整体拉伸，与既有主题一致。
+    #[test]
+    fn fill_spec_defaults_to_stretch() {
+        let img = ViewImage {
+            path: "p.png".to_string(),
+            mode: String::new(),
+            slice: [0.0; 4],
+            slice_repeat: [false; 2],
+            opacity: 1.0,
+            tint: None,
+        };
+        assert_eq!(fill_spec_of(&img), crate::image_cache::FillSpec::stretch());
+    }
+}
+
 #[cfg(test)]
 mod idle_evict_tests {
     use super::*;

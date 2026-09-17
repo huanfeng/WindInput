@@ -162,13 +162,42 @@ fn brief(src: &str) -> Cow<'_, str> {
     }
 }
 
+/// 一次填充的「怎么铺」：模式 + 九宫切片 + 中段是否平铺。
+///
+/// 收成一个结构而不是三个平行参数，是为了让 `fill` 与缓存键都只多一处而不是三处——
+/// 它们本来就是同进同出的一组。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FillSpec {
+    /// 见 [`mode_code`]。
+    pub mode: u8,
+    /// 仅 nine_slice：源图四边切片像素 [上,右,下,左]。
+    pub slice: [u32; 4],
+    /// 仅 nine_slice：中段沿 [x, y] 轴平铺而非拉伸。
+    pub repeat: [bool; 2],
+}
+
+impl FillSpec {
+    /// 整体拉伸、不切片——覆盖图（layer）与绝大多数调用的形态。
+    pub const fn stretch() -> Self {
+        Self {
+            mode: MODE_STRETCH,
+            slice: [0; 4],
+            repeat: [false; 2],
+        }
+    }
+}
+
+/// stretch 的模式码。单独具名是为了让 [`FillSpec::stretch`] 不必把编码表抄第二份——
+/// 抄了的话，改 [`mode_code`] 时编译器不会提醒那一处。
+const MODE_STRETCH: u8 = 0;
+
 /// 填充模式码：0=stretch（默认）1=nine_slice 2=tile 3=center。
 pub fn mode_code(mode: &str) -> u8 {
     match mode {
         "nine_slice" => 1,
         "tile" => 2,
         "center" => 3,
-        _ => 0, // stretch
+        _ => MODE_STRETCH,
     }
 }
 
@@ -220,7 +249,7 @@ struct Src {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct ImgId(u32);
 
-type FillKey = (ImgId, u8, [u32; 4], u32, u32, [u8; 4]);
+type FillKey = (ImgId, FillSpec, u32, u32, [u8; 4]);
 
 #[derive(Default)]
 pub struct ImageCache {
@@ -396,14 +425,13 @@ impl ImageCache {
     pub fn fill(
         &mut self,
         path: &str,
-        mode: u8,
-        slice: [u32; 4],
+        spec: FillSpec,
         w: u32,
         h: u32,
         tint: [u8; 4],
     ) -> Option<&Pixmap> {
         self.touch();
-        let key = (self.id_of(path), mode, slice, w, h, tint);
+        let key = (self.id_of(path), spec, w, h, tint);
         if !self.fills.contains_key(&key) {
             let built = self.build_fill(key, path);
             let bytes = built.as_ref().map_or(0, |pm| pm.data().len());
@@ -418,7 +446,7 @@ impl ImageCache {
     }
 
     fn build_fill(&mut self, key: FillKey, path: &str) -> Option<Pixmap> {
-        let (id, mode, slice, w, h, tint) = key;
+        let (id, spec, w, h, tint) = key;
         if w == 0 || h == 0 {
             return None;
         }
@@ -446,7 +474,7 @@ impl ImageCache {
         let px = pm.pixels_mut();
         for dy in 0..h {
             for dx in 0..w {
-                let Some((sx, sy)) = map_src(mode, slice, sw, sh, w, h, dx, dy) else {
+                let Some((sx, sy)) = map_src(spec, sw, sh, w, h, dx, dy) else {
                     continue; // 透明（Pixmap::new 已清零）
                 };
                 let si = ((sy * sw + sx) * 4) as usize;
@@ -467,8 +495,7 @@ impl ImageCache {
 /// 目标像素 (dx,dy) → 源像素坐标；None=该处透明（仅 center 越界）。
 #[allow(clippy::too_many_arguments)]
 fn map_src(
-    mode: u8,
-    slice: [u32; 4],
+    spec: FillSpec,
     sw: u32,
     sh: u32,
     w: u32,
@@ -476,11 +503,16 @@ fn map_src(
     dx: u32,
     dy: u32,
 ) -> Option<(u32, u32)> {
+    let FillSpec {
+        mode,
+        slice,
+        repeat,
+    } = spec;
     match mode {
         1 => {
             // nine_slice：slice = [上,右,下,左]
-            let sx = nine_axis(dx, w, sw, slice[3], slice[1])?;
-            let sy = nine_axis(dy, h, sh, slice[0], slice[2])?;
+            let sx = nine_axis(dx, w, sw, slice[3], slice[1], repeat[0])?;
+            let sy = nine_axis(dy, h, sh, slice[0], slice[2], repeat[1])?;
             Some((sx, sy))
         }
         2 => Some((dx % sw, dy % sh)), // tile
@@ -504,8 +536,8 @@ fn map_src(
     }
 }
 
-/// 九宫格单轴映射：起/末 `s0`/`s1` 像素 1:1，中段拉伸。
-fn nine_axis(d: u32, dlen: u32, slen: u32, s0: u32, s1: u32) -> Option<u32> {
+/// 九宫格单轴映射：起/末 `s0`/`s1` 像素 1:1，中段按 `repeat` 平铺或拉伸。
+fn nine_axis(d: u32, dlen: u32, slen: u32, s0: u32, s1: u32, repeat: bool) -> Option<u32> {
     // 切片过大时退化为整体拉伸，避免中段为负。
     if s0 + s1 >= slen || s0 + s1 >= dlen {
         return Some((d as u64 * slen as u64 / dlen as u64).min(slen as u64 - 1) as u32);
@@ -515,11 +547,17 @@ fn nine_axis(d: u32, dlen: u32, slen: u32, s0: u32, s1: u32) -> Option<u32> {
     } else if d >= dlen - s1 {
         Some(slen - (dlen - d)) // 末尾固定段（对齐到源末尾）
     } else {
-        // 中段拉伸：dest [s0, dlen-s1) → src [s0, slen-s1)
+        // 中段：dest [s0, dlen-s1) → src [s0, slen-s1)
         let dmid = d - s0;
         let dmid_len = dlen - s0 - s1;
         let smid_len = slen - s0 - s1;
-        Some((s0 + (dmid as u64 * smid_len as u64 / dmid_len as u64) as u32).min(slen - 1))
+        if repeat {
+            // 平铺：目标尺寸变化只改变重复次数，纹理本身不缩放——候选窗宽度每变一下
+            // 中段就被重新压缩一次（「呼吸」）的根源正是下面那条拉伸。
+            Some(s0 + dmid % smid_len)
+        } else {
+            Some((s0 + (dmid as u64 * smid_len as u64 / dmid_len as u64) as u32).min(slen - 1))
+        }
     }
 }
 
@@ -552,6 +590,30 @@ mod tests {
         )
     }
 
+    /// 一行横向条纹图（每列一个颜色），用来看清像素落到了源图的哪一列。
+    fn png_stripes_data_uri(reds: &[u8]) -> String {
+        let mut img = image::RgbaImage::new(reds.len() as u32, 1);
+        for (x, r) in reds.iter().enumerate() {
+            img.put_pixel(x as u32, 0, image::Rgba([*r, 0, 0, 255]));
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("PNG 编码");
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+        )
+    }
+
+    /// 读一行填充结果里每个像素对应的源图红色分量。
+    /// BGRA 序（见 compose）：源的 R 落在 blue 通道上。
+    fn row_reds(pm: &Pixmap, w: u32) -> Vec<u8> {
+        (0..w)
+            .map(|x| pm.pixel(x, 0).expect("像素").blue())
+            .collect()
+    }
+
     /// 编辑器发布的主题把图片内嵌在 theme.toml 里，必须一路解码到像素。
     ///
     /// 这条是「市场主题导入后没有背景图」的回归护栏：曾经解码走的是
@@ -563,7 +625,7 @@ mod tests {
 
         assert_eq!(cache.src_size(&uri), Some((2, 2)));
         let pm = cache
-            .fill(&uri, mode_code("stretch"), [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("内嵌 PNG 应当能填充");
         let px = pm.pixel(0, 0).expect("像素");
         // 输出是 BGRA 序（见 compose）：源的红落在 blue 通道上。
@@ -580,7 +642,7 @@ mod tests {
         let mut cache = ImageCache::new();
 
         let pm = cache
-            .fill(&uri, mode_code("stretch"), [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("内嵌 SVG 应当能填充");
         let px = pm.pixel(0, 0).expect("像素");
         // BGRA 序：源的蓝落在 red 通道上。
@@ -598,12 +660,12 @@ mod tests {
         let mut cache = ImageCache::new();
 
         let r = cache
-            .fill(&red, 0, [0; 4], 2, 2, [0, 0, 0, 0])
+            .fill(&red, FillSpec::stretch(), 2, 2, [0, 0, 0, 0])
             .expect("红图")
             .pixel(0, 0)
             .expect("像素");
         let g = cache
-            .fill(&green, 0, [0; 4], 2, 2, [0, 0, 0, 0])
+            .fill(&green, FillSpec::stretch(), 2, 2, [0, 0, 0, 0])
             .expect("绿图")
             .pixel(0, 0)
             .expect("像素");
@@ -626,7 +688,7 @@ mod tests {
         let mut cache = ImageCache::new();
         assert_eq!(cache.src_size(&p), Some((2, 2)));
         let px = cache
-            .fill(&p, 0, [0; 4], 2, 2, [0, 0, 0, 0])
+            .fill(&p, FillSpec::stretch(), 2, 2, [0, 0, 0, 0])
             .expect("文件图应当能填充")
             .pixel(0, 0)
             .expect("像素");
@@ -685,7 +747,7 @@ mod tests {
 
         let mut cache = ImageCache::new();
         let pm = cache
-            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("SVG 本身仍应栅格化成功（只是那张图不该被读进来）");
         let px = pm.pixel(0, 0).expect("像素");
         assert_eq!(
@@ -708,7 +770,7 @@ mod tests {
         let edge = 2048;
         for i in 0..3u8 {
             cache
-                .fill(&uri, 0, [0; 4], edge, edge, [0, 0, 0, i])
+                .fill(&uri, FillSpec::stretch(), edge, edge, [0, 0, 0, i])
                 .expect("填充");
         }
         let (count, bytes) = cache.fill_stats();
@@ -726,12 +788,12 @@ mod tests {
         // 断言就废了（这条起初正是这么写的，变异测试才照出来）。
         let small = 64;
         cache
-            .fill(&uri, 0, [0; 4], small, small, [0, 0, 0, 3])
+            .fill(&uri, FillSpec::stretch(), small, small, [0, 0, 0, 3])
             .expect("首次");
         let before = cache.fill_stats();
         for _ in 0..10 {
             cache
-                .fill(&uri, 0, [0; 4], small, small, [0, 0, 0, 3])
+                .fill(&uri, FillSpec::stretch(), small, small, [0, 0, 0, 3])
                 .expect("命中");
         }
         assert_eq!(cache.fill_stats(), before, "命中路径重复记账了");
@@ -761,7 +823,7 @@ mod tests {
         let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
         let mut cache = ImageCache::new();
         cache
-            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("首次");
 
         let stale = Instant::now()
@@ -771,7 +833,7 @@ mod tests {
         let before = cache.next_deadline().expect("有内容就该有到期时刻");
 
         cache
-            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("命中");
 
         let after = cache.next_deadline().expect("到期时刻");
@@ -784,7 +846,7 @@ mod tests {
         let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
         let mut cache = ImageCache::new();
         cache
-            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("填充");
 
         let t = Instant::now();
@@ -808,7 +870,7 @@ mod tests {
         // 四张表都得填上：只填 fills 的话，清 ids/src/svg_sizes 那几行删掉测试照样绿，
         // 而它们才是 RSS 回落的大头（ids 里一条内嵌 data: URI 就是几百 KB）。
         cache
-            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("填充");
         // src_size 也要打点：只取尺寸不填充的调用路径（layer 未写 size）同样该推迟回收。
         cache
@@ -835,11 +897,110 @@ mod tests {
 
         // 回收不是残废：同一张图再取用照样出正确像素。
         let px = cache
-            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .fill(&uri, FillSpec::stretch(), 4, 4, [0, 0, 0, 0])
             .expect("回收后应能重建")
             .pixel(0, 0)
             .expect("像素");
         assert_eq!((px.blue(), px.green(), px.alpha()), (255, 0, 255));
+    }
+
+    /// 九宫中段**平铺**：目标变宽只是多重复几次，纹理本身不缩放。
+    ///
+    /// 对照组是拉伸——候选窗宽度每变一下中段就被重新压缩一次（用户看到的「呼吸」），
+    /// 根源就在那条按比例映射上。
+    #[test]
+    fn nine_slice_mid_repeats_instead_of_stretching() {
+        let uri = png_stripes_data_uri(&[10, 20, 30, 40]);
+        let mut cache = ImageCache::new();
+        // slice 全 0 ⇒ 整轴都是中段，正好把中段的行为单独拎出来看。
+        let repeat = FillSpec {
+            mode: mode_code("nine_slice"),
+            slice: [0; 4],
+            repeat: [true, false],
+        };
+        let stretch = FillSpec {
+            repeat: [false, false],
+            ..repeat
+        };
+
+        let w8 = cache.fill(&uri, repeat, 8, 1, [0; 4]).expect("平铺 w=8");
+        assert_eq!(row_reds(w8, 8), vec![10, 20, 30, 40, 10, 20, 30, 40]);
+        let w6 = cache.fill(&uri, repeat, 6, 1, [0; 4]).expect("平铺 w=6");
+        assert_eq!(
+            row_reds(w6, 6),
+            vec![10, 20, 30, 40, 10, 20],
+            "平铺下，前四列必须与源图逐列一致，不随目标宽度变"
+        );
+
+        let s8 = cache.fill(&uri, stretch, 8, 1, [0; 4]).expect("拉伸 w=8");
+        assert_eq!(
+            row_reds(s8, 8),
+            vec![10, 10, 20, 20, 30, 30, 40, 40],
+            "拉伸下每列被摊成两格——这正是要能被 repeat 关掉的行为"
+        );
+    }
+
+    /// 纵轴平铺要独立验一遍：横轴那条用的是 1px 高的源图，`dmid % 1` 恒 0，
+    /// 就算 `repeat[1]` 根本没接线也照样绿。
+    #[test]
+    fn nine_slice_repeat_applies_to_vertical_axis_too() {
+        // 1 宽 4 高的竖条纹，只让纵轴平铺。
+        let mut img = image::RgbaImage::new(1, 4);
+        for (y, r) in [10u8, 20, 30, 40].iter().enumerate() {
+            img.put_pixel(0, y as u32, image::Rgba([*r, 0, 0, 255]));
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("PNG 编码");
+        let uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+        );
+
+        let mut cache = ImageCache::new();
+        let spec = FillSpec {
+            mode: mode_code("nine_slice"),
+            slice: [0; 4],
+            repeat: [false, true],
+        };
+        let pm = cache.fill(&uri, spec, 1, 6, [0; 4]).expect("纵向平铺");
+        let col: Vec<u8> = (0..6)
+            .map(|y| pm.pixel(0, y).expect("像素").blue())
+            .collect();
+        assert_eq!(col, vec![10, 20, 30, 40, 10, 20]);
+    }
+
+    /// 目标比切片还窄时同样退化为整体拉伸（`s0 + s1 >= dlen` 那条）。
+    ///
+    /// 这条在实机够得着：编码条窄于左右切片之和（本例主题是 59+9=68px）并不稀奇。
+    #[test]
+    fn nine_slice_falls_back_when_target_narrower_than_slices() {
+        let uri = png_stripes_data_uri(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        let mut cache = ImageCache::new();
+        let spec = FillSpec {
+            mode: mode_code("nine_slice"),
+            slice: [0, 2, 0, 2],
+            repeat: [true, false],
+        };
+        // 目标 3 < 左右切片和 4 ⇒ 整轴按比例拉伸：src = d*10/3 → 0, 3, 6
+        let pm = cache.fill(&uri, spec, 3, 1, [0; 4]).expect("退化仍要出图");
+        assert_eq!(row_reds(pm, 3), vec![10, 40, 70]);
+    }
+
+    /// 切片大到中段不剩时退化为整体拉伸，`repeat` 不该把这条路带歪（除零）。
+    #[test]
+    fn nine_slice_repeat_falls_back_when_no_middle_left() {
+        let uri = png_stripes_data_uri(&[10, 20, 30, 40]);
+        let mut cache = ImageCache::new();
+        let spec = FillSpec {
+            mode: mode_code("nine_slice"),
+            // 左右切片加起来已经吃掉整张源图，中段宽度为 0。
+            slice: [0, 2, 0, 2],
+            repeat: [true, true],
+        };
+        let pm = cache.fill(&uri, spec, 8, 1, [0; 4]).expect("退化仍要出图");
+        assert_eq!(row_reds(pm, 8), vec![10, 10, 20, 20, 30, 30, 40, 40]);
     }
 
     #[test]

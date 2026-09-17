@@ -49,6 +49,8 @@ pub struct RvImage {
     pub mode: String,
     /// 仅 nine_slice：源图四边切片像素 [上,右,下,左]（纹理空间，不随 DPI 缩放）。
     pub slice: [f32; 4],
+    /// 仅 nine_slice：中段沿 [x, y] 轴平铺而非拉伸。
+    pub slice_repeat: [bool; 2],
     /// 已解析不透明度（None→1.0）。
     pub opacity: f32,
     /// 仅 layers：内容基准 0，<0 在内容下、>0 在上。

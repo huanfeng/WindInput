@@ -102,6 +102,10 @@ fn to_rv_image(im: &ViewImage, palette: &HashMap<String, Rgba>, is_dark: bool) -
             slice_px(im.slice.bottom),
             slice_px(im.slice.left),
         ],
+        slice_repeat: [
+            im.slice_repeat.x.as_deref() == Some("repeat"),
+            im.slice_repeat.y.as_deref() == Some("repeat"),
+        ],
         opacity: im.opacity.unwrap_or(1.0),
         z: im.z,
         anchor: im.anchor.clone(),
@@ -782,6 +786,30 @@ height = 30
         );
         // 未配 → None，place_window 拿到 0，定位与旧版逐像素一致
         assert_eq!(load_offset("[window]\nradius = 8\n"), (None, None));
+    }
+
+    /// `slice_repeat` 要一路走到渲染消费形态：字符串在求值层坍缩成两轴布尔。
+    ///
+    /// 这条守的是数据通路——渲染层再怎么实现平铺，这里断了就永远是拉伸。
+    #[test]
+    fn slice_repeat_reaches_rv_image_per_axis() {
+        let text = "\
+[preedit_bar]
+background = { image = { ref = \"p.png\", mode = \"nine_slice\", slice_repeat = [\"repeat\", \"stretch\"] } }
+
+[item]
+background = { image = { ref = \"q.png\", mode = \"nine_slice\" } }
+";
+        let value: toml::Value = toml::from_str(text).unwrap();
+        let theme: Theme = crate::normalize::normalize_theme(value).try_into().unwrap();
+        let v = resolve(&theme, false, &[data_dir()]).views;
+
+        let bar = v.preedit_bar.bg_image.expect("preedit_bar 背景图");
+        assert_eq!(bar.slice_repeat, [true, false], "两轴分别求值，不能串");
+
+        // 不写的主题保持原样：全部拉伸，既有观感不被新字段改掉。
+        let item = v.item.bg_image.expect("item 背景图");
+        assert_eq!(item.slice_repeat, [false, false]);
     }
 
     /// 四个「此前渲染层不读自身盒模型」的节点：背景与边框须完整进 RvNode。

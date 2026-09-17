@@ -33,6 +33,7 @@ pub fn rv_image(theme: &Resolved, im: Option<&RvImage>) -> Option<ViewImage> {
         path,
         mode: im.mode.clone(),
         slice: im.slice,
+        slice_repeat: im.slice_repeat,
         opacity: im.opacity,
         tint: im.tint,
     })
@@ -67,4 +68,42 @@ pub fn rv_layers(theme: &Resolved, layers: &[RvImage], scale: f32) -> Vec<ViewLa
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wind_theme::Resolved;
+
+    /// 本模块是主题求值形态到渲染形态的**最后一环**：这里漏传一个字段，上游求值
+    /// 测得再全也没用——画出来仍是旧行为，而且一声不响。
+    ///
+    /// `slice_repeat` 是第一个用这条护栏钉住的字段：漏传它的后果是九宫中段永远拉伸，
+    /// 也就是候选窗变宽时纹理跟着「呼吸」，正是它要修的那个毛病。
+    #[test]
+    fn rv_image_carries_fill_shape_through() {
+        let theme = Resolved::default();
+        let im = RvImage {
+            reference: "panel.png".to_string(),
+            mode: "nine_slice".to_string(),
+            slice: [1.0, 2.0, 3.0, 4.0],
+            slice_repeat: [true, false],
+            opacity: 0.5,
+            ..Default::default()
+        };
+
+        let out = rv_image(&theme, Some(&im)).expect("有 ref 就该出图");
+
+        assert_eq!(out.mode, "nine_slice");
+        assert_eq!(out.slice, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(out.slice_repeat, [true, false], "中段重复没传到渲染层");
+        assert_eq!(out.opacity, 0.5);
+    }
+
+    /// 空 ref = 没有图，不能凭空造一个（调用方据此跳过整层绘制）。
+    #[test]
+    fn rv_image_rejects_empty_reference() {
+        assert!(rv_image(&Resolved::default(), Some(&RvImage::default())).is_none());
+        assert!(rv_image(&Resolved::default(), None).is_none());
+    }
 }

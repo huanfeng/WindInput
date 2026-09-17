@@ -143,13 +143,41 @@ fn normalize_fill(v: Value) -> Value {
     }
 }
 
-/// ImageFill 归一化：展开 `slice` 简写。
+/// ImageFill 归一化：展开 `slice` 与 `slice_repeat` 简写。
 fn normalize_image(v: Value) -> Value {
     let Value::Table(mut t) = v else { return v };
     if let Some(slice) = t.remove("slice") {
         t.insert("slice".to_string(), expand_edges(slice));
     }
+    if let Some(r) = t.remove("slice_repeat") {
+        t.insert("slice_repeat".to_string(), expand_axes(r));
+    }
     Value::Table(t)
+}
+
+/// 双轴简写展开：标量 `"repeat"` → `{ x, y }` 同值；`[x, y]` 复用点展开；表原样。
+///
+/// **认不出的形态一律丢弃**（展开成空表 ⇒ 两轴都是 None ⇒ 拉伸），而不是原样留给 serde。
+/// 留给 serde 的话，`slice_repeat = 42` 这种笔误会让**整份主题加载失败**（字段在但类型
+/// 不对是硬错误，`#[serde(default)]` 只管字段缺失），一个枚举值写错就整套皮肤打不开。
+/// 这个字段的取值是两个固定单词，写错的概率比尺寸类字段高得多，代价不该这么大。
+/// 编辑器侧 `sliceRepeatF` 对同样的输入也是丢弃——两边对「作者写错了」的反应要一致。
+fn expand_axes(v: Value) -> Value {
+    match v {
+        Value::String(_) => {
+            let mut t = Table::new();
+            t.insert("x".to_string(), v.clone());
+            t.insert("y".to_string(), v);
+            Value::Table(t)
+        }
+        Value::Array(_) => match expand_point(v) {
+            // expand_point 对非法长度原样返回数组，那正是会炸 serde 的形态。
+            Value::Table(t) => Value::Table(t),
+            _ => Value::Table(Table::new()),
+        },
+        Value::Table(t) => Value::Table(t),
+        _ => Value::Table(Table::new()),
+    }
 }
 
 /// Shadow 归一化：`offset = [x, y]` → `offset_x` / `offset_y`。
@@ -345,6 +373,58 @@ mod tests {
         let b = &t.views.unwrap().window.border;
         assert_eq!(b.width, Some(Dim::Px(1.0)));
         assert_eq!(b.style.as_deref(), Some("dashed"));
+    }
+
+    /// `slice_repeat` 的两种人写简写都要能展开到 `{ x, y }`。
+    ///
+    /// 分轴不是讲究：横轴随候选窗宽度变、纵轴一般固定，一个值管两轴会把
+    /// 「纵向压扁到条高」变成「只取源图顶部那几行」。
+    #[test]
+    fn slice_repeat_shorthand_expands_to_axes() {
+        let scalar = load(
+            "[window]\nbackground = { image = { ref = \"p.png\", mode = \"nine_slice\", slice_repeat = \"repeat\" } }\n",
+        );
+        let img = scalar
+            .views
+            .unwrap()
+            .window
+            .background
+            .image
+            .expect("image");
+        assert_eq!(img.slice_repeat.x.as_deref(), Some("repeat"));
+        assert_eq!(img.slice_repeat.y.as_deref(), Some("repeat"));
+
+        let pair = load(
+            "[window]\nbackground = { image = { ref = \"p.png\", mode = \"nine_slice\", slice_repeat = [\"repeat\", \"stretch\"] } }\n",
+        );
+        let img = pair.views.unwrap().window.background.image.expect("image");
+        assert_eq!(img.slice_repeat.x.as_deref(), Some("repeat"));
+        assert_eq!(img.slice_repeat.y.as_deref(), Some("stretch"), "两轴不该串");
+
+        // 展开后的表形态（编辑器读别人主题时也认它），原样透传。
+        let table = load(
+            "[window]\nbackground = { image = { ref = \"p.png\", mode = \"nine_slice\", slice_repeat = { x = \"repeat\", y = \"stretch\" } } }\n",
+        );
+        let img = table.views.unwrap().window.background.image.expect("image");
+        assert_eq!(img.slice_repeat.x.as_deref(), Some("repeat"));
+        assert_eq!(img.slice_repeat.y.as_deref(), Some("stretch"));
+
+        // 认不出的形态一律丢弃，而不是让整份主题加载失败（见 expand_axes）。
+        for bad in ["42", "true", "[\"repeat\"]", "[\"a\", \"b\", \"c\"]"] {
+            let t = load(&format!(
+                "[window]\nbackground = {{ image = {{ ref = \"p.png\", mode = \"nine_slice\", slice_repeat = {bad} }} }}\n"
+            ));
+            let img = t.views.unwrap().window.background.image.expect("image");
+            assert_eq!(img.slice_repeat.x, None, "非法值 {bad} 该被丢弃");
+            assert_eq!(img.slice_repeat.y, None, "非法值 {bad} 该被丢弃");
+        }
+
+        // 不写就是两轴都拉伸（既有主题的行为不能被这个新字段改掉）。
+        let none =
+            load("[window]\nbackground = { image = { ref = \"p.png\", mode = \"nine_slice\" } }\n");
+        let img = none.views.unwrap().window.background.image.expect("image");
+        assert_eq!(img.slice_repeat.x, None);
+        assert_eq!(img.slice_repeat.y, None);
     }
 
     #[test]

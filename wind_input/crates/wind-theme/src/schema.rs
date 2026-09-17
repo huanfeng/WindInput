@@ -131,6 +131,20 @@ pub struct ViewEdges {
     pub left: Option<Dim>,
 }
 
+/// 九宫格中段的填充方式，分轴。值：`"stretch"`（默认，拉伸）| `"repeat"`（平铺）。
+///
+/// 分轴是必须的而不是讲究：横轴随候选窗宽度变化，纵轴一般固定。拿一个值管两轴的话，
+/// 一张 985×255 的背景在 40px 高的编码条里会从「压扁到 40px」变成「只取顶部 40 行」，
+/// 图的内容完全不同。
+///
+/// 人写形态支持简写，由 `normalize` 展开：`slice_repeat = "repeat"`（两轴同值）、
+/// `slice_repeat = ["repeat", "stretch"]`（x, y）。
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct SliceRepeat {
+    pub x: Option<String>,
+    pub y: Option<String>,
+}
+
 /// 边框：width 常用 `"1px"` 发丝线（不随 DPI 加粗）。
 #[derive(Deserialize, Debug, Default, Clone)]
 pub struct ViewBorder {
@@ -169,6 +183,9 @@ pub struct ViewImage {
     /// 仅 nine_slice：源图四边切片像素。
     #[serde(default)]
     pub slice: ViewEdges,
+    /// 仅 nine_slice：中段沿该轴**平铺**而非拉伸。
+    #[serde(default)]
+    pub slice_repeat: SliceRepeat,
     pub opacity: Option<f32>,
     /// 仅 layers[]：内容基准 0，<0 在内容下、>0 在上。
     #[serde(default)]
