@@ -7415,6 +7415,13 @@ impl Coordinator {
     /// 各自 `encode_commit_text`），既不走 `handle_key_event_policed`，也不在 push 那几条
     /// 路上——三个调用方（切中英 / 系统切换 / CapsLock）都从这里取文本，收在此处一处覆盖。
     /// 漏了它的症状是「同一个词，回车上屏对、切中英上屏不对」。
+    ///
+    /// ⚠️ 但这一处堵的是**理论缺口，不是能复现的故障**，上面那句是失效形态、不是现场记录，
+    /// 别照着它反推「曾经有个 bug」：
+    /// 本函数上屏的绝大多数是**原始编码**（普通组合）或英文缓冲原文，两者都不可能带换行。
+    /// 唯一带得上换行的是拼音类逐步转换的 `committed_text`（已选中的汉字，见其字段注释）
+    /// ——要触发得先在临拼/混输的逐步转换里选中一个带换行的词条，再切中英；而码表（五笔）
+    /// 选词消费整串、根本不进那个态。⇒ 修它是为了让四条出口语义一致，不是修现场。
     pub(crate) fn take_input_on_mode_switch(&self, state: &mut State, chinese: bool) -> String {
         let text = self.take_input_on_mode_switch_raw(state, chinese);
         self.convert_commit_newline(text)
