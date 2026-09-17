@@ -314,14 +314,59 @@ $env:WIND_REMOTE_SLOT = "off"    # 关掉槽位，与主树共用目录（串台
   都找不到的文件。清理范围严格等于同步范围（同一份排除清单），`target/`、`build[_dev]/`、
   `dist/`、`.cache/` 一律不碰；只删文件不删目录。逃生口 `-NoPrune`，彻底重来 `-Clean`。
 
-### Linux 交叉（MinGW，`scripts/dev.sh`）
+### Linux 交叉（MSVC / cargo-xwin，`scripts/dev.sh`）
 
-- 编译检查：`cargo check --target x86_64-pc-windows-gnu -p <crate>`（`wind_input/` 下）。
-- host 单测：`windows` crate 全员是 `cfg(windows)` 依赖，Linux host 上不参与编译——
-  `wind-coordinator` 也可直接 `cargo test -p wind-coordinator`（旧说法「传递依赖 windows
-  不能跑」已随 wind-ui 解耦作废；CI 的 test 正是跑在 ubuntu 上）。注意集成测试的
-  `build_dev/data` 假绿判据（见下方「注意」）。
-- 部署调试版到 Windows：`scripts/dev.sh push debug`（配置见 `scripts/deploy.local`）。
+⚠️ **本机不产出交付物**：凡会写进 `build[_dev]/` 或 `dist/` 的命令都自动转发到 Windows 编译机
+（配置 `scripts/build.local`）。理由在工具链代码生成层——clang / cargo-xwin 交叉编出的
+`wind_tsf.dll` 在带安全加固的宿主里 **COM 激活失败**（根因见提交 `6dbc8595`），原生 MSVC 编的
+没这个问题。⇒ **发版与部署的产物一律走编译机**，本机交叉只用于「编不编得过 / 逻辑对不对」。
+`WIND_BUILD_LOCAL=1` 可强行本机出二进制，那是用来看链接过不过的，**不能部署也不能发版**。
+
+- 编译检查：`dev.sh k` / `l`（cargo-xwin，目标 `x86_64-pc-windows-msvc`）。
+- host 单测：`cargo test`（Linux 原生跑，`windows` crate 是 `cfg(windows)` 依赖不参与编译）；
+  `dev.sh t` 即全 workspace。注意 `build_dev/data` 的假绿判据（见下方「注意」）。
+- 候选逻辑速验：`dev.sh r`（repl）。
+- 部署 / 远程诊断：`dev.sh pd1`、`rproc`、`shot` 等（推的是编译机产出的产物）。
+
+#### 邻仓 wind-setting：交叉 + wine（`sk` / `st` / `sg`）
+
+`wind-setting` 编不出**原生 Linux** 产物：它依赖 `windui`，而 `windui` 对非 Windows/macOS 目标
+直接 `compile_error!`（rfd 的后端 feature 只是最先爆的那个，修好它照样过不去）。但**交叉到
+Windows 目标一切正常**，测试二进制交给 wine 执行即可：
+
+| 命令 | 做什么 | 要 wine |
+|---|---|---|
+| `dev.sh sk` | 交叉检查（`--all-targets`，含测试代码） | 否 |
+| `dev.sh st` | 邻仓全量测试（实测 1041 passed / 0 failed，1.6s） | 是 |
+| `dev.sh sg` | 重生成检入产物（capability 快照 / `mockdata/config.json`） | 是 |
+
+装 wine：`sudo apt install wine64`（首次跑会建 `~/.wine` prefix，之后秒级；启动时那句
+`wine32 is missing` 对 x64 目标无碍）。`sg` 取代了以前「tar 两个仓 → scp 编译机 → 独立槽位 →
+跑完删 2.6G target」那条路。
+
+⚠️ `sg` 跑完 `git diff` 只剩 `appVersion` 一行是**正常的**：它跟着 `docs/VERSION` 走，与配置
+契约无关（邻仓守护测试刻意不比它）。别把它跟自己的改动一起提交。
+
+#### 本机 wine 冒烟：核心 exe 的 CLI
+
+交叉编出的 `wind_input.exe` 在 wine 下跑得起来，CLI 子命令可用（实测 `--help` 与
+`config get <key>` 都正常）。适合快速验证「配置读写 / 数据层加载」这类不碰宿主的逻辑，
+省掉一轮推靶机。
+
+⛔ **不能**拿它验证 TSF：`wind_tsf.dll` 要真实 TSF 宿主加载 + COM 激活，而交叉编出来的那份
+恰恰就卡在 COM 激活（本节开头那条）。输入链路的验证仍然只能上靶机。
+⛔ 这份产物同样**不可发版、不可部署**，理由同上。
+
+#### 改了 core 的配置注册表，先跑这条
+
+```bash
+cargo test -p wind-rpc --test wind_setting_assets
+```
+
+在 core 这边对账邻仓三份检入产物（capability 快照逐键比、`mockdata` 比键集合、设置清单覆盖
+单向断言），**不编译 wind-setting、也不需要 wine**，秒级。找不到 `../wind-setting` 时整族跳过
+并打印原因（`WIND_SETTING_DIR` 可指定位置）。它只管「core 这边看得见的事实」；值的策展偏离、
+控件类型、选项文案仍由 `st` 那套把关，两者不重叠。
 
 ### macOS 本机（`scripts/mac/dev.sh`）
 
