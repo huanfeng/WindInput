@@ -986,6 +986,10 @@ impl ReverseLookup {
                 return;
             }
         };
+        // 行尾规整同 parse_comment_dict。★ 这一处与 load_pinyin 一度被守卫的**文件粒度**
+        // 放过：同文件的 parse_comment_dict 调了 normalize_input，整个 lib.rs 就被判成
+        // 「已覆盖」，这两个独立的加载器就此隐身。守卫已收紧到函数粒度。
+        let content = wind_utils::text::normalize_input(&content);
         let mut rows: Vec<(char, &str, &str)> = Vec::new();
         for line in content.lines() {
             let line = line.trim_end();
@@ -1018,6 +1022,8 @@ impl ReverseLookup {
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
+        // 行尾规整，同 load_chaizi
+        let content = wind_utils::text::normalize_input(&content);
         let mut rows: Vec<(char, Vec<&str>)> = Vec::new();
         for line in content.lines() {
             let mut line = line.trim();
@@ -2102,9 +2108,16 @@ mod tests {
     // ---------------- 注释库解析 ----------------
 
     fn parse_str(content: &str) -> Vec<(String, String, String)> {
+        // 文件名必须**每次调用都唯一**。原先按内容哈希（len*31+首字节）取名，两个
+        // 用同样样本的测试就会撞到同一个路径，并行跑时互删对方的文件、随机读到空。
+        // 加了行尾那组用例后当场复现：它的 LF 样本与 parse_defaults_to_text_comment
+        // 一字不差。
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "wind_comment_test_{}.dict.yaml",
-            content.len() as u64 * 31 + content.as_bytes().first().copied().unwrap_or(0) as u64
+            "wind_comment_test_{}_{}.dict.yaml",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&p, content).unwrap();
         let r = parse_comment_dict(&p).unwrap();

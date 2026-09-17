@@ -405,6 +405,10 @@ impl FreqTracker {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
+        // 行尾规整：`word\tcount` 是逐行格式，孤立 \r 会让整份文件算成一行 → 只认出
+        // 一条（还是带 \r 的垃圾词）。这个入口被守卫的**文件粒度**放过了——同文件的
+        // `import_freq_jsonl` 调了 normalize_input，整个 freq.rs 就被判成「已覆盖」。
+        let content = wind_utils::text::normalize_input(&content);
         let mut records = Vec::new();
         for line in content.lines() {
             let line = line.trim();
