@@ -38,6 +38,9 @@
 #   pm1/pm2      push 单模块 (tsf/核心, release)
 #   pdm1/pdm2    push 单模块 (dev)
 #   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活pre-commit)  clean
+#   sk=setting-check  st=setting-test   邻仓 ../wind-setting (交叉到 Windows 目标; st 要 wine)
+#     ↑ 只改了 core 配置注册表的话, 先跑 cargo test -p wind-rpc --test wind_setting_assets
+#       (在 core 这边对账邻仓三份检入产物, 不必编译 wind-setting)
 #     ↑ 这几个【在本机跑】: 不产出交付物, cargo-xwin 在 Linux 上仅存的正当用途就是它们;
 #       t/test 更是原生 cargo test。想在本机直接出二进制看看链接过不过: WIND_BUILD_LOCAL=1
 #       (⚠️ 产物不能部署也不能发版, 见 lib/remote-build.sh)
@@ -296,6 +299,42 @@ do_test() {
     # 中间 29 个在 CI 上从未执行过。代价是失败时更慢, 换来一次看全所有失败点。
     say "\n正在运行 cargo test (本机, 全工作区)..."
     cd "$PROJECT_ROOT" && cargo test --workspace --no-fail-fast
+}
+
+# ---------- 邻仓 wind-setting: 本机检查 / 测试 ----------
+# 【为什么要交叉到 Windows 目标】wind-setting 依赖 windui, 而 windui 对非 Windows/macOS
+# 目标是 `compile_error!("windui 目前仅支持 Windows 与 macOS 平台")` —— 原生 Linux 编不过,
+# 且那不是 rfd 后端的问题(rfd 只是最先爆的那个)。交叉到 x86_64-pc-windows-msvc 则一切正常,
+# check --all-targets 含测试代码一并过。
+#
+# 【与 core 的跨仓对账各管一段】本机改了 core 的配置注册表之后:
+#   · `cargo test -p wind-rpc --test wind_setting_assets` 在 core 这边比对邻仓三份产物
+#     (键在不在、类型/默认值对不对), 不需要编译 wind-setting —— 日常改配置用这个最快;
+#   · sk/st 跑的是 wind-setting **自己那套**守护测试(值的策展偏离、控件类型、选项文案),
+#     那些只有它自己知道。
+do_setting_check() {
+    [ -d "$SETTING_DIR" ] || { err "../wind-setting 仓库不存在"; return 1; }
+    say "\n正在检查 wind_setting ($TARGET, 含测试代码)..."
+    export WIND_APP_VERSION="$VERSION"
+    cd "$SETTING_DIR" && cargo_xwin check --target "$TARGET" --all-targets
+}
+
+# 测试二进制是 Windows PE, 靠 wine 执行(cargo-xwin 自动配 runner)。
+# ⚠️ 没装 wine 时明确报出来 —— 否则 cargo 只会甩一句 "cannot execute binary file",
+#    看不出缺的是什么。
+# ⚠️ **未实测**(本机尚未装 wine): 邻仓多处测试用 env!("CARGO_MANIFEST_DIR") 拼绝对路径,
+#    那在这里是 Linux 路径(/home/...), wine 能否解析到 Z: 盘要现场看; 打不开就把那几处
+#    改成相对路径。首次跑还会建 wine prefix(慢且会在 ~/.wine 落一堆东西)。
+do_setting_test() {
+    [ -d "$SETTING_DIR" ] || { err "../wind-setting 仓库不存在"; return 1; }
+    if ! command -v wine >/dev/null 2>&1 && ! command -v wine64 >/dev/null 2>&1; then
+        err "需要 wine 才能跑 Windows 目标的测试二进制: sudo apt install wine64"
+        err "只想验证编不编得过, 用 sk (setting-check, 不需要 wine)。"
+        return 1
+    fi
+    say "\n正在运行 wind_setting 测试 ($TARGET, 经 wine)..."
+    export WIND_APP_VERSION="$VERSION"
+    cd "$SETTING_DIR" && cargo_xwin test --target "$TARGET"
 }
 
 do_fmt() {
@@ -1598,6 +1637,7 @@ show_menu() {
     echo  "    SHOT_ON=vm shot             截编译机上刚编的那份 (不用先部署)"
     printf '\n%b  杂项:%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    gd=gen-data  clean  q=退出"
+    echo  "    sk/st  邻仓 wind-setting 的检查/测试 (交叉到 Windows 目标; st 要 wine)"
     printf '%b============================================%b\n' "$C_CYAN" "$C_RESET"
 }
 
@@ -1638,6 +1678,8 @@ dispatch() {
         k|check)          do_check ;;
         l|clippy)         do_clippy ;;
         t|test)           do_test ;;
+        sk|setting-check) do_setting_check ;;
+        st|setting-test)  do_setting_test ;;
         f|fmt)            do_fmt ;;
         fmt-check)        do_fmt_check ;;
         ci)               do_ci ;;
