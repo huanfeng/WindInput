@@ -47,9 +47,14 @@ fn fixture(tag: &str) -> CachedDict {
     );
     // ri(0..2) chu(2..5) → bit 0/2
     w.add_with_boundary("richu".into(), vec![("日出".into(), 2380, 0, 0b101)]);
+    // nan(0..3) qu(3..5) cai(5..8) → bit 0/3/5。挂在**精确键** `nqc` 下，权重刻意低于
+    // 「篮球场」(1191)：支点是「不打折时模糊解反而更高」，一旦纯简拼的模糊命中不吃
+    // fuzzy_penalized，它就会把这条精确命中压下去。
+    w.add_with_boundary("nanqucai".into(), vec![("南区菜".into(), 800, 0, 0b101001)]);
     // ni(0..2) hao(2..5) → bit 0/2
     w.add_with_boundary("nihao".into(), vec![("你好".into(), 5328, 0, 0b101)]);
     w.add_abbrev("lqc".into(), vec![("lanqiuchang".into(), 1191)]);
+    w.add_abbrev("nqc".into(), vec![("nanqucai".into(), 800)]);
     w.add_abbrev("fbm".into(), vec![("fangbianmian".into(), 3140)]);
     w.add_abbrev("rc".into(), vec![("richu".into(), 2380)]);
     w.add_abbrev("nh".into(), vec![("nihao".into(), 5328)]);
@@ -219,4 +224,49 @@ fn initial_alternatives_matches_pairwise_equal() {
             }
         }
     }
+}
+
+// ── 折扣：模糊召回不得压过精确解 ────────────────────────────────────────
+
+/// 纯简拼路径的模糊命中必须吃 `fuzzy_penalized` 折扣并标 `is_fuzzy`。
+///
+/// **`is_abbrev` 沉底救不了这个**：那只把简拼整层压到全拼之后，**层内仍按 weight 降序**。
+/// 折扣是层内唯一区分「精确键命中」与「变体键命中」的机制 —— 去掉它，`lqc` 下权重更高的
+/// 词会把唯一那条 `nqc` 精确词直接挤下去，而真实词库里热键的头部权重远高于冷门键，
+/// 这是必然发生而非可能发生。
+///
+/// 同一个不变量在**混合**路径由 `pinyin_abbrev_recall.rs` 的
+/// `fuzzy_mixed_abbrev_is_penalized_and_marked` 守着，纯简拼这条当初漏了。
+#[test]
+fn plain_abbrev_fuzzy_is_penalized_and_ordered_after_exact() {
+    let e = nl("plain_penalty");
+    let r = e.convert("nqc", 50).expect("convert 成功");
+
+    let fz = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "篮球场")
+        .expect("nqc 应经变体键 lqc 召回「篮球场」");
+    let ex = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "南区菜")
+        .expect("nqc 是「南区菜」的精确键，须一并召回");
+
+    // 键 nqc→lqc 只有首位不同 ⇒ 1 处 ⇒ 1191 × 0.5 = 595.5 → 596。
+    assert!(fz.is_fuzzy, "变体键命中须标 is_fuzzy");
+    assert_eq!(fz.weight, 596, "变体键命中须按处数折扣");
+    assert!(!ex.is_fuzzy, "精确键命中不得标 is_fuzzy");
+    assert_eq!(ex.weight, 800, "精确键命中权重须原样");
+
+    // 折扣的意义：不打折时 1191 > 800，次序会反过来。
+    let pos = |t: &str| r.candidates.iter().position(|c| c.text == t).unwrap();
+    assert!(
+        pos("南区菜") < pos("篮球场"),
+        "精确解须排在模糊解之前: {:?}",
+        r.candidates
+            .iter()
+            .map(|c| (&c.text, c.weight, c.is_fuzzy))
+            .collect::<Vec<_>>()
+    );
 }
