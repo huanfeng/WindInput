@@ -106,6 +106,109 @@ const INITIAL_GROUPS: &[FuzzyGroup] = &[
     },
 ];
 
+/// 声母**首字母**的模糊等价集（含 `c` 自身，只含开启的组）。
+///
+/// ## 为什么单独有这个函数
+///
+/// 简拼索引的键是各音节**首字母**拼成的串，所以只有**改首字母**的声母组会影响召回：
+/// `n↔l`、`f↔h`、`r↔l`。而 `sh↔s` / `zh↔z` / `ch↔c` 模糊前后首字母相同（s/z/c），
+/// 对本函数是恒等变换 —— **它们之所以一直走得通，正是因为这一点**，不是因为简拼路径
+/// 支持模糊音。用 [`FuzzyMatcher::fuzzy_variants_scored`] 代替不了它：那个要完整音节，
+/// 而这里只有一个首字母，`split_initial_final("n")` 得到的是裸声母、韵母为空。
+///
+/// ⚠️ `l` **同时属于** `n↔l` 与 `r↔l` 两组，两组都开时等价集是 `{l, n, r}`（3 个）。
+/// 这是唯一一个等价集大于 2 的字母，键变体数的上界由它决定。
+pub fn initial_alternatives(c: char, config: &FuzzyConfig) -> Vec<char> {
+    let mut out = vec![c];
+    for g in INITIAL_GROUPS {
+        if !(g.flag)(config) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (g.a.chars().next(), g.b.chars().next()) else {
+            continue;
+        };
+        // 首字母相同的组（zh/z、ch/c、sh/s）对本函数是恒等变换，跳过。
+        if a == b {
+            continue;
+        }
+        let other = if a == c {
+            b
+        } else if b == c {
+            a
+        } else {
+            continue;
+        };
+        if !out.contains(&other) {
+            out.push(other);
+        }
+    }
+    out
+}
+
+/// 两个**首字母**是否模糊等价（含相等）。[`initial_alternatives`] 的无分配版本。
+///
+/// 段校验跑在 `keys × abbr_code × hit` 的三重循环里，每条候选的每个声母段都要问一次；
+/// 走 `initial_alternatives(..).contains(..)` 等于在最内层为最多 3 个 char 反复分配 Vec。
+/// 判据与它**逐位一致**，改一处必须改另一处 —— 两者的一致性由
+/// `initial_alternatives_matches_pairwise_equal` 守住。
+pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
+    if a == b {
+        return true;
+    }
+    INITIAL_GROUPS.iter().any(|g| {
+        if !(g.flag)(config) {
+            return false;
+        }
+        let (Some(x), Some(y)) = (g.a.chars().next(), g.b.chars().next()) else {
+            return false;
+        };
+        // 首字母相同的组（zh/z、ch/c、sh/s）不产生跨字母等价。
+        x != y && ((x == a && y == b) || (y == a && x == b))
+    })
+}
+
+/// 简拼键的模糊变体（**含原键自身，且恒在首位**）。
+///
+/// 键是各音节首字母的拼接，故变体 = 各位 [`initial_alternatives`] 的笛卡尔积。
+/// 变体数是各位等价集大小之积，最坏 `3^len`（全 `l` 且 n_l + r_l 都开）。
+///
+/// ⚠️ **超过 [`MAX_ABBREV_KEY_VARIANTS`] 时只返回原键**，不做部分展开 —— 截一半等于
+/// 按字母表顺序随机挑几个变体放行，用户看到的是「有时出得来有时出不来」，比一致地
+/// 出不来更难排查。触发它需要 5 个以上的位都落在 n/l/f/h/r 上，是罕见输入。
+pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<String> {
+    if key.is_empty() || !config.any_enabled() {
+        return vec![key.to_string()];
+    }
+    let per_pos: Vec<Vec<char>> = key
+        .chars()
+        .map(|c| initial_alternatives(c, config))
+        .collect();
+    let total: usize = per_pos.iter().map(|v| v.len()).product();
+    if total <= 1 || total > MAX_ABBREV_KEY_VARIANTS {
+        return vec![key.to_string()];
+    }
+    // 原键恒在首位：各位的 alternatives[0] 就是原字母，笛卡尔积的第一项即原键。
+    let mut out: Vec<String> = vec![String::new()];
+    for opts in &per_pos {
+        let mut next = Vec::with_capacity(out.len() * opts.len());
+        for prefix in &out {
+            for c in opts {
+                let mut s = prefix.clone();
+                s.push(*c);
+                next.push(s);
+            }
+        }
+        out = next;
+    }
+    out
+}
+
+/// [`fuzzy_abbrev_keys`] 的变体数上限。
+///
+/// 32 = 5 个双选位（`2^5`），或 3 个双选位 + 1 个三选位再多一点。真机简拼键长度
+/// 就是音节数，常见 2~4；4 位全落在 n/l/f/h/r 上且都开组才 16 个变体，仍在限内。
+pub const MAX_ABBREV_KEY_VARIANTS: usize = 32;
+
 /// 韵母模糊组。**整体相等**比较，不是子串查找：`jiang` 的韵母是 `iang`，它不该因为
 /// 「串里含 `ang`」就被 `an_ang` 组改成 `jian`（那是 `ian_iang` 组的事，用户可能根本没开）。
 const FINAL_GROUPS: &[FuzzyGroup] = &[

@@ -1076,20 +1076,22 @@ impl PinyinEngine {
         // 故此处只需判形态。该值下面 ③④ 复用，不重算——重算就多一次漂移的机会。
         let plain = AbbrevMatcher::is_abbreviation(stroke, trie);
         if plain {
-            for abbr_code in dict.search_abbrev(stroke, 10) {
-                for h in dict.search_with_boundary(&abbr_code) {
-                    let eb = effective_boundary(&abbr_code, h.boundary, trie);
-                    if eb != 0 && eb.count_ones() as usize != stroke.len() {
-                        continue;
+            for key in self.abbrev_recall_keys(stroke) {
+                for abbr_code in dict.search_abbrev(&key, 10) {
+                    for h in dict.search_with_boundary(&abbr_code) {
+                        let eb = effective_boundary(&abbr_code, h.boundary, trie);
+                        if eb != 0 && eb.count_ones() as usize != stroke.len() {
+                            continue;
+                        }
+                        push(
+                            cands,
+                            h.text,
+                            abbr_code.clone(),
+                            h.weight,
+                            h.boundary,
+                            false,
+                        );
                     }
-                    push(
-                        cands,
-                        h.text,
-                        abbr_code.clone(),
-                        h.weight,
-                        h.boundary,
-                        false,
-                    );
                 }
             }
         }
@@ -1108,10 +1110,13 @@ impl PinyinEngine {
             mixed_abbrev::mixed_patterns(stroke, trie)
         };
         if !pats.is_empty() {
-            let mut keys: Vec<&str> = pats.iter().map(|p| p.key()).collect();
+            let mut keys: Vec<String> = pats
+                .iter()
+                .flat_map(|p| self.abbrev_recall_keys(p.key()))
+                .collect();
             keys.sort_unstable();
             keys.dedup();
-            for key in keys {
+            for key in &keys {
                 for abbr_code in dict.search_abbrev(key, MIXED_ABBREV_INDEX_LIMIT) {
                     for h in dict.search_with_boundary(&abbr_code) {
                         let Some(syls) =
@@ -1121,13 +1126,11 @@ impl PinyinEngine {
                         };
                         // 同一个键下常有多条解释命中，取**模糊处数最少**的那条计罚
                         // ——按最有利的解释算，与 `expand_code` 侧「变体自带处数」同口径。
+                        // 不按 `p.key() == key` 预筛，理由同 step 5b。
                         let Some(edits) = pats
                             .iter()
-                            .filter(|p| p.key() == key)
                             .filter_map(|p| {
-                                p.matches_with(&syls, |seg, syl| {
-                                    self.syllable_matches_fuzzy(seg, syl)
-                                })
+                                p.matches_with(&syls, |seg, syl| self.seg_matches_fuzzy(seg, syl))
                             })
                             .min()
                         else {
@@ -1152,16 +1155,14 @@ impl PinyinEngine {
         // 音节数、逐段全等仍在下面逐条判。见 `DictLayer::search_abbrev`。
         if let Some(store_dm) = &self.store_layers {
             for c in self.recall_store_by_abbrev(store_dm, stroke, plain, &pats) {
-                let plain = self.abbrev_of_code(&c.code, c.boundary).as_deref() == Some(stroke);
+                let plain = self.abbrev_matches_stroke(&c.code, c.boundary, stroke);
                 let mixed_edits = if plain {
                     None
                 } else {
                     mixed_abbrev::syllables_from_boundary(&c.code, c.boundary).and_then(|syls| {
                         pats.iter()
                             .filter_map(|p| {
-                                p.matches_with(&syls, |seg, syl| {
-                                    self.syllable_matches_fuzzy(seg, syl)
-                                })
+                                p.matches_with(&syls, |seg, syl| self.seg_matches_fuzzy(seg, syl))
                             })
                             .min()
                     })
@@ -1217,16 +1218,17 @@ impl PinyinEngine {
         plain: bool,
         pats: &[mixed_abbrev::MixedPattern],
     ) -> Vec<Candidate> {
-        let mut keys: Vec<&str> = Vec::new();
+        // 键与系统词侧同样要展开首字母模糊变体，否则用户词里的「篮球场」在 `nqc` 下召不回。
+        let mut keys: Vec<String> = Vec::new();
         if plain {
-            keys.push(stroke);
+            keys.extend(self.abbrev_recall_keys(stroke));
         }
-        keys.extend(pats.iter().map(|p| p.key()));
+        keys.extend(pats.iter().flat_map(|p| self.abbrev_recall_keys(p.key())));
         keys.sort_unstable();
         keys.dedup();
 
         let mut out: Vec<Candidate> = Vec::new();
-        for key in keys {
+        for key in &keys {
             for c in store_dm.search_abbrev(key, 0) {
                 if !out.iter().any(|x| x.code == c.code && x.text == c.text) {
                     out.push(c);
@@ -1648,17 +1650,58 @@ impl PinyinEngine {
     /// 表，512 次展开可塌成 ≤6 次。尚未做。
     ///
     /// `any_enabled()` 那道短路是有效的：模糊音全关时整条链路一次都不执行。
-    fn syllable_matches_fuzzy(&self, seg: &str, syl: &str) -> Option<usize> {
-        if seg == syl {
+    /// 简拼键的**召回集**：原键 + 首字母模糊变体（`n↔l` / `f↔h` / `r↔l`）。
+    ///
+    /// 简拼索引的键是各音节首字母拼成的串，改首字母的模糊组因此在**召回侧**就断了：
+    /// 用户打 `nqc`，「篮球场」挂在 `lqc` 下，`search_abbrev` 一条都捞不到，后面的逐段
+    /// 校验根本没机会表态。所以 `Initial` 段的模糊与 `Syllable` 段的模糊**是同一个缺口
+    /// 的两面**，必须召回侧枚举键 + 校验侧放宽 `Initial` 一起做，缺一条都不出结果。
+    ///
+    /// `sh↔s` / `zh↔z` / `ch↔c` 在这里是恒等变换（首字母同为 s/z/c），返回单元素 —— 这
+    /// 正是它们一直能用而另外三组不能的原因。模糊音全关时同样返回单元素，零额外点查。
+    ///
+    /// 变体键与原键**等长**，故调用方按键长度做的音节数过滤（`eb.count_ones() == key.len()`）
+    /// 不受影响。上限与截断策略见 [`fuzzy::fuzzy_abbrev_keys`]。
+    fn abbrev_recall_keys(&self, key: &str) -> Vec<String> {
+        fuzzy::fuzzy_abbrev_keys(key, &self.fuzzy_config)
+    }
+
+    /// 词条的声母串是否匹配用户敲的简拼 `stroke`（含首字母模糊）。
+    ///
+    /// 取代 `abbrev_of_code(..) == Some(stroke)` 的精确比较：召回侧放宽后，`lqc` 下的词
+    /// 会经 `nqc` 的变体键被捞回来，这里再按老判据比一次就又把它扔了。
+    fn abbrev_matches_stroke(&self, code: &str, boundary: u64, stroke: &str) -> bool {
+        let Some(ab) = self.abbrev_of_code(code, boundary) else {
+            return false;
+        };
+        if ab == stroke {
+            return true;
+        }
+        self.fuzzy_config.any_enabled() && self.abbrev_recall_keys(stroke).contains(&ab)
+    }
+
+    fn seg_matches_fuzzy(&self, seg: &mixed_abbrev::AbbrevSeg, syl: &str) -> Option<usize> {
+        use mixed_abbrev::AbbrevSeg;
+        if seg.matches_exact(syl) {
             return Some(0);
         }
         if !self.fuzzy_config.any_enabled() {
             return None;
         }
-        fuzzy::FuzzyMatcher::fuzzy_variants_scored(seg, &self.fuzzy_config)
-            .into_iter()
-            .find(|(variant, _)| variant == syl)
-            .map(|(_, edits)| edits)
+        match seg {
+            // 声母段只约束首字母 ⇒ 判据是首字母的模糊等价集，计 1 处改动。
+            // 不能套 `fuzzy_variants_scored`：那个要完整音节，而这里只有一个字母。
+            AbbrevSeg::Initial(c) => {
+                let first = syl.chars().next()?;
+                fuzzy::initials_fuzzy_equal(*c, first, &self.fuzzy_config).then_some(1)
+            }
+            AbbrevSeg::Syllable(s) => {
+                fuzzy::FuzzyMatcher::fuzzy_variants_scored(s, &self.fuzzy_config)
+                    .into_iter()
+                    .find(|(variant, _)| variant == syl)
+                    .map(|(_, edits)| edits)
+            }
+        }
     }
 
     /// 带模糊拼音扩展的词库查找（对齐 Go lookupWithFuzzy）。
@@ -2760,45 +2803,47 @@ impl Engine for PinyinEngine {
         //    候选因此带上真实的 code 与 boundary：词频记账走 `cand_code` 取候选的 code，
         //    此前设成简拼串 `nh`，同一个词在简拼与全拼下遂走两个互不相认的计数。
         if stroke_is_plain_abbrev {
-            for abbr_code in dict.search_abbrev(abbr_query, 10) {
-                // 用 search_with_boundary 而非 search：拼音引擎直接持有 CachedDict、
-                // 不经 SystemDictLayer，用 search() 会把边界丢在这里（P2b 踩过同款）。
-                for h in dict.search_with_boundary(&abbr_code) {
-                    // **音节数必须等于简拼字母数**。扁平码有损：`xian` 既是「西安」的
-                    // xi|an（2 音节），也是「先」的 xian（1 音节）。索引里 `xa` 指向的是
-                    // 前者的码，回查主表却会把后者一并捞出来 —— 实测 `xa` 出「先/线/弦/
-                    // 现/县」一串单字。这是「存词」改「存码」引入的，存词时不会发生。
-                    //
-                    // boundary=0（无边界信息）**不再直接放行**：那是本判据唯一的漏网口，
-                    // 手输码用户词/旧词典条目会绕过音节数约束（`nh` 出 3 音节词）。
-                    // 改用 `effective_boundary` 对码现切补出音节数，与全拼侧 6.3 闸门同源。
-                    let eb = effective_boundary(&abbr_code, h.boundary, trie);
-                    if eb != 0 && eb.count_ones() as usize != abbr_query.len() {
-                        continue;
-                    }
-                    let before = candidates.len();
-                    push_unique(
-                        &mut candidates,
-                        h.text,
-                        abbr_code.clone(),
-                        h.weight,
-                        999999,
-                        false,
-                        // is_prefix=false：简拼不是前缀补全，层级由 is_abbrev 表达（见下）。
-                        false,
-                        h.boundary,
-                        false,
-                    );
-                    // **简拼层标记，必须与 step6 的用户词简拼一致。**
-                    //
-                    // 此前这里借 `is_prefix=true` 沉底，而 step6 用 `is_abbrev=true`——
-                    // 二者在 `cmp_match_layers` 里是**两个不同层级**（`is_abbrev` 是第一键、
-                    // 比前缀层更沉），于是用户词简拼被整层压在系统词简拼之后，怎么调频都
-                    // 翻不过来（层级是硬闸门）：`dblg` 下用户词「大菠萝哥」永远排在系统词
-                    // 「夺不了冠」之后。同层之后两者才能按权重/词频正常竞争。
-                    if candidates.len() > before {
-                        candidates[before].is_abbrev = true;
-                        abbrev_full_hit = true;
+            for key in self.abbrev_recall_keys(abbr_query) {
+                for abbr_code in dict.search_abbrev(&key, 10) {
+                    // 用 search_with_boundary 而非 search：拼音引擎直接持有 CachedDict、
+                    // 不经 SystemDictLayer，用 search() 会把边界丢在这里（P2b 踩过同款）。
+                    for h in dict.search_with_boundary(&abbr_code) {
+                        // **音节数必须等于简拼字母数**。扁平码有损：`xian` 既是「西安」的
+                        // xi|an（2 音节），也是「先」的 xian（1 音节）。索引里 `xa` 指向的是
+                        // 前者的码，回查主表却会把后者一并捞出来 —— 实测 `xa` 出「先/线/弦/
+                        // 现/县」一串单字。这是「存词」改「存码」引入的，存词时不会发生。
+                        //
+                        // boundary=0（无边界信息）**不再直接放行**：那是本判据唯一的漏网口，
+                        // 手输码用户词/旧词典条目会绕过音节数约束（`nh` 出 3 音节词）。
+                        // 改用 `effective_boundary` 对码现切补出音节数，与全拼侧 6.3 闸门同源。
+                        let eb = effective_boundary(&abbr_code, h.boundary, trie);
+                        if eb != 0 && eb.count_ones() as usize != abbr_query.len() {
+                            continue;
+                        }
+                        let before = candidates.len();
+                        push_unique(
+                            &mut candidates,
+                            h.text,
+                            abbr_code.clone(),
+                            h.weight,
+                            999999,
+                            false,
+                            // is_prefix=false：简拼不是前缀补全，层级由 is_abbrev 表达（见下）。
+                            false,
+                            h.boundary,
+                            false,
+                        );
+                        // **简拼层标记，必须与 step6 的用户词简拼一致。**
+                        //
+                        // 此前这里借 `is_prefix=true` 沉底，而 step6 用 `is_abbrev=true`——
+                        // 二者在 `cmp_match_layers` 里是**两个不同层级**（`is_abbrev` 是第一键、
+                        // 比前缀层更沉），于是用户词简拼被整层压在系统词简拼之后，怎么调频都
+                        // 翻不过来（层级是硬闸门）：`dblg` 下用户词「大菠萝哥」永远排在系统词
+                        // 「夺不了冠」之后。同层之后两者才能按权重/词频正常竞争。
+                        if candidates.len() > before {
+                            candidates[before].is_abbrev = true;
+                            abbrev_full_hit = true;
+                        }
                     }
                 }
             }
@@ -2832,10 +2877,14 @@ impl Engine for PinyinEngine {
         if !mixed_pats.is_empty() {
             // 同一串的多条解释常投影到同一个键（`nhao` 的 [n][hao] 与 `nih` 的 [ni][h] 都是
             // `nh`），按键去重后每个键只点查一次索引。
-            let mut keys: Vec<&str> = mixed_pats.iter().map(|p| p.key()).collect();
+            // 每条模式再展开首字母模糊变体（见 `abbrev_recall_keys`），合并去重后逐键点查。
+            let mut keys: Vec<String> = mixed_pats
+                .iter()
+                .flat_map(|p| self.abbrev_recall_keys(p.key()))
+                .collect();
             keys.sort_unstable();
             keys.dedup();
-            for key in keys {
+            for key in &keys {
                 // limit 比 step5 的 10 大一截：那边键即答案、取权重前 10 就够；这里拿到的
                 // 码还要过一道逐段校验，**绝大多数会被滤掉**，取 10 条几乎必然一条不剩。
                 for abbr_code in dict.search_abbrev(key, MIXED_ABBREV_INDEX_LIMIT) {
@@ -2847,13 +2896,15 @@ impl Engine for PinyinEngine {
                             continue;
                         };
                         // 取**模糊处数最少**的解释计罚（同 `recall_abbrev_prefix` ②）。
+                        // **不再按 `p.key() == key` 预筛**：召回键现在可能是某条模式的
+                        // 模糊变体，与该模式的原键并不相等，预筛会把刚捞回来的词又滤掉。
+                        // 判据本就该是「有没有任一条模式解释得通这个词」，键只是召回手段；
+                        // 模式数有 `MAX_PATTERNS` 封顶，且 `matches_with` 首先比音节数，
+                        // 去掉预筛的代价是每条候选多几次整数比较。
                         let Some(edits) = mixed_pats
                             .iter()
-                            .filter(|p| p.key() == key)
                             .filter_map(|p| {
-                                p.matches_with(&syls, |seg, syl| {
-                                    self.syllable_matches_fuzzy(seg, syl)
-                                })
+                                p.matches_with(&syls, |seg, syl| self.seg_matches_fuzzy(seg, syl))
                             })
                             .min()
                         else {
@@ -3037,8 +3088,7 @@ impl Engine for PinyinEngine {
                     }
                     // 比对基准是原始击键（见 `abbr_query`）：双拼下 query 已是转换结果，
                     // 拿它比对永远匹配不上用户敲的简拼。
-                    let plain =
-                        self.abbrev_of_code(&c.code, c.boundary).as_deref() == Some(abbr_query);
+                    let plain = self.abbrev_matches_stroke(&c.code, c.boundary, abbr_query);
                     // 混合简拼：按 boundary 切回音节序列逐段比对（无边界 → 无判据 → 不参与）。
                     // 与系统词侧走同一批 `mixed_pats`，判据完全一致，只是这边不经索引——
                     // 用户词规模小，现算即可（与 `abbrev_of_code` 那条注释同理）。
@@ -3051,7 +3101,7 @@ impl Engine for PinyinEngine {
                                     .iter()
                                     .filter_map(|p| {
                                         p.matches_with(&syls, |seg, syl| {
-                                            self.syllable_matches_fuzzy(seg, syl)
+                                            self.seg_matches_fuzzy(seg, syl)
                                         })
                                     })
                                     .min()

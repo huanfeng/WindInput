@@ -50,6 +50,20 @@ pub enum AbbrevSeg {
     Syllable(String),
 }
 
+impl AbbrevSeg {
+    /// 本段与词典音节的**精确**匹配判定 —— 段语义的唯一真相源。
+    ///
+    /// 模糊放宽由调用方在此基础上叠加（见 `PinyinEngine::seg_matches_fuzzy`）：先问这里，
+    /// 不中再试变体。把 `starts_with` / 全等这两条留在本模块，是为了让「声母段只约束
+    /// 首字母、音节段约束全等」这个定义只有一处。
+    pub fn matches_exact(&self, syl: &str) -> bool {
+        match self {
+            AbbrevSeg::Initial(c) => syl.starts_with(*c),
+            AbbrevSeg::Syllable(s) => syl == s,
+        }
+    }
+}
+
 /// 一串输入的一种混合解释。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MixedPattern {
@@ -94,13 +108,14 @@ impl MixedPattern {
     /// 施加折扣）。保留它是作为「精确比较」的语义锚点与本模块单测的入口；若哪天单测也不用了，
     /// 直接删掉即可，不要为了「保持对称」再给它接回生产路径。
     pub fn matches<S: AsRef<str>>(&self, syllables: &[S]) -> bool {
-        self.matches_with(syllables, |seg, syl| (seg == syl).then_some(0))
+        self.matches_with(syllables, |seg, syl| seg.matches_exact(syl).then_some(0))
             .is_some()
     }
 
     /// 同 [`Self::matches`]，但音节段的比较交给调用方 —— 供模糊音放宽。
     ///
-    /// 闭包返回 `Some(edits)`（该段的模糊改动处数，`0` = 精确相等）或 `None`（不匹配）；
+    /// 闭包对**每一段**（声母段与音节段都算）返回 `Some(edits)`（该段的模糊改动处数，
+    /// `0` = 精确匹配）或 `None`（不匹配）；
     /// 整条模式的返回值是各段 `edits` 之和。**调用方必须据此施加
     /// [`fuzzy_penalized`](crate::pinyin) 折扣并标 `is_fuzzy`** —— 模糊命中恒低精确命中一档
     /// 是全仓不变量（见 `FUZZY_WEIGHT_SCALE` 那段论证），本路径不是例外。
@@ -118,21 +133,14 @@ impl MixedPattern {
     pub fn matches_with<S: AsRef<str>>(
         &self,
         syllables: &[S],
-        syl_match: impl Fn(&str, &str) -> Option<usize>,
+        seg_match: impl Fn(&AbbrevSeg, &str) -> Option<usize>,
     ) -> Option<usize> {
         if syllables.len() != self.segs.len() {
             return None;
         }
         let mut edits = 0usize;
         for (seg, syl) in self.segs.iter().zip(syllables) {
-            match seg {
-                AbbrevSeg::Initial(c) => {
-                    if !syl.as_ref().starts_with(*c) {
-                        return None;
-                    }
-                }
-                AbbrevSeg::Syllable(s) => edits += syl_match(s, syl.as_ref())?,
-            }
+            edits += seg_match(seg, syl.as_ref())?;
         }
         Some(edits)
     }
