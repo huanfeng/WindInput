@@ -214,9 +214,20 @@ pub(crate) fn dec_val_ordered(b: &[u8]) -> Option<(i32, u32, i64, u64, u32)> {
 /// 使用场景足够宽松。
 pub(crate) const USER_WORD_TEXT_MAX_CHARS: usize = 10000;
 
+/// 手动加词 code（编码）长度上限（字符数）。
+///
+/// 与 [`USER_WORD_TEXT_MAX_CHARS`] 同一闸口、同一动机，但数值按 code 的实际容量定：
+/// 二进制格式 `code_len: u16`（`wind_dict::binformat`）本身给不出实质约束，真正收紧的是
+/// 拼音音节边界 `boundary: u64`——**code 超过 64 字节，边界位掩码就装不下、消费方降级回
+/// DAG 猜测**。真实方案数值都远小于它：五笔类码表码固定 4 位，英文方案
+/// `max_code_length=32`，10 字词组全拼全码约 60 字节。128 留出 2 倍以上余量，够真实场景
+/// 用、又能挡住病态输入（比如把 text 错填进了 code 参数）。
+pub(crate) const USER_WORD_CODE_MAX_CHARS: usize = 128;
+
 impl Store {
     /// 新增/合并用户词：已存在则权重取 max、保留原 created_at；新词记 created_at=now。
-    /// 用户词**无权重上限**（store.md §3），但文本长度有 `USER_WORD_TEXT_MAX_CHARS` 兜底上限。
+    /// 用户词**无权重上限**（store.md §3），但文本/编码长度分别有 `USER_WORD_TEXT_MAX_CHARS`
+    /// / `USER_WORD_CODE_MAX_CHARS` 兜底上限。
     ///
     /// `boundary`：该 code 的音节边界（见 `wind_dict::binformat::DictEntry::boundary`）。
     /// 造词路径（`generate_word_pinyin`）算得；用户手输码/wdict 导入无从得知，传 0
@@ -233,6 +244,10 @@ impl Store {
         let n = text.chars().count();
         if n > USER_WORD_TEXT_MAX_CHARS {
             anyhow::bail!("词条过长（{n} 字，上限 {USER_WORD_TEXT_MAX_CHARS}）");
+        }
+        let code_len = code.chars().count();
+        if code_len > USER_WORD_CODE_MAX_CHARS {
+            anyhow::bail!("编码过长（{code_len} 字，上限 {USER_WORD_CODE_MAX_CHARS}）");
         }
         let key = enc_key(schema, code, text);
         self.with_db(|db| {
@@ -689,9 +704,38 @@ mod tests {
         let err = s
             .add_user_word("pinyin", "abd", &too_long, 100, 0)
             .expect_err("超过上限应被拒绝");
-        assert!(err.to_string().contains("过长"), "错误信息应提示过长: {err}");
+        assert!(
+            err.to_string().contains("过长"),
+            "错误信息应提示过长: {err}"
+        );
         assert!(
             s.get_user_words("pinyin", "abd").unwrap().is_empty(),
+            "拒绝的词不得落库"
+        );
+    }
+
+    /// 超长 code（> `USER_WORD_CODE_MAX_CHARS`）一律拒绝，语义与文本长度校验对称。
+    #[test]
+    fn add_user_word_rejects_code_over_max_chars() {
+        let p = tmp("wind_uw_code_max_len.redb");
+        let s = Store::open(&p).unwrap();
+
+        let ok_code: String = "a".repeat(USER_WORD_CODE_MAX_CHARS);
+        s.add_user_word("pinyin", &ok_code, "你好", 100, 0)
+            .expect("恰好等于上限应写入成功");
+
+        let too_long_code: String = "a".repeat(USER_WORD_CODE_MAX_CHARS + 1);
+        let err = s
+            .add_user_word("pinyin", &too_long_code, "你好", 100, 0)
+            .expect_err("超过上限应被拒绝");
+        assert!(
+            err.to_string().contains("过长"),
+            "错误信息应提示过长: {err}"
+        );
+        assert!(
+            s.get_user_words("pinyin", &too_long_code)
+                .unwrap()
+                .is_empty(),
             "拒绝的词不得落库"
         );
     }
