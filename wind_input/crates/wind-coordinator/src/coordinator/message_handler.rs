@@ -4,7 +4,10 @@
 //!（coordinator 子模块，自 coordinator.rs 平移，纯搬运。）
 
 use super::*;
+// 本模块自己导入，**不挂到 `coordinator.rs` 的那条 use 上**：那个文件是多方共同修改的热点，
+// 往它的 import 行搭一笔会让本功能的提交与别人的改动绑在同一个 hunk 上。
 use wind_config::app_compat::NewlineStyle;
+use wind_ipc::protocol::TOGGLE_PASSTHROUGH_KEY;
 
 impl Coordinator {
     /// 当前焦点应用的上屏换行档位：per-app（compat `[[commit_newline]]`）→ 全局
@@ -576,6 +579,27 @@ impl MessageHandler for Coordinator {
     /// 再做 preedit 占位后处理。集中在此避免修改 40+ 个 commit 返回点（对齐旧 Go
     /// HandleKeyEvent 末尾的 recordCommitFallback 思路）。
     fn handle_key_event_policed(&self, data: &KeyEventData) -> KeyAction {
+        // 「上一次按键送达之后、这一按之前，有键被透传给了宿主」⇒ 智能符号武装态失效。
+        //
+        // 这是出口那道「非同键按键解除武装」够不着的那一块：英文半角下 TSF 只吃标点键
+        // （`_IsCustomEnglishPunctKey` → `IsPunctuationKey`，11 个 OEM 键），中间打的字母
+        // 数字**根本不产生按键事件**，而英文模式又没有编码缓冲，`smart_symbol_press2` 的
+        // 「缓冲非空」也恒为假。两道判据同时失明，只有 DLL 知道这件事发生过，于是由它经
+        // `toggles` 的 `TOGGLE_PASSTHROUGH_KEY` 位如实上报（见 C++ `_NotePassthroughKeyDown`）。
+        //
+        // **必须在 `handle_key_event` 之前**：出口那道是「这一按之后」的清理，而这一位说的是
+        // 「这一按之前已经发生过」，放到出口就晚了一整拍——press2 早已误触发。
+        //
+        // 影响面刻意收到最窄：只解除智能符号武装，不碰任何别的状态；位为假时（绝大多数按键）
+        // 连锁都不取。旧 DLL 不置位 ⇒ 行为与改造前逐字一致。
+        if data.event_type == EVENT_KEY_DOWN && data.toggles & TOGGLE_PASSTHROUGH_KEY != 0 {
+            let mut arm = self.smart_symbol.lock().unwrap_or_else(|e| e.into_inner());
+            if arm.armed {
+                debug!("SmartSymbol: 上一按之后有键被透传给宿主，解除武装");
+                arm.armed = false;
+                arm.hold_pending_commit = false;
+            }
+        }
         let action = self.handle_key_event(data);
         // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
         // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达

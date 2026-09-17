@@ -354,6 +354,58 @@ private:
     // 把一个已被我们吃掉的键原样重放给宿主（skip 表标记，避免自己的钩子二次处理）。
     void _ReplayKeyToHost(WORD vk);
 
+    // ── 透传上报（TOGGLE_PASSTHROUGH_KEY）────────────────────────────────────────
+    //
+    // 事实：某个 keydown 没被我们吃下，直接进了宿主。服务端因此**看不到**这次输入——
+    // 英文半角下字母数字全走这条路（TSF 只吃标点键），中文模式下数字键等也是。
+    // 智能符号的 press2 判定需要知道「press1 与 press2 之间有没有别的输入」，而这是
+    // 服务端唯一拿不到的那一块。分工同 _lastPassthroughDigit：本文件只报事实。
+    //
+    // ⚠️ 判据必须**失效安全**：多报一次的代价是用户得重新按一次 press1；漏报的代价是
+    // ReplaceBackward 删掉用户刚打的字。故宁可宽——凡没吃下的 keydown 一律记，只排除
+    // 纯修饰键（按 Shift/Ctrl/Alt/Win 本身不往文档里写东西，排除它们是为了保住「按住
+    // Shift 连按两次 ？」这类正常 press2）。
+    //
+    // CapsLock **刻意不排除**：它切换后标点产物换了一列（服务端 caps 镜像会临时关中文
+    // 标点），press2 再按旧方向替换本就是错的，解除武装反而是对的。
+    //
+    // 只记 keydown：被我们吃下的键，其 keyup 常常是透传的（TSF 只对 toggle 键要 keyup），
+    // 把 keyup 也记进来会让每一次正常的 press1 自己把自己解除掉。
+    static bool _IsBareModifierVk(WPARAM vk)
+    {
+        switch (vk)
+        {
+        case VK_SHIFT:    case VK_CONTROL:  case VK_MENU:
+        case VK_LSHIFT:   case VK_RSHIFT:
+        case VK_LCONTROL: case VK_RCONTROL:
+        case VK_LMENU:    case VK_RMENU:
+        case VK_LWIN:     case VK_RWIN:
+            return true;
+        default:
+            return false;
+        }
+    }
+    void _NotePassthroughKeyDown(WPARAM vk)
+    {
+        if (!_IsBareModifierVk(vk))
+            _passthroughSinceLastKeyDownSent = true;
+    }
+
+    // `OnTestKeyDown` / `OnKeyDown` 有 40+ 个 return，逐个接线必漏一处（本仓反复吃过的
+    // "散点接线"）。用作用域守卫在**函数出口**统一判：析构时 `*pfEaten` 已是最终结论。
+    // 同款收口见 Rust 侧的 `SoftKeyboardPushOnDrop`。
+    struct PassthroughNoter
+    {
+        CKeyEventSink* sink;
+        WPARAM vk;
+        BOOL* eaten;
+        ~PassthroughNoter()
+        {
+            if (sink != nullptr && eaten != nullptr && !*eaten)
+                sink->_NotePassthroughKeyDown(vk);
+        }
+    };
+
     // ── 数字后智能标点的备用 prevChar 通路 ──────────────────────────────────────
     //
     // prevChar 主路径是 TSF 现读文档（CTextService::ConsumeCachedPrevChar）；EverEdit
@@ -410,6 +462,11 @@ private:
     // **不要在 TSF 侧重新实现它。**
 
     WCHAR _lastPassthroughDigit; // Last digit key that passed through (for smart punct fallback in apps where TSF can't read text)
+    // 自上一个 **keydown** 事件发给服务端以来，有没有键被透传给宿主（见 _NotePassthroughKeyDown）。
+    // 在 _SendKeyToService 里随 toggles 的 TOGGLE_PASSTHROUGH_KEY 位带出并清零——只在 keydown
+    // 那一发消费：toggle 键的 keyup 也会发到服务端，让它顺手清掉会把这个事实丢在一个
+    // 服务端根本不看这位的事件上。
+    bool _passthroughSinceLastKeyDownSent = false;
     uint32_t _pendingKeyUpKey;   // Key code of pending KeyUp toggle key
     uint32_t _pendingKeyUpModifiers; // Modifiers when KeyDown was pressed
     DWORD    _pendingKeyDownTime;    // GetTickCount() when toggle key was pressed down

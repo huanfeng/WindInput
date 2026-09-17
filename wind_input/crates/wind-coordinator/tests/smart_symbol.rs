@@ -683,3 +683,96 @@ fn numpad_punct_press2_survives_the_disarm_guard() {
         a2
     );
 }
+
+// ── 英文半角：中间输入被 DLL 直接透传，服务端靠 toggles 位得知 ─────────────────────
+//
+// 英文输入模式 + 半角下 TSF 只吃标点键（`_IsCustomEnglishPunctKey` → `IsPunctuationKey`，
+// 11 个 OEM 键），中间打的字母**不产生按键事件**；英文模式又没有编码缓冲。于是另外两道
+// 判据（`smart_symbol_press2` 的「缓冲非空」、出口的「非同键按键」）在这条路上同时失明，
+// `prev_char` 读不回的宿主里表现为：`.` → 快打 `abc` → 再按 `.` ⇒ `c` 被换成 `。`。
+//
+// 补法是让 DLL 如实上报「上一次按键送达之后有键被透传」（`TOGGLE_PASSTHROUGH_KEY`，搭
+// `toggles` 的空闲位，不动 18 字节的 KeyPayload 布局）。服务端只在这一位为真时解除武装。
+
+/// C++ `TOGGLE_PASSTHROUGH_KEY` 的值。刻意写字面量而不是引常量——引了就会跟着一起漂，
+/// 本组用例便再也证明不了「服务端读的确实是 DLL 写的那一位」。
+/// 与 C++ 头文件的一致性另由 `wind-ipc/tests/toggle_bits_match_cpp.rs` 对账。
+const TOGGLES_PASSTHROUGH: u8 = 0x08;
+
+fn press_policed_toggles(coord: &Coordinator, vk: u32, prev_char: u16, toggles: u8) -> KeyAction {
+    coord.handle_key_event_policed(&KeyEventData {
+        key_code: vk,
+        scan_code: 0,
+        modifiers: 0,
+        event_type: EVENT_KEY_DOWN,
+        toggles,
+        event_seq: 0,
+        prev_char,
+    })
+}
+
+/// 主用例：press1 与 press2 之间 DLL 报了「有键被透传」⇒ 不判 press2。
+/// `prev_char = 0` 是宿主读不回文档那族（微信/终端），光标前字符那道对照在那里恒放行。
+#[test]
+fn english_mode_passthrough_flag_disarms_press2() {
+    let coord = Coordinator::new_headless(cfg_en_mode(), Some(&data_dir()));
+    let a1 = press_policed_toggles(&coord, VK_OEM_PERIOD, 0, 0);
+    assert_eq!(
+        inserted(&a1),
+        Some("."),
+        "英文模式 press1 应由 core 出英文句点，实际: {:?}",
+        a1
+    );
+    // 用户快打 `abc`：DLL 全部透传，服务端一个事件都收不到，只在下一个标点事件上看到这一位。
+    let a2 = press_policed_toggles(&coord, VK_OEM_PERIOD, 0, TOGGLES_PASSTHROUGH);
+    assert!(
+        replaced(&a2).is_none(),
+        "中间有透传输入 ⇒ 不是 press2，替换会删掉用户刚打的字母，实际: {:?}",
+        a2
+    );
+    assert_eq!(
+        inserted(&a2),
+        Some("."),
+        "应落普通流程：照常出英文句点（并作为新的 press1 重新武装），实际: {:?}",
+        a2
+    );
+}
+
+/// 对照：同一时序、这一位为 0（没有透传，或旧版 DLL 压根不报）⇒ press2 **必须照常触发**。
+///
+/// 这条是「不影响正常流程」的守卫：新判据若写成恒真（比如误把别的位也算进去、或忘了判位
+/// 直接解除），本条立刻红。旧 DLL + 新 core 的混搭也由它代表——不置位即原行为。
+#[test]
+fn english_mode_without_passthrough_flag_still_replaces() {
+    let coord = Coordinator::new_headless(cfg_en_mode(), Some(&data_dir()));
+    let a1 = press_policed_toggles(&coord, VK_OEM_PERIOD, 0, 0);
+    assert_eq!(inserted(&a1), Some("."), "实际: {:?}", a1);
+    let a2 = press_policed_toggles(&coord, VK_OEM_PERIOD, '.' as u16, 0);
+    assert_eq!(
+        replaced(&a2),
+        Some((1, "。")),
+        "没有透传 ⇒ press2 照常把英文句点换成中文句号，实际: {:?}",
+        a2
+    );
+}
+
+/// 这一位与 CapsLock 位互不干扰（同一个 `toggles` 字节，bit0 是锁定态、bit3 是透传事实）。
+/// 搭车位最容易出的错就是掩码写错把两件事搅在一起：CapsLock 开着时 press2 不该因此失效。
+#[test]
+fn passthrough_flag_does_not_disturb_capslock_bit() {
+    let coord = Coordinator::new_headless(cfg_en_mode(), Some(&data_dir()));
+    let a1 = press_policed_toggles(&coord, VK_OEM_PERIOD, 0, 0x01);
+    assert_eq!(
+        inserted(&a1),
+        Some("."),
+        "CapsLock 开着照常出英文句点，实际: {:?}",
+        a1
+    );
+    let a2 = press_policed_toggles(&coord, VK_OEM_PERIOD, '.' as u16, 0x01);
+    assert_eq!(
+        replaced(&a2),
+        Some((1, "。")),
+        "只开 CapsLock 位不该解除武装，实际: {:?}",
+        a2
+    );
+}

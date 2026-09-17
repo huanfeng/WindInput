@@ -164,6 +164,19 @@ constexpr uint8_t TOGGLE_CAPSLOCK   = 0x01; // CapsLock is on
 constexpr uint8_t TOGGLE_NUMLOCK    = 0x02; // NumLock is on
 constexpr uint8_t TOGGLE_SCROLLLOCK = 0x04; // ScrollLock is on
 
+// 自上一个 keydown 事件送达服务端以来，**有键被透传给了宿主**（服务端没看见的输入）。
+//
+// 严格说它不是「切换键状态」，搭 toggles 的空闲位是为了**不动 KeyPayload 的 18 字节布局**：
+// 这个结构两端各有 static_assert，加字段就是一次协议破坏，而新旧 DLL / core 在真机上会
+// 混搭（DLL 随安装包走、core 可能是另一次升级）。搭空闲位则两个方向都安全——旧 core 只读
+// bit0 会忽略它，旧 DLL 不置位等于「没透传过」，各自保持原行为。
+//
+// 用途只有一个：智能符号的 press2 判定。press1 与 press2 之间若夹了服务端看不见的输入，
+// 这一按就不能当 press2（否则 ReplaceBackward 删掉的是用户刚打的字）。英文半角下 TSF 只吃
+// 标点键、字母数字全透传，服务端既无按键事件也无编码缓冲，只能靠 DLL 如实上报这个事实。
+// 与 _lastPassthroughDigit 同一分工：**DLL 报事实，服务端持策略**。
+constexpr uint8_t TOGGLE_PASSTHROUGH_KEY = 0x08;
+
 // ============================================================================
 // Modifier flags for KeyHash encoding (high 16 bits)
 // Using KEYMOD_ prefix to avoid conflicts with Windows SDK MOD_* macros

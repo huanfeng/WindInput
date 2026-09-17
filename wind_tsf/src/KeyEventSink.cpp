@@ -328,6 +328,11 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 {
     *pfEaten = FALSE;
 
+    // 透传上报：本函数有 40+ 个 return，逐个接线必漏；守卫在**出口**统一按最终的
+    // `*pfEaten` 判。没吃下 = 这次输入服务端看不见，智能符号的 press2 判定要知道。
+    // 详见 KeyEventSink.h 的 _NotePassthroughKeyDown。
+    PassthroughNoter _ptNote{this, wParam, pfEaten};
+
     // 合成提交触发键：无条件吃下，不流入下面任何按键逻辑（大小写/会话/热键判据……）。
     // 真正的提交在 OnKeyDown 里执行——那才是 TSF 认可的"按键处理期间"。放在最前面，
     // 与状态（_isComposing 等）无关：不管此刻是否在组合中，触发键都必须先被截获。
@@ -871,6 +876,11 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
 STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+
+    // 同 OnTestKeyDown 的守卫。两处都要：跳过 OnTestKeyDown 直奔 OnKeyDown 的宿主存在
+    // （见 _DispatchPendingToggleKeyUp 的注释），只挂一处会在那些宿主上整条失效。
+    // 同一个键两处都记也无妨——记的是个幂等的布尔。
+    PassthroughNoter _ptNote{this, wParam, pfEaten};
 
     // 合成提交触发键：这里才是真正的提交点——TSF 认可的"按键处理期间"，
     // CommitText 内部据此走 TF_ES_SYNC 而非 nonKeyContext 的异步会话。
@@ -2087,6 +2097,19 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
     else if (_lastPassthroughDigit != 0 && !isPunctKey)
     {
         _lastPassthroughDigit = 0;
+    }
+
+    // 透传上报位：只在 **keydown** 这一发带出并清零。toggle 键的 keyup 也会走到这里
+    // （见 _DispatchPendingToggleKeyUp），让它顺手清掉会把「中间有过透传」这个事实丢在一个
+    // 服务端根本不读该位的事件上——症状是「中间按过 Shift 就又能误删一次」。
+    if (eventType == KEY_EVENT_DOWN)
+    {
+        if (_passthroughSinceLastKeyDownSent)
+        {
+            toggles |= TOGGLE_PASSTHROUGH_KEY;
+            WIND_LOG_DEBUG(L"passthrough_before_key: 上一次按键送达后有键被透传，随本事件上报\n");
+        }
+        _passthroughSinceLastKeyDownSent = false;
     }
 
     BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar);

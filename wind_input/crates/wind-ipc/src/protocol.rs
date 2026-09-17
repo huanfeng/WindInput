@@ -1441,6 +1441,21 @@ pub const MOD_CAPSLOCK: u32 = 0x0100;
 /// Windows 侧无回归：Win+键由系统抢先处理，本就到不了 TSF。
 pub const MOD_SHORTCUT: u32 = MOD_CTRL | MOD_ALT | MOD_WIN;
 
+/// `KeyEventData::toggles` 的位（对齐 C++ `BinaryProtocol.h` 的 `TOGGLE_*`）。
+/// CapsLock/NumLock/ScrollLock 是真正的锁定态快照，每键实时采集。
+pub const TOGGLE_CAPSLOCK: u8 = 0x01;
+
+/// 自上一个 keydown 事件送达以来，**有键被透传给了宿主**——服务端没看见的一次输入。
+///
+/// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的 18 字节布局（两端各有
+/// static_assert，加字段即协议破坏，而真机上 DLL 与 core 会混搭版本）。两个方向都安全：
+/// 旧 core 只读 bit0，旧 DLL 不置位 = 「没透传过」= 原行为。
+///
+/// 唯一消费者是智能符号的武装态：英文半角下 TSF 只吃标点键，中间打的字母全透传，服务端
+/// 既收不到按键事件、又没有编码缓冲，两道既有判据都够不着，只能靠 DLL 报这个事实。
+/// 失效方向是安全的——多报一次只是让用户重按一次 press1，漏报则会删掉用户刚打的字。
+pub const TOGGLE_PASSTHROUGH_KEY: u8 = 0x08;
+
 /// 计算热键哈希值：(modifiers << 16) | (keyCode & 0xFFFF)
 pub fn calc_key_hash(modifiers: u32, key_code: u32) -> u32 {
     (modifiers << 16) | (key_code & 0xFFFF)
