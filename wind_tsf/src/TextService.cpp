@@ -5912,8 +5912,11 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
     // ★ 所以问题从来不在「这个来源准不准」，而在**拿它做什么**：
     //     做首显决策 → 有害（就是上面记的 Excel 16px 错位被 settle 固定）
     //     刷新坐标缓存 → 有益（这是那段时间里唯一的位置信息）
-    // 独立的 source 值把这个区分交给消费端，服务端见到 PRE_REFLOW 只更新缓存、
-    // 绝不参与任何首显判据。**不要把它改回普通 probe 通道**，那才是当初翻车的原因。
+    // 独立的 source 值把这个区分交给消费端：服务端见到 PRE_REFLOW 不拿它当位置来源，
+    // 只更新缓存 + 记成「本轮重排前的坐标」当否决基准（后续 probe 与它相同即判未重排，
+    // 2026-09-17 追加，治终端行满回绕时候选窗横穿屏幕）。
+    // **不要把它改回普通 probe 通道**，那才是当初翻车的原因——区别在于「拿它定位置」
+    // 会把错位固定下来，而「拿它否决别人」只会多等一轮。
     if (result.kind == CaretProbeKind::FirstShowProbe)
     {
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())

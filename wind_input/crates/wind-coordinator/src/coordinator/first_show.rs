@@ -50,6 +50,19 @@ impl Coordinator {
             .composition_start
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        // 矩形那条路的锁同步清掉——它与上面那位是**两把锁**（见字段注释），漏清这一处的后果是
+        // 下一组合的矩形锚点整条失效、候选窗钉在上一组合的位置。
+        *self
+            .locked_rect_anchor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        // pre_reflow 基准同理：它描述「**本轮**组合重排前光标在哪」，组合一结束就没有意义，
+        // 留着会让下一轮的 probe 拿上一轮的重排前坐标做比较（多数情况下不等 ⇒ 判据恒放行，
+        // 等于没加；少数情况下恰好相等 ⇒ 无故拖到兜底）。
+        *self
+            .last_pre_reflow_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
         // 候选窗显示锚点同理：它描述的是「这一轮候选窗画在哪」，组合一结束就失效。
         // 不清会让下一轮的非坐标重绘复用上一轮的位置。
         *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner()) = (0, 0, false);

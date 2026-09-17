@@ -1569,6 +1569,43 @@ pub struct Coordinator {
     /// 组合起点屏幕坐标 (x, y, valid)：嵌入预编辑模式（编码插入宿主、光标随输入右移）下候选窗锚此处
     /// （缓冲头部），不随输入移动。同一组合只锁定首个有效值（handle_caret_update），组合结束复位。
     composition_start: Mutex<(i32, i32, bool)>,
+    /// 本轮组合里 DLL 标记为 `PRE_REFLOW` 的那一帧坐标 (x, y, seen)——**宿主重排前的位置**。
+    ///
+    /// 用途只有一个：给 probe 的「宿主 reflow 了没有」判据当基准。原判据拿的是**上一轮**
+    /// 权威坐标，而终端换行时陈旧值与它天然不等（行尾 1432 vs 上一轮 1401，差一个字符宽），
+    /// 于是陈旧值被判成「已 reflow」⇒ 候选窗画在行尾、67ms 后横穿屏幕跳到行首 1044px。
+    /// 本轮的 pre_reflow 帧是更贴切的基准：DLL 已经明说它是重排前的，probe 与它相同就是
+    /// 「还没重排」。
+    ///
+    /// ★ 这是**换依据**，不是给位置关系再加一条物理约束——后者的四个变体全被真机推翻过
+    /// （见 `handle_caret_probe` 里那段「已否定」清单）。本条不问坐标之间的几何关系，
+    /// 只问「这一帧和宿主自己声明的重排前坐标是不是同一个值」。
+    pub(crate) last_pre_reflow_probe: Mutex<(i32, i32, bool)>,
+    /// 本组合内**组合矩形**首帧给出的锚点 (x, y, locked)——同一行里它就是最终答案。
+    ///
+    /// ★★ 存的是**值**而不是一个 bool，因为矩形这条路必须保持「**每帧如实**」的语义。
+    /// `composition_start` 在同一次组合里还有另外两个写入者，它们都只要求「本帧没有可信矩形」：
+    /// `shown_anchor` 回灌（把「候选窗画在哪」写回起点）与大偏移逃生阀（把起点推到当前 caret
+    /// ＝ 组合**末端**）。两处的注释都明写自己敢这么做的前提是「矩形每帧如实到达，锁不错也
+    /// 就无需逃生」。若本锁只是「置位后什么都不做」，那么全零矩形帧（组合 range 的
+    /// `GetTextExt` 回 `TS_E_NOLAYOUT`，`comp_rect_from_bytes` 给 `None` 而 `frame_layout_degenerate`
+    /// 为 false）让逃生阀武装一次，`cs` 就被改成组合末端，**此后本行再也纠不回来**——改动前
+    /// 每帧无条件覆盖时下一帧矩形会自动自愈。存值后锁定分支改为把 `cs` 恢复成本值，
+    /// 那个前提重新成立，另外两个写入者一行都不用动。
+    ///
+    /// ★ 为什么不能复用 `composition_start.2`：那一位是**路径 A**（DLL 上报的 `compStart`）的锁，
+    /// 而新组合第一帧的 `compStart` 常常是陈旧的——Tabby 实测新组合第一帧路径 A 锁进上一组合的
+    /// 末端 `453`，随后由矩形修正成真起点 `442`。绑在 `.2` 上会把这次**必要的修正**一并挡掉，
+    /// 错位 11px 且不自愈。本位只锁矩形自己那条路，两条路各锁各的。
+    ///
+    /// ⚠ **已知盲区**：同一行内**合法**的起点变化（终端行内重排——D 类记着 WindTerm 同行左移
+    /// 312px；单行编辑框组合超宽后横向滚动）在本组合内同样不再跟随，要等换行或组合结束才恢复。
+    /// 没有收窄成「只挡小幅右移」是刻意的：那要回到「用位置关系判断这一帧准不准」，而那条路的
+    /// 四个变体全被真机推翻过（见 `handle_caret_probe` 里的清单）。宁可要一个**形状确定**的盲区。
+    ///
+    /// 清位与 `composition_start` 同步：组合结束（`reset_first_show`）与焦点换 docMgr 各一处，
+    /// 少清一处就会跨组合钉死。
+    pub(crate) locked_rect_anchor: Mutex<(i32, i32, bool)>,
     /// 宿主**上一帧如实上报**的组合起点 (x, y, seen)。只由 `handle_caret_update` 按帧写入，
     /// 且只在本帧 compStart 非零时更新——零值表示「宿主这帧没报」，不是「起点变成了 0」。
     ///
@@ -2432,6 +2469,8 @@ impl Coordinator {
             candidate_flipped: std::sync::atomic::AtomicBool::new(false),
             hover_index: std::sync::atomic::AtomicI32::new(-1),
             composition_start: Mutex::new((0, 0, false)),
+            locked_rect_anchor: Mutex::new((0, 0, false)),
+            last_pre_reflow_probe: Mutex::new((0, 0, false)),
             last_reported_comp_start: Mutex::new((0, 0, false)),
             last_authoritative_caret: Mutex::new((0, 0, false)),
             last_key_at: Mutex::new(None),
@@ -10681,6 +10720,241 @@ mod caret_compat_tests {
         );
     }
 
+    /// 上一条的反面：宿主把 `left` 报错时，同组合同行内**不得**跟着它走。
+    ///
+    /// 2026-09-17 靶机 192.168.5.30，Tabby（Electron 终端，组合层是 xterm.js）一次组合
+    /// `w → wv → wvs → wvsr` 的原始帧：
+    ///
+    /// | buf | compRect | w | left |
+    /// |---|---|---|---|
+    /// | `w` | (379,1174,393,1205) | 14 | 379 |
+    /// | `wv` | (381,1174,405,1205) | 24 | **381** |
+    /// | `wvs` | (384,1174,417,1205) | 33 | **384** |
+    /// | `wvsr` | (390,1174,429,1205) | 39 | **390** |
+    ///
+    /// 组合内容只增不减，起点按定义不动，这家却一路右移，四码推了 11px——用户报的
+    /// 「输入到 2/3 码时候选窗抖动，几乎百分百」就是它。同一份日志里 Tabby 161 次重锁，
+    /// 而 Chrome / VS Code / 记事本 **0 次**。
+    ///
+    /// ★ 与上一条测试是**一对**：上一条守「left 稳定的宿主照常跟随」，本条守「left 不稳定
+    /// 的宿主不跟」。两条都在，判据才被夹住——只留任一条，把判据写成恒真或恒假都能绿。
+    #[test]
+    fn composition_rect_left_that_drifts_within_one_composition_is_pinned() {
+        const TOP: i32 = 1174;
+        const BOTTOM: i32 = 1205;
+        const LINE_H: i32 = 31;
+        // 首帧的 left 才是真起点，后三帧都是宿主报错的漂移值
+        const TRUE_START: i32 = 379;
+
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (TRUE_START, BOTTOM, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "w".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "我".into(),
+                ..Default::default()
+            }];
+            st.caret_x = TRUE_START;
+            st.caret_y = BOTTOM;
+            st.caret_height = LINE_H;
+        }
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        drain_positions(&rx);
+
+        // 靶机原始帧，顺序即用户的击键顺序
+        let frames = [
+            (379, 393), // 首帧：矩形第一次给锚点，必须采信
+            (381, 405),
+            (384, 417),
+            (390, 429),
+        ];
+        for (left, right) in frames {
+            c.handle_caret_update(&CaretData {
+                x: right,
+                y: BOTTOM,
+                height: LINE_H,
+                composition_start_x: left,
+                composition_start_y: BOTTOM,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some((left, TOP, right, BOTTOM)),
+            });
+            let cs = *c.composition_start.lock().unwrap();
+            assert_eq!(
+                (cs.0, cs.1),
+                (TRUE_START, BOTTOM),
+                "同组合同行内起点按定义不动，宿主报 left={left} 也不得跟"
+            );
+        }
+        assert!(
+            drain_positions(&rx)
+                .into_iter()
+                .all(|pos| pos == (TRUE_START, BOTTOM)),
+            "候选窗不得每打一码挪一下"
+        );
+
+        // ── 跨行必须放行 ──
+        // 「矩形自动落到最后一行行首」是这条路径存在的理由，钉列不能把它一起钉掉。
+        const NEXT_LINE: i32 = BOTTOM + LINE_H;
+        c.handle_caret_update(&CaretData {
+            x: 120,
+            y: NEXT_LINE,
+            height: LINE_H,
+            composition_start_x: TRUE_START,
+            composition_start_y: BOTTOM,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some((96, BOTTOM, 120, NEXT_LINE)),
+        });
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (96, NEXT_LINE),
+            "换行后锚点必须跟到最后一行行首——本条挡的是同行漂移，不是跨行更新"
+        );
+    }
+
+    /// ★★ 锁定之后矩形仍是「每帧如实」——别的写入者改过 `cs`，下一帧矩形必须把它纠回来。
+    ///
+    /// `composition_start` 在同一次组合里还有两个写入者，条件都是「本帧没有可信矩形」：
+    /// `shown_anchor` 回灌（写进「候选窗画在哪」）与大偏移逃生阀（写进当前 caret ＝ 组合**末端**）。
+    /// 两处的注释都写明自己敢这么做的前提是「矩形每帧如实到达，锁不错也就无需逃生」。
+    ///
+    /// 若锁定分支只是「什么都不做」，那么全零矩形帧（组合 range 的 `GetTextExt` 回
+    /// `TS_E_NOLAYOUT`）让逃生阀武装一次，`cs` 就被改成组合末端，**本行余下整段再也纠不回来**
+    /// ——而改动前每帧无条件覆盖时下一帧矩形会自动自愈。所以锁存的是**值**：锁定分支把 `cs`
+    /// 恢复成本轮锚点，那个前提重新成立。
+    #[test]
+    fn the_locked_rect_anchor_still_corrects_cs_after_another_writer_touched_it() {
+        const TOP: i32 = 1174;
+        const BOTTOM: i32 = 1205;
+        const LINE_H: i32 = 31;
+        const TRUE_START: i32 = 379;
+
+        let (c, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (TRUE_START, BOTTOM, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "w".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "我".into(),
+                ..Default::default()
+            }];
+            st.caret_x = TRUE_START;
+            st.caret_y = BOTTOM;
+            st.caret_height = LINE_H;
+        }
+        let frame = |left: i32, right: i32| CaretData {
+            x: right,
+            y: BOTTOM,
+            height: LINE_H,
+            composition_start_x: left,
+            composition_start_y: BOTTOM,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some((left, TOP, right, BOTTOM)),
+        };
+
+        // 首帧：矩形锁定真起点
+        c.handle_caret_update(&frame(TRUE_START, 393));
+        assert_eq!(
+            c.composition_start.lock().unwrap().0,
+            TRUE_START,
+            "前提：本轮锚点已锁定"
+        );
+
+        // 模拟另一个写入者（逃生阀 / shown_anchor 回灌）在无矩形的那一帧把 cs 改成组合末端
+        *c.composition_start.lock().unwrap() = (9999, BOTTOM, true);
+
+        // 下一帧矩形照常到达（宿主报的 left 仍在漂移）
+        c.handle_caret_update(&frame(384, 417));
+        // ⚠ 先取值再断言：`Mutex` 非重入，同一表达式里锁两次会挂住（见另一条测试的同款注释）
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (TRUE_START, BOTTOM),
+            "矩形必须把 cs 纠回本轮锚点——只挡不写会让那次改写永久生效，本行再也回不来"
+        );
+    }
+
+    /// 组合结束后，矩形必须能**重新**给锚点——两把锁各清各的，漏清就钉死在上一组合。
+    ///
+    /// ⚠ 这条守的是 `locked_rect_anchor` 与 `composition_start.2` 是两个状态：后者由
+    /// 路径 A（DLL 上报 compStart）持有，且新组合第一帧的 compStart 常是陈旧值——Tabby
+    /// 实测路径 A 锁进上一组合末端 `453`，靠矩形修正成真起点 `442`（19:50:50.018 那帧）。
+    /// 把矩形的锁并到 `cs.2` 上，这次修正就没了，候选窗错位 11px 且不自愈。
+    #[test]
+    fn a_new_composition_lets_the_rect_anchor_again() {
+        const TOP: i32 = 1174;
+        const BOTTOM: i32 = 1205;
+        const LINE_H: i32 = 31;
+
+        let (c, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (379, BOTTOM, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "w".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "我".into(),
+                ..Default::default()
+            }];
+            st.caret_x = 379;
+            st.caret_y = BOTTOM;
+            st.caret_height = LINE_H;
+        }
+        let frame = |c: &Coordinator, left: i32, right: i32| {
+            c.handle_caret_update(&CaretData {
+                x: right,
+                y: BOTTOM,
+                height: LINE_H,
+                composition_start_x: left,
+                composition_start_y: BOTTOM,
+                source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+                composition_rect: Some((left, TOP, right, BOTTOM)),
+            });
+        };
+
+        frame(&c, 379, 393);
+        frame(&c, 381, 405);
+        assert_eq!(
+            c.composition_start.lock().unwrap().0,
+            379,
+            "前提：本组合内已钉住（这条断言不成立的话下面证明不了任何事）"
+        );
+
+        // 上屏 ⇒ 组合结束
+        c.reset_first_show();
+        assert!(
+            !c.locked_rect_anchor.lock().unwrap().2,
+            "组合结束必须解锁矩形锚点"
+        );
+
+        // 新组合落在别处：必须锚到新位置，而不是留在 379
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "x".into();
+        }
+        frame(&c, 442, 453);
+        // ⚠ 先取值再断言：`Mutex` 非重入，把两个 `lock()` 写进同一个表达式会死锁
+        // （guard 在表达式求值结束前不释放）——本测试初版就是这么挂住的。
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (cs.0, cs.1),
+            (442, BOTTOM),
+            "新组合的矩形必须被采信——这正是路径 A 锁进陈旧 compStart 后唯一的修正机会"
+        );
+    }
+
     /// 只返回首行的宿主：`caret.y` 会大于 `rect.bottom` ⇒ 判定不可信 ⇒ 回退既有逻辑。
     ///
     /// 目前实测三家宿主都返回真包围盒（`caret.y` 恒等于 `bottom`），但规范不保证，
@@ -11816,7 +12090,10 @@ mod caret_compat_tests {
         );
     }
 
-    /// ★★★ `PRE_REFLOW` 探测**绝不参与首显决策**，哪怕它满足全部原判据。
+    /// ★★★ `PRE_REFLOW` 探测**绝不作首显的位置来源**，哪怕它满足全部原判据。
+    ///
+    /// （它**可以**当否决基准，那是相反方向的用法，见
+    /// `a_probe_equal_to_this_rounds_pre_reflow_frame_must_not_drive_first_show`。）
     ///
     /// 2026-08-01 的翻车现场：这条来源（组合刚启动时的异步取值，多数宿主内联执行 ⇒ 拿到
     /// reflow **前**的坐标）一度走普通 probe 通道，被判据采信提前首显，随后真权威坐标的
@@ -11866,6 +12143,161 @@ mod caret_compat_tests {
         assert!(
             !*c.pending_first_show.lock().unwrap(),
             "对照组：普通 probe 满足判据 1 时应当提前首显（否则本测试证明不了差别来自 source）"
+        );
+    }
+
+    /// probe 与**本轮 `pre_reflow` 帧**逐位相同 ⇒ 宿主还没重排 ⇒ 不得提前首显。
+    ///
+    /// 2026-09-17 靶机 192.168.5.30，Tabby 终端行满回绕的原始帧（20:48:31.8xx）：
+    ///
+    /// ```text
+    /// 31.851  空闲上报 (378,1205)        ← 换行已完成，真实光标在行首
+    /// 31.857  probe(pre_reflow) 1432     ← 行尾陈旧值，DLL 标了「重排前」
+    /// 31.863  probe 1432 → 提前首显      ← 判据 1 的基准是上一轮权威 1401，1432≠1401 ⇒ 放行
+    /// 31.863  首显 pos=(1413)
+    /// 31.865  probe 369                  ← 真值，晚了 2ms
+    /// 31.930  reshow dx=1044             ← 候选窗横穿屏幕
+    /// ```
+    ///
+    /// 换行让陈旧值与上一轮权威天然不等（行尾 vs 它左边一个字符宽），判据 1 在这里必然失效。
+    /// 判据 2 换了基准：同一轮里 DLL 已经声明过哪个坐标是重排前的。
+    ///
+    /// ★ 对照组用**同一份坐标**、只改 `last_pre_reflow_probe` 有没有记过，证明差别来自这个
+    /// 基准而不是别的条件。
+    #[test]
+    fn a_probe_equal_to_this_rounds_pre_reflow_frame_must_not_drive_first_show() {
+        // 靶机原始值
+        const STALE: (i32, i32) = (1432, 1205); // 行尾，重排前
+        const LAST_AUTH: (i32, i32) = (1401, 1205); // 上一轮权威，判据 1 拿它当基准
+        const TRUE_POS: (i32, i32) = (369, 1205); // 换行后的真值
+
+        let arm = |probe_at_xy: (i32, i32), record_pre_reflow: bool| {
+            let c = coord();
+            set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+            {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "q".to_string();
+                st.caret_x = 100;
+                st.caret_y = 1205;
+                st.caret_height = 31;
+            }
+            *c.last_authoritative_caret.lock().unwrap() = (LAST_AUTH.0, LAST_AUTH.1, true);
+            // 前置门：缓存未经当前插入点验证时，`first_show_needs_long_wait` 会在本判据之前
+            // 就否决掉 probe 的显示决策（那是 Excel 那条信任门）。不置位的话三条断言比的是
+            // 那道门，不是本判据——恒「不首显」，第一条假绿、后两条必挂。
+            c.caret_cache_verified
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if record_pre_reflow {
+                // 走真实通路记录，而不是直接写字段——这样「pre_reflow 分支忘了记」
+                // 这种回归也会被本测试抓住。
+                let mut pre = probe_at(STALE.0, STALE.1, 31);
+                pre.source = wind_ipc::protocol::caret_source::PRE_REFLOW;
+                c.handle_caret_probe(&pre);
+            }
+            *c.pending_first_show.lock().unwrap() = true;
+            c.handle_caret_probe(&probe_at(probe_at_xy.0, probe_at_xy.1, 31));
+            c
+        };
+
+        assert!(
+            *arm(STALE, true).pending_first_show.lock().unwrap(),
+            "probe 与本轮 pre_reflow 帧相同 ⇒ 宿主还停在重排前，不得提前首显（否则候选窗画在\
+             行尾，67ms 后横穿屏幕跳 1044px）"
+        );
+        assert!(
+            !*arm(TRUE_POS, true).pending_first_show.lock().unwrap(),
+            "重排后的真值与 pre_reflow 帧不同 ⇒ 照常提前首显（判据只挡「没动过」，不挡换行本身）"
+        );
+        assert!(
+            !*arm(STALE, false).pending_first_show.lock().unwrap(),
+            "★ 对照组：同一份陈旧坐标，没记过 pre_reflow 基准时判据 2 不成立、判据 1 照旧放行\
+             ——差别确实来自这个基准"
+        );
+    }
+
+    /// 否决基准必须挡在**连打快路径之前**——「行满回绕」正是连打到行尾才发生的事件。
+    ///
+    /// `fast_typing_window_ms` 出厂 100ms，终端连打的按键间隔 30~60ms 必然落进去，而快路径
+    /// 不比对任何基准就采信首条采样。判据若排在它下游，等于挡不住自己的触发条件。
+    /// 同一函数里 `stale_probe_guard` 就是为这个理由放在快路径之前的（并由
+    /// `stale_probe_rejected_even_on_fast_typing_path` 钉住），本条是同一类否决判据。
+    #[test]
+    fn the_pre_reflow_baseline_rejects_even_on_the_fast_typing_path() {
+        const STALE: (i32, i32) = (1432, 1205);
+        let c = coord();
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "q".to_string();
+            st.caret_x = 100;
+            st.caret_y = 1205;
+            st.caret_height = 31;
+        }
+        *c.last_authoritative_caret.lock().unwrap() = (1401, 1205, true);
+        c.caret_cache_verified
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // 连打：按键间隔落进 fast_typing_window_ms（出厂 100ms）⇒ 快路径武装
+        *c.last_key_interval_ms.lock().unwrap() = Some(60);
+        let mut pre = probe_at(STALE.0, STALE.1, 31);
+        pre.source = wind_ipc::protocol::caret_source::PRE_REFLOW;
+        c.handle_caret_probe(&pre);
+        *c.pending_first_show.lock().unwrap() = true;
+        c.handle_caret_probe(&probe_at(STALE.0, STALE.1, 31));
+        assert!(
+            *c.pending_first_show.lock().unwrap(),
+            "连打时同样要挡：判据排在快路径下游的话，行满回绕（只在连打到行尾发生）永远绕过它"
+        );
+    }
+
+    /// 基准要记的是 pre_reflow 的**本帧原值**，与 `absorb_probe_coords` 收没收它无关。
+    ///
+    /// 退化帧（`h<=0`）与 `stale_probe_guard` 宿主的 probe 都不进缓存，但它们同样能回答
+    /// 「宿主还停在重排前吗」——而这两类恰恰是最需要否决基准的宿主。按 `absorbed` 过滤会让
+    /// 它们一条基准都拿不到。
+    #[test]
+    fn the_pre_reflow_baseline_is_recorded_even_when_the_frame_is_not_absorbed() {
+        // stale_probe_guard 宿主：absorb_probe_coords 直接返回 false
+        let c = coord();
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+        c.active_compat.lock().unwrap().stale_probe_guard = true;
+        let mut pre = probe_at(1432, 1205, 31);
+        pre.source = wind_ipc::protocol::caret_source::PRE_REFLOW;
+        c.handle_caret_probe(&pre);
+        assert_eq!(
+            *c.last_pre_reflow_probe.lock().unwrap(),
+            (1432, 1205, true),
+            "probe 不可信的宿主同样要记基准——它们才是最需要这条否决的"
+        );
+
+        // 退化帧：h<=0 同样不进缓存
+        let c = coord();
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+        let mut pre = probe_at(1432, 1205, 0);
+        pre.source = wind_ipc::protocol::caret_source::PRE_REFLOW;
+        c.handle_caret_probe(&pre);
+        assert_eq!(
+            *c.last_pre_reflow_probe.lock().unwrap(),
+            (1432, 1205, true),
+            "退化帧的坐标不配进缓存，但「宿主还没重排」这个事实照样成立"
+        );
+    }
+
+    /// 组合结束必须清掉 pre_reflow 基准，否则下一轮拿的是上一轮的重排前坐标。
+    #[test]
+    fn the_pre_reflow_baseline_is_cleared_when_the_composition_ends() {
+        let c = coord();
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Fast);
+        let mut pre = probe_at(1432, 1205, 31);
+        pre.source = wind_ipc::protocol::caret_source::PRE_REFLOW;
+        c.handle_caret_probe(&pre);
+        assert!(
+            c.last_pre_reflow_probe.lock().unwrap().2,
+            "前提：pre_reflow 帧已记录（不成立的话下面证明不了任何事）"
+        );
+        c.reset_first_show();
+        assert!(
+            !c.last_pre_reflow_probe.lock().unwrap().2,
+            "组合结束必须清位——它描述的是「本轮重排前在哪」，跨轮沿用只会误拦"
         );
     }
 

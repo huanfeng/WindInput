@@ -2240,6 +2240,17 @@ impl MessageHandler for Coordinator {
             .composition_start
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        // 矩形锚点与 pre_reflow 基准同步作废（理由同上：换了 docMgr，两者答的都是旧文档的事）。
+        // ⚠ 两个都要清：字段注释承诺的是「组合结束与焦点换 docMgr 各一处」，漏一个就与注释不符，
+        // 而这类状态的清位点从来不是只有一处（见 144925d8「挡住一处不等于挡住了」）。
+        *self
+            .locked_rect_anchor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        *self
+            .last_pre_reflow_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
         // ⚠ `shown_anchor` 在这里**刻意不清**：它答的是「候选窗此刻画在屏幕的哪里」，而焦点
         // 切换并不会把候选窗从屏幕上抹掉——它还在旧位置画着。清掉反而让下面 reshow 的判据
         // 失去基准（那个判据正是靠它发现「候选窗落在旧 docMgr 上」的）。锚点只在候选窗真正
@@ -3050,17 +3061,62 @@ impl MessageHandler for Coordinator {
         // 暂存本帧几何，锚点在 notify_ui_update 里补齐后一并推给浮窗。
         self.stash_overlay_frame(data);
         if let Some((ax, ay)) = rect_anchor {
+            // 同一组合、同一行里，矩形只给**一次**锚点。
+            //
+            // 组合内容只增不减时组合起点按定义不动，可 Tabby（xterm.js 的组合层）报的矩形
+            // `left` 跟着组合变长一路右移——2026-09-17 靶机实测一次组合 `w→wv→wvs→wvsr`：
+            //   (379,1174,393,1205) w=14 → (381,…,405) w=24 → (384,…,417) w=33 → (390,…,429) w=39
+            // 四码把起点推了 11px，候选窗就是每打一码挪一下（用户报「2/3 码时抖动，几乎百分百」）。
+            //
+            // ★ 判据为什么敢做成全局：同一份日志里的对照组给了答案——Chrome 与 VS Code 用的是
+            // 同一套 Chromium TSFTextStore，组合从 w=14 长到 w=48 期间 `left` **恒为 918**，
+            // 记事本同理（27 次首锁、0 次重锁）。对这些宿主 `ax` 本就等于 `cs.0`，本条是 no-op；
+            // 只有把 `left` 报错的宿主才会被它挡住。⇒ 不是 Chromium 族共性，是单个宿主的缺陷，
+            // 因而不必按宿主声明（`pin_anchor_when_start_drifts` 那条则相反，见其字段注释）。
+            //
+            // ⚠ **跨行必须放行**：`ay != cs.1` 时照常更新——「矩形自动落到最后一行行首」正是
+            // 这条路径的价值，也是 `pin_anchor_when_start_drifts` 宿主拿不到、只能钉列跟行的东西。
+            //
+            // ⚠ 锁用 `locked_rect_anchor` 而不是 `cs.2`：后者是路径 A（DLL 上报 compStart）的锁，
+            // 且新组合第一帧的 compStart 常是陈旧值（Tabby 实测锁进上一组合末端 453，靠本条路径
+            // 修正成真起点 442）。绑在 `cs.2` 上会把这次必要的修正一起挡掉。
+            // ⚠ 先取值再上 `cs` 的锁，两把锁**不嵌套**：本仓对持有序的谨慎见
+            // `effective_first_show_mode` 的注释（那里为同样的理由拆开了 `active_compat` 与 `rt()`）。
+            let locked = *self
+                .locked_rect_anchor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let mut cs = self
                 .composition_start
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if (cs.0, cs.1) != (ax, ay) {
-                debug!(
-                    "组合起点取自组合矩形: ({},{}) → ({ax},{ay})（宿主对整个组合范围的测量，跨行时自动落到最后一行行首）",
-                    cs.0, cs.1
-                );
+            if locked.2 && ay == locked.1 {
+                // ★ 不是「什么都不做」，而是**把 cs 写回本轮锁定的那个锚点**——矩形这条路必须
+                // 保持「每帧如实」，只是如实的是它首帧给的值，不是宿主这帧报的 left。
+                // `shown_anchor` 回灌与大偏移逃生阀都可能在无矩形的那一帧改过 `cs`，它们敢这么
+                // 做的前提正是「矩形每帧如实到达」（见两处注释）。只挡不写会让那次改写永久生效。
+                if ax != locked.0 {
+                    debug!(
+                        "组合矩形起点漂移，不采信: ({ax},{ay}) → 保持本轮锚点 ({},{})（同组合同行内\
+                         起点按定义不动；宿主的 left 随组合变长而移）",
+                        locked.0, locked.1
+                    );
+                }
+                *cs = (locked.0, locked.1, true);
+            } else {
+                if (cs.0, cs.1) != (ax, ay) {
+                    debug!(
+                        "组合起点取自组合矩形: ({},{}) → ({ax},{ay})（宿主对整个组合范围的测量，跨行时自动落到最后一行行首）",
+                        cs.0, cs.1
+                    );
+                }
+                *cs = (ax, ay, true);
+                drop(cs); // 先放掉 cs 再上另一把锁，避免引入新的持有序
+                *self
+                    .locked_rect_anchor
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = (ax, ay, true);
             }
-            *cs = (ax, ay, true);
         }
         // ★★★ 钉住的是**列**，不是行。
         //
@@ -3487,9 +3543,10 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_caret_probe(&self, data: &CaretData) {
-        // ★★ reflow 前探测（组合刚启动时 C++ 的异步取值）：**只刷新缓存，绝不参与任何
-        // 首显判据**，因此**不受档位门控**——它不改变任何档位的首显时机，只让兜底手里的
-        // 坐标新鲜些。
+        // ★★ reflow 前探测（组合刚启动时 C++ 的异步取值）：**绝不作首显的位置来源**，
+        // 只刷新缓存 + 记下「本轮重排前在哪」当否决基准（见 `last_pre_reflow_probe`）。
+        // 两者都不改变任何档位的首显**时机**，故**不受档位门控**——基准只会让 probe 多等一轮，
+        // 不会让任何一帧提前显示。
         //
         // ⚠ 曾把它放在下面的 fast 门之后，结果 `wait` 档宿主完全收不到（EverEdit 实测
         // 一条不落全被「当前档位=wait 非 fast」挡掉，长按时候选窗照旧钉在原地，而同为
@@ -3497,8 +3554,16 @@ impl MessageHandler for Coordinator {
         // **首显行为**，刷新缓存不属于它——把约束套用过宽，等于让一半宿主白拿不到修复。
         if data.source == wind_ipc::protocol::caret_source::PRE_REFLOW {
             let absorbed = self.absorb_probe_coords(data);
+            // 记下本轮的「重排前坐标」，供下面那条 reflow 判据当基准（见字段注释）。
+            // ⚠ 记的是**本帧原值**，与 absorb 收没收它无关：判据问的是「宿主还停在重排前吗」，
+            // 而退化帧/不可信帧同样能回答这个问题——按 absorbed 过滤会让恰恰最需要它的宿主
+            // （probe 不可信那些）拿不到基准。
+            *self
+                .last_pre_reflow_probe
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = (data.x, data.y, true);
             debug!(
-                "caret_probe(pre_reflow) → 仅刷新缓存: ({},{}) h={} {}",
+                "caret_probe(pre_reflow) → 刷新缓存 + 记为本轮重排前基准: ({},{}) h={} {}",
                 data.x,
                 data.y,
                 data.height,
@@ -3647,6 +3712,34 @@ impl MessageHandler for Coordinator {
                 "caret_probe → 拒绝: 该宿主 composition rect 恒陈旧，改用组合前空闲上报 \
                  ({sx},{sy})（probe 报的是 ({},{})）",
                 data.x, data.y
+            );
+            return;
+        }
+        // ★ 第四道判据：与**本轮** `pre_reflow` 帧逐位相同 ⇒ 宿主还没重排。
+        //
+        // 下面那条判据（判据 1）拿**上一轮**权威坐标当基准，终端换行时失效——陈旧值停在行尾
+        // （1432）、上一轮权威在它左边一个字符（1401），两者不等，于是陈旧值被判成「已 reflow」
+        // 放行首显，候选窗画在行尾、67ms 后横穿屏幕跳到行首 1044px（2026-09-17 靶机 Tabby 实测，
+        // 20:48:31.863 那帧）。本轮的 pre_reflow 帧是更贴切的基准：DLL 自己标了它是重排前的坐标。
+        // 实测两例都被这条救回：换行那次 1432==1432 被拦、下一帧 369 放行（14ms）；
+        // 另一例 598==598 被拦、646 放行（12ms）。
+        //
+        // ⚠ 必须放在连打快路径**之前**，理由与上面 `stale_probe_guard` 那条完全相同：快路径不
+        // 比对任何基准就采信，排在它后面等于只要按键间隔落进 `fast_typing_window_ms` 就整条绕过。
+        // **而这条判据尤其不能放在后面——它要救的「行满回绕」正是连打到行尾才会发生的事件**，
+        // 放在下游等于挡不住自己的触发条件。
+        //
+        // ⚠ 判据是**相等**，不是距离/方向——位置关系的四个变体全被真机推翻过（见下方清单）。
+        // ⚠ 覆盖面不是「罕见误判」：**组合期间光标本就不动**的宿主（不做嵌入预编辑、宿主不插入
+        // 组合文本）每轮都会命中本条 ⇒ probe 抢跑关闭、恒退回 25ms 兜底。代价是首显慢 ~20ms 而
+        // 位置不变（兜底用的就是同一份坐标），方向安全；换来的是换行时不跳一屏。
+        let (px, py, has_pre) = *self
+            .last_pre_reflow_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if has_pre && data.x == px && data.y == py {
+            debug!(
+                "caret_probe → 继续等待: 坐标仍等于本轮 pre_reflow 帧 ({px},{py})，宿主尚未 reflow"
             );
             return;
         }
