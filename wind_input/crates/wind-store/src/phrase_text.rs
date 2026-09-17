@@ -27,6 +27,8 @@
 //! position / enabled / 词频 / 候选调整），本格式是**分发**格式，只承载内容三元组里的
 //! `code` 与 `text`。position 刻意不进格式——照抄分发者的位置会打乱接收者的短语顺序。
 
+use crate::text_source::normalize_import_text;
+
 /// 格式标记前缀。`p` = phrases，其后是格式版本号。
 const MARKER_PREFIX: &str = "wind:p";
 
@@ -91,6 +93,8 @@ pub struct PhraseTextDoc {
 /// 这段文本是否带本格式的标记。用于导入侦测分派：**前缀匹配零歧义，应当先于
 /// TOML 系（信封 / 配置片段）判定**，判不中再回落原有的侦测链。
 pub fn is_phrase_text(text: &str) -> bool {
+    let normalized = normalize_import_text(text);
+    let text = normalized.as_ref();
     first_content_line(text).is_some_and(|l| l.starts_with(MARKER_PREFIX))
 }
 
@@ -100,6 +104,8 @@ pub fn is_phrase_text(text: &str) -> bool {
 /// `problems`，不牵连其余条目——群聊里粘贴掉一行格式是常态，为一行拒绝整段
 /// 会让用户无从下手。
 pub fn parse_phrase_text(text: &str) -> Result<PhraseTextDoc, String> {
+    let normalized = normalize_import_text(text);
+    let text = normalized.as_ref();
     let mut lines = text.lines().enumerate();
     let marker_line = lines
         .by_ref()

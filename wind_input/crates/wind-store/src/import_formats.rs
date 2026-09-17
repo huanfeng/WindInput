@@ -9,6 +9,7 @@
 //!  - TSV：任一非空非注释行含制表符
 //!  - 其余 → Unknown
 
+use crate::text_source::normalize_import_text;
 use crate::wdict::WordIo;
 
 /// 词库文本格式。
@@ -74,7 +75,8 @@ impl Default for CodePolicy {
 
 /// 按内容探测词库格式。
 pub fn detect_dict_format(text: &str) -> DictFormat {
-    let text = strip_bom(text);
+    let normalized = normalize_import_text(text);
+    let text = normalized.as_ref();
     if text
         .split("\n---")
         .next()
@@ -102,7 +104,8 @@ pub fn parse_words_auto(
     text: &str,
     policy: CodePolicy,
 ) -> Result<(DictFormat, Vec<WordIo>, usize), String> {
-    let text = strip_bom(text);
+    let normalized = normalize_import_text(text);
+    let text = normalized.as_ref();
     let fmt = detect_dict_format(text);
     let (rows, skipped) = match fmt {
         DictFormat::WindDict => crate::wdict::parse_words_wdict(text)?,
@@ -124,7 +127,8 @@ pub fn parse_words_auto(
 /// 编码列去内部空格（拼音音节 `ni hao` → `nihao`）；缺 text/code 的行跳过；
 /// 权重解析失败回退 0。
 pub fn parse_words_rime(text: &str, policy: CodePolicy) -> Result<(Vec<WordIo>, usize), String> {
-    let text = strip_bom(text);
+    let normalized = normalize_import_text(text);
+    let text = normalized.as_ref();
     let mut lines = text.lines();
     let mut header_lines: Vec<&str> = Vec::new();
     let mut found_sep = false;
@@ -208,7 +212,8 @@ fn rime_columns_from_header(header: &[&str]) -> Vec<String> {
 /// 列数 <2、code/text 为空、code 含非可打印 ASCII（乱码/列序颠倒防护）的行跳过；
 /// 权重缺省或解析失败回退 0。
 pub fn parse_words_tsv(text: &str, policy: CodePolicy) -> Result<(Vec<WordIo>, usize), String> {
-    let text = strip_bom(text);
+    let normalized = normalize_import_text(text);
+    let text = normalized.as_ref();
     let mut rows = Vec::new();
     let mut skipped = 0usize;
     for line in text.lines() {
@@ -277,10 +282,6 @@ fn parse_weight(s: &str) -> i32 {
         return v.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
     }
     0
-}
-
-fn strip_bom(text: &str) -> &str {
-    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 #[cfg(test)]
