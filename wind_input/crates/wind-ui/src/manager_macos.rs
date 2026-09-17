@@ -740,7 +740,9 @@ pub fn forwarder_thread(
 ) {
     let mut fwd = Forwarder::new(ev_tx, sink, suffix);
     tracing::info!("macOS host-render forwarder started");
-    for cmd in rx {
+    // 不是裸 `for cmd in rx`：那样线程永远阻塞在 recv 上，背景图缓存的闲置回收
+    // （`manager.rs` 的消息循环负责的那件事）在 macOS 就一次都不会发生。
+    while let Some(cmd) = crate::view::recv_evicting_idle(&rx) {
         if matches!(cmd, UiCommand::Shutdown) {
             break;
         }

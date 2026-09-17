@@ -10,6 +10,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 #[inline]
@@ -171,6 +172,36 @@ pub fn mode_code(mode: &str) -> u8 {
     }
 }
 
+/// 填充位图的字节预算。
+///
+/// 候选窗的宽度随候选内容每次都在变，而填充缓存以**目标宽高**为键——宽度每变一个
+/// 像素就是一条新条目。实测宽 200→800、高 40 这一段就是 45.9 MB，只涨不落。
+/// 超预算即整体清空（同 `view.rs` 的 `SHADOW_CACHE`）：不做 LRU，因为淘汰谁都得重建，
+/// 而重建一张候选窗尺寸的填充只要 0.3 ms，不值得为此维护一份访问序。
+///
+/// 取值两头受夹：
+/// - **下界**：必须显著大于一帧的工作集，否则清空会在同一帧内反复发生，把「只费内存」
+///   变成「每帧重建」。一帧的工作集不受本模块控制——layer 未写 size 时按原图尺寸填充
+///   （`view.rs` 的 `paint_layer`），再乘 DPI scale，单张大图就能吃掉一大截。
+/// - **上界**：定得太大，回收就白做了。实测（宽 200→800 扫一遍再回收，Linux glibc）：
+///   8 MiB 峰值 15.4 → 回收后 6.1、16 MiB 峰值 23.6 → 回收后 8.0，都完整落回起点；
+///   而 **32 MiB 峰值 39.4 → 回收后只到 36.5**——越过了 glibc 自动 trim 的门槛，内存
+///   虽已释放却不再归还 OS（`malloc_trim(0)` 能把它压回 5.8 MiB，印证确实只是没归还）。
+///
+/// 16 MiB 落在两者之间：装得下「一张 4 MiB 的 layer + 一帧候选窗（约 600 KiB）」还有
+/// 富余，又仍在会自动归还的那一侧。
+const FILL_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+
+/// 解码源图的字节预算。一张 985×255 的背景图解出来约 1 MB，够放几十张。
+const SRC_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+/// 闲置多久后整个丢掉。
+///
+/// 预算只挡住「涨到多高」，挡不住「不用了也不落」——不打字的时候候选窗背景图仍占着
+/// 那几 MB。这条负责让它回落到零。30 秒：比一次连续输入的间隙长得多（重建代价才回来），
+/// 又短到用户端起茶杯的工夫内存就还回去了。
+pub const IDLE_EVICT_AFTER: Duration = Duration::from_secs(30);
+
 /// 解码后的源图（unpremult RGBA8，row-major）。
 struct Src {
     w: u32,
@@ -203,11 +234,100 @@ pub struct ImageCache {
     /// 要问一遍原始尺寸，不缓存就是每次重新解析一遍 SVG。
     svg_sizes: HashMap<ImgId, Option<(u32, u32)>>,
     fills: HashMap<FillKey, Option<Pixmap>>,
+    /// `src` / `fills` 各自的驻留字节，对账两个预算。
+    ///
+    /// ⚠️ 两个计数**只在整表清空时归零**，精确性依赖「从不单独删某一条」。谁要加定向
+    /// 淘汰，必须同时把该条的字节减回去，否则计数会静默失同步、预算随之失效。
+    ///
+    /// 两个预算都不含 `ids`（驻留源串，一条内嵌 `data:` URI 就是几百 KB）与 `svg_sizes`：
+    /// 它们只在闲置回收时才缩。这是有意的——`ids` 的条数被「主题里有几张图」界住，
+    /// 真正会随宽度爆炸的是 `fills`。
+    src_bytes: usize,
+    fill_bytes: usize,
+    /// 最后一次被取用的时刻；None = 空缓存，没有什么可回收。
+    last_use: Option<Instant>,
 }
 
 impl ImageCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 记一次取用，闲置回收的计时从这里重新起算。
+    ///
+    /// **命中也要刷新**，不只是未命中时：只在首次绘制打点的话，连续打字的会话会在开始
+    /// 后 30 秒被整个回收一次，紧接着又全部重建——内存刚还回去就要回来，还白白吃一次
+    /// 重建风暴。
+    fn touch(&mut self) {
+        self.touch_at(Instant::now());
+    }
+
+    /// 打点到指定时刻（测试用它陈述「最后一次取用是何时」）。
+    fn touch_at(&mut self, now: Instant) {
+        self.last_use = Some(now);
+    }
+
+    /// 仅测试可见：把最后取用时刻挪到过去，模拟闲置。
+    #[cfg(test)]
+    pub fn set_last_use_for_test(&mut self, now: Instant) {
+        self.touch_at(now);
+    }
+
+    /// 闲置回收的到期时刻；None = 无需唤醒。
+    ///
+    /// ⚠ 调用方（UI 消息循环）必须把它登记进 `next_deadline`，否则线程睡下去就再也不会
+    /// 来收这份内存——闲置回收只在有别的事把线程叫醒时才碰巧发生。
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.last_use.map(|t| t + IDLE_EVICT_AFTER)
+    }
+
+    /// 闲置够久就整个丢掉，返回是否真的清了。
+    ///
+    /// 连驻留表 `ids` 一起清：它存的是完整源串，一条内嵌 `data:` URI 就是几百 KB。
+    /// `next_id` **不**跟着回退——句柄一旦复用，`src`/`fills` 里按旧 id 索引的残留就会
+    /// 串成另一张图。这里全表一起清本不会留下残留，但那个不变量不该依赖「调用顺序恰好
+    /// 安全」来维持。
+    pub fn evict_if_idle(&mut self, now: Instant) -> bool {
+        let Some(last) = self.last_use else {
+            return false;
+        };
+        if now.saturating_duration_since(last) < IDLE_EVICT_AFTER {
+            return false;
+        }
+        self.ids.clear();
+        self.src.clear();
+        self.svg_sizes.clear();
+        self.fills.clear();
+        self.src_bytes = 0;
+        self.fill_bytes = 0;
+        self.last_use = None;
+        true
+    }
+
+    /// 仅测试可见：填充位图的条目数与驻留字节。
+    #[cfg(test)]
+    fn fill_stats(&self) -> (usize, usize) {
+        (self.fills.len(), self.fill_bytes)
+    }
+
+    /// 仅测试可见：解码源图的条目数与驻留字节。
+    #[cfg(test)]
+    fn src_stats(&self) -> (usize, usize) {
+        (self.src.len(), self.src_bytes)
+    }
+
+    /// 仅测试可见：**全部**驻留 —— 回收测试只盯 `fills` 的话，清 `ids`/`src`/`svg_sizes`
+    /// 那几行删掉也照样绿，而它们才是内存回落的大头。
+    #[cfg(test)]
+    fn residency(&self) -> (usize, usize, usize, usize, usize, usize) {
+        (
+            self.ids.len(),
+            self.src.len(),
+            self.svg_sizes.len(),
+            self.fills.len(),
+            self.src_bytes,
+            self.fill_bytes,
+        )
     }
 
     /// 源字符串 → 驻留句柄（首见时登记）。
@@ -216,30 +336,37 @@ impl ImageCache {
             return *id;
         }
         let id = ImgId(self.next_id);
-        self.next_id += 1;
+        // 回绕就是句柄复用，也就是上面那条不变量的反面。够不到，但它是承重的，配一行执行。
+        self.next_id = self.next_id.checked_add(1).expect("ImgId 句柄用尽");
         self.ids.insert(src.to_string(), id);
         id
     }
 
     /// 解码源图（缓存；失败缓存 None 避免反复重试）。
     fn decode(&mut self, id: ImgId, src: &str) -> Option<&Src> {
-        self.src
-            .entry(id)
-            .or_insert_with(|| {
-                let decoded = decode_bitmap(src).map(|img| {
-                    let rgba = img.to_rgba8();
-                    Src {
-                        w: rgba.width(),
-                        h: rgba.height(),
-                        rgba: rgba.into_raw(),
-                    }
-                });
-                if decoded.is_none() {
-                    tracing::warn!("主题背景图解码失败: {}", brief(src));
+        if !self.src.contains_key(&id) {
+            let decoded = decode_bitmap(src).map(|img| {
+                let rgba = img.to_rgba8();
+                Src {
+                    w: rgba.width(),
+                    h: rgba.height(),
+                    rgba: rgba.into_raw(),
                 }
-                decoded
-            })
-            .as_ref()
+            });
+            if decoded.is_none() {
+                tracing::warn!("主题背景图解码失败: {}", brief(src));
+            }
+            let bytes = decoded.as_ref().map_or(0, |s| s.rgba.len());
+            // 先腾地方再放：清空后仍超预算说明单张就超了，仍旧放进去——功能优先，
+            // 下一张进来时再清一次。
+            if self.src_bytes + bytes > SRC_BUDGET_BYTES {
+                self.src.clear();
+                self.src_bytes = 0;
+            }
+            self.src_bytes += bytes;
+            self.src.insert(id, decoded);
+        }
+        self.src.get(&id).and_then(|o| o.as_ref())
     }
 
     /// 源图原始尺寸（用于 layer size=0 时取原尺寸）。
@@ -247,6 +374,7 @@ impl ImageCache {
     /// SVG 单独一条路：它进不了 `src`（没有位图可解码），而调用方拿不到尺寸就整层不
     /// 画——`.svg` 文件早先就是这样，内嵌 SVG 放行后这个洞会落到市场主题上。
     pub fn src_size(&mut self, path: &str) -> Option<(u32, u32)> {
+        self.touch();
         let id = self.id_of(path);
         if is_svg(path) {
             return *self.svg_sizes.entry(id).or_insert_with(|| {
@@ -274,9 +402,16 @@ impl ImageCache {
         h: u32,
         tint: [u8; 4],
     ) -> Option<&Pixmap> {
+        self.touch();
         let key = (self.id_of(path), mode, slice, w, h, tint);
         if !self.fills.contains_key(&key) {
             let built = self.build_fill(key, path);
+            let bytes = built.as_ref().map_or(0, |pm| pm.data().len());
+            if self.fill_bytes + bytes > FILL_BUDGET_BYTES {
+                self.fills.clear();
+                self.fill_bytes = 0;
+            }
+            self.fill_bytes += bytes;
             self.fills.insert(key, built);
         }
         self.fills.get(&key).and_then(|o| o.as_ref())
@@ -561,6 +696,150 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 候选窗宽度每变一个像素就是一条新的填充缓存条目，没有上界就只涨不落
+    /// （实测宽 200→800、高 40 这一段是 45.9 MB）。超预算必须整体让位。
+    #[test]
+    fn fills_stay_within_byte_budget() {
+        let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
+        let mut cache = ImageCache::new();
+        // 每张 2048×2048×4 = 16 MiB，预算 16 MiB ⇒ 从第二张起，每张进来前都要先清空。
+        let edge = 2048;
+        for i in 0..3u8 {
+            cache
+                .fill(&uri, 0, [0; 4], edge, edge, [0, 0, 0, i])
+                .expect("填充");
+        }
+        let (count, bytes) = cache.fill_stats();
+        assert_eq!(count, 1, "第三张进来时应已清空前两张，实际留下 {count} 条");
+        assert!(
+            bytes <= FILL_BUDGET_BYTES,
+            "驻留字节 {bytes} 超出预算 {FILL_BUDGET_BYTES}"
+        );
+
+        // 命中路径不得再记一次账：记账一旦挪出 `if !contains_key`，每帧重绘都会给
+        // fill_bytes 充气，几帧就清一次表——正是这次改动要消灭的那种抖动。
+        //
+        // 特意用**不会触发清空**的小尺寸：拿上面那种 16 MiB 的大图重复命中的话，
+        // 重复记账会一次次撞上预算、清表、重建，十轮下来字节数可能恰好绕回原值，
+        // 断言就废了（这条起初正是这么写的，变异测试才照出来）。
+        let small = 64;
+        cache
+            .fill(&uri, 0, [0; 4], small, small, [0, 0, 0, 3])
+            .expect("首次");
+        let before = cache.fill_stats();
+        for _ in 0..10 {
+            cache
+                .fill(&uri, 0, [0; 4], small, small, [0, 0, 0, 3])
+                .expect("命中");
+        }
+        assert_eq!(cache.fill_stats(), before, "命中路径重复记账了");
+    }
+
+    /// 解码源图侧同样要有上界：一张 985×255 解出来就是 1 MB，主题图多了照样堆。
+    #[test]
+    fn decoded_sources_stay_within_byte_budget() {
+        let mut cache = ImageCache::new();
+        // 每张 2048×2048×4 = 16 MiB，预算 32 MiB ⇒ 第三张进来前必须先清空。
+        for i in 0..3u8 {
+            let uri = png_data_uri(2048, 2048, [i, 0, 0, 255]);
+            assert_eq!(cache.src_size(&uri), Some((2048, 2048)));
+        }
+        let (count, bytes) = cache.src_stats();
+        assert_eq!(count, 1, "第三张进来时应已清空前两张，实际留下 {count} 条");
+        assert!(
+            bytes <= SRC_BUDGET_BYTES,
+            "驻留字节 {bytes} 超出预算 {SRC_BUDGET_BYTES}"
+        );
+    }
+
+    /// 打点必须在**命中时**也刷新。只在未命中时打点的话，连续打字的会话会在开始
+    /// 后 30 秒被整个回收，紧接着全部重建——内存刚还回去就要回来。
+    #[test]
+    fn touch_refreshes_on_cache_hit_too() {
+        let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
+        let mut cache = ImageCache::new();
+        cache
+            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("首次");
+
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("单调时钟回拨 10 秒");
+        cache.set_last_use_for_test(stale);
+        let before = cache.next_deadline().expect("有内容就该有到期时刻");
+
+        cache
+            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("命中");
+
+        let after = cache.next_deadline().expect("到期时刻");
+        assert!(after > before, "命中没有刷新打点");
+    }
+
+    /// 回收边界：判据是「闲置时长 < 阈值才留」，恰好到点的那一刻就该收。
+    #[test]
+    fn idle_eviction_boundary_is_inclusive() {
+        let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
+        let mut cache = ImageCache::new();
+        cache
+            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("填充");
+
+        let t = Instant::now();
+        cache.set_last_use_for_test(t);
+        assert!(
+            !cache.evict_if_idle(t + IDLE_EVICT_AFTER - Duration::from_nanos(1)),
+            "差一纳秒就不该收"
+        );
+        assert!(cache.evict_if_idle(t + IDLE_EVICT_AFTER), "到点就该收");
+    }
+
+    /// 预算只挡「涨到多高」，挡不住「不用了也不落」。闲置够久要整个还回去，
+    /// 且还回去之后照常工作。
+    #[test]
+    fn idle_eviction_releases_everything_and_recovers() {
+        let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
+        let mut cache = ImageCache::new();
+        assert_eq!(cache.next_deadline(), None, "空缓存不该要求 UI 线程醒来");
+
+        let t0 = Instant::now();
+        // 四张表都得填上：只填 fills 的话，清 ids/src/svg_sizes 那几行删掉测试照样绿，
+        // 而它们才是 RSS 回落的大头（ids 里一条内嵌 data: URI 就是几百 KB）。
+        cache
+            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("填充");
+        // src_size 也要打点：只取尺寸不填充的调用路径（layer 未写 size）同样该推迟回收。
+        cache
+            .src_size(&svg_data_uri(4, 4, "#0000ff"))
+            .expect("SVG 尺寸");
+        let res = cache.residency();
+        assert!(
+            res.0 >= 2 && res.1 >= 1 && res.2 >= 1 && res.3 >= 1 && res.4 > 0 && res.5 > 0,
+            "四张表都该非空才谈得上验证回收，实际={res:?}"
+        );
+
+        assert!(cache.next_deadline().is_some(), "有内容就得登记回收时刻");
+        assert!(!cache.evict_if_idle(t0), "刚取用过不该回收");
+
+        let late = t0 + IDLE_EVICT_AFTER + Duration::from_secs(1);
+        assert!(cache.evict_if_idle(late), "闲置超时该回收");
+        assert!(!cache.evict_if_idle(late), "已经空了，不该重复报告回收");
+        assert_eq!(
+            cache.residency(),
+            (0, 0, 0, 0, 0, 0),
+            "回收必须让全部四张表归零，否则内存不会真的落回去"
+        );
+        assert_eq!(cache.next_deadline(), None);
+
+        // 回收不是残废：同一张图再取用照样出正确像素。
+        let px = cache
+            .fill(&uri, 0, [0; 4], 4, 4, [0, 0, 0, 0])
+            .expect("回收后应能重建")
+            .pixel(0, 0)
+            .expect("像素");
+        assert_eq!((px.blue(), px.green(), px.alpha()), (255, 0, 255));
     }
 
     #[test]

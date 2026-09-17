@@ -81,6 +81,46 @@ fn with_shadow_mask<R>(
     })
 }
 
+/// 背景图缓存的闲置回收到期时刻，供 UI 消息循环登记进 `next_deadline`。
+pub fn image_cache_next_deadline() -> Option<std::time::Instant> {
+    IMAGE_CACHE.with(|c| c.borrow().next_deadline())
+}
+
+/// 闲置够久就把背景图缓存整个丢掉，返回是否真的清了（清了才值得记一行日志）。
+pub fn image_cache_evict_if_idle(now: std::time::Instant) -> bool {
+    IMAGE_CACHE.with(|c| c.borrow_mut().evict_if_idle(now))
+}
+
+/// 等下一条命令，期间到点就回收背景图缓存；返回 None = 发送端已全部断开。
+///
+/// 存在的理由是 **macOS**：那边没有 `manager.rs` 的消息循环（`ui_thread` 是
+/// `cfg(not(macos))`），只有 `manager_macos::forwarder_thread` 一个纯阻塞 `recv`，
+/// 于是闲置回收永远轮不到执行——而候选窗在 macOS 同样走本地绘制（`candidate_window`
+/// 的 `render_frame` → `root.paint`），缓存照样在涨。
+///
+/// 逻辑放在这里而不是 `manager_macos`：那个模块 `cfg(target_os = "macos")`，在开发机上
+/// 连编译都不参与，写进去的代码没有任何本机可验证性。做成与命令类型无关的泛型后，它在
+/// 所有平台参与编译、在开发机上可测，macOS 那侧只剩一行调用。
+pub fn recv_evicting_idle<T>(rx: &std::sync::mpsc::Receiver<T>) -> Option<T> {
+    use std::sync::mpsc::RecvTimeoutError;
+    loop {
+        let now = std::time::Instant::now();
+        image_cache_evict_if_idle(now);
+        // 回收之后才问到期时刻：刚清空的缓存不再要求唤醒，于是退化为纯阻塞 recv，
+        // 空闲时线程零开销地停住。
+        let Some(deadline) = image_cache_next_deadline() else {
+            return rx.recv().ok();
+        };
+        match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+            Ok(cmd) => return Some(cmd),
+            // 到点了：回到顶部收一次。不会忙等——那一轮的回收必定成功，
+            // 于是下一轮走上面的纯阻塞分支。
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
 /// 仅测试可见：当前阴影蒙版缓存条目数。
 #[cfg(test)]
 fn shadow_cache_len() -> usize {
@@ -1982,6 +2022,70 @@ pub fn fill_ring(
 // 以 mock 的确定尺寸做精确断言；纯几何与形状用例则跨平台运行。
 
 /// 几何与形状绘制测试（跨平台真实：tiny-skia 纯 Rust 光栅化，不依赖文本后端）。
+#[cfg(test)]
+mod idle_evict_tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
+
+    /// 把线程局部的那份缓存清干净，让用例从确定状态起步。
+    fn reset() {
+        image_cache_evict_if_idle(Instant::now() + crate::image_cache::IDLE_EVICT_AFTER * 2);
+    }
+
+    /// 往缓存里留下点驻留并把最后取用时刻挪到过去。解码失败的源同样会占表并打点，
+    /// 用它就不必在本模块再搭一份图片编码的脚手架。
+    fn stage_stale_entry() {
+        IMAGE_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            assert!(cache.src_size("data:image/png;base64,####").is_none());
+            let stale = Instant::now()
+                .checked_sub(crate::image_cache::IDLE_EVICT_AFTER + Duration::from_secs(1))
+                .expect("单调时钟回拨");
+            cache.set_last_use_for_test(stale);
+        });
+    }
+
+    /// macOS 的 forwarder 线程只有一个阻塞 recv，闲置回收得挂在**等待命令**这件事上。
+    /// 等待期间到点就收——收不掉的话，那个平台的内存永远不落。
+    #[test]
+    fn recv_evicting_idle_reclaims_while_waiting() {
+        reset();
+        stage_stale_entry();
+        assert!(
+            image_cache_next_deadline().is_some(),
+            "布置的驻留应当要求唤醒"
+        );
+
+        let (tx, rx) = channel::<u32>();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let _ = tx.send(7);
+        });
+
+        assert_eq!(recv_evicting_idle(&rx), Some(7));
+        assert_eq!(
+            image_cache_next_deadline(),
+            None,
+            "等命令的这段时间里就该把缓存收掉"
+        );
+        sender.join().expect("发送线程");
+    }
+
+    /// 缓存空着时退化成普通 recv：既不忙等，也要如实报告发送端断开。
+    #[test]
+    fn recv_evicting_idle_is_plain_recv_when_cache_empty() {
+        reset();
+        assert_eq!(image_cache_next_deadline(), None);
+
+        let (tx, rx) = channel::<u32>();
+        tx.send(1).expect("发送");
+        assert_eq!(recv_evicting_idle(&rx), Some(1));
+        drop(tx);
+        assert_eq!(recv_evicting_idle(&rx), None, "发送端断开该返回 None");
+    }
+}
+
 #[cfg(test)]
 mod geom_tests {
     use super::*;

@@ -247,6 +247,10 @@ impl UiManager {
                 }
                 toast_hide_at = None;
             }
+            // 背景图缓存闲置回收：不打字时把那几 MB 还回去（见 image_cache 的 IDLE_EVICT_AFTER）。
+            if crate::view::image_cache_evict_if_idle(std::time::Instant::now()) {
+                debug!("UI: 背景图缓存闲置回收");
+            }
             // 工具栏显隐迟滞推进。无待定项时 is_active()=false 直接跳过（不取时间）。
             if toolbar_gate.is_active() {
                 match toolbar_gate.tick_at(std::time::Instant::now()) {
@@ -1184,6 +1188,8 @@ impl UiManager {
                     popup_menu.as_ref().and_then(|m| m.next_deadline(now)),
                     // 软键盘键帽的长按重复
                     soft_keyboard.as_ref().and_then(|k| k.next_deadline()),
+                    // 背景图缓存的闲置回收
+                    crate::view::image_cache_next_deadline(),
                 ]
                 .into_iter()
                 .flatten()
@@ -1415,6 +1421,37 @@ fn split_args(s: &str) -> Vec<String> {
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn open_app(_path: &str, _args: &str) {}
+
+#[cfg(test)]
+mod wakeup_registration_tests {
+    /// `next_deadline` 那张清单漏登记一项，UI 线程就会睡过它——后果不是变慢，而是那件事
+    /// 再也不被推进，表现为「偶尔不生效」，极难复现（见 `ui_thread` 里那段注释）。
+    ///
+    /// 这条护栏守的是**那条规则本身**而不是某一个实例：新加计时器的人把名字添进来，
+    /// 就继续起作用。手段粗糙（对自己的源文本做匹配），但驱动整个 `ui_thread` 的集成
+    /// 测试所需的脚手架，成本远超它能守住的这一行。
+    #[test]
+    fn every_timer_source_is_registered_for_wakeup() {
+        let src = include_str!("manager.rs");
+        let (_, list) = src
+            .split_once("let next_deadline = [")
+            .expect("next_deadline 清单还在原地");
+        let (list, _) = list.split_once(']').expect("清单的右括号");
+        for source in [
+            "tip_hide_at",
+            "toast_hide_at",
+            "toolbar_gate.deadline()",
+            "tip_debounce.deadline()",
+            "candidate_window.next_deadline()",
+            "image_cache_next_deadline()",
+        ] {
+            assert!(
+                list.contains(source),
+                "{source} 没有登记进 next_deadline，UI 线程会睡过它"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod menu_id_tests {
