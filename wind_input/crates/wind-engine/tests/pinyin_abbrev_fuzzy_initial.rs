@@ -312,3 +312,43 @@ fn fuzzy_abbrev_keys_invariants() {
         vec![("nqc".to_string(), 0)]
     );
 }
+
+/// `MAX_ABBREV_KEY_VARIANTS` 那张变体数表必须**可执行**。
+///
+/// 该 doc 的算例写错过一版：「4 位全落在 n/l/f/h/r 上且都开组才 16 个变体，仍在限内」——
+/// `2^4 = 16` 只对**2 选位**（n/f/h/r）成立，而 `l` 同属 `n↔l` 与 `r↔l` 两组、是 3 选位，
+/// `llll` 实际 `3^4 = 81`。按错的上界做判断，会以为全 `l` 的键也在覆盖内，
+/// 而它恰恰是唯一落在覆盖外的形状。把表钉成断言，下次再写错就红。
+#[test]
+fn fuzzy_abbrev_keys_variant_counts_match_doc() {
+    let all = FuzzyConfig {
+        n_l: true,
+        r_l: true,
+        f_h: true,
+        ..Default::default()
+    };
+    let nl_only = FuzzyConfig {
+        n_l: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        fuzzy::fuzzy_abbrev_keys("nqc", &nl_only).len(),
+        2,
+        "n 是 2 选位"
+    );
+    assert_eq!(
+        fuzzy::fuzzy_abbrev_keys("nnnn", &nl_only).len(),
+        16,
+        "2^4：四个 2 选位"
+    );
+    assert_eq!(
+        fuzzy::fuzzy_abbrev_keys("lllh", &all).len(),
+        54,
+        "3³×2：三个 3 选位(l) + 一个 2 选位(h)，仍在 64 之内"
+    );
+    assert_eq!(
+        fuzzy::fuzzy_abbrev_keys("llll", &all),
+        vec![("llll".to_string(), 0)],
+        "3^4 = 81 > 64 ⇒ 降级为只查原键"
+    );
+}
