@@ -917,7 +917,7 @@ fn test_pinyin_trailing_partial_prefix_floats_above_exact() {
 /// 长用户词上浮的端到端回归（真实拼音词库 + store 学习词）：
 /// ① 全拼精确命中恒居首，且**不被错误整句挤下**（step6.5 降级配合）；
 /// ② 打到第 3 个音节（含「整音节 + 残码」如 qingfengs）用户长词应上浮显现；
-/// ③ 只打 2 音节（qingfeng，无残码）不上浮，精确整句仍居首。
+/// ③ 只打 2 音节（qingfeng，无残码）时精确整句仍居首；距词尾超出 `max_extra` 才不上浮。
 /// weight=0 模拟「学习词」（词频另在协调器算），是最易触发上浮边界的场景。
 #[test]
 fn user_long_word_promotion_end_to_end() {
@@ -975,19 +975,29 @@ fn user_long_word_promotion_end_to_end() {
         "qingfengshu 下清风输入法应上浮"
     );
 
-    // ③ 仅 2 音节无残码（qingfeng）：不上浮；精确整句「清风」居首。
+    // ③ 仅 2 音节无残码（qingfeng）：精确整句「清风」必须居首。
+    //
+    // ⚠️ 这里**不再**断言「不上浮」。本用例的 `max_extra = 3`，而「清风输入法」5 音节、
+    // started 2 ⇒ 剩 3 ≤ 3 ⇒ 判据说该上浮，这是配置想要的行为。
+    //
+    // 旧版本之所以能断言「不上浮」，是因为夹具的用户词 `boundary = 0` 落进了
+    // `started >= 3` 那条退化分支 —— 钉住的是漏网口本身，而非任何配置语义。
+    // 该分支修掉后（`boundary == 0` 统一过 `effective_boundary` 现切），这里守的
+    // 应当是**上浮不等于夺首选**：`promotion_cap` 把提升后的权重封在「本次输入的
+    // 最佳完整解 - 1」，精确整句因此稳居第 0 位。
     let r = mgr.convert("qingfeng", 400);
     assert_eq!(
         r.candidates.first().map(|c| c.text.as_str()),
         Some("清风"),
-        "qingfeng 首选应是精确整句「清风」"
+        "qingfeng 首选应是精确整句「清风」（上浮受 promotion_cap 封顶）"
     );
-    if let Some(w) = r.candidates.iter().find(|c| c.text == "清风输入法") {
-        assert!(
-            !w.is_promoted_completion,
-            "qingfeng(2 音节无残码)不应上浮清风输入法"
-        );
-    }
+
+    // ⚠️ **不要在这里补一段「收紧 max_extra ⇒ 不该上浮」的对照**。试过，它恒空过：
+    // step 6.3 的 `retain` 用 `syllable_cap = started + max_extra` 裁 `is_prefix` 候选，
+    // 与判据的 `remaining <= max_extra` 是同一个不等式 —— 收紧只会让词在召回层就没了。
+    // 实测把 `should_promote_user_completion` 整个改成 `return true`，那段照样绿。
+    // 该命题唯一可观测的位置是 step 6.7 支路，护栏在
+    // `pinyin_user_word_no_boundary_tier.rs::fallback_branch_far_word_promotes_for_neither`。
 }
 
 #[test]

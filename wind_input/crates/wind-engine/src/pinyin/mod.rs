@@ -619,10 +619,42 @@ const MAX_FULL_PINYIN_SUBPHRASE: usize = 4;
 /// **尾部残码**（未成音节的声母，如 `qingfengs` 的 `s`）算作「已起头的一个音节」——用户已
 /// 明确要接着打这个音节，意图强于停在整音节边界（`qingfeng`）。`started` = 完整音节数 +
 /// (有残码 ? 1 : 0)：
-/// - **有边界**（GUI 加词/学习词带音节真值）：`started ≥ 2` 且**距词尾 ≤ `max_extra`**
-///   （用户配置的 `completion.max_extra_syllables`）才上浮。
-/// - **无边界**（手输码用户词 `boundary=0`，算不出剩余）：退化为「`started ≥ 3`」门槛，
-///   同样对齐「打到第 3 个音节才给」，避免 1-2 音节时被一堆冷僻长词占满前排。
+/// - **有边界**（GUI 加词/学习词带音节真值，或码能 DAG 切出音节）：`started ≥ 2` 且
+///   **距词尾 ≤ `max_extra`**（用户配置的 `completion.max_extra_syllables`）才上浮。
+/// - **算不出音节数**：退化为「`started ≥ 3`」门槛，同样对齐「打到第 3 个音节才给」，
+///   避免 1-2 音节时被一堆冷僻长词占满前排。
+///
+/// # `word_syls` 必须是 [`effective_boundary`] 现切的结果，不能是 `boundary.count_ones()`
+///
+/// ⚠️ **`boundary == 0` 不等于「音节数算不出」**，这是本判据踩过的坑：手输码用户词恒
+/// `boundary = 0`，而它的码本身就是合法全拼串、DAG 现切即得音节数。此前本函数直接读裸
+/// `boundary` ⇒ 这批词一律落进 `started >= 3` 那条退化门槛，于是**同一个词有没有带
+/// 边界字段，决定了它在 2 音节输入下能不能被看见**：5 音节的 `qingfengshurufa` 用户词在
+/// `qingf`(started 2) 下，带边界那条上浮到首位，手输码那条沉在补全层。
+///
+/// 更要紧的是它与**召回门不同口径**：召回门早已过 `effective_boundary` 把这批词放进来了，
+/// 上浮判据却拿裸 `boundary` 按「无信息」处置 —— 正是本文档末尾要消除的那个
+/// 「召回了却沉在必被截断的位置」的中间态。
+///
+/// 入参之所以是**算好的音节数**而非 `(code, boundary, trie)`：三个调用点里有两个在紧邻
+/// 几行内已经为显示序档位算过一次，传进来即可复用（`boundary == 0` 时那是一次
+/// `Dag::build`，而手输码用户词恰好全是 `boundary == 0`）。顺带消掉「code 与 boundary
+/// 取自不同候选」这个类型系统管不着的面 —— `d4084b8` 踩过一次「A 层的码 + B 层的边界」。
+///
+/// # `remaining <= max_extra` 在主路径上恒真，别拿它写护栏
+///
+/// step 6.3 的 `retain` 用 `syllable_cap = started + max_extra` 裁掉所有 `is_prefix`
+/// 候选，而 `word_syls <= started + max_extra` 与本函数的 `remaining <= max_extra`
+/// **是同一个不等式** ⇒ 能活到这里的候选必然满足它，起作用的只剩 `started >= 2`。
+///
+/// ⇒ **想验「距词尾太远所以不上浮」，只能在 step 6.7 全拼降级支路上做**：那条路的
+/// 用户词刻意不受 `completion_syllable_cap` 约束（见 `recall_full_pinyin` 里那段
+/// 「没有跟着加 completion_syllable_cap」的取舍说明）。首版护栏在主路径上写了三处
+/// 「收紧 max_extra ⇒ 不该上浮」的对照，候选被召回门先一步删光、断言全部空过，
+/// 把本函数整个改成 `return true` 也照样全绿。
+///
+/// 同理，反方向（`started >= 3` 且距词尾 > `max_extra` 时旧逻辑会误上浮）在主路径上
+/// **是理论缺口而非可复现故障**。
 ///
 /// # 为什么距词尾上限必须读配置，不能硬编码
 ///
@@ -648,15 +680,19 @@ const MAX_FULL_PINYIN_SUBPHRASE: usize = 4;
 fn should_promote_user_completion(
     completed_syls: usize,
     trailing_partial: bool,
-    boundary: u64,
+    word_syls: u32,
     max_extra: u32,
 ) -> bool {
     let started = completed_syls + usize::from(trailing_partial);
-    if boundary != 0 {
-        let word_syls = boundary.count_ones() as usize;
-        let remaining = word_syls.saturating_sub(started);
+    if word_syls != 0 {
+        let remaining = (word_syls as usize).saturating_sub(started);
         started >= 2 && remaining <= max_extra as usize
     } else {
+        // 音节数算不出来：退化为「打到第 3 个音节才给」。
+        //
+        // ⚠️ 这里只兜得住**一个音节都切不出**的码（空码、整串非拼音）。码切不满
+        // （`daboluoqq` → `da|bo|luo`）走的是上面那条，拿低估的音节数判 —— 见
+        // `effective_boundary` 文档里那条「一声不吭地少算」。
         started >= 3
     }
 }
@@ -1643,13 +1679,19 @@ impl PinyinEngine {
         // 不上浮时它落在 **603/604 位**，而协调器传的 limit 恒为 300 ⇒ 被 `truncate` 丢弃
         // ⇒ 用户看到的是「这个词根本打不出来」。纯拼音方案同输入是位次 1。
         // 与 `should_promote_user_completion` 文档里那次报障是同一病灶的另一条通道。
+        let trie = &self.trie;
         for c in &mut cands[start..] {
             if !c.is_prefix {
                 continue;
             }
-            let word_syls = c.boundary.count_ones();
+            // 口径同主路径 step4/step6：`boundary == 0` 先过 `effective_boundary` 现切，
+            // 而不是当「算不出」跳过 —— 用户词里手输码条目恒 boundary=0，直接跳过等于
+            // 这批词的档位永远是 0，与 4 音节真值词同档竞争。
+            let word_syls = effective_boundary(&c.code, c.boundary, trie).count_ones();
             if word_syls == 0 {
-                continue; // 无边界信息：算不出，保持默认 0（同主路径对 boundary==0 的处置）
+                // 一个音节都切不出（空码 / 整串非拼音）：确实算不出，保持默认 0。
+                // 码切不满的那类拿到的是低估值而非 0，走不到这里（见 `effective_boundary`）。
+                continue;
             }
             c.completion_extra_syllables =
                 word_syls.saturating_sub(started).min(u8::MAX as u32) as u8;
@@ -1658,7 +1700,7 @@ impl PinyinEngine {
                 && should_promote_user_completion(
                     syllables.len(),
                     trailing_partial,
-                    c.boundary,
+                    word_syls, // 上一行档位刚算过，复用
                     self.config.completion_max_extra_syllables,
                 )
             {
@@ -1992,6 +2034,18 @@ fn syllables_boundary_mask(syllables: &[String], limit_len: usize) -> u64 {
 /// ⚠️ 猜测走 `maximum_match`（最长匹配 ⇒ **最少**音节），故对同码多切分会偏向少的那侧：
 /// `xian` 猜成 1 音节，若某条 boundary=0 的候选实为「西安」(xi|an)，会被少算一个音节。
 /// 只影响没有边界真值的那一小撮，且仅在短输入档生效。
+///
+/// ⚠️⚠️ **码切不满时同样少算，而且一声不吭**。`Dag::maximum_match` 从最远可达位置回溯，
+/// 码里混进非拼音串就只返回能切的那段前缀：`daboluoqq` 切成 `da|bo|luo`（3 音节），
+/// 尾部 `qq` 被无声丢掉 —— 实测该词在 `dabo` 下拿到 `extra=1`（按 3 音节算）并上浮，
+/// 而它本该是「音节数不可知」。命中面是 `dict import` 的脏数据、码表码误入 pinyin
+/// schema、手输码打错。
+///
+/// 本函数**刻意不做覆盖校验**（对比：同文件的 `abbrev_of_code` 有
+/// `consumed != code.len() → None` 这道闸）。加这道闸会同时改变全部调用点的行为
+/// （召回门、step4/step6/6.7 档位、上浮判据），得单独立项配回归 —— 在那之前，
+/// 调用方拿到的「音节数」对这类码是**低估值而非 0**，`word_syls == 0` 这个判据
+/// 只挡得住空码和整串切不出的码。
 fn effective_boundary(code: &str, boundary: u64, trie: &SyllableTrie) -> u64 {
     if boundary != 0 {
         return boundary;
@@ -3200,7 +3254,9 @@ impl Engine for PinyinEngine {
                     } else if should_promote_user_completion(
                         completed_syls,
                         trailing_partial,
-                        existing.boundary,
+                        // 码与边界必须取自**同一条**候选（此处都是 `existing` 的，
+                        // 合并分支刻意保留已有候选的这两项，理由见上方注释）。
+                        effective_boundary(&existing.code, existing.boundary, trie).count_ones(),
                         self.config.completion_max_extra_syllables,
                     ) {
                         let w = existing.weight.max(c.weight);
@@ -3225,25 +3281,26 @@ impl Engine for PinyinEngine {
                 // 用户/临时词的前缀补全（is_prefix=true，码更长）：打到词尾附近就提升进完整
                 // 匹配层，否则被首音节同音子短语整层淹没（长词打到第 3-4 音节才给的根因）。
                 // is_prefix 保持结构真值不动，排序提升由 is_promoted_completion 承接。
-                if c.is_prefix
-                    && should_promote_user_completion(
+                if c.is_prefix {
+                    // 上浮判据与显示序档位**共用同一次现切**：两者都要「这个词几个音节」，
+                    // 而 `boundary == 0`（手输码用户词的常态）下每次都是一趟 `Dag::build`。
+                    //
+                    // 档位口径同 step4，连同那条「boundary == 0 要过 `effective_boundary`
+                    // 现切」一起（理由见 step4 的 `distance`）。用户词里手输码条目最多，
+                    // 这一处漏掉的话，导入词库绕过分档的路就没堵上。
+                    let word_syls = effective_boundary(&c.code, c.boundary, trie).count_ones();
+                    if should_promote_user_completion(
                         completed_syls,
                         trailing_partial,
-                        c.boundary,
+                        word_syls,
                         self.config.completion_max_extra_syllables,
-                    )
-                {
-                    c.is_promoted_completion = true;
-                    if let Some(cap) = promotion_cap {
-                        c.weight = c.weight.min(cap);
+                    ) {
+                        c.is_promoted_completion = true;
+                        if let Some(cap) = promotion_cap {
+                            c.weight = c.weight.min(cap);
+                        }
                     }
-                }
-                // 显示序档位，口径同 step4 —— 连同那条「boundary == 0 要过
-                // `effective_boundary` 现切」一起（理由见 step4 的 `distance`）。
-                // 用户词里手输码条目最多，这一处漏掉的话，导入词库绕过分档的路就没堵上。
-                if c.is_prefix {
-                    c.completion_extra_syllables = effective_boundary(&c.code, c.boundary, trie)
-                        .count_ones()
+                    c.completion_extra_syllables = word_syls
                         .saturating_sub(started_syllables)
                         .min(u8::MAX as u32)
                         as u8;
@@ -4514,7 +4571,19 @@ mod tests {
     }
 
     /// 构造「带 qing 同音字洪泛的系统词典 + 用户长词」的引擎（复用于长词上浮系列测试）。
-    fn engine_with_qing_flood_and_user_word(store_name: &str) -> PinyinEngine {
+    /// `max_extra` 与 `boundary` 都参数化：
+    ///
+    /// - `boundary` 让同一夹具能造出「带音节真值」与「手输码(=0)」两种用户词。
+    ///   `boundary == 0` 漏网口修掉后，两者的上浮判据必须**完全一致** —— 这是
+    ///   `user_long_word_promotion_ignores_missing_boundary` 里对称性断言的抓手。
+    /// - `max_extra` 因此成了唯一的门槛来源。旧版本这里写死用 `relaxed_completion_config`
+    ///   的 3，而「够不够得着」实际是由 `boundary == 0` 那条退化分支决定的，
+    ///   配置调了也没用。
+    fn engine_with_qing_flood_and_user_word(
+        store_name: &str,
+        max_extra: u32,
+        boundary: u64,
+    ) -> PinyinEngine {
         let mut raw = CodetableDict::empty();
         for (i, ch) in ["清", "青", "情", "请", "轻", "晴", "倾", "氢", "卿", "顷"]
             .iter()
@@ -4531,22 +4600,37 @@ mod tests {
         raw.merge_single("qingfeng".to_string(), "清风".to_string(), 800, 0);
 
         let store = tmp_store(store_name);
-        // boundary=0：模拟手输码用户词（无音节真值）→ 走 completed_syls>=3 兜底门槛。
         store
-            .add_user_word("pinyin", "qingfengshurufa", "清风输入法", 5000, 0)
+            .add_user_word("pinyin", "qingfengshurufa", "清风输入法", 5000, boundary)
             .unwrap();
         let dm = DictManager::new();
         dm.register_layer(Box::new(wind_dict::StoreUserLayer::new(store, "pinyin")));
-        // 门槛设回 2：本组用例用 `qingfengshu`(3 音节) 验用户长词上浮，出厂的 4 会挡掉样本。
-        PinyinEngine::new(relaxed_completion_config(), CachedDict::Memory(raw))
-            .with_store_layers(Arc::new(dm))
+        // min_syllables 设回 2：本组用例用 `qingfengshu`(3 音节) 验用户长词上浮，
+        // 出厂的 4 会挡掉样本。
+        let cfg = Config {
+            completion_max_extra_syllables: max_extra,
+            ..relaxed_completion_config()
+        };
+        PinyinEngine::new(cfg, CachedDict::Memory(raw)).with_store_layers(Arc::new(dm))
+    }
+
+    /// 「清风输入法」qing|feng|shu|ru|fa 的音节起点位图（上面夹具那条用户词的真值）。
+    fn qingfengshurufa_boundary() -> u64 {
+        let mut b: u64 = 0;
+        let mut code = String::new();
+        for syl in ["qing", "feng", "shu", "ru", "fa"] {
+            b |= 1u64 << code.len();
+            code.push_str(syl);
+        }
+        assert_eq!(code, "qingfengshurufa", "夹具自检：音节拼接须还原出该码");
+        b
     }
 
     /// 【核心回归】用户长词「清风输入法」在打到第 3-4 音节时应上浮到同音子短语之上，
     /// 而非被压到候选最底（本次修复的用户反馈现场：打到完整全拼才出现）。
     #[test]
     fn user_long_word_surfaces_at_partial_pinyin() {
-        let engine = engine_with_qing_flood_and_user_word("long_word_surface");
+        let engine = engine_with_qing_flood_and_user_word("long_word_surface", 3, 0);
 
         for input in ["qingfengshu", "qingfengshuruf"] {
             let r = engine.convert(input, 300).unwrap();
@@ -4596,82 +4680,153 @@ mod tests {
         );
     }
 
-    /// 【边界守卫】音节太少时不上浮：`qing`(1 音节) / `qingfeng`(2 音节) 下用户长词
-    /// 仍沉在补全层，且精确词「清风」在 qingfeng 下仍居首——不被用户长词越过。
+    /// 【边界守卫】短输入下的两件事：**上浮与否不看词条填没填 boundary**，
+    /// 且**上浮不等于夺位**（精确词仍在前）。
+    ///
+    /// `max_extra = 3`、用户词 5 音节：
+    /// - `qing`(started 1)：召回门 `cap = 1 + 3 = 4 < 5` ⇒ 词根本进不来；
+    /// - `qingfeng`(started 2)：`cap = 5` ⇒ 在场，剩 3 ≤ 3 ⇒ 上浮，但被
+    ///   `promotion_cap` 封在精确词之后。
+    ///
+    /// ## 这条用例改过两次，两次都是断言钉错了东西
+    ///
+    /// **第一版**夹具写死 `boundary = 0`，注释直言「走 completed_syls>=3 兜底门槛」，
+    /// 用例名承诺「音节太少不上浮」—— 它钉住的其实是**退化分支本身**。同一个词带上
+    /// 音节真值后行为就变了（`started >= 2 && 剩 3 ≤ 3` ⇒ 上浮），而用例察觉不到。
+    ///
+    /// **第二版**（`boundary == 0` 漏网口修掉后）为了保住「太少不上浮」这个名字，
+    /// 把 `max_extra` 收到 2 —— 于是 `cap = 4 < 5`，用户词被召回门整个删掉，
+    /// 四处上浮断言**全部空过**，真正执行的只剩「清风在候选里」。
+    ///
+    /// **根因**：`remaining <= max_extra` 与召回门的 `word_syls <= started + max_extra`
+    /// 是同一个不等式，「距词尾太远所以不上浮」在主路径上**不可观测**
+    /// （详见 [`should_promote_user_completion`] 的文档）。本用例遂不再承诺那件事，
+    /// 改钉真正可观测的两条。
     #[test]
-    fn user_long_word_not_promoted_when_too_few_syllables() {
-        let engine = engine_with_qing_flood_and_user_word("long_word_guard");
-
-        // qing：1 音节，boundary=0 兜底门槛 completed_syls>=3 未达 → 不上浮。
-        let r1 = engine.convert("qing", 300).unwrap();
-        if let Some(p) = r1.candidates.iter().position(|c| c.text == "清风输入法") {
-            assert!(
-                !r1.candidates[p].is_promoted_completion,
-                "qing(1 音节)不应上浮用户长词"
+    fn user_long_word_promotion_ignores_missing_boundary() {
+        for (tag, boundary) in [
+            ("no_boundary", 0u64),
+            ("with_boundary", qingfengshurufa_boundary()),
+        ] {
+            let engine = engine_with_qing_flood_and_user_word(
+                &format!("long_word_guard_{tag}"),
+                3,
+                boundary,
             );
-        }
 
-        // qingfeng：2 音节，未达门槛 → 不上浮；精确「清风」应排在用户长词之前。
-        let r2 = engine.convert("qingfeng", 300).unwrap();
-        let pos_qf = r2.candidates.iter().position(|c| c.text == "清风");
-        let pos_word = r2.candidates.iter().position(|c| c.text == "清风输入法");
-        if let Some(pw) = pos_word {
+            // qing：started 1 ⇒ cap = 4 < 5 音节 ⇒ 召回门先一步挡掉。
+            // 这一档验不了判据的 `started >= 2`（候选根本进不来），只能钉住「确实没进来」
+            // —— 写成硬断言而非 `if let`，是为了让它哪天进得来时当场报红、而非静默空过。
+            let r1 = engine.convert("qing", 300).unwrap();
             assert!(
-                !r2.candidates[pw].is_promoted_completion,
-                "qingfeng(2 音节)不应上浮用户长词"
+                !r1.candidates.iter().any(|c| c.text == "清风输入法"),
+                "[{tag}] qing(started 1，cap=4)下 5 音节用户词应被召回门挡在外面"
             );
-            if let Some(pqf) = pos_qf {
-                assert!(pqf < pw, "qingfeng 下精确「清风」应排在用户长词之前");
-            }
+
+            // qingfeng：started 2 ⇒ cap = 5 ⇒ 在场。★ 本用例的要害在这一档。
+            let r2 = engine.convert("qingfeng", 300).unwrap();
+            let pw = r2
+                .candidates
+                .iter()
+                .position(|c| c.text == "清风输入法")
+                .unwrap_or_else(|| {
+                    panic!("[{tag}] 前提不成立：qingfeng(cap=5)下用户长词应在候选里")
+                });
+            assert!(
+                r2.candidates[pw].is_promoted_completion,
+                "[{tag}] started 2、剩 3 ≤ max_extra 3 ⇒ 应上浮（与填没填 boundary 无关）"
+            );
+
+            let pqf = r2
+                .candidates
+                .iter()
+                .position(|c| c.text == "清风")
+                .unwrap_or_else(|| panic!("[{tag}] 前提不成立：精确词「清风」没进候选"));
+            assert!(
+                pqf < pw,
+                "[{tag}] 上浮不等于夺位：`promotion_cap` 应把用户长词封在精确「清风」之后，\
+                 实际 清风@{pqf} 长词@{pw}"
+            );
         }
     }
 
-    /// 上浮判据单测：距词尾 ≤ `max_extra`（有边界）/ 已打 ≥3 音节（无边界）才上浮。
+    /// 上浮判据单测：距词尾 ≤ `max_extra`（音节数已知）/ 已打 ≥3 音节（算不出）才上浮。
+    ///
+    /// 入参是**算好的音节数**，故 `boundary != 0` 的那批直接传 `count_ones()`；
+    /// `boundary == 0` 那批要先过 `effective_boundary` 才有意义，见组内注释。
     #[test]
     fn promote_user_completion_thresholds() {
+        let trie = SyllableTrie::new();
         // 5 音节词（boundary 五个音节起始位；此处只关心 count_ones()=5）。
         let b5: u64 = 0b11111; // 5 个置位（count_ones=5，模拟 5 音节词）
         assert_eq!(b5.count_ones(), 5);
         // 以 max_extra = 2 复核历史档位（本判据长期硬编码的那个值）。
         // 无残码：completed_syls 即 started。
         assert!(
-            !should_promote_user_completion(2, false, b5, 2),
+            !should_promote_user_completion(2, false, b5.count_ones(), 2),
             "5 音节词打 2 音节剩 3 > 2，不上浮"
         );
         assert!(
-            should_promote_user_completion(3, false, b5, 2),
+            should_promote_user_completion(3, false, b5.count_ones(), 2),
             "5 音节词打 3 音节剩 2 = 2，上浮"
         );
         assert!(
-            should_promote_user_completion(4, false, b5, 2),
+            should_promote_user_completion(4, false, b5.count_ones(), 2),
             "5 音节词打 4 音节剩 1，上浮"
         );
         assert!(
-            !should_promote_user_completion(1, false, b5, 2),
+            !should_promote_user_completion(1, false, b5.count_ones(), 2),
             "1 音节 < 2，无条件不上浮"
         );
         // 尾部残码算作已起头的一个音节：qingfengs = 2 完整音节 + 残码 → started 3 → 上浮。
         assert!(
-            should_promote_user_completion(2, true, b5, 2),
+            should_promote_user_completion(2, true, b5.count_ones(), 2),
             "2 完整音节 + 残码（started 3, 剩 2）应上浮"
         );
         assert!(
-            !should_promote_user_completion(1, true, b5, 2),
+            !should_promote_user_completion(1, true, b5.count_ones(), 2),
             "1 完整音节 + 残码（started 2, 剩 3 > 2）不上浮"
         );
-        // 无边界兜底：started>=3，与 max_extra 无关（算不出剩余）。
+        // ===== boundary == 0 的两种处境，判据**不同** =====
+
+        // ① 码切得出音节（手输码用户词的常态）：DAG 现切即得音节数，
+        //    与带边界的同码词**走同一条路**，不再退化。
+        //    这是 `boundary == 0` 漏网口的单元级护栏，端到端那条在
+        //    `tests/pinyin_user_word_no_boundary_tier.rs`。
+        let code5 = "qingfengshurufa"; // qing|feng|shu|ru|fa
+        assert_eq!(
+            effective_boundary(code5, 0, &trie).count_ones(),
+            5,
+            "夹具自检：该码必须能被 DAG 切成 5 个音节，否则下面测的是退化分支"
+        );
+        for started in 1..=5usize {
+            let with_b = should_promote_user_completion(started, false, b5.count_ones(), 2);
+            let no_b = should_promote_user_completion(
+                started,
+                false,
+                effective_boundary(code5, 0, &trie).count_ones(),
+                2,
+            );
+            assert_eq!(
+                with_b, no_b,
+                "started={started}：同码同音节数，带不带 boundary 字段结果必须一致"
+            );
+        }
+
+        // ② 码切不出音节（空码 / 非法码）：确实算不出剩余，退化为 started >= 3，
+        //    与 max_extra 无关。
         for max_extra in [0, 2, 10] {
             assert!(
                 !should_promote_user_completion(2, false, 0, max_extra),
-                "无边界 2 音节不上浮（max_extra={max_extra} 不参与）"
+                "算不出音节数时 2 音节不上浮（max_extra={max_extra} 不参与）"
             );
             assert!(
                 should_promote_user_completion(3, false, 0, max_extra),
-                "无边界 3 音节上浮（max_extra={max_extra} 不参与）"
+                "算不出音节数时 3 音节上浮（max_extra={max_extra} 不参与）"
             );
             assert!(
                 should_promote_user_completion(2, true, 0, max_extra),
-                "无边界 2 音节 + 残码（started 3）上浮"
+                "算不出音节数时 2 音节 + 残码（started 3）上浮"
             );
         }
     }
@@ -4692,19 +4847,19 @@ mod tests {
 
         // started = 5（qingfengshurufa），剩 6。
         assert!(
-            !should_promote_user_completion(5, false, b11, 2),
+            !should_promote_user_completion(5, false, b11.count_ones(), 2),
             "max_extra=2：剩 6 > 2，不上浮（旧硬编码行为，报障现场）"
         );
         assert!(
-            should_promote_user_completion(5, false, b11, 10),
+            should_promote_user_completion(5, false, b11.count_ones(), 10),
             "max_extra=10：剩 6 ≤ 10，必须上浮 —— 用户把设置调宽就是这个意思"
         );
         assert!(
-            should_promote_user_completion(5, false, b11, 6),
+            should_promote_user_completion(5, false, b11.count_ones(), 6),
             "max_extra=6：剩 6 恰好等于上限，边界值取闭区间（与召回层同口径）"
         );
         assert!(
-            !should_promote_user_completion(5, false, b11, 5),
+            !should_promote_user_completion(5, false, b11.count_ones(), 5),
             "max_extra=5：剩 6 > 5，不上浮"
         );
 
@@ -4714,7 +4869,8 @@ mod tests {
             let remaining = 11usize.saturating_sub(started);
             let max_extra = 10u32;
             let recalled = 11 <= started + max_extra as usize;
-            let promoted = should_promote_user_completion(started, false, b11, max_extra);
+            let promoted =
+                should_promote_user_completion(started, false, b11.count_ones(), max_extra);
             assert_eq!(
                 promoted,
                 recalled && started >= 2,

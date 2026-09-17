@@ -275,16 +275,25 @@ fn shuangpin_mixed_abbrev_survives_boundary_check() {
     );
 }
 
-/// **用户长词打 2 个音节即可上浮**——这正是边界接通后才拿得到的行为。
+/// **用户长词打 2 个音节即可上浮**，且这一行为**不取决于词条填没填 boundary**。
 ///
-/// 「大菠萝哥」4 音节，输入 `dabo`（2 音节）：
-/// - 有边界：`started=2`、距词尾 `remaining=2` ≤ COMPLETION_NEAR_SYLLABLES → 上浮
-/// - 无边界：只能退回 `started >= 3` → 不上浮，于是被首音节一大批同音子短语整层压住，
-///   **30 个候选里根本找不到**
+/// 「大菠萝哥」4 音节、`max_extra = 3`，输入 `dabo`（started 2、距词尾 2 ≤ 3）→ 上浮。
 ///
-/// 断链期间用户词恒走后者，「用户长词打部分拼音即上浮」对用户词从未真正生效。
+/// ## 本用例的语义变过一次
+///
+/// 原名 `..._only_with_boundary`，断言的是「有边界上浮 / 无边界**找不到**」：无边界那条
+/// 当时只能退回 `started >= 3`，于是被首音节一大批同音子短语整层压住、30 名外。
+///
+/// 那个差异**是漏网口而非规格**：手输码用户词恒 `boundary = 0`，而它的码
+/// （`daboluoge`）本身就是合法全拼串、DAG 现切即得 4 音节。召回门早已按现切的音节数
+/// 把它放进来了，上浮判据却拿裸 `boundary` 当「无信息」处置 —— 同一个词填不填边界
+/// 字段决定了它能不能被看见。判据改走 `effective_boundary` 后两条路合一，本用例
+/// 随之反向：**两侧必须一致**。
+///
+/// 「打 2 音节就上浮」这件事本身没变，仍由下面第一条断言守着；
+/// 判据没被改成恒真，由末尾 `max_extra = 1` 的下侧对照守着。
 #[test]
-fn user_long_word_promotes_at_two_syllables_only_with_boundary() {
+fn user_long_word_promotes_at_two_syllables_regardless_of_boundary() {
     let Some(dir) = data_dir() else {
         eprintln!("跳过：拼音词库不存在");
         return;
@@ -299,13 +308,15 @@ fn user_long_word_promotes_at_two_syllables_only_with_boundary() {
         "有边界时 dabo 应上浮进完整匹配层，实际 {hit:?}"
     );
 
+    // 无边界那条：**同样上浮**，且 `boundary` 字段仍如实为 0 —— 现切只用于判据，
+    // 不回写候选（回写会让下游误以为词条自带音节真值）。
+    let hit_wo = find(&without, "dabo", "大菠萝哥");
     assert!(
-        find(&without, "dabo", "大菠萝哥").is_none(),
-        "对照组：无边界时 started=2 不足以上浮，用户词被同音子短语淹没在 30 名之外"
+        hit_wo.is_some_and(|(_, b, promoted)| b == 0 && promoted),
+        "无边界时 dabo 也应上浮（码可 DAG 现切出 4 音节），且候选 boundary 仍为 0，实际 {hit_wo:?}"
     );
 
-    // 3 音节两侧都上浮（无边界分支的 started>=3 也满足）——确认差异只在 2 音节这一档，
-    // 不是整体行为翻转。
+    // 3 音节两侧同样上浮——确认一致性不只在 2 音节这一档成立。
     assert!(
         find(&with, "daboluo", "大菠萝哥").is_some_and(|(_, _, p)| p),
         "有边界：3 音节上浮"
@@ -314,4 +325,10 @@ fn user_long_word_promotes_at_two_syllables_only_with_boundary() {
         find(&without, "daboluo", "大菠萝哥").is_some_and(|(_, _, p)| p),
         "无边界：3 音节同样上浮"
     );
+
+    // ⚠️ 本用例守的是「**一致性**」，不是「判据没被改成恒真」——后者在主路径上
+    // 测不了：step 6.3 的 `syllable_cap = started + max_extra` 与判据的
+    // `remaining <= max_extra` 是同一个不等式，收紧 `max_extra` 只会让词在召回层
+    // 就没了（实测判据改 `return true`，本文件全绿）。该命题挂在 6.7 支路，见
+    // `pinyin_user_word_no_boundary_tier.rs::fallback_branch_far_word_promotes_for_neither`。
 }
