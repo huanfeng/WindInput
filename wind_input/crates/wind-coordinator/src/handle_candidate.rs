@@ -3,8 +3,8 @@
 //! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
 
 use crate::coordinator::{
-    Coordinator, DEFERRED_COMPOSITION_FALLBACK_MS, InputOutcome, LEARN_ADD_WEIGHT, State,
-    now_unix_secs, punct_char,
+    CommittedSeg, Coordinator, DEFERRED_COMPOSITION_FALLBACK_MS, InputOutcome, LEARN_ADD_WEIGHT,
+    State, now_unix_secs, punct_char,
 };
 use crate::pipeline::ModeKind;
 use crate::preedit_cursor;
@@ -1008,7 +1008,7 @@ impl Coordinator {
         let last_seg_is_pinyin = state
             .committed_segs
             .last()
-            .is_some_and(|(_, _, _, src, _)| *src == CandidateSource::Pinyin);
+            .is_some_and(|s| s.source == CandidateSource::Pinyin);
         let pinyin_schema = if last_seg_is_pinyin {
             let active = self.engine_mgr.active_schema_id();
             self.engine_mgr
@@ -2520,13 +2520,14 @@ impl Coordinator {
     pub(crate) fn pop_committed_seg(&self, state: &mut State) -> KeyAction {
         // 并回缓冲的必须是 raw_code（原始输入空间），不是全拼 code：双拼下后者会把
         // `hao` 塞进击键缓冲，被重解析成 `ha|o` 而整串错乱。
-        let Some((raw_code, _, _, _, _)) = state.committed_segs.pop() else {
+        let Some(popped) = state.committed_segs.pop() else {
             return KeyAction::Consumed;
         };
+        let raw_code = popped.raw_code;
         state.committed_text = state
             .committed_segs
             .iter()
-            .map(|(_, _, t, _, _)| t.as_str())
+            .map(|s| s.text.as_str())
             .collect();
         // 回退段的码并回缓冲**前部** → 影子串同步前置（并回的码来自已确认段，恒小写）。
         if !state.input_buffer_cased.is_empty() {
@@ -3051,13 +3052,14 @@ impl Coordinator {
         );
         let raw_code = Self::raw_consumed_code(&state.input_buffer, consumed, partial);
         if partial {
-            state.committed_segs.push((
+            state.committed_segs.push(CommittedSeg {
                 raw_code,
                 code,
-                cand.text.clone(),
-                cand.source,
-                cand.boundary,
-            ));
+                text: cand.text.clone(),
+                source: cand.source,
+                boundary: cand.boundary,
+                learn: cand.meta.learn_code.clone(),
+            });
             state.committed_text.push_str(&cand.text);
             state.input_buffer = state.input_buffer[consumed..].to_string();
             // 剩余码是缓冲的后缀 → 影子串同步掐头（大写随之左移，不错位也不丢）。
@@ -3076,13 +3078,14 @@ impl Coordinator {
             // 联想候选不进已转换段、不喂造词：那两者都以「这一段是用什么码打出来的」为
             // 前提，而联想没有码。
             if !from_assoc {
-                state.committed_segs.push((
+                state.committed_segs.push(CommittedSeg {
                     raw_code,
-                    code.clone(),
-                    cand.text.clone(),
-                    cand.source,
-                    cand.boundary,
-                ));
+                    code: code.clone(),
+                    text: cand.text.clone(),
+                    source: cand.source,
+                    boundary: cand.boundary,
+                    learn: cand.meta.learn_code.clone(),
+                });
             }
             // 上屏文本：联想的**显示文本是整词**（「中国」），而屏幕上已经有「中」了，
             // 真正要补出去的只有 `commit_override` 里那半截。见 `Candidate::commit_override`。

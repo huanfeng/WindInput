@@ -68,6 +68,24 @@ pub struct CandidateMeta {
     /// `None` = 该候选不来自 store 层，或本就是新增分支（此时 `code` 即存储码）。
     #[serde(skip)]
     pub store_code: Option<std::sync::Arc<str>>,
+    /// **造词用的规范词条编码**与它自己的音节边界；`None` = 与候选 `code`/`boundary` 相同。
+    ///
+    /// 只有模糊音命中会让两者分家：用户敲 `senri`、词典里的词是 `shengri`。候选对外的
+    /// `code` 必须留**用户那份** —— `consumed_length` 的判据是 `query.starts_with(&c.code)`，
+    /// 换成词典码会落到「消费整串」分支、分步上屏当场失效；preedit 跟随与词频记账同理绑在
+    /// 它上面。而造词要的恰恰是**词典那份**：写进词库的码得是用户下次真能打出来的。
+    ///
+    /// 不修这条的后果实测过：`senrikl` 分步选「生日」「快乐」，造出来的是
+    /// `senrikuaile`（前半模糊原码 + 后半词典全拼码），`senrikl` 打不出、
+    /// `shengrikuaile` 也打不出，只有一字不差敲 `senrikuaile` 才行。
+    ///
+    /// 边界一并带：模糊命中的 `boundary` 恒 0（与原码不同域、位偏移对不上，见
+    /// `lookup_with_fuzzy`），而词典码与它自己的边界天然同域 —— 没有这份真值，
+    /// 造出的词 `boundary=0`，简拼索引只能进兜底组（`abbrev_index::group_of`），算不出声母串。
+    ///
+    /// 排序/去重/显示一律不读本字段，它只服务「把这条候选写进词库」这个方向。
+    #[serde(skip)]
+    pub learn_code: Option<(String, u64)>,
 }
 
 /// 命令栏动作

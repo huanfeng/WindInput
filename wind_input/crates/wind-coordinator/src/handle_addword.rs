@@ -2,7 +2,7 @@
 //!
 //! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
 
-use crate::coordinator::{Coordinator, LEARN_ADD_WEIGHT, State};
+use crate::coordinator::{CommittedSeg, Coordinator, LEARN_ADD_WEIGHT, State};
 use tracing::{debug, warn};
 use wind_bridge::handler::{COMPOSITION_PLACEHOLDER, KeyAction, KeyEventData};
 use wind_candidate::CandidateSource;
@@ -42,17 +42,14 @@ const EVICT_CHECK_INTERVAL: usize = 64;
 
 /// 自动造词超长裁剪：从尾部保留整段（最近输入优先）使合并字数 ≤ max_chars。
 /// 返回保留区间的起始段索引；max_chars=0 不限（返回 0）。
-fn trim_segs_start(
-    segs: &[(String, String, String, wind_candidate::CandidateSource, u64)],
-    max_chars: usize,
-) -> usize {
+fn trim_segs_start(segs: &[CommittedSeg], max_chars: usize) -> usize {
     if max_chars == 0 {
         return 0;
     }
     let mut total = 0;
     let mut start = segs.len();
-    for (i, (_, _, t, _, _)) in segs.iter().enumerate().rev() {
-        let n = t.chars().count();
+    for (i, seg) in segs.iter().enumerate().rev() {
+        let n = seg.text.chars().count();
         if total + n > max_chars {
             break;
         }
@@ -604,8 +601,22 @@ impl Coordinator {
         let mut boundary = 0u64;
         let mut boundary_ok = true;
         // 取**全拼** code（第 2 元）而非 raw_code：写入词库的编码与 boundary 位移都须全拼语义。
-        for (_, c, _, _, b) in segs {
-            if *b == 0 || code.len() + c.len() > 64 {
+        for seg in segs {
+            // **优先取规范词条码**（`learn`），而不是候选对外那份 `code`。
+            //
+            // 模糊音命中时两者分家：用户敲 `senri`、词典里登记的是 `shengri`。拼 `code`
+            // 造出来的是 `senrikuaile` —— 前半模糊原码 + 后半词典全拼码，两段分处两个域，
+            // 用户下次 `senrikl` 打不出、`shengrikuaile` 也打不出，只有一字不差敲那串怪码
+            // 才行。写进词库的码必须是**用户真能打出来的**。
+            //
+            // 边界一并跟着走：模糊命中的候选 `boundary` 恒 0（与原码不同域、位偏移对不上），
+            // 而 `learn` 里的边界与它自己的码同域，是词典真值 —— 否则整词 boundary 归 0，
+            // 简拼索引只能进兜底组、算不出声母串。
+            let (c, b) = match &seg.learn {
+                Some((dict_code, dict_boundary)) => (dict_code.as_str(), *dict_boundary),
+                None => (seg.code.as_str(), seg.boundary),
+            };
+            if b == 0 || code.len() + c.len() > 64 {
                 boundary_ok = false;
             } else {
                 boundary |= b << code.len();
@@ -613,7 +624,7 @@ impl Coordinator {
             code.push_str(c);
         }
         let boundary = if boundary_ok { boundary } else { 0 };
-        let text: String = segs.iter().map(|(_, _, t, _, _)| t.as_str()).collect();
+        let text: String = segs.iter().map(|s| s.text.as_str()).collect();
         let min_len = if min_len == 0 { 2 } else { min_len };
         let n_chars = text.chars().count();
         if n_chars < min_len || code.is_empty() {
@@ -634,8 +645,8 @@ impl Coordinator {
         // 混输仅当全段同源时用该源归属 id（混源/无法归因跳过，混合码写给谁都无意义）。
         // 注：混源判定使用截后 segs，截掉的段不参与归属判断。
         let schema = if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("mixed") {
-            let first = segs[0].3; // 上面的 is_empty 守卫已保证非空
-            if segs.iter().any(|(_, _, _, s, _)| *s != first) {
+            let first = segs[0].source; // 上面的 is_empty 守卫已保证非空
+            if segs.iter().any(|seg| seg.source != first) {
                 return None; // 混源：跳过自动造词
             }
             // 全段码表：混输超码长回捞的前缀候选现在带 `consumed_length`（见 `mixed/engine.rs`
@@ -1364,7 +1375,7 @@ mod tests {
     //! （字符还原/词长调整/确认写库）。编码计算依赖引擎，headless 下为空，
     //! 故写库测试手动注入 add_word_code。
     use super::{ADD_WORD_MAX_LEN, trim_segs_start};
-    use crate::coordinator::Coordinator;
+    use crate::coordinator::{CommittedSeg, Coordinator};
     use std::sync::Arc;
     use wind_config::Config;
     use wind_keys::keymap;
@@ -1612,22 +1623,15 @@ mod tests {
         let make_state_with_segs = || {
             let mut st = c.state.lock().unwrap();
             // 码表段：raw_code 与 code 同为击键码（无双拼转换）。
-            st.committed_segs = vec![
-                (
-                    "aa".to_string(),
-                    "aa".to_string(),
-                    "工".to_string(),
-                    CS::CodeTable,
-                    0,
-                ),
-                (
-                    "bb".to_string(),
-                    "bb".to_string(),
-                    "人".to_string(),
-                    CS::CodeTable,
-                    0,
-                ),
-            ];
+            let seg = |code: &str, text: &str| CommittedSeg {
+                raw_code: code.to_string(),
+                code: code.to_string(),
+                text: text.to_string(),
+                source: CS::CodeTable,
+                boundary: 0,
+                learn: None,
+            };
+            st.committed_segs = vec![seg("aa", "工"), seg("bb", "人")];
             drop(st);
         };
 
@@ -1777,14 +1781,13 @@ mod tests {
     #[test]
     fn trim_segs_keeps_tail_within_max() {
         use wind_candidate::CandidateSource as S;
-        let seg = |c: &str, t: &str| {
-            (
-                c.to_string(),
-                c.to_string(),
-                t.to_string(),
-                S::CodeTable,
-                0u64,
-            )
+        let seg = |c: &str, t: &str| CommittedSeg {
+            raw_code: c.to_string(),
+            code: c.to_string(),
+            text: t.to_string(),
+            source: S::CodeTable,
+            boundary: 0,
+            learn: None,
         };
         let segs = vec![seg("aa", "工人"), seg("bb", "们"), seg("cc", "好的")];
         // 总 5 字，max=3 → 从尾部保留 "们"(1)+"好的"(2)=3 字，起始索引 1

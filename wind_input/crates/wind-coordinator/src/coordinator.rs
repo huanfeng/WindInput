@@ -375,6 +375,31 @@ pub(crate) fn settings_app_path() -> Option<String> {
     path.exists().then(|| path.display().to_string())
 }
 
+/// 组合区「逐步转换」已确认的一段（拼音专属；码表选词消费整串、绝不进入此态）。
+///
+/// 此前是个五元组，`(raw_code, _, _, _, _)` 这样的解构在文件里到处都是；加第六个成员
+/// （`learn`）之后可读性撑不住，改成具名结构体。字段语义与旧元组逐位一一对应。
+#[derive(Debug, Clone)]
+pub(crate) struct CommittedSeg {
+    /// **原始输入空间**的消费码（双拼下是击键 `hc`）。退格回退（`pop_*_seg`）把它并回
+    /// 输入缓冲，故必须与缓冲同域。
+    pub(crate) raw_code: String,
+    /// **全拼语义**码（`hao`）。词频记账用它，`boundary` 的位移量按它的 `len()` 算。
+    pub(crate) code: String,
+    pub(crate) text: String,
+    pub(crate) source: CandidateSource,
+    /// 该段 `code` 的音节边界。段自身可能是多音节整词（选「你好」→ 段码 nihao、
+    /// 段内边界 ni|hao），故自动造词拼接各段时须把段内边界平移到全局位置。
+    pub(crate) boundary: u64,
+    /// **造词专用**的规范词条码与其边界；`None` = 就用 `code`/`boundary`。
+    ///
+    /// 只有模糊音命中会让两者分家（用户敲 `senri`、词典里是 `shengri`）。`code` 必须留
+    /// 用户那份——它绑着 `consumed_length` 的 `starts_with` 判据、preedit 跟随与词频记账；
+    /// 而写进词库的码得是用户下次真能打出来的。来源见
+    /// `wind_candidate::CandidateMeta::learn_code`。
+    pub(crate) learn: Option<(String, u64)>,
+}
+
 /// ⚠️ `Default` **只在测试构建下存在**（`cfg_attr(test, ...)`）。
 ///
 /// 生产侧一律走 `Coordinator::new` 里的显式构造：那里每个字段的初值都有来历
@@ -613,7 +638,7 @@ pub(crate) struct State {
     /// boundary = 该段 code 的音节边界（见 `wind_dict::binformat::DictEntry::boundary`）；
     /// 段自身可能是多音节整词（选「你好」→ 段码 nihao、段内边界 ni|hao），故自动造词拼接
     /// 各段时须把段内边界平移到全局位置，不能只按「一段一音节」记。
-    pub(crate) committed_segs: Vec<(String, String, String, CandidateSource, u64)>,
+    pub(crate) committed_segs: Vec<CommittedSeg>,
     /// 当前激活的独占输入模式（临时拼音/快捷输入/临时英文）。`None` = 普通输入。
     /// 单点决策的唯一真相源：结构上保证同一时刻至多一个独占模式（见 `pipeline.rs`）。
     pub(crate) active: Option<ModeKind>,

@@ -1386,6 +1386,9 @@ impl PinyinEngine {
         // 于是同一个人同一套模糊音设置在两条流下表现不一致，这本身就是缺陷。
         // 惩罚由 `lookup_with_fuzzy` 内部的 `fuzzy_penalized`（0.5^音节数）施加，与主路径同源。
         let completed: String = syllables.concat();
+        // ⚠️ 本支路（双拼下的全拼降级）**刻意不带 `learn_code`**：它的候选 `code` 是击键前缀，
+        // 而双拼击键与全拼码本就不同域，造词侧另有一套（分段态由主路径产生）。带出来只会让
+        // 两套域在同一个字段里混着。
         for h in self.lookup_with_fuzzy(&completed, syllables) {
             let c = completed.clone();
             let n = c.len();
@@ -1803,6 +1806,8 @@ impl PinyinEngine {
                 order: h.order,
                 is_fuzzy: false,
                 boundary: h.boundary,
+                // 精确命中：候选码即词典码，无需另带。
+                dict: None,
             })
             .collect();
         let mut seen: std::collections::HashSet<String> =
@@ -1821,16 +1826,19 @@ impl PinyinEngine {
             for (variant, edits) in
                 fuzzy::FuzzyMatcher::fuzzy_variants_scored(syllable, &self.fuzzy_config)
             {
-                for (text, weight, order) in self.dict.search(&variant) {
-                    if seen.insert(text.clone()) {
+                // 走 `search_with_boundary` 而非 `search`：变体码与它自己的边界同域，
+                // 那份真值正是造词要的（候选对外仍报 boundary=0，见下）。
+                for h in self.dict.search_with_boundary(&variant) {
+                    if seen.insert(h.text.clone()) {
                         results.push(LookupHit {
-                            text,
+                            text: h.text,
                             // 单音节也可能声母、韵母同时模糊（`sen`→`sheng` 计 2 处），
                             // 故按变体自带的改动处数罚，不再恒当 1 处。
-                            weight: fuzzy_penalized(weight, edits),
-                            order,
+                            weight: fuzzy_penalized(h.weight, edits),
+                            order: h.order,
                             is_fuzzy: true,
                             boundary: 0,
+                            dict: Some((variant.clone(), h.boundary)),
                         });
                     }
                 }
@@ -1841,14 +1849,15 @@ impl PinyinEngine {
                 if alt_code == code {
                     continue;
                 }
-                for (text, weight, order) in self.dict.search(&alt_code) {
-                    if seen.insert(text.clone()) {
+                for h in self.dict.search_with_boundary(&alt_code) {
+                    if seen.insert(h.text.clone()) {
                         results.push(LookupHit {
-                            text,
-                            weight: fuzzy_penalized(weight, fuzzy_count),
-                            order,
+                            text: h.text,
+                            weight: fuzzy_penalized(h.weight, fuzzy_count),
+                            order: h.order,
                             is_fuzzy: true,
                             boundary: 0,
+                            dict: Some((alt_code.clone(), h.boundary)),
                         });
                     }
                 }
@@ -1897,6 +1906,16 @@ struct LookupHit {
     is_fuzzy: bool,
     /// 该候选 code 的音节边界；0=无信息（模糊变体/非拼音词库/旧数据），不参与校验。
     boundary: u64,
+    /// **词典里登记的那个码**与它自己的真值边界；`None` = 与候选 `code` 同一个（精确命中）。
+    ///
+    /// 模糊命中时两者不同：用户敲 `senri`，词典里的词是 `shengri`。候选对外的 `code`
+    /// 必须留用户那份 —— `consumed_length` 的判据是 `query.starts_with(&c.code)`，换成
+    /// 词典码会落到「消费整串」分支、分步上屏当场失效（preedit 跟随与词频记账同理）。
+    ///
+    /// 但**造词要的恰恰是词典那份**：拼出来的码得是用户下次真能打出来的。顺带解决
+    /// boundary —— 模糊命中的 `boundary` 恒 0（与原码不同域、位偏移对不上），
+    /// 而词典码与它自己的边界天然同域，真值可以直接用。
+    dict: Option<(String, u64)>,
 }
 
 /// 按边界 bitmask 渲染 preedit：`code` 以 `'` 在各音节起点断开，尾部残码另起一段。
@@ -2338,6 +2357,11 @@ impl Engine for PinyinEngine {
         //    传 completed 后守卫正确跳过全原组合（精确匹配 is_fuzzy=false）；code 存 completed 使
         //    残码输入的 consumed_length 只覆盖完成音节（nihao 消费 5 留 m 续输）。
         for h in self.lookup_with_fuzzy(completed, &syllables) {
+            // 词典规范码另走 `learn_code`，不覆盖候选的 `code`（理由见该字段文档）。
+            // 与 `is_abbrev` 那几处同款：`push_unique` 的参数已经很长，附加信息走事后赋值，
+            // 用 `before` 判断这次是否真的新增了候选（同文去重时不新增）。
+            let learn = h.dict.clone();
+            let before = candidates.len();
             push_unique(
                 &mut candidates,
                 h.text,
@@ -2349,6 +2373,9 @@ impl Engine for PinyinEngine {
                 h.boundary,
                 false,
             );
+            if candidates.len() > before {
+                candidates[before].meta.learn_code = learn;
+            }
         }
 
         // （step 1.5「超长词典整词兜底」已删除。它把音节数超过 `max_word_len` 的词典精确
@@ -2723,6 +2750,9 @@ impl Engine for PinyinEngine {
                 // 分段上屏候选，与精确同层按权重排（不可降权——否则罕见全长词「拟好」会压过
                 // 常用子词组「你」）。只有 code 比输入*长*的补全词(step4)才算前缀补全降权。
                 for h in self.lookup_with_fuzzy(&code, &syllables[..end]) {
+                    // 同 step1：词典规范码另走 `learn_code`，不覆盖候选的 `code`。
+                    let learn = h.dict.clone();
+                    let before = candidates.len();
                     push_unique(
                         &mut candidates,
                         h.text,
@@ -2734,6 +2764,9 @@ impl Engine for PinyinEngine {
                         h.boundary,
                         false,
                     );
+                    if candidates.len() > before {
+                        candidates[before].meta.learn_code = learn;
+                    }
                 }
             }
         }

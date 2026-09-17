@@ -3,6 +3,7 @@
 //! 原住 webdata 契约测试；webdata 独立成 crate 后按「是否用 web_data_rpc」分拣：
 //! 用则留 wind-webdata（经公开面/debug_* 支撑），不用则属 coordinator 行为测试。
 
+use crate::coordinator::CommittedSeg;
 use std::sync::Arc;
 
 use wind_candidate::CandidateSource;
@@ -171,13 +172,14 @@ fn pinyin_coord(tag: &str) -> (Arc<Coordinator>, Arc<Store>) {
 fn push_single_seg(c: &Coordinator, code: &str, text: &str, boundary: u64) {
     let mut st = c.state.lock().unwrap();
     st.committed_segs.clear();
-    st.committed_segs.push((
-        code.into(),
-        code.into(),
-        text.into(),
-        CandidateSource::Pinyin,
+    st.committed_segs.push(CommittedSeg {
+        raw_code: code.into(),
+        code: code.into(),
+        text: text.into(),
+        source: CandidateSource::Pinyin,
         boundary,
-    ));
+        learn: None,
+    });
 }
 
 /// 智能组句生成的整句，一次上屏也要进临时词库。
@@ -558,20 +560,22 @@ fn mixed_learn_phrase_same_source_only() {
         let mut st = c.state.lock().unwrap();
         st.committed_segs.clear();
         // 段各为单音节（段内边界 0b1）→ 自动造词拼出 nihao 时全局边界应为 ni|hao = 0b101。
-        st.committed_segs.push((
-            "ni".into(),
-            "ni".into(),
-            "你".into(),
-            CandidateSource::Pinyin,
-            0b1,
-        ));
-        st.committed_segs.push((
-            "hao".into(),
-            "hao".into(),
-            "好".into(),
-            CandidateSource::Pinyin,
-            0b1,
-        ));
+        st.committed_segs.push(CommittedSeg {
+            raw_code: "ni".into(),
+            code: "ni".into(),
+            text: "你".into(),
+            source: CandidateSource::Pinyin,
+            boundary: 0b1,
+            learn: None,
+        });
+        st.committed_segs.push(CommittedSeg {
+            raw_code: "hao".into(),
+            code: "hao".into(),
+            text: "好".into(),
+            source: CandidateSource::Pinyin,
+            boundary: 0b1,
+            learn: None,
+        });
         c.learn_phrase_on_commit(&st, false); // 分步造词路径，非整句
     }
     let py_words = store.get_temp_words("pinyin", "nihao").unwrap();
@@ -592,20 +596,22 @@ fn mixed_learn_phrase_same_source_only() {
         let mut st = c.state.lock().unwrap();
         st.committed_segs.clear();
         // 码表段无音节概念（boundary=0）→ 整词边界作废（半截边界比没有更糟）。
-        st.committed_segs.push((
-            "aaaa".into(),
-            "aaaa".into(),
-            "工".into(),
-            CandidateSource::CodeTable,
-            0,
-        ));
-        st.committed_segs.push((
-            "hao".into(),
-            "hao".into(),
-            "好".into(),
-            CandidateSource::Pinyin,
-            0b1,
-        ));
+        st.committed_segs.push(CommittedSeg {
+            raw_code: "aaaa".into(),
+            code: "aaaa".into(),
+            text: "工".into(),
+            source: CandidateSource::CodeTable,
+            boundary: 0,
+            learn: None,
+        });
+        st.committed_segs.push(CommittedSeg {
+            raw_code: "hao".into(),
+            code: "hao".into(),
+            text: "好".into(),
+            source: CandidateSource::Pinyin,
+            boundary: 0b1,
+            learn: None,
+        });
         c.learn_phrase_on_commit(&st, false); // 分步造词路径，非整句
     }
     for schema in ["ct_test", "pinyin", "mx_test"] {
@@ -629,20 +635,22 @@ fn mixed_learn_phrase_same_source_only() {
     {
         let mut st = c.state.lock().unwrap();
         st.committed_segs.clear();
-        st.committed_segs.push((
-            "aa".into(),
-            "aa".into(),
-            "工".into(),
-            CandidateSource::CodeTable,
-            0,
-        ));
-        st.committed_segs.push((
-            "bb".into(),
-            "bb".into(),
-            "人".into(),
-            CandidateSource::CodeTable,
-            0,
-        ));
+        st.committed_segs.push(CommittedSeg {
+            raw_code: "aa".into(),
+            code: "aa".into(),
+            text: "工".into(),
+            source: CandidateSource::CodeTable,
+            boundary: 0,
+            learn: None,
+        });
+        st.committed_segs.push(CommittedSeg {
+            raw_code: "bb".into(),
+            code: "bb".into(),
+            text: "人".into(),
+            source: CandidateSource::CodeTable,
+            boundary: 0,
+            learn: None,
+        });
         c.learn_phrase_on_commit(&st, false); // 分步造词路径，非整句
     }
     for schema in ["ct_test", "pinyin", "mx_test"] {

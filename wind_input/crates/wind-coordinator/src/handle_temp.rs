@@ -4,7 +4,8 @@
 //! 触发键判定、进入/退出、候选刷新、按键处理、选词上屏。
 
 use crate::coordinator::{
-    Coordinator, ENGINE_MAX_CANDIDATES, State, TEMP_PINYIN_MAX_CANDIDATES, numpad_char, punct_char,
+    CommittedSeg, Coordinator, ENGINE_MAX_CANDIDATES, State, TEMP_PINYIN_MAX_CANDIDATES,
+    numpad_char, punct_char,
 };
 use crate::key_convert::printable_char;
 use crate::pipeline::{ModeKind, Rewind, RewindOrigin};
@@ -263,13 +264,14 @@ impl Coordinator {
     /// 临拼：回退最后一个已转换段——把它消费的码并回缓冲**前部**并重转，光标落码末尾
     /// （理由同主输入的 `pop_committed_seg`）。Backspace（段优先）与 Delete（删空后）共用。
     fn pop_temp_pinyin_seg(&self, state: &mut State) -> KeyAction {
-        let Some((raw_code, _, _, _, _)) = state.committed_segs.pop() else {
+        let Some(popped) = state.committed_segs.pop() else {
             return KeyAction::Consumed;
         };
+        let raw_code = popped.raw_code;
         state.committed_text = state
             .committed_segs
             .iter()
-            .map(|(_, _, t, _, _)| t.as_str())
+            .map(|s| s.text.as_str())
             .collect();
         state.temp_pinyin_buffer = format!("{}{}", raw_code, state.temp_pinyin_buffer);
         state.temp_pinyin_cursor = state.temp_pinyin_buffer.len();
@@ -490,13 +492,14 @@ impl Coordinator {
         );
         let raw_code = Self::raw_consumed_code(&state.temp_pinyin_buffer, consumed, partial);
         if partial {
-            state.committed_segs.push((
+            state.committed_segs.push(CommittedSeg {
                 raw_code,
                 code,
-                cand.text.clone(),
-                cand.source,
-                cand.boundary,
-            ));
+                text: cand.text.clone(),
+                source: cand.source,
+                boundary: cand.boundary,
+                learn: cand.meta.learn_code.clone(),
+            });
             state.committed_text.push_str(&cand.text);
             state.temp_pinyin_buffer = state.temp_pinyin_buffer[consumed..].to_string();
             // 分步确认消费掉前缀码：光标落剩余码末尾
@@ -509,13 +512,14 @@ impl Coordinator {
                 text: display,
             }
         } else {
-            state.committed_segs.push((
+            state.committed_segs.push(CommittedSeg {
                 raw_code,
                 code,
-                cand.text.clone(),
-                cand.source,
-                cand.boundary,
-            ));
+                text: cand.text.clone(),
+                source: cand.source,
+                boundary: cand.boundary,
+                learn: cand.meta.learn_code.clone(),
+            });
             let final_simplified = format!("{}{}", state.committed_text, cand.text);
             // 单段整句同样要造词（临拼模式下整句一次上屏亦只 push 一段）。
             self.learn_phrase_on_commit(state, cand.is_synthesized);

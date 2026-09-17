@@ -3,7 +3,9 @@
 //! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
 //! 简繁、方案切换、主题切换、mix 融合模式、引擎方案叠加。
 
-use crate::coordinator::{Coordinator, SchemaToggleOrigin, State, SwitchCommit, ToggleLanding};
+use crate::coordinator::{
+    CommittedSeg, Coordinator, SchemaToggleOrigin, State, SwitchCommit, ToggleLanding,
+};
 use crate::pipeline::ModeKind;
 use crate::preedit_cursor;
 use crate::theme_style::ThemeStyle;
@@ -628,13 +630,14 @@ impl Coordinator {
         state: &mut State,
         refresh: &dyn Fn(&Self, &mut State) -> KeyAction,
     ) -> KeyAction {
-        let Some((raw_code, _, _, _, _)) = state.committed_segs.pop() else {
+        let Some(popped) = state.committed_segs.pop() else {
             return KeyAction::Consumed;
         };
+        let raw_code = popped.raw_code;
         state.committed_text = state
             .committed_segs
             .iter()
-            .map(|(_, _, t, _, _)| t.as_str())
+            .map(|s| s.text.as_str())
             .collect();
         state.mix_buffer = format!("{}{}", raw_code, state.mix_buffer);
         state.mix_cursor = state.mix_buffer.len();
@@ -1679,13 +1682,14 @@ impl Coordinator {
                 page_offset as i32,
                 wind_store::stats::CommitSource::Mix,
             );
-            state.committed_segs.push((
-                Self::raw_consumed_code(&state.mix_buffer, consumed, true),
+            state.committed_segs.push(CommittedSeg {
+                raw_code: Self::raw_consumed_code(&state.mix_buffer, consumed, true),
                 code,
-                cand.text.clone(),
-                cand.source,
-                cand.boundary,
-            ));
+                text: cand.text.clone(),
+                source: cand.source,
+                boundary: cand.boundary,
+                learn: cand.meta.learn_code.clone(),
+            });
             state.committed_text.push_str(&cand.text);
             state.mix_buffer = state.mix_buffer[consumed..].to_string();
             // 分步确认消费掉前缀码：光标落剩余码末尾
@@ -1720,13 +1724,15 @@ impl Coordinator {
                 // ★ 主路径不受此影响是因为它的 emoji 候选走整体上屏那一支、本就不 push 段；
                 // mix 这一支是**无条件** push 的，故须显式排除。
                 if !cand.is_emoji_suggestion {
-                    state.committed_segs.push((
-                        state.mix_buffer.clone(), // 消费整串：回退码即整个缓冲
+                    state.committed_segs.push(CommittedSeg {
+                        // 消费整串：回退码即整个缓冲
+                        raw_code: state.mix_buffer.clone(),
                         code,
-                        cand.text.clone(),
-                        cand.source,
-                        cand.boundary,
-                    ));
+                        text: cand.text.clone(),
+                        source: cand.source,
+                        boundary: cand.boundary,
+                        learn: cand.meta.learn_code.clone(),
+                    });
                     // 单段整句同样要造词（混输下拼音子引擎的整句一次上屏亦只 push 一段）。
                     self.learn_phrase_on_commit(state, cand.is_synthesized);
                 }
