@@ -215,6 +215,8 @@ impl Store {
     /// 从 jsonl 导入词频（单写事务；Merge=已存在取 max(count)/max(last_used)）。
     /// 返回 (imported, skipped)；非法行跳过计数。
     pub fn import_freq_jsonl(&self, schema: &str, text: &str) -> anyhow::Result<(usize, usize)> {
+        let normalized = wind_utils::text::normalize_input(text);
+        let text = normalized.as_ref();
         let mut rows: Vec<(String, String, u32, i64)> = Vec::new();
         let mut skipped = 0usize;
         for line in text.lines() {

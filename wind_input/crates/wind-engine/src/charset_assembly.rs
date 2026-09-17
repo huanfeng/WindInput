@@ -270,6 +270,10 @@ fn load_member_file(key: &str, rel: &str, data_dir: Option<&Path>) -> Vec<String
         warn!("字符类「{key}」的字表 {} 读不出来", path.display());
         return Vec::new();
     };
+    // 行尾规整：孤立 \r 会让整份文件算成一行，`#` 开头的表就被整个当成注释
+    // 跳过——与 `CommonChars::load` 读同一种文件，症状也一样（上面那句「全程无
+    // 报错」正是它）
+    let content = wind_utils::text::normalize_input(&content);
     content
         .lines()
         .map(str::trim)
@@ -474,5 +478,35 @@ order: 900
         // ClassSpec 上的属性」：key 是主键，file 与列表体同归 members，enabled 在
         // 本函数之前就决定了这个类进不进来，replace 由配置层消化。
         let _ = CharsetDef::default();
+    }
+
+    /// 外部字表的行尾不挑食。
+    ///
+    /// 这是 `CommonChars::load` **同一种文件的第二条路径**（`file:` 存在的理由就是
+    /// 兼容 `schemas/common_chars.txt`）。cb70b849 修了前者却漏了这里——带 `#` 注释
+    /// 头的 CR 文件会被整份当成一条注释，一个成员都收不到，而上面那句注释写的
+    /// 「全程无报错」正是这个症状。
+    ///
+    /// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+    #[test]
+    fn member_file_line_endings_do_not_change_the_result() {
+        let dir = std::env::temp_dir().join(format!("wind-memberfile-eol-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("schemas")).unwrap();
+        for lf in ["的一是\n了我不\n", "# 我的字表\n的一是\n了我不\n"] {
+            for (tag, text) in [
+                ("LF", lf.to_string()),
+                ("CRLF", lf.replace('\n', "\r\n")),
+                ("CR", lf.replace('\n', "\r")),
+            ] {
+                std::fs::write(dir.join("schemas/t.txt"), &text).unwrap();
+                let got = load_member_file("测试类", "t.txt", Some(dir.as_path()));
+                assert_eq!(
+                    got,
+                    vec!["的", "一", "是", "了", "我", "不"],
+                    "{tag}: 成员与 LF 版不同（样本 {lf:?}）"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

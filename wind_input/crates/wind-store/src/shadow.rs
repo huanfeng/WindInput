@@ -298,6 +298,8 @@ impl Store {
     /// 从 jsonl 导入 shadow 规则（逐条 replay pin/delete，天然 upsert）。
     /// 返回 (imported=重放的规则条数, skipped=非法行数)。
     pub fn import_shadow_jsonl(&self, schema: &str, text: &str) -> anyhow::Result<(usize, usize)> {
+        let normalized = wind_utils::text::normalize_input(text);
+        let text = normalized.as_ref();
         let mut imported = 0usize;
         let mut skipped = 0usize;
         for line in text.lines() {

@@ -201,6 +201,8 @@ impl Store {
     /// 从 JSONL 导入，返回写入条数。坏行跳过（与 [`Self::list_common_char_overrides`]
     /// 同一条纪律：一行坏数据不该让整次还原失败）。
     pub fn import_common_chars_jsonl(&self, text: &str) -> anyhow::Result<usize> {
+        let normalized = wind_utils::text::normalize_input(text);
+        let text = normalized.as_ref();
         let mut n = 0usize;
         for line in text.lines() {
             let line = line.trim();

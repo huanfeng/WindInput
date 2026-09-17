@@ -550,6 +550,11 @@ fn partition_for_export(items: &[String]) -> (String, Vec<String>) {
 /// 想单独导进来时，那份文件是现成的，认不出它就只能让他手工转换。识别成本也低——
 /// 首个有效行以 `{` 开头即是。
 fn parse_common_chars_file(content: &str) -> anyhow::Result<ParsedCommonChars> {
+    // 先规整行尾再探测：下面靠「首个有效行」判 TOML 还是 JSONL，孤立 \r 会让整份
+    // 文件算成一行，格式在第一步就判错。用户手上的这份是从备份包里掏出来的，
+    // 经过解压与编辑器，行尾不由我们决定。
+    let normalized = wind_utils::text::normalize_input(content);
+    let content = normalized.as_ref();
     let first = content
         .lines()
         .map(str::trim)
@@ -760,7 +765,7 @@ impl crate::Coordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::{common_char_of, partition_for_export};
+    use super::{common_char_of, parse_common_chars_file, partition_for_export};
 
     /// 导出分段：单字符进文本串，多码位单独成项。
     ///
@@ -856,6 +861,31 @@ mod tests {
     fn rejects_blank_and_control_chars() {
         for s in [" ", "\t", "\u{3000}", "\u{0}"] {
             assert_eq!(common_char_of(s), None, "{s:?} 不该放行");
+        }
+    }
+
+    /// 导入文件的行尾不挑食。
+    ///
+    /// 这个函数靠「首个有效行」判 TOML 还是 JSONL——孤立 `\r` 会让整份文件算成一行，
+    /// **格式在第一步就判错**。而注释里说得明白，用户手上这份是从备份包里掏出来的，
+    /// 经过解压与编辑器，行尾不由我们决定。
+    ///
+    /// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+    #[test]
+    fn import_file_line_endings_do_not_change_the_result() {
+        let jsonl = "{\"ch\":\"的\",\"common\":true}\n{\"ch\":\"兲\",\"common\":false}\n";
+        let toml = "# 我的常用字调整\nwind_common_chars = 1\ncommon = \"的一\"\nrare = \"兲\"\n";
+        for lf in [jsonl, toml] {
+            let want = parse_common_chars_file(lf).expect("LF 版应能解析");
+            for (tag, text) in [
+                ("CRLF", lf.replace('\n', "\r\n")),
+                ("CR", lf.replace('\n', "\r")),
+            ] {
+                let got = parse_common_chars_file(&text)
+                    .unwrap_or_else(|e| panic!("{tag}: 解析失败 {e}（样本 {lf:?}）"));
+                assert_eq!(got.entries, want.entries, "{tag}: 条目与 LF 版不同");
+                assert_eq!(got.skipped, want.skipped, "{tag}: 跳过行与 LF 版不同");
+            }
         }
     }
 }

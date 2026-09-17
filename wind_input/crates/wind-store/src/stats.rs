@@ -346,6 +346,8 @@ impl Store {
         text: &str,
         overwrite: bool,
     ) -> anyhow::Result<(usize, usize)> {
+        let normalized = wind_utils::text::normalize_input(text);
+        let text = normalized.as_ref();
         // 非覆盖模式先一次性收集已存在日期，避免逐行开读事务（备份可跨数年 daily）。
         let mut existing: std::collections::HashSet<String> = if overwrite {
             Default::default()

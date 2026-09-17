@@ -2497,6 +2497,7 @@ dependencies = [
  "wind-transform",
  "wind-ui",
  "wind-ui-types",
+ "wind-utils",
  "wind-webdata",
  "windows",
  "winreg",
@@ -2531,6 +2532,7 @@ dependencies = [
  "wind-config",
  "wind-dict",
  "wind-store",
+ "wind-utils",
  "windows",
 ]
 

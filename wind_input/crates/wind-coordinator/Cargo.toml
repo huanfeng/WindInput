@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+wind-utils = { path = "../wind-utils" }
 wind-ipc = { path = "../wind-ipc" }
 wind-bridge = { path = "../wind-bridge" }
 wind-config = { path = "../wind-config" }
