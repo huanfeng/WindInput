@@ -246,11 +246,15 @@ impl Coordinator {
 
     /// 对给定候选施加生僻字准入（仅生僻字模式；其余模式为空操作）。
     ///
-    /// ⚠️ 「只有生僻字模式才筛」这道守卫必须**只落在本函数里**，调用方一律经此过一手，
-    /// 不要就地调 `retain_rare_admitted` 再自带一份 `matches!`。曾经的形态正是那样：
+    /// ⚠️ 凡在 `RareChar` 守卫**之外**的调用点，一律经本函数过一手，不要就地调
+    /// `retain_rare_admitted` 再自带一份 `matches!`。（`refill_rare_if_short` 是例外而非
+    /// 反例：它首行就按 `RareChar` 早退，整个函数体都已在守卫之内，里面再判一次是重复
+    /// 判定；`handle_mode.rs` 里 mix 的生僻字成员同理，由 `member ==` 分支天然圈定。）
+    /// 曾经的形态正是那样：
     /// 空码补全那条旁路（`update_special_candidates` 里取 `completion_hints` 的收口）
     /// 直接调了裸过滤器，守卫漏在了那一处 —— 快符等 overlay 模式的补全候选于是被生僻
-    /// 准入当场滤空（`rare_admits` 对符号与多字条目恒为 false），表现为「精确匹配下
+    /// 准入当场滤空（`rare_admits` 对符号与多字条目判 false —— 除非该符号被
+    /// `input.rare_char.include_blocks` 点名，见 `data_dir` 夹具那处的同款说明），表现为「精确匹配下
     /// 空码永远不显示后续编码」（论坛 t125）。
     ///
     /// 那条缺陷在自动化测试里是**不可见**的：`retain_rare_admitted` 对未加载的常用字表
@@ -761,7 +765,9 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     //! 直达热键进入特殊模式/临拼的单元测试（无头 Coordinator + 临时 store）。
-    //! headless 下无引擎，故只覆盖不依赖引擎查询的行为：id→idx 定位、空前缀进入、半成品上屏。
+    //! 不依赖引擎的行为（id→idx 定位、空前缀进入、半成品上屏）直接用空 `Coordinator`。
+    //! 依赖引擎查询的用例**同样属于这里**，但必须自造 data_dir（见 `special_completion::data_dir`）
+    //! ——别指望 `build_dev/data`，那是集成层「缺数据则整族静默跳过而计数照绿」的来源。
     use super::*;
     use crate::coordinator::Coordinator;
     use std::sync::Arc;
@@ -1471,7 +1477,7 @@ mod tests {
     /// 照绿而缺陷原样活着 —— 论坛 t125 报的「快符空码不显示后续编码」正是这样躲过了
     /// 一整轮自动化测试，只在装了字表的真机上复现。
     ///
-    /// 刻意**不依赖 `build_dev/data`**：自造两张三条词条的小码表，缺数据也不会静默跳过。
+    /// 刻意**不依赖 `build_dev/data`**：自造两张两条词条的小码表，缺数据也不会静默跳过。
     mod special_completion {
         use super::set_common;
         use crate::coordinator::Coordinator;
@@ -1491,7 +1497,13 @@ mod tests {
         /// `schema.codetable`（`EngineManager::codetable_baseline` 按 `[overlay]` 段分流，
         /// 取内置基线），写全局对它一点作用都没有。
         fn data_dir(tag: &str) -> std::path::PathBuf {
-            let dir = std::env::temp_dir().join(format!("wind_special_completion_{tag}"));
+            // 带 pid：并发跑同一条用例时，一方的 `remove_dir_all` 会在另一方正扫
+            // `schemas/` 时把目录抽走，表现为偶发红在下面那句 `expect` 上、而错误信息
+            // 完全指不到真因。同 `handle_punct.rs` 夹具的做法。
+            let dir = std::env::temp_dir().join(format!(
+                "wind_special_completion_{}_{tag}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             let schemas = dir.join("schemas");
             std::fs::create_dir_all(schemas.join(KF)).unwrap();
@@ -1600,20 +1612,38 @@ mod tests {
             );
         }
 
-        /// 模式标识确实落在了预期的那一个上——上面两条的分流全靠它。
+        /// **夹具自检**，不是回归用例：缺陷存在时它照绿。上面两条主用例的分流全靠
+        /// 「两种模式各自查的是哪张码表」，这里把那件事本身钉住。
+        ///
+        /// 光断言 `st.active` 是在复述 `enter_*` 自己那行赋值，测不出东西；真正会让主
+        /// 用例**静默空转**的是引擎选错表——`special_mode_idx` 在装了真实 overlay 方案的
+        /// 开发机上指到别人的方案、或生僻字模式没落回活跃方案，两条主用例都会变成在错
+        /// 误的码表上断言。故断言落在 `overlay_engine_schema` 上。
         #[test]
-        fn the_two_modes_are_distinguishable() {
+        fn the_two_modes_query_their_own_schema() {
             let c = coord("modes");
             let idx = c
                 .special_mode_idx(KF)
                 .expect("快符方案应在 overlay 注册表内");
             let mut st = c.state.lock().unwrap();
             st.chinese_mode = true;
+
             c.enter_special_mode(&mut st, idx, 0);
             assert_eq!(st.active, Some(ModeKind::Special(idx)));
+            assert_eq!(
+                c.overlay_engine_schema(&st).as_deref(),
+                Some(KF),
+                "快符模式该查 overlay 方案自带的那张码表"
+            );
             c.exit_special_mode(&mut st);
+
             c.enter_rare_char_mode(&mut st, 0);
             assert_eq!(st.active, Some(ModeKind::RareChar));
+            assert_eq!(
+                c.overlay_engine_schema(&st).as_deref(),
+                Some(MAIN),
+                "生僻字模式该回落到**活跃方案**的码表，而不是任何 overlay 方案"
+            );
             c.exit_special_mode(&mut st);
         }
     }
