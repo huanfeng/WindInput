@@ -30,6 +30,7 @@ mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
 mod schema_cli;
+mod theme_cli;
 mod ui_cli;
 // 仅 Windows：它的动作全是写 HKLM 的 TSF 登记项（`wind_coordinator::tsf_profile_name`
 // 本身也在 `#[cfg(windows)]` 之下）。少了这道门控，darwin 构建会在 use 处就 E0432。
@@ -47,6 +48,7 @@ fn print_root_usage() {
          子命令:\n  \
          config    配置查看/读写/导入导出（离线可用，core 在线时热重载）\n  \
          schema    方案配置 / 分类词库开关 / 词库缓存重建（需 core 在线）\n  \
+         theme     主题列表 / 主题包 .wtheme 预览与导入（需 core 在线）\n  \
          dict      用户词库按方案导入导出（需 core 在线）\n  \
          phrase    用户短语导入导出 / 系统短语恢复（需 core 在线）\n  \
          backup    整机备份创建/查看/还原（需 core 在线）\n  \
@@ -128,6 +130,7 @@ fn main() {
         Some(
             "config"
                 | "schema"
+                | "theme"
                 | "dict"
                 | "phrase"
                 | "backup"
@@ -153,6 +156,7 @@ fn main() {
         let code = match sub {
             Some("config") => config_cli::run(&cli_args[2..]),
             Some("schema") => schema_cli::run(&cli_args[2..]),
+            Some("theme") => theme_cli::run(&cli_args[2..]),
             Some("dict") => dict_cli::run(&cli_args[2..]),
             Some("phrase") => phrase_cli::run(&cli_args[2..]),
             Some("backup") => backup_cli::run(&cli_args[2..]),
