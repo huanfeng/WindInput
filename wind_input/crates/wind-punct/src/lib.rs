@@ -219,7 +219,12 @@ pub fn participates(cfg: &InputConfig, cn: &str) -> bool {
 /// 而推给 DLL 的吃键集必须是源字符（见 [`english_smart_source_chars`]）。按源字符判定，
 /// 「参与判据」与「吃键判据」天然同源，不必从自定义英半列的产物反推回按键。
 pub fn english_participates(cfg: &InputConfig, ch: char) -> bool {
-    cfg.symbol.english_chars.contains(ch)
+    // 空白一律不参与，与 [`english_smart_source_chars`] 的过滤**同源**（那边早就滤了，这边
+    // 当时漏了）。两处不同源的后果：用户在 `english_chars` 里写了空格 ⇒ 英文全角下按空格会
+    // 被 `full_width_source_char` 取到 `' '` 并据此武装，而解除武装那道判据按 `punct_char` /
+    // `numpad_char` 问键 ⇒ 空格键两边都答 `None` ⇒ press1 当场自解武装，press2 永远不来，
+    // 全程零日志。空格本来也不是「标点的中英两形」这件事的成员。
+    !ch.is_whitespace() && cfg.symbol.english_chars.contains(ch)
 }
 
 /// 英文输入模式的智能符号需要 DLL 吃下并转发的源字符集合（去重、升序）。
@@ -320,6 +325,17 @@ mod tests {
         assert!(english_participates(&c, '.'));
         assert!(english_participates(&c, ','));
         assert!(!english_participates(&c, '?'));
+    }
+
+    /// 空白不参与，与 `english_smart_source_chars` 的过滤同源：配了空格的用户在英文全角下
+    /// 会用空格键武装，而解除武装那道判据按键问字符（空格键答 None）⇒ press1 自解武装、
+    /// press2 永不到来且零日志。
+    #[test]
+    fn english_participates_never_matches_whitespace() {
+        let mut c = cfg();
+        c.symbol.english_chars = ". ,".to_string();
+        assert!(!english_participates(&c, ' '));
+        assert!(english_participates(&c, '.'), "非空白成员不受影响");
     }
 
     /// 推给 DLL 的吃键集受 `english_mode` 门控：关闭时必须是空集——英文模式的标点键就该

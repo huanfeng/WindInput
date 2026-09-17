@@ -380,6 +380,32 @@ impl Coordinator {
             // 上下文必须与 press1 时一致：三种上下文各有独立开关与独立产物列，press1 后用户
             // 切了中英模式或标点模式，这一按就该当全新 press1，而不是按旧方向删掉文档里的字。
             || arm.mode_snapshot != (state.chinese_mode, state.chinese_punct)
+            // ★ press1 之后又打了编码 ⇒ 这一按不是 press2。
+            //
+            // 依据是一条不变式：三条武装通路的 press1 之后编码缓冲**必为空**（空闲态直接上屏、
+            // 顶屏上屏都会清缓冲）。故 press2 这一刻缓冲非空，只可能是中间又敲了编码——光标
+            // 此刻在组合区里，替换目标已不是文档里那个符号，而是正在看的候选。真机现象：
+            // 「。」后快打字母出候选、再按「。」，候选被 `ReplaceBackward` 削掉换成「.」
+            // （`HoldComposition` 方案则是 `CommitReplacingHeld` 覆盖掉整个组合）。
+            //
+            // 为什么不能指望下方 `_` 分支那道 `prev_char` 对照兜住：它有两个**恒定**绕过口——
+            //   ① 宿主读不回文档时 `prev_char == 0`，那里刻意判作「读失败」而非「不匹配」；
+            //   ② 候选窗自显 preedit（`preedit_display = candidate_top/inline`）时应用侧组合是
+            //      「占位空格 + 光标置前」，读回的光标前一字符恰好就是 press1 上屏的那个符号，
+            //      与武装串完美匹配。
+            // 两条都通向同一次误删，且都与宿主是否正常无关，故判据必须在服务端自己这侧立。
+            //
+            // 只问编码缓冲、**不问 `candidates`**：联想态（标点联想就会进）候选非空而缓冲为空，
+            // 那是 press1 上屏后的正常延续，press2 在那里必须照常工作。
+            //
+            // ⚠️ **别当它是 `handle_key_event_policed` 那道「非同键按键解除武装」的冗余副本**。
+            // 那道判据挂在 bridge 的按键出口上，而 `wind-mobile` 的 `MobileCore::key_down` 直接
+            // 调内层 `handle_key_event`（见 `crates/wind-mobile/src/lib.rs`），整个出口都不经过
+            // ⇒ 移动端上**只有这一条**拦得住。两者各有一条独立会红的用例
+            // （`intervening_letters_do_not_trigger_press2_mobile_entry` 盯这条，
+            // `intervening_passthrough_key_disarms` 盯那条），删任意一道都有红。
+            || !state.input_buffer.is_empty()
+            || !state.committed_text.is_empty()
             || !arm
                 .at
                 .map(|t| t.elapsed() < self.smart_symbol_timeout())
@@ -501,6 +527,24 @@ impl Coordinator {
     ///
     /// `committed` 是本次 press1 会上屏的串（调用方已算好，含配对/全角处理前的标点本体）。
     /// 返回 `Some` 表示这次是 press2，调用方应短路返回该替换响应。
+    ///
+    /// # ⚠️ 已知限制：英文**半角**下「中间打了别的字」服务端看不见
+    ///
+    /// 另外两条上下文靠两道判据挡住「press1 与 press2 之间又输入了东西」：
+    /// `smart_symbol_press2` 的「编码缓冲非空」与 `handle_key_event_policed` 的「非同键按键
+    /// 解除武装」。**英文半角这条路两道都够不着**：
+    ///   - 英文模式无编码缓冲 ⇒ 第一道恒为假；
+    ///   - 半角下 DLL 只吃标点键（`_IsCustomEnglishPunctKey` → `IsPunctuationKey`，11 个 OEM 键），
+    ///     字母/数字/空格/退格**直接透传给宿主**，服务端连事件都收不到 ⇒ 第二道没有触发机会。
+    ///     连 `event_seq` 都帮不上忙：它在 C++ 的 `_SendKeyToService` 里才自增，透传的键不计数。
+    ///
+    /// 于是在 `prev_char` 读不回的宿主上（微信/终端那族恒为 0，press2 会当作「读失败」放行）
+    /// 仍存在这条时序：`.` → 快打 `abc` → 时限内再按 `.` ⇒ `ReplaceBackward` 把 `c` 换成 `。`。
+    ///
+    /// 要真修只能由 DLL 补上报——它**知道**自己透传了哪些键（`_lastPassthroughDigit` 就是同款
+    /// 机制），加一位「上一键是透传的非标点键」随下一个标点事件带上来即可。服务端这侧没有新
+    /// 信息可用，靠改 `prev_char == 0` 的语义去堵会让那批宿主上本功能整体失效，代价更大。
+    /// 英文全角不在此列：`english_fullwidth` 分支把字母也吃下转发，第二道判据照常生效。
     pub(crate) fn english_mode_smart_symbol(
         &self,
         state: &State,

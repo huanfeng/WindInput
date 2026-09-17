@@ -601,6 +601,57 @@ impl MessageHandler for Coordinator {
             }
             _ => {}
         }
+        // 「中间按了别的键」⇒ 智能符号武装态失效。
+        //
+        // press1 之后的武装态只该等**同一个键**的第二次按下；中间任何一次别的按键（字母进
+        // 缓冲、空格、退格、英文模式下直接上屏的字母……）都意味着光标前已不再是 press1 那个
+        // 符号，再按同键就该当全新 press1。此前这条判据**完全不存在**：上面那段清理按
+        // `held_text.is_some()` 开门，而出厂方案 `DeleteReplace` 的 `held_text` 恒为 `None`，
+        // 于是它对出厂路径整段惰性——`HoldComposition` 侥幸不中招靠的正是那段，不是有判据。
+        //
+        // 判据用**本次按键产出的标点字符**与 `arm.key` 比，而不是虚拟键码：武装侧记的就是
+        // 字符（三条武装通路里 `arm_smart_symbol_after_commit` 根本拿不到键码）。产不出字符的
+        // （字母、功能键）与产出的不是 `arm.key` 那个符号的（数字、别的标点）一律解除。
+        //
+        // **只解除 `armed`，不碰 `held_text`**：后者的生命周期归上面那段按 action 判（C++ 侧
+        // `FlushHoldCompositionIfActive` 提交了才清）。在这里一并清掉会让下一个标点的
+        // `pre_held_text` 捡不到仍挂在组合态里的旧符号，变成二次提交。press2 的门是 `armed`，
+        // 清它已经足够。
+        //
+        // 与标点分支里那几处 `disarm_smart_symbol()`（它会连 `held_text` 一起清）**不矛盾**：
+        // 那些点都在 `try_smart_symbol_replace` 之后，而它的落地分支里凡是继续往下走的
+        // （press1 不武装 / `DeleteReplace` / `HoldComposition` 且有活跃编码）都已把 `held_text`
+        // 置空，唯一置 `Some` 的那条当场短路返回 `HoldComposition`。那里清的是个空值。
+        // 本处不同：出口对**任何**按键生效，包括 hold 正挂着的那些帧。
+        //
+        // **只在 keydown 上做**：修饰键（Shift/Ctrl/CapsLock）的 keyup 是会转发到服务端的
+        // （见 C++ `_DispatchPendingToggleKeyUp`），在 keyup 上解除会误伤「按住 Shift 连按两次
+        // `？`」这类正常 press2。
+        //
+        // 本条只覆盖**桌面宿主**（bridge 的按键出口）。`wind-mobile` 走内层 `handle_key_event`，
+        // 不经这里；那一侧由 `smart_symbol_press2` 里「press1 之后又打了编码」那条判据兜住。
+        // 两条覆盖面不同、各有独立会红的用例，见 `tests/smart_symbol.rs` 的同名注释。
+        if data.event_type == EVENT_KEY_DOWN {
+            let mut arm = self.smart_symbol.lock().unwrap_or_else(|e| e.into_inner());
+            if arm.armed {
+                // `punct_char` 只认主键盘那 21 个键。英文全角那条路（`handle_english_full_width`）
+                // 经 `full_width_source_char` 连**小键盘**一起吃下，`.` `/` `+` `-` `*` 都能武装，
+                // 而它们在 `punct_char` 里是 `None` ⇒ 只问 `punct_char` 会把它们判成「别的键」，
+                // 在 press1 那一按当场自解武装、press2 永远不来。故按同一张来源表补上小键盘。
+                // 带 Ctrl/Alt/Win 的组合键**一律算「别的键」**：`Ctrl+.` 的 `punct_char` 仍是
+                // `.`，不排除就会被当成同键而保住武装，可它根本不是在打标点——宿主拿它做什么
+                // （移动光标、跳转、执行命令）服务端不知道，之后再按 `。` 就可能对着已经挪走的
+                // 光标做替换。与 C++ `_IsCustomEnglishPunctKey` 的同款守卫对齐。
+                let same_key = data.modifiers & MOD_SHORTCUT == 0
+                    && punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
+                        .or_else(|| numpad_char(data.key_code))
+                        .is_some_and(|ch| ch == arm.key);
+                if !same_key {
+                    arm.armed = false;
+                    arm.hold_pending_commit = false;
+                }
+            }
+        }
         // 检索范围临时放宽的失效：本次组合结束（缓冲已空）即恢复配置档位。
         // 与 record_input_stats / note_commit_action 同一收口理由——`input_buffer.clear()`
         // 有十几个调用点（上屏/取消/切焦点/模式切换），散点接线必漏。放在按键处理的唯一出口，
@@ -1807,6 +1858,18 @@ impl MessageHandler for Coordinator {
                             _ => self.engine_mgr.codetable_settings().punct_commit,
                         };
                         if !punct_commit {
+                            // 标点被吞掉、编码原样保留 ⇒ 符号**从未上屏**，而本次按键刚刚在
+                            // `try_smart_symbol_replace` 里被武装成 press1。不解除的话，下次按
+                            // 同键会以 press2 的身份去删一个从未出现在屏幕上的符号。与紧邻下方
+                            // `clear_no_input` 分支同源，那里已这么做了——这条当时漏了。
+                            //
+                            // ⚠️ 如实交代：本行**当前没有独立会红的用例**。这条路吞键后编码原样
+                            // 保留，此后「缓冲重新变空」的两条路都已各自有解除——键盘路必经一次
+                            // 别的按键（出口那道判据），鼠标点选候选走 `select_candidate_at`
+                            // （那里也解除了）——构造不出只靠本行才不炸的时序。
+                            // 留着不是为了补一道防线，而是维持「武装态不得指向从未上屏的符号」
+                            // 这条不变式——放任它成立，那两道判据哪天被收窄就直接漏成缺陷。
+                            self.disarm_smart_symbol();
                             return KeyAction::Consumed;
                         }
                         // 空码 + `punct_on_empty_behavior = "clear_no_input"`：废码丢弃，标点
@@ -1859,6 +1922,12 @@ impl MessageHandler for Coordinator {
                         if let Some((hold_text, timeout_ms)) = hold_info {
                             // 命令候选顶屏 → 执行命令（与按空格一致），不走智能符号 Hold。
                             if let Some(act) = self.top_commit_command_guard(&mut state) {
+                                // 标点被命令吃掉、从未上屏，而本次按键刚在
+                                // `try_smart_symbol_replace` 里武装成 press1；命令又会清空缓冲
+                                // （`commit_command` 两条分支都清），于是下次按同键时 press2 的
+                                // 「缓冲非空」判据恰好放行、「非同键」判据因确是同键也放行 ⇒
+                                // 去删一个从未出现在屏幕上的符号。同 `!punct_commit` / `clear_no_input`。
+                                self.disarm_smart_symbol();
                                 return act;
                             }
                             // 空码丢弃（`punct_on_empty_behavior = "clear"`）：与下方普通标点
@@ -1916,6 +1985,10 @@ impl MessageHandler for Coordinator {
                     }
                     // 命令候选顶屏 → 执行命令（与按空格一致），不上屏 display 标签、不追加标点。
                     if let Some(act) = self.top_commit_command_guard(&mut state) {
+                        // 同上一处 command guard：标点没上屏而武装已生效，不解除就会在下次按同键
+                        // 时删掉一个从未出现过的符号。这两处与 `!punct_commit` / `clear_no_input`
+                        // 是同一族——**凡「本次按键已武装、但标点最终没上屏」的提前返回都要解除**。
+                        self.disarm_smart_symbol();
                         return act;
                     }
                     // 标点/符号键：先上屏已转换前缀 + 首选候选（若有输入），再追加（转换后的）标点
@@ -1996,6 +2069,11 @@ impl MessageHandler for Coordinator {
                     // CapsLock + 无待提交内容：TSF 层应已透传此键，coordinator 不应收到；
                     // 防御性兜底——直接透传让系统产生原始 WM_KEYDOWN + WM_CHAR。
                     if state.caps_lock && !had_input {
+                        // 键交还宿主 ⇒ 这个标点**不是服务端出的**（宿主按 CapsLock 的英文语义
+                        // 自己打），而本次按键已在上面武装成 press1，武装串却是按中文列算的。
+                        // 同族第四处，判据同 `!punct_commit` / `clear_no_input` / 两处 command
+                        // guard：凡「本次按键已武装、标点最终不由服务端上屏」的提前返回都要解除。
+                        self.disarm_smart_symbol();
                         return KeyAction::PassThrough;
                     }
 

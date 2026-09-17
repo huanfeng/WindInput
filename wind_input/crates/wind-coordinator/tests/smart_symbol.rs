@@ -447,3 +447,239 @@ fn hold_press2_still_replaces_held() {
         other => panic!("press2 应返回 CommitReplacingHeld，实际: {:?}", other),
     }
 }
+
+// ── 武装态失效：press1 之后中间夹了别的输入 ─────────────────────────────────────────
+//
+// 本组守的是「press1 与 press2 之间必须什么都没发生」这条前提。此前判据只有「同键 + 时限 +
+// 中英模式没变」三条，对「中间敲了字母出了候选」完全失明，于是 press2 的
+// `ReplaceBackward` / `CommitReplacingHeld` 落在**组合区**上，把用户正在看的候选削成了
+// 一个英文标点（用户报障原话：「先输入。然后快速的输入字母（有候选）再输入。，会出现这个
+// 候选被替换为 . 的问题」）。
+//
+// 缺陷由两道判据合力堵上，各守一族宿主，故本组的入口不是一刀切：
+//   - `smart_symbol_press2` 的「press1 之后又打了编码」——所有入口都经过它；
+//   - `handle_key_event_policed` 的「非同键按键解除武装」——**只有 bridge 那条按键出口**
+//     （`server.rs:470` 调的就是它，桌面 Windows/macOS 客户端都走这里）。
+//
+// ⚠️ 因此：`intervening_passthrough_key_disarms` 与 `numpad_punct_press2_survives_the_disarm_guard`
+// 是**唯二**只有 policed 入口才测得到的（前者中间那一键不进缓冲、后者要的就是出口那道判据
+// 别误伤），拿内层 `handle_key_event` 测会得到假绿；
+// `intervening_letters_do_not_trigger_press2_mobile_entry` 则**刻意**用内层入口——那正是
+// `wind-mobile` 的走法，用它盯住第一道判据；其余几条两道判据都能挡住，走 policed 是为了贴近
+// 桌面真实路径。
+
+const VK_N: u32 = 0x4E;
+const VK_I: u32 = 0x49;
+const VK_1: u32 = 0x31;
+
+fn press_policed(coord: &Coordinator, vk: u32, prev_char: u16) -> KeyAction {
+    coord.handle_key_event_policed(&KeyEventData {
+        key_code: vk,
+        scan_code: 0,
+        modifiers: 0,
+        event_type: EVENT_KEY_DOWN,
+        toggles: 0,
+        event_seq: 0,
+        prev_char,
+    })
+}
+
+/// 主用例（出厂 `DeleteReplace` 方案 + 宿主读不回文档）：`。` → 字母 `ni`（有候选）→ `.`。
+///
+/// `prev_char == 0` 是 press2 判定里刻意留的「宿主读不回文档」兜底口（微信/Terminal 那族），
+/// 它让光标前字符那道对照形同虚设 ⇒ 缺陷期这一按返回 `ReplaceBackward{1, "."}`，而光标此刻
+/// 在组合区里，删掉的是候选本身。
+#[test]
+fn intervening_letters_do_not_trigger_press2() {
+    if !has_data() {
+        return;
+    }
+    let mut cfg = cfg_smart();
+    // 标点顶码上屏：出厂 `schema.codetable.punct_commit = false` 会让这一按变成吞键
+    // （`Consumed`），下面的正面断言就无从谈起。本用例要看的正是普通标点流程那条路。
+    cfg.schema.codetable.punct_commit = true;
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let a1 = press_policed(&coord, VK_OEM_PERIOD, 0);
+    assert_eq!(
+        inserted(&a1),
+        Some("。"),
+        "press1 应出中文句号，实际: {:?}",
+        a1
+    );
+    let an = press_policed(&coord, VK_N, 0);
+    assert!(
+        matches!(an, KeyAction::UpdateComposition { .. }),
+        "字母应进编码缓冲形成组合，实际: {:?}",
+        an
+    );
+    press_policed(&coord, VK_I, 0);
+    let a2 = press_policed(&coord, VK_OEM_PERIOD, 0);
+    assert!(
+        replaced(&a2).is_none(),
+        "中间打过编码 ⇒ 这一按不是 press2，替换会削掉组合区里的候选，实际: {:?}",
+        a2
+    );
+    // 反面断言不够强：`PassThrough` / `Consumed` / `ClearComposition` 也都满足它。这一按**该**
+    // 做的是落普通标点流程——顶屏候选 + 追加中文句号。不钉住正面产物，哪天这一按整个变成
+    // 吞键，上面那条照样绿。
+    assert!(
+        inserted(&a2).is_some_and(|t| t.ends_with('。')),
+        "应落普通标点流程：顶屏候选后追加中文句号，实际: {:?}",
+        a2
+    );
+}
+
+/// 同一场景，但宿主**读得回**文档：候选窗自显 preedit（`candidate_top`）时应用侧组合是
+/// 「占位空格 + 光标置前」（`UpdateComposition { text: " ", caret_pos: 0 }`），宿主如实读回的
+/// 光标前一字符恰好就是 press1 上屏的 `。`，与武装串末位**完美匹配**。
+///
+/// 这条与上一条是同一个缺陷的两条**互不重叠**的触发路径：上一条靠 `prev_char == 0` 绕过对照，
+/// 这一条靠「对照本身就成立」。只修其中一条，另一条照样复现。
+#[test]
+fn placeholder_preedit_intervening_letters_do_not_trigger_press2() {
+    if !has_data() {
+        return;
+    }
+    let mut cfg = cfg_smart();
+    cfg.ui.candidate.preedit_display = "candidate_top".to_string();
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let a1 = press_policed(&coord, VK_OEM_PERIOD, 0);
+    assert_eq!(
+        inserted(&a1),
+        Some("。"),
+        "press1 应出中文句号，实际: {:?}",
+        a1
+    );
+    let an = press_policed(&coord, VK_N, '。' as u16);
+    assert!(
+        matches!(&an, KeyAction::UpdateComposition { text, caret_pos } if text == " " && *caret_pos == 0),
+        "候选窗自显 preedit 时应用侧组合应是占位空格 + 光标置前（本用例的前提），实际: {:?}",
+        an
+    );
+    press_policed(&coord, VK_I, '。' as u16);
+    let a2 = press_policed(&coord, VK_OEM_PERIOD, '。' as u16);
+    assert!(
+        replaced(&a2).is_none(),
+        "光标前虽确是武装串 `。`，但那是占位组合前面的旧字符，不该判 press2，实际: {:?}",
+        a2
+    );
+}
+
+/// `HoldComposition` 方案下的同一场景：press2 会发 `CommitReplacingHeld`，语义是**覆盖**当前
+/// 组合——而组合此刻装的是拼音候选，覆盖掉就是整条候选没了。
+///
+/// 这条在修复前**恰好**不会红：出口处那段「C++ 已 flush 掉 hold」的清理按
+/// `held_text.is_some()` 开门，HoldComposition 正好满足。锁在这里是防它哪天被收窄
+/// （`DeleteReplace` 的 `held_text` 恒为 None，当年正是这样对出厂方案整段惰性的）。
+#[test]
+fn hold_composition_intervening_letters_do_not_replace_composition() {
+    if !has_data() {
+        return;
+    }
+    let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
+    let a1 = press_policed(&coord, VK_OEM_PERIOD, 0);
+    assert_eq!(
+        held(&a1),
+        Some("。"),
+        "press1 应把中文句号挂进组合态，实际: {:?}",
+        a1
+    );
+    press_policed(&coord, VK_N, 0);
+    press_policed(&coord, VK_I, 0);
+    let a2 = press_policed(&coord, VK_OEM_PERIOD, 0);
+    assert!(
+        !matches!(a2, KeyAction::CommitReplacingHeld { .. }),
+        "组合里此刻是候选不是 held 符号，覆盖提交会把候选整条吃掉，实际: {:?}",
+        a2
+    );
+}
+
+/// 中间那一键**不进编码缓冲**时同样要解除武装——这一条单独锁「非同键按键即失效」那道判据。
+///
+/// 上面三条靠的是「缓冲非空」，把那道判据删掉它们仍然红；本条走数字键（中文模式空缓冲下透传，
+/// 不留任何缓冲痕迹），缓冲前后都是空的 ⇒ 只有出口处那道「非同键解除武装」能挡住。两道判据
+/// 各自被至少一条用例单独盯住，删任意一道都有红。
+#[test]
+fn intervening_passthrough_key_disarms() {
+    let coord = Coordinator::new_headless(cfg_smart(), Some(&data_dir()));
+    let a1 = press_policed(&coord, VK_OEM_PERIOD, 0);
+    assert_eq!(
+        inserted(&a1),
+        Some("。"),
+        "press1 应出中文句号，实际: {:?}",
+        a1
+    );
+    // 数字键透传（不经服务端出字），缓冲仍为空。这一按的产物必须断言：「缓冲不留痕」是本用例
+    // 区别于上面三条的**唯一**前提，也是判据 2 在桌面侧唯一的独立哨兵。哪天数字键进了缓冲
+    // （空码补全、方案把数字当码元……），本条会靠判据 1 继续绿，判据 2 从此零覆盖零告警。
+    let ad = press_policed(&coord, VK_1, '。' as u16);
+    assert!(
+        matches!(ad, KeyAction::PassThrough | KeyAction::NotHandled),
+        "本用例前提是数字键透传、不进缓冲（否则判据 1 会顶替判据 2 让本条假绿），实际: {:?}",
+        ad
+    );
+    // 宿主读不回文档（prev_char=0）：唯一还能挡住的就是「中间按过别的键」。
+    let a2 = press_policed(&coord, VK_OEM_PERIOD, 0);
+    assert!(
+        replaced(&a2).is_none(),
+        "中间按过别的键 ⇒ 光标前已不是 press1 那个符号，不该判 press2，实际: {:?}",
+        a2
+    );
+}
+
+/// 同一场景，**移动端入口**（`wind-mobile` 的 `MobileCore::key_down` 直接调内层
+/// `Coordinator::handle_key_event`，见 `crates/wind-mobile/src/lib.rs`）。
+///
+/// 那条路不经 bridge 出口，也就拿不到「非同键按键解除武装」那道判据 ⇒ press2 判定里那条
+/// 「press1 之后又打了编码」的前置条件在移动端是**唯一**防线。本用例因此刻意用非 policed
+/// 的 `press`：两个宿主族各有一条独立可观测的用例，删掉任一道判据都有红。
+#[test]
+fn intervening_letters_do_not_trigger_press2_mobile_entry() {
+    if !has_data() {
+        return;
+    }
+    let coord = Coordinator::new_headless(cfg_smart(), Some(&data_dir()));
+    let a1 = press(&coord, VK_OEM_PERIOD, 0);
+    assert_eq!(
+        inserted(&a1),
+        Some("。"),
+        "press1 应出中文句号，实际: {:?}",
+        a1
+    );
+    press(&coord, VK_N, 0);
+    press(&coord, VK_I, 0);
+    let a2 = press(&coord, VK_OEM_PERIOD, 0);
+    assert!(
+        replaced(&a2).is_none(),
+        "移动端入口同样不得把组合区里的候选当成 press1 的符号删掉，实际: {:?}",
+        a2
+    );
+}
+
+/// 小键盘标点（英文模式 + 全角，键经 `full_width_source_char` 吃下）的 press2 不得被
+/// 「非同键按键解除武装」那道判据误伤。
+///
+/// `punct_char` 只认主键盘那 21 个键，小键盘 `.`（VK_DECIMAL）在它那里是 `None`——若出口
+/// 判据只问 `punct_char`，press1 那一按会把自己刚武装的状态当成「别的键」立刻解除，press2
+/// 永远不来，且全程零日志。
+#[test]
+fn numpad_punct_press2_survives_the_disarm_guard() {
+    const VK_DECIMAL: u32 = 0x6E;
+    let mut cfg = cfg_en_mode();
+    cfg.input.default.full_width = true; // 英文全角：小键盘键由 core 接手出字
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let a1 = press_policed(&coord, VK_DECIMAL, 0);
+    assert_eq!(
+        inserted(&a1),
+        Some("．"),
+        "英文全角 press1 应出全角句点，实际: {:?}",
+        a1
+    );
+    let a2 = press_policed(&coord, VK_DECIMAL, '．' as u16);
+    assert_eq!(
+        replaced(&a2),
+        Some((1, "。")),
+        "同一个小键盘键的 press2 应照常换中文形，实际: {:?}",
+        a2
+    );
+}
