@@ -11,6 +11,9 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+# 主题包要在落盘前校验 theme.toml 本身合法（坏主题别等回滚才发现），并取 meta 作展示名。
+# wind-theme 是纯解析 crate，不反向依赖本 crate。
+wind-theme = { path = "../wind-theme" }
 zip = "2"
 
 [dev-dependencies]

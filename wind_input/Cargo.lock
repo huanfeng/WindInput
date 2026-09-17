@@ -2703,6 +2703,7 @@ dependencies = [
  "wind-config",
  "wind-dict",
  "wind-store",
+ "wind-theme",
  "zip",
 ]
 

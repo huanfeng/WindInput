@@ -36,7 +36,7 @@
 | `wind-keys` | 键名/VK 映射、导航键分类（纯逻辑）+ 按键注入（平台层）；**VK 常量 SSOT** | — |
 | `wind-candidate` | 候选词数据类型、排序与过滤 | — |
 | `wind-phrase` | 短语系统：静态/动态模板展开 + cmdbar 双路径 | — |
-| `wind-transfer` | 导入导出/备份还原底座：Bundle（manifest + zip）聚合打包与 Merge 合并策略（编解码在 wind-store） | — |
+| `wind-transfer` | 导入导出/备份还原底座：Bundle（manifest + zip）聚合打包与 Merge 合并策略（编解码在 wind-store）；方案包 `.wpkg` 与主题包 `.wtheme` 的格式定义都在这里 | — |
 | `wind-quick-input` | 快捷输入的内置候选来源（纯逻辑）：`quick_input.calc` 算式（含幂 `^`）/ `.date` 日期年月 / `.number` 数字金额；另定义 `.repeat`（重复上屏，由协调器实现）的成员 id。开关与优先级 = `mix_modes.members` 的有无与顺序 | — |
 | `wind-reverse` | 候选反查：五笔编码/拆字/拼音读音（悬停 tooltip） | — |
 | `wind-aux-code` | 辅助码过滤：拼音后追加字形辅助码，按字形裁减候选字词（**出厂关闭**，`schema.pinyin.aux_code.enabled`） | [AGENTS.md](wind_input/crates/wind-aux-code/AGENTS.md) |

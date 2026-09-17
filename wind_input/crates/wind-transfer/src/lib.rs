@@ -5,3 +5,4 @@ pub mod bundle;
 pub mod envelope;
 pub mod merge;
 pub mod scheme;
+pub mod theme;
