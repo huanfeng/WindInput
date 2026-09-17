@@ -270,3 +270,45 @@ fn plain_abbrev_fuzzy_is_penalized_and_ordered_after_exact() {
             .collect::<Vec<_>>()
     );
 }
+
+/// `fuzzy_abbrev_keys` 的四条不变量。五个召回点现在都依赖构造侧给的这份处数，
+/// 口径一旦漂移，罚分就会在不同路径上各算各的。
+///
+/// - **等长**：`eb.count_ones() == key.len()` 那道音节数过滤、以及逐位比较都以此为前提；
+/// - **原键在首位且处数 0**：纯简拼两处按枚举顺序 `push_unique`，精确键先进才能把同 text
+///   的模糊条目去重掉；
+/// - **处数 == 逐位差**：与校验侧 `Initial` 段计 1 处同口径；
+/// - **无重复键**：`l` 的等价集 `{l,n,r}` 与 `n` 的 `{n,l}` 有交集，笛卡尔积容易撞出重复。
+#[test]
+fn fuzzy_abbrev_keys_invariants() {
+    let cfg = FuzzyConfig {
+        n_l: true,
+        r_l: true,
+        f_h: true,
+        ..Default::default()
+    };
+    for key in ["nqc", "lqc", "fbm", "rc", "nl", "ll", "abc", "l"] {
+        let keys = fuzzy::fuzzy_abbrev_keys(key, &cfg);
+        assert_eq!(
+            keys[0],
+            (key.to_string(), 0),
+            "{key}: 原键须在首位且处数为 0"
+        );
+        for (k, edits) in &keys {
+            assert_eq!(k.len(), key.len(), "{key}: 变体 {k} 与原键须等长");
+            let diff = k.chars().zip(key.chars()).filter(|(a, b)| a != b).count();
+            assert_eq!(*edits, diff, "{key}: 变体 {k} 的处数须等于逐位差");
+        }
+        let mut seen: Vec<&String> = keys.iter().map(|(k, _)| k).collect();
+        let total = seen.len();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), total, "{key}: 不得产出重复变体键");
+    }
+    // 模糊音全关 ⇒ 单元素、处数 0，零额外点查。
+    let off = FuzzyConfig::default();
+    assert_eq!(
+        fuzzy::fuzzy_abbrev_keys("nqc", &off),
+        vec![("nqc".to_string(), 0)]
+    );
+}

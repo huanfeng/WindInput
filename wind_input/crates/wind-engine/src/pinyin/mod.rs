@@ -1076,13 +1076,8 @@ impl PinyinEngine {
         // 故此处只需判形态。该值下面 ③④ 复用，不重算——重算就多一次漂移的机会。
         let plain = AbbrevMatcher::is_abbreviation(stroke, trie);
         if plain {
-            for key in self.abbrev_recall_keys(stroke) {
+            for (key, edits) in self.abbrev_recall_keys(stroke) {
                 // 模糊处数与折扣，口径同 step5（见那里的论证）。
-                let edits = key
-                    .chars()
-                    .zip(stroke.chars())
-                    .filter(|(a, b)| a != b)
-                    .count();
                 for abbr_code in dict.search_abbrev(&key, 10) {
                     for h in dict.search_with_boundary(&abbr_code) {
                         let eb = effective_boundary(&abbr_code, h.boundary, trie);
@@ -1118,7 +1113,7 @@ impl PinyinEngine {
         if !pats.is_empty() {
             let mut keys: Vec<String> = pats
                 .iter()
-                .flat_map(|p| self.abbrev_recall_keys(p.key()))
+                .flat_map(|p| self.abbrev_recall_keys_only(p.key()))
                 .collect();
             keys.sort_unstable();
             keys.dedup();
@@ -1162,7 +1157,10 @@ impl PinyinEngine {
         if let Some(store_dm) = &self.store_layers {
             for c in self.recall_store_by_abbrev(store_dm, stroke, plain, &pats) {
                 let plain_edits = self.abbrev_matches_stroke(&c.code, c.boundary, stroke);
-                let mixed_edits = if plain_edits.is_some() {
+                // 旧代码 `if plain { None }` 的短路前提是「纯简拼命中恒精确 ⇒ 已是最小」。
+                // 召回侧放宽后这个前提**只在 `Some(0)` 时还成立** —— 纯简拼也可能是变体键
+                // 命中、带着处数，那时混合解释可能更优（处数更少），不能跳过不算。
+                let mixed_edits = if plain_edits == Some(0) {
                     None
                 } else {
                     mixed_abbrev::syllables_from_boundary(&c.code, c.boundary).and_then(|syls| {
@@ -1173,10 +1171,13 @@ impl PinyinEngine {
                             .min()
                     })
                 };
-                // 两条来源互斥（`mixed_edits` 只在纯简拼未命中时才算），故 `or` 即取到
-                // 命中的那一条。**纯简拼命中不再恒精确**：召回侧放宽后它也可能是变体键
-                // 命中，处数由 `abbrev_matches_stroke` 给出，照吃折扣。
-                if let Some(edits) = plain_edits.or(mixed_edits) {
+                // 取**处数最少**的解释计罚，与 step5b「同一个键下多条解释取 min」同口径 ——
+                // `plain` 与 `mixed` 就是同一个词的两种解释。⚠️ **不能用 `or`**：它在两边
+                // 都有值时返回左边，也就是取了**更差**的那个解释。
+                let Some(edits) = [plain_edits, mixed_edits].into_iter().flatten().min() else {
+                    continue;
+                };
+                {
                     push(
                         cands,
                         c.text,
@@ -1227,9 +1228,12 @@ impl PinyinEngine {
         // 键与系统词侧同样要展开首字母模糊变体，否则用户词里的「篮球场」在 `nqc` 下召不回。
         let mut keys: Vec<String> = Vec::new();
         if plain {
-            keys.extend(self.abbrev_recall_keys(stroke));
+            keys.extend(self.abbrev_recall_keys_only(stroke));
         }
-        keys.extend(pats.iter().flat_map(|p| self.abbrev_recall_keys(p.key())));
+        keys.extend(
+            pats.iter()
+                .flat_map(|p| self.abbrev_recall_keys_only(p.key())),
+        );
         keys.sort_unstable();
         keys.dedup();
 
@@ -1682,8 +1686,20 @@ impl PinyinEngine {
     /// 不是在这里乘个 `fuzzy_penalized` 就完事的，属另一笔改动。
     /// `Lattice::build` 本就接 `fuzzy_config`（全拼节点支持模糊、简拼节点不支持），
     /// 这个不对称在本次改动后变成「整串支持、前缀回退支持、整句不支持」。
-    fn abbrev_recall_keys(&self, key: &str) -> Vec<String> {
+    fn abbrev_recall_keys(&self, key: &str) -> Vec<(String, usize)> {
         fuzzy::fuzzy_abbrev_keys(key, &self.fuzzy_config)
+    }
+
+    /// 同 [`Self::abbrev_recall_keys`]，只要键、丢掉处数。
+    ///
+    /// 供**混合**路径用：那边的模糊处数由逐段校验（`seg_matches_fuzzy`）给出，已经涵盖
+    /// `Initial` 段，键的处数是同一件事的重复计量，取了会罚两遍。纯简拼路径反过来 ——
+    /// 它没有段校验，键的处数就是唯一来源。
+    fn abbrev_recall_keys_only(&self, key: &str) -> Vec<String> {
+        self.abbrev_recall_keys(key)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
     }
 
     /// 词条的声母串与用户敲的简拼 `stroke` 的匹配**处数**：`Some(0)` = 精确，
@@ -1700,16 +1716,14 @@ impl PinyinEngine {
         if ab == stroke {
             return Some(0);
         }
-        if !self.fuzzy_config.any_enabled() || !self.abbrev_recall_keys(stroke).contains(&ab) {
+        if !self.fuzzy_config.any_enabled() {
             return None;
         }
-        // 变体键与原键等长，逐位不等的位数即模糊处数（同 step5 口径）。
-        Some(
-            ab.chars()
-                .zip(stroke.chars())
-                .filter(|(a, b)| a != b)
-                .count(),
-        )
+        // 处数取构造侧给的那一份，不在这里重算（口径统一见 `fuzzy_abbrev_keys`）。
+        self.abbrev_recall_keys(stroke)
+            .into_iter()
+            .find(|(k, _)| *k == ab)
+            .map(|(_, edits)| edits)
     }
 
     fn seg_matches_fuzzy(&self, seg: &mixed_abbrev::AbbrevSeg, syl: &str) -> Option<usize> {
@@ -2835,10 +2849,11 @@ impl Engine for PinyinEngine {
         //    候选因此带上真实的 code 与 boundary：词频记账走 `cand_code` 取候选的 code，
         //    此前设成简拼串 `nh`，同一个词在简拼与全拼下遂走两个互不相认的计数。
         if stroke_is_plain_abbrev {
-            for key in self.abbrev_recall_keys(abbr_query) {
-                // 变体键与原键**等长**，故逐位不等的位数即本次召回用掉的模糊处数 ——
-                // 每位只比首字母，与校验侧 `Initial` 段计 1 处**同口径**。精确键 ⇒ 0 ⇒
-                // `fuzzy_penalized` 原样返回、`is_fuzzy` 为 false，与改动前逐字节一致。
+            for (key, edits) in self.abbrev_recall_keys(abbr_query) {
+                // `edits` 由 `fuzzy_abbrev_keys` 在构造期给出（逐位计），与校验侧
+                // `Initial` 段计 1 处**同口径**（简拼键的每一位就是一个 `Initial` 段）。
+                // 精确键 ⇒ 0 ⇒ `fuzzy_penalized` 原样返回、`is_fuzzy` 为 false，
+                // 与改动前逐字节一致。
                 //
                 // ⚠️ **不罚会让模糊解压过精确解**：`is_abbrev` 只把简拼整层压到全拼之后，
                 // **层内仍按 weight 降序**。折扣是层内唯一区分「精确键」与「变体键」的机制。
@@ -2846,11 +2861,6 @@ impl Engine for PinyinEngine {
                 // 不罚时模糊解排第 1、精确解第 2；罚一处后 1191×0.5=595 < 800，次序才对。
                 // 同一个不变量在混合路径已由 `fuzzy_mixed_abbrev_is_penalized_and_marked`
                 // 守着，纯简拼这条当时漏了。
-                let edits = key
-                    .chars()
-                    .zip(abbr_query.chars())
-                    .filter(|(a, b)| a != b)
-                    .count();
                 for abbr_code in dict.search_abbrev(&key, 10) {
                     // 用 search_with_boundary 而非 search：拼音引擎直接持有 CachedDict、
                     // 不经 SystemDictLayer，用 search() 会把边界丢在这里（P2b 踩过同款）。
@@ -2927,7 +2937,7 @@ impl Engine for PinyinEngine {
             // 每条模式再展开首字母模糊变体（见 `abbrev_recall_keys`），合并去重后逐键点查。
             let mut keys: Vec<String> = mixed_pats
                 .iter()
-                .flat_map(|p| self.abbrev_recall_keys(p.key()))
+                .flat_map(|p| self.abbrev_recall_keys_only(p.key()))
                 .collect();
             keys.sort_unstable();
             keys.dedup();
@@ -3139,7 +3149,8 @@ impl Engine for PinyinEngine {
                     // 混合简拼：按 boundary 切回音节序列逐段比对（无边界 → 无判据 → 不参与）。
                     // 与系统词侧走同一批 `mixed_pats`，判据完全一致，只是这边不经索引——
                     // 用户词规模小，现算即可（与 `abbrev_of_code` 那条注释同理）。
-                    let mixed_edits = if plain_edits.is_some() {
+                    // 同上：短路只在纯简拼**精确**命中时成立。
+                    let mixed_edits = if plain_edits == Some(0) {
                         None
                     } else {
                         mixed_abbrev::syllables_from_boundary(&c.code, c.boundary).and_then(
@@ -3155,9 +3166,9 @@ impl Engine for PinyinEngine {
                             },
                         )
                     };
-                    // 两条来源互斥（`mixed_edits` 只在纯简拼未命中时才算），`or` 即取到
-                    // 命中的那一条；都没命中就跳过。
-                    let Some(edits) = plain_edits.or(mixed_edits) else {
+                    // 取**处数最少**的解释计罚（同 step5b）。⚠️ 不能用 `or`：两边都有值时
+                    // 它返回左边，等于取了更差的解释。
+                    let Some(edits) = [plain_edits, mixed_edits].into_iter().flatten().min() else {
                         continue;
                     };
                     c.source = CandidateSource::Pinyin;

@@ -167,7 +167,15 @@ pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
     })
 }
 
-/// 简拼键的模糊变体（**含原键自身，且恒在首位**）。
+/// 简拼键的模糊变体，附带该变体改动了**几位**（**含原键自身，处数 0，且恒在首位**）。
+///
+/// **处数随键一起返回**而不是让调用方事后逐位比较：它在笛卡尔积构造期是免费的
+/// （每选一个非原字母就 +1），五个召回点的罚分口径因此由构造侧统一保证、不会各自漂移。
+/// 与本模块 [`FuzzyMatcher::fuzzy_variants_scored`]、`expand_syllables` 同族形态。
+///
+/// 处数口径 = **逐位计**，与校验侧 `AbbrevSeg::Initial` 段计 1 处一致：简拼键的每一位
+/// 就是一个 `Initial` 段。`l` 的等价集 `{l,n,r}` 那种多来源不影响计量 —— 逐位比较不问
+/// 「经由哪一组」，一位改了就是一处。
 ///
 /// 键是各音节首字母的拼接，故变体 = 各位 [`initial_alternatives`] 的笛卡尔积。
 /// 变体数是各位等价集大小之积，最坏 `3^len`（全 `l` 且 n_l + r_l 都开）。
@@ -175,9 +183,9 @@ pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
 /// ⚠️ **超过 [`MAX_ABBREV_KEY_VARIANTS`] 时只返回原键**，不做部分展开 —— 截一半等于
 /// 按字母表顺序随机挑几个变体放行，用户看到的是「有时出得来有时出不来」，比一致地
 /// 出不来更难排查。触发它需要 5 个以上的位都落在 n/l/f/h/r 上，是罕见输入。
-pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<String> {
+pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<(String, usize)> {
     if key.is_empty() || !config.any_enabled() {
-        return vec![key.to_string()];
+        return vec![(key.to_string(), 0)];
     }
     let per_pos: Vec<Vec<char>> = key
         .chars()
@@ -185,17 +193,18 @@ pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<String> {
         .collect();
     let total: usize = per_pos.iter().map(|v| v.len()).product();
     if total <= 1 || total > MAX_ABBREV_KEY_VARIANTS {
-        return vec![key.to_string()];
+        return vec![(key.to_string(), 0)];
     }
-    // 原键恒在首位：各位的 alternatives[0] 就是原字母，笛卡尔积的第一项即原键。
-    let mut out: Vec<String> = vec![String::new()];
+    // 原键恒在首位，处数 0：各位的 alternatives[0] 就是原字母，笛卡尔积的第一项即原键。
+    let mut out: Vec<(String, usize)> = vec![(String::new(), 0)];
     for opts in &per_pos {
         let mut next = Vec::with_capacity(out.len() * opts.len());
-        for prefix in &out {
-            for c in opts {
+        for (prefix, edits) in &out {
+            for (j, c) in opts.iter().enumerate() {
                 let mut s = prefix.clone();
                 s.push(*c);
-                next.push(s);
+                // `opts[0]` 恒是原字母（见 `initial_alternatives`），故 j>0 即这一位改了一处。
+                next.push((s, edits + usize::from(j > 0)));
             }
         }
         out = next;
