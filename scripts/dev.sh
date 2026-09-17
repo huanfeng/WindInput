@@ -38,7 +38,8 @@
 #   pm1/pm2      push 单模块 (tsf/核心, release)
 #   pdm1/pdm2    push 单模块 (dev)
 #   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活pre-commit)  clean
-#   sk=setting-check  st=setting-test   邻仓 ../wind-setting (交叉到 Windows 目标; st 要 wine)
+#   sk=setting-check  st=setting-test  sg=setting-regen   邻仓 ../wind-setting
+#     (交叉到 Windows 目标; st/sg 经 wine 执行。sg = 重生成检入的 capability 快照与 mockdata)
 #     ↑ 只改了 core 配置注册表的话, 先跑 cargo test -p wind-rpc --test wind_setting_assets
 #       (在 core 这边对账邻仓三份检入产物, 不必编译 wind-setting)
 #     ↑ 这几个【在本机跑】: 不产出交付物, cargo-xwin 在 Linux 上仅存的正当用途就是它们;
@@ -322,9 +323,11 @@ do_setting_check() {
 # 测试二进制是 Windows PE, 靠 wine 执行(cargo-xwin 自动配 runner)。
 # ⚠️ 没装 wine 时明确报出来 —— 否则 cargo 只会甩一句 "cannot execute binary file",
 #    看不出缺的是什么。
-# ⚠️ **未实测**(本机尚未装 wine): 邻仓多处测试用 env!("CARGO_MANIFEST_DIR") 拼绝对路径,
-#    那在这里是 Linux 路径(/home/...), wine 能否解析到 Z: 盘要现场看; 打不开就把那几处
-#    改成相对路径。首次跑还会建 wine prefix(慢且会在 ~/.wine 落一堆东西)。
+#
+# 【实测 2026-09-17, wine 9.0 / Ubuntu 24.04】全量 1041 passed / 0 failed / 4 ignored, 1.6s。
+# 两个顾虑都不成立: env!("CARGO_MANIFEST_DIR") 的 Linux 绝对路径 wine 解析得了(邻仓多处
+# 测试靠它找 ../WindInput/data, 全过), 启动时那句 "wine32 is missing" 对 x64 目标无碍。
+# 首次跑会建 ~/.wine prefix(慢一次, 之后秒级)。
 do_setting_test() {
     [ -d "$SETTING_DIR" ] || { err "../wind-setting 仓库不存在"; return 1; }
     if ! command -v wine >/dev/null 2>&1 && ! command -v wine64 >/dev/null 2>&1; then
@@ -335,6 +338,24 @@ do_setting_test() {
     say "\n正在运行 wind_setting 测试 ($TARGET, 经 wine)..."
     export WIND_APP_VERSION="$VERSION"
     cd "$SETTING_DIR" && cargo_xwin test --target "$TARGET"
+}
+
+# 重新生成邻仓的两份检入产物(capabilities.snapshot.json / mockdata/config.json)。
+#
+# 这两个生成器是 `#[ignore]` 的维护工具, 邻仓 capabilities.rs 明令「重新生成而不是手改
+# JSON —— 手改正是漂移的来源」。**以前只能上编译机跑**(见 wind-setting 那段 README 式注释),
+# 现在经 wine 本机就能跑, 实测重生成的产物与检入版逐字一致。
+#
+# ⚠️ 跑完 `git diff` 里若只剩 appVersion 一行, 那是**正常的**: 它跟着 docs/VERSION 走,
+#    与配置契约无关(邻仓的守护测试也刻意不比它)。别把它跟自己的改动一起提交。
+do_setting_regen() {
+    [ -d "$SETTING_DIR" ] || { err "../wind-setting 仓库不存在"; return 1; }
+    if ! command -v wine >/dev/null 2>&1 && ! command -v wine64 >/dev/null 2>&1; then
+        err "需要 wine: sudo apt install wine64"; return 1
+    fi
+    say "\n正在重生成 wind_setting 的检入产物 ($TARGET, 经 wine)..."
+    export WIND_APP_VERSION="$VERSION"
+    cd "$SETTING_DIR" && cargo_xwin test --target "$TARGET" -- --ignored regenerate_
 }
 
 do_fmt() {
@@ -1637,7 +1658,7 @@ show_menu() {
     echo  "    SHOT_ON=vm shot             截编译机上刚编的那份 (不用先部署)"
     printf '\n%b  杂项:%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    gd=gen-data  clean  q=退出"
-    echo  "    sk/st  邻仓 wind-setting 的检查/测试 (交叉到 Windows 目标; st 要 wine)"
+    echo  "    sk/st/sg  邻仓 wind-setting: 检查 / 测试 / 重生成检入产物 (st,sg 经 wine)"
     printf '%b============================================%b\n' "$C_CYAN" "$C_RESET"
 }
 
@@ -1680,6 +1701,7 @@ dispatch() {
         t|test)           do_test ;;
         sk|setting-check) do_setting_check ;;
         st|setting-test)  do_setting_test ;;
+        sg|setting-regen) do_setting_regen ;;
         f|fmt)            do_fmt ;;
         fmt-check)        do_fmt_check ;;
         ci)               do_ci ;;
