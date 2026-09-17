@@ -244,12 +244,30 @@ impl Coordinator {
         }
     }
 
-    /// 对当前候选施加生僻字准入（仅生僻字模式；其余模式为空操作）。
-    fn apply_rare_admission(&self, state: &mut State) {
-        if !matches!(state.active, Some(ModeKind::RareChar)) {
+    /// 对给定候选施加生僻字准入（仅生僻字模式；其余模式为空操作）。
+    ///
+    /// ⚠️ 「只有生僻字模式才筛」这道守卫必须**只落在本函数里**，调用方一律经此过一手，
+    /// 不要就地调 `retain_rare_admitted` 再自带一份 `matches!`。曾经的形态正是那样：
+    /// 空码补全那条旁路（`update_special_candidates` 里取 `completion_hints` 的收口）
+    /// 直接调了裸过滤器，守卫漏在了那一处 —— 快符等 overlay 模式的补全候选于是被生僻
+    /// 准入当场滤空（`rare_admits` 对符号与多字条目恒为 false），表现为「精确匹配下
+    /// 空码永远不显示后续编码」（论坛 t125）。
+    ///
+    /// 那条缺陷在自动化测试里是**不可见**的：`retain_rare_admitted` 对未加载的常用字表
+    /// 整条早退，而 headless 夹具恰好就是那个状态（`common_chars` 由
+    /// `CommonChars::from_registry` 装配，夹具没有 `common_han` 类）⇒ 过滤根本没跑。
+    /// 凡要验这道准入的用例，都得先照 `set_common` 那样把字表与 registry 一并装上。
+    ///
+    /// 取 `active` 而非 `&State`：调用方常在可变借出候选表的同时需要这个判据。
+    fn apply_rare_admission(
+        &self,
+        active: Option<ModeKind>,
+        candidates: &mut Vec<wind_candidate::Candidate>,
+    ) {
+        if !matches!(active, Some(ModeKind::RareChar)) {
             return;
         }
-        self.retain_rare_admitted(&mut state.candidates);
+        self.retain_rare_admitted(candidates);
     }
 
     /// 生僻字模式：**过滤后不足一页**时加大取数上限重取一次。
@@ -411,7 +429,7 @@ impl Coordinator {
         // 而 `$AA`/`$CC` 那类词条是在 finalize 里才展开成真正文本的。
         // 放在 shadow **之前**，与主路径 `apply_filter` → `apply_shadow` 同序：先决定
         // 哪些候选存在，再应用用户的置顶/隐藏。
-        self.apply_rare_admission(state);
+        self.apply_rare_admission(state.active, &mut state.candidates);
         self.refill_rare_if_short(state, &schema);
         // 空码补全对齐主码表方案（`single_code_input` + `single_code_complete`）：精确匹配模式下
         // 当前编码无精确候选、但更长前缀有候选时，引擎「备货不 push」把首个更长编码候选放进
@@ -449,7 +467,10 @@ impl Coordinator {
             let mut hint = self.finalize_candidates(result.completion_hints, &state.special_buffer);
             // 补全候选**同样要过生僻准入**：这条旁路直接取自引擎、绕过了上面那次过滤，
             // 不补这一句的表现是「本码没有生僻字时，补出来的却是个常用字」。
-            self.retain_rare_admitted(&mut hint);
+            // ⚠️ 必须走 `apply_rare_admission`（带模式守卫）而**不是**裸的
+            // `retain_rare_admitted`：生僻准入只对生僻字模式成立，对快符这类 overlay
+            // 模式施加等于把补全候选整批滤空。见 `apply_rare_admission` 的说明。
+            self.apply_rare_admission(state.active, &mut hint);
             self.apply_shadow_in(owner.as_deref(), &mut hint, &state.special_buffer);
             // 仍只采纳一条（`$AA`/`$SS` 在前缀情形折叠为单个组名候选，正常也只有一条）。
             state.candidates.extend(hint.into_iter().next());
@@ -930,12 +951,56 @@ mod tests {
         }
     }
 
+    /// 装一份最小常用字表。`retain_rare_admitted` 对空表整条早退（见那条测试），
+    /// 故凡要验过滤结果的用例都得先装表。
+    /// 灌出厂字表。
+    ///
+    /// ⚠️ **必须同时装配配套的 registry**：判定已经归 `CharsetRegistry`（`common_han`
+    /// 类给出「是汉字却不在名单里 ⇒ 生僻」），只灌 `CommonChars` 的话没有人表态，
+    /// 所有字兜底判常用——生僻字模式会一条候选都留不下，而看起来像是过滤写错了。
+    ///
+    /// 生产路径上两者同源：`CommonChars::load` 读 `schemas/common_chars.txt`，
+    /// registry 里 `common_han` 的 `file:` 指的也是那一个文件。
+    fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char> + Clone) {
+        *c.common_chars.write().unwrap() = wind_candidate::CommonChars::from_base(chars.clone());
+        // ⚠️ **合并而不是整份替换**：registry 里还有装配好的 emoji 类、50 个内置区块，
+        // 以及 `include_blocks` 打上的 `in_rare` 标记。整份换掉会把它们一并抹了
+        // ——表现为「配了 include_blocks 却不生效」，而根因在夹具。
+        let mut specs: Vec<wind_candidate::ClassSpec> = c
+            .engine_mgr
+            .charsets()
+            .classes()
+            .iter()
+            .filter(|s| s.key != "common_han")
+            .cloned()
+            .collect();
+        specs.push(common_han_spec(chars));
+        let (reg, dropped) = wind_candidate::CharsetRegistry::compile(specs);
+        assert!(dropped.is_empty());
+        c.engine_mgr.set_charsets(std::sync::Arc::new(reg));
+    }
+
+    /// 出厂 `common_han` 类的形态：作用域 = 汉字域、名单 = 这些字、名单外生僻。
+    fn common_han_spec(chars: impl IntoIterator<Item = char>) -> wind_candidate::ClassSpec {
+        wind_candidate::ClassSpec {
+            key: "common_han".into(),
+            members: chars.into_iter().map(|c| c.to_string()).collect(),
+            scope: Some(wind_candidate::Scope::Han),
+            default_common: Some(true),
+            outside_common: Some(false),
+            order: 50,
+            ..Default::default()
+        }
+    }
+
     /// ── 生僻字模式 ────────────────────────────────────────────────────────────
     ///
     /// 这几条**刻意不依赖真实词库**：本 worktree 没有 `build_dev/data` 时，依赖词库的
     /// 端到端用例会整族静默跳过而计数照绿（判据是耗时 0.00s）。模式的生命周期与准入
     /// 判据是这轮的核心性质，不能挂在一个可能没跑的测试上。
     mod rare_char {
+        // 常用字表夹具上提到父模块：空码补全那族用例同样要装表，见 `set_common` 的说明。
+        use super::set_common;
         use crate::coordinator::Coordinator;
         use crate::pipeline::ModeKind;
         use wind_config::Config;
@@ -1365,49 +1430,6 @@ mod tests {
             assert_eq!(before, after, "进出生僻字模式不应改变普通输入的候选");
         }
 
-        /// 装一份最小常用字表。`retain_rare_admitted` 对空表整条早退（见那条测试），
-        /// 故凡要验过滤结果的用例都得先装表。
-        /// 灌出厂字表。
-        ///
-        /// ⚠️ **必须同时装配配套的 registry**：判定已经归 `CharsetRegistry`（`common_han`
-        /// 类给出「是汉字却不在名单里 ⇒ 生僻」），只灌 `CommonChars` 的话没有人表态，
-        /// 所有字兜底判常用——生僻字模式会一条候选都留不下，而看起来像是过滤写错了。
-        ///
-        /// 生产路径上两者同源：`CommonChars::load` 读 `schemas/common_chars.txt`，
-        /// registry 里 `common_han` 的 `file:` 指的也是那一个文件。
-        fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char> + Clone) {
-            *c.common_chars.write().unwrap() =
-                wind_candidate::CommonChars::from_base(chars.clone());
-            // ⚠️ **合并而不是整份替换**：registry 里还有装配好的 emoji 类、50 个内置区块，
-            // 以及 `include_blocks` 打上的 `in_rare` 标记。整份换掉会把它们一并抹了
-            // ——表现为「配了 include_blocks 却不生效」，而根因在夹具。
-            let mut specs: Vec<wind_candidate::ClassSpec> = c
-                .engine_mgr
-                .charsets()
-                .classes()
-                .iter()
-                .filter(|s| s.key != "common_han")
-                .cloned()
-                .collect();
-            specs.push(common_han_spec(chars));
-            let (reg, dropped) = wind_candidate::CharsetRegistry::compile(specs);
-            assert!(dropped.is_empty());
-            c.engine_mgr.set_charsets(std::sync::Arc::new(reg));
-        }
-
-        /// 出厂 `common_han` 类的形态：作用域 = 汉字域、名单 = 这些字、名单外生僻。
-        fn common_han_spec(chars: impl IntoIterator<Item = char>) -> wind_candidate::ClassSpec {
-            wind_candidate::ClassSpec {
-                key: "common_han".into(),
-                members: chars.into_iter().map(|c| c.to_string()).collect(),
-                scope: Some(wind_candidate::Scope::Han),
-                default_common: Some(true),
-                outside_common: Some(false),
-                order: 50,
-                ..Default::default()
-            }
-        }
-
         fn cand(text: &str) -> wind_candidate::Candidate {
             wind_candidate::Candidate {
                 text: text.to_string(),
@@ -1435,6 +1457,164 @@ mod tests {
             ];
             c.retain_rare_admitted(&mut cands);
             assert_eq!(cands.len(), 2, "表未加载时不得过滤（宁可不滤，不给假列表）");
+        }
+    }
+    /// ── 特殊模式的空码补全 ────────────────────────────────────────────────────
+    ///
+    /// 「精确匹配 + 空码补全」（`single_code_input` + `single_code_complete`）下，当前码
+    /// 无精确解、更长编码有解时，引擎把更长那条备进 `ConvertResult::completion_hints`，
+    /// 由 `update_special_candidates` 判空后择一采纳。这一族钉的是**采纳路上的几道过滤
+    /// 不能把它吃掉**，以及生僻准入那道只对生僻字模式生效。
+    ///
+    /// ⚠️ 全族必须先 `set_common` 装表：生僻准入对空表整条早退（见
+    /// `no_filtering_when_common_table_is_missing`），不装表的话那道过滤根本没跑，用例
+    /// 照绿而缺陷原样活着 —— 论坛 t125 报的「快符空码不显示后续编码」正是这样躲过了
+    /// 一整轮自动化测试，只在装了字表的真机上复现。
+    ///
+    /// 刻意**不依赖 `build_dev/data`**：自造两张三条词条的小码表，缺数据也不会静默跳过。
+    mod special_completion {
+        use super::set_common;
+        use crate::coordinator::Coordinator;
+        use crate::pipeline::ModeKind;
+        use std::sync::Arc;
+        use wind_config::Config;
+
+        /// overlay（快符）方案 id。`zz_` 前缀避开开发机上真实安装的方案。
+        const KF: &str = "zz_kfx";
+        /// 主方案 id：生僻字模式用的是**活跃方案**的引擎，故它也要开这两个开关。
+        const MAIN: &str = "zz_main";
+
+        /// 造数据目录：一个主方案 + 一个 overlay 方案，两者都是「精确匹配 + 空码补全」，
+        /// 码表里 `x` 本身**没有编码**，只有 `xab` / `xcd` 这些更长的。
+        ///
+        /// ⚠️ 开关写在**方案自己名下**而不是全局：overlay 方案不继承全局
+        /// `schema.codetable`（`EngineManager::codetable_baseline` 按 `[overlay]` 段分流，
+        /// 取内置基线），写全局对它一点作用都没有。
+        fn data_dir(tag: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!("wind_special_completion_{tag}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            let schemas = dir.join("schemas");
+            std::fs::create_dir_all(schemas.join(KF)).unwrap();
+            std::fs::create_dir_all(schemas.join(MAIN)).unwrap();
+            let codetable = "[engine.codetable]\nmax_code_length = 4\n\
+                             single_code_input = true\nsingle_code_complete = true\n";
+            std::fs::write(
+                schemas.join(format!("{KF}.schema.toml")),
+                format!(
+                    "[schema]\nid = \"{KF}\"\nname = \"快符测试\"\nhidden = true\n\
+                     [engine]\ntype = \"codetable\"\n{codetable}\
+                     [overlay]\nkind = \"special\"\n\
+                     [[dictionaries]]\nid = \"main\"\npath = \"{KF}/{KF}.dict.yaml\"\ndefault = true\n"
+                ),
+            )
+            .unwrap();
+            // 快符表里是**符号**——正是 `rare_admits` 恒判 false 的那一类：它落在默认字表
+            // 管辖域之外，`is_string_common` 对它恒真（语义是「忽略」而非「常用」），
+            // 又没被 `include_blocks` 点名 ⇒ 生僻准入一施加就整批清空。
+            std::fs::write(
+                schemas.join(KF).join(format!("{KF}.dict.yaml")),
+                "---\nname: kfx\nversion: \"1\"\n...\n——\txab\n……\txcd\n",
+            )
+            .unwrap();
+            std::fs::write(
+                schemas.join(format!("{MAIN}.schema.toml")),
+                format!(
+                    "[schema]\nid = \"{MAIN}\"\nname = \"主测试\"\n\
+                     [engine]\ntype = \"codetable\"\n{codetable}\
+                     [[dictionaries]]\nid = \"main\"\npath = \"{MAIN}/{MAIN}.dict.yaml\"\ndefault = true\n"
+                ),
+            )
+            .unwrap();
+            // 同一个码前缀下**一常用一生僻**：生僻字模式那条对照据此分辨准入是真的在判，
+            // 而不是「全留」或「全滤」。
+            std::fs::write(
+                schemas.join(MAIN).join(format!("{MAIN}.dict.yaml")),
+                "---\nname: main\nversion: \"1\"\n...\n我\txab\n龘\txcd\n",
+            )
+            .unwrap();
+            dir
+        }
+
+        fn coord(tag: &str) -> Arc<Coordinator> {
+            let dir = data_dir(tag);
+            let mut cfg = Config::default();
+            cfg.schema.available = vec![MAIN.into()];
+            cfg.schema.active = MAIN.into();
+            Coordinator::new_headless(cfg, Some(&dir))
+        }
+
+        /// 敲一个无精确解的码，返回当前候选文本。
+        fn cands_for(
+            c: &Coordinator,
+            enter: impl FnOnce(&Coordinator, &mut crate::coordinator::State),
+        ) -> Vec<String> {
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            enter(c, &mut st);
+            st.special_buffer = "x".to_string();
+            st.special_cursor = 1;
+            c.update_special_candidates(&mut st);
+            let out = st.candidates.iter().map(|x| x.text.clone()).collect();
+            c.exit_special_mode(&mut st);
+            out
+        }
+
+        /// ★ 主用例（论坛 t125 的回归）：快符模式下空码补全必须出得来。
+        ///
+        /// 缺陷形态：补全旁路直接调了裸的 `retain_rare_admitted`，生僻准入于是施加到了
+        /// **所有**特殊模式上。快符候选是符号 ⇒ 准入恒判 false ⇒ 整批滤空 ⇒ 用户看到
+        /// 「有 `xab` 的编码，敲 `x` 却什么都不显示」。
+        #[test]
+        fn quick_symbol_completion_survives_rare_admission() {
+            let c = coord("kf");
+            set_common(&c, ['我']);
+            let idx = c
+                .special_mode_idx(KF)
+                .expect("快符方案应在 overlay 注册表内");
+            let got = cands_for(&c, |c, st| {
+                c.enter_special_mode(st, idx, 0);
+            });
+            assert_eq!(
+                got,
+                vec!["——".to_string()],
+                "快符模式下 `x` 应补出更长编码 `xab` 的候选，实得 {got:?}"
+            );
+        }
+
+        /// ★ 反向对照：生僻字模式下，同一条旁路**仍然**要筛。
+        ///
+        /// 没有这一条，把守卫连同过滤一起删掉也能让上一条绿——而那会让生僻字模式补出
+        /// 常用字来（原注释「本码没有生僻字时，补出来的却是个常用字」说的就是它）。
+        /// 这里一常用（我 `xab`）一生僻（龘 `xcd`）同码前缀，留下的必须只有生僻那个。
+        #[test]
+        fn rare_char_mode_still_filters_its_completion() {
+            let c = coord("rare");
+            set_common(&c, ['我']);
+            let got = cands_for(&c, |c, st| {
+                c.enter_rare_char_mode(st, 0);
+            });
+            assert_eq!(
+                got,
+                vec!["龘".to_string()],
+                "生僻字模式的补全候选应只剩生僻字（常用的「我」要被滤掉），实得 {got:?}"
+            );
+        }
+
+        /// 模式标识确实落在了预期的那一个上——上面两条的分流全靠它。
+        #[test]
+        fn the_two_modes_are_distinguishable() {
+            let c = coord("modes");
+            let idx = c
+                .special_mode_idx(KF)
+                .expect("快符方案应在 overlay 注册表内");
+            let mut st = c.state.lock().unwrap();
+            st.chinese_mode = true;
+            c.enter_special_mode(&mut st, idx, 0);
+            assert_eq!(st.active, Some(ModeKind::Special(idx)));
+            c.exit_special_mode(&mut st);
+            c.enter_rare_char_mode(&mut st, 0);
+            assert_eq!(st.active, Some(ModeKind::RareChar));
+            c.exit_special_mode(&mut st);
         }
     }
 }
