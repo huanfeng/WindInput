@@ -323,6 +323,29 @@ const BARE_INITIAL_SINGLE_CHAR_BOOST: i32 = 10_000_000;
 /// 两套依据逐键切换。收到 1 后该序列的首选长度恢复单调。
 const COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES: u32 = 1;
 
+/// **近距离补全的上浮名额**：`distance <= COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES` 的
+/// 补全按权重降序最多放行这么多条进完整匹配层，其余沉回前缀层。
+///
+/// ## 为什么无条件上浮必须有名额
+///
+/// 「近距离无条件上浮」本意是让「没有」这种高频补全别被数百条同音单字淹掉。但它对
+/// **同距离的一大批**候选没有任何约束：`meiy` 的残码 `y` 一个音节就能补出 58 条
+/// （没有/美元/每月/没用/每一/美院…），全部 distance=1、全部无条件上浮，于是
+/// 单字「没」被整批压到第 59 位 —— 从「单字淹掉词」翻转成「词淹掉单字」，只是方向反过来。
+///
+/// 该常量的原注释已预见这个风险（「若 30 条补全全部上浮，长输入下候选 2~5 位会被该前缀下
+/// 的冷僻长词占满」），但给出的约束是**距离 + 置信度**，对同距离同档的 58 条不起作用。
+///
+/// ## 为什么是名额而不是权重门槛
+///
+/// [`COMPLETION_FAR_WEIGHT_FLOOR`] 的文档写明了不能对近距离套门槛的理由：词库 weight_spec
+/// 的 median 仅 200，一半的词低于它，按权重卡会误沉大量「高频使用但低词频」的日常词。
+/// 名额则与词频分布无关 —— 不管这批词权重高低，只让最靠前的几条插队。
+///
+/// 取 8：候选窗每页 5~9 条（`ui.candidate.per_page` 出厂 5、extended 7），8 条保证高频补全
+/// 占满首页仍有余量，而单字最迟在第二页露面。实测 `meiy`：单字「没」从第 59 位升到第 9 位。
+const COMPLETION_NEAR_PROMOTE_LIMIT: usize = 8;
+
 /// 远距离补全的权重门槛：超出近距离的补全属于「预测用户尚未输入的内容」，
 /// 需足够高频才配上浮，否则沉回前缀补全层级（仍在候选中，只是排到精确匹配之后）。
 ///
@@ -2839,27 +2862,48 @@ impl Engine for PinyinEngine {
         // 补完」，判据位落在残码**之前**才对。裸声母（`zh`）下 `completed_len == 0`，位 0
         // 恒置位 ⇒ 整条判据自动让开，退化为纯字符前缀匹配 —— 这也是主流全拼输入法的行为：
         // `fe` 不成音节故前缀匹配，`fen` 是合法音节故按音节匹配、不含 `feng`。
-        for h in dict.search_prefix_with_boundary_syllable_capped(
-            query,
-            completion_limit,
-            syllable_cap,
-            completed_len,
-        ) {
-            // 候选比已完成音节多出的音节数。同时供「是否降级」判据与
-            // `completion_penalized` 的折扣指数使用。
-            //
-            // ⚠️ **必须过 `effective_boundary`**：`boundary == 0`（导入词库 / 手输码 /
-            // 旧数据）时 `count_ones()` 也是 0，`saturating_sub` 一减就是 0 —— 于是不管几个
-            // 音节，全部算作「与输入完全对齐」，既躲过分档、又白拿残码上浮特权、还免掉
-            // `completion_penalized` 的折扣。真机现场：用户导入扩展词库后打 `meiy`，
-            // 3 音节词涌进候选把单字「没」压到第 59 位。
-            //
-            // 同一个漏网口简拼路径堵过（见 step5 那条「boundary=0 不再直接放行」的注释），
-            // 这里当时漏了。`effective_boundary` 只在 `boundary == 0` 时才对码现切，
-            // 正常候选零成本。
-            let distance = effective_boundary(&h.code, h.boundary, trie)
-                .count_ones()
-                .saturating_sub(completed_syls);
+        // **先收集再定名额**：名额要发给权重最高的那几条（见 `COMPLETION_NEAR_PROMOTE_LIMIT`）。
+        //
+        // ⚠️ 下面那行按权重排序**当前是冗余的** —— 实测 `search_prefix_with_boundary_syllable_capped`
+        // 返回的就是权重降序，边遍历边计数结果相同（变异验证：删掉排序，两条护栏测试照样绿）。
+        // 保留它是因为「名额按权重发」是本逻辑的**要求**，而「上游按权重返回」是上游的
+        // **当前实现**，把要求寄存在别处的实现细节上，改那边的人不会知道这里依赖它。
+        // 代价只有一次 ≤ completion_limit 的排序。
+        let prefix_hits: Vec<_> = dict
+            .search_prefix_with_boundary_syllable_capped(
+                query,
+                completion_limit,
+                syllable_cap,
+                completed_len,
+            )
+            .into_iter()
+            .map(|h| {
+                let distance = effective_boundary(&h.code, h.boundary, trie)
+                    .count_ones()
+                    .saturating_sub(completed_syls);
+                (h, distance)
+            })
+            .collect();
+        // 够得着无条件上浮的那批（`w > 0` 那条门槛见下方 `demote_to_prefix_layer`），
+        // 按权重降序取前 N 个名额；其余沉回前缀层。
+        let near_promoted: std::collections::HashSet<usize> = {
+            let mut idx: Vec<usize> = prefix_hits
+                .iter()
+                .enumerate()
+                .filter(|(_, (h, d))| {
+                    h.weight > 0 && *d <= COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES
+                })
+                .map(|(i, _)| i)
+                .collect();
+            idx.sort_by_key(|&i| std::cmp::Reverse(prefix_hits[i].0.weight));
+            idx.into_iter()
+                .take(COMPLETION_NEAR_PROMOTE_LIMIT)
+                .collect()
+        };
+        for (hit_idx, (h, distance)) in prefix_hits.into_iter().enumerate() {
+            // `distance`（候选比已完成音节多出的音节数）已在上方连同 `effective_boundary`
+            // 一起算好 —— 那里有一条要害注释：`boundary == 0`（导入词库 / 手输码 / 旧数据）
+            // 时 `count_ones()` 也是 0，不过 `effective_boundary` 就会让多音节词冒充「完全对齐」。
             let demote_to_prefix_layer = if trailing_partial {
                 // ⚠️ 门槛比的是**原始** weight：COMPLETION_FAR_WEIGHT_FLOOR 按原始权重分布
                 // 标定（合理项下界「中国人民解放军」252 / 噪音上界 60），拿折后值比会让这条
@@ -2872,8 +2916,12 @@ impl Engine for PinyinEngine {
                 // 「中华人民」（后者距离 2、要过 FLOOR 而没过）。librime 用
                 // `log(w > 0 ? w : DBL_EPSILON)` 在结构上避免了这类条目参与竞争。
                 h.weight <= 0
-                    || (distance > COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES
-                        && h.weight < COMPLETION_FAR_WEIGHT_FLOOR)
+                    || if distance > COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES {
+                        h.weight < COMPLETION_FAR_WEIGHT_FLOOR
+                    } else {
+                        // 近距离：无条件上浮**限名额**，没抢到的沉回前缀层。
+                        !near_promoted.contains(&hit_idx)
+                    }
             } else {
                 true // 无残码：正常前缀补全，沉在精确匹配之后
             };

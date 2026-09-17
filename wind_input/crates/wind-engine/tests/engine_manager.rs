@@ -878,7 +878,13 @@ fn test_pinyin_trailing_partial_prefix_floats_above_exact() {
         eprintln!("跳过：pinyin schema 不存在");
         return;
     }
-    let cfg = make_config(&["pinyin"]);
+    // ⚠️ **本用例必须用出厂 completion 门槛**，不能沿用 `make_config` 那套旧值(2/3)。
+    // 那套是为本文件另外几个用例设的（`qingfengs` 验用户长词上浮，出厂门槛下召回层就没了），
+    // 而 `min_syllables = 2` 会让 `meiy`(2 音节)**达标启用词组补全**，放进大量 3+ 音节词，
+    // 单字被挤出 limit —— 那是「把门槛调宽」的代价，不是本用例要守的东西。
+    // 本用例守的是出厂配置下「前缀补全上浮、但不把单字整批压没」。
+    let mut cfg = make_config(&["pinyin"]);
+    cfg.schema.pinyin.completion = Default::default();
     let mgr = EngineManager::new(&cfg, Some(&dir));
 
     // meiy 尾部 "y" 未成音节：前缀补全「没有」应排在精确子串单字「没」之前。
