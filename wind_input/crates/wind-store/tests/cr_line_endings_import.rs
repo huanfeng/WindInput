@@ -9,6 +9,10 @@
 //!
 //! 末尾的 `every_text_entry_point_normalizes` 是守卫：新增一个吃全文的 `pub fn`
 //! 却忘了归一化，它会红。
+//!
+//! ⚠️ **样本一律在代码里构造，不要改用仓库里的 fixture 文件**：git 的 `core.autocrlf`
+//! 会在 checkout 时按平台改写文件行尾，同一份 fixture 在 Windows 和 Linux 上行尾不同，
+//! 这组测试就会变成「测 git 配置」而不是测解析器。
 
 use wind_store::import_formats::{
     CodePolicy, DictFormat, detect_dict_format, parse_words_auto, parse_words_rime, parse_words_tsv,

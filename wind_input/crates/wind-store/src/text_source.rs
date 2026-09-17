@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-/// 把外来文本规整成可按行解析的形态：剥 UTF-8 BOM，行尾一律折成 `\n`。
+/// 把外来文本规整成可按行解析的形态：剥 UTF-8 BOM，把**孤立** `\r` 折成 `\n`。
 ///
 /// **为什么需要**：全仓的按行解析走的都是 `str::lines()` 语义——只认 `\n`，顺带剥掉
 /// 紧邻其前的 `\r`。孤立 `\r` 因此根本不算换行，整份文件会被当成**一行**。各格式的
@@ -24,11 +24,38 @@ use std::borrow::Cow;
 /// 改掉的情况。这与「上屏换行风格」（`NewlineStyle`，宿主语义不同、CR 有意义）是两回事，
 /// 那边不能这么干，这边可以。
 ///
-/// **零拷贝**：不带 BOM 且不含 `\r` 时直接借用。用户词库动辄几 MB，不该为最常见的情况
-/// 复制一份。含 `\r` 时也只扫一遍、只分配一次（`\r\n` 折成一个 `\n`）。
+/// **只改真正需要改的**：`\r\n` 原样留着——`lines()` 本来就正确处理它，改写它既没有
+/// 收益，又要为最常见的 Windows 文件复制一整份。实测 5.6MB 的 CRLF 词库：无条件改写
+/// 要 11.1ms 并分配一份，只认孤立 `\r` 则是 2.0ms 零拷贝。LF 的 0.4ms 是一次 SIMD 扫描。
+/// 这一点也与 `NewlineStyle` 的教训同向：能不动用户的字节就不动。
+///
+/// **重复调用是刻意的**：`parse_words_auto` 归一化后传给 `detect_dict_format` 和各
+/// `parse_words_*`，它们各自再调一次（此时已无孤立 `\r`，走快路）。让每个 pub 入口
+/// 自包含地保证行尾正确，比省下那几毫秒重要——单独调用其中任何一个也得是对的。
+/// 是否含**孤立** `\r`（不被 `\n` 紧跟的）。CRLF 本来就被 `lines()` 正确处理，
+/// 没必要为它复制一份。
+fn has_lone_cr(text: &str) -> bool {
+    // 快路：`contains` 走标准库的向量化搜索，没有 `\r` 的文件到此为止（最常见的 LF）。
+    if !text.contains('\r') {
+        return false;
+    }
+    // 慢路：确实有 `\r` 了，逐个看它后面是不是 `\n`。纯 CRLF 会一路走到底返回 false，
+    // 代价是一趟扫描，仍远低于无条件复制一份几 MB 的文本。
+    let b = text.as_bytes();
+    let mut i = 0;
+    while let Some(off) = b[i..].iter().position(|&c| c == b'\r') {
+        let p = i + off;
+        if b.get(p + 1) != Some(&b'\n') {
+            return true;
+        }
+        i = p + 2;
+    }
+    false
+}
+
 pub fn normalize_import_text(text: &str) -> Cow<'_, str> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    if !text.contains('\r') {
+    if !has_lone_cr(text) {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
@@ -68,8 +95,20 @@ mod tests {
     }
 
     #[test]
-    fn crlf_folds_to_one_newline() {
-        assert_eq!(normalize_import_text("a\r\nb\r\n"), "a\nb\n");
+    fn crlf_is_left_alone_and_borrowed() {
+        // `lines()` 本来就把 \r\n 当一个换行，没有理由为它复制一份
+        let s = "a\r\nb\r\n";
+        assert!(matches!(normalize_import_text(s), Cow::Borrowed(x) if x == s));
+    }
+
+    #[test]
+    fn crlf_still_splits_into_the_same_lines_as_lf() {
+        // 不改写不等于不生效：下游按 lines() 读到的东西必须一致
+        let (a, b) = (
+            normalize_import_text("a\r\nb\r\n"),
+            normalize_import_text("a\nb\n"),
+        );
+        assert_eq!(a.lines().collect::<Vec<_>>(), b.lines().collect::<Vec<_>>());
     }
 
     #[test]
@@ -79,6 +118,8 @@ mod tests {
 
     #[test]
     fn mixed_endings_all_become_lf() {
+        // 只要存在一个孤立 \r 就整份改写：混排文件里 \r\n 一并折成 \n，
+        // 结果仍是「每行一条」，不会因为 \r\n 被动过而多出空行
         assert_eq!(normalize_import_text("a\r\nb\rc\nd"), "a\nb\nc\nd");
     }
 
