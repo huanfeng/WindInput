@@ -550,7 +550,7 @@ pub struct KeyPayload {
     pub scan_code: u32,
     pub modifiers: u32,
     pub event_type: u8, // 0=keydown, 1=keyup
-    pub toggles: u8,    // CapsLock/NumLock/ScrollLock
+    pub toggles: u8,    // 锁定态 CapsLock/NumLock/ScrollLock + 搭车位，见 `TOGGLE_*` 常量
     pub event_seq: u16,
     pub prev_char: u16,
 }
@@ -1445,7 +1445,12 @@ pub const MOD_SHORTCUT: u32 = MOD_CTRL | MOD_ALT | MOD_WIN;
 /// CapsLock/NumLock/ScrollLock 是真正的锁定态快照，每键实时采集。
 pub const TOGGLE_CAPSLOCK: u8 = 0x01;
 
-/// 自上一个 keydown 事件送达以来，**有键被透传给了宿主**——服务端没看见的一次输入。
+/// 自上一个 keydown 事件送达以来，**有键进了宿主**。
+///
+/// ⚠️ 语义就是字面这句，比「服务端没看见的输入」**更宽**：守卫在 `OnKeyDown` 出口按最终的
+/// `pfEaten` 判，而事件在函数中段就已发出，于是「发给了服务端**又**吐回给宿主」的键
+/// （`ipc_failed_*`、只读上下文、Ctrl/Alt 清理透传……）同样置位。那些置位都是对的——键确实
+/// 进了宿主、文档可能变了——而宽的这一侧恰好是安全方向（多报 = 用户重按一次 press1）。
 ///
 /// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的 18 字节布局（两端各有
 /// static_assert，加字段即协议破坏，而真机上 DLL 与 core 会混搭版本）。两个方向都安全：

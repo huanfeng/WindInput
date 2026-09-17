@@ -164,6 +164,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME caret_default_pos_policy COMMAND caret_default_pos_policy_test)
 
+    add_executable(passthrough_note_test tests/passthrough_note_test.cpp)
+    target_include_directories(passthrough_note_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(passthrough_note_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME passthrough_note COMMAND passthrough_note_test)
+
     add_executable(installer_guard_test tests/installer_guard_test.cpp)
     target_include_directories(installer_guard_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)

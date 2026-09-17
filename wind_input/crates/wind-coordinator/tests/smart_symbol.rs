@@ -776,3 +776,33 @@ fn passthrough_flag_does_not_disturb_capslock_bit() {
         a2
     );
 }
+
+/// keyup 带着这一位不得解除武装 —— 从服务端这侧钉住 C++「只在 keydown 那一发消费」的设计。
+///
+/// 补这条的由来：判据里 `data.event_type == EVENT_KEY_DOWN` 原本没有任何用例盯着（上面三条
+/// 全用 keydown，删掉它照样全绿）。而 toggle 键（Shift/Ctrl/CapsLock）的 keyup **会**发到
+/// 服务端，若那一发也消费该位，「中间按过 Shift」就会把事实吃掉，press2 又能误删一次。
+#[test]
+fn passthrough_flag_on_keyup_does_not_disarm() {
+    let coord = Coordinator::new_headless(cfg_en_mode(), Some(&data_dir()));
+    let a1 = press_policed_toggles(&coord, VK_OEM_PERIOD, 0, 0);
+    assert_eq!(inserted(&a1), Some("."), "实际: {:?}", a1);
+    // Shift 抬起（C++ 只对 toggle 键转发 keyup）。这一发带着位——但它不该被当成
+    // 「press1 之后有过透传」而解除武装：事实的归属者是紧随其后的那个 keydown。
+    coord.handle_key_event_policed(&KeyEventData {
+        key_code: 0x10, // VK_SHIFT
+        scan_code: 0,
+        modifiers: 0,
+        event_type: wind_ipc::protocol::EVENT_KEY_UP,
+        toggles: TOGGLES_PASSTHROUGH,
+        event_seq: 0,
+        prev_char: 0,
+    });
+    let a2 = press_policed_toggles(&coord, VK_OEM_PERIOD, '.' as u16, 0);
+    assert_eq!(
+        replaced(&a2),
+        Some((1, "。")),
+        "keyup 上的位不得解除武装，press2 应照常触发，实际: {:?}",
+        a2
+    );
+}

@@ -3,6 +3,7 @@
 #include "Globals.h"
 #include "IPCClient.h"
 #include "SkipKeyTable.h"
+#include "PassthroughNote.h"
 #include <string>
 #include <cstdint>
 #include <deque>
@@ -91,6 +92,7 @@ public:
     // 配对里打完字再跳出）。真正让前提失效的是焦点/文档切换与组合被清，那些路径按默认值全清。
     void ResetComposingState(BOOL keepPairState = FALSE) {
         _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _resyncDeadline = 0; _resyncFailStreak = 0; _skipKeys.Clear(); _pendingPairAction = {};
+        _passthrough.Reset();  // 与 skip 表同处清：跨文档带一个陈旧的透传事实过去没有意义
         if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; }
     }
 
@@ -356,40 +358,21 @@ private:
 
     // ── 透传上报（TOGGLE_PASSTHROUGH_KEY）────────────────────────────────────────
     //
-    // 事实：某个 keydown 没被我们吃下，直接进了宿主。服务端因此**看不到**这次输入——
-    // 英文半角下字母数字全走这条路（TSF 只吃标点键），中文模式下数字键等也是。
-    // 智能符号的 press2 判定需要知道「press1 与 press2 之间有没有别的输入」，而这是
-    // 服务端唯一拿不到的那一块。分工同 _lastPassthroughDigit：本文件只报事实。
-    //
-    // ⚠️ 判据必须**失效安全**：多报一次的代价是用户得重新按一次 press1；漏报的代价是
-    // ReplaceBackward 删掉用户刚打的字。故宁可宽——凡没吃下的 keydown 一律记，只排除
-    // 纯修饰键（按 Shift/Ctrl/Alt/Win 本身不往文档里写东西，排除它们是为了保住「按住
-    // Shift 连按两次 ？」这类正常 press2）。
-    //
-    // CapsLock **刻意不排除**：它切换后标点产物换了一列（服务端 caps 镜像会临时关中文
-    // 标点），press2 再按旧方向替换本就是错的，解除武装反而是对的。
-    //
-    // 只记 keydown：被我们吃下的键，其 keyup 常常是透传的（TSF 只对 toggle 键要 keyup），
-    // 把 keyup 也记进来会让每一次正常的 press1 自己把自己解除掉。
-    static bool _IsBareModifierVk(WPARAM vk)
-    {
-        switch (vk)
-        {
-        case VK_SHIFT:    case VK_CONTROL:  case VK_MENU:
-        case VK_LSHIFT:   case VK_RSHIFT:
-        case VK_LCONTROL: case VK_RCONTROL:
-        case VK_LMENU:    case VK_RMENU:
-        case VK_LWIN:     case VK_RWIN:
-            return true;
-        default:
-            return false;
-        }
-    }
-    void _NotePassthroughKeyDown(WPARAM vk)
-    {
-        if (!_IsBareModifierVk(vk))
-            _passthroughSinceLastKeyDownSent = true;
-    }
+    // 事实：某个 keydown 没被我们吃下，直接进了宿主。判据、排除项与失效方向的完整论证都在
+    // `PassthroughNote.h`（那是个不含 Win32 头的纯逻辑单元，有 `tests/passthrough_note_test.cpp`
+    // 钉着）。本文件这边只剩两件事：把 VK 值与 `<winuser.h>` 钉死，以及把守卫接到两个入口上。
+    static_assert(WindPassthrough::kVkShift == VK_SHIFT, "VK 漂移");
+    static_assert(WindPassthrough::kVkControl == VK_CONTROL, "VK 漂移");
+    static_assert(WindPassthrough::kVkMenu == VK_MENU, "VK 漂移");
+    static_assert(WindPassthrough::kVkLWin == VK_LWIN, "VK 漂移");
+    static_assert(WindPassthrough::kVkRWin == VK_RWIN, "VK 漂移");
+    static_assert(WindPassthrough::kVkLShift == VK_LSHIFT, "VK 漂移");
+    static_assert(WindPassthrough::kVkRShift == VK_RSHIFT, "VK 漂移");
+    static_assert(WindPassthrough::kVkLControl == VK_LCONTROL, "VK 漂移");
+    static_assert(WindPassthrough::kVkRControl == VK_RCONTROL, "VK 漂移");
+    static_assert(WindPassthrough::kVkLMenu == VK_LMENU, "VK 漂移");
+    static_assert(WindPassthrough::kVkRMenu == VK_RMENU, "VK 漂移");
+    static_assert(WindPassthrough::kVkPacket == VK_PACKET, "VK 漂移");
 
     // `OnTestKeyDown` / `OnKeyDown` 有 40+ 个 return，逐个接线必漏一处（本仓反复吃过的
     // "散点接线"）。用作用域守卫在**函数出口**统一判：析构时 `*pfEaten` 已是最终结论。
@@ -399,12 +382,27 @@ private:
         CKeyEventSink* sink;
         WPARAM vk;
         BOOL* eaten;
+        // skip 表命中（我们自己注入的键）时置位，见 `PassthroughNote.h` 的排除项论证。
+        bool suppressed = false;
+        void Suppress() { suppressed = true; }
         ~PassthroughNoter()
         {
-            if (sink != nullptr && eaten != nullptr && !*eaten)
-                sink->_NotePassthroughKeyDown(vk);
+            if (sink != nullptr && eaten != nullptr)
+                sink->_passthrough.NoteKeyDown((uint32_t)vk, *eaten != FALSE, suppressed);
         }
     };
+
+    // ⚠️⚠️ **skip 表放行的键一律不上报**，哪怕它们确实 `pfEaten = FALSE` 走进了宿主。
+    //
+    // 那些键是**我们自己注入的**（`MarkSyntheticKey` 的 SendInput 兜底、`_SimulatePairKey`
+    // 的配对动作、`_ReplayKeyToHost` 的重放），每一次都是在执行服务端刚下达的指示——服务端
+    // 对它们了如指掌，不是「它看不见的输入」。用户的真实按键永远不会出现在 skip 表里。
+    //
+    // 漏抑制的后果不是偶发而是**系统性失效**：`CTextService::CommitText` 在 TSF 提交失败时
+    // 回退 SendInput（每个字符 `MarkSyntheticKey(VK_PACKET)`），于是 press1 每次上屏都会把
+    // 自己注入的那串字符当成「用户透传输入」记一笔，press2 到达时必被解除 ⇒ 智能符号在那类
+    // 宿主上**整条功能失效**。而走这条兜底的恰恰是 `prev_char` 读不回的那批宿主（微信/终端），
+    // 也就是本功能最需要生效的地方——真机上还极难归因：换个宿主就好了。
 
     // ── 数字后智能标点的备用 prevChar 通路 ──────────────────────────────────────
     //
@@ -462,11 +460,9 @@ private:
     // **不要在 TSF 侧重新实现它。**
 
     WCHAR _lastPassthroughDigit; // Last digit key that passed through (for smart punct fallback in apps where TSF can't read text)
-    // 自上一个 **keydown** 事件发给服务端以来，有没有键被透传给宿主（见 _NotePassthroughKeyDown）。
-    // 在 _SendKeyToService 里随 toggles 的 TOGGLE_PASSTHROUGH_KEY 位带出并清零——只在 keydown
-    // 那一发消费：toggle 键的 keyup 也会发到服务端，让它顺手清掉会把这个事实丢在一个
-    // 服务端根本不看这位的事件上。
-    bool _passthroughSinceLastKeyDownSent = false;
+    // 「自上一个 keydown 送达服务端以来有键进了宿主」的记账。规则与理由见 PassthroughNote.h；
+    // 消费点在 _SendKeyToService（仅 keydown 那一发），清理点在 ResetComposingState。
+    WindPassthrough::PassthroughState _passthrough;
     uint32_t _pendingKeyUpKey;   // Key code of pending KeyUp toggle key
     uint32_t _pendingKeyUpModifiers; // Modifiers when KeyDown was pressed
     DWORD    _pendingKeyDownTime;    // GetTickCount() when toggle key was pressed down

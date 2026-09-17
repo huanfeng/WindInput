@@ -347,6 +347,10 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     if (_TryConsumeSkipKey(wParam, FALSE))
     {
         *pfEaten = FALSE; // Let it pass directly to the app
+        // 自生成键不算「服务端看不见的输入」——它正是服务端让我们注入的。理由见
+        // KeyEventSink.h 里 PassthroughNoter::Suppress 上方那段（漏抑制 = 智能符号在
+        // 走 SendInput 兜底的宿主上整条失效）。
+        _ptNote.Suppress();
         return S_OK;
     }
 
@@ -877,8 +881,11 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 {
     *pfEaten = FALSE;
 
-    // 同 OnTestKeyDown 的守卫。两处都要：跳过 OnTestKeyDown 直奔 OnKeyDown 的宿主存在
-    // （见 _DispatchPendingToggleKeyUp 的注释），只挂一处会在那些宿主上整条失效。
+    // 同 OnTestKeyDown 的守卫，两处都要 —— 但成因不是「宿主跳过 test」，而是**反过来**：
+    // Chrome / QQ 等宿主会无视 OnTestKeyDown 的 pfEaten=FALSE **仍调用本函数**（见下方
+    // 密码框守卫与 policy 早期闸门那两处同款注释）。也就是说 test 已经跑过、skip 条目
+    // 已被它消费掉，本守卫这边**无从 Suppress()** —— 自生成键在那批宿主上的兜底因此不能
+    // 依赖 skip 表，改由 `IsSelfInjectedVk` 按 VK 值挡（0xE7/0xE8），见 PassthroughNote.h。
     // 同一个键两处都记也无妨——记的是个幂等的布尔。
     PassthroughNoter _ptNote{this, wParam, pfEaten};
 
@@ -2099,20 +2106,23 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
         _lastPassthroughDigit = 0;
     }
 
-    // 透传上报位：只在 **keydown** 这一发带出并清零。toggle 键的 keyup 也会走到这里
-    // （见 _DispatchPendingToggleKeyUp），让它顺手清掉会把「中间有过透传」这个事实丢在一个
-    // 服务端根本不读该位的事件上——症状是「中间按过 Shift 就又能误删一次」。
-    if (eventType == KEY_EVENT_DOWN)
+    // 透传上报位：只在 **keydown** 这一发带出并清零（keyup 不消费的理由见 PassthroughNote.h
+    // 的 TakeOnKeyDownSend）。本函数在此之前的两处 early return 都在赋值之前，位被保留，
+    // 属安全方向。
+    if (eventType == KEY_EVENT_DOWN && _passthrough.TakeOnKeyDownSend())
     {
-        if (_passthroughSinceLastKeyDownSent)
-        {
-            toggles |= TOGGLE_PASSTHROUGH_KEY;
-            WIND_LOG_DEBUG(L"passthrough_before_key: 上一次按键送达后有键被透传，随本事件上报\n");
-        }
-        _passthroughSinceLastKeyDownSent = false;
+        toggles |= TOGGLE_PASSTHROUGH_KEY;
+        WIND_LOG_DEBUG(L"passthrough_before_key: 上一次按键送达后有键进了宿主，随本事件上报\n");
     }
 
     BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar);
+    // ★ 发送失败 ⇒ 事实从未送达，必须放回去。位已在上面清掉，不放回就是**漏报**——而漏报
+    // 正是本机制唯一不可接受的方向（服务端会把下一按判成 press2，删掉用户刚打的字）。
+    // SendKeyEvent 返回 FALSE 是本文件显式承认的场景（下游各 ipc_failed_* 分支）。
+    if (!result && (toggles & TOGGLE_PASSTHROUGH_KEY) != 0)
+    {
+        _passthrough.RestoreOnSendFailure();
+    }
 
     WIND_LOG_DEBUG_FMT(L"_SendKeyToService: vk=0x%02X, mods=0x%04X, elapsed=%dms\n",
                  keyCode, modifiers, GetTickCount() - startTime);

@@ -25,7 +25,13 @@ fn constexpr_u8(src: &str, name: &str) -> Option<u8> {
         .lines()
         .find(|l| l.contains(name) && l.contains("constexpr") && l.contains('='))?;
     let rhs = line.split('=').nth(1)?;
-    let hex = rhs.trim().trim_start_matches("0x");
+    let rhs = rhs.trim();
+    // 必须是 `0x` 字面量：`trim_start_matches` 对十进制 `= 16;` 会静默按 16 进制读成 0x16，
+    // 于是「两端一致」的结论建立在一次误解析上——对账测试自己假绿，比没有还糟。
+    if !rhs.starts_with("0x") {
+        return None;
+    }
+    let hex = rhs.trim_start_matches("0x");
     let hex = hex.split(|c: char| !c.is_ascii_hexdigit()).next()?;
     u8::from_str_radix(hex, 16).ok()
 }

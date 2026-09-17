@@ -164,7 +164,8 @@ constexpr uint8_t TOGGLE_CAPSLOCK   = 0x01; // CapsLock is on
 constexpr uint8_t TOGGLE_NUMLOCK    = 0x02; // NumLock is on
 constexpr uint8_t TOGGLE_SCROLLLOCK = 0x04; // ScrollLock is on
 
-// 自上一个 keydown 事件送达服务端以来，**有键被透传给了宿主**（服务端没看见的输入）。
+// 自上一个 keydown 事件送达服务端以来，**有键进了宿主**（含「发过给服务端又吐回宿主」的，
+// 语义以 PassthroughNote.h 为准；宽的那一侧是安全方向）。
 //
 // 严格说它不是「切换键状态」，搭 toggles 的空闲位是为了**不动 KeyPayload 的 18 字节布局**：
 // 这个结构两端各有 static_assert，加字段就是一次协议破坏，而新旧 DLL / core 在真机上会
