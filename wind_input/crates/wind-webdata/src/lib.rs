@@ -545,6 +545,8 @@ pub trait WebDataRpc: WebDataHost {
             "theme.getText" => self.web_theme_get_text(params),
             "theme.delete" => self.web_theme_delete(params),
             "theme.importFromText" => self.web_theme_import_text(params),
+            "theme.previewPackage" => self.web_theme_preview_package(params),
+            "theme.importPackage" => self.web_theme_import_package(params),
             "theme.importFromUrl" => {
                 anyhow::bail!("URL 导入未启用（features.theme.import_url=false）")
             }
@@ -3447,6 +3449,75 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({ "ok": true }))
     }
 
+    /// 主题落到哪个目录 id —— **文本导入与包导入共用这一套判据**。
+    ///
+    /// 两条路各写一份的话，「哪个 id 能用、落到哪个目录」迟早会各说各话，而那种分歧
+    /// 只有在用户那边表现为「导入成功却哪儿都找不到」。
+    ///
+    /// - 传了 `slug`（主题唯一 id）：目录已存在则就地写回（不新建），否则以 slug 建目录；
+    /// - 未传（兼容旧客户端）：退回按 `meta.name` 建目录。
+    ///
+    /// 定制版 `[themes] hide` 掉的 id **当场拒掉，不给成功回执**：hide 是绝对的（用户层
+    /// 同名主题也不复活，见 `Config::custom_hides_theme` 的取舍说明），而导入是用户唯一
+    /// 能主动撞上这个 id 的入口——放行的话文件写下去了、回执是 ok，但它永远不进列表、
+    /// 选它也会被 `push_theme` 兜底掉，用户只看到「导入成功了却哪儿都找不到」。
+    fn theme_target_dir(
+        &self,
+        params: &Value,
+        fallback_name: &str,
+    ) -> anyhow::Result<(String, std::path::PathBuf)> {
+        let user_dir = self
+            .user_themes_dir()
+            .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
+        let slug = params
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| {
+                !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
+            });
+        let theme_id = slug.unwrap_or(fallback_name).to_string();
+        if wind_config::Config::custom_hides_theme(&theme_id) {
+            anyhow::bail!("本定制版已移除主题 id「{theme_id}」，该 id 不可用；请换一个 id 再导入");
+        }
+        let target = user_dir.join(&theme_id);
+        Ok((theme_id, target))
+    }
+
+    /// 「同名已存在」的机器可读回执。
+    ///
+    /// 这是**可预期的业务性失败**：客户端拿它去弹「是否覆盖」再以 force=true 重推，因此走
+    /// result 字段而非 error 通道——error 通道只有一个 String，客户端只能靠匹配文案来认
+    /// 冲突，改一次文案，设置端的覆盖确认就会静默退化成一条普通报错（没有任何测试或编译
+    /// 期检查看得见这种耦合）。
+    fn theme_conflict_json(theme_id: &str, display_name: &str) -> Value {
+        json!({
+            "ok": false,
+            "conflict": true,
+            "slug": theme_id,
+            "display_name": display_name,
+            "error": format!("主题「{display_name}」已存在"),
+        })
+    }
+
+    /// 推的正好是当前生效主题 → 立刻重解析下发，编辑器里改完即见效。返回是否重载了。
+    ///
+    /// 不做则只落盘，用户得手动切走再切回来（或重启）才看得到自己刚推的改动。
+    ///
+    /// 判据是**目录 id 相同**，不比对文件内容：主题可能被 base 继承链间接影响，且重解析
+    /// 一次远比误判便宜。用户目录优先于安装目录，所以推一个与内置主题同 id 的用户主题
+    /// （如 slug=default）同样会改变实际生效外观，这里一并覆盖。
+    fn theme_reload_if_current(&self, theme_id: &str) -> bool {
+        if self.current_theme_name() != theme_id {
+            return false;
+        }
+        // 明暗沿用当前 style（system 时按系统实时判定），与 on_system_theme_changed 同一出口。
+        let dark = self.current_theme_is_dark();
+        tracing::info!("导入的是当前主题 {}，重新加载以即时生效", theme_id);
+        self.push_theme(theme_id, dark);
+        true
+    }
+
     fn web_theme_import_text(&self, params: &Value) -> anyhow::Result<Value> {
         // 参数键沿用 "yaml"（前端契约未改），内容为 TOML 文本。
         let text = str_param(params, "yaml")?;
@@ -3461,48 +3532,11 @@ pub trait WebDataRpc: WebDataHost {
         if meta.name.trim().is_empty() {
             anyhow::bail!("主题 meta.name 为空");
         }
-        let user_dir = self
-            .user_themes_dir()
-            .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
-        // 目标目录 id：以调用方传入的 slug（主题唯一 id）为准——
-        //   传了 slug：目录已存在则就地写回（不新建），否则以 slug 建目录（id 与目录名一致）；
-        //   未传 slug（兼容旧客户端）：退回按 meta.name 建目录。
-        let slug = params
-            .get("slug")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| {
-                !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
-            });
-        let theme_id = slug.unwrap_or(meta.name.as_str()).to_string();
-        // 定制版 `[themes] hide` 掉的 id：**当场拒掉，别给成功回执**。hide 是绝对的
-        // （用户层同名主题也不复活，见 `Config::custom_hides_theme` 的取舍说明），
-        // 而导入是用户唯一能主动撞上这个 id 的入口——放行的话文件写下去了、回执是
-        // `ok: true`，但它永远不进列表、选它也会被 `push_theme` 兜底掉，用户只看到
-        // 「导入成功了却哪儿都找不到」。这里说清楚该改哪个名字。
-        if wind_config::Config::custom_hides_theme(&theme_id) {
-            anyhow::bail!("本定制版已移除主题 id「{theme_id}」，该 id 不可用；请换一个 id 再导入");
-        }
-        let target = user_dir.join(&theme_id);
+        let (theme_id, target) = self.theme_target_dir(params, &meta.name)?;
         let file = target.join("theme.toml");
         let existed_before = file.exists();
         if existed_before && !force {
-            // 「同名已存在」是**可预期的业务性失败**，客户端拿它去弹「是否覆盖」再以
-            // force=true 重推，因此走 result 字段而非 error 通道——同 dispatch 里
-            // 「逐键错误不是 RPC 错误」的取舍。error 通道只有一个 String，客户端只能
-            // 靠匹配文案来认冲突，改一次文案，设置端的覆盖确认就会静默退化成一条普通
-            // 报错（没有任何测试或编译期检查看得见这种耦合）。`conflict` 是机器可读的
-            // 稳定判据。
-            //
-            // 旧设置端只认 ok/slug/display_name，会把这里显示成「主题导入失败」——
-            // 文案不如从前，但它本来就没有覆盖能力，走哪条通道都只能失败。
-            return Ok(json!({
-                "ok": false,
-                "conflict": true,
-                "slug": theme_id,
-                "display_name": meta.name,
-                "error": format!("主题「{}」已存在", meta.name),
-            }));
+            return Ok(Self::theme_conflict_json(&theme_id, &meta.name));
         }
         // 覆盖已存在主题前备份原文本，供依赖链校验失败时回滚。
         let backup = if existed_before {
@@ -3534,25 +3568,70 @@ pub trait WebDataRpc: WebDataHost {
             );
         }
 
-        // 推送的就是当前生效主题 → 立刻重解析下发，编辑器里改完即见效。
-        // 不做则只落盘，用户得手动切走再切回来（或重启）才看得到自己刚推的改动。
-        //
-        // 判据是**目录 id 相同**，不比对文件内容：主题可能被 base 继承链间接影响，
-        // 且重解析一次远比误判便宜。用户目录优先于安装目录，所以推一个与内置主题
-        // 同 id 的用户主题（如 slug=default）同样会改变实际生效外观，这里一并覆盖。
-        let current = self.current_theme_name();
-        let reloaded = current == theme_id;
-        if reloaded {
-            // 明暗沿用当前 style（system 时按系统实时判定），与 on_system_theme_changed 同一出口。
-            let dark = self.current_theme_is_dark();
-            tracing::info!("导入的是当前主题 {}，重新加载以即时生效", theme_id);
-            self.push_theme(&theme_id, dark);
-        }
+        let reloaded = self.theme_reload_if_current(&theme_id);
         Ok(json!({
             "ok": true,
             "slug": theme_id,
             "display_name": meta.name,
             // 供设置层如实回报给编辑器（此前那一层硬编码 false）。
+            "reloaded": reloaded,
+        }))
+    }
+
+    /// `theme.previewPackage { path }`：只读预览一个 `.wtheme`，不落任何盘。
+    ///
+    /// 设置端拿它弹「要导入这个主题吗」——双击文件关联进来的包，用户在确认之前有权
+    /// 知道自己要装的是什么。
+    fn web_theme_preview_package(&self, params: &Value) -> anyhow::Result<Value> {
+        let path = str_param(params, "path")?;
+        let p = wind_transfer::theme::preview_package(std::path::Path::new(path))?;
+        Ok(json!({
+            "display_name": p.display_name,
+            "author": p.author,
+            "version": p.version,
+            "asset_count": p.asset_count,
+            "has_preview": p.has_preview,
+        }))
+    }
+
+    /// `theme.importPackage { path, slug?, force? }`：主题包落盘。
+    ///
+    /// 回执形状与 `theme.importFromText` 一致（ok/slug/display_name/reloaded/conflict），
+    /// 设置端的覆盖确认与「已生效」提示因此是同一套，不必为包再写一份。
+    fn web_theme_import_package(&self, params: &Value) -> anyhow::Result<Value> {
+        let path = str_param(params, "path")?;
+        let package = std::path::Path::new(path);
+        let force = params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // 先预览：既拿到展示名（未传 slug 时用它定目录 id），也把坏包挡在动目录之前。
+        let preview = wind_transfer::theme::preview_package(package)?;
+        let (theme_id, target) = self.theme_target_dir(params, &preview.display_name)?;
+        if target.exists() && !force {
+            return Ok(Self::theme_conflict_json(&theme_id, &preview.display_name));
+        }
+
+        // 依赖链校验交给 transfer 的校验回调：它要在新目录**已就位、旧目录还没删**的
+        // 那一刻跑，失败才回滚得掉。单文件那条路是自己备份原文再校验的——两者落盘形态
+        // 不同（整目录 vs 单文件），回滚共用不了，但判据（能不能按 base 链加载起来）
+        // 是同一条。
+        let dirs = self.theme_dirs();
+        let id_for_verify = theme_id.clone();
+        let out = wind_transfer::theme::import_package(package, &target, move |_| {
+            wind_theme::theme::load_typed_dirs(&dirs, &id_for_verify)
+                .map(|_| ())
+                .map_err(|e| {
+                    anyhow::anyhow!("主题依赖校验失败：{e}（请检查 base 引用的基础主题是否存在）")
+                })
+        })?;
+
+        let reloaded = self.theme_reload_if_current(&theme_id);
+        Ok(json!({
+            "ok": true,
+            "slug": theme_id,
+            "display_name": out.display_name,
+            "files": out.files,
             "reloaded": reloaded,
         }))
     }

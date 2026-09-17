@@ -272,7 +272,19 @@ pub fn preview_package(package: &Path) -> anyhow::Result<ThemePreview> {
 /// **整目录替换**而不是逐文件覆盖：资源可能改名，逐文件写会把上一版的图留成垃圾，
 /// 而主题目录是按 id 独占的，没有「用户往里手工放了东西」这种用法。
 /// 先写 `.tmp` 兄弟目录、成功后才动目标，中途失败目标原封不动。
-pub fn import_package(package: &Path, target_dir: &Path) -> anyhow::Result<ThemeImportOutcome> {
+///
+/// `verify` 在**新目录已就位、旧目录尚未删除**的那一刻被调用，失败则整体回滚到旧内容。
+/// 它存在是因为有些校验只有看得到真实目录才做得了——比如主题的 `base` 继承链要在
+/// 主题目录群里定位被继承的那个。把这一步交给调用方，回滚逻辑就只有这里一份；
+/// 让调用方自己在事后校验的话，它手上已经没有旧内容可回滚了。
+pub fn import_package<V>(
+    package: &Path,
+    target_dir: &Path,
+    verify: V,
+) -> anyhow::Result<ThemeImportOutcome>
+where
+    V: FnOnce(&Path) -> anyhow::Result<()>,
+{
     let s = scan(package)?;
     let text = read_theme_text(package, &s.theme_entry)?;
     wind_theme::validate_text(&text)?;
@@ -331,6 +343,14 @@ pub fn import_package(package: &Path, target_dir: &Path) -> anyhow::Result<Theme
         }
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e.into());
+    }
+    // 就位之后才校验：`base` 继承链这类判断要在真实目录里才做得了。
+    if let Err(e) = verify(target_dir) {
+        let _ = std::fs::remove_dir_all(target_dir);
+        if had_old {
+            let _ = std::fs::rename(&old_dir, target_dir);
+        }
+        return Err(e);
     }
     let _ = std::fs::remove_dir_all(&old_dir);
 
@@ -484,7 +504,7 @@ mod tests {
         assert!(preview.has_preview);
 
         let dst = t.path().join("themes").join("shuimo");
-        let out = import_package(&pkg, &dst).unwrap();
+        let out = import_package(&pkg, &dst, |_| Ok(())).unwrap();
         assert_eq!(out.display_name, "水墨");
         assert_eq!(
             fs::read_to_string(dst.join(THEME_ENTRY_NAME)).unwrap(),
@@ -509,7 +529,7 @@ mod tests {
 
         let pkg = t.path().join("p.wtheme");
         write_good(&pkg);
-        import_package(&pkg, &dst).unwrap();
+        import_package(&pkg, &dst, |_| Ok(())).unwrap();
 
         assert!(dst.join("assets/bg.png").exists());
         assert!(
@@ -529,11 +549,67 @@ mod tests {
         let pkg = t.path().join("bad.wtheme");
         write_zip(&pkg, &[("assets/bg.png", b"only-assets")]); // 缺 theme.toml
 
-        assert!(import_package(&pkg, &dst).is_err());
+        assert!(import_package(&pkg, &dst, |_| Ok(())).is_err());
         assert_eq!(
             fs::read_to_string(dst.join(THEME_ENTRY_NAME)).unwrap(),
             "[meta]\nname = \"原装\"\n"
         );
+    }
+
+    /// 就位后的校验失败要整体回滚：装不上的新版不能把用户原来的主题顶掉。
+    ///
+    /// 这一步只能在包已经就位、旧目录还没删的那个窗口里做，所以回滚也只能在这里做
+    /// ——调用方拿到失败时，手上已经没有旧内容了。
+    #[test]
+    fn verify_failure_rolls_back_to_previous_theme() {
+        let t = tempfile::tempdir().unwrap();
+        let dst = t.path().join("themes").join("x");
+        fs::create_dir_all(dst.join("assets")).unwrap();
+        fs::write(dst.join(THEME_ENTRY_NAME), "[meta]\nname = \"原装\"\n").unwrap();
+        fs::write(dst.join("assets/keep.png"), b"mine").unwrap();
+
+        let pkg = t.path().join("p.wtheme");
+        write_good(&pkg);
+        let err = import_package(&pkg, &dst, |_| anyhow::bail!("base 引用的基础主题不存在"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("base"), "校验失败的原因要透传：{err}");
+        assert_eq!(
+            fs::read_to_string(dst.join(THEME_ENTRY_NAME)).unwrap(),
+            "[meta]\nname = \"原装\"\n"
+        );
+        assert!(dst.join("assets/keep.png").exists(), "旧资源该跟着回来");
+        assert!(!dst.join("assets/bg.png").exists(), "新版的资源不该残留");
+    }
+
+    /// 新装时校验失败：不留半个主题目录，否则主题列表里会多出一个打不开的条目。
+    #[test]
+    fn verify_failure_on_fresh_install_leaves_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let dst = t.path().join("themes").join("brand-new");
+        let pkg = t.path().join("p.wtheme");
+        write_good(&pkg);
+
+        assert!(import_package(&pkg, &dst, |_| anyhow::bail!("装不上")).is_err());
+        assert!(!dst.exists());
+    }
+
+    /// 校验看到的是**就位后的真实目录**——依赖链那类判断只有在这个位置才做得了。
+    #[test]
+    fn verify_sees_the_placed_directory() {
+        let t = tempfile::tempdir().unwrap();
+        let dst = t.path().join("themes").join("x");
+        let pkg = t.path().join("p.wtheme");
+        write_good(&pkg);
+
+        let mut seen = None;
+        import_package(&pkg, &dst, |dir| {
+            seen = Some(dir.join(THEME_ENTRY_NAME).exists() && dir.join("assets/bg.png").exists());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, Some(true), "校验时主题应当已经在目标位置了");
     }
 
     /// 路径穿越：`../` 与反斜杠形态都不能落到主题目录外面。
@@ -659,7 +735,7 @@ mod tests {
         assert!(preview_package(&pkg).is_err());
 
         let dst = t.path().join("themes").join("x");
-        assert!(import_package(&pkg, &dst).is_err());
+        assert!(import_package(&pkg, &dst, |_| Ok(())).is_err());
         assert!(!dst.exists(), "失败的导入不该留下半个主题目录");
     }
 
