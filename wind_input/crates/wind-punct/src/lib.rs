@@ -325,10 +325,18 @@ pub fn chinese_passthrough_punct_chars(
         {
             continue;
         }
-        // 3. 参与英文智能符号 ⇒ 连按替换要引擎接手，必须吃。按**源字符**判，与
-        //    [`english_participates`] 同源。两个开关（`symbol.english_mode` /
-        //    `symbol.english_punct_mode`）任一开着都可能用到它，故只看集合不看开关，宁可多吃。
-        if cfg.symbol.english_chars.contains(ch) {
+        // 3. 参与**中文**智能符号 ⇒ 连按替换要引擎接手，必须吃。
+        //
+        //    这个态的智能符号按**中文产物**判（[`participates`]），而第 1 条已经保证走到
+        //    这里的字符没有中文产物 ⇒ 产物就是它自己。出厂 `smart_chars` 全是中文符号，
+        //    故本条实际恒不命中；留着是为了用户把 ASCII 配进 `smart_chars` 时仍然正确。
+        //
+        //    ⛔ 这里**不能**改用 `symbol.english_chars`：那是英文智能符号的源字符集，
+        //    归 `english_punct_mode` / `english_mode` 两个开关管，与中文标点态无关。
+        //    早先在此按它排除，把 `.` `,` `?` `!` `:` `;` 整排挡在了透传之外——而那两个
+        //    开关出厂都是关的，等于凭一个没生效的功能否掉了一批键（`.` 撞 VK_DELETE，
+        //    恰恰是最该修的那个）。
+        if participates(cfg, &ch.to_string()) {
             continue;
         }
         // 4. 配对符 ⇒ 配对栈由引擎维护，必须吃。
@@ -373,7 +381,14 @@ pub fn english_passthrough_punct_chars(cfg: &InputConfig) -> Vec<char> {
             continue;
         }
         // 2. 参与英文智能符号 ⇒ 连按替换要引擎接手，必须吃。
-        if cfg.symbol.english_chars.contains(ch) {
+        //
+        //    ⚠️ **必须连开关一起判**。`english_chars` 只是源字符集，它归
+        //    `english_punct_mode` 管（本函数的场景是「中文输入 + 英文标点态」，对应的正是
+        //    这一个开关；`english_mode` 管的是整个输入法切英文，那时 DLL 走另一条分支、
+        //    根本不查本集合）。出厂 `english_punct_mode = false`，不判开关就等于凭一个
+        //    没生效的功能把出厂 `english_chars`（`.,?!:;`）整排挡在透传之外——`.` 撞
+        //    `VK_DELETE`，是这批里最该修的一个。
+        if cfg.symbol.english_punct_mode && cfg.symbol.english_chars.contains(ch) {
             continue;
         }
         // 3. 配对符 ⇒ 配对栈由引擎维护，必须吃。
@@ -667,11 +682,27 @@ mod tests {
 
     #[test]
     fn english_passthrough_default_set() {
-        // 默认配置下被挡住的只有两类：智能符号源 `.,?!:;` 与配对符 `()[]{}<>`。
-        // 其余 18 个的产物在英文半角态就是原样 ASCII。
+        // 默认配置下被挡住的只有配对符一类：出厂 `english_punct_mode = false`，
+        // 智能符号那条判据不成立。
         let en = english_passthrough_punct_chars(&cfg());
+        // ★ `.` 是这批里最危险的一个（撞 `VK_DELETE`，会吞掉光标后一个字符）。
+        //   它一度因为「只看 english_chars 不看开关」被挡在修复之外——凭一个出厂关闭的
+        //   功能否掉了一批键。这条锁住那个回归。
         for ch in ['.', ',', '?', '!', ':', ';'] {
-            assert!(!en.contains(&ch), "`{ch}` 参与英文智能符号，要留给引擎");
+            assert!(
+                en.contains(&ch),
+                "`{ch}` 在出厂配置（english_punct_mode=false）下产物即原样，应透传"
+            );
+        }
+        // 开关打开后才轮到智能符号接手。
+        let mut c_sw = cfg();
+        c_sw.symbol.english_punct_mode = true;
+        let en_sw = english_passthrough_punct_chars(&c_sw);
+        for ch in ['.', ',', '?', '!', ':', ';'] {
+            assert!(
+                !en_sw.contains(&ch),
+                "开了 english_punct_mode，`{ch}` 要留给引擎"
+            );
         }
         // ⚠️ 只点名代码默认值 `default_english_pairs()` 里真有的三对。出厂
         // `data/config.toml` 还多配了 `<>`（两者不一致，是既有状况，与本函数无关），
@@ -763,10 +794,21 @@ mod tests {
     #[test]
     fn passthrough_excludes_smart_symbol_and_pair_chars() {
         let conv = PunctuationConverter::new();
-        // 参与英文智能符号 → 连按替换要引擎接手。只看集合不看开关。
+        // 参与**中文**智能符号 → 连按替换要引擎接手。中文态按**产物**判，而走到这一步的
+        // 字符产物就是它自己，故把 ASCII 配进 `smart_chars` 即命中。
         let mut c = cfg();
-        c.symbol.english_chars = "#".into();
+        c.symbol.smart_chars = "#".into();
         assert!(!chinese_passthrough_punct_chars(&conv, &c).contains(&'#'));
+
+        // ⛔ 反过来，`english_chars` **不该**影响中文态：它归 english_punct_mode /
+        // english_mode 管，与中文标点态无关。早先在此按它排除，把出厂 `.,?!:;` 整排挡在
+        // 透传外——而那两个开关出厂都是关的。这条锁住那个回归。
+        let mut c2 = cfg();
+        c2.symbol.english_chars = "#".into();
+        assert!(
+            chinese_passthrough_punct_chars(&conv, &c2).contains(&'#'),
+            "english_chars 不该影响中文标点态的判据"
+        );
 
         // 被配进配对表 → 配对栈由引擎维护。
         let mut c2 = cfg();
