@@ -21,6 +21,16 @@ use wind_bridge::handler::KeyEventData;
 /// 融合模式里生僻字成员的常规取数上限（与其余成员同量级）。
 const MIX_RARE_CONVERT_LIMIT: usize = 50;
 
+/// 真实方案成员（拼音 / 英文 / 第三方码表）的**每成员配额**：最多有多少条进最终列表。
+///
+/// 与「取数上限」是两件事，见 [`Coordinator::update_mix_candidates`] 里那一支的注释。
+const MIX_MEMBER_QUOTA: usize = 50;
+
+/// 同上，成员**取数窗口**的封顶。窗口只需大到让词频/置顶够得着被埋在后面的词，
+/// 取到配额的 6 倍已经足够；再大只是让下游的词频 probe 白跑几百条随即被截掉
+/// （`initial_candidate_limit_of` 对码表类成员在 3 码以上给的是 1000）。
+const MIX_MEMBER_FETCH_CAP: usize = 300;
+
 /// 同上，过滤后不足配额时的重取上限。与独立模式的 `RARE_REFILL_LIMIT` 同值同理由。
 const MIX_RARE_REFILL_LIMIT: usize = 1000;
 
@@ -1904,15 +1914,35 @@ impl Coordinator {
                 if !self.engine_mgr.ensure_schema(member) {
                     continue;
                 }
-                // 50 是**每成员配额**，不是主输入路那种「取数上限」——别照
-                // `initial_candidate_limit_of` 把它按引擎类型放大。本函数无跨成员排序
-                // （见函数文档「成员顺序即候选优先级」），`seen` 又是先到先得，于是每个成员
-                // 取多少，直接等于它从靠后成员那里抢走多少位置：把它提到 300，排在末位的
-                // `english` 成员的候选就从第 ~100 条被推到第 ~400 条，越改越难找。
+                // ★ **取数上限与每成员配额是两件事**，此前是同一个 50，A2-3 即由此而来。
                 //
-                // 临英那处（`update_temp_english_candidates`）形似而实不同：那里只有一个词库
-                // 来源，上限纯粹是「够不够得着」，故与主路径同表分级。
-                let result = self.engine_mgr.convert_with(member, &state.mix_buffer, 50);
+                // · **配额**（[`MIX_MEMBER_QUOTA`]）＝最多有多少条进最终列表。它必须小：本函数
+                //   无跨成员排序（见函数文档「成员顺序即候选优先级」），`seen` 又是先到先得，
+                //   每个成员留多少，直接等于它从靠后成员那里抢走多少位置——放到 300，排在末位
+                //   的 `english` 成员的候选就从第 ~100 条被推到第 ~400 条，越改越难找。
+                // · **取数上限**＝从引擎问出多少条来**供下面的段内重排挑选**。它必须大：词频
+                //   重排与候选调整都只在已取到的切片内工作（`apply_freq_rerank_in` 不回查
+                //   词库），取数就是它们的可见窗口。两者合一时窗口恒等于配额，于是**原序排在
+                //   配额之外的词永远等不到被提上来**——用户在临英里把 `history` 用出了词频，
+                //   回到快捷输入打 `hi` 它仍不见踪影，要多打一码把候选面缩到 50 以内才
+                //   「忽然」生效。⚠️ 判据是**重排前的原序位次**：实测临英打 `hi` 拿 87 条、
+                //   `history` 重排后在第 34，但它的原序位次在 50 开外——快捷的 50 条窗口
+                //   压根取不到它，也就无从重排。别拿重排后的名次去估该取多少。
+                //
+                // 故取数按引擎类型分级（与主输入路、临英同一张表，再封顶到
+                // [`MIX_MEMBER_FETCH_CAP`]），段内重排之后才截到配额。
+                //
+                // ⚠️ 与上面生僻字成员那一支**刻意不同**，别照它改成条件重取：那里是「够一页
+                // 就不再多取」，因为它的缺口是*过滤后还剩几条*；这里必须无条件取数，因为重排
+                // 窗口与幸存条数无关——没取到的词就没得排，而「有没有被埋着」事前无从判断。
+                let limit = Self::initial_candidate_limit_of(
+                    self.engine_mgr.loaded_engine_type(member),
+                    &state.mix_buffer,
+                )
+                .min(MIX_MEMBER_FETCH_CAP);
+                let result = self
+                    .engine_mgr
+                    .convert_with(member, &state.mix_buffer, limit);
                 // 空串是「这个成员没给出显示串」（方案加载失败等），不是一种形态——漏掉这半个
                 // 判据会把组合区整段吞成前缀。
                 if text_display.is_none()
@@ -1959,6 +1989,18 @@ impl Coordinator {
                     &state.mix_buffer,
                 );
                 self.apply_shadow_in(mix_member_owner.as_deref(), &mut member_cands, &shadow_code);
+                // 配额在**重排与候选调整之后**截取——这个顺序就是本次修复本身：先截再排，
+                // 排的是同一个 50 条窗口，等于没改。⛔ 别把它挪到 `apply_*_in` 之前。
+                //
+                // 顺带两处随之而来的行为变化，都是**朝主输入路对齐**的方向，别当成缺陷：
+                // · `deleted` 现在是在整个窗口里删，删掉一条会从第 51 条补上来，列表不再
+                //   越删越短（改前从 50 条里删，删几条少几条）。
+                // · 置顶规则的 `position` 若 ≥ 配额（`MoveDown` 存的是全表下标，见
+                //   `handle_candidate.rs` 的 `CandidateOp::MoveDown`），该候选现在会被截掉而
+                //   不再出现。改前 `shadow.rs` 的 `position.min(len)` 会把它 clamp 到段末尾、
+                //   强行留一个位置——而用户把一条候选「往后移到第 80」本就是要压下去，
+                //   在只有 50 个位置的成员段里让它消失才是这个意图的正解。
+                member_cands.truncate(MIX_MEMBER_QUOTA);
                 for c in member_cands {
                     if seen.insert(c.text.clone()) {
                         cands.push(c);
