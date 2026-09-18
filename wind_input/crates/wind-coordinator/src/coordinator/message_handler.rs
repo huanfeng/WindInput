@@ -1676,12 +1676,18 @@ impl MessageHandler for Coordinator {
             keymap::VK_QUOTE | keymap::VK_BACKTICK
                 if data.modifiers & MOD_SHIFT == 0
                     && !state.input_buffer.is_empty()
-                    && self.manual_separator_key(data.key_code) =>
+                    && (self.manual_separator_key(data.key_code)
+                        || self.english_phrase_separator_key(data.key_code)) =>
             {
                 // 拼音手动音节分隔符：把 `'` 压入缓冲作硬边界（引擎按 `'` 强制切分、查询前剥除、
                 // preedit 原样保留含末尾 `'`）。走与字母键一致的候选刷新路径。
                 // 置于选词/标点分派（`_` 臂）之前：分隔符模式下该键优先作分隔符而非三选键——
                 // auto 模式仅在 `'` 未被占作选择键时才拦截 `'`（见 manual_separator_key）。
+                //
+                // 英文词组分词符（t42）走同一条路：同样是「把 `'` 压进缓冲、照常刷候选」，
+                // 区别只在谁来放行。两个谓词**或**在一起而不是合成一个，理由见
+                // `english_phrase_separator_key` 的文档（避让 vs 夺取是两条相反策略）。
+                // 反引号不参与英文分词——该谓词只认 VK_QUOTE。
                 {
                     let st = &mut *state;
                     preedit_cursor::BufEdit::new(&mut st.input_buffer, &mut st.input_cursor_pos)

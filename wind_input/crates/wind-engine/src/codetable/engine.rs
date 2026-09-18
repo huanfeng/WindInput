@@ -164,6 +164,14 @@ impl CodeTableEngine {
         self
     }
 
+    /// 本引擎的词典管理器。
+    ///
+    /// 供薄封装（[`EnglishEngine`](crate::english::EnglishEngine)）建它自己的索引——
+    /// 英文词组分词索引与码表无关，但它的数据源和本引擎是同一份词库，没必要再加载一遍。
+    pub fn dict_manager(&self) -> &Arc<DictManager> {
+        &self.dm
+    }
+
     /// 后台预热整句的两张懒表（简码索引 + 拼音词频）。整句未开启时是 no-op。
     ///
     /// 由构建方在引擎组装完毕、**所有 `with_*` 都已调用之后**调用一次——预热线程读的是

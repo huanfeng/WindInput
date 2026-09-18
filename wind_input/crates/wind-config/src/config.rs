@@ -927,6 +927,26 @@ pub struct EnglishGlobal {
     /// 本项改的是词库候选**自身**的形态，不新增条目。
     #[serde(default = "default_true")]
     pub case_follow_input: bool,
+    /// 英文词组分词输入（论坛 t42）：用 `'` 切开各段，每段只打前缀。**默认关**。
+    ///
+    /// `bue'air` ⇒ `Buenos Aires`，`ip'max` ⇒ `iPhone 15 Pro Max`。允许跳词，
+    /// 故 `ip'pro` 也能命中 `iPhone 15 Pro`，不必写成 `ip'15'pro`。
+    ///
+    /// # 为什么默认关
+    ///
+    /// 开启会让 `'` 在英文方案下**不再是第三候选键**（它要被收进缓冲当分词符）。
+    /// 那是所有英文方案用户都会察觉的行为变化，不该由一次升级静默施加。
+    /// 代价本身很小——`'` 选第 3 候选只是数字键 `3` 的冗余别名，同
+    /// `MixModeConfig::free_input_takes_select_keys` 的取舍——但「小」不等于「可以不问」。
+    ///
+    /// # 分词符为什么是 `'` 而不可配
+    ///
+    /// 词库里 57 条 code 本身含撇号（`you're` / `let's` / `O'Reilly`），看似冲突，实则不：
+    /// 英文方案 `input_chars` 默认 `a-z`，`'` 本来就进不了缓冲，那些词一直是靠**前缀**
+    /// 召回的（打 `let` 就能出 `let's`）。且 `convert` 是**合并**而非劫持，原路径照查。
+    /// 真正的备选是 `.`（t153 想拿它作模糊万能键），两者将来要一起定，那时再谈可配。
+    #[serde(default)]
+    pub phrase_seg: bool,
 }
 
 impl Default for EnglishGlobal {
@@ -937,6 +957,7 @@ impl Default for EnglishGlobal {
             raw_candidate: RawCandidateMode::Always,
             case_variants: false,
             case_follow_input: true,
+            phrase_seg: false,
         }
     }
 }
@@ -3829,6 +3850,16 @@ pub struct TempEnglishConfig {
     /// 故只影响主动开启过的用户。
     #[serde(default)]
     pub commit_space: bool,
+    /// 临英下的词组分词输入（论坛 t42）：用 `'` 切开各段，每段只打前缀。**默认关**。
+    ///
+    /// 与 [`EnglishGlobal::phrase_seg`] 是**两个作用域各一份**，同本段其余项的形制。
+    /// 语义、分词符、跳词规则完全一致——临英只是「临时状态」，核心功能与英文方案统一，
+    /// 但进入时机不同、需求可能相反（长时打英文 vs 中文里插一个英文词），故开关独立。
+    ///
+    /// ⚠️ 开启后 `'` 在临英下不再作二三候选键（`select_key_offset` 那条判定够不着它）。
+    /// 与英文方案侧同一个取舍，理由见那边。
+    #[serde(default)]
+    pub phrase_seg: bool,
 }
 
 impl Default for TempEnglishConfig {
@@ -3848,6 +3879,7 @@ impl Default for TempEnglishConfig {
             case_follow_input: true,
             comment_template_vertical: None,
             comment_template_horizontal: None,
+            phrase_seg: false,
         }
     }
 }

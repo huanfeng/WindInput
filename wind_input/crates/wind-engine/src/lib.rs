@@ -9,6 +9,7 @@ pub mod encoder;
 pub mod engine;
 pub mod english;
 pub mod english_merge;
+pub mod english_phrase;
 pub mod freq_rerank;
 pub mod manager;
 pub mod mixed;

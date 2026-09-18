@@ -265,6 +265,7 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.english.raw_candidate", Enum(RAW_CANDIDATE_VALUES)),
     f("schema.english.case_variants", Bool),
     f("schema.english.case_follow_input", Bool),
+    f("schema.english.phrase_seg", Bool),
     f("schema.codetable.auto_phrase.enabled", Bool),
     f("schema.codetable.auto_phrase.min_phrase_len", Int),
     f("schema.codetable.auto_phrase.max_phrase_len", Int),
@@ -413,6 +414,7 @@ static REGISTRY: &[ConfigField] = &[
         Enum(RAW_CANDIDATE_VALUES),
     ),
     f("input.temp_english.commit_space", Bool),
+    f("input.temp_english.phrase_seg", Bool),
     // 候选窗定位方式（内部配置，不进设置页 —— 见 wind-setting 的 uncovered allowlist）。
     f("input.caret.add_word_via_composition", Bool),
     f("input.caret.temp_pinyin_via_composition", Bool),

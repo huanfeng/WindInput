@@ -2204,6 +2204,56 @@ impl Coordinator {
         )
     }
 
+    /// 临英作用域的词组分词符判定（`input.temp_english.phrase_seg`）。
+    ///
+    /// 与 [`Self::english_phrase_separator_key`] 是**两个作用域各一份**，不是两个真相源：
+    /// 临英与英文方案的开关本就独立（同 `raw_candidate` / `commit_space` 那几对），
+    /// 用户对「长时打英文」与「中文里插一个英文词」的需求可能相反。
+    ///
+    /// 不问活跃引擎类型——临英是 overlay，典型场景下活跃引擎是五笔/拼音，问了恒假。
+    /// 调用点自己保证「当前在临英模式且缓冲非空」。
+    pub(crate) fn temp_english_phrase_separator_key(&self, key_code: u32) -> bool {
+        key_code == wind_keys::keymap::VK_QUOTE
+            && self.rt().config.input.temp_english.phrase_seg
+    }
+
+    /// 英文词组分词符判定：`key_code` 是否应作为分词符 `'` 压入缓冲（论坛 t42）。
+    ///
+    /// # ★ 与 [`Self::manual_separator_key`] 是**两条相反策略**，刻意不合并
+    ///
+    /// 两者都让 `'` 进缓冲，但对「`'` 已被占作选词键」的态度正相反：
+    /// - 拼音分隔符的 `auto` 档**避让**——`'` 被占就退去用反引号，占不到就不启用；
+    /// - 英文分词符**夺取**——开关打开就是用户明说「我要拿 `'` 当分词符」。
+    ///
+    /// 合进一个函数就得在里面按引擎类型分叉出两套相反的占用策略，那种函数改哪一侧都
+    /// 得先读懂另一侧。分开写，各自的策略在各自的文档里说得完整。
+    ///
+    /// # 夺取的代价与既有范式
+    ///
+    /// `'` 是出厂第三候选键（`keys.select_key_groups = semicolon_quote`）。夺取它的取舍
+    /// 与 `MixModeConfig::free_input_takes_select_keys` 同款——`'` 选第 3 候选只是数字键
+    /// `3` 的冗余别名，能力零损失。区别是那边默认夺取、这边默认关（见
+    /// `EnglishGlobal::phrase_seg`：那是所有英文方案用户都会察觉的变化，不该静默施加）。
+    ///
+    /// # ⚠️ 本谓词必须是唯一真相源
+    ///
+    /// 调用点是 `message_handler` 里 `VK_QUOTE | VK_BACKTICK` 那个 match 臂的守卫，它位于
+    /// 选词/标点分派（`_` 臂）**之前**——于是「收进缓冲」与「不再作选词键」是同一个判断的
+    /// 两面，物理上无法分叉。别把它拆成两处各判一次：`mix_select_keys_active` 的长注释
+    /// 记着那个教训（收字符那一臂口径比选词那一臂宽，选词臂成了不可达代码，且完全静默）。
+    pub(crate) fn english_phrase_separator_key(&self, key_code: u32) -> bool {
+        if key_code != wind_keys::keymap::VK_QUOTE {
+            return false;
+        }
+        if !self.rt().config.schema.english.phrase_seg {
+            return false;
+        }
+        // 只在**英文引擎**下夺取。活跃方案是五笔/拼音时 `'` 维持原本的选词键身份，
+        // 哪怕开关开着——那个开关属于英文方案的作用域。
+        self.engine_mgr.loaded_engine_type(&self.engine_mgr.active_schema_id())
+            == Some(wind_engine::EngineType::English)
+    }
+
     /// 手动分隔符判定的单一入口：`key_code` 是否应作为分隔符 `'` 压入缓冲。
     ///
     /// 每次按键实时求值（不缓存），使 `separator` 或 `select_key_groups` 热更新即时生效。

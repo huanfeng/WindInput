@@ -369,6 +369,11 @@ pub struct EngineManager {
     english_merge_engine: Mutex<Option<Option<Arc<dyn Engine>>>>,
     /// 全局临时拼音配置（码表方案下临时切拼音反查；全局唯一）。Mutex 以支持热重载。
     temp_pinyin: Mutex<wind_config::config::TempPinyinConfig>,
+    /// 临时英文配置镜像。**目前只为 `phrase_seg` 而存在**：词组分词索引要不要预热，取决于
+    /// 三个作用域（英文方案 / 临英 / 快捷输入英文）里有没有任何一个开着，而临英那份开关
+    /// 不在 `schema` 段里，`english` 镜像够不着它。与 `temp_pinyin` 同构地整份镜像而非
+    /// 只存一个 bool：下一个需要它的字段来了不必再改一次结构。
+    temp_english: Mutex<wind_config::config::TempEnglishConfig>,
     /// 不参与词频的字符区块（`schema.frequency.exclude_blocks` 的**解析结果**）。
     ///
     /// 存解析后的 [`wind_candidate::BlockMask`] 而不是原始 `Vec<String>`：解析要按名字线性
@@ -686,6 +691,7 @@ impl EngineManager {
             english: Mutex::new(config.schema.english.clone()),
             english_merge_engine: Mutex::new(None),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
+            temp_english: Mutex::new(config.input.temp_english.clone()),
             // 用户层在 store 里（`wind_store::charsets`），装配前先 `as_deref` 借用，
             // 下一行才把 `store` 本体 move 进结构体。
             charsets: Mutex::new(Arc::new(Self::build_charsets(
@@ -1882,6 +1888,19 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // 词组分词（t42）：快捷输入英文跟随 `schema.english.phrase_seg`（它的英文成员就是
+        // 英文方案那个引擎），临英那份是独立开关，故两者相或。引擎只需知道「要不要具备
+        // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
+        let phrase_seg_anywhere = self
+            .english
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .phrase_seg
+            || self
+                .temp_english
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phrase_seg;
         match Self::build_engine(
             schema_id,
             self.data_dir.as_deref(),
@@ -1890,6 +1909,7 @@ impl EngineManager {
             &mix_cfg,
             self.override_dir.as_deref(),
             &pinyin_cfg,
+            phrase_seg_anywhere,
             // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
             None,
         ) {
@@ -2817,6 +2837,9 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self.temp_pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
             config.input.temp_pinyin.clone();
+        // 同上：`phrase_seg` 变更要能让下方 `engines.clear()` 重建的引擎读到新值。
+        *self.temp_english.lock().unwrap_or_else(|e| e.into_inner()) =
+            config.input.temp_english.clone();
         // 字符类：**重新装配**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
         // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧的重建）。
         *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::build_charsets(
@@ -4365,6 +4388,12 @@ impl EngineManager {
         mix_cfg: &wind_config::MixGlobal,
         override_dir: Option<&Path>,
         pinyin_cfg: &wind_config::config::PinyinGlobalConfig,
+        // `phrase_seg_anywhere`：三个作用域（英文方案 / 临英 / 快捷输入英文）里是否
+        // **有任何一个**开着词组分词。不按作用域分别开关，是因为英文引擎实例是三者
+        // **共用**的（都走 `build_engine("english")`）——`seg_sep` 挂在引擎上根本分不开
+        // 作用域。真正的闸门在协调器：`'` 进不了缓冲，`convert` 的 `input.contains(sep)`
+        // 就早退，分词路径恒不触发。本参数只决定「引擎要不要具备这个能力、要不要预热索引」。
+        phrase_seg_anywhere: bool,
         mixed_role: Option<MixedRole>,
     ) -> Option<Box<dyn Engine>> {
         let data_dir = data_dir?;
@@ -4386,6 +4415,7 @@ impl EngineManager {
                 mix_cfg,
                 override_dir,
                 pinyin_cfg,
+                phrase_seg_anywhere,
                 Some(MixedRole::Primary {
                     // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）。
                     sentence_input: schema.engine.codetable.sentence_input,
@@ -4414,6 +4444,7 @@ impl EngineManager {
                     mix_cfg,
                     override_dir,
                     pinyin_cfg,
+                    phrase_seg_anywhere,
                     Some(MixedRole::Secondary(MixPinyinOpts {
                         abbrev: mix_cfg.enable_pinyin_abbrev,
                     })),
@@ -4438,6 +4469,7 @@ impl EngineManager {
                     mix_cfg,
                     override_dir,
                     pinyin_cfg,
+                    phrase_seg_anywhere,
                     None,
                 )
             } else {
@@ -4519,10 +4551,17 @@ impl EngineManager {
             // 全 false：无自动上屏 / 顶码 / 编码提示，纯前缀查词。
             let commit_opts = crate::codetable::CommitOptions::default();
             info!("Built english engine {}", schema_id);
-            return Some(Box::new(crate::english::EnglishEngine::new(
-                CodeTableEngine::new(mcl, commit_opts, Arc::new(dm))
-                    .with_own_extra_dicts(Self::declared_extra_dict_ids(&schema)),
-            )));
+            // 词组分词（t42）：三个作用域任一开着就给引擎装上这个能力，分词符固定 `'`
+            // （不可配的理由见 `EnglishGlobal::phrase_seg`）。全关时传 None，
+            // `convert` 逐字节退回原路径、索引一次都不建。
+            let seg = phrase_seg_anywhere.then_some(crate::english_phrase::PHRASE_SEPARATOR);
+            return Some(Box::new(
+                crate::english::EnglishEngine::new(
+                    CodeTableEngine::new(mcl, commit_opts, Arc::new(dm))
+                        .with_own_extra_dicts(Self::declared_extra_dict_ids(&schema)),
+                )
+                .with_phrase_seg(seg),
+            ));
         }
 
         // 拼音分支只关心「是不是混输辅助拼音」这一面，先解出来，下面三处判据照旧。

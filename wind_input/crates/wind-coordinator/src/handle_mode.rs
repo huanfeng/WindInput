@@ -76,11 +76,20 @@ impl MixLens {
     ///
     /// 这是 [`Coordinator::mix_lens`] 与按键分派的**单一真相源**：实际写进缓冲的字符
     /// 必须与本函数一致，否则透镜会在两个取值之间震荡（插入 → 判越界 → 回退 → 再插入）。
-    fn accepts(self, c: char) -> bool {
+    ///
+    /// `phrase_sep` = 本实例生效的英文词组分词符（[`Coordinator::mix_phrase_separator`]，
+    /// 未启用时 `None`）。它必须**由调用方传进来**而不是在这里读配置：本函数是 `MixLens`
+    /// 的方法、拿不到 `Coordinator`，而写入侧与本函数必须问同一个谓词——这正是上面那条
+    /// 「单一真相源」要求的内容。
+    fn accepts(self, c: char, phrase_sep: Option<char>) -> bool {
         match self {
             // 文本透镜的缓冲只可能由 ① 的 `VK_A..=VK_Z` 小写字母构成——拼音的手动音节
             // 分隔符走主输入路径，不进 mix 缓冲（`handle_mix_key` 里没有分隔符分支）。
-            MixLens::Text => c.is_ascii_lowercase(),
+            //
+            // 例外是英文词组分词符（t42）：它由按键分派显式收进缓冲，在这里就**不能**算
+            // 越界，否则 `free_input = auto`（出厂值）下缓冲一含 `'` 就切 Free 透镜，
+            // 而 Free 下一个选词键都没有 —— 词组打得进去却选不出来。
+            MixLens::Text => c.is_ascii_lowercase() || Some(c) == phrase_sep,
             // 数字透镜 = 求值器的表达式字符集（共用 `wind_quick_input::is_expr_char`，
             // 不另写一份，否则给求值器加运算符时这里会静默落后）。
             MixLens::Numeric => wind_quick_input::is_expr_char(c),
@@ -340,6 +349,44 @@ impl Coordinator {
             .unwrap_or(false)
     }
 
+    /// 本 mix 实例是否把 `'` 用作英文词组分词符（t42）。
+    ///
+    /// 跟随 `schema.english.phrase_seg`——快捷输入的英文成员**就是**英文方案的那个引擎
+    /// （`build_engine("english")`），两者用同一份词库、同一套分词规则，再立一个开关只会
+    /// 变成「在这里开了、在那里没开」的两处真相。临英则不同：它有自己独立的那份
+    /// （`input.temp_english.phrase_seg`），理由见该字段。
+    ///
+    /// 还要求本实例**确实含英文成员**：没有英文成员时 `'` 没有任何东西可查，夺走它
+    /// 只是白白让第三候选键失效。
+    ///
+    /// # ★ 这是分词符的单一真相源，两个消费者必须都问它
+    ///
+    /// 1. 按键分派：抢在第④步选词键判定之前把 `'` 收进缓冲；
+    /// 2. [`MixLens::accepts`]：让 `'` 不算「越界字符」。
+    ///
+    /// 第 2 条不可省。`mix_lens` 在 `free_input = auto`（出厂值）下会因为缓冲里出现越界
+    /// 字符而切到 [`MixLens::Free`]，而 Free 透镜**一个选词键都没有**、候选窗连序号标签
+    /// 都不画（见 `hide_index`）——那正好废掉分词的目的：从一堆词组里精确挑一条。
+    /// 两处若各写一份判据，表现就是「打得进去、选不出来」，且不报任何错。
+    pub(crate) fn mix_phrase_separator(&self, idx: u8) -> Option<char> {
+        let rt = self.rt();
+        if !rt.config.schema.english.phrase_seg {
+            return None;
+        }
+        let primary = rt.config.schema.primary_pinyin.clone();
+        let has_english = rt
+            .config
+            .schema
+            .mix_modes
+            .get(idx as usize)
+            .is_some_and(|m| {
+                m.members
+                    .iter()
+                    .any(|s| Self::resolve_mix_member(s, &primary) == "english")
+            });
+        has_english.then_some(wind_engine::english_phrase::PHRASE_SEPARATOR)
+    }
+
     /// 本 mix 实例的自由输入设置（实例缺失时按 `Off`——没有实例就没有自由输入可言）。
     pub(crate) fn mix_free_input(&self, idx: u8) -> FreeInputMode {
         self.rt()
@@ -422,7 +469,8 @@ impl Coordinator {
         if free == FreeInputMode::Off {
             return base;
         }
-        if state.mix_buffer.chars().any(|c| !base.accepts(c)) {
+        let sep = self.mix_phrase_separator(state.mix_id);
+        if state.mix_buffer.chars().any(|c| !base.accepts(c, sep)) {
             MixLens::Free
         } else {
             base
@@ -2463,6 +2511,25 @@ impl Coordinator {
                     //
                     // ★ 判据与①的数字臂共用 `mix_select_keys_active`：那里不让开，这里就是
                     // 不可达代码（数字透镜下曾如此，见该函数文档）。
+                    // ★ 英文词组分词符（t42）抢在选词键判定**之前**：位置即夺取。
+                    // `'` 是出厂第三候选键，不抢在前面这一键会被判成「选第 3 候选」。
+                    // 与主输入路、临英两处同构——同一处判断同时决定「收进缓冲」与
+                    // 「不再作选词键」，物理上无法分叉。
+                    //
+                    // 与 `free_input` 的夺取（⑤）不冲突也不重复：那条要 `free_on`，而本条
+                    // 在 `free_input = off` 的实例上同样生效。走到⑤才收的话，`free_input`
+                    // 关着的快捷输入里分词符永远进不去。
+                    if !shift
+                        && !state.mix_buffer.is_empty()
+                        && let Some(sep) = self.mix_phrase_separator(state.mix_id)
+                        && data.key_code == keymap::VK_QUOTE
+                    {
+                        // 经 BufEdit 而非直接 push：编码区支持左右移光标，分词符要插在
+                        // 光标处（与⑤的字面输入同一条写法）。
+                        preedit_cursor::BufEdit::new(&mut state.mix_buffer, &mut state.mix_cursor)
+                            .insert(sep);
+                        return refresh(self, state);
+                    }
                     if self.mix_select_keys_active(state.mix_id)
                         && !shift
                         && let Some(offset) = self.select_key_offset(data.key_code)

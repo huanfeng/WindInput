@@ -10,16 +10,62 @@
 
 use crate::codetable::CodeTableEngine;
 use crate::engine::{ConvertResult, Engine, EngineType};
+use crate::english_phrase::{LazyPhraseIndex, split_segments};
+use std::sync::Arc;
 use wind_candidate::CandidateSource;
 
 /// 英文引擎：内部复用码表引擎的查询，候选统一标记为 [`CandidateSource::English`]。
 pub struct EnglishEngine {
     inner: CodeTableEngine,
+    /// 词组分词索引（懒建 + 后台预热）。恒建结构、按 `seg_sep` 决定是否真的去填它。
+    phrase: Arc<LazyPhraseIndex>,
+    /// 词组分词符。`None` = 功能关闭，`convert` 逐字节退回原路径。
+    seg_sep: Option<char>,
 }
 
 impl EnglishEngine {
     pub fn new(inner: CodeTableEngine) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            phrase: Arc::new(LazyPhraseIndex::new()),
+            seg_sep: None,
+        }
+    }
+
+    /// 开启词组分词输入并指定分词符（t42）。
+    ///
+    /// 由构建方在引擎组装完毕后调用；`None` 保持关闭。开启时顺带把索引构建推给后台线程——
+    /// 不预热的话那笔全表扫描会恰好落在用户**第一次按下分词符**的那一刻。
+    pub fn with_phrase_seg(mut self, sep: Option<char>) -> Self {
+        self.seg_sep = sep;
+        if sep.is_some() {
+            self.phrase.prewarm(Arc::clone(self.inner.dict_manager()));
+        }
+        self
+    }
+
+    /// 词组分词候选。无分词符 / 功能关闭 / 切不出段时返回空。
+    fn phrase_candidates(&self, input: &str, max: usize) -> Vec<wind_candidate::Candidate> {
+        let Some(sep) = self.seg_sep else {
+            return Vec::new();
+        };
+        if !input.contains(sep) {
+            return Vec::new();
+        }
+        let segs = split_segments(input, sep);
+        // ★ 单段照查，别在这里挡。
+        //
+        // 「单段等价于普通前缀补全、原路径已经做了」这个理由只对**不含分词符**的输入成立，
+        // 而那种输入在上面就被 `!input.contains(sep)` 挡掉了、根本走不到这里。能走到这里的
+        // 单段只有一种形状：`ip'`（用户刚按下分词符）。此时原路径拿 `ip'` 去查 code 前缀
+        // 必然落空（词库里没有 code 以 `ip'` 开头的条目），再把分词路径也挡掉，候选就整片
+        // 消失了——实测反馈正是「打到 ' 时变空候选」。
+        //
+        // 单段查询的语义是「列出首词以这一段开头的词组」，正是按下分词符时该看到的东西。
+        // 空 `segs`（整串只有分词符）由 `PhraseSegIndex::search` 自己挡。
+        self.phrase
+            .get(self.inner.dict_manager())
+            .search(&segs, max)
     }
 }
 
@@ -29,6 +75,28 @@ impl Engine for EnglishEngine {
         // 英文候选统一标记来源（词频归属 / 融合加权档区分用）。
         for c in &mut r.candidates {
             c.source = CandidateSource::English;
+        }
+        // 词组分词候选**追加在原路径之后**，不是二选一。
+        //
+        // ★ 为什么合并而不是「见到分词符就改走分词路径」：词库里有 57 条 code 本身含撇号
+        // （`you're` / `let's` / `O'Reilly`）。分词符取 `'` 时，劫持式实现会让这些词在
+        // 打全码时反而查不到——而它们原本是能精确命中的。合并则两边各查各的：
+        // `you'r` 由原路径出 `you're`、分词路径出空；`envi'deg` 反过来。零回归。
+        //
+        // 两侧重复的可能性可以忽略：分词路径只出**多词**条目，而原路径要命中同一条，
+        // 得有一条 code 恰好等于带分词符的输入串——真出现了也是词库里确有此码，
+        // 那条候选本就该在。
+        let extra = self.phrase_candidates(input, max_candidates);
+        if !extra.is_empty() {
+            let base = r.candidates.len() as i32;
+            r.candidates
+                .extend(extra.into_iter().enumerate().map(|(i, mut c)| {
+                    // natural_order 接在原路径之后续号：它在下游是**同权重时的定序依据**，
+                    // 让分词候选从 0 重新开始会与原路径候选交错。
+                    c.natural_order = base + i as i32;
+                    c
+                }));
+            r.candidates.truncate(max_candidates);
         }
         // 英文无「自动上屏」语义：即使内部误判也抹掉（构造已关，此为双保险）。
         r.should_commit = false;

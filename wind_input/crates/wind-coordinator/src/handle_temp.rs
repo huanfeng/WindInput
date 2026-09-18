@@ -1459,6 +1459,26 @@ impl Coordinator {
                 // 这个整体开关，于是为了打 `C++` 就得连 `;`/`'` 的选词能力一起赔进去；
                 // 现在只有 `;` 自己被列入白名单时它才让位。
                 // 越界（页内候选不足）不在此处理，落下方标点臂保持既有语义。
+                // ── 词组分词符（t42）──
+                //
+                // ★ 必须排在下方选词键判定**之前**：位置即夺取。`'` 是出厂第三候选键，
+                // 不抢在前面的话这一键会被判成「选第 3 候选」，走不到缓冲。与主输入路
+                // `message_handler.rs` 的 `VK_QUOTE` 臂在 `_` 兜底之前是同一个道理——
+                // 同一处判断同时决定「收进缓冲」与「不再作选词键」，物理上无法分叉。
+                // （`mix_select_keys_active` 的长注释记着两处各判一次、选词臂成了不可达
+                // 代码的教训。）
+                //
+                // 缓冲非空是前提：空缓冲下临英压根没进来。
+                if !shift
+                    && !state.temp_english_buffer.is_empty()
+                    && self.temp_english_phrase_separator_key(data.key_code)
+                {
+                    Self::temp_english_insert(
+                        state,
+                        wind_engine::english_phrase::PHRASE_SEPARATOR,
+                    );
+                    return refresh(self, state);
+                }
                 if !shift
                     && punct_char(data.key_code, shift)
                         .is_none_or(|ch| !self.temp_english_char_allowed(ch))
