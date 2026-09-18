@@ -2930,8 +2930,19 @@ impl CandidateWindow {
         let preedit_bar_shown = !self.preedit.is_empty() && !self.preedit_embedded;
         if !self.mode_label.is_empty() && !preedit_bar_shown {
             let ml_fs = node_fs(&v.mode_label);
+            // 这个留白是**与后面的候选**拉开距离用的；一个候选都没有时（刚进临英/临拼、
+            // 窗口里只有这个徽标）它就成了凭空多出来的边距，是 GH#127 那片空白的另一半。
+            let trailing = if self.candidates.is_empty() {
+                0.0
+            } else {
+                12.0 * s
+            };
             let sep = if list_vertical {
-                let gap = 6.0 * s;
+                let gap = if self.candidates.is_empty() {
+                    0.0
+                } else {
+                    6.0 * s
+                };
                 Edges {
                     t: if inline_preedit_bottom { gap } else { 0.0 },
                     b: if inline_preedit_bottom { 0.0 } else { gap },
@@ -2939,7 +2950,7 @@ impl CandidateWindow {
                 }
             } else {
                 Edges {
-                    r: 12.0 * s,
+                    r: trailing,
                     ..Edges::default()
                 }
             };
@@ -2967,11 +2978,18 @@ impl CandidateWindow {
         // 无候选但有提示（模式徽标 / preedit）时：补一个与正常候选行等高的透明占位行，
         // 使提示窗口（如网址模式、临拼/临英刚进入）高度与有候选时及普通候选窗一致，
         // 避免窗口忽高忽低。占位行内边距/字号与候选行一致 → 测得同高，内容透明不可见。
+        //
+        // ★ `fixed_w(0.0)`：它的职责**只有撑高**，宽度一律不算。少了这一句，它会把
+        // `item_pad` 左右（10+8）连同那个空格字符（约 0.6 字宽）一并计进行宽 —— 而这一行
+        // 在横排里与模式徽标同处一行，于是「临时英文」四个字的提示框右边凭空多出近 30px
+        // 空白（GH#127，用户原话「提示框右侧还有好多空白」）。`fixed_w` 覆盖的是含 padding
+        // 的整宽、且不参与高度，正好只关掉宽度这一半（见 `View::measure`）。
         if self.candidates.is_empty() {
             list = list.child(
                 View::container(Layout::Row)
                     .cross(Align::Center)
                     .pad(item_pad)
+                    .fixed_w(0.0)
                     .child(
                         View::leaf(" ".to_string(), [0, 0, 0, 0]).font_size(text_fs.max(index_fs)),
                     ),
@@ -3777,6 +3795,94 @@ mod min_size_tests {
 
     const FIVE: &[&str] = &["一", "二", "三", "四", "五"];
     const THREE: &[&str] = &["一", "二", "三"];
+
+    // ────────────────── 只有模式徽标时的提示窗宽度（GH#127） ──────────────────
+
+    /// 造一个「只有模式徽标、没有候选」的提示窗（刚进临时英文/临时拼音的那一帧）。
+    fn hint(label: &str, min_w_dp: u32) -> CandidateWindow {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        w.scale = 1.0;
+        w.set_orientation(false, false, false);
+        w.set_min_size(min_w_dp, 0, 0, 0, 0);
+        w.update("", 0, label, vec![], 0, -1, 1, 1);
+        w
+    }
+
+    /// mock 文本测量的宽度（字符数 × 字号 × 0.6，见模块头注释）。
+    fn mock_text_w(w: &CandidateWindow, s: &str) -> f32 {
+        s.chars().count() as f32 * w.theme.behavior.font_size as f32 * 0.6
+    }
+
+    /// ★ GH#127：提示窗该紧贴文字，除了窗口自己的内边距不该再多出任何固定量。
+    ///
+    /// 修复前恒多 40.8px：无候选占位行把 `item_pad` 左右（10+8）连同那个撑高用的空格
+    /// （约 0.6 字宽）算进了行宽，模式徽标又带着「与后面候选拉开距离」的 12px 右留白 ——
+    /// 而这一帧后面根本没有候选。用户原话是「提示框右侧还有好多空白」。
+    ///
+    /// 判据写成等式而不是「差值一致」：多出来的是**固定量**，比较两个不同长度的徽标
+    /// 得到的差值在修复前后完全一样，那样的测试一个字都测不到。
+    #[test]
+    fn mode_label_hint_window_hugs_its_text() {
+        // 16 = 主题默认窗口内边距左右各 8（`window.padding` 的兜底值，scale=1）
+        const WINDOW_PAD_LR: f32 = 16.0;
+        for label in ["英", "临时英文", "临时英文超长模式名称"] {
+            let w = hint(label, 0);
+            let got = measured(&w).0;
+            let want = mock_text_w(&w, label) + WINDOW_PAD_LR;
+            assert!(
+                (got - want).abs() < 0.5,
+                "徽标「{label}」的提示窗应宽 {want}（文字 + 窗口内边距），实际 {got}"
+            );
+        }
+    }
+
+    /// 占位行的本职不能丢：提示窗的**高度**仍须与「有一条候选」时一致。
+    ///
+    /// 它存在的唯一理由就是这个（刚进临英时窗口不要比随后出候选时矮一截）。
+    /// 只盯着宽度改，很容易顺手把整行删掉 —— 那样宽度是对了，窗口却开始忽高忽低。
+    #[test]
+    fn mode_label_hint_window_keeps_candidate_row_height() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut with_cand = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        with_cand.scale = 1.0;
+        with_cand.set_orientation(false, false, false);
+        with_cand.update("", 0, "临时英文", vec![cand("一")], 0, -1, 1, 1);
+        assert_eq!(
+            measured(&hint("临时英文", 0)).1,
+            measured(&with_cand).1,
+            "只有徽标时的窗口高度须与有候选时一致"
+        );
+    }
+
+    /// 用户显式配了候选窗最小宽度时，仍以配置为准（紧贴文字只是**没配**时的默认）。
+    #[test]
+    fn configured_min_width_still_wins_on_hint_window() {
+        let w = hint("英", 300);
+        assert_eq!(measured(&w).0, 300.0, "配了最小宽度就该撑到 300dp");
+    }
+
+    /// 反向对照：有候选时，徽标与候选之间那 12px 留白必须还在 —— 上面那条修的是
+    /// 「后面没有候选」，不是把留白一删了事。
+    #[test]
+    fn mode_label_keeps_its_gap_when_candidates_follow() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut with_label = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        with_label.scale = 1.0;
+        with_label.set_orientation(false, false, false);
+        with_label.update("", 0, "临时英文", vec![cand("一")], 0, -1, 1, 1);
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let mut no_label = CandidateWindow::new(CandidateWindowConfig::default(), tx2).unwrap();
+        no_label.scale = 1.0;
+        no_label.set_orientation(false, false, false);
+        no_label.update("", 0, "", vec![cand("一")], 0, -1, 1, 1);
+        let delta = measured(&with_label).0 - measured(&no_label).0;
+        let want = mock_text_w(&with_label, "临时英文") + 12.0; // 徽标文字 + 右留白
+        assert!(
+            (delta - want).abs() < 0.5,
+            "有候选时徽标应占「文字 + 12px 留白」= {want}，实际 {delta}"
+        );
+    }
 
     // ─────────────────────────── 行数下限（min_rows） ───────────────────────────
 
