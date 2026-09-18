@@ -1,4 +1,4 @@
-//! `wind_input theme ...` 命令行：列出主题、预览与导入主题包（`.wtheme`）。
+//! `wind_input theme ...` 命令行：列出主题、主题包（`.wtheme`）的预览、导入与导出。
 //!
 //! 与设置端的图形入口是同一条 RPC，只是把「看清楚再决定」这一步交给终端输出而不是
 //! 确认框。存在的理由有两条：一是主题包的分发方（作者、市场）需要一个能脚本化的
@@ -20,6 +20,10 @@ pub fn run(args: &[String]) -> i32 {
         Some("import") => match args.get(1) {
             Some(path) => cmd_import(path, &args[2..]),
             None => return usage_err("import <包路径> [--force] [--id <主题id>]"),
+        },
+        Some("export") => match (args.get(1), args.get(2)) {
+            (Some(id), Some(out)) => cmd_export(id, out, &args[3..]),
+            _ => return usage_err("export <主题id> <输出路径> [--force]"),
         },
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
@@ -49,7 +53,9 @@ fn print_usage() {
          preview <包路径>                  只读查看一个 .wtheme 里装的是什么，不导入\n  \
          import <包路径> [选项]            导入主题包\n    \
          --force                         同 id 已存在时覆盖（默认拒绝并提示）\n    \
-         --id <主题id>                   指定落到哪个目录 id（默认用包里的主题名）"
+         --id <主题id>                   指定落到哪个目录 id（默认用包里的主题名）\n  \
+         export <主题id> <输出路径> [选项]  把已装主题打成 .wtheme（内置主题也可导出）\n    \
+         --force                         输出路径已有文件时覆盖（默认拒绝并提示）"
     );
 }
 
@@ -148,5 +154,40 @@ fn cmd_import(path: &str, rest: &[String]) -> anyhow::Result<i32> {
     } else {
         println!("在设置里切换到该主题即可生效。");
     }
+    Ok(0)
+}
+
+fn cmd_export(id: &str, out: &str, rest: &[String]) -> anyhow::Result<i32> {
+    let mut force = false;
+    for a in rest {
+        match a.as_str() {
+            "--force" => force = true,
+            other => {
+                eprintln!("未知选项: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    // 落点已有文件时默认拒绝——与 import 的同名冲突要 `--force` 对称。import 那边
+    // 有 core 的 `conflict` 回执兜着，导出没有：core 不猜落点，也就无从判断「这个
+    // 路径上原来那份要不要留」，只能由拿着路径的这一侧问。设置端走文件保存对话框，
+    // 那个框自己会问「要覆盖吗」，所以这道判据只在 CLI 这条路上。
+    if !force && std::path::Path::new(out).exists() {
+        eprintln!("{out} 已存在；要覆盖请加 --force");
+        return Ok(1);
+    }
+
+    let v = rpc_online("theme.exportPackage", json!({ "slug": id, "path": out }))?;
+    let display = v.get("display_name").and_then(Value::as_str).unwrap_or(id);
+    let path = v.get("path").and_then(Value::as_str).unwrap_or(out);
+    println!(
+        "已导出「{display}」→ {path}（{} 个资源文件{}）",
+        v.get("asset_count").and_then(Value::as_u64).unwrap_or(0),
+        if v.get("has_preview").and_then(Value::as_bool) == Some(true) {
+            "，含市场预览图"
+        } else {
+            ""
+        }
+    );
     Ok(0)
 }

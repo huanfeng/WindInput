@@ -48,7 +48,7 @@ fn print_root_usage() {
          子命令:\n  \
          config    配置查看/读写/导入导出（离线可用，core 在线时热重载）\n  \
          schema    方案配置 / 分类词库开关 / 词库缓存重建（需 core 在线）\n  \
-         theme     主题列表 / 主题包 .wtheme 预览与导入（需 core 在线）\n  \
+         theme     主题列表 / 主题包 .wtheme 预览、导入与导出（需 core 在线）\n  \
          dict      用户词库按方案导入导出（需 core 在线）\n  \
          phrase    用户短语导入导出 / 系统短语恢复（需 core 在线）\n  \
          backup    整机备份创建/查看/还原（需 core 在线）\n  \
