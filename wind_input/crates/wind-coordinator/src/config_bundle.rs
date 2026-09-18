@@ -220,6 +220,12 @@ pub(crate) struct SchemaKeyUnion {
     /// ——两侧的透传闸门本就带 `!hasInputSession`。这里按 `key_actions` 整表排除是**偏保守**
     /// 的取舍：该表里也可能有只在会话中生效的动词，多排除几个只是少透传，不构成缺陷。
     pub(crate) key_action_vks: std::collections::BTreeSet<u32>,
+    /// 任一**已安装**方案的 `[punct] custom_mappings` 覆盖过的标点源字符（并集）。
+    ///
+    /// 第三个减数，与前两个同一条理由。`effective_punct` 在方案声明了该表时是**整表替换**
+    /// （连 `custom_enabled` 一起换），全局表完全不参与 ⇒ 只看全局表的话，方案配的键会被
+    /// 透传掉、方案里那一格静默失效且零日志。同 `punct_en_chars` 已经接上的那条链。
+    pub(crate) custom_covered_chars: std::collections::BTreeSet<char>,
 }
 
 /// 算一次跨方案并集。
@@ -234,7 +240,34 @@ pub(crate) fn schema_key_union(mgr: &EngineManager) -> SchemaKeyUnion {
             .iter()
             .filter_map(|name| crate::key_resolver::key_action_name_to_vk(name))
             .collect(),
+        custom_covered_chars: schema_custom_covered_punct_chars(mgr),
     }
+}
+
+/// 任一已安装方案的自定义标点表覆盖过的源字符（并集）。见
+/// [`SchemaKeyUnion::custom_covered_chars`]。
+///
+/// 写法与 [`schema_custom_en_punct_chars`] 逐条对齐：给每个方案造一份「只含该方案表」的
+/// `PunctConfig`（与 `effective_punct` 合成生效配置的方式一致，整表替换连开关一起换），
+/// 再去问**同一个**判据函数 `wind_punct::custom_covered_punct_chars`。
+/// 不在此另写一份「哪一列非空」——那会是第四份，迟早与出字侧漂移。
+pub(crate) fn schema_custom_covered_punct_chars(
+    mgr: &EngineManager,
+) -> std::collections::BTreeSet<char> {
+    let conv = wind_transform::punctuation::PunctuationConverter::new();
+    let mut out = std::collections::BTreeSet::new();
+    for id in mgr.installed_schemas() {
+        let Some(table) = mgr.behavior_for(&id).punct_custom_mappings.clone() else {
+            continue; // 跟随全局 ⇒ 已由全局那份贡献，不重复算
+        };
+        let punct = wind_config::config::PunctConfig {
+            custom_enabled: !table.is_empty(),
+            custom_mappings: table,
+            ..Default::default()
+        };
+        out.extend(wind_punct::custom_covered_punct_chars(&conv, &punct));
+    }
+    out
 }
 
 /// 所有已安装方案的码元集里可作首码的非字母字符（并集）。见
@@ -424,8 +457,13 @@ impl ConfigBundle {
         //
         // 会话态绑定（翻页 / 次选 / 以词定字）**不必**在此排除：两侧的透传闸门本就带
         // `!hasInputSession`，那些键在空缓冲下本就该交还宿主。
-        // 层②：按键占用。两个标点态共用同一道过滤——占用与标点态无关。
+        // 层②：按键占用 + 方案级自定义表。两个标点态共用同一道过滤——两者都与标点态无关。
         let not_occupied = |ch: char| -> bool {
+            // 任一方案的自定义标点表覆盖了它 ⇒ 要出方案配的值，必须吃。全局表由
+            // `wind_punct` 那层判，这里补的是**方案级**（整表替换，全局表不参与）那半。
+            if schema_keys.custom_covered_chars.contains(&ch) {
+                return false;
+            }
             // 任一方案把它当码元首码 ⇒ 空缓冲按下要开始组码，透传就是「切到那个方案
             // 后再也打不出字」。跨方案并集，理由见 `SchemaKeyUnion::leading_code_chars`。
             if schema_keys.leading_code_chars.contains(&ch) {

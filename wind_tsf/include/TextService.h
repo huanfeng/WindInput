@@ -314,7 +314,8 @@ public:
     BOOL IsFullWidth() { return _bFullWidth; }
     // 当前是否**中文标点态**。标点透传判据要按它在两份集合间二选一
     // （见 CKeyEventSink::_IsPassthroughPunctKey）。与 _bFullWidth 在**完全相同**的
-    // 四处更新，漏一处就是「切了标点态但第一个标点仍按旧态判」。
+    // 五处写入（构造 + _SyncStateFromResponse + ModePush 回调 + 状态推送 + UpdateFullStatus），
+    // 漏一处就是「切了标点态但第一个标点仍按旧态判」。
     BOOL IsChinesePunct() { return _bChinesePunct; }
     // 软键盘面板是否开着（由服务端经 statusFlags 推送）。见 KeyEventSink 的数字键分支。
     BOOL IsSoftKeyboard() { return _bSoftKeyboard; }

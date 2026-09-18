@@ -293,6 +293,32 @@ const PUNCT_SOURCES: [char; 32] = [
     ';', ':', '\'', '"', ',', '<', '.', '>', '/', '?', '`', '~',
 ];
 
+/// 某份自定义标点表**覆盖**了哪些标点源字符（任一列非空即算覆盖，去重升序）。
+///
+/// 「覆盖」= 该键在这份表下会被改写成别的东西 ⇒ 必须经引擎出字，不能透传。
+/// 空串列是「回落默认转换」，不算覆盖（同 [`custom_english_punct_chars`] 的口径）。
+///
+/// # 为什么要单独成函数
+///
+/// 有两个消费者，判据必须同源：
+/// 1. [`chinese_passthrough_punct_chars`] 判**全局**表；
+/// 2. `ConfigBundle` 判**每个方案**的表——`effective_punct` 在方案声明了 `[punct]
+///    custom_mappings` 时是**整表替换**（连 `custom_enabled` 一起换），全局那份完全不参与。
+///    方案配的键漏减就是「被透传掉、方案里配的那一格静默失效」，零日志。
+///
+/// ⚠️ 查表走 [`custom_lookup`]（内部按 `PunctuationConverter::custom_key` 生成键），
+/// **不要**自己遍历 `custom_mappings` 的键：引号的存储键是 `"1`/`"2`、`'1`/`'2`，
+/// 手写遍历拿到的是存储键、折不回源字符，方案自定义的引号就会被漏减。
+pub fn custom_covered_punct_chars(conv: &PunctuationConverter, punct: &PunctConfig) -> Vec<char> {
+    PUNCT_SOURCES
+        .iter()
+        .copied()
+        .filter(|&ch| {
+            (0..4).any(|col| custom_lookup(conv, punct, ch, col).is_some_and(|v| !v.is_empty()))
+        })
+        .collect()
+}
+
 /// 该字符是否**正在**参与自动配对。配对栈由引擎维护，透传掉栈就断了，故命中即不能透传。
 ///
 /// ⚠️ **必须连开关一起判**。两张配对表出厂就有值（`()[]{}｛｝` 等），而
@@ -336,11 +362,12 @@ pub fn chinese_passthrough_punct_chars(
         if conv.peek_chinese_str(ch).is_some() {
             continue;
         }
-        // 2. 自定义映射**任一列**有值 ⇒ 要改写，必须吃。
+        // 2. 自定义映射**任一列**有值 ⇒ 要改写，必须吃。判据抽在
+        //    [`custom_covered_punct_chars`]，与 `ConfigBundle` 判**方案级**表的那份同源
+        //    ——方案声明了 `[punct] custom_mappings` 时是整表替换，全局这份完全不参与。
         //    只看中半列不够：中文输入模式下还能切到英文标点态（走英半列），那时这个键若已被
         //    透传，用户配的那一列就成了打不到的死格。空串列 = 回落默认转换，不算覆盖。
-        if (0..4).any(|col| custom_lookup(conv, &cfg.punct, ch, col).is_some_and(|v| !v.is_empty()))
-        {
+        if custom_covered_punct_chars(conv, &cfg.punct).contains(&ch) {
             continue;
         }
         // 3. 参与**中文**智能符号 ⇒ 连按替换要引擎接手，必须吃。
@@ -349,12 +376,15 @@ pub fn chinese_passthrough_punct_chars(
         //    这里的字符没有中文产物 ⇒ 产物就是它自己。出厂 `smart_chars` 全是中文符号，
         //    故本条实际恒不命中；留着是为了用户把 ASCII 配进 `smart_chars` 时仍然正确。
         //
+        //    ⚠️ **连 `smart_mode` 一起判**：`smart_chars` 出厂有值而总开关出厂是 `false`
+        //    （运行时闸门见 `handle_punct.rs` 的 `if !sym.smart_mode { return None; }`）。
+        //    只看表不看开关，就是本文件已经栽过两次的那个形状——凭一个没生效的功能否掉
+        //    一批键，而被否掉的恰是撞码最狠的那些。
+        //
         //    ⛔ 这里**不能**改用 `symbol.english_chars`：那是英文智能符号的源字符集，
-        //    归 `english_punct_mode` / `english_mode` 两个开关管，与中文标点态无关。
-        //    早先在此按它排除，把 `.` `,` `?` `!` `:` `;` 整排挡在了透传之外——而那两个
-        //    开关出厂都是关的，等于凭一个没生效的功能否掉了一批键（`.` 撞 VK_DELETE，
-        //    恰恰是最该修的那个）。
-        if participates(cfg, &ch.to_string()) {
+        //    归 `english_punct_mode` / `english_mode` 管，与中文标点态无关。早先在此按它
+        //    排除，把 `.` `,` `?` `!` `:` `;` 整排挡在了透传之外（`.` 撞 VK_DELETE）。
+        if cfg.symbol.smart_mode && participates(cfg, &ch.to_string()) {
             continue;
         }
         // 4. 配对符 ⇒ 配对栈由引擎维护，必须吃。
@@ -376,8 +406,13 @@ pub fn chinese_passthrough_punct_chars(
 ///
 /// 英文标点态下 [`convert_punct`] 根本不走中文标点表（`is_chinese_punct == false`），
 /// 于是 `,` `.` `;` `'` `[` `]` `\` 这些**在中文态必须吃**的键，在这个态下产物就是原样
-/// ASCII。所以这份集合比中文那份**更大**，是超集而非子集 —— 给现有集合叠 `&&` 只会让它
-/// 更小，方向正好反了。
+/// ASCII。所以这份集合**通常**比中文那份更大 —— 给现有集合叠 `&&` 只会让它更小，
+/// 方向正好反了。
+///
+/// ⚠️ 「超集」是出厂配置下的观察，**不是不变量**：两态的智能符号判据取自不同来源
+/// （中文态看 `smart_chars` 的中文产物、英文态看 `english_chars` + `english_punct_mode`），
+/// 用户完全可以把某个无中文映射的字符（如 `@`）配进 `english_chars` 并打开开关，那时
+/// 它在中文态能透传、英文态不能 —— 那是**正确**行为，不是判据写反。
 ///
 /// 撞码在这个态下同样成立，而且比中文态那批更凶：`.`(0x2E)→`VK_DELETE`（**吞掉光标后
 /// 一个字符**）、`[`(0x5B)→`VK_LWIN`（弹开始菜单）、`'`(0x27)→`VK_RIGHT`、`;`(0x3B)→`VK_F1`。
@@ -685,9 +720,12 @@ mod tests {
 
     #[test]
     fn english_passthrough_is_superset_of_chinese() {
-        // 这条断言表达的是设计意图：英文标点态不走中文标点表，凡中文态能透传的，英文态
-        // 必然也能。反过来不成立——`,` `.` `;` 这些在中文态要转，在英文态却是原样。
-        // 若哪天两者出现「中文能透、英文不能」的字符，多半是判据写反了。
+        // 出厂配置下英文态是中文态的超集：英文态不走中文标点表，中文态能透传的它也能。
+        // 反过来不成立——`,` `.` `;` 这些在中文态要转、在英文态却是原样。
+        //
+        // ⚠️ 只在**出厂配置**下成立，**不是不变量**。两态的智能符号判据来源不同，把无中文
+        // 映射的字符配进 `english_chars` 并开 `english_punct_mode`，就会出现「中文能透、
+        // 英文不能」——下面那条反例正是验它，免得后人把本条误当铁律去「修」判据。
         let conv = PunctuationConverter::new();
         let c = cfg();
         let cn = chinese_passthrough_punct_chars(&conv, &c);
@@ -695,7 +733,20 @@ mod tests {
         for ch in &cn {
             assert!(en.contains(ch), "`{ch}` 中文态能透传，英文态没有理由不能");
         }
-        assert!(en.len() > cn.len(), "英文态该是真超集，不该只是相等");
+        assert!(
+            en.len() > cn.len(),
+            "出厂配置下英文态该是真超集，不该只是相等"
+        );
+
+        // 反例：`@` 无中文映射（中文态可透传），但配进英文智能符号并开开关后，英文态
+        // 必须把它留给引擎 ⇒ 超集关系被打破，而这是**正确**行为。
+        let mut c2 = cfg();
+        c2.symbol.english_punct_mode = true;
+        c2.symbol.english_chars = "@".into();
+        let cn2 = chinese_passthrough_punct_chars(&conv, &c2);
+        let en2 = english_passthrough_punct_chars(&c2);
+        assert!(cn2.contains(&'@'), "中文态不看 english_chars，`@` 仍可透传");
+        assert!(!en2.contains(&'@'), "英文态开了开关，`@` 要留给智能符号");
     }
 
     #[test]
@@ -817,11 +868,23 @@ mod tests {
     #[test]
     fn passthrough_excludes_smart_symbol_and_pair_chars() {
         let conv = PunctuationConverter::new();
-        // 参与**中文**智能符号 → 连按替换要引擎接手。中文态按**产物**判，而走到这一步的
-        // 字符产物就是它自己，故把 ASCII 配进 `smart_chars` 即命中。
+        // 参与**中文**智能符号**且开关开着** → 连按替换要引擎接手。中文态按**产物**判，
+        // 而走到这一步的字符产物就是它自己，故把 ASCII 配进 `smart_chars` 即命中。
         let mut c = cfg();
+        c.symbol.smart_mode = true;
         c.symbol.smart_chars = "#".into();
         assert!(!chinese_passthrough_punct_chars(&conv, &c).contains(&'#'));
+
+        // ⛔ `smart_mode` 关着时智能符号不生效，光有 `smart_chars` 不该挡住透传。
+        // 出厂 `smart_mode = false` 而 `smart_chars` 有值——这是本文件第三次栽的同一个坑
+        // （前两次是 english_chars 与 auto_pair 两张表）。这条锁住那个方向。
+        let mut c_off = cfg();
+        c_off.symbol.smart_mode = false;
+        c_off.symbol.smart_chars = "#".into();
+        assert!(
+            chinese_passthrough_punct_chars(&conv, &c_off).contains(&'#'),
+            "smart_mode 关着，光有 smart_chars 不该挡住透传"
+        );
 
         // ⛔ 反过来，`english_chars` **不该**影响中文态：它归 english_punct_mode /
         // english_mode 管，与中文标点态无关。早先在此按它排除，把出厂 `.,?!:;` 整排挡在
