@@ -323,9 +323,9 @@ public:
     using RefreshIconCallback = std::function<void()>;
 
     // Callback type for mode-only push (CMD_MODE_PUSH).
-    // 仅携带 chineseMode + fullWidth，用于 FocusGained 竞态窗口优化。
-    // 回调在 AsyncReader 线程上调用；实现必须用 InterlockedExchange 写 _bChineseMode/_bFullWidth，
-    // 不得调用 _SyncStateFromResponse（会清热键）。
+    // 携带 chineseMode + fullWidth + chinesePunct，用于 FocusGained 竞态窗口优化。
+    // 回调在 AsyncReader 线程上调用；实现必须用 InterlockedExchange 写
+    // _bChineseMode/_bFullWidth/_bChinesePunct，不得调用 _SyncStateFromResponse（会清热键）。
     // 带 chinesePunct：TSF 侧的标点透传判据要按当下标点态二选一，而 CMD_MODE_PUSH 正是
     // 消除焦点切换后首次按键竞态的那条快路径——漏了它，切完焦点的第一个标点会用旧态判。
     using ModePushCallback =

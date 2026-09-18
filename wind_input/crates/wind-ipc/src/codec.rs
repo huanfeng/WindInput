@@ -442,15 +442,23 @@ pub fn encode_ack() -> Vec<u8> {
     ipc.to_bytes().to_vec()
 }
 
-/// 编码 ModePush 响应（FocusGained 同步路径）：4 字节 LE flags，仅携带中英/全半角。
-/// DLL 收到后在首键前写好 _bChineseMode/_bFullWidth。与 Go `EncodeModePush` 字节对齐。
-pub fn encode_mode_push(chinese_mode: bool, full_width: bool) -> Vec<u8> {
+/// 编码 ModePush 响应（FocusGained 同步路径）：4 字节 LE flags，携带中英 / 全半角 / 中英标点。
+/// DLL 收到后在首键前写好 `_bChineseMode` / `_bFullWidth` / `_bChinesePunct`。
+///
+/// ⚠️ **标点位不可省**：DLL 的标点透传判据要按当下标点态在两份集合间二选一，而英文态那份
+/// 是超集。漏了这一位，`_bChinesePunct` 会在每次焦点切换后被清成 false，于是中文标点态下
+/// 误用英文态集合 —— `,` `.` `'` 这些本该转中文标点的键被直接透传成半角（B-9 的回归形态）。
+/// 旧版 DLL 忽略不认识的 bit，跨版本安全。
+pub fn encode_mode_push(chinese_mode: bool, full_width: bool, chinese_punct: bool) -> Vec<u8> {
     let mut flags: u32 = 0;
     if chinese_mode {
         flags |= STATUS_CHINESE_MODE;
     }
     if full_width {
         flags |= STATUS_FULL_WIDTH;
+    }
+    if chinese_punct {
+        flags |= STATUS_CHINESE_PUNCT;
     }
     let ipc = IpcHeader::new(CMD_MODE_PUSH, 4);
     let mut out = ipc.to_bytes().to_vec();

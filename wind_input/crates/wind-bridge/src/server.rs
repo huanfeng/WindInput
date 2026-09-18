@@ -542,11 +542,11 @@ pub(crate) fn dispatch_command(
                     .unwrap_or(0);
                 // 窗口类同样要给同步路径：按应用套用初始模式在这里也算一次，且**早于**
                 // 重型段 handle_focus_gained。只给后者会让门控看起来生效、状态却已被改。
-                let (chinese_mode, full_width) = handler.get_current_mode(
+                let (chinese_mode, full_width, chinese_punct) = handler.get_current_mode(
                     token,
                     wind_ipc::codec::decode_focus_gained_window_class(payload),
                 );
-                Some(encode_mode_push(chinese_mode, full_width))
+                Some(encode_mode_push(chinese_mode, full_width, chinese_punct))
             }
         }
 

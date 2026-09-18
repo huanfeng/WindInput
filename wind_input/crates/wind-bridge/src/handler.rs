@@ -480,8 +480,8 @@ pub trait MessageHandler: Send + Sync {
     /// ⚠ **这是「按应用套用初始模式」的第二个落点**，与重型段 `handle_focus_gained` 各算
     /// 各的（本方法早于它执行，DLL 正阻塞等回传值）。两处的门控条件必须同步改——只改一处
     /// 时症状是「日志显示跳过了、图标照样切」，因为真正把状态改掉的是先跑的这一个。
-    fn get_current_mode(&self, _client_token: u64, _window_class: &str) -> (bool, bool) {
-        (true, false)
+    fn get_current_mode(&self, _client_token: u64, _window_class: &str) -> (bool, bool, bool) {
+        (true, false, true)
     }
 
     /// compartment 禁用态变更（不换焦点）上报。默认空实现。

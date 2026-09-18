@@ -120,9 +120,12 @@ constexpr uint16_t CMD_SERVICE_READY      = 0x0207; // Go service connected push
 // 区别于 CMD_STATE_PUSH：本命令是 activation 握手的回包，必须携带完整状态；
 // CMD_STATE_PUSH 是状态变更广播，hotkeys 不变所以不带。
 constexpr uint16_t CMD_ACTIVATION_STATUS_PUSH = 0x020C;
-// CMD_MODE_PUSH：FocusGained 同步路径的轻量模式预推送（仅 chineseMode+fullWidth）。
-// 载荷：4 字节 flags（位定义同 STATUS_CHINESE_MODE/STATUS_FULL_WIDTH）。
-// DLL 侧仅 InterlockedExchange _bChineseMode/_bFullWidth，不调用 _SyncStateFromResponse，不影响热键白名单。
+// CMD_MODE_PUSH：FocusGained 同步路径的轻量模式预推送（chineseMode + fullWidth + chinesePunct）。
+// 载荷：4 字节 flags（位定义同 STATUS_CHINESE_MODE / STATUS_FULL_WIDTH / STATUS_CHINESE_PUNCT）。
+// DLL 侧仅 InterlockedExchange _bChineseMode/_bFullWidth/_bChinesePunct，不调用
+// _SyncStateFromResponse，不影响热键白名单。
+// ⚠️ 标点位不可省：标点透传判据要按当下标点态在两份集合间二选一，漏了它会让
+// _bChinesePunct 在每次焦点切换后被清成 FALSE，中文标点态下误用英文态超集。
 constexpr uint16_t CMD_MODE_PUSH              = 0x020D;
 // CMD_SHELL_EXEC：在 TSF 侧（前台应用进程）执行 ShellExecuteW，解决 Service 进程无前台权限问题。
 // 载荷：target_len(u32 LE) + target(UTF-8) + params_len(u32 LE) + params(UTF-8)

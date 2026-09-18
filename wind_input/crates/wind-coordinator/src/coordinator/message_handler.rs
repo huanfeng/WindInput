@@ -2430,7 +2430,11 @@ impl MessageHandler for Coordinator {
         // 焦点。真正离开时随后的 DocChanged / Thread 会收口。
     }
 
-    fn get_current_mode(&self, client_token: u64, window_class: &str) -> (bool, bool) {
+    fn get_current_mode(&self, client_token: u64, window_class: &str) -> (bool, bool, bool) {
+        // 回传三元组（中英 / 全半角 / **中英标点**）。标点态不可省：DLL 的标点透传判据要按
+        // 它在两份集合间二选一，漏了就会在焦点切换后的竞态窗口里误用英文态超集
+        // （`,` `.` 被透传成半角）。而 per-app 的 `initial_punct` 规则正是在本方法里落地的。
+        //
         // FocusGained 同步路径回传 ModePush：DLL 正同步阻塞等本值，仅允许锁+HashMap 查询，
         // 严禁 OpenProcess 等跨进程调用。`should_reapply_initial` / `apply_initial_mode` /
         // `cached_proc_name` / `rule_initial_*` 全部满足该约束（纯锁 + 表查询）。
@@ -2485,16 +2489,16 @@ impl MessageHandler for Coordinator {
                     self.apply_initial_mode(client_token, false);
                 }
                 // 锁先释放再打日志：本方法在 DLL 的同步阻塞路径上，不在持锁期间做格式化。
-                let (chinese, full) = {
+                let (chinese, full, punct) = {
                     let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    (s.chinese_mode, s.full_width)
+                    (s.chinese_mode, s.full_width, s.chinese_punct)
                 };
                 tracing::debug!(
                     "get_current_mode: proc={proc} class={window_class:?} old_pid={old_pid} \
                      old_has_rule={old_has_rule} new_has_rule={new_has_rule} per_app={per_app} \
-                     reapply={reapply} → 回传 chinese={chinese} full={full}"
+                     reapply={reapply} → 回传 chinese={chinese} full={full} punct={punct}"
                 );
-                return (chinese, full);
+                return (chinese, full, punct);
             } else {
                 // ★ 这条出路此前完全静默，而它会把 per-app 重算整个跳过、直接回传全局现状
                 // ——上一个应用若被 `initial_mode` 规则强制成英文，回传的就是那个英文，首键
@@ -2509,15 +2513,15 @@ impl MessageHandler for Coordinator {
         }
         // crossed=false（同进程内换焦点）与上面两条 fall-through 共用本出口；
         // 三者靠 crossed= 与各自那条前置日志区分。
-        let (chinese, full) = {
+        let (chinese, full, punct) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            (s.chinese_mode, s.full_width)
+            (s.chinese_mode, s.full_width, s.chinese_punct)
         };
         tracing::debug!(
             "get_current_mode: pid={new_pid} old_pid={old_pid} crossed={crossed} \
-             → 回传现状 chinese={chinese} full={full}"
+             → 回传现状 chinese={chinese} full={full} punct={punct}"
         );
-        (chinese, full)
+        (chinese, full, punct)
     }
 
     fn handle_ime_activated(&self, client_token: u64) -> Option<StatusUpdateData> {

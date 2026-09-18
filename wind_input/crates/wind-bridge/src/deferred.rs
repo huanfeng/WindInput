@@ -181,9 +181,9 @@ impl MessageHandler for DeferredHandler {
         self.with_handler((), |h| h.handle_host_render_failed(reason))
     }
 
-    fn get_current_mode(&self, client_token: u64, window_class: &str) -> (bool, bool) {
-        // 未就绪时回中文模式（安全默认）；就绪后委派真实处理器读权威模式。
-        self.with_handler((true, false), |h| {
+    fn get_current_mode(&self, client_token: u64, window_class: &str) -> (bool, bool, bool) {
+        // 未就绪时回中文模式 + 中文标点（安全默认）；就绪后委派真实处理器读权威模式。
+        self.with_handler((true, false, true), |h| {
             h.get_current_mode(client_token, window_class)
         })
     }
