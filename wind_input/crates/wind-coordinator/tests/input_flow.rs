@@ -3360,7 +3360,7 @@ fn quick_input_digit_select_keys_are_not_in_the_takes_scope() {
     match press_char(&coord, '1') {
         KeyAction::InsertText { text, .. } => assert!(
             text.ends_with(&first),
-            "数字键必须始终是选词键（夺取范围只含二三候选键），实际: {:?}",
+            "有候选时数字键必须是选词键（夺取范围只含二三候选键），实际: {:?}",
             text
         ),
         other => panic!("数字键应选词上屏，实际: {:?}", other),
