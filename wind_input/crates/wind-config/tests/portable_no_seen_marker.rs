@@ -61,6 +61,8 @@ fn portable_does_not_write_user_config_seen() {
         stray.is_empty(),
         "便携树里不该有任何 user_config.seen：{stray:?}"
     );
+    // 收尾：固定名目录，不清的话下次跑会带着上次的残留（同姊妹测试 custom_layer_portable）。
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {

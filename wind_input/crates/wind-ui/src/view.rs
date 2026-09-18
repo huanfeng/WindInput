@@ -411,7 +411,7 @@ pub struct View {
     /// 「前半 + 竖线 + 后半」三节点，`measure(a+b) != measure(a)+measure(b)`（字距在拆分边界
     /// 丢失、每段各自亚像素舍入），拆分点随光标移动 → 整串宽度抖动 → 字符位移。
     pub caret_at: Option<usize>,
-    /// 插入符竖线宽度（像素；调用方按 DPI 缩放传入）。
+    /// 插入符竖线宽度（像素；调用方按 DPI 缩放传入，[`View::caret_at`] 取整到整像素）。
     pub caret_w: f32,
     /// 左侧强调条：在节点左缘内绘制竖条（选中候选用）；不占布局空间（落在左内边距内）。
     pub left_bar: Option<LeftBar>,
@@ -604,7 +604,11 @@ impl View {
             }
             None => 0,
         });
-        self.caret_w = width;
+        // ★ 取整到整设备像素**必须在这里**，不能指望绘制端。`fill_rounded` 用
+        // `snap_to_pixels` 按边界取整，那个算法只对**整数尺寸**保尺寸；传进去 1.5，
+        // 画出来的宽度会随 `frac(x)` 在 1px 与 2px 之间跳，而插入符的 x 随打字逐字移动
+        // ——竖线粗细就会一边打字一边闪。1.25/1.5 倍缩放下 `scale.max(1.0)` 正好是这种值。
+        self.caret_w = width.round().max(1.0);
         self
     }
 
@@ -1570,6 +1574,14 @@ fn for_each_mapped(
 ///
 /// 不在这里兜 `max(1.0)`：各调用点对「退化成 0 尺寸」的处理不同（`fill_rounded` 直接不画，
 /// 背景图/渐变则钳到 1px），兜在这里会把那个差别抹掉。
+///
+/// # ⚠️ 只对**整数尺寸**保尺寸
+///
+/// `round(x + n) - round(x) == n` 仅在 `n` 为整数时恒成立；非整数尺寸的结果会随
+/// `frac(x)` 在 `⌊n⌋` 与 `⌈n⌉` 之间变。对相邻平铺的背景盒这正是要的（宁可行高差 1px
+/// 也不能留缝），但对**语义定宽**的元素（插入符、分隔线这类「就该是 1 个逻辑像素粗」
+/// 的东西）就是抖动：位置一变粗细就变。故这类尺寸必须在**源头**取整成整设备像素——
+/// 插入符收口在 [`View::caret_at`]，编码栏分隔线收口在它的 `fixed_h` 调用处。
 fn snap_to_pixels(x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
     let x0 = x.round();
     let y0 = y.round();
@@ -2263,6 +2275,44 @@ mod geom_tests {
                 "上一个盒子的下边界须正好落在下一个的上边界（y0={y0} h0={h0} y1={y1}）"
             );
         }
+    }
+
+    /// 边界取整的**另一半**：整数尺寸必须与落点无关。
+    ///
+    /// 这条是「语义定宽」元素（插入符、分隔线）能继续用 `fill_rounded` 的全部依据——
+    /// 它们要的是「恒 n 像素粗」，而本函数只对整数 n 给这个保证。反面对照一并锁住：
+    /// 非整数尺寸**确实**会随落点变，那不是缺陷而是相邻平铺无缝的代价，故这类尺寸
+    /// 必须在源头取整（[`View::caret_at`]）。
+    #[test]
+    fn snap_keeps_integer_sizes_at_any_subpixel_offset() {
+        for n in [1.0f32, 2.0, 3.0] {
+            for x in [0.0f32, 0.1, 0.4, 0.5, 0.6, 0.9, 10.3, 10.7] {
+                let (_, _, w, _) = snap_to_pixels(x, 0.0, n, 1.0);
+                assert_eq!(w, n, "整数尺寸 {n} 在 x={x} 处不该变成 {w}");
+            }
+        }
+        // 反面对照：非整数尺寸随落点变 —— 正是插入符必须在源头取整的理由。
+        let (_, _, w_lo, _) = snap_to_pixels(10.0, 0.0, 1.5, 1.0);
+        let (_, _, w_hi, _) = snap_to_pixels(10.6, 0.0, 1.5, 1.0);
+        assert_ne!(
+            w_lo, w_hi,
+            "1.5 宽在不同落点该给出不同结果，否则本测试的前提不成立"
+        );
+    }
+
+    /// 插入符宽度在 `caret_at` 就取整，绘制端拿不到半像素。
+    ///
+    /// 1.5 是 1.5 倍缩放下 `scale.max(1.0)` 的真实取值；不取整的话竖线会一边打字
+    /// 一边在 1px / 2px 之间闪（插入符的 x 随前半段文本宽度逐字移动）。
+    #[test]
+    fn caret_width_snaps_to_whole_pixels() {
+        for (given, want) in [(1.0f32, 1.0f32), (1.25, 1.0), (1.5, 2.0), (2.0, 2.0)] {
+            let v = View::leaf("ab".to_string(), [0, 0, 0, 255]).caret_at(1, given);
+            assert_eq!(v.caret_w, want, "caret_w({given}) 应取整到 {want}");
+        }
+        // 缩放小于 1 时仍须看得见。
+        let v = View::leaf("ab".to_string(), [0, 0, 0, 255]).caret_at(1, 0.4);
+        assert_eq!(v.caret_w, 1.0, "亚像素缩放下插入符不该消失");
     }
 
     #[test]

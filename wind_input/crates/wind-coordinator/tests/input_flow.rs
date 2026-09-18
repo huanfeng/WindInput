@@ -2785,8 +2785,80 @@ fn quick_input_off_keeps_digit_as_select_key_on_empty_candidates() {
     }
 }
 
-/// ★反向对照：`free_input = off` 的实例分毫不动 —— 空候选下字母仍被选词臂吃掉，
-/// 空格上屏的只有那个 `.`。本条修复整体挂在 `free_on` 上，关掉即完全退回既有行为。
+/// ★钉住一个**自觉的例外**：`takes_select_keys = false` 时 `;` `'` 在零候选下仍是死键。
+///
+/// ③ 的守卫立论是「一条候选都没有，这个键不可能在表达选词意图」，按同一句话 ④ 也该让开。
+/// 这里刻意不让：`takes_select_keys = false` 是用户明写的「这两个键归选词」，空候选下改作
+/// 字面等于推翻该配置。取舍可以再议，但**不能悄悄漂移**——没有这条，把 ④ 改成跟 ③ 一样
+/// 加守卫，全部测试照样绿。
+#[test]
+fn quick_input_select_keys_stay_dead_when_not_taken() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.schema.mix_modes[0].free_input_takes_select_keys = false;
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_char(&coord, '.');
+    assert!(coord.debug_page_texts().is_empty(), "前提：光一个点无候选");
+    // `;` 是第 2 候选键；缓冲非空，故不走「引导键二次按下」那条路。
+    match press_char(&coord, ';') {
+        KeyAction::Consumed => {}
+        other => panic!(
+            "不夺取时 `;` 仍是选词键（尽管此刻没得选），实际: {:?}",
+            other
+        ),
+    }
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, ".", "缓冲不该被 `;` 污染"),
+        other => panic!("空格应上屏缓冲原文，实际: {:?}", other),
+    }
+}
+
+/// ★钉住本次改动**唯一一处「原本保护用户的死键」被去掉**的地方。
+///
+/// 没有表达式类成员的 mix（纯拼音 + 英文），空缓冲下数字键走文本透镜的选词臂 —— 而此刻
+/// 候选也是空的，于是现在它字面入缓冲并把会话带进 `Free`。改前这一键无声无息。
+/// 接受这个代价的理由：那种 mix 的任何成员都接不下数字，按⑤的判据它本就该是字面；
+/// 退格一下即回。写成测试是为了让下一个人**看见**这个行为，而不是当缺陷再修一遍。
+#[test]
+fn quick_input_text_only_mix_first_digit_is_literal() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.schema.mix_modes[0]
+        .members
+        .retain(|m| !wind_quick_input::is_quick_member(m));
+    assert!(
+        !cfg.schema.mix_modes[0].members.is_empty(),
+        "前提：去掉内置来源后还得剩下真实方案成员，否则这个 mix 根本进不去"
+    );
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    let last = press_char(&coord, '1');
+    assert_eq!(
+        action_text(&last).unwrap(),
+        ";1",
+        "无表达式成员的 mix 里数字键接不下任何编码，空候选下应字面入缓冲"
+    );
+    // 退格即回到原样：透镜是缓冲的纯函数，这条路不是单向的。
+    match coord.handle_key_event(&key_event(0x08, EVENT_KEY_DOWN)) {
+        KeyAction::ClearComposition => {}
+        other => panic!("退格删空缓冲应退出模式，实际: {:?}", other),
+    }
+}
+
+/// `off` 档的**基线**：与 `free_dot_prefix_types_file_extension` 配对 —— 关掉自由输入后
+/// 头号场景原样保留（字母仍被选词臂吃掉，空格上屏的只有那个 `.`）。「`.txt` 在 off 档下
+/// 就该打不出来」是设计而非缺陷，这条负责说明它。
+///
+/// ⚠️ 本条**测不到**守卫的 `free_on` 限定：`free_on = false` 时③的守卫恒真放行，字母在③
+/// 就被 `mix_select` 吃掉，后面的⑤根本够不着。那道闸门归
+/// `quick_input_free_comma_literal_vs_off_top_commits` 管（逗号是 off 档下唯一能走到⑤
+/// 门口的键型）；守卫自身的 `free_on` 归上面的
+/// `off_keeps_digit_as_select_key_on_empty_candidates`（数字键会被⑥当标点顶屏，看得出差别）。
 #[test]
 fn quick_input_off_keeps_letters_as_select_keys_on_empty_candidates() {
     if !has_schemas() {
@@ -3267,9 +3339,15 @@ fn quick_input_numeric_lens_respects_takes_select_keys_off() {
 }
 
 /// ★反向对照：数字键**不在**夺取范围——它是文本透镜唯一的选词通路。
-/// 这条同时钉住了已知缺口：`;utf8` 里的 `8` 仍会选词，要打这类串需先切进自由输入。
+///
+/// ⚠️ 锁的是「不在 `takes_select_keys` 的夺取范围内」这一条，**不是**「数字键在任何情况下
+/// 都是选词键」。0.122 起候选为空时它照样让位字面（见
+/// `free_text_lens_digit_is_literal_on_empty_candidates`），两者各管一头。名字为此改过一次。
+///
+/// 已知缺口也随之收窄：`;utf8` 里的 `8` 仍会选词——但**前提是 `utf` 在本 mix 下确实有候选**；
+/// 查不到任何候选的字母前缀，后面那个数字现在直接就是字面，不必再绕大写字母。
 #[test]
-fn quick_input_digit_select_keys_are_never_taken() {
+fn quick_input_digit_select_keys_are_not_in_the_takes_scope() {
     if !has_schemas() {
         return;
     }

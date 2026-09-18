@@ -2472,7 +2472,9 @@ impl CandidateWindow {
                 preedit_sep = Some(
                     View::container(Layout::Row)
                         .bg(sep_col)
-                        .fixed_h((1.0 * s).max(1.0))
+                        // 取整：这是「就该 1 个逻辑像素粗」的语义定宽元素，非整数尺寸
+                        // 交给 `snap_to_pixels` 会随落点在 1px/2px 之间变（同 caret_w）。
+                        .fixed_h((1.0 * s).round().max(1.0))
                         .fill_cross()
                         .margin(Edges {
                             b: 4.0 * s,
@@ -2689,7 +2691,15 @@ impl CandidateWindow {
                 )
                 .width
                 + chip_pad
-                + 12.0 * s // 装配段给的右留白
+                // 与装配段的 `trailing` **同源同条件**：无候选时那边给 0，这边再无条件加
+                // 12 就会把可用宽算少，超长编码提前一截。两处分开写过一次，正是 GH#127
+                // 只修好一半的原因。
+                + if self.candidates.is_empty() { 0.0 } else { 12.0 * s }
+                // ⚠️ `box_gap` 这一项照加：无候选时 `list` 里仍是 [徽标, 占位行] 两个子节点，
+                // Row 的 gap 照样落在它们之间。内置主题一律未配 `item_spacing`（box_gap=0），
+                // 故观感上看不出来；自定义主题把它配到大于 item 左右内边距之和时，提示窗
+                // 右边会按差值多出一小块 —— 是 GH#127 的同类残余，但去掉 gap 会连带动到
+                // 内联编码与徽标之间的间隔，故留着不动。
                 + box_gap
             } else {
                 0.0
@@ -2938,11 +2948,11 @@ impl CandidateWindow {
                 12.0 * s
             };
             let sep = if list_vertical {
-                let gap = if self.candidates.is_empty() {
-                    0.0
-                } else {
-                    6.0 * s
-                };
+                // ⚠️ 这一支**不可能在无候选时走到**：`list_vertical` 自带 `&& !candidates
+                // .is_empty()`（见其定义处的注释——无候选时强制 Row，免得徽标与占位行纵向
+                // 堆叠把提示窗撑高）。所以竖排配置下的「只有徽标」那一帧走的是下面的 else，
+                // 由 `trailing` 归零处理。别在这里再写一遍无候选分支，那是死代码。
+                let gap = 6.0 * s;
                 Edges {
                     t: if inline_preedit_bottom { gap } else { 0.0 },
                     b: if inline_preedit_bottom { 0.0 } else { gap },
@@ -3812,6 +3822,59 @@ mod min_size_tests {
     /// mock 文本测量的宽度（字符数 × 字号 × 0.6，见模块头注释）。
     fn mock_text_w(w: &CandidateWindow, s: &str) -> f32 {
         s.chars().count() as f32 * w.theme.behavior.font_size as f32 * 0.6
+    }
+
+    /// ★ GH#127 的**另一半**：那 12px 右留白在**宽度预算**段也得跟着条件化。
+    ///
+    /// 装配段（`trailing`）无候选时给 0，预算段却一直无条件加 `12 * s`——两边分叉的后果
+    /// 不是多出空白（方向反了，是少算可用宽），而是**超长编码提前一截被截断**：实测同一帧
+    /// 下窗宽 2988.4 而上限 3000，白白空掉 10.8px。只修装配段就只修好一半。
+    ///
+    /// 判据取「剩余空隙小于一个字符宽」而不是「宽度 == 上限」：截断按整字符走，量出来
+    /// 总比预算少小半个字。带 bug 时空隙 11.6px > 一个字宽（14×0.6=8.4），故这条会红。
+    #[test]
+    fn hint_window_spends_its_whole_width_budget_on_a_long_preedit() {
+        let long = "a'".repeat(200);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        w.scale = 1.0;
+        w.set_orientation(false, false, false);
+        w.set_preedit_embedded(true);
+        w.update(&long, long.len(), "临时英文", vec![], 0, -1, 1, 1);
+        let width_of = |w: &CandidateWindow| {
+            let mut root = w.build_tree(false);
+            root.layout(0.0, 0.0, &w.text_renderer);
+            root.measured_size().0
+        };
+        let win_w = width_of(&w);
+        let cap = w.screen_safety_max_width_px() as f32;
+
+        // 前置①：这一帧必须**已经被上限夹住**（再加长一倍宽度不变），否则下面的判据恒真。
+        let mut w2 = CandidateWindow::new(CandidateWindowConfig::default(), {
+            let (tx2, _rx2) = std::sync::mpsc::channel();
+            tx2
+        })
+        .unwrap();
+        w2.scale = 1.0;
+        w2.set_orientation(false, false, false);
+        w2.set_preedit_embedded(true);
+        let longer = "a'".repeat(400);
+        w2.update(&longer, longer.len(), "临时英文", vec![], 0, -1, 1, 1);
+        assert_eq!(
+            win_w,
+            width_of(&w2),
+            "前置：超长编码须已被宽度上限夹住（加长一倍不该再变宽）"
+        );
+        // 前置②：夹住后不得越界。
+        assert!(win_w <= cap + 0.5, "夹住后不该超过上限（{win_w} vs {cap}）");
+
+        let one_char = mock_text_w(&w, "a");
+        assert!(
+            cap - win_w < one_char,
+            "预算该被用满，剩余空隙 {} 不得超过一个字符宽 {}（预算段与装配段的右留白分叉了）",
+            cap - win_w,
+            one_char
+        );
     }
 
     /// ★ GH#127：提示窗该紧贴文字，除了窗口自己的内边距不该再多出任何固定量。
