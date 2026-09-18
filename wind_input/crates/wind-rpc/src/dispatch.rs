@@ -68,10 +68,18 @@ impl DispatchState {
 }
 
 /// 分发一条请求，返回 JSON-RPC 响应（成功/错误均为 200 等价的 Response）。
+///
+/// 错误用 `{e:#}` **展开整条 anyhow 链**，不是 `to_string()`。这条通道是 core 向设置端与
+/// CLI 传递失败原因的**唯一**出口，而 `to_string()` 只给最外层那一句：谁在路上给错误套了
+/// 一层 `.context("导出失败")`，底下「条目过多（211 个，上限 200）」这类真正能指导用户
+/// 动作的信息就在这里被静默抹掉，客户端只剩一句正确但无用的话。
+///
+/// 对单层错误（`bail!` / `anyhow!`，本仓绝大多数）`{:#}` 与 `{}` 输出逐字相同，所以这不是
+/// 给所有错误加噪音，只是让**带因果链的**那些别在出口断掉。
 pub fn dispatch(state: &DispatchState, req: Request) -> Response {
     match handle(state, &req.method, &req.params) {
         Ok(v) => Response::success(req.id, v),
-        Err(e) => Response::error(req.id, e.to_string()),
+        Err(e) => Response::error(req.id, format!("{e:#}")),
     }
 }
 
@@ -515,10 +523,12 @@ mod tests {
             false // needsRestart=false
         }
         fn data_rpc(&self, method: &str, _params: &Value) -> anyhow::Result<Value> {
-            if method == "dict.stats" {
-                Ok(json!([]))
-            } else {
-                anyhow::bail!("unknown method: {}", method)
+            match method {
+                "dict.stats" => Ok(json!([])),
+                // 两层错误：外层是人话主语，内层才是真正的原因。用来钉住出口不截断
+                // （见 `dispatch` 的文档注释）。
+                "test.layered" => Err(anyhow::anyhow!("底层真正的原因").context("外层的人话")),
+                _ => anyhow::bail!("unknown method: {}", method),
             }
         }
         fn fonts(&self) -> Vec<(String, String)> {
@@ -537,6 +547,24 @@ mod tests {
             method: method.to_string(),
             params,
         }
+    }
+
+    /// **出口不许把错误的因果链截断。**
+    ///
+    /// 这条通道是 core 向设置端与 CLI 传递失败原因的唯一出口。写成 `e.to_string()` 的话
+    /// 只剩最外层那句人话，底下真正能指导用户动作的原因（「条目过多（211 个，上限 200）」
+    /// 那类）就在这里被静默抹掉——客户端拿到一句正确但无用的话，而日志里什么都没有。
+    ///
+    /// 断的是**两层**错误：单层错误下 `{:#}` 与 `{}` 输出逐字相同，拿单层来测这条等于没测。
+    #[test]
+    fn error_response_keeps_the_whole_cause_chain() {
+        let resp = dispatch(&state(), req("test.layered", json!({})));
+        let e = resp.error.expect("该方法必然失败");
+        assert!(
+            e.contains("底层真正的原因"),
+            "出口把内层原因截断了，客户端只会看到一句无用的话：{e}"
+        );
+        assert!(e.contains("外层的人话"), "外层主语也要在，别只剩原因：{e}");
     }
 
     #[test]
