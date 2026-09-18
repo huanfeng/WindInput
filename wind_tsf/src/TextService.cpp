@@ -2161,8 +2161,15 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
                     //
                     // ⚠️ 正因为它**过宽**才必须是乐观的而非权威的：这里能看到的 id 段是
                     // `_RegisterAddWordHotkeys` 注册的 GlobalHotkeys() 全集 —— 除加词外还有
-                    // softkeyboard、open_add_word_dialog、enter_special:*、enter_rare_char、
-                    // 临拼直达键，而 DLL 这边只有 (vk, keymod)、分不出是哪个动作。
+                    // softkeyboard、open_add_word_dialog，以及 keys.key_actions 里一切进
+                    // overlay 的动词（special:* / rare_char / temp_pinyin / temp_english /
+                    // aux_code / mix:*），而 DLL 这边只有 (vk, keymod)、分不出是哪个动作。
+                    //
+                    // ⚠️ 那个集合在 2026-09-18 的组合键值域合流后**变大了**（服务端
+                    // hotkey.rs 的 `hotkey_policy_for` 决定谁带 GLOBAL 位）。本函数的
+                    // id 段只有 16 个（kHotkeyIdAddWordBase + 16），超出静默 break ——
+                    // 超出的那些退回普通 TSF 转发链路，在 Chromium 类宿主里会被同名
+                    // 加速键抢走。服务端那侧给 GLOBAL 位要克制，理由就在这里。
                     //
                     // 前一版把它当权威用（置位 + 靠 ClearComposition 清位），于是按一次
                     // 软键盘开关就卡死：软键盘在这个 id 段内，却不产候选也不发

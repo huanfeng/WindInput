@@ -90,7 +90,8 @@
 1. 散字段·两模式都吃：`switch_engine` / `toggle_full_width` / `toggle_toolbar` / `open_settings` / `take_screenshot`
 2. 散字段·仅中文：`toggle_punct` / `add_word` / `open_add_word_dialog` / `toggle_s2t`（加词类额外带 `GLOBAL`）
 3. 临拼直达热键：`input.temp_pinyin.hotkey`（`CHINESE_ONLY | GLOBAL`）
-4. **`keys.key_actions` 的组合键部分** → key_down，动词过 `hotkey_action_entry` 白名单
+4. **`keys.key_actions` 的组合键部分** → key_down，动词值域 = 完整 `BoundAction`，
+   策略位逐动词取自 `hotkey_policy_for`（见 §2.5）
 5. **`keys.key_actions` 的修饰键部分** → key_up，action 记 `schema_bound`
 6. 数字模板：`pin_candidate` / `delete_candidate` → `SESSION` 位
 7. `effective_session_actions()` → keyup-only 键进 key_up + `SESSION`；其余进 key_down + `FORWARD_ONLY`
@@ -118,19 +119,29 @@ keys.key_actions 的一条条目
 分水岭是**「英文模式下这个键要不要能出字」**：顶层链位置 8（英文模式 → PassThrough）之后的一切，
 英文态下都跑不到，所以有字符的键只能排在位置 12。
 
-### 2.5 ★ 现存缺陷：同一张表，值域按键形态分裂
+### 2.5 ✅ 已修：同一张表，值域按键形态分裂（2026-09-18）
 
-组合键那条路要过 `hotkey_action_entry` 白名单，它**只认 3 个动词**：`toggle_schema:` /
-`switch_schema:` / `special:`。而单键那条路的 `BoundAction` 值域含 `temp_pinyin` / `temp_english` /
-`mix:` / `special:` / `none`。
+**曾经的形态**：组合键那条路要过 `hotkey_action_entry` 白名单，它只认
+`toggle_schema:` / `switch_schema:` / `special:` / `rare_char` / `softkeyboard` 五族；
+而单键那条路的 `BoundAction` 值域约 20 个动词。
 
 ⇒ `ctrl+alt+e = "temp_english"` 被 warn 掉后**静默失效**，而 `z = "temp_english"` 正常工作。
-表面上是一张表，实际上不是。用户无从分辨自己拼错了、还是该组合根本不支持。
+表面上是一张表，实际上不是。用户无从分辨自己拼错了、还是该组合根本不支持。用户 2026-09-18
+的原话：「单个按键中可以配置很多功能，包括中英文切换之类的，但是，组合键能配置的功能会少很多」。
 
-这是本设计要顺手收掉的缺陷之一（见 §8 注意点 11）。修法有两个方向，实施时择一：
-(a) 补齐组合键白名单到 `BoundAction` 全值域；(b) 保持裁剪但**把 warn 变成用户可见的诊断**。
-方向 (a) 需要先回答「进 overlay 的动词绑组合键时策略位怎么取」——`enter_special` 那段注释已经指出
-同一个位在两类机制下后果相反，不能沿用 `key_actions` 现在「一律不带 `CHINESE_ONLY`」的做法。
+**已按方向 (a) 修掉**（补齐到 `BoundAction` 全值域）。当初留的那个前置问题——「进 overlay 的
+动词绑组合键时策略位怎么取」——答案是**不用重新发明**：§2.3 里散字段那几组已经把每个动词
+该带什么位写好了，`hotkey_policy_for` 照抄那个分组即可。`CHINESE_ONLY` 的判据进一步抽成
+`BoundAction::only_in_chinese_mode()`，**编译期给位与分派端的 `chinese_mode` 守卫读同一个方法**，
+从此不存在「策略位说英文态别转发、分派端却不判」这种分叉。
+
+顺带把分派端那串手写 `else if action == "enter_xxx"` 特判换成了
+`dispatch_bound_action_hotkey`：动词不再改写成 `enter_special:` 这类分发端专用形态，两条通路
+认同一个值域。详见 [schema-key-actions.md](schema-key-actions.md) §7 六期。
+
+⚠️ 仍有一条**没有编译期约束**的手写清单对：core 的 `hotkey_action_entry` 与设置端的
+`verb_allowed`（跨仓）。但两边现在都是「全放行减去加词那两个」而不是逐条列举，漂移面小了
+一个量级。
 
 ## 3. 逻辑状态清单（补 [session-key-actions.md](session-key-actions.md) §2）
 
@@ -593,8 +604,13 @@ KeyResolver
 
 ### 顺手能修的既有缺陷
 
-11. **组合键动词白名单与单键值域不一致**（§2.5），以及**同一个键被多处绑定时静默失效**
+11. ~~**组合键动词白名单与单键值域不一致**（§2.5）~~ —— ✅ 2026-09-18 已单独修掉，
+    没等这次重构（见 §2.5）。剩下的一半仍然成立：**同一个键被多处绑定时静默失效**
     （`.find()` 先到先得、遍历顺序即胜者，schema-key-actions.md §1 记录在案）。
+
+    ★ 那一半在修上半条时又咬了一口：给新功能写集成测试，用 `ctrl+shift+j` 绑
+    `toggle_mode`，六条用例全红在「功能没生效」上——出厂 `keys.toggle_s2t` 正是这个键，
+    而散字段那几段编译在 `key_actions` **之前**。构建期 warn 会直接省掉这次排查。
 
     ★ 收敛成单一 resolver 后，重复绑定在**构建期**就能发现——**应该顺手 warn 出来**。判据同
     `warn_unknown_session_actions`：静默忽略与「这个功能坏了」完全同形，用户无从分辨自己拼错了、

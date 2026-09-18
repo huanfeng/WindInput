@@ -436,10 +436,11 @@ impl Coordinator {
         use_schema_layer: bool,
     ) -> Option<(BoundAction, bool)> {
         // 键名→VK 走与全局层**同一个**解析口（`key_action_name_to_vk`）：两层各留一份解析
-        // 规则，就是「同一张表按维度分裂」。同类**现存**缺陷有一个未修的样本：
-        // `hotkey_action_entry` 的动词白名单只认 3 个，而单键那条路的 `BoundAction` 值域
-        // 更大 ⇒ `ctrl+alt+e = "temp_english"` 静默失效、`z = "temp_english"` 正常。
-        // 见 docs/design/key-resolver-unification.md §2.5。
+        // 规则，就是「同一张表按维度分裂」。这类分裂曾有过一个样本：`hotkey_action_entry`
+        // 的动词白名单只认几个，而单键那条路的 `BoundAction` 值域大得多 ⇒
+        // `ctrl+alt+e = "temp_english"` 静默失效、`z = "temp_english"` 正常。
+        // **那一条已于 2026-09-18 合流修掉**（见 docs/design/key-resolver-unification.md §2.5
+        // 与 schema-key-actions.md §7 六期）；本处的「两层各一份解析规则」仍然成立。
         if use_schema_layer {
             for (name, action) in self.engine_mgr.active_key_actions().iter() {
                 if crate::key_resolver::key_action_name_to_vk(name) == Some(key_code) {
@@ -774,11 +775,34 @@ impl Coordinator {
     /// 该动作是否属于「锁外执行」那一类（A/C）。与
     /// [`Self::run_lock_free_bound_action`] 的 match 臂同源——分成两个函数是因为
     /// keyup 路径要**先判断再决定取不取锁**，而不是拿到结果才知道。
+    ///
+    /// ⚠️ **穷举 `match`，不用 `matches!`**：本判据是组合键热键分派
+    /// （[`Self::dispatch_bound_action_hotkey`]）锁约束的**唯一支点**——它判 `true` 的走锁外、
+    /// `false` 的在持锁时执行。新变体若静默落进 `false` 而它的执行函数自己取 `State` 锁，
+    /// 结果是**死锁**，且只在那个动词被真的绑上时才复现。列全的话新增变体编译不过。
     pub(crate) fn is_lock_free_bound(&self, action: &BoundAction) -> bool {
-        matches!(
-            action,
-            BoundAction::ToggleSchema(_) | BoundAction::SwitchSchema(_) | BoundAction::Action(_)
-        )
+        match action {
+            // 目标函数自取 `State` 锁 ⇒ 必须锁外。
+            BoundAction::ToggleSchema(_)
+            | BoundAction::SwitchSchema(_)
+            | BoundAction::Action(_) => true,
+            // 建 overlay，要 `&mut State` ⇒ 调用方持锁。
+            //
+            // ★ `SoftKeyboard` 在这里是 `false`，但它**也要在锁外执行**：
+            // `softkeyboard_hotkey` 自己取锁（要按 `commit_on_switch` 处置正在打的编码）。
+            // 本函数回答的是「走不走 `run_lock_free_bound_action`」，而软键盘不经那个分流口
+            // ——`dispatch_bound_action_hotkey` 在取锁前单独把它分了出去。别看到 `false`
+            // 就把它塞进持锁分支。
+            BoundAction::None
+            | BoundAction::TempPinyin
+            | BoundAction::TempEnglish
+            | BoundAction::AuxCode
+            | BoundAction::RareChar
+            | BoundAction::Mix(_)
+            | BoundAction::Special(_)
+            | BoundAction::SingleChar(_)
+            | BoundAction::SoftKeyboard(_) => false,
+        }
     }
 
     pub(crate) fn run_lock_free_bound_action(
@@ -792,6 +816,117 @@ impl Coordinator {
             BoundAction::Action(a) => self.run_dispatch_action(a),
             _ => None,
         }
+    }
+
+    /// **组合键热键**命中后的分派：与单键、修饰键两条通路同一个值域（[`BoundAction`]）。
+    ///
+    /// 返回 `None` = 本函数不接这个动词，调用方继续走原有按键链路（不吞键）。
+    ///
+    /// 2026-09-18 之前这里是 `message_handler` 里一串手写特判（`enter_special:` /
+    /// `enter_rare_char` / `enter_temp_pinyin` / `toggle_schema:` / …），每接一个动词加一段，
+    /// 与编译期那份六项白名单一一对应。合流后组合键能绑的就是 `BoundAction` 的全值域，
+    /// 今后新增功能不必再在两处各加一遍——**那正是组合键长期比单键少一大截功能的成因**。
+    ///
+    /// # 热键上下文与引导键上下文的三处差别
+    ///
+    /// 都是这条通路专有的，合流时必须保住：
+    ///
+    /// 1. **`key_code` 恒传 0**（哨兵）：热键进入不写引导符。出处见
+    ///    `commit_and_enter_temp_pinyin` 与 `enter_special_mode`。
+    /// 2. **`chinese_mode` 守卫**：判据取 [`BoundAction::only_in_chinese_mode`]，与编译期
+    ///    给不给 `CHINESE_ONLY` 位是**同一个方法**。策略位已让 TSF 在英文态不转发，这里
+    ///    仍要判——别的路径转发进来的同一个键，会在英文态凭空建组合区。
+    ///    ⚠️ 这道守卫**只覆盖 B 类**：A 类在它之前就被分流走了，那是刻意的，理由写在
+    ///    `only_in_chinese_mode` 的「为什么 A 类不走分派端那道守卫」一节。
+    /// 3. **幂等**：已在目标模式时安静吃掉，不重开。引导键通路不需要这条（模式激活后
+    ///    按键走模式内分派，根本到不了这里）。
+    /// 4. **门卫没过也吃键**：与引导键通路刻意相反。引导键落下去是打出一个字符（无害），
+    ///    组合键落下去是把 `Ctrl+;` 交给宿主执行它自己的加速键。见函数末尾那段。
+    ///
+    /// # 两个动词走独立分支
+    ///
+    /// - `SoftKeyboard` —— `softkeyboard_hotkey` 自己取 `State` 锁（要按
+    ///   `keys.commit_on_switch` 处置正在打的编码），**只能在锁外调**；而 B 类那条要持锁。
+    ///   它也不受 `chinese_mode` 守卫：面板与中英态无关，见 `only_in_chinese_mode`。
+    /// - `add_word` / `open_add_word_dialog` —— 不在 `BoundAction` 值域内，要返回占位
+    ///   composition 激活 C++ 转发全部按键，不符 `dispatch_hotkey` 的 `bool` 契约。
+    ///   调用方在本函数**之前**特判。
+    pub(crate) fn dispatch_bound_action_hotkey(&self, action: &str) -> Option<KeyAction> {
+        let parsed = BoundAction::parse(action);
+        if !parsed.is_enabled() {
+            debug!("Unhandled hotkey action: {action}");
+            return None;
+        }
+        // 软键盘：锁外，且不判中英态。
+        if let BoundAction::SoftKeyboard(page) = &parsed {
+            return Some(self.softkeyboard_hotkey(page.as_deref()));
+        }
+        // A/C 类：不建 overlay，目标函数自加锁，必须在锁外。
+        //
+        // trigger_vk 传 0：组合键在所有方案里都命中，不需要「回程键临时授权」那套——
+        // 那是方案级绑定专有的问题，见 `schema_toggle_key_authorized`。
+        if self.is_lock_free_bound(&parsed) {
+            return Some(
+                self.run_lock_free_bound_action(&parsed, 0)
+                    .unwrap_or(KeyAction::Consumed),
+            );
+        }
+        // B 类：建 overlay，要 `&mut State`。
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if parsed.only_in_chinese_mode() && !state.chinese_mode {
+            return None;
+        }
+        // 已在目标模式：安静吃掉。放行会让这个组合键泄漏给宿主，重开则会把用户已经
+        // 打进模式里的编码清掉——两个都不是「再按一次」该有的结果。
+        if let Some(kind) = self.bound_action_mode_kind(&parsed)
+            && state.active == Some(kind)
+        {
+            return Some(KeyAction::Consumed);
+        }
+        // ★ 门卫没过（目标模式不可加载 / 临拼目标方案不是码表 / 辅助码无候选可筛）时
+        // **仍然吞键**，不落回按键链。
+        //
+        // 这与引导键通路的策略**刻意相反**，因为落下去的后果不同：引导键落下去是打出
+        // 一个字符（无害，本来也该出那个字符），组合键落下去是把 `Ctrl+;` 原样交给宿主，
+        // 宿主会按自己的加速键执行——用户配的是「进临时拼音」，得到的是宿主的某个功能。
+        //
+        // 被合流掉的旧手写链三处都是这么做的（`enter_temp_pinyin` 那段写着「中文模式下
+        // 一律吞键（不放行，避免把该组合键泄漏给宿主）」）。判据是**责任归属**：中文态
+        // 守卫一过，这个键就归本函数管，门卫没过的正确表现是「什么都没发生」。
+        //
+        // ⚠️ 受影响的不止新放开的动词：`input.temp_pinyin.hotkey` 这条出厂通路现在也编成
+        // `temp_pinyin` 走这里，而活跃方案本身就是拼音方案时 `temp_pinyin_target()` 恒为
+        // `None`（那是正常配置，不是错误路径）。
+        Some(
+            self.commit_and_enter_bound_action(&mut state, &parsed, 0)
+                .unwrap_or(KeyAction::Consumed),
+        )
+    }
+
+    /// 动作对应的独占模式身份，供热键路径做幂等判断；没有对应模式的动作返回 `None`。
+    ///
+    /// id 解析不出下标时也返回 `None`——那种配置根本进不去，谈不上「已在该模式」。
+    ///
+    /// ⚠️ **穷举 `match`，不用 `_` 兜底**：漏掉一个建 overlay 的变体的后果是丢幂等，
+    /// 而丢幂等的表现是「再按一次把用户已经打进模式里的编码清掉」——那是用户会当成
+    /// 数据丢失的一类。列全的话新增变体编译不过，逼人当场判断它有没有模式身份。
+    fn bound_action_mode_kind(&self, action: &BoundAction) -> Option<ModeKind> {
+        Some(match action {
+            BoundAction::TempPinyin => ModeKind::TempPinyin,
+            BoundAction::TempEnglish => ModeKind::TempEnglish,
+            BoundAction::AuxCode => ModeKind::AuxCode,
+            BoundAction::RareChar => ModeKind::RareChar,
+            BoundAction::Special(id) => ModeKind::Special(self.special_mode_idx(id)?),
+            BoundAction::Mix(id) => ModeKind::Mix(self.mix_mode_idx(id)?),
+            // 不建 overlay ⇒ 没有可比对的模式身份。软键盘有自己的开关态，幂等由
+            // `toggle_softkeyboard` 自己处理（它的语义就是「再按一次关掉」）。
+            BoundAction::None
+            | BoundAction::SingleChar(_)
+            | BoundAction::SoftKeyboard(_)
+            | BoundAction::ToggleSchema(_)
+            | BoundAction::SwitchSchema(_)
+            | BoundAction::Action(_) => return None,
+        })
     }
 
     /// keydown 路径上的 A 类分派判定：**判定在锁内、执行在锁外**。

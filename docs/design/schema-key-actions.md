@@ -15,6 +15,9 @@
 | `ZKeyAction` | `none` / `temp_pinyin` / `temp_english` / `mix:<id>` / `special:<id>` | 单键（仅 z） | **方案级** | `handle_lifecycle.rs:269` |
 | `trigger_keys` × 5 处 | 隐含「进入本实例」 | 单键 | 全局 | 见下表 |
 
+> ⚠️ 本章记的是**设计当时**（2026-08）的现状，不是现在的代码。第一张表的值域已于
+> 2026-09-18 合流为完整 `BoundAction`，动词也不再改写成 `enter_*` 形态，见 §7 六期。
+
 五处 `trigger_keys`：`input.temp_pinyin` / `input.temp_english` / `schema.mix_modes[]` /
 `schema.special_modes[]`，加上 `keys.toggle_mode_keys`。前四者的优先级是**代码顺序**
 （`try_activate_mode`，`handle_lifecycle.rs`），不是数据；`match_special_trigger` 用
@@ -89,7 +92,7 @@ toml 层（`merge_toml`），而它**只能新增/覆盖，无法表达「删除
 
 ```
  2  key_up 分支：CapsLock → handle_select_key_up → is_toggle_mode_keycode
- 3  组合键热键匹配 → add_word / enter_special: / switch_schema: / dispatch_hotkey
+ 3  组合键热键匹配 → add_word / dispatch_bound_action_hotkey（BoundAction 全值域，见 §7 六期）
  6  密码框抑制 → PassThrough
  8  英文模式 → PassThrough          ← 分水岭
 11  已激活独占模式分派
@@ -638,6 +641,62 @@ A 类反过来排到最后——它是功能完整性，不是任何人的诉求
 四个 `*_trigger` 函数改读 `bound_action_for` 后，「模式内二次按同键退出」「智能符号
 press2 门控」「设置页冲突检测」这三个场景第一次看得见**方案级** `[key_actions]` 的绑定
 ——它们原先只读全局 `trigger_keys`。
+
+
+### ✅ 六期：组合键值域合流到 `BoundAction`（2026-09-18）
+
+五c 的「通路分流」把 `keys.key_actions` 按键形态分成三条路，但**三条路的值域没有对齐**：
+组合键那条受 `hotkey_action_entry` 里一份逐条追加的白名单限制，只认
+`toggle_schema:` / `switch_schema:` / `special:` / `rare_char` / `softkeyboard` 五族，
+而单键、修饰键两条走的是完整 `BoundAction`（约 20 个动词）。
+
+用户的观察（2026-09-18）：「单个按键中可以配置很多功能，包括中英文切换之类的，但是，
+组合键能配置的功能会少很多，我认为这是不太合理的」。
+
+**成因是演进残留，不是设计结论。** 那份白名单每接一个新功能加一行（`git log -S` 可见
+special → switch_schema → toggle_schema → softkeyboard 的追加顺序），从没做过一次统一；
+而按 §4.1 的插入点表，组合键这条通路位次**最早**（位置 3，英文模式分水岭之前）、不与
+输入争键、可全局拦截，本该是限制**最少**的一条。倒挂到了「`` ` `` 能绑 16 个功能，
+`Ctrl+` `` ` `` 只能绑 6 个」的地步。
+
+**分派端其实早就接得住**：`message_handler` 那条手写特判链末尾一直有
+`dispatch_hotkey_keyed(&action)` 兜底，A 类 9 个动词零改动即可通。真正缺的只是编译期放行。
+
+合流后：
+
+| | 合流前 | 合流后 |
+|---|---|---|
+| 编译期 | `hotkey_action_entry` 六项白名单 + 动词改写成 `enter_special:` 等分发端专用形态 | `BoundAction::parse` 认得就收，动词**原样**进表；`hotkey_policy_for` 只管策略位 |
+| 分派端 | 手写 `else if` 链逐动词特判 | `dispatch_bound_action_hotkey`：B 类交 `commit_and_enter_bound_action`，A/C 类交 `run_lock_free_bound_action` |
+| 值域 | 组合键 6 / 单键 16 / 修饰键 20 | 三条路同一张表，组合键只差加词那两个 |
+
+**最实际的收获是中英文切换**：`toggle_mode` 此前只能绑 `keys.toggle_mode_keys` 的五个
+修饰键（`lshift`/`rshift`/`lctrl`/`rctrl`/`capslock`），想配成 `Ctrl+Space` 这种组合键，
+全系统没有任何一条路。
+
+#### 合流时必须保住的四条
+
+1. **策略位按动词分**，分组与固定字段那几段逐条一致。`CHINESE_ONLY` 的判据抽成
+   `BoundAction::only_in_chinese_mode()`，**编译期给位与分派端守卫读同一个方法**——
+   两处分叉的后果不对称：策略位说「英文态别转发」而分派端不判，别的路径转发进来的
+   同一个键就会在英文态凭空建组合区。
+2. **`toggle_mode` 不得带 `CHINESE_ONLY`**。带上就是单程票：切到英文态后 TSF 不再转发
+   这个键，再也切不回中文。这与 `toggle_schema` 踩过的是同一个坑。
+3. **`GLOBAL` 位有容量上限 16**（`TextService.cpp` 的 `kHotkeyIdAddWordBase + 16`，
+   `RegisterHotKey` 超出后静默 break）。只给进 overlay 的一族与软键盘，别整张表挂上。
+4. **`SoftKeyboard` 与 A/C 类一样走锁外**：`softkeyboard_hotkey` 自己取 `State` 锁
+   （要按 `commit_on_switch` 处置正在打的编码），而 B 类那条要持锁。
+
+#### 写测试时撞到的坑：出厂固定字段会遮蔽同键的 `key_actions`
+
+`match_key_down` 是 `.find()` 先注册者赢，而固定字段那几段编译在 `key_actions` **之前**。
+用 `ctrl+shift+j` 写用例时全部红在「功能没生效」上——出厂 `keys.toggle_s2t` 正是这个键。
+**选键前先查一遍出厂占用**；设置页的只读组会把这种同键重复标橙，但测试里没人提醒。
+
+#### 仍然配不了组合键的：`add_word` / `open_add_word_dialog`
+
+它们要返回占位 composition 激活 C++ 转发全部按键，不符 `dispatch_hotkey` 的 `bool` 契约，
+本就不在 `BoundAction` 值域内。这两个在「按键 → 功能快捷键」页配。
 
 
 ## 8. 相关文档

@@ -525,6 +525,13 @@ key_down 热键表。三处缺一不可：
 | `hotkey_action_entry` | **组合键**能否进热键表 | **组合键按下无反应**（本次踩的） |
 | 协调器分派臂 | 收到动作后做什么 | 热键转发到了但没人处理 |
 
+> ✅ **这个坑已于 2026-09-18 从结构上填掉**：`hotkey_action_entry` 不再是独立白名单，
+> 改成「`BoundAction::parse` 认得就收」，只负责逐动词取**策略位**；协调器那一臂也合并成
+> 一个按 `BoundAction` 分流的入口。上表三处里的后两处因此不再能与第一处分叉——
+> 「单键能绑、组合键静默失效」这个形态没有了。见
+> [key-resolver-unification.md](key-resolver-unification.md) §2.5 与
+> [schema-key-actions.md](schema-key-actions.md) §7 六期。
+
 ★ 这正是设计 §7.1 写的那条判据的现场：「与『没绑上』完全同形，用户无从分辨」——
 只不过当时想的是解析层，实际漏的是编译层。
 

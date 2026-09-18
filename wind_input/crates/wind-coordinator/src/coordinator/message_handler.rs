@@ -1017,70 +1017,10 @@ impl MessageHandler for Coordinator {
                 if state.chinese_mode {
                     return self.open_add_word_from_history(&mut state);
                 }
-            } else if action == "enter_temp_pinyin" {
-                // 临拼直达热键：进入前先上屏半成品（commit_and_enter_temp_pinyin 内含），
-                // 传 key_code=0 → 组合区无引导符。已在临拼态则幂等；中文模式下一律吞键
-                // （不放行，避免把该组合键泄漏给宿主）。
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.chinese_mode {
-                    if state.active != Some(ModeKind::TempPinyin)
-                        && let Some(target) = self.engine_mgr.temp_pinyin_target()
-                    {
-                        return self.commit_and_enter_temp_pinyin(&mut state, 0, target);
-                    }
-                    return KeyAction::Consumed;
-                }
-            } else if let Some(id) = action.strip_prefix("enter_special:") {
-                // 特殊模式直达热键：按 id 定位配置序 idx（与 match_special_trigger 下标语义一致）。
-                // 已在该模式则幂等；未知 id / 方案不可加载均安全吞键（不放行以免误触）。
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.chinese_mode {
-                    if let Some(idx) = self.special_mode_idx(id)
-                        && state.active != Some(ModeKind::Special(idx))
-                        && let Some(schema) = self.special_schema(idx)
-                        && self.engine_mgr.ensure_schema(&schema)
-                    {
-                        // key_code=0 哨兵：热键进入不写引导符。
-                        return self.commit_and_enter_special_mode(&mut state, idx, 0);
-                    }
-                    return KeyAction::Consumed;
-                }
-            } else if action == "enter_rare_char" {
-                // 生僻字模式直达热键。已在该模式则幂等（与 enter_special 同）；
-                // 非中文态吞键不放行，理由同上：策略位已带 CHINESE_ONLY，走到这里
-                // 说明是别的路径转发来的，放行会在英文态凭空插入一个字符。
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.chinese_mode {
-                    if state.active != Some(ModeKind::RareChar) {
-                        // key_code=0 哨兵：热键进入不写引导符（同 enter_special）。
-                        return self.commit_and_enter_rare_char_mode(&mut state, 0);
-                    }
-                    return KeyAction::Consumed;
-                }
-            } else if let Some(id) = action.strip_prefix("toggle_schema:") {
-                // 方案往返热键（keys.key_actions）：切过去，再按一次回来源。
-                // 与 switch_schema 同样**不判 chinese_mode**——回程尤其要在英文态按得动。
-                //
-                // trigger_vk 传 0：全局热键在所有方案里都生效，不需要「回程键临时授权」
-                // 那套（那是方案级绑定专有的问题，见 `schema_toggle_key_authorized`）。
-                let commit = self.toggle_schema_by_id(id, 0);
-                return self.schema_switch_key_action(commit);
-            } else if let Some(id) = action.strip_prefix("switch_schema:") {
-                // 方案直达热键：切 active 方案。**不判 chinese_mode**——与循环键
-                // (`switch_engine`) 同策略。切方案在英文态下同样该生效，否则切到英文方案后
-                // 这条路径就失效了，用户回不到中文方案。
-                let commit = self.switch_schema_by_id(id);
-                return self.schema_switch_key_action(commit);
-            } else if action == "softkeyboard" {
-                // 不带面：纯开关。
-                return self.softkeyboard_hotkey(None);
-            } else if let Some(id) = action.strip_prefix("softkeyboard:") {
-                // 直通车：无论开着还是关着都切到这一面，见 `toggle_softkeyboard` 的说明。
-                return self.softkeyboard_hotkey(Some(id.trim()));
-            } else if let Some(act) = self.dispatch_hotkey_keyed(&action) {
-                // 按键上下文走 `_keyed`：`toggle_mode` / `switch_engine` 会动输入状态，
-                // 它们的编码要经本次按键应答交还宿主（`dispatch_hotkey` 那条只能 push，
-                // 而 push 的空文本清不掉组合）。
+            } else if let Some(act) = self.dispatch_bound_action_hotkey(&action) {
+                // 其余动词统一按 `BoundAction` 分派——组合键与单键、修饰键同一个值域。
+                // 热键上下文专有的三条（key_code=0 哨兵 / chinese_mode 守卫 / 幂等）
+                // 都在那个函数里，见其文档。
                 return act;
             }
         }

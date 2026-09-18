@@ -7,82 +7,95 @@
 use crate::config::Config;
 use tracing::{debug, warn};
 
-/// `keys.key_actions` 里**组合键**条目的动词表：动词 → `(分发端 action, 策略位)`；
-/// 不支持的动词返回 `None`。
+/// `keys.key_actions` 里**组合键**条目的策略表：动词 → `(分发端 action, 策略位)`；
+/// 结构上走不通的动词返回 `None`。
 ///
-/// 白名单而非「解析得动就收」：写错的动词若静默进热键表，按下时分发端匹配不上、
-/// 什么都不发生，而用户看不出是自己拼错了还是功能坏了。调用点拦下并 warn，与
-/// `global_hotkeys` 对不支持动作的处理同策略。
+/// ★ **值域就是 [`crate::BoundAction`]**，与单键、修饰键两条通路同一张表。本函数只回答
+/// 「这个动词编进 key_down 热键表时该带哪些策略位」，不回答「组合键能不能绑它」——后者
+/// 由 `BoundAction::parse` 认不认得该动词决定。
 ///
-/// ★ **只管组合键**。单键条目走的是引导键通路（`Coordinator::bound_action_for`），
-/// 值域是完整的 [`crate::BoundAction`]，不经本函数——两条通路的分发端不同，能认的动词
-/// 自然不同。用一张表管两条路的结果，是要么放行了热键分发端不认的（配了没反应），
-/// 要么挡住了引导键通路完全支持的（能力凭空少一半）。
+/// 2026-09-18 之前这里是一份**逐条追加**的六项白名单（`toggle_schema:` / `switch_schema:` /
+/// `special:` / `rare_char` / `softkeyboard`），每接一个新功能往里加一行，于是组合键能绑的
+/// 功能恒比单键少一大截——而组合键这条通路在按键链上位次更早（英文模式分水岭之前）、
+/// 不与输入争键、可全局拦截，本该是限制**最少**的一条。那份白名单不是设计论证的产物，
+/// 是演进残留；现已翻转为「解析得出 `BoundAction` 就收，减去结构上走不通的」。
 ///
-/// 值域语义见 docs/design/schema-key-actions.md §2。
+/// 结构上走不通的只有两类，都不在 `BoundAction` 值域内、因而自然落 `None`：
+/// `add_word` / `open_add_word_dialog` 要返回占位 composition 激活 C++ 转发全部按键，
+/// 不符 `dispatch_hotkey` 的 `bool` 契约（分派端另有特判）。
 ///
-/// ★★ **策略位必须按动词分**，不能一律不带：同一个位在两类机制下后果相反。
+/// ★★ **策略位必须按动词分**，不能一律不带：同一个位在两类机制下后果相反。分组与
+/// `Compiler::compile` 里固定字段那几段**逐条一致**——同一个功能经两条路进表却带不同的位，
+/// 表现是「在设置页配和在自定义按键里配，行为不一样」。
 ///
 /// | 动词 | 策略位 | why |
 /// |---|---|---|
-/// | `toggle_schema:<id>` | 无 | 回程恰恰要在**非中文态**下按得动——带上 `CHINESE_ONLY` 就成了单程票，切到英文方案后回不来 |
-/// | `special:<id>` | `CHINESE_ONLY \| GLOBAL` | 进 overlay 只在中文输入中途有意义；`GLOBAL` 让 TSF 用 `RegisterHotKey` 抢占，穿透 QQNT/Tabby 等 Chromium 宿主的同名加速键 |
+/// | `toggle_schema:` / `switch_schema:` / `toggle_mode` / `switch_engine` | 无 | 它们正是用来**离开/返回英文态**的；带上 `CHINESE_ONLY` 就成了单程票 |
+/// | `toggle_full_width` / `toggle_toolbar` / `open_settings` / `take_screenshot` | 无 | 两模式下都该生效，与固定字段那段同档 |
+/// | `toggle_punct` / `toggle_s2t` / `toggle_t2s` / `single_char` | `CHINESE_ONLY` | 只在中文态有意义；**不带 `GLOBAL`**，避免不必要地抢占宿主快捷键 |
+/// | 进 overlay 的（`temp_pinyin` / `temp_english` / `aux_code` / `rare_char` / `mix:` / `special:`） | `CHINESE_ONLY \| GLOBAL` | 进 overlay 只在中文输入中途有意义；`GLOBAL` 让 TSF 用 `RegisterHotKey` 抢占，穿透 QQNT/Tabby 等 Chromium 宿主的同名加速键 |
+/// | `softkeyboard[:<id>]` | `GLOBAL` | 面板画的是「键位 → 符号」，与中英文态无关（英文态想打个 ℃ 同样合理），C++ 侧为此专设了软键盘总闸 `IsSoftKeyboard()`；带上 `CHINESE_ONLY` 英文态连开都开不出来 |
 ///
-/// ★ 动词形态在此做一次映射：引导键通路用 `special:<id>`（[`crate::BoundAction`] 的值域），
-/// 而热键分发端认的是 `enter_special:<id>`。两条通路的分发端不同，动词形态也就不同——
-/// 映射放在编译期，分发端零改动。
+/// ⚠️ `GLOBAL` 有**容量上限 16**（`TextService.cpp` 的 `kHotkeyIdAddWordBase + 16`，
+/// `RegisterHotKey` 超出后静默 break）。给位要克制：只在确需穿透 Chromium 宿主时给，
+/// 别为了「看起来更可靠」给整张表都挂上。
+///
+/// ★ 动词**原样**进表，不再改写成 `enter_special:` / `enter_rare_char` 那种分发端专用形态
+/// ——分派端现在也用 `BoundAction::parse` 认串，两条通路认的是同一个值域，映射失去了意义。
+/// （那层映射本身还制造过一类缺陷：新增动词时只在一处加，另一处忘了，症状是「配了没反应」。）
+///
+/// 值域语义见 docs/design/schema-key-actions.md §2。
+/// ⚠️ 进表的是**用户写的原串**（只 trim，不规范化）：`BoundAction::parse` 对无载荷动词
+/// 大小写不敏感，所以 `"TEMP_PINYIN"` 会以大写形态躺在 key_down 表里。消费方
+/// （`dispatch_bound_action_hotkey`）同样用 `BoundAction::parse` 认串，故行为正确——
+/// 但**别拿表里的 `action` 跟字面量直接比**，那种写法只在用户恰好写小写时成立。
 pub(crate) fn hotkey_action_entry(action: &str) -> Option<(String, u32)> {
-    // 两个切方案动词都**不带 CHINESE_ONLY**：切方案在中英两态下都该生效——尤其
-    // 「英文方案 → 中文方案」，要求恰恰是在非中文态下也能按。带上就是「切得过去、
-    // 切不回来」。与 `switch_engine` 循环键同策略。
-    if let Some(id) = action.strip_prefix("toggle_schema:")
-        && !id.trim().is_empty()
-    {
-        return Some((action.to_string(), 0));
+    let action = action.trim();
+    let policy = hotkey_policy_for(&crate::config::BoundAction::parse(action))?;
+    Some((action.to_string(), policy))
+}
+
+/// 组合键动词的策略位。`BoundAction::None`（含解析不出的未知动词）返回 `None` ⇒ 不进表。
+///
+/// 两个位各有各的判据，分开取：
+///
+/// - `CHINESE_ONLY` —— 复用 [`crate::BoundAction::only_in_chinese_mode`]，**不在这里重写一份**。
+///   分派端的 `chinese_mode` 守卫读的是同一个方法，两处分叉的后果见那里的说明。
+/// - `GLOBAL` —— 只给「会被 Chromium 类宿主（QQNT/Tabby）的同名加速键抢走」的那些：进
+///   overlay 的一族与软键盘。⚠️ 它有**容量上限 16**（`TextService.cpp` 的
+///   `kHotkeyIdAddWordBase + 16`，`RegisterHotKey` 超出后静默 break），给位要克制，
+///   别为了「看起来更可靠」给整张表都挂上。
+fn hotkey_policy_for(action: &crate::config::BoundAction) -> Option<u32> {
+    use crate::config::BoundAction as BA;
+    if matches!(action, BA::None) {
+        return None;
     }
-    if let Some(id) = action.strip_prefix("switch_schema:")
-        && !id.trim().is_empty()
-    {
-        return Some((action.to_string(), 0));
+    let mut policy = 0;
+    if action.only_in_chinese_mode() {
+        policy |= HOTKEY_POLICY_CHINESE_ONLY;
     }
-    if let Some(id) = action.strip_prefix("special:")
-        && !id.trim().is_empty()
-    {
-        return Some((
-            format!("enter_special:{}", id.trim()),
-            HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
-        ));
+    // ⚠️ 穷举 `match`，不用 `matches!`：漏给 GLOBAL 的症状是「在 QQNT / Tabby 里按不出来、
+    // 在记事本里正常」——本仓自述最难归因的一类。列全的话新增变体编译不过。
+    let needs_global = match action {
+        BA::TempPinyin
+        | BA::TempEnglish
+        | BA::AuxCode
+        | BA::RareChar
+        | BA::Mix(_)
+        | BA::Special(_)
+        | BA::SoftKeyboard(_) => true,
+        // 不抢占：这些不进 overlay，被宿主同名加速键抢走的代价也小（最多是这一次没切成），
+        // 而 GLOBAL 的槽位只有 16 个（见下方 `warn_global_hotkey_overflow`）。
+        BA::None
+        | BA::SingleChar(_)
+        | BA::ToggleSchema(_)
+        | BA::SwitchSchema(_)
+        | BA::Action(_) => false,
+    };
+    if needs_global {
+        policy |= HOTKEY_POLICY_GLOBAL;
     }
-    // 生僻字模式：策略位与 `special:` 完全一致——同样是「进 overlay 只在中文输入中途有
-    // 意义」，同样需要 GLOBAL 穿透 Chromium 类宿主的同名加速键。动词做一次映射
-    // （`rare_char` → `enter_rare_char`），理由同 `special:`：引导键通路与热键分发端
-    // 认的是两个不同的串。
-    if action == "rare_char" {
-        return Some((
-            "enter_rare_char".to_string(),
-            HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL,
-        ));
-    }
-    // 软键盘：**不带 `CHINESE_ONLY`**。
-    //
-    // 面板画的是「键位 → 符号」的映射，跟当前是中文还是英文模式没有关系——用户在英文态
-    // 想打个 ℃ 同样合理。C++ 侧为此专设了软键盘总闸（`IsSoftKeyboard()`），接管不再
-    // 依附于中文模式的那条判定链。带上这个位的话，英文态连开都开不出来。
-    //
-    // 保留 `GLOBAL`：同 `special:`，规避 Chromium 类宿主无视 `pfEaten` 造成的双处理。
-    // 它自身的注册条件含「中文 + 焦点在文本框」，英文态下自然退回普通热键链路。
-    //
-    // 动词原样传给分派端（不像 `special:` 那样改写成 `enter_special:`）：协调器的
-    // `softkeyboard_hotkey` 认的就是这个串。
-    if action == "softkeyboard" {
-        return Some((action.to_string(), HOTKEY_POLICY_GLOBAL));
-    }
-    if let Some(id) = action.strip_prefix("softkeyboard:")
-        && !id.trim().is_empty()
-    {
-        return Some((action.to_string(), HOTKEY_POLICY_GLOBAL));
-    }
-    None
+    Some(policy)
 }
 
 /// `keys.key_actions` 的一条条目该走哪条通路。由**键的形态**决定，不由动词决定。
@@ -473,12 +486,16 @@ impl Compiler {
         // `"ctrl+shift+u" = "special:<方案id>"`），由上方的 `KeyActionRoute::Hotkey`
         // 分支按动词取策略位编译。原先那段遍历 `schema.special_modes[].hotkey` 的循环
         // 连同「id 为空则跳过」那条陷阱一并消失——身份现在就是方案 id，不可能为空。
+        //
+        // ★ action 用动词原文 `"temp_pinyin"`（`BoundAction` 的值域），不是早先那个分发端
+        // 专用的 `enter_temp_pinyin`：分派端现已统一用 `BoundAction::parse` 认串，本条与
+        // `key_actions` 里写 `"ctrl+;" = "temp_pinyin"` 落到**同一个**分派臂。
         let mode_policy = HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL;
         if let Some(raw) = parse_hotkey(&self.config.input.temp_pinyin.hotkey) {
             result.key_down.push(HotkeyEntry {
                 tsf_hash: raw | mode_policy,
                 match_hash: raw,
-                action: "enter_temp_pinyin".to_string(),
+                action: "temp_pinyin".to_string(),
             });
         }
 
@@ -497,12 +514,9 @@ impl Compiler {
         // ⚠ 别在这里"顺手"把它加回来：加回来这两个洞就一起回来了。
 
         // ── KeyDown：按键功能表（keys.key_actions）──
-        // **不带 CHINESE_ONLY**，理由与上面方案直达热键同：`toggle_schema` 的回程恰恰要在
-        // 非中文态下按得动（切到英文方案后带上该位就回不来了）。
-        //
-        // ⚠ 后续接入别的动词时**策略位必须按动词分**，不能沿用这里的"一律不带"：进 overlay
-        // 的动词（enter_special / temp_pinyin 那类）只在中文输入中途有意义，需要
-        // CHINESE_ONLY | GLOBAL——同一个位在两类机制下后果相反（见上方 enter_special 那段）。
+        // 策略位**逐动词**取自 `hotkey_action_entry`，本段自己不定位——同一个位在两类动词上
+        // 后果相反（切方案带 CHINESE_ONLY 就成单程票，进 overlay 不带就会在英文态凭空触发），
+        // 那张表是这批判断的单点，分组理由见其文档。
         //
         // BTreeMap 遍历即有序，无需像 schema_hotkeys 那样显式排序：撞键时的胜者顺序
         // 在任何进程里都一致。
@@ -527,16 +541,19 @@ impl Compiler {
                     // 显式值承载——语义与单键、修饰键两条通路的 `BoundAction::None`
                     // 逐条对应，见 `Coordinator::bound_action_with_source_layered`。
                     //
-                    // ★ 必须在白名单**之前**静默跳过。落到下面那句 warn 的话，会把
+                    // ★ 必须在取策略位**之前**静默跳过。落到下面那句 warn 的话，会把
                     // 「用户主动禁用」报成「配置写错了」——而这是一条预期内的配法。
-                    // （功能上此前就已经关得掉：`hotkey_action_entry` 不认 none ⇒ 不进表。
-                    // 本分支改的是日志与意图表达，不是新增能力。）
+                    // `none` 与「动词写错了」在 `BoundAction::parse` 眼里都是 `None`，
+                    // 两者只能靠这里的先后顺序分开。
                     if action.eq_ignore_ascii_case("none") {
                         debug!("keys.key_actions: {key:?} 显式禁用（none），不进热键表");
                         continue;
                     }
                     let Some((dispatch_action, policy)) = hotkey_action_entry(action) else {
-                        warn!("keys.key_actions: 组合键不支持动词 {action:?}（键 {key:?}），忽略");
+                        warn!(
+                            "keys.key_actions: 认不得动词 {action:?}（键 {key:?}），忽略。\
+                             组合键与单键同一值域（BoundAction），多半是拼错了"
+                        );
                         continue;
                     };
                     result.key_down.push(HotkeyEntry {
@@ -621,6 +638,8 @@ impl Compiler {
         // 无害；服务端按 action 区分，切换只认 action=="toggle_mode"，故消费端**不能**用
         // 「key_up 里有这个 key_code」当切换判据（见 is_toggle_mode_keycode）。
 
+        warn_global_hotkey_overflow(&result.key_down);
+
         debug!(
             "Compiled hotkeys: {} key_down, {} key_up",
             result.key_down.len(),
@@ -628,6 +647,48 @@ impl Compiler {
         );
         result
     }
+}
+
+/// Win32 `RegisterHotKey` 的槽位上限：带 `GLOBAL` 位的条目超过这么多就有一部分注册不上。
+///
+/// 与 `wind_tsf/src/TextService.cpp` 的 `kHotkeyIdAddWordBase + 16` 对齐。那边超出后
+/// **静默 `break`**，只留一行 `registered=%d/%d` 的 debug 日志——说得出「少注册了几个」，
+/// 说不出「是哪几个键」（DLL 那侧只有 rawHash，翻不回键名）。
+const GLOBAL_HOTKEY_SLOTS: usize = 16;
+
+/// 带 `GLOBAL` 位的条目超过槽位上限时告警，并点名会失效的那几个。
+///
+/// ★ **这里是唯一说得出人话的地方**：本函数既知道数量、又还拿着用户写的键名。
+///
+/// 触发条件真实可达（不是恒假的护栏）：出厂基线只有 2~4 条带 GLOBAL，但
+/// `keys.key_actions` 里每绑一个进 overlay 的动词就加一条，绑满十来个组合键就会顶到上限。
+/// 2026-09-18 组合键值域合流后 `temp_english` / `aux_code` / `mix:` 也进了这一族，
+/// 从「结构上不可能顶到」变成了「结构上可能」。
+fn warn_global_hotkey_overflow(key_down: &[HotkeyEntry]) {
+    let (total, dropped) = global_hotkey_overflow(key_down);
+    if dropped.is_empty() {
+        return;
+    }
+    warn!(
+        "全局拦截热键共 {total} 个，超过系统槽位上限 {GLOBAL_HOTKEY_SLOTS}：{dropped:?} \
+         这几个注册不上，在 QQNT / Tabby 等宿主里会被同名加速键抢走（普通转发仍然有效）"
+    );
+}
+
+/// 超限判定本体，抽出来是为了**可测**：`warn!` 只在日志里，断言不到。
+///
+/// 返回 `(带 GLOBAL 的总数, 注册不上的那些的动词)`。超出的是**靠后**的那些：
+/// TSF 侧按 `GlobalHotkeys()` 的顺序注册，填满即 break。
+fn global_hotkey_overflow(key_down: &[HotkeyEntry]) -> (usize, Vec<&str>) {
+    let globals: Vec<&HotkeyEntry> = key_down
+        .iter()
+        .filter(|e| e.tsf_hash & HOTKEY_POLICY_GLOBAL != 0)
+        .collect();
+    let dropped = globals
+        .get(GLOBAL_HOTKEY_SLOTS..)
+        .map(|rest| rest.iter().map(|e| e.action.as_str()).collect())
+        .unwrap_or_default();
+    (globals.len(), dropped)
 }
 
 /// 编译 toggle 模式键（含通用位+具体位），对齐 Go compileToggleModeKey
@@ -1324,7 +1385,7 @@ mod tests {
             compiled
                 .key_down
                 .iter()
-                .any(|e| e.action == "enter_special:fuhao"),
+                .any(|e| e.action == "special:fuhao"),
             "同表里其它条目不受影响"
         );
     }
@@ -1374,8 +1435,8 @@ mod tests {
         assert!(tp.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0);
     }
 
-    /// 特殊模式直达热键现在写在 `keys.key_actions` 里（`special:<方案id>`），
-    /// 编译时映射成分发端认的 `enter_special:<id>`，并带 CHINESE_ONLY | GLOBAL。
+    /// 特殊模式直达热键写在 `keys.key_actions` 里（`special:<方案id>`），动词**原样**
+    /// 进表（分派端用 `BoundAction::parse` 认串），并带 CHINESE_ONLY | GLOBAL。
     #[test]
     fn special_mode_hotkey_compiles_with_global_policy() {
         let mut cfg = Config::default();
@@ -1386,8 +1447,8 @@ mod tests {
         let e = compiled
             .key_down
             .iter()
-            .find(|e| e.action == "enter_special:rare")
-            .expect("key_actions 的 special:<id> 应编出 enter_special:<id>");
+            .find(|e| e.action == "special:rare")
+            .expect("key_actions 的 special:<id> 应原样进表");
         // 与加词键同策略：CHINESE_ONLY | GLOBAL；match_hash 不含任何 policy 位
         assert!(e.tsf_hash & HOTKEY_POLICY_GLOBAL != 0);
         assert!(e.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0);
@@ -1405,8 +1466,8 @@ mod tests {
         let e = compiled
             .key_down
             .iter()
-            .find(|e| e.action == "enter_temp_pinyin")
-            .expect("temp_pinyin.hotkey 应编出 enter_temp_pinyin");
+            .find(|e| e.action == "temp_pinyin")
+            .expect("temp_pinyin.hotkey 应编出动词原文 temp_pinyin");
         assert!(e.tsf_hash & HOTKEY_POLICY_GLOBAL != 0);
         assert!(e.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0);
         assert_eq!(
@@ -1502,7 +1563,7 @@ mod tests {
         let e2 = c2
             .key_down
             .iter()
-            .find(|e| e.action == "enter_special:rare")
+            .find(|e| e.action == "special:rare")
             .unwrap();
         assert!(
             e2.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0,
@@ -1558,7 +1619,7 @@ mod tests {
             !compiled
                 .key_down
                 .iter()
-                .any(|e| e.action.starts_with("enter_special:") || e.action == "enter_temp_pinyin"),
+                .any(|e| e.action.starts_with("special:") || e.action == "temp_pinyin"),
             "空 hotkey / 空 id 不应产生直达热键条目"
         );
     }
@@ -1670,8 +1731,160 @@ mod tests {
         assert_eq!(up.action, "schema_bound");
     }
 
-    /// 生僻字模式直达热键：`rare_char` 编成分发端认的 `enter_rare_char`，
-    /// 策略位与 `special:` 一致（CHINESE_ONLY | GLOBAL）。
+    /// 全局拦截热键的槽位上限护栏**必须真的能触发**，不能是一条恒假的不等式。
+    ///
+    /// ⚠️ 这条测试的存在理由是本仓踩过的一类：护栏写好了，而上游某个闸门让它的条件恒不
+    /// 成立，于是它从来没报过——「没报警」被当成了「没问题」。所以这里两头都验：
+    /// 出厂配置下不报（不是噪音），配满 overlay 组合键时报得出来、且点得出是哪几个。
+    #[test]
+    fn global_hotkey_slot_guard_can_actually_fire() {
+        // ① 出厂基线不该触发——否则它就是常驻噪音，很快会被无视。
+        let base = Compiler::new(Config::default()).compile();
+        let (base_total, base_dropped) = global_hotkey_overflow(&base.key_down);
+        assert!(
+            base_dropped.is_empty(),
+            "出厂配置不该触发槽位告警（当前 {base_total} 个带 GLOBAL）"
+        );
+        assert!(
+            base_total <= GLOBAL_HOTKEY_SLOTS,
+            "出厂基线本身就顶满槽位了，护栏的余量判据要重算"
+        );
+
+        // ② 配满进 overlay 的组合键 ⇒ 必须报，且点得出是哪几个。
+        //    用 `rare_char`（无载荷、恒带 CHINESE_ONLY|GLOBAL）逐键绑满。
+        let mut cfg = Config::default();
+        for (i, vk) in ('a'..='z').enumerate().take(GLOBAL_HOTKEY_SLOTS + 4) {
+            let _ = i;
+            cfg.keys
+                .key_actions
+                .insert(format!("ctrl+alt+shift+{vk}"), "rare_char".to_string());
+        }
+        let full = Compiler::new(cfg).compile();
+        let (total, dropped) = global_hotkey_overflow(&full.key_down);
+        assert!(
+            total > GLOBAL_HOTKEY_SLOTS,
+            "前提没达成：只编出 {total} 个带 GLOBAL 的条目"
+        );
+        assert!(!dropped.is_empty(), "超限了却报不出来，护栏形同虚设");
+        assert_eq!(
+            dropped.len(),
+            total - GLOBAL_HOTKEY_SLOTS,
+            "报出的条数应恰好是溢出的那些"
+        );
+    }
+
+    /// 组合键的值域**就是** `BoundAction` 的全值域——这是 2026-09-18 合流的核心断言。
+    ///
+    /// 合流前这里是一份逐条追加的六项白名单，组合键能绑的功能恒比单键少一大截；而组合键
+    /// 这条通路在按键链上位次更早（英文模式分水岭之前）、不与输入争键，本该是限制最少的
+    /// 一条。若今后有人为了修某个具体问题把某一族重新挡回去，本测试会红。
+    #[test]
+    fn combo_keys_accept_the_whole_bound_action_domain() {
+        let verbs = [
+            // A 类状态切换
+            "toggle_mode",
+            "switch_engine",
+            "toggle_full_width",
+            "toggle_punct",
+            "toggle_s2t",
+            "toggle_t2s",
+            "toggle_toolbar",
+            "open_settings",
+            "take_screenshot",
+            // B 类进 overlay
+            "temp_pinyin",
+            "temp_english",
+            "aux_code",
+            "rare_char",
+            "mix:quick_mix",
+            "special:fuhao",
+            "single_char",
+            "single_char:on",
+            "softkeyboard",
+            "softkeyboard:num",
+            // C 类切方案
+            "toggle_schema:english",
+            "switch_schema:wubi",
+        ];
+        for verb in verbs {
+            let mut cfg = Config::default();
+            cfg.keys.softkeyboard = String::new(); // 免得出厂那条占着同一个键
+            cfg.keys
+                .key_actions
+                .insert("ctrl+alt+shift+j".to_string(), verb.to_string());
+            let compiled = Compiler::new(cfg).compile();
+            let raw = parse_hotkey("ctrl+alt+shift+j").expect("组合键应解析得动");
+            assert!(
+                compiled
+                    .key_down
+                    .iter()
+                    .any(|e| e.match_hash == raw && e.action == verb),
+                "组合键应能绑 {verb}，且动词原样进表"
+            );
+        }
+    }
+
+    /// 策略位按动词分，且与固定字段那两段**逐条一致**：同一个功能经两条路进表却带不同的
+    /// 位，表现是「在设置页配和在自定义按键里配，行为不一样」。
+    ///
+    /// ⚠️ `toggle_mode` 那条是本次合流最实际的收获，也是最容易配错的一条：带上
+    /// `CHINESE_ONLY` 就成了单程票——切到英文态后这个键 TSF 不再转发，再也切不回中文。
+    #[test]
+    fn combo_key_policy_bits_split_by_verb() {
+        // (动词, 期望 CHINESE_ONLY, 期望 GLOBAL)
+        let cases: &[(&str, bool, bool)] = &[
+            ("toggle_mode", false, false),
+            ("switch_engine", false, false),
+            ("toggle_schema:english", false, false),
+            ("switch_schema:wubi", false, false),
+            ("toggle_full_width", false, false),
+            ("toggle_toolbar", false, false),
+            ("open_settings", false, false),
+            ("take_screenshot", false, false),
+            ("toggle_punct", true, false),
+            ("toggle_s2t", true, false),
+            ("toggle_t2s", true, false),
+            ("single_char", true, false),
+            ("temp_pinyin", true, true),
+            ("temp_english", true, true),
+            ("aux_code", true, true),
+            ("rare_char", true, true),
+            ("mix:quick_mix", true, true),
+            ("special:fuhao", true, true),
+            ("softkeyboard", false, true),
+        ];
+        for (verb, want_chinese, want_global) in cases {
+            let mut cfg = Config::default();
+            cfg.keys.softkeyboard = String::new();
+            cfg.keys
+                .key_actions
+                .insert("ctrl+alt+shift+j".to_string(), (*verb).to_string());
+            let compiled = Compiler::new(cfg).compile();
+            let e = compiled
+                .key_down
+                .iter()
+                .find(|e| e.action == *verb)
+                .unwrap_or_else(|| panic!("{verb} 应进 key_down 表"));
+            assert_eq!(
+                e.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0,
+                *want_chinese,
+                "{verb} 的 CHINESE_ONLY 位与预期不符"
+            );
+            assert_eq!(
+                e.tsf_hash & HOTKEY_POLICY_GLOBAL != 0,
+                *want_global,
+                "{verb} 的 GLOBAL 位与预期不符"
+            );
+            // match_hash 恒不含策略位：服务端匹配只认裸 hash。
+            assert_eq!(
+                e.match_hash & (HOTKEY_POLICY_CHINESE_ONLY | HOTKEY_POLICY_GLOBAL),
+                0
+            );
+        }
+    }
+
+    /// 生僻字模式直达热键：`rare_char` 动词原样进表，策略位与 `special:` 一致
+    /// （CHINESE_ONLY | GLOBAL）。
     ///
     /// GLOBAL 那半不是可选的：少了它，QQNT / Tabby 这类 Chromium 宿主会用自己的同名
     /// 加速键把这个组合吃掉，用户只在部分程序里按不出来——最难归因的一类问题。
@@ -1685,8 +1898,8 @@ mod tests {
         let e = compiled
             .key_down
             .iter()
-            .find(|e| e.action == "enter_rare_char")
-            .expect("key_actions 的 rare_char 应编出 enter_rare_char");
+            .find(|e| e.action == "rare_char")
+            .expect("key_actions 的 rare_char 应原样进表");
         assert!(
             e.tsf_hash & HOTKEY_POLICY_GLOBAL != 0,
             "须带 GLOBAL，否则 Chromium 类宿主会吃掉它"

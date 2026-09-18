@@ -1466,6 +1466,63 @@ impl BoundAction {
         }
     }
 
+    /// 该动作是否**只在中文态有意义**。
+    ///
+    /// 两处共用：
+    ///
+    /// - 编译期 —— 组合键要不要带 `HOTKEY_POLICY_CHINESE_ONLY`（`hotkey.rs` 的
+    ///   `hotkey_policy_for`），决定 TSF 在英文态转不转发。**对全部动词生效**。
+    /// - 分派端 —— 组合键命中后判不判 `chinese_mode`（`dispatch_bound_action_hotkey`）。
+    ///   ⚠️ **只对建 overlay 的 B 类生效**，见下。
+    ///
+    /// 分派端那道守卫是给策略位兜底的：策略位说「英文态别转发」，但别的路径转发进来的
+    /// 同一个键仍会到达分派端，那时在英文态凭空建一个组合区就是明显的错。
+    ///
+    /// # 为什么 A 类不走分派端那道守卫
+    ///
+    /// `toggle_punct` / `toggle_s2t` / `toggle_t2s` 在本方法是 `true`（策略位该带
+    /// `CHINESE_ONLY`，与固定字段那段的既有分组一致），但它们是 `BoundAction::Action(_)`，
+    /// 在 `dispatch_bound_action_hotkey` 里被 `is_lock_free_bound` 在守卫**之前**分流走。
+    ///
+    /// 这是**刻意的**，不是漏网：
+    ///
+    /// - A 类只改一个状态位，不建 overlay ⇒ 英文态下改了也不会在屏幕上凭空出现什么；
+    /// - 「英文态下先把繁简档切好，回中文态就生效」是**合理用法**，挡掉是回归；
+    /// - `toggle_punct` 自己在 `dispatch_hotkey` 里有 `effective_chinese` 内检
+    ///   （它改的东西只在中文态有意义），需要内检的动词各自负责。
+    ///
+    /// ⇒ 本方法回答的是「**策略位**该不该带 `CHINESE_ONLY`」；分派端借用它来判 B 类的
+    /// 进入条件，是这个判据的一个**子集用法**，不是它的全部含义。
+    ///
+    /// 判据是「离开英文态的手段吗」的**反面**：`toggle_mode` / `switch_engine` /
+    /// `toggle_schema:` / `switch_schema:` 恰恰要在非中文态按得动（否则切过去回不来），
+    /// 故一律 `false`。`softkeyboard` 也是 `false`——面板画的是「键位 → 符号」，与中英态
+    /// 无关（英文态想打个 ℃ 同样合理），C++ 侧为此专设了软键盘总闸 `IsSoftKeyboard()`。
+    pub fn only_in_chinese_mode(&self) -> bool {
+        match self {
+            // 进 overlay 的一族：中文输入中途才有意义。
+            Self::TempPinyin
+            | Self::TempEnglish
+            | Self::AuxCode
+            | Self::RareChar
+            | Self::Mix(_)
+            | Self::Special(_) => true,
+            // 字词范围切的是「这一码出什么」，没有中文候选就无从谈起。
+            Self::SingleChar(_) => true,
+            Self::None | Self::SoftKeyboard(_) | Self::ToggleSchema(_) | Self::SwitchSchema(_) => {
+                false
+            }
+            // A 类：只有这三个是「中文态才有意义」，其余（`toggle_mode` / `switch_engine` /
+            // `toggle_full_width` / `toggle_toolbar` / `open_settings` / `take_screenshot`）
+            // 两模式都吃。分组与 `hotkey.rs` 里固定字段那两段逐条一致。
+            //
+            // ⚠️ 载荷是 `String`，**编译期穷举不了**，新增的 A 类动词会静默落进 `false`
+            // 那一档。守门交给测试 `chinese_only_covers_every_dispatch_action`：它遍历
+            // `DISPATCH_ACTIONS` 比对一张预期表，新增动词时那条会红，逼人当场表态。
+            Self::Action(a) => matches!(a.as_str(), "toggle_punct" | "toggle_s2t" | "toggle_t2s"),
+        }
+    }
+
     /// 解析配置字符串。大小写与首尾空白不敏感；未知值 → [`Self::None`]。
     pub fn parse(s: &str) -> Self {
         let s = s.trim();
@@ -5983,6 +6040,93 @@ mod global_default_guards {
             Some(FirstShowMode::default()),
             "ui.candidate.first_show_mode 的出厂串与 FirstShowMode 的 #[default] 必须是同一档"
         );
+    }
+}
+
+#[cfg(test)]
+mod bound_action_chinese_only_tests {
+    use super::*;
+
+    /// [`BoundAction::only_in_chinese_mode`] 必须对 **每一个** A 类动词都表过态。
+    ///
+    /// 那个方法的 `Action(_)` 臂载荷是 `String`，编译期穷举不了，新增的动词会静默落进
+    /// 「两模式都吃」那一档——而那一档对只在中文态有意义的动作是错的（英文态凭空触发）。
+    /// 本测试就是那道编译期给不了的闸：预期表按 `DISPATCH_ACTIONS` 逐项列全，
+    /// 新增动词时这里会红，逼人当场表态。
+    ///
+    /// 结果同时决定两处（组合键要不要带 `HOTKEY_POLICY_CHINESE_ONLY`、分派端判不判
+    /// `chinese_mode`），见该方法的文档。
+    #[test]
+    fn chinese_only_covers_every_dispatch_action() {
+        // (动词, 是否只在中文态有意义)
+        let expected: &[(&str, bool)] = &[
+            // 中英/方案切换：**恰恰**要在非中文态按得动，否则切过去回不来。
+            ("toggle_mode", false),
+            ("switch_engine", false),
+            // 两模式下都该生效。
+            ("toggle_full_width", false),
+            ("toggle_toolbar", false),
+            ("open_settings", false),
+            ("take_screenshot", false),
+            // 只在中文态有意义。
+            ("toggle_punct", true),
+            ("toggle_s2t", true),
+            ("toggle_t2s", true),
+        ];
+        let mut listed: Vec<&str> = expected.iter().map(|(v, _)| *v).collect();
+        listed.sort_unstable();
+        let mut actual: Vec<&str> = BoundAction::DISPATCH_ACTIONS.to_vec();
+        actual.sort_unstable();
+        assert_eq!(
+            listed, actual,
+            "DISPATCH_ACTIONS 变了：请在本表里给新动词表态（只在中文态有意义吗）"
+        );
+        for (verb, only_chinese) in expected {
+            let parsed = BoundAction::parse(verb);
+            assert!(
+                matches!(parsed, BoundAction::Action(_)),
+                "{verb} 应解析成 A 类动作"
+            );
+            assert_eq!(
+                parsed.only_in_chinese_mode(),
+                *only_chinese,
+                "{verb} 的中文态判据与预期不符"
+            );
+        }
+    }
+
+    /// 进 overlay 的一族与字词范围恒为真；软键盘与切方案恒为假。
+    ///
+    /// 软键盘那条不是顺手写的：它带 `CHINESE_ONLY` 的话英文态连开都开不出来，而面板画的
+    /// 是「键位 → 符号」，与中英态无关（C++ 侧为此专设了 `IsSoftKeyboard()` 总闸）。
+    #[test]
+    fn chinese_only_matches_action_family() {
+        for verb in [
+            "temp_pinyin",
+            "temp_english",
+            "aux_code",
+            "rare_char",
+            "mix:quick_mix",
+            "special:fuhao",
+            "single_char",
+        ] {
+            assert!(
+                BoundAction::parse(verb).only_in_chinese_mode(),
+                "{verb} 只在中文输入中途有意义"
+            );
+        }
+        for verb in [
+            "softkeyboard",
+            "softkeyboard:num",
+            "toggle_schema:english",
+            "switch_schema:wubi",
+            "none",
+        ] {
+            assert!(
+                !BoundAction::parse(verb).only_in_chinese_mode(),
+                "{verb} 不得限中文态"
+            );
+        }
     }
 }
 
