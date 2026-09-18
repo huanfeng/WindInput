@@ -380,6 +380,17 @@ pub const CONFIG_KEY_PASSWORD_SUPPRESS: &str = "password_suppress";
 /// （集合为空 = 行为与历史完全一致）。判据须与 `wind_punct::custom_english_punct_chars`
 /// 同源，漂移即「吃了再吐」丢键。
 pub const CONFIG_KEY_CUSTOM_EN_PUNCT: &str = "custom_en_punct";
+/// 「中文模式下产物就是原样半角 ASCII、该由 TSF **直接透传**」的上挡符号集合同步键名。
+/// 与 `CONFIG_KEY_CUSTOM_EN_PUNCT` 共用编码格式（count(u8) + UTF-16LE 字符数组）。
+///
+/// 方向与上一个键**相反**：那个是「本该透传的，请多吃几个」，这个是「本该吃的，请别吃」。
+/// 成因是「吃了再吐」在非 TSF-aware 宿主上不是无害的往返——CUAS 送达的字符码会被宿主当
+/// **虚拟键码**解释（Tkinter 实测 `#`→VK_END、`%`→VK_LEFT、`&`→VK_UP，字不上屏反而移了光标，
+/// 见 B-9）。微软拼音对这批符号根本不吃键，本键就是让我们对齐那个行为。
+///
+/// 判据须与 `wind_punct::chinese_passthrough_punct_chars` 同源；集合为空 = 行为与历史完全一致。
+/// TSF 侧还要再叠两道**动态**闸门（有输入会话 / 全角），那两个只有 DLL 自己知道。
+pub const CONFIG_KEY_CN_PASSTHROUGH_PUNCT: &str = "cn_passthrough_punct";
 /// 配对状态时效（秒，0=不过期）同步键名。TSF 端持有吃键闸门（`_pairPendingDepth`），
 /// 必须能本地判定状态是否陈旧：若只有协调器过期而 DLL 仍吃跳出键，协调器回 PassThrough
 /// 已太晚（形成「吃了再吐」丢键）。故 TTL 判据以 DLL 侧为准，此键把阈值推给它。

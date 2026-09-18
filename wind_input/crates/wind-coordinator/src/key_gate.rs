@@ -33,6 +33,7 @@ use wind_host::KeyProbe;
 use wind_keys::keymap;
 
 use crate::coordinator::Coordinator;
+use crate::key_convert::punct_char;
 
 /// 修饰位：本模块内部用的规范化形式（与 `wind_ipc::protocol` 的通用位对齐）。
 const MOD_SHIFT: u32 = 0x0001;
@@ -157,6 +158,31 @@ impl Coordinator {
         // （`!` 而不是 `！`），而且只在空缓冲时如此——有编码时它们又是全角，
         // 于是看起来像「有时候转有时候不转」。安卓端实测就是这个形状。
         if mods & MOD_SHIFT != 0 && is_digit(probe.vk) {
+            // …但其中**产物就是原样半角 ASCII**的那几个（默认是 `@#%&*`，即中文标点表里
+            // 没有映射的）要反过来**透传**，不吃。
+            //
+            // 吃了再把原样 ASCII 吐回去不是无害的往返：非 TSF-aware 宿主会把 CUAS 送达的
+            // 字符码当**虚拟键码**解释。Tkinter 实测（B-9）`#`(0x23)→VK_END、`%`(0x25)→VK_LEFT、
+            // `&`(0x26)→VK_UP —— 字不上屏，反倒执行了一次光标移动。微软拼音对这批符号根本
+            // 不吃键，宿主拿到的是真实 VK，故无此问题；这里就是对齐那个行为。
+            //
+            // 判据取 `cn_passthrough_punct_chars`，与推给 DLL 的那份**同源**
+            // （`wind_punct::chinese_passthrough_punct_chars`）——两侧漂移就是老问题的另一面。
+            //
+            // 两道动态闸门必须叠在集合之外，因为它们不是配置、是当下状态：
+            //   · 有输入会话 ⇒ 组码中按上挡符号是**顶码**语义，必须吃；
+            //   · 全角 ⇒ `#` 要出 `＃`，必须吃。
+            if !session
+                && let Some(ch) = punct_char(probe.vk, true)
+                && self.rt().cn_passthrough_punct_chars.contains(&ch)
+                && !self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .full_width
+            {
+                return false;
+            }
             return true;
         }
         if is_session_only_key(probe.vk) {

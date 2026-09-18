@@ -44,23 +44,60 @@ fn probe(vk: u32) -> KeyProbe {
     KeyProbe::new(vk)
 }
 
-/// Shift+数字是上挡标点，**空缓冲时也要吃**。
+/// Shift+数字的上挡标点：**会转换的吃，产物原样的透传**。
+///
+/// # 前半条契约（旧）
 ///
 /// 现象（已修）：中文标点态下 `!@#$%^&*()` 整排绕过标点层直出半角，而且只在空缓冲时如此
 /// ——有编码时又是全角，看起来像「有时候转有时候不转」。根因是 `is_session_only_key`
 /// 只看 VK 不看修饰位，把 Shift+1 也当成了「数字键，空缓冲交还宿主」。
+///
+/// # 后半条契约（B-9 补上的另一半）
+///
+/// 产物**就是原样半角 ASCII** 的那几个（`@#%&*`，中文标点表里没有映射）必须反过来**透传**。
+/// 吃了再原样吐回去要绕一圈经 CUAS 回到宿主，而非 TSF-aware 宿主会把送达的字符码当**虚拟
+/// 键码**解释：Tkinter 实测 `#`(0x23)→VK_END、`%`(0x25)→VK_LEFT、`&`(0x26)→VK_UP，字不上屏、
+/// 反倒执行了一次光标移动。微软拼音对这批符号根本不吃键，宿主拿到的是真实 VK，故无此问题。
+///
+/// 两条合起来才是完整判据：**吃与不吃，取决于这个键在当前配置下会不会被改写**。
 #[test]
-fn shifted_digits_are_punct_even_on_empty_buffer() {
+fn shifted_digits_eaten_only_when_they_convert() {
     let Some(c) = coordinator() else { return };
-    for vk in 0x30u32..=0x39 {
+
+    // 有中文标点映射 ⇒ 要转换 ⇒ 必须吃。(VK, 产物, 中文形)
+    for (vk, ch, cn) in [
+        (0x30u32, ')', '）'),
+        (0x31, '!', '！'),
+        (0x34, '$', '￥'),
+        (0x36, '^', '…'),
+        (0x39, '(', '（'),
+    ] {
         let mut p = KeyProbe::new(vk);
         p.modifiers = Modifiers(0x0001); // MOD_SHIFT
         assert!(
             c.should_handle_key(&p),
-            "Shift+{:#x} 是上挡标点，空缓冲也应被吃",
-            vk
+            "Shift+{vk:#x} 出 `{ch}`→`{cn}`，要转换，空缓冲也应被吃"
         );
-        // 不带 Shift 的数字仍旧交还宿主（原有契约不能被这条改坏）
+    }
+
+    // 中文标点表无映射 ⇒ 产物即原样 ⇒ 必须透传（否则就是 B-9 那条「吃了再吐」）。
+    for (vk, ch) in [
+        (0x32u32, '@'),
+        (0x33, '#'),
+        (0x35, '%'),
+        (0x37, '&'),
+        (0x38, '*'),
+    ] {
+        let mut p = KeyProbe::new(vk);
+        p.modifiers = Modifiers(0x0001); // MOD_SHIFT
+        assert!(
+            !c.should_handle_key(&p),
+            "Shift+{vk:#x} 出 `{ch}` 且无中文映射，吃了也只能原样吐回，应透传"
+        );
+    }
+
+    // 不带 Shift 的数字仍旧交还宿主（原有契约不能被上面两条改坏）。
+    for vk in 0x30u32..=0x39 {
         assert!(
             !c.should_handle_key(&probe(vk)),
             "{vk:#x} 无 Shift 时空缓冲应交还宿主"

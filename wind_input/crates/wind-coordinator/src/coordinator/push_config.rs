@@ -102,6 +102,7 @@ impl Coordinator {
         self.push_jump_out_keys_config(client_token); // 配对跳出键（英文模式跳出 + 中文转发放行）
         self.push_password_suppress_config(client_token); // 密码框抑制策略（DLL 本地吃键门控）
         self.push_custom_en_punct_config(client_token); // 英半列自定义标点：DLL 据此吃键转发
+        self.push_cn_passthrough_punct_config(client_token); // 中文模式该透传的上挡符号：DLL 据此**不**吃
         self.push_pair_state_ttl_config(client_token); // 配对状态时效（DLL 侧闸门据此判陈旧）
         // 诊断采集开关：DLL 每次重连都从默认值（关）起步，握手不推则 HUD 开着也收不到
         // 新连接宿主的快照——而最需要它的 SearchHost 恰恰是最常重连的那类。
@@ -223,6 +224,32 @@ impl Coordinator {
         let value = wind_ipc::codec::encode_custom_en_punct_value(&chars);
         let msg = wind_ipc::codec::encode_sync_config(
             wind_ipc::protocol::CONFIG_KEY_CUSTOM_EN_PUNCT,
+            &value,
+        );
+        if client_token != 0 {
+            self.push_server.push_to_token(client_token, &msg);
+        } else {
+            self.push_server.push_to_active(&msg);
+        }
+    }
+
+    /// 下发「中文模式下该让 DLL **透传不吃**」的上挡符号集合。与
+    /// [`Self::push_custom_en_punct_config`] 方向相反：那个是「本该透传的请多吃几个」，
+    /// 这个是「本该吃的请别吃」。
+    ///
+    /// 吃了再把原样 ASCII 吐回去，在非 TSF-aware 宿主上不是无害的往返——CUAS 送达的字符码
+    /// 会被宿主当**虚拟键码**解释（Tkinter 实测 `#`→VK_END、`%`→VK_LEFT、`&`→VK_UP，字不
+    /// 上屏反倒移了光标，B-9）。微软拼音对这批符号根本不吃键，宿主拿到的是真实 VK，故无此问题。
+    ///
+    /// 判据与出字侧同源（`wind_punct::chinese_passthrough_punct_chars`，也是本侧
+    /// `should_handle_key` 用的那一份），集合为空 = 行为与历史完全一致。
+    /// DLL 侧还要再叠「无输入会话」「非全角」两道动态闸门，那两个只有它自己知道。
+    pub fn push_cn_passthrough_punct_config(&self, client_token: u64) {
+        let chars: Vec<char> = self.rt().cn_passthrough_punct_chars.iter().copied().collect();
+        // 与 CUSTOM_EN_PUNCT 同格式（count(u8) + UTF-16LE），复用同一个编码器。
+        let value = wind_ipc::codec::encode_custom_en_punct_value(&chars);
+        let msg = wind_ipc::codec::encode_sync_config(
+            wind_ipc::protocol::CONFIG_KEY_CN_PASSTHROUGH_PUNCT,
             &value,
         );
         if client_token != 0 {

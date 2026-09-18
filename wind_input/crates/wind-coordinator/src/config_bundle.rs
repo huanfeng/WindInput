@@ -88,6 +88,13 @@ pub(crate) struct ConfigBundle {
     /// 行为与历史一致）。这是 DLL 吃键与本侧出字的**同源判据**，且在英文标点键的热路径上每键
     /// 都要查——故预计算，别在按键时重新遍历 `custom_mappings`。有序集合使推送字节可复现。
     pub(crate) custom_en_punct_chars: std::collections::BTreeSet<char>,
+    /// 「中文模式下产物就是原样半角 ASCII、该让 DLL **透传不吃**」的上挡符号集合
+    /// （见 `wind_punct::chinese_passthrough_punct_chars`；空 = 行为与历史一致）。
+    ///
+    /// 与上一个字段方向相反、成因同根：吃了再原样吐回去，在非 TSF-aware 宿主上会被当成
+    /// 虚拟键码（B-9）。同样是 DLL 吃键与本侧 `should_handle_key` 的**同源判据**，
+    /// 同样在热路径上每键要查，故一并预计算。
+    pub(crate) cn_passthrough_punct_chars: std::collections::BTreeSet<char>,
     /// 分层按键配置的解析器（当前只收全局 `keys.key_actions` 的预编译引导键表）。
     ///
     /// 与 `session_keys` 同源的理由：动作值域在 `wind-config`、键名解析在 `wind-keys`，
@@ -332,6 +339,15 @@ impl ConfigBundle {
                 .chain(wind_punct::english_smart_source_chars(&config.input))
                 .chain(schema_keys.punct_en_chars.iter().copied())
                 .collect();
+        // 中文模式下该透传的上挡符号。转换器只用来 peek（查中文标点表 / 自定义映射），
+        // 不推进引号交替态，故这里临时建一个即可，与运行期那份互不影响。
+        let cn_passthrough_punct_chars: std::collections::BTreeSet<char> =
+            wind_punct::chinese_passthrough_punct_chars(
+                &wind_transform::punctuation::PunctuationConverter::new(),
+                &config.input,
+            )
+            .into_iter()
+            .collect();
         // 预编译放在 `normalize()` 之后：`trigger_keys` 收编等存量迁移会往 `key_actions`
         // 折算，早于迁移编译就会漏掉那批键。
         let key_resolver = crate::key_resolver::KeyResolver::build(&config);
@@ -351,6 +367,7 @@ impl ConfigBundle {
             english_case_cycle_vk,
             jump_out_on_right_symbol,
             custom_en_punct_chars,
+            cn_passthrough_punct_chars,
             key_resolver,
             schema_session_vks,
         }

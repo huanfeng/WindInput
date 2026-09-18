@@ -901,6 +901,18 @@ constexpr const char* CONFIG_KEY_DIAG_SNAPSHOT = "diag_snapshot";
 // core 收不到，用户配的「英半」列因此永远不生效；据此集合精确吃下这些键转发给 core。
 // 集合为空（默认）= 行为与历史完全一致。格式：count(u8) + [ch:u16(LE)]...
 constexpr const char* CONFIG_KEY_CUSTOM_EN_PUNCT = "custom_en_punct";
+// 「中文模式下产物就是原样半角 ASCII、本 DLL 该**直接透传**」的上挡符号集合。
+// 与上一个键**方向相反**：那个是「本该透传的，请多吃几个」，这个是「本该吃的，请别吃」。
+//
+// 成因：吃了再把原样 ASCII 吐回去，在非 TSF-aware（CUAS 桥接）宿主上不是无害的往返 ——
+// CUAS 送达的字符码会被宿主当**虚拟键码**解释。Tkinter 实测（B-9）：`#`(0x23)→VK_END、
+// `%`(0x25)→VK_LEFT、`&`(0x26)→VK_UP，字不上屏、反倒执行了一次光标移动；同批的 `@`(0x40)、
+// `*`(0x2A) 只因撞上的 VK 在宿主里没有默认绑定才侥幸正常。微软拼音对这批符号根本不吃键，
+// 宿主拿到的 keycode 仍是真实 VK（VK_3/VK_5/VK_7），故无此问题 —— 本键就是对齐那个行为。
+//
+// 判据须与 core 的 `wind_punct::chinese_passthrough_punct_chars` 同源。
+// 集合为空（默认）= 行为与历史完全一致。格式：count(u8) + [ch:u16(LE)]...（同上一个键）
+constexpr const char* CONFIG_KEY_CN_PASSTHROUGH_PUNCT = "cn_passthrough_punct";
 // 配对状态时效（秒，0=不过期）。格式：secs(u16 LE)。
 // 吃键闸门（_pairPendingDepth）在本 DLL，故陈旧判据也必须在本地：若只有 core 过期而这边
 // 照吃跳出键，core 回 PassThrough 已太晚（「吃了再吐」，不补发 WM_KEYDOWN 的宿主会丢键）。

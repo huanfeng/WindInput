@@ -253,6 +253,75 @@ pub fn english_smart_source_chars(cfg: &InputConfig) -> Vec<char> {
     out
 }
 
+/// 中文输入模式下**产物就是原样半角 ASCII**、因而该让 DLL 直接透传（不吃键）的上挡符号
+/// （Shift+数字）集合，去重升序。
+///
+/// # 为什么不能「吃下来再原样吐回去」
+///
+/// 吃了再吐要绕一圈经 CUAS 回到宿主，而非 TSF-aware 宿主普遍把这条路上送达的**字符码当
+/// 虚拟键码**解释。Tkinter 实测（B-9，2026-09-18）：`#`(0x23)→`VK_END`、`%`(0x25)→`VK_LEFT`、
+/// `&`(0x26)→`VK_UP`，字不上屏、反倒执行了一次光标移动；同批的 `@`(0x40)、`*`(0x2A) 只因撞上
+/// 的 VK 在宿主里没有默认绑定才侥幸正常。微软拼音对这批符号根本不吃键，宿主拿到的 keycode
+/// 仍是真实 VK（`VK_3`/`VK_5`/`VK_7`），因而不受影响 —— 本函数就是对齐那个行为。
+///
+/// # 判据与出字侧同源
+///
+/// 铁律同 [`custom_english_punct_chars`]：**吃键集必须 ⊆ 出字集**。这里反过来用：凡
+/// [`convert_punct`] 的三步（自定义映射 → 中文标点表 → 全半角）里**任何一步会改写该字符**，
+/// 就不能透传。第三步（全半角）由 DLL 侧判 `IsFullWidth()`，故本函数只管前两步，外加
+/// 智能符号 / 配对符这两类「产物虽同、语义上仍须经引擎」的例外。
+///
+/// # 为什么只圈 Shift+数字
+///
+/// OEM 标点键（`/` `\` `;` 等）可能被配成引导键、次选键、以词定字键或方案码元，透传掉就是
+/// 「那个模式再也进不去」，且**不报错**。上挡符号不参与这些绑定，排除项因此收敛到下面四条。
+/// 要扩到 OEM 键，必须把 `Coordinator::code_char_conflicts` 那套 owners 检查一并搬过来，
+/// 缺一臂就是静默失效。
+pub fn chinese_passthrough_punct_chars(
+    conv: &PunctuationConverter,
+    cfg: &InputConfig,
+) -> Vec<char> {
+    // Shift+数字 的十个上挡符号，下标即数字键 0-9；与 `key_convert::punct_char` 的 shifted
+    // 列同源（那边答 VK→字符，这边只要字符本身）。
+    const SHIFTED_DIGITS: [char; 10] = [')', '!', '@', '#', '$', '%', '^', '&', '*', '('];
+
+    let mut out: Vec<char> = Vec::new();
+    for ch in SHIFTED_DIGITS {
+        // 1. 中文标点表有映射（`!`→！、`$`→￥、`^`→……、`(`→（、`)`→））⇒ 要转换，必须吃。
+        if conv.peek_chinese_str(ch).is_some() {
+            continue;
+        }
+        // 2. 自定义映射**任一列**有值 ⇒ 要改写，必须吃。
+        //    只看中半列不够：中文输入模式下还能切到英文标点态（走英半列），那时这个键若已被
+        //    透传，用户配的那一列就成了打不到的死格。空串列 = 回落默认转换，不算覆盖。
+        if (0..4).any(|col| {
+            custom_lookup(conv, &cfg.punct, ch, col).is_some_and(|v| !v.is_empty())
+        }) {
+            continue;
+        }
+        // 3. 参与英文智能符号 ⇒ 连按替换要引擎接手，必须吃。按**源字符**判，与
+        //    [`english_participates`] 同源。两个开关（`symbol.english_mode` /
+        //    `symbol.english_punct_mode`）任一开着都可能用到它，故只看集合不看开关，宁可多吃。
+        if cfg.symbol.english_chars.contains(ch) {
+            continue;
+        }
+        // 4. 配对符 ⇒ 配对栈由引擎维护，必须吃。
+        //    `(` `)` 已被第 1 条拦下（有中文映射），这条是防用户改配对表把别的上挡符号配进去。
+        if cfg
+            .auto_pair
+            .english_pairs
+            .iter()
+            .chain(cfg.auto_pair.chinese_pairs.iter())
+            .any(|p| p.chars().any(|c| c == ch))
+        {
+            continue;
+        }
+        out.push(ch);
+    }
+    out.sort_unstable(); // 推送字节可复现（同 custom_english_punct_chars）
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +561,82 @@ mod tests {
             compute_punct_str_pure(&conv, &c.punct, false, '"', false).as_deref(),
             Some("\"")
         );
+    }
+
+    // ── chinese_passthrough_punct_chars ────────────────────────────────────────
+    //
+    // 判据的真值表锁在这里。漏掉任一条排除项的现场表现都是「某个键忽然不经引擎了」，
+    // 且不报错 —— 靠真机复现的成本远高于这几条断言。
+
+    #[test]
+    fn passthrough_default_only_uncovered_shifted_symbols() {
+        let conv = PunctuationConverter::new();
+        let c = cfg();
+        // 默认配置下能透传的，恰是中文标点表里**没有**映射的那五个。
+        // 另五个（! $ ^ ( )）分别转 ！￥……（）> 必须经引擎，不得入集。
+        assert_eq!(
+            chinese_passthrough_punct_chars(&conv, &c),
+            vec!['#', '%', '&', '*', '@']
+        );
+    }
+
+    #[test]
+    fn passthrough_excludes_chinese_mapped_symbols() {
+        let conv = PunctuationConverter::new();
+        let c = cfg();
+        let got = chinese_passthrough_punct_chars(&conv, &c);
+        for ch in ['!', '$', '^', '(', ')'] {
+            assert!(!got.contains(&ch), "{ch} 有中文标点映射，不得透传");
+        }
+    }
+
+    #[test]
+    fn passthrough_excludes_any_custom_mapping_column() {
+        // 中半列配了 → 必须吃（要出用户配的值）。
+        let conv = PunctuationConverter::new();
+        let mut c = cfg();
+        c.punct.custom_enabled = true;
+        c.punct
+            .custom_mappings
+            .insert("#".into(), vec!["井".into(), String::new(), String::new(), String::new()]);
+        assert!(!chinese_passthrough_punct_chars(&conv, &c).contains(&'#'));
+
+        // ★ 只配了**英半列**也必须吃：中文输入模式下还能切到英文标点态走那一列，
+        //   透传掉的话用户配的那格就永远打不出来。这条是「只看中半列」会漏掉的。
+        let mut c2 = cfg();
+        c2.punct.custom_enabled = true;
+        c2.punct
+            .custom_mappings
+            .insert("%".into(), vec![String::new(), String::new(), String::new(), "pct".into()]);
+        assert!(!chinese_passthrough_punct_chars(&conv, &c2).contains(&'%'));
+    }
+
+    #[test]
+    fn passthrough_empty_custom_column_is_not_coverage() {
+        // 四列全是空串 = 回落默认转换，不算覆盖，仍可透传。
+        let conv = PunctuationConverter::new();
+        let mut c = cfg();
+        c.punct.custom_enabled = true;
+        c.punct.custom_mappings.insert(
+            "#".into(),
+            vec![String::new(), String::new(), String::new(), String::new()],
+        );
+        assert!(chinese_passthrough_punct_chars(&conv, &c).contains(&'#'));
+    }
+
+    #[test]
+    fn passthrough_excludes_smart_symbol_and_pair_chars() {
+        let conv = PunctuationConverter::new();
+        // 参与英文智能符号 → 连按替换要引擎接手。只看集合不看开关。
+        let mut c = cfg();
+        c.symbol.english_chars = "#".into();
+        assert!(!chinese_passthrough_punct_chars(&conv, &c).contains(&'#'));
+
+        // 被配进配对表 → 配对栈由引擎维护。
+        let mut c2 = cfg();
+        c2.auto_pair.english_pairs = vec!["@&".into()];
+        let got = chinese_passthrough_punct_chars(&conv, &c2);
+        assert!(!got.contains(&'@'));
+        assert!(!got.contains(&'&'));
     }
 }
