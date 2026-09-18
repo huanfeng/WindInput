@@ -2146,8 +2146,11 @@ impl CandidateWindow {
             self.flip_when_above,
             self.swap_preedit_when_above,
         );
-        // 翻页栏并入编码栏行（右对齐）：需开关开启 + 有独立编码栏（非嵌入）+ 翻页栏本身可见。
-        // 满足时翻页栏随编码区一同装配（swap 时自动跟随沉底）；否则回退候选行尾/竖排底部独立行。
+        // 翻页栏并入**独立**编码栏行（右对齐）：需开关开启 + 有独立编码栏（非嵌入）+ 翻页栏本身可见。
+        // 满足时翻页栏随编码区一同装配（swap 时自动跟随沉底）。
+        // ⚠️ 这只是「并入编码所在行」的**两条落点之一**。内联编码（`candidate_inline`）那条是
+        //    下方的 `pager_in_inline_row`（判据含 `list_vertical`，故没法与本条合并在此处算）。
+        //    两条都不满足才回退候选行尾 / 竖排底部独立行。
         let pager_will_inline = self.pager_in_preedit
             && !self.preedit.is_empty()
             && !self.preedit_embedded
@@ -2691,7 +2694,23 @@ impl CandidateWindow {
             } else {
                 0.0
             };
-        let pager_row_w = if !list_vertical && !pager_will_inline && self.pager_visible() {
+        // 翻页栏并入**内联**编码那一行（右对齐）——与 `pager_will_inline` 同一个开关、同一个
+        // 诉求（竖排省一行），只是编码不在独立栏里，落点改为编码自己那一行的右端。
+        // · 仅竖排：横排下内联编码与候选同属一行，翻页栏本就落在该行末尾，开关无从谈起。
+        // · ⚠️ 排除旋转态（蒙文）：内联编码是 `list` 的子节点、在旋转包裹层**内部**，翻页栏跟
+        //   进去会连箭头和页码一起转 90°。那一档维持底部独立行（它加在 `root` 上，屏幕上仍是横的）。
+        let pager_in_inline_row = self.pager_in_preedit
+            && !self.preedit.is_empty()
+            && self.preedit_embedded
+            && list_vertical
+            && !self.rotated
+            && self.pager_visible();
+        // 同一行里要为翻页栏预留的宽度（0 = 这一行没有翻页栏）：
+        //   · 横排未并入编码栏 → 翻页栏落在候选行尾，与候选抢宽度（原行为）
+        //   · 竖排内联编码并入 → 翻页栏在编码那一行右端，与编码抢宽度
+        let pager_row_w = if self.pager_visible()
+            && ((!list_vertical && !pager_will_inline) || pager_in_inline_row)
+        {
             let footer_fs = node_fs(&v.footer_bar);
             let fpad = edges_or(&v.footer_bar.padding, [0.0, 6.0, 0.0, 6.0]);
             let fmargin = edges_or(&v.footer_bar.margin, [0.0, 0.0, 0.0, 8.0]);
@@ -2717,8 +2736,10 @@ impl CandidateWindow {
         // 分配：参与者 = [内联编码(仅横排下与候选同行)] + 候选们。
         let (inline_preedit_budget_px, cand_text_budgets) = if list_vertical {
             // 竖排：内联编码与每个候选各占一行、互不竞争，都用满整行预算（保持既有行为）。
+            // 唯一例外是翻页栏并进编码行时（`pager_in_inline_row`，此时 `pager_row_w` 非 0）：
+            // 那一行被它占掉一截，编码预算须同步扣除，否则超长编码会把翻页栏顶出窗口右缘。
             (
-                (row_budget - preedit_pad.l).max(min_text_w),
+                (row_budget - preedit_pad.l - pager_row_w).max(min_text_w),
                 cand_metrics
                     .iter()
                     .map(|(fixed, _)| (row_budget - fixed).max(min_text_w))
@@ -2743,6 +2764,108 @@ impl CandidateWindow {
             } else {
                 ((row_budget - preedit_pad.l).max(min_text_w), alloc)
             }
+        };
+
+        // 【构建位置】翻页器在此提前构建（原先在候选项装配之后）：竖排内联编码要把它作为
+        // **子节点**并入编码那一行，而那一行在候选项之前就装配完毕 —— 消费点在前，构建必须更前。
+        // 其余落点（编码栏 band / 候选行尾 / 竖排底部独立行）都在末尾装配段用 take() 转移，
+        // 与构建位置无关。
+        // 翻页器（多页时）：‹ p/t › —— 箭头可点击翻页，带悬停高亮 + 禁用态
+        // mut：末尾装配段据归属（并入编码栏 / 候选行尾 / 竖排底部）用 take() 转移所有权。
+        let mut pager = if self.pager_visible() {
+            let disabled = t.color("text_hint", [180, 180, 185, 255]);
+            let marker_c = t.color("text_dim", [140, 140, 145, 255]);
+            let accent = col(v.accent_bar.bg_color, [66, 133, 244, 255]);
+            // 文字箭头启用色：优先 footer_bar.text_color，回退 accent。
+            let arrow_on = col(v.footer_bar.text_color, accent);
+            let footer_fs = node_fs(&v.footer_bar);
+            let prev_on = self.page > 1;
+            let next_on = self.page < self.total_pages;
+            // 固定矩形触摸区（对齐 Go）：宽 = 字号 + 左右 padding，高 = 候选行高，内容居中。
+            // 命中区 = 整个矩形（与图标实际像素范围解耦），悬停在该矩形内即触发圆角高亮。
+            let fpad = edges_or(&v.footer_bar.padding, [0.0, 6.0, 0.0, 6.0]);
+            let arrow_w = footer_fs + fpad.l + fpad.r;
+            // 触摸区高度：独立行=候选行高；并入编码所在行（独立栏 pager_will_inline 或内联行
+            // pager_in_inline_row）=编码文字高(自适应)，使翻页栏不撑高那一行（消除有/无翻页栏
+            // 时的抖动）并与编码垂直居中。
+            let row_h = if pager_will_inline || pager_in_inline_row {
+                preedit_fs.max(footer_fs)
+            } else {
+                text_fs + item_pad.t + item_pad.b
+            };
+            // 翻页箭头：主题配了 prev/next_image（如 _base 的 chevron SVG + tint）则用图标，否则回退文字 ‹ ›。
+            let prev_icon = self.arrow_icon(v.footer_bar.prev_image.as_ref(), prev_on);
+            let next_icon = self.arrow_icon(v.footer_bar.next_image.as_ref(), next_on);
+            // 图标保持主题尺寸（footer_fs 方形），水平居中靠对称内边距撑到 arrow_w；
+            // 垂直靠 cross(Center) 居中于 row_h。触摸盒 = arrow_w × row_h，与图标像素范围解耦。
+            let icon_pad_x = ((arrow_w - footer_fs) * 0.5).max(0.0);
+            let arrow =
+                |icon: Option<ViewImage>, txt: &str, tag: i32, enabled: bool, hovered: bool| {
+                    let mut node = match icon {
+                        Some(vi) => View::container(Layout::Row)
+                            .fixed_h(row_h)
+                            .pad(Edges::xy(icon_pad_x, 0.0))
+                            .child(
+                                View::container(Layout::Row)
+                                    .fixed_w(footer_fs)
+                                    .fixed_h(footer_fs)
+                                    .bg_image(vi),
+                            ),
+                        // 文字箭头启用色：优先 footer_bar.text_color（清风主题设为 text_hint → 细小淡 ‹›），
+                        // 未配置则回退 accent（旧主题保持原样）。
+                        None => View::leaf(txt, if enabled { arrow_on } else { disabled })
+                            .font_size(footer_fs)
+                            .fixed_w(arrow_w)
+                            .fixed_h(row_h)
+                            .text_align(Align::Center),
+                    };
+                    node = node.radius(item_radius).cross(Align::Center);
+                    if enabled {
+                        node = node.tag(tag); // 仅启用项参与命中
+                        if hovered {
+                            node = node.bg(hover_bg); // 圆角悬停高亮覆盖整个按钮矩形
+                        }
+                    }
+                    node
+                };
+            Some(
+                decorate_box(
+                    View::container(Layout::Row)
+                        .cross(Align::Center)
+                        .margin(edges_or(&v.footer_bar.margin, [0.0, 0.0, 0.0, 8.0])),
+                    &v.footer_bar,
+                )
+                .child(arrow(
+                    prev_icon,
+                    "‹",
+                    TAG_PAGE_PREV,
+                    prev_on,
+                    self.hover == TAG_PAGE_PREV,
+                ))
+                .child(
+                    View::leaf(
+                        if self.page_number_visible() {
+                            format!("{}/{}", self.page, self.total_pages)
+                        } else {
+                            String::new()
+                        },
+                        // 页码颜色用主题 footer_bar.color（如 svgtest 的亮红/暗粉），缺则回退 text_dim。
+                        col(v.footer_bar.text_color, marker_c),
+                    )
+                    .font_size(footer_fs)
+                    .font_weight(v.footer_bar.font_weight)
+                    .font_family(v.footer_bar.font_family.clone()),
+                )
+                .child(arrow(
+                    next_icon,
+                    "›",
+                    TAG_PAGE_NEXT,
+                    next_on,
+                    self.hover == TAG_PAGE_NEXT,
+                )),
+            )
+        } else {
+            None
         };
 
         // 内联编码的"沉底"（swap_preedit_when_above 在首单元内联下的落点）：
@@ -2777,8 +2900,23 @@ impl CandidateWindow {
             };
             let node = self
                 // 内联编码是 list 的子节点 ⇒ 在旋转包裹层里，直立态要逐格扶正。
-                .preedit_view(preedit_fs, inline_preedit_budget_px, self.upright)
-                .margin(sep);
+                .preedit_view(preedit_fs, inline_preedit_budget_px, self.upright);
+            // 翻页栏并入这一行（`pager_in_inline_row`）：包一层撑满内容宽的 Row，spacer 把翻页栏
+            // 顶到行末——与独立编码栏那条落点（band 内 spacer 右对齐）同构。
+            // ⚠️ 先判开关再 `take()`：反过来写（`take().filter(…)`）会在开关关闭时把翻页栏取出来
+            //    直接丢掉，末尾装配段再也拿不到它 —— 表现是翻页栏凭空消失，且只在关着开关时才犯。
+            // 左缩进与行间距（sep）挂在**外层**：内外都挂会叠成两倍缩进，且行间距落在编码而非整行上。
+            let node = if pager_in_inline_row && let Some(p) = pager.take() {
+                View::container(Layout::Row)
+                    .cross(Align::Center)
+                    .fill_cross()
+                    .child(node)
+                    .child(View::spacer())
+                    .child(p)
+            } else {
+                node
+            };
+            let node = node.margin(sep);
             if inline_preedit_bottom {
                 inline_tail.push(node);
             } else {
@@ -3105,103 +3243,6 @@ impl CandidateWindow {
         for node in inline_tail {
             list = list.child(node);
         }
-
-        // 翻页器（多页时）：‹ p/t › —— 箭头可点击翻页，带悬停高亮 + 禁用态
-        // mut：末尾装配段据归属（并入编码栏 / 候选行尾 / 竖排底部）用 take() 转移所有权。
-        let mut pager = if self.pager_visible() {
-            let disabled = t.color("text_hint", [180, 180, 185, 255]);
-            let marker_c = t.color("text_dim", [140, 140, 145, 255]);
-            let accent = col(v.accent_bar.bg_color, [66, 133, 244, 255]);
-            // 文字箭头启用色：优先 footer_bar.text_color，回退 accent。
-            let arrow_on = col(v.footer_bar.text_color, accent);
-            let footer_fs = node_fs(&v.footer_bar);
-            let prev_on = self.page > 1;
-            let next_on = self.page < self.total_pages;
-            // 固定矩形触摸区（对齐 Go）：宽 = 字号 + 左右 padding，高 = 候选行高，内容居中。
-            // 命中区 = 整个矩形（与图标实际像素范围解耦），悬停在该矩形内即触发圆角高亮。
-            let fpad = edges_or(&v.footer_bar.padding, [0.0, 6.0, 0.0, 6.0]);
-            let arrow_w = footer_fs + fpad.l + fpad.r;
-            // 触摸区高度：独立行=候选行高；并入编码栏(pager_will_inline)=编码文字高(自适应)，
-            // 使翻页栏不撑高编码栏（消除有/无翻页栏时的抖动）并与编码在栏内垂直居中。
-            let row_h = if pager_will_inline {
-                preedit_fs.max(footer_fs)
-            } else {
-                text_fs + item_pad.t + item_pad.b
-            };
-            // 翻页箭头：主题配了 prev/next_image（如 _base 的 chevron SVG + tint）则用图标，否则回退文字 ‹ ›。
-            let prev_icon = self.arrow_icon(v.footer_bar.prev_image.as_ref(), prev_on);
-            let next_icon = self.arrow_icon(v.footer_bar.next_image.as_ref(), next_on);
-            // 图标保持主题尺寸（footer_fs 方形），水平居中靠对称内边距撑到 arrow_w；
-            // 垂直靠 cross(Center) 居中于 row_h。触摸盒 = arrow_w × row_h，与图标像素范围解耦。
-            let icon_pad_x = ((arrow_w - footer_fs) * 0.5).max(0.0);
-            let arrow =
-                |icon: Option<ViewImage>, txt: &str, tag: i32, enabled: bool, hovered: bool| {
-                    let mut node = match icon {
-                        Some(vi) => View::container(Layout::Row)
-                            .fixed_h(row_h)
-                            .pad(Edges::xy(icon_pad_x, 0.0))
-                            .child(
-                                View::container(Layout::Row)
-                                    .fixed_w(footer_fs)
-                                    .fixed_h(footer_fs)
-                                    .bg_image(vi),
-                            ),
-                        // 文字箭头启用色：优先 footer_bar.text_color（清风主题设为 text_hint → 细小淡 ‹›），
-                        // 未配置则回退 accent（旧主题保持原样）。
-                        None => View::leaf(txt, if enabled { arrow_on } else { disabled })
-                            .font_size(footer_fs)
-                            .fixed_w(arrow_w)
-                            .fixed_h(row_h)
-                            .text_align(Align::Center),
-                    };
-                    node = node.radius(item_radius).cross(Align::Center);
-                    if enabled {
-                        node = node.tag(tag); // 仅启用项参与命中
-                        if hovered {
-                            node = node.bg(hover_bg); // 圆角悬停高亮覆盖整个按钮矩形
-                        }
-                    }
-                    node
-                };
-            Some(
-                decorate_box(
-                    View::container(Layout::Row)
-                        .cross(Align::Center)
-                        .margin(edges_or(&v.footer_bar.margin, [0.0, 0.0, 0.0, 8.0])),
-                    &v.footer_bar,
-                )
-                .child(arrow(
-                    prev_icon,
-                    "‹",
-                    TAG_PAGE_PREV,
-                    prev_on,
-                    self.hover == TAG_PAGE_PREV,
-                ))
-                .child(
-                    View::leaf(
-                        if self.page_number_visible() {
-                            format!("{}/{}", self.page, self.total_pages)
-                        } else {
-                            String::new()
-                        },
-                        // 页码颜色用主题 footer_bar.color（如 svgtest 的亮红/暗粉），缺则回退 text_dim。
-                        col(v.footer_bar.text_color, marker_c),
-                    )
-                    .font_size(footer_fs)
-                    .font_weight(v.footer_bar.font_weight)
-                    .font_family(v.footer_bar.font_family.clone()),
-                )
-                .child(arrow(
-                    next_icon,
-                    "›",
-                    TAG_PAGE_NEXT,
-                    next_on,
-                    self.hover == TAG_PAGE_NEXT,
-                )),
-            )
-        } else {
-            None
-        };
 
         // ── 装配 ──
         // 翻页栏归属（按优先级三选一）：
@@ -4094,6 +4135,225 @@ mod min_size_tests {
         w.scale = 2.0;
         assert_eq!((w.min_window_w_px(), w.min_window_h_px()), (400, 300));
         assert_eq!(CandidateWindow::dp_to_px(0, 2.0), 0, "0 恒为「不限」");
+    }
+}
+
+/// 翻页栏并入「编码所在行」（`ui.candidate.pager_in_preedit`）。
+///
+/// 这个开关的诉求只有一句：**竖排时别让翻页栏白占一行**。但编码有两种形态，落点因此有两处：
+/// 独立编码栏（`candidate_top`）并进栏行右端，内联编码（`candidate_inline`）并进编码自己那一行。
+/// 本组钉的是「两种形态表现一致」，以及三条不该被波及的旁路（横排 / 旋转态 / 开关关闭）。
+///
+/// 断言一律是相对量（谁比谁矮、谁在谁上面、有没有出右缘），与文本后端量出多宽无关，
+/// 故不 gate 平台 —— 与 [`width_budget_tests`] 同样的理由。
+#[cfg(test)]
+mod pager_inline_tests {
+    use super::*;
+    use crate::view::Rect;
+
+    fn cand(text: &str) -> CandidateItem {
+        CandidateItem {
+            text: text.to_string(),
+            code: String::new(),
+            label: String::new(),
+            tooltip: String::new(),
+            comment: String::new(),
+            no_index: false,
+        }
+    }
+
+    /// 造一个多页候选窗。`embedded` = 内联编码（`candidate_inline`），false 即独立编码栏。
+    ///
+    /// `rotated`（蒙文竖排）与 `vertical` 互斥、不能同时为真（见 `set_orientation` 的断言），
+    /// 故这里传 `rotated=true` 时 `vertical` 一律置 false —— 两者在布局里殊途同归，
+    /// 都让 `list_vertical` 成立。
+    fn win(
+        vertical: bool,
+        rotated: bool,
+        embedded: bool,
+        on: bool,
+        preedit: &str,
+    ) -> CandidateWindow {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        w.scale = 1.0;
+        w.set_orientation(vertical && !rotated, rotated, false);
+        w.set_preedit_embedded(embedded);
+        w.set_pager_in_preedit(on);
+        let items: Vec<CandidateItem> = ["一", "二", "三"].iter().map(|t| cand(t)).collect();
+        // total_pages > 1 才有翻页栏；preedit 非空才谈得上「并入编码行」。
+        w.update(preedit, preedit.len(), "", items, 0, -1, 1, 3);
+        w
+    }
+
+    fn laid(w: &CandidateWindow, above: bool) -> View {
+        let mut root = w.build_tree(above);
+        root.layout(0.0, 0.0, &w.text_renderer);
+        root
+    }
+
+    fn height(w: &CandidateWindow) -> f32 {
+        laid(w, false).measured_size().1
+    }
+
+    /// 取某个 tag 的命中矩形；`None` = 该 tag 未参与命中（如翻页箭头被禁用或整个翻页栏没渲染）。
+    fn hit(root: &View, tag: i32) -> Option<Rect> {
+        let mut hits = Vec::new();
+        root.collect_hits(&mut hits);
+        hits.iter().find(|(t, _)| *t == tag).map(|(_, r)| *r)
+    }
+
+    fn pager(root: &View) -> Rect {
+        hit(root, TAG_PAGE_NEXT).expect("翻页栏须存在（多页 + 默认主题下可见）")
+    }
+
+    /// 首条候选的矩形（tag = 候选下标）。
+    fn first_cand(root: &View) -> Rect {
+        hit(root, 0).expect("首条候选须参与命中")
+    }
+
+    /// ★ 本次修复的核心判据：竖排下**两种编码形态的表现必须一致**。
+    ///
+    /// 修复前内联编码那档完全不理会开关（翻页栏照旧独占底部一行），用户看到的就是
+    /// 「同一个开关，换个编码显示方式就失灵」。
+    ///
+    /// 前置断言不可省：若独立编码栏那档本身就没省下这一行，后面两个相等就成了恒等式。
+    #[test]
+    fn inline_preedit_joins_pager_like_top_bar() {
+        let top_off = height(&win(true, false, false, false, "nihao"));
+        let top_on = height(&win(true, false, false, true, "nihao"));
+        let inline_off = height(&win(true, false, true, false, "nihao"));
+        let inline_on = height(&win(true, false, true, true, "nihao"));
+        assert!(
+            top_on < top_off,
+            "前置：独立编码栏下开关须真的省掉一行（{top_on} vs {top_off}）"
+        );
+        assert_eq!(
+            inline_off, top_off,
+            "开关关闭时两种编码形态本就同高（都是底部独立行）"
+        );
+        assert_eq!(
+            inline_on, top_on,
+            "开关开启时内联编码须与独立编码栏省下同样的一行（{inline_on} vs {top_on}）"
+        );
+    }
+
+    /// 并入后翻页栏须真的落在**编码那一行**里：整个矩形在首条候选之上。
+    ///
+    /// 只测高度不够——把翻页栏挂到窗口任意别处也能让总高少一行，位置才是这条开关的本意。
+    #[test]
+    fn inlined_pager_sits_above_first_candidate() {
+        let w = win(true, false, true, true, "nihao");
+        let root = laid(&w, false);
+        let p = pager(&root);
+        let c0 = first_cand(&root);
+        assert!(
+            p.y + p.h <= c0.y + 0.5,
+            "翻页栏须整体位于首条候选之上（翻页栏底 {} vs 候选顶 {}）",
+            p.y + p.h,
+            c0.y
+        );
+    }
+
+    /// ★ 开关关闭时翻页栏**不得消失**，仍是候选区下方的独立一行。
+    ///
+    /// 这条钉的是实现里的一个真实陷阱：并入分支若写成 `pager.take().filter(开关)`，
+    /// 开关关闭时翻页栏会被取出来直接丢掉，末尾装配段再也拿不到它 —— 症状是「关掉开关翻页栏
+    /// 就没了」，而开着的时候一切正常，最容易漏测的那一半。
+    #[test]
+    fn switch_off_keeps_pager_below_candidates() {
+        let w = win(true, false, true, false, "nihao");
+        let root = laid(&w, false);
+        let p = pager(&root);
+        let c0 = first_cand(&root);
+        assert!(
+            p.y > c0.y,
+            "开关关闭时翻页栏须留在候选下方（翻页栏 y={} vs 首候选 y={}）",
+            p.y,
+            c0.y
+        );
+    }
+
+    /// 横排不受影响：内联编码与候选本就同属一行，翻页栏本来就在该行末尾，开关无从谈起。
+    #[test]
+    fn horizontal_inline_is_untouched_by_switch() {
+        let off = height(&win(false, false, true, false, "nihao"));
+        let on = height(&win(false, false, true, true, "nihao"));
+        assert_eq!(off, on, "横排内联编码下开关不得改变布局");
+    }
+
+    /// ⚠️ 旋转态（蒙文竖排）刻意排除在外：内联编码在旋转包裹层**内部**，翻页栏跟进去会连
+    /// 箭头带页码一起转 90°。那一档维持底部独立行（它挂在 root 上，屏幕上仍是横的一条）。
+    #[test]
+    fn rotated_inline_keeps_bottom_pager() {
+        let off = height(&win(false, true, true, false, "nihao"));
+        let on = height(&win(false, true, true, true, "nihao"));
+        assert_eq!(off, on, "旋转态下不得并入（否则翻页箭头会跟着转）");
+        // 前置：同一组参数在非旋转竖排下开关是**有效**的，否则上面的相等只是「哪儿都没生效」。
+        assert!(
+            height(&win(true, false, true, true, "nihao"))
+                < height(&win(true, false, true, false, "nihao")),
+            "前置：非旋转竖排下开关须真的省掉一行"
+        );
+    }
+
+    /// 编码沉底（`swap_preedit_when_above`，窗口翻到光标上方）时，并入的翻页栏须**跟着编码一起**
+    /// 沉到底部 —— 它是编码那一行的子节点，本就该同进同退。
+    #[test]
+    fn inlined_pager_follows_preedit_to_bottom_on_swap() {
+        let mut w = win(true, false, true, true, "nihao");
+        w.set_swap_preedit_when_above(true);
+        let root = laid(&w, true);
+        let p = pager(&root);
+        let c0 = first_cand(&root);
+        assert!(
+            p.y > c0.y,
+            "沉底时翻页栏须随编码行落到候选之下（翻页栏 y={} vs 首候选 y={}）",
+            p.y,
+            c0.y
+        );
+    }
+
+    /// ★ 超长编码不得把这一行撑出宽度上限：编码的文字预算要先扣掉翻页栏占的那一截。
+    ///
+    /// 竖排下内联编码原本独占整行预算（与候选互不竞争），并入之后这个前提不再成立。
+    ///
+    /// ⚠️ 参照物必须是**屏幕安全上限**，不能拿 `measured_size()` 当窗口宽去比翻页栏右缘 ——
+    /// 树是自底向上量的，翻页栏当然落在自己撑出来的那个宽度里，那样写恒真（本条最初就是
+    /// 这么写的，变异检验里「预算不扣翻页栏」一改，七条测试全绿，才发现它什么都没测）。
+    #[test]
+    fn long_preedit_does_not_push_row_past_width_budget() {
+        let long = "a'".repeat(200);
+        let w_on = win(true, false, true, true, &long);
+        let cap = w_on.screen_safety_max_width_px() as f32;
+        // 前置：这一行必须**已经被上限夹住**（再加长一倍宽度不变），否则下面的不等式恒真。
+        // 判据取「加长不再变宽」而不是「宽度 == 上限」：截断按整字符走，量出来总比预算少小半个字。
+        let off_w = laid(&win(true, false, true, false, &long), false)
+            .measured_size()
+            .0;
+        let off_w2 = laid(&win(true, false, true, false, &"a'".repeat(400)), false)
+            .measured_size()
+            .0;
+        assert_eq!(
+            off_w, off_w2,
+            "前置：超长编码须已被宽度上限夹住（{off_w} vs {off_w2}）"
+        );
+        assert!(
+            off_w <= cap + 0.5,
+            "前置自洽：夹住后不该超过上限（{off_w} vs {cap}）"
+        );
+        let root = laid(&w_on, false);
+        let (win_w, _) = root.measured_size();
+        assert!(
+            win_w <= cap + 0.5,
+            "并入翻页栏后整窗仍不得越过安全上限（{win_w} vs {cap}）"
+        );
+        let p = pager(&root);
+        assert!(
+            p.x + p.w <= win_w + 0.5,
+            "翻页栏须完整落在窗口内（右缘 {} vs 窗口宽 {win_w}）",
+            p.x + p.w
+        );
     }
 }
 

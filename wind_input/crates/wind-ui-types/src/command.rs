@@ -188,7 +188,7 @@ pub enum UiCommand {
     SetCandidateFlipWhenAbove(bool),
     /// 候选窗在光标上方时交换编码栏与候选栏位置。来自 ui.candidate.swap_preedit_when_above。
     SetCandidateSwapWhenAbove(bool),
-    /// 翻页栏并入编码栏行右对齐显示。来自 ui.candidate.pager_in_preedit。
+    /// 翻页栏并入编码所在行右对齐显示（独立编码栏 / 内联编码两种落点）。来自 ui.candidate.pager_in_preedit。
     SetPagerInPreedit(bool),
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。
     ///

@@ -1100,7 +1100,7 @@ hide_window = false
 index_labels = []
 pager_bar_display = ""
 page_number_display = ""
-pager_in_preedit = false         # 翻页栏并入编码栏行右对齐（竖排省一行；仅 candidate_top 生效）
+pager_in_preedit = false         # 翻页栏并入编码所在行右对齐（竖排省一行；candidate_top 与 candidate_inline 都生效）
 # 定位方式：follow_caret=跟随光标（默认） | fixed=固定屏幕位置（不再随光标移动，也不再上翻）
 position_mode = "follow_caret"
 # 固定模式下的内容左上屏幕坐标，由拖动候选窗落盘；(0,0)=尚未设定，首显落到屏幕默认锚点。

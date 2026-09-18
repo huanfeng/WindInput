@@ -5294,7 +5294,9 @@ pub struct UiCandidateConfig {
     /// 候选窗在光标上方时交换编码栏与候选栏位置（编码区沉底贴光标）。与 flip_when_above 正交，可叠加。
     #[serde(default)]
     pub swap_preedit_when_above: bool,
-    /// 翻页栏并入编码栏行、右对齐显示（竖排省一行）。仅"非嵌入编码"（有独立编码栏）时生效。
+    /// 翻页栏并入**编码所在行**、右对齐显示（竖排省一行）。两种编码形态的落点不同、表现一致：
+    /// 独立编码栏（`candidate_top`）并进栏行右端，内联编码（`candidate_inline`）并进编码自己那一行。
+    /// 横排下翻页栏本就落在行尾，此项无影响；蒙文旋转态维持底部独立行（并入会让箭头跟着转 90°）。
     #[serde(default)]
     pub pager_in_preedit: bool,
     /// 候选窗定位方式："follow_caret"（默认，跟随光标）/ "fixed"（固定屏幕坐标）。
