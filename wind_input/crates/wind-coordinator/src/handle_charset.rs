@@ -332,6 +332,8 @@ impl crate::Coordinator {
                 key: key.clone(),
                 name: Some(TEMPLATE_NAME.into()),
                 ranges: Some(Vec::new()),
+                // ★★ 模板**显式**给 order，不留空走 `DEFAULT_ORDER`——见 TEMPLATE_ORDER。
+                order: Some(TEMPLATE_ORDER),
                 ..Default::default()
             },
             added: Vec::new(),
@@ -558,6 +560,30 @@ impl crate::Coordinator {
 
 /// 「新建类」模板的显示名。用户在文件里改成自己的。
 const TEMPLATE_NAME: &str = "我的字符类";
+
+/// 「新建类」模板给的 `order`，**比所有出厂类都小**。
+///
+/// ★★ 不留空走 [`charset_def::DEFAULT_ORDER`]（100）的理由是一个实测出来的坑：出厂值
+/// 是 `common_han` = 10、`emoji` = 20、50 个区块类 = 900，而 `common_han` 带
+/// `scope: han` + `outside: rare`，等于**对整个汉字域都表态**。缺省 100 的自建类排在
+/// 它后面 ⇒ 用户新建一个类想把几个生僻汉字设成常用，**一点反应都没有**。
+///
+/// ⚠️ 这条路连告警都收不到：`CharsetRegistry::shadowed_keys` 只比对区间型的 `ranges`，
+/// `scope` 型的全域表态不在它的判据里（设计文档 §6.5 那道防线盖不住这种形态）。
+///
+/// ⛔ 对策**不是**改 `DEFAULT_ORDER`：那会让所有没写 `order` 的已有自建类的仲裁结果
+/// 静默翻转。只给新导出的模板一个显式值——**已存的类一个字节都不改**。
+///
+/// ⚠️ 这个决定有三条代价，不是零成本，写在这里免得下次误以为它只有好处：
+///
+/// 1. **「老类不动」只在字面上成立，相对次序变了**：新建的类（5）会压过用户先前建的、
+///    走 `DEFAULT_ORDER` 的老类（100）——改动前两者同为 100、靠 key 字典序打平。
+///    用户若要老类优先，得自己去把它的 `order` 调小。
+/// 2. **新建的类彼此打平**：每个模板都拿 5，两个自建类之间只能靠 key 字典序破
+///    （`CharsetRegistry` 编译时那条 `then_with(key)`）。确定，但语义是任意的。
+/// 3. **护栏只盖 `data/`**：钉住它的测试喂的是仓里的自带层；`charset_factory()` 实际
+///    还合并 `data_custom/`（定制版层）。定制包若发一个 `order < 5` 的类，测试不会响。
+const TEMPLATE_ORDER: i32 = 5;
 
 /// 外部编辑文件的默认落点：系统临时目录下 `WindInput/charsets/`。
 ///
@@ -1140,6 +1166,63 @@ mod tests {
         // 直接加载模板也合法——得到一个空的自建类。
         let out = c.charset_import_file(&path).unwrap();
         assert!(!out[0].builtin);
+        drop(c);
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// ★★ 新建模板的 `order` 必须压过**所有出厂类**，且判据读的是仓里真实的
+    /// `data/charsets/`，不是记在这里的一个数字。
+    ///
+    /// 背景见 [`TEMPLATE_ORDER`]：缺省的 100 压不过 `common_han`（10），用户新建一个类
+    /// 想把几个生僻汉字设成常用会**一点反应都没有**，而这条路连 warn 都收不到
+    /// （`shadowed_keys` 只比对区间型的 ranges）。出厂哪天把某个类的 order 调小，
+    /// 这条测试当场红，而不是等用户来报「配了没反应」。
+    #[test]
+    fn the_new_class_template_outranks_every_factory_class() {
+        let (c, user) = coord("template_order");
+        let path = c.charset_export_template_to(&user).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(&format!("order: {TEMPLATE_ORDER}")),
+            "模板必须**显式**写 order（留空会走 DEFAULT_ORDER）：{text}"
+        );
+
+        let orders: std::collections::BTreeSet<i32> = c
+            .engine_mgr
+            .charset_factory()
+            .values()
+            .map(|f| f.def.order_or_default())
+            .collect();
+        let lowest = *orders.first().expect("出厂层至少有 blocks.yaml 里那批类");
+        assert!(
+            TEMPLATE_ORDER < lowest,
+            "模板 order {TEMPLATE_ORDER} 必须小于最小的出厂 order {lowest}"
+        );
+
+        // ⚠️ 连**取值集合**一起钉住，不只钉最小值：`charset_def.rs` 的两份编辑视图头注释
+        // 里写着「出厂类用的是 10（常用汉字）、20（emoji）、900（Unicode 区块）」，那句话
+        // 是 `data/charsets/` 的镜像，除了这条断言没有任何东西看着它。出厂哪天加一个
+        // `order: 50` 的类，上面那条 `<` 照绿，而**用户手上那份导出文件开始说假话**——
+        // 同样是注释漂移，只是这次漂的是用户可见的文案。
+        assert_eq!(
+            orders,
+            std::collections::BTreeSet::from([10, 20, 900, 1000]),
+            "出厂 order 取值集合变了 ⇒ 必须同步改 charset_def.rs 里 CUSTOM_VIEW_HEADER 与 \
+             EDIT_VIEW_HEADER 那句「出厂类用的是 10 / 20 / 900 / 1000」"
+        );
+
+        // 模板 → 库 → 装配一整条链：导入后真的以这个优先级排在最前。
+        c.charset_import_file(&path).unwrap();
+        let rows = c.charset_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.key == "my_class_1")
+            .expect("导入的自建类要在列表里");
+        assert_eq!(row.order, TEMPLATE_ORDER);
+        assert_eq!(
+            rows[0].key, "my_class_1",
+            "order 最小 ⇒ 列表第一行（列表序就是仲裁序）"
+        );
         drop(c);
         let _ = std::fs::remove_dir_all(&user);
     }

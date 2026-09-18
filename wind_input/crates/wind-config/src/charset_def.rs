@@ -192,6 +192,12 @@ pub struct CharsetDef {
 
 /// `order` 缺省值。取中间值而不是 0，让用户既能插到内置类前面也能插到后面，
 /// 不必给所有内置类重新编号。
+///
+/// ⚠️ 「插到前面」在**汉字**上不成立：出厂的 `common_han` 是 10 且对整个汉字域表态
+/// （`scope: han` + `outside: rare`），缺省 100 的类对汉字的 `default` 永远轮不到。
+/// 新建类因此由 `handle_charset::TEMPLATE_ORDER` 显式给一个更小的值；这个常量只管
+/// 「用户层压根没写 order」的老数据，⛔ 不要为上面那件事来改它——改了会让已有自建类的
+/// 仲裁结果静默翻转。
 pub const DEFAULT_ORDER: i32 = 100;
 
 impl CharsetDef {
@@ -607,7 +613,9 @@ const EDIT_VIEW_HEADER: &str = "\
 # 这是「{name}」（key: {key}）当前生效的完整定义 = 出厂 + 你的调整。
 # 直接增删 `...` 之后的字符行即可；导入时只记下与出厂的差异，出厂更新仍会跟随。
 # 字段：name、default（common / rare，删掉这行 = 沿用出厂）、no_freq、in_rare、
-#       order（小的优先）、enabled。
+#       order、enabled。
+# order 小的优先，且只管 default 的仲裁（no_freq / in_rare 是并集，不看它）。
+# 出厂类用的是 10（常用汉字）、20（emoji）、900（Unicode 区块）、1000（「符号」聚合类）。
 ";
 
 /// 自建类（含「新建类」模板）的编辑视图头部。与 [`EDIT_VIEW_HEADER`] 分开：自建类没有
@@ -618,7 +626,10 @@ const CUSTOM_VIEW_HEADER: &str = "\
 # 这是自建字符类「{name}」（key: {key}）的完整定义，导入时整份替换库里的那份。
 # 成员写在 `...` 之后，一行一个；范围写在 ranges 里，如 `ranges: [U+2600-U+26FF, U+3299]`。
 # 改 key 等于另建一个类，原来的仍在（要删去设置页右键「删除此类」）。
-# 字段：name、ranges、default（common / rare）、no_freq、in_rare、order（小的优先）、enabled。
+# 字段：name、ranges、default（common / rare）、no_freq、in_rare、order、enabled。
+# order 小的优先，且只管 default 的仲裁（no_freq / in_rare 是并集，不看它）。
+# 出厂类用的是 10（常用汉字）、20（emoji）、900（Unicode 区块）、1000（「符号」聚合类），
+# 比它们小才压得过。
 ";
 
 /// 出厂类的 `ranges` 在编辑视图里写成注释时，跟在后面的说明。
