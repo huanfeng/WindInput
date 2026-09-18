@@ -164,6 +164,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME caret_default_pos_policy COMMAND caret_default_pos_policy_test)
 
+    add_executable(editable_context_policy_test tests/editable_context_policy_test.cpp)
+    target_include_directories(editable_context_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(editable_context_policy_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME editable_context_policy COMMAND editable_context_policy_test)
+
     add_executable(passthrough_note_test tests/passthrough_note_test.cpp)
     target_include_directories(passthrough_note_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)

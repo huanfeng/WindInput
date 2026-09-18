@@ -1,4 +1,5 @@
 #include "TextService.h"
+#include "EditableContextPolicy.h"
 #include "KeyEventSink.h"
 #include "IPCClient.h"
 #include "LangBarItemButton.h"
@@ -9,6 +10,15 @@
 #include <vector>
 #include <shellscalingapi.h>
 #include <inputscope.h> // ITfInputScope / InputScope 枚举
+
+// EditableContextPolicy.h 为了能用 g++ 在非 Windows 机器上单测而不含任何 Win32 头，两个
+// SDK 常量在那边是按数值重述的。这两行把「与 SDK 对一遍」从人工纪律变成编译期门禁——
+// 抄错的后果不对称：`kEmptyContextHr` 一旦对不上，判据**静默**退回改动前的行为
+// （GH#134 后半条原样复发），而那边的单测用的是同一个常量，自证循环、照绿。
+static_assert(wind::editable::kEmptyContextHr == static_cast<std::uint32_t>(TF_E_EMPTYCONTEXT),
+              "kEmptyContextHr 与 SDK 的 TF_E_EMPTYCONTEXT 不一致");
+static_assert(wind::editable::kReadOnlyDynFlag == static_cast<std::uint32_t>(TF_SD_READONLY),
+              "kReadOnlyDynFlag 与 SDK 的 TF_SD_READONLY 不一致");
 
 // GUID_PROP_INPUTSCOPE 在 SDK 头中仅为 EXTERN_C 声明，其字节定义需某个 TU 启用 INITGUID
 // 才会生成；直接引用会产生 LNK2019。这里本地定义该 GUID 值（与 inputscope.h 一致），
@@ -5231,20 +5241,19 @@ BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr, DWORD* pDy
     }
 
     TF_STATUS status = {};
-    BOOL result = TRUE;
     HRESULT hrStatus = pCtx->GetStatus(&status);
+    // 判据本体抽在 EditableContextPolicy.h（纯逻辑、可单测）。两条分支的依据都写在那里：
+    // 成功时只认 TF_SD_READONLY（TS_SS_TRANSITORY 单独判不可靠 —— Chrome 与 JetBrains
+    // 都把它挂在真能打字的 context 上；它作为 locked/transient 判据的**一半**仍然有效，
+    // 见 IsLockedTransientDocMgr，两个判据回答的是不同的问题）；失败时只有
+    // TF_E_EMPTYCONTEXT 判不可编辑，其余未知失败码仍走宽松兜底。
+    BOOL result = wind::editable::ContextIsEditable(static_cast<std::uint32_t>(hrStatus),
+                                                    status.dwDynamicFlags)
+                      ? TRUE
+                      : FALSE;
     if (SUCCEEDED(hrStatus))
     {
-        // Only TF_SD_READONLY (bit 0 of dwDynamicFlags) reliably means "no writable text
-        // input". Chrome dynamically sets/clears this bit when text fields gain/lose focus.
-        // TF_SS_TRANSITORY (0x4 of dwStaticFlags) is NOT a reliable signal — Chrome and
-        // JetBrains both set it on contexts that do have real text input.
-        // ⚠ 上面这条只否掉「拿 TS_SS_TRANSITORY **单独**判可编辑性」。它作为
-        // locked/transient 判据的**一半**仍然有效（与 dynFlags 的能力位合取），
-        // 见 IsLockedTransientDocMgr —— 两个判据回答的是不同的问题，别互相引用来否定。
         WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: dynFlags=0x%X statFlags=0x%X", status.dwDynamicFlags, status.dwStaticFlags);
-        if (status.dwDynamicFlags & TF_SD_READONLY)
-            result = FALSE;
         if (pDynFlagsOut)
             *pDynFlagsOut = status.dwDynamicFlags;
         if (pStatFlagsOut)
@@ -5252,7 +5261,12 @@ BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr, DWORD* pDy
     }
     else
     {
-        WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: GetStatus hr=0x%08X -> default TRUE", hrStatus);
+        // ★ 这一行是 GH#134 后半条的现场证据行：`hr=0x80040509`（TF_E_EMPTYCONTEXT）
+        // 就是 Chromium 给「焦点不在可编辑元素上」准备的那个 DocMgr —— 它照常建 context
+        // 但不挂 text store。改动前这里兜底成 TRUE，于是点网页空白处照发 focus_gained，
+        // 服务端的 has_edit_context 再也回不到假，工具栏永不隐藏。
+        WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: GetStatus hr=0x%08X -> %s",
+                           hrStatus, result ? L"TRUE(未知失败码, 宽松兜底)" : L"FALSE(空上下文)");
     }
 
     WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: -> %d", result);
