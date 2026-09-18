@@ -374,6 +374,11 @@ fn sibling_with_suffix(dir: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
 ///
 /// 只收 `theme.toml` 与 `assets/**`——主题目录里可能还有别的东西（编辑器的草稿、
 /// 系统生成的缩略图数据库），一并打进去既胀包又泄露无关文件。
+///
+/// ⚠️ `assets/**` 的收集**跟随符号链接**（`collect_files` 用 `is_dir()`、写入用
+/// `fs::read`）。主题目录按 id 独占、没有「用户往里手工放东西」的用法，Windows 上建
+/// 符号链接还要管理员权限或开发者模式，所以目前不拦；但这一条一旦不再成立（比如哪天
+/// 允许从任意目录导出），链接指向的仓外文件就会被打进可分发的包里。
 pub fn export_package(
     theme_dir: &Path,
     out_path: &Path,

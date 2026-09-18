@@ -1,10 +1,15 @@
-//! 用被定制版 `[themes] hide` 掉的 slug 导入主题 ⇒ **当场拒掉，不给成功回执**。
+//! 用被定制版 `[themes] hide` 掉的 slug **导入或导出**主题 ⇒ **当场拒掉**。
 //!
 //! 为什么这一条单独值一个用例：hide 是绝对的（用户层同名主题也不复活，见
-//! `Config::custom_hides_theme` 的取舍说明），而**主题导入 RPC 是用户唯一能主动撞上
-//! 那个 id 的入口**。放行的话文件确实写下去了、回执是 `ok: true`，但它永远不进列表
-//! （`list_themes_full` 滤掉）、选它也会被 `push_theme` 兜底掉——用户看到的是
-//! 「导入成功了却哪儿都找不到」，一个自相矛盾的回执。
+//! `Config::custom_hides_theme` 的取舍说明），而主题包的两条 RPC 是用户唯一能主动撞上
+//! 那个 id 的入口。
+//!
+//! - **导入**放行的话文件确实写下去了、回执是 `ok: true`，但它永远不进列表
+//!   （`list_themes_full` 滤掉）、选它也会被 `push_theme` 兜底掉——用户看到的是
+//!   「导入成功了却哪儿都找不到」，一个自相矛盾的回执。
+//! - **导出**放行的话更糟：定制者明确要移除的素材（文件仍物理留在 `data/themes/` 下）
+//!   被重新打包成可对外分发的 `.wtheme`，而用户拿这个包去导入又会被上面那条拒掉——
+//!   一个「导得出、装不回」的产物。
 //!
 //! 为什么必须是集成测试（独立进程）：`Config::custom_manifest()` 用 OnceLock 缓存。
 //! ⚠️ 全文件仅此一个 `#[test]`，理由同 `wind-engine/tests/custom_layer_hide.rs`。
@@ -28,7 +33,7 @@ fn theme_toml(name: &str) -> String {
 }
 
 #[test]
-fn importing_a_hidden_theme_slug_is_refused_not_silently_orphaned() {
+fn hidden_theme_slug_is_refused_by_both_import_and_export() {
     // ⚠️ 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
     let tmp = std::env::temp_dir().join(format!(
         "wind_webdata_custom_hide_import-{}",
@@ -68,6 +73,9 @@ fn importing_a_hidden_theme_slug_is_refused_not_silently_orphaned() {
     );
 
     write_at(&data, "themes/default/theme.toml", &theme_toml("默认"));
+    // ★ 被 hide 的主题**物理存在**于 data 层——这是导出那半边用例的前提：文件不在的话，
+    // 导出失败就只说明「找不到」，把 hide 判据整个删掉也照样绿。
+    write_at(&data, "themes/msime/theme.toml", &theme_toml("微软拼音风"));
     let coord = Coordinator::new_headless(Config::default(), Some(&data));
 
     let import = |slug: &str| -> anyhow::Result<Value> {
@@ -96,6 +104,32 @@ fn importing_a_hidden_theme_slug_is_refused_not_silently_orphaned() {
         !user.join("themes/msime").exists(),
         "拒掉就不该留下任何目录——留下的话用户下次导入会撞上「已存在（force=false）」，\
          而那个提示指向一个他根本看不见的主题"
+    );
+
+    // ── 导出侧：同一条 hide 判据 ────────────────────────────────────────────
+    let export = |slug: &str, out: &Path| -> anyhow::Result<Value> {
+        coord.web_data_rpc(
+            "theme.exportPackage",
+            &json!({ "slug": slug, "path": out.to_string_lossy() }),
+        )
+    };
+
+    // 正向对照：没被 hide 的内置主题导得出。没有这条，下面那条在「导出整体坏掉」时也会绿。
+    let good = tmp.join("default.wtheme");
+    let ok = export("default", &good).expect("普通 slug 必须能导出成功");
+    assert_eq!(ok["ok"], json!(true), "正常导出的回执应是 ok，实际={ok}");
+    assert!(good.is_file(), "正常导出应真的落盘");
+
+    // ★ 被 hide 的 slug：主题目录就在 data 层躺着，但必须导不出，且不留任何产物。
+    assert!(
+        data.join("themes/msime/theme.toml").is_file(),
+        "前置条件：被 hide 的主题此刻确实物理存在，否则下面拒的是「找不到」而不是 hide"
+    );
+    let out = tmp.join("msime.wtheme");
+    export("msime", &out).expect_err("被 hide 的 slug 必须导不出——它在本定制版里不存在");
+    assert!(
+        !out.exists() && !out.with_extension("wtheme.tmp").exists(),
+        "拒掉就不该留下任何包文件或 .tmp 残骸"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

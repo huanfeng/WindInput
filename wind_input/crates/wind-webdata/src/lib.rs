@@ -547,6 +547,7 @@ pub trait WebDataRpc: WebDataHost {
             "theme.importFromText" => self.web_theme_import_text(params),
             "theme.previewPackage" => self.web_theme_preview_package(params),
             "theme.importPackage" => self.web_theme_import_package(params),
+            "theme.exportPackage" => self.web_theme_export_package(params),
             "theme.importFromUrl" => {
                 anyhow::bail!("URL 导入未启用（features.theme.import_url=false）")
             }
@@ -3420,20 +3421,38 @@ pub trait WebDataRpc: WebDataHost {
         Ok(serde_json::to_value(&normalized)?)
     }
 
-    fn web_theme_get_text(&self, params: &Value) -> anyhow::Result<Value> {
-        let slug = str_param(params, "slug")?;
+    /// 按 slug 在主题搜索链里定位主题目录 —— **读取主题的入口共用这一套判据**。
+    ///
+    /// 与 [`Self::theme_target_dir`]（写入侧）分开是刻意的：写入只认用户目录，读取要
+    /// 跨整条链（内置主题也读得到）。但读取侧自己**不该有第二份**——slug 合法性、
+    /// 找哪一层、找不到怎么报，`getText` 与导出各写一遍的话，迟早出现「能导出却读不
+    /// 到原文」这种只在某一层成立的分歧。
+    ///
+    /// 定制版 `[themes] hide` 掉的 id 按**不存在**处理，与列表（`list_themes_full` 滤掉）
+    /// 和导入（`theme_target_dir` 当场拒）一致：`custom_hides_theme` 的绝对性是写死在
+    /// 那边的文档里的，读取侧放行就意味着「列表里看不见、却导得出一个装不回去的包」。
+    fn theme_dir_of(&self, slug: &str) -> anyhow::Result<std::path::PathBuf> {
         if slug.is_empty() || slug.contains('/') || slug.contains('\\') || slug.contains("..") {
             anyhow::bail!("非法主题 slug");
         }
-        for dir in self.theme_dirs() {
-            let path = dir.join(slug).join("theme.toml");
-            if path.is_file() {
-                let toml = std::fs::read_to_string(&path)
-                    .map_err(|e| anyhow::anyhow!("读取主题失败：{e}"))?;
-                return Ok(json!({ "slug": slug, "toml": toml }));
-            }
+        if wind_config::Config::custom_hides_theme(slug) {
+            anyhow::bail!("主题不存在");
         }
-        anyhow::bail!("主题不存在")
+        self.theme_dirs()
+            .into_iter()
+            .map(|d| d.join(slug))
+            .find(|d| d.join(wind_transfer::theme::THEME_ENTRY_NAME).is_file())
+            .ok_or_else(|| anyhow::anyhow!("主题不存在"))
+    }
+
+    fn web_theme_get_text(&self, params: &Value) -> anyhow::Result<Value> {
+        let slug = str_param(params, "slug")?;
+        let path = self
+            .theme_dir_of(slug)?
+            .join(wind_transfer::theme::THEME_ENTRY_NAME);
+        let toml =
+            std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("读取主题失败：{e}"))?;
+        Ok(json!({ "slug": slug, "toml": toml }))
     }
 
     fn web_theme_delete(&self, params: &Value) -> anyhow::Result<Value> {
@@ -3634,6 +3653,93 @@ pub trait WebDataRpc: WebDataHost {
             "files": out.files,
             "reloaded": reloaded,
         }))
+    }
+
+    /// `theme.exportPackage { slug, path }`：把一个已装主题打成 `.wtheme`。
+    ///
+    /// 源目录走整条搜索链而不是只认用户目录——把内置主题改了色想发给别人，是主题包
+    /// 最常见的来路；只让用户层导得出，那份改动就得先手工复制一遍目录才能分享。
+    ///
+    /// 落点由调用方给全路径（与 `scheme.exportPackage` 同形）：core 不猜「导到哪」，
+    /// 那是设置端的文件对话框与 CLI 的参数各自该管的事。
+    ///
+    /// ⚠️ `path` **不做任何校验**，这条成立的前提是这条 RPC 只经本机 ctrl 通道由设置端
+    /// 与 CLI 调用、不对外暴露。哪天这条链上多一个远程或网页入口，它连同下面的
+    /// `create_dir_all(parent)` 就是一个任意写——**那时必须先加落点白名单再接入**，
+    /// 而不是指望「现在没人远程调」。
+    fn web_theme_export_package(&self, params: &Value) -> anyhow::Result<Value> {
+        let slug = str_param(params, "slug")?;
+        let out = str_param(params, "path")?;
+        let dir = self.theme_dir_of(slug)?;
+        let png = self.theme_preview_png(&dir);
+        let out_path = std::path::Path::new(out);
+
+        // **先写 `.tmp` 兄弟文件，自检通过才 rename 到位**——与导入侧同一条纪律
+        // （见 `wind_transfer::theme::import_package` 的「中途失败目标原封不动」）。
+        // 直接往 `out_path` 上写的话，超限的主题（条目数 / 解压体积越过包格式上限）
+        // 会走成这样：包已经完整落盘 → 自检报错 → 调用方看到失败，但磁盘上留着一个
+        // core 自己都不认的包；而 `File::create` 是截断写，那个路径上原有的好包已经
+        // 被毁了——**一次报错的导出销毁用户数据**，比不给导出严重得多。
+        let tmp = out_path.with_extension("wtheme.tmp");
+        let done = (|| -> anyhow::Result<wind_transfer::theme::ThemePreview> {
+            wind_transfer::theme::export_package(&dir, &tmp, png.as_deref())?;
+            // 读回自检：刚打出来的包必须能被自己的解析器认出来。这一步不是多余的仪式——
+            // 导出与导入各有一套条目判据（收什么 vs 认什么），哪天两边走岔了，这里当场
+            // 就报，而不是等用户把包发出去之后在对方机器上报。
+            wind_transfer::theme::preview_package(&tmp)
+        })();
+        let p = match done {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                // 用户做的是「导出我的主题」，收到的却是包格式的限额措辞；补一句主语，
+                // 否则他不知道该去改自己的哪个主题。
+                return Err(e.context(format!("导出主题「{slug}」失败")));
+            }
+        };
+        std::fs::rename(&tmp, out_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::anyhow!("写入 {} 失败：{e}", out_path.display())
+        })?;
+
+        Ok(json!({
+            "ok": true,
+            "path": out_path.to_string_lossy(),
+            "display_name": p.display_name,
+            "asset_count": p.asset_count,
+            "has_preview": p.has_preview,
+        }))
+    }
+
+    /// 主题目录下的市场预览图，没有或读不动就当没有。
+    ///
+    /// 有界读取：`wind-transfer` 对导入侧的每个条目都立了限额，导出侧把一张来路不明的
+    /// 图整个吃进内存则没人拦——而这是常驻的输入法服务进程，一张误拷进主题目录的
+    /// 原图就能把它撑爆。超限与读失败都只是「这个包没有预览图」，但都要留下痕迹：
+    /// 静默的话，用户只会看到导出回执里少了「含市场预览图」而无从追查。
+    fn theme_preview_png(&self, dir: &std::path::Path) -> Option<Vec<u8>> {
+        /// 与 `wind-transfer` 给主题文本的限额同档（4 MiB）：预览图是分发用的缩略图，
+        /// 越过这个量级的必然是误放的原图。
+        const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
+
+        let path = dir.join(wind_transfer::theme::THEME_PREVIEW_NAME);
+        match std::fs::metadata(&path) {
+            Err(_) => None, // 没有预览图是常态，不值得一条日志
+            Ok(m) if m.len() > MAX_PREVIEW_BYTES => {
+                tracing::warn!(
+                    "主题预览图过大（{} 字节，上限 {MAX_PREVIEW_BYTES}），本次导出不含预览图",
+                    m.len()
+                );
+                None
+            }
+            Ok(_) => match std::fs::read(&path) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    tracing::warn!("主题预览图读取失败（{e}），本次导出不含预览图");
+                    None
+                }
+            },
+        }
     }
 
     fn web_theme_list(&self) -> anyhow::Result<Value> {
@@ -7940,6 +8046,176 @@ short_code_yield_level = 2
             )
             .is_err()
         );
+    }
+
+    /// 主题包三个 RPC 的边界契约:导出→预览的闭环,以及各自的拒绝路径。
+    ///
+    /// **只测不写用户目录的那两条。** `theme.importPackage` 落盘到真实的用户主题目录
+    /// (`user_config_dir()/themes`),在测试进程里跑它会改开发机上真在用的配置——
+    /// scheme 那边的契约测试同样只测到「不存在的包报错」为止,取舍一致。导入本身的
+    /// 落盘/回滚语义由 `wind-transfer::theme` 的单测覆盖,那里目标目录是临时的。
+    ///
+    /// 导出取 data 层的主题:`coord()` 的 data 目录进得了主题搜索链,于是整条
+    /// 「按 slug 找目录 → 打包 → 读回」都在临时目录里闭合。
+    ///
+    /// ⚠️ 本用例**读**整条搜索链,而链首是真实的用户主题目录(`user_config_dir()/themes`,
+    /// 优先级高于测试的 data 层)。夹具 slug 因此必须取一个开发机上撞不上的名字——取
+    /// `mo` 那种通用名的话,谁的机器上恰好装了同名主题,断言就拿到别人的主题元信息,
+    /// 现象是「这台机器上恒红且报错指不到原因」。
+    #[test]
+    fn theme_package_rpc_contract() {
+        // 目录名带 pid:多 worktree / 多会话并行跑测试时固定名会互删夹具
+        // (同 `tests/custom_layer_hide_theme_import.rs` 的纪律)。
+        let tag = format!("themepkg{}", std::process::id());
+        let c = coord(&tag);
+        let data = std::env::temp_dir().join(format!("wind_webdata_data_{tag}"));
+        let out_dir =
+            std::env::temp_dir().join(format!("wind_themepkg_out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let slug = "wind_test_themepkg_mo";
+
+        // exportPackage:穿越形态的 slug → **在碰盘之前**按 slug 拒掉。
+        //
+        // 断的是错误文案而不是 `is_err()`:这几个 slug 拼出来的路径本来就不存在,只断
+        // `is_err()` 的话,把守卫整段删掉也照样绿(全部落到「主题不存在」),那这条用例
+        // 就一个字节都没测到它声称要测的东西。
+        for bad in ["../evil", "a/b", r"a\b", ""] {
+            let e = c
+                .web_data_rpc(
+                    "theme.exportPackage",
+                    &json!({ "slug": bad, "path": out_dir.join("x.wtheme").to_string_lossy() }),
+                )
+                .unwrap_err();
+            let e = format!("{e:#}");
+            assert!(
+                e.contains("非法主题 slug"),
+                "应在碰盘前按 slug 拒掉 {bad:?}，实际报的是: {e}"
+            );
+        }
+        // 反过来:合法但不存在的 slug 走的是**另一条**路(找不到),两条合起来才证明
+        // 守卫与「找不到」没有混成一条。
+        let e = c
+            .web_data_rpc(
+                "theme.exportPackage",
+                &json!({ "slug": "zz_no_such_theme", "path": out_dir.join("x.wtheme").to_string_lossy() }),
+            )
+            .unwrap_err();
+        let e = format!("{e:#}");
+        assert!(
+            e.contains("主题不存在") && !e.contains("非法主题 slug"),
+            "不存在的主题应报「主题不存在」，实际: {e}"
+        );
+
+        // 在 data 层造一个主题:theme.toml + 两个资源 + 预览图 + 一个无关文件。
+        let src = data.join("themes").join(slug);
+        std::fs::create_dir_all(src.join("assets/sub")).unwrap();
+        std::fs::write(
+            src.join("theme.toml"),
+            "[meta]\nname = \"水墨\"\nauthor = \"某人\"\nversion = \"1.2\"\n\n[window]\nbackground = { image = { ref = \"assets/bg.png\" } }\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("assets/bg.png"), b"bg").unwrap();
+        std::fs::write(src.join("assets/sub/x.png"), b"x").unwrap();
+        std::fs::write(src.join("preview.png"), b"fake-png").unwrap();
+        std::fs::write(src.join("Thumbs.db"), b"junk").unwrap();
+
+        let pkg = out_dir.join("mo.wtheme");
+        let r = c
+            .web_data_rpc(
+                "theme.exportPackage",
+                &json!({ "slug": slug, "path": pkg.to_string_lossy() }),
+            )
+            .unwrap();
+        assert_eq!(r["ok"], json!(true));
+        assert_eq!(r["display_name"], json!("水墨"), "展示名取自主题 meta");
+        // 无关文件不计入,预览图不算资源(它由 has_preview 单独表达)。
+        assert_eq!(
+            r["asset_count"],
+            json!(2),
+            "只有 assets/** 下的两个文件算资源"
+        );
+        assert_eq!(
+            r["has_preview"],
+            json!(true),
+            "主题目录里的 preview.png 要带进包——这一步是 RPC 层独有的,crate 层的 export_package 不读它"
+        );
+        assert!(pkg.is_file(), "包要真的落在给定路径上");
+
+        // previewPackage:刚导出的包读得回来,且与导出回执逐字对得上(导出与导入两套
+        // 条目判据走岔时,这里当场炸)。
+        let prev = c
+            .web_data_rpc(
+                "theme.previewPackage",
+                &json!({ "path": pkg.to_string_lossy() }),
+            )
+            .unwrap();
+        assert_eq!(prev["display_name"], r["display_name"]);
+        assert_eq!(prev["asset_count"], r["asset_count"]);
+        assert_eq!(prev["has_preview"], r["has_preview"]);
+        assert_eq!(prev["author"], json!("某人"));
+        assert_eq!(prev["version"], json!("1.2"));
+
+        // 没有 preview.png 的主题:导出照样成,has_preview 如实为 false。
+        std::fs::remove_file(src.join("preview.png")).unwrap();
+        let bare = out_dir.join("mo-bare.wtheme");
+        let r2 = c
+            .web_data_rpc(
+                "theme.exportPackage",
+                &json!({ "slug": slug, "path": bare.to_string_lossy() }),
+            )
+            .unwrap();
+        assert_eq!(r2["has_preview"], json!(false));
+
+        // 导出失败不留残骸,更不毁掉落点上原有的包:拿一个必然过不了自检的主题
+        // (条目数越过包格式上限)去打到一个已有好包的路径上。
+        let many = data.join("themes").join("wind_test_themepkg_many");
+        std::fs::create_dir_all(many.join("assets")).unwrap();
+        std::fs::write(many.join("theme.toml"), "[meta]\nname = \"太多\"\n").unwrap();
+        for i in 0..=wind_transfer::theme::MAX_THEME_ENTRIES {
+            std::fs::write(many.join("assets").join(format!("{i}.png")), b"x").unwrap();
+        }
+        let good_before = std::fs::read(&bare).unwrap();
+        let e = c
+            .web_data_rpc(
+                "theme.exportPackage",
+                &json!({ "slug": "wind_test_themepkg_many", "path": bare.to_string_lossy() }),
+            )
+            .unwrap_err();
+        // `{:#}` 打印整条 anyhow 链:加了 `.context()` 之后 `to_string()` 只给最外层那句,
+        // 底下「条目过多」那条就看不见了。
+        let e = format!("{e:#}");
+        // 断文案:否则哪天这个夹具因为别的原因(比如主题本身没通过 validate)提前失败,
+        // 下面那两条「旧包还在」就会在一个根本没走到打包的路径上假绿。
+        assert!(
+            e.contains("条目过多"),
+            "应因条目数越过上限而失败，实际: {e}"
+        );
+        assert!(
+            e.contains("导出主题"),
+            "错误链要带上「导出主题」这层主语，实际: {e}"
+        );
+        assert_eq!(
+            std::fs::read(&bare).unwrap(),
+            good_before,
+            "失败的导出必须原封不动地留下落点上那份旧包"
+        );
+        assert!(
+            !bare.with_extension("wtheme.tmp").exists(),
+            "失败后不留 .tmp 残骸"
+        );
+
+        // previewPackage / importPackage:不存在的包路径 → 错误
+        let missing = out_dir.join("zz_no_such.wtheme");
+        for m in ["theme.previewPackage", "theme.importPackage"] {
+            assert!(
+                c.web_data_rpc(m, &json!({ "path": missing.to_string_lossy() }))
+                    .is_err(),
+                "{m} 对不存在的包应报错"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&out_dir);
     }
 
     /// 分发包的说明元信息:包级 title/description 提到响应顶层,片段自带的说明进
