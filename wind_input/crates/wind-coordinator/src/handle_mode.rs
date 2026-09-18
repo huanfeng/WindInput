@@ -1643,11 +1643,44 @@ impl Coordinator {
     /// 文本透镜（拼音/英文）走组合区逐步转换：部分匹配并入 committed 前缀、裁剪缓冲、重转剩余
     /// （剩余仍由 mix 成员方案出候选，不落五笔），留模式内不上屏；完整匹配整体上屏 + 造词。
     /// 数字透镜（计算）的候选恒整体上屏。
+    /// 「重复上屏」候选（`quick_input.repeat`）的上屏 —— **空格臂与选词臂共用**。
+    ///
+    /// 这条候选与输入缓冲没有对应关系（`code` 恒空、`consumed_length` 恒 0），故不记选词、
+    /// 不进 `committed_segs`、不造词，只记一次上屏统计与历史。
+    /// 见 [`Self::inject_mix_repeat_candidate`]：那里点名了「选词记录、造词、标点顶屏三条
+    /// 路径都必须绕开它」，而**选词那条曾经漏了** —— `mix_select` 一路走到
+    /// `record_selection_cand_in`，往词频库写一条 `code = ""` 的行（实测
+    /// `("wubi86", "", "广告")`），正是读端按候选码永远查不中的孤儿键。
+    ///
+    /// 抽成方法而不是在两处各写一遍，就是因为它已经漂移过一次：空格臂与⑥标点臂绕开了，
+    /// 中间那条没有。护栏见 `tests/mix_repeat_no_freq.rs`。
+    fn commit_mix_repeat(&self, state: &mut State, text: String) -> KeyAction {
+        // 一个键重出上次全部内容：字数如实计，但速度分子按「1 击键」封顶，否则一键几十字
+        // 会把速度顶穿（本路径 code_len 恒 0，不显式传就漏封）。
+        self.record_commit_ks(&text, 0, 1, 0, wind_store::stats::CommitSource::Mix);
+        // 重复上屏本身也入历史：连按两次仍重复同一内容（而非取到更早的一条）。
+        self.push_commit_history(&text);
+        let out = self.maybe_convert(state, &text);
+        self.exit_mix_mode(state);
+        self.notify_ui_hide();
+        if out.is_empty() {
+            KeyAction::ClearComposition
+        } else {
+            Self::commit_action(out, true)
+        }
+    }
+
     pub(crate) fn mix_select(&self, state: &mut State, page_offset: usize) -> KeyAction {
         let (start, end) = self.page_range(state);
         let gi = start + page_offset;
         if gi >= end {
             return KeyAction::Consumed;
+        }
+        // 重复上屏候选：与空格臂同一条路径（不记选词、不造词）。必须在取 `cand` 之后、
+        // 一切记账之前 —— 往下任何一步都会把它当成一条有编码的正常候选。
+        if state.mix_repeat {
+            let text = state.candidates[gi].text.clone();
+            return self.commit_mix_repeat(state, text);
         }
         let cand = state.candidates[gi].clone();
         // $AA/$SS 组折叠候选：补全编码到完整码并重查展开（二级选择，不上屏组名）。
@@ -2229,13 +2262,7 @@ impl Coordinator {
                 // 重复上屏：整体上屏上次内容，不记选词/不造词（该候选无对应编码）。
                 if state.mix_repeat && !state.candidates.is_empty() {
                     let text = state.candidates[0].text.clone();
-                    // 一个空格重出上次全部内容：字数如实计，但速度分子按「1 击键」封顶，
-                    // 否则一键几十字会把速度顶穿（本路径 code_len 恒 0，不显式传就漏封）。
-                    self.record_commit_ks(&text, 0, 1, 0, wind_store::stats::CommitSource::Mix);
-                    // 重复上屏本身也入历史：连按两次仍重复同一内容（而非取到更早的一条）。
-                    self.push_commit_history(&text);
-                    let out = self.maybe_convert(state, &text);
-                    return commit_text(self, state, out);
+                    return self.commit_mix_repeat(state, text);
                 }
                 // 空格：选当前高亮候选（文本透镜逐步转换）
                 if state.candidates.is_empty() {
