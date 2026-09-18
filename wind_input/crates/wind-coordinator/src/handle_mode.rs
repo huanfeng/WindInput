@@ -122,7 +122,19 @@ impl MixLens {
     /// 候选是否**整体上屏**（而非拼音那种分步确认消费前缀）。
     /// 数字透镜的结果与自由输入的原文都没有可分段的编码。
     pub(crate) fn commits_whole(self) -> bool {
-        !matches!(self, MixLens::Text)
+        match self {
+            // 文本透镜下候选可能消费前缀（拼音的分步确认）。
+            MixLens::Text => false,
+            // 数字/自由：结果与原文都没有可分段的编码。
+            MixLens::Numeric | MixLens::Free => true,
+            // 词组：**显式**整体上屏。词组候选没有可分段的编码，分步确认对它没有意义。
+            //
+            // 写成穷尽 `match` 而不是 `!matches!(self, Text)`：那种写法下新变体会静默落进
+            // `true`，而「整体上屏还是分步确认」是每个透镜都必须自己回答的问题。今天
+            // Phrase 落 `true` 恰好是对的（英文候选 `consumed_length = 0`，分步确认要求
+            // `consumed > 0`），但那是巧合不是设计——巧合不该当判据用。
+            MixLens::Phrase => true,
+        }
     }
 }
 
@@ -395,17 +407,15 @@ impl Coordinator {
         if !rt.config.schema.english.phrase_seg {
             return None;
         }
-        let primary = rt.config.schema.primary_pinyin.clone();
-        let has_english = rt
-            .config
-            .schema
-            .mix_modes
-            .get(idx as usize)
-            .is_some_and(|m| {
-                m.members
-                    .iter()
-                    .any(|s| Self::resolve_mix_member(s, &primary) == "english")
-            });
+        drop(rt);
+        // ⚠️ 走 `mix_members_resolved` 而不是自己再解析一遍占位符：`update_mix_candidates`
+        // 的成员循环用的就是它，两处必须是同一份口径。自己写一份的话，`$primary_pinyin`
+        // 这类占位符的解析规则哪天改了只会改到其中一处，而症状是「本实例明明有英文成员，
+        // 分词符却不生效」——静默且难查。
+        let has_english = self
+            .mix_members_resolved(idx)
+            .iter()
+            .any(|m| m == "english");
         has_english.then_some(wind_engine::english_phrase::PHRASE_SEPARATOR)
     }
 

@@ -1078,7 +1078,19 @@ impl Coordinator {
         // 精确去重：词库里字面相同的那条被头部候选吃掉（同主输入路）。**不是**小写去重
         // ——`hello` 不该把词库里的 `Hello` 一起抹掉。⚠️ 这与 `InDict` 的判据是同一个
         // 口径（都按字面），两处必须同进同退：判据认定「同名候选存在」，去重才吃得掉它。
+        // 词组分词生效时 `Always` 降级成 `InDict`（见 `raw_mode_under_phrase_seg`）。
+        //
+        // ⚠️ 判据取**临英自己那份开关**，不是 `schema.english.phrase_seg`——两个作用域各一份。
+        // 也不能只嗅 `buf.contains('\'')`：临英开了 `allow_symbols` 且把 `'` 列进
+        // `symbol_chars` 时 `don't` 是正常字面输入，与分词无关，不该被这条规则管。
+        let phrase_active = self.rt().config.input.temp_english.phrase_seg
+            && buf.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
+        let raw_mode =
+            crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
         let want_raw = crate::english_candidates::wants_raw_candidate(raw_mode, &buf, &dict_part);
+        // 变形跟着原文走（同主输入路）。临英出厂 `case_variants = true`，不管的话
+        // `ip'pro` 会先出 `Ip'pro` / `ip'pro` / `IP'PRO` 三条才轮到词组。
+        let want_variants = want_variants && (!phrase_active || want_raw);
         let mut cands =
             crate::english_candidates::english_head_candidates(&buf, want_raw, want_variants);
         if !cands.is_empty() {
@@ -1473,10 +1485,7 @@ impl Coordinator {
                     && !state.temp_english_buffer.is_empty()
                     && self.temp_english_phrase_separator_key(data.key_code)
                 {
-                    Self::temp_english_insert(
-                        state,
-                        wind_engine::english_phrase::PHRASE_SEPARATOR,
-                    );
+                    Self::temp_english_insert(state, wind_engine::english_phrase::PHRASE_SEPARATOR);
                     return refresh(self, state);
                 }
                 if !shift

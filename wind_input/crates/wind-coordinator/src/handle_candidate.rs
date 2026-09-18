@@ -1447,8 +1447,18 @@ impl Coordinator {
             // ★ `InDict` 档的判据必须在**投影之后**求值：`case_follow_input` 开着时，打
             // `Hell` 会把词库的 `hell` 投影成 `Hell`，此时它才与所打原文字面相同。放在投影
             // 之前算，同一档在两个开关下给出的答案会不一样，而用户改的是另一个开关。
+            // 词组分词生效时 `Always` 降级成 `InDict`（见 `raw_mode_under_phrase_seg`）：
+            // 含分词符的串是查询语法不是内容，但 `o'clock` 这类原文真是词库词的不能误伤。
+            let phrase_active = self.rt().config.schema.english.phrase_seg
+                && raw.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
+            let raw_mode =
+                crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
             let want_raw =
                 crate::english_candidates::wants_raw_candidate(raw_mode, raw, &candidates);
+            // 大小写变形跟着原文走：`ip'pro` 连原文都不产，`IP'PRO` 更没有意义；而
+            // `o'clock` 保住了原文，它的变形照旧有用（想打全大写）。判据统一成
+            // 「原文产不产」，不另立一套。
+            let want_variants = want_variants && (!phrase_active || want_raw);
             let head =
                 crate::english_candidates::english_head_candidates(raw, want_raw, want_variants);
             if !head.is_empty() {
@@ -2213,8 +2223,7 @@ impl Coordinator {
     /// 不问活跃引擎类型——临英是 overlay，典型场景下活跃引擎是五笔/拼音，问了恒假。
     /// 调用点自己保证「当前在临英模式且缓冲非空」。
     pub(crate) fn temp_english_phrase_separator_key(&self, key_code: u32) -> bool {
-        key_code == wind_keys::keymap::VK_QUOTE
-            && self.rt().config.input.temp_english.phrase_seg
+        key_code == wind_keys::keymap::VK_QUOTE && self.rt().config.input.temp_english.phrase_seg
     }
 
     /// 英文词组分词符判定：`key_code` 是否应作为分词符 `'` 压入缓冲（论坛 t42）。
@@ -2250,7 +2259,8 @@ impl Coordinator {
         }
         // 只在**英文引擎**下夺取。活跃方案是五笔/拼音时 `'` 维持原本的选词键身份，
         // 哪怕开关开着——那个开关属于英文方案的作用域。
-        self.engine_mgr.loaded_engine_type(&self.engine_mgr.active_schema_id())
+        self.engine_mgr
+            .loaded_engine_type(&self.engine_mgr.active_schema_id())
             == Some(wind_engine::EngineType::English)
     }
 

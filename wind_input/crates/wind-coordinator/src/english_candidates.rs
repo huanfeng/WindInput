@@ -63,6 +63,35 @@ use wind_config::config::RawCandidateMode;
 /// `show_candidates = false` 时压根不查词库（`overlay_engine_schema` 返回 `None`），
 /// 那种情况下判据无从回答，调用方须退回 [`RawCandidateMode::Always`] 而不是让它恒假
 /// ——否则「原文那条在候选关闭时仍是『空格上屏什么』的依据」这条既有语义就断了。
+/// 词组分词生效时，[`RawCandidateMode::Always`] 降级成 [`RawCandidateMode::InDict`]。
+///
+/// # 为什么降级而不是一刀切「不产」
+///
+/// `Always` 档的立论前提是「英文引擎输入即内容，打词库里没有的词时原文是唯一能上屏的
+/// 东西」。含分词符的串**不是内容、是查询语法**，那个前提不成立——打 `ip'pro` 得到字面
+/// `ip'pro` 不是任何人想要的，而出厂 `Always` 下它还恒占首位、把真正想要的词组挤到
+/// 第二条起（临英更甚：`case_variants` 出厂开着，首三条是 `Ip'pro` / `ip'pro` / `IP'PRO`）。
+///
+/// 但**一刀切不产会误伤**：`o'clock` / `you're` / `O'Reilly` 这类串既含分词符、原文又
+/// 真是词库词，它们本该保住首位。降级成 `InDict` 的「原文字面是不是词库词」判据两边都
+/// 照顾到了，而 `InDict` / `Off` 两档行为完全不变——三档天然共存，不需要新旋钮。
+///
+/// # ⚠️ `phrase_active` 必须由调用方传，不能在这里嗅 `raw.contains('\'')`
+///
+/// 临英开了 `allow_symbols` 且把 `'` 列进 `symbol_chars` 时，`don't` 是**正常的字面输入**
+/// （那是该配置存在的意义），与词组分词无关，不该被本规则管。判据是「本作用域的分词开关
+/// 开着**且**这串里确实有分词符」，只有调用方知道前一半。
+pub(crate) fn raw_mode_under_phrase_seg(
+    mode: RawCandidateMode,
+    phrase_active: bool,
+) -> RawCandidateMode {
+    if phrase_active && mode == RawCandidateMode::Always {
+        RawCandidateMode::InDict
+    } else {
+        mode
+    }
+}
+
 pub(crate) fn wants_raw_candidate(mode: RawCandidateMode, raw: &str, dict: &[Candidate]) -> bool {
     match mode {
         RawCandidateMode::Always => true,
@@ -87,20 +116,6 @@ pub(crate) fn english_head_candidates(
     with_variants: bool,
 ) -> Vec<Candidate> {
     if raw.is_empty() {
-        return Vec::new();
-    }
-    // ★ 输入里带着词组分词符时，**整个头部一条都不产**——原文与大小写变形都不产。
-    //
-    // 分词符是**输入语法**，不是内容。头部候选会把它原样带上屏：打 `ip'pro` 得到字面
-    // `ip'pro`（临英还会再给 `IP'PRO`），那不是任何人想要的东西；而出厂
-    // `raw_candidate = always` 下它还恒占首位，把真正想要的词组挤到第二条起。
-    //
-    // 闸门放在这里而不是 `wants_raw_candidate`：那个只管原文这一条，挡不住变形候选
-    // （临英出厂 `case_variants = true`，实测首三条是 `ip'pro` / `IP'PRO` 才轮到词组）。
-    // 本函数是两个作用域**共用的唯一头部生成点**，两种候选都从这里出，是唯一挡得干净的
-    // 位置。三档 `RawCandidateMode` 也一并对齐：`InDict` 本来就不产（带分词符的串不可能
-    // 是词库词），`Off` 更不产，这里让 `Always` 档也跟上。
-    if raw.contains(wind_engine::english_phrase::PHRASE_SEPARATOR) {
         return Vec::new();
     }
     let mut out: Vec<Candidate> = Vec::new();
