@@ -293,13 +293,31 @@ const PUNCT_SOURCES: [char; 32] = [
     ';', ':', '\'', '"', ',', '<', '.', '>', '/', '?', '`', '~',
 ];
 
-/// 该字符是否被配进自动配对表（中英两张都算）。配对栈由引擎维护，透传掉栈就断了。
+/// 该字符是否**正在**参与自动配对。配对栈由引擎维护，透传掉栈就断了，故命中即不能透传。
+///
+/// ⚠️ **必须连开关一起判**。两张配对表出厂就有值（`()[]{}｛｝` 等），而
+/// `auto_pair.english` / `auto_pair.chinese` 两个开关的默认值都是 `false`——只看表不看
+/// 开关，等于凭一个没开的功能把 `(` `)` `[` `]` `{` `}` 挡在透传之外，而 `(`(0x28) 撞
+/// `VK_DOWN`、`)`(0x29) 撞 `VK_SELECT`，正是最该修的那批（B-9 实测：英文标点态打 `(`
+/// 光标下移、字不上屏）。
+///
+/// per-app 开关（`auto_pair_allowed_for_pid`）是 AND 语义、只能把已开的关掉，所以全局
+/// 关着就一定不配对，这里据全局判是安全的；反向（全局开、某 app 关）会多排除几个键，
+/// 落在保守侧。
 fn is_pair_char(cfg: &InputConfig, ch: char) -> bool {
-    cfg.auto_pair
-        .english_pairs
-        .iter()
-        .chain(cfg.auto_pair.chinese_pairs.iter())
-        .any(|p| p.chars().any(|c| c == ch))
+    let cn = cfg.auto_pair.chinese
+        && cfg
+            .auto_pair
+            .chinese_pairs
+            .iter()
+            .any(|p| p.chars().any(|c| c == ch));
+    let en = cfg.auto_pair.english
+        && cfg
+            .auto_pair
+            .english_pairs
+            .iter()
+            .any(|p| p.chars().any(|c| c == ch));
+    cn || en
 }
 
 /// # 只管**中文标点态**
@@ -704,17 +722,22 @@ mod tests {
                 "开了 english_punct_mode，`{ch}` 要留给引擎"
             );
         }
-        // ⚠️ 只点名代码默认值 `default_english_pairs()` 里真有的三对。出厂
-        // `data/config.toml` 还多配了 `<>`（两者不一致，是既有状况，与本函数无关），
-        // 真实环境下 `<` `>` 因此也会被本条挡住——那正是判据按**生效配置**算的证据。
+        // ★ 出厂 `auto_pair.english = false`，配对没开 ⇒ 配对符也该透传。
+        //   `(`(0x28) 撞 `VK_DOWN`、`)`(0x29) 撞 `VK_SELECT`，实测就是打 `(` 光标下移、
+        //   字不上屏。早先只看配对表不看开关，把它们挡在了修复之外。
         for ch in ['(', ')', '[', ']', '{', '}'] {
-            assert!(!en.contains(&ch), "`{ch}` 是配对符，配对栈在引擎那边");
+            assert!(
+                en.contains(&ch),
+                "`{ch}` 在出厂配置（auto_pair.english=false）下不参与配对，应透传"
+            );
         }
-        // 反过来验一次：把 `<>` 配进去，它就该被挡住。
+        // 开关打开后才轮到配对栈接手。
         let mut c2 = cfg();
-        c2.auto_pair.english_pairs.push("<>".into());
+        c2.auto_pair.english = true;
         let en2 = english_passthrough_punct_chars(&c2);
-        assert!(!en2.contains(&'<') && !en2.contains(&'>'));
+        for ch in ['(', ')', '[', ']', '{', '}'] {
+            assert!(!en2.contains(&ch), "开了配对，`{ch}` 要留给引擎维护配对栈");
+        }
         // 中文态里被中文标点表拦下、英文态却该放行的那批，逐个点名。
         for ch in ['\'', '"', '\\', '`', '~', '$', '^', '_'] {
             assert!(en.contains(&ch), "`{ch}` 在英文半角态产物即原样，应透传");
@@ -810,11 +833,21 @@ mod tests {
             "english_chars 不该影响中文标点态的判据"
         );
 
-        // 被配进配对表 → 配对栈由引擎维护。
+        // 被配进配对表**且开关开着** → 配对栈由引擎维护，必须吃。
         let mut c2 = cfg();
+        c2.auto_pair.english = true;
         c2.auto_pair.english_pairs = vec!["@&".into()];
         let got = chinese_passthrough_punct_chars(&conv, &c2);
         assert!(!got.contains(&'@'));
         assert!(!got.contains(&'&'));
+
+        // ⛔ 开关关着时配对不生效，光有表不该挡住透传。两个开关出厂都是 false，
+        // 只看表不看开关等于凭一个没开的功能否掉一批键——`(`(0x28) 撞 VK_DOWN 就是这么
+        // 被漏掉的。这条锁住那个回归。
+        let mut c3 = cfg();
+        c3.auto_pair.english = false;
+        c3.auto_pair.english_pairs = vec!["@&".into()];
+        let got3 = chinese_passthrough_punct_chars(&conv, &c3);
+        assert!(got3.contains(&'@'), "配对开关关着，光有表不该挡住透传");
     }
 }
