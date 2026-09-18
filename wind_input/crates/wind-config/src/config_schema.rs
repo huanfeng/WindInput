@@ -601,6 +601,7 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.status.items", StrList),
     f("ui.toolbar.visible", Bool),
     f("ui.toolbar.hide_in_fullscreen", Bool),
+    f("ui.toolbar.fullscreen_watch", Bool),
     f("ui.toolbar.auto_hide", Bool),
     f("ui.toolbar.auto_hide_delay", Int),
     f("ui.toolbar.vertical", Bool),

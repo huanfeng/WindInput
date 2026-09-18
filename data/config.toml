@@ -1168,6 +1168,10 @@ debug_enabled = false
 [ui.toolbar]
 visible = true
 hide_in_fullscreen = true
+# 主动检测全屏状态：进出全屏本身不产生任何输入法回调（输入框里按 F11、播放器快捷键
+# 全屏），只靠焦点事件的话工具栏该隐没隐。关掉则只在焦点/激活事件到达时顺带查一次。
+# 仅在 hide_in_fullscreen = true 时有意义。
+fullscreen_watch = true
 # 自动隐藏：显示后 auto_hide_delay 秒无交互则 1 秒淡出（悬停/拖动顺延；默认关）
 auto_hide = false
 auto_hide_delay = 5

@@ -4785,6 +4785,21 @@ pub struct ToolbarConfig {
     /// 前台应用全屏时自动隐藏工具栏（默认 true）。
     #[serde(default = "default_true")]
     pub hide_in_fullscreen: bool,
+    /// 主动检测前台全屏态（默认 true）。
+    ///
+    /// 只在 `hide_in_fullscreen` 之下才有意义，管的是**靠什么发现进出全屏**：关掉则只在
+    /// 焦点/激活事件到达时顺带查一次，开着则工具栏显示期间按固定节拍自查。
+    ///
+    /// 为什么需要这个开关：进出全屏本身不产生任何 TSF 回调（在输入框里按 F11、播放器
+    /// 快捷键全屏），只靠事件的话缓存会停在进全屏之前的值，工具栏该隐没隐（GH#134）。
+    /// 但复查是一条常驻线程，而「这个功能值不值得常驻开销」该由用户定——故留此开关。
+    /// 关掉后 F11 那条已知例外会回来。
+    ///
+    /// ⚠ 节拍取值与实测开销**只写在实现处**（`wind-coordinator` 的
+    /// `coordinator/fullscreen_watch.rs` 的 `WATCH_TICK`），此处不复述：那个数会随实测
+    /// 调整，写两处迟早只改一处。
+    #[serde(default = "default_true")]
+    pub fullscreen_watch: bool,
     /// 自动隐藏：显示后超时无交互则淡出（默认关）。
     #[serde(default)]
     pub auto_hide: bool,
@@ -4961,6 +4976,7 @@ impl Default for ToolbarConfig {
         Self {
             visible: true,
             hide_in_fullscreen: true,
+            fullscreen_watch: true,
             auto_hide: false,
             auto_hide_delay: 5,
             vertical: false,

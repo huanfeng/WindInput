@@ -15,6 +15,7 @@ use crate::pipeline::{ModeKind, Rewind};
 // 子模块（src/coordinator/ 目录）：这批切片重度访问本模块**私有**字段/函数，
 // 子模块对父私有项可见，平级模块则须放开可见性——归属判据即「是否需要碰私有态」。
 mod first_show;
+pub(crate) mod fullscreen_watch;
 mod langbar_icon;
 mod message_handler;
 mod push_config;
@@ -752,6 +753,23 @@ pub(crate) struct State {
     /// 当前生效的字符池来源：false = 最近上屏（默认），true = 剪贴板。
     /// 两个池子的**裁剪方向相反**，读取一律走 `add_word_pool` / `add_word_current_word`。
     pub(crate) add_word_from_clip: bool,
+}
+
+impl State {
+    /// 工具栏显示的**三项合取**：本输入法在服务某宿主（`ime_active`）、焦点在可编辑控件里
+    /// （`has_edit_context`）、用户开着工具栏（`toolbar_visible`）。三项正交、缺一不可，
+    /// 各自的失效形态见字段注释。
+    ///
+    /// 单独成函数是因为有**两个**判定点：`notify_toolbar` 的可见性决策，与全屏复查线程的
+    /// 开销闸（见 `coordinator/fullscreen_watch.rs`）。后者必须与前者同源——闸门比判据宽
+    /// 只是白探测，比判据窄则会漏掉「工具栏正显示着、全屏却没人复查」这一格，而那正是
+    /// 复查线程唯一要服务的场景。
+    ///
+    /// ⚠ 全屏否决**不在**本函数里：那是另一层（配置开关 × 探测缓存），且复查线程恰恰要在
+    /// 它为真、工具栏已因此隐藏时继续工作，否则退出全屏后没人把工具栏放回来。
+    pub(crate) fn toolbar_conjunction(&self) -> bool {
+        self.ime_active && self.has_edit_context && self.toolbar_visible
+    }
 }
 
 /// 空码时按标点/符号键怎么处置这串废码（`input.punct_on_empty_behavior` 的解释结果）。
@@ -1776,10 +1794,24 @@ pub struct Coordinator {
     pub(crate) stat_recorded: std::sync::atomic::AtomicBool,
     /// 全屏状态缓存：由 notify_toolbar_async 在后台线程异步刷新，notify_toolbar 直接读取，
     /// 消除 bridge handler 线程上的 SHQueryUserNotificationState 阻塞。
+    ///
+    /// ⚠ 这一位的**含义随写者而异**，读它之前先想清楚：焦点事件那条（`commit_fullscreen_kind`）
+    /// 写的是「任意全屏形态」（含 D3D 独占 / 演示模式），周期复查那条
+    /// （`commit_fullscreen_covering`）写的只是判据②「铺满显示器」——后者刻意不问判据①，
+    /// 因为那要跨进程问 shell，不能按拍反复发。两者可在「演示模式已置但窗口未铺满」这类
+    /// 罕见格上给出不同的值。目前唯一的生产读者是 `notify_toolbar` 的 `hide_fullscreen`，
+    /// 它只关心「要不要收工具栏」，对这点差异不敏感；独占那一侧另有
+    /// `fullscreen_exclusive_cached` 与 UI 线程的按需闸负责。**新增读者前先确认你要的是哪个**。
     pub(crate) fullscreen_cached: std::sync::atomic::AtomicBool,
     /// 全屏探测的单飞闸：已有探测在途时跳过新的。焦点变化是成串来的，而探的是同一个
-    /// 全局前台状态，此前每次都 spawn 一个线程。见 `notify_toolbar_async`。
+    /// 全局前台状态，此前每次都 spawn 一个线程。
+    ///
+    /// 两个获取点（焦点事件的 `notify_toolbar_async`、复查线程的 `ensure_fullscreen_watch`）
+    /// 都经 `try_take_probe_gate`，归还统一由 `ProbeGate` 的 `Drop` 负责——**不要**直接写它。
     pub(crate) fullscreen_probing: std::sync::atomic::AtomicBool,
+    /// 全屏复查线程是否已起——懒启动的单次闸，见 `coordinator/fullscreen_watch.rs`。
+    #[cfg(windows)]
+    pub(crate) fullscreen_watch_started: std::sync::atomic::AtomicBool,
     /// 前台是否 **D3D 独占**全屏（`FullscreenKind::D3dExclusive`），与 `fullscreen_cached`
     /// 同一探测线程刷新。独立成位是因为后果不同：它压的是候选窗（弹了会把游戏踢出独占态），
     /// 而 `fullscreen_cached` 只管工具栏。见 `handle_uielement.rs`。
@@ -2519,6 +2551,8 @@ impl Coordinator {
             stat_recorded: std::sync::atomic::AtomicBool::new(false),
             fullscreen_cached: std::sync::atomic::AtomicBool::new(false),
             fullscreen_probing: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(windows)]
+            fullscreen_watch_started: std::sync::atomic::AtomicBool::new(false),
             fullscreen_exclusive_cached: std::sync::atomic::AtomicBool::new(false),
             uielement_host_pids: Mutex::new(std::collections::HashSet::new()),
             uielement_reader_pids: Mutex::new(std::collections::HashSet::new()),
@@ -3978,6 +4012,9 @@ impl Coordinator {
                 }
                 self.reload_config(); // 刷新主题/工具栏（候选窗下次输入按新配置）
                 self.notify_toolbar(); // 工具栏显隐(visible/全屏)按新配置即时刷新
+                // `ui.toolbar.fullscreen_watch` 从关改到开时把复查线程起回来。关掉那个
+                // 方向由线程自己在下一拍读到配置后退出，不必在这里管。
+                self.ensure_fullscreen_watch();
                 self.sync_global_hotkeys(); // keys.global_hotkeys 增删/改键即时生效
                 self.sync_direct_switch_hotkey(); // keys.activate_ime 改键/清空即时生效
                 // capslock 绑定的增删即时生效：配上才装全局钩子，删掉立刻卸载。

@@ -117,6 +117,29 @@ pub(crate) fn settings_cmdline(page: Option<&str>, extra: &str) -> String {
     out
 }
 
+/// 全屏探测单飞闸的归还句柄：`Drop` 里必定把闸放回去。
+///
+/// 为什么值得为一个 bool 造个类型：闸是「取在一条线程、还在另一条线程」的，中间夹着一次
+/// 跨进程阻塞查询和一段会取 `state` 锁、下发 UI 命令、推语言栏图标的通知逻辑。归还点若散在
+/// 那一路的每个早退分支上，漏一个的后果**不是少探一次**，而是此后所有探测（焦点事件的与
+/// 复查线程的）全部 early return —— 全屏缓存永久冻结，症状正是本次要修的 GH#134，且变成
+/// 不可恢复的那一版，日志里还什么都看不到。收进 `Drop` 之后归还点唯一。
+///
+/// ⚠ **别把它当 panic 安全**：release profile 是 `panic = "abort"`（见 `wind_input/Cargo.toml`），
+/// 栈不展开、`Drop` 不执行，出厂版本上 panic 即进程终止，没有「闸被归还」这回事。它买到的
+/// 是跨线程交接与早退路径的收口，不是 panic 恢复。
+///
+/// 持有 `Arc` 而不是 `&AtomicBool`：闸要跨到 `spawn` 出去的线程里归还，借用活不过去。
+pub(crate) struct ProbeGate(std::sync::Arc<Coordinator>);
+
+impl Drop for ProbeGate {
+    fn drop(&mut self) {
+        self.0
+            .fullscreen_probing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 impl Coordinator {
     /// 菜单项激活：UI 已自管导航/子菜单，这里仅按动作派发。
     pub(crate) fn menu_action(&self, kind: MenuKind) {
@@ -2056,9 +2079,16 @@ impl Coordinator {
     /// 再后台刷新全屏缓存，若状态变化则再次通知。
     /// 保证 bridge handler 线程立即返回，缓存刷新在独立线程完成。
     /// 非焦点路径（模式切换/菜单操作）直接调 notify_toolbar()，缓存值仍然有效。
+    ///
+    /// ⚠ 还有一个超出函数名的副作用：它是全屏复查线程（`coordinator/fullscreen_watch.rs`）
+    /// 的**唯一起点**——第一次焦点/激活事件时懒启动，此后常驻。理由见那个模块。
     pub(crate) fn notify_toolbar_async(&self) {
         // 立即用缓存值通知，bridge 线程无阻塞
         self.notify_toolbar();
+        // 全屏复查线程懒启动：焦点事件**捎带**刷新缓存这件事只覆盖「焦点变化的那一刻」，
+        // 用户在焦点稳定之后进出全屏（浏览器全屏播放视频 / F11）没有任何回调，得靠它。
+        // 见 `coordinator/fullscreen_watch.rs`（非 Windows 上是空实现）。
+        self.ensure_fullscreen_watch();
         // 探测**不再**受 `hide_in_fullscreen` 门控：同一次探测还要给候选窗的
         // 「D3D 独占全屏不弹窗」判据（`fullscreen_exclusive_cached`）刷值，那条没有开关。
         let Some(weak) = self.self_weak.get().cloned() else {
@@ -2066,48 +2096,25 @@ impl Coordinator {
         };
         // 单飞：已有探测在途就跳过。探的是**同一个**全局前台状态，重复查没有意义，
         // 而焦点变化是成串来的（一次应用切换会连着触发多次），此前每次都 spawn 一个线程。
+        // 复查线程走的是同一道闸（见 `ensure_fullscreen_watch`）。
+        //
+        // 闸在这里取、由起出来的那条线程持 [`ProbeGate`] 归还：判「已有探测在途」必须发生
+        // 在**起线程之前**，否则挡不住白起线程这件事本身。
         //
         // 这里不并入 first-show 那个共享定时器：foreground_fullscreen_kind 会阻塞
         // （异步化它正是 1abab9f 的目的），塞进定时器线程会拖垮兜底时限。
-        if self
-            .fullscreen_probing
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
+        if !self.try_take_probe_gate() {
             return;
         }
         let spawned = std::thread::Builder::new()
             .name("fullscreen-probe".into())
             .spawn(move || {
-                let kind = crate::foreground_fullscreen_kind();
-                let is_fs = kind != crate::FullscreenKind::None;
-                let is_excl = kind == crate::FullscreenKind::D3dExclusive;
-                if let Some(c) = weak.upgrade() {
-                    let prev = c
-                        .fullscreen_cached
-                        .swap(is_fs, std::sync::atomic::Ordering::Relaxed);
-                    let prev_excl = c
-                        .fullscreen_exclusive_cached
-                        .swap(is_excl, std::sync::atomic::Ordering::Relaxed);
-                    c.fullscreen_probing
-                        .store(false, std::sync::atomic::Ordering::Release);
-                    if prev != is_fs {
-                        // 全屏态发生变化，用新值重新通知
-                        c.notify_toolbar();
-                    }
-                    if prev_excl != is_excl {
-                        // 独占全屏态翻转：候选窗该收的收、该弹的弹（见 handle_uielement.rs）。
-                        tracing::info!(
-                            "前台 D3D 独占全屏={is_excl}，候选窗{}",
-                            if is_excl {
-                                "改为不弹出"
-                            } else {
-                                "恢复显示"
-                            }
-                        );
-                        let st = c.state.lock().unwrap_or_else(|e| e.into_inner());
-                        c.notify_ui_update(&st);
-                    }
-                }
+                let Some(c) = weak.upgrade() else {
+                    // 协调器已析构，闸随它一起消失，无须归还。
+                    return;
+                };
+                let _gate = c.adopt_probe_gate();
+                c.commit_fullscreen_kind(crate::foreground_fullscreen_kind());
             });
         if spawned.is_err() {
             // 线程没起来就得把闸放回去，否则此后永远不再探测
@@ -2116,11 +2123,112 @@ impl Coordinator {
         }
     }
 
+    /// 取全屏探测的单飞闸；已有探测在途返回 `false`。
+    ///
+    /// 取到之后**必须**由真正执行探测的那条线程调 [`Self::adopt_probe_gate`] 接管归还
+    /// （唯一的例外是线程压根没起来，见调用点）。分两步是因为取闸与归还落在两条线程上：
+    /// 判「在途」要在起线程之前，而归还要等探测跑完。
+    pub(crate) fn try_take_probe_gate(&self) -> bool {
+        !self
+            .fullscreen_probing
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// 接管单飞闸的归还责任：返回的 [`ProbeGate`] 析构时把闸放回去。
+    pub(crate) fn adopt_probe_gate(self: &std::sync::Arc<Self>) -> ProbeGate {
+        ProbeGate(std::sync::Arc::clone(self))
+    }
+
+    /// 把一次探测的结果写进两个缓存，有变化就重新通知工具栏 / 候选窗。
+    ///
+    /// 与探测分开，是因为两个调用点对「要不要信这一次采样」的态度不同：焦点事件那条直采
+    /// 直信（那一刻本来就要重算），复查线程那条要先连着看两拍（见
+    /// `coordinator/fullscreen_watch.rs` 的 `confirmed`）。
+    ///
+    /// ⚠ 只能在后台线程调用（内部会取 `state` 锁并下发 UI 命令），且调用方须持有
+    /// [`ProbeGate`]。
+    pub(crate) fn commit_fullscreen_kind(&self, kind: crate::FullscreenKind) {
+        let is_fs = kind != crate::FullscreenKind::None;
+        let is_excl = kind == crate::FullscreenKind::D3dExclusive;
+        let prev = self
+            .fullscreen_cached
+            .swap(is_fs, std::sync::atomic::Ordering::Relaxed);
+        let prev_excl = self
+            .fullscreen_exclusive_cached
+            .swap(is_excl, std::sync::atomic::Ordering::Relaxed);
+        if prev_excl != is_excl {
+            // 独占全屏态翻转：候选窗该收的收、该弹的弹（见 handle_uielement.rs）。
+            tracing::info!(
+                "前台 D3D 独占全屏={is_excl}，候选窗{}",
+                if is_excl {
+                    "改为不弹出"
+                } else {
+                    "恢复显示"
+                }
+            );
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.notify_ui_update(&st);
+        }
+        // ★ 工具栏要在**任一**位翻转时重算，不能只看 `is_fs`：`notify_toolbar` 的否决项
+        // 里除了 `fullscreen_cached`，还有经 `ui_suppressed_by_host()` 读到的
+        // `fullscreen_exclusive_cached`。只看前者的话，`Covering → D3dExclusive`
+        // （无边框全屏的游戏切独占、PPT 从最大化窗口进放映）这一步 `is_fs` 恒真不翻转，
+        // 工具栏就留在独占全屏上——而它弹在那儿会把游戏踢出独占态（Dota 2 实测冻死）。
+        // 反向（退出放映）则是工具栏再也回不来。改动前这个洞够不着：唯一调用点
+        // `notify_toolbar_async` 会在探测前先无条件 `notify_toolbar()` 一次，顺手糊住了。
+        if prev != is_fs || prev_excl != is_excl {
+            tracing::info!(
+                "前台全屏态={kind:?}（此前 fs={prev} excl={prev_excl}），工具栏重算可见性"
+            );
+            self.notify_toolbar();
+        }
+    }
+
+    /// 只提交「前台铺满显示器」这一格（判据②），**不碰** `fullscreen_exclusive_cached`。
+    ///
+    /// 复查线程专用：它按固定节拍采样，因此刻意不问判据①（`SHQueryUserNotificationState`
+    /// 是跨进程 RPC，见 `coordinator/fullscreen_watch.rs` 的开销三条）。既然没问，就不能
+    /// 拿「没问到」去清独占位——那会把一台正在放 PPT / 跑独占全屏游戏的机器误判成不独占。
+    ///
+    /// ⚠ 只能在后台线程调用（内部会取 `state` 锁并下发 UI 命令），且调用方须持有
+    /// [`ProbeGate`]。
+    ///
+    /// 唯一的生产调用点在 `cfg(windows)` 的复查线程里，故非 Windows 下它只有测试在用。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn commit_fullscreen_covering(&self, covering: bool) {
+        let prev = self
+            .fullscreen_cached
+            .swap(covering, std::sync::atomic::Ordering::Relaxed);
+        if prev != covering {
+            tracing::info!("前台铺满显示器={covering}（周期复查），工具栏重算可见性");
+            self.notify_toolbar();
+        }
+    }
+
+    /// 工具栏「三项合取」的当前值（**不含**全屏否决）——即「用户此刻停在某个宿主的可编辑
+    /// 控件里，且开着工具栏」。全屏复查线程拿它当开销闸，见 `coordinator/fullscreen_watch.rs`。
+    ///
+    /// ⚠ 自带取锁，**不可在持 `state` 锁时调用**（`std::sync::Mutex` 不可重入）。
+    /// `notify_toolbar` 里那份判据直接读它已持有的 `s`，两处共用
+    /// [`State::toolbar_conjunction`] 保持同源。
+    ///
+    /// 唯一的生产调用点在 `cfg(windows)` 的复查线程里，故非 Windows 下它只有测试在用。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn toolbar_wants_display(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .toolbar_conjunction()
+    }
+
     /// 推送当前状态到常驻工具栏（中英/方案/标点/全半角）
-    /// 工具栏可见性单点决策 + 内容刷新。对齐 Go toolbar_reducer 的合取公式：
-    /// 仅当 `ime_active && toolbar_visible` 时显示（UpdateToolbar 会刷内容+定位+显示），
-    /// 否则下发 HideToolbar。所有调用点（启动/切模式/切方案/激活/失活）经此单点决策，
-    /// 不再各自直接显示，根治”工具栏总是显示、切走输入法不隐藏”。
+    /// 工具栏可见性单点决策 + 内容刷新。合取公式（由 Go toolbar_reducer 的两项扩到四项）：
+    /// 仅当 `ime_active && has_edit_context && toolbar_visible && !全屏否决` 时显示
+    /// （UpdateToolbar 会刷内容+定位+显示），否则下发 HideToolbar。所有调用点（启动/切模式/
+    /// 切方案/激活/失活）经此单点决策，不再各自直接显示，根治”工具栏总是显示、切走输入法
+    /// 不隐藏”。前三项见 [`State::toolbar_conjunction`]；第四项是**环境否决**，变量名叫
+    /// `hide_fullscreen` 但装的不止全屏——它还含 `ui_suppressed_by_host()`（宿主自绘候选、
+    /// D3D 独占全屏），故排查日志里那句 `fullscreen=` 为真时未必是全屏惹的。
     pub(crate) fn notify_toolbar(&self) {
         // 前台应用全屏时隐藏工具栏（读缓存，由 notify_toolbar_async 后台刷新，无阻塞）。
         // 「宿主接管 UI / D3D 独占全屏」一律压住，不受 hide_in_fullscreen 开关管：
@@ -2135,7 +2243,16 @@ impl Coordinator {
         // 四项合取：本输入法在服务某宿主（ime_active）、焦点在可编辑控件里
         // （has_edit_context）、用户开着工具栏（toolbar_visible）、且未处于全屏。
         // 前两项正交且缺一不可——只看 ime_active 会让应用内点到非文本框时工具栏不隐藏。
-        if !(s.ime_active && s.has_edit_context && s.toolbar_visible) || hide_fullscreen {
+        // 前三项收在 `State::toolbar_conjunction`：全屏复查线程的开销闸读的是同一个判据。
+        //
+        // ★ 复查线程的唤醒判据取**闸**（三项合取）而不是「本函数要不要显示工具栏」（四项）。
+        // 两者只差全屏那一项，而那一格恰恰是唯一要紧的：工具栏正因全屏隐藏、此时三项合取
+        // 由假转真（用户点进全屏页面里的搜索框），若按四项判就走隐藏分支、信号发不出去，
+        // 挂着的线程要等 `PARK_FALLBACK` 兜底才醒 —— 用户退出全屏后十来秒工具栏才回来。
+        // 「隐藏 ⇒ 闸随后会关」这个想当然，正是 `watch_gate_stays_open_while_hidden_by_fullscreen`
+        // 那条测试钉着要否掉的。
+        let gate_open = s.toolbar_conjunction();
+        if !gate_open || hide_fullscreen {
             // 记录是哪一项否决了显示：UI 层日志只看得到「HideToolbar」，判不出成因，
             // 而四条路径的排查方向完全不同（激活态乱序 / 焦点离开输入框 / 用户关了开关 /
             // 全屏探测）。
@@ -2147,6 +2264,11 @@ impl Coordinator {
                 hide_fullscreen
             );
             drop(s);
+            // 闸开着却走到隐藏分支 = 「三项合取成立，只是被全屏否决了」，正是复查线程最该
+            // 醒着的那一格（它得盯着用户什么时候退出全屏）。判据见上面 `gate_open`。
+            if gate_open {
+                crate::coordinator::fullscreen_watch::wake();
+            }
             // 内容没变就不再推：焦点抖动时这条 Hide 会被连发数次（真机：飞书 200ms 内
             // 5 轮 focus_lost，每轮一条），全挤在 UI 线程上。见 `last_toolbar_push`。
             if self.take_toolbar_push_if_changed(ToolbarPush::Hidden) {
@@ -2163,6 +2285,10 @@ impl Coordinator {
         }
         let (chinese_mode, caps_lock) = (s.chinese_mode, s.caps_lock);
         drop(s);
+        // 走到这里 ⇒ 闸必开（`gate_open` 为真才不进上面那个分支），叫醒挂着的复查线程。
+        // 放在推送去重**之前**：去重看的是工具栏内容变没变，而这个信号问的是「闸是不是
+        // 该开了」，内容没变但刚从隐藏转为显示时，去重会挡掉推送、信号却必须发出去。
+        crate::coordinator::fullscreen_watch::wake();
         // ⚠ **必须在取 state 锁之前算**：effective_input_block() 内部要读 state，
         // 而 std::sync::Mutex 不可重入——写在下面的初始化式里就是当场自死锁
         // （工具栏一显示就走到这里，表现为输入法整个卡住）。
@@ -2933,6 +3059,220 @@ mod toolbar_push_dedup_tests {
         assert!(
             c.take_toolbar_push_if_changed(state("五")),
             "reset 之后同样的内容也必须下发一次"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_veto_tests {
+    //! 全屏否决项与**全屏复查线程的开销闸**（`coordinator/fullscreen_watch.rs`）。
+    //!
+    //! 复查线程本身要问系统前台，跨平台跑不了；能锁住、也正是它依赖的两条性质在这里测：
+    //! 缓存翻转的两个方向都会重算可见性，以及闸门与显示判据同源。
+
+    use crate::coordinator::Coordinator;
+    use std::sync::atomic::Ordering;
+    use wind_config::Config;
+    use wind_ui_types::UiCommand;
+
+    /// 三项合取全置真（= 用户停在某宿主的可编辑控件里且开着工具栏）的协调器 + UI 通道。
+    fn coord() -> (
+        std::sync::Arc<Coordinator>,
+        std::sync::mpsc::Receiver<UiCommand>,
+    ) {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        {
+            let mut s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.ime_active = true;
+            s.has_edit_context = true;
+            s.toolbar_visible = true;
+        }
+        // 构造过程已推过一次工具栏，去重缓存非空 —— 不归零的话首次断言测的是构造顺序。
+        c.reset_toolbar_push_dedup();
+        (c, rx)
+    }
+
+    /// 排空通道，返回最后一条工具栏命令是显示（true）还是隐藏（false）；没推过则 None。
+    fn last_toolbar(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<bool> {
+        let mut last = None;
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                UiCommand::UpdateToolbar(_) => last = Some(true),
+                UiCommand::HideToolbar => last = Some(false),
+                _ => {}
+            }
+        }
+        last
+    }
+
+    /// ★ 本次修的那条：全屏缓存翻转的**两个方向**都要重算可见性。
+    ///
+    /// 复查线程的全部价值就在这两个方向上——进全屏要把工具栏收走（GH#134：浏览器全屏
+    /// 播放视频时工具栏一直显示），退出全屏要把它放回来。只测进不测退的话，一个「进全屏
+    /// 隐藏、此后永不恢复」的实现照样绿，而那种缺陷比原缺陷更难查：用户看到的是工具栏
+    /// 莫名其妙消失了。
+    #[test]
+    fn fullscreen_hides_and_leaving_it_restores_the_toolbar() {
+        let (c, rx) = coord();
+        c.notify_toolbar();
+        assert_eq!(last_toolbar(&rx), Some(true), "非全屏下工具栏应显示");
+
+        c.fullscreen_cached.store(true, Ordering::Relaxed);
+        c.notify_toolbar();
+        assert_eq!(last_toolbar(&rx), Some(false), "进全屏应隐藏工具栏");
+
+        c.fullscreen_cached.store(false, Ordering::Relaxed);
+        c.notify_toolbar();
+        assert_eq!(last_toolbar(&rx), Some(true), "退出全屏应恢复工具栏");
+    }
+
+    /// `ui.toolbar.hide_in_fullscreen=false` 时全屏不改变工具栏显隐——那是用户偏好，
+    /// 探测照常进行（同一次探测还要给候选窗的独占全屏判据刷值），但**不作用于**工具栏。
+    #[test]
+    fn hide_in_fullscreen_off_keeps_the_toolbar_visible() {
+        let mut cfg = Config::default();
+        cfg.ui.toolbar.hide_in_fullscreen = false;
+        let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
+        {
+            let mut s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.ime_active = true;
+            s.has_edit_context = true;
+            s.toolbar_visible = true;
+        }
+        c.reset_toolbar_push_dedup();
+        c.fullscreen_cached.store(true, Ordering::Relaxed);
+        c.notify_toolbar();
+        assert_eq!(
+            last_toolbar(&rx),
+            Some(true),
+            "关掉开关后全屏不应隐藏工具栏"
+        );
+    }
+
+    /// 复查线程的开销闸必须与 `notify_toolbar` 的显示判据**同源**：三项里任一为假就关闸
+    /// （工具栏本就不显示，前台全不全屏无人关心）。闸比判据窄会让复查漏掉该管的场景。
+    #[test]
+    fn watch_gate_follows_the_three_way_conjunction() {
+        let (c, _rx) = coord();
+        assert!(c.toolbar_wants_display(), "三项全真时闸应开");
+        for (name, clear) in [
+            ("ime_active", 0usize),
+            ("has_edit_context", 1),
+            ("toolbar_visible", 2),
+        ] {
+            {
+                let mut s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+                s.ime_active = clear != 0;
+                s.has_edit_context = clear != 1;
+                s.toolbar_visible = clear != 2;
+            }
+            assert!(!c.toolbar_wants_display(), "{name} 为假时闸应关");
+        }
+    }
+
+    /// ★ 单飞闸必须被归还——`ProbeGate` 的 `Drop` 是唯一的归还点。
+    ///
+    /// 攥死的后果不是少探一次，而是此后**所有**探测（焦点事件的与复查线程的）全部
+    /// early return，全屏缓存永久冻结 —— 症状与 GH#134 一模一样，只是不可恢复。
+    #[test]
+    fn the_probe_gate_is_always_returned() {
+        let (c, _rx) = coord();
+        assert!(c.try_take_probe_gate(), "空闲时应取得闸");
+        assert!(!c.try_take_probe_gate(), "已在途时必须挡住第二次");
+        {
+            let _gate = c.adopt_probe_gate();
+            assert!(!c.try_take_probe_gate(), "持有期间仍挡住");
+        }
+        assert!(c.try_take_probe_gate(), "析构后闸必须已归还");
+    }
+
+    /// ★ 提交一次探测结果：缓存翻转要落进去，并重算工具栏可见性。
+    ///
+    /// 非 Windows 上 `foreground_fullscreen_kind` 恒 `None`，故这里直接喂形态给
+    /// `commit_fullscreen_kind`，测的正是复查线程与焦点探测线程共用的那段提交逻辑。
+    #[test]
+    fn commit_writes_the_cache_and_recomputes_the_toolbar() {
+        let (c, rx) = coord();
+        c.notify_toolbar();
+        assert_eq!(last_toolbar(&rx), Some(true), "前置：工具栏本应显示");
+
+        c.commit_fullscreen_kind(crate::FullscreenKind::Covering);
+        assert!(c.fullscreen_cached.load(Ordering::Relaxed), "缓存应置真");
+        assert_eq!(last_toolbar(&rx), Some(false), "进全屏应收起工具栏");
+
+        c.commit_fullscreen_kind(crate::FullscreenKind::None);
+        assert!(!c.fullscreen_cached.load(Ordering::Relaxed), "缓存应归零");
+        assert_eq!(last_toolbar(&rx), Some(true), "退出全屏应把工具栏放回来");
+    }
+
+    /// ★ 复查线程那条提交**只动 `fullscreen_cached`**，不得碰独占位。
+    ///
+    /// 它刻意不问判据①（那是跨进程 RPC，不能按拍反复发），所以手里根本没有独占位的
+    /// 新值；顺手清掉的话，正在放 PPT / 跑独占全屏游戏的机器会被误判成「不独占」，
+    /// 候选窗随即弹进独占全屏里——那是本仓有实测冻死记录的一格。
+    #[test]
+    fn the_periodic_commit_never_touches_the_exclusive_bit() {
+        let (c, _rx) = coord();
+        c.fullscreen_exclusive_cached.store(true, Ordering::Relaxed);
+        c.commit_fullscreen_covering(true);
+        assert!(
+            c.fullscreen_exclusive_cached.load(Ordering::Relaxed),
+            "复查不问判据①，就不能拿「没问到」去清独占位"
+        );
+        c.commit_fullscreen_covering(false);
+        assert!(
+            c.fullscreen_exclusive_cached.load(Ordering::Relaxed),
+            "反向同理"
+        );
+    }
+
+    /// ★★ `Covering → D3dExclusive`：`is_fs` 两端都是真、**不翻转**，但工具栏必须重算。
+    ///
+    /// 独占全屏经 `ui_suppressed_by_host()` 单独否决工具栏，且不受 `hide_in_fullscreen`
+    /// 开关管（工具栏弹在独占全屏上会把游戏踢出独占态，Dota 2 实测冻死）。只看 `is_fs`
+    /// 翻转的实现在这一步什么都不做 —— 无边框全屏的游戏切独占、PPT 从最大化窗口进放映，
+    /// 工具栏就留在上面；反向退出放映则是它再也回不来。
+    #[test]
+    fn switching_from_covering_to_exclusive_still_recomputes() {
+        let mut cfg = Config::default();
+        // 关掉开关，隔离出「只由独占位否决」这一格：否则 Covering 那步就已经把工具栏收了，
+        // 断言分不出是哪一位起的作用。
+        cfg.ui.toolbar.hide_in_fullscreen = false;
+        let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
+        {
+            let mut s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.ime_active = true;
+            s.has_edit_context = true;
+            s.toolbar_visible = true;
+        }
+        c.reset_toolbar_push_dedup();
+        c.commit_fullscreen_kind(crate::FullscreenKind::Covering);
+        c.notify_toolbar();
+        assert_eq!(
+            last_toolbar(&rx),
+            Some(true),
+            "前置：关了开关的无边框全屏不该隐藏工具栏"
+        );
+
+        c.commit_fullscreen_kind(crate::FullscreenKind::D3dExclusive);
+        assert_eq!(
+            last_toolbar(&rx),
+            Some(false),
+            "切进 D3D 独占全屏必须收起工具栏，哪怕 is_fs 这一位没翻转"
+        );
+    }
+
+    /// ★★ 闸门**不含**全屏否决：工具栏正因全屏而隐藏时，复查必须继续跑。
+    ///
+    /// 把全屏也写进闸门是这段逻辑最容易犯的错——一旦那样，进全屏 → 工具栏隐藏 → 闸门
+    /// 关闭 → 再没人去看「用户退出全屏了没有」，工具栏就永远回不来了。
+    #[test]
+    fn watch_gate_stays_open_while_hidden_by_fullscreen() {
+        let (c, _rx) = coord();
+        c.fullscreen_cached.store(true, Ordering::Relaxed);
+        assert!(
+            c.toolbar_wants_display(),
+            "因全屏隐藏时闸仍须开着，否则退出全屏后无人恢复工具栏"
         );
     }
 }

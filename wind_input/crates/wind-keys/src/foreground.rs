@@ -2,7 +2,11 @@
 //!
 //! 放在本 crate 而不是协调器里，是因为**要在两个地方判**：
 //! - 协调器在焦点/激活事件时异步探一次、缓存起来（工具栏 `hide_in_fullscreen`、候选窗
-//!   「D3D 独占全屏不弹」），那是事件驱动的，游戏**在激活之后**才切进独占全屏时它就过期了；
+//!   「D3D 独占全屏不弹」），那是事件驱动的，游戏**在激活之后**才切进独占全屏时它就过期了。
+//!   同一盲区的日常形态是浏览器全屏播放视频 / 按 F11：焦点没动，系统不回调任何东西，缓存
+//!   一直停在旧值。协调器为此另有一条 500ms 复查线程（`coordinator/fullscreen_watch.rs`），
+//!   但它**只覆盖工具栏那一格**——开销闸是工具栏的三项合取，而全屏游戏几乎不会有 TSF 可编辑
+//!   上下文，上一句那个独占全屏的盲区仍然只由下面这道 UI 线程闸兜住；
 //! - UI 线程在**真正要显示某个浮窗的那一刻**再判一次（[`exclusive_fullscreen_recent`]），
 //!   这是最后一道闸——独占全屏的游戏被别的进程的窗口盖一下就会被踢出独占态，处理不好
 //!   的游戏直接卡死（Dota 2 实测），一帧都不能漏。
@@ -181,9 +185,6 @@ pub fn foreground_covers_monitor(m: &windows::Win32::Foundation::RECT) -> bool {
 /// 远程桌面) ⇒ [`FullscreenKind::Covering`]。排除桌面/Shell 窗口。非 Windows 恒 `None`。
 #[cfg(windows)]
 pub fn foreground_fullscreen_kind() -> FullscreenKind {
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-    };
     use windows::Win32::UI::Shell::{
         QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
     };
@@ -203,19 +204,52 @@ pub fn foreground_fullscreen_kind() -> FullscreenKind {
             return FullscreenKind::D3dExclusive;
         }
         // 判据②:前台窗口矩形 ⊇ **它自己所在那块**显示器的物理矩形（含两道守卫）。
+        if !window_covers_own_monitor(hwnd) {
+            return FullscreenKind::None;
+        }
+        FullscreenKind::Covering
+    }
+}
+
+/// 判据②的实现：`hwnd` 是否铺满**它自己所在那块**显示器。
+#[cfg(windows)]
+fn window_covers_own_monitor(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
+    unsafe {
         let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
         if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
-            return FullscreenKind::None;
+            return false;
         }
-        if !window_covers_monitor(hwnd, &mi.rcMonitor) {
-            return FullscreenKind::None;
-        }
-        FullscreenKind::Covering
+        window_covers_monitor(hwnd, &mi.rcMonitor)
     }
+}
+
+/// **只问判据②**：前台窗口是否铺满它自己那块显示器（无边框全屏 / F11 / 浏览器全屏播放
+/// 视频 / 远程桌面）。
+///
+/// 与 [`foreground_fullscreen_kind`] 的差别是**不问判据①** —— 那条要跨进程问 shell
+/// （`SHQueryUserNotificationState`），是这组查询里唯一的 RPC，其余全是 user32/gdi32 的
+/// 本地调用。周期性复查（`coordinator/fullscreen_watch.rs`）只服务工具栏那一格，而工具栏
+/// 关心的全屏形态都落在判据②上，故用本函数把那次 RPC 省掉：**要按固定节拍反复问的东西，
+/// 不能带着一次跨进程调用**。判据①管的是 D3D 独占 / PPT 放映，它另有 UI 线程那道
+/// 按需的最后闸（[`exclusive_fullscreen_recent`]）负责。
+///
+/// 守卫链与 [`foreground_fullscreen_kind`] 共用同一实现（见 [`window_covers_monitor`]）。
+#[cfg(windows)]
+pub fn foreground_covers_own_monitor() -> bool {
+    foreground_window().is_some_and(window_covers_own_monitor)
+}
+
+/// 非 Windows：无全屏检测，恒 `false`。
+#[cfg(not(windows))]
+pub fn foreground_covers_own_monitor() -> bool {
+    false
 }
 
 /// 非 Windows:无全屏检测,恒 None(工具栏不因全屏隐藏、候选窗不因独占全屏抑制)。

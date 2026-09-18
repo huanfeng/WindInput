@@ -56,7 +56,7 @@
 - **拼音逐步转换不变量**：`committed_text`/`committed_segs` 存「选中汉字累积、留组合区不上屏，全转完才整体上屏」；码表（五笔）选词消费整串、绝不进入此态。`preedit` 仅含输入码/拼音，**绝不含候选列表**。
 - **配置热重载**：读配置统一经 `self.rt()`（`RwLock<Arc<ConfigBundle>>` 原子快照）；`reload_user_config` 整体替换 bundle，轻量项（标点/热键/候选数/导航键/配对）即时生效，重型项（引擎/方案/词典/字体）仍需重启。
 - **锁与线程**：`State` 由单个 `Mutex` 保护，另有多个细粒度 `Mutex`/`Atomic`（pending_first_show、stat_recorded、fullscreen_cached 等）。cmdbar 动作经独立线程异步执行（`self_weak`），故控制器回调自锁的 coordinator 方法是安全的——切勿在持 `state` 锁时调用会再次取锁的方法。
-- **工具栏显隐**对齐 Go 公式 `ime_active && toolbar_visible`（两者正交，见 `State` 注释），隐藏经 UI 层 50ms 防抖；全屏经 `fullscreen_cached` 后台异步刷新，勿在 bridge handler 线程同步调 `is_foreground_fullscreen`。
+- **工具栏显隐**是四项合取 `ime_active && has_edit_context && toolbar_visible && !全屏否决`（前三项收在 `State::toolbar_conjunction`，正交理由见 `State` 注释；Go 版只有前两项），隐藏经 UI 层 50ms 防抖；全屏经 `fullscreen_cached` 后台异步刷新，勿在 bridge handler 线程同步调 `foreground_fullscreen_kind`。该缓存除焦点事件外还由 `fullscreen-watch` 线程按固定节拍复查（`coordinator/fullscreen_watch.rs`，节拍值只写在那里的 `WATCH_TICK`）——进出全屏本身不产生任何 TSF 回调，只靠事件刷新会让工具栏在全屏下一直显示。该线程**默认挂起**，由 `notify_toolbar` 在三项合取成立时叫醒；是否启用受 `ui.toolbar.hide_in_fullscreen && ui.toolbar.fullscreen_watch` 合取门控。
 
 ### Feature: desktop-ui（headless/Android 形态）
 - `desktop-ui`（默认开）门控桌面渲染路径：生产构造器 `new`、`UiManager`、剪贴板直通、macOS `select_self`。`--no-default-features` 即 headless/Android 形态——入口是 `new_headless_with_ui`（返回 `Receiver<UiCommand>`）+ `inject_ui_event`（反向事件）+ `set_host_services`（剪贴板注入，须在首次使用前）。
