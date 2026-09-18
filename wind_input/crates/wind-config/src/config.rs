@@ -7632,7 +7632,18 @@ impl Config {
     ///
     /// 放 `%LOCALAPPDATA%`（非漫游）是关键：它登录即挂载、不受漫游延迟影响
     /// （日志能写出就是证据），故能可靠仲裁那个「可能迟到」的漫游 `config.toml`。
+    ///
+    /// ★ **便携模式恒 `None`**：整套机制只为仲裁漫游挂载竞态，而便携那一档的用户目录
+    /// 就在 exe 边上、不经漫游——[`Self::probe_user_config`] 第一个分支即返回 `Portable`，
+    /// **永远读不到这个标记**。偏偏 [`Self::local_dir`] 在便携下指向 `userdata/`，于是写端
+    /// 会在用户眼皮底下造一个从来没人读的文件（论坛 t150 的原帖就是在问它是什么、能不能删）。
+    ///
+    /// 闸门收在**路径这一处**而不是写端：读写两端共用它，加在写端只挡住了当下那一个调用点，
+    /// 日后任何新读者都会重新踩进来。已经落在老便携包里的那个文件删掉即可，程序不再生成。
     fn user_config_marker_path() -> Option<PathBuf> {
+        if crate::variant::is_portable() {
+            return None;
+        }
         Self::local_dir().map(|d| d.join("user_config.seen"))
     }
 
