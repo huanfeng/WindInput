@@ -913,6 +913,11 @@ constexpr const char* CONFIG_KEY_CUSTOM_EN_PUNCT = "custom_en_punct";
 // 判据须与 core 的 `wind_punct::chinese_passthrough_punct_chars` 同源。
 // 集合为空（默认）= 行为与历史完全一致。格式：count(u8) + [ch:u16(LE)]...（同上一个键）
 constexpr const char* CONFIG_KEY_CN_PASSTHROUGH_PUNCT = "cn_passthrough_punct";
+// 同上，但用于**英文标点态**（中文输入模式 + 标点切英文）。格式相同。
+// 必须是两个集合而不是一个加条件：英文标点态不走中文标点表，`,` `.` `;` `'` `[` `]` `\`
+// 这些在中文态必须吃的键，那个态下产物也是原样 ASCII ⇒ 英文态集合是中文态的**超集**。
+// 撞码在那个态下更凶：`.`→VK_DELETE 吞掉光标后一个字符、`[`→VK_LWIN 弹开始菜单。
+constexpr const char* CONFIG_KEY_EN_PASSTHROUGH_PUNCT = "en_passthrough_punct";
 // 配对状态时效（秒，0=不过期）。格式：secs(u16 LE)。
 // 吃键闸门（_pairPendingDepth）在本 DLL，故陈旧判据也必须在本地：若只有 core 过期而这边
 // 照吃跳出键，core 回 PassThrough 已太晚（「吃了再吐」，不补发 WM_KEYDOWN 的宿主会丢键）。

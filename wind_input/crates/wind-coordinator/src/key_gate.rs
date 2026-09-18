@@ -160,22 +160,29 @@ impl Coordinator {
         // `-`(0x2D)→VK_INSERT 更会把宿主切进改写模式。微软拼音对这批符号根本不吃键，
         // 宿主拿到的是真实 VK，故无此问题；这里就是对齐那个行为。
         //
-        // 判据取 `cn_passthrough_punct_chars`，与推给 DLL 的那份**同源**（`ConfigBundle`
-        // 里由标点转换层 + 按键占用层两道合成）——两侧漂移就是老问题的另一面。
+        // 判据取 `{cn,en}_passthrough_punct_chars`，与推给 DLL 的那两份**同源**
+        // （`ConfigBundle` 里由标点转换层 + 按键占用层两道合成）——两侧漂移就是老问题的
+        // 另一面。**中英标点态各一份**，因为英文态不走中文标点表、集合是中文态的超集。
         //
         // 两道**动态**闸门必须叠在集合之外，因为它们不是配置、是当下状态：
         //   · 有输入会话 ⇒ 组码中按标点是**顶码**语义，必须吃；
         //   · 全角 ⇒ `#` 要出 `＃`，必须吃。
-        if !session
-            && let Some(ch) = punct_char(probe.vk, mods & MOD_SHIFT != 0)
-            && self.rt().cn_passthrough_punct_chars.contains(&ch)
-            && !self
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .full_width
-        {
-            return false;
+        if !session && let Some(ch) = punct_char(probe.vk, mods & MOD_SHIFT != 0) {
+            let (full_width, chinese_punct) = {
+                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                (s.full_width, s.chinese_punct)
+            };
+            let rt = self.rt();
+            // 按**当下标点态**二选一。英文标点态那份是中文那份的超集：那个态不走中文标点
+            // 表，`,` `.` `;` 这些的产物也是原样 ASCII，撞码还更凶（`.`→VK_DELETE 吞字符）。
+            let set = if chinese_punct {
+                &rt.cn_passthrough_punct_chars
+            } else {
+                &rt.en_passthrough_punct_chars
+            };
+            if !full_width && set.contains(&ch) {
+                return false;
+            }
         }
 
         // Shift+数字是**上挡标点**（`!@#$%^&*()`），不是数字键：它要走标点转换，
@@ -216,4 +223,60 @@ impl Coordinator {
 /// 配对跳出键：把光标移出已插入的右半。
 fn is_jump_out_key(vk: u32) -> bool {
     matches!(vk, keymap::VK_TAB | keymap::VK_RETURN | keymap::VK_RIGHT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wind_config::Config;
+
+    fn coord() -> std::sync::Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.symbol.smart_mode = false;
+        Coordinator::new_headless(cfg, None)
+    }
+
+    /// 透传用哪份集合，取决于**当下标点态**。
+    ///
+    /// 这条必须写在 crate 内部：`state` 是 `pub(crate)`，`tests/` 里够不着标点态，
+    /// 在那边写就是个永远走中文态分支的假护栏（见 `is_chinese_punct` 只读不写）。
+    ///
+    /// 用 `'` 做判据是因为它在两个态下**结论相反**：中文态转 `‘`/`’` 必须吃，英文态产物
+    /// 即原样该透传。若哪天两个态给出同样答案，说明二选一那段没生效。
+    #[test]
+    fn passthrough_set_follows_punct_mode() {
+        let c = coord();
+        let quote = KeyProbe::new(keymap::VK_QUOTE);
+
+        c.state.lock().unwrap().chinese_punct = true;
+        assert!(
+            c.should_handle_key(&quote),
+            "中文标点态下 `'` 要转中文引号，必须吃"
+        );
+
+        c.state.lock().unwrap().chinese_punct = false;
+        assert!(
+            !c.should_handle_key(&quote),
+            "英文标点态下 `'` 产物即原样，吃了也只能原样吐回，应透传"
+        );
+    }
+
+    /// 全角闸门优先于集合：两个标点态下都必须吃。
+    #[test]
+    fn full_width_overrides_passthrough_in_both_punct_modes() {
+        let c = coord();
+        let quote = KeyProbe::new(keymap::VK_QUOTE);
+        for punct in [true, false] {
+            {
+                let mut s = c.state.lock().unwrap();
+                s.chinese_punct = punct;
+                s.full_width = true;
+            }
+            assert!(
+                c.should_handle_key(&quote),
+                "全角下 `'` 要出全角形，必须吃（chinese_punct={punct}）"
+            );
+        }
+    }
 }

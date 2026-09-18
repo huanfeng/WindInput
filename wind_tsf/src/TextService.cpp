@@ -1043,6 +1043,7 @@ CTextService::CTextService()
     , _pHostWindow{}
     , _bChineseMode(TRUE)
     , _bFullWidth(FALSE)
+    , _bChinesePunct(TRUE)  // 出厂中文标点态；首个 status 推送会校正
     , _bSoftKeyboard(FALSE)
     , _bSoftKeyboardKeys(FALSE)
     , _lastCapsKeyTick(0)
@@ -3210,6 +3211,7 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
 
     _SetChineseMode(response.IsChineseMode());
     _bFullWidth = response.IsFullWidth();
+    _bChinesePunct = response.IsChinesePunct();
     _bSoftKeyboard = response.IsSoftKeyboard();
     _bSoftKeyboardKeys = response.IsSoftKeyboardKeys();
     // 热键模式会话：**无条件镜像**服务端的值（level-triggered，见 STATUS_HOTKEY_SESSION）。
@@ -4389,11 +4391,13 @@ BOOL CTextService::_InitIPCClient()
     // 在 ~1ms 内就绪（vs 激活 push 的 ~15ms），消除首次按键竞态窗口。
     // 此回调在 AsyncReader 线程执行，不得访问 TSF COM 对象。
     // InterlockedExchange 提供全内存屏障，保证 TSF 主线程 OnTestKeyDown 立即见到新值。
-    _pIPCClient->SetModePushCallback([pThis](bool chineseMode, bool fullWidth) {
+    _pIPCClient->SetModePushCallback([pThis](bool chineseMode, bool fullWidth, bool chinesePunct) {
         ::InterlockedExchange(reinterpret_cast<LONG*>(&pThis->_bChineseMode),
                               chineseMode ? TRUE : FALSE);
         ::InterlockedExchange(reinterpret_cast<LONG*>(&pThis->_bFullWidth),
                               fullWidth ? TRUE : FALSE);
+        ::InterlockedExchange(reinterpret_cast<LONG*>(&pThis->_bChinesePunct),
+                              chinesePunct ? TRUE : FALSE);
     });
 
     // 图标刷新推送（CMD_REFRESH_ICON）：服务端换了共享内存里的位图但状态没变
@@ -4484,6 +4488,7 @@ BOOL CTextService::_InitIPCClient()
         // Update internal state (atomic operation, thread-safe)
         pThis->_SetChineseMode(response.IsChineseMode());
         pThis->_bFullWidth = response.IsFullWidth();
+        pThis->_bChinesePunct = response.IsChinesePunct();
         pThis->_bSoftKeyboard = response.IsSoftKeyboard();
         pThis->_bSoftKeyboardKeys = response.IsSoftKeyboardKeys();
         // 同 _SyncStateFromResponse：本位由服务端权威驱动，这里无条件镜像。
@@ -6362,6 +6367,7 @@ void CTextService::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bCh
 {
     _SetChineseMode(bChineseMode);
     _bFullWidth = bFullWidth;
+    _bChinesePunct = bChinesePunct;
 
     // compartment 如实反映中英模式（值语义），见 _SetOpenCloseCompartment 定义处的说明。
     _SetOpenCloseCompartment(_bChineseMode);

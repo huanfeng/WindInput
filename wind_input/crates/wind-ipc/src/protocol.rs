@@ -391,6 +391,14 @@ pub const CONFIG_KEY_CUSTOM_EN_PUNCT: &str = "custom_en_punct";
 /// 判据须与 `wind_punct::chinese_passthrough_punct_chars` 同源；集合为空 = 行为与历史完全一致。
 /// TSF 侧还要再叠两道**动态**闸门（有输入会话 / 全角），那两个只有 DLL 自己知道。
 pub const CONFIG_KEY_CN_PASSTHROUGH_PUNCT: &str = "cn_passthrough_punct";
+/// 同上，但用于**英文标点态**（中文输入模式 + 标点切英文）。格式与上一个键相同。
+///
+/// 必须是**两个**集合而不是一个加条件：英文标点态不走中文标点表，`,` `.` `;` `'` `[` `]`
+/// `\` 这些在中文态必须吃的键，在那个态下产物也是原样 ASCII ⇒ 英文态的集合是中文态的
+/// **超集**。撞码在那个态下更凶：`.`→`VK_DELETE` 吞字符、`[`→`VK_LWIN` 弹开始菜单。
+///
+/// TSF 侧按**当下**标点态（`STATUS_CHINESE_PUNCT`）二选一，标点态是运行时状态、进不了配置。
+pub const CONFIG_KEY_EN_PASSTHROUGH_PUNCT: &str = "en_passthrough_punct";
 /// 配对状态时效（秒，0=不过期）同步键名。TSF 端持有吃键闸门（`_pairPendingDepth`），
 /// 必须能本地判定状态是否陈旧：若只有协调器过期而 DLL 仍吃跳出键，协调器回 PassThrough
 /// 已太晚（形成「吃了再吐」丢键）。故 TTL 判据以 DLL 侧为准，此键把阈值推给它。

@@ -312,6 +312,10 @@ public:
     // CFileLogger::IsEnabled 门控**——日志宏的实参在调用点即求值，不会被级别短路。
     LONG GetOpenCloseCompartmentValue();
     BOOL IsFullWidth() { return _bFullWidth; }
+    // 当前是否**中文标点态**。标点透传判据要按它在两份集合间二选一
+    // （见 CKeyEventSink::_IsPassthroughPunctKey）。与 _bFullWidth 在**完全相同**的
+    // 四处更新，漏一处就是「切了标点态但第一个标点仍按旧态判」。
+    BOOL IsChinesePunct() { return _bChinesePunct; }
     // 软键盘面板是否开着（由服务端经 statusFlags 推送）。见 KeyEventSink 的数字键分支。
     BOOL IsSoftKeyboard() { return _bSoftKeyboard; }
     // 当前面是**键盘面**：按键交还输入法，软键盘总闸只留 Esc 与翻页。
@@ -644,6 +648,7 @@ private:
     // Input mode state
     BOOL _bChineseMode;
     BOOL _bFullWidth;
+    BOOL _bChinesePunct;
     BOOL _bSoftKeyboard;
     BOOL _bSoftKeyboardKeys;
     BOOL _bKeyboardDisabled;   // GUID_COMPARTMENT_KEYBOARD_DISABLED

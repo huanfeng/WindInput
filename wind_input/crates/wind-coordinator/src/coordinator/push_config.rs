@@ -103,6 +103,7 @@ impl Coordinator {
         self.push_password_suppress_config(client_token); // 密码框抑制策略（DLL 本地吃键门控）
         self.push_custom_en_punct_config(client_token); // 英半列自定义标点：DLL 据此吃键转发
         self.push_cn_passthrough_punct_config(client_token); // 中文模式该透传的标点：DLL 据此**不**吃
+        self.push_en_passthrough_punct_config(client_token); // 同上，英文标点态那份（超集）
         self.push_pair_state_ttl_config(client_token); // 配对状态时效（DLL 侧闸门据此判陈旧）
         // 诊断采集开关：DLL 每次重连都从默认值（关）起步，握手不推则 HUD 开着也收不到
         // 新连接宿主的快照——而最需要它的 SearchHost 恰恰是最常重连的那类。
@@ -255,6 +256,30 @@ impl Coordinator {
         let value = wind_ipc::codec::encode_custom_en_punct_value(&chars);
         let msg = wind_ipc::codec::encode_sync_config(
             wind_ipc::protocol::CONFIG_KEY_CN_PASSTHROUGH_PUNCT,
+            &value,
+        );
+        if client_token != 0 {
+            self.push_server.push_to_token(client_token, &msg);
+        } else {
+            self.push_server.push_to_active(&msg);
+        }
+    }
+
+    /// 下发**英文标点态**那份透传集合（[`Self::push_cn_passthrough_punct_config`] 的姊妹）。
+    ///
+    /// 两份都要推：标点态是运行时状态，DLL 按当下态二选一。只推中文那份的话，用户把标点
+    /// 切成英文后，`,` `.` `;` 这些照旧「吃了再吐」，B-9 在那个态下原样存在且更凶
+    /// （`.`→VK_DELETE 会吞掉光标后一个字符）。
+    pub fn push_en_passthrough_punct_config(&self, client_token: u64) {
+        let chars: Vec<char> = self
+            .rt()
+            .en_passthrough_punct_chars
+            .iter()
+            .copied()
+            .collect();
+        let value = wind_ipc::codec::encode_custom_en_punct_value(&chars);
+        let msg = wind_ipc::codec::encode_sync_config(
+            wind_ipc::protocol::CONFIG_KEY_EN_PASSTHROUGH_PUNCT,
             &value,
         );
         if client_token != 0 {

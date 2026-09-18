@@ -281,34 +281,37 @@ pub fn english_smart_source_chars(cfg: &InputConfig) -> Vec<char> {
 /// ⇒ 调用方**必须**在本函数结果上再减去那两类，见 `ConfigBundle` 里
 /// `cn_passthrough_punct_chars` 的组装。翻页键 / 次选键 / 以词定字这些**只在有会话时**
 /// 生效的绑定不必在此排除——两侧的透传闸门本就带 `!hasInputSession`。
-/// # ⚠️ 已知缺口：**英文标点态**下这条判据不生效
+/// 主键盘能打出的全部 ASCII 标点，与 `key_convert::punct_char` 的两列**逐字对应**
+/// （那边答 VK+shift→字符，这边只要字符本身）。
+/// 首行 = Shift+数字的上挡符号，后两行 = OEM 键的无 Shift / 有 Shift 两态。
 ///
-/// 判据第 1 步只问**中文标点表**。但中文输入模式下还能把标点切成英文态，那个态下
-/// `,` `.` `;` `'` `[` `]` `\` 的产物同样是原样半角 ASCII，却因为「中文标点表里有映射」
-/// 被判成必须吃，于是照旧走「吃了再吐」。撞码在那个态下同样成立，而且比已修的这批更凶：
-/// `.`(0x2E)→`VK_DELETE`（**会删掉光标后一个字符**）、`[`(0x5B)→`VK_LWIN`（弹开始菜单）、
-/// `'`(0x27)→`VK_RIGHT`、`;`(0x3B)→`VK_F1`。
+/// 手工排版即文档：压成两行就再也对不上「首行数字、后两行 OEM」这句话了。
+#[rustfmt::skip]
+const PUNCT_SOURCES: [char; 32] = [
+    ')', '!', '@', '#', '$', '%', '^', '&', '*', '(',
+    '-', '_', '=', '+', '[', '{', ']', '}', '\\', '|',
+    ';', ':', '\'', '"', ',', '<', '.', '>', '/', '?', '`', '~',
+];
+
+/// 该字符是否被配进自动配对表（中英两张都算）。配对栈由引擎维护，透传掉栈就断了。
+fn is_pair_char(cfg: &InputConfig, ch: char) -> bool {
+    cfg.auto_pair
+        .english_pairs
+        .iter()
+        .chain(cfg.auto_pair.chinese_pairs.iter())
+        .any(|p| p.chars().any(|c| c == ch))
+}
+
+/// # 只管**中文标点态**
 ///
-/// 没有顺手补的原因：英文标点态要的是一份**更大**的透传集（改按英半列判会不会被改写），
-/// 不是给现在这份再加一个 `&&`，得推第二个集合；DLL 侧还要缓存中英标点态
-/// （`STATUS_CHINESE_PUNCT` 已在协议里、`IPCClient::IsChinesePunct()` 已有，缺的是
-/// `CTextService` 侧的镜像，对照 `IsFullWidth()`）。
-///
+/// 判据第 1 步问的是中文标点表，故结论只在中文标点态下成立。英文标点态（中文输入模式下
+/// 也能切）另有一份更大的集合，见 [`english_passthrough_punct_chars`]——那个态不走中文
+/// 标点表，`,` `.` `;` 这些的产物同样是原样 ASCII，撞码还更凶（`.`→`VK_DELETE` 吞字符、
+/// `[`→`VK_LWIN` 弹开始菜单）。两个集合都要推给宿主，由宿主按当下标点态选用。
 pub fn chinese_passthrough_punct_chars(
     conv: &PunctuationConverter,
     cfg: &InputConfig,
 ) -> Vec<char> {
-    // 主键盘能打出的全部 ASCII 标点，与 `key_convert::punct_char` 的两列**逐字对应**
-    // （那边答 VK+shift→字符，这边只要字符本身）。分两行写是为了对照方便：
-    // 首行 = Shift+数字的上挡符号，后两行 = OEM 键的无 Shift / 有 Shift 两态。
-    // 手工排版即文档：压成两行就再也对不上「首行数字、后两行 OEM」这句话了。
-    #[rustfmt::skip]
-    const PUNCT_SOURCES: [char; 32] = [
-        ')', '!', '@', '#', '$', '%', '^', '&', '*', '(',
-        '-', '_', '=', '+', '[', '{', ']', '}', '\\', '|',
-        ';', ':', '\'', '"', ',', '<', '.', '>', '/', '?', '`', '~',
-    ];
-
     let mut out: Vec<char> = Vec::new();
     for ch in PUNCT_SOURCES {
         // 1. 中文标点表有映射（`!`→！、`$`→￥、`^`→……、`(`→（、`)`→））⇒ 要转换，必须吃。
@@ -330,18 +333,57 @@ pub fn chinese_passthrough_punct_chars(
         }
         // 4. 配对符 ⇒ 配对栈由引擎维护，必须吃。
         //    `(` `)` 已被第 1 条拦下（有中文映射），这条是防用户改配对表把别的标点配进去。
-        if cfg
-            .auto_pair
-            .english_pairs
-            .iter()
-            .chain(cfg.auto_pair.chinese_pairs.iter())
-            .any(|p| p.chars().any(|c| c == ch))
-        {
+        if is_pair_char(cfg, ch) {
             continue;
         }
         out.push(ch);
     }
     out.sort_unstable(); // 推送字节可复现（同 custom_english_punct_chars）
+    out
+}
+
+/// **英文标点态**（中文输入模式 + 标点切英文）下产物就是原样半角 ASCII、因而该透传的标点
+/// 集合，去重升序。[`chinese_passthrough_punct_chars`] 的姊妹，成因与失效方向完全相同，
+/// 差别只在「什么算会被改写」。
+///
+/// # 为什么必须单独一份，不能给中文那份加个条件
+///
+/// 英文标点态下 [`convert_punct`] 根本不走中文标点表（`is_chinese_punct == false`），
+/// 于是 `,` `.` `;` `'` `[` `]` `\` 这些**在中文态必须吃**的键，在这个态下产物就是原样
+/// ASCII。所以这份集合比中文那份**更大**，是超集而非子集 —— 给现有集合叠 `&&` 只会让它
+/// 更小，方向正好反了。
+///
+/// 撞码在这个态下同样成立，而且比中文态那批更凶：`.`(0x2E)→`VK_DELETE`（**吞掉光标后
+/// 一个字符**）、`[`(0x5B)→`VK_LWIN`（弹开始菜单）、`'`(0x27)→`VK_RIGHT`、`;`(0x3B)→`VK_F1`。
+///
+/// # 判据
+///
+/// 英文半角列（col 3）是这个态唯一会改写字符的来源，故复用
+/// [`custom_english_punct_chars`]——那正是「英半列有覆盖」的判据，与 DLL 英文模式吃键
+/// 共用同一份，天然同源。全角由调用方的动态闸门挡（全角走 col 1，不在本函数职责内）。
+///
+/// ⚠️ 与姊妹函数同样的职责边界：**按键占用层（引导键 / 方案码元首码）不在此排除**，
+/// 由调用方再滤一道，见 `ConfigBundle` 里的组装。
+pub fn english_passthrough_punct_chars(cfg: &InputConfig) -> Vec<char> {
+    let en_custom = custom_english_punct_chars(&cfg.punct);
+    let mut out: Vec<char> = Vec::new();
+    for ch in PUNCT_SOURCES {
+        // 1. 英半列配了自定义 ⇒ 要出用户配的值，必须吃。
+        if en_custom.contains(&ch) {
+            continue;
+        }
+        // 2. 参与英文智能符号 ⇒ 连按替换要引擎接手，必须吃。
+        if cfg.symbol.english_chars.contains(ch) {
+            continue;
+        }
+        // 3. 配对符 ⇒ 配对栈由引擎维护，必须吃。
+        //    这个态下 `(` `)` `[` `]` 不再被中文映射拦下，本条是它们唯一的闸门。
+        if is_pair_char(cfg, ch) {
+            continue;
+        }
+        out.push(ch);
+    }
+    out.sort_unstable();
     out
 }
 
@@ -606,6 +648,59 @@ mod tests {
             chinese_passthrough_punct_chars(&conv, &c),
             vec!['#', '%', '&', '*', '+', '-', '/', '=', '@', '|']
         );
+    }
+
+    #[test]
+    fn english_passthrough_is_superset_of_chinese() {
+        // 这条断言表达的是设计意图：英文标点态不走中文标点表，凡中文态能透传的，英文态
+        // 必然也能。反过来不成立——`,` `.` `;` 这些在中文态要转，在英文态却是原样。
+        // 若哪天两者出现「中文能透、英文不能」的字符，多半是判据写反了。
+        let conv = PunctuationConverter::new();
+        let c = cfg();
+        let cn = chinese_passthrough_punct_chars(&conv, &c);
+        let en = english_passthrough_punct_chars(&c);
+        for ch in &cn {
+            assert!(en.contains(ch), "`{ch}` 中文态能透传，英文态没有理由不能");
+        }
+        assert!(en.len() > cn.len(), "英文态该是真超集，不该只是相等");
+    }
+
+    #[test]
+    fn english_passthrough_default_set() {
+        // 默认配置下被挡住的只有两类：智能符号源 `.,?!:;` 与配对符 `()[]{}<>`。
+        // 其余 18 个的产物在英文半角态就是原样 ASCII。
+        let en = english_passthrough_punct_chars(&cfg());
+        for ch in ['.', ',', '?', '!', ':', ';'] {
+            assert!(!en.contains(&ch), "`{ch}` 参与英文智能符号，要留给引擎");
+        }
+        // ⚠️ 只点名代码默认值 `default_english_pairs()` 里真有的三对。出厂
+        // `data/config.toml` 还多配了 `<>`（两者不一致，是既有状况，与本函数无关），
+        // 真实环境下 `<` `>` 因此也会被本条挡住——那正是判据按**生效配置**算的证据。
+        for ch in ['(', ')', '[', ']', '{', '}'] {
+            assert!(!en.contains(&ch), "`{ch}` 是配对符，配对栈在引擎那边");
+        }
+        // 反过来验一次：把 `<>` 配进去，它就该被挡住。
+        let mut c2 = cfg();
+        c2.auto_pair.english_pairs.push("<>".into());
+        let en2 = english_passthrough_punct_chars(&c2);
+        assert!(!en2.contains(&'<') && !en2.contains(&'>'));
+        // 中文态里被中文标点表拦下、英文态却该放行的那批，逐个点名。
+        for ch in ['\'', '"', '\\', '`', '~', '$', '^', '_'] {
+            assert!(en.contains(&ch), "`{ch}` 在英文半角态产物即原样，应透传");
+        }
+    }
+
+    #[test]
+    fn english_passthrough_excludes_en_half_custom() {
+        // 英半列配了自定义 ⇒ 要出用户配的值，必须吃。判据复用
+        // `custom_english_punct_chars`，与 DLL 英文模式吃键同源。
+        let mut c = cfg();
+        c.punct.custom_enabled = true;
+        c.punct.custom_mappings.insert(
+            "/".into(),
+            vec![String::new(), String::new(), String::new(), "÷".into()],
+        );
+        assert!(!english_passthrough_punct_chars(&c).contains(&'/'));
     }
 
     #[test]

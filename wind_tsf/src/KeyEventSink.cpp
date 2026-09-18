@@ -834,7 +834,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
             // 两道闸门是**动态**的、不在推送集合里：有 input session 时按标点是顶码
             // 语义、全角时 `#` 要出 `＃`，两种都必须照吃。
             if (!hasInputSession && !_pTextService->IsFullWidth() &&
-                _IsCnPassthroughPunctKey(wParam, modifiers))
+                _IsPassthroughPunctKey(wParam, modifiers))
             {
                 _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
                                 isChineseMode, hasComposition, _hasCandidates, hasInputSession, FALSE,
@@ -1270,15 +1270,15 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         (CHotkeyManager::ClassifyInputKey(wParam, modifiers) == HotkeyType::Punctuation) &&
         (GetKeyState(VK_CAPITAL) & 0x0001);
 
-    // 与 OnTestKeyDown 的 `chinese_punct_passthrough` 对称：中文 + 无 session + 非全角 +
-    // 该标点产物就是原样半角 ASCII ⇒ 同步透传（不吃、不发 core）。
+    // 与 OnTestKeyDown 的 `chinese_punct_passthrough` 对称：中文输入模式 + 无 session +
+    // 非全角 + 该标点在**当下标点态**下产物就是原样半角 ASCII ⇒ 同步透传（不吃、不发 core）。
     //
     // **这条对称是必须的，不是保险**：OnTestKeyDown 已判 pfEaten=FALSE，若本函数仍把它
     // 算作输入键，就成了 test(FALSE) + down(TRUE) 的翻转 —— 而 Chrome/WindTerm/Electron
     // 等宿主不会回退合成 WM_CHAR，键会被直接吞掉（同上面 CapsLock 两条的成因）。
-    BOOL cnPunctPassthrough =
+    BOOL punctPassthrough =
         isChineseMode && !hasInputSession && !_pTextService->IsFullWidth() &&
-        _IsCnPassthroughPunctKey(wParam, modifiers);
+        _IsPassthroughPunctKey(wParam, modifiers);
 
     // Track whether this is a Ctrl/Alt combo that needs cleanup-then-passthrough
     BOOL isCtrlAltCleanup = FALSE;
@@ -1350,7 +1350,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             {
                 // 透传场景一律不视为输入键（保持 pfEaten=FALSE 同步透传，不发 core）：
                 // CapsLock 下的字母/标点，以及中文模式下产物即原样 ASCII 的标点。
-                isInputKey = (capsLockLetterPassthrough || capsLockPunctPassthrough || cnPunctPassthrough)
+                isInputKey = (capsLockLetterPassthrough || capsLockPunctPassthrough || punctPassthrough)
                                  ? FALSE
                                  : (keyType != HotkeyType::None);
             }
@@ -2741,9 +2741,15 @@ BOOL CKeyEventSink::_IsCustomEnglishPunctKey(WPARAM vk, uint32_t modifiers) cons
 // ⚠️ 本函数只答「配置上该不该」。调用方必须自行叠上两道**动态**闸门：`!hasInputSession`
 // （组码中按标点是顶码语义，必须吃）与 `!IsFullWidth()`（全角下 `#` 要出 `＃`）。
 // 那两个是当下状态、进不了推送集合。
-BOOL CKeyEventSink::_IsCnPassthroughPunctKey(WPARAM vk, uint32_t modifiers) const
+BOOL CKeyEventSink::_IsPassthroughPunctKey(WPARAM vk, uint32_t modifiers) const
 {
-    if (_cnPassthroughPunctChars.empty())
+    // 按**当下标点态**二选一。英文标点态那份是中文那份的超集：那个态不走中文标点表，
+    // `,` `.` `;` 这些的产物也是原样 ASCII，且撞码更凶（`.`→VK_DELETE 吞光标后一个字符）。
+    // 标点态是运行时状态、进不了配置快照，故只能在这里问 CTextService 的镜像。
+    const std::set<wchar_t>& chars = _pTextService->IsChinesePunct()
+                                         ? _cnPassthroughPunctChars
+                                         : _enPassthroughPunctChars;
+    if (chars.empty())
         return FALSE;
     // Ctrl/Alt 组合是功能热键，不参与出字（同 _IsCustomEnglishPunctKey）。
     if (modifiers & (KEYMOD_CTRL | KEYMOD_ALT))
@@ -2768,7 +2774,7 @@ BOOL CKeyEventSink::_IsCnPassthroughPunctKey(WPARAM vk, uint32_t modifiers) cons
         // OEM 标点键（`-_` `=+` `[{` `]}` `\|` `;:` `\'"` `,<` `.>` `/?` `` `~ ``）两态。
         ch = CHotkeyManager::VirtualKeyToPunctuation(vk, shift);
     }
-    return ch != 0 && _cnPassthroughPunctChars.count(ch) > 0;
+    return ch != 0 && chars.count(ch) > 0;
 }
 
 void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8_t>& value)
@@ -2833,6 +2839,18 @@ void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8
             _cnPassthroughPunctChars.insert((wchar_t)ch);
         }
         WIND_LOG_INFO_FMT(L"CN passthrough punct chars updated: count=%d\n", (int)_cnPassthroughPunctChars.size());
+    }
+    else if (key == CONFIG_KEY_EN_PASSTHROUGH_PUNCT)
+    {
+        _enPassthroughPunctChars.clear();
+        if (value.empty()) return;
+        uint8_t count = value[0];
+        for (size_t i = 0; i < count && (1 + i * 2 + 2) <= value.size(); i++)
+        {
+            uint16_t ch = *reinterpret_cast<const uint16_t*>(value.data() + 1 + i * 2);
+            _enPassthroughPunctChars.insert((wchar_t)ch);
+        }
+        WIND_LOG_INFO_FMT(L"EN passthrough punct chars updated: count=%d\n", (int)_enPassthroughPunctChars.size());
     }
     else if (key == CONFIG_KEY_PAIR_STATE_TTL)
     {

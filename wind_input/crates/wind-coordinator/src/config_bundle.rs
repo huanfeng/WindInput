@@ -95,6 +95,10 @@ pub(crate) struct ConfigBundle {
     /// 虚拟键码（B-9）。同样是 DLL 吃键与本侧 `should_handle_key` 的**同源判据**，
     /// 同样在热路径上每键要查，故一并预计算。
     pub(crate) cn_passthrough_punct_chars: std::collections::BTreeSet<char>,
+    /// 同上，但用于**英文标点态**（中文输入模式 + 标点切英文）。是上一份的**超集**：
+    /// 那个态不走中文标点表，`,` `.` `;` 这些的产物也是原样 ASCII。
+    /// 两份都推给 DLL，由它按当下标点态选用——标点态是运行时状态，不进配置快照。
+    pub(crate) en_passthrough_punct_chars: std::collections::BTreeSet<char>,
     /// 分层按键配置的解析器（当前只收全局 `keys.key_actions` 的预编译引导键表）。
     ///
     /// 与 `session_keys` 同源的理由：动作值域在 `wind-config`、键名解析在 `wind-keys`，
@@ -420,27 +424,36 @@ impl ConfigBundle {
         //
         // 会话态绑定（翻页 / 次选 / 以词定字）**不必**在此排除：两侧的透传闸门本就带
         // `!hasInputSession`，那些键在空缓冲下本就该交还宿主。
+        // 层②：按键占用。两个标点态共用同一道过滤——占用与标点态无关。
+        let not_occupied = |ch: char| -> bool {
+            // 任一方案把它当码元首码 ⇒ 空缓冲按下要开始组码，透传就是「切到那个方案
+            // 后再也打不出字」。跨方案并集，理由见 `SchemaKeyUnion::leading_code_chars`。
+            if schema_keys.leading_code_chars.contains(&ch) {
+                return false;
+            }
+            let Some(vk) = crate::key_convert::punct_source_vk(ch) else {
+                // 反查不到说明它不是主键盘标点键产出的，来路不明就别透传。
+                return false;
+            };
+            // 引导键（`special:*` / `mix` / 临拼 / 临英）空缓冲时就生效。方案层取并集，
+            // 全局层查预编译好的 `key_resolver`——两层都要，`bound_action_for` 就是这么链的。
+            !schema_keys.key_action_vks.contains(&vk) && key_resolver.global_lead(vk).is_none()
+        };
         let cn_passthrough_punct_chars: std::collections::BTreeSet<char> =
             wind_punct::chinese_passthrough_punct_chars(
                 &wind_transform::punctuation::PunctuationConverter::new(),
                 &config.input,
             )
             .into_iter()
-            .filter(|&ch| {
-                // 任一方案把它当码元首码 ⇒ 空缓冲按下要开始组码，透传就是「切到那个方案
-                // 后再也打不出字」。跨方案并集，理由见 `SchemaKeyUnion::leading_code_chars`。
-                if schema_keys.leading_code_chars.contains(&ch) {
-                    return false;
-                }
-                let Some(vk) = crate::key_convert::punct_source_vk(ch) else {
-                    // 反查不到说明它不是主键盘标点键产出的，来路不明就别透传。
-                    return false;
-                };
-                // 引导键（`special:*` / `mix` / 临拼 / 临英）空缓冲时就生效。方案层取并集，
-                // 全局层查预编译好的 `key_resolver`——两层都要，`bound_action_for` 就是这么链的。
-                !schema_keys.key_action_vks.contains(&vk) && key_resolver.global_lead(vk).is_none()
-            })
+            .filter(|&ch| not_occupied(ch))
             .collect();
+        // 英文标点态那份（更大的超集，见 `wind_punct::english_passthrough_punct_chars`）。
+        // 两份都要推给 DLL，由它按**当下**标点态选用——标点态是运行时状态，进不了配置快照。
+        let en_passthrough_punct_chars: std::collections::BTreeSet<char> =
+            wind_punct::english_passthrough_punct_chars(&config.input)
+                .into_iter()
+                .filter(|&ch| not_occupied(ch))
+                .collect();
         // ⚠️ `input.rare_char.include_blocks` **不在这里解析**：它与 `exclude_blocks`
         // 一样是「按名字点名字符类」，两者在 `EngineManager` 装配 `CharsetRegistry` 时
         // 一并吃进去（`charset_assembly::ExternalRefs`），拼错的名字也在那里统一 warn。
@@ -458,6 +471,7 @@ impl ConfigBundle {
             jump_out_on_right_symbol,
             custom_en_punct_chars,
             cn_passthrough_punct_chars,
+            en_passthrough_punct_chars,
             key_resolver,
             schema_session_vks,
         }

@@ -1054,7 +1054,7 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight, UINT64
         LeaveCriticalSection(&_asyncLock);
         if (mpCallback)
         {
-            mpCallback(response.IsChineseMode(), response.IsFullWidth());
+            mpCallback(response.IsChineseMode(), response.IsFullWidth(), response.IsChinesePunct());
         }
     }
     return TRUE;
@@ -2720,14 +2720,15 @@ void CIPCClient::_AsyncReaderLoop()
                                    | (static_cast<uint32_t>(p[3]) << 24);
                     bool chineseMode = (flags & STATUS_CHINESE_MODE) != 0;
                     bool fullWidth   = (flags & STATUS_FULL_WIDTH) != 0;
-                    _LogDebug(L"Async reader: CMD_MODE_PUSH received - chineseMode=%d fullWidth=%d",
-                              chineseMode, fullWidth);
+                    bool chinesePunct = (flags & STATUS_CHINESE_PUNCT) != 0;
+                    _LogDebug(L"Async reader: CMD_MODE_PUSH received - chineseMode=%d fullWidth=%d punct=%d",
+                              chineseMode, fullWidth, chinesePunct);
                     EnterCriticalSection(&_asyncLock);
                     ModePushCallback mpCallback = _modePushCallback;
                     LeaveCriticalSection(&_asyncLock);
                     if (mpCallback)
                     {
-                        mpCallback(chineseMode, fullWidth);
+                        mpCallback(chineseMode, fullWidth, chinesePunct);
                     }
                 }
             }

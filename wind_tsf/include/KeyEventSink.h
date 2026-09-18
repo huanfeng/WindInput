@@ -313,11 +313,16 @@ private:
     // 「中文模式下该透传不吃」的标点集合（core 经 CONFIG_KEY_CN_PASSTHROUGH_PUNCT 推送）。
     // 空集合（默认）= 与历史行为完全一致。
     std::set<wchar_t> _cnPassthroughPunctChars;
-    // 该键在中文模式下是否该**透传**（不吃）。仅答「配置上该不该」——调用方必须自行叠上
-    // 两道**动态**闸门：`!hasInputSession`（组码中按标点是顶码语义）与 `!IsFullWidth()`
-    // （全角下 `#` 要出 `＃`）。那两个是当下状态、不在推送集合里。
-    // 判据必须与 core 的 `wind_punct::chinese_passthrough_punct_chars` 同源。
-    BOOL _IsCnPassthroughPunctKey(WPARAM vk, uint32_t modifiers) const;
+    // 同上，**英文标点态**那份（core 经 CONFIG_KEY_EN_PASSTHROUGH_PUNCT 推送）。
+    // 是上一份的超集：那个态不走中文标点表。按当下标点态二选一。
+    std::set<wchar_t> _enPassthroughPunctChars;
+    // 该键在中文输入模式下是否该**透传**（不吃）。内部按**当下标点态**在两份集合间
+    // 二选一（中文态那份 / 英文态那份，后者是超集）。
+    //
+    // 仅答「配置上该不该」——调用方必须自行叠上两道**动态**闸门：`!hasInputSession`
+    // （组码中按标点是顶码语义）与 `!IsFullWidth()`（全角下 `#` 要出 `＃`）。
+    // 判据必须与 core 的 `wind_punct::{chinese,english}_passthrough_punct_chars` 同源。
+    BOOL _IsPassthroughPunctKey(WPARAM vk, uint32_t modifiers) const;
     // IPC 失败后置位：本地 composition 已强制复位，但 Go 侧可能仍持有活跃会话状态。
     // 下一次按键前提下视作"有会话"，让 ENTER/ESC 也能发给 Go 走重握手；
     // 任何一次成功 ReceiveResponse 之后清旗，状态由响应处理路径自然重建。
