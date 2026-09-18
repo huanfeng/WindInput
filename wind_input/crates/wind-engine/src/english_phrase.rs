@@ -101,6 +101,11 @@ impl PhraseSegIndex {
     /// 贪心最左匹配：对「是否存在子序列」这个判定，贪心最左与最优解等价（经典结论），
     /// 同时它给出的结束位置是所有可行匹配里最小的，正好就是排序要的紧凑度。
     ///
+    /// # 排序
+    ///
+    /// `weight 降序 → 跨度升序 → 文本序`。主键是 weight 而非跨度，理由见函数体里的长注释
+    /// （一句话：协调器会按 weight 统一重排，引擎内不改 weight 的排序会被冲掉）。
+    ///
     /// # 量级
     ///
     /// 线性扫词组子集。出厂 787 条 × 平均 2~3 词，每条只做几次 `starts_with`——
@@ -116,11 +121,31 @@ impl PhraseSegIndex {
                 hits.push((span, e));
             }
         }
-        // 跨度升序（跳得越少越紧凑）→ weight 降序 → 文本序（定序，避免同分时次序随词库
-        // 遍历顺序漂移，那会让候选位置在重建索引后莫名换位）。
+        // ★ **weight 降序 → 跨度升序 → 文本序**。跨度是次级键，不是主键。
+        //
+        // 主键必须是 weight，这是 AGENTS.md「跨组件硬约定」里的一条：**候选排序必须落到
+        // weight，引擎内部只调顺序、不改 weight 的排序会被协调器的统一重排冲掉**。
+        // `EnglishEngine` 没有覆写 `base_sort_ignores_weight()`（默认 false），于是英文
+        // 方案那条路上 `candidate_display_order` 的键序是
+        // `cmp_exact_first → by_weight → base_order → natural_order` —— 跨度一个都不在里面。
+        //
+        // 本模块**曾把跨度当主键**，实测的后果是两个作用域顺序不一致：`ip'pro` 在引擎侧
+        // 首位是跨度 1 的 `iPad Pro`，到了英文方案首页却被 weight 序挤出去了；而快捷输入
+        // 那条路（`update_mix_candidates`）完全不排序、原样透传，跨度序在那边还活着。
+        // 同一串输入两处不同序，且单测测的是用户看不到的中间态。
+        //
+        // 另外两条路都不可行：`base_sort_ignores_weight() -> true` 会对**全部**英文候选
+        // 生效（普通英文输入的词频排序一起变）；把跨度折进 `weight` 与
+        // `mixed/engine.rs` 的「`weight` 只承载真实词频」相冲。
+        //
+        // 于是承认 weight 优先就是最终口径。跨度仍然有用——同权重时它决定谁更贴合所打的
+        // 那几段，而词库里同权重的条目成片存在（出厂词组大量 weight 相同）。
+        // 文本序兜底是为了定序：同分时次序不能随词库遍历顺序漂移，否则候选位置会在重建
+        // 索引后莫名换位。
         hits.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| b.1.weight.cmp(&a.1.weight))
+            b.1.weight
+                .cmp(&a.1.weight)
+                .then_with(|| a.0.cmp(&b.0))
                 .then_with(|| a.1.text.cmp(&b.1.text))
         });
         hits.truncate(limit);
@@ -188,7 +213,18 @@ pub fn split_segments(input: &str, sep: char) -> Vec<String> {
 /// 保证两条线程抢到同一份结果；预热没跑完就打到了，按键线程在 `get_or_init` 上等，
 /// 那是与「不预热」持平的最坏情况，不会更差。
 pub struct LazyPhraseIndex {
-    index: std::sync::OnceLock<PhraseSegIndex>,
+    /// `RwLock<Option<..>>` 而非 `OnceLock`：**索引必须能被作废**。
+    ///
+    /// 关闭某本英文词库走的是**热摘**（`CodeTableEngine::set_dict_enabled` →
+    /// `DictManager::unregister_layer`，返回 true = 目标已达成 ⇒ 引擎不重建）。索引若只建
+    /// 一次且没有失效通路，就会继续召回已禁用词库里的词组——出厂 `en_ext` 一本就带 779/787
+    /// 条，而同一串输入走原路径已经查不到它们了。症状是本仓反复记着的那种
+    /// 「关了没反应，顺手改别的设置又好了」（改别的设置会触发 `reload_from_config` →
+    /// `engines.clear()` → 引擎连同索引一起重建）。
+    ///
+    /// 用 `Arc` 包内层是为了让读取方**不必持锁**：查询在按键路径上，持读锁跑完整个线性扫
+    /// 会和后台预热的写锁互相等。取一次 `Arc::clone` 就放锁。
+    index: std::sync::RwLock<Option<std::sync::Arc<PhraseSegIndex>>>,
 }
 
 impl Default for LazyPhraseIndex {
@@ -200,12 +236,40 @@ impl Default for LazyPhraseIndex {
 impl LazyPhraseIndex {
     pub fn new() -> Self {
         Self {
-            index: std::sync::OnceLock::new(),
+            index: std::sync::RwLock::new(None),
         }
     }
 
-    pub fn get(&self, dm: &DictManager) -> &PhraseSegIndex {
-        self.index.get_or_init(|| PhraseSegIndex::build(dm))
+    /// 取索引，必要时现场构建。
+    ///
+    /// 两段式取锁（先读后写）而不是全程持写锁：读路径在按键链路上，绝大多数调用都会命中
+    /// 已建好的索引、只付一次读锁。竞态下两条线程可能各建一次，结果等价——比让按键线程
+    /// 排在写锁后面便宜。
+    pub fn get(&self, dm: &DictManager) -> std::sync::Arc<PhraseSegIndex> {
+        if let Some(idx) = self
+            .index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return std::sync::Arc::clone(idx);
+        }
+        let built = std::sync::Arc::new(PhraseSegIndex::build(dm));
+        let mut w = self.index.write().unwrap_or_else(|e| e.into_inner());
+        // 期间别的线程已经建好就用它的，保证同一时刻只有一份索引在被引用。
+        if let Some(existing) = w.as_ref() {
+            return std::sync::Arc::clone(existing);
+        }
+        *w = Some(std::sync::Arc::clone(&built));
+        built
+    }
+
+    /// 作废索引，下次查询时重建。
+    ///
+    /// 调用点＝词库启用状态变更（`EnglishEngine::set_dict_enabled`）。词库热摘不重建引擎，
+    /// 这是索引跟上词库的唯一通路。
+    pub fn invalidate(&self) {
+        *self.index.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// 把索引构建推给后台线程。由引擎构建完成时调用。
@@ -299,27 +363,45 @@ mod tests {
         );
     }
 
-    /// 跨度小的排前面：同样两段，跳得少的更贴合所打内容。
+    /// 跨度是**次级**键：同权重时跳得少的排前面。
     ///
-    /// ⚠️ 两条的 weight 必须**反向**拉开（紧凑那条更低），否则本用例对排序主键的顺序无感：
-    /// weight 相等时，把跨度降到 weight 之后仍会 fallback 回跨度、结果一模一样，
-    /// 于是「跨度优先」和「weight 优先」两种实现都能过——变异验证里这条实测不变红。
+    /// ⚠️ 两条 weight 必须**相等**，本用例才测得到跨度。weight 不等的话主键就分出了胜负，
+    /// 「有没有跨度这一级」根本看不出来。
     #[test]
-    fn tighter_span_ranks_first() {
+    fn tighter_span_breaks_ties_within_the_same_weight() {
+        let i = idx(&[
+            ("iPhone 15 Pro Max", "iphone", 100),
+            ("iPhone Pro", "iphone", 100),
+        ]);
+        assert_eq!(
+            texts(&i, "ip'pro"),
+            vec!["iPhone Pro", "iPhone 15 Pro Max"],
+            "同权重下跳 0 个词的应排在跳 1 个词的前面"
+        );
+    }
+
+    /// ★ 而 weight 是**主键**：权重更高的排前面，哪怕它跨度更大。
+    ///
+    /// 这条钉的是 AGENTS.md 那条硬约定的落地——协调器会按 weight 统一重排，引擎内序
+    /// 若以跨度为主键，到了用户眼前就是另一个顺序（两个作用域还会各不相同）。
+    /// 与上一条构成对照的两半：缺了它，「跨度优先」的旧实现同样能过上一条。
+    #[test]
+    fn weight_outranks_span() {
         let i = idx(&[
             ("iPhone 15 Pro Max", "iphone", 900),
             ("iPhone Pro", "iphone", 10),
         ]);
         assert_eq!(
             texts(&i, "ip'pro"),
-            vec!["iPhone Pro", "iPhone 15 Pro Max"],
-            "跳 0 个词的应排在跳 1 个词的前面，哪怕它 weight 低得多"
+            vec!["iPhone 15 Pro Max", "iPhone Pro"],
+            "weight 是主键：高权重的排前面，跨度只在同权重时才说话"
         );
     }
 
-    /// 跨度相同时才轮到 weight。反向对照：没有这条，「只按 weight 排」也能过上一条。
+    /// weight 主键在同跨度的条目之间同样生效（与 `weight_outranks_span` 互补：那条跨度
+    /// 不同、这条跨度相同）。
     #[test]
-    fn weight_breaks_ties_within_the_same_span() {
+    fn weight_orders_entries_of_equal_span() {
         let i = idx(&[
             ("iPhone 15 Pro", "iphone", 10),
             ("iPhone 16 Pro", "iphone", 900),

@@ -3758,7 +3758,11 @@ fn default_temp_english_symbol_chars() -> String {
 }
 
 /// 临时英文配置（[input.temp_english]，原 input.shift_temp_english）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// ⚠️ `PartialEq` 是**承重的**，不是顺手 derive 的：`Coordinator::reload_user_config`
+/// 的 `schema_dirty` 判据靠它发现本段变更，进而触发 `EngineManager::reload_from_config`
+/// 去刷新引擎侧镜像。去掉它，`phrase_seg` 这类「协调器实时读、引擎走镜像」的开关就会
+/// 退化成「改了没反应、重启才生效」。同 [`TempPinyinConfig`] 的理由。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TempEnglishConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,

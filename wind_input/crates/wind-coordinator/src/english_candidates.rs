@@ -89,6 +89,20 @@ pub(crate) fn english_head_candidates(
     if raw.is_empty() {
         return Vec::new();
     }
+    // ★ 输入里带着词组分词符时，**整个头部一条都不产**——原文与大小写变形都不产。
+    //
+    // 分词符是**输入语法**，不是内容。头部候选会把它原样带上屏：打 `ip'pro` 得到字面
+    // `ip'pro`（临英还会再给 `IP'PRO`），那不是任何人想要的东西；而出厂
+    // `raw_candidate = always` 下它还恒占首位，把真正想要的词组挤到第二条起。
+    //
+    // 闸门放在这里而不是 `wants_raw_candidate`：那个只管原文这一条，挡不住变形候选
+    // （临英出厂 `case_variants = true`，实测首三条是 `ip'pro` / `IP'PRO` 才轮到词组）。
+    // 本函数是两个作用域**共用的唯一头部生成点**，两种候选都从这里出，是唯一挡得干净的
+    // 位置。三档 `RawCandidateMode` 也一并对齐：`InDict` 本来就不产（带分词符的串不可能
+    // 是词库词），`Off` 更不产，这里让 `Always` 档也跟上。
+    if raw.contains(wind_engine::english_phrase::PHRASE_SEPARATOR) {
+        return Vec::new();
+    }
     let mut out: Vec<Candidate> = Vec::new();
     if with_raw {
         out.push(Candidate {

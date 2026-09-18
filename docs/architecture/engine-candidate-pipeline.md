@@ -314,10 +314,33 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 
 ## 6. 英文引擎（EnglishEngine)
 
-文件：`wind-engine/src/english.rs`（64 行）。**码表引擎的薄包装**：词库用码表格式
+文件：`wind-engine/src/english.rs`。**码表引擎的薄包装**：词库用码表格式
 （`type = "english"` 方案），构建时 code 列**小写化**实现大小写不敏感前缀匹配（manager.rs:1375-1400）；
 查询走精确 + 前缀，候选标 `source = English`。独立方案可直接使用，更常见的是被混输懒加载
 （`schema.mix.enable_english`）。
+
+### 6.1 词组分词（`english_phrase.rs`，论坛 t42）
+
+`'` 切开各段、每段只打前缀：`bue'air` → `Buenos Aires`，`ip'max` → `iPhone 15 Pro Max`。
+允许**跳词**（`ip'pro` 命中 `iPhone 15 Pro`），段序须与词序一致，首段锚定第一个词。
+
+- **查询读候选的 `text` 而非 `code`**：出厂词库词组有两种编码并存（拼接式
+  `BuenosAires` / 共同前缀式 `iPhone`），后者 code 里没有后段词，任何「从 code 拆出各段」
+  的方案对它们直接失效。词边界只在 text 的空格里。
+- **索引**：`LazyPhraseIndex` 懒建 + 后台预热，只收 `text` 含空白的词条（出厂 787 条，
+  靶机实测 4758 条 / 42ms）。`RwLock<Option<Arc<..>>>` 而非 `OnceLock`——词库热摘
+  （`set_dict_enabled`）不重建引擎，索引必须能单独作废。
+- **`convert` 是合并而非劫持**：原路径候选照出、分词候选追加在后。词库里 57 条 code
+  自带撇号（`you're` / `o'clock`），劫持式实现会让它们在打全码时失踪。
+- **排序 `weight 降序 → 跨度升序 → 文本序`**：主键必须是 weight（本文档 §跨组件硬约定：
+  协调器会按 weight 统一重排，引擎内不改 weight 的排序会被冲掉）。跨度是次级键。
+- **三个作用域，两份开关**：`schema.english.phrase_seg`（英文方案 + 快捷输入英文）与
+  `input.temp_english.phrase_seg`（临英）。引擎侧不分作用域（三者共用同一实例），
+  只收一个「有没有任何一个开着」；闸门在协调器——`'` 进不了缓冲，`convert` 的
+  `input.contains(sep)` 就早退。
+- 快捷输入侧另有 `MixLens::Phrase` 透镜：接受集 = 小写字母 + 分词符、**只查 english 成员**、
+  选词键同 Text。不能并进 `Text`（那会让 `don't` 被喂给拼音成员并打散），也不能落进
+  `Free`（那里一个选词键都没有）。
 
 ### 6.1 英文候选混入非混输方案（`schema.codetable.english_merge` / `schema.pinyin.english_merge`）
 

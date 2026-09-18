@@ -17,7 +17,8 @@
 | `src/pinyin/mod.rs` | `PinyinEngine`：精确 → Viterbi 整句 → DAG 子短语 → 前缀补全 → 简拼 → store 造词层，按层级排序（完整 >> 子短语 >> 前缀 >> 模糊）。子模块 `dag`/`viterbi`/`lattice`/`lm`/`scorer`/`fuzzy`/`syllable`/`shuangpin`/`generate`/`parser` |
 | `src/codetable/engine.rs` | `CodeTableEngine`：经 `DictManager`(CompositeDict) 精确 + 前缀查询；全码自动上屏、顶码、`clear_on_empty_max` 等上屏策略（`CommitOptions`） |
 | `src/mixed/engine.rs` | `MixedEngine`：持码表主 + 拼音次 + 可选英文子引擎，分档加权合并（码表精确 +boost、短语 +1M、英文精确 +500K、前缀 +500K，拼音 ÷100 降档）；**拼音否决统一入口 `pinyin_vetoes_commit`**（否决①粗粒度默认关 / ②词强度默认开，满码/顶码/显示态复评三通路共用）；超码长走 `convert_overflow`（`pinyin_only_overflow` 分流），归属由 `codetable_owns_overflow` 四条判据裁决 |
-| `src/english.rs` | `EnglishEngine`：码表引擎薄包装（词库 code 列小写化，大小写不敏感前缀匹配），独立方案或被混输懒加载（`schema.mix.enable_english`） |
+| `src/english.rs` | `EnglishEngine`：码表引擎薄包装（词库 code 列小写化，大小写不敏感前缀匹配），独立方案或被混输懒加载（`schema.mix.enable_english`）；`convert` 在原路径候选之后**追加**词组分词候选（合并而非劫持） |
+| `src/english_phrase.rs` | 英文词组分词（t42）：`'` 切段、每段打前缀、允许跳词。**按候选 `text` 的空格切词，不读 `code`**（出厂词组两种编码并存，共同前缀式的 code 里没有后段词）。`LazyPhraseIndex` 懒建 + 后台预热 + 可作废（词库热摘不重建引擎）。排序 `weight → 跨度 → 文本`，主键必须是 weight（协调器会统一重排） |
 | `src/english_merge.rs` | 英文候选混入（**只收精确命中**）：配置按引擎分两份——`schema.codetable.english_merge`（三项，可经方案级 `[engine.codetable.english_merge]` 覆盖）与 `schema.pinyin.english_merge`（两项，无 `block_commit`），由 `manager::english_merge_cfg` 分流折叠成 `Effective`。接线在 `manager.rs` 的三条通路，**不是**混输那套（后者与 `truncation_tier` 三方仲裁耦合，见该模块文档） |
 
 ## For AI Agents

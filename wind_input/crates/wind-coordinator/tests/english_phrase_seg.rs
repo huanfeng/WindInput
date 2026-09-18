@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
+use wind_config::config::FreeInputMode;
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_SHIFT};
 use wind_store::Store;
@@ -186,6 +187,42 @@ fn candidates_do_not_vanish_right_after_the_separator() {
         p.iter().any(|t| t.starts_with("iPhone")),
         "打到 `ip'` 时应列出首词以 ip 开头的词组，不该是空候选，实际: {p:?}"
     );
+}
+
+/// ★ 顺序断言：weight 是主键，跨度只在同权重时说话。
+///
+/// 审查点名的缺口——此前 12 条 e2e **一条顺序断言都没有**，全是 `iter().any(...)`，
+/// 于是引擎内部按什么排都测不出来，而协调器的 `candidate_display_order` 会按 weight
+/// 统一重排（AGENTS.md 硬约定）。单测里的顺序断言测的是用户看不到的中间态。
+///
+/// 判据取 `ip'max`：`iPhone XS Max` 是**跨度 2**（ip→iPhone、max→Max，跳过 XS），
+/// 比 `iPhone 15 Pro Max` 的跨度 3 更紧凑。跨度当主键时它会排在前面；weight 当主键时
+/// 则是 `iPhone … Pro Max` 那批在前。后者才是用户眼前的真实顺序。
+#[test]
+fn weight_outranks_span_end_to_end() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let p = page_of("ip'max", "order", true);
+    let phrases: Vec<&String> = p.iter().filter(|t| t.contains(' ')).collect();
+    assert!(
+        phrases.len() >= 2,
+        "前提：应有多条词组候选可比较，实际: {p:?}"
+    );
+    let pro_max = phrases
+        .iter()
+        .position(|t| t.as_str() == "iPhone 15 Pro Max");
+    let xs_max = phrases.iter().position(|t| t.as_str() == "iPhone XS Max");
+    if let (Some(a), Some(b)) = (pro_max, xs_max) {
+        assert!(
+            a < b,
+            "weight 高的 `iPhone 15 Pro Max` 应排在跨度更小但 weight 低的 `iPhone XS Max` 之前，\
+             实际顺序: {phrases:?}"
+        );
+    } else {
+        panic!("前提不成立：词库里应同时有 iPhone 15 Pro Max 与 iPhone XS Max，实际: {p:?}");
+    }
 }
 
 /// 不含分词符时逐条回归原路径——本功能不得改动普通英文输入。
@@ -387,4 +424,156 @@ fn quick_input_separator_keeps_select_keys_alive() {
             panic!("分词符把透镜推进 Free 了：数字键不再选词，实际: {other:?}（候选 {page:?}）")
         }
     }
+}
+
+/// ★★ H1 回归护栏：开启分词**不得**打散快捷输入里含撇号的自由输入。
+///
+/// 第一版把分词符并进了 `MixLens::Text` 的接受集，于是 `don't` 留在「编码域」被喂给拼音
+/// 成员：实测候选变成 `["东欧","斗殴",…]`，空格上屏得到 `;东欧n't`，整串输入被打散。
+/// `input_flow.rs` 的 `quick_input_free_apostrophe_word` 当初正是为防这个事故而写，
+/// 它没变红只因为用的是出厂 `phrase_seg = false`——**开关一开，它钉住的不变量就没人守了**。
+///
+/// 判据取「开/关两档逐条一致」：这类词本就不是词组，分词开着与关着都该原样上屏。
+#[test]
+fn phrase_seg_does_not_break_apostrophe_free_input() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    for (i, word) in ["don't", "rock'n'roll"].iter().enumerate() {
+        let off = quick_page(word, &format!("apo_off{i}"), false);
+        let on = quick_page(word, &format!("apo_on{i}"), true);
+        assert_eq!(
+            on, off,
+            "`;{word}` 的候选不该因为开启词组分词而改变（开={on:?} 关={off:?}）"
+        );
+        assert_eq!(
+            on.first().map(String::as_str),
+            Some(*word),
+            "`;{word}` 应原样作为候选，实际: {on:?}"
+        );
+    }
+}
+
+/// ★ M1 回归护栏：分词符不得在**数字透镜**下被收进缓冲。
+///
+/// `accepts` 只在 Text/Phrase 下认分词符；写入侧若不带同样的 `lens` 守卫，两者就不是同一个
+/// 谓词了。实测 `free_input = off` 的实例里 `;12` 按 `'` 会从「选第 3 候选」变成缓冲 `12'`
+/// 且候选整片清空——仓里 `input_flow.rs` 的
+/// `quick_input_numeric_lens_off_keeps_quote_as_third_select_key` 钉的正是前一种行为，
+/// 而它同样只在出厂开关下才守得住。
+#[test]
+fn phrase_seg_keeps_quote_as_select_key_in_numeric_lens() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let mut cfg = quick_config(true);
+    cfg.schema.mix_modes[0].free_input = FreeInputMode::Off;
+    let c = coord_with(cfg, "num_lens");
+    c.handle_key_event(&key(VK_SEMICOLON));
+    c.handle_key_event(&key(0x31));
+    c.handle_key_event(&key(0x32));
+    let before = c.debug_page_texts();
+    assert!(
+        before.len() >= 3,
+        "前提：`;12` 应有 3 条以上候选，实际: {before:?}"
+    );
+    let third = before[2].clone();
+    match c.handle_key_event(&key(VK_QUOTE)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(
+            text, third,
+            "数字透镜下 `'` 必须仍是第三候选键，不得被分词符臂收走"
+        ),
+        other => panic!("数字透镜下 `'` 应选中第 3 候选上屏，实际: {other:?}"),
+    }
+}
+
+/// ★ 词组透镜只查 english 成员：拼音成员不得掺进来。
+///
+/// 实测（修复前）`;mac'sn` 出的是 `["吗","嘛","骂","马",…]` —— 整串被喂给拼音成员，
+/// 分词符当噪声处理。修复后应当是那条词组。
+#[test]
+fn phrase_lens_queries_english_member_only() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let p = quick_page("mac'sn", "only_en", true);
+    assert_eq!(
+        p.first().map(String::as_str),
+        Some("Mac OS X Snow Leopard"),
+        "词组透镜下应只有英文词组候选，不该掺拼音字，实际: {p:?}"
+    );
+}
+
+/// ★ M6 补缺：英文方案的作用域护栏（审查指出此前完全没测）。
+///
+/// `english_phrase_separator_key` 承诺「只在英文引擎下夺取 `'`」，但把那条判据换成 `true`
+/// 时整个测试族仍然全绿——即「phrase_seg 开着时五笔/拼音方案下 `'` 仍是三选键」没人守。
+/// 临英与快捷输入各自都写了作用域对照，就差这一处。
+#[test]
+fn quote_stays_a_select_key_in_non_english_schema() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let mut cfg = english_config(true);
+    cfg.schema.active = "wubi86".into(); // 开关开着，但活跃方案不是英文
+    let c = coord_with(cfg, "non_en");
+    // 五笔打两码，拿到候选。
+    c.handle_key_event(&key(u32::from(b'W')));
+    c.handle_key_event(&key(u32::from(b'W')));
+    let before = c.debug_page_texts();
+    assert!(
+        before.len() >= 3,
+        "前提：五笔 `ww` 应有 3 条以上候选，实际: {before:?}"
+    );
+    let third = before[2].clone();
+    match c.handle_key_event(&key(VK_QUOTE)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(
+            text, third,
+            "非英文方案下 `'` 必须仍是第三候选键，哪怕 schema.english.phrase_seg 开着"
+        ),
+        other => panic!("非英文方案下 `'` 应作三选键上屏，实际: {other:?}"),
+    }
+}
+
+/// ★ M4：分词符是输入语法，不得作为「原文候选」被带上屏。
+///
+/// 出厂 `raw_candidate = always` 会把所打原文恒插在首位。含分词符时那条候选是字面
+/// `ip'pro`——不是任何人想要的内容，而且它占着首位，把真正想要的词组挤到第二条起。
+///
+/// 三档都该如此：`in_dict` 本来就不产（带分词符的串不可能是词库词），`off` 更不产，
+/// 这条钉的是 `always` 档也对齐。
+#[test]
+fn separator_is_syntax_not_content() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let p = page_of("ip'pro", "m4", true);
+    assert!(
+        !p.iter().any(|t| t.contains('\'')),
+        "候选里不该出现带分词符的原文，实际: {p:?}"
+    );
+    assert!(
+        p.first().is_some_and(|t| t.starts_with("iPhone")),
+        "首候选应直接是词组，实际: {p:?}"
+    );
+
+    // 临英同理（它有独立的一份 raw_candidate，出厂同样是 always）。
+    let t = temp_page("ip'pro", "m4_te", true);
+    assert!(
+        !t.iter().any(|x| x.contains('\'')),
+        "临英候选里同样不该出现带分词符的原文，实际: {t:?}"
+    );
+
+    // ★ 反向对照：不含分词符时原文候选照常在（别把 always 档整个关掉了）。
+    let plain = page_of("hel", "m4_plain", true);
+    assert_eq!(
+        plain.first().map(String::as_str),
+        Some("hel"),
+        "不含分词符时 always 档仍应把原文放首位，实际: {plain:?}"
+    );
 }

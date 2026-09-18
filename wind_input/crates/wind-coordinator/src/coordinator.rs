@@ -772,6 +772,32 @@ impl State {
     }
 }
 
+/// 配置变更后**引擎是否需要重建**（`reload_user_config` 的 `schema_dirty`）。
+///
+/// 抽成自由函数而非内联表达式，就是为了**能被单测直接喂两份配置**——它守的那类缺陷
+/// （某个键漏进判据）在端到端层面只表现为「设置页改了没反应、重启就好」，那是本仓
+/// 反复出现、且最难从现象定位回判据的一类。
+///
+/// # 收什么
+///
+/// - `schema` 整段：已含全局 codetable / pinyin / mix（上屏策略、调频等）。
+/// - `input.temp_pinyin`、`input.temp_english`：两者都在 `input` 段却被引擎按需缓存，
+///   [`wind_engine::EngineManager`] 各持一份镜像，只在构造与 `reload_from_config` 里写。
+///
+/// # ⚠️ 新增「协调器实时读、引擎走镜像」的开关时必须同步这里
+///
+/// `input.temp_english.phrase_seg` 就栽过：协调器谓词
+/// [`Coordinator::temp_english_phrase_separator_key`] 每次按键现读 `rt().config`，开关一开
+/// `'` 立刻进临英缓冲；而引擎镜像不标脏就永远是旧值 ⇒ `seg_sep` 仍是 `None`、分词候选
+/// 恒空，原路径拿 `ip'pro` 去查 code 前缀也必然落空 ⇒ **候选塌成只剩原文，直到重启**。
+///
+/// 判据是「这个键有没有第二个消费者在引擎侧」，不是「它在不在 schema 段」。
+pub(crate) fn engine_reload_needed(old: &Config, new: &Config) -> bool {
+    old.schema != new.schema
+        || old.input.temp_pinyin != new.input.temp_pinyin
+        || old.input.temp_english != new.input.temp_english
+}
+
 /// 空码时按标点/符号键怎么处置这串废码（`input.punct_on_empty_behavior` 的解释结果）。
 ///
 /// ★ 这一族配置描述的行为有**两根轴**——「废码上不上屏」与「按键字符本身出不出」——而配置
@@ -3905,10 +3931,7 @@ impl Coordinator {
                 // 方案相关项（活跃/可用方案、全局上屏策略）是否变化：变了才热重建引擎，
                 // 避免每次保存都丢词典缓存（拼音合并/unigram 重建开销大）。
                 let old = self.rt();
-                // schema 段已含全局 codetable/pinyin/mix（上屏策略/调频等）；temp_pinyin 在 input 段，
-                // 引擎按需缓存，故一并纳入脏判定。
-                let schema_dirty = old.config.schema != cfg.schema
-                    || old.config.input.temp_pinyin != cfg.input.temp_pinyin;
+                let schema_dirty = engine_reload_needed(&old.config, &cfg);
                 // 候选窗定位方式切换的边沿检测（见下方 ReportCandidatePos）。
                 let cand_was_fixed = old.config.ui.candidate.is_fixed_position();
                 drop(old);
@@ -8747,6 +8770,66 @@ mod mode_comment_e2e_tests {
 
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod engine_reload_needed_tests {
+    //! `engine_reload_needed`（`reload_user_config` 的 `schema_dirty`）的键覆盖。
+    //!
+    //! 这组测试守的是一类**很难从现象定位回判据**的缺陷：某个键漏进判据，端到端只表现为
+    //! 「设置页改了没反应、重启就好」。每加一个「协调器实时读、引擎侧另有镜像」的开关，
+    //! 这里就该多一条。
+    use super::*;
+
+    /// 临英段变更必须触发引擎重建。
+    ///
+    /// ★ `input.temp_english.phrase_seg` 有两个消费者：协调器谓词每次按键现读
+    /// `rt().config`，引擎侧走 `EngineManager::temp_english` 镜像。漏掉这一键时前者立刻
+    /// 生效、后者永远是旧值 ⇒ `'` 进得了缓冲但引擎 `seg_sep` 仍是 `None` ⇒ 候选塌成
+    /// 只剩原文。
+    #[test]
+    fn temp_english_change_requires_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.input.temp_english.phrase_seg = !old.input.temp_english.phrase_seg;
+        assert!(
+            engine_reload_needed(&old, &new),
+            "临英段变更必须让引擎重建，否则引擎侧镜像会停在旧值"
+        );
+    }
+
+    /// 临拼段同理（既有行为，一并钉住）。
+    #[test]
+    fn temp_pinyin_change_requires_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.input.temp_pinyin.enabled = !old.input.temp_pinyin.enabled;
+        assert!(engine_reload_needed(&old, &new));
+    }
+
+    /// schema 段（含 `schema.english.phrase_seg`）同理。
+    #[test]
+    fn english_schema_change_requires_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.schema.english.phrase_seg = !old.schema.english.phrase_seg;
+        assert!(engine_reload_needed(&old, &new));
+    }
+
+    /// ★ 反向对照：与引擎无关的段变更**不该**触发重建。
+    ///
+    /// 没有这条，「恒返回 true」也能让上面三条通过，而那会让每次保存设置都丢词典缓存
+    /// （拼音合并/unigram 重建开销大，正是判据存在的理由）。
+    #[test]
+    fn unrelated_change_does_not_require_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.ui.toolbar.visible = !old.ui.toolbar.visible;
+        assert!(
+            !engine_reload_needed(&old, &new),
+            "工具栏可见性与引擎无关，不该触发重建"
+        );
     }
 }
 

@@ -88,7 +88,17 @@ impl Engine for EnglishEngine {
         // 那条候选本就该在。
         let extra = self.phrase_candidates(input, max_candidates);
         if !extra.is_empty() {
-            let base = r.candidates.len() as i32;
+            // ★ 取原路径 `natural_order` 的**最大值**，不是它们的条数。
+            //
+            // 这两个数差着几个量级：`natural_order` 来自词库、是上万的序号（实测 `o'c` 的
+            // `o'clock` 拿到 12085），而条数只有个位数。按条数续号的话分词候选会拿到 1..8，
+            // 同权重时反而排在原路径候选**前面**——与本注释想避免的恰好相反。
+            let base = r
+                .candidates
+                .iter()
+                .map(|c| c.natural_order)
+                .max()
+                .map_or(0, |m| m + 1);
             r.candidates
                 .extend(extra.into_iter().enumerate().map(|(i, mut c)| {
                     // natural_order 接在原路径之后续号：它在下游是**同权重时的定序依据**，
@@ -113,7 +123,19 @@ impl Engine for EnglishEngine {
     }
 
     fn set_dict_enabled(&self, dict_id: &str, enabled: bool) -> bool {
-        self.inner.set_dict_enabled(dict_id, enabled)
+        let claimed = self.inner.set_dict_enabled(dict_id, enabled);
+        // ★ 词组索引必须跟着词库走。
+        //
+        // 关闭方向走的是**热摘**（`unregister_layer`），返回 true 表示「目标已达成」⇒ 上层
+        // 不会重建引擎（见 `EngineManager::set_dict_enabled_live`）。索引是在引擎构造时建的，
+        // 没有这一行就会继续召回已禁用词库里的词组——出厂 `en_ext` 一本就带 779/787 条，
+        // 而同一串输入走原路径已经查不到它们了，表现为「关了没反应、重启才好」。
+        //
+        // 只在本引擎认领了这个 id 时作废：认领不了说明那是别的方案的库，与本索引无关。
+        if claimed {
+            self.phrase.invalidate();
+        }
+        claimed
     }
 
     fn input_chars(&self) -> Option<&wind_config::CodeCharSet> {

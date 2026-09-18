@@ -61,8 +61,11 @@ pub trait DictLayer: Send + Sync {
             .any(|c| c.code.chars().count() > n)
     }
 
-    /// 全量枚举本层的 `(code, text, weight)`，供**离线索引构建**使用
-    /// （当前唯一消费方：码表整句的简码索引 `wind_engine::codetable::sentence`）。
+    /// 全量枚举本层的 `(code, text, weight)`，供**离线索引构建**使用。
+    ///
+    /// 消费方（都是懒建 + 后台预热的一次性全表扫，各自有失效通路）：
+    /// - 码表整句的简码索引 `wind_engine::codetable::sentence`
+    /// - 英文词组分词索引 `wind_engine::english_phrase`（t42）
     ///
     /// ⚠️ **不是查询接口**：它是 O(全表) 的，绝不能出现在按键链路上。
     /// 默认实现为空——与 [`Self::search_abbrev`] 同一取舍：默认「枚举不到」好过默认

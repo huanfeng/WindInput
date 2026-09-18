@@ -69,6 +69,26 @@ pub(crate) enum MixLens {
     Text,
     Numeric,
     Free,
+    /// 英文词组分词（t42）：缓冲里含分词符 `'`。
+    ///
+    /// # 为什么不能塞进 [`MixLens::Text`]
+    ///
+    /// Text 的含义是「这串是**编码**」，缓冲会被喂给**所有**成员。把分词符并进它的接受集，
+    /// 等于对拼音成员宣布「`don't` 是一串编码」——实测 `;don't` 会出 `["东欧","斗殴",…]`，
+    /// 空格上屏得到 `;东欧n't`，整串输入被打散。`input_flow.rs` 的
+    /// `quick_input_free_apostrophe_word` 当初正是为防这个事故而写。
+    ///
+    /// # 为什么也不能落进 [`MixLens::Free`]
+    ///
+    /// Free 下**一个选词键都没有**、候选窗连序号标签都不画（见 `hide_index`）——那正好废掉
+    /// 分词的目的：从一堆词组里精确挑一条。
+    ///
+    /// # 于是它自成一档
+    ///
+    /// 接受集 = 小写字母 + 分词符；**只查 english 成员**（见 `update_mix_candidates`）；
+    /// 选词键与 Text 同（数字键 1-9）。整体上屏（`commits_whole`）——词组没有可分段的编码，
+    /// 不走拼音那种分步确认。
+    Phrase,
 }
 
 impl MixLens {
@@ -86,10 +106,12 @@ impl MixLens {
             // 文本透镜的缓冲只可能由 ① 的 `VK_A..=VK_Z` 小写字母构成——拼音的手动音节
             // 分隔符走主输入路径，不进 mix 缓冲（`handle_mix_key` 里没有分隔符分支）。
             //
-            // 例外是英文词组分词符（t42）：它由按键分派显式收进缓冲，在这里就**不能**算
-            // 越界，否则 `free_input = auto`（出厂值）下缓冲一含 `'` 就切 Free 透镜，
-            // 而 Free 下一个选词键都没有 —— 词组打得进去却选不出来。
-            MixLens::Text => c.is_ascii_lowercase() || Some(c) == phrase_sep,
+            // ⚠️ 分词符**不属于** Text 的接受集：Text 说的是「这串是编码，喂给所有成员」，
+            // 而分词符对拼音/码表成员不是编码。它归 [`MixLens::Phrase`]，理由见那里。
+            MixLens::Text => c.is_ascii_lowercase(),
+            // 词组透镜：小写字母 + 分词符。`phrase_sep` 为 `None`（未启用）时它退化成 Text，
+            // 但那种情形下 `mix_lens` 压根不会给出本取值。
+            MixLens::Phrase => c.is_ascii_lowercase() || Some(c) == phrase_sep,
             // 数字透镜 = 求值器的表达式字符集（共用 `wind_quick_input::is_expr_char`，
             // 不另写一份，否则给求值器加运算符时这里会静默落后）。
             MixLens::Numeric => wind_quick_input::is_expr_char(c),
@@ -460,16 +482,39 @@ impl Coordinator {
         }
         // 首字符非字母且本 mix 含表达式类来源 → 数字透镜；其余一律文本透镜。
         // （没有表达式类成员时数字键是选词键，不该开数字透镜——见 mix_has_quick_numeric。）
+        let sep = self.mix_phrase_separator(state.mix_id);
         let base = match state.mix_buffer.chars().next() {
+            // 首字符是分词符时**不进数字透镜**：`'` 不是表达式字符，那样判会让整串掉进
+            // Free（`accepts` 认不出它），选词键随之消失。
+            //
+            // ⚠️ 如实交代：本臂**当前没有独立会红的用例**。要触发它得让缓冲以 `'` 开头，
+            // 而两条可能的来路都被堵死了——写入臂要求 `!mix_buffer.is_empty()`；分步确认
+            // 消费前缀那条（曾担心 `ni'pro` 选走「你」后剩 `'pro`）在 Phrase 透镜下不存在，
+            // 因为 `commits_whole` 对它返回 true、候选整体上屏不消费前缀（实测按 1 得到
+            // 完整的 `ni'pro`）。
+            //
+            // 留着不是为了补一道防线，而是维持「首字符判据要认得所有合法首字符」这条
+            // 不变式——上面那两条守卫哪天被放宽，这里就是唯一拦得住的地方。
+            Some(c) if Some(c) == sep => MixLens::Phrase,
             Some(c) if !c.is_ascii_alphabetic() && self.mix_has_quick_numeric(state.mix_id) => {
                 MixLens::Numeric
             }
             _ => MixLens::Text,
         };
+        // 词组透镜：缓冲里出现分词符即切入，**与 `free_input` 无关**。
+        //
+        // 必须在下面那道 `free == Off` 早退**之前**：关掉自由输入的实例同样要能用分词
+        // （`'` 由专门的按键臂收进缓冲，不经自由输入那条路）。放在早退之后的话，
+        // `free_input = off` 的快捷输入里分词符进得去、透镜却仍是 Text ⇒ 整串被喂给拼音。
+        if sep.is_some()
+            && base != MixLens::Numeric
+            && state.mix_buffer.chars().any(|c| Some(c) == sep)
+        {
+            return MixLens::Phrase;
+        }
         if free == FreeInputMode::Off {
             return base;
         }
-        let sep = self.mix_phrase_separator(state.mix_id);
         if state.mix_buffer.chars().any(|c| !base.accepts(c, sep)) {
             MixLens::Free
         } else {
@@ -1892,6 +1937,9 @@ impl Coordinator {
             return;
         }
         let numeric = lens == MixLens::Numeric;
+        // 词组透镜：**只查 english 成员**。缓冲里带着分词符，对拼音/码表成员那不是合法编码，
+        // 查它们只会得到把分词符当噪声的残码候选（实测 `mac'sn` 会出「吗嘛骂马」一片拼音字）。
+        let phrase_only = lens == MixLens::Phrase;
         let members = self.mix_members_resolved(state.mix_id);
         let mut cands: Vec<Candidate> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -1952,6 +2000,10 @@ impl Coordinator {
                 if numeric {
                     continue; // 数字透镜下是算式，没有编码可查
                 }
+                // 生僻字成员查的是**活跃方案**（码表/拼音），词组透镜下同样不认分词符。
+                if phrase_only {
+                    continue;
+                }
                 let schema = self.engine_mgr.active_schema_id();
                 if !self.engine_mgr.ensure_schema(&schema) {
                     continue;
@@ -1995,6 +2047,10 @@ impl Coordinator {
             } else {
                 if numeric {
                     continue; // 数字模式跳过真实方案（表达式无拼音/英文意义）
+                }
+                // 词组透镜下只有 english 成员认得这串（见 `phrase_only` 的说明）。
+                if phrase_only && member != "english" {
+                    continue;
                 }
                 if !self.engine_mgr.ensure_schema(member) {
                     continue;
@@ -2097,6 +2153,18 @@ impl Coordinator {
         if let Some(disp) = text_display {
             state.preedit = format!("{}{}{}", state.mix_prefix, state.committed_text, disp);
             state.overlay_body = disp; // 供光标换算（含引擎插入的音节分隔符）
+        }
+        // 词组透镜下一条都没命中：给出所打原文兜底，与 [`MixLens::Free`] 同一个理由——
+        // 候选窗空着时用户不知道自己打的这串还能不能上屏。
+        //
+        // 这不是多余的保险：Phrase 透镜只查 english 成员，而缓冲里带撇号的串未必是词组
+        // （`rock'n'roll` / `don't`）。没有这条兜底，开启分词后打这类词候选窗会整片空掉，
+        // 而关闭时它们由 Free 透镜显示原文——同一串输入的观感不该因为开关而塌掉。
+        if phrase_only && cands.is_empty() {
+            cands.push(Candidate {
+                text: state.mix_buffer.clone(),
+                ..Default::default()
+            });
         }
         // 统一展开汇聚点：混输成员词库候选内 `$` 特殊语法在此展开（见 finalize_candidates）。
         state.candidates = self.finalize_candidates(cands, &state.mix_buffer);
@@ -2415,6 +2483,13 @@ impl Coordinator {
                     MixLens::Numeric => Self::mix_numeric_input_char(data.key_code, shift),
                     // 文本透镜：字母入缓冲。自由输入关闭时 Shift 被丢弃（既有行为，恒小写）；
                     // 开启时大写字母即越界字符，字面入缓冲并把透镜带进 Free。
+                    // 词组透镜与 Text 同：字母入缓冲。分词符本身由下面专门的臂收，
+                    // 不走这里（`mix_input_char` 只认字母/表达式字符）。
+                    MixLens::Phrase if is_letter => {
+                        let base = (data.key_code - keymap::VK_A) as u8;
+                        Some((b'a' + base) as char)
+                    }
+                    MixLens::Phrase => None,
                     MixLens::Text if is_letter => {
                         let base = (data.key_code - keymap::VK_A) as u8;
                         Some(if free_on && shift {
@@ -2519,7 +2594,13 @@ impl Coordinator {
                     // 与 `free_input` 的夺取（⑤）不冲突也不重复：那条要 `free_on`，而本条
                     // 在 `free_input = off` 的实例上同样生效。走到⑤才收的话，`free_input`
                     // 关着的快捷输入里分词符永远进不去。
+                    // ★ `lens` 守卫是**承重的**（M1）：`accepts` 只在 Text/Phrase 下认分词符，
+                    // 写入侧若在 Numeric 下也收，两者就不是同一个谓词了——实测
+                    // `free_input = off` 的实例里 `;12` 按 `'` 会从「选第 3 候选」变成缓冲
+                    // `12'` 且候选整片清空（`quick_input_numeric_lens_off_keeps_quote_as_third_select_key`
+                    // 钉的正是前一种行为）。
                     if !shift
+                        && matches!(lens, MixLens::Text | MixLens::Phrase)
                         && !state.mix_buffer.is_empty()
                         && let Some(sep) = self.mix_phrase_separator(state.mix_id)
                         && data.key_code == keymap::VK_QUOTE
