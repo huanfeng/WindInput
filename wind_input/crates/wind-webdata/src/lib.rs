@@ -3694,7 +3694,12 @@ pub trait WebDataRpc: WebDataHost {
                 let _ = std::fs::remove_file(&tmp);
                 // 用户做的是「导出我的主题」，收到的却是包格式的限额措辞；补一句主语，
                 // 否则他不知道该去改自己的哪个主题。
-                return Err(e.context(format!("导出主题「{slug}」失败")));
+                //
+                // ⚠️ 用 `{e:#}` 把原因**展开进同一条消息**，不能用 `.context()`：RPC 出口
+                // （`wind-rpc::dispatch`）只取 `e.to_string()`，那是最外层那一句，套一层
+                // context 等于把「条目过多」这类真正的原因从客户端眼前抹掉，只剩一句
+                // 「导出失败」。设置端与 CLI 都只拿得到这一个字符串。
+                return Err(anyhow::anyhow!("导出主题「{slug}」失败：{e:#}"));
             }
         };
         std::fs::rename(&tmp, out_path).map_err(|e| {
@@ -8086,8 +8091,8 @@ short_code_yield_level = 2
                     "theme.exportPackage",
                     &json!({ "slug": bad, "path": out_dir.join("x.wtheme").to_string_lossy() }),
                 )
-                .unwrap_err();
-            let e = format!("{e:#}");
+                .unwrap_err()
+                .to_string();
             assert!(
                 e.contains("非法主题 slug"),
                 "应在碰盘前按 slug 拒掉 {bad:?}，实际报的是: {e}"
@@ -8100,8 +8105,8 @@ short_code_yield_level = 2
                 "theme.exportPackage",
                 &json!({ "slug": "zz_no_such_theme", "path": out_dir.join("x.wtheme").to_string_lossy() }),
             )
-            .unwrap_err();
-        let e = format!("{e:#}");
+            .unwrap_err()
+            .to_string();
         assert!(
             e.contains("主题不存在") && !e.contains("非法主题 slug"),
             "不存在的主题应报「主题不存在」，实际: {e}"
@@ -8181,10 +8186,12 @@ short_code_yield_level = 2
                 "theme.exportPackage",
                 &json!({ "slug": "wind_test_themepkg_many", "path": bare.to_string_lossy() }),
             )
-            .unwrap_err();
-        // `{:#}` 打印整条 anyhow 链:加了 `.context()` 之后 `to_string()` 只给最外层那句,
-        // 底下「条目过多」那条就看不见了。
-        let e = format!("{e:#}");
+            .unwrap_err()
+            // ★ 断的是 `to_string()` 而**不是** `{:#}`：RPC 出口(`wind-rpc::dispatch`)
+            // 就是拿这一个字符串发给设置端与 CLI 的。用 `{:#}` 断言的话,哪天这里改回
+            // `.context()`,链在测试里照样看得见、测试照绿,而客户端那边已经只剩一句
+            // 「导出失败」了 —— 守的东西和客户端看到的东西必须是同一个。
+            .to_string();
         // 断文案:否则哪天这个夹具因为别的原因(比如主题本身没通过 validate)提前失败,
         // 下面那两条「旧包还在」就会在一个根本没走到打包的路径上假绿。
         assert!(
