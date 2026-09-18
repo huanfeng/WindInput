@@ -676,8 +676,13 @@ pub(crate) fn dispatch_command(
                             return Some(encode_host_render_setup(instance_id, &entries));
                         }
                         Err(e) => {
+                            // `{e:#}` 展开整条 anyhow 链:`setup` 内部给失败套了
+                            // 「create SHM kind=N」这类 context,而底下那层才是
+                            // `io::Error::last_os_error()`——真正要看的 Windows 错误码
+                            // （拒绝访问 / 名称已存在）。用 `{}` 只打印最外层那句,
+                            // 等于把排查 host render 唯一的线索丢掉。
                             debug!(
-                                "host_render setup 拒绝 conn_id={} pid={}: {}",
+                                "host_render setup 拒绝 conn_id={} pid={}: {:#}",
                                 ctx.conn_id, ctx.pid, e
                             );
                             return Some(encode_ack());

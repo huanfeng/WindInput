@@ -357,7 +357,9 @@ impl UiManager {
                                 host_ok = true;
                             }
                             Err(e) => {
-                                tracing::warn!("host render 写 status 帧失败，回退本地: {}", e);
+                                // `{e:#}`:写帧失败的真正原因（Windows 错误码）在
+                                // `write_frame_for_kind` 的 context 之下,见 server.rs 同款注释。
+                                tracing::warn!("host render 写 status 帧失败，回退本地: {e:#}");
                             }
                         }
                     }
@@ -1283,7 +1285,7 @@ fn try_host_render_candidates(
                             if let Err(e) =
                                 hr.write_frame_for_kind(HOST_WINDOW_TOOLTIP, &target, &tt_params)
                             {
-                                tracing::warn!("host render 写 tooltip 帧失败: {}", e);
+                                tracing::warn!("host render 写 tooltip 帧失败: {e:#}");
                                 hr.hide_kind(HOST_WINDOW_TOOLTIP);
                             }
                         }
@@ -1293,7 +1295,7 @@ fn try_host_render_candidates(
                 }
                 Err(e) => {
                     // 写帧失败必须回退本地窗口，不得静默丢帧
-                    tracing::warn!("host render 写帧失败，回退本地窗口: {}", e);
+                    tracing::warn!("host render 写帧失败，回退本地窗口: {e:#}");
                     false
                 }
             }
