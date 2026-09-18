@@ -104,6 +104,35 @@ missing = []                                   # 导出时即缺失的引用
 - 资源收集:解析 `schema.toml` 中对码表、词典、双拼布局、拆字表、字体等的引用路径,凡指向用户目录(非系统 `data/`)的文件一并纳入;指向系统种子的引用只记路径不打包(导入端若缺失再提示)。zip 内条目保留 schemas 根相对路径,使 schema.toml 的相对引用免改写、导入即用。
 - 导入识别:根下 `*.schema.toml` 即方案(无 package.toml 也可导入);根下无任何 schema.toml → 拒绝;含 `manifest.toml`/`manifest.json` → 提示误选了备份包/旧格式归档。
 
+### 主题包 `.wtheme`
+
+主题带资源(背景图、图标)之后,单个 `.toml` 就分发不动了——这是它与既有
+`theme.importFromText`(纯文本主题)的分工:文本那条路仍在,只是带不了图。
+
+zip 条目名 = 主题目录相对路径,**只收 `theme.toml` 与 `assets/**`**:
+
+```
+package.toml                      可选元信息(导出恒写;手工打的包可以没有)
+theme.toml                        主题本体(根条目,识别的依据)
+preview.png                       可选,市场预览图(不计入 asset_count)
+assets/<资源>                     背景图等,theme.toml 里以 assets/ 相对路径引用
+```
+
+`package.toml` 与方案包同形,`kind = "theme"`;缺 `format_version` 一律按 legacy v1。
+全部字段可缺省,拿不到就回退到主题自身的 `[meta]`。
+
+- **只收那两类**:主题目录里可能还有编辑器草稿、`Thumbs.db` 一类系统文件,一并打进去
+  既胀包又泄露无关文件。条目顺序稳定排序——同样的输入要打出同样的包。
+- **规模门禁**:条目数 ≤ 200、声明解压体积 ≤ 32 MiB,只读 zip 中央目录不解压;真正的界
+  画在导入时的逐条有界读取上(撒谎的包骗得过前者)。
+- **导入是整目录替换**:先写 `.tmp` 兄弟目录、成功才动目标。资源可能改名,逐文件覆盖会
+  把上一版的图留成垃圾。依赖校验(`base` 继承链能否加载)在**新目录已就位、旧目录未删**
+  的那一刻跑,失败整体回滚。
+- **导出同一条纪律**:先写 `.tmp` 兄弟文件、读回自检通过才 rename 到位。直接写落点的话,
+  越限的主题会先完整落盘再报错,而截断写已经毁掉那个路径上原有的包。
+- **定制版 `[themes] hide` 的 id 导不出也导不进**:hide 是绝对的(见
+  `Config::custom_hides_theme`),读取侧放行就会产出一个「导得出、装不回」的包。
+
 ### 整机备份 `.zip`(kind=backup)
 
 逐表文本承载用户数据。布局:
@@ -151,6 +180,9 @@ state/state.toml                       type="state"      (include_state)
 | 方案 | `scheme.exportPackage` | `{id, path}` | `{path}` |
 | | `scheme.importPackage` | `{path, strategy}` | `{imported, conflicts}` |
 | | `scheme.previewImport` | `{path}` | `{package, willAdd, conflicts, systemRefs, missing}` |
+| 主题 | `theme.previewPackage` | `{path}` | `{display_name, author, version, asset_count, has_preview}` |
+| | `theme.importPackage` | `{path, slug?, force?}` | `{ok, slug, display_name, files, reloaded}` 或 `{conflict:true, ...}` |
+| | `theme.exportPackage` | `{slug, path}` | `{ok, path, display_name, asset_count, has_preview}` |
 | 备份 | `backup.create` | `{path, includeStats?, includeState?}` | `{path, manifest}` |
 | | `backup.inspect` | `{path}` | `{manifest}` |
 | | `backup.restore` | `{path, strategy, sections?}` | `{restored, conflicts}` |
@@ -158,6 +190,12 @@ state/state.toml                       type="state"      (include_state)
 - `strategy`: `"merge"`(默认)| `"replace"`。
 - `backup.restore` 的 `sections`(可选):限定只还原部分域,如 `["dict", "config"]`,缺省还原全部。
 - 现有 `phrase.export/import`、`theme.importFromText/Url` **签名不变**,内部逐步统一到 `wind-transfer` 的 codec/merge。
+- 主题包的三条走 `wind-transfer::theme`,与方案包的 `scheme` 平行但不共用条目判据(一个认
+  `*.schema.toml` 根条目,一个认 `theme.toml`)。`theme.importPackage` 的同名冲突是**可预期的
+  业务性失败**,走 `conflict: true` 回执而非 error 通道——客户端据此弹「是否覆盖」再以
+  `force=true` 重推;靠匹配报错文案认冲突的话,core 改一次文案客户端就静默失效。
+- `theme.exportPackage` 的 `path` 由调用方给全路径,core 不校验落点。这条成立的前提是它只
+  经本机 ctrl 通道由设置端与 CLI 调用;哪天多一个远程或网页入口,必须先加落点白名单。
 - 还原/导入落盘后,核心触发 `rebuild_*` 与 `config.changed` / `dict.changed` 事件,通知 TSF/UI 刷新。
 
 ## 代码落点
@@ -205,6 +243,7 @@ wind-transfer/src/
 | **P3 方案包** | `scheme.exportPackage/importPackage/previewImport` + 资源收集 + 用户方案目录落地 | P1 |
 | **P4 整机备份** | `backup.create/inspect/restore`(组合全部层) | P1–P3 |
 | **P5 打磨** | `state`/跨平台项过滤、`stats` 可选、边界与错误提示 | P4 |
+| **P6 主题包** | `theme.previewPackage/importPackage/exportPackage` + `.wtheme` 格式(后续增量,不在原 P1–P5 规划内) | P1 |
 
 P2/P3 相互独立,可并行;P4 收口。
 
@@ -215,6 +254,10 @@ P2/P3 相互独立,可并行;P4 收口。
 - **bundle**:manifest 校验、zip 打包解包 round-trip、`spec_version` 过高拒绝。
 - **scheme**:资源收集完整性(引用文件全部入包)、导入后方案可加载并出候选。
 - **backup**:整机 export→restore round-trip(空库、已有数据合并、Replace)、`sections` 局部还原、排除项确实未入包。
+- **theme**:export→import round-trip;路径穿越/未知条目/缺 `theme.toml`/按 kind 认错包/格式
+  版本过新/条目数越限一律拒;三种回滚场景(全新安装失败不留垃圾、覆盖失败退回旧主题、
+  失败不动目标目录);导出失败不毁落点上的旧包、不留 `.tmp`。守 hide 的用例必须让被 hide 的
+  主题**物理存在**——否则拒的是「找不到」,判据删掉也照绿。
 - **契约**:`webdata.rs` 集成测试(真实 Coordinator + 临时 redb),断言各 RPC 输出形状,对齐现有 `web_data_rpc` 契约测试风格。
 
 ## 非目标(YAGNI)
