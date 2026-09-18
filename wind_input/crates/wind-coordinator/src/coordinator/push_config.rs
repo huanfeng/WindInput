@@ -245,7 +245,12 @@ impl Coordinator {
     /// `should_handle_key` 用的那一份），集合为空 = 行为与历史完全一致。
     /// DLL 侧还要再叠「无输入会话」「非全角」两道动态闸门，那两个只有它自己知道。
     pub fn push_cn_passthrough_punct_config(&self, client_token: u64) {
-        let chars: Vec<char> = self.rt().cn_passthrough_punct_chars.iter().copied().collect();
+        let chars: Vec<char> = self
+            .rt()
+            .cn_passthrough_punct_chars
+            .iter()
+            .copied()
+            .collect();
         // 与 CUSTOM_EN_PUNCT 同格式（count(u8) + UTF-16LE），复用同一个编码器。
         let value = wind_ipc::codec::encode_custom_en_punct_value(&chars);
         let msg = wind_ipc::codec::encode_sync_config(
