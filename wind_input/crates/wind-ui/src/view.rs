@@ -1245,10 +1245,8 @@ fn paint_bg_gradient(
     if g.stops.is_empty() {
         return;
     }
-    let x = r.x.round();
-    let y = r.y.round();
-    let rw = r.w.round().max(1.0);
-    let rh = r.h.round().max(1.0);
+    let (x, y, rw, rh) = snap_to_pixels(r.x, r.y, r.w, r.h);
+    let (rw, rh) = (rw.max(1.0), rh.max(1.0));
     // 单色/退化 → 纯色填充（tiny-skia 渐变需 ≥2 停靠点）。
     if g.stops.len() < 2 {
         fill_rounded(buf, buf_w, buf_h, r.x, r.y, r.w, r.h, g.stops[0].0, radius);
@@ -1313,10 +1311,8 @@ fn paint_bg_gradient(
 }
 
 fn paint_bg_image(buf: &mut [u8], buf_w: u32, buf_h: u32, r: Rect, radius: f32, img: &ViewImage) {
-    let x = r.x.round();
-    let y = r.y.round();
-    let rw = r.w.round().max(1.0);
-    let rh = r.h.round().max(1.0);
+    let (x, y, rw, rh) = snap_to_pixels(r.x, r.y, r.w, r.h);
+    let (rw, rh) = (rw.max(1.0), rh.max(1.0));
     let spec = fill_spec_of(img);
     let tint = img.tint.unwrap_or([0, 0, 0, 0]);
     let Some(path) = round_rect_path(x, y, rw, rh, radius.round().max(0.0)) else {
@@ -1561,6 +1557,25 @@ fn for_each_mapped(
     }
 }
 
+/// 把浮点矩形对齐到像素网格：**四条边界各自取整**，而不是「位置 round、尺寸也 round」。
+///
+/// 判据是相邻两个盒子既不留缝也不重叠。竖排候选里上一行的 `y + h` 恰好就是下一行的 `y`，
+/// 只有让这条**公共边界**在两边取整到同一个整数，它们才始终严丝合缝。
+///
+/// 分别 round 的老写法在整数倍 DPI 下看不出问题（小数部分恒为 0，两种算法同解），
+/// 换成 1.25 / 1.5 倍缩放就会随小数相位时而重叠 1px、时而空 1px。论坛 t164
+/// 「候选行间距设为 0，绘制出来仍有微小间距」正是后者：scale=1.5 下行高 53.4、
+/// 行 y 依次 9.0 / 62.4 / 115.8，分别 round 得
+/// (9,53)=9..62、(62,53)=62..115、(116,53)=116..169 —— 115~116 空出整整一行像素。
+///
+/// 不在这里兜 `max(1.0)`：各调用点对「退化成 0 尺寸」的处理不同（`fill_rounded` 直接不画，
+/// 背景图/渐变则钳到 1px），兜在这里会把那个差别抹掉。
+fn snap_to_pixels(x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+    let x0 = x.round();
+    let y0 = y.round();
+    (x0, y0, (x + w).round() - x0, (y + h).round() - y0)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn fill_rounded(
     buf: &mut [u8],
@@ -1576,11 +1591,8 @@ pub fn fill_rounded(
     if color[3] == 0 {
         return;
     }
-    // 位置/尺寸对齐像素网格（这些盒子本就像素对齐），半径保留浮点供 AA。
-    let x = x.round();
-    let y = y.round();
-    let w = w.round();
-    let h = h.round();
+    // 位置/尺寸对齐像素网格（按边界取整，见 snap_to_pixels），半径保留浮点供 AA。
+    let (x, y, w, h) = snap_to_pixels(x, y, w, h);
     if w <= 0.0 || h <= 0.0 || buf_w == 0 || buf_h == 0 {
         return;
     }
@@ -1991,10 +2003,7 @@ pub fn fill_ring(
     if color[3] == 0 || bw <= 0.0 || buf_w == 0 || buf_h == 0 {
         return;
     }
-    let x = x.round();
-    let y = y.round();
-    let w = w.round();
-    let h = h.round();
+    let (x, y, w, h) = snap_to_pixels(x, y, w, h);
     if w <= 0.0 || h <= 0.0 {
         return;
     }
@@ -2187,6 +2196,73 @@ mod geom_tests {
         );
         let center = (5 * 10 + 5) * 4;
         assert!(buf[center + 3] > 0, "中心像素 alpha 应被写入");
+    }
+
+    // ─────────────────── 像素对齐：相邻盒子不留缝也不重叠 ───────────────────
+
+    /// ★ 论坛 t164「候选行间距设为 0，绘制出来仍有微小间距」的判据。
+    ///
+    /// 竖排候选一行接一行，上一行的 `y + h` 就是下一行的 `y`。非整数倍 DPI 下这些值全带小数
+    /// （scale=1.5：行高 53.4，y 依次 9.0 / 62.4 / 115.8），「位置 round、尺寸也 round」会让
+    /// 同一条公共边界在两边算出不同的整数 —— 时而空 1px（缝），时而多画 1px（叠）。
+    ///
+    /// 这里直接画三行真实数值，逐行扫 alpha：从第一行顶到最后一行底，**不允许有空行**。
+    #[test]
+    fn adjacent_rows_leave_no_gap_at_fractional_scale() {
+        // scale = 1.5 下候选窗实测的行几何（见 candidate_window 的行距探针）
+        let rows = [(9.0f32, 53.4f32), (62.4, 53.4), (115.8, 53.4)];
+        let (w, h) = (24u32, 200u32);
+        let mut buf = vec![0u8; (w * h) as usize * 4];
+        for (y, rh) in rows {
+            fill_rounded(&mut buf, w, h, 0.0, y, w as f32, rh, [255, 0, 0, 255], 0.0);
+        }
+        let alpha_at = |row: u32| buf[((row * w + w / 2) * 4 + 3) as usize];
+        let top = rows[0].0.round() as u32;
+        let bottom = (rows[2].0 + rows[2].1).round() as u32;
+        let empty: Vec<u32> = (top..bottom).filter(|r| alpha_at(*r) == 0).collect();
+        assert!(
+            empty.is_empty(),
+            "第 {top}~{bottom} 行之间不该有空行，实际空在 {empty:?}"
+        );
+        // 前置：确实画了东西，且范围之外没有越界涂抹（否则上面的「无空行」可能是整片糊了）
+        assert!(alpha_at(top) > 0, "前置：首行须被填上");
+        assert_eq!(alpha_at(top.saturating_sub(2)), 0, "首行之上不该被涂到");
+        assert_eq!(alpha_at(bottom + 2), 0, "末行之下不该被涂到");
+    }
+
+    /// 对照：整数倍缩放下行为不变（老写法在这一档本就正确，不能改坏）。
+    #[test]
+    fn integer_scale_rows_are_unchanged() {
+        let (w, h) = (24u32, 200u32);
+        let mut buf = vec![0u8; (w * h) as usize * 4];
+        for (y, rh) in [(6.0f32, 36.0f32), (42.0, 36.0), (78.0, 36.0)] {
+            fill_rounded(&mut buf, w, h, 0.0, y, w as f32, rh, [255, 0, 0, 255], 0.0);
+        }
+        let alpha_at = |row: u32| buf[((row * w + w / 2) * 4 + 3) as usize];
+        assert!((6..114).all(|r| alpha_at(r) > 0), "6~114 行须连续填满");
+        assert_eq!(alpha_at(5), 0, "盒子上沿之外不该被涂到");
+        assert_eq!(alpha_at(114), 0, "盒子下沿之外不该被涂到");
+    }
+
+    /// 边界取整本身：公共边界在两边必须解析成同一个整数。
+    ///
+    /// 直接测 `snap_to_pixels` 而不只测像素，是因为像素那条测不出「重叠」——
+    /// 多画一层 alpha 仍是非 0，扫描看不出来，而重叠在半透明背景下是看得见的深一道。
+    #[test]
+    fn snap_shares_the_boundary_between_neighbours() {
+        for (y0, h0, y1) in [
+            (9.0f32, 53.4f32, 62.4f32),
+            (7.5, 44.5, 52.0),
+            (0.3, 10.4, 10.7),
+        ] {
+            let (_, ya, _, ha) = snap_to_pixels(0.0, y0, 1.0, h0);
+            let (_, yb, _, _) = snap_to_pixels(0.0, y1, 1.0, h0);
+            assert_eq!(
+                ya + ha,
+                yb,
+                "上一个盒子的下边界须正好落在下一个的上边界（y0={y0} h0={h0} y1={y1}）"
+            );
+        }
     }
 
     #[test]
