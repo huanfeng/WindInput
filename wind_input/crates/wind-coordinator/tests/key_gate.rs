@@ -105,6 +105,61 @@ fn shifted_digits_eaten_only_when_they_convert() {
     }
 }
 
+/// OEM 标点键同样「会转换的吃、产物原样的透传」（B-9 第二批）。
+///
+/// 这批的撞码同样实打实：`-`(0x2D)→`VK_INSERT`（宿主会切进**改写模式**）、`/`(0x2F)→`VK_HELP`、
+/// `|`(0x7C)→`VK_F13`。成因与 `#%&` 同根，只是键不同。
+///
+/// 断言用**同一个键的两个态**对照，这是最稳的形式：`-`/`_` 同一个 VK，前者无中文映射该透传、
+/// 后者转 `——` 必须吃。有映射的那半与方案配置无关，恒成立。
+///
+/// ⚠️ 无映射的那半还要过「按键占用」这一关（引导键 / 方案码元首码）。默认方案没配它们，
+/// 故此处可以断言透传；将来默认方案若把 `-` 配成码元或引导键，本断言会失败——**那不是回归**，
+/// 是判据正确生效，届时改断言即可。
+#[test]
+fn oem_punct_eaten_only_when_they_convert() {
+    let Some(c) = coordinator() else { return };
+
+    // 上挡态有中文映射 ⇒ 必须吃（与占用无关，恒成立）。
+    for (vk, ch, cn) in [
+        (keymap::VK_MINUS, '_', "——"),
+        (keymap::VK_SLASH, '?', "？"),
+        (keymap::VK_BACKTICK, '~', "～"),
+    ] {
+        let mut p = KeyProbe::new(vk);
+        p.modifiers = Modifiers(0x0001); // MOD_SHIFT
+        assert!(
+            c.should_handle_key(&p),
+            "Shift+{vk:#x} 出 `{ch}`→`{cn}`，要转换，必须吃"
+        );
+    }
+
+    // 无 Shift 态有中文映射 ⇒ 同样必须吃。
+    for (vk, ch, cn) in [
+        (keymap::VK_COMMA, ',', '，'),
+        (keymap::VK_PERIOD, '.', '。'),
+        (keymap::VK_SEMICOLON, ';', '；'),
+        (keymap::VK_BACKSLASH, '\\', '、'),
+    ] {
+        assert!(
+            c.should_handle_key(&probe(vk)),
+            "{vk:#x} 出 `{ch}`→`{cn}`，要转换，必须吃"
+        );
+    }
+
+    // 无中文映射、产物即原样 ⇒ 透传（默认方案未把它们配成引导键或码元）。
+    for (vk, ch) in [
+        (keymap::VK_MINUS, '-'),
+        (keymap::VK_EQUAL, '='),
+        (keymap::VK_SLASH, '/'),
+    ] {
+        assert!(
+            !c.should_handle_key(&probe(vk)),
+            "{vk:#x} 出 `{ch}` 且无中文映射，吃了也只能原样吐回，应透传"
+        );
+    }
+}
+
 /// 空缓冲下的功能键/数字必须交还宿主。
 ///
 /// 设备现象（已修）：空格打不出空格、回车不换行、退格删不掉字、数字打不出来。

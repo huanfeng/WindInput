@@ -4047,7 +4047,7 @@ impl Coordinator {
                 self.push_jump_out_keys_config(0); // 配对跳出键同步（英文模式跳出 + 中文转发放行）
                 self.push_password_suppress_config(0); // 密码框抑制策略（DLL 本地吃键门控）
                 self.push_custom_en_punct_config(0); // 英半列自定义标点：DLL 据此吃键转发
-                self.push_cn_passthrough_punct_config(0); // 中文模式该透传的上挡符号：DLL 据此**不**吃
+                self.push_cn_passthrough_punct_config(0); // 中文模式该透传的标点：DLL 据此**不**吃
                 self.push_pair_state_ttl_config(0); // 配对状态时效（DLL 侧闸门据此判陈旧）
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——
                 // 与 password_suppress 同样处理，让"重载一次"能修好任何 DLL 侧状态漂移。

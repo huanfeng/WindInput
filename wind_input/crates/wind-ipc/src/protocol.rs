@@ -380,7 +380,7 @@ pub const CONFIG_KEY_PASSWORD_SUPPRESS: &str = "password_suppress";
 /// （集合为空 = 行为与历史完全一致）。判据须与 `wind_punct::custom_english_punct_chars`
 /// 同源，漂移即「吃了再吐」丢键。
 pub const CONFIG_KEY_CUSTOM_EN_PUNCT: &str = "custom_en_punct";
-/// 「中文模式下产物就是原样半角 ASCII、该由 TSF **直接透传**」的上挡符号集合同步键名。
+/// 「中文模式下产物就是原样半角 ASCII、该由 TSF **直接透传**」的标点集合同步键名。
 /// 与 `CONFIG_KEY_CUSTOM_EN_PUNCT` 共用编码格式（count(u8) + UTF-16LE 字符数组）。
 ///
 /// 方向与上一个键**相反**：那个是「本该透传的，请多吃几个」，这个是「本该吃的，请别吃」。

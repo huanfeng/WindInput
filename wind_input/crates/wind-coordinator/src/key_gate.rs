@@ -150,6 +150,34 @@ impl Coordinator {
         }
 
         // ── 6. 中文模式 ──
+        //
+        // 先问「这个键该不该**透传**」——它横跨上挡符号（Shift+数字）与 OEM 标点两类，
+        // 故提在下面的分类之前统一判一次。
+        //
+        // 为什么产物不变的标点不能吃：吃了再把原样 ASCII 吐回去不是无害的往返。非 TSF-aware
+        // 宿主会把 CUAS 送达的字符码当**虚拟键码**解释 —— Tkinter 实测（B-9）
+        // `#`(0x23)→VK_END、`%`(0x25)→VK_LEFT、`&`(0x26)→VK_UP，字不上屏反倒移了光标；
+        // `-`(0x2D)→VK_INSERT 更会把宿主切进改写模式。微软拼音对这批符号根本不吃键，
+        // 宿主拿到的是真实 VK，故无此问题；这里就是对齐那个行为。
+        //
+        // 判据取 `cn_passthrough_punct_chars`，与推给 DLL 的那份**同源**（`ConfigBundle`
+        // 里由标点转换层 + 按键占用层两道合成）——两侧漂移就是老问题的另一面。
+        //
+        // 两道**动态**闸门必须叠在集合之外，因为它们不是配置、是当下状态：
+        //   · 有输入会话 ⇒ 组码中按标点是**顶码**语义，必须吃；
+        //   · 全角 ⇒ `#` 要出 `＃`，必须吃。
+        if !session
+            && let Some(ch) = punct_char(probe.vk, mods & MOD_SHIFT != 0)
+            && self.rt().cn_passthrough_punct_chars.contains(&ch)
+            && !self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .full_width
+        {
+            return false;
+        }
+
         // Shift+数字是**上挡标点**（`!@#$%^&*()`），不是数字键：它要走标点转换，
         // 空缓冲时也得吃。必须排在下面那条之前——[`is_session_only_key`] 只看 VK、
         // 不看修饰位，会把 Shift+1 一并判成「数字，空缓冲交还宿主」。
@@ -158,31 +186,6 @@ impl Coordinator {
         // （`!` 而不是 `！`），而且只在空缓冲时如此——有编码时它们又是全角，
         // 于是看起来像「有时候转有时候不转」。安卓端实测就是这个形状。
         if mods & MOD_SHIFT != 0 && is_digit(probe.vk) {
-            // …但其中**产物就是原样半角 ASCII**的那几个（默认是 `@#%&*`，即中文标点表里
-            // 没有映射的）要反过来**透传**，不吃。
-            //
-            // 吃了再把原样 ASCII 吐回去不是无害的往返：非 TSF-aware 宿主会把 CUAS 送达的
-            // 字符码当**虚拟键码**解释。Tkinter 实测（B-9）`#`(0x23)→VK_END、`%`(0x25)→VK_LEFT、
-            // `&`(0x26)→VK_UP —— 字不上屏，反倒执行了一次光标移动。微软拼音对这批符号根本
-            // 不吃键，宿主拿到的是真实 VK，故无此问题；这里就是对齐那个行为。
-            //
-            // 判据取 `cn_passthrough_punct_chars`，与推给 DLL 的那份**同源**
-            // （`wind_punct::chinese_passthrough_punct_chars`）——两侧漂移就是老问题的另一面。
-            //
-            // 两道动态闸门必须叠在集合之外，因为它们不是配置、是当下状态：
-            //   · 有输入会话 ⇒ 组码中按上挡符号是**顶码**语义，必须吃；
-            //   · 全角 ⇒ `#` 要出 `＃`，必须吃。
-            if !session
-                && let Some(ch) = punct_char(probe.vk, true)
-                && self.rt().cn_passthrough_punct_chars.contains(&ch)
-                && !self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .full_width
-            {
-                return false;
-            }
             return true;
         }
         if is_session_only_key(probe.vk) {

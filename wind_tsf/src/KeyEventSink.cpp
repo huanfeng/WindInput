@@ -823,7 +823,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
                                 L"chinese_capslock_punct_passthrough");
                 return S_OK; // pfEaten 保持 FALSE → 同步透传
             }
-            // 中文 + 该上挡符号在当前配置下**产物就是原样半角 ASCII** + 无 input session +
+            // 中文 + 该标点在当前配置下**产物就是原样半角 ASCII** + 无 input session +
             // 非全角 → 透传，与上面 CapsLock 那条同构。
             //
             // 吃了再把原样 ASCII 吐回去不是无害的往返：非 TSF-aware（CUAS 桥接）宿主会把
@@ -831,7 +831,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
             // `%`(0x25)→VK_LEFT、`&`(0x26)→VK_UP —— 字不上屏，反倒执行了一次光标移动。
             // 微软拼音对这批符号根本不吃键，宿主收到的 keycode 仍是真实 VK，故无此问题。
             //
-            // 两道闸门是**动态**的、不在推送集合里：有 input session 时按上挡符号是顶码
+            // 两道闸门是**动态**的、不在推送集合里：有 input session 时按标点是顶码
             // 语义、全角时 `#` 要出 `＃`，两种都必须照吃。
             if (!hasInputSession && !_pTextService->IsFullWidth() &&
                 _IsCnPassthroughPunctKey(wParam, modifiers))
@@ -1271,7 +1271,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         (GetKeyState(VK_CAPITAL) & 0x0001);
 
     // 与 OnTestKeyDown 的 `chinese_punct_passthrough` 对称：中文 + 无 session + 非全角 +
-    // 该上挡符号产物就是原样半角 ASCII ⇒ 同步透传（不吃、不发 core）。
+    // 该标点产物就是原样半角 ASCII ⇒ 同步透传（不吃、不发 core）。
     //
     // **这条对称是必须的，不是保险**：OnTestKeyDown 已判 pfEaten=FALSE，若本函数仍把它
     // 算作输入键，就成了 test(FALSE) + down(TRUE) 的翻转 —— 而 Chrome/WindTerm/Electron
@@ -1349,7 +1349,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             else
             {
                 // 透传场景一律不视为输入键（保持 pfEaten=FALSE 同步透传，不发 core）：
-                // CapsLock 下的字母/标点，以及中文模式下产物即原样 ASCII 的上挡符号。
+                // CapsLock 下的字母/标点，以及中文模式下产物即原样 ASCII 的标点。
                 isInputKey = (capsLockLetterPassthrough || capsLockPunctPassthrough || cnPunctPassthrough)
                                  ? FALSE
                                  : (keyType != HotkeyType::None);
@@ -2739,7 +2739,7 @@ BOOL CKeyEventSink::_IsCustomEnglishPunctKey(WPARAM vk, uint32_t modifiers) cons
 // 空集合时零开销返回 FALSE，行为与历史完全一致。
 //
 // ⚠️ 本函数只答「配置上该不该」。调用方必须自行叠上两道**动态**闸门：`!hasInputSession`
-// （组码中按上挡符号是顶码语义，必须吃）与 `!IsFullWidth()`（全角下 `#` 要出 `＃`）。
+// （组码中按标点是顶码语义，必须吃）与 `!IsFullWidth()`（全角下 `#` 要出 `＃`）。
 // 那两个是当下状态、进不了推送集合。
 BOOL CKeyEventSink::_IsCnPassthroughPunctKey(WPARAM vk, uint32_t modifiers) const
 {
@@ -2748,19 +2748,27 @@ BOOL CKeyEventSink::_IsCnPassthroughPunctKey(WPARAM vk, uint32_t modifiers) cons
     // Ctrl/Alt 组合是功能热键，不参与出字（同 _IsCustomEnglishPunctKey）。
     if (modifiers & (KEYMOD_CTRL | KEYMOD_ALT))
         return FALSE;
-    // 只圈 Shift+主键盘数字的上挡符号，与 core 的
-    // `wind_punct::chinese_passthrough_punct_chars` 圈的范围**逐字对应**。
-    if ((modifiers & KEYMOD_SHIFT) == 0)
-        return FALSE;
-    if (vk < L'0' || vk > L'9')
-        return FALSE;
-    // ⚠️ 这里不能用 `CHotkeyManager::VirtualKeyToPunctuation`：它只认 OEM 键，**不覆盖
-    // 主键盘数字排**（同 `ClassifyInputKey` vs `IsPunctuationKey` 那条既有注释）。
-    // 下标即 VK_0..VK_9，与 core `key_convert::punct_char` 的 shifted 列同源。
-    static const wchar_t kShiftedDigits[10] = {
-        L')', L'!', L'@', L'#', L'$', L'%', L'^', L'&', L'*', L'('
-    };
-    return _cnPassthroughPunctChars.count(kShiftedDigits[vk - L'0']) > 0;
+    const BOOL shift = (modifiers & KEYMOD_SHIFT) != 0;
+    wchar_t ch = 0;
+    if (vk >= L'0' && vk <= L'9')
+    {
+        // 主键盘数字排。⚠️ 不能用 `CHotkeyManager::VirtualKeyToPunctuation`：它只认 OEM 键、
+        // **不覆盖这一排**（同 `ClassifyInputKey` vs `IsPunctuationKey` 那条既有注释），
+        // 故自带一张表。下标即 VK_0..VK_9，与 core `key_convert::punct_char` 的 shifted 列同源。
+        // 不按 Shift 时它出的是数字本身、不是标点，不参与透传。
+        if (!shift)
+            return FALSE;
+        static const wchar_t kShiftedDigits[10] = {
+            L')', L'!', L'@', L'#', L'$', L'%', L'^', L'&', L'*', L'('
+        };
+        ch = kShiftedDigits[vk - L'0'];
+    }
+    else
+    {
+        // OEM 标点键（`-_` `=+` `[{` `]}` `\|` `;:` `\'"` `,<` `.>` `/?` `` `~ ``）两态。
+        ch = CHotkeyManager::VirtualKeyToPunctuation(vk, shift);
+    }
+    return ch != 0 && _cnPassthroughPunctChars.count(ch) > 0;
 }
 
 void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8_t>& value)

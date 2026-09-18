@@ -901,7 +901,7 @@ constexpr const char* CONFIG_KEY_DIAG_SNAPSHOT = "diag_snapshot";
 // core 收不到，用户配的「英半」列因此永远不生效；据此集合精确吃下这些键转发给 core。
 // 集合为空（默认）= 行为与历史完全一致。格式：count(u8) + [ch:u16(LE)]...
 constexpr const char* CONFIG_KEY_CUSTOM_EN_PUNCT = "custom_en_punct";
-// 「中文模式下产物就是原样半角 ASCII、本 DLL 该**直接透传**」的上挡符号集合。
+// 「中文模式下产物就是原样半角 ASCII、本 DLL 该**直接透传**」的标点集合。
 // 与上一个键**方向相反**：那个是「本该透传的，请多吃几个」，这个是「本该吃的，请别吃」。
 //
 // 成因：吃了再把原样 ASCII 吐回去，在非 TSF-aware（CUAS 桥接）宿主上不是无害的往返 ——

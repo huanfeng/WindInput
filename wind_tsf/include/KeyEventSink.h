@@ -310,11 +310,11 @@ private:
     // （吃下的键要交给 core 出字，本地配对若抢先 CommitText 就把转发吞了）。
     // 判据必须与 core 的 `wind_punct::custom_english_punct_chars` 同源，漂移即「吃了再吐」丢键。
     BOOL _IsCustomEnglishPunctKey(WPARAM vk, uint32_t modifiers) const;
-    // 「中文模式下该透传不吃」的上挡符号集合（core 经 CONFIG_KEY_CN_PASSTHROUGH_PUNCT 推送）。
+    // 「中文模式下该透传不吃」的标点集合（core 经 CONFIG_KEY_CN_PASSTHROUGH_PUNCT 推送）。
     // 空集合（默认）= 与历史行为完全一致。
     std::set<wchar_t> _cnPassthroughPunctChars;
     // 该键在中文模式下是否该**透传**（不吃）。仅答「配置上该不该」——调用方必须自行叠上
-    // 两道**动态**闸门：`!hasInputSession`（组码中按上挡符号是顶码语义）与 `!IsFullWidth()`
+    // 两道**动态**闸门：`!hasInputSession`（组码中按标点是顶码语义）与 `!IsFullWidth()`
     // （全角下 `#` 要出 `＃`）。那两个是当下状态、不在推送集合里。
     // 判据必须与 core 的 `wind_punct::chinese_passthrough_punct_chars` 同源。
     BOOL _IsCnPassthroughPunctKey(WPARAM vk, uint32_t modifiers) const;

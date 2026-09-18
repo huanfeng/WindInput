@@ -102,7 +102,7 @@ impl Coordinator {
         self.push_jump_out_keys_config(client_token); // 配对跳出键（英文模式跳出 + 中文转发放行）
         self.push_password_suppress_config(client_token); // 密码框抑制策略（DLL 本地吃键门控）
         self.push_custom_en_punct_config(client_token); // 英半列自定义标点：DLL 据此吃键转发
-        self.push_cn_passthrough_punct_config(client_token); // 中文模式该透传的上挡符号：DLL 据此**不**吃
+        self.push_cn_passthrough_punct_config(client_token); // 中文模式该透传的标点：DLL 据此**不**吃
         self.push_pair_state_ttl_config(client_token); // 配对状态时效（DLL 侧闸门据此判陈旧）
         // 诊断采集开关：DLL 每次重连都从默认值（关）起步，握手不推则 HUD 开着也收不到
         // 新连接宿主的快照——而最需要它的 SearchHost 恰恰是最常重连的那类。
@@ -233,7 +233,7 @@ impl Coordinator {
         }
     }
 
-    /// 下发「中文模式下该让 DLL **透传不吃**」的上挡符号集合。与
+    /// 下发「中文模式下该让 DLL **透传不吃**」的标点集合。与
     /// [`Self::push_custom_en_punct_config`] 方向相反：那个是「本该透传的请多吃几个」，
     /// 这个是「本该吃的请别吃」。
     ///

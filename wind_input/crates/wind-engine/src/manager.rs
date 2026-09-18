@@ -3356,6 +3356,25 @@ impl EngineManager {
         ))
     }
 
+    /// **所有已安装**方案（含 overlay）的 `[key_actions]` 里出现过的键名（并集）。
+    ///
+    /// 与 [`Self::all_key_action_keys`] 只差枚举源，但那一差是**语义性**的：
+    /// 那个回答「要不要把这个键的 keyup 转发过来」，overlay 方案的 `[key_actions]`
+    /// 查不到消费点，用 `available` 足矣；本函数回答「**谁占了这个键**」，供从「该透传的
+    /// 标点集合」里减去——减数漏一个就是「某方案的引导键被透传掉、那个模式再也进不去」，
+    /// 且不报错。减数必须取更大的那个集合，与 `schema_leading_code_chars` 的枚举源一致。
+    pub fn installed_key_action_keys(&self) -> std::collections::BTreeSet<String> {
+        let mut keys = std::collections::BTreeSet::new();
+        for id in self.installed_schemas() {
+            if let Some(s) =
+                Self::read_schema(&id, self.data_dir.as_deref(), self.override_dir.as_deref())
+            {
+                keys.extend(s.key_actions.into_keys());
+            }
+        }
+        keys
+    }
+
     /// 不走 `key_actions_cache`：该缓存按活跃方案 id 存单份，而这里要的是跨方案的并集。
     pub fn all_key_action_keys(&self) -> std::collections::BTreeSet<String> {
         self.all_action_keys().0

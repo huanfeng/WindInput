@@ -195,6 +195,19 @@ pub(crate) fn char_to_main_vk(ch: char) -> Option<u32> {
     (0x20u32..=0xFF).find(|&vk| punct_char(vk, false) == Some(ch))
 }
 
+/// 标点字符 → 产生它的 VK，**两态都查**（`-`/`_`、`[`/`{` 这些一个 VK 两个字符）。
+/// [`punct_char`] 的反向查询，与 [`char_to_main_vk`] 是孪生——那个只认无 Shift 态。
+///
+/// 同样用线性扫描而非反查表，理由见 [`char_to_main_vk`]：多一张表就多一份要与
+/// `punct_char` 保持同步的真相源。调用方在配置生效期用它（构造 / 热重载），非热路径。
+///
+/// 值域无歧义：`punct_char` 只覆盖 `0x30-0x39` 与 11 个 OEM VK，小键盘另走
+/// [`numpad_to_main`] 归一，不会出现「一个字符命中两个 VK」。
+pub(crate) fn punct_source_vk(ch: char) -> Option<u32> {
+    (0x20u32..=0xFF)
+        .find(|&vk| punct_char(vk, false) == Some(ch) || punct_char(vk, true) == Some(ch))
+}
+
 /// VK + shift → 可打印 ASCII 字符（字母按 shift 决定大小写、数字/符号复用 punct_char）。
 /// 用于网址模式原样累积与前缀探测。非可打印键返回 None。
 pub(crate) fn printable_char(key_code: u32, shift: bool) -> Option<char> {

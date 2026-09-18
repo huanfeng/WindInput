@@ -88,7 +88,7 @@ pub(crate) struct ConfigBundle {
     /// 行为与历史一致）。这是 DLL 吃键与本侧出字的**同源判据**，且在英文标点键的热路径上每键
     /// 都要查——故预计算，别在按键时重新遍历 `custom_mappings`。有序集合使推送字节可复现。
     pub(crate) custom_en_punct_chars: std::collections::BTreeSet<char>,
-    /// 「中文模式下产物就是原样半角 ASCII、该让 DLL **透传不吃**」的上挡符号集合
+    /// 「中文模式下产物就是原样半角 ASCII、该让 DLL **透传不吃**」的标点集合
     /// （见 `wind_punct::chinese_passthrough_punct_chars`；空 = 行为与历史一致）。
     ///
     /// 与上一个字段方向相反、成因同根：吃了再原样吐回去，在非 TSF-aware 宿主上会被当成
@@ -192,6 +192,30 @@ pub(crate) struct SchemaKeyUnion {
     /// 等价（见 `push_custom_en_punct_config` 与 `wind_punct::english_smart_source_chars`
     /// 的文档）。代价只是英文模式下多转发几个标点键。
     pub(crate) punct_en_chars: std::collections::BTreeSet<char>,
+    /// 所有**已安装**方案的码元集里，**可作首码**的非字母字符（并集）。
+    ///
+    /// ★ 方向与上面三项**相反**：那些是「多收几个键」（并集 = 更保守 = 安全），这一项是
+    /// 要从「该透传的集合」里**减去**。凡任一方案把它当码元首码，空缓冲按下就要开始组码，
+    /// 透传掉就是「切到那个方案后再也打不出字」。故这里取并集同样是保守侧——宁可少透传
+    /// 几个键（退回旧的吃键行为），不可多透传一个。
+    ///
+    /// 并集而非活跃方案那一份的理由同 `punct_en_chars`：`CONFIG_KEY_CN_PASSTHROUGH_PUNCT`
+    /// 只在握手与热重载推送、**切方案不推**。
+    pub(crate) leading_code_chars: std::collections::BTreeSet<char>,
+    /// 所有**已安装**方案（含 overlay）`[key_actions]` 里绑过的键 VK（并集）。
+    ///
+    /// ⚠️ 枚举源是 `installed_schemas()` 而非 `available`，与同为减数的
+    /// [`Self::leading_code_chars`] 保持一致——overlay 方案（快符等）不进 `available`，
+    /// 但它被激活时 `[key_actions]` 是生效的。漏一个减数就是「那个模式再也进不去」。
+    /// 这与 `modifier_vks` 用 `available` 是**两种情况**：那个是加数（多转发无害）。
+    ///
+    /// 同样用于从透传集合里减去：`special:*` / `mix` / 临拼 / 临英这些引导键**空缓冲时
+    /// 就生效**，透传掉等于「那个模式再也进不去」，且不报错。
+    ///
+    /// ⚠️ 只需排除「空缓冲也生效」的那类。翻页 / 次选 / 以词定字等会话态绑定不必在此排除
+    /// ——两侧的透传闸门本就带 `!hasInputSession`。这里按 `key_actions` 整表排除是**偏保守**
+    /// 的取舍：该表里也可能有只在会话中生效的动词，多排除几个只是少透传，不构成缺陷。
+    pub(crate) key_action_vks: std::collections::BTreeSet<u32>,
 }
 
 /// 算一次跨方案并集。
@@ -200,7 +224,50 @@ pub(crate) fn schema_key_union(mgr: &EngineManager) -> SchemaKeyUnion {
         modifier_vks: schema_bound_modifier_vks(mgr),
         session_key_names: mgr.all_session_action_keys(),
         punct_en_chars: schema_custom_en_punct_chars(mgr),
+        leading_code_chars: schema_leading_code_chars(mgr),
+        key_action_vks: mgr
+            .installed_key_action_keys()
+            .iter()
+            .filter_map(|name| crate::key_resolver::key_action_name_to_vk(name))
+            .collect(),
     }
+}
+
+/// 所有已安装方案的码元集里可作首码的非字母字符（并集）。见
+/// [`SchemaKeyUnion::leading_code_chars`]。
+///
+/// 只收非字母：字母本就是默认码元，与标点集合不可能相交，白扫一遍。
+///
+/// 混输方案在这里取到的是它**自身**的 `[engine.codetable]`（通常为空 → 被跳过），而不是
+/// 主码表子引擎那份；但主方案本身也在 `installed_schemas()` 里、会被单独扫到，并集不变。
+/// 枚举源用 `installed_schemas()` 而非 `available`，理由同
+/// [`schema_custom_en_punct_chars`]：overlay 方案（快符等）不进 `available`，
+/// 而它们恰恰是最可能把符号配成码元的一类。
+///
+/// ⛔ **必须走 `schema_code_char_set`（纯 TOML 读），不能用 `input_chars_of`**：后者会
+/// `ensure_loaded` → `build_engine`，把方案的码表 / 词库整个熔出来。而 `EngineManager`
+/// 的懒加载是明写的设计（只同步构建活跃方案，其余交给 `prewarm_schema` 后台预热），
+/// 本函数的三个调用点——`Coordinator::new`、`refresh_config_in_memory`、
+/// `reload_user_config`——全在不该阻塞的路径上：装了四套方案的用户每次保存设置都要重熔
+/// 全部词库，内存也白白常驻。两者对本函数的结果逐字等价（`input_chars` 为空时
+/// `CodeCharSet::new` 回落 `default_alpha`，照样被下面那道 `is_default_alpha()` 跳过）。
+pub(crate) fn schema_leading_code_chars(mgr: &EngineManager) -> std::collections::BTreeSet<char> {
+    let mut out = std::collections::BTreeSet::new();
+    for id in mgr.installed_schemas() {
+        // 读不到方案文件 ⇒ 该方案本就用不了，跳过不影响可达性。
+        let Some(cs) = mgr.schema_code_char_set(&id) else {
+            continue;
+        };
+        if cs.is_default_alpha() {
+            continue; // 默认集只有字母，不可能与标点相撞
+        }
+        for ch in cs.chars() {
+            if !ch.is_ascii_alphabetic() && cs.contains_leading(ch) {
+                out.insert(ch);
+            }
+        }
+    }
+    out
 }
 
 /// 所有**已安装**方案的方案级标点表里，配了英半列的源字符（并集）。
@@ -339,18 +406,41 @@ impl ConfigBundle {
                 .chain(wind_punct::english_smart_source_chars(&config.input))
                 .chain(schema_keys.punct_en_chars.iter().copied())
                 .collect();
-        // 中文模式下该透传的上挡符号。转换器只用来 peek（查中文标点表 / 自定义映射），
-        // 不推进引号交替态，故这里临时建一个即可，与运行期那份互不影响。
+        // 预编译放在 `normalize()` 之后：`trigger_keys` 收编等存量迁移会往 `key_actions`
+        // 折算，早于迁移编译就会漏掉那批键。
+        let key_resolver = crate::key_resolver::KeyResolver::build(&config);
+        // 中文模式下该**透传不吃**的标点（B-9）。两层判据合成，缺一层都是静默失效：
+        //
+        //   ① 标点转换层（`wind_punct`）：自定义映射 / 中文标点表 / 全半角 三步里
+        //      任何一步会改写它 ⇒ 必须吃。转换器只用来 peek，不推进引号交替态，
+        //      故临时建一个即可，与运行期那份互不影响。
+        //   ② 按键占用层（此处）：**空缓冲时也生效**的绑定 —— 方案码元首码与引导键 ——
+        //      占住的键必须吃。这层数据在方案码元集和 `keys.key_actions` 里，
+        //      `wind_punct` 只吃 `InputConfig`，看不见。
+        //
+        // 会话态绑定（翻页 / 次选 / 以词定字）**不必**在此排除：两侧的透传闸门本就带
+        // `!hasInputSession`，那些键在空缓冲下本就该交还宿主。
         let cn_passthrough_punct_chars: std::collections::BTreeSet<char> =
             wind_punct::chinese_passthrough_punct_chars(
                 &wind_transform::punctuation::PunctuationConverter::new(),
                 &config.input,
             )
             .into_iter()
+            .filter(|&ch| {
+                // 任一方案把它当码元首码 ⇒ 空缓冲按下要开始组码，透传就是「切到那个方案
+                // 后再也打不出字」。跨方案并集，理由见 `SchemaKeyUnion::leading_code_chars`。
+                if schema_keys.leading_code_chars.contains(&ch) {
+                    return false;
+                }
+                let Some(vk) = crate::key_convert::punct_source_vk(ch) else {
+                    // 反查不到说明它不是主键盘标点键产出的，来路不明就别透传。
+                    return false;
+                };
+                // 引导键（`special:*` / `mix` / 临拼 / 临英）空缓冲时就生效。方案层取并集，
+                // 全局层查预编译好的 `key_resolver`——两层都要，`bound_action_for` 就是这么链的。
+                !schema_keys.key_action_vks.contains(&vk) && key_resolver.global_lead(vk).is_none()
+            })
             .collect();
-        // 预编译放在 `normalize()` 之后：`trigger_keys` 收编等存量迁移会往 `key_actions`
-        // 折算，早于迁移编译就会漏掉那批键。
-        let key_resolver = crate::key_resolver::KeyResolver::build(&config);
         // ⚠️ `input.rare_char.include_blocks` **不在这里解析**：它与 `exclude_blocks`
         // 一样是「按名字点名字符类」，两者在 `EngineManager` 装配 `CharsetRegistry` 时
         // 一并吃进去（`charset_assembly::ExternalRefs`），拼错的名字也在那里统一 warn。
@@ -401,9 +491,8 @@ mod reload_tests {
             "前置条件：被测键须是出厂默认未登记的，否则测不到「新增登记」这件事"
         );
         let union = SchemaKeyUnion {
-            modifier_vks: Default::default(),
             session_key_names: ["home".to_string()].into_iter().collect(),
-            punct_en_chars: Default::default(),
+            ..Default::default()
         };
         let with_schema = ConfigBundle::build(cfg, &union);
         assert!(
@@ -433,9 +522,8 @@ mod reload_tests {
             .insert("home".to_string(), "page_prev".to_string());
         let global_only = ConfigBundle::build(cfg.clone(), &Default::default());
         let union = SchemaKeyUnion {
-            modifier_vks: Default::default(),
             session_key_names: ["home".to_string()].into_iter().collect(),
-            punct_en_chars: Default::default(),
+            ..Default::default()
         };
         let both = ConfigBundle::build(cfg, &union);
         assert_eq!(
