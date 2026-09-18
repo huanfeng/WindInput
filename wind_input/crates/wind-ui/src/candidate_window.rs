@@ -2224,18 +2224,6 @@ impl CandidateWindow {
         // 文字宽度下限：预算被行内其它成员吃光时每个文字节点仍保底这么宽，避免退化成
         // 「一个字都不显示」。触发它意味着无解（固定开销已超预算），见 [`Self::water_fill`]。
         let min_text_w = 20.0 * s;
-        // **独立**编码栏（`!preedit_embedded`）的文字预算：它是 root 这个 Column 的直接子节点、
-        // 自成一行，不与候选抢宽度，故只需扣窗口内边距与自身内边距。
-        // 内联编码（`preedit_embedded`）走的是另一条路——它在候选行里，预算由下方的统一分配
-        // （横排 water-filling）给出。
-        //
-        // ⚠️ 旋转态下 `content_budget_px` 量的是**局部横轴**（屏幕高度），而独立编码栏在旋转
-        // 包裹**之外**、量的是屏幕宽度——这里是两条轴混用。竖屏上长 preedit 会拿到超过屏幕
-        // 宽度的预算而不被截断（窗口本身仍被渲染期的宽度钳制夹住，夹不到文字）。
-        // 已知边界，蒙文用户是横屏，暂不为它再分一条轴。
-        let preedit_bar_text_budget_px =
-            (content_budget_px - window_pad.l - window_pad.r - preedit_pad.l - preedit_pad.r)
-                .max(min_text_w);
         // 状态 patch 取色（selected/hover 的 bg/text，None patch 或缺色→兜底）。
         let patch_bg =
             |p: &Option<Box<RvNode>>, d: [u8; 4]| p.as_ref().and_then(|n| n.bg_color).unwrap_or(d);
@@ -2361,6 +2349,103 @@ impl CandidateWindow {
             }
             chip
         };
+
+        // ── 「与编码同处一行」的两个不截断成员，各自的**节点自身宽度** ──
+        //
+        // 抽成闭包是因为它们有**三个**消费点，而此前每处各写了一份算术：独立编码栏的文字
+        // 预算（正下方）、候选行的 `mode_label_row_w`、翻页栏的 `pager_row_w`。分开写的代价
+        // 已经兑现过两次 —— 55032bc0 补了内联编码那条落点却漏了独立栏这条（F-17），
+        // 2bee2a9f 改了装配段的右留白却漏了预算段。
+        //
+        // 只共用**节点这一半**，外边距/间隙留给各调用点：栏行给徽标的是左 12px，候选行给的
+        // 是右 `trailing`（且仅在后面真有候选时），而翻页栏在候选行还要额外吃一个 `box_gap`
+        // （Row 的 gap），在栏行则没有。方向与条件都不同，硬并进来只会再造一个分叉。
+        let mode_chip_node_w = || -> f32 {
+            if self.mode_label.is_empty() {
+                return 0.0;
+            }
+            // 门控与 `decorate_mode_chip` 同源：没底色也没边框时它不包盒子，也就没有内边距。
+            let chip_pad = if v.mode_label.bg_color.is_some()
+                || eff_border(&v.mode_label, false, false).is_some()
+            {
+                let p = edges_or(&v.mode_label.padding, [1.0, 6.0, 1.0, 6.0]);
+                p.l + p.r
+            } else {
+                0.0
+            };
+            self.text_renderer
+                .measure(
+                    &self.mode_label,
+                    &Self::measure_style(
+                        node_fs(&v.mode_label),
+                        v.mode_label.font_weight,
+                        v.mode_label.font_family.as_deref(),
+                    ),
+                )
+                .width
+                + chip_pad
+        };
+        let pager_node_w = || -> f32 {
+            let footer_fs = node_fs(&v.footer_bar);
+            let fpad = edges_or(&v.footer_bar.padding, [0.0, 6.0, 0.0, 6.0]);
+            let fmargin = edges_or(&v.footer_bar.margin, [0.0, 0.0, 0.0, 8.0]);
+            let num_w = if self.page_number_visible() {
+                self.text_renderer
+                    .measure(
+                        &format!("{}/{}", self.page, self.total_pages),
+                        &Self::measure_style(
+                            footer_fs,
+                            v.footer_bar.font_weight,
+                            v.footer_bar.font_family.as_deref(),
+                        ),
+                    )
+                    .width
+            } else {
+                0.0
+            };
+            // 两个箭头各 arrow_w = 字号 + 左右 padding（见下方 pager 构造）。
+            2.0 * (footer_fs + fpad.l + fpad.r) + num_w + fmargin.l + fmargin.r
+        };
+
+        // **独立**编码栏（`!preedit_embedded`）的文字预算：它是 root 这个 Column 的直接子节点、
+        // 自成一行，不与候选抢宽度，故只需扣窗口内边距与自身内边距——**以及同一行右端那两个
+        // 不截断的成员**。
+        // 内联编码（`preedit_embedded`）走的是另一条路——它在候选行里，预算由下方的统一分配
+        // （横排 water-filling）给出。
+        //
+        // ★ 右端预留（F-17）：band 排的是 `[编码][spacer][徽标][翻页栏]`，后两者是纯加在编码
+        // 后面的，此前一个都没进预算。超长编码下 `root` 就按超宽排完了版，而窗口宽那道钳制
+        // （见渲染入口 `content_w.min(safety_max_w)`）是**裁切**语义、不回头改 `root`，于是
+        // 溢出的部分在右缘直接被切掉且没有省略号 —— 翻页栏和徽标看不见，或只剩半截箭头。
+        // 实测（scale=1，200 组 `a'`，上限 3000）：光翻页栏就撑到 3091.6，加上徽标 3146.8。
+        //
+        // ⚠️ 旋转态下 `content_budget_px` 量的是**局部横轴**（屏幕高度），而独立编码栏在旋转
+        // 包裹**之外**、量的是屏幕宽度——这里是两条轴混用。竖屏上长 preedit 会拿到超过屏幕
+        // 宽度的预算而不被截断（窗口本身仍被渲染期的宽度钳制夹住，夹不到文字）。
+        // 已知边界，蒙文用户是横屏，暂不为它再分一条轴。
+        let preedit_bar_right_reserve_px = {
+            // 徽标的 12px 是它在 band 里的**左**外边距（把它与编码拉开），与候选行那个右留白
+            // 不是同一笔账——那边由 `mode_label_row_w` 按「后面有没有候选」决定。
+            let chip = if self.mode_label.is_empty() {
+                0.0
+            } else {
+                12.0 * s + mode_chip_node_w()
+            };
+            // band 里翻页栏直接挂在 spacer 右侧，没有容器 gap 可吃（候选行那条才有 box_gap）。
+            let pager = if pager_will_inline {
+                pager_node_w()
+            } else {
+                0.0
+            };
+            chip + pager
+        };
+        let preedit_bar_text_budget_px = (content_budget_px
+            - window_pad.l
+            - window_pad.r
+            - preedit_pad.l
+            - preedit_pad.r
+            - preedit_bar_right_reserve_px)
+            .max(min_text_w);
 
         let mut root = View::container(Layout::Column)
             .bg(col(v.window.bg_color, [255, 255, 255, 255]))
@@ -2671,26 +2756,7 @@ impl CandidateWindow {
         let preedit_bar_shown_pre = !self.preedit.is_empty() && !self.preedit_embedded;
         let mode_label_row_w =
             if !list_vertical && !self.mode_label.is_empty() && !preedit_bar_shown_pre {
-                let ml_fs = node_fs(&v.mode_label);
-                let chip_pad = if v.mode_label.bg_color.is_some()
-                    || eff_border(&v.mode_label, false, false).is_some()
-                {
-                    let p = edges_or(&v.mode_label.padding, [1.0, 6.0, 1.0, 6.0]);
-                    p.l + p.r
-                } else {
-                    0.0
-                };
-                self.text_renderer
-                .measure(
-                    &self.mode_label,
-                    &Self::measure_style(
-                        ml_fs,
-                        v.mode_label.font_weight,
-                        v.mode_label.font_family.as_deref(),
-                    ),
-                )
-                .width
-                + chip_pad
+                mode_chip_node_w()
                 // 与装配段的 `trailing` **同源同条件**：无候选时那边给 0，这边再无条件加
                 // 12 就会把可用宽算少，超长编码提前一截。两处分开写过一次，正是 GH#127
                 // 只修好一半的原因。
@@ -2721,25 +2787,9 @@ impl CandidateWindow {
         let pager_row_w = if self.pager_visible()
             && ((!list_vertical && !pager_will_inline) || pager_in_inline_row)
         {
-            let footer_fs = node_fs(&v.footer_bar);
-            let fpad = edges_or(&v.footer_bar.padding, [0.0, 6.0, 0.0, 6.0]);
-            let fmargin = edges_or(&v.footer_bar.margin, [0.0, 0.0, 0.0, 8.0]);
-            let num_w = if self.page_number_visible() {
-                self.text_renderer
-                    .measure(
-                        &format!("{}/{}", self.page, self.total_pages),
-                        &Self::measure_style(
-                            footer_fs,
-                            v.footer_bar.font_weight,
-                            v.footer_bar.font_family.as_deref(),
-                        ),
-                    )
-                    .width
-            } else {
-                0.0
-            };
-            // 两个箭头各 arrow_w = 字号 + 左右 padding（见下方 pager 构造）。
-            2.0 * (footer_fs + fpad.l + fpad.r) + num_w + fmargin.l + fmargin.r + box_gap
+            // `box_gap` 是**候选行这个 Row 的 gap**，只有这条落点吃得到；独立编码栏那条
+            // 挂在 spacer 右侧、没有容器间隙，故它只取节点自身宽（见 `pager_node_w` 上方）。
+            pager_node_w() + box_gap
         } else {
             0.0
         };
@@ -4480,6 +4530,97 @@ mod pager_inline_tests {
             "沉底时翻页栏须随编码行落到候选之下（翻页栏 y={} vs 首候选 y={}）",
             p.y,
             c0.y
+        );
+    }
+
+    /// 造一个**独立编码栏**（`candidate_top`）的窗口，可带模式徽标。
+    ///
+    /// 与 `win()` 的区别只有两条：`embedded = false`，以及 `mode_label` 可非空。
+    /// 单列一个助手而不给 `win()` 再加参数——这两条测的是 band 那条落点，与内联那族无关。
+    fn bar_win(label: &str, on: bool, preedit: &str) -> CandidateWindow {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        w.scale = 1.0;
+        w.set_orientation(true, false, false);
+        w.set_preedit_embedded(false);
+        w.set_pager_in_preedit(on);
+        let items: Vec<CandidateItem> = ["一", "二", "三"].iter().map(|t| cand(t)).collect();
+        w.update(preedit, preedit.len(), label, items, 0, -1, 1, 3);
+        w
+    }
+
+    /// ★ F-17：**独立**编码栏那条落点同样要为并入的翻页栏留出宽度。
+    ///
+    /// 这是 55032bc0 给内联那条补的同一笔账的另一半，当时漏了。band 排的是
+    /// `[编码][spacer][徽标][翻页栏]`，而 `preedit_bar_text_budget_px` 只扣了窗口内边距与
+    /// 自身内边距，后两个成员一个都没进预算。
+    ///
+    /// ⚠️ 症状**不是**「窗口探出屏幕」：渲染入口那道 `content_w.min(safety_max_w)` 是**裁切**
+    /// 语义、不回头改 `root`，所以窗口出不去，超出的部分在右缘直接被切掉且没有省略号——
+    /// 翻页栏看不见或只剩半截箭头。也正因如此 `width_budget_tests` 那组抓不到它（它断的是
+    /// 钳制**之后**的窗口宽，恒满足）。判据必须量 `laid()` 的**树宽**、与安全上限比。
+    ///
+    /// 实测（scale=1，200 组 `a'`，上限 3000）：修复前树宽 3091.6，修复后 2994.4。
+    #[test]
+    fn long_preedit_in_own_bar_reserves_room_for_inlined_pager() {
+        let long = "a'".repeat(200);
+        let w = bar_win("", true, &long);
+        let cap = w.screen_safety_max_width_px() as f32;
+        // 前置①：这一行必须**已经被上限夹住**（再加长一倍不再变宽），否则不等式恒真。
+        let root = laid(&w, false);
+        let (win_w, _) = root.measured_size();
+        assert_eq!(
+            win_w,
+            laid(&bar_win("", true, &"a'".repeat(400)), false)
+                .measured_size()
+                .0,
+            "前置：超长编码须已被宽度上限夹住"
+        );
+        // 前置②：这一档确实并入了编码栏（翻页栏落在编码那一行，不是候选区底部）。
+        let p = pager(&root);
+        let c0 = first_cand(&root);
+        assert!(
+            p.y < c0.y,
+            "前置：翻页栏须并在编码行（y={} 应在首候选 y={} 之上）",
+            p.y,
+            c0.y
+        );
+
+        assert!(
+            win_w <= cap + 0.5,
+            "整棵树不得越过安全上限（{win_w} vs {cap}）—— 越过的部分会被右缘裁掉"
+        );
+        assert!(
+            p.x + p.w <= win_w + 0.5,
+            "翻页栏须完整落在窗口内（右缘 {} vs 窗口宽 {win_w}）",
+            p.x + p.w
+        );
+    }
+
+    /// ★ F-17 的另一半：模式徽标同样占着 band 的右端，同样得进预算。
+    ///
+    /// 与上一条分开是因为两者**各自独立**地漏掉了——实测（同参数）只带徽标不开翻页栏时
+    /// 树宽 3046.4，仍越上限 46.4；只有两项都扣掉，四种组合才全部落回上限内。
+    #[test]
+    fn long_preedit_in_own_bar_reserves_room_for_mode_chip() {
+        let long = "a'".repeat(200);
+        let w = bar_win("临时英文", false, &long);
+        let cap = w.screen_safety_max_width_px() as f32;
+        let root = laid(&w, false);
+        let (win_w, _) = root.measured_size();
+        assert_eq!(
+            win_w,
+            laid(&bar_win("临时英文", false, &"a'".repeat(400)), false)
+                .measured_size()
+                .0,
+            "前置：超长编码须已被宽度上限夹住"
+        );
+        // 前置：对照组（无徽标）必须**本来就没越界**，否则这条量到的是别的账。
+        let plain = laid(&bar_win("", false, &long), false).measured_size().0;
+        assert!(plain <= cap + 0.5, "前置：无徽标时本就不该越界（{plain}）");
+        assert!(
+            win_w <= cap + 0.5,
+            "带模式徽标时整棵树仍不得越过安全上限（{win_w} vs {cap}）"
         );
     }
 
