@@ -281,7 +281,7 @@ public:
     CCommitTextEditSession(CTextService* pTextService, ITfContext* pContext,
                            ITfComposition* pComposition, const std::wstring& text)
         : _refCount(1), _pTextService(pTextService), _pContext(pContext),
-          _pComposition(pComposition), _text(text), _success(FALSE)
+          _pComposition(pComposition), _text(text), _success(FALSE), _executed(FALSE)
     {
         _pTextService->AddRef();
         _pContext->AddRef();
@@ -362,6 +362,10 @@ public:
 
     STDMETHODIMP DoEditSession(TfEditCookie ec)
     {
+        // 「本会话确实跑过」——**必须是函数第一句**，且与成败无关。CommitText 靠它区分
+        // 「宿主没给锁、会话一次都没执行」与「执行了但没写成」，两者的善后相反。见 WasExecuted()。
+        _executed = TRUE;
+
         // 标准 IME 提交语义: 把最终上屏文字 SetText 到 composition range 后再
         // EndComposition, 让宿主应用通过 OnEndComposition 看到的 range 内容就是
         // 上屏文字, 与微软拼音/搜狗/Rime 一致。
@@ -486,15 +490,25 @@ public:
 
     BOOL GetSuccess() const { return _success; }
 
-    // 组合是否仍在本对象手里 —— 等价于「DoEditSession 还没执行到组合处置那一步」。
+    // 组合是否仍在本对象手里。
     //
     // DoEditSession 一旦跑到组合分支，无论成败都会 EndComposition + Release + 置空
-    // （GetRange 失败那条 fallthrough 也已经 EndComposition 过了）。所以这个判据能精确
-    // 区分两种失败：
-    //   TRUE  = 会话根本没执行（宿主拒发锁），组合仍是活的，Release 掉它就会变成孤儿；
-    //   FALSE = 会话执行过了，组合已正常结束，此时补一次 SendInput 只会重复出字。
-    // 两者的善后完全相反，不能只看 GetSuccess() 就一律 SendInput。见 CommitText。
+    // （GetRange 失败那条 fallthrough 也已经 EndComposition 过了）。
+    //
+    // ⚠️ **不要拿它当「会话是否执行过」的判据**——那是 [`WasExecuted`] 的活儿。本对象
+    // 构造时 pComposition 就可能是 nullptr（空缓冲直接上屏符号、鼠标上屏），那时它恒为
+    // FALSE，与执行与否无关。判据要的是"执行过没有"就直接问 WasExecuted()。
     BOOL HasPendingComposition() const { return _pComposition != nullptr; }
+
+    // 「DoEditSession 是否真的被执行过」——与成败无关，只答跑没跑。
+    //
+    // 为什么需要它而不能沿用 HasPendingComposition()：后者只在**本来就有 composition**
+    // 时才与"执行过没有"同义。无 composition 的提交（空缓冲直接上屏符号、鼠标上屏）里
+    // _pComposition 从一开始就是 nullptr，恒 FALSE ⇒ 宿主拒发同步锁时会被误判成"已执行
+    // 过"，于是跳过异步重试、直接落 SendInput 末路兜底。而 SendInput 是三条出路里最差的
+    // 一条：受 UIPI（被拦时静默失败）、受物理修饰键污染，且非 TSF-aware 宿主普遍会把
+    // 注入的字符码当虚拟键码解释（B-9 在 Tkinter 上实测到的就是这一类）。能退异步就别落它。
+    BOOL WasExecuted() const { return _executed; }
 
 private:
     LONG _refCount;
@@ -503,6 +517,7 @@ private:
     ITfComposition* _pComposition;  // Owned composition pointer
     std::wstring _text;
     BOOL _success;
+    BOOL _executed;  // DoEditSession 跑过没有（与成败无关）；见 WasExecuted()
 };
 
 // EditSession：把光标前 count 个字符替换为 text（智能符号纠错替换）。
@@ -7055,9 +7070,15 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
             // 与 nonKeyContext 分支同构。pEditSession 由 TSF 保活至 DoEditSession 运行，
             // 组合随之正确收尾。代价是用户可能多看到原码若干毫秒——比文档里多一串编码轻。
             //
-            // 组合已不在（HasPendingComposition()==FALSE）时不走这里：那说明会话执行过、
-            // 组合已正常结束，再请求一次只会重复出字，仍按原样走 SendInput 兜底。
-            if (pEditSession->HasPendingComposition())
+            // 判据是「会话跑过没有」，**不是**「组合还在不在」。
+            //   没跑过（宿主拒发锁）⇒ 退异步，让 TSF 在能授予锁时原地落定；
+            //   跑过但没写成       ⇒ 再请求一次只会重复出字，按原样走 SendInput 兜底。
+            //
+            // ⚠️ 曾用 HasPendingComposition() 当这个判据，对**无 composition 的提交**是错的：
+            // 空缓冲直接上屏符号 / 鼠标上屏时 _pComposition 从一开始就是 nullptr，它恒为
+            // FALSE ⇒ 同步被拒也被当成"已执行过"，跳过异步重试直接落 SendInput。而 Tk 一类
+            // 非 TSF-aware 宿主上 SendInput 恰是最坏的一条路（B-9）。见 WasExecuted()。
+            if (!pEditSession->WasExecuted())
             {
                 HRESULT hrAsyncSession = S_OK;
                 HRESULT hrAsyncReq = pContext->RequestEditSession(
@@ -7082,7 +7103,9 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
             {
                 pEditSession->Release();
                 pContext->Release();
-                WIND_LOG_WARN_FMT(L"CommitText: TSF method failed (hr=0x%08X, hrSession=0x%08X), composition already ended, falling back to SendInput, duration=%dms\n",
+                // 会话跑过了但没写成（组合已收尾 / SetText 与 InsertTextAtSelection 双双失败）。
+                // 重试无意义，落 SendInput 保证不丢字。
+                WIND_LOG_WARN_FMT(L"CommitText: TSF method failed (hr=0x%08X, hrSession=0x%08X), session executed but commit failed, falling back to SendInput, duration=%dms\n",
                              hr, hrSession, durationMs);
             }
         }
