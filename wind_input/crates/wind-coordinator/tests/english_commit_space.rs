@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wind_bridge::handler::{CommitRequestData, KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
+use wind_config::config::RawCandidateMode;
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_SHIFT};
 
@@ -210,7 +211,7 @@ fn raw_code_space_commit_appends_space() {
         return;
     }
     let mut cfg = english_config(true);
-    cfg.schema.english.raw_candidate = false;
+    cfg.schema.english.raw_candidate = RawCandidateMode::Off;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
 
     // 前提：该串在词库中无候选。若日后词库收录了它，前提失效 → 显式失败而非静默变成
@@ -241,7 +242,7 @@ fn raw_code_space_commit_appends_space_when_capitalized() {
         return;
     }
     let mut cfg = english_config(true);
-    cfg.schema.english.raw_candidate = false;
+    cfg.schema.english.raw_candidate = RawCandidateMode::Off;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
 
     // 与小写那条同一个无候选串，只把首字母改成大写输入。
@@ -269,7 +270,7 @@ fn raw_code_enter_commit_does_not_append_space() {
     }
     // 同上：关掉原文候选，否则「无候选」的前提不成立。
     let mut cfg = english_config(true);
-    cfg.schema.english.raw_candidate = false;
+    cfg.schema.english.raw_candidate = RawCandidateMode::Off;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
 
     let nonsense = "qwxzjv";

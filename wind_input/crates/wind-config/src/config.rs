@@ -795,17 +795,96 @@ pub struct FrequencyGlobal {
     pub exclude_blocks: Vec<String>,
 }
 
+/// 「首候选是所打原文」的三档（`schema.english.raw_candidate` /
+/// `input.temp_english.raw_candidate`，两个作用域各一份）。
+///
+/// # 为什么是三档而不是开关
+///
+/// 英文引擎的特殊性是「输入即内容」——输入串本身就是合法上屏文本。但用户对这条能力的
+/// 需求**依赖当次输入的查询结果**，静态开关表达不了（t139 / A2-2）：
+///
+/// - 打 `hel`（词库里没有这个词）：开着就多出一条 `hel` 占着首位，用户不想要；
+/// - 打 `hell`（词库里有）：关掉就被调频顶下去（`hello` 用得多就排到了前面），用户想要
+///   它恒在首位。
+///
+/// 两种诉求**同时**成立，而 `true` / `false` 各只满足一半。[`Self::InDict`] 就是那条
+/// 缺失的对角线：按「原文本身是不是词库词」在另外两档之间逐次切换。
+///
+/// # 判据为什么是**字面**相同，不是忽略大小写、也不是 `is_exact_code`
+///
+/// 实测（`en.dict.yaml`）：打 `hell` 时 `he'll` 的 `code` 也是 `hell`（撇号在建码时被
+/// 剥掉）⇒ `is_exact_code` 回答的是「码对得上」，不是「这个词在词库里」，据它产出的
+/// 原文候选可能是一个词库里根本不存在的词。
+///
+/// 忽略大小写同样不取：打 `usa` 时词库里只有 `USA`，`usa` 这个**字面**并不在词库里。
+/// 按字面判 ⇒ 不产原文候选 ⇒ `USA` 自然成为首选，正是用户要的；而想上屏小写 `usa`
+/// 仍可按回车走「上屏原码」那条既有通路。判据口径与紧邻的**精确去重**一致
+/// （`heads.contains(c.text)`，那里的注释写明「不是小写去重」）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RawCandidateMode {
+    /// 恒是首候选（历史 `true`，出厂档）。打词库里没有的词时它是唯一能上屏的东西。
+    #[default]
+    Always,
+    /// **仅当所打原文本身是词库里的词**时才作首候选（钉最前、不受调频影响）；
+    /// 否则一条都不产，列表就是纯词库候选、调频照常生效。
+    InDict,
+    /// 不产原文候选（历史 `false`）。想上屏所打原文走回车。
+    Off,
+}
+
+/// `raw_candidate` 的兼容反序列化：老配置里它是 `bool`。
+///
+/// `true` → [`RawCandidateMode::Always`]、`false` → [`RawCandidateMode::Off`]，与升级前
+/// 逐字节同义。⚠️ **不可改成「认不出就当 Always」**：那会把 `false` 也吞成开启，
+/// 关掉过这一项的用户升级后会突然多出一条原文候选，而他没改过任何设置。
+///
+/// 字符串分支把值重新喂给 derive 生成的实现（同 [`crate::tolerant_de::tolerant`] 的手法），
+/// 值域因此仍只有枚举本身一份；写错了回落出厂档并记进 fallback 供设置端 toast。
+fn de_raw_candidate<'de, D>(d: D) -> Result<RawCandidateMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::IntoDeserializer;
+    use serde::de::value::StrDeserializer;
+    let v = toml::Value::deserialize(d)?;
+    match v {
+        toml::Value::Boolean(true) => Ok(RawCandidateMode::Always),
+        toml::Value::Boolean(false) => Ok(RawCandidateMode::Off),
+        toml::Value::String(raw) => {
+            let sd: StrDeserializer<'_, D::Error> = raw.as_str().into_deserializer();
+            match RawCandidateMode::deserialize(sd) {
+                Ok(v) => Ok(v),
+                Err(_) => {
+                    tracing::warn!(
+                        "配置值 \"{raw}\" 不在 raw_candidate 的取值范围内（always / in_dict / off，\
+                         或老写法 true / false），本项回落出厂默认值"
+                    );
+                    crate::tolerant_de::record_fallback(&raw);
+                    Ok(RawCandidateMode::default())
+                }
+            }
+        }
+        // 其余类型（数字、数组…）交给段级降级，与 `tolerant` 的分工一致：
+        // 值域层只回答「这个值在不在值域里」，不吞类型错误。
+        other => Err(serde::de::Error::custom(format!(
+            "raw_candidate 应为 always / in_dict / off（或老写法 true / false），实际是 {}",
+            other.type_str()
+        ))),
+    }
+}
+
 /// 全局英文配置（[schema.english]）。
 ///
 /// 英文自 0.114 起是可切换方案，行为不再挂靠码表段——那是历史包袱：英文引擎复用了
 /// 码表的重排路径，配置就顺手挂在了 `schema.codetable` 下，于是纯码表用户的「上屏行为」
 /// 里混着只对英文生效的项，而英文用户改调频策略又会连带改掉五笔的。
 ///
-/// ⚠️ **不 derive `Default`**：本段有默认 `true` 的字段，而 `derive(Default)` 只会给 bool
-/// 零值。serde 的 `#[serde(default = "default_true")]` 只在**反序列化缺键**时生效，
-/// 管不着 `Config::default()` 这条路——两条路不一致的后果是「出厂配置文件里写着 true、
-/// 代码里的默认值却是 false」，而这种分叉只有端到端测试才看得见
-/// （见 `config-design-rules` §R4「L1 与 L2 必须一致」）。
+/// ⚠️ **不 derive `Default`**：本段有默认非零值的字段（如 `case_follow_input` 默认 `true`、
+/// `raw_candidate` 默认 [`RawCandidateMode::Always`]），而 `derive(Default)` 只会给零值。
+/// serde 的 `#[serde(default = ...)]` 只在**反序列化缺键**时生效，管不着 `Config::default()`
+/// 这条路——两条路不一致的后果是「出厂配置文件里写着 true、代码里的默认值却是 false」，
+/// 而这种分叉只有端到端测试才看得见（见 `config-design-rules` §R4「L1 与 L2 必须一致」）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnglishGlobal {
     #[serde(default)]
@@ -820,7 +899,8 @@ pub struct EnglishGlobal {
     /// - **不含**回车上屏原码（终结性动作）、标点键顶屏（会得到 `hello ,`）、顶码。
     #[serde(default)]
     pub commit_space: bool,
-    /// 首候选是用户所打原文（英文方案下的「输入即内容」保证）。**默认开**。
+    /// 首候选是用户所打原文（英文方案下的「输入即内容」保证）。**三档**，
+    /// 见 [`RawCandidateMode`]；出厂 [`RawCandidateMode::Always`]（＝老配置的 `true`）。
     ///
     /// 英文引擎的特殊性：输入串本身就是合法上屏内容。而调频一旦把某个词顶到首位，
     /// 想上屏所打原文就只剩回车这一条路，而回车是终结性动作、会打断连续输入流。
@@ -828,8 +908,8 @@ pub struct EnglishGlobal {
     ///
     /// 与 `input.temp_english.raw_candidate` 是**两个作用域各一份**，不是两个真相源：
     /// 用户对「中文里插一个英文词」与「长时打英文」的需求本就可能相反。
-    #[serde(default = "default_true")]
-    pub raw_candidate: bool,
+    #[serde(default, deserialize_with = "de_raw_candidate")]
+    pub raw_candidate: RawCandidateMode,
     /// 生成大小写变形候选（全小写 / 首字母大写 / 全大写）。**默认关**。
     ///
     /// ★ 与临英那份（`input.temp_english.case_variants`，默认**开**）默认值刻意相反，
@@ -854,7 +934,7 @@ impl Default for EnglishGlobal {
         Self {
             frequency: EnglishFrequency::default(),
             commit_space: false,
-            raw_candidate: true,
+            raw_candidate: RawCandidateMode::Always,
             case_variants: false,
             case_follow_input: true,
         }
@@ -3645,16 +3725,23 @@ pub struct TempEnglishConfig {
     /// 临英常设 `candidate_layout = "horizontal"`，此时生效的是本项而非竖排那份。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_template_horizontal: CommentTemplateOverride,
-    /// 首候选是用户所打原文（保证能上屏自己输入的内容）。
+    /// 首候选是用户所打原文（保证能上屏自己输入的内容）。**三档**，见
+    /// [`RawCandidateMode`]；出厂 [`RawCandidateMode::Always`]（＝老配置的 `true`，
+    /// 保持既有行为——此前这条是硬编码、不可配的）。
     ///
-    /// **默认开 = 保持既有行为**：此前这条是硬编码、不可配的。开成配置项是因为「打英文时
-    /// 总是走词库补全」也是一种合理偏好——原文占掉首位，常用词就永远在 2 号键。
+    /// 开成配置项是因为「打英文时总是走词库补全」也是一种合理偏好——原文占掉首位，
+    /// 常用词就永远在 2 号键。
     ///
-    /// ⚠️ 与 [`Self::case_variants`] **同时关闭**且词库无命中时，候选列表会是空的。
-    /// 那不是缺陷：临英空格臂的判据是「实际候选是否为空」而非本配置，空候选会正确落到
-    /// 「上屏缓冲原文」的兜底分支。见 `handle_temp.rs` 空格臂。
-    #[serde(default = "default_true")]
-    pub raw_candidate: bool,
+    /// ⚠️ 本项为 [`RawCandidateMode::Off`]（或 [`RawCandidateMode::InDict`] 未命中）
+    /// 且 [`Self::case_variants`] 也关、词库又无命中时，候选列表会是空的。那不是缺陷：
+    /// 临英空格臂的判据是「实际候选是否为空」而非本配置，空候选会正确落到「上屏缓冲原文」
+    /// 的兜底分支。见 `handle_temp.rs` 空格臂。
+    ///
+    /// ⚠️ `show_candidates = false` 时词库**根本不被查询**，`InDict` 的判据无从回答，
+    /// 届时按 [`RawCandidateMode::Always`] 处理（见 `update_temp_english_candidates`）
+    /// ——否则这个组合下临英一条候选都不产。
+    #[serde(default, deserialize_with = "de_raw_candidate")]
+    pub raw_candidate: RawCandidateMode,
     /// 生成大小写变形候选（全小写 / 首字母大写 / 全大写）。
     ///
     /// 关掉后候选只剩输入原文 + 词库匹配。变形候选的代价是**每条都占一个候选位**：
@@ -3699,7 +3786,7 @@ impl Default for TempEnglishConfig {
             symbol_chars: default_temp_english_symbol_chars(),
             space_as_input: false,
             candidate_layout: LayoutIntent::default(),
-            raw_candidate: true,
+            raw_candidate: RawCandidateMode::Always,
             case_variants: true,
             case_follow_input: true,
             comment_template_vertical: None,

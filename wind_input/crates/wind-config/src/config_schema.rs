@@ -175,6 +175,11 @@ pub const FONT_SCRIPT_KEYS: &[&str] = &[
 /// mix / special 的同名字段是 StructList 条目内的属性，不在本注册表单独登记。
 const LAYOUT_INTENT_VALUES: &[&str] = &["follow", "vertical", "horizontal"];
 
+/// 「首候选是所打原文」的三档（`RawCandidateMode`）。老配置里本项是 `bool`，
+/// 反序列化侧仍认 `true` / `false`（见 `de_raw_candidate`），但**设置端只写新值域**
+/// ——两侧都认 bool 的话，写回一次就把用户的档位悄悄降级成两档。
+const RAW_CANDIDATE_VALUES: &[&str] = &["always", "in_dict", "off"];
+
 /// emoji 扩展的触发范围（`input.emoji.scope`）。
 ///
 /// ★ 值域登记在这里而不是只写进注释：core 与设置页 options 各写一份的话，两者脱节了
@@ -257,7 +262,7 @@ static REGISTRY: &[ConfigField] = &[
         Enum(ENGLISH_CODE_SCOPE_VALUES),
     ),
     f("schema.english.commit_space", Bool),
-    f("schema.english.raw_candidate", Bool),
+    f("schema.english.raw_candidate", Enum(RAW_CANDIDATE_VALUES)),
     f("schema.english.case_variants", Bool),
     f("schema.english.case_follow_input", Bool),
     f("schema.codetable.auto_phrase.enabled", Bool),
@@ -403,7 +408,10 @@ static REGISTRY: &[ConfigField] = &[
     f("input.temp_english.allow_symbols", Bool),
     f("input.temp_english.symbol_chars", Str),
     f("input.temp_english.space_as_input", Bool),
-    f("input.temp_english.raw_candidate", Bool),
+    f(
+        "input.temp_english.raw_candidate",
+        Enum(RAW_CANDIDATE_VALUES),
+    ),
     f("input.temp_english.commit_space", Bool),
     // 候选窗定位方式（内部配置，不进设置页 —— 见 wind-setting 的 uncovered allowlist）。
     f("input.caret.add_word_via_composition", Bool),

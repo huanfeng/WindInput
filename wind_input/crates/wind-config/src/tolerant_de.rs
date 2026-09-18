@@ -67,7 +67,9 @@ pub fn take_fallbacks() -> Vec<String> {
     })
 }
 
-fn record_fallback(raw: &str) {
+/// `pub(crate)`：自定义 `Deserialize` 的字段（如 `de_raw_candidate`，它要兼容老的 bool
+/// 形态、无法直接套 [`tolerant`]）同样要把回落记进来，否则设置端的 toast 漏报这一项。
+pub(crate) fn record_fallback(raw: &str) {
     FALLBACKS.with(|f| f.borrow_mut().push(raw.to_string()));
 }
 

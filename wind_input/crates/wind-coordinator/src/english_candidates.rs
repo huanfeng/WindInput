@@ -24,7 +24,54 @@
 //! 只对**词库段**跑 `apply_freq_rerank_in` / `apply_shadow_in`。
 
 use crate::key_convert::en_case_variants;
-use wind_candidate::Candidate;
+use wind_candidate::{Candidate, CandidateSource};
+use wind_config::config::RawCandidateMode;
+
+/// [`RawCandidateMode`] 的落点：这一次输入要不要产出「原文」那条头部候选。
+///
+/// 两侧调用方（主输入路 / 临英）都经本函数，档位语义因此只有一份实现——同本模块
+/// 「配置分开、实现共用」的纪律：分歧只允许出现在*要不要生成*，不允许出现在*生成什么*。
+///
+/// # `InDict` 的判据：`dict` 里有没有与原文**字面**相同的**英文词库**候选
+///
+/// 判据用字面相等（`==`），**不是** `eq_ignore_ascii_case`、**也不是** `is_exact_code`，
+/// 理由见 [`RawCandidateMode`] 的类型文档（`he'll` 的 code 同为 `hell`；`usa` 的字面不在
+/// 词库里）。口径与紧邻调用点的**精确去重**一致，两处必须同进同退：去重按字面吃掉词库
+/// 同名候选，判据也按字面认定「同名候选存在」。
+///
+/// ★ **必须先按 `source` 收到英文词库来源上**，只比 `text` 会被短语误判。主输入路传进来的
+/// 是**整张候选表**，走到这里时短语/命令/组候选已经并进去了（`finalize_candidates` 还把
+/// `$` 语法展开成了显示文本）；只要有一条短语的文本恰好等于所打原文，`in_dict` 就会在
+/// 「这个词根本不在英文词库里」时产出原文候选，而且紧接着的精确去重还会把用户那条短语从
+/// 列表里抹掉、换上一条无来源的原文候选。`case_follow_input` 的投影跑在整列上、也会改写
+/// 短语文本，误判面比看上去更大。
+///
+/// ⚠️ 这是**防御性**的：出厂 `english.schema.toml` 写着 `[phrases] enabled = false`
+/// （理由见该文件——`date` / `tel` / `em` 这类既是短语码也是英文词，打英文时会莫名跳出
+/// 中文内容），故出厂配置下英文方案根本不出短语候选，这条守卫在端到端层面**测不出来**，
+/// 单元测试 `in_dict_ignores_non_dictionary_sources` 直接喂判据一张含短语的表来钉它。
+/// 定制层或第三方英文方案一旦打开 `[phrases]`，它就是实打实的。
+///
+/// 收到 `source` 上之后，两个调用点的答案才真正同口径——这正是本模块「产出必须逐字节
+/// 相同」那条纪律要求的。
+///
+/// ⚠️ `dict` 必须已过 shadow 删除与大小写投影：
+/// - 用户把某个词隐藏掉了，它就不该再让原文候选冒出来；
+/// - 投影会改写候选文本，判据在投影前后求值的结果不同（见调用点注释）。
+///
+/// ⚠️ **`dict` 为空要区分「问过没命中」与「根本没问」**。临英在
+/// `show_candidates = false` 时压根不查词库（`overlay_engine_schema` 返回 `None`），
+/// 那种情况下判据无从回答，调用方须退回 [`RawCandidateMode::Always`] 而不是让它恒假
+/// ——否则「原文那条在候选关闭时仍是『空格上屏什么』的依据」这条既有语义就断了。
+pub(crate) fn wants_raw_candidate(mode: RawCandidateMode, raw: &str, dict: &[Candidate]) -> bool {
+    match mode {
+        RawCandidateMode::Always => true,
+        RawCandidateMode::Off => false,
+        RawCandidateMode::InDict => dict
+            .iter()
+            .any(|c| c.source == CandidateSource::English && c.text == raw),
+    }
+}
 
 /// 生成头部候选：`[原文] + [大小写变形…]`，内部已去重（变形与原文相同者不产出）。
 ///
@@ -198,6 +245,61 @@ pub(crate) fn dedup_by_text(cands: &mut Vec<Candidate>) {
 
 #[cfg(test)]
 mod tests {
+    fn dict_cand(text: &str) -> Candidate {
+        Candidate {
+            text: text.to_string(),
+            source: CandidateSource::English,
+            ..Default::default()
+        }
+    }
+
+    fn phrase_cand(text: &str) -> Candidate {
+        Candidate {
+            text: text.to_string(),
+            source: CandidateSource::Phrase,
+            is_phrase: true,
+            ..Default::default()
+        }
+    }
+
+    /// `InDict` 只认**英文词库来源**：文本相同但来源是短语的那条不得让判据成立。
+    ///
+    /// 出厂英文方案不加载短语（`english.schema.toml` 的 `[phrases] enabled = false`），
+    /// 所以这条守卫在端到端层面测不出来——必须在这里直接喂判据一张含短语的表。
+    /// 定制层或第三方方案打开 `[phrases]` 后它才会真的被走到。
+    #[test]
+    fn in_dict_ignores_non_dictionary_sources() {
+        let raw = "zzq";
+        assert!(
+            !wants_raw_candidate(RawCandidateMode::InDict, raw, &[phrase_cand("zzq")]),
+            "短语文本恰好等于所打原文，不代表这个词在英文词库里"
+        );
+        assert!(
+            wants_raw_candidate(RawCandidateMode::InDict, raw, &[dict_cand("zzq")]),
+            "同样的文本、来源是英文词库时，判据必须成立"
+        );
+        // 混表：短语在前、词库在后，仍应以词库那条为准。
+        assert!(
+            wants_raw_candidate(
+                RawCandidateMode::InDict,
+                raw,
+                &[phrase_cand("zzq"), dict_cand("zzq")]
+            ),
+            "混表下只要存在词库同名候选，判据就该成立"
+        );
+    }
+
+    /// 另外两档不看 `dict`，恒定返回。
+    #[test]
+    fn always_and_off_ignore_the_dictionary() {
+        assert!(wants_raw_candidate(RawCandidateMode::Always, "zzq", &[]));
+        assert!(!wants_raw_candidate(
+            RawCandidateMode::Off,
+            "zzq",
+            &[dict_cand("zzq")]
+        ));
+    }
+
     use super::*;
 
     fn texts(v: &[Candidate]) -> Vec<&str> {

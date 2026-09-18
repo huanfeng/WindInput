@@ -1414,13 +1414,15 @@ impl Coordinator {
         // （`aaaa` 不是可上屏文本），故这条只对英文引擎生效。
         //
         // ★ 钉在**所有加工之后**：重排、shadow、出简让全、空码补全收口全都只作用于词库
-        // 候选，原文才不会被挤走。手法与临英 `split_off(dict_start)` 同型，位置不同是因为
-        // 主路径的加工链更长、没有一个「词库段起点」可切。
+        // 候选，原文才不会被挤走。**与临英同序**（见 `update_temp_english_candidates`）——
+        // 两处都是词库段算完、头部候选最后生成。临英原先是反的（头部打底、词库追加），
+        // 2026-09-18 随 `RawCandidateMode::InDict` 掉了过来：那个档的判据要看词库段的最终
+        // 形态，而头部候选一旦先生成就没法再问「原文是不是词库词」了。
         //
         // 配置与临英各自独立（`schema.english.*` vs `input.temp_english.*`，默认值还刻意
         // 相反），但产出共用同一个函数——见 crate::english_candidates 模块文档。
         if self.engine_mgr.active_is_english() {
-            let (want_raw, want_variants, follow_case) = {
+            let (raw_mode, want_variants, follow_case) = {
                 let en = &self.rt().config.schema.english;
                 (en.raw_candidate, en.case_variants, en.case_follow_input)
             };
@@ -1442,6 +1444,11 @@ impl Coordinator {
                     crate::english_candidates::CaseVariant::Default,
                 );
             }
+            // ★ `InDict` 档的判据必须在**投影之后**求值：`case_follow_input` 开着时，打
+            // `Hell` 会把词库的 `hell` 投影成 `Hell`，此时它才与所打原文字面相同。放在投影
+            // 之前算，同一档在两个开关下给出的答案会不一样，而用户改的是另一个开关。
+            let want_raw =
+                crate::english_candidates::wants_raw_candidate(raw_mode, raw, &candidates);
             let head =
                 crate::english_candidates::english_head_candidates(raw, want_raw, want_variants);
             if !head.is_empty() {

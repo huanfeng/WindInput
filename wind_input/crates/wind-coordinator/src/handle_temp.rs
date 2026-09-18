@@ -13,6 +13,7 @@ use crate::preedit_cursor;
 use tracing::debug;
 use wind_bridge::handler::{KeyAction, KeyEventData};
 use wind_candidate::{Candidate, CandidateSource};
+use wind_config::config::RawCandidateMode;
 use wind_engine::manager::ENGLISH_SCHEMA;
 use wind_ipc::protocol::{MOD_SHIFT, MOD_SHORTCUT};
 use wind_keys::keymap;
@@ -989,31 +990,30 @@ impl Coordinator {
         // 会让 `Ver2b` 里的 `2` 被当成选词键；次选键越界回落标点的判据同理。
         // 原文那条不受此限：它在候选关闭时仍是「空格上屏什么」的依据（既有语义）。
         let dict_schema = self.overlay_engine_schema(state);
-        let (want_raw, want_variants) = {
+        let (raw_mode, want_variants) = {
             let te = &self.rt().config.input.temp_english;
             (te.raw_candidate, te.case_variants && dict_schema.is_some())
         };
-        let mut cands =
-            crate::english_candidates::english_head_candidates(&buf, want_raw, want_variants);
-        let mut cased = false;
-        let mut seen: std::collections::HashSet<String> =
-            cands.iter().map(|c| c.text.clone()).collect();
-        for (i, c) in cands.iter_mut().enumerate() {
-            c.natural_order = i as i32;
-        }
-        // 去重按精确文本；入列时补 `natural_order`（= 入列序）。取整条 `Candidate` 而非
-        // 只取文本：词库候选的 `source` / `code` 是词频记账与重排的依据，在这里丢掉的话
-        // 下游再也拿不回来。
-        let mut push_cand = |mut c: Candidate, cands: &mut Vec<Candidate>| {
-            if !seen.insert(c.text.clone()) {
-                return;
-            }
-            c.natural_order = cands.len() as i32;
-            cands.push(c);
+        // ★ 词库**根本没被查询**时（`show_candidates = false` ⇒ `overlay_engine_schema` 返回
+        // `None`），`InDict` 的判据无从回答——那不是「问过但没命中」。此时退回 `Always`：
+        // 否则判据恒假、而 `want_variants` 同时也被 `dict_schema.is_some()` 摁成 false，
+        // 临英会**一条候选都不产**，用户在设置页选的「仅当它是词库里的词」实际表现成
+        // 「永不显示」。上方那条「原文那条不受此限：它在候选关闭时仍是『空格上屏什么』的
+        // 依据」正是这里要守住的既有语义。
+        let raw_mode = if dict_schema.is_none() && raw_mode == RawCandidateMode::InDict {
+            RawCandidateMode::Always
+        } else {
+            raw_mode
         };
+        let mut cased = false;
+        // ★ **词库段先独立算完，头部候选最后才生成**（与主输入路同序）。
+        //
+        // 此前是反的（头部打底、词库追加），因为那时 `raw_candidate` 是个静态开关、不看
+        // 词库。`RawCandidateMode::InDict` 打破了这一点：判据是「所打原文是不是词库词」，
+        // 它要看的正是**这一段的最终形态**——shadow 删掉的词不该再让原文候选冒出来，
+        // 大小写投影也会改写候选文本。故顺序必须掉过来。
+        let mut dict_part: Vec<Candidate> = Vec::new();
         if let Some(schema) = dict_schema {
-            // 词库段起点：下面的词频重排与候选调整**只作用于这一段**。
-            let dict_start = cands.len();
             let code = buf.to_lowercase();
             // 取数上限按**词库方案自己的引擎类型**分级，与主输入路同一张表（见
             // `initial_candidate_limit_of`）。此前写死 `ENGINE_MAX_CANDIDATES`（50），
@@ -1036,11 +1036,16 @@ impl Coordinator {
                 &code,
             );
             let result = self.engine_mgr.convert_with(&schema, &code, limit);
-            for c in result.candidates {
-                // 来源与码原样带上：临英与英文方案共用一个词频桶，记账要的正是这两样
-                // （见 `record_temp_english_selection`）。此前只取 `text`，候选身份在这里
-                // 就丢了，上屏出口再想记词频已无从记起。
-                push_cand(c, &mut cands);
+            // 去重按精确文本；入列时补 `natural_order`（= 入列序）。取整条 `Candidate` 而非
+            // 只取文本：词库候选的 `source` / `code` 是词频记账与重排的依据，在这里丢掉的话
+            // 下游再也拿不回来。
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for mut c in result.candidates {
+                if !seen.insert(c.text.clone()) {
+                    continue;
+                }
+                c.natural_order = dict_part.len() as i32;
+                dict_part.push(c);
             }
             // 词频重排 + 候选调整（置顶/隐藏），归属方案与写端同源，见 `effective_data_schema`。
             //
@@ -1051,7 +1056,6 @@ impl Coordinator {
             // ★ 码取**小写化缓冲**：临英缓冲带大写（Shift+H 进入即 `H`），而英文方案下
             // `input_buffer` 恒为全小写。不归一的话两个入口各存一份键，「临英里学到的、
             // 切到英文方案不生效」，而这种失效是完全静默的。
-            let mut dict_part: Vec<Candidate> = cands.split_off(dict_start);
             self.apply_freq_rerank_in(Some(ENGLISH_SCHEMA), &mut dict_part, &code);
             self.apply_shadow_in(Some(ENGLISH_SCHEMA), &mut dict_part, &code);
             // ★ 大小写投影排在重排与置顶**之后**：那两者都以候选 `text` 为键，先改写文本
@@ -1068,8 +1072,40 @@ impl Coordinator {
                     crate::english_candidates::CaseVariant::Default,
                 );
             }
-            cands.extend(dict_part);
         }
+        // ── 头部候选：判据依赖上面那段的最终形态，故生成点在此而非函数开头 ──
+        //
+        // 精确去重：词库里字面相同的那条被头部候选吃掉（同主输入路）。**不是**小写去重
+        // ——`hello` 不该把词库里的 `Hello` 一起抹掉。⚠️ 这与 `InDict` 的判据是同一个
+        // 口径（都按字面），两处必须同进同退：判据认定「同名候选存在」，去重才吃得掉它。
+        let want_raw = crate::english_candidates::wants_raw_candidate(raw_mode, &buf, &dict_part);
+        let mut cands =
+            crate::english_candidates::english_head_candidates(&buf, want_raw, want_variants);
+        if !cands.is_empty() {
+            let heads: std::collections::HashSet<&str> =
+                cands.iter().map(|c| c.text.as_str()).collect();
+            dict_part.retain(|c| !heads.contains(c.text.as_str()));
+        }
+        // 头部占 `0..h`，词库段整体后移 h 位。对每条加同一个偏移不动相对序。
+        //
+        // ⚠️ 号**可能有空洞**，与拆分前并非逐值相同：那时被头部文本吃掉的那条词库候选在入列
+        // 阶段就被挡下、不占号，现在它要到上面 `retain` 才被移除、号已经发出去了。
+        // `natural_order` 只作为 `better()` / `by_natural()` 的**相对**比较键，且本路径在此
+        // 之后不再排序（`finalize_candidates` 不排），故无可观察差异——但别据此在别处依赖
+        // 它的**绝对值**。
+        //
+        // ⚠️ 同源的另一处顺序变化：`apply_shadow_in` 现在看到的表里**还留着**那条将被头部
+        // 吃掉的候选（它用的是绝对下标 `position.min(len)`），于是「把某词置顶到第 2 位」
+        // 在原文命中时会落到第 1 位。这是**向主输入路对齐**（那边一直是 shadow 在前、
+        // 去重在后），不是缺陷；记在这里是因为「置顶位置差一位」这种现象不写下来会查很久。
+        let head_len = cands.len() as i32;
+        for (i, c) in cands.iter_mut().enumerate() {
+            c.natural_order = i as i32;
+        }
+        for c in dict_part.iter_mut() {
+            c.natural_order += head_len;
+        }
+        cands.append(&mut dict_part);
         // 档位（CapsLock 循环）作用于**整列**，含头部候选：用户按出「全大写」时，列表里
         // 不该还留着小写的变形候选。档位非默认时不再跑投影——用户已显式指定形态。
         if state.english_case_variant != crate::english_candidates::CaseVariant::Default {
@@ -1080,7 +1116,7 @@ impl Coordinator {
             );
         }
         // 去重必须在改写**之后**再跑一次：投影把词库的 `hi` 变成 `Hi`，与头部原文候选撞车；
-        // 全大写档更会把三条变形塌成同一条。上面 `push_cand` 那次去重看的是改写前的文本。
+        // 全大写档更会把三条变形塌成同一条。上面词库段内部那次 `seen` 去重看的是改写前的文本。
         if cased {
             crate::english_candidates::dedup_by_text(&mut cands);
         }
@@ -1307,7 +1343,7 @@ impl Coordinator {
                         .min(state.candidates.len() - 1);
                     self.commit_temp_english_selected(state, idx)
                 } else {
-                    // 无候选（`show_candidates` 关闭）：上屏缓冲原文。这正是英文方案
+                    // 无候选（`show_candidates` 关闭 / 原文与变形都不产 / `in_dict` 未命中且词库无命中）：上屏缓冲原文。这正是英文方案
                     // 「空格上屏原码」的对应出口，故同样补空格。
                     let text = state.temp_english_buffer.clone();
                     let sp = self.english_space_enabled_in(state);

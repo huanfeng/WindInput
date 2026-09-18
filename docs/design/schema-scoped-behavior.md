@@ -421,7 +421,7 @@ match intent.resolve() {
 
 1. **原文候选不带 `source` / `code`**。写端 `if cand.source != English { return }` 据此排除，
    否则会写出「读端按候选码永远查不中」的孤儿词频键（与「短语有文本无码位恒不记词频」同一先例）；
-2. **rerank 只作用于词库段**（`cands.split_off(dict_start)`）。这正是需求要的那个保证：
+2. **rerank 只作用于词库段**（临英是独立的 `dict_part`，主输入路是头部生成前的整表）。这正是需求要的那个保证：
    原文钉在最前、词频置顶只在词库候选内部生效；
 3. **精确去重**，不是小写去重。`hello` 只抹掉词库里字面相同的那条，不能连 `Hello` 一起抹。
 
@@ -429,20 +429,52 @@ match intent.resolve() {
 
 ```toml
 [input.temp_english]
-raw_candidate = true      # 新增，默认 true（＝保持既有行为）
+raw_candidate = "always"  # 新增，默认 always（＝保持既有行为）
 case_variants = true      # 既有，默认 true，不动
 
 [schema.english]
-raw_candidate = true      # 新增，默认 true
+raw_candidate = "always"  # 新增，默认 always
 case_variants = false     # 新增，默认 false
 ```
 
 | 键 | 默认 | 变更性质 |
 |---|---|---|
-| `input.temp_english.raw_candidate` | `true` | **新增可配置性**，行为不变（临英原本恒有原文候选、不可配） |
+| `input.temp_english.raw_candidate` | `"always"` | **新增可配置性**，行为不变（临英原本恒有原文候选、不可配） |
 | `input.temp_english.case_variants` | `true` | 既有键，**一个字都不改** |
-| `schema.english.raw_candidate` | `true` | 新能力（英文方案原本没有原文候选） |
+| `schema.english.raw_candidate` | `"always"` | 新能力（英文方案原本没有原文候选） |
 | `schema.english.case_variants` | `false` | 新能力，默认关 |
+
+#### 5.3.1 `raw_candidate` 后续升级为三档（2026-09-18，t139 / A2-2）
+
+本项原为 `bool`，现为三档枚举 `RawCandidateMode`。**老配置逐字节同义**：`true` 读作
+`always`、`false` 读作 `off`（见 `de_raw_candidate`）。
+
+| 档 | 语义 |
+|---|---|
+| `always`（出厂） | 恒是首候选＝原 `true` |
+| `in_dict` | **仅当所打原文本身是词库里的词**时才作首候选（钉最前、不受调频影响）；否则一条都不产 |
+| `off` | 不产原文候选＝原 `false` |
+
+加这一档的原因是原来的两档**各对一半**：`always` 下打 `hel`（词库无此词）会多出一条占着
+首位的 `hel`；`off` 下打 `hell`（词库有）又会被调频顶下去（`hello` 用得多就排到了前面）。
+而用户的两个诉求同时成立，`in_dict` 是那条缺失的对角线。
+
+★ **判据是「词库候选里有没有与原文字面相同的那条」**，落在 `wants_raw_candidate`：
+
+- **不用 `is_exact_code`**：打 `hell` 时 `he'll` 的 `code` 也是 `hell`（撇号在建码时被剥掉）
+  ⇒ 它回答的是「码对得上」，据此产出的原文候选可能是词库里根本不存在的词；
+- **不忽略大小写**：打 `usa` 时词库里只有 `USA`，`usa` 这个字面不在词库中 ⇒ 不产原文候选、
+  `USA` 成为首选（用户 2026-09-18 拍板的取舍；想上屏小写 `usa` 仍可走回车上屏原码）。
+  口径与 §5.2 第 3 条的**精确去重**一致，两处必须同进同退。
+
+⚠️ **判据必须在大小写投影之后求值**。`case_follow_input` 开着时，打 `Hell` 会把词库的
+`hell` 投影成 `Hell`，此时它才与所打原文字面相同；放在投影之前算，同一档在两个开关下会
+给出不同答案，而用户改的是另一个开关。**临英侧的候选生成顺序因此被掉了过来**（原为
+「头部打底 → 词库追加」，现为「词库段算完 → 头部生成」），与主输入路同序。
+
+⚠️ 这条顺序依赖**只靠「首选是不是 `Hell`」测不出来**：投影后的词库候选文本同样是 `Hell`。
+必须借调频拉开差距（让 `hello` 高频，再看 `Hell` 还在不在首位）——头部候选钉最前、
+词库候选会被顶下去。用例 `in_dict_applies_to_temp_english_after_case_projection` 记着这件事。
 
 ★ **两侧完全对称、各自独立**：同一能力在两个作用域各有一份，各自默认。
 理由是**用户对这两个场景的需求本就可能相反**——中文里插一个英文词（临英）与长时打英文
@@ -467,6 +499,11 @@ case_variants = false     # 新增，默认 false
 `case_variants` 的既有实现 `en_case_variants(&buf)` 已是独立纯函数，直接复用。
 
 ### 5.5 ⚠️ 新出现的边界：两个键同时关闭 ⇒ 候选可能为空
+
+`in_dict` 未命中与关掉 `raw_candidate` 在本节意义上**等价**：两者都不产原文候选，
+走的是同一条兜底（判据落在 `!state.candidates.is_empty()`，不是配置项）。
+⚠️ 但 `show_candidates = false` 那个组合是例外——那时词库根本没被查询，`in_dict`
+无从判断，须按 `always` 处理，否则临英一条候选都不产（见 §5.3.1）。
 
 关掉 `raw_candidate` 后，「打词库里没有的词」这件事就只剩回车这一条出口——这本身是
 用户可以选的取舍（有人就是想要「打英文时总是走词库补全」）。真正的风险在**两个键
@@ -525,7 +562,7 @@ IPC 排水路径的两个分支）全部换用它，漏一个就是「键盘补�
 #### ③ `EnglishGlobal` 不能 `derive(Default)`
 
 serde 的 `#[serde(default = "default_true")]` **只在反序列化缺键时生效**，管不着
-`Config::default()` 那条路。本段有默认 `true` 的字段（`raw_candidate`），而
+`Config::default()` 那条路。本段有默认非零值的字段（`case_follow_input` 默认 `true`；`raw_candidate` 默认 `Always`），而
 `derive(Default)` 只会给 bool 零值 ⇒ 出厂配置文件里写着 `true`、代码里的默认值却是
 `false`。这种 L1/L2 分叉只有端到端测试看得见（`config-design-rules` §R4）。
 
@@ -816,7 +853,7 @@ pub fn active_candidate_layout(&self) -> LayoutIntent
 | 用例 | 钉住 |
 |---|---|
 | 四个键的 2×2×2×2 里，**两侧互不影响**（改临英那对不动英文方案，反之亦然） | §5.3 的「各自独立」 |
-| `raw_candidate=false` + `case_variants=false` + 词库无命中 → 空候选 → 空格 | §5.5：临英必须上屏缓冲原文；**英文方案必须上屏输入串而不是吞键** |
+| `raw_candidate=off`（或 `in_dict` 未命中）+ `case_variants=false` + 词库无命中 → 空候选 → 空格 | §5.5：临英必须上屏缓冲原文；**英文方案必须上屏输入串而不是吞键** |
 | 英文方案 `case_variants` 默认关 / 临英默认开 | 默认值本身要有测试，否则「只翻默认值」一条都不红 |
 
 ### 7.4 已知假绿源
