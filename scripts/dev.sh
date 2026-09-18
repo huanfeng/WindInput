@@ -739,17 +739,44 @@ bins_for() {
 ps_list() { local out="" x; for x in "$@"; do out="$out${out:+,}'$x'"; done; printf '%s' "$out"; }
 
 # 终止远端进程（按 profile 决定 _dev 后缀；mod 限定只杀该模块的进程）。
+#
+# ⚠️ **全量推送（mod 为空）必须连设置端一起停**：`do_push_full` 推的是整个 build[_dev]/
+# 目录，里面有 wind_setting[_dev].exe，而运行中的 exe 在 Windows 上**不可覆盖** ⇒ scp 直接
+# 报 `dest open "...wind_setting_dev.exe": Failure` 整条推送失败。此前这里只停主进程，
+# 于是「在设置页配完按键、接着部署」这条最常见的路径必然撞上（2026-09-18 实测撞到）。
+#
+# ⛔ **wind_portable.exe 不在此列，别加**：它是两个变体**同名**的唯一产物（无 _dev 后缀，
+# 见 build/ 与 build_dev/ 各一份）。`taskkill /IM` 按映像名匹配，杀它会连带结束**正式版**
+# 的便携版进程 —— 而 dev 变体存在的全部意义就是「重部署不打断正在用的正式版」
+# （见 scripts/deploy.local 开头那段）。它开着时仍会让 scp 失败，那种情况由下方 scp 的
+# 错误提示点名，交给人去关。
+#
+# ★ 与 `dev.ps1` 的 `Stop-ProcessForFile` **有意不同**，不是这边漏了：那边逐个文件按映像名
+#   杀，**包括** wind_portable。差异的理由是部署位置不同 —— ps1 是**本机**部署（人就坐在那台
+#   机器前，杀错了当场看得见），dev.sh 推的是**远程靶机**（人在另一台机器上，静默杀掉他正在
+#   用的便携版，他只会看到输入法突然没了）。远程侧该更保守。
+#   ⚠️ 设置端那一条则是这边**真的落后了**：ps1 侧一直杀（它的注释明确点了
+#   「独立打开的设置程序 wind_setting[_dev].exe ... 覆盖前需先按名杀掉」），dev.sh 直到
+#   2026-09-18 才补上。两处同构实现漂移，本仓反复吃亏的形态，改任一侧时请对着另一侧看一眼。
 remote_taskkill() {
     local profile="$1" mod="${2:-}" sfx=""
     [ "$profile" = dev ] && sfx="_dev"
     local procs=()
     case "$mod" in
         core)    procs=("wind_input${sfx}.exe") ;;
-        tsf|"")  procs=("wind_input${sfx}.exe") ;;  # 改 DLL 也需停宿主
+        tsf)     procs=("wind_input${sfx}.exe") ;;  # 改 DLL 也需停宿主
+        "")      procs=("wind_input${sfx}.exe" "wind_setting${sfx}.exe") ;;
     esac
     local p
     for p in "${procs[@]}"; do
-        ssh "$WIND_REMOTE" "taskkill /F /IM $p" >/dev/null 2>&1 || true
+        # taskkill 的退出码可用：杀成功为 0，进程不存在为非 0。据此只在**真的停了**
+        # 某个进程时才出一行 —— 尤其设置端，静默关掉会让人以为自己忘了点保存。
+        if ssh "$WIND_REMOTE" "taskkill /F /IM $p" >/dev/null 2>&1; then
+            case "$p" in
+                wind_setting*) say "  已关闭设置端 $p（它占着自己的 exe，不关则推送失败；未保存的设置会丢失）" ;;
+                *)             say "  已停止 $p" ;;
+            esac
+        fi
     done
     sleep 1
 }
@@ -853,6 +880,10 @@ do_push_full() {
         say "已全量部署并启动（$profile）。"
     else
         err "scp 失败：检查 $([ "$profile" = dev ] && echo WIND_REMOTE_DIR_DEV || echo WIND_REMOTE_DIR_RELEASE) 路径(正斜杠)、SSH、磁盘。"
+        # 报 dest open "...xxx.exe": Failure 基本就是被占用。主程序与设置端上面已经停了，
+        # 剩下最可能的是便携版——它两个变体同名，脚本刻意不杀（见 remote_taskkill 的 ⛔）。
+        err "  若报 dest open \"...exe\": Failure，是该文件正被占用：wind_portable.exe 请手动关闭"
+        err "  （主程序与设置端脚本已自动停止；便携版两个变体同名，杀它会连带结束正式版，故不自动处理）"
         return 1
     fi
 }
