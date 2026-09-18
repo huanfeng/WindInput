@@ -76,6 +76,33 @@ impl Engine for EnglishEngine {
         for c in &mut r.candidates {
             c.source = CandidateSource::English;
         }
+        // ★ 含分词符时，原路径**再用剥掉分词符的串查一次**，结果并进来。
+        //
+        // 撇号词的编码在词库之间不统一，这是实打实的：出厂英文词库保留撇号
+        // （`o'clock` 的 code 就是 `o'clock`，57 条如此），而用户自制/第三方词库常把它
+        // 去掉（实测靶机那份 3.8 MB 词库里是 `o'clock → oclock`）。
+        //
+        // 分词符对用户而言是**输入语法**，他打 `o'clock` 时脑子里想的是那个词，不该被要求
+        // 先知道自己这份词库是哪种编码方案。只查原串的话，去撇号那种词库下从打第 4 个键
+        // （`o'cl`）起就是零候选——实测反馈正是这个。
+        //
+        // 两个串都查、按 text 去重：保留撇号的词库由原串命中，去撇号的由剥离串命中，
+        // 两种方案下表现一致。代价是多一次 Trie 前缀查询，只在缓冲含分词符时发生。
+        if let Some(sep) = self.seg_sep
+            && input.contains(sep)
+        {
+            let stripped: String = input.chars().filter(|c| *c != sep).collect();
+            if !stripped.is_empty() {
+                let seen: std::collections::HashSet<String> =
+                    r.candidates.iter().map(|c| c.text.clone()).collect();
+                let mut alt = self.inner.convert(&stripped, max_candidates)?;
+                alt.candidates.retain(|c| !seen.contains(&c.text));
+                for c in &mut alt.candidates {
+                    c.source = CandidateSource::English;
+                }
+                r.candidates.extend(alt.candidates);
+            }
+        }
         // 词组分词候选**追加在原路径之后**，不是二选一。
         //
         // ★ 为什么合并而不是「见到分词符就改走分词路径」：词库里有 57 条 code 本身含撇号
@@ -155,4 +182,84 @@ impl Engine for EnglishEngine {
     }
 
     // handle_top_code：用 trait 默认 None —— 英文无顶码上屏语义。
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codetable::CommitOptions;
+    use crate::engine::Engine;
+    use std::sync::Arc;
+    use wind_dict::cached::CachedDict;
+    use wind_dict::codetable::CodetableDict;
+    use wind_dict::{DictManager, SystemDictLayer};
+
+    /// 内存英文引擎，开着词组分词。
+    fn engine(entries: &[(&str, &str, i32)]) -> EnglishEngine {
+        let mut d = CodetableDict::empty();
+        for (i, (code, text, w)) in entries.iter().enumerate() {
+            d.merge_single(code.to_string(), text.to_string(), *w, i as i32);
+        }
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(SystemDictLayer::new(CachedDict::Memory(d), "en")));
+        let ct = CodeTableEngine::new(32, CommitOptions::default(), Arc::new(dm));
+        EnglishEngine::new(ct).with_phrase_seg(Some(crate::english_phrase::PHRASE_SEPARATOR))
+    }
+
+    fn texts(e: &EnglishEngine, input: &str) -> Vec<String> {
+        e.convert(input, 20)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    }
+
+    /// ★★ 撇号词的编码在词库之间不统一，两种方案都得能打出来。
+    ///
+    /// 出厂英文词库**保留**撇号（`o'clock` 的 code 就是 `o'clock`，57 条如此），而用户
+    /// 自制/第三方词库常把它**去掉**（实测靶机那份 3.8 MB 词库里是 `o'clock → oclock`）。
+    ///
+    /// 用户打 `o'clock` 时脑子里想的是那个词，不该被要求先知道自己这份词库是哪种编码。
+    /// 只查原串的话，去撇号那种词库下从第 4 个键（`o'cl`）起就是零候选——这条护栏就是
+    /// 那次实测反馈的固化。**出厂词库表达不了这个场景**（它只有保留撇号那一种），
+    /// 所以必须在这里用自造词库测。
+    #[test]
+    fn apostrophe_word_found_under_both_encoding_schemes() {
+        // 方案一：code 保留撇号（出厂英文词库的形态）
+        let keep = engine(&[("o'clock", "o'clock", 1000)]);
+        assert_eq!(texts(&keep, "o'cl"), vec!["o'clock"], "保留撇号的词库");
+
+        // 方案二：code 去掉撇号（用户自制词库的常见形态）
+        let strip = engine(&[("oclock", "o'clock", 1000)]);
+        assert_eq!(texts(&strip, "o'cl"), vec!["o'clock"], "去撇号的词库");
+
+        // 两种方案下打完整串同样命中。
+        assert_eq!(texts(&keep, "o'clock"), vec!["o'clock"]);
+        assert_eq!(texts(&strip, "o'clock"), vec!["o'clock"]);
+    }
+
+    /// 剥离查询不得产生重复：两种 code 同时存在时，同一个 text 只出一条。
+    #[test]
+    fn stripped_query_does_not_duplicate() {
+        let e = engine(&[("o'clock", "o'clock", 1000), ("oclock", "o'clock", 900)]);
+        assert_eq!(
+            texts(&e, "o'cl"),
+            vec!["o'clock"],
+            "同 text 的两条编码只该出一条"
+        );
+    }
+
+    /// ★ 反向对照：不含分词符时**不做**剥离查询，行为逐字节不变。
+    ///
+    /// 没有这条，「恒查两次」与「只在含分词符时查两次」都能过上面几条。
+    #[test]
+    fn plain_input_does_not_trigger_stripped_query() {
+        let e = engine(&[("oclock", "o'clock", 1000), ("ocl", "OCL", 900)]);
+        // 打 `ocl`（不含分词符）：只有前缀匹配的结果，不会因为剥离而多出什么。
+        let got = texts(&e, "ocl");
+        assert!(got.contains(&"OCL".to_string()));
+        assert!(got.contains(&"o'clock".to_string()));
+        assert_eq!(got.len(), 2, "不含分词符时不该有额外查询，实际: {got:?}");
+    }
 }
