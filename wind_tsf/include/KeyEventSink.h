@@ -100,14 +100,16 @@ public:
     // 它们，只有这里能看全）。栈空（depth==0）时不记，避免空状态攒出活动时间。
     void TouchPairState() { if (_pairPendingDepth > 0) _pairLastActivityTick = GetTickCount64(); }
 
-    // 直通 ime.pair 的推送落点：上屏 text 后左移 moveLeft 格，并记一层待跳出深度。
+    // 直通 ime.pair 的推送落点：上屏 text 后左移 moveLeft 格，并记一层待跳出深度
+    //（经合成提交键延后到 OnKeyDown 周期执行，不在本函数返回时就已发生）。
     //
     // 与 OnKeyDown 里 InsertTextWithCursor 响应分支**同源**——那条走按键响应，这条走 push
     // 通道（命令动作在协调器的独立线程执行，按键响应早已返回）。深度这一层不能省：它是
     // 中文模式下 Enter 能否被转发给协调器的闸门，漏掉的症状是「Tab 跳得出、Enter 毫无反应」。
     //
-    // 提交与左移都经合成提交键挪进 OnKeyDown 执行（见 .cpp 的实现注释），本函数自身只负责
-    // 排队。调用方在 WM_PAIR_COMMIT 的窗口消息回调里，那里**不是**按键上下文。
+    // 提交与左移都经合成提交键挪进 OnKeyDown 执行（见 .cpp 的实现注释）：本函数的主路只做
+    // 排队，另有一条降级支路——合成键注入失败时就地直接提交并自己补记账。调用方在
+    // WM_PAIR_COMMIT 的窗口消息回调里，那里**不是**按键上下文。
     void HandlePairCommitPush(const std::wstring& text, uint32_t moveLeft);
 
     // 配对状态是否已陈旧。TTL=0 表示不过期。
@@ -196,13 +198,14 @@ public:
     // "干净"的按键；这里要的是相反方向——"识别出触发键→吃掉→转入我们自己的同步提交"，
     // 必须是独立的判据与独立的队列，见 `_TryConsumeAsyncCommitTrigger`。
     //
-    // `moveLeft>0` 时本次提交是配对上屏：左移与深度记账一并排进队列，在同一个 OnKeyDown
-    // 周期里紧跟提交执行（见 PendingAsyncCommit::moveLeft 与 HandlePairCommitPush）。
+    // `pairCommit=TRUE` 时本次提交是配对上屏：左移与深度记账一并排进队列，在同一个
+    // OnKeyDown 周期里紧跟提交执行（见 PendingAsyncCommit 的两个字段与 HandlePairCommitPush）。
     //
     // 返回 FALSE＝合成按键注入失败（SendInput 出错，极罕见），调用方应回退到旧的
-    // `CommitText(text, TRUE)` 直接异步提交，保证至少不丢字。
+    // `CommitText(text, TRUE)` 直接异步提交，保证至少不丢字；**配对那条还必须自己补一次
+    // `_ApplyPairCommitTail`**，漏掉就是 DLL 少记一层、core 那层成孤儿。
     BOOL QueueAsyncCommitViaSyntheticKey(const std::wstring& text, BOOL replacingHeld,
-                                         uint32_t moveLeft = 0);
+                                         BOOL pairCommit = FALSE, uint32_t moveLeft = 0);
 
 private:
     static constexpr uint32_t ENGLISH_STATS_REPORT_COUNT = 5;
@@ -546,12 +549,18 @@ private:
     // ========================================================================
     // Auto-pair key simulation (deferred + skip list approach)
     // ========================================================================
-    void _SimulatePairKey(WORD vk);
+    // count = 这一次配对定位要走的格数（多字符右段如 `-->` 就是 3）。无修饰键时 count 个
+    // down+up 一次 SendInput 提交；有修饰键时整条 defer，到 keyup 再按 count 发。
+    void _SimulatePairKey(WORD vk, int count = 1);
     static bool _AreModifiersHeld();
 
     // 配对上屏的收尾：左移 moveLeft 格回到两段之间，并记一层待跳出深度。
     // 两个调用点（合成提交键的正路、注入失败的兜底）共用，避免记账规则分裂。
-    void _ApplyPairCommitTail(uint32_t moveLeft);
+    // 记账判据是 pairCommit 而不是 moveLeft——理由见 .cpp 的实现注释，写错两边都会失配。
+    void _ApplyPairCommitTail(BOOL pairCommit, uint32_t moveLeft);
+
+    // 丢弃全部待提交并对被丢掉的配对层留痕。队列清空只走这一个出口。
+    void _DropPendingAsyncCommits();
 
     // Pending auto-pair action (deferred until modifiers released)
     struct PendingPairAction {
@@ -599,9 +608,13 @@ private:
     struct PendingAsyncCommit {
         std::wstring text;
         BOOL replacingHeld = FALSE;
-        // >0＝本次是配对上屏（直通 ime.pair）：提交完成后还要左移这么多格回到两段之间，
-        // 并记一层待跳出深度。**跟着提交一起排队**，才能保证左移与提交落在同一个按键
-        // 上下文里——理由见 HandlePairCommitPush。
+        // 本次是配对上屏（直通 ime.pair）：提交完成后要记一层待跳出深度。**与 moveLeft
+        // 分开**——`jump="0"` 时 core 照样压栈而这边一格都不走，按 moveLeft 判会漏记；
+        // 同队列里 WM_COMMIT_TEXT 的条目 moveLeft 也是 0，按它判又会多记。
+        BOOL pairCommit = FALSE;
+        // 提交后向左退回两段之间的格数（多字符右段按 ime.pair 的 jump 取值）。
+        // **跟着提交一起排队**，才能保证左移与提交落在同一个按键上下文里——理由见
+        // HandlePairCommitPush。
         uint32_t moveLeft = 0;
     };
     // 队列而非单槽：鼠标可能连续快速点选，多个 push 可能在上一个触发键送达前叠加。

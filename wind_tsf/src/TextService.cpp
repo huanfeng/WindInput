@@ -6872,8 +6872,12 @@ BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
 //   字符注入，多数控件既不换行也不报错（key.type 8/22 的实测，见 wind-keys 的
 //   `split_type_text`）。那是那条出口的物理限制，修法是拆成 VK_RETURN，单独立案。
 
-BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL replacingHeld)
+BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL replacingHeld,
+                              BOOL* pAsyncDeferred)
 {
+    // 默认"已落定"，只有真的把编辑交给异步会话时才置位（两处 RequestEditSession 成功后）。
+    if (pAsyncDeferred != nullptr) *pAsyncDeferred = FALSE;
+
     // hold 预览态活跃时（智能符号已把中文符号放进组合、等 press2），本次提交必须交代
     // 那个符号的去向——下面提交走的是**组合 range 的 SetText**，range 里此刻显示的正是
     // 它，不主动处置就会被静默覆盖掉。
@@ -6986,6 +6990,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
 
             if (SUCCEEDED(hr))
             {
+                if (pAsyncDeferred != nullptr) *pAsyncDeferred = TRUE;
                 WIND_LOG_DEBUG_FMT(L"CommitText(async): commit requested, hrSession=0x%08X\n", hrSession);
                 return TRUE;
             }
@@ -7041,6 +7046,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
 
                 if (SUCCEEDED(hrAsyncReq))
                 {
+                    if (pAsyncDeferred != nullptr) *pAsyncDeferred = TRUE;
                     WIND_LOG_WARN_FMT(L"CommitText: sync rejected (hr=0x%08X, hrSession=0x%08X), retried async hrSession=0x%08X, duration=%dms\n",
                                       hr, hrSession, hrAsyncSession, durationMs);
                     return TRUE;

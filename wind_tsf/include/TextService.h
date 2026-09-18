@@ -176,8 +176,13 @@ public:
     // （智能符号 press2：「。」→「.」）。默认 FALSE = 追加语义，held 符号并入 prefix
     // 与本次文本一起上屏——因为提交用的是组合 range 的 SetText，不并入就会被覆盖掉。
     // 由服务端在 CommitText 响应的 flags bit3 显式声明，见 COMMIT_FLAG_REPLACING_HELD。
+    // pAsyncDeferred（可选出参）：置 TRUE 表示本次提交**没有当场落定**，而是交给了异步
+    // EditSession（nonKeyContext 分支，或按键上下文里宿主拒发同步锁后的退路），编辑要等
+    // TSF 授锁才发生。调用方若要在提交后立刻注入按键（配对左移），必须看这一位——返回值
+    // 三条出口都是 TRUE，单看它区分不出"已落定"与"排进异步"。不关心的调用方传 nullptr。
+    // SendInput 末路兜底不置位：那条把文本注入输入队列，与随后注入的按键天然有序。
     BOOL CommitText(const std::wstring& text, BOOL nonKeyContext = FALSE,
-                    BOOL replacingHeld = FALSE);
+                    BOOL replacingHeld = FALSE, BOOL* pAsyncDeferred = nullptr);
 
     // `CommitText(text, TRUE, ...)` 的替代：不直接在当前（非按键）调用栈里发起异步
     // EditSession，而是缓冲文本 + 合成一个触发键，把真正的提交挪到 OnKeyDown 里、

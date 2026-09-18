@@ -900,11 +900,36 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             *pfEaten = TRUE;
             WIND_LOG_DEBUG_FMT(L"AsyncCommitTrigger: committing via synchronous edit session, textLen=%zu\n",
                                pending.text.length());
-            _pTextService->CommitText(pending.text, /*nonKeyContext=*/FALSE, pending.replacingHeld);
-            // 配对上屏（直通 ime.pair）的收尾。**必须在这里、紧跟提交**：左移是注入给宿主
-            // 的真实方向键，宿主按它自己的插入点解释，而那份插入点只有在「宿主自己处理
-            // 按键顺带完成的编辑」之后才是新的。见 HandlePairCommitPush。
-            _ApplyPairCommitTail(pending.moveLeft);
+            BOOL asyncDeferred = FALSE;
+            _pTextService->CommitText(pending.text, /*nonKeyContext=*/FALSE, pending.replacingHeld,
+                                      &asyncDeferred);
+
+            // 提交真正发生在这一刻，下面三件事都必须跟在它后面、而不是入队时：
+            //
+            //   · 组合态标志：入队到触发键抵达之间是有窗口的，用户在窗口里敲的键会让协调器
+            //     回 UpdateComposition 重新开组合。在入队时清标志，就会出现「DLL 认为没有
+            //     组合、文档里却有」的错位。
+            //   · 备用 prevChar：它记的是「已落进文档、光标紧邻的那个字符」，入队时那件事
+            //     还没发生；窗口里插进来的数字键会把它改成相反的值。
+            //   · 配对收尾：左移是注入给宿主的真实方向键，宿主按它自己的插入点解释，而那份
+            //     插入点只有在编辑真的落定之后才是新的。
+            _TrackCommittedTextForSmartPunct(pending.text);
+            _isComposing = FALSE;
+            _hasCandidates = FALSE;
+
+            // 按键上下文里 CommitText **也可能**落不成同步：宿主忙时照样拒发 TF_ES_SYNC
+            // （MSDN 的措辞是 "can be expected to succeed"，是期待不是保证），此时若组合还
+            // 活着，那侧会退到异步会话——编辑要等 TSF 授锁才发生，而下面的左移是立刻注入的。
+            // 组合不在时退的是 SendInput 注入，文本键与左移同在输入队列里、顺序保得住，故
+            // 只有 asyncDeferred 这一档有残留竞态。留痕是它唯一的可观测信号：不打这条 WARN，
+            // 现象就是「偶尔光标位置不对」，与本次修掉的那个缺陷长得一模一样、无从区分。
+            if (asyncDeferred && pending.moveLeft > 0)
+            {
+                WIND_LOG_WARN_FMT(L"AsyncCommitTrigger: 宿主拒发同步锁, 提交退到异步会话; "
+                                  L"随后的 %u 格左移可能抢在文本落定之前\n",
+                                  pending.moveLeft);
+            }
+            _ApplyPairCommitTail(pending.pairCommit, pending.moveLeft);
             if (!_pendingAsyncCommits.empty())
             {
                 // 队列里还有后续提交（连续快速点选）：再次自注入触发键，让它在自己的
@@ -912,7 +937,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
                 if (!_SendAsyncCommitTriggerKey())
                 {
                     WIND_LOG_WARN(L"AsyncCommitTrigger: chained trigger key injection failed, dropping remaining commits\n");
-                    _pendingAsyncCommits.clear();
+                    _DropPendingAsyncCommits();
                 }
             }
             return S_OK;
@@ -2940,8 +2965,6 @@ void CKeyEventSink::HandlePairCommitPush(const std::wstring& text, uint32_t move
 {
     WIND_LOG_DEBUG_FMT(L"HandlePairCommitPush: textLen=%zu, moveLeft=%u\n",
                        text.length(), moveLeft);
-    _isComposing = FALSE;
-    _hasCandidates = FALSE;
 
     if (text.empty())
     {
@@ -2951,73 +2974,109 @@ void CKeyEventSink::HandlePairCommitPush(const std::wstring& text, uint32_t move
         return;
     }
 
-    // 与按键响应那条同源分支（InsertTextWithCursor）对齐：经引擎上屏的文本要更新备用
-    // prevChar。配对文本末位必是右段符号、不是数字，作用就是**清零**——漏掉这一步，读不回
-    // 文档的宿主里会带着上一个数字的状态进入下一次智能标点判断。
-    _TrackCommittedTextForSmartPunct(text);
-
-    if (QueueAsyncCommitViaSyntheticKey(text, /*replacingHeld=*/FALSE, moveLeft))
+    if (QueueAsyncCommitViaSyntheticKey(text, /*replacingHeld=*/FALSE, /*pairCommit=*/TRUE, moveLeft))
         return;
 
-    // 合成键注入失败（SendInput 出错，极罕见）：退回直接提交，保证至少不丢字，代价是
-    // 回到上面那条已知的宿主问题面。nonKeyContext=TRUE 是这条路的事实——它走异步会话，
-    // 左移有可能抢在文本落定之前，但此刻 SendInput 本身都在失败，方向键多半也发不出去。
+    // 合成键注入失败（SendInput 出错，极罕见）：就地降级为直接提交，保证至少不丢字。
+    // nonKeyContext=TRUE 是这条路的事实（不在 OnKeyDown 调用栈里），代价是它走异步会话：
+    // 左移可能抢在文本落定之前。修饰键按住时左移还会延到 keyup 才发，那时提交多半已落定
+    // ——两种时序都不保证，这是这条降级路的已知残留竞态，不是"回到改前的行为"（改前是
+    // 在非按键上下文里请求**同步**会话，问题面不同）。
     WIND_LOG_WARN(L"HandlePairCommitPush: 合成提交键注入失败，退回非按键上下文直接提交\n");
     _pTextService->CommitText(text, /*nonKeyContext=*/TRUE);
-    _ApplyPairCommitTail(moveLeft);
+    _TrackCommittedTextForSmartPunct(text);
+    _isComposing = FALSE;
+    _hasCandidates = FALSE;
+    _ApplyPairCommitTail(/*pairCommit=*/TRUE, moveLeft);
 }
 
 // 配对上屏的收尾：左移回两段之间 + 记一层待跳出深度。
 //
-// moveLeft==0 说明协调器判定为「退化纯上屏」，那侧也没压栈，此处同样不记账——
-// 深度与 core 的 pair_tracker 必须严格同步，宁可两边都没有，不要一边有。
-void CKeyEventSink::_ApplyPairCommitTail(uint32_t moveLeft)
+// ★ 记账判据是 `pairCommit`（这一条是不是配对上屏），**不是** `moveLeft > 0`：
+//
+//   · 队列与 WM_COMMIT_TEXT（鼠标点候选 / 纯文本命令短语）共用，那些条目 moveLeft 恒 0，
+//     按 moveLeft 记会给它们凭空记一层配对；
+//   · 反过来，`ime.pair(..., jump="0")` 是合法写法（`jump` 只要求非负整数），core 侧
+//     `cmd_pair_commit` 在这种情况下照样**无条件** push_pair_text 压一层栈。按 moveLeft
+//     记就会漏掉它，depth 停在 0 ⇒ 中文模式下 Enter 不被转发给协调器 ⇒ 那层栈成孤儿，
+//     表现正是头文件写的那个指纹症状「Tab 跳得出、Enter 毫无反应」。
+//     （退化纯上屏走的是 core 的 push_commit_text → WM_COMMIT_TEXT，根本到不了这里。）
+//
+// 深度与 core 的 pair_tracker 必须严格同步：core 压了一层，这边就得记一层，与要走几格无关。
+void CKeyEventSink::_ApplyPairCommitTail(BOOL pairCommit, uint32_t moveLeft)
 {
-    if (moveLeft == 0)
+    if (!pairCommit)
         return;
-    for (uint32_t i = 0; i < moveLeft; i++)
-        _SimulatePairKey(VK_LEFT);
+    // jump=0 时不注入方向键（光标本就该落在末尾），但栈照记——两件事判据不同。
+    if (moveLeft > 0)
+        _SimulatePairKey(VK_LEFT, (int)moveLeft);
     _pairPendingDepth++;
     TouchPairState();
 }
 
-void CKeyEventSink::_SimulatePairKey(WORD vk)
+// 丢弃全部待提交。**必须走这一个出口**：配对条目被丢掉时 core 侧的配对栈已经压过了，
+// 不留痕就只剩「文本静默消失 + 此后 Enter 在配对里不起作用」，而 DLL < core 这个失配方向
+// 没有自愈路径（pair_jumpout_desync_replay 只治反方向）。
+void CKeyEventSink::_DropPendingAsyncCommits()
 {
+    size_t pairLayers = 0;
+    for (const PendingAsyncCommit& c : _pendingAsyncCommits)
+    {
+        if (c.pairCommit) pairLayers++;
+    }
+    if (pairLayers > 0)
+    {
+        WIND_LOG_WARN_FMT(L"AsyncCommit: 丢弃 %zu 条待提交, 其中 %zu 条是配对上屏 —— "
+                          L"core 侧那 %zu 层配对栈将成孤儿\n",
+                          _pendingAsyncCommits.size(), pairLayers, pairLayers);
+    }
+    _pendingAsyncCommits.clear();
+}
+
+void CKeyEventSink::_SimulatePairKey(WORD vk, int count)
+{
+    if (count <= 0)
+        return;
+
     if (_AreModifiersHeld())
     {
-        // Defer: save action, execute when modifiers released
-        if (!_pendingPairAction.active)
-        {
-            _pendingPairAction.vk = vk;
-            _pendingPairAction.count = 1;
-            _pendingPairAction.active = true;
-        }
-        else if (_pendingPairAction.vk == vk)
-        {
-            // Same key deferred again (e.g., Shift+< pressed multiple times)
-            // Only the last pair's cursor positioning matters, keep count = 1
-        }
-        else
-        {
-            // Different key — replace pending action
-            _pendingPairAction.vk = vk;
-            _pendingPairAction.count = 1;
-        }
+        // Defer: save action, execute when modifiers released.
+        //
+        // 三种情形（新建 / 同键再来 / 换键）统一成"后来者整条覆盖"：一次调用就是一次完整的
+        // 配对定位，count 是**这一次**要走的格数（多字符右段如 `<!--`/`-->` 就是 3）。
+        // 同键再来时保留旧 count 会把 N 格塌缩成上一次的格数——`Auto-pair: deferred x1`
+        // 之后光标停在 `<!---|->`，而跳出仍按 jump_steps 右移 3 格，直接越界。
+        // 语义仍是原来那条「只有最后一次配对的光标定位有意义」，只是"定位"现在带格数。
+        _pendingPairAction.vk = vk;
+        _pendingPairAction.count = count;
+        _pendingPairAction.active = true;
         WIND_LOG_DEBUG_FMT(L"Auto-pair: deferred vk=0x%02X x%d (modifiers held)\n",
             (WORD)vk, _pendingPairAction.count);
         return;
     }
 
-    // No modifiers: execute immediately via skip list
-    _PushSkipKey(vk, FALSE);
+    // No modifiers: execute immediately via skip list.
+    // count 个 down+up **一次 SendInput 提交**（同 _SendAsyncCommitTriggerKey 的先例）：
+    // 分多次发会被并发的真实键鼠输入从中间穿插，多字符右段的几格左移中间插进一个字符，
+    // 光标就落在两段之间的错误位置上。
+    std::vector<INPUT> inputs;
+    inputs.reserve((size_t)count * 2);
+    for (int i = 0; i < count; i++)
+    {
+        _PushSkipKey(vk, FALSE);
 
-    INPUT inputs[2] = {};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = vk;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = vk;
-    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(2, inputs, sizeof(INPUT));
+        INPUT down = {};
+        down.type = INPUT_KEYBOARD;
+        down.ki.wVk = vk;
+        inputs.push_back(down);
+
+        INPUT up = {};
+        up.type = INPUT_KEYBOARD;
+        up.ki.wVk = vk;
+        up.ki.dwFlags = KEYEVENTF_KEYUP;
+        inputs.push_back(up);
+    }
+    SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
 }
 
 // 把一个已被我们吃掉的键原样重放给宿主。
@@ -3122,19 +3181,29 @@ BOOL CKeyEventSink::_SendAsyncCommitTriggerKey()
 }
 
 BOOL CKeyEventSink::QueueAsyncCommitViaSyntheticKey(const std::wstring& text, BOOL replacingHeld,
-                                                    uint32_t moveLeft)
+                                                    BOOL pairCommit, uint32_t moveLeft)
 {
     if (text.empty())
-        return TRUE; // 无事可做，不必绕一圈合成按键。
+    {
+        // 无事可做，不必绕一圈合成按键。但配对那条不能走这里静默返回 TRUE：调用方会据此
+        // 判定"已排队、不必自己补记账"，而队列里根本没有这一条 ⇒ 深度永远不会 +1，
+        // core 那层配对栈成孤儿。调用方已有空文本闸门挡在前面，这里是让不可达变成可检测。
+        if (pairCommit)
+        {
+            WIND_LOG_WARN(L"QueueAsyncCommitViaSyntheticKey: 配对上屏拿到空文本，拒绝排队\n");
+            return FALSE;
+        }
+        return TRUE;
+    }
 
     if (_pendingAsyncCommits.size() >= MAX_PENDING_ASYNC_COMMITS)
     {
         // 队列积压＝上一批触发键没有正常送达/消费（多半是目标窗口已经失焦）。继续囤积
         // 只会让文本越堆越多、之后乱序上屏，故整体清空并留痕——好过无界增长或半截乱序。
         WIND_LOG_WARN(L"QueueAsyncCommitViaSyntheticKey: pending queue full, dropping all pending commits\n");
-        _pendingAsyncCommits.clear();
+        _DropPendingAsyncCommits();
     }
-    _pendingAsyncCommits.push_back(PendingAsyncCommit{text, replacingHeld, moveLeft});
+    _pendingAsyncCommits.push_back(PendingAsyncCommit{text, replacingHeld, pairCommit, moveLeft});
 
     if (!_SendAsyncCommitTriggerKey())
     {
@@ -3143,8 +3212,8 @@ BOOL CKeyEventSink::QueueAsyncCommitViaSyntheticKey(const std::wstring& text, BO
         _pendingAsyncCommits.pop_back();
         return FALSE;
     }
-    WIND_LOG_DEBUG_FMT(L"QueueAsyncCommitViaSyntheticKey: queued textLen=%zu, moveLeft=%u, pending=%zu\n",
-                       text.length(), moveLeft, _pendingAsyncCommits.size());
+    WIND_LOG_DEBUG_FMT(L"QueueAsyncCommitViaSyntheticKey: queued textLen=%zu, pair=%d, moveLeft=%u, pending=%zu\n",
+                       text.length(), (int)pairCommit, moveLeft, _pendingAsyncCommits.size());
     return TRUE;
 }
 
