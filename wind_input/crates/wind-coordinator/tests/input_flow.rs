@@ -2627,6 +2627,184 @@ fn quick_input_free_non_expr_first_char_enters_literal() {
     }
 }
 
+/// 进入路径⑤：首字符 `.` —— **表达式字符集内**却一条候选也换不来的符号。
+///
+/// A2-23 / t157：用户想在快捷输入里打 `.txt`，组合区永远停在 `.`。链条是
+/// `.` 开数字透镜 → 字母在③被无条件当选词键吃掉 → 越界字符进不了缓冲 →
+/// `auto` 的越界判据永远等不到它。`.` 与 `<`（进入路径③）的区别正在于它**是**
+/// 表达式字符，缓冲自身永不越界，只能靠「候选为空 ⇒ 选词键不是功能键」这条解开。
+#[test]
+fn quick_input_free_dot_prefix_types_file_extension() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_char(&coord, '.');
+    // 前提断言：本条修复只在「一条候选都没有」时生效，光一个点必须确实换不来候选
+    // ——哪天内置来源开始为它产出候选，本测试就该改判据而不是继续绿着。
+    assert!(
+        coord.debug_page_texts().is_empty(),
+        "光一个 `.` 不该有任何候选，实际: {:?}",
+        coord.debug_page_texts()
+    );
+    let last = press_str(&coord, "txt");
+    assert_eq!(
+        action_text(&last).unwrap(),
+        ";.txt",
+        "候选为空时字母不该被当选词键吃掉"
+    );
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, ".txt"),
+        other => panic!("空格应上屏原文，实际: {:?}", other),
+    }
+}
+
+/// 同上的小写对照：`.5` 也换不来候选（`is_decimal_number` 要求首字节是数字），
+/// 于是 `.5gb` 现在与 `12.5GB`（进入路径④）走同一条路。修复前只有大写打得出，
+/// 这个大小写不对称本身就是③漏判的证据。
+#[test]
+fn quick_input_free_dot_decimal_takes_lowercase_unit() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_str(&coord, ".5");
+    assert!(coord.debug_page_texts().is_empty(), "`.5` 不该有候选");
+    let last = press_str(&coord, "gb");
+    assert_eq!(action_text(&last).unwrap(), ";.5gb");
+}
+
+/// ★反向对照：候选**非空**时字母仍是数字透镜的选词键。
+///
+/// 这是本次修复的边界——判据是「一条都没有」而不是「第 off 条不存在」，否则瞄歪的
+/// 选词会变成字面输入。`1+2` 有六条候选，`a` 必须照旧选走首选。
+#[test]
+fn quick_input_numeric_lens_letter_still_selects_when_candidates_exist() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_str(&coord, "1+2");
+    assert_eq!(
+        coord.debug_page_texts().first().map(String::as_str),
+        Some("3")
+    );
+    match press_letter(&coord, 'a') {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "3", "a 应选走首选"),
+        other => panic!("字母应仍是数字透镜的选词键，实际: {:?}", other),
+    }
+}
+
+/// ★反向对照（锁「一条都没有」而非「第 off 条不存在」）：候选非空时，**越界序号的
+/// 选词键仍被吃掉**，不得改作字面输入。
+///
+/// 这一条是本次判据取舍的唯一护栏——换成按 off 判存在性时，本测试会红而上面那条
+/// `letter_still_selects` 仍绿（它按的是存在的首选）。瞄歪的选词若变成字面，
+/// `;nihao` 误按一下就会连人带缓冲掉进 `Free`，整段转换作废。
+#[test]
+fn quick_input_numeric_lens_out_of_range_select_key_is_still_eaten() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_str(&coord, "1+2");
+    let n = coord.debug_page_texts().len();
+    assert!(
+        n > 0 && n <= 25,
+        "前提：本页候选数须落在 z(第 26 个选词键) 之内，实际 {n}"
+    );
+    match press_letter(&coord, 'z') {
+        KeyAction::Consumed => {}
+        other => panic!("越界序号的选词键应被吃掉而非字面入缓冲，实际: {:?}", other),
+    }
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "3", "缓冲不该被 z 污染"),
+        other => panic!("空格应上屏首选，实际: {:?}", other),
+    }
+}
+
+/// 同一条判据在**文本透镜**上的形态：候选为空时数字键也不再是选词键。
+///
+/// 只留内置来源的 mix 里，字母开头的缓冲（`a`）没有任何成员认领，候选恒空 —— 此前
+/// 数字键在这里是彻头彻尾的死键，按下去连个响都没有。
+#[test]
+fn quick_input_free_text_lens_digit_is_literal_on_empty_candidates() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.schema.mix_modes[0]
+        .members
+        .retain(|m| wind_quick_input::is_quick_member(m));
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_char(&coord, 'a');
+    assert!(
+        coord.debug_page_texts().is_empty(),
+        "前提：只剩内置来源时字母缓冲不该有候选，实际: {:?}",
+        coord.debug_page_texts()
+    );
+    let last = press_char(&coord, '1');
+    assert_eq!(
+        action_text(&last).unwrap(),
+        ";a1",
+        "空候选下数字键应字面入缓冲"
+    );
+}
+
+/// ★反向对照（锁本条修复整体挂在 `free_on` 上）：同样的空候选 + 数字键，
+/// `free_input = off` 的实例必须仍走选词臂被吃掉。
+///
+/// 这条控制项刻意用**文本透镜的数字键**而不是数字透镜的字母：去掉 `free_on` 之后，
+/// 字母落到⑥只会 `Consumed`（`punct_char` 不认字母），看不出差别；数字键则会被⑥
+/// 当标点顶屏——直接上屏一个 `1` 并退出模式。字母那条路的对照见下一条。
+#[test]
+fn quick_input_off_keeps_digit_as_select_key_on_empty_candidates() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.schema.mix_modes[0]
+        .members
+        .retain(|m| wind_quick_input::is_quick_member(m));
+    cfg.schema.mix_modes[0].free_input = wind_config::config::FreeInputMode::Off;
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_char(&coord, 'a');
+    match press_char(&coord, '1') {
+        KeyAction::Consumed => {}
+        other => panic!("关掉自由输入后数字键仍该被选词臂吃掉，实际: {:?}", other),
+    }
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "a", "缓冲不该被 1 污染"),
+        other => panic!("空格应上屏缓冲原文，实际: {:?}", other),
+    }
+}
+
+/// ★反向对照：`free_input = off` 的实例分毫不动 —— 空候选下字母仍被选词臂吃掉，
+/// 空格上屏的只有那个 `.`。本条修复整体挂在 `free_on` 上，关掉即完全退回既有行为。
+#[test]
+fn quick_input_off_keeps_letters_as_select_keys_on_empty_candidates() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.schema.mix_modes[0].free_input = wind_config::config::FreeInputMode::Off;
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_str(&coord, ".txt");
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => {
+            assert_eq!(text, ".", "关掉自由输入后字母仍该被吃掉，缓冲只剩那个点")
+        }
+        other => panic!("空格应上屏缓冲原文，实际: {:?}", other),
+    }
+}
+
 /// 进入路径④：数字透镜里出现大写字母。小写字母仍是选词键，大写才越界。
 #[test]
 fn quick_input_free_uppercase_upgrades_numeric_lens() {
