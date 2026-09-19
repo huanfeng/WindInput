@@ -378,6 +378,9 @@ pub struct CodeTableSpec {
     /// ⚠️ 与 `sentence_input` 占的是**不同区间**（`==` vs `>` 码长），两者可同开、互不让位；
     /// 但同开时顶码会因整句而整体让位，逆切分候选的「后码顶首选上屏」随之失效
     /// （见 `CodeTableEngine::handle_top_code`，构建时会告警）。
+    ///
+    /// ⚠️ **混输方案下整体不生效**（写了会告警）：切分候选的 `code` 是整串，会落进混输
+    /// 档位体系的档 0、压过拼音精确候选。见 `wind_engine::manager::resolve_split_input`。
     #[serde(default)]
     pub split_input: bool,
     /// 逆切分的**前段**取几条候选。0/缺省 = 1（前段恒取首选）。

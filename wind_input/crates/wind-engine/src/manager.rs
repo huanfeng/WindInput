@@ -186,18 +186,34 @@ fn resolve_sentence_input(role: Option<MixedRole>, own: bool) -> bool {
     }
 }
 
-/// 逆切分开关的取值来源，判据同 [`resolve_sentence_input`]：混输主引擎取**混输方案自己**的
-/// 声明，不继承 `primary_schema`。
+/// 逆切分开关的取值来源：独立方案用自己的声明，**混输主引擎一律关闭**。
 ///
-/// ⚠️ 与整句**同判据、不同后果**：整句在混输下压根不会触发（超码长直接走
-/// `convert_overflow`，不经主引擎），而逆切分的区间是**码长内**，混输走的正是
-/// `primary.convert` ⇒ **它会真正生效**，切分候选将与拼音候选同场竞争排序。
-/// 所以这里不继承的理由比整句更硬：`wubi86` 单用时开着合适，不等于 `wubi86_pinyin`
-/// 下也合适——后者多了一路拼音候选，是完全不同的候选环境。
-fn resolve_split_input(role: Option<MixedRole>, own: bool) -> bool {
+/// # 为什么混输下必须整体关掉（而不是像整句那样「取混输方案自己的声明」）
+///
+/// 逆切分候选的 `code` **就是整串输入** —— 这是它能被既有 `decide_auto_commit` 认作
+/// 「恰一个精确匹配」从而自动上屏的根据（见 `CodeTableEngine::decode_split`），不能改。
+/// 引擎侧为此刻意**不置** `is_exact_code`，想把它挡在 `cmp_exact_first` 的精确档之外。
+///
+/// 但混输的两个档位函数判的**不是** `is_exact_code`：
+///
+/// - `wind_candidate::source_tier`：`CodeTable if c.code == input => 0`
+/// - `mixed::engine::truncation_tier`：`CodeTable if c.code == ctx.codetable_exact => 0`
+///
+/// ⇒ 那个回避在混输链路上被整个绕过，切分候选照样落进**档 0**，无条件压过拼音精确候选
+/// （档 1）。真机后果：混输方案开了它，打任一五笔四码空码串（实测空码率 81%），首选会被
+/// 一条机械拼接的组合占住——而「不抢任何现有候选」正是本功能的立身之本。
+///
+/// 让它在混输下正确，需要先决定切分候选在混输档位体系里该占哪一档（档 2 码表前缀补全？
+/// 还是独立一档？），那是独立的一步，不在本轮。⇒ **本轮整体关闭**，与设计文档
+/// §5.6「混输下的档位归属本轮不做」保持自洽。
+///
+/// 判据只需要「是不是混输主」，故 `MixedRole::Primary` 不带 `split_input` 字段——留一个
+/// 不决定任何行为的开关字段，下一个读代码的人一定会以为它有用。「方案作者写了却不生效」
+/// 的告警直接读 `schema.engine.codetable.split_input`，在 `build_engine` 的混输分支里。
+fn resolve_split_input(role: Option<MixedRole>, _own: bool) -> bool {
     match role {
-        Some(MixedRole::Primary { split_input, .. }) => split_input,
-        _ => own,
+        Some(MixedRole::Primary { .. }) => false,
+        _ => _own,
     }
 }
 
@@ -215,11 +231,7 @@ enum MixedRole {
     /// 后者的超码长区间已经归拼音管（`MixedEngine::convert` 超码长直接走
     /// `convert_overflow`，根本不经过主引擎），继承过来只会得到一个「配置开着却不生效」
     /// 的状态，那是最难排查的一种。
-    Primary {
-        sentence_input: bool,
-        /// 逆切分，判据同 `sentence_input` 但后果不同——见 [`resolve_split_input`]。
-        split_input: bool,
-    },
+    Primary { sentence_input: bool },
     /// 混输次（拼音），携带拼音侧的语境收敛。
     Secondary(MixPinyinOpts),
 }
@@ -4457,7 +4469,6 @@ impl EngineManager {
                 Some(MixedRole::Primary {
                     // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）。
                     sentence_input: schema.engine.codetable.sentence_input,
-                    split_input: schema.engine.codetable.split_input,
                 }),
             )?;
             // 「声明了整句、却配着拼音子引擎」是个不会生效的组合：超码长区间归拼音
@@ -4468,6 +4479,17 @@ impl EngineManager {
                     "混输方案 {} 声明了 [engine.codetable] sentence_input，但它配有拼音子引擎 \
                      {}：超码长输入由拼音接管，码表整句不会触发。混输下的整句尚未接线。",
                     schema_id, m.secondary_schema
+                );
+            }
+            // 逆切分在混输下是**整体关闭**的（见 `resolve_split_input` 的长注释：切分候选的
+            // code 是整串，会落进混输档位的档 0、压过拼音精确候选）。方案作者写了却不生效，
+            // 必须说一句 —— 「配置开着却没反应」是本仓点过名的最难排查的状态。
+            if schema.engine.codetable.split_input {
+                warn!(
+                    "混输方案 {} 声明了 [engine.codetable] split_input，但逆切分在混输下尚未接线\
+                     （切分候选会落进档位体系的档 0、压过拼音精确候选），已忽略。\
+                     要用它请在纯码表方案上开。",
+                    schema_id
                 );
             }
             // secondary（拼音）是**唯一**注入 [`MixPinyinOpts`] 的地方：这些收敛只约束
@@ -4773,6 +4795,12 @@ impl EngineManager {
                 ),
                 // 逆切分：同为方案级引擎固定参数。切点有效性与「与整句同开」的告警在
                 // `CodeTableEngine::new` 里（那里才同时握着 max_code_length 与两个开关）。
+                //
+                // ⚠️ 下面两个旋钮取的是**本次构建的这份 schema**，混输下那就是
+                // `primary_schema` 的值而非混输方案自己的 —— 之所以不必像 `split_input`
+                // 那样经 `MixedRole` 收敛，是因为混输下 `split_input` 已恒为 false，
+                // 两个旋钮读到什么都不会被用到。⚠️ 将来若给混输接上逆切分，**这两行必须
+                // 一并收敛**，否则会得到「混输方案里写的档位静默失效、却继承了主码表的」。
                 split_input: resolve_split_input(mixed_role, schema.engine.codetable.split_input),
                 split_front_candidates: schema.engine.codetable.split_front_candidates,
                 split_trigger: crate::codetable::SplitTrigger::parse(
@@ -5788,16 +5816,14 @@ mod tests {
         // ★ 混输主：`own=true`（primary_schema 开着）也要被压成混输方案自己的取值。
         assert!(!resolve_sentence_input(
             Some(MixedRole::Primary {
-                sentence_input: false,
-                split_input: false
+                sentence_input: false
             }),
             true
         ));
         // 混输方案自己声明了 ⇒ 开（当前只在没配拼音子引擎的退化混输下真正生效）。
         assert!(resolve_sentence_input(
             Some(MixedRole::Primary {
-                sentence_input: true,
-                split_input: false
+                sentence_input: true
             }),
             false
         ));
@@ -5807,39 +5833,38 @@ mod tests {
         assert!(resolve_sentence_input(sec, true));
     }
 
-    /// 逆切分同样不继承 `primary_schema`，理由比整句更硬 —— 见 [`resolve_split_input`]：
-    /// 整句在混输下压根不会触发（超码长归 `convert_overflow`），而逆切分的区间是**码长内**、
-    /// 混输走的正是 `primary.convert`，**它会真正生效**并与拼音候选同场竞争。
-    /// `wubi86` 单用时开着合适，不等于 `wubi86_pinyin` 下也合适。
+    /// 逆切分在**混输主引擎上一律关闭**，谁声明都不行 —— 见 [`resolve_split_input`]：
+    /// 切分候选的 `code` 是整串，会落进混输档位体系的档 0、无条件压过拼音精确候选。
+    /// 让它在混输下正确需要先定档位归属，那是独立一步。
     #[test]
-    fn mixed_primary_does_not_inherit_split_input() {
+    fn split_input_is_off_for_mixed_primary() {
         // 独立方案：用自己的声明。
         assert!(resolve_split_input(None, true));
         assert!(!resolve_split_input(None, false));
 
-        // ★ 混输主：`own=true`（primary_schema 开着）也要被压成混输方案自己的取值。
-        assert!(!resolve_split_input(
-            Some(MixedRole::Primary {
-                sentence_input: false,
-                split_input: false
-            }),
-            true
-        ));
-        assert!(resolve_split_input(
-            Some(MixedRole::Primary {
-                sentence_input: false,
-                split_input: true
-            }),
-            false
-        ));
+        // ★ 混输主：两个来源都开着也压成 false —— 不是「不继承」，是「不生效」。
+        for own in [true, false] {
+            assert!(
+                !resolve_split_input(
+                    Some(MixedRole::Primary {
+                        sentence_input: false
+                    }),
+                    own
+                ),
+                "混输主引擎必须恒关（own={own}）"
+            );
+        }
 
-        // ★ 两个开关互不串味：整句开着不该把逆切分也带开（反之同理）。
-        let sentence_only = Some(MixedRole::Primary {
+        // ★ 反向对照：整句**不受**这条影响，仍按混输方案自己的声明走。
+        // 缺了它，一个把两个开关一起压死的实现也会让上面那段变绿。
+        let sentence_on = Some(MixedRole::Primary {
             sentence_input: true,
-            split_input: false,
         });
-        assert!(resolve_sentence_input(sentence_only, false));
-        assert!(!resolve_split_input(sentence_only, true));
+        assert!(
+            resolve_sentence_input(sentence_on, false),
+            "整句仍按声明生效"
+        );
+        assert!(!resolve_split_input(sentence_on, true), "逆切分仍须关");
 
         // 混输次（拼音）走不到码表分支，取值等同独立方案即可。
         let sec = Some(MixedRole::Secondary(MixPinyinOpts { abbrev: true }));

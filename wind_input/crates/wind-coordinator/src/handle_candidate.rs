@@ -137,25 +137,32 @@ pub(crate) fn candidate_display_order(
     let by_consumed = wind_candidate::cmp_by_consumed(a, b, input_len);
 
     by_consumed
-        .then_with(|| wind_candidate::cmp_match_layers(a, b))
-        // 音节数对齐者优先（`zaim` 先给 2 音节的「在吗/再买」，3 音节的「在美国」排其后）。
-        // 置于层级之后、权重之前：层内分档，不跨层提拔。见 `cmp_completion_extra`。
-        .then_with(|| wind_candidate::cmp_completion_extra(a, b))
-        .then_with(|| wind_candidate::cmp_exact_first(a, b))
-        .then(by_source_tier)
         // 逆切分候选沉底（`split_trigger = "no_exact"` 档才看得见效果）。
         //
-        // 该档下切分候选与既有的前缀/补全候选同处「非精确」层，只靠 weight 竞争会插进
-        // 用户本来打得出的候选中间——而逆切分的立身之本是「不抢任何现有候选」。引擎侧
-        // 的 append 只保证入列序，本函数会无条件重排全部候选，留不住。
+        // 该档下切分候选与既有的前缀/补全候选同场，只靠 weight 竞争会插进用户本来打得出的
+        // 候选中间——而逆切分的立身之本是「不抢任何现有候选」。引擎侧的 append 只保证入列序，
+        // 本函数会无条件重排全部候选，留不住。
         //
-        // ⚠️ 为什么加在这里是安全的（对照 `place_english_after_common_exact` 那条
+        // ⚠️ **必须排在 `cmp_match_layers` 之前**：那个键的第三层是 `eff_prefix`，而切分候选
+        // `is_prefix = false`、用户词/临时词层的前缀补全 `is_prefix = true`（`store_layer.rs`）
+        // ⇒ 放在它之后的话，胜负在那一层就已分出（判「切分候选更优」），本层永远走不到。
+        // 实测过：`hfkn` 无精确解但用户词库有 `hfknq` 时，屏幕是「很可能 / 很可难 / 甲」——
+        // 用户自己造的词被合成候选挤到第三位。（系统码表层的前缀候选不带 `is_prefix`，
+        // 所以最常见的那一类不受影响，问题只在用户词上暴露，更难发现。）
+        //
+        // ⚠️ 为什么加比较键在这里是安全的（对照 `place_english_after_common_exact` 那条
         // 「不要往本函数加比较键」的告诫）：那里被否决的是**想对某些候选对表态、对另一些
         // 返回 Equal** 的比较器——那不构成全序，`sort_by` 的结果未指定。本键按一个布尔
         // 把候选分成两区，是合法全序，且两条非切分候选之间恒 `Equal`
         // ⇒ **可证明不改变任何既有次序**。默认档（`Empty`）下列表里只有切分候选，
         // 本层是纯空操作。
         .then(a.is_split_composed.cmp(&b.is_split_composed))
+        .then_with(|| wind_candidate::cmp_match_layers(a, b))
+        // 音节数对齐者优先（`zaim` 先给 2 音节的「在吗/再买」，3 音节的「在美国」排其后）。
+        // 置于层级之后、权重之前：层内分档，不跨层提拔。见 `cmp_completion_extra`。
+        .then_with(|| wind_candidate::cmp_completion_extra(a, b))
+        .then_with(|| wind_candidate::cmp_exact_first(a, b))
+        .then(by_source_tier)
         .then(by_weight)
         .then(a.base_order.cmp(&b.base_order))
         .then(a.natural_order.cmp(&b.natural_order))
@@ -5682,6 +5689,10 @@ mod clear_recheck_tests {
     fn split_composed_sinks_below_ordinary_candidates() {
         let mut ordinary = codetable("甲");
         ordinary.weight = 10; // 故意给一个**低**权重
+        // ★ 必须带 `is_prefix`：用户词/临时词层的前缀补全就是这个形态，而 `cmp_match_layers`
+        // 的第三层正是 `eff_prefix`。夹具若留 false，两条候选在那一层相等、沉底层放在它
+        // 之后也能变绿 —— 那正是本用例第一版漏掉真缺陷的原因。
+        ordinary.is_prefix = true;
         let mut composed = codetable("很可能");
         composed.is_split_composed = true;
         composed.weight = 9999; // 故意给一个**高**权重

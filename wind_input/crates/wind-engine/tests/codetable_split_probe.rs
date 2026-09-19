@@ -264,14 +264,13 @@ fn split_encoding_space_probe() {
         println!();
         println!("  抽样（前段首选 + 后段前若干候选）：");
         for (code, f, b) in &r.samples {
+            // 按 **char** 切，不按字节 —— `probe()` 本身就是按 char 枚举码元的，而模块文档
+            // 承诺「换一张码表只改 PROBE_DICTS」。填进一个非 ASCII 码元的方案时，字节切法
+            // 会在跑完几十秒统计、进入打印阶段时才 panic。
             let half = *code_len / 2;
-            println!(
-                "    {}'{}  →  {} + [{}]",
-                &code[..half],
-                &code[half..],
-                f,
-                b.join(" ")
-            );
+            let front: String = code.chars().take(half).collect();
+            let back: String = code.chars().skip(half).collect();
+            println!("    {front}'{back}  →  {f} + [{}]", b.join(" "));
         }
 
         // 探针不判分，只挡住「一条都没查到」这种环境/路径出错的情形——
