@@ -5,8 +5,22 @@
 > 均为实跑verbatim，非纸面翻译。
 
 开发主力迁到 Linux 后，`scripts/release.ps1` 跑不了了（它是 PowerShell，且 `sign-draft`
-段要调 `dev.ps1`）。本文记录在 Linux 上手工完成一次发版的完整序列，供日后固化成
-`scripts/release.sh`。
+段要调 `dev.ps1`）。本文记录在 Linux 上完成一次发版的完整序列。
+
+> **已固化为 `scripts/release.sh`**（2026-09-19）。日常发版走脚本：
+>
+> ```bash
+> ./scripts/release.sh check                   # 第 4 节
+> ./scripts/release.sh push <版本|patch|minor>  # 第 5 节
+> ./scripts/release.sh wait                    # 第 6 节
+> ./scripts/release.sh sign-draft              # 第 7–8 节（含上传与端到端校验）
+> ./scripts/release.sh upload                  # 只上传：签名已出但上传失败时的恢复路径
+> ```
+>
+> **本文不是脚本的使用说明，而是它每一步的判据来源**：脚本把命令固化了，但「为什么
+> 是这个顺序」「这一步要盯哪几行输出」仍然只写在这里。改脚本前先读对应章节；下面各节
+> 的「检查点」凡是脚本没法自动判的（如 `sign 8s` 的三段签名、`unstage` 的两行 `→`），
+> 脚本会把编译机输出原样透传出来，仍然要人眼过。
 
 ---
 
@@ -378,17 +392,35 @@ Windows 侧 `signtool verify /pa /v`（见第 7 节）。两者互补，别拿�
 
 ---
 
-## 10. 与 `release.ps1` 的对应关系
+## 10. 三者的对应关系
 
-| `release.ps1` | 本文 | Linux 可否原生 |
+| `release.ps1`（Windows） | `release.sh`（Linux） | 本文 |
 |---|---|---|
-| `status` / `check` | 第 4 节 | ✅ 纯 git |
-| `patch` / `minor` | 第 5 节 | ✅ 纯 git |
-| （等 CI） | 第 6 节 | ✅ `gh` |
-| `sign-draft` | 第 7–8 节 | ⚠️ 签名段必须委托 VM，其余 `gh` 可做 |
-| `auto-sign` / `-AutoSign` | — | 尚未有对应物 |
+| `status` / `check` | `status` / `check` | 第 4 节 |
+| `patch` / `minor` | `push <版本｜patch｜minor>` | 第 5 节 |
+| （等 CI） | `wait` | 第 6 节 |
+| `sign-draft` | `sign-draft` | 第 7–8 节 |
+| （无：那边上传失败可直接重跑） | `upload` | 第 8 节 |
+| `auto-sign` / `-AutoSign` | — | 尚无对应物 |
 
-固化成 `scripts/release.sh` 时，人工不可消除的只有一步：**在 VM 桌面登录签名会话**
-（手机二次验证 + GUI 客户端，2 小时时限）。其余全部可自动化。
+**两侧为什么不能合成一个。** `release.ps1 sign-draft` 从头到尾在一台 Windows 上跑，
+因为签名与 `gh` 都在本机；Linux 这侧这两样分处两机，故按能力劈开：
+
+| 步骤 | 在哪跑 | 为什么只能在那儿 |
+|---|---|---|
+| 拉 CI 中转产物、上传 Release、改正文、端到端校验 | Linux | 编译机上没装 `gh`，装了就要在那台机器上再放一份 GitHub 凭据 |
+| `unstage` → `sign 8s`/`9s` → `verify-sign` → 时间戳验证 | 编译机 | 云签名客户端与 `signtool` 只有 Windows 有 |
+
+⚠️ **代价：签名段的编排因此在 `release.ps1` 与 `release.sh` 各有一份。** 改
+`Invoke-SignDraft` 时要同步 `do_sign_draft`，尤其是「签名夹在打包中间、不能对成品补签
+外壳」与「摘横幅认特征串」这两条 —— 错了都不报错。
+
+`release.sh` 调编译机走的是 `dev.sh` 那条通道（`lib/remote-build.sh` 的 `rbuild_ps`）：
+脚本经 UTF-16LE+base64 以 `-EncodedCommand` 传入，第 7 节那个「多层引号静默传成字面量」
+的坑因此不再需要靠「写成本地脚本再 `scp`」来绕。它还会占用与 `remote-build.ps1` 同一个
+锁文件，所以签名期间编译机上的构建会排队而不是对撞。
+
+人工不可消除的只剩一步：**在编译机桌面登录签名会话**（手机二次验证 + GUI 客户端，
+2 小时时限）。其余全部已自动化。
 
 相关：[code-signing.md](code-signing.md)（签名原理、五个接线点、4.3 签名机迁到编译机）

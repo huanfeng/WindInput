@@ -386,6 +386,11 @@ cargo test -p wind-rpc --test wind_setting_assets
 
 ## 版本 / 发布
 
+- 发版入口：Linux 走 `scripts/release.sh`（`check` → `push` → `wait` → `sign-draft`），
+  Windows 走 `scripts/release.ps1`。签名只能在 Windows 编译机上做（云签名客户端与
+  `signtool` 只有 Windows 有），故 Linux 侧把流程劈成「本机用 `gh` 收发、编译机只签名」
+  两段。每一步的判据与检查点见 [docs/design/release-from-linux.md](docs/design/release-from-linux.md)
+  —— 脚本固化的是命令，「为什么是这个顺序」只写在那里。
 - 产品版本**唯一真源 = `docs/VERSION`**。构建脚本读取后分发到 5 类产物
   （`wind_input.exe` / `wind_tsf.dll` / `wind_setting.exe` / `wind_portable.exe` / 安装包），
   跨仓经环境变量 `WIND_APP_VERSION` 注入（不经脚本独立构建时各仓自行回退）。
