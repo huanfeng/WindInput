@@ -24,7 +24,9 @@
 | `src/pipeline.rs` | `ModeKind`（单一活跃独占模式枚举）+ `Rewind`（夺取回退登记）；含与 Go 决策器的**刻意差异说明**（见下） |
 | `src/handle_candidate.rs` | 候选生成/过滤/shadow/词频重排/分页/选词上屏/右键操作 |
 | `src/handle_temp.rs` | 临时拼音 + 临时英文模式（触发判定/进出/候选刷新/上屏） |
-| `src/handle_url.rs` | 网址模式（夺取缓冲 + 边界退格回退） |
+| `src/handle_url.rs` | 网址模式（夺取缓冲 + 边界退格回退）**兼前缀夺取骨架** |
+| `src/handle_email.rs` | 邮箱模式（`@` 后缀触发，共用上面那套骨架） |
+| `src/mode_completion.rs` | 网址/邮箱**共用**的补全候选源与上屏收尾（学习数据在 wind-store 的 `completion` 表） |
 | `src/handle_special.rs` | 引导键特殊模式（自带码表 + 全码上屏策略） |
 | `src/handle_mode.rs` | 中英 / 简繁 / 方案 / 主题 / mix 融合模式切换 |
 | `src/handle_punct.rs` | 标点编排 + 智能符号同键连按替换状态机（武装/触发/解除） |
