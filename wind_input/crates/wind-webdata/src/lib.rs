@@ -16,6 +16,7 @@
 use serde_json::{Value, json};
 use wind_coordinator::handle_common_chars::CommonCharEdit;
 use wind_coordinator::handle_quick_format::QuickFormatEdit;
+use wind_store::completion::CompletionKind;
 /// [`WebData::apply_pinyin_entry_contract`] 的处置统计，逐项对应导入预览的三档
 /// （见 `docs/design/pinyin-entry-boundary-contract.md` §5）。
 #[derive(Debug, Default)]
@@ -472,6 +473,21 @@ pub trait WebDataRpc: WebDataHost {
             "freq.listPaged" => self.web_freq_list_paged(params),
             "freq.delete" => self.web_freq_delete(params),
             "freq.clear" => self.web_freq_clear(params),
+
+            // ── mailSuffix.* / urlHistory.*（补全学习数据，redb 持久化）──
+            // 两组共用一份实现，只差 `CompletionKind`：存储层本就是一张表两个分区，
+            // RPC 再各写一遍等于把「同形态」这件事在第三处重新论证一遍。
+            // 命名空间分开是给设置端用的——「清空网址历史」不该顺带抹掉邮箱学习。
+            "mailSuffix.listPaged" => {
+                self.web_completion_list_paged(CompletionKind::EmailSuffix, params)
+            }
+            "mailSuffix.delete" => self.web_completion_delete(CompletionKind::EmailSuffix, params),
+            "mailSuffix.clear" => self.web_completion_clear(CompletionKind::EmailSuffix),
+            "urlHistory.listPaged" => {
+                self.web_completion_list_paged(CompletionKind::UrlHistory, params)
+            }
+            "urlHistory.delete" => self.web_completion_delete(CompletionKind::UrlHistory, params),
+            "urlHistory.clear" => self.web_completion_clear(CompletionKind::UrlHistory),
 
             // ── shadow.*（影子规则，redb 持久化）─────────────────
             "shadow.list" => self.web_shadow_list(params),
@@ -2041,6 +2057,83 @@ pub trait WebDataRpc: WebDataHost {
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         Ok(json!(store.clear_freq(&schema)?))
+    }
+
+    /// 补全学习数据的分页列表（邮箱后缀 / 网址历史共用）。
+    ///
+    /// 不分方案：这两类都是全局属性（见 `wind_store::completion` 模块文档），故参数里
+    /// **没有** `schemaId`——设置端那侧对应 `CategorySpec::scoped_by_schema = false`。
+    fn web_completion_list_paged(
+        &self,
+        kind: CompletionKind,
+        params: &Value,
+    ) -> anyhow::Result<Value> {
+        // `prefix` 与 `query` 是设置端发的同值别名（`build_list_params`），取到哪个算哪个。
+        let query = params
+            .get("prefix")
+            .or_else(|| params.get("query"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let offset = usize_param(params, "offset", 0);
+        let limit = usize_param(params, "limit", 50);
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        let sort = parse_sort(params, &["text", "count", "lastUsed"]);
+
+        // 搜索是**包含**而非前缀：用户记得的多半是网址中段（搜 `example` 要能找出
+        // `www.example.com`），而 store 侧只提供前缀扫描。故有搜索词或要自定义排序时
+        // 全量拉取后在内存里过滤/排序——这两类数据有 `history_max` 封顶，规模可控。
+        let (page, total) = if query.is_empty() && sort.is_none() {
+            store.list_completions(kind, "", offset, limit)?
+        } else {
+            let (all, _) = store.list_completions(kind, "", 0, 0)?;
+            let q = query.to_lowercase();
+            let mut all: Vec<_> = all
+                .into_iter()
+                .filter(|(text, _)| q.is_empty() || text.to_lowercase().contains(&q))
+                .collect();
+            if let Some((by, desc)) = sort {
+                all.sort_by(|(ta, ra), (tb, rb)| {
+                    let ord = match by {
+                        "count" => ra.count.cmp(&rb.count),
+                        "lastUsed" => ra.last_used.cmp(&rb.last_used),
+                        _ => ta.cmp(tb),
+                    };
+                    if desc { ord.reverse() } else { ord }
+                });
+            }
+            let total = all.len();
+            let page = all.into_iter().skip(offset).take(limit).collect();
+            (page, total)
+        };
+        let items: Vec<Value> = page
+            .into_iter()
+            .map(|(text, rec)| {
+                json!({ "text": ui_text(&text), "count": rec.count, "lastUsed": rec.last_used })
+            })
+            .collect();
+        Ok(json!({ "items": items, "total": total }))
+    }
+
+    /// 删一条补全学习数据。返回它本来在不在。
+    fn web_completion_delete(&self, kind: CompletionKind, params: &Value) -> anyhow::Result<Value> {
+        let text = str_param(params, "text")?;
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        Ok(json!(store.remove_completion(kind, &store_text(text))?))
+    }
+
+    /// 清空某一类补全学习数据，返回删除条数。
+    ///
+    /// 无内存镜像要一并清（不像 `stats.clear` 那样还要 `stat_collector().reset()`）：
+    /// 补全候选每次刷新都现查库，没有缓存层。
+    fn web_completion_clear(&self, kind: CompletionKind) -> anyhow::Result<Value> {
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        Ok(json!(store.clear_completions(kind)?))
     }
 
     fn web_shadow_list(&self, params: &Value) -> anyhow::Result<Value> {

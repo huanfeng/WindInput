@@ -168,6 +168,19 @@ pub fn create_backup(
         serde_json::Value::Null,
     )?;
 
+    // 补全学习数据（邮箱后缀词频 + 网址历史）：同样是键不带方案的全局段。
+    // 一个文件装两类（jsonl 每行自带 kind），而不是两个文件——备份包里多一个文件就多
+    // 一处要在 create / restore / RESTORE_SECTIONS 三处同步登记的地方，而 common_chars
+    // 漏登记 RESTORE_SECTIONS 的前科说明那是条真会被漏的路。
+    let completions = store.export_completions_jsonl()?;
+    add(
+        &mut w,
+        "userdata/completions.jsonl".into(),
+        completions.as_bytes(),
+        "completion",
+        serde_json::Value::Null,
+    )?;
+
     if opts.include_stats {
         let stats = store.export_stats_jsonl()?;
         add(
@@ -402,6 +415,16 @@ pub fn restore_backup(
                 store.import_common_chars_jsonl(&text())?;
                 restored.push(e.path.clone());
             }
+            "completion" => {
+                if replace && cleared.insert("completion".into()) {
+                    // 两个分区都清：备份包里的这一个文件装的就是两类，只清一类会让
+                    // 另一类变成「本地残留 ∪ 包里内容」，那不是 Replace 的语义。
+                    store.clear_completions(wind_store::completion::CompletionKind::EmailSuffix)?;
+                    store.clear_completions(wind_store::completion::CompletionKind::UrlHistory)?;
+                }
+                store.import_completions_jsonl(&text())?;
+                restored.push(e.path.clone());
+            }
             "stats" => {
                 if replace && cleared.insert("stats".into()) {
                     store.clear_stats()?;
@@ -478,6 +501,146 @@ pub fn restore_backup(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// 空 sources/targets（只考察 store 数据域时用，文件域一概不带）。
+    fn empty_sources() -> BackupSources<'static> {
+        BackupSources {
+            user_config_file: None,
+            compat_file: None,
+            user_schemas_dir: None,
+            user_schema_overrides_dir: None,
+            user_themes_dir: None,
+            state_file: None,
+        }
+    }
+
+    fn empty_targets() -> RestoreTargets<'static> {
+        RestoreTargets {
+            user_config_file: None,
+            compat_file: None,
+            user_schemas_dir: None,
+            user_schema_overrides_dir: None,
+            user_themes_dir: None,
+            state_file: None,
+        }
+    }
+
+    fn open_store(dir: &std::path::Path, tag: &str) -> Store {
+        Store::open(dir.join(format!("{tag}.redb"))).unwrap()
+    }
+
+    /// 补全学习数据（邮箱后缀 + 网址历史）必须随整机备份走一个来回。
+    ///
+    /// 这两类是**键不带方案的全局段**，不在 `list_data_schemas()` 的逐 schema 循环里
+    /// ——漏登记 `create_backup` 的话备份包里压根没有它们，而备份与还原都不会报错，
+    /// 用户换机后才发现学的东西全没了。`common_chars` 当年就是这么漏在
+    /// `RESTORE_SECTIONS` 里的。
+    #[test]
+    fn backup_roundtrip_carries_completion_learning_data() {
+        use wind_store::completion::CompletionKind;
+        let t = tempfile::tempdir().unwrap();
+        let src = open_store(t.path(), "src");
+        src.record_completion(CompletionKind::EmailSuffix, "mycorp.cn")
+            .unwrap();
+        src.record_completion(CompletionKind::EmailSuffix, "mycorp.cn")
+            .unwrap();
+        src.record_completion(CompletionKind::UrlHistory, "www.example.com")
+            .unwrap();
+
+        let pkg = t.path().join("b.zip");
+        let r = create_backup(
+            &src,
+            &empty_sources(),
+            &pkg,
+            "0.0.0",
+            "test",
+            "2026-09-19T00:00:00Z",
+            &BackupOptions {
+                include_stats: false,
+                include_state: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            r.entries.iter().any(|e| e == "userdata/completions.jsonl"),
+            "备份包里应有补全学习数据这一段，实际条目：{:?}",
+            r.entries
+        );
+
+        let dst = open_store(t.path(), "dst");
+        restore_backup(
+            &pkg,
+            &dst,
+            &empty_targets(),
+            crate::merge::Strategy::Replace,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            dst.get_completion(CompletionKind::EmailSuffix, "mycorp.cn")
+                .unwrap()
+                .expect("邮箱后缀应被还原")
+                .count,
+            2,
+            "次数要一并还原，否则还原后排序全乱"
+        );
+        assert_eq!(
+            dst.list_completions(CompletionKind::UrlHistory, "", 0, 0)
+                .unwrap()
+                .1,
+            1,
+            "网址历史也该被还原"
+        );
+    }
+
+    /// `--sections completion` 能单独还原这一段。
+    ///
+    /// 这条钉的是 `RESTORE_SECTIONS` 那张与 `create_backup` 无编译期约束的白名单：
+    /// 漏登记不会报错，只是 `--sections` 里写了也被静默丢弃。
+    #[test]
+    fn completion_is_selectable_as_its_own_restore_section() {
+        use wind_store::completion::CompletionKind;
+        let t = tempfile::tempdir().unwrap();
+        let src = open_store(t.path(), "s2");
+        src.record_completion(CompletionKind::UrlHistory, "www.a.com")
+            .unwrap();
+        let pkg = t.path().join("b2.zip");
+        create_backup(
+            &src,
+            &empty_sources(),
+            &pkg,
+            "0.0.0",
+            "test",
+            "2026-09-19T00:00:00Z",
+            &BackupOptions {
+                include_stats: false,
+                include_state: false,
+            },
+        )
+        .unwrap();
+
+        let dst = open_store(t.path(), "d2");
+        let sections = vec!["completion".to_string()];
+        let r = restore_backup(
+            &pkg,
+            &dst,
+            &empty_targets(),
+            crate::merge::Strategy::Replace,
+            Some(&sections),
+        )
+        .unwrap();
+        assert!(
+            r.restored.iter().any(|p| p == "userdata/completions.jsonl"),
+            "只选 completion 这一段时它必须被还原，实际：{:?}",
+            r.restored
+        );
+        assert_eq!(
+            dst.list_completions(CompletionKind::UrlHistory, "", 0, 0)
+                .unwrap()
+                .1,
+            1
+        );
+    }
 
     /// 造一份最小可用的 wdat 字节流（供下面两条「替换后不得复用旧 reader」用）。
     fn wdat_bytes(code: &str, text: &str) -> Vec<u8> {

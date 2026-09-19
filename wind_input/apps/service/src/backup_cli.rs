@@ -11,10 +11,27 @@ use serde_json::{Value, json};
 use crate::cli_util::{resolve_path, rpc_online};
 
 /// 还原可选的域名。backup.rs 的 `section_of` 只重映射 schema_file/theme_file/
-/// stats_meta 三类，其余条目 type（config/state/dict/temp/freq/shadow/phrase/stats）
-/// 原样即域名——白名单须覆盖备份包实际写入的全部 type，否则对应域无法单独还原。
+/// stats_meta 三类，其余条目 type（config/state/dict/temp/freq/shadow/phrase/
+/// common_chars/charset/completion/stats）原样即域名——白名单须覆盖备份包实际写入的
+/// 全部 type，否则对应域无法单独还原（`--sections` 里写了也会被静默丢弃）。
+///
+/// ⚠️ 这张表与 `backup.rs::create_backup` 实际写入的 type 集合**没有编译期约束**，
+/// 漏一个不报错、只是那个域从此单独还原不了。`common_chars` 与 `charset` 曾这样漏了
+/// 一段时间，本次补齐并连同新增的 `completion` 一起登记。
 const RESTORE_SECTIONS: &[&str] = &[
-    "config", "dict", "temp", "freq", "shadow", "phrase", "schemas", "themes", "state", "stats",
+    "config",
+    "dict",
+    "temp",
+    "freq",
+    "shadow",
+    "phrase",
+    "common_chars",
+    "charset",
+    "completion",
+    "schemas",
+    "themes",
+    "state",
+    "stats",
 ];
 
 /// 子命令入口。`args` 为 `backup` 之后的参数。返回进程退出码。
