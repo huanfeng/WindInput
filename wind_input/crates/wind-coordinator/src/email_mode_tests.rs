@@ -345,6 +345,88 @@ fn committing_learns_the_suffix_without_the_username() {
     );
 }
 
+/// 回车上屏半截后缀时**不学**它 —— 否则下次补全会先递一条垃圾。
+///
+/// 「打一半就上屏」是回车带来的正常用法（见 `mode_completion.rs` 文件头分工表）。
+/// 若把 `gm` 也学进去，下次打 `x@g` 时它会作为「学过的」排在 `gmail.com` 前面，
+/// 而用户根本没有 `@gm` 这个邮箱。
+#[test]
+fn a_half_typed_suffix_is_committed_but_not_learned() {
+    let (c, store) = coord_with("halflearn", email_cfg());
+    press_letter(&c, 'a');
+    press_at(&c);
+    press_letter(&c, 'g');
+    press_letter(&c, 'm');
+    let act = press(&c, wind_keys::keymap::VK_RETURN);
+
+    // 上屏不受影响：用户要的就是这五个字符。
+    assert_eq!(
+        committed(&act).as_deref(),
+        Some("a@gm"),
+        "半截后缀照样原样上屏"
+    );
+    // 但它不该进学习数据。
+    assert_eq!(
+        store
+            .list_completions(CompletionKind::EmailSuffix, "", 0, 0)
+            .unwrap()
+            .1,
+        0,
+        "「gm」不像域名，不该被学成后缀"
+    );
+}
+
+/// 反过来：回车上屏一个**表外的完整域名**时必须学 —— 这正是「自定义后缀也能学」的场景。
+#[test]
+fn a_custom_full_domain_committed_by_enter_is_learned() {
+    let (c, store) = coord_with("customlearn", email_cfg());
+    press_letter(&c, 'a');
+    press_at(&c);
+    for ch in ['m', 'y', 'c', 'o', 'r', 'p'] {
+        press_letter(&c, ch);
+    }
+    press(&c, wind_keys::keymap::VK_PERIOD);
+    press_letter(&c, 'c');
+    press_letter(&c, 'n');
+    let act = press(&c, wind_keys::keymap::VK_RETURN);
+
+    assert_eq!(committed(&act).as_deref(), Some("a@mycorp.cn"));
+    assert_eq!(
+        store
+            .get_completion(CompletionKind::EmailSuffix, "mycorp.cn")
+            .unwrap()
+            .map(|r| r.count),
+        Some(1),
+        "表外的完整域名必须学得下来，否则「自定义后缀也能学」就废了"
+    );
+}
+
+/// 域名判据的边界：点在首尾、重复点、无点一概不算。
+#[test]
+fn domain_shape_rejects_malformed_suffixes() {
+    let (c, store) = coord_with("shape", email_cfg());
+    for bad in ["gm", "com.", ".com"] {
+        press_letter(&c, 'a');
+        press_at(&c);
+        for ch in bad.chars() {
+            if ch == '.' {
+                press(&c, wind_keys::keymap::VK_PERIOD);
+            } else {
+                press_letter(&c, ch);
+            }
+        }
+        press(&c, wind_keys::keymap::VK_RETURN);
+    }
+    assert_eq!(
+        store
+            .list_completions(CompletionKind::EmailSuffix, "", 0, 0)
+            .unwrap()
+            .1,
+        0,
+        "首尾带点或无点的串都不该被学成后缀"
+    );
+}
+
 #[test]
 fn a_learned_suffix_outranks_the_preset_table() {
     let (c, store) = coord_with("rank", email_cfg());

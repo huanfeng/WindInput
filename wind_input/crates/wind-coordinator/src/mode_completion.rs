@@ -197,7 +197,7 @@ impl Coordinator {
         }
         let suffix = Self::email_suffix_part(text);
         // 没打后缀就上屏（`abc@` 直接按空格）时无可学。`@` 也不该被当成后缀的一部分。
-        if suffix.is_empty() {
+        if suffix.is_empty() || !Self::looks_like_domain(suffix) {
             return;
         }
         let Some(store) = self.store.as_ref() else {
@@ -205,6 +205,30 @@ impl Coordinator {
         };
         if let Err(e) = store.record_completion(CompletionKind::EmailSuffix, suffix) {
             tracing::debug!("邮箱后缀学习写入失败: {e}");
+        }
+    }
+
+    /// 这串看起来像不像个域名（含点，且点不在首尾）。
+    ///
+    /// # 为什么学习要过这道闸
+    ///
+    /// 回车**恒上屏缓冲原文**（见文件头分工表），于是「打一半就上屏」是一条正常用法
+    /// ——用户打 `abc@gm` 按回车，要的就是 `abc@gm` 这五个字符。若照单全收，`gm` 就被
+    /// 当成一个后缀学了进去：下次打 `x@g` 时它会作为**学过的**条目排在 `gmail.com`
+    /// **前面**，而用户根本没有 `@gm` 这个邮箱。补全从此每次都先递一条垃圾。
+    ///
+    /// 这道闸只拦学习，不拦上屏：`abc@gm` 照样原样上屏，只是不进学习数据。
+    ///
+    /// 空格那条路不受影响——它上屏的是候选，而候选恒来自预置表或已学数据，本就都是
+    /// 域名形态，判据对它幂等。
+    ///
+    /// ⚠️ 代价是内网短域名（`abc@localhost`、`abc@mail`）学不到。那是刻意取舍：学不到
+    /// 只是少个补全，而学到半截后缀是**主动**往候选里塞垃圾，且用户要自己去词库页删。
+    fn looks_like_domain(suffix: &str) -> bool {
+        match suffix.find('.') {
+            // 点不在首尾 ⇒ 点两边都有内容。`.com` / `qq.` / `qq..com` 一概不算。
+            Some(i) => i > 0 && i + 1 < suffix.len() && !suffix.ends_with('.'),
+            None => false,
         }
     }
 
