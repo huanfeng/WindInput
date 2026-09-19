@@ -2333,7 +2333,10 @@ pub struct AutoLearnConfig {
     /// 「今天天气不错」这类值得进词库的长词，又挡住整句解常见的跨句拼接。
     #[serde(default = "default_learn_max_len")]
     pub max_word_length: usize,
-    /// 临时词晋升所需使用次数（原 learning.temp_promote_count）。
+    /// 临时词晋升进用户词库所需使用次数。**0 = 不晋升**，一直留在临时词库（默认）
+    /// ——与 [`AutoPhraseConfig::promote_count`] 逐字同义，两边共用同一套晋升判定
+    /// （`Coordinator::maybe_promote_temp`）。不是「0 = 用内置默认」：这条曾在
+    /// `data/config.toml` 的注释里写反，于是「自动学习」出厂即学了也永不转正。
     #[serde(default)]
     pub promote_count: usize,
 }
