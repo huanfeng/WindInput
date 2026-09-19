@@ -40,31 +40,65 @@ use std::sync::Arc;
 use wind_dict::cached::CachedDict;
 use wind_dict::{DictManager, SystemDictLayer};
 
-/// 要体检的码表：`(展示名, 相对 build_dev/data/schemas 的 .dict.yaml 路径, 码元字符集, 码长)`。
+/// 要体检的码表：`(展示名, 词库层, 码元字符集, 码长)`。
 ///
-/// 五笔码元是 `a-y`（`z` 是万能键、不入码），故枚举空间是 25⁴ 而非 26⁴。
-/// 加别的码表时照填它自己的码元集——枚举空间填错会让空码率整体失真。
-const PROBE_DICTS: &[(&str, &str, &str, usize)] = &[(
-    "五笔86（极点主库）",
-    "wubi86/wubi86_jidian.dict.yaml",
-    "abcdefghijklmnopqrstuvwxy",
-    4,
-)];
+/// **口径**：挂「主词库 + 文字类扩展」，两张表一致才能对照。刻意**不挂**符号/表情库与
+/// `ok` 引导的拼字库——它们占的是专门码位，与「二简能不能组合」这件事无关，挂上只会
+/// 让空码率凭空下降一截。
+///
+/// **码元集**决定枚举空间，填错会让空码率整体失真：五笔是 `a-y`（`z` 是万能键、不入码，
+/// 25⁴），小鹤音形是全 `a-z`（双拼声母含 `z`，26⁴）。
+const PROBE_DICTS: &[(&str, &[&str], &str, usize)] = &[
+    (
+        "五笔86（极点：主库 + 文字扩展）",
+        &[
+            "wubi86/wubi86_jidian.dict.yaml",
+            "wubi86/wubi86_jidian_extra.dict.yaml",
+        ],
+        "abcdefghijklmnopqrstuvwxy",
+        4,
+    ),
+    (
+        "小鹤音形（主库 + 分类词库 + 一简次选）",
+        &[
+            "flypy/00_xh.dict.yaml",
+            "flypy/11_fl.dict.yaml",
+            "flypy/21_yj.dict.yaml",
+        ],
+        "abcdefghijklmnopqrstuvwxyz",
+        4,
+    ),
+];
 
 fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data/schemas")
 }
 
-fn load(rel: &str) -> Option<Arc<DictManager>> {
-    let yaml = schemas_dir().join(rel);
-    if !yaml.exists() {
-        return None;
-    }
-    let wdat = yaml.with_extension("wdat");
-    let cached = CachedDict::load_at_with(&yaml, &wdat, false).ok()?;
+/// 把若干层挂进一个 `DictManager`（跨层合并去重由 `CompositeDict` 负责，与真实引擎同一条路）。
+///
+/// **主库缺席即整张表跳过**；扩展层缺席只少一层、照跑——扩展是可选的，报告里会注明。
+fn load(rels: &[&str]) -> Option<(Arc<DictManager>, usize)> {
     let dm = DictManager::new();
-    dm.register_layer(Box::new(SystemDictLayer::new(cached, "probe")));
-    Some(Arc::new(dm))
+    let mut loaded = 0;
+    for (i, rel) in rels.iter().enumerate() {
+        let yaml = schemas_dir().join(rel);
+        if !yaml.exists() {
+            if i == 0 {
+                return None;
+            }
+            continue;
+        }
+        let wdat = yaml.with_extension("wdat");
+        let Ok(cached) = CachedDict::load_at_with(&yaml, &wdat, false) else {
+            continue;
+        };
+        dm.register_layer(Box::new(SystemDictLayer::new(
+            cached,
+            Box::leak(format!("probe-{i}").into_boxed_str()),
+        )));
+        loaded += 1;
+    }
+    Some((Arc::new(dm), loaded))
 }
 
 /// 一张码表的体检报告。
@@ -77,6 +111,11 @@ struct Report {
     splittable: usize,
     /// 可切分串中后段**唯一**的（= 能自动上屏的那部分）。
     back_unique: usize,
+    /// 可切分串中**前段首选是多字词**的（= 二简位上放的是词而不是字）。
+    ///
+    /// ★ 这是区分「音形红利」与「五笔噪声」的那个数：三个百分比在两张码表上很接近，
+    /// 真正的差别是切出来的前段是「安保」还是「节」。
+    front_is_word: usize,
     /// 后段候选数直方图，下标即候选数（0 不计），末槽是「≥8」。
     back_hist: [usize; 9],
     /// 抽样实例：`(码串, 前段首选, 后段候选文本)`。
@@ -127,6 +166,7 @@ fn probe(dm: &DictManager, chars: &str, code_len: usize, sample_every: usize) ->
         empty: 0,
         splittable: 0,
         back_unique: 0,
+        front_is_word: 0,
         back_hist: [0; 9],
         samples: Vec::new(),
     };
@@ -150,6 +190,10 @@ fn probe(dm: &DictManager, chars: &str, code_len: usize, sample_every: usize) ->
             if bc.len() == 1 {
                 r.back_unique += 1;
             }
+            // 「多字」按 char 数算即可：两张表的条目都是中文，一字一 char。
+            if fc[0].chars().count() >= 2 {
+                r.front_is_word += 1;
+            }
             if r.splittable.is_multiple_of(sample_every) && r.samples.len() < 25 {
                 r.samples.push((
                     full,
@@ -167,8 +211,11 @@ fn probe(dm: &DictManager, chars: &str, code_len: usize, sample_every: usize) ->
 fn split_encoding_space_probe() {
     let mut ran = false;
     for (name, rel, chars, code_len) in PROBE_DICTS {
-        let Some(dm) = load(rel) else {
-            println!("· 跳过 {name}：找不到 {rel}（需先构建一次 build_dev）");
+        let Some((dm, layers)) = load(rel) else {
+            println!(
+                "· 跳过 {name}：找不到主词库 {}（需先构建一次 build_dev）",
+                rel[0]
+            );
             continue;
         };
         ran = true;
@@ -182,7 +229,12 @@ fn split_encoding_space_probe() {
             }
         };
         println!("\n═══ {name} ═══");
-        println!("枚举 {} 码串（码元 {} 个）", r.total, chars.chars().count());
+        println!(
+            "枚举 {} 码串（码元 {} 个，挂了 {layers}/{} 层）",
+            r.total,
+            chars.chars().count(),
+            rel.len()
+        );
         println!(
             "  空码        {:>7}  ({:5.2}% 的码空间)   ← 逆切分默认档的触发面",
             r.empty,
@@ -197,6 +249,11 @@ fn split_encoding_space_probe() {
             "  后段唯一    {:>7}  ({:5.2}% 的可切分)   ← 这部分能四码自动上屏",
             r.back_unique,
             pct(r.back_unique, r.splittable)
+        );
+        println!(
+            "  前段是词    {:>7}  ({:5.2}% 的可切分)   ★ 二简位放的是词还是字",
+            r.front_is_word,
+            pct(r.front_is_word, r.splittable)
         );
         print!("  后段重码分布 ");
         for (k, v) in r.back_hist.iter().enumerate().skip(1) {
