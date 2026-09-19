@@ -24,6 +24,7 @@ use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::CGContext;
 
 use core_text::font::CTFont;
+use core_text::font_collection;
 use core_text::font_descriptor::{CTFontDescriptor, kCTFontCascadeListAttribute};
 use core_text::line::CTLine;
 use core_text::string_attributes::{kCTFontAttributeName, kCTForegroundColorAttributeName};
@@ -123,10 +124,35 @@ impl TextRenderer {
         &self.plan
     }
 
-    /// CoreText 侧尚未接查询（`CTFontCollectionCreateFromAvailableFonts` 可做），
-    /// 先一律「不知道」——调用方据此不发 warn，宁可少一条提示也不误报。
-    pub fn family_exists(&self, _family: &str) -> Option<bool> {
-        None
+    /// 系统字体集里有没有这个字族名。`None` = 查不了（名字为空）。
+    ///
+    /// 语义与 Windows 侧 `dwrite.rs` 的同名方法对齐：问的是**家族名表**里有没有这个名字
+    /// （`CTFontManagerCopyAvailableFontFamilyNames`），而不是「能不能凑出一款字体」——
+    /// 后者（`font_collection::create_for_family` 那条路）对写错的名字也会匹配出最近似的
+    /// 一款，那恰好是这条告警要抓的情形，用它等于自废。
+    /// 大小写不敏感，同 DirectWrite 的 `FindFamilyName`。
+    ///
+    /// # ⚠️ 此前这里恒返回 `None`
+    ///
+    /// 理由写的是「先一律不知道，宁可少一条提示也不误报」，而调用方
+    /// （`CandidateWindow::warn_if_family_missing`）的判据是 `== Some(false)`
+    /// ⇒ **整条字体缺失告警在 macOS 上空转**：`ui.font.family` / 方案级 `[candidate]
+    /// font_family` / 主题节点写错字族名，画面静默回落、日志一个字都没有，而 macOS 上
+    /// 写错的概率比 Windows 还高（主题多半是在 Windows 上做的，字体名照抄过来就不存在）。
+    ///
+    /// 成本：一次全量家族名拷贝（本机几百条）。调用点都是换字体 / 换方案 / 换主题这类
+    /// 低频事件，不在渲染热路径——同 Windows 侧那条 `⚠️ 只在设置字体时查` 的约束。
+    pub fn family_exists(&self, family: &str) -> Option<bool> {
+        let name = family.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let names = font_collection::get_family_names();
+        Some(
+            names
+                .iter()
+                .any(|n| n.to_string().eq_ignore_ascii_case(name)),
+        )
     }
 
     /// 加载拆字字根字体（TTF）作级联回退；失败返回 Err（不影响普通文本渲染）。
@@ -480,5 +506,35 @@ mod tests {
         r.draw_text(&mut buf, w, h, 2.0, 2.0, "中", [0, 0, 0, 255])
             .unwrap();
         assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    /// [`TextRenderer::family_exists`] 的三态各自落对。
+    ///
+    /// ★ 关键是**第二条**：装上之前这里恒返回 `None`，而调用方的判据是 `== Some(false)`
+    /// ⇒ 字体缺失告警在 macOS 上整条空转。只断言「存在的查得到」的话，一个恒 `Some(true)`
+    /// 的实现也能绿——那同样是空转，只是翻了个面。
+    #[test]
+    fn family_exists_tells_present_from_absent() {
+        let r = TextRenderer::new(FALLBACK_FAMILY, 16.0).unwrap();
+        assert_eq!(
+            r.family_exists(FALLBACK_FAMILY),
+            Some(true),
+            "本文件把它当兜底字体用，它必须在家族名表里"
+        );
+        assert_eq!(
+            r.family_exists("这个字族并不存在 ZZZ"),
+            Some(false),
+            "查不到必须明确报「没有」，报 None 等于告诉调用方「别 warn」"
+        );
+        assert_eq!(
+            r.family_exists("   "),
+            None,
+            "空名 = 没设置，与「系统里没有」是两件事"
+        );
+        assert_eq!(
+            r.family_exists(&FALLBACK_FAMILY.to_lowercase()),
+            Some(true),
+            "大小写不敏感，同 DirectWrite 的 FindFamilyName"
+        );
     }
 }
