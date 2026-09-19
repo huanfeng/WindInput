@@ -92,10 +92,7 @@ fn load(rels: &[&str]) -> Option<(Arc<DictManager>, usize)> {
         let Ok(cached) = CachedDict::load_at_with(&yaml, &wdat, false) else {
             continue;
         };
-        dm.register_layer(Box::new(SystemDictLayer::new(
-            cached,
-            Box::leak(format!("probe-{i}").into_boxed_str()),
-        )));
+        dm.register_layer(Box::new(SystemDictLayer::new(cached, format!("probe-{i}"))));
         loaded += 1;
     }
     Some((Arc::new(dm), loaded))

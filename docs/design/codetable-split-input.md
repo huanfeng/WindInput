@@ -506,6 +506,24 @@ split_front_candidates = 2
 **整句才是对的先例，`completion_hints` 不是**：判据是「它参不参与上屏决策」。
 补全提示是兜底展示，可以不出；切分候选要能自动上屏、要能被顶码取到，那就必须是一等候选。
 
+### 10.1b 「关闭时零影响」的端到端证据
+
+代码层面的等价性（`decode_split` 首行短路、`extend` 空 vec、`is_split_composed` 恒 false
+让沉底层与组合区判据都退化成空操作、`preedit_codetable` 的三元在两种情形下都等于原值）
+可以逐条论证，但论证不是证据。实际做的是**双二进制对照**：
+
+```
+git worktree add --detach ../wt-baseline/WindInput main   # 基线 = 未含本功能的 main
+两边各跑 apps/repl，喂同一份 19 行输入（空码 / 有候选 / 未满码 / 超码长 / 一简二简）
+diff 两份输出 → 逐字相同（各 91 行、56 条候选行）
+```
+
+⇒ 出厂配置（方案不写 `split_input`）下，候选集、候选序、无候选的那几格，与 main 分毫不差。
+
+另一条交叉证据：既有测试**一条断言都没改**。本分支相对基点的删除行里，测试相关的只有 4 处
+`MixedRole::Primary` 结构体字面量补字段（编译需要），`git diff main -- manager.rs | grep '^-'`
+可自证。core 测试数 4624 → 4641，增量全是新增用例。
+
 ### 10.2 沉底层加进 `candidate_display_order` 是安全的（那条告诫不适用）
 
 `place_english_after_common_exact` 的文档明确劝阻「往 `candidate_display_order` 加比较键」。
