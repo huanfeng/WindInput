@@ -137,7 +137,9 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
  ├─ ② 前缀匹配   dm.search_prefix(input)    仅 !single_code_input 时；按 text 与①去重
  └─ ③ 空码补全   search_prefix(input, 8) 取首个 code≠input 的候选
                   仅 single_code_complete 且①②为空且未满码时
- → better() 排序 → truncate（截断保护精确匹配，见下）
+ → better() 排序
+ → 整句 insert(0)（仅 >max_code_length）/ 逆切分 append（仅 ==max_code_length 且空码）
+ → truncate（截断保护精确匹配，见下）
  → show_code_hint 时前缀候选 comment 标注剩余编码
  → 自动上屏判定 / 满码空码清空（has_longer_code 单次求值复用）
 ```
@@ -157,6 +159,7 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
 | `single_code_input` | 精确模式：禁前缀匹配 |
 | `single_code_complete` | 精确模式下的空码补全 |
 | `show_code_hint` | 前缀候选标注剩余编码 |
+| `split_input` / `split_front_candidates` / `split_trigger` | **逆切分**：**恰好**满码长且空码时，把码切成前后两段（各 `max_code_length/2`）各查一次词典，拼成组合候选（`hfkn` → `hf`(很可) + `kn`(能) → 「很可能」）。候选 `code` 为整串 ⇒ 后段唯一时被既有 `decide_auto_commit` 认作「恰一个精确匹配」而自动上屏，后段重码时出候选窗；`handle_top_code` 走 `convert(prefix,1)` ⇒ 继续打字母顶的就是切分首选。**方案级引擎固定参数，出厂关**。见 [codetable-split-input.md](../design/codetable-split-input.md) |
 
 配置来源：全局 `schema.codetable.*` + 方案 `[engine.codetable]` 行为字段逐字段折叠（`Some` 覆盖 /
 `None` 回落全局）。行为与引擎固定参数**同段同结构**收在 `CodeTableSpec`（`wind-config/src/schema.rs`）：
@@ -898,9 +901,9 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 | 候选生成 | 精确 + 前缀 + 空码补全 | 六步：精确/Viterbi 整句/子短语/前缀/简拼/用户层 | 同全拼 | 码表全流程 + 拼音全流程 + 英文，档位加权合并 | 精确 + 前缀 |
 | 引擎内排序 | better()（weight 主导） | 层级（模糊/前缀/子短语）→ weight | 同全拼 | 截断档（码表精确 > 短语 > 码表前缀/英文整词 > 拼音/英文前缀），**档内保持子引擎原序** | weight |
 | 自动上屏 | 满码唯一精确且无更长后继 | 无 | 无 | 码表意向 + **拼音否决①② + 英文守护 + 存活复核 + 显示首选须码表** | 无 |
-| 顶码 | 超满码顶前 N 码首选，余码续打 | 无 | 无 | 同否决①②后委托码表；`top_code_override_pinyin` 可强制 | 无 |
+| 顶码 | 超满码顶前 N 码首选，余码续打（开 `sentence_input` 时整体让位给整句） | 无 | 无 | 同否决①②后委托码表；`top_code_override_pinyin` 可强制 | 无 |
 | 分段上屏 | 无（consumed_length=0） | consumed_length 前缀消费，余码续转 | 同全拼（映射回双拼键数） | 拼音候选支持；接力强制走 secondary_schema | 无 |
-| 空码行为 | 满码空码清空（可配） | 不清空 | 不清空 | 三道门：码表请求清空 → 两道拼音守护（受 `auto_commit_block_on_pinyin` 支配）→ 协调器候选复核（拼音部分匹配不算有效候选） | — |
+| 空码行为 | 满码空码清空（可配）；开 `split_input` 时**恰好**满码的空码先走逆切分，切得出就不再是空码 | 不清空 | 不清空 | 三道门：码表请求清空 → 两道拼音守护（受 `auto_commit_block_on_pinyin` 支配）→ 协调器候选复核（拼音部分匹配不算有效候选） | — |
 | 词频重排 | used-first 永久档位 | 衰减软置前 | 衰减软置前 | 按候选 source 分流两策略 | 归入档位 3 |
 | preedit | 原始码 | 音节 `'` 分隔 | 原始按键按音节分隔 | `preedit_display`：≥2 音节用拼音拆分串，否则原始码。`preedit_pinyin`（高亮跟随用）判据更宽：**拆分串 ≠ 原串**即给出，覆盖单音节 + 残码（`nun'l`） | 原始输入 |
 
