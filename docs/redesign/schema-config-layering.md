@@ -52,7 +52,7 @@ schema_overrides/{id}.toml ── 方案覆盖（仅码表；带开关；设置�
 | `top_code_commit` | 顶码上屏 |
 | `clear_on_empty_max` | 满码空码清空 |
 | `auto_commit_at_full` | 满码唯一自动上屏 |
-| `auto_commit_min_len` | 自动上屏最短码长（**隐藏参数**，默认 0 = 等于全码长；不在设置 UI 暴露） |
+| `auto_commit_min_len` | 自动上屏最短码长（默认 0 = 等于全码长；0.122 起在设置页开放，此前为隐藏参数） |
 | `punct_commit` | 标点顶码上屏 |
 | `show_code_hint` | 显示编码提示 |
 | `single_code_input` | 精确匹配模式（不前缀匹配） |
@@ -222,7 +222,7 @@ struct SchemaConfig {
 struct CodetableGlobal {
     // 行为：全局是基线，用绝对值 bool（非 tri-state）
     top_code_commit: bool, clear_on_empty_max: bool, auto_commit_at_full: bool,
-    auto_commit_min_len: usize,   // 隐藏参数，默认 0=全码长
+    auto_commit_min_len: usize,   // 默认 0=全码长
     punct_commit: bool, show_code_hint: bool,
     single_code_input: bool, single_code_complete: bool, z_key_repeat: bool,
     z_key_action: String,            // ""/none/temp_pinyin/temp_english/mix:<id>/special:<id>
