@@ -6,6 +6,7 @@
 pub mod abbrev_index;
 pub mod charsets;
 pub mod common_chars;
+pub mod completion;
 pub mod dict_export;
 pub mod freq;
 pub mod import_formats;

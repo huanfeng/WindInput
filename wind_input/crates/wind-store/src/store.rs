@@ -81,6 +81,13 @@ pub(crate) const COMMON_CHARS: TableDefinition<&str, &[u8]> = TableDefinition::n
 /// 不解析。为什么用户层进库而不是目录见 [`crate::charsets`] 的模块文档。
 /// 新表无需迁移：`init_tables` 在写事务里 `open_table` 即创建。
 pub(crate) const CHARSET_USER: TableDefinition<&str, &[u8]> = TableDefinition::new("charset_user");
+/// 补全候选的**用户学习数据**：key = `"{kind}\0{text}"`，value = {count,last_used} 定长 12B。
+///
+/// `kind` 是 [`crate::completion::CompletionKind`] 的闭集（邮箱后缀 / 网址历史）。
+/// **键不带方案**——「我常用哪个邮箱后缀」「我访问过哪个网址」与五笔拼音无关，同
+/// [`COMMON_CHARS`] 的判据。与 [`FREQ`] 的分界见 [`crate::completion`] 模块文档。
+/// 新表无需迁移：`init_tables` 在写事务里 `open_table` 即创建。
+pub(crate) const COMPLETION: TableDefinition<&str, &[u8]> = TableDefinition::new("completion");
 /// 全局短语：key = "{code}\0{text}"
 pub(crate) const PHRASES: TableDefinition<&str, &[u8]> = TableDefinition::new("phrases");
 /// 每日统计：key = "YYYY-MM-DD"
@@ -174,6 +181,7 @@ impl Store {
             w.open_table(QUICK_FORMAT)?;
             w.open_table(COMMON_CHARS)?;
             w.open_table(CHARSET_USER)?;
+            w.open_table(COMPLETION)?;
             w.open_table(PHRASES)?;
             w.open_table(STATS_DAILY)?;
             w.open_table(META)?;
