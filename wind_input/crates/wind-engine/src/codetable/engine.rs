@@ -71,6 +71,18 @@ const SPLIT_BACK_LIMIT: usize = 8;
 /// 这个旋钮在文档里被定位成「给方案作者实测用的」，更容易被填大。
 const SPLIT_FRONT_LIMIT: usize = 8;
 
+/// 逆切分的**前段码长**：恒 2，即一个**二简**。
+///
+/// # 为什么是常量而不是「码长的一半」
+///
+/// 初版取 `max_code_length / 2`，四码方案下恰好也是 2，看着等价 —— 直到需求方补充了
+/// 三码那一格（论坛 t11，2026-09-19）：`sma` 要切成 `sm`(什么) + `a`(啊)，是 **2+1**
+/// 而不是均分。⇒ 这个功能的本质从来不是「对半切」，而是**「切出一个二简，剩下的归后段」**：
+/// 二简就是 2 码，与方案的满码长无关。
+///
+/// 不做成配置项的理由不变：多一个自由参数只会制造「配出来不报错、打起来全是错」的状态。
+const SPLIT_FRONT_LEN: usize = 2;
+
 /// 逆切分的触发档（`[engine.codetable].split_trigger`）：满码长时「空到什么程度」才切分。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SplitTrigger {
@@ -194,13 +206,16 @@ impl CodeTableEngine {
         let sentence = opts
             .sentence_input
             .then(|| super::sentence::CodeSentenceDecoder::new(max_code_length));
-        // 逆切分的切点由 `max_code_length` 唯一决定（见 `split_at`），奇数/过短码长下无解。
-        // **就地关掉并告警**，而不是留给 `split_at()` 每次按键静默返回 None：配置者只会
-        // 观察到「开了没反应」，拿不到任何线索。
-        if opts.split_input && !(max_code_length >= 4 && max_code_length.is_multiple_of(2)) {
+        // 前段恒 2 码（`SPLIT_FRONT_LEN`），后段至少 1 码 ⇒ 满码长至少 3 才切得动。
+        // **就地关掉并告警**，而不是每次按键静默什么都不做：配置者只会观察到「开了没反应」，
+        // 拿不到任何线索。
+        //
+        // ⚠️ 判据曾是「偶数且 ≥4」（那时切点取码长的一半）。改成恒切二简后奇数码长不再是
+        // 障碍：5 码方案切 2+3 照样成立。
+        if opts.split_input && max_code_length <= SPLIT_FRONT_LEN {
             tracing::warn!(
                 max_code_length,
-                "[engine.codetable] split_input 需要偶数且 ≥4 的 max_code_length（切点取其一半），\
+                "[engine.codetable] split_input 需要 max_code_length > 2（前段恒取一个二简、后段至少 1 码），\
                  本方案码长不满足，逆切分已关闭"
             );
             opts.split_input = false;
@@ -342,31 +357,21 @@ impl CodeTableEngine {
         )
     }
 
-    /// 逆切分的切点：`max_code_length / 2`。
-    ///
-    /// **不做成配置项**：切点是「这张码表的二简在哪里结束」，由 `max_code_length` 唯一决定。
-    /// 多给一个自由参数只会制造 `max_code_length = 4, split_at = 3` 这种配出来不报错、
-    /// 打起来全是错的状态。
-    ///
-    /// 「码长为偶数且 ≥ 4」这个前提由 [`CodeTableEngine::new`] 保证（不满足就地把
-    /// `split_input` 置 false 并告警），故此处**不再重复判一遍**——同一个不变量守在两处，
-    /// 迟早只改一处。
-    fn split_at(&self) -> usize {
-        debug_assert!(self.max_code_length >= 4 && self.max_code_length.is_multiple_of(2));
-        self.max_code_length / 2
-    }
-
     /// 逆切分：恰好满码长的空码串切成两段，各查一次词典后拼接成组合候选。
     ///
     /// # 四道门槛
     ///
-    /// 1. **功能开启**（`opts.split_input`）且**切点有效**（见 [`Self::split_at`]）；
-    /// 2. **恰好**满码长 —— 超码长那一段归顶码与整句（两者的闸门都在 `>` 上，
-    ///    本功能刻意只占 `==` 这一格，与它们零重叠、不必和谁让位）；未满码时还有更长
-    ///    后继可打，切分等于替用户提前认定「这串到此为止」（整句门槛的注释记着真机反例：
-    ///    `aaw`（本意 `aawt`→「工作」）会被读成「啊啊我」）；
+    /// 1. **功能开启**（`opts.split_input`）；
+    /// 2. **码长落在 `(SPLIT_FRONT_LEN, max_code_length]`**，且**未满码时必须无更长后继**：
+    ///    - 超码长那一段归顶码与整句（两者的闸门都在 `>` 上），本功能不碰；
+    ///    - 满码长是主场（`hfkn` → `hf` + `kn`）；
+    ///    - **未满码**原本整个排除，理由是「还有更长后继可打，切分等于替用户提前认定这串
+    ///      到此为止」（整句门槛记着真机反例：`aaw` 本意 `aawt`→「工作」，被读成「啊啊我」）。
+    ///      需求方补充的「**且无后续编码**」恰好补上那个缺口：没有更长后继时用户已经打不
+    ///      下去了，这串确实就是到此为止 ⇒ `sma` 无后继时切成 `sm`(什么) + `a`(啊)。
     /// 3. **`split_trigger` 定的空度**（[`SplitTrigger::allows`]）；
-    /// 4. **两段都查得到** —— 切一半没有意义，半截结果只会让用户以为词库缺条目。
+    /// 4. **两段都查得到字词** —— 切一半没有意义；而查到的若只是符号（二简位没字可编时
+    ///    被编进去的 `→`/emoji/标点），那一段视同空码，见 [`wind_candidate::is_word_like`]。
     ///
     /// # 排序
     ///
@@ -383,14 +388,21 @@ impl CodeTableEngine {
         if !self.opts.split_input {
             return none;
         }
-        let split_at = self.split_at();
         let chars: Vec<char> = input.chars().collect();
-        if chars.len() != self.max_code_length {
+        let len = chars.len();
+        // 后段至少 1 码 ⇒ 总长必须长于前段；超过满码长归顶码与整句。
+        if len <= SPLIT_FRONT_LEN || len > self.max_code_length {
             return none;
         }
         if !self.opts.split_trigger.allows(candidates) {
             return none;
         }
+        // 未满码时才问后继：满码长那一格是主场，不必问。放在空度判据**之后**，
+        // 让绝大多数按键根本走不到这次索引查询。
+        if len < self.max_code_length && self.has_longer_code(input) {
+            return none;
+        }
+        let split_at = SPLIT_FRONT_LEN;
 
         let front_code: String = chars[..split_at].iter().collect();
         let back_code: String = chars[split_at..].iter().collect();
@@ -401,14 +413,22 @@ impl CodeTableEngine {
         // 不会被换掉。此前这里的注释把那条写成了对两种查询都成立，是错的。）
         //
         // 本函数只读段候选的 `text` 与 `weight`，不读 `code`。
-        let front = self.dm.search(
+        // ⚠️ 两段都要滤掉**非字词**候选（符号/表情/标点/西文）：二简位没字可编时被编进去的
+        // 符号若照拼，产物是「字 + →」这种读不通的东西。滤空即视同该段空码 ⇒ 整体不产出
+        // ⇒ `is_empty` 保持真 ⇒ 满码空码清空按方案原本的设定走（正是需求方要的处理方案）。
+        let words_only = |v: Vec<Candidate>| -> Vec<Candidate> {
+            v.into_iter()
+                .filter(|c| wind_candidate::is_word_like(&c.text))
+                .collect()
+        };
+        let front = words_only(self.dm.search(
             &front_code,
             self.opts.split_front_candidates.clamp(1, SPLIT_FRONT_LIMIT),
-        );
+        ));
         if front.is_empty() {
             return none;
         }
-        let back = self.dm.search(&back_code, SPLIT_BACK_LIMIT);
+        let back = words_only(self.dm.search(&back_code, SPLIT_BACK_LIMIT));
         if back.is_empty() {
             return none;
         }
@@ -1612,6 +1632,11 @@ mod tests {
         ("up", "双拼", 600),
         // 四码精确条目：默认档下「有候选就不切」的对照组。
         ("aaaa", "工", 100),
+        // 一简：三码切分（2+1）的后段落点。
+        ("a", "啊", 950),
+        // ★ 二简位被**符号**占着（论坛 t11 第 2 条：「无字词可编也编成了符号」）。
+        // 它查得到、但不是字词 ⇒ 该段须视同空码。
+        ("qw", "→", 700),
     ];
 
     /// 让 `hfkn` **有前缀候选却仍无精确解** —— 构造 `no_exact` 档场景的唯一条目。
@@ -1709,22 +1734,82 @@ mod tests {
     /// 超码长那一格归顶码与整句（两者的闸门都在 `>` 上）；未满码时还有更长后继可打，
     /// 切分等于替用户提前认定「这串到此为止」。
     #[test]
-    fn split_only_at_exactly_full_length() {
+    fn split_range_is_front_len_exclusive_to_full_length() {
         let e = split_engine(&[], split_opts());
 
-        let short = e.convert("hfk", 50).unwrap();
+        // 2 码 = 前段本身，后段无码可分。
+        let two = e.convert("hf", 50).unwrap();
         assert!(
-            !short.candidates.iter().any(|c| c.is_split_composed),
-            "3 码（未满码）不得切分，实际: {:?}",
-            texts(&short)
+            !two.candidates.iter().any(|c| c.is_split_composed),
+            "码长不长于前段时不得切分，实际: {:?}",
+            texts(&two)
         );
 
+        // 超码长归顶码与整句。
         let long = e.convert("hfknx", 50).unwrap();
         assert!(
             !long.candidates.iter().any(|c| c.is_split_composed),
             "5 码（超码长）不得切分，那是顶码与整句的区间，实际: {:?}",
             texts(&long)
         );
+    }
+
+    /// ★ 三码空码 + **无更长后继** → 切成 2+1（论坛 t11 补充，2026-09-19）。
+    ///
+    /// 需求方的实机形态是 `sm'a` →「什么啊」：前段仍是**二简**，后段是剩下的一简，
+    /// 而不是把三码对半分。
+    #[test]
+    fn split_three_code_when_no_longer_code() {
+        let e = split_engine(&[], split_opts());
+        // `hfa`：精确无、无 `hfa*` 后继 ⇒ 切成 hf(很可) + a(啊)。
+        let r = e.convert("hfa", 50).unwrap();
+        assert_eq!(texts(&r), vec!["很可啊"], "三码空码无后继时须切成 2+1");
+        assert_eq!(r.preedit_codetable, format!("hf{SEPS}a"));
+    }
+
+    /// ★ 反向对照：三码**有**更长后继时不得切分 —— 用户还能继续打，切了就是替他
+    /// 提前认定「这串到此为止」。缺了这条，一个「未满码一律切」的实现同样会让上一条变绿。
+    #[test]
+    fn split_three_code_yields_when_longer_code_exists() {
+        // `hfk` 有 `hfknq` 这个更长后继。
+        let e = split_engine(&[PREFIX_ONLY_ENTRY], split_opts());
+        let r = e.convert("hfk", 50).unwrap();
+        assert!(
+            !r.candidates.iter().any(|c| c.is_split_composed),
+            "三码有更长后继时不得切分，实际: {:?}",
+            texts(&r)
+        );
+    }
+
+    /// ★ 段候选只是**符号**时视同该段空码（论坛 t11 补充第 2 条）。
+    ///
+    /// 二简位没字可编时被编进去的 `→`/emoji/标点若照拼，产物是「字 + →」这种读不通的东西。
+    /// 滤空 ⇒ 整体不产出 ⇒ `is_empty` 保持真 ⇒ 满码空码清空按方案原设定走。
+    #[test]
+    fn split_treats_symbol_only_segment_as_empty() {
+        let e = split_engine(
+            &[],
+            CommitOptions {
+                clear_on_empty_max: true,
+                ..split_opts()
+            },
+        );
+        // `qw` 只有符号「→」，`kn` 有字 ⇒ 前段被滤空 ⇒ 不产出。
+        let r = e.convert("qwkn", 50).unwrap();
+        assert!(
+            r.candidates.is_empty(),
+            "符号段须视同空码，实际: {:?}",
+            texts(&r)
+        );
+        assert!(
+            r.is_empty && r.should_clear,
+            "视同空码 ⇒ 满码空码清空照常生效（这正是需求方要的处理方案）"
+        );
+
+        // ★ 反向对照：换成有字的前段，同一后段就切得出来 —— 证明挡住它的是「符号」
+        // 这个判据本身，不是那两段码碰巧查不到。
+        let ok = e.convert("hfkn", 50).unwrap();
+        assert!(ok.candidates.iter().any(|c| c.is_split_composed));
     }
 
     /// 两段缺一不产：切一半的结果只会让用户以为词库缺条目。
@@ -1872,13 +1957,16 @@ mod tests {
             CachedDict::Memory(d),
             "codetable-system",
         )));
-        // 码长 5：切点 5/2 无意义 ⇒ `new` 就地关掉。
-        let e = CodeTableEngine::new(5, split_opts(), Arc::new(dm));
-        let r = e.convert("hfknq", 50).unwrap();
-        assert_eq!(
-            texts(&r),
-            vec!["甲"],
-            "奇数码长下不得切分（只该有 hfknq 的精确解）"
+        // 码长 2：前段就占满了，后段无码可分 ⇒ `new` 就地关掉。
+        // ⚠️ 这里曾用码长 5 —— 那时切点取码长的一半，奇数无解；改成恒切二简后
+        // 5 码是**合法**的（2+3），拿它当反例就测不到东西了。
+        let e = CodeTableEngine::new(2, split_opts(), Arc::new(dm));
+        let r = e.convert("hf", 50).unwrap();
+        // 只看「有没有切分候选」——列表里还会有词库自带的前缀候选，那与本判据无关。
+        assert!(
+            !r.candidates.iter().any(|c| c.is_split_composed),
+            "码长不长于前段时功能整体关闭，实际: {:?}",
+            texts(&r)
         );
     }
 
