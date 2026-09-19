@@ -798,6 +798,26 @@ do_upload() {
     done < <(release_assets "$v")
     [ "$missing" = 0 ] || { err "  资产不齐, 无法上传。"; return 1; }
 
+    # ⛔ 上传前的硬闸门: 这几个文件必须真的带签名。
+    #
+    # do_upload 有三个入口 —— 签名段走完自然落到这里 (那边刚验过)、直接跑 `upload`、以及
+    # 挂机模式下「dist/ 已有产物就跳过签名」那条。后两条拿的是 dist/ 里现成的文件, 而
+    # dist/ 里完全可能躺着本机构建留下的【未签名】同名产物: 实测本机 dev 构建就会在 dist/
+    # 留下 WindInput-Setup-<版本>.exe, 证书表为空。少了这道闸门, 那份会被原样传上 Release
+    # 且全程不报错 —— 正是本仓反复吃过亏的「发布包静默出坏包」。
+    #
+    # ⚠️ 与签名段末尾那次验签重复是刻意的: 那次验的是「回传回来的对不对」, 这次验的是
+    #    「要传上去的对不对」, 入口不同, 不能靠上游替这里把关。
+    cyan "\n上传前验签"
+    if pe_has_signature "$DIST_DIR/WindInput-Setup-$v.exe"; then
+        say "  ✓ Setup.exe 带签名"
+    else
+        err "  ✗ dist/WindInput-Setup-$v.exe 的证书表是空的 —— 这是【未签名】产物, 拒绝上传。"
+        err "     多半是本机构建留下的同名文件。跑 sign-draft 出签名版, 或先把它移走再来。"
+        return 1
+    fi
+    verify_portable_contents "$DIST_DIR/WindInput-Portable-$v.zip" || return 1
+
     printf '\n'
     confirm "覆盖 $tag 的这 4 个资产?" y || { gray "已取消 (签名产物留在 dist/)。"; return 0; }
 
