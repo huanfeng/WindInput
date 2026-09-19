@@ -76,7 +76,23 @@ impl Coordinator {
         //
         // **空缓冲不触发**：否则用户每次想单独打一个 `@` 都会掉进邮箱模式。这个条件
         // 同时也是「用户名从哪来」的答案。
-        if email_on && ch == crate::handle_email::EMAIL_AT && !state.input_buffer.is_empty() {
+        //
+        // **分段上屏中途不夺取**（`committed_text` 非空即已有半句中文待在组合区里）：
+        // 那个状态下的 `@` 几乎一定是标点，而不是邮箱。更要紧的是夺取不处置
+        // `committed_text` —— 拼音打 `nihaoma`、选「你好」分段上屏后 `input_buffer` 是
+        // `ma`，此时按 `@` 会进邮箱模式而「你好」留在 state 里成孤儿：上屏只给宿主
+        // `ma@qq.com`，随后再打一个字母，`update_candidates` 又把「你好」拼回 preedit，
+        // 用户看到的是乱序的两截。
+        //
+        // ⚠️ url / unicode 结构上有同一个洞，但它们要求「缓冲恰好等于前缀去掉末键」
+        // （`www` + `.`、`u` + `+`），触发面窄得多；本模式是「任意非空缓冲 + `@`」，
+        // 不挡就会从潜在变成常见。那两个的既有洞另案处理，不在本闸门里一并改——
+        // 那会动到既有行为。
+        if email_on
+            && ch == crate::handle_email::EMAIL_AT
+            && !state.input_buffer.is_empty()
+            && state.committed_text.is_empty()
+        {
             let buffer = format!("{}{}", state.input_buffer, crate::handle_email::EMAIL_AT);
             return Some(self.enter_email_mode(state, buffer));
         }
@@ -128,6 +144,17 @@ impl Coordinator {
         state.active = None;
         state.url_buffer.clear();
         state.url_cursor = 0;
+        // ★ 候选与翻页视图必须一起清。加历史补全**之前**这里漏了也无害——网址模式恒无
+        // 候选，`enter_url_mode` 清完就再没人填；`update_url_candidates` 一接上，漏清就
+        // 变成真缺陷：退出后 `state.candidates` 仍非空而候选窗已隐藏，用户看不见它，
+        // 可下一次按空格会命中 `message_handler` 的「有候选则选词」分支，凭空再上屏一条
+        // 历史网址。数字选词键、翻页键、`has_input_session`（它把非空候选算作「有会话」）
+        // 同样被这批幽灵候选骗过。
+        //
+        // 四条退出路径都经这里：上屏 / Esc / Ctrl-Alt 守卫 / 退格删空。其中删空那条最狠
+        // ——`update_url_candidates("")` 列的是**整张**历史表。
+        state.candidates.clear();
+        self.reset_candidate_view(state);
         state.preedit.clear();
         state.rewind = None;
     }

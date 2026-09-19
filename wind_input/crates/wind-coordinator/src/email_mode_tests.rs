@@ -611,12 +611,21 @@ fn a_candidate_identical_to_the_buffer_is_not_offered() {
     );
 }
 
+/// 达到上限后**仍然学得进新网址**，被挤掉的是除它以外最冷的那条。
+///
+/// ⚠️ 这条用例最初把相反的行为钉成了预期（「刚上屏的 count=1，该出局」），审查时才发现
+/// 那等于把一个结构性缺陷写成契约：调用方是「先记一条、再裁到上限」，而新条目次数恒为
+/// 1、在次数降序里垫底，于是表一满就**每次上屏都把自己刚写的那条删掉**——历史从此冻结，
+/// 还每次白付一次写事务加一次全表排序。
+///
+/// ★ 判据：一条断言「符合当前实现」不等于「符合应有行为」。把行为钉成契约之前先问一句
+/// 「这个行为一直持续下去，用户会得到什么」。
 #[test]
-fn url_history_is_pruned_to_the_configured_ceiling() {
+fn a_full_history_still_learns_new_urls() {
     let mut cfg = url_cfg(true);
     cfg.input.url.history_max = 2;
     let (c, store) = coord_with("url_prune", cfg);
-    // 先埋两条高频的，再上屏一条新的 —— 新条目 count=1，应当场被裁掉。
+    // 先把表塞满两条高频的。
     for text in ["www.hot1", "www.hot2"] {
         for _ in 0..5 {
             store
@@ -631,9 +640,52 @@ fn url_history_is_pruned_to_the_configured_ceiling() {
     let (rows, total) = store
         .list_completions(CompletionKind::UrlHistory, "", 0, 0)
         .unwrap();
-    assert_eq!(total, 2, "应裁剪到上限，实际 {rows:?}");
+    assert_eq!(total, 2, "仍裁到上限，实际 {rows:?}");
     assert!(
-        rows.iter().all(|(t, _)| t != "www.z"),
-        "裁剪按与补全展示同一个排序取舍，最冷的那条（刚上屏、count=1）该出局：{rows:?}"
+        rows.iter().any(|(t, _)| t == "www.z"),
+        "刚上屏的网址必须学得进去，否则表一满历史就永远冻结了：{rows:?}"
+    );
+}
+
+/// 退出网址模式后**不得**留下幽灵候选。
+///
+/// 加历史补全之前 `exit_url_mode` 漏清 `candidates` 是无害的（那时恒无候选）；接上
+/// `update_url_candidates` 之后，残留候选会在候选窗已隐藏的情况下被下一次空格命中
+/// 「有候选则选词」分支，凭空再上屏一条历史网址。数字选词键、翻页键与
+/// `has_input_session` 同样会被这批看不见的候选骗过。
+#[test]
+fn leaving_url_mode_leaves_no_ghost_candidates() {
+    let (c, store) = coord_with("ghost", url_cfg(true));
+    store
+        .record_completion(CompletionKind::UrlHistory, "www.example.com")
+        .unwrap();
+
+    // ① 上屏退出
+    enter_url(&c);
+    press_letter(&c, 'e');
+    assert!(!c.debug_page_texts().is_empty(), "前提：此刻确实有候选");
+    press(&c, wind_keys::keymap::VK_SPACE);
+    assert!(
+        c.debug_page_texts().is_empty(),
+        "上屏退出后候选必须清空，否则下一次空格会再上屏一条：{:?}",
+        c.debug_page_texts()
+    );
+
+    // ② Esc 退出
+    enter_url(&c);
+    press_letter(&c, 'e');
+    press(&c, wind_keys::keymap::VK_ESCAPE);
+    assert!(c.debug_page_texts().is_empty(), "Esc 退出后候选必须清空");
+
+    // ③ 退格删空退出 —— 这条最狠：空缓冲时列的是**整张**历史表。
+    enter_url(&c);
+    for _ in 0..4 {
+        press(&c, wind_keys::keymap::VK_BACK);
+    }
+    assert_eq!(c.debug_active_mode(), None, "前提：退格已删空并退出模式");
+    assert!(
+        c.debug_page_texts().is_empty(),
+        "退格删空退出后候选必须清空：{:?}",
+        c.debug_page_texts()
     );
 }

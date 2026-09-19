@@ -78,6 +78,9 @@ impl Coordinator {
         state.email_buffer.clear();
         state.email_cursor = 0;
         state.candidates.clear();
+        // 与 `exit_url_mode` 同步：只清候选不清翻页视图的话，`current_page` /
+        // `selected_index` 会带着上一次的值进入下一个会话。
+        self.reset_candidate_view(state);
         state.preedit.clear();
         state.rewind = None;
     }

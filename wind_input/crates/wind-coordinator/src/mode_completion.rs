@@ -255,7 +255,9 @@ impl Coordinator {
             tracing::debug!("网址历史写入失败: {e}");
             return;
         }
-        if let Err(e) = store.prune_completions(CompletionKind::UrlHistory, max) {
+        // 传 `keep` 保护刚写入的这条 —— 否则表一满就再也学不进新网址（理由见
+        // `prune_completions` 的文档）。
+        if let Err(e) = store.prune_completions(CompletionKind::UrlHistory, max, Some(text)) {
             tracing::debug!("网址历史裁剪失败: {e}");
         }
     }

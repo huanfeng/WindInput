@@ -260,13 +260,36 @@ impl Store {
     /// 网址历史是**无界**的（用户打过的每个网址都是一条），没有这道闸它会一直长。裁剪
     /// 按与补全展示**同一个排序**（[`better`]）取舍，所以被裁掉的一定是补全里最靠后、
     /// 用户最不可能选到的那些。
-    pub fn prune_completions(&self, kind: CompletionKind, max: usize) -> anyhow::Result<usize> {
+    ///
+    /// # ★ `keep` 存在的理由：不加它，表一满就再也学不进新东西
+    ///
+    /// 调用方的顺序是「先记一条，再裁到上限」，而新记的那条 `count` 恒为 1，在 [`better`]
+    /// 的首要判据（次数降序）里排在所有 `count ≥ 2` 的老条目**之后**。于是表里一旦攒够
+    /// `max` 条老条目，每次上屏都是**写进去、当场被自己这次裁剪删掉**——历史从此冻结，
+    /// 且每次上屏白付一次写事务加一次全表排序。这是纯 LFU 的结构性缺陷，不是调 `max`
+    /// 能绕开的。
+    ///
+    /// `keep` 把本次刚写入的那条提到排序最前，使它必定在保留集内；被挤掉的于是变成
+    /// 「除它以外最冷的那条」，这才是这道闸本来该有的语义。
+    pub fn prune_completions(
+        &self,
+        kind: CompletionKind,
+        max: usize,
+        keep: Option<&str>,
+    ) -> anyhow::Result<usize> {
         if max == 0 {
             return Ok(0);
         }
-        let (all, total) = self.list_completions(kind, "", 0, 0)?;
+        let (mut all, total) = self.list_completions(kind, "", 0, 0)?;
         if total <= max {
             return Ok(0);
+        }
+        // 把 `keep` 提到队首再切，保留集恰好仍是 `max` 条。
+        if let Some(k) = keep
+            && let Some(pos) = all.iter().position(|(text, _)| text == k)
+        {
+            let item = all.remove(pos);
+            all.insert(0, item);
         }
         let doomed: Vec<String> = all.into_iter().skip(max).map(|(text, _)| text).collect();
         let mut removed = 0usize;
@@ -527,7 +550,8 @@ mod tests {
             }
         }
         assert_eq!(
-            s.prune_completions(CompletionKind::UrlHistory, 2).unwrap(),
+            s.prune_completions(CompletionKind::UrlHistory, 2, None)
+                .unwrap(),
             1
         );
         let (rows, total) = s
@@ -541,11 +565,13 @@ mod tests {
 
         // 未超上限时不动任何东西；max=0 表示不限。
         assert_eq!(
-            s.prune_completions(CompletionKind::UrlHistory, 5).unwrap(),
+            s.prune_completions(CompletionKind::UrlHistory, 5, None)
+                .unwrap(),
             0
         );
         assert_eq!(
-            s.prune_completions(CompletionKind::UrlHistory, 0).unwrap(),
+            s.prune_completions(CompletionKind::UrlHistory, 0, None)
+                .unwrap(),
             0
         );
         assert_eq!(
@@ -553,6 +579,60 @@ mod tests {
                 .unwrap()
                 .1,
             2
+        );
+    }
+
+    /// `keep` 保护刚写入的那条 —— 没有它，表一满就再也学不进新东西。
+    ///
+    /// 新条目 `count` 恒为 1，在次数降序里排在所有老条目之后，于是调用方「先记再裁」
+    /// 的顺序会让它**当场被自己这次裁剪删掉**。这条钉的就是那个结构性缺陷。
+    #[test]
+    fn prune_keeps_the_just_written_entry() {
+        let s = store("prunekeep");
+        for (text, n) in [("old_hot", 5), ("old_mid", 3)] {
+            for _ in 0..n {
+                s.record_completion(CompletionKind::UrlHistory, text)
+                    .unwrap();
+            }
+        }
+        // 模拟「上屏一条新网址」：count=1，排序上垫底。
+        s.record_completion(CompletionKind::UrlHistory, "fresh")
+            .unwrap();
+
+        assert_eq!(
+            s.prune_completions(CompletionKind::UrlHistory, 2, Some("fresh"))
+                .unwrap(),
+            1
+        );
+        let (rows, total) = s
+            .list_completions(CompletionKind::UrlHistory, "", 0, 0)
+            .unwrap();
+        assert_eq!(total, 2, "保留集仍恰好是 max 条，实际 {rows:?}");
+        let kept: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert!(
+            kept.contains(&"fresh"),
+            "刚写入的那条必须留下，实际 {kept:?}"
+        );
+        assert!(
+            kept.contains(&"old_hot"),
+            "最热的那条也该留下，实际 {kept:?}"
+        );
+        assert!(
+            !kept.contains(&"old_mid"),
+            "被挤掉的应是「除新条目外最冷的」"
+        );
+
+        // 不传 keep 时行为不变（批量维护等调用方仍走纯 LFU）。
+        s.record_completion(CompletionKind::UrlHistory, "fresh2")
+            .unwrap();
+        s.prune_completions(CompletionKind::UrlHistory, 2, None)
+            .unwrap();
+        let (rows2, _) = s
+            .list_completions(CompletionKind::UrlHistory, "", 0, 0)
+            .unwrap();
+        assert!(
+            !rows2.iter().any(|r| r.0 == "fresh2"),
+            "keep=None 时新条目照旧垫底被裁，实际 {rows2:?}"
         );
     }
 
