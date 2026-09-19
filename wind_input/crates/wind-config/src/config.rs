@@ -11876,10 +11876,7 @@ mod email_config_tests {
         let c = EmailConfig::default();
         assert!(!c.suffixes.is_empty(), "出厂应带预置后缀");
         for s in &c.suffixes {
-            assert!(
-                !s.contains('@'),
-                "预置后缀存 @ 之后的部分，{s:?} 不该带 @"
-            );
+            assert!(!s.contains('@'), "预置后缀存 @ 之后的部分，{s:?} 不该带 @");
             assert!(s.contains('.'), "后缀应是域名形态，{s:?} 不像");
         }
     }
