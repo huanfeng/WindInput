@@ -3,7 +3,9 @@
 #
 #   ./scripts/release.sh status                  只读: 五仓状态一览
 #   ./scripts/release.sh check                   预检: 五仓 / gh / 编译机 / 签名会话
-#   ./scripts/release.sh push <版本|patch|minor>  五仓按序打 tag 并推送 (主仓最后)
+#   ./scripts/release.sh push <版本|patch|minor> [--force]
+#                                             五仓按序打 tag 并推送 (主仓最后)
+#                                             --force 覆盖同名 tag (仅限草稿 Release)
 #   ./scripts/release.sh wait [版本]             等 release.yml 跑完
 #   ./scripts/release.sh sign-draft [版本]       拉 CI 中转产物 → 编译机签名 → 回传 → 上传
 #   ./scripts/release.sh auto-sign [版本]        等 CI 跑完再自动接 sign-draft (挂机, 不用守着)
@@ -76,6 +78,7 @@ RELEASE_REPOS=(
     "wind-installer:tag"
     "WindInput:tag"
 )
+MAIN_REPO="WindInput"
 
 # ---------- 目标分支: 从 repo manifest 读 default revision ----------
 manifest_branch() {
@@ -289,26 +292,59 @@ do_check() {
 # ============================================================================
 # push —— 第 5 节: 五仓按序打 tag 并推送
 # ============================================================================
+
+# `--force` 重发前的把关: 目标版本的 Release 必须还是草稿, 或者根本还没有。
+#
+# ⛔ 覆盖【已发布】版本的 tag = 同一个版本号先后指向两份不同的代码。这比覆盖资产更狠 ——
+#    已下载的用户手上那份与仓库对不上, R2 的 latest.json 仍按旧 hash 分发, 而且事后连
+#    「这个版本到底是哪份代码」都无从追溯。要改就换个号, tag 是廉价的。
+release_overwritable() {
+    local tag="$1" out
+    if out="$(gh release view "$tag" -R "$GH_REPO" --json isDraft -q .isDraft 2>/dev/null)"; then
+        if [ "$out" = true ]; then
+            gray "  $tag 的 Release 还是草稿, 可以覆盖"
+            return 0
+        fi
+        err "  ✗ $tag 已经【发布】, 拒绝 --force 重发。"
+        err "     同一个版本号会指向两份代码: 已下载用户的包与仓库对不上, R2 的"
+        err "     latest.json 也仍按旧 hash 分发。请改用新版本号。"
+        return 1
+    fi
+    gray "  远端还没有 $tag 的 Release (首次发这个号)"
+    return 0
+}
+
+# $2 = 1 时 --force: 覆盖已存在的同名 tag (本地 -f + 远端 --force)。
 do_push() {
-    local v="$1" br tag name mode d done_list=() i
+    local v="$1" force="${2:-0}" br tag name mode d done_list=() main_tag_kept=0
     br="$(manifest_branch)"
     tag="v$v"
 
     cyan "\n准备发布 $tag  (目标分支: $br)"
 
-    # 先把「tag 已存在」查干净。tag 顺序一旦推错, 删远端 tag 的代价远高于换个版本号重发
-    # (见 release-from-linux.md 第 9 节), 所以宁可在动手前多查一轮。
-    for r in "${RELEASE_REPOS[@]}"; do
-        name="${r%%:*}"; mode="${r##*:}"; d="$WORK_ROOT/$name"
-        [ "$mode" = tag ] || continue
-        if git -C "$d" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            err "  ✗ $name 本地已有 tag $tag"; return 1
+    if [ "$force" = 1 ]; then
+        warn "  --force: 已存在的 $tag 会被覆盖 (本地 -f + 远端 --force)"
+        require_gh || return 1
+        release_overwritable "$tag" || return 1
+    else
+        # 先把「tag 已存在」查干净。tag 顺序一旦推错, 删远端 tag 的代价远高于换个版本号
+        # 重发 (见 release-from-linux.md 第 9 节), 所以宁可在动手前多查一轮。
+        local existing=0
+        for r in "${RELEASE_REPOS[@]}"; do
+            name="${r%%:*}"; mode="${r##*:}"; d="$WORK_ROOT/$name"
+            [ "$mode" = tag ] || continue
+            if git -C "$d" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+                err "  ✗ $name 本地已有 tag $tag"; existing=1
+            elif [ -n "$(git -C "$d" ls-remote --tags origin "refs/tags/$tag" 2>/dev/null)" ]; then
+                err "  ✗ $name 远端已有 tag $tag"; existing=1
+            fi
+        done
+        if [ "$existing" = 1 ]; then
+            gray "     重发同一个版本号请加 --force (仅当该版本的 Release 还是草稿)"
+            return 1
         fi
-        if [ -n "$(git -C "$d" ls-remote --tags origin "refs/tags/$tag" 2>/dev/null)" ]; then
-            err "  ✗ $name 远端已有 tag $tag"; return 1
-        fi
-    done
-    say "  ✓ 五仓均无 $tag, 可以发布"
+        say "  ✓ 五仓均无 $tag, 可以发布"
+    fi
 
     printf '\n'
     warn "即将按下面的顺序推送 —— 主仓的 tag 一到远端就会【立刻】触发 CI 构建:"
@@ -318,7 +354,9 @@ do_push() {
         else                       gray "    $name  → 只 push $br (自有版本线, 不打本产品的 tag)"; fi
     done
     printf '\n'
-    confirm "确认发布 $tag ?" n || { gray "已取消, 什么都没做。"; return 0; }
+    local what="确认发布 $tag ?"
+    [ "$force" = 1 ] && what="确认 force 重发 $tag (覆盖远端同名 tag) ?"
+    confirm "$what" n || { gray "已取消, 什么都没做。"; return 0; }
 
     for r in "${RELEASE_REPOS[@]}"; do
         name="${r%%:*}"; mode="${r##*:}"; d="$WORK_ROOT/$name"
@@ -335,10 +373,24 @@ do_push() {
         fi
 
         if [ "$mode" = tag ]; then
-            if ! git -C "$d" tag -a "$tag" -m "Release $tag"; then
+            # ★ tag 已经指向本轮 HEAD 的仓直接跳过: 那种「覆盖」只是换个 tagger 时间戳,
+            #   引用一个字节都不变, 不值得冒一次 force push 的险 (对齐 release.ps1)。
+            #   ⚠️ 代价是它不产生新的 release.yml run —— 主仓命中时下面会专门提示。
+            local tag_sha head_sha
+            tag_sha="$(git -C "$d" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null)"
+            head_sha="$(git -C "$d" rev-parse HEAD)"
+            if [ -n "$tag_sha" ] && [ "$tag_sha" = "$head_sha" ]; then
+                say "  ✓ $name  tag 已指向本轮 HEAD, 跳过打 tag"
+                [ "$name" = "$MAIN_REPO" ] && main_tag_kept=1
+                done_list+=("$name"); continue
+            fi
+            local tagargs=(tag -a "$tag" -m "Release $tag")
+            local pushargs=(push origin "$tag")
+            if [ "$force" = 1 ]; then tagargs=(tag -f -a "$tag" -m "Release $tag"); pushargs+=(--force); fi
+            if ! git -C "$d" "${tagargs[@]}"; then
                 err "  ✗ $name 打 tag 失败"; push_abort_hint "${done_list[@]}"; return 1
             fi
-            if ! git -C "$d" push origin "$tag"; then
+            if ! git -C "$d" "${pushargs[@]}"; then
                 err "  ✗ $name push tag 失败 (本地 tag 已打, 可用 git -C $d tag -d $tag 撤掉)"
                 push_abort_hint "${done_list[@]}"; return 1
             fi
@@ -350,6 +402,12 @@ do_push() {
     done
 
     printf '\n'
+    if [ "$main_tag_kept" = 1 ]; then
+        warn "五仓推送完成, 但主仓的 tag 没有移动 —— 【不会】产生新的 release.yml run。"
+        gray "  要重跑构建: gh run rerun <runId> -R $GH_REPO"
+        gray "  (run 号: gh run list --workflow release.yml --branch $tag -R $GH_REPO)"
+        return 0
+    fi
     say "五仓推送完成, CI 应在 1 分钟内起来。"
     gray "  下一步: 菜单 [9] 等CI+签名 (挂机), 或 ./scripts/release.sh auto-sign $v"
     gray "          想分步走: wait $v 然后 sign-draft $v"
@@ -896,7 +954,7 @@ show_menu() {
     printf '    3  发布 Minor  '; say "v$MENU_BASE  →  v$(bump_version "$MENU_BASE" minor)"
     printf '    4  发布当前版  '
     if [ -n "$MENU_LATEST" ] && [ "$MENU_BASE" = "$MENU_LATEST" ]; then
-        printf 'v%s' "$MENU_BASE"; warn "   ⚠️ 远端已有此 tag, 会被拒绝 (换个号发)"
+        printf 'v%s' "$MENU_BASE"; warn "   ⚠️ 远端已有此 tag —— 选它会 force 重发 (仅限草稿)"
     else
         printf 'v%s' "$MENU_BASE"; gray "   (docs/VERSION 的版本; 远端尚无此 tag)"
     fi
@@ -948,7 +1006,19 @@ menu_loop() {
             1)   do_check; rc=$? ;;
             2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
             3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
-            4)   do_push "$MENU_BASE"; rc=$?; MENU_DIRTY=1 ;;
+            4)   if [ -n "$MENU_LATEST" ] && [ "$MENU_BASE" = "$MENU_LATEST" ]; then
+                     printf '\n'
+                     warn "远端已有 v$MENU_BASE —— 重发会用 --force 覆盖该 tag。"
+                     gray "  只有该版本的 Release 还是草稿时才允许, 脚本会先查一遍。"
+                     if confirm "确认 force 重发 v$MENU_BASE ?" n; then
+                         do_push "$MENU_BASE" 1; rc=$?
+                     else
+                         gray "已取消。"; rc=0
+                     fi
+                 else
+                     do_push "$MENU_BASE"; rc=$?
+                 fi
+                 MENU_DIRTY=1 ;;
             5)   printf '\n'; read -e -r -p "版本号 (x.y.z, 不带 v): " v
                  v="$(printf '%s' "$v" | tr -d '[:space:]')"
                  if valid_version "$v"; then do_push "$v"; rc=$?; MENU_DIRTY=1
@@ -974,7 +1044,9 @@ WindInput 发版编排 (Linux 侧)
 
   ./scripts/release.sh status                  五仓状态一览 (只读)
   ./scripts/release.sh check                   预检: 五仓 / gh / 编译机 / 签名会话
-  ./scripts/release.sh push <版本|patch|minor>  五仓按序打 tag 并推送 (主仓最后)
+  ./scripts/release.sh push <版本|patch|minor> [--force]
+                                               五仓按序打 tag 并推送 (主仓最后);
+                                               --force 覆盖已存在的同名 tag, 仅限草稿
   ./scripts/release.sh wait [版本]             等 release.yml 跑完
   ./scripts/release.sh sign-draft [版本]       拉 CI 产物 → 编译机签名 → 回传 → 上传
   ./scripts/release.sh auto-sign [版本]        等 CI 跑完再自动接 sign-draft (挂机)
@@ -996,7 +1068,13 @@ main() {
         push)
             [ -n "${2:-}" ] || { err "push 需要版本号: <x.y.z> | patch | minor"; return 1; }
             v="$(resolve_version "$2")" || return 1
-            do_push "$v" ;;
+            local f=0
+            case "${3:-}" in
+                --force|-f) f=1 ;;
+                "")         ;;
+                *)          err "push 的第三个参数只能是 --force: ${3}"; return 1 ;;
+            esac
+            do_push "$v" "$f" ;;
         wait)
             v="$(resolve_version "${2:-}")" || return 1
             [ -n "$v" ] || { err "取不到版本号"; return 1; }
