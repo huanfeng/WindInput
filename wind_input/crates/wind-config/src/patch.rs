@@ -57,6 +57,8 @@ pub const ALLOWED_UNREGISTERED_KEYS: &[&str] = &[
     "input.temp_pinyin.comment_template_horizontal",
     "input.url.comment_template_vertical",
     "input.url.comment_template_horizontal",
+    "input.email.comment_template_vertical",
+    "input.email.comment_template_horizontal",
 ];
 
 /// 预览条目：片段里的一个配置键及其应用效果。

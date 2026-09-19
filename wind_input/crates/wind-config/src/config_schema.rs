@@ -436,6 +436,13 @@ static REGISTRY: &[ConfigField] = &[
     ),
     f("input.url.enabled", Bool),
     f("input.url.prefixes", StrList),
+    // 网址历史：独立于 url.enabled 的第二道开关（前者只改输入行为，后者开始落盘用户
+    // 打过的网址原文）。理由见 `UrlConfig::history_enabled`。
+    f("input.url.history_enabled", Bool),
+    f("input.url.history_max", Int),
+    // 邮箱模式。与 url 共用补全候选源，但触发判据是**后缀**（`@`）而非前缀。
+    f("input.email.enabled", Bool),
+    f("input.email.suffixes", StrList),
     // Unicode 码点输入（`u+4e00` → 一）。与 url 同为前缀夺取式模式，故字段形态一致。
     f("input.unicode.enabled", Bool),
     f("input.unicode.prefixes", StrList),
@@ -453,6 +460,7 @@ static REGISTRY: &[ConfigField] = &[
     f("input.emoji.min_word_chars", Int),
     f("input.emoji.categories", Bool),
     f("input.url.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
+    f("input.email.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f("input.unicode.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f(
         "input.add_word.candidate_layout",

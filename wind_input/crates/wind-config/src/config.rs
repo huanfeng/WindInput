@@ -3454,6 +3454,10 @@ pub struct InputConfig {
     /// 网址输入模式。
     #[serde(default)]
     pub url: UrlConfig,
+    /// 邮箱输入模式（缓冲非空时按 `@` 触发，补全常用后缀）。与 [`Self::url`] 共用
+    /// 补全候选源与夺取回退骨架，但触发判据是**后缀**而非前缀。
+    #[serde(default)]
+    pub email: EmailConfig,
     /// Unicode 码点输入模式（`u+4e00` → 一）。与 [`Self::url`] 同为前缀夺取式。
     #[serde(default)]
     pub unicode: UnicodeConfig,
@@ -3536,6 +3540,7 @@ impl Default for InputConfig {
             rare_char: RareCharConfig::default(),
             emoji: EmojiConfig::default(),
             url: UrlConfig::default(),
+            email: EmailConfig::default(),
             unicode: UnicodeConfig::default(),
             add_word: AddWordConfig::default(),
             s2t: S2TConfig::default(),
@@ -4073,6 +4078,22 @@ pub struct UrlConfig {
     /// 触发前缀（恰好匹配；如 "www." / "http" / "https" / "ftp."）
     #[serde(default = "default_url_prefixes")]
     pub prefixes: Vec<String>,
+    /// 是否把上屏过的网址记进历史，供下次补全（默认**关闭**）。
+    ///
+    /// # 为什么它独立于 [`Self::enabled`]
+    ///
+    /// 网址模式本身只是「让我自由打字不被转成中文」，不产生任何持久数据；开了历史才
+    /// 开始**把用户打过的网址原文落盘**。这两件事的隐私量级不同，合成一个开关等于让
+    /// 想要前者的人被动接受后者。邮箱后缀学习则没有这道分界——它只记后缀（`qq.com`
+    /// 这类域名），不记用户名，故跟随 [`EmailConfig::enabled`] 即可。
+    #[serde(default)]
+    pub history_enabled: bool,
+    /// 历史条数上限，超出时按「次数少、用得旧」的顺序裁掉（0 = 不限）。
+    ///
+    /// 历史是**无界增长**的——用户打过的每个网址都是一条。没有这道闸，库会一直长，
+    /// 而补全候选窗从来只显示前几条，长出来的部分纯属负担。
+    #[serde(default = "default_url_history_max")]
+    pub history_max: u32,
     /// 进入网址模式期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
@@ -4082,6 +4103,10 @@ pub struct UrlConfig {
     /// 网址模式期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_template_horizontal: CommentTemplateOverride,
+}
+
+fn default_url_history_max() -> u32 {
+    200
 }
 
 fn default_url_prefixes() -> Vec<String> {
@@ -4099,6 +4124,97 @@ impl Default for UrlConfig {
         Self {
             enabled: false,
             prefixes: default_url_prefixes(),
+            history_enabled: false,
+            history_max: default_url_history_max(),
+            candidate_layout: LayoutIntent::default(),
+            comment_template_vertical: None,
+            comment_template_horizontal: None,
+        }
+    }
+}
+
+/// 邮箱输入配置（[input.email]）。
+///
+/// # 它不是前缀夺取式，是**后缀触发**
+///
+/// [`UrlConfig`] 那类的判据是「缓冲 + 本键 == 某个前缀」（全等）；邮箱的判据是
+/// 「本键是 `@` 且缓冲非空」，缓冲整体作为用户名被带进模式。`abc@` 里缓冲是 `abc`，
+/// 与任何前缀都不相等——照抄前缀夺取会撞墙（`docs/design/prefix-hijack-modes.md` §5.2）。
+///
+/// 两者共用 `try_prefix_hijack` 那道闸门与 `Rewind` 回退骨架，只是闸门里多一条判据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailConfig {
+    /// 总开关（默认关闭，与 [`UrlConfig`] 同口径）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 预置后缀表，存 `@` **之后**的部分（`qq.com` 而不是 `@qq.com`）。
+    ///
+    /// 不带 `@` 是为了与学习数据（`wind_store::completion::CompletionKind::EmailSuffix`）
+    /// 同域——两者要按同一把尺子去重与比对，一边带一边不带就永远对不上，表现是用户
+    /// 常用的那个后缀在候选里出现两次。
+    ///
+    /// 用户自己打出的后缀不必在表内：模式内可自由输入，上屏后会被学进补全数据，
+    /// 下次自动出现在候选里（且因为带频次，很快就会排到预置项前面）。
+    #[serde(default = "default_email_suffixes")]
+    pub suffixes: Vec<String>,
+    /// 进入邮箱模式期间的候选布局（默认跟随全局）。
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
+    pub candidate_layout: LayoutIntent,
+    /// 邮箱模式期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_template_vertical: CommentTemplateOverride,
+    /// 邮箱模式期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_template_horizontal: CommentTemplateOverride,
+}
+
+/// 出厂预置的邮箱后缀。
+///
+/// 国内常用在前、国际常用在后——补全候选没有频次数据时就按这个顺序排，而本输入法的
+/// 用户绝大多数在国内。学过几次之后频次接管排序，这份顺序只影响冷启动那几次。
+///
+/// ⚠️ 这是**数组字段**（不是 map），所以用户在设置里删干净就是真的空表，不会被逐键
+/// 深合并把出厂值合回来——见 AGENTS.md「出厂预置的绑定/开关，落点必须是用户能清空的
+/// 载体」。空表时邮箱模式仍可用，只是没有预置候选，全靠学习数据。
+fn default_email_suffixes() -> Vec<String> {
+    [
+        // 国内
+        "qq.com",
+        "163.com",
+        "126.com",
+        "foxmail.com",
+        "sina.com",
+        "sina.cn",
+        "sohu.com",
+        "139.com",
+        "189.cn",
+        "aliyun.com",
+        "yeah.net",
+        "21cn.com",
+        "tom.com",
+        // 国际
+        "gmail.com",
+        "outlook.com",
+        "hotmail.com",
+        "yahoo.com",
+        "icloud.com",
+        "live.com",
+        "me.com",
+        "proton.me",
+        "protonmail.com",
+        "aol.com",
+        "gmx.com",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            suffixes: default_email_suffixes(),
             candidate_layout: LayoutIntent::default(),
             comment_template_vertical: None,
             comment_template_horizontal: None,
@@ -11330,6 +11446,11 @@ scripts = { latin = 42 }
         assert_eq!(c.input.symbol.smart_timeout_ms, 500);
         assert!(c.input.temp_english.enabled && c.input.temp_english.show_candidates);
         assert_eq!(c.input.url.prefixes.len(), 5);
+        // 网址历史是独立于 url.enabled 的第二道开关，且出厂关闭：网址模式本身不落盘，
+        // 开了历史才开始记用户打过的网址原文。
+        assert!(!c.input.url.history_enabled, "网址历史出厂关闭");
+        assert_eq!(c.input.url.history_max, 200);
+        assert!(!c.input.email.enabled, "邮箱模式出厂关闭");
         assert!(!c.input.unicode.enabled, "Unicode 码点输入出厂关闭");
         assert_eq!(
             c.input.unicode.prefixes,
@@ -11739,5 +11860,72 @@ smart_method = "delete_replace"
         assert_eq!(BoundAction::parse("rare_charx"), BoundAction::None);
         assert_eq!(BoundAction::parse("rare"), BoundAction::None);
         assert_eq!(BoundAction::parse(""), BoundAction::None);
+    }
+}
+
+#[cfg(test)]
+mod email_config_tests {
+    use super::*;
+
+    /// 预置后缀与学习数据必须**同域**：两边都存 `@` 之后的部分。
+    ///
+    /// 一边带 `@` 一边不带，去重就永远对不上，表现是用户最常用的那个后缀在候选里
+    /// 出现两次（一条来自预置表、一条来自学习数据），且怎么用都消不掉。
+    #[test]
+    fn preset_suffixes_carry_no_at_sign() {
+        let c = EmailConfig::default();
+        assert!(!c.suffixes.is_empty(), "出厂应带预置后缀");
+        for s in &c.suffixes {
+            assert!(
+                !s.contains('@'),
+                "预置后缀存 @ 之后的部分，{s:?} 不该带 @"
+            );
+            assert!(s.contains('.'), "后缀应是域名形态，{s:?} 不像");
+        }
+    }
+
+    /// 预置表不得有重复项——重复项会在候选里变成两条一模一样的邮箱。
+    #[test]
+    fn preset_suffixes_are_unique() {
+        let c = EmailConfig::default();
+        let mut seen = std::collections::HashSet::new();
+        for s in &c.suffixes {
+            assert!(seen.insert(s.as_str()), "预置后缀重复：{s}");
+        }
+    }
+
+    /// 国内常用在前：冷启动（还没有任何学习数据）时排序完全由这份顺序决定。
+    #[test]
+    fn domestic_suffixes_come_first() {
+        let c = EmailConfig::default();
+        let pos = |needle: &str| c.suffixes.iter().position(|s| s == needle);
+        let qq = pos("qq.com").expect("应含 qq.com");
+        let gmail = pos("gmail.com").expect("应含 gmail.com");
+        assert!(qq < gmail, "国内常用后缀应排在国际之前");
+    }
+
+    /// 用户清空后缀表 = 真的空表。
+    ///
+    /// 这是 AGENTS.md「出厂预置的落点必须是用户能清空的载体」那条的守护：`suffixes`
+    /// 是**数组字段**，上层整体覆盖，不像 map 字段那样被逐键深合并把出厂值合回来。
+    /// 空表时邮箱模式仍可用，只是没有预置候选。
+    #[test]
+    fn empty_suffix_list_survives_deserialization() {
+        let c: EmailConfig = toml::from_str("enabled = true\nsuffixes = []\n").unwrap();
+        assert!(c.enabled);
+        assert!(c.suffixes.is_empty(), "用户清空后不该被出厂值合回来");
+    }
+
+    /// 缺字段时逐个落到默认值（老配置文件升级上来不会炸）。
+    #[test]
+    fn missing_fields_fall_back_to_defaults() {
+        let c: EmailConfig = toml::from_str("").unwrap();
+        assert!(!c.enabled);
+        assert_eq!(c.suffixes, default_email_suffixes());
+
+        let u: UrlConfig = toml::from_str("enabled = true\n").unwrap();
+        assert!(u.enabled);
+        assert!(!u.history_enabled, "老配置没有 history_enabled ⇒ 关闭");
+        assert_eq!(u.history_max, 200);
     }
 }

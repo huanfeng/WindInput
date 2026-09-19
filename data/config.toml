@@ -866,6 +866,24 @@ categories = false
 [input.url]
 enabled = false
 prefixes = ["www.", "http", "https", "ftp."]
+# 是否把上屏过的网址记下来供下次补全。独立于上面那个开关：网址模式本身不产生任何
+# 持久数据，开了历史才开始把你打过的网址原文落盘。清空入口在设置的「词库」页。
+history_enabled = false
+# 历史条数上限，超出时按「次数少、用得旧」裁掉。0 = 不限。
+history_max = 200
+candidate_layout = "follow"
+
+# 邮箱输入模式：正常输入下缓冲非空时按 @ 即进入（`abc` + `@` → 用户名 abc），
+# 候选给出常用后缀拼成的完整邮箱，空格或回车上屏。默认关闭。
+#
+# 与 [input.url] 的差别在触发判据：那边是「已打的字恰好等于某个前缀」，这边是
+# 「本键是 @ 且前面已经打了字」。空缓冲按 @ 不会进入，@ 照常作标点。
+#
+# suffixes 存 @ 之后的部分（qq.com 而不是 @qq.com）。模式内可自由输入表外的后缀，
+# 上屏后会被学下来，下次自动出现在候选里并按使用次数排到预置项前面。
+[input.email]
+enabled = false
+suffixes = ["qq.com", "163.com", "126.com", "foxmail.com", "sina.com", "sina.cn", "sohu.com", "139.com", "189.cn", "aliyun.com", "yeah.net", "21cn.com", "tom.com", "gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "live.com", "me.com", "proton.me", "protonmail.com", "aol.com", "gmx.com"]
 candidate_layout = "follow"
 
 # Unicode 输入：正常输入下打出 u+ 即进入，续打十六进制得到该码点的字符
