@@ -165,7 +165,10 @@ impl Coordinator {
                     KeyAction::Consumed
                 }
             }
-            keymap::VK_SPACE | keymap::VK_RETURN => self.commit_email(state),
+            // 空格选候选、回车上屏原文（分工见 `mode_completion.rs` 文件头）。
+            // ⛔ 不要把这两个键并回一条 —— 那样打了一半的邮箱就再也上不了屏。
+            keymap::VK_SPACE => self.commit_email(state, true),
+            keymap::VK_RETURN => self.commit_email(state, false),
             _ => {
                 let shift = data.modifiers & MOD_SHIFT != 0;
                 // 小键盘键（direct 语义）回退 numpad_char：数字/`.`/`-` 都是合法邮箱内容

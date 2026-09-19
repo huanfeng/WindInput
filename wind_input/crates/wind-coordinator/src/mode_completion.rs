@@ -8,16 +8,24 @@
 //! 都对，没人会去比。故排序、去重、上限、上屏收尾统统收在本文件，两个模式只提供
 //! 「候选从哪来」和「上屏时学什么」这两处差异。
 //!
-//! # 空格键语义（两个模式同时改）
+//! # 空格与回车**分工**（两个模式同一套）
 //!
-//! 网址模式此前恒无候选，空格 = 上屏缓冲原文。加了补全之后改为：
+//! | 键 | 行为 |
+//! |---|---|
+//! | 空格 | 有候选 → 上屏高亮候选；无候选 → 上屏缓冲原文 |
+//! | 回车 | **恒上屏缓冲原文**，无论有没有候选 |
 //!
-//! - **有候选** → 上屏当前高亮候选；
-//! - **无候选** → 上屏缓冲原文（与改动前逐字相同）。
+//! ★ 这道分工是补出来的，起因是实机反馈：一期把两个键并成一条路
+//! （`VK_SPACE | VK_RETURN => commit`），于是**打了一半的邮箱再也上不了屏**——
+//! 打 `abc@gm` 想就这么上屏，回车却给出候选里的 `abc@gmail.com`。
 //!
-//! 这条是 2026-09-19 与用户拍的板。对既有网址模式用户的影响被「无候选走原路」这半条
-//! 兜住：出厂 `input.url.history_enabled = false` ⇒ 永远没有候选 ⇒ 行为与从前一模一样。
-//! 只有主动开了历史的人才会看到新语义，而那正是他要的东西。
+//! 判据：回车在输入法里的通行语义就是「上屏我实际打的这串」，它是用户**否决候选**的
+//! 出口。候选越聪明，这个出口越不能堵——补全猜错时用户手上必须还有一个键能拿回原文。
+//!
+//! 附带好处是它让改动更**保守**：网址模式改动前回车就是上屏原文（那时恒无候选），
+//! 这道分工把那个行为原样保住了，空格才是唯一引入新语义的键。而空格的新语义又被
+//! 「无候选走原路」兜住——出厂 `input.url.history_enabled = false` ⇒ 恒无候选 ⇒
+//! 两个键都与从前逐字相同。
 
 use crate::coordinator::{Coordinator, State};
 use wind_bridge::handler::KeyAction;
@@ -145,10 +153,11 @@ impl Coordinator {
         state.candidates.get(gi).map(|c| c.text.clone())
     }
 
-    /// 邮箱模式上屏：有候选上屏高亮候选，无候选上屏缓冲原文；随后学下后缀。
-    pub(crate) fn commit_email(&self, state: &mut State) -> KeyAction {
-        let text = self
-            .highlighted_completion(state)
+    /// 邮箱模式上屏。`prefer_candidate` 见本文件头的空格/回车分工表。
+    pub(crate) fn commit_email(&self, state: &mut State, prefer_candidate: bool) -> KeyAction {
+        let text = prefer_candidate
+            .then(|| self.highlighted_completion(state))
+            .flatten()
             .unwrap_or_else(|| state.email_buffer.clone());
         self.learn_email_suffix(&text);
         self.record_commit(&text, 0, -1, CommitSource::Email);
@@ -161,10 +170,11 @@ impl Coordinator {
         }
     }
 
-    /// 网址模式上屏：有候选上屏高亮候选，无候选上屏缓冲原文；随后按开关记历史。
-    pub(crate) fn commit_url(&self, state: &mut State) -> KeyAction {
-        let text = self
-            .highlighted_completion(state)
+    /// 网址模式上屏。`prefer_candidate` 见本文件头的空格/回车分工表。
+    pub(crate) fn commit_url(&self, state: &mut State, prefer_candidate: bool) -> KeyAction {
+        let text = prefer_candidate
+            .then(|| self.highlighted_completion(state))
+            .flatten()
             .unwrap_or_else(|| state.url_buffer.clone());
         self.learn_url_history(&text);
         self.record_commit(&text, 0, -1, CommitSource::Url);

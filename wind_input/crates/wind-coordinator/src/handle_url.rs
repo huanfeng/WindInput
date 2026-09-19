@@ -276,10 +276,11 @@ impl Coordinator {
                     KeyAction::Consumed
                 }
             }
-            // 空格/回车：有补全候选则上屏高亮候选，否则上屏缓冲原文（都不做全半角/标点
-            // 转换）。历史关着时恒无候选 ⇒ 与加补全之前逐字相同。收口在 `commit_url`，
-            // 与邮箱模式共用同一段语义。
-            keymap::VK_SPACE | keymap::VK_RETURN => self.commit_url(state),
+            // 空格选候选、回车上屏原文（分工见 `mode_completion.rs` 文件头）。都不做
+            // 全半角/标点转换。回车这一支与加补全之前逐字相同——那时恒无候选，回车本
+            // 就是上屏原文。收口在 `commit_url`，与邮箱模式共用同一段语义。
+            keymap::VK_SPACE => self.commit_url(state, true),
+            keymap::VK_RETURN => self.commit_url(state, false),
             _ => {
                 let shift = data.modifiers & MOD_SHIFT != 0;
                 // 小键盘键（direct 语义）回退 numpad_char：网址缓冲是文本，数字/`.`/`-`/`/`

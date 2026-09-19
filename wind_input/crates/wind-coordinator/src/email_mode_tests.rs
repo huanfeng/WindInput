@@ -236,6 +236,90 @@ fn empty_suffix_list_still_lets_the_user_type_freely() {
     assert_eq!(committed(&act).as_deref(), Some("a@qq"));
 }
 
+/// **回车恒上屏缓冲原文**，即使候选里有更"完整"的那一条。
+///
+/// 这是实机反馈修出来的：一期把空格与回车并成一条路，于是打了一半的邮箱再也上不了屏
+/// ——打 `abc@gm` 想就这么上屏，回车却给出 `abc@gmail.com`。回车是用户**否决候选**的
+/// 出口，补全猜错时他手上必须还有一个键能拿回原文。
+#[test]
+fn enter_commits_the_raw_buffer_even_when_a_candidate_is_highlighted() {
+    let (c, _s) = coord_with("enter_raw", email_cfg());
+    press_letter(&c, 'a');
+    press_at(&c);
+    press_letter(&c, 'g');
+    // 此刻候选首位是 a@gmail.com（空格会上屏它）——回车必须给出原文。
+    assert_eq!(
+        c.debug_page_texts().first().map(String::as_str),
+        Some("a@gmail.com")
+    );
+
+    let act = press(&c, wind_keys::keymap::VK_RETURN);
+    assert_eq!(
+        committed(&act).as_deref(),
+        Some("a@g"),
+        "回车应上屏缓冲原文而不是高亮候选，实际 {act:?}"
+    );
+}
+
+/// 同一个缓冲状态下，空格与回车必须给出**不同**的结果。
+///
+/// 分开写这一条是因为上一条单独看会被「候选恰好等于原文」蒙混过去：两个键都返回
+/// `a@g` 时它也是绿的。这里把两条路并排跑，直接钉住「它们不是同一条路」。
+#[test]
+fn space_and_enter_diverge_on_the_same_buffer() {
+    let mut out = Vec::new();
+    for (tag, vk) in [
+        ("space", wind_keys::keymap::VK_SPACE),
+        ("enter", wind_keys::keymap::VK_RETURN),
+    ] {
+        let (c, _s) = coord_with(tag, email_cfg());
+        press_letter(&c, 'a');
+        press_at(&c);
+        press_letter(&c, 'g');
+        out.push(committed(&press(&c, vk)).unwrap_or_default());
+    }
+    assert_eq!(out[0], "a@gmail.com", "空格选候选");
+    assert_eq!(out[1], "a@g", "回车上原文");
+    assert_ne!(
+        out[0], out[1],
+        "两个键并回一条路就会在这里失败 —— 那正是实机上「打一半上不了屏」的成因"
+    );
+}
+
+/// 网址模式同一套分工（两模式共用 `mode_completion.rs` 的上屏收尾，不该分叉）。
+#[test]
+fn url_enter_also_commits_the_raw_buffer() {
+    let (c, store) = coord_with("url_enter", url_cfg(true));
+    store
+        .record_completion(CompletionKind::UrlHistory, "www.example.com")
+        .unwrap();
+    enter_url(&c);
+    press_letter(&c, 'e');
+    assert_eq!(c.debug_page_texts(), vec!["www.example.com".to_string()]);
+
+    let act = press(&c, wind_keys::keymap::VK_RETURN);
+    assert_eq!(
+        committed(&act).as_deref(),
+        Some("www.e"),
+        "网址模式回车同样上屏原文，实际 {act:?}"
+    );
+}
+
+/// 无候选时两个键殊途同归（都上屏原文）——出厂态走的就是这条。
+#[test]
+fn without_candidates_both_keys_commit_the_raw_buffer() {
+    for vk in [wind_keys::keymap::VK_SPACE, wind_keys::keymap::VK_RETURN] {
+        let (c, _s) = coord_with("nocand", url_cfg(false));
+        enter_url(&c);
+        press_letter(&c, 'z');
+        assert_eq!(
+            committed(&press(&c, vk)).as_deref(),
+            Some("www.z"),
+            "历史关闭 ⇒ 恒无候选 ⇒ 两个键都与加补全之前逐字相同"
+        );
+    }
+}
+
 // ───────────────────────── 学习 ─────────────────────────
 
 #[test]
