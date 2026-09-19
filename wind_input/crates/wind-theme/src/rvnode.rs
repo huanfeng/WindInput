@@ -202,3 +202,122 @@ pub struct RvViews {
     pub toolbar_border_radius: Option<Dim>,
     pub toolbar_border_width: Option<Dim>,
 }
+
+impl RvViews {
+    /// 主题**显式声明**过的字族名，按节点路径列出（`views.text`、`views.item.selected`、
+    /// `views.menu.item` …）。空 / 纯空白的声明不算「声明过」。
+    ///
+    /// # 为什么要能列出来
+    ///
+    /// 字族名写错在渲染层**没有任何信号**：DirectWrite 的 `SetFontFamilyName` 对不存在的
+    /// 家族返回成功、静默回落默认字体，画面上只表现为「字体不对、字看着小了一圈」。
+    /// `ui.font.family` 与方案级 `[candidate] font_family` 都已在设置那一刻查一次存在性并
+    /// 记 warn（wind-ui `CandidateWindow::warn_if_family_missing`），主题节点这条一直漏着
+    /// ——而主题恰恰最容易写错：作者自己机器上装着那款字体，换台机器就静默回落。
+    ///
+    /// 消费方只在**换主题时**走一遍（`CandidateWindow::set_theme`），不在渲染热路径：
+    /// 每个字族一次 `FindFamilyName` 是按 COM 调用计费的，逐帧逐节点查等于按帧计费。
+    pub fn declared_font_families(&self) -> Vec<(String, String)> {
+        let mut nodes: Vec<(&str, &RvNode)> = vec![
+            ("views.window", &self.window),
+            ("views.preedit_bar", &self.preedit_bar),
+            ("views.candidate_list", &self.candidate_list),
+            ("views.item", &self.item),
+            ("views.index", &self.index),
+            ("views.text", &self.text),
+            ("views.comment", &self.comment),
+            ("views.accent_bar", &self.accent_bar),
+            ("views.footer_bar", &self.footer_bar),
+            ("views.mode_label", &self.mode_label),
+        ];
+        // 可选节点：主题没写就没有对应的键，列出来只会让 warn 指向一个不存在的路径。
+        for (path, opt) in [
+            ("views.status", &self.status),
+            ("views.tooltip", &self.tooltip),
+            ("views.toast", &self.toast),
+            ("views.menu.root", &self.menu_root),
+            ("views.menu.item", &self.menu_item),
+            ("views.menu.separator", &self.menu_separator),
+        ] {
+            if let Some(n) = opt {
+                nodes.push((path, n));
+            }
+        }
+        let mut out = Vec::new();
+        for (path, n) in nodes {
+            collect_font_families(path, n, &mut out);
+        }
+        out
+    }
+}
+
+/// 递归收集一个节点及其状态 patch（selected / hover / disabled）声明的字族。
+///
+/// 状态 patch 不能漏：`[item.selected] font_family` 是「选中项换个字体」的正经写法，
+/// 而它与基态用的是两个不同的名字——只查基态的话，选中那一行的字体照样静默回落。
+fn collect_font_families(path: &str, n: &RvNode, out: &mut Vec<(String, String)>) {
+    if let Some(f) = n.font_family.as_deref() {
+        let f = f.trim();
+        if !f.is_empty() {
+            out.push((path.to_string(), f.to_string()));
+        }
+    }
+    for (state, sub) in [
+        ("selected", &n.selected),
+        ("hover", &n.hover),
+        ("disabled", &n.disabled),
+    ] {
+        if let Some(sub) = sub {
+            collect_font_families(&format!("{path}.{state}"), sub, out);
+        }
+    }
+}
+
+#[cfg(test)]
+mod font_family_tests {
+    use super::*;
+
+    fn node(family: Option<&str>) -> RvNode {
+        RvNode {
+            font_family: family.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// 收集要覆盖三件事：必选节点与可选节点都算、状态 patch 递归进去、空声明不算。
+    #[test]
+    fn declared_font_families_covers_states_and_optional_nodes() {
+        let mut v = RvViews {
+            text: node(Some("思源宋体")),
+            index: node(Some("  ")), // 纯空白 = 没声明
+            comment: node(None),
+            ..Default::default()
+        };
+        v.item = node(Some("Consolas"));
+        v.item.selected = Some(Box::new(node(Some("Consolas Bold"))));
+        v.item.hover = Some(Box::new(node(None)));
+        v.menu_item = Some(node(Some("Segoe UI")));
+        v.toast = Some(node(None));
+
+        let got = v.declared_font_families();
+        assert_eq!(
+            got,
+            vec![
+                ("views.item".to_string(), "Consolas".to_string()),
+                (
+                    "views.item.selected".to_string(),
+                    "Consolas Bold".to_string()
+                ),
+                ("views.text".to_string(), "思源宋体".to_string()),
+                ("views.menu.item".to_string(), "Segoe UI".to_string()),
+            ],
+            "顺序按节点表 + 状态 patch 紧跟其基态；空白与 None 不该出现"
+        );
+    }
+
+    /// 没配过字体的主题一条都不该报——否则每次换主题都白查一轮 COM。
+    #[test]
+    fn a_theme_without_font_family_declares_nothing() {
+        assert!(RvViews::default().declared_font_families().is_empty());
+    }
+}

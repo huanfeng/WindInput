@@ -986,7 +986,28 @@ impl CandidateWindow {
         if let Some(tip) = self.tooltip.as_mut() {
             tip.set_theme(&theme);
         }
+        self.warn_missing_theme_families(&theme);
         self.theme = theme;
+    }
+
+    /// 主题各节点声明的字族逐个查一次存在性，缺的记 warn。见 [`Self::warn_if_family_missing`]。
+    ///
+    /// 全局 `ui.font.family` 与方案级 `[candidate] font_family` 早有这道查，主题节点一直漏着
+    /// ——而主题是最容易写错的那处：作者自己机器上装着那款字体，换台机器就静默回落，
+    /// 画面只表现为「字体不对」，日志里一片安静。
+    ///
+    /// 只在换主题时走（`push_theme` 的那几个低频事件：启动 / 切主题 / 深浅色 / 配置 reload），
+    /// 不在渲染热路径——每个字族一次 `FindFamilyName` 是按 COM 调用计费的。
+    ///
+    /// **按字族去重**：一份主题里十来个节点常配同一个名字，缺失时刷十条一模一样的 warn
+    /// 只会把日志淹掉。留第一个声明它的节点路径，用户照着去主题文件里搜那个名字就够了。
+    fn warn_missing_theme_families(&self, theme: &wind_theme::Resolved) {
+        let mut seen = std::collections::HashSet::new();
+        for (path, family) in theme.views.declared_font_families() {
+            if seen.insert(family.clone()) {
+                self.warn_if_family_missing(&family, &format!("主题节点 {path}.font_family"));
+            }
+        }
     }
 
     /// 一帧候选窗的完整状态。参数即协调器下发的字段本身，包成结构体只会在 IPC 解包与
@@ -5652,5 +5673,59 @@ mod tests {
             CandidateWindow::content_to_window((100, 200), 12, 10),
             (88, 190)
         );
+    }
+}
+
+/// 主题节点字族的存在性检查接线。
+///
+/// ⚠️ **只在 mock 后端下编译**：`family_exists` 在 Windows 上要问系统字体集、在 CoreText 上
+/// 尚未实现，两边都没有 `asked_families()` 这个读回口。而「有没有真的去问」正是这条链唯一
+/// 钉得住的一半——它此前整个不存在，主题里把字族名写错只表现为「字体不对」，日志里一个字
+/// 都没有。
+#[cfg(all(test, not(windows), not(target_os = "macos")))]
+mod theme_font_check_tests {
+    use super::*;
+    use wind_theme::RvNode;
+
+    fn node(family: &str) -> RvNode {
+        RvNode {
+            font_family: Some(family.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn win() -> CandidateWindow {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap()
+    }
+
+    #[test]
+    fn switching_theme_asks_once_per_distinct_declared_family() {
+        let mut w = win();
+        let before = w.text_renderer.asked_families().len();
+
+        let mut theme = wind_theme::Resolved::default();
+        theme.views.item = node("Consolas");
+        theme.views.item.selected = Some(Box::new(node("Consolas Bold")));
+        theme.views.text = node("思源宋体");
+        // 同一个字族在两个节点上声明：缺失时刷两条一模一样的 warn 没有意义，只问一次。
+        theme.views.index = node("思源宋体");
+        w.set_theme(theme);
+
+        assert_eq!(
+            &w.text_renderer.asked_families()[before..],
+            ["Consolas", "Consolas Bold", "思源宋体"],
+            "每个不同的声明字族问且只问一次，含状态 patch"
+        );
+    }
+
+    /// 反证这条接线真的在钉东西：没声明字族的主题一个都不该问——否则上面那条断言在
+    /// 「把整份节点表都问一遍」这种实现下也照样绿。
+    #[test]
+    fn a_theme_without_font_family_asks_nothing() {
+        let mut w = win();
+        let before = w.text_renderer.asked_families().len();
+        w.set_theme(wind_theme::Resolved::default());
+        assert_eq!(w.text_renderer.asked_families().len(), before);
     }
 }

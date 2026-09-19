@@ -1378,6 +1378,8 @@ mod imp {
         font_size: f32,
         /// 只为让 `font_plan()` 有东西可还——mock 的等宽近似不看字体。
         plan: FontPlan,
+        /// 被问过存在性的字族名，按提问顺序。见 [`Self::asked_families`]。
+        asked_families: std::cell::RefCell<Vec<String>>,
     }
 
     impl TextRenderer {
@@ -1385,6 +1387,7 @@ mod imp {
             Ok(Self {
                 font_size,
                 plan: FontPlan::default(),
+                asked_families: std::cell::RefCell::new(Vec::new()),
             })
         }
 
@@ -1408,8 +1411,19 @@ mod imp {
         }
 
         /// mock：没有系统字体集可问，一律「不知道」——调用方据此不发 warn。
-        pub fn family_exists(&self, _family: &str) -> Option<bool> {
+        ///
+        /// 但**问过什么要记下来**：mock 答不了「系统里有没有」，而「有没有真的去问」正是
+        /// 接线测试唯一能钉住的那一半。字体缺失告警此前就是因为无人验证，在 CoreText 上
+        /// 空转了很久没被发现（那边同样恒返回 `None`）。见 [`Self::asked_families`]。
+        pub fn family_exists(&self, family: &str) -> Option<bool> {
+            self.asked_families.borrow_mut().push(family.to_string());
             None
+        }
+
+        /// 至今被问过存在性的字族名，按提问顺序。仅 mock 后端有，供接线测试断言
+        /// 「设字体 / 换主题时确实逐个查了」。
+        pub fn asked_families(&self) -> Vec<String> {
+            self.asked_families.borrow().clone()
         }
 
         pub fn set_chaizi_font(&mut self, _path: &str, _family: &str) -> Result<(), String> {
