@@ -143,6 +143,19 @@ pub(crate) fn candidate_display_order(
         .then_with(|| wind_candidate::cmp_completion_extra(a, b))
         .then_with(|| wind_candidate::cmp_exact_first(a, b))
         .then(by_source_tier)
+        // 逆切分候选沉底（`split_trigger = "no_exact"` 档才看得见效果）。
+        //
+        // 该档下切分候选与既有的前缀/补全候选同处「非精确」层，只靠 weight 竞争会插进
+        // 用户本来打得出的候选中间——而逆切分的立身之本是「不抢任何现有候选」。引擎侧
+        // 的 append 只保证入列序，本函数会无条件重排全部候选，留不住。
+        //
+        // ⚠️ 为什么加在这里是安全的（对照 `place_english_after_common_exact` 那条
+        // 「不要往本函数加比较键」的告诫）：那里被否决的是**想对某些候选对表态、对另一些
+        // 返回 Equal** 的比较器——那不构成全序，`sort_by` 的结果未指定。本键按一个布尔
+        // 把候选分成两区，是合法全序，且两条非切分候选之间恒 `Equal`
+        // ⇒ **可证明不改变任何既有次序**。默认档（`Empty`）下列表里只有切分候选，
+        // 本层是纯空操作。
+        .then(a.is_split_composed.cmp(&b.is_split_composed))
         .then(by_weight)
         .then(a.base_order.cmp(&b.base_order))
         .then(a.natural_order.cmp(&b.natural_order))
@@ -5552,16 +5565,21 @@ mod finalize_candidates_tests {
     }
 }
 
-/// 组合区是否该显示**码表整句的编码单元切分**。
+/// 组合区是否该显示**码表的编码单元切分**（整句 `aawt'aawt` / 逆切分 `hf'kn`）。
 ///
-/// 判据两条都要：有切分串（本次确实解出了整句），且**当前高亮的就是那条整句候选**。
+/// 判据两条都要：有切分串（本次确实解出了切分），且**当前高亮的就是那条切分候选**。
 /// 后者不能省——用户翻到别的候选时，屏幕上留着一个不对应它的切法比不切更糊涂。
+///
+/// 两个来源共用本判据是因为它们共用同一个出口（`ConvertResult::preedit_codetable`）与同一个
+/// 分隔符，且闸门互斥（整句 `> max_code_length`、逆切分 `==`），同一次转换只会有一个非空。
 ///
 /// 抽成自由函数是为了可测：`effective_preedit_body` 收 `&self`，要构造整个 Coordinator
 /// 才测得到，而这里真正要锁的只是这两条判据。
 fn wants_codetable_split(body: &str, cand: Option<&Candidate>) -> bool {
     !body.is_empty()
-        && cand.is_some_and(|c| c.is_sentence && c.source == CandidateSource::CodeTable)
+        && cand.is_some_and(|c| {
+            (c.is_sentence || c.is_split_composed) && c.source == CandidateSource::CodeTable
+        })
 }
 
 #[cfg(test)]
@@ -5623,6 +5641,76 @@ mod clear_recheck_tests {
             ..Default::default()
         };
         assert!(!wants_codetable_split("aawt'aawt", Some(&pinyin_sentence)));
+    }
+
+    /// 逆切分候选走**同一条**组合区判据（同一个出口 `preedit_codetable`、同一个分隔符），
+    /// 但身份标记是它自己的 `is_split_composed`。
+    ///
+    /// ★ 反向对照不能省：只断言「切分候选显示切分」时，一个把判据写成无条件 true 的实现
+    /// 同样会变绿 —— 高亮到别的候选时屏幕上就留着一个不对应它的切法。
+    #[test]
+    fn codetable_split_shows_on_highlighted_split_composition() {
+        let composed = Candidate {
+            text: "很可能".into(),
+            source: CandidateSource::CodeTable,
+            is_split_composed: true,
+            ..Default::default()
+        };
+        assert!(
+            wants_codetable_split("hf'kn", Some(&composed)),
+            "高亮逆切分候选时应显示 hf'kn"
+        );
+        assert!(
+            !wants_codetable_split("hf'kn", Some(&codetable("很可"))),
+            "高亮普通码表候选时不得显示切分"
+        );
+        // 非码表来源即便带标记也不走这条（同拼音整句那一条的理由）。
+        let alien = Candidate {
+            text: "很可能".into(),
+            source: CandidateSource::Pinyin,
+            is_split_composed: true,
+            ..Default::default()
+        };
+        assert!(!wants_codetable_split("hf'kn", Some(&alien)));
+    }
+
+    /// `split_trigger = "no_exact"` 档的立身之本：切分候选**沉在既有候选之后**。
+    ///
+    /// 引擎侧的 append 只保证入列序，本函数会无条件重排全部候选 —— 没有这一层，
+    /// 一条高权重的组合候选会插进用户本来打得出的候选中间。
+    #[test]
+    fn split_composed_sinks_below_ordinary_candidates() {
+        let mut ordinary = codetable("甲");
+        ordinary.weight = 10; // 故意给一个**低**权重
+        let mut composed = codetable("很可能");
+        composed.is_split_composed = true;
+        composed.weight = 9999; // 故意给一个**高**权重
+
+        assert_eq!(
+            candidate_display_order(&ordinary, &composed, false, false, "hfkn"),
+            std::cmp::Ordering::Less,
+            "权重再高的切分候选也须排在普通候选之后（沉底层先于 weight 生效）"
+        );
+
+        // ★ 反向对照：两条都不是切分候选时，本层必须是**空操作**，权重照常说了算。
+        // 缺了它，一个「无条件把 a 排前」的实现也能让上面那句变绿。
+        let mut other = codetable("乙");
+        other.weight = 9999;
+        assert_eq!(
+            candidate_display_order(&ordinary, &other, false, false, "hfkn"),
+            std::cmp::Ordering::Greater,
+            "两条普通候选之间，沉底层不得改变既有次序（高权重者仍在前）"
+        );
+
+        // 两条都是切分候选时同样是空操作，序交给后续键（weight）。
+        let mut composed_low = composed.clone();
+        composed_low.text = "很可难".into();
+        composed_low.weight = 1;
+        assert_eq!(
+            candidate_display_order(&composed, &composed_low, false, false, "hfkn"),
+            std::cmp::Ordering::Less,
+            "切分候选之间按权重，本层不得干预"
+        );
     }
 
     #[test]
