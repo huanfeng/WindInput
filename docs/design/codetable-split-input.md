@@ -440,6 +440,26 @@ split_input = true
 ⚠️ 若方案的 `max_code_length` 不是偶数或小于 4，开了也不生效，日志里有一条 `warn`
 说明原因（切点取码长的一半，奇数码长无解）。
 
+### 8.2 本机 REPL 实测（2026-09-19，真实小鹤词库）
+
+`dev.sh r`（`apps/repl`）吃一个 data 目录就能跑，不必构建 Windows 产物、不必上靶机 ——
+把方案与词库放进去、在方案的 `[engine.codetable]` 写上开关即可。实测三档：
+
+```
+split_input = true
+  abpd → 安保排                    adcb → 按到从不          ← 后段唯一，出一条
+  ajgx → 安静挂 / 安静更新          blvc → 本来找 / 本来这次  ← 后段重码，逐条列出
+split_input = false（反向对照）
+  abpd → (无候选)                  ajgx → (无候选)          ← 关闭时零行为变化
+split_front_candidates = 2
+  ajgx → 安静挂 / 安静更新 / 按键挂 / 按键更新                ← 前段外层 × 后段内层
+```
+
+⇒ 引擎侧的行为在真实词库上与单测一致，且切出来的确实是「二简词 + 二简字/词」。
+
+⚠️ REPL **看不到**的三件事，只能上靶机人工验（见下）：组合区的 `aj'gx`、自动上屏、顶码。
+它走的是 `EngineManager::convert`，不经协调器与 TSF。
+
 ### 8.2 真机验证的判据（靶机跑不了 GUI 自动化，须人工验）
 
 给需求方/自己的验证清单，每条都是可判真假的：
@@ -524,7 +544,7 @@ split_input = true
 | S1 引擎 | **已完成**：字段 / 配置载体 / `decode_split` / `convert` 接线 / `preedit_codetable` / 两条构建期告警 |
 | S2 协调器 | **已完成**：`wants_codetable_split` 判据、`candidate_display_order` 沉底层 |
 | S3 配置与混输 | **已完成**：`CodeTableSpec` 三字段、`manager` 装配、`resolve_split_input`（不继承 primary）。全局配置与设置仓**零改动** |
-| S4 收尾 | 文档本轮已写；`.omc/feedback-todo.md` 的 C0-5 与论坛回帖待功能验证后再动 |
+| S4 收尾 | 文档已写；**已部署靶机 dev**（`dev.sh dm2` → `pdm2`，2026-09-19 14:14）；`.omc/feedback-todo.md` 的 C0-5 与论坛回帖待真机验证后再动 |
 
 **测试 18 条**（含 1 条 `#[ignore]` 探针）：`codetable/engine.rs` 13 条（基本盘 / 字段约定 / preedit / 关闭零变化 /
 闸门只占 `==` / 两段缺一 / 默认档让位 / `no_exact` 档含反向对照 / 唯一即上屏 / 重码不上屏 /
