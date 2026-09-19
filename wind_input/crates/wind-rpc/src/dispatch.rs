@@ -74,8 +74,10 @@ impl DispatchState {
 /// 一层 `.context("导出失败")`，底下「条目过多（211 个，上限 200）」这类真正能指导用户
 /// 动作的信息就在这里被静默抹掉，客户端只剩一句正确但无用的话。
 ///
-/// 对单层错误（`bail!` / `anyhow!`，本仓绝大多数）`{:#}` 与 `{}` 输出逐字相同，所以这不是
-/// 给所有错误加噪音，只是让**带因果链的**那些别在出口断掉。
+/// 与 `{}` 逐字相同的条件是「**最内层那个错误自己没有 `source()`**」——`bail!` / `anyhow!`
+/// 造的错误都满足，本仓绝大多数如此，所以这不是给所有错误加噪音。反例是从带 `source()`
+/// 的外部错误类型 `?` 进来的那些（如 `zip::result::ZipError::Io`，它的 Display 里已经嵌了
+/// 一遍 io 错误，链上会再追加一遍），那类会重复一句——观感问题，不影响判读。
 pub fn dispatch(state: &DispatchState, req: Request) -> Response {
     match handle(state, &req.method, &req.params) {
         Ok(v) => Response::success(req.id, v),
@@ -179,10 +181,15 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
         //
         // ⚠️ 命令栏里那个同名的 `config.get(key)` 函数**是**按 key 取值的（见
         // `wind-cmdbar::funcs::config`）——同名不同源，这正是这个坑好踩的原因。
+        //
+        // 取单个键的正解是隔壁的 [`get_item`]（`config.getItem`），它当年加进来的理由
+        // 原话就是「补 config.get 只能整份的缺口」，回执 `{key, value}` 恰好就是那个错
+        // 写法想要的形状——踩坑的人其实是把 getItem 的用法安在了 get 上。
         "config.get" => {
             if params.get("key").is_some() {
                 anyhow::bail!(
-                    "config.get 不接受 key 参数（它返回整份配置）；请取回后按点路径下钻"
+                    "config.get 不接受 key 参数（它返回整份配置）；取单个已登记键请用 \
+                     config.getItem {{\"key\": ...}}，它的回执正是 {{key, value}}"
                 );
             }
             let cfg = Config::load(Config::data_dir().as_deref())?;
@@ -596,6 +603,10 @@ mod tests {
     /// 那类）就在这里被静默抹掉——客户端拿到一句正确但无用的话，而日志里什么都没有。
     ///
     /// 断的是**两层**错误：单层错误下 `{:#}` 与 `{}` 输出逐字相同，拿单层来测这条等于没测。
+    ///
+    /// ⚠️ `wind-webdata` 的 `theme_package_rpc_contract` **依赖本用例**：它断言的是
+    /// `{:#}`，而那与「客户端实际看到什么」等价的前提，正是出口这边不退回 `to_string()`。
+    /// 删掉本用例，那条会安静地退化成测不到客户端所见。
     #[test]
     fn error_response_keeps_the_whole_cause_chain() {
         let resp = dispatch(&state(), req("test.layered", json!({})));
