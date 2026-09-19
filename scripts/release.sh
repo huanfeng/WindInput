@@ -728,7 +728,11 @@ _sign_body() {
     # ---------- 4. 签名 ----------
     cyan "\n[4/7] 编译机: unstage → sign 8s → sign 9s → verify-sign"
     gray "  下面是编译机的原样输出。★ 逐条看, 脚本报「完成」不算数:"
-    gray "    · unstage 要打印【两行】→ : build\\ 和 target\\release (安装器三件套)。"
+    # ⚠️ `target\release` 里的反斜杠要写成 \\\\: say/gray 用 printf '%b'(为了支持 \n),
+    #    它会把 \r 解释成回车 —— 实测这行曾打印成「targetelease」。偏偏这里是让人照着
+    #    核对的检查点说明, 说明文字自己错了最误导。其余 Windows 路径(dist\ 、dist\_archive\、
+    #    .\scripts\dev.ps1)里的反斜杠后面都不是转义字母, 不受影响。
+    gray "    · unstage 要打印【两行】→ : build\\ 和 target\\\\release (安装器三件套)。"
     gray "      只有第一行说明三件套没还原, pack.ps1 会现编 —— 那就不是 CI 那份二进制了。"
     gray "    · sign 8s 应出现【三段】签名: 5 个文件 → 1 个(uninstall.exe) → 1 个(Setup.exe),"
     gray "      共 7 次配额, 不是 6 次。"

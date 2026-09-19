@@ -12,7 +12,7 @@
 > ```bash
 > ./scripts/release.sh                         # 直接跑 = 交互菜单（版本号已算好摆在菜单里）
 > ./scripts/release.sh check                   # 第 4 节
-> ./scripts/release.sh push <版本|patch|minor>  # 第 5 节
+> ./scripts/release.sh push <版本|patch|minor>  # 第 5 节（重发同一个号加 --force）
 > ./scripts/release.sh wait                    # 第 6 节
 > ./scripts/release.sh sign-draft              # 第 7–8 节（含上传与端到端校验）
 > ./scripts/release.sh auto-sign               # 第 6–8 节连做：等 CI 再自动签名上传（挂机）
@@ -431,5 +431,23 @@ Windows 侧 `signtool verify /pa /v`（见第 7 节）。两者互补，别拿�
 ⚠️ `auto-sign` 的挂机模式下，若 `dist/` 里已有该版本的签名产物，它**跳过签名直接转上传**
 而不是重签一遍 —— 重跑签名段要白扣 7 次云签名配额，而那时躺在 `dist/` 里的多半就是上一轮
 签好、只是上传失败的那份。真要重签请手动跑 `sign-draft`。
+
+★ **但上传前一律验签**（`Setup.exe` 读 PE 证书表、便携包解开逐个 PE 查），无论从哪个入口
+进到上传那一步。因为「`dist/` 里有同名产物」推不出「那是签过的」：本机 dev 构建同样会在
+`dist/` 留下 `WindInput-Setup-<版本>.exe`，证书表是空的。少了这道闸门，挂机模式会把那份
+原样传上 Release 且全程不报错。
+
+### 重发同一个版本号：`push <版本> --force`
+
+CI 挂了、或临门又改了一点时用。三条护栏：
+
+1. **已发布的 Release 拒绝重发** —— 覆盖已发布版本的 tag = 同一个号先后指向两份代码，
+   已下载用户手上那份与仓库对不上，R2 的 `latest.json` 仍按旧 hash 分发，事后连「这个版本
+   到底是哪份代码」都无从追溯。只有草稿（或该号还没有 Release）才放行。
+2. **tag 已指向本轮 HEAD 的仓跳过** —— 那种「覆盖」只是换个 tagger 时间戳，引用一个字节
+   都不变，不值得冒一次 force push 的险。
+3. **主仓 tag 没动时明说「不会产生新的 release.yml run」** —— 这是第 2 条的代价：推 tag 才
+   触发 CI，跳过了就不触发。不点破的话会让人干等一个永远不会出现的 run，改为提示去
+   `gh run rerun`。
 
 相关：[code-signing.md](code-signing.md)（签名原理、五个接线点、4.3 签名机迁到编译机）
