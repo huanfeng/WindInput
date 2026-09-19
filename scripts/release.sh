@@ -6,6 +6,7 @@
 #   ./scripts/release.sh push <版本|patch|minor>  五仓按序打 tag 并推送 (主仓最后)
 #   ./scripts/release.sh wait [版本]             等 release.yml 跑完
 #   ./scripts/release.sh sign-draft [版本]       拉 CI 中转产物 → 编译机签名 → 回传 → 上传
+#   ./scripts/release.sh auto-sign [版本]        等 CI 跑完再自动接 sign-draft (挂机, 不用守着)
 #   ./scripts/release.sh upload [版本]           只做上传+摘横幅+校验 (签名产物已在 dist/ 时)
 #
 # ── 为什么签名段要「拆开跑」, 而不是在编译机上直接调 release.ps1 sign-draft ──────────
@@ -133,6 +134,30 @@ resolve_version() {
                        bump_version "$cur" "$arg" ;;
         *)             valid_version "$arg" || { err "版本号格式应为 x.y.z (不带 v): $arg"; return 1; }
                        printf '%s\n' "$arg" ;;
+    esac
+}
+
+# 确认点。AUTO_YES=1 (auto-sign 挂机模式) 时自动通过。
+# ⚠️ 只有「继续做下去」这类确认走这里。涉及会白扣云签名配额、需要人判断的岔路不要塞进来
+#    —— 那种在 do_sign_draft 里按 AUTO_YES 单独选了一条更省的路, 而不是闷头 yes。
+AUTO_YES=0
+confirm() {
+    local prompt="$1" default="${2:-n}" ans hint
+    if [ "$default" = y ]; then hint="[Y/n]"; else hint="[y/N]"; fi
+    if [ "$AUTO_YES" = 1 ]; then
+        gray "  $prompt $hint  → (挂机模式) 自动确认"
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        err "  当前不是交互式终端, 无法确认: $prompt"
+        return 1
+    fi
+    read -r -p "  $prompt $hint " ans
+    ans="$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "$ans" in
+        "")    [ "$default" = y ] ;;
+        y|yes) return 0 ;;
+        *)     return 1 ;;
     esac
 }
 
@@ -293,8 +318,7 @@ do_push() {
         else                       gray "    $name  → 只 push $br (自有版本线, 不打本产品的 tag)"; fi
     done
     printf '\n'
-    read -r -p "确认发布 $tag ? [y/N] " ans
-    case "$ans" in y|Y|yes|YES) ;; *) gray "已取消, 什么都没做。"; return 0 ;; esac
+    confirm "确认发布 $tag ?" n || { gray "已取消, 什么都没做。"; return 0; }
 
     for r in "${RELEASE_REPOS[@]}"; do
         name="${r%%:*}"; mode="${r##*:}"; d="$WORK_ROOT/$name"
@@ -327,7 +351,8 @@ do_push() {
 
     printf '\n'
     say "五仓推送完成, CI 应在 1 分钟内起来。"
-    gray "  下一步: ./scripts/release.sh wait $v"
+    gray "  下一步: 菜单 [9] 等CI+签名 (挂机), 或 ./scripts/release.sh auto-sign $v"
+    gray "          想分步走: wait $v 然后 sign-draft $v"
     return 0
 }
 
@@ -570,9 +595,16 @@ do_sign_draft() {
     # 签名产物已经在本地? 那就别重签 —— 重跑一遍要白扣 7 次云签名配额。
     if [ -f "$DIST_DIR/WindInput-Setup-$v.exe" ] && [ -f "$DIST_DIR/WindInput-Portable-$v.zip" ]; then
         warn "  ⚠️ dist/ 里已经有 $v 的 Setup 与便携包。"
+        # ★ 挂机模式下不问、也不重签: 重跑签名段要白扣 7 次云签名配额, 而这时 dist/ 里
+        #   躺着的多半就是上一轮签好、只是上传失败的那份 —— 直接转上传才是本意。真要重签
+        #   请手动跑 sign-draft。
+        if [ "$AUTO_YES" = 1 ]; then
+            warn "     挂机模式: 跳过签名直接走上传 (重签会白扣 7 次配额)。"
+            do_upload "$v"
+            return $?
+        fi
         gray "     若上一轮只是上传失败, 直接跑 ./scripts/release.sh upload $v (不重签, 不扣配额)。"
-        read -r -p "  仍要重新走一遍签名? [y/N] " ans
-        case "$ans" in y|Y|yes|YES) ;; *) gray "已取消。"; return 0 ;; esac
+        confirm "仍要重新走一遍签名?" n || { gray "已取消。"; return 0; }
     fi
 
     # ---------- 1. 定位 CI run 并拉中转产物 ----------
@@ -709,8 +741,7 @@ do_upload() {
     [ "$missing" = 0 ] || { err "  资产不齐, 无法上传。"; return 1; }
 
     printf '\n'
-    read -r -p "  覆盖 $tag 的这 4 个资产? [Y/n] " ans
-    case "$ans" in n|N|no|NO) gray "已取消 (签名产物留在 dist/)。"; return 0 ;; esac
+    confirm "覆盖 $tag 的这 4 个资产?" y || { gray "已取消 (签名产物留在 dist/)。"; return 0; }
 
     local args=()
     while IFS= read -r a; do args+=("$a"); done < <(release_assets "$v")
@@ -802,11 +833,36 @@ PY
 }
 
 # ============================================================================
+# auto-sign —— 等 CI → 自动接签名上传
+# ============================================================================
+# 挂机用: 推完 tag 就可以走开, 回来时草稿 Release 上已经是签名版。对齐 release.ps1 的
+# auto-sign 子命令。
+#
+# ★ 前提是签名会话【已经建立】。会话只活 2 小时而 CI 约 20 分钟 —— 正确顺序是先在编译机
+#   桌面登录会话, 再推 tag; 等 CI 的这 20 分钟里会话一直在倒计时, 不是等完了再去登录。
+#
+# 中止 (Ctrl+C) 不会留下半成品: tag 与草稿 Release 都还在, 事后 sign-draft 可原样接上。
+do_auto_sign() {
+    local v="$1" rc
+    cyan "\n══ 等 CI 并自动签名上传  v$v ══"
+    gray "  随时可 Ctrl+C 中止 —— tag 与草稿 Release 都不会丢, 事后 sign-draft 接着跑即可。"
+    do_wait "$v" || return 1
+    AUTO_YES=1
+    do_sign_draft "$v"; rc=$?
+    AUTO_YES=0
+    return "$rc"
+}
+
+# ============================================================================
 # 交互菜单
 # ============================================================================
 # 无参数直接跑进这里 (对齐 dev.sh 与 release.ps1 的习惯); 子命令仍可单独调, CI/脚本用那个。
 pause() { printf '\n'; read -e -r -p "按回车继续..." _; }
 
+# 菜单数据带缓存: menu_refresh 要跑 git ls-remote (联网, 1~2 秒), 每次操作完回到菜单都
+# 重查一遍会把「看一眼状态」变成等待。只有 push 会改变这几个值, 所以只在它之后置脏;
+# 想手动重查按 r。
+MENU_DIRTY=1
 MENU_BASE=""; MENU_LATEST=""; MENU_FILEVER=""; MENU_AHEAD=""; MENU_BRANCH=""
 menu_refresh() {
     printf '%b正在查询远端 tag ...%b\r' "$C_GRAY" "$C_RESET"
@@ -850,9 +906,11 @@ show_menu() {
     printf '    6  等 CI       '; gray "守着 release.yml 跑完 (约 20 分钟; windows 与 macos 两个 job)"
     printf '    7  签名+上传   '; gray "拉 CI 产物 → 编译机签名 → 回传 → 覆盖草稿 Release → 端到端校验"
     printf '    8  只上传      '; gray "签名已出而上传失败时的恢复路径 (不重签, 不扣配额)"
+    printf '    9  等CI+签名   '; gray "守着 CI 跑完再自动接 [7]; 推完 tag 就能走开 (需签名会话已建立)"
     printf '\n'
     printf '%b  其它:%b\n' "$C_YELLOW" "$C_RESET"
     printf '    s  状态        '; gray "五仓分支 / 待推 / 脏文件 (不联网)"
+    printf '    r  刷新        '; gray "重查远端 tag (上面几个值是进菜单时取的, 不会自己变)"
     printf '    h  帮助        '; gray "子命令用法"
     printf '    q  退出\n'
     printf '%b%s%b\n' "$C_CYAN" "$sep" "$C_RESET"
@@ -875,7 +933,10 @@ menu_loop() {
         return 1
     fi
     while :; do
-        menu_refresh
+        # 每轮开头复位: do_auto_sign 正常走完会自己复位, 但它中途失败返回时若哪天加了
+        # 提前 return, 残留的 AUTO_YES=1 会让后面手动选的操作全部静默自动确认。
+        AUTO_YES=0
+        if [ "$MENU_DIRTY" = 1 ]; then menu_refresh; MENU_DIRTY=0; fi
         show_menu
         printf '\n'
         read -e -r -p "请选择: " choice
@@ -885,16 +946,18 @@ menu_loop() {
             "")  continue ;;
             q)   gray "已退出。"; return 0 ;;
             1)   do_check; rc=$? ;;
-            2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$? ;;
-            3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$? ;;
-            4)   do_push "$MENU_BASE"; rc=$? ;;
+            2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
+            3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
+            4)   do_push "$MENU_BASE"; rc=$?; MENU_DIRTY=1 ;;
             5)   printf '\n'; read -e -r -p "版本号 (x.y.z, 不带 v): " v
                  v="$(printf '%s' "$v" | tr -d '[:space:]')"
-                 if valid_version "$v"; then do_push "$v"; rc=$?
+                 if valid_version "$v"; then do_push "$v"; rc=$?; MENU_DIRTY=1
                  else err "版本号格式应为 x.y.z (不带 v): $v"; rc=1; fi ;;
             6)   if v="$(menu_target_version)"; then do_wait "$v"; rc=$?; else rc=1; fi ;;
             7)   if v="$(menu_target_version)"; then do_sign_draft "$v"; rc=$?; else rc=1; fi ;;
             8)   if v="$(menu_target_version)"; then do_upload "$v"; rc=$?; else rc=1; fi ;;
+            9)   if v="$(menu_target_version)"; then do_auto_sign "$v"; rc=$?; else rc=1; fi ;;
+            r)   MENU_DIRTY=1; continue ;;
             s)   do_status; rc=$? ;;
             h)   usage; rc=0 ;;
             *)   err "无效选项: $choice"; sleep 1; continue ;;
@@ -914,6 +977,7 @@ WindInput 发版编排 (Linux 侧)
   ./scripts/release.sh push <版本|patch|minor>  五仓按序打 tag 并推送 (主仓最后)
   ./scripts/release.sh wait [版本]             等 release.yml 跑完
   ./scripts/release.sh sign-draft [版本]       拉 CI 产物 → 编译机签名 → 回传 → 上传
+  ./scripts/release.sh auto-sign [版本]        等 CI 跑完再自动接 sign-draft (挂机)
   ./scripts/release.sh upload [版本]           只上传 (签名产物已在 dist/ 时的恢复路径)
 
 版本号留空时取远端最新的 v* tag。完整流程与每步的检查点见
@@ -937,6 +1001,10 @@ main() {
             v="$(resolve_version "${2:-}")" || return 1
             [ -n "$v" ] || { err "取不到版本号"; return 1; }
             do_wait "$v" ;;
+        auto-sign|autosign)
+            v="$(resolve_version "${2:-}")" || return 1
+            [ -n "$v" ] || { err "取不到版本号"; return 1; }
+            do_auto_sign "$v" ;;
         sign-draft|sign)
             v="$(resolve_version "${2:-}")" || return 1
             [ -n "$v" ] || { err "取不到版本号"; return 1; }

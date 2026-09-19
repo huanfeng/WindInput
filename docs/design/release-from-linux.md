@@ -15,6 +15,7 @@
 > ./scripts/release.sh push <版本|patch|minor>  # 第 5 节
 > ./scripts/release.sh wait                    # 第 6 节
 > ./scripts/release.sh sign-draft              # 第 7–8 节（含上传与端到端校验）
+> ./scripts/release.sh auto-sign               # 第 6–8 节连做：等 CI 再自动签名上传（挂机）
 > ./scripts/release.sh upload                  # 只上传：签名已出但上传失败时的恢复路径
 > ```
 >
@@ -405,7 +406,7 @@ Windows 侧 `signtool verify /pa /v`（见第 7 节）。两者互补，别拿�
 | （等 CI） | `wait` | 第 6 节 |
 | `sign-draft` | `sign-draft` | 第 7–8 节 |
 | （无：那边上传失败可直接重跑） | `upload` | 第 8 节 |
-| `auto-sign` / `-AutoSign` | — | 尚无对应物 |
+| `auto-sign` / `-AutoSign` | `auto-sign` | 第 6–8 节连做 |
 
 **两侧为什么不能合成一个。** `release.ps1 sign-draft` 从头到尾在一台 Windows 上跑，
 因为签名与 `gh` 都在本机；Linux 这侧这两样分处两机，故按能力劈开：
@@ -426,5 +427,9 @@ Windows 侧 `signtool verify /pa /v`（见第 7 节）。两者互补，别拿�
 
 人工不可消除的只剩一步：**在编译机桌面登录签名会话**（手机二次验证 + GUI 客户端，
 2 小时时限）。其余全部已自动化。
+
+⚠️ `auto-sign` 的挂机模式下，若 `dist/` 里已有该版本的签名产物，它**跳过签名直接转上传**
+而不是重签一遍 —— 重跑签名段要白扣 7 次云签名配额，而那时躺在 `dist/` 里的多半就是上一轮
+签好、只是上传失败的那份。真要重签请手动跑 `sign-draft`。
 
 相关：[code-signing.md](code-signing.md)（签名原理、五个接线点、4.3 签名机迁到编译机）
