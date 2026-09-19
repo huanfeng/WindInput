@@ -4452,6 +4452,39 @@ mod pager_inline_tests {
         hit(root, 0).expect("首条候选须参与命中")
     }
 
+    /// 造一段**确实已被宽度上限夹住**的超长编码：从 200 组 `a'` 起翻倍，直到「再翻一倍
+    /// 也不再变宽」为止，返回夹住的那一档。`mk` 是被测那一档的构造器 —— 必须与随后写
+    /// 前置断言时用的是同一个，否则夹住的是另一棵树。
+    ///
+    /// ⚠️ **重复次数不能写死。** 本组头注说「断言一律是相对量，与文本后端量出多宽无关」，
+    ///    可「超长编码须已被宽度上限夹住」这条**前置**恰恰是绝对量 —— 它成不成立取决于
+    ///    一个字有多宽，而三个平台的后端各不相同（Windows: DirectWrite；macOS: CoreText；
+    ///    Linux: 等宽 mock，见 `text/dwrite.rs` 末尾）。实测同样 200 组 `a'`：Windows 下
+    ///    已顶到 3000 的上限，macOS 下只有 2713.45，于是这三条**只在 macOS CI 上红**，
+    ///    Windows 与 Linux(mock) 全绿 —— 本机怎么跑都发现不了。
+    ///    判据要跟着字宽走，而不是把次数往上调一档、等下一个后端再把它顶穿。
+    ///
+    /// ★ `> floor` 那半条判据不能省。「加长一倍不再变宽」在**两端**都成立：
+    ///   一端是这里要的「顶到宽度上限」，另一端是「短得连窗口最小宽度都没撑满」——
+    ///   实测 mock 后端下 2 组 `a'` 与 4 组同为 116.4，正是后者。少了这半条，探测会在
+    ///   第一档就「收敛」并交回一段根本没被夹住的短编码，于是三条测试里那些
+    ///   「不得越过上限」的不等式**全部恒真** —— 绿得毫无意义，正是本组头注反复警告的
+    ///   那种写法。用空编码那档的树宽当 floor，两个平台期差着两个数量级，分得很开。
+    fn clamped_preedit(mk: impl Fn(&str) -> CandidateWindow) -> String {
+        let floor = laid(&mk(""), false).measured_size().0;
+        let mut n = 200usize;
+        for _ in 0..6 {
+            let one = "a'".repeat(n);
+            let w1 = laid(&mk(&one), false).measured_size().0;
+            let w2 = laid(&mk(&"a'".repeat(n * 2)), false).measured_size().0;
+            if w1 == w2 && w1 > floor {
+                return one;
+            }
+            n *= 2;
+        }
+        panic!("加到 {n} 组 `a'` 仍未被宽度上限夹住 —— 上限逻辑或文本测量变了，先查那边");
+    }
+
     /// ★ 本次修复的核心判据：竖排下**两种编码形态的表现必须一致**。
     ///
     /// 修复前内联编码那档完全不理会开关（翻页栏照旧独占底部一行），用户看到的就是
@@ -4584,7 +4617,7 @@ mod pager_inline_tests {
     /// 实测（scale=1，200 组 `a'`，上限 3000）：修复前树宽 3091.6，修复后 2994.4。
     #[test]
     fn long_preedit_in_own_bar_reserves_room_for_inlined_pager() {
-        let long = "a'".repeat(200);
+        let long = clamped_preedit(|p| bar_win("", true, p));
         let w = bar_win("", true, &long);
         let cap = w.screen_safety_max_width_px() as f32;
         // 前置①：这一行必须**已经被上限夹住**（再加长一倍不再变宽），否则不等式恒真。
@@ -4592,7 +4625,7 @@ mod pager_inline_tests {
         let (win_w, _) = root.measured_size();
         assert_eq!(
             win_w,
-            laid(&bar_win("", true, &"a'".repeat(400)), false)
+            laid(&bar_win("", true, &long.repeat(2)), false)
                 .measured_size()
                 .0,
             "前置：超长编码须已被宽度上限夹住"
@@ -4624,14 +4657,14 @@ mod pager_inline_tests {
     /// 树宽 3046.4，仍越上限 46.4；只有两项都扣掉，四种组合才全部落回上限内。
     #[test]
     fn long_preedit_in_own_bar_reserves_room_for_mode_chip() {
-        let long = "a'".repeat(200);
+        let long = clamped_preedit(|p| bar_win("临时英文", false, p));
         let w = bar_win("临时英文", false, &long);
         let cap = w.screen_safety_max_width_px() as f32;
         let root = laid(&w, false);
         let (win_w, _) = root.measured_size();
         assert_eq!(
             win_w,
-            laid(&bar_win("临时英文", false, &"a'".repeat(400)), false)
+            laid(&bar_win("临时英文", false, &long.repeat(2)), false)
                 .measured_size()
                 .0,
             "前置：超长编码须已被宽度上限夹住"
@@ -4654,7 +4687,7 @@ mod pager_inline_tests {
     /// 这么写的，变异检验里「预算不扣翻页栏」一改，七条测试全绿，才发现它什么都没测）。
     #[test]
     fn long_preedit_does_not_push_row_past_width_budget() {
-        let long = "a'".repeat(200);
+        let long = clamped_preedit(|p| win(true, false, true, false, p));
         let w_on = win(true, false, true, true, &long);
         let cap = w_on.screen_safety_max_width_px() as f32;
         // 前置：这一行必须**已经被上限夹住**（再加长一倍宽度不变），否则下面的不等式恒真。
@@ -4662,7 +4695,7 @@ mod pager_inline_tests {
         let off_w = laid(&win(true, false, true, false, &long), false)
             .measured_size()
             .0;
-        let off_w2 = laid(&win(true, false, true, false, &"a'".repeat(400)), false)
+        let off_w2 = laid(&win(true, false, true, false, &long.repeat(2)), false)
             .measured_size()
             .0;
         assert_eq!(
