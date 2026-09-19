@@ -10,12 +10,16 @@
 > **已固化为 `scripts/release.sh`**（2026-09-19）。日常发版走脚本：
 >
 > ```bash
+> ./scripts/release.sh                         # 直接跑 = 交互菜单（版本号已算好摆在菜单里）
 > ./scripts/release.sh check                   # 第 4 节
 > ./scripts/release.sh push <版本|patch|minor>  # 第 5 节
 > ./scripts/release.sh wait                    # 第 6 节
 > ./scripts/release.sh sign-draft              # 第 7–8 节（含上传与端到端校验）
 > ./scripts/release.sh upload                  # 只上传：签名已出但上传失败时的恢复路径
 > ```
+>
+> 菜单里「发布 Patch / Minor」的基准取 **远端最新 tag 与 `docs/VERSION` 的较大者** ——
+> 与 `release.ps1` 的 `Show-Menu` 同一套算法，两台机器对同一个仓库必须算出同一个下一版号。
 >
 > **本文不是脚本的使用说明，而是它每一步的判据来源**：脚本把命令固化了，但「为什么
 > 是这个顺序」「这一步要盯哪几行输出」仍然只写在这里。改脚本前先读对应章节；下面各节

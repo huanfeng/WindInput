@@ -386,7 +386,8 @@ cargo test -p wind-rpc --test wind_setting_assets
 
 ## 版本 / 发布
 
-- 发版入口：Linux 走 `scripts/release.sh`（`check` → `push` → `wait` → `sign-draft`），
+- 发版入口：Linux 走 `scripts/release.sh`（直接跑进交互菜单；子命令 `check` → `push`
+  → `wait` → `sign-draft`），
   Windows 走 `scripts/release.ps1`。签名只能在 Windows 编译机上做（云签名客户端与
   `signtool` 只有 Windows 有），故 Linux 侧把流程劈成「本机用 `gh` 收发、编译机只签名」
   两段。每一步的判据与检查点见 [docs/design/release-from-linux.md](docs/design/release-from-linux.md)

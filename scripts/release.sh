@@ -108,13 +108,28 @@ bump_version() {
 
 valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
+# bump 的基准版本。以远端最新 tag 为准 (tag 是版本真源); 但本机 docs/VERSION 更大时取它
+# —— 那说明有人手工提前 bump 过, 拿远端 tag 做基准会让版本号往回退。
+#
+# ⚠️ 与 release.ps1 的 Show-Menu 是同一套算法, 必须保持一致: 同一个仓库在 Linux 和 Windows
+#    上点「发布 Patch」要得出同一个版本号, 否则两台机器发出来的号会岔开。
+bump_base() {
+    local remote file
+    remote="$(latest_remote_version)"
+    file="$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null)"
+    valid_version "$file" || file=""
+    [ -n "$remote" ] || { printf '%s\n' "${file:-0.0.0}"; return 0; }
+    [ -n "$file" ]   || { printf '%s\n' "$remote"; return 0; }
+    printf '%s\n%s\n' "$remote" "$file" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+
 # 解析「版本参数」: 显式版本号 / patch / minor / 留空(取远端最新, 用于 wait 等只读场景)。
 resolve_version() {
     local arg="${1:-}" cur
     case "$arg" in
         "")            latest_remote_version ;;
-        patch|minor)   cur="$(latest_remote_version)"
-                       [ -n "$cur" ] || { err "取不到远端最新 tag, 无法 $arg bump"; return 1; }
+        patch|minor)   cur="$(bump_base)"
+                       [ -n "$cur" ] || { err "取不到基准版本, 无法 $arg bump"; return 1; }
                        bump_version "$cur" "$arg" ;;
         *)             valid_version "$arg" || { err "版本号格式应为 x.y.z (不带 v): $arg"; return 1; }
                        printf '%s\n' "$arg" ;;
@@ -787,6 +802,109 @@ PY
 }
 
 # ============================================================================
+# 交互菜单
+# ============================================================================
+# 无参数直接跑进这里 (对齐 dev.sh 与 release.ps1 的习惯); 子命令仍可单独调, CI/脚本用那个。
+pause() { printf '\n'; read -e -r -p "按回车继续..." _; }
+
+MENU_BASE=""; MENU_LATEST=""; MENU_FILEVER=""; MENU_AHEAD=""; MENU_BRANCH=""
+menu_refresh() {
+    printf '%b正在查询远端 tag ...%b\r' "$C_GRAY" "$C_RESET"
+    MENU_BRANCH="$(manifest_branch)"
+    MENU_LATEST="$(latest_remote_version)"
+    MENU_FILEVER="$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null)"
+    MENU_BASE="$(bump_base)"
+    # 不 fetch: 菜单要快, 这里只是给个量级提示。真正的把关在 [1] 预检里 (那边会 fetch)。
+    MENU_AHEAD="$(git -C "$PRODUCT_ROOT" rev-list --count "origin/$MENU_BRANCH..HEAD" 2>/dev/null || echo '?')"
+    printf '%*s\r' 30 ''
+}
+
+show_menu() {
+    local sep
+    sep="$(printf '=%.0s' $(seq 1 64))"
+    clear 2>/dev/null || true
+    printf '%b%s%b\n' "$C_CYAN" "$sep" "$C_RESET"
+    printf '%b  WindInput 发版  (Linux; 签名委托编译机 %s)%b\n' "$C_CYAN" "${WIND_BUILD_REMOTE:-未配置 build.local}" "$C_RESET"
+    printf '%b%s%b\n' "$C_CYAN" "$sep" "$C_RESET"
+    printf '  最新已发布 tag : '
+    if [ -n "$MENU_LATEST" ]; then say "v$MENU_LATEST"; else warn "(无)"; fi
+    printf '  docs/VERSION   : %s' "${MENU_FILEVER:-?}"
+    gray "   (本地构建占位, 非版本真源)"
+    printf '  主仓待推提交   : %s 个' "$MENU_AHEAD"
+    gray "   (分支 $MENU_BRANCH; 未 fetch, 仅供参考)"
+    printf '%b%s%b\n\n' "$C_CYAN" "$sep" "$C_RESET"
+
+    printf '%b  发布 (按顺序走):%b\n' "$C_YELLOW" "$C_RESET"
+    printf '    1  预检        '; gray "五仓 / gh / 编译机 / 签名会话; 不做任何改动"
+    printf '    2  发布 Patch  '; say "v$MENU_BASE  →  v$(bump_version "$MENU_BASE" patch)"
+    printf '    3  发布 Minor  '; say "v$MENU_BASE  →  v$(bump_version "$MENU_BASE" minor)"
+    printf '    4  发布当前版  '
+    if [ -n "$MENU_LATEST" ] && [ "$MENU_BASE" = "$MENU_LATEST" ]; then
+        printf 'v%s' "$MENU_BASE"; warn "   ⚠️ 远端已有此 tag, 会被拒绝 (换个号发)"
+    else
+        printf 'v%s' "$MENU_BASE"; gray "   (docs/VERSION 的版本; 远端尚无此 tag)"
+    fi
+    printf '    5  指定版本    '; gray "自己输入 x.y.z"
+    printf '\n'
+    printf '%b  发布之后 (下面三项操作 %s):%b\n' "$C_YELLOW" "$(if [ -n "$MENU_LATEST" ]; then echo "v$MENU_LATEST"; else echo "最新 tag"; fi)" "$C_RESET"
+    printf '    6  等 CI       '; gray "守着 release.yml 跑完 (约 20 分钟; windows 与 macos 两个 job)"
+    printf '    7  签名+上传   '; gray "拉 CI 产物 → 编译机签名 → 回传 → 覆盖草稿 Release → 端到端校验"
+    printf '    8  只上传      '; gray "签名已出而上传失败时的恢复路径 (不重签, 不扣配额)"
+    printf '\n'
+    printf '%b  其它:%b\n' "$C_YELLOW" "$C_RESET"
+    printf '    s  状态        '; gray "五仓分支 / 待推 / 脏文件 (不联网)"
+    printf '    h  帮助        '; gray "子命令用法"
+    printf '    q  退出\n'
+    printf '%b%s%b\n' "$C_CYAN" "$sep" "$C_RESET"
+    gray "  ★ 时序: 先在编译机桌面登录签名会话 (2 小时时限) 再发布, CI 跑完时会话才还有效。"
+}
+
+# 6/7/8 处理的版本: 刚 push 完时, 远端最新 tag 就是本次要处理的那个。
+menu_target_version() {
+    [ -n "$MENU_LATEST" ] && { printf '%s\n' "$MENU_LATEST"; return 0; }
+    err "远端没有 v* tag, 没有可处理的版本。"
+    return 1
+}
+
+menu_loop() {
+    local choice v rc
+    # 菜单要交互式终端; 管道 / CI 里请用子命令。
+    if [ ! -t 0 ]; then
+        err "当前不是交互式终端, 无法显示菜单。"
+        gray "  请改用子命令: release.sh check|status|push|wait|sign-draft|upload"
+        return 1
+    fi
+    while :; do
+        menu_refresh
+        show_menu
+        printf '\n'
+        read -e -r -p "请选择: " choice
+        choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        rc=0
+        case "$choice" in
+            "")  continue ;;
+            q)   gray "已退出。"; return 0 ;;
+            1)   do_check; rc=$? ;;
+            2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$? ;;
+            3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$? ;;
+            4)   do_push "$MENU_BASE"; rc=$? ;;
+            5)   printf '\n'; read -e -r -p "版本号 (x.y.z, 不带 v): " v
+                 v="$(printf '%s' "$v" | tr -d '[:space:]')"
+                 if valid_version "$v"; then do_push "$v"; rc=$?
+                 else err "版本号格式应为 x.y.z (不带 v): $v"; rc=1; fi ;;
+            6)   if v="$(menu_target_version)"; then do_wait "$v"; rc=$?; else rc=1; fi ;;
+            7)   if v="$(menu_target_version)"; then do_sign_draft "$v"; rc=$?; else rc=1; fi ;;
+            8)   if v="$(menu_target_version)"; then do_upload "$v"; rc=$?; else rc=1; fi ;;
+            s)   do_status; rc=$? ;;
+            h)   usage; rc=0 ;;
+            *)   err "无效选项: $choice"; sleep 1; continue ;;
+        esac
+        [ "$rc" -ne 0 ] && err "\n(退出码 $rc)"
+        pause
+    done
+}
+
+# ============================================================================
 usage() {
     cat <<'USAGE'
 WindInput 发版编排 (Linux 侧)
@@ -827,7 +945,8 @@ main() {
             v="$(resolve_version "${2:-}")" || return 1
             [ -n "$v" ] || { err "取不到版本号"; return 1; }
             do_upload "$v" ;;
-        ""|-h|--help|help) usage ;;
+        ""|menu)    menu_loop ;;
+        -h|--help|help) usage ;;
         *)          err "未知命令: $cmd"; printf '\n'; usage; return 1 ;;
     esac
 }
