@@ -1048,6 +1048,8 @@ impl Coordinator {
         state.temp_pinyin_prefix.clear();
         state.url_buffer.clear();
         state.url_cursor = 0;
+        state.email_buffer.clear();
+        state.email_cursor = 0;
         state.unicode_buffer.clear();
         state.unicode_cursor = 0;
         state.rewind = None;

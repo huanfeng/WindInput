@@ -2152,8 +2152,11 @@ impl Coordinator {
                 self.commit_special_candidate(state, gi)
             }
             Some(ModeKind::Mix(_)) => self.mix_select(state, offset),
-            // 网址模式无候选列表（不出候选窗），没有可选中的东西。
-            Some(ModeKind::Url) => return None,
+            // 网址 / 邮箱模式**有**候选（补全项），但**不能**按序号选中：数字在网址与
+            // 邮箱里都是合法字符（`www.163.com`、`abc123@qq.com`），放行序号选词等于
+            // 让用户再也打不出含数字的网址和用户名。高亮靠导航键移动、上屏走空格/回车
+            // （`handle_url_key` / `handle_email_key`），与 Unicode 同一条理由。
+            Some(ModeKind::Url) | Some(ModeKind::Email) => return None,
             // Unicode 模式**有**一条候选，但**不能**按序号选中：候选恒只有一条，而数字键
             // `0-9` 全是十六进制位。放行选词等于把 `u+1` 的 `1` 吃成「选第 1 条」，用户
             // 再也打不出任何含数字的码点。上屏走空格/回车（`handle_unicode_key`）。
@@ -2442,6 +2445,9 @@ impl Coordinator {
                 &mut st.temp_english_cursor,
             ),
             ModeKind::Url => preedit_cursor::BufEdit::new(&mut st.url_buffer, &mut st.url_cursor),
+            ModeKind::Email => {
+                preedit_cursor::BufEdit::new(&mut st.email_buffer, &mut st.email_cursor)
+            }
             ModeKind::Unicode => {
                 preedit_cursor::BufEdit::new(&mut st.unicode_buffer, &mut st.unicode_cursor)
             }
@@ -2495,6 +2501,14 @@ impl Coordinator {
                 &state.url_buffer,
                 &state.url_buffer,
                 state.url_cursor,
+            ),
+            // 邮箱：缓冲里**已经含用户名与 `@`**（`abc@gmail.com` 整串），同 Unicode，
+            // 只读前缀留空——那一段是可编辑缓冲的一部分（退格能删到它），不是装饰。
+            ModeKind::Email => (
+                String::new(),
+                &state.email_buffer,
+                &state.email_buffer,
+                state.email_cursor,
             ),
             // Unicode：缓冲里**已经含触发前缀**（`u+4e00` 整串），故只读前缀留空——
             // 前缀那一段是可编辑缓冲的一部分（退格能删到它），不是外挂的装饰。

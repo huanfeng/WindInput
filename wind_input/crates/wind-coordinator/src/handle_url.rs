@@ -40,11 +40,15 @@ impl Coordinator {
         state: &mut State,
         data: &KeyEventData,
     ) -> Option<KeyAction> {
-        let (url_on, unicode_on) = {
+        let (url_on, unicode_on, email_on) = {
             let rt = self.rt();
-            (rt.config.input.url.enabled, rt.config.input.unicode.enabled)
+            (
+                rt.config.input.url.enabled,
+                rt.config.input.unicode.enabled,
+                rt.config.input.email.enabled,
+            )
         };
-        if !url_on && !unicode_on {
+        if !url_on && !unicode_on && !email_on {
             return None;
         }
         let shift = data.modifiers & MOD_SHIFT != 0;
@@ -62,6 +66,19 @@ impl Coordinator {
             if self.is_unicode_prefix(&probe) {
                 return Some(self.enter_unicode_mode(state, probe, RewindOrigin::Normal));
             }
+        }
+        // 邮箱：**后缀触发**，判据与上面两条不同类——不是「缓冲 + 本键 == 某前缀」，
+        // 而是「本键是 `@` 且缓冲非空」，缓冲整体作为用户名带进模式（见
+        // `handle_email.rs` 文件头的对照表与 `docs/design/prefix-hijack-modes.md` §5.2）。
+        //
+        // 排在最后：`@` 不可能是出厂的任何 url/unicode 前缀，但用户可以把它配进
+        // `input.url.prefixes`。排在后面 = 显式配置的前缀优先，不去猜用户的意图。
+        //
+        // **空缓冲不触发**：否则用户每次想单独打一个 `@` 都会掉进邮箱模式。这个条件
+        // 同时也是「用户名从哪来」的答案。
+        if email_on && ch == crate::handle_email::EMAIL_AT && !state.input_buffer.is_empty() {
+            let buffer = format!("{}{}", state.input_buffer, crate::handle_email::EMAIL_AT);
+            return Some(self.enter_email_mode(state, buffer));
         }
         None
     }
@@ -94,7 +111,9 @@ impl Coordinator {
             host_text: buffer,
             origin: RewindOrigin::Normal, // 前缀夺取抢的是正常码表输入流
         });
-        // 显示候选窗（空候选 + 模式徽标）而非隐藏，给出「正在输入网址」提示。
+        // 历史补全候选（`input.url.history_enabled` 关着时恒空）。候选窗照常显示——
+        // 空候选时它给的是「正在输入网址」的模式徽标提示。
+        self.update_url_candidates(state);
         self.notify_ui_update(state);
         let disp = state.url_buffer.clone();
         debug!("Entered URL mode (buffer={})", disp);
@@ -117,6 +136,7 @@ impl Coordinator {
     pub(crate) fn active_hijack_buffer<'a>(&self, state: &'a State) -> Option<&'a str> {
         match state.active {
             Some(ModeKind::Url) => Some(&state.url_buffer),
+            Some(ModeKind::Email) => Some(&state.email_buffer),
             Some(ModeKind::Unicode) => Some(&state.unicode_buffer),
             // z 夺取：仅 try_z_fallback 会同时武装 state.rewind，故 can_rewind 只对夺取式进入
             // 成立（符号/字母首键进入的这些模式 rewind=None，不会误回退）。
@@ -146,6 +166,7 @@ impl Coordinator {
         // （committed_segs、cursor、mix 的透镜态）不会跑，回退后留下半清理的残局。
         match state.active {
             Some(ModeKind::Url) => self.exit_url_mode(state),
+            Some(ModeKind::Email) => self.exit_email_mode(state),
             Some(ModeKind::Unicode) => self.exit_unicode_mode(state),
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),
@@ -194,9 +215,10 @@ impl Coordinator {
 
     /// 网址模式按键处理：可见 ASCII 原样累积；空格/回车上屏原文；退格删空退出；Esc 放弃。
     pub(crate) fn handle_url_key(&self, state: &mut State, data: &KeyEventData) -> KeyAction {
-        // 缓冲变化后：同步 preedit + 刷新候选窗（保留「网址输入」徽标），再返回组合区动作。
+        // 缓冲变化后：重算历史补全候选 + 同步 preedit + 刷新候选窗（无候选时保留
+        // 「网址输入」徽标），再返回组合区动作。
         let refresh = |this: &Self, state: &mut State| -> KeyAction {
-            state.preedit = state.url_buffer.clone();
+            this.update_url_candidates(state);
             this.notify_ui_update(state);
             KeyAction::UpdateComposition {
                 text: state.url_buffer.clone(),
@@ -254,18 +276,10 @@ impl Coordinator {
                     KeyAction::Consumed
                 }
             }
-            keymap::VK_SPACE | keymap::VK_RETURN => {
-                // 空格/回车：上屏当前缓冲原文（不做全半角/标点转换）
-                let text = state.url_buffer.clone();
-                self.record_commit(&text, 0, -1, wind_store::stats::CommitSource::Url);
-                self.exit_url_mode(state);
-                self.notify_ui_hide();
-                if text.is_empty() {
-                    KeyAction::ClearComposition
-                } else {
-                    Self::commit_action(text, true)
-                }
-            }
+            // 空格/回车：有补全候选则上屏高亮候选，否则上屏缓冲原文（都不做全半角/标点
+            // 转换）。历史关着时恒无候选 ⇒ 与加补全之前逐字相同。收口在 `commit_url`，
+            // 与邮箱模式共用同一段语义。
+            keymap::VK_SPACE | keymap::VK_RETURN => self.commit_url(state),
             _ => {
                 let shift = data.modifiers & MOD_SHIFT != 0;
                 // 小键盘键（direct 语义）回退 numpad_char：网址缓冲是文本，数字/`.`/`-`/`/`

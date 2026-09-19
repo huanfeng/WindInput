@@ -51,7 +51,10 @@ impl CompletionKind {
     }
 
     /// 从库中字面写法还原。未知字符串返回 `None`（导入时用来跳过陌生分区）。
-    pub fn from_str(s: &str) -> Option<Self> {
+    ///
+    /// 名字刻意不叫 `from_str`：那个名字会被 clippy 判为与 `std::str::FromStr::from_str`
+    /// 易混（这里返回 `Option` 而非 `Result`，签名并不兼容）。同 `DictSection::from_key`。
+    pub fn from_key(s: &str) -> Option<Self> {
         match s {
             "email_suffix" => Some(CompletionKind::EmailSuffix),
             "url_history" => Some(CompletionKind::UrlHistory),
@@ -325,7 +328,7 @@ impl Store {
             let kind = v
                 .get("kind")
                 .and_then(|x| x.as_str())
-                .and_then(CompletionKind::from_str);
+                .and_then(CompletionKind::from_key);
             let word = v.get("text").and_then(|x| x.as_str());
             let (Some(kind), Some(word)) = (kind, word) else {
                 skipped += 1;
@@ -381,10 +384,20 @@ mod tests {
     #[test]
     fn record_accumulates_count() {
         let s = store("acc");
-        assert_eq!(s.get_completion(CompletionKind::EmailSuffix, "qq.com").unwrap(), None);
+        assert_eq!(
+            s.get_completion(CompletionKind::EmailSuffix, "qq.com")
+                .unwrap(),
+            None
+        );
 
-        assert!(s.record_completion(CompletionKind::EmailSuffix, "qq.com").unwrap());
-        assert!(s.record_completion(CompletionKind::EmailSuffix, "qq.com").unwrap());
+        assert!(
+            s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+                .unwrap()
+        );
+        assert!(
+            s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+                .unwrap()
+        );
         let rec = s
             .get_completion(CompletionKind::EmailSuffix, "qq.com")
             .unwrap()
@@ -396,44 +409,73 @@ mod tests {
     #[test]
     fn kinds_do_not_leak_into_each_other() {
         let s = store("kinds");
-        s.record_completion(CompletionKind::EmailSuffix, "same.text").unwrap();
-        s.record_completion(CompletionKind::UrlHistory, "same.text").unwrap();
+        s.record_completion(CompletionKind::EmailSuffix, "same.text")
+            .unwrap();
+        s.record_completion(CompletionKind::UrlHistory, "same.text")
+            .unwrap();
 
         // 同一条文本在两个 kind 下各有独立计数。
-        s.record_completion(CompletionKind::UrlHistory, "same.text").unwrap();
+        s.record_completion(CompletionKind::UrlHistory, "same.text")
+            .unwrap();
         assert_eq!(
-            s.get_completion(CompletionKind::EmailSuffix, "same.text").unwrap().unwrap().count,
+            s.get_completion(CompletionKind::EmailSuffix, "same.text")
+                .unwrap()
+                .unwrap()
+                .count,
             1
         );
         assert_eq!(
-            s.get_completion(CompletionKind::UrlHistory, "same.text").unwrap().unwrap().count,
+            s.get_completion(CompletionKind::UrlHistory, "same.text")
+                .unwrap()
+                .unwrap()
+                .count,
             2
         );
 
         // 清一类不影响另一类——设置里「清空网址历史」不该抹掉邮箱学习。
         assert_eq!(s.clear_completions(CompletionKind::UrlHistory).unwrap(), 1);
-        assert_eq!(s.list_completions(CompletionKind::UrlHistory, "", 0, 0).unwrap().1, 0);
-        assert_eq!(s.list_completions(CompletionKind::EmailSuffix, "", 0, 0).unwrap().1, 1);
+        assert_eq!(
+            s.list_completions(CompletionKind::UrlHistory, "", 0, 0)
+                .unwrap()
+                .1,
+            0
+        );
+        assert_eq!(
+            s.list_completions(CompletionKind::EmailSuffix, "", 0, 0)
+                .unwrap()
+                .1,
+            1
+        );
     }
 
     #[test]
     fn list_filters_by_prefix_and_sorts_by_count() {
         let s = store("list");
         for _ in 0..3 {
-            s.record_completion(CompletionKind::UrlHistory, "www.b.com").unwrap();
+            s.record_completion(CompletionKind::UrlHistory, "www.b.com")
+                .unwrap();
         }
-        s.record_completion(CompletionKind::UrlHistory, "www.a.com").unwrap();
-        s.record_completion(CompletionKind::UrlHistory, "bbs.c.com").unwrap();
+        s.record_completion(CompletionKind::UrlHistory, "www.a.com")
+            .unwrap();
+        s.record_completion(CompletionKind::UrlHistory, "bbs.c.com")
+            .unwrap();
 
         // 前缀过滤：bbs. 那条不在 www. 的结果里。
-        let (rows, total) = s.list_completions(CompletionKind::UrlHistory, "www.", 0, 0).unwrap();
+        let (rows, total) = s
+            .list_completions(CompletionKind::UrlHistory, "www.", 0, 0)
+            .unwrap();
         assert_eq!(total, 2, "www. 前缀应命中两条，实际 {:?}", rows);
         // 次数多的在前，与字典序相反 —— 证明排的是频次而不是 redb 的返回序。
         assert_eq!(rows[0].0, "www.b.com");
         assert_eq!(rows[1].0, "www.a.com");
 
         // 空前缀 = 全部。
-        assert_eq!(s.list_completions(CompletionKind::UrlHistory, "", 0, 0).unwrap().1, 3);
+        assert_eq!(
+            s.list_completions(CompletionKind::UrlHistory, "", 0, 0)
+                .unwrap()
+                .1,
+            3
+        );
     }
 
     #[test]
@@ -442,7 +484,9 @@ mod tests {
         for t in ["a", "b", "c"] {
             s.record_completion(CompletionKind::UrlHistory, t).unwrap();
         }
-        let (page, total) = s.list_completions(CompletionKind::UrlHistory, "", 1, 1).unwrap();
+        let (page, total) = s
+            .list_completions(CompletionKind::UrlHistory, "", 1, 1)
+            .unwrap();
         assert_eq!(total, 3, "total 是命中总数而非本页条数");
         assert_eq!(page.len(), 1);
     }
@@ -450,15 +494,26 @@ mod tests {
     #[test]
     fn remove_one_leaves_the_rest() {
         let s = store("rm");
-        s.record_completion(CompletionKind::EmailSuffix, "qq.com").unwrap();
-        s.record_completion(CompletionKind::EmailSuffix, "163.com").unwrap();
+        s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+            .unwrap();
+        s.record_completion(CompletionKind::EmailSuffix, "163.com")
+            .unwrap();
 
-        assert!(s.remove_completion(CompletionKind::EmailSuffix, "qq.com").unwrap());
         assert!(
-            !s.remove_completion(CompletionKind::EmailSuffix, "qq.com").unwrap(),
+            s.remove_completion(CompletionKind::EmailSuffix, "qq.com")
+                .unwrap()
+        );
+        assert!(
+            !s.remove_completion(CompletionKind::EmailSuffix, "qq.com")
+                .unwrap(),
             "删第二次应返回 false 而不是报错"
         );
-        assert_eq!(s.list_completions(CompletionKind::EmailSuffix, "", 0, 0).unwrap().1, 1);
+        assert_eq!(
+            s.list_completions(CompletionKind::EmailSuffix, "", 0, 0)
+                .unwrap()
+                .1,
+            1
+        );
     }
 
     #[test]
@@ -467,18 +522,38 @@ mod tests {
         // hot 记 3 次、mid 2 次、cold 1 次 —— 裁剪应按补全展示的同一排序取舍。
         for (text, n) in [("hot", 3), ("mid", 2), ("cold", 1)] {
             for _ in 0..n {
-                s.record_completion(CompletionKind::UrlHistory, text).unwrap();
+                s.record_completion(CompletionKind::UrlHistory, text)
+                    .unwrap();
             }
         }
-        assert_eq!(s.prune_completions(CompletionKind::UrlHistory, 2).unwrap(), 1);
-        let (rows, total) = s.list_completions(CompletionKind::UrlHistory, "", 0, 0).unwrap();
+        assert_eq!(
+            s.prune_completions(CompletionKind::UrlHistory, 2).unwrap(),
+            1
+        );
+        let (rows, total) = s
+            .list_completions(CompletionKind::UrlHistory, "", 0, 0)
+            .unwrap();
         assert_eq!(total, 2);
-        assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["hot", "mid"]);
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["hot", "mid"]
+        );
 
         // 未超上限时不动任何东西；max=0 表示不限。
-        assert_eq!(s.prune_completions(CompletionKind::UrlHistory, 5).unwrap(), 0);
-        assert_eq!(s.prune_completions(CompletionKind::UrlHistory, 0).unwrap(), 0);
-        assert_eq!(s.list_completions(CompletionKind::UrlHistory, "", 0, 0).unwrap().1, 2);
+        assert_eq!(
+            s.prune_completions(CompletionKind::UrlHistory, 5).unwrap(),
+            0
+        );
+        assert_eq!(
+            s.prune_completions(CompletionKind::UrlHistory, 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            s.list_completions(CompletionKind::UrlHistory, "", 0, 0)
+                .unwrap()
+                .1,
+            2
+        );
     }
 
     #[test]
@@ -486,20 +561,34 @@ mod tests {
         let s = store("guard");
         assert!(!s.record_completion(CompletionKind::UrlHistory, "").unwrap());
         let long = "x".repeat(COMPLETION_TEXT_MAX_CHARS + 1);
-        assert!(!s.record_completion(CompletionKind::UrlHistory, &long).unwrap());
-        assert_eq!(s.list_completions(CompletionKind::UrlHistory, "", 0, 0).unwrap().1, 0);
+        assert!(
+            !s.record_completion(CompletionKind::UrlHistory, &long)
+                .unwrap()
+        );
+        assert_eq!(
+            s.list_completions(CompletionKind::UrlHistory, "", 0, 0)
+                .unwrap()
+                .1,
+            0
+        );
 
         // 恰好等于上限的仍收。
         let ok = "x".repeat(COMPLETION_TEXT_MAX_CHARS);
-        assert!(s.record_completion(CompletionKind::UrlHistory, &ok).unwrap());
+        assert!(
+            s.record_completion(CompletionKind::UrlHistory, &ok)
+                .unwrap()
+        );
     }
 
     #[test]
     fn jsonl_roundtrip_carries_both_kinds() {
         let a = store("exp");
-        a.record_completion(CompletionKind::EmailSuffix, "qq.com").unwrap();
-        a.record_completion(CompletionKind::EmailSuffix, "qq.com").unwrap();
-        a.record_completion(CompletionKind::UrlHistory, "www.x.com").unwrap();
+        a.record_completion(CompletionKind::EmailSuffix, "qq.com")
+            .unwrap();
+        a.record_completion(CompletionKind::EmailSuffix, "qq.com")
+            .unwrap();
+        a.record_completion(CompletionKind::UrlHistory, "www.x.com")
+            .unwrap();
         let dump = a.export_completions_jsonl().unwrap();
         assert_eq!(dump.lines().count(), 2, "两个 kind 各一条:\n{dump}");
 
@@ -507,29 +596,45 @@ mod tests {
         let (imported, skipped) = b.import_completions_jsonl(&dump).unwrap();
         assert_eq!((imported, skipped), (2, 0));
         assert_eq!(
-            b.get_completion(CompletionKind::EmailSuffix, "qq.com").unwrap().unwrap().count,
+            b.get_completion(CompletionKind::EmailSuffix, "qq.com")
+                .unwrap()
+                .unwrap()
+                .count,
             2,
             "count 应随导出导入保住"
         );
-        assert_eq!(b.list_completions(CompletionKind::UrlHistory, "", 0, 0).unwrap().1, 1);
+        assert_eq!(
+            b.list_completions(CompletionKind::UrlHistory, "", 0, 0)
+                .unwrap()
+                .1,
+            1
+        );
     }
 
     #[test]
     fn import_merges_by_max_and_skips_junk() {
         let s = store("merge");
-        s.record_completion(CompletionKind::EmailSuffix, "qq.com").unwrap(); // count=1
+        s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+            .unwrap(); // count=1
 
         let jsonl = concat!(
-            r#"{"kind":"email_suffix","text":"qq.com","count":9,"last_used":100}"#, "\n",
-            r#"not json"#, "\n",
-            r#"{"kind":"no_such_kind","text":"x","count":1}"#, "\n",
-            r#"{"kind":"email_suffix","count":1}"#, "\n",
+            r#"{"kind":"email_suffix","text":"qq.com","count":9,"last_used":100}"#,
+            "\n",
+            r#"not json"#,
+            "\n",
+            r#"{"kind":"no_such_kind","text":"x","count":1}"#,
+            "\n",
+            r#"{"kind":"email_suffix","count":1}"#,
+            "\n",
         );
         let (imported, skipped) = s.import_completions_jsonl(jsonl).unwrap();
         assert_eq!(imported, 1);
         assert_eq!(skipped, 3, "坏行/未知 kind/缺 text 各跳一条");
         assert_eq!(
-            s.get_completion(CompletionKind::EmailSuffix, "qq.com").unwrap().unwrap().count,
+            s.get_completion(CompletionKind::EmailSuffix, "qq.com")
+                .unwrap()
+                .unwrap()
+                .count,
             9,
             "已存在的条目取 max(count)"
         );
@@ -538,8 +643,8 @@ mod tests {
     #[test]
     fn kind_str_roundtrip_is_closed() {
         for k in [CompletionKind::EmailSuffix, CompletionKind::UrlHistory] {
-            assert_eq!(CompletionKind::from_str(k.as_str()), Some(k));
+            assert_eq!(CompletionKind::from_key(k.as_str()), Some(k));
         }
-        assert_eq!(CompletionKind::from_str("emial_suffix"), None);
+        assert_eq!(CompletionKind::from_key("emial_suffix"), None);
     }
 }

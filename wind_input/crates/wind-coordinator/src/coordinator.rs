@@ -666,6 +666,14 @@ pub(crate) struct State {
     pub(crate) url_buffer: String,
     /// 网址模式编码区光标（`url_buffer` 内字节偏移）
     pub(crate) url_cursor: usize,
+    /// 邮箱模式输入缓冲（**含 `@` 与用户名**，如 `abc@gmail.com`）。
+    ///
+    /// 连用户名一起存是刻意的，同 [`Self::unicode_buffer`] 连前缀一起存：编码区要把
+    /// 用户打的整串原样显示出来，且退格退到只剩 `abc@` 时才是夺取边界，
+    /// `Rewind::host_text` 拿它直接比对。拆后缀是候选查询时的事（`email_suffix_part`）。
+    pub(crate) email_buffer: String,
+    /// 邮箱模式编码区光标（`email_buffer` 内字节偏移）
+    pub(crate) email_cursor: usize,
     /// Unicode 模式输入缓冲（**含触发前缀**，如 `u+4e00`）。
     ///
     /// 连前缀一起存是刻意的：编码区要把用户打的整串原样显示出来（`U+` 起手时显示的
@@ -2425,6 +2433,8 @@ impl Coordinator {
                 temp_english_cursor: 0,
                 temp_english_prefix: String::new(),
                 url_buffer: String::new(),
+                email_buffer: String::new(),
+                email_cursor: 0,
                 url_cursor: 0,
                 unicode_buffer: String::new(),
                 unicode_cursor: 0,
@@ -4719,6 +4729,7 @@ impl Coordinator {
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),
             Some(ModeKind::Url) => self.exit_url_mode(state),
+            Some(ModeKind::Email) => self.exit_email_mode(state),
             Some(ModeKind::Unicode) => self.exit_unicode_mode(state),
             Some(ModeKind::Special(_)) | Some(ModeKind::RareChar) => self.exit_special_mode(state),
             Some(ModeKind::Mix(_)) => self.exit_mix_mode(state),

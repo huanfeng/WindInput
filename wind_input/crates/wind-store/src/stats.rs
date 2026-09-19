@@ -50,11 +50,16 @@ pub enum CommitSource {
     SpecialMode = 9, // 引导键特殊模式
     Url = 10,        // 网址模式（Rust 特有）
     Mix = 11,        // 混合模式（Rust 特有）
+    Email = 12,      // 邮箱模式（Rust 特有）
 }
 
 impl CommitSource {
     /// 来源总数（by_source 数组长度）。
-    pub const COUNT: usize = 12;
+    ///
+    /// ⚠️ 加变体即改本值。存量的每日统计记录里 `by_source` 只有旧长度，
+    /// `stat_collector::Shared::record` 读回后会先 `resize` 到本值再索引——那道
+    /// resize 是加变体的前提，别把它优化掉。
+    pub const COUNT: usize = 13;
     /// 数组索引。
     pub fn index(self) -> usize {
         self as usize

@@ -1140,6 +1140,7 @@ impl MessageHandler for Coordinator {
             Some(ModeKind::TempPinyin) => return self.handle_temp_pinyin_key(&mut state, data),
             Some(ModeKind::TempEnglish) => return self.handle_temp_english_key(&mut state, data),
             Some(ModeKind::Url) => return self.handle_url_key(&mut state, data),
+            Some(ModeKind::Email) => return self.handle_email_key(&mut state, data),
             Some(ModeKind::Unicode) => return self.handle_unicode_key(&mut state, data),
             // ★ 生僻字模式复用 special 的整套按键处理（缓冲/光标/退格/选词/翻页）。
             // 两者只差「引擎取哪个方案」与「候选过不过生僻准入」，那两处分别在

@@ -398,6 +398,10 @@ pub(crate) fn template_for<'a>(
             &cfg.input.url.comment_template_vertical,
             &cfg.input.url.comment_template_horizontal,
         ),
+        Some(ModeKind::Email) => pick(
+            &cfg.input.email.comment_template_vertical,
+            &cfg.input.email.comment_template_horizontal,
+        ),
         Some(ModeKind::Unicode) => pick(
             &cfg.input.unicode.comment_template_vertical,
             &cfg.input.unicode.comment_template_horizontal,

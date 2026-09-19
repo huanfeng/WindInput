@@ -1282,6 +1282,7 @@ impl Coordinator {
             }
             ModeKind::TempEnglish => Some(("临时英文".to_string(), "英".to_string())),
             ModeKind::Url => Some(("网址输入".to_string(), "网址".to_string())),
+            ModeKind::Email => Some(("邮箱输入".to_string(), "邮箱".to_string())),
             // 短名用 `U+` 而不是「码」之类的意译：用户是照着 `U+4E00` 这个写法来的，
             // 徽标与他刚打进去的前缀一致，比任何中文缩写都直接。
             ModeKind::Unicode => Some(("Unicode 输入".to_string(), "U+".to_string())),

@@ -15,6 +15,8 @@ pub(crate) mod debug_support;
 #[cfg(windows)]
 pub mod direct_switch;
 pub mod edit_ops;
+#[cfg(test)]
+mod email_mode_tests;
 pub(crate) mod english_candidates;
 #[cfg(test)]
 mod freq_learn_tests;
@@ -28,6 +30,7 @@ pub mod handle_cmdbar;
 pub mod handle_cmdbar_macos;
 pub mod handle_common_chars;
 pub mod handle_config;
+pub mod handle_email;
 pub mod handle_key;
 pub mod handle_lifecycle;
 pub mod handle_menu;
@@ -40,7 +43,7 @@ pub mod handle_temp;
 pub mod handle_tooltip;
 pub mod handle_uielement;
 pub mod handle_unicode;
-pub mod handle_url;
+mod handle_url;
 pub mod host_services;
 pub mod hotkey_match;
 pub mod input_diag;
@@ -48,6 +51,7 @@ pub mod key_convert;
 pub mod key_gate;
 pub(crate) mod key_resolver;
 pub mod layout;
+pub mod mode_completion;
 pub mod pipeline;
 pub(crate) mod preedit_cursor;
 mod quick_eval;
