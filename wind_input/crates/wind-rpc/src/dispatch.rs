@@ -169,7 +169,22 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
                 .collect(),
         )),
         "system.notifyReload" => Ok(json!({ "ok": true })),
+        // 返回**整份**配置（四层合并后），不按键取值。
+        //
+        // 多余的 `key` 参数**当场拒掉**而不是无视：无视它的代价是调用方写
+        // `config.get {"key": "ui.theme.name"}` 再读回执的 `value` —— 那个字段不存在，
+        // 拿到 None 却**不报错**，于是功能静默失效。CLI 的主题列表（`*` 标记恒不显示）
+        // 与设置端的主题导出（「没有当前主题可导出」）先后踩的都是这一个坑，后者直到
+        // 用户点了按钮才暴露。取单个键请拉整份下来按点路径下钻。
+        //
+        // ⚠️ 命令栏里那个同名的 `config.get(key)` 函数**是**按 key 取值的（见
+        // `wind-cmdbar::funcs::config`）——同名不同源，这正是这个坑好踩的原因。
         "config.get" => {
+            if params.get("key").is_some() {
+                anyhow::bail!(
+                    "config.get 不接受 key 参数（它返回整份配置）；请取回后按点路径下钻"
+                );
+            }
             let cfg = Config::load(Config::data_dir().as_deref())?;
             Ok(serde_json::to_value(cfg)?)
         }
@@ -547,6 +562,31 @@ mod tests {
             method: method.to_string(),
             params,
         }
+    }
+
+    /// `config.get` 传了 `key` 要**当场报错**，不能无视后照常返回整份配置。
+    ///
+    /// 无视的代价是调用方拿不到想要的那个键、却也收不到任何错误：它读回执里的 `value`
+    /// 得到 `None`，功能静默失效。CLI 的主题列表与设置端的主题导出先后栽在这上面，
+    /// 后者一直到用户点了导出按钮才暴露。
+    #[test]
+    fn config_get_rejects_a_key_param_instead_of_silently_ignoring_it() {
+        let e = dispatch(
+            &state(),
+            req("config.get", json!({ "key": "ui.theme.name" })),
+        )
+        .error
+        .expect("传了 key 必须报错");
+        assert!(e.contains("key"), "报错要点明是 key 这个参数的问题：{e}");
+
+        // 正向对照：不传 key 照常返回整份配置。没有这条，上面那条在「config.get 整个
+        // 坏掉」时也会绿。
+        let ok = dispatch(&state(), req("config.get", json!({})));
+        assert!(ok.error.is_none(), "不传 key 不该失败：{:?}", ok.error);
+        assert!(
+            ok.result.is_some_and(|v| v.get("ui").is_some()),
+            "回执该是整份配置（含 ui 段）"
+        );
     }
 
     /// **出口不许把错误的因果链截断。**

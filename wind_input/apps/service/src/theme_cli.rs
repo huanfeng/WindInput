@@ -66,9 +66,16 @@ fn usage_err(form: &str) -> i32 {
 
 fn cmd_list() -> anyhow::Result<i32> {
     let items = rpc_online("theme.list", json!({}))?;
-    let current = rpc_online("config.get", json!({ "key": "ui.theme.name" }))
+    // `config.get` **不接受 key 参数**，它恒返回整份配置；传 `{"key": ...}` 再读回执的
+    // `value` 是错的——拿到的是 None 而不是错误，于是这里的 `*` 标记恒不显示，静默失效。
+    // （命令栏里那个同名的 `config.get(key)` 函数确实按 key 取值，同名不同源。）
+    let current = rpc_online("config.get", json!({}))
         .ok()
-        .and_then(|v| v.get("value").and_then(Value::as_str).map(str::to_string))
+        .and_then(|v| {
+            crate::cli_util::json_get_path(&v, "ui.theme.name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let Some(rows) = items.as_array() else {
         anyhow::bail!("theme.list 返回的不是数组");
