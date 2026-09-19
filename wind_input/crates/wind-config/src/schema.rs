@@ -363,6 +363,33 @@ pub struct CodeTableSpec {
     /// 而顶码是自动上屏、一触发用户就看不到整句候选（见 `CodeTableEngine::handle_top_code`）。
     #[serde(default)]
     pub sentence_input: bool,
+    /// 逆切分（切分模式）：**恰好** `max_code_length` 长的串若空码，切成前后两段
+    /// （各 `max_code_length / 2` 码）各查词典，把结果拼成组合候选。
+    /// 设计与判据见 `docs/design/codetable-split-input.md`（需求来源：论坛 t11）。
+    ///
+    /// **引擎固定参数而非行为 tri-state**（同 `sentence_input`）：能不能逆切分取决于这张
+    /// 码表有没有成体系的二简、二简空间是否留了余量——是编码方案的结构事实，故不设全局
+    /// 回落，由方案作者在 `.schema.toml` 里声明。出厂 `false`。
+    ///
+    /// **不限定方案类型**：音形类码表是它的典型受益者（二简空间大、四码空码位多），但别的
+    /// 码表开了未必没用，只是表现随编码结构而异。要不要开、开了好不好用，交给方案作者与
+    /// 用户实测——用户也可经设置页写 `schema_overrides/{id}.toml` 的同名段自行覆盖。
+    ///
+    /// ⚠️ 与 `sentence_input` 占的是**不同区间**（`==` vs `>` 码长），两者可同开、互不让位；
+    /// 但同开时顶码会因整句而整体让位，逆切分候选的「后码顶首选上屏」随之失效
+    /// （见 `CodeTableEngine::handle_top_code`，构建时会告警）。
+    #[serde(default)]
+    pub split_input: bool,
+    /// 逆切分的**前段**取几条候选。0/缺省 = 1（前段恒取首选）。
+    ///
+    /// 取更多会让同前段的变体占满候选窗（后段 4 个重码 × 前段 2 条 = 8 条，其中后 4 条
+    /// 共享一个用户多半不想要的前段）。这个旋钮是给方案作者实测用的，不是终端用户开关。
+    #[serde(default)]
+    pub split_front_candidates: usize,
+    /// 逆切分的触发档：`""`/`"empty"`（默认，整串零候选才切）/ `"no_exact"`（无精确解即切，
+    /// 切分候选沉底且不参与自动上屏）。非法值回退 `"empty"` 并告警。
+    #[serde(default)]
+    pub split_trigger: String,
 
     // ── 方案内联行为覆盖（None=回落全局 schema.codetable；Some=覆盖）──
     /// 顶码上屏（超满码长取前 N 码首选上屏）。

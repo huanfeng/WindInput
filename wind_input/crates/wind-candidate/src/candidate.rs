@@ -350,6 +350,27 @@ pub struct Candidate {
     /// 引擎内部用，不推送 UI。
     #[serde(skip)]
     pub is_synthesized: bool,
+    /// 该候选由**逆切分**拼成：满码长的串被切成两段、各取词典候选后拼接
+    /// （`hfkn` → `hf`(很可) + `kn`(能) → 「很可能」）。
+    /// 见 `docs/design/codetable-split-input.md` 与 `codetable::engine::decode_split`。
+    ///
+    /// ## 为什么不复用 [[is_sentence]]
+    ///
+    /// 两者都是「引擎合成的多段解读」，但 `is_sentence` 已有三类消费者的语义与本功能不合：
+    /// `freq_rerank` 的顶部锚定与 `is_sentence_demoted` 让位、`wants_codetable_split` 的
+    /// 组合区判据、若干探针的整句名次统计。借用会让「整句的统计里混进切分候选」这类问题
+    /// 以最难查的形态出现——同 `is_prefix` 被静态短语借用、`is_fuzzy` 被用户词简拼借作
+    /// 沉底标记那两次，最终都拆成了独立字段（`is_promoted_completion` / `is_abbrev`）。
+    ///
+    /// ## 消费者
+    ///
+    /// ① `wants_codetable_split`：高亮它时组合区显示 `hf'kn`；
+    /// ② `candidate_display_order` 的沉底层：`split_trigger = "no_exact"` 档下切分候选
+    ///    须排在既有候选之后（默认 `"empty"` 档下列表里只有它，那一层是空操作）。
+    ///
+    /// 引擎内部用，不推送 UI。
+    #[serde(skip)]
+    pub is_split_composed: bool,
     /// 前缀补全**已被提升进完整匹配层**（排序决策，与 `is_prefix` 表达的「码更长」结构事实正交）。
     ///
     /// `is_prefix=true` 表达的是结构事实——候选码严格长于输入（补全词）；而「该不该沉到
@@ -487,6 +508,7 @@ impl Default for Candidate {
             is_sentence: false,
             is_sentence_demoted: false,
             is_synthesized: false,
+            is_split_composed: false,
             is_promoted_completion: false,
             completion_extra_syllables: 0,
             consumed_length: 0,

@@ -6,6 +6,9 @@
 //! 候选生成：精确匹配 + 前缀匹配。运行时词频/shadow 不在此（见 frequency.md / dict.md）。
 
 use crate::engine::{ConvertResult, Engine, EngineType, ExtendedEngine};
+// 组合区里两段编码之间的分隔符，与码表整句、拼音音节分隔**共用**同一个字符：
+// 用户不必为逆切分再学一套符号。
+use super::sentence::SPLIT_SEPARATOR;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wind_candidate::{Candidate, CandidateSource, better, by_natural, cmp_exact_first};
@@ -52,6 +55,56 @@ impl BaseSort {
     }
 }
 
+/// 逆切分**后段**的取数上限。
+///
+/// 8 的口径同 `single_code_complete` 的补全池：够协调器过滤（检索范围 / 单字 / shadow）
+/// 之后仍有得选，又不至于让一个二简的重码把候选窗整屏占满。前段的取数是可配的
+/// （`CommitOptions::split_front_candidates`），后段不可配——后段重码有几个是词库的事实，
+/// 砍掉它就是砍掉用户本来打得出的字。
+const SPLIT_BACK_LIMIT: usize = 8;
+
+/// 逆切分的触发档（`[engine.codetable].split_trigger`）：满码长时「空到什么程度」才切分。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SplitTrigger {
+    /// 整串**一条候选都没有**才切（默认）。只填「现在什么都没有」的那一格，
+    /// 不抢任何现有候选，回归面接近零。
+    #[default]
+    Empty,
+    /// 整串**没有精确解**（无 `code == input` 的候选）即切，即便有前缀/补全候选。
+    /// 覆盖面更大，但会改变既有候选序 ⇒ 此档产出的切分候选一律**沉底**
+    /// （`candidate_display_order` 的 `is_split_composed` 层）且**不参与自动上屏**
+    /// （`decide_auto_commit` 的「恰一个精确匹配」判据此时本就不成立）。
+    NoExact,
+}
+
+impl SplitTrigger {
+    /// 解析配置字符串：`"no_exact"` → NoExact，`""`/`"empty"` → Empty。
+    ///
+    /// 其余取值回退 Empty 并**告警**，理由同 [`BaseSort::parse`]：静默吞掉拼写错误时，
+    /// 配置者只会观察到「改了没生效」而拿不到任何线索。
+    pub fn parse(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("no_exact") {
+            Self::NoExact
+        } else {
+            if !s.is_empty() && !s.eq_ignore_ascii_case("empty") {
+                tracing::warn!(
+                    value = %s,
+                    "[engine.codetable].split_trigger 取值无法识别，已回退 \"empty\"；合法值仅 \"empty\" / \"no_exact\""
+                );
+            }
+            Self::Empty
+        }
+    }
+
+    /// 本档下 `candidates` 是否「空到可以切分」。
+    fn allows(self, candidates: &[Candidate]) -> bool {
+        match self {
+            Self::Empty => candidates.is_empty(),
+            Self::NoExact => !candidates.iter().any(|c| c.is_exact_code),
+        }
+    }
+}
+
 /// 码表上屏策略配置（schema 的 [engine.codetable] 相关开关）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CommitOptions {
@@ -78,6 +131,26 @@ pub struct CommitOptions {
     /// 行为 tri-state：一张码表能不能整句取决于它的编码结构（定长？简码体系多深？），
     /// 是方案属性而非用户偏好。出厂关闭。
     pub sentence_input: bool,
+    /// 逆切分（切分模式）：**恰好**满码长的串若空码，切成 2+2 两段各查词典再拼接。
+    /// 见 `docs/design/codetable-split-input.md`。
+    ///
+    /// **方案级引擎固定参数**（同 `sentence_input`）：能不能逆切分取决于这张码表有没有
+    /// 成体系的二简、二简空间是否留了余量，是编码方案的结构事实。出厂关闭。
+    ///
+    /// ⚠️ 与 `sentence_input` **占的是不同区间**（`== max_code_length` vs `>`），
+    /// 两者可以同开、互不让位；但同开时顶码会因整句而整体让位
+    /// （见 [`CodeTableEngine::handle_top_code`]），逆切分候选的「后码顶首选上屏」随之失效。
+    pub split_input: bool,
+    /// 逆切分的**前段**取几条候选（`[engine.codetable].split_front_candidates`）。
+    ///
+    /// 默认 1（前段恒取首选）：取更多会让**同前段的变体**占满候选窗——后段有 4 个重码时，
+    /// 前段取 2 就是 8 条，其中后 4 条共享一个用户多半不想要的前段。
+    ///
+    /// 这个旋钮存在的意义是让上面那条取舍**可被实测推翻**，不是给终端用户调的。
+    /// 0 与缺省等同于 1。
+    pub split_front_candidates: usize,
+    /// 逆切分的触发档。见 [`SplitTrigger`]。
+    pub split_trigger: SplitTrigger,
 }
 
 /// 码表引擎
@@ -116,6 +189,26 @@ impl CodeTableEngine {
         let sentence = opts
             .sentence_input
             .then(|| super::sentence::CodeSentenceDecoder::new(max_code_length));
+        // 逆切分的切点由 `max_code_length` 唯一决定（见 `split_at`），奇数/过短码长下无解。
+        // **就地关掉并告警**，而不是留给 `split_at()` 每次按键静默返回 None：配置者只会
+        // 观察到「开了没反应」，拿不到任何线索。
+        if opts.split_input && !(max_code_length >= 4 && max_code_length.is_multiple_of(2)) {
+            tracing::warn!(
+                max_code_length,
+                "[engine.codetable] split_input 需要偶数且 ≥4 的 max_code_length（切点取其一半），\
+                 本方案码长不满足，逆切分已关闭"
+            );
+            opts.split_input = false;
+        }
+        // 两者占的区间本不重叠（`==` vs `>` 码长），可以同开；但整句会让**顶码整体让位**
+        // （见 `handle_top_code`），而逆切分的「后码顶首选上屏」正是靠顶码实现的。
+        // 功能仍可用，只是少了那一条交互 —— 说一句，别让人以为是 bug。
+        if opts.split_input && opts.sentence_input {
+            tracing::warn!(
+                "[engine.codetable] split_input 与 sentence_input 同时开启：整句会让顶码整体让位，\
+                 逆切分候选的「继续打字母顶首选上屏」将不生效（候选窗选词不受影响）"
+            );
+        }
         Self {
             max_code_length,
             opts,
@@ -242,6 +335,107 @@ impl CodeTableEngine {
             }),
             split,
         )
+    }
+
+    /// 逆切分的切点：`max_code_length / 2`，仅当码长为**偶数且 ≥ 4** 时有效。
+    ///
+    /// **不做成配置项**：切点是「这张码表的二简在哪里结束」，由 `max_code_length` 唯一决定。
+    /// 多给一个自由参数只会制造 `max_code_length = 4, split_at = 3` 这种配出来不报错、
+    /// 打起来全是错的状态。奇数/过短码长下返回 `None`（功能整体不生效，构建期已告警）。
+    fn split_at(&self) -> Option<usize> {
+        (self.max_code_length >= 4 && self.max_code_length.is_multiple_of(2))
+            .then_some(self.max_code_length / 2)
+    }
+
+    /// 逆切分：恰好满码长的空码串切成两段，各查一次词典后拼接成组合候选。
+    ///
+    /// # 四道门槛
+    ///
+    /// 1. **功能开启**（`opts.split_input`）且**切点有效**（见 [`Self::split_at`]）；
+    /// 2. **恰好**满码长 —— 超码长那一段归顶码与整句（两者的闸门都在 `>` 上，
+    ///    本功能刻意只占 `==` 这一格，与它们零重叠、不必和谁让位）；未满码时还有更长
+    ///    后继可打，切分等于替用户提前认定「这串到此为止」（整句门槛的注释记着真机反例：
+    ///    `aaw`（本意 `aawt`→「工作」）会被读成「啊啊我」）；
+    /// 3. **`split_trigger` 定的空度**（[`SplitTrigger::allows`]）；
+    /// 4. **两段都查得到** —— 切一半没有意义，半截结果只会让用户以为词库缺条目。
+    ///
+    /// # 排序
+    ///
+    /// `weight` 取两段的**较小值**：组合的可信度不高于最弱的那一段。前段恒取首选时
+    /// （默认）这等价于「按后段权重序」，与构造序一致；`natural_order` 填构造序作为
+    /// 同权重时的末级键，`base_sort = natural` 的方案也因此拿到同一个序。
+    ///
+    /// # 返回
+    ///
+    /// `(组合候选, 编码单元切分串)`。切分串给组合区显示（`hf'kn`，见
+    /// `ConvertResult::preedit_codetable`），无产出时为空串。
+    fn decode_split(&self, input: &str, candidates: &[Candidate]) -> (Vec<Candidate>, String) {
+        let none = (Vec::new(), String::new());
+        if !self.opts.split_input {
+            return none;
+        }
+        let Some(split_at) = self.split_at() else {
+            return none;
+        };
+        let chars: Vec<char> = input.chars().collect();
+        if chars.len() != self.max_code_length {
+            return none;
+        }
+        if !self.opts.split_trigger.allows(candidates) {
+            return none;
+        }
+
+        let front_code: String = chars[..split_at].iter().collect();
+        let back_code: String = chars[split_at..].iter().collect();
+        // ⚠️ **不得按 `c.code == 段码` 过滤**：`DictManager::search` 走的是
+        // `CompositeDict::merge_search(.., Query::Exact)`，查询本身已经是精确的、不会混进
+        // 前缀候选；但同一条 `merge_search` 在跨层合并时会「同 text 取最短码」——「能」若
+        // 同时在 `kn` 与某个一简位上，返回条目的 `code` 会被换成那个更短的码。
+        // **查询口径与 code 字段不是同一件事**，按 code 过滤会误杀正确的二简候选。
+        // 本函数只读段候选的 `text` 与 `weight`。
+        let front = self
+            .dm
+            .search(&front_code, self.opts.split_front_candidates.max(1));
+        if front.is_empty() {
+            return none;
+        }
+        let back = self.dm.search(&back_code, SPLIT_BACK_LIMIT);
+        if back.is_empty() {
+            return none;
+        }
+
+        let mut out = Vec::with_capacity(front.len() * back.len());
+        for f in &front {
+            for b in &back {
+                out.push(Candidate {
+                    text: format!("{}{}", f.text, b.text),
+                    // 整串：`decide_auto_commit` 的判据是「恰一个 `code == input` 的候选」，
+                    // 后段唯一时它恰好成立 ⇒ 原帖「前后都唯一即自动上屏」零额外判据地实现。
+                    code: input.to_string(),
+                    weight: f.weight.min(b.weight),
+                    natural_order: out.len() as i32,
+                    source: CandidateSource::CodeTable,
+                    is_split_composed: true,
+                    // 词库里没有以它为整体的词条 —— 自动造词据此判「值不值得学」。
+                    // 打过一次下次 `hfkn` 直接有，切分从此不必再算。
+                    is_synthesized: true,
+                    // ⚠️ **不置 `is_exact_code`**：它不是词库里的精确解。置位会让它混进
+                    // `cmp_exact_first` 的精确档，越过真正的精确候选（`no_exact` 档下可见）。
+                    is_exact_code: false,
+                    // ⚠️ `consumed_length` 留 0（= 消费整串）：组合候选本就是一个整体，
+                    // 没有分段上屏的需求，故不打破全仓「码表候选 consumed_length 恒 0」的约定
+                    // （同整句，见 `decode_sentence`）。
+                    consumed_length: 0,
+                    // ⚠️ `boundary` 也留 0：该字段是**音节**边界、域是拼音，码表码没有音节
+                    // 语义。填编码单元的切分位会让组合候选被自动造词学进用户词库时带一份
+                    // 假的音节真值。切分显示另有出口（`preedit_codetable`）。
+                    boundary: 0,
+                    ..Default::default()
+                });
+            }
+        }
+        let split = format!("{front_code}{SPLIT_SEPARATOR}{back_code}");
+        (out, split)
     }
 
     /// 整句解的**切分分段**（诊断/探针用）。`None` = 未开启整句或解不出。
@@ -457,6 +651,22 @@ impl Engine for CodeTableEngine {
         if let Some(c) = sentence {
             candidates.insert(0, c);
         }
+
+        // 逆切分：**恰好**满码长且空码时，把这串码切成两段、各查词典后拼接成组合候选。
+        //
+        // **append 而非 `insert(0)`**：默认档（`SplitTrigger::Empty`）下列表本就是空的，
+        // append 即全部；`NoExact` 档下则自然排在既有候选之后。两档共用一套代码、零分支。
+        // 跨过协调器重排后的沉底由 `candidate_display_order` 的 `is_split_composed` 层保证。
+        //
+        // ⚠️ 必须在 `truncate` **之前**：`handle_top_code` 以 `convert(prefix, 1)` 取顶码
+        // 首选（原帖「后码顶首选上屏」那条规则靠它成立），放到 truncate 之后会让那次调用
+        // 拿回超过 limit 条候选，破坏 `max_candidates` 契约。
+        //
+        // ⚠️ 也必须在下面 `is_empty` 求值**之前**：`should_clear`（满码空码清空）读的正是
+        // 那个 `is_empty`。写反了就是「切分出候选了但缓冲被清空」——用户看到候选一闪即逝。
+        let (split, split_code) = self.decode_split(input, &candidates);
+        candidates.extend(split);
+
         // 精确匹配已居首，截断不会再把它挤出配额（此前需一次临时分区保护：单字母等短输入下
         // 前缀候选可达数百，纯按基础序截断会让低权重简码字丢失，此后协调器再排也找不回）。
         candidates.truncate(max_candidates);
@@ -501,7 +711,13 @@ impl Engine for CodeTableEngine {
             commit_text,
             should_clear,
             completion_hints,
-            preedit_codetable: sentence_split,
+            // 整句与逆切分的闸门互斥（`> max_code_length` vs `==`），两个切分串不可能同时
+            // 非空；真撞上时以整句为准——超码长那一格本就是它的。
+            preedit_codetable: if sentence_split.is_empty() {
+                split_code
+            } else {
+                sentence_split
+            },
             ..Default::default()
         })
     }
@@ -1359,5 +1575,314 @@ mod tests {
             r.candidates.first().map(|c| c.text.as_str()),
             Some("皮工作")
         );
+    }
+
+    // ───────────────────────── 逆切分（split_input） ─────────────────────────
+
+    /// 音形结构的缩微模型：二简字/词 + 一个四码精确条目（对照组）。
+    ///
+    /// 取自论坛 t11 的原例 `hf'kn` →「很可能」，后段 `kn` 故意留两个重码。
+    ///
+    /// ⚠️ **不在这里放 `hfkn` 的五码扩展**：那会给 `hfkn` 添一条前缀候选，默认档的
+    /// 「有候选就不切」随即把所有基本盘用例挡掉。需要它的只有 `no_exact` 档那一条用例，
+    /// 由该用例自己经 `extra` 加入（[`PREFIX_ONLY_ENTRY`]）。
+    const SPLIT_ENTRIES: &[(&str, &str, i32)] = &[
+        ("hf", "很可", 900),
+        ("kn", "能", 800),
+        ("kn", "难", 500),
+        ("xt", "学", 700),
+        ("up", "双拼", 600),
+        // 四码精确条目：默认档下「有候选就不切」的对照组。
+        ("aaaa", "工", 100),
+    ];
+
+    /// 让 `hfkn` **有前缀候选却仍无精确解** —— 构造 `no_exact` 档场景的唯一条目。
+    const PREFIX_ONLY_ENTRY: (&str, &str, i32) = ("hfknq", "甲", 1000);
+
+    fn split_engine(extra: &[(&str, &str, i32)], opts: CommitOptions) -> CodeTableEngine {
+        let mut entries: Vec<(&str, &str, i32)> = SPLIT_ENTRIES.to_vec();
+        entries.extend_from_slice(extra);
+        engine_opts(&entries, opts)
+    }
+
+    fn split_opts() -> CommitOptions {
+        CommitOptions {
+            split_input: true,
+            ..Default::default()
+        }
+    }
+
+    fn texts(r: &ConvertResult) -> Vec<&str> {
+        r.candidates.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// 基本盘：满码长空码 → 前段首选 × 后段列举，按后段权重序。
+    #[test]
+    fn split_composes_two_segments_on_full_length_empty_code() {
+        let e = split_engine(&[], split_opts());
+        let r = e.convert("hfkn", 50).unwrap();
+        assert_eq!(
+            texts(&r),
+            vec!["很可能", "很可难"],
+            "hf(很可) × kn(能/难)，后段按权重序"
+        );
+        assert!(
+            r.candidates.iter().all(|c| c.is_split_composed),
+            "组合候选须带 is_split_composed（协调器的组合区判据与沉底层都读它）"
+        );
+        assert!(!r.is_empty, "产出了候选，is_empty 必须为假");
+    }
+
+    /// ★ 组合候选的四条字段约定，每一条都有下游依赖，改动即回归。
+    #[test]
+    fn split_candidate_field_contract() {
+        let e = split_engine(&[], split_opts());
+        let r = e.convert("hfkn", 50).unwrap();
+        let c = r.candidates.first().expect("应有组合候选");
+
+        assert_eq!(
+            c.code, "hfkn",
+            "code 须是整串 —— decide_auto_commit 据此认精确"
+        );
+        assert_eq!(
+            c.consumed_length, 0,
+            "消费整串：全仓「码表候选 consumed_length 恒 0」的约定不得由本功能打破"
+        );
+        assert_eq!(
+            c.boundary, 0,
+            "boundary 是音节边界（拼音域），码表无音节语义；填切分位会让自动造词学到假真值"
+        );
+        assert!(
+            !c.is_exact_code,
+            "它不是词库里的精确解，置位会让它混进 cmp_exact_first 的精确档"
+        );
+        assert!(
+            c.is_synthesized,
+            "词库无此整体词条 ⇒ 自动造词据此判「值得学」，打过一次下次直接有"
+        );
+        assert_eq!(c.source, CandidateSource::CodeTable);
+    }
+
+    /// 组合区显示 `hf'kn`，与整句、拼音音节共用同一个分隔符。
+    #[test]
+    fn split_fills_preedit_codetable() {
+        let e = split_engine(&[], split_opts());
+        let r = e.convert("hfkn", 50).unwrap();
+        assert_eq!(r.preedit_codetable, format!("hf{SEPS}kn"));
+        // 对照：没切分时不得留下切分串，否则组合区会显示一个不对应任何候选的切法。
+        let r2 = e.convert("aaaa", 50).unwrap();
+        assert!(r2.preedit_codetable.is_empty());
+    }
+
+    /// 关闭时**零行为变化** —— 这是本功能能默认关着发布的全部依据。
+    #[test]
+    fn split_disabled_changes_nothing() {
+        let e = split_engine(&[], CommitOptions::default());
+        let r = e.convert("hfkn", 50).unwrap();
+        assert!(
+            r.candidates.is_empty() && r.is_empty,
+            "关闭时满码空码仍是空"
+        );
+        assert!(r.preedit_codetable.is_empty());
+    }
+
+    /// 闸门只占 `== max_code_length` 这一格：未满码、超码长都不切。
+    ///
+    /// 超码长那一格归顶码与整句（两者的闸门都在 `>` 上）；未满码时还有更长后继可打，
+    /// 切分等于替用户提前认定「这串到此为止」。
+    #[test]
+    fn split_only_at_exactly_full_length() {
+        let e = split_engine(&[], split_opts());
+
+        let short = e.convert("hfk", 50).unwrap();
+        assert!(
+            !short.candidates.iter().any(|c| c.is_split_composed),
+            "3 码（未满码）不得切分，实际: {:?}",
+            texts(&short)
+        );
+
+        let long = e.convert("hfknx", 50).unwrap();
+        assert!(
+            !long.candidates.iter().any(|c| c.is_split_composed),
+            "5 码（超码长）不得切分，那是顶码与整句的区间，实际: {:?}",
+            texts(&long)
+        );
+    }
+
+    /// 两段缺一不产：切一半的结果只会让用户以为词库缺条目。
+    #[test]
+    fn split_needs_both_segments() {
+        let e = split_engine(&[], split_opts());
+        for input in ["hfzz", "zzkn", "zzyy"] {
+            let r = e.convert(input, 50).unwrap();
+            assert!(
+                r.candidates.is_empty(),
+                "{input}：有一段查不到就整体不产出，实际: {:?}",
+                texts(&r)
+            );
+        }
+    }
+
+    /// 默认档（`Empty`）**不抢任何现有候选**：有精确解时一条切分候选都不出。
+    #[test]
+    fn split_empty_trigger_yields_to_existing_candidates() {
+        let e = split_engine(&[], split_opts());
+        let r = e.convert("aaaa", 50).unwrap();
+        assert_eq!(texts(&r), vec!["工"], "有精确候选时默认档不切分");
+    }
+
+    /// `no_exact` 档：无精确解即切，但切分候选**排在既有候选之后**。
+    ///
+    /// 反向对照同在本用例里 —— 同一串码在默认档下必须一条都不产，
+    /// 缺了它，一个「两档都照切」的实现同样能让上半段变绿。
+    #[test]
+    fn split_no_exact_trigger_appends_after_existing() {
+        // `hfkn` 无精确解，但 `hfknq`（甲）是它的前缀扩展 ⇒ 有候选、无精确。
+        let e = split_engine(
+            &[PREFIX_ONLY_ENTRY],
+            CommitOptions {
+                split_trigger: SplitTrigger::NoExact,
+                ..split_opts()
+            },
+        );
+        let r = e.convert("hfkn", 50).unwrap();
+        assert_eq!(
+            texts(&r),
+            vec!["甲", "很可能", "很可难"],
+            "no_exact 档：切分候选 append 在既有候选之后"
+        );
+
+        let default_trigger = split_engine(&[PREFIX_ONLY_ENTRY], split_opts());
+        let r2 = default_trigger.convert("hfkn", 50).unwrap();
+        assert_eq!(
+            texts(&r2),
+            vec!["甲"],
+            "★ 反向对照：默认档下有候选就不切，一条组合都不该出现"
+        );
+    }
+
+    /// 原帖规则一/二：前后两段都唯一（或前段有重码但恒取首选）→ 适配四码唯一自动上屏。
+    ///
+    /// 靠的是既有 `decide_auto_commit` 的「恰一个 `code == input` 的候选」判据，
+    /// 本功能**没有**为此新增任何上屏判据。
+    #[test]
+    fn split_unique_composition_triggers_auto_commit() {
+        let e = split_engine(
+            &[],
+            CommitOptions {
+                auto_commit_at_full: true,
+                ..split_opts()
+            },
+        );
+        let r = e.convert("xtup", 50).unwrap();
+        assert!(r.should_commit, "xt(学) × up(双拼) 唯一 ⇒ 应自动上屏");
+        assert_eq!(r.commit_text, "学双拼");
+    }
+
+    /// 原帖规则三前半：后段有重码 → 不自动上屏，列出候选让用户选。
+    #[test]
+    fn split_ambiguous_back_segment_blocks_auto_commit() {
+        let e = split_engine(
+            &[],
+            CommitOptions {
+                auto_commit_at_full: true,
+                ..split_opts()
+            },
+        );
+        let r = e.convert("hfkn", 50).unwrap();
+        assert!(!r.should_commit, "后段 kn 有重码 ⇒ 不得自动上屏");
+        assert_eq!(texts(&r), vec!["很可能", "很可难"]);
+    }
+
+    /// ★ 原帖规则三后半：「想要①就直接往后打」—— 第 5 个字母触发顶码，顶的是切分首选。
+    ///
+    /// 这条能成立是因为 `handle_top_code` 取首选走的是 `self.convert(&prefix, 1)`，
+    /// 而 prefix 恰好是满码长 ⇒ 切分在那次 convert 里照常触发。**没有第四条上屏通路**。
+    #[test]
+    fn split_top_code_commits_first_composition() {
+        use crate::engine::Engine;
+        let e = split_engine(
+            &[],
+            CommitOptions {
+                top_code_commit: true,
+                ..split_opts()
+            },
+        );
+        assert_eq!(
+            e.handle_top_code("hfknx"),
+            Some(("很可能".to_string(), "x".to_string())),
+            "顶码须顶出切分首选，余码 x 返回续打"
+        );
+    }
+
+    /// `split_front_candidates = 2`：前段也列举，得到原帖配图那种效果。
+    ///
+    /// 顺序是**前段外层、后段内层** —— 同前段的组合聚在一起，而不是按权重全局交错。
+    #[test]
+    fn split_front_candidates_expands_combinations() {
+        let e = split_engine(
+            &[("hf", "困", 300)],
+            CommitOptions {
+                split_front_candidates: 2,
+                ..split_opts()
+            },
+        );
+        let r = e.convert("hfkn", 50).unwrap();
+        assert_eq!(
+            texts(&r),
+            vec!["很可能", "很可难", "困能", "困难"],
+            "前段取 2 条时按「前段外层 × 后段内层」展开"
+        );
+    }
+
+    /// 切点由 `max_code_length` 唯一决定，奇数/过短码长下功能整体关闭（构建期已告警）。
+    #[test]
+    fn split_disabled_on_unsupported_code_length() {
+        let mut entries: Vec<(&str, &str, i32)> = SPLIT_ENTRIES.to_vec();
+        entries.push(PREFIX_ONLY_ENTRY);
+        let mut d = CodetableDict::empty();
+        for (i, (code, text, w)) in entries.iter().enumerate() {
+            d.merge_single(code.to_string(), text.to_string(), *w, i as i32);
+        }
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(SystemDictLayer::new(
+            CachedDict::Memory(d),
+            "codetable-system",
+        )));
+        // 码长 5：切点 5/2 无意义 ⇒ `new` 就地关掉。
+        let e = CodeTableEngine::new(5, split_opts(), Arc::new(dm));
+        let r = e.convert("hfknq", 50).unwrap();
+        assert_eq!(
+            texts(&r),
+            vec!["甲"],
+            "奇数码长下不得切分（只该有 hfknq 的精确解）"
+        );
+    }
+
+    /// 逆切分与整句**占不同区间**，可以同开、互不干扰。
+    #[test]
+    fn split_and_sentence_cover_different_ranges() {
+        let mut entries: Vec<(&str, &str, i32)> = SPLIT_ENTRIES.to_vec();
+        entries.extend_from_slice(SENTENCE_ENTRIES);
+        let e = engine_opts(
+            &entries,
+            CommitOptions {
+                split_input: true,
+                sentence_input: true,
+                ..Default::default()
+            },
+        );
+
+        // 4 码（== 码长）→ 逆切分
+        let r4 = e.convert("hfkn", 50).unwrap();
+        let c4 = r4.candidates.first().expect("4 码应有组合候选");
+        assert!(c4.is_split_composed && !c4.is_sentence, "4 码那格归逆切分");
+        assert_eq!(c4.text, "很可能");
+
+        // 8 码（> 码长）→ 整句
+        let r8 = e.convert("aawtaawt", 50).unwrap();
+        let c8 = r8.candidates.first().expect("8 码应有整句候选");
+        assert!(c8.is_sentence && !c8.is_split_composed, "超码长那格归整句");
+        assert_eq!(c8.text, "工作工作");
     }
 }
