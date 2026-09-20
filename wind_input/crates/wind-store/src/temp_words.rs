@@ -191,8 +191,18 @@ impl Store {
         })
     }
 
-    /// 淘汰：保留权重最高的 max_keep 条，删除其余（按 weight 升序淘汰最低的）。
+    /// 淘汰：保留 max_keep 条，删除其余（按 `(count, created_at, weight)` 升序淘汰）。
     /// 单写事务完成（先在事务内收集快照再删除，无 TOCTOU）。返回淘汰条数。
+    ///
+    /// **排序键必须以 `count` 打头**：自动造词写入的 weight 恒为 `LEARN_ADD_WEIGHT`
+    /// （协调器 `coordinator.rs`），只按 weight 排会让整库并列，实际顺序退化成 redb 的
+    /// key 字典序 —— 用过 500 次的词与造出来没用过的词被淘汰的概率一样。`count` 是真正的
+    /// 使用计数：造词写入记 1，之后每次选中该临时词由 `handle_candidate` 再 `learn_temp_word`
+    /// 一次（count++）。
+    ///
+    /// 次键取 `created_at` 而非 FREQ 表的 `last_used`，**是为了不退化**：淘汰的主力是
+    /// `count == 1`（造出来从未被选中）那批，它们在 FREQ 里根本没有记录，跨表读只会回落到
+    /// 同一个默认值、重新并列。`created_at` 对每条都是确定值，先淘汰最老的没用过的词。
     pub fn evict_temp_words(&self, schema: &str, max_keep: usize) -> anyhow::Result<usize> {
         let scan = format!("{schema}\u{0}");
         self.with_db(|db| {
@@ -200,26 +210,24 @@ impl Store {
             let mut deleted = 0usize;
             {
                 let mut t = txn.open_table(TEMP_WORDS)?;
-                // 1) 事务内收集本方案全部 (key, weight, boundary)
+                // 1) 事务内收集本方案全部 (key, count, created_at, weight, boundary)
                 //    boundary 一并带出：删索引要按**删除前**的边界算分组键（见 abbrev_index::remove）。
-                let mut all: Vec<(String, i32, u64)> = Vec::new();
+                let mut all: Vec<(String, u32, i64, i32, u64)> = Vec::new();
                 for item in t.range(scan.as_str()..)? {
                     let (k, v) = item?;
                     let key = k.value();
                     if !key.starts_with(&scan) {
                         break;
                     }
-                    let (w, b) = dec_val(v.value())
-                        .map(|(w, _, _, b)| (w, b))
-                        .unwrap_or((0, 0));
-                    all.push((key.to_string(), w, b));
+                    let (w, c, ca, b) = dec_val(v.value()).unwrap_or((0, 0, 0, 0));
+                    all.push((key.to_string(), c, ca, w, b));
                 }
-                // 2) 超出 max_keep 则删除权重最低的若干条
+                // 2) 超出 max_keep 则删除排序最靠前的若干条
                 if all.len() > max_keep {
-                    all.sort_by_key(|(_, w, _)| *w); // 升序：最低在前
+                    all.sort_by_key(|(_, c, ca, w, _)| (*c, *ca, *w)); // 升序：最该淘汰的在前
                     let to_delete = all.len() - max_keep;
                     let mut idx = txn.open_table(TEMP_ABBREV)?;
-                    for (key, _, b) in all.iter().take(to_delete) {
+                    for (key, _, _, _, b) in all.iter().take(to_delete) {
                         t.remove(key.as_str())?;
                         if let Some((_, code, text)) = crate::user_words::split_key(key) {
                             abbrev_index::remove(&mut idx, schema, code, text, *b)?;
@@ -742,6 +750,64 @@ mod tests {
             100,
             "计数不再驱动权重变化"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **用过的词不能和没用过的词一起被随机淘汰。**
+    ///
+    /// 自动造词写入的 weight 恒为 `LEARN_ADD_WEIGHT`，真实库里整片并列；只按 weight 排时
+    /// 实际顺序退化成 redb 的 key 字典序。此处三条词权重故意全同、且**字典序与使用次数相反**
+    /// （用得最多的 code 是 "a"，排字典序第一个）—— 排序键一旦退回纯 weight，被删的头两条
+    /// 就是 a/b，用了 3 次的「常用」当场消失。
+    #[test]
+    fn evict_keeps_the_used_word_when_weights_are_all_equal() {
+        let path = tmp("wind_tw_evict_count.redb");
+        let s = Store::open(&path).unwrap();
+        for _ in 0..3 {
+            s.learn_temp_word("wb", "a", "常用", 800, 0).unwrap(); // count=3
+        }
+        s.learn_temp_word("wb", "b", "没用过一", 800, 0).unwrap(); // count=1
+        s.learn_temp_word("wb", "c", "没用过二", 800, 0).unwrap(); // count=1
+        assert_eq!(s.evict_temp_words("wb", 1).unwrap(), 2);
+        assert!(
+            !s.get_temp_words("wb", "a").unwrap().is_empty(),
+            "count=3 的词必须留下"
+        );
+        assert!(s.get_temp_words("wb", "b").unwrap().is_empty());
+        assert!(s.get_temp_words("wb", "c").unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// count 与 weight 都相同时按 `created_at` 升序淘汰（先造的先走）。
+    ///
+    /// 这一维覆盖的正是淘汰的主力人群——自动造词产出的 `count=1` + `weight=800` 那批，
+    /// 它们在前两个键上全等，只剩 `created_at` 能定序。`learn_temp_word` 取的是当下秒数、
+    /// 且对已存在记录沿用旧值，故此处直接写表构造隔秒的两条。
+    #[test]
+    fn evict_falls_back_to_created_at_when_count_and_weight_tie() {
+        let path = tmp("wind_tw_evict_ca.redb");
+        let s = Store::open(&path).unwrap();
+        // 该被淘汰的是 created_at 更早的 zz_old，而它的 key 字典序排在后面：排序键一旦
+        // 漏掉 created_at，稳定排序会保持 range 的字典序，删掉的就变成 aa_new。
+        s.with_db(|db| {
+            let txn = db.begin_write()?;
+            {
+                let mut t = txn.open_table(TEMP_WORDS)?;
+                for (code, text, ca) in [("aa_new", "新造", 100i64), ("zz_old", "老词", 50)] {
+                    let key = enc_key("wb", code, text);
+                    t.insert(key.as_str(), enc_val(800, 1, ca, 0).as_slice())?;
+                }
+            }
+            txn.commit()?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(s.evict_temp_words("wb", 1).unwrap(), 1);
+        assert!(
+            s.get_temp_words("wb", "zz_old").unwrap().is_empty(),
+            "created_at 更早的那条该被淘汰"
+        );
+        assert!(!s.get_temp_words("wb", "aa_new").unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 
