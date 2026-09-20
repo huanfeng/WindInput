@@ -1236,7 +1236,9 @@ impl MessageHandler for Coordinator {
         // （判据在 `symbol_buffer_key_free`）。故必须排在它之后——同一个字符两边都配时，
         // 「真码元」的语义（参与码长/顶码判定）优先。
         //
-        // ⚠️ 出厂 `-` 在本闸门下**恒不改变已有行为**，除了「首页按下空转吞键」那一格。
+        // ⚠️ 出厂 `-` 改变的只有「有候选 + 没翻过页」那一格（原本是空转吞键）。**无候选那格
+        // 刻意不碰** —— 那里 `-` 原本会落标点臂甩掉废码、并吃全角与自定义标点映射，都是
+        // 有实际行为的，判据见 `symbol_buffer_key_free` 的最后一问。
         if let Some(act) = self.try_symbol_buffer_gate(&mut state, data) {
             return act;
         }

@@ -5102,8 +5102,13 @@ impl Coordinator {
     /// （`[engine.codetable] input_chars`）时，它是合法编码的一部分，该照常查引擎、
     /// 照常参与顶码。本谓词只管本闸门放进来的那类字面符号。
     ///
-    /// 隔音符 `'` 天然不在此列——它不进 `buffer_symbol_chars`，走的是
-    /// `manual_separator_key` 那条独立通路，`sun'an` 仍是合法拼音输入。
+    /// ⚠️ 分隔符那一条同样不能省，而且是**反着**踩出来的：`symbol_buffer_key_free` 已经
+    /// 让位给音节分隔符 / 英文分词符了，于是 `'` 是经**那条通路**进的缓冲——可本谓词只问
+    /// 「这个字符在不在白名单里」，照样把它认成自己放进来的，`xi'an` 的候选于是被清空。
+    /// 让位与识别必须用同一套判据，否则「让了位」只是让到一半。
+    ///
+    /// 判据落在**字符**上（`char_to_main_vk` 反查回键）而不是记一个「这一帧是谁放进来的」
+    /// 标志位：缓冲会被退格、光标中插改写，来源标志迟早与内容对不上，而字符本身不会。
     pub(crate) fn buffer_has_literal_symbol(&self, state: &State) -> bool {
         let bundle = self.rt();
         let set = &bundle.config.input.buffer_symbol_chars;
@@ -5113,12 +5118,29 @@ impl Coordinator {
         state
             .input_buffer
             .chars()
-            .any(|c| set.contains(c) && !self.engine_mgr.active_is_code_char(c))
+            .any(|c| set.contains(c) && self.char_is_literal_symbol(c))
+    }
+
+    /// 缓冲里的这个字符，是[`Self::try_symbol_buffer_gate`] 放进来的那一类吗。
+    ///
+    /// 两条排除各有来历：
+    /// - **真码元**（方案 `input_chars`）是合法编码的一部分，该照常查引擎、照常参与顶码；
+    /// - **音节分隔符 / 英文分词符**根本不经本闸门（`symbol_buffer_key_free` 给它们让了位），
+    ///   把它们算进来等于把自己让出去的那条路又堵死一次。
+    fn char_is_literal_symbol(&self, c: char) -> bool {
+        if self.engine_mgr.active_is_code_char(c) {
+            return false;
+        }
+        match char_to_main_vk(c) {
+            Some(vk) => !self.manual_separator_key(vk) && !self.english_phrase_separator_key(vk),
+            // 反查不到键的字符只可能来自本闸门（它的入口就是 `printable_char`）。
+            None => true,
+        }
     }
 
     /// 这个键此刻有没有别的活身份——有就让位，[`Self::try_symbol_buffer_gate`] 的唯一判据。
     ///
-    /// 两问覆盖 [`Self::code_char_conflicts`] 的 owners 链前四项，**两处必须同增同减**：
+    /// 四问覆盖 [`Self::code_char_conflicts`] 的 owners 链，**两处必须同增同减**：
     /// 那边漏一臂是「本该告警却没告警」，这边漏一臂是「本该让位却夺了键」——后者用户
     /// 立刻可见，且会被归因成「翻页键忽然不灵了」。
     ///
@@ -5128,16 +5150,37 @@ impl Coordinator {
     /// 第一问已经拦下。那边分开列是因为要给用户报出**是哪个功能**占了键，这里只需要
     /// 知道「有没有人占」。⚠️ 哪天它们改成独立取表，这里就得跟着补问。
     ///
-    /// # 唯一的例外：没翻过页的「上一页」
+    /// # 两张不经会话表的表也要问
     ///
-    /// 那一格本就是空转——`page_prev` 在 `current_page == 0` 时返回 false，而
-    /// [`Self::apply_session_action`] 末尾无条件 `Consumed`，于是按下什么都不发生。
-    /// 把这一格让给字符输入是零损失的。
+    /// 音节分隔符（`'` / 反引号）与数字选词（硬编码的 `VK_1..=VK_9` 臂）都不走
+    /// `session_actions`，上面两问一个都查不到，而它们的消费点全排在本闸门之后。
+    /// 不显式问一句，用户照文档的邀请往 `buffer_symbol_chars` 里加 `'` 就会让
+    /// `xi'an` 彻底没有候选，加数字就会废掉 1-9 选词，且都**无声无息**。
+    ///
+    /// 分隔符那条尤其阴：`manual_separator_key` 的 `auto` 档只在「`'` 未被占作选词键
+    /// **且**未被 `[key_actions]` 绑定」时才挑中 `'`——那恰好是上面两问的补集，于是
+    /// 「它当上了分隔符」与「本闸门判它空闲」是同一个不等式，必撞。
+    ///
+    /// # 唯一的例外：没翻过页的「上一页」，且**此刻有候选**
+    ///
+    /// 有候选时那一格确是空转——`page_prev` 在 `current_page == 0` 时返回 false，而
+    /// [`Self::apply_session_action`] 末尾无条件 `Consumed`，按下什么都不发生。
     ///
     /// 判据取 `state.paged`（这批候选**翻过页没有**）而不是 `current_page == 0`：
     /// 从第 2 页翻回第 1 页的用户正在翻页，此刻 `-` 突然变回字符会让人当场打错字。
     /// 候选一重装 `paged` 即清零（[`Self::reset_candidate_view`]），所以「打一串码、
     /// 翻过页、再接着打字母」之后的那个 `-` 仍然是字符。
+    ///
+    /// ★ **「有候选」这个前提不能省**，它是本函数最后一问。无候选时导航类动作被
+    /// `SessionAction::requires_candidates` 挡在 `apply_session_action` 门外，**键根本
+    /// 不会被吞**，而是继续往下走三条各有行为的通路：`try_z_fallback`（`z_key_action`
+    /// 配成临英/mix 时 `z-` 要夺取残余码）、标点臂按 `punct_on_empty_behavior` 甩掉废码
+    /// （出厂 `clear`，那是用户打错码时的退出口）、以及标点臂里的全角与自定义标点映射。
+    /// 把这一格也夺过来等于一次废掉三条既有行为，而它们都不是「按下没反应」。
+    ///
+    /// 例外的例外：缓冲里**已经有**本闸门放进来的符号时照收不误。那一串早已不是本方案
+    /// 的编码（候选因此恒空，见 [`Self::buffer_has_literal_symbol`]），上面三条通路对它
+    /// 要么无从谈起，要么反而有害——标点臂会把用户打了一半的 `e-mail-addr` 整串丢掉。
     ///
     /// # 「下一页」刻意不给这个待遇
     ///
@@ -5145,9 +5188,12 @@ impl Coordinator {
     /// 看更多 ⇒ 临时放宽检索范围）。把它判成空转会把那个功能整个砍掉，而 `=` 也不是
     /// 英文标识符字符，换不来什么。
     ///
-    /// ⚠️ 后三问**不带 shift**（那三个查询函数只按 VK 取表）。于是「无 shift 形态被占用、
-    /// 用户想用 shift 形态」时会保守地一并让位（`;` 是次选键 ⇒ `:` 也进不了缓冲）。
-    /// 出厂白名单只有 `-`，够不着这一格；真要放开得先给那三个查询补 shift 维度。
+    /// # shift
+    ///
+    /// 第一问**带** shift（`SessionKey::matches` 要求精确相等），所以 `;` 作为无 shift 的
+    /// 次选键挡不住 `:`；真正保守让位的是 `bound_action_for`，它没有 shift 维度，绑定键的
+    /// shift 形态会跟着一起让。这不构成缺口：选词键与以词定字键的两个消费点自带
+    /// `!shift` 守卫，shift 形态本就不归它们。
     fn symbol_buffer_key_free(&self, state: &State, key_code: u32, shift: bool) -> bool {
         match self.session_action_for(key_code, shift, true) {
             Some(wind_config::SessionAction::PagePrev) if !state.paged => {}
@@ -5161,7 +5207,20 @@ impl Coordinator {
         ) {
             return false;
         }
-        true
+        // ⚠️ 删掉这一问**不会有用例变红**——`char_is_literal_symbol` 那侧也排除了分隔符，
+        // 候选照样出得来。两处不是重复防御，是同一条规则的两面：这里管「`'` 走不走它自己
+        // 那条分隔符通路」（那条臂在本闸门之后，抢了就再也到不了），那里管「已经在缓冲里
+        // 的 `'` 算不算本闸门放进来的」。只留那一侧的话，`'` 会被当字面符号塞进缓冲，
+        // 缓冲内容碰巧一样、候选碰巧也一样，但它再不是分隔符了——引擎侧的硬边界语义
+        // （双拼的配对边界、`consumed_length` 的计入）会无声消失。
+        if self.manual_separator_key(key_code) || self.english_phrase_separator_key(key_code) {
+            return false;
+        }
+        if (keymap::VK_0..=keymap::VK_9).contains(&key_code) {
+            return false;
+        }
+        // 最后一问：这个键此刻**真的**空转吗（见上方 ★）。
+        self.buffer_has_literal_symbol(state) || !state.candidates.is_empty()
     }
 
     /// 码元字符集与既有按键功能的冲突清单：`(字符, 占用它的功能名)`，空 = 无冲突。

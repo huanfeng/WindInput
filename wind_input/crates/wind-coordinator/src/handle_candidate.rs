@@ -1993,7 +1993,24 @@ impl Coordinator {
             state.has_more = false;
             state.candidate_input = state.input_buffer.clone();
             state.candidate_limit = 0;
+            // ⚠️ 这一行是 `page_range` 那道 panic 的**唯一**防线：它只把 `end` 夹到
+            // `candidates.len()`，`start` 不夹。候选清空而 `current_page` 还停在 2 的话，
+            // `candidates[10..0]` 当场 panic，而 `notify_ui_update` 的推送路径切的是同一刀。
+            // 可达性不靠猜：把翻页键换成 PageUp/PageDown（`-` 于是没有会话身份）、翻到
+            // 第 2 页再按 `-` 就走到了。
             self.reset_candidate_view(state);
+            // ★ 不能就这么 return：`state.preedit` 在本函数开头只被置成**裸 `input_buffer`**
+            // （见上方 `state.preedit = state.input_buffer.clone()`），正常路径靠末尾这同一个
+            // 调用补上两件事——
+            //   1. 拼接 `committed_text`（拼音分步上屏留在组合区的已转换前缀）。少了它，
+            //      打 `nihao` 选「你」之后再按 `-`，组合区从「你hao」变成「hao-」,「你」凭空
+            //      消失；而 `composition_caret` 仍按含前缀算，给出的 caret 比文本还长。
+            //   2. `project_case` 把影子串里的大写投影回显示串。少了它，`X-Ray` 在组合区
+            //      显示成 `x-ray`，而回车上屏的是 `X-Ray`——正是本功能要根除的「看到的和
+            //      拿到的不一致」，换个维度复发。
+            // 候选已空、各 body 已清 ⇒ 它等价于 `committed_text + project_case(input_buffer)`，
+            // 走不到任何按高亮选形态的分支。
+            self.sync_preedit_to_highlight(state);
             return InputOutcome::Normal;
         }
         let limit = self.initial_candidate_limit(&state.input_buffer);

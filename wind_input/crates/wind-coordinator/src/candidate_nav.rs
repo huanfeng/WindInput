@@ -75,6 +75,17 @@ impl Coordinator {
     ///
     /// ⚠️ 不含 `try_relax_scope_on_page_end` 里那处**还原** `page_before`：还原不是翻页，
     /// 那一帧若置位会把「临拼下重建候选前本来就在第 0 页」误记成翻过页。
+    ///
+    /// # 五个写点里只有三个有独立效果，另两个是刻意的冗余
+    ///
+    /// 往**上**抬页码的三处（`move_down` 回卷 / `page_next` / 末页放宽）各自都能单独把
+    /// `paged` 从 false 翻成 true，删掉任一处都有用例变红。往**下**降的两处
+    /// （`move_up` 回卷 / `page_prev`）则永远只是重复置位——页码降得下去，就说明它先被
+    /// 抬上去过，那一帧已经置过了。
+    ///
+    /// 它们照样走这个函数，是因为**判据不该按写点分叉**：留两处裸赋值，下一个人照着最近
+    /// 的先例加第六个写点时，抄到的可能正是那两处。所以「删掉它们没有用例会红」是设计的
+    /// 一部分，不是漏测——别为此去补一条只能靠白盒读 `paged` 才写得出的用例。
     fn turn_page(state: &mut State, page: usize) {
         state.current_page = page;
         state.paged = true;
@@ -213,12 +224,19 @@ impl Coordinator {
         state.scope_relaxed = true;
         // 两条路径的候选重建函数不同：临拼走 overlay 的那套（主路径的 `build_candidates`
         // 读 `input_buffer`，在临拼下会构建出空列表）。
+        // `paged` 与 `current_page` 一起存还：下面 `update_temp_pinyin_candidates` 内部会经
+        // `reset_candidate_view` 把 `paged` 清成 false，只还原页码的话就留下
+        // 「`current_page > 0` 而 `paged == false`」这个错位，`turn_page` 文档里承诺的
+        // 「同生命周期」当场破功。今天无害（本状态位只有普通模式的符号闸门在读，而
+        // overlay 在按键分派处就 return 了），但不变式破一个口子就不再是不变式。
         let page_before = state.current_page;
+        let paged_before = state.paged;
         if in_temp {
             // ⚠️ `update_temp_pinyin_candidates` 会把 current_page/selected_index 归零，
             // 重建后须还原，否则用户翻到的位置丢失。
             self.update_temp_pinyin_candidates(state);
             state.current_page = page_before;
+            state.paged = paged_before;
         } else {
             let limit = state.candidate_limit;
             self.build_candidates(state, limit);
