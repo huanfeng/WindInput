@@ -2014,6 +2014,23 @@ impl CandidateWindow {
         })
     }
 
+    /// 单个翻页箭头占的宽度：基线（字号 + 左右 padding）与实测文本宽取大。
+    ///
+    /// **两个消费点必须共用这一份**：pager 装配处给按钮定宽，`pager_node_w()` 给同一行的
+    /// 编码/候选扣预留宽度。此前装配处 `fixed_w(arrow_w)`、预算处手写同一个公式，两份各自
+    /// 正确；一旦按文本撑开（主题可以把 prev_char 写成多字，schema 不限长）还各写各的，
+    /// 多字箭头下预算就比真实翻页栏窄，`pager_row_w` 的两个消费点都会算漏 —— 竖排内联
+    /// 编码那条的注释早写明「否则超长编码会把翻页栏顶出窗口右缘」，横排 water-filling 则
+    /// 是候选多分了宽度。
+    ///
+    /// 走图标档时实际宽恒为基线，这里仍按文本算 → 预算只会偏大几像素，不会算漏；为省这点
+    /// 去重算一遍 `arrow_icon` 的资产解析不划算。
+    /// `fs` 由调用处给出（字号是 `build_tree` 内按 base_fs + scale 算的，此处拿不到）。
+    fn arrow_slot_w(&self, txt: &str, base_w: f32, fs: f32, footer: &wind_theme::RvNode) -> f32 {
+        let style = Self::measure_style(fs, footer.font_weight, footer.font_family.as_deref());
+        base_w.max(self.text_renderer.measure(txt, &style).width)
+    }
+
     /// RvImage[] → ViewLayer[]（委托共享 theme_assets）。
     fn rv_layers(&self, layers: &[wind_theme::RvImage]) -> Vec<ViewLayer> {
         crate::theme_assets::rv_layers(&self.theme, layers, self.scale)
@@ -2439,8 +2456,15 @@ impl CandidateWindow {
             } else {
                 0.0
             };
-            // 两个箭头各 arrow_w = 字号 + 左右 padding（见下方 pager 构造）。
-            2.0 * (footer_fs + fpad.l + fpad.r) + num_w + fmargin.l + fmargin.r
+            // 两个箭头各占 arrow_slot_w（基线 = 字号 + 左右 padding，多字按文本撑开）——
+            // 与下方 pager 装配处共用同一份，不再手写第二遍公式。
+            let base = footer_fs + fpad.l + fpad.r;
+            let fb = &v.footer_bar;
+            self.arrow_slot_w(arrow_char(&fb.prev_char, "‹"), base, footer_fs, fb)
+                + self.arrow_slot_w(arrow_char(&fb.next_char, "›"), base, footer_fs, fb)
+                + num_w
+                + fmargin.l
+                + fmargin.r
         };
 
         // **独立**编码栏（`!preedit_embedded`）的文字预算：它是 root 这个 Column 的直接子节点、
@@ -2916,9 +2940,16 @@ impl CandidateWindow {
                             ),
                         // 文字箭头启用色：优先 footer_bar.text_color（清风主题设为 text_hint → 细小淡 ‹›），
                         // 未配置则回退 accent（旧主题保持原样）。
+                        //
+                        // 宽度走 arrow_slot_w：arrow_w 这个基线是按**一个字**算的，而主题可以
+                        // 把 prev_char 写成多字（schema 不限长），定死基线的话文本会盖到页码上
+                        // 或被裁掉、命中区也仍是单字宽。取实测文本宽与基线的大者，单字符一侧
+                        // 毫无变化（内置 ‹ › 及寻常符号都比基线窄）。
+                        // 仍用 fixed_w 而非 min_w：宽度就此确定，与 pager_node_w() 的预算逐像素
+                        // 对齐 —— 两处同源正是这个函数存在的理由。
                         None => View::leaf(txt, if enabled { arrow_on } else { disabled })
                             .font_size(footer_fs)
-                            .fixed_w(arrow_w)
+                            .fixed_w(self.arrow_slot_w(txt, arrow_w, footer_fs, &v.footer_bar))
                             .fixed_h(row_h)
                             .text_align(Align::Center),
                     };
@@ -4458,6 +4489,127 @@ mod pager_inline_tests {
         laid(w, false).measured_size().1
     }
 
+    /// 递归收集树上所有叶子文本。
+    fn texts(v: &View) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(t) = &v.text {
+            out.push(t.clone());
+        }
+        for c in &v.children {
+            out.extend(texts(c));
+        }
+        out
+    }
+
+    /// 主题写的翻页字符要真的画到树上。
+    ///
+    /// `arrow_char` 那条纯函数测试挡不住这个 —— 把装配处的 `prev_txt`/`next_txt` 改回字面量
+    /// `"‹"`/`"›"`，它照样全绿。而「字段一路解析得好好的、渲染层不消费」正是本次修的 bug
+    /// 本体，测试若也绕开消费点，等于把同一个坑再踩一遍。故这条从 `set_theme` 出发，
+    /// 一直断言到布局后的树上。
+    #[test]
+    fn theme_arrow_chars_reach_the_view_tree() {
+        let mut w = win(false, false, false, false, "");
+        let mut t = wind_theme::Resolved::default();
+        t.views.footer_bar.prev_char = "$".into();
+        t.views.footer_bar.next_char = ")".into();
+        w.set_theme(t);
+        let found = texts(&laid(&w, false));
+        assert!(
+            found.iter().any(|s| s == "$"),
+            "上一页应画主题字符, 实得 {found:?}"
+        );
+        assert!(
+            found.iter().any(|s| s == ")"),
+            "下一页应画主题字符, 实得 {found:?}"
+        );
+        assert!(
+            !found.iter().any(|s| s == "‹" || s == "›"),
+            "内置箭头不该再出现, 实得 {found:?}"
+        );
+    }
+
+    /// 多字翻页符号要把按钮（连同命中区）撑宽，而不是盖到页码上或被裁掉。
+    ///
+    /// 宽度基线 `arrow_w` 是按一个字算的，schema 却不限 prev_char 的长度。判据用相对量
+    /// （多字宽 > 单字宽），与本组头注要求一致 —— 三个平台的文本后端量出的绝对宽度各不相同。
+    #[test]
+    fn multi_char_arrow_widens_the_hit_box() {
+        let hit_w = |ch: &str| {
+            let mut w = win(false, false, false, false, "");
+            let mut t = wind_theme::Resolved::default();
+            t.views.footer_bar.next_char = ch.into();
+            w.set_theme(t);
+            hit(&laid(&w, false), TAG_PAGE_NEXT)
+                .expect("下一页可点（首页 → 有下一页）")
+                .w
+        };
+        let one = hit_w(")");
+        let many = hit_w("下一页");
+        assert!(
+            many > one,
+            "多字应撑宽按钮: 单字 {one}, 多字 {many}（fixed_w 下两者相等）"
+        );
+    }
+
+    /// 多字箭头下，同一行的编码预算要跟着收窄 —— 否则超长编码把翻页栏顶出窗口右缘。
+    ///
+    /// 命中盒那条测试盖不住这个：按钮撑宽了、预算却按单字算，两者不一致恰恰是「箭头宽度
+    /// 公式写了两份」的后果。判据沿用同组既有那条（翻页栏右缘须落在窗口内），因为那正是
+    /// 预算算漏时真实会坏掉的地方；`pager_row_w` 的注释也明写着这条因果。
+    #[test]
+    fn multi_char_arrow_shrinks_the_preedit_budget() {
+        let themed = |ch: &str, preedit: &str| {
+            let mut w = win(true, false, true, true, preedit);
+            let mut t = wind_theme::Resolved::default();
+            t.views.footer_bar.next_char = ch.into();
+            t.views.footer_bar.prev_char = ch.into();
+            w.set_theme(t);
+            w
+        };
+        // 前置：编码必须已被宽度上限夹住, 否则下面的不等式恒真（同组头注反复警告的写法）。
+        let long = clamped_preedit(|p| themed("下一页", p));
+        let w1 = laid(&themed("下一页", &long), false).measured_size().0;
+        let w2 = laid(&themed("下一页", &long.repeat(2)), false)
+            .measured_size()
+            .0;
+        assert_eq!(w1, w2, "前置：超长编码须已被上限夹住（{w1} vs {w2}）");
+
+        let w = themed("下一页", &long);
+        let cap = w.screen_safety_max_width_px() as f32;
+        let root = laid(&w, false);
+        let (win_w, _) = root.measured_size();
+        // 判据必须是安全上限而不是「翻页栏落在 win_w 内」：预算算漏时整行照样排得下,
+        // 只是 win_w 自己跟着涨 —— 那个不等式恒真, 测了等于没测。真正坏掉的地方是渲染入口
+        // 那道 content_w.min(safety_max_w), 它是**裁切**语义, 超出部分在右缘直接被切掉。
+        assert!(
+            win_w <= cap + 0.5,
+            "多字箭头下整窗仍不得越过安全上限（{win_w} vs {cap}）—— 越界即预算按单字算漏了"
+        );
+        let p = pager(&root);
+        assert!(
+            p.x + p.w <= win_w + 0.5,
+            "翻页栏须完整落在窗口内（右缘 {} vs 窗口宽 {win_w}）",
+            p.x + p.w
+        );
+    }
+
+    /// 未配字符时回退内置 ‹ › —— 与上一条互为反面, 省得「让主题字符生效」被实现成
+    /// 「无论如何都不画内置箭头」。
+    #[test]
+    fn builtin_arrows_remain_when_theme_says_nothing() {
+        let w = win(false, false, false, false, "");
+        let found = texts(&laid(&w, false));
+        assert!(
+            found.iter().any(|s| s == "‹"),
+            "未配字符应回退内置, 实得 {found:?}"
+        );
+        assert!(
+            found.iter().any(|s| s == "›"),
+            "未配字符应回退内置, 实得 {found:?}"
+        );
+    }
+
     /// 取某个 tag 的命中矩形；`None` = 该 tag 未参与命中（如翻页箭头被禁用或整个翻页栏没渲染）。
     fn hit(root: &View, tag: i32) -> Option<Rect> {
         let mut hits = Vec::new();
@@ -5590,7 +5742,7 @@ mod tests {
         assert_eq!(arrow_char("$", "‹"), "$", "配了 ASCII 符号 → 原样");
         assert_eq!(arrow_char(")", "›"), ")", "配了 ASCII 符号 → 原样");
         assert_eq!(arrow_char("◀", "‹"), "◀", "配了多字节字符 → 原样");
-        // 多字原样传递（触摸盒仍按单字宽算，多字会挤出去，故主题里以单符号为宜）
+        // 多字原样传递；按钮宽度按文本撑开，见 pager_inline_tests 的 multi_char_arrow_*
         assert_eq!(arrow_char("上页", "‹"), "上页", "配了多字 → 原样");
         assert_eq!(arrow_char(" ", "‹"), " ", "留白是显式意图，不回退");
     }

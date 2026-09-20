@@ -157,9 +157,19 @@ const ARROW_PAIRS: [(&str, &str); 2] = [("prev_char", "prev_image"), ("next_char
 /// 判据是「本层写没写」而不是「值是什么」：显式写的压过继承来的，与 `ref = ""` 这种
 /// 显式清空并不冲突（那是本层写的，照样生效）。
 ///
-/// 扁平（`[footer_bar]`，主题文件的人写形态）与规范嵌套（`[views.footer_bar]`，
-/// `normalize` 的产物形态）两种位置都看：合并跑在 normalize 之前，但两种形态都能进到
-/// 这里，只认一种就会留下静默的盲区。
+/// 扁平（`[footer_bar]`，主题文件的人写形态）与规范嵌套（`[views.footer_bar]`）两种位置
+/// 都看 —— 合并跑在 normalize 之前，schema 两种都收得下。
+///
+/// ⚠ 两条路径各自独立：`over` 命中哪条，就只去 `base` 的**同一条**上删键。故本规则只在
+/// 两层用同一种写法时成立，跨形态不触发 —— 但那种组合本就先坏在别处：`normalize_theme`
+/// 收完顶层视图键后是 `t.insert("views", …)` **整块替换**而非合并，于是
+///
+/// - base 扁平 / 派生嵌套：派生那份 `views` 整个被顶掉，`prev_char` 跟着没了；
+/// - base 嵌套 / 派生扁平：箭头看着对了其实是假对，base 那份 `views` 连同里面别的节点
+///   （`views.item` 之类）一起被抹掉。
+///
+/// 两种都丢得远不止箭头，真要支持混写得先修 normalize，不在本规则的责任范围内。实际也
+/// 到不了：内置七个主题与编辑器导出的全是扁平写法。
 fn drop_inherited_arrow_images(base: &mut Value, over: &Value) {
     for path in [
         ["footer_bar"].as_slice(),
@@ -347,15 +357,21 @@ mod tests {
     #[test]
     fn same_layer_image_and_char_both_kept() {
         let m = merged(
-            "[footer_bar]\nfont_size = -4\n",
+            "[footer_bar]\nprev_image = { ref = \"inherited.svg\", mode = \"center\" }\n",
             "[footer_bar]\nprev_char = \"$\"\nprev_image = { ref = \"own.svg\" }\n",
         );
+        let img = footer(&m, "prev_image").expect("prev_image");
         assert_eq!(
-            footer(&m, "prev_image")
-                .and_then(|i| i.get("ref"))
-                .and_then(|v| v.as_str()),
+            img.get("ref").and_then(|v| v.as_str()),
             Some("own.svg"),
             "本层自己写的图不该被本层自己写的字符挤掉"
+        );
+        // mode 是判别点：本层没写它, 只有「没让位、照常深合并」才留得下。
+        // 只断言 ref 的话, 让位与否都得到 own.svg, 这条测试就永远不会红。
+        assert_eq!(
+            img.get("mode").and_then(|v| v.as_str()),
+            Some("center"),
+            "同层写了图 → 不该触发让位, 继承的图应照常深合并"
         );
         assert_eq!(footer(&m, "prev_char").and_then(|v| v.as_str()), Some("$"));
     }
@@ -365,16 +381,67 @@ mod tests {
     #[test]
     fn explicit_empty_ref_is_still_an_own_image() {
         let m = merged(
-            "[footer_bar]\nprev_image = { ref = \"chevron.svg\" }\n",
+            "[footer_bar]\nprev_image = { ref = \"chevron.svg\", mode = \"center\" }\n",
             "[footer_bar]\nprev_char = \"$\"\nprev_image = { ref = \"\" }\n",
         );
+        let img = footer(&m, "prev_image").expect("prev_image");
         assert_eq!(
-            footer(&m, "prev_image")
-                .and_then(|i| i.get("ref"))
-                .and_then(|v| v.as_str()),
+            img.get("ref").and_then(|v| v.as_str()),
             Some(""),
             "显式清空是本层的意思, 该原样留着"
         );
+        // 同上：ref 两条分支都得空串, mode 才是判别点。
+        assert_eq!(
+            img.get("mode").and_then(|v| v.as_str()),
+            Some("center"),
+            "本层写了图(哪怕是空 ref) → 不触发让位"
+        );
+    }
+
+    /// 走**真实加载链**（写盘 → load_typed_dirs → 合并 → normalize → 类型化）验一次让位。
+    ///
+    /// 上面那几条都直接调 `drop_inherited_arrow_images`，于是把 `load_merged_dirs_at` 里那行
+    /// 调用删掉，它们一条都不会红 —— 而「字段/规则存在但没接到链上」正是这两笔修的 bug 本体
+    /// （渲染层不读 prev_char），同一个坑不能在测试侧再踩一次。这条从磁盘上的两份 toml 出发，
+    /// 挂得住调用点、normalize 与类型化整条链。
+    #[test]
+    fn inherited_image_yields_through_the_real_load_chain() {
+        let dir =
+            std::env::temp_dir().join(format!("wind_theme_arrow_chain_{}", std::process::id()));
+        let base_dir = dir.join("themebase");
+        let derived_dir = dir.join("derived");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        std::fs::create_dir_all(&derived_dir).unwrap();
+        std::fs::write(
+            base_dir.join(THEME_FILE),
+            "[meta]\nname = \"themebase\"\n[footer_bar]\n\
+             prev_image = { ref = \"chevron_prev.svg\" }\n\
+             next_image = { ref = \"chevron_next.svg\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            derived_dir.join(THEME_FILE),
+            "base = \"themebase\"\n[meta]\nname = \"derived\"\n[footer_bar]\nprev_char = \"$\"\n",
+        )
+        .unwrap();
+
+        let t = load_typed_dirs(std::slice::from_ref(&dir), "derived").expect("load derived");
+        let footer = &t.views.as_ref().expect("views").footer_bar;
+        assert_eq!(
+            footer.prev_char.as_deref(),
+            Some("$"),
+            "本层写的字符要活到类型化之后"
+        );
+        assert!(
+            footer.prev_image.is_none(),
+            "写了 prev_char 的那侧, 继承来的图应在合并层就让位"
+        );
+        assert!(
+            footer.next_image.is_some(),
+            "没写 next_char 的那侧, 继承来的图原样保留"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 规范嵌套形态（`[views.footer_bar]`）同样受规则约束 —— 合并虽跑在 normalize

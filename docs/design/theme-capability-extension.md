@@ -191,7 +191,12 @@ place_window (render_frame:883) → 叠加 ✔
 | status / tooltip / toast | ✔ | ✔ | ✔ |
 | menu.root / menu.item | ✔ | ✔ | ✔ |
 
-`footer_bar` 现只消费 padding/margin/text_color/font_*/prev_image/next_image/prev_char/next_char；`candidate_list` 只消费 gap/band_gap/row_gap。
+`footer_bar` 现只消费 padding/margin/text_color/font_*/prev_image/next_image；`candidate_list` 只消费 gap/band_gap/row_gap。
+
+> 上表与这句都是**盘查当时（本方案实施前）的快照**，此后已不再是现状，留着是为了讲清楚下面的改法针对什么。
+> 两处后续变化：§3 实施后 `footer_bar`/`candidate_list` 的背景边框圆角已接通（`0419e5e`）；
+> `prev_char`/`next_char` 当时也在"死字段"之列，2026-09-20 才接到渲染层并补了「继承来的图让位于本层字符」
+> 的合并规则（`e3d4c36f`、`3765f144`，编辑器侧 `96c0331`）。
 
 ### 改法
 
