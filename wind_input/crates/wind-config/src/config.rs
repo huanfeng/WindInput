@@ -8455,30 +8455,36 @@ impl Config {
     }
 
     /// 本机状态目录（工具栏位置、日志、缓存等机器相关数据）。
-    /// - 便携模式：`<exe目录>/userdata/`
+    /// - 便携模式：`<exe目录>/localdata/`
     /// - 正常模式：`%LOCALAPPDATA%\WindInput[Dev]`（不随漫游同步）
+    ///
+    /// ⚠️ 便携下它与 [`Self::user_config_dir`]（`<exe目录>/userdata/`）**不是同一个目录**。
+    /// 两者曾经收敛到 `userdata/`，于是备份用户数据要连带拖走上百 MB 的缓存与日志
+    /// （论坛 t120）。分家的完整理由见 [`crate::variant::portable_localdata_dir`]。
     pub fn local_dir() -> Option<PathBuf> {
         if crate::variant::is_portable() {
-            crate::variant::portable_userdata_dir()
+            crate::variant::portable_localdata_dir()
         } else {
             dirs::data_local_dir().map(|d| d.join(Self::app_dir_name()))
         }
     }
 
-    /// 缓存目录（%LOCALAPPDATA%\WindInput\cache）：词库 .wdat 等可重建产物。
+    /// 缓存目录（%LOCALAPPDATA%\WindInput\cache，便携下 `<exe目录>/localdata/cache`）：
+    /// 词库 .wdat 等可重建产物。
     pub fn cache_dir() -> Option<PathBuf> {
         Self::local_dir().map(|d| d.join("cache"))
     }
 
     /// 日志目录。
-    /// - 便携模式：`<exe目录>/userdata/logs`
+    /// - 便携模式：`<exe目录>/localdata/logs`
     /// - 正常模式：`%LOCALAPPDATA%\WindInput[Dev]\logs`
+    ///
+    /// 两个分支现在只差 [`Self::local_dir`] 那一层，故不再各写一份：便携分支曾经绕开
+    /// `local_dir()` 直接从 `portable_userdata_dir()` 拼，两处得改两次，漏一处就是
+    /// 「日志和缓存分在两个目录」。TSF DLL 那份（`FileLogger::_BuildPaths`）在 C++ 里，
+    /// 合不进来，只能靠两边的注释互指。
     pub fn log_dir() -> Option<PathBuf> {
-        if crate::variant::is_portable() {
-            crate::variant::portable_userdata_dir().map(|d| d.join("logs"))
-        } else {
-            Self::local_dir().map(|d| d.join("logs"))
-        }
+        Self::local_dir().map(|d| d.join("logs"))
     }
 
     /// 获取 data 目录（安装根目录下的 `data/`，正常即可执行文件同目录）。

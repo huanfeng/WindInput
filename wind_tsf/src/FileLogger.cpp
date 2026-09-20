@@ -10,7 +10,7 @@
 
 // 逐级创建目录（`a\b\c` 里缺哪层建哪层）。
 //
-// 便携形态下日志目录是 `<安装根>\userdata\logs`，而 `userdata\` 这一层未必已经存在——
+// 便携形态下日志目录是 `<安装根>\localdata\logs`，而 `localdata\` 这一层未必已经存在——
 // TSF DLL 由宿主加载、再由它去拉服务，本函数跑的时候服务可能还没建过任何目录。
 // `CreateDirectoryW` 只建最后一层，父目录缺失时直接失败，表现是便携版**一行日志都没有**。
 //
@@ -89,7 +89,7 @@ void CFileLogger::Init()
     // Ensure log directory exists（配置文件就在这一层；日志文件的子目录留到真要写时再建，
     // 见 _OpenLogFile —— mode=none 时不该给每个宿主进程都平白造一个空目录）
     //
-    // 逐级建：便携形态下 `<安装根>\userdata\` 这一层可能还不存在，见 _EnsureDirRecursive。
+    // 逐级建：便携形态下 `<安装根>\localdata\` 这一层可能还不存在，见 _EnsureDirRecursive。
     _EnsureDirRecursive(_logDir);
 
     // Read config (mode + level)
@@ -362,7 +362,7 @@ void CFileLogger::_RotateNow()
 
 void CFileLogger::_BuildPaths()
 {
-    // ★ 便携部署的日志必须留在便携目录内（`<安装根>\userdata\logs`，与 Rust 侧
+    // ★ 便携部署的日志必须留在便携目录内（`<安装根>\localdata\logs`，与 Rust 侧
     // `Config::log_dir()` 逐字对齐）。写 `%LOCALAPPDATA%` 会让便携版「拔盘走人不留痕」
     // 这条承诺落空——用户以为带走了全部痕迹，机器上却留着一份带宿主名的输入法日志，
     // 而这是全仓**唯一**漏掉便携分支的日志落点（core 与设置程序都走各自的 log_dir）。
@@ -372,7 +372,7 @@ void CFileLogger::_BuildPaths()
     wchar_t root[MAX_PATH];
     if (WindResolveInstallRoot(root, _countof(root)) && WindIsPortableRoot(root))
     {
-        _snwprintf_s(_logDir, _countof(_logDir), _TRUNCATE, L"%ls\\userdata\\logs", root);
+        _snwprintf_s(_logDir, _countof(_logDir), _TRUNCATE, L"%ls\\localdata\\logs", root);
     }
     else
     {

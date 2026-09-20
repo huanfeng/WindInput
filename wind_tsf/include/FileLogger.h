@@ -40,7 +40,7 @@
 //   dump_hotkey=0
 //
 // ★ <日志根> 有两种，判据见 _BuildPaths：
-//   便携部署（安装根下有 portable_mode 标记）→ <安装根>\userdata\logs
+//   便携部署（安装根下有 portable_mode 标记）→ <安装根>\localdata\logs
 //   其余                                    → %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs
 // 两条与 Rust 侧 `Config::log_dir()` 逐字对齐。便携版**绝不可**写 %LOCALAPPDATA%——
 // 那会让「拔盘走人不留痕」落空，而日志里带着宿主进程名。

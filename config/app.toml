@@ -97,6 +97,10 @@ markers = ["config.toml", "compat.toml", "userdata.redb", "wind_setting.toml", "
 #    不声明这一段，卸载后这些会原样留下（连同目录本身）——安装器只撤销自己写过的
 #    东西（回执），主程序写的它无从得知。实测残留：logs/ 约 4 MB、cache/ 上百 MB。
 #
+#    ⚠️ 节名与便携版的 `<安装根>\localdata\` 目录**同名但不同物**：这一段的作用域根恒是
+#    `%LOCALAPPDATA%\{app.id}`（见 wind-installer 的 manifest 校验），只服务安装版卸载；
+#    便携版没有卸载器，整个目录由用户自己删。两者同名纯属巧合，改一边不要顺手改另一边。
+#
 #    cache_dirs  →「清除本地词库缓存」勾选。两项都是可重建产物：
 #      cache  词库 .wdat/.wridx（wind-config 的 Paths::cache_dir）
 #      logs   主程序 / wind_setting / TSF DLL 三方的日志，含 tsf_log/ 与 tsf_log_config

@@ -80,6 +80,26 @@ pub fn portable_userdata_dir() -> Option<PathBuf> {
     install_root().map(|d| d.join("userdata"))
 }
 
+/// 便携模式下的**本机状态**根目录（安装根/localdata）：cache、logs、state.toml 等可重建产物。
+///
+/// # 为什么与 `userdata` 分家
+///
+/// 两者曾经收敛到同一个 `userdata/`（便携包自包含，本机数据也没别处可去）。代价是备份
+/// 用户数据时连带拖走上百 MB 的词库缓存和日志——论坛 t120 的楼主正是为此提的：
+/// 「这两个都是程序自动生成的，跟配置又无关」。
+///
+/// **与 `userdata` 同级，不是它的子目录**：深度不变，只是并排多一个目录。
+///
+/// ⚠️ 与 `config/app.toml` 的 `[localdata]` **同名但不同物**：那是安装器清单的一个节，
+/// 列的是卸载时要从 `%LOCALAPPDATA%\{app.id}` 下清掉哪些东西（非便携侧），不是这个目录。
+///
+/// 存量便携用户升级后旧 `userdata/{cache,logs,state.toml}` 里的东西**不迁移**（已决）：
+/// cache/logs 重建即可，`state.toml`（工具栏位置等）会静默回默认一次——搬迁代码要处理
+/// 「cache 正被 mmap 占着 rename 失败」的降级路径，为一次性的小状态不值当。
+pub fn portable_localdata_dir() -> Option<PathBuf> {
+    install_root().map(|d| d.join("localdata"))
+}
+
 /// 覆盖安装根目录的完整路径。仅供测试与开发排查，生产部署严禁设置。
 const INSTALL_ROOT_ENV: &str = "WIND_INSTALL_ROOT";
 
