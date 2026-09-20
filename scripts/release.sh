@@ -35,6 +35,14 @@ DIST_DIR="$PRODUCT_ROOT/dist"
 VERSION_FILE="$PRODUCT_ROOT/docs/VERSION"
 GH_REPO="huanfeng/WindInput"
 
+# ⚠️ 关掉 gh 的 pager。gh 在 stdout 是 tty 时会把长输出塞进 $PAGER(本机是 less), 于是菜单里
+#    跑到 `gh run view --json jobs` 这类多行输出的地方会停下来等人按 q —— 脚本看着像卡死,
+#    而 auto-sign 挂机时根本没人按, 整条链就停在那里。
+#    ★ 这个坑只在【交互菜单】里露头: 用管道或后台跑时 stdout 不是 tty, gh 不启用 pager,
+#      所以先前那些测试一次都没碰到。实测判据: 伪终端下不设它, gh 输出里会出现 \e[?1049h
+#      (less 切到备用屏幕) 且进程挂住不退; 设 cat 后退出码 0、内容直接打全。
+export GH_PAGER=cat
+
 # ---------- 颜色 / 输出 (与 dev.sh 逐字一致) ----------
 # 刻意不抽成 lib/ui.sh: dev.sh 是本仓改动最频繁的文件之一, 为四个 printf 去动它,
 # 换来的合并冲突风险大于这点重复的代价。
@@ -615,6 +623,49 @@ exit 0'
     return "${PIPESTATUS[0]}"
 }
 
+# ---------- 签名产物的来源标记 ----------
+# 记「dist/ 里这批产物是哪一次 CI 构建签出来的」。
+#
+# ★ 谁在用它: `upload` 子命令。sign-draft 现在无条件重签, 自己用不着这个判断; 但 upload
+#   是「签好了、只是没传上去」的恢复路径, 它拿的是 dist/ 里的现成文件, 必须有办法确认
+#   那批确实是本次构建签的。
+#
+# ★ 为什么不能只看文件在不在: 重发同一个版本号时 (push --force) 文件名一模一样。实测踩过
+#   (09-20): 09-19 17:43 签的 Windows 产物在次日的重发里被原样上传, 而同一个 Release 上的
+#   macOS .pkg 来自当天的新 CI —— 两个平台的产物出自不同代码。这一路上验签过了 (它确实
+#   签过)、时间戳过了、连「把文件真下回来比对 sha256」也过了 (比的是本地那份旧的) ——
+#   所有护栏全绿, 零报错。判据必须是「来自哪次构建」, 不是「文件在不在」「签没签」。
+
+origin_mark_path() { printf '%s/.origin-%s.json\n' "$DIST_DIR" "$1"; }
+
+write_origin_mark() {
+    python3 - "$(origin_mark_path "$1")" "$2" "$DIST_DIR/WindInput-Setup-$1.exe" <<'PY'
+import datetime, hashlib, json, sys
+out, run, setup = sys.argv[1], sys.argv[2], sys.argv[3]
+json.dump({"run": run,
+           "setupSha256": hashlib.sha256(open(setup, "rb").read()).hexdigest(),
+           "signedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds")},
+          open(out, "w"), ensure_ascii=False, indent=2)
+PY
+}
+
+# 0 = dist/ 里的产物确实是 $2 那次构建签出来的; 1 = 来自别的构建 / 没有标记 / 文件被动过。
+# 连 Setup.exe 的 sha256 一起比: 只认 run 号的话, 有人手工换掉文件就看不出来了。
+origin_mark_matches() {
+    local f; f="$(origin_mark_path "$1")"
+    [ -f "$f" ] || return 1
+    python3 - "$f" "$2" "$DIST_DIR/WindInput-Setup-$1.exe" <<'PY'
+import hashlib, json, sys
+f, run, setup = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    m = json.load(open(f))
+    h = hashlib.sha256(open(setup, "rb").read()).hexdigest()
+except Exception:
+    sys.exit(1)
+sys.exit(0 if str(m.get("run")) == run and h == m.get("setupSha256") else 1)
+PY
+}
+
 # 本地 dist/ 里本版本的 4 个待传资产
 release_assets() {
     local v="$1"
@@ -650,26 +701,30 @@ do_sign_draft() {
     cyan "\n══ 签名段  $tag ══"
     require_draft_release "$tag" || return 1
 
-    # 签名产物已经在本地? 那就别重签 —— 重跑一遍要白扣 7 次云签名配额。
-    if [ -f "$DIST_DIR/WindInput-Setup-$v.exe" ] && [ -f "$DIST_DIR/WindInput-Portable-$v.zip" ]; then
-        warn "  ⚠️ dist/ 里已经有 $v 的 Setup 与便携包。"
-        # ★ 挂机模式下不问、也不重签: 重跑签名段要白扣 7 次云签名配额, 而这时 dist/ 里
-        #   躺着的多半就是上一轮签好、只是上传失败的那份 —— 直接转上传才是本意。真要重签
-        #   请手动跑 sign-draft。
-        if [ "$AUTO_YES" = 1 ]; then
-            warn "     挂机模式: 跳过签名直接走上传 (重签会白扣 7 次配额)。"
-            do_upload "$v"
-            return $?
-        fi
-        gray "     若上一轮只是上传失败, 直接跑 ./scripts/release.sh upload $v (不重签, 不扣配额)。"
-        confirm "仍要重新走一遍签名?" n || { gray "已取消。"; return 0; }
-    fi
-
-    # ---------- 1. 定位 CI run 并拉中转产物 ----------
-    cyan "\n[1/7] 定位 CI 构建并拉取中转产物"
+    # ---------- 1. 定位 CI run ----------
+    # ⚠️ 必须在「能不能跳过重签」之前定位: 判据是「dist/ 里那批是不是【这一次】构建签的」,
+    #    没有 run 号就只能退回「文件在不在」, 而那正是会把上一轮旧产物当成这一轮的写法。
+    cyan "\n[1/8] 定位 CI 构建"
     run="$(ci_find_run "$tag" success)"
     [ -n "$run" ] || { err "  ✗ $tag 没有成功的 release.yml 构建"; return 1; }
     gray "  run $run"
+
+    # ★ 本段【无条件】重新拉产物、重新签 —— 不看 dist/ 里有没有现成的同名文件。
+    #
+    #   曾经为省云签名配额加过一条「dist/ 里已有该版本产物就跳过签名直接上传」, 那是错的:
+    #   重发同一个版本号时文件名一模一样, 跳过就把【上一轮旧代码】签好的包当成这一轮传了
+    #   上去。实测踩过 (09-20): 那次 Release 上的 macOS .pkg 来自当天新 CI、Windows 两个包
+    #   来自前一天, 而验签、时间戳、连「把文件真下回来比对 sha256」全都过了 (比的是本地那份
+    #   旧的) —— 所有护栏全绿, 零报错。
+    #
+    #   配额不值得拿这个换: 走到这一步就是要出一版能发的包, 7 次配额是它应付的成本。
+    #   (`sign 9s` 那层对已签 PE 按指纹跳过是另一回事, 那是 dev.ps1 内部的去重, 保留。)
+    if [ -f "$DIST_DIR/WindInput-Setup-$v.exe" ]; then
+        gray "  dist/ 里有 $v 的旧产物, 回传时会被本次构建的覆盖"
+    fi
+
+    # ---------- 拉中转产物 ----------
+    cyan "\n[2/8] 拉取中转产物"
 
     tmp="$(mktemp -d)"
     if ! gh run download "$run" --name stage-windows --dir "$tmp" -R "$GH_REPO"; then
@@ -685,7 +740,7 @@ do_sign_draft() {
     rbuild_trap_on
     if ! rbuild_lock; then rbuild_trap_off; rm -rf "$tmp"; return 1; fi
 
-    _sign_body "$v" "$stagezip"; rc=$?
+    _sign_body "$v" "$stagezip" "$run"; rc=$?
 
     rbuild_cleanup
     rbuild_trap_off
@@ -697,10 +752,10 @@ do_sign_draft() {
 }
 
 _sign_body() {
-    local v="$1" stagezip="$2" out rc
+    local v="$1" stagezip="$2" run="$3" out rc
 
     # ---------- 2. 清场 ----------
-    cyan "\n[2/7] 归档编译机 dist\\ 里的同名旧包"
+    cyan "\n[3/8] 归档编译机 dist\\ 里的同名旧包"
     out="$(remote_archive_old_dist)"
     case "$out" in
         *NONE*)  gray "  dist\\ 里没有同名旧包" ;;
@@ -709,7 +764,7 @@ _sign_body() {
     esac
 
     # ---------- 3. 传中转产物 + 对齐版本号 ----------
-    cyan "\n[3/7] 上传中转产物并对齐编译机的 docs/VERSION"
+    cyan "\n[4/8] 上传中转产物并对齐编译机的 docs/VERSION"
     if ! rbuild_scp "$stagezip" "$WIND_BUILD_REMOTE:$WIND_BUILD_ROOT/dist/" "中转产物"; then
         err "  ✗ 上传中转产物失败"; return 1
     fi
@@ -726,7 +781,7 @@ _sign_body() {
     gray "     dev.ps1 的 Sync-VersionStamp 会触发一次 cargo clean + 全量重编 (约 9 分钟)。"
 
     # ---------- 4. 签名 ----------
-    cyan "\n[4/7] 编译机: unstage → sign 8s → sign 9s → verify-sign"
+    cyan "\n[5/8] 编译机: unstage → sign 8s → sign 9s → verify-sign"
     gray "  下面是编译机的原样输出。★ 逐条看, 脚本报「完成」不算数:"
     # ⚠️ `target\release` 里的反斜杠要写成 \\\\: say/gray 用 printf '%b'(为了支持 \n),
     #    它会把 \r 解释成回车 —— 实测这行曾打印成「targetelease」。偏偏这里是让人照着
@@ -751,7 +806,7 @@ _sign_body() {
     esac
 
     # ---------- 5. 时间戳 ----------
-    cyan "\n[5/7] 编译机: 验便携包内每个 PE 的时间戳"
+    cyan "\n[6/8] 编译机: 验便携包内每个 PE 的时间戳"
     remote_verify_timestamps "$v"; rc=$?
     if [ "$rc" != 0 ]; then
         err "  ✗ 时间戳校验未通过 (退出码 $rc)"
@@ -761,7 +816,7 @@ _sign_body() {
     say "  ✓ 便携包内每个 PE 都有时间戳"
 
     # ---------- 6. 回传 ----------
-    cyan "\n[6/7] 回传 4 个签名资产"
+    cyan "\n[7/8] 回传 4 个签名资产"
     local pat ok=1
     for pat in "WindInput-Setup-$v.exe" "WindInput-Setup-$v.exe.sha256" \
                "WindInput-Portable-$v.zip" "WindInput-Portable-$v.zip.sha256"; do
@@ -774,13 +829,18 @@ _sign_body() {
     [ "$ok" = 1 ] || { err "  资产不齐, 停在这里 (签名产物还在编译机 dist\\, 不必重签)"; return 1; }
 
     # ---------- 7. Linux 侧独立验签 ----------
-    cyan "\n[7/7] 本机独立验签 (读 PE 证书表, 不依赖 signtool)"
+    cyan "\n[8/8] 本机独立验签 (读 PE 证书表, 不依赖 signtool)"
     if pe_has_signature "$DIST_DIR/WindInput-Setup-$v.exe"; then
         say "  ✓ Setup.exe 带签名"
     else
         err "  ✗ Setup.exe 的证书表是空的 —— 拿回来的是未签名版, 不能上传"; return 1
     fi
     verify_portable_contents "$DIST_DIR/WindInput-Portable-$v.zip" || return 1
+
+    # 落来源标记 —— 必须是在验签全过之后, 它等于「这批产物是 run $run 签出来的」的凭据。
+    # 下一次重发同版本号时, 跳过重签与上传前的把关都认它。
+    write_origin_mark "$v" "$run"
+    gray "  已记来源: run $run → $(origin_mark_path "$v")"
     return 0
 }
 
@@ -804,14 +864,36 @@ do_upload() {
 
     # ⛔ 上传前的硬闸门: 这几个文件必须真的带签名。
     #
-    # do_upload 有三个入口 —— 签名段走完自然落到这里 (那边刚验过)、直接跑 `upload`、以及
-    # 挂机模式下「dist/ 已有产物就跳过签名」那条。后两条拿的是 dist/ 里现成的文件, 而
-    # dist/ 里完全可能躺着本机构建留下的【未签名】同名产物: 实测本机 dev 构建就会在 dist/
-    # 留下 WindInput-Setup-<版本>.exe, 证书表为空。少了这道闸门, 那份会被原样传上 Release
-    # 且全程不报错 —— 正是本仓反复吃过亏的「发布包静默出坏包」。
+    # do_upload 有两个入口 —— 签名段走完自然落到这里 (那边刚验过), 以及单独跑 `upload`
+    # 那条恢复路径。后者拿的是 dist/ 里的现成文件, 而 dist/ 里完全可能躺着本机构建留下的
+    # 【未签名】同名产物: 实测本机 dev 构建就会在 dist/ 留下 WindInput-Setup-<版本>.exe,
+    # 证书表为空。少了这道闸门, 那份会被原样传上 Release 且全程不报错 —— 正是本仓反复
+    # 吃过亏的「发布包静默出坏包」。
     #
     # ⚠️ 与签名段末尾那次验签重复是刻意的: 那次验的是「回传回来的对不对」, 这次验的是
     #    「要传上去的对不对」, 入口不同, 不能靠上游替这里把关。
+    # ⛔ 来源把关: 要传的这批必须是【本次 CI 构建】签出来的。
+    #
+    # 验签只能回答「签过没有」, 回答不了「签的是哪一版」—— 重发同一个版本号时, 上一轮
+    # 签好的旧产物文件名一模一样、签名也真实有效, 验签、时间戳、连端到端 sha256 比对都会
+    # 过 (比的是本地那份旧的), 而传上去的是旧代码编的包。实测踩过一次, 那次 Release 上的
+    # macOS .pkg 来自新 CI、Windows 两个包来自前一天 —— 全程零报错。
+    cyan "\n上传前校验产物来源"
+    local urun; urun="$(ci_find_run "$tag" success)"
+    if [ -z "$urun" ]; then
+        err "  ✗ 找不到 $tag 成功的 CI 构建, 无从判断 dist/ 里这批是不是它签的。"
+        return 1
+    fi
+    if origin_mark_matches "$v" "$urun"; then
+        say "  ✓ 来自本次构建 (run $urun)"
+    else
+        err "  ✗ dist/ 里的产物不是本次 CI 构建 (run $urun) 签出来的, 拒绝上传。"
+        err "     同一个版本号重发时文件名一样, 但内容是上一轮的 —— 传上去就是"
+        err "     「Windows 包和 macOS 包出自不同代码」, 而且一路验签都会过。"
+        gray "     先跑 ./scripts/release.sh sign-draft $v 重新签 (会拉本次构建的产物)。"
+        return 1
+    fi
+
     cyan "\n上传前验签"
     if pe_has_signature "$DIST_DIR/WindInput-Setup-$v.exe"; then
         say "  ✓ Setup.exe 带签名"
