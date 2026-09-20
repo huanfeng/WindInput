@@ -370,6 +370,7 @@ static REGISTRY: &[ConfigField] = &[
         "input.punct_on_empty_behavior",
         Enum(PUNCT_EMPTY_CODE_BEHAVIOR_VALUES),
     ),
+    f("input.buffer_symbol_chars", Str),
     f("input.numpad_behavior", Str),
     f("input.numpad_half_width", Bool),
     // 启动默认状态（原 general 域）

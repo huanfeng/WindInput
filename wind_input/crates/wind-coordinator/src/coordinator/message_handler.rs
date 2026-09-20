@@ -1230,6 +1230,17 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // 组码中符号入缓冲（`input.buffer_symbol_chars`，出厂只有 `-`）：让 `sun-panel`
+        // 这类带连字符的英文打得出来。紧跟上面那道闸门，两者的分工是**谁让位**：
+        // 码元闸门无条件夺取（方案作者说了算），本闸门只捡该键此刻空着的那一格
+        // （判据在 `symbol_buffer_key_free`）。故必须排在它之后——同一个字符两边都配时，
+        // 「真码元」的语义（参与码长/顶码判定）优先。
+        //
+        // ⚠️ 出厂 `-` 在本闸门下**恒不改变已有行为**，除了「首页按下空转吞键」那一格。
+        if let Some(act) = self.try_symbol_buffer_gate(&mut state, data) {
+            return act;
+        }
+
         // 以词定字（select_char）：配置的成对标点键从当前高亮候选词逐字上屏（对齐 Go
         // handleEngineDefault——select_char 优先于翻页键，故置于 apply_session_action 之前）。默认
         // `select_char_keys` 为空 → select_char_index 恒 None → 跳过（零回归）。仅在缓冲非空或

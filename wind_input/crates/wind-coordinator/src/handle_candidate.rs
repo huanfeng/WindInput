@@ -1977,6 +1977,25 @@ impl Coordinator {
             state.preedit = state.committed_text.clone();
             return InputOutcome::Normal;
         }
+        // ★ 缓冲里混进了「入缓冲符号」（`input.buffer_symbol_chars`，出厂 `-`）⇒ 这一串
+        // 已经不是本方案的编码，**不去问引擎**，候选直接空着。
+        //
+        // 不拦的后果全是静默的：拼音引擎对 `sun-panel` 会按合法前缀容错，把 `sun` 的候选
+        // 原样留着——用户看着 `孙 损 隼` 打完 `sun-panel`，一按空格上屏的是「孙」；
+        // 组合区还会拿 `sun` 的音节拆分去渲染，显示成 `sun'-panel`（多一个隔音符，
+        // 与回车真正上屏的 `sun-panel` 对不上）。
+        //
+        // 早退在 `preedit` 已置为原码、各 body 已清空之后（本函数开头那几行），所以
+        // 组合区自然落到「恒原始码」那一档，无需另写显示分支。
+        //
+        // 判据谓词与 `accumulate_code_char` 的顶码否决共用，见 `buffer_has_literal_symbol`。
+        if self.buffer_has_literal_symbol(state) {
+            state.has_more = false;
+            state.candidate_input = state.input_buffer.clone();
+            state.candidate_limit = 0;
+            self.reset_candidate_view(state);
+            return InputOutcome::Normal;
+        }
         let limit = self.initial_candidate_limit(&state.input_buffer);
         let (engine_count, outcome) = self.build_candidates(state, limit);
         // 引导字母的「重复上屏」：输入恰为单个引导字母时，把最近一次上屏内容注入候选顶部

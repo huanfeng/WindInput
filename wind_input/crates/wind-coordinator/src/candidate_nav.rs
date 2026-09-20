@@ -58,8 +58,26 @@ impl Coordinator {
     /// 收进一处后，新增候选来源时能漏的只剩「忘了调用本函数」——比在三行里少写一行显眼得多。
     pub(crate) fn reset_candidate_view(&self, state: &mut State) {
         state.current_page = 0;
+        // 翻页史随候选一起作废：新装填的是另一批候选，上一批翻到过第几页与它无关。
+        // 挂在这里而不是各装填点，理由同上面那三件——`current_page` 归零的地方就是它
+        // 该归零的地方。生产代码里 `current_page` 的写点全在本文件，别处的都是测试。
+        state.paged = false;
         state.selected_index = 0;
         self.clear_hover();
+    }
+
+    /// 翻到第 `page` 页并记下「这批候选被翻过页」。
+    ///
+    /// 存在的理由只有一个：`current_page` 有五个写点（页内回卷两个、翻页键两个、
+    /// 末页放宽一个），而 `paged` 必须与它们**每一个**同步。分散成五行 `paged = true`
+    /// 是在等着下一个新写点漏掉——漏掉的表现是 `-` 在用户明明翻过页之后又变回字符，
+    /// 只在某一条特定翻页路径上复现。
+    ///
+    /// ⚠️ 不含 `try_relax_scope_on_page_end` 里那处**还原** `page_before`：还原不是翻页，
+    /// 那一帧若置位会把「临拼下重建候选前本来就在第 0 页」误记成翻过页。
+    fn turn_page(state: &mut State, page: usize) {
+        state.current_page = page;
+        state.paged = true;
     }
 
     /// 上移高亮（页首回卷到上一页末项）；返回是否变化
@@ -71,7 +89,7 @@ impl Coordinator {
         if state.selected_index > 0 {
             state.selected_index -= 1;
         } else if state.current_page > 0 {
-            state.current_page -= 1;
+            Self::turn_page(state, state.current_page - 1);
             let (s, e) = self.page_range(state);
             state.selected_index = e - s - 1;
         } else {
@@ -95,7 +113,7 @@ impl Coordinator {
         if state.selected_index + 1 < page_count {
             state.selected_index += 1;
         } else if state.current_page + 1 < self.total_pages(state) {
-            state.current_page += 1;
+            Self::turn_page(state, state.current_page + 1);
             state.selected_index = 0;
         } else {
             return false;
@@ -107,7 +125,7 @@ impl Coordinator {
     pub(crate) fn page_prev(&self, state: &mut State) -> bool {
         self.clear_hover();
         if state.current_page > 0 {
-            state.current_page -= 1;
+            Self::turn_page(state, state.current_page - 1);
             state.selected_index = 0;
             true
         } else {
@@ -123,7 +141,7 @@ impl Coordinator {
             self.expand_candidates(state);
         }
         if state.current_page + 1 < self.total_pages(state) {
-            state.current_page += 1;
+            Self::turn_page(state, state.current_page + 1);
             state.selected_index = 0;
             true
         } else {
@@ -216,7 +234,7 @@ impl Coordinator {
         // 语义完全一致。⚠️ 曾让放宽后的候选按真实顺序插入，结果 `dwi` 的新字（权重 8999 占
         // 三简位）落到第 1 页第 2 位，视口只能跳回页首——翻页翻着翻着跳回开头，很突兀。
         if state.current_page + 1 < self.total_pages(state) {
-            state.current_page += 1;
+            Self::turn_page(state, state.current_page + 1);
             state.selected_index = 0;
         }
         true

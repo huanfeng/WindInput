@@ -3409,6 +3409,32 @@ pub struct InputConfig {
     /// 编码留在组合区继续输入；`clear_no_input` 是「吞键、**丢弃**编码」。
     #[serde(default = "default_punct_on_empty_behavior")]
     pub punct_on_empty_behavior: String,
+    /// **组码中**可直接进输入缓冲的符号（纯字面字符集，逐字符匹配）。出厂 `-`，留空 = 关闭。
+    ///
+    /// 解决的是 `-` 这个字符的双重身份：它既是英文标识符里的高频字符（`sun-panel`、
+    /// `e-mail`），又是出厂翻页键（`keys.page_keys` 含 `minus_equal`）。两个身份在组码中
+    /// 撞车，而撞车处此前**两边都不通**——配成翻页键时首页按下是空转吞键（按了没反应），
+    /// 不配翻页键时落标点臂顶码上屏，都打不出 `sun-panel`。
+    ///
+    /// ★ **只在该键此刻没有别的活身份时才入缓冲**，判据单点在
+    /// `Coordinator::symbol_buffer_key_free`：会话动作（翻页/移高亮/取消/辅助码…）、次选键、
+    /// 以词定字键、`key_actions` 引导键，命中任一即让位、行为逐字不变。唯一的例外是
+    /// **本次会话尚未翻过页时的「上一页」**——那一格本就是空转，让给字符输入零损失。
+    /// 翻过页之后 `-` 恢复翻页身份（`State::paged` 粘滞到候选重装），对齐微软拼音。
+    ///
+    /// ⚠️ 只对**组码中**生效（`input_buffer` 非空）。空闲时这些键仍归宿主/标点流水线，
+    /// 否则用户在任何程序里都打不出减号。
+    ///
+    /// ★ 刻意**不**复用码元集 `input_chars` 的 `a-z` 范围语法，理由同
+    /// [`TempEnglishConfig::symbol_chars`]：`-` 在符号集里是高频字符，范围语法下它会被
+    /// 解析成区间端点而静默放行几十个字符。字面即全部真相。
+    ///
+    /// **不是码元**：本项不进 `CodeCharSet`、不参与引擎查询语义，只决定「这个键此刻是
+    /// 字符还是功能」。方案作者要让某符号成为真正的码元（参与码长/顶码判定）仍走
+    /// `[engine.codetable] input_chars`，那条路会**无条件夺取**该键（见
+    /// `Coordinator::code_char_conflicts`），与本项的「让位优先」正相反。
+    #[serde(default = "default_buffer_symbol_chars")]
+    pub buffer_symbol_chars: String,
     #[serde(default = "default_numpad_behavior")]
     pub numpad_behavior: String,
     /// 小键盘恒半角：开启后小键盘的 `0-9` 与 `. + - * /` 在**全角态下仍输出 ASCII 原形**，
@@ -3528,6 +3554,7 @@ impl Default for InputConfig {
             enter_behavior: "commit".to_string(),
             space_on_empty_behavior: "commit".to_string(),
             punct_on_empty_behavior: default_punct_on_empty_behavior(),
+            buffer_symbol_chars: default_buffer_symbol_chars(),
             numpad_behavior: default_numpad_behavior(),
             numpad_half_width: false,
             default: InputDefaultConfig::default(),
@@ -6513,6 +6540,16 @@ fn default_space_behavior() -> String {
 /// 按键就能拿到。留着回车不改，是为了不把「获取原码」这个能力面整个封掉。
 fn default_punct_on_empty_behavior() -> String {
     "clear".to_string()
+}
+
+/// 出厂只放减号：它是唯一「既是英文标识符高频字符、又被出厂配成翻页键」的符号。
+///
+/// 同类候选（`_` `.` `/` `@`）刻意不放：它们出厂都**没有**会话身份，组码中按下走的是
+/// 「顶码上屏 + 出符号」这条长期行为，没有「按了没反应」那格空白要填。把它们一并改成
+/// 入缓冲是在动一条没人抱怨过的既有行为，且会跟 `www.` 的 URL 前缀夺取抢同一帧。
+/// 要它们的用户自己往这串里加——那时让位判据照样护着 `comma_period` 一类的自配键组。
+fn default_buffer_symbol_chars() -> String {
+    "-".to_string()
 }
 
 fn default_pinyin_separator() -> String {

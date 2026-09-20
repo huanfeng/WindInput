@@ -609,6 +609,18 @@ pub(crate) struct State {
     pub(crate) selected_index: usize,
     /// 当前页码（0-based）
     pub(crate) current_page: usize,
+    /// 这批候选被翻过页没有（`current_page` 的**历史**，不是它的现值）。
+    ///
+    /// 唯一消费者是 `Coordinator::symbol_buffer_key_free`：未翻过页时「上一页」是一格空转，
+    /// 把 `-` 让给字符输入（打 `sun-panel`）；翻过页之后 `-` 恢复翻页身份。判据取历史而非
+    /// `current_page == 0`，是因为从第 2 页翻回第 1 页的用户**正在翻页**，此刻 `-` 突然
+    /// 变成字符会让人当场打错字。
+    ///
+    /// 与 `current_page` 同生命周期：置位在 `page_prev` / `page_next` 真的翻动那一帧，
+    /// 清零在 [`Coordinator::reset_candidate_view`]（候选重新装填 = 换了一批候选，
+    /// 上一批的翻页史与新的这批无关）。**别在别处清**——`current_page` 归零的地方就是
+    /// 它该归零的地方，两者分家就会漂移。
+    pub(crate) paged: bool,
     /// 动态分级加载：当前候选对应的输入码
     pub(crate) candidate_input: String,
     /// 动态分级加载：当前加载上限
@@ -2418,6 +2430,7 @@ impl Coordinator {
                 candidates: Vec::new(),
                 selected_index: 0,
                 current_page: 0,
+                paged: false,
                 candidate_input: String::new(),
                 candidate_limit: 0,
                 has_more: false,
@@ -4864,6 +4877,11 @@ impl Coordinator {
             .engine_mgr
             .handle_top_code(&state.input_buffer)
             .filter(|_| !self.phrase_vetoes_top_code(state, &state.input_buffer))
+            // 缓冲里混进了入缓冲符号 ⇒ 这串不是本方案的编码，没有「码长溢出」可言。
+            // 不否决的话，码表方案下打 `sun-panel` 到第 5 个字符就会把 `sun` 顶上屏、
+            // 余码续打，用户正打的标识符当场被拆两半。判据与候选侧同源，见
+            // `buffer_has_literal_symbol`。
+            .filter(|_| !self.buffer_has_literal_symbol(state))
             // 切点修正：引擎把 prefix 固定切在 `max_code_length`，而**短语码长不受方案满码长
             // 约束**（5 码短语 `zzsfz` 落在 4 码五笔里）。顶码前的缓冲若恰是一条精确码短语，
             // 就以短语码为切点。不修则 `zzsfza` 被切成 `zzsf` + `za`，与 `pre_buf` 对不上而
@@ -5010,6 +5028,140 @@ impl Coordinator {
             return None;
         }
         Some(self.accumulate_code_char(state, lower, ch))
+    }
+
+    /// 组码中符号入缓冲闸门（`input.buffer_symbol_chars`，出厂 `-`）：打 `sun-panel`。
+    ///
+    /// # 与 [`Self::try_code_char_gate`] 的分工是「谁让位」
+    ///
+    /// 那道闸门管的是**真码元**（方案 `input_chars`）：字符进缓冲并参与码长/顶码判定，
+    /// 且**无条件夺取**该键——方案作者说了算，撞了什么功能由
+    /// [`Self::code_char_conflicts`] 告警而不阻止。
+    ///
+    /// 本闸门相反，是**让位优先**：只捡该键此刻空着的那一格（见
+    /// [`Self::symbol_buffer_key_free`]），任何活身份都能把它挡回去。所以它不需要、也不该
+    /// 进那张冲突清单——它本身就不制造冲突。
+    ///
+    /// # 为什么非要有这一格
+    ///
+    /// `-` 同时是英文标识符的高频字符和出厂翻页键（`keys.page_keys` 含 `minus_equal`），
+    /// 撞车处此前**两边都不通**：配成翻页键时首页按下走
+    /// [`Self::apply_session_action`] 的「命中即吞」（`page_prev` 返回 false 也照吞，
+    /// 用户观感是按了没反应）；不配翻页键则落兜底标点臂顶码上屏。两条路都打不出
+    /// `sun-panel`，而把 `-` 写进 `input_chars` 又会彻底夺走翻页身份——且拼音方案根本
+    /// 走不通那条路（`PinyinEngine::input_chars` 完全由双拼布局推导，不读该字段）。
+    ///
+    /// 复用 [`Self::accumulate_code_char`] 而不另起一条插入路径：顶码、全码自动上屏、
+    /// 满码空码清空、影子串、光标中插全在那里，另写一份就是第二套组码语义。
+    /// 拼音下顶码对它恒不触发（顶码要求显示首选是码表候选），码表下则与「把该符号配成
+    /// 码元」逐字同路——那正是同一件事该有的样子。
+    pub(crate) fn try_symbol_buffer_gate(
+        &self,
+        state: &mut State,
+        data: &KeyEventData,
+    ) -> Option<KeyAction> {
+        // Ctrl/Alt 组合不是字符输入（同 `try_code_char_gate`，纵深防御）。
+        if data.modifiers & MOD_SHORTCUT != 0 {
+            return None;
+        }
+        // ★ 只在组码中。空闲时这些键归标点流水线/宿主——否则用户在任何程序里都打不出减号。
+        // 判据取 `input_buffer` 而非 `has_input_session`：已上屏前缀（`committed_text`）
+        // 非空而缓冲已空时，这一码是新一轮的开头，符号当首码没有意义。
+        if state.input_buffer.is_empty() {
+            return None;
+        }
+        let shift = data.modifiers & MOD_SHIFT != 0;
+        let ch = printable_char(data.key_code, shift)?;
+        // 字母不走这里（同 `try_code_char_gate`）：字母臂上还有 z-fallback 等专属判定，
+        // 从这里抄近路会把它们全绕过去。
+        if ch.is_ascii_alphabetic() {
+            return None;
+        }
+        if !self.rt().config.input.buffer_symbol_chars.contains(ch) {
+            return None;
+        }
+        if !self.symbol_buffer_key_free(state, data.key_code, shift) {
+            return None;
+        }
+        // 符号无大小写，缓冲形态与影子串原形同值。
+        Some(self.accumulate_code_char(state, ch, ch))
+    }
+
+    /// 缓冲里有没有经 [`Self::try_symbol_buffer_gate`] 进来的符号 —— 即「这一串还是不是
+    /// 本方案的编码」。
+    ///
+    /// 两个消费点，**必须同一个谓词**：
+    /// 1. [`Self::update_candidates`]：是 ⇒ 不问引擎，候选空着（否则拼音引擎按合法前缀
+    ///    容错，`sun-panel` 会顶着 `sun` 的候选，空格上屏「孙」）；
+    /// 2. [`Self::accumulate_code_char`] 的顶码否决：是 ⇒ 不顶码（否则码表方案下打到第 5
+    ///    个字符就把 `sun` 顶上屏、余码 `-p` 续打，用户正打的标识符当场被拆成两半）。
+    ///
+    /// 两处判据若分家，会分裂成「候选空着但还在顶码」这种自相矛盾的中间态。
+    ///
+    /// ⚠️ `!active_is_code_char` 这一条不能省：方案作者把某符号配成**真码元**
+    /// （`[engine.codetable] input_chars`）时，它是合法编码的一部分，该照常查引擎、
+    /// 照常参与顶码。本谓词只管本闸门放进来的那类字面符号。
+    ///
+    /// 隔音符 `'` 天然不在此列——它不进 `buffer_symbol_chars`，走的是
+    /// `manual_separator_key` 那条独立通路，`sun'an` 仍是合法拼音输入。
+    pub(crate) fn buffer_has_literal_symbol(&self, state: &State) -> bool {
+        let bundle = self.rt();
+        let set = &bundle.config.input.buffer_symbol_chars;
+        if set.is_empty() {
+            return false;
+        }
+        state
+            .input_buffer
+            .chars()
+            .any(|c| set.contains(c) && !self.engine_mgr.active_is_code_char(c))
+    }
+
+    /// 这个键此刻有没有别的活身份——有就让位，[`Self::try_symbol_buffer_gate`] 的唯一判据。
+    ///
+    /// 两问覆盖 [`Self::code_char_conflicts`] 的 owners 链前四项，**两处必须同增同减**：
+    /// 那边漏一臂是「本该告警却没告警」，这边漏一臂是「本该让位却夺了键」——后者用户
+    /// 立刻可见，且会被归因成「翻页键忽然不灵了」。
+    ///
+    /// 那边的次选键与以词定字键在这里**不单独问**：
+    /// [`Self::select_key_offset`] / [`Self::select_char_index`] 都是
+    /// [`Self::session_action_for`] 的派生（取 `candidate_ordinal` / `char_ordinal`），
+    /// 第一问已经拦下。那边分开列是因为要给用户报出**是哪个功能**占了键，这里只需要
+    /// 知道「有没有人占」。⚠️ 哪天它们改成独立取表，这里就得跟着补问。
+    ///
+    /// # 唯一的例外：没翻过页的「上一页」
+    ///
+    /// 那一格本就是空转——`page_prev` 在 `current_page == 0` 时返回 false，而
+    /// [`Self::apply_session_action`] 末尾无条件 `Consumed`，于是按下什么都不发生。
+    /// 把这一格让给字符输入是零损失的。
+    ///
+    /// 判据取 `state.paged`（这批候选**翻过页没有**）而不是 `current_page == 0`：
+    /// 从第 2 页翻回第 1 页的用户正在翻页，此刻 `-` 突然变回字符会让人当场打错字。
+    /// 候选一重装 `paged` 即清零（[`Self::reset_candidate_view`]），所以「打一串码、
+    /// 翻过页、再接着打字母」之后的那个 `-` 仍然是字符。
+    ///
+    /// # 「下一页」刻意不给这个待遇
+    ///
+    /// 末页按 `=` **不是**空转：它带 [`Self::try_relax_scope_on_page_end`]（翻到底了还想
+    /// 看更多 ⇒ 临时放宽检索范围）。把它判成空转会把那个功能整个砍掉，而 `=` 也不是
+    /// 英文标识符字符，换不来什么。
+    ///
+    /// ⚠️ 后三问**不带 shift**（那三个查询函数只按 VK 取表）。于是「无 shift 形态被占用、
+    /// 用户想用 shift 形态」时会保守地一并让位（`;` 是次选键 ⇒ `:` 也进不了缓冲）。
+    /// 出厂白名单只有 `-`，够不着这一格；真要放开得先给那三个查询补 shift 维度。
+    fn symbol_buffer_key_free(&self, state: &State, key_code: u32, shift: bool) -> bool {
+        match self.session_action_for(key_code, shift, true) {
+            Some(wind_config::SessionAction::PagePrev) if !state.paged => {}
+            Some(_) => return false,
+            None => {}
+        }
+        // 显式 `none` 是「这个键让位」，不是「这个键归我」——它与未配置同义。
+        if !matches!(
+            self.bound_action_for(key_code),
+            None | Some(wind_config::BoundAction::None)
+        ) {
+            return false;
+        }
+        true
     }
 
     /// 码元字符集与既有按键功能的冲突清单：`(字符, 占用它的功能名)`，空 = 无冲突。
