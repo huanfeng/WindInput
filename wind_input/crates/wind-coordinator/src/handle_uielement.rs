@@ -431,8 +431,10 @@ impl Coordinator {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use wind_bridge::handler::{COMPOSITION_PLACEHOLDER, KeyAction, KeyEventData, MessageHandler};
     use wind_candidate::Candidate;
-    use wind_config::Config;
+    use wind_config::{Config, PreeditDisplay};
+    use wind_ipc::protocol::EVENT_KEY_DOWN;
     use wind_ui_types::UiCommand;
 
     fn coord() -> (Arc<Coordinator>, std::sync::mpsc::Receiver<UiCommand>) {
@@ -593,6 +595,145 @@ mod tests {
         assert!(
             got.contains(&"hide") && !got.contains(&"update"),
             "判定自绘后只发 Hide: {got:?}"
+        );
+    }
+
+    /// 敲一个键，返回它的**出口**动作。必须走 `handle_key_event_policed`——占位后处理
+    /// 就挂在那个出口上，`handle_key_event` 一路看不到它。
+    fn press(c: &Coordinator, vk: u32) -> KeyAction {
+        c.handle_key_event_policed(&KeyEventData {
+            key_code: vk,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
+        })
+    }
+
+    /// 敲一串字母，返回末键的出口动作。
+    fn type_code(c: &Coordinator, code: &str) -> KeyAction {
+        let mut last = KeyAction::Consumed;
+        for ch in code.chars() {
+            last = press(c, (ch.to_ascii_uppercase() as u32) & 0xFF);
+        }
+        last
+    }
+
+    /// 出口动作里的组合区文本。不是 `UpdateComposition` 就是构造出了问题，直接炸——
+    /// 返回 `None` 再 `assert_ne!` 的话，形态变了会变成一条**永远成立**的断言。
+    fn composition_of(action: &KeyAction) -> &str {
+        match action {
+            KeyAction::UpdateComposition { text, .. } => text.as_str(),
+            other => panic!("期望组合区更新，实得 {other:?}"),
+        }
+    }
+
+    /// ★★★ 候选窗被压住 ⇒ **强制嵌入编码**：非 app_inline 一律降级回 app_inline。
+    ///
+    /// # 修的是什么
+    ///
+    /// 非 app_inline 时真编码只走 `UiCommand::UpdateCandidates::preedit` 交给候选窗，
+    /// 宿主组合区里换成占位空格（`with_composition_placeholder`）。而上面几条用例正说明
+    /// 候选窗在压制态**根本不下发**（`notify_ui_update` 发完 `HideCandidates` 就 return），
+    /// 交给宿主自绘的 `UiElementPage` 又不带编码串 —— 于是 UI-less 游戏里编码两条路全断、
+    /// 一个字都看不见。占位存在的唯一理由是「别和候选窗的编码栏重复显示」，压制态下那条
+    /// 理由本就不存在，占位是纯粹的信息丢失。
+    ///
+    /// # 护栏为什么落在按键出口上
+    ///
+    /// 判据函数返回什么不算数，**它被那个 if 读到**才算数：`preedit_uses_placeholder`
+    /// 的唯一消费点是 `handle_key_event_policed` 出口那一步。故这里断言的是出口动作里的
+    /// 组合区文本，不是判据的布尔值。
+    ///
+    /// # 反向对照不可省
+    ///
+    /// 开头那条「没有压制时照旧占位」是全组的对照：只测正向的话，判据整条恒 false
+    /// （占位从此全局失效、连记事本都不占位了）也照样全绿。
+    ///
+    /// 变异检验：删掉 `preedit_uses_placeholder` 开头那个 `ui_suppressed_by_host` 早退
+    /// ⇒ 三条正向全红；把该函数改成无条件 `false` ⇒ 开头的对照红。
+    #[test]
+    fn a_suppressed_host_gets_the_real_code_inline() {
+        // 对照：同样 candidate_top、同样两键，只差没有任何压制来源。
+        let (c, _rx) = coord();
+        *c.preedit_display.lock().unwrap() = PreeditDisplay::CandidateTop;
+        focus_pid(&c, 42);
+        assert_eq!(
+            c.ui_suppressed_by_host(),
+            None,
+            "前置：对照这一格必须真的没被压住"
+        );
+        assert_eq!(
+            composition_of(&type_code(&c, "ni")),
+            COMPOSITION_PLACEHOLDER,
+            "没被压住时 candidate_top 照旧把编码换成占位——这是本组的鉴别力来源"
+        );
+
+        // 三个压制来源逐个走一遍：它们在「编码丢了」这件事上没有分别，判据收口在
+        // `ui_suppressed_by_host`，故三条都得钉，漏一条就等于给那条留了退路。
+        type Suppress = Box<dyn Fn(&Arc<Coordinator>)>;
+        let sources: [(&str, Suppress); 3] = [
+            (
+                "宿主声明接管（pbShow=FALSE / UI-less 线程）",
+                Box::new(|c: &Arc<Coordinator>| c.set_uielement_host_draws(42, true)),
+            ),
+            (
+                "前台 D3D 独占全屏",
+                Box::new(|c: &Arc<Coordinator>| {
+                    c.fullscreen_exclusive_cached
+                        .store(true, std::sync::atomic::Ordering::Relaxed)
+                }),
+            ),
+            (
+                "compat opt-in 的候选读取者",
+                Box::new(|c: &Arc<Coordinator>| {
+                    name_pid(c, 42, "maplestory.exe");
+                    compat_rule(
+                        c,
+                        wind_config::app_compat::AppCompatRule {
+                            process: "MapleStory.exe".into(),
+                            host_drawn_candidates: Some(true),
+                            ..Default::default()
+                        },
+                    );
+                    c.set_uielement_host_reads(42, true);
+                }),
+            ),
+        ];
+
+        for (name, suppress) in sources {
+            let (c, _rx) = coord();
+            *c.preedit_display.lock().unwrap() = PreeditDisplay::CandidateTop;
+            focus_pid(&c, 42);
+            suppress(&c);
+            assert!(
+                c.ui_suppressed_by_host().is_some(),
+                "前置：{name} 必须真的压住了候选窗，否则下面那条断言测的是别的东西"
+            );
+            assert_eq!(
+                composition_of(&type_code(&c, "ni")),
+                "ni",
+                "{name}：候选窗被压住后编码必须原样写回宿主组合区"
+            );
+        }
+
+        // 撤销压制即恢复用户配的显示方式：接管是**宿主**的属性，切回桌面应用不该还嵌着。
+        let (c, _rx) = coord();
+        *c.preedit_display.lock().unwrap() = PreeditDisplay::CandidateTop;
+        focus_pid(&c, 42);
+        c.set_uielement_host_draws(42, true);
+        assert_eq!(
+            composition_of(&type_code(&c, "ni")),
+            "ni",
+            "前置：接管态先拿到真编码"
+        );
+        c.set_uielement_host_draws(42, false);
+        assert_eq!(
+            composition_of(&press(&c, 'H' as u32)),
+            COMPOSITION_PLACEHOLDER,
+            "撤销接管后下一键就该回到占位——粘住的话用户切回记事本会看到编码显示两遍"
         );
     }
 

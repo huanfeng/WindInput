@@ -5491,6 +5491,12 @@ pub struct UiCandidateConfig {
     /// - "app_inline"（默认）：编码内嵌应用光标处，候选窗不显示 preedit 栏
     /// - "candidate_top"：候选窗顶部独立 preedit 栏
     /// - "candidate_inline"：编码作为候选窗首单元内联
+    ///
+    /// ⚠ 后两种把编码的显示托付给候选窗，而候选窗在**宿主自绘候选**的场合根本不弹
+    /// （TSF UI-less 的全屏游戏 / SDL、D3D 独占全屏）。那种场合下本项自动降级为
+    /// `app_inline`，否则编码两条出口全断、一个字都看不见 —— 判据与理由见
+    /// `wind-coordinator` 的 `preedit_uses_placeholder` 及
+    /// `docs/design/game-compat-tsf-uielement.md` §4.4 末。
     #[serde(default = "default_preedit_display")]
     pub preedit_display: String,
     #[serde(default)]

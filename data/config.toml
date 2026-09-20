@@ -1162,6 +1162,8 @@ auto_comment_dicts = true
 # 格式与更多示例：https://windinput.com/docs/settings/appearance/candidate-comment
 layout = "horizontal"
 # 编码显示方式：app_inline=内嵌应用光标处(候选窗不显 preedit) | candidate_top=候选窗顶部独立栏 | candidate_inline=编码内联候选首单元
+# ⚠ 后两种依赖候选窗来显示编码，而候选窗在「宿主自绘候选」的场合根本不弹（TSF UI-less 的
+# 全屏游戏 / SDL、D3D 独占全屏）。那种场合下本项自动按 app_inline 走，否则编码一个字都看不见。
 preedit_display = "app_inline"
 # 候选窗上翻到光标上方时的两个正交行为开关（可单独或叠加）：
 flip_when_above = false          # 反转候选项排列顺序（仅竖排 layout="vertical" 生效）

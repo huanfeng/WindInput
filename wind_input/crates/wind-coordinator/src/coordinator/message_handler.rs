@@ -562,6 +562,22 @@ impl MessageHandler for Coordinator {
     }
 
     fn preedit_uses_placeholder(&self) -> bool {
+        // 候选窗被宿主压住时（TSF UI-less / D3D 独占全屏）一律**不占位**，即强制 app_inline。
+        //
+        // 占位存在的唯一理由是「别和候选窗的编码栏重复显示编码」。而 `ui_suppressed_by_host`
+        // 命中时 `notify_ui_update` 直接发 `HideCandidates` 就 return，`UpdateCandidates`
+        // （编码的另一条出口，见 `UiCommand::UpdateCandidates::preedit`）根本不下发——那条
+        // 理由不存在了，占位就成了纯粹的信息丢失：宿主组合区里只剩一个空格，交给宿主自绘的
+        // 候选快照 `UiElementPage` 又不带编码串，于是游戏里**编码两条路全断、完全看不见**。
+        //
+        // 反过来 `host_render` 与 `hide_candidate_window` 刻意**不在**此列：前者候选窗照画
+        // （只是换个地方画），编码栏还在，强制嵌入会变成两处重复；后者是用户自己关的窗。
+        //
+        // ⛔ 别改成读 `uielement_host_draws()` 一家：独占全屏那条同样压窗、同样丢编码，
+        // 三个来源在这件事上没有分别，收口就在 `ui_suppressed_by_host`。
+        if self.ui_suppressed_by_host().is_some() {
+            return false;
+        }
         // 非 app_inline（候选窗自显 preedit）→ 应用侧用占位空格，不重复显示编码。
         //
         // ⚠️ 这里**只看 preedit 显示模式**，不要把 `[input.caret]` 的逐模式开关叠进来。

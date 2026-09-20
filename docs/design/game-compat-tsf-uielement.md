@@ -671,6 +671,37 @@ SDL2 `SDL_windowskeyboard.c`（`UILess_GetCandidateList`）。
   `page_next/page_prev` 原语（它们负责动态扩展与末页放宽）；`Finalize` = `mouse_select(高亮)`；
   `Abort` = `cancel_session` + 推 `ClearComposition`。
 
+#### 压制态一律强制嵌入编码（`app_inline`）
+
+`ui_suppressed_by_host()` 命中时 `preedit_uses_placeholder()` 直接回 false
+（`coordinator/message_handler.rs`），即**不管用户配的是哪种 `preedit_display`，都按
+`app_inline` 走**：真编码原样写进宿主组合区。
+
+不这么做的后果是编码**两条路全断**：
+
+| 编码的出口 | 非 `app_inline` 时 | 压制态下 |
+|---|---|---|
+| 宿主组合区（TSF composition） | 换成占位空格 `COMPOSITION_PLACEHOLDER` | 还是一个空格 |
+| `UiCommand::UpdateCandidates::preedit` → 候选窗编码栏 | 真编码走这条 | `notify_ui_update` 发完 `HideCandidates` 就 return，**根本不下发** |
+| 交给宿主自绘的 `UiElementPage` | — | 结构里**没有**编码串字段（只有 items/selected/page_size/current_page） |
+
+于是 UI-less 游戏里一个编码字都看不见，而用户只是在设置里把编码栏挪到了候选窗顶部。
+占位存在的唯一理由是「别和候选窗的编码栏重复显示」，压制态下候选窗压根不画，那条理由
+不存在，占位就是纯粹的信息丢失。
+
+- 判据收口在 `ui_suppressed_by_host`，**三个来源一视同仁**（声明接管 / D3D 独占全屏 /
+  compat opt-in 的读取者）：它们在「编码丢了」这件事上没有分别。
+- `host_render` 与 `hide_candidate_window` 刻意**不在**此列。前者候选窗照画、只是换个地方画
+  （数据走 SHM 到宿主进程内的 DLL band 窗口），编码栏还在，强制嵌入会变成两处重复显示；
+  后者是用户自己关的窗，属于另一件事。
+- **不设配置键**：同 §4.5 的理由，「候选窗这一刻画不画得出来」是可由程序判定的物理事实，
+  按 config-design-rules R1 走自动判定。真出现判错的宿主，该加的是 compat 里的 per-app
+  `preedit_display` 覆盖，不是一个全局开关。
+- 护栏在 `handle_uielement.rs::a_suppressed_host_gets_the_real_code_inline`，断言落在**按键
+  出口**（`handle_key_event_policed` 返回的组合区文本）而不是判据函数的布尔值上——判据返回
+  什么不算数，被那个 if 读到才算数。两个变异都验过：删早退 ⇒ 三条正向红且复现原 bug
+  （拿到 `" "`）；判据改成恒 false ⇒ 开头的反向对照红。
+
 ### 4.5 独占全屏不弹窗（P2）
 
 `is_foreground_fullscreen` 拆成 `foreground_fullscreen_kind() -> {None, D3dExclusive, Covering}`：
@@ -760,8 +791,8 @@ TSF DLL 部署到 `%WINDIR%\System32\IME\WindInput[Dev]\`，x86 到
 - `wind-ipc/src/protocol.rs`、`codec.rs`：常量、`UiElementStatePayload/ActionPayload/Page`、编解码 + 往返测试。
 - `wind-bridge/src/handler.rs`、`deferred.rs`、`server.rs`：trait 三方法、转发、分发 + 测试。
 - `wind-coordinator/src/handle_uielement.rs`（新）、`coordinator.rs`（两个字段 + `notify_ui_update` 守卫）、
-  `handle_menu.rs`（探测线程刷两个缓存位）、`coordinator/message_handler.rs`（trait impl + 清账）、
-  `lib.rs`（`FullscreenKind`）。
+  `handle_menu.rs`（探测线程刷两个缓存位）、`coordinator/message_handler.rs`（trait impl + 清账 +
+  `preedit_uses_placeholder` 里的压制态强制嵌入编码，见 §4.4 末）、`lib.rs`（`FullscreenKind`）。
 - `wind_tsf/include/BinaryProtocol.h`、`IPCClient.h`、`src/IPCClient.cpp`（PAGE 解析）、
   `include/TextService.h`、`src/TextService.cpp`（UIElement 段重写、ActivateEx/Deactivate 接线）。
 
