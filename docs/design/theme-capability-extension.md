@@ -191,7 +191,7 @@ place_window (render_frame:883) → 叠加 ✔
 | status / tooltip / toast | ✔ | ✔ | ✔ |
 | menu.root / menu.item | ✔ | ✔ | ✔ |
 
-`footer_bar` 现只消费 padding/margin/text_color/font_*/prev_image/next_image；`candidate_list` 只消费 gap/band_gap/row_gap。
+`footer_bar` 现只消费 padding/margin/text_color/font_*/prev_image/next_image/prev_char/next_char；`candidate_list` 只消费 gap/band_gap/row_gap。
 
 ### 改法
 

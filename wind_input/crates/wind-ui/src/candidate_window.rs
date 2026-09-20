@@ -127,6 +127,21 @@ fn visible_whitespace(s: &str) -> Cow<'_, str> {
     }
     Cow::Owned(out)
 }
+
+/// 主题翻页字符 → 实际绘制的文本：未配（空串）时用内置箭头。
+///
+/// 仅空串算「未配」，空白字符不算——主题作者用 `prev_char = " "` 表达的是「这里留白」，
+/// 不能被当成未配置而悄悄换回 ‹ ›。（编辑器那条路进不来这种值：它 trim 后空串即存 undefined，
+/// 手写 toml 才配得出来。）
+///
+/// 只管「字符档画什么」，不管要不要走字符档——箭头图优先，见调用点。
+fn arrow_char<'a>(configured: &'a str, builtin: &'a str) -> &'a str {
+    if configured.is_empty() {
+        builtin
+    } else {
+        configured
+    }
+}
 use crate::window::{LayeredWindow, WindowMouse};
 use std::time::{Duration, Instant};
 
@@ -2874,7 +2889,12 @@ impl CandidateWindow {
             } else {
                 text_fs + item_pad.t + item_pad.b
             };
-            // 翻页箭头：主题配了 prev/next_image（如 _base 的 chevron SVG + tint）则用图标，否则回退文字 ‹ ›。
+            // 翻页箭头三档（顺序即主题编辑器「翻页符号」面板上公开写明的契约）：
+            // prev/next_image（如 _base 的 chevron SVG + tint）> prev/next_char > 内置文字 ‹ ›。
+            // 图配了 `ref = ""`（_qingfeng / msime 就这么清掉继承来的 chevron）时 arrow_icon
+            // 返回 None，于是落到字符档。
+            let prev_txt = arrow_char(&v.footer_bar.prev_char, "‹");
+            let next_txt = arrow_char(&v.footer_bar.next_char, "›");
             let prev_icon = self.arrow_icon(v.footer_bar.prev_image.as_ref(), prev_on);
             let next_icon = self.arrow_icon(v.footer_bar.next_image.as_ref(), next_on);
             // 图标保持主题尺寸（footer_fs 方形），水平居中靠对称内边距撑到 arrow_w；
@@ -2918,7 +2938,7 @@ impl CandidateWindow {
                 )
                 .child(arrow(
                     prev_icon,
-                    "‹",
+                    prev_txt,
                     TAG_PAGE_PREV,
                     prev_on,
                     self.hover == TAG_PAGE_PREV,
@@ -2939,7 +2959,7 @@ impl CandidateWindow {
                 )
                 .child(arrow(
                     next_icon,
-                    "›",
+                    next_txt,
                     TAG_PAGE_NEXT,
                     next_on,
                     self.hover == TAG_PAGE_NEXT,
@@ -5553,8 +5573,25 @@ mod font_plan_build_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{CandidateWindow, visible_whitespace};
+    use super::{CandidateWindow, arrow_char, visible_whitespace};
     use std::borrow::Cow;
+
+    /// 主题配的翻页字符必须原样落到渲染，只有「一个字符都没配」才回退内置箭头。
+    ///
+    /// 这条以前是断的：渲染侧把 ‹ › 写死，`footer_bar.prev_char` 解析到 RvNode 后无人消费，
+    /// 主题里写什么都被画回内置箭头（而主题编辑器的预览一直照配置画，两边从来没对齐过）。
+    /// 空白不算未配——`prev_char = " "` 是「这里留白」的显式意图，被当成未配置就又变回 ‹ ›，
+    /// 正是同一个 bug 的另一副面孔。
+    #[test]
+    fn arrow_char_falls_back_only_when_unset() {
+        assert_eq!(arrow_char("", "‹"), "‹", "未配 → 内置箭头");
+        assert_eq!(arrow_char("$", "‹"), "$", "配了 ASCII 符号 → 原样");
+        assert_eq!(arrow_char(")", "›"), ")", "配了 ASCII 符号 → 原样");
+        assert_eq!(arrow_char("◀", "‹"), "◀", "配了多字节字符 → 原样");
+        // 多字原样传递（触摸盒仍按单字宽算，多字会挤出去，故主题里以单符号为宜）
+        assert_eq!(arrow_char("上页", "‹"), "上页", "配了多字 → 原样");
+        assert_eq!(arrow_char(" ", "‹"), " ", "留白是显式意图，不回退");
+    }
 
     /// 主题位置偏移的方向语义：正值恒为「远离光标」——下方向下、上方向上。
     ///

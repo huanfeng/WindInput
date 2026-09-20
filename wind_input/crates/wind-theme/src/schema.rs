@@ -297,7 +297,9 @@ pub struct ViewNode {
     /// 仅 footer_bar：上/下翻页箭头图（可 SVG + tint 随主题变色）。
     pub prev_image: Option<ViewImage>,
     pub next_image: Option<ViewImage>,
-    /// 仅 footer_bar：上/下翻页字符（None=内置 ❮/❯）；未配图时生效。
+    /// 仅 footer_bar：上/下翻页字符（None/空=内置 ‹ ›）；**未配图时**生效。
+    /// 三档顺序 prev_image > prev_char > 内置，与主题编辑器「翻页符号」面板公开的契约一致：
+    /// 继承了带 chevron 的 base 又想用字符，得先 `prev_image = { ref = "" }` 清掉那张图。
     pub prev_char: Option<String>,
     pub next_char: Option<String>,
     /// 多行/多列布局间距（tooltip/toast 专有；None=渲染层兜底）。
