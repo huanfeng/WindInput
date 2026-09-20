@@ -410,6 +410,16 @@ fn resolve_views(v: &Views, palette: &HashMap<String, Rgba>, is_dark: bool) -> R
     rv.comment.selected =
         resolve_state(v.comment.selected.as_deref(), palette, is_dark, None, None);
     rv.comment.hover = resolve_state(v.comment.hover.as_deref(), palette, is_dark, None, None);
+    // footer_bar 的禁用态（首页的「上一页」/末页的「下一页」）：主题编辑器「禁用态」面板
+    // 配的就是它，此前这里不建、渲染层硬用全局 text_hint，于是面板上配了没反应、预览又
+    // 照配置画 —— 预览与实机因此对不上。
+    rv.footer_bar.disabled = resolve_state(
+        v.footer_bar.disabled.as_deref(),
+        palette,
+        is_dark,
+        None,
+        None,
+    );
 
     // 序号槽位字符（index 节点）：透传到 Resolved，协调器裁决优先级（用户 > 主题 > 默认）。
     rv.index_labels = v.index.labels.clone();
@@ -557,6 +567,32 @@ mod tests {
 
     fn load_jidian(is_dark: bool) -> Resolved {
         load_resolved_dirs(&[testdata_dir(), data_dir()], "jidian-classic", is_dark).unwrap()
+    }
+
+    /// footer_bar 的禁用态 patch 要一路活到 RvNode —— 翻页箭头灰显色的唯一来源。
+    ///
+    /// 这里从前根本不建：schema 收得下（footer_bar 是 ViewNode，带 disabled）、主题编辑器
+    /// 也把「禁用态」面板开给了它、预览照着画，唯独引擎 resolve 不建、渲染层硬用全局
+    /// text_hint。表现是主题作者在面板上配了没反应，且预览与实机对不上 —— 又一例
+    /// 「配置项存在但无人消费」。
+    #[test]
+    fn footer_bar_disabled_state_survives_resolve() {
+        let text = "[footer_bar.disabled]\ncolor = \"#FF0000\"\n";
+        let value: toml::Value = toml::from_str(text).unwrap();
+        let normalized = crate::normalize::normalize_theme(value);
+        let theme: Theme = normalized.try_into().unwrap();
+        let r = resolve(&theme, false, &[data_dir()]);
+        let d = r
+            .views
+            .footer_bar
+            .disabled
+            .as_ref()
+            .expect("footer_bar.disabled 应被构建");
+        assert_eq!(
+            d.text_color,
+            Some([255, 0, 0, 255]),
+            "禁用态文字色应解析出来"
+        );
     }
 
     #[test]

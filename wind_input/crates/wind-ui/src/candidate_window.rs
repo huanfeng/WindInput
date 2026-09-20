@@ -2893,7 +2893,14 @@ impl CandidateWindow {
         // 翻页器（多页时）：‹ p/t › —— 箭头可点击翻页，带悬停高亮 + 禁用态
         // mut：末尾装配段据归属（并入编码栏 / 候选行尾 / 竖排底部）用 take() 转移所有权。
         let mut pager = if self.pager_visible() {
-            let disabled = t.color("text_hint", [180, 180, 185, 255]);
+            // 禁用态箭头色：优先主题给 footer_bar 配的禁用态文字色（编辑器「禁用态」面板
+            // 就是配它），未配才回退全局 text_hint —— 回退保持旧观感，内置主题都没配。
+            let disabled = v
+                .footer_bar
+                .disabled
+                .as_ref()
+                .and_then(|d| d.text_color)
+                .unwrap_or_else(|| t.color("text_hint", [180, 180, 185, 255]));
             let marker_c = t.color("text_dim", [140, 140, 145, 255]);
             let accent = col(v.accent_bar.bg_color, [66, 133, 244, 255]);
             // 文字箭头启用色：优先 footer_bar.text_color，回退 accent。
@@ -4527,6 +4534,58 @@ mod pager_inline_tests {
             !found.iter().any(|s| s == "‹" || s == "›"),
             "内置箭头不该再出现, 实得 {found:?}"
         );
+    }
+
+    /// 主题给 footer_bar 配的禁用态文字色，要真的画到禁用那一侧的箭头上。
+    ///
+    /// 判据取「首页时上一页与下一页**不同色**」这种相对量：绝对色值要跟着回退链（未配时
+    /// 回退全局 text_hint）走, 写死就成了另一份需要同步的副本。resolve 那侧另有一条
+    /// footer_bar_disabled_state_survives_resolve 钉住「patch 建得出来」, 这条钉住「渲染
+    /// 真的读它」—— 两段都断过一次。
+    #[test]
+    fn theme_disabled_arrow_color_reaches_the_view_tree() {
+        let leaf_colors = |ch_prev: &str, ch_next: &str, disabled: Option<[u8; 4]>| {
+            let mut w = win(false, false, false, false, "");
+            let mut t = wind_theme::Resolved::default();
+            t.views.footer_bar.prev_char = ch_prev.into();
+            t.views.footer_bar.next_char = ch_next.into();
+            if let Some(c) = disabled {
+                t.views.footer_bar.disabled = Some(Box::new(wind_theme::RvNode {
+                    text_color: Some(c),
+                    ..Default::default()
+                }));
+            }
+            w.set_theme(t);
+            let mut found = Vec::new();
+            collect_colors(&laid(&w, false), &mut found);
+            found
+        };
+        // 首页：上一页禁用、下一页可用 —— 两者取色分属禁用/启用两条路径。
+        let red = [255, 0, 0, 255];
+        let got = leaf_colors("<", ">", Some(red));
+        let prev_c = got.iter().find(|(t, _)| t == "<").map(|(_, c)| *c);
+        let next_c = got.iter().find(|(t, _)| t == ">").map(|(_, c)| *c);
+        assert_eq!(
+            prev_c,
+            Some(red),
+            "禁用侧应用主题配的禁用态色, 实得 {got:?}"
+        );
+        assert_ne!(next_c, Some(red), "可用侧不该被禁用色染上");
+
+        // 未配禁用态：回退全局 text_hint，行为与从前一致（内置主题都没配）。
+        let plain = leaf_colors("<", ">", None);
+        let prev_plain = plain.iter().find(|(t, _)| t == "<").map(|(_, c)| *c);
+        assert!(prev_plain.is_some() && prev_plain != Some(red));
+    }
+
+    /// 递归收集树上 (文本, 文字色)。
+    fn collect_colors(v: &View, out: &mut Vec<(String, [u8; 4])>) {
+        if let Some(t) = &v.text {
+            out.push((t.clone(), v.text_color));
+        }
+        for c in &v.children {
+            collect_colors(c, out);
+        }
     }
 
     /// 多字翻页符号要把按钮（连同命中区）撑宽，而不是盖到页码上或被裁掉。
