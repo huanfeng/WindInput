@@ -660,7 +660,7 @@ fn init_logger() {
         return;
     }
 
-    // 便携模式：<exe>/userdata/logs；正常模式：%LOCALAPPDATA%\WindInput[Dev]\logs。
+    // 便携模式：<exe>/localdata/logs；正常模式：%LOCALAPPDATA%\WindInput[Dev]\logs。
     let log_dir = wind_config::Config::log_dir()
         .or_else(|| {
             std::env::current_exe()
