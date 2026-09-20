@@ -2893,6 +2893,8 @@ impl CandidateWindow {
             // prev/next_image（如 _base 的 chevron SVG + tint）> prev/next_char > 内置文字 ‹ ›。
             // 图配了 `ref = ""`（_qingfeng / msime 就这么清掉继承来的 chevron）时 arrow_icon
             // 返回 None，于是落到字符档。
+            // 这里看到的图必定是主题**自己写的**：只从 base 继承来的那张已在合并层让位给本层
+            // 写的字符（wind-theme `drop_inherited_arrow_images`），故此处无须再分辨来源。
             let prev_txt = arrow_char(&v.footer_bar.prev_char, "‹");
             let next_txt = arrow_char(&v.footer_bar.next_char, "›");
             let prev_icon = self.arrow_icon(v.footer_bar.prev_image.as_ref(), prev_on);

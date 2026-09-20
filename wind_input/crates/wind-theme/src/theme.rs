@@ -134,10 +134,69 @@ fn load_merged_dirs_at(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Re
         .and_then(|b| b.as_str())
         .filter(|b| !b.is_empty() && *b != name)
     {
-        let base = load_merged_dirs_at(dirs, base_name, depth + 1)?;
+        let mut base = load_merged_dirs_at(dirs, base_name, depth + 1)?;
+        drop_inherited_arrow_images(&mut base, &value);
         return Ok(merge(base, value));
     }
     Ok(value)
+}
+
+/// 翻页箭头的互斥组：(字符键, 图键)。同一节点里两者只会用一个。
+const ARROW_PAIRS: [(&str, &str); 2] = [("prev_char", "prev_image"), ("next_char", "next_image")];
+
+/// 合并前：把「本主题显式写了字符、却只从 base 继承来的那张箭头图」丢掉。
+///
+/// 同层优先级不变 —— 一个主题自己同时写了图和字符，仍是图优先（字符留作图 `ref` 解析
+/// 不出时的兜底，见 `candidate_window.rs` 的三档）。变的只是**跨层**：
+///
+/// `_base` 给了 chevron SVG，而派生主题写 `[footer_bar] prev_char = "$"` 时，它要的显然
+/// 是那个 `$`；让继承来的图把它挡死，作者就必须再补一行 `prev_image = { ref = "" }` 去
+/// 抵消一个自己从没写过的默认值 —— 这个动作没有人猜得到（2026-09-20 的用户反馈正是如此，
+/// 而 `_base` 那张图偏偏又是七个内置主题全都清掉、从未真正示人的一张）。
+///
+/// 判据是「本层写没写」而不是「值是什么」：显式写的压过继承来的，与 `ref = ""` 这种
+/// 显式清空并不冲突（那是本层写的，照样生效）。
+///
+/// 扁平（`[footer_bar]`，主题文件的人写形态）与规范嵌套（`[views.footer_bar]`，
+/// `normalize` 的产物形态）两种位置都看：合并跑在 normalize 之前，但两种形态都能进到
+/// 这里，只认一种就会留下静默的盲区。
+fn drop_inherited_arrow_images(base: &mut Value, over: &Value) {
+    for path in [
+        ["footer_bar"].as_slice(),
+        ["views", "footer_bar"].as_slice(),
+    ] {
+        let Some(o) = table_at(over, path) else {
+            continue;
+        };
+        let stale: Vec<&str> = ARROW_PAIRS
+            .iter()
+            .filter(|(c, i)| o.contains_key(*c) && !o.contains_key(*i))
+            .map(|(_, i)| *i)
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        let Some(b) = table_at_mut(base, path) else {
+            continue;
+        };
+        for key in stale {
+            b.remove(key);
+        }
+    }
+}
+
+/// 按键路径取表（任一段不是表则 None）。
+fn table_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a toml::value::Table> {
+    path.iter()
+        .try_fold(v, |cur, k| cur.get(k))
+        .and_then(Value::as_table)
+}
+
+/// [`table_at`] 的可变版。
+fn table_at_mut<'a>(v: &'a mut Value, path: &[&str]) -> Option<&'a mut toml::value::Table> {
+    path.iter()
+        .try_fold(v, |cur, k| cur.get_mut(k))
+        .and_then(Value::as_table_mut)
 }
 
 /// 深合并：over 覆盖 base。表递归合并；其余（标量/数组）由 over 覆盖。
@@ -234,5 +293,103 @@ mod tests {
         assert_eq!(img.get("ref").and_then(|v| v.as_str()), Some("a.svg"));
         assert_eq!(img.get("mode").and_then(|v| v.as_str()), Some("center"));
         assert_eq!(img.get("tint").and_then(|v| v.as_str()), Some("#222222"));
+    }
+
+    /// 合并 + 互斥规则的一次调用（测试里反复用到的两行）。
+    fn merged(base: &str, over: &str) -> Value {
+        let mut b: Value = toml::from_str(base).unwrap();
+        let o: Value = toml::from_str(over).unwrap();
+        drop_inherited_arrow_images(&mut b, &o);
+        merge(b, o)
+    }
+
+    /// 取 `[footer_bar]` 下某键（不存在则 None）。
+    fn footer<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+        v.get("footer_bar").and_then(|f| f.get(key))
+    }
+
+    /// 派生主题写了翻页字符 → 继承来的箭头图让位，字符才是作者要的东西。
+    ///
+    /// 这条不成立的话，任何 `base = "_base"` 的主题写 `prev_char` 都石沉大海，而
+    /// 补救动作（`prev_image = { ref = "" }` 抵消一个自己没写过的默认值）无从猜起。
+    #[test]
+    fn explicit_char_drops_inherited_arrow_image() {
+        let m = merged(
+            "[footer_bar]\nprev_image = { ref = \"chevron.svg\" }\nnext_image = { ref = \"chevron2.svg\" }\n",
+            "[footer_bar]\nprev_char = \"$\"\nnext_char = \")\"\n",
+        );
+        assert!(footer(&m, "prev_image").is_none(), "继承的上一页图应让位");
+        assert!(footer(&m, "next_image").is_none(), "继承的下一页图应让位");
+        assert_eq!(footer(&m, "prev_char").and_then(|v| v.as_str()), Some("$"));
+    }
+
+    /// 让位只按「本层写没写」判，与写的是什么值无关：
+    /// 上一页写了字符 → 上一页的图让位；下一页没写 → 下一页的图原样继承。
+    /// 两侧互不牵连，否则「只想改一边」的主题会莫名丢掉另一边的图。
+    #[test]
+    fn inherited_image_survives_on_the_side_without_char() {
+        let m = merged(
+            "[footer_bar]\nprev_image = { ref = \"a.svg\" }\nnext_image = { ref = \"b.svg\" }\n",
+            "[footer_bar]\nprev_char = \"$\"\n",
+        );
+        assert!(footer(&m, "prev_image").is_none());
+        assert_eq!(
+            footer(&m, "next_image")
+                .and_then(|i| i.get("ref"))
+                .and_then(|v| v.as_str()),
+            Some("b.svg"),
+            "没写 next_char 的那侧不受影响"
+        );
+    }
+
+    /// 同层仍是图优先：一个主题自己把图和字符都写上，图留着
+    /// （字符退为图 `ref` 解析不出时的兜底）。让位只针对**继承来的**图。
+    #[test]
+    fn same_layer_image_and_char_both_kept() {
+        let m = merged(
+            "[footer_bar]\nfont_size = -4\n",
+            "[footer_bar]\nprev_char = \"$\"\nprev_image = { ref = \"own.svg\" }\n",
+        );
+        assert_eq!(
+            footer(&m, "prev_image")
+                .and_then(|i| i.get("ref"))
+                .and_then(|v| v.as_str()),
+            Some("own.svg"),
+            "本层自己写的图不该被本层自己写的字符挤掉"
+        );
+        assert_eq!(footer(&m, "prev_char").and_then(|v| v.as_str()), Some("$"));
+    }
+
+    /// `ref = ""`（_qingfeng / msime 清掉继承图的写法）仍是**本层写的图**，
+    /// 照常保留 —— 它一路传到渲染层才解析成空、回退字符档，与本规则不冲突。
+    #[test]
+    fn explicit_empty_ref_is_still_an_own_image() {
+        let m = merged(
+            "[footer_bar]\nprev_image = { ref = \"chevron.svg\" }\n",
+            "[footer_bar]\nprev_char = \"$\"\nprev_image = { ref = \"\" }\n",
+        );
+        assert_eq!(
+            footer(&m, "prev_image")
+                .and_then(|i| i.get("ref"))
+                .and_then(|v| v.as_str()),
+            Some(""),
+            "显式清空是本层的意思, 该原样留着"
+        );
+    }
+
+    /// 规范嵌套形态（`[views.footer_bar]`）同样受规则约束 —— 合并虽跑在 normalize
+    /// 之前, 但主题文件本就可以直接写 views 表, 只认扁平形态会留下静默盲区。
+    #[test]
+    fn rule_applies_to_nested_views_form() {
+        let m = merged(
+            "[views.footer_bar]\nprev_image = { ref = \"chevron.svg\" }\n",
+            "[views.footer_bar]\nprev_char = \"$\"\n",
+        );
+        let f = m
+            .get("views")
+            .and_then(|v| v.get("footer_bar"))
+            .expect("views.footer_bar");
+        assert!(f.get("prev_image").is_none(), "嵌套形态也应让位");
+        assert_eq!(f.get("prev_char").and_then(|v| v.as_str()), Some("$"));
     }
 }

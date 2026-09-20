@@ -105,7 +105,7 @@ pub struct RvNode {
     pub bg_image: Option<RvImage>,
     pub bg_gradient: Option<RvGradient>,
     pub layers: Vec<RvImage>,
-    /// 仅 footer_bar：翻页箭头图/字符（图优先于字符，见 schema 同名字段）。
+    /// 仅 footer_bar：翻页箭头图/字符（同层图优先；继承来的图已在合并层让位，见 schema 同名字段）。
     pub prev_image: Option<RvImage>,
     pub next_image: Option<RvImage>,
     pub prev_char: String,
