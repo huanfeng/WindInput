@@ -1333,21 +1333,57 @@ impl EngineManager {
             .clone()
     }
 
-    /// 反查索引缓存路径：`<cache>/<方案目录>/<方案 id>.wridx`。
+    /// 反查索引缓存路径：`<cache>/<方案键>/<方案键>.wridx`。
     ///
     /// # 为什么键是方案 id 而不是主词库路径
     ///
     /// 索引内容取决于该方案启用的**整组**词库，而「两个方案共用同一个主库、各挂不同扩展」
-    /// 是常态。`combined.wdat` 当年正是按主库命名的，其代码注释里就写着这挡不住
-    /// 「两个方案指向同一个 combined」——那会让两个方案反复顶掉对方的缓存。
+    /// 是常态（出厂的 `shuangpin` 与 `pinyin` 就共用 `pinyin/rime_frost.dict.yaml`）。
+    /// `combined.wdat` 当年正是按主库命名的，其代码注释里就写着这挡不住「两个方案指向同一个
+    /// combined」——那会让两个方案反复顶掉对方的缓存。
     ///
-    /// 方案 id 会成为文件名，故只保留 ASCII 字母/数字/`-`/`_`，其余一律换成 `_`：
-    /// 目录部分沿用 `cache_path` 已经算好的方案目录，这里只换文件名，不引入新的路径拼接。
+    /// # ⚠️ 目录也必须由 id 决定，不能从主词库路径推
+    ///
+    /// 文件名一直是方案 id，**目录**却曾经沿用 `cache_path(first_dict, ..)` 算出的命名空间。
+    /// 那是错的：调用点手里的 `first_dict` 是 [`wind_dict::cached::CachedDict::source_file`]，
+    /// 即已经落在缓存里的 `.wdat`。那条路径里**没有 `schemas` 段**，
+    /// [`wind_dict::cache_ns::schema_namespace`] 于是走回退分支取父目录名——方案把主库放在
+    /// `schemas/ime_wubi86/Default/` 下时，索引就落成了 `<cache>/Default/ime_wubi86.wridx`
+    /// （论坛 t120）。两个方案各把主库放进自己的 `Default/` 时，它们的索引还会一起挤进那个
+    /// 与任何方案都不对应的 `<cache>/Default/`。
+    ///
+    /// 改成整条路径只由 id 决定后，它与任何源路径都无关，上面两条同时消解。出厂的扁平方案
+    /// （主库在 `schemas/<id>/` 下）算出来的路径与旧实现逐字节一致，存量索引不失效；
+    /// 共用主库的 `shuangpin` 会换一次目录（`<cache>/pinyin/` → `<cache>/shuangpin/`），
+    /// 重建一次。旧路径下的孤儿不清，理由同 [`cache_path`] 的那节。
     ///
     /// **无缓存根时返回 `None` = 本次不落盘**。刻意不像 `cache_path` 那样回退到「源文件旁」
     /// ——词库源常在只读的安装目录，而反查索引是个上百 MB 的产物，落错地方比不落更糟。
-    fn reverse_index_cache_path(schema_id: &str, first_dict: &Path) -> Option<std::path::PathBuf> {
-        CACHE_DIR.get()?.as_ref()?;
+    fn reverse_index_cache_path(schema_id: &str) -> Option<std::path::PathBuf> {
+        let dir = CACHE_DIR.get()?.as_ref()?;
+        Self::reverse_index_cache_path_in(dir, schema_id)
+    }
+
+    /// [`reverse_index_cache_path`](Self::reverse_index_cache_path) 的纯函数内核：缓存根显式
+    /// 传入。`CACHE_DIR` 是进程级 `OnceLock`，测试无从改写它，路径形态只能从这里断言。
+    fn reverse_index_cache_path_in(
+        cache_root: &Path,
+        schema_id: &str,
+    ) -> Option<std::path::PathBuf> {
+        let key = Self::schema_cache_key(schema_id)?;
+        Some(cache_root.join(&key).join(format!("{key}.wridx")))
+    }
+
+    /// 方案 id → 可安全当**目录名和文件名**用的键；id 为空时 `None`。
+    ///
+    /// 只保留 ASCII 字母/数字/`-`/`_`，其余一律换成 `_`。转义**真的发生**时再附一段 id 的
+    /// 短哈希：不然「五笔」与「拼音」会双双转义成同一串下划线，而目录现在也由这个键决定，
+    /// 两个方案会互相顶掉对方的索引（旧实现里目录另有来源，这条碰撞被目录挡住了一半）。
+    /// ASCII id 不触发哈希，路径与旧实现逐字节一致。
+    ///
+    /// 哈希用自带的 FNV-1a 而不是 `DefaultHasher`：后者的输出**不保证跨 Rust 版本稳定**，
+    /// 而这串字符会进路径——`cache_fp` 里用它只影响「是否重建一次」，这里却会留下孤儿目录。
+    fn schema_cache_key(schema_id: &str) -> Option<String> {
         let safe: String = schema_id
             .chars()
             .map(|c| {
@@ -1361,7 +1397,15 @@ impl EngineManager {
         if safe.is_empty() {
             return None;
         }
-        Some(cache_path(first_dict, "wridx").with_file_name(format!("{safe}.wridx")))
+        if safe == schema_id {
+            return Some(safe);
+        }
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in schema_id.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Some(format!("{safe}_{h:016x}"))
     }
 
     /// 各词库缓存产物的摘要列表，用作 `.wridx` 的二级指纹源（顺序即语义）。
@@ -1478,10 +1522,9 @@ impl EngineManager {
         // 顺手清掉旧版留下的合并缓存（本方案已不再需要它）。
         Self::purge_legacy_combined(&schema, &schemas);
 
-        let cache = dicts
-            .first()
-            .and_then(|d| d.source_file())
-            .and_then(|p| Self::reverse_index_cache_path(schema_id, p));
+        // 索引落盘与否只看缓存根：「某本词库处于内存模式」这一守卫由下面的 digests 兜住，
+        // 它查的是**全部**词库，比这里曾经只看首本词库的 `source_file()` 严格。
+        let cache = Self::reverse_index_cache_path(schema_id);
         let digests = Self::reverse_index_source_digests(&dicts);
 
         // ① 复用：词库一个没变就直接开盘上的那份，连构建都不发生。
@@ -5801,6 +5844,53 @@ impl EngineManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 反查索引落在**方案自己的目录**下，且与主词库放得多深无关。
+    ///
+    /// 论坛 t120：主库在 `schemas/ime_wubi86/Default/` 时，索引曾落到
+    /// `<cache>/Default/ime_wubi86.wridx` —— 目录来自主库 `.wdat` 的父目录名，
+    /// 而 `Default` 与任何方案都不对应，多个方案还会挤进同一个。
+    #[test]
+    fn reverse_index_path_is_scoped_by_schema_id_only() {
+        let root = Path::new("cache");
+        let p = EngineManager::reverse_index_cache_path_in(root, "ime_wubi86").unwrap();
+        assert_eq!(p, root.join("ime_wubi86").join("ime_wubi86.wridx"));
+
+        // 出厂扁平方案：与旧实现逐字节一致，存量索引不失效。
+        assert_eq!(
+            EngineManager::reverse_index_cache_path_in(root, "wubi86").unwrap(),
+            root.join("wubi86").join("wubi86.wridx")
+        );
+
+        // 共用主库的两个方案（shuangpin 的主库在 pinyin/ 下）各归各的目录。
+        let a = EngineManager::reverse_index_cache_path_in(root, "pinyin").unwrap();
+        let b = EngineManager::reverse_index_cache_path_in(root, "shuangpin").unwrap();
+        assert_ne!(a.parent(), b.parent());
+    }
+
+    /// 转义后同形的中文方案名不能共用一条路径——目录现在也由这个键决定。
+    #[test]
+    fn schema_cache_key_disambiguates_escaped_ids() {
+        // ASCII id 不触发哈希：路径必须与旧实现保持逐字节一致。
+        assert_eq!(
+            EngineManager::schema_cache_key("wubi86_pinyin").as_deref(),
+            Some("wubi86_pinyin")
+        );
+
+        let a = EngineManager::schema_cache_key("五笔").expect("非空 id 必有键");
+        let b = EngineManager::schema_cache_key("拼音").expect("非空 id 必有键");
+        assert_ne!(a, b, "两个中文方案名不能算出同一个键");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "键会当目录名和文件名用，必须全是安全字符：{a}"
+        );
+
+        // 同一个 id 必须恒等——键进了路径，抖一下就是一批孤儿加一次全量重建。
+        assert_eq!(EngineManager::schema_cache_key("五笔"), Some(a));
+
+        assert_eq!(EngineManager::schema_cache_key(""), None);
+    }
 
     /// 混输主引擎的整句开关**不继承** `primary_schema` 的声明。
     ///
