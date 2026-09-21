@@ -58,6 +58,21 @@ pub(crate) const USER_ABBREV: TableDefinition<&str, &[u8]> = TableDefinition::ne
 /// `StoreUserLayer` 与 `StoreTempLayer`，只索引其一等于只修一半——自动造词开着时，
 /// 临时词库（默认上限 5000 条）仍会被逐切点全量枚举。
 pub(crate) const TEMP_ABBREV: TableDefinition<&str, &[u8]> = TableDefinition::new("temp_abbrev");
+/// 自动造词的**草稿层**：key = `"{schema}\0{code}\0{text}"`，value = {created_at} 定长 8B。
+///
+/// 滑窗切出的候选词先落这里，用户真的用它上屏过一次才跃迁进 [`TEMP_WORDS`]
+/// （设计见 `docs/design/auto-phrase-draft-layer.md`）。与临时词库的分界是**谁验证过它**：
+/// 草稿是机器猜的、带有效期、到期没人用就丢；临时词是用户用过的、长期留着。
+///
+/// **value 不存 weight**：草稿在候选里恒沉底（只精确召回 + 沉底键），weight 不参与任何比较，
+/// 存了就是一个永远读不到却要维护的字段。
+///
+/// ⚠️ **刻意没有伴随的简拼索引**（对比 [`TEMP_ABBREV`]）：草稿的写入量比临时词高一两个
+/// 数量级，配索引等于把写放大也翻上去。代价是草稿只支持精确码召回——而它的定位就是
+/// 「你刚打过的，用同样的码再打一次就出来」，简拼召回等它跃迁进临时词库之后自然就有。
+/// 这在 trait 层面是免费的：`DictLayer::search_abbrev` 的默认实现就返回空、不回退全表扫。
+/// 新表无需迁移：`init_tables` 在写事务里 `open_table` 即创建。
+pub(crate) const DRAFT_WORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("draft_words");
 /// 用户词频：key = "{schema}\0{code}\0{text}"，value = {count,last_used}（见 frequency.md）
 pub(crate) const FREQ: TableDefinition<&str, &[u8]> = TableDefinition::new("freq");
 /// Shadow 规则：key = "{schema}\0{code}"
@@ -176,6 +191,7 @@ impl Store {
             w.open_table(USER_ABBREV)?;
             w.open_table(TEMP_WORDS)?;
             w.open_table(TEMP_ABBREV)?;
+            w.open_table(DRAFT_WORDS)?;
             w.open_table(FREQ)?;
             w.open_table(SHADOW)?;
             w.open_table(QUICK_FORMAT)?;
