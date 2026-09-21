@@ -33,7 +33,16 @@
 
 - 状态机：`wind-coordinator/src/auto_phrase.rs`（**纯逻辑、零 IO**，打断语义全部单测覆盖）
 - 编码器：`wind-engine/src/encoder.rs`（**纯函数**，公式求值 + 规则匹配）
-- 单字全码表：`wind-dict/src/cached.rs::build_single_char_full_codes`
+- 单字全码表：`wind-dict/src/cached.rs::build_single_char_full_codes`，
+  落盘格式 `wind-dict/src/charcodes.rs`（`.wscc`）
+
+  这张表与反查索引同源（同一批词库、同一次全表扫描），**造词的就绪闸是两者的与**
+  （`EngineManager::single_char_codes_ready` ∧ `reverse_index_if_ready`）。它此前是唯一
+  没有磁盘缓存的那份派生产物，于是 `.wridx` 命中缓存省下的时间被它原样吃回去——
+  开机后头几次造词照样整次跳过。补上 `.wscc` 后（沿用 `.wridx` 的指纹/原子替换那一套，
+  但**不做 mmap**：只收单字条目、不随词条数增长，wubi86 实测 185 KB）该窗口大幅缩短。
+  ⚠️ 它的指纹比 `.wridx` 多一项 `max_code_length`——这张表拿它当闸筛超长码，
+  而反查索引与之无关；漏了这一项，用户改了码长而词库未动时会永久复用旧表。
 - 接线与 IO：`wind-coordinator/src/handle_addword.rs`
 
 ### flush 流程
