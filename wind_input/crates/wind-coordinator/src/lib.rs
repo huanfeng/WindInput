@@ -14,6 +14,7 @@ pub mod coordinator;
 pub(crate) mod debug_support;
 #[cfg(windows)]
 pub mod direct_switch;
+pub mod draft_window;
 pub mod edit_ops;
 #[cfg(test)]
 mod email_mode_tests;

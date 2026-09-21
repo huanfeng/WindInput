@@ -64,7 +64,7 @@ fn trim_segs_start(segs: &[CommittedSeg], max_chars: usize) -> usize {
 /// 当成汉字混进词里。
 /// ⚠️ 与 `wind_candidate::is_han`（常用性判定域）**刻意不同源**：那边把部首、笔画一并纳入
 /// （它们在码表里占着汉字编码出现），这边不能——部首不是造词素材。补充平面的处理则一致。
-fn is_han(c: char) -> bool {
+pub(crate) fn is_han(c: char) -> bool {
     matches!(c as u32,
         0x4E00..=0x9FFF      // 基本区
         | 0x3400..=0x4DBF    // 扩展 A
