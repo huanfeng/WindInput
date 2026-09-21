@@ -158,6 +158,15 @@ fn toast_clamp(word: &str) -> String {
     word.chars().take(MAX).collect::<String>() + "…"
 }
 
+/// 造词的方案对：**出码方案**与**入库方案**是两个不同的 id。
+///
+/// 出码要真实方案（读它的 `[[encoder.rules]]` 与码表词库），入库要数据方案
+/// （混输折叠到主码表）。对齐 `add_word_target_schema` 的既有区分。
+pub(crate) struct PhraseSchemas {
+    pub(crate) encode: String,
+    pub(crate) write: String,
+}
+
 impl Coordinator {
     // ──────────────────────────────────────────────────────────────────────
     // 码表自动造词：连续单字 + 终止信号 = 自动组词
@@ -215,16 +224,10 @@ impl Coordinator {
         // 造词只喂「整段新插入的文本」，刻意仍限这两种变体：`ReplaceBackward` 是回改已上屏
         // 的内容、`Commit*` 系的 commit_text 是上一段的收尾，都不是新起的一段输入。
         // 与上面的打点判据不同源是**有意**的，别顺手合并。
-        let text = match action {
-            KeyAction::InsertText { text, .. } | KeyAction::InsertTextWithCursor { text, .. } => {
-                text.as_str()
-            }
-            _ => return,
-        };
-        if text.is_empty() {
-            return;
-        }
-        self.feed_auto_phrase(text);
+        // 码表造词走滑窗草稿层，吃的是**一切真落屏的文字**（五种变体），与上面的自提交
+        // 打点同源。旧的 `feed_auto_phrase` 只取 `InsertText`/`InsertTextWithCursor` 两种
+        // ——那是「只关心新起的一段输入」的判据，随连续单字模型一起退役了。
+        self.note_draft_commit(action);
     }
 
     /// 造词是否启用（码表/混输方案 + 开关开启）。拼音方案走 `[pinyin.auto_learn]` 的
@@ -233,75 +236,20 @@ impl Coordinator {
         !self.engine_mgr.is_pinyin() && self.engine_mgr.codetable_settings().auto_phrase.enabled
     }
 
-    /// 把上屏文本喂给造词缓冲。
+    /// 终止信号统一入口（回车/焦点丢失/IME 停用/模式切换/切换方案/光标移动）。
     ///
-    /// - 全汉字单字 → 追加（混输下拼音打出的单字**同样计入**：编码在 flush 时由
-    ///   `[[encoder.rules]]` 从字重算，段自身带什么码不影响结果，故来源无意义）
-    /// - 全汉字多字词 → 终止（选了词组说明这不是散字序列）
-    /// - 含非汉字（标点/英文/数字/空格）→ 终止
-    fn feed_auto_phrase(&self, text: &str) {
-        if !self.auto_phrase_enabled() {
-            return;
-        }
-        let all_han = text.chars().all(is_han);
-        let now = std::time::Instant::now();
-        let idle = self.auto_phrase_idle_timeout();
-        let flushed = {
-            let mut buf = self.auto_phrase.lock().unwrap_or_else(|e| e.into_inner());
-            if all_han {
-                buf.on_commit(text, now, idle)
-            } else {
-                // 非汉字上屏 = 终止符，且该文本自身不入缓冲。
-                buf.terminate()
-            }
-        }; // 锁在此释放：flush 要做词库 IO，不可持缓冲锁。
-        if let Some(seq) = flushed {
-            // 与 `terminate_auto_phrase` 的「终止信号」日志对齐：本路径同样会造词，
-            // 缺了它排查时会看到「凭空出现的已造词」，误以为触发源丢了。
-            //
-            // ⚠️ **三条来源必须分开写**。`flushed` 为 `Some` 有两个出处：多字词终止
-            // （`AutoPhraseBuf::on_commit` 的 `!is_single`）与**单字 idle 超时**（`stale`），
-            // 两者 `all_han` 同为 true。原先只按 `all_han` 二分，于是超时被一律打成
-            // 「多字词上屏」——真机日志里一条单字上屏的记录长得和词组上屏一模一样。
-            // 这不是措辞瑕疵而是**会把排查带向相反结论**：`aqgy` 那次事故里，按 Y 上屏的
-            // 是单字「葡」，日志却说「多字词上屏」，照字面读会得出「第 4 码上屏了词组」。
-            //
-            // 判据无需回改 `on_commit` 签名：`all_han` 且 `text` 为单字时，能走到这里就
-            // 只可能是 stale 分支（单字未超时恒返回 `None`，压根进不来）。
-            if !all_han {
-                debug!("auto-phrase: 终止信号 非汉字上屏 → flush {} 字", seq.len());
-            } else if text.chars().count() > 1 {
-                debug!("auto-phrase: 终止信号 多字词上屏 → flush {} 字", seq.len());
-            } else {
-                // 语义与上面两条**不同**：序列不是被终止，而是超时截断后本字另起一段。
-                debug!(
-                    "auto-phrase: 空闲超时（间隔 > {:?}）→ flush {} 字，本字另起新序列",
-                    idle,
-                    seq.len()
-                );
-            }
-            self.flush_auto_phrase(&seq);
-        }
-    }
-
-    /// 终止信号统一入口（标点/回车/空格/焦点丢失/IME 停用/模式切换/光标移动）。
-    /// `reason` 只进 DEBUG 日志，便于排查「词为什么没造出来 / 为什么被切断」。
+    /// ⚠️ **标点与空格不走这里**——它们由 `note_draft_commit` 里「文本含非汉字」内联判定，
+    /// 同旧模型 `feed_auto_phrase` 的 `all_han` 判据。
+    ///
+    /// 函数名保留 `auto_phrase` 是为了不动它那七八个调用点（`message_handler` 与
+    /// `coordinator` 里的焦点/模式/光标回调）；连续单字模型退役后，它断的是滑窗草稿流。
+    /// `reason` 只进 DEBUG 日志，便于排查「这一段为什么被切断」。
     pub(crate) fn terminate_auto_phrase(&self, reason: &str) {
-        if !self.auto_phrase_enabled() {
-            return;
-        }
-        let flushed = {
-            let mut buf = self.auto_phrase.lock().unwrap_or_else(|e| e.into_inner());
-            buf.terminate()
-        };
-        if let Some(seq) = flushed {
-            debug!("auto-phrase: 终止信号 {} → flush {} 字", reason, seq.len());
-            self.flush_auto_phrase(&seq);
-        }
+        self.terminate_draft_window(reason);
     }
 
     /// idle 超时（连续单字最大间隔）。0 = 用默认 5s。
-    fn auto_phrase_idle_timeout(&self) -> std::time::Duration {
+    pub(crate) fn auto_phrase_idle_timeout(&self) -> std::time::Duration {
         let ms = self
             .rt()
             .config
@@ -310,102 +258,91 @@ impl Coordinator {
             .auto_phrase
             .idle_timeout_ms;
         if ms == 0 {
-            crate::auto_phrase::DEFAULT_IDLE_TIMEOUT
+            crate::draft_window::DEFAULT_IDLE_TIMEOUT
         } else {
             std::time::Duration::from_millis(ms as u64)
         }
     }
 
-    /// 对吐出的字序列造词：长度策略 → 取码 → 查重 → 写临时层 → 晋升判定 → 淘汰。
-    fn flush_auto_phrase(&self, seq: &[char]) {
-        let ap = self.engine_mgr.codetable_settings().auto_phrase;
-        let Some(word) =
-            crate::auto_phrase::word_from_seq(seq, ap.min_phrase_len, ap.max_phrase_len)
-        else {
-            return; // 太短或超长（超长整体放弃，不切末尾 N 字——中间切一刀多半是杂词）
-        };
+    pub(crate) fn resolve_phrase_schemas(&self) -> Option<PhraseSchemas> {
         let active = self.engine_mgr.active_schema_id();
-        // 出码方案与入库方案是**两个不同的 id**（对齐 `add_word_target_schema` 的既有区分）：
-        // 出码要真实方案（读它的 [[encoder.rules]] 与码表词库），入库要数据方案（混输折叠到主码表）。
-        let encode_schema =
-            if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("mixed") {
-                match self.engine_mgr.mixed_primary_schema(&active) {
-                    Some(s) => s,
-                    None => {
-                        debug!("auto-phrase: 混输方案主码表缺失，跳过造词");
-                        return;
-                    }
+        let encode = if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("mixed") {
+            match self.engine_mgr.mixed_primary_schema(&active) {
+                Some(s) => s,
+                None => {
+                    debug!("auto-phrase: 混输方案主码表缺失，跳过造词");
+                    return None;
                 }
-            } else {
-                active.clone()
-            };
-        // ★★★ 索引未就绪时**跳过本次造词**并后台预热，两条理由缺一不可：
-        //
-        // ① 不能在此现建：本函数跑在上屏（按键）线程上，而单字全码表与反查索引都是
-        //    惰性全量构建，大词库上是秒级——TSF→服务同步 IPC，那一等就是整机卡顿。
-        // ② **更不能把「没就绪」当成「查不到」继续往下走**：下面的查重①靠
-        //    `word_codes_in` 判断系统词库是否已有这个「码+词」。拿空结果去判，
-        //    `"".split('/')` 产出 `[""]`，永远不等于非空的 code ⇒ 去重判据**静默失效**
-        //    ⇒ 往临时层写入一条系统词库本就有的重复条目。那不是「这一屏少显示点东西」，
-        //    而是**写进 redb 的持久错误**：候选出现重复项，且该条目计入提升计数、
-        //    可能被 `maybe_promote_temp` 永久固化进用户词库。
-        //
-        // 自动造词是机会性功能，丢掉这一次完全无感；下次上屏时通常已就绪。
-        if self
-            .engine_mgr
-            .reverse_index_if_ready(&encode_schema)
-            .is_none()
-            || !self.engine_mgr.single_char_codes_ready(&encode_schema)
+            }
+        } else {
+            active.clone()
+        };
+        if self.engine_mgr.reverse_index_if_ready(&encode).is_none()
+            || !self.engine_mgr.single_char_codes_ready(&encode)
         {
             debug!("auto-phrase: 词库索引未就绪，跳过本次造词并后台预热");
-            self.ensure_word_encoding_async(&encode_schema);
-            return;
+            self.ensure_word_encoding_async(&encode);
+            return None;
         }
-        let code = match self.engine_mgr.encode_word(&encode_schema, &word) {
+        let write = self
+            .engine_mgr
+            .write_data_schema_id(&active, CandidateSource::CodeTable)
+            .or_else(|| {
+                debug!("auto-phrase: 无法归属入库方案，跳过造词");
+                None
+            })?;
+        Some(PhraseSchemas { encode, write })
+    }
+
+    /// 给一个词取码并过两道查重闸；通过则返回它的码表词组码。
+    ///
+    /// 查重的两道（系统词库 / 用户词库）**不是旧模型的包袱**，草稿层同样要过：
+    /// 造一个用户本来就打得出的词，只会在候选面上多出一条重复项。
+    ///
+    /// `also_skip_temp` 供草稿层用——临时词库已有即说明用户已经用过它，
+    /// 再记一份草稿是冗余（候选面虽会按 text 去重，草稿表的容量却是实打实被占掉的）。
+    pub(crate) fn encode_and_dedup(
+        &self,
+        sc: &PhraseSchemas,
+        word: &str,
+        also_skip_temp: bool,
+    ) -> Option<String> {
+        let code = match self.engine_mgr.encode_word(&sc.encode, word) {
             Ok(c) => c,
             Err(e) => {
                 // DEBUG 级可带具体字符（CLAUDE.md 隐私规则：INFO 及以下不得带）。
                 // 这条是排查「自动造词不生效」最关键的线索——通常是某个字在码表里没有全码。
                 debug!("auto-phrase: 取码失败，整词作废（{}）: {}", word, e);
-                return;
+                return None;
             }
         };
         // 查重①系统词库：反查索引给的是该词在词库里的**实际**编码列表（`a/ab/abc`），
         // 命中同码即说明系统库已收录这个「码+词」，不必再造。
-        // 上面的就绪闸保证了这里的 `None` 不可能是「索引没建好」，故 `unwrap_or_default`
-        // 是安全的——它只会在「方案 id 为空」时兜底，而那种情况下本来也无从查重。
+        // 就绪闸保证了这里的 `None` 不可能是「索引没建好」，故 `unwrap_or_default` 安全。
         let existing = self
             .engine_mgr
-            .word_codes_in(&encode_schema, &word)
+            .word_codes_in(&sc.encode, word)
             .unwrap_or_default();
         if existing.split('/').any(|c| c == code) {
             debug!("auto-phrase: 系统词库已有 {} -> {}，跳过", code, word);
-            return;
+            return None;
         }
-        let Some(store) = &self.store else { return };
-        let Some(schema) = self
-            .engine_mgr
-            .write_data_schema_id(&active, CandidateSource::CodeTable)
-        else {
-            debug!("auto-phrase: 无法归属入库方案，跳过造词");
-            return;
-        };
-        // 查重②用户词库：同「码+词」已存在则不再写临时层（否则候选会出现重复项）。
-        if let Ok(recs) = store.get_user_words(&schema, &code)
+        let store = self.store.as_ref()?;
+        // 查重②用户词库：同「码+词」已存在则不再写（否则候选会出现重复项）。
+        if let Ok(recs) = store.get_user_words(&sc.write, &code)
             && recs.iter().any(|r| r.text == word)
         {
             debug!("auto-phrase: 用户词库已有 {} -> {}，跳过", code, word);
-            return;
+            return None;
         }
-        // 码表词组码无音节边界语义 → boundary=0（消费方降级回 DAG）。
-        match store.learn_temp_word(&schema, &code, &word, LEARN_ADD_WEIGHT, 0) {
-            Ok(count) => {
-                debug!("auto-phrase: 已造词 {} -> {} (count={})", code, word, count);
-                self.maybe_promote_temp(store, &schema, &code, &word, count, ap.promote_count);
-                self.maybe_evict_temp(store, &schema);
-            }
-            Err(e) => warn!("auto-phrase: 写临时词库失败: {}", e),
+        if also_skip_temp
+            && let Ok(recs) = store.get_temp_words(&sc.write, &code)
+            && recs.iter().any(|r| r.text == word)
+        {
+            debug!("draft: 临时词库已有 {} -> {}，不再记草稿", code, word);
+            return None;
         }
+        Some(code)
     }
 
     /// 临时词库上限淘汰。按写入次数节流——每次造词都全表扫描代价过高，而上限本身

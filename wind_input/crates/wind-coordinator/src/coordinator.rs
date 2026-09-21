@@ -1252,10 +1252,20 @@ pub struct Coordinator {
     pub(crate) punct: Mutex<PunctuationConverter>,
     /// 智能符号模式待命态（同键连按删中文标点改英文）
     pub(crate) smart_symbol: Mutex<SmartSymbolArm>,
-    /// 码表自动造词的连续单字缓冲。**独立于 `State`**：终止信号多来自 IPC 回调
-    /// （焦点丢失 / IME 停用 / 光标移动），那些路径不持 `state` 锁，塞进 `State` 会
-    /// 逼出跨锁调用。见 `auto_phrase` 模块头注释。
-    pub(crate) auto_phrase: Mutex<crate::auto_phrase::AutoPhraseBuf>,
+    /// 滑窗草稿的**落屏文本流**缓冲。独立于 `State` 的理由同 `auto_phrase`。
+    ///
+    /// 与 `auto_phrase` 的分界：那边缓冲「连续单字序列」（多字词即终止），这边缓冲
+    /// 「最近落屏的文本流」（词组照样进流）。见 `draft_window` 模块头注释。
+    pub(crate) draft_window: Mutex<crate::draft_window::DraftWindowBuf>,
+    /// 待落库的草稿词队列。
+    ///
+    /// ★ **按键路径上只做「滑窗切分 + push」**，取码、查重、写库全在后台线程
+    /// （`spawn_draft_flush`）。草稿的产生速率约每字 4 条，而取码要查单字全码表、
+    /// 查重要查反查索引与用户词库——任何一项落在上屏线程上都是在给每次按键加钱。
+    pub(crate) draft_queue: Mutex<Vec<String>>,
+    /// 是否已有草稿 flush 线程在跑。没有这道闸，队列每满一次就会 spawn 一个新线程去
+    /// 抢同一把 redb 写锁（同 `is_building_reverse_index` 那道闸的理由）。
+    pub(crate) draft_flushing: std::sync::atomic::AtomicBool,
     /// 最近一次**本输入法自己**向宿主吐字的时刻（由 `commit_action` 统一打点）。
     ///
     /// 用途只有一个：宿主插入我们提交的文字后会回送 `SelectionChanged`，它和「用户真的
@@ -2488,7 +2498,9 @@ impl Coordinator {
             capslock_hook: Mutex::new(None),
             capslock_press_tx,
             smart_symbol: Mutex::new(SmartSymbolArm::default()),
-            auto_phrase: Mutex::new(crate::auto_phrase::AutoPhraseBuf::new()),
+            draft_window: Mutex::new(crate::draft_window::DraftWindowBuf::new()),
+            draft_queue: Mutex::new(Vec::new()),
+            draft_flushing: std::sync::atomic::AtomicBool::new(false),
             last_self_commit: Mutex::new(None),
             auto_phrase_writes: std::sync::atomic::AtomicUsize::new(0),
             phrases,

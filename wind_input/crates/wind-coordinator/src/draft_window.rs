@@ -293,6 +293,24 @@ mod tests {
         );
     }
 
+    /// 空文本不影响流（承自 `AutoPhraseBuf::empty_commit_is_noop`）。
+    ///
+    /// 空的 `InsertText` 在生产里确实会出现（若干路径把「没有可上屏的文本」也走同一个
+    /// 返回变体）。它既不该产出窗口，也**不该被当成非汉字而断流**——那会让流被无端切碎。
+    #[test]
+    fn empty_commit_neither_yields_nor_breaks() {
+        let mut b = DraftWindowBuf::new();
+        let t = now();
+        feed(&mut b, "你", t);
+        assert!(feed(&mut b, "", t).is_empty(), "空文本不产出窗口");
+        assert_eq!(b.buffered(), "你", "空文本不该影响流");
+        assert_eq!(
+            feed(&mut b, "好", t),
+            vec!["你好"],
+            "流没被切断，窗口照常切出"
+        );
+    }
+
     /// 断流不产出任何待结算的东西——与 `AutoPhraseBuf::terminate` 的语义分界。
     #[test]
     fn terminate_yields_nothing_because_windows_were_already_emitted() {

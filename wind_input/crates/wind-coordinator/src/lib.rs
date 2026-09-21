@@ -2,7 +2,6 @@
 //!
 //! 与 Go 版本 `wind_input/internal/coordinator/` 对齐。
 
-pub mod auto_phrase;
 pub(crate) mod candidate_nav;
 pub mod candidate_pull;
 #[cfg(test)]
@@ -31,6 +30,7 @@ pub mod handle_cmdbar;
 pub mod handle_cmdbar_macos;
 pub mod handle_common_chars;
 pub mod handle_config;
+pub mod handle_draft;
 pub mod handle_email;
 pub mod handle_key;
 pub mod handle_lifecycle;

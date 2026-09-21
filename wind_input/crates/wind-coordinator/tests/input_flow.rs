@@ -8352,6 +8352,25 @@ fn temp_words(store: &Store, schema: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// 枚举某方案下全部草稿词（`search_drafts` 只按精确 code 查，故逐 code 取不现实，
+/// 这里直接扫表）。`ttl=0` = 不过滤有效期。
+fn draft_entries(store: &Store, schema: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for code in ["aa", "aaa", "aaaa", "aaaaa"] {
+        for text in store.search_drafts(schema, code, 0).unwrap_or_default() {
+            out.push((code.to_string(), text));
+        }
+    }
+    out
+}
+
+fn all_drafts(store: &Store, schema: &str) -> Vec<String> {
+    draft_entries(store, schema)
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect()
+}
+
 /// 敲「字母 + 空格」上屏一个字，返回上屏文本。
 fn commit_one_char(coord: &Coordinator, letter: u8) -> String {
     coord.handle_key_event_policed(&key_event(letter as u32, EVENT_KEY_DOWN));
@@ -8361,10 +8380,14 @@ fn commit_one_char(coord: &Coordinator, letter: u8) -> String {
     }
 }
 
-/// 连续单字上屏 → 终止信号 → 造出词组并写入临时词库。
+/// 连续单字上屏 → 造出词组，**落点是草稿层**。
 ///
-/// 覆盖历史上「完全不工作」的两个断裂：触发源（旧实现挂在拼音专属的 `committed_segs` 上，
-/// 码表恒不满足）与编码算法（旧实现拼接各段全码，造出的码查不出来）。
+/// 覆盖历史上「完全不工作」的两个断裂：触发源（最早的实现挂在拼音专属的 `committed_segs`
+/// 上，码表恒不满足）与编码算法（拼接各段全码，造出的码查不出来）。这两条判据在滑窗模型下
+/// 一字不改地继续成立——**取码规则没变，变的是什么时候取、结果落在哪一层**。
+///
+/// ⚠️ 落点从临时词库改成了草稿层（`docs/design/auto-phrase-draft-layer.md`）：
+/// 词不再是「一次终止信号结算出来的成品」，而是「滑窗记下、等人用过才转正」的猜测。
 #[test]
 fn test_codetable_auto_phrase_learns_from_single_chars() {
     if !has_schemas() {
@@ -8378,14 +8401,25 @@ fn test_codetable_auto_phrase_learns_from_single_chars() {
     let word = format!("{a}{b}");
     assert_eq!(word.chars().count(), 2, "应上屏两个单字，实际: {:?}", word);
 
-    // 造词发生在终止信号（此处用失焦，等价于打完一句切窗口）。
+    // 断流并等后台 flush（落库在后台线程，按键路径上只入队）。
     coord.handle_focus_lost(0, wind_bridge::handler::FocusLostReason::Thread);
-
-    let words = temp_words(&store, "wubi86");
-    let hit = words
-        .iter()
-        .find(|(_, t)| *t == word)
-        .unwrap_or_else(|| panic!("终止信号后应造出「{word}」，临时层实际: {words:?}"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut hit = None;
+    while std::time::Instant::now() < deadline {
+        hit = draft_entries(&store, "wubi86")
+            .into_iter()
+            .find(|(_, t)| *t == word);
+        if hit.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let hit = hit.unwrap_or_else(|| {
+        panic!(
+            "打完两个单字后应记下「{word}」，草稿层实际: {:?}",
+            draft_entries(&store, "wubi86")
+        )
+    });
     // 五笔二字词规则 AaAbBaBb = 各字全码前两位 → 码长恒为 4。
     // 这条同时否掉了「拼接各字全码」的旧做法（那会得到 7~8 位）。
     assert_eq!(
@@ -8397,7 +8431,66 @@ fn test_codetable_auto_phrase_learns_from_single_chars() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// 造词只在终止信号发生：上屏过程中不得写库，否则每打一个字就造一次半截词。
+/// ★ 滑窗草稿的**端到端贯通**：落屏 → 滑窗 → 取码查重 → 异步落库，一条链通到 `DRAFT_WORDS`。
+///
+/// 判据是「记下**全部** 2~5 字组合」而不只是最长那个——旧模型一次终止信号只结算出一个词，
+/// 滑窗则把每个窗口都记下来，这是两个模型在可观测行为上的分界。
+///
+/// ⚠️ **本用例不覆盖「词组上屏不中断流」那一条**：在按键路径上造一次真实的词组上屏需要
+/// 词库里恰好有对应词组，随词库更新即失效。那条判据由 `draft_window` 的单测
+/// `phrases_no_longer_break_the_stream` 覆盖（多字文本喂进 `on_commit`），
+/// 而多字文本能否抵达状态机，由本用例这条接线链路保证——两边合起来才是完整的。
+#[test]
+fn test_draft_layer_records_every_window_not_just_the_longest() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 schema");
+        return;
+    }
+    let (coord, store, db) = auto_phrase_coord("draft_across", true);
+
+    // 三个单字依次上屏。对滑窗来说它们就是一段落屏文本流——旧模型也能处理这一段，
+    // 但旧模型只在终止信号时结算成**一个**词；滑窗会把 2~5 字的组合全记下来。
+    let a = commit_one_char(&coord, b'A');
+    let b = commit_one_char(&coord, b'A');
+    let c = commit_one_char(&coord, b'A');
+    assert_eq!(
+        [a.as_str(), b.as_str(), c.as_str()]
+            .concat()
+            .chars()
+            .count(),
+        3,
+        "应上屏三个单字"
+    );
+
+    // 断流并等后台 flush 落库（写库在后台线程，按键路径上只入队）。
+    coord.handle_focus_lost(0, wind_bridge::handler::FocusLostReason::Thread);
+    let two = format!("{a}{b}");
+    let three = format!("{a}{b}{c}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut drafts = Vec::new();
+    while std::time::Instant::now() < deadline {
+        drafts = all_drafts(&store, "wubi86");
+        if drafts.iter().any(|t| *t == three) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        drafts.iter().any(|t| *t == three),
+        "三字窗口「{three}」应进草稿表，实际: {drafts:?}"
+    );
+    assert!(
+        drafts.iter().any(|t| *t == two),
+        "二字窗口「{two}」也该在（滑窗记下的是全部 2~5 字组合，不只最长那个），实际: {drafts:?}"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+/// 上屏过程中不得落库：写库在后台线程，按键路径上只入队。
+///
+/// 旧模型这条的理由是「造词只在终止信号发生」；滑窗模型下窗口每次上屏就切出来了，
+/// 但**落库**仍要等队列攒够或断流——判据变了，要守的东西没变：不能让 redb 写事务
+/// 出现在按键路径上。
 #[test]
 fn test_codetable_auto_phrase_does_not_learn_before_terminator() {
     if !has_schemas() {
@@ -8408,8 +8501,13 @@ fn test_codetable_auto_phrase_does_not_learn_before_terminator() {
     commit_one_char(&coord, b'A');
     commit_one_char(&coord, b'A');
     assert!(
+        draft_entries(&store, "wubi86").is_empty(),
+        "断流之前不该落库，实际: {:?}",
+        draft_entries(&store, "wubi86")
+    );
+    assert!(
         temp_words(&store, "wubi86").is_empty(),
-        "终止信号之前不应写入任何临时词，实际: {:?}",
+        "任何时候都不该直接写临时词库——那要等用户真的用过草稿，实际: {:?}",
         temp_words(&store, "wubi86")
     );
     let _ = std::fs::remove_file(&db);
