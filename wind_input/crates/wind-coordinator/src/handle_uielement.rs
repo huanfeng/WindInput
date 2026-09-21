@@ -19,10 +19,15 @@
 //!
 //! # 与 host-render / `hide_candidate_window` 的关系
 //!
-//! 三者都在 [`Coordinator::notify_ui_update`] 里压住 `UpdateCandidates`，但意图不同：
-//! host-render 是「换个地方画」（数据仍走 SHM 到 DLL 的 band 窗口）、`hide_candidate_window`
-//! 是用户开关、本模块是宿主接管。本模块只**不弹窗**，候选状态照常演进——空格上屏、
-//! 数字选词、翻页全部照旧，宿主画的就是这份状态。
+//! 意图不同，**落点也不同**：`hide_candidate_window`（用户开关）与本模块（宿主接管）各在
+//! [`Coordinator::notify_ui_update`] 里占一道早退，压住 `UpdateCandidates`；而 host-render
+//! **不在那个函数里**——它是「换个地方画」，`UpdateCandidates` 照发，只是数据走 SHM 交给
+//! 宿主进程内 DLL 的 band 窗口去渲染（`host_render_active()` 的生产消费点在
+//! `message_handler.rs` 的伪终止事件那一处）。本模块只**不弹窗**，候选状态照常演进——
+//! 空格上屏、数字选词、翻页全部照旧，宿主画的就是这份状态。
+//!
+//! 这条区别有实质后果：编码的**有效归属**（[`Coordinator::preedit_in_app_effective`]）只把
+//! 本模块这道压制算进去。host-render 下候选窗的编码栏照画，若也强制嵌入就成了两处重复。
 //!
 //! 设计与外部规范摘要见 `docs/design/game-compat-tsf-uielement.md`。
 
@@ -598,10 +603,8 @@ mod tests {
         );
     }
 
-    /// 敲一个键，返回它的**出口**动作。必须走 `handle_key_event_policed`——占位后处理
-    /// 就挂在那个出口上，`handle_key_event` 一路看不到它。
-    fn press(c: &Coordinator, vk: u32) -> KeyAction {
-        c.handle_key_event_policed(&KeyEventData {
+    fn key_event(vk: u32) -> KeyEventData {
+        KeyEventData {
             key_code: vk,
             scan_code: 0,
             modifiers: 0,
@@ -609,7 +612,13 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
-        })
+        }
+    }
+
+    /// 敲一个键，返回它的**出口**动作。必须走 `handle_key_event_policed`——占位后处理
+    /// 就挂在那个出口上，`handle_key_event` 一路看不到它。
+    fn press(c: &Coordinator, vk: u32) -> KeyAction {
+        c.handle_key_event_policed(&key_event(vk))
     }
 
     /// 敲一串字母，返回末键的出口动作。
@@ -652,8 +661,18 @@ mod tests {
     /// 开头那条「没有压制时照旧占位」是全组的对照：只测正向的话，判据整条恒 false
     /// （占位从此全局失效、连记事本都不占位了）也照样全绿。
     ///
-    /// 变异检验：删掉 `preedit_uses_placeholder` 开头那个 `ui_suppressed_by_host` 早退
-    /// ⇒ 三条正向全红；把该函数改成无条件 `false` ⇒ 开头的对照红。
+    /// # ⚠️ 本条**不覆盖**生产上的首键
+    ///
+    /// 这里是「先压制、再打字」，而生产上的顺序常常是反的：`pbShow=FALSE` 在 `Show()` /
+    /// `BeginUIElement` 才上报、`host_reads` 在宿主真读走候选串才上报，**两者都晚于第一次
+    /// 候选出现**，也就是晚于首键的应答。所以 `candidate_top` + 这类宿主，本次激活的第一次
+    /// 组合的**第一键**组合区仍是占位空格，第二键起才是真编码。不是数据损坏（组合整串替换，
+    /// C++ 的去重比的是 text **和** caret，`" "/0` 与 `"ni"/2` 不相等，不会被跳过），是可
+    /// 接受的一帧。以 `TF_TMAE_UIELEMENTENABLEDONLY` 激活的那一类宿主没有这一帧——它在
+    /// `ActivateEx` 就知道，激活时即上报。
+    ///
+    /// 变异检验：删掉 `preedit_in_app_effective` 里那个 `ui_suppressed_by_host` 早退
+    /// ⇒ 三条正向全红；把该函数改成无条件回 `false`（即恒占位）⇒ 开头的对照红。
     #[test]
     fn a_suppressed_host_gets_the_real_code_inline() {
         // 对照：同样 candidate_top、同样两键，只差没有任何压制来源。
@@ -735,6 +754,236 @@ mod tests {
             COMPOSITION_PLACEHOLDER,
             "撤销接管后下一键就该回到占位——粘住的话用户切回记事本会看到编码显示两遍"
         );
+    }
+
+    /// ★ 顶码余码这条**出厂主路径**在压制态下也得把真编码交出去。
+    ///
+    /// `top_commit_mode` 出厂是 `direct_commit`（`data/config.toml`），于是压制态下用户在游戏
+    /// 里打满码长的那一下，走的是 `CommitThenDeferComposition` 而不是上面两条钉的
+    /// `UpdateComposition` —— 护栏此前**一条都没踩过这条路**。而
+    /// `with_composition_placeholder` 确实也会改写这个变体的 `deferred_composition`
+    /// （`wind-bridge/src/handler.rs`，那一支正是为「skce 顶码后快打 h」那次真机事故补的），
+    /// 所以它与压制态的交叉点是真实可达的用户可见行为：漏掉的话，顶码之后那一截余码编码
+    /// 在游戏里是隐形的。
+    ///
+    /// ⚠️ 本条**复述**了出口那一步（判据 + 改写函数），没有走 `handle_key_event_policed`：
+    /// 真顶码要求输入超过方案码长上限，而 lib 单测一律无词库（本模块所有用例都是，带词库会
+    /// 让它们在没有 `build_dev/data` 的 worktree 里静默跳过而计数照绿）。于是分工是——
+    /// 「出口里那个 if 还在不在」由 [`a_suppressed_host_gets_the_real_code_inline`] 钉（它走
+    /// 真出口），本条钉「同一条规则对顶码变体同样成立」。两条合起来才完整，删任何一条都留缺口。
+    #[test]
+    fn the_top_code_remainder_also_reaches_the_host() {
+        // `suppress` 之外两侧完全同构，返回的是余码组合最终的模样。
+        let run = |suppress: bool| -> String {
+            let mut cfg = Config::default();
+            cfg.ui.candidate.preedit_display = PreeditDisplay::CandidateTop.as_config().into();
+            let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
+            focus_pid(&c, 42);
+            if suppress {
+                c.set_uielement_host_draws(42, true);
+                assert!(
+                    c.ui_suppressed_by_host().is_some(),
+                    "前置：压制必须真的生效"
+                );
+            } else {
+                assert_eq!(c.ui_suppressed_by_host(), None, "前置：对照那侧不该被压住");
+            }
+            let action = {
+                let mut st = c.state.lock().unwrap();
+                st.input_buffer = "h".into();
+                st.input_buffer_cased = "h".into();
+                st.preedit = "h".into();
+                c.commit_top_text(
+                    &mut st,
+                    "aaaa",
+                    "工".into(),
+                    None,
+                    "h",
+                    wind_candidate::CandidateSource::CodeTable,
+                )
+            };
+            // ↓ 这三行是 `handle_key_event_policed` 出口那一步的复述（见上面的 ⚠️）。
+            let out = if c.preedit_uses_placeholder() {
+                action.with_composition_placeholder()
+            } else {
+                action
+            };
+            match out {
+                KeyAction::CommitThenDeferComposition {
+                    commit_text,
+                    deferred_composition,
+                    ..
+                } => {
+                    assert_eq!(
+                        commit_text, "工",
+                        "顶出的正文是已承诺上屏的字，两侧都不许被改写"
+                    );
+                    deferred_composition
+                }
+                other => {
+                    panic!("顶码 direct_commit 该产出 CommitThenDeferComposition，实得 {other:?}")
+                }
+            }
+        };
+
+        assert_eq!(
+            run(false),
+            COMPOSITION_PLACEHOLDER,
+            "没被压住时余码照旧换占位——编码归候选窗画，这是本条的鉴别力来源"
+        );
+        assert_eq!(
+            run(true),
+            "h",
+            "压住候选窗后余码必须原样交给宿主，否则顶码后那一截编码在游戏里是隐形的"
+        );
+    }
+
+    /// ⛔ **用户自己关掉候选窗**（`ui.candidate.hide_window`）不在强制嵌入之列。
+    ///
+    /// 在「信息丢失」这个维度上它与压制态**完全同构**：`notify_ui_update` 里那两条早退
+    /// （用户开关那条、`ui_suppressed_by_host` 那条）动作逐字一样——`clear_hover` +
+    /// `HideCandidates` + `reset_first_show` + `return`，`UpdateCandidates` 同样不下发，
+    /// 非 app_inline 时组合区同样只剩一个空格。所以这个排除**靠的不是「后果不同」**，
+    /// 而是用户表达了几次意图：压制态下他只做过一次选择（编码放候选窗顶部），是环境把它
+    /// 推翻的，他从没同意过「编码可以看不见」；而 `hide_window` 是第二次显式选择，
+    /// 「关掉候选窗 + 编码归候选窗」这个组合本身就定义了盲打语境——那里「编码也看不见」
+    /// 不是丢失，是这个模式的定义。
+    ///
+    /// 本条守的就是这个边界：谁将来「顺手补全」把 `hide_candidate_window` 也并进
+    /// `ui_suppressed_by_host`，这里立刻红。对照 `wind-bridge` 那边
+    /// `placeholder_keeps_literal_symbol_compositions` 守 `with_composition_placeholder` 的
+    /// 变体边界——同一个道理，这条边界此前没人守。
+    #[test]
+    fn the_user_hiding_the_window_keeps_the_placeholder() {
+        let mut cfg = Config::default();
+        cfg.ui.candidate.hide_window = true;
+        cfg.ui.candidate.preedit_display = PreeditDisplay::CandidateTop.as_config().into();
+        let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
+        focus_pid(&c, 42);
+
+        // 前置①：候选窗确实被用户关掉了（走可观测路径确认，不去读私有开关字段）。
+        fill(&c, 5);
+        let _ = drain(&rx);
+        {
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+        }
+        let got = drain(&rx);
+        assert!(
+            got.contains(&"hide") && !got.contains(&"update"),
+            "前置：用户关窗后候选窗不下发，本条才与压制态同构: {got:?}"
+        );
+        // 前置②：这不是宿主压制。两条前置缺一，下面那条断言就在测别的东西。
+        assert_eq!(
+            c.ui_suppressed_by_host(),
+            None,
+            "前置：用户开关不该被算成宿主压制"
+        );
+
+        // 清掉 fill 摆的局，让下面两键从空缓冲开始。
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer.clear();
+            st.candidates.clear();
+        }
+        assert_eq!(
+            composition_of(&type_code(&c, "ni")),
+            COMPOSITION_PLACEHOLDER,
+            "用户自己关的窗照旧占位——盲打语境下看不见编码是这个模式的定义，不是缺陷"
+        );
+    }
+
+    /// 摆一个混输「同一串码两种编码形态」的局面：高亮在候选 0（拼音来源）时编码显示音节拆分
+    /// `sa'a'a`，移到候选 1（码表来源）时显示原始码 `saaa`。
+    ///
+    /// 形态由 `effective_preedit_body` 纯读 `state` 算出（候选来源 + 三个 body 字段），**不碰
+    /// 引擎也不碰词库**，所以这里手工摆盘是合法的，不是在绕过什么。
+    fn fill_split_forms(c: &Coordinator) {
+        use wind_candidate::CandidateSource;
+        let mut st = c.state.lock().unwrap();
+        st.active = None;
+        st.input_buffer = "saaa".into();
+        st.input_buffer_cased = "saaa".into();
+        st.preedit_split_body = "sa'a'a".into();
+        st.committed_text.clear();
+        st.candidates = vec![
+            Candidate {
+                text: "萨阿阿".into(),
+                source: CandidateSource::Pinyin,
+                ..Default::default()
+            },
+            Candidate {
+                text: "模式".into(),
+                source: CandidateSource::CodeTable,
+                ..Default::default()
+            },
+        ];
+        st.current_page = 0;
+        st.selected_index = 0;
+        st.caret_x = 100;
+        st.caret_y = 200;
+        st.caret_height = 20;
+        // 先落到「拆分形态」这一侧。不做这一步的话 `before` 是空串、形态变化恒成立，
+        // 用例就测不出「变化才回传」那半个条件了。
+        c.sync_preedit_to_highlight(&mut st);
+        assert_eq!(st.preedit, "sa'a'a", "前提：高亮在拼音候选上时是拆分形态");
+    }
+
+    /// ★★★ 压制态下**高亮跟随**也得把编码回传宿主——抽访问器那一步真正修掉的就是这条。
+    ///
+    /// 混输方案下 ↑↓ 在五笔↔拼音候选间移动会切换编码形态（原始码 `saaa` ↔ 音节拆分
+    /// `sa'a'a`）。`apply_session_action` 里那条回传 `UpdateComposition` 的分支此前**只读配置
+    /// 原值**：压制态 + `candidate_top` 下判成「编码归候选窗画」⇒ 不回传，而候选窗在压制态又
+    /// 根本不下发 ⇒ 游戏聊天框里的编码停在旧形态。换成 `preedit_in_app_effective()` 才跟上。
+    ///
+    /// ⚠ 这是**上一版改动造出来的**可见性，不是老 bug：改之前那一格组合区里恒是占位空格，
+    /// 形态对不对都看不见。压制态一旦开始往组合区写真编码，所有写入点就都得跟着这条规则走
+    /// ——这正是那个访问器存在的理由。
+    ///
+    /// 反向对照是同一副牌、只把压制撤掉：那时**不回传才是对的**（编码本就归候选窗画）。
+    ///
+    /// 变异检验：把 `apply_session_action` 里的 `preedit_in_app_effective()` 改回
+    /// `preedit_display.lock()...in_app()` ⇒ 正向红、反向仍绿。
+    #[test]
+    fn highlight_follow_reaches_the_host_when_suppressed() {
+        // ⚠️ 必须走 `press`（= 生产出口 `handle_key_event_policed`），不能图省事直接调
+        // `apply_session_action`：出口那步还会做 `with_composition_placeholder`，而本条与
+        // `a_suppressed_host_gets_the_real_code_inline` 守的是同一条规则的两半。绕过出口的话，
+        // 哪天有人动了 `preedit_uses_placeholder` 的判据，回传的 `"saaa"` 会在出口被拍成占位
+        // 空格，而这条测试照绿。
+        let down = |c: &Arc<Coordinator>| press(c, wind_keys::keymap::VK_DOWN);
+
+        // 反向对照：candidate_top、没有压制 ⇒ 编码归候选窗，不该回传组合串。
+        let (c, _rx) = coord();
+        *c.preedit_display.lock().unwrap() = PreeditDisplay::CandidateTop;
+        focus_pid(&c, 42);
+        fill_split_forms(&c);
+        assert!(
+            matches!(down(&c), KeyAction::Consumed),
+            "没被压住时高亮移动只吞键、不回传组合串，编码由候选窗自己画——这是本条的鉴别力来源"
+        );
+        assert_eq!(
+            c.state.lock().unwrap().selected_index,
+            1,
+            "前置：↓ 真的把高亮挪到了码表候选上（不然下面测的是导航坏了还是回传坏了分不清）"
+        );
+
+        // 正向：压住之后，形态一变就得把新编码写回宿主组合区。
+        let (c, _rx) = coord();
+        *c.preedit_display.lock().unwrap() = PreeditDisplay::CandidateTop;
+        focus_pid(&c, 42);
+        c.set_uielement_host_draws(42, true);
+        fill_split_forms(&c);
+        match down(&c) {
+            KeyAction::UpdateComposition { text, caret_pos } => {
+                assert_eq!(
+                    text, "saaa",
+                    "回传的必须是**新**形态（原始码），不是旧的拆分串"
+                );
+                assert_eq!(caret_pos, 4, "光标落在新编码末尾");
+            }
+            other => panic!("压住候选窗后，高亮移到码表候选必须把编码回传宿主，实得 {other:?}"),
+        }
     }
 
     /// `host_drawn_candidates` 只管**推断**那条，管不着宿主的**声明**。

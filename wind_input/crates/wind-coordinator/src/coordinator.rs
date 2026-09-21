@@ -4689,12 +4689,9 @@ impl Coordinator {
                 let before = state.preedit.clone();
                 self.sync_preedit_to_highlight(state);
                 if state.preedit != before {
-                    let in_app = self
-                        .preedit_display
-                        .lock()
-                        .map(|m| m.in_app())
-                        .unwrap_or(true);
-                    if in_app {
+                    // ★ 必须用**有效**归属而不是配置原值：压制态下候选窗不下发，编码只剩组合区
+                    // 这一条出口，这里不回传就等于让游戏聊天框里的编码停在旧形态。
+                    if self.preedit_in_app_effective() {
                         let text = state.preedit.clone();
                         let caret_pos = text.chars().count() as u32;
                         composed = Some(KeyAction::UpdateComposition { text, caret_pos });
@@ -5594,6 +5591,39 @@ impl Coordinator {
         }
     }
 
+    /// 「编码这一刻是不是嵌在宿主组合区里」——`preedit_display` 的**有效**取值，全部消费点共用。
+    ///
+    /// 配置说 `candidate_top` / `candidate_inline` 时编码归候选窗画；但候选窗被宿主压住
+    /// （TSF UI-less 的全屏游戏 / D3D 独占全屏，见 [`Self::ui_suppressed_by_host`]）时它
+    /// **根本不画**，此时一律回到嵌入，否则编码两条出口全断、游戏里一个字都看不见。
+    /// 完整论证见 `preedit_uses_placeholder` 与 `docs/design/game-compat-tsf-uielement.md` §4.4 末。
+    ///
+    /// ⛔ **别再在别处写 `preedit_display.lock().map(|m| m.in_app())`**。这个访问器是从四个
+    /// 各判各的读点收上来的，其中「混输高亮跟随」那处（`handle_candidate_nav` 里）漏掉压制态
+    /// 的后果是可见的：↑↓ 改了编码形态却不回传组合串，游戏聊天框里的编码停在旧形态。
+    /// 配置的**写入**点（`apply_ui_config` / [`Self::cmd_toggle_preedit`]）不在此列——它们存的是
+    /// 用户选的值，不是这一刻的有效值。
+    ///
+    /// 锁毒化时回 `true`（嵌入）：与收上来的三处原有兜底逐字一致，也与
+    /// `preedit_uses_placeholder` 的 `unwrap_or(false)` 互为反面。
+    ///
+    /// ⚠️ **加锁顺序**：本函数会在**持有 `state`** 的路径里被调用（混输高亮跟随、
+    /// `maybe_enter_assoc`），而它自己要取 `uielement_*_pids` / `active_compat` / `app_compat`。
+    /// 全局持有序是 `state → uielement_*_pids → active_compat → app_compat`，它取的这几把
+    /// **必须永远排在 `state` 之后**；谁哪天写出一条「持 `active_compat` 再锁 `state`」就成环。
+    /// 本仓在同类问题上翻过一次车，见 `apply_compat_for_pid` 上方那条「两把锁在此嵌套会引入
+    /// 一个方向相反的持有序」。本函数**没有引入新的锁边**：那两个调用点本来紧接着就要调
+    /// `notify_ui_update(state)`，而那里面的压制态守卫早就在做同样的 `state → uielement_*_pids`。
+    pub(crate) fn preedit_in_app_effective(&self) -> bool {
+        if self.ui_suppressed_by_host().is_some() {
+            return true;
+        }
+        self.preedit_display
+            .lock()
+            .map(|m| m.in_app())
+            .unwrap_or(true)
+    }
+
     /// 循环切换编码显示方式（内嵌应用 → 候选顶部 → 候选内联 → ...），下发 UI 并持久化。
     fn cmd_toggle_preedit(&self) {
         let mode = {
@@ -6076,11 +6106,7 @@ impl Coordinator {
         // 联想态**不再强制非嵌入**：宿主侧此刻挂着占位组合（见 `ASSOC_COMPOSITION`），
         // 归属如实按配置走即可。嵌入模式下 `maybe_enter_assoc` 干脆不给标识
         // （`state.preedit` 为空），候选窗因此没有编码栏、高度不跳。
-        let in_app = self
-            .preedit_display
-            .lock()
-            .map(|m| m.in_app())
-            .unwrap_or(true);
+        let in_app = self.preedit_in_app_effective();
         // 坐标基准：嵌入模式且组合起点已锁定 → 用组合起点（钉在缓冲头部，不随输入移动）；否则当前光标。
         // 组合起点由 handle_caret_update 在本组合首个有效坐标处锁定。候选窗首显已由"延迟首显"门控
         // 保证发生在 reflow 后的权威坐标处。无效坐标回退最近有效坐标，避免跑到屏幕左上角。

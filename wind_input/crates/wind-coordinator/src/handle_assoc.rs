@@ -378,11 +378,17 @@ impl Coordinator {
         //
         // ⚠️ 无论哪种模式，这个字符串都**绝不流进宿主 composition**——宿主拿到的恒是
         // [`ASSOC_COMPOSITION`]（占位空格）。真写进去就是把「联想输入」四个字塞进用户的文档。
-        let inline = self
-            .preedit_display
-            .lock()
-            .map(|m| m.in_app())
-            .unwrap_or(true);
+        // 用**有效**归属：候选窗被宿主压住时（UI-less 游戏）这个标识同样没有落点，与嵌入模式同理。
+        //
+        // ★ 更要紧的是**方向**。上面那条「绝不流进宿主 composition」今天成立，靠的是
+        // 「压制态下这个串恰好没人读到宿主那边去」——而 `state.preedit` 的消费者其实**很多**
+        // （Home/End 移组合区光标、前插补码、各 overlay 模式十余处都会把它克隆进
+        // `UpdateComposition`），只是每一条都要求非空缓冲或活跃 overlay，而联想是上屏**之后**
+        // 弹的、缓冲为空，才统统够不着。这个「恰好」太薄，不该拿来当铁律的支点。
+        // 取有效值之后压制态下这里装的是空串：哪天真给 `UiElementPage` 补上编码串字段
+        // （见 `docs/design/game-compat-tsf-uielement.md` §4.4），交出去的也是空串，
+        // 而不是把「联想输入」四个字送进游戏的聊天框。
+        let inline = self.preedit_in_app_effective();
         state.preedit = if inline {
             String::new()
         } else {

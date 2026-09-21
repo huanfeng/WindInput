@@ -562,33 +562,34 @@ impl MessageHandler for Coordinator {
     }
 
     fn preedit_uses_placeholder(&self) -> bool {
-        // 候选窗被宿主压住时（TSF UI-less / D3D 独占全屏）一律**不占位**，即强制 app_inline。
-        //
-        // 占位存在的唯一理由是「别和候选窗的编码栏重复显示编码」。而 `ui_suppressed_by_host`
-        // 命中时 `notify_ui_update` 直接发 `HideCandidates` 就 return，`UpdateCandidates`
-        // （编码的另一条出口，见 `UiCommand::UpdateCandidates::preedit`）根本不下发——那条
-        // 理由不存在了，占位就成了纯粹的信息丢失：宿主组合区里只剩一个空格，交给宿主自绘的
-        // 候选快照 `UiElementPage` 又不带编码串，于是游戏里**编码两条路全断、完全看不见**。
-        //
-        // 反过来 `host_render` 与 `hide_candidate_window` 刻意**不在**此列：前者候选窗照画
-        // （只是换个地方画），编码栏还在，强制嵌入会变成两处重复；后者是用户自己关的窗。
-        //
-        // ⛔ 别改成读 `uielement_host_draws()` 一家：独占全屏那条同样压窗、同样丢编码，
-        // 三个来源在这件事上没有分别，收口就在 `ui_suppressed_by_host`。
-        if self.ui_suppressed_by_host().is_some() {
-            return false;
-        }
         // 非 app_inline（候选窗自显 preedit）→ 应用侧用占位空格，不重复显示编码。
+        //
+        // 「是不是 app_inline」取**有效**归属（[`Coordinator::preedit_in_app_effective`]）而不是
+        // 配置原值：候选窗被宿主压住时（TSF UI-less 的全屏游戏 / D3D 独占全屏）它根本不画，
+        // 占位存在的唯一理由——「别和候选窗的编码栏重复显示」——随之消失，占位就成了纯粹的
+        // 信息丢失：宿主组合区里只剩一个空格，交给宿主自绘的候选快照 `UiElementPage` 又不带
+        // 编码串，于是游戏里**编码两条出口全断、完全看不见**。故那时一律不占位。
+        //
+        // 反过来 `host_render` 与 `hide_candidate_window` 刻意**不在**压制之列，但两者的理由
+        // 不是同一个：
+        //   - `host_render` 下候选窗**照画**（只是数据走 SHM 换个地方画），编码栏还在，
+        //     强制嵌入会变成两处重复 —— 后果确实不同。
+        //   - `hide_candidate_window` 的后果与压制态**完全同构**（同一个函数里两条早退动作
+        //     逐字一样），靠的是**用户表达了几次意图**：压制态下用户只选过一次「编码放候选窗
+        //     顶部」，是环境推翻了它；而关窗是第二次显式选择，「关掉候选窗 + 编码归候选窗」
+        //     这个组合本身就定义了盲打语境，那里看不见编码是模式的定义而非丢失。
+        //     ⛔ 别因为「后果一样」就顺手把它并进来 —— 守这条边界的是
+        //     `handle_uielement.rs::the_user_hiding_the_window_keeps_the_placeholder`。
+        //
+        // 守本函数这条规则的是 `handle_uielement.rs::a_suppressed_host_gets_the_real_code_inline`
+        // （断言落在按键出口的组合区文本上，不是判据的布尔值）。
         //
         // ⚠️ 这里**只看 preedit 显示模式**，不要把 `[input.caret]` 的逐模式开关叠进来。
         // 叠过一次（2026-09-15），两个毛病：① 本函数在出厂 app_inline 下恒为 false，
         // 那几个开关因此完全惰性，配了也不生效；② 它是全局出口，某一个模式的开关会顺带
         // 改写所有路径的 preedit 形态。开关各自在 `enter_*` 里决定发什么，见
         // `enter_add_word_mode`。
-        self.preedit_display
-            .lock()
-            .map(|m| !m.in_app())
-            .unwrap_or(false)
+        !self.preedit_in_app_effective()
     }
 
     /// bridge 真正入口：在按键处理之上统一埋点输入统计（上屏文本字符数），

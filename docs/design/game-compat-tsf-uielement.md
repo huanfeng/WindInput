@@ -691,16 +691,53 @@ SDL2 `SDL_windowskeyboard.c`（`UILess_GetCandidateList`）。
 
 - 判据收口在 `ui_suppressed_by_host`，**三个来源一视同仁**（声明接管 / D3D 独占全屏 /
   compat opt-in 的读取者）：它们在「编码丢了」这件事上没有分别。
-- `host_render` 与 `hide_candidate_window` 刻意**不在**此列。前者候选窗照画、只是换个地方画
-  （数据走 SHM 到宿主进程内的 DLL band 窗口），编码栏还在，强制嵌入会变成两处重复显示；
-  后者是用户自己关的窗，属于另一件事。
-- **不设配置键**：同 §4.5 的理由，「候选窗这一刻画不画得出来」是可由程序判定的物理事实，
-  按 config-design-rules R1 走自动判定。真出现判错的宿主，该加的是 compat 里的 per-app
-  `preedit_display` 覆盖，不是一个全局开关。
-- 护栏在 `handle_uielement.rs::a_suppressed_host_gets_the_real_code_inline`，断言落在**按键
-  出口**（`handle_key_event_policed` 返回的组合区文本）而不是判据函数的布尔值上——判据返回
-  什么不算数，被那个 if 读到才算数。两个变异都验过：删早退 ⇒ 三条正向红且复现原 bug
-  （拿到 `" "`）；判据改成恒 false ⇒ 开头的反向对照红。
+- **「有效归属」只有一个真相源**：`Coordinator::preedit_in_app_effective()`。配置 `in_app()`
+  的消费点有四个——按键出口的占位判据、混输高亮跟随的组合串回传、`notify_ui_update` 的
+  `preedit_host_owned` 与坐标锚点、联想标识文案——**四处必须同源**。这不是洁癖：漏掉高亮
+  跟随那处的后果是可见的（↑↓ 改了编码形态却不回传，游戏聊天框里的编码停在旧形态），
+  而它恰恰是「压制态开始往组合区写真编码」之后**才**暴露出来的。配置的**写入**点
+  （`apply_ui_config` / `cmd_toggle_preedit`）不在此列，它们存的是用户选的值。
+- `host_render` 与 `hide_candidate_window` 刻意**不在**此列，但两者的理由**不是同一个**：
+  - `host_render` 下候选窗**照画**（数据走 SHM 到宿主进程内的 DLL band 窗口，只是换个地方画），
+    编码栏还在，强制嵌入会变成两处重复显示——后果确实不同。
+  - `hide_candidate_window` 的后果与压制态**完全同构**（`notify_ui_update` 里那两条早退动作
+    逐字一样，`UpdateCandidates` 同样不下发，组合区同样只剩一个空格）。排除它靠的是**用户
+    表达了几次意图**：压制态下用户只选过一次「编码放候选窗顶部」，是环境推翻了它；而关窗是
+    第二次显式选择，「关掉候选窗 + 编码归候选窗」这个组合本身就定义了盲打语境，那里看不见
+    编码是模式的定义而非丢失。⛔ 别因为「后果一样」就顺手把它并进来。
+- **本次激活的首键仍是占位**，这是已知且可接受的一帧：`pbShow=FALSE` 要到 `Show()` /
+  `BeginUIElement` 才上报、`host_reads` 要到宿主真读走候选串才上报，**两者都晚于第一次候选
+  出现**，也就是晚于首键的应答。所以 `candidate_top` + 这类宿主，第一次组合的第一键组合区
+  还是空格，第二键起才是真编码。不是数据损坏（组合整串替换，C++ 去重比的是 text **和**
+  caret，`" "/0` 与 `"ni"/2` 不相等，不会被跳过）。以 `TF_TMAE_UIELEMENTENABLEDONLY` 激活的
+  那一类没有这一帧——它在 `ActivateEx` 就知道，激活时即上报。
+- **不设配置键**，理由是 config-design-rules R1 反例判据的**第一条**——「某一侧取值明显更优、
+  另一侧只是兜底 ⇒ 不加键，直接取优值」：压制态下 `candidate_top` / `candidate_inline` 这一侧
+  等于零信息（编码栏根本不画），`app_inline` 不是折中而是唯一有意义的取值，且它就是出厂默认。
+
+  > ⚠️ **别援引 R1 的第二条**（「差异可由程序判定 ⇒ 走自动判定」）。那条原文自带后半句
+  > 「**+ compat 覆盖**」，而 `AppCompatRule`（`wind-config/src/app_compat.rs`）今天**没有任何
+  > preedit 相关字段**，那个逃生口并不存在——援引它等于承诺了一个没兑现的东西。对照 §1.4
+  > 同形状的那次判定：它援引 R1 时 `host_drawn_candidates` 这个 compat 键是配齐了的。
+  > 真出现判错的宿主，要补的就是这个 per-app `preedit_display` 覆盖（**尚未实现**）。
+
+- **压制态下给不出任何运行时提示**，这一点没有选择余地：状态泡走 `show_tip` / `show_tip_at`，
+  而那两处被**同一个** `ui_suppressed_by_host()` 判据挡掉（规范要求 TIP 的任何 UI 都经
+  UIElementMgr 征得宿主同意）。用户在设置里选的显示方式被静默改写，可见性只能在设置页 hint
+  与文档站上补——跨仓，未做。
+- **护栏四条**，全在 `handle_uielement.rs` 的 tests mod（压制来源的构造器都在那儿；搬走就得
+  复制一套 helper，复制出来的那份会独立漂移）。断言一律落在**行为**上而非判据的布尔值——
+  判据返回什么不算数，被那个 `if` 读到才算数：
+
+  | 用例 | 钉住什么 | 变异检验（实跑过） |
+  |---|---|---|
+  | `a_suppressed_host_gets_the_real_code_inline` | 三个压制来源逐个走按键出口，拿到真编码；撤销后回到占位 | 删早退 ⇒ 三条正向红且复现原状（拿到 `" "`）；判据恒 `false` ⇒ 反向对照红 |
+  | `highlight_follow_reaches_the_host_when_suppressed` | 压制态下 ↑↓ 切换编码形态要回传组合串 | 该处改回读配置原值 ⇒ 正向红，实得 `Consumed` |
+  | `the_top_code_remainder_also_reaches_the_host` | 顶码余码（`direct_commit`，**出厂主路径**）同样交真编码 | 摘掉 `with_composition_placeholder` 的顶码变体那一支 ⇒ 对照红 |
+  | `the_user_hiding_the_window_keeps_the_placeholder` | 用户关窗**不**触发强制嵌入这条边界 | 把 `hide_candidate_window` 并进有效归属 ⇒ 红 |
+
+  最后一条守的是上面那条边界：这条分界线在代码注释、提交信息和本节都反复强调，却一度没有
+  任何用例钉它——谁「顺手补全」把用户关窗也收进来，全量一条都不会红。
 
 ### 4.5 独占全屏不弹窗（P2）
 
