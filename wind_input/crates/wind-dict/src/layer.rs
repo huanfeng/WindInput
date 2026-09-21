@@ -15,6 +15,17 @@ pub enum LayerType {
     Temp = 2,   // 临时学习词
     Cell = 3,   // 单元词典
     System = 4, // 系统主词典
+    /// 自动造词的**草稿层**：滑窗切出、尚未被任何人用过的猜测词
+    /// （`docs/design/auto-phrase-draft-layer.md`）。
+    ///
+    /// 数值排在 `System` **之后**，与「数值越小优先级越高」一致——草稿是未经验证的猜测，
+    /// 等权时该让位给一切真词。这也让 `CompositeDict::merge_search` 的跨层去重
+    /// 自动做对：同 text 时保留数值更小那层的 code，草稿不会盖掉真词。
+    ///
+    /// ⚠️ **取 5 而不是插在 `Temp` 与 `Cell` 之间**，是为了不改动任何现有档位的数值——
+    /// 那会连带改掉 `base_order` 的默认分档与 `register_layer` 的排序，
+    /// 为一个新层去动四个旧层不划算。
+    Draft = 5,
 }
 
 /// 词典层接口
@@ -100,6 +111,9 @@ pub trait DictLayer: Send + Sync {
             LayerType::Temp => -2,
             LayerType::Cell => -1,
             LayerType::System => 0,
+            // 比系统层还靠后：草稿等权时让位给一切真词（沉底的主力是
+            // `Candidate::is_draft`，这里只是让两处口径一致）。
+            LayerType::Draft => 1,
         }
     }
 }

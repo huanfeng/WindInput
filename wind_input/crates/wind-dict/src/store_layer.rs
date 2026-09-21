@@ -207,6 +207,81 @@ impl DictLayer for StoreTempLayer {
     }
 }
 
+/// 自动造词的**草稿层**（redb 后端，只读）。
+///
+/// 滑窗切出的猜测词住在这里，用户真的用它上屏过一次才跃迁进临时词库
+/// （设计见 `docs/design/auto-phrase-draft-layer.md`）。
+///
+/// # 只响应精确查询 —— 这是设计的一部分，不是没实现完
+///
+/// [`search_prefix`](DictLayer::search_prefix) **恒返回空**。草稿层的杂词率极高
+/// （模型使然：先记一堆、用过的才留），而码表打字是前缀式的（w → wq → wqv…）——
+/// 草稿若参与前缀召回，那些杂词会在**每一次按键**上涌进候选列表。
+/// 只精确命中意味着「打满这个词的完整码才出来」，正是草稿该有的语义，
+/// 也把杂词整个挡在了前缀阶段之外。
+///
+/// [`search_abbrev`](DictLayer::search_abbrev) 走 trait 的默认实现（返回空、不回退全表扫）：
+/// 草稿表**刻意没有简拼索引**，那是为了不让写放大跟着草稿的写入量翻上去。
+/// 简拼召回等草稿跃迁进临时词库之后自然就有。
+pub struct StoreDraftLayer {
+    store: Arc<Store>,
+    schema_id: String,
+    name: String,
+    /// 草稿有效期（秒）。0 = 永不过期。**过期判定在查询里做**，不能只靠定期清理——
+    /// 清理线程没跑到的窗口里，过期草稿照样会被召回。
+    ttl_secs: i64,
+}
+
+impl StoreDraftLayer {
+    pub fn new(store: Arc<Store>, schema_id: impl Into<String>, ttl_secs: i64) -> Self {
+        let schema_id = schema_id.into();
+        let name = format!("draft:{schema_id}");
+        Self {
+            store,
+            schema_id,
+            name,
+            ttl_secs,
+        }
+    }
+}
+
+impl DictLayer for StoreDraftLayer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn layer_type(&self) -> LayerType {
+        LayerType::Draft
+    }
+
+    fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
+        let texts = self
+            .store
+            .search_drafts(&self.schema_id, code, self.ttl_secs)
+            .unwrap_or_default();
+        let cands: Vec<Candidate> = texts
+            .into_iter()
+            .map(|text| Candidate {
+                text,
+                code: code.to_string(),
+                // 草稿层不存 weight：它在候选里恒沉底（`Candidate::is_draft` 排在
+                // `candidate_display_order` 的 weight 之前），weight 不参与任何比较。
+                // 取 0 而非某个正值，还顺带保证 `CompositeDict::merge_search` 的
+                // 「跨层同 (code,text) 继承更高 weight」不会被草稿意外抬权。
+                weight: 0,
+                is_draft: true,
+                ..Default::default()
+            })
+            .collect();
+        sort_trunc(cands, limit)
+    }
+
+    /// 恒空，理由见结构体文档——**不要顺手实现它**。
+    fn search_prefix(&self, _prefix: &str, _limit: usize) -> Vec<Candidate> {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +291,56 @@ mod tests {
         let p = std::env::temp_dir().join(format!("wind_storelayer_{name}.redb"));
         let _ = std::fs::remove_file(&p);
         Arc::new(Store::open(&p).unwrap())
+    }
+
+    /// ★ **草稿绝不能进前缀召回** —— 钉在 `CompositeDict` 这个跨层合并的消费点上。
+    ///
+    /// 草稿层的杂词率极高（模型使然：先记一堆、用过的才留），而码表打字是前缀式的
+    /// （w → wq → wqv…）。草稿若参与前缀召回，杂词会在**每一次按键**上涌进候选列表——
+    /// 那会让整个功能不可用。只精确命中是设计的一部分，不是没实现完。
+    ///
+    /// 判据刻意钉在 `CompositeDict::search_prefix` 而不是直接调 `StoreDraftLayer` 的方法：
+    /// 层自己返回空、合并时却从别的路径把它捞回来，是本仓踩过的那类「护栏绕开消费点」
+    /// 的故障形态。
+    #[test]
+    fn drafts_never_surface_through_prefix_queries() {
+        let s = store("draft_prefix");
+        s.add_drafts("wb", &[("wqvb".to_string(), "你好".to_string())])
+            .unwrap();
+        // 同时放一条**临时词**做对照组：同样的前缀，它必须照常召回。
+        // 没有这个对照，一个「前缀查询整个坏掉」的实现也能让本用例变绿。
+        s.learn_temp_word("wb", "wqvb", "拟好", 800, 0).unwrap();
+
+        let composite = CompositeDict::new();
+        composite.register_layer(Box::new(StoreDraftLayer::new(s.clone(), "wb", 0)));
+        composite.register_layer(Box::new(StoreTempLayer::new(s.clone(), "wb")));
+
+        let by_prefix = composite.search_prefix("wq", 50);
+        let texts: Vec<&str> = by_prefix.iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            texts.contains(&"拟好"),
+            "对照组：临时词的前缀召回必须照常工作，否则本用例测不出东西：{texts:?}"
+        );
+        assert!(
+            !texts.contains(&"你好"),
+            "草稿从前缀查询里冒出来了 —— 每次按键都会涌进一堆杂词：{texts:?}"
+        );
+        assert!(
+            by_prefix.iter().all(|c| !c.is_draft),
+            "任何标着 is_draft 的候选都不该出现在前缀结果里"
+        );
+
+        // 打满完整码：草稿必须出得来，否则它永远没机会被用过、也就永远转不了正。
+        let exact = composite.search("wqvb", 50);
+        let texts: Vec<&str> = exact.iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            texts.contains(&"你好"),
+            "精确命中时草稿必须召回，这是它转正的唯一途径：{texts:?}"
+        );
+        assert!(
+            exact.iter().any(|c| c.is_draft && c.text == "你好"),
+            "草稿候选必须带上 is_draft 标记，否则排序层无从沉底"
+        );
     }
 
     /// **边界必须穿过「记录 → 候选」这一层**（P2a 漏掉的第二条旁路，见 record_to_candidate 注释）。

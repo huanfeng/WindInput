@@ -371,6 +371,27 @@ pub struct Candidate {
     /// 引擎内部用，不推送 UI。
     #[serde(skip)]
     pub is_split_composed: bool,
+
+    /// 该候选来自**自动造词的草稿层**：滑窗切出、尚未被任何人用过的猜测词
+    /// （`docs/design/auto-phrase-draft-layer.md`）。
+    ///
+    /// ## 为什么必须有这个标记
+    ///
+    /// 草稿层的杂词率极高，这是它的模型决定的（「先记一堆、用过的才留」，过滤在使用端）。
+    /// 但草稿又必须能被召回，否则用户永远没机会「用过」它、它也就永远转不了正。
+    /// 两个诉求靠两道闸调和：① 草稿层只响应精确查询、不参与前缀召回（`StoreDraftLayer`）；
+    /// ② 本标记让它在候选里**恒沉底**（`candidate_display_order`）。
+    ///
+    /// ## 为什么不复用 [[is_split_composed]]
+    ///
+    /// 同 `is_split_composed` 不复用 `is_sentence` 的理由：那个字段已有两类消费者
+    /// （组合区切分显示、逆切分沉底档），借用会让「逆切分的统计里混进草稿」这类问题以
+    /// 最难查的形态出现。本仓在 `is_prefix` / `is_fuzzy` 上各踩过一次借位，最终都拆成了
+    /// 独立字段。
+    ///
+    /// 引擎内部用，不推送 UI。
+    #[serde(skip)]
+    pub is_draft: bool,
     /// 前缀补全**已被提升进完整匹配层**（排序决策，与 `is_prefix` 表达的「码更长」结构事实正交）。
     ///
     /// `is_prefix=true` 表达的是结构事实——候选码严格长于输入（补全词）；而「该不该沉到
@@ -509,6 +530,7 @@ impl Default for Candidate {
             is_sentence_demoted: false,
             is_synthesized: false,
             is_split_composed: false,
+            is_draft: false,
             is_promoted_completion: false,
             completion_extra_syllables: 0,
             consumed_length: 0,

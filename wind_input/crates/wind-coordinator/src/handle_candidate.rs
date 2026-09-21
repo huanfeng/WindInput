@@ -156,6 +156,21 @@ pub(crate) fn candidate_display_order(
         // 把候选分成两区，是合法全序，且两条非切分候选之间恒 `Equal`
         // ⇒ **可证明不改变任何既有次序**。默认档（`Empty`）下列表里只有切分候选，
         // 本层是纯空操作。
+        // 草稿候选沉底（自动造词的滑窗产物，`docs/design/auto-phrase-draft-layer.md`）。
+        //
+        // 排在逆切分那一层**之前** ⇒ 草稿沉得比切分候选还靠后。判据是「谁更未经验证」：
+        // 切分候选是引擎按码表规则拼出来的，草稿只是滑窗从落屏文本里切下来的猜测，
+        // 杂词率高是它的模型决定的。用户打满某个码时草稿能出来（这是它转正的唯一途径），
+        // 但绝不该挤到任何真词前面。
+        //
+        // ⚠️ 与逆切分同理，**必须排在 `cmp_match_layers` 之前**：那个键的第三层是
+        // `eff_prefix`，而草稿 `is_prefix = false`、用户词/临时词层的前缀补全
+        // `is_prefix = true` ⇒ 放在它之后的话胜负在那一层就已分出，本层永远走不到，
+        // 草稿会插进用户自己造的词中间。
+        //
+        // 全序性同逆切分那条：按一个布尔把候选分成两区，两条非草稿之间恒 `Equal`
+        // ⇒ 可证明不改变任何既有次序（草稿层没挂载时本层是纯空操作）。
+        .then(a.is_draft.cmp(&b.is_draft))
         .then(a.is_split_composed.cmp(&b.is_split_composed))
         .then_with(|| wind_candidate::cmp_match_layers(a, b))
         // 音节数对齐者优先（`zaim` 先给 2 音节的「在吗/再买」，3 音节的「在美国」排其后）。
@@ -5715,6 +5730,97 @@ mod clear_recheck_tests {
             ..Default::default()
         };
         assert!(!wants_codetable_split("hf'kn", Some(&alien)));
+    }
+
+    /// 草稿候选**沉在一切真词之后**，且沉得比切分候选还靠后。
+    ///
+    /// 这是草稿层敢参与召回的前提：它的杂词率极高（模型使然），必须保证无论权重如何
+    /// 都挤不到用户本来打得出的候选前面。见 `docs/design/auto-phrase-draft-layer.md` §5。
+    #[test]
+    fn draft_sinks_below_everything_including_split_composed() {
+        let mut ordinary = codetable("甲");
+        ordinary.weight = 10; // 故意给一个**低**权重
+        // ★ 同逆切分那条：必须带 `is_prefix`，否则两条候选在 `cmp_match_layers` 的
+        // `eff_prefix` 层就分出胜负，沉底层放在它之后也能变绿——那是假护栏。
+        ordinary.is_prefix = true;
+        let mut draft = codetable("甲乙丙");
+        draft.is_draft = true;
+        draft.weight = 9999; // 故意给一个**高**权重
+
+        assert_eq!(
+            candidate_display_order(&ordinary, &draft, false, false, "abcd"),
+            std::cmp::Ordering::Less,
+            "权重再高的草稿也须排在普通候选之后"
+        );
+
+        // 比切分候选还靠后：判据是「谁更未经验证」。
+        let mut composed = codetable("很可能");
+        composed.is_split_composed = true;
+        composed.weight = 1;
+        assert_eq!(
+            candidate_display_order(&composed, &draft, false, false, "abcd"),
+            std::cmp::Ordering::Less,
+            "草稿该沉在切分候选之后——切分是按码表规则拼的，草稿只是滑窗猜的"
+        );
+
+        // ★ 反向对照：两条都不是草稿时，本层必须是**空操作**，权重照常说了算。
+        // 缺了它，一个「无条件把 a 排前」的实现也能让上面两句变绿。
+        let mut other = codetable("乙");
+        other.weight = 9999;
+        assert_eq!(
+            candidate_display_order(&ordinary, &other, false, false, "abcd"),
+            std::cmp::Ordering::Greater,
+            "两条普通候选之间，沉底层不得改变既有次序"
+        );
+
+        // 两条都是草稿时同样是空操作，序交给后续键（weight）。
+        let mut draft_low = draft.clone();
+        draft_low.text = "甲乙丁".into();
+        draft_low.weight = 1;
+        assert_eq!(
+            candidate_display_order(&draft, &draft_low, false, false, "abcd"),
+            std::cmp::Ordering::Less,
+            "草稿之间仍按权重排"
+        );
+    }
+
+    /// 沉底必须在**真实的整表重排**下成立，不只是两两比较成立。
+    ///
+    /// `build_candidates` 对引擎候选做的是 `candidates.sort_by(candidate_display_order(..))`
+    /// ——一次无条件全量重排。只断言两两比较的话，测不出「比较器不构成全序、`sort_by`
+    /// 结果未指定」这类问题，而那正是本仓在 `place_english_after_common_exact` 那条
+    /// 注释里反复告诫的坑。
+    #[test]
+    fn drafts_land_at_the_tail_after_a_full_resort() {
+        let mut list = Vec::new();
+        for (text, weight, is_draft) in [
+            ("草稿甲", 9999, true),
+            ("真词一", 5, false),
+            ("草稿乙", 8888, true),
+            ("真词二", 3000, false),
+            ("真词三", 1, false),
+        ] {
+            let mut c = codetable(text);
+            c.weight = weight;
+            c.is_draft = is_draft;
+            // ★ 真词带 `is_prefix`（用户词/临时词层前缀补全的形态），草稿不带。
+            // 两者若在这一维上相同，`cmp_match_layers` 的 `eff_prefix` 层就相等，
+            // 沉底键即便被错放到那一层**之后**也照样变绿 —— 那是假护栏。
+            // 同 `split_composed_sinks_below_ordinary_candidates` 的夹具告诫。
+            c.is_prefix = !is_draft;
+            list.push(c);
+        }
+        list.sort_by(|a, b| candidate_display_order(a, b, false, false, "abcd"));
+        let texts: Vec<&str> = list.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            &texts[..3],
+            &["真词二", "真词一", "真词三"],
+            "真词按权重降序（3000 → 5 → 1）排在前面：{texts:?}"
+        );
+        assert!(
+            texts[3].starts_with("草稿") && texts[4].starts_with("草稿"),
+            "两条草稿必须落在整表末尾，与权重无关：{texts:?}"
+        );
     }
 
     /// `split_trigger = "no_exact"` 档的立身之本：切分候选**沉在既有候选之后**。
