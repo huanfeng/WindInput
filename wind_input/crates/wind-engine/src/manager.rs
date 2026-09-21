@@ -1374,6 +1374,26 @@ impl EngineManager {
         Some(cache_root.join(&key).join(format!("{key}.wridx")))
     }
 
+    /// 单字全码表缓存路径：`<cache>/<方案键>/<方案键>.wscc`。
+    ///
+    /// 与 [`reverse_index_cache_path`](Self::reverse_index_cache_path) 同键同目录——两者
+    /// 同源于该方案启用的整组词库，一起生、一起废，分开放只会让清理缓存时漏掉一个。
+    /// 「为什么键是方案 id 而不是主词库路径」「无缓存根就不落盘」两条理由也逐字相同，
+    /// 见那里。
+    fn single_char_codes_cache_path(schema_id: &str) -> Option<std::path::PathBuf> {
+        let dir = CACHE_DIR.get()?.as_ref()?;
+        Self::single_char_codes_cache_path_in(dir, schema_id)
+    }
+
+    /// 纯函数内核，理由同 [`reverse_index_cache_path_in`](Self::reverse_index_cache_path_in)。
+    fn single_char_codes_cache_path_in(
+        cache_root: &Path,
+        schema_id: &str,
+    ) -> Option<std::path::PathBuf> {
+        let key = Self::schema_cache_key(schema_id)?;
+        Some(cache_root.join(&key).join(format!("{key}.wscc")))
+    }
+
     /// 方案 id → 可安全当**目录名和文件名**用的键；id 为空时 `None`。
     ///
     /// 只保留 ASCII 字母/数字/`-`/`_`，其余一律换成 `_`。转义**真的发生**时再附一段 id 的
@@ -1640,15 +1660,79 @@ impl EngineManager {
         if dicts.is_empty() {
             return HashMap::new();
         }
+        let cache = Self::single_char_codes_cache_path(schema_id);
+        let digests = Self::single_char_codes_source_digests(&dicts, cap);
+
+        // ① 复用：词库与 cap 都没变就直接读盘上那份，连扫描都不发生。
+        if let (Some(c), Some(dg)) = (cache.as_deref(), digests.as_deref())
+            && wind_dict::cache_fp::derived_cache_is_fresh(
+                c,
+                dg,
+                wind_dict::cache_fp::SINGLE_CHAR_CODES_TAG,
+            )
+        {
+            match wind_dict::charcodes::read(c) {
+                Ok(m) => {
+                    info!(
+                        "Reused single-char full-code cache: {} ({} chars, cap={}, {} dicts)",
+                        schema_id,
+                        m.len(),
+                        cap,
+                        dicts.len()
+                    );
+                    return m;
+                }
+                // 指纹说新鲜但读不出＝文件被截断/损坏。重建即可，但要留痕：静默重建会让
+                // 「每次启动都慢」这类故障失去唯一的外部线索。同反查索引那条。
+                Err(e) => warn!("单字全码表缓存 {} 读不出（{e}），重建", c.display()),
+            }
+        }
+
+        // ② 重建。
+        let t0 = std::time::Instant::now();
         let idx = wind_dict::cached::build_single_char_full_codes_from(&dicts, cap);
+        let built = t0.elapsed();
+
+        // ③ 落盘。**不像反查索引那样「写完再从盘打开」**——那一步是为了把上百 MB 的索引
+        //    字节移出进程私有内存（mmap），而这张表是 MB 以内的常驻 HashMap，重新读一遍
+        //    只会白花一次解析时间，拿到的还是等价的东西。写失败也只是下次启动再建一遍。
+        if let (Some(c), Some(dg)) = (cache.as_deref(), digests.as_deref()) {
+            match wind_dict::charcodes::write(c, &wind_dict::charcodes::serialize(&idx)) {
+                Ok(()) => wind_dict::cache_fp::write_derived_cache_fp(
+                    c,
+                    dg,
+                    wind_dict::cache_fp::SINGLE_CHAR_CODES_TAG,
+                ),
+                // Windows 上最常见的原因是目标仍被占用（rename 会 Access Denied）。
+                Err(e) => warn!(
+                    "单字全码表写盘失败 {}（{e}）——本次照常可用，下次启动仍需重建",
+                    c.display()
+                ),
+            }
+        }
         info!(
-            "Built single-char full-code table: {} ({} chars, cap={}, {} dicts)",
+            "Built single-char full-code table: {} ({} chars, cap={}, {} dicts, {:?})",
             schema_id,
             idx.len(),
             cap,
-            dicts.len()
+            dicts.len(),
+            built
         );
         idx
+    }
+
+    /// `.wscc` 的指纹源：各词库摘要（同 `.wridx`）**再加上 `max_code_length`**。
+    ///
+    /// ⚠️ 这一项是两张表的唯一分歧，也是不能直接复用
+    /// [`reverse_index_source_digests`](Self::reverse_index_source_digests) 的原因：
+    /// 反查索引记录的是词库里**实际存在**的编码，与 cap 无关；单字全码表却要用 cap 当闸
+    /// 筛掉超长码（`build_single_char_full_codes_from`）。用户在设置页改了 cap 而词库一字未动时，
+    /// 只哈希词库的指纹仍判「新鲜」，于是那份按旧 cap 筛出来的表被永久复用——
+    /// 表现是改了码长设置却毫无变化，而且重装也不好使（缓存还在）。
+    fn single_char_codes_source_digests(dicts: &[CachedDict], cap: usize) -> Option<Vec<String>> {
+        let mut dg = Self::reverse_index_source_digests(dicts)?;
+        dg.push(format!("cap|{cap}"));
+        Some(dg)
     }
 
     /// 按方案的 `[[encoder.rules]]` 为词计算码表词组编码（造词/加词统一入口）。
@@ -5866,6 +5950,40 @@ mod tests {
         let a = EngineManager::reverse_index_cache_path_in(root, "pinyin").unwrap();
         let b = EngineManager::reverse_index_cache_path_in(root, "shuangpin").unwrap();
         assert_ne!(a.parent(), b.parent());
+    }
+
+    /// 单字全码表与反查索引同键同目录、只差扩展名。
+    ///
+    /// 两者同源于该方案启用的整组词库，一起生、一起废。分开放的话，清缓存/换词库时
+    /// 漏掉一个，留下的那份就是一份与另一份不同步的幽灵。
+    #[test]
+    fn single_char_codes_cache_sits_next_to_the_reverse_index() {
+        let root = Path::new("cache");
+        let w = EngineManager::single_char_codes_cache_path_in(root, "ime_wubi86").unwrap();
+        assert_eq!(w, root.join("ime_wubi86").join("ime_wubi86.wscc"));
+        let r = EngineManager::reverse_index_cache_path_in(root, "ime_wubi86").unwrap();
+        assert_eq!(w.parent(), r.parent(), "同源的两份产物必须同目录");
+        assert_ne!(w, r);
+    }
+
+    /// **`max_code_length` 必须进单字全码表的指纹。**
+    ///
+    /// 它是这张表与反查索引的唯一分歧：反查索引记录词库里实际存在的编码、与 cap 无关，
+    /// 单字全码表却拿 cap 当闸筛超长码。用户在设置页改了码长而词库一字未动时，只哈希词库
+    /// 的指纹仍判「新鲜」⇒ 按旧 cap 筛出来的表被永久复用，表现为改了设置毫无变化，
+    /// 且重装也不好使（缓存还在）。
+    ///
+    /// 空词库列表下摘要为空，剩下的恰好就是 cap 这一项，判据因此不受词库构造干扰。
+    #[test]
+    fn cap_is_part_of_the_single_char_cache_fingerprint() {
+        let a = EngineManager::single_char_codes_source_digests(&[], 4).unwrap();
+        let b = EngineManager::single_char_codes_source_digests(&[], 6).unwrap();
+        assert_ne!(a, b, "改了 max_code_length，指纹必须跟着变");
+        assert_ne!(
+            EngineManager::reverse_index_source_digests(&[]).unwrap(),
+            a,
+            "两张表共用一个目录，指纹再相等就会互相判「新鲜」"
+        );
     }
 
     /// 转义后同形的中文方案名不能共用一条路径——目录现在也由这个键决定。

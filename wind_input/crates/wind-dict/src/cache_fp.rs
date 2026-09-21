@@ -249,6 +249,18 @@ pub fn write_derived_cache_fp(cache: &Path, source_digests: &[String], tag: &str
 /// - v1 = 初始（含「权重在去重前聚合」的语义；发布前的中间态未单独计版）
 pub const REVERSE_INDEX_TAG: &str = "reverse-index/v1";
 
+/// 单字全码表（`.wscc`）缓存的 tag。同 [`REVERSE_INDEX_TAG`]，**取码判据一改就要 +1**：
+/// 它与反查索引同源同批词库，但选码判据另有一套（码长 → 权重 → 码字典序，见
+/// [`crate::cached::build_single_char_full_codes_from`]），布局不动而选出的码变了，
+/// `VERSION` 一样拦不住。
+///
+/// ⚠️ 这张表还依赖方案的 `max_code_length`，而那**不在词库指纹里**——
+/// 调用方必须把它并进 `source_digests`（见 `EngineManager::build_single_char_codes_for`）。
+///
+/// 历史：
+/// - v1 = 初始
+pub const SINGLE_CHAR_CODES_TAG: &str = "single-char-codes/v1";
+
 /// 词库缓存的 tag：区分 code 列是否被小写化（`dict_type = english` 走小写）。
 pub fn dict_tag(lowercase_code: bool) -> &'static str {
     if lowercase_code {

@@ -22,6 +22,7 @@ pub mod binformat;
 pub mod cache_fp;
 pub mod cache_ns;
 pub mod cached;
+pub mod charcodes;
 pub mod codetable;
 pub mod commentdict;
 pub mod composite;
