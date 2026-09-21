@@ -31,9 +31,19 @@ impl Coordinator {
         // 若有活跃 composition（拼音输入中/独占模式），先清空内部状态并通知 TSF 清除 composition，
         // 避免服务退出后 TSF 持有孤儿 composition 导致残留。
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // ⚠️ `candidates` 这一项不能少 —— **联想态**的四项全是空的：文本已上屏（`input_buffer`
+        // / `committed_text` 空）、`active` 恒为 `None`（联想不是 overlay 模式，`assoc_active()`
+        // 纯看首候选的 source），而它挂在宿主里的那个组合是 `ASSOC_COMPOSITION` 占位空格。
+        // 少了这一项，联想态下重启服务不推 `ClearComposition`，那个占位空格就留在用户文档里
+        // 成了孤儿——而且这次连兜底都没有：服务进程重启了，`assoc_placeholder_orphaned` 标记
+        // 跟着没了，`adopt_orphaned_placeholder` 接不到。症状同 `fire_assoc_hide` 注释里记的
+        // 那个「被宿主 finalize 后在文档里留下占位空格」。
+        //
+        // 它只在**联想态**这一格改变行为：普通输入有候选时 `input_buffer` 必然非空，早就为真了。
         let has_composition = !state.input_buffer.is_empty()
             || !state.preedit.is_empty()
             || !state.committed_text.is_empty()
+            || !state.candidates.is_empty()
             || state.active.is_some();
         if has_composition {
             self.reset_exclusive_modes(&mut state);
@@ -1088,5 +1098,72 @@ impl Coordinator {
         if dirty {
             debug!("reset_exclusive_modes: cleared residual exclusive input mode state");
         }
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    //! 重启服务前的「有没有活跃组合」判据。
+    //!
+    //! 只钉**联想态**这一格：那是四个原有析取项同时为空、而宿主里确实挂着组合
+    //! （`ASSOC_COMPOSITION` 占位空格）的唯一形态，也是这条判据唯一会判错的地方。
+
+    use crate::Coordinator;
+    use wind_candidate::{Candidate, CandidateSource};
+    use wind_config::Config;
+
+    /// 摆一个联想态：文本已上屏 ⇒ 缓冲/前缀全空、`active` 为 `None`，只有联想候选在。
+    /// 宿主那边此刻挂着 `ASSOC_COMPOSITION` 占位空格（本测试构造不出宿主，只摆核心侧）。
+    fn fill_assoc(c: &Coordinator) {
+        let mut st = c.state.lock().unwrap();
+        st.input_buffer.clear();
+        st.input_buffer_cased.clear();
+        st.committed_text.clear();
+        st.preedit.clear(); // 嵌入模式（含压制态强制嵌入）下联想不给标识，这里就是空
+        st.active = None;
+        st.candidates = vec![Candidate {
+            text: "输入法".into(),
+            source: CandidateSource::Assoc,
+            ..Default::default()
+        }];
+    }
+
+    /// ★ 联想态下重启服务必须认定「有组合」，否则宿主里的占位空格成孤儿。
+    ///
+    /// # 为什么断言的是 `candidates` 被清空
+    ///
+    /// 判据为真会走 `reset_exclusive_modes`，它末尾清 `state.candidates`；判据为假则整个
+    /// if 都不进。所以清没清，就是判据结论的**可观测投影**——不必去截 `push_server` 上那条
+    /// `ClearComposition`（headless 下没有对端）。`restart_service()` 在单测里可以整条跑完：
+    /// `request_restart()` 的 `RESTART_TX` 是个没注入的 `OnceLock`，是 no-op。
+    ///
+    /// # 这个洞比本次改动老
+    ///
+    /// 出厂 `app_inline` 下联想的 `preedit` 本来就是空串，四项全空 ⇒ 判据早就漏了。
+    /// 只是「编码显示在候选窗顶部」那一档恰好把 `preedit` 填成「联想输入」四个字，
+    /// 把它糊住了。压制态强制嵌入之后那一档也变成空串，糊不住了，才暴露出来。
+    ///
+    /// 变异检验：去掉判据里的 `!state.candidates.is_empty()` ⇒ 本条红。
+    #[test]
+    fn restarting_during_association_still_clears_the_host_composition() {
+        let (c, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        fill_assoc(&c);
+        // 前置：四个原有析取项确实全空，否则本条测的是别的东西。
+        {
+            let st = c.state.lock().unwrap();
+            assert!(st.input_buffer.is_empty(), "前置：联想态缓冲为空");
+            assert!(st.committed_text.is_empty(), "前置：联想态无已转换前缀");
+            assert!(st.preedit.is_empty(), "前置：嵌入模式下联想不给标识");
+            assert!(st.active.is_none(), "前置：联想不是 overlay 模式");
+            assert!(st.assoc_active(), "前置：这确实是联想态");
+        }
+
+        c.restart_service();
+
+        assert!(
+            c.state.lock().unwrap().candidates.is_empty(),
+            "联想态重启服务必须认定有组合并清理——否则宿主里那个占位空格没人收，\
+             而服务一重启 assoc_placeholder_orphaned 也跟着没了，孤儿认领接不到"
+        );
     }
 }
