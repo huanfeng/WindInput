@@ -593,3 +593,87 @@ fn separator_is_syntax_not_content() {
         "不含分词符时 always 档仍应把原文放首位，实际: {plain:?}"
     );
 }
+
+// ───────────────────── 剥离查询的噪音闸门 ─────────────────────
+
+/// ★★ 打了分词符就不该再看见**普通单词的前缀补全**。
+///
+/// 实测反馈（本组用例的由来）：打 `p'o`，整屏候选是 pocket / pod / podcast / poem …
+/// 一个词组都没有。来路是 `english.rs` 那条「剥掉分词符再查一次」——`p'o` 剥成 `po`，
+/// 出厂词库里 `po*` 的单词按权重铺满 `max_candidates`，分段候选一条都挤不进来。
+///
+/// 那些单词**不打分词符时本来就查得到**（下面的反向对照），打了分词符还出它们不但没有
+/// 新增信息，还正好淹掉用户用分词符请求的东西。判据落在
+/// `wind_engine::english::stripped_hit_is_relevant`：剥离命中只收「text 含分词符」或
+/// 「text 是多词」的条目。
+#[test]
+fn separator_suppresses_plain_word_completions() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let p = page_of("p'o", "strip_noise", true);
+    assert!(
+        !p.is_empty(),
+        "前提：`p'o` 不该是空候选，否则下面测不到东西"
+    );
+    for t in &p {
+        assert!(
+            t.contains(' ') || t.contains('\''),
+            "打了分词符不该再出普通单词补全（`{t}`），实际整页: {p:?}"
+        );
+    }
+
+    // ★ 反向对照：同一批词在**不打分词符**时照常出——闸门关的是「打了还出」，
+    // 不是把它们从词库里抹掉。没有这条，「剥离查询整个删掉」也能过上面那段。
+    let plain = page_of("po", "strip_noise_plain", true);
+    assert!(
+        plain.iter().any(|t| !t.contains(' ') && !t.contains('\'')),
+        "不打分词符时普通单词补全必须照常在，实际: {plain:?}"
+    );
+}
+
+/// ★ 但剥离查询本身不能关掉：拼接式编码的词组只有它够得着。
+///
+/// `macOS Tahoe` 的 text 里 `macOS` 是**一个**词，`mac'os` 的第二段 `os` 无词可配，
+/// 分段路径恒空；这一族全靠剥离串 `macos` 前缀命中 code。与上一条构成对照的两半。
+#[test]
+fn stripped_query_still_reaches_concatenated_phrases() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let p = page_of("mac'os", "strip_concat", true);
+    assert!(
+        p.iter().any(|t| t.starts_with("macOS ")),
+        "`mac'os` 应能命中 macOS 系列词组，实际: {p:?}"
+    );
+}
+
+/// ★ 顺序：同权重时**分段命中压过剥离命中**，一路保到用户眼前。
+///
+/// `p'o` 下两类候选都有，且出厂 weight 同为 0：
+/// - `Point-to-Point Protocol over Ethernet` —— 段 `p` 配上首词、段 `o` 配上 `over`，
+///   这是用户按下分词符真正请求的东西；
+/// - `Pocket PC` —— 只是把分词符当没打过（剥离成 `po` 前缀命中 code `pocketpc`）。
+///
+/// 变异验证：把引擎里分段那一路挪到剥离之后，本页首条就从前者翻成后者——协调器的
+/// `candidate_display_order` 在同权重时保的正是引擎给的 `natural_order` 序，所以引擎侧
+/// 的先后不是内部细节，它就是用户看到的顺序。
+#[test]
+fn phrase_hits_outrank_stripped_hits_end_to_end() {
+    if !has_english_schema() {
+        eprintln!("跳过：缺少英文方案或词库");
+        return;
+    }
+    let p = page_of("p'o", "strip_order", true);
+    assert!(
+        p.contains(&"Pocket PC".to_string()),
+        "前提：剥离路径那条也得在列表里，否则测不到两类的先后，实际: {p:?}"
+    );
+    assert_eq!(
+        p.first().map(String::as_str),
+        Some("Point-to-Point Protocol over Ethernet"),
+        "首候选应是分段命中的那条，实际: {p:?}"
+    );
+}

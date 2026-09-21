@@ -69,6 +69,23 @@ impl EnglishEngine {
     }
 }
 
+/// 剥离查询的命中**值不值得并进候选**：只收多词条目与含分词符的词。
+///
+/// 剥离查询存在的唯一理由是「带分词符的串在某些词库里编码不含分词符」，它要接住的是两类：
+/// - **撇号词**：`o'clock` 在去撇号词库里 code 是 `oclock`，而 text 仍带着撇号；
+/// - **词组**：`mac'os` 剥成 `macos` 恰好命中拼接式编码的 `macOS Tahoe` 一族——分段路径对
+///   它们无能为力（`macOS` 在 text 里是**一个**词，段 `os` 无词可配），剥离是它们唯一的通路。
+///
+/// 这两类之外的命中一律是普通单词的前缀补全，而它们**不打分词符时本来就在**（直接打 `po`
+/// 就能出 pocket / pod / poem）。打了分词符还出它们不但没有新增信息，还会按词库权重铺满整个
+/// `max_candidates`，把用户真正用分词符请求的词组挤到看不见的地方。
+///
+/// ⚠️ 判据落在 **text** 而不是 code：这与 `english_phrase` 整个模块的立足点是同一条——词边界
+/// 只在 text 的空白里，code 那边两种编码方案并存（见该模块头部的表）。
+fn stripped_hit_is_relevant(text: &str, sep: char) -> bool {
+    text.contains(sep) || text.split_whitespace().nth(1).is_some()
+}
+
 impl Engine for EnglishEngine {
     fn convert(&self, input: &str, max_candidates: usize) -> anyhow::Result<ConvertResult> {
         let mut r = self.inner.convert(input, max_candidates)?;
@@ -76,64 +93,81 @@ impl Engine for EnglishEngine {
         for c in &mut r.candidates {
             c.source = CandidateSource::English;
         }
-        // ★ 含分词符时，原路径**再用剥掉分词符的串查一次**，结果并进来。
+        // ★ 含分词符时追加两路候选，**词组分段在前、剥离查询在后**，三路统一按 text 去重。
         //
-        // 撇号词的编码在词库之间不统一，这是实打实的：出厂英文词库保留撇号
-        // （`o'clock` 的 code 就是 `o'clock`，57 条如此），而用户自制/第三方词库常把它
-        // 去掉（实测靶机那份 3.8 MB 词库里是 `o'clock → oclock`）。
+        // 顺序就是优先级：`natural_order` 在下游是同权重时的定序依据，而词库里 weight 相同的
+        // 条目成片存在（出厂词组大量 weight = 0），实际次序多半就由它定。用户按下分词符是在
+        // 表达「我要按段找词组」，分段候选理应压过「把分词符当没打过」的剥离候选。
         //
-        // 分词符对用户而言是**输入语法**，他打 `o'clock` 时脑子里想的是那个词，不该被要求
-        // 先知道自己这份词库是哪种编码方案。只查原串的话，去撇号那种词库下从打第 4 个键
-        // （`o'cl`）起就是零候选——实测反馈正是这个。
+        // 去重必须**跨三路**：原路径与剥离路径可能命中同一条（同 text 两种编码），分段路径
+        // 与剥离路径更会成片相撞——`mac'os` 下 `Mac OS X` 既被分段路径召回（两段各配上一个
+        // 词），又被剥离串 `macos` 前缀命中 code `macosx`。
         //
-        // 两个串都查、按 text 去重：保留撇号的词库由原串命中，去撇号的由剥离串命中，
-        // 两种方案下表现一致。代价是多一次 Trie 前缀查询，只在缓冲含分词符时发生。
+        // ⚠️ 重复**到不了用户眼前**：协调器 `handle_candidate.rs` 那道按 text 的通用去重
+        // （带 `merged_codes` 归并）会接住。要在这里去重是因为紧跟着的
+        // `truncate(max_candidates)` 在引擎内——每条重复都白占一个名额，挤掉一条本可召回的
+        // 词组，而协调器再去重也变不回来。故本条的护栏在引擎单测，不在 e2e（按整表断言的
+        // e2e 实测恒绿，那是假护栏）。
         if let Some(sep) = self.seg_sep
             && input.contains(sep)
         {
+            let mut seen: std::collections::HashSet<String> =
+                r.candidates.iter().map(|c| c.text.clone()).collect();
+            let mut extra: Vec<wind_candidate::Candidate> = Vec::new();
+
+            // ── 一、词组分段候选 ──────────────────────────────────────────────
+            //
+            // ★ 为什么合并而不是「见到分词符就改走分词路径」：词库里有 57 条 code 本身含撇号
+            // （`you're` / `let's` / `O'Reilly`）。分词符取 `'` 时，劫持式实现会让这些词在打
+            // 全码时反而查不到——而它们原本是能精确命中的。合并则两边各查各的：`you'r` 由原
+            // 路径出 `you're`、分词路径出空；`envi'deg` 反过来。零回归。
+            for c in self.phrase_candidates(input, max_candidates) {
+                if seen.insert(c.text.clone()) {
+                    extra.push(c);
+                }
+            }
+
+            // ── 二、剥掉分词符再查一次 ────────────────────────────────────────
+            //
+            // 撇号词的编码在词库之间不统一，这是实打实的：出厂英文词库保留撇号（`o'clock`
+            // 的 code 就是 `o'clock`，57 条如此），而用户自制/第三方词库常把它去掉（实测靶机
+            // 那份 3.8 MB 词库里是 `o'clock → oclock`）。分词符对用户而言是**输入语法**，他打
+            // `o'clock` 时脑子里想的是那个词，不该被要求先知道自己这份词库是哪种编码方案。
+            //
+            // ★★ 但剥离命中必须过 [`stripped_hit_is_relevant`] 那道闸：不设闸的话 `p'o` 被剥成
+            // `po`，pocket / pod / poem …一整屏普通单词补全按词库权重灌进来，分段候选一条都挤不
+            // 进 `max_candidates`——实测反馈正是「打 `p'o` 出来的全是不相干的词」。
             let stripped: String = input.chars().filter(|c| *c != sep).collect();
             if !stripped.is_empty() {
-                let seen: std::collections::HashSet<String> =
-                    r.candidates.iter().map(|c| c.text.clone()).collect();
-                let mut alt = self.inner.convert(&stripped, max_candidates)?;
-                alt.candidates.retain(|c| !seen.contains(&c.text));
-                for c in &mut alt.candidates {
+                for mut c in self.inner.convert(&stripped, max_candidates)?.candidates {
+                    if !stripped_hit_is_relevant(&c.text, sep) || !seen.insert(c.text.clone()) {
+                        continue;
+                    }
                     c.source = CandidateSource::English;
+                    extra.push(c);
                 }
-                r.candidates.extend(alt.candidates);
             }
-        }
-        // 词组分词候选**追加在原路径之后**，不是二选一。
-        //
-        // ★ 为什么合并而不是「见到分词符就改走分词路径」：词库里有 57 条 code 本身含撇号
-        // （`you're` / `let's` / `O'Reilly`）。分词符取 `'` 时，劫持式实现会让这些词在
-        // 打全码时反而查不到——而它们原本是能精确命中的。合并则两边各查各的：
-        // `you'r` 由原路径出 `you're`、分词路径出空；`envi'deg` 反过来。零回归。
-        //
-        // 两侧重复的可能性可以忽略：分词路径只出**多词**条目，而原路径要命中同一条，
-        // 得有一条 code 恰好等于带分词符的输入串——真出现了也是词库里确有此码，
-        // 那条候选本就该在。
-        let extra = self.phrase_candidates(input, max_candidates);
-        if !extra.is_empty() {
-            // ★ 取原路径 `natural_order` 的**最大值**，不是它们的条数。
-            //
-            // 这两个数差着几个量级：`natural_order` 来自词库、是上万的序号（实测 `o'c` 的
-            // `o'clock` 拿到 12085），而条数只有个位数。按条数续号的话分词候选会拿到 1..8，
-            // 同权重时反而排在原路径候选**前面**——与本注释想避免的恰好相反。
-            let base = r
-                .candidates
-                .iter()
-                .map(|c| c.natural_order)
-                .max()
-                .map_or(0, |m| m + 1);
-            r.candidates
-                .extend(extra.into_iter().enumerate().map(|(i, mut c)| {
-                    // natural_order 接在原路径之后续号：它在下游是**同权重时的定序依据**，
-                    // 让分词候选从 0 重新开始会与原路径候选交错。
-                    c.natural_order = base + i as i32;
-                    c
-                }));
-            r.candidates.truncate(max_candidates);
+
+            if !extra.is_empty() {
+                // ★ 取原路径 `natural_order` 的**最大值**，不是它们的条数。
+                //
+                // 这两个数差着几个量级：`natural_order` 来自词库、是上万的序号（实测 `o'c` 的
+                // `o'clock` 拿到 12085），而条数只有个位数。按条数续号的话追加的候选会拿到
+                // 1..8，同权重时反而排在原路径候选**前面**——而原路径那条是带着分词符打全码
+                // 精确命中的撇号词，它该在最前。
+                let base = r
+                    .candidates
+                    .iter()
+                    .map(|c| c.natural_order)
+                    .max()
+                    .map_or(0, |m| m + 1);
+                r.candidates
+                    .extend(extra.into_iter().enumerate().map(|(i, mut c)| {
+                        c.natural_order = base + i as i32;
+                        c
+                    }));
+                r.candidates.truncate(max_candidates);
+            }
         }
         // 英文无「自动上屏」语义：即使内部误判也抹掉（构造已关，此为双保险）。
         r.should_commit = false;
@@ -248,6 +282,73 @@ mod tests {
             vec!["o'clock"],
             "同 text 的两条编码只该出一条"
         );
+    }
+
+    /// ★★ 剥离查询不得把**普通单词的前缀补全**灌进来。
+    ///
+    /// 真机反馈（本组用例的由来）：开着词组分词打 `p'o`，候选窗整屏是 pocket / pod / poem
+    /// 一类与分词符毫无关系的单词——它们由剥离串 `po` 的前缀匹配召回，按词库权重铺满
+    /// `max_candidates`，真正被请求的词组一条都挤不进来。
+    ///
+    /// 这些词**不打分词符时本来就查得到**，打了还出它们没有任何新增信息。
+    #[test]
+    fn stripped_query_drops_plain_word_completions() {
+        let e = engine(&[
+            ("pocket", "pocket", 100),
+            ("pod", "pod", 100),
+            ("poem", "poem", 100),
+            ("pocketpc", "Pocket PC", 50),
+        ]);
+        assert_eq!(
+            texts(&e, "p'o"),
+            vec!["Pocket PC"],
+            "剥离命中里只有多词条目该留下"
+        );
+        // 反向对照：不打分词符时这些单词照常出——闸门关的是「打了分词符还出它们」。
+        let plain = texts(&e, "po");
+        assert!(plain.contains(&"pocket".to_string()) && plain.len() == 4);
+    }
+
+    /// ★ 但剥离命中的**多词条目**必须留下：分段路径够不着它们。
+    ///
+    /// `macOS Tahoe` 的 text 里 `macOS` 是**一个**词，`mac'os` 的第二段 `os` 无词可配，
+    /// 分段路径恒空；它只能靠剥离串 `macos` 前缀命中拼接式编码。把剥离查询整个关掉、
+    /// 或只保留撇号词，这一族就没了。
+    #[test]
+    fn stripped_query_keeps_multi_word_hits() {
+        let e = engine(&[("macos", "macOS Tahoe", 9)]);
+        assert_eq!(texts(&e, "mac'os"), vec!["macOS Tahoe"]);
+    }
+
+    /// ★★ 分段路径与剥离路径撞同一条 text 时只出一条。
+    ///
+    /// `mac'os`：`Mac OS X`（code `macosx`）既被分段路径召回（段 `mac` / `os` 各配上一个
+    /// 词），又被剥离串 `macos` 前缀命中。旧注释断言「两侧重复可以忽略」——那是在剥离查询
+    /// 加进来之前写的，两路一碰就不成立了。
+    ///
+    /// ⚠️ 判据只能落在**引擎层**：协调器那道按 text 的通用去重会在用户端接住重复，端到端
+    /// 断言（连按整表）实测恒绿。这里要挡的是重复白占 `truncate(max_candidates)` 的名额——
+    /// 挤掉的那条词组，协调器再去重也变不回来。
+    #[test]
+    fn phrase_and_stripped_hits_are_deduped() {
+        let e = engine(&[("macosx", "Mac OS X", 999)]);
+        assert_eq!(texts(&e, "mac'os"), vec!["Mac OS X"]);
+    }
+
+    /// ★ 同权重时分段候选排在剥离候选**之前**。
+    ///
+    /// 按下分词符就是在表达「我要按段找词组」，那条路的结果理应压过「把分词符当没打过」
+    /// 的剥离结果。词库里 weight 相同的条目成片存在（出厂词组大量 weight = 0），这个次序
+    /// 在实际候选窗里说了算。两条 weight 必须**相等**，本用例才测得到顺序本身。
+    #[test]
+    fn phrase_candidates_come_before_stripped_ones() {
+        let e = engine(&[
+            // 只有分段路径能命中（code `macx` 接不上剥离串 `macos`）。
+            ("macx", "Mac OS X", 100),
+            // 只有剥离路径能命中（`Tahoe` 不以 `os` 开头，分段路径配不上第二段）。
+            ("macos", "macOS Tahoe", 100),
+        ]);
+        assert_eq!(texts(&e, "mac'os"), vec!["Mac OS X", "macOS Tahoe"]);
     }
 
     /// ★ 反向对照：不含分词符时**不做**剥离查询，行为逐字节不变。
