@@ -496,6 +496,15 @@ const MAX_COMPLETION_CANDIDATES: usize = 1000;
 /// 反而查得更少**。且因为截断在**召回层**，候选窗开到 300 也捞不回来，调频同样救不回来
 /// （位次重排只能重排已经进了列表的候选）。两条路径的窗口必须一致，见
 /// `tests/pinyin_abbrev_recall_window.rs`。
+///
+/// ⚠️ **已知上界：只有单键上限，没有总额。** 成本是
+/// `变体键数 × 本值 × 每码的 search_with_boundary`，而 `fuzzy_abbrev_keys` 最多返回
+/// `MAX_ABBREV_KEY_VARIANTS`(64) 个变体键，step 6.2 还要逐切点重来一遍。
+/// 真机计时（`build_dev/data`、release、开满六个声母模糊组，见
+/// `tests/pinyin_abbrev_recall_latency.rs`）最坏 `zhy` 551µs / `lll` 246µs，
+/// 离按键线程的预算还远，故**不设总额**。但同样的形状在合成词库（每键塞满码）下
+/// `lll` 会到 4.99ms —— 真实 `cn_dicts` 一个 3 位键下只有几十条码，这个余量靠的是
+/// **数据分布而非代码保证**。词库形态变了（超大码表、机器生成的键）先重跑那个基准。
 const ABBREV_INDEX_LIMIT: usize = 64;
 
 /// 混合整句的**质量闸门**：路径平均每字 log_prob 低于此值就不插入候选。
@@ -564,10 +573,16 @@ const MIN_MIXED_SENTENCE_LEN: usize = 4;
 /// 单字母不构成简拼，退到 1 只会拖出一堆高频单字。
 const MIN_ABBREV_STROKE: usize = 2;
 
-/// 前缀回退**单个切点**的产出上限。
+/// 前缀回退单个切点、**单个来源层**的产出上限。
 ///
 /// 逐切点限流而非只设总额，是为了保证**短切点也挤得进来**：`bzdhaobuhao` 的
 /// `bzdh` 切点若把配额占满，`bzd`（→「不知道」，词频高 672 倍）就一条都进不来。
+///
+/// ⚠️ **系统层与 store 层各记各的**（`recall_abbrev_prefix` 的 `start` / `store_base`），
+/// 故单切点的实际上限是 **2×** 本值、两个切点合计 4×。共用一份时 ③④ 排在 ①② 之后，
+/// 系统的高频词占满席位 ⇒ 用户自己造的词在长输入下静默出局。调这个值时记得乘 2 再
+/// 对照候选规模（`mixed_partial_pinyin_filter.rs` 记着「219 条残码单字把简拼词压到
+/// 第 221 位」的教训）。
 const MAX_FALLBACK_PER_CUT: usize = 6;
 
 /// 前缀回退**参与竞争的切点数**（有产出的才计数）。
@@ -3153,8 +3168,8 @@ impl Engine for PinyinEngine {
             keys.sort_unstable();
             keys.dedup();
             for key in &keys {
-                // limit 比 step5 的 10 大一截：那边键即答案、取权重前 10 就够；这里拿到的
-                // 码还要过一道逐段校验，**绝大多数会被滤掉**，取 10 条几乎必然一条不剩。
+                // 与 step5 共用 `ABBREV_INDEX_LIMIT`（两条路径查的是同一张表、同一个键）。
+                // 这里拿到的码还要过一道逐段校验，**绝大多数会被滤掉**，窗口小了几乎一条不剩。
                 for abbr_code in dict.search_abbrev(key, ABBREV_INDEX_LIMIT) {
                     for h in dict.search_with_boundary(&abbr_code) {
                         // 无边界信息 → 判据不存在 → 不参与（不是放行，见 syllables_from_boundary）。

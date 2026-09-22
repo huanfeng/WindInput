@@ -179,10 +179,19 @@ pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
 /// ⚠️ 不能改用 [`initials_fuzzy_equal`]：那个比的是**首字母**，而 `zh` 与 `z` 的首字母
 /// 相同 ⇒ 它会走 `a == b` 的短路恒返回 true，于是 `zh_z` 关着也放行 `ze`，
 /// 双字母声母就白设了。`head` 传的是 z/c/s 那一位。
+///
+/// ⚠️ 判据**两端对称**，不依赖组表把长的那端写在 `a` 还是 `b`（本组是无序对，见
+/// [`FuzzyGroup`]）。只问 `b` 的写法能work是因为今天三组都写成 `a="zh", b="z"`；
+/// 哪天有人写反，该函数会静默返回 false、开关对本段悄悄失效，而
+/// [`initials_fuzzy_equal`] 与 [`initial_alternatives`] 都是对称写的、不会跟着红。
 pub fn retroflex_relaxed(head: char, config: &FuzzyConfig) -> bool {
-    INITIAL_GROUPS
-        .iter()
-        .any(|g| (g.flag)(config) && g.a.len() == 2 && g.b.starts_with(head))
+    INITIAL_GROUPS.iter().any(|g| {
+        (g.flag)(config)
+            // 一端是双字母、另一端是单字母，且两端都以 head 开头 ⇒ 正是 zh/z 这类组。
+            && g.a.starts_with(head)
+            && g.b.starts_with(head)
+            && g.a.len() != g.b.len()
+    })
 }
 
 /// 简拼键的模糊变体，附带该变体改动了**几位**（**含原键自身，处数 0，且恒在首位**）。
@@ -561,6 +570,54 @@ mod tests {
         assert!(!FuzzyConfig::default().any_enabled(), "默认全关");
         assert!(cfg(|c| c.zh_z = true).any_enabled());
         assert!(cfg(|c| c.uan_uang = true).any_enabled(), "末位组也须被算上");
+    }
+
+    // ------------------------------------------------------------ retroflex_relaxed
+
+    /// 三个卷舌组各管各的，且**只认自己那一组**——`zh_z` 开着不该让 `ch` 段跟着放宽。
+    #[test]
+    fn retroflex_relaxed_is_per_group() {
+        for (head, on) in [
+            (
+                'z',
+                (|c: &mut FuzzyConfig| c.zh_z = true) as fn(&mut FuzzyConfig),
+            ),
+            ('c', |c| c.ch_c = true),
+            ('s', |c| c.sh_s = true),
+        ] {
+            assert!(
+                !retroflex_relaxed(head, &FuzzyConfig::default()),
+                "{head}: 全关时不放宽"
+            );
+            assert!(retroflex_relaxed(head, &cfg(on)), "{head}: 开了本组即放宽");
+        }
+        assert!(
+            !retroflex_relaxed('c', &cfg(|c| c.zh_z = true)),
+            "zh_z 不该带动 ch"
+        );
+        // 非卷舌声母没有「双字母」这回事，任何组合都不成立。
+        assert!(!retroflex_relaxed('n', &cfg(|c| c.n_l = true)));
+    }
+
+    /// 判据不得依赖组表把长的那端写在 `a` 还是 `b`（无序对），也不得与
+    /// [`initials_fuzzy_equal`] 混用 —— 后者对 zh/z 这类**恒返回 true**（首字母相同），
+    /// 拿它当判据等于开关形同虚设。
+    #[test]
+    fn retroflex_relaxed_differs_from_initials_fuzzy_equal() {
+        let off = FuzzyConfig::default();
+        assert!(
+            initials_fuzzy_equal('z', 'z', &off),
+            "首字母相同 ⇒ 恒真，这正是不能拿它当卷舌判据的原因"
+        );
+        assert!(!retroflex_relaxed('z', &off), "而本函数在全关时必须为假");
+        // 两端对称：三组都以同一个字母开头、长度一长一短。
+        for g in INITIAL_GROUPS.iter().filter(|g| g.a.len() == 2) {
+            assert_eq!(
+                g.a.chars().next(),
+                g.b.chars().next(),
+                "卷舌组两端首字母必须相同，否则 retroflex_relaxed 的形状要重估"
+            );
+        }
     }
 
     // ---------------------------------------------------------------- fuzzy_spellings

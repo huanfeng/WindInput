@@ -38,8 +38,16 @@ use super::syllable::SyllableTrie;
 const MAX_SEGMENTS: usize = 6;
 
 /// 单串最多保留的模式数。达到上限即停止枚举（DFS 顺序固定，故截断是确定性的：
-/// **长音节优先于短音节、音节段优先于声母段**，即更具体的解释先被保留）。
-const MAX_PATTERNS: usize = 16;
+/// **长音节优先于短音节、音节段优先于双字母声母、双字母声母优先于单字母声母**，
+/// 即更具体的解释先被保留）。
+///
+/// ★ **从 16 提到 24 是因为双字母声母加了一档**：`zh`/`ch`/`sh` 的位置上多出一条边，
+/// 深层位置的分支互相挤，`chengshizhong` 实测丢掉了 3 条**改动前就有**的解释
+/// （键 `chesz`/`cheszh`/`chegsz`）。新增一个维度却不给额度，等于拿新解释换旧解释。
+/// 24 的依据是实测：该串新旧解释合计 16 条，`shanghaishizh` 等其余样本更少，
+/// 留出余量后仍远低于「每条模式一次索引点查」的成本拐点（见
+/// `tests/pinyin_abbrev_recall_latency.rs` 的真机计时）。
+const MAX_PATTERNS: usize = 24;
 
 /// 超过此长度不做混合解释。长串的合法解释本就少，而枚举成本随长度增长。
 const MAX_INPUT_LEN: usize = 16;
@@ -53,7 +61,8 @@ pub enum AbbrevSeg {
     /// 载荷是 z/c/s 那一位 —— 投影键取的正是它，故索引不受影响（`zh|ge` → 键 `zg`）。
     ///
     /// 它不是 [`Initial`](Self::Initial) 的特例而是独立一段，因为二者**消耗的击键数不同**
-    /// （2 vs 1），而段与击键的对应关系是 preedit 渲染与 `consumed_length` 的依据。
+    /// （2 vs 1）：`walk` 原先靠「边长 == 1」判声母段，混进 2 字节的声母后那条判据必错
+    /// 且不会报错（见 [`Edge`]）。
     Retroflex(char),
     /// 音节段：约束对应音节**全等**。
     Syllable(String),
@@ -73,15 +82,6 @@ impl AbbrevSeg {
                 it.next() == Some(*c) && it.next() == Some('h')
             }
             AbbrevSeg::Syllable(s) => syl == s,
-        }
-    }
-
-    /// 本段在**击键串**里占几个字节。段与击键的对应关系只在这里定义一次。
-    pub fn keystroke_len(&self) -> usize {
-        match self {
-            AbbrevSeg::Initial(_) => 1,
-            AbbrevSeg::Retroflex(_) => 2,
-            AbbrevSeg::Syllable(s) => s.len(),
         }
     }
 }
@@ -285,7 +285,13 @@ fn walk(
             .iter()
             .any(|s| matches!(s, AbbrevSeg::Initial(_) | AbbrevSeg::Retroflex(_)));
         let has_syllable = cur.iter().any(|s| matches!(s, AbbrevSeg::Syllable(_)));
-        if has_retroflex || (has_initial && has_syllable) {
+        // ⚠️ **投影键至少 2 位**（= 段数 ≥ 2）。`Retroflex` 吃 2 个击键却只投影 1 个字母，
+        // 单段模式（`zh` → 键 `z`）于是绕过了 `MIN_ABBREV_STROKE` 立的规矩：
+        // 「单字母不构成简拼，退到 1 只会拖出一堆高频单字」。实测 `zhq` 会在 step 6.2 的
+        // `zh` 切点上把键 `z` 下所有 zh 开头的**单音节**词（这/中/只）连同单字的巨大权重
+        // 灌进候选，而它们只解释了 3 键里的 2 键。本次要修的三条（zhy/zhge/baichx）
+        // 都是 ≥2 段，不受此闸影响。
+        if cur.len() >= 2 && (has_retroflex || (has_initial && has_syllable)) {
             out.push(MixedPattern::new(cur.clone()));
         }
         return;
@@ -355,8 +361,26 @@ pub fn syllables_from_boundary(code: &str, boundary: u64) -> Option<Vec<&str>> {
 /// ## 切法
 ///
 /// 逐音节贪心：当前位置能整段对上该音节就是**音节段**（吃掉整个音节），对不上就只能是
-/// **声母段**（吃 1 字节，且该字母必须是这个音节的首字母）。音节段优先是对的 ——
-/// 声母段是「信息更少」的解释，只在整段对不上时才成立。
+/// **声母段**（吃 1 字节，或 `zh`/`ch`/`sh` 那 2 字节，且该声母必须是这个音节的开头）。
+/// 音节段优先是对的 —— 声母段是「信息更少」的解释，只在整段对不上时才成立。
+///
+/// ## 为什么双字母声母要**两遍**
+///
+/// 贪心无回溯，而 `zh` 这一位有两种都合法的读法，且哪种对**取决于后面走不走得通**：
+///
+/// | 击键 | 候选音节 | 正确切法 |
+/// |---|---|---|
+/// | `zhge` | zhe\|ge | `zh'ge` —— zh 是一个声母段 |
+/// | `zh`   | zhong\|hua | `z'h` —— 老写法，z 和 h 各是一段 |
+///
+/// 只按「双字母优先」单遍扫，第二行会在第一步吃掉 2 字节、第二个音节没键可分，
+/// 整个函数返回 `None`，组合区退回无分隔符的 `zh`。那正是本模块要显示给用户的东西
+/// （`z'h'ge` 这个显示曾是双字母声母缺失的**唯一**可见线索），不能因为新增了一种解释
+/// 就把另一种的显示弄丢 —— 候选侧两种解释是并存的，显示侧也必须并存。
+///
+/// 故先按双字母优先试一遍，不成再按单字母试一遍。两遍都失败才返回 `None`。
+/// 不会出现「两遍都成功但结果不同」的歧义：能整串对齐的切法对给定音节序列是唯一的
+/// （每一步的候选段互不为前缀）。
 ///
 /// 返回 `(渲染串, 已消费的 raw 字节数)`。**部分匹配**（step 6.2 前缀回退）时消费数会小于
 /// `raw.len()`，余下的字母由调用方自己切分后追加——尾巴往往还含完整音节
@@ -369,6 +393,11 @@ pub fn render_keystroke_preedit(raw: &str, syllables: &[&str]) -> Option<(String
     if raw.is_empty() || syllables.is_empty() || !raw.is_ascii() {
         return None;
     }
+    render_pass(raw, syllables, true).or_else(|| render_pass(raw, syllables, false))
+}
+
+/// [`render_keystroke_preedit`] 的一遍扫描。`allow_two` 决定这一遍认不认双字母声母。
+fn render_pass(raw: &str, syllables: &[&str], allow_two: bool) -> Option<(String, usize)> {
     let mut out = String::with_capacity(raw.len() + syllables.len());
     let mut pos = 0usize;
     for (i, syl) in syllables.iter().enumerate() {
@@ -378,10 +407,13 @@ pub fn render_keystroke_preedit(raw: &str, syllables: &[&str]) -> Option<(String
         if i > 0 {
             out.push('\'');
         }
-        // 贪心：整段音节 > 双字母声母 > 单字母声母。顺序与 `edges` 一致（更具体的先试），
-        // 且必须在单字母之前试双字母 —— 否则 `zhge` 会被切成 `z` + 余下的 `hge`，
-        // 显示回 `z'h'ge`，与候选真正的段划分（zh|ge）对不上。
-        let two = (pos + 2 <= raw.len()).then(|| &raw[pos..pos + 2]);
+        // 贪心：整段音节 > 双字母声母 > 单字母声母。顺序与 `edges` 一致（更具体的先试）。
+        //
+        // ⚠️ 这里刻意**不查 `SyllableTrie`**（与 `is_retroflex_at` 不同，那边查是为了不
+        // 硬编码三个字面量）：判据 `syl.starts_with(t)` 是向**候选自己的真值音节**求证，
+        // 比查音节表更直接，也免去把 trie 穿进显示层。第二位是 `h` 那一条只是先筛掉
+        // 绝大多数不可能的位置。
+        let two = (allow_two && pos + 2 <= raw.len()).then(|| &raw[pos..pos + 2]);
         let seg = if raw[pos..].starts_with(syl) {
             *syl
         } else if let Some(t) = two
@@ -512,7 +544,17 @@ mod tests {
     /// 模式数有硬上限，且枚举不得随长度爆炸 —— 这是热路径上的成本闸门。
     #[test]
     fn pattern_count_is_bounded() {
-        for input in ["zhongguorenm", "nhaoshijien", "wdjdxzgr", "aeiouaeiou"] {
+        for input in [
+            "zhongguorenm",
+            "nhaoshijien",
+            "wdjdxzgr",
+            "aeiouaeiou",
+            // 卷舌串：双字母声母加了一档边，分支最密的形状要一并看住。
+            "chengshizhong",
+            "shanghaishizh",
+            "zhchshzh",
+            "zhzhzhzh",
+        ] {
             let pats = mixed_patterns(input, &trie());
             assert!(
                 pats.len() <= MAX_PATTERNS,
@@ -520,6 +562,89 @@ mod tests {
                 pats.len()
             );
             assert!(pats.iter().all(|p| p.len() <= MAX_SEGMENTS));
+        }
+    }
+
+    /// **新增一个维度不得挤掉旧解释**。
+    ///
+    /// `Retroflex` 边排在 `Initial` 边之前，同一位置上新分支先展开，深层位置会把
+    /// `MAX_PATTERNS` 的额度提前用光。`chengshizhong` 实测曾因此丢掉三条改动前就有的
+    /// 解释 —— 那不是「截断」而是「换掉」，用户感知为「某些老写法忽然打不出词了」。
+    #[test]
+    fn retroflex_edges_do_not_evict_pre_existing_interpretations() {
+        let k = keys("chengshizhong");
+        for expected in ["chesz", "cheszh", "chegsz"] {
+            assert!(
+                k.contains(&expected.to_string()),
+                "丢了改动前就有的解释 {expected}：{k:?}"
+            );
+        }
+    }
+
+    /// 投影键至少 2 位：`Retroflex` 吃 2 个击键却只投影 1 个字母，单段模式会绕过
+    /// `MIN_ABBREV_STROKE`（「单字母不构成简拼，退到 1 只会拖出一堆高频单字」）。
+    #[test]
+    fn single_retroflex_segment_does_not_yield_one_letter_key() {
+        assert!(keys("zh").is_empty(), "zh 单独一段投影成键 `z`，不该产出");
+        assert!(keys("ch").is_empty());
+        assert!(keys("sh").is_empty());
+        // 两段起才算数。
+        assert_eq!(keys("zhy"), vec!["zy".to_string()]);
+    }
+
+    /// 双字母声母的模式与投影键。
+    #[test]
+    fn retroflex_patterns_project_to_existing_keys() {
+        assert!(keys("zhge").contains(&"zg".to_string()), "zh|ge → zg");
+        assert!(
+            keys("baichx").contains(&"bcx".to_string()),
+            "bai|ch|x → bcx"
+        );
+        // 老解释并存：zhge 同时还有 z|h|ge。
+        assert!(
+            keys("zhge").contains(&"zhg".to_string()),
+            "z|h|ge → zhg 仍在"
+        );
+    }
+
+    /// 段语义：`Retroflex` 要求音节以两个字母开头，比 `Initial` 严。
+    #[test]
+    fn retroflex_segment_is_stricter_than_initial() {
+        assert!(AbbrevSeg::Retroflex('z').matches_exact("zhe"));
+        assert!(!AbbrevSeg::Retroflex('z').matches_exact("ze"));
+        assert!(!AbbrevSeg::Retroflex('z').matches_exact("z"));
+        assert!(AbbrevSeg::Initial('z').matches_exact("ze"), "单字母仍宽松");
+    }
+
+    /// preedit 渲染：两种解释的显示都要在。
+    ///
+    /// 单遍「双字母优先」贪心会让第二行返回 `None`（第一步吃掉 2 字节、第二个音节没键可分），
+    /// 组合区退回无分隔符的 `zh` —— 而 `z'h'ge` 这种显示正是双字母声母缺失时用户能看到的
+    /// 唯一线索，不能因为新增一种解释就把另一种的显示弄丢。
+    #[test]
+    fn preedit_renders_both_retroflex_and_single_letter_splits() {
+        assert_eq!(
+            render_keystroke_preedit("zhge", &["zhe", "ge"]),
+            Some(("zh'ge".into(), 4)),
+            "zh 是一个声母段"
+        );
+        assert_eq!(
+            render_keystroke_preedit("zh", &["zhong", "hua"]),
+            Some(("z'h".into(), 2)),
+            "老写法：z 和 h 各是一段"
+        );
+        assert_eq!(
+            render_keystroke_preedit("baichx", &["bai", "cheng", "xian"]),
+            Some(("bai'ch'x".into(), 6))
+        );
+        // 不变量：去掉 ' 恰好还原击键串的已消费部分。
+        for (raw, syls) in [
+            ("zhge", &["zhe", "ge"][..]),
+            ("zh", &["zhong", "hua"][..]),
+            ("baichx", &["bai", "cheng", "xian"][..]),
+        ] {
+            let (rendered, used) = render_keystroke_preedit(raw, syls).expect("应渲染得出");
+            assert_eq!(rendered.replace('\'', ""), raw[..used]);
         }
     }
 
