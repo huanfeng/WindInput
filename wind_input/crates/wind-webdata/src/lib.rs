@@ -425,7 +425,15 @@ pub trait WebDataRpc: WebDataHost {
             // ── backup.*（整机备份，wind-transfer::backup）───────
             "backup.create" => self.web_backup_create(params),
             "backup.inspect" => self.web_backup_inspect(params),
-            "backup.restore" => self.web_backup_restore(params),
+            "backup.restore" => {
+                // restore 比 dict.import 还重：对每个方案逐张表 clear + import
+                // （用户词/临时词/词频/shadow/短语/常用字/补全/字符类）。
+                let r = self.web_backup_restore(params);
+                if r.is_ok() {
+                    self.drop_page_cache_after_bulk_write("backup.restore");
+                }
+                r
+            }
 
             // ── dict.*（用户词库，redb 持久化）────────────────────
             "comment.sources" => self.web_comment_sources(),
@@ -434,7 +442,14 @@ pub trait WebDataRpc: WebDataHost {
             "dict.add" => self.web_dict_add(params),
             "dict.update" => self.web_dict_update(params),
             "dict.remove" => self.web_dict_remove(params),
-            "dict.clear" => self.web_dict_clear(params),
+            // 清空是逐条 remove，19 万条走一遍，动的页与导入同量级。
+            "dict.clear" => {
+                let r = self.web_dict_clear(params);
+                if r.is_ok() {
+                    self.drop_page_cache_after_bulk_write("dict.clear");
+                }
+                r
+            }
             "dict.stats" => self.web_dict_stats(),
             // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
             // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
@@ -468,10 +483,10 @@ pub trait WebDataRpc: WebDataHost {
             // 把一次成功的导入报成失败。
             "dict.import" => {
                 let r = self.web_dict_import(params);
-                if let Some(s) = self.user_store() {
-                    if let Err(e) = s.drop_page_cache() {
-                        tracing::warn!("导入后丢弃页缓存失败（{e}）——不影响导入结果，仅内存未回落");
-                    }
+                // 只在**真写进去了**才丢：格式不符 / 引擎类型不匹配那两条 early-return Err
+                // 一个字节都没落库，没必要付「关库 + 重开 + 建表写事务」这一趟。
+                if r.is_ok() {
+                    self.drop_page_cache_after_bulk_write("dict.import");
                 }
                 r
             }
@@ -1316,6 +1331,30 @@ pub trait WebDataRpc: WebDataHost {
                 } ],
                 "compatible": true,
             }))
+        }
+    }
+
+    /// 一次**全表规模的写**做完之后，把 redb 那笔只涨不落的读缓存还回去。
+    ///
+    /// redb 2.x 不是 mmap，页是堆上的 `Arc<[u8]>`，刷盘时脏页会被直接晋升进读缓存，
+    /// 之后只涨不落（上界 ≈ min(配额, 库文件大小)，19 万词实测 41 MB）——「导入大词库
+    /// 之后内存占用变高」就是它。见 wind-store 的 `tests/redb_cache_high_water.rs`。
+    ///
+    /// ⚠️ **失败是真故障，不是「内存没回落」**：`drop_page_cache` 内部重试过一次仍失败时，
+    /// store 已经停在暂停态，此后每一次读写都会报 `store is paused`，用户词 / 临时词 /
+    /// 词频 / shadow 全线失效到重启。所以这里 `error!` 而不是 `warn!`。
+    ///
+    /// 仍然不把它变成调用方的 `Err`：写已经成功落库了，把一次成功的导入报成失败会让用户
+    /// 重来一遍（那只会再触发一次同样的故障）。日志是唯一的诊断出口，故文案必须说清后果。
+    fn drop_page_cache_after_bulk_write(&self, op: &str) {
+        let Some(store) = self.user_store() else {
+            return;
+        };
+        if let Err(e) = store.drop_page_cache() {
+            tracing::error!(
+                "{op} 之后丢弃页缓存失败：{e}。\
+                 数据已写入，但存储层现处于暂停态，后续读写都会失败，请重启服务。"
+            );
         }
     }
 

@@ -340,8 +340,15 @@ impl Store {
     /// 重开 `Database` 要读回 header 并校验，毫秒级；随后头几次查询会走冷缓存。所以它
     /// **只该用在「刚做完一次全表规模的操作」之后**，绝不能进按键链路。
     ///
-    /// ⚠️ 重开失败时保持暂停态并返回 `Err`——此时库已经被丢弃，不能假装无事发生。
-    /// 调用方要么重试 [`Self::resume`]，要么让错误浮上去。
+    /// ⚠️ **重开失败时自救一次**：`*guard = None` 已经执行，库已经丢了，此时若直接返回
+    /// `Err` 就把 store 永久钉在暂停态——之后每一次 `with_db` 都 bail「store is paused」，
+    /// 用户词 / 临时词 / 词频 / shadow 全线失效直到重启，而 [`Self::resume`] 在生产代码里
+    /// **一处调用都没有**（全仓只出现在测试里）。失败是真会发生的：重开要 open 加一次
+    /// `init_tables` 写事务 commit，而这个函数恰好被安排在「刚写完几十 MB 库文件」之后，
+    /// Windows 上杀软短暂持有 `.redb` 正是本仓当初做 pause/resume 的理由。
+    ///
+    /// 所以这里重试一次；再失败才返回 `Err`，并且**那时 store 确实是暂停态**，调用方必须
+    /// 当成故障处理（`error!` 而非 `warn!`），不能当成「只是内存没回落」。
     ///
     /// ⚠️ 「缓存释放了」不等于「内存还给 OS 了」：页是 4 KiB 的小块，glibc 与 Windows 堆
     /// 都会把它们留在 free list 里，RSS / Private Bytes 未必立刻下降。释放的意义是这笔
@@ -353,11 +360,41 @@ impl Store {
             return Ok(()); // 已经是暂停态，没有缓存可丢；由 `resume` 负责开回来。
         }
         *guard = None;
-        let db = open_db(&self.path, self.cache_bytes)?;
+        // 丢了就必须开回来。第一次失败重试一次——最常见的原因（杀软/索引器短暂持有刚写完
+        // 的 .redb）是瞬时的。两次都不行才认栽，那时 store 停在暂停态，由调用方按故障处理。
+        let mut last = match Self::reopen(&self.path, self.cache_bytes) {
+            Ok(db) => {
+                *guard = Some(db);
+                debug!("Store page cache dropped: {}", self.path.display());
+                return Ok(());
+            }
+            Err(e) => e,
+        };
+        for _ in 0..1 {
+            match Self::reopen(&self.path, self.cache_bytes) {
+                Ok(db) => {
+                    *guard = Some(db);
+                    warn!(
+                        "丢弃页缓存后首次重开失败（{last}），重试成功：{}",
+                        self.path.display()
+                    );
+                    return Ok(());
+                }
+                Err(e) => last = e,
+            }
+        }
+        Err(last.context(format!(
+            "丢弃页缓存后重开数据库失败，store 已停在暂停态：{}。\
+             此后所有读写都会报 store is paused，需调 resume() 或重启服务",
+            self.path.display()
+        )))
+    }
+
+    /// 开库 + 建表，[`Self::resume`] 与 [`Self::drop_page_cache`] 共用。
+    fn reopen(path: &Path, cache_bytes: usize) -> anyhow::Result<Database> {
+        let db = open_db(path, cache_bytes)?;
         Self::init_tables(&db)?;
-        *guard = Some(db);
-        debug!("Store page cache dropped: {}", self.path.display());
-        Ok(())
+        Ok(db)
     }
 
     /// 是否处于暂停态
