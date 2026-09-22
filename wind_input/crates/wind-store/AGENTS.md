@@ -26,6 +26,9 @@
 
 - **所有读写必须经 `Store::with_db`**：不要直接访问 `Store.db` 字段。`with_db` 持 `Mutex` 锁并检查暂停态——`pause()` 后 `with_db` 返回 `"store is paused"` 错误，绕过它会破坏 pause/resume 语义或导致 panic。
 
+- **redb 的读缓存是只涨不落的高水位，全额计进进程私有内存**：redb 2.x 不是 mmap，页是堆上的 `Arc<[u8]>`；每次读未命中就插入，只有越过上限才淘汰，唯一的整体清空是库文件扩容，刷盘时脏页还会被直接晋升进读缓存。上界 ≈ `min(读缓存配额, 库文件大小)`——实测 19 万词的库全表扫后常驻 41 MB 不还，50 万词约 90 MB，这是「导入大词库后内存高」的正主（`tests/redb_cache_high_water.rs`）。做完一次**全表规模**的操作（导入、清空、全量导出）后调 `Store::drop_page_cache` 把它还回去；**绝不能进按键链路**，它要重开 `Database`。
+- **要条数就用 `count_*`，要一页就用 `for_each_*`，别 `list(..).len()` 或先全收再 `skip/take`**：19 万条的库翻第一页会先造 38 万个 `String`。`for_each_user_word` 的回调收 `UserWordView`（`code`/`text` 直接借 redb 的页），只对真正要留的那几条调 `to_record()`。⚠️ 新增计数/遍历 API 时，**口径必须与对应的 `search_*` 逐条一致**（含「解不出的坏记录算不算」），否则症状是「说有 N 条、翻到最后一页只有 N-1 条」，而且只在库里真有坏记录时才出现——守门在 `tests/counts_match_listings.rs`，它不比具体数字，只比两条路彼此相等。
+- **这两件事是分开的**：流式遍历省的是 Rust 侧的物化峰值，**不省 redb 读缓存**（range 迭代照样把走过的叶子页读进缓存，key 与 value 同页）。只改其中一样就以为内存问题解决了，是这条最容易踩的坑。
 - **复合 key 编码是范围查询的基础，不可改**：用户词/临时词/词频统一用 `schema\0code\0text` 三段；Shadow 用 `schema\0code` 两段；短语用 `code\0text`（全局，无 schema 前缀）。前缀范围查用 `t.range(scan..)` + 前缀 break，依赖此编码结构——改分隔符或字段顺序会静默读到跨方案数据。
 
 - **短语软删除走 `set_phrase_enabled`，不走 Shadow delete**：短语候选的屏蔽语义是"用户在设置 UI 可恢复的禁用"，存 `PhraseRecord.enabled=false`；`Shadow.delete` 只用于系统词库/用户词候选。两条路径不混用，否则设置 UI 的启用开关无法正确反映状态（见 `shadow.rs` 顶部注释）。
