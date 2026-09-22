@@ -21,9 +21,12 @@
 //!
 //! ## 与纯简拼的分工
 //!
-//! 本模块只认**既有声母段又有音节段**的解释：
-//! - 全是声母段（`nh`）→ 纯简拼，由 `AbbrevMatcher` + step5 处理，这里返回空；
-//! - 全是音节段（`nihao`）→ 全拼，走主路径。
+//! 本模块认**既有声母段又有音节段**的解释，外加**含双字母声母**的那些：
+//! - 全是单字母声母段（`nh`）→ 纯简拼，由 `AbbrevMatcher` + step5 处理，这里返回空；
+//! - 全是音节段（`nihao`）→ 全拼，走主路径；
+//! - 含 `zh`/`ch`/`sh` 段（`zhy` = zh|y）→ **归本模块，即使全是声母段**。纯简拼路径
+//!   逐字母切，只能把 `zhy` 解释成 z|h|y、投影键 `zhy`，而「这样」挂在键 `zy` 下 ——
+//!   那条路径表达不了「zh 是一个声母」，所以这里必须接住。
 //!
 //! 调用方还应先确认整串**不能**被完整切成音节序列，否则常见全拼输入会白跑一趟（见
 //! `PinyinEngine::convert` step 5b 的短路）。
@@ -41,11 +44,17 @@ const MAX_PATTERNS: usize = 16;
 /// 超过此长度不做混合解释。长串的合法解释本就少，而枚举成本随长度增长。
 const MAX_INPUT_LEN: usize = 16;
 
-/// 混合简拼的一段：要么是一个声母字母，要么是一个完整音节。
+/// 混合简拼的一段：一个声母（单字母或 `zh`/`ch`/`sh`），或一个完整音节。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbbrevSeg {
     /// 声母段：只约束对应音节的**首字母**。
     Initial(char),
+    /// 双字母声母段（`zh`/`ch`/`sh`）：约束对应音节以这**两个**字母开头。
+    /// 载荷是 z/c/s 那一位 —— 投影键取的正是它，故索引不受影响（`zh|ge` → 键 `zg`）。
+    ///
+    /// 它不是 [`Initial`](Self::Initial) 的特例而是独立一段，因为二者**消耗的击键数不同**
+    /// （2 vs 1），而段与击键的对应关系是 preedit 渲染与 `consumed_length` 的依据。
+    Retroflex(char),
     /// 音节段：约束对应音节**全等**。
     Syllable(String),
 }
@@ -59,7 +68,20 @@ impl AbbrevSeg {
     pub fn matches_exact(&self, syl: &str) -> bool {
         match self {
             AbbrevSeg::Initial(c) => syl.starts_with(*c),
+            AbbrevSeg::Retroflex(c) => {
+                let mut it = syl.chars();
+                it.next() == Some(*c) && it.next() == Some('h')
+            }
             AbbrevSeg::Syllable(s) => syl == s,
+        }
+    }
+
+    /// 本段在**击键串**里占几个字节。段与击键的对应关系只在这里定义一次。
+    pub fn keystroke_len(&self) -> usize {
+        match self {
+            AbbrevSeg::Initial(_) => 1,
+            AbbrevSeg::Retroflex(_) => 2,
+            AbbrevSeg::Syllable(s) => s.len(),
         }
     }
 }
@@ -77,7 +99,7 @@ impl MixedPattern {
         let key = segs
             .iter()
             .map(|s| match s {
-                AbbrevSeg::Initial(c) => *c,
+                AbbrevSeg::Initial(c) | AbbrevSeg::Retroflex(c) => *c,
                 // 音节段非空（来自 trie 匹配），first() 必有值
                 AbbrevSeg::Syllable(s) => s.chars().next().unwrap_or('?'),
             })
@@ -166,7 +188,7 @@ pub fn mixed_patterns(input: &str, trie: &SyllableTrie) -> Vec<MixedPattern> {
     let mut reach = vec![false; n + 1];
     reach[n] = true;
     for pos in (0..n).rev() {
-        if edges(input, pos, trie).any(|len| reach[pos + len]) {
+        if edges(input, pos, trie).any(|e| reach[pos + e.len()]) {
             reach[pos] = true;
         }
     }
@@ -180,7 +202,32 @@ pub fn mixed_patterns(input: &str, trie: &SyllableTrie) -> Vec<MixedPattern> {
     out
 }
 
-/// 位置 `pos` 上的所有出边长度：完整音节（长→短）在前，单字母声母在后。
+/// 一条出边：吃掉几个字节，以及吃成哪种段。
+///
+/// **必须带类型而不能只给长度**：`zh` 与 `ba` 都是 2 字节，前者是声母段、后者是音节段，
+/// 靠长度区分不了。此前 `walk` 用 `len == 1` 判「是不是声母段」，双字母声母进来后
+/// 那条判据就失效了。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Initial,
+    Retroflex,
+    Syllable(usize),
+}
+
+impl Edge {
+    fn len(self) -> usize {
+        match self {
+            Edge::Initial => 1,
+            Edge::Retroflex => 2,
+            Edge::Syllable(n) => n,
+        }
+    }
+}
+
+/// 位置 `pos` 上的所有出边：完整音节（长→短）在前，然后双字母声母，最后单字母声母。
+///
+/// 顺序即 DFS 的保留优先级（见 `MAX_PATTERNS`）：更具体的解释先被保留。双字母声母排在
+/// 单字母之前，因为 `zh` 比 `z` 约束更强。
 ///
 /// **长度为 1 的音节不作为音节边**（`a`/`e`/`o`）：它与同位置的声母边消耗一样多的字节，
 /// 而声母边的约束更松（`a?` ⊇ `==a`），保留两条只是把同一批词查两遍。
@@ -188,18 +235,31 @@ fn edges<'a>(
     input: &'a str,
     pos: usize,
     trie: &'a SyllableTrie,
-) -> impl Iterator<Item = usize> + 'a {
+) -> impl Iterator<Item = Edge> + 'a {
     let syls = trie.match_at(input, pos).into_iter().filter_map(|s| {
         let n = s.len();
-        (n > 1).then_some(n)
+        (n > 1).then_some(Edge::Syllable(n))
     });
-    let initial = is_initial(input.as_bytes()[pos], trie).then_some(1);
-    syls.chain(initial)
+    let retroflex = is_retroflex_at(input, pos, trie).then_some(Edge::Retroflex);
+    let initial = is_initial(input.as_bytes()[pos], trie).then_some(Edge::Initial);
+    syls.chain(retroflex).chain(initial)
 }
 
 /// 该字母是否可作声母段 —— 判据与 `AbbrevMatcher::is_abbreviation` 同款：存在以它开头的音节。
 fn is_initial(byte: u8, trie: &SyllableTrie) -> bool {
     trie.is_prefix(std::str::from_utf8(&[byte]).unwrap_or(""))
+}
+
+/// `pos` 处是不是 `zh`/`ch`/`sh`。
+///
+/// 判据仍向 trie 求证（`trie.is_prefix("zh")`）而非硬编码三个字面量：音节表是这件事的
+/// 真相源，写死一份就多一处会漂移的副本。
+fn is_retroflex_at(input: &str, pos: usize, trie: &SyllableTrie) -> bool {
+    let b = input.as_bytes();
+    if pos + 1 >= b.len() || b[pos + 1] != b'h' {
+        return false;
+    }
+    trie.is_prefix(&input[pos..pos + 2])
 }
 
 fn walk(
@@ -214,10 +274,18 @@ fn walk(
         return;
     }
     if pos == input.len() {
-        // 两种退化形态都不归本模块：全声母 = 纯简拼（step5），全音节 = 全拼（主路径）。
-        let has_initial = cur.iter().any(|s| matches!(s, AbbrevSeg::Initial(_)));
+        // 两种退化形态不归本模块：全**单字母**声母 = 纯简拼（step5），全音节 = 全拼（主路径）。
+        //
+        // ★ 含 `Retroflex` 段的模式**即使全是声母段也要收**：`zhy` = zh|y 是纯简拼路径
+        // 表达不了的形态（它逐字母切，只能给出 z|h|y、投影键 `zhy`），而「这样」挂在
+        // 键 `zy` 下。不为它放行，双字母声母就只在「混着全拼音节打」时有效，
+        // 恰恰漏掉了用户最常写的那种（`zhy`/`zhsh`）。
+        let has_retroflex = cur.iter().any(|s| matches!(s, AbbrevSeg::Retroflex(_)));
+        let has_initial = cur
+            .iter()
+            .any(|s| matches!(s, AbbrevSeg::Initial(_) | AbbrevSeg::Retroflex(_)));
         let has_syllable = cur.iter().any(|s| matches!(s, AbbrevSeg::Syllable(_)));
-        if has_initial && has_syllable {
+        if has_retroflex || (has_initial && has_syllable) {
             out.push(MixedPattern::new(cur.clone()));
         }
         return;
@@ -225,14 +293,15 @@ fn walk(
     if cur.len() >= MAX_SEGMENTS {
         return;
     }
-    for len in edges(input, pos, trie).collect::<Vec<_>>() {
+    for edge in edges(input, pos, trie).collect::<Vec<_>>() {
+        let len = edge.len();
         if !reach[pos + len] {
             continue;
         }
-        cur.push(if len == 1 {
-            AbbrevSeg::Initial(input.as_bytes()[pos] as char)
-        } else {
-            AbbrevSeg::Syllable(input[pos..pos + len].to_string())
+        cur.push(match edge {
+            Edge::Initial => AbbrevSeg::Initial(input.as_bytes()[pos] as char),
+            Edge::Retroflex => AbbrevSeg::Retroflex(input.as_bytes()[pos] as char),
+            Edge::Syllable(_) => AbbrevSeg::Syllable(input[pos..pos + len].to_string()),
         });
         walk(input, pos + len, trie, reach, cur, out);
         cur.pop();
@@ -309,8 +378,17 @@ pub fn render_keystroke_preedit(raw: &str, syllables: &[&str]) -> Option<(String
         if i > 0 {
             out.push('\'');
         }
+        // 贪心：整段音节 > 双字母声母 > 单字母声母。顺序与 `edges` 一致（更具体的先试），
+        // 且必须在单字母之前试双字母 —— 否则 `zhge` 会被切成 `z` + 余下的 `hge`，
+        // 显示回 `z'h'ge`，与候选真正的段划分（zh|ge）对不上。
+        let two = (pos + 2 <= raw.len()).then(|| &raw[pos..pos + 2]);
         let seg = if raw[pos..].starts_with(syl) {
             *syl
+        } else if let Some(t) = two
+            && t.as_bytes()[1] == b'h'
+            && syl.starts_with(t)
+        {
+            t
         } else {
             let c = &raw[pos..pos + 1];
             if !syl.starts_with(c) {

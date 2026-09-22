@@ -171,6 +171,20 @@ pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
     })
 }
 
+/// 双字母声母（`zh`/`ch`/`sh`）能否放宽成它不带 `h` 的那一支。
+///
+/// 供混合简拼的 [`AbbrevSeg::Retroflex`](super::mixed_abbrev::AbbrevSeg) 段做模糊放宽：
+/// 该段的精确语义是「音节以 `zh` 开头」，放宽成「以 `z` 开头」**只有对应组开着时才成立**。
+///
+/// ⚠️ 不能改用 [`initials_fuzzy_equal`]：那个比的是**首字母**，而 `zh` 与 `z` 的首字母
+/// 相同 ⇒ 它会走 `a == b` 的短路恒返回 true，于是 `zh_z` 关着也放行 `ze`，
+/// 双字母声母就白设了。`head` 传的是 z/c/s 那一位。
+pub fn retroflex_relaxed(head: char, config: &FuzzyConfig) -> bool {
+    INITIAL_GROUPS
+        .iter()
+        .any(|g| (g.flag)(config) && g.a.len() == 2 && g.b.starts_with(head))
+}
+
 /// 简拼键的模糊变体，附带该变体改动了**几位**（**含原键自身，处数 0，且恒在首位**）。
 ///
 /// **处数随键一起返回**而不是让调用方事后逐位比较：它在笛卡尔积构造期是免费的

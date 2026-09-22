@@ -1865,6 +1865,14 @@ impl PinyinEngine {
                 let first = syl.chars().next()?;
                 fuzzy::initials_fuzzy_equal(*c, first, &self.fuzzy_config).then_some(1)
             }
+            // 双字母声母段：精确语义是「以 zh 开头」，走到这里说明音节**不**以 zh 开头。
+            // 放宽成「只比首字母」仅在对应的卷舌组（zh_z / ch_c / sh_s）开着时成立 ——
+            // 用 `initials_fuzzy_equal` 会因 zh 与 z 首字母相同而恒真，等于把这个段降级
+            // 回单字母声母、开关形同虚设。同样计 **1 处**，与 `Initial` 段同量纲。
+            AbbrevSeg::Retroflex(c) => {
+                let first = syl.chars().next()?;
+                (first == *c && fuzzy::retroflex_relaxed(*c, &self.fuzzy_config)).then_some(1)
+            }
             AbbrevSeg::Syllable(s) => {
                 fuzzy::FuzzyMatcher::fuzzy_variants_scored(s, &self.fuzzy_config)
                     .into_iter()
