@@ -77,6 +77,17 @@ pub struct PhraseSegIndex {
     raw: String,
     word_ends: Vec<u32>,
     entries: Vec<PhraseEntry>,
+    /// [`Self::finish`] 调过没有。**只在 debug 构建里存在**。
+    ///
+    /// [`Self::search`] 的二分以「`entries` 按首词有序」为前提，而那是 `finish` 建立的；
+    /// 漏调的后果是二分在无序数组上乱跳、静默少召回。
+    ///
+    /// 存一个布尔而不是在 `search` 里验一遍有序：后者是 O(n)，18 万条时**每次按键**都要
+    /// 走一遍，正好把二分省下来的 1.48 ms 原样赔回去（靶机的 dev 变体走
+    /// `[profile.dev-variant]`、`debug-assertions = false` 不受影响，但开发者本地
+    /// `cargo run` / `cargo test` 是实打实地付）。有序性本身在 `finish` 末尾验一次就够。
+    #[cfg(debug_assertions)]
+    finished: bool,
 }
 
 impl PhraseSegIndex {
@@ -108,6 +119,14 @@ impl PhraseSegIndex {
         let mut entries = std::mem::take(&mut self.entries);
         entries.sort_by(|a, b| self.word(a, 0).cmp(self.word(b, 0)));
         self.entries = entries;
+        debug_assert!(
+            self.first_words_are_sorted(),
+            "排序之后 entries 仍不是按首词有序 —— 比较键写错了"
+        );
+        #[cfg(debug_assertions)]
+        {
+            self.finished = true;
+        }
     }
 
     /// 首词以 `prefix` 开头的那一段。`entries` 按首词有序，故这些条目必然连续。
@@ -124,7 +143,7 @@ impl PhraseSegIndex {
         &rest[..n]
     }
 
-    /// `entries` 是否按首词非降序。只给 `debug_assert` 用。
+    /// `entries` 是否按首词非降序。O(n)，只在 [`Self::finish`] 末尾验一次。
     fn first_words_are_sorted(&self) -> bool {
         self.entries
             .windows(2)
@@ -252,9 +271,12 @@ impl PhraseSegIndex {
         if segs.is_empty() || limit == 0 {
             return Vec::new();
         }
-        debug_assert!(
-            self.first_words_are_sorted(),
-            "entries 未按首词排序 —— 建完索引忘了 finish()，二分会静默少召回"
+        // O(1)：只问「finish 调过没有」。验有序是 O(n)，不能放在按键路径上，
+        // 那一条在 `finish` 末尾做（见 `finished` 字段的文档）。
+        #[cfg(debug_assertions)]
+        assert!(
+            self.finished,
+            "建完索引忘了 finish() —— 二分会在无序数组上乱跳，静默少召回"
         );
         let mut hits: Vec<(usize, &PhraseEntry)> = Vec::new();
         for e in self.first_word_range(&segs[0]) {
