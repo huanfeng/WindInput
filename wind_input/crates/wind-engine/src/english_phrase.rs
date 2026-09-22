@@ -34,49 +34,129 @@ pub const PHRASE_SEPARATOR: char = '\'';
 
 use wind_dict::DictManager;
 
-/// 索引里的一条词组。
+/// 索引里的一条词组：**只存偏移，不存字符串**。
 ///
-/// 存 `Box<str>` 而非 `String`：本表一次建成后只读，`String` 的容量字段在这里是纯浪费，
-/// 而词组条数虽小、每条又带一个词序列，省下的是每词一个 usize。
+/// 字符串全部躺在 [`PhraseSegIndex`] 的三块 arena 里。这不是微优化——旧结构每条持有
+/// `Vec<Box<str>>` + 两个 `Box<str>`，一条词组就是 4~6 次独立堆分配，而真机上这张表有
+/// **18 万条**（用户自备英文词库，出厂只有 787 条）：约 90 万次小分配，每次都要付分配器
+/// 头部与对齐填充，实测常驻 48 MB，其中真实数据不到三分之一。
+///
+/// 改成 arena 后整张表只有个位数次分配，字段也从「指针 + 容量」缩到定长偏移。
 struct PhraseEntry {
-    /// 预切分并小写化的词序列。**匹配只读这里**，不再每次查询重切。
-    words: Vec<Box<str>>,
-    /// 原文（带大小写与空格），上屏用。
-    text: Box<str>,
-    /// 词库里的原始编码。只为填进候选供调试段显示，匹配不读它。
-    code: Box<str>,
+    /// 本条小写词序列在 `lower` 中的起点（第 0 个词的起点）。
+    lower_start: u32,
+    /// 原文与编码在 `raw` 中的起点：原文在前，编码紧随其后，两者不留分隔。
+    raw_start: u32,
+    text_len: u32,
+    code_len: u32,
+    /// 本条各词的结束偏移在 `word_ends` 中的起点。
+    words_start: u32,
+    /// 词数，恒 ≥ 2（单词条目不进索引）。
+    word_count: u32,
     weight: i32,
 }
 
 /// 英文词组分词索引：只收 `text` 含空白的词条。
 ///
 /// ⚠️ 构建是 O(全表) 的（`DictManager::for_each_entry` 自己的注释就写着「绝不能出现在
-/// 按键链路上」），故由 [`LazyPhraseIndex`] 用 `OnceLock` 守着 + 后台预热。
+/// 按键链路上」），故由 [`LazyPhraseIndex`] 守着 + 后台预热。
+///
+/// # 三块 arena
+///
+/// | | 存什么 | 谁读 |
+/// |---|---|---|
+/// | `lower` | 各词小写化后**首尾相接**（不留分隔符） | 匹配 |
+/// | `raw` | 原文 + 编码首尾相接 | 产出候选 |
+/// | `word_ends` | 每个词在 `lower` 中的结束偏移 | 切词 |
+///
+/// 词与词之间不留分隔符，是因为边界已由 `word_ends` 给出——再塞一个空格等于为 18 万条
+/// 各付一个字节去表达一件已经表达过的事。
+#[derive(Default)]
 pub struct PhraseSegIndex {
+    lower: String,
+    raw: String,
+    word_ends: Vec<u32>,
     entries: Vec<PhraseEntry>,
 }
 
 impl PhraseSegIndex {
     /// 全表扫一次，挑出词组建索引。
     pub fn build(dm: &DictManager) -> Self {
-        let mut entries = Vec::new();
-        dm.for_each_entry(&mut |code, text, weight| {
-            // 判据是「text 里有空白」而不是「code 里有什么」：词边界只在 text 上。
-            let words: Vec<Box<str>> = text
-                .split_whitespace()
-                .map(|w| w.to_lowercase().into_boxed_str())
-                .collect();
-            if words.len() < 2 {
-                return;
+        let mut me = Self::default();
+        dm.for_each_entry(&mut |code, text, weight| me.push(code, text, weight));
+        // arena 按翻倍扩容，18 万条下尾部空洞可达数 MB，而本表建成后只读。
+        me.lower.shrink_to_fit();
+        me.raw.shrink_to_fit();
+        me.word_ends.shrink_to_fit();
+        me.entries.shrink_to_fit();
+        me
+    }
+
+    /// 收一条词条。**非词组（不足两个词）原样回滚**，不留痕迹。
+    ///
+    /// 判据是「text 里有空白」而不是「code 里有什么」：词边界只在 text 上（见模块文档
+    /// 「查询读 text，不读 code」那一节）。
+    ///
+    /// 先写 arena 再回滚，而不是先数词数——数词数要先切一遍，切完还得再走一遍才能写进
+    /// arena，等于对**全表**每条都多切一次。回滚只对被丢弃的那些条目付代价，而那是少数。
+    fn push(&mut self, code: &str, text: &str, weight: i32) {
+        let lower_start = self.lower.len() as u32;
+        let words_start = self.word_ends.len() as u32;
+        let mut word_count = 0u32;
+        for w in text.split_whitespace() {
+            // 逐字符写进 arena：`w.to_lowercase()` 会为每个词造一个临时 String，
+            // 而这里每条词条有 2~5 个词、全表 18 万条。
+            for ch in w.chars() {
+                for lc in ch.to_lowercase() {
+                    self.lower.push(lc);
+                }
             }
-            entries.push(PhraseEntry {
-                words,
-                text: text.into(),
-                code: code.into(),
-                weight,
-            });
+            self.word_ends.push(self.lower.len() as u32);
+            word_count += 1;
+        }
+        if word_count < 2 {
+            self.lower.truncate(lower_start as usize);
+            self.word_ends.truncate(words_start as usize);
+            return;
+        }
+        let raw_start = self.raw.len() as u32;
+        self.raw.push_str(text);
+        self.raw.push_str(code);
+        self.entries.push(PhraseEntry {
+            lower_start,
+            raw_start,
+            text_len: text.len() as u32,
+            code_len: code.len() as u32,
+            words_start,
+            word_count,
+            weight,
         });
-        Self { entries }
+    }
+
+    /// 第 `j` 个词的小写形态。`j` 必须 `< e.word_count`。
+    ///
+    /// 第 0 个词从 `lower_start` 起，其余从前一个词的结束偏移起——词在 arena 里首尾相接，
+    /// 所以「上一个的 end」就是「这一个的 start」，不必另存起点。
+    fn word(&self, e: &PhraseEntry, j: usize) -> &str {
+        let ws = e.words_start as usize;
+        let start = if j == 0 {
+            e.lower_start as usize
+        } else {
+            self.word_ends[ws + j - 1] as usize
+        };
+        &self.lower[start..self.word_ends[ws + j] as usize]
+    }
+
+    /// 原文（带大小写与空格），上屏用。
+    fn text(&self, e: &PhraseEntry) -> &str {
+        let s = e.raw_start as usize;
+        &self.raw[s..s + e.text_len as usize]
+    }
+
+    /// 词库里的原始编码。只为填进候选供调试段显示，匹配不读它。
+    fn code(&self, e: &PhraseEntry) -> &str {
+        let s = e.raw_start as usize + e.text_len as usize;
+        &self.raw[s..s + e.code_len as usize]
     }
 
     pub fn len(&self) -> usize {
@@ -85,6 +165,21 @@ impl PhraseSegIndex {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// 本索引占的堆字节数（四块 arena 的容量之和）。
+    ///
+    /// ★ 打进预热日志，是这张表在真机上**唯一**的观测出口。
+    /// 2026-09-22 查一次「服务占 100 MB」花了六轮 A/B 才定位到这里——当时日志只报条数
+    /// （`phrases=180998`），而条数说明不了内存，恰恰是条数看着正常时内存最吓人。
+    ///
+    /// 容量而非长度：arena 按翻倍扩容，`build` 末尾虽已 `shrink_to_fit`，但报「实际占了
+    /// 多少」才是观测该回答的问题。
+    pub fn heap_bytes(&self) -> usize {
+        self.lower.capacity()
+            + self.raw.capacity()
+            + self.word_ends.capacity() * size_of::<u32>()
+            + self.entries.capacity() * size_of::<PhraseEntry>()
     }
 
     /// 按分好的段查词组。`segs` 已由调用方切分并小写化，**空段须已剔除**
@@ -117,7 +212,7 @@ impl PhraseSegIndex {
         }
         let mut hits: Vec<(usize, &PhraseEntry)> = Vec::new();
         for e in &self.entries {
-            if let Some(span) = match_entry(&e.words, segs) {
+            if let Some(span) = self.match_entry(e, segs) {
                 hits.push((span, e));
             }
         }
@@ -146,14 +241,14 @@ impl PhraseSegIndex {
             b.1.weight
                 .cmp(&a.1.weight)
                 .then_with(|| a.0.cmp(&b.0))
-                .then_with(|| a.1.text.cmp(&b.1.text))
+                .then_with(|| self.text(a.1).cmp(self.text(b.1)))
         });
         hits.truncate(limit);
         hits.into_iter()
             .enumerate()
             .map(|(i, (_, e))| Candidate {
-                text: e.text.to_string(),
-                code: e.code.to_string(),
+                text: self.text(e).to_string(),
+                code: self.code(e).to_string(),
                 weight: e.weight,
                 natural_order: i as i32,
                 source: CandidateSource::English,
@@ -163,33 +258,39 @@ impl PhraseSegIndex {
     }
 }
 
-/// 一条词组是否匹配这组段；匹配则返回**跨度** = 最后一段落在第几个词上。
-///
-/// 跨度就是紧凑度：`ip'pro` 对 `iPhone 15 Pro` 跨度 2、对假想的 `iPhone Pro` 跨度 1，
-/// 后者更贴合所打的两段，该排前面。
-fn match_entry(words: &[Box<str>], segs: &[String]) -> Option<usize> {
-    // 段比词还多 ⇒ 无论怎么跳都对不上。提前挡掉，省下后面的逐段扫。
-    if segs.len() > words.len() {
-        return None;
-    }
-    // 规则 1：首段锚定第一个词。
-    if !words[0].starts_with(segs[0].as_str()) {
-        return None;
-    }
-    // 规则 2：其余段在 words[1..] 上保序贪心最左。
-    let mut wi = 1usize;
-    let mut span = 0usize;
-    for seg in &segs[1..] {
-        loop {
-            let w = words.get(wi)?;
-            wi += 1;
-            if w.starts_with(seg.as_str()) {
-                span = wi - 1;
-                break;
+impl PhraseSegIndex {
+    /// 一条词组是否匹配这组段；匹配则返回**跨度** = 最后一段落在第几个词上。
+    ///
+    /// 跨度就是紧凑度：`ip'pro` 对 `iPhone 15 Pro` 跨度 2、对假想的 `iPhone Pro` 跨度 1，
+    /// 后者更贴合所打的两段，该排前面。
+    fn match_entry(&self, e: &PhraseEntry, segs: &[String]) -> Option<usize> {
+        let n = e.word_count as usize;
+        // 段比词还多 ⇒ 无论怎么跳都对不上。提前挡掉，省下后面的逐段扫。
+        if segs.len() > n {
+            return None;
+        }
+        // 规则 1：首段锚定第一个词。
+        if !self.word(e, 0).starts_with(segs[0].as_str()) {
+            return None;
+        }
+        // 规则 2：其余段在 words[1..] 上保序贪心最左。
+        let mut wi = 1usize;
+        let mut span = 0usize;
+        for seg in &segs[1..] {
+            loop {
+                if wi >= n {
+                    return None;
+                }
+                let w = self.word(e, wi);
+                wi += 1;
+                if w.starts_with(seg.as_str()) {
+                    span = wi - 1;
+                    break;
+                }
             }
         }
+        Some(span)
     }
-    Some(span)
 }
 
 /// 按分词符切段并小写化，**剔除空段**。
@@ -279,10 +380,13 @@ impl LazyPhraseIndex {
             .name("english-phrase-warm".into())
             .spawn(move || {
                 let t0 = std::time::Instant::now();
-                let n = me.get(&dm).len();
+                let idx = me.get(&dm);
                 tracing::info!(
                     ms = t0.elapsed().as_millis(),
-                    phrases = n,
+                    phrases = idx.len(),
+                    // 条数说明不了内存：出厂 787 条与用户自备词库的 18 万条差两个数量级，
+                    // 而后者曾在真机上常驻 48 MB。把字节数一并报出来。
+                    heap_kb = idx.heap_bytes() / 1024,
                     "英文词组分词：后台预热完成"
                 );
             });
@@ -297,23 +401,14 @@ impl LazyPhraseIndex {
 mod tests {
     use super::*;
 
+    /// ⚠️ 夹具走**生产同一条** `push`，不再自己复制一份「≥2 个词才进索引」的判据——
+    /// 那份复制曾与 `build` 并存，是典型的漂移隐患（改了一处另一处静默过期）。
     fn idx(pairs: &[(&str, &str, i32)]) -> PhraseSegIndex {
-        let entries = pairs
-            .iter()
-            .filter_map(|(text, code, w)| {
-                let words: Vec<Box<str>> = text
-                    .split_whitespace()
-                    .map(|x| x.to_lowercase().into_boxed_str())
-                    .collect();
-                (words.len() >= 2).then(|| PhraseEntry {
-                    words,
-                    text: (*text).into(),
-                    code: (*code).into(),
-                    weight: *w,
-                })
-            })
-            .collect();
-        PhraseSegIndex { entries }
+        let mut me = PhraseSegIndex::default();
+        for (text, code, w) in pairs {
+            me.push(code, text, *w);
+        }
+        me
     }
 
     fn texts(i: &PhraseSegIndex, input: &str) -> Vec<String> {
@@ -429,6 +524,67 @@ mod tests {
             ("Buenos Aires", "buenosaires", 100),
         ]);
         assert_eq!(i.len(), 1);
+    }
+
+    /// ★ **每条词组的堆开销上界**。这是本模块唯一的内存护栏。
+    ///
+    /// 缘起：真机上这张表有 18 万条（用户自备英文词库，出厂只有 787 条），旧结构每条
+    /// 持有 `Vec<Box<str>>` + 两个 `Box<str>`，约 90 万次小分配，实测常驻 **48 MB**，
+    /// 而它被建了两份（english 方案 + 混输的 english 子引擎）⇒ 96 MB。
+    ///
+    /// 上界取 120 字节/条：arena 版实测约 78（entry 28 + word_ends 10 + lower 15 + raw 25），
+    /// 留出的余量够容纳词长分布的波动，但**挡得住退回 `Box<str>`**——那一版光
+    /// `Vec` + 两个 `Box` 的头部就已经是 56 字节，加上每词一次分配的分配器开销必然超线。
+    ///
+    /// ⚠️ 样本必须**足够多且带多词条目**：条数太少时 arena 的翻倍扩容尾巴会摊到分母上，
+    /// 测出来的是扩容策略而不是结构本身。
+    #[test]
+    fn heap_cost_per_phrase_stays_within_budget() {
+        let pairs: Vec<(String, String, i32)> = (0..2000)
+            .map(|i| {
+                (
+                    format!("iPhone {i} Pro Max Ultra"),
+                    format!("iphone{i}"),
+                    100,
+                )
+            })
+            .collect();
+        let mut me = PhraseSegIndex::default();
+        for (text, code, w) in &pairs {
+            me.push(code, text, *w);
+        }
+        me.lower.shrink_to_fit();
+        me.raw.shrink_to_fit();
+        me.word_ends.shrink_to_fit();
+        me.entries.shrink_to_fit();
+
+        // ★ 这一条堵的是上面那条护栏的**漏网口**：`heap_bytes` 只统计四块 arena，
+        // 谁要是往 `PhraseEntry` 里加回一个 `Box<str>`（16 B）或 `Vec<Box<str>>`（24 B），
+        // 那份堆内存**不会被 `heap_bytes` 统计到**，上面的预算断言照样绿。
+        // 用 `size_of` 直接钉住「条目里不许出现指针」，这是编译期事实，绕不过去。
+        assert!(
+            size_of::<PhraseEntry>() <= 28,
+            "PhraseEntry 涨到 {} 字节——加了指针字段？条目必须只存定长偏移",
+            size_of::<PhraseEntry>()
+        );
+        assert_eq!(me.len(), 2000, "全部应进索引（每条 5 个词）");
+        let per = me.heap_bytes() / me.len();
+        assert!(
+            per < 120,
+            "每条词组堆开销 {per} 字节，超出预算 120——退回 per-entry 堆分配了？\n             （总计 {} KB / {} 条）",
+            me.heap_bytes() / 1024,
+            me.len()
+        );
+    }
+
+    /// 多字节字符不能把偏移算错：arena 存的是**字节**偏移，切片边界必须落在字符边界上。
+    /// 旧结构各词独立成串，天然不会切错；arena 把它们首尾相接之后这就成了真实风险。
+    #[test]
+    fn multibyte_words_slice_on_char_boundaries() {
+        let i = idx(&[("Café Noir Über", "cafe", 100)]);
+        assert_eq!(texts(&i, "caf'noir"), vec!["Café Noir Über"]);
+        // 小写化后 Ü → ü，段用小写打
+        assert_eq!(texts(&i, "caf'üb"), vec!["Café Noir Über"]);
     }
 
     /// 段比词多时不命中——别让 `a'b'c` 匹配上只有两个词的条目。
