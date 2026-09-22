@@ -151,33 +151,67 @@ impl Store {
         })
     }
 
-    /// 某方案下的临时词条数。只数不抄。
+    /// 流式遍历某方案下以 `prefix` 开头的临时词。回调返回 `false` 即停。
     ///
-    /// 口径与 [`Self::search_temp_words_prefix`]`(schema, "", 0).len()` 逐条一致——
-    /// 设置页拿它显示条数，与列表对不上就是 bug。守门见
-    /// `tests/counts_match_listings.rs`。
+    /// 与 [`Store::for_each_user_word`] 同构：`code` / `text` 直接借 redb 的页，不物化。
     ///
-    /// ⚠️ 它省的是 Rust 侧的物化峰值（19 万条 × 两个 `String`），**不省 redb 读缓存**：
-    /// range 迭代照样把走过的叶子页读进缓存。见 [`Store::drop_page_cache`]。
-    pub fn count_temp_words(&self, schema: &str) -> anyhow::Result<usize> {
-        let scan = format!("{schema}\u{0}");
+    /// **它是本模块「哪些记录算数」的唯一一份判据**——[`Self::count_temp_words`] 与
+    /// [`Self::search_temp_words_prefix`] 都走它。此前那两个各抄了一遍过滤条件，于是
+    /// 「计数与列表口径一致」只能靠测试去比，而**在全是好记录的库上比两条路相等，测不出
+    /// 坏记录上的分叉**（`tests/counts_match_listings.rs` 当时确实漏掉了这个：把计数那份
+    /// 的过滤删成无条件 `n += 1`，测试照样绿）。结构上只留一份，分叉就不可能发生。
+    pub fn for_each_temp_word(
+        &self,
+        schema: &str,
+        prefix: &str,
+        f: &mut dyn FnMut(crate::user_words::UserWordView<'_>) -> bool,
+    ) -> anyhow::Result<()> {
+        let scan = format!("{schema}\u{0}{prefix}");
         self.with_db(|db| {
             let txn = db.begin_read()?;
             let t = txn.open_table(TEMP_WORDS)?;
-            let mut n = 0usize;
             for item in t.range(scan.as_str()..)? {
                 let (k, v) = item?;
                 let key = k.value();
                 if !key.starts_with(&scan) {
                     break;
                 }
-                // 与 `search_temp_words_prefix` 同口径：key 拆不开或 value 解不出的都不算。
-                if crate::user_words::split_key(key).is_some() && dec_val(v.value()).is_some() {
-                    n += 1;
+                let (Some((_, code, text)), Some((w, c, ca, b))) =
+                    (crate::user_words::split_key(key), dec_val(v.value()))
+                else {
+                    continue; // 解不出的记录跳过且不计数
+                };
+                if !f(crate::user_words::UserWordView {
+                    code,
+                    text,
+                    weight: w,
+                    count: c,
+                    created_at: ca,
+                    boundary: b,
+                    // 临时词库不参与「导入文件词序」那套排序（顺序由造词先后与 count 决定）。
+                    order: 0,
+                }) {
+                    break;
                 }
             }
-            Ok(n)
+            Ok(())
         })
+    }
+
+    /// 某方案下的临时词条数。只数不抄。
+    ///
+    /// 口径与 [`Self::search_temp_words_prefix`] 一致**是结构保证的**：两者都走
+    /// [`Self::for_each_temp_word`]，不存在第二份过滤判据可供分叉。
+    ///
+    /// ⚠️ 它省的是 Rust 侧的物化峰值（19 万条 × 两个 `String`），**不省 redb 读缓存**：
+    /// range 迭代照样把走过的叶子页读进缓存。见 [`Store::drop_page_cache`]。
+    pub fn count_temp_words(&self, schema: &str) -> anyhow::Result<usize> {
+        let mut n = 0usize;
+        self.for_each_temp_word(schema, "", &mut |_| {
+            n += 1;
+            true
+        })?;
+        Ok(n)
     }
 
     /// 前缀检索临时词（跨 code）。limit<=0 不限。
@@ -187,37 +221,12 @@ impl Store {
         prefix: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<UserWordRecord>> {
-        let scan = format!("{schema}\u{0}{prefix}");
-        self.with_db(|db| {
-            let txn = db.begin_read()?;
-            let t = txn.open_table(TEMP_WORDS)?;
-            let mut out = Vec::new();
-            for item in t.range(scan.as_str()..)? {
-                let (k, v) = item?;
-                let key = k.value();
-                if !key.starts_with(&scan) {
-                    break;
-                }
-                if let (Some((_, code, text)), Some((w, c, ca, b))) =
-                    (crate::user_words::split_key(key), dec_val(v.value()))
-                {
-                    out.push(UserWordRecord {
-                        code: code.to_string(),
-                        text: text.to_string(),
-                        weight: w,
-                        count: c,
-                        created_at: ca,
-                        boundary: b,
-                        // 临时词库不参与「导入文件词序」那套排序（它的顺序由造词先后与 count 决定）。
-                        order: 0,
-                    });
-                }
-                if limit > 0 && out.len() >= limit {
-                    break;
-                }
-            }
-            Ok(out)
-        })
+        let mut out = Vec::new();
+        self.for_each_temp_word(schema, prefix, &mut |w| {
+            out.push(w.to_record());
+            limit == 0 || out.len() < limit
+        })?;
+        Ok(out)
     }
 
     /// 淘汰：保留 max_keep 条，删除其余（按 `(count, created_at, weight)` 升序淘汰）。

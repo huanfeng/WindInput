@@ -163,8 +163,48 @@ impl Store {
         })
     }
 
+    /// 流式遍历某方案下以 `prefix` 开头的词频记录。回调返回 `false` 即停。
+    ///
+    /// 与 [`Store::for_each_user_word`] / [`Store::for_each_temp_word`] 同构：`code` /
+    /// `text` 直接借 redb 的页，不物化。**本模块「哪些记录算数」的唯一一份判据**，
+    /// [`Self::list_freq_paged`] 与设置页的搜索都走它。
+    pub fn for_each_freq(
+        &self,
+        schema: &str,
+        prefix: &str,
+        f: &mut dyn FnMut(&str, &str, FreqRecord) -> bool,
+    ) -> anyhow::Result<()> {
+        let scan = format!("{schema}\u{0}{prefix}");
+        self.with_db(|db| {
+            let txn = db.begin_read()?;
+            let t = txn.open_table(FREQ)?;
+            for item in t.range(scan.as_str()..)? {
+                let (k, v) = item?;
+                let key = k.value();
+                if !key.starts_with(&scan) {
+                    break;
+                }
+                let (Some((_, code, text)), Some(rec)) =
+                    (crate::user_words::split_key(key), dec_freq(v.value()))
+                else {
+                    continue; // 解不出的记录跳过且不计数
+                };
+                if !f(code, text, rec) {
+                    break;
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// 列举某方案的词频记录（设置页用）：按 code 前缀过滤，分页。
     /// 返回 `(本页 [(code,text,记录)], 总数)`。limit=0 表示不限。
+    ///
+    /// **只物化本页**。从前是「先全收进 Vec 再 `skip/take`」，而词频表与用户词表同量级
+    /// （每选一次词就记一条），19 万条时翻第一页要先造 38 万个 `String`。
+    ///
+    /// ⚠️ 仍然扫完整表、不能早退：`total` 要精确（分页器显示「共 N 条」）。省的是物化，
+    /// 不是扫描；redb 的读缓存该填还是填，见 [`Store::drop_page_cache`]。
     pub fn list_freq_paged(
         &self,
         schema: &str,
@@ -172,31 +212,16 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> anyhow::Result<FreqPage> {
-        let scan = format!("{schema}\u{0}{prefix}");
-        self.with_db(|db| {
-            let txn = db.begin_read()?;
-            let t = txn.open_table(FREQ)?;
-            let mut all = Vec::new();
-            for item in t.range(scan.as_str()..)? {
-                let (k, v) = item?;
-                let key = k.value();
-                if !key.starts_with(&scan) {
-                    break;
-                }
-                if let (Some((_, code, text)), Some(rec)) =
-                    (crate::user_words::split_key(key), dec_freq(v.value()))
-                {
-                    all.push((code.to_string(), text.to_string(), rec));
-                }
+        let mut page = Vec::new();
+        let mut total = 0usize;
+        self.for_each_freq(schema, prefix, &mut |code, text, rec| {
+            if total >= offset && (limit == 0 || page.len() < limit) {
+                page.push((code.to_string(), text.to_string(), rec));
             }
-            let total = all.len();
-            let page: Vec<_> = all
-                .into_iter()
-                .skip(offset)
-                .take(if limit == 0 { usize::MAX } else { limit })
-                .collect();
-            Ok((page, total))
-        })
+            total += 1;
+            true
+        })?;
+        Ok((page, total))
     }
 
     /// 导出某方案全部词频为 jsonl（每行 {"code","text","count","last_used"}）。

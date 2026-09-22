@@ -2051,25 +2051,36 @@ pub trait WebDataRpc: WebDataHost {
             // 词频表的 key 是扁平码；用户可能从用户词库列表复制带空格的串来搜，先拆
             //（对无空格串恒等，故无副作用）。
             let (code_prefix, _) = wind_store::wdict::split_spaced_code(prefix);
-            let (mut all, _) = store.list_freq_paged(&schema, &code_prefix, 0, 0)?;
-            // 并入两类补充命中（与上面的编码前缀取并集，去重）：
-            //   ① 词条内容包含搜索词（拿汉字匹配 text，用原串）
-            //   ② **编码中段包含**搜索词 —— 与 web_dict_list_paged 同款，前缀扫描只能
-            //      命中开头，`haoya` 搜 `ya` 一条也出不来。两者共用这一次全量扫描。
-            if !prefix.is_empty() {
+            let mut all = if prefix.is_empty() {
+                // 只排序不搜索：排序是跨页全局的，只能全量物化。
+                store.list_freq_paged(&schema, &code_prefix, 0, 0)?.0
+            } else {
+                // **一遍**扫描分两组，编码前缀命中在前、其余命中在后：
+                //   ① 词条内容包含搜索词（拿汉字匹配 text，用原串）
+                //   ② **编码中段包含**搜索词 —— 前缀扫描只能命中开头，`haoya` 搜 `ya`
+                //      一条也出不来，而用户并不知道搜索框只认前缀。
+                //
+                // 从前这里与 `web_dict_list_paged` 同款：扫两遍全表（一遍前缀、一遍全量）
+                // 再拿一个全量 clone 的 `HashSet<(String,String)>` 去重。前缀命中本就是
+                // 全量扫描的子集，第二遍纯属重复；分两组天然互斥，去重结构一并不需要了。
+                // 顺序与从前逐条相同。
                 let q = prefix.to_lowercase();
                 let code_q = code_prefix.to_lowercase();
-                let seen: std::collections::HashSet<(String, String)> =
-                    all.iter().map(|(c, t, _)| (c.clone(), t.clone())).collect();
-                let (rest, _) = store.list_freq_paged(&schema, "", 0, 0)?;
-                for (c, t, rec) in rest {
-                    let hit = t.to_lowercase().contains(&q)
-                        || (!code_q.is_empty() && c.to_lowercase().contains(&code_q));
-                    if hit && !seen.contains(&(c.clone(), t.clone())) {
-                        all.push((c, t, rec));
+                let mut head = Vec::new();
+                let mut tail = Vec::new();
+                store.for_each_freq(&schema, "", &mut |c, t, rec| {
+                    if c.starts_with(code_prefix.as_str()) {
+                        head.push((c.to_string(), t.to_string(), rec));
+                    } else if t.to_lowercase().contains(&q)
+                        || (!code_q.is_empty() && c.to_lowercase().contains(&code_q))
+                    {
+                        tail.push((c.to_string(), t.to_string(), rec));
                     }
-                }
-            }
+                    true
+                })?;
+                head.append(&mut tail);
+                head
+            };
             let total = all.len();
             if let Some((by, desc)) = sort {
                 all.sort_by(|(ca, ta, ra), (cb, tb, rb)| {
@@ -8104,6 +8115,87 @@ short_code_yield_level = 2
             )
             .unwrap();
         assert_eq!(r4["total"], 3, "不传 sortBy 应保持原有行为");
+    }
+
+    /// ★ `freq.listPaged` 的三条路必须彼此自洽（与 `dict.listPaged` 同款判据）。
+    ///
+    /// 这个入口和 `dict.listPaged` 是同一个模式、同一次改造：不搜不排序走 store 的流式
+    /// 分页，要排序走全量，搜索走一遍扫描分两组。拆开之后最容易坏的同样是**三条彼此不
+    /// 一致**，而不是某一条本身。
+    #[test]
+    fn freq_list_paged_stays_consistent_across_its_three_paths() {
+        let c = coord("freq_paths");
+        let store = c.user_store().unwrap();
+        for (code, text) in [
+            ("nihao", "你好"),
+            ("nimen", "你们"),
+            ("haoya", "好呀"),
+            ("women", "我们"),
+        ] {
+            store.record_freq("py", code, text).unwrap();
+        }
+        let call = |p: Value| c.web_data_rpc("freq.listPaged", &p).unwrap();
+        let texts = |v: &Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|it| it["text"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+
+        // ① 流式路：分页拼接 == 一次取全部。
+        let all = call(json!({ "schemaId": "py", "offset": 0, "limit": 100 }));
+        assert_eq!(all["total"], json!(4));
+        let whole = texts(&all);
+        let mut stitched = Vec::new();
+        for off in [0, 2] {
+            let page = call(json!({ "schemaId": "py", "offset": off, "limit": 2 }));
+            assert_eq!(page["total"], json!(4), "翻页不得改变总数");
+            stitched.extend(texts(&page));
+        }
+        assert_eq!(stitched, whole, "分页拼接必须逐条等于一次取全部");
+
+        // ② 排序路：集合与 ① 相同。
+        let sorted = call(json!({
+            "schemaId": "py", "offset": 0, "limit": 100, "sortBy": "text", "sortDesc": false
+        }));
+        assert_eq!(sorted["total"], json!(4), "排序不得改变总数");
+        let (mut a, mut b) = (texts(&sorted), whole.clone());
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "排序路与流式路必须是同一批条目");
+
+        // ③ 搜索路：前缀命中在前、不重复；编码中段与词条内容也要能捞到。
+        let hit = call(json!({ "schemaId": "py", "prefix": "ni", "offset": 0, "limit": 100 }));
+        let got = texts(&hit);
+        assert_eq!(
+            hit["total"].as_u64().unwrap() as usize,
+            got.len(),
+            "total 必须等于实际条数"
+        );
+        let mut dedup = got.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup.len(), got.len(), "同一条不得同时进两组");
+        assert_eq!(
+            &got[..2],
+            &["你好".to_string(), "你们".to_string()],
+            "编码前缀命中必须在前，实际 {got:?}"
+        );
+        // 只能由编码中段命中的那条。
+        let mid = texts(&call(
+            json!({ "schemaId": "py", "prefix": "ya", "offset": 0, "limit": 100 }),
+        ));
+        assert!(
+            mid.contains(&"好呀".to_string()),
+            "编码中段命中丢了：{mid:?}"
+        );
+        // 只能由词条内容命中的那条。
+        let by_text = texts(&call(
+            json!({ "schemaId": "py", "prefix": "我", "offset": 0, "limit": 100 }),
+        ));
+        assert_eq!(by_text, vec!["我们".to_string()], "按词条内容搜不到");
     }
 
     #[test]
