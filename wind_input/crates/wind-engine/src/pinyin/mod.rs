@@ -142,7 +142,7 @@ fn sentence_weight(log_prob: f64, word_count: usize) -> i32 {
 ///
 /// **为什么是 10 而不是混输 `PINYIN_QUOTA_DIVISOR` 的 5**：那边护的是「整个拼音块」，
 /// 五笔 2 码前缀动辄数百条、要抢的席位多；这边护的是简拼这一小类，而它的产出在**上游
-/// 就被限流**了 —— 纯简拼 `search_abbrev(stroke, 10)`、混合 `MIXED_ABBREV_INDEX_LIMIT = 64`，
+/// 就被限流**了 —— 纯简拼与混合共用 [`ABBREV_INDEX_LIMIT`] = 64，
 /// 再经音节数与逐段校验滤掉绝大多数。真机现场要的是 **1 席**（`shengrikl` 的「生日快乐」
 /// 是第 337 位那一条）。30 席是宽松上界且大概率打不满，`extra` 取多少就只挤多少
 /// （见 `truncate_with_abbrev_quota` 的「只补不挤空」），故放宽的代价有限。
@@ -482,13 +482,21 @@ fn completion_penalized(weight: i32, extra: u32) -> i32 {
 /// 远超实用范围；该上限只约束**补全**，精确匹配候选不受影响。
 const MAX_COMPLETION_CANDIDATES: usize = 1000;
 
-/// 混合简拼查 `AbbrevSection` 时的取码上限（step 5b）。
+/// 查 `AbbrevSection` 时的取码上限。纯简拼（step 5 / 回退①）与混合简拼（step 5b / 回退②）
+/// **共用同一个值**——两条路径查的是同一张表、同一个键。
 ///
-/// 比纯简拼的 10 大一截：纯简拼那边「键即答案」，按权重取前 10 条就是最终候选；混合路径
-/// 拿到的码还要过一道逐段校验（`nh` 下的 `nihao`/`nanhai`/`naihe`… 只有第二段等于 `hao`
-/// 的能活下来），**绝大多数会被滤掉**，取 10 条几乎必然一条不剩。
-/// 索引点查本身是 DAT 前缀走位 + 定长条目读取，放宽到 64 的成本远小于「查了等于没查」。
-const MIXED_ABBREV_INDEX_LIMIT: usize = 64;
+/// 为什么混合路径需要 64：拿到的码还要过一道逐段校验（`nh` 下的 `nihao`/`nanhai`/`naihe`…
+/// 只有第二段等于 `hao` 的能活下来），**绝大多数会被滤掉**，取 10 条几乎必然一条不剩。
+/// 索引点查本身是 DAT 前缀走位 + 定长条目读取，放宽的成本远小于「查了等于没查」。
+///
+/// ★ **纯简拼曾单独取 10，已废止。** 那个值的理由是「键即答案，按权重取前 10 就是最终
+/// 候选」——该前提只在**键下词条少于 10** 时成立。真实词库里 `bcx` 有 48 条，取 10 等于
+/// 宣布「这个键下只有最热门的 10 个词存在」：`bai cheng xian`（拜城县，w=1，第 48 条）
+/// 在 `bcx` 下永不产生，而在 `baicx`（混合、64）下是第 77 位候选 —— **打得更省事的写法
+/// 反而查得更少**。且因为截断在**召回层**，候选窗开到 300 也捞不回来，调频同样救不回来
+/// （位次重排只能重排已经进了列表的候选）。两条路径的窗口必须一致，见
+/// `tests/pinyin_abbrev_recall_window.rs`。
+const ABBREV_INDEX_LIMIT: usize = 64;
 
 /// 混合整句的**质量闸门**：路径平均每字 log_prob 低于此值就不插入候选。
 ///
@@ -1099,18 +1107,27 @@ impl PinyinEngine {
         let dict = &self.dict;
         // 本切点的产出配额（见 MAX_FALLBACK_PER_CUT：不逐切点限流，长切点会把额度占满，
         // 词频高得多的短切点一条都进不来）。
+        //
+        // ★ **系统层与 store 层各记各的基准**：配额按 `base` 分段计，系统层 ①② 用 `start`，
+        // 用户/临时层 ③④ 另起一个（见下方 `store_base`）。共用一份时 ③④ 排在 ①② 之后，
+        // 系统的高频词占满 6 席 ⇒ 用户自己造的词在**长输入**下静默出局，而短输入（整串走
+        // step 5/6，不经本函数）照常出得来 —— 真机观感是「短的打得出、长的就没了」，
+        // 恰恰砸在最需要分段上屏的场景上（一次输入长串连续部分上屏，是拼音自动造词唯一
+        // 走得通的路径：整串上屏会 `reset_pinyin_composition` 清空 `committed_segs`，
+        // 而 `learn_phrase_on_commit` 要求 ≥2 段）。见 `tests/pinyin_abbrev_recall_window.rs`。
         let start = cands.len();
 
         // 部分候选统一形态：`is_abbrev` 归入简拼层、`is_partial` 表示只覆盖了输入前缀
         // （沉在完整匹配之后），`consumed_length` **自带击键域的消费数**——下方那个按
         // code/query 关系统一计算 consumed 的循环会跳过它们（见其注释）。
         let push = |cands: &mut Vec<Candidate>,
+                    base: usize,
                     text: String,
                     code: String,
                     w: i32,
                     boundary: u64,
                     is_fuzzy: bool| {
-            if cands.len() - start >= MAX_FALLBACK_PER_CUT {
+            if cands.len() - base >= MAX_FALLBACK_PER_CUT {
                 return;
             }
             if text.is_empty() || cands.iter().any(|c| c.text == text) {
@@ -1139,7 +1156,7 @@ impl PinyinEngine {
         if plain {
             for (key, edits) in self.abbrev_recall_keys(stroke) {
                 // 模糊处数与折扣，口径同 step5（见那里的论证）。
-                for abbr_code in dict.search_abbrev(&key, 10) {
+                for abbr_code in dict.search_abbrev(&key, ABBREV_INDEX_LIMIT) {
                     for h in dict.search_with_boundary(&abbr_code) {
                         let eb = effective_boundary(&abbr_code, h.boundary, trie);
                         if eb != 0 && eb.count_ones() as usize != stroke.len() {
@@ -1147,6 +1164,7 @@ impl PinyinEngine {
                         }
                         push(
                             cands,
+                            start,
                             h.text,
                             abbr_code.clone(),
                             fuzzy_penalized(h.weight, edits),
@@ -1179,7 +1197,7 @@ impl PinyinEngine {
             keys.sort_unstable();
             keys.dedup();
             for key in &keys {
-                for abbr_code in dict.search_abbrev(key, MIXED_ABBREV_INDEX_LIMIT) {
+                for abbr_code in dict.search_abbrev(key, ABBREV_INDEX_LIMIT) {
                     for h in dict.search_with_boundary(&abbr_code) {
                         let Some(syls) =
                             mixed_abbrev::syllables_from_boundary(&abbr_code, h.boundary)
@@ -1200,6 +1218,7 @@ impl PinyinEngine {
                         };
                         push(
                             cands,
+                            start,
                             h.text,
                             abbr_code.clone(),
                             fuzzy_penalized(h.weight, edits),
@@ -1216,6 +1235,8 @@ impl PinyinEngine {
         // 经**声母索引**取候选，判据一字未动：索引只保证「声母投影对得上」，
         // 音节数、逐段全等仍在下面逐条判。见 `DictLayer::search_abbrev`。
         if let Some(store_dm) = &self.store_layers {
+            // 用户/临时层自己的配额基准（见 `start` 处的说明）：不与系统层 ①② 抢同一份。
+            let store_base = cands.len();
             for c in self.recall_store_by_abbrev(store_dm, stroke, plain, &pats) {
                 let plain_edits = self.abbrev_matches_stroke(&c.code, c.boundary, stroke);
                 // 旧代码 `if plain { None }` 的短路前提是「纯简拼命中恒精确 ⇒ 已是最小」。
@@ -1252,6 +1273,7 @@ impl PinyinEngine {
                 {
                     push(
                         cands,
+                        store_base,
                         c.text,
                         c.code,
                         fuzzy_penalized(c.weight, edits),
@@ -3042,7 +3064,7 @@ impl Engine for PinyinEngine {
                 // 不罚时模糊解排第 1、精确解第 2；罚一处后 1191×0.5=595 < 800，次序才对。
                 // 同一个不变量在混合路径已由 `fuzzy_mixed_abbrev_is_penalized_and_marked`
                 // 守着，纯简拼这条当时漏了。
-                for abbr_code in dict.search_abbrev(&key, 10) {
+                for abbr_code in dict.search_abbrev(&key, ABBREV_INDEX_LIMIT) {
                     // 用 search_with_boundary 而非 search：拼音引擎直接持有 CachedDict、
                     // 不经 SystemDictLayer，用 search() 会把边界丢在这里（P2b 踩过同款）。
                     for h in dict.search_with_boundary(&abbr_code) {
@@ -3125,7 +3147,7 @@ impl Engine for PinyinEngine {
             for key in &keys {
                 // limit 比 step5 的 10 大一截：那边键即答案、取权重前 10 就够；这里拿到的
                 // 码还要过一道逐段校验，**绝大多数会被滤掉**，取 10 条几乎必然一条不剩。
-                for abbr_code in dict.search_abbrev(key, MIXED_ABBREV_INDEX_LIMIT) {
+                for abbr_code in dict.search_abbrev(key, ABBREV_INDEX_LIMIT) {
                     for h in dict.search_with_boundary(&abbr_code) {
                         // 无边界信息 → 判据不存在 → 不参与（不是放行，见 syllables_from_boundary）。
                         let Some(syls) =
