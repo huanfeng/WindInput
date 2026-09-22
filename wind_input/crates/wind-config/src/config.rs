@@ -2257,27 +2257,46 @@ fn default_promote_prefix() -> String {
     "single".to_string()
 }
 
-/// 码表自动造词（[schema.codetable.auto_phrase]）。
+/// 码表自动造词（[schema.codetable.auto_phrase]）。**滑窗草稿层模型**
+/// （`docs/design/auto-phrase-draft-layer.md`，2026-09-22 起）。
 ///
-/// 语义：连续单字上屏累积成序列，遇终止符（标点/回车/空格/焦点切换/光标移动/多字词上屏）
-/// 或超过 `idle_timeout_ms` 未继续时，按方案 `[[encoder.rules]]` 为整个序列算词组编码并
-/// 写入**临时词库**（立即可作为候选）；累计使用达 `promote_count` 次才晋升进用户词库。
+/// 缓冲的对象是**最近落屏的文本流**（逐字打与选词组上屏都进流），不是旧模型的
+/// 「连续单字序列」——后者把多字词上屏当终止符，而正常打字里大多数词就是选词组上屏的，
+/// 那正是「开了功能却几乎不造词」的主因。
+///
+/// 词走**两跳**才进用户词库，勿混作一件事：
+/// 1. 滑窗切出 `min_phrase_len..=max_phrase_len` 字的窗口 → 全部记进**草稿层**
+///    （`DRAFT_WORDS` 表，带 `draft_ttl_hours` 有效期）；
+/// 2. 用户真的用某条草稿上屏过一次 → 跃迁进**临时词库**（即「用过即转正」）；
+/// 3. 此后累计使用达 `promote_count` 次 → 晋升进**用户词库**（永久，无容量上限）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AutoPhraseConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// 造词最小字数（默认 2；内部字段，设置页不开放）。
+    /// 滑窗下界（字，默认 2；内部字段，设置页不开放）。
     #[serde(default = "default_phrase_min_len")]
     pub min_phrase_len: usize,
-    /// 造词最大字数（默认 5；内部字段，设置页不开放）。**超长序列整体放弃**，不截取末尾
-    /// N 字——在连续多字中间切一刀，切出来的多半不是词，是杂词的主要来源。
+    /// 滑窗上界（字，默认 5；内部字段，设置页不开放）。
+    ///
+    /// ⚠️ 旧模型里它是「超长序列**整体放弃**」的那道闸；滑窗模型下它只是窗口上界，
+    /// 超过它的连续输入不再被整段丢弃，而是照常切出 `min..=max` 的各个窗口。
     #[serde(default = "default_phrase_max_len")]
     pub max_phrase_len: usize,
-    /// 临时词晋升进用户词库所需使用次数。**0 = 不晋升**，一直留在临时词库（默认）。
+    /// 临时词晋升进用户词库所需使用次数。**0 = 不晋升**，一直留在临时词库。
+    ///
+    /// ⚠️ 这里的 `0` 是**结构体零值（L1）**，不是出厂值：出厂值在 `data/config.toml`
+    /// （L2，恒覆盖 L1），**自 2026-09-22 起是 3**。改 L1 会连带改变大量以
+    /// `Config::default()` 构造的集成测试的行为，故只动 L2——同 [`CodetableGlobal::default`]
+    /// 那段注释立下的规矩。
+    ///
+    /// 拼音侧 [`AutoLearnConfig::promote_count`] 的**出厂值仍是 0**，两边自此分叉：
+    /// 本段出厂 `enabled = false`（只触及主动开启的用户），拼音那段出厂就开着（全体用户）。
     #[serde(default)]
     pub promote_count: usize,
-    /// 连续单字之间的最大间隔（毫秒，0=默认 5000）。超过则把已累积序列视作终止。
-    /// 兜底用：终止信号全漏时防止跨句拼出「加好加好」这类杂词。内部字段，设置页不开放。
+    /// 落屏文本流的最大间隔（毫秒，0=默认 5000）。超时即断流，已缓冲内容不再与后续拼接。
+    ///
+    /// 兜底用：其余断流信号（标点/焦点/切方案/移光标）全漏时，防止跨句拼出「加好加好」
+    /// 这类杂词。内部字段，设置页不开放。
     #[serde(default)]
     pub idle_timeout_ms: u32,
     /// 临时词库条目上限（0=不限）。超出后按「用得最少、造得最早」淘汰。内部字段，设置页不开放。
@@ -2367,10 +2386,14 @@ pub struct AutoLearnConfig {
     /// 「今天天气不错」这类值得进词库的长词，又挡住整句解常见的跨句拼接。
     #[serde(default = "default_learn_max_len")]
     pub max_word_length: usize,
-    /// 临时词晋升进用户词库所需使用次数。**0 = 不晋升**，一直留在临时词库（默认）
+    /// 临时词晋升进用户词库所需使用次数。**0 = 不晋升**，一直留在临时词库（**出厂值**）
     /// ——与 [`AutoPhraseConfig::promote_count`] 逐字同义，两边共用同一套晋升判定
     /// （`Coordinator::maybe_promote_temp`）。不是「0 = 用内置默认」：这条曾在
     /// `data/config.toml` 的注释里写反，于是「自动学习」出厂即学了也永不转正。
+    ///
+    /// ⚠️ **出厂值自 2026-09-22 起与码表侧分叉**：那边改成了 3，本项仍是 0。语义没有分叉，
+    /// 分叉的是影响面——码表侧出厂 `enabled = false`，本段出厂 `enabled = true`，
+    /// 动本项等于给**全体用户**的用户词库开闸。要不要跟着改是单独一项，需先有真机数据。
     #[serde(default)]
     pub promote_count: usize,
 }
