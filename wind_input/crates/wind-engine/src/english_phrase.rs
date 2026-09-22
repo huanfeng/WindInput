@@ -415,6 +415,18 @@ impl LazyPhraseIndex {
         built
     }
 
+    /// 索引是否已经建出来了。
+    ///
+    /// 供「关着词组分词就不该付这笔内存」的守门测试用（`english.rs` 的
+    /// `a_disabled_feature_never_builds_the_index`）。真机上这张表 12.7 MB，
+    /// 而它是否存在只取决于两个开关的**或**，判据必须能被断言，不能只写在注释里。
+    pub fn is_built(&self) -> bool {
+        self.index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
     /// 作废索引，下次查询时重建。
     ///
     /// 调用点＝词库启用状态变更（`EnglishEngine::set_dict_enabled`）。词库热摘不重建引擎，

@@ -363,4 +363,44 @@ mod tests {
         assert!(got.contains(&"o'clock".to_string()));
         assert_eq!(got.len(), 2, "不含分词符时不该有额外查询，实际: {got:?}");
     }
+
+    /// ★ 词组分词关着时，那张索引一个字节都不许建。
+    ///
+    /// 真机上这张表 **12.7 MB**（18 万条用户英文词组），是进程 Private 的最大单块。
+    /// 它存不存在只取决于 `schema.english.phrase_seg || input.temp_english.phrase_seg`
+    /// ——两处**都**关才不建（全局 OR，只关一处无效，2026-09-22 我就为此白验了一轮）。
+    ///
+    /// 这条守的是「关着等于不付钱」这个承诺，三个层次各断言一次：
+    ///
+    /// 1. **装配期**不预热（`with_phrase_seg(None)` 不调 `prewarm`）。
+    /// 2. **`convert`** 整条路不把它勾出来——这是用户真正走的入口。
+    /// 3. **`phrase_candidates`** 自己早退。
+    ///
+    /// 第 3 条不能省，虽然 2 看着已经覆盖它：`convert` 外面还有一道
+    /// `if let Some(sep) = self.seg_sep` 挡着，只测 `convert` 的话第二道闸破了也照样绿
+    /// （实测如此）。而 `LazyPhraseIndex::get` 自带懒建，谁在 `phrase_candidates` 的早退
+    /// 之前多调它一次，12.7 MB 就静默回来了——那才是会被改坏的地方。
+    #[test]
+    fn a_disabled_feature_never_builds_the_index() {
+        let mut d = CodetableDict::empty();
+        d.merge_single("macx".into(), "Mac OS X".into(), 100, 0);
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(SystemDictLayer::new(CachedDict::Memory(d), "en")));
+        let ct = CodeTableEngine::new(32, CommitOptions::default(), Arc::new(dm));
+        // 刻意**不调** `with_phrase_seg` —— 等同于两个开关都关着时的装配。
+        let e = EnglishEngine::new(ct);
+        assert!(!e.phrase.is_built(), "装配期就不该预热");
+
+        // 带分词符的输入走完整条 convert，也不许把它勾出来。
+        let _ = e.convert("mac'os", 20).unwrap();
+        assert!(!e.phrase.is_built(), "convert 把索引勾出来了");
+
+        // 越过 convert 的外层闸，直接打真正那道：`seg_sep` 为 None 就该在够着
+        // `LazyPhraseIndex::get` 之前返回。
+        assert!(e.phrase_candidates("mac'os", 20).is_empty());
+        assert!(
+            !e.phrase.is_built(),
+            "关着词组分词却把 12.7 MB 的索引建了出来 —— 有人在 seg_sep 早退之前调了 get"
+        );
+    }
 }
