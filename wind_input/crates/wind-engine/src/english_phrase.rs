@@ -418,6 +418,22 @@ pub struct LazyPhraseIndex {
     /// 用 `Arc` 包内层是为了让读取方**不必持锁**：查询在按键路径上，持读锁跑完整个线性扫
     /// 会和后台预热的写锁互相等。取一次 `Arc::clone` 就放锁。
     index: std::sync::RwLock<Option<std::sync::Arc<PhraseSegIndex>>>,
+    /// 失效代号。[`Self::invalidate`] 递增，[`Self::get`] 在**锁外构建之前**记下它、
+    /// 写回之前比对。
+    ///
+    /// # 没有它会怎样（2026-09-22 实测的真实竞态）
+    ///
+    /// `get` 刻意在锁外构建（那是秒级的全表扫，持锁会把按键线路一起堵住），于是
+    /// 「开始构建」与「写回」之间有一段长窗口。热摘词库（`set_dict_enabled` →
+    /// `unregister_layer` → `invalidate`）若落在这段窗口里，那份**按旧词库建好的**索引
+    /// 随后会被原样写回 —— 用户看到的就是本仓反复记着的那句「关了词库没反应」。
+    ///
+    /// 引擎构造时会 `prewarm` 一条后台线程去建索引，所以这个窗口在**每次启动**都真实存在，
+    /// 不是理论竞态：`tests/english_phrase_index.rs` 在机器负载高时就会红，而它测的正是
+    /// 「关掉 en_ext 之后不得再召回它里面的词组」。
+    ///
+    /// 代号的读写都在 `index` 的写锁内完成，故 `Relaxed` 足够——锁本身提供了同步。
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl Default for LazyPhraseIndex {
@@ -430,6 +446,7 @@ impl LazyPhraseIndex {
     pub fn new() -> Self {
         Self {
             index: std::sync::RwLock::new(None),
+            generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -439,22 +456,33 @@ impl LazyPhraseIndex {
     /// 已建好的索引、只付一次读锁。竞态下两条线程可能各建一次，结果等价——比让按键线程
     /// 排在写锁后面便宜。
     pub fn get(&self, dm: &DictManager) -> std::sync::Arc<PhraseSegIndex> {
-        if let Some(idx) = self
-            .index
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            return std::sync::Arc::clone(idx);
+        use std::sync::atomic::Ordering::Relaxed;
+        loop {
+            if let Some(idx) = self
+                .index
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                return std::sync::Arc::clone(idx);
+            }
+            // ★ 先记代号**再**构建。顺序不能反：反了就照不出「构建期间被失效」。
+            let started_at = self.generation.load(Relaxed);
+            let built = std::sync::Arc::new(PhraseSegIndex::build(dm));
+            let mut w = self.index.write().unwrap_or_else(|e| e.into_inner());
+            // 期间别的线程已经建好就用它的，保证同一时刻只有一份索引在被引用。
+            if let Some(existing) = w.as_ref() {
+                return std::sync::Arc::clone(existing);
+            }
+            if self.generation.load(Relaxed) != started_at {
+                // 构建期间词库变过（热摘了某本），这份是按旧词库建的，**不许写回**。
+                // 放锁重来——下一轮按新词库重建。见 `generation` 字段的文档。
+                drop(w);
+                continue;
+            }
+            *w = Some(std::sync::Arc::clone(&built));
+            return built;
         }
-        let built = std::sync::Arc::new(PhraseSegIndex::build(dm));
-        let mut w = self.index.write().unwrap_or_else(|e| e.into_inner());
-        // 期间别的线程已经建好就用它的，保证同一时刻只有一份索引在被引用。
-        if let Some(existing) = w.as_ref() {
-            return std::sync::Arc::clone(existing);
-        }
-        *w = Some(std::sync::Arc::clone(&built));
-        built
     }
 
     /// 索引是否已经建出来了。
@@ -474,7 +502,12 @@ impl LazyPhraseIndex {
     /// 调用点＝词库启用状态变更（`EnglishEngine::set_dict_enabled`）。词库热摘不重建引擎，
     /// 这是索引跟上词库的唯一通路。
     pub fn invalidate(&self) {
-        *self.index.write().unwrap_or_else(|e| e.into_inner()) = None;
+        // 代号与清空在**同一把写锁内**完成，`get` 的比对也在这把锁内 —— 两者互斥，
+        // 不存在「代号已加、索引还没清」的中间态被看到。
+        let mut w = self.index.write().unwrap_or_else(|e| e.into_inner());
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *w = None;
     }
 
     /// 把索引构建推给后台线程。由引擎构建完成时调用。
@@ -562,6 +595,118 @@ mod tests {
         println!(
             "窗口 {windowed:?} / 全表 {full:?}  窗口条目数={}",
             me.first_word_range(&segs[0]).len()
+        );
+    }
+
+    /// ★ 构建期间被 `invalidate` 的那份结果，**不许写回**。
+    ///
+    /// `get` 刻意在锁外构建（全表扫，持锁会堵住按键线路），于是「开始构建」到「写回」
+    /// 之间有一段长窗口。热摘词库落在窗口里时，那份按**旧**词库建好的索引若被原样写回，
+    /// 用户看到的就是「关了词库没反应」。
+    ///
+    /// 这不是理论竞态：引擎构造时 `prewarm` 一条后台线程去建索引，窗口每次启动都存在。
+    /// 2026-09-22 `tests/english_phrase_index.rs` 在 `cargo test --workspace` 的负载下
+    /// 稳定复现（机器闲时反而绿，所以单独跑那条照不出来）。
+    ///
+    /// # 时序是**摆明**的，不是靠撞
+    ///
+    /// 自定义一个会在遍历中途停下来等信号的层，于是「构建已经读过旧词库、但还没写回」
+    /// 这个瞬间被固定住。第一版用 `channel` 在**调 `get` 之前**同步，那是错的——构建
+    /// 压根没跨过失效点，删掉代号比对照样绿（实测）。
+    ///
+    /// 层的内容用一个标志翻转来模拟热摘，而不是真去 `unregister_layer`：`for_each_entry`
+    /// 正持着 composite 的锁停在那里，主线程这时摘层会直接死锁。
+    ///
+    /// 反向验证（变异）：删掉 `get` 里 `generation != started_at` 那段比对即红。
+    #[test]
+    fn a_build_that_started_before_invalidate_must_not_win() {
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        use std::sync::{Mutex, mpsc};
+        use wind_dict::{DictLayer, DictManager, LayerType};
+
+        /// 测试层的共享状态：测试线程与层各持一份 `Arc`。
+        struct Gate {
+            entered: mpsc::Sender<()>,
+            resume: Mutex<mpsc::Receiver<()>>,
+            /// 只让**第一趟**遍历停下来；重建那趟要直接走完。
+            stopped_once: AtomicBool,
+            /// 还吐不吐 `zzz zzz`。主线程在放行前翻成 false = 那本词库被热摘了。
+            yields_zzz: AtomicBool,
+        }
+
+        struct FlakyLayer(std::sync::Arc<Gate>);
+
+        impl DictLayer for FlakyLayer {
+            fn name(&self) -> &str {
+                "flaky"
+            }
+            fn layer_type(&self) -> LayerType {
+                LayerType::System
+            }
+            fn search(&self, _code: &str, _limit: usize) -> Vec<Candidate> {
+                Vec::new()
+            }
+            fn search_prefix(&self, _p: &str, _limit: usize) -> Vec<Candidate> {
+                Vec::new()
+            }
+            fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {
+                // ⚠️ 先吐词条**再**停。反过来的话，放行后读到的已经是翻转后的标志，
+                // 构建结果本来就不含 zzz —— 两种实现都绿，什么也证不出来（第一版的错）。
+                // 要照出缺陷，构建线程手上必须是**旧**视图。
+                if self.0.yields_zzz.load(Relaxed) {
+                    f("zzz", "zzz zzz", 100);
+                }
+                f("aaa", "aaa bbb", 100);
+                if !self.0.stopped_once.swap(true, Relaxed) {
+                    // 第一趟：告诉主线程「旧视图我已经读完了」，然后等它失效完再返回。
+                    self.0.entered.send(()).unwrap();
+                    self.0.resume.lock().unwrap().recv().unwrap();
+                }
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let gate = std::sync::Arc::new(Gate {
+            entered: entered_tx,
+            resume: Mutex::new(resume_rx),
+            stopped_once: AtomicBool::new(false),
+            yields_zzz: AtomicBool::new(true),
+        });
+
+        let dm = std::sync::Arc::new(DictManager::new());
+        dm.register_layer(Box::new(FlakyLayer(std::sync::Arc::clone(&gate))));
+
+        let lazy = std::sync::Arc::new(LazyPhraseIndex::new());
+        let builder = {
+            let (lazy, dm) = (std::sync::Arc::clone(&lazy), std::sync::Arc::clone(&dm));
+            std::thread::spawn(move || lazy.get(&dm))
+        };
+
+        // 构建线程此刻停在 `for_each_entry` 的末尾，手上已是含 zzz 的旧视图。
+        entered_rx.recv().expect("构建应已读完旧视图");
+        gate.yields_zzz.store(false, Relaxed); // = 热摘掉那本词库
+        lazy.invalidate();
+        resume_tx.send(()).unwrap();
+
+        builder.join().expect("构建线程");
+
+        let zzz = |i: &PhraseSegIndex| -> Vec<String> {
+            i.search(&split_segments("zzz", PHRASE_SEPARATOR), 10)
+                .into_iter()
+                .map(|c| c.text)
+                .collect()
+        };
+        // 要紧的是**别人**读到的那份：缓存里不许躺着按旧词库建的索引。
+        let after = zzz(&lazy.get(&dm));
+        assert!(after.is_empty(), "缓存里躺着按旧词库建的索引：{after:?}");
+        // 反面：主库那条必须还在，证明作废的是过时的那份，不是把功能连坐关掉了。
+        assert_eq!(
+            lazy.get(&dm)
+                .search(&split_segments("aaa", PHRASE_SEPARATOR), 10)
+                .len(),
+            1,
+            "主库词组不该受牵连"
         );
     }
 
