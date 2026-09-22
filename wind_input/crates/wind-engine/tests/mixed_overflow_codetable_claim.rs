@@ -82,7 +82,7 @@ fn all_vetoes_off() -> MixConfig {
 /// - `words` 是**精确整串**词条（第三条判据的正例，选它是为了隔离变量，见该用例文档）；
 /// - `yijgatron` 只让 `yijga` 命中**前缀**（反向锁：前缀不足以夺走归属）；
 /// - `github` 供顶码分工用例（③ 开/关的对照）。
-fn english() -> Box<dyn Engine> {
+fn english() -> Arc<dyn Engine> {
     let mut d = CodetableDict::empty();
     d.merge_single("words".into(), "words".into(), 500, 0);
     d.merge_single("wordsmith".into(), "wordsmith".into(), 100, 1);
@@ -91,7 +91,7 @@ fn english() -> Box<dyn Engine> {
     let dm = DictManager::new();
     dm.register_layer(Box::new(SystemDictLayer::new(CachedDict::Memory(d), "en")));
     let ct = CodeTableEngine::new(32, CommitOptions::default(), Arc::new(dm));
-    Box::new(EnglishEngine::new(ct))
+    Arc::new(EnglishEngine::new(ct))
 }
 
 fn mixed(cfg: MixConfig) -> MixedEngine {

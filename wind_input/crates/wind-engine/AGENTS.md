@@ -24,7 +24,7 @@
 ## For AI Agents
 
 ### Working In This Directory
-- **引擎构建唯一入口是 `manager.rs::build_engine`**：读方案 TOML（用户目录 > 安装目录，再深合并 `schema_overrides/{id}.toml`），按 `engine_type` 分派；mixed 递归构建 primary/secondary 子引擎。新增方案字段须在此解析，并考虑是否需在 `reload_from_config` 热更新（否则改设置要重启才生效）。
+- **引擎构建唯一入口是 `manager.rs::build_engine`**：读方案 TOML（用户目录 > 安装目录，再深合并 `schema_overrides/{id}.toml`），按 `engine_type` 分派；mixed 递归构建 primary/secondary 子引擎，但**英文子引擎不递归构建**——它经 `EnglishProvider` 回调借 `engines["english"]` 那一个实例（英文引擎带一张随用户词库增长的词组分词索引，靶机 18 万条时每份 12.7 MB，各建一份是纯浪费）。新增方案字段须在此解析，并考虑是否需在 `reload_from_config` 热更新（否则改设置要重启才生效）。
 - **码表行为分层（仅码表有 override）**：上屏等行为解析顺序为 方案 `schema_overrides/{id}.toml [codetable]`（带 `enabled` 总开关，逐字段 `Some` 覆盖）> 全局 `schema.codetable` > 内置默认；统一经 `CodetableGlobal::resolved()` / `resolve_codetable()`。拼音、混输**无方案 override**，只读全局 `schema.pinyin` / `schema.mix`。混输的码表类行为继承主码表 `schema.codetable`。调频/造词全局唯一按引擎分（`schema.codetable.frequency` / `schema.pinyin.frequency`）。详见 `docs/redesign/schema-config-layering.md`。
 - **词频是与 weight 解耦的独立维度**：引擎 `convert` 只产出基础权重候选；`freq_rerank` 是 coordinator 排序后调用的纯函数，**不得在引擎内改 weight 做词频**。两套语义（码表永久 used-first / 拼音衰减褪色）不可混用。
 - **拼音 vs 码表的根本差异**：拼音走连续解码（DAG 分词 + Viterbi 打分 + 层级排序，节点分取自词条自身的词典权重），码表只做 `DictManager` 精确 + 前缀查表无评分。匹配层级的**唯一真相**是 `wind_candidate::cmp_match_layers`（`is_abbrev`/`is_prefix`/`is_partial`），引擎层、协调器 `candidate_display_order`、`freq_rerank` 三处统一调用它，勿再各写一份。

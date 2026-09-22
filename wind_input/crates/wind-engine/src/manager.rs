@@ -36,6 +36,10 @@ pub const PINYIN_DATA_SCHEMA: &str = "pinyin";
 /// 词库，故用户数据（词频 / 候选调整）也归同一个桶，见 `Coordinator::effective_data_schema`。
 /// 融合英文候选（混输 / 快捷输入）同样引用它，但那些场景用户在写中文句子，只借词库不共享
 /// 上屏行为。
+///
+/// 进程里**只建一份**：以上全部入口都经 [`EngineManager::shared_english_engine`] 取同一个
+/// `Arc`。此前混输在 `build_engine` 里内联另建一份，靶机实测白占 12.7 MB（英文引擎的词组
+/// 分词索引随用户词库规模增长，那台机器 18 万条）。
 pub const ENGLISH_SCHEMA: &str = "english";
 
 /// 双拼方案未声明 `layout` 时的缺省布局。
@@ -355,11 +359,13 @@ impl RangeScan {
     }
 }
 
-/// 「英文候选混入」取用的英文词库方案 id。
+/// 混输取英文子引擎的通道：由 [`EngineManager::ensure_loaded`] 注入，回调进
+/// [`EngineManager::shared_english_engine`]。
 ///
-/// 与混输懒加载的是**同一个方案**（`build_engine` 的 mixed 分支写死 `"english"`），
-/// 故两条路复用同一份引擎实例、同一份词库内存。
-const ENGLISH_MERGE_SCHEMA_ID: &str = "english";
+/// 给**回调**而不是直接给 `Arc`，是因为它必须懒——`schema.mix.enable_english` 关着时一次
+/// 都不该去建英文引擎。而 `build_engine` 是关联函数（没有 `&self`），够不着那份缓存，
+/// 只能由调用方注入。
+type EnglishProvider<'a> = &'a dyn Fn() -> Option<Arc<dyn Engine>>;
 
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）
@@ -392,12 +398,16 @@ pub struct EngineManager {
     mix: Mutex<wind_config::MixGlobal>,
     /// 全局英文配置（英文方案的行为与调频；全局唯一）。Mutex 以支持热重载。
     english: Mutex<wind_config::config::EnglishGlobal>,
-    /// 「英文候选混入」用的英文引擎缓存。
+    /// 共享英文引擎缓存——「英文候选混入」与**混输的英文子引擎**取的是同一份。
     ///
     /// `None` = 尚未尝试；`Some(None)` = 试过且不可用（英文词库缺失），**不再重试**。
     /// ⚠️ 少了这层「记住失败」，`convert` 每一次按键都会重走一遍 `ensure_loaded` 构建、
-    /// 失败、`warn!` ——热路径上刷日志且白做功。与其余镜像同批在 `reload_from_config` 重置。
-    english_merge_engine: Mutex<Option<Option<Arc<dyn Engine>>>>,
+    /// 失败、`warn!` ——热路径上刷日志且白做功。
+    ///
+    /// **两处重置，缺一不可**：`reload_from_config`（配置变更，与其余镜像同批），以及
+    /// `invalidate_schema(ENGLISH_SCHEMA)`（扩展词库启停会把 `engines` 里那份换掉，这里
+    /// 不跟着清的话，混入与混输会一直握着刚被移出表的旧实例）。
+    shared_english_engine: Mutex<Option<Option<Arc<dyn Engine>>>>,
     /// 全局临时拼音配置（码表方案下临时切拼音反查；全局唯一）。Mutex 以支持热重载。
     temp_pinyin: Mutex<wind_config::config::TempPinyinConfig>,
     /// 临时英文配置镜像。**目前只为 `phrase_seg` 而存在**：词组分词索引要不要预热，取决于
@@ -720,7 +730,7 @@ impl EngineManager {
             codetable: Mutex::new(config.schema.codetable.clone()),
             mix: Mutex::new(config.schema.mix.clone()),
             english: Mutex::new(config.schema.english.clone()),
-            english_merge_engine: Mutex::new(None),
+            shared_english_engine: Mutex::new(None),
             temp_pinyin: Mutex::new(config.input.temp_pinyin.clone()),
             temp_english: Mutex::new(config.input.temp_english.clone()),
             // 用户层在 store 里（`wind_store::charsets`），装配前先 `as_deref` 借用，
@@ -2070,6 +2080,9 @@ impl EngineManager {
             phrase_seg_anywhere,
             // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
             None,
+            // 混输分支据此取**共享**英文引擎而不是另建一份。闭包在此处求值，
+            // 故 `enable_english` 关着时英文引擎一次都不会被建出来。
+            Some(&|| self.shared_english_engine()),
         ) {
             Some(engine) => {
                 info!(
@@ -2636,13 +2649,15 @@ impl EngineManager {
 
     /// 已加载的**混输**方案里，以 `schema_id` 为成员（primary / secondary / english）的那些。
     ///
-    /// 成员子引擎在 `build_engine` 里内联构造、从不入 `engines` 表，所以同一份词库在进程里
-    /// 可能有两个副本：独立方案一份、混输方案内部一份（用户 `available` 同时含 `wubi86` 与
-    /// `wubi86_pinyin` 时预热会把两份都建出来）。凡是「对已加载引擎做点什么」的运行时操作
-    /// 都得把后者也算上，否则命中的是没人在用的那份、还报告成功。
+    /// 码表 / 拼音成员子引擎在 `build_engine` 里内联构造、从不入 `engines` 表，所以同一份
+    /// 词库在进程里可能有两个副本：独立方案一份、混输方案内部一份（用户 `available` 同时含
+    /// `wubi86` 与 `wubi86_pinyin` 时预热会把两份都建出来）。凡是「对已加载引擎做点什么」的
+    /// 运行时操作都得把后者也算上，否则命中的是没人在用的那份、还报告成功。
     ///
-    /// english 特殊：它不写在方案文件里，由全局 `schema.mix.enable_english` 决定要不要建，
-    /// 这里对所有混输方案一律返回、由调用方按转发结果处置。
+    /// english 特殊，两点：它不写在方案文件里，由全局 `schema.mix.enable_english` 决定要不要
+    /// 建，故这里对所有混输方案一律返回、由调用方按转发结果处置；而且它**已不是副本**——
+    /// 混输持有的就是 `engines["english"]` 那个 `Arc`（见 [`EnglishProvider`]），对它转发
+    /// `set_dict_enabled` 与对独立方案那次是同一个实例上的同一件事。
     fn loaded_mixed_dependents(&self, schema_id: &str) -> Vec<(String, Arc<dyn Engine>)> {
         let loaded: Vec<(String, Arc<dyn Engine>)> = self
             .engines
@@ -2708,8 +2723,9 @@ impl EngineManager {
             // —— 没有「热恢复」这条路可走。于是**不能**再拿返回值去路由：下面禁用路径那道
             // `schema_id != ENGLISH_SCHEMA` 豁免（前提是「转发不到是常态」）会与这个恒 false
             // 叠加，让英文扩展库（`en_ext`，出厂启用、设置页可点）的启用在混输里**永远**
-            // 不失效 —— 独立 english 方案下次用会重建、正常，而混输里那份**内联构造的**
-            // english 子引擎（与 `engines` 表里那份不是同一个实例）一直拿不到它，
+            // 不失效 —— 独立 english 方案下次用会重建、正常，而已经建好的混输引擎里捧着的
+            // 仍是**构造时拿到的那个** `Arc`：英文引擎现在虽是共享的，`invalidate_schema`
+            // 换掉的也只是 `engines` 表里的登记，换不动已有的引用。
             // 表现就是本函数上面注释写的「关了没反应，顺手改别的设置又好了」。
             //
             // 对「mixed 里根本没建 english 子引擎」（`enable_english` 关着）的情形，这一趟
@@ -2824,6 +2840,14 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(schema_id);
+        // 英文方案被换掉时，共享英文引擎缓存也必须作废——混入与混输都从那里取，不清的话
+        // 它们会一直握着刚被移出 `engines` 的旧实例（`en_ext` 的启用就走这条路）。
+        if schema_id == ENGLISH_SCHEMA {
+            *self
+                .shared_english_engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
         self.freq_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2990,7 +3014,7 @@ impl EngineManager {
         // `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后仍然不生效，
         // 症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
         *self
-            .english_merge_engine
+            .shared_english_engine
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self.temp_pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -3151,7 +3175,7 @@ impl EngineManager {
         if !cfg.enable {
             return None;
         }
-        Some((self.english_merge_engine()?, cfg))
+        Some((self.shared_english_engine()?, cfg))
     }
 
     /// 取本次转换该用哪份英文混入配置——**按引擎类型分流，两份互不共享取值**。
@@ -3206,11 +3230,15 @@ impl EngineManager {
         // 它已经不成立，改由编译器来提醒。
     }
 
-    /// 英文词库引擎（懒加载一次，失败也记住，见 [`Self::english_merge_engine`] 字段文档）。
-    fn english_merge_engine(&self) -> Option<Arc<dyn Engine>> {
+    /// 进程里那**唯一**一份英文词库引擎（懒加载一次，失败也记住，见
+    /// [`Self::shared_english_engine`] 字段文档）。
+    ///
+    /// 两类调用方：英文候选混入（[`Self::english_merge_ctx`]）与混输的英文子引擎
+    /// （经 [`EnglishProvider`] 注入 `build_engine`）。
+    fn shared_english_engine(&self) -> Option<Arc<dyn Engine>> {
         {
             let cached = self
-                .english_merge_engine
+                .shared_english_engine
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if let Some(v) = cached.as_ref() {
@@ -3219,17 +3247,20 @@ impl EngineManager {
         }
         // **锁外**构建：`ensure_loaded` 自带 single-flight，且会去读盘建词库（秒级）。
         // 持着本缓存锁做这件事会把并发的按键线路一并堵住。
-        let built = if self.ensure_loaded(ENGLISH_MERGE_SCHEMA_ID) {
+        //
+        // 混输构建期回调进来时，外层正持着**那个混输方案**的 build_lock；这里取的是
+        // `"english"` 自己那一把（`build_locks` 按 schema_id 分表），不是同一把锁。
+        let built = if self.ensure_loaded(ENGLISH_SCHEMA) {
             self.engines
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get(ENGLISH_MERGE_SCHEMA_ID)
+                .get(ENGLISH_SCHEMA)
                 .cloned()
         } else {
             None
         };
         *self
-            .english_merge_engine
+            .shared_english_engine
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(built.clone());
         built
@@ -4567,11 +4598,15 @@ impl EngineManager {
         pinyin_cfg: &wind_config::config::PinyinGlobalConfig,
         // `phrase_seg_anywhere`：三个作用域（英文方案 / 临英 / 快捷输入英文）里是否
         // **有任何一个**开着词组分词。不按作用域分别开关，是因为英文引擎实例是三者
-        // **共用**的（都走 `build_engine("english")`）——`seg_sep` 挂在引擎上根本分不开
-        // 作用域。真正的闸门在协调器：`'` 进不了缓冲，`convert` 的 `input.contains(sep)`
+        // **共用**的（进程里只有 `engines["english"]` 这一个实例，见 [`EnglishProvider`]）
+        // ——`seg_sep` 挂在引擎上根本分不开作用域。真正的闸门在协调器：`'` 进不了缓冲，
+        // `convert` 的 `input.contains(sep)`
         // 就早退，分词路径恒不触发。本参数只决定「引擎要不要具备这个能力、要不要预热索引」。
         phrase_seg_anywhere: bool,
         mixed_role: Option<MixedRole>,
+        // `english_provider`：混输分支取英文子引擎的通道，见 [`EnglishProvider`]。
+        // 非混输分支一概不碰它。
+        english_provider: Option<EnglishProvider<'_>>,
     ) -> Option<Box<dyn Engine>> {
         let data_dir = data_dir?;
         let schemas = data_dir.join("schemas");
@@ -4597,6 +4632,7 @@ impl EngineManager {
                     // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）。
                     sentence_input: schema.engine.codetable.sentence_input,
                 }),
+                english_provider,
             )?;
             // 「声明了整句、却配着拼音子引擎」是个不会生效的组合：超码长区间归拼音
             // （`MixedEngine::convert` 直接走 `convert_overflow`，不经主引擎），而整句的
@@ -4636,6 +4672,7 @@ impl EngineManager {
                     Some(MixedRole::Secondary(MixPinyinOpts {
                         abbrev: mix_cfg.enable_pinyin_abbrev,
                     })),
+                    english_provider,
                 )
             };
             // 融合策略走全局 schema.mix（无方案级 override）。
@@ -4645,21 +4682,15 @@ impl EngineManager {
                 2
             };
             let block_on_pinyin = mix_cfg.auto_commit_block_on_pinyin;
-            // 英文候选（schema.mix.enable_english）：开启时懒加载 english 词库引擎混入混输候选。
-            // 走 build_engine("english") → EnglishEngine（词库缺失则 None，静默退化为无英文）。
+            // 英文候选（schema.mix.enable_english）：开启时经 `english_provider` 取那份
+            // **共享**的英文引擎（词库缺失则 None，静默退化为无英文）。
+            //
+            // ⚠️ 此前这里是 `Self::build_engine("english", ...)`，于是混输自带一份、
+            // `engines["english"]` 一份，同样的词库与词组索引在进程里躺两遍。靶机
+            // （18 万条英文词组）上表现为启动日志里两条「后台预热完成」、多占 12.7 MB。
             // 开关热切换经 reload_from_config 的 engines.clear() 重建混输引擎自然生效。
             let english = if mix_cfg.enable_english {
-                Self::build_engine(
-                    "english",
-                    Some(data_dir),
-                    store.clone(),
-                    codetable_cfg,
-                    mix_cfg,
-                    override_dir,
-                    pinyin_cfg,
-                    phrase_seg_anywhere,
-                    None,
-                )
+                english_provider.and_then(|f| f())
             } else {
                 None
             };

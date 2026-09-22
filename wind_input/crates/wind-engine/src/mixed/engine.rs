@@ -10,6 +10,7 @@
 //! 后置：英文候选、简拼长度惩罚（HasFullSyllable）、convertMixedOverflow 精细档。
 
 use crate::engine::{ConvertOptions, ConvertResult, Engine, EngineType};
+use std::sync::Arc;
 use wind_candidate::{Candidate, CandidateSource};
 
 /// 拼音候选的**保底配额分母**：截断时至少给拼音留 `max_candidates / 此值` 席
@@ -165,7 +166,11 @@ pub struct MixedEngine {
     show_source_hint: bool,
     /// 英文词库引擎（schema.mix.enable_english 开且 english 方案可加载时为 Some）。
     /// 混输各路径按精确/前缀加权混入英文候选；None = 关闭（零开销）。
-    english: Option<Box<dyn Engine>>,
+    ///
+    /// ⚠️ `Arc` 而非 `Box`：这一份与 `engines["english"]`（英文方案自身、英文候选混入、
+    /// 临英、快捷输入英文都用它）是**同一个实例**。英文引擎带一张按用户词库规模增长的
+    /// 词组分词索引，靶机 18 万条时每份 12.7 MB，各建一份是纯浪费。
+    english: Option<Arc<dyn Engine>>,
     /// 英文最小触发长度：输入短于此值时不查英文（2 字符以内不匹配 → 默认 3）。
     min_english_length: usize,
     /// 满码自动上屏时若存在英文候选（含前缀）则否决（保护正在输入英文词的用户）。
@@ -183,7 +188,7 @@ impl MixedEngine {
     pub fn new(
         primary: Box<dyn Engine>,
         secondary: Option<Box<dyn Engine>>,
-        english: Option<Box<dyn Engine>>,
+        english: Option<Arc<dyn Engine>>,
         cfg: MixConfig,
     ) -> Self {
         let max_code_len = primary.max_code_length();
@@ -1458,7 +1463,7 @@ mod tests {
             .iter()
             .map(|(c, t, w)| (c.as_str(), t.as_str(), *w))
             .collect();
-        let build = |ct: &[(&str, &str, i32)], english: Box<dyn Engine>| {
+        let build = |ct: &[(&str, &str, i32)], english: Arc<dyn Engine>| {
             MixedEngine::new(
                 ct_engine(ct, false),
                 None,
@@ -2223,7 +2228,7 @@ mod tests {
     }
 
     /// 内存英文引擎（EnglishEngine 包码表；code=小写英文词，前缀匹配）。
-    fn english_engine(entries: &[(&str, &str, i32)]) -> Box<dyn Engine> {
+    fn english_engine(entries: &[(&str, &str, i32)]) -> Arc<dyn Engine> {
         let mut d = CodetableDict::empty();
         for (i, (code, text, w)) in entries.iter().enumerate() {
             d.merge_single(code.to_string(), text.to_string(), *w, i as i32);
@@ -2231,7 +2236,7 @@ mod tests {
         let dm = DictManager::new();
         dm.register_layer(Box::new(SystemDictLayer::new(CachedDict::Memory(d), "en")));
         let ct = CodeTableEngine::new(32, CommitOptions::default(), Arc::new(dm));
-        Box::new(crate::english::EnglishEngine::new(ct))
+        Arc::new(crate::english::EnglishEngine::new(ct))
     }
 
     #[test]
