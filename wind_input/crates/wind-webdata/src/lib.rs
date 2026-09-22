@@ -1525,6 +1525,10 @@ pub trait WebDataRpc: WebDataHost {
                 if self.engine_mgr().data_schema_id(sid) == *sid {
                     store.clear_user_words(sid)?;
                     store.clear_temp_words(sid)?;
+                    // 草稿层同属该方案的数据域：方案都删了，它记下的猜测就是垃圾。
+                    // 漏掉这一条不会立刻出错（草稿带 TTL，启动清理终会收走），
+                    // 但在那之前它们仍会被召回并跃迁——往一个已不存在的方案的临时词库里写。
+                    store.clear_drafts(sid)?;
                     store.clear_freq(sid)?;
                     store.clear_shadow(sid)?;
                 }

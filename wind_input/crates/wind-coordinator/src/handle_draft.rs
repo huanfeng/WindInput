@@ -294,6 +294,33 @@ impl Coordinator {
         }
     }
 
+    /// 启动时跑一次的**全表**过期清理。不看开关，也不分方案。
+    ///
+    /// `maybe_evict_drafts` 只跟在落库之后跑，够不着两类草稿：
+    /// ① **开关关掉之后**——此后再没有落库，旧草稿永远没人收；
+    /// ② **用户已经不用的方案**——落库带的是当前方案的前缀，碰不到它。
+    /// 两类都会永久躺在库里，而它们恰恰是最没有价值的那些。
+    ///
+    /// 不看开关是刻意的：关掉功能的用户更需要这次清理，而且因为没有新的写入，
+    /// 他的草稿表会在一个 TTL 之内自行排空。
+    ///
+    /// ⚠️ 只做**过期**清理，不做容量淘汰——容量上限是按方案定义的（`evict_drafts`
+    /// 的语义是「这个方案保留 N 条」），全表跨方案套同一个上限会把小方案连坐清空。
+    pub(crate) fn purge_drafts_on_start(&self) {
+        let Some(store) = &self.store else { return };
+        let ttl = self.draft_ttl_secs();
+        if ttl <= 0 {
+            return;
+        }
+        match store.purge_all_expired_drafts(ttl) {
+            // 无条件打这一行（哪怕一条没清）：`剩余` 是草稿表规模在真机上**唯一**的
+            // 观测出口，而 `draft_max_entries` 的默认值至今还是纸面估算。
+            // 想调那个值的人需要的就是这个数。
+            Ok((k, kept)) => debug!("draft: 启动清理过期 {k} 条，剩余 {kept} 条"),
+            Err(e) => warn!("draft: 启动清理失败: {e}"),
+        }
+    }
+
     /// 队列攒到这么多条就触发一次后台落库。
     ///
     /// 取值的两头：太小则频繁抢 redb 的单写锁（草稿是这个库里最高频的写入方），
@@ -325,5 +352,84 @@ impl Coordinator {
             .codetable_settings()
             .auto_phrase
             .draft_max_entries
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::coordinator::Coordinator;
+    use std::sync::Arc;
+    use wind_config::config::Config;
+    use wind_store::Store;
+
+    fn cfg_with_ttl(hours: u32) -> Config {
+        let mut cfg = Config::default();
+        cfg.schema.codetable.auto_phrase.draft_ttl_hours = hours;
+        cfg
+    }
+
+    /// 带一个真 store 的无头协调器（`new_headless` 的 store 恒为 `None`，
+    /// 用它测不到启动清理真的走进了存储层）。
+    fn coord_with_store(
+        tag: &str,
+        hours: u32,
+    ) -> (Arc<Coordinator>, Arc<Store>, std::path::PathBuf) {
+        let db = std::env::temp_dir().join(format!("wind_draft_start_{tag}.redb"));
+        let _ = std::fs::remove_file(&db);
+        let store = Arc::new(Store::open(&db).unwrap());
+        let c = Coordinator::new_headless_with_store(cfg_with_ttl(hours), None, Arc::clone(&store));
+        (c, store, db)
+    }
+
+    /// 单位换算：配置里是**小时**，存储层的 `ttl_secs` 要的是**秒**。
+    ///
+    /// 漏掉 ×3600 不会让功能报错，只会让草稿在 24 **秒**后就被判过期——开关看着是开的，
+    /// 用户却永远等不到一条草稿被用上。这类「只错在量纲上」的缺陷最难从行为上察觉，
+    /// 故直接钉住换算本身。
+    #[test]
+    fn draft_ttl_is_hours_in_config_but_seconds_at_the_store() {
+        let c = Coordinator::new_headless(cfg_with_ttl(24), None);
+        assert_eq!(c.draft_ttl_secs(), 86_400);
+        let c = Coordinator::new_headless(cfg_with_ttl(1), None);
+        assert_eq!(c.draft_ttl_secs(), 3_600);
+        // 0 = 永不过期，启动清理据此整个跳过。
+        let c = Coordinator::new_headless(cfg_with_ttl(0), None);
+        assert_eq!(c.draft_ttl_secs(), 0);
+    }
+
+    /// 启动清理**不能误杀还没过期的草稿**。它跑在启动线程上、没有任何 UI 反馈，
+    /// 错删的表现是「昨天记下的词今天一条也召不回」，用户无从分辨是没记住还是被清了。
+    #[test]
+    fn startup_purge_keeps_drafts_that_are_still_fresh() {
+        let (c, store, db) = coord_with_store("fresh", 24);
+        store
+            .add_drafts("wubi86", &[("aaaa".into(), "刚记的".into())])
+            .unwrap();
+        c.purge_drafts_on_start();
+        assert_eq!(
+            store.search_drafts("wubi86", "aaaa", 0).unwrap(),
+            vec!["刚记的"],
+            "还在有效期内的草稿不该被启动清理带走"
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 两条早退：`TTL = 0`（永不过期）与**没有 store** 的宿主（测试 / 移动端裸构造）。
+    /// 它跑在启动线程上，这两条是它不会在那里 panic 的全部依据。
+    #[test]
+    fn startup_purge_is_a_quiet_noop_without_a_ttl_or_a_store() {
+        let (c, store, db) = coord_with_store("nottl", 0);
+        store
+            .add_drafts("wubi86", &[("aaaa".into(), "刚记的".into())])
+            .unwrap();
+        c.purge_drafts_on_start();
+        assert_eq!(
+            store.count_drafts("wubi86").unwrap(),
+            1,
+            "TTL=0 ＝ 永不过期，一条都不该动"
+        );
+        let _ = std::fs::remove_file(&db);
+        // store 为 None：只要不 panic 即可。
+        Coordinator::new_headless(cfg_with_ttl(24), None).purge_drafts_on_start();
     }
 }

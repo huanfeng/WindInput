@@ -139,6 +139,10 @@ impl Coordinator {
                 //    构造**末尾**就已 spawn，不等就会抢在宿主表态之前读到默认值 true；
                 // ② 避开启动期的锁竞争高峰（宿主此时正在建视图、要焦点、可能已在收键）。
                 std::thread::sleep(std::time::Duration::from_millis(1500));
+                // 草稿表的启动清理。刻意放在 eager_prewarm 闸**之前**：移动端关掉的是
+                // 「把所有已装方案的词库都编译一遍」那几秒 CPU，不是数据库维护，而草稿
+                // 在手机上一样会攒。这一次不碰任何引擎，代价只有一次 redb 事务。
+                c.purge_drafts_on_start();
                 if !c.eager_prewarm.load(std::sync::atomic::Ordering::Relaxed) {
                     debug!("启动预热已关闭（宿主声明按需加载）");
                     return;

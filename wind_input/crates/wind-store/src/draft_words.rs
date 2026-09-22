@@ -124,30 +124,58 @@ impl Store {
     /// 这是**容量维护**，不是过期语义——过期判定在 [`Self::search_drafts`] 里，
     /// 少跑一次清理只会让表大一点，不会让过期草稿被召回。
     pub fn purge_expired_drafts(&self, schema: &str, ttl_secs: i64) -> anyhow::Result<usize> {
+        Ok(self.purge_drafts_expired_in(Some(schema), ttl_secs)?.0)
+    }
+
+    /// 同上，但**不分方案扫全表**。启动时跑一次。
+    ///
+    /// 按方案那一版永远够不着两类表：**开关被关掉之后**（此后再没有落库，而清理只跟在
+    /// 落库之后跑）、以及**用户已经不用的方案**（它的前缀再也不会被带上）。两类都是
+    /// 「草稿永久躺在库里」，而它们恰恰是最该被收掉的——没人会再用到它们。
+    ///
+    /// 不看开关是刻意的：关掉功能的用户更需要这次清理，且因为没有新的写入，
+    /// 他的草稿表会在一个 TTL 内自行排空。
+    ///
+    /// 返回 `(删除条数, 剩余条数)`。剩余条数是**顺带**数出来的——这次扫描本来就要
+    /// 走遍全表，而它是真机重定 `draft_max_entries` 唯一的观测出口（那个默认值目前
+    /// 还是纸面估算）。`ttl_secs == 0` 时不扫描，返回 `(0, 0)`。
+    pub fn purge_all_expired_drafts(&self, ttl_secs: i64) -> anyhow::Result<(usize, usize)> {
+        self.purge_drafts_expired_in(None, ttl_secs)
+    }
+
+    /// `schema = None` ⇒ 全表；`Some(s)` ⇒ 只清该方案。
+    fn purge_drafts_expired_in(
+        &self,
+        schema: Option<&str>,
+        ttl_secs: i64,
+    ) -> anyhow::Result<(usize, usize)> {
         if ttl_secs <= 0 {
-            return Ok(0);
+            return Ok((0, 0));
         }
-        let scan = format!("{schema}\u{0}");
+        let scan = schema.map(|s| format!("{s}\u{0}"));
         let now = now_secs();
         self.with_db(|db| {
             let txn = db.begin_write()?;
             let mut deleted = 0usize;
+            let mut kept = 0usize;
             {
                 let mut t = txn.open_table(DRAFT_WORDS)?;
                 // 先在事务内收集再删除（无 TOCTOU，同 evict_temp_words 的形态）。
                 let mut doomed: Vec<String> = Vec::new();
-                for item in t.range(scan.as_str()..)? {
+                for item in t.range(scan.as_deref().unwrap_or("")..)? {
                     let (k, v) = item?;
                     let key = k.value();
-                    if !key.starts_with(&scan) {
-                        break;
+                    if let Some(p) = scan.as_deref() {
+                        if !key.starts_with(p) {
+                            break;
+                        }
                     }
                     match dec_draft(v.value()) {
                         // 解不出 created_at 的记录一并清掉：它没有可判定的有效期，
                         // 留着只会在每次查询里被 `continue` 跳过，永远占着位置。
                         None => doomed.push(key.to_string()),
                         Some(ca) if is_expired(ca, now, ttl_secs) => doomed.push(key.to_string()),
-                        Some(_) => {}
+                        Some(_) => kept += 1,
                     }
                 }
                 for key in &doomed {
@@ -156,7 +184,7 @@ impl Store {
                 }
             }
             txn.commit()?;
-            Ok(deleted)
+            Ok((deleted, kept))
         })
     }
 
@@ -478,6 +506,52 @@ mod tests {
             vec!["拼音的"],
             "清空一个方案不该动到另一个"
         );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 启动清理要**跨方案**：按方案清永远够不着「用户已经不用了的方案」留下的草稿。
+    ///
+    /// 这正是加这一条通路的理由——落库后的清理只会带上当前方案的前缀。
+    #[test]
+    fn startup_purge_sweeps_every_schema_not_just_the_active_one() {
+        let p = tmp("wind_draft_purge_all.redb");
+        let s = Store::open(&p).unwrap();
+        let now = now_secs();
+        s.with_db(|db| {
+            let txn = db.begin_write()?;
+            {
+                let mut t = txn.open_table(DRAFT_WORDS)?;
+                for (schema, code, text, ca) in [
+                    ("wb", "aaaa", "五笔新的", now - 10),
+                    ("wb", "bbbb", "五笔旧的", now - 90_000),
+                    ("py", "cccc", "拼音旧的", now - 90_000),
+                    ("zr", "dddd", "自然旧的", now - 90_000),
+                ] {
+                    let key = enc_key(schema, code, text);
+                    t.insert(key.as_str(), enc_draft(ca).as_slice())?;
+                }
+            }
+            txn.commit()?;
+            Ok(())
+        })
+        .unwrap();
+        let day = 86_400;
+        // 对照：按方案清只收得掉 wb 那一条，另外两个方案原封不动。
+        assert_eq!(s.purge_expired_drafts("wb", day).unwrap(), 1);
+        assert_eq!(s.count_drafts("py").unwrap(), 1);
+        assert_eq!(s.count_drafts("zr").unwrap(), 1);
+        // 全表清一次把它们都收掉，且没碰 wb 那条还没过期的。
+        // 第二个返回值是**剩余**条数——真机重定 `draft_max_entries` 就靠它。
+        assert_eq!(s.purge_all_expired_drafts(day).unwrap(), (2, 1));
+        assert_eq!(s.count_drafts("py").unwrap(), 0);
+        assert_eq!(s.count_drafts("zr").unwrap(), 0);
+        assert_eq!(
+            s.search_drafts("wb", "aaaa", day).unwrap(),
+            vec!["五笔新的"],
+            "没过期的草稿不该被启动清理带走"
+        );
+        // ttl=0 ＝ 永不过期 ⇒ 不扫描、什么都不删（剩余数随之无意义，恒 0）
+        assert_eq!(s.purge_all_expired_drafts(0).unwrap(), (0, 0));
         let _ = std::fs::remove_file(&p);
     }
 
