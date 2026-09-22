@@ -84,12 +84,51 @@ impl PhraseSegIndex {
     pub fn build(dm: &DictManager) -> Self {
         let mut me = Self::default();
         dm.for_each_entry(&mut |code, text, weight| me.push(code, text, weight));
-        // arena 按翻倍扩容，18 万条下尾部空洞可达数 MB，而本表建成后只读。
-        me.lower.shrink_to_fit();
-        me.raw.shrink_to_fit();
-        me.word_ends.shrink_to_fit();
-        me.entries.shrink_to_fit();
+        me.finish();
         me
+    }
+
+    /// 收完词条后的收尾：压实 arena + **按首词排序**。
+    ///
+    /// 排序是 [`Self::first_word_range`] 的前提，也就是 [`Self::search`] 的前提。单独成
+    /// 函数而不是写在 `build` 里，是为了让测试夹具能走**同一条**收尾——夹具自己补一句
+    /// `sort` 就又是一份会漂移的复制品（本模块的 `idx()` 夹具上一次就栽在这里：它自带
+    /// 一份「≥2 个词才进索引」的判据，与 `push` 并存）。
+    ///
+    /// 忘了调它的后果是 `search` 静默少召回（二分在无序数组上乱跳），故 `search` 里挂了
+    /// `debug_assert`——测试下必爆，不靠人记得。
+    fn finish(&mut self) {
+        // arena 按翻倍扩容，18 万条下尾部空洞可达数 MB，而本表建成后只读。
+        self.lower.shrink_to_fit();
+        self.raw.shrink_to_fit();
+        self.word_ends.shrink_to_fit();
+        self.entries.shrink_to_fit();
+        // 比较闭包要读 `self.lower` / `self.word_ends`，而 `self.entries` 同时被可变借出。
+        // 取出来排完再放回是最直白的解法：`word()` 不碰 `entries`，语义完全等价。
+        let mut entries = std::mem::take(&mut self.entries);
+        entries.sort_by(|a, b| self.word(a, 0).cmp(self.word(b, 0)));
+        self.entries = entries;
+    }
+
+    /// 首词以 `prefix` 开头的那一段。`entries` 按首词有序，故这些条目必然连续。
+    ///
+    /// 匹配规则 1 要求首段是第一个词的前缀（见 [`Self::search`]），于是**区间之外的条目
+    /// 一条都不可能命中**，不必看。真机 18 万条词组下这是从「全表逐条 `starts_with`」
+    /// 降到「两次二分 + 扫命中段」。
+    fn first_word_range(&self, prefix: &str) -> &[PhraseEntry] {
+        let lo = self.entries.partition_point(|e| self.word(e, 0) < prefix);
+        // `lo` 起的条目首词都 ≥ prefix；以 prefix 开头的那些排在最前面（字典序下前缀
+        // 恒小于任何以它开头的更长串），一个 `partition_point` 就切出上界。
+        let rest = &self.entries[lo..];
+        let n = rest.partition_point(|e| self.word(e, 0).starts_with(prefix));
+        &rest[..n]
+    }
+
+    /// `entries` 是否按首词非降序。只给 `debug_assert` 用。
+    fn first_words_are_sorted(&self) -> bool {
+        self.entries
+            .windows(2)
+            .all(|w| self.word(&w[0], 0) <= self.word(&w[1], 0))
     }
 
     /// 收一条词条。**非词组（不足两个词）原样回滚**，不留痕迹。
@@ -203,15 +242,22 @@ impl PhraseSegIndex {
     ///
     /// # 量级
     ///
-    /// 线性扫词组子集。出厂 787 条 × 平均 2~3 词，每条只做几次 `starts_with`——
-    /// 远比 `Trie::search_prefix` 对短前缀做的整棵子树 `collect_all` + 排序便宜。
-    /// 即便换上 t42 作者那份 2W 条词组的词库也只慢一个数量级，仍在亚毫秒。
+    /// **两次二分定位首词区间，然后只扫区间内**（见 [`Self::first_word_range`]）。规则 1
+    /// 把首段钉死在第一个词上，区间外的条目连看都不用看。
+    ///
+    /// 这一步不是为出厂那 787 条做的——那点量怎么扫都行。真机上用户挂自备英文词库后
+    /// 这张表是 **18 万条**，而查询在按键链路上：每按一个字母全表扫一遍，`ip` 这样的
+    /// 短前缀尤其吃亏。二分之后扫描量只剩首词真正匹配的那几百条。
     pub fn search(&self, segs: &[String], limit: usize) -> Vec<Candidate> {
         if segs.is_empty() || limit == 0 {
             return Vec::new();
         }
+        debug_assert!(
+            self.first_words_are_sorted(),
+            "entries 未按首词排序 —— 建完索引忘了 finish()，二分会静默少召回"
+        );
         let mut hits: Vec<(usize, &PhraseEntry)> = Vec::new();
-        for e in &self.entries {
+        for e in self.first_word_range(&segs[0]) {
             if let Some(span) = self.match_entry(e, segs) {
                 hits.push((span, e));
             }
@@ -270,6 +316,10 @@ impl PhraseSegIndex {
             return None;
         }
         // 规则 1：首段锚定第一个词。
+        //
+        // 走 `search` 进来时这条恒成立（`first_word_range` 已按它切过区间），**仍然保留**：
+        // 它是本函数自身的契约，删掉的话函数就只在「调用方恰好先筛过」时才正确。
+        // 代价是区间内每条多一次短前缀比较，与省下的 18 万次不在一个量级。
         if !self.word(e, 0).starts_with(segs[0].as_str()) {
             return None;
         }
@@ -401,13 +451,15 @@ impl LazyPhraseIndex {
 mod tests {
     use super::*;
 
-    /// ⚠️ 夹具走**生产同一条** `push`，不再自己复制一份「≥2 个词才进索引」的判据——
-    /// 那份复制曾与 `build` 并存，是典型的漂移隐患（改了一处另一处静默过期）。
+    /// ⚠️ 夹具走**生产同一条** `push` + `finish`，不再自己复制一份「≥2 个词才进索引」的
+    /// 判据、也不自己补排序——那种复制品曾与 `build` 并存，是典型的漂移隐患
+    /// （改了一处另一处静默过期）。
     fn idx(pairs: &[(&str, &str, i32)]) -> PhraseSegIndex {
         let mut me = PhraseSegIndex::default();
         for (text, code, w) in pairs {
             me.push(code, text, *w);
         }
+        me.finish();
         me
     }
 
@@ -416,6 +468,149 @@ mod tests {
             .into_iter()
             .map(|c| c.text)
             .collect()
+    }
+
+    /// 真机量级（18 万条）下二分窗口与全表扫的耗时对比。手动跑：
+    /// `cargo test -p wind-engine --release --lib -- --ignored --nocapture bench_`
+    ///
+    /// 2026-09-22 本机实测：**窗口 5.1 µs / 全表 1.48 ms**，290 倍。1.48 ms 落在按键
+    /// 链路上，每多打一个字母就再付一次——这才是做这一步的理由，不是「显得快一点」。
+    ///
+    /// `#[ignore]` 是因为它是**基准不是判据**：机器一换数字就变，拿它当回归门会变成
+    /// 随机红。正确性由 `the_binary_search_window_returns_exactly_what_a_full_scan_would`
+    /// 守，「有没有真的少扫」由 `the_first_word_window_is_exactly_the_prefix_block` 守。
+    #[test]
+    #[ignore = "基准，不参与常规回归"]
+    fn bench_window_vs_full_scan() {
+        let mut me = PhraseSegIndex::default();
+        for i in 0..180_000u32 {
+            let text = format!("word{i:06} beta gamma{i:04}");
+            me.push(&format!("w{i}"), &text, (i % 1000) as i32);
+        }
+        me.finish();
+        let segs = split_segments("word0123'gam", PHRASE_SEPARATOR);
+        let t0 = std::time::Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(me.search(&segs, 20));
+        }
+        let windowed = t0.elapsed() / 200;
+        let t1 = std::time::Instant::now();
+        for _ in 0..200 {
+            let mut hits = 0usize;
+            for e in &me.entries {
+                if me.match_entry(e, &segs).is_some() {
+                    hits += 1;
+                }
+            }
+            std::hint::black_box(hits);
+        }
+        let full = t1.elapsed() / 200;
+        println!(
+            "窗口 {windowed:?} / 全表 {full:?}  窗口条目数={}",
+            me.first_word_range(&segs[0]).len()
+        );
+    }
+
+    /// 首词有公共前缀的一族 —— 二分边界最容易错的地方（`ip` 的区间必须刚好收住
+    /// `ipad`/`iphone`/`ipod`，既不漏 `ipod` 也不吃进 `internet`）。
+    fn prefix_family() -> PhraseSegIndex {
+        idx(&[
+            ("iPad Pro", "ipadpro", 100),
+            ("iPhone 15 Pro Max", "iphone", 100),
+            ("iPhone 15 Pro", "iphone", 90),
+            ("iPod Touch", "ipod", 80),
+            ("Internet Explorer", "ie", 70),
+            ("Buenos Aires", "buenosaires", 60),
+            ("Mac OS X", "macosx", 50),
+            ("Zulu Time", "zulu", 40),
+            ("北京 大学", "bjdx", 30),
+        ])
+    }
+
+    /// 朴素全表扫，只回答「命中哪些」。
+    ///
+    /// 刻意**不复制排序逻辑**：顺序自有 `weight_outranks_span` 那几条用例守着，这里再抄
+    /// 一份三级比较器只会多一个会漂移的副本。用集合比对，测的是「二分有没有漏/多」。
+    fn linear_hits(i: &PhraseSegIndex, input: &str) -> std::collections::BTreeSet<String> {
+        let segs = split_segments(input, PHRASE_SEPARATOR);
+        if segs.is_empty() {
+            return Default::default();
+        }
+        i.entries
+            .iter()
+            .filter(|e| i.match_entry(e, &segs).is_some())
+            .map(|e| i.text(e).to_string())
+            .collect()
+    }
+
+    fn search_hits(i: &PhraseSegIndex, input: &str) -> std::collections::BTreeSet<String> {
+        i.search(&split_segments(input, PHRASE_SEPARATOR), 100)
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    }
+
+    /// ★ 二分窗口必须与全表扫召回同一批条目。
+    ///
+    /// 反向验证（变异）：删掉 `finish()` 里那句 `sort_by`，本用例在 `i'pro` / `ipo'touch`
+    /// 这类落在区间边界的输入上立刻红（debug 构建还会先撞上 `search` 的 `debug_assert`）。
+    #[test]
+    fn the_binary_search_window_returns_exactly_what_a_full_scan_would() {
+        let i = prefix_family();
+        for input in [
+            "i'pro",     // 区间跨 ipad/iphone/ipod 三族
+            "ip'pro",    //
+            "ipa'pro",   // 只剩 iPad
+            "iph'max",   // 只剩一条
+            "ipo'touch", // 区间**右端**那条，最容易被上界切掉
+            "int'exp",   // 区间左邻，不得被吃进来
+            "b'air",     // 全表最前
+            "z'time",    // 全表最后（ASCII 段）
+            "北'大",     // 多字节首词，排在全部 ASCII 之后
+            "zz'x",      // 首词无人匹配 ⇒ 空区间
+            "'",         // 空段全被剔除 ⇒ 空结果
+        ] {
+            assert_eq!(
+                search_hits(&i, input),
+                linear_hits(&i, input),
+                "输入 {input:?} 上二分窗口与全表扫不一致"
+            );
+        }
+    }
+
+    /// ★ 窗口本身的边界：`ip` 收住三族、不吃 `internet`。
+    ///
+    /// 与上一条的分工：那条测「结果对不对」，这条测「少看了多少」——窗口若退化成全表，
+    /// 结果照样正确，而本功能（把按键路径上的 18 万条扫描降下来）就白做了。
+    #[test]
+    fn the_first_word_window_is_exactly_the_prefix_block() {
+        let i = prefix_family();
+        let win: std::collections::BTreeSet<String> = i
+            .first_word_range("ip")
+            .iter()
+            .map(|e| i.text(e).to_string())
+            .collect();
+        assert_eq!(
+            win,
+            [
+                "iPad Pro",
+                "iPhone 15 Pro",
+                "iPhone 15 Pro Max",
+                "iPod Touch"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert!(
+            i.first_word_range("zz").is_empty(),
+            "无人匹配的首词该给出空窗口"
+        );
+        assert_eq!(
+            i.first_word_range("").len(),
+            i.entries.len(),
+            "空前缀是全表 —— 用户刚打下分词符那一刻走的就是它"
+        );
     }
 
     /// 两种编码方案都靠 text 命中——这是整个设计的立足点。
