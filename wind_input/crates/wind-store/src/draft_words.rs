@@ -165,10 +165,10 @@ impl Store {
                 for item in t.range(scan.as_deref().unwrap_or("")..)? {
                     let (k, v) = item?;
                     let key = k.value();
-                    if let Some(p) = scan.as_deref() {
-                        if !key.starts_with(p) {
-                            break;
-                        }
+                    if let Some(p) = scan.as_deref()
+                        && !key.starts_with(p)
+                    {
+                        break;
                     }
                     match dec_draft(v.value()) {
                         // 解不出 created_at 的记录一并清掉：它没有可判定的有效期，
