@@ -162,13 +162,10 @@ impl PhraseSegIndex {
         let words_start = self.word_ends.len() as u32;
         let mut word_count = 0u32;
         for w in text.split_whitespace() {
-            // 逐字符写进 arena：`w.to_lowercase()` 会为每个词造一个临时 String，
-            // 而这里每条词条有 2~5 个词、全表 18 万条。
-            for ch in w.chars() {
-                for lc in ch.to_lowercase() {
-                    self.lower.push(lc);
-                }
-            }
+            // ★ 与查询侧同源，见 [`lower`]。纯 ASCII 的词（英文词库里的绝大多数）在那里
+            // 走不查 Unicode 表的快路径；临时 `String` 只对非 ASCII 词产生，随即被 push
+            // 进 arena 并丢弃——那是构建期的瞬时分配，不进常驻。
+            self.lower.push_str(&lower(w));
             self.word_ends.push(self.lower.len() as u32);
             word_count += 1;
         }
@@ -374,8 +371,31 @@ pub fn split_segments(input: &str, sep: char) -> Vec<String> {
     input
         .split(sep)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_lowercase())
+        .map(lower)
         .collect()
+}
+
+/// 小写化。**索引侧（[`PhraseSegIndex::push`]）与查询侧必须同源**，两处都只走这个判据。
+///
+/// # 为什么不能图省事逐字符
+///
+/// `char::to_lowercase` 与 `str::to_lowercase` **不等价**：后者带希腊词尾 Σ 的上下文特例
+/// （`"ΟΔΟΣ"` → `"οδος"`，词尾 ς），前者恒给 σ（`"οδοσ"`）。逐字符版有两个毛病：
+/// 两侧只要有一侧用它就静默漏召回；**即便两侧都用它**，用户自己打出词尾 ς 时也配不上
+/// 索引里的 σ。改动前索引侧走的就是 `str` 版，逐字符是 arena 改造时为省临时分配换的
+/// ——省下的那点分配不值一个语义回归。
+///
+/// # ASCII 快路径
+///
+/// 英文词库里绝大多数词是纯 ASCII，而 ASCII 小写化没有任何上下文特例，`to_ascii_lowercase`
+/// 与 `to_lowercase` 逐字节相同。走它避开 Unicode 表查找；非 ASCII 才落到 `str` 版。
+/// 两条路对同一输入必然给出同一结果，所以这个分流不引入新的分叉面。
+fn lower(s: &str) -> String {
+    if s.is_ascii() {
+        s.to_ascii_lowercase()
+    } else {
+        s.to_lowercase()
+    }
 }
 
 /// 懒建的词组索引 + 后台预热。
@@ -543,6 +563,30 @@ mod tests {
             "窗口 {windowed:?} / 全表 {full:?}  窗口条目数={}",
             me.first_word_range(&segs[0]).len()
         );
+    }
+
+    /// ★ 索引侧与查询侧的小写化必须是**同一个**函数。
+    ///
+    /// 判据非用希腊词尾 Σ 不可：`str::to_lowercase` 有上下文特例（`"ΟΔΟΣ"` → `"οδος"`），
+    /// 逐字符 `char::to_lowercase` 恒给 σ（`"οδοσ"`）。Café / Über 这类常见多字节词两种
+    /// 写法结果相同——既有的 `multibyte_words_slice_on_char_boundaries` 正是因此照不出
+    /// 分叉，那条恒绿。
+    ///
+    /// 反向验证（变异）：把 `split_segments` 的 `.map(lower)` 换回 `.map(str::to_lowercase)`，
+    /// 本用例立刻红——首段 `odos` 配不上索引里的 `οδοσ`，二分窗口为空。
+    #[test]
+    fn both_sides_lowercase_the_same_way() {
+        // 首词与非首词各放一个词尾 Σ，两条匹配规则都要覆盖。
+        let i = idx(&[("ΟΔΟΣ ΑΘΗΝΑΣ", "odos", 100)]);
+        assert_eq!(
+            texts(&i, "οδο'αθη"),
+            vec!["ΟΔΟΣ ΑΘΗΝΑΣ"],
+            "首段与非首段都得能配上"
+        );
+        // 用户打的是大写，查询侧也得归一到同一形态。
+        assert_eq!(texts(&i, "ΟΔΟ'ΑΘΗ"), vec!["ΟΔΟΣ ΑΘΗΝΑΣ"]);
+        // 整词（词尾 Σ 就在段末）——这是两种写法真正分叉的位置。
+        assert_eq!(texts(&i, "οδος'αθη"), vec!["ΟΔΟΣ ΑΘΗΝΑΣ"]);
     }
 
     /// 首词有公共前缀的一族 —— 二分边界最容易错的地方（`ip` 的区间必须刚好收住
