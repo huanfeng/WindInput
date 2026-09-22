@@ -9,7 +9,7 @@
 use redb::{Database, TableDefinition};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// 当前存储版本（迁移锚点）
 pub const CURRENT_VERSION: u32 = 1;
@@ -313,6 +313,50 @@ impl Store {
             *guard = Some(db);
             info!("Store resumed: {}", self.path.display());
         }
+        Ok(())
+    }
+
+    /// 丢掉 redb 的页缓存：**一次锁内**丢弃 `Database` 再重开。
+    ///
+    /// # 它解决什么
+    ///
+    /// redb 2.x 不是 mmap，它自己在普通文件 IO 之上维护 `PagedCachedFile`，页是堆上的
+    /// `Arc<[u8]>`，**全额计进进程私有内存**。这个缓存只增不减：每次读未命中就插入，
+    /// 只有越过上限才淘汰，唯一的整体清空是库文件扩容；事务刷盘时脏页还会被直接晋升
+    /// 进读缓存。于是它是个高水位结构，上界 ≈ `min(读缓存配额, 库文件大小)`——本机实测
+    /// 19 万词的库（32.6 MB）全表扫过之后吃掉 **41 MB 并长期不还**，50 万词约 90 MB。
+    /// 这正是用户反馈「导入大词库之后内存占用变高」的正主（`tests/redb_cache_high_water.rs`）。
+    ///
+    /// 导入必然写全表、脏页必然晋升，那一笔躲不掉，只能事后还。
+    ///
+    /// # 为什么不是 `pause()` + `resume()`
+    ///
+    /// 那是两次独立取锁，中间存在一个 `db` 为 `None` 的窗口，落在这个窗口里的查询会拿到
+    /// `store is paused` 的错误——按键线路正跑着的时候这就是一次吞字。本函数在**同一个
+    /// guard 里**换掉，对外没有可观测的暂停态。
+    ///
+    /// # 代价与边界
+    ///
+    /// 重开 `Database` 要读回 header 并校验，毫秒级；随后头几次查询会走冷缓存。所以它
+    /// **只该用在「刚做完一次全表规模的操作」之后**，绝不能进按键链路。
+    ///
+    /// ⚠️ 重开失败时保持暂停态并返回 `Err`——此时库已经被丢弃，不能假装无事发生。
+    /// 调用方要么重试 [`Self::resume`]，要么让错误浮上去。
+    ///
+    /// ⚠️ 「缓存释放了」不等于「内存还给 OS 了」：页是 4 KiB 的小块，glibc 与 Windows 堆
+    /// 都会把它们留在 free list 里，RSS / Private Bytes 未必立刻下降。释放的意义是这笔
+    /// 空间不再增长、且可被后续分配复用——`tests/redb_cache_high_water.rs` 的
+    /// `evict` / `hold` 两组正是为了把这件事和「RSS 降不降」分开而写的。
+    pub fn drop_page_cache(&self) -> anyhow::Result<()> {
+        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            return Ok(()); // 已经是暂停态，没有缓存可丢；由 `resume` 负责开回来。
+        }
+        *guard = None;
+        let db = open_db(&self.path, self.cache_bytes)?;
+        Self::init_tables(&db)?;
+        *guard = Some(db);
+        debug!("Store page cache dropped: {}", self.path.display());
         Ok(())
     }
 
