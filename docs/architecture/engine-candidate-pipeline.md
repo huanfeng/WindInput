@@ -214,13 +214,25 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
 | 步骤 | 内容 | 标志 |
 |---|---|---|
 | ① 精确查找 | `lookup_with_fuzzy(completed)`——以**完成音节前缀**（去尾部残码）为查询码与存储 code | — |
-| ② Viterbi 整句 | `use_smart_compose` 且 ≥2 音节：LatticeBuilder 建词图（`max_word_len=10`，模糊变体 -0.5 惩罚）→ ViterbiDecoder DP 最优路径；权重 = `SENTENCE_WEIGHT_BASE(30M) + clamp(log_prob×1000)`。**只在 `completed`（去尾部残码）上建图** | `is_sentence`，insert(0) |
+| ② Viterbi 整句 | `use_smart_compose` 且 ≥2 音节：LatticeBuilder 建词图（`max_word_len=10`，模糊变体 -0.5 惩罚）→ ViterbiDecoder DP 最优路径；权重 = `sentence_weight()` = `exp(log_prob/n + ln DICT_TOTAL)`，即各词频次的**几何平均**，与词库同量纲。⚠️ `SENTENCE_WEIGHT_BASE(3e7)` **在拼音侧已退役**（见 `docs/design/sentence-weight-same-axis.md`，3e7 只在码表侧还活着且值为 1e6）。**只在 `completed`（去尾部残码）上建图** | `is_sentence`，insert(0) |
 | ②b 混合整句 | 简拼段与全拼段同图解码（`bzdhaobuhao`→不知道好不好）；在**整串**上建图 + `add_abbrev_nodes` | `is_sentence` |
 | ②c **残码整句** | 尾部残码作为**待定音节**入图（`add_partial_final_nodes`），Viterbi 选最优单字：`buzhidaok`→「不知道**看**」。在**含残码的整串**上重建图——step ② 的 `nodes` 只到 `completed.len()+1`，残码末端没有槽位。对齐 librime `enable_completion` / fcitx5 不完整拼音。门槛：≥2 完整音节、非双拼、非分隔符、**非混输**（`enable_partial_final`） | `is_sentence` + `is_sentence_unanchored` |
 | ③ DAG 子短语 | 前 6 音节的各前缀子段查词（分段上屏候选） | `is_partial` |
 | ④ 前缀补全 | `search_prefix(query, 30)` | `is_prefix` |
-| ⑤ 简拼 | `AbbrevMatcher` 判定（每字母为音节首字母且非完整音节序列）→ `search_abbrev(query, 10)` | natural_order=999999 沉底 |
+| ⑤ 简拼 | `AbbrevMatcher` 判定（每字母为音节首字母且非完整音节序列）→ `search_abbrev(query, ABBREV_INDEX_LIMIT)` | natural_order=999999 沉底 |
+| ⑤b 混合简拼 | `mixed_abbrev::mixed_patterns` 枚举「声母段 + 音节段」的解释（`nhao` = n\|hao、`zhge` = zh\|ge），投影成声母键点查同一张 `AbbrevSection`，再逐段校验 | `is_abbrev` |
 | ⑥ 用户/临时造词层 | store_layers 整串精确 + 子码 + 前缀，按 text 与系统词典去重 | — |
+| **6.2 简拼前缀回退** | 整串无产出时按切点从长到短重查（`recall_abbrev_prefix`）：每切点 `MAX_FALLBACK_PER_CUT`(6) 条、只取前 `MAX_FALLBACK_CUTS`(2) 个有产出的切点。**系统层与 store 层各记各的配额基准**。这是**唯一**能产出「只消费前 N 码」简拼候选的路径 | `is_abbrev` + `is_partial` + 自带 `consumed_length` |
+
+> **两条简拼路径共用一个取码窗口** [`ABBREV_INDEX_LIMIT`](../../wind_input/crates/wind-engine/src/pinyin/mod.rs)(64)。
+> 纯简拼曾单独取 10，理由是「键即答案」——该前提只在键下词条少于 10 时成立：真实词库
+> `bcx` 有 48 条，取 10 意味着 w=1 的「拜城县」在 `bcx` 下永不产生，而在 `baicx`（混合、64）
+> 下能出。**打得更省事的写法反而查得更少**。且截断在**召回层**，候选窗开多大都捞不回来，
+> 调频也够不着（位次重排只能重排已经进了列表的候选）。
+>
+> **声母段含双字母** `zh`/`ch`/`sh`（`AbbrevSeg::Retroflex`，`zhy` = zh\|y → 键 `zy`）。
+> 投影键取的是 z/c/s 那一位，故**索引不受影响**。含 `Retroflex` 的模式即使全是声母段也归
+> ⑤b（纯简拼路径逐字母切，表达不了「zh 是一个声母」），两种解释并存。
 
 节点打分（lattice.rs `score_node()`）：以 `ln(weight / DICT_TOTAL)` 为基础（`weight` 即词条自身的
 词典权重，`w ≤ 0` 走 `0.5/T` 兜底，对齐 librime 的 `DBL_EPSILON` 思路），叠加单字实词惩罚(-3.0)/虚词加成(+2.0)/
