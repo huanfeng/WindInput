@@ -109,7 +109,7 @@ impl Coordinator {
         if words.is_empty() {
             return;
         }
-        let full = {
+        {
             let mut q = self.draft_queue.lock().unwrap_or_else(|e| e.into_inner());
             q.extend(words);
             if q.len() > DRAFT_QUEUE_MAX {
@@ -118,11 +118,21 @@ impl Coordinator {
                 q.drain(..drop);
                 warn!("draft: 队列超上限，丢弃最早的 {drop} 条（后台线程没跟上？）");
             }
-            q.len() >= self.draft_flush_batch()
-        };
-        if full {
-            self.spawn_draft_flush();
         }
+        // ⚠️ **入队即起 flush，不设「攒够 N 条才触发」的门槛。**
+        //
+        // 曾经这里是 `if q.len() >= draft_flush_batch() { spawn }`，而那个门槛让功能在
+        // 最常见的使用姿势上必然失效：打「幻」「枫」两个单字只产出 **1 条**草稿，离 64 差
+        // 得远，于是它一直躺在内存队列里——用户接着打 `xnsm` 想召回，草稿表还是空的。
+        // 靶机 2026-09-22 实测：第一条落库直到 1 分半后焦点丢失断流才发生。
+        // 「刚打完一个词、马上想用它」恰恰是用户最期待的时刻，功能却恰恰在这一刻不工作。
+        //
+        // 去掉门槛**不会**退化成「每条一个事务」：攒批的收益本来就不是这个门槛提供的，
+        // 而是 `spawn_draft_flush` 里的 `draft_flushing` 去重 + flush 线程内那个
+        // 「循环到队列空」提供的——连打时第一次上屏起线程，后续入队全被去重挡掉，
+        // 由那个循环一并带走，天然成批。门槛只在「打得少」时起作用，而那正是它最该
+        // 让路的场景（低压期，一次写事务毫无压力）。
+        self.spawn_draft_flush();
     }
 
     /// 起一个后台线程把队列里的词取码、查重、批量落库。
@@ -163,7 +173,11 @@ impl Coordinator {
                         if q.is_empty() {
                             break;
                         }
-                        std::mem::take(&mut *q)
+                        // 每轮只取 `draft_flush_batch` 条：那是**单次写事务的条数上限**。
+                        // 队列上限是 4096，一次事务把它整个吞下要做 4096 次取码 + 查重，
+                        // 而 redb 是单写者——那条长事务期间选词写词频全得排队。
+                        let n = c.draft_flush_batch().min(q.len());
+                        q.drain(..n).collect::<Vec<_>>()
                     };
                     c.flush_draft_batch(batch);
                     // ⚠️ 必须在**取完下一批之前**放掉 c：Arc 活着会拖住 Coordinator 的析构。
@@ -321,11 +335,15 @@ impl Coordinator {
         }
     }
 
-    /// 队列攒到这么多条就触发一次后台落库。
+    /// **单次写事务**最多落库多少条草稿。
     ///
-    /// 取值的两头：太小则频繁抢 redb 的单写锁（草稿是这个库里最高频的写入方），
-    /// 太大则一批的取码与查重堆在一起、且崩溃时丢得更多。**待实测调参。**
-    /// 配成 0 会让每次入队都触发 flush，故下限钳到 1。
+    /// ⚠️ 这**不是**「攒够多少条才触发落库」——那个门槛已经去掉了（见 `enqueue_drafts`
+    /// 里的说明：它让「刚打完的词马上召不回」成为必然）。落库由每次入队触发，
+    /// 本项只决定一次事务吞多少。
+    ///
+    /// 取值的两头：太小则同一批词要多开几次写事务，太大则一次事务里的取码与查重堆在
+    /// 一起、而 redb 是单写者，那条长事务期间选词写词频全得排队。**待实测调参。**
+    /// 配成 0 会让 `drain(..0)` 空转成死循环，故下限钳到 1。
     pub(crate) fn draft_flush_batch(&self) -> usize {
         self.engine_mgr
             .codetable_settings()

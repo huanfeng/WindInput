@@ -4018,6 +4018,23 @@ impl Coordinator {
                     self.notify_ui_hide();
                     self.push_state_update();
                     self.notify_toolbar(); // 方案名变化 → 刷新工具栏标签
+                    // 重建把反查索引与单字全码表都置空了（`reload_from_config`），必须补一次
+                    // 预热，否则它们要等**首次上屏**才惰性重建——而自动造词的取码与查重正好
+                    // 跑在那条路径上，`flush_draft_batch` 在未就绪时是**整批丢弃**。
+                    // 表现：用户在设置页打开自动造词后，最先打的那几个词被静默吞掉，
+                    // 大词库上（真机 253 万条实测秒级构建）能吞掉一整句。
+                    //
+                    // ⚠️ 必须后台：`prewarm_indexes` 阻塞秒级，而本函数是设置页 RPC 调过来的。
+                    // 与启动线程、测试、移动端 prepare() 共用同一个 `prewarm_indexes`。
+                    if let Some(weak) = self.self_weak.get().cloned() {
+                        let _ = std::thread::Builder::new()
+                            .name("reload-prewarm".into())
+                            .spawn(move || {
+                                if let Some(c) = weak.upgrade() {
+                                    c.prewarm_indexes();
+                                }
+                            });
+                    }
                 }
                 // 同步主题选择:设置页改 config.ui.theme.* 后内存态须跟随,reload_config 才会下发新主题
                 // (此前 reload_config 只重推旧内存主题 → 设置页切主题不生效)。
