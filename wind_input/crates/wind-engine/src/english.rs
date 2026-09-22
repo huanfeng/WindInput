@@ -372,7 +372,7 @@ mod tests {
     ///
     /// 这条守的是「关着等于不付钱」这个承诺，三个层次各断言一次：
     ///
-    /// 1. **装配期**不预热（`with_phrase_seg(None)` 不调 `prewarm`）。
+    /// 1. **装配期**：`with_phrase_seg(None)` 之后索引不存在。
     /// 2. **`convert`** 整条路不把它勾出来——这是用户真正走的入口。
     /// 3. **`phrase_candidates`** 自己早退。
     ///
@@ -380,6 +380,11 @@ mod tests {
     /// `if let Some(sep) = self.seg_sep` 挡着，只测 `convert` 的话第二道闸破了也照样绿
     /// （实测如此）。而 `LazyPhraseIndex::get` 自带懒建，谁在 `phrase_candidates` 的早退
     /// 之前多调它一次，12.7 MB 就静默回来了——那才是会被改坏的地方。
+    ///
+    /// ⚠️ **第 1 条守不住「`with_phrase_seg` 里那道 `if sep.is_some()`」**。把它改成无条件
+    /// `prewarm`，本用例仍会绿：`prewarm` 是后台线程，断言跑到时它多半还没建完。要真守住
+    /// 得让 `prewarm` 可 join，那是给测试改生产接口，与这一行的收益不相称。第 1 条实际
+    /// 断言的是「装配完成的那一刻索引不在」，仅此而已。
     #[test]
     fn a_disabled_feature_never_builds_the_index() {
         let mut d = CodetableDict::empty();
@@ -387,9 +392,11 @@ mod tests {
         let dm = DictManager::new();
         dm.register_layer(Box::new(SystemDictLayer::new(CachedDict::Memory(d), "en")));
         let ct = CodeTableEngine::new(32, CommitOptions::default(), Arc::new(dm));
-        // 刻意**不调** `with_phrase_seg` —— 等同于两个开关都关着时的装配。
-        let e = EnglishEngine::new(ct);
-        assert!(!e.phrase.is_built(), "装配期就不该预热");
+        // 走生产同一条装配：`phrase_seg_anywhere` 为 false 时 `build_engine` 传的就是
+        // `None`（`manager.rs` 的 `phrase_seg_anywhere.then_some(...)`）。此前这里写的是
+        // 裸 `EnglishEngine::new(ct)`，那连 `with_phrase_seg` 都没经过，名实不符。
+        let e = EnglishEngine::new(ct).with_phrase_seg(None);
+        assert!(!e.phrase.is_built(), "装配完成的那一刻索引不该在");
 
         // 带分词符的输入走完整条 convert，也不许把它勾出来。
         let _ = e.convert("mac'os", 20).unwrap();

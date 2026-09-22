@@ -15,8 +15,10 @@
 //! `p1..p10` 分列）对它们直接失效。而**词边界一直明摆在 `text` 的空格里**——按 text 切分
 //! 两种编码统一处理，用户自备词库的编码方案也不影响本功能。
 //!
-//! 代价是索引与 code 无关，不能靠 Trie 前缀剪枝，只能线性扫词组子集。出厂 787 条下这不是
-//! 问题（见 [`PhraseSegIndex::search`] 的量级说明）。
+//! 代价是索引与 code 无关，不能靠 Trie 前缀剪枝。**但也不是全表线性扫**：匹配规则把首段
+//! 钉死在第一个词上，于是索引按首词排序、查询两次二分切出窗口，只扫窗口内
+//! （见 [`PhraseSegIndex::first_word_range`]）。出厂 787 条时这无所谓，真机上用户挂了
+//! 自备词库是 18 万条，而查询在按键链路上——那时它是 1.48 ms 与 5.1 µs 的差别。
 //!
 //! # 这个功能解决的不是「词组够不着」
 //!
@@ -402,9 +404,11 @@ fn lower(s: &str) -> String {
 ///
 /// 与 `codetable/sentence.rs` 的 [`LazyTables`](crate::codetable::sentence) 同款：
 /// 「懒」只解决**要不要付**这笔全表扫描，不解决**在哪条线程上付**——不预热的话它会恰好
-/// 落在用户第一次按下分词符的那一刻。预热**不改变任何取值**，`OnceLock::get_or_init`
-/// 保证两条线程抢到同一份结果；预热没跑完就打到了，按键线程在 `get_or_init` 上等，
-/// 那是与「不预热」持平的最坏情况，不会更差。
+/// 落在用户第一次按下分词符的那一刻。预热**不改变任何取值**：`get` 的两段式取锁保证
+/// 同一时刻只有一份索引被引用（竞态下两条线程可能各建一次，但只有一份会被留下，
+/// 见 [`LazyPhraseIndex::get`] 自己的说明——**不是** `OnceLock::get_or_init` 那种
+/// 「保证只建一次」，这里刻意不用 `OnceLock`，因为索引必须能被作废）。
+/// 预热没跑完就打到了，按键线程自己建一份，那是与「不预热」持平的最坏情况，不会更差。
 pub struct LazyPhraseIndex {
     /// `RwLock<Option<..>>` 而非 `OnceLock`：**索引必须能被作废**。
     ///
@@ -775,8 +779,12 @@ mod tests {
 
     /// ★ 二分窗口必须与全表扫召回同一批条目。
     ///
-    /// 反向验证（变异）：删掉 `finish()` 里那句 `sort_by`，本用例在 `i'pro` / `ipo'touch`
-    /// 这类落在区间边界的输入上立刻红（debug 构建还会先撞上 `search` 的 `debug_assert`）。
+    /// 反向验证（变异）：删掉 `finish()` 里那句 `sort_by`（并去掉它末尾的有序断言，模拟
+    /// 「只是漏了排序」），本用例红在 **`ip'pro`** 上——2026-09-22 实跑的结果。
+    ///
+    /// ⚠️ 举例必须实跑，不能推。列表里第一个输入 `i'pro` **照不出来**：未排序时它的窗口
+    /// 恰好仍然正确。所以这条用例的有效性来自「覆盖了一整族前缀」，不是某一个输入；
+    /// 删掉别的输入只留 `i'pro`，它就变成假护栏了。
     #[test]
     fn the_binary_search_window_returns_exactly_what_a_full_scan_would() {
         let i = prefix_family();
@@ -829,10 +837,14 @@ mod tests {
             i.first_word_range("zz").is_empty(),
             "无人匹配的首词该给出空窗口"
         );
+        // 空前缀 = 全表。⚠️ 这**不是**一条按键路径：`split_segments` 已经
+        // `filter(|s| !s.is_empty())`，`segs[0]` 永不为空（用户刚按下分词符时是
+        // `ip'` ⇒ `segs = ["ip"]`）。留这条是钉住 `partition_point` 在空前缀上的
+        // 边界行为，免得将来有人「优化」成空前缀直接返回空切片。
         assert_eq!(
             i.first_word_range("").len(),
             i.entries.len(),
-            "空前缀是全表 —— 用户刚打下分词符那一刻走的就是它"
+            "空前缀该给出全表窗口"
         );
     }
 
@@ -971,10 +983,10 @@ mod tests {
         for (text, code, w) in &pairs {
             me.push(code, text, *w);
         }
-        me.lower.shrink_to_fit();
-        me.raw.shrink_to_fit();
-        me.word_ends.shrink_to_fit();
-        me.entries.shrink_to_fit();
+        // ⚠️ 走生产同一条收尾，别手抄它那几行 shrink——抄一份的话，将来加第五块 arena
+        // 时这里会静默地测「未压实的容量」。这正是 `idx()` 夹具注释点名批评的漂移模式，
+        // 本用例此前就抄着。
+        me.finish();
 
         // ★ 这一条堵的是上面那条护栏的**漏网口**：`heap_bytes` 只统计四块 arena，
         // 谁要是往 `PhraseEntry` 里加回一个 `Box<str>`（16 B）或 `Vec<Box<str>>`（24 B），
@@ -987,9 +999,14 @@ mod tests {
         );
         assert_eq!(me.len(), 2000, "全部应进索引（每条 5 个词）");
         let per = me.heap_bytes() / me.len();
+        // ⚠️ 预算按**本夹具**定，不是按生产表定：这里每条 5 个词（`iPhone {i} Pro Max
+        // Ultra`），实测 per≈102；生产表平均 2~3 词、靶机 18 万条实测 per≈74。拿 120 卡
+        // 5 词的夹具只剩 15% 余量，夹具字符串一改长就会在结构毫无退化时假红，故留到 140。
+        // 真正钉住「不许退回 per-entry 堆分配」的是下面那条 `size_of` 断言，它是编译期
+        // 事实、绕不过去；本条只是粗筛。
         assert!(
-            per < 120,
-            "每条词组堆开销 {per} 字节，超出预算 120——退回 per-entry 堆分配了？\n             （总计 {} KB / {} 条）",
+            per < 140,
+            "每条词组堆开销 {per} 字节，超出预算 140——退回 per-entry 堆分配了？\n             （总计 {} KB / {} 条，本夹具每条 5 个词）",
             me.heap_bytes() / 1024,
             me.len()
         );
