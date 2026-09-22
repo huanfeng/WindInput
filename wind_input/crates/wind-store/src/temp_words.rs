@@ -151,6 +151,35 @@ impl Store {
         })
     }
 
+    /// 某方案下的临时词条数。只数不抄。
+    ///
+    /// 口径与 [`Self::search_temp_words_prefix`]`(schema, "", 0).len()` 逐条一致——
+    /// 设置页拿它显示条数，与列表对不上就是 bug。守门见
+    /// `tests/counts_match_listings.rs`。
+    ///
+    /// ⚠️ 它省的是 Rust 侧的物化峰值（19 万条 × 两个 `String`），**不省 redb 读缓存**：
+    /// range 迭代照样把走过的叶子页读进缓存。见 [`Store::drop_page_cache`]。
+    pub fn count_temp_words(&self, schema: &str) -> anyhow::Result<usize> {
+        let scan = format!("{schema}\u{0}");
+        self.with_db(|db| {
+            let txn = db.begin_read()?;
+            let t = txn.open_table(TEMP_WORDS)?;
+            let mut n = 0usize;
+            for item in t.range(scan.as_str()..)? {
+                let (k, v) = item?;
+                let key = k.value();
+                if !key.starts_with(&scan) {
+                    break;
+                }
+                // 与 `search_temp_words_prefix` 同口径：key 拆不开或 value 解不出的都不算。
+                if crate::user_words::split_key(key).is_some() && dec_val(v.value()).is_some() {
+                    n += 1;
+                }
+            }
+            Ok(n)
+        })
+    }
+
     /// 前缀检索临时词（跨 code）。limit<=0 不限。
     pub fn search_temp_words_prefix(
         &self,

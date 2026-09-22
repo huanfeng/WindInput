@@ -15,6 +15,36 @@ use redb::{ReadableTable, WriteTransaction};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// 遍历期的**借用视图**：`code` / `text` 直接指向 redb 页里的字节，不分配。
+///
+/// 只在 [`Store::for_each_user_word`] 的回调里活着；要留下来就 [`Self::to_record`]。
+#[derive(Debug, Clone, Copy)]
+pub struct UserWordView<'a> {
+    pub code: &'a str,
+    pub text: &'a str,
+    pub weight: i32,
+    pub count: u32,
+    pub created_at: i64,
+    pub boundary: u64,
+    pub order: u32,
+}
+
+impl UserWordView<'_> {
+    /// 抄成拥有所有权的记录。**只对真正要留下的那几条调**——这两次 `to_string`
+    /// 正是流式遍历要省掉的东西。
+    pub fn to_record(self) -> UserWordRecord {
+        UserWordRecord {
+            code: self.code.to_string(),
+            text: self.text.to_string(),
+            weight: self.weight,
+            count: self.count,
+            created_at: self.created_at,
+            boundary: self.boundary,
+            order: self.order,
+        }
+    }
+}
+
 /// 用户词记录（code/text 来自 key，weight/count/created_at/boundary 来自定长 value）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserWordRecord {
@@ -278,6 +308,73 @@ impl Store {
             txn.commit()?;
             Ok(())
         })
+    }
+
+    /// 流式遍历某方案下以 `prefix` 开头的用户词。回调返回 `false` 即停。
+    ///
+    /// 与 [`Self::search_user_words_prefix`] 的唯一差别是**不物化**：`code` / `text` 直接
+    /// 借 redb 的页，一条也不往堆上抄。调用方自己决定留哪几条。
+    ///
+    /// # 为什么要有它
+    ///
+    /// 设置页的分页列表从前一律「先全收进 `Vec` 再 `skip(offset).take(limit)`」——用户
+    /// 19 万条的词库，翻第一页也要先造 38 万个 `String`。本机实测那一趟几十 MB 峰值，
+    /// 而真正要显示的只有 50 条。
+    ///
+    /// ⚠️ **它省的是 Rust 侧的峰值，不是 redb 的读缓存**：range 迭代照样把走过的 B 树
+    /// 叶子页读进缓存（key 与 value 同页），那笔高水位只有丢弃 `Database` 才还得掉
+    /// （见 `tests/redb_cache_high_water.rs` 与 [`Store::drop_page_cache`]）。两件事要分开记。
+    pub fn for_each_user_word(
+        &self,
+        schema: &str,
+        prefix: &str,
+        f: &mut dyn FnMut(UserWordView<'_>) -> bool,
+    ) -> anyhow::Result<()> {
+        let scan = format!("{schema}\u{0}{prefix}");
+        self.with_db(|db| {
+            let txn = db.begin_read()?;
+            let t = txn.open_table(USER_WORDS)?;
+            for item in t.range(scan.as_str()..)? {
+                let (k, v) = item?;
+                let key = k.value();
+                if !key.starts_with(&scan) {
+                    break;
+                }
+                let (Some((_, code, text)), Some((w, c, ca, b, o))) =
+                    (split_key(key), dec_val_ordered(v.value()))
+                else {
+                    // 解不出的记录**跳过但不计数**，与 `search_user_words_prefix` 一致：
+                    // 那边也是 `if let` 不匹配就不 push。总数口径必须和它逐条对齐，否则
+                    // 会出现「说有 N 条、翻到最后一页只有 N-1 条」。
+                    continue;
+                };
+                if !f(UserWordView {
+                    code,
+                    text,
+                    weight: w,
+                    count: c,
+                    created_at: ca,
+                    boundary: b,
+                    order: o,
+                }) {
+                    break;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// 某方案下的用户词条数。只数不抄。
+    ///
+    /// 口径与 [`Self::search_user_words_prefix`]`(schema, "", 0).len()` 逐条一致
+    /// （解不出的记录两边都不算）——设置页拿它显示「共 N 条」，与列表必须对得上。
+    pub fn count_user_words(&self, schema: &str) -> anyhow::Result<usize> {
+        let mut n = 0usize;
+        self.for_each_user_word(schema, "", &mut |_| {
+            n += 1;
+            true
+        })?;
+        Ok(n)
     }
 
     /// 精确取某 code 下的所有用户词

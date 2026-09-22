@@ -457,7 +457,24 @@ pub trait WebDataRpc: WebDataHost {
                 Ok(json!(self.gen_pinyin_word(&store_text(text))))
             }
             "dict.export" => self.web_dict_export(params),
-            "dict.import" => self.web_dict_import(params),
+            // 导入是一次**全表规模的写**，而 redb 刷盘时会把脏页直接晋升进读缓存并
+            // 长期不还（本机实测 19 万词的库因此常驻 41 MB，50 万词约 90 MB）——
+            // 用户反馈「导入大词库之后内存占用变高」就是它。落库之后把那一笔还回去。
+            //
+            // 放在分发处而不是 `web_dict_import` 里面：那个函数有 wdict 与 Rime/TSV 两条
+            // 分支、各自返回，将来多一条就会漏掉一处。这里只有一个出口。
+            //
+            // 丢缓存失败不影响导入结果：那只是内存没还回去，词已经落库了，不该因此
+            // 把一次成功的导入报成失败。
+            "dict.import" => {
+                let r = self.web_dict_import(params);
+                if let Some(s) = self.user_store() {
+                    if let Err(e) = s.drop_page_cache() {
+                        tracing::warn!("导入后丢弃页缓存失败（{e}）——不影响导入结果，仅内存未回落");
+                    }
+                }
+                r
+            }
             "dict.previewImport" => self.web_dict_preview_import(params),
 
             // ── temp.*（临时词，redb）─────────────────────────────
@@ -753,30 +770,62 @@ pub trait WebDataRpc: WebDataHost {
         // 那个形态（见 `docs/design/pinyin-code-domains.md`）。
         let (code_prefix, _) = wind_store::wdict::split_spaced_code(prefix);
         let code_prefix = self.normalize_pinyin_code(&schema, code_prefix);
-        let mut all = store.search_user_words_prefix(&schema, &code_prefix, 0)?;
-        // 并入两类补充命中（与上面的编码前缀取并集，去重）：
-        //   ① 词条内容包含搜索词（拿汉字匹配 text，用原串）
-        //   ② **编码中段包含**搜索词（用拆过的扁平码）—— 前缀扫描只能命中开头，
-        //      `haoya` 搜 `ya` 一条也出不来，而用户并不知道搜索框只认前缀。
-        // 两者共用这一次全量扫描，仅在有搜索词时才付出该代价。
-        if !prefix.is_empty() {
+        let sort = parse_sort(params, &["code", "text", "weight"]);
+
+        // ★ 不搜也不排序：按 key 序**流式**取一页，全表只物化 `limit` 条。
+        //
+        // 设置页打开词库标签走的就是这条，是三条路里最常被走的。从前它与另外两条一样
+        // 「先全收进 Vec 再 skip/take」——19 万条的库要先造 38 万个 `String` 才切出 50 条。
+        //
+        // ⚠️ 仍然**扫完整表**，不能中途早退：`total` 要精确（分页器显示「共 N 条」）。
+        // 省掉的是物化，不是扫描；redb 的读缓存该填还是填（见 wind-store 的
+        // `tests/redb_cache_high_water.rs`）。那笔高水位另有出路，不在这里解决。
+        if prefix.is_empty() && sort.is_none() {
+            let mut items: Vec<Value> = Vec::new();
+            let mut total = 0usize;
+            store.for_each_user_word(&schema, &code_prefix, &mut |w| {
+                if total >= offset && items.len() < limit {
+                    items.push(word_item(w.to_record()));
+                }
+                total += 1;
+                true
+            })?;
+            return Ok(json!({ "items": items, "total": total }));
+        }
+
+        let mut all = if prefix.is_empty() {
+            // 要排序：排序是跨页全局的，只能全量物化。
+            store.search_user_words_prefix(&schema, &code_prefix, 0)?
+        } else {
+            // 有搜索词：**一遍**扫描分两组，编码前缀命中在前、其余命中在后。
+            //   ① 词条内容包含搜索词（拿汉字匹配 text，用原串）
+            //   ② **编码中段包含**搜索词（用拆过的扁平码）—— 前缀扫描只能命中开头，
+            //      `haoya` 搜 `ya` 一条也出不来，而用户并不知道搜索框只认前缀。
+            //
+            // 从前这里扫**两遍**全表（一遍前缀、一遍全量），再拿一个全量 clone 的
+            // `HashSet<(String,String)>` 去重——而前缀命中本就是全量扫描的子集，第二遍
+            // 纯属重复，那个 HashSet 更是把整张表的 code/text 又抄了一份。分两组天然互斥，
+            // 去重结构一并不需要了。顺序与从前逐条相同。
             let q = prefix.to_lowercase();
             let code_q = code_prefix.to_lowercase();
-            let seen: std::collections::HashSet<(String, String)> = all
-                .iter()
-                .map(|w| (w.code.clone(), w.text.clone()))
-                .collect();
-            for w in store.search_user_words_prefix(&schema, "", 0)? {
-                let hit = w.text.to_lowercase().contains(&q)
-                    || (!code_q.is_empty() && w.code.to_lowercase().contains(&code_q));
-                if hit && !seen.contains(&(w.code.clone(), w.text.clone())) {
-                    all.push(w);
+            let mut head = Vec::new();
+            let mut tail = Vec::new();
+            store.for_each_user_word(&schema, "", &mut |w| {
+                if w.code.starts_with(code_prefix.as_str()) {
+                    head.push(w.to_record());
+                } else if w.text.to_lowercase().contains(&q)
+                    || (!code_q.is_empty() && w.code.to_lowercase().contains(&code_q))
+                {
+                    tail.push(w.to_record());
                 }
-            }
-        }
+                true
+            })?;
+            head.append(&mut tail);
+            head
+        };
         let total = all.len();
         // 有 sortBy 时在切片前排序，实现跨页全局排序
-        if let Some((by, desc)) = parse_sort(params, &["code", "text", "weight"]) {
+        if let Some((by, desc)) = sort {
             all.sort_by(|a, b| {
                 let ord = match by {
                     "weight" => a.weight.cmp(&b.weight),
@@ -1277,14 +1326,12 @@ pub trait WebDataRpc: WebDataHost {
         };
         let mut out = Vec::new();
         for id in self.engine_mgr().available_schemas().iter() {
-            let user_words = store
-                .search_user_words_prefix(id, "", 0)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let temp_words = store
-                .search_temp_words_prefix(id, "", 0)
-                .map(|v| v.len())
-                .unwrap_or(0);
+            // ⚠️ 只要条数就用 `count_*`，别 `list(..).len()`：那会把整张表物化一遍
+            // （19 万条 × 两个 `String`，本机实测几十 MB 峰值）**只为了读一个数字**，
+            // 而且这里对**每个方案**各来一遍。口径与列表逐条一致，守门见
+            // wind-store 的 `tests/counts_match_listings.rs`。
+            let user_words = store.count_user_words(id).unwrap_or(0);
+            let temp_words = store.count_temp_words(id).unwrap_or(0);
             // 候选调整按 data_schema_id 归属（拼音族折叠到 "pinyin"），与写端 `candidate_op`
             // 和读端 `shadow.list` 同源。此前直传原始 id：双拼方案（`shuangpin_*`）折叠后
             // 才是 "pinyin"，拿原始 id 去查恒得 0 条——设置页的规则计数于是永远显示 0。
@@ -4589,6 +4636,109 @@ outside: rare
     /// 分页之前设置端是「一次全取 + 客户端过滤」，条目上万时开页即卡；搬到服务端后
     /// 这四件事都得由 core 兑现，缺一样的症状分别是：翻页翻不动 / 页数算错 /
     /// 搜索搜不全 / 排序只排当页那几十条。
+    /// ★ `dict.listPaged` 的三条路必须给出彼此自洽的结果。
+    ///
+    /// 这个入口被拆成了三条分流（不搜不排序走流式、只物化一页；要排序走全量；搜索走
+    /// 一遍扫描分两组），而它们从前是同一段代码。拆开之后最容易坏的不是某一条本身，
+    /// 而是**它们彼此不一致**——分页拼起来少一条、搜索路径的 total 与列表对不上、
+    /// 排序路径把某些条目漏掉。逐条比对是唯一测得到这些的办法。
+    #[test]
+    fn dict_list_paged_stays_consistent_across_its_three_paths() {
+        let c = coord("dict_paged");
+        let store = c.user_store().expect("有 store");
+        // `ni*` 三条供前缀命中；`haoya` 只能由「编码中段含 ya」命中；
+        // 「你好呀」只能由「词条内容含 你」命中。
+        for (code, text) in [
+            ("ni hao", "你好"),
+            ("ni men", "你们"),
+            ("ni hao ya", "你好呀"),
+            ("hao ya", "好呀"),
+            ("wo men", "我们"),
+        ] {
+            store
+                .add_user_word("pinyin", &code.replace(' ', ""), text, 100, 0)
+                .unwrap();
+        }
+        let call = |p: Value| c.web_data_rpc("dict.listPaged", &p).unwrap();
+        let texts = |v: &Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|it| it["text"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+
+        // ── ① 流式路（不搜不排序）：分页拼起来必须等于一次取全部 ──────────────
+        let all = call(json!({ "schemaId": "pinyin", "offset": 0, "limit": 100 }));
+        assert_eq!(all["total"], json!(5));
+        let whole = texts(&all);
+        assert_eq!(whole.len(), 5);
+
+        let mut stitched = Vec::new();
+        for off in [0, 2, 4] {
+            let page = call(json!({ "schemaId": "pinyin", "offset": off, "limit": 2 }));
+            assert_eq!(page["total"], json!(5), "翻页不得改变总数");
+            stitched.extend(texts(&page));
+        }
+        assert_eq!(stitched, whole, "分页拼接必须逐条等于一次取全部");
+
+        // offset 越界给空页，但 total 照旧——分页器靠它算页数。
+        let over = call(json!({ "schemaId": "pinyin", "offset": 99, "limit": 2 }));
+        assert_eq!(over["total"], json!(5));
+        assert!(texts(&over).is_empty());
+
+        // ── ② 排序路：集合与 ① 相同，只是次序不同 ───────────────────────────
+        let sorted = call(json!({
+            "schemaId": "pinyin", "offset": 0, "limit": 100, "sortBy": "text", "sortDesc": false
+        }));
+        assert_eq!(sorted["total"], json!(5), "排序不得改变总数");
+        let mut a = texts(&sorted);
+        let mut b = whole.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "排序路与流式路必须是同一批条目");
+
+        // ── ③ 搜索路：前缀命中在前，其余命中在后，且不重复 ──────────────────
+        let hit = call(json!({ "schemaId": "pinyin", "query": "ni", "offset": 0, "limit": 100 }));
+        let got = texts(&hit);
+        assert_eq!(
+            hit["total"].as_u64().unwrap() as usize,
+            got.len(),
+            "total 必须等于实际条数"
+        );
+        let mut dedup = got.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup.len(), got.len(), "同一条不得同时进两组");
+        // `ni*` 三条靠编码前缀命中，必须排在最前。
+        assert_eq!(
+            &got[..3],
+            // key 序（扁平码字典序）：nihao < nihaoya < nimen。
+            &["你好".to_string(), "你好呀".to_string(), "你们".to_string()],
+            "编码前缀命中必须在前，实际 {got:?}"
+        );
+
+        // 只能由「编码中段」命中的那条：搜 `ya` 要捞到 `haoya`。
+        let mid = texts(&call(
+            json!({ "schemaId": "pinyin", "query": "ya", "offset": 0, "limit": 100 }),
+        ));
+        assert!(
+            mid.contains(&"好呀".to_string()),
+            "编码中段命中丢了：{mid:?}"
+        );
+        assert!(
+            mid.contains(&"你好呀".to_string()),
+            "编码中段命中丢了：{mid:?}"
+        );
+
+        // 只能由「词条内容」命中的：搜汉字。
+        let by_text = texts(&call(
+            json!({ "schemaId": "pinyin", "query": "我", "offset": 0, "limit": 100 }),
+        ));
+        assert_eq!(by_text, vec!["我们".to_string()], "按词条内容搜不到");
+    }
+
     #[test]
     fn temp_list_paged_slices_searches_and_sorts() {
         let c = coord("temp_paged");
