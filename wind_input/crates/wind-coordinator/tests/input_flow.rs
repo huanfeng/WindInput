@@ -8431,6 +8431,89 @@ fn test_codetable_auto_phrase_learns_from_single_chars() {
     let _ = std::fs::remove_file(&db);
 }
 
+/// ★ **用过即转正**：选中一条草稿候选上屏 ⇒ 它离开草稿层、进入临时词库。
+///
+/// 这是草稿层存在的全部意义。没有这一跳，草稿只会躺到过期被丢——滑窗产出再多也等于没有。
+///
+/// 判据同时钉住 `count == 1`：跃迁本身已经把使用次数记成 1，若「6b 临时词使用累积」
+/// 没有被跳过，同一次上屏会让它变成 2，晋升进度凭空快一倍
+/// （与 `learn_phrase_on_commit` 返回值要跳过 6b 是同一个坑）。
+#[test]
+fn test_draft_is_promoted_to_temp_when_user_picks_it() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 schema");
+        return;
+    }
+    let (coord, store, db) = auto_phrase_coord("draft_promote", true);
+
+    // 先打出几个单字让滑窗记下草稿，断流后等落库。
+    let a = commit_one_char(&coord, b'A');
+    let b = commit_one_char(&coord, b'A');
+    let word = format!("{a}{b}");
+    coord.handle_focus_lost(0, wind_bridge::handler::FocusLostReason::Thread);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut code = None;
+    while std::time::Instant::now() < deadline {
+        code = draft_entries(&store, "wubi86")
+            .into_iter()
+            .find(|(_, t)| *t == word)
+            .map(|(c, _)| c);
+        if code.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let code = code.unwrap_or_else(|| panic!("前置条件不成立：草稿「{word}」没落库"));
+    assert!(
+        temp_words(&store, "wubi86").is_empty(),
+        "跃迁之前临时词库应是空的，否则下面测不出东西"
+    );
+
+    // 打出那个词的码。草稿**沉在候选底部**（这是它敢参与召回的前提），所以不能按空格
+    // 选首选——那选中的是真词。按绝对下标去选它。
+    for ch in code.bytes() {
+        coord.handle_key_event_policed(&key_event(ch.to_ascii_uppercase() as u32, EVENT_KEY_DOWN));
+    }
+    let win = coord.candidate_window(0, 200);
+    let idx = win
+        .items
+        .iter()
+        .position(|t| t == &word)
+        .unwrap_or_else(|| {
+            panic!(
+                "草稿「{word}」该出现在候选里（精确码命中），实际: {:?}",
+                win.items
+            )
+        });
+    assert_eq!(
+        idx,
+        win.items.len() - 1,
+        "草稿必须沉在候选最末位，实际排在第 {} 位：{:?}",
+        idx + 1,
+        win.items
+    );
+    coord.select_candidate(idx);
+
+    let temp = temp_words(&store, "wubi86");
+    assert!(
+        temp.iter().any(|(c, t)| c == &code && t == &word),
+        "选中草稿上屏后它该进临时词库，实际: {temp:?}"
+    );
+    assert!(
+        !all_drafts(&store, "wubi86").contains(&word),
+        "跃迁后草稿层不该还留着它"
+    );
+    let count = store
+        .get_temp_word("wubi86", &code, &word)
+        .unwrap_or_default()
+        .unwrap_or(0);
+    assert_eq!(
+        count, 1,
+        "跃迁记 count=1；变成 2 说明「6b 临时词使用累积」没被跳过，晋升进度会快一倍"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
 /// ★ 滑窗草稿的**端到端贯通**：落屏 → 滑窗 → 取码查重 → 异步落库，一条链通到 `DRAFT_WORDS`。
 ///
 /// 判据是「记下**全部** 2~5 字组合」而不只是最长那个——旧模型一次终止信号只结算出一个词，

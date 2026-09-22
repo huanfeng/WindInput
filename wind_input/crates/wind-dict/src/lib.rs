@@ -41,5 +41,5 @@ pub mod weight_norm;
 pub use composite::CompositeDict;
 pub use layer::{DictLayer, LayerType, MutableLayer};
 pub use manager::{DictManager, SystemDictLayer};
-pub use store_layer::{StoreTempLayer, StoreUserLayer};
+pub use store_layer::{StoreDraftLayer, StoreTempLayer, StoreUserLayer};
 pub use weight_norm::WeightNorm;

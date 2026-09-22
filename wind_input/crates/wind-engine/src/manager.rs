@@ -4953,6 +4953,22 @@ impl EngineManager {
                     store.clone(),
                     schema_id,
                 )));
+                // 自动造词的**草稿层**（`docs/design/auto-phrase-draft-layer.md`）。
+                //
+                // ⚠️ 只在开关打开时挂：关着的用户不该为一个用不到的功能在每次精确查询上
+                // 多付一次 redb 读。这与 `prewarm_indexes` 只在造词开启时才预热单字全码表
+                // 是同一条判据。
+                //
+                // ⚠️ TTL 在**注册时**固定。改配置需要重建引擎——方案切换与配置重载本来就会
+                // 重建，故不另设通路；真要做成热更新，得给层一个共享的原子值，
+                // 为一个内部字段不值得。
+                if codetable_cfg.auto_phrase.enabled {
+                    dm.register_layer(Box::new(wind_dict::StoreDraftLayer::new(
+                        store.clone(),
+                        schema_id,
+                        i64::from(codetable_cfg.auto_phrase.draft_ttl_hours) * 3600,
+                    )));
+                }
             }
             // 主库优先注册（在 load_codetable_layers 中已置首），扩展库其后。
             // base_order 决定等权/natural 排序的库间档位；default_weight 覆盖无权重库的权重档。

@@ -3253,6 +3253,13 @@ impl Coordinator {
             } else {
                 None
             };
+            // 6a-draft: 选中**草稿候选** → 跃迁进临时词库（「用过即转正」的第一跳）。
+            //
+            // 草稿只有被用过才留得下来，没被用过的到期自动丢弃——这是滑窗模型敢产出
+            // 大量杂词的前提：过滤在使用端，不在产生端。
+            // 见 `docs/design/auto-phrase-draft-layer.md` §6。
+            let promoted_draft =
+                cand.is_draft && self.promote_draft_on_commit(&code, &cand.text, cand.boundary);
             // 6b: 临时词使用累积（对齐 Go LearnWord-on-commit）：选中临时层候选也推进晋升计数。
             // 点查代替候选层标记：一次 redb 读，未命中即非临时词，零成本略过。
             // is_group/is_command 已在 commit_selected 入口提前返回；is_phrase 由本条件显式过滤
@@ -3260,7 +3267,10 @@ impl Coordinator {
             //
             // **刚由造词写入的那条要跳过**：单段整句时造词的 key 与这里的点查完全相同，
             // 不跳就是同一次上屏 count +2（见 `learn_phrase_on_commit` 的返回值说明）。
+            // **刚跃迁的草稿同样要跳过**：跃迁已把 count 记成 1，6b 再点查命中一次
+            // 就是同一次上屏 count +2 —— 与上面那条 `learned_code` 是同一个坑。
             if !cand.is_phrase
+                && !promoted_draft
                 && learned_code.as_deref() != Some(code.as_str())
                 && let Some(store) = &self.store
             {

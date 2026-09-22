@@ -19,13 +19,6 @@ use wind_bridge::handler::KeyAction;
 use std::sync::atomic::Ordering;
 use tracing::{debug, warn};
 
-/// 队列攒到这么多条就触发一次后台 flush。
-///
-/// 取值的两头：太小则频繁抢 redb 写锁（草稿是这个库里最高频的写入方），
-/// 太大则一批要处理的取码与查重堆在一起、且崩溃时丢得更多。
-/// **待实测调参**（设计稿 §7 要求先量一版真机数据）。
-const DRAFT_FLUSH_BATCH: usize = 64;
-
 /// 队列的硬上限。后台线程若长时间没跑起来（比如 redb 被暂停），
 /// 队列不能无限涨——超出就丢最早的那些。
 ///
@@ -125,7 +118,7 @@ impl Coordinator {
                 q.drain(..drop);
                 warn!("draft: 队列超上限，丢弃最早的 {drop} 条（后台线程没跟上？）");
             }
-            q.len() >= DRAFT_FLUSH_BATCH
+            q.len() >= self.draft_flush_batch()
         };
         if full {
             self.spawn_draft_flush();
@@ -249,16 +242,88 @@ impl Coordinator {
         }
     }
 
-    /// 草稿有效期（秒）。**待接配置**（设计稿 §8 的 `draft_ttl_hours`，Stage 5）。
-    pub(crate) fn draft_ttl_secs(&self) -> i64 {
-        24 * 3600
+    /// 选中一条**草稿候选**上屏：把它从草稿层跃迁进临时词库。返回是否真的跃迁了。
+    ///
+    /// 这是「用过即转正」的第一跳，也是草稿层存在的意义——草稿只有被用过才会留下，
+    /// 没被用过的到期自动丢弃，过滤因此发生在使用端而不是产生端。
+    ///
+    /// 跃迁后它就是一条普通临时词：再被用到 `count++`，累到 `promote_count` 晋升进
+    /// 用户词库，容量超限时按 `(count, created_at, weight)` 淘汰。
+    ///
+    /// ⚠️ **调用方必须据此跳过「6b 临时词使用累积」**：跃迁本身已经把 count 记成 1，
+    /// 再让 6b 点查命中一次就是同一次上屏 count +2 —— 与 `learn_phrase_on_commit`
+    /// 的返回值要跳过 6b 是同一个坑（那里记着「单段时两者 key 完全相同」）。
+    pub(crate) fn promote_draft_on_commit(&self, code: &str, text: &str, boundary: u64) -> bool {
+        if !self.draft_enabled() {
+            return false;
+        }
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let active = self.engine_mgr.active_schema_id();
+        let Some(schema) = self
+            .engine_mgr
+            .write_data_schema_id(&active, wind_candidate::CandidateSource::CodeTable)
+        else {
+            return false;
+        };
+        match store.promote_draft_to_temp(
+            &schema,
+            code,
+            text,
+            crate::coordinator::LEARN_ADD_WEIGHT,
+            boundary,
+        ) {
+            Ok(true) => {
+                debug!("draft: 用过即转正 {code} -> {text}");
+                let promote_count = self
+                    .engine_mgr
+                    .codetable_settings()
+                    .auto_phrase
+                    .promote_count;
+                // 跃迁写入的 count 恒为 1（草稿本就是第一次被用）；用户把
+                // `promote_count` 设成 1 时，这一次就该直接进用户词库。
+                self.maybe_promote_temp(store, &schema, code, text, 1, promote_count);
+                true
+            }
+            Ok(false) => false, // 不是草稿（或已过期被清），走常规路径
+            Err(e) => {
+                warn!("draft: 跃迁失败: {e}");
+                false
+            }
+        }
     }
 
-    /// 草稿表容量上限。**待接配置**（设计稿 §8 的 `draft_max_entries`，Stage 5）。
+    /// 队列攒到这么多条就触发一次后台落库。
     ///
-    /// 暂取的这个数来自设计稿 §7 的纸面估算（一天 8 小时约 11.5 万条**上界**，
-    /// 真实打字有大量停顿与重复窗口应显著更低），**不是实测值**。
+    /// 取值的两头：太小则频繁抢 redb 的单写锁（草稿是这个库里最高频的写入方），
+    /// 太大则一批的取码与查重堆在一起、且崩溃时丢得更多。**待实测调参。**
+    /// 配成 0 会让每次入队都触发 flush，故下限钳到 1。
+    pub(crate) fn draft_flush_batch(&self) -> usize {
+        self.engine_mgr
+            .codetable_settings()
+            .auto_phrase
+            .draft_flush_batch
+            .max(1)
+    }
+
+    /// 草稿有效期（秒）。0 = 永不过期。
+    pub(crate) fn draft_ttl_secs(&self) -> i64 {
+        i64::from(
+            self.engine_mgr
+                .codetable_settings()
+                .auto_phrase
+                .draft_ttl_hours,
+        ) * 3600
+    }
+
+    /// 草稿表容量上限。0 = 不限。
+    ///
+    /// ⚠️ 默认值来自设计稿 §7 的**纸面估算上界**，不是实测值，待真机数据出来后重定。
     pub(crate) fn draft_max_entries(&self) -> usize {
-        50_000
+        self.engine_mgr
+            .codetable_settings()
+            .auto_phrase
+            .draft_max_entries
     }
 }

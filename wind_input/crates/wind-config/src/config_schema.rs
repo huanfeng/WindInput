@@ -272,6 +272,9 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.auto_phrase.promote_count", Int),
     f("schema.codetable.auto_phrase.idle_timeout_ms", Int),
     f("schema.codetable.auto_phrase.temp_max_entries", Int),
+    f("schema.codetable.auto_phrase.draft_ttl_hours", Int),
+    f("schema.codetable.auto_phrase.draft_max_entries", Int),
+    f("schema.codetable.auto_phrase.draft_flush_batch", Int),
     // 全局拼音
     f(
         "schema.pinyin.code_hint_source",

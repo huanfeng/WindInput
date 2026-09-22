@@ -2280,9 +2280,40 @@ pub struct AutoPhraseConfig {
     /// 兜底用：终止信号全漏时防止跨句拼出「加好加好」这类杂词。内部字段，设置页不开放。
     #[serde(default)]
     pub idle_timeout_ms: u32,
-    /// 临时词库条目上限（0=不限）。超出后淘汰权重最低者。内部字段，设置页不开放。
+    /// 临时词库条目上限（0=不限）。超出后按「用得最少、造得最早」淘汰。内部字段，设置页不开放。
     #[serde(default = "default_temp_max_entries")]
     pub temp_max_entries: usize,
+    /// **草稿层**有效期（小时，0=永不过期）。默认 24。
+    ///
+    /// 草稿是滑窗切出的猜测词，到期没被用过就自动丢弃
+    /// （`docs/design/auto-phrase-draft-layer.md`）。内部字段，设置页不开放。
+    #[serde(default = "default_draft_ttl_hours")]
+    pub draft_ttl_hours: u32,
+    /// **草稿层**条目上限（0=不限）。超出后按 `created_at` 升序淘汰（最早的先走，
+    /// 而写入会刷新它，故实际是近似 LRU）。内部字段，设置页不开放。
+    ///
+    /// ⚠️ 默认值来自设计稿 §7 的**纸面估算上界**（滑窗约每字 4 条，一天 8 小时约 11.5 万条），
+    /// 真实打字有大量停顿与重复窗口应显著更低——**这不是实测值**，待真机数据出来后重定。
+    #[serde(default = "default_draft_max_entries")]
+    pub draft_max_entries: usize,
+    /// **草稿层**攒够多少条触发一次后台落库。默认 64。
+    ///
+    /// 太小则频繁抢 redb 的单写锁（草稿是这个库里最高频的写入方），太大则一批的取码与
+    /// 查重堆在一起、且崩溃时丢得更多。内部字段，设置页不开放。**待实测调参。**
+    #[serde(default = "default_draft_flush_batch")]
+    pub draft_flush_batch: usize,
+}
+
+fn default_draft_ttl_hours() -> u32 {
+    24
+}
+
+fn default_draft_max_entries() -> usize {
+    50_000
+}
+
+fn default_draft_flush_batch() -> usize {
+    64
 }
 
 fn default_phrase_min_len() -> usize {
@@ -2307,6 +2338,9 @@ impl Default for AutoPhraseConfig {
             promote_count: 0,
             idle_timeout_ms: 0,
             temp_max_entries: default_temp_max_entries(),
+            draft_ttl_hours: default_draft_ttl_hours(),
+            draft_max_entries: default_draft_max_entries(),
+            draft_flush_batch: default_draft_flush_batch(),
         }
     }
 }
