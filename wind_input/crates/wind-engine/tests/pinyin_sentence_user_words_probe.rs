@@ -16,7 +16,11 @@ use wind_engine::EngineManager;
 /// ⚠️ **「盖伦」在 cn_dicts 里本来就有**（`base.dict.yaml:84220`，w=237），同码的「概论」
 /// w=1217 —— 所以这不是「系统库没这个词」，是「它在同码里排第二」。而手动加词的出厂权重
 /// 恰好是 1200（`handle_addword.rs::ADD_WORD_WEIGHT`），比「概论」低 17 分。
-/// 这正是本探针要量的东西：**默认权重够不够翻盘**。
+///
+/// 本探针量的就是**出厂路径够不够用**：用户造了词、开了开关，整句认不认。
+/// 加 `USER_NODE_BONUS`(+2.0) 之前，答案是「不认，要手工把权重调到 1300」——
+/// 那等于这个功能对默认路径上的用户不存在。加成之后 w=1200 那一行就该翻过来，
+/// **这一行是本探针的主断言**；它要是退回「有概论吗」，就是加成没生效或被改小了。
 const INPUTS: &[&str] = &["yougailunma", "gailunhenqiang", "wanyigailun"];
 
 /// 权重梯度：0 = 不加用户词（对照），1200 = 手动加词出厂值，其余为用户手调。
@@ -97,9 +101,11 @@ fn user_word_changes_the_sentence_on_real_dict() {
         Some(w) => println!("\n⇒ 用户词权重达到 {w} 时整句开始改变"),
         None => println!("\n⇒ 梯度内整句始终未变"),
     }
-    assert!(
-        changed_at.is_some(),
-        "梯度拉到 {} 都没改变整句，说明这条路没接通（而不是没赢）",
-        WEIGHTS.last().unwrap()
+    // 主断言：**出厂路径**（手动加词 w=1200）就要能翻过来。
+    // 拉到 50000 才变说明加成没生效；完全不变说明这条路没接通。
+    assert_eq!(
+        changed_at,
+        Some(1200),
+        "出厂加词权重就该让整句改变（USER_NODE_BONUS 的存在意义）"
     );
 }

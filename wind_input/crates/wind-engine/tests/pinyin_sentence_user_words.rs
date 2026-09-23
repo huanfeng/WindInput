@@ -48,11 +48,12 @@ fn sys_dict(tag: &str) -> CachedDict {
                 .collect(),
         );
     }
-    // ⚠️ `gailun` 这个码下**刻意不放系统词**：t134 的现场就是「盖伦」系统库完全没有，
-    // 整句只好把它拆成两个单字。放一个高权重同码词进去，测的就变成「权重比大小」了。
-    //
-    // 另给 `goulun` 放一个系统侧已有的双字词，供 GH#93（用户调权重覆盖系统词）单独用。
-    // gou|lun → 位 0/3
+    // `gailun` 下放**真机的实际数值**：cn_dicts 里「概论」w=1217（`base.dict.yaml:84218`），
+    // 而手动加词的出厂权重是 1200（`handle_addword.rs::ADD_WORD_WEIGHT`）——**低 17 分**。
+    // 用户按设计流程走完（造词 + 开开关）后整句仍然不认，正是 `USER_NODE_BONUS` 要解决的。
+    // gai|lun → 位 0/3
+    w.add_with_boundary("gailun".into(), vec![("概论".into(), 1217, 0, 0b1001)]);
+    // 另给 `goulun` 放一个高权重系统词，供 GH#93（用户调权重覆盖系统词）单独用。
     w.add_with_boundary("goulun".into(), vec![("狗论".into(), 90_000, 0, 0b1001)]);
     w.write(&wdat).unwrap();
     CachedDict::load_at(&dir.join("t.dict.yaml"), &wdat).expect("加载 wdat 夹具")
@@ -89,6 +90,10 @@ fn sentence(e: &PinyinEngine, input: &str) -> Option<String> {
 }
 
 /// t134：造过「盖伦」之后，整句里也要认它。
+///
+/// ⚠️ 这一条同时钉住 [`USER_NODE_BONUS`] 的存在意义：用户词权重取的是**手动加词的出厂值
+/// 1200**，而同码的「概论」w=1217 比它高。没有那份加成时，用户按设计流程走完
+/// （造词 + 开开关）整句**仍然不认** —— 那等于这个功能对默认路径上的用户不存在。
 #[test]
 fn promoted_user_word_joins_the_sentence() {
     let s = store("joins");
@@ -133,6 +138,24 @@ fn user_weight_overrides_the_same_word_from_system_dict() {
         sentence(&engine("override_on", s, true), "yougoulunma").as_deref(),
         Some("有狗轮吗"),
         "用户词权重高于系统同码词时，整句应改用它"
+    );
+}
+
+/// 加成是「势均力敌时胜出」，**不是碾压**：用户词不该压过真正的高频词。
+///
+/// `USER_NODE_BONUS` = +2.0 ≈ weight ×7.4。出厂加词 1200 等效到 ~8900，翻得过同码的
+/// 中频词（概论 1217），但仍然输给 90000 那一档 —— 后者是「这个词就是比你那个常用得多」，
+/// 用户没有明确表态要改的情况下不该被掀翻。
+#[test]
+fn bonus_wins_close_calls_but_does_not_crush_high_frequency_words() {
+    let s = store("notcrush");
+    // 与上一条同样的出厂权重，但这次对手是 w=90000 的「狗论」。
+    s.add_user_word("pinyin", "goulun", "狗轮", 1200, 0b1001)
+        .unwrap();
+    assert_eq!(
+        sentence(&engine("notcrush_on", s, true), "yougoulunma").as_deref(),
+        Some("有狗论吗"),
+        "加成不该让出厂权重的用户词压过高频系统词"
     );
 }
 
