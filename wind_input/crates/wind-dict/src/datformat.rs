@@ -302,26 +302,112 @@ fn find_base(codes: &[i32], base: &mut Vec<i32>, check: &mut Vec<i32>, free: &mu
 
 // ======================= 写入 =======================
 
+/// 空槽标记。真实文本长度受 `DatEntryRow` 的 `u16` 字段约束（≤ 65535），撞不上。
+const POOL_EMPTY: u32 = u32::MAX;
+/// 初始槽数，必须是 2 的幂（`slot_of` 用 `& mask` 取模）。
+const POOL_INITIAL_SLOTS: usize = 1024;
+
+/// FxHash（rustc 自用的那支）。对中文词条这种 3~12 字节的短串，比 `DefaultHasher`
+/// 的 SipHash 快一个量级，而本池每条词条都要算一次。
+fn pool_hash(bytes: &[u8]) -> u64 {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+    let mut h: u64 = 0;
+    let mut chunks = bytes.chunks_exact(8);
+    for c in &mut chunks {
+        let v = u64::from_le_bytes(c.try_into().expect("chunks_exact(8)"));
+        h = (h.rotate_left(5) ^ v).wrapping_mul(SEED);
+    }
+    let rest = chunks.remainder();
+    if !rest.is_empty() {
+        let mut b = [0u8; 8];
+        b[..rest.len()].copy_from_slice(rest);
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(b)).wrapping_mul(SEED);
+    }
+    // 长度混进去：否则 "ab\0" 与 "ab" 在补零后同哈希（相等性仍由 slot_of 逐字节判，
+    // 这里只是少一次探测冲突）。
+    (h.rotate_left(5) ^ bytes.len() as u64).wrapping_mul(SEED)
+}
+
 /// 字符串池（去重）。
+///
+/// **索引里不存字符串副本**：槽位存的是 `(池内偏移, 字节长)`，判等时回 `buf` 取那段字节。
+/// 从前是 `HashMap<String, u32>`，每个唯一文本要在索引里再留一份 `String`，而同一份字节
+/// 已经躺在 `buf` 里了——雾凇 65 万条那次实测，这份副本白占 54 MB（`String` 头 24 字节 +
+/// 内容 + HashMap 自身的桶开销）。换成开放寻址后索引恒为 `8 字节 × 槽数`。
+///
+/// 顺带比 `HashMap<String, u32>` 快：省掉每个唯一文本一次堆分配 + memcpy，查找也不必
+/// 顺着 `String` 的指针跳到堆上另一处。
 struct StringPool {
     buf: Vec<u8>,
-    index: std::collections::HashMap<String, u32>,
+    /// 开放寻址（线性探测）表，槽位 `(offset, len)`，`len == POOL_EMPTY` 为空。
+    /// 槽数恒为 2 的幂；装填过半即翻倍。
+    slots: Vec<(u32, u32)>,
+    filled: usize,
 }
 
 impl StringPool {
     fn new() -> Self {
         Self {
             buf: Vec::new(),
-            index: std::collections::HashMap::new(),
+            slots: vec![(0, POOL_EMPTY); POOL_INITIAL_SLOTS],
+            filled: 0,
         }
     }
+
+    /// 找 `s` 该落的槽：命中返回其槽位，未命中返回第一个空槽。
+    ///
+    /// 关联函数而非方法：调用方 `add` 随后要改 `self.buf` / `self.slots`，写成 `&self`
+    /// 的方法会让借用跨过那些写。
+    #[inline]
+    fn slot_of(slots: &[(u32, u32)], buf: &[u8], s: &[u8], h: u64) -> usize {
+        let mask = slots.len() - 1;
+        let mut i = (h as usize) & mask;
+        loop {
+            let (off, len) = slots[i];
+            if len == POOL_EMPTY {
+                return i;
+            }
+            let (a, b) = (off as usize, off as usize + len as usize);
+            if len as usize == s.len() && &buf[a..b] == s {
+                return i;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    /// 槽数翻倍并重散列。重散列要回 `buf` 取字节重算哈希——不缓存哈希值是刻意的：
+    /// 每槽多存 8 字节，在 65 万条上就是 10 MB，而重散列一共只发生 log2(n) 次。
+    fn grow(&mut self) {
+        let mut next = vec![(0u32, POOL_EMPTY); self.slots.len() * 2];
+        let mask = next.len() - 1;
+        for &(off, len) in &self.slots {
+            if len == POOL_EMPTY {
+                continue;
+            }
+            let s = &self.buf[off as usize..off as usize + len as usize];
+            let mut i = (pool_hash(s) as usize) & mask;
+            while next[i].1 != POOL_EMPTY {
+                i = (i + 1) & mask;
+            }
+            next[i] = (off, len);
+        }
+        self.slots = next;
+    }
+
     fn add(&mut self, s: &str) -> u32 {
-        if let Some(&off) = self.index.get(s) {
-            return off;
+        let b = s.as_bytes();
+        let i = Self::slot_of(&self.slots, &self.buf, b, pool_hash(b));
+        if self.slots[i].1 != POOL_EMPTY {
+            return self.slots[i].0;
         }
         let off = self.buf.len() as u32;
-        self.buf.extend_from_slice(s.as_bytes());
-        self.index.insert(s.to_string(), off);
+        self.buf.extend_from_slice(b);
+        self.slots[i] = (off, b.len() as u32);
+        self.filled += 1;
+        // 装填因子上限 1/2：线性探测在这个水位上平均探测次数仍接近 1。
+        if self.filled * 2 >= self.slots.len() {
+            self.grow();
+        }
         off
     }
 }
@@ -542,14 +628,12 @@ impl WdatWriter {
         } else {
             (None, Vec::new(), Vec::new())
         };
-
         // MaxW 段（v6 剪枝上界），与各自的 DAT 同长。
         let maxw = compute_maxw(&dat, &leaves, &entries);
         let a_maxw = a_dat
             .as_ref()
             .map(|ad| compute_maxw(ad, &a_leaves, &a_entries))
             .unwrap_or_default();
-
         // 主区段偏移。base/check/maxw 三段等长，故 leaf 段起点为 dat_off + dat_size*4*3。
         let dat_size = dat.base.len() as u32;
         let dat_off = HEADER_SIZE as u32;
@@ -1998,6 +2082,56 @@ mod tests {
     ///
     /// ⚠️ **条目内容已随 v5 从「词」改为「全拼码」**（二级索引指向主键）。取出的
     /// `DictEntry::text` 现在装的是码，调用方拿它去主表装配候选。
+    /// 字符串池必须**真的**去重：同一文本无论来自哪个 code、哪个段，都返回同一个偏移，
+    /// 且 `buf` 里只存一份。
+    ///
+    /// 端到端的 roundtrip 用例守不住这条——去重失效时每份副本各自正确，读出来的候选一模
+    /// 一样，只是文件白白变大、构建期白白多占内存。而去重**错**（返回了别人的偏移）才是
+    /// 功能性事故：读出来是另一个词。两个方向这里都断言。
+    #[test]
+    fn string_pool_dedups_and_never_returns_a_foreign_offset() {
+        let mut pool = StringPool::new();
+
+        // 同串多次 add → 同一偏移，且 buf 不增长。
+        let a1 = pool.add("你好");
+        let a2 = pool.add("你好");
+        assert_eq!(a1, a2, "同一文本必须复用同一偏移");
+        assert_eq!(pool.buf.len(), "你好".len(), "重复文本不该再占 buf");
+
+        // 不同串 → 不同偏移，且各自读回来是自己。
+        let mut offs = Vec::new();
+        // 刻意混入：空串、单字节、长度相同但内容不同、互为前缀、以及足够多条触发多次 grow。
+        let mut words: Vec<String> = vec![
+            String::new(),
+            "a".into(),
+            "b".into(),
+            "ab".into(),
+            "abc".into(),
+            "你好".into(),
+            "你坏".into(),
+        ];
+        for i in 0..5000 {
+            words.push(format!("词{i}"));
+        }
+        for w in &words {
+            offs.push((w.clone(), pool.add(w)));
+        }
+        // 再来一遍：必须全部命中已有偏移。
+        for (w, off) in &offs {
+            assert_eq!(pool.add(w), *off, "第二次 add {w:?} 应命中原偏移");
+        }
+        // 逐条按偏移取回，必须是自己——去重表把偏移串了的话这里立刻红。
+        for (w, off) in &offs {
+            let a = *off as usize;
+            let got = std::str::from_utf8(&pool.buf[a..a + w.len()]).expect("utf8");
+            assert_eq!(got, w.as_str(), "偏移 {off} 处应是 {w:?}");
+        }
+        // 唯一文本数 == buf 里应有的总字节数（去重没漏）。
+        let uniq: std::collections::HashSet<&String> = words.iter().collect();
+        let expect: usize = uniq.iter().map(|w| w.len()).sum();
+        assert_eq!(pool.buf.len(), expect, "buf 应恰好装下每个唯一文本一份");
+    }
+
     #[test]
     fn abbrev_section_roundtrip() {
         let p = std::env::temp_dir().join("wdat_abbrev_test.wdat");
