@@ -8223,7 +8223,30 @@ impl Coordinator {
 
     /// 候选来源标签：短语（系统/用户 + 组/成员）优先，其次用户/临时词库，再按来源 + 方案名。
     /// 混输下英文候选归码表体系。
+    /// 调试段的「来源」行：词库来源 + **整句标记**。
+    ///
+    /// 整句标记单列一层、不并进 `match c.source`：整句不是第七种来源，而是正交于来源的
+    /// 一个身份——拼音、码表（`codetable/sentence.rs`）两侧都产整句，而同一条整句还可能
+    /// 是「词典里本就有的词被补标了整句身份」（同文合并，见 `Candidate::is_synthesized`
+    /// 的文档）。把它揉进 `match` 就要在每个分支重复一遍。
+    ///
+    /// 三个标志各自回答一个不同的问题，调试时都需要：
+    /// - `is_sentence` —— 它是不是「对整串输入的最优解读」；
+    /// - `is_synthesized` —— 是引擎新拼出来的，还是词库本就有这个词条；
+    /// - `is_sentence_demoted` —— 是否已让位于精确整词（还在列表里，只是不占首位）。
+    ///
+    /// **验证 S2（用户词进整句词图）时这行是主要抓手**：整句只出一条、赢者通吃，
+    /// 光看候选文本分不清「用户词赢了」和「系统词本来就长这样」。
     fn debug_source_label(&self, c: &Candidate, ctx: &DebugSchemaCtx) -> String {
+        let base = self.debug_source_base(c, ctx);
+        match sentence_debug_tag(c) {
+            Some(tag) => format!("{base} · {tag}"),
+            None => base,
+        }
+    }
+
+    /// 词库来源本身（不含整句标记），见 [`Self::debug_source_label`]。
+    fn debug_source_base(&self, c: &Candidate, ctx: &DebugSchemaCtx) -> String {
         use wind_candidate::CandidateSource as S;
         if c.is_phrase {
             let kind = if c.meta.is_system_phrase {
@@ -8319,6 +8342,86 @@ impl Coordinator {
             parts.push("✎已调整".to_string());
         }
         format!("[调试]\n来源: {source}\n{}", parts.join(" · "))
+    }
+}
+
+/// 候选的整句身份标记，供调试段的「来源」行使用（`None` = 不是整句）。
+///
+/// 抽成自由函数是为了可单测：整个调试段要一个活的 `Coordinator` 才跑得起来，
+/// 而这段判据是纯的——它只问候选身上那三个布尔。
+///
+/// 三个标志各自回答一个不同的问题：
+/// - `is_sentence` —— 它是不是「对整串输入的最优解读」；
+/// - `is_synthesized` —— 引擎新拼出来的，还是词库本就有这个词条（同文合并会给后者
+///   补上整句身份，见该字段文档）；
+/// - `is_sentence_demoted` —— 是否已让位于精确整词（还在列表里，只是不占首位）。
+fn sentence_debug_tag(c: &Candidate) -> Option<String> {
+    if !c.is_sentence {
+        return None;
+    }
+    let kind = if c.is_synthesized { "合成" } else { "词典" };
+    let demoted = if c.is_sentence_demoted {
+        "·已降位"
+    } else {
+        ""
+    };
+    Some(format!("整句({kind}{demoted})"))
+}
+
+#[cfg(test)]
+mod sentence_debug_tag_tests {
+    //! 整句标记是验证 S2（用户词进整句词图）的主要抓手：整句只出一条、赢者通吃，
+    //! 光看候选文本分不清「用户词赢了」与「系统词本来就长这样」。
+
+    use super::*;
+
+    fn cand(f: impl FnOnce(&mut Candidate)) -> Candidate {
+        let mut c = Candidate {
+            text: "有盖伦吗".into(),
+            ..Default::default()
+        };
+        f(&mut c);
+        c
+    }
+
+    #[test]
+    fn non_sentence_has_no_tag() {
+        assert_eq!(sentence_debug_tag(&cand(|_| {})), None);
+        // 只有 is_synthesized 而没有 is_sentence 不构成整句（理论上不该出现，
+        // 但标记判据必须以 is_sentence 为准，不能靠另两个反推）。
+        assert_eq!(sentence_debug_tag(&cand(|c| c.is_synthesized = true)), None);
+    }
+
+    #[test]
+    fn synthesized_and_dictionary_sentences_are_distinguishable() {
+        // 引擎新拼出来的：词库里没有「有盖伦吗」这个词条。
+        assert_eq!(
+            sentence_debug_tag(&cand(|c| {
+                c.is_sentence = true;
+                c.is_synthesized = true;
+            }))
+            .as_deref(),
+            Some("整句(合成)")
+        );
+        // 同文合并：词库本就有这个词，被补标了整句身份。
+        assert_eq!(
+            sentence_debug_tag(&cand(|c| c.is_sentence = true)).as_deref(),
+            Some("整句(词典)")
+        );
+    }
+
+    #[test]
+    fn demotion_is_visible() {
+        assert_eq!(
+            sentence_debug_tag(&cand(|c| {
+                c.is_sentence = true;
+                c.is_synthesized = true;
+                c.is_sentence_demoted = true;
+            }))
+            .as_deref(),
+            Some("整句(合成·已降位)"),
+            "降位是排序决策、不清 is_sentence，调试时必须看得见"
+        );
     }
 }
 
