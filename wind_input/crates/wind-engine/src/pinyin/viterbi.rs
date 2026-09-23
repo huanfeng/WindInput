@@ -50,8 +50,35 @@ pub struct WordNode {
 struct DpEntry {
     log_prob: f64,
     prev_pos: usize,
+    /// 前驱在 `dp[prev_pos]` 里的下标。
+    ///
+    /// **K=1 时恒 0，多解时才有意义**：`dp[i]` 保留 top-K 条路径后，光靠 `prev_pos`
+    /// 已经定位不到「是哪一条」—— 同一个起点位置上并存着 K 条分数不同的前驱。
+    /// （beam 那侧用 `prev_word` 解同一个问题，因为它按末词分组；DP 这侧按分数排名分组，
+    /// 故用下标。）
+    prev_idx: usize,
     word: String,
     syl_mask: u64,
+}
+
+/// 往**降序**的 top-K 列表里插入一条，超出 `k` 的丢弃。
+///
+/// ⚠️ 插入位置取「第一个**严格小于**它的位置」，即分数相等时新来的排在既有之后 ——
+/// 这与单路径 DP 那句「严格大于才覆盖 ⇒ 相等分数保留先到的」是同一条 tie-break 规则。
+/// K=1 时本函数与那句等价，这正是「K=1 逐位不变」的依据。
+fn push_topk(list: &mut Vec<DpEntry>, entry: DpEntry, k: usize) {
+    if k == 0 {
+        return;
+    }
+    let pos = list
+        .iter()
+        .position(|x| x.log_prob < entry.log_prob)
+        .unwrap_or(list.len());
+    if pos >= k {
+        return;
+    }
+    list.insert(pos, entry);
+    list.truncate(k);
 }
 
 /// beam 的一条线（**有 grammar 时**用）。
@@ -248,6 +275,39 @@ impl ViterbiDecoder {
         result
     }
 
+    /// 同 [`Self::decode`]，但返回至多 `k` 条解（**按分数降序，未按文本去重**）。
+    ///
+    /// `k <= 1` 时等价于 `decode`，且与单路径 DP **逐位相同** —— 出厂配置走的就是这条，
+    /// 这是 N-best 改造的零回归依据（见 `k_of_one_matches_single_path_dp`）。
+    ///
+    /// ⚠️ **未去重**：不同切分可能拼出同一串字，调用方要连同「凑够 N 条」一起做，
+    /// 因为去重后条数会少于 `k`。
+    ///
+    /// ⚠️ **有语法模型时只返回一条**。beam 那侧的 `dp[i]` 虽然也并存多条，但它是按
+    /// **末词**分组保留的（`BEAM_WIDTH` 条不同末词），前 k 条之间往往只差最后一个词、
+    /// 而不是「另一种解读」——拿来当整句备选是误导。要给它做真正的 N-best 得先想清楚
+    /// 「按末词分组」与「按整句排名」怎么对齐，不在本次范围内。语法模型出厂关闭且不随
+    /// 安装包分发模型，故这条路暂时影响不到任何人。
+    pub fn decode_nbest(
+        &self,
+        nodes: &[Vec<WordNode>],
+        input_len: usize,
+        k: usize,
+    ) -> Vec<ViterbiResult> {
+        if input_len == 0 {
+            return Vec::new();
+        }
+        if k <= 1 || self.grammar.is_some() {
+            let one = self.decode(nodes, input_len);
+            return if one.words.is_empty() {
+                Vec::new()
+            } else {
+                vec![one]
+            };
+        }
+        Self::decode_dp_nbest(nodes, input_len, k)
+    }
+
     /// 记一次解码的性能。**只记数量与耗时，绝不记输入串或候选文本**
     /// （日志隐私：INFO 及以下不得出现用户输入内容）。
     ///
@@ -306,16 +366,36 @@ impl ViterbiDecoder {
     /// `prev_word`、胜出才 `clone`。改这里之前先想清楚：它的存在意义就是
     /// 「没开这个功能的用户一分钱都不用付」。
     fn decode_dp(nodes: &[Vec<WordNode>], input_len: usize) -> ViterbiResult {
-        // dp[i] = 到达位置 i 的最优路径
-        let mut dp: Vec<DpEntry> = (0..=input_len)
-            .map(|_| DpEntry {
+        Self::decode_dp_nbest(nodes, input_len, 1)
+            .into_iter()
+            .next()
+            .unwrap_or(ViterbiResult {
+                words: Vec::new(),
                 log_prob: f64::NEG_INFINITY,
-                prev_pos: 0,
-                word: String::new(),
-                syl_mask: 0,
+                boundary: 0,
             })
-            .collect();
-        dp[0].log_prob = 0.0;
+    }
+
+    /// K-best DP：每个位置保留 top-K 条路径，回溯出至多 `k` 条整句解。
+    ///
+    /// **`k == 1` 时与单路径 DP 逐位相同**（tie-break 见 [`push_topk`]），这是整个
+    /// N-best 改造的零回归依据：出厂 `sentence_max_count = 1` 走的就是这条。
+    ///
+    /// 返回按分数降序，**未按文本去重** —— 不同切分可能拼出同一串字
+    /// （`xi'an` 的 xi|an 与 xian 都可能落到同一个词上），去重要在调用方连同
+    /// 「凑够 N 条」一起做，因为去重后条数会少于 k。
+    fn decode_dp_nbest(nodes: &[Vec<WordNode>], input_len: usize, k: usize) -> Vec<ViterbiResult> {
+        let k = k.max(1);
+        // dp[i] = 到达位置 i 的 top-K 路径（降序）。空 = 该位置不可达
+        // （单路径版本用 log_prob == NEG_INFINITY 表达同一件事）。
+        let mut dp: Vec<Vec<DpEntry>> = vec![Vec::new(); input_len + 1];
+        dp[0].push(DpEntry {
+            log_prob: 0.0,
+            prev_pos: 0,
+            prev_idx: 0,
+            word: String::new(),
+            syl_mask: 0,
+        });
 
         // nodes[end_pos] = 所有在字节位置 end_pos 结束的词（与 LatticeBuilder::build 的
         // 存储约定一致：node 存入 nodes[char_end]）。此前误读 nodes[end_pos-1] 导致
@@ -326,54 +406,75 @@ impl ViterbiDecoder {
             }
             for node in &nodes[end_pos] {
                 let start_pos = node.start;
-                if dp[start_pos].log_prob == f64::NEG_INFINITY {
-                    continue;
-                }
-                let total_prob = dp[start_pos].log_prob + node.log_prob;
-                // 严格大于：相等分数保留先到的（beam 侧的 tie-break 复刻的正是这里）。
-                if total_prob > dp[end_pos].log_prob {
-                    dp[end_pos] = DpEntry {
-                        log_prob: total_prob,
+                // 前驱的**每一条**都要试：次优整句往往正是「某一段换了个词」，
+                // 只接前驱的最优线就退化回单路径了。
+                for idx in 0..dp[start_pos].len() {
+                    let prev = &dp[start_pos][idx];
+                    if prev.log_prob == f64::NEG_INFINITY {
+                        continue;
+                    }
+                    let entry = DpEntry {
+                        log_prob: prev.log_prob + node.log_prob,
                         prev_pos: start_pos,
+                        prev_idx: idx,
                         word: node.word.clone(),
                         syl_mask: node.syl_mask,
                     };
+                    push_topk(&mut dp[end_pos], entry, k);
                 }
             }
         }
 
-        // 回溯
-        let mut words = Vec::new();
-        let mut pos = input_len;
-
-        // 从最远可达位置回溯
-        while pos > 0 && dp[pos].log_prob == f64::NEG_INFINITY {
-            pos -= 1;
+        // 从最远可达位置回溯（同单路径版本：整串走不通时退而求其次）。
+        let mut end = input_len;
+        while end > 0 && dp[end].is_empty() {
+            end -= 1;
+        }
+        if end == 0 {
+            return Vec::new();
         }
 
-        // 回溯的同时把各节点的音节 mask 平移到全输入空间累加，得到整句的真实边界。
-        // 输入超 64 字节时 bitmask 表达不下，一律给 0（= 无信息，下游降级放行）。
-        let mut boundary = 0u64;
         let expressible = input_len <= 64;
-        while pos > 0 {
-            let entry = &dp[pos];
-            if entry.word.is_empty() {
-                break;
-            }
-            words.push(entry.word.clone());
-            if expressible {
-                boundary |= entry.syl_mask << entry.prev_pos;
-            }
-            pos = entry.prev_pos;
-        }
-
-        words.reverse();
-
-        ViterbiResult {
-            words,
-            log_prob: dp[input_len].log_prob,
-            boundary: if expressible { boundary } else { 0 },
-        }
+        // ★ **整串走不通时，分数一律 NEG_INFINITY**，哪怕 words 有内容。
+        //
+        // 这不是笔误，是单路径版本一直以来的行为（它取 `dp[input_len].log_prob` 而非回溯
+        // 起点 `dp[pos]` 的分），而且那个「看起来像 bug」的取值**承担着压制部分解的功能**：
+        // 回溯起点退到 `end < input_len` 意味着这条解没有解释完整串输入，把它的真实分数
+        // 放出去，它就会以正常权重去和完整解竞争。实测 `bzdhaobuhao` 一类输入下
+        // 「不知道哈」（多吞一个字的部分解）会就此抢走首选，压过词频高 672 倍的「不知道」
+        // —— `competing_cuts_coexist_and_are_ranked_by_frequency` 当场抓到。
+        //
+        // 改这里之前先想清楚谁来接替这道压制，不要只看「words 非空却报 -inf 很奇怪」。
+        let full_reach = end == input_len;
+        (0..dp[end].len())
+            .map(|rank| {
+                // 回溯第 rank 条：沿 (prev_pos, prev_idx) 往回走。
+                let mut words = Vec::new();
+                let mut boundary = 0u64;
+                let (mut pos, mut idx) = (end, rank);
+                while pos > 0 {
+                    let entry = &dp[pos][idx];
+                    if entry.word.is_empty() {
+                        break;
+                    }
+                    words.push(entry.word.clone());
+                    if expressible {
+                        boundary |= entry.syl_mask << entry.prev_pos;
+                    }
+                    (pos, idx) = (entry.prev_pos, entry.prev_idx);
+                }
+                words.reverse();
+                ViterbiResult {
+                    words,
+                    log_prob: if full_reach {
+                        dp[end][rank].log_prob
+                    } else {
+                        f64::NEG_INFINITY
+                    },
+                    boundary: if expressible { boundary } else { 0 },
+                }
+            })
+            .collect()
     }
 
     /// beam search：每个位置按末词保留至多 [`BEAM_WIDTH`] 条线，转移时叠加上下文分。
@@ -633,6 +734,103 @@ mod tests {
         nodes[2].push(node(0, 2, "后", 1.0));
         let r = ViterbiDecoder::new().decode(&nodes, input_len);
         assert_eq!(r.words, vec!["先".to_string()]);
+    }
+
+    /// K=1 的 K-best 必须与单路径 DP **逐位相同** —— 这是整个 N-best 改造的零回归依据。
+    ///
+    /// 同分那条尤其要看住：`push_topk` 取「第一个严格小于」的位置插入，等价于旧版的
+    /// 「严格大于才覆盖」。写成 `<=` 就会让后到的同分项顶掉先到的，整句结果相对基线漂移。
+    #[test]
+    fn k_of_one_matches_single_path_dp() {
+        let input_len = 4usize;
+        let mut nodes: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
+        nodes[2].push(node(0, 2, "先", 1.0));
+        nodes[2].push(node(0, 2, "后", 1.0)); // 同分，须保留「先」
+        nodes[4].push(node(2, 4, "来", 1.0));
+        nodes[4].push(node(0, 4, "先来", 1.5)); // 整词分更高，但两段合计 2.0 更优
+
+        let single = ViterbiDecoder::decode_dp(&nodes, input_len);
+        let nbest = ViterbiDecoder::decode_dp_nbest(&nodes, input_len, 1);
+        assert_eq!(nbest.len(), 1);
+        assert_eq!(nbest[0].words, single.words);
+        assert_eq!(nbest[0].log_prob, single.log_prob);
+        assert_eq!(nbest[0].boundary, single.boundary);
+        assert_eq!(single.words, vec!["先".to_string(), "来".to_string()]);
+    }
+
+    /// K>1 时次优解要出得来，且**按分数降序**。
+    ///
+    /// 次优整句的典型形态正是「某一段换了个词」，所以转移时必须对前驱的**每一条**都试 ——
+    /// 只接前驱最优线的话，`dp[end]` 里堆的全是同一条前缀的延伸，K 条里看不到真正的第二解。
+    #[test]
+    fn nbest_returns_ranked_alternatives() {
+        let input_len = 4usize;
+        let mut nodes: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
+        // 前段两个互斥的词，分数不同
+        nodes[2].push(node(0, 2, "盖", 2.0));
+        nodes[2].push(node(0, 2, "概", 1.0));
+        // 后段唯一
+        nodes[4].push(node(2, 4, "伦", 1.0));
+
+        let r = ViterbiDecoder::decode_dp_nbest(&nodes, input_len, 3);
+        assert_eq!(r.len(), 2, "只有两条完整路径");
+        assert_eq!(r[0].words, vec!["盖".to_string(), "伦".to_string()]);
+        assert_eq!(r[1].words, vec!["概".to_string(), "伦".to_string()]);
+        assert!(
+            r[0].log_prob > r[1].log_prob,
+            "必须按分数降序: {:?}",
+            r.iter().map(|x| x.log_prob).collect::<Vec<_>>()
+        );
+    }
+
+    /// 每条解的 `boundary` 要跟着**自己那条路径**走，不能都取最优解的。
+    ///
+    /// 下游拿它回填 `Candidate::boundary`，双拼校验与自动造词都依赖它；
+    /// 串了就是「选了第 2 条整句，学进词库的却是第 1 条的切分」。
+    #[test]
+    fn each_alternative_carries_its_own_boundary() {
+        let input_len = 4usize;
+        let mut nodes: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
+        // 路径甲：两段各 2 字节 ⇒ 位 0、2
+        nodes[2].push(node(0, 2, "甲", 2.0));
+        nodes[4].push(node(2, 4, "乙", 2.0));
+        // 路径乙：整段一个词、单音节 ⇒ 只有位 0
+        nodes[4].push(node(0, 4, "丙", 3.0));
+
+        let r = ViterbiDecoder::decode_dp_nbest(&nodes, input_len, 3);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].words, vec!["甲".to_string(), "乙".to_string()]);
+        assert_eq!(r[0].boundary, 0b101, "两段: 位 0 与位 2");
+        assert_eq!(r[1].words, vec!["丙".to_string()]);
+        assert_eq!(r[1].boundary, 0b1, "一段: 只有位 0");
+    }
+
+    /// **整串走不通的解，分数必须是 `-inf`**，哪怕 `words` 有内容。
+    ///
+    /// 这条看着反直觉，却是单路径版本一直以来的行为，而且承担着**压制部分解**的功能：
+    /// 放出真实分数后，只解释了前半截的解会以正常权重去和完整解竞争。
+    /// 真机现场是 `bzdhaobuhao` 下「不知道哈」抢走首选、压过词频高 672 倍的「不知道」。
+    #[test]
+    fn partial_reach_paths_report_neg_infinity() {
+        let input_len = 6usize;
+        let mut nodes: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
+        // 只能走到位置 4，末尾两字节无人认领。
+        nodes[2].push(node(0, 2, "甲", 2.0));
+        nodes[4].push(node(2, 4, "乙", 2.0));
+
+        let r = ViterbiDecoder::decode_dp_nbest(&nodes, input_len, 3);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].words, vec!["甲".to_string(), "乙".to_string()]);
+        assert_eq!(
+            r[0].log_prob,
+            f64::NEG_INFINITY,
+            "部分解不得带正常分数出去竞争"
+        );
+        // 单路径版本同样如此 —— 两侧必须一致。
+        assert_eq!(
+            ViterbiDecoder::decode_dp(&nodes, input_len).log_prob,
+            f64::NEG_INFINITY
+        );
     }
 
     /// 记录每次 `query` 的入参，用来验证 context / is_rear 是怎么构造的。
