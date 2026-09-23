@@ -352,7 +352,20 @@ impl Coordinator {
         match Store::open(&p) {
             Ok(s) => {
                 info!("Opened redb store: {}", p.display());
-                Some(Arc::new(s))
+                let s = Arc::new(s);
+                // 空闲一分钟就把 redb 的页缓存还给系统。那笔缓存只涨不落
+                // （上界 ≈ min(配额, 库文件大小)，19 万词实测 41 MB、50 万词约 90 MB），
+                // 是「导入大词库后内存占用变高」的正主。写那一路已在 `dict.import` /
+                // `backup.restore` / `dict.clear` 之后直接丢；读那一路躲不掉——设置页的
+                // 分页要给精确 `total` 就不能早退，照样扫完整表——只能靠这条兜。
+                //
+                // 60 秒 / 10 秒一拍：判据是「真的没人在用」，那时重开 Database 的几毫秒
+                // 与随后几次冷查询都没人感知得到。间隔不做成配置键（见该函数的文档）。
+                s.spawn_idle_cache_reclaimer(
+                    std::time::Duration::from_secs(60),
+                    std::time::Duration::from_secs(10),
+                );
+                Some(s)
             }
             Err(e) => {
                 warn!("Failed to open redb store {}: {}", p.display(), e);

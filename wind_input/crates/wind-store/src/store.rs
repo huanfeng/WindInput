@@ -9,7 +9,7 @@
 use redb::{Database, TableDefinition};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 当前存储版本（迁移锚点）
 pub const CURRENT_VERSION: u32 = 1;
@@ -118,6 +118,16 @@ pub struct Store {
     db: Mutex<Option<Database>>,
     /// 本库的页缓存上限；`resume` 重开时要用同一个值，故随实例存着。
     cache_bytes: usize,
+    /// 上一轮检查之后有没有访问过本库。由 [`Self::with_db`] 置位、空闲回收线程取走。
+    ///
+    /// **刻意不存时间戳**：`with_db` 是热路径（一次简拼召回要经它十几遍），而
+    /// `Instant::elapsed()` 是一次 `clock_gettime`。改成「回收线程自己按固定节拍采样」
+    /// 之后，热路径只剩一个 `Relaxed` 的 bool store，代价可以忽略；精度损失至多一个
+    /// 节拍，而判据本来就是「空闲了一分钟」这种量级的事。
+    touched: std::sync::atomic::AtomicBool,
+    /// 累计丢弃页缓存的次数。供测试断言与诊断——「缓存到底有没有被回收」在外部
+    /// 不可观测（RSS 不降，见 `tests/redb_cache_high_water.rs`），只能由内部报数。
+    drops: std::sync::atomic::AtomicU64,
 }
 
 impl Store {
@@ -141,6 +151,8 @@ impl Store {
             path,
             db: Mutex::new(Some(db)),
             cache_bytes,
+            touched: std::sync::atomic::AtomicBool::new(false),
+            drops: std::sync::atomic::AtomicU64::new(0),
         };
         store.run_migrations()?;
         store.backfill_abbrev_indexes();
@@ -211,6 +223,10 @@ impl Store {
         &self,
         f: impl FnOnce(&Database) -> anyhow::Result<R>,
     ) -> anyhow::Result<R> {
+        // 空闲回收的唯一信号源。放在这里而不是各个读写函数里：`with_db` 是**所有**
+        // 读写的唯一入口（AGENTS.md 的硬约定），漏不掉。
+        self.touched
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(db) => f(db),
@@ -365,6 +381,8 @@ impl Store {
         let mut last = match Self::reopen(&self.path, self.cache_bytes) {
             Ok(db) => {
                 *guard = Some(db);
+                self.drops
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 debug!("Store page cache dropped: {}", self.path.display());
                 return Ok(());
             }
@@ -395,6 +413,81 @@ impl Store {
         let db = open_db(path, cache_bytes)?;
         Self::init_tables(&db)?;
         Ok(db)
+    }
+
+    /// 累计丢弃页缓存的次数。诊断与测试用。
+    pub fn page_cache_drops(&self) -> u64 {
+        self.drops.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 起一条后台线程：**空闲够久就把页缓存还回去**。
+    ///
+    /// # 为什么光靠「写完就丢」不够
+    ///
+    /// 导入之后接 [`Self::drop_page_cache`] 只堵住了写那一路。真正把高水位顶起来的还有
+    /// 读：设置页的分页列表要给出精确的 `total`，就**不能中途早退**，于是照样扫完整表、
+    /// 把走过的叶子页全填进读缓存。用户导入完随手翻一下词库标签，41 MB 就原样回来了。
+    /// 正常打字也在慢慢填（简拼召回、前缀补全都读页），只是慢得多。
+    ///
+    /// redb 没有按范围计数的 API（`len()` 是 O(1) 但只给**整表**，而我们的 key 是
+    /// `schema\0code\0text`、一张表混着所有方案），所以「不扫全表也能拿到 total」这条路
+    /// 要自己维护计数器，写路径一多就会漏。与其在每条路上堵，不如在**空闲时统一回收**：
+    /// 这条覆盖所有填缓存的路径，包括将来新加的。
+    ///
+    /// # 判据
+    ///
+    /// 连续 `idle` 没有任何 `with_db`，且这期间之前确实访问过（`pending`），才丢一次。
+    /// 不设 `pending` 的话，一个没人用的输入法会每分钟白白重开一次数据库。
+    ///
+    /// 丢缓存本身要重开 `Database`（毫秒级）并让随后头几次查询走冷缓存，所以判据必须是
+    /// 「真的没人在用」——那时这点代价没人感知得到。冷缓存也不等于慢：redb 2.x 未命中走
+    /// `read` 系统调用，下面还垫着 OS 页缓存，是 µs 级 syscall 而非磁盘寻道。
+    ///
+    /// 线程持 `Weak`：`Store` 被丢弃后它自己退出，不拖住进程。
+    ///
+    /// ⚠️ 间隔**不做成配置键**（`docs/architecture/config-design-rules.md` §R1：差异可由
+    /// 程序判定就别加用户键）。参数化只为测试能用毫秒级的值跑完。
+    pub fn spawn_idle_cache_reclaimer(
+        self: &std::sync::Arc<Self>,
+        idle: std::time::Duration,
+        tick: std::time::Duration,
+    ) {
+        let weak = std::sync::Arc::downgrade(self);
+        let ticks_to_idle = (idle.as_millis() / tick.as_millis().max(1)).max(1) as u32;
+        let spawned = std::thread::Builder::new()
+            .name("store-cache-reclaim".into())
+            .spawn(move || {
+                let mut quiet = 0u32;
+                let mut pending = false;
+                loop {
+                    std::thread::sleep(tick);
+                    let Some(store) = weak.upgrade() else { return };
+                    if store
+                        .touched
+                        .swap(false, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        // 这一拍里有人用过：静默计数归零，并记下「缓存可能涨了」。
+                        quiet = 0;
+                        pending = true;
+                        continue;
+                    }
+                    quiet += 1;
+                    if pending && quiet >= ticks_to_idle {
+                        match store.drop_page_cache() {
+                            Ok(()) => debug!("空闲 {idle:?}，已回收 redb 页缓存"),
+                            // 回收失败时 `drop_page_cache` 已经自救过一次仍不成，store
+                            // 停在暂停态——那是故障，不是「内存没回落」。
+                            Err(e) => error!("空闲回收页缓存失败：{e}"),
+                        }
+                        pending = false;
+                        quiet = 0;
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            // 不致命：只是内存不会自动回落，功能一切照旧。
+            warn!("空闲页缓存回收线程启动失败（{e}），内存将不会自动回落");
+        }
     }
 
     /// 是否处于暂停态
