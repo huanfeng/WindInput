@@ -2069,6 +2069,26 @@ impl EngineManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .phrase_seg;
+        // 混输分支据此取**共享**英文引擎而不是另建一份。闭包在 `build_engine` 内部求值，
+        // 故 `enable_english` 关着时英文引擎一次都不会被建出来。
+        //
+        // ⚠️ 构建英文方案**自己**时必须传 `None`：英文方案不能把自己当成自己的英文子引擎。
+        // `read_schema` 合并 override 走的是无白名单的 `merge_toml`，所以 `english.toml` 里
+        // 写一句 `[engine] type = "mixed"` 就能把英文方案变成混输，于是
+        // `shared_english_engine` → `ensure_loaded("english")` → 持 `build_locks["english"]`
+        // → mixed 分支回调 → `shared_english_engine` → `ensure_loaded("english")`
+        // → **同一线程再取同一把 `Mutex`**。`std::sync::Mutex` 不可重入，整条打字线路就此
+        // 挂死，只能杀进程。传 `None` 后退化为「这个畸形的混输拿不到英文子引擎」——少一路
+        // 候选，但活着。
+        //
+        // 闭包**先绑定再取引用**：写成 `Some(&|| …)` 的话它是个临时值，在 `if` 表达式结束
+        // 时就被丢掉，借用活不到 `build_engine` 的调用点。
+        let borrow_shared_english = || self.shared_english_engine();
+        let english_provider: Option<EnglishProvider<'_>> = if schema_id == ENGLISH_SCHEMA {
+            None
+        } else {
+            Some(&borrow_shared_english)
+        };
         match Self::build_engine(
             schema_id,
             self.data_dir.as_deref(),
@@ -2080,9 +2100,7 @@ impl EngineManager {
             phrase_seg_anywhere,
             // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
             None,
-            // 混输分支据此取**共享**英文引擎而不是另建一份。闭包在此处求值，
-            // 故 `enable_english` 关着时英文引擎一次都不会被建出来。
-            Some(&|| self.shared_english_engine()),
+            english_provider,
         ) {
             Some(engine) => {
                 info!(
