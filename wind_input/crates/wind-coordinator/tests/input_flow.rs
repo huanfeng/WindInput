@@ -8553,17 +8553,17 @@ fn test_draft_layer_records_every_window_not_just_the_longest() {
     let mut drafts = Vec::new();
     while std::time::Instant::now() < deadline {
         drafts = all_drafts(&store, "wubi86");
-        if drafts.iter().any(|t| *t == three) {
+        if drafts.contains(&three) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(
-        drafts.iter().any(|t| *t == three),
+        drafts.contains(&three),
         "三字窗口「{three}」应进草稿表，实际: {drafts:?}"
     );
     assert!(
-        drafts.iter().any(|t| *t == two),
+        drafts.contains(&two),
         "二字窗口「{two}」也该在（滑窗记下的是全部 2~5 字组合，不只最长那个），实际: {drafts:?}"
     );
     let _ = std::fs::remove_file(&db);

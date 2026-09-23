@@ -84,7 +84,7 @@ fn the_streaming_walk_sees_exactly_what_the_listing_does() {
         .map(|i| WordIo {
             code: format!("a{i:03}"),
             text: format!("词{i:03}"),
-            weight: (i % 7) as i32,
+            weight: i % 7,
             count: 0,
             boundary: None,
         })
