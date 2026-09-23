@@ -1369,16 +1369,21 @@ pub trait WebDataRpc: WebDataHost {
             // （19 万条 × 两个 `String`，本机实测几十 MB 峰值）**只为了读一个数字**，
             // 而且这里对**每个方案**各来一遍。口径与列表逐条一致，守门见
             // wind-store 的 `tests/counts_match_listings.rs`。
-            let user_words = store.count_user_words(id).unwrap_or(0);
-            let temp_words = store.count_temp_words(id).unwrap_or(0);
-            // 候选调整按 data_schema_id 归属（拼音族折叠到 "pinyin"），与写端 `candidate_op`
-            // 和读端 `shadow.list` 同源。此前直传原始 id：双拼方案（`shuangpin_*`）折叠后
-            // 才是 "pinyin"，拿原始 id 去查恒得 0 条——设置页的规则计数于是永远显示 0。
+            // 三个计数**同走 `data_schema_id`**，与 `dict.listPaged` / `dict.search` /
+            // `shadow.list` 等 23 处读路径同源。直传原始 id 会恒得 0：拼音族折叠后才是
+            // "pinyin"，拿 `shuangpin` 去查的是一个空桶——连全拼自己都是 0，只有方案 id
+            // 恰好等于 "pinyin" 时才碰巧对上。
             //
-            // ⚠️ 上面 user_words / temp_words **刻意保持原始 id**：它们走
-            // `write_data_schema_id` 的按来源分桶，与 shadow 不是同一套归属规则，别顺手改。
+            // 由此可见的两件**设计使然、不是缺陷**的事：
+            // - 全拼与双拼显示**同一个数**：拼音族共享同一份用户词/临时词（`data_schema_id`
+            //   把 `engine.type == "pinyin"` 的方案统一折叠到 "pinyin"）。
+            // - 混输方案显示 **0**：混输本身不存用户词，词按来源落在它的目标方案里
+            //   （主码表方案 / "pinyin"，见 `write_data_schema_id`）。这里报 0 是如实反映。
+            let data_schema = self.engine_mgr().data_schema_id(id);
+            let user_words = store.count_user_words(&data_schema).unwrap_or(0);
+            let temp_words = store.count_temp_words(&data_schema).unwrap_or(0);
             let shadow_rules = store
-                .list_shadow_rules(&self.engine_mgr().data_schema_id(id))
+                .list_shadow_rules(&data_schema)
                 .map(|v| {
                     v.iter()
                         .map(|(_, r)| r.pinned.len() + r.deleted.len())
@@ -7814,43 +7819,71 @@ short_code_yield_level = 2
         );
     }
 
-    /// `dict.stats` 的候选调整计数必须走 `data_schema_id` 折叠。
+    /// `dict.stats` 的**三个计数**（userWords / tempWords / shadowRules）都必须走
+    /// `data_schema_id` 折叠，与 `dict.listPaged` / `dict.search` / `shadow.list` 同源。
     ///
-    /// 这里曾是**全仓唯一**一处直传原始方案 id 的 shadow 读取：写端 `candidate_op` 与
-    /// `shadow.list` 都折叠到 `"pinyin"`，统计却拿 `double_pinyin` 去查，于是双拼方案的
-    /// 规则计数恒显示 0——功能明明生效，设置页却像是一条规则都没有。
+    /// 两次踩的是同一个坑。shadow 那次：统计拿 `double_pinyin` 去查，而写端 `candidate_op`
+    /// 折叠到 `"pinyin"`，于是双拼的规则计数恒显示 0。user_words / temp_words 那次更隐蔽
+    /// ——它们直传原始 id 一直留到 2026-09-23，理由写在注释里：「刻意保持原始 id，走
+    /// `write_data_schema_id` 的按来源分桶」。**那条理由不成立**：`manager.rs` 的
+    /// `write_data_schema_id` 对非混输方案直接返回 `data_schema_id(自身)`，不按来源分桶，
+    /// 分桶只发生在混输。实测 `dict.add(pinyin_simp)` 后 `listPaged(double_pinyin).total = 1`
+    /// 而 stats 两行都是 0——连全拼自己都是 0，只有方案 id 恰好等于 `"pinyin"` 时才碰巧对上。
     ///
-    /// 反向对照（`user_words`）不可省：它**刻意**保持原始 id（走 `write_data_schema_id`
-    /// 的按来源分桶，与 shadow 不是同一套归属规则）。没有这一条，本测试无法区分
-    /// 「shadow 正确折叠」与「整个函数被改成一律折叠」——后者会悄悄改掉用户词的统计口径。
+    /// 本测试守两个方向，**缺一不可**：
+    /// - **正向**：拼音族折叠 ⇒ 全拼与双拼报同一个数（它们共享同一份词，是设计）。
+    /// - **反向**：码表方案 `wubi_like` 报自己的数，**不等于**拼音族那个数。没有这一条，
+    ///   把 `data_schema_id(id)` 误写成常量 `"pinyin"` 也能让正向断言全绿。
     #[test]
-    fn dict_stats_shadow_count_follows_data_schema_folding() {
+    fn dict_stats_counts_all_follow_data_schema_folding() {
         use std::io::Write;
-        let base_dir = std::env::temp_dir().join("wind_coord_stats_shadow_fold");
+        let base_dir = std::env::temp_dir().join("wind_coord_stats_fold_all");
         let schemas = base_dir.join("schemas");
         std::fs::create_dir_all(&schemas).unwrap();
         for name in ["pinyin_simp", "double_pinyin"] {
             let mut f = std::fs::File::create(schemas.join(format!("{name}.schema.toml"))).unwrap();
             write!(f, "[engine]\ntype = \"pinyin\"\n").unwrap();
         }
+        // 反向对照方案：非拼音族 ⇒ `data_schema_id` 返回自身 id，不参与折叠。
+        {
+            let mut f = std::fs::File::create(schemas.join("wubi_like.schema.toml")).unwrap();
+            write!(f, "[engine]\ntype = \"codetable\"\n").unwrap();
+        }
 
-        let db_path = std::env::temp_dir().join("wind_coord_stats_shadow_fold.redb");
+        let db_path = std::env::temp_dir().join("wind_coord_stats_fold_all.redb");
         let _ = std::fs::remove_file(&db_path);
         let store = Arc::new(Store::open(&db_path).unwrap());
         // `dict.stats` 遍历的是**已启用方案**（`config.schema.available`），不是目录扫描结果
-        // ——只写 schema.toml 不够，两个方案都得在这份清单里才会出现在统计中。
+        // ——只写 schema.toml 不够，方案都得在这份清单里才会出现在统计中。
         let mut cfg = Config::default();
-        cfg.schema.available = vec!["pinyin_simp".into(), "double_pinyin".into()];
+        cfg.schema.available = vec![
+            "pinyin_simp".into(),
+            "double_pinyin".into(),
+            "wubi_like".into(),
+        ];
         cfg.schema.active = "pinyin_simp".into();
         let c =
             Coordinator::new_headless_with_store(cfg, Some(base_dir.as_path()), Arc::clone(&store));
 
-        // 用全拼方案置顶一条（写端折叠 → 落在 "pinyin"）。
+        // 全拼下写一条用户词 + 置顶一条（写端都折叠 → 落在 "pinyin"）。
+        c.web_data_rpc(
+            "dict.add",
+            &json!({ "schemaId": "pinyin_simp", "code": "nihao", "text": "你好", "weight": 5 }),
+        )
+        .unwrap();
         c.web_data_rpc(
             "shadow.pin",
             &json!({ "schemaId": "pinyin_simp", "code": "hao", "word": "好", "position": 0 }),
         )
         .unwrap();
+        // 码表方案下写两条，数量**刻意与拼音族不同**——相等的话反向断言就退化成恒真。
+        for (code, text) in [("aaaa", "工"), ("bbbb", "王")] {
+            c.web_data_rpc(
+                "dict.add",
+                &json!({ "schemaId": "wubi_like", "code": code, "text": text, "weight": 5 }),
+            )
+            .unwrap();
+        }
 
         let stats = c.web_data_rpc("dict.stats", &json!({})).unwrap();
         let rows = stats.as_array().expect("stats 是数组");
@@ -7861,12 +7894,30 @@ short_code_yield_level = 2
                 .unwrap_or(Value::Null)
         };
 
+        // 正向：拼音族两行报同一个数。
+        assert_eq!(
+            row_of("pinyin_simp")["userWords"],
+            1,
+            "全拼须报出自己加的那条词"
+        );
+        assert_eq!(
+            row_of("double_pinyin")["userWords"],
+            1,
+            "双拼与全拼共享同一份用户词（data_schema_id 折叠到 \"pinyin\"），须报同一个数"
+        );
+        assert_eq!(row_of("pinyin_simp")["shadowRules"], 1, "全拼报 1 条规则");
         assert_eq!(
             row_of("double_pinyin")["shadowRules"],
             1,
-            "双拼方案须报出折叠后的规则数（与全拼共享同一条）"
+            "双拼须报出折叠后的规则数（与全拼共享同一条）"
         );
-        assert_eq!(row_of("pinyin_simp")["shadowRules"], 1, "全拼方案同样报 1");
+
+        // 反向：码表方案不参与折叠，报自己的 2 条。
+        assert_eq!(
+            row_of("wubi_like")["userWords"],
+            2,
+            "码表方案须报自己桶里的条数，不受拼音族折叠影响"
+        );
     }
 
     /// 拼音的默认导出段必须含**候选调整**，与设置页子标签同增同减。
