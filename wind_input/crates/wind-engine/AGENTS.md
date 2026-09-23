@@ -29,6 +29,13 @@
 - **词频是与 weight 解耦的独立维度**：引擎 `convert` 只产出基础权重候选；`freq_rerank` 是 coordinator 排序后调用的纯函数，**不得在引擎内改 weight 做词频**。两套语义（码表永久 used-first / 拼音衰减褪色）不可混用。
 - **拼音 vs 码表的根本差异**：拼音走连续解码（DAG 分词 + Viterbi 打分 + 层级排序，节点分取自词条自身的词典权重），码表只做 `DictManager` 精确 + 前缀查表无评分。匹配层级的**唯一真相**是 `wind_candidate::cmp_match_layers`（`is_abbrev`/`is_prefix`/`is_partial`），引擎层、协调器 `candidate_display_order`、`freq_rerank` 三处统一调用它，勿再各写一份。
 - **「层级」与「来源」必须分开**：层级键是布尔的，等价于「惩罚 = ∞」，只该用于结构性的匹配质量差异。召回**来源**（模糊音 `is_fuzzy`、用户词 `meta.is_user_dict`）一律走 weight 上的惩罚/加成，不得塞进 `cmp_match_layers`。`is_fuzzy` 曾是其首要键，真实词库下把模糊候选整体压到 200 名开外（`si` 下「是」第 231 位，而生产候选上限 50~300），模糊音在拼音/混输/临拼三条路径上全部等价于未实现；现改为 `FUZZY_WEIGHT_SCALE` 折扣。同理 `is_prefix` 被静态短语、`is_fuzzy` 被用户词简拼借作「沉底」标记都已拆出独立字段（`is_promoted_completion` / `is_abbrev`）——**要沉底就加自己的字段，别借现成的布尔**。
+- **整句词图的来源有两个，不是一个**（S2，2026-09-23）：系统词库走 `self.dict`（`CachedDict`），
+  已晋升的用户词走 `store_layers` + `lattice::add_store_nodes`，由 `schema.pinyin.sentence_uses_user_words`
+  把关（**出厂 false**）。三条建图通路（②主 / ②b 混合 / ②c 残码）各在 `build` 之后追加一次，
+  全拼降级支路刻意不接。**只收已晋升的用户词**（临时词与草稿层不收——滑窗草稿会造大量杂词），
+  **`boundary == 0` 不进图**（与 `build` 的降级放行相反：整句节点必须有真值切分），
+  **同词同起点取 `log_prob` 较大者**（GH#93 要的是「我调过的权重整句也得认」）。
+  ⚠️ 整句**没有 N-best**，用户词进图是赢者通吃 —— 这是它出厂必须关的根本原因。
 - **整句候选与词库同量纲**：拼音侧 `SENTENCE_WEIGHT_BASE`(3e7) **已退役**（`docs/design/sentence-weight-same-axis.md`，四步全部实施），现为 `sentence_weight()` = `exp(log_prob/n + ln DICT_TOTAL)`，即各词频次的几何平均。整句要降位走 `is_sentence_demoted`（step 6.5「整句让位于精确整词」，把整句压到 `用户词weight - 1`——这是「用户把词加进词库、配再高权重也换不回首选」的修复点）。3e7 只在**码表侧**还活着，且那边的值是 1e6（`codetable/sentence.rs`）。
 - **懒加载 + single-flight 构建锁**：`ensure_loaded` 抢方案专属 build_lock 后复查，避免后台预热与首次切换重复熔大词库；不同方案可并行构建。引擎缓存仅在 `invalidate_schema`/`reload_from_config` 清除（无 LRU 驱逐，与 Go 版不同）。
 - **`convert` 永不 panic**：引擎错误降级为 `ConvertResult::default()`（空候选），勿在热路径用会 panic 的 `unwrap`。锁中毒统一 `unwrap_or_else(|e| e.into_inner())`。

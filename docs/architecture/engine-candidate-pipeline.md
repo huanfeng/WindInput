@@ -219,6 +219,7 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
 | ②c **残码整句** | 尾部残码作为**待定音节**入图（`add_partial_final_nodes`），Viterbi 选最优单字：`buzhidaok`→「不知道**看**」。在**含残码的整串**上重建图——step ② 的 `nodes` 只到 `completed.len()+1`，残码末端没有槽位。对齐 librime `enable_completion` / fcitx5 不完整拼音。门槛：≥2 完整音节、非双拼、非分隔符、**非混输**（`enable_partial_final`） | `is_sentence` + `is_sentence_unanchored` |
 | ③ DAG 子短语 | 前 6 音节的各前缀子段查词（分段上屏候选） | `is_partial` |
 | ④ 前缀补全 | `search_prefix(query, 30)` | `is_prefix` |
+| — | **用户词入词图（S2）**：②/②b/②c 三条建图通路在 `build` 之后各追加一次 `add_store_nodes`，由 `schema.pinyin.sentence_uses_user_words` 把关（**出厂 false**）。全拼降级支路刻意不接 | 见下方说明 |
 | ⑤ 简拼 | `AbbrevMatcher` 判定（每字母为音节首字母且非完整音节序列）→ `search_abbrev(query, ABBREV_INDEX_LIMIT)` | natural_order=999999 沉底 |
 | ⑤b 混合简拼 | `mixed_abbrev::mixed_patterns` 枚举「声母段 + 音节段」的解释（`nhao` = n\|hao、`zhge` = zh\|ge），投影成声母键点查同一张 `AbbrevSection`，再逐段校验 | `is_abbrev` |
 | ⑥ 用户/临时造词层 | store_layers 整串精确 + 子码 + 前缀，按 text 与系统词典去重 | — |
@@ -233,6 +234,25 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
 > **声母段含双字母** `zh`/`ch`/`sh`（`AbbrevSeg::Retroflex`，`zhy` = zh\|y → 键 `zy`）。
 > 投影键取的是 z/c/s 那一位，故**索引不受影响**。含 `Retroflex` 的模式即使全是声母段也归
 > ⑤b（纯简拼路径逐字母切，表达不了「zh 是一个声母」），两种解释并存。
+
+> **S2：用户词进整句词图**（`lattice.rs::add_store_nodes`，2026-09-23）。此前整句词图只吃
+> `PinyinEngine::self.dict` 这**一个** `CachedDict`，而用户词挂在另一个独立字段 `store_layers`
+> 上，两者从不相交 ⇒ 自造词**根本没参与整句分词**（t134「盖伦单独能出、有盖伦吗就打散」、
+> GH#93「整句无法记忆手动调整过的词」）。
+>
+> - **只收已晋升的用户词**（`is_user_dict && !is_temp_dict`）。临时词与草稿层不收——滑窗
+>   草稿会造大量杂词，「用过即转正」才是它的质量闸。
+> - **`boundary == 0` 不进图**，与 `build` 对系统词的降级放行**相反**：整句每个节点都要求
+>   真值切分，无边界的手输码词进去等于让 Viterbi 按猜的切分组句。
+> - **同词同起点取 `log_prob` 较大者**（不是「已存在就跳过」）——GH#93 要的正是
+>   「我调过的权重整句也得认」。
+> - 标定两头都管：下有 `USER_NODE_BONUS`(+2.0 对数域)、上有 `USER_NODE_WEIGHT_CAP`(1e6)。
+>   加成的由来：出厂加词 `ADD_WORD_WEIGHT=1200` 翻不过同码的中频词（实测「概论」1217，
+>   差 17 分），用户按设计流程走完整句仍然不认。**不抬 `ADD_WORD_WEIGHT`**——那会动候选层
+>   的标定，而候选层本来就是对的。
+> - ⚠️ **整句没有 N-best**（`ViterbiResult` 只有一条 `words`）⇒ 用户词进图是赢者通吃，
+>   赢了整句就变、输了什么都看不见。这是它出厂必须关的根本原因。
+> - 关闭态零回归已证：`pinyin_eval` 四类 × 四项指标与改动前**逐位相同**。
 
 节点打分（lattice.rs `score_node()`）：以 `ln(weight / DICT_TOTAL)` 为基础（`weight` 即词条自身的
 词典权重，`w ≤ 0` 走 `0.5/T` 兜底，对齐 librime 的 `DBL_EPSILON` 思路），叠加单字实词惩罚(-3.0)/虚词加成(+2.0)/
@@ -955,6 +975,7 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 | `schema.mix.show_source_hint` | false | 拼音候选「拼」标记 |
 | `schema.codetable.*`（auto_commit_at_full / auto_commit_min_len / clear_on_empty_max / top_code_commit / show_code_hint / single_code_input / single_code_complete 等） | 见 config.toml | 可被 `schema_overrides/{id}.toml [codetable]` 按方案覆盖 |
 | `schema.pinyin.use_smart_compose` | — | Viterbi 整句开关 |
+| `schema.pinyin.sentence_uses_user_words` | **false** | 已晋升的用户词进整句词图（S2）。只接 `USER_WORDS`，不接临时词/草稿层。出厂关的理由是结构性的：整句无 N-best ⇒ 赢者通吃 |
 | `schema.pinyin.fuzzy.*` | — | 模糊音 11 对开关 |
 | `schema.pinyin.frequency.*`（half_life / base_scale / recency_peak） | — | 拼音词频衰减参数 |
 | `schema.pinyin.auto_learn.*` | — | 自动造词 |
