@@ -2848,6 +2848,40 @@ impl EngineManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = None;
         }
+        // ★ 扇出到把它当成员的混输方案。
+        //
+        // 从 `engines` 表里摘掉一条，**换不动已经建好的引擎手里那个 `Arc`**：混输在
+        // `build_engine` 时就把成员子引擎接了过去，此后与表里登记的是谁再无关系。
+        // 不扇出的后果有两重，实测 `EngineManager::with_store_override` 下
+        // `write_schema_override("english", …)` 之后 `is_loaded("english") == false` 而
+        // `is_loaded("wubi86_pinyin") == true`：
+        // - **功能**：改了成员方案的配置，混输里仍在服务旧子引擎——就是下面
+        //   `set_dict_enabled_live` 注释里那句「关了没反应，顺手改别的设置又好了」。
+        // - **内存**：旧英文引擎被混输吊着不放，`shared_english_engine` 下次又建一份，
+        //   进程里回到两份 12.7 MB（靶机 18 万条英文词时的实测值），共享引擎省下的原样吐回去。
+        //
+        // 此前这个扇出只写在 `set_dict_enabled_live` 一处，于是
+        // `write_schema_override` / `delete_schema_override` / `rebuild_all_caches`
+        // 三条路全漏着。下沉到这里，凡失效必扇出。
+        //
+        // **只摘 `engines` 条目、不递归走整个 `invalidate_schema`**：混输自身的配置并没有
+        // 变，它的 freq / behavior / name 等派生缓存仍然有效；而且递归在「混输把另一个混输
+        // 当 primary」这种配置下绕不出来。需要连带清那些缓存的调用方自己再走一趟完整失效。
+        //
+        // 取 id 时就把 `Arc` 丢掉（`map(|(id, _)| id)`）：留在 `Vec` 里会把旧引擎的释放
+        // 推迟到本函数返回，而这里正是要让它尽早落地。
+        let dependents: Vec<String> = self
+            .loaded_mixed_dependents(schema_id)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        for mixed_id in dependents {
+            debug!("失效 {schema_id}：连带失效混输方案 {mixed_id}（它捧着旧的成员子引擎）");
+            self.engines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&mixed_id);
+        }
         self.freq_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
