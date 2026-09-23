@@ -159,6 +159,22 @@ fn bonus_wins_close_calls_but_does_not_crush_high_frequency_words() {
     );
 }
 
+/// 残码整句（step 2c）也要认用户词：前半句用自造词、末尾还没打完，是最常见的形态。
+///
+/// `yougailunm` = 有 + 盖伦 + 残码 `m`（由 `add_partial_final_nodes` 补成「吗」）。
+/// 两类节点在同一张图上各管各的跨度，这条用例钉住它们**能串起来**。
+#[test]
+fn partial_final_sentence_also_uses_user_words() {
+    let s = store("partial");
+    s.add_user_word("pinyin", "gailun", "盖伦", 1200, 0b1001)
+        .unwrap();
+    let got = sentence(&engine("partial_on", s, true), "yougailunm");
+    assert!(
+        got.as_deref().unwrap_or("").contains("盖伦"),
+        "残码整句应认用户词，实际: {got:?}"
+    );
+}
+
 /// 硬约束：**临时词不进图**。滑窗草稿会造大量杂词，「用过即转正」才是质量闸。
 #[test]
 fn temp_words_never_enter_the_lattice() {

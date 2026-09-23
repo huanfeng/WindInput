@@ -1136,6 +1136,28 @@ impl PinyinEngine {
     /// 带着大段历史踩坑注释和专门的回归测试（层级一致、音节数过滤、边界豁免…），把它们
     /// 抽成公共函数的回归风险大于这里重复三十行的维护成本。判据本身很短，且都由
     /// `mixed_abbrev` 的同一套模式表达。
+    /// S2：把已晋升的用户词追加进词图（出厂关）。三条整句通路共用这一个入口。
+    ///
+    /// ⚠️ **必须在 `LatticeBuilder::build` 之后调**：同词同起点时它要拿用户词的分去更新
+    /// 既有节点（见 `add_store_nodes` 的第三条约束），那个节点得先在图里。
+    ///
+    /// 开关与 `store_layers` 的判定收在这里，调用点只写一行 —— 三处各写一遍 `if` 的话，
+    /// 新增通路时漏掉判定就是「开关对那条路不生效」，而那种错在测试里长得和「功能没接」
+    /// 一模一样。
+    fn maybe_add_store_nodes(
+        &self,
+        input: &str,
+        graph: &SegGraph,
+        nodes: &mut [Vec<lattice::LatticeNode>],
+    ) {
+        if self.config.sentence_uses_user_words
+            && let Some(store_dm) = &self.store_layers
+        {
+            self.lattice_builder
+                .add_store_nodes(input, graph, store_dm, nodes);
+        }
+    }
+
     fn recall_abbrev_prefix(&self, stroke: &str, consumed: usize, cands: &mut Vec<Candidate>) {
         let trie = &self.trie;
         let dict = &self.dict;
@@ -1639,6 +1661,12 @@ impl PinyinEngine {
         //    「不能跑两遍 convert」的根由。
         //
         //    模糊音传 `None`：与本支路其余部分一致，降级通道不做二次放大。
+        //
+        //    **S2 的用户词节点同样不接**，判据与上面拒绝 2c 残码补全的是同一条：本支路是
+        //    「双拼用户偶尔打一次全拼」的降级通道，产出恒沉在双拼候选之后，而用户词进图会
+        //    改变整句这唯一一条结果（没有 N-best 兜底）。收益极小、却要多维护一处判据面。
+        //    真要在双拼下用自造词组句，正途是那个方案本身的 step 2（用户词的 code 就是全拼，
+        //    双拼主路径转换后同域），不是这条降级支路。
         if self.config.use_smart_compose && syllables.len() >= 2 {
             let trie = &self.trie;
             let seg_graph = SegGraph::from_dag(&Dag::build(&completed, trie));
@@ -2589,18 +2617,7 @@ impl Engine for PinyinEngine {
                 Some(&self.fuzzy_config),
                 true,
             );
-            // S2：已晋升的用户词也进词图（出厂关）。必须在 `build` **之后**追加 ——
-            // 同词同起点时要拿用户词的分去更新既有节点，那个节点得先在图里。
-            if self.config.sentence_uses_user_words
-                && let Some(store_dm) = &self.store_layers
-            {
-                self.lattice_builder.add_store_nodes(
-                    completed,
-                    &seg_graph,
-                    store_dm,
-                    &mut lattice_nodes,
-                );
-            }
+            self.maybe_add_store_nodes(completed, &seg_graph, &mut lattice_nodes);
             let input_len = completed.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -2737,6 +2754,10 @@ impl Engine for PinyinEngine {
                 dict,
                 &mut lattice_nodes,
             );
+            // S2：残码整句同样认用户词 —— 前半句用自造词、末尾还没打完，是最常见的形态
+            // （`yougailunm` = 有 + 盖伦 + 残码 m）。残码那一段由上面的 partial_final
+            // 节点负责，两者在同一张图上各管各的跨度。
+            self.maybe_add_store_nodes(query, &seg_graph, &mut lattice_nodes);
             let full_len = query.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); full_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -2834,6 +2855,11 @@ impl Engine for PinyinEngine {
             );
             self.lattice_builder
                 .add_abbrev_nodes(abbr_query, dict, &mut lattice_nodes);
+            // S2：混合整句里**全拼那几段**也认用户词（`bzdgailun` 的 `gailun` 段）。
+            // ⚠️ 简拼段上取不到 —— 那里 `&input[p..q]` 是声母串，而用户词的 code 是全拼，
+            // 点查必然落空。这是有意的：简拼段的用户词召回归 step 5b/6.2，
+            // 那两条走的是声母投影键，与本方法不同域。
+            self.maybe_add_store_nodes(abbr_query, &graph, &mut lattice_nodes);
 
             let input_len = abbr_query.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
