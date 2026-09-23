@@ -418,27 +418,182 @@ type DatLeafRow = (u32, u16);
 /// EntryTable 一行：`(文本在共享池的偏移, 文本字节长, weight, natural_order, 音节边界位图)`。
 type DatEntryRow = (u32, u16, i32, u32, u64);
 
+/// 构建完成、待落盘的 .wdat 各段（含全部区段偏移）。由 [`WdatWriter::build`] 产出。
+///
+/// 与 [`WdatWriter`] 分开，是为了**让条目数据早点死**：`build` 消费 writer，文本进池即
+/// 释放，走到这里时那批数据已经还给分配器了（雾凇 65 万条构建期实测占 130 MB）。
+///
+/// 可以 [`emit`](Self::emit) 多次：落盘失败要退到别的目录、或写成了却打不开要换个地方
+/// 重来时，需要的只是这些字节，不是条目。
+pub struct WdatBlob {
+    dat: Dat,
+    leaves: Vec<DatLeafRow>,
+    entries: Vec<DatEntryRow>,
+    maxw: Vec<i32>,
+    a_dat: Option<Dat>,
+    a_leaves: Vec<DatLeafRow>,
+    a_entries: Vec<DatEntryRow>,
+    a_maxw: Vec<i32>,
+    pool_buf: Vec<u8>,
+    meta: Option<Vec<u8>>,
+    dat_size: u32,
+    dat_off: u32,
+    leaf_off: u32,
+    entry_off: u32,
+    str_off: u32,
+    abbrev_off: u32,
+    a_dat_off: u32,
+    a_leaf_off: u32,
+    a_entry_off: u32,
+    a_charmap_off: u32,
+    char_map_off: u32,
+    meta_off: u32,
+}
+
+impl WdatBlob {
+    /// 原子写一个目标：tmp+pid+seq → rename。`&self`，故可在多个目标上重试。
+    pub fn emit(&self, path: &Path) -> anyhow::Result<()> {
+        use std::io::Write;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let seq = ATOMIC_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut tmp_os = path.as_os_str().to_os_string();
+        tmp_os.push(format!(".tmp.{}.{seq}", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp_os);
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+
+        // Header (48B, LE)。
+        f.write_all(&MAGIC)?;
+        f.write_all(&VERSION.to_le_bytes())?;
+        f.write_all(&self.dat_size.to_le_bytes())?;
+        f.write_all(&(self.leaves.len() as u32).to_le_bytes())?;
+        f.write_all(&self.dat_off.to_le_bytes())?;
+        f.write_all(&self.leaf_off.to_le_bytes())?;
+        f.write_all(&self.entry_off.to_le_bytes())?;
+        f.write_all(&self.str_off.to_le_bytes())?;
+        f.write_all(&self.abbrev_off.to_le_bytes())?;
+        f.write_all(&self.meta_off.to_le_bytes())?;
+        f.write_all(&(self.entries.len() as u32).to_le_bytes())?;
+        f.write_all(&self.char_map_off.to_le_bytes())?;
+
+        let write_dat_section = |f: &mut std::io::BufWriter<std::fs::File>,
+                                 dat: &Dat,
+                                 maxw: &[i32],
+                                 leaves: &[DatLeafRow],
+                                 entries: &[DatEntryRow]|
+         -> std::io::Result<()> {
+            for v in &dat.base {
+                f.write_all(&v.to_le_bytes())?;
+            }
+            for v in &dat.check {
+                f.write_all(&v.to_le_bytes())?;
+            }
+            // v6 MaxW：与 base/check 等长，长度不符即为构建 bug（读取侧按 dat_size 定长切片）。
+            debug_assert_eq!(maxw.len(), dat.base.len());
+            for v in maxw {
+                f.write_all(&v.to_le_bytes())?;
+            }
+            for (eoff, elen) in leaves {
+                f.write_all(&eoff.to_le_bytes())?;
+                f.write_all(&elen.to_le_bytes())?;
+                f.write_all(&0u16.to_le_bytes())?;
+            }
+            for (toff, tlen, w, order, boundary) in entries {
+                f.write_all(&toff.to_le_bytes())?;
+                f.write_all(&tlen.to_le_bytes())?;
+                f.write_all(&w.to_le_bytes())?;
+                f.write_all(&order.to_le_bytes())?;
+                f.write_all(&boundary.to_le_bytes())?; // v4：音节边界（22B 中的末 8B）
+            }
+            Ok(())
+        };
+        let write_charmap =
+            |f: &mut std::io::BufWriter<std::fs::File>, dat: &Dat| -> std::io::Result<()> {
+                f.write_all(&dat.max_code.to_le_bytes())?;
+                for c in &dat.char_map {
+                    f.write_all(&c.to_le_bytes())?;
+                }
+                Ok(())
+            };
+
+        // 主区段 + 共享池。
+        write_dat_section(&mut f, &self.dat, &self.maxw, &self.leaves, &self.entries)?;
+        f.write_all(&self.pool_buf)?;
+
+        // 简拼区段：自描述头 + DAT/leaf/entry + 简拼 CharMap。
+        if let Some(ad) = &self.a_dat {
+            f.write_all(&(ad.base.len() as u32).to_le_bytes())?;
+            f.write_all(&(self.a_leaves.len() as u32).to_le_bytes())?;
+            f.write_all(&self.a_dat_off.to_le_bytes())?;
+            f.write_all(&self.a_leaf_off.to_le_bytes())?;
+            f.write_all(&self.a_entry_off.to_le_bytes())?;
+            f.write_all(&self.a_charmap_off.to_le_bytes())?;
+            write_dat_section(&mut f, ad, &self.a_maxw, &self.a_leaves, &self.a_entries)?;
+            write_charmap(&mut f, ad)?;
+        }
+
+        // 主 CharMap。
+        write_charmap(&mut f, &self.dat)?;
+
+        // Meta。
+        if let Some(m) = &self.meta
+            && !m.is_empty()
+        {
+            f.write_all(&(m.len() as u32).to_le_bytes())?;
+            f.write_all(m)?;
+        }
+
+        f.flush()?;
+        drop(f);
+        // 池里可能还存着指向替换前那份数据的 mmap reader，且 (大小, mtime) 未必看得出
+        // 差别（同构词库 + 同一 mtime 刻度）。守卫圈住 rename，见 `reader_pool::replacing`。
+        let replacing = crate::reader_pool::replacing(path);
+        let renamed = std::fs::rename(&tmp, path);
+        drop(replacing);
+        if let Err(e) = renamed {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        info!(
+            "Wrote wdat: {} keys, {} abbrevs, {} entries, dat_size={}",
+            self.leaves.len(),
+            self.a_leaves.len(),
+            self.entries.len(),
+            self.dat_size
+        );
+        Ok(())
+    }
+}
+
 /// 从排序后的 (code,entries) 构建一段独立 DAT：返回 (DAT, leaves, entries)，文本入共享池。
 /// 主表与简拼表各调一次（共用同一 StringPool 去重）。
 fn build_section(
-    sorted: &[&(String, Vec<WriteEntry>)],
+    mut sorted: Vec<(String, Vec<WriteEntry>)>,
     pool: &mut StringPool,
 ) -> (Dat, Vec<DatLeafRow>, Vec<DatEntryRow>) {
     let mut leaves: Vec<DatLeafRow> = Vec::with_capacity(sorted.len());
     let mut entries: Vec<DatEntryRow> = Vec::new();
-    let mut codes: Vec<&str> = Vec::with_capacity(sorted.len());
     let mut entry_byte_off = 0u32;
-    for kv in sorted {
-        let (code, ents) = (&kv.0, &kv.1);
-        codes.push(code.as_str());
+    // 先走一趟**只消费候选**：每条 text 的字节进池之后那个 `String` 就没人要了，就地
+    // 释放。`code` 留着——下面建 DAT 要借它们，那是本函数最后一步。
+    for (_, ents) in sorted.iter_mut() {
+        let ents = std::mem::take(ents);
         leaves.push((entry_byte_off, ents.len() as u16));
-        for (text, weight, order, boundary) in ents {
-            let text_off = pool.add(text);
-            entries.push((text_off, text.len() as u16, *weight, *order, *boundary));
-        }
         entry_byte_off += (ents.len() * ENTRY_SIZE) as u32;
+        for (text, weight, order, boundary) in ents {
+            let text_off = pool.add(&text);
+            entries.push((text_off, text.len() as u16, weight, order, boundary));
+            // `text` 在此出作用域 —— 池里已有它的字节，这份 `String` 不必活到写盘。
+        }
+        // 这个 code 的 `Vec<WriteEntry>` 也在此归还（52 万个 code 就是 52 万次）。
     }
-    (build_dat_from_sorted(&codes), leaves, entries)
+    let codes: Vec<&str> = sorted.iter().map(|(c, _)| c.as_str()).collect();
+    let dat = build_dat_from_sorted(&codes);
+    drop(codes);
+    drop(sorted); // code 串到这里才真正没人用
+    (dat, leaves, entries)
 }
 
 /// 计算 MaxW 段（v6）：`maxw[s]` = 以状态 s 为根的子树中所有条目 weight 的最大值。
@@ -607,27 +762,53 @@ impl WdatWriter {
         self.keys.len()
     }
 
-    /// 原子写 .wdat（tmp+pid+seq → rename，与 binformat 一致，仅防读到半文件）。
-    pub fn write(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
-        use std::io::Write;
-        let path = path.as_ref();
+    /// 构建各段并原子写 .wdat（tmp+pid+seq → rename，与 binformat 一致，仅防读到半文件）。
+    ///
+    /// **消费 `self`**：文本进池即释放，写盘时条目数据已经还给分配器了（雾凇 65 万条那次
+    /// 实测，这批数据在构建期间占 130 MB）。
+    ///
+    /// 要在多个目标之间回退的调用方用 [`Self::build`] 拿到 [`WdatBlob`]，它可以落盘多次。
+    pub fn write(self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        self.build().emit(path.as_ref())
+    }
 
-        // 按 code 排序（确定性 + DAT key 唯一）。排序**引用**而非克隆全量数据，省一份大拷贝。
-        let mut sorted: Vec<&(String, Vec<WriteEntry>)> = self.keys.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut sorted_ab: Vec<&(String, Vec<WriteEntry>)> = self.abbrevs.iter().collect();
-        sorted_ab.sort_by(|a, b| a.0.cmp(&b.0));
-        let has_abbrev = !sorted_ab.is_empty();
+    /// 排序 + 建 DAT + 入池，产出待落盘的 [`WdatBlob`]。消费 `self`。
+    ///
+    /// 想落盘多次（正式路径写不进去要退到临时目录、或写成了但打不开要换个地方重来）就用
+    /// 这个：条目数据在这一步结束时已经释放，而 `WdatBlob::emit` 只碰那些字节。
+    pub fn build(mut self) -> WdatBlob {
+        let has_abbrev = !self.abbrevs.is_empty();
 
         // 共享字符串池：主表先入（简拼候选多与主表 text 重复 → 去重复用偏移）。
         let mut pool = StringPool::new();
-        let (dat, leaves, entries) = build_section(&sorted, &mut pool);
+
+        // 按 code 排序（确定性 + DAT key 唯一）。
+        //
+        // 排的是 **owned 元组**而不是从前的 `Vec<&(..)>`：消费式的 `build_section` 要把
+        // entries move 出来，持引用做不到。代价是排序搬动 32 字节的元素而非 8 字节的引用
+        // （52 万条上是毫秒级），换来的是文本能边进池边释放，而不是与池全程叠加。
+        let mut keys = std::mem::take(&mut self.keys);
+        keys.sort_by(|a, b| a.0.cmp(&b.0));
+        let (dat, leaves, entries) = build_section(keys, &mut pool);
+
         let (a_dat, a_leaves, a_entries) = if has_abbrev {
-            let (d, l, e) = build_section(&sorted_ab, &mut pool);
+            let mut abbrevs = std::mem::take(&mut self.abbrevs);
+            abbrevs.sort_by(|a, b| a.0.cmp(&b.0));
+            let (d, l, e) = build_section(abbrevs, &mut pool);
             (Some(d), l, e)
         } else {
             (None, Vec::new(), Vec::new())
         };
+
+        // 池的索引到这里就没用了（去重只发生在构建期），显式解构让那 8B×槽数 立刻归还
+        // ——65 万条约 10 MB，而下面还要把整个文件写一遍。
+        let StringPool {
+            buf: pool_buf,
+            slots,
+            filled: _,
+        } = pool;
+        drop(slots);
+
         // MaxW 段（v6 剪枝上界），与各自的 DAT 同长。
         let maxw = compute_maxw(&dat, &leaves, &entries);
         let a_maxw = a_dat
@@ -640,7 +821,7 @@ impl WdatWriter {
         let leaf_off = dat_off + dat_size * 4 * 3;
         let entry_off = leaf_off + (leaves.len() * LEAF_SIZE) as u32;
         let str_off = entry_off + (entries.len() * ENTRY_SIZE) as u32;
-        let after_pool = str_off + pool.buf.len() as u32;
+        let after_pool = str_off + pool_buf.len() as u32;
 
         // 简拼区段（AbbrevSection）：紧跟共享池之后。自描述头 24B（6×u32）：
         // {dat_size, leaf_count, dat_off, leaf_off, entry_off, char_map_off}。
@@ -672,116 +853,30 @@ impl WdatWriter {
             _ => 0,
         };
 
-        // 原子写。
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        WdatBlob {
+            dat,
+            leaves,
+            entries,
+            maxw,
+            a_dat,
+            a_leaves,
+            a_entries,
+            a_maxw,
+            pool_buf,
+            meta: self.meta,
+            dat_size,
+            dat_off,
+            leaf_off,
+            entry_off,
+            str_off,
+            abbrev_off,
+            a_dat_off,
+            a_leaf_off,
+            a_entry_off,
+            a_charmap_off,
+            char_map_off,
+            meta_off,
         }
-        let seq = ATOMIC_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut tmp_os = path.as_os_str().to_os_string();
-        tmp_os.push(format!(".tmp.{}.{seq}", std::process::id()));
-        let tmp = std::path::PathBuf::from(tmp_os);
-        let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-
-        // Header (48B, LE)。
-        f.write_all(&MAGIC)?;
-        f.write_all(&VERSION.to_le_bytes())?;
-        f.write_all(&dat_size.to_le_bytes())?;
-        f.write_all(&(leaves.len() as u32).to_le_bytes())?;
-        f.write_all(&dat_off.to_le_bytes())?;
-        f.write_all(&leaf_off.to_le_bytes())?;
-        f.write_all(&entry_off.to_le_bytes())?;
-        f.write_all(&str_off.to_le_bytes())?;
-        f.write_all(&abbrev_off.to_le_bytes())?;
-        f.write_all(&meta_off.to_le_bytes())?;
-        f.write_all(&(entries.len() as u32).to_le_bytes())?;
-        f.write_all(&char_map_off.to_le_bytes())?;
-
-        let write_dat_section = |f: &mut std::io::BufWriter<std::fs::File>,
-                                 dat: &Dat,
-                                 maxw: &[i32],
-                                 leaves: &[DatLeafRow],
-                                 entries: &[DatEntryRow]|
-         -> std::io::Result<()> {
-            for v in &dat.base {
-                f.write_all(&v.to_le_bytes())?;
-            }
-            for v in &dat.check {
-                f.write_all(&v.to_le_bytes())?;
-            }
-            // v6 MaxW：与 base/check 等长，长度不符即为构建 bug（读取侧按 dat_size 定长切片）。
-            debug_assert_eq!(maxw.len(), dat.base.len());
-            for v in maxw {
-                f.write_all(&v.to_le_bytes())?;
-            }
-            for (eoff, elen) in leaves {
-                f.write_all(&eoff.to_le_bytes())?;
-                f.write_all(&elen.to_le_bytes())?;
-                f.write_all(&0u16.to_le_bytes())?;
-            }
-            for (toff, tlen, w, order, boundary) in entries {
-                f.write_all(&toff.to_le_bytes())?;
-                f.write_all(&tlen.to_le_bytes())?;
-                f.write_all(&w.to_le_bytes())?;
-                f.write_all(&order.to_le_bytes())?;
-                f.write_all(&boundary.to_le_bytes())?; // v4：音节边界（22B 中的末 8B）
-            }
-            Ok(())
-        };
-        let write_charmap =
-            |f: &mut std::io::BufWriter<std::fs::File>, dat: &Dat| -> std::io::Result<()> {
-                f.write_all(&dat.max_code.to_le_bytes())?;
-                for c in &dat.char_map {
-                    f.write_all(&c.to_le_bytes())?;
-                }
-                Ok(())
-            };
-
-        // 主区段 + 共享池。
-        write_dat_section(&mut f, &dat, &maxw, &leaves, &entries)?;
-        f.write_all(&pool.buf)?;
-
-        // 简拼区段：自描述头 + DAT/leaf/entry + 简拼 CharMap。
-        if let Some(ad) = &a_dat {
-            f.write_all(&(ad.base.len() as u32).to_le_bytes())?;
-            f.write_all(&(a_leaves.len() as u32).to_le_bytes())?;
-            f.write_all(&a_dat_off.to_le_bytes())?;
-            f.write_all(&a_leaf_off.to_le_bytes())?;
-            f.write_all(&a_entry_off.to_le_bytes())?;
-            f.write_all(&a_charmap_off.to_le_bytes())?;
-            write_dat_section(&mut f, ad, &a_maxw, &a_leaves, &a_entries)?;
-            write_charmap(&mut f, ad)?;
-        }
-
-        // 主 CharMap。
-        write_charmap(&mut f, &dat)?;
-
-        // Meta。
-        if let Some(m) = &self.meta
-            && !m.is_empty()
-        {
-            f.write_all(&(m.len() as u32).to_le_bytes())?;
-            f.write_all(m)?;
-        }
-
-        f.flush()?;
-        drop(f);
-        // 池里可能还存着指向替换前那份数据的 mmap reader，且 (大小, mtime) 未必看得出
-        // 差别（同构词库 + 同一 mtime 刻度）。守卫圈住 rename，见 `reader_pool::replacing`。
-        let replacing = crate::reader_pool::replacing(path);
-        let renamed = std::fs::rename(&tmp, path);
-        drop(replacing);
-        if let Err(e) = renamed {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
-        info!(
-            "Wrote wdat: {} keys, {} abbrevs, {} entries, dat_size={}",
-            leaves.len(),
-            a_leaves.len(),
-            entries.len(),
-            dat_size
-        );
-        Ok(())
     }
 }
 

@@ -317,7 +317,9 @@ impl CachedDict {
         // 遍历所有键，导出到 writer
         dict.export_to_wdat(&mut writer);
 
-        if writer.key_count() == 0 {
+        // 先取数：`write` 消费 writer（构建时就把条目释放掉），之后问不出 key_count 了。
+        let key_count = writer.key_count();
+        if key_count == 0 {
             anyhow::bail!("No entries to write");
         }
 
@@ -325,7 +327,7 @@ impl CachedDict {
         info!(
             "Wrote .wdat cache: {} ({} keys)",
             wdat_path.display(),
-            writer.key_count()
+            key_count
         );
         Ok(())
     }

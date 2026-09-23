@@ -5954,9 +5954,13 @@ impl EngineManager {
                 .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("rime.merged.wdat")),
         );
+        // 先构建再逐个目标落盘：`build` 消费 writer，条目数据（65 万条那次占 130 MB）在这
+        // 一步结束时就还给分配器了，而回退重写只需要已经构建好的字节。从前是拿 writer 在
+        // 循环里重试，等于把那 130 MB 一直押到最后一个目标写完。
+        let blob = writer.build();
         for target in [&merged_wdat, &temp_fallback] {
             let is_fallback = target.as_path() == temp_fallback.as_path();
-            if let Err(e) = writer.write(target) {
+            if let Err(e) = blob.emit(target) {
                 if is_fallback {
                     warn!("Failed to write merged cache {}: {}", target.display(), e);
                 } else {
