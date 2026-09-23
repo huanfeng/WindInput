@@ -1107,6 +1107,23 @@ pub struct PinyinGlobalConfig {
     pub code_hint_source: String,
     #[serde(default = "default_true")]
     pub use_smart_compose: bool,
+    /// 让**已晋升的用户词**参与整句解码（S2）。**出厂 false**。
+    ///
+    /// 关闭时整句词图只从系统词库建，自造词永远不会成为整句的一段：「盖伦」单独打得出、
+    /// 「有盖伦吗」却被打散（t134）；手动调过权重的词在整句里同样不认（GH#93）。
+    ///
+    /// ★ 出厂关的三条理由都是结构性的，不是「怕有 bug」：整句**没有 N-best**（赢者通吃，
+    /// 输了连第二候选都没有）；它会改变**所有**老用户的整句结果（含从未造过词的
+    /// —— wdict 导入词也进图）；用户词 weight 的标定只做了上限截断、没做分布对齐。
+    ///
+    /// ⚠️ 只接已晋升的用户词，**不接临时词、不接草稿层**——滑窗草稿会造大量杂词，
+    /// 「用过即转正」才是它的质量闸。详见 `pinyin/lattice.rs::add_store_nodes`。
+    ///
+    /// ⚠️ 默认值与 `wind_engine::pinyin::Config::default()` 那份**必须同值**
+    ///（同 completion 两项的先例：两处分叉会让「引擎单测通过、协调器行为不同」这类假绿
+    /// 有可乘之机）。
+    #[serde(default)]
+    pub sentence_uses_user_words: bool,
     /// 拼音分隔策略（"auto" 等）。原 input.pinyin_separator 收拢至此。
     #[serde(default = "default_pinyin_separator")]
     pub separator: String,
@@ -1342,6 +1359,8 @@ impl Default for PinyinGlobalConfig {
         Self {
             code_hint_source: default_code_hint_source(),
             use_smart_compose: true,
+            // 出厂关，理由见字段文档的三条结构事实。与引擎侧 `pinyin::Config::default()` 同值。
+            sentence_uses_user_words: false,
             english_merge: PinyinEnglishMerge::default(),
             separator: default_pinyin_separator(),
             fuzzy: PinyinFuzzy::default(),

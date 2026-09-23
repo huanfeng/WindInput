@@ -6,6 +6,7 @@
 use crate::pinyin::dag::{MaskCheck, SegGraph};
 use crate::pinyin::fuzzy::{FuzzyConfig, FuzzyMatcher};
 use wind_dict::cached::CachedDict;
+use wind_dict::manager::DictManager;
 
 /// 虚词表：**字形 → 该字作虚词时的读音**（无调全拼）。
 ///
@@ -158,6 +159,23 @@ pub(crate) const ABBREV_NODE_PENALTY: f64 = 1.2;
 /// 简拼召回面宽（`bzd` 真实词库下 12 个词），全塞进去会让节点数与 Viterbi 的边数一起膨胀，
 /// 而排在后面的低频词几乎不可能赢下整句路径。按权重取前 N 即可。
 const ABBREV_NODE_LIMIT: usize = 8;
+
+/// 单个跨度上最多取几条用户词入图（[`LatticeBuilder::add_store_nodes`]）。
+///
+/// 同一个 code 下的用户词通常只有一两条（用户不会给同一串拼音造十个词），8 是宽松上界；
+/// 它同时是成本闸门：整句建图要遍历全部 (p, q) 跨度，每个跨度一次 redb 点查。
+const USER_NODE_LIMIT: usize = 8;
+
+/// 用户词入图时的 weight 上限（[`LatticeBuilder::add_store_nodes`]）。
+///
+/// 用户词与词典 weight 同轴，默认档位本就落在合理位置（手动加词 1200 压过 96.3% 的系统词、
+/// 造词晋升 800 压过 94.7%），故不做分布重映射，**只防极端值**：导入的 wdict 可以带任意
+/// 权重，`w = 2e9` 时 `ln(w/DICT_TOTAL) = +2.11`，而系统最大词（15,378,475）才 −2.76
+/// —— 差近 5 个自然对数单位（≈148 倍），足以让整句变成用户词拼接秀。
+///
+/// 取 1e6（`ln = −5.49`，约 p99.99+）：够强 —— 几乎压过所有系统词，又仍在词频轴内侧，
+/// 不会跨到对数正值那一段去碾压一切。
+const USER_NODE_WEIGHT_CAP: i32 = 1_000_000;
 
 /// 简拼跨度的最大字母数（= 最大音节数）。与 `AbbrevMatcher::find_candidates` 的上限一致。
 const MAX_ABBREV_SPAN: usize = 6;
@@ -541,6 +559,92 @@ impl LatticeBuilder {
                             log_prob,
                         });
                     }
+                }
+            }
+        }
+    }
+
+    /// 在已建好的词图上**追加用户词节点**（S2），让自造词参与整句解码。
+    ///
+    /// ## 解决什么
+    ///
+    /// 整句词图此前只从 [`CachedDict`]（系统词库）建，用户层挂在 `PinyinEngine` 的另一个
+    /// 字段上、两者从不相交 ⇒ 用户自造的词**根本没参与整句分词**：「盖伦」单独打得出，
+    /// 「有盖伦吗」却被打散（t134）；手动调过权重的词在整句里同样不认（GH#93）。
+    ///
+    /// ## 三条约束（都不是「防御性编程」，各有具体代价）
+    ///
+    /// 1. **只收已晋升的用户词**（`meta.is_user_dict && !meta.is_temp_dict`）。临时词与
+    ///    草稿层不收 —— 滑窗草稿会造出大量杂词，它的「用过即转正」才是质量闸；杂词直接
+    ///    进整句词图，污染的是所有人的整句。
+    /// 2. **`boundary == 0` 不进图**（与 [`Self::add_abbrev_nodes`] 同、与 [`Self::build`]
+    ///    的降级放行**相反**）。整句的每个节点都要求真值切分：手输码用户词没有可信边界，
+    ///    放进去等于让 Viterbi 按猜出来的切分组句。代价是隐性造词（无边界）不参与整句，
+    ///    这是有意的 —— 宁可不进，不可乱切。
+    /// 3. **同词同起点已在图中时取 `log_prob` 较大者**，而不是像简拼节点那样直接跳过。
+    ///    GH#93 要的正是这个：用户把一个**系统词库已有**的词加进用户库并调高权重，
+    ///    整句里也得认这个新权重。直接跳过的话，用户词对所有已在系统库里的词完全无效。
+    ///
+    /// ## 权重标定
+    ///
+    /// 用户词 weight 与词典 weight 同轴（`ln(w / DICT_TOTAL)`），默认档位天然落在合理位置：
+    /// 手动加词 1200 压过 96.3% 的系统词、造词晋升 800 压过 94.7%。故**不做分布重映射**，
+    /// 只截上限 [`USER_NODE_WEIGHT_CAP`] —— 导入词库可能带 `w=2e9`，那时 `ln(w/T) = +2.11`，
+    /// 比系统最大词还高近 5 个自然对数单位（≈148 倍），整句会变成用户词拼接秀。
+    ///
+    /// ⚠️ 本方法由 `Config::sentence_uses_user_words` 把关，**出厂关闭**；开关的三条理由
+    /// 见该字段文档（赢者通吃 / 影响全体老用户 / 标定只做了截断）。
+    pub fn add_store_nodes(
+        &self,
+        input: &str,
+        graph: &SegGraph,
+        store: &DictManager,
+        nodes: &mut [Vec<LatticeNode>],
+    ) {
+        let input_len = input.len();
+        for p in 0..input_len.min(graph.len()) {
+            for q in graph.ends_within(p, self.max_word_len) {
+                if q > input_len || q >= nodes.len() {
+                    continue;
+                }
+                let code = &input[p..q];
+                for cand in store.search(code, USER_NODE_LIMIT) {
+                    // 约束 1：只认已晋升的用户词。
+                    if !cand.meta.is_user_dict || cand.meta.is_temp_dict {
+                        continue;
+                    }
+                    // 约束 2：必须有真值切分，且该切分是本跨度上的一条合法路径。
+                    let offsets = match graph.mask_path(p, q, cand.boundary) {
+                        MaskCheck::Path(syl_count) => {
+                            if syl_count > self.max_word_len {
+                                continue;
+                            }
+                            mask_offsets(cand.boundary, q - p)
+                        }
+                        // 与 build 的降级放行相反：整句节点不接受无边界的词。
+                        MaskCheck::NoInfo | MaskCheck::Reject => continue,
+                    };
+                    let weight = cand.weight.min(USER_NODE_WEIGHT_CAP);
+                    let log_prob = score_node(&cand.text, code, weight)
+                        - AMBIGUOUS_PENALTY * graph.ambiguous_count(p, q, &offsets) as f64;
+                    // 约束 3：同词同起点取更优的那个分，而不是先到先得。
+                    if let Some(existing) = nodes[q]
+                        .iter_mut()
+                        .find(|n| n.word == cand.text && n.start == p)
+                    {
+                        if log_prob > existing.log_prob {
+                            existing.log_prob = log_prob;
+                        }
+                        continue;
+                    }
+                    nodes[q].push(LatticeNode {
+                        start: p,
+                        end: q,
+                        word: cand.text,
+                        syllables: slice_syllables(code, &offsets),
+                        syl_mask: offsets_mask(&offsets),
+                        log_prob,
+                    });
                 }
             }
         }

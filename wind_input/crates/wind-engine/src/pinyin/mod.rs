@@ -757,6 +757,22 @@ pub struct Config {
     pub completion_min_syllables: u32,
     /// 词组补全的音节数约束：候选最多比输入多几个音节。
     pub completion_max_extra_syllables: u32,
+    /// 是否让**已晋升的用户词**参与整句解码（S2）。
+    ///
+    /// 关闭（出厂）时整句词图只从系统词库建，用户自造词永远不会成为整句的一段：
+    /// 「盖伦」单独打得出、「有盖伦吗」却被打散（t134），手动调过权重的词在整句里
+    /// 同样不认（GH#93）——那不是联想弱也不是词频没学到，是它**根本没参与整句分词**。
+    ///
+    /// ★ **出厂 false 是硬约束**，理由不是「怕有 bug」而是三条结构事实：
+    /// - 整句**没有 N-best**（`ViterbiResult` 只有一条 `words`）⇒ 用户词进图是**赢者通吃**，
+    ///   赢了整句就变、输了什么都看不见，没有第二候选兜底；
+    /// - 它会改变**所有**老用户的整句结果，包括从未造过词的人（wdict 导入词也进图）；
+    /// - 用户词的 weight 轴与词频轴同源但语义不同（前者是「我要这个词」，后者是频次），
+    ///   标定只做了上限截断（见 [`USER_NODE_WEIGHT_CAP`]），没有做分布对齐。
+    ///
+    /// ⚠️ **只接 `USER_WORDS`（已晋升），不接临时词，更不接草稿层**。S5 滑窗会造出大量
+    /// 杂词，它的「用过即转正」才是质量闸；杂词若直接进整句词图，污染的是所有人的整句。
+    pub sentence_uses_user_words: bool,
     /// **双拼方案下**是否额外把击键串当全拼解释一遍（`nihao` → 「你好」）。
     ///
     /// 服务「多人共用一台机器」：主力用户打双拼，偶尔来的人只会全拼。产出的候选整体沉在
@@ -833,6 +849,9 @@ impl Default for Config {
             // 默认关：全拼降级是显式开启的降级通道，不该在任何未声明的地方生效
             // （测试要覆盖支路时显式置 true，这样"支路参与了哪些用例"一目了然）。
             allow_full_pinyin: false,
+            // 默认关：理由见字段文档的三条结构事实（赢者通吃 / 影响全体老用户 / 标定只做了截断）。
+            // ⚠️ 与 `wind_config::PinyinGlobalConfig` 那份默认值**保持同值**，同 completion 两项。
+            sentence_uses_user_words: false,
         }
     }
 }
@@ -2563,13 +2582,25 @@ impl Engine for PinyinEngine {
             } else {
                 SegGraph::from_dag(&Dag::build(completed, trie))
             };
-            let lattice_nodes = self.lattice_builder.build(
+            let mut lattice_nodes = self.lattice_builder.build(
                 completed,
                 &seg_graph,
                 dict,
                 Some(&self.fuzzy_config),
                 true,
             );
+            // S2：已晋升的用户词也进词图（出厂关）。必须在 `build` **之后**追加 ——
+            // 同词同起点时要拿用户词的分去更新既有节点，那个节点得先在图里。
+            if self.config.sentence_uses_user_words
+                && let Some(store_dm) = &self.store_layers
+            {
+                self.lattice_builder.add_store_nodes(
+                    completed,
+                    &seg_graph,
+                    store_dm,
+                    &mut lattice_nodes,
+                );
+            }
             let input_len = completed.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
