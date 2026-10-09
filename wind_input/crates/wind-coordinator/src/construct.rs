@@ -151,6 +151,10 @@ impl Coordinator {
             });
         }
 
+        // 闲置清扫（每分钟一拍）：方案常驻策略关着时摘掉 30 分钟没用的方案引擎。
+        // 与预热一样只在桌面构造器里起——移动端走 headless 构造，不受影响（设计 §9 D3）。
+        coordinator.spawn_idle_sweeper();
+
         // 恢复持久化的工具栏位置（按前台窗口所在显示器的 key 查找）。
         // 与运行期换屏走同一个函数——判据分成两套迟早漂移。
         coordinator.init_toolbar_pos();
@@ -227,38 +231,13 @@ impl Coordinator {
     }
 
     /// 启动预热线程的主体（`new` 里延迟 1.5 秒后调；**阻塞**，只可在后台线程 / 测试里调）：
-    /// 建好 `available` 全部方案 + 临拼 / 临英目标的引擎，再 [`Self::prewarm_indexes`]。
+    /// 按方案常驻策略建方案引擎（[`Self::prewarm_schemas_on_start`]：全部常驻，或只建
+    /// 用得着的），再 [`Self::prewarm_indexes`]，常驻关着时最后校验其余方案的缓存
+    /// （[`Self::refresh_schema_caches_on_start`]）。
     ///
     /// 与 `debug_desktop_startup_and_prewarm` 共用，理由同 [`Self::load_data_on_start`]。
     pub(crate) fn prewarm_on_start(&self) {
-        let active = self.engine_mgr.active_schema_id();
-        // available_schemas 只含「可切换的方案」。临时拼音 / 临时英文的目标引擎
-        // **不在其中**（它们是模式的实现，不是可切换方案），此前因此漏出预热范围：
-        // 实测首次按引导键进临拼时才同步加载 52 万词条的拼音库 + 英文库，用户感到
-        // 顿一下。两者都只在启用时才预热，不给没开这些功能的用户白付内存。
-        let mut targets: Vec<String> = self.engine_mgr.available_schemas().to_vec();
-        // ⚠ `temp_pinyin_target()` **自身就会 `ensure_loaded`**（它的语义是「可用才
-        // 返回」），故这一行本身即完成了临拼引擎的加载，下面循环里那次只是复查跳过。
-        // 看着绕，但比在此复制一份「开关 + 方案适用性 + 目标解析」的判据强——那套判据
-        // 是所有临拼入口的公共门卫，抄一份必然漂移。
-        if let Some(t) = self.engine_mgr.temp_pinyin_target() {
-            targets.push(t);
-        }
-        if self.rt().config.input.temp_english.show_candidates {
-            targets.push("english".to_string());
-        }
-        for id in targets {
-            if id == active || self.engine_mgr.is_loaded(&id) {
-                continue;
-            }
-            let t0 = std::time::Instant::now();
-            if self.engine_mgr.prewarm_schema(&id) {
-                tracing::debug!("Prewarmed schema {} in {:?}", id, t0.elapsed());
-            } else {
-                tracing::debug!("Prewarm skipped/failed for schema {}", id);
-            }
-        }
-        tracing::debug!("Schema prewarm done");
+        self.prewarm_schemas_on_start();
 
         // 反查索引（悬停[编码]/编码提示/词语联想的数据源）同样要提前建好。
         //
@@ -273,6 +252,8 @@ impl Coordinator {
         //
         // 与测试、移动端 prepare() 共用 `prewarm_indexes`，避免三处各写一份。
         self.prewarm_indexes();
+        // 常驻关着时，其余方案只校验派生缓存（排在索引之后，见该函数文档）。
+        self.refresh_schema_caches_on_start();
     }
 
     /// 无头构造器（测试用）：跳过 UI 线程，不做词频持久化（避免污染真实文件）。

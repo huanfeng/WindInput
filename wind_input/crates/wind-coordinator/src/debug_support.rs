@@ -333,6 +333,21 @@ impl Coordinator {
         self.prewarm_on_start();
     }
 
+    /// 测试：快捷输入成员的取数上限（见 `mix_member_fetch_limit`）。
+    pub fn debug_mix_member_fetch_limit(&self, member: &str, buffer: &str) -> usize {
+        self.mix_member_fetch_limit(member, buffer)
+    }
+
+    /// 测试：同步跑「全部常驻」那一支的方案预热（不看开关，开关由它内部逐个复核）。
+    pub fn debug_prewarm_all_schemas(&self) {
+        self.prewarm_all_schemas();
+    }
+
+    /// 测试：同步跑一拍闲置清扫（生产由 `idle-sweep` 线程每分钟一拍、阈值 30 分钟）。
+    pub fn debug_idle_sweep(&self, idle: std::time::Duration) -> Vec<String> {
+        self.idle_sweep(idle)
+    }
+
     /// 诊断：各懒建结构的自报大小与已加载引擎清单（多行文本，只含方案 id 与数字，不含用户内容）。
     pub fn debug_memory_report(&self) -> String {
         use std::fmt::Write;

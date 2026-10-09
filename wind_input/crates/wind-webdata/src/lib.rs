@@ -358,6 +358,57 @@ fn today_str() -> String {
         .to_string()
 }
 
+/// `system.memoryStats` 的回包：进程私有内存 + 已加载方案 + 各懒建结构的自报大小。
+///
+/// 数据源与 `Coordinator::debug_memory_report` 相同（[`wind_engine::EngineManager::memory_report`]
+/// 与 `ReverseLookup::heap_bytes`），不另算一套。字段恒在：取不到的给 `null`、没有的给空数组。
+///
+/// - `process`：`{bytes, kind}`，口径见 `wind_coordinator::process_memory`（Windows Private、
+///   Linux / Android RssAnon；macOS 两者皆 `null`）。
+/// - `redb`：redb 不暴露页缓存的在用量，只给上限与「空闲回收」已发生的次数；无 store 时 `null`。
+/// - 字节数都是各结构按容量自报、不含分配器开销，只用来回答「是哪一档涨了」。
+fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
+    let process = wind_coordinator::process_memory::private_memory();
+    let r = h.engine_mgr().memory_report();
+    let (chaizi, pinyin, comments) = h
+        .reverse_lookup()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .heap_bytes();
+    json!({
+        "process": {
+            "bytes": process.map(|p| p.bytes),
+            "kind": process.map(|p| p.kind),
+        },
+        "schemas": r.engines.iter().map(|(id, ty, parts)| json!({
+            "id": id,
+            "type": ty,
+            "parts": parts.iter().map(|p| json!({
+                "name": p.name, "bytes": p.bytes, "allocs": p.allocs,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "reverseIndex": r.reverse_index.iter().map(|(id, heap, image)| json!({
+            "schema": id, "heapBytes": heap, "imageBytes": image,
+        })).collect::<Vec<_>>(),
+        "userText": r.user_text.iter().map(|(id, bytes, building)| json!({
+            "schema": id, "bytes": bytes, "building": building,
+        })).collect::<Vec<_>>(),
+        "userAssoc": r.user_assoc.as_ref().map(|(id, bytes)| json!({
+            "schema": id, "bytes": bytes,
+        })),
+        "singleChar": r.single_char.as_ref().map(|(id, bytes, _)| json!({
+            "schema": id, "bytes": bytes,
+        })),
+        "reverseLookup": {
+            "chaiziBytes": chaizi, "pinyinBytes": pinyin, "commentBytes": comments,
+        },
+        "redb": h.user_store().map(|s| json!({
+            "cacheLimitBytes": wind_store::store::DEFAULT_CACHE_SIZE_BYTES,
+            "pageCacheDrops": s.page_cache_drops(),
+        })),
+    })
+}
+
 /// 设置页数据 RPC 本体：全部方法为默认实现，只能经 [`WebDataHost`] 窄面触宿主——
 /// 默认方法看不见 Coordinator 字段，窄面约束由编译期保证。调用方
 /// `use 本 trait` 后在 Coordinator 上直接调 `web_data_rpc`。
@@ -417,6 +468,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
             });
             Ok(json!({ "ok": true }))
         }
+        // 内存诊断（只读，设置端「高级 → 性能 → 内存占用」与「复制诊断信息」）。
+        "system.memoryStats" => Ok(memory_stats_json(h)),
         // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
         // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
         //
@@ -10309,5 +10362,76 @@ mod followed_behavior_tests {
             READONLY_SIDECAR_FIELDS.contains(&"followedBehavior"),
             "旁路字段漏登记：{READONLY_SIDECAR_FIELDS:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_stats_tests {
+    //! `system.memoryStats`（只读诊断）的回包形态。设置端「高级 → 性能 → 内存占用」卡片与
+    //! 「复制诊断信息」按它取数：字段恒在（缺数给 `null` / 空数组），客户端可无条件渲染。
+    use super::*;
+    use std::sync::Arc;
+    use wind_config::Config;
+    use wind_coordinator::Coordinator;
+    use wind_store::Store;
+
+    /// 一个自造码表方案 `zm1` 的数据目录 + store（不依赖 build_dev，不会静默跳过）。
+    fn coord() -> Arc<Coordinator> {
+        let base = std::env::temp_dir().join(format!("wind_memstats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let schemas = base.join("schemas");
+        std::fs::create_dir_all(schemas.join("zm1")).unwrap();
+        std::fs::write(
+            schemas.join("zm1.schema.toml"),
+            "[schema]\nid = \"zm1\"\nname = \"zm1\"\n[engine]\ntype = \"codetable\"\n\
+             [engine.codetable]\nmax_code_length = 4\n\
+             [[dictionaries]]\nid = \"main\"\npath = \"zm1/zm1.dict.yaml\"\ndefault = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zm1/zm1.dict.yaml"),
+            "---\nname: zm1\nversion: \"1\"\n...\n甲\ta\n",
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
+        let mut cfg = Config::default();
+        cfg.schema.active = "zm1".into();
+        cfg.schema.available = vec!["zm1".into()];
+        Coordinator::new_headless_with_store(cfg, Some(&base), store)
+    }
+
+    #[test]
+    fn memory_stats_reports_process_schemas_and_structures() {
+        let c = coord();
+        let v = c.web_data_rpc("system.memoryStats", &json!({})).unwrap();
+
+        let p = &v["process"];
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            assert_eq!(p["kind"], "rss_anon");
+            assert!(p["bytes"].as_u64().unwrap() > 0);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(p["kind"], "private");
+            assert!(p["bytes"].as_u64().unwrap() > 0);
+        }
+        assert!(p.get("bytes").is_some() && p.get("kind").is_some());
+
+        let schemas = v["schemas"].as_array().expect("schemas 是数组");
+        assert_eq!(schemas.len(), 1, "只有当前方案已加载：{v}");
+        assert_eq!(schemas[0]["id"], "zm1");
+        assert_eq!(schemas[0]["type"], "CodeTable");
+        assert!(schemas[0]["parts"].is_array());
+
+        assert!(v["reverseIndex"].is_array());
+        assert!(v["userText"].is_array());
+        assert!(v.get("userAssoc").is_some());
+        assert!(v.get("singleChar").is_some());
+        for k in ["chaiziBytes", "pinyinBytes", "commentBytes"] {
+            assert!(v["reverseLookup"][k].is_u64(), "reverseLookup.{k}：{v}");
+        }
+        assert!(v["redb"]["cacheLimitBytes"].as_u64().unwrap() > 0);
+        assert!(v["redb"]["pageCacheDrops"].is_u64());
     }
 }

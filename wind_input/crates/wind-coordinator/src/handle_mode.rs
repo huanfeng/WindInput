@@ -2548,11 +2548,7 @@ impl Coordinator {
                 // ⚠️ 与上面生僻字成员那一支**刻意不同**，别照它改成条件重取：那里是「够一页
                 // 就不再多取」，因为它的缺口是*过滤后还剩几条*；这里必须无条件取数，因为重排
                 // 窗口与幸存条数无关——没取到的词就没得排，而「有没有被埋着」事前无从判断。
-                let limit = Self::initial_candidate_limit_of(
-                    self.engine_mgr.loaded_engine_type(member),
-                    &state.mix_buffer,
-                )
-                .min(MIX_MEMBER_FETCH_CAP);
+                let limit = self.mix_member_fetch_limit(member, &state.mix_buffer);
                 let result = self
                     .engine_mgr
                     .convert_with(member, &state.mix_buffer, limit);
@@ -3843,5 +3839,19 @@ mod exit_clears_rewind_tests {
             exit(&c, &mut st);
             assert!(st.rewind.is_none(), "{name} 退出后夺取回退登记不得残留");
         }
+    }
+}
+
+impl Coordinator {
+    /// 快捷输入（mix）某成员的**取数上限**（理由见调用处）：按成员引擎类型分级，封顶
+    /// [`MIX_MEMBER_FETCH_CAP`]。
+    ///
+    /// 先确保成员已加载再取类型：方案常驻关着时成员可能被淘汰过，`loaded_engine_type`
+    /// 对未加载的方案返回 `None`，码表成员就会被当成「拼音 / 英文」那一档。紧接着的
+    /// `convert_with` 本来也要加载它，提前到这里不多花一分。
+    pub(crate) fn mix_member_fetch_limit(&self, member: &str, buffer: &str) -> usize {
+        let _ = self.engine_mgr.ensure_schema(member);
+        Self::initial_candidate_limit_of(self.engine_mgr.loaded_engine_type(member), buffer)
+            .min(MIX_MEMBER_FETCH_CAP)
     }
 }

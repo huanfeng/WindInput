@@ -214,6 +214,7 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.available", StrList),
     f("schema.primary_codetable", Str),
     f("schema.primary_pinyin", Str),
+    f("schema.keep_all_loaded", Bool),
     // 全局码表（公共基线；方案经 schema_overrides 覆盖）
     f("schema.codetable.top_code_commit", Bool),
     f("schema.codetable.clear_on_empty_max", Bool),
@@ -1432,6 +1433,19 @@ mod tests {
         let l1 = crate::Config::default().ui.candidate.comment_enabled;
         assert!(l1, "ui.candidate.comment_enabled 出厂应为 true");
         assert_eq!(l2_bool("candidate", "comment_enabled"), l1);
+    }
+
+    /// L1↔L2 同源：方案常驻策略（出厂关，设计 memory-footprint.md §9 D1）。
+    #[test]
+    fn keep_all_loaded_l1_matches_l2() {
+        let l1 = crate::Config::default().schema.keep_all_loaded;
+        assert!(!l1, "schema.keep_all_loaded 出厂应为 false");
+        let l2 = data_config_toml()
+            .get("schema")
+            .and_then(|t| t.get("keep_all_loaded"))
+            .and_then(toml::Value::as_bool)
+            .expect("data/config.toml 缺少布尔键 schema.keep_all_loaded");
+        assert_eq!(l2, l1);
     }
 
     /// 解析仓库内系统预置 `data/config.toml`。

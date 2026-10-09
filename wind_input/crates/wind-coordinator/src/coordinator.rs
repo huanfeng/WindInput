@@ -855,8 +855,17 @@ thread_local! {
 /// 恒空，原路径拿 `ip'pro` 去查 code 前缀也必然落空 ⇒ **候选塌成只剩原文，直到重启**。
 ///
 /// 判据是「这个键有没有第二个消费者在引擎侧」，不是「它在不在 schema 段」。
+/// # 不收什么
+///
+/// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
+///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
 pub(crate) fn engine_reload_needed(old: &Config, new: &Config) -> bool {
-    old.schema != new.schema
+    let schema_changed = {
+        let mut old_schema = old.schema.clone();
+        old_schema.keep_all_loaded = new.schema.keep_all_loaded;
+        old_schema != new.schema
+    };
+    schema_changed
         || old.input.temp_pinyin != new.input.temp_pinyin
         || old.input.temp_english != new.input.temp_english
         || old.input.reverse.lookup_disabled_dicts != new.input.reverse.lookup_disabled_dicts
@@ -4602,6 +4611,7 @@ impl Coordinator {
                 let schema_dirty = engine_reload_needed(&old.config, &cfg);
                 // 候选窗定位方式切换的边沿检测（见下方 ReportCandidatePos）。
                 let cand_was_fixed = old.config.ui.candidate.is_fixed_position();
+                let was_keep_all = old.config.schema.keep_all_loaded;
                 drop(old);
 
                 let keys = schema_key_union(&self.engine_mgr);
@@ -4673,6 +4683,12 @@ impl Coordinator {
                             .name("reload-prewarm".into())
                             .spawn(move || {
                                 if let Some(c) = weak.upgrade() {
+                                    // 重建只建回了当前方案：按常驻策略把常驻集合（全部方案，
+                                    // 或临拼目标 / 英文）补回来，否则「切换零等待」要到重启才恢复。
+                                    // 宿主声明按需加载（移动端）时与启动同样不建。
+                                    if c.eager_prewarm.load(std::sync::atomic::Ordering::Relaxed) {
+                                        c.prewarm_schemas_on_start();
+                                    }
                                     c.prewarm_indexes();
                                 }
                             });
@@ -4681,6 +4697,8 @@ impl Coordinator {
                 // 按需数据随配置收放（拆字表、用户层编码索引、简繁表），两个分支都要：
                 // 注释模板 / 悬停段 / 编码来源档都不会把 schema 标脏。
                 self.apply_data_needs();
+                // 方案常驻策略变了：就地摘除 / 后台预热（这个键不标脏，见 engine_reload_needed）。
+                self.apply_residency_change(was_keep_all);
                 // 同步主题选择:设置页改 config.ui.theme.* 后内存态须跟随,reload_config 才会下发新主题
                 // (此前 reload_config 只重推旧内存主题 → 设置页切主题不生效)。
                 {
@@ -10652,6 +10670,16 @@ mod engine_reload_needed_tests {
         let mut new = old.clone();
         new.input.reverse.lookup_disabled_dicts = !old.input.reverse.lookup_disabled_dicts;
         assert!(engine_reload_needed(&old, &new));
+    }
+
+    /// 反向对照：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 / 后台预热），
+    /// 改它不该把全部引擎丢掉重建。
+    #[test]
+    fn keep_all_loaded_change_does_not_require_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.schema.keep_all_loaded = !old.schema.keep_all_loaded;
+        assert!(!engine_reload_needed(&old, &new));
     }
 
     /// 反向对照：反查模式的候选布局只给协调器读，不该丢词典缓存。

@@ -403,9 +403,30 @@ pub const ASSOC_TEMP_MIN_COUNT: u32 = 2;
 /// 词语联想：每档先取 `limit ×` 本值作重排池。
 pub const ASSOC_POOL_FACTOR: usize = 4;
 
+/// [`LoadedEngine::last_used`] 的记号：校验缓存刚建好、还没人用过（见
+/// [`EngineManager::refresh_schema_cache`]）。时钟读数从 0 往上走，碰不到它。
+const UNTOUCHED: u64 = u64::MAX;
+
+/// `engines` 表里的一项：引擎 + 最后使用时刻（方案常驻策略的闲置淘汰用）。
+///
+/// 时刻存的是 [`EngineManager::use_clock`] 的读数（毫秒，粗粒度——淘汰拍子推进一次），
+/// 不在取引擎时读系统时钟：按键热路径上的全部开销就是一次原子读 + 一次原子写。
+struct LoadedEngine {
+    engine: Arc<dyn Engine>,
+    last_used: std::sync::atomic::AtomicU64,
+}
+
 pub struct EngineManager {
-    /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）
-    engines: Mutex<HashMap<String, Arc<dyn Engine>>>,
+    /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）+ 最后使用时刻
+    engines: Mutex<HashMap<String, LoadedEngine>>,
+    /// 淘汰时钟的零点（构造时刻）。
+    clock_origin: std::time::Instant,
+    /// 淘汰时钟：距 `clock_origin` 的毫秒数，**只在淘汰拍子里推进**（[`Self::evict_idle`]）。
+    ///
+    /// 取引擎时把它的当前读数记进 [`LoadedEngine::last_used`]——不直接读系统时钟，是为了让
+    /// 按键热路径上只多一次原子读写。代价是「最后使用」的精度只到一个拍子（生产 1 分钟），
+    /// 对 30 分钟的闲置判据无关紧要。
+    use_clock: std::sync::atomic::AtomicU64,
     /// 当前活跃方案 ID
     active: Mutex<String>,
     /// 活跃方案的**变更代际**：每次 `active` 真正改变时 +1。
@@ -849,6 +870,8 @@ impl EngineManager {
 
         let mgr = Self {
             engines: Mutex::new(HashMap::new()),
+            clock_origin: std::time::Instant::now(),
+            use_clock: std::sync::atomic::AtomicU64::new(0),
             active: Mutex::new(active_id.clone()),
             schema_generation: std::sync::atomic::AtomicU64::new(0),
             available: Mutex::new(available),
@@ -1374,7 +1397,10 @@ impl EngineManager {
     pub fn memory_report(&self) -> MemoryReport {
         let engines: Vec<(String, Arc<dyn Engine>)> = {
             let g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
-            let mut v: Vec<_> = g.iter().map(|(k, e)| (k.clone(), e.clone())).collect();
+            let mut v: Vec<_> = g
+                .iter()
+                .map(|(k, l)| (k.clone(), l.engine.clone()))
+                .collect();
             v.sort_by(|a, b| a.0.cmp(&b.0));
             v
         };
@@ -1803,8 +1829,8 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
-            .filter(|e| e.disabled_dict_layers().is_some())
-            .cloned()
+            .filter(|l| l.engine.disabled_dict_layers().is_some())
+            .map(|l| Arc::clone(&l.engine))
     }
 
     /// 阻塞地把 `schema_id` 已加载引擎的影子层建好（预热线程 / 测试用，**不可进按键链路**）。
@@ -2624,8 +2650,279 @@ impl EngineManager {
         self.ensure_loaded(schema_id)
     }
 
-    fn ensure_loaded(&self, schema_id: &str) -> bool {
+    /// 已加载就把「最后使用」记成当前淘汰时钟并返回 true；未加载返回 false。
+    ///
+    /// 记录与查表在**同一把 `engines` 锁**下：淘汰拍子也是持这把锁读「最后使用」再摘，
+    /// 故「取引擎的人刚确认它在表里、淘汰随即把它摘掉」不会发生——要么淘汰在前（这里
+    /// 看到未加载、去重建），要么记录在前（淘汰看到它刚用过）。
+    fn touch_loaded(&self, schema_id: &str) -> bool {
+        let g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+        match g.get(schema_id) {
+            Some(l) => {
+                l.last_used.store(
+                    self.use_clock.load(std::sync::atomic::Ordering::Relaxed),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 淘汰时钟的当前读数（不推进）。
+    fn use_clock_now(&self) -> u64 {
+        self.use_clock.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 已加载引擎（**不触发构建、不记使用**）。
+    fn loaded_engine(&self, schema_id: &str) -> Option<Arc<dyn Engine>> {
+        self.engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(schema_id)
+            .map(|l| Arc::clone(&l.engine))
+    }
+
+    /// 已加载引擎的方案 id（升序）。诊断与测试用。
+    pub fn loaded_schemas(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// 方案常驻策略（`schema.keep_all_loaded = false`）下**不摘**的方案：
+    ///
+    /// - 当前方案；
+    /// - 临拼目标（开关开着、当前方案适用时；按 id 判，不触发加载）；
+    /// - `english`——临英候选开着，或共享英文引擎已被取走（英文混入 / 混输的英文子引擎握着
+    ///   同一个 `Arc`：这时从表里摘掉一分内存也省不下，下次 `ensure_loaded("english")`
+    ///   反倒会再建一份）。
+    ///
+    /// 混输的成员**不保护**：混输在 `build_engine` 里自建成员子引擎，用不到表里那份独立
+    /// 引擎，保护它只是多留一份没人用的副本。
+    ///
+    /// 启动常驻集合与闲置淘汰的保护名单是同一份，两处判据不会漂移。
+    /// 正在构建的方案还不在 `engines` 表里，天然不会被摘。
+    pub fn residency_protected(&self) -> std::collections::HashSet<String> {
+        let active = self.active_schema_id();
+        let mut keep = std::collections::HashSet::new();
+        let temp_pinyin_on = self
+            .temp_pinyin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .enabled;
+        let primary_pinyin = self
+            .primary_pinyin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(t) = Self::resolve_temp_pinyin_target(
+            temp_pinyin_on,
+            self.loaded_engine_type(&active),
+            &primary_pinyin,
+        ) {
+            keep.insert(t);
+        }
+        let temp_english_on = self
+            .temp_english
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .show_candidates;
+        let english_shared = matches!(
+            *self
+                .shared_english_engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            Some(Some(_))
+        );
+        if temp_english_on || english_shared {
+            keep.insert(ENGLISH_SCHEMA.to_string());
+        }
+        keep.insert(active);
+        keep
+    }
+
+    /// 闲置淘汰（方案常驻策略关时由协调器的清扫拍子调）：先推进淘汰时钟，再把
+    /// 「`idle` 以上没用过、且不在 [`Self::residency_protected`] 里」的引擎从表里摘掉，
+    /// 返回被摘的方案 id。`idle = 0` 即「保护名单外的一律摘」（运行期把常驻关掉时用）。
+    ///
+    /// 只摘引擎与**只属于它**的派生索引（[`Self::forget_unloaded`]），不动方案配置缓存：
+    /// 配置没变，再切回来时按原样重建即可（派生缓存文件仍新鲜 ⇒ 只是 mmap + 建外壳）。
+    pub fn evict_idle(&self, idle: std::time::Duration) -> Vec<String> {
+        let now = self.clock_origin.elapsed().as_millis() as u64;
+        self.use_clock
+            .fetch_max(now, std::sync::atomic::Ordering::Relaxed);
+        let idle_ms = idle.as_millis() as u64;
+        let keep = self.residency_protected();
+        let mut dropped: Vec<(String, LoadedEngine)> = Vec::new();
+        {
+            let mut g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            let stale: Vec<String> = g
+                .iter()
+                .filter(|(id, l)| {
+                    !keep.contains(id.as_str())
+                        && now
+                            .saturating_sub(l.last_used.load(std::sync::atomic::Ordering::Relaxed))
+                            >= idle_ms
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in stale {
+                if let Some(l) = g.remove(&id) {
+                    dropped.push((id, l));
+                }
+            }
+        }
+        // 出锁再放引擎（解映射、释放外壳不该挡住取引擎的按键线程）。
+        let ids: Vec<String> = dropped.into_iter().map(|(id, _)| id).collect();
+        for id in &ids {
+            self.forget_unloaded(id);
+        }
+        if !ids.is_empty() {
+            info!("闲置淘汰方案引擎：{:?}", ids);
+        }
+        ids
+    }
+
+    /// 引擎被摘后，清掉**只属于它**的派生索引。
+    ///
+    /// 与 [`Self::invalidate_schema`] 不同，这里不清全部反查索引 / 单字全码表：摘引擎不改变
+    /// 任何方案的定义，别的方案的索引照样有效。被摘方案自己的反查索引 / 单字全码表也要先过一遍
+    /// 「在用」判据——主码表、编码来源、联想 / 辅助码在用的方案（同 `reverse_index_for` 的
+    /// 护栏）的索引不随引擎走：拼音方案的编码提示查的就是主码表的反查索引，与主码表的引擎
+    /// 在不在内存无关。
+    fn forget_unloaded(&self, schema_id: &str) {
+        let primary = self.primary_codetable_id();
+        let mut in_use = self.reverse_index_pins();
+        in_use.push(self.code_source_schema());
+        let in_use_kept = reverse_index_keeps(schema_id, "", &primary, &in_use);
+        if !in_use_kept {
+            let removed = self
+                .reverse_index
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(schema_id)
+                .is_some();
+            if removed {
+                self.reverse_index_skipped
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(schema_id);
+            }
+        }
+        // 单字全码表跟反查索引同一个「在用」判据：自动造词取码对的是编码来源方案
+        // （混输则其主码表成员），与那个方案的独立引擎在不在内存无关。
+        if in_use_kept {
+            return;
+        }
+        let mut sc = self
+            .single_char_codes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if sc.as_ref().is_some_and(|(id, _)| id == schema_id) {
+            *sc = None;
+        }
+    }
+
+    /// 共享英文引擎缓存放手（[`Self::shared_english_engine`] 字段），条件是眼下没有消费者：
+    /// 临英候选关着、且表里没有混输（混输握着同一个 `Arc`，放手会让下次再建一份）。
+    /// 英文候选混入不算消费者——它每次现取，缓存空了会重新取回表里那一份。
+    ///
+    /// 放手后英文不再落进 [`Self::residency_protected`]，闲置清扫才能摘它。启动缓存校验
+    /// 之后调（校验建混输时把英文取走了）。返回是否真的放了手。
+    pub fn release_shared_english_if_unused(&self) -> bool {
+        let temp_english_on = self
+            .temp_english
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .show_candidates;
+        let mixed_loaded = self
+            .engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|l| l.engine.engine_type() == EngineType::Mixed);
+        if temp_english_on || mixed_loaded {
+            return false;
+        }
+        self.shared_english_engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .is_some()
+    }
+
+    /// 校验某方案的派生缓存（`.wdat` 等，指纹不符或缺失即重建），**建完不留引擎**
+    /// （除非它在 [`Self::residency_protected`] 里）。阻塞，只可在后台线程里调。
+    ///
+    /// 走与切换完全相同的 `ensure_loaded` 构建路径，而不是另抽一个「只确保缓存」的入口：
+    /// 缓存的种类、路径、指纹判据都长在 `build_engine` 那几条分支里（码表逐库、拼音
+    /// merged / unigram、英文词组索引……），另写一份必然漂移，漂了的表现是「启动校验过了、
+    /// 切换时照样同步重建」。代价是多建一次引擎外壳——缓存新鲜时就是 mmap + 外壳，立即释放。
+    ///
+    /// 已加载的方案直接返回 true（它的缓存在加载时已校验过）。返回是否构建成功。
+    pub fn refresh_schema_cache(&self, schema_id: &str) -> bool {
+        self.refresh_schema_cache_hooked(schema_id, || {})
+    }
+
+    /// [`Self::refresh_schema_cache`] 的测试缝：`after_build` 在「建好」与「摘除」之间跑，
+    /// 用来确定性地复现「校验刚建完、用户恰好切过去」的竞态。生产只走上面那个入口。
+    #[doc(hidden)]
+    pub fn refresh_schema_cache_hooked(&self, schema_id: &str, after_build: impl FnOnce()) -> bool {
         if self.is_loaded(schema_id) {
+            return true;
+        }
+        if !self.ensure_loaded(schema_id) {
+            return false;
+        }
+        // 建完打一个「没人碰过」的记号：此后任何取引擎（`touch_loaded`）都会把它覆盖成
+        // 时钟读数。不能拿时钟读数本身比对——它只在清扫拍子里推进，建完与随后的使用
+        // 很可能读到同一个值。
+        if let Some(l) = self
+            .engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(schema_id)
+        {
+            l.last_used
+                .store(UNTOUCHED, std::sync::atomic::Ordering::Relaxed);
+        }
+        after_build();
+        let protected = self.residency_protected().contains(schema_id);
+        let dropped = {
+            let mut g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            let untouched = g.get(schema_id).is_some_and(|l| {
+                l.last_used.load(std::sync::atomic::Ordering::Relaxed) == UNTOUCHED
+            });
+            if untouched && !protected {
+                g.remove(schema_id)
+            } else {
+                // 被用过（含切成了当前方案：切换先经 `ensure_loaded`）或受保护 ⇒ 留下；
+                // 记号换回时钟读数，否则它永远不算闲置。
+                if untouched && let Some(l) = g.get(schema_id) {
+                    l.last_used
+                        .store(self.use_clock_now(), std::sync::atomic::Ordering::Relaxed);
+                }
+                None
+            }
+        };
+        drop(dropped);
+        true
+    }
+
+    /// 取引擎的公共入口：已加载就记一笔「用过」（闲置淘汰的判据），否则构建。
+    ///
+    /// 取引擎的路径（`engine_for` / `convert_with*` / `enumerate_with` / …）都先过这里，
+    /// 故「最后使用」只在这一处打。快路径上相对原来的 `is_loaded` 只多一次原子读 +
+    /// 一次原子写（[`Self::touch_loaded`]），不读系统时钟、不多拿锁。
+    fn ensure_loaded(&self, schema_id: &str) -> bool {
+        if self.touch_loaded(schema_id) {
             return true;
         }
         // single-flight：取该方案的专用构建锁（不同方案各自一把，可并行构建）。
@@ -2635,7 +2932,7 @@ impl EngineManager {
         };
         let _build_guard = build_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 抢到锁后复查：等待期间可能已被另一线程（预热/切换）构建完成。
-        if self.is_loaded(schema_id) {
+        if self.touch_loaded(schema_id) {
             return true;
         }
         let codetable_cfg = self
@@ -2709,7 +3006,14 @@ impl EngineManager {
                 self.engines
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(schema_id.to_string(), Arc::from(engine));
+                    .insert(
+                        schema_id.to_string(),
+                        LoadedEngine {
+                            engine: Arc::from(engine),
+                            // 刚建好也算「用过」，否则一个拍子之内就可能被判闲置。
+                            last_used: std::sync::atomic::AtomicU64::new(self.use_clock_now()),
+                        },
+                    );
                 // 活跃方案的引擎（重）建好了：影子层后台预热。非活跃方案等切过去时再热
                 // （`on_active_changed`），不为用户未必会用的方案读盘。
                 if schema_id == self.active_schema_id() {
@@ -2740,11 +3044,7 @@ impl EngineManager {
             return None;
         }
         self.ensure_loaded(schema_id);
-        self.engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned()
+        self.loaded_engine(schema_id)
     }
 
     /// 当前活跃方案 ID
@@ -2933,7 +3233,7 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
-            .map(|e| e.base_sort_ignores_weight())
+            .map(|e| e.engine.base_sort_ignores_weight())
             .unwrap_or(false)
     }
 
@@ -3343,7 +3643,7 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|(id, _)| id.as_str() != schema_id)
-            .map(|(id, e)| (id.clone(), Arc::clone(e)))
+            .map(|(id, l)| (id.clone(), Arc::clone(&l.engine)))
             .collect();
         loaded
             .into_iter()
@@ -3385,12 +3685,7 @@ impl EngineManager {
     /// `reload_from_config` 的动作才生效——真机表现为「关了没反应，顺手改别的设置又好了」。
     /// 转发不到的依赖方案（成员子引擎不认这个 dict）直接失效，下次使用按已落盘的 override 重建。
     pub fn set_dict_enabled_live(&self, schema_id: &str, dict_id: &str, enabled: bool) -> bool {
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned();
+        let engine = self.loaded_engine(schema_id);
         // 独立方案与把它当成员的混输方案同一条规则：翻得动就翻，翻不动就失效待重建。
         // 只失效混输不失效独立方案的话，同一个拼音扩展库在混输里下次输入就生效、
         // 在独立拼音方案里却要重启，两个方案表现不一致。
@@ -4030,11 +4325,7 @@ impl EngineManager {
         // 混输构建期回调进来时，外层正持着**那个混输方案**的 build_lock；这里取的是
         // `"english"` 自己那一把（`build_locks` 按 schema_id 分表），不是同一把锁。
         let built = if self.ensure_loaded(ENGLISH_SCHEMA) {
-            self.engines
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(ENGLISH_SCHEMA)
-                .cloned()
+            self.loaded_engine(ENGLISH_SCHEMA)
         } else {
             None
         };
@@ -4089,7 +4380,7 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
-            .map(|e| e.engine_type())
+            .map(|e| e.engine.engine_type())
     }
 
     /// 确保指定方案可加载（懒加载）。用于 overlay 模式（特殊模式等）激活前的可用性校验。
@@ -5258,12 +5549,7 @@ impl EngineManager {
         if !self.ensure_loaded(schema_id) {
             return ConvertResult::default();
         }
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned();
+        let engine = self.loaded_engine(schema_id);
         match engine {
             Some(e) => e
                 .convert_with_opts(input, max_candidates, opts)
@@ -5284,12 +5570,7 @@ impl EngineManager {
         if !self.ensure_loaded(schema_id) {
             return ConvertResult::default();
         }
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned();
+        let engine = self.loaded_engine(schema_id);
         match engine {
             Some(e) => e.convert(input, max_candidates).unwrap_or_else(|err| {
                 warn!("convert_with error: {}", err);
@@ -5305,12 +5586,7 @@ impl EngineManager {
         if !self.ensure_loaded(schema_id) {
             return Vec::new();
         }
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned();
+        let engine = self.loaded_engine(schema_id);
         engine.map(|e| e.enumerate(limit)).unwrap_or_default()
     }
 
@@ -5322,7 +5598,7 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
-            .and_then(|e| e.browse_display_limit())
+            .and_then(|e| e.engine.browse_display_limit())
     }
 
     /// 反查 `(code, text)` 在该方案词典里的音节边界；方案未加载/非拼音/查不到均返回 0。
@@ -5333,12 +5609,7 @@ impl EngineManager {
         if !self.ensure_loaded(schema_id) {
             return 0;
         }
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned();
+        let engine = self.loaded_engine(schema_id);
         engine.map_or(0, |e| e.syllable_boundary_of(code, text))
     }
 
@@ -5351,12 +5622,7 @@ impl EngineManager {
         if !self.ensure_loaded(schema_id) {
             return None;
         }
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned()?;
+        let engine = self.loaded_engine(schema_id)?;
         engine.generate_word_pinyin(text)
     }
 
@@ -5375,12 +5641,7 @@ impl EngineManager {
         if !self.ensure_loaded(schema_id) {
             return vec![BoundaryResolution::NoInfo; pairs.len()];
         }
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned();
+        let engine = self.loaded_engine(schema_id);
         let Some(engine) = engine else {
             return vec![BoundaryResolution::NoInfo; pairs.len()];
         };
@@ -5398,12 +5659,7 @@ impl EngineManager {
         if !self.ensure_loaded(schema_id) {
             return vec![None; texts.len()];
         }
-        let engine = self
-            .engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(schema_id)
-            .cloned();
+        let engine = self.loaded_engine(schema_id);
         let Some(engine) = engine else {
             return vec![None; texts.len()];
         };

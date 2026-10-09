@@ -23,6 +23,8 @@
 | `src/config_bundle.rs` | `ConfigBundle`（配置 + 轻量派生缓存快照，热重载整体原子替换）+ `parse_pairs`/`parse_jump_out_*` 配置解析 |
 | `src/key_convert.rs` | 键位换算纯函数：`punct_char`/`printable_char`/`numpad_*`/`full_width_source_char`/`en_case_variants`/`wind_mods_to_win32` |
 | `src/candidate_nav.rs` | 候选视图导航：分页/高亮移动/悬停清除/末页检索范围临时放宽（`try_relax_scope_on_page_end`） |
+| `src/schema_residency.rs` | 方案常驻策略（`schema.keep_all_loaded`）：启动预热分「全部常驻」与「只建常驻集合 + 后台校验其余方案缓存」两支、`idle-sweep` 闲置清扫线程（每分钟一拍，30 分钟摘除；§7 其它闲置清扫也接这里）、运行期改键就地对齐（不进 `engine_reload_needed`） |
+| `src/process_memory.rs` | 进程私有内存读数（Windows `PrivateUsage` / Linux·Android `RssAnon` / macOS 不提供），供 `system.memoryStats` |
 | `src/debug_support.rs` | `debug_*` 测试/诊断支撑方法（生产路径不调用；生产 tooltip 用的 `DebugSchemaCtx` 族名字带 debug 但**不在**此文件） |
 | `src/pipeline.rs` | `ModeKind`（单一活跃独占模式枚举）+ `Rewind`（夺取回退登记）；含与 Go 决策器的**刻意差异说明**（见下） |
 | `src/handle_candidate.rs` | 候选生成/过滤/shadow/词频重排/分页/选词上屏/右键操作 |

@@ -729,6 +729,18 @@ pub struct SchemaConfig {
     pub primary_codetable: String,
     #[serde(default)]
     pub primary_pinyin: String,
+    /// 方案常驻策略（出厂 `false`）。
+    ///
+    /// - `true`：启动后预热全部可用方案（+ 临拼目标 + 英文）并一直常驻——切换零等待。
+    /// - `false`：启动只建用得着的（当前方案、临拼目标、临英开着时的英文），其余方案只在
+    ///   后台校验 / 重建派生缓存、建完即释放；切过去时现建（缓存新鲜时只是 mmap + 建外壳），
+    ///   30 分钟没用的方案引擎自动卸载。
+    ///
+    /// 一个布尔同时管「预热」与「淘汰」：两者是同一个取舍的两面，拆成两个键会出现「不预热
+    /// 但永不卸载」这类无意义组合（设计 `docs/design/memory-footprint.md` §5）。30 分钟与
+    /// 每分钟一拍不进配置（R1：程序能定）。
+    #[serde(default)]
+    pub keep_all_loaded: bool,
     /// 全局码表配置（所有码表方案公共基线；方案经 schema_overrides 覆盖）。
     #[serde(default)]
     pub codetable: CodetableGlobal,
@@ -776,6 +788,7 @@ impl Default for SchemaConfig {
             available: Vec::new(),
             primary_codetable: String::new(),
             primary_pinyin: String::new(),
+            keep_all_loaded: false,
             codetable: CodetableGlobal::default(),
             pinyin: PinyinGlobalConfig::default(),
             mix: MixGlobal::default(),
