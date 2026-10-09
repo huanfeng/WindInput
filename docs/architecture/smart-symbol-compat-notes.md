@@ -207,9 +207,10 @@ press1 之后符号进入 TSF 组合态，`_pTextService->HasActiveComposition()
 
 默认取追加而不是给全角路径单独打补丁，是因为 hold 期间可能触发提交的路径远不止一处（全角空格/数字、临时英文、各独占模式出字、中英切换时的待定文本提交），把安全的一侧设为默认，新增路径自动正确。顺带修好了中英切换（`SystemModeSwitch` / `Ctrl+Space`）时 hold 符号被丢弃的同类问题。
 
-### 搁置：Ctrl/Alt 组合（Ctrl+S 等宿主快捷键）
+### 已修：Ctrl/Alt 组合（Ctrl+V / Ctrl+S 等宿主快捷键，A2-65 / t263）
 
 **症状**：hold 预览期间按 Ctrl+S，EverEdit 这类严格宿主收不到，保存不生效；记事本/Chromium 正常。
+用户报障（论坛 t263）：组合态预览期间 Ctrl+V，微信、WPS 表格粘贴无效，QQ、WPS 文字、浏览器正常。
 
 **实测确认的路径**（`Coordinator` 探测，非推断）：
 
@@ -226,16 +227,20 @@ OnKeyDown       → 服务端 → PassThrough          ← 实测：Ctrl+S / Ctr
 
 注意曾有一个错误判断被写进代码注释又被推翻：以为 Ctrl 组合走 `isCtrlAltCleanup` 分支、响应为 `Ack`、键被**吃掉**。实际服务端回 `PassThrough`，`pfEaten` 为假，`isCtrlAltCleanup && *pfEaten` 那段压根不执行；符号收口也已经由 `PassThrough` 分支完成。所以这不是「被吃掉」，就是普通的「吃了再吐」。
 
-**修法**（同构，未实施）：重放分支的条件放宽一个修饰键判断即可——
+**修法**（同构）：重放分支的条件放宽一个修饰键判断。实际落地用的是 OnKeyDown 已算好的
+`isCtrlAltCleanup`（会话中的 Ctrl/Alt 组合、不含修饰键本身与已注册热键，与 OnTestKeyDown 的
+`ctrl_alt_cleanup` 吃键分支同一判据），判据收在 `HoldReplayPolicy.h`（`tests/hold_replay_policy_test.cpp`），
+服务端「hold + Ctrl/Alt 组合 ⇒ PassThrough」由 `smart_symbol.rs::hold_then_ctrl_combo_passes_through` 钉住——
 
 ```cpp
 if (holdActiveBeforeResponse && !(*pfEaten)
-    && (_IsHoldReplayKey(wParam) || (modifiers & (KEYMOD_CTRL | KEYMOD_ALT))))
+    && (_IsHoldReplayKey(wParam) || isCtrlAltCleanup))
 ```
 
 重放时物理修饰键仍按着，宿主 `GetKeyState` 能还原 Ctrl+S 语义；Alt 组合同理会正常生成 `WM_SYSKEYDOWN`。
 
-**为什么搁置**：触及面小——只在「hold 预览的 500ms 窗口内」+「严格 TSF 宿主」两个条件同时成立时才发生，且符号本身不会丢（`PassThrough` 分支已收口），丢的只是那一次快捷键。等有用户实际反馈再动。
+曾以「触及面小，等用户反馈再动」搁置；t263 即那条反馈。微信 / WPS 表格是否确属「不补发被吐回的键」
+这一族，代码层无法确证，以靶机人工验证为准。
 
 **一并留个提醒**：普通输入会话（有候选）下的 Ctrl 组合走的是另一条路——服务端返回非 `PassThrough` 时会进 `isCtrlAltCleanup` 那段，末尾同样有一句 `*pfEaten = FALSE`，理论上是**同一个翻转**。那条路覆盖 Ctrl+C/V/Z/S 全部高频快捷键，改动面比 hold 大得多。**该路径的服务端响应尚未实测**，要动之前必须先用同样的探测方法确认，不要沿用本节结论。
 

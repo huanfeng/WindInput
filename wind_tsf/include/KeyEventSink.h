@@ -359,17 +359,11 @@ private:
     // 数字键必须在列：hold 期间无候选，它被 session_select_or_page 吃掉后服务端回
     // PassThrough，漏列就退回「吃了再吐」，EverEdit 这类宿主下数字会丢。
     //
-    // 仍未覆盖 Ctrl/Alt 组合（Ctrl+S 等宿主快捷键）。此处曾断言它们「走 isCtrlAltCleanup、
-    // 响应为 Ack、会被吃掉」——**实测证伪**：hold 期间缓冲为空，服务端对 Ctrl+S / Ctrl+C
-    // 一律回 PassThrough，故 pfEaten 为假、`isCtrlAltCleanup && *pfEaten` 那段压根不执行，
-    // 符号也已在 PassThrough 分支的 FlushHoldCompositionIfActive 里收口。
-    // 真实症状与本函数治的是同一个：OnTestKeyDown 吃了、OnKeyDown 吐成 FALSE 的「吃了再吐」
-    // ——记事本/Chromium 补发所以正常，EverEdit 这类严格宿主丢键。
-    // 修法也同构：把重放条件放宽为 `_IsHoldReplayKey(vk) || (modifiers & (KEYMOD_CTRL|KEYMOD_ALT))`
-    // 即可（重放时物理修饰键仍按着，宿主 GetKeyState 能还原 Ctrl+S 语义）。暂未实施——触及面
-    // 小：只在「hold 的 500ms 窗口内」+「严格 TSF 宿主」同时成立时才丢那一次快捷键，符号本身
-    // 不丢。完整背景、实测探测方法与「普通输入会话下同类翻转尚未验证」的提醒见
-    // docs/architecture/smart-symbol-compat-notes.md 的「HoldComposition 方案」一节。
+    // Ctrl/Alt 组合（Ctrl+V / Ctrl+S 等宿主快捷键）不在本表，由重放判据的 isCtrlAltCleanup 项
+    // 覆盖（HoldReplayPolicy.h）：hold 期间缓冲为空，服务端对它们一律回 PassThrough，此前吐成
+    // FALSE 即「吃了再吐」，微信、WPS 表格里粘贴无效（A2-65 / t263）。完整背景、实测探测方法与
+    // 「普通输入会话下同类翻转尚未验证」的提醒见 docs/architecture/smart-symbol-compat-notes.md
+    // 的「HoldComposition 方案」一节。
     BOOL _IsHoldReplayKey(WPARAM wParam) const
     {
         if (wParam >= '0' && wParam <= '9')                 return TRUE; // 主键盘数字

@@ -199,6 +199,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME number_key_policy COMMAND number_key_policy_test)
 
+    add_executable(hold_replay_policy_test tests/hold_replay_policy_test.cpp)
+    target_include_directories(hold_replay_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(hold_replay_policy_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME hold_replay_policy COMMAND hold_replay_policy_test)
+
     add_executable(deferred_composition_policy_test tests/deferred_composition_policy_test.cpp)
     target_include_directories(deferred_composition_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)

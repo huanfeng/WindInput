@@ -448,6 +448,28 @@ fn hold_press2_still_replaces_held() {
     }
 }
 
+/// A2-65 / t263：hold 预览期间的 Ctrl/Alt 组合键（Ctrl+V 粘贴等宿主快捷键），服务端必须回
+/// `PassThrough`——TSF 侧「吃键 → 收口 → 重放」那条分支（`KeyEventSink.cpp` 的
+/// `hold_commit_then_replay`）只在 PassThrough 时触发。服务端一旦改成吃掉或回别的动作，
+/// DLL 就既不重放也不放行，粘贴在所有宿主上都会消失。
+#[test]
+fn hold_then_ctrl_combo_passes_through() {
+    const VK_V: u32 = 0x56;
+    const VK_S: u32 = 0x53;
+    const MOD_CTRL: u32 = 0x0002; // 与 wind_ipc::protocol::MOD_CTRL 同值
+    const MOD_ALT: u32 = 0x0004; // 与 wind_ipc::protocol::MOD_ALT 同值
+    for (vk, mods) in [(VK_V, MOD_CTRL), (VK_S, MOD_CTRL), (VK_V, MOD_ALT)] {
+        let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
+        assert_eq!(held(&press(&coord, VK_OEM_PERIOD, 0)), Some("。"));
+        let a2 = press_mod(&coord, vk, mods, '。' as u16);
+        assert!(
+            matches!(a2, KeyAction::PassThrough),
+            "hold 期间 vk=0x{vk:02X} mods=0x{mods:X} 应回 PassThrough，实际: {:?}",
+            a2
+        );
+    }
+}
+
 // ── 武装态失效：press1 之后中间夹了别的输入 ─────────────────────────────────────────
 //
 // 本组守的是「press1 与 press2 之间必须什么都没发生」这条前提。此前判据只有「同键 + 时限 +

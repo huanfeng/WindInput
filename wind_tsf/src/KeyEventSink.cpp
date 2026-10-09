@@ -1,5 +1,6 @@
 #include "KeyEventSink.h"
 #include "DeferredCompositionPolicy.h"
+#include "HoldReplayPolicy.h"
 #include "NumberKeyPolicy.h"
 #include "TextService.h"
 #include "IPCClient.h"
@@ -1617,7 +1618,13 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     //
     // 故把两个动作都收进我们控制的顺序：吃掉原键（与 OnTestKeyDown 的决定一致，无翻转），
     // 再用 SendInput 重放。宿主先看到收口后的文档，再看到一个与组合无关的普通按键。
-    if (holdActiveBeforeResponse && !(*pfEaten) && _IsHoldReplayKey(wParam))
+    //
+    // Ctrl/Alt 组合（isCtrlAltCleanup）同理：hold 期间服务端对 Ctrl+V / Ctrl+S 一律回
+    // PassThrough，原先吐成 FALSE，微信、WPS 表格里粘贴无效（A2-65 / t263）。重放时物理
+    // 修饰键仍按着，宿主据 GetKeyState 还原 Ctrl+V 语义。判据见 HoldReplayPolicy.h。
+    if (wind::holdreplay::ShouldReplayAfterHold(holdActiveBeforeResponse != FALSE, *pfEaten != FALSE,
+                                                _IsHoldReplayKey(wParam) != FALSE,
+                                                isCtrlAltCleanup != FALSE))
     {
         _ReplayKeyToHost((WORD)wParam);
         *pfEaten = TRUE;
