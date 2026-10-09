@@ -79,6 +79,7 @@ use wind_config::{Config, OverlaySpec};
 use wind_ui_types::{InlineColor, SpanStyle, StyledText};
 
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 一次变量引用：名字 + 可选参数（`${chaizi_all:／}` 的 `／`）。
 ///
@@ -503,13 +504,23 @@ fn render_nodes(
 /// 整个模板按一个隐式可选段处理：所有变量都为空 ⇒ 返回空。否则返回渲染结果（已 trim
 /// 首尾空白——模板里为分隔而写的空格，在相邻内容缺席时不该留在两端）。
 ///
-/// `max_chars` = 0 表示不限；超出则按字符截断并加 `…`（`…` 继承被截处前一个字的样式）。
+/// `max_chars` = 0 表示不限；超出则按字素簇截断并加 `…`（见 [`truncate_graphemes`]）。
 pub(crate) fn render_styled(
     tpl: &str,
     max_chars: usize,
     eval: impl Fn(&str, Option<&str>) -> Option<String>,
 ) -> StyledText {
     Template::parse(tpl).render_whole(max_chars, &eval)
+}
+
+/// 注释段的长度截断：超过 `max_chars` 个**字素簇**就只留前 `max_chars` 簇，再接 `…`
+/// （继承被截处前一个字的样式）；0 = 不限。口径同候选的 `truncate_display` 与悬停提示——
+/// 按码位切会把 emoji ZWJ 序列、组合符、变体选择符拦腰切开。
+fn truncate_graphemes(t: StyledText, max_chars: usize) -> StyledText {
+    match t.as_str().grapheme_indices(true).nth(max_chars) {
+        Some((cut, _)) if max_chars > 0 => t.cut_with_mark(cut, "…"),
+        _ => t,
+    }
 }
 
 /// [`render_styled`] 的纯文本形态：要上屏的文字（`alt_commit_text` 上屏注释、`reverse_render`
@@ -560,7 +571,7 @@ impl Template {
         if !render_nodes(&self.0, eval, &|_| true, &mut b) {
             return StyledText::new();
         }
-        b.out.into_trimmed().into_truncated(max_chars, "…")
+        truncate_graphemes(b.out.into_trimmed(), max_chars)
     }
 
     /// 上方注释条开关开时的渲染：按模板**字面文字**里第一个 `\n` 拆成 `(上段, 下段)`。
@@ -577,7 +588,7 @@ impl Template {
         if !render_nodes(&self.0, eval, &|_| true, &mut b) {
             return (StyledText::new(), StyledText::new());
         }
-        let part = |t: StyledText| t.into_trimmed().into_truncated(max_chars, "…");
+        let part = |t: StyledText| truncate_graphemes(t.into_trimmed(), max_chars);
         let Some(s) = b.split_at else {
             return (StyledText::new(), part(b.out));
         };
@@ -2114,6 +2125,33 @@ mod split_tests {
         assert_eq!((a.into_string(), b.into_string()), pair("abc…", "uvw…"));
     }
 
+    /// 注释段截断按字素簇计（口径同候选 `truncate_display` 与悬停提示）：
+    /// ZWJ 序列 / 组合符 / 变体选择符不被拦腰切开，恰好等长不截。整段与拆段两条路径都走。
+    #[test]
+    fn truncation_counts_graphemes() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let e = "e\u{301}";
+        let ball = "⚽\u{FE0F}";
+        let cases = [
+            (format!("ab{family}"), format!("ab{family}")),
+            (format!("ab{family}c"), format!("ab{family}…")),
+            (e.repeat(3), e.repeat(3)),
+            (e.repeat(4), format!("{}…", e.repeat(3))),
+            (format!("ab{ball}{ball}"), format!("ab{ball}…")),
+            ("中a文".to_string(), "中a文".to_string()),
+            ("中a文b".to_string(), "中a文…".to_string()),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                render("${a}", 3, ev(&[("a", &input)])),
+                want,
+                "整段：{input:?}"
+            );
+            let (_, b) = Template::parse("${a}").render_split(3, &ev(&[("a", &input)]));
+            assert_eq!(b.into_string(), want, "拆段：{input:?}");
+        }
+    }
+
     /// 上段里变量值自带的换行折成空格：上方条恒单行，否则按页等高就被撑破。下段不动。
     #[test]
     fn newline_in_upper_var_value_becomes_space() {
@@ -2635,6 +2673,22 @@ mod legacy_parity {
         }
     }
 
+    /// 参照的截断按码位计，现行按字素簇计（见 `truncate_graphemes`）——这是**有意**的行为
+    /// 变化，参照本身不改（它的价值在于不变）。故对拍取参照的**不截断**产物，截断这一步按
+    /// 现行口径在此显式套上：截断之前的渲染仍须与参照逐字节相同。
+    fn legacy_render_truncated(
+        tpl: &str,
+        max: usize,
+        e: &impl Fn(&str, Option<&str>) -> Option<String>,
+    ) -> String {
+        use unicode_segmentation::UnicodeSegmentation;
+        let s = legacy_ref::render(tpl, 0, e);
+        match s.grapheme_indices(true).nth(max) {
+            Some((cut, _)) if max > 0 => format!("{}…", &s[..cut]),
+            _ => s,
+        }
+    }
+
     #[test]
     fn render_matches_pre_change_engine() {
         for tpl in TEMPLATES {
@@ -2643,7 +2697,7 @@ mod legacy_parity {
                 for max in [0usize, 1, 3, 8] {
                     assert_eq!(
                         super::render(tpl, max, &e),
-                        legacy_ref::render(tpl, max, &e),
+                        legacy_render_truncated(tpl, max, &e),
                         "render({tpl:?}, {max}) 与改动前不同，取值 {fx:?}"
                     );
                 }

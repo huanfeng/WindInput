@@ -24,6 +24,7 @@
 use crate::coordinator::Coordinator;
 use crate::tooltip::RenderedTooltip;
 use tracing::{debug, warn};
+use unicode_segmentation::UnicodeSegmentation;
 use wind_bridge::handler::KeyAction;
 use wind_ui_types::{
     MenuAnchor, MenuCmd, MenuItemSpec, MenuKind, ToastKind, ToastPosition, TooltipHit, UiCommand,
@@ -50,18 +51,17 @@ pub(crate) struct TooltipMenuTarget {
 /// 放弃执行时的 Toast 文案（候选已变、会话已结束、没有可信快照）。
 const ABANDONED_TOAST: &str = "候选已变化，未执行";
 
-/// 菜单项里段名的长度上限（字符数），超出截断加 `…`。菜单是一列窄条，段名是用户写的模板
-/// 求值结果，可能很长（`编码{(${code_source})}` 求出长方案名）。
+/// 菜单项里段名的长度上限（字素簇数，emoji 序列不被切开），超出截断加 `…`。菜单是一列
+/// 窄条，段名是用户写的模板求值结果，可能很长（`编码{(${code_source})}` 求出长方案名）。
 const MENU_LABEL_MAX_CHARS: usize = 8;
 
 /// 菜单里指称一段的名字：段名，空则「第 N 段」（N 从 1 起），过长截断。
 fn section_label(title: Option<&str>, section: usize) -> String {
     match title.filter(|t| !t.is_empty()) {
-        Some(t) if t.chars().count() > MENU_LABEL_MAX_CHARS => {
-            let head: String = t.chars().take(MENU_LABEL_MAX_CHARS).collect();
-            format!("{head}…")
-        }
-        Some(t) => t.to_string(),
+        Some(t) => match t.grapheme_indices(true).nth(MENU_LABEL_MAX_CHARS) {
+            Some((cut, _)) => format!("{}…", &t[..cut]),
+            None => t.to_string(),
+        },
         None => format!("第 {} 段", section + 1),
     }
 }
@@ -372,6 +372,18 @@ mod tests {
             "编码(五笔86极…"
         );
         assert_eq!(section_label(Some(""), 1), "第 2 段");
+    }
+
+    /// 段名截断按字素簇计：ZWJ 序列不被切开，恰好 8 簇不截。
+    #[test]
+    fn section_label_truncates_by_grapheme() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let eight = format!("abcdefg{family}");
+        assert_eq!(section_label(Some(&eight), 0), eight, "恰好 8 簇不截");
+        assert_eq!(
+            section_label(Some(&format!("{eight}h")), 0),
+            format!("{eight}…")
+        );
     }
 
     /// 取值用原始行、不含段名：完整原文段复制得到未截断原文。

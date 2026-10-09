@@ -1332,6 +1332,29 @@ mod tests {
         assert!(!out.contains("U+2026"));
     }
 
+    /// 「是否截断」判据（`disp != full`）跟着 `truncate_display` 的字素簇口径走：
+    /// 恰好 max_chars 簇（含 ZWJ 序列）不算截断，`${full_text}` 段不出；多一簇才出。
+    #[test]
+    fn full_text_follows_grapheme_truncation() {
+        let mut cfg = wind_config::Config::default().ui.candidate;
+        cfg.max_chars = 3;
+        let s = [section("完整原文", "", "${full_text}")];
+        let rl = ReverseLookup::default();
+        let fit = "ab👨\u{200D}👩\u{200D}👧";
+        let disp = cfg.truncate_display(fit);
+        assert_eq!(
+            render_new(&rl, &s, &truncated(&disp, fit)),
+            "",
+            "恰好 3 簇不截"
+        );
+        let over = format!("{fit}c");
+        let disp = cfg.truncate_display(&over);
+        assert_eq!(
+            render_new(&rl, &s, &truncated(&disp, &over)),
+            format!("[完整原文]\n{over}")
+        );
+    }
+
     /// 出厂口径（200 字 / 40 列）端到端：超长短语的完整原文先截到 200 字，再每 20 个汉字一行。
     #[test]
     fn factory_limits_apply_end_to_end() {

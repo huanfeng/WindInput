@@ -6588,16 +6588,14 @@ impl UiCandidateConfig {
 
     /// 按 max_chars 截断候选显示文本（0=不限）。超出时截断并加省略号 [`TRUNCATION_MARK`]
     /// 提示"过长"（仅影响显示；上屏用完整原文，见 coordinator 候选下发）。
+    ///
+    /// 「字」按**字素簇**计（口径同悬停提示的截断与折行）：按码位切会把 emoji ZWJ 序列、
+    /// 组合符、变体选择符拦腰切开，屏上冒出半个字形。
     pub fn truncate_display(&self, text: &str) -> String {
-        if self.max_chars == 0 {
-            return text.to_string();
-        }
-        let chars: Vec<char> = text.chars().collect();
-        if chars.len() <= self.max_chars {
-            text.to_string()
-        } else {
-            let head: String = chars[..self.max_chars].iter().collect();
-            format!("{head}{TRUNCATION_MARK}")
+        use unicode_segmentation::UnicodeSegmentation;
+        match text.grapheme_indices(true).nth(self.max_chars) {
+            Some((cut, _)) if self.max_chars > 0 => format!("{}{TRUNCATION_MARK}", &text[..cut]),
+            _ => text.to_string(),
         }
     }
 }
@@ -11855,6 +11853,43 @@ active = "x"
             "截断到 4 字并加省略号"
         );
         assert_eq!(c.truncate_display("一二"), "一二", "不足不截");
+    }
+
+    /// 截断按**字素簇**计（口径同悬停提示），不把 ZWJ 序列 / 组合符 / 变体选择符拦腰切开。
+    #[test]
+    fn test_truncate_display_counts_graphemes() {
+        let cfg = merged_with("[ui.candidate]\nmax_chars = 3\n");
+        let c = cfg.ui.candidate;
+        let family = "👨\u{200D}👩\u{200D}👧";
+        // ZWJ 序列算一个字：恰好 3 簇不截；4 簇截到前 3 簇，序列完整保留。
+        let abf = format!("ab{family}");
+        assert_eq!(c.truncate_display(&abf), abf, "ZWJ 序列整簇计 1");
+        assert_eq!(
+            c.truncate_display(&format!("{family}{family}{family}{family}")),
+            format!("{family}{family}{family}…")
+        );
+        // 组合符：e + U+0301 是一簇。
+        let e = "e\u{301}";
+        assert_eq!(
+            c.truncate_display(&e.repeat(3)),
+            e.repeat(3),
+            "组合符不另计"
+        );
+        assert_eq!(
+            c.truncate_display(&e.repeat(4)),
+            format!("{}…", e.repeat(3))
+        );
+        // 变体选择符：⚽ + U+FE0F 是一簇。
+        let ball = "⚽\u{FE0F}";
+        assert_eq!(c.truncate_display(&ball.repeat(3)), ball.repeat(3));
+        assert_eq!(
+            c.truncate_display(&format!("ab{ball}{ball}")),
+            format!("ab{ball}…"),
+            "截断点落在簇边界，不留孤立的 U+FE0F"
+        );
+        // 普通中英文与恰好等长。
+        assert_eq!(c.truncate_display("中a文b"), "中a文…");
+        assert_eq!(c.truncate_display("中a文"), "中a文", "恰好等长不截");
     }
 
     #[test]
