@@ -149,39 +149,27 @@ impl Coordinator {
     ///   历史在其后，与临英「首候选是所打原文」一致；不要时去掉原文，历史置首。
     /// - **其余**（带符号，`${re` / `RESET_TIME`）：去掉原文、历史置首。原文在组合区里本就
     ///   看得见，回车恒上屏它；排在历史下面反而怪（实机反馈）。
+    ///
+    /// `raw_pinned` = `seg` 首格是按开关钉上去的原文（`mix_free_english_segment` 已按临英判据
+    /// 判过，这里不再重判一遍——两处各判一次曾在 `InDict` 上分叉：一边按字面、一边忽略大小写）。
     pub(crate) fn mix_free_with_history(
         &self,
         state: &State,
         seg: Vec<Candidate>,
+        raw_pinned: bool,
     ) -> Vec<Candidate> {
         use wind_candidate::CandidateSource;
-        use wind_config::config::RawCandidateMode;
         let hist = self.quick_history_candidates(state, false);
         if hist.is_empty() {
             return seg;
         }
         let raw = state.mix_buffer.as_str();
-        // 原文格**按位置认**：`seg` 首格恒是头部（原文）——`mix_free_english_segment` 先放
+        // 原文格**按位置认**：钉了原文时 `seg` 首格就是它——`mix_free_english_segment` 先放
         // 头部、去重保留首次出现。按文本认会在两处失手：头部格被同名词库词占据
         // （`merge_head_with_dict`），以及大小写档位把它改写成 `HEL` / `hel`。
-        let keep_raw = self.mix_free_is_english_word(state) && {
-            let te = &self.rt().config.input.temp_english;
-            match te.raw_candidate {
-                RawCandidateMode::Always => true,
-                RawCandidateMode::Off => false,
-                // `show_candidates = false` 时词库没查，按 Always（同 `update_temp_english_candidates`）。
-                // 判「词库里有」不区分大小写：`seg` 已按输入大小写 / 档位投影过。
-                RawCandidateMode::InDict => {
-                    !te.show_candidates
-                        || seg.iter().any(|c| {
-                            c.source == CandidateSource::English && c.text.eq_ignore_ascii_case(raw)
-                        })
-                }
-            }
-        };
         // 逐字相同的历史（若有）排在 `hist` 首位，它就是原文本身，不再另列原文格。
         let exact = hist.first().is_some_and(|h| h.text == raw);
-        let raw_first = keep_raw && !exact;
+        let raw_first = raw_pinned && !exact;
         let mut out: Vec<Candidate> = Vec::with_capacity(hist.len() + seg.len());
         let mut rest = seg.into_iter();
         if let Some(first) = rest.next() {
@@ -192,9 +180,14 @@ impl Coordinator {
                 out.extend(hist);
                 // 不单列原文时只去掉**纯原文**（来源为空）；占据头部格的同名词库词照常出
                 // ——临英关掉原文候选时词库词同样会出。
-                if first.source != CandidateSource::None
-                    && !out.iter().any(|o| o.text == first.text)
-                {
+                //
+                // 首格是不是原文：钉了原文时按位置认（大小写档位可能已把它改写成 `HEL`）；
+                // 没钉时首格可能是补位原文，也可能是同样无来源的大小写变形（原文候选关、
+                // 变形开）——变形按定义不等于原文，补位原文在档位之后才放、文本恒等于缓冲，
+                // 故按文本认。
+                let is_raw =
+                    first.source == CandidateSource::None && (raw_pinned || first.text == raw);
+                if !is_raw && !out.iter().any(|o| o.text == first.text) {
                     out.push(first);
                 }
             }
