@@ -102,6 +102,82 @@ pub(crate) fn foreground_pid() -> u32 {
     window_pid(unsafe { GetForegroundWindow() })
 }
 
+/// 当前持有键盘焦点的窗口所属进程 ID（0 = 查询失败）。
+///
+/// 取前台线程的 `GetGUIThreadInfo().hwndFocus`：跨进程嵌入的子窗口（WebView2 等）与前台
+/// 顶层窗口共用输入队列，焦点落在子进程窗口时这里给出的是子进程——只看前台窗口会把它们
+/// 全算到宿主头上。拿不到焦点窗口时退回前台窗口的进程。
+#[cfg(windows)]
+pub(crate) fn focus_owner_pid() -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
+    };
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_invalid() {
+        return 0;
+    }
+    let tid = unsafe { GetWindowThreadProcessId(fg, None) };
+    let mut gti = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if tid != 0 && unsafe { GetGUIThreadInfo(tid, &mut gti) }.is_ok() && !gti.hwndFocus.is_invalid()
+    {
+        let pid = window_pid(gti.hwndFocus);
+        if pid != 0 {
+            return pid;
+        }
+    }
+    window_pid(fg)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn focus_owner_pid() -> u32 {
+    0
+}
+
+/// `sender` 是否是后台客户端：焦点在别的进程，且那个进程正是当前活动客户端。
+///
+/// 只在「活动客户端 = 焦点持有者」时才判后台——焦点查询拿不准（0）、或活动客户端本身
+/// 已不是焦点持有者（它可能是陈旧的）时一律不判，保持旧行为：错判的代价是真正切过去
+/// 的宿主抢不到激活态，比放过一次初始化噪声严重得多。
+pub(crate) fn is_background_sender(sender_pid: u32, active_pid: u32, focus_pid: u32) -> bool {
+    sender_pid != 0 && focus_pid != 0 && sender_pid != focus_pid && active_pid == focus_pid
+}
+
 // 全屏形态探测搬到 wind-keys：UI 线程显示浮窗前还要再判一次（最后一道闸），而
 // wind-ui 不能依赖本 crate。见 `wind_keys::foreground` 模块注释。
 pub(crate) use wind_keys::foreground::{FullscreenKind, foreground_fullscreen_kind};
+
+#[cfg(test)]
+mod background_sender_tests {
+    use super::is_background_sender;
+
+    #[test]
+    fn webview_child_during_searchhost_typing_is_background() {
+        // 2026-10-09：SearchHost(8092) 正在输入，其 WebView2 子进程(27168) 初始化 TSF。
+        assert!(is_background_sender(27168, 8092, 8092));
+    }
+
+    #[test]
+    fn real_focus_switch_is_not_background() {
+        // 焦点已到发送方：正常的切应用。
+        assert!(!is_background_sender(27168, 8092, 27168));
+        // 同进程（别的线程）也不判。
+        assert!(!is_background_sender(8092, 8092, 8092));
+    }
+
+    #[test]
+    fn unsure_cases_keep_legacy_behavior() {
+        assert!(!is_background_sender(27168, 8092, 0), "焦点查询失败不判");
+        assert!(
+            !is_background_sender(27168, 0, 8092),
+            "还没有活动客户端不判"
+        );
+        assert!(
+            !is_background_sender(27168, 1234, 8092),
+            "活动客户端已不持焦点（陈旧）不判"
+        );
+        assert!(!is_background_sender(0, 8092, 8092), "发送方 pid 未知不判");
+    }
+}

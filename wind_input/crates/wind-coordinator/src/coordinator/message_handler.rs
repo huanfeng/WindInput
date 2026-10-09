@@ -3060,6 +3060,32 @@ impl MessageHandler for Coordinator {
         Some(status)
     }
 
+    fn is_background_client(&self, pid: u32) -> bool {
+        let active_pid = (self.push_server.active_token() >> 32) as u32;
+        // 先挡掉绝大多数情况（发送方就是活动客户端），焦点查询只在跨进程时才做。
+        if pid == 0 || active_pid == 0 || pid == active_pid {
+            return false;
+        }
+        // 最近一次按键就是它发的 ⇒ 它在打字，不是后台。误判一次后的自愈口：活动 token
+        // 只有 focus_gained / ime_activated 会改，而 SearchHost 这类宿主不发 focus_gained、
+        // ime_activated 每进程只发一次，没有这道口子，误判会让它整段使用期间的光标都被丢掉。
+        if pid == self.focus_pid.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        let focus = crate::focus_owner_pid();
+        let background = crate::is_background_sender(pid, active_pid, focus);
+        // 跨进程才会走到这里，量很小；三个判据 pid 全打出来，靶机上才能复核判得对不对。
+        tracing::debug!(
+            "后台客户端判定: sender={pid} active={active_pid} focus={focus} → {}",
+            if background { "后台" } else { "放行" }
+        );
+        background
+    }
+
+    fn handle_background_ime_activated(&self, client_token: u64) {
+        self.push_activation_status(client_token);
+    }
+
     fn handle_ime_deactivated(&self, client_token: u64) {
         tracing::debug!("handle_ime_deactivated: token={:#x}", client_token);
         // 同 handle_focus_lost：关菜单先于 stale 判定。下面清 menu_open 的那段仍保留

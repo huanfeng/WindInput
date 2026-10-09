@@ -577,6 +577,16 @@ pub(crate) fn dispatch_command(
         // Phase2 调用 HandleIMEActivated 并推送 ActivationStatusPush。
         CMD_IME_ACTIVATED => {
             let token = decode_client_token(payload);
+            // 后台客户端的激活不是焦点转移：不动 host render 写帧目标与活动客户端，
+            // 只回推激活态（见 MessageHandler::is_background_client）。
+            if handler.is_background_client(ctx.pid) {
+                debug!(
+                    "IME_ACTIVATED 来自后台客户端 pid={} token={:#x}：不抢活动客户端",
+                    ctx.pid, token
+                );
+                handler.handle_background_ime_activated(token);
+                return None;
+            }
             // 记录最近焦点实例（host-render 写帧目标）。已 setup 才在 active_target 生效。
             #[cfg(windows)]
             if let Some(mgr) = host_render {
@@ -718,6 +728,12 @@ pub(crate) fn dispatch_command(
 
         // ── 光标更新（异步） ──
         CMD_CARET_UPDATE => {
+            // 后台客户端的光标不是输入位置：它在 ActivateEx 里随手报的 Win32 光标曾吃掉
+            // 前台宿主的首显等待，把第一个字的候选摆到 (0,74)。
+            if handler.is_background_client(ctx.pid) {
+                debug!("caret_update 来自后台客户端 pid={}，忽略", ctx.pid);
+                return if is_async { None } else { Some(encode_ack()) };
+            }
             if let Ok(caret) = wind_ipc::codec::decode_focus_gained(payload)
                 .map(|fg| fg.caret)
                 .or_else(|_| {
@@ -1202,6 +1218,9 @@ mod tests {
         last_select: std::sync::atomic::AtomicI32,
         last_scroll: std::sync::atomic::AtomicI32,
         last_uielement: std::sync::Mutex<Vec<String>>,
+        /// 视为后台客户端的 pid（0 = 无）。
+        background_pid: AtomicU32,
+        activation_calls: std::sync::Mutex<Vec<String>>,
     }
 
     impl MessageHandler for RecordingHandler {
@@ -1212,8 +1231,21 @@ mod tests {
             None
         }
         fn handle_focus_lost(&self, _client_token: u64, _reason: FocusLostReason) {}
-        fn handle_ime_activated(&self, _client_token: u64) -> Option<StatusUpdateData> {
+        fn handle_ime_activated(&self, client_token: u64) -> Option<StatusUpdateData> {
+            self.activation_calls
+                .lock()
+                .unwrap()
+                .push(format!("fg:{client_token:#x}"));
             None
+        }
+        fn is_background_client(&self, pid: u32) -> bool {
+            pid != 0 && pid == self.background_pid.load(Ordering::SeqCst)
+        }
+        fn handle_background_ime_activated(&self, client_token: u64) {
+            self.activation_calls
+                .lock()
+                .unwrap()
+                .push(format!("bg:{client_token:#x}"));
         }
         fn handle_ime_deactivated(&self, _client_token: u64) {}
         fn handle_mode_notify(&self, _flags: u32) {}
@@ -1519,6 +1551,47 @@ mod tests {
         let header = IpcHeader::from_bytes(&hdr_arr);
         let cmd = header.command;
         assert_eq!(cmd, CMD_ACK, "未命中白名单应回 ACK");
+    }
+
+    /// 后台客户端的 IME_ACTIVATED 走 background 分支，不进常规激活（不抢活动客户端）。
+    #[test]
+    fn ime_activated_from_background_client_does_not_take_over() {
+        let handler = Arc::new(RecordingHandler::default());
+        handler.background_pid.store(27168, Ordering::SeqCst);
+        let dyn_handler: Arc<dyn MessageHandler> = handler.clone();
+        let token: u64 = (27168u64 << 32) | 1;
+        let payload = token.to_le_bytes();
+        let send = |pid: u32| {
+            let ctx = ClientCtx { conn_id: 9, pid };
+            #[cfg(windows)]
+            {
+                dispatch_command(
+                    &dyn_handler,
+                    wind_ipc::protocol::CMD_IME_ACTIVATED,
+                    true,
+                    &payload,
+                    ctx,
+                    None,
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                dispatch_command(
+                    &dyn_handler,
+                    wind_ipc::protocol::CMD_IME_ACTIVATED,
+                    true,
+                    &payload,
+                    ctx,
+                )
+            }
+        };
+        assert!(send(27168).is_none());
+        assert!(send(8092).is_none());
+        assert_eq!(
+            *handler.activation_calls.lock().unwrap(),
+            vec![format!("bg:{token:#x}"), format!("fg:{token:#x}")],
+            "后台 pid 只回推，前台 pid 走常规激活"
+        );
     }
 
     /// HOST_RENDER_FAILED 应把 reason 路由到 handler（跨平台，不涉及管理器）。

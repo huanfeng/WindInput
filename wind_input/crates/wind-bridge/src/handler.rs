@@ -396,6 +396,23 @@ pub trait MessageHandler: Send + Sync {
     /// 处理 IME 激活（返回状态用于 ActivationStatusPush）
     fn handle_ime_activated(&self, client_token: u64) -> Option<StatusUpdateData>;
 
+    /// 发送方进程是否是「后台客户端」：别的进程正持有键盘焦点、且它就是当前活动客户端。
+    ///
+    /// 这类客户端的 `IME_ACTIVATED` / 光标上报是**初始化噪声**，不是焦点转移——SearchHost
+    /// 的 WebView2 子进程（开始菜单搜索结果页）在用户打第一个字时才初始化 TSF，此前它的
+    /// 激活把活动客户端和 host render 写帧目标从 SearchHost 抢走，第一个字的候选落到被
+    /// 开始菜单盖住的本地窗口（2026-10-09 靶机）。默认 `false` = 不判（旧行为）。
+    ///
+    /// 只拦 `IME_ACTIVATED` 与 `CARET_UPDATE` 两条（靶机上实际抢走激活态的就是这两条）；
+    /// 后台客户端若发 `FOCUS_GAINED` 仍照常处理——那本身就是焦点转移的声明。
+    fn is_background_client(&self, _pid: u32) -> bool {
+        false
+    }
+
+    /// 后台客户端的 `IME_ACTIVATED`：只给它回推一次激活态（让它的 DLL 状态对齐），
+    /// **不**改活动客户端、不重置输入模式。判据见 [`Self::is_background_client`]。
+    fn handle_background_ime_activated(&self, _client_token: u64) {}
+
     /// 处理 IME 停用。`client_token` 语义同 [`Self::handle_focus_lost`]。
     fn handle_ime_deactivated(&self, client_token: u64);
 

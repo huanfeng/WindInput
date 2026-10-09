@@ -137,6 +137,14 @@ impl MessageHandler for DeferredHandler {
         self.with_handler(None, |h| h.handle_ime_activated(client_token))
     }
 
+    fn is_background_client(&self, pid: u32) -> bool {
+        self.with_handler(false, |h| h.is_background_client(pid))
+    }
+
+    fn handle_background_ime_activated(&self, client_token: u64) {
+        self.with_handler((), |h| h.handle_background_ime_activated(client_token))
+    }
+
     fn handle_ime_deactivated(&self, client_token: u64) {
         self.with_handler((), |h| h.handle_ime_deactivated(client_token))
     }
