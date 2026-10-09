@@ -541,6 +541,31 @@ download_dicts() {
     download_file "$EMOJI_BASE/LICENSE"                   "$rime_emoji/LICENSE"                   "LGPL-3.0"
 }
 
+# 把 rime 主表 import_tables 里**没随包**的子表注释掉（就地改写）。
+#
+# 上游 rime_frost.dict.yaml 默认导入 GB18030-2022 与 23 张细胞词库，我们只发其中 6 张：
+# 原样带着的话每次加载都对缺的那些 warn 一遍（24 条），且细胞词库的自动识别会把
+# 「已被主表引用」的文件当主表的一部分跳过——不裁掉，用户放进 cn_dicts_cell/ 的同名
+# 文件就永远出现不了（见 docs/design/schema-dict-discovery.md §5）。
+# 判据是「输出目录里有没有这个文件」而不是写死名单：以后多发几张不用回来改这里。
+# ⚠ dev.ps1 的 Remove-UnshippedImports 是同一件事，改一边要同步另一边。
+strip_unshipped_imports() {
+    local main="$1" dir
+    dir="$(dirname "$main")"
+    awk -v dir="$dir" '
+        /^\.\.\.[[:space:]]*$/ { done = 1 }
+        !done && /^import_tables:/ { inblk = 1; print; next }
+        !done && inblk && /^[^[:space:]#-]/ { inblk = 0 }
+        !done && inblk && match($0, /^[[:space:]]*-[[:space:]]*[^[:space:]#]+/) {
+            entry = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*-[[:space:]]*/, "", entry)
+            if (system("test -f \"" dir "/" entry ".dict.yaml\"") != 0) {
+                print "  # [未随包] " substr($0, RSTART + RLENGTH - length(entry)); next
+            }
+        }
+        { print }
+    ' "$main" > "$main.tmp" && mv -f "$main.tmp" "$main"
+}
+
 # 从 data/（源）+ .cache/（下载/生成）组装完整运行时数据到 $outdir/data/
 assemble_data() {
     local outdir="${1:-$BUILD_DEV_DIR}"
@@ -580,6 +605,7 @@ assemble_data() {
                  others.dict.yaml corrections.dict.yaml; do
             [ -f "$rime_frost/cn_dicts/$f" ] && cp -f "$rime_frost/cn_dicts/$f" "$pinyin_cn/"
         done
+        strip_unshipped_imports "$pinyin/rime_frost.dict.yaml"
     else
         warn "缺 .cache/rime-frost/，拼音词库不可用（运行 gen-data 下载）"
     fi

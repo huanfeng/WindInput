@@ -541,6 +541,30 @@ function Download-Dicts {
 }
 
 # 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 $outdir\data\
+# 把 rime 主表 import_tables 里**没随包**的子表注释掉（就地改写）。
+# 理由见 dev.sh 的 strip_unshipped_imports（同一件事，改一边要同步另一边）：
+# 免去每次加载 24 条缺失 warn，并让细胞词库的自动识别不把用户放进 cn_dicts_cell\ 的同名文件
+# 当成「已被主表引用」跳过。判据是输出目录里有没有这个文件，不写死名单。
+# 按 LF 切行、按 LF 拼回，原文件的换行与编码（UTF-8 无 BOM）保持不变。
+function Remove-UnshippedImports ([string]$main) {
+    $dir = Split-Path $main -Parent
+    $lines = [IO.File]::ReadAllText($main, [Text.UTF8Encoding]::new($false)) -split "`n"
+    $inBlock = $false; $done = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $l = $lines[$i]
+        if ($l -match '^\.\.\.\s*$') { $done = $true }
+        if ($done) { continue }
+        if ($l -match '^import_tables:') { $inBlock = $true; continue }
+        if ($inBlock -and $l -match '^[^\s#-]') { $inBlock = $false }
+        if ($inBlock -and $l -match '^\s*-\s*([^\s#]+)(.*)$') {
+            if (-not (Test-Path (Join-Path $dir "$($Matches[1]).dict.yaml"))) {
+                $lines[$i] = "  # [未随包] $($Matches[1])$($Matches[2])"
+            }
+        }
+    }
+    [IO.File]::WriteAllText($main, ($lines -join "`n"), [Text.UTF8Encoding]::new($false))
+}
+
 function Assemble-Data ([string]$outdir = $BuildDevDir) {
     $data      = "$outdir\data"
     $schemas   = "$data\schemas"
@@ -575,6 +599,7 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
         foreach ($f in @("8105.dict.yaml", "41448.dict.yaml", "base.dict.yaml", "ext.dict.yaml", "others.dict.yaml", "corrections.dict.yaml")) {
             if (Test-Path "$rimeFrost\cn_dicts\$f") { Copy-Item "$rimeFrost\cn_dicts\$f" $pinyinCn -Force }
         }
+        Remove-UnshippedImports "$pinyin\rime_frost.dict.yaml"
     } else { Warn "缺 .cache\rime-frost\, 拼音词库不可用 (运行 gen-data 下载)" }
 
     # 3. 英文词库
