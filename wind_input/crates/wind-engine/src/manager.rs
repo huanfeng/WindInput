@@ -5921,7 +5921,9 @@ impl EngineManager {
         Self::inject_dir_dicts(
             &mut base,
             &|sub| Config::list_schema_resource_dir(Some(data_dir), sub, DICT_YAML_SUFFIX),
-            &|rel| Self::read_dict_head(&Self::resolve_dict_file(rel, &data_dir.join("schemas"))),
+            &|rel| {
+                Self::dict_head_resolved(&Self::resolve_dict_file(rel, &data_dir.join("schemas")))
+            },
         );
         // 合并 override 层（存在才读；不存在则零影响）。
         if let Some(ov) = override_dir.and_then(|d| Self::read_override_value(schema_id, d)) {
@@ -7029,8 +7031,10 @@ impl EngineManager {
     ///
     /// 跳过两类文件：
     /// - 方案已手写声明的（同 path）——手写的有 label / base_order 等设计，优先；
-    /// - 已被某个已声明词库的 `import_tables` 引用的——它本就是那张主表的一部分，再登记一次
-    ///   就是同一批词加载两遍。用户拿上游完整的 `rime_frost.dict.yaml` 覆盖主表时正是这样。
+    /// - 已被某个已声明词库的 `import_tables` 引用、**且确实会被它加载**的——它本就是那张
+    ///   主表的一部分，再登记一次就是同一批词加载两遍。用户拿上游完整的 `rime_frost.dict.yaml`
+    ///   连同 `cn_dicts_cell/` 一起放进用户目录时正是这样。「确实会加载」由 `head` 负责判定
+    ///   （生产用 [`Self::dict_head_resolved`]）。
     ///
     /// `list_dir(sub)` 返回 `(相对 schemas/ 的路径, 绝对路径)`（生产用分层扫描），
     /// `head(rel)` 读该词库头部 → `(name, import_tables)`。两者都作为参数传入，单测不碰真实用户目录。
@@ -7117,6 +7121,24 @@ impl EngineManager {
                 arr.push(toml::Value::Table(t));
             }
         }
+    }
+
+    /// [`Self::read_dict_head`]，但 `import_tables` 只留**真能在主表目录找到文件**的那些。
+    ///
+    /// 给发现目录的「已被主表引用就跳过」用：子表只按主表**所在目录**拼路径、不走分层
+    /// （`rime_source_paths`），所以安装目录里的主表写着 `cn_dicts_cell/idiom`、而文件只在
+    /// 用户目录时，它其实**不会**被主表加载。只看清单就跳过，这张库就两头落空——主表没加载、
+    /// 扩展词库列表里也不出现（未经 S1 裁剪的旧主表正是这样，评测时撞见）。
+    fn dict_head_resolved(path: &Path) -> (String, Vec<String>) {
+        let (name, imports) = Self::read_dict_head(path);
+        let Some(dir) = path.parent() else {
+            return (name, Vec::new());
+        };
+        let imports = imports
+            .into_iter()
+            .filter(|imp| dir.join(format!("{imp}{DICT_YAML_SUFFIX}")).is_file())
+            .collect();
+        (name, imports)
     }
 
     /// 读一个 `.dict.yaml` 的 YAML 头 → `(name, import_tables)`。
@@ -9260,6 +9282,31 @@ mod tests {
             dict_ids(&base),
             ["dir:wubi86/ext/a"],
             "path 的首尾斜杠不影响扫描"
+        );
+    }
+
+    /// 主表清单里写了、但主表目录里没有的子表，不算「已被主表引用」：子表不走分层，它其实
+    /// 不会被加载。只看清单就跳过，用户目录里那张同名细胞库就两头落空。
+    #[test]
+    fn dict_head_resolved_keeps_only_imports_present_beside_main() {
+        let dir = std::env::temp_dir().join(format!("wind-headres-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cells")).unwrap();
+        let main = dir.join("main.dict.yaml");
+        std::fs::write(
+            &main,
+            "---\nname: main\nimport_tables:\n  - cells/here\n  - cells/elsewhere\n...\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("cells/here.dict.yaml"), "---\nname: here\n...\n").unwrap();
+
+        let (name, imports) = EngineManager::dict_head_resolved(&main);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(name, "main");
+        assert_eq!(
+            imports,
+            ["cells/here"],
+            "cells/elsewhere 不在主表目录，不会被主表加载"
         );
     }
 
