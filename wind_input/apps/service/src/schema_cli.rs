@@ -189,18 +189,19 @@ fn cmd_rebuild() -> anyhow::Result<i32> {
     Ok(0)
 }
 
-/// 词库行的启用状态：主库恒开；扩展库 = 用户覆盖 enabled，未设时继承
-/// default_enabled（tri-state，nil=true）。与引擎侧装载判定同一语义。
+/// 词库行的启用状态：主库恒开；扩展库直接用引擎的判定 [`DictSpec::is_enabled`]。
+///
+/// 不在这里另写一份：此前手抄的版本把「enabled 与 default_enabled 都没写」当启用，引擎却当
+/// 关闭——自动识别的扩展库正是这种形态，CLI 会把一张没开的库报成「启用」。
 fn dict_status(d: &Value) -> &'static str {
-    if d.get("default").and_then(Value::as_bool).unwrap_or(false) {
-        return "主库";
+    let spec: wind_config::schema::DictSpec = serde_json::from_value(d.clone()).unwrap_or_default();
+    if spec.default {
+        "主库"
+    } else if spec.is_enabled() {
+        "启用"
+    } else {
+        "停用"
     }
-    let enabled = d
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .or_else(|| d.get("default_enabled").and_then(Value::as_bool))
-        .unwrap_or(true);
-    if enabled { "启用" } else { "停用" }
 }
 
 fn cmd_dict_list(id: &str) -> anyhow::Result<i32> {
@@ -260,4 +261,26 @@ fn cmd_dict_toggle(id: &str, dict_ids: &[String], enable: bool) -> anyhow::Resul
         println!("✓ {id}: 词库 {did} 已{verb}{note}");
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 三态与引擎一致：两个开关都没写 ⇒ 停用（自动识别的扩展库正是这种形态）。
+    #[test]
+    fn dict_status_matches_engine_semantics() {
+        assert_eq!(dict_status(&json!({ "id": "m", "default": true })), "主库");
+        assert_eq!(dict_status(&json!({ "id": "dir:a" })), "停用");
+        assert_eq!(
+            dict_status(&json!({ "id": "x", "default_enabled": true })),
+            "启用"
+        );
+        assert_eq!(
+            dict_status(&json!({ "id": "x", "default_enabled": true, "enabled": false })),
+            "停用"
+        );
+        assert_eq!(dict_status(&json!({ "id": "x", "enabled": true })), "启用");
+    }
 }
