@@ -76,6 +76,12 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
         "list_schema_resource_dir 已按层序展开（在 resource_layers_named_with 的循环体内         拼 schemas/<sub>）——它是 resolve_schema_resource 的「有哪些名字」那一面，         设置页据此列出可选的注释词库文件，故与解析侧看见的层必须是同一批",
     ),
     (
+        "crates/wind-engine/src/pinyin/generate/legacy_equiv.rs",
+        1,
+        "仅测试夹具（整文件 `#[cfg(test)]`）：对拍紧凑索引与旧实现，直接读 `build_dev/data` \
+         这一个目录的拼音词库，不是运行期资源解析，不需要看见 data_custom 层",
+    ),
+    (
         "crates/wind-mobile/src/lib.rs",
         1,
         "scan_installed_schemas 已按层序（在 resource_layers_with 的循环体内拼 schemas）",
