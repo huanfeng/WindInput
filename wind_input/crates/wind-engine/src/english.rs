@@ -87,6 +87,18 @@ fn stripped_hit_is_relevant(text: &str, sep: char) -> bool {
 }
 
 impl Engine for EnglishEngine {
+    fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
+        let mut v = self.inner.memory_parts();
+        if let Some(bytes) = self.phrase.heap_bytes_if_built() {
+            v.push(crate::engine::MemPart {
+                name: "LazyPhraseIndex".into(),
+                bytes,
+                allocs: 4,
+            });
+        }
+        v
+    }
+
     fn convert(&self, input: &str, max_candidates: usize) -> anyhow::Result<ConvertResult> {
         let mut r = self.inner.convert(input, max_candidates)?;
         // 英文候选统一标记来源（词频归属 / 融合加权档区分用）。

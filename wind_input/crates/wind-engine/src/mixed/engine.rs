@@ -855,6 +855,24 @@ impl MixedEngine {
 }
 
 impl Engine for MixedEngine {
+    /// 子引擎是混输自己建的（不与独立方案共享），故逐个带前缀列出。
+    fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
+        let sub = |tag: &str, e: &dyn Engine| {
+            e.memory_parts().into_iter().map({
+                let tag = tag.to_string();
+                move |mut p| {
+                    p.name = format!("{tag}/{}", p.name);
+                    p
+                }
+            })
+        };
+        let mut v: Vec<_> = sub("primary", self.primary.as_ref()).collect();
+        if let Some(s) = &self.secondary {
+            v.extend(sub("secondary", s.as_ref()));
+        }
+        v
+    }
+
     /// 码元字符集取**主码表子引擎**的。
     ///
     /// ⚠️ 必须显式代理，不能沿用 trait 默认的 `None`：默认值会让协调器回落历史行为，

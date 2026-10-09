@@ -21,58 +21,178 @@ use super::syllable::{STANDARD_SYLLABLES, SyllableTrie};
 /// 整词读音消歧时笛卡尔积组合数上限（防生僻多音字长词性能塌方）。
 const MAX_READING_COMBOS: usize = 64;
 
+/// [`CharPinyinIndex::build`] 的累计统计（诊断）。
+pub static BUILD_STATS: crate::text_codes::BuildStats = crate::text_codes::BuildStats::new();
+
+/// 单字读音表的查询面：本模块的推断 / 求解只经这三个方法读读音表。
+///
+/// 抽成 trait 只为一件事：等价性对拍（测试里的旧实现与 [`CharPinyinIndex`] 喂同一批词，
+/// 比上游函数的产出）。生产只有 [`CharPinyinIndex`] 一个实现。
+pub trait ReadingTable {
+    /// 代表读音（权重最高者）；没收录的字为 `None`。
+    fn representative(&self, c: char) -> Option<&str>;
+    /// 该字的读音条数（≥ 1）；没收录的字为 `None`。
+    fn reading_count(&self, c: char) -> Option<usize>;
+    /// 第 `i` 个读音（按权重降序，`i < reading_count`）；越界或没收录为 `None`。
+    fn reading(&self, c: char, i: usize) -> Option<&str>;
+}
+
 /// 汉字 → 读音反向索引。
 ///
-/// 多音字 `char_all` 按词典权重降序，`char`（代表读音）= 权重最高者。
+/// 每字的读音按词典权重降序（同权重按 [`STANDARD_SYLLABLES`] 的次序），第 0 个即代表读音。
 /// 由 [`CharPinyinIndex::build`] 遍历 [`STANDARD_SYLLABLES`] 查词典单字候选构建。
+///
+/// 紧凑存储（与 `wind-reverse` 的 `PinyinTable` 同构）：按字升序的定长条目数组 + 读音结束偏移
+/// 数组 + 一整块读音文本，查询二分，**没有逐条堆分配**。此前是两张 `HashMap<char, String>` /
+/// `HashMap<char, Vec<String>>`：4 万字、5.2 万读音拆成 13.3 万个小块，实测在用堆 9.1 MB、
+/// 加上分配器开销常驻约 12.5 MB（`docs/design/memory-footprint.md` S5；对拍见
+/// `generate/legacy_equiv.rs`）。
 #[derive(Debug, Default)]
 pub struct CharPinyinIndex {
-    /// 汉字 → 代表读音（权重最高）
-    char: HashMap<char, String>,
-    /// 汉字 → 所有读音（按权重降序），用于多音字消歧
-    char_all: HashMap<char, Vec<String>>,
+    /// 按 `ch` 升序。本字读音在 `reading_ends` 中的下标区间 = [前一条目的 `reading_end`,
+    /// 本条 `reading_end`)，首条起点为 0。
+    entries: Vec<CharEntry>,
+    /// 每个读音在 `arena` 中的结束偏移，按条目序连续；单条读音 = [前一项, 本项)，首项起点为 0。
+    reading_ends: Vec<u32>,
+    /// 全部读音文本首尾相接。
+    arena: String,
+}
+
+#[derive(Debug)]
+struct CharEntry {
+    ch: char,
+    reading_end: u32,
 }
 
 impl CharPinyinIndex {
     /// 从词典构建索引：遍历标准音节，收集单字候选及其权重，按权重降序定读音。
     pub fn build(dict: &CachedDict) -> Self {
-        // 每字暂存 (读音, 权重)；同字同音节多条（异体/多源）合并取最大权重
-        let mut all: HashMap<char, Vec<(String, i32)>> = HashMap::new();
-        for &syl in STANDARD_SYLLABLES {
+        let t0 = std::time::Instant::now();
+        let idx = Self::build_inner(dict);
+        let took = t0.elapsed();
+        BUILD_STATS.record(took, took);
+        tracing::debug!(
+            "单字读音索引构建 字数={} 用时={took:?} heap_kb={}",
+            idx.char_count(),
+            idx.heap_estimate().0 / 1024
+        );
+        idx
+    }
+
+    fn build_inner(dict: &CachedDict) -> Self {
+        // 音节 id = 它在 `STANDARD_SYLLABLES` 里**首次**出现的下标：同一音节串只算一个读音，
+        // 且 id 序就是遍历序（旧实现「同权重保留首次遇到的次序」靠的正是它）。
+        let mut first: HashMap<&'static str, u32> =
+            HashMap::with_capacity(STANDARD_SYLLABLES.len());
+        // 中间态只有定长三元组 (字, 音节 id, 权重)，不为读音逐条分配。
+        let mut rows: Vec<(char, u32, i32)> = Vec::new();
+        for (i, &syl) in STANDARD_SYLLABLES.iter().enumerate() {
+            let sid = *first.entry(syl).or_insert(i as u32);
             for (text, weight, _order) in dict.search(syl) {
                 let mut chars = text.chars();
                 let (Some(c), None) = (chars.next(), chars.next()) else {
                     continue; // 仅单字
                 };
-                let entry = all.entry(c).or_default();
-                if let Some(e) = entry.iter_mut().find(|(s, _)| s == syl) {
-                    if weight > e.1 {
-                        e.1 = weight;
-                    }
-                } else {
-                    entry.push((syl.to_string(), weight));
-                }
+                rows.push((c, sid, weight));
             }
         }
+        // 同字同音节多条（异体 / 多源）合并取最大权重。
+        rows.sort_unstable_by_key(|&(c, sid, _)| (c, sid));
+        rows.dedup_by(|b, a| {
+            let same = a.0 == b.0 && a.1 == b.1;
+            if same {
+                a.2 = a.2.max(b.2);
+            }
+            same
+        });
+        // 字内按权重降序、同权重按音节 id（= 旧实现的稳定排序 + 首次出现次序）。
+        rows.sort_unstable_by_key(|&(c, sid, w)| (c, std::cmp::Reverse(w), sid));
 
-        let mut char = HashMap::with_capacity(all.len());
-        let mut char_all = HashMap::with_capacity(all.len());
-        for (c, mut list) in all {
-            // 按权重降序，第 0 个即代表读音
-            list.sort_by_key(|(_, w)| std::cmp::Reverse(*w));
-            let readings: Vec<String> = list.into_iter().map(|(s, _)| s).collect();
-            char.insert(c, readings[0].clone());
-            char_all.insert(c, readings);
+        let chars =
+            rows.windows(2).filter(|w| w[0].0 != w[1].0).count() + usize::from(!rows.is_empty());
+        let mut idx = CharPinyinIndex {
+            entries: Vec::with_capacity(chars),
+            reading_ends: Vec::with_capacity(rows.len()),
+            arena: String::with_capacity(
+                rows.iter()
+                    .map(|r| STANDARD_SYLLABLES[r.1 as usize].len())
+                    .sum(),
+            ),
+        };
+        for (i, &(c, sid, _)) in rows.iter().enumerate() {
+            idx.arena.push_str(STANDARD_SYLLABLES[sid as usize]);
+            // 偏移存 u32：读音池实测约 0.2 MB、读音 5 万条，离上限差四个数量级。
+            debug_assert!(u32::try_from(idx.arena.len()).is_ok(), "读音池超出 u32");
+            idx.reading_ends.push(idx.arena.len() as u32);
+            if rows.get(i + 1).is_none_or(|n| n.0 != c) {
+                debug_assert!(
+                    u32::try_from(idx.reading_ends.len()).is_ok(),
+                    "读音条数超出 u32"
+                );
+                idx.entries.push(CharEntry {
+                    ch: c,
+                    reading_end: idx.reading_ends.len() as u32,
+                });
+            }
         }
-        Self { char, char_all }
+        drop(rows);
+        idx.entries.shrink_to_fit();
+        idx.reading_ends.shrink_to_fit();
+        idx.arena.shrink_to_fit();
+        idx
     }
 
+    /// 该字读音在 `reading_ends` 中的下标区间；没收录为 `None`。
+    fn range_of(&self, c: char) -> Option<std::ops::Range<usize>> {
+        let i = self.entries.binary_search_by_key(&c, |e| e.ch).ok()?;
+        let start = if i == 0 {
+            0
+        } else {
+            self.entries[i - 1].reading_end as usize
+        };
+        Some(start..self.entries[i].reading_end as usize)
+    }
+
+    /// 诊断：(堆字节, 堆分配块数)。三块连续存储，按容量计。
+    pub(crate) fn heap_estimate(&self) -> (usize, usize) {
+        let bytes = self.entries.capacity() * size_of::<CharEntry>()
+            + self.reading_ends.capacity() * size_of::<u32>()
+            + self.arena.capacity();
+        (bytes, 3)
+    }
+
+    /// 诊断：收录的字数。
+    pub(crate) fn char_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// 诊断：全部读音条数（多音字每音一条）。
+    pub(crate) fn total_readings(&self) -> usize {
+        self.reading_ends.len()
+    }
+}
+
+impl ReadingTable for CharPinyinIndex {
     fn representative(&self, c: char) -> Option<&str> {
-        self.char.get(&c).map(String::as_str)
+        self.reading(c, 0)
     }
 
-    fn readings(&self, c: char) -> Option<&[String]> {
-        self.char_all.get(&c).map(Vec::as_slice)
+    fn reading_count(&self, c: char) -> Option<usize> {
+        self.range_of(c).map(|r| r.len())
+    }
+
+    fn reading(&self, c: char, i: usize) -> Option<&str> {
+        let r = self.range_of(c)?;
+        let k = r.start + i;
+        if k >= r.end {
+            return None;
+        }
+        let from = if k == 0 {
+            0
+        } else {
+            self.reading_ends[k - 1] as usize
+        };
+        Some(&self.arena[from..self.reading_ends[k] as usize])
     }
 }
 
@@ -132,7 +252,7 @@ impl SpacedCode {
 /// `dict` 为拼音系统词典（提供整词验证的真值表），`index` 为单字读音索引。
 pub fn generate_word_pinyin(
     dict: &CachedDict,
-    index: &CharPinyinIndex,
+    index: &(impl ReadingTable + ?Sized),
     word: &str,
 ) -> Option<String> {
     let runes: Vec<char> = word.chars().collect();
@@ -160,7 +280,7 @@ pub fn generate_word_pinyin(
 /// 单字不进入此分支（无消歧必要）。
 fn infer_whole_word_code(
     dict: &CachedDict,
-    index: &CharPinyinIndex,
+    index: &(impl ReadingTable + ?Sized),
     runes: &[char],
     word: &str,
 ) -> Option<String> {
@@ -168,26 +288,26 @@ fn infer_whole_word_code(
         return None;
     }
     // 收集每字读音列表，同时估算笛卡尔积规模
-    let mut readings: Vec<&[String]> = Vec::with_capacity(runes.len());
+    let mut counts: Vec<usize> = Vec::with_capacity(runes.len());
     let mut combos = 1usize;
     for &r in runes {
-        let rs = index.readings(r)?;
-        if rs.is_empty() {
+        let n = index.reading_count(r)?;
+        if n == 0 {
             return None;
         }
-        combos *= rs.len();
+        combos *= n;
         if combos > MAX_READING_COMBOS {
             return None;
         }
-        readings.push(rs);
+        counts.push(n);
     }
     // 笛卡尔积枚举（按字典序，等价于按权重组合的优先级）
     let mut idxs = vec![0usize; runes.len()];
     loop {
-        // 每字一音节（readings[i][pos] 即第 i 字选中的读音）。
+        // 每字一音节（第 i 字选第 pos 个读音）。
         let mut b = SpacedCode::new(runes.len());
         for (i, &pos) in idxs.iter().enumerate() {
-            b.push_syllable(&readings[i][pos]);
+            b.push_syllable(index.reading(runes[i], pos)?);
         }
         let spaced = b.finish();
         // 查词典须用**扁平**码：词典 key 是扁平的（见 §2.2）。
@@ -203,7 +323,7 @@ fn infer_whole_word_code(
             }
             k -= 1;
             idxs[k] += 1;
-            if idxs[k] < readings[k].len() {
+            if idxs[k] < counts[k] {
                 break;
             }
             idxs[k] = 0;
@@ -238,7 +358,7 @@ fn better(a: &DpState, b: &DpState) -> bool {
 /// 找不到任何多字子词切分时返回 `None`，让调用方走逐字兜底。
 fn infer_by_subword_segmentation(
     dict: &CachedDict,
-    index: &CharPinyinIndex,
+    index: &(impl ReadingTable + ?Sized),
     runes: &[char],
 ) -> Option<String> {
     let n = runes.len();
@@ -375,10 +495,10 @@ pub struct BoundarySolve {
 /// 是多余的。判据① 唯一独占的战果是「中英/符号混排词条」，而那恰恰是上面那类合法用法。
 ///
 /// ⚠️ 降级后逻辑是**自洽**的，不是绕过：无读音时 [`reading_score`] 里的
-/// `index.readings(runes[i])?` 本就会让每条路径都不计分，`scored` 自然为空，于是落进
+/// `index.reading_count(runes[i])?` 本就会让每条路径都不计分，`scored` 自然为空，于是落进
 /// 下面那个早已存在、注释也早已写明「切分本身合法就不能否决」的降级分支。
 pub fn boundary_by_char_count(
-    index: &CharPinyinIndex,
+    index: &(impl ReadingTable + ?Sized),
     trie: &SyllableTrie,
     code: &str,
     text: &str,
@@ -389,7 +509,7 @@ pub fn boundary_by_char_count(
     }
     // 判据①（设计文档 §2.1）：每个字符都要有读音。**只作标记，不再拒收**（见上方说明）。
     // ⚠️ `readings` 只收**单字词典条目**，故这条同时也是「该字在本方案词典里存在」。
-    let no_reading = runes.iter().any(|&c| index.readings(c).is_none());
+    let no_reading = runes.iter().any(|&c| index.reading_count(c).is_none());
     // **必须 `build_strict`**：这里推的是词条的**真值边界**（哪几个字节属于哪个字的读音），
     // 下面还要拿每个音节去比对该字的 readings。带模糊拼写层会凭空多出「用户错音」那些边，
     // 既可能撑爆 `MAX_BOUNDARY_PATHS` 把本来唯一的解判成 truncated，也让判据②
@@ -429,7 +549,7 @@ pub fn boundary_by_char_count(
 
 /// 一条切分的读音代价：各音节在对应字读音表中的下标之和；任一音节不是该字的读音则 `None`。
 fn reading_score(
-    index: &CharPinyinIndex,
+    index: &(impl ReadingTable + ?Sized),
     runes: &[char],
     code: &str,
     offsets: &[usize],
@@ -441,7 +561,8 @@ fn reading_score(
     for (i, &off) in offsets.iter().enumerate() {
         let end = offsets.get(i + 1).copied().unwrap_or(code.len());
         let syl = code.get(off..end)?;
-        let pos = index.readings(runes[i])?.iter().position(|r| r == syl)?;
+        let n = index.reading_count(runes[i])?;
+        let pos = (0..n).position(|k| index.reading(runes[i], k) == Some(syl))?;
         score += pos;
     }
     Some(score)
@@ -454,6 +575,9 @@ fn mask_of(offsets: &[usize]) -> u64 {
         .filter(|&&o| o < 64)
         .fold(0u64, |m, &o| m | (1u64 << o))
 }
+
+#[cfg(test)]
+mod legacy_equiv;
 
 #[cfg(test)]
 mod tests {
@@ -485,6 +609,56 @@ mod tests {
     /// 即用户词表里最终存下的形态。
     fn gen_py_stored(entries: &[(&str, &str, i32)], word: &str) -> Option<(String, u64)> {
         gen_py_spaced(entries, word).map(|s| wind_store::wdict::split_spaced_code(&s))
+    }
+
+    /// 同权重的多个读音按 [`STANDARD_SYLLABLES`] 的次序排（旧实现「稳定排序 + 按音节表遍历
+    /// 的首次出现序」的语义），与词条写进词典的先后无关。
+    ///
+    /// ⚠️ 样本形状是试出来的：只有两个同权重读音、或全部同权重时，第二遍排序的输入本就有序，
+    /// 排序键漏掉音节 id 也照样绿（实测）。这里给「长」40 个读音、两档权重交错，排序必须
+    /// 真的搬动元素，同档内的次序才只能靠音节 id 定。
+    #[test]
+    fn equal_weight_readings_follow_syllable_table_order() {
+        let pos = |s: &str| STANDARD_SYLLABLES.iter().position(|x| *x == s).unwrap();
+        let syls: Vec<&str> = STANDARD_SYLLABLES
+            .iter()
+            .step_by(9)
+            .take(40)
+            .copied()
+            .collect();
+        let weight = |i: usize| if i.is_multiple_of(2) { 100 } else { 500 };
+        // 故意按音节表**倒序**写进词典；另配两个字作陪。
+        let mut entries: Vec<(&str, &str, i32)> = syls
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, s)| (*s, "长", weight(i)))
+            .collect();
+        entries.extend([("ni", "你", 1), ("a", "阿", 3)]);
+        let dict = dict_from(&entries);
+        let idx = CharPinyinIndex::build(&dict);
+
+        // 期望：先 500 档、再 100 档，档内按音节表次序（`syls` 本身就是音节表次序）。
+        let mut want: Vec<&str> = syls
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| weight(*i) == 500)
+            .map(|(_, s)| *s)
+            .collect();
+        want.extend(
+            syls.iter()
+                .enumerate()
+                .filter(|(i, _)| weight(*i) == 100)
+                .map(|(_, s)| *s),
+        );
+        assert!(
+            want.windows(2).take(19).all(|w| pos(w[0]) < pos(w[1])),
+            "前提：档内升序"
+        );
+        let n = idx.reading_count('长').unwrap();
+        let got: Vec<&str> = (0..n).map(|i| idx.reading('长', i).unwrap()).collect();
+        assert_eq!(got, want, "同权重读音须按音节表次序");
+        assert_eq!(idx.representative('长'), Some(want[0]));
     }
 
     /// 造词须同时产出音节边界——用户自造词的边界从此有来源，不再是「空洞」。

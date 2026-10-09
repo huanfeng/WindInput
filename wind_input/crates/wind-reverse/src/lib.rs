@@ -729,6 +729,26 @@ pub fn declares_comment_column(path: &Path) -> bool {
 }
 
 impl ReverseLookup {
+    /// 诊断：(拆字表, 拼音表, 常驻内存的注释库) 各自的堆字节（按容量）；mmap 的注释库不计。
+    pub fn heap_bytes(&self) -> (usize, usize, usize) {
+        let chaizi = self.chaizi.entries.capacity() * size_of::<ChaiziEntry>()
+            + self.chaizi.arena.capacity();
+        let pinyin = self.pinyin.entries.capacity() * size_of::<PinyinEntry>()
+            + self.pinyin.reading_ends.capacity() * size_of::<u32>()
+            + self.pinyin.arena.capacity();
+        let comments = self
+            .comments
+            .iter()
+            .map(|c| match &c.body {
+                CommentBody::Mmap(_) => 0,
+                CommentBody::Memory(t) => {
+                    t.entries.capacity() * size_of::<CommentEntry>() + t.arena.capacity()
+                }
+            })
+            .sum();
+        (chaizi, pinyin, comments)
+    }
+
     /// 加载反查表：两份资源的路径**都**由调用方解析后传入（无则跳过）——拆字库来自方案
     /// `[engine.chaizi].db_path`，拼音读音表 `pinyin_map.txt` 来自数据根。
     ///

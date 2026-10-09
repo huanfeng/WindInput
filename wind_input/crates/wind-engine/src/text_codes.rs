@@ -84,6 +84,64 @@ impl TextCodeView {
     }
 }
 
+/// 诊断：全表扫描建索引的累计统计（进程级，只增不减）。
+#[derive(Default)]
+pub struct BuildStats {
+    builds: std::sync::atomic::AtomicU64,
+    scan_ns: std::sync::atomic::AtomicU64,
+    total_ns: std::sync::atomic::AtomicU64,
+    max_scan_ns: std::sync::atomic::AtomicU64,
+    max_total_ns: std::sync::atomic::AtomicU64,
+}
+
+/// [`BuildStats`] 的快照：次数，扫表（持库锁）累计 / 最大，总耗时累计 / 最大。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuildStatsSnapshot {
+    pub builds: u64,
+    pub scan_total: std::time::Duration,
+    pub scan_max: std::time::Duration,
+    pub total: std::time::Duration,
+    pub total_max: std::time::Duration,
+}
+
+impl BuildStats {
+    pub(crate) const fn new() -> Self {
+        use std::sync::atomic::AtomicU64;
+        Self {
+            builds: AtomicU64::new(0),
+            scan_ns: AtomicU64::new(0),
+            total_ns: AtomicU64::new(0),
+            max_scan_ns: AtomicU64::new(0),
+            max_total_ns: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn record(&self, scan: std::time::Duration, total: std::time::Duration) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (s, t) = (scan.as_nanos() as u64, total.as_nanos() as u64);
+        self.builds.fetch_add(1, Relaxed);
+        self.scan_ns.fetch_add(s, Relaxed);
+        self.total_ns.fetch_add(t, Relaxed);
+        self.max_scan_ns.fetch_max(s, Relaxed);
+        self.max_total_ns.fetch_max(t, Relaxed);
+    }
+
+    pub fn snapshot(&self) -> BuildStatsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::time::Duration;
+        BuildStatsSnapshot {
+            builds: self.builds.load(Relaxed),
+            scan_total: Duration::from_nanos(self.scan_ns.load(Relaxed)),
+            scan_max: Duration::from_nanos(self.max_scan_ns.load(Relaxed)),
+            total: Duration::from_nanos(self.total_ns.load(Relaxed)),
+            total_max: Duration::from_nanos(self.max_total_ns.load(Relaxed)),
+        }
+    }
+}
+
+/// `UserTextIndex::build` 的累计统计（诊断）。
+pub static BUILD_STATS: BuildStats = BuildStats::new();
+
 /// 同时保留的方案份数上限。在用的方案通常是：主码表、联想方案、辅助码引用的方案，
 /// 取 4 留一格余量；超出时淘汰最久未用且不在重建中的那份。
 const MAX_SLOTS: usize = 4;
@@ -153,18 +211,36 @@ impl UserTextIndex {
     /// 不标记）：库空闲 3 秒后由 store 的回收线程丢 redb 读缓存并整理堆。不当场回收——自动造词
     /// 让打字中反复重建，当场关库重开会让按键线程陪等、每次重建都从冷缓存起扫。
     pub fn build(store: &wind_store::Store, data_schema: &str) -> Self {
+        let t0 = std::time::Instant::now();
         let generation = store.words_generation_of(data_schema);
         let mut rows = Vec::new();
+        // `for_each_user_word` 整个扫描期间持着 store 的库锁（`with_db`），故扫表耗时即持锁时长。
         if let Err(e) = store.for_each_user_word(data_schema, "", &mut |w| {
             rows.push((w.text.to_string(), w.code.to_string()));
             true
         }) {
             tracing::warn!("按词查编码用户层：读 store 失败 schema={data_schema}: {e}");
         }
+        let scan = t0.elapsed();
         let scanned = rows.len();
         let idx = Self::from_rows(data_schema, generation, rows);
         store.mark_scan_pending_rows(scanned);
+        let total = t0.elapsed();
+        BUILD_STATS.record(scan, total);
+        tracing::debug!(
+            "按词查编码用户层重建 schema={data_schema} rows={scanned} 扫表(持库锁)={:?} 总={:?} heap_kb={}",
+            scan,
+            total,
+            idx.heap_bytes() / 1024
+        );
         idx
+    }
+
+    /// 诊断：本表占的堆字节（按容量）。
+    pub fn heap_bytes(&self) -> usize {
+        self.buf.capacity()
+            + self.entries.capacity() * size_of::<Entry>()
+            + self.data_schema.capacity()
     }
 
     fn text_of(&self, e: &Entry) -> &str {
@@ -302,6 +378,24 @@ pub(crate) fn clear(slots: &SharedSlots) {
     let mut g = slots.lock().unwrap_or_else(|e| e.into_inner());
     g.map.clear();
     g.epoch += 1;
+}
+
+/// 诊断：各槽的 (数据方案 id, 已建表的堆字节, 是否在重建中)；没建好的槽字节为 0。
+pub(crate) fn report(slots: &SharedSlots) -> Vec<(String, usize, bool)> {
+    let g = slots.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<_> = g
+        .map
+        .iter()
+        .map(|(k, s)| {
+            (
+                k.clone(),
+                s.index.as_ref().map_or(0, |i| i.heap_bytes()),
+                s.building,
+            )
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 /// 已建好索引的槽数。

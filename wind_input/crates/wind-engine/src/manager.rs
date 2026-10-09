@@ -598,6 +598,25 @@ pub struct EngineManager {
     data_facts_builds: std::sync::atomic::AtomicUsize,
 }
 
+/// 诊断：[`EngineManager::memory_report`] 的结果。字节数都按容量估、不含分配器开销。
+#[derive(Debug, Default, Clone)]
+pub struct MemoryReport {
+    /// 已加载引擎：(方案 id, 引擎类型, 引擎内已建懒建结构)。
+    pub engines: Vec<(String, String, Vec<crate::engine::MemPart>)>,
+    /// 反查索引：(方案 id, 常驻堆字节, 镜像总字节)；mmap 的常驻堆为 0。
+    pub reverse_index: Vec<(String, usize, usize)>,
+    /// 按词查编码用户层：(数据方案 id, 堆字节, 是否在重建中)。
+    pub user_text: Vec<(String, usize, bool)>,
+    /// 联想用户词索引：(数据方案 id, 堆字节)。
+    pub user_assoc: Option<(String, usize)>,
+    /// 单字全码表：(方案 id, 堆字节, 分配块数)。
+    pub single_char: Option<(String, usize, usize)>,
+    pub user_text_builds: crate::text_codes::BuildStatsSnapshot,
+    pub user_assoc_builds: crate::text_codes::BuildStatsSnapshot,
+    /// `CharPinyinIndex` 构建（每个拼音引擎一份、首次用到时在调用线程上同步建）。
+    pub char_pinyin_builds: crate::text_codes::BuildStatsSnapshot,
+}
+
 /// 方案文件里「按需加载」要看的事实（协调器 `DataNeeds` 的材料），见
 /// [`EngineManager::schema_data_facts`]。
 #[derive(Debug, Default, Clone)]
@@ -1343,6 +1362,52 @@ impl EngineManager {
     /// 再用到，照常走首次使用时后台重建。
     pub fn clear_user_text(&self) {
         crate::text_codes::clear(&self.user_text);
+    }
+
+    /// 诊断：各懒建结构的自报大小与已加载引擎清单（`docs/design/memory-footprint.md` S5）。
+    /// 只读：逐个取锁拷出数字，不触发任何构建。
+    pub fn memory_report(&self) -> MemoryReport {
+        let engines: Vec<(String, Arc<dyn Engine>)> = {
+            let g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            let mut v: Vec<_> = g.iter().map(|(k, e)| (k.clone(), e.clone())).collect();
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v
+        };
+        let engines = engines
+            .into_iter()
+            .map(|(id, e)| (id, format!("{:?}", e.engine_type()), e.memory_parts()))
+            .collect();
+        let reverse_index = {
+            let g = self.reverse_index.lock().unwrap_or_else(|e| e.into_inner());
+            let mut v: Vec<_> = g
+                .iter()
+                .map(|(k, i)| (k.clone(), i.heap_bytes(), i.image_bytes()))
+                .collect();
+            v.sort();
+            v
+        };
+        let single_char = self
+            .single_char_codes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(id, m)| {
+                let mut bytes = m.capacity() * (size_of::<(char, String)>() + 1);
+                for s in m.values() {
+                    bytes += s.capacity();
+                }
+                (id.clone(), bytes, 1 + m.len())
+            });
+        MemoryReport {
+            engines,
+            reverse_index,
+            user_text: crate::text_codes::report(&self.user_text),
+            user_assoc: crate::user_assoc::report(&self.user_assoc),
+            single_char,
+            user_text_builds: crate::text_codes::BUILD_STATS.snapshot(),
+            user_assoc_builds: crate::user_assoc::BUILD_STATS.snapshot(),
+            char_pinyin_builds: crate::pinyin::generate::BUILD_STATS.snapshot(),
+        }
     }
 
     /// 用户层当前在内存里的方案份数（诊断 / 测试用）。

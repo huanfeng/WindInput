@@ -91,6 +91,10 @@ impl TextTable {
         t
     }
 
+    fn heap_bytes(&self) -> usize {
+        self.buf.capacity() + self.entries.capacity() * size_of::<Entry>()
+    }
+
     fn hit(&self, e: &Entry) -> UserHit<'_> {
         let (o, tl, cl) = (e.off as usize, e.text_len as usize, e.code_len as usize);
         UserHit {
@@ -147,6 +151,7 @@ impl UserAssocIndex {
     /// ★ 临时词的排序键以 **count** 打头：临时词权重是写入时的定值（自动造词恒为
     /// `LEARN_ADD_WEIGHT`），按权重排等于按字典序排。
     pub fn build(store: &wind_store::Store, data_schema: &str) -> Self {
+        let t0 = Instant::now();
         let generation = store.words_generation();
         let count_generation = store.words_count_generation();
         let (mut user, mut temp): (Vec<Row>, Vec<Row>) = (Vec::new(), Vec::new());
@@ -183,7 +188,19 @@ impl UserAssocIndex {
         };
         // 扫完标记待回收，库空闲 3 秒后回收（理由见 `text_codes::UserTextIndex::build`）。
         store.mark_scan_pending_rows(scanned);
+        let total = t0.elapsed();
+        // 这里的扫表分两次进库（用户词、临时词），不单拆持锁时长，两项都记总耗时。
+        BUILD_STATS.record(total, total);
+        tracing::debug!(
+            "联想用户词索引重建 schema={data_schema} rows={scanned} 总={total:?} heap_kb={}",
+            idx.heap_bytes() / 1024
+        );
         idx
+    }
+
+    /// 诊断：本索引占的堆字节（按容量）。
+    pub fn heap_bytes(&self) -> usize {
+        self.user.heap_bytes() + self.temp.heap_bytes() + self.data_schema.capacity()
     }
 
     /// 相对 store 当前状态是否过期。`count_interval`：仅临时词 count 变化时，建成多久后
@@ -212,6 +229,17 @@ impl UserAssocIndex {
     ) -> Vec<UserHit<'_>> {
         self.temp.with_prefix(prefix, limit, keep)
     }
+}
+
+/// `UserAssocIndex::build` 的累计统计（诊断）。
+pub static BUILD_STATS: crate::text_codes::BuildStats = crate::text_codes::BuildStats::new();
+
+/// 诊断：已建索引的 (数据方案 id, 堆字节)。
+pub(crate) fn report(slot: &SharedSlot) -> Option<(String, usize)> {
+    let g = slot.lock().unwrap_or_else(|e| e.into_inner());
+    g.index
+        .as_ref()
+        .map(|i| (i.data_schema.clone(), i.heap_bytes()))
 }
 
 /// 缓存槽：只留一份（当前联想方案的），外加「后台重建进行中」单飞标记。

@@ -287,8 +287,24 @@ impl BoundaryResolution {
     }
 }
 
+/// 诊断用：一块可自报大小的内存结构（`docs/design/memory-footprint.md` S5 打点）。
+///
+/// `bytes` 是按容量算的堆字节（不含分配器每块的额外开销），`allocs` 是它占的堆分配块数——
+/// 小块多的结构（逐条 `String`）在真实分配器上的占用明显高于 `bytes`，两者一起看。
+#[derive(Debug, Clone, Default)]
+pub struct MemPart {
+    pub name: String,
+    pub bytes: usize,
+    pub allocs: usize,
+}
+
 /// 基础引擎接口
 pub trait Engine: Send + Sync {
+    /// 诊断：引擎内已建好的懒建结构及其自报大小（没建的不列）。只读，不触发构建。
+    fn memory_parts(&self) -> Vec<MemPart> {
+        Vec::new()
+    }
+
     /// 转换输入为候选词列表
     fn convert(&self, input: &str, max_candidates: usize) -> anyhow::Result<ConvertResult>;
 

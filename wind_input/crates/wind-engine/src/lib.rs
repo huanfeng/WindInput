@@ -20,11 +20,12 @@ pub mod user_assoc;
 pub use codetable::CodeTableEngine;
 pub use engine::{
     AdmitFn, BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType, ExtendedEngine,
+    MemPart,
 };
 pub use english::EnglishEngine;
 pub use manager::{
     ActiveDataFacts, AuxCodeSettings, AuxCodeSourceOptions, AuxSource, EngineManager, FreqSettings,
-    FreqStrategy, SchemaDataFacts, SchemaDictFile,
+    FreqStrategy, MemoryReport, SchemaDataFacts, SchemaDictFile,
 };
 pub use pinyin::PinyinEngine;
 pub use text_codes::TextCodeView;

@@ -117,6 +117,19 @@ struct Entry {
 }
 
 impl ReverseIndex {
+    /// 诊断：常驻堆的字节数（读进内存的那份）；mmap 的返回 0（不计私有内存）。
+    pub fn heap_bytes(&self) -> usize {
+        match &self.data {
+            IndexData::Owned(v) => v.capacity(),
+            IndexData::Mapped(_) => 0,
+        }
+    }
+
+    /// 诊断：索引镜像的总字节数（不论常驻还是 mmap）。
+    pub fn image_bytes(&self) -> usize {
+        self.data.as_slice().len()
+    }
+
     /// 从 (词, 编码, 权重) 三元组构建（进程内，不落盘）。
     ///
     /// 语义与落盘版**完全一致**，因为两者是同一个 [`serialize`] 的产物。

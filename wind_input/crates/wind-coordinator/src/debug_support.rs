@@ -321,4 +321,104 @@ impl Coordinator {
             .map(|c| (c.text.clone(), c.code.clone(), c.comment.clone()))
             .collect()
     }
+
+    /// 诊断：桌面构造器 `new` 在 `build` 之后的非 UI 装载与启动预热线程的主体，**同步**跑完。
+    ///
+    /// 供本机复现内存（`tests/typing_memory_repro.rs`）把 headless 协调器拉到与桌面相同的
+    /// 常驻状态。两段都与 `new` 共用同一个函数（[`Self::load_data_on_start`] /
+    /// [`Self::prewarm_on_start`]），次序同生产：数据装载 → 草稿清理 → 预热。
+    pub fn debug_desktop_startup_and_prewarm(&self) {
+        self.load_data_on_start();
+        self.purge_drafts_on_start();
+        self.prewarm_on_start();
+    }
+
+    /// 诊断：各懒建结构的自报大小与已加载引擎清单（多行文本，只含方案 id 与数字，不含用户内容）。
+    pub fn debug_memory_report(&self) -> String {
+        use std::fmt::Write;
+        let kb = |b: usize| b.div_ceil(1024);
+        let r = self.engine_mgr.memory_report();
+        let mut o = String::new();
+        let _ = writeln!(o, "engines ({}):", r.engines.len());
+        for (id, ty, parts) in &r.engines {
+            let _ = write!(o, "  {id} [{ty}]");
+            for p in parts {
+                let _ = write!(o, " {}={}KB/{}块", p.name, kb(p.bytes), p.allocs);
+            }
+            let _ = writeln!(o);
+        }
+        for (id, heap, image) in &r.reverse_index {
+            let _ = writeln!(
+                o,
+                "reverse_index {id}: 常驻堆 {}KB / 镜像 {}KB",
+                kb(*heap),
+                kb(*image)
+            );
+        }
+        for (id, heap, building) in &r.user_text {
+            let _ = writeln!(o, "UserTextIndex {id}: {}KB building={building}", kb(*heap));
+        }
+        if let Some((id, heap)) = &r.user_assoc {
+            let _ = writeln!(o, "UserAssocIndex {id}: {}KB", kb(*heap));
+        }
+        if let Some((id, heap, allocs)) = &r.single_char {
+            let _ = writeln!(o, "SingleCharCodeCache {id}: {}KB/{allocs}块", kb(*heap));
+        }
+        let (chaizi, pinyin, comments) = self
+            .reverse
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .heap_bytes();
+        let _ = writeln!(
+            o,
+            "ReverseLookup: ChaiziTable {}KB PinyinTable {}KB 常驻注释库 {}KB",
+            kb(chaizi),
+            kb(pinyin),
+            kb(comments)
+        );
+        // 只有 `UserTextIndex` 的扫表是一次 `with_db` 内完成的，扫表时长即持库锁时长；
+        // 联想索引分两次进库（只记总耗时），读音索引读的是 mmap 词库、不碰 store。
+        let b = r.user_text_builds;
+        let _ = writeln!(
+            o,
+            "UserTextIndex 重建: {} 次, 扫表(持库锁)累计 {:?} 最大 {:?}, 总耗时累计 {:?} 最大 {:?}",
+            b.builds, b.scan_total, b.scan_max, b.total, b.total_max
+        );
+        let b = r.user_assoc_builds;
+        let _ = writeln!(
+            o,
+            "UserAssocIndex 重建: {} 次, 耗时(含两次进库)累计 {:?} 最大 {:?}",
+            b.builds, b.total, b.total_max
+        );
+        let b = r.char_pinyin_builds;
+        let _ = writeln!(
+            o,
+            "CharPinyinIndex 构建(不碰 store): {} 次, 耗时累计 {:?} 最大 {:?}",
+            b.builds, b.total, b.total_max
+        );
+        if let Some(s) = &self.store {
+            let _ = writeln!(
+                o,
+                "store: words_gen={} pinyin_gen={:?} page_cache_drops={}",
+                s.words_generation(),
+                s.words_generation_of(wind_engine::manager::PINYIN_DATA_SCHEMA),
+                s.page_cache_drops()
+            );
+        }
+        o
+    }
+
+    /// 诊断：注释 `${pinyin}` 对非拼音候选走的那条推断（会在首次调用时同步建主拼音引擎的
+    /// `CharPinyinIndex`）。
+    pub fn debug_word_pinyin(&self, text: &str) -> String {
+        self.engine_mgr.word_pinyin_syllables(text)
+    }
+
+    /// 诊断：立刻做一次空闲回收（丢 redb 读缓存 + 整理堆），等价于回收线程过了空闲档。
+    pub fn debug_reclaim_now(&self) {
+        if let Some(s) = &self.store {
+            let _ = s.drop_page_cache();
+        }
+        crate::heap_trim::release_free_heap();
+    }
 }

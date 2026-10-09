@@ -489,6 +489,15 @@ impl LazyPhraseIndex {
         }
     }
 
+    /// 诊断：已建时返回索引的堆字节（[`PhraseSegIndex::heap_bytes`]），未建返回 `None`。不触发构建。
+    pub fn heap_bytes_if_built(&self) -> Option<usize> {
+        self.index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|i| i.heap_bytes())
+    }
+
     /// 索引是否已经建出来了。
     ///
     /// 供「关着词组分词就不该付这笔内存」的守门测试用（`english.rs` 的

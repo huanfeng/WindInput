@@ -147,48 +147,7 @@ impl Coordinator {
                     debug!("启动预热已关闭（宿主声明按需加载）");
                     return;
                 }
-                let active = c.engine_mgr.active_schema_id();
-                // available_schemas 只含「可切换的方案」。临时拼音 / 临时英文的目标引擎
-                // **不在其中**（它们是模式的实现，不是可切换方案），此前因此漏出预热范围：
-                // 实测首次按引导键进临拼时才同步加载 52 万词条的拼音库 + 英文库，用户感到
-                // 顿一下。两者都只在启用时才预热，不给没开这些功能的用户白付内存。
-                let mut targets: Vec<String> = c.engine_mgr.available_schemas().to_vec();
-                // ⚠ `temp_pinyin_target()` **自身就会 `ensure_loaded`**（它的语义是「可用才
-                // 返回」），故这一行本身即完成了临拼引擎的加载，下面循环里那次只是复查跳过。
-                // 看着绕，但比在此复制一份「开关 + 方案适用性 + 目标解析」的判据强——那套判据
-                // 是所有临拼入口的公共门卫，抄一份必然漂移。
-                if let Some(t) = c.engine_mgr.temp_pinyin_target() {
-                    targets.push(t);
-                }
-                if c.rt().config.input.temp_english.show_candidates {
-                    targets.push("english".to_string());
-                }
-                for id in targets {
-                    if id == active || c.engine_mgr.is_loaded(&id) {
-                        continue;
-                    }
-                    let t0 = std::time::Instant::now();
-                    if c.engine_mgr.prewarm_schema(&id) {
-                        debug!("Prewarmed schema {} in {:?}", id, t0.elapsed());
-                    } else {
-                        debug!("Prewarm skipped/failed for schema {}", id);
-                    }
-                }
-                debug!("Schema prewarm done");
-
-                // 反查索引（悬停[编码]/编码提示/词语联想的数据源）同样要提前建好。
-                //
-                // 它此前是**首次按键时**才懒构建的，而对大词库那是秒级操作，恰好落在
-                // TSF→服务的同步 IPC 链路上：真机 feihuzj2（253 万条）实测让整机卡了
-                // 29.5 秒。放到这里之后，绝大多数用户永远碰不到那次构建。
-                //
-                // 只预热**当前用得着的方案**（悬停编码段与词语联想各自的来源方案，
-                // 混输下通常同为主码表成员）：其余方案的索引切过去时才有意义，而每份
-                // 索引对超大词库是百 MB 量级（护栏本就只保留两份），全量预热等于把内存
-                // 花在用户未必会用的方案上。
-                //
-                // 与测试、移动端 prepare() 共用 `prewarm_indexes`，避免三处各写一份。
-                c.prewarm_indexes();
+                c.prewarm_on_start();
             });
         }
 
@@ -242,20 +201,78 @@ impl Coordinator {
         let _ = coordinator
             .ui_tx
             .send(UiCommand::SetTooltipDelay(rt0.config.ui.tooltip.delay));
-        // 拆字字根字体（PUA 字根渲染）：路径 + DWrite 家族名取自主码表方案 [engine.chaizi]。
-        // 库已在 build 内加载，此处仅补发字体（sync 按变更检测，重复调用幂等）。
-        // 快捷输入格式表的用户调整（右键调序/停用）：真相在 store，这里装载运行时镜像。
-        // 必须在 store 就位之后——构造体内只能给空初值。
-        coordinator.reload_quick_adjust();
-        coordinator.sync_chaizi_assets();
-        // 注释词库首次加载（`[[ui.comment_dicts]]`，出厂为空数组=不加载任何库）。
-        coordinator.sync_comment_dicts();
-        // emoji 扩展表首次加载（`[input.emoji]`，出厂 enabled=false ⇒ 不打开任何文件）。
-        coordinator.sync_emoji_dict();
+        // 快捷输入调整 / 拆字字根字体（PUA 字根渲染，路径 + DWrite 家族名取自主码表方案
+        // [engine.chaizi]）/ 注释库 / emoji 的首次装载，见 `load_data_on_start`。
+        coordinator.load_data_on_start();
         // 统一应用外观项（幂等）：补齐上面手动块未含的翻页栏 / 页码等外观项，
         // 使首次启动即按 config 应用（与 reload_user_config 同一路径）。
         coordinator.apply_ui_config();
         coordinator
+    }
+
+    /// 生产构造器在 `build` 之后的**非 UI** 数据装载（快捷输入调整、拆字、注释库、emoji）。
+    ///
+    /// 抽出来是为了让 `debug_desktop_startup_and_prewarm`（本机复现内存的探针入口）与
+    /// `new` 走同一份序列，不各抄一份而漂移。
+    pub(crate) fn load_data_on_start(&self) {
+        // 快捷输入格式表的用户调整（右键调序/停用）：真相在 store，这里装载运行时镜像。
+        // 必须在 store 就位之后——构造体内只能给空初值。
+        self.reload_quick_adjust();
+        // 拆字库已在 build 内加载，此处仅补发字体（sync 按变更检测，重复调用幂等）。
+        self.sync_chaizi_assets();
+        // 注释词库首次加载（`[[ui.comment_dicts]]`，出厂为空数组=不加载任何库）。
+        self.sync_comment_dicts();
+        // emoji 扩展表首次加载（`[input.emoji]`，出厂 enabled=false ⇒ 不打开任何文件）。
+        self.sync_emoji_dict();
+    }
+
+    /// 启动预热线程的主体（`new` 里延迟 1.5 秒后调；**阻塞**，只可在后台线程 / 测试里调）：
+    /// 建好 `available` 全部方案 + 临拼 / 临英目标的引擎，再 [`Self::prewarm_indexes`]。
+    ///
+    /// 与 `debug_desktop_startup_and_prewarm` 共用，理由同 [`Self::load_data_on_start`]。
+    pub(crate) fn prewarm_on_start(&self) {
+        let active = self.engine_mgr.active_schema_id();
+        // available_schemas 只含「可切换的方案」。临时拼音 / 临时英文的目标引擎
+        // **不在其中**（它们是模式的实现，不是可切换方案），此前因此漏出预热范围：
+        // 实测首次按引导键进临拼时才同步加载 52 万词条的拼音库 + 英文库，用户感到
+        // 顿一下。两者都只在启用时才预热，不给没开这些功能的用户白付内存。
+        let mut targets: Vec<String> = self.engine_mgr.available_schemas().to_vec();
+        // ⚠ `temp_pinyin_target()` **自身就会 `ensure_loaded`**（它的语义是「可用才
+        // 返回」），故这一行本身即完成了临拼引擎的加载，下面循环里那次只是复查跳过。
+        // 看着绕，但比在此复制一份「开关 + 方案适用性 + 目标解析」的判据强——那套判据
+        // 是所有临拼入口的公共门卫，抄一份必然漂移。
+        if let Some(t) = self.engine_mgr.temp_pinyin_target() {
+            targets.push(t);
+        }
+        if self.rt().config.input.temp_english.show_candidates {
+            targets.push("english".to_string());
+        }
+        for id in targets {
+            if id == active || self.engine_mgr.is_loaded(&id) {
+                continue;
+            }
+            let t0 = std::time::Instant::now();
+            if self.engine_mgr.prewarm_schema(&id) {
+                tracing::debug!("Prewarmed schema {} in {:?}", id, t0.elapsed());
+            } else {
+                tracing::debug!("Prewarm skipped/failed for schema {}", id);
+            }
+        }
+        tracing::debug!("Schema prewarm done");
+
+        // 反查索引（悬停[编码]/编码提示/词语联想的数据源）同样要提前建好。
+        //
+        // 它此前是**首次按键时**才懒构建的，而对大词库那是秒级操作，恰好落在
+        // TSF→服务的同步 IPC 链路上：真机 feihuzj2（253 万条）实测让整机卡了
+        // 29.5 秒。放到这里之后，绝大多数用户永远碰不到那次构建。
+        //
+        // 只预热**当前用得着的方案**（悬停编码段与词语联想各自的来源方案，
+        // 混输下通常同为主码表成员）：其余方案的索引切过去时才有意义，而每份
+        // 索引对超大词库是百 MB 量级（护栏本就只保留两份），全量预热等于把内存
+        // 花在用户未必会用的方案上。
+        //
+        // 与测试、移动端 prepare() 共用 `prewarm_indexes`，避免三处各写一份。
+        self.prewarm_indexes();
     }
 
     /// 无头构造器（测试用）：跳过 UI 线程，不做词频持久化（避免污染真实文件）。

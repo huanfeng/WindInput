@@ -493,6 +493,34 @@ enum FreqSource {
 }
 
 impl CodeSentenceDecoder {
+    /// 诊断：两张懒表里已建好的那几张的自报大小。不触发构建。
+    pub(crate) fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
+        let mut v = Vec::new();
+        if let Some(i) = self.tables.index.get() {
+            let mut bytes = i.short.capacity() * (size_of::<((String, String), i32)>() + 1);
+            for (c, t) in i.short.keys() {
+                bytes += c.capacity() + t.capacity();
+            }
+            v.push(crate::engine::MemPart {
+                name: "sentence/ShortCodeIndex".into(),
+                bytes,
+                allocs: 1 + i.short.len() * 2,
+            });
+        }
+        if let Some(Some(f)) = self.tables.freq.get() {
+            let mut bytes = f.freq.capacity() * (size_of::<(String, i32)>() + 1);
+            for k in f.freq.keys() {
+                bytes += k.capacity();
+            }
+            v.push(crate::engine::MemPart {
+                name: "sentence/SentenceFreq".into(),
+                bytes,
+                allocs: 1 + f.freq.len(),
+            });
+        }
+        v
+    }
+
     pub fn new(max_code_length: usize) -> Self {
         Self {
             max_code_length: max_code_length.max(1),

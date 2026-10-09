@@ -2531,6 +2531,25 @@ fn build_raw_preedit(raw_input: &str, sp: &shuangpin::SpConvertResult) -> String
 }
 
 impl Engine for PinyinEngine {
+    fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
+        self.char_pinyin_idx
+            .get()
+            .map(|idx| {
+                let (bytes, allocs) = idx.heap_estimate();
+                crate::engine::MemPart {
+                    name: format!(
+                        "CharPinyinIndex(字{}/读音{})",
+                        idx.char_count(),
+                        idx.total_readings()
+                    ),
+                    bytes,
+                    allocs,
+                }
+            })
+            .into_iter()
+            .collect()
+    }
+
     /// 双拼布局带非字母键时返回该布局的码元集，否则 `None`（回落内置 `a-z`）。
     /// 拼音没有「码表码元」那层配置，本集**完全由双拼布局推导**，不读 `[engine.codetable]`。
     fn input_chars(&self) -> Option<&wind_config::CodeCharSet> {

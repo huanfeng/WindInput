@@ -777,6 +777,13 @@ fn merge_disabled_hits(enabled: Vec<Candidate>, disabled: Vec<Candidate>) -> Vec
 }
 
 impl Engine for CodeTableEngine {
+    fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
+        self.sentence
+            .as_ref()
+            .map(|d| d.memory_parts())
+            .unwrap_or_default()
+    }
+
     /// 热插拔扩展词库。**禁用摘层、启用交给重建**，两边不对称，各有理由：
     ///
     /// **禁用 → 从 composite 摘掉 `codetable-extra-<id>` 层**，而不是翻它的 enabled 标志。
