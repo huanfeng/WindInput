@@ -405,8 +405,8 @@ mod tests {
                     let d = crate::cached::CachedDict::load_at_with(&yaml, &cache, false).unwrap();
                     match d {
                         crate::cached::CachedDict::Mmap(r) => Some(r),
-                        // 缓存写入失败会退化成 Memory，这里不该发生
-                        crate::cached::CachedDict::Memory(_) => None,
+                        // 缓存写入失败会退化成 Memory，这里不该发生（单文件加载也不会是 Layered）
+                        _ => None,
                     }
                 })
             })

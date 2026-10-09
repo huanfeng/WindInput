@@ -51,6 +51,14 @@ type = "rime_pinyin"
 default = true
 base_order = 0
 
+# 扩展词库（细胞词库）发现目录：把 rime 拼音词库（*.dict.yaml）放进用户目录的
+# schemas/pinyin/cn_dicts_cell/，它就出现在「方案设置 → 扩展词库」里（出厂不勾选），
+# 不用改本文件。目录名与 rime-frost 一致，上游那个目录可以整个拷过来。
+# 已被上面主库 import_tables 引用的文件不重复登记。
+[[dictionary_dirs]]
+path = "pinyin/cn_dicts_cell"
+type = "rime_pinyin"
+
 # 权重不归一化——这是刻意的，勿加 [weight_spec]：
 #   1. 拼音权重刻意在与码表不同的轴上（max 1537 万），其与码表的先后由协调器
 #      source_tier 的档位隔离决定，不靠比 weight；

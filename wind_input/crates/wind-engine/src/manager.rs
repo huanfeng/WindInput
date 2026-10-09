@@ -7112,10 +7112,11 @@ impl EngineManager {
     /// - 拼音（rime_pinyin）：单库经 import_tables 合并（load_rime_pinyin_dict）。
     /// - 多库 → `.combined.wdat`。
     ///
-    /// ⚠️ **现存唯一的多库消费方是拼音引擎**（`PinyinEngine` 只持有一个 `CachedDict`、
-    /// 没有 composite 分层，故多库拼音方案必须拿到合并视图）。出厂 pinyin/shuangpin
-    /// 各只声明 1 个词库、走单库快路径，因此**出厂配置下 `combined.wdat` 根本不会产生**；
-    /// 只有用户经 `schema_overrides` 给拼音方案加第二个词库才会触发。
+    /// ⚠️ **现存唯一的多库消费方是拼音引擎**（`PinyinEngine` 只持有一个 `CachedDict`）。
+    /// 启用的库**全是** rime_pinyin 时（主库 + 发现目录里开启的细胞词库正是如此），每个库
+    /// 各自走单库合并、各有各的缓存，组成 [`CachedDict::Layered`] 交给引擎：开关一张扩展库
+    /// 只是多挂或少挂一层，主库几十 MB 的合并缓存不重建。只有拼音方案混挂了别的类型才落到
+    /// `combined.wdat`——那条路径按 `search_prefix` 枚举后重写，**丢音节边界与简拼**。
     ///
     /// 码表/英文的 live 查询走 `load_codetable_layers` 的每库独立层；两个索引构建方
     /// 已改走 [`Self::load_dicts_individually`]，不再经过这里。
@@ -7139,6 +7140,29 @@ impl EngineManager {
                 e.dict_type.clone()
             }
         };
+
+        // 拼音族多库：分层（见本函数文档）。某张扩展库建不出来只少一层，主库照常可用。
+        if enabled.len() > 1 && enabled.iter().all(|e| dtype(e) == "rime_pinyin") {
+            let main = resolve(&enabled[0].path);
+            info!(
+                "Loading dictionary: {} (type=rime_pinyin, 扩展库 {} 层)",
+                main.display(),
+                enabled.len() - 1
+            );
+            let mut layers = vec![Self::load_rime_pinyin_dict(&main)?];
+            for e in &enabled[1..] {
+                let full = resolve(&e.path);
+                match Self::load_rime_pinyin_dict(&full) {
+                    Some(d) => layers.push(d),
+                    None => warn!("扩展词库 {} 加载失败，本次不挂这一层", full.display()),
+                }
+            }
+            return Some(if layers.len() == 1 {
+                layers.pop()?
+            } else {
+                CachedDict::Layered(layers)
+            });
+        }
 
         // 单库快路径
         if enabled.len() == 1 {
@@ -10323,6 +10347,130 @@ input_chars = \"a-z;\"
         std::fs::write(&dict, "---\nname: py\n...\n你好\tni hao\t200\n").unwrap();
         assert!(EngineManager::load_rime_pinyin_dict(&dict).is_some());
         assert!(!marker.exists());
+    }
+
+    /// 分层视图（主库 + 细胞库各一层）与「主表 import 细胞库合成一份 merged」查询结果逐项
+    /// 一致：精确查、前缀查、按音节截断的前缀查、简拼、更长码存在性。
+    ///
+    /// 夹具里刻意放的三类陷阱：
+    /// - **跨层同权**（主库「拟好」与细胞库「尼豪」都是 64）：`order` 是层内名次，跨层直接比
+    ///   会排反；
+    /// - **被音节过滤掉的同码高权词**（主库「西安」xi'an 1000 与单音节「先」同码 `xian`）：
+    ///   读端先取名次再过滤，合并缓存里「先」的名次照样排在「西安」之后，拿候选池重算会算小；
+    /// - **跨层同一个词**（两层都有「你好」）：合并缓存保留两条，分层也不去重。
+    ///
+    /// 简拼 `xg` 的跨层同权码（主库 xiguan、细胞库 xigua 都是 300）验证按码字典序而非层序。
+    #[test]
+    fn layered_pinyin_dict_matches_merged_cache() {
+        let dir = std::env::temp_dir().join(format!("wind_eng_layered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cells")).unwrap();
+        let body_main = "你好\tni hao\t100\n你\tni\t500\n拟好\tni hao\t64\n你好吗\tni hao ma\t20\n\
+                         中国\tzhong guo\t1000\n逆\tni\t64\n\
+                         西安\txi an\t1000\n先\txian\t500\n想\txiang\t500\n小\txiao\t10\n\
+                         习惯\txi guan\t300\n";
+        let body_cell = "你好呀\tni hao ya\t30\n尼豪\tni hao\t64\n中国风\tzhong guo feng\t50\n\
+                         厚积薄发\thou ji bo fa\t5\n泥\tni\t64\n你好\tni hao\t300\n\
+                         虾啊\txia a\t10\n鲜\txian\t500\n西瓜\txi gua\t300\n";
+        let main = dir.join("main.dict.yaml");
+        std::fs::write(&main, format!("---\nname: main\n...\n{body_main}")).unwrap();
+        let cell = dir.join("cells/cell.dict.yaml");
+        std::fs::write(&cell, format!("---\nname: cell\n...\n{body_cell}")).unwrap();
+        // 对照组：同一批词经 import_tables 合成一份（旧的整合方式）
+        std::fs::write(
+            dir.join("mainbody.dict.yaml"),
+            format!("---\nname: mb\n...\n{body_main}"),
+        )
+        .unwrap();
+        let both = dir.join("both.dict.yaml");
+        std::fs::write(
+            &both,
+            "---\nname: both\nimport_tables:\n  - mainbody\n  - cells/cell\n...\n",
+        )
+        .unwrap();
+
+        let merged = EngineManager::load_rime_pinyin_dict(&both).unwrap();
+        let layered = CachedDict::Layered(vec![
+            EngineManager::load_rime_pinyin_dict(&main).unwrap(),
+            EngineManager::load_rime_pinyin_dict(&cell).unwrap(),
+        ]);
+
+        let hits = |v: Vec<wind_dict::cached::DictHit>| {
+            v.into_iter()
+                .map(|h| (h.code, h.text, h.weight, h.order, h.boundary))
+                .collect::<Vec<_>>()
+        };
+        for code in [
+            "nihao",
+            "ni",
+            "zhongguo",
+            "houjibofa",
+            "nihaoya",
+            "xian",
+            "none",
+        ] {
+            assert_eq!(
+                hits(layered.search_with_boundary(code)),
+                hits(merged.search_with_boundary(code)),
+                "精确查 {code}"
+            );
+            assert_eq!(
+                layered.search(code),
+                merged.search(code),
+                "精确查(元组) {code}"
+            );
+        }
+        for (prefix, limit) in [
+            ("ni", 100),
+            ("ni", 3),
+            ("nihao", 2),
+            ("zhong", 10),
+            ("h", 5),
+            ("xi", 10),
+            ("x", 3),
+        ] {
+            assert_eq!(
+                hits(layered.search_prefix_with_boundary(prefix, limit)),
+                hits(merged.search_prefix_with_boundary(prefix, limit)),
+                "前缀查 {prefix} limit={limit}"
+            );
+        }
+        for (prefix, limit, syl, done) in [
+            ("ni", 10, 2, 2),
+            ("nihao", 10, 3, 5),
+            ("zhongguo", 5, 2, 8),
+            ("xia", 10, 1, 0),
+            ("xi", 10, 1, 0),
+            ("x", 4, 1, 0),
+        ] {
+            assert_eq!(
+                hits(layered.search_prefix_with_boundary_syllable_capped(prefix, limit, syl, done)),
+                hits(merged.search_prefix_with_boundary_syllable_capped(prefix, limit, syl, done)),
+                "音节截断前缀查 {prefix}"
+            );
+        }
+        for ab in ["nh", "nhy", "zg", "zgf", "hjbf", "xa", "xg", "xx"] {
+            assert_eq!(
+                layered.search_abbrev(ab, 10),
+                merged.search_abbrev(ab, 10),
+                "简拼 {ab}"
+            );
+        }
+        for p in ["nihao", "zhongguo", "houjibofa", "ni"] {
+            assert_eq!(
+                layered.has_longer_code(p),
+                merged.has_longer_code(p),
+                "更长码 {p}"
+            );
+        }
+
+        drop((merged, layered));
+        for f in [&main, &cell, &both] {
+            for ext in ["merged.wdat", "merged.wdat.fp"] {
+                let _ = std::fs::remove_file(cache_path(f, ext));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

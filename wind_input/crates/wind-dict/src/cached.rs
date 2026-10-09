@@ -167,6 +167,110 @@ pub enum CachedDict {
     Mmap(Arc<WdatReader>),
     /// 内存模式（首次加载或缓存写入失败）
     Memory(CodetableDict),
+    /// 分层：首层是主库，其余是扩展库（拼音细胞词库），每层各有自己的缓存文件。
+    ///
+    /// 查询时逐层查、按单库的排序语义合并（见 [`merge_ranked`] / [`merge_exact`]），故开关
+    /// 一张扩展库只是多挂或少挂一层——主库那份几十 MB 的合并缓存不用重建，全拼与双拼开的
+    /// 扩展库不同也共用同一批缓存。只由拼音引擎构建（`PinyinEngine` 只持有一个词库对象，
+    /// 码表的扩展库另有 CompositeDict 分层）。
+    Layered(Vec<CachedDict>),
+}
+
+/// 只有一层有结果时原样返回它（最常见：细胞库没命中）——单层的结果本就与合并缓存一致，
+/// 不付任何合并代价。都为空返回空。多层有结果返回 `None`，交给调用方合并。
+fn single_nonempty(results: &mut [Vec<DictHit>]) -> Option<Vec<DictHit>> {
+    let mut it = results.iter().enumerate().filter(|(_, r)| !r.is_empty());
+    match (it.next(), it.next()) {
+        (None, _) => Some(Vec::new()),
+        (Some((i, _)), None) => Some(std::mem::take(&mut results[i])),
+        _ => None,
+    }
+}
+
+/// 精确查询的跨层合并，结果与「各层并成一份合并缓存」逐项一致：同 code 下按权重降序、
+/// 同权按层序、层内保持原序，`order` 重排为 0,1,2…（合并缓存的写法）。
+///
+/// **不跨层去重**：合并缓存同样保留重复项（下游引擎自己会去重），保留它们才能逐项一致，
+/// 也免得开了一张细胞库就把主库自身经 import 合出来的层内重复项一并吞掉。
+fn merge_exact(mut layers: Vec<Vec<DictHit>>) -> Vec<DictHit> {
+    if let Some(one) = single_nonempty(&mut layers) {
+        return one;
+    }
+    let mut out: Vec<(usize, DictHit)> = layers
+        .into_iter()
+        .enumerate()
+        .flat_map(|(li, hits)| hits.into_iter().map(move |h| (li, h)))
+        .collect();
+    out.sort_by(|(la, a), (lb, b)| {
+        b.weight
+            .cmp(&a.weight)
+            .then(la.cmp(lb))
+            .then(a.order.cmp(&b.order))
+    });
+    out.into_iter()
+        .enumerate()
+        .map(|(i, (_, mut h))| {
+            h.order = i as i32;
+            h
+        })
+        .collect()
+}
+
+/// 前缀类查询的跨层合并，结果与合并缓存逐项一致：按单库前缀查询的排序键（权重降序 →
+/// order 升序 → code 字典序，见 `datformat::RankKey`）排，截到 `limit`。
+///
+/// ⚠ `order` 是「该词在自己 code 下的名次」，各层各算各的，不能跨层直接比。合并缓存里的
+/// 名次 = 层内名次 + **其他层同 code 下排在它前面的条目数**（权重更高，或同权而层更靠前）。
+/// 后者用各层的**精确查询**去数，不能拿候选池数：按音节截断的查询在读端先取名次、再做音节
+/// 过滤，被滤掉的同 code 高权词不在池里，却照样占着合并缓存里的名次。
+///
+/// 每层各取 `limit` 条再合并是精确的：全局前 `limit` 名必在其所在层的前 `limit` 名之内。
+/// 不跨层去重，理由同 [`merge_exact`]。
+fn merge_ranked(
+    layers: &[CachedDict],
+    mut results: Vec<Vec<DictHit>>,
+    limit: usize,
+) -> Vec<DictHit> {
+    if let Some(one) = single_nonempty(&mut results) {
+        return one;
+    }
+    // (code, 层) → 该层该 code 下全部条目的权重。同一个 code 在池里常出现多次，只查一遍。
+    let mut weights: std::collections::HashMap<(String, usize), Vec<i32>> =
+        std::collections::HashMap::new();
+    let mut out: Vec<DictHit> = Vec::new();
+    for (li, hits) in results.into_iter().enumerate() {
+        for mut h in hits {
+            let mut before = 0i32;
+            for (lj, layer) in layers.iter().enumerate() {
+                if lj == li {
+                    continue;
+                }
+                let ws = weights.entry((h.code.clone(), lj)).or_insert_with(|| {
+                    layer
+                        .search_with_boundary(&h.code)
+                        .into_iter()
+                        .map(|e| e.weight)
+                        .collect()
+                });
+                before += ws
+                    .iter()
+                    .filter(|&&w| w > h.weight || (w == h.weight && lj < li))
+                    .count() as i32;
+            }
+            h.order += before;
+            out.push(h);
+        }
+    }
+    out.sort_by(|a, b| {
+        b.weight
+            .cmp(&a.weight)
+            .then(a.order.cmp(&b.order))
+            .then(a.code.cmp(&b.code))
+    });
+    if limit > 0 {
+        out.truncate(limit);
+    }
+    out
 }
 
 impl CachedDict {
@@ -345,6 +449,11 @@ impl CachedDict {
                 .map(|e| (e.text, e.weight, e.order))
                 .collect(),
             Self::Memory(dict) => dict.search(code),
+            Self::Layered(_) => self
+                .search_with_boundary(code)
+                .into_iter()
+                .map(|h| (h.text, h.weight, h.order))
+                .collect(),
         }
     }
 
@@ -368,6 +477,12 @@ impl CachedDict {
                 .collect(),
             // 内存回退（yaml 直载，未走 wdat）：CodetableDict 保有 boundary，一并带出。
             Self::Memory(dict) => dict.search_with_boundary(code),
+            Self::Layered(layers) => merge_exact(
+                layers
+                    .iter()
+                    .map(|l| l.search_with_boundary(code))
+                    .collect(),
+            ),
         }
     }
 
@@ -388,6 +503,14 @@ impl CachedDict {
                 })
                 .collect(),
             Self::Memory(dict) => dict.search_prefix_with_boundary(prefix, limit),
+            Self::Layered(layers) => merge_ranked(
+                layers,
+                layers
+                    .iter()
+                    .map(|l| l.search_prefix_with_boundary(prefix, limit))
+                    .collect(),
+                limit,
+            ),
         }
     }
 
@@ -426,6 +549,21 @@ impl CachedDict {
                 max_syllables,
                 completed_len,
             ),
+            Self::Layered(layers) => merge_ranked(
+                layers,
+                layers
+                    .iter()
+                    .map(|l| {
+                        l.search_prefix_with_boundary_syllable_capped(
+                            prefix,
+                            limit,
+                            max_syllables,
+                            completed_len,
+                        )
+                    })
+                    .collect(),
+                limit,
+            ),
         }
     }
 
@@ -435,6 +573,7 @@ impl CachedDict {
         match self {
             Self::Mmap(reader) => reader.has_longer_code(prefix),
             Self::Memory(dict) => dict.has_longer_code(prefix),
+            Self::Layered(layers) => layers.iter().any(|l| l.has_longer_code(prefix)),
         }
     }
 
@@ -447,6 +586,11 @@ impl CachedDict {
                 .map(|e| (e.code, e.text, e.weight, e.order))
                 .collect(),
             Self::Memory(dict) => dict.search_prefix(prefix, limit),
+            Self::Layered(_) => self
+                .search_prefix_with_boundary(prefix, limit)
+                .into_iter()
+                .map(|h| (h.code, h.text, h.weight, h.order))
+                .collect(),
         }
     }
 
@@ -472,6 +616,16 @@ impl CachedDict {
                 })
                 .collect(),
             Self::Memory(dict) => dict.search_pattern(pattern, wildcard, limit, with_prefix),
+            // ⚠ 仅供拼音：拼音不走通配，这里只求不丢条目，排序按前缀查询的键，**不复刻**
+            // 「等长档先取满」。将来若有码表类调用方拿到 Layered，须先补上那条语义。
+            Self::Layered(layers) => merge_ranked(
+                layers,
+                layers
+                    .iter()
+                    .map(|l| l.search_pattern(pattern, wildcard, limit, with_prefix))
+                    .collect(),
+                limit,
+            ),
         }
     }
 
@@ -482,13 +636,44 @@ impl CachedDict {
     /// 主表装配候选，从而得到真实的 code 与 boundary；此前直接返回词，简拼候选只能把
     /// code 设成简拼串，词频遂与全拼输入分裂成两份计数。
     pub fn search_abbrev(&self, abbrev: &str, limit: usize) -> Vec<String> {
+        self.search_abbrev_weighted(abbrev, limit)
+            .into_iter()
+            .map(|(code, _)| code)
+            .collect()
+    }
+
+    /// [`Self::search_abbrev`] 带权重的形态：分层合并要按权重重排各层的码。
+    fn search_abbrev_weighted(&self, abbrev: &str, limit: usize) -> Vec<(String, i32)> {
         match self {
             Self::Mmap(reader) => reader
                 .search_abbrev(abbrev, limit)
                 .into_iter()
-                .map(|e| e.text)
+                .map(|e| (e.text, e.weight))
                 .collect(),
             Self::Memory(_) => Vec::new(),
+            Self::Layered(layers) => {
+                // 同码取高权重，按权重降序、同权按码字典序——合并缓存写简拼段正是这么排的
+                // （`load_rime_pinyin_dict`：码 → 各源最高权重，再按 (权重降序, 码) 排）。
+                let mut out: Vec<(String, i32)> = Vec::new();
+                let mut at: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for l in layers {
+                    for (code, w) in l.search_abbrev_weighted(abbrev, limit) {
+                        match at.get(&code) {
+                            Some(&i) => out[i].1 = out[i].1.max(w),
+                            None => {
+                                at.insert(code.clone(), out.len());
+                                out.push((code, w));
+                            }
+                        }
+                    }
+                }
+                out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                if limit > 0 {
+                    out.truncate(limit);
+                }
+                out
+            }
         }
     }
 
@@ -497,6 +682,7 @@ impl CachedDict {
         match self {
             Self::Mmap(reader) => reader.for_each_entry(f),
             Self::Memory(dict) => dict.for_each_entry(f),
+            Self::Layered(layers) => layers.iter().for_each(|l| l.for_each_entry(f)),
         }
     }
 
@@ -543,14 +729,19 @@ impl CachedDict {
         match self {
             Self::Mmap(reader) => Some(reader.path()),
             Self::Memory(_) => None,
+            // 不是单个文件：二级缓存的来源判定走逐库加载（`load_dicts_individually`），
+            // 不经分层视图；这里按「没有稳定的单一产物」报，宁可不落盘也不报一半。
+            Self::Layered(_) => None,
         }
     }
 
-    /// 总条目数
+    /// 总条目数（mmap 下是编码数）。分层时是各层之和——同一编码在两层里各算一次，
+    /// 只作日志 / 统计用，不要拿它判断词库内容。
     pub fn len(&self) -> usize {
         match self {
             Self::Mmap(reader) => reader.key_count() as usize,
             Self::Memory(dict) => dict.len(),
+            Self::Layered(layers) => layers.iter().map(|l| l.len()).sum(),
         }
     }
 
