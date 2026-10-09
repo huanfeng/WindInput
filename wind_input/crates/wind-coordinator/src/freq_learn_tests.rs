@@ -1013,3 +1013,17 @@ fn bump_threshold_follows_landing_bucket() {
         "混输 owner 下码表桶临时词应按码表阈值，2 次不晋升"
     );
 }
+
+/// 词频文本空、上屏文本非空（空显示标签的 `$CC` 纯文本命令）：上屏历史照记。
+///
+/// 两条通路独立：词频没得记不等于这次没上屏——曾经空 `freq_text` 在记历史之前就 return，
+/// `;` 重复上屏取不到刚上屏的命令文本。
+#[test]
+fn empty_freq_text_still_records_commit_history() {
+    let c = coord("empty_freq_text_history");
+    c.record_selection_cased_in(None, "vbnm", "", "命令文本", CandidateSource::CodeTable);
+    assert_eq!(
+        c.recent_commits_snapshot().first().map(String::as_str),
+        Some("命令文本")
+    );
+}

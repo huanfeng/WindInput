@@ -567,11 +567,13 @@ impl Coordinator {
         history_text: &str,
         source: CandidateSource,
     ) {
+        // 历史先记、与词频文本空不空无关：两条通路独立（理由见 emoji 守卫）。空显示标签的
+        // `$CC` 纯文本命令就是 `freq_text` 空而上屏文本非空的例子。
+        self.push_commit_history(history_text);
         let text = freq_text;
         if text.is_empty() {
             return;
         }
-        self.push_commit_history(history_text);
         if source == CandidateSource::Phrase {
             return;
         }
@@ -1003,6 +1005,25 @@ impl Coordinator {
         out
     }
 
+    /// 满码自动上屏复核：引擎意向 `t` 是否指向这条候选，可以放行。
+    ///
+    /// 意向有两种来路，都要认：引擎首轮按**词条原文**给（`$` 模板词条是 `$Y年$M月$D日`，
+    /// 要比 `template_source`）；显示态复评（`recheck_auto_commit`）按**展开后的候选**给
+    /// （比 `text`）。`$CC` 命令另由调用方按 `phrase_template` 认。
+    ///
+    /// **`{..}` 插值一律不放行**，两种来路都拦：剪贴板 / 反查这类内容取自外部状态，自动
+    /// 上屏等于不经候选窗就把用户没看过的内容送出去（剪贴板值还是「宁陈旧勿等待」的缓存）。
+    /// 它们须手动选。纯 `$` 模板（日期等）可预期，与 `$CC` 纯文本命令同口径（GH#177）。
+    pub(crate) fn auto_commit_target_matches(c: &Candidate, t: &str) -> bool {
+        if c.template_source
+            .as_deref()
+            .is_some_and(|s| s.contains('{'))
+        {
+            return false;
+        }
+        c.text == t || c.template_source.as_deref() == Some(t)
+    }
+
     /// 短语候选的**稳定 id**（`Candidate::id`）：`phrase:{code}:{原始记录文本}`，对齐 Go
     /// `dict.phraseCandID`。供 shadow 规则跨日精准匹配——短语的显示文本可能是模板求值结果
     /// （`date` 的 `$Y-$MM-$DD` → `2026-07-29`），以文本为键的规则次日必失配。
@@ -1011,15 +1032,6 @@ impl Coordinator {
     /// shadow 规则的存储键 code 同源；`raw` 为 store 里的 `PhraseEntry.text`（模板未展开）。
     /// `raw` 为空（测试直构的 `PhraseHit::plain` / `$AA` 字面元素）→ 返回空 id，表示该候选
     /// 无稳定身份，shadow 落回文本匹配。
-    /// 满码自动上屏复核：引擎意向 `t`（词条原文）是否就是这条 `$` 模板候选展开前的源文本。
-    ///
-    /// **`{..}` 插值不放行**：剪贴板 / 反查这类内容取自外部状态，自动上屏等于不经候选窗
-    /// 就把用户没看过的内容送出去（剪贴板值还是「宁陈旧勿等待」的缓存）。它们维持原状——
-    /// 恒不满码自动上屏，须手动选。纯 `$` 模板（日期等）可预期，与 `$CC` 纯文本命令同口径。
-    pub(crate) fn template_auto_commit_matches(c: &Candidate, t: &str) -> bool {
-        c.template_source.as_deref() == Some(t) && !t.contains('{')
-    }
-
     pub(crate) fn phrase_cand_id(code: &str, raw: &str) -> String {
         if raw.is_empty() {
             return String::new();
@@ -1793,9 +1805,8 @@ impl Coordinator {
         let outcome = match auto_commit
             .filter(|t| {
                 state.candidates.iter().any(|c| {
-                    &c.text == t
-                        || (c.is_command && &c.phrase_template == t)
-                        || Self::template_auto_commit_matches(c, t)
+                    (c.is_command && &c.phrase_template == t)
+                        || Self::auto_commit_target_matches(c, t)
                 })
             })
             // 短语侧否决：引擎的「唯一」判在**码表候选子集**上跑（`decide_auto_commit` 按
@@ -4671,9 +4682,9 @@ impl Coordinator {
                     codes.push(c);
                 }
             }
-            // 库里存的是模板源文本（`rq` → `$Y年$M月$D日`），`text` 是当天展开结果，
-            // 按后者删恒 miss（GH#177）。
-            let stored_text = cand.template_source.as_deref().unwrap_or(&cand.text);
+            // 库里存的是词条原文：模板词是源文本（`rq` → `$Y年$M月$D日`，GH#177）、英文是
+            // 大小写投影前的形态；`text` 是展开 / 投影后的样子，按它删恒 miss。
+            let stored_text = cand.freq_text();
             // 删之前先查。**没有这一步，三种结局在日志里长得一模一样**：`redb` 的 `remove`
             // 对不存在的 key 静默成功，而 key 由 schema+code+text 三段拼成，任一段错配的
             // 表现都是「点了删除、界面毫无变化、词还在词库里」。

@@ -542,14 +542,13 @@ impl Coordinator {
         };
         if let Some(t) = auto_commit {
             // 引擎意向是词条原文：`$CC` 命令比 phrase_template、`$` 模板比 template_source
-            // （展开后 text 已变，同主路复核；`{..}` 插值不放行，GH#177）。
+            // （展开后 text 已变；`{..}` 插值不放行。判据同主路复核，GH#177）。
             return state
                 .candidates
                 .iter()
                 .find(|c| {
-                    c.text == t
-                        || (c.is_command && c.phrase_template == t)
-                        || Self::template_auto_commit_matches(c, &t)
+                    (c.is_command && c.phrase_template == t)
+                        || Self::auto_commit_target_matches(c, &t)
                 })
                 .cloned();
         }

@@ -256,7 +256,7 @@ fn special_mode_auto_commit_records_template_source() {
 }
 
 /// `{..}` 插值（剪贴板 / 反查）**不**满码自动上屏：内容取自外部状态，须经候选窗让用户
-/// 看过再选。主路与特殊模式同一判据（`template_auto_commit_matches`），这里钉主路。
+/// 看过再选。主路与特殊模式同一判据（`auto_commit_target_matches`），这里钉主路。
 ///
 /// 用 `{code()}`（求值即当前编码）：不依赖剪贴板等外部状态，headless 下稳定非空，候选必在。
 #[test]
@@ -330,4 +330,36 @@ fn dict_command_select_records_label() {
         "不应按求值文本记词频（读端按标签查，永不命中）"
     );
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// 显示态复评（`recheck_auto_commit`）这条来路：引擎首轮见同码两条（系统「工厂」+ 用户词）
+/// 判不唯一，shadow 删掉「工厂」后只剩用户词，复评按**展开后的**候选给出意向。
+///
+/// 插值词条在这条路上同样不放行（复评返回的是展开文本，只比 `text` 会放过它）；
+/// `$` 模板词条照常放行——对照组，证明拦的是插值而不是复评整条路。
+#[test]
+fn recheck_path_blocks_interpolation_but_not_template() {
+    if !has_data() {
+        return;
+    }
+    for (tag, text, should_commit) in [
+        ("recheck_interp", "{code()}", false),
+        ("recheck_tmpl", DATE_TEMPLATE, true),
+    ] {
+        let (coord, store, base) = open_main(tag, "aadg", text, "auto_commit_at_full = true");
+        store.delete_shadow("wubi86", "aadg", "工厂").unwrap();
+        let act = type_str(&coord, "aadg");
+        let page = coord.debug_page_texts();
+        let committed = matches!(act, KeyAction::InsertText { .. });
+        assert_eq!(
+            committed,
+            should_commit,
+            "`{text}`：shadow 删掉「工厂」后复评{}自动上屏，实际 act={act:?} page={page:?}",
+            if should_commit { "应" } else { "不应" }
+        );
+        if !should_commit {
+            assert_eq!(page.len(), 1, "前提：只剩这一条插值候选，实际: {page:?}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
