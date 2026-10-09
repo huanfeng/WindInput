@@ -29,6 +29,9 @@ CHostWindow::CHostWindow()
     , _wndClassAtom(0)
     , _active(FALSE)
     , _currentBand(0)
+    , _probedHostBand(0)
+    , _requestedBand(0)
+    , _hasOwner(FALSE)
     , _hSharedMem(NULL)
     , _pSharedMem(nullptr)
     , _maxBufferSize(0)
@@ -115,26 +118,34 @@ BOOL CALLBACK BandEnumProc(HWND hwnd, LPARAM lParam)
 }
 } // namespace
 
+DWORD CHostWindow::GetForegroundHostBand()
+{
+    if (!_pfnGetWindowBand)
+        return 0;
+    HWND hwndFg = GetForegroundWindow();
+    if (!hwndFg)
+        return 0;
+    DWORD fgPID = 0;
+    GetWindowThreadProcessId(hwndFg, &fgPID);
+    if (fgPID != GetCurrentProcessId())
+        return 0;
+    DWORD band = 0;
+    return _pfnGetWindowBand(hwndFg, &band) ? band : 0;
+}
+
 DWORD CHostWindow::GetHostBand()
 {
-    DWORD currentPID = GetCurrentProcessId();
-    DWORD band = 0;
-
     // Try the foreground window first
-    HWND hwndFg = GetForegroundWindow();
-    if (hwndFg)
-    {
-        DWORD fgPID = 0;
-        GetWindowThreadProcessId(hwndFg, &fgPID);
-        if (fgPID == currentPID)
-        {
-            if (_pfnGetWindowBand(hwndFg, &band) && band > 1)
-                return band;
-        }
-    }
+    DWORD band = GetForegroundHostBand();
+    if (band > 1)
+        return band;
 
-    // Enumerate top-level windows owned by this process
-    BandEnumData enumData = { currentPID, _pfnGetWindowBand, 0 };
+    // Enumerate top-level windows owned by this process.
+    //
+    // ⚠ 前台不是本进程时这里只是猜：SearchHost 开机预启动、界面还没显示时它的窗口不在
+    // 开始菜单那一层，据此建的窗口会被开始菜单盖住（2026-10-09 靶机开机首次）。所以建窗
+    // 后由 CTextService::RecheckHostBand 在一段输入的第一个键按前台 band 复核。
+    BandEnumData enumData = { GetCurrentProcessId(), _pfnGetWindowBand, 0 };
     EnumWindows(BandEnumProc, (LPARAM)&enumData);
 
     return enumData.bestBand;
@@ -428,6 +439,8 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
         }
     }
 
+    _hasOwner = (owner != NULL);
+
     _hwnd = _pfnCreateWindowInBand(
         exStyle,
         _wndClassAtom,
@@ -504,6 +517,8 @@ BOOL CHostWindow::Initialize(const wchar_t* shmName, const wchar_t* eventName, D
     // candidates invisible.)
     DWORD hostBand = GetHostBand();
     DWORD targetBand = (hostBand > 1) ? hostBand : 1;
+    _probedHostBand = hostBand;
+    _requestedBand = targetBand;
     WIND_LOG_INFO_FMT(L"HostWindow: host band=%u, placing at band=%u\n", hostBand, targetBand);
 
     // Open shared memory
@@ -643,6 +658,7 @@ BOOL CHostWindow::UpdateBand(DWORD newBand)
         _hwnd = NULL;
     }
 
+    _requestedBand = newBand;
     if (!_CreateBandWindow(newBand))
     {
         WIND_LOG_ERROR_FMT(L"HostWindow: Failed to recreate window at band=%u\n", newBand);

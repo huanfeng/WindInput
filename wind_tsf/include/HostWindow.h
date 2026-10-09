@@ -53,6 +53,18 @@ public:
     // Get the Band of the host process's foreground window.
     DWORD GetHostBand();
 
+    // 只看前台窗口：前台属于本进程时返回它的 band，否则 0。不像 GetHostBand 那样退到
+    // EnumWindows——这里跑在键路径上，且「前台不是本进程」时根本没有可比的依据。
+    DWORD GetForegroundHostBand();
+
+    // 建窗当时的判定依据与结果，供复核（RecheckHostBand）和落位上报（diag.host_render_placed）。
+    // probed = GetHostBand() 探到的宿主 band；requested = 据此决定往哪建；owner = 候选建窗
+    // 时有没有拿到本进程的前台窗口作 owner。复核拿 requested 比而不拿 actual：建窗回退到
+    // band=0 时 actual 恒与前台 band 不等，拿它比会每个键都重建一次。
+    DWORD GetProbedHostBand() const { return _probedHostBand; }
+    DWORD GetRequestedBand() const { return _requestedBand; }
+    BOOL HasOwner() const { return _hasOwner; }
+
 private:
     // Render thread entry point
     static DWORD WINAPI _RenderThread(LPVOID param);
@@ -88,6 +100,9 @@ private:
     ATOM _wndClassAtom;
     BOOL _active;
     DWORD _currentBand; // Band of the current window (0 if no window)
+    DWORD _probedHostBand; // GetHostBand() at Initialize
+    DWORD _requestedBand;  // band passed to _CreateBandWindow (before band=0 fallback)
+    BOOL  _hasOwner;       // band window was created with a non-NULL owner
 
     // Shared memory
     HANDLE _hSharedMem;

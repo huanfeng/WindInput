@@ -393,6 +393,12 @@ pub mod ext_kind {
     /// 上行（Linux addon）：addon 自己把菜单收掉了（空闲超时、失焦、服务重启、抓不住指针…），
     /// 服务端据此复位 `menu_open`。body = `{"reason":"…"}`，只进日志。
     pub const MENU_DISMISS: &str = "menu.dismiss";
+    /// 上行（Windows TSF）：host render 候选窗建成后的落位诊断，只进日志。body =
+    /// `{"pid":..,"trigger":"setup"|"recheck","probed":..,"requested":..,"actual":..,"owner":bool}`，
+    /// `recheck` 另带被换掉那个窗口的 `prev_probed` / `prev_requested` / `prev_actual` / `prev_owner`。
+    /// 存在理由：SearchHost 这类 AppContainer 宿主写不了 tsf_log，band 判错（候选被开始菜单
+    /// 盖住）只能靠这条在中央日志里看见。C++ 侧编码见 `wind_tsf/include/HostBandPolicy.h`。
+    pub const DIAG_HOST_RENDER_PLACED: &str = "diag.host_render_placed";
     //
     // 为什么这两个「位置」要一问一答，而不是服务进程自己记账：
     //

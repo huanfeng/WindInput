@@ -1507,6 +1507,13 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         _pTextService->StartDeferredCompositionIfPending();
     }
 
+    // 一段输入的第一个键：宿主界面此刻必定已显示，按前台 band 复核 host 候选窗落位。
+    // SearchHost 二次聚焦会跳过 focus_gained，这里是唯一可靠的时机。
+    if (!hasComposition)
+    {
+        _pTextService->RecheckHostBand(L"key");
+    }
+
     // Update caret position before sending key event
     // This ensures the candidate window appears at the correct position
     _pTextService->SendCaretPositionUpdate();

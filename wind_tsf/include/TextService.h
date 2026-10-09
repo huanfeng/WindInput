@@ -9,6 +9,7 @@
 #include "CaretEditSession.h"
 // 「宿主没有插入点可报」的纯判据（可单测，见 tests/caret_default_pos_policy_test.cpp）。
 #include "CaretDefaultPosPolicy.h"
+#include "HostBandPolicy.h" // host 候选窗 band 复核判据 + 落位上报编码（可单测）
 #include <string>
 #include <mutex>
 #include <vector>
@@ -898,9 +899,15 @@ private:
     // State sync helper (internal): apply status response to local state
     void _SyncStateFromResponse(const ServiceResponse& response);
     void _EnsureHostRenderSetup(const ServiceResponse& response, BOOL forceRefresh);
+    // 向服务端要 setup 并建整组 host 窗口，建成后上报落位。prev 非空 = 复核重建，
+    // 带上被换掉那个窗口的依据一并上报。
+    void _CreateHostWindows(const wind::hostband::Placement* prev);
+    // 已有 host 候选窗且需要按前台重建，判据见 HostBandPolicy.h。
+    BOOL _HostBandNeedsRebuild();
+    void _ReportHostRenderPlaced(const wind::hostband::Placement* prev);
     // 销毁宿主代理渲染窗口（释放共享内存映射 + 渲染线程 + Band 窗口）。
-    // 仅在 Deactivate（IME 卸载）和 _EnsureHostRenderSetup（强制刷新/host render
-    // 不可用）时调用。**不要**在失焦时调用：locked/transient DocMgr（SearchHost/任务
+    // 仅在 Deactivate（IME 卸载）、_EnsureHostRenderSetup（强制刷新/host render
+    // 不可用）和 RecheckHostBand（前台 band 与建窗时不符）时调用。**不要**在失焦时调用：locked/transient DocMgr（SearchHost/任务
     // 管理器）会跳过 focus_gained，销毁后无法重建 → 候选永久不显示。失焦只需靠 Go 的
     // WriteHide 经本进程 event 隐藏窗口。空操作安全。
     void _DestroyHostWindow();
@@ -910,6 +917,9 @@ public:
     // Called after new/re-connection to ensure TSF and service state are consistent.
     void _DoFullStateSync();
     void TryRecoverFocusState();
+    // 按前台 band 复核 host 候选窗的落位，不符则整组重建。一段输入的第一个键时调，
+    // 见 TextService.cpp 的实现注释。why 只进日志。
+    void RecheckHostBand(const wchar_t* why);
     // 用当前焦点重发一次 focus_gained（caret / InputScope / 类名 / 标题现取）。延迟恢复与
     // 标题开关补发共用。why 只进日志。
     BOOL _ResendFocusGained(const wchar_t* why);

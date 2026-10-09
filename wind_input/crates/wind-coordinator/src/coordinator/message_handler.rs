@@ -293,6 +293,47 @@ fn decode_ext_host_display(body: &[u8]) -> Option<HostDisplay> {
     })
 }
 
+/// `diag.host_render_placed` → (是否升 WARN, 日志行)。body 不是 JSON 对象返回 `None`。
+///
+/// 只有 recheck 且旧窗 `requested` 与新窗不同才升 WARN：那才是「建窗时 band 判错、候选
+/// 曾被宿主界面盖住」。只缺 owner / 窗口被连带销毁也会 recheck，但 band 本来是对的，
+/// 打成 WARN 会稀释检索价值。
+fn host_render_placed_log(body: &[u8]) -> Option<(bool, String)> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = v.as_object()?;
+    let num = |k: &str| obj.get(k).and_then(|x| x.as_u64());
+    let flag = |k: &str| obj.get(k).and_then(|x| x.as_bool());
+    let show = |x: Option<u64>| x.map_or_else(|| "?".to_owned(), |n| n.to_string());
+    let trigger = obj.get("trigger").and_then(|x| x.as_str()).unwrap_or("?");
+    let mut line = format!(
+        "host_render placed: pid={} trigger={trigger} probed={} requested={} actual={} owner={}",
+        show(num("pid")),
+        show(num("probed")),
+        show(num("requested")),
+        show(num("actual")),
+        flag("owner").map_or("?", |b| if b { "true" } else { "false" }),
+    );
+    if trigger != "recheck" {
+        return Some((false, line));
+    }
+    let band_was_wrong = num("prev_requested") != num("requested");
+    line.push_str(&format!(
+        " prev_probed={} prev_requested={} prev_actual={} prev_owner={}",
+        show(num("prev_probed")),
+        show(num("prev_requested")),
+        show(num("prev_actual")),
+        flag("prev_owner").map_or("?", |b| if b { "true" } else { "false" }),
+    ));
+    line.push_str(if band_was_wrong {
+        "（建窗时 band 判错，候选曾被宿主界面盖住，已按前台重建）"
+    } else if flag("prev_owner") == Some(false) {
+        "（band 无误，建窗时缺 owner，已补）"
+    } else {
+        "（候选窗句柄已失效，已重建）"
+    });
+    Some((band_was_wrong, line))
+}
+
 /// `shot.result` → Toast 文案。
 ///
 /// 抽成纯函数是为了可测：这里全是措辞分支，而措辞正是**必须与 Windows 侧
@@ -577,6 +618,12 @@ impl MessageHandler for Coordinator {
                 None => tracing::warn!("host.display 载荷无法解析，忽略"),
             },
             // 原生浮窗截图的结果（`.app` 动手，服务端只管文案）。
+            // Windows TSF：host render 候选窗落位诊断（SearchHost 写不了 tsf_log，只能看这条）。
+            ext_kind::DIAG_HOST_RENDER_PLACED => match host_render_placed_log(body) {
+                Some((true, line)) => tracing::warn!("{line}"),
+                Some((false, line)) => tracing::info!("{line}"),
+                None => tracing::warn!("diag.host_render_placed 载荷无法解析，忽略"),
+            },
             ext_kind::SHOT_RESULT => match serde_json::from_slice(body) {
                 Ok(v) => {
                     let (msg, kind) = shot_result_message(&v);
@@ -4512,6 +4559,48 @@ mod ext_envelope_tests {
 
     fn coord() -> Arc<Coordinator> {
         Coordinator::new_headless(Config::default(), None)
+    }
+
+    #[test]
+    fn host_render_placed_log_levels() {
+        // setup：INFO，不带 prev。
+        let (warn, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"setup","probed":1,"requested":1,"actual":1,"owner":false}"#,
+        )
+        .unwrap();
+        assert!(!warn);
+        assert!(line.contains("pid=7 trigger=setup probed=1 requested=1 actual=1 owner=false"));
+        assert!(!line.contains("prev_"));
+
+        // recheck 且 band 变了（开机预启动那条）：WARN。
+        let (warn, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"recheck","probed":13,"requested":13,"actual":13,"owner":true,
+                "prev_probed":0,"prev_requested":1,"prev_actual":1,"prev_owner":false}"#,
+        )
+        .unwrap();
+        assert!(warn, "band 判错应升 WARN");
+        assert!(line.contains("prev_requested=1") && line.contains("band 判错"));
+
+        // recheck 但 band 本来就对、只缺 owner：INFO。
+        let (warn, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"recheck","probed":13,"requested":13,"actual":13,"owner":true,
+                "prev_probed":13,"prev_requested":13,"prev_actual":13,"prev_owner":false}"#,
+        )
+        .unwrap();
+        assert!(!warn, "只缺 owner 不该报成 band 判错");
+        assert!(line.contains("缺 owner"));
+
+        // recheck、band 对、有 owner：只能是窗口失效。
+        let (warn, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"recheck","probed":13,"requested":13,"actual":13,"owner":true,
+                "prev_probed":13,"prev_requested":13,"prev_actual":13,"prev_owner":true}"#,
+        )
+        .unwrap();
+        assert!(!warn);
+        assert!(line.contains("已失效"));
+
+        assert_eq!(host_render_placed_log(b"not json"), None);
+        assert_eq!(host_render_placed_log(b"[1]"), None);
     }
 
     #[test]

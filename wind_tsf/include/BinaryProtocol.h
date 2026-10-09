@@ -89,8 +89,9 @@ constexpr uint16_t CMD_CARET_PROBE      = 0x0304; // First-show probe: one pre-r
 // Unknown `kind` MUST be ignored silently (log at debug, never error, never drop the
 // connection) -- that is what lets old and new peers interoperate.
 //
-// Currently unused on the Windows side; declared here so the three copies of this
-// protocol (Rust / C++ / Swift) stay in step.
+// Windows side: only upstream `diag.host_render_placed` so far (HostBandPolicy.h encodes
+// the envelope); declared here so the three copies of this protocol (Rust / C++ / Swift)
+// stay in step.
 constexpr uint16_t CMD_EXT              = 0x0E01;
 
 constexpr uint16_t CMD_BATCH_EVENTS     = 0x0F01; // Batch events container

@@ -157,6 +157,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME uielement_policy COMMAND uielement_policy_test)
 
+    add_executable(host_band_policy_test tests/host_band_policy_test.cpp)
+    target_include_directories(host_band_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(host_band_policy_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME host_band_policy COMMAND host_band_policy_test)
+
     add_executable(caret_default_pos_policy_test tests/caret_default_pos_policy_test.cpp)
     target_include_directories(caret_default_pos_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)
