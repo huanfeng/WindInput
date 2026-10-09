@@ -2965,6 +2965,22 @@ impl Coordinator {
         coordinator.reload_common_chars();
         // 命令栏：装配 Services（ime/config/dict 后端）+ 自身 Weak 引用。
         coordinator.init_cmdbar();
+        // 按词查编码用户层后台建好 → 重刷当前这屏候选，把用户码补上（否则要等下一次按键）。
+        // 与 `spawn_index_warm` 建成反查索引后的重渲染同一个做法；只持 Weak。
+        {
+            let weak = Arc::downgrade(&coordinator);
+            coordinator
+                .engine_mgr
+                .set_user_text_built_hook(Arc::new(move || {
+                    let Some(c) = weak.upgrade() else {
+                        return;
+                    };
+                    let s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if !s.input_buffer.is_empty() {
+                        c.notify_ui_update(&s);
+                    }
+                }));
+        }
         // 启动即显示常驻工具栏（反映初始 中英/方案/标点/全半角）
         coordinator.notify_toolbar();
         // 码元集与按键功能的冲突体检（只告警）。默认字符集下直接返回，无开销。

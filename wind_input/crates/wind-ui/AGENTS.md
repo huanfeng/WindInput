@@ -44,7 +44,7 @@
 - **线程模型**：`UiManager::new()` 启 `ui-manager` 线程跑 `manager::ui_thread`；协调器持 `wind_coordinator::UiSender` 下发（**不是裸 `Sender<UiCommand>`**，见下条）、`take_event_rx()`（仅一次）取 `Receiver<UiEvent>` 收鼠标事件。**所有窗口/缓存（`thread_local` 鼠标处理表、image cache）只在该 UI 线程存活**，禁止跨线程触碰窗口。
 - **循环是事件驱动的，不再轮询**：`ui_thread` 空闲时阻塞在 `wake::UiWaitPort::wait`（Windows 等「消息队列 ∪ 唤醒事件 ∪ 最近到期时刻」），到期源全空即无限等待。两条硬约束由此而来：
   - **投递命令必须唤醒**，故协调器侧一律经 `UiSender`（把投递 + 唤醒绑成一次 `send`，编译器守门），别用裸 `Sender`。
-  - ⚠ **新增任何「靠每轮被调用才能推进」的状态，必须在循环末尾的 deadline 数组里登记到期时刻**。漏登记不是变慢，是它**永不推进**——只在碰巧有别的事唤醒线程时才动一下，表现为「偶尔不生效」，极难复现。现有登记项：气泡 / toast 自动隐藏、`toolbar_gate`、`tip_debounce`、候选窗悬停闸门、工具栏 `auto_hide`（含淡出逐帧）、菜单外点击轮询。
+  - ⚠ **新增任何「靠每轮被调用才能推进」的状态，必须在循环末尾的 deadline 数组里登记到期时刻**。漏登记不是变慢，是它**永不推进**——只在碰巧有别的事唤醒线程时才动一下，表现为「偶尔不生效」，极难复现。现有登记项：气泡 / toast 自动隐藏、`toolbar_gate`、`tip_debounce`、候选窗悬停闸门与隐藏 30 秒释放像素缓冲 / 离屏表面（`window::HiddenRelease`）、工具栏 `auto_hide`（含淡出逐帧）、菜单外点击轮询、绘制缓存（背景图 + 阴影蒙版）30 秒闲置回收（`view::paint_cache_next_deadline`）。
   - 另注意：靠「每轮顺延」表达的计时（工具栏 `auto_hide` 的 `was_engaged`、气泡的 `tip_was_interacting`）真实语义是「某状态**结束时**才起算」。轮询年代 tick 密集，二者无从区分；事件驱动下必须显式做边沿检测，否则一移开就立刻到期。
 - **渲染管线统一**：每个窗口都 build `view::View` 树 → `measure`/`arrange` → `paint` 到 `LayeredWindow` 的 BGRA buffer → `update()`（`UpdateLayeredWindow`，预乘 alpha BGRA）。文本走 `text::dwrite`。新增窗口类型照此模式，别另起渲染路径。
 - **跨平台三层（见 lib.rs，改前必读）**：① 纯 Rust 真实可测——`view` 盒模型布局/形状光栅化、`viewbox`、`debounce`、`image_cache`；② mock 近似——`text::dwrite` 非 Windows 返回等宽近似；③ 仅占位——Layered Window、DirectWrite 字形、剪贴板、消息泵在非 Windows 是空实现。动到 ② ③ 必须 Windows 实测。

@@ -556,11 +556,16 @@ pub struct EngineManager {
     user_assoc: crate::user_assoc::SharedSlot,
     /// 按词查编码的用户层，按方案分槽。见 [`crate::text_codes`]。
     user_text: crate::text_codes::SharedSlots,
+    /// 用户层后台重建写回之后的回调（协调器借它重刷当前这屏候选，见
+    /// [`Self::set_user_text_built_hook`]）。
+    user_text_built: std::sync::OnceLock<crate::text_codes::BuiltHook>,
     /// 码表**单字全码**表缓存:方案 id → (汉字 → 全码)。供造词按 `[[encoder.rules]]` 组装
     /// 词组编码(见 `encode_word`)。与 `reverse_index` 分开是刻意的——那份按「码长升序」排,
     /// 服务悬停 `[编码]` 的打法列表展示;这份要的是「按权重挑全码」,两种排序需求互斥。
     /// **只缓存一份**:造词恒对活跃方案(混输则其主码表)进行,切方案即弃,无需两份护栏。
     single_char_codes: Mutex<Option<SingleCharCodeCache>>,
+    /// 单字全码表的最后使用（[`Self::use_clock`] 读数），供闲置清扫（[`Self::evict_idle_caches`]）。
+    single_char_used: std::sync::atomic::AtomicU64,
     /// 全局拼音配置（fuzzy/code_hint_source/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
     /// 双拼韵母键集缓存：(已缓存的活跃方案 id, Option<HashSet<u8>>)。
@@ -911,7 +916,9 @@ impl EngineManager {
             reverse_index: Mutex::new(HashMap::new()),
             user_assoc: Default::default(),
             user_text: Default::default(),
+            user_text_built: std::sync::OnceLock::new(),
             single_char_codes: Mutex::new(None),
+            single_char_used: std::sync::atomic::AtomicU64::new(0),
             pinyin: Mutex::new(config.schema.pinyin.clone()),
             shuangpin_finals_cache: Mutex::new((String::new(), None)),
             shuangpin_reverse_cache: Mutex::new((String::new(), None)),
@@ -1370,7 +1377,13 @@ impl EngineManager {
         }
         let system = self.reverse_index_if_ready(schema_id);
         let user = self.store.as_ref().and_then(|s| {
-            crate::text_codes::get_or_refresh(&self.user_text, s, &self.data_schema_id(schema_id))
+            crate::text_codes::get_or_refresh(
+                &self.user_text,
+                s,
+                &self.data_schema_id(schema_id),
+                self.use_clock_now(),
+                self.user_text_built.get().cloned(),
+            )
         });
         crate::text_codes::TextCodeView { system, user }
     }
@@ -1382,9 +1395,24 @@ impl EngineManager {
         }
         let built_sys = self.prewarm_reverse_index(schema_id);
         let built_user = self.store.as_ref().is_some_and(|s| {
-            crate::text_codes::prewarm(&self.user_text, s, &self.data_schema_id(schema_id))
+            crate::text_codes::prewarm(
+                &self.user_text,
+                s,
+                &self.data_schema_id(schema_id),
+                self.use_clock_now(),
+            )
         });
         built_sys || built_user
+    }
+
+    /// 注册「用户层后台重建写回之后」的回调（一次性，重复注册忽略）。
+    ///
+    /// 用户层缺失 / 过期时查询本次没有用户码、另起后台重建（[`Self::text_codes`]）；没有这个
+    /// 回调，建好之后要等用户下一次按键才看得到——闲置清扫释放之后回来的第一键尤其如此。
+    /// 回调在重建线程上、出锁之后调；与反查索引后台建成后的重绘（协调器 `spawn_index_warm`）
+    /// 同一个意思。
+    pub fn set_user_text_built_hook(&self, hook: crate::text_codes::BuiltHook) {
+        let _ = self.user_text_built.set(hook);
     }
 
     /// 清空「按词查编码」的用户层（全部方案槽）。配置不再有消费者时由协调器调，释放内存
@@ -2242,6 +2270,8 @@ impl EngineManager {
 
     /// 取 `schema_id` 的单字全码表，缺则构建并缓存（只留一份，见字段注释）。
     fn single_char_full_codes(&self, schema_id: &str) -> Arc<HashMap<char, String>> {
+        self.single_char_used
+            .store(self.use_clock_now(), std::sync::atomic::Ordering::Relaxed);
         {
             let guard = self
                 .single_char_codes
@@ -2758,9 +2788,7 @@ impl EngineManager {
     /// 只摘引擎与**只属于它**的派生索引（[`Self::forget_unloaded`]），不动方案配置缓存：
     /// 配置没变，再切回来时按原样重建即可（派生缓存文件仍新鲜 ⇒ 只是 mmap + 建外壳）。
     pub fn evict_idle(&self, idle: std::time::Duration) -> Vec<String> {
-        let now = self.clock_origin.elapsed().as_millis() as u64;
-        self.use_clock
-            .fetch_max(now, std::sync::atomic::Ordering::Relaxed);
+        let now = self.advance_use_clock();
         let idle_ms = idle.as_millis() as u64;
         let keep = self.residency_protected();
         let mut dropped: Vec<(String, LoadedEngine)> = Vec::new();
@@ -2793,6 +2821,62 @@ impl EngineManager {
         ids
     }
 
+    /// 推进淘汰时钟到当前时刻并返回读数（只在清扫拍子里调，见 [`Self::use_clock`]）。
+    fn advance_use_clock(&self) -> u64 {
+        let now = self.clock_origin.elapsed().as_millis() as u64;
+        self.use_clock
+            .fetch_max(now, std::sync::atomic::Ordering::Relaxed);
+        now
+    }
+
+    /// 懒建缓存的闲置清扫（`docs/design/memory-footprint.md` §7；协调器清扫拍子调，与方案
+    /// 常驻策略无关、恒生效）：先推进淘汰时钟，再释放 `idle` 以上没用过的
+    ///
+    /// - 单字全码表。释放后各消费方下次用到时就地重建（`.wscc` 新鲜时只是读一次盘，毫秒级；
+    ///   过期才全量重建），不丢活：
+    ///   - 自动造词的草稿落库（协调器 `resolve_phrase_schemas`，后台线程）：反查索引就绪时
+    ///     同步建回来再落库；反查索引也没就绪才照旧整批放弃并派后台预热；
+    ///   - 快捷加词取码（按键线程）与设置页 `dict.encodeWords` / `dict.encode`（RPC 线程）：
+    ///     经 [`Self::encode_word`] / [`Self::encode_words`] 在调用线程上同步建回来。
+    /// - 按词查编码用户层的槽（悬停 [编码]、`${code_rev}`）。释放后下一次查询**本次没有用户层**
+    ///   （只出系统层的码），同时起后台重建，建好后下一次查询就有。
+    ///
+    /// 「最后使用」与引擎同一套打法：取用处一次原子写 / 已持锁时顺手写时钟读数。
+    /// 返回释放了的项（`single_char:<方案>` / `user_text:<数据方案>`），供日志与测试。
+    pub fn evict_idle_caches(&self, idle: std::time::Duration) -> Vec<String> {
+        let now = self.advance_use_clock();
+        let idle_ms = idle.as_millis() as u64;
+        let mut released = Vec::new();
+        // 摘下的表出锁再析构（2 万多个小块），别让取表的造词 / 加词路径陪等。
+        let taken = {
+            let mut sc = self
+                .single_char_codes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let used = self
+                .single_char_used
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(used) >= idle_ms {
+                sc.take()
+            } else {
+                None
+            }
+        };
+        if let Some((id, table)) = taken {
+            drop(table);
+            released.push(format!("single_char:{id}"));
+        }
+        released.extend(
+            crate::text_codes::evict_idle(&self.user_text, now, idle_ms)
+                .into_iter()
+                .map(|k| format!("user_text:{k}")),
+        );
+        if !released.is_empty() {
+            info!("闲置释放懒建缓存：{:?}", released);
+        }
+        released
+    }
+
     /// 引擎被摘后，清掉**只属于它**的派生索引。
     ///
     /// 与 [`Self::invalidate_schema`] 不同，这里不清全部反查索引 / 单字全码表：摘引擎不改变
@@ -2823,6 +2907,26 @@ impl EngineManager {
         // （混输则其主码表成员），与那个方案的独立引擎在不在内存无关。
         if in_use_kept {
             return;
+        }
+        // 按词查编码用户层（S4 审查 L7）：槽按**数据方案**分（拼音类方案共用 `pinyin` 一份），
+        // 还有已加载引擎或在用方案落在同一数据方案上就留着。
+        let data = self.data_schema_id(schema_id);
+        let shared = {
+            let loaded: Vec<String> = self
+                .engines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned()
+                .collect();
+            loaded
+                .iter()
+                .chain(in_use.iter())
+                .chain(std::iter::once(&primary))
+                .any(|id| !id.is_empty() && self.data_schema_id(id) == data)
+        };
+        if !shared {
+            crate::text_codes::remove(&self.user_text, &data);
         }
         let mut sc = self
             .single_char_codes

@@ -29,6 +29,19 @@ const SHADOW_Q: f32 = 4.0;
 /// 蒙版缓存条数上限。候选窗的阴影几何种类有限（随候选数/码长变化），超限整体清空即可。
 const SHADOW_CACHE_CAP: usize = 32;
 
+/// 阴影蒙版缓存：蒙版表 + 最后取用时刻（闲置回收与图片缓存同一个
+/// [`crate::image_cache::IDLE_EVICT_AFTER`]，设计 `docs/design/memory-footprint.md` §7）。
+///
+/// 条数上限挡住「涨到多高」（32 条，满了整体清），挡不住「不用了也不落」：候选窗宽度几乎
+/// 每帧在变、每个宽度一条，打一阵字就停在十几到三十几条（推断：出厂主题 blur 8，1x 横排
+/// 一条约 80 KB、1.5x 竖排约 250 KB ⇒ 满表 2.7–8 MB），不打字时一直占着。
+#[derive(Default)]
+struct ShadowCache {
+    masks: HashMap<ShadowKey, ShadowMask>,
+    /// 最后一次被取用的时刻（命中也算）；None = 空表，没什么可回收。
+    last_use: Option<std::time::Instant>,
+}
+
 /// 模糊后的阴影 alpha 蒙版 + 尺寸与四周留边（`pad`）。
 struct ShadowMask {
     alpha: Vec<u8>,
@@ -50,7 +63,7 @@ thread_local! {
     /// 这层缓存省掉的是每帧 3 趟可分离方框模糊——400×120 的窗口配 blur=8，临时缓冲
     /// 约 460×180，三轮双向模糊就是 ~50 万像素的 6 遍扫描，而候选窗在一次输入过程中
     /// 尺寸高度重复（同码长、同候选数），几乎帧帧都在重算同一张图。
-    static SHADOW_CACHE: RefCell<HashMap<ShadowKey, ShadowMask>> = RefCell::new(HashMap::new());
+    static SHADOW_CACHE: RefCell<ShadowCache> = RefCell::new(ShadowCache::default());
 }
 
 /// 以模糊阴影蒙版调用 `f`（命中缓存则复用，否则构建并入缓存）。
@@ -69,29 +82,50 @@ fn with_shadow_mask<R>(
     let q = |v: f32| (v * SHADOW_Q).round() as i32;
     let key = (q(bw), q(bh), q(radius), q(blur), q(phase_x), q(phase_y));
     SHADOW_CACHE.with(|c| {
-        if let Some(m) = c.borrow().get(&key) {
-            return Some(f(m));
+        let mut cache = c.borrow_mut();
+        if let Some(m) = cache.masks.get(&key) {
+            let r = f(m);
+            cache.last_use = Some(std::time::Instant::now());
+            return Some(r);
         }
         let mask = build_shadow_mask(bw, bh, radius, blur, phase_x, phase_y)?;
-        let mut cache = c.borrow_mut();
-        if cache.len() >= SHADOW_CACHE_CAP {
-            cache.clear();
+        if cache.masks.len() >= SHADOW_CACHE_CAP {
+            cache.masks.clear();
         }
-        Some(f(cache.entry(key).or_insert(mask)))
+        cache.last_use = Some(std::time::Instant::now());
+        Some(f(cache.masks.entry(key).or_insert(mask)))
     })
 }
 
-/// 背景图缓存的闲置回收到期时刻，供 UI 消息循环登记进 `next_deadline`。
-pub fn image_cache_next_deadline() -> Option<std::time::Instant> {
-    IMAGE_CACHE.with(|c| c.borrow().next_deadline())
+/// 绘制缓存（背景图 + 阴影蒙版）闲置回收的最早到期时刻，供 UI 消息循环登记进 `next_deadline`。
+pub fn paint_cache_next_deadline() -> Option<std::time::Instant> {
+    let image = IMAGE_CACHE.with(|c| c.borrow().next_deadline());
+    let shadow = SHADOW_CACHE.with(|c| {
+        c.borrow()
+            .last_use
+            .map(|t| t + crate::image_cache::IDLE_EVICT_AFTER)
+    });
+    image.into_iter().chain(shadow).min()
 }
 
-/// 闲置够久就把背景图缓存整个丢掉，返回是否真的清了（清了才值得记一行日志）。
-pub fn image_cache_evict_if_idle(now: std::time::Instant) -> bool {
-    IMAGE_CACHE.with(|c| c.borrow_mut().evict_if_idle(now))
+/// 闲置够久就把背景图缓存 / 阴影蒙版缓存各自整个丢掉（两者各按自己的最后取用计时），
+/// 返回是否真的清了什么（清了才值得记一行日志）。
+pub fn paint_cache_evict_if_idle(now: std::time::Instant) -> bool {
+    let image = IMAGE_CACHE.with(|c| c.borrow_mut().evict_if_idle(now));
+    let shadow = SHADOW_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        match c.last_use {
+            Some(t) if now.saturating_duration_since(t) >= crate::image_cache::IDLE_EVICT_AFTER => {
+                *c = ShadowCache::default();
+                true
+            }
+            _ => false,
+        }
+    });
+    image || shadow
 }
 
-/// 等下一条命令，期间到点就回收背景图缓存；返回 None = 发送端已全部断开。
+/// 等下一条命令，期间到点就回收绘制缓存；返回 None = 发送端已全部断开。
 ///
 /// 存在的理由是 **macOS**：那边没有 `manager.rs` 的消息循环（`ui_thread` 是
 /// `cfg(not(macos))`），只有 `manager_macos::forwarder_thread` 一个纯阻塞 `recv`，
@@ -105,10 +139,10 @@ pub fn recv_evicting_idle<T>(rx: &std::sync::mpsc::Receiver<T>) -> Option<T> {
     use std::sync::mpsc::RecvTimeoutError;
     loop {
         let now = std::time::Instant::now();
-        image_cache_evict_if_idle(now);
+        paint_cache_evict_if_idle(now);
         // 回收之后才问到期时刻：刚清空的缓存不再要求唤醒，于是退化为纯阻塞 recv，
         // 空闲时线程零开销地停住。
-        let Some(deadline) = image_cache_next_deadline() else {
+        let Some(deadline) = paint_cache_next_deadline() else {
             return rx.recv().ok();
         };
         match rx.recv_timeout(deadline.saturating_duration_since(now)) {
@@ -124,13 +158,13 @@ pub fn recv_evicting_idle<T>(rx: &std::sync::mpsc::Receiver<T>) -> Option<T> {
 /// 仅测试可见：当前阴影蒙版缓存条目数。
 #[cfg(test)]
 fn shadow_cache_len() -> usize {
-    SHADOW_CACHE.with(|c| c.borrow().len())
+    SHADOW_CACHE.with(|c| c.borrow().masks.len())
 }
 
 /// 仅测试可见：清空阴影蒙版缓存，让用例从确定状态起步。
 #[cfg(test)]
 fn shadow_cache_clear() {
-    SHADOW_CACHE.with(|c| c.borrow_mut().clear());
+    SHADOW_CACHE.with(|c| *c.borrow_mut() = ShadowCache::default());
 }
 
 /// 构建模糊阴影蒙版：画 alpha=255 的圆角矩形 → 抽 alpha 通道 → 3 次方框模糊逼近高斯。
@@ -2322,7 +2356,7 @@ mod idle_evict_tests {
 
     /// 把线程局部的那份缓存清干净，让用例从确定状态起步。
     fn reset() {
-        image_cache_evict_if_idle(Instant::now() + crate::image_cache::IDLE_EVICT_AFTER * 2);
+        paint_cache_evict_if_idle(Instant::now() + crate::image_cache::IDLE_EVICT_AFTER * 2);
     }
 
     /// 往缓存里留下点驻留并把最后取用时刻挪到过去。解码失败的源同样会占表并打点，
@@ -2345,7 +2379,7 @@ mod idle_evict_tests {
         reset();
         stage_stale_entry();
         assert!(
-            image_cache_next_deadline().is_some(),
+            paint_cache_next_deadline().is_some(),
             "布置的驻留应当要求唤醒"
         );
 
@@ -2357,7 +2391,7 @@ mod idle_evict_tests {
 
         assert_eq!(recv_evicting_idle(&rx), Some(7));
         assert_eq!(
-            image_cache_next_deadline(),
+            paint_cache_next_deadline(),
             None,
             "等命令的这段时间里就该把缓存收掉"
         );
@@ -2368,7 +2402,7 @@ mod idle_evict_tests {
     #[test]
     fn recv_evicting_idle_is_plain_recv_when_cache_empty() {
         reset();
-        assert_eq!(image_cache_next_deadline(), None);
+        assert_eq!(paint_cache_next_deadline(), None);
 
         let (tx, rx) = channel::<u32>();
         tx.send(1).expect("发送");
@@ -2780,6 +2814,47 @@ mod shadow_cache_tests {
         }
         let after = base(BLACK);
         assert_eq!(before, after, "缓存清空后重建的蒙版须与首次一致");
+    }
+
+    /// 把阴影缓存的最后取用时刻挪到 `ago` 之前（模拟闲置）。
+    fn age_shadow_cache(ago: std::time::Duration) {
+        let stale = std::time::Instant::now()
+            .checked_sub(ago)
+            .expect("单调时钟回拨");
+        SHADOW_CACHE.with(|c| c.borrow_mut().last_use = Some(stale));
+    }
+
+    /// 设计 §7：阴影蒙版并入图片缓存那套 30 秒闲置回收——闲置到期整个清掉、不再要求唤醒；
+    /// 清掉后重画与清之前逐字节一致（按需重建）。
+    #[test]
+    fn idle_shadow_cache_is_evicted_and_rebuilt() {
+        shadow_cache_clear();
+        let before = base(BLACK);
+        assert_eq!(shadow_cache_len(), 1);
+        assert!(paint_cache_next_deadline().is_some(), "有驻留就要求唤醒");
+        age_shadow_cache(crate::image_cache::IDLE_EVICT_AFTER + std::time::Duration::from_secs(1));
+        assert!(
+            paint_cache_evict_if_idle(std::time::Instant::now()),
+            "闲置到期应回收"
+        );
+        assert_eq!(shadow_cache_len(), 0);
+        assert_eq!(paint_cache_next_deadline(), None, "清空后不再要求唤醒");
+        assert_eq!(base(BLACK), before, "回收后按需重建，结果一致");
+        assert_eq!(shadow_cache_len(), 1);
+    }
+
+    /// 期间用过（命中也算）就不回收：最后取用时刻随每次绘制刷新。
+    #[test]
+    fn used_shadow_cache_is_kept() {
+        shadow_cache_clear();
+        let _ = base(BLACK);
+        age_shadow_cache(crate::image_cache::IDLE_EVICT_AFTER + std::time::Duration::from_secs(1));
+        let _ = base(BLACK); // 命中
+        assert!(
+            !paint_cache_evict_if_idle(std::time::Instant::now()),
+            "刚用过不回收"
+        );
+        assert_eq!(shadow_cache_len(), 1);
     }
 }
 

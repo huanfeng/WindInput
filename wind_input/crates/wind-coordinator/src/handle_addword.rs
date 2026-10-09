@@ -311,6 +311,15 @@ impl Coordinator {
         } else {
             active.clone()
         };
+        // 反查索引就绪、只缺单字全码表：就地建回来。它会被闲置清扫释放（内存设计 §7），
+        // 用户停手 30 分钟回来打的第一批草稿正是这种状态；整批丢掉就吞了用户的头几个词。
+        // 本函数只在草稿落库线程（`flush_draft_batch`，后台）上调，缓存新鲜时只是读一次
+        // `.wscc`（毫秒级），过期才全量重建——那也在后台，不碰按键线程。
+        if self.engine_mgr.reverse_index_if_ready(&encode).is_some()
+            && !self.engine_mgr.single_char_codes_ready(&encode)
+        {
+            self.engine_mgr.prewarm_single_char_codes(&encode);
+        }
         if self.engine_mgr.reverse_index_if_ready(&encode).is_none()
             || !self.engine_mgr.single_char_codes_ready(&encode)
         {

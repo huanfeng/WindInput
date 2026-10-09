@@ -269,6 +269,38 @@ fn keep_all_loaded_prewarms_everything_and_never_evicts() {
     assert_eq!(loaded(&c), all, "常驻开着时一个都不摘");
 }
 
+/// 懒建缓存的闲置清扫（设计 §7）走同一个清扫拍子，且**不看** `keep_all_loaded`：常驻开着
+/// 时方案一个不摘，单字全码表与按词查编码用户层照样到期释放。
+#[test]
+fn idle_sweep_releases_caches_even_when_keep_all() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset(true);
+    // 用户库单开一份：别的用例的协调器可能还被后台线程握着，redb 不能同时开两次（开不了
+    // 时 store 为 None，用户层根本建不出来）。
+    let own = root().join("userdata-sweep");
+    std::fs::create_dir_all(&own).unwrap();
+    let data = Config::data_dir();
+    let c = Coordinator::new_headless_with_ui_at(
+        Config::load(data.as_deref()).unwrap(),
+        data.as_deref(),
+        Some(&own),
+    )
+    .0;
+    c.debug_desktop_startup_and_prewarm();
+    let em = c.engine_mgr();
+    assert!(em.prewarm_single_char_codes("za"));
+    em.prewarm_text_codes("za");
+    assert_eq!(em.user_text_loaded(), 1, "前提：用户层已建");
+    std::thread::sleep(Duration::from_millis(80));
+    assert!(
+        c.debug_idle_sweep(Duration::from_millis(40)).is_empty(),
+        "常驻开着时方案一个不摘"
+    );
+    assert!(!em.single_char_codes_ready("za"), "单字全码表到期释放");
+    assert_eq!(em.user_text_loaded(), 0, "用户层到期释放");
+    assert_eq!(loaded(&c), sorted(&["za", "zb", "zc", "zd", "zm"]));
+}
+
 /// 闲置淘汰：未用的摘掉；当前方案、临拼目标不摘；混输成员不保护（混输自建子引擎）；
 /// 摘掉后再切回能正常出字；摘除不清掉仍在用的反查索引。
 #[test]

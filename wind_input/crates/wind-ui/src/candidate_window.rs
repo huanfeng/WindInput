@@ -354,6 +354,8 @@ pub struct CandidateWindow {
     page: usize,
     total_pages: usize,
     visible: bool,
+    /// 隐藏后释放像素缓冲的计时（设计 §7，见 [`Self::release_idle_pixels_at`]）。
+    pixel_release: crate::window::HiddenRelease,
     x: i32,
     y: i32,
     /// 光标高度（上翻定位用）
@@ -511,6 +513,7 @@ impl CandidateWindow {
             page: 1,
             total_pages: 1,
             visible: false,
+            pixel_release: Default::default(),
             x: 0,
             y: 0,
             caret_height: 0,
@@ -1129,6 +1132,7 @@ impl CandidateWindow {
             self.mouse.borrow_mut().reset_hover();
         }
         self.visible = true;
+        self.pixel_release.shown();
     }
 
     /// 设置"翻页栏并入编码栏行"。来自 ui.candidate.pager_in_preedit。
@@ -4154,6 +4158,9 @@ impl CandidateWindow {
 
     pub fn hide(&mut self) {
         self.window.hide();
+        if self.visible {
+            self.pixel_release.hidden(Instant::now());
+        }
         self.visible = false;
         self.last_content_pos = None; // 组合结束，下次显示重新落位
         self.placed_above = false; // 清除上方粘滞，下次组合按下方默认重新判定
@@ -4188,6 +4195,9 @@ impl CandidateWindow {
     /// 压制（见 [`TipHold`]）。
     pub fn tick(&mut self) {
         let now = Instant::now();
+        if self.release_idle_pixels_at(now) {
+            tracing::debug!("UI: 候选窗隐藏已久，释放像素缓冲");
+        }
         // 悬停宽限：光标已进入气泡就撤掉待发的悬停变化，到期未进则照发（见 [`hover_move`]）。
         if self.mouse.borrow().deferred.is_some() {
             let on_tip = self.tooltip.as_ref().is_some_and(|t| t.cursor_on_tip_now());
@@ -4212,6 +4222,20 @@ impl CandidateWindow {
         }
     }
 
+    /// 隐藏满 [`crate::window::HIDDEN_RELEASE_AFTER`] 就释放像素缓冲与（Windows）离屏表面，
+    /// 返回是否真的放了。两者都按历史最大尺寸驻留（推断：出厂主题 1x 横排约 0.3 MB、1.5x 竖排
+    /// 约 1 MB 的像素缓冲，离屏表面按「最大宽 × 最大高」再一份），下一次 `show` 按当时尺寸
+    /// 重建。[`Self::tick`] 每轮调，到期时刻经 [`Self::next_deadline`] 登记。
+    pub(crate) fn release_idle_pixels_at(&mut self, now: Instant) -> bool {
+        if !self.pixel_release.take_due(now) {
+            return false;
+        }
+        self.window.release_buffer();
+        #[cfg(windows)]
+        self.text_renderer.release_surface();
+        true
+    }
+
     /// 下一次需要 [`Self::tick`] 的时刻；`None` = 无待到期者。
     ///
     /// 消息循环据此安排唤醒。两个到期源：悬停激活闸门（`engage_at`，用户首次真实移动鼠标到
@@ -4223,10 +4247,15 @@ impl CandidateWindow {
             TipHold::AwaitMenu { until } => Some(until),
             _ => None,
         };
-        [m.engage_deadline(), hold, m.deferred]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            m.engage_deadline(),
+            hold,
+            m.deferred,
+            self.pixel_release.deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn is_visible(&self) -> bool {
@@ -4768,6 +4797,62 @@ impl WindowMouse for CandidateMouse {
             }
             _ => None,
         }
+    }
+}
+
+/// 设计 §7：候选窗隐藏 30 秒后释放像素缓冲（Windows 另释放 DirectWrite 离屏表面），
+/// 下次显示按当时尺寸重建、画出来逐字节一致。
+#[cfg(all(test, mock_text))]
+mod pixel_release_tests {
+    use super::*;
+    use crate::window::HIDDEN_RELEASE_AFTER;
+
+    fn shown() -> CandidateWindow {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+        let items = ["一", "二", "三"]
+            .iter()
+            .map(|t| CandidateItem {
+                text: t.to_string(),
+                code: String::new(),
+                label: String::new(),
+                tooltip: Default::default(),
+                comment: Default::default(),
+                comment_above: Default::default(),
+                no_index: false,
+            })
+            .collect();
+        w.update("abc", 3, "", items, 0, -1, 1, 1);
+        w.show();
+        assert!(!w.window.buffer().is_empty(), "前提：画出来了");
+        w
+    }
+
+    #[test]
+    fn hidden_window_releases_pixels_and_redraws_identically() {
+        let mut w = shown();
+        let before = w.window.buffer().to_vec();
+        let size = w.window.size();
+        let t0 = Instant::now();
+        w.hide();
+        assert!(w.next_deadline().is_some(), "隐藏后要求在到期时刻唤醒");
+        assert!(!w.release_idle_pixels_at(t0 + HIDDEN_RELEASE_AFTER - Duration::from_secs(1)));
+        assert!(!w.window.buffer().is_empty(), "未到期不放");
+        assert!(w.release_idle_pixels_at(Instant::now() + HIDDEN_RELEASE_AFTER));
+        assert!(w.window.buffer().is_empty(), "到期释放像素缓冲");
+        assert_eq!(w.next_deadline(), None, "放过之后不再要求唤醒");
+        w.show();
+        assert_eq!(w.window.size(), size);
+        assert_eq!(w.window.buffer(), &before[..], "按需重建，画出来一致");
+    }
+
+    #[test]
+    fn shown_again_within_window_keeps_pixels() {
+        let mut w = shown();
+        w.hide();
+        w.show();
+        assert!(!w.release_idle_pixels_at(Instant::now() + HIDDEN_RELEASE_AFTER * 2));
+        assert!(!w.window.buffer().is_empty(), "期间又显示过 ⇒ 不放");
     }
 }
 

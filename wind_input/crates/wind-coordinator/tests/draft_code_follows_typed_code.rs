@@ -19,6 +19,7 @@ use std::sync::Arc;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
+use wind_coordinator::web_host::WebDataHost;
 use wind_ipc::protocol::EVENT_KEY_DOWN;
 use wind_store::Store;
 
@@ -191,5 +192,52 @@ fn host_typed_key_between_commits_breaks_the_draft_stream() {
     assert!(
         !broken.iter().any(|t| t == "二六"),
         "中间夹了宿主出的字，「二六」不该登记：{broken:?}"
+    );
+}
+
+/// 内存设计 S5 后半审查 MEDIUM：单字全码表被闲置清扫释放之后，用户回来打的第一批草稿
+/// 不能整批丢——落库线程本就在后台，反查索引就绪时就地把全码表建回来（新鲜 `.wscc` 只是读盘）。
+#[test]
+fn first_draft_batch_after_idle_release_is_not_dropped() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 schema");
+        return;
+    }
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
+    cfg.schema.active = "wubi86".into();
+    cfg.input.default.chinese_mode = true;
+    cfg.schema.codetable.auto_phrase.enabled = true;
+
+    let db = std::env::temp_dir().join(format!(
+        "wind_draft_after_idle_release_{}.redb",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db);
+    let store = Arc::new(Store::open(&db).unwrap());
+    let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), Arc::clone(&store));
+    coord.prewarm_indexes();
+    let em = coord.engine_mgr();
+    assert!(
+        em.single_char_codes_ready("wubi86"),
+        "前提：预热建好了全码表"
+    );
+    // 闲置清扫（毫秒参数）把全码表放掉；反查索引是当前方案的，不随之释放。
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    coord.debug_idle_sweep(std::time::Duration::from_millis(40));
+    assert!(!em.single_char_codes_ready("wubi86"), "前提：全码表已释放");
+    assert!(
+        em.reverse_index_if_ready("wubi86").is_some(),
+        "前提：反查索引仍就绪"
+    );
+
+    type_and_pick(&coord, "gkgy", "彧");
+    type_and_pick(&coord, "xnn", "幻");
+
+    let found = wait_draft(&store, "gkxn");
+    let _ = std::fs::remove_file(&db);
+    assert!(
+        found.iter().any(|t| t == "彧幻"),
+        "释放全码表后的第一批草稿应照常落库：gkxn -> {found:?}"
     );
 }

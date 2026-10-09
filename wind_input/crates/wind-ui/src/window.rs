@@ -433,6 +433,14 @@ mod platform {
             self.buffer.fill(0);
         }
 
+        /// 释放像素缓冲（窗口隐藏够久时，见 [`super::HiddenRelease`]）。尺寸一并归零：之后
+        /// 必须先 [`Self::resize`] 再画——候选窗每次显示本就如此，缓冲按当时尺寸重新分配。
+        pub fn release_buffer(&mut self) {
+            self.buffer = Vec::new();
+            self.width = 0;
+            self.height = 0;
+        }
+
         pub fn size(&self) -> (u32, u32) {
             (self.width, self.height)
         }
@@ -575,6 +583,14 @@ mod platform {
             self.buffer.fill(0);
         }
 
+        /// 释放像素缓冲（窗口隐藏够久时，见 [`super::HiddenRelease`]）。尺寸一并归零：之后
+        /// 必须先 [`Self::resize`] 再画——候选窗每次显示本就如此，缓冲按当时尺寸重新分配。
+        pub fn release_buffer(&mut self) {
+            self.buffer = Vec::new();
+            self.width = 0;
+            self.height = 0;
+        }
+
         pub fn size(&self) -> (u32, u32) {
             (self.width, self.height)
         }
@@ -590,6 +606,88 @@ mod platform {
 }
 
 pub use platform::LayeredWindow;
+
+/// 窗口隐藏多久后把像素缓冲 / 离屏表面还回去（设计 `docs/design/memory-footprint.md` §7）。
+///
+/// 与绘制缓存（[`crate::image_cache::IDLE_EVICT_AFTER`]）同一个 30 秒：比一次连续输入的间隙
+/// 长得多（重建代价才回来），又短到停手片刻内存就还回去。不进配置（R1）。
+pub(crate) const HIDDEN_RELEASE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 「隐藏满 [`HIDDEN_RELEASE_AFTER`] 就释放」的计时（纯逻辑，平台无关）。
+///
+/// 分层窗口的像素缓冲（`LayeredWindow::resize` 只增不缩）与 DirectWrite 离屏表面
+/// （`ensure_surface` 只增不缩）都按**历史最大尺寸**驻留；窗口隐藏后它们没有用处，下一次显示
+/// 本来就先按当时尺寸 `resize` 再整帧重画，故可以整块释放、到时按需重建。
+#[derive(Debug, Default)]
+pub(crate) struct HiddenRelease {
+    /// 由「可见」转为隐藏的时刻；None = 可见中、或已释放过（不再计时）。
+    since: Option<std::time::Instant>,
+}
+
+impl HiddenRelease {
+    /// 窗口显示：撤销计时。
+    pub(crate) fn shown(&mut self) {
+        self.since = None;
+    }
+
+    /// 窗口由可见转为隐藏：开始计时（已在计时则沿用最早那次）。
+    pub(crate) fn hidden(&mut self, now: std::time::Instant) {
+        self.since.get_or_insert(now);
+    }
+
+    /// 到期时刻；None = 无需唤醒（UI 消息循环据此登记 `next_deadline`）。
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        self.since.map(|t| t + HIDDEN_RELEASE_AFTER)
+    }
+
+    /// 到期了就返回 true 并停止计时（每次隐藏只释放一次）。
+    pub(crate) fn take_due(&mut self, now: std::time::Instant) -> bool {
+        match self.deadline() {
+            Some(d) if now >= d => {
+                self.since = None;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod hidden_release_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn fires_once_after_hidden_long_enough() {
+        let t0 = Instant::now();
+        let mut r = HiddenRelease::default();
+        assert_eq!(r.deadline(), None, "可见中不计时");
+        r.hidden(t0);
+        assert_eq!(r.deadline(), Some(t0 + HIDDEN_RELEASE_AFTER));
+        assert!(!r.take_due(t0 + HIDDEN_RELEASE_AFTER - Duration::from_millis(1)));
+        assert!(r.take_due(t0 + HIDDEN_RELEASE_AFTER), "到点就放（含边界）");
+        assert!(!r.take_due(t0 + HIDDEN_RELEASE_AFTER * 3), "只放一次");
+        assert_eq!(r.deadline(), None, "放过之后不再要求唤醒");
+    }
+
+    #[test]
+    fn showing_again_cancels_and_repeated_hide_keeps_first_time() {
+        let t0 = Instant::now();
+        let mut r = HiddenRelease::default();
+        r.hidden(t0);
+        r.hidden(t0 + Duration::from_secs(20));
+        assert_eq!(
+            r.deadline(),
+            Some(t0 + HIDDEN_RELEASE_AFTER),
+            "重复隐藏沿用最早那次"
+        );
+        r.shown();
+        assert!(
+            !r.take_due(t0 + HIDDEN_RELEASE_AFTER * 2),
+            "期间又显示过 ⇒ 不放"
+        );
+    }
+}
 
 // 非 Windows mock 的冒烟测试：仅验证 mock 的缓冲区契约（尺寸/resize/clear）。
 // 边界：真实 Layered Window 行为（UpdateLayeredWindow 透明渲染、show/hide 定位、

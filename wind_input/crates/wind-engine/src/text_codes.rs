@@ -272,6 +272,9 @@ struct Slot {
     index: Option<Arc<UserTextIndex>>,
     building: bool,
     last_used: u64,
+    /// 最后使用时的淘汰时钟读数（`EngineManager` 的 `use_clock`，毫秒、粗粒度），供闲置清扫
+    /// （[`evict_idle`]）。与 `last_used`（槽满时挑谁让位的先后序）是两回事。
+    used_at: u64,
 }
 
 #[derive(Default)]
@@ -284,6 +287,9 @@ pub(crate) struct UserTextSlots {
 }
 
 pub(crate) type SharedSlots = Arc<Mutex<UserTextSlots>>;
+
+/// 后台重建写回之后的回调（见 `EngineManager::set_user_text_built_hook`）。
+pub type BuiltHook = Arc<dyn Fn() + Send + Sync>;
 
 impl UserTextSlots {
     /// 为 `key` 腾位：新方案进来且已满时，淘汰最久未用、且不在重建中的一份。
@@ -305,24 +311,28 @@ impl UserTextSlots {
         }
     }
 
-    fn touch(&mut self, key: &str) -> &mut Slot {
+    fn touch(&mut self, key: &str, now: u64) -> &mut Slot {
         self.make_room_for(key);
         self.tick += 1;
         let tick = self.tick;
         let slot = self.map.entry(key.to_string()).or_default();
         slot.last_used = tick;
+        slot.used_at = now;
         slot
     }
 }
 
 /// 取可用索引（可能略旧）；缺失或过期时起一次后台重建（已有在建则不重复起）。
+/// `now` 是淘汰时钟读数（记为该槽的最后使用）；`on_built` 在后台重建写回之后（出锁）调。
 pub(crate) fn get_or_refresh(
     slots: &SharedSlots,
     store: &Arc<wind_store::Store>,
     data_schema: &str,
+    now: u64,
+    on_built: Option<BuiltHook>,
 ) -> Option<Arc<UserTextIndex>> {
     let mut g = slots.lock().unwrap_or_else(|e| e.into_inner());
-    let slot = g.touch(data_schema);
+    let slot = g.touch(data_schema, now);
     let current = slot.index.clone();
     let stale = current.as_ref().is_none_or(|i| i.is_stale(store));
     if stale && !slot.building {
@@ -332,10 +342,16 @@ pub(crate) fn get_or_refresh(
         let spawned = std::thread::Builder::new()
             .name("user-text-index".into())
             .spawn(move || {
-                // 建表中途 panic 也要复位 `building`，否则单飞标记卡死、此后永不重建。
-                let _reset = BuildingGuard(slots2.clone(), key.clone(), epoch);
-                let idx = Arc::new(UserTextIndex::build(&store2, &key));
-                install(&slots2, &key, epoch, idx);
+                let installed = {
+                    // 建表中途 panic 也要复位 `building`，否则单飞标记卡死、此后永不重建。
+                    let _reset = BuildingGuard(slots2.clone(), key.clone(), epoch);
+                    let idx = Arc::new(UserTextIndex::build(&store2, &key));
+                    install(&slots2, &key, epoch, idx)
+                };
+                // 单飞标记已复位后再通知：回调方重刷候选时会再查本层，得看到「已建好、不在建」。
+                if installed && let Some(f) = on_built {
+                    f();
+                }
             });
         if let Err(e) = spawned {
             tracing::warn!("按词查编码用户层：起重建线程失败: {e}");
@@ -347,14 +363,19 @@ pub(crate) fn get_or_refresh(
     current
 }
 
-/// 后台重建的结果写回槽。发起后被 [`clear`] 过（代次不符）就丢弃。
-fn install(slots: &SharedSlots, key: &str, epoch: u64, idx: Arc<UserTextIndex>) {
+/// 后台重建的结果写回槽，返回是否写进去了。发起后被 [`clear`] 过（代次不符）或槽已被
+/// 闲置清扫摘掉就丢弃。
+fn install(slots: &SharedSlots, key: &str, epoch: u64, idx: Arc<UserTextIndex>) -> bool {
     let mut g = slots.lock().unwrap_or_else(|e| e.into_inner());
     if g.epoch != epoch {
-        return;
+        return false;
     }
-    if let Some(s) = g.map.get_mut(key) {
-        s.index = Some(idx);
+    match g.map.get_mut(key) {
+        Some(s) => {
+            s.index = Some(idx);
+            true
+        }
+        None => false,
     }
 }
 
@@ -371,6 +392,41 @@ impl Drop for BuildingGuard {
             s.building = false;
         }
     }
+}
+
+/// 闲置清扫（`docs/design/memory-footprint.md` §7）：丢掉 `now - used_at >= idle_ms` 的槽，
+/// 返回其数据方案 id。在建的槽不动——删了它重建线程白跑，单飞标记也跟着丢。
+///
+/// 摘下的槽出锁再析构：一份可达数 MB（19 万词 7 MB），在锁里释放会挡住按键线程上的查询。
+pub(crate) fn evict_idle(slots: &SharedSlots, now: u64, idle_ms: u64) -> Vec<String> {
+    let dropped: Vec<(String, Slot)> = {
+        let mut g = slots.lock().unwrap_or_else(|e| e.into_inner());
+        let stale: Vec<String> = g
+            .map
+            .iter()
+            .filter(|(_, s)| !s.building && now.saturating_sub(s.used_at) >= idle_ms)
+            .map(|(k, _)| k.clone())
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|k| g.map.remove(&k).map(|s| (k, s)))
+            .collect()
+    };
+    dropped.into_iter().map(|(k, _)| k).collect()
+}
+
+/// 丢掉一个槽（方案引擎被淘汰时，S4 审查 L7）。在建的同样不动，理由同 [`evict_idle`]。
+/// 摘下的槽同样出锁再析构。
+pub(crate) fn remove(slots: &SharedSlots, data_schema: &str) -> bool {
+    let dropped = {
+        let mut g = slots.lock().unwrap_or_else(|e| e.into_inner());
+        if g.map.get(data_schema).is_some_and(|s| !s.building) {
+            g.map.remove(data_schema)
+        } else {
+            None
+        }
+    };
+    dropped.is_some()
 }
 
 /// 丢掉全部槽（含在建的：其重建线程写回时找不到槽即作罢）。
@@ -410,10 +466,15 @@ pub(crate) fn loaded(slots: &SharedSlots) -> usize {
 }
 
 /// 阻塞地建好并放进槽（预热 / 测试用）。已是最新则不重建，返回是否真的建了。
-pub(crate) fn prewarm(slots: &SharedSlots, store: &wind_store::Store, data_schema: &str) -> bool {
+pub(crate) fn prewarm(
+    slots: &SharedSlots,
+    store: &wind_store::Store,
+    data_schema: &str,
+    now: u64,
+) -> bool {
     {
         let mut g = slots.lock().unwrap_or_else(|e| e.into_inner());
-        if g.touch(data_schema)
+        if g.touch(data_schema, now)
             .index
             .as_ref()
             .is_some_and(|i| !i.is_stale(store))
@@ -425,7 +486,7 @@ pub(crate) fn prewarm(slots: &SharedSlots, store: &wind_store::Store, data_schem
     slots
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .touch(data_schema)
+        .touch(data_schema, now)
         .index = Some(idx);
     true
 }
@@ -445,10 +506,10 @@ mod tests {
     fn clear_fences_off_in_flight_rebuild() {
         let slots: SharedSlots = Default::default();
         let old_epoch = slots.lock().unwrap().epoch;
-        slots.lock().unwrap().touch("wb").building = true;
+        slots.lock().unwrap().touch("wb", 0).building = true;
         clear(&slots);
         // 清空后新一轮重建已起。
-        slots.lock().unwrap().touch("wb").building = true;
+        slots.lock().unwrap().touch("wb", 0).building = true;
         let idx = Arc::new(UserTextIndex::from_rows("wb", (0, 0), rows(&[("工", "a")])));
         install(&slots, "wb", old_epoch, idx);
         drop(BuildingGuard(slots.clone(), "wb".into(), old_epoch));
@@ -499,14 +560,14 @@ mod tests {
         s.add_user_word("wb", "zzzz", "嗨", 0, 0).unwrap();
         s.add_user_word("pinyin", "hai", "嗨", 0, 0).unwrap();
         let slots = SharedSlots::default();
-        assert!(prewarm(&slots, &s, "wb"));
-        let idx = get_or_refresh(&slots, &s, "wb").expect("预热后就绪");
+        assert!(prewarm(&slots, &s, "wb", 0));
+        let idx = get_or_refresh(&slots, &s, "wb", 0, None).expect("预热后就绪");
         assert_eq!(
             idx.codes_of("嗨").collect::<Vec<_>>(),
             vec!["zzzz"],
             "不串方案"
         );
-        assert!(!prewarm(&slots, &s, "wb"), "已是最新则不重建");
+        assert!(!prewarm(&slots, &s, "wb", 0), "已是最新则不重建");
     }
 
     /// ★ 别的方案写入不让本方案过期（依赖 store 的按方案代次）。
@@ -514,11 +575,14 @@ mod tests {
     fn other_schema_write_keeps_index_fresh() {
         let s = tmp_store("fresh");
         let slots = SharedSlots::default();
-        prewarm(&slots, &s, "wb");
+        prewarm(&slots, &s, "wb", 0);
         s.add_user_word("pinyin", "nihao", "你好", 0, 0).unwrap();
-        assert!(!prewarm(&slots, &s, "wb"), "拼音写入后五笔的索引仍是最新");
+        assert!(
+            !prewarm(&slots, &s, "wb", 0),
+            "拼音写入后五笔的索引仍是最新"
+        );
         s.add_user_word("wb", "wqvb", "你好", 0, 0).unwrap();
-        assert!(prewarm(&slots, &s, "wb"), "本方案写入后必须重建");
+        assert!(prewarm(&slots, &s, "wb", 0), "本方案写入后必须重建");
     }
 
     #[test]
@@ -526,7 +590,7 @@ mod tests {
         let s = tmp_store("cold");
         let slots = SharedSlots::default();
         // 冷启动：本次拿不到（后台去建），调用方按「这一层没就绪」处理。
-        assert!(get_or_refresh(&slots, &s, "wb").is_none());
+        assert!(get_or_refresh(&slots, &s, "wb", 0, None).is_none());
     }
 
     /// 轮询到「该槽有索引且不在重建中」为止（上限 5 秒），返回那份索引。
@@ -568,17 +632,17 @@ mod tests {
         s.add_user_word("wb", "zzzz", "嗨", 0, 0).unwrap();
         let slots = SharedSlots::default();
         assert!(
-            get_or_refresh(&slots, &s, "wb").is_none(),
+            get_or_refresh(&slots, &s, "wb", 0, None).is_none(),
             "冷启动本次拿不到"
         );
         let built = wait_built(&slots, "wb");
         assert_eq!(built.codes_of("嗨").collect::<Vec<_>>(), vec!["zzzz"]);
-        let got = get_or_refresh(&slots, &s, "wb").expect("建好后下一次调用拿得到");
+        let got = get_or_refresh(&slots, &s, "wb", 0, None).expect("建好后下一次调用拿得到");
         assert!(Arc::ptr_eq(&got, &built));
         assert!(!building(&slots, "wb"), "已是最新，不再起重建");
 
         s.add_user_word("wb", "aaaa", "嗨", 0, 0).unwrap();
-        let stale = get_or_refresh(&slots, &s, "wb").expect("过期时照返回旧表");
+        let stale = get_or_refresh(&slots, &s, "wb", 0, None).expect("过期时照返回旧表");
         assert_eq!(
             stale.codes_of("嗨").collect::<Vec<_>>(),
             vec!["zzzz"],
@@ -591,7 +655,7 @@ mod tests {
             fresh.codes_of("嗨").collect::<Vec<_>>(),
             vec!["aaaa", "zzzz"]
         );
-        let again = get_or_refresh(&slots, &s, "wb").unwrap();
+        let again = get_or_refresh(&slots, &s, "wb", 0, None).unwrap();
         assert!(Arc::ptr_eq(&again, &fresh), "下一次调用拿到新表");
         assert!(!building(&slots, "wb"));
     }
@@ -632,7 +696,7 @@ mod tests {
         s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
         s.add_user_word("wb", "zzzz", "嗨", 0, 0).unwrap();
         let slots = SharedSlots::default();
-        assert!(prewarm(&slots, &s, "wb"));
+        assert!(prewarm(&slots, &s, "wb", 0));
         std::thread::sleep(SCAN_IDLE * 4);
         assert_eq!(s.page_cache_drops(), 0);
     }
@@ -646,12 +710,12 @@ mod tests {
         s.add_user_word("wb", "zzzz", "嗨", 0, 0).unwrap();
         s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
         let slots = SharedSlots::default();
-        assert!(prewarm(&slots, &s, "wb"));
+        assert!(prewarm(&slots, &s, "wb", 0));
         assert_eq!(s.page_cache_drops(), 0, "预热建完不立即回收");
         assert!(wait_drops(&s, 1), "空闲满短档后回收");
 
         s.add_user_word("wb", "aaaa", "嗨", 0, 0).unwrap();
-        get_or_refresh(&slots, &s, "wb");
+        get_or_refresh(&slots, &s, "wb", 0, None);
         let fresh = wait_built(&slots, "wb");
         assert_eq!(
             fresh.codes_of("嗨").collect::<Vec<_>>(),
@@ -675,7 +739,7 @@ mod tests {
             // 「打字」：间隔远小于短档地查库；每轮造一个新词，令索引过期、后台重建。
             s.add_user_word("wb", &format!("y{i}"), &format!("新{i}"), 0, 0)
                 .unwrap();
-            get_or_refresh(&slots, &s, "wb");
+            get_or_refresh(&slots, &s, "wb", 0, None);
             let t0 = std::time::Instant::now();
             while t0.elapsed() < SCAN_IDLE / 2 {
                 let _ = s.search_user_words_prefix("wb", "x1", 5).unwrap();
@@ -696,12 +760,27 @@ mod tests {
         assert_eq!(s.page_cache_drops(), 1, "只回收一次");
     }
 
+    /// 闲置清扫只放「闲够久且不在重建中」的槽：在建的删了，重建线程白跑、单飞标记也丢。
+    #[test]
+    fn evict_idle_spares_building_and_recently_used_slots() {
+        let slots = SharedSlots::default();
+        {
+            let mut g = slots.lock().unwrap();
+            g.touch("old", 0);
+            g.touch("busy", 0).building = true;
+            g.touch("recent", 900);
+        }
+        assert_eq!(evict_idle(&slots, 1000, 500), vec!["old".to_string()]);
+        let g = slots.lock().unwrap();
+        assert!(g.map.contains_key("busy") && g.map.contains_key("recent"));
+    }
+
     #[test]
     fn slots_are_capped() {
         let s = tmp_store("cap");
         let slots = SharedSlots::default();
         for id in ["a", "b", "c", "d", "e", "f"] {
-            prewarm(&slots, &s, id);
+            prewarm(&slots, &s, id, 0);
         }
         assert!(slots.lock().unwrap().map.len() <= MAX_SLOTS);
     }

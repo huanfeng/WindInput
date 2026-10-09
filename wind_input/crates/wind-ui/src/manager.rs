@@ -242,9 +242,10 @@ impl UiManager {
                 }
                 toast_hide_at = None;
             }
-            // 背景图缓存闲置回收：不打字时把那几 MB 还回去（见 image_cache 的 IDLE_EVICT_AFTER）。
-            if crate::view::image_cache_evict_if_idle(std::time::Instant::now()) {
-                debug!("UI: 背景图缓存闲置回收");
+            // 绘制缓存（背景图 + 阴影蒙版）闲置回收：不打字时把那几 MB 还回去
+            // （见 image_cache 的 IDLE_EVICT_AFTER）。
+            if crate::view::paint_cache_evict_if_idle(std::time::Instant::now()) {
+                debug!("UI: 绘制缓存闲置回收");
             }
             // 工具栏显隐迟滞推进。无待定项时 is_active()=false 直接跳过（不取时间）。
             if toolbar_gate.is_active() {
@@ -1188,8 +1189,8 @@ impl UiManager {
                     popup_menu.as_ref().and_then(|m| m.next_deadline(now)),
                     // 软键盘键帽的长按重复
                     soft_keyboard.as_ref().and_then(|k| k.next_deadline()),
-                    // 背景图缓存的闲置回收
-                    crate::view::image_cache_next_deadline(),
+                    // 绘制缓存（背景图 + 阴影蒙版）的闲置回收
+                    crate::view::paint_cache_next_deadline(),
                 ]
                 .into_iter()
                 .flatten()
@@ -1487,7 +1488,7 @@ mod wakeup_registration_tests {
             "toolbar_gate.deadline()",
             "tip_debounce.deadline()",
             "candidate_window.next_deadline()",
-            "image_cache_next_deadline()",
+            "paint_cache_next_deadline()",
         ] {
             assert!(
                 list.contains(source),

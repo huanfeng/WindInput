@@ -24,6 +24,8 @@
 //! WIND_REPRO_STOP_AFTER=3            # 「一阶段一进程」：跑到第 N 阶段就停（缺省全跑）
 //! WIND_REPRO_LONG_IDLE=65            # 末阶段真等这么多秒（缺省直接调 debug_reclaim_now 模拟）
 //! WIND_REPRO_PREBUILD_PINYIN=1       # 打字前先单独建 `${pinyin}` 的读音索引（S2 后多一拍）
+//! WIND_REPRO_SYNTH_CT=190000         # 构造前往用户库 wubi86 灌这么多条合成码表用户词
+//! WIND_REPRO_IDLE_SWEEP=1            # 末尾多一拍：闲置清扫（阈值 0，设计 §7）后的读数
 //! cargo test -p wind-coordinator --release --test typing_memory_repro -- --ignored --nocapture --test-threads=1
 //! ```
 //!
@@ -51,6 +53,22 @@
 //!   1 KB、整段打字重建 1 次。
 //! - 其余约 4 MB（各配置都有）是 redb 读缓存（回收后落）与打字碎片。
 //! - 60 秒长档回收实际要停手约 60–70 秒才触发（闲置慢拍 10 秒 + 60 个 1 秒拍）。
+//!
+//! # 闲置清扫（S5 后半，2026-10-09，本机合成库）
+//!
+//! 空用户目录（出厂配置）+ 变体 `ct_auto_phrase,keep_all`（码表自动造词开、方案全常驻，
+//! 清扫只放懒建缓存），`WIND_REPRO_SYNTH_CT=190000`，400 次上屏，各 3 次一致：
+//!
+//! | 阶段 | live | blocks | RssAnon（trim 后） |
+//! |---|---|---|---|
+//! | S5 长档回收后 | 12.8 MB | 43708 | 14.3–15.9 MB |
+//! | S6 闲置清扫后 | 4.7 MB | 22467 | 12.7–14.3 MB |
+//!
+//! −8.1 MB live = `UserTextIndex wubi86` 7.0 MB（19 万合成码表用户词）+ 单字全码表 1.0 MB
+//! （2.1 万字、2.1 万块）。不灌合成词时只剩单字全码表：live 5.8 → 4.7 MB、RssAnon −1.6 MB。
+//! RssAnon 降得比 live 少：glibc 把这些块留在线程 arena 里，`malloc_trim` 也只还一部分
+//! （Windows 堆会还大块，见设计 §1）。同一份 19 万码表用户词，`UserTextIndex` 首建扫表持库锁
+//! 96–169 ms、总 228–431 ms；随机打字 400 次上屏期间不再重建（代次只在该方案新增词 / 权重变化时推进）。
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
@@ -234,6 +252,8 @@ fn apply_variant(cfg: &mut Config, variant: &str) {
             "no_tip_chaizi" => off_section(cfg, "${chaizi}"),
             "no_tip_debug" => off_section(cfg, "${debug}"),
             "no_learn" => cfg.schema.pinyin.auto_learn.enabled = false,
+            "ct_auto_phrase" => cfg.schema.codetable.auto_phrase.enabled = true,
+            "keep_all" => cfg.schema.keep_all_loaded = true,
             other => panic!("未知变体 {other}"),
         }
     }
@@ -380,6 +400,12 @@ fn typing_memory_repro() {
     );
 
     let root = setup_root(&repro);
+    if let Some(n) = std::env::var("WIND_REPRO_SYNTH_CT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        synth_codetable_words(&root.join("userdata/userdata.redb"), n);
+    }
     let mut cfg = Config::load(Some(&data)).expect("加载配置");
     apply_variant(&mut cfg, &variant);
     // headless 没有 caret 事件：首显闸门改「立即」，否则首帧被挂起、注释与悬停不渲染。
@@ -464,4 +490,39 @@ fn typing_memory_repro() {
         c.debug_reclaim_now();
     }
     report(5, "长档回收后", Some(&c));
+
+    if std::env::var_os("WIND_REPRO_IDLE_SWEEP").is_some() {
+        let evicted = c.debug_idle_sweep(Duration::ZERO);
+        println!("@@ 闲置清扫（阈值 0）摘方案 {evicted:?}");
+        report(6, "闲置清扫后", Some(&c));
+    }
+}
+
+/// 往用户库的 `wubi86` 灌 `n` 条合成用户词（2–4 字、4 码，固定种子），模拟「码表用户词多」的库。
+fn synth_codetable_words(db: &Path, n: usize) {
+    const HAN: &str = "的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年动同工也能下过子说产种面而方后多定行学法所民得经十三之进着等部度家电力里如水化高自二理起小物现实加量都两体制机当使点从业本去把性好应开它合还因由其些然前外天政四日那社义事平形相全表间样与关各重新线内数正心反你明看原又么利比或但质气第向道命此变条只没结解问意建月公无系军很情者最立代想已通并提直题党程展五果料象员革位入常文总次品式活设及管特件长求老头基资边流路级少图山统接知较将组见计别她手角期根论运农指几九区强放决西被干做必战先回则任取据处理府研";
+    let han: Vec<char> = HAN.chars().collect();
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    let letters = b"abcdefghijklmnopqrstuvwxy";
+    let rows: Vec<wind_store::wdict::WordIo> = (0..n)
+        .map(|_| {
+            let len = 2 + (rng.next() % 3) as usize;
+            let text: String = (0..len)
+                .map(|_| han[(rng.next() % han.len() as u64) as usize])
+                .collect();
+            let code: String = (0..4)
+                .map(|_| letters[(rng.next() % 25) as usize] as char)
+                .collect();
+            wind_store::wdict::WordIo {
+                code,
+                text,
+                weight: 0,
+                count: 0,
+                boundary: None,
+            }
+        })
+        .collect();
+    let store = wind_store::Store::open(db).expect("打开用户库");
+    let r = store.import_user_words("wubi86", &rows).expect("灌合成词");
+    println!("@@ 合成码表用户词 {n} 条：{r:?}");
 }

@@ -9,6 +9,11 @@
 //! 「用过」的记录打在引擎侧取引擎的公共入口（`EngineManager::ensure_loaded`），本模块只管
 //! 何时预热、何时清扫。30 分钟与 1 分钟不进配置（R1：「多久算不常用」程序能定）。
 //!
+//! 同一个清扫拍子还负责懒建缓存的闲置释放（设计 §7：单字全码表、按词查编码用户层），
+//! 那部分不看常驻开关（[`EngineManager::evict_idle_caches`]）。
+//!
+//! [`EngineManager::evict_idle_caches`]: wind_engine::EngineManager::evict_idle_caches
+//!
 //! [`EngineManager::residency_protected`]: wind_engine::EngineManager::residency_protected
 //! [`EngineManager::refresh_schema_cache`]: wind_engine::EngineManager::refresh_schema_cache
 //! [`EngineManager::evict_idle`]: wind_engine::EngineManager::evict_idle
@@ -19,9 +24,9 @@ use tracing::{debug, info};
 
 use crate::coordinator::Coordinator;
 
-/// 方案引擎多久没用算闲置（`keep_all_loaded = false` 时摘除）。
+/// 方案引擎（`keep_all_loaded = false` 时）与懒建缓存（恒生效，设计 §7）多久没用算闲置。
 #[cfg(feature = "desktop-ui")]
-pub(crate) const SCHEMA_IDLE_EVICT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const IDLE_EVICT: Duration = Duration::from_secs(30 * 60);
 /// 闲置清扫的拍长。
 #[cfg(feature = "desktop-ui")]
 pub(crate) const IDLE_SWEEP_TICK: Duration = Duration::from_secs(60);
@@ -115,14 +120,21 @@ impl Coordinator {
         );
     }
 
-    /// 清扫拍子的主体：常驻开着时什么都不做；关着时摘掉闲置 `idle` 以上的方案引擎，
-    /// 摘到了就整理一次堆（引擎外壳的释放只是回到分配器手里）。返回被摘的方案 id。
+    /// 清扫拍子的主体：
+    ///
+    /// - 懒建缓存（单字全码表、按词查编码用户层，设计 §7）闲置 `idle` 以上就释放——**恒生效**，
+    ///   与常驻策略无关（[`wind_engine::EngineManager::evict_idle_caches`]）；
+    /// - 常驻关着时再摘掉闲置 `idle` 以上的方案引擎。
+    ///
+    /// 放掉了东西就整理一次堆（释放只是回到分配器手里）。返回被摘的方案 id。
     pub(crate) fn idle_sweep(&self, idle: Duration) -> Vec<String> {
-        if self.rt().config.schema.keep_all_loaded {
-            return Vec::new();
-        }
-        let evicted = self.engine_mgr.evict_idle(idle);
-        if !evicted.is_empty() {
+        let released = self.engine_mgr.evict_idle_caches(idle);
+        let evicted = if self.rt().config.schema.keep_all_loaded {
+            Vec::new()
+        } else {
+            self.engine_mgr.evict_idle(idle)
+        };
+        if !evicted.is_empty() || !released.is_empty() {
             crate::heap_trim::release_free_heap();
         }
         evicted
@@ -147,7 +159,7 @@ impl Coordinator {
                     let Some(c) = weak.upgrade() else {
                         break;
                     };
-                    c.idle_sweep(SCHEMA_IDLE_EVICT);
+                    c.idle_sweep(IDLE_EVICT);
                 }
             });
         if let Err(e) = spawned {

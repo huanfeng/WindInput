@@ -1151,6 +1151,12 @@ mod imp {
             }
         }
 
+        /// 释放离屏表面（窗口隐藏够久时，设计 §7）；下一次绘制经 [`Self::ensure_surface`]
+        /// 按当时尺寸重建。
+        pub fn release_surface(&self) {
+            *self.surface.borrow_mut() = None;
+        }
+
         /// 确保位图渲染表面至少为给定尺寸（只增长不重建：翻页时窗口宽度抖动，
         /// 复用最大表面可避免每帧重建 COM 渲染目标）。DIB 实际可比窗口大，
         /// draw_text 用窗口尺寸裁剪、用 DIBSECTION 的真实 stride 索引，故安全。
