@@ -17,6 +17,11 @@ pub struct Schema {
     pub engine: EngineSpec,
     #[serde(default)]
     pub dictionaries: Vec<DictSpec>,
+    /// 扩展词库的**发现目录**（`[[dictionary_dirs]]`）：目录里的词库文件在读方案时自动登记为
+    /// 扩展库（出厂关，由用户在「方案设置 → 扩展词库」里开），不必改方案文件。
+    /// 注入发生在 `EngineManager::read_schema`，见 docs/design/schema-dict-discovery.md。
+    #[serde(default)]
+    pub dictionary_dirs: Vec<DictDirSpec>,
     /// **方案级词库权重归一化**（`[weight_spec]`）。`None` = 不归一化（默认）。
     ///
     /// ## 为什么是方案级而不是按词库
@@ -624,6 +629,17 @@ pub struct DictSpec {
     /// 主库合并、按权重排序时让其条目落在设计者选定的权重档，而非 weight=0 全部沉底。默认 None=用自身权重。
     #[serde(default)]
     pub default_weight: Option<i32>,
+}
+
+/// 扩展词库发现目录（[[dictionary_dirs]]）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DictDirSpec {
+    /// 相对 `schemas/` 的目录，各资源层合并扫描（用户目录遮蔽安装目录的同名文件）
+    #[serde(default)]
+    pub path: String,
+    /// 目录里词库的类型，同 [`DictSpec::dict_type`]
+    #[serde(rename = "type", default)]
+    pub dict_type: String,
 }
 
 /// 方案级词库权重归一化（`[weight_spec]`）。语义与取舍见 [`Schema::weight_spec`]。

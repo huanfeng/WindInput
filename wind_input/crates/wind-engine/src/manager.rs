@@ -791,6 +791,9 @@ fn dir_has_yaml(dir: &Path) -> bool {
 /// [`EngineManager::read_dict_head`] 只读这么多字节的头 —— 超出即认定正文早已开始。
 const DICT_HEAD_SCAN_LIMIT: usize = 64 * 1024;
 
+/// rime 词库文件后缀（发现目录只认这一种）。
+const DICT_YAML_SUFFIX: &str = ".dict.yaml";
+
 /// 把 `sibling` 接到 `rel` 所在目录下：`pinyin/rime_frost.dict.yaml` +
 /// `cn_dicts/corrections.dict.yaml` → `pinyin/cn_dicts/corrections.dict.yaml`。
 ///
@@ -5809,6 +5812,13 @@ impl EngineManager {
                 return None;
             }
         };
+        // 发现目录里的词库登记为扩展库。必须在合并 override **之前**：override 的词库项只按 id
+        // 匹配方案里已有的库（`merge_dict_overrides`），晚注入的库用户翻的开关永远对不上号。
+        Self::inject_dir_dicts(
+            &mut base,
+            &|sub| Config::list_schema_resource_dir(Some(data_dir), sub, DICT_YAML_SUFFIX),
+            &|rel| Self::read_dict_head(&Self::resolve_dict_file(rel, &data_dir.join("schemas"))),
+        );
         // 合并 override 层（存在才读；不存在则零影响）。
         if let Some(ov) = override_dir.and_then(|d| Self::read_override_value(schema_id, d)) {
             merge_toml(&mut base, ov);
@@ -6905,6 +6915,104 @@ impl EngineManager {
             }
         }
         out
+    }
+
+    /// 把 `[[dictionary_dirs]]` 目录里的词库登记成扩展库，追加到 `base` 的 `dictionaries` 末尾。
+    ///
+    /// 生成项：`id = "dir:<相对路径去掉 .dict.yaml>"`（带前缀，不与方案手写的 id 撞；按完整
+    /// 路径而非文件名，两个目录里的同名文件不会合成一项），`label` 取词库头的 `name:`、空则
+    /// 文件名，出厂关（不写 `default_enabled`），码表的 `base_order` 排在已声明的库之后。
+    ///
+    /// 跳过两类文件：
+    /// - 方案已手写声明的（同 path）——手写的有 label / base_order 等设计，优先；
+    /// - 已被某个已声明词库的 `import_tables` 引用的——它本就是那张主表的一部分，再登记一次
+    ///   就是同一批词加载两遍。用户拿上游完整的 `rime_frost.dict.yaml` 覆盖主表时正是这样。
+    ///
+    /// `list_dir(sub)` 返回 `(相对 schemas/ 的路径, 绝对路径)`（生产用分层扫描），
+    /// `head(rel)` 读该词库头部 → `(name, import_tables)`。两者都作为参数传入，单测不碰真实用户目录。
+    fn inject_dir_dicts(
+        base: &mut toml::Value,
+        list_dir: &dyn Fn(&str) -> Vec<(String, std::path::PathBuf)>,
+        head: &dyn Fn(&str) -> (String, Vec<String>),
+    ) {
+        let Some(table) = base.as_table_mut() else {
+            return;
+        };
+        let dirs: Vec<(String, String)> = table
+            .get("dictionary_dirs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| {
+                        let path = d.get("path")?.as_str()?.trim_matches('/').to_string();
+                        let ty = d.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        (!path.is_empty()).then(|| (path, ty.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if dirs.is_empty() {
+            return;
+        }
+        let dicts = table
+            .entry("dictionaries")
+            .or_insert_with(|| toml::Value::Array(Vec::new()));
+        let Some(arr) = dicts.as_array_mut() else {
+            return;
+        };
+
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut next_order: i64 = 0;
+        for d in arr.iter() {
+            next_order = next_order.max(
+                d.get("base_order")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(0)
+                    + 1,
+            );
+            let Some(rel) = d.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            taken.insert(rel.to_string());
+            // import_tables 子表相对主表所在目录（同 `rime_source_paths`）
+            let parent = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+            for imp in head(rel).1 {
+                let sub = format!("{imp}{DICT_YAML_SUFFIX}");
+                taken.insert(if parent.is_empty() {
+                    sub
+                } else {
+                    format!("{parent}/{sub}")
+                });
+            }
+        }
+
+        for (dir, ty) in dirs {
+            for (rel, _abs) in list_dir(&dir) {
+                if !taken.insert(rel.clone()) {
+                    continue;
+                }
+                let stem = rel.strip_suffix(DICT_YAML_SUFFIX).unwrap_or(&rel);
+                let file = stem.rsplit_once('/').map(|(_, f)| f).unwrap_or(stem);
+                let name = head(&rel).0;
+                let mut t = toml::map::Map::new();
+                t.insert("id".into(), format!("dir:{stem}").into());
+                t.insert(
+                    "label".into(),
+                    if name.is_empty() {
+                        file.to_string()
+                    } else {
+                        name
+                    }
+                    .into(),
+                );
+                t.insert("description".into(), format!("自动识别：{rel}").into());
+                t.insert("path".into(), rel.clone().into());
+                t.insert("type".into(), ty.clone().into());
+                t.insert("base_order".into(), next_order.into());
+                next_order += 1;
+                arr.push(toml::Value::Table(t));
+            }
+        }
     }
 
     /// 读一个 `.dict.yaml` 的 YAML 头 → `(name, import_tables)`。
@@ -8876,6 +8984,198 @@ mod tests {
                 .any(|d| d.get("id").and_then(|v| v.as_str()) == Some("gone")),
             "方案已删除的库不因 override 复活"
         );
+    }
+
+    /// 发现目录注入的夹具：`files` 是目录里的文件（相对 schemas/），`heads` 是各词库头部。
+    fn inject_with(base_src: &str, files: &[&str], heads: &[(&str, &str, &[&str])]) -> toml::Value {
+        let mut base: toml::Value = toml::from_str(base_src).unwrap();
+        let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+        let heads: Vec<(String, String, Vec<String>)> = heads
+            .iter()
+            .map(|(r, n, i)| {
+                (
+                    r.to_string(),
+                    n.to_string(),
+                    i.iter().map(|x| x.to_string()).collect(),
+                )
+            })
+            .collect();
+        EngineManager::inject_dir_dicts(
+            &mut base,
+            &|sub| {
+                files
+                    .iter()
+                    .filter(|f| f.starts_with(&format!("{sub}/")))
+                    .map(|f| (f.clone(), std::path::PathBuf::from(f)))
+                    .collect()
+            },
+            &|rel| {
+                heads
+                    .iter()
+                    .find(|(r, _, _)| r == rel)
+                    .map(|(_, n, i)| (n.clone(), i.clone()))
+                    .unwrap_or_default()
+            },
+        );
+        base
+    }
+
+    fn dict_ids(base: &toml::Value) -> Vec<String> {
+        base.get("dictionaries")
+            .and_then(|d| d.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| d.get("id")?.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    const PINYIN_WITH_DIR: &str = "[[dictionaries]]\nid = \"main\"\npath = \"pinyin/rime_frost.dict.yaml\"\n\
+        type = \"rime_pinyin\"\ndefault = true\n\
+        [[dictionary_dirs]]\npath = \"pinyin/cn_dicts_cell\"\ntype = \"rime_pinyin\"\n";
+
+    /// 目录里的词库登记成**出厂关**的扩展库，id 带前缀、label 取词库头 name（空则文件名）。
+    #[test]
+    fn dir_dicts_are_injected_disabled_with_name_or_file_label() {
+        let base = inject_with(
+            PINYIN_WITH_DIR,
+            &[
+                "pinyin/cn_dicts_cell/idiom.dict.yaml",
+                "pinyin/cn_dicts_cell/food.dict.yaml",
+            ],
+            &[("pinyin/cn_dicts_cell/idiom.dict.yaml", "成语", &[])],
+        );
+        assert_eq!(
+            dict_ids(&base),
+            [
+                "main",
+                "dir:pinyin/cn_dicts_cell/idiom",
+                "dir:pinyin/cn_dicts_cell/food"
+            ]
+        );
+        let schema: Schema = base.try_into().unwrap();
+        let idiom = &schema.dictionaries[1];
+        assert_eq!(idiom.label, "成语");
+        assert_eq!(idiom.path, "pinyin/cn_dicts_cell/idiom.dict.yaml");
+        assert_eq!(idiom.dict_type, "rime_pinyin");
+        assert!(!idiom.default);
+        assert!(!idiom.is_enabled(), "出厂关：开不开由用户在扩展词库里决定");
+        assert_eq!(
+            schema.dictionaries[2].label, "food",
+            "词库头没写 name 时退回文件名"
+        );
+    }
+
+    /// 两类不登记：方案已手写声明的同一文件；已被已声明词库的 import_tables 引用的文件
+    /// （用户拿上游完整 rime_frost 主表覆盖时，它们就是主表的一部分，再登记就加载两遍）。
+    #[test]
+    fn dir_dicts_skip_declared_and_imported_files() {
+        let src = format!(
+            "{PINYIN_WITH_DIR}[[dictionaries]]\nid = \"hand\"\npath = \"pinyin/cn_dicts_cell/hand.dict.yaml\"\n\
+             type = \"rime_pinyin\"\nlabel = \"手写的\"\nbase_order = 5\n"
+        );
+        let base = inject_with(
+            &src,
+            &[
+                "pinyin/cn_dicts_cell/hand.dict.yaml",
+                "pinyin/cn_dicts_cell/idiom.dict.yaml",
+                "pinyin/cn_dicts_cell/place.dict.yaml",
+            ],
+            &[(
+                "pinyin/rime_frost.dict.yaml",
+                "rime_frost",
+                &["cn_dicts/base", "cn_dicts_cell/idiom"],
+            )],
+        );
+        assert_eq!(
+            dict_ids(&base),
+            ["main", "hand", "dir:pinyin/cn_dicts_cell/place"],
+            "hand 已手写、idiom 已被主表 import，只有 place 是新的"
+        );
+        let place = &base.get("dictionaries").unwrap().as_array().unwrap()[2];
+        assert_eq!(
+            place.get("base_order").unwrap().as_integer(),
+            Some(6),
+            "排在已声明的库之后（码表按 base_order 分层）"
+        );
+    }
+
+    /// 用户在扩展词库里翻的开关（override 的 `{id, enabled}`）必须对得上注入的库——
+    /// 这正是注入要排在 merge_toml 之前的原因。
+    #[test]
+    fn dir_dict_toggle_from_override_applies_after_injection() {
+        let mut base = inject_with(
+            PINYIN_WITH_DIR,
+            &["pinyin/cn_dicts_cell/idiom.dict.yaml"],
+            &[],
+        );
+        let over: toml::Value = toml::from_str(
+            "[[dictionaries]]\nid = \"dir:pinyin/cn_dicts_cell/idiom\"\nenabled = true\n",
+        )
+        .unwrap();
+        merge_toml(&mut base, over);
+        let schema: Schema = base.try_into().unwrap();
+        assert!(schema.dictionaries[1].is_enabled());
+    }
+
+    /// 没声明发现目录 ⇒ 原样不动；声明了但方案没有 `[[dictionaries]]` ⇒ 照样能登记。
+    #[test]
+    fn dir_dicts_noop_without_dirs_and_work_without_declared_dicts() {
+        let plain = "[[dictionaries]]\nid = \"main\"\npath = \"a.dict.yaml\"\ndefault = true\n";
+        let before: toml::Value = toml::from_str(plain).unwrap();
+        assert_eq!(inject_with(plain, &["x/a.dict.yaml"], &[]), before);
+
+        let only_dir = "[[dictionary_dirs]]\npath = \"wubi86/ext/\"\ntype = \"rime_codetable\"\n";
+        let base = inject_with(only_dir, &["wubi86/ext/a.dict.yaml"], &[]);
+        assert_eq!(
+            dict_ids(&base),
+            ["dir:wubi86/ext/a"],
+            "path 的首尾斜杠不影响扫描"
+        );
+    }
+
+    /// 端到端：真实 `read_schema` 走分层扫描 + 读词库头 + 合并 override。
+    /// 目录名取一个用户目录里不可能有的，免得本机真实的用户层混进来。
+    #[test]
+    fn read_schema_registers_dir_dicts_and_applies_override() {
+        let root = std::env::temp_dir().join(format!("wind-dirdicts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        let schemas = data.join("schemas");
+        let cells = schemas.join("zz_dirdicts_probe/cells");
+        std::fs::create_dir_all(&cells).unwrap();
+        std::fs::write(
+            schemas.join("zzprobe.schema.toml"),
+            "[schema]\nid = \"zzprobe\"\nname = \"探针\"\n\
+             [[dictionaries]]\nid = \"main\"\npath = \"zz_dirdicts_probe/main.dict.yaml\"\ndefault = true\n\
+             [[dictionary_dirs]]\npath = \"zz_dirdicts_probe/cells\"\ntype = \"rime_codetable\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zz_dirdicts_probe/main.dict.yaml"),
+            "---\nname: main\nimport_tables:\n  - cells/inmain  # 已被主表引用\n...\n",
+        )
+        .unwrap();
+        std::fs::write(cells.join("inmain.dict.yaml"), "---\nname: inmain\n...\n").unwrap();
+        std::fs::write(cells.join("extra.dict.yaml"), "---\nname: \"额外\"\n...\n").unwrap();
+        std::fs::write(cells.join("notes.txt"), "不是词库").unwrap();
+        let ov = root.join("ov");
+        std::fs::create_dir_all(&ov).unwrap();
+        std::fs::write(
+            ov.join("zzprobe.toml"),
+            "[[dictionaries]]\nid = \"dir:zz_dirdicts_probe/cells/extra\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let schema = EngineManager::read_schema("zzprobe", Some(&data), Some(&ov)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        let ids: Vec<&str> = schema.dictionaries.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["main", "dir:zz_dirdicts_probe/cells/extra"]);
+        let extra = &schema.dictionaries[1];
+        assert_eq!(extra.label, "额外");
+        assert!(extra.is_enabled(), "override 的开关落到注入的库上");
     }
 
     /// base 侧没有 dictionaries 时，override 的稀疏项无 path、造不出可用词库，应整键忽略。
