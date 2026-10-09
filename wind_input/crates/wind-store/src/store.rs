@@ -36,6 +36,33 @@ pub const CURRENT_VERSION: u32 = 1;
 /// 首版取 32 MiB 只测了读就下了结论，导入因此慢 4.6 倍——**只测一半的结论等于没测**。
 pub const DEFAULT_CACHE_SIZE_BYTES: usize = 256 * 1024 * 1024;
 
+/// 空闲回收长档：连续这么久没有任何读写就丢页缓存（兜所有填缓存的路径）。
+///
+/// 这三个时长**不做成配置键**（`docs/architecture/config-design-rules.md` §R1：差异可由
+/// 程序判定就别加用户键）；`spawn_idle_cache_reclaimer*` 把它们做成参数只为测试能用毫秒跑。
+pub const RECLAIM_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// 空闲回收短档：有全表扫描待回收时，空闲这么久就丢（见 [`Store::mark_scan_pending`]）。
+///
+/// 设置页翻页、打字中自动造词触发的索引重建，间隔都远小于它，故连续操作期间不回收；停手满它
+/// 才还回去。持续打字时长档永远等不到，这一档就是为此而设。
+pub const SCAN_RECLAIM_IDLE: std::time::Duration = std::time::Duration::from_secs(3);
+/// 回收线程的采样拍长。短档只有 3 秒，拍长须远小于它。只在有东西待回收时按它醒；
+/// 闲置时按它的 [`IDLE_TICK_FACTOR`] 倍睡（生产 10 秒），来了标记就被叫醒。
+pub const RECLAIM_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+/// 闲置慢拍 = `tick` × 本值。
+const IDLE_TICK_FACTOR: u32 = 10;
+/// [`Store::mark_scan_pending_rows`] 的门槛：后台扫描走过的行数不到它就不标记。
+///
+/// 回收要关库重开，关库那一下要刷盘（本机 zfs 实测约 6 ms，几乎全在关旧库上）。小库（拼音词
+/// 约 170 B/条，1 万条 ≈ 1.7 MB 页）扫进缓存的那点页不值得每次停手都来这一下，照旧交给长档；
+/// 大库（S3 的对象，19 万条 ≈ 41 MB）远在门槛之上。
+///
+/// 两处调用方的行数口径不同：`UserTextIndex` 只数该方案的**用户词**，`UserAssocIndex` 数
+/// **用户词 + 临时词**（它两张表都扫）。差异可以接受：门槛量的是「这次扫描往缓存里填了多少页」，
+/// 各自数的正是各自扫过的行；临时词表默认上限 5000 条，两种口径在门槛附近最多差半个门槛，
+/// 只影响离门槛很近的那一小段库是标记还是交给长档，两种结果都正确。
+pub const SCAN_RECLAIM_MIN_ROWS: usize = 10_000;
+
 /// 按统一配置打开 redb（`open` 与 `resume` 共用，避免两处默认值漂移）。
 fn open_db(path: &Path, cache_bytes: usize) -> Result<Database, redb::DatabaseError> {
     Database::builder().set_cache_size(cache_bytes).create(path)
@@ -115,6 +142,17 @@ pub(crate) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta
 
 const META_VERSION_KEY: &str = "schema_version";
 
+/// [`Store::drop_page_cache_inner`] 的结果。
+#[derive(Debug, PartialEq, Eq)]
+enum Dropped {
+    /// 丢了一次。
+    Yes,
+    /// 暂停态，没有缓存可丢。
+    Paused,
+    /// 拿到锁时发现刚有人用过库，作罢（只在回收线程的「判空闲」那条路上出现）。
+    Busy,
+}
+
 /// 存储引擎（redb）。`db` 为 None 表示已暂停（pause，释放文件锁供热替换）。
 pub struct Store {
     path: PathBuf,
@@ -131,6 +169,11 @@ pub struct Store {
     /// 累计丢弃页缓存的次数。供测试断言与诊断——「缓存到底有没有被回收」在外部
     /// 不可观测（RSS 不降，见 `tests/redb_cache_high_water.rs`），只能由内部报数。
     drops: std::sync::atomic::AtomicU64,
+    /// 有一次全表扫描待回收（[`Self::mark_scan_pending`] 置位，回收时清除）。
+    scan_pending: std::sync::atomic::AtomicBool,
+    /// 叫醒闲置（慢拍）中的回收线程：`bool` = 有标记待它看。[`Self::mark_scan_pending`] 置位并
+    /// 通知。单独一个 `Arc`：回收线程只持 `Weak<Store>`，睡着时不能拖住 `Store` 不让释放。
+    reclaim_wake: std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>,
     /// 用户词 / 临时词两表的**结构代次**：增删词、改权重（排序键）的事务 commit 后 +1，
     /// `resume`（备份还原换了整个文件）也 +1。只增不减、进程内有效。
     ///
@@ -181,6 +224,8 @@ impl Store {
             cache_bytes,
             touched: std::sync::atomic::AtomicBool::new(false),
             drops: std::sync::atomic::AtomicU64::new(0),
+            scan_pending: std::sync::atomic::AtomicBool::new(false),
+            reclaim_wake: Default::default(),
             words_gen: std::sync::atomic::AtomicU64::new(0),
             words_count_gen: std::sync::atomic::AtomicU64::new(0),
             words_gen_by_schema: Default::default(),
@@ -258,13 +303,20 @@ impl Store {
     ) -> anyhow::Result<R> {
         // 空闲回收的唯一信号源。放在这里而不是各个读写函数里：`with_db` 是**所有**
         // 读写的唯一入口（AGENTS.md 的硬约定），漏不掉。
+        //
+        // 进出各置一次：空闲要从操作**结束**时算起。只在入口置位的话，一次很长的 `with_db`
+        // （单事务导入、冷扫描）跑着的时候回收线程就在攒静默拍数，它一结束就被立刻关库重开
+        // ——还会与批量写之后的立即回收撞成两次。
         self.touched
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
+        let r = match guard.as_ref() {
             Some(db) => f(db),
             None => anyhow::bail!("store is paused"),
-        }
+        };
+        self.touched
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        r
     }
 
     /// 用户词 / 临时词两表的结构代次，见字段 `words_gen`。
@@ -441,9 +493,9 @@ impl Store {
     /// ⚠️ **重开失败时自救一次**：`*guard = None` 已经执行，库已经丢了，此时若直接返回
     /// `Err` 就把 store 永久钉在暂停态——之后每一次 `with_db` 都 bail「store is paused」，
     /// 用户词 / 临时词 / 词频 / shadow 全线失效直到重启，而 [`Self::resume`] 在生产代码里
-    /// **一处调用都没有**（全仓只出现在测试里）。失败是真会发生的：重开要 open 加一次
-    /// `init_tables` 写事务 commit，而这个函数恰好被安排在「刚写完几十 MB 库文件」之后，
-    /// Windows 上杀软短暂持有 `.redb` 正是本仓当初做 pause/resume 的理由。
+    /// **一处调用都没有**（全仓只出现在测试里）。失败是真会发生的：重开要重新打开文件，
+    /// 而这个函数恰好被安排在「刚写完几十 MB 库文件」之后，Windows 上杀软短暂持有 `.redb`
+    /// 正是本仓当初做 pause/resume 的理由。
     ///
     /// 所以这里重试一次；再失败才返回 `Err`，并且**那时 store 确实是暂停态**，调用方必须
     /// 当成故障处理（`error!` 而非 `warn!`），不能当成「只是内存没回落」。
@@ -452,35 +504,59 @@ impl Store {
     /// 都会把它们留在 free list 里，RSS / Private Bytes 未必立刻下降。释放的意义是这笔
     /// 空间不再增长、且可被后续分配复用——`tests/redb_cache_high_water.rs` 的
     /// `evict` / `hold` 两组正是为了把这件事和「RSS 降不降」分开而写的。
-    pub fn drop_page_cache(&self) -> anyhow::Result<()> {
+    ///
+    /// 返回 `Ok(true)` = 真丢了一次（计入 [`Self::page_cache_drops`]，含重试成功的那次）；
+    /// `Ok(false)` = 本就是暂停态，没有缓存可丢——调用方不该当成一次回收（不记日志、不整理堆）。
+    pub fn drop_page_cache(&self) -> anyhow::Result<bool> {
+        Ok(self.drop_page_cache_inner(false)? == Dropped::Yes)
+    }
+
+    /// `if_idle`：回收线程用。拿到 `db` 锁之后若发现 `touched` 已被置位就作罢（[`Dropped::Busy`]）
+    /// ——它是在锁外判定「空闲够久」的，判定之后可能正撞上一次长 `with_db`（单事务导入、冷扫描）：
+    /// 那次操作持锁期间回收线程在锁上等，操作一结束就会被关库重开。`with_db` 在放锁**之前**
+    /// 再置一次 `touched`，所以这里一定看得到。
+    fn drop_page_cache_inner(&self, if_idle: bool) -> anyhow::Result<Dropped> {
         let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if if_idle && self.touched.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(Dropped::Busy);
+        }
+        // 不论哪条路触发、丢没丢成，扫描留下的待回收标记都作废：丢了自不必说；暂停态
+        // 根本没有缓存，留着它只会让回收线程一直按快拍空转。
+        self.scan_pending
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if guard.is_none() {
-            return Ok(()); // 已经是暂停态，没有缓存可丢；由 `resume` 负责开回来。
+            return Ok(Dropped::Paused); // 已经是暂停态，没有缓存可丢；由 `resume` 负责开回来。
         }
         *guard = None;
         // 丢了就必须开回来。第一次失败重试一次——最常见的原因（杀软/索引器短暂持有刚写完
         // 的 .redb）是瞬时的。两次都不行才认栽，那时 store 停在暂停态，由调用方按故障处理。
-        let mut last = match Self::reopen(&self.path, self.cache_bytes) {
+        //
+        // 重开**不跑 `init_tables`**（`resume` 仍跑）：这是本进程刚关掉的同一个文件，表在
+        // `open` 时已建好，期间没有任何东西替换它；而 `resume` 面对的可能是备份还原换进来的
+        // 另一个文件，要补表。省掉的是一次写事务提交（锁内多持的那一下）。
+        let mut last = match open_db(&self.path, self.cache_bytes) {
             Ok(db) => {
                 *guard = Some(db);
                 self.drops
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 debug!("Store page cache dropped: {}", self.path.display());
-                return Ok(());
+                return Ok(Dropped::Yes);
             }
-            Err(e) => e,
+            Err(e) => anyhow::Error::from(e),
         };
         for _ in 0..1 {
-            match Self::reopen(&self.path, self.cache_bytes) {
+            match open_db(&self.path, self.cache_bytes) {
                 Ok(db) => {
                     *guard = Some(db);
+                    self.drops
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     warn!(
                         "丢弃页缓存后首次重开失败（{last}），重试成功：{}",
                         self.path.display()
                     );
-                    return Ok(());
+                    return Ok(Dropped::Yes);
                 }
-                Err(e) => last = e,
+                Err(e) => last = e.into(),
             }
         }
         Err(last.context(format!(
@@ -488,13 +564,6 @@ impl Store {
              此后所有读写都会报 store is paused，需调 resume() 或重启服务",
             self.path.display()
         )))
-    }
-
-    /// 开库 + 建表，[`Self::resume`] 与 [`Self::drop_page_cache`] 共用。
-    fn reopen(path: &Path, cache_bytes: usize) -> anyhow::Result<Database> {
-        let db = open_db(path, cache_bytes)?;
-        Self::init_tables(&db)?;
-        Ok(db)
     }
 
     /// 累计丢弃页缓存的次数。诊断与测试用。
@@ -516,10 +585,19 @@ impl Store {
     /// 要自己维护计数器，写路径一多就会漏。与其在每条路上堵，不如在**空闲时统一回收**：
     /// 这条覆盖所有填缓存的路径，包括将来新加的。
     ///
-    /// # 判据
+    /// # 判据（两档，都要求上次回收之后访问过：`pending`）
     ///
-    /// 连续 `idle` 没有任何 `with_db`，且这期间之前确实访问过（`pending`），才丢一次。
-    /// 不设 `pending` 的话，一个没人用的输入法会每分钟白白重开一次数据库。
+    /// - **长档**：连续 `idle` 没有任何 `with_db` 就丢一次——兜所有填缓存的路径。
+    /// - **短档**：有人调过 [`Self::mark_scan_pending`]（设置页列表、建索引这类全表扫描
+    ///   刚做完），连续 `scan_idle` 没有 `with_db` 就丢一次并清标志。设置页连续翻页、打字中
+    ///   自动造词反复触发索引重建时都在不停访问库，等不满短档，故不逐次回收；停手之后很快
+    ///   还回去，不必等长档（持续打字时长档永远等不到）。
+    ///
+    /// 回收**只在这条线程上**发生（批量写之后的 `drop_page_cache` 除外）：扫描线程只置标志，
+    /// 从不当场关库重开，按键线程不会因建索引而等那一下。
+    ///
+    /// 不设 `pending` 的话，一个没人用的输入法会每分钟白白重开一次数据库。空闲按 `tick`
+    /// 采样，实际判定比给定时长至多晚一拍；生产取值见 [`RECLAIM_IDLE`] 等三个常量。
     ///
     /// 丢缓存本身要重开 `Database`（毫秒级）并让随后头几次查询走冷缓存，所以判据必须是
     /// 「真的没人在用」——那时这点代价没人感知得到。冷缓存也不等于慢：redb 2.x 未命中走
@@ -532,9 +610,10 @@ impl Store {
     pub fn spawn_idle_cache_reclaimer(
         self: &std::sync::Arc<Self>,
         idle: std::time::Duration,
+        scan_idle: std::time::Duration,
         tick: std::time::Duration,
     ) {
-        self.spawn_idle_cache_reclaimer_then(idle, tick, || {});
+        self.spawn_idle_cache_reclaimer_then(idle, scan_idle, tick, || {});
     }
 
     /// 同 [`Self::spawn_idle_cache_reclaimer`]，每次回收后再调 `after`。
@@ -544,19 +623,43 @@ impl Store {
     pub fn spawn_idle_cache_reclaimer_then(
         self: &std::sync::Arc<Self>,
         idle: std::time::Duration,
+        scan_idle: std::time::Duration,
         tick: std::time::Duration,
         after: impl Fn() + Send + 'static,
     ) {
         let weak = std::sync::Arc::downgrade(self);
-        let ticks_to_idle = (idle.as_millis() / tick.as_millis().max(1)).max(1) as u32;
+        let wake = self.reclaim_wake.clone();
+        let ticks = |d: std::time::Duration| (d.as_millis() / tick.as_millis().max(1)).max(1);
+        let (ticks_to_idle, ticks_to_scan_idle) = (ticks(idle), ticks(scan_idle));
+        let slow_tick = tick * IDLE_TICK_FACTOR;
         let spawned = std::thread::Builder::new()
             .name("store-cache-reclaim".into())
             .spawn(move || {
-                let mut quiet = 0u32;
+                let mut quiet = 0u128;
                 let mut pending = false;
+                // 本拍是否按快拍睡：只有「有东西待回收」时才需要按 `tick` 数静默拍。
+                let mut busy = false;
                 loop {
-                    std::thread::sleep(tick);
+                    if busy {
+                        std::thread::sleep(tick);
+                    } else {
+                        // 闲置：按慢拍睡，有标记就被叫醒。这期间没在数静默拍（`pending` 为假时
+                        // 本就不数），所以拍长换算不受影响；醒来看到 `touched` 再转快拍从零数。
+                        let (lock, cv) = &*wake;
+                        let mut kicked = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        if !*kicked {
+                            kicked = cv
+                                .wait_timeout(kicked, slow_tick)
+                                .unwrap_or_else(|e| e.into_inner())
+                                .0;
+                        }
+                        *kicked = false;
+                    }
                     let Some(store) = weak.upgrade() else { return };
+                    busy = pending
+                        || store
+                            .scan_pending
+                            .load(std::sync::atomic::Ordering::Relaxed);
                     if store
                         .touched
                         .swap(false, std::sync::atomic::Ordering::Relaxed)
@@ -564,27 +667,85 @@ impl Store {
                         // 这一拍里有人用过：静默计数归零，并记下「缓存可能涨了」。
                         quiet = 0;
                         pending = true;
+                        busy = true;
                         continue;
                     }
                     quiet += 1;
-                    if pending && quiet >= ticks_to_idle {
-                        match store.drop_page_cache() {
-                            Ok(()) => debug!("空闲 {idle:?}，已回收 redb 页缓存"),
-                            // 回收失败时 `drop_page_cache` 已经自救过一次仍不成，store
-                            // 停在暂停态——那是故障，不是「内存没回落」。
-                            Err(e) => error!("空闲回收页缓存失败：{e}"),
-                        }
-                        drop(store);
-                        after();
-                        pending = false;
-                        quiet = 0;
+                    if !pending {
+                        continue;
                     }
+                    let scanned = store
+                        .scan_pending
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let due = if scanned && quiet >= ticks_to_scan_idle {
+                        scan_idle
+                    } else if quiet >= ticks_to_idle {
+                        idle
+                    } else {
+                        continue;
+                    };
+                    let dropped = match store.drop_page_cache_inner(true) {
+                        Ok(Dropped::Yes) => {
+                            debug!("空闲 {due:?}，已回收 redb 页缓存");
+                            true
+                        }
+                        // 判定之后有人用过库（多半是一次长操作刚结束）：不算空闲，下一拍
+                        // 看到 `touched` 会把静默计数归零重来。
+                        Ok(Dropped::Busy) => continue,
+                        // 暂停态：没有缓存可丢，也就没有堆可整理。
+                        Ok(Dropped::Paused) => false,
+                        // 回收失败时 `drop_page_cache` 已经自救过一次仍不成，store
+                        // 停在暂停态——那是故障，不是「内存没回落」。
+                        Err(e) => {
+                            error!("空闲回收页缓存失败：{e}");
+                            false
+                        }
+                    };
+                    drop(store);
+                    if dropped {
+                        after();
+                    }
+                    pending = false;
+                    busy = false;
+                    quiet = 0;
                 }
             });
         if let Err(e) = spawned {
             // 不致命：只是内存不会自动回落，功能一切照旧。
             warn!("空闲页缓存回收线程启动失败（{e}），内存将不会自动回落");
         }
+    }
+
+    /// **后台**全表扫描（建索引）做完之后调：走过的行数到 [`SCAN_RECLAIM_MIN_ROWS`] 才
+    /// [`Self::mark_scan_pending`]，否则什么都不做。
+    ///
+    /// 不当场回收：拼音出厂开着自动造词，打字中每学一个新词都推进用户词代次、触发一次整表
+    /// 重建；每次都关库重开的话，按键线程的 `with_db` 要陪等（≥ 7 ms，Windows 上更久），
+    /// 而且每次重建都从冷缓存起扫。改成标记之后，连续打字期间一次都不回收，停手满
+    /// [`SCAN_RECLAIM_IDLE`] 才还（`docs/design/memory-footprint.md` §6）。
+    pub fn mark_scan_pending_rows(&self, rows_scanned: usize) {
+        if rows_scanned >= SCAN_RECLAIM_MIN_ROWS {
+            self.mark_scan_pending();
+        }
+    }
+
+    /// 全表扫描（设置页列表、导出、统计；建索引走 [`Self::mark_scan_pending_rows`]）做完
+    /// 之后调：只置「有扫描待回收」，由回收线程在库空闲 [`SCAN_RECLAIM_IDLE`] 后回收一次
+    /// （见 [`Self::spawn_idle_cache_reclaimer`] 的短档）。
+    ///
+    /// 不立即回收：设置页连续翻页时每页都是一次全表扫，逐页回收等于每页都从冷缓存起扫，
+    /// 还白白重开 N 次库。不设行数门槛：请求方拿不到行数，而设置页操作稀少、回收发生在
+    /// 空闲时，小库多回收一次的代价可以忽略。没起回收线程时标志无人消费，等于什么都不做。
+    pub fn mark_scan_pending(&self) {
+        // 标记总是紧跟在一次访问之后（扫描刚做完）：也记一次访问，空闲从此刻算起，且回收后
+        // 单独一次标记也能生效。
+        self.touched
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.scan_pending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (lock, cv) = &*self.reclaim_wake;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_one();
     }
 
     /// 是否处于暂停态

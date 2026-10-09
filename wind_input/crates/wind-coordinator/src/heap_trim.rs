@@ -5,7 +5,8 @@
 //! `image_cache.rs` 的实测是 23.6 MiB 释放后不落，一次 `malloc_trim(0)` 压回 5.8 MiB。
 //!
 //! 只在**空闲时**调：整理堆要走一遍空闲链表、把页 decommit，之后的分配又要重新 commit，
-//! 放在按键路径上就是白白抖动。接线点是 redb 的空闲回收（连续 60 秒没人碰库），见 construct.rs。
+//! 放在按键路径上就是白白抖动。接线点是 redb 的空闲回收（长档连续 60 秒没人碰库；有全表扫描
+//! 待回收时短档 3 秒），见 construct.rs。
 
 /// 归还空闲堆内存。尽力而为：失败只打 debug，平台不支持时什么都不做。
 pub(crate) fn release_free_heap() {

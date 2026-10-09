@@ -148,6 +148,10 @@ impl UserTextIndex {
     }
 
     /// 全量扫该方案的用户词建表（**会扫整张用户词表**，只在后台线程 / 预热 / 测试里调）。
+    ///
+    /// 扫完标记「有扫描待回收」（[`wind_store::Store::mark_scan_pending_rows`]，小库不到门槛
+    /// 不标记）：库空闲 3 秒后由 store 的回收线程丢 redb 读缓存并整理堆。不当场回收——自动造词
+    /// 让打字中反复重建，当场关库重开会让按键线程陪等、每次重建都从冷缓存起扫。
     pub fn build(store: &wind_store::Store, data_schema: &str) -> Self {
         let generation = store.words_generation_of(data_schema);
         let mut rows = Vec::new();
@@ -157,7 +161,10 @@ impl UserTextIndex {
         }) {
             tracing::warn!("按词查编码用户层：读 store 失败 schema={data_schema}: {e}");
         }
-        Self::from_rows(data_schema, generation, rows)
+        let scanned = rows.len();
+        let idx = Self::from_rows(data_schema, generation, rows);
+        store.mark_scan_pending_rows(scanned);
+        idx
     }
 
     fn text_of(&self, e: &Entry) -> &str {
@@ -493,6 +500,106 @@ mod tests {
         let again = get_or_refresh(&slots, &s, "wb").unwrap();
         assert!(Arc::ptr_eq(&again, &fresh), "下一次调用拿到新表");
         assert!(!building(&slots, "wb"));
+    }
+
+    /// 刚好到标记门槛的一份用户词（小库扫完不标记，见 `SCAN_RECLAIM_MIN_ROWS`）。
+    fn big_dict() -> Vec<wind_store::wdict::WordIo> {
+        (0..wind_store::store::SCAN_RECLAIM_MIN_ROWS)
+            .map(|i| wind_store::wdict::WordIo {
+                code: format!("x{i}"),
+                text: format!("词{i}"),
+                weight: 0,
+                count: 0,
+                boundary: None,
+            })
+            .collect()
+    }
+
+    const TICK: std::time::Duration = std::time::Duration::from_millis(20);
+    const SCAN_IDLE: std::time::Duration = std::time::Duration::from_millis(150);
+    const NEVER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// 轮询到 `drops >= n`（上限 5 秒）。
+    fn wait_drops(s: &wind_store::Store, n: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if s.page_cache_drops() >= n {
+                return true;
+            }
+            std::thread::sleep(TICK / 2);
+        }
+        false
+    }
+
+    /// 小库：建完不标记，短档过后也不回收（门槛之下，留给空闲回收的长档）。
+    #[test]
+    fn small_build_keeps_the_page_cache() {
+        let s = tmp_store("small");
+        s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
+        s.add_user_word("wb", "zzzz", "嗨", 0, 0).unwrap();
+        let slots = SharedSlots::default();
+        assert!(prewarm(&slots, &s, "wb"));
+        std::thread::sleep(SCAN_IDLE * 4);
+        assert_eq!(s.page_cache_drops(), 0);
+    }
+
+    /// ★ 建表是一次全表扫：预热（阻塞）与后台重建两条路建完都**只标记**，库空闲满短档后
+    /// 才回收一次（`docs/design/memory-footprint.md` §6）——建完当场关库重开会让按键线程等。
+    #[test]
+    fn every_build_marks_and_reclaims_after_short_idle() {
+        let s = tmp_store("reclaim");
+        s.import_user_words("wb", &big_dict()).unwrap();
+        s.add_user_word("wb", "zzzz", "嗨", 0, 0).unwrap();
+        s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
+        let slots = SharedSlots::default();
+        assert!(prewarm(&slots, &s, "wb"));
+        assert_eq!(s.page_cache_drops(), 0, "预热建完不立即回收");
+        assert!(wait_drops(&s, 1), "空闲满短档后回收");
+
+        s.add_user_word("wb", "aaaa", "嗨", 0, 0).unwrap();
+        get_or_refresh(&slots, &s, "wb");
+        let fresh = wait_built(&slots, "wb");
+        assert_eq!(
+            fresh.codes_of("嗨").collect::<Vec<_>>(),
+            vec!["aaaa", "zzzz"]
+        );
+        assert!(wait_drops(&s, 2), "后台重建之后同样在空闲满短档后回收");
+        std::thread::sleep(SCAN_IDLE * 3);
+        assert_eq!(s.page_cache_drops(), 2, "每次扫描只回收一次");
+    }
+
+    /// ★ 模拟打字（自动造词）：持续访问库、其间不断写新词触发后台重建——一次都不回收；
+    /// 停手满短档后回收**一次**。
+    #[test]
+    fn rebuilds_while_typing_never_reclaim_until_typing_stops() {
+        let s = tmp_store("typing");
+        s.import_user_words("wb", &big_dict()).unwrap();
+        s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
+        let slots = SharedSlots::default();
+        let mut builds = 0;
+        for i in 0..8 {
+            // 「打字」：间隔远小于短档地查库；每轮造一个新词，令索引过期、后台重建。
+            s.add_user_word("wb", &format!("y{i}"), &format!("新{i}"), 0, 0)
+                .unwrap();
+            get_or_refresh(&slots, &s, "wb");
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < SCAN_IDLE / 2 {
+                let _ = s.search_user_words_prefix("wb", "x1", 5).unwrap();
+                std::thread::sleep(TICK / 4);
+            }
+            if wait_built(&slots, "wb")
+                .codes_of(&format!("新{i}"))
+                .next()
+                .is_some()
+            {
+                builds += 1;
+            }
+        }
+        assert!(builds >= 4, "前提：打字期间确实重建过多次（{builds}）");
+        assert_eq!(s.page_cache_drops(), 0, "持续打字期间不该回收");
+        assert!(wait_drops(&s, 1), "停手满短档后回收");
+        std::thread::sleep(SCAN_IDLE * 3);
+        assert_eq!(s.page_cache_drops(), 1, "只回收一次");
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! 判据落在 `page_cache_drops()` 而不是 RSS：缓存有没有被回收在外部**不可观测**
 //! （`pause` 之后 RSS 一动不动，见 `redb_cache_high_water.rs`），只能由内部报数。
 //!
-//! 时间参数取毫秒级，跑得完；生产是 60 秒 / 10 秒一拍。
+//! 时间参数取毫秒级，跑得完；生产是 60 秒 / 1 秒一拍（短档 3 秒见 `scan_reclaim.rs`）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +40,7 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
 #[test]
 fn an_idle_store_gives_its_page_cache_back() {
     let (s, p) = store("reclaims");
-    s.spawn_idle_cache_reclaimer(IDLE, TICK);
+    s.spawn_idle_cache_reclaimer(IDLE, IDLE, TICK);
 
     s.import_user_words(
         "py",
@@ -70,7 +70,7 @@ fn an_idle_store_gives_its_page_cache_back() {
 #[test]
 fn a_busy_store_is_never_reclaimed() {
     let (s, p) = store("busy");
-    s.spawn_idle_cache_reclaimer(IDLE, TICK);
+    s.spawn_idle_cache_reclaimer(IDLE, IDLE, TICK);
 
     // 持续访问，跨度远超空闲阈值。
     let t0 = std::time::Instant::now();
@@ -93,7 +93,7 @@ fn a_busy_store_is_never_reclaimed() {
 #[test]
 fn a_never_used_store_is_not_reclaimed_on_a_timer() {
     let (s, p) = store("never");
-    s.spawn_idle_cache_reclaimer(IDLE, TICK);
+    s.spawn_idle_cache_reclaimer(IDLE, IDLE, TICK);
 
     // 开库本身会经 `with_db`（run_migrations / backfill），所以先让那一笔过去：
     // 等第一次回收发生，再看此后是否还继续空转。
@@ -120,7 +120,7 @@ fn the_after_hook_runs_once_per_reclaim() {
     let (s, p) = store("after_hook");
     let calls = Arc::new(AtomicUsize::new(0));
     let c = calls.clone();
-    s.spawn_idle_cache_reclaimer_then(IDLE, TICK, move || {
+    s.spawn_idle_cache_reclaimer_then(IDLE, IDLE, TICK, move || {
         c.fetch_add(1, Ordering::SeqCst);
     });
 

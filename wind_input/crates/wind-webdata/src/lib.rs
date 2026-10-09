@@ -285,6 +285,54 @@ fn i32_param(p: &Value, key: &str) -> i32 {
     p.get(key).and_then(|v| v.as_i64()).unwrap_or(0) as i32
 }
 
+/// 该数据 RPC 是否扫整张（某方案的）用户词 / 临时词 / 词频 / shadow 表，见 [`WebDataRpc::web_data_rpc`]。
+///
+/// 只收真正全表的：`dict.listPaged` 为给精确 `total` 三条分流都扫满；`dict.search` 是带
+/// `limit` 的前缀查询、扫到够数即停，只有 `limit = 0`（不限）时才算。短语 / 补全 / 快捷输入 /
+/// 常用字 / 字符类 / 统计这些全局小表不在内：条数有界，扫一遍填不起可观的缓存。
+fn scans_whole_table(method: &str, params: &Value) -> bool {
+    FULL_SCAN_METHODS.contains(&method)
+        || (method == "dict.search" && usize_param(params, "limit", 50) == 0)
+}
+
+/// 无条件全表扫描的 RPC（`dict.search` 有条件，单独判，见 [`scans_whole_table`]）。
+/// 方法名与分派表的对应由测试 `rpc_name_tables_match_the_dispatch_table` 锁住。
+const FULL_SCAN_METHODS: &[&str] = &[
+    "dict.listPaged",
+    "dict.export",
+    "dict.stats",
+    "temp.list",
+    "temp.listPaged",
+    "temp.promoteAll",
+    "temp.clear",
+    "freq.listPaged",
+    "shadow.list",
+    "shadow.listPaged",
+    "backup.create",
+    // 预览要逐条比对现有词（新增 / 已存在 / 冲突），整表都读一遍。
+    "dict.previewImport",
+    // 清空是逐条删（整表都走一遍）；量通常不大，按扫描标记而不立即回收。
+    "freq.clear",
+    "shadow.clear",
+];
+
+/// **全表规模的写**：成功之后立即回收页缓存（`drop_page_cache_after_bulk_write`）。
+///
+/// redb 刷盘时会把脏页直接晋升进读缓存并长期不还（本机实测 19 万词的库因此常驻 41 MB，
+/// 50 万词约 90 MB）——用户反馈「导入大词库之后内存占用变高」就是它。写是一次性的，不必等
+/// 空闲：做完就还。只在**成功**时丢：格式不符 / 引擎类型不匹配那些 early-return Err 一个字节
+/// 都没落库，没必要付关库重开这一趟；丢缓存失败也不把一次成功的写报成失败（只记日志）。
+/// 放在分发出口而不是各 handler 里：handler 内多条分支各自返回，将来多一条就会漏。
+///
+/// `schema.delete` 级联清该方案的用户词 / 临时词 / 草稿 / 词频 / 联想历史 / shadow 六张表，
+/// 动的页与 `dict.clear` 同量级。
+const BULK_WRITE_METHODS: &[&str] = &[
+    "backup.restore",
+    "dict.clear",
+    "dict.import",
+    "schema.delete",
+];
+
 fn usize_param(p: &Value, key: &str, default: usize) -> usize {
     p.get(key)
         .and_then(|v| v.as_u64())
@@ -313,6 +361,260 @@ fn today_str() -> String {
 /// 设置页数据 RPC 本体：全部方法为默认实现，只能经 [`WebDataHost`] 窄面触宿主——
 /// 默认方法看不见 Coordinator 字段，窄面约束由编译期保证。调用方
 /// `use 本 trait` 后在 Coordinator 上直接调 `web_data_rpc`。
+/// 数据类 RPC 的分派体。**模块私有**：外部只能经 [`WebDataRpc::web_data_rpc`] 进来，那里统一
+/// 做扫描标记与批量写之后的回收——绕过它就漏了。（trait 的默认方法没有私有可见性，故不放进 trait。）
+fn web_data_dispatch<H: WebDataRpc + ?Sized>(
+    h: &H,
+    method: &str,
+    params: &Value,
+) -> anyhow::Result<Value> {
+    match method {
+        // ── schema.* ─────────────────────────────────────────
+        "schema.list" => h.web_schema_list(params),
+        "schema.layouts" => h.web_schema_layouts(),
+        "schema.active" => Ok(json!({ "id": h.engine_mgr().active_schema_id() })),
+        "schema.setActive" => {
+            let id = str_param(params, "id")?;
+            let ok = h.engine_mgr().switch_schema(id);
+            if ok {
+                h.sync_chaizi_assets(); // 拆字库/字根字体随活跃方案切换
+                h.note_global_schema_set(id); // 设置页是全局意图：按应用方案的全局方案跟随
+                // 注释库不随方案变化，见 `Coordinator::sync_comment_dicts`。
+            }
+            Ok(json!({ "ok": ok }))
+        }
+        // ── 方案配置编辑（三层合并：默认 ← 方案文件 ← override 层）──
+        "schema.getConfig" => h.web_schema_get_config(params),
+        // 全局页「已被 N 个方案覆盖」的反查：全局键 → 覆盖它的方案 id 列表（R8.6）。
+        "schema.overrideSummary" => h.web_schema_override_summary(),
+        "schema.saveConfig" => h.web_schema_save_config(params),
+        "schema.auxCodeSources" => h.web_schema_aux_code_sources(params),
+        "schema.resetConfig" => h.web_schema_reset_config(params),
+        "schema.setDictEnabled" => h.web_schema_set_dict_enabled(params),
+        // 失效方案的引擎缓存（未加载时安全 no-op）：CLI `schema set/reset` 后
+        // 调用，让 override 改动在下次使用该方案时按新配置重建生效。
+        "schema.invalidate" => {
+            let id = str_param(params, "id")?;
+            h.engine_mgr().invalidate_schema(id);
+            // CLI 直接写 override 后走这里，与 saveConfig 同形（GH#144）：吃键集等跨方案
+            // 派生集合不重建，方案自定义标点 / 引导键要等重启才生效。
+            h.refresh_schema_derived_config();
+            Ok(json!({ "ok": true }))
+        }
+        // 全量强制重建词库缓存（CLI `schema rebuild`）：失效全部引擎后删缓存产物。
+        // 面向「指纹判新鲜但内容需重建」的场景（如解析器修复后存量缓存静默过期）。
+        "schema.rebuildCache" => {
+            let (removed, failed) = h.engine_mgr().rebuild_all_caches();
+            Ok(json!({ "removed": removed, "failed": failed }))
+        }
+        // 重启服务（CLI `wind_input restart`）：与托盘菜单同一条 request_restart
+        // 流程。延迟发信号——main 收到即释放单例并 exit，先让本条 RPC 响应写回
+        // 客户端，避免 CLI 读响应与进程退出竞争。
+        "system.restart" => {
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                wind_coordinator::request_restart();
+            });
+            Ok(json!({ "ok": true }))
+        }
+        // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
+        // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
+        //
+        // ⚠️ 刻意**不**在 dict.import / config.set 这类干活的方法里弹提示：那会连
+        // 设置页的按钮一起弹（设置页自己已有 UI 反馈），把"要不要提示"的决定权
+        // 从调用方手里夺走。要提示的调用方显式打这一条。
+        "ui.toast" => {
+            let text = str_param(params, "text")?;
+            let s = |k: &str| {
+                params
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let ms = params.get("ms").and_then(Value::as_u64).unwrap_or(0);
+            h.ui_toast(text, &s("kind"), &s("color"), &s("pos"), ms)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(json!({ "ok": true }))
+        }
+        "schema.delete" => h.web_schema_delete(params),
+        "schema.references" => Ok(json!({})), // 引用关系（删除安全检查）：暂返空，前端宽松消费
+        "scheme.exportPackage" => h.web_scheme_export_package(params),
+        "scheme.importPackage" => h.web_scheme_import_package(params),
+        "scheme.previewImport" => h.web_scheme_preview_import(params),
+        // 文本信封（kind = "schema_text"）：形状与上面两个 path 版完全一致，
+        // 设置端复用同一个确认对话框。
+        "scheme.previewImportText" => h.web_scheme_preview_import_text(params),
+        "scheme.importText" => h.web_scheme_import_text(params),
+
+        // ── backup.*（整机备份，wind-transfer::backup）───────
+        "backup.create" => h.web_backup_create(params),
+        "backup.inspect" => h.web_backup_inspect(params),
+        // 批量写：成功后立即回收页缓存，见 `BULK_WRITE_METHODS`。
+        "backup.restore" => h.web_backup_restore(params),
+
+        // ── dict.*（用户词库，redb 持久化）────────────────────
+        "comment.sources" => h.web_comment_sources(),
+        "dict.listPaged" => h.web_dict_list_paged(params),
+        "dict.search" => h.web_dict_search(params),
+        "dict.add" => h.web_dict_add(params),
+        "dict.update" => h.web_dict_update(params),
+        "dict.remove" => h.web_dict_remove(params),
+        // 批量写（逐条 remove，动的页与导入同量级）：见 `BULK_WRITE_METHODS`。
+        "dict.clear" => h.web_dict_clear(params),
+        "dict.stats" => h.web_dict_stats(),
+        // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
+        // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
+        // 深链带了参数就不会调它——那时用户的意图已经明确。
+        "dict.addWordContext" => {
+            let ctx = h.add_word_context();
+            Ok(json!({
+                "schemaId": ctx.schema_id,
+                "recentText": ctx.recent_text,
+                "maxLen": ctx.max_len,
+            }))
+        }
+        // 加词自动出码：按方案类型选拼音/五笔规则（reverse 反查表）。
+        "dict.encode" => h.web_dict_encode(params),
+        // 批量出码：纯词列表导入按批调用（设置端每批约 1000 词）。
+        "dict.encodeWords" => h.web_dict_encode_words(params),
+        "dict.genPinyin" => {
+            // 取码要按**真实文本**算：转义形态里的 `\` `n` 会被当成两个待取码的字符。
+            let text = str_param(params, "text")?;
+            Ok(json!(h.gen_pinyin_word(&store_text(text))))
+        }
+        "dict.export" => h.web_dict_export(params),
+        // 批量写：成功后立即回收页缓存，见 `BULK_WRITE_METHODS`。
+        "dict.import" => h.web_dict_import(params),
+        "dict.previewImport" => h.web_dict_preview_import(params),
+
+        // ── temp.*（临时词，redb）─────────────────────────────
+        "temp.list" => h.web_temp_list(params),
+        // 分页版（设置页列表走这条；`temp.list` 保留给导出等全量取用方）。
+        "temp.listPaged" => h.web_temp_list_paged(params),
+        "temp.promote" => h.web_temp_promote(params),
+        "temp.remove" => h.web_temp_remove(params),
+        "temp.promoteAll" => h.web_temp_promote_all(params),
+        "temp.clear" => h.web_temp_clear(params),
+
+        // ── freq.*（用户词频，redb 持久化）───────────────────
+        "freq.listPaged" => h.web_freq_list_paged(params),
+        "freq.delete" => h.web_freq_delete(params),
+        "freq.clear" => h.web_freq_clear(params),
+
+        // ── mailSuffix.* / urlHistory.*（补全学习数据，redb 持久化）──
+        // 两组共用一份实现，只差 `CompletionKind`：存储层本就是一张表两个分区，
+        // RPC 再各写一遍等于把「同形态」这件事在第三处重新论证一遍。
+        // 命名空间分开是给设置端用的——「清空网址历史」不该顺带抹掉邮箱学习。
+        "mailSuffix.listPaged" => h.web_completion_list_paged(CompletionKind::EmailSuffix, params),
+        "mailSuffix.delete" => h.web_completion_delete(CompletionKind::EmailSuffix, params),
+        "mailSuffix.clear" => h.web_completion_clear(CompletionKind::EmailSuffix),
+        "urlHistory.listPaged" => h.web_completion_list_paged(CompletionKind::UrlHistory, params),
+        "urlHistory.delete" => h.web_completion_delete(CompletionKind::UrlHistory, params),
+        "urlHistory.clear" => h.web_completion_clear(CompletionKind::UrlHistory),
+        // 快捷输入历史（成员 `quick_input.history`），同一张表的第三个分区。
+        "quickHistory.listPaged" => {
+            h.web_completion_list_paged(CompletionKind::QuickHistory, params)
+        }
+        "quickHistory.delete" => h.web_completion_delete(CompletionKind::QuickHistory, params),
+        "quickHistory.clear" => h.web_completion_clear(CompletionKind::QuickHistory),
+
+        // ── shadow.*（影子规则，redb 持久化）─────────────────
+        "shadow.list" => h.web_shadow_list(params),
+        // 分页版（设置页列表走这条；`shadow.list` 保留给全量取用方）。
+        "shadow.listPaged" => h.web_shadow_list_paged(params),
+        // 整表撤销。此前设置端靠「逐条 remove_rule」凑出清空，分页之后它手上
+        // 只剩当前页，那条路会静默只清一页。
+        "shadow.clear" => h.web_shadow_clear(params),
+        "shadow.pin" => h.web_shadow_pin(params),
+        "shadow.delete" => h.web_shadow_delete(params),
+        "shadow.removeRule" => h.web_shadow_remove_rule(params),
+        "shadow.addRule" => h.web_shadow_add_rule(params),
+
+        // ── phrase.*（用户短语，全局，redb 持久化）──────────
+        "phrase.list" => h.web_phrase_list(),
+        "phrase.add" => h.web_phrase_add(params),
+        "phrase.update" => h.web_phrase_update(params),
+        "phrase.remove" => h.web_phrase_remove(params),
+        "phrase.setEnabled" => h.web_phrase_set_enabled(params),
+        "phrase.resetDefault" => h.web_phrase_reset(),
+        "phrase.listSystem" => h.web_phrase_list_system(),
+        "phrase.listUser" => h.web_phrase_list_user(params),
+        "phrase.export" => h.web_phrase_export(),
+        "phrase.import" => h.web_phrase_import(params),
+        "phrase.previewImportText" => h.web_phrase_preview_import_text(params),
+        "phrase.importText" => h.web_phrase_import_text(params),
+        "phrase.resetSystem" => h.web_phrase_reset_system(),
+
+        // ── quick.*（快捷输入格式表的用户调整，全局，redb 持久化）──
+        // 基表（模板与出厂顺序）在 system.quick.toml，**RPC 一律不写它**：
+        // 那会抢走高级用户手写文件的所有权，见 handle_quick_format 模块文档。
+        "charset.list" => h.web_charset_list(),
+        "charset.set" => h.web_charset_set(params),
+        "charset.reset" => h.web_charset_reset(params),
+        "charset.clearRedundant" => h.web_charset_clear_redundant(params),
+        "charset.delete" => h.web_charset_delete(params),
+        "charset.editFile" => h.web_charset_edit_file(params),
+        "charset.exportEdit" => h.web_charset_export_edit(params),
+        "charset.importFile" => h.web_charset_import_file(params),
+        "commonChars.list" => h.web_common_chars_list(params),
+        "commonChars.query" => h.web_common_chars_query(params),
+        "commonChars.set" => h.web_common_chars_set(params),
+        "commonChars.bulkByBlock" => h.web_common_chars_bulk(params),
+        "commonChars.reset" => h.web_common_chars_reset(params),
+        "commonChars.clear" => h.web_common_chars_clear(),
+        "commonChars.export" => h.web_common_chars_export(),
+        "commonChars.previewImport" => h.web_common_chars_preview_import(params),
+        "commonChars.import" => h.web_common_chars_import(params),
+        "quick.list" => h.web_quick_list(),
+        "quick.move" => h.web_quick_move(params),
+        "quick.setEnabled" => h.web_quick_set_enabled(params),
+        "quick.resetEntry" => h.web_quick_reset_entry(params),
+        "quick.resetKind" => h.web_quick_reset_kind(params),
+        "quick.vars" => h.web_quick_vars(),
+        "quick.add" => h.web_quick_add(params),
+        "quick.setText" => h.web_quick_set_text(params),
+        "quick.delete" => h.web_quick_delete(params),
+        // ── compat.*：应用兼容规则的分层管理（逻辑全在 wind_config::compat_admin）──
+        m if m.starts_with("compat.") => h.web_compat_rpc(m, params),
+        "quick.export" => h.web_quick_export(),
+        "quick.import" => h.web_quick_import(params),
+        "quick.previewImport" => h.web_quick_preview_import(params),
+
+        // ── stats.*（输入统计，redb 每日聚合）────────────────
+        "stats.summary" => h.web_stats_summary(),
+        "stats.daily" => h.web_stats_daily(params),
+        "stats.clear" => h.web_stats_clear(),
+        "stats.pruneBefore" => h.web_stats_prune(params),
+
+        // ── appearance.*（设置页预览，text-span-colors.md §11）──
+        "appearance.previewTemplate" => h.web_appearance_preview_template(params),
+
+        // ── theme.* ──────────────────────────────────────────
+        "theme.list" => h.web_theme_list(),
+        "theme.resolved" => Ok(serde_json::to_value(h.theme_follow_values())?),
+        "theme.accent" => {
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            Ok(serde_json::to_value(h.theme_accent(name))?)
+        }
+        "theme.preview" => h.web_theme_preview(params),
+        "theme.getText" => h.web_theme_get_text(params),
+        "theme.delete" => h.web_theme_delete(params),
+        "theme.importFromText" => h.web_theme_import_text(params),
+        "theme.previewPackage" => h.web_theme_preview_package(params),
+        "theme.importPackage" => h.web_theme_import_package(params),
+        "theme.exportPackage" => h.web_theme_export_package(params),
+        "theme.importFromUrl" => {
+            anyhow::bail!("URL 导入未启用（features.theme.import_url=false）")
+        }
+
+        other => anyhow::bail!("unknown method: {}", other),
+    }
+}
+
 pub trait WebDataRpc: WebDataHost {
     /// 枚举本机字体：返回 (family, display_name)。family 为匹配/渲染用名(通常英文),
     /// display_name 优先取该字体含 CJK 字符的本地化名(如"微软雅黑"),否则同 family。
@@ -350,287 +652,24 @@ pub trait WebDataRpc: WebDataHost {
     }
 
     /// 数据类 RPC 总分派。方法名以 `<ns>.<method>` 形式分组；未知方法返回 Err。
+    ///
+    /// 会扫整张用户词 / 临时词 / 词频 / shadow 表的方法做完之后标记「有扫描待回收」：
+    /// 库空闲 3 秒后回收 redb 读缓存（`Store::mark_scan_pending`，
+    /// `docs/design/memory-footprint.md` §6）。不立即回收——设置页连续翻页时每页都扫一遍，
+    /// 逐页回收等于每页都从冷缓存起扫。放在这里而不是各个 handler 里：出口只有一个，
+    /// 各 handler 内的多条分流 / early-return 漏不掉。出错也标记：扫描可能已走了一半。
+    ///
+    /// 批量写（[`BULK_WRITE_METHODS`]）成功之后则**立即**回收，见那张表的文档。
     fn web_data_rpc(&self, method: &str, params: &Value) -> anyhow::Result<Value> {
-        match method {
-            // ── schema.* ─────────────────────────────────────────
-            "schema.list" => self.web_schema_list(params),
-            "schema.layouts" => self.web_schema_layouts(),
-            "schema.active" => Ok(json!({ "id": self.engine_mgr().active_schema_id() })),
-            "schema.setActive" => {
-                let id = str_param(params, "id")?;
-                let ok = self.engine_mgr().switch_schema(id);
-                if ok {
-                    self.sync_chaizi_assets(); // 拆字库/字根字体随活跃方案切换
-                    self.note_global_schema_set(id); // 设置页是全局意图：按应用方案的全局方案跟随
-                    // 注释库不随方案变化，见 `Coordinator::sync_comment_dicts`。
-                }
-                Ok(json!({ "ok": ok }))
-            }
-            // ── 方案配置编辑（三层合并：默认 ← 方案文件 ← override 层）──
-            "schema.getConfig" => self.web_schema_get_config(params),
-            // 全局页「已被 N 个方案覆盖」的反查：全局键 → 覆盖它的方案 id 列表（R8.6）。
-            "schema.overrideSummary" => self.web_schema_override_summary(),
-            "schema.saveConfig" => self.web_schema_save_config(params),
-            "schema.auxCodeSources" => self.web_schema_aux_code_sources(params),
-            "schema.resetConfig" => self.web_schema_reset_config(params),
-            "schema.setDictEnabled" => self.web_schema_set_dict_enabled(params),
-            // 失效方案的引擎缓存（未加载时安全 no-op）：CLI `schema set/reset` 后
-            // 调用，让 override 改动在下次使用该方案时按新配置重建生效。
-            "schema.invalidate" => {
-                let id = str_param(params, "id")?;
-                self.engine_mgr().invalidate_schema(id);
-                // CLI 直接写 override 后走这里，与 saveConfig 同形（GH#144）：吃键集等跨方案
-                // 派生集合不重建，方案自定义标点 / 引导键要等重启才生效。
-                self.refresh_schema_derived_config();
-                Ok(json!({ "ok": true }))
-            }
-            // 全量强制重建词库缓存（CLI `schema rebuild`）：失效全部引擎后删缓存产物。
-            // 面向「指纹判新鲜但内容需重建」的场景（如解析器修复后存量缓存静默过期）。
-            "schema.rebuildCache" => {
-                let (removed, failed) = self.engine_mgr().rebuild_all_caches();
-                Ok(json!({ "removed": removed, "failed": failed }))
-            }
-            // 重启服务（CLI `wind_input restart`）：与托盘菜单同一条 request_restart
-            // 流程。延迟发信号——main 收到即释放单例并 exit，先让本条 RPC 响应写回
-            // 客户端，避免 CLI 读响应与进程退出竞争。
-            "system.restart" => {
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    wind_coordinator::request_restart();
-                });
-                Ok(json!({ "ok": true }))
-            }
-            // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
-            // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
-            //
-            // ⚠️ 刻意**不**在 dict.import / config.set 这类干活的方法里弹提示：那会连
-            // 设置页的按钮一起弹（设置页自己已有 UI 反馈），把"要不要提示"的决定权
-            // 从调用方手里夺走。要提示的调用方显式打这一条。
-            "ui.toast" => {
-                let text = str_param(params, "text")?;
-                let s = |k: &str| {
-                    params
-                        .get(k)
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string()
-                };
-                let ms = params.get("ms").and_then(Value::as_u64).unwrap_or(0);
-                self.ui_toast(text, &s("kind"), &s("color"), &s("pos"), ms)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                Ok(json!({ "ok": true }))
-            }
-            "schema.delete" => self.web_schema_delete(params),
-            "schema.references" => Ok(json!({})), // 引用关系（删除安全检查）：暂返空，前端宽松消费
-            "scheme.exportPackage" => self.web_scheme_export_package(params),
-            "scheme.importPackage" => self.web_scheme_import_package(params),
-            "scheme.previewImport" => self.web_scheme_preview_import(params),
-            // 文本信封（kind = "schema_text"）：形状与上面两个 path 版完全一致，
-            // 设置端复用同一个确认对话框。
-            "scheme.previewImportText" => self.web_scheme_preview_import_text(params),
-            "scheme.importText" => self.web_scheme_import_text(params),
-
-            // ── backup.*（整机备份，wind-transfer::backup）───────
-            "backup.create" => self.web_backup_create(params),
-            "backup.inspect" => self.web_backup_inspect(params),
-            "backup.restore" => {
-                // restore 比 dict.import 还重：对每个方案逐张表 clear + import
-                // （用户词/临时词/词频/shadow/短语/常用字/补全/字符类）。
-                let r = self.web_backup_restore(params);
-                if r.is_ok() {
-                    self.drop_page_cache_after_bulk_write("backup.restore");
-                }
-                r
-            }
-
-            // ── dict.*（用户词库，redb 持久化）────────────────────
-            "comment.sources" => self.web_comment_sources(),
-            "dict.listPaged" => self.web_dict_list_paged(params),
-            "dict.search" => self.web_dict_search(params),
-            "dict.add" => self.web_dict_add(params),
-            "dict.update" => self.web_dict_update(params),
-            "dict.remove" => self.web_dict_remove(params),
-            // 清空是逐条 remove，19 万条走一遍，动的页与导入同量级。
-            "dict.clear" => {
-                let r = self.web_dict_clear(params);
-                if r.is_ok() {
-                    self.drop_page_cache_after_bulk_write("dict.clear");
-                }
-                r
-            }
-            "dict.stats" => self.web_dict_stats(),
-            // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
-            // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
-            // 深链带了参数就不会调它——那时用户的意图已经明确。
-            "dict.addWordContext" => {
-                let ctx = self.add_word_context();
-                Ok(json!({
-                    "schemaId": ctx.schema_id,
-                    "recentText": ctx.recent_text,
-                    "maxLen": ctx.max_len,
-                }))
-            }
-            // 加词自动出码：按方案类型选拼音/五笔规则（reverse 反查表）。
-            "dict.encode" => self.web_dict_encode(params),
-            // 批量出码：纯词列表导入按批调用（设置端每批约 1000 词）。
-            "dict.encodeWords" => self.web_dict_encode_words(params),
-            "dict.genPinyin" => {
-                // 取码要按**真实文本**算：转义形态里的 `\` `n` 会被当成两个待取码的字符。
-                let text = str_param(params, "text")?;
-                Ok(json!(self.gen_pinyin_word(&store_text(text))))
-            }
-            "dict.export" => self.web_dict_export(params),
-            // 导入是一次**全表规模的写**，而 redb 刷盘时会把脏页直接晋升进读缓存并
-            // 长期不还（本机实测 19 万词的库因此常驻 41 MB，50 万词约 90 MB）——
-            // 用户反馈「导入大词库之后内存占用变高」就是它。落库之后把那一笔还回去。
-            //
-            // 放在分发处而不是 `web_dict_import` 里面：那个函数有 wdict 与 Rime/TSV 两条
-            // 分支、各自返回，将来多一条就会漏掉一处。这里只有一个出口。
-            //
-            // 丢缓存失败不影响导入结果：那只是内存没还回去，词已经落库了，不该因此
-            // 把一次成功的导入报成失败。
-            "dict.import" => {
-                let r = self.web_dict_import(params);
-                // 只在**真写进去了**才丢：格式不符 / 引擎类型不匹配那两条 early-return Err
-                // 一个字节都没落库，没必要付「关库 + 重开 + 建表写事务」这一趟。
-                if r.is_ok() {
-                    self.drop_page_cache_after_bulk_write("dict.import");
-                }
-                r
-            }
-            "dict.previewImport" => self.web_dict_preview_import(params),
-
-            // ── temp.*（临时词，redb）─────────────────────────────
-            "temp.list" => self.web_temp_list(params),
-            // 分页版（设置页列表走这条；`temp.list` 保留给导出等全量取用方）。
-            "temp.listPaged" => self.web_temp_list_paged(params),
-            "temp.promote" => self.web_temp_promote(params),
-            "temp.remove" => self.web_temp_remove(params),
-            "temp.promoteAll" => self.web_temp_promote_all(params),
-            "temp.clear" => self.web_temp_clear(params),
-
-            // ── freq.*（用户词频，redb 持久化）───────────────────
-            "freq.listPaged" => self.web_freq_list_paged(params),
-            "freq.delete" => self.web_freq_delete(params),
-            "freq.clear" => self.web_freq_clear(params),
-
-            // ── mailSuffix.* / urlHistory.*（补全学习数据，redb 持久化）──
-            // 两组共用一份实现，只差 `CompletionKind`：存储层本就是一张表两个分区，
-            // RPC 再各写一遍等于把「同形态」这件事在第三处重新论证一遍。
-            // 命名空间分开是给设置端用的——「清空网址历史」不该顺带抹掉邮箱学习。
-            "mailSuffix.listPaged" => {
-                self.web_completion_list_paged(CompletionKind::EmailSuffix, params)
-            }
-            "mailSuffix.delete" => self.web_completion_delete(CompletionKind::EmailSuffix, params),
-            "mailSuffix.clear" => self.web_completion_clear(CompletionKind::EmailSuffix),
-            "urlHistory.listPaged" => {
-                self.web_completion_list_paged(CompletionKind::UrlHistory, params)
-            }
-            "urlHistory.delete" => self.web_completion_delete(CompletionKind::UrlHistory, params),
-            "urlHistory.clear" => self.web_completion_clear(CompletionKind::UrlHistory),
-            // 快捷输入历史（成员 `quick_input.history`），同一张表的第三个分区。
-            "quickHistory.listPaged" => {
-                self.web_completion_list_paged(CompletionKind::QuickHistory, params)
-            }
-            "quickHistory.delete" => {
-                self.web_completion_delete(CompletionKind::QuickHistory, params)
-            }
-            "quickHistory.clear" => self.web_completion_clear(CompletionKind::QuickHistory),
-
-            // ── shadow.*（影子规则，redb 持久化）─────────────────
-            "shadow.list" => self.web_shadow_list(params),
-            // 分页版（设置页列表走这条；`shadow.list` 保留给全量取用方）。
-            "shadow.listPaged" => self.web_shadow_list_paged(params),
-            // 整表撤销。此前设置端靠「逐条 remove_rule」凑出清空，分页之后它手上
-            // 只剩当前页，那条路会静默只清一页。
-            "shadow.clear" => self.web_shadow_clear(params),
-            "shadow.pin" => self.web_shadow_pin(params),
-            "shadow.delete" => self.web_shadow_delete(params),
-            "shadow.removeRule" => self.web_shadow_remove_rule(params),
-            "shadow.addRule" => self.web_shadow_add_rule(params),
-
-            // ── phrase.*（用户短语，全局，redb 持久化）──────────
-            "phrase.list" => self.web_phrase_list(),
-            "phrase.add" => self.web_phrase_add(params),
-            "phrase.update" => self.web_phrase_update(params),
-            "phrase.remove" => self.web_phrase_remove(params),
-            "phrase.setEnabled" => self.web_phrase_set_enabled(params),
-            "phrase.resetDefault" => self.web_phrase_reset(),
-            "phrase.listSystem" => self.web_phrase_list_system(),
-            "phrase.listUser" => self.web_phrase_list_user(params),
-            "phrase.export" => self.web_phrase_export(),
-            "phrase.import" => self.web_phrase_import(params),
-            "phrase.previewImportText" => self.web_phrase_preview_import_text(params),
-            "phrase.importText" => self.web_phrase_import_text(params),
-            "phrase.resetSystem" => self.web_phrase_reset_system(),
-
-            // ── quick.*（快捷输入格式表的用户调整，全局，redb 持久化）──
-            // 基表（模板与出厂顺序）在 system.quick.toml，**RPC 一律不写它**：
-            // 那会抢走高级用户手写文件的所有权，见 handle_quick_format 模块文档。
-            "charset.list" => self.web_charset_list(),
-            "charset.set" => self.web_charset_set(params),
-            "charset.reset" => self.web_charset_reset(params),
-            "charset.clearRedundant" => self.web_charset_clear_redundant(params),
-            "charset.delete" => self.web_charset_delete(params),
-            "charset.editFile" => self.web_charset_edit_file(params),
-            "charset.exportEdit" => self.web_charset_export_edit(params),
-            "charset.importFile" => self.web_charset_import_file(params),
-            "commonChars.list" => self.web_common_chars_list(params),
-            "commonChars.query" => self.web_common_chars_query(params),
-            "commonChars.set" => self.web_common_chars_set(params),
-            "commonChars.bulkByBlock" => self.web_common_chars_bulk(params),
-            "commonChars.reset" => self.web_common_chars_reset(params),
-            "commonChars.clear" => self.web_common_chars_clear(),
-            "commonChars.export" => self.web_common_chars_export(),
-            "commonChars.previewImport" => self.web_common_chars_preview_import(params),
-            "commonChars.import" => self.web_common_chars_import(params),
-            "quick.list" => self.web_quick_list(),
-            "quick.move" => self.web_quick_move(params),
-            "quick.setEnabled" => self.web_quick_set_enabled(params),
-            "quick.resetEntry" => self.web_quick_reset_entry(params),
-            "quick.resetKind" => self.web_quick_reset_kind(params),
-            "quick.vars" => self.web_quick_vars(),
-            "quick.add" => self.web_quick_add(params),
-            "quick.setText" => self.web_quick_set_text(params),
-            "quick.delete" => self.web_quick_delete(params),
-            // ── compat.*：应用兼容规则的分层管理（逻辑全在 wind_config::compat_admin）──
-            m if m.starts_with("compat.") => self.web_compat_rpc(m, params),
-            "quick.export" => self.web_quick_export(),
-            "quick.import" => self.web_quick_import(params),
-            "quick.previewImport" => self.web_quick_preview_import(params),
-
-            // ── stats.*（输入统计，redb 每日聚合）────────────────
-            "stats.summary" => self.web_stats_summary(),
-            "stats.daily" => self.web_stats_daily(params),
-            "stats.clear" => self.web_stats_clear(),
-            "stats.pruneBefore" => self.web_stats_prune(params),
-
-            // ── appearance.*（设置页预览，text-span-colors.md §11）──
-            "appearance.previewTemplate" => self.web_appearance_preview_template(params),
-
-            // ── theme.* ──────────────────────────────────────────
-            "theme.list" => self.web_theme_list(),
-            "theme.resolved" => Ok(serde_json::to_value(self.theme_follow_values())?),
-            "theme.accent" => {
-                let name = params
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty());
-                Ok(serde_json::to_value(self.theme_accent(name))?)
-            }
-            "theme.preview" => self.web_theme_preview(params),
-            "theme.getText" => self.web_theme_get_text(params),
-            "theme.delete" => self.web_theme_delete(params),
-            "theme.importFromText" => self.web_theme_import_text(params),
-            "theme.previewPackage" => self.web_theme_preview_package(params),
-            "theme.importPackage" => self.web_theme_import_package(params),
-            "theme.exportPackage" => self.web_theme_export_package(params),
-            "theme.importFromUrl" => {
-                anyhow::bail!("URL 导入未启用（features.theme.import_url=false）")
-            }
-
-            other => anyhow::bail!("unknown method: {}", other),
+        let r = web_data_dispatch(self, method, params);
+        if r.is_ok() && BULK_WRITE_METHODS.contains(&method) {
+            self.drop_page_cache_after_bulk_write(method);
+        } else if scans_whole_table(method, params)
+            && let Some(store) = self.user_store()
+        {
+            store.mark_scan_pending();
         }
+        r
     }
 
     /// `schema.list` —— 方案全集（含元信息），供设置页方案管理与主方案下拉。
@@ -5037,7 +5076,8 @@ outside: rare
     }
 
     fn coord(tag: &str) -> Arc<Coordinator> {
-        let path = std::env::temp_dir().join(format!("wind_webdata_{tag}.redb"));
+        let path =
+            std::env::temp_dir().join(format!("wind_webdata_{tag}_{}.redb", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(Store::open(&path).unwrap());
         let data = charsets_data_dir(tag);
@@ -5155,6 +5195,97 @@ outside: rare
                 .is_empty(),
             "remove 收到带空格的码须先拆再删"
         );
+    }
+
+    /// ★ 两张回收名单里的每个方法名都必须真在分派表里：改名而忘了改名单，回收就静默失效。
+    /// 拿空参数逐个调一遍：分派表认得的方法会因缺参报错（或照常返回），只有不认得的才报
+    /// `unknown method`。名单里的方法都只读或缺参即返回，空参数调用不会动数据。
+    #[test]
+    fn rpc_name_tables_match_the_dispatch_table() {
+        let c = coord("rpc_name_tables");
+        for &m in FULL_SCAN_METHODS
+            .iter()
+            .chain(BULK_WRITE_METHODS)
+            .chain(&["dict.search"])
+        {
+            if let Err(e) = c.web_data_rpc(m, &json!({})) {
+                assert!(
+                    !e.to_string().contains("unknown method"),
+                    "{m} 不在分派表里（改名了？同步更新名单）"
+                );
+            }
+        }
+    }
+
+    /// ★ S3 复审 M3：这些方法也扫整表 / 是批量写，名单里不能缺。
+    #[test]
+    fn rpc_name_tables_cover_reviewed_methods() {
+        for m in ["dict.previewImport", "freq.clear", "shadow.clear"] {
+            assert!(scans_whole_table(m, &json!({})), "{m} 应标记扫描待回收");
+        }
+        assert!(
+            BULK_WRITE_METHODS.contains(&"schema.delete"),
+            "schema.delete 级联清六张表，应与 dict.clear 一样立即回收"
+        );
+    }
+
+    /// ★ S3：设置页翻页（`dict.listPaged`，每次都扫整表）只标记待回收、不逐页回收；
+    /// 停手满短档后回收**一次**。另验窄查询（`dict.search` 带 limit）不标记。
+    #[test]
+    fn dict_list_paged_marks_scan_and_reclaims_once_after_short_idle() {
+        use std::time::Duration;
+        const TICK: Duration = Duration::from_millis(20);
+        const SCAN_IDLE: Duration = Duration::from_millis(300);
+        const NEVER: Duration = Duration::from_secs(3600);
+        let wait_drops = |store: &Store, n: u64, timeout: Duration| {
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < timeout {
+                if store.page_cache_drops() >= n {
+                    return true;
+                }
+                std::thread::sleep(TICK / 2);
+            }
+            false
+        };
+
+        // 窄查询：只访问、不标记 ⇒ 长档一小时，短档不生效。
+        let c = coord("scan_reclaim_narrow");
+        let store = c.user_store().expect("有 store").clone();
+        store.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
+        c.web_data_rpc(
+            "dict.search",
+            &json!({ "schemaId": "pinyin", "query": "ni", "limit": 50 }),
+        )
+        .unwrap();
+        std::thread::sleep(SCAN_IDLE * 3);
+        assert_eq!(
+            store.page_cache_drops(),
+            0,
+            "带 limit 的前缀查询不该触发短档"
+        );
+
+        let c = coord("scan_reclaim");
+        let store = c.user_store().expect("有 store").clone();
+        store
+            .add_user_word("pinyin", "nihao", "你好", 100, 0)
+            .unwrap();
+        store.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
+        let page = json!({ "schemaId": "pinyin", "offset": 0, "limit": 50 });
+        let first = c.web_data_rpc("dict.listPaged", &page).unwrap();
+        let second = c.web_data_rpc("dict.listPaged", &page).unwrap();
+        assert_eq!(store.page_cache_drops(), 0, "连续翻页只标记，不逐页回收");
+
+        assert!(
+            wait_drops(&store, 1, SCAN_IDLE * 20),
+            "停手满短档后该回收一次"
+        );
+        std::thread::sleep(SCAN_IDLE * 3);
+        assert_eq!(store.page_cache_drops(), 1, "只回收一次，不重复");
+        // 回收后查询结果不变。
+        let after = c.web_data_rpc("dict.listPaged", &page).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first, after);
+        assert_eq!(after["total"], json!(1));
     }
 
     /// 临时词分页：切片、跨页 total、服务端搜索（含编码中段命中）、跨页排序。

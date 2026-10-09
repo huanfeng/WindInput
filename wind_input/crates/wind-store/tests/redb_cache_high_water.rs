@@ -42,6 +42,7 @@
 //! WIND_HW=idle   $T -- $M    # 只开库，不读 → 基线
 //! WIND_HW=scan   $T -- $M    # 开库 + 全表扫 → 差值就是读缓存
 //! WIND_HW=trim   $T -- $M    # 全表扫 → 丢缓存 → malloc_trim，看 RSS 能否落回
+//! WIND_HW=scanreclaim $T -- $M  # 全表扫一遍 → 标记待回收 → 等过短档（钩子 malloc_trim）
 //! ```
 
 use wind_store::{Store, wdict::WordIo};
@@ -230,6 +231,56 @@ fn the_page_cache_is_a_high_water_mark() {
                 "[trim] 开库 {opened:.1} → 全表扫 {filled:.1} → 丢缓存 {dropped:.1} → malloc_trim {trimmed:.1} MB"
             );
         }
-        _ => println!("请设 WIND_HW=build|idle|scan|import|evict|hold|trim，见文件头的跑法"),
+        // ★ S3 的后台扫描那档：19 万条全表扫一遍 → `mark_scan_pending_rows` → 等过短档，由回收
+        // 线程丢缓存并调钩子 malloc_trim（与协调器登记的 `heap_trim::release_free_heap` 同形）。
+        // 与 `trim` 的差别：只扫一遍（建索引就是一遍），回收走的是生产路径而不是手调两步。
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        Ok("scanreclaim") => {
+            use std::time::Duration;
+            unsafe extern "C" {
+                fn malloc_trim(pad: usize) -> i32;
+            }
+            const SCAN_IDLE: Duration = Duration::from_millis(300);
+            let before = rss_mb();
+            let s = std::sync::Arc::new(Store::open(&db).expect("开库"));
+            s.spawn_idle_cache_reclaimer_then(
+                Duration::from_secs(3600),
+                SCAN_IDLE,
+                Duration::from_millis(50),
+                || unsafe {
+                    malloc_trim(0);
+                },
+            );
+            let opened = rss_mb();
+            let n = s.count_user_words("py").expect("全表扫");
+            let scanned = rss_mb();
+            if n < wind_store::store::SCAN_RECLAIM_MIN_ROWS {
+                println!(
+                    "[scanreclaim] 未过门槛：只有 {n} 条（门槛 {}），不会标记；先跑 WIND_HW=build",
+                    wind_store::store::SCAN_RECLAIM_MIN_ROWS
+                );
+                return;
+            }
+            s.mark_scan_pending_rows(n);
+            let marked = rss_mb();
+            let t0 = std::time::Instant::now();
+            while s.page_cache_drops() == 0 && t0.elapsed() < SCAN_IDLE * 20 {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // 回收与钩子在同一拍里先后执行：drops 变了之后再给钩子一拍的时间。
+            std::thread::sleep(Duration::from_millis(100));
+            let reclaimed = rss_mb();
+            let again = s.count_user_words("py").expect("回收后再查");
+            println!(
+                "[scanreclaim] 开库 {before:.1} → {opened:.1} → 全表扫 {n} 条 {scanned:.1} → \
+                 标记后 {marked:.1} → 空闲 {:?} 后回收（含 malloc_trim）{reclaimed:.1} MB；\
+                 drops={}，回收后再数 {again} 条",
+                t0.elapsed(),
+                s.page_cache_drops()
+            );
+        }
+        _ => println!(
+            "请设 WIND_HW=build|idle|scan|import|evict|hold|trim|scanreclaim，见文件头的跑法"
+        ),
     }
 }

@@ -141,7 +141,8 @@ pub struct UserAssocIndex {
 }
 
 impl UserAssocIndex {
-    /// 全量扫 store 建索引（**会扫整张用户词表**，只在后台线程 / 预热 / 测试里调）。
+    /// 全量扫 store 建索引（**会扫整张用户词表**，只在后台线程 / 预热 / 测试里调），扫完标记
+    /// 待回收（库空闲 3 秒后回收 redb 读缓存）。
     ///
     /// ★ 临时词的排序键以 **count** 打头：临时词权重是写入时的定值（自动造词恒为
     /// `LEARN_ADD_WEIGHT`），按权重排等于按字典序排。
@@ -150,8 +151,10 @@ impl UserAssocIndex {
         let count_generation = store.words_count_generation();
         let (mut user, mut temp): (Vec<Row>, Vec<Row>) = (Vec::new(), Vec::new());
         let multi = |t: &str| t.chars().nth(1).is_some();
+        let mut scanned = 0usize;
         let r = store
             .for_each_user_word(data_schema, "", &mut |w| {
+                scanned += 1;
                 if multi(w.text) {
                     user.push((w.text.into(), w.code.into(), w.weight as i64, w.count));
                 }
@@ -159,6 +162,7 @@ impl UserAssocIndex {
             })
             .and_then(|_| {
                 store.for_each_temp_word(data_schema, "", &mut |w| {
+                    scanned += 1;
                     if multi(w.text) {
                         let rank = ((w.count as i64) << 32) | (w.created_at & 0xFFFF_FFFF);
                         temp.push((w.text.into(), w.code.into(), rank, w.count));
@@ -169,14 +173,17 @@ impl UserAssocIndex {
         if let Err(e) = r {
             tracing::warn!("联想用户词索引：读 store 失败 schema={data_schema}: {e}");
         }
-        UserAssocIndex {
+        let idx = UserAssocIndex {
             data_schema: data_schema.to_string(),
             generation,
             count_generation,
             built_at: Instant::now(),
             user: TextTable::build(user),
             temp: TextTable::build(temp),
-        }
+        };
+        // 扫完标记待回收，库空闲 3 秒后回收（理由见 `text_codes::UserTextIndex::build`）。
+        store.mark_scan_pending_rows(scanned);
+        idx
     }
 
     /// 相对 store 当前状态是否过期。`count_interval`：仅临时词 count 变化时，建成多久后
@@ -318,7 +325,8 @@ mod tests {
     }
 
     fn tmp_store(tag: &str) -> wind_store::Store {
-        let p = std::env::temp_dir().join(format!("wind_user_assoc_{tag}.redb"));
+        let p =
+            std::env::temp_dir().join(format!("wind_user_assoc_{tag}_{}.redb", std::process::id()));
         let _ = std::fs::remove_file(&p);
         wind_store::Store::open(&p).unwrap()
     }
@@ -374,5 +382,52 @@ mod tests {
         let idx = UserAssocIndex::build(&s, "wb");
         assert!(idx.contains("荷载") && idx.contains("荷叶田田"));
         assert!(!idx.contains("荷") && !idx.contains("荷叶"));
+    }
+
+    /// ★ 建索引是一次全表扫：预热与后台重建两条路建完都**只标记**，库空闲满短档后才回收
+    /// 一次（`docs/design/memory-footprint.md` §6）。
+    #[test]
+    fn every_build_marks_and_reclaims_after_short_idle() {
+        const TICK: Duration = Duration::from_millis(20);
+        const SCAN_IDLE: Duration = Duration::from_millis(150);
+        let wait_drops = |s: &wind_store::Store, n: u64| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if s.page_cache_drops() >= n {
+                    return true;
+                }
+                std::thread::sleep(TICK / 2);
+            }
+            false
+        };
+        let s = Arc::new(tmp_store("reclaim"));
+        let big: Vec<_> = (0..wind_store::store::SCAN_RECLAIM_MIN_ROWS)
+            .map(|i| wind_store::wdict::WordIo {
+                code: format!("x{i}"),
+                text: format!("词{i}"),
+                weight: 0,
+                count: 0,
+                boundary: None,
+            })
+            .collect();
+        s.import_user_words("wb", &big).unwrap();
+        s.add_user_word("wb", "awfa", "荷载", 0, 0).unwrap();
+        s.spawn_idle_cache_reclaimer(Duration::from_secs(3600), SCAN_IDLE, TICK);
+        let slot = SharedSlot::default();
+        assert!(prewarm(&slot, &s, "wb"));
+        assert_eq!(s.page_cache_drops(), 0, "预热建完不立即回收");
+        assert!(wait_drops(&s, 1), "空闲满短档后回收");
+
+        s.add_user_word("wb", "awgg", "荷叶", 0, 0).unwrap();
+        get_or_refresh(&slot, &s, "wb");
+        assert!(wait_drops(&s, 2), "后台重建之后同样在空闲满短档后回收");
+        assert!(
+            slot.lock()
+                .unwrap()
+                .index
+                .as_ref()
+                .is_some_and(|i| i.contains("荷叶")),
+            "回收前重建已完成"
+        );
     }
 }

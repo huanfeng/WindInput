@@ -708,6 +708,56 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// S3：大库上用户层编码索引（`UserTextIndex`）建完只标记待回收，库空闲满短档后回收——
+    /// 预热与打字链路触发的后台重建两条路都是；建完当场不回收（不让按键线程等关库重开）。
+    #[test]
+    fn user_text_rebuild_reclaims_after_short_idle() {
+        use std::time::Duration;
+        const TICK: Duration = Duration::from_millis(20);
+        const SCAN_IDLE: Duration = Duration::from_millis(150);
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 词库");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("wind_dn_s3_{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(wind_store::Store::open(&path).unwrap());
+        let c =
+            Coordinator::new_headless_with_store(wubi(|_| {}), Some(&data_dir()), store.clone());
+        // 过门槛的一份用户词：小库扫完不标记（`SCAN_RECLAIM_MIN_ROWS`）。
+        let big: Vec<_> = (0..wind_store::store::SCAN_RECLAIM_MIN_ROWS)
+            .map(|i| wind_store::wdict::WordIo {
+                code: format!("x{i}"),
+                text: format!("词{i}"),
+                weight: 0,
+                count: 0,
+                boundary: None,
+            })
+            .collect();
+        store.import_user_words("wubi86", &big).unwrap();
+        store.spawn_idle_cache_reclaimer(Duration::from_secs(3600), SCAN_IDLE, TICK);
+        let wait_drops = |n: u64| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if store.page_cache_drops() >= n {
+                    return true;
+                }
+                std::thread::sleep(TICK / 2);
+            }
+            false
+        };
+        let d0 = store.page_cache_drops();
+        assert!(c.engine_mgr.prewarm_text_codes("wubi86"));
+        assert_eq!(store.page_cache_drops(), d0, "预热建完不当场回收");
+        assert!(wait_drops(d0 + 1), "空闲满短档后回收");
+
+        store.add_user_word("wubi86", "zzzz", "嗨", 0, 0).unwrap();
+        let _ = c.engine_mgr.text_codes("wubi86"); // 过期 ⇒ 后台重建
+        assert!(wait_drops(d0 + 2), "后台重建之后同样在空闲满短档后回收");
+        drop(c);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// 端到端（S2）：注释与悬停都在要拆字 / 用户层时，关掉两个总开关并生效配置 ⇒
     /// 用户层编码索引清空、拆字表卸载。
     #[test]

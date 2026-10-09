@@ -358,14 +358,19 @@ impl Coordinator {
                 // `backup.restore` / `dict.clear` 之后直接丢；读那一路躲不掉——设置页的
                 // 分页要给精确 `total` 就不能早退，照样扫完整表——只能靠这条兜。
                 //
-                // 60 秒 / 10 秒一拍：判据是「真的没人在用」，那时重开 Database 的几毫秒
-                // 与随后几次冷查询都没人感知得到。间隔不做成配置键（见该函数的文档）。
+                // 长档 60 秒：判据是「真的没人在用」，那时重开 Database 的几毫秒与随后几次
+                // 冷查询都没人感知得到。短档 3 秒：设置页列表 / 导出、后台建索引这类全表扫描
+                // 做完只标记（`Store::mark_scan_pending[_rows]`），停手 3 秒就还——持续打字时
+                // 长档等不到，而自动造词让打字中反复重建索引，当场回收会让按键线程陪等关库重开。
+                // 1 秒一拍。
+                // 时长不做成配置键（见 wind-store `RECLAIM_IDLE` 的文档）。
                 //
                 // 同一时刻顺带整理堆：丢掉的页缓存、此前构建索引与全表扫的临时分配都只是回到
                 // 分配器手里，不整理的话私有内存停在历史峰值（见 heap_trim.rs）。
                 s.spawn_idle_cache_reclaimer_then(
-                    std::time::Duration::from_secs(60),
-                    std::time::Duration::from_secs(10),
+                    wind_store::store::RECLAIM_IDLE,
+                    wind_store::store::SCAN_RECLAIM_IDLE,
+                    wind_store::store::RECLAIM_TICK,
                     crate::heap_trim::release_free_heap,
                 );
                 Some(s)
