@@ -948,16 +948,29 @@ impl crate::coordinator::Coordinator {
     /// 注释段求值用的编码来源档。候选窗渲染与「上屏注释」（`input.alt_commit`）共用，
     /// 两处各算一份的话，同一条候选显示的注释与上屏的注释会不一样。
     ///
-    /// 两份开关按模式分：临拼 / 快捷输入读 `input.temp_pinyin.code_hint_source`（出厂
-    /// `auto`，码表用户反查编码的场景），其余（拼音 / 双拼主方案）读
-    /// `schema.pinyin.code_hint_source`（出厂 `off`）。两类用户习惯相反，所以拆开。
+    /// 三份开关，模式层优先于方案层：
+    /// - 临拼 / 快捷输入读 `input.temp_pinyin.code_hint_source`（出厂 `auto`，码表用户借
+    ///   拼音反查编码的场景）——哪怕主方案是混输；
+    /// - 混输方案读 `schema.mix.pinyin_code_hint`（出厂开，开 ⇒ 只放行码表反查：混输里的
+    ///   拼音是全拼，双拼编码没意义）；
+    /// - 其余（拼音 / 双拼主方案）读 `schema.pinyin.code_hint_source`（出厂 `off`）。
+    ///
+    /// 码表用户与纯拼音用户习惯相反，所以拆开。混输曾落在最后一档，拼音出厂改 `off` 后
+    /// 混输跟着没了编码提示。
     /// ★ 临拼那份原样生效、**可以关掉**——旧实现在这里无视配置并集式强制放行反查。
     pub(crate) fn comment_hint_source(&self, state: &State) -> CodeHintSource {
         if Self::forces_code_hint(state) {
-            self.engine_mgr.temp_pinyin_code_hint_source()
-        } else {
-            self.engine_mgr.code_hint_source()
+            return self.engine_mgr.temp_pinyin_code_hint_source();
         }
+        let active = self.engine_mgr.active_schema_id();
+        if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("mixed") {
+            return if self.rt().config.schema.mix.pinyin_code_hint {
+                CodeHintSource::CodeTable
+            } else {
+                CodeHintSource::Off
+            };
+        }
+        self.engine_mgr.code_hint_source()
     }
 
     /// 「上屏注释 / 拼音」（`input.alt_commit`，t138）要上屏的文本；空串＝这条候选没有可上屏的。
@@ -2565,6 +2578,60 @@ mod eval_var_tests {
             CodeHintSource::Auto
         );
         assert_eq!(hint_in(&co, Some(ModeKind::Mix(0))), CodeHintSource::Auto);
+    }
+
+    /// 混输方案为活跃方案、拼音那份与混输那份各配一值的协调器。
+    fn mixed_coord(schema_src: &str, mix_hint: bool) -> Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
+        cfg.schema.active = "wubi86_pinyin".to_string();
+        cfg.schema.pinyin.code_hint_source = schema_src.to_string();
+        cfg.schema.mix.pinyin_code_hint = mix_hint;
+        Coordinator::new_headless(cfg, Some(&data_dir()))
+    }
+
+    /// 混输方案读 `schema.mix.pinyin_code_hint`，不受拼音方案那份影响。
+    ///
+    /// 拼音那份刻意配成与之相反的值：混输若还读拼音那份（本开关引入前的行为），这里会拿到
+    /// 对方的档位。
+    #[test]
+    fn mixed_schema_follows_mix_switch() {
+        for schema in ["off", "auto"] {
+            assert_eq!(
+                hint_in(&mixed_coord(schema, true), None),
+                CodeHintSource::CodeTable,
+                "混输开：schema.pinyin={schema}"
+            );
+            assert_eq!(
+                hint_in(&mixed_coord(schema, false), None),
+                CodeHintSource::Off,
+                "混输关：schema.pinyin={schema}"
+            );
+        }
+    }
+
+    /// 混输方案下进临拼 / 快捷输入，仍按临拼那份——模式层优先于方案层。
+    #[test]
+    fn overlay_modes_in_mixed_schema_follow_temp_pinyin_source() {
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
+        cfg.schema.active = "wubi86_pinyin".to_string();
+        cfg.schema.mix.pinyin_code_hint = true;
+        cfg.input.temp_pinyin.code_hint_source = "off".to_string();
+        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
+        for active in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
+            assert_eq!(hint_in(&co, active), CodeHintSource::Off, "{active:?}");
+        }
+    }
+
+    /// 出厂：拼音方案不显示编码，混输方案显示主码表反查编码。
+    #[test]
+    fn factory_mixed_schema_shows_reverse_code() {
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
+        cfg.schema.active = "wubi86_pinyin".to_string();
+        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
+        assert_eq!(hint_in(&co, None), CodeHintSource::CodeTable);
     }
 }
 

@@ -218,7 +218,8 @@ draft_max_entries = 50000
 draft_flush_batch = 64
 
 # 全局拼音配置：所有拼音类方案（全拼/双拼/混输拼音子方案/临时拼音反查）共用一份。
-# （例外：编码来源 code_hint_source 临时拼音/快捷输入另有一份，见 [input.temp_pinyin]。）
+# （例外：编码来源 code_hint_source 临时拼音/快捷输入另有一份，见 [input.temp_pinyin]；
+#   混输方案也另有一份，见 [schema.mix] 的 pinyin_code_hint。）
 [schema.pinyin]
 # 拼音方案（含双拼）下，候选注释里的编码从哪来。四档：
 #   off        两种都不显示（出厂）
@@ -227,7 +228,8 @@ draft_flush_batch = 64
 #   auto       两者都允许，谁先出由下方注释模板的回退链决定
 # 开关管「允许哪些来源求值」，模板管「按什么顺序和格式摆」——两层不重叠。
 # 出厂 off：编码反查是给码表用户的，纯拼音/双拼用户多半用不上；需要的话改成 codetable/auto。
-# 临时拼音/快捷输入不读这里，读 [input.temp_pinyin] 的同名键。认不出的值按 auto 处理。
+# 临时拼音/快捷输入不读这里，读 [input.temp_pinyin] 的同名键；混输方案也不读这里，
+# 读 [schema.mix] 的 pinyin_code_hint。认不出的值按 off 处理。
 # 旧的 show_code_hint 已改名：升级时 true 自动迁移为 codetable（严格零回归）、false 为 off。
 code_hint_source = "off"
 use_smart_compose = true
@@ -551,6 +553,11 @@ pinyin_word_min_weight = 0
 # 不把简拼改成「不算主张整串」是有意取舍：那样长简拼词（zgrmghg 之类）会被前 4 码的五笔
 # 全码顶码截胡。需要简拼打长词的用户显式打开本项，代价是失去超码长顶码上屏。
 enable_pinyin_abbrev = false
+# 混输方案下，拼音候选旁显示主码表的编码（反查）。出厂开：混输用户以码表为主，打拼音时
+# 看编码正是学码的场景。与拼音方案的 [schema.pinyin] code_hint_source 互不影响（那份出厂 off，
+# 照顾纯拼音用户）。临时拼音/快捷输入期间不读这里，读 [input.temp_pinyin] 的 code_hint_source。
+# 显示位置与格式由注释模板（${code_rev}）决定。
+pinyin_code_hint = true
 # 码长内（输入不超过主码表码长）是否保留「未消费整串」的拼音候选。
 # 关（默认）：gedw（五笔精确码「青春」）不再列出 ge 的两百多条同音单字——它们每条只解释了
 # 4 键中的 2 键。开着简拼时，混合简拼词「各单位」也因此能排到前面。
@@ -1339,7 +1346,8 @@ comment_enabled = true
 # 可用变量：
 #   code_hint          引擎产的编码提示（码表前缀候选的剩余编码 si→sikao 标 kao；混输标记「拼」）
 #   code_rev           主码表整词反查编码（仅拼音来源候选，受 schema.pinyin.code_hint_source 门控；
-#                      临时拼音/快捷输入期间改受 input.temp_pinyin.code_hint_source 门控）
+#                      临时拼音/快捷输入期间改受 input.temp_pinyin.code_hint_source 门控，
+#                      混输方案下改受 schema.mix.pinyin_code_hint 门控）
 #   shuangpin          双拼编码（你好 → 小鹤 nihc）。同受上述门控。
 #                      **全拼方案下照样有值**：布局按「活跃方案→主拼音方案→已装的首个
 #                      双拼方案」回退，一个双拼方案都没装才恒空

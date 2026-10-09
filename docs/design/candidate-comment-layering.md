@@ -18,7 +18,7 @@
 | 4 | config.toml | `schema.mix_modes[].comment_template_*` | 实例级三态 |
 | 5 | 方案文件 | `[overlay].comment_template_*` | overlay **激活期间** |
 | 6 | config.toml | `[[ui.comment_dicts]]`（含 `schemas`） | 全局表 + 方案过滤 |
-| 7 | config.toml | `schema.pinyin.code_hint_source` / `input.temp_pinyin.code_hint_source` | 四档，门控 `${code_rev}` / `${shuangpin}` 的**求值**；前者只管拼音方案（含双拼），临拼/快捷输入读后者（2026-09-28 拆分，见 §1.1 第 5 条） |
+| 7 | config.toml | `schema.pinyin.code_hint_source` / `input.temp_pinyin.code_hint_source` | 四档，门控 `${code_rev}` / `${shuangpin}` 的**求值**；前者只管拼音方案（含双拼），临拼/快捷输入读后者（2026-09-28 拆分，见 §1.1 第 5 条）；混输方案另读布尔键 `schema.mix.pinyin_code_hint`（开 ≡ `codetable`，2026-10-09 拆出，同见第 5 条） |
 | 8 | 方案文件 | `[engine.codetable].show_code_hint` | 方案级，门控 `${code_hint}` 的**生产** |
 | 9 | 主题 | `[comment]` ViewNode | 主题级（样式） |
 | 10 | config.toml | `ui.tooltip.*` | 全局，相邻但独立的悬停提示 |
@@ -55,6 +55,14 @@
    `schema.pinyin.code_hint_source` 只管拼音方案（含双拼），出厂改 `off`。`forcing_reverse`
    退役，临拼的开关原样生效——现在可以被真正关掉。两份各有各的默认值函数，临拼那份
    **不能**复用拼音方案的，否则会被一并拖成 `off`。
+
+   补遗（2026-10-09）：混输方案当时落在「其余」那档、跟着拼音方案读，出厂改 `off` 后混输也
+   没了编码提示——而混输用户恰是码表用户。拆出第三份 `schema.mix.pinyin_code_hint`（布尔，
+   出厂开；开只放行码表反查，混输里的拼音是全拼，双拼编码没意义）。裁决顺序：模式层（临拼 /
+   快捷输入）> 混输方案 > 拼音方案，收在 `Coordinator::comment_hint_source` 一处。
+   `DataNeeds` 只在可用方案里有混输方案时才把它算作反查索引的消费者。
+   已知取舍：升级前为混输手写过 `schema.pinyin.code_hint_source = "off"` 的用户，升级后
+   混输会重新出编码，需改新开关；不做迁移（该键同时管拼音方案，无法判定用户是冲着哪个写的）。
 
 ### 1.2 三条「看着散但不要合并」
 

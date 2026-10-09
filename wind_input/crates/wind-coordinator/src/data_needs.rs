@@ -60,6 +60,9 @@ pub(crate) struct SchemaFacts {
     pub(crate) aux_code_in_use: bool,
     /// 自动造词开着（码表 / 混输方案 + 开关）。造词的查重要主码表反查索引。
     pub(crate) auto_phrase: bool,
+    /// 可用方案里有混输方案（`engine.type = "mixed"`）。`schema.mix.pinyin_code_hint` 只在
+    /// 这时才有消费者。
+    pub(crate) mixed_available: bool,
 }
 
 impl SchemaFacts {
@@ -73,6 +76,10 @@ impl SchemaFacts {
             overlay_templates: templates.overlay_templates.clone(),
             aux_code_in_use: active.aux_code_in_use,
             auto_phrase: active.auto_phrase,
+            mixed_available: mgr
+                .available_schemas()
+                .iter()
+                .any(|id| mgr.schema_engine_type(id).as_deref() == Some("mixed")),
         }
     }
 }
@@ -85,9 +92,10 @@ fn refs_any(tpl: &str, names: &[&str]) -> bool {
 impl DataNeeds {
     /// 唯一判定处。规则逐条对应求值端的门控（`Coordinator::eval_var` / 悬停候选循环）：
     ///
-    /// - 注释段的 `${code_rev*}` 只在编码来源档 `allows_reverse()` 时求值。档分两份：临拼 / 快捷
-    ///   输入期间读 `input.temp_pinyin.code_hint_source`，其余读 `schema.pinyin.code_hint_source`
-    ///   （`Coordinator::comment_hint_source`）。全局 / 方案级模板两种期间都可能渲染（模式层没意见
+    /// - 注释段的 `${code_rev*}` 只在编码来源档 `allows_reverse()` 时求值。档分三份：临拼 / 快捷
+    ///   输入期间读 `input.temp_pinyin.code_hint_source`，混输方案读 `schema.mix.pinyin_code_hint`，
+    ///   其余读 `schema.pinyin.code_hint_source`（`Coordinator::comment_hint_source`）。后两份
+    ///   同属「主档」。全局 / 方案级模板两种期间都可能渲染（模式层没意见
     ///   时落到它们），故两档任一放行即算；临拼 / 快捷输入自己的模式级模板只看临拼那档。
     /// - 悬停段**不看**编码来源档：逐字段走 `eval_text_var`，那里的 `${code_rev}` 不带门控；
     ///   `${word_code}` / `${code_source}` 任一被引用，候选循环就按词查码（含用户层）。
@@ -98,9 +106,11 @@ impl DataNeeds {
         let tip = crate::tooltip::CompiledTooltip::compile(&cfg.ui.tooltip);
         let tip_any = |names: &[&str]| names.iter().any(|n| tip.references(n));
 
+        // 主档：拼音方案那份，或混输方案那份（装了混输方案才有消费者）。
         let main_rev =
             CodeHintSource::from_config(&cfg.schema.pinyin.code_hint_source, CodeHintSource::Off)
-                .allows_reverse();
+                .allows_reverse()
+                || (facts.mixed_available && cfg.schema.mix.pinyin_code_hint);
         // 临拼档只在临拼 / 快捷输入进得去时才有消费者。
         let temp_reachable = cfg.input.temp_pinyin.enabled || !cfg.schema.mix_modes.is_empty();
         let temp_rev = temp_reachable
@@ -268,6 +278,27 @@ mod tests {
         unreachable.input.temp_pinyin.enabled = false;
         unreachable.schema.mix_modes.clear();
         assert!(!derive(&unreachable).reverse_index);
+    }
+
+    /// 混输方案的编码提示开关（`schema.mix.pinyin_code_hint`，出厂开）只在**装了混输方案**
+    /// 时算消费者：纯拼音用户不该为一个用不上的开关常驻反查索引。
+    #[test]
+    fn mix_pinyin_code_hint_counts_only_with_mixed_schema() {
+        let mut off = without_code_section(factory());
+        off.input.temp_pinyin.code_hint_source = "off".into();
+        assert!(off.schema.mix.pinyin_code_hint, "前置条件：出厂开");
+        let with_mixed = SchemaFacts {
+            mixed_available: true,
+            ..Default::default()
+        };
+
+        assert!(!derive(&off).reverse_index, "没装混输方案 ⇒ 不要");
+        let n = DataNeeds::derive(&off, &with_mixed);
+        assert!(n.reverse_index && n.user_text, "装了混输方案 ⇒ 要");
+
+        let mut switched_off = off.clone();
+        switched_off.schema.mix.pinyin_code_hint = false;
+        assert!(!DataNeeds::derive(&switched_off, &with_mixed).reverse_index);
     }
 
     /// 其余反查来源：联想、辅助码、自动造词。用户层只跟悬停 / 注释 / 辅助码。

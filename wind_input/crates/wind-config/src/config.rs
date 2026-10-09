@@ -1216,7 +1216,8 @@ fn default_code_hint_source() -> String {
 pub struct PinyinGlobalConfig {
     /// 拼音方案（含双拼）下，候选注释里的编码从哪来。值域与理由见 [`CodeHintSource`]。
     /// 出厂 `off`（理由见 `default_code_hint_source`）；认不出的值同样回落 `off`。
-    /// 临拼/快捷输入不读本字段，读 `input.temp_pinyin.code_hint_source`。
+    /// 临拼/快捷输入不读本字段，读 `input.temp_pinyin.code_hint_source`；混输方案也不读，
+    /// 读 `schema.mix.pinyin_code_hint`。
     #[serde(default = "default_code_hint_source")]
     pub code_hint_source: String,
     #[serde(default = "default_true")]
@@ -2843,6 +2844,15 @@ pub struct MixGlobal {
     /// 纯拼音方案不受影响。
     #[serde(default = "default_true")]
     pub enable_pinyin_abbrev: bool,
+    /// 混输方案下，拼音候选旁是否显示主码表的编码（反查）。默认开。
+    ///
+    /// 独立于拼音方案那份 `schema.pinyin.code_hint_source`：那份出厂 `off`，照顾的是纯拼音
+    /// 用户；混输用户以码表为主，打拼音时看编码正是学码、补码的场景，共用一份就只能顾一头
+    /// （此前混输读的就是拼音那份，拼音出厂改 off 后混输跟着没了编码提示）。
+    /// 只有开关、不设四档：混输里的拼音是全拼，双拼编码没有意义。
+    /// 临拼 / 快捷输入期间不读本项，读 `input.temp_pinyin.code_hint_source`。
+    #[serde(default = "default_true")]
+    pub pinyin_code_hint: bool,
 }
 
 impl Default for MixGlobal {
@@ -2868,6 +2878,7 @@ impl Default for MixGlobal {
             // 用户把两个否决开关都关掉也无济于事）。混输用户以码表为主，默认让顶码可用；
             // 需要简拼的用户显式打开即可。详见 `data/config.toml` 同名项注释。
             enable_pinyin_abbrev: false,
+            pinyin_code_hint: true,
         }
     }
 }

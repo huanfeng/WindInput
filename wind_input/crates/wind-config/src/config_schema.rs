@@ -369,6 +369,7 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.mix.block_commit_on_pinyin_word", Bool),
     f("schema.mix.pinyin_word_min_weight", Int),
     f("schema.mix.enable_pinyin_abbrev", Bool),
+    f("schema.mix.pinyin_code_hint", Bool),
     f("schema.mix.pinyin_partial_candidates", Bool),
     f("schema.mix.pinyin_partial_candidates_overflow", Bool),
     // 快捷输入：各候选来源的开关与优先级在 schema.mix_modes 的 members 里（有无=开关，
