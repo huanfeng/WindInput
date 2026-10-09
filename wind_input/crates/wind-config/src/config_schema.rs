@@ -439,6 +439,10 @@ static REGISTRY: &[ConfigField] = &[
         "input.temp_english.shift_behavior",
         Enum(&["temp_english", "direct_commit"]),
     ),
+    f(
+        "input.temp_english.shift_when_composing",
+        Enum(&["buffer", "commit_enter"]),
+    ),
     f("input.temp_english.trigger_keys", StrList),
     f("input.temp_english.allow_symbols", Bool),
     f("input.temp_english.symbol_chars", Str),

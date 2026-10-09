@@ -911,6 +911,10 @@ commit_space = false
 #   ⚠️ 开启后 ' 在临英与快捷输入下不再作第三候选键。用数字键 3 代替。
 phrase_seg = false
 shift_behavior = "temp_english"
+# shift_when_composing：已有编码时按 Shift+字母（shift_behavior 只管没有编码的情形）。
+#   buffer       = 大写字母照常进编码缓冲（默认）
+#   commit_enter = 上屏高亮候选，再以该字母进入临时英文
+shift_when_composing = "buffer"
 trigger_keys = []
 # allow_symbols：符号与数字直接入缓冲（C++ / hello2 / x64）而非上屏退出或选词。总开关，
 #                放行哪些字符由下面的 symbol_chars 精确决定。

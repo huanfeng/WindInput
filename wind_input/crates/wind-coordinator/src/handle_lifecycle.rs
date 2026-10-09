@@ -228,6 +228,47 @@ impl Coordinator {
             });
         }
 
+        // 已有编码时 Shift+字母（`temp_english.shift_when_composing = "commit_enter"`）：
+        // 上屏高亮候选（含已转换前缀），再以该大写字母进临时英文，对齐临拼「顶字进模式」。
+        // 出厂 `buffer` 不进本分支，大写照旧进编码缓冲（影子串记大小写）。
+        // 门卫与上面空缓冲那支同源（启用、非英文方案、Shift+字母、非快捷键），区别只在
+        // 缓冲非空；联想态没有码、不顶屏，由上面那支处理，这里不碰。
+        if (!state.input_buffer.is_empty() || !state.committed_text.is_empty())
+            && !state.assoc_active()
+            && self.rt().config.input.temp_english.enabled
+            && self.rt().config.input.temp_english.shift_when_composing == "commit_enter"
+            && !self.engine_mgr.active_is_english()
+            && data.modifiers & MOD_SHIFT != 0
+            && data.modifiers & MOD_SHORTCUT == 0
+            && (keymap::VK_A..=keymap::VK_Z).contains(&data.key_code)
+        {
+            let ch = (b'A' + (data.key_code - 0x41) as u8) as char;
+            // 命令候选顶屏 → 执行命令（与按空格一致），不进模式。
+            if let Some(act) = self.top_commit_command_guard(state) {
+                return Some(act);
+            }
+            let committed = self.take_committed_with_highlight(state);
+            state.input_buffer.clear();
+            state.input_buffer_cased.clear();
+            state.input_cursor_pos = 0;
+            state.candidates.clear();
+            state.active = Some(ModeKind::TempEnglish);
+            state.temp_english_buffer = ch.to_string();
+            state.temp_english_cursor = state.temp_english_buffer.len();
+            state.temp_english_prefix = String::new();
+            self.update_temp_english_candidates(state);
+            let disp = state.preedit.clone();
+            self.notify_ui_update(state);
+            debug!("Entered temp English mode after commit (buffer={})", disp);
+            return Some(match committed {
+                Some(text) => self.commit_then_new_composition(text, disp),
+                None => KeyAction::UpdateComposition {
+                    caret_pos: disp.chars().count() as u32,
+                    text: disp,
+                },
+            });
+        }
+
         // 快捷输入已退役为内置类方案 mix 成员（quick_input），不再独立激活：
         // 想要纯快捷输入，配一个 members=["quick_input"] 的 mix 即可。; 默认走「快捷」融合 mix。
 

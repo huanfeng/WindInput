@@ -4279,6 +4279,14 @@ pub struct TempEnglishConfig {
     pub show_candidates: bool,
     #[serde(default = "default_shift_behavior")]
     pub shift_behavior: String,
+    /// **已有编码缓冲时**按 Shift+字母的行为（`shift_behavior` 只管空缓冲那一支）。
+    /// 字符串枚举，值域：
+    /// - `buffer`（出厂）：大写字母以小写进编码缓冲、大小写记在影子串里（现状，
+    ///   英文候选套形、混输自由输入都依赖它）。
+    /// - `commit_enter`：上屏高亮候选（含已转换前缀），再以该大写字母进临时英文——
+    ///   对齐临时拼音「顶字进模式」。英文方案下不生效。
+    #[serde(default = "default_shift_when_composing")]
+    pub shift_when_composing: String,
     /// 触发键（符号键进入临时英文模式，类似临时拼音触发键）。默认空（仅 Shift+字母触发）。
     #[serde(default)]
     pub trigger_keys: Vec<String>,
@@ -4394,6 +4402,7 @@ impl Default for TempEnglishConfig {
             enabled: true,
             show_candidates: true,
             shift_behavior: "temp_english".to_string(),
+            shift_when_composing: default_shift_when_composing(),
             trigger_keys: Vec::new(),
             allow_symbols: false,
             symbol_chars: default_temp_english_symbol_chars(),
@@ -7470,6 +7479,10 @@ fn default_pinyin_separator() -> String {
 
 fn default_shift_behavior() -> String {
     "temp_english".to_string()
+}
+
+fn default_shift_when_composing() -> String {
+    "buffer".to_string()
 }
 
 /// 用户配置目录的就绪探测结果。
