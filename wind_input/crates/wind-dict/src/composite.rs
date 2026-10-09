@@ -138,6 +138,20 @@ impl CompositeDict {
         }
     }
 
+    /// [`Self::for_each_entry`] 全部输入的摘要：各**启用**层的
+    /// [`DictLayer::entries_digest`]，按层序。任一层说不清即 `None`（派生索引不落盘）。
+    ///
+    /// ⚠️ 过滤条件与层序必须与 `for_each_entry` 逐字一致——它回答的就是「那次枚举的输入
+    /// 是什么」。热摘 / 停用一本词库后，返回值随之改变，派生索引因此按新集合另取一份。
+    pub fn entries_digest(&self) -> Option<Vec<String>> {
+        let layers = self.layers.read().unwrap();
+        layers
+            .iter()
+            .filter(|l| l.enabled())
+            .map(|l| l.entries_digest())
+            .collect()
+    }
+
     /// 跨层合并：遍历各层收集候选，按 text 去重——
     ///   - 保留**高优先级层**(先出现)的词条信息(code/natural_order)；
     ///   - 但**继承后续层中同 text 的更高权重**(用户词不因低权重丢失码表词的自然排序位)；

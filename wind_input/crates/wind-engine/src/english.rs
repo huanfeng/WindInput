@@ -32,6 +32,19 @@ impl EnglishEngine {
         }
     }
 
+    /// 词组分词索引的落盘目录（`None` = 不落盘，堆上建）。见 [`LazyPhraseIndex`] 的「落盘」一节。
+    ///
+    /// ⚠️ 必须在 [`Self::with_phrase_seg`] **之前**调用：那边一开就起预热线程，线程手里攥着
+    /// 的是当时那个 `LazyPhraseIndex`，之后再换就是白建一份、按键时再建一份。
+    pub fn with_phrase_cache_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        debug_assert!(
+            self.seg_sep.is_none(),
+            "with_phrase_cache_dir 须在 with_phrase_seg 之前调用"
+        );
+        self.phrase = Arc::new(LazyPhraseIndex::with_cache_dir(dir));
+        self
+    }
+
     /// 开启词组分词输入并指定分词符（t42）。
     ///
     /// 由构建方在引擎组装完毕后调用；`None` 保持关闭。开启时顺带把索引构建推给后台线程——
@@ -90,11 +103,21 @@ impl Engine for EnglishEngine {
     fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
         let mut v = self.inner.memory_parts();
         if let Some(bytes) = self.phrase.heap_bytes_if_built() {
+            // 镜像是一整块：常驻时 1 次分配，mmap 时堆上没有它（0 字节 / 0 块），
+            // 映射的文件字节另列一项——那不是私有内存，混进堆字节会让「降没降」无从判断。
+            let mapped = self.phrase.mapped_bytes_if_built().unwrap_or(0);
             v.push(crate::engine::MemPart {
                 name: "LazyPhraseIndex".into(),
                 bytes,
-                allocs: 4,
+                allocs: usize::from(mapped == 0),
             });
+            if mapped > 0 {
+                v.push(crate::engine::MemPart {
+                    name: "LazyPhraseIndex.mmap".into(),
+                    bytes: mapped,
+                    allocs: 0,
+                });
+            }
         }
         v
     }
@@ -421,5 +444,70 @@ mod tests {
             !e.phrase.is_built(),
             "关着词组分词却把 12.7 MB 的索引建了出来 —— 有人在 seg_sep 早退之前调了 get"
         );
+    }
+
+    /// ★ 端到端：真 wdat 词库 + 缓存目录 + **真热摘**（`set_dict_enabled` →
+    /// `unregister_layer`）。摘掉扩展库后换用另一份落盘文件，且不再召回被摘库的词组。
+    ///
+    /// `tests/english_phrase_index.rs` 走 `EngineManager`，缓存根是进程级 `CACHE_DIR`、测试
+    /// 改不了，也就断言不了「换了哪份文件」；这里用引擎的缓存目录注入口补上这一半。
+    #[test]
+    fn hot_unplugging_a_dictionary_switches_to_another_cache_file() {
+        let dir = std::env::temp_dir().join(format!("wind_en_unplug_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let load = |name: &str, body: &str| {
+            let yaml = dir.join(format!("{name}.dict.yaml"));
+            std::fs::write(&yaml, format!("---\nname: {name}\n...\n{body}")).unwrap();
+            CachedDict::load_at_with(&yaml, &dir.join(format!("{name}.wdat")), true).unwrap()
+        };
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(SystemDictLayer::new(
+            load("en", "Buenos Aires\tbuenosaires\t60\n"),
+            "en",
+        )));
+        dm.register_layer(Box::new(SystemDictLayer::new(
+            load("en_ext", "iPhone 15 Pro Max\tiphone\t100\n"),
+            "codetable-extra-en_ext",
+        )));
+        let cache = dir.join("cache");
+        let ct = CodeTableEngine::new(32, CommitOptions::default(), Arc::new(dm))
+            .with_own_extra_dicts(["en_ext".to_string()]);
+        let e = EnglishEngine::new(ct)
+            .with_phrase_cache_dir(Some(cache.clone()))
+            .with_phrase_seg(Some(crate::english_phrase::PHRASE_SEPARATOR));
+        let files = || -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(&cache)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| n.ends_with(".wphr"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            v.sort();
+            v
+        };
+
+        assert!(texts(&e, "ip'max").contains(&"iPhone 15 Pro Max".to_string()));
+        let before = files();
+        assert_eq!(before.len(), 1, "开着两本库时应落盘一份：{before:?}");
+
+        assert!(
+            e.set_dict_enabled("en_ext", false),
+            "前提：热摘应被本引擎认领"
+        );
+        assert!(
+            !texts(&e, "ip'max").contains(&"iPhone 15 Pro Max".to_string()),
+            "热摘后不该再召回被摘库的词组"
+        );
+        assert!(texts(&e, "bue'air").contains(&"Buenos Aires".to_string()));
+        let after = files();
+        assert_eq!(after.len(), 2, "热摘后应按新集合另落一份：{after:?}");
+        assert!(
+            after.contains(&before[0]),
+            "原集合那份应保留（再启用时复用）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

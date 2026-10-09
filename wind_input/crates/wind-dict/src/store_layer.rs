@@ -125,6 +125,15 @@ impl DictLayer for StoreUserLayer {
         LayerType::User
     }
 
+    /// 本层**没有**覆盖 `for_each_entry`（枚举恒空），对派生索引的贡献恒为「无」，
+    /// 故可以给一个稳定摘要——否则挂着用户词层的英文引擎永远落不了盘。
+    ///
+    /// ⚠️ 哪天给本层实现了 `for_each_entry`，这里必须同时改成反映其内容的摘要，
+    /// 否则用户词的增删不会让英文词组索引失效。
+    fn entries_digest(&self) -> Option<String> {
+        Some(format!("{}|enumerates-nothing", self.name))
+    }
+
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
         let recs = self
             .store
@@ -234,6 +243,15 @@ impl DictLayer for StoreTempLayer {
 
     fn layer_type(&self) -> LayerType {
         LayerType::Temp
+    }
+
+    /// 本层**没有**覆盖 `for_each_entry`（枚举恒空），对派生索引的贡献恒为「无」，
+    /// 故可以给一个稳定摘要——否则挂着用户词层的英文引擎永远落不了盘。
+    ///
+    /// ⚠️ 哪天给本层实现了 `for_each_entry`，这里必须同时改成反映其内容的摘要，
+    /// 否则用户词的增删不会让英文词组索引失效。
+    fn entries_digest(&self) -> Option<String> {
+        Some(format!("{}|enumerates-nothing", self.name))
     }
 
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {

@@ -150,6 +150,21 @@ pub fn cache_is_fresh(cache: &Path, sources: &[&Path], tag: &str) -> bool {
     matches!(std::fs::read_to_string(fp_sidecar(cache)), Ok(s) if s.trim() == fp)
 }
 
+/// 删掉缓存的指纹 sidecar（不存在不算错）。**重建缓存之前**调用：新 `.fp` 一旦写失败，
+/// 盘上留下的是「没有指纹」而不是「旧指纹」——前者让 [`cache_is_fresh`] 判不新鲜、
+/// [`cache_digest`] 退到 `大小:mtime`，后者会让派生缓存（`.wridx`、英文词组索引）把新内容
+/// 当成没变过。不改任何指纹的算法，存量缓存键不受影响。
+pub fn remove_cache_fp(cache: &Path) {
+    if let Err(e) = std::fs::remove_file(fp_sidecar(cache))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            "删除旧指纹 sidecar {} 失败: {e}",
+            fp_sidecar(cache).display()
+        );
+    }
+}
+
 /// 缓存构建成功后调用：写入指纹 sidecar。
 ///
 /// 单次失败只是「下次多重建一次」，但**持续失败就是持续重建**——大词库上那是几十秒的
@@ -273,6 +288,16 @@ pub const REVERSE_INDEX_TAG: &str = "reverse-index/v1";
 /// 历史：
 /// - v1 = 初始
 pub const SINGLE_CHAR_CODES_TAG: &str = "single-char-codes/v1";
+
+/// 英文词组分词索引（`.wphr`，`wind_engine::english_phrase`）的指纹 tag。
+///
+/// 同 [`REVERSE_INDEX_TAG`]：**索引语义一改就要 +1**——收词判据（几个词算词组）、小写化
+/// 规则、首词排序键，任何一项变了而文件布局没动，文件头里的格式版本拦不住，存量用户会
+/// 永久复用按旧语义建的索引。指纹进的是**文件名**，+1 即换一份新文件，旧的由保留上限清走。
+///
+/// 历史：
+/// - v1 = 初始（`text` 按空白切词、≥2 词才收、逐词 `lower()`、按首词字节序稳定排序）
+pub const ENGLISH_PHRASE_INDEX_TAG: &str = "english-phrase/v1";
 
 /// 词库缓存的 tag：区分 code 列是否被小写化（`dict_type = english` 走小写）。
 pub fn dict_tag(lowercase_code: bool) -> &'static str {

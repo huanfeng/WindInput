@@ -264,6 +264,10 @@ impl CachedDict {
         if let Some(parent) = wdat_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // 先删旧 `.fp` 再写新 wdat：新 `.fp` 写失败时，盘上留下的是「没有指纹」（下次
+        // `cache_is_valid` 判不新鲜而重建、下游摘要退到大小:mtime），而不是一份与新 wdat
+        // 对不上的旧指纹（见 `cache_fp::remove_cache_fp`）。
+        crate::cache_fp::remove_cache_fp(wdat_path);
         if let Err(e) = Self::write_cache(&dict, wdat_path) {
             // 退化成内存模式：词库整份常驻堆而非 mmap，大词库代价可观。此前只记一行
             // 「Failed to write」，看不出后果，用户也就无从解释内存为何偏高。
@@ -1020,5 +1024,43 @@ mod tests {
         assert!(idx.is_empty());
         assert_eq!(idx.len(), 0);
         assert!(idx.codes_of("任意").is_none());
+    }
+
+    /// ★ 重建 wdat 时**先删旧 `.fp`**：新 `.fp` 写失败的话，盘上留下的应是「没有指纹」
+    /// （下游摘要退到 `大小:mtime`、`cache_is_fresh` 判不新鲜而重建），而不是一份
+    /// 「旧指纹」——后者会让 `.wridx` / 英文词组索引把新 wdat 当成没变过，静默复用旧产物。
+    ///
+    /// 写失败用「旧 `.fp` 只读」模拟（非 root 下 `fs::write` 打不开只读文件；目录可写，
+    /// 删得掉）。root 下只读挡不住写，本用例退化为恒绿——不是假红，只是测不到。
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_fp_is_removed_before_the_wdat_is_rebuilt() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("wind-stale-fp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml = dir.join("x.dict.yaml");
+        let wdat = dir.join("x.wdat");
+        let mut fp = wdat.clone().into_os_string();
+        fp.push(".fp");
+        std::fs::write(&yaml, "---\nname: x\n...\n啊\ta\t1\n").unwrap();
+        drop(CachedDict::load_at_with(&yaml, &wdat, false).unwrap());
+        let before = crate::cache_fp::cache_digest(&wdat);
+        assert!(
+            before.starts_with("fp:"),
+            "前提：首建应写出 .fp，实际 {before}"
+        );
+        std::fs::set_permissions(&fp, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        std::fs::write(&yaml, "---\nname: x\n...\n啊\ta\t1\n吧\tb\t1\n").unwrap();
+        let d = CachedDict::load_at_with(&yaml, &wdat, false).unwrap();
+        assert_eq!(d.search("b").len(), 1, "前提：wdat 确已按新 yaml 重建");
+        drop(d);
+        assert_ne!(
+            crate::cache_fp::cache_digest(&wdat),
+            before,
+            "wdat 已换内容，摘要却还是旧指纹——下游派生缓存会静默复用旧产物"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

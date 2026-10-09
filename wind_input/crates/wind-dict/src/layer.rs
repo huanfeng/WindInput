@@ -97,6 +97,20 @@ pub trait DictLayer: Send + Sync {
     /// 与 [`Self::search`] 返回的候选同域——否则索引里的权重与查询结果对不上。
     fn for_each_entry(&self, _f: &mut dyn FnMut(&str, &str, i32)) {}
 
+    /// [`Self::for_each_entry`] 枚举结果的**稳定摘要**，供落盘的派生索引判定「盘上那份
+    /// 还对不对得上本层」（当前唯一消费方：英文词组分词索引 `.wphr`）。
+    ///
+    /// - `Some(s)`：同一个 `s` 必须对应同一组枚举结果（**含权重换算**）；
+    /// - `None`：说不清（内存词库、没有稳定磁盘产物的层）⇒ 以它为源的派生索引**不落盘**，
+    ///   每次照旧全表扫——慢，但结果正确。
+    ///
+    /// 默认 `None`，理由同 `for_each_entry` 默认为空：覆盖了 `for_each_entry` 却忘了覆盖
+    /// 本方法的层只会「没缓存」，不会把一份旧索引骗成新鲜的。反过来，**没有**覆盖
+    /// `for_each_entry` 的层（枚举恒空）要参与缓存，得自己显式声明，见 `StoreUserLayer`。
+    fn entries_digest(&self) -> Option<String> {
+        None
+    }
+
     /// **通配查询**（`docs/design/codetable-wildcard.md` §5.1）：`pattern` 中等于 `wildcard`
     /// 的位匹配**恰好一个**任意码元，其余位字面匹配。`with_prefix` 时追加更长编码
     /// （前 `pattern` 位匹配即可）的前缀补全。

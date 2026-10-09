@@ -15,6 +15,8 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 toml = { workspace = true }
+# 英文词组分词索引落盘后 mmap 读（`english_phrase.rs`）。版本与 wind-dict 同一条，不引入新依赖。
+memmap2 = "0.9"
 
 [target.'cfg(windows)'.dev-dependencies]
 # 只给「禁用词库后文件不再被占用」那条 e2e 用：判据必须走 `DeleteFileW`。

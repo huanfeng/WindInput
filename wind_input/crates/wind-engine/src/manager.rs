@@ -711,9 +711,11 @@ fn cache_path(source: &Path, ext: &str) -> std::path::PathBuf {
     source.with_extension(ext)
 }
 
-/// 递归删除目录下的缓存产物（wdat 词库 / fp 指纹 / wdb unigram），best-effort：
-/// 单个文件删除失败（如仍被 mmap 占用）计入 failed 继续。只认扩展名白名单，
-/// 不触碰目录本身与其它文件（缓存根与用户数据同在 %LOCALAPPDATA% 命名空间下）。
+/// 递归删除目录下的缓存产物（wdat 词库 / fp 指纹 / wdb unigram / wridx 反查索引 /
+/// building 构建死亡记录 / 英文词组索引 `phrase-*.wphr` 及其写盘临时文件），best-effort：
+/// 单个文件删除失败（如仍被 mmap 占用）计入 failed 继续。只认白名单（扩展名，外加词组
+/// 索引的文件名形态——`.tmp` 只按扩展名认太宽），不触碰目录本身与其它文件（缓存根与
+/// 用户数据同在 %LOCALAPPDATA% 命名空间下）。
 fn purge_cache_files(dir: &Path, removed: &mut usize, failed: &mut usize) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -733,7 +735,10 @@ fn purge_cache_files(dir: &Path, removed: &mut usize, failed: &mut usize) {
         let is_cache = p
             .extension()
             .and_then(|s| s.to_str())
-            .is_some_and(|s| matches!(s, "wdat" | "fp" | "wdb" | "wridx" | "building"));
+            .is_some_and(|s| matches!(s, "wdat" | "fp" | "wdb" | "wridx" | "building"))
+            || p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(crate::english_phrase::is_phrase_cache_file);
         if !is_cache {
             continue;
         }
@@ -1942,6 +1947,17 @@ impl EngineManager {
     ) -> Option<std::path::PathBuf> {
         let key = Self::schema_cache_key(schema_id)?;
         Some(cache_root.join(&key).join(format!("{key}.wscc")))
+    }
+
+    /// 英文词组分词索引（`.wphr`）的落盘目录：`<cache>/<方案键>/`，文件名由索引自己按
+    /// 启用词库集合的指纹取（`phrase-<指纹>.wphr`，见 [`crate::english_phrase::LazyPhraseIndex`]）。
+    ///
+    /// 与 [`reverse_index_cache_path`](Self::reverse_index_cache_path) 同目录、同键：同源于该方案
+    /// 的整组词库，一起生、一起废。**无缓存根时 `None` = 不落盘**，理由也同那里——词库源常在
+    /// 只读的安装目录，不该把十几 MB 的派生产物落到源旁。
+    fn english_phrase_cache_dir(schema_id: &str) -> Option<std::path::PathBuf> {
+        let dir = CACHE_DIR.get()?.as_ref()?;
+        Some(dir.join(Self::schema_cache_key(schema_id)?))
     }
 
     /// 方案 id → 可安全当**目录名和文件名**用的键；id 为空时 `None`。
@@ -5927,6 +5943,8 @@ impl EngineManager {
                     CodeTableEngine::new(mcl, commit_opts, Arc::new(dm))
                         .with_own_extra_dicts(Self::declared_extra_dict_ids(&schema)),
                 )
+                // 落盘目录须先于 `with_phrase_seg` 装上：后者会立刻起预热线程。
+                .with_phrase_cache_dir(Self::english_phrase_cache_dir(schema_id))
                 .with_phrase_seg(seg),
             ));
         }
@@ -9763,15 +9781,22 @@ input_chars = \"a-z;\"
         std::fs::write(dir.join("unigram.wdb"), b"x").unwrap();
         // 构建死亡记录（应删：「重建缓存」即手动重试，见 build_guard）
         std::fs::write(sub.join("main.wdat.building"), b"x").unwrap();
-        // 非缓存文件（应留）
+        // 英文词组索引及其写盘临时文件（应删，`english_phrase::is_phrase_cache_file`）
+        std::fs::write(sub.join("phrase-x.wphr"), b"x").unwrap();
+        std::fs::write(sub.join("phrase-x.wphr.123-0.tmp"), b"x").unwrap();
+        // 非缓存文件（应留）——别人的 `.tmp` 也不归我们删
         std::fs::write(dir.join("note.txt"), b"x").unwrap();
         std::fs::write(sub.join("raw.dict.yaml"), b"x").unwrap();
+        std::fs::write(sub.join("other.tmp"), b"x").unwrap();
 
         let (mut removed, mut failed) = (0usize, 0usize);
         purge_cache_files(&dir, &mut removed, &mut failed);
-        assert_eq!((removed, failed), (5, 0));
+        assert_eq!((removed, failed), (7, 0));
         assert!(dir.join("note.txt").exists());
         assert!(sub.join("raw.dict.yaml").exists());
+        assert!(sub.join("other.tmp").exists());
+        assert!(!sub.join("phrase-x.wphr").exists());
+        assert!(!sub.join("phrase-x.wphr.123-0.tmp").exists());
         assert!(!sub.join("main.wdat").exists());
         assert!(!dir.join("unigram.wdb").exists());
 

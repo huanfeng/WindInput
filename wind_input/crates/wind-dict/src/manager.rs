@@ -81,6 +81,11 @@ impl DictManager {
         self.composite.for_each_entry(f);
     }
 
+    /// 见 [`CompositeDict::entries_digest`]。
+    pub fn entries_digest(&self) -> Option<Vec<String>> {
+        self.composite.entries_digest()
+    }
+
     pub fn composite(&self) -> &CompositeDict {
         &self.composite
     }
@@ -249,6 +254,45 @@ impl DictLayer for SystemDictLayer {
         self.dict.for_each_entry(&mut |code, text, weight| {
             f(code, text, self.effective_weight(weight));
         });
+    }
+
+    /// 词库文件路径 + 它的缓存摘要（[`crate::cache_fp::cache_digest`]：有 `.fp` 走内容指纹，
+    /// 无则 `大小:mtime`）+ **wdat 自身的 `大小:mtime`** + **两项权重换算参数**。
+    ///
+    /// 换算参数必须在内：`for_each_entry` 报的是换算后的权重，同一个 wdat 换了
+    /// `default_weight` / `weight_spec`，枚举出的权重就变了，只哈希文件会复用旧权重的索引。
+    /// 内存词库（wdat 写失败的降级形态）没有稳定的磁盘产物 ⇒ `None`。
+    ///
+    /// # 为什么 `.fp` 之外还要 wdat 自身的 `大小:mtime`
+    ///
+    /// `.fp` 是 wdat 旁边的另一个文件，与 wdat **不是原子地一起换**：重建 wdat 之后写 `.fp`
+    /// 失败，盘上就是「新 wdat + 旧 `.fp`」，只看 `.fp` 的摘要与换内容之前逐字相同，
+    /// 词组索引会静默召回已删掉的词组。wdat 只经整体替换（rename），换内容必改 mtime。
+    /// 代价是「内容没变、wdat 被重写」时多重建一次词组索引（百毫秒级）。
+    ///
+    /// ⚠️ 只混进**本方法**，不改共用的 `cache_digest`：后者是 `.wridx` 的指纹源，改它会让
+    /// 全体用户的反查索引白重建一次（大词库峰值数百 MB）。`.fp` 那一侧的根治在
+    /// `CachedDict::load_at_with`：重建 wdat 前先删旧 `.fp`。
+    fn entries_digest(&self) -> Option<String> {
+        let p = self.dict.source_file()?;
+        let own = match std::fs::metadata(p) {
+            Ok(m) => format!(
+                "{}:{}",
+                m.len(),
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos())
+            ),
+            Err(_) => "absent".to_string(),
+        };
+        Some(format!(
+            "sys|{}|{}|wdat={own}|dw={:?}|wn={:?}",
+            p.display(),
+            crate::cache_fp::cache_digest(p),
+            self.default_weight,
+            self.weight_norm
+        ))
     }
 
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
@@ -564,5 +608,66 @@ mod tests {
             .map(|c| (c.text.as_str(), c.code.as_str(), c.is_prefix))
             .collect();
         assert_eq!(got, [("甲", "ab", false), ("丙", "abcd", true)]);
+    }
+
+    /// ★ `entries_digest` 必须随**枚举结果的每个来源**变：词库内容、文件（无 `.fp` 时的
+    /// `大小:mtime`）、两项权重换算。缺一项，英文词组索引就会在那一项变了之后读回旧文件。
+    ///
+    /// 内存词库（wdat 写失败的降级形态）给 `None`：没有稳定产物可比 ⇒ 派生索引不落盘。
+    #[test]
+    fn entries_digest_tracks_content_file_and_weight_transform() {
+        let dir = std::env::temp_dir().join(format!("wind_entries_digest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml = dir.join("en.dict.yaml");
+        let wdat = dir.join("en.wdat");
+        let write_yaml = |body: &str| {
+            std::fs::write(&yaml, format!("---\nname: en\n...\n{body}")).unwrap();
+        };
+        let digest_of = |dw: Option<i32>| {
+            let d = CachedDict::load_at_with(&yaml, &wdat, true).unwrap();
+            SystemDictLayer::new(d, "en")
+                .with_default_weight(dw)
+                .entries_digest()
+                .expect("mmap 词库应给得出摘要")
+        };
+
+        write_yaml("Buenos Aires\tbuenosaires\t60\n");
+        let v1 = digest_of(None);
+        assert_eq!(
+            digest_of(None),
+            v1,
+            "什么都没变，摘要必须稳定（否则永远不命中）"
+        );
+        assert_ne!(
+            digest_of(Some(5)),
+            v1,
+            "default_weight 改了，枚举出的权重就变了"
+        );
+
+        write_yaml("Buenos Aires\tbuenosaires\t60\nZulu Time\tzulu\t40\n");
+        assert_ne!(digest_of(None), v1, "词库内容变了，摘要必须变");
+
+        // 无 `.fp` sidecar（wdat-only 分发）时退到「大小:mtime」：只动 mtime 也得变。
+        let v2 = digest_of(None);
+        let mut fp = wdat.clone().into_os_string();
+        fp.push(".fp");
+        std::fs::remove_file(&fp).unwrap();
+        let d = CachedDict::Mmap(crate::reader_pool::open_wdat(&wdat).unwrap());
+        let no_fp = SystemDictLayer::new(d, "en").entries_digest().unwrap();
+        assert_ne!(no_fp, v2);
+        let f = std::fs::File::options().write(true).open(&wdat).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        let d = CachedDict::Mmap(crate::reader_pool::open_wdat(&wdat).unwrap());
+        assert_ne!(
+            SystemDictLayer::new(d, "en").entries_digest().unwrap(),
+            no_fp,
+            "无 .fp 时 mtime 变了摘要必须变"
+        );
+
+        let mem = SystemDictLayer::new(CachedDict::Memory(CodetableDict::empty()), "m");
+        assert!(mem.entries_digest().is_none(), "内存词库说不清摘要");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
