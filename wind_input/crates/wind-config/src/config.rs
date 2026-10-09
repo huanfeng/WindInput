@@ -2838,11 +2838,12 @@ pub struct MixGlobal {
     /// 那里正是长拼音的地盘，`nihaom` 选「你好」再续打的分步上屏要留着。
     #[serde(default = "default_true")]
     pub pinyin_partial_candidates_overflow: bool,
-    /// 混输时拼音是否产出简拼候选（声母缩写，nh→你好）。默认开=历史行为（此前恒开无开关）。
-    /// 关闭后混输里的拼音只认全拼，适合「只把拼音当临时输入补位、不用简拼」的用户；
-    /// 简拼会让几乎任何字母串都可能是拼音，关掉可让候选更干净。仅影响混输的拼音子引擎，
-    /// 纯拼音方案不受影响。
-    #[serde(default = "default_true")]
+    /// 混输时拼音是否产出简拼候选（声母缩写，nh→你好）。**出厂关**（a3971b4f 起；此前恒开）：
+    /// 开着时超码长的顶码上屏基本不会发生，理由见 `data/config.toml` 同名项注释。
+    /// 关闭时混输里的拼音只认全拼，候选更干净。仅影响混输的拼音子引擎，纯拼音方案不受影响。
+    /// ⚠️ 三处同源：本处 serde 默认 / `Default` / `data/config.toml`，由
+    /// `mix_pinyin_abbrev_*` 三条测试守门。
+    #[serde(default)]
     pub enable_pinyin_abbrev: bool,
     /// 混输方案下，拼音候选旁是否显示主码表的编码（反查）。默认开。
     ///
@@ -13301,6 +13302,21 @@ smart_method = "delete_replace"
         assert!(
             !MixGlobal::default().enable_pinyin_abbrev,
             "简拼出厂应为关；改它前先读 data/config.toml 同名项的注释"
+        );
+    }
+
+    /// 第三处同源：serde 字段默认值（写了 `[schema.mix]` 段、没写这一项时取它）。
+    ///
+    /// 它曾是 `default_true`，与 `Default` / `data/config.toml` 的 `false` 相反。`Config::load`
+    /// 以 `Config::default()` 序列化值打底，所以那条路上触发不到；但直接反序列化部分配置的
+    /// 调用方（测试、日后的新入口）会拿到与出厂相反的值。
+    #[test]
+    fn mix_pinyin_abbrev_serde_default_matches_default() {
+        let v: Config = toml::from_str("[schema.mix]\nshow_source_hint = true\n").unwrap();
+        assert_eq!(
+            v.schema.mix.enable_pinyin_abbrev,
+            MixGlobal::default().enable_pinyin_abbrev,
+            "serde 默认值与 Default 漂移了"
         );
     }
 
