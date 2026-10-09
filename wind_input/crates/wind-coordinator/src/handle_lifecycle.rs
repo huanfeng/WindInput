@@ -262,6 +262,8 @@ impl Coordinator {
             // 再显示并重锁起点，否则留在上屏前的位置（同顶码余码续打，见 handle_candidate）。
             if committed.is_some() {
                 self.reset_first_show();
+                self.first_show_after_commit
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             self.notify_ui_update(state);
             debug!("Entered temp English mode after commit (buffer={})", disp);

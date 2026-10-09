@@ -1599,6 +1599,12 @@ pub struct Coordinator {
     /// 置位后，该轮第一次权威坐标到达时改用放宽的容差判断要不要校正——校正动作本身
     /// 才是抖动的观感来源，小偏差不动比「跳一下修正」更稳。组合结束时复位。
     pub(crate) first_show_was_provisional: std::sync::atomic::AtomicBool,
+    /// 本轮组合紧接在一次**上屏**之后开（Shift+字母上屏进临英）：宿主插入点必然已前移，
+    /// 兜底首显用的旧坐标是确定的陈旧值，不是「可能差一点」。置位时兜底首显**不记**
+    /// `first_show_was_provisional`，让随后到达的权威坐标按常规 3px 容差校正，
+    /// 而不是被放宽容差（≈2 个行高）当微移吞掉、候选窗留在上屏前的位置。
+    /// 由 [`Coordinator::reset_first_show`] 复位，兜底首显消费。
+    pub(crate) first_show_after_commit: std::sync::atomic::AtomicBool,
     /// 坐标缓存是否已被**当前插入点**验证过（= `state.caret_*` 还算不算数）。
     ///
     /// `fast` 档短兜底的隐含前提是「手里的旧坐标 ≈ 当前插入点」——同一行连打时它只差一个
@@ -2853,6 +2859,7 @@ impl Coordinator {
             last_key_at: Mutex::new(None),
             last_key_interval_ms: Mutex::new(None),
             first_show_was_provisional: std::sync::atomic::AtomicBool::new(false),
+            first_show_after_commit: std::sync::atomic::AtomicBool::new(false),
             caret_cache_verified: std::sync::atomic::AtomicBool::new(false),
             caret_cache_is_idle_report: std::sync::atomic::AtomicBool::new(false),
             awaiting_first_authority_after_focus: std::sync::atomic::AtomicBool::new(false),
@@ -6679,7 +6686,16 @@ impl Coordinator {
         let caret_free = self
             .caret_independent
             .load(std::sync::atomic::Ordering::Relaxed);
-        if is_first_frame && !caret_free && !skip_caret_pending && !coords_ready && !idle_anchor {
+        // 上屏后开的新组合（`first_show_after_commit`）：插入点必然已前移，instant 的遗留坐标、
+        // idle_anchor 的「按键前」坐标都是上屏前的陈旧值，逃生口一律不放行，老老实实等
+        // 权威坐标（兜底超时到期时消费该标记，见 `fire_pending_first_show`）。
+        let after_commit = self
+            .first_show_after_commit
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if is_first_frame
+            && !caret_free
+            && (after_commit || (!skip_caret_pending && !coords_ready && !idle_anchor))
+        {
             // 唯一的「等」出口。与下面的放行日志成对，两条合起来即可从服务端日志判定
             // 每一帧走了哪条路、以及是哪个逃生口生效——不必再对着 TSF 日志比时间戳。
             debug!(
@@ -13959,6 +13975,35 @@ mod caret_compat_tests {
             c.first_show_was_provisional
                 .load(std::sync::atomic::Ordering::Relaxed),
             "兜底显示后应置位 provisional 以享放宽容差"
+        );
+    }
+
+    /// 上屏后紧接着开的新组合（Shift+字母上屏进临英）：兜底首显用的旧坐标确定陈旧，
+    /// 不得记 provisional，否则随后一个字宽的前移会被放宽容差吞掉、候选窗留在原位。
+    #[test]
+    fn first_show_after_commit_is_not_provisional() {
+        let c = coord();
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "a".to_string();
+            st.caret_x = 100;
+            st.caret_y = 200;
+            st.caret_height = 25;
+        }
+        *c.pending_first_show.lock().unwrap() = true;
+        c.first_show_after_commit
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let token = *c.pending_first_show_token.lock().unwrap();
+        c.fire_pending_first_show(token);
+        assert!(
+            !c.first_show_was_provisional
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "上屏后的兜底首显不应享放宽容差"
+        );
+        assert!(
+            !c.first_show_after_commit
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "标记应被兜底首显消费"
         );
     }
 

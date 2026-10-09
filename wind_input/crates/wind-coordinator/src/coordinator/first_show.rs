@@ -95,6 +95,8 @@ impl Coordinator {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.first_show_extended
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.first_show_after_commit
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         *self
             .candidate_shown
             .lock()
@@ -373,8 +375,12 @@ impl Coordinator {
             // 用的既然是旧坐标，就必须按「非权威」记账，否则随后到达的权威坐标会被 3px 常规容差
             // 判成需要校正而跳一下——兜底路径本来就是抖动最容易被看见的地方。
             // 置位在 has_content 内：没真显示就不该留下"用过非权威坐标"的账。
+            // 上屏刚前移过插入点：旧坐标确定陈旧，不留「用过非权威坐标」的账（见字段注释）。
+            let after_commit = self
+                .first_show_after_commit
+                .swap(false, std::sync::atomic::Ordering::Relaxed);
             self.first_show_was_provisional
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+                .store(!after_commit, std::sync::atomic::Ordering::Relaxed);
             self.show_authorized
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             debug!("first_show 兜底 timer 到期 → 用现有坐标首显（非权威，享放宽容差）");

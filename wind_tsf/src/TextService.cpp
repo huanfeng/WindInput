@@ -7859,7 +7859,16 @@ void CTextService::StartDeferredCompositionIfPending()
     WIND_LOG_DEBUG_FMT(L"StartDeferredComposition: opening new composition text=%s\n", text.c_str());
     // 此刻 CommitText 已结束旧组合、_pComposition 为空 → UpdateComposition 新建组合并显示余码
     //（有下划线的正常编码态）。对齐真实输入法 compositionstart@keyup。
-    UpdateComposition(text, _CompositionCaretFor(text));
+    const BOOL opened = UpdateComposition(text, _CompositionCaretFor(text));
+    // 延迟组合是在 keyup / 定时器里开的，不经 keydown 的应答处理，没人替它上报坐标：
+    // 上屏使宿主光标前移，服务端若没收到这条，首显只能拿上屏前的陈旧坐标兜底，
+    // 候选窗留在原处，直到下一个按键才跳（Shift+字母上屏进临英实测，2026-10-09）。
+    // 组合没建成（失败 / 宿主排成异步还没落地）就不报：非按键上下文里同步取坐标会被宿主拒，
+    // 退到 GUI 光标的值会被服务端当权威坐标。异步落地的由 OnLayoutChange 去报。
+    if (opened && HasActiveComposition())
+    {
+        SendCaretPositionUpdate();
+    }
 }
 
 void CTextService::CancelDeferredComposition()
