@@ -258,6 +258,11 @@ impl Coordinator {
             state.temp_english_prefix = String::new();
             self.update_temp_english_candidates(state);
             let disp = state.preedit.clone();
+            // 上屏使宿主光标前移，新组合起点已变：复位首显，让候选窗等 reflow 后的新坐标
+            // 再显示并重锁起点，否则留在上屏前的位置（同顶码余码续打，见 handle_candidate）。
+            if committed.is_some() {
+                self.reset_first_show();
+            }
             self.notify_ui_update(state);
             debug!("Entered temp English mode after commit (buffer={})", disp);
             return Some(match committed {
