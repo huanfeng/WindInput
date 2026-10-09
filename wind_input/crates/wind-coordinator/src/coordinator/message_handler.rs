@@ -1842,7 +1842,9 @@ impl MessageHandler for Coordinator {
                 // 在候选不足时吞掉字母并上屏高亮候选，用户按 z 想接着打码却上了别的字。
                 // 判据与 `handle_select_key_up` 同源、结论相反：那里修饰键**没有**字符可
                 // 输出所以吞键，这里字母的字符就是编码所以落回。
+                // 联想态让出选词键（`select_keys_commit = false`）时不选，落下面正常组码。
                 if !state.candidates.is_empty()
+                    && !self.assoc_yields_select_key(&state)
                     && let Some(offset) = self.select_key_offset(data.key_code)
                 {
                     let (start, end) = self.page_range(&state);
@@ -2046,8 +2048,14 @@ impl MessageHandler for Coordinator {
                     // 它接着流到 D0 的模式引导键（`;` 出厂绑 quick_mix）和下方标点流水线，
                     // 于是 `ing` 韵母仍旧打不出。三条拦截通路只挡了一条，是典型的半截修复。
                     // 现由码元集单点仲裁（拼音引擎的 `input_chars` 从双拼布局推导）。
+                    //
+                    // 联想态让出选词键（`input.association.select_keys_commit = false`，t251）：
+                    // 整段跳过（不选、也不记越界），该键按「联想窗不在」往下走——模式引导照常
+                    // 进模式，否则落下方标点流水线，那里先收联想再出标点。
                     let mut select_overflow: Option<char> = None;
-                    if let Some(offset) = self.select_key_offset(data.key_code) {
+                    if !self.assoc_yields_select_key(&state)
+                        && let Some(offset) = self.select_key_offset(data.key_code)
+                    {
                         let (start, end) = self.page_range(&state);
                         let idx = start + offset;
                         if idx < end {

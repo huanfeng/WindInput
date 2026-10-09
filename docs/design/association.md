@@ -252,12 +252,18 @@ composition 照常结束，只让 `_hasCandidates` 保持为真。
 |---|---|---|
 | 数字 1-9 / 0 | `handle_number_key_select` | 选中并上屏 |
 | 空格 | VK_SPACE 臂（`!candidates.is_empty()`） | 上屏当前高亮 |
-| `;` / `'` 二三候选 | select-key 消费点 | 选第 2/3 条 |
+| `;` / `'` 二三候选 | select-key 消费点 | 选第 2/3 条（`select_keys_commit = false` 时让出，见下） |
 | ↑↓ / PgUp PgDn / `-` `=` | `apply_session_action` | 移高亮 / 翻页 |
 | Esc | `cancel_session` | 收窗 + 结束组合 |
 | 字母 | `update_candidates` | 换成新一轮正常候选（**Shift+字母除外**，见 §3.3.2） |
 | 标点 | 标点流水线 | 出标点、结束组合 |
 | 鼠标点选 | `select_candidate_at` | 与键盘同一条 `commit_selected` |
+
+**二三候选键可让出**（论坛 t251，对标 QQ 五笔）。`select_keys_commit = false` 时，主路两个
+选词键消费点（符号臂、字母臂）在联想态跳过选词，该键按「联想窗不在」往下走：普通标点落
+标点流水线（先收联想再出标点），另绑了模式引导的（出厂 `;` = 快捷输入）照常进模式。
+判据收在 `assoc_yields_select_key`；口径是「选词键」而非写死 `;` `'`，用户自配的字母选词键
+同样让出。修饰键组走 keyup、没有字符可出，不受影响；数字键选联想也不受影响。
 
 **例外有四类**（与 §3 表格的第 2~5 行一一对应）：
 
@@ -443,6 +449,7 @@ kind = "off"            # off / word / smart —— 兼任开关
 mode = "one_shot"       # one_shot / continuous
 max_count = 9
 space_commits = true    # 空格是否上屏当前高亮
+select_keys_commit = true  # 二三候选键是否选联想；false = 联想态让出（t251）
 hide_after_ms = 5000    # 联想窗自动隐藏；0 = 不隐藏
 hint = "联想输入"        # 编码栏标识；空串 = 不显示
 history = true

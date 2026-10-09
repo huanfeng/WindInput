@@ -933,3 +933,192 @@ fn assoc_shift_letter_direct_commits_when_configured() {
     assert_eq!(c.debug_active_mode(), None, "direct_commit 档不进临英");
     assert!(assoc_texts(&c).is_empty(), "上屏后联想窗该收起");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `select_keys_commit`：联想态让出二三候选键（论坛 t251）
+//
+// 出厂 `true`（照常选第 2/3 条，由 `select_keys_work_in_assoc` 钉）。`false` 时联想态下
+// `;` `'` 不选联想：收窗，该键按「联想窗不在」处理——判据就是拿同一个键在空闲态的
+// 应答来比，而不是写死某个标点：`;` 出厂另绑了快捷输入，空闲态按它进的是模式。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 上屏 / 组合动作的「对宿主可见的那部分」，用来比「联想态让出」与「空闲态」是否一致。
+///
+/// 联想态挂着占位组合，空闲态没有：同样出一个标点，前者可能是「替换占位组合」、后者是
+/// 「直接插入」，动作变体不必相同，真正要比的是**写进宿主的文本**与**新开的组合**。
+fn host_visible(act: &KeyAction) -> (String, String) {
+    match act {
+        KeyAction::InsertText {
+            text,
+            new_composition,
+            ..
+        } => (text.clone(), new_composition.clone().unwrap_or_default()),
+        KeyAction::CommitThenDeferComposition {
+            commit_text,
+            deferred_composition,
+            ..
+        } => (commit_text.clone(), deferred_composition.clone()),
+        KeyAction::UpdateComposition { text, .. } => (String::new(), text.clone()),
+        other => panic!("意外的动作 {other:?}"),
+    }
+}
+
+/// 空闲态（联想关、刚上屏一个字）按 `vk` 的应答——「联想窗不在」时这个键本来的样子。
+fn idle_response(vk: u32) -> (String, String) {
+    let c = coord_tweak("off", "wubi86_pinyin", |cfg| {
+        cfg.input.association.select_keys_commit = false;
+    });
+    press(&c, "q");
+    c.handle_key_event(&key_event(0x20));
+    assert!(assoc_texts(&c).is_empty(), "前提：参照组不进联想态");
+    host_visible(&c.handle_key_event(&key_event(vk)))
+}
+
+fn yield_coord() -> std::sync::Arc<Coordinator> {
+    coord_tweak("word", "wubi86_pinyin", |cfg| {
+        cfg.input.association.select_keys_commit = false;
+    })
+}
+
+/// ★ `select_keys_commit = false`：联想态按 `'`（三选键）不选联想，收窗并照空闲态出符号。
+#[test]
+fn assoc_yields_quote_when_select_keys_commit_off() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = yield_coord();
+    let hits = enter_assoc(&c);
+    assert!(
+        hits.len() >= 3,
+        "前提：至少三条联想，`'` 才选得到，实得 {hits:?}"
+    );
+    let act = c.handle_key_event(&key_event(0xDE)); // VK_OEM_7 = `'`
+    let got = host_visible(&act);
+    for h in &hits {
+        assert!(
+            !got.0.contains(h.as_str()),
+            "不该选中联想 {h:?}，实得 {act:?}"
+        );
+    }
+    assert!(!got.0.is_empty(), "`'` 该出符号，实得 {act:?}");
+    assert_eq!(got, idle_response(0xDE), "该与联想窗不在时按 `'` 一致");
+    assert!(assoc_texts(&c).is_empty(), "联想窗该收起");
+}
+
+/// ★ 同上，`;`（二选键）。出厂 `;` 另绑快捷输入引导，空闲态按它进模式——让出后也该进。
+#[test]
+fn assoc_yields_semicolon_when_select_keys_commit_off() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = yield_coord();
+    let hits = enter_assoc(&c);
+    assert!(hits.len() >= 2, "前提：至少两条联想，实得 {hits:?}");
+    let act = c.handle_key_event(&key_event(0xBA)); // VK_OEM_1 = `;`
+    let got = host_visible(&act);
+    for h in &hits {
+        assert!(
+            !got.0.contains(h.as_str()),
+            "不该选中联想 {h:?}，实得 {act:?}"
+        );
+    }
+    assert_eq!(got, idle_response(0xBA), "该与联想窗不在时按 `;` 一致");
+    assert!(assoc_texts(&c).is_empty(), "联想窗该收起");
+}
+
+/// 让出只管联想态：有码时 `;` 照常选第 2 个候选。
+#[test]
+fn select_keys_commit_off_keeps_select_keys_outside_assoc() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = yield_coord();
+    press(&c, "q");
+    let page = c.debug_page_texts();
+    assert!(page.len() >= 2, "前提：q 至少两个候选，实得 {page:?}");
+    let (text, _) = host_visible(&c.handle_key_event(&key_event(0xBA)));
+    assert_eq!(text, page[1], "非联想态 `;` 该照常选第 2 个候选");
+}
+
+/// 让出不碰数字键：联想态按 `2` 照常选第 2 条联想。
+#[test]
+fn select_keys_commit_off_keeps_digit_selection_in_assoc() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = yield_coord();
+    let hits = enter_assoc(&c);
+    assert!(hits.len() >= 2, "前提：至少两条联想，实得 {hits:?}");
+    let (text, _) = host_visible(&c.handle_key_event(&key_event(0x32)));
+    assert!(
+        hits[1].ends_with(&text) && !text.is_empty(),
+        "数字 2 该选第 2 条 {:?}，实得 {text:?}",
+        hits[1]
+    );
+}
+
+/// **受控对照**：默认（`true`）时 `'` 在联想态确实选第 3 条——少了它，上面的让出用例
+/// 可能只是因为 `'` 在联想态压根不选词。
+#[test]
+fn quote_selects_third_assoc_by_default() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord("word", "wubi86_pinyin");
+    let hits = enter_assoc(&c);
+    assert!(hits.len() >= 3, "前提：至少三条联想，实得 {hits:?}");
+    let (text, _) = host_visible(&c.handle_key_event(&key_event(0xDE)));
+    assert!(
+        hits[2].ends_with(&text) && !text.is_empty(),
+        "默认 `'` 该选第 3 条 {:?}，实得 {text:?}",
+        hits[2]
+    );
+}
+
+/// 让出的口径是「选词键」而非写死 `;` `'`：用户把字母 `z` 配成二选键时，联想态按 `z`
+/// 同样不选联想，照空闲态处理（字母臂与符号臂是两个消费点，两处都要让）。
+#[test]
+fn assoc_yields_custom_letter_select_key() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let tweak = |cfg: &mut Config| {
+        cfg.input.association.select_keys_commit = false;
+        cfg.keys
+            .session_actions
+            .insert("z".into(), "select_candidate:2".into());
+    };
+    let c = coord_tweak("word", "wubi86_pinyin", tweak);
+    let hits = enter_assoc(&c);
+    assert!(hits.len() >= 2, "前提：至少两条联想，实得 {hits:?}");
+    let act = c.handle_key_event(&key_event(0x5A)); // `z`
+    let got = host_visible(&act);
+    for h in &hits {
+        assert!(
+            !got.0.contains(h.as_str()),
+            "不该选中联想 {h:?}，实得 {act:?}"
+        );
+    }
+    assert!(assoc_texts(&c).is_empty(), "联想窗该收起");
+
+    let idle = coord_tweak("off", "wubi86_pinyin", tweak);
+    press(&idle, "q");
+    idle.handle_key_event(&key_event(0x20));
+    assert_eq!(
+        got,
+        host_visible(&idle.handle_key_event(&key_event(0x5A))),
+        "该与联想窗不在时按 `z` 一致"
+    );
+}

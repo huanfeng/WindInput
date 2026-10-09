@@ -804,6 +804,15 @@ impl Coordinator {
         }
     }
 
+    /// 联想态下这一键若是二三候选键，是否**让出**（不选联想、按「联想窗不在」处理）。
+    ///
+    /// `input.association.select_keys_commit = false` 时成立（论坛 t251，对标 QQ 五笔）。
+    /// 只给 keydown 消费的可打印选词键用（主路符号臂与字母臂）：让出后那一键照常往下走，
+    /// 由既有分支收联想并出字 / 进模式——与联想态的其它标点同一条路，这里不另写出口。
+    pub(crate) fn assoc_yields_select_key(&self, state: &State) -> bool {
+        state.assoc_active() && !self.rt().config.input.association.select_keys_commit
+    }
+
     /// 联想态的**回车**处置（`input.association.enter_cancels_only`，默认 `false` = 透传）。
     ///
     /// 默认让回车穿过去：它是终结性动作，用户按它是要发送/换行，而联想窗是输入法自己弹的、

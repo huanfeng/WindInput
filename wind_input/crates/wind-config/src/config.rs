@@ -3468,6 +3468,17 @@ pub struct AssociationConfig {
     /// 这一项没有「更对」的答案——它取决于用户把联想当「顺手就选」还是「别挡我打字」。
     #[serde(default = "default_true")]
     pub space_commits: bool,
+    /// 二三候选键（`keys.select_key_groups` / `session_actions` 里 `select_candidate:N`
+    /// 的**可打印**键，出厂 `;` `'`）在联想态是否选联想候选。
+    ///
+    /// `true`（默认）= 照常选第 2/3 条，与非联想态一致。`false` = 联想态下让出这些键：
+    /// 收起联想窗，该键按「联想窗不在」处理（普通标点照常出；若另绑了模式引导，则照常进
+    /// 该模式）。对标 QQ 五笔（论坛 t251）：联想是输入法猜的，按 `;` 想打的是分号。
+    ///
+    /// 只管 keydown 消费的可打印键。修饰键组（`lrshift` / `lrctrl`）走 keyup、没有字符可
+    /// 「原样上屏」，不受本项影响；数字键选联想也不受影响。
+    #[serde(default = "default_true")]
+    pub select_keys_commit: bool,
     /// 联想态按**回车**：只收窗（吃键），还是收窗 + 把回车**透传**给宿主。
     ///
     /// `false`（默认）= 透传：联想窗收起，同时回车照常换行 / 发送消息。
@@ -3525,6 +3536,7 @@ impl Default for AssociationConfig {
             mode: default_assoc_mode(),
             max_count: default_assoc_max_count(),
             space_commits: true,
+            select_keys_commit: true,
             enter_cancels_only: false,
             backspace_cancels_only: true,
             hide_after_ms: default_assoc_hide_after_ms(),
