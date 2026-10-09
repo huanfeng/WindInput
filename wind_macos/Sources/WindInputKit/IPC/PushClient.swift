@@ -90,35 +90,45 @@ public final class PushClient {
 
     // MARK: - read loop
 
+    // 整个循环是一个永不返回的 GCD block, 队列自带的 autorelease pool 要等 block 结束才
+    // drain。onFrame 在本线程同步跑 (候选窗位图、NSLog 等都会产生 autorelease 对象),
+    // 不逐帧包一层 pool, 这些对象就攒到断连才释放——每敲一键涨一点, 重启服务才回落 (GH#147)。
     private func readLoop() {
         while !stopRequested {
-            // 在锁外拿 client 避免持锁阻塞 read
-            stateLock.lock()
-            let c = client
-            stateLock.unlock()
-            guard let c = c, c.isConnected else { return }
+            let keepGoing: Bool = autoreleasepool { readOnce() }
+            if !keepGoing { return }
+        }
+    }
 
-            do {
-                let frame = try c.readFrame()
-                onFrame?(frame)
-            } catch IPCError.eof {
-                // server 关 socket 或 stop() 主动 close。若非主动 stop (如服务重启),
-                // 也回调 onError 让上层重连; stop() 已置位则静默退出。
-                if !stopRequested {
-                    onError?(.eof)
-                }
-                return
-            } catch let e as IPCError {
-                if !stopRequested {
-                    onError?(e)
-                }
-                return
-            } catch {
-                if !stopRequested {
-                    onError?(.readFailed(String(describing: error)))
-                }
-                return
+    /// 读一帧并回调。返回 false = 读循环该退出了。
+    private func readOnce() -> Bool {
+        // 在锁外拿 client 避免持锁阻塞 read
+        stateLock.lock()
+        let c = client
+        stateLock.unlock()
+        guard let c = c, c.isConnected else { return false }
+
+        do {
+            let frame = try c.readFrame()
+            onFrame?(frame)
+            return true
+        } catch IPCError.eof {
+            // server 关 socket 或 stop() 主动 close。若非主动 stop (如服务重启),
+            // 也回调 onError 让上层重连; stop() 已置位则静默退出。
+            if !stopRequested {
+                onError?(.eof)
             }
+            return false
+        } catch let e as IPCError {
+            if !stopRequested {
+                onError?(e)
+            }
+            return false
+        } catch {
+            if !stopRequested {
+                onError?(.readFailed(String(describing: error)))
+            }
+            return false
         }
     }
 }

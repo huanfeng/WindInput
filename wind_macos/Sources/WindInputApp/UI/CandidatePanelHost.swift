@@ -1,4 +1,5 @@
 import Cocoa
+import os
 import WindInputKit
 
 // CandidatePanelHost — IMKit `.app` 内的候选框承载层 (PR-A.5 Phase 1 + M5 鼠标点选).
@@ -44,6 +45,10 @@ public final class CandidatePanelHost {
     private var currentScale: CGFloat = 1
     private var reconnecting = false            // push 重连排程中, 防重复
     private let lock = NSLock()
+
+    /// 逐帧渲染的跟踪走 debug 级: 默认不落盘、插值惰性求值, 每键不再付格式化的代价;
+    /// 要看时 `log stream --level debug --predicate 'category == "render"'`。
+    private static let renderLog = Logger(subsystem: "to.feng.inputmethod.WindInput", category: "render")
 
     /// 当前焦点 InputController, push 通道 commit 路由目标。weak 避免保活已销毁的 controller。
     public weak var activeResponder: PushResponder?
@@ -447,9 +452,9 @@ public final class CandidatePanelHost {
 
     private func applyHostRenderFrame(_ p: HostRenderFramePayload) {
         let visible = (p.flags & 0x1) != 0
-        NSLog("CPH.renderFrame seq=\(p.seq) vis=\(visible) \(p.width)x\(p.height) x=\(p.x) y=\(p.y) scale=\(p.scale) flags=0x\(String(p.flags, radix:16))")
+        Self.renderLog.debug("renderFrame seq=\(p.seq, privacy: .public) vis=\(visible, privacy: .public) \(p.width, privacy: .public)x\(p.height, privacy: .public) x=\(p.x, privacy: .public) y=\(p.y, privacy: .public) scale=\(p.scale, privacy: .public) flags=0x\(String(p.flags, radix: 16), privacy: .public)")
         if !visible || p.width == 0 || p.height == 0 {
-            NSLog("CPH.renderFrame hiding (invisible or zero-size)")
+            Self.renderLog.debug("renderFrame hiding (invisible or zero-size)")
             DispatchQueue.main.async { [weak self] in
                 self?.lastHoverIndex = -1
                 self?.panel.hidePanel()
@@ -459,22 +464,20 @@ public final class CandidatePanelHost {
         }
         let scale = max(1, CGFloat(p.scale))
         if reader == nil { lock.lock(); openSHMIfNeeded(); lock.unlock() }
-        NSLog("CPH.renderFrame reader=\(reader != nil) scale=\(scale)")
         guard let r = reader else {
-            NSLog("CPH.renderFrame FAIL: reader is nil after openSHMIfNeeded")
+            Self.renderLog.error("renderFrame FAIL: reader is nil after openSHMIfNeeded")
             return
         }
         guard let frame = r.snapshot() else {
-            NSLog("CPH.renderFrame FAIL: snapshot() returned nil")
+            Self.renderLog.error("renderFrame FAIL: snapshot() returned nil")
             return
         }
-        NSLog("CPH.renderFrame SHM frame \(frame.width)x\(frame.height) flags=0x\(String(frame.flags, radix:16)) seq=\(frame.sequence) dataSize=\(frame.bgra.count)")
+        Self.renderLog.debug("renderFrame SHM frame \(frame.width, privacy: .public)x\(frame.height, privacy: .public) flags=0x\(String(frame.flags, radix: 16), privacy: .public) seq=\(frame.sequence, privacy: .public) dataSize=\(frame.bgra.count, privacy: .public)")
         guard let img = Self.makeNSImage(from: frame, scale: scale) else {
-            NSLog("CPH.renderFrame FAIL: makeNSImage returned nil (frame \(frame.width)x\(frame.height) bgra=\(frame.bgra.count))")
+            Self.renderLog.error("renderFrame FAIL: makeNSImage returned nil (frame \(frame.width, privacy: .public)x\(frame.height, privacy: .public) bgra=\(frame.bgra.count, privacy: .public))")
             return
         }
         let pt = NSPoint(x: CGFloat(p.x), y: CGFloat(p.y))
-        NSLog("CPH.renderFrame showing panel at (\(p.x),\(p.y)) imgSize=\(img.size)")
         let useSoftwareShadow = frame.hasSoftwareShadow
         let absolute = p.isAbsolutePos
         lock.lock(); currentScale = scale; let rects = Self.scaleRects(latestRects, by: scale); lock.unlock()
