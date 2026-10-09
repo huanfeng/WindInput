@@ -4800,8 +4800,9 @@ BOOL CTextService::_InitIPCClient()
     // known-working cross-thread channel used by PostUpdateFullStatus et al.).
     _pIPCClient->SetServiceReadyCallback([pThis]() {
         // 推送通道（重）连上了 = 新的服务会话：会话级开关回到默认。标题采集开关必须清零——
-        // 服务端先发 CMD_SERVICE_READY、再收 token、再推握手配置（同一条管道按序到达，本回调在
-        // reader 线程上同步执行），故清零必然早于握手推来的新值，不会把它冲掉。
+        // 服务端收到 token 后、待自身就绪才发 CMD_SERVICE_READY，且必排在握手配置之前（同一条
+        // 管道按序到达，本回调在 reader 线程上同步执行；服务端的保证见 PushServer::mark_ready），
+        // 故清零必然早于握手推来的新值，不会把它冲掉。
         pThis->SetTitleMatchEnabled(FALSE);
         if (pThis->_pLangBarItemButton != nullptr)
             pThis->_pLangBarItemButton->PostServiceReady();

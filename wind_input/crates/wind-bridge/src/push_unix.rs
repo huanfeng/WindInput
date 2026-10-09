@@ -74,6 +74,8 @@ fn handle_push_conn(mut stream: UnixStream, clients: Arc<Mutex<Vec<PushClient>>>
             token,
             tx,
             hooked: false,
+            // 上面第 1 步已经发过（unix 侧连接即发，不走 `PushServer::mark_ready` 的补发）
+            ready_sent: true,
         });
     }
     // 4. writer loop

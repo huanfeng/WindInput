@@ -3,12 +3,11 @@
 //! 与 Go 版本 `wind_input/internal/bridge/server_push.go` 对齐。
 //! 服务端主动推送状态更新、配置同步等消息给 TSF DLL。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use tracing::{debug, error};
 use tracing::{info, warn};
-#[cfg(windows)]
 use wind_ipc::protocol::*;
 
 #[cfg(windows)]
@@ -91,6 +90,44 @@ pub(crate) struct PushClient {
     /// activation push 的**唯一**通路，丢一次即永久停留本地渲染（开始菜单候选窗被压在后面）。
     /// 该标志让 hook 注册时能精确补跑这批客户端，且与连接线程的自发触发互斥去重。
     pub(crate) hooked: bool,
+    /// 是否已给它发过 CMD_SERVICE_READY。
+    ///
+    /// Windows 侧要等服务真正就绪（[`PushServer::mark_ready`]）才发，见那里的说明；
+    /// unix 侧连接即发，注册时就是 `true`。
+    pub(crate) ready_sent: bool,
+}
+
+fn service_ready_frame() -> Vec<u8> {
+    IpcHeader::new(CMD_SERVICE_READY, 0).to_bytes().to_vec()
+}
+
+/// 把握手完成的客户端登记进表；服务已就绪则顺带投一帧 SERVICE_READY，否则留给
+/// [`PushServer::mark_ready`] 补发。
+///
+/// 「读就绪标志 → 入表」与 `mark_ready` 的「置标志 → 扫表」都在 `clients` 锁内，
+/// 二者串行：不会出现「这边读到未就绪、那边扫表时它还没入表」而两头都没发的空档。
+/// 同 token 的旧连接一并清掉（DLL 重连）。
+#[cfg(any(windows, test))]
+fn register_client(
+    clients: &Mutex<Vec<PushClient>>,
+    ready: &AtomicBool,
+    token: u64,
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+) {
+    let mut c = clients.lock().unwrap();
+    c.retain(|c| c.token != token);
+    let ready_now = ready.load(Ordering::Acquire);
+    let client = PushClient {
+        token,
+        tx,
+        hooked: false,
+        ready_sent: ready_now,
+    };
+    // 新建的队列是空的，投不满
+    if ready_now {
+        let _ = offer(&client, service_ready_frame());
+    }
+    c.push(client);
 }
 
 /// 认领指定 token 的 hook 触发权：返回 `true` 表示本次调用赢得认领、应触发回调。
@@ -147,6 +184,8 @@ pub struct PushServer {
     gained_token: Arc<AtomicU64>,
     /// 客户端注册回调（可选，服务侧后置注入）
     connected_hook: Arc<Mutex<Option<ClientConnectedHook>>>,
+    /// 服务是否已就绪（消息处理器已切到真实的协调器），见 [`Self::mark_ready`]。
+    ready: Arc<AtomicBool>,
 }
 
 impl PushServer {
@@ -157,6 +196,44 @@ impl PushServer {
             active_token: Arc::new(AtomicU64::new(0)),
             gained_token: Arc::new(AtomicU64::new(0)),
             connected_hook: Arc::new(Mutex::new(None)),
+            ready: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 宣告服务就绪：给就绪前连上的客户端补发 CMD_SERVICE_READY（幂等）。
+    ///
+    /// # 为什么不能连上就发
+    ///
+    /// 管道在 `Coordinator::new` 之前就开始 accept，而 DLL 收到 SERVICE_READY 会立刻做全量
+    /// 同步（发 IME_ACTIVATED / 补发 focus_gained）。协调器没就绪时这些请求落在
+    /// `DeferredHandler` 上被静默丢弃，DLL 却以为同步过了、清掉了标志——工具栏要等用户
+    /// 切焦点或按键才出来。平时协调器 0.1 s 就绪、DLL 1 s 退避后才重连，碰不上；改了词库
+    /// 要重建缓存时协调器要好几秒，DLL 必然落进这段窗口（t254，靶机实测 2.6 s）。
+    ///
+    /// # 调用时机
+    ///
+    /// 必须在 `DeferredHandler::set_ready` **之后**（DLL 据此发来的请求才有人接），且在
+    /// [`Self::set_client_connected_hook`] **之前**：DLL 收到 SERVICE_READY 会把会话级开关
+    /// 清零，它必须排在 hook 补跑推来的握手配置前面（同一条发送队列，先投先到）。
+    ///
+    /// unix 侧连接即发（客户端注册时 `ready_sent` 已是 `true`），这里对它们是空操作。
+    pub fn mark_ready(&self) {
+        let mut clients = self.clients.lock().unwrap();
+        if self.ready.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mut stalled = Vec::new();
+        let mut sent = 0usize;
+        for c in clients.iter_mut().filter(|c| !c.ready_sent) {
+            c.ready_sent = true;
+            sent += 1;
+            if offer(c, service_ready_frame()) {
+                stalled.push(c.token);
+            }
+        }
+        drop_stalled(&mut clients, &stalled);
+        if sent > 0 {
+            info!("服务就绪：给 {sent} 个就绪前连上的 push 客户端补发 SERVICE_READY");
         }
     }
 
@@ -261,11 +338,12 @@ impl PushServer {
 
         let clients = self.clients.clone();
         let hook = self.connected_hook.clone();
+        let ready = self.ready.clone();
 
         std::thread::Builder::new()
             .name("push-server".into())
             .spawn(move || {
-                run_push_pipe_server(&pipe_name, clients, hook);
+                run_push_pipe_server(&pipe_name, clients, hook, ready);
             })?;
 
         Ok(())
@@ -311,6 +389,8 @@ impl PushServer {
             token,
             tx,
             hooked: true,
+            // 截获器只该看到被测代码推的帧
+            ready_sent: true,
         });
         self.active_token.store(token, Ordering::Relaxed);
         rx
@@ -435,6 +515,7 @@ fn run_push_pipe_server(
     pipe_name: &str,
     clients: Arc<Mutex<Vec<PushClient>>>,
     connected_hook: Arc<Mutex<Option<ClientConnectedHook>>>,
+    ready: Arc<AtomicBool>,
 ) {
     use std::ffi::CString;
     use windows::Win32::Foundation::*;
@@ -497,9 +578,9 @@ fn run_push_pipe_server(
 
         debug!("Push client connected to push pipe");
 
-        // 握手（写 SERVICE_READY + 读 8 字节 token）**必须离开 accept 循环**。
+        // 握手（读 8 字节 token）**必须离开 accept 循环**。
         //
-        // 二者都是无超时阻塞调用，而它们执行期间管道名下**没有任何监听实例**——
+        // 读 token 是无超时阻塞调用，而它执行期间管道名下**没有任何监听实例**——
         // 此刻敲门的客户端拿到的是 ERROR_FILE_NOT_FOUND，白扣一次重试机会。
         // DLL 侧 `_StartAsyncReader` 只试 3 次就 `return FALSE` 永久放弃，且
         // **重连逻辑活在它没能创建的 async reader 线程里**，于是一次失手 = 终身失联，
@@ -512,10 +593,11 @@ fn run_push_pipe_server(
         // 慢客户端最多拖住自己那一个线程，拖不住别人的接纳。
         let clients_c = clients.clone();
         let hook_c = connected_hook.clone();
+        let ready_c = ready.clone();
         let pipe = PipeHandle(pipe_handle);
         if let Err(e) = std::thread::Builder::new()
             .name("push-handshake".into())
-            .spawn(move || serve_push_client(pipe, clients_c, hook_c))
+            .spawn(move || serve_push_client(pipe, clients_c, hook_c, ready_c))
         {
             error!("spawn push-handshake 线程失败: {e}；关闭该连接");
             unsafe {
@@ -535,6 +617,7 @@ fn serve_push_client(
     pipe: PipeHandle,
     clients: Arc<Mutex<Vec<PushClient>>>,
     connected_hook: Arc<Mutex<Option<ClientConnectedHook>>>,
+    ready: Arc<AtomicBool>,
 ) {
     use windows::Win32::Foundation::*;
     use windows::Win32::Storage::FileSystem::*;
@@ -542,30 +625,9 @@ fn serve_push_client(
 
     let pipe_handle = pipe.0;
 
-    // 与 Go 版对齐：先发送 CMD_SERVICE_READY，再读取 token。
-    // Go 的 push pipe 在 ConnectNamedPipe 后立即写 SERVICE_READY，
-    // C++ 端 AsyncReader 收到后触发 _DoFullStateSync(WM_SERVICE_READY)。
-    let ready_msg = IpcHeader::new(CMD_SERVICE_READY, 0).to_bytes().to_vec();
-    {
-        let mut bytes_written: u32 = 0;
-        let write_ok = unsafe {
-            WriteFile(
-                pipe_handle,
-                Some(&ready_msg),
-                Some(&mut bytes_written),
-                None,
-            )
-        };
-        if write_ok.is_err() {
-            warn!("Failed to send SERVICE_READY to push client");
-            unsafe {
-                let _ = DisconnectNamedPipe(pipe_handle);
-                let _ = CloseHandle(pipe_handle);
-            }
-            return;
-        }
-    }
-    debug!("Sent SERVICE_READY to push client");
+    // CMD_SERVICE_READY 不在这里发：服务还没就绪时发出去，DLL 据此做的全量同步会被吞掉。
+    // 入表时按就绪与否决定立刻投递还是留给 `mark_ready` 补发（见 `register_client`）。
+    // DLL 连上即写 token、不等 SERVICE_READY，故先读 token 不会互等。
 
     // 读取客户端 token（8 字节）
     let mut token_buf = [0u8; 8];
@@ -591,22 +653,9 @@ fn serve_push_client(
     let token = u64::from_le_bytes(token_buf);
     debug!("Push client token: 0x{:016X}", token);
 
-    // 创建发送通道
-    let (tx, rx) = push_channel();
-
     // 注册客户端（不持有 pipe handle，本线程稍后独占）
-    let client = PushClient {
-        token,
-        tx,
-        hooked: false,
-    };
-
-    {
-        let mut c = clients.lock().unwrap();
-        // 清理同 token 的旧连接
-        c.retain(|c| c.token != token);
-        c.push(client);
-    }
+    let (tx, rx) = push_channel();
+    register_client(&clients, &ready, token, tx);
 
     // 注册完成后回调（发送经 tx 入队，下面的 writer loop 写出，顺序安全）。
     // 用途：host-render 白名单宿主（transient DocMgr，如 SearchHost）服务重启重连时
@@ -718,6 +767,7 @@ mod tests {
             token: 0xAA_0000_0001,
             tx,
             hooked: false,
+            ready_sent: true,
         });
 
         // 命中：精确 token 投递
@@ -743,11 +793,13 @@ mod tests {
                 token: 1,
                 tx: stuck_tx,
                 hooked: true,
+                ready_sent: true,
             });
             c.push(PushClient {
                 token: 2,
                 tx: live_tx,
                 hooked: true,
+                ready_sent: true,
             });
         }
         for i in 0..PUSH_QUEUE_CAP + 10 {
@@ -769,6 +821,7 @@ mod tests {
             token,
             tx,
             hooked: false,
+            ready_sent: false,
         });
     }
 
@@ -840,5 +893,58 @@ mod tests {
             claim_connected_hook(&srv.clients_for_test(), 0xAA_0000_0001),
             "重连后必须可再次认领，否则 DLL 重连不会重新 setup"
         );
+    }
+
+    /// 就绪前连上的客户端**不能**先拿到 SERVICE_READY，要等 `mark_ready` 补发。
+    ///
+    /// 真机根因（t254，2026-10-09 靶机复现）：改了词库后重启，`Coordinator::new` 同步重建
+    /// 拼音合并缓存约 2.6 s，DLL 1 s 退避后重连落在这段窗口里。连上即发的 SERVICE_READY
+    /// 让持焦点的 DLL 立刻发 IME_ACTIVATED，被未就绪的 DeferredHandler 静默丢弃，DLL 又已
+    /// 清掉同步标志——工具栏要等用户切焦点或按键才出来。
+    #[test]
+    fn clients_registered_before_ready_get_service_ready_on_mark_ready() {
+        let srv = PushServer::new(PushConfig::default());
+        let (tx, rx) = push_channel();
+        register_client(&srv.clients_for_test(), &srv.ready, 0xAA_0000_0001, tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "未就绪时不得发 SERVICE_READY，否则 DLL 的全量同步会被未就绪的处理器吞掉"
+        );
+
+        srv.mark_ready();
+        assert_eq!(rx.try_recv().ok(), Some(service_ready_frame()));
+
+        srv.mark_ready();
+        assert!(rx.try_recv().is_err(), "重复 mark_ready 不得重发");
+    }
+
+    /// 就绪后连上的客户端照旧在注册时立刻拿到 SERVICE_READY（平时的快速重启路径）。
+    #[test]
+    fn clients_registered_after_ready_get_service_ready_immediately() {
+        let srv = PushServer::new(PushConfig::default());
+        srv.mark_ready();
+        let (tx, rx) = push_channel();
+        register_client(&srv.clients_for_test(), &srv.ready, 0xAA_0000_0001, tx);
+        assert_eq!(rx.try_recv().ok(), Some(service_ready_frame()));
+        assert!(rx.try_recv().is_err(), "只发一次");
+    }
+
+    /// 补发的 SERVICE_READY 必须排在 hook 补跑推的握手配置**之前**：DLL 收到 SERVICE_READY
+    /// 会把会话级开关（标题采集）清零，晚到就会冲掉刚推来的新值。main.rs 先 `mark_ready`
+    /// 再 `set_client_connected_hook`，同一条发送队列保证这个顺序。
+    #[test]
+    fn service_ready_precedes_replayed_handshake_config() {
+        let srv = Arc::new(PushServer::new(PushConfig::default()));
+        let (tx, rx) = push_channel();
+        register_client(&srv.clients_for_test(), &srv.ready, 0xAA_0000_0001, tx);
+
+        srv.mark_ready();
+        let s = srv.clone();
+        srv.set_client_connected_hook(Box::new(move |t| {
+            s.push_to_token(t, b"cfg");
+        }));
+
+        assert_eq!(rx.try_recv().ok(), Some(service_ready_frame()));
+        assert_eq!(rx.try_recv().ok(), Some(b"cfg".to_vec()));
     }
 }

@@ -401,18 +401,25 @@ fn main() {
     // 注入 host-render 管理器（与 BridgeServer 共享同一实例），供后续写帧/隐藏使用。
     #[cfg(windows)]
     coordinator.set_host_render(host_render.clone());
-    // push 客户端注册回调：host-render 白名单受限宿主（SearchHost 等 transient DocMgr）
-    // 服务重启重连时不发任何激活事件，由此回调补推 activation 握手使 DLL 重新 setup。
     #[cfg(windows)]
-    {
-        let coord = coordinator.clone();
-        push_server.set_client_connected_hook(Box::new(move |token| {
-            coord.on_push_client_connected(token);
-        }));
-    }
+    let coord_for_push_hook = coordinator.clone();
     let coord_for_web = coordinator.clone();
     let coord_for_restart_toast = coordinator.clone();
     deferred.set_ready(coordinator);
+
+    // 三步顺序不能动（见 `PushServer::mark_ready`）：
+    // ① set_ready 在前——DLL 收到 SERVICE_READY 就发 IME_ACTIVATED，得有真处理器接；
+    // ② mark_ready 给就绪前连上的 DLL 补发 SERVICE_READY（改了词库要重建缓存时，协调器
+    //    构造要好几秒，DLL 几乎必然在这段窗口里重连；不补发则工具栏要等切焦点才出来，t254）；
+    // ③ hook 注册在后——补跑推的握手配置必须排在 SERVICE_READY 之后，否则 DLL 收到
+    //    SERVICE_READY 时清零的会话级开关会冲掉刚推来的新值。
+    push_server.mark_ready();
+    // push 客户端注册回调：host-render 白名单受限宿主（SearchHost 等 transient DocMgr）
+    // 服务重启重连时不发任何激活事件，由此回调补推 activation 握手使 DLL 重新 setup。
+    #[cfg(windows)]
+    push_server.set_client_connected_hook(Box::new(move |token| {
+        coord_for_push_hook.on_push_client_connected(token);
+    }));
 
     // 9.5 启动本地控制 / 配置 JSON-RPC 服务（命名管道：..._ctrl + ..._events）。
     // 本地授权靠 OS ACL（SDDL），不再需要 token/Origin/CORS/端口发现。
