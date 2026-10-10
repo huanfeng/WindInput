@@ -799,6 +799,9 @@ const DICT_HEAD_SCAN_LIMIT: usize = 64 * 1024;
 /// rime 词库文件后缀（发现目录只认这一种）。
 const DICT_YAML_SUFFIX: &str = ".dict.yaml";
 
+/// 码表方案没声明 `[[dictionary_dirs]]` 时兜底的发现目录名（主词库所在目录下）。
+const CODETABLE_DEFAULT_DICT_DIR: &str = "ext";
+
 /// 把 `sibling` 接到 `rel` 所在目录下：`pinyin/rime_frost.dict.yaml` +
 /// `cn_dicts/corrections.dict.yaml` → `pinyin/cn_dicts/corrections.dict.yaml`。
 ///
@@ -7046,6 +7049,7 @@ impl EngineManager {
         let Some(table) = base.as_table_mut() else {
             return;
         };
+        Self::default_codetable_dict_dir(table);
         let dirs: Vec<(String, String)> = table
             .get("dictionary_dirs")
             .and_then(|v| v.as_array())
@@ -7121,6 +7125,58 @@ impl EngineManager {
                 arr.push(toml::Value::Table(t));
             }
         }
+    }
+
+    /// 码表方案（`[engine] type = "codetable"`）没写 `dictionary_dirs` 键时，补一个兜底发现目录
+    /// `<主词库所在目录>/ext`，类型同主词库。第三方码表方案不改文件就能放扩展词库。
+    ///
+    /// 补进方案本身而不是只在扫描时用：`schema.getConfig` 也就带上它，设置端的「打开扩展词库
+    /// 目录」按钮不用另外推算。写了 `dictionary_dirs = []` 即显式关掉兜底。主词库在 `schemas/`
+    /// 根下（路径无目录部分）时不兜底——那会去扫所有方案共用的 `schemas/ext`。
+    fn default_codetable_dict_dir(table: &mut toml::map::Map<String, toml::Value>) {
+        if table.contains_key("dictionary_dirs") {
+            return;
+        }
+        let is_codetable = table
+            .get("engine")
+            .and_then(|e| e.get("type"))
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t.eq_ignore_ascii_case("codetable"));
+        if !is_codetable {
+            return;
+        }
+        let Some(dicts) = table.get("dictionaries").and_then(|d| d.as_array()) else {
+            return;
+        };
+        let Some(main) = dicts
+            .iter()
+            .find(|d| d.get("default").and_then(|v| v.as_bool()) == Some(true))
+            .or_else(|| dicts.first())
+        else {
+            return;
+        };
+        let Some((parent, _)) = main
+            .get("path")
+            .and_then(|p| p.as_str())
+            .and_then(|p| p.rsplit_once('/'))
+        else {
+            return;
+        };
+        let ty = main
+            .get("type")
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty())
+            .unwrap_or("rime_codetable");
+        let mut dir = toml::map::Map::new();
+        dir.insert(
+            "path".into(),
+            format!("{parent}/{CODETABLE_DEFAULT_DICT_DIR}").into(),
+        );
+        dir.insert("type".into(), ty.into());
+        table.insert(
+            "dictionary_dirs".into(),
+            toml::Value::Array(vec![toml::Value::Table(dir)]),
+        );
     }
 
     /// [`Self::read_dict_head`]，但 `import_tables` 只留**真能在主表目录找到文件**的那些。
@@ -9283,6 +9339,55 @@ mod tests {
             ["dir:wubi86/ext/a"],
             "path 的首尾斜杠不影响扫描"
         );
+    }
+
+    const CODETABLE_NO_DIR: &str = "[engine]\ntype = \"codetable\"\n\
+        [[dictionaries]]\nid = \"extra\"\npath = \"shared/extra.dict.yaml\"\nbase_order = 1\n\
+        [[dictionaries]]\nid = \"main\"\npath = \"wubi86/main.dict.yaml\"\ntype = \"rime_codetable\"\n\
+        default = true\nbase_order = 0\n";
+
+    /// 码表方案没写 dictionary_dirs ⇒ 兜底扫主词库目录下的 ext/（取 default=true 的那张，
+    /// 不是第一张），兜底目录写回方案、扫到的库排在已声明的之后。
+    #[test]
+    fn codetable_without_dirs_falls_back_to_main_dict_ext() {
+        let base = inject_with(
+            CODETABLE_NO_DIR,
+            &["wubi86/ext/chengyu.dict.yaml", "wubi86/stray.dict.yaml"],
+            &[],
+        );
+        assert_eq!(
+            dict_ids(&base),
+            ["extra", "main", "dir:wubi86/ext/chengyu"],
+            "只扫 ext/，方案目录本层的未声明文件不登记"
+        );
+        let schema: Schema = base.try_into().unwrap();
+        assert_eq!(schema.dictionary_dirs.len(), 1);
+        assert_eq!(schema.dictionary_dirs[0].path, "wubi86/ext");
+        assert_eq!(schema.dictionary_dirs[0].dict_type, "rime_codetable");
+        assert_eq!(schema.dictionaries[2].base_order, 2);
+        assert!(!schema.dictionaries[2].is_enabled());
+    }
+
+    /// 不兜底的三种：显式写了 `dictionary_dirs = []`；不是码表方案；主词库在 schemas/ 根下。
+    #[test]
+    fn codetable_default_dir_only_when_undeclared_and_main_has_a_dir() {
+        let files = ["wubi86/ext/a.dict.yaml", "ext/a.dict.yaml"];
+        let opted_out = format!("dictionary_dirs = []\n{CODETABLE_NO_DIR}");
+        assert_eq!(
+            dict_ids(&inject_with(&opted_out, &files, &[])),
+            ["extra", "main"]
+        );
+
+        let pinyin = CODETABLE_NO_DIR.replace("\"codetable\"", "\"pinyin\"");
+        let base = inject_with(&pinyin, &files, &[]);
+        assert_eq!(dict_ids(&base), ["extra", "main"]);
+        assert!(base.get("dictionary_dirs").is_none());
+
+        let at_root = "[engine]\ntype = \"codetable\"\n\
+            [[dictionaries]]\nid = \"main\"\npath = \"main.dict.yaml\"\ndefault = true\n";
+        let base = inject_with(at_root, &files, &[]);
+        assert_eq!(dict_ids(&base), ["main"]);
+        assert!(base.get("dictionary_dirs").is_none());
     }
 
     /// 主表清单里写了、但主表目录里没有的子表，不算「已被主表引用」：子表不走分层，它其实
