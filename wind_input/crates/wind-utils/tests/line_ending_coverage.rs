@@ -116,6 +116,11 @@ const ALLOWED: &[(&str, &str)] = &[
          .lines() 只用来在 golden 对不上时定位首个不同行、写进失败信息；判等比的是整串，\
          检入的 golden 由本仓自己生成，不是用户文件。",
     ),
+    (
+        "crates/wind-coordinator/src/process_memory.rs",
+        "parse_rss_anon_kb 解析的是内核给的 /proc/self/status，格式固定、只用 \\n 分行，\
+         不是用户文件；取不到只是内存统计缺一项，不涉及数据丢失。",
+    ),
     // ---- 另案：修法与其余几处不同 ----
     (
         "crates/wind-dict/src/codetable.rs",
