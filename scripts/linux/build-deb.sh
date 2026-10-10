@@ -30,14 +30,18 @@ SETTING_TARGET="${SETTING_TARGET:-$WORK_DIR/target-setting}"
 ARCH="$(dpkg --print-architecture)"
 mkdir -p "$WORK_DIR" "$OUT_DIR"
 
+# 不加 --locked，与 Windows / macOS 的发布构建一致：设置程序经 path 依赖引用 wind-ui-rust 等兄弟仓，
+# 它们升版本后锁文件常常没跟上，--locked 会让 Linux 一端单独在发版时失败。
+# 等这些依赖改走 crates.io、锁文件稳定下来，再三端统一加回 --locked。
+
 # ── 服务 ──
 (cd "$SRC_DIR/wind_input" && CARGO_TARGET_DIR="$SERVICE_TARGET" \
-    cargo build --release --locked -p wind_service --features linux-host)
+    cargo build --release -p wind_service --features linux-host)
 
 # ── 设置程序 ──
 # 版本号与服务同源（docs/VERSION），不走 git——worktree 的 .git 指向宿主路径，容器里读不到。
 (cd "$SETTING_DIR" && WIND_APP_VERSION="$APP_VERSION" CARGO_TARGET_DIR="$SETTING_TARGET" \
-    cargo build --release --locked)
+    cargo build --release)
 
 # ── addon ──
 cmake -S "$SRC_DIR/wind_linux" -B "$WORK_DIR/cmake" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
