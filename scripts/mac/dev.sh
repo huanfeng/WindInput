@@ -883,9 +883,9 @@ assemble_data() {
         for f in 8105 41448 base ext others corrections; do
             [[ -f "$rime/cn_dicts/$f.dict.yaml" ]] && cp -f "$rime/cn_dicts/$f.dict.yaml" "$pinyin_cn/"
         done
-        mkdir -p "$pinyin/cn_dicts_cell"
+        mkdir -p "$pinyin/ext"   # 扩展词库的默认发现目录
         for f in $FROST_CELLS; do
-            [[ -f "$rime/cn_dicts_cell/$f.dict.yaml" ]] && cp -f "$rime/cn_dicts_cell/$f.dict.yaml" "$pinyin/cn_dicts_cell/"
+            [[ -f "$rime/cn_dicts_cell/$f.dict.yaml" ]] && cp -f "$rime/cn_dicts_cell/$f.dict.yaml" "$pinyin/ext/"
         done
         strip_unshipped_imports "$pinyin/rime_frost.dict.yaml"
     else

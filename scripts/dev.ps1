@@ -550,9 +550,8 @@ $FrostCells = @('exthot', 'idiom', 'place', 'history', 'name', 'name2', 'sport',
 
 # 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
 # 理由见 dev.sh 的 strip_unshipped_imports（同一件事，改一边要同步另外两边）：
-# 免去缺失子表的 warn；细胞词库作为扩展词库单独开关，留在主表里就关不掉，且自动识别会把
-# 用户放进 cn_dicts_cell\ 的同名文件当成「已被主表引用」跳过。其余子表的判据是输出目录里
-# 有没有这个文件，不写死名单。
+# 免去缺失子表的 warn；细胞词库作为扩展词库单独开关，留在主表里就关不掉。其余子表的判据是
+# 输出目录里有没有这个文件，不写死名单。
 # 按 LF 切行、按 LF 拼回，原文件的换行与编码（UTF-8 无 BOM）保持不变。
 function Remove-UnshippedImports ([string]$main) {
     $dir = Split-Path $main -Parent
@@ -610,9 +609,10 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
         foreach ($f in @("8105.dict.yaml", "41448.dict.yaml", "base.dict.yaml", "ext.dict.yaml", "others.dict.yaml", "corrections.dict.yaml")) {
             if (Test-Path "$rimeFrost\cn_dicts\$f") { Copy-Item "$rimeFrost\cn_dicts\$f" $pinyinCn -Force }
         }
-        New-Item -ItemType Directory -Path "$pinyin\cn_dicts_cell" -Force | Out-Null
+        # 细胞词库放主词库目录的 ext\（扩展词库的默认发现目录），不沿用上游的 cn_dicts_cell\
+        New-Item -ItemType Directory -Path "$pinyin\ext" -Force | Out-Null
         foreach ($c in $FrostCells) {
-            if (Test-Path "$rimeFrost\cn_dicts_cell\$c.dict.yaml") { Copy-Item "$rimeFrost\cn_dicts_cell\$c.dict.yaml" "$pinyin\cn_dicts_cell" -Force }
+            if (Test-Path "$rimeFrost\cn_dicts_cell\$c.dict.yaml") { Copy-Item "$rimeFrost\cn_dicts_cell\$c.dict.yaml" "$pinyin\ext" -Force }
         }
         Remove-UnshippedImports "$pinyin\rime_frost.dict.yaml"
     } else { Warn "缺 .cache\rime-frost\, 拼音词库不可用 (运行 gen-data 下载)" }

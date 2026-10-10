@@ -53,23 +53,17 @@ type = "rime_pinyin"
 default = true
 base_order = 0
 
-# 扩展词库（细胞词库）发现目录：把 rime 拼音词库（*.dict.yaml）放进用户目录的
-# schemas/pinyin/cn_dicts_cell/，它就出现在「方案设置 → 扩展词库」里（出厂不勾选），
-# 不用改本文件。目录名与 rime-frost 一致，上游那个目录可以整个拷过来。
-# 已被上面主库 import_tables 引用的文件不重复登记。
-[[dictionary_dirs]]
-path = "pinyin/cn_dicts_cell"
-type = "rime_pinyin"
-
-# 随包附带的扩展词库：rime-frost cn_dicts_cell 里体积小、开了对主库排序几乎无影响的 16 张，
-# 出厂不勾选。逐张登记只为给出中文名称；上面的发现目录不会重复登记已声明的路径。
-# 大库（composite / food / game / medication 等）不随包，用户自己放进目录即可，
+# 扩展词库（细胞词库）：放在主词库所在目录的 ext/ 下（schemas/pinyin/ext/），引擎自动识别、
+# 出现在「方案设置 → 扩展词库」里（出厂不勾选），不用在这里声明（拼音 / 码表方案没写
+# [[dictionary_dirs]] 时都兜底这个目录）。下面逐张登记的是随包附带的 16 张——rime-frost
+# cn_dicts_cell 里体积小、开了对主库排序几乎无影响的那些——只为给出中文名称。
+# 大库（composite / food / game / medication 等）不随包，用户自己放进 ext/ 即可，
 # 取舍见 docs/design/schema-dict-discovery.md §8。文件清单与 scripts/dev.sh 的 FROST_CELLS 同步。
 [[dictionaries]]
 id = "cell_exthot"
 label = "网络热词"
 description = "近年流行语与网络热词"
-path = "pinyin/cn_dicts_cell/exthot.dict.yaml"
+path = "pinyin/ext/exthot.dict.yaml"
 type = "rime_pinyin"
 base_order = 1
 
@@ -77,7 +71,7 @@ base_order = 1
 id = "cell_idiom"
 label = "成语"
 description = "成语、俗语与古诗文名句"
-path = "pinyin/cn_dicts_cell/idiom.dict.yaml"
+path = "pinyin/ext/idiom.dict.yaml"
 type = "rime_pinyin"
 base_order = 2
 
@@ -85,7 +79,7 @@ base_order = 2
 id = "cell_place"
 label = "地名"
 description = "地名与地铁站名"
-path = "pinyin/cn_dicts_cell/place.dict.yaml"
+path = "pinyin/ext/place.dict.yaml"
 type = "rime_pinyin"
 base_order = 3
 
@@ -93,7 +87,7 @@ base_order = 3
 id = "cell_history"
 label = "历史"
 description = "历史人物、年号与事件"
-path = "pinyin/cn_dicts_cell/history.dict.yaml"
+path = "pinyin/ext/history.dict.yaml"
 type = "rime_pinyin"
 base_order = 4
 
@@ -101,7 +95,7 @@ base_order = 4
 id = "cell_name"
 label = "人名"
 description = "常见人名"
-path = "pinyin/cn_dicts_cell/name.dict.yaml"
+path = "pinyin/ext/name.dict.yaml"
 type = "rime_pinyin"
 base_order = 5
 
@@ -109,7 +103,7 @@ base_order = 5
 id = "cell_name2"
 label = "动漫人名"
 description = "动漫、影视角色与外国人名"
-path = "pinyin/cn_dicts_cell/name2.dict.yaml"
+path = "pinyin/ext/name2.dict.yaml"
 type = "rime_pinyin"
 base_order = 6
 
@@ -117,7 +111,7 @@ base_order = 6
 id = "cell_sport"
 label = "体育"
 description = "球类等运动术语与体育明星"
-path = "pinyin/cn_dicts_cell/sport.dict.yaml"
+path = "pinyin/ext/sport.dict.yaml"
 type = "rime_pinyin"
 base_order = 7
 
@@ -125,7 +119,7 @@ base_order = 7
 id = "cell_geography"
 label = "地理"
 description = "地理、地质术语"
-path = "pinyin/cn_dicts_cell/geography.dict.yaml"
+path = "pinyin/ext/geography.dict.yaml"
 type = "rime_pinyin"
 base_order = 8
 
@@ -133,7 +127,7 @@ base_order = 8
 id = "cell_animal"
 label = "动物"
 description = "动物名称、犬种等"
-path = "pinyin/cn_dicts_cell/animal.dict.yaml"
+path = "pinyin/ext/animal.dict.yaml"
 type = "rime_pinyin"
 base_order = 9
 
@@ -141,7 +135,7 @@ base_order = 9
 id = "cell_computer"
 label = "计算机"
 description = "计算机与互联网术语"
-path = "pinyin/cn_dicts_cell/computer.dict.yaml"
+path = "pinyin/ext/computer.dict.yaml"
 type = "rime_pinyin"
 base_order = 10
 
@@ -149,7 +143,7 @@ base_order = 10
 id = "cell_music"
 label = "音乐"
 description = "乐理与演奏术语"
-path = "pinyin/cn_dicts_cell/music.dict.yaml"
+path = "pinyin/ext/music.dict.yaml"
 type = "rime_pinyin"
 base_order = 11
 
@@ -157,7 +151,7 @@ base_order = 11
 id = "cell_media"
 label = "自媒体"
 description = "网文与自媒体用语"
-path = "pinyin/cn_dicts_cell/media.dict.yaml"
+path = "pinyin/ext/media.dict.yaml"
 type = "rime_pinyin"
 base_order = 12
 
@@ -165,7 +159,7 @@ base_order = 12
 id = "cell_industry_product"
 label = "行业产品"
 description = "行业与产品名称"
-path = "pinyin/cn_dicts_cell/industry_product.dict.yaml"
+path = "pinyin/ext/industry_product.dict.yaml"
 type = "rime_pinyin"
 base_order = 13
 
@@ -173,7 +167,7 @@ base_order = 13
 id = "cell_inputmethod"
 label = "输入法"
 description = "输入法相关术语"
-path = "pinyin/cn_dicts_cell/inputmethod.dict.yaml"
+path = "pinyin/ext/inputmethod.dict.yaml"
 type = "rime_pinyin"
 base_order = 14
 
@@ -181,7 +175,7 @@ base_order = 14
 id = "cell_chess"
 label = "象棋"
 description = "象棋术语"
-path = "pinyin/cn_dicts_cell/chess.dict.yaml"
+path = "pinyin/ext/chess.dict.yaml"
 type = "rime_pinyin"
 base_order = 15
 
@@ -189,7 +183,7 @@ base_order = 15
 id = "cell_chess2"
 label = "象棋棋谱"
 description = "象棋着法记录，如「炮二平五」"
-path = "pinyin/cn_dicts_cell/chess2.dict.yaml"
+path = "pinyin/ext/chess2.dict.yaml"
 type = "rime_pinyin"
 base_order = 16
 

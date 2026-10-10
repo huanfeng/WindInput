@@ -546,8 +546,8 @@ download_dicts() {
     download_file "$EMOJI_BASE/LICENSE"                   "$rime_emoji/LICENSE"                   "LGPL-3.0"
 }
 
-# 随包附带的 rime-frost 细胞词库（cn_dicts_cell/ 下的文件名）。只挑体积小、开了对主库排序
-# 几乎无影响的（共约 3.6MB，见 docs/design/schema-dict-discovery.md §8）。
+# 随包附带的 rime-frost 细胞词库（上游 cn_dicts_cell/ 下的文件名，组装到 schemas/pinyin/ext/）。
+# 只挑体积小、开了对主库排序几乎无影响的（共约 3.6MB，见 docs/design/schema-dict-discovery.md §8）。
 # ⚠ 与 dev.ps1 的 $FrostCells、mac/dev.sh 的 FROST_CELLS、data/schemas/{pinyin,shuangpin}.schema.toml
 #   里的 cell_* 词库声明同步。
 FROST_CELLS="exthot idiom place history name name2 sport geography animal computer music media industry_product inputmethod chess chess2"
@@ -557,8 +557,8 @@ FROST_CELLS="exthot idiom place history name name2 sport geography animal comput
 # 上游 rime_frost.dict.yaml 默认导入 GB18030-2022 与 23 张细胞词库：
 # - 没随包的：原样带着的话每次加载都对缺的那些 warn 一遍。
 # - 细胞词库：一律裁掉，哪怕随包附带了。它们作为扩展词库由方案单独开关；留在主表里就成了
-#   主库的一部分、关不掉，且自动识别会把「已被主表引用」的文件跳过，用户放进 cn_dicts_cell/
-#   的同名文件就永远出现不了（见 docs/design/schema-dict-discovery.md §5）。
+#   主库的一部分、关不掉。随包的组装在 ext/ 而非 cn_dicts_cell/，按下面的存在判据本也会裁，
+#   这里单列是为了标对来源（[扩展词库] 而非 [未随包]）。
 # 其余子表的判据是「输出目录里有没有这个文件」而不是写死名单：以后多发几张不用回来改这里。
 # ⚠ dev.ps1 的 Remove-UnshippedImports、mac/dev.sh 的 strip_unshipped_imports 是同一件事，改一边要同步另外两边。
 strip_unshipped_imports() {
@@ -620,9 +620,10 @@ assemble_data() {
                  others.dict.yaml corrections.dict.yaml; do
             [ -f "$rime_frost/cn_dicts/$f" ] && cp -f "$rime_frost/cn_dicts/$f" "$pinyin_cn/"
         done
-        mkdir -p "$pinyin/cn_dicts_cell"
+        # 细胞词库放主词库目录的 ext/（扩展词库的默认发现目录），不沿用上游的 cn_dicts_cell/
+        mkdir -p "$pinyin/ext"
         for f in $FROST_CELLS; do
-            [ -f "$rime_frost/cn_dicts_cell/$f.dict.yaml" ] && cp -f "$rime_frost/cn_dicts_cell/$f.dict.yaml" "$pinyin/cn_dicts_cell/"
+            [ -f "$rime_frost/cn_dicts_cell/$f.dict.yaml" ] && cp -f "$rime_frost/cn_dicts_cell/$f.dict.yaml" "$pinyin/ext/"
         done
         strip_unshipped_imports "$pinyin/rime_frost.dict.yaml"
     else

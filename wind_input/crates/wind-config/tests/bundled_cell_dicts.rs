@@ -5,7 +5,8 @@
 //! - 脚本多发、方案没声明：靠发现目录照样出现，但名称是英文文件名；
 //! - 方案声明了、脚本没发：设置里列着一张勾上也没词的库。
 //!
-//! 另钉「出厂不勾选」：细胞库是用户主动开的（docs/design/schema-dict-discovery.md §7.1 / §8）。
+//! 另钉两条：出厂不勾选（细胞库是用户主动开的，docs/design/schema-dict-discovery.md §7.1 / §8）；
+//! 放在兜底发现目录 `pinyin/ext`。
 //!
 //! ⚠️ 读仓库里的真实出厂文件，不是夹具。
 
@@ -13,7 +14,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use wind_config::schema::Schema;
 
-const CELL_DIR: &str = "pinyin/cn_dicts_cell";
+const CELL_DIR: &str = "pinyin/ext";
 
 fn repo_root() -> PathBuf {
     // CARGO_MANIFEST_DIR = <repo>/wind_input/crates/wind-config
@@ -80,10 +81,15 @@ fn pinyin_schemas_declare_every_shipped_cell_disabled_with_a_label() {
         "data/schemas/shuangpin.schema.toml",
     ] {
         let s = schema(rel);
+        // 随包细胞库要放在引擎兜底的发现目录里（`<主词库目录>/ext`，见 wind-engine
+        // `default_dict_dir`），用户自己放的库才和它们在同一处、同一个「打开」按钮。
         assert!(
-            s.dictionary_dirs.iter().any(|d| d.path == CELL_DIR),
-            "{rel} 没声明发现目录 {CELL_DIR}"
+            s.dictionary_dirs.is_empty(),
+            "{rel} 不该声明 dictionary_dirs，否则兜底的 {CELL_DIR} 不生效"
         );
+        let main = s.dictionaries.iter().find(|d| d.default).expect("主词库");
+        let main_dir = main.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        assert_eq!(format!("{main_dir}/ext"), CELL_DIR, "{rel} 主词库目录变了");
         let cells: Vec<_> = s
             .dictionaries
             .iter()

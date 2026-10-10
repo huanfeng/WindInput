@@ -799,8 +799,8 @@ const DICT_HEAD_SCAN_LIMIT: usize = 64 * 1024;
 /// rime 词库文件后缀（发现目录只认这一种）。
 const DICT_YAML_SUFFIX: &str = ".dict.yaml";
 
-/// 码表方案没声明 `[[dictionary_dirs]]` 时兜底的发现目录名（主词库所在目录下）。
-const CODETABLE_DEFAULT_DICT_DIR: &str = "ext";
+/// 码表 / 拼音方案没声明 `[[dictionary_dirs]]` 时兜底的发现目录名（主词库所在目录下）。
+const DEFAULT_DICT_DIR: &str = "ext";
 
 /// 把 `sibling` 接到 `rel` 所在目录下：`pinyin/rime_frost.dict.yaml` +
 /// `cn_dicts/corrections.dict.yaml` → `pinyin/cn_dicts/corrections.dict.yaml`。
@@ -7049,7 +7049,7 @@ impl EngineManager {
         let Some(table) = base.as_table_mut() else {
             return;
         };
-        Self::default_codetable_dict_dir(table);
+        Self::default_dict_dir(table);
         let dirs: Vec<(String, String)> = table
             .get("dictionary_dirs")
             .and_then(|v| v.as_array())
@@ -7127,22 +7127,25 @@ impl EngineManager {
         }
     }
 
-    /// 码表方案（`[engine] type = "codetable"`）没写 `dictionary_dirs` 键时，补一个兜底发现目录
-    /// `<主词库所在目录>/ext`，类型同主词库。第三方码表方案不改文件就能放扩展词库。
+    /// 码表 / 拼音方案（`[engine] type = "codetable" | "pinyin"`）没写 `dictionary_dirs` 键时，补一个
+    /// 兜底发现目录 `<主词库所在目录>/ext`，类型同主词库。出厂与第三方方案不改文件就能放扩展词库。
+    /// 英文、混输等不兜底：混输没有自己的词库，英文没有这个需求。
     ///
     /// 补进方案本身而不是只在扫描时用：`schema.getConfig` 也就带上它，设置端的「打开扩展词库
     /// 目录」按钮不用另外推算。写了 `dictionary_dirs = []` 即显式关掉兜底。主词库在 `schemas/`
     /// 根下（路径无目录部分）时不兜底——那会去扫所有方案共用的 `schemas/ext`。
-    fn default_codetable_dict_dir(table: &mut toml::map::Map<String, toml::Value>) {
+    fn default_dict_dir(table: &mut toml::map::Map<String, toml::Value>) {
         if table.contains_key("dictionary_dirs") {
             return;
         }
-        let is_codetable = table
+        let has_dict_dir = table
             .get("engine")
             .and_then(|e| e.get("type"))
             .and_then(|t| t.as_str())
-            .is_some_and(|t| t.eq_ignore_ascii_case("codetable"));
-        if !is_codetable {
+            .is_some_and(|t| {
+                t.eq_ignore_ascii_case("codetable") || t.eq_ignore_ascii_case("pinyin")
+            });
+        if !has_dict_dir {
             return;
         }
         let Some(dicts) = table.get("dictionaries").and_then(|d| d.as_array()) else {
@@ -7168,10 +7171,7 @@ impl EngineManager {
             .filter(|t| !t.is_empty())
             .unwrap_or("rime_codetable");
         let mut dir = toml::map::Map::new();
-        dir.insert(
-            "path".into(),
-            format!("{parent}/{CODETABLE_DEFAULT_DICT_DIR}").into(),
-        );
+        dir.insert("path".into(), format!("{parent}/{DEFAULT_DICT_DIR}").into());
         dir.insert("type".into(), ty.into());
         table.insert(
             "dictionary_dirs".into(),
@@ -9368,9 +9368,22 @@ mod tests {
         assert!(!schema.dictionaries[2].is_enabled());
     }
 
-    /// 不兜底的三种：显式写了 `dictionary_dirs = []`；不是码表方案；主词库在 schemas/ 根下。
+    /// 拼音方案同样兜底：出厂全拼 / 双拼的随包细胞库就在 `pinyin/ext`，类型取 rime_pinyin。
     #[test]
-    fn codetable_default_dir_only_when_undeclared_and_main_has_a_dir() {
+    fn pinyin_without_dirs_falls_back_to_main_dict_ext() {
+        let src = "[engine]\ntype = \"pinyin\"\n\
+            [[dictionaries]]\nid = \"main\"\npath = \"pinyin/rime_frost.dict.yaml\"\n\
+            type = \"rime_pinyin\"\ndefault = true\n";
+        let base = inject_with(src, &["pinyin/ext/idiom.dict.yaml"], &[]);
+        assert_eq!(dict_ids(&base), ["main", "dir:pinyin/ext/idiom"]);
+        let schema: Schema = base.try_into().unwrap();
+        assert_eq!(schema.dictionary_dirs[0].path, "pinyin/ext");
+        assert_eq!(schema.dictionary_dirs[0].dict_type, "rime_pinyin");
+    }
+
+    /// 不兜底的三种：显式写了 `dictionary_dirs = []`；英文等其它方案；主词库在 schemas/ 根下。
+    #[test]
+    fn default_dict_dir_only_when_undeclared_and_main_has_a_dir() {
         let files = ["wubi86/ext/a.dict.yaml", "ext/a.dict.yaml"];
         let opted_out = format!("dictionary_dirs = []\n{CODETABLE_NO_DIR}");
         assert_eq!(
@@ -9378,8 +9391,8 @@ mod tests {
             ["extra", "main"]
         );
 
-        let pinyin = CODETABLE_NO_DIR.replace("\"codetable\"", "\"pinyin\"");
-        let base = inject_with(&pinyin, &files, &[]);
+        let english = CODETABLE_NO_DIR.replace("\"codetable\"", "\"english\"");
+        let base = inject_with(&english, &files, &[]);
         assert_eq!(dict_ids(&base), ["extra", "main"]);
         assert!(base.get("dictionary_dirs").is_none());
 
