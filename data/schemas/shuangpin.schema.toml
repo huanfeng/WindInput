@@ -61,6 +61,138 @@ base_order = 0
 path = "pinyin/cn_dicts_cell"
 type = "rime_pinyin"
 
+# 随包附带的扩展词库：rime-frost cn_dicts_cell 里体积小、开了对主库排序几乎无影响的 16 张，
+# 出厂不勾选。逐张登记只为给出中文名称；上面的发现目录不会重复登记已声明的路径。
+# 大库（composite / food / game / medication 等）不随包，用户自己放进目录即可，
+# 取舍见 docs/design/schema-dict-discovery.md §8。文件清单与 scripts/dev.sh 的 FROST_CELLS 同步。
+[[dictionaries]]
+id = "cell_exthot"
+label = "网络热词"
+description = "近年流行语与网络热词"
+path = "pinyin/cn_dicts_cell/exthot.dict.yaml"
+type = "rime_pinyin"
+base_order = 1
+
+[[dictionaries]]
+id = "cell_idiom"
+label = "成语"
+description = "成语、俗语与古诗文名句"
+path = "pinyin/cn_dicts_cell/idiom.dict.yaml"
+type = "rime_pinyin"
+base_order = 2
+
+[[dictionaries]]
+id = "cell_place"
+label = "地名"
+description = "地名与地铁站名"
+path = "pinyin/cn_dicts_cell/place.dict.yaml"
+type = "rime_pinyin"
+base_order = 3
+
+[[dictionaries]]
+id = "cell_history"
+label = "历史"
+description = "历史人物、年号与事件"
+path = "pinyin/cn_dicts_cell/history.dict.yaml"
+type = "rime_pinyin"
+base_order = 4
+
+[[dictionaries]]
+id = "cell_name"
+label = "人名"
+description = "常见人名"
+path = "pinyin/cn_dicts_cell/name.dict.yaml"
+type = "rime_pinyin"
+base_order = 5
+
+[[dictionaries]]
+id = "cell_name2"
+label = "动漫人名"
+description = "动漫、影视角色与外国人名"
+path = "pinyin/cn_dicts_cell/name2.dict.yaml"
+type = "rime_pinyin"
+base_order = 6
+
+[[dictionaries]]
+id = "cell_sport"
+label = "体育"
+description = "球类等运动术语与体育明星"
+path = "pinyin/cn_dicts_cell/sport.dict.yaml"
+type = "rime_pinyin"
+base_order = 7
+
+[[dictionaries]]
+id = "cell_geography"
+label = "地理"
+description = "地理、地质术语"
+path = "pinyin/cn_dicts_cell/geography.dict.yaml"
+type = "rime_pinyin"
+base_order = 8
+
+[[dictionaries]]
+id = "cell_animal"
+label = "动物"
+description = "动物名称、犬种等"
+path = "pinyin/cn_dicts_cell/animal.dict.yaml"
+type = "rime_pinyin"
+base_order = 9
+
+[[dictionaries]]
+id = "cell_computer"
+label = "计算机"
+description = "计算机与互联网术语"
+path = "pinyin/cn_dicts_cell/computer.dict.yaml"
+type = "rime_pinyin"
+base_order = 10
+
+[[dictionaries]]
+id = "cell_music"
+label = "音乐"
+description = "乐理与演奏术语"
+path = "pinyin/cn_dicts_cell/music.dict.yaml"
+type = "rime_pinyin"
+base_order = 11
+
+[[dictionaries]]
+id = "cell_media"
+label = "自媒体"
+description = "网文与自媒体用语"
+path = "pinyin/cn_dicts_cell/media.dict.yaml"
+type = "rime_pinyin"
+base_order = 12
+
+[[dictionaries]]
+id = "cell_industry_product"
+label = "行业产品"
+description = "行业与产品名称"
+path = "pinyin/cn_dicts_cell/industry_product.dict.yaml"
+type = "rime_pinyin"
+base_order = 13
+
+[[dictionaries]]
+id = "cell_inputmethod"
+label = "输入法"
+description = "输入法相关术语"
+path = "pinyin/cn_dicts_cell/inputmethod.dict.yaml"
+type = "rime_pinyin"
+base_order = 14
+
+[[dictionaries]]
+id = "cell_chess"
+label = "象棋"
+description = "象棋术语"
+path = "pinyin/cn_dicts_cell/chess.dict.yaml"
+type = "rime_pinyin"
+base_order = 15
+
+[[dictionaries]]
+id = "cell_chess2"
+label = "象棋棋谱"
+description = "象棋着法记录，如「炮二平五」"
+path = "pinyin/cn_dicts_cell/chess2.dict.yaml"
+type = "rime_pinyin"
+base_order = 16
+
 # 权重不归一化——这是刻意的，勿加 [weight_spec]：
 #   1. 拼音权重刻意在与码表不同的轴上（max 1537 万），其与码表的先后由协调器
 #      source_tier 的档位隔离决定，不靠比 weight；

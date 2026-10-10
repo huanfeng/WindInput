@@ -452,6 +452,11 @@ download_dicts() {
     download_file "$FROST_BASE/cn_dicts/others.dict.yaml"         "$rime_frost_cn/others.dict.yaml"         "容错词"
     download_file "$FROST_BASE/cn_dicts/corrections.dict.yaml"    "$rime_frost_cn/corrections.dict.yaml"    "错音词"
     download_file "$FROST_BASE/cn_dicts/tencent.dict.yaml"        "$rime_frost_cn/tencent.dict.yaml"        "腾讯词频 ~17MB"
+    local cell
+    mkdir -p "$rime_frost/cn_dicts_cell"
+    for cell in $FROST_CELLS; do
+        download_file "$FROST_BASE/cn_dicts_cell/$cell.dict.yaml" "$rime_frost/cn_dicts_cell/$cell.dict.yaml" "扩展词库"
+    done
 
     gray "rime-frost (英文):"
     download_file "$FROST_BASE/en_dicts/en.dict.yaml"     "$rime_frost_en/en.dict.yaml"     "主词库"
@@ -541,14 +546,21 @@ download_dicts() {
     download_file "$EMOJI_BASE/LICENSE"                   "$rime_emoji/LICENSE"                   "LGPL-3.0"
 }
 
-# 把 rime 主表 import_tables 里**没随包**的子表注释掉（就地改写）。
+# 随包附带的 rime-frost 细胞词库（cn_dicts_cell/ 下的文件名）。只挑体积小、开了对主库排序
+# 几乎无影响的（共约 3.6MB，见 docs/design/schema-dict-discovery.md §8）。
+# ⚠ 与 dev.ps1 的 $FrostCells、mac/dev.sh 的 FROST_CELLS、data/schemas/{pinyin,shuangpin}.schema.toml
+#   里的 cell_* 词库声明同步。
+FROST_CELLS="exthot idiom place history name name2 sport geography animal computer music media industry_product inputmethod chess chess2"
+
+# 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
 #
-# 上游 rime_frost.dict.yaml 默认导入 GB18030-2022 与 23 张细胞词库，我们只发其中 6 张：
-# 原样带着的话每次加载都对缺的那些 warn 一遍（24 条），且细胞词库的自动识别会把
-# 「已被主表引用」的文件当主表的一部分跳过——不裁掉，用户放进 cn_dicts_cell/ 的同名
-# 文件就永远出现不了（见 docs/design/schema-dict-discovery.md §5）。
-# 判据是「输出目录里有没有这个文件」而不是写死名单：以后多发几张不用回来改这里。
-# ⚠ dev.ps1 的 Remove-UnshippedImports 是同一件事，改一边要同步另一边。
+# 上游 rime_frost.dict.yaml 默认导入 GB18030-2022 与 23 张细胞词库：
+# - 没随包的：原样带着的话每次加载都对缺的那些 warn 一遍。
+# - 细胞词库：一律裁掉，哪怕随包附带了。它们作为扩展词库由方案单独开关；留在主表里就成了
+#   主库的一部分、关不掉，且自动识别会把「已被主表引用」的文件跳过，用户放进 cn_dicts_cell/
+#   的同名文件就永远出现不了（见 docs/design/schema-dict-discovery.md §5）。
+# 其余子表的判据是「输出目录里有没有这个文件」而不是写死名单：以后多发几张不用回来改这里。
+# ⚠ dev.ps1 的 Remove-UnshippedImports、mac/dev.sh 的 strip_unshipped_imports 是同一件事，改一边要同步另外两边。
 strip_unshipped_imports() {
     local main="$1" dir
     dir="$(dirname "$main")"
@@ -558,6 +570,9 @@ strip_unshipped_imports() {
         !done && inblk && /^[^[:space:]#-]/ { inblk = 0 }
         !done && inblk && match($0, /^[[:space:]]*-[[:space:]]*[^[:space:]#]+/) {
             entry = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*-[[:space:]]*/, "", entry)
+            if (entry ~ /^cn_dicts_cell\//) {
+                print "  # [扩展词库] " substr($0, RSTART + RLENGTH - length(entry)); next
+            }
             if (system("test -f \"" dir "/" entry ".dict.yaml\"") != 0) {
                 print "  # [未随包] " substr($0, RSTART + RLENGTH - length(entry)); next
             }
@@ -604,6 +619,10 @@ assemble_data() {
         for f in 8105.dict.yaml 41448.dict.yaml base.dict.yaml ext.dict.yaml \
                  others.dict.yaml corrections.dict.yaml; do
             [ -f "$rime_frost/cn_dicts/$f" ] && cp -f "$rime_frost/cn_dicts/$f" "$pinyin_cn/"
+        done
+        mkdir -p "$pinyin/cn_dicts_cell"
+        for f in $FROST_CELLS; do
+            [ -f "$rime_frost/cn_dicts_cell/$f.dict.yaml" ] && cp -f "$rime_frost/cn_dicts_cell/$f.dict.yaml" "$pinyin/cn_dicts_cell/"
         done
         strip_unshipped_imports "$pinyin/rime_frost.dict.yaml"
     else

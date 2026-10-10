@@ -776,6 +776,9 @@ download_dicts() {
     for f in 8105 41448 base ext others corrections tencent; do
         get_dict "$frost/cn_dicts/$f.dict.yaml" "$rime/cn_dicts/$f.dict.yaml"
     done
+    for f in $FROST_CELLS; do
+        get_dict "$frost/cn_dicts_cell/$f.dict.yaml" "$rime/cn_dicts_cell/$f.dict.yaml" "扩展词库"
+    done
     info "rime-frost (英文):"
     for f in en en_ext; do get_dict "$frost/en_dicts/$f.dict.yaml" "$rime/en_dicts/$f.dict.yaml"; done
 
@@ -818,6 +821,31 @@ download_dicts() {
     return 0
 }
 
+# 随包附带的 rime-frost 细胞词库。清单与理由见 scripts/dev.sh 的 FROST_CELLS（几处要同步）。
+FROST_CELLS="exthot idiom place history name name2 sport geography animal computer music media industry_product inputmethod chess chess2"
+
+# 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
+# 与 scripts/dev.sh 的同名函数是同一件事（理由见那边），改一边要同步另外两边。
+strip_unshipped_imports() {
+    local main="$1" dir
+    dir="$(dirname "$main")"
+    awk -v dir="$dir" '
+        /^\.\.\.[[:space:]]*$/ { done = 1 }
+        !done && /^import_tables:/ { inblk = 1; print; next }
+        !done && inblk && /^[^[:space:]#-]/ { inblk = 0 }
+        !done && inblk && match($0, /^[[:space:]]*-[[:space:]]*[^[:space:]#]+/) {
+            entry = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*-[[:space:]]*/, "", entry)
+            if (entry ~ /^cn_dicts_cell\//) {
+                print "  # [扩展词库] " substr($0, RSTART + RLENGTH - length(entry)); next
+            }
+            if (system("test -f \"" dir "/" entry ".dict.yaml\"") != 0) {
+                print "  # [未随包] " substr($0, RSTART + RLENGTH - length(entry)); next
+            }
+        }
+        { print }
+    ' "$main" > "$main.tmp" && mv -f "$main.tmp" "$main"
+}
+
 # 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 build_mac/data。
 assemble_data() {
     local data="$DATA_SNAPSHOT"
@@ -855,6 +883,11 @@ assemble_data() {
         for f in 8105 41448 base ext others corrections; do
             [[ -f "$rime/cn_dicts/$f.dict.yaml" ]] && cp -f "$rime/cn_dicts/$f.dict.yaml" "$pinyin_cn/"
         done
+        mkdir -p "$pinyin/cn_dicts_cell"
+        for f in $FROST_CELLS; do
+            [[ -f "$rime/cn_dicts_cell/$f.dict.yaml" ]] && cp -f "$rime/cn_dicts_cell/$f.dict.yaml" "$pinyin/cn_dicts_cell/"
+        done
+        strip_unshipped_imports "$pinyin/rime_frost.dict.yaml"
     else
         warn "缺 .cache/rime-frost/, 拼音词库不可用 (先跑 gd 下载)"
     fi

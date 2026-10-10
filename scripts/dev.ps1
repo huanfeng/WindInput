@@ -453,6 +453,10 @@ function Download-Dicts {
     Get-Dict "$frostBase/cn_dicts/others.dict.yaml"      "$rimeFrostCn\others.dict.yaml"        "容错词"       | Out-Null
     Get-Dict "$frostBase/cn_dicts/corrections.dict.yaml" "$rimeFrostCn\corrections.dict.yaml"   "错音词"       | Out-Null
     Get-Dict "$frostBase/cn_dicts/tencent.dict.yaml"     "$rimeFrostCn\tencent.dict.yaml"       "腾讯词频"     | Out-Null
+    New-Item -ItemType Directory -Path "$rimeFrost\cn_dicts_cell" -Force | Out-Null
+    foreach ($c in $FrostCells) {
+        Get-Dict "$frostBase/cn_dicts_cell/$c.dict.yaml" "$rimeFrost\cn_dicts_cell\$c.dict.yaml" "扩展词库" | Out-Null
+    }
 
     Gray "rime-frost (英文):"
     Get-Dict "$frostBase/en_dicts/en.dict.yaml"     "$rimeFrostEn\en.dict.yaml"     "主词库" | Out-Null
@@ -540,11 +544,15 @@ function Download-Dicts {
     return $true
 }
 
-# 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 $outdir\data\
-# 把 rime 主表 import_tables 里**没随包**的子表注释掉（就地改写）。
-# 理由见 dev.sh 的 strip_unshipped_imports（同一件事，改一边要同步另一边）：
-# 免去每次加载 24 条缺失 warn，并让细胞词库的自动识别不把用户放进 cn_dicts_cell\ 的同名文件
-# 当成「已被主表引用」跳过。判据是输出目录里有没有这个文件，不写死名单。
+# 随包附带的 rime-frost 细胞词库。清单与理由见 dev.sh 的 FROST_CELLS（几处要同步）。
+$FrostCells = @('exthot', 'idiom', 'place', 'history', 'name', 'name2', 'sport', 'geography', 'animal',
+                'computer', 'music', 'media', 'industry_product', 'inputmethod', 'chess', 'chess2')
+
+# 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
+# 理由见 dev.sh 的 strip_unshipped_imports（同一件事，改一边要同步另外两边）：
+# 免去缺失子表的 warn；细胞词库作为扩展词库单独开关，留在主表里就关不掉，且自动识别会把
+# 用户放进 cn_dicts_cell\ 的同名文件当成「已被主表引用」跳过。其余子表的判据是输出目录里
+# 有没有这个文件，不写死名单。
 # 按 LF 切行、按 LF 拼回，原文件的换行与编码（UTF-8 无 BOM）保持不变。
 function Remove-UnshippedImports ([string]$main) {
     $dir = Split-Path $main -Parent
@@ -557,7 +565,9 @@ function Remove-UnshippedImports ([string]$main) {
         if ($l -match '^import_tables:') { $inBlock = $true; continue }
         if ($inBlock -and $l -match '^[^\s#-]') { $inBlock = $false }
         if ($inBlock -and $l -match '^\s*-\s*([^\s#]+)(.*)$') {
-            if (-not (Test-Path (Join-Path $dir "$($Matches[1]).dict.yaml"))) {
+            if ($Matches[1].StartsWith('cn_dicts_cell/')) {
+                $lines[$i] = "  # [扩展词库] $($Matches[1])$($Matches[2])"
+            } elseif (-not (Test-Path (Join-Path $dir "$($Matches[1]).dict.yaml"))) {
                 $lines[$i] = "  # [未随包] $($Matches[1])$($Matches[2])"
             }
         }
@@ -565,6 +575,7 @@ function Remove-UnshippedImports ([string]$main) {
     [IO.File]::WriteAllText($main, ($lines -join "`n"), [Text.UTF8Encoding]::new($false))
 }
 
+# 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 $outdir\data\
 function Assemble-Data ([string]$outdir = $BuildDevDir) {
     $data      = "$outdir\data"
     $schemas   = "$data\schemas"
@@ -598,6 +609,10 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
         Copy-Item "$rimeFrost\rime_frost.dict.yaml" $pinyin -Force
         foreach ($f in @("8105.dict.yaml", "41448.dict.yaml", "base.dict.yaml", "ext.dict.yaml", "others.dict.yaml", "corrections.dict.yaml")) {
             if (Test-Path "$rimeFrost\cn_dicts\$f") { Copy-Item "$rimeFrost\cn_dicts\$f" $pinyinCn -Force }
+        }
+        New-Item -ItemType Directory -Path "$pinyin\cn_dicts_cell" -Force | Out-Null
+        foreach ($c in $FrostCells) {
+            if (Test-Path "$rimeFrost\cn_dicts_cell\$c.dict.yaml") { Copy-Item "$rimeFrost\cn_dicts_cell\$c.dict.yaml" "$pinyin\cn_dicts_cell" -Force }
         }
         Remove-UnshippedImports "$pinyin\rime_frost.dict.yaml"
     } else { Warn "缺 .cache\rime-frost\, 拼音词库不可用 (运行 gen-data 下载)" }
