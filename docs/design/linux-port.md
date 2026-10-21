@@ -394,14 +394,19 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
    透传、熔断 3 秒后自愈，不卡死。
 9. **SHM 名被别的用户抢先占用**：名字带 uid 后别人仍可在 `/dev/shm` 建我们的名字（`O_EXCL` 失败），
    服务端建不了段、候选窗不显示；addon 按属主拒收，内容伪造不了。只是拒绝服务，不处理。
-10. **GNOME Wayland 会话下候选窗位置不准（已知限制，不修）**：GNOME 没有 input-method-v2，Wayland 原生应用
-   （如 gedit，`frontend=dbus`）经 DBus 前端报的 `cursorRect` 是**窗口相对坐标**，而 X11 路径把它当屏幕
-   坐标摆，候选窗于是不跟窗口走。2026-10-10 在 Ubuntu 22.04（GNOME Shell 42.9）实测：gedit 报
-   `rect=(344,76 0x18)`，服务端摆到 `(344,96)`。addon 自己换算不了——Wayland 客户端不知道窗口的屏幕位置，
-   GNOME 42 又封了 `Introspect.GetWindows`（AccessDenied）与 `Shell.Eval`。唯一做准的办法是写 GNOME Shell
-   扩展取焦点窗口 frame 再回传（kimpanel 即此思路），成本高且随 GNOME 版本变，暂不做。
-   X11 会话（含 XWayland 应用）正常；Deepin 25 的 treeland 有 input-method-v2，走 popup surface，正常。
-   较新的 GNOME 是否有变化未验证。
+10. **GNOME Wayland 会话下候选窗跟不准插入点（Shell 扩展补窗口原点）**：GNOME 没有
+   input-method-v2（`Using Wayland native input method protocol: 0`），Wayland 原生应用经
+   `dbus` / `ibus` / `fcitx4` 报的 `cursorRect` 往往不是 XWayland 根坐标。分数缩放下还有
+   输出缩放 vs Xft 缓冲缩放两套像素。`GetWindows`/`Eval` 仍拒，做准需要 Shell 内的
+   `focus_window`。**做法**（`windinput-caret@windinput`）：
+   - 仅 `RelativeRect`：扩展 `TranslateRelativeSpot`（`protocol_to_stage_rect` + compositor
+     actor）再折到 X11；无该能力位的绝对屏坐标只缩放，不得叠窗口原点。
+   - 扩展 `spotScale`（矩形坐标系）：sf≈缓冲缩放 → 用客户端 sf（已预乘）；sf≈1 且 frontend=ibus
+     → 用输出缩放（相对矩形常已预乘却未报 scale）；sf≈1 且其它前端 → 主题 scale≈1（逻辑相对）；
+     sf≈输出且 ≠缓冲 → 主题 scale≈1（逻辑 DIP，避免误缩后再 ×缓冲缩放）。
+   - 扩展未启用时退回 toolkit 折中——最大化大致可用，浮动窗会偏。
+   源码在 `wind_linux/gnome-shell-extension/windinput-caret@windinput/`。X11 会话与
+   treeland/KWin popup 不受影响。
 11. **Wayland 下工具栏 / 软键盘记住的位置可能跳角（已知限制）**：Wayland 面板坐标的单位是「合成器逻辑
    坐标 × 服务端此刻的光栅化缩放」（§5b / `OverlayInput.h`「Wayland 面板坐标」），而光栅化缩放跟着焦点
    走：XWayland 应用取 `Xft.dpi`，原生 Wayland 应用取输出缩放。两者不一致时（例如输出 150%、`Xft.dpi`

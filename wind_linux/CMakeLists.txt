@@ -65,12 +65,16 @@ if(WIND_BUILD_ADDON)
     # 候选窗的 X11 呈现：自建 xcb 连接 + XShape（无合成器时按 alpha 抠形）+ RandR（工具栏 /
     # 软键盘按输出取名字与工作区）。
     pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-shape xcb-randr)
+    # GNOME Wayland：查 windinput-caret@windinput 扩展，把窗口相对光标换成绝对坐标
+    pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 
     add_library(windinput MODULE
         src/fcitx/WindEngine.cpp
         src/fcitx/X11Panel.cpp
+        src/fcitx/GnomeCaret.cpp
     )
-    target_link_libraries(windinput PRIVATE windcore Fcitx5::Core Fcitx5::Utils PkgConfig::XCB)
+    target_link_libraries(windinput PRIVATE windcore Fcitx5::Core Fcitx5::Utils PkgConfig::XCB
+                          PkgConfig::GIO)
 
     # 新版 Fcitx5（Arch 等）的头文件用了 std::ranges / std::span / std::source_location，按当前标准编不过
     # 就把 addon 升到 C++20（GH#192）。只探 addon 用到的头文件与日志宏，纯逻辑库与单测不受影响。
