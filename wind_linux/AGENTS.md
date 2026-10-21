@@ -121,6 +121,8 @@ e2e 的坑，都踩过：
   翻转不触发 activate，按键前比对、翻转即补报 FocusGained（同 macOS 的安全输入跟随）。
 - 光标：`InputContext::cursorRect()`（X11 客户端是根窗口坐标，正是 wire 坐标系）→
   `CMD_CARET_UPDATE` 12 字节版，y 取行顶、height 取行高。宿主没报过位置（全 0）时不发。
+  GNOME 无 IM-v2 时 `dbus`/`ibus`/`fcitx4` 需按 `RelativeRect` / `scaleFactor` / frontend 折到
+  X11（扩展 `windinput-caret` 补窗口原点；细则 §7.10）。
 - 回删（`CMD_REPLACE_BACKWARD`，智能符号 / 撤销上屏）的计数是 **UTF-16 码元**（Windows TSF 的 ACP、
   macOS 的 NSRange 同量纲），Fcitx5 的 `deleteSurroundingText` 按码点删：按光标前文本换算
   （`codepointsForUtf16Back`，落在代理对中间宁少删），读不到光标前文本才按码元数直删。配对插入后的

@@ -1,6 +1,7 @@
 #include "WindEngine.h"
 
 #include "ExtProtocol.h"
+#include "GnomeCaret.h"
 #include "Menu.h"
 #include "ServiceLauncher.h"
 #include "SettingsLauncher.h"
@@ -23,8 +24,11 @@
 #include <fcitx/userinterfacemanager.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <tuple>
 #include <unistd.h>
 
 FCITX_DEFINE_LOG_CATEGORY(windinput_log, "windinput");
@@ -50,6 +54,112 @@ uint64_t nowMs()
     using namespace std::chrono;
     return uint64_t(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
+
+#ifdef WIND_HAVE_WAYLAND
+/// GNOME 无 IM-v2：dbus / ibus / fcitx4 的候选仍走 X11 面板，但 `cursorRect` 不是 XWayland
+/// 根坐标。分数缩放下还有「输出缩放」与「Xft 缓冲缩放」两套像素。见 §7.10。
+///
+/// 前端报法（按能力位 + scaleFactor，不按具体应用）：
+/// - RelativeRect + sf≈缓冲缩放：矩形已预乘（典型 GTK via dbus）；
+/// - RelativeRect + sf≈1 + ibus：相对矩形常已 ×输出缩放，却未带 scale；
+/// - RelativeRect + sf≈1 + 其它前端（如 fcitx4）：窗口相对逻辑像素，勿按输出缩放再除；
+/// - RelativeRect + sf≈输出且 ≠缓冲：逻辑 DIP（dbus SetCursorRectV2）；
+/// - 无 RelativeRect：绝对屏坐标——只缩放，不得再加窗口原点。
+bool isGnomeX11PanelFrontend(const fcitx::InputContext* ic, const WaylandCandidatePanel* wl)
+{
+    if (!wl || !ic || wl->handles(ic)) {
+        return false;
+    }
+    const char* fe = ic->frontend();
+    return fe
+        && (std::strcmp(fe, "dbus") == 0 || std::strcmp(fe, "ibus") == 0
+            || std::strcmp(fe, "fcitx4") == 0);
+}
+
+bool needsWindowRelCaretFix(const fcitx::InputContext* ic, const WaylandCandidatePanel* wl)
+{
+    return isGnomeX11PanelFrontend(ic, wl)
+        && ic->capabilityFlags().test(fcitx::CapabilityFlag::RelativeRect);
+}
+
+/// 扩展公式 `coord * (shellScale / spotScale)` 的除数：声明客户端矩形所在坐标系。
+double spotScaleForGnomeExt(double clientSf, double x11BufScale, double outputScale,
+                            const char* frontend)
+{
+    const double sf = clientSf > 0.01 ? clientSf : 1.0;
+    const double buf = x11BufScale > 0.0 ? x11BufScale : 1.0;
+    const double out = outputScale > 0.01 ? outputScale : buf;
+    // scale-monitor-framebuffer 下 St 主题 scale 多为 1；toX11 再用扩展回包的 shellScale。
+    constexpr double kShellHint = 1.0;
+    if (sf > 1.01 && std::fabs(sf - buf) <= 0.25) {
+        return sf; // 已按缓冲缩放预乘
+    }
+    if (sf <= 1.01) {
+        // ibus 相对 + 无 scale：矩形常已 ×输出缩放；其余前端视为逻辑相对。
+        if (frontend && std::strcmp(frontend, "ibus") == 0) {
+            return out;
+        }
+        return kShellHint;
+    }
+    // 逻辑 DIP + 分数 sf：主题 scale 按 1 处理，避免先按 sf 误缩再 ×buf。
+    return kShellHint;
+}
+
+std::tuple<int, int, int> scaleRectToX11(const fcitx::Rect& r, double mul)
+{
+    const int h0 = r.height() > 0 ? r.height() : 16;
+    return {int(std::lround(r.left() * mul)), int(std::lround(r.top() * mul)),
+            int(std::lround(h0 * mul))};
+}
+
+/// RelativeRect、无扩展时：只缩放，假定窗口在屏左上。
+std::tuple<int, int, int> windowRelCaretToX11(const fcitx::InputContext* ic, double x11BufScale)
+{
+    const fcitx::Rect& r = ic->cursorRect();
+    const double buf = x11BufScale > 0.0 ? x11BufScale : 1.0;
+    const double sf = ic->scaleFactor() > 0.01 ? ic->scaleFactor() : 1.0;
+    const bool premult = (sf > 1.01 && std::fabs(sf - buf) <= 0.25) || sf <= 1.01;
+    return scaleRectToX11(r, premult ? 1.0 : buf);
+}
+
+/// RelativeRect：扩展换算；失败再折中。
+std::tuple<int, int, int> resolveWindowRelCaret(const fcitx::InputContext* ic, double x11BufScale,
+                                                double outputScale)
+{
+    const fcitx::Rect& r = ic->cursorRect();
+    const int rw = r.width() > 0 ? r.width() : 0;
+    const int rh = r.height() > 0 ? r.height() : 16;
+    const double sf = ic->scaleFactor() > 0.01 ? ic->scaleFactor() : 1.0;
+    const double buf = x11BufScale > 0.0 ? x11BufScale : 1.0;
+    const double spotScale = spotScaleForGnomeExt(sf, buf, outputScale, ic->frontend());
+    if (auto spot = translateRelativeSpot(r.left(), r.top(), rw, rh, spotScale)) {
+        const double shell = spot->shellScale > 0.01 ? spot->shellScale : 1.0;
+        const double toX11 = (std::fabs(shell - buf) <= 0.25) ? 1.0 : (buf / shell);
+        const int h = spot->h > 0 ? spot->h : rh;
+        WIND_DEBUG() << "window-rel fe=" << ic->frontend() << " (" << r.left() << "," << r.top()
+                     << ") sf=" << sf << " spot=" << spotScale << " → ("
+                     << int(std::lround(spot->x * toX11)) << "," << int(std::lround(spot->y * toX11))
+                     << ")";
+        return {int(std::lround(spot->x * toX11)), int(std::lround(spot->y * toX11)),
+                int(std::lround(h * toX11))};
+    }
+    return windowRelCaretToX11(ic, x11BufScale);
+}
+
+/// 无 RelativeRect：绝对屏坐标 → X11，不加窗口原点。
+std::tuple<int, int, int> resolveAbsoluteWaylandCaret(const fcitx::InputContext* ic,
+                                                      double x11BufScale)
+{
+    const fcitx::Rect& r = ic->cursorRect();
+    const double buf = x11BufScale > 0.0 ? x11BufScale : 1.0;
+    const double sf = ic->scaleFactor() > 0.01 ? ic->scaleFactor() : 1.0;
+    const bool premult = sf > 1.01 && std::fabs(sf - buf) <= 0.25;
+    auto out = scaleRectToX11(r, premult ? 1.0 : buf);
+    WIND_DEBUG() << "window-abs fe=" << ic->frontend() << " (" << r.left() << "," << r.top()
+                 << ") sf=" << sf << " → (" << std::get<0>(out) << "," << std::get<1>(out) << ")";
+    return out;
+}
+#endif
 
 /// InputContext → TextSink 适配器（对位 Swift `IMKClientAdapter`）。每次响应现造，短命。
 class ICSink final : public TextSink {
@@ -522,6 +632,8 @@ void WindEngine::sendHostDisplay(fcitx::InputContext* ic)
         return;
     }
     bool caretFree = false;
+    // X11 路径（含 GNOME 上 dbus 应用的候选窗）按 XWayland 缓冲缩放光栅化（hostScale /
+    // Xft.dpi）；Wayland popup 路径才用输出的分数缩放。
     double scale = panel_->hostScale();
 #ifdef WIND_HAVE_WAYLAND
     if (wlPanel_ && wlPanel_->handles(ic)) {
@@ -559,10 +671,25 @@ HostOutput WindEngine::hostOutput(fcitx::InputContext* ic)
 #endif
     // X11：焦点所在输出（RandR）的名字与工作区。位置取应用报的光标矩形，应用没报（全 0）时取
     // 指针处。没有 RandR / 点不在任何输出上时名字不报，工作区回落到根窗口（不分显示器）。
+    // Wayland dbus/ibus/fcitx4：与 sendCaretUpdate 同一套相对/绝对换算。
     std::optional<std::pair<int32_t, int32_t>> at;
     const fcitx::Rect& caret = ic->cursorRect();
     if (caret.left() != 0 || caret.top() != 0 || caret.width() != 0 || caret.height() != 0) {
-        at = std::make_pair(caret.left(), caret.top());
+#ifdef WIND_HAVE_WAYLAND
+        const double outScale = wlPanel_ ? wlPanel_->scale() : panel_->hostScale();
+        if (needsWindowRelCaretFix(ic, wlPanel_.get())) {
+            auto [x, y, h] = resolveWindowRelCaret(ic, panel_->hostScale(), outScale);
+            (void)h;
+            at = std::make_pair(x, y);
+        } else if (isGnomeX11PanelFrontend(ic, wlPanel_.get())) {
+            auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, panel_->hostScale());
+            (void)h;
+            at = std::make_pair(x, y);
+        } else
+#endif
+        {
+            at = std::make_pair(caret.left(), caret.top());
+        }
     } else {
         at = panel_->pointerPosition();
     }
@@ -598,6 +725,20 @@ void WindEngine::sendCaretUpdate(fcitx::InputContext* ic)
     if (r.height() <= 0 && r.width() <= 0 && r.left() == 0 && r.top() == 0) {
         return; // 宿主没报过光标位置：宁可不报，也别把候选窗钉到屏幕左上角
     }
+#ifdef WIND_HAVE_WAYLAND
+    // GNOME Wayland：相对 → 扩展加窗口原点；绝对 → 只缩放。见 §7.10。
+    const double outScale = wlPanel_ ? wlPanel_->scale() : panel_->hostScale();
+    if (needsWindowRelCaretFix(ic, wlPanel_.get())) {
+        auto [x, y, h] = resolveWindowRelCaret(ic, panel_->hostScale(), outScale);
+        sendAndDrain(encodeCaretUpdateFrame(x, y, h));
+        return;
+    }
+    if (isGnomeX11PanelFrontend(ic, wlPanel_.get())) {
+        auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, panel_->hostScale());
+        sendAndDrain(encodeCaretUpdateFrame(x, y, h));
+        return;
+    }
+#endif
     // X11 客户端报的是根窗口坐标（物理像素、左上原点、y 向下），正是 wire 坐标系。
     // y 取行顶、height 取行高（对位 Swift `CaretCoords.caretRectToWire`）。
     int h = r.height() > 0 ? r.height() : 16;
