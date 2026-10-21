@@ -22,6 +22,29 @@ public final class BridgeClient {
     // push 连接 (PushClient 长期空闲等服务端推送) 必须保持 0, 否则会被读超时误判断连。
     private let ioTimeoutMs: Int
 
+    // 冷却期: 任一带超时的连接超时后, 冷却期内所有带超时的连接直接抛 .timeout 不碰 socket。
+    // 服务卡住时若每个请求都等满超时, 打字会每键卡 2 秒; 冷却期内按键直接透传, 期满再探一次。
+    private static let stallLock = NSLock()
+    private static var stalledUntil = Date.distantPast
+
+    static func resetStall() {
+        stallLock.lock(); stalledUntil = .distantPast; stallLock.unlock()
+    }
+
+    private static var isStalled: Bool {
+        stallLock.lock(); defer { stallLock.unlock() }
+        return Date() < stalledUntil
+    }
+
+    /// 超时: 标记冷却并关闭连接 —— 迟到的响应会错位成下一次请求的回包, 这条连接不能再用。
+    private func timedOut() -> IPCError {
+        Self.stallLock.lock()
+        Self.stalledUntil = Date().addingTimeInterval(BridgeEndpoints.requestStallCooldown)
+        Self.stallLock.unlock()
+        close()
+        return .timeout
+    }
+
     public init(socketPath: String, ioTimeoutMs: Int = 0) throws {
         self.socketPath = socketPath
         self.ioTimeoutMs = ioTimeoutMs
@@ -104,6 +127,7 @@ public final class BridgeClient {
 
     public func send(_ data: Data) throws {
         guard fd >= 0 else { throw IPCError.writeFailed("socket closed") }
+        if ioTimeoutMs > 0 && Self.isStalled { throw IPCError.timeout }
         var sent = 0
         let total = data.count
         try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
@@ -112,6 +136,7 @@ public final class BridgeClient {
                 let n = Darwin.write(fd, base.advanced(by: sent), total - sent)
                 if n < 0 {
                     if errno == EINTR { continue }
+                    if errno == EAGAIN { throw timedOut() }
                     throw IPCError.writeFailed(String(cString: strerror(errno)))
                 }
                 if n == 0 {
@@ -146,6 +171,7 @@ public final class BridgeClient {
                 let r = Darwin.read(fd, base.advanced(by: got), n - got)
                 if r < 0 {
                     if errno == EINTR { continue }
+                    if errno == EAGAIN { throw timedOut() }
                     throw IPCError.readFailed(String(cString: strerror(errno)))
                 }
                 if r == 0 {

@@ -83,6 +83,21 @@ cmake --build . --config Release      # → build/Release/wind_tsf.dll
 - Handles service unavailability gracefully
 - Max 3 consecutive failures before opening circuit
 - 3-second reset interval before retry
+- SERVICE_READY 同步期间以 `ERROR_PIPE_BUSY` 收尾的连接失败不计入（服务活着、只是监听实例
+  被别的宿主抢走），按键路径照旧计数；收到 SERVICE_READY 时重置熔断器
+- SERVICE_READY 后 IME_ACTIVATED 发不出去会按 `ServiceReadyRetryPolicy.h` 有限次带抖动重试
+  （与组合态推迟共用 `TIMER_ID_SERVICE_READY`）。重试只在前台线程做；按键 / 焦点路径在本连接
+  上同步过就停——再发 IME_ACTIVATED 会让服务端按初始模式重置中英
+- 服务重启后主管道句柄是旧连接（`IsConnected()` 仍为真，写入报 232）：收到 SERVICE_READY 时
+  `DiscardStaleConnection` 先丢掉它（Peek 失败才丢，活连接不动）；没经过 SERVICE_READY 的，
+  `_SendBinaryMessage` 在**写过的**连接上遇到对端已断类错误时重连重写一次，不计熔断
+- focus_gained 仍发不出去时 `ScheduleFocusRecoveryRetry` 另起定时器（`TIMER_ID_FOCUS_RECOVERY`，
+  次数与间隔同就绪重试、计数分开），到点**只补 focus_gained**、不发 IME_ACTIVATED——补发窗口里
+  用户可能已手切中英，重置它比工具栏晚出更糟。判据 `DecideFocusRecovery`；本连接上有过按键
+  （`SendKeyEvent` 也置 `_stateEstablished`）或焦点 / 激活往来就停
+- 回归测试 `tests/win/ipc_reconnect_test.cpp`：链接真实 IPCClient.cpp + 测试专用管道名的服务端，
+  模拟重启；`make -C wind_tsf/tests/win run`（wine），exe 也可拷到 Windows 直接跑。
+  放子目录是因为 CI 会拿 g++ 编 `tests/` 顶层的 `*_test.cpp`
 
 ## Component Architecture
 

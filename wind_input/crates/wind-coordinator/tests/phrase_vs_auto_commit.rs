@@ -290,3 +290,72 @@ fn mixed_short_phrase_is_not_auto_committed() {
         "前提：短语须是唯一候选（否则唯一闸就拦了，测不到码长闸）"
     );
 }
+
+/// 建一个 wubi86 协调器（开满码自动上屏），注入一条短语；`sentence` 经方案 override 开整句。
+///
+/// 返回顺序 `(store 路径, override 目录, 协调器)`：绑定按声明逆序析构 ⇒ 协调器先放掉，
+/// 调用方再删文件。
+fn sentence_coord_with_phrase(
+    tag: &str,
+    code: &str,
+    text: &str,
+    sentence: bool,
+) -> (PathBuf, PathBuf, std::sync::Arc<Coordinator>) {
+    let root = std::env::temp_dir().join(format!(
+        "wind_phrase_ac_sentence_{tag}_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let ov = root.join("overrides");
+    std::fs::create_dir_all(&ov).unwrap();
+    std::fs::write(
+        ov.join("wubi86.toml"),
+        format!("[engine.codetable]\nsentence_input = {sentence}\n"),
+    )
+    .unwrap();
+    let store_path = root.join("user_data.redb");
+    let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
+    store.add_phrase(code, text, 0, 1200).unwrap();
+
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["wubi86".into()];
+    cfg.schema.active = "wubi86".into();
+    cfg.input.default.chinese_mode = true;
+    cfg.schema.codetable.auto_commit_at_full = true;
+    let coord =
+        Coordinator::new_headless_with_store_override(cfg, Some(&data_dir()), store, Some(ov));
+    (store_path, root, coord)
+}
+
+/// 短语满码上屏读的是配置、绕过引擎，整句开启时须在协调器侧另行让位。
+///
+/// `qwrr` 在五笔 86 里是空码，挂上一条短语后它就是唯一候选、且满码——正是短语满码上屏
+/// 的命中形态。两向对照：关整句时上屏（证明现场确实走到了短语上屏），开整句时不上屏。
+#[test]
+fn phrase_auto_commit_yields_to_sentence_input() {
+    if !has_schemas() {
+        eprintln!("跳过：缺少 build_dev/data/schemas —— 本测试未实际执行");
+        return;
+    }
+    for sentence in [false, true] {
+        let tag = if sentence { "on" } else { "off" };
+        let (_, root, coord) = sentence_coord_with_phrase(tag, "qwrr", "空码短语", sentence);
+        let mut action = KeyAction::Consumed;
+        for ch in "qwrr".chars() {
+            action = press_letter(&coord, ch);
+        }
+        drop(coord);
+        let _ = std::fs::remove_dir_all(&root);
+        if sentence {
+            assert!(
+                matches!(action, KeyAction::UpdateComposition { .. }),
+                "开整句时短语不得满码上屏，实际 {action:?}"
+            );
+        } else {
+            assert!(
+                matches!(&action, KeyAction::InsertText { text, .. } if text == "空码短语"),
+                "前提：关整句时唯一短语应满码上屏，实际 {action:?}"
+            );
+        }
+    }
+}

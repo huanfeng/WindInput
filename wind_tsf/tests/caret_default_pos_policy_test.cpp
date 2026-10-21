@@ -14,6 +14,7 @@
 //   - LatchApplies 改成只看 latched（= 忘了加组合作用域那一版）         → TestLatchScope 红
 //   - SameRect 任一成员比较去掉                                          → TestSameRect 红
 //   - AllowCompositionRectFallback 任一前提去掉（含 !hostDefaultPos，2026-09-30） → TestCompositionRectFallback 红
+//   - ShowsLaidOutComposition 任一前提去掉（10 处）                      → TestLaidOutComposition 红
 // 改测试时请保住这个性质——一条永远绿的测试不会告诉你任何事。
 //
 // ⚠️ 覆盖边界：这里测的只是**判据**。矩形怎么取、闩什么时候置、`_pComposition` 在哪几个
@@ -110,6 +111,51 @@ void TestFingerprint()
     CHECK(!IsHostDefaultPosition(kIllustrator, false, kIllustrator, false, kIllustrator));
 }
 
+void TestLaidOutComposition()
+{
+    CASE("ShowsLaidOutComposition：Edge 网页输入框排完版必须成立");
+    // 选区落在组合末尾，组合矩形从起点到末尾、与选区同高。不成立的话，Edge 被误判成
+    // IMM32 宿主后解除不了，组合起点一直不报，候选窗跟着插入点逐字抖动。
+    CHECK(ShowsLaidOutComposition(true, Rect{1464, 695, 1464, 725}, true, Rect{1440, 695, 1464, 725}));
+    // 记事本同形
+    CHECK(ShowsLaidOutComposition(true, Rect{495, 484, 495, 539}, true, Rect{461, 484, 495, 539}));
+
+    CASE("ShowsLaidOutComposition：CUAS 上的 Java 补发前后都不成立");
+    // 补发前：工作区右下角像素；补发后：CUAS 改答 CANDIDATEFORM 点。三次查询都是同一个 h=0 的点。
+    constexpr Rect kJavaCuas{1919, 1039, 1920, 1039};
+    CHECK(!ShowsLaidOutComposition(true, kJavaCuas, true, kJavaCuas));
+    constexpr Rect kJavaAfterNudge{314, 60, 314, 60};
+    CHECK(!ShowsLaidOutComposition(true, kJavaAfterNudge, true, kJavaAfterNudge));
+    CHECK(!ShowsLaidOutComposition(true, kIllustrator, true, kIllustrator));
+
+    CASE("ShowsLaidOutComposition：只答一个固定矩形的宿主不成立");
+    // 有高度但所有 range 都给同一个矩形（如按 CFS_EXCLUDE 区域作答），不是在排版。
+    constexpr Rect fixed{300, 40, 320, 70};
+    CHECK(!ShowsLaidOutComposition(true, fixed, true, fixed));
+
+    CASE("ShowsLaidOutComposition：选区不在组合矩形上不成立");
+    // 两个互不相干的矩形（如分别答输入框区域与 CFS_EXCLUDE 区域）不是排版证据。
+    constexpr Rect area{1440, 695, 1464, 725};
+    CHECK(!ShowsLaidOutComposition(true, Rect{1400, 695, 1400, 725}, true, area)); // 在左边外
+    CHECK(!ShowsLaidOutComposition(true, Rect{1500, 695, 1500, 725}, true, area)); // 在右边外
+    CHECK(!ShowsLaidOutComposition(true, Rect{1450, 600, 1450, 630}, true, area)); // 在上方
+    CHECK(!ShowsLaidOutComposition(true, Rect{1450, 760, 1450, 790}, true, area)); // 在下方
+    // 换行的组合：选区在第二行，组合矩形包住两行，仍成立
+    CHECK(ShowsLaidOutComposition(true, Rect{1060, 725, 1060, 755}, true, Rect{1040, 695, 1800, 755}));
+    // shell 临时输入小窗：选区退化在屏幕角落，组合起点有效——不成立
+    CHECK(!ShowsLaidOutComposition(true, kIllustrator, true, Rect{473, 189, 485, 217}));
+
+    CASE("ShowsLaidOutComposition：任一维缺失或退化都不成立");
+    constexpr Rect caret{1464, 695, 1464, 725};
+    constexpr Rect comp{1440, 695, 1464, 725};
+    CHECK(!ShowsLaidOutComposition(false, caret, true, comp));                          // 选区没取到
+    // 以下三条其余前提全满足（选区落在组合矩形内），只缺被测那一维
+    CHECK(!ShowsLaidOutComposition(true, Rect{1464, 710, 1464, 710}, true, comp));      // 选区无高度
+    CHECK(!ShowsLaidOutComposition(true, caret, false, comp));                          // 组合矩形没取到
+    CHECK(!ShowsLaidOutComposition(true, Rect{1464, 700, 1464, 720}, true, Rect{1464, 695, 1464, 725})); // 组合矩形零宽
+    CHECK(!ShowsLaidOutComposition(true, Rect{1399, 1620, 1399, 1650}, true, Rect{1353, 1647, 1399, 1647})); // 洛克王国：不填高度
+}
+
 void TestCompositionRectFallback()
 {
     CASE("AllowCompositionRectFallback：洛克王国形态（算完布局、不填高度）必须放行");
@@ -147,6 +193,7 @@ int main()
     std::printf("CaretDefaultPosPolicy tests\n");
     TestSameRect();
     TestFingerprint();
+    TestLaidOutComposition();
     TestCompositionRectFallback();
     TestLatchScope();
 

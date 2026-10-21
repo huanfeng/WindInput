@@ -300,6 +300,10 @@ separator = "auto"
 [schema.pinyin.english_merge]
 enable = false
 min_length = 3
+# 中文侧有候选时也补英文前缀（至多 2 条）。只在打的不是完整拼音时补：输入至少 5 个字母、
+# 且整串怎么切都切不成完整全拼音节（templa 补 template；shang、chang 不补）。
+# 双拼方案下不生效（判据按全拼音节定义）。需先开 enable。
+prefix_complete = false
 
 [schema.pinyin.shuangpin]
 # 双拼方案下额外把击键当全拼再解释一遍（多人共用一台机器：主力打双拼，别人只会全拼）。
@@ -1100,6 +1104,9 @@ min_word_chars = 2
 # 是否启用分类词表：「动物」「水果」等分类词会带出整组 emoji，数量受 max_per_word 约束
 categories = false
 
+# 候选里追加了 emoji 或附加模块的符号时，不做全码唯一自动上屏，留出选它的机会
+block_auto_commit = false
+
 # 附加模块：来自白霜拼音（rime-frost）的 emoji / 符号表，按模块单独开关。查询时排在上面的
 # 主表（与分类表）之后，同一个词多张表都有时依次拼接，再按 max_per_word 截断。
 [input.emoji.modules]
@@ -1372,7 +1379,7 @@ min_window_height_vertical = 0
 # min_window_height_vertical（两项可同时配，取较大者）。
 min_rows = 0
 # 候选展开（卷轴）：候选多于一页时按翻页键，候选窗原地展开成多行网格，一行就是原来的一页。
-# 展开后 ↑↓ 换行、←→ 行内移动、翻页键一次滚一屏，数字键选高亮行；Esc 收起、再按一次取消。
+# 展开后 ↑↓ 换行、←→ 行内移动、翻页键逐行移动，数字键选高亮行；Esc 收起、再按一次取消。
 # 只对横排生效。
 grid_expand = false
 # 展开态的可见行数（2~10）。
@@ -1382,6 +1389,8 @@ grid_cell_max_chars = 6
 # 展开态下序号（与数字键）从高亮行往下怎么顺延：rows = 只补整行（每页 5 个时下一行 6~0）、
 # cells = 逐格编到 0（可以停在半行）、off = 只编高亮行。
 grid_index_fill = "rows"
+# 展开态下 PageUp/PageDown 翻一整屏；关掉后也逐行。其余翻页键（如 - =）恒逐行。
+grid_pageupdown_screen = true
 # 展开态的分类标签（Tab / Shift+Tab 或鼠标点击切换）：all 全部、single 单字、phrase 词组、
 # rare 生僻、symbol 符号。只决定有哪些，顺序固定按这个次序；少于两个时不显示标签栏。
 grid_categories = ["all", "single", "phrase", "rare"]

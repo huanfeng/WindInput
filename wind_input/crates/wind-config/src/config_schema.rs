@@ -318,6 +318,7 @@ static REGISTRY: &[ConfigField] = &[
     // 拼音方案两者都没有，登记它等于教用户去配一件不成立的事。见 `PinyinEnglishMerge`。
     f("schema.pinyin.english_merge.enable", Bool),
     f("schema.pinyin.english_merge.min_length", Int),
+    f("schema.pinyin.english_merge.prefix_complete", Bool),
     f("schema.pinyin.fuzzy.enabled", Bool),
     f("schema.pinyin.fuzzy.zh_z", Bool),
     f("schema.pinyin.fuzzy.ch_c", Bool),
@@ -517,6 +518,7 @@ static REGISTRY: &[ConfigField] = &[
     f("input.emoji.max_hosts", Int),
     f("input.emoji.min_word_chars", Int),
     f("input.emoji.categories", Bool),
+    f("input.emoji.block_auto_commit", Bool),
     // 附加模块开关（id → bool）。键由内置注册表与用户放进 `emoji/` 的文件共同决定，不是
     // 固定集合，故整体登记为 Map；设置端由对话框整体读写。
     f("input.emoji.modules", Map(&[])),
@@ -641,6 +643,7 @@ static REGISTRY: &[ConfigField] = &[
         "ui.candidate.grid_index_fill",
         Enum(&["rows", "cells", "off"]),
     ),
+    f("ui.candidate.grid_pageupdown_screen", Bool),
     f("ui.candidate.grid_categories", StrList),
     f("ui.candidate.comment_enabled", Bool),
     f("ui.candidate.comment_template_vertical", Str),

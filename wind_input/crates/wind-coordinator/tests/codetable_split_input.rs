@@ -367,3 +367,65 @@ fn full_length_empty_code_with_longer_entry_shows_completion_not_split() {
         bare.debug_page_texts()
     );
 }
+
+/// 论坛 t302：超码长（第 5 码起）空码、仍有更长后续时照样提示后续编码，直到打全。
+/// 小鹤音形现场 `okou` → `okouu` → `okouuxb`（𢠙），曾只在满码长那一格提示、第 5 码断开。
+/// 竞争者 `ojssbc` 与目标在第 5 码分岔：证明补的是「本串的后续」而非同前缀随便一条。
+/// 顶码同开：有更长后继时顶码不得抢先上屏。
+#[test]
+fn completion_continues_past_full_length() {
+    let exact = |c: &mut Config| {
+        c.schema.codetable.single_code_input = true;
+        c.schema.codetable.single_code_complete = true;
+        c.schema.codetable.top_code_commit = true;
+    };
+    let (coord, _d) = coord_xy_with("t302_over", "后续\tojssab\n另条\tojssbc\n", exact);
+    press(&coord, "ojss");
+    assert_eq!(coord.debug_page_texts(), vec!["后续"], "满码长");
+    press(&coord, "a");
+    assert_eq!(coord.debug_input_buffer(), "ojssa", "第 5 码不得顶码");
+    assert_eq!(
+        coord.debug_page_texts(),
+        vec!["后续"],
+        "第 5 码仍应提示后续"
+    );
+    press(&coord, "b");
+    assert_eq!(coord.debug_page_texts(), vec!["后续"], "全码");
+
+    let (other, _d1) = coord_xy_with("t302_over_b", "后续\tojssab\n另条\tojssbc\n", exact);
+    press(&other, "ojssb");
+    assert_eq!(
+        other.debug_page_texts(),
+        vec!["另条"],
+        "第 5 码分岔后补另一条"
+    );
+
+    // 短语侧补全源同口径：码表无货、短语收着更长的码。
+    let (ph, _d2) = coord_xy_with("t302_over_ph", "后续\tojssab\n", exact);
+    ph.debug_install_phrases(vec![seed("ojsxyz", "短语后续")]);
+    press(&ph, "ojsxy");
+    assert_eq!(ph.debug_page_texts(), vec!["短语后续"], "超码长短语后续");
+}
+
+/// 论坛 t302 连带：开 `clear_on_empty_max` 时，超码长的短语后续补全须拦住满码空码清空。
+/// 引擎只看码表（`ojsxy` 无后继 ⇒ 给出清空资格），协调器按最终列表裁决——补出的短语后续
+/// 在列表里就不清。反例：`ojssz` 码表与短语都无后继，照常清空。
+#[test]
+fn phrase_completion_past_full_length_blocks_clear_on_empty_max() {
+    let exact_clear = |c: &mut Config| {
+        c.schema.codetable.single_code_input = true;
+        c.schema.codetable.single_code_complete = true;
+        c.schema.codetable.clear_on_empty_max = true;
+    };
+    let (ph, _d) = coord_xy_with("t302_clear_ph", "后续\tojssab\n", exact_clear);
+    ph.debug_install_phrases(vec![seed("ojsxyz", "短语后续")]);
+    press(&ph, "ojsxy");
+    assert_eq!(ph.debug_input_buffer(), "ojsxy", "有短语后续时不得清空");
+    assert_eq!(ph.debug_page_texts(), vec!["短语后续"]);
+
+    let (bare, _d1) = coord_xy_with("t302_clear_bare", "后续\tojssab\n", exact_clear);
+    bare.debug_install_phrases(vec![seed("ojsxyz", "短语后续")]);
+    press(&bare, "ojssz");
+    assert_eq!(bare.debug_input_buffer(), "", "无任何后继照常清空");
+    assert!(bare.debug_page_texts().is_empty());
+}

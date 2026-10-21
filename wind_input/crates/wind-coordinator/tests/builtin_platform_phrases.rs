@@ -106,7 +106,9 @@ fn old_filter_accepts(platform: Option<&str>) -> bool {
         None => true,
         Some(p) => {
             let p = p.to_lowercase();
-            p.is_empty() || p == "all" || p == "windows"
+            // `desktop`：原本没写平台的电脑专用条目（打开网页、读写剪贴板……）后来补标的，
+            // 只是让手机看不见它们；在 Windows 上与改标前一样都收
+            p.is_empty() || p == "all" || p == "windows" || p == "desktop"
         }
     }
 }
@@ -128,6 +130,8 @@ struct RawPhrase {
     platform: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 fn raw_entries() -> Vec<RawPhrase> {
@@ -306,6 +310,7 @@ fn to_store(v: &[wind_phrase::SystemPhraseEntry]) -> Vec<wind_store::phrases::Sy
             weight: e.weight,
             position: e.position,
             category: e.category.clone(),
+            enabled: e.enabled,
         })
         .collect()
 }
@@ -392,6 +397,8 @@ fn windows_upgrade_keeps_every_row() {
             weight: r.weight.unwrap_or(1000),
             position: r.position.unwrap_or(0),
             category: r.category.unwrap_or_default(),
+            // 出厂开关取文件里写的（时间戳出厂关闭是有意的改动，不算「条目集变了」）
+            enabled: r.enabled.unwrap_or(true),
         })
         .collect();
     store.sync_system_phrases(&old).unwrap();

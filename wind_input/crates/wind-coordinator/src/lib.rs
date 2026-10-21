@@ -18,6 +18,8 @@ pub(crate) mod construct;
 pub mod coordinator;
 pub(crate) mod data_needs;
 pub(crate) mod debug_support;
+pub mod dict_stats_api;
+pub mod dict_transfer_api;
 #[cfg(windows)]
 pub mod direct_switch;
 pub mod draft_window;
@@ -69,6 +71,8 @@ pub(crate) mod preedit_cursor;
 pub mod process_memory;
 mod quick_eval;
 pub(crate) mod quick_history;
+/// 方案附加词库的列表与开关（桌面设置页 RPC 与移动端门面共用），见模块文档。
+pub mod schema_dicts_api;
 pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
 pub(crate) mod short_code_yield;

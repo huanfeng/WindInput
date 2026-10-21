@@ -394,6 +394,7 @@ public:
     // 当前实例是否持有输入焦点（OnSetFocus 最后一次收到非 null 的 pDocMgrFocus）。
     // 用于服务重启时避免对无焦点实例触发工具栏显示。
     BOOL HasFocus() const { return _hasFocus; }
+    BOOL HasThreadFocus() const { return _hasThreadFocus; }
     // TRUE when the focused document manager has an editable (non-readonly,
     // non-transitory) context. FALSE when e.g. Chrome passes a doc manager
     // with no active text field (its context is TF_SD_READONLY).
@@ -930,8 +931,15 @@ private:
 public:
     // Perform full state sync with Go service (sends IMEActivated + processes response).
     // Called after new/re-connection to ensure TSF and service state are consistent.
-    void _DoFullStateSync();
+    // 返回 IME_ACTIVATED 是否真发出去了；SERVICE_READY 路径据此决定是否重试。
+    // fromServiceReady：管道忙不计熔断、失败日志降为 INFO（重试路径自己打判决日志）。
+    BOOL _DoFullStateSync(BOOL fromServiceReady = FALSE);
+    // 按键 / 焦点路径已建立服务端状态：停掉 SERVICE_READY 的失败重试。
+    void CancelServiceReadyRetry();
     void TryRecoverFocusState();
+    // ScheduleFocusRecoveryRetry 的定时器到点时调（TSF 线程）：只补发 focus_gained。
+    // 返回 TRUE = 补上了或不必再补；FALSE = 发送失败，由调用方决定是否再排一次。
+    BOOL RetryFocusRecovery();
     // 按前台 band 复核 host 候选窗的落位，不符则整组重建。一段输入的第一个键时调，
     // 见 TextService.cpp 的实现注释。why 只进日志。
     void RecheckHostBand(const wchar_t* why);

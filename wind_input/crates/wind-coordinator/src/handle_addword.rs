@@ -36,6 +36,8 @@ const ADD_WORD_DEFAULT_LEN: usize = 2;
 const ADD_WORD_MAX_LEN: usize = 10;
 /// 手动加词默认权重（略高于系统词库归一化中位 1000，对齐 Go addWordMaxWeight）
 const ADD_WORD_WEIGHT: i32 = 1200;
+// 手动加的英文词要压过按词频名次赋权的系统词（见 `wind_dict::freq_rank`）。
+const _: () = assert!(wind_dict::freq_rank::RANK_WEIGHT_MAX < ADD_WORD_WEIGHT);
 /// 临时词库淘汰的检查间隔（每 N 次造词写入检查一次）。全表扫描代价高，而上限是软约束，
 /// 略微超出无害，故不必每次都查。
 const EVICT_CHECK_INTERVAL: usize = 64;

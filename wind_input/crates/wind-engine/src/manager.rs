@@ -14,6 +14,7 @@ use crate::encoder;
 use crate::engine::{BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType};
 use crate::freq_rerank::ProtectPolicy;
 use crate::pinyin::{Config as PinyinConfig, PinyinEngine};
+pub use dict_stats::{DictStatsLayer, SystemDictStats};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,10 @@ pub const PINYIN_DATA_SCHEMA: &str = "pinyin";
 /// `Arc`。此前混输在 `build_engine` 里内联另建一份，靶机实测白占 12.7 MB（英文引擎的词组
 /// 分词索引随用户词库规模增长，那台机器 18 万条）。
 pub const ENGLISH_SCHEMA: &str = "english";
+
+/// 英文词频名次表（相对 `schemas/`）：给英文词库里没写权重的词条按名次赋权，
+/// 见 `wind_dict::freq_rank` 与 [`EngineManager::load_table_dict`]。
+const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
 
 /// 双拼方案未声明 `layout` 时的缺省布局。
 ///
@@ -419,6 +424,9 @@ pub const ASSOC_POOL_FACTOR: usize = 4;
 /// [`EngineManager::refresh_schema_cache`]）。时钟读数从 0 往上走，碰不到它。
 const UNTOUCHED: u64 = u64::MAX;
 
+#[cfg(test)]
+type BeforePublishHook = Arc<dyn Fn(&EngineManager, &str) + Send + Sync>;
+
 /// `engines` 表里的一项：引擎 + 最后使用时刻（方案常驻策略的闲置淘汰用）。
 ///
 /// 时刻存的是 [`EngineManager::use_clock`] 的读数（毫秒，粗粒度——淘汰拍子推进一次），
@@ -431,6 +439,16 @@ struct LoadedEngine {
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）+ 最后使用时刻
     engines: Mutex<HashMap<String, LoadedEngine>>,
+    /// `engines` 的失效代次：凡「表里的引擎已按旧配置建成、不能再用」的失效口
+    /// （`invalidate_schema`、`reload_from_config`）都在**持 `engines` 锁**时 +1。
+    /// `ensure_loaded` 锁外构建前记代次、写回前（同一把锁下）比对，变了就丢掉重建——否则
+    /// 「建到一半被失效」的旧引擎会被插回表里，一直用到下次失效。共享英文引擎缓存同理。
+    /// 闲置淘汰不推进它：被摘的引擎配置没变，正在建的那份照样能用。
+    ///
+    /// **全局一个代次是有意的取舍**：无关方案的失效也会让在建的构建重来一轮（白建一次），
+    /// 换来的是不必维护「谁依赖谁」的按方案代次（混输成员、共享英文都要跟着推）。失效是
+    /// 设置页操作级的低频事件，不会活锁——每多一轮都要求其间又发生一次失效。
+    engines_gen: std::sync::atomic::AtomicU64,
     /// 淘汰时钟的零点（构造时刻）。
     clock_origin: std::time::Instant,
     /// 淘汰时钟：距 `clock_origin` 的毫秒数，**只在淘汰拍子里推进**（[`Self::evict_idle`]）。
@@ -524,6 +542,11 @@ pub struct EngineManager {
     /// redb 查询叠加，造成可感知卡顿。缓存 `None` 同样有意义：方案文件不存在时反复尝试
     /// 读盘，还会刷出成片的 `Schema file not found` 警告。
     schema_type_cache: Mutex<HashMap<String, Option<String>>>,
+    /// 词库统计结果（方案 id → (缓存键, 结果)），见 [`Self::dict_stats`]。键含各库摘要，
+    /// 词库一变自然失效，故不接 `invalidate_schema`；只存结果（KB 级），不存中间集合。
+    dict_stats_cache: Mutex<HashMap<String, (String, Arc<dict_stats::SystemDictStats>)>>,
+    /// 词库统计按方案 single-flight 的闸（方案 id → 锁），见 [`Self::dict_stats`]。
+    dict_stats_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 已建引擎所用用户分库的指纹（方案 id → [(数据方案, 指纹)]），建引擎前记下。不带路径的
     /// `dict.reload` 据此判断分库变没变（[`Self::user_dicts_changed`]）。
     user_dicts_seen: Mutex<HashMap<String, Vec<(String, String)>>>,
@@ -553,8 +576,13 @@ pub struct EngineManager {
     /// 与 [`Self::key_actions_cache`] 同批失效：`invalidate_schema` 按 id 移除、
     /// 配置热重载整表清空，两处都要接。
     behavior_cache: Mutex<HashMap<String, Arc<wind_config::SchemaBehavior>>>,
-    /// 方案显示名缓存（schema_id -> schema.name；缺则回退 id）。按需读盘一次。
-    name_cache: Mutex<HashMap<String, String>>,
+    /// 方案显示名与图标短称缓存（schema_id -> (schema.name 缺则回退 id, 截断后的 icon_label)）。
+    /// 两者出自同一次读方案文件，一并缓存、同批失效；按需读盘一次。
+    ///
+    /// 短称此前不缓存，每次 `schema_icon_label` 都读盘 + 整份解析方案文件：方案列表
+    /// （`schema_entries`）每项各一次，手机上每次弹键盘 / 换模式都要列一遍方案，装 5 个方案
+    /// 就是主线程上约 40ms（模拟器实测）。
+    name_cache: Mutex<HashMap<String, (String, String)>>,
     /// overlay 方案注册表缓存（见 [`Self::overlay_modes`]）。
     ///
     /// 与其它缓存不同，这是**整表**缓存而非 per-schema：它是一个集合，任何方案的
@@ -616,6 +644,11 @@ pub struct EngineManager {
     /// 每方案构建锁（single-flight）：同一方案的引擎/缓存构建串行，避免后台预热与首次
     /// 切换并发时重复构建同一份大缓存；不同方案可并行构建（缓存在各自子目录，互不冲突）。
     build_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// 测试钩子：引擎建好、写回 `engines` 之前（参数为方案 id）、共享英文引擎写回缓存之前
+    /// （`"@shared_english"`）、`invalidate_schema` 放开 `engines` 锁之后（`"@after_engines_bump"`）
+    /// 调用。用来在锁外构建的窗口里确定性地插入一次失效。
+    #[cfg(test)]
+    before_publish_hook: Mutex<Option<BeforePublishHook>>,
     /// 反查索引的每方案构建锁。与 `build_locks` **刻意分开**：索引构建（秒级、上百 MB）
     /// 不该和引擎构建互相阻塞，两者的等待方也不同（前者是后台线程，后者是切换方案的用户）。
     /// 兼作「是否正在建」的判据（`try_lock` 失败即在建），供打字线路决定要不要再 spawn。
@@ -923,6 +956,7 @@ impl EngineManager {
 
         let mgr = Self {
             engines: Mutex::new(HashMap::new()),
+            engines_gen: std::sync::atomic::AtomicU64::new(0),
             clock_origin: std::time::Instant::now(),
             use_clock: std::sync::atomic::AtomicU64::new(0),
             active: Mutex::new(active_id.clone()),
@@ -952,6 +986,8 @@ impl EngineManager {
             codetable_settings_cache: Mutex::new(HashMap::new()),
             codetable_settings_gen: std::sync::atomic::AtomicU64::new(0),
             schema_type_cache: Mutex::new(HashMap::new()),
+            dict_stats_cache: Mutex::new(HashMap::new()),
+            dict_stats_gates: Mutex::new(HashMap::new()),
             user_dicts_seen: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
             session_actions_cache: Mutex::new(HashMap::new()),
@@ -971,6 +1007,8 @@ impl EngineManager {
             shuangpin_finals_cache: Mutex::new((String::new(), None)),
             shuangpin_reverse_cache: Mutex::new((String::new(), None)),
             build_locks: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            before_publish_hook: Mutex::new(None),
             index_build_locks: Mutex::new(HashMap::new()),
             aux_source_warned: Mutex::default(),
             reverse_index_skipped: Mutex::new(std::collections::HashSet::new()),
@@ -3086,6 +3124,20 @@ impl EngineManager {
         true
     }
 
+    /// 跑一次 [`Self::before_publish_hook`]（拷出来、放锁后调：钩子里允许再取引擎，
+    /// 也允许别的线程同时进钩子）。
+    #[cfg(test)]
+    fn run_before_publish_hook(&self, stage: &str) {
+        let hook = self
+            .before_publish_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(h) = hook {
+            h(self, stage);
+        }
+    }
+
     /// 取引擎的公共入口：已加载就记一笔「用过」（闲置淘汰的判据），否则构建。
     ///
     /// 取引擎的路径（`engine_for` / `convert_with*` / `enumerate_with` / …）都先过这里，
@@ -3101,105 +3153,118 @@ impl EngineManager {
             locks.entry(schema_id.to_string()).or_default().clone()
         };
         let _build_guard = build_lock.lock().unwrap_or_else(|e| e.into_inner());
-        // 抢到锁后复查：等待期间可能已被另一线程（预热/切换）构建完成。
-        if self.touch_loaded(schema_id) {
-            return true;
-        }
-        let codetable_cfg = self
-            .codetable
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let mix_cfg = self.mix.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let pinyin_cfg = self
-            .pinyin
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        // 词组分词（t42）：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
-        // `input.temp_english.phrase_seg`（A2-3b），两份开关相或。引擎只需知道「要不要具备
-        // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
-        let phrase_seg_anywhere = self
-            .english
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .phrase_seg
-            || self
-                .temp_english
+        // 构建期间被失效（`engines_gen` 变了）就丢掉这次结果、按新配置再建一轮，而不是返回
+        // 「建好但没登记」：调用方一律 `ensure_loaded` 后再 `loaded_engine` 取，取不到就是
+        // 丢一次按键 / 切方案失败。每轮重来都要求期间又发生一次失效，不会空转。
+        loop {
+            // 抢到锁后复查：等待期间可能已被另一线程（预热/切换）构建完成。
+            if self.touch_loaded(schema_id) {
+                return true;
+            }
+            // 先记代次、后读配置：读到的配置不会比代次旧。
+            let generation = self.engines_gen.load(std::sync::atomic::Ordering::Acquire);
+            let codetable_cfg = self
+                .codetable
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .phrase_seg;
-        // 反查模式专属的「含未启用扩展库」开关（全局镜像），决定 `build_engine` 挂不挂影子层。
-        let lookup_disabled_dicts = self
-            .reverse_lookup_disabled
-            .load(std::sync::atomic::Ordering::Relaxed);
-        // 混输分支据此取**共享**英文引擎而不是另建一份。闭包在 `build_engine` 内部求值，
-        // 故 `enable_english` 关着时英文引擎一次都不会被建出来。
-        //
-        // ⚠️ 构建英文方案**自己**时必须传 `None`：英文方案不能把自己当成自己的英文子引擎。
-        // `read_schema` 合并 override 走的是无白名单的 `merge_toml`，所以 `english.toml` 里
-        // 写一句 `[engine] type = "mixed"` 就能把英文方案变成混输，于是
-        // `shared_english_engine` → `ensure_loaded("english")` → 持 `build_locks["english"]`
-        // → mixed 分支回调 → `shared_english_engine` → `ensure_loaded("english")`
-        // → **同一线程再取同一把 `Mutex`**。`std::sync::Mutex` 不可重入，整条打字线路就此
-        // 挂死，只能杀进程。传 `None` 后退化为「这个畸形的混输拿不到英文子引擎」——少一路
-        // 候选，但活着。
-        //
-        // 闭包**先绑定再取引用**：写成 `Some(&|| …)` 的话它是个临时值，在 `if` 表达式结束
-        // 时就被丢掉，借用活不到 `build_engine` 的调用点。
-        // 先记指纹再建：建的过程中文件被改，下次 `dict.reload` 照样能发现
-        let user_dicts_fp = self.user_dicts_fingerprints(schema_id);
-        let borrow_shared_english = || self.shared_english_engine();
-        let english_provider: Option<EnglishProvider<'_>> = if schema_id == ENGLISH_SCHEMA {
-            None
-        } else {
-            Some(&borrow_shared_english)
-        };
-        match Self::build_engine(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.store.clone(),
-            &codetable_cfg,
-            &mix_cfg,
-            self.override_dir.as_deref(),
-            &pinyin_cfg,
-            phrase_seg_anywhere,
-            lookup_disabled_dicts,
-            // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
-            None,
-            english_provider,
-        ) {
-            Some(engine) => {
-                info!(
-                    "Loaded engine: {} (type={:?})",
-                    schema_id,
-                    engine.engine_type()
-                );
-                self.user_dicts_seen
+                .clone();
+            let mix_cfg = self.mix.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let pinyin_cfg = self
+                .pinyin
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            // 词组分词（t42）：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
+            // `input.temp_english.phrase_seg`（A2-3b），两份开关相或。引擎只需知道「要不要具备
+            // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
+            let phrase_seg_anywhere = self
+                .english
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phrase_seg
+                || self
+                    .temp_english
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(schema_id.to_string(), user_dicts_fp);
-                self.engines
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(
-                        schema_id.to_string(),
-                        LoadedEngine {
-                            engine: Arc::from(engine),
-                            // 刚建好也算「用过」，否则一个拍子之内就可能被判闲置。
-                            last_used: std::sync::atomic::AtomicU64::new(self.use_clock_now()),
-                        },
-                    );
-                // 活跃方案的引擎（重）建好了：影子层后台预热。非活跃方案等切过去时再热
-                // （`on_active_changed`），不为用户未必会用的方案读盘。
-                if schema_id == self.active_schema_id() {
-                    self.warm_disabled_dicts_async(schema_id);
+                    .phrase_seg;
+            // 反查模式专属的「含未启用扩展库」开关（全局镜像），决定 `build_engine` 挂不挂影子层。
+            let lookup_disabled_dicts = self
+                .reverse_lookup_disabled
+                .load(std::sync::atomic::Ordering::Relaxed);
+            // 混输分支据此取**共享**英文引擎而不是另建一份。闭包在 `build_engine` 内部求值，
+            // 故 `enable_english` 关着时英文引擎一次都不会被建出来。
+            //
+            // ⚠️ 构建英文方案**自己**时必须传 `None`：英文方案不能把自己当成自己的英文子引擎。
+            // `read_schema` 合并 override 走的是无白名单的 `merge_toml`，所以 `english.toml` 里
+            // 写一句 `[engine] type = "mixed"` 就能把英文方案变成混输，于是
+            // `shared_english_engine` → `ensure_loaded("english")` → 持 `build_locks["english"]`
+            // → mixed 分支回调 → `shared_english_engine` → `ensure_loaded("english")`
+            // → **同一线程再取同一把 `Mutex`**。`std::sync::Mutex` 不可重入，整条打字线路就此
+            // 挂死，只能杀进程。传 `None` 后退化为「这个畸形的混输拿不到英文子引擎」——少一路
+            // 候选，但活着。
+            //
+            // 闭包**先绑定再取引用**：写成 `Some(&|| …)` 的话它是个临时值，在 `if` 表达式结束
+            // 时就被丢掉，借用活不到 `build_engine` 的调用点。
+            // 先记指纹再建：建的过程中文件被改，下次 `dict.reload` 照样能发现
+            let user_dicts_fp = self.user_dicts_fingerprints(schema_id);
+            let borrow_shared_english = || self.shared_english_engine();
+            let english_provider: Option<EnglishProvider<'_>> = if schema_id == ENGLISH_SCHEMA {
+                None
+            } else {
+                Some(&borrow_shared_english)
+            };
+            match Self::build_engine(
+                schema_id,
+                self.data_dir.as_deref(),
+                self.store.clone(),
+                &codetable_cfg,
+                &mix_cfg,
+                self.override_dir.as_deref(),
+                &pinyin_cfg,
+                phrase_seg_anywhere,
+                lookup_disabled_dicts,
+                // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
+                None,
+                english_provider,
+            ) {
+                Some(engine) => {
+                    #[cfg(test)]
+                    self.run_before_publish_hook(schema_id);
+                    let engine_type = engine.engine_type();
+                    {
+                        let mut g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+                        if self.engines_gen.load(std::sync::atomic::Ordering::Acquire) != generation
+                        {
+                            debug!("{schema_id} 构建期间被失效，丢弃本次结果重建");
+                            continue;
+                        }
+                        // 与发布同在 `engines` 锁里登记指纹：先发布后登记的话，其间
+                        // `user_dicts_changed` 会把这个刚建好的方案误报成「变了」。
+                        self.user_dicts_seen
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(schema_id.to_string(), user_dicts_fp);
+                        g.insert(
+                            schema_id.to_string(),
+                            LoadedEngine {
+                                engine: Arc::from(engine),
+                                // 刚建好也算「用过」，否则一个拍子之内就可能被判闲置。
+                                last_used: std::sync::atomic::AtomicU64::new(self.use_clock_now()),
+                            },
+                        );
+                    }
+                    info!("Loaded engine: {} (type={:?})", schema_id, engine_type);
+                    // 活跃方案的引擎（重）建好了：影子层后台预热。非活跃方案等切过去时再热
+                    // （`on_active_changed`），不为用户未必会用的方案读盘。
+                    if schema_id == self.active_schema_id() {
+                        self.warm_disabled_dicts_async(schema_id);
+                    }
+                    return true;
                 }
-                true
-            }
-            None => {
-                warn!("Failed to build engine for schema: {}", schema_id);
-                false
+                None => {
+                    warn!("Failed to build engine for schema: {}", schema_id);
+                    return false;
+                }
             }
         }
     }
@@ -3255,14 +3320,6 @@ impl EngineManager {
         self.active_engine()
             .map(|e| e.engine_type() == EngineType::CodeTable)
             .unwrap_or(false)
-    }
-
-    /// 活跃引擎的最大编码长度（码表返回其码长；拼音/无意义引擎返回 0）。
-    /// 供协调器判定短语前缀补全是否"未满码"（镜像码表引擎 single_code_complete 的 `input < max` 条件）。
-    pub fn active_max_code_length(&self) -> usize {
-        self.active_engine()
-            .map(|e| e.max_code_length())
-            .unwrap_or(0)
     }
 
     /// 活跃引擎的码元字符集（`[engine.codetable].input_chars` / `.leading_chars`）。
@@ -3336,14 +3393,14 @@ impl EngineManager {
 
     /// 活跃方案的满码长：码表取其码长，混输取主码表的，拼音 / 双拼为 0（无「满码」）。
     ///
-    /// 与 [`Self::active_max_code_length`] 只差在混输：那个值对混输刻意为 0。短语自动上屏
+    /// 与活跃引擎自报的 [`Engine::max_code_length`] 只差在混输：那个值对混输刻意为 0。短语自动上屏
     /// 的「是否参与」与最短码长都按本值判，混输才和它的主码表同口径。
     pub fn active_full_code_length(&self) -> usize {
         self.active_wildcard_code_length()
     }
 
     /// 活跃方案的通配码长（[`Engine::wildcard_code_length`]；混输取主码表的）。
-    /// 协调器判「满码后通配键按字面」只从这里取，**不**用 [`Self::active_max_code_length`]
+    /// 协调器判「满码后通配键按字面」只从这里取，**不**用活跃引擎的 [`Engine::max_code_length`]
     /// ——混输那个值刻意为 0。
     pub fn active_wildcard_code_length(&self) -> usize {
         self.active_engine()
@@ -3655,27 +3712,38 @@ impl EngineManager {
 
     /// 方案显示名（schema.name 优先，缺/读不到回退 id）。带缓存避免重复读盘。
     pub fn schema_name(&self, schema_id: &str) -> String {
-        if let Some(n) = self
+        self.schema_labels(schema_id).0
+    }
+
+    /// (显示名, 图标短称)：读一次方案文件，进 `name_cache`。
+    fn schema_labels(&self, schema_id: &str) -> (String, String) {
+        if let Some(v) = self
             .name_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
         {
-            return n.clone();
+            return v.clone();
         }
-        let name = Self::read_schema(
+        let schema = Self::read_schema(
             schema_id,
             self.data_dir.as_deref(),
             self.override_dir.as_deref(),
-        )
-        .map(|s| s.schema.name)
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| schema_id.to_string());
+        );
+        let name = schema
+            .as_ref()
+            .map(|s| s.schema.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| schema_id.to_string());
+        let icon = schema
+            .map(|s| wind_config::icon_label_trunc(&s.schema.icon_label))
+            .unwrap_or_default();
+        let v = (name, icon);
         self.name_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(schema_id.to_string(), name.clone());
-        name
+            .insert(schema_id.to_string(), v.clone());
+        v
     }
 
     /// 指定方案的图标短称（`schema.icon_label` 截断到 [`wind_config::ICON_LABEL_MAX_WIDTH`]）；
@@ -3684,13 +3752,7 @@ impl EngineManager {
     /// 截断口径见 [`wind_config::icon_label_trunc`]——上限由渲染宽度与 C++ 侧缓冲共同决定，
     /// 与"是不是方案"无关，故与非中文态标签（`[ui.labels]`）共用同一个函数。
     pub fn schema_icon_label(&self, schema_id: &str) -> String {
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| wind_config::icon_label_trunc(&s.schema.icon_label))
-        .unwrap_or_default()
+        self.schema_labels(schema_id).1
     }
 
     /// 指定方案的引擎类型字符串（小写，如 "pinyin"|"codetable"|"mixed"）；读不到返回 None。
@@ -3859,14 +3921,32 @@ impl EngineManager {
                 if schema_id == ENGLISH_SCHEMA {
                     return true;
                 }
-                Self::read_schema(id, self.data_dir.as_deref(), self.override_dir.as_deref())
-                    .map(|s| {
-                        s.engine.mixed.primary_schema == schema_id
-                            || s.engine.mixed.secondary_schema == schema_id
-                    })
-                    .unwrap_or(false)
+                // 沿 primary / secondary 传递：混输把另一个混输当成员时，叶子成员也被它捧着。
+                self.mixed_members_closure(id)
+                    .iter()
+                    .any(|m| m == schema_id)
             })
             .collect()
+    }
+
+    /// 混输方案沿 primary / secondary **传递**可达的全部成员（不含自身）；非混输为空。
+    /// 已访问集合防环（成环的方案建不起来，但这里读的是方案文件，环照样会出现）。
+    fn mixed_members_closure(&self, schema_id: &str) -> Vec<String> {
+        let Some(data_dir) = self.data_dir.as_deref() else {
+            return Vec::new();
+        };
+        let mut seen = vec![schema_id.to_string()];
+        let mut stack = vec![schema_id.to_string()];
+        while let Some(id) = stack.pop() {
+            for m in Self::mixed_edges_of(&id, data_dir, self.override_dir.as_deref()) {
+                if !seen.contains(&m) {
+                    seen.push(m.clone());
+                    stack.push(m);
+                }
+            }
+        }
+        seen.remove(0);
+        seen
     }
 
     /// 运行时启停某方案的扩展词库。**禁用与启用不对称**（t107 之后）：
@@ -3890,6 +3970,14 @@ impl EngineManager {
     /// `reload_from_config` 的动作才生效——真机表现为「关了没反应，顺手改别的设置又好了」。
     /// 转发不到的依赖方案（成员子引擎不认这个 dict）直接失效，下次使用按已落盘的 override 重建。
     pub fn set_dict_enabled_live(&self, schema_id: &str, dict_id: &str, enabled: bool) -> bool {
+        // 禁用方向只对已加载引擎摘层，摸不到正在锁外构建的那份（它可能已按旧 override 读到
+        // 这个库开着）：推进代次让它写回前作废重建（见 `engines_gen`）。启用方向走
+        // `invalidate_schema`，自带推进。
+        if !enabled {
+            let _g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            self.engines_gen
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         let engine = self.loaded_engine(schema_id);
         // 独立方案与把它当成员的混输方案同一条规则：翻得动就翻，翻不动就失效待重建。
         // 只失效混输不失效独立方案的话，同一个拼音扩展库在混输里下次输入就生效、
@@ -4088,26 +4176,12 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    /// 混输方案的成员（primary / secondary）；非混输为空。
+    /// 混输方案的成员（primary / secondary，传递闭包）；非混输为空。
     fn user_dict_mixed_members(&self, schema_id: &str) -> Vec<String> {
         if self.schema_engine_type(schema_id).as_deref() != Some("mixed") {
             return Vec::new();
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| {
-            [
-                s.engine.mixed.primary_schema,
-                s.engine.mixed.secondary_schema,
-            ]
-            .into_iter()
-            .filter(|m| !m.is_empty() && m != schema_id)
-            .collect()
-        })
-        .unwrap_or_default()
+        self.mixed_members_closure(schema_id)
     }
 
     /// 删除某方案 override 层并使其引擎缓存失效。返回是否删除了文件。
@@ -4168,18 +4242,27 @@ impl EngineManager {
     /// 使某方案的引擎与解析缓存失效（override/词典变更后，下次构建按新定义重建）。
     /// pub:方案包导入后由 RPC 层调用,失效已加载缓存(未加载时安全 no-op)。
     pub fn invalidate_schema(&self, schema_id: &str) {
-        self.engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(schema_id);
-        // 英文方案被换掉时，共享英文引擎缓存也必须作废——混入与混输都从那里取，不清的话
-        // 它们会一直握着刚被移出 `engines` 的旧实例（`en_ext` 的启用就走这条路）。
-        if schema_id == ENGLISH_SCHEMA {
-            *self
-                .shared_english_engine
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+        {
+            let mut g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            // 与摘除同在一把锁下推进：见 `engines_gen`。下面扇出摘的混输也由这一次覆盖。
+            self.engines_gen
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            g.remove(schema_id);
+            // 英文方案被换掉时，共享英文引擎缓存也必须作废——混入与混输都从那里取，不清的话
+            // 它们会一直握着刚被移出 `engines` 的旧实例（`en_ext` 的启用就走这条路）。
+            //
+            // 必须与推进代次**同在这把锁里**（锁序 engines → 缓存）：放锁后再清的话，正等着
+            // `engines` 锁写回的混输比对失败、立刻按新代次重来，会从还没清的缓存里取到旧实例，
+            // 带着新代次写回成功。
+            if schema_id == ENGLISH_SCHEMA {
+                *self
+                    .shared_english_engine
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+            }
         }
+        #[cfg(test)]
+        self.run_before_publish_hook("@after_engines_bump");
         // ★ 扇出到把它当成员的混输方案。
         //
         // 从 `engines` 表里摘掉一条，**换不动已经建好的引擎手里那个 `Arc`**：混输在
@@ -4404,13 +4487,6 @@ impl EngineManager {
         *self.codetable.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.codetable.clone();
         *self.mix.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.mix.clone();
         *self.english.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.english.clone();
-        // 连同**引擎缓存**一起重置：开关从关到开时，缓存里躺着的可能是上次「未尝试」之外的
-        // `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后仍然不生效，
-        // 症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
-        *self
-            .shared_english_engine
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
         *self.temp_pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
             config.input.temp_pinyin.clone();
         // 同上：`phrase_seg` 变更要能让下方 `engines.clear()` 重建的引擎读到新值。
@@ -4436,10 +4512,21 @@ impl EngineManager {
         // 全局拼音配置变更：更新缓存，引擎缓存随下方 clear() 一起失效，下次按新配置重建。
         *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.pinyin.clone();
         // 丢弃缓存：引擎按新上屏策略/词典重建，名称/词频按新方案重读。
-        self.engines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        {
+            let mut g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            // 与清表同在一把锁下推进（见 `engines_gen`），且在上面各份配置镜像写完之后。
+            self.engines_gen
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            g.clear();
+            // 连同**共享英文引擎缓存**一起重置：开关从关到开时，缓存里躺着的可能是上次
+            // 「未尝试」之外的 `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后
+            // 仍然不生效，症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
+            // 与推进代次同在这把锁里，理由见 `invalidate_schema` 同一处。
+            *self
+                .shared_english_engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
         self.freq_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -4539,10 +4626,22 @@ impl EngineManager {
             // 有中文候选 ⇒ 只收精确（前缀词是噪音，`hen` 不该带出 Henderson/Hendrix）；
             // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
             // 精确那条由英文引擎自己排在最前。
+            //
+            // 例外是可选的 `prefix_complete`（拼音，出厂关）：中文侧有候选、但整串不是完整
+            // 拼音时，在精确之外再补至多 2 条前缀词。判据见 `prefix_complete_applies`；
+            // 双拼已在 `english_merge_cfg_for` 折掉。
             let english = if r.candidates.is_empty() {
                 crate::english_merge::lookup_prefix_fallback(eng.as_ref(), input, cfg.min_length)
             } else {
-                crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length)
+                let mut v = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
+                if cfg.prefix_complete
+                    && crate::english_merge::prefix_complete_applies(input, cfg.min_length)
+                {
+                    let extra =
+                        crate::english_merge::lookup_prefix_complete(eng.as_ref(), input, &v);
+                    v.extend(extra);
+                }
+                v
             };
             if !english.is_empty() {
                 // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
@@ -4621,6 +4720,7 @@ impl EngineManager {
                     enable: c.enable,
                     min_length: c.min_length,
                     block_commit: c.block_commit,
+                    prefix_complete: false,
                 })
             }
             EngineType::Pinyin => {
@@ -4635,6 +4735,9 @@ impl EngineManager {
                     min_length: p.min_length,
                     // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
                     block_commit: false,
+                    // 判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
+                    // 开关关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
+                    prefix_complete: p.prefix_complete && !self.pinyin_is_shuangpin_of(schema_id),
                 })
             }
             // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），
@@ -4667,15 +4770,27 @@ impl EngineManager {
         //
         // 混输构建期回调进来时，外层正持着**那个混输方案**的 build_lock；这里取的是
         // `"english"` 自己那一把（`build_locks` 按 schema_id 分表），不是同一把锁。
+        //
+        // 取前记 `engines_gen`、写回前比对：其间 `invalidate_schema("english")` /
+        // `reload_from_config` 清掉的缓存不能被这份旧实例盖回去。变了就只交给本次调用方、
+        // 不进缓存——下次取会重新走 `ensure_loaded`。混输构建拿到它也无妨：它记的代次在失效
+        // 之前，写回比对必失败、整份重来；重来那一轮读缓存时，失效口已在推进代次的同一段
+        // `engines` 锁里把缓存清掉，读不到旧实例。
+        let generation = self.engines_gen.load(std::sync::atomic::Ordering::Acquire);
         let built = if self.ensure_loaded(ENGLISH_SCHEMA) {
             self.loaded_engine(ENGLISH_SCHEMA)
         } else {
             None
         };
-        *self
+        #[cfg(test)]
+        self.run_before_publish_hook("@shared_english");
+        let mut cache = self
             .shared_english_engine
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(built.clone());
+            .unwrap_or_else(|e| e.into_inner());
+        if self.engines_gen.load(std::sync::atomic::Ordering::Acquire) == generation {
+            *cache = Some(built.clone());
+        }
         built
     }
 
@@ -6518,8 +6633,11 @@ impl EngineManager {
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 Some(MixedRole::Primary {
-                    // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）。
-                    sentence_input: schema.engine.codetable.sentence_input,
+                    // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）；
+                    // 且只在整句**真能触发**（没配拼音子引擎）时才传真——整句开着会让满码上屏 /
+                    // 满码空码清空 / 顶码让位，一个不触发的整句不该白白关掉它们。
+                    sentence_input: schema.engine.codetable.sentence_input
+                        && m.secondary_schema.is_empty(),
                 }),
                 english_provider,
             )?;
@@ -6529,7 +6647,8 @@ impl EngineManager {
             if schema.engine.codetable.sentence_input && !m.secondary_schema.is_empty() {
                 warn!(
                     "混输方案 {} 声明了 [engine.codetable] sentence_input，但它配有拼音子引擎 \
-                     {}：超码长输入由拼音接管，码表整句不会触发。混输下的整句尚未接线。",
+                     {}：超码长输入由拼音接管，码表整句不会触发，已忽略（顶码 / 满码上屏 / \
+                     满码空码清空照常生效）。混输下的整句尚未接线。",
                     schema_id, m.secondary_schema
                 );
             }
@@ -6637,10 +6756,12 @@ impl EngineManager {
             //
             // 注册顺序 User → Temp → System 与码表分支一致（用户词在前）。
             if let Some(store) = &store {
-                dm.register_layer(Box::new(wind_store::StoreUserLayer::new(
-                    store.clone(),
-                    schema_id,
-                )));
+                // 用户词托底到名次权重之上：系统词按词频名次赋了权，权重为 0（导入的词表
+                // 没有权重列）或手填小值的用户词不托底就会沉到常用系统词之后。
+                dm.register_layer(Box::new(
+                    wind_store::StoreUserLayer::new(store.clone(), schema_id)
+                        .with_min_weight(wind_dict::freq_rank::RANK_WEIGHT_MAX + 1),
+                ));
                 dm.register_layer(Box::new(wind_store::StoreTempLayer::new(
                     store.clone(),
                     schema_id,
@@ -7142,13 +7263,12 @@ impl EngineManager {
             .map(|e| {
                 let full = Self::resolve_dict_file(&e.path, schemas_dir);
                 let is_english = e.dict_type == "english";
+                let schemas_dir = schemas_dir.to_path_buf();
                 crate::codetable::DisabledDictSource {
                     id: e.id.clone(),
                     base_order: e.base_order,
                     default_weight: e.default_weight,
-                    load: Arc::new(move || {
-                        CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), is_english)
-                    }),
+                    load: Arc::new(move || Self::load_table_dict(&full, is_english, &schemas_dir)),
                 }
             })
             .collect()
@@ -7175,6 +7295,25 @@ impl EngineManager {
         ))
     }
 
+    /// 码表类词库（含英文）读盘的统一入口：英文词库额外叠英文词频名次表
+    /// （[`ENGLISH_FREQ_RANKS`]，见 `wind_dict::freq_rank`）。
+    ///
+    /// ⚠️ 读英文词库的每一处都要走这里：名次表参与 wdat 指纹，有的带有的不带，同一槽位就
+    /// 有两种指纹、两份缓存来回重建。名次表经 `resolve_dict_file` 定位，用户目录可整体替换。
+    fn load_table_dict(
+        full: &Path,
+        english: bool,
+        schemas_dir: &Path,
+    ) -> anyhow::Result<CachedDict> {
+        let wdat = cache_path(full, "wdat");
+        if english {
+            let ranks = Self::resolve_dict_file(ENGLISH_FREQ_RANKS, schemas_dir);
+            CachedDict::load_english_at(full, &wdat, &ranks)
+        } else {
+            CachedDict::load_at_with(full, &wdat, false)
+        }
+    }
+
     fn load_codetable_layers(schema: &Schema, schemas_dir: &Path) -> Vec<CodetableLayer> {
         let resolve =
             |rel: &str| -> std::path::PathBuf { Self::resolve_dict_file(rel, schemas_dir) };
@@ -7187,7 +7326,7 @@ impl EngineManager {
 
         let load_one = |e: &DictSpec| -> Option<CachedDict> {
             let full = resolve(&e.path);
-            match CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), is_english(e)) {
+            match Self::load_table_dict(&full, is_english(e), schemas_dir) {
                 Ok(d) => Some(d),
                 Err(err) => {
                     warn!("Failed to load codetable dict {}: {}", full.display(), err);
@@ -7289,25 +7428,25 @@ impl EngineManager {
     fn load_dicts_individually(schema: &Schema, schemas_dir: &Path) -> Vec<CachedDict> {
         Self::enabled_dict_specs(schema)
             .iter()
-            .filter_map(|e| {
-                let full = Self::resolve_dict_file(&e.path, schemas_dir);
-                let dtype = if e.dict_type.is_empty() {
-                    "rime_codetable"
-                } else {
-                    e.dict_type.as_str()
-                };
-                match dtype {
-                    // rime 主表须经 import_tables 展开，否则只读到头部元数据。
-                    "rime_pinyin" => Self::load_rime_pinyin_dict(&full),
-                    // english：code 列小写化，与 load_codetable_layers 的缓存 tag 一致，
-                    // 否则会另建一份大小写不同的 wdat。
-                    t => {
-                        CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), t == "english")
-                            .ok()
-                    }
-                }
-            })
+            .filter_map(|e| Self::load_dict_individually(e, schemas_dir))
             .collect()
+    }
+
+    /// [`Self::load_dicts_individually`] 的单库那一步；词库统计要逐库对上 spec，单独开口。
+    fn load_dict_individually(e: &DictSpec, schemas_dir: &Path) -> Option<CachedDict> {
+        let full = Self::resolve_dict_file(&e.path, schemas_dir);
+        let dtype = if e.dict_type.is_empty() {
+            "rime_codetable"
+        } else {
+            e.dict_type.as_str()
+        };
+        match dtype {
+            // rime 主表须经 import_tables 展开，否则只读到头部元数据。
+            "rime_pinyin" => Self::load_rime_pinyin_dict(&full),
+            // english：code 列小写化，与 load_codetable_layers 的缓存 tag 一致，
+            // 否则会另建一份大小写不同的 wdat。
+            t => Self::load_table_dict(&full, t == "english", schemas_dir).ok(),
+        }
     }
 
     /// 全部**已启用方案**声明的**已启用词库**文件，按 `rel` 去重。
@@ -7794,7 +7933,7 @@ impl EngineManager {
             } else {
                 // 英文词库：code 列小写化（大小写不敏感前缀匹配，text 保留原样）。
                 let lowercase = dtype(e) == "english";
-                match CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), lowercase) {
+                match Self::load_table_dict(&full, lowercase, schemas_dir) {
                     Ok(d) => {
                         info!("Dictionary loaded: {} entries", d.len());
                         Some(d)
@@ -8481,6 +8620,8 @@ fn misplaced_dict_font_keys(schema: &toml::Value) -> Vec<String> {
         })
         .collect()
 }
+
+mod dict_stats;
 
 #[cfg(test)]
 mod tests {
@@ -11739,5 +11880,307 @@ input_chars = \"a-z;\"
             EngineManager::disabled_dict_layers(&schema, Path::new("/nonexistent"), Vec::new())
                 .is_none()
         );
+    }
+
+    /// 混输代际测试的夹具。方案 id 前缀 `t` = 标签 + 进程号：派生缓存按词库所在目录名分组、
+    /// 落在进程级 `CACHE_DIR`（真实用户缓存根）下，不带进程号的话并发进程互踩。
+    ///
+    /// 方案：码表 `{t}c`（主库 `a` → 甲；默认启用的扩展库 `ext`，`b` → 戊）、混输 `{t}b`
+    /// （primary = `{t}c`）、混输 `{t}a`（primary = `{t}b`），以及码表类型的 `english`
+    /// （词库在 `{t}en`，不与真英文方案的缓存撞路径）。Drop 时删数据目录与那几组缓存。
+    struct MixFixture {
+        t: String,
+        root: std::path::PathBuf,
+    }
+
+    impl MixFixture {
+        fn new(tag: &str) -> Self {
+            let t = format!("{tag}{}", std::process::id());
+            let root = std::env::temp_dir().join(format!("wind_eng_mixgen_{t}"));
+            let _ = std::fs::remove_dir_all(&root);
+            let fx = Self { t, root };
+            let t = &fx.t;
+            let schemas = fx.data().join("schemas");
+            for (dir, line) in [("c", "甲\ta"), ("x", "戊\tb"), ("en", "乙\ta")] {
+                let id = format!("{t}{dir}");
+                std::fs::create_dir_all(schemas.join(&id)).unwrap();
+                std::fs::write(
+                    fx.dict(dir),
+                    format!("---\nname: {id}\nversion: \"1\"\n...\n{line}\n"),
+                )
+                .unwrap();
+            }
+            let codetable = |id: &str, dict: &str, extra: &str| {
+                format!(
+                    "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"codetable\"\n\
+                     [engine.codetable]\nmax_code_length = 4\n\
+                     [[dictionaries]]\nid = \"main\"\npath = \"{dict}/{dict}.dict.yaml\"\ndefault = true\n\
+                     {extra}"
+                )
+            };
+            let mixed = |id: &str, primary: &str| {
+                format!(
+                    "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"mixed\"\n\
+                     [engine.mixed]\nprimary_schema = \"{primary}\"\nsecondary_schema = \"\"\n"
+                )
+            };
+            let ext = format!(
+                "[[dictionaries]]\nid = \"ext\"\npath = \"{t}x/{t}x.dict.yaml\"\n\
+                 default_enabled = true\n"
+            );
+            let files = [
+                (fx.id("c"), codetable(&fx.id("c"), &fx.id("c"), &ext)),
+                (fx.id("b"), mixed(&fx.id("b"), &fx.id("c"))),
+                (fx.id("a"), mixed(&fx.id("a"), &fx.id("b"))),
+                (
+                    ENGLISH_SCHEMA.to_string(),
+                    codetable(ENGLISH_SCHEMA, &fx.id("en"), ""),
+                ),
+            ];
+            for (id, body) in files {
+                std::fs::write(schemas.join(format!("{id}.schema.toml")), body).unwrap();
+            }
+            fx
+        }
+
+        fn id(&self, suffix: &str) -> String {
+            format!("{}{suffix}", self.t)
+        }
+
+        fn data(&self) -> std::path::PathBuf {
+            self.root.join("data")
+        }
+
+        /// `{t}{dir}` 目录下那份词库源文件。
+        fn dict(&self, dir: &str) -> std::path::PathBuf {
+            let id = self.id(dir);
+            self.data().join(format!("schemas/{id}/{id}.dict.yaml"))
+        }
+
+        fn manager(&self, active: &str, available: &[&str], enable_english: bool) -> EngineManager {
+            let mut cfg = Config::default();
+            cfg.schema.active = active.into();
+            cfg.schema.available = available.iter().map(|s| s.to_string()).collect();
+            cfg.schema.mix.enable_english = enable_english;
+            cfg.input.temp_pinyin.enabled = false;
+            cfg.input.temp_english.show_candidates = false;
+            EngineManager::with_store_override(
+                &cfg,
+                Some(&self.data()),
+                None,
+                Some(self.root.join("ov")),
+            )
+        }
+    }
+
+    impl Drop for MixFixture {
+        fn drop(&mut self) {
+            for dir in ["c", "x", "en"] {
+                if let Some(p) = cache_path(&self.dict(dir), "wdat").parent() {
+                    let _ = std::fs::remove_dir_all(p);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// 扇出要沿 primary / secondary **传递**：A 的 primary 是混输 B、B 的 primary 是码表 C，
+    /// 改 C 之后 A 手里捧着的是旧 C，必须连带摘掉。
+    #[test]
+    fn invalidating_leaf_member_drops_mixed_two_levels_up() {
+        let fx = MixFixture::new("fan");
+        let (a, b, c) = (fx.id("a"), fx.id("b"), fx.id("c"));
+        let mgr = fx.manager(&a, &[&a, &b, &c], false);
+        assert!(mgr.is_loaded(&a), "夹具：混输 A 应能建起来");
+        let v: toml::Value = "[engine.codetable]\nmax_code_length = 3\n".parse().unwrap();
+        mgr.write_schema_override(&c, &v).unwrap();
+        assert!(!mgr.is_loaded(&a), "C 是 A 的间接成员，改 C 必须连带失效 A");
+    }
+
+    /// 用户分库扇出同理：可用列表里只有 A 时，C 的分库变了也要沿 A → B → C 找到 C 并失效 A。
+    #[test]
+    fn user_dict_invalidation_reaches_indirect_member() {
+        let fx = MixFixture::new("udm");
+        let (a, c) = (fx.id("a"), fx.id("c"));
+        let mgr = fx.manager(&a, &[&a], false);
+        assert!(mgr.is_loaded(&a), "夹具：混输 A 应能建起来");
+        assert_eq!(mgr.data_schema_id(&c), c);
+        mgr.invalidate_user_dicts(&c);
+        assert!(
+            !mgr.is_loaded(&a),
+            "C 的分库变了，间接引用它的混输 A 必须失效"
+        );
+    }
+
+    fn set_hook(mgr: &EngineManager, f: impl Fn(&EngineManager, &str) + Send + Sync + 'static) {
+        *mgr.before_publish_hook.lock().unwrap() = Some(Arc::new(f));
+    }
+
+    /// 装一个只在 `stage` 第一次出现时触发的钩子。
+    fn hook_once(
+        mgr: &EngineManager,
+        stage: String,
+        f: impl FnOnce(&EngineManager) + Send + 'static,
+    ) {
+        let f = Mutex::new(Some(f));
+        set_hook(mgr, move |m, s| {
+            if s == stage {
+                let f = f.lock().unwrap().take();
+                if let Some(f) = f {
+                    f(m);
+                }
+            }
+        });
+    }
+
+    fn first_text(mgr: &EngineManager, id: &str, code: &str) -> Option<String> {
+        mgr.convert_with(id, code, 5)
+            .candidates
+            .first()
+            .map(|c| c.text.clone())
+    }
+
+    /// 锁外构建期间方案被失效（词库换了内容），建好的旧引擎不许写回表里：
+    /// 下次取到的必须是按新内容建的。`invalidate` 即构建窗口里插入的那次失效。
+    fn assert_mid_build_invalidation_discarded(
+        tag: &str,
+        invalidate: impl FnOnce(&EngineManager, &str) + Send + 'static,
+    ) {
+        let fx = MixFixture::new(tag);
+        let c = fx.id("c");
+        let mgr = fx.manager(&c, &[&c], false);
+        assert_eq!(first_text(&mgr, &c, "a").as_deref(), Some("甲"), "夹具");
+        mgr.invalidate_schema(&c);
+        let dict = fx.dict("c");
+        let id = c.clone();
+        hook_once(&mgr, c.clone(), move |m| {
+            std::fs::write(&dict, "---\nname: changed\nversion: \"2\"\n...\n丙丁\ta\n").unwrap();
+            invalidate(m, &id);
+        });
+        assert!(mgr.prewarm_schema(&c));
+        assert_eq!(
+            first_text(&mgr, &c, "a").as_deref(),
+            Some("丙丁"),
+            "构建期间被失效的旧引擎被写回了表里"
+        );
+    }
+
+    #[test]
+    fn engine_invalidated_mid_build_is_not_published() {
+        assert_mid_build_invalidation_discarded("rce", |m, id| m.invalidate_schema(id));
+    }
+
+    #[test]
+    fn engine_reloaded_mid_build_is_not_published() {
+        assert_mid_build_invalidation_discarded("rcr", |m, id| {
+            // 活跃方案不能是正在建的这个：`reload_from_config` 末尾会 `ensure_loaded(活跃)`，
+            // 而钩子跑在持着它构建锁的同一线程上。
+            let mut cfg = Config::default();
+            cfg.schema.active = ENGLISH_SCHEMA.into();
+            cfg.schema.available = vec![ENGLISH_SCHEMA.into(), id.into()];
+            cfg.schema.mix.enable_english = false;
+            cfg.input.temp_pinyin.enabled = false;
+            cfg.input.temp_english.show_candidates = false;
+            m.reload_from_config(&cfg);
+        });
+    }
+
+    /// 禁用扩展库只对已加载引擎摘层；正在锁外构建的那份（已按旧 override 读到库开着）
+    /// 不许带着这个库写回。
+    #[test]
+    fn dict_disabled_mid_build_is_not_published() {
+        let fx = MixFixture::new("dde");
+        let c = fx.id("c");
+        let mgr = fx.manager(ENGLISH_SCHEMA, &[ENGLISH_SCHEMA, &c], false);
+        assert_eq!(first_text(&mgr, &c, "b").as_deref(), Some("戊"), "夹具");
+        mgr.invalidate_schema(&c);
+        let id = c.clone();
+        hook_once(&mgr, c.clone(), move |m| {
+            let ov: toml::Value = "[[dictionaries]]\nid = \"ext\"\nenabled = false\n"
+                .parse()
+                .unwrap();
+            m.persist_schema_override(&id, &ov).unwrap();
+            m.set_dict_enabled_live(&id, "ext", false);
+        });
+        assert!(mgr.prewarm_schema(&c));
+        assert_eq!(
+            first_text(&mgr, &c, "b"),
+            None,
+            "构建期间被禁用的扩展库随旧引擎写回了表里"
+        );
+    }
+
+    /// 共享英文引擎同理：取到之后、写回缓存之前 `invalidate_schema("english")`，
+    /// 缓存不许留着那份已被移出表的旧实例。
+    #[test]
+    fn shared_english_invalidated_before_cache_write_is_not_cached() {
+        let fx = MixFixture::new("rcs");
+        let c = fx.id("c");
+        let mgr = fx.manager(&c, &[&c, ENGLISH_SCHEMA], false);
+        hook_once(&mgr, "@shared_english".into(), |m| {
+            m.invalidate_schema(ENGLISH_SCHEMA)
+        });
+        let old = mgr
+            .shared_english_engine()
+            .expect("夹具：英文引擎应能建起来");
+        assert!(!mgr.is_loaded(ENGLISH_SCHEMA), "钩子里已失效");
+        let now = mgr.shared_english_engine().expect("重建");
+        assert!(!Arc::ptr_eq(&old, &now), "失效后缓存仍握着旧英文引擎");
+        assert!(Arc::ptr_eq(
+            &now,
+            &mgr.loaded_engine(ENGLISH_SCHEMA).unwrap()
+        ));
+    }
+
+    /// 混输构建被 `invalidate_schema("english")` 打断后重来的那一轮，不许从共享英文缓存里
+    /// 取到还没清掉的旧实例：清缓存必须与推进代次在同一段 `engines` 锁里。
+    ///
+    /// 时序靠两个线程 + 钩子钉死：混输 B 建好、写回前（钩子 B）放行线程 A 去失效英文；
+    /// A 推进代次、放开 `engines` 锁后停在 `@after_engines_bump`；B 比对失败重来、取共享英文；
+    /// B 发布完才放 A 走完。
+    #[test]
+    fn mixed_retry_does_not_pick_up_uncleared_shared_english() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let fx = MixFixture::new("rse");
+        let (b, c) = (fx.id("b"), fx.id("c"));
+        let mgr = fx.manager(&c, &[&c, &b, ENGLISH_SCHEMA], true);
+        let old = Arc::downgrade(&mgr.shared_english_engine().expect("夹具：英文引擎"));
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (bump_tx, bump_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let go_tx = Mutex::new(Some(go_tx));
+        let (bump_tx, bump_rx) = (Mutex::new(bump_tx), Mutex::new(bump_rx));
+        let release_rx = Mutex::new(release_rx);
+        let stage = b.clone();
+        let wait = Duration::from_secs(20);
+        set_hook(&mgr, move |_, s| {
+            if s == stage {
+                let go = go_tx.lock().unwrap().take();
+                if let Some(go) = go {
+                    go.send(()).unwrap();
+                    bump_rx.lock().unwrap().recv_timeout(wait).unwrap();
+                }
+            } else if s == "@after_engines_bump" {
+                bump_tx.lock().unwrap().send(()).unwrap();
+                release_rx.lock().unwrap().recv_timeout(wait).unwrap();
+            }
+        });
+        // 判据要在放 A 走完之前取：A 收尾时的扇出会把 B 连同它捧着的英文一起摘掉。
+        let (published, stale_alive) = std::thread::scope(|sc| {
+            let m = &mgr;
+            let a = sc.spawn(move || {
+                go_rx.recv_timeout(wait).unwrap();
+                m.invalidate_schema(ENGLISH_SCHEMA);
+            });
+            let published = mgr.prewarm_schema(&b) && mgr.is_loaded(&b);
+            let stale_alive = old.upgrade().is_some();
+            release_tx.send(()).unwrap();
+            a.join().unwrap();
+            (published, stale_alive)
+        });
+        *mgr.before_publish_hook.lock().unwrap() = None;
+        assert!(published, "混输 B 应已建好发布");
+        assert!(!stale_alive, "重来那一轮的混输捧着已失效的旧英文引擎");
     }
 }

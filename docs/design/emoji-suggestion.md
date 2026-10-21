@@ -118,6 +118,11 @@ let [c] = &state.candidates[..] else { return None; };
 （`wind-engine/src/codetable/engine.rs`），而 emoji 的 `code` 为空（见 3.2）。所以只需补
 短语这一处，并写测试钉住。
 
+**可选的反向口径** `block_auto_commit`（出厂关）：开了附加模块的用户要的往往正是追加候选
+（五笔 `rrup` 提手旁 → 扌），自动上屏会让它来不及出现。开启后，候选里只要有追加候选，码表
+「全码唯一」与短语自动上屏两侧都不放行；顶码与满码空码清空不受影响。临拼 / mix 本无全码
+自动上屏，特殊模式候选不追加 emoji，故只此两处。
+
 ### 3.4 ⚠️ 不得全量载入内存
 
 `wind-dict/src/commentdict.rs` 的模块文档已经论证过同一件事，且点名了 emoji：
@@ -277,6 +282,7 @@ max_per_word = 3              # 一个词最多产出几个 emoji（挡住「動
 max_hosts = 1                 # 只对前 N 个候选扩展（show_as = focus 时忽略）
 min_word_chars = 2            # 单字不触发（「一 → 1️⃣」噪音最大）
 categories = false            # emoji_category.txt 单独开关，出厂关
+block_auto_commit = false     # 有追加候选时不做全码唯一自动上屏（§3.3）
 ```
 
 ⛔ 初稿还有 `learn_freq = false`（emoji 是否参与调频），**已撤掉**：emoji 在

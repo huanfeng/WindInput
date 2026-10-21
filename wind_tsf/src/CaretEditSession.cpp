@@ -289,8 +289,13 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
                                                   _compositionRect);
         // 这类宿主多半只在收到 IMN_OPENCANDIDATE 后才经 IMM32 报位置，而 CUAS 不替我们发——
         // 记下本线程，此后每次组合起止补发（见 ImmOpenCandidateNudge.h）。
+        // 同线程别的输入框排版正常时解除，否则下方会一直不报组合起点。同样要在降级改动矩形之前判；
+        // 与置位一样是线程级判定，不分取坐标的种类。
         if (hostDefaultPos)
             wind::caret::NoteHostDefaultPositionForImm();
+        else if (wind::caret::ShowsLaidOutComposition(_succeeded != FALSE, _caretRect, _hasCompositionRect != FALSE,
+                                                       _compositionRect))
+            wind::caret::NoteLaidOutCompositionForImm();
 
         // ★ 一级降级：caret 无效而组合起点有效时，用组合起点当 caret。
         //

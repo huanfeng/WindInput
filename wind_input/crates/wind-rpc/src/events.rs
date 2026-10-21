@@ -88,6 +88,12 @@ impl EventSink {
         self.broadcast("compat.changed", data);
     }
 
+    /// 方案配置变更事件（`schema.saveConfig` / `resetConfig` / `setDictEnabled` 等成功后，
+    /// 载荷 `{id, method}`）。设置端开着该方案的设置对话框时据此重拉 `schema.getConfig`。
+    pub fn emit_schema_config_changed(&self, data: Value) {
+        self.broadcast("schema.configChanged", data);
+    }
+
     /// 词库变更事件（dict.* 写操作后，宿主按需调用）。
     pub fn emit_dict_changed(&self, data: Value) {
         self.broadcast("dict.changed", data);

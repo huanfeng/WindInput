@@ -2,11 +2,11 @@ changelog:
   categories:
     - title: "🆕 新功能"
       labels:
-        - enhancement
+        - 功能建议
         - feature
     - title: "🐛 Bug 修复"
       labels:
-        - bug
+        - 缺陷
         - fix
     - title: "🔧 维护"
       labels:
@@ -14,7 +14,7 @@ changelog:
         - maintenance
     - title: "📖 文档"
       labels:
-        - documentation
+        - 文档
     - title: "⚡ 性能"
       labels:
         - performance

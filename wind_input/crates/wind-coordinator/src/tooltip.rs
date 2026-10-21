@@ -24,7 +24,7 @@
 //! 解析在配置快照里做一次（[`CompiledTooltip::compile`]，随 `ConfigBundle` 重建），
 //! 候选循环里只渲染。设计见 `docs/design/candidate-tooltip-sections.md`。
 
-use crate::comment::Template;
+use crate::comment::{Template, VarValue};
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
 use wind_config::config::{
@@ -169,8 +169,8 @@ impl CompiledTooltip {
         &self,
         disp: &str,
         full: &str,
-        cand: &impl Fn(&str, Option<&str>) -> Option<String>,
-        per_char: &impl Fn(char, &str, Option<&str>) -> Option<String>,
+        cand: &impl Fn(&str, Option<&str>) -> Option<VarValue>,
+        per_char: &impl Fn(char, &str, Option<&str>) -> Option<VarValue>,
     ) -> RenderedTooltip {
         let truncated = disp != full;
         let shown = if truncated {
@@ -178,22 +178,18 @@ impl CompiledTooltip {
         } else {
             disp
         };
-        let cand_eval = |name: &str, arg: Option<&str>| -> Option<String> {
+        let cand_eval = |name: &str, arg: Option<&str>| -> Option<VarValue> {
             match name {
-                "full_text" => Some(if truncated {
+                "full_text" => Some(VarValue::from(if truncated {
                     full.to_string()
                 } else {
                     String::new()
-                }),
+                })),
                 // `${unicode_all[:分隔符]}` —— 逐字码位（跳过空白），默认空格连接。
-                "unicode_all" => Some(
-                    shown
-                        .chars()
-                        .filter(|c| !c.is_whitespace())
-                        .map(unicode_of)
-                        .collect::<Vec<_>>()
-                        .join(arg.unwrap_or(" ")),
-                ),
+                "unicode_all" => Some(VarValue::joined(
+                    shown.chars().filter(|c| !c.is_whitespace()).map(unicode_of),
+                    arg.unwrap_or(" "),
+                )),
                 _ => cand(name, arg),
             }
         };
@@ -564,9 +560,10 @@ mod tests {
     }
 
     /// 生产同一份的逐字求值（去掉只有协调器才有的引擎类变量，对拍的段列表用不到它们）。
-    fn per_char(rl: &ReverseLookup) -> impl Fn(char, &str, Option<&str>) -> Option<String> + '_ {
+    fn per_char(rl: &ReverseLookup) -> impl Fn(char, &str, Option<&str>) -> Option<VarValue> + '_ {
         move |c, name, arg| {
             char_var(name, arg, c, rl)
+                .map(VarValue::from)
                 .or_else(|| crate::comment::reverse_text_var(name, arg, &c.to_string(), rl))
         }
     }
@@ -580,9 +577,9 @@ mod tests {
         debug: &'a str,
     }
 
-    fn cand_eval<'a>(c: &'a Cand<'a>) -> impl Fn(&str, Option<&str>) -> Option<String> + 'a {
+    fn cand_eval<'a>(c: &'a Cand<'a>) -> impl Fn(&str, Option<&str>) -> Option<VarValue> + 'a {
         move |name, arg| {
-            Some(match name {
+            Some(VarValue::from(match name {
                 "word_code" => c.word_code.unwrap_or_default().to_string(),
                 "code_source" => c.code_source.unwrap_or_default().to_string(),
                 "debug" => c.debug.to_string(),
@@ -595,7 +592,7 @@ mod tests {
                 }
                 "dict_all" => String::new(),
                 _ => return None,
-            })
+            }))
         }
     }
 
@@ -1485,6 +1482,34 @@ mod tests {
             vec![("bbbb", Some("debug")), ("：", Some("literal"))]
         );
         assert_eq!(roles(lines[2]), vec![("cc", Some("word_code"))]);
+    }
+
+    /// `${unicode_all:,}` 的分隔符带标记、角色仍是 unicode_all。
+    #[test]
+    fn unicode_all_marks_its_separator() {
+        let t = limited(0, 0, &[section("", "", "${unicode_all:,}")]);
+        let r = render_limited(&t, &cand("好𠀀"));
+        let line = &r.doc.sections[0].lines[0].text;
+        assert_eq!(line.as_str(), "U+597D,U+20000");
+        let got: Vec<(&str, Option<&str>, bool)> = line
+            .spans()
+            .iter()
+            .map(|s| {
+                (
+                    &line.as_str()[s.start as usize..s.end as usize],
+                    s.role,
+                    s.separator,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("U+597D", Some("unicode_all"), false),
+                (",", Some("unicode_all"), true),
+                ("U+20000", Some("unicode_all"), false),
+            ]
+        );
     }
 
     /// 单行截断的 `…` 继承被截处前一簇的样式。

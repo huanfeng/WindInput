@@ -225,6 +225,7 @@ mod tests {
             weight: 100,
             position: 0,
             category: String::new(),
+            enabled: true,
         };
         s.set_system_phrases(&[sys("rq", "{date}"), sys("sj", "{time}")])
             .unwrap();

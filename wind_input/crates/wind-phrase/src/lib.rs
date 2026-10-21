@@ -174,6 +174,9 @@ pub struct SystemPhraseEntry {
     pub position: i32,
     /// 分类（`""` = 未分类），来自 TOML 的 `category` 键。
     pub category: String,
+    /// 出厂是否启用（TOML 的 `enabled`，缺省 = 开）。关着的照样入库，用户能在短语管理里打开；
+    /// 用于「少数人用、编码又和码表撞」的条目，如时间戳。
+    pub enabled: bool,
 }
 
 /// [`PhraseLayer::from_records`] 的输入记录。
@@ -201,24 +204,38 @@ pub struct PhraseLayer {
 const CURRENT_PLATFORM: &str = if cfg!(windows) {
     "windows"
 } else if cfg!(target_os = "macos") {
-    "darwin"
+    "macos"
+} else if cfg!(target_os = "android") {
+    // 先于 linux 判：Android 的 target_os 是 "android"，但别处有按 unix 归 linux 的习惯
+    "android"
 } else if cfg!(target_os = "linux") {
     "linux"
 } else {
-    // Android 等：只收全平台条目。
     "other"
 };
 
-/// 条目的 `platform` 是否适用于 `current`：缺省 / 空 / `"all"` = 全平台；否则按名字
-/// 比对（大小写不敏感，取值见 system.phrases.toml 文件头）。`"macos"` 是 `"darwin"`
-/// 的别名——两种叫法在本仓都常见，写哪个都该生效。
+/// 平台名归一：大小写不敏感；`"darwin"` 是 `"macos"` 的旧写法（文件里两种都可能有）。
+fn canonical_platform(p: &str) -> String {
+    let p = p.to_lowercase();
+    if p == "darwin" { "macos".into() } else { p }
+}
+
+/// 条目的 `platform` 是否适用于 `current`：缺省 / 空 / `"all"` = 全平台；`"desktop"` =
+/// 三种电脑（windows / macos / linux）；否则按名字比对（取值见 system.phrases.toml 文件头）。
+///
+/// `desktop` 存在的理由：电脑专用的条目（打开网页、按键序列、时间戳……）在手机上要么执行
+/// 不了、要么没意义，但三种电脑上是同一条——不该为了让手机看不见而复制三份。
 fn platform_matches(platform: Option<&str>, current: &str) -> bool {
     let Some(p) = platform else {
         return true;
     };
-    let p = p.to_lowercase();
-    let p = if p == "macos" { "darwin" } else { p.as_str() };
-    p.is_empty() || p == "all" || p == current
+    let p = canonical_platform(p);
+    let current = canonical_platform(current);
+    match p.as_str() {
+        "" | "all" => true,
+        "desktop" => matches!(current.as_str(), "windows" | "macos" | "linux"),
+        _ => p == current,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -240,6 +257,9 @@ struct RawPhrase {
     /// 分类（缺省 = 未分类）。方案级 `[phrases] categories` 按它过滤。
     #[serde(default)]
     category: Option<String>,
+    /// 出厂启用（缺省 = 开），见 [`SystemPhraseEntry::enabled`]。
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 impl PhraseLayer {
@@ -258,7 +278,9 @@ impl PhraseLayer {
         };
         let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
         for r in parsed.phrases {
-            if !platform_matches(r.platform.as_deref(), CURRENT_PLATFORM) {
+            if !platform_matches(r.platform.as_deref(), CURRENT_PLATFORM)
+                || r.enabled == Some(false)
+            {
                 continue;
             }
             map.entry(r.code).or_default().push(PhraseEntry {
@@ -282,7 +304,7 @@ impl PhraseLayer {
         Self::parse_system_entries_for(path, CURRENT_PLATFORM)
     }
 
-    /// 同 [`Self::parse_system_entries`]，但按指定平台（`windows` / `darwin` / `linux`）过滤。
+    /// 同 [`Self::parse_system_entries`]，但按指定平台（`windows` / `macos` / `linux` / `android`）过滤。
     ///
     /// 供测试在任一主机上核对**别的平台**看到的条目集——Windows 上的取舍是否与改动前逐条
     /// 一致，不能只靠 Windows 机器上跑的那份 CI 来回答。
@@ -312,6 +334,7 @@ impl PhraseLayer {
                 weight: r.weight.unwrap_or(1000),
                 position: r.position.unwrap_or(0),
                 category: r.category.unwrap_or_default(),
+                enabled: r.enabled.unwrap_or(true),
             });
         }
         out
@@ -963,16 +986,16 @@ mod tests {
 
     /// 各平台只收自己的条目与全平台条目。
     ///
-    /// 变异判据：把比对改回写死 `"windows"`，linux / darwin 两行转红——那正是 macOS 与
+    /// 变异判据：把比对改回写死 `"windows"`，linux / macos 两行转红——那正是 macOS 与
     /// Linux 上显示 `notepad.exe` 词条的原形。
     #[test]
     fn platform_filter_follows_current_platform() {
-        for cur in ["windows", "darwin", "linux"] {
+        for cur in ["windows", "macos", "linux", "android"] {
             assert!(platform_matches(None, cur));
             assert!(platform_matches(Some(""), cur));
             assert!(platform_matches(Some("all"), cur));
             assert!(platform_matches(Some("ALL"), cur));
-            for other in ["windows", "darwin", "linux"] {
+            for other in ["windows", "macos", "linux", "android"] {
                 assert_eq!(
                     platform_matches(Some(other), cur),
                     other == cur,
@@ -981,11 +1004,54 @@ mod tests {
             }
         }
         assert!(platform_matches(Some("Windows"), "windows"));
-        assert!(platform_matches(Some("macos"), "darwin"));
+        // darwin 是 macos 的旧写法，条目与当前平台哪边写哪个都认
+        assert!(platform_matches(Some("darwin"), "macos"));
         assert!(platform_matches(Some("MacOS"), "darwin"));
         assert!(!platform_matches(Some("macos"), "linux"));
         assert!(!platform_matches(Some("macos"), "windows"));
         assert!(!platform_matches(Some("linux"), "other"));
+        assert!(!platform_matches(Some("linux"), "android"));
+    }
+
+    /// `desktop` = 三种电脑，手机上没有：电脑专用条目写一条就够，不用为手机看不见复制三份。
+    #[test]
+    fn desktop_group_covers_the_three_computers_only() {
+        for cur in ["windows", "macos", "darwin", "linux"] {
+            assert!(platform_matches(Some("desktop"), cur), "{cur}");
+        }
+        assert!(!platform_matches(Some("desktop"), "android"));
+        assert!(!platform_matches(Some("android"), "windows"));
+    }
+
+    /// 出厂关闭（`enabled = false`）的条目：入库同步照样给出（带上关闭态，用户能打开），
+    /// 直接建层的 `load` 不收（没有库可记开关的场合，关着就是没有）。
+    #[test]
+    fn disabled_entries_are_synced_off_and_skipped_by_load() {
+        let dir = std::env::temp_dir().join(format!("wind_phrase_off_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("system.phrases.toml");
+        std::fs::write(
+            &p,
+            "[[phrases]]\ncode = 'ts'\ntext = 'off'\nenabled = false\n\n\
+             [[phrases]]\ncode = 'ts'\ntext = 'on'\n",
+        )
+        .unwrap();
+        let synced = PhraseLayer::parse_system_entries_for(&p, "linux");
+        let flags: Vec<_> = synced
+            .iter()
+            .map(|e| (e.text.as_str(), e.enabled))
+            .collect();
+        assert_eq!(flags, [("off", false), ("on", true)]);
+        let layer = PhraseLayer::load(&p);
+        let texts: Vec<_> = layer
+            .map
+            .get("ts")
+            .unwrap()
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(texts, ["on"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 本进程编出来的平台名与短语文件用的词表一致（写错一个字母，本平台的条目就全没了）。
@@ -994,7 +1060,9 @@ mod tests {
         let expect = if cfg!(windows) {
             "windows"
         } else if cfg!(target_os = "macos") {
-            "darwin"
+            "macos"
+        } else if cfg!(target_os = "android") {
+            "android"
         } else if cfg!(target_os = "linux") {
             "linux"
         } else {
@@ -1019,7 +1087,7 @@ mod tests {
         .unwrap();
         let own = match CURRENT_PLATFORM {
             "windows" => "win",
-            "darwin" => "mac",
+            "macos" => "mac",
             "linux" => "lin",
             _ => "",
         };

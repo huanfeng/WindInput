@@ -6,6 +6,7 @@
 //! |---|---|
 //! | `${name}` | 变量替换 |
 //! | `${name:arg}` | 带参数的变量（如 `${chaizi_all:／}` 指定逐字分隔符） |
+//! | `${name:$[颜色]{分隔符}}` | 分隔符单独上色（参数**整个**写成内联色时；颜色写法同 `$[颜色]{ … }`） |
 //! | `${a\|b\|c}` | 取**首个非空**的变量 |
 //! | `{ … }` | 可选段：段内变量**全为空**则整段（含字面文本）消失；可嵌套，段内字面 `{` 必须配对 |
 //! | `$[颜色]{ … }` | 内联色：只管上色，**不是**可选段（内部变量照常计入外层的「有值」判定，全空时自己也不消失）；颜色写法与回落见 `docs/design/text-span-colors.md` §4 |
@@ -85,6 +86,9 @@ use unicode_segmentation::UnicodeSegmentation;
 ///
 /// 参数**不 trim**，名字才 trim：`${chaizi_all: · }` 里那两个空格正是用户要的分隔符，
 /// 削掉它就没法配出「亻尔 · 女子」。而 `${ pinyin }` 这种手滑仍要认。
+///
+/// 参数整个写成 `$[颜色]{分隔符}`（`${chaizi_all:$[text_dim]{／}}`）时，变量收到的参数是
+/// `分隔符`，颜色只标在值里的分隔符上（[`VarValue`]），写法与回落同模板内联色。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VarRef {
     name: String,
@@ -92,20 +96,109 @@ struct VarRef {
     /// 这个变量取到值时片段带的角色：别名归一后、契约清单里的常驻名（清单外为 `None`）。
     /// 解析时算一次——渲染在每次按键的候选循环里，逐次查表会吃掉 §13.3 的性能预算。
     role: Option<&'static str>,
+    /// 参数里的内联色：只给分隔符上色。
+    sep_color: Option<Arc<InlineColor>>,
 }
 
 impl VarRef {
-    /// 解析 `name` 或 `name:arg`。只切**第一个**冒号——分隔符本身可以含冒号。
-    fn parse(s: &str) -> Self {
-        let (name, arg) = match s.split_once(':') {
-            Some((n, a)) => (n.trim(), Some(a.to_string())),
-            None => (s.trim(), None),
+    /// 解析 `tpl[start..end]`（`name` 或 `name:arg`）。只切**第一个**冒号——分隔符本身可以含冒号。
+    fn parse(tpl: &str, pairs: &Pairs, start: usize, end: usize) -> Self {
+        let s = &tpl[start..end];
+        let (name, arg, sep_color) = match s.split_once(':') {
+            Some((n, a)) => match arg_color(tpl.as_bytes(), pairs, start + n.len() + 1, end) {
+                Some((spec, body)) => (
+                    n.trim(),
+                    Some(tpl[body.0..body.1].to_string()),
+                    Some(Arc::new(InlineColor::parse(&tpl[spec.0..spec.1]))),
+                ),
+                None => (n.trim(), Some(a.to_string()), None),
+            },
+            None => (s.trim(), None, None),
         };
         Self {
             name: name.to_string(),
             arg,
             role: wind_ui_types::static_role(role_of(name)),
+            sep_color,
         }
+    }
+}
+
+/// `${…}` 内部 `tpl[from..close]` 按 `|` 切成各变量引用的区间；参数里 `$[…]{…}` 内的 `|` 不切。
+fn var_ref_ranges(b: &[u8], pairs: &Pairs, from: usize, close: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let (mut seg, mut j) = (from, from);
+    while j < close {
+        if let Some(body_end) = pairs.arg_color_end(b, j, close) {
+            j = body_end + 1;
+            continue;
+        }
+        if b[j] == b'|' {
+            out.push((seg, j));
+            seg = j + 1;
+        }
+        j += 1;
+    }
+    out.push((seg, close));
+    out
+}
+
+/// 参数 `b[from..end]` 是否**整个**写成 `$[SPEC]{BODY}`：是则返回 `(SPEC 区间, BODY 区间)`。
+fn arg_color(
+    b: &[u8],
+    pairs: &Pairs,
+    from: usize,
+    end: usize,
+) -> Option<((usize, usize), (usize, usize))> {
+    let body_end = pairs.arg_color_end(b, from, end)?;
+    if body_end + 1 != end {
+        return None;
+    }
+    let spec_end = (from + 2..body_end).find(|&j| b[j] == b']')?;
+    Some(((from + 2, spec_end), (spec_end + 2, body_end)))
+}
+
+/// 变量的取值：文字 + 其中分项分隔符的字节区间。
+///
+/// `${chaizi_all:／}` 一类变量把分项拼成一串，分隔符要能单独着色（`separator` 角色），故由变量
+/// 自己记下分隔符落在哪——渲染时按 `arg` 切开会误切值内部同样的字符（分隔符是空格时尤甚）。
+/// 纯文本出口只读文字，与拼接结果逐字相同。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct VarValue {
+    text: String,
+    /// 分隔符的 `[start, end)`：升序、不重叠、非空。
+    seps: Vec<(usize, usize)>,
+}
+
+impl VarValue {
+    /// 以 `sep` 连接各分项（同 `[T]::join`，空分项照样占位）。
+    pub(crate) fn joined<S: AsRef<str>>(items: impl IntoIterator<Item = S>, sep: &str) -> Self {
+        let mut v = Self::default();
+        for (i, item) in items.into_iter().enumerate() {
+            if i > 0 && !sep.is_empty() {
+                let start = v.text.len();
+                v.text.push_str(sep);
+                v.seps.push((start, v.text.len()));
+            }
+            v.text.push_str(item.as_ref());
+        }
+        v
+    }
+}
+
+impl From<String> for VarValue {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            seps: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for VarValue {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
     }
 }
 
@@ -168,9 +261,9 @@ fn parse_range(tpl: &str, pairs: &Pairs, start: usize, end: usize, depth: usize)
                     nodes.push(Node::Text(std::mem::take(&mut text)));
                 }
                 nodes.push(Node::Var(
-                    tpl[i + 2..close]
-                        .split('|')
-                        .map(VarRef::parse)
+                    var_ref_ranges(b, pairs, i + 2, close)
+                        .into_iter()
+                        .map(|(s, e)| VarRef::parse(tpl, pairs, s, e))
                         .filter(|v| !v.name.is_empty())
                         .collect(),
                 ));
@@ -235,12 +328,15 @@ pub(crate) const MAX_DEPTH: usize = 32;
 /// 此前 `find_group_end` 每遇到一个 `{` 就往后重扫到配对处，`${` 找 `}` 也是逐次往后找：
 /// 一串未闭合的 `{`（20 万个）就是平方级，实测 37 秒——同样是存进配置就卡死候选渲染的形状。
 ///
-/// 配对规则与旧的逐次扫描逐字相同（测试 `pairs_match_rescan_reference` 按随机模板对拍）：
-/// `${` 跳到其后第一个 `}`（变量未闭合 ⇒ 其后再无 `}`，一切段都闭合不了）；其余 `{` `}` 按层
-/// 配对。从任一段首重扫与从头扫一遍切出的记号相同——段首本就是整串扫描里的记号边界。
+/// 配对规则与逐次重扫逐字相同（测试 `pairs_match_rescan_reference` 按随机模板对拍）：
+/// `${` 跳到其后第一个不在参数内联色 `$[…]{…}` 里的 `}`（[`Self::var_end`]；变量未闭合 ⇒ 其后
+/// 不再配对，一切段都闭合不了）；其余 `{` `}` 按层配对。从任一段首重扫与从头扫一遍切出的记号
+/// 相同——段首本就是整串扫描里的记号边界。
 struct Pairs {
     /// `next_close[i]` = `i` 起（含）第一个 `}` 的位置；没有为 `usize::MAX`。
     next_close: Vec<usize>,
+    /// `var_close[i]`（`i` = `${` 之后的首字节）= 变量的收尾 `}`；没有为 `usize::MAX`。
+    var_close: Vec<usize>,
     /// `group_close[i]`（`b[i] == '{'` 且不是 `${` 的 `{`）= 配对的 `}`；没有为 `usize::MAX`。
     group_close: Vec<usize>,
 }
@@ -252,14 +348,19 @@ impl Pairs {
         for i in (0..n).rev() {
             next_close[i] = if b[i] == b'}' { i } else { next_close[i + 1] };
         }
-        let mut group_close = vec![usize::MAX; n];
+        let mut pairs = Self {
+            next_close,
+            var_close: vec![usize::MAX; n + 1],
+            group_close: vec![usize::MAX; n],
+        };
         let mut stack = Vec::new();
         let mut i = 0;
         while i < n {
             if b[i] == b'$' && i + 1 < n && b[i + 1] == b'{' {
-                match next_close[i + 2] {
-                    usize::MAX => break,
-                    c => {
+                match pairs.scan_var(b, i + 2) {
+                    None => break,
+                    Some(c) => {
+                        pairs.var_close[i + 2] = c;
                         i = c + 1;
                         continue;
                     }
@@ -269,22 +370,52 @@ impl Pairs {
                 b'{' => stack.push(i),
                 b'}' => {
                     if let Some(open) = stack.pop() {
-                        group_close[open] = i;
+                        pairs.group_close[open] = i;
                     }
                 }
                 _ => {}
             }
             i += 1;
         }
-        Self {
-            next_close,
-            group_close,
+        pairs
+    }
+
+    /// 从 `from` 起找变量的收尾 `}`：参数里成立的 `$[…]{…}` 整块跳过（它的 `}` 不收尾）。
+    /// 每个变量只在建表时扫一次，`arg_color_end` 取 BODY 结尾是查表，整体仍线性。
+    fn scan_var(&self, b: &[u8], from: usize) -> Option<usize> {
+        let mut j = from;
+        while j < b.len() {
+            if let Some(body_end) = self.arg_color_end(b, j, b.len()) {
+                j = body_end + 1;
+                continue;
+            }
+            if b[j] == b'}' {
+                return Some(j);
+            }
+            j += 1;
         }
+        None
+    }
+
+    /// `b[i..]` 以参数内联色 `$[SPEC]{BODY}` 开头时，返回 BODY 结束 `}` 的位置（须在 `end` 之前）。
+    /// `SPEC` 的成立条件同 [`color_bounds`]；`BODY` 是分隔符文字，不嵌套，到其后第一个 `}`。
+    fn arg_color_end(&self, b: &[u8], i: usize, end: usize) -> Option<usize> {
+        if !(b[i] == b'$' && i + 1 < end && b[i + 1] == b'[') {
+            return None;
+        }
+        let from = i + 2;
+        let limit = (from + COLOR_SPEC_MAX + 1).min(end);
+        let close = (from..limit).find(|&j| matches!(b[j], b']' | b'{' | b'}' | b'\n'))?;
+        if b[close] != b']' || close + 1 >= end || b[close + 1] != b'{' {
+            return None;
+        }
+        let body_end = *self.next_close.get(close + 2)?;
+        (body_end < end).then_some(body_end)
     }
 
     /// `${` 之后（`from` 指向名字首字节）的收尾 `}`，须在 `end` 之前。
     fn var_end(&self, from: usize, end: usize) -> Option<usize> {
-        let c = *self.next_close.get(from)?;
+        let c = *self.var_close.get(from)?;
         (c < end).then_some(c)
     }
 
@@ -311,6 +442,7 @@ fn color_bounds(b: &[u8], pairs: &Pairs, from: usize, end: usize) -> Option<(usi
 }
 
 /// 结构角色（§3.2）：模板字面文字在正文里是 `literal`，在段名里是 `title`。
+/// 第三个结构角色 `separator` 不进片段的 `role`，是 `Span::separator` 标记（主题没配时随变量同色）。
 const ROLE_LITERAL: &str = "literal";
 const ROLE_TITLE: &str = "title";
 
@@ -392,12 +524,46 @@ impl Builder {
     }
 
     fn push(&mut self, s: &str, role: Option<&'static str>) {
+        self.push_styled(s, role, false);
+    }
+
+    fn push_styled(&mut self, s: &str, role: Option<&'static str>, separator: bool) {
+        let color = self.colors.last().cloned();
+        self.push_with(s, role, separator, color);
+    }
+
+    fn push_with(
+        &mut self,
+        s: &str,
+        role: Option<&'static str>,
+        separator: bool,
+        color: Option<Arc<InlineColor>>,
+    ) {
         let style = SpanStyle {
             role,
             in_title: self.in_title,
-            color: self.colors.last().cloned(),
+            separator,
+            color,
         };
         self.out.push(s, &style);
+    }
+
+    /// 变量值：分项带变量角色，分隔符另带 `separator` 标记；`sep_color` = 参数里写的内联色，
+    /// 只标在分隔符上（压过外层 `$[…]{}`，同内层内联色压过外层）。
+    fn push_value(
+        &mut self,
+        v: &VarValue,
+        role: Option<&'static str>,
+        sep_color: Option<&Arc<InlineColor>>,
+    ) {
+        let mut at = 0;
+        for &(start, end) in &v.seps {
+            self.push(&v.text[at..start], role);
+            let color = sep_color.cloned().or_else(|| self.colors.last().cloned());
+            self.push_with(&v.text[start..end], role, true, color);
+            at = end;
+        }
+        self.push(&v.text[at..], role);
     }
 
     fn push_literal(&mut self, s: &str) {
@@ -434,9 +600,9 @@ impl Builder {
 ///
 /// `counts(name)` 决定「这个变量填上了」算不算数：悬停提示的逐字段里 `${char}` 恒非空，
 /// 若计入，查不到读音的字会留下孤零零的 `好：`。注释段传恒真。
-fn render_nodes(
+fn render_nodes<V: Into<VarValue>>(
     nodes: &[Node],
-    eval: &impl Fn(&str, Option<&str>) -> Option<String>,
+    eval: &impl Fn(&str, Option<&str>) -> Option<V>,
     counts: &impl Fn(&str) -> bool,
     b: &mut Builder,
 ) -> bool {
@@ -447,27 +613,32 @@ fn render_nodes(
             Node::Var(refs) => {
                 // 未知名恒排在「首个非空」判定之外单独处理：它不是值，是错误提示。
                 // 角色 = **实际取到值的那个变量**（`${code_hint|code_rev}` 取到反查码时是 code_rev）。
-                let mut value: Option<(String, bool, Option<&'static str>)> = None;
+                // 第三项 = 取到值的变量；`None` = 未知名回显（无角色、无分隔符色）。
+                let mut value: Option<(VarValue, bool, Option<&VarRef>)> = None;
                 for r in refs {
-                    match eval(&r.name, r.arg.as_deref()) {
+                    match eval(&r.name, r.arg.as_deref()).map(Into::into) {
                         None => {
-                            value = Some((format!("${{{}}}", r.name), true, None));
+                            value = Some((format!("${{{}}}", r.name).into(), true, None));
                             break;
                         }
                         Some(v) if !v.is_empty() => {
                             if r.role.is_none() {
                                 warn_unlisted_role(&r.name);
                             }
-                            value = Some((v, counts(&r.name), r.role));
+                            value = Some((v, counts(&r.name), Some(r)));
                             break;
                         }
                         Some(_) => {} // 已知但空 → 试下一个回退
                     }
                 }
                 match value {
-                    Some((v, counted, role)) => {
+                    Some((v, counted, r)) => {
                         // 角色取契约清单里的常驻名（清单外的名字不产角色，见 `Span::role`）。
-                        b.push(&v, role);
+                        b.push_value(
+                            &v,
+                            r.and_then(|r| r.role),
+                            r.and_then(|r| r.sep_color.as_ref()),
+                        );
                         any |= counted;
                     }
                     // 空变量吞掉紧邻的一个空白：`(拼: ${pinyin} ${chaizi})` 在拆字为空时
@@ -507,10 +678,10 @@ fn render_nodes(
 /// 首尾空白——模板里为分隔而写的空格，在相邻内容缺席时不该留在两端）。
 ///
 /// `max_chars` = 0 表示不限；超出则按字素簇截断并加 `…`（见 [`truncate_graphemes`]）。
-pub(crate) fn render_styled(
+pub(crate) fn render_styled<V: Into<VarValue>>(
     tpl: &str,
     max_chars: usize,
-    eval: impl Fn(&str, Option<&str>) -> Option<String>,
+    eval: impl Fn(&str, Option<&str>) -> Option<V>,
 ) -> StyledText {
     Template::parse(tpl).render_whole(max_chars, &eval)
 }
@@ -527,10 +698,10 @@ fn truncate_graphemes(t: StyledText, max_chars: usize) -> StyledText {
 
 /// [`render_styled`] 的纯文本形态：要上屏的文字（`alt_commit_text` 上屏注释、`reverse_render`
 /// 的 cmdbar `dict.rev`），`$[…]{}` 只留 `BODY` 的文字（§4.6）。
-pub(crate) fn render(
+pub(crate) fn render<V: Into<VarValue>>(
     tpl: &str,
     max_chars: usize,
-    eval: impl Fn(&str, Option<&str>) -> Option<String>,
+    eval: impl Fn(&str, Option<&str>) -> Option<V>,
 ) -> String {
     render_styled(tpl, max_chars, eval).into_string()
 }
@@ -553,9 +724,9 @@ impl Template {
     /// 悬停提示的原始行是复制 / 上屏的取值来源，完整原文开头的缩进、`\t` 必须原样保留；
     /// 段内容全空要消失，而段名的字面文字（`编码`）不能消失。
     #[cfg(test)]
-    pub(crate) fn render(
+    pub(crate) fn render<V: Into<VarValue>>(
         &self,
-        eval: &impl Fn(&str, Option<&str>) -> Option<String>,
+        eval: &impl Fn(&str, Option<&str>) -> Option<V>,
         counts: &impl Fn(&str) -> bool,
     ) -> (String, bool) {
         let (t, filled) = self.render_styled(eval, counts, false);
@@ -564,10 +735,10 @@ impl Template {
 
     /// 按注释段口径渲染（见 [`render_styled`]）：整个模板是一个隐式可选段、trim、按字截断。
     /// 预解析的模板在候选循环外解析一次、循环里只渲染。
-    pub(crate) fn render_whole(
+    pub(crate) fn render_whole<V: Into<VarValue>>(
         &self,
         max_chars: usize,
-        eval: &impl Fn(&str, Option<&str>) -> Option<String>,
+        eval: &impl Fn(&str, Option<&str>) -> Option<V>,
     ) -> StyledText {
         let mut b = Builder::new(false);
         if !render_nodes(&self.0, eval, &|_| true, &mut b) {
@@ -581,10 +752,10 @@ impl Template {
     /// ★ 先拆、后各自 trim、再各自截断（`max_chars` 含义为「每段」）。先 trim 整体会让
     /// `${pinyin}\n${chaizi}` 在拆字为空时吃掉尾部 `\n`，拼音就掉到了右侧。
     /// 无字面 `\n`、或上段为空 ⇒ 上段空，下段与 [`Self::render_whole`] 同口径。
-    pub(crate) fn render_split(
+    pub(crate) fn render_split<V: Into<VarValue>>(
         &self,
         max_chars: usize,
-        eval: &impl Fn(&str, Option<&str>) -> Option<String>,
+        eval: &impl Fn(&str, Option<&str>) -> Option<V>,
     ) -> (StyledText, StyledText) {
         let mut b = Builder::new(false).with_split();
         if !render_nodes(&self.0, eval, &|_| true, &mut b) {
@@ -608,9 +779,9 @@ impl Template {
 
     /// 同 [`Self::render`]，产出带分段样式的文字。`in_title` = 这是段名模板：字面文字的角色
     /// 是 `title` 而非 `literal`，变量片段带 `in_title`（角色未配色时回落 `title`，§3.2）。
-    pub(crate) fn render_styled(
+    pub(crate) fn render_styled<V: Into<VarValue>>(
         &self,
-        eval: &impl Fn(&str, Option<&str>) -> Option<String>,
+        eval: &impl Fn(&str, Option<&str>) -> Option<V>,
         counts: &impl Fn(&str) -> bool,
         in_title: bool,
     ) -> (StyledText, bool) {
@@ -885,19 +1056,37 @@ pub(crate) fn reverse_text_var(
     arg: Option<&str>,
     text: &str,
     reverse: &wind_reverse::ReverseLookup,
-) -> Option<String> {
+) -> Option<VarValue> {
     // 判据是 `chars().count()` 而非 `len()`：扩展区汉字走代理对，按字节数会被当成词组。
     let single = text.chars().count() == 1;
-    Some(match name {
+    Some(VarValue::from(match name {
         "char" => text.to_string(),
         "chaizi" if single => reverse.radicals_of(text, ""),
         "chaizi" => String::new(),
         "chaizi_code" if single => reverse.chaizi_code_of(text),
         "chaizi_code" => String::new(),
-        "chaizi_all" => reverse.radicals_of(text, arg.unwrap_or(" ")),
-        "chaizi_code_all" => reverse.codes_of(text, arg.unwrap_or(" ")),
+        "chaizi_all" => {
+            return Some(VarValue::joined(
+                reverse.radicals_each(text),
+                arg.unwrap_or(" "),
+            ));
+        }
+        "chaizi_code_all" => {
+            return Some(VarValue::joined(
+                reverse.codes_each(text),
+                arg.unwrap_or(" "),
+            ));
+        }
         _ => return None,
-    })
+    }))
+}
+
+/// 码表反查的全部码位（`word_codes_display` 以 `/` 连接）按 `sep` 重新连接，`/` 即分隔符。
+fn joined_codes(codes: &str, sep: Option<&str>) -> VarValue {
+    if codes.is_empty() {
+        return VarValue::default();
+    }
+    VarValue::joined(codes.split('/'), sep.unwrap_or("/"))
 }
 
 impl crate::coordinator::Coordinator {
@@ -1134,8 +1323,8 @@ impl crate::coordinator::Coordinator {
         arg: Option<&str>,
         text: &str,
         reverse: &wind_reverse::ReverseLookup,
-    ) -> Option<String> {
-        Some(match name {
+    ) -> Option<VarValue> {
+        Some(VarValue::from(match name {
             // 索引未就绪给空串（而不是 `None`）：`None` 在渲染层专表**未知变量名**，
             // 会原样输出 `${code_rev}` 让用户看见拼写错误。空串则不计入
             // `reverse_render` 的 found 判据，整条反查候选这一次照旧不出现 —— 想要的
@@ -1170,11 +1359,8 @@ impl crate::coordinator::Coordinator {
                         String::new()
                     }
                 };
-                match arg {
-                    // `word_codes_display` 固定用 `/` 连接，换分隔符只能在这里替。
-                    Some(sep) if !codes.is_empty() => codes.replace('/', sep),
-                    _ => codes,
-                }
+                // `word_codes_display` 固定用 `/` 连接，换分隔符只能在这里替。
+                return Some(joined_codes(&codes, arg));
             }
             "pinyin" => {
                 // 与 `pinyin_text` 的路径 B 同构：先让引擎按词推断音节（多音字消歧），
@@ -1212,12 +1398,13 @@ impl crate::coordinator::Coordinator {
             }
             "dict_all" => {
                 let schema = self.engine_mgr.active_schema_id();
-                reverse
-                    .comments_of(text, None, &schema)
-                    .join(arg.unwrap_or(DICT_ALL_SEP))
+                return Some(VarValue::joined(
+                    reverse.comments_of(text, None, &schema),
+                    arg.unwrap_or(DICT_ALL_SEP),
+                ));
             }
             _ => return reverse_text_var(name, arg, text, reverse),
-        })
+        }))
     }
 
     /// 变量求值。`None` = 未知变量名（渲染层据此原样回显 `${name}` 让用户看见拼写错误）。
@@ -1296,10 +1483,10 @@ impl crate::coordinator::Coordinator {
         reverse: &wind_reverse::ReverseLookup,
         hint_source: CodeHintSource,
         dict_schema: &str,
-    ) -> Option<String> {
+    ) -> Option<VarValue> {
         // 判据是 `chars().count()` 而非 `len()`：扩展区汉字走代理对，按字节数会被当成词组。
         let single = c.text.chars().count() == 1;
-        Some(match name {
+        Some(VarValue::from(match name {
             "code_hint" => c.comment.clone(),
             // `${emoji}` —— 该词对应的 emoji（`[input.emoji]`，空格分隔，取前 max_per_word 个）。
             //
@@ -1345,10 +1532,7 @@ impl crate::coordinator::Coordinator {
                         .engine_mgr
                         .word_codes_display(&sid, &c.text)
                         .unwrap_or_default();
-                    match arg {
-                        Some(sep) if !codes.is_empty() => codes.replace('/', sep),
-                        _ => codes,
-                    }
+                    return Some(joined_codes(&codes, arg));
                 } else {
                     String::new()
                 }
@@ -1384,8 +1568,18 @@ impl crate::coordinator::Coordinator {
             "chaizi" => String::new(),
             "chaizi_code" if single => reverse.chaizi_code_of(&c.text),
             "chaizi_code" => String::new(),
-            "chaizi_all" => reverse.radicals_of(&c.text, arg.unwrap_or(" ")),
-            "chaizi_code_all" => reverse.codes_of(&c.text, arg.unwrap_or(" ")),
+            "chaizi_all" => {
+                return Some(VarValue::joined(
+                    reverse.radicals_each(&c.text),
+                    arg.unwrap_or(" "),
+                ));
+            }
+            "chaizi_code_all" => {
+                return Some(VarValue::joined(
+                    reverse.codes_each(&c.text),
+                    arg.unwrap_or(" "),
+                ));
+            }
             // 用户挂载的注释词库（`[[ui.comment_dicts]]`）。键是**词**，故一份库可跨方案复用；
             // 候选自身的 `code` 作可选消歧（注释库声明了 code 列时才生效，跨方案对不上则
             // 回落该词首条，见 `ReverseLookup::comment_of`）。
@@ -1408,12 +1602,13 @@ impl crate::coordinator::Coordinator {
             // 就看不见；`${dict:id}` 能并排但要逐库写死 id。不带来源库标签：标签该写在库内容里。
             "dict_all" => {
                 let (key, fb) = dict_query_key(c);
-                reverse
-                    .comments_of_with(key, Some(&c.code), dict_schema, fb)
-                    .join(arg.unwrap_or(DICT_ALL_SEP))
+                return Some(VarValue::joined(
+                    reverse.comments_of_with(key, Some(&c.code), dict_schema, fb),
+                    arg.unwrap_or(DICT_ALL_SEP),
+                ));
             }
             _ => return None,
-        })
+        }))
     }
 }
 
@@ -2331,6 +2526,7 @@ mod eval_var_tests {
     fn eval(co: &Coordinator, name: &str, c: &Candidate, hint: CodeHintSource) -> Option<String> {
         let rev = wind_reverse::ReverseLookup::default();
         co.eval_var(name, None, c, &rev, hint, "shuangpin")
+            .map(|v| v.to_string())
     }
 
     // ───────────── `${dict_all}`（论坛 t282） ─────────────
@@ -2411,6 +2607,35 @@ mod eval_var_tests {
             )),
             "v.配置 · [IT]配置…"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `${dict_all}` 的连接符带分隔符标记（两个入口同义）。
+    #[test]
+    fn dict_all_marks_its_separator() {
+        let co = coord("pinyin");
+        let (dir, rl) = two_comment_libs("seprole");
+        let c = word("configure");
+        let t = co.comment_for(
+            &c,
+            &Template::parse("${dict_all}"),
+            0,
+            &rl,
+            CodeHintSource::Off,
+            "",
+        );
+        let sep: Vec<(u32, u32)> = t
+            .spans()
+            .iter()
+            .filter(|s| s.separator)
+            .map(|s| (s.start, s.end))
+            .collect();
+        assert_eq!(sep, vec![(8, 11)], "「v.配置」之后的「；」");
+        assert!(t.spans().iter().all(|s| s.role == Some("dict")));
+        let bare = co
+            .eval_text_var("dict_all", Some("/"), "configure", &rl)
+            .unwrap();
+        assert_eq!(bare.seps, vec![(8, 9)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3345,17 +3570,385 @@ mod styled_tests {
 }
 
 /// 入参防护：嵌套上限与线性配对（`MAX_DEPTH` / `Pairs`）。
+/// 分隔符角色：`${name:分隔符}` 的分隔符带 `separator` 标记、角色仍是变量名；纯文本与改前逐字相同。
+#[cfg(test)]
+mod separator_tests {
+    use super::*;
+    use crate::coordinator::Coordinator;
+
+    /// `(文字, 角色, 是分隔符)` 逐段。
+    fn pieces(t: &StyledText) -> Vec<(&str, Option<&str>, bool)> {
+        t.spans()
+            .iter()
+            .map(|s| {
+                (
+                    &t.as_str()[s.start as usize..s.end as usize],
+                    s.role,
+                    s.separator,
+                )
+            })
+            .collect()
+    }
+
+    /// `name` 取 `items` 以参数（缺省 `default`）连接。
+    fn items<'a>(
+        name: &'a str,
+        items: &'a [&'a str],
+        default: &'a str,
+    ) -> impl Fn(&str, Option<&str>) -> Option<VarValue> + 'a {
+        move |n, arg| (n == name).then(|| VarValue::joined(items, arg.unwrap_or(default)))
+    }
+
+    #[test]
+    fn separator_is_flagged_and_keeps_variable_role() {
+        let t = render_styled(
+            "${chaizi_all:／}",
+            0,
+            items("chaizi_all", &["亻尔", "女子"], " "),
+        );
+        assert_eq!(t.as_str(), "亻尔／女子");
+        assert_eq!(
+            pieces(&t),
+            vec![
+                ("亻尔", Some("chaizi_all"), false),
+                ("／", Some("chaizi_all"), true),
+                ("女子", Some("chaizi_all"), false),
+            ]
+        );
+        // 别名归一后的角色同样带到分隔符上。
+        let t = render_styled(
+            "${dict_all}",
+            0,
+            items("dict_all", &["a", "b"], DICT_ALL_SEP),
+        );
+        assert_eq!(
+            pieces(&t),
+            vec![
+                ("a", Some("dict"), false),
+                ("；", Some("dict"), true),
+                ("b", Some("dict"), false),
+            ]
+        );
+    }
+
+    /// 分隔符是空格时只标拼接处，值内部的空格不算——这正是不在渲染时按 `arg` 切开的理由。
+    #[test]
+    fn space_separator_does_not_split_inside_items() {
+        let t = render_styled(
+            "${dict_all: }",
+            0,
+            items("dict_all", &["a b", "c"], DICT_ALL_SEP),
+        );
+        assert_eq!(t.as_str(), "a b c");
+        assert_eq!(
+            pieces(&t),
+            vec![
+                ("a b", Some("dict"), false),
+                (" ", Some("dict"), true),
+                ("c", Some("dict"), false),
+            ]
+        );
+    }
+
+    /// 边界：空分隔符、单项不产分隔符片段；空分项照样占位（同 `join`）；全空 = 变量为空。
+    #[test]
+    fn edge_cases() {
+        let t = render_styled("${chaizi_all:}", 0, items("chaizi_all", &["a", "b"], " "));
+        assert_eq!(pieces(&t), vec![("ab", Some("chaizi_all"), false)]);
+        let t = render_styled("${chaizi_all:/}", 0, items("chaizi_all", &["a"], " "));
+        assert_eq!(pieces(&t), vec![("a", Some("chaizi_all"), false)]);
+        let t = render_styled("${chaizi_all:/}", 0, items("chaizi_all", &["", "b"], " "));
+        assert_eq!(
+            pieces(&t),
+            vec![
+                ("/", Some("chaizi_all"), true),
+                ("b", Some("chaizi_all"), false)
+            ]
+        );
+        let tpl = "${code_hint}{(${chaizi_all:/})}";
+        let e = |n: &str, a: Option<&str>| match n {
+            "code_hint" => Some(VarValue::from("kh".to_string())),
+            _ => items("chaizi_all", &[""], " ")(n, a),
+        };
+        assert_eq!(render(tpl, 0, e), "kh", "分项全空 = 变量为空，可选段消失");
+        let t = render_styled("${chaizi_all:/}", 0, items("chaizi_all", &[], " "));
+        assert!(t.is_empty());
+    }
+
+    /// 内联色里的分隔符：带内联色（内联色优先于一切角色色），仍有分隔符标记。
+    #[test]
+    fn separator_inside_inline_color() {
+        let t = render_styled(
+            "$[accent]{${chaizi_all:/}}",
+            0,
+            items("chaizi_all", &["a", "b"], " "),
+        );
+        let sp = &t.spans()[1];
+        assert!(sp.separator && sp.color.is_some());
+    }
+
+    /// 纯文本：任意分项 × 分隔符，`VarValue` 与改前的 `join` 逐字相同；整条模板的纯文本出口
+    /// （`render`）与返回改前字符串的求值闭包渲染结果相同。
+    #[test]
+    fn plain_text_matches_join() {
+        let cases: &[&[&str]] = &[
+            &[],
+            &[""],
+            &["a"],
+            &["a", "b"],
+            &["", "b"],
+            &["a", ""],
+            &["a b", "c d"],
+        ];
+        for parts in cases {
+            for sep in ["", " ", "／", " · ", ":"] {
+                let old = parts.join(sep);
+                assert_eq!(&*VarValue::joined(*parts, sep), old, "{parts:?} {sep:?}");
+                let tpl = format!("x{{(${{chaizi_all:{sep}}})}} ${{chaizi_all:{sep}}}");
+                assert_eq!(
+                    render(&tpl, 0, items("chaizi_all", parts, " ")),
+                    render(&tpl, 0, |n, _| (n == "chaizi_all").then(|| old.clone())),
+                    "{tpl:?} {parts:?}"
+                );
+            }
+        }
+    }
+
+    /// `${code_rev_all}`：`word_codes_display` 的 `/` 连接串换分隔符，与改前的 `replace` 逐字相同。
+    #[test]
+    fn code_rev_all_matches_pre_change_replace() {
+        let old = |codes: &str, arg: Option<&str>| match arg {
+            Some(sep) if !codes.is_empty() => codes.replace('/', sep),
+            _ => codes.to_string(),
+        };
+        for codes in ["", "q", "q/trn/trnt"] {
+            for arg in [None, Some(""), Some(" "), Some("·")] {
+                assert_eq!(
+                    &*joined_codes(codes, arg),
+                    old(codes, arg),
+                    "{codes:?} {arg:?}"
+                );
+            }
+        }
+        // 缺省的 `/` 也是分隔符。
+        assert_eq!(joined_codes("q/trn", None).seps, vec![(1, 2)]);
+    }
+
+    /// 分隔符的颜色（`None` = 无内联色），逐个分隔符片段。
+    fn sep_colors(t: &StyledText) -> Vec<(&str, Option<InlineColor>)> {
+        t.spans()
+            .iter()
+            .filter(|s| s.separator)
+            .map(|s| {
+                (
+                    &t.as_str()[s.start as usize..s.end as usize],
+                    s.color.as_deref().cloned(),
+                )
+            })
+            .collect()
+    }
+
+    /// `${name:$[颜色]{分隔符}}`：变量收到的参数是 `分隔符`，颜色只标在分隔符上；文字不带标记。
+    #[test]
+    fn inline_color_in_separator_arg() {
+        let e = items("chaizi_all", &["亻尔", "女子"], " ");
+        let t = render_styled("${chaizi_all:$[#888888]{／}}", 0, &e);
+        assert_eq!(t.as_str(), "亻尔／女子");
+        assert_eq!(
+            sep_colors(&t),
+            vec![("／", Some(InlineColor::parse("#888888")))]
+        );
+        assert!(
+            t.spans()
+                .iter()
+                .filter(|s| !s.separator)
+                .all(|s| s.color.is_none()),
+            "分项不带颜色"
+        );
+        assert_eq!(render("${chaizi_all:$[#888888]{／}}", 0, &e), "亻尔／女子");
+        // 分隔符带空格、颜色写色名，同模板内联色。
+        let t = render_styled("${chaizi_all:$[text_dim]{ · }}", 0, &e);
+        assert_eq!(t.as_str(), "亻尔 · 女子");
+        assert_eq!(
+            sep_colors(&t),
+            vec![(" · ", Some(InlineColor::parse("text_dim")))]
+        );
+        // 空分隔符照样成立：没有分隔符片段。
+        let t = render_styled("${chaizi_all:$[x]{}}", 0, &e);
+        assert_eq!(t.as_str(), "亻尔女子");
+        assert!(sep_colors(&t).is_empty());
+    }
+
+    /// 优先级：分隔符自己的内联色 > 外层 `$[…]{}`（分项仍取外层）；没写时分隔符随外层。
+    #[test]
+    fn separator_inline_color_beats_outer_inline() {
+        let e = items("chaizi_all", &["a", "b"], " ");
+        let t = render_styled("$[accent]{${chaizi_all:$[#888]{/}}}", 0, &e);
+        let got: Vec<(bool, InlineColor)> = t
+            .spans()
+            .iter()
+            .map(|s| (s.separator, s.color.as_deref().cloned().unwrap()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (false, InlineColor::parse("accent")),
+                (true, InlineColor::parse("#888")),
+                (false, InlineColor::parse("accent")),
+            ]
+        );
+    }
+
+    /// 内联色里的 `|`、`:` 是分隔符文字，不切回退链；回退链照常工作。
+    #[test]
+    fn separator_body_is_not_split_by_fallback_bar() {
+        let e = |n: &str, a: Option<&str>| match n {
+            "chaizi_all" => Some(VarValue::default()),
+            "dict_all" => Some(VarValue::joined(["x", "y"], a.unwrap_or(DICT_ALL_SEP))),
+            _ => None,
+        };
+        let tpl = "${chaizi_all:$[a]{|}|dict_all:$[b]{:|}}";
+        let t = render_styled(tpl, 0, e);
+        assert_eq!(t.as_str(), "x:|y");
+        assert_eq!(sep_colors(&t), vec![(":|", Some(InlineColor::parse("b")))]);
+        let e2 = items("chaizi_all", &["a", "b"], " ");
+        assert_eq!(render("${chaizi_all:$[a]{|}|dict_all}", 0, &e2), "a|b");
+    }
+
+    /// 出错口径同模板内联色：语法不成立（`]` 后不是 `{`、`SPEC` 过长或含换行、只占参数一部分）
+    /// 参数按字面；`BODY` 未闭合即变量未闭合，其后全按字面；颜色写错仍是内联色（求色时回落正文色）。
+    #[test]
+    fn separator_inline_color_errors_degrade_like_inline_color() {
+        let e = items("chaizi_all", &["a", "b"], " ");
+        let plain = |tpl: &str| render(tpl, 0, &e);
+        assert_eq!(plain("${chaizi_all:$[x]/}"), "a$[x]/b", "]后不是 {{");
+        assert_eq!(
+            plain("${chaizi_all:-$[x]{/}}"),
+            "a-$[x]{/}b",
+            "只占一部分：整个按字面"
+        );
+        assert!(
+            sep_colors(&render_styled("${chaizi_all:-$[x]{/}}", 0, &e))[0]
+                .1
+                .is_none()
+        );
+        let long = "x".repeat(COLOR_SPEC_MAX + 1);
+        assert_eq!(
+            plain(&format!("${{chaizi_all:$[{long}]{{/}}}}")),
+            format!("a$[{long}]{{/b}}"),
+            "SPEC 过长：同改前，变量收在第一个 `}}`"
+        );
+        assert_eq!(
+            plain("${chaizi_all} ${chaizi_all:$[x]{/ {${chaizi_all}"),
+            "a b ${chaizi_all:$[x]{/ {${chaizi_all}",
+            "BODY 未闭合 = 变量未闭合，其后全按字面"
+        );
+        // 颜色值非法：语法成立，分隔符带一个非法颜色（求色回落正文色，同 `$[红]{…}`）。
+        let t = render_styled("${chaizi_all:$[红]{/}}", 0, &e);
+        assert_eq!(t.as_str(), "a/b");
+        assert_eq!(sep_colors(&t), vec![("/", Some(InlineColor::parse("红")))]);
+        assert_eq!(
+            InlineColor::parse("红").normal,
+            wind_theme::ColorRef {
+                light: wind_theme::Atom::Invalid,
+                dark: wind_theme::Atom::Invalid,
+            }
+        );
+    }
+
+    /// 夹具拆字表：好 = 女子 [vbg]、人 = 人 [w]、丂 = （空） [gnv]（有编码无字根）。
+    fn chaizi() -> wind_reverse::ReverseLookup {
+        let dir = std::env::temp_dir().join(format!("wind_sep_chaizi_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("chaizi.txt");
+        std::fs::write(&p, "好\t女子\tvbg\n人\t人\tw\n丂\t\tgnv\n").unwrap();
+        let rl = wind_reverse::ReverseLookup::load(None, Some(&p));
+        let _ = std::fs::remove_dir_all(&dir);
+        rl
+    }
+
+    /// `${chaizi_all}` / `${chaizi_code_all}` 两个入口（裸文本、候选）的纯文本与改前的
+    /// `radicals_of` / `codes_of` 逐字相同，分隔符带标记。
+    #[test]
+    fn chaizi_all_variables_match_pre_change() {
+        let rl = chaizi();
+        let co = Coordinator::new_headless(Config::default(), None);
+        for text in ["好人", "好", "丂人", "好X人", "XY"] {
+            let cand = Candidate {
+                text: text.into(),
+                ..Default::default()
+            };
+            for arg in [None, Some(""), Some("／"), Some(" · ")] {
+                let sep = arg.unwrap_or(" ");
+                let old = [
+                    ("chaizi_all", rl.radicals_of(text, sep)),
+                    ("chaizi_code_all", rl.codes_of(text, sep)),
+                ];
+                for (name, old) in old {
+                    let bare = reverse_text_var(name, arg, text, &rl).unwrap();
+                    assert_eq!(&*bare, old, "{name} {text:?} {arg:?}");
+                    let via = co
+                        .eval_var(name, arg, &cand, &rl, CodeHintSource::Off, "")
+                        .unwrap();
+                    assert_eq!(via, bare, "{name} {text:?} {arg:?}");
+                }
+            }
+        }
+        let tpl = Template::parse("${chaizi_all:／} ${chaizi_code_all:+}");
+        let cand = Candidate {
+            text: "好人".into(),
+            ..Default::default()
+        };
+        let t = co.comment_for(&cand, &tpl, 0, &rl, CodeHintSource::Off, "");
+        assert_eq!(t.as_str(), "女子／人 vbg+w");
+        let seps: Vec<(&str, Option<&str>)> = pieces(&t)
+            .into_iter()
+            .filter(|p| p.2)
+            .map(|p| (p.0, p.1))
+            .collect();
+        assert_eq!(
+            seps,
+            vec![("／", Some("chaizi_all")), ("+", Some("chaizi_code_all"))]
+        );
+    }
+}
+
 #[cfg(test)]
 mod bound_tests {
     use super::*;
 
-    /// 旧的逐次重扫实现，留作对拍基准（配对规则必须逐字相同）。
+    /// 逐次重扫的变量收尾：`from` 起第一个不在参数内联色 `$[SPEC]{BODY}` 里的 `}`。
+    /// 朴素写法（逐处现找），与配对表的查表实现对拍。
+    fn rescan_var_end(b: &[u8], from: usize) -> Option<usize> {
+        let mut j = from;
+        while j < b.len() {
+            if b[j] == b'$' && b.get(j + 1) == Some(&b'[') {
+                let spec = (j + 2..b.len().min(j + 2 + COLOR_SPEC_MAX + 1))
+                    .find(|&k| matches!(b[k], b']' | b'{' | b'}' | b'\n'));
+                if let Some(k) = spec
+                    && b[k] == b']'
+                    && b.get(k + 1) == Some(&b'{')
+                    && let Some(body) = (k + 2..b.len()).find(|&m| b[m] == b'}')
+                {
+                    j = body + 1;
+                    continue;
+                }
+            }
+            if b[j] == b'}' {
+                return Some(j);
+            }
+            j += 1;
+        }
+        None
+    }
+
+    /// 逐次重扫实现，留作对拍基准（配对规则必须逐字相同）。
     fn rescan_group_end(b: &[u8], from: usize) -> Option<usize> {
         let mut i = from;
         let mut depth = 0usize;
         while i < b.len() {
             if b[i] == b'$' && i + 1 < b.len() && b[i + 1] == b'{' {
-                i = (i + 2..b.len()).find(|&j| b[j] == b'}')? + 1;
+                i = rescan_var_end(b, i + 2)? + 1;
                 continue;
             }
             match b[i] {
@@ -3372,7 +3965,7 @@ mod bound_tests {
     /// 配对表与旧的逐次重扫在随机模板上逐位置一致（凡旧解析会去找配对的 `{`）。
     #[test]
     fn pairs_match_rescan_reference() {
-        let alphabet = b"${}[]a";
+        let alphabet = b"${}[]a|";
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
         let mut next = || {
             seed ^= seed << 13;
@@ -3390,15 +3983,20 @@ mod bound_tests {
             let mut i = 0;
             while i < b.len() {
                 if b[i] == b'$' && i + 1 < b.len() && b[i + 1] == b'{' {
-                    match (i + 2..b.len()).find(|&j| b[j] == b'}') {
+                    let want = rescan_var_end(&b, i + 2);
+                    match want {
                         Some(c) => {
+                            assert_eq!(
+                                pairs.var_end(i + 2, b.len()),
+                                Some(c),
+                                "{:?} @ {i}",
+                                String::from_utf8_lossy(&b)
+                            );
                             i = c + 1;
                             continue;
                         }
-                        None => {
-                            i += 1;
-                            continue;
-                        }
+                        // 未闭合：之后一切按字面，配对表不再回答（全为 None）。
+                        None => break,
                     }
                 }
                 if b[i] == b'{' {

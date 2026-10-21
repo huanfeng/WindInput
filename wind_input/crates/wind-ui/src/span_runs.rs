@@ -35,6 +35,7 @@ pub(crate) fn color_runs(
                 body_fallback,
                 s.role,
                 s.in_title,
+                s.separator,
                 s.color.as_deref(),
             );
             (rgba != body).then_some(ColorRun {
@@ -124,5 +125,49 @@ mod tests {
             &t,
         );
         assert!(runs.is_empty());
+    }
+
+    /// 分隔符标记透传到求色：配了 separator 单独着色，没配与变量同色（相邻两段同色仍各占一段）。
+    #[test]
+    fn separator_flag_reaches_span_color() {
+        const RED: Rgba = [255, 0, 0, 255];
+        const BLUE: Rgba = [0, 0, 255, 255];
+        let var = SpanStyle {
+            role: Some("chaizi_all"),
+            ..Default::default()
+        };
+        let sep = SpanStyle {
+            separator: true,
+            ..var.clone()
+        };
+        let mut t = StyledText::new();
+        t.push("ab", &var);
+        t.push("/", &sep);
+        t.push("c", &var);
+        let runs_with = |roles: &[(&str, Rgba)]| {
+            let node = RvNode {
+                roles: roles.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+                ..Default::default()
+            };
+            color_runs(
+                &Resolved::default(),
+                &node,
+                false,
+                TextState::Normal,
+                BODY,
+                &t,
+            )
+            .into_iter()
+            .map(|r| (r.start, r.end, r.rgba))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            runs_with(&[("chaizi_all", RED), ("separator", BLUE)]),
+            vec![(0, 2, RED), (2, 3, BLUE), (3, 4, RED)]
+        );
+        assert_eq!(
+            runs_with(&[("chaizi_all", RED)]),
+            vec![(0, 2, RED), (2, 3, RED), (3, 4, RED)]
+        );
     }
 }

@@ -2356,14 +2356,8 @@ impl Coordinator {
         true
     }
 
-    /// 构建右键候选菜单项并下发给 UI 显示。
-    /// 词条操作的启用态/删除文案按候选来源动态化（对齐 Go window_mouse 菜单状态规则）：
-    /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁全部调位（无稳定位置语义）。
-    /// - 删除：短语→「禁用短语」（软删可恢复）；用户词/临时词→真删；系统词→「隐藏候选」（shadow）。
-    /// - 特殊模式（快符等）：词条操作**照常提供**，编码取其独立缓冲、归属取其引用方案。
-    /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
+    /// 构建右键候选菜单项并下发给 UI 显示。菜单项本身由 [`Self::candidate_menu_items`] 构造。
     pub(crate) fn show_candidate_menu(&self, page_local: usize, x: i32, y: i32) {
-        use wind_ui_types::MenuItemSpec as M;
         // 右键落在分类标签上：不是候选，没有候选菜单。
         if self.grid_tab_of_event(page_local).is_some() {
             return;
@@ -2386,23 +2380,51 @@ impl Coordinator {
                 self.notify_ui_update(&st);
             }
         }
+        let (idx, word) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.candidates.is_empty() {
+                return;
+            }
+            let (start, end) = self.page_range(&state);
+            let idx = start + page_local;
+            if idx >= end || idx >= state.candidates.len() {
+                return;
+            }
+            (idx, state.candidates[idx].text.clone())
+        };
+        let Some(items) = self.candidate_menu_items(idx) else {
+            return;
+        };
+        self.mark_menu_open(page_local, word);
+        // 候选右键菜单在光标处向下弹出（above=false，y_bottom 不使用）。
+        let _ = self.ui_tx.send(UiCommand::ShowCandidateMenu {
+            items,
+            anchor: MenuAnchor::at_point(x, y),
+        });
+    }
+
+    /// 按**全量绝对下标**构造候选菜单项（不弹菜单、不动菜单状态）；无候选 / 越界 → `None`。
+    ///
+    /// 桌面右键（[`Self::show_candidate_menu`]，页内下标折算后进来）与移动端长按菜单共用这一份，
+    /// 文案、启用态、顺序因此天然一致——各写一份的话，两端迟早在某个候选类型上分叉，
+    /// 而分叉的表现是「同一个词桌面能置顶、手机上是灰的」，没有任何报错。
+    ///
+    /// 词条操作的启用态/删除文案按候选来源动态化（对齐 Go window_mouse 菜单状态规则）：
+    /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁全部调位（无稳定位置语义）。
+    /// - 删除：短语→「禁用短语」（软删可恢复）；用户词/临时词→真删；系统词→「隐藏候选」（shadow）。
+    /// - 特殊模式（快符等）：词条操作**照常提供**，编码取其独立缓冲、归属取其引用方案。
+    /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
+    pub fn candidate_menu_items(&self, idx: usize) -> Option<Vec<wind_ui_types::MenuItemSpec>> {
+        use wind_ui_types::MenuItemSpec as M;
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.candidates.is_empty() {
-            return;
-        }
-        let (start, end) = self.page_range(&state);
-        let idx = start + page_local;
-        if idx >= end || idx >= state.candidates.len() {
-            return;
-        }
-        let cand = state.candidates[idx].clone();
+        let cand = state.candidates.get(idx)?.clone();
         let word = cand.text.clone();
         let pos = self.reorder_positions(&state, idx);
         let scope = self.candidate_op_scope(&state);
         // 快捷输入的格式候选：判据独立于 candidate_op_scope（后者问「有没有词库落点」，
         // 混输没有，返回 None 是对的）。与写端 `candidate_or_quick_format_op` 同源。
-        let quick = self.quick_format_scope(&state, page_local);
-        let history = self.quick_history_at(&state, page_local).is_some();
+        let quick = self.quick_format_scope_at(&state, idx);
+        let history = self.quick_history_of(&state, idx).is_some();
         drop(state);
 
         let op = |o: CandidateOp| MenuKind::Op(o);
@@ -2414,12 +2436,7 @@ impl Coordinator {
                 M::separator(),
                 M::leaf("复制", MenuKind::Copy, true, false),
             ];
-            self.mark_menu_open(page_local, word);
-            let _ = self.ui_tx.send(UiCommand::ShowCandidateMenu {
-                items,
-                anchor: MenuAnchor::at_point(x, y),
-            });
-            return;
+            return Some(items);
         }
         // 格式候选优先：它调的是「这种写法排第几」，不是词库里的某个词。
         // 标签也相应改写——操作对象是格式，不是这次算出来的那串文本。
@@ -2449,12 +2466,7 @@ impl Coordinator {
                 M::separator(),
                 M::leaf("复制", MenuKind::Copy, true, false),
             ];
-            self.mark_menu_open(page_local, word);
-            let _ = self.ui_tx.send(UiCommand::ShowCandidateMenu {
-                items,
-                anchor: MenuAnchor::at_point(x, y),
-            });
-            return;
+            return Some(items);
         }
         // 常用/生僻标记：作用域是**全局的那个字**，与词库落点无关，故对上面那两类
         // 「只有复制」的状态同样成立——它只要求 `cand.text` 是**单个可登记的字符**
@@ -2533,12 +2545,7 @@ impl Coordinator {
         // 「同一个字在临拼下右键没有这一项」——用户绝不会想到那是分支写重了。
         items.extend(common_item);
         items.push(M::leaf("复制", MenuKind::Copy, true, false));
-        self.mark_menu_open(page_local, word);
-        // 候选右键菜单在光标处向下弹出（above=false，y_bottom 不使用）。
-        let _ = self.ui_tx.send(UiCommand::ShowCandidateMenu {
-            items,
-            anchor: MenuAnchor::at_point(x, y),
-        });
+        Some(items)
     }
 
     /// 把工具栏移到「输入焦点所在显示器」上的记忆位置（该屏没记过则落到它的右下角）。

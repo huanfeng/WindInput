@@ -190,7 +190,7 @@ pub struct CommitOptions {
     pub show_code_hint: bool,
     /// 精确匹配模式（关闭前缀匹配，对齐 Go SingleCodeInput）。
     pub single_code_input: bool,
-    /// 精确匹配空码补全：精确无候选且不超码长时，从更长编码取首选（对齐 Go SingleCodeComplete）。
+    /// 精确匹配空码补全：精确无候选且有更长编码时，从中取首选（对齐 Go SingleCodeComplete；不限码长）。
     pub single_code_complete: bool,
     /// 基础排序维度（weight 降序 / natural 出现序）。见 [`BaseSort`]。
     pub base_sort: BaseSort,
@@ -277,6 +277,20 @@ impl CodeTableEngine {
         let sentence = opts
             .sentence_input
             .then(|| super::sentence::CodeSentenceDecoder::new(max_code_length));
+        // ★ 整句开启时满码上屏与满码空码清空**就地让位**（同顶码，判据看功能开没开）：
+        // 两者都在第 4 码截断正在组的句子——唯一全码当场上屏、空码当场清空，而那 4 码
+        // 很可能只是句子的前几个编码单元。在这里关掉，`convert` / `should_auto_commit` /
+        // `recheck_auto_commit` 与清空资格（协调器只在引擎给了 `should_clear` 时才裁决）
+        // 一处覆盖。见设计文档 §7.2。
+        if opts.sentence_input && (opts.auto_commit_at_full || opts.clear_on_empty_max) {
+            tracing::info!(
+                auto_commit_at_full = opts.auto_commit_at_full,
+                clear_on_empty_max = opts.clear_on_empty_max,
+                "[engine.codetable] sentence_input 开启：满码上屏与满码空码清空不生效"
+            );
+            opts.auto_commit_at_full = false;
+            opts.clear_on_empty_max = false;
+        }
         // 前段恒 2 码（`SPLIT_FRONT_LEN`），后段至少 1 码 ⇒ 满码长至少 3 才切得动。
         // **就地关掉并告警**，而不是每次按键静默什么都不做：配置者只会观察到「开了没反应」，
         // 拿不到任何线索。
@@ -668,9 +682,13 @@ fn decide_auto_commit(
     // `hhnu` 下常用「X」+生僻「愳」判不唯一不上屏，滤掉「愳」后复评才放行）。放宽把它们补回
     // 列表却不在此排除，会让一批原本满码即上屏的字退化成要多按一次空格——**而且是静默退化**，
     // 用户只觉得「上屏时灵时不灵」。排除后，自动上屏口径在自动补充/手动放宽下均与放宽前一致。
+    //
+    // ⚠️ **也排除整句候选**（`is_sentence`）：它的 `code` 是整串，超码长时又常是唯一一条
+    // `code == input`、且超码长串没有更长后继 ⇒ 不排除的话，开了满码上屏后每多打一码
+    // 整句就把自己上屏了（`trntw` → 「我人」），句子永远组不起来（论坛 t350）。
     let mut exact = candidates
         .iter()
-        .filter(|c| c.code == input && !c.is_scope_filtered);
+        .filter(|c| c.code == input && !c.is_scope_filtered && !c.is_sentence);
     let first = exact.next()?;
     if exact.next().is_some() {
         return None; // 多个精确匹配，不自动上屏
@@ -883,6 +901,10 @@ impl Engine for CodeTableEngine {
             candidates.push(c);
         }
 
+        // has_longer 一次求值复用：空码补全的前置判据、自动上屏判定与满码空码清空共用同一
+        // 「更长后继」索引查询（直问有序索引，不物化候选），避免每次按键各查一次。
+        let has_longer = self.has_longer_code(input);
+
         // 前缀匹配补充（精确匹配模式下跳过）
         let mut completion_hints: Vec<Candidate> = Vec::new();
         if !self.opts.single_code_input {
@@ -906,12 +928,12 @@ impl Engine for CodeTableEngine {
                 c.is_exact_code = c.code == input;
                 candidates.push(c);
             }
-        } else if self.opts.single_code_complete
-            && candidates.is_empty()
-            // `<=` 而非 `<`（论坛 t302）：码表可以收超码长的词条（小鹤音形实测），满码长空码时
-            // 照样有后续编码可提示。超码长那一段归顶码 / 整句，仍不碰。
-            && input.chars().count() <= self.max_code_length
-        {
+        } else if self.opts.single_code_complete && candidates.is_empty() && has_longer {
+            // 不设码长闸门（论坛 t302）：码表可以收超码长的词条（小鹤音形实测），满码长乃至
+            // 超码长空码时照样有后续编码可提示，直到打全。判据只剩「有更长后继」，无后继时
+            // 连前缀扫描都不做。超码长那一段与顶码、整句的关系：有后继时顶码不触发；开整句时
+            // 若整句可解，屏上是整句、补全不显示（协调器按最终列表判空后才采纳），整句解不出
+            // 才轮到补全。
             // 空码补全：从更长编码备一小池候选作提示。
             // limit=8：够协调器过滤后仍有得选，又避免全量前缀扫描开销。
             //
@@ -989,9 +1011,6 @@ impl Engine for CodeTableEngine {
         }
 
         let is_empty = candidates.is_empty();
-        // has_longer 一次求值复用：自动上屏判定与满码空码清空共用同一「更长后继」前缀扫描，
-        // 避免每次按键各查一次 search_prefix（此前经 should_auto_commit + should_clear 两次）。
-        let has_longer = self.has_longer_code(input);
         let (should_commit, commit_text) = match decide_auto_commit(
             self.opts.auto_commit_at_full,
             self.opts.auto_commit_min_len,
@@ -1562,6 +1581,28 @@ mod tests {
         }
     }
 
+    /// 论坛 t302：超码长空码（第 5 码起）仍有更长后续 ⇒ 照样备补全并标剩余编码，直到打全。
+    #[test]
+    fn single_code_complete_fills_beyond_full_length() {
+        let e = engine_opts(
+            &[("abcdef", "你", 100), ("abcdgh", "他", 90)],
+            CommitOptions {
+                single_code_input: true,
+                single_code_complete: true,
+                show_code_hint: true,
+                ..Default::default()
+            },
+        );
+        let r = e.convert("abcde", 50).unwrap();
+        let hint = r.completion_hints.first().expect("超码长空码应备后续");
+        assert_eq!((hint.text.as_str(), hint.comment.as_str()), ("你", "f"));
+        assert!(
+            r.completion_hints.iter().all(|c| c.text != "他"),
+            "第 5 码已分岔，abcdgh 不是这串的后续"
+        );
+        assert!(e.convert("abcdx", 50).unwrap().completion_hints.is_empty());
+    }
+
     #[test]
     fn single_code_complete_hint_absent_without_longer_code() {
         // 无 "ab" 精确项、也无更长后继 → 无货可备。
@@ -1813,6 +1854,50 @@ mod tests {
         let first = r.candidates.first().expect("应有候选");
         assert_eq!(first.text, "工作工作");
         assert!(first.is_sentence, "整句候选须带 is_sentence 供顶部锚定");
+    }
+
+    #[test]
+    fn sentence_candidate_never_auto_commits() {
+        // 整句候选是超码长串上唯一一条 `code == input`，满码上屏不得把它当唯一全码上屏。
+        let opts = CommitOptions {
+            auto_commit_at_full: true,
+            ..sentence_opts()
+        };
+        let r = sentence_engine(&[], opts).convert("aawtaawt", 50).unwrap();
+        assert!(r.candidates[0].is_sentence, "前提：应解出整句");
+        assert!(!r.should_commit, "整句候选不得触发满码上屏");
+    }
+
+    #[test]
+    fn sentence_input_disables_full_auto_commit_and_clear() {
+        // 两向对照：同一配置只差 `sentence_input`。`aawt` 唯一全码、`zzzz` 空码。
+        let with = |sentence_input| CommitOptions {
+            auto_commit_at_full: true,
+            clear_on_empty_max: true,
+            sentence_input,
+            ..Default::default()
+        };
+        let off = sentence_engine(&[], with(false));
+        assert!(
+            off.convert("aawt", 50).unwrap().should_commit,
+            "前提：关整句时唯一全码上屏"
+        );
+        assert!(
+            off.convert("zzzz", 50).unwrap().should_clear,
+            "前提：关整句时空码清空"
+        );
+        let cands = off.convert("aawt", 50).unwrap().candidates;
+        assert!(off.should_auto_commit("aawt", &cands).is_some());
+
+        let on = sentence_engine(&[], with(true));
+        let r = on.convert("aawt", 50).unwrap();
+        assert!(!r.should_commit, "开整句时满码上屏让位");
+        assert!(on.should_auto_commit("aawt", &r.candidates).is_none());
+        assert!(on.recheck_auto_commit("aawt", &r.candidates).is_none());
+        assert!(
+            !on.convert("zzzz", 50).unwrap().should_clear,
+            "开整句时空码清空让位"
+        );
     }
 
     #[test]

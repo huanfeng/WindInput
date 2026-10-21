@@ -3,6 +3,7 @@
 #include "IPCClient.h"
 #include "Globals.h"
 #include "LoadingIcon.h"
+#include "ServiceReadyRetryPolicy.h"
 #include <olectl.h>  // For CONNECT_E_* constants
 #include <shellscalingapi.h>  // GetDpiForMonitor / MDT_EFFECTIVE_DPI（符号动态取，不静态链接 shcore）
 
@@ -47,6 +48,7 @@ const UINT CLangBarItemButton::WM_TITLE_MATCH_RESYNC = WM_USER + 109;
 
 static const UINT_PTR TIMER_ID_CARET_RETRY    = 0xC401;
 static const UINT_PTR TIMER_ID_SERVICE_READY  = 0xC402;
+static const UINT_PTR TIMER_ID_FOCUS_RECOVERY = 0xC403;
 
 CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     : _refCount(1)
@@ -63,6 +65,8 @@ CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     , _hMsgWnd(NULL)
     , _bIconLoading(TRUE)
     , _bLoggedLoading(FALSE)
+    , _serviceReadyFailures(0)
+    , _focusRecoveryFailures(0)
 {
     // Default input type label
     wcscpy_s(_inputTypeLabel, L"中");
@@ -797,26 +801,18 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (pThis != nullptr && pThis->_pTextService != nullptr)
         {
-            if (!pThis->_pTextService->HasFocus())
+            // 服务刚证明自己活着：就绪前攒下的连接失败（管道不存在时）已打开的熔断器作废，
+            // 否则下面的 Connect 会在熔断窗口里直接跳过。
+            CIPCClient* pIPC = pThis->_pTextService->GetIPCClient();
+            if (pIPC != nullptr)
             {
-                // 当前实例无输入焦点，跳过同步以避免在无文本焦点时弹出工具栏。
-                // 待焦点到来时 OnSetFocus → SendFocusGained 会完整建立服务端状态。
-                WIND_LOG_INFO(L"MsgWndProc: WM_SERVICE_READY — no focus, skipping state sync\n");
-                KillTimer(hwnd, TIMER_ID_SERVICE_READY);
+                pIPC->ResetCircuitBreaker();
+                // 服务重启后主管道句柄是旧连接，无焦点时下面不同步，它会一直留到下次焦点 /
+                // 按键才在写入时暴露。此刻就丢掉，下一次发送直接新建连接。活连接不受影响。
+                pIPC->DiscardStaleConnection();
             }
-            else if (!pThis->_pTextService->HasActiveComposition())
-            {
-                WIND_LOG_INFO(L"MsgWndProc: WM_SERVICE_READY — running full state sync\n");
-                KillTimer(hwnd, TIMER_ID_SERVICE_READY);
-                pThis->_pTextService->_DoFullStateSync();
-            }
-            else
-            {
-                // Composition active — defer sync to avoid clearing Go's input buffer.
-                // Retry after composition likely ends (200ms).
-                WIND_LOG_DEBUG(L"MsgWndProc: WM_SERVICE_READY deferred (composition active), scheduling retry\n");
-                SetTimer(hwnd, TIMER_ID_SERVICE_READY, 200, nullptr);
-            }
+            pThis->_serviceReadyFailures = 0;
+            pThis->_RunServiceReadySync(hwnd);
         }
         return 0;
     }
@@ -849,30 +845,21 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
     }
     else if (msg == WM_TIMER)
     {
-        if (wParam == TIMER_ID_SERVICE_READY)
+        if (wParam == TIMER_ID_FOCUS_RECOVERY)
         {
             KillTimer(hwnd, wParam);
             CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
             if (pThis != nullptr && pThis->_pTextService != nullptr)
-            {
-                if (!pThis->_pTextService->HasFocus())
-                {
-                    // 同上：无焦点时跳过，避免工具栏在无输入上下文时显示。
-                    WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY retry — no focus, skipping state sync\n");
-                }
-                else if (!pThis->_pTextService->HasActiveComposition())
-                {
-                    WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY retry — running full state sync\n");
-                    pThis->_pTextService->_DoFullStateSync();
-                }
-                else
-                {
-                    // Still composing — keep retrying until composition ends
-                    // (TSF composition is always finite: user commits, cancels, or focus changes).
-                    WIND_LOG_DEBUG(L"MsgWndProc: SERVICE_READY retry deferred (composition still active)\n");
-                    SetTimer(hwnd, TIMER_ID_SERVICE_READY, 500, nullptr);
-                }
-            }
+                pThis->_RunFocusRecoveryRetry(hwnd);
+            return 0;
+        }
+        if (wParam == TIMER_ID_SERVICE_READY)
+        {
+            CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (pThis != nullptr && pThis->_pTextService != nullptr)
+                pThis->_RunServiceReadySync(hwnd);
+            else
+                KillTimer(hwnd, wParam);
             return 0;
         }
         if (wParam == TIMER_ID_CARET_RETRY)
@@ -1329,6 +1316,117 @@ void CLangBarItemButton::PostTitleMatchResync()
     }
     if (!PostMessageW(_hMsgWnd, WM_TITLE_MATCH_RESYNC, 0, 0))
         WIND_LOG_WARN(L"PostTitleMatchResync: PostMessage failed\n");
+}
+
+void CLangBarItemButton::_RunServiceReadySync(HWND hwnd)
+{
+    using wind::svcready::Action;
+
+    KillTimer(hwnd, TIMER_ID_SERVICE_READY);
+    const BOOL isRetry = _serviceReadyFailures > 0;
+    CIPCClient* pIPC = _pTextService->GetIPCClient();
+    const Action action = wind::svcready::Decide(
+        isRetry != FALSE, _pTextService->HasFocus() != FALSE, _pTextService->HasThreadFocus() != FALSE,
+        _pTextService->HasActiveComposition() != FALSE, pIPC != nullptr && pIPC->IsConnected(),
+        pIPC != nullptr && pIPC->StateEstablished());
+
+    switch (action)
+    {
+    case Action::StopNoFocus:
+        // 当前实例无输入焦点，跳过同步以避免在无文本焦点时弹出工具栏。
+        // 待焦点到来时 OnSetFocus → SendFocusGained 会完整建立服务端状态。
+        WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY — no focus, skipping state sync\n");
+        _serviceReadyFailures = 0;
+        return;
+    case Action::StopAlreadySynced:
+        WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY retry — state already synced on this connection, stopping\n");
+        _serviceReadyFailures = 0;
+        return;
+    case Action::StopBackground:
+        WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY retry — thread not in foreground, stopping\n");
+        _serviceReadyFailures = 0;
+        return;
+    case Action::DeferComposition:
+        // Composition active — defer sync to avoid clearing the service's input buffer.
+        // TSF composition is always finite: user commits, cancels, or focus changes.
+        // 推迟不计失败次数：它与发送失败的重试共用定时器，靠 _serviceReadyFailures 区分。
+        WIND_LOG_DEBUG(L"MsgWndProc: SERVICE_READY deferred (composition active), scheduling retry\n");
+        SetTimer(hwnd, TIMER_ID_SERVICE_READY, 500, nullptr);
+        return;
+    case Action::Sync:
+        break;
+    }
+
+    WIND_LOG_INFO(L"MsgWndProc: SERVICE_READY — running full state sync\n");
+    if (_pTextService->_DoFullStateSync(TRUE))
+    {
+        if (isRetry)
+            WIND_LOG_INFO_FMT(L"MsgWndProc: SERVICE_READY sync succeeded after %u retries\n", _serviceReadyFailures);
+        _serviceReadyFailures = 0;
+        return;
+    }
+
+    // 宿主多时主管道会被同时就绪的各线程挤满（ERROR_PIPE_BUSY）。SERVICE_READY 只来一次，
+    // 服务端又只在收到 IME_ACTIVATED 时显示工具栏，不重试就要等到用户按键。
+    ++_serviceReadyFailures;
+    if (wind::svcready::ShouldRetry(_serviceReadyFailures))
+    {
+        const UINT delay = wind::svcready::RetryDelayMs(GetCurrentThreadId(), _serviceReadyFailures);
+        WIND_LOG_INFO_FMT(L"MsgWndProc: SERVICE_READY sync failed, retry %u/%u in %ums\n",
+                          _serviceReadyFailures, wind::svcready::kMaxRetries, delay);
+        SetTimer(hwnd, TIMER_ID_SERVICE_READY, delay, nullptr);
+        return;
+    }
+
+    WIND_LOG_WARN_FMT(L"MsgWndProc: SERVICE_READY sync gave up after %u retries, toolbar waits for next key or focus\n",
+                      wind::svcready::kMaxRetries);
+    _serviceReadyFailures = 0;
+}
+
+void CLangBarItemButton::CancelServiceReadyRetry()
+{
+    if (_hMsgWnd == NULL)
+        return;
+    // KillTimer 对未挂的定时器返回 FALSE，借此只在真有待发同步时留痕。
+    if (KillTimer(_hMsgWnd, TIMER_ID_SERVICE_READY))
+        WIND_LOG_INFO_FMT(L"SERVICE_READY pending sync cancelled (state synced by key/focus path, failures=%u)\n",
+                          _serviceReadyFailures);
+    _serviceReadyFailures = 0;
+    if (KillTimer(_hMsgWnd, TIMER_ID_FOCUS_RECOVERY))
+        WIND_LOG_INFO(L"Focus resend retry cancelled (state synced by key/focus path)\n");
+    _focusRecoveryFailures = 0;
+}
+
+void CLangBarItemButton::ScheduleFocusRecoveryRetry()
+{
+    if (_hMsgWnd == NULL)
+        return;
+    // 每次 focus_gained 失败都重新起一轮；与就绪重试各用各的定时器和计数。
+    _focusRecoveryFailures = 1;
+    const UINT delay = wind::svcready::RetryDelayMs(GetCurrentThreadId(), _focusRecoveryFailures);
+    WIND_LOG_INFO_FMT(L"FocusGained failed, focus resend retry in %ums\n", delay);
+    SetTimer(_hMsgWnd, TIMER_ID_FOCUS_RECOVERY, delay, nullptr);
+}
+
+void CLangBarItemButton::_RunFocusRecoveryRetry(HWND hwnd)
+{
+    if (_pTextService->RetryFocusRecovery())
+    {
+        _focusRecoveryFailures = 0;
+        return;
+    }
+    ++_focusRecoveryFailures;
+    if (wind::svcready::ShouldRetry(_focusRecoveryFailures))
+    {
+        const UINT delay = wind::svcready::RetryDelayMs(GetCurrentThreadId(), _focusRecoveryFailures);
+        WIND_LOG_INFO_FMT(L"Focus resend failed, retry %u/%u in %ums\n", _focusRecoveryFailures,
+                          wind::svcready::kMaxRetries, delay);
+        SetTimer(hwnd, TIMER_ID_FOCUS_RECOVERY, delay, nullptr);
+        return;
+    }
+    WIND_LOG_WARN_FMT(L"Focus resend gave up after %u retries, toolbar waits for next key or focus\n",
+                      wind::svcready::kMaxRetries);
+    _focusRecoveryFailures = 0;
 }
 
 void CLangBarItemButton::PostServiceReady()

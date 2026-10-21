@@ -82,7 +82,7 @@ fn piece(out: &mut StyledText, text: &str, role: &'static str, in_title: bool) {
         &SpanStyle {
             role: Some(role),
             in_title,
-            color: None,
+            ..Default::default()
         },
     );
 }

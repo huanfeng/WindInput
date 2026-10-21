@@ -13,6 +13,8 @@ use wind_dict::{DictLayer, LayerType};
 /// 构造时把该方案绑定到文本（之后手改文件经 sync 生效）。
 pub struct StoreUserLayer {
     inner: wind_userdata::layer::UserDataUserLayer,
+    /// 查询结果的权重下限（`None` = 原样）。见 [`Self::with_min_weight`]。
+    min_weight: Option<i32>,
 }
 
 impl StoreUserLayer {
@@ -24,7 +26,28 @@ impl StoreUserLayer {
                 store.runtime().data().clone(),
                 &schema_id,
             ),
+            min_weight: None,
         }
+    }
+
+    /// 查询出的候选权重至少取 `w`（只改查询结果，存储里的权重不动）。
+    ///
+    /// 英文用：系统词按词频名次赋了权（`wind_dict::freq_rank`，至多 `RANK_WEIGHT_MAX`），
+    /// 而用户词可能是 0（导入的词表没有权重列）或手填的小值，不托底就会沉到常用系统词之后
+    /// ——名次引入前系统词全是 0，用户词恒在前。代价：低于下限的几条用户词之间不再按各自
+    /// 权重分先后（同权后按自然序），高于下限的照旧。
+    pub fn with_min_weight(mut self, w: i32) -> Self {
+        self.min_weight = Some(w);
+        self
+    }
+
+    fn floor(&self, mut v: Vec<Candidate>) -> Vec<Candidate> {
+        if let Some(min) = self.min_weight {
+            for c in &mut v {
+                c.weight = c.weight.max(min);
+            }
+        }
+        v
     }
 }
 
@@ -44,19 +67,19 @@ impl DictLayer for StoreUserLayer {
     }
 
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
-        self.inner.search(code, limit)
+        self.floor(self.inner.search(code, limit))
     }
 
     fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<Candidate> {
-        self.inner.search_prefix(prefix, limit)
+        self.floor(self.inner.search_prefix(prefix, limit))
     }
 
     fn search_abbrev(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
-        self.inner.search_abbrev(abbrev, limit)
+        self.floor(self.inner.search_abbrev(abbrev, limit))
     }
 
     fn search_abbrev_exact(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
-        self.inner.search_abbrev_exact(abbrev, limit)
+        self.floor(self.inner.search_abbrev_exact(abbrev, limit))
     }
 
     fn search_pattern(
@@ -66,8 +89,10 @@ impl DictLayer for StoreUserLayer {
         limit: usize,
         with_prefix: bool,
     ) -> Vec<Candidate> {
-        self.inner
-            .search_pattern(pattern, wildcard, limit, with_prefix)
+        self.floor(
+            self.inner
+                .search_pattern(pattern, wildcard, limit, with_prefix),
+        )
     }
 }
 

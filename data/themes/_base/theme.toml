@@ -130,6 +130,8 @@ color = "${text_hint}"
 font_size = -4
 # 注释刻意不配角色色（设计 text-span-colors.md §18）：出厂注释保持 text_hint 的原外观（用户验收时
 # 要求）。想分色的主题自己写 [comment.roles]，用户也可在模板里写 $[颜色]{…}。
+# 角色名即变量名，另有结构角色 literal（模板字面文字）、title（段名）、separator（${chaizi_all:／}
+# 一类变量的分隔符；不配时随所在变量同色）。
 
 [footer_bar]
 font_size = -4

@@ -29,6 +29,7 @@
 //! 宿主就能在加载清单时当场比对：清单里有而注册表没有的键，直接报出来。
 
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use wind_config::Config;
 use wind_config::config_schema::{self, FieldType};
@@ -133,10 +134,19 @@ pub fn snapshot(data_dir: &Path) -> String {
 ///
 /// ⚠ 这里改写的键**不该出现在移动端设置清单里**——它们不是用户可选项。
 pub fn apply_mobile_overrides(cfg: &mut Config) {
+    // 启用的方案：每次（构造、每次重载）都重算——此前只在构造时把可选方案换成「装了的全部」，
+    // 重载一读回出厂 `available = ["wubi86", "wubi86_pinyin"]`，拼音、双拼、英文就从列表里没了
+    // （真机：快捷面板一操作方案就少了）。
+    apply_enabled_schemas(cfg);
     // 编码区归候选区自绘（移动端必须如此，非偏好）：默认的 `app_inline` 是把编码塞进
     // 宿主组合区、协调器**不下发 preedit** 给候选窗。移动端没有桌面那种浮在光标旁的
     // 候选窗，编码要显示在键盘上方的编码栏里，就必须让协调器把 preedit 发出来。
     cfg.ui.candidate.preedit_display = "candidate_top".to_string();
+    // 联想态空格出空格、不选联想（手机习惯，非偏好）：豆包、微信都是收起联想出空格，汉字后
+    // 双击空格出「。」也靠这一下真的是空格。桌面默认 `space_commits = true` 是实体键盘语义
+    // （联想高亮在候选窗里看得见，空格选词顺手）；手机上联想挤在候选条里，空格选走它就是
+    // 「我想打空格却上了个词」。此前 Android 侧先发 Esc 再出空格权宜绕过，改到这里收口。
+    cfg.input.association.space_commits = false;
 }
 
 /// **出厂默认**配置的全量快照（TOML 文本）。
@@ -185,6 +195,247 @@ fn to_toml(cfg: &Config) -> String {
     toml::to_string(cfg).unwrap_or_default()
 }
 
+// ── 启用的方案 ──────────────────────────────────────────────────────
+//
+// 移动端语义：**装了的方案默认全部可用**；用户在设置里关掉某些，就写用户层 `schema.available`
+// （装了的里头他要的那些）。英文方案恒在其中——它是中英键切换的目标，关掉中英键就失灵；
+// 也因此用户写下的列表恒含 `english`，不会与出厂列表相等而被「等于默认不落盘」剪掉。
+
+/// 已装方案（构造时扫 assets 得到，见 [`set_installed_schemas`]）。覆盖钩子是函数指针、
+/// 捕获不了变量，故放进程级。
+static INSTALLED: OnceLock<Vec<String>> = OnceLock::new();
+
+/// 英文方案 id：中英键切换的目标，恒启用。
+pub const ENGLISH_SCHEMA: &str = "english";
+
+/// 记下已装方案（构造时调一次；同进程再调无效，装了什么在进程生命期内不变）。
+pub fn set_installed_schemas(ids: Vec<String>) {
+    let _ = INSTALLED.set(ids);
+}
+
+/// 已装方案；构造前为空。
+pub fn installed_schemas() -> &'static [String] {
+    INSTALLED.get().map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// 用户层里显式写下的 `schema.available`（没写过 = `None`）。
+///
+/// 直接读用户层文件而不是看合并后的配置：合并后分不清「用户选的」与「出厂那两个」，
+/// 而这两者语义正相反（前者照办，后者在移动端应当忽略、按装了的全部来）。
+fn user_chosen_schemas() -> Option<Vec<String>> {
+    let path = Config::user_config_dir()?.join("config.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    let arr = value.get("schema")?.get("available")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// 当前启用的方案：装了的 ∩ 用户选的（没选过 = 全部），英文恒在。
+pub fn enabled_schemas() -> Vec<String> {
+    enabled_from(installed_schemas(), user_chosen_schemas().as_deref())
+}
+
+/// 把可选方案设成 [`enabled_schemas`]；当前方案不在其中时换成第一个仍启用的中文方案。
+/// 没有已装信息（构造前、测试壳）时不动。
+pub fn apply_enabled_schemas(cfg: &mut Config) {
+    if installed_schemas().is_empty() {
+        return;
+    }
+    let list = enabled_schemas();
+    if !list.contains(&cfg.schema.active)
+        && let Some(first) = list.iter().find(|s| *s != ENGLISH_SCHEMA)
+    {
+        cfg.schema.active = first.clone();
+    }
+    cfg.schema.available = list;
+}
+
+/// 纯函数：装了的方案里，用户选了的（`None` = 全部），再补上英文；至少留一个中文方案，
+/// 用户一个中文方案都没留（手改配置）时退回全部。
+pub fn enabled_from(installed: &[String], chosen: Option<&[String]>) -> Vec<String> {
+    let mut list: Vec<String> = match chosen {
+        Some(c) => installed
+            .iter()
+            .filter(|s| c.contains(s))
+            .cloned()
+            .collect(),
+        None => installed.to_vec(),
+    };
+    if installed.iter().any(|s| s == ENGLISH_SCHEMA) && !list.iter().any(|s| s == ENGLISH_SCHEMA) {
+        list.push(ENGLISH_SCHEMA.to_string());
+    }
+    if !list.iter().any(|s| s != ENGLISH_SCHEMA) {
+        return installed.to_vec();
+    }
+    list
+}
+
+/// 启用 / 停用一个已装方案（写用户层 `schema.available`）。英文与最后一个中文方案关不掉。
+/// 同 [`set`]，只写盘，生效要另发重载（重载时 [`apply_enabled_schemas`] 按新列表重算）。
+pub fn set_schema_enabled(id: &str, on: bool) -> Result<(), String> {
+    let installed = installed_schemas();
+    if !installed.iter().any(|s| s == id) {
+        return Err(format!("没有装这个方案：{id}"));
+    }
+    if id == ENGLISH_SCHEMA && !on {
+        return Err("英文方案是中英键切换的目标，不能关闭".to_string());
+    }
+    let _w = write_guard();
+    let mut list = enabled_from(installed, user_chosen_schemas().as_deref());
+    if on {
+        if !list.iter().any(|s| s == id) {
+            list.push(id.to_string());
+        }
+    } else {
+        list.retain(|s| s != id);
+        if !list.iter().any(|s| s != ENGLISH_SCHEMA) {
+            return Err("至少要留一个中文方案".to_string());
+        }
+    }
+    // 按已装顺序落盘，列表稳定、diff 好读
+    let ordered: Vec<toml::Value> = installed
+        .iter()
+        .filter(|s| list.contains(s))
+        .map(|s| toml::Value::String(s.clone()))
+        .collect();
+    Config::set_user_value(&["schema", "available"], toml::Value::Array(ordered))
+        .map_err(|e| e.to_string())
+}
+
+/// 用户层写入的进程内互斥。
+///
+/// `Config::set_user_value` 是「读整份 config.toml → 改一键 → 整份写回」，本身不加锁；
+/// [`set_tooltip_section_enabled`] 更是先 load 再整份写回段列表。宿主的设置页把各卡片的写入
+/// 各自丢到 IO 线程上，连点两个开关就是两条并发的读改写——后写的拿着旧文件覆盖先写的，
+/// 界面上表现为「刚打开的开关又弹回去」。本模块的写口一律经这把锁。
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn write_guard() -> std::sync::MutexGuard<'static, ()> {
+    // 持锁方 panic 过也照常往下写：锁里没有要保护的内存状态，只是串行化文件读改写
+    WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 一个 emoji 附加模块与它当前的开关（设置页「附加模块」一行）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmojiModuleState {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// 用户自己放进 `emoji/` 目录的表（`false` = 内置模块）
+    pub user: bool,
+    pub enabled: bool,
+}
+
+/// 全部 emoji 附加模块（内置在前，其后是用户放进 `emoji/` 的表）及当前开关。
+///
+/// 单独开口而不走 [`set`]：`input.emoji.modules` 是**按模块 id 为键的表**，注册表里只登记了
+/// 表本身（条数不定，用户能自己加），逐个 id 的叶子键不在注册表里，[`set`] 会当成未知键拒掉。
+/// 用户没设过的模块取它的出厂开关（`default_on`），与核心查表时的口径一致。
+pub fn emoji_modules(data_dir: &Path) -> Vec<EmojiModuleState> {
+    let cfg = Config::load(Some(data_dir)).unwrap_or_default();
+    Config::emoji_modules(Some(data_dir))
+        .into_iter()
+        .map(|m| EmojiModuleState {
+            enabled: cfg
+                .input
+                .emoji
+                .modules
+                .get(&m.id)
+                .copied()
+                .unwrap_or(m.default_on),
+            id: m.id,
+            label: m.label,
+            description: m.description,
+            user: m.user,
+        })
+        .collect()
+}
+
+/// 打开 / 关闭一个 emoji 附加模块（写用户层 `input.emoji.modules.<id>`）。只认
+/// [`emoji_modules`] 列出的 id：写一个不存在的模块不报错的话，就是「开关点了没反应」。
+/// 同 [`set`]，只写盘，生效要另发重载。
+pub fn set_emoji_module(data_dir: &Path, id: &str, on: bool) -> Result<(), String> {
+    if !Config::emoji_modules(Some(data_dir))
+        .iter()
+        .any(|m| m.id == id)
+    {
+        return Err(format!("没有这个 emoji 模块：{id}"));
+    }
+    let _w = write_guard();
+    Config::set_user_value(&["input", "emoji", "modules", id], toml::Value::Boolean(on))
+        .map_err(|e| e.to_string())
+}
+
+/// 候选提示（`ui.tooltip.sections`）的一段与它当前的开关（设置页「长按提示」一行）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TooltipSectionState {
+    /// 段名原文（可能是模板，如 `编码{(${code_source})}`）——开关时原样回传，按它定位
+    pub label: String,
+    /// 给人看的段名：模板里的 `{…}` 可选组去掉（`编码{(${code_source})}` → `编码`）
+    pub title: String,
+    pub enabled: bool,
+}
+
+/// 候选提示的全部段（顺序即显示顺序）及当前开关。
+///
+/// 单独开口而不走 [`set`]：段列表是结构体数组，[`ConfigValue`] 表达不了「改第几项的某个字段」，
+/// 照 [`set_emoji_module`] 的先例按段名开关。只列有段名的段（无名段在设置里没法称呼）。
+pub fn tooltip_sections(data_dir: &Path) -> Vec<TooltipSectionState> {
+    let cfg = Config::load(Some(data_dir)).unwrap_or_default();
+    cfg.ui
+        .tooltip
+        .sections
+        .iter()
+        .filter(|s| !s.label.is_empty())
+        .map(|s| TooltipSectionState {
+            title: section_title(&s.label),
+            label: s.label.clone(),
+            enabled: s.enabled,
+        })
+        .collect()
+}
+
+/// 段名模板 → 显示名：去掉 `{…}` 可选组（组里是「有值才出现」的变量部分）。
+fn section_title(label: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in label.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+/// 打开 / 关闭名为 `label` 的提示段：整份段列表写回用户层（改回与出厂一致时由
+/// `set_user_value` 剪掉，不留残余）。没有这一段 → Err。同 [`set`]，只写盘，生效要另发重载。
+///
+/// ⚠ 已知取舍（与电脑版设置页的段列表对话框相同）：开关过任意一段后，用户层存的是整份
+/// 列表，此后出厂对段模板的修改到不了这位用户——直到他把列表改回与出厂一致。出厂段列表
+/// 变更时由 `Config::migrate_stale_factory_tooltip_sections_value` 认出存量副本迁移。
+pub fn set_tooltip_section_enabled(data_dir: &Path, label: &str, on: bool) -> Result<(), String> {
+    // 读与写都在锁里：load 到 set_user_value 之间别处写进来的，会被这里整份写回冲掉
+    let _w = write_guard();
+    let mut cfg = Config::load(Some(data_dir)).map_err(|e| e.to_string())?;
+    let sec = cfg
+        .ui
+        .tooltip
+        .sections
+        .iter_mut()
+        .find(|s| s.label == label)
+        .ok_or_else(|| format!("没有这一段提示：{label}"))?;
+    sec.enabled = on;
+    let value = toml::Value::try_from(&cfg.ui.tooltip.sections).map_err(|e| e.to_string())?;
+    Config::set_user_value(&["ui", "tooltip", "sections"], value).map_err(|e| e.to_string())
+}
+
 /// 写一个配置键到用户层。
 ///
 /// **只写盘，不重载引擎**——重载走 [`crate::MobileCommand::ReloadConfig`]。分开是为了
@@ -203,12 +454,86 @@ pub fn set(key: &str, value: ConfigValue) -> Result<(), String> {
         return Err(format!("未登记的配置键：{key}"));
     }
     let path: Vec<&str> = key.split('.').collect();
+    let _w = write_guard();
     Config::set_user_value(&path, value.into_toml()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 移动端强制项在快照里可见：设置页、引擎读到的必须是同一个值。
+    #[test]
+    fn overrides_reach_snapshot_defaults() {
+        let cfg = apply_overrides_to(Config::default());
+        assert!(!cfg.input.association.space_commits, "联想态空格不选联想");
+        assert_eq!(cfg.ui.candidate.preedit_display, "candidate_top");
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 没选过 = 装了的全部；选过 = 交集 + 英文；一个中文都没留 = 全部
+    #[test]
+    fn enabled_schemas_rules() {
+        let installed = ids(&["english", "pinyin", "shuangpin", "wubi86"]);
+        assert_eq!(enabled_from(&installed, None), installed, "没选过：全部");
+        assert_eq!(
+            enabled_from(&installed, Some(&ids(&["wubi86", "pinyin", "gone"]))),
+            ids(&["pinyin", "wubi86", "english"]),
+            "交集（没装的丢掉）、英文补上"
+        );
+        assert_eq!(
+            enabled_from(&installed, Some(&ids(&["english"]))),
+            installed,
+            "一个中文方案都没留：退回全部"
+        );
+        // 出厂列表 ["wubi86", "wubi86_pinyin"] 在移动端不该起作用——它不在用户层，
+        // 这里只验纯函数：用户层若真写了它，也照交集办（不含英文时补上）
+        let with_mix = ids(&["english", "wubi86", "wubi86_pinyin"]);
+        assert!(
+            enabled_from(&with_mix, Some(&ids(&["wubi86", "wubi86_pinyin"])))
+                .contains(&"english".to_string())
+        );
+    }
+
+    /// 段名模板的显示名：可选组整个去掉，字面文字留下
+    #[test]
+    fn tooltip_section_title_strips_optional_groups() {
+        assert_eq!(section_title("编码{(${code_source})}"), "编码");
+        assert_eq!(section_title("拆字"), "拆字");
+        assert_eq!(section_title("{${x}}"), "");
+    }
+
+    /// 不存在的段名当场拒绝（不落盘）
+    #[test]
+    fn unknown_tooltip_section_is_rejected() {
+        let dir = std::env::temp_dir();
+        assert!(set_tooltip_section_enabled(&dir, "没有这一段", true).is_err());
+    }
+
+    /// 不存在的模块 id 当场拒绝（不落盘）
+    #[test]
+    fn unknown_emoji_module_is_rejected() {
+        let dir = std::env::temp_dir();
+        assert!(set_emoji_module(&dir, "no_such_module", true).is_err());
+    }
+
+    /// 内置模块都在列表里，没设过的取出厂开关
+    #[test]
+    fn builtin_emoji_modules_listed_with_factory_defaults() {
+        let dir = std::env::temp_dir().join(format!("wind_mobile_emoji_{}", std::process::id()));
+        let mods = emoji_modules(&dir);
+        for m in wind_config::EMOJI_MODULES {
+            let got = mods
+                .iter()
+                .find(|s| s.id == m.id)
+                .expect("内置模块应在列表里");
+            assert!(!got.user);
+            assert_eq!(got.label, m.label);
+        }
+    }
 
     /// 注册表里报成 enum 的键都要带值域：设置页拿空选项画不出选择器（LayoutEnum 曾漏填）。
     #[test]

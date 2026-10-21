@@ -70,6 +70,20 @@ constexpr bool IsHostDefaultPosition(const RectT& caret, bool hasCompStart, cons
            && SameRect(caret, compRect);
 }
 
+/// 这一帧是不是宿主「确实在排版」的证据：选区有高度，组合整体矩形有宽有高、与选区不是同一个
+/// 矩形，且选区落在组合矩形的水平范围内、与它垂直重叠。
+///
+/// 用来解除 IMM32 宿主的线程级判定（见 ImmOpenCandidateNudge.h）。CUAS 上的 Java 补发前后
+/// 三次查询都是同一个 h=0 的点，永远不满足；只答一个固定矩形的宿主满足不了「两者不同」，
+/// 给两个互不相干的矩形的满足不了「落在其中」。
+template <class RectT>
+constexpr bool ShowsLaidOutComposition(bool caretOk, const RectT& caret, bool hasCompRect, const RectT& compRect)
+{
+    return caretOk && caret.bottom > caret.top && hasCompRect && compRect.right > compRect.left
+           && compRect.bottom > compRect.top && !SameRect(caret, compRect) && caret.left >= compRect.left
+           && caret.left <= compRect.right && caret.top < compRect.bottom && caret.bottom > compRect.top;
+}
+
 /// 二级降级（拿组合整体矩形的左上角当锚点）能不能走。
 ///
 /// 前提是「宿主算完了布局、只是不填高度」：矩形有宽度、落在宿主声明的显示区内。

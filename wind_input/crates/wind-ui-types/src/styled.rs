@@ -45,6 +45,9 @@ pub const TEXT_ROLES: &[&str] = &[
     // 结构角色：模板字面文字（正文 / 段名里）
     "title",
     "literal",
+    // 结构角色：`${name:分隔符}` 一类变量的分项分隔符（片段带 `separator` 标记、角色仍是变量名；
+    // 主题没配它时随变量同色，见 `wind_theme::span_color`）
+    "separator",
 ];
 
 /// 清单里的同名常驻字符串（`Span::role` 用）；清单外为 `None`。
@@ -66,18 +69,19 @@ pub struct Span {
     pub role: Option<&'static str>,
     /// 在段名（气泡 label）里产出的片段：角色未配色时回落 `title` 角色，而非正文色。
     pub in_title: bool,
+    /// 变量值里的分项分隔符（`${chaizi_all:／}` 的 `／`）：主题配了 `separator` 角色就用它，
+    /// 没配则按 `role`（所在变量）求色。
+    pub separator: bool,
     /// 内联色（`$[…]{}`）。有值即优先于角色。共享持有：一个 `$[…]{}` 里的全部片段指向同一份。
     pub color: Option<Arc<InlineColor>>,
 }
 
 impl Span {
-    fn same_style(
-        &self,
-        role: &Option<&'static str>,
-        in_title: bool,
-        color: &Option<Arc<InlineColor>>,
-    ) -> bool {
-        self.role == *role && self.in_title == in_title && self.color == *color
+    fn same_style(&self, style: &SpanStyle) -> bool {
+        self.role == style.role
+            && self.in_title == style.in_title
+            && self.separator == style.separator
+            && self.color == style.color
     }
 }
 
@@ -86,6 +90,7 @@ impl Span {
 pub struct SpanStyle {
     pub role: Option<&'static str>,
     pub in_title: bool,
+    pub separator: bool,
     pub color: Option<Arc<InlineColor>>,
 }
 
@@ -93,7 +98,7 @@ impl SpanStyle {
     /// 没有任何可着色的信息：无角色、无内联色（`in_title` 单独不足以着色——它只是角色的回落
     /// 方向，§3.2 未知变量回显在段名里也不回落 title）。这样的文字不建区间，按正文色。
     fn is_plain(&self) -> bool {
-        self.role.is_none() && self.color.is_none()
+        self.role.is_none() && self.color.is_none() && !self.separator
     }
 }
 
@@ -171,7 +176,7 @@ impl StyledText {
         let spans = self.spans_mut();
         if let Some(last) = spans.last_mut()
             && last.end == start
-            && last.same_style(&style.role, style.in_title, &style.color)
+            && last.same_style(style)
         {
             last.end = end;
             return;
@@ -181,6 +186,7 @@ impl StyledText {
             end,
             role: style.role,
             in_title: style.in_title,
+            separator: style.separator,
             color: style.color.clone(),
         });
     }
@@ -198,6 +204,7 @@ impl StyledText {
                 &SpanStyle {
                     role: sp.role,
                     in_title: sp.in_title,
+                    separator: sp.separator,
                     color: sp.color.clone(),
                 },
             );
@@ -260,6 +267,7 @@ impl StyledText {
             .map(|sp| SpanStyle {
                 role: sp.role,
                 in_title: sp.in_title,
+                separator: sp.separator,
                 color: sp.color.clone(),
             })
             .unwrap_or_default()
@@ -362,6 +370,26 @@ mod tests {
             ranges(&t),
             vec![(0, 3, Some("pinyin")), (4, 7, Some("chaizi"))]
         );
+    }
+
+    /// 分隔符与所在变量同角色，但不能并进同一区间：主题配了 `separator` 时要分开求色。
+    #[test]
+    fn separator_does_not_merge_with_its_variable() {
+        let sep = SpanStyle {
+            separator: true,
+            ..role("chaizi_all")
+        };
+        let mut t = StyledText::new();
+        t.push("亻尔", &role("chaizi_all"));
+        t.push("／", &sep);
+        t.push("女子", &role("chaizi_all"));
+        let got: Vec<(u32, u32, bool)> = t
+            .spans()
+            .iter()
+            .map(|s| (s.start, s.end, s.separator))
+            .collect();
+        assert_eq!(got, vec![(0, 6, false), (6, 9, true), (9, 15, false)]);
+        assert_eq!(t.style_at(6), sep);
     }
 
     #[test]

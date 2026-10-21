@@ -1210,10 +1210,14 @@ impl ReverseLookup {
     /// （在教「这个字怎么拆」），这里整词一行、只给字根（在标注「这个词长什么样」）。
     /// 候选注释段只有一行，容不下逐字展开，故需要这个整词形态。
     pub fn radicals_of(&self, text: &str, sep: &str) -> String {
+        self.radicals_each(text).join(sep)
+    }
+
+    /// [`Self::radicals_of`] 的分项形态：逐字字根，无拆字数据的字跳过。
+    pub fn radicals_each(&self, text: &str) -> Vec<&str> {
         text.chars()
             .filter_map(|c| self.chaizi.radicals(c))
-            .collect::<Vec<_>>()
-            .join(sep)
+            .collect()
     }
 
     /// 词的**整词反查编码串**（逐字编码以 `sep` 连接，无拆字数据的字跳过）。全空返回空串。
@@ -1223,10 +1227,12 @@ impl ReverseLookup {
     /// 也对应 `radicals_of` 与 [`Self::chaizi_code_of`] 里 `chaizi`/单字取码的关系：
     /// 那个仅单字候选可用，这个不限字数。
     pub fn codes_of(&self, text: &str, sep: &str) -> String {
-        text.chars()
-            .filter_map(|c| self.chaizi.code(c))
-            .collect::<Vec<_>>()
-            .join(sep)
+        self.codes_each(text).join(sep)
+    }
+
+    /// [`Self::codes_of`] 的分项形态：逐字编码，无编码的字跳过。
+    pub fn codes_each(&self, text: &str) -> Vec<&str> {
+        text.chars().filter_map(|c| self.chaizi.code(c)).collect()
     }
 
     /// 生成词的拼音编码（空格分隔、去声调小写；ü→v）。无读音的字跳过。

@@ -859,6 +859,26 @@ impl CodetableDict {
         exact
     }
 
+    /// 按英文词频名次给**权重为 0** 的条目赋权（见 [`crate::freq_rank`]），写了权重的不动。
+    /// 赋权后各码下重新按权重排序。返回赋了权的条目数。
+    pub fn apply_freq_ranks(&mut self, ranks: &crate::freq_rank::FreqRanks) -> usize {
+        let mut n = 0;
+        for code_entries in self.entries.values_mut() {
+            let mut touched = false;
+            for e in code_entries.iter_mut().filter(|e| e.weight == 0) {
+                if let Some(w) = ranks.weight_of(&e.text) {
+                    e.weight = w;
+                    touched = true;
+                    n += 1;
+                }
+            }
+            if touched {
+                code_entries.sort_by(|a, b| b.weight.cmp(&a.weight).then(a.order.cmp(&b.order)));
+            }
+        }
+        n
+    }
+
     /// 遍历全部条目(供反查索引构建):对每个 (code, text, weight) 调用 `f`。
     pub fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {
         for (code, entries) in &self.entries {
@@ -866,6 +886,11 @@ impl CodetableDict {
                 f(code, &e.text, e.weight);
             }
         }
+    }
+
+    /// 按码升序逐组遍历（`entries` 本就是 BTreeMap，序与 wdat 的 DFS 同为字节序）。
+    pub fn groups(&self) -> impl Iterator<Item = (&str, &[CodetableEntry])> {
+        self.entries.iter().map(|(c, v)| (c.as_str(), v.as_slice()))
     }
 
     /// 总条目数

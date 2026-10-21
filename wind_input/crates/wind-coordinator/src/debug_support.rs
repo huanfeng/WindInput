@@ -322,6 +322,12 @@ impl Coordinator {
             .collect()
     }
 
+    /// 加载 emoji 扩展表（测试/诊断用）：headless 构造器不跑 [`Self::load_data_on_start`]，
+    /// 要 emoji 候选的集成测试经此补上。表从 `Config::data_dir()` 读，不认构造时注入的目录。
+    pub fn debug_sync_emoji_dict(&self) {
+        self.sync_emoji_dict();
+    }
+
     /// 诊断：桌面构造器 `new` 在 `build` 之后的非 UI 装载与启动预热线程的主体，**同步**跑完。
     ///
     /// 供本机复现内存（`tests/typing_memory_repro.rs`）把 headless 协调器拉到与桌面相同的

@@ -4,8 +4,12 @@
 #
 # weight: 0~10000 短语 tier 内排序权重，未设置默认 1000（中位）
 # position: 仅同 code 多条 tie-break（升序）
-# platform: ""/"all"=全平台；"windows"/"darwin"/"linux"=仅该平台（"macos" 同 "darwin"）。
-#   按运行平台取舍：同一个 code 要在各平台做不同的事，就每个平台各写一条。
+# platform: ""/"all"=全平台；"windows"/"macos"/"linux"/"android"=仅该平台（"darwin" 是 "macos" 的旧写法）；
+#   "desktop"=三种电脑（windows/macos/linux），手机上没有——打开网页、模拟按键、读写剪贴板这类
+#   手机上执行不了的条目写它，不必复制三份。
+#   按运行平台取舍：同一个 code 要在各平台做不同的事（路径、程序名不同），就每个平台各写一条。
+# enabled: 出厂是否启用，缺省开。少数人用、编码又容易和码表撞的写 false（如时间戳 tmts），
+#   照样出现在短语管理里，用户自己打开即可；「恢复默认」回到这里的值。
 # 详见 docs/design/command-bar-design.md
 
 [[phrases]]
@@ -128,12 +132,14 @@ weight = 1000
 [[phrases]]
 code = 'tmts'
 text = '$ts'
+enabled = false
 weight = 800
 position = 2
 
 [[phrases]]
 code = 'tmts'
 text = '$tsms'
+enabled = false
 weight = 800
 position = 3
 
@@ -403,11 +409,13 @@ position = 4
 [[phrases]]
 code = 'cobd'
 text = '$CC("打开百度", open("https://baidu.com"))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
 code = 'cozd'
 text = '$CC("汉典:{last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
@@ -420,7 +428,7 @@ platform = 'windows'
 code = 'cono'
 text = '$CC("打开文本编辑", proc.run("open", "-a", "TextEdit"))'
 weight = 2000
-platform = 'darwin'
+platform = 'macos'
 
 # Linux 各桌面自带的编辑器不同：按顺序试，第一个装了的即启动（GNOME / 旧 GNOME / KDE /
 # Xfce / Cinnamon / MATE / Deepin / LXQt / LXDE）。
@@ -440,7 +448,7 @@ platform = 'windows'
 code = 'coca'
 text = '$CC("打开计算器", proc.run("open", "-a", "Calculator"))'
 weight = 2000
-platform = 'darwin'
+platform = 'macos'
 
 [[phrases]]
 code = 'coca'
@@ -458,7 +466,7 @@ platform = 'windows'
 code = 'cohm'
 text = '$CC("打开用户主目录", open(env("HOME")))'
 weight = 2000
-platform = 'darwin'
+platform = 'macos'
 
 [[phrases]]
 code = 'cohm'
@@ -469,11 +477,13 @@ platform = 'linux'
 [[phrases]]
 code = 'coll'
 text = '$CC(last(), type(last()))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
 code = 'copa'
 text = '$CC("粘贴", clip.paste())'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
@@ -491,7 +501,7 @@ platform = 'windows'
 code = 'codl'
 text = '$CC("[删行]", key.seq("Ctrl+A", "Ctrl+K"))'
 weight = 2000
-platform = 'darwin'
+platform = 'macos'
 
 # Linux 上的按键合成（key.tap / key.seq / key.hold / key.release）由 Fcitx5 addon 接住
 #   CMD_KEY_* 下行帧、经 forwardKey 交给当前应用（wind_linux/AGENTS.md「命令直通车按键合成」）。
@@ -504,11 +514,13 @@ platform = 'linux'
 [[phrases]]
 code = 'cocp'
 text = '$CC("复制时间", clip.copy(now()))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
 code = 'coad'
 text = '$CC("剪贴板加词:{clip()}", dict.add(clip()))'
+platform = 'desktop'
 weight = 2000
 
 # 剪贴板反查：复制一个不认识的字 → 切回输入法 → 打 cofc → 候选即「字: 编码 拼音」，
@@ -528,6 +540,7 @@ weight = 2000
 [[phrases]]
 code = 'cofc'
 text = '$CC(default(dict.rev(clip()), "剪贴板反查（需先复制文字）"), type(dict.rev(clip())))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
@@ -543,16 +556,19 @@ weight = 2000
 [[phrases]]
 code = 'coly'
 text = '$CC("切横纵候选", ime.toggle("layout"))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
 code = 'cocw'
 text = '$CC("切候选窗", ime.toggle("candwin"))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
 code = 'coss'
 text = '$CC("打开设置", setting.open(""))'
+platform = 'desktop'
 weight = 2000
 position = 1
 
@@ -564,14 +580,31 @@ weight = 2000
 [[phrases]]
 code = 'copm'
 text = '$CC("切编码模式", ime.toggle("preedit"))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
 code = 'cotb'
 text = '$CC("切工具栏", ime.toggle("toolbar"))'
+platform = 'desktop'
 weight = 2000
 
 [[phrases]]
 code = 'cots'
 text = '$CC("切主题", ime.theme_cycle())'
+platform = 'desktop'
 weight = 2000
+
+# ── 手机专用（platform = 'android'）────────────────────────────────
+# 聊天里最常打的短回复与颜文字。电脑上用不着（有完整键盘），故只在手机上出现。
+[[phrases]]
+code = 'zzhf'
+text = '$SS("常用回复", "好的", "收到", "好的，谢谢", "没问题", "稍等一下", "马上到", "在路上了", "在开会，稍后回复", "辛苦了", "晚点联系")'
+weight = 1240
+platform = 'android'
+
+[[phrases]]
+code = 'zzbq'
+text = '$SS("颜文字", "(＾▽＾)", "(´・ω・｀)", "╮(╯▽╰)╭", "(ಥ_ಥ)", "(๑•̀ㅂ•́)و✧", "ʕ•ᴥ•ʔ", "ヽ(✿ﾟ▽ﾟ)ノ", "(⊙_⊙)", "(｡•́︿•̀｡)", "o(*￣▽￣*)ブ")'
+weight = 1235
+platform = 'android'

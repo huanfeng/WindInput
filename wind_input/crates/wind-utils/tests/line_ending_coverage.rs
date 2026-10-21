@@ -54,6 +54,10 @@ const ALLOWED: &[(&str, &str)] = &[
         "构建期工具，读上游数据",
     ),
     (
+        "apps/wind-tools/src/bin/gen_block_charsets.rs",
+        "构建期工具，读 gen_emoji_chars 的产物",
+    ),
+    (
         "apps/wind-tools/src/bin/gen_emoji_chars.rs",
         "构建期工具，读上游数据",
     ),

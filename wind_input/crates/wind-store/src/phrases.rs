@@ -21,6 +21,8 @@ pub struct SystemPhrase {
     /// 分类（`""` = 未分类）。供方案级 `[phrases] categories` 过滤，见
     /// `docs/design/schema-scoped-behavior.md` §6。
     pub category: String,
+    /// 出厂启用（TOML `enabled`，缺省开）。用户的开关写在修改行里，优先于它。
+    pub enabled: bool,
 }
 
 /// 系统短语同步统计。
@@ -204,7 +206,7 @@ fn overlay(sys: &[SystemPhrase], rows: &[FileRow]) -> Vec<PhraseRecord> {
                     text: e.text.clone(),
                     weight: e.weight,
                     position: e.position,
-                    enabled: true,
+                    enabled: e.enabled,
                     is_system: true,
                     overrides_system: false,
                     category: e.category.clone(),
@@ -537,14 +539,33 @@ impl Store {
             .collect())
     }
 
-    /// 系统"恢复默认"：修改行全部 enabled=1。返回改动条数。
+    /// 系统"恢复默认"：修改行的开关回到出厂值（TOML `enabled`，缺省开）。返回改动条数。
+    ///
+    /// 不是一律打开：出厂就关着的条目（时间戳这类）恢复默认后应当仍是关的。
     pub fn reset_system_enabled(&self) -> anyhow::Result<usize> {
+        use std::collections::HashMap;
         self.phrase_table().sync();
+        let defaults: HashMap<(String, String), bool> = self
+            .system_phrases()
+            .iter()
+            .map(|e| ((e.code.clone(), e.text.clone()), e.enabled))
+            .collect();
         let edits: Vec<_> = self
             .file_phrase_rows()
             .into_iter()
-            .filter(|r| r.overrides_system && !r.enabled)
-            .map(|r| (r.key(), Some(FileRow { enabled: true, ..r })))
+            .filter(|r| r.overrides_system)
+            .filter_map(|r| {
+                let default = defaults.get(&r.key()).copied().unwrap_or(true);
+                (r.enabled != default).then(|| {
+                    (
+                        r.key(),
+                        Some(FileRow {
+                            enabled: default,
+                            ..r
+                        }),
+                    )
+                })
+            })
             .collect();
         let n = edits.len();
         self.put_phrase_rows(edits)?;
@@ -855,6 +876,47 @@ mod tests {
         p
     }
 
+    /// 出厂关闭的系统短语：列表里呈现为关、不进输入期短语集；用户打开后生效；
+    /// 「恢复默认」回到出厂的关，而不是一律打开。
+    #[test]
+    fn system_phrase_default_off_survives_restore_defaults() {
+        let path = tmp("wind_phrases_default_off.redb");
+        let s = Store::open(&path).unwrap();
+        let sys = vec![
+            SystemPhrase {
+                code: "tmts".into(),
+                text: "$ts".into(),
+                weight: 800,
+                position: 0,
+                category: String::new(),
+                enabled: false,
+            },
+            SystemPhrase {
+                code: "rq".into(),
+                text: "$date".into(),
+                weight: 1000,
+                position: 0,
+                category: String::new(),
+                enabled: true,
+            },
+        ];
+        s.set_system_phrases(&sys).unwrap();
+        let enabled_of = |code: &str| {
+            s.list_phrases()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.code == code)
+                .map(|p| p.enabled)
+        };
+        assert_eq!(enabled_of("tmts"), Some(false), "出厂关闭照样列出、标为关");
+        s.set_phrase_enabled("tmts", "$ts", true).unwrap();
+        s.set_phrase_enabled("rq", "$date", false).unwrap();
+        assert_eq!(enabled_of("tmts"), Some(true), "用户打开后生效");
+        s.reset_system_enabled().unwrap();
+        assert_eq!(enabled_of("tmts"), Some(false), "恢复默认回到出厂的关");
+        assert_eq!(enabled_of("rq"), Some(true), "出厂开的恢复成开");
+    }
+
     #[test]
     fn sync_system_phrases_add_update_remove() {
         let path = tmp("wind_phrases_sync.redb");
@@ -867,6 +929,7 @@ mod tests {
                 weight: 1000,
                 position: 0,
                 category: String::new(),
+                enabled: true,
             },
             SystemPhrase {
                 code: "em".into(),
@@ -874,6 +937,7 @@ mod tests {
                 weight: 1000,
                 position: 0,
                 category: String::new(),
+                enabled: true,
             },
         ];
         let st = s.sync_system_phrases(&v1).unwrap();
@@ -888,6 +952,7 @@ mod tests {
                 weight: 500,
                 position: 0,
                 category: String::new(),
+                enabled: true,
             },
             SystemPhrase {
                 code: "nn".into(),
@@ -895,6 +960,7 @@ mod tests {
                 weight: 1000,
                 position: 0,
                 category: String::new(),
+                enabled: true,
             },
         ];
         let st2 = s.sync_system_phrases(&v2).unwrap();
@@ -920,6 +986,7 @@ mod tests {
             weight: 1,
             position: 0,
             category: String::new(),
+            enabled: true,
         }])
         .unwrap();
         // 再同步（sys 消失）应删 sys 但保留用户 me
@@ -965,6 +1032,7 @@ mod tests {
                 weight: 1,
                 position: 0,
                 category: String::new(),
+                enabled: true,
             },
             SystemPhrase {
                 code: "b".into(),
@@ -972,6 +1040,7 @@ mod tests {
                 weight: 1,
                 position: 0,
                 category: String::new(),
+                enabled: true,
             },
         ])
         .unwrap();
@@ -1015,6 +1084,7 @@ mod tests {
             weight: 1,
             position: 0,
             category: String::new(),
+            enabled: true,
         }])
         .unwrap();
         s.add_phrase("u", "用户", 0, 1).unwrap();
@@ -1087,6 +1157,7 @@ mod tests {
             weight: 9,
             position: 5,
             category: String::new(),
+            enabled: true,
         }];
         s.sync_system_phrases(&sys).unwrap();
 
@@ -1130,6 +1201,7 @@ mod tests {
             weight: 1000,
             position: 1,
             category: String::new(),
+            enabled: true,
         }];
         s.sync_system_phrases(&sys).unwrap();
 
@@ -1189,6 +1261,7 @@ mod tests {
             weight: 1000,
             position: 1,
             category: String::new(),
+            enabled: true,
         }];
         s.sync_system_phrases(&sys).unwrap();
         s.add_phrase("date", "$Y年$M月$D日", 9, 5000).unwrap();
@@ -1215,6 +1288,7 @@ mod tests {
                 weight: 1000,
                 position: 1,
                 category: String::new(),
+                enabled: true,
             },
             SystemPhrase {
                 code: "b".into(),
@@ -1222,6 +1296,7 @@ mod tests {
                 weight: 1000,
                 position: 2,
                 category: String::new(),
+                enabled: true,
             },
         ];
         s.sync_system_phrases(&sys).unwrap();
@@ -1264,6 +1339,7 @@ mod tests {
             weight: 1000,
             position: 1,
             category: String::new(),
+            enabled: true,
         }];
         s.sync_system_phrases(&sys).unwrap();
         s.update_phrase("a", "甲", None, None, Some(9), Some(5555))
@@ -1290,6 +1366,7 @@ mod tests {
             weight: 1000,
             position: 0,
             category: String::new(),
+            enabled: true,
         }])
         .unwrap();
         s.update_phrase("em", "（＾＿＾）", None, None, None, Some(42))
@@ -1312,6 +1389,7 @@ mod tests {
             weight: 9,
             position: 5,
             category: String::new(),
+            enabled: true,
         }];
         // 手工制造受损现场：用户行在先，且与系统条目同键
         s.add_phrase("date", "二〇二六年", 0, 1).unwrap();
@@ -1342,6 +1420,7 @@ mod tests {
             weight: 9,
             position: 0,
             category: String::new(),
+            enabled: true,
         }])
         .unwrap();
         // 用户行应保持 is_system=false，不被系统化
@@ -1430,6 +1509,7 @@ mod tests {
             weight: w,
             position: 0,
             category: String::new(),
+            enabled: true,
         }
     }
 

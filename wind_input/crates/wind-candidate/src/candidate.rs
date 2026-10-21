@@ -88,6 +88,13 @@ pub struct CandidateMeta {
     /// 排序/去重/显示一律不读本字段，它只服务「把这条候选写进词库」这个方向。
     #[serde(skip)]
     pub learn_code: Option<(String, u64)>,
+    /// 拼音「英文前缀补全」（`schema.pinyin.english_merge.prefix_complete`）补出来的英文候选。
+    ///
+    /// 只由 `wind_engine::english_merge::lookup_prefix_complete` 置位；协调器
+    /// `place_english_after_common_exact` 据此让它们排在整串拼音真词之后。不能拿「code 比输入
+    /// 长」代替：英文方案、混输自己的前缀候选也长那样，却不该被挪动。
+    #[serde(skip)]
+    pub from_prefix_complete: bool,
 }
 
 /// 命令栏动作
@@ -185,7 +192,8 @@ pub struct Candidate {
     /// 与 [`Self::is_scope_filtered`] 同构，四个消费者各自决定行为：
     /// - **自动上屏**：计数时跳过。`phrase_auto_commit` 判的是「整个候选列表长度为 1」
     ///   （`let [c] = &state.candidates[..]`），插一条 emoji 进去那条恒假 ⇒ 短语打全码
-    ///   不再自动上屏、要按空格，且只在该短语文本恰好命中 emoji 表时发生；
+    ///   不再自动上屏、要按空格，且只在该短语文本恰好命中 emoji 表时发生。用户开了
+    ///   `input.emoji.block_auto_commit` 时反过来：列表里有它就不自动上屏；
     /// - **排序**：位置由 `input.emoji.show_as` 决定（紧随宿主 / 沉底 / 只作注释不进列表），
     ///   不由本字段决定；
     /// - **词频**：恒不参与（协调器 `record_selection_cand`）。不只是「同短语的有文本无

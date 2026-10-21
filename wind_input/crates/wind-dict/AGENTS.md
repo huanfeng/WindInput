@@ -23,6 +23,7 @@
 | `src/codetable.rs` | `CodetableDict` 内存 BTreeMap；自动检测五笔/拼音 Rime 格式；`parse_rime_entries_parallel` 多线程解析（>1MB 走 `thread::scope`），输出全拼+简拼两组；`rime_layout` 公开正文起点 / `# no comment` 截断点 / 列下标给 `wind-userdata` 文本层复用（规则只此一份） |
 | `src/trie.rs` | 前缀 Trie，供英文词库回退路径等组件使用 |
 | `src/hotcache.rs` | 热点码查找缓存层 |
+| `src/stats.rs` | 系统词库统计纯计算（设置页「词库统计」）：按码分组喂入 `StatsBuilder`，出条目/单字/词组分档、码长与简码、重码组与 Top、分字集静重与字频加权选重率；条目来源是 `cached::for_each_code_group`（多库按码 k 路归并，保留 order/boundary）。口径改了要加 `STATS_ALGO_VERSION` |
 
 ## For AI Agents
 

@@ -82,6 +82,12 @@ const EMPTY_BASE_MIN_LENGTH: usize = 2;
 /// 故不在此列）。2 条足够，且候选面上英文再多也没有意义。
 const EXACT_MAX: usize = 2;
 
+/// 前缀补全（中文侧**有**候选时，`prefix_complete` 开着）至多补几条。见 [`lookup_prefix_complete`]。
+const PREFIX_COMPLETE_MAX: usize = 2;
+
+/// 前缀补全的最短输入。短串几乎都是拼音的开头（`chan` / `shan`），且补全词太多、信息量低。
+const PREFIX_COMPLETE_MIN_LEN: usize = 5;
+
 /// 最小触发长度的回退值（配置为 0 时）。与 `manager::build_engine` 给
 /// `schema.mix.min_english_length` 的回退**同值**，两处口径一致。
 const DEFAULT_MIN_LENGTH: usize = 3;
@@ -99,6 +105,9 @@ pub struct Effective {
     pub enable: bool,
     pub min_length: usize,
     pub block_commit: bool,
+    /// 中文侧有候选时也补英文前缀（[`prefix_complete_applies`] 判据下）。只有拼音侧有这项，
+    /// 码表侧恒 `false`。
+    pub prefix_complete: bool,
 }
 
 /// 配置值 0 视作「用回退值」，口径同 `schema.mix.min_english_length`。
@@ -214,6 +223,56 @@ pub fn lookup_prefix_fallback(
             c.is_exact_code = false;
             c
         })
+        .collect()
+}
+
+/// 中文侧**有**候选时，这串输入要不要再补英文前缀（`schema.pinyin.english_merge.prefix_complete`）。
+///
+/// 判据（维护者定）：至少 [`PREFIX_COMPLETE_MIN_LEN`] 个字母（`min_length` 更大时以它为准），
+/// 且整串**任何切法**都切不成完整的全拼音节序列——`templa` / `produc` 补，`shang` / `chang`
+/// 不补。「打的不是完整拼音」才说明用户可能在打英文；能切成完整音节的串，前缀词就是
+/// [`lookup`] 文档里说的那种噪音。
+///
+/// 音节表用 [`crate::pinyin::syllable::is_full_pinyin_code`]（标准音节表、DP 判可达，与临时词
+/// 晋升同一判据），**不含模糊音拼写**：开了模糊音的人打 `tinzhi` 也会补——宁可多给两条
+/// 英文，不为一个可选开关去读引擎的模糊音状态。
+///
+/// 含非字母（分隔符 `'`、数字、符号）的串不补：那是拼音语法或在打别的东西。
+/// 判据只对全拼成立；双拼由调用方（`manager::convert`）排除。
+pub fn prefix_complete_applies(input: &str, min_length: usize) -> bool {
+    if input.len() < PREFIX_COMPLETE_MIN_LEN.max(min_length_or_default(min_length))
+        || !input.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    !crate::pinyin::syllable::is_full_pinyin_code(&input.to_ascii_lowercase(), 0)
+}
+
+/// 中文侧有候选时的英文前缀补全：至多 [`PREFIX_COMPLETE_MAX`] 条，跳过精确命中（`exact`
+/// 即 [`lookup`] 的结果，调用方会把两者拼在一起）。是否该补由 [`prefix_complete_applies`] 判。
+///
+/// 次序取英文引擎的前缀排序（按词频权重，见 `wind_dict::freq_rank`），故 `produc` 先补
+/// product。查询失败静默退化为空，口径同 [`lookup`]。
+pub fn lookup_prefix_complete(
+    english: &dyn Engine,
+    input: &str,
+    exact: &[Candidate],
+) -> Vec<Candidate> {
+    let lower = input.to_lowercase();
+    let Ok(r) = english.convert(&lower, EXACT_SCAN + PREFIX_COMPLETE_MAX) else {
+        return Vec::new();
+    };
+    r.candidates
+        .into_iter()
+        .filter(|c| c.code != lower && !exact.iter().any(|e| e.text == c.text))
+        .map(|mut c| {
+            // 同 `lookup`：码表域标志不跨来源带。
+            c.is_exact_code = false;
+            // 协调器据此把它排在整串拼音真词之后（见该字段文档）。
+            c.meta.from_prefix_complete = true;
+            c
+        })
+        .take(PREFIX_COMPLETE_MAX)
         .collect()
 }
 
@@ -472,6 +531,54 @@ mod tests {
         assert!(!lookup(&eng, "hello", 0).is_empty());
         // 显式配置覆盖回退值。
         assert!(!lookup(&eng, "he", 2).is_empty());
+    }
+
+    /// 前缀补全判据 B：≥5 字母，且整串**任何切法**都切不成完整全拼音节才补。
+    #[test]
+    fn prefix_complete_only_when_not_full_pinyin() {
+        // 切不完整 ⇒ 补。
+        for s in ["templa", "configu", "produc", "xiaom"] {
+            assert!(prefix_complete_applies(s, 0), "{s} 不是完整拼音，应补");
+        }
+        // 能切成完整音节 ⇒ 不补。`xian` 这类有多种切法的也算（xi'an / xian）。
+        for s in ["chang", "shang", "zhongguo", "xianshi", "nihao"] {
+            assert!(!prefix_complete_applies(s, 0), "{s} 是完整拼音，不该补");
+        }
+        // 不足 5 字母不补，哪怕切不完整。
+        assert!(!prefix_complete_applies("temp", 0));
+        // 带分隔符 / 非字母：用户在用拼音语法或打符号，不补。
+        assert!(!prefix_complete_applies("tem'pla", 0));
+        // 大写按小写判（`Shang` 仍是完整拼音）。
+        assert!(!prefix_complete_applies("Shang", 0));
+        // min_length 调得比 5 大时以它为准。
+        assert!(!prefix_complete_applies("templa", 7));
+        assert!(prefix_complete_applies("templat", 7));
+    }
+
+    /// 前缀补全至多 2 条，且不与精确命中重复。
+    #[test]
+    fn prefix_complete_caps_and_skips_exact() {
+        let eng = FakeEnglish(vec![
+            ("hello", "hello"),
+            ("hellos", "hellos"),
+            ("hellow", "Hellow"),
+            ("hellox", "hellox"),
+        ]);
+        let exact = lookup(&eng, "hello", 0);
+        assert_eq!(exact.len(), 1, "前提：精确命中 hello");
+        let extra = lookup_prefix_complete(&eng, "hello", &exact);
+        let texts: Vec<&str> = extra.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["hellos", "Hellow"], "至多 2 条、跳过精确那条");
+        assert!(extra.iter().all(|c| !c.is_exact_code));
+        assert!(
+            extra.iter().all(|c| c.meta.from_prefix_complete),
+            "补全候选要带标记，协调器靠它定位"
+        );
+
+        // 无精确命中时照补。
+        let none = lookup(&eng, "hell", 0);
+        assert!(none.is_empty());
+        assert_eq!(lookup_prefix_complete(&eng, "hell", &none).len(), 2);
     }
 
     /// 同文本不重复入列，且被丢弃那条的码位并进幸存者。

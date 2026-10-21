@@ -87,6 +87,8 @@ pub struct Span {
     pub role: Option<&'static str>,
     /// 在段名（气泡 label）里产出的片段：角色未配色时回落 `title` 角色，而非正文色（§3.2）。
     pub in_title: bool,
+    /// 变量值里的分项分隔符（`${chaizi_all:／}` 的 `／`）：先查 `separator` 角色，没配按 `role`（§3.2）。
+    pub separator: bool,
     /// 内联色（`$[…]{}`）。有值即优先于角色（§6.2）。同一个 `$[…]{}` 内的片段共享一份。
     pub color: Option<Arc<InlineColor>>,
 }
@@ -128,7 +130,7 @@ impl From<String> for StyledText { /* 无区间 */ }
 | 气泡候选上下文附加 | `coordinator.rs` 气泡组装处的 `cand_eval`；`CompiledTooltip::render` 内层的 `cand_eval` | `word_code`、`code_source`、`debug`；`full_text`、`unicode_all` |
 | 逐字上下文 | `tooltip::char_var`；`Coordinator::eval_text_var` | `readings`、`unicode`；`char` 及与候选上下文同名的变量 |
 
-结构角色 `title`、`literal` 不是变量，测试单列排除；别名表的每个键也必须能求值（今天
+结构角色 `title`、`literal`、`separator` 不是变量，测试单列排除；别名表的每个键也必须能求值（今天
 `legacy_names_are_aliases` 已守）。新增求值入口时把它加进源码扫描测试的入口表。
 
 ### 3.2 角色从哪来（协调器产出规则）
@@ -138,6 +140,7 @@ impl From<String> for StyledText { /* 无区间 */ }
 | `${name}` 的值 | `name`（经别名表归一） | `${code}` → `code_rev`，`${code_all}` → `code_rev_all`；主题只需认规范名 |
 | `${a\|b\|c}` 的值 | **实际取到值的那个变量** | `${code_hint\|code_rev}` 取到反查码时是 `code_rev` |
 | `${name:arg}` 的值 | `name` | 参数不影响角色 |
+| `${name:分隔符}` 的分隔符（`chaizi_all`、`chaizi_code_all`、`code_rev_all`、`dict_all`、`unicode_all`，含缺省分隔符） | `name`，`separator = true` | 主题配了 `separator` 用它，没配随变量同色（老主题零变化）。分项由变量求值时记下（`VarValue`），不在渲染时按参数切串——分隔符是空格时会误切值内部的空格 |
 | 模板字面文字（正文） | `literal` | `(拼: `、`：`、`\t`、` [`、`]` |
 | 模板字面文字（段名里） | `title` | |
 | 气泡段名的装饰 `[` `]` 与 inline 段的 `: ` | `title` | 由 `TooltipDoc` 拼出，不是模板字面 |
@@ -146,9 +149,11 @@ impl From<String> for StyledText { /* 无区间 */ }
 | 截断标记 `…`（`comment_max_chars` / 气泡 `max_chars`） | 与被截处前一个字同样式 | 不单设角色：它不承载信息 |
 | 非模板来源的注释（快捷加词预览行的提示等） | 无片段 | 整段正文色 |
 
-**结构角色只设 `title`、`literal` 两个**，理由：它们是模板里仅有的两类「不是变量值」的文字，
-主题要「淡化装饰、突出信息」或「段名用强调色」时离不开；再细分（括号、分隔符、制表符各一个角色）
-没有真实需求，徒增契约面。`char` 是逐字段的变量，按「变量即角色」自然得到，不算结构角色。
+**结构角色设 `title`、`literal`、`separator` 三个**：前两个是模板里仅有的两类「不是变量值」的文字，
+主题要「淡化装饰、突出信息」或「段名用强调色」时离不开；`separator` 是变量值里的分隔符，有用户要它与
+分项分色。它不占片段的 `role`（那仍是变量名），而是 `Span::separator` 标记，求色时先查它、
+没配再查变量——「不配则继承」只有这样表达得出来。再细分（括号、制表符各一个角色）没有真实需求。
+`char` 是逐字段的变量，按「变量即角色」自然得到，不算结构角色。
 
 `emoji` 角色对彩色 emoji 基本无效：彩色字形各层用字体自带调色板，只有「前景色哨兵层」
 （`paletteIndex == 0xFFFF`）才用文字色。文档站注明，不特殊处理。
@@ -228,6 +233,18 @@ impl InlineColor { pub fn parse(spec: &str) -> Self }           // 不失败，�
 模板引擎另有两个出口，产物是**要上屏的文字**而非显示：`alt_commit_text`（上屏注释）与
 `reverse_render`（cmdbar `dict.rev`）。它们继续调 `render()` 得 `String`，`$[…]{}` 只留 `BODY` 的文字。
 复制 / 上屏 / 「复制全部」同理，一律取 `StyledText::as_str()` 或气泡的原始行（本来就是纯文本）。
+
+### 4.7 分隔符参数里的内联色
+
+`${name:分隔符}` 的参数**整个**写成 `$[SPEC]{BODY}` 时（`${chaizi_all:$[text_dim]{／}}`、
+`${dict_all:$[#888]{ · }}`），变量收到的分隔符是 `BODY`，`SPEC` 只标在值里的分隔符片段上。
+
+- `SPEC` 的成立条件、颜色写法与回落同 §4.2–4.5（复用 `InlineColor::parse`）；`BODY` 不嵌套，到其后
+  第一个 `}`。变量的收尾 `}` 是第一个**不在**这样的 `$[…]{…}` 里的 `}`；`|` 回退链同样不在其中切。
+- 优先级：分隔符自己的内联色 > 外层 `$[…]{}` > 主题 `separator` 角色 > 变量角色。
+- 降级同 §4.4：语法不成立（`]` 后不是 `{`、`SPEC` 过长或含 `{` `}` 换行、只占参数一部分）参数按字面；
+  `BODY` 未闭合即变量未闭合，其后全按字面；颜色写错照样是内联色，分隔符按正文色显示。
+- 纯文本出口只有 `BODY` 的文字。设置页预览把这个 `SPEC` 与模板内联色一起列进 `colors` 做诊断。
 
 ## 5 主题：角色表
 
@@ -481,6 +498,7 @@ if let Some(ic) = s.color:                      // ① 内联色优先
     if st == 选中 && ic.selected 有值 → return resolve(ic.selected) ?? body
     if state_changed_body              → return body        // 规则 3
     return resolve(ic.normal) ?? body                        // 非法 / 查不到 → 正文色
+// ②③ 的「角色」：分隔符片段先查 `separator` 再查 s.role，其余只查 s.role
 if st ≠ 常态 && n.<st>.roles[s.role] 有值  → return 它         // ② 状态态单列的角色色
 if state_changed_body                      → return body      // 规则 3
 if n.roles[s.role] 有值                     → return 它         // ③ 常态角色色

@@ -481,6 +481,17 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 查询走精确 + 前缀，候选标 `source = English`。独立方案可直接使用，更常见的是被混输懒加载
 （`schema.mix.enable_english`）。
 
+**词频名次**：上游英文主库没有权重列，前缀补全会退化成字母序。加载英文词库（`type = "english"`）
+时，权重为 0 的条目按 `schemas/english/en_freq.txt` 的名次赋权（`wind_dict::freq_rank`，值域
+`1..=799`；写了权重的条目不动）。名次权重低于临时词初始权重 800、晋升权重 1000 与手工加词
+1200（编译期断言守着），英文用户层另按 800 托底（`StoreUserLayer::with_min_weight`，导入的
+0 权重用户词与同码系统词相比也在前；前缀补全档另有 `cmp_match_layers` 的 `is_prefix` 层级键，用户词补全本就在系统补全之后，与权重无关），故用户词 / 临时词与系统词的先后不变。代价：扩展库里写了个位数
+权重的条目（`macOS` 各版本、`ID` / `I'd` 消歧对）从「压在全部 0 权重词之上」变成排在有名次的
+常用词之后，彼此先后不变；上游数据不改。
+名次表是 wdat 的第二个指纹源（`CachedDict::load_english_at`），改了它在下次加载英文词库时
+重建缓存（不热重载）。读英文词库的各处统一经 `EngineManager::load_table_dict`。英文方案、
+临英、拼音 / 码表混英文共用这一份引擎，一致受益。
+
 ### 6.1 词组分词（`english_phrase.rs`，论坛 t42）
 
 `'` 切开各段、每段只打前缀：`bue'air` → `Buenos Aires`，`ip'max` → `iPhone 15 Pro Max`。
@@ -565,6 +576,11 @@ hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条
 
 收窄后英文天然只剩 1~2 条，**按比例分席的配额机制随之删除**（原 `seats_for`）。
 
+**拼音的可选前缀补全**（`schema.pinyin.english_merge.prefix_complete`，出厂关）是这条收窄的
+唯一例外：中文侧有候选时，若输入 ≥5 字母且整串任何切法都切不成完整全拼音节
+（`english_merge::prefix_complete_applies`，标准音节表 DP），在精确之外再补至多 2 条前缀词
+（`lookup_prefix_complete`，跳过精确那条）。双拼下不生效（`manager::convert` 排除）。
+
 ⚠️ **上屏否决的判据不跟着收窄**：`english_merge::has_any` 与
 `MixedEngine::english_candidates`（`auto_commit_block_on_english` 用）仍按前缀判。
 用户打到 `gith` 时精确命中尚不存在，否决若也要求精确，五笔满码就会在第 4 键把中文顶上屏。
@@ -582,6 +598,14 @@ hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条
 定位：插在「开头那段连续的 `source_tier <= 1` 候选」之后，即中文常用精确解之后、其余
 候选之前。采用后置定位而非新增比较键，理由见该函数文档（比较键会扰动非英文候选之间的
 既有次序，而只对英文表态的比较器不是全序）。
+
+前缀补全来的英文（`meta.from_prefix_complete`，只有 `lookup_prefix_complete` 打这个标记）
+再往后让一段：让过紧随其后、吃满整串且非引擎合成的**拼音**候选（`xiaom` 的「小米」是简拼残码
+命中，不在精确档）。两头都收窄：英文方案 / 混输自己的前缀候选不带标记、不挪；短语
+（`consumed` 为 0 会被当成吃满）不是让位对象。没有要让的时英文整块原序插入。
+
+选中混进来的英文候选，词频另记一份进英文桶（`"english"`，开关按英文方案取），与英文方案、
+临英同一个记频口（`Coordinator::record_selection_cand`）。
 
 ---
 

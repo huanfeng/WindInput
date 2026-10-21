@@ -239,3 +239,55 @@ fn emoji_no_longer_over_collects_the_way_blocks_did() {
         assert!(c.members.contains(ch), "{ch} 有 Emoji 属性，该收");
     }
 }
+
+/// 勾「符号」免词频后，`✓ ✗ ★ ☆ ☐ ⌘` 这批**非 emoji** 符号也免——它们所在的
+/// 「装饰符号」「杂项符号」「杂项技术符号」三块扣掉 emoji 后并入了「符号」。
+///
+/// ⚠️ 只勾 `emoji` 管不到它们（不带 Emoji 属性），没有这一并入它们哪个开关都管不到。
+#[test]
+fn symbol_group_covers_non_emoji_in_mixed_blocks() {
+    let d = data_dir();
+    let defs = wind_config::charset_def::load_layered(Some(&d), None, Vec::new());
+    let sym = vec!["符号".to_string()];
+    let reg = assemble(
+        &defs,
+        Some(&d),
+        ExternalRefs {
+            no_freq: &sym,
+            in_rare: &[],
+        },
+    );
+    for s in ["✓", "✗", "✘", "★", "☆", "☐", "⌘"] {
+        assert!(reg.no_freq(s), "勾「符号」后 {s} 应免词频");
+    }
+    for s in ["我", "a", "✔", "☀"] {
+        assert!(!reg.no_freq(s), "只勾「符号」时 {s} 不该免词频");
+    }
+}
+
+/// ★ 「符号」在三个混住块里与 emoji **按码位不相交**：勾「符号」不顺带收进 emoji。
+///
+/// 只断言这三块：其余 17 块整块并入，内有 `▶ ™ ↔` 这类散落的 emoji，是既有口径。
+#[test]
+fn symbol_group_is_disjoint_from_emoji_in_mixed_blocks() {
+    let reg = factory_registry();
+    let sym = reg.class_by_key("符号").expect("缺「符号」类");
+    let emoji = reg.class_by_key("emoji").expect("缺 emoji 类");
+    let in_sym = |c: u32| sym.ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi);
+    let mut covered = 0;
+    for (lo, hi) in [(0x2300u32, 0x23FFu32), (0x2600, 0x26FF), (0x2700, 0x27BF)] {
+        for c in lo..=hi {
+            let Some(ch) = char::from_u32(c) else {
+                continue;
+            };
+            let is_emoji = emoji.members.contains(ch.to_string().as_str());
+            assert_ne!(
+                in_sym(c),
+                is_emoji,
+                "U+{c:04X}：三块内的码位应恰好属于「符号」与 emoji 之一"
+            );
+            covered += usize::from(in_sym(c));
+        }
+    }
+    assert!(covered > 300, "三块并入「符号」的码位只有 {covered} 个");
+}

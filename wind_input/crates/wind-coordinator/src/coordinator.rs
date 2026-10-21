@@ -10,6 +10,7 @@
 //!
 //! 候选生成委托给 [`EngineManager`]，运行时词频 boost + 最终排序在本层应用。
 
+use crate::comment::VarValue;
 use crate::handle_mode::MixLens;
 use crate::pipeline::{ModeKind, Rewind};
 // 子模块（src/coordinator/ 目录）：这批切片重度访问本模块**私有**字段/函数，
@@ -283,6 +284,13 @@ pub(crate) const TEMP_PINYIN_MAX_CANDIDATES: usize = 5000;
 /// 复选次数只用于晋升判定（见 `Store::learn_temp_word`），不再驱动权重增长——
 /// 晋升入用户词库时统一取 `wind_store::temp_words::PROMOTED_WEIGHT`。
 pub(crate) const LEARN_ADD_WEIGHT: i32 = 800;
+
+// 英文系统词的名次权重须低于临时词初始权重：否则加了词频名次后，自动造的英文临时词会
+// 沉到常用系统词之后（名次引入前系统词全是 0）。见 `wind_dict::freq_rank`。
+const _: () = assert!(wind_dict::freq_rank::RANK_WEIGHT_MAX < LEARN_ADD_WEIGHT);
+// 晋升进用户库的权重同理（用户层另有托底，见 `StoreUserLayer::with_min_weight`）。
+const _: () =
+    assert!(wind_dict::freq_rank::RANK_WEIGHT_MAX < wind_store::temp_words::PROMOTED_WEIGHT);
 
 /// 自提交宽限期：本输入法吐字后这段时间内收到的 `SelectionChanged` 视为宿主回声，
 /// 不当作用户移动光标（见 `handle_selection_changed`）。
@@ -674,6 +682,8 @@ pub(crate) struct State {
     pub(crate) grid_tab: wind_ui_types::GridTab,
     /// 筛选期间的完整候选列表；`grid_tab == All` 时为空。
     pub(crate) grid_full: Vec<Candidate>,
+    /// 连续切分类时的锚点，见 [`crate::candidate_grid::GridTabAnchor`]。
+    pub(crate) grid_tab_anchor: Option<crate::candidate_grid::GridTabAnchor>,
     /// 动态分级加载：当前候选对应的输入码
     pub(crate) candidate_input: String,
     /// 动态分级加载：当前加载上限
@@ -1602,6 +1612,9 @@ pub struct Coordinator {
     /// 合成坐标去骗过闸门（Android 一度就是这么做的，`height` 写 0 还会被判为「宿主
     /// 尚未 reflow」整帧丢弃，候选一次都不下发）。
     caret_independent: std::sync::atomic::AtomicBool,
+    /// 宿主对配置的**强制改写**（见 [`Self::set_config_overlay`]），每次从磁盘重载配置后
+    /// 重新套上。只设一次（构造后），故用 `OnceLock` 而不加锁。
+    config_overlay: std::sync::OnceLock<fn(&mut Config)>,
     /// 暂停学习（隐私 / 无痕输入）：置位期间上屏照常、候选照常，但**不把这次输入写进任何
     /// 用户数据**（词频、自动造词 / 草稿、联想历史与下一词、英文造词、输入统计、快捷输入 /
     /// 网址 / 邮箱历史、上屏历史）。见 [`Coordinator::set_learning_suspended`]。
@@ -1617,6 +1630,8 @@ pub struct Coordinator {
     /// 如 WPS、QQ 一类走 XIM 的应用）。置位时编码改由我们自己的候选窗画，见
     /// [`Coordinator::preedit_in_app_effective`]。见 `host.display` 的 `inline_preedit`。
     host_no_inline_preedit: std::sync::atomic::AtomicBool,
+    /// 热重载成功后**不弹**「设置已更新」（移动端）。见 [`Coordinator::set_quiet_reload_toast`]。
+    quiet_reload_toast: std::sync::atomic::AtomicBool,
     /// 启动时预热全部已装方案（桌面默认开；移动端关，见构造里的说明）
     pub(crate) eager_prewarm: std::sync::atomic::AtomicBool,
     /// 0=Idle 1=Preparing 2=Ready 3=Failed（见 [`Coordinator::readiness`]）
@@ -2470,6 +2485,17 @@ impl Coordinator {
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 登记宿主对配置的强制改写（移动端：编码区归候选区、联想态空格不选词…），
+    /// [`Self::reload_user_config`] 从磁盘重读后会再套一遍。
+    ///
+    /// 宿主在构造前已经改写过一次传进来的 `Config`，但那只管到第一次重载：设置页每改一项
+    /// 就发一次重载，`Config::load` 读回的是盘上的值，强制项随之悄悄回到桌面默认——
+    /// 表现为「改了任意一个设置之后，联想态空格又开始选词」，而且与改的那一项毫无关系。
+    /// 只能设一次：第二次调用被忽略（返回 false），防止两处各登记一份互相覆盖。
+    pub fn set_config_overlay(&self, overlay: fn(&mut Config)) -> bool {
+        self.config_overlay.set(overlay).is_ok()
+    }
+
     /// 暂停 / 恢复学习（隐私 / 无痕输入，见字段 `learning_suspended`）。
     ///
     /// 判断收口在各条**学习入口**（`record_selection_cased_in`、`learn_phrase_on_commit_in`、
@@ -2491,6 +2517,15 @@ impl Coordinator {
     pub fn learning_suspended(&self) -> bool {
         self.learning_suspended
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 热重载成功后不弹「设置已更新」（失败、语法错误照常提示）。
+    ///
+    /// 电脑上改设置是在独立的设置程序里点「保存」，弹一句确认是合适的；手机设置页**每改一项**
+    /// 就重载一次，连改几项就连弹几条，而且改动本身在设置页上就看得见（真机反馈）。
+    pub fn set_quiet_reload_toast(&self, value: bool) {
+        self.quiet_reload_toast
+            .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 声明宿主报的光标坐标可直接当权威（见字段 `host_caret_trusted`）。
@@ -2660,6 +2695,7 @@ impl Coordinator {
                             weight: e.weight,
                             position: e.position,
                             category: e.category.clone(),
+                            enabled: e.enabled,
                         })
                         .collect();
                     // 系统短语只在内存（P3 叠加模型），每次启动都交给 store；首次还会触发旧表迁移。
@@ -2944,6 +2980,7 @@ impl Coordinator {
                 grid_keep: false,
                 grid_tab: wind_ui_types::GridTab::All,
                 grid_full: Vec::new(),
+                grid_tab_anchor: None,
                 paged: false,
                 candidate_input: String::new(),
                 candidate_limit: 0,
@@ -3065,9 +3102,11 @@ impl Coordinator {
             pair_tracker: Mutex::new(wind_transform::pair_tracker::PairTracker::new()),
             last_valid_caret: Mutex::new((0, 0, 0)),
             caret_independent: std::sync::atomic::AtomicBool::new(false),
+            config_overlay: std::sync::OnceLock::new(),
             learning_suspended: std::sync::atomic::AtomicBool::new(false),
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
             host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
+            quiet_reload_toast: std::sync::atomic::AtomicBool::new(false),
             eager_prewarm: std::sync::atomic::AtomicBool::new(true),
             readiness_state: std::sync::atomic::AtomicU8::new(0),
             pending_first_show: Mutex::new(false),
@@ -4950,7 +4989,10 @@ impl Coordinator {
 
     pub fn reload_user_config(&self) -> bool {
         match Config::load(Config::data_dir().as_deref()) {
-            Ok(cfg) => {
+            Ok(mut cfg) => {
+                if let Some(overlay) = self.config_overlay.get() {
+                    overlay(&mut cfg);
+                }
                 // 方案相关项（活跃/可用方案、全局上屏策略）是否变化：变了才热重建引擎，
                 // 避免每次保存都丢词典缓存（拼音合并/unigram 重建开销大）。
                 let old = self.rt();
@@ -5145,7 +5187,11 @@ impl Coordinator {
                 // 语法错误时**取代**「设置已更新」，而不是两条都弹：报成功再报失败会让
                 // 用户以为是两件事，而这里只有一件——他刚存的设置里有一部分没生效。
                 // 此时 `self.rt()` 已是上面换进去的新 bundle，读到的就是本次加载的降级记录。
-                if !self.notify_config_syntax_error() {
+                if !self.notify_config_syntax_error()
+                    && !self
+                        .quiet_reload_toast
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     self.show_toast(
                         "设置已更新",
                         ToastPosition::BottomCenter,
@@ -5836,15 +5882,16 @@ impl Coordinator {
             .candidate_flipped
             .load(std::sync::atomic::Ordering::Relaxed);
         //
-        // 展开态（`grid_top` 有值）整组改写：高亮上下 = 换行、翻页 = 滚一屏，见 `candidate_grid`。
+        // 展开态（`grid_top` 有值）整组改写：高亮上下 = 换行、翻页 = 滚一行（PageUp/PageDown
+        // 可翻一屏），见 `candidate_grid`。
         // 网格只在横排出现，`flipped`（竖排专属）在这里恒为 false，两支不会相遇。
         // 收起态按下翻页先试展开：展开了就只展开、不翻页（设计 D3）。
         let changed = if Self::grid_active(state) {
             match nav {
                 keymap::NavAction::HighlightUp => self.grid_move_row(state, false),
                 keymap::NavAction::HighlightDown => self.grid_move_row(state, true),
-                keymap::NavAction::PagePrev => self.grid_page(state, false),
-                keymap::NavAction::PageNext => self.grid_page(state, true),
+                keymap::NavAction::PagePrev => self.grid_page_key(state, false, data.key_code),
+                keymap::NavAction::PageNext => self.grid_page_key(state, true, data.key_code),
             }
         } else {
             match nav {
@@ -7179,7 +7226,7 @@ impl Coordinator {
     /// 第 `i` 个候选（0 基）的序号标签，按「用户配置 > 主题 > 默认数字」裁决：
     /// ① 用户 `ui.candidate.index_labels` 显式设了该槽位 → 用之；
     /// ② 否则当前主题 `views.index.labels` 有非空槽位 → 用之；
-    /// ③ 否则回退默认 (i+1)。
+    /// ③ 否则回退默认 (i+1)，第 10 个写 `0`，与选它的物理键对应。
     fn resolve_index_label(
         &self,
         cand_cfg: &wind_config::config::UiCandidateConfig,
@@ -7196,6 +7243,9 @@ impl Coordinator {
             .filter(|s| !s.is_empty())
         {
             return s.clone();
+        }
+        if i == 9 {
+            return "0".to_string();
         }
         (i + 1).to_string()
     }
@@ -7397,18 +7447,10 @@ impl Coordinator {
         //  - overlay 反查模式(临时拼音 / 快捷输入(mix)内拼音):跟随独立的
         //    input.temp_pinyin.code_hint_source(出厂 auto,可关),见 comment_hint_source。
         // 码表类方案/候选的剩余编码由码表引擎在 convert 内填,不在此处理。
-        let force_hint = Self::forces_code_hint(state);
-        let hint_source = self.comment_hint_source(state);
-        // 调试提示上下文：仅有段引用 `${debug}` 时解析一次（mixed 归属 / 方案 id），
-        // 循环内按候选来源选用。
-        let dbg_ctx = if tip.references("debug") {
-            // 归属与读写两端同源（`effective_data_schema`）：特殊模式下若这里仍按 active 解析，
-            // 调试段显示的计数与排序实际用的不是同一个 key——排查时会被它带偏，
-            // 而这正是最难察觉的一种不一致。
-            Some(self.build_debug_schema_ctx(self.effective_data_schema(state).as_deref()))
-        } else {
-            None
-        };
+        // 悬停提示与注释段共用的整页上下文（编码来源方案、调试归属、注释库作用域…），
+        // 见 `TooltipEvalCtx`；移动端按下标取提示走同一份。
+        let tip_ctx = self.tooltip_eval_ctx(state, tip);
+        let hint_source = tip_ctx.hint_source;
         // 反查表读锁在候选循环外取一次（写方只有拆字段的装卸：sync_chaizi_assets /
         // ensure_chaizi_async）。
         let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
@@ -7431,47 +7473,6 @@ impl Coordinator {
         ));
         // 注释段长度预算横竖各一份：横排全部候选共享一行宽度，竖排每行独占。
         let comment_max = cand_cfg.comment_max_chars(comment_vertical);
-        // 注释**库**的 `schemas` 白名单作用域：与词频/短语同源取 `effective_data_schema`
-        // （临英归 english 桶）。⚠️ 与上面模板层取 active 刻意不同——库是数据、模板是呈现。
-        let comment_dict_schema = self
-            .effective_data_schema(state)
-            .unwrap_or_else(|| self.engine_mgr.active_schema_id());
-        // ⚠️ 快捷输入（mix）下这一份**不够**：它把多个成员方案的候选合进同一张列表，
-        // 而 `effective_data_schema` 对 `Mix(_)` 返回 `None` ⇒ 整列表都按主方案（五笔等）
-        // 求白名单，于是英文成员的候选查不到白名单写着 `english` 的注释库——同一个单词，
-        // 英文方案/临英下有释义，快捷输入里没有（论坛 #153）。
-        //
-        // 归属逐候选取 `mix_candidate_owner`，与词频/加词**同一个**函数：注释库是数据类
-        // 资源，归属与词频/短语同源（见 `comment.rs` 里 `dict` 变量那段）。另写一份
-        // 「哪个候选算哪个成员」的判据就是第二个真相源，漂移后的表现是「词频记进 A 桶、
-        // 注释查的是 B 桶」这类只在多成员配置下才现形的错配。
-        let mix_comment_scope = matches!(state.active, Some(ModeKind::Mix(_)));
-        // `${word_code}` / `${code_source}` 的来源方案（循环外解析一次，没有段引用就不碰）：
-        // 码表方案=自身全部编码（码长升序 a/ab/abc）、混输=其主码表成员、拼音=全局主码表。
-        // 编码按词查方案词库反查索引（word_codes_display），不按取码规则生成；含用户层：
-        // 自己造的词也显示编码（text-code-lookup.md）。候选并非用该编码方案
-        // 直接输入时（来源方案≠活跃方案，或处于临时拼音/快捷输入反查模式）`${code_source}`
-        // 才有值，出厂段名据此显示为 [编码(五笔)]。
-        let code_schema = (tip.references("word_code") || tip.references("code_source"))
-            .then(|| self.engine_mgr.code_source_schema())
-            .filter(|s| !s.is_empty());
-        // 反查索引没就绪就**在后台建**，本次先不显示编码段（绝不在此等）。
-        // 索引对超大词库是秒级构建，而这里是按键处理链路、且正持有 state 锁——
-        // 真机上曾因此让整机卡死 29.5 秒。
-        if let Some(sid) = code_schema.as_deref() {
-            self.ensure_reverse_index_async(sid);
-        }
-        let code_source_name = code_schema.as_deref().and_then(|sid| {
-            let indirect = force_hint || sid != self.engine_mgr.active_schema_id();
-            indirect.then(|| {
-                let name = self.engine_mgr.schema_name(sid);
-                if name.is_empty() {
-                    sid.to_string()
-                } else {
-                    name
-                }
-            })
-        });
         // 本页每个候选的气泡原文，右键菜单按段 / 按行复制、上屏时从这里取（见 handle_tooltip）。
         let mut tip_page: Vec<crate::handle_tooltip::TooltipPageEntry> =
             Vec::with_capacity(end.saturating_sub(start));
@@ -7489,67 +7490,17 @@ impl Coordinator {
                     cand_cfg.truncate_display(&full)
                 };
                 let tip_skipped = grid_range.is_some() && i as i32 != hover_now;
-                // 悬停提示按段列表渲染（见 `crate::tooltip`）。逐字段遍历**截断后**的显示文本、
-                // 且不含截断追加的 `…`：超长候选（如长短语）逐字展开会撑爆气泡，只提示实际
-                // 显示出的字；被截掉的部分由「完整原文」段（`${full_text}`）整段给出。
-                // `${word_code}` 则按候选**完整原文**查词库（截断/繁化文本词库里没有；
-                // 查不到=空，段随之消失）。
-                //
-                // ⚠️ 曾改成按显示文本（`full`）查编码，动机是「气泡三段应同属一个域」——已回退。
-                // 拼音段/拆字段吃显示文本是**它们**的事（拆字库覆盖繁体字，查得到），而编码段
-                // 回答的是「这个候选怎么打出来」，用户实际敲的就是内部文本那个码；改成查繁化
-                // 文本只会让它查不到而整段消失，是拿一个**已经正确**的段去换取形式上的一致。
-                // 想再动它之前，先拿出一个真实的错例（2026-09-08 复核，没有找到）。
-                // `word_codes_display` 返回 None＝**系统层反查索引尚未就绪**（区别于「查不到」的
-                // Some("")）。此时本段不显示，并已在循环外触发后台构建，建好后自动补上。
-                let word_code = code_schema
-                    .as_deref()
-                    .filter(|_| !tip_skipped)
-                    .and_then(|sid| {
-                        #[cfg(test)]
-                        WORD_CODE_LOOKUPS.with(|n| n.set(n.get() + 1));
-                        self.engine_mgr.word_codes_display(sid, &c.text)
-                    })
-                    .unwrap_or_default();
-                let dict_schema =
-                    self.comment_dict_scope(state, c, mix_comment_scope, &comment_dict_schema);
-                // 调试正文要点查 redb 词频，按需算且一个候选只算一次。
-                let debug_body = std::cell::OnceCell::new();
-                let cand_eval = |name: &str, arg: Option<&str>| -> Option<String> {
-                    Some(match name {
-                        "word_code" => word_code.clone(),
-                        "code_source" => code_source_name.clone().unwrap_or_default(),
-                        "debug" => dbg_ctx
-                            .as_ref()
-                            .map(|ctx| {
-                                debug_body
-                                    .get_or_init(|| {
-                                        self.debug_tooltip_body(c, &state.input_buffer, ctx)
-                                    })
-                                    .clone()
-                            })
-                            .unwrap_or_default(),
-                        _ => {
-                            return self.eval_var(
-                                name,
-                                arg,
-                                c,
-                                &reverse,
-                                hint_source,
-                                &dict_schema,
-                            );
-                        }
-                    })
-                };
-                let char_eval = |ch: char, name: &str, arg: Option<&str>| {
-                    crate::tooltip::char_var(name, arg, ch, &reverse)
-                        .or_else(|| self.eval_text_var(name, arg, &ch.to_string(), &reverse))
-                };
                 let rendered = if tip_skipped {
                     Default::default()
                 } else {
-                    tip.render(&disp, &full, &cand_eval, &char_eval)
+                    self.render_candidate_tooltip(state, c, &disp, &full, tip, &tip_ctx, &reverse)
                 };
+                let dict_schema = self.comment_dict_scope(
+                    state,
+                    c,
+                    tip_ctx.mix_comment_scope,
+                    &tip_ctx.comment_dict_schema,
+                );
                 let tooltip = rendered.doc.clone();
                 tip_page.push(crate::handle_tooltip::TooltipPageEntry {
                     text: c.text.clone(),
@@ -8245,11 +8196,7 @@ impl Coordinator {
         }
         let changed = if Self::grid_active(&state) {
             // 鼠标往上滚到第一行就停住，不像 ↑ 那样收起：滚轮滚过头是常事。
-            if dir > 0 {
-                self.grid_scroll_down(&mut state)
-            } else {
-                state.current_page > 0 && self.grid_move_row(&mut state, false)
-            }
+            self.grid_scroll(&mut state, dir > 0)
         } else if dir < 0 {
             self.page_prev(&mut state)
         } else {
@@ -10083,6 +10030,7 @@ impl Coordinator {
                 weight: e.weight,
                 position: e.position,
                 category: e.category.clone(),
+                enabled: e.enabled,
             })
             .collect();
         match store.ensure_system_phrases(&sys) {
@@ -10111,6 +10059,7 @@ impl Coordinator {
                 weight: e.weight,
                 position: e.position,
                 category: e.category.clone(),
+                enabled: e.enabled,
             })
             .collect();
         // 先认领：历史上 `add_phrase`/wdict 导入撞键时会把系统行降级成用户行，此后
@@ -10146,8 +10095,159 @@ fn phrase_entries_hash(entries: &[wind_phrase::SystemPhraseEntry]) -> String {
         e.text.hash(&mut h);
         e.weight.hash(&mut h);
         e.position.hash(&mut h);
+        e.enabled.hash(&mut h);
     }
     format!("{:016x}", h.finish())
+}
+
+/// 悬停提示（与注释段）渲染的整页上下文：只依赖状态与配置、对一页候选相同的那些量，
+/// 候选循环外解析一次，循环里逐候选 [`Coordinator::render_candidate_tooltip`]。
+///
+/// 桌面候选页组装与移动端按绝对下标取提示（[`Coordinator::candidate_tooltip_at`]）共用这一份——
+/// 两边各解析一遍就是两个真相源，漂移后的表现是「同一个候选，电脑上气泡有编码段、手机上没有」。
+pub(crate) struct TooltipEvalCtx {
+    pub(crate) hint_source: wind_config::config::CodeHintSource,
+    /// 调试提示上下文：仅有段引用 `${debug}` 时解析（mixed 归属 / 方案 id）。
+    dbg_ctx: Option<DebugSchemaCtx>,
+    /// `${word_code}` / `${code_source}` 的来源方案；没有段引用它们就是 `None`。
+    code_schema: Option<String>,
+    code_source_name: Option<String>,
+    /// 快捷输入（mix）下注释库归属逐候选取，见 [`Coordinator::comment_dict_scope`]。
+    pub(crate) mix_comment_scope: bool,
+    /// 注释**库**的 `schemas` 白名单作用域（非 mix 时整页共用）。
+    pub(crate) comment_dict_schema: String,
+}
+
+impl Coordinator {
+    pub(crate) fn tooltip_eval_ctx(
+        &self,
+        state: &State,
+        tip: &crate::tooltip::CompiledTooltip,
+    ) -> TooltipEvalCtx {
+        let force_hint = Self::forces_code_hint(state);
+        let hint_source = self.comment_hint_source(state);
+        let dbg_ctx = if tip.references("debug") {
+            // 归属与读写两端同源（`effective_data_schema`）：特殊模式下若这里仍按 active 解析，
+            // 调试段显示的计数与排序实际用的不是同一个 key——排查时会被它带偏，
+            // 而这正是最难察觉的一种不一致。
+            Some(self.build_debug_schema_ctx(self.effective_data_schema(state).as_deref()))
+        } else {
+            None
+        };
+        // 注释**库**的 `schemas` 白名单作用域：与词频/短语同源取 `effective_data_schema`
+        // （临英归 english 桶）。⚠️ 与上面模板层取 active 刻意不同——库是数据、模板是呈现。
+        let comment_dict_schema = self
+            .effective_data_schema(state)
+            .unwrap_or_else(|| self.engine_mgr.active_schema_id());
+        // ⚠️ 快捷输入（mix）下这一份**不够**：它把多个成员方案的候选合进同一张列表，
+        // 而 `effective_data_schema` 对 `Mix(_)` 返回 `None` ⇒ 整列表都按主方案（五笔等）
+        // 求白名单，于是英文成员的候选查不到白名单写着 `english` 的注释库——同一个单词，
+        // 英文方案/临英下有释义，快捷输入里没有（论坛 #153）。
+        //
+        // 归属逐候选取 `mix_candidate_owner`，与词频/加词**同一个**函数：注释库是数据类
+        // 资源，归属与词频/短语同源（见 `comment.rs` 里 `dict` 变量那段）。另写一份
+        // 「哪个候选算哪个成员」的判据就是第二个真相源，漂移后的表现是「词频记进 A 桶、
+        // 注释查的是 B 桶」这类只在多成员配置下才现形的错配。
+        let mix_comment_scope = matches!(state.active, Some(ModeKind::Mix(_)));
+        // `${word_code}` / `${code_source}` 的来源方案（循环外解析一次，没有段引用就不碰）：
+        // 码表方案=自身全部编码（码长升序 a/ab/abc）、混输=其主码表成员、拼音=全局主码表。
+        // 编码按词查方案词库反查索引（word_codes_display），不按取码规则生成；含用户层：
+        // 自己造的词也显示编码（text-code-lookup.md）。候选并非用该编码方案
+        // 直接输入时（来源方案≠活跃方案，或处于临时拼音/快捷输入反查模式）`${code_source}`
+        // 才有值，出厂段名据此显示为 [编码(五笔)]。
+        let code_schema = (tip.references("word_code") || tip.references("code_source"))
+            .then(|| self.engine_mgr.code_source_schema())
+            .filter(|s| !s.is_empty());
+        // 反查索引没就绪就**在后台建**，本次先不显示编码段（绝不在此等）。
+        // 索引对超大词库是秒级构建，而这里是按键处理链路、且正持有 state 锁——
+        // 真机上曾因此让整机卡死 29.5 秒。
+        if let Some(sid) = code_schema.as_deref() {
+            self.ensure_reverse_index_async(sid);
+        }
+        let code_source_name = code_schema.as_deref().and_then(|sid| {
+            let indirect = force_hint || sid != self.engine_mgr.active_schema_id();
+            indirect.then(|| {
+                let name = self.engine_mgr.schema_name(sid);
+                if name.is_empty() {
+                    sid.to_string()
+                } else {
+                    name
+                }
+            })
+        });
+        TooltipEvalCtx {
+            hint_source,
+            dbg_ctx,
+            code_schema,
+            code_source_name,
+            mix_comment_scope,
+            comment_dict_schema,
+        }
+    }
+
+    /// 渲染一个候选的悬停提示（`disp` / `full` 见 [`crate::tooltip::CompiledTooltip::render`]）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_candidate_tooltip(
+        &self,
+        state: &State,
+        c: &Candidate,
+        disp: &str,
+        full: &str,
+        tip: &crate::tooltip::CompiledTooltip,
+        ctx: &TooltipEvalCtx,
+        reverse: &wind_reverse::ReverseLookup,
+    ) -> crate::tooltip::RenderedTooltip {
+        // 悬停提示按段列表渲染（见 `crate::tooltip`）。逐字段遍历**截断后**的显示文本、
+        // 且不含截断追加的 `…`：超长候选（如长短语）逐字展开会撑爆气泡，只提示实际
+        // 显示出的字；被截掉的部分由「完整原文」段（`${full_text}`）整段给出。
+        // `${word_code}` 则按候选**完整原文**查词库（截断/繁化文本词库里没有；
+        // 查不到=空，段随之消失）。
+        //
+        // ⚠️ 曾改成按显示文本（`full`）查编码，动机是「气泡三段应同属一个域」——已回退。
+        // 拼音段/拆字段吃显示文本是**它们**的事（拆字库覆盖繁体字，查得到），而编码段
+        // 回答的是「这个候选怎么打出来」，用户实际敲的就是内部文本那个码；改成查繁化
+        // 文本只会让它查不到而整段消失，是拿一个**已经正确**的段去换取形式上的一致。
+        // 想再动它之前，先拿出一个真实的错例（2026-09-08 复核，没有找到）。
+        // `word_codes_display` 返回 None＝**系统层反查索引尚未就绪**（区别于「查不到」的
+        // Some("")）。此时本段不显示，并已在 [`Self::tooltip_eval_ctx`] 里触发后台构建，建好后自动补上。
+        let word_code = ctx
+            .code_schema
+            .as_deref()
+            .and_then(|sid| {
+                #[cfg(test)]
+                WORD_CODE_LOOKUPS.with(|n| n.set(n.get() + 1));
+                self.engine_mgr.word_codes_display(sid, &c.text)
+            })
+            .unwrap_or_default();
+        let dict_schema =
+            self.comment_dict_scope(state, c, ctx.mix_comment_scope, &ctx.comment_dict_schema);
+        // 调试正文要点查 redb 词频，按需算且一个候选只算一次。
+        let debug_body = std::cell::OnceCell::new();
+        let cand_eval = |name: &str, arg: Option<&str>| -> Option<VarValue> {
+            Some(VarValue::from(match name {
+                "word_code" => word_code.clone(),
+                "code_source" => ctx.code_source_name.clone().unwrap_or_default(),
+                "debug" => ctx
+                    .dbg_ctx
+                    .as_ref()
+                    .map(|dbg| {
+                        debug_body
+                            .get_or_init(|| self.debug_tooltip_body(c, &state.input_buffer, dbg))
+                            .clone()
+                    })
+                    .unwrap_or_default(),
+                _ => {
+                    return self.eval_var(name, arg, c, reverse, ctx.hint_source, &dict_schema);
+                }
+            }))
+        };
+        let char_eval = |ch: char, name: &str, arg: Option<&str>| {
+            crate::tooltip::char_var(name, arg, ch, reverse)
+                .map(VarValue::from)
+                .or_else(|| self.eval_text_var(name, arg, &ch.to_string(), reverse))
+        };
+        tip.render(disp, full, &cand_eval, &char_eval)
+    }
 }
 
 /// 悬停调试段的方案归属上下文（每次候选推送解析一次，镜像 `apply_freq_rerank` 的方案解析）。
@@ -11109,7 +11209,7 @@ mod mode_comment_e2e_tests {
         let vars: Vec<&str> = wind_ui_types::TEXT_ROLES
             .iter()
             .copied()
-            .filter(|r| !matches!(*r, "title" | "literal"))
+            .filter(|r| !matches!(*r, "title" | "literal" | "separator"))
             .collect();
         let whole: String = vars
             .iter()
@@ -11984,6 +12084,25 @@ mod caret_compat_tests {
     /// 造一个开了 `show_on_focus` 的协调器，并**保留 UI 通道接收端**——「气泡有没有真的发出去」
     /// 只能从 `ui_tx` 上观察。用 debug 方法「按同样规则再算一遍」是假测试：决策函数写对但
     /// 生产路径没接上时，那种测试照样全绿。
+    /// 宿主登记的配置改写在**从磁盘重载**之后仍然生效（移动端设置页每改一项就重载一次，
+    /// 改写若只在构造时套一次，之后就悄悄回到桌面默认）。用一个盘上不可能出现的哨兵值，
+    /// 不受本机用户配置影响；对照组证明「不登记就没有」。
+    #[test]
+    fn config_overlay_survives_reload() {
+        fn sentinel(cfg: &mut Config) {
+            cfg.input.association.max_count = 4242;
+        }
+        let (c, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        assert!(c.set_config_overlay(sentinel));
+        assert!(!c.set_config_overlay(sentinel), "只能登记一次");
+        c.reload_user_config();
+        assert_eq!(c.rt().config.input.association.max_count, 4242);
+
+        let (plain, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        plain.reload_user_config();
+        assert_ne!(plain.rt().config.input.association.max_count, 4242);
+    }
+
     fn coord_focus_tip(
         show_on_focus: bool,
         position_mode: &str,

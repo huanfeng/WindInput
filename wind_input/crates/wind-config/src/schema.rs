@@ -379,6 +379,8 @@ pub struct CodeTableSpec {
     ///
     /// ⚠️ 开启后 `top_code_commit` 自动让位：两者抢同一个区间（超码长），
     /// 而顶码是自动上屏、一触发用户就看不到整句候选（见 `CodeTableEngine::handle_top_code`）。
+    /// `auto_commit_at_full` / `clear_on_empty_max` 同样让位：它们在满码那一键截断句子
+    /// （见 `CodeTableEngine::new`）。
     #[serde(default)]
     pub sentence_input: bool,
     /// 逆切分（切分模式）：**恰好** `max_code_length` 长的串若空码，切成前后两段

@@ -12,7 +12,10 @@
 //! 颜色（按当前主题求色、颜色名在当前主题里查不查得到）由 wind-webdata 做——它能加载主题，
 //! 这里只交出每个内联色的写法与位置。
 
-use super::{MAX_DEPTH, Pairs, Template, VarRef, color_bounds, role_of, utf8_len};
+use super::{
+    MAX_DEPTH, Pairs, Template, VarRef, VarValue, arg_color, color_bounds, role_of, utf8_len,
+    var_ref_ranges,
+};
 use std::sync::Arc;
 use wind_theme::InlineColor;
 use wind_ui_types::StyledText;
@@ -131,14 +134,16 @@ fn spec_notes(spec: &str) -> Vec<String> {
 
 /// 求值入口认得的变量：契约清单里的变量 + 兼容别名。
 fn is_known(name: &str) -> bool {
-    !matches!(name, "title" | "literal") && wind_ui_types::TEXT_ROLES.contains(&role_of(name))
+    !matches!(name, "title" | "literal" | "separator")
+        && wind_ui_types::TEXT_ROLES.contains(&role_of(name))
 }
 
 /// 样例值。`ch` = 逐字段当前字（整段求值为 `None`）。`None` 返回值 = 未知变量名。
-fn sample_value(name: &str, arg: Option<&str>, ch: Option<char>) -> Option<String> {
-    // `_all` 类变量的分隔符参数：样例里用空格连接，参数换掉它。
-    let joined = |parts: &[&str]| parts.join(arg.unwrap_or(" "));
-    Some(match role_of(name) {
+fn sample_value(name: &str, arg: Option<&str>, ch: Option<char>) -> Option<VarValue> {
+    // `_all` 类变量的分隔符参数：样例里用空格连接，参数换掉它。分隔符带 `separator` 标记，同真实求值。
+    let joined =
+        |parts: &[&str], default: &str| Some(VarValue::joined(parts, arg.unwrap_or(default)));
+    Some(VarValue::from(match role_of(name) {
         "char" => ch.map(String::from).unwrap_or_default(),
         "readings" => {
             let all: &[&str] = match ch {
@@ -155,16 +160,17 @@ fn sample_value(name: &str, arg: Option<&str>, ch: Option<char>) -> Option<Strin
         "unicode" => ch
             .map(|c| format!("U+{:04X}", c as u32))
             .unwrap_or_default(),
-        "unicode_all" => SAMPLE_TEXT
-            .chars()
-            .map(|c| format!("U+{:04X}", c as u32))
-            .collect::<Vec<_>>()
-            .join(arg.unwrap_or(" ")),
+        "unicode_all" => {
+            return Some(VarValue::joined(
+                SAMPLE_TEXT.chars().map(|c| format!("U+{:04X}", c as u32)),
+                arg.unwrap_or(" "),
+            ));
+        }
         "code_hint" => "hao".into(),
         "emoji" => "👋".into(),
         "code_rev" => "wqvb".into(),
         // 全部码位默认以 `/` 连接（同 `word_codes_in`），参数换掉它。
-        "code_rev_all" => ["wq", "wqvb"].join(arg.unwrap_or("/")),
+        "code_rev_all" => return joined(&["wq", "wqvb"], "/"),
         "shuangpin" => "nihk".into(),
         "pinyin" => "nǐ hǎo".into(),
         "chaizi" => match ch {
@@ -175,17 +181,17 @@ fn sample_value(name: &str, arg: Option<&str>, ch: Option<char>) -> Option<Strin
             Some('好') => "vbg".into(),
             _ => "wqiy".into(),
         },
-        "chaizi_all" => joined(&["亻尔", "女子"]),
-        "chaizi_code_all" => joined(&["wqiy", "vbg"]),
+        "chaizi_all" => return joined(&["亻尔", "女子"], " "),
+        "chaizi_code_all" => return joined(&["wqiy", "vbg"], " "),
         // `dict_all` 归一到 `dict` 角色（同一份数据），但取值不同：按原名分开。
-        "dict" if name == "dict_all" => ["hello", "问候"].join(arg.unwrap_or(super::DICT_ALL_SEP)),
+        "dict" if name == "dict_all" => return joined(&["hello", "问候"], super::DICT_ALL_SEP),
         "dict" => "hello".into(),
         "word_code" => "wqvb".into(),
         "code_source" => "五笔".into(),
         "debug" => "来源: 拼音".into(),
         "full_text" => "你好，世界".into(),
         _ => return None,
-    })
+    }))
 }
 
 /// 扫出模板里的变量引用与内联色（位置按入参模板计）。结构判定与模板引擎的 `parse_range`
@@ -228,11 +234,25 @@ fn scan(
         }
         if b[i] == b'$' && i + 1 < end && b[i + 1] == b'{' {
             if let Some(close) = pairs.var_end(i + 2, end) {
-                let names = tpl[i + 2..close]
-                    .split('|')
-                    .map(|s| VarRef::parse(s).name)
-                    .filter(|n| !n.is_empty())
-                    .collect();
+                let mut names = Vec::new();
+                for (s, e) in var_ref_ranges(b, pairs, i + 2, close) {
+                    let name = VarRef::parse(tpl, pairs, s, e).name;
+                    // 分隔符参数里的内联色同样列出，颜色诊断与模板内联色一致。
+                    if let Some(colon) = tpl[s..e].find(':')
+                        && let Some(((ss, se), _)) = arg_color(b, pairs, s + colon + 1, e)
+                    {
+                        let spec = &tpl[ss..se];
+                        colors.push(ColorSpec {
+                            start: ss,
+                            end: se,
+                            color: Arc::new(InlineColor::parse(spec)),
+                            notes: spec_notes(spec),
+                        });
+                    }
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                }
                 vars.push((i, close + 1, names));
                 i = close + 1;
                 continue;
@@ -368,6 +388,51 @@ mod tests {
             ]
         );
         assert!(s.problems.is_empty());
+    }
+
+    /// 预览样例的分隔符同样带标记（设置页预览才看得出 separator 配色）；文字不变。
+    #[test]
+    fn sample_marks_separators() {
+        for (tpl, text, sep) in [
+            ("${chaizi_all:／}", "亻尔／女子", "／"),
+            ("${chaizi_code_all}", "wqiy vbg", " "),
+            ("${code_rev_all}", "wq/wqvb", "/"),
+            ("${dict_all:}", "hello问候", ""),
+            ("${dict_all}", "hello；问候", "；"),
+        ] {
+            let s = sample(tpl, &TemplateScene::Comment);
+            assert_eq!(s.text.as_str(), text, "{tpl}");
+            let got: Vec<&str> = s
+                .text
+                .spans()
+                .iter()
+                .filter(|sp| sp.separator)
+                .map(|sp| &s.text.as_str()[sp.start as usize..sp.end as usize])
+                .collect();
+            let want: Vec<&str> = if sep.is_empty() { vec![] } else { vec![sep] };
+            assert_eq!(got, want, "{tpl}");
+        }
+        let s = sample(
+            "${unicode_all:,}",
+            &TemplateScene::TooltipContent { each: "".into() },
+        );
+        assert_eq!(s.text.as_str(), "U+4F60,U+597D");
+        assert_eq!(s.text.spans().iter().filter(|sp| sp.separator).count(), 1);
+    }
+
+    /// 分隔符参数里的内联色：样例照样上色、不报未知变量；颜色写法按模板坐标列出供诊断。
+    #[test]
+    fn sample_lists_separator_inline_color() {
+        let tpl = "${chaizi_all:$[nope,hover=x]{／}}";
+        let s = sample(tpl, &TemplateScene::Comment);
+        assert_eq!(s.text.as_str(), "亻尔／女子");
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        assert_eq!(s.colors.len(), 1);
+        let c = &s.colors[0];
+        assert_eq!(&tpl[c.start..c.end], "nope,hover=x");
+        assert_eq!(c.notes.len(), 1, "未知 key= 同样提示");
+        let sep = s.text.spans().iter().find(|sp| sp.separator).unwrap();
+        assert!(sep.color.is_some());
     }
 
     #[test]
@@ -519,7 +584,7 @@ mod tests {
     #[test]
     fn every_listed_role_has_a_sample_value() {
         for r in wind_ui_types::TEXT_ROLES {
-            if matches!(*r, "title" | "literal") {
+            if matches!(*r, "title" | "literal" | "separator") {
                 continue;
             }
             assert!(sample_value(r, None, Some('你')).is_some(), "{r}");

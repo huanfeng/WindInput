@@ -29,12 +29,14 @@ pub mod commentdict;
 pub mod composite;
 pub mod datformat;
 pub mod emojidict;
+pub mod freq_rank;
 pub mod gramdb;
 pub mod hotcache;
 pub mod layer;
 pub mod manager;
 pub mod reader_pool;
 pub mod reverseidx;
+pub mod stats;
 pub mod trie;
 pub mod weight_norm;
 

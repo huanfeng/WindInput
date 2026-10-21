@@ -292,11 +292,20 @@ public enum IPCError: Error, Equatable {
     case connectFailed(String)
     case writeFailed(String)
     case readFailed(String)
+    /// 收发超时 (服务卡住/不回包; 此时连接已被关闭), 或处于超时后的冷却期。重试无益。
+    case timeout
 }
 
 // MARK: - 默认运行时路径
 
 public enum BridgeEndpoints {
+    /// request 连接 I/O 超时 (毫秒): 服务卡死/与 app 版本不配套时, 主线程上的同步 readFrame
+    /// 否则会无限阻塞 → 切到本输入法整机卡死。正常 UDS roundtrip <1ms; 超时后调用方丢弃连接重建。
+    /// 凡在主线程做同步 roundtrip 的连接都要带上; push 连接不设 (见 BridgeClient.ioTimeoutMs)。
+    public static let requestIOTimeoutMs = 2000
+    /// 超时后的冷却期 (秒): 期内带超时的连接直接抛 .timeout, 不再逐个等满超时。
+    public static let requestStallCooldown: TimeInterval = 5
+
     /// 变体后缀: dev 变体的 .app (bundleID 以 "Dev" 结尾) 用 "Dev", 与 Rust
     /// wind_config::variant::app_dir_name() 对齐 (release=WindInput, dev=WindInputDev),
     /// 让 dev/release 两套 .app + 服务各用独立运行时目录 (socket/config) 共存 ——

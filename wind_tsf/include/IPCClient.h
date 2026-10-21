@@ -263,6 +263,10 @@ public:
     // Check if connected
     BOOL IsConnected() const { return _hPipe != INVALID_HANDLE_VALUE; }
 
+    // 主管道对端已断（服务端重启后留下的旧连接，IsConnected() 仍为真）时关掉句柄，
+    // 让下一次发送走 Connect 新建；活连接不动。返回是否丢弃了句柄。TSF 线程调用。
+    BOOL DiscardStaleConnection();
+
     // Receive response from service (call this after sending)
     BOOL ReceiveResponse(ServiceResponse& response);
 
@@ -407,6 +411,13 @@ public:
     BOOL NeedsStateSync() const { return _needsStateSync; }
     void ClearNeedsSyncFlag() { _needsStateSync = FALSE; }
 
+    // 本连接上 IME_ACTIVATED、FOCUS_GAINED 或按键是否已发出去过（新连接 / 断开时清零）。
+    // SERVICE_READY 的过期重试与焦点补发据此停手：服务端收到 IME_ACTIVATED 会按初始模式重置中英。
+    BOOL StateEstablished() const { return _stateEstablished; }
+
+    // SERVICE_READY 同步期间置 TRUE：管道忙（各宿主同时来连）不计入熔断。按键路径照旧计数。
+    void SetPipeBusyExempt(BOOL exempt) { _pipeBusyExempt = exempt; }
+
 private:
     // Pipe handle
     HANDLE _hPipe;
@@ -419,6 +430,15 @@ private:
 
     // State sync flag: set TRUE on new connection, cleared after full sync
     BOOL _needsStateSync;
+
+    BOOL _stateEstablished;
+    BOOL _pipeBusyExempt;
+
+    // 本连接上是否成功写过消息。写过的连接才可能是服务端重启留下的陈旧句柄，
+    // 发送失败时只对它重连重发；刚建的连接失败照旧算失败。
+    BOOL _pipeWritten;
+    // 最近一次 _WriteWithTimeout 失败的错误码，_SendBinaryMessage 据此判对端是否已断。
+    DWORD _lastWriteError;
 
     // Circuit breaker state
     CircuitState _circuitState;

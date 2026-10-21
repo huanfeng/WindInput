@@ -121,7 +121,7 @@
 - 排序：`cmp_exact_first(a,b).then(base_cmp)`，`base_cmp` 由 `base_sort` 选：
   - `base_sort = "weight"`（默认）→ `better`：`weight 降 → base_order 升 → natural_order 升 → code → consumed_length 降 → text`
   - `base_sort = "natural"` → `by_natural`：**完全忽略权重**，`base_order 升 → natural_order 升 → code → consumed_length 降 → text`
-- **空码补全**：精确模式无候选且不超码长时（满码长也补，论坛 t302），从更长编码取首个作 `completion_hint`（**只备货不入列**，交协调器判空）。
+- **空码补全**：精确模式无候选时（不限码长，满码长、超码长有更长编码也补，论坛 t302），从更长编码取首个作 `completion_hint`（**只备货不入列**，交协调器判空）。
 
 ### 4.2 拼音引擎（`pinyin/mod.rs`）
 

@@ -97,6 +97,12 @@ public:
     // Triggers _DoFullStateSync() on the TSF thread so the toolbar appears
     // after service restart without waiting for a focus/key event.
     void PostServiceReady();
+    // 按键 / 焦点路径已建立服务端状态时调（TSF 线程）：停掉 SERVICE_READY 的待发同步，
+    // 免得它晚到一步再发 IME_ACTIVATED、把用户刚切的中英状态重置。
+    void CancelServiceReadyRetry();
+    // focus_gained 发不出去时调（TSF 线程）：有限次定时补发 focus_gained，不必等用户按键。
+    // 与 SERVICE_READY 重试分开：它只补焦点，不发 IME_ACTIVATED。
+    void ScheduleFocusRecoveryRetry();
 
     // Thread-safe activation status from async reader thread.
     // 触发时机：Go 收到异步化后的 CmdIMEActivated / CmdFocusGained 完成 handler 后通过
@@ -132,6 +138,10 @@ private:
     // Message window for cross-thread updates
     HWND _hMsgWnd;
     static LRESULT CALLBACK _MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    // WM_SERVICE_READY 与其 TIMER_ID_SERVICE_READY 重试共用的同步判决（TSF 线程）。
+    void _RunServiceReadySync(HWND hwnd);
+    // TIMER_ID_FOCUS_RECOVERY 到点（TSF 线程）。
+    void _RunFocusRecoveryRetry(HWND hwnd);
     static const UINT WM_UPDATE_STATUS;
     static const UINT WM_COMMIT_TEXT;
     static const UINT WM_CLEAR_COMPOSITION;
@@ -195,6 +205,11 @@ private:
     BOOL _bIconLoading;
     // 「进入加载中」那条日志是否记过；见 GetIcon。
     BOOL _bLoggedLoading;
+    // SERVICE_READY 后 IME_ACTIVATED 已连续发送失败的次数（0 = 没有在重试）。
+    // 组合态推迟不计入；新的 WM_SERVICE_READY、成功、无焦点时清零。
+    UINT _serviceReadyFailures;
+    // focus_gained 补发已失败的次数（0 = 没有在补发）。
+    UINT _focusRecoveryFailures;
 
     // 模式主字。中文态取方案的 icon_label（"中"/"拼"/"五"/"双"），非中文态取
     // [ui.labels]（默认 "英"/"A"，用户可配，最多 2 个字符）。

@@ -1,8 +1,12 @@
 //! 生成 `data/charsets/blocks.yaml`：50 个 Unicode 区块 + 「其它」补集 + 预设组「符号」。
 //!
 //! ```text
-//! cargo run -q -p wind-tools --bin gen_block_charsets -- --out ../data/charsets/blocks.yaml
+//! cargo run -q -p wind-tools --bin gen_block_charsets -- --out ../data/charsets/blocks.yaml \
+//!     --emoji ../data/charsets/emoji.yaml
 //! ```
+//!
+//! `--emoji` 给「符号」组扣减 emoji 用（见 [`wind_candidate::preset_symbol_mixed_block_names`]），
+//! 改了 emoji 字表要重新生成本文件。
 //!
 //! # 为什么区块表要出成配置
 //!
@@ -32,15 +36,19 @@ const MAX_CODEPOINT: u32 = 0x10FFFF;
 fn main() -> anyhow::Result<()> {
     let mut out = String::new();
     let args: Vec<String> = std::env::args().collect();
-    let path = args
-        .windows(2)
-        .find(|w| w[0] == "--out")
-        .map(|w| w[1].clone())
-        .unwrap_or_else(|| "../data/charsets/blocks.yaml".to_string());
+    let arg = |name: &str, default: &str| {
+        args.windows(2)
+            .find(|w| w[0] == name)
+            .map(|w| w[1].clone())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let path = arg("--out", "../data/charsets/blocks.yaml");
+    let emoji = load_emoji(&arg("--emoji", "../data/charsets/emoji.yaml"))?;
 
     let blocks = wind_candidate::block_table();
     let other = wind_candidate::other_block_name();
     let symbols = wind_candidate::preset_symbol_block_names();
+    let mixed = wind_candidate::preset_symbol_mixed_block_names();
 
     out.push_str(HEADER);
     for (name, lo, hi) in blocks {
@@ -60,25 +68,34 @@ fn main() -> anyhow::Result<()> {
     out.push_str(SYMBOL_NOTE);
     out.push_str("- key: 符号\n  ranges:\n");
     let mut n = 0;
+    let mut segs = 0;
     for (name, lo, hi) in blocks {
         if symbols.contains(name) {
             out.push_str(&format!("    - {}\n", range_text(*lo, *hi)));
+            n += 1;
+            segs += 1;
+        } else if mixed.contains(name) {
+            for (a, b) in subtract(*lo, *hi, &emoji) {
+                out.push_str(&format!("    - {}\n", range_text(a, b)));
+                segs += 1;
+            }
             n += 1;
         }
     }
     // ⚠️ 组员写错一个名字，那一块就**静默消失**：用户勾了「符号」，某片字符不生效，
     // 而配置校验一声不吭。在生成时就核对数量，比留到运行期强。
+    let want = symbols.len() + mixed.len();
     anyhow::ensure!(
-        n == symbols.len(),
+        n == want,
         "预设组「符号」有 {} 个成员名在区块表里找不到",
-        symbols.len() - n
+        want - n
     );
     out.push_str(&format!("  order: {PRESET_ORDER}\n"));
 
     let mut f = std::fs::File::create(&path)?;
     f.write_all(out.as_bytes())?;
     println!(
-        "已写出 {path}：{} 个区块 + 「{other}」+ 符号({n} 段)",
+        "已写出 {path}：{} 个区块 + 「{other}」+ 符号({n} 块 / {segs} 段)",
         blocks.len()
     );
     Ok(())
@@ -90,6 +107,51 @@ fn range_text(lo: u32, hi: u32) -> String {
     } else {
         format!("U+{lo:04X}-U+{hi:04X}")
     }
+}
+
+/// 出厂 emoji 字表里的**单码位**成员（多码位序列不影响按码位扣减）。
+///
+/// 格式：`...` 之后一行一个字素簇。读到的条数过少就报错——静默读空会让「符号」把三块
+/// 整块收进来，与 emoji 相交而无人察觉。
+fn load_emoji(path: &str) -> anyhow::Result<std::collections::BTreeSet<u32>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("读取 emoji 字表 {path} 失败：{e}"))?;
+    let set: std::collections::BTreeSet<u32> = text
+        .lines()
+        .skip_while(|l| l.trim() != "...")
+        .skip(1)
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut cs = l.chars();
+            match (cs.next(), cs.next()) {
+                (Some(c), None) => Some(c as u32),
+                _ => None,
+            }
+        })
+        .collect();
+    anyhow::ensure!(
+        set.len() > 1000,
+        "emoji 字表 {path} 只读到 {} 条",
+        set.len()
+    );
+    Ok(set)
+}
+
+/// `[lo, hi]` 扣掉 `holes` 里的码位后剩下的连续段。
+fn subtract(lo: u32, hi: u32, holes: &std::collections::BTreeSet<u32>) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut start = lo;
+    for &h in holes.range(lo..=hi) {
+        if h > start {
+            out.push((start, h - 1));
+        }
+        start = h + 1;
+    }
+    if start <= hi {
+        out.push((start, hi));
+    }
+    out
 }
 
 /// 区块表的补集。依赖块表**按 start 升序且互不重叠**（`blocks_are_sorted_and_disjoint`
@@ -137,4 +199,6 @@ const SYMBOL_NOTE: &str = "
 # ⚠️ 与 emoji 刻意不相交：勾「符号」不该顺带把 emoji 也放进来，否则界面上两个开关的
 # 关系说不清楚。emoji 不在这里——它由 charsets/emoji.yaml 那份按 UTS #51 生成的精确
 # 字表给出（「五个块并集」的老口径两个方向都不准，见设计文档 §5.5）。
+# 「杂项技术符号」「杂项符号」「装饰符号」三块 emoji 与非 emoji 混住，按码位扣掉
+# emoji 字表后并入（✓ ★ ☐ ⌘ 在此，✔ ☀ ⌚ 不在），故下面有许多零碎小段。
 ";

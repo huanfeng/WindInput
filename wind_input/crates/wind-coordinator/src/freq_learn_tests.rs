@@ -775,6 +775,42 @@ fn excluded_blocks_skip_freq_recording() {
     );
 }
 
+/// 勾「符号」后 `✓` 不记频、不参与重排：它不带 Emoji 属性，只靠「符号」组管得到。
+#[test]
+fn symbol_group_excludes_check_mark() {
+    let (c, store) = exclude_coord("symbol_check", &["符号"]);
+    c.record_selection("dui", "✓", CandidateSource::None);
+    assert!(
+        store.get_freq("pinyin", "dui", "✓").unwrap().is_none(),
+        "勾「符号」后 ✓ 不该落词频记录"
+    );
+    let settings = c.engine_mgr.freq_settings_for("py_test");
+    assert!(settings.excluded_from_freq("✓"), "✓ 读端也应排除");
+    c.record_selection("nihao", "你好", CandidateSource::None);
+    assert!(
+        store.get_freq("pinyin", "nihao", "你好").unwrap().is_some(),
+        "汉字候选必须照常落库"
+    );
+}
+
+/// `✔`（U+2714）带 Emoji 属性：归 emoji、不归「符号」，只在勾 emoji 时免词频。
+#[test]
+fn heavy_check_mark_follows_emoji_not_symbol() {
+    let (c, _) = exclude_coord("heavy_check_sym", &["符号"]);
+    let settings = c.engine_mgr.freq_settings_for("py_test");
+    assert!(
+        !settings.excluded_from_freq("✔"),
+        "只勾「符号」时 ✔ 照常调频"
+    );
+    let (c, _) = exclude_coord("heavy_check_emoji", &["emoji"]);
+    let settings = c.engine_mgr.freq_settings_for("py_test");
+    assert!(settings.excluded_from_freq("✔"), "勾 emoji 时 ✔ 应免词频");
+    assert!(
+        !settings.excluded_from_freq("✓"),
+        "只勾 emoji 时 ✓ 照常调频"
+    );
+}
+
 /// 出厂（未配置）时行为与改动前完全一致：emoji 照常记词频。
 ///
 /// 锁的是「新功能默认不动任何人」，即 `BlockMask` 空集恒假那条路径的端到端体现。

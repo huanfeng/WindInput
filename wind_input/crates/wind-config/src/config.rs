@@ -2992,6 +2992,16 @@ pub struct PinyinEnglishMerge {
     /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。
     #[serde(default)]
     pub min_length: usize,
+    /// 中文侧**有**候选时也补英文前缀（至多 2 条，不与精确命中重复）。出厂关。
+    ///
+    /// 只在「打的不是完整拼音」时补：输入至少 5 个字母，且整串**任何切法**都切不成完整的
+    /// 全拼音节序列（`templa` 补 template，`shang` / `chang` 不补）。判据见
+    /// `wind_engine::english_merge::prefix_complete_applies`。
+    ///
+    /// ⚠️ 双拼方案下不生效：判据按全拼音节定义，双拼码两键一音节、几乎任何串都解得开，
+    /// 套不上这条判据。
+    #[serde(default)]
+    pub prefix_complete: bool,
 }
 
 /// 全局模糊音（[schema.pinyin.fuzzy]）。字段对齐引擎 FuzzyConfig。
@@ -4596,6 +4606,13 @@ pub struct EmojiConfig {
     /// 入口，故做成独立开关而不是不引入。
     #[serde(default)]
     pub categories: bool,
+    /// 候选里有追加出来的 emoji / 附加模块符号时，**不**做全码唯一自动上屏（码表与短语两侧）。
+    ///
+    /// 出厂关：追加候选不是这个码检索出的词条，默认不计入唯一性判据（见
+    /// `Candidate::is_emoji_suggestion`）。开了附加模块（如偏旁部首）的用户要的往往正是那条
+    /// 追加候选（`rrup` 提手旁 → 扌），自动上屏会让它来不及出现。
+    #[serde(default)]
+    pub block_auto_commit: bool,
     /// 附加模块开关（`[input.emoji.modules]`，键 = [`EMOJI_MODULES`] 的 id）。缺的键按该模块
     /// 的出厂值（[`EmojiConfig::module_enabled`]）；不认识的键忽略。
     ///
@@ -4837,6 +4854,7 @@ impl Default for EmojiConfig {
             max_hosts: default_emoji_max_hosts(),
             min_word_chars: default_emoji_min_word_chars(),
             categories: false,
+            block_auto_commit: false,
             modules: default_emoji_modules(),
         }
     }
@@ -6617,6 +6635,10 @@ pub struct UiCandidateConfig {
     /// - `"off"`：只编高亮行。
     #[serde(default = "default_grid_index_fill")]
     pub grid_index_fill: String,
+    /// 展开态下 PageUp/PageDown 是否翻一整屏（出厂开）；其余翻页键（如 `-` `=`）恒逐行移动。
+    /// 关掉后 PageUp/PageDown 也逐行。
+    #[serde(default = "default_true")]
+    pub grid_pageupdown_screen: bool,
     /// 展开态的分类标签：`all` 全部 / `single` 单字 / `phrase` 词组 / `rare` 生僻 / `symbol` 符号。
     /// 只决定**有哪些**，顺序固定按上面这个次序（「全部」恒在首位）。少于两个时不显示标签栏。
     /// 未知名字忽略。
@@ -6847,6 +6869,7 @@ impl Default for UiCandidateConfig {
             grid_rows: default_grid_rows(),
             grid_cell_max_chars: default_grid_cell_max_chars(),
             grid_index_fill: default_grid_index_fill(),
+            grid_pageupdown_screen: true,
             grid_categories: default_grid_categories(),
             comment_enabled: true,
             comment_template_vertical: default_comment_template(),
@@ -13596,6 +13619,7 @@ scripts = { latin = 42 }
             "出厂关：只有设置里打开的用户才会展开"
         );
         assert_eq!(cfg.ui.candidate.grid_rows(), 5);
+        assert!(cfg.ui.candidate.grid_pageupdown_screen);
         let mut c = cfg.ui.candidate.clone();
         c.max_chars = 16;
         c.grid_cell_max_chars = 3;

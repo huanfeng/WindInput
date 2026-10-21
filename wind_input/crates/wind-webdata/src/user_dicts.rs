@@ -215,9 +215,11 @@ pub(super) fn import_as<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow
     wind_store::user_dicts::validate_name(name)?;
     let content = super::dict_source_text(params)?;
     let content = content.as_ref();
-    let (fmt, rows, skipped) =
-        wind_store::import_formats::parse_words_auto(content, h.code_policy_for(schema_id))
-            .map_err(|e| anyhow::anyhow!(e))?;
+    let (fmt, rows, skipped) = wind_store::import_formats::parse_words_auto(
+        content,
+        super::dict_transfer_api::code_policy_for(h, schema_id),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     if fmt == wind_store::import_formats::DictFormat::WindDict
         && let Some(src) = wind_store::wdict::read_header_field(content, "engine_type")
         && !src.is_empty()
@@ -230,7 +232,8 @@ pub(super) fn import_as<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow
         anyhow::bail!("该文件的词库类型与当前方案不一致，导入会导致编码错乱，已阻止。");
     }
     let parsed = rows.len();
-    let (rows, st) = h.apply_pinyin_entry_contract(schema_id, rows, true);
+    let (rows, st) =
+        super::dict_transfer_api::apply_pinyin_entry_contract(h, schema_id, rows, true);
     let imported = store.import_user_dict(&ds, name, &rows)?;
     changed(h, &ds);
     Ok(json!({
@@ -250,28 +253,6 @@ pub(super) fn set_enabled<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyh
         "enabled": params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
     });
     h.web_schema_set_dict_enabled(&p)
-}
-
-/// `schema.setDictEnabled` 对 `user:` 前缀的 id：写 `dicts.toml`，生效路径与扩展库相同。
-pub(super) fn set_dict_enabled<H: WebDataRpc + ?Sized>(
-    h: &H,
-    schema_id: &str,
-    dict_id: &str,
-    enabled: bool,
-) -> anyhow::Result<Value> {
-    if let Some(r) = h.storage_readonly_reason() {
-        anyhow::bail!("{r}");
-    }
-    let name = dict_id.strip_prefix(ID_PREFIX).unwrap_or(dict_id);
-    let store = h
-        .user_store()
-        .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-    let ds = h.engine_mgr().data_schema_id(schema_id);
-    store.set_user_dict_enabled(&ds, schema_id, name, enabled)?;
-    let live = h
-        .engine_mgr()
-        .set_dict_enabled_live(schema_id, dict_id, enabled);
-    Ok(json!({ "ok": true, "live": live }))
 }
 
 #[cfg(test)]

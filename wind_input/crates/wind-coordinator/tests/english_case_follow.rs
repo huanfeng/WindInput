@@ -74,6 +74,9 @@ fn coord_with(cfg: Config, tag: &str) -> Arc<Coordinator> {
     Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store_at(tag))
 }
 
+/// 本文件多数用例打 `Hib` / `hib` 而不是 `Hi`：英文候选按词频排序后，`hi` 首页是
+/// hi / his / high…，用作观测对象的 hibernate / hibernation 落不到首页。
+///
 /// 按 `word` 逐键输入，大写字母带 Shift。首字母大写时**不**特殊处理——英文方案下它就该
 /// 落进主路字母臂（本文件的 `shift_letter_stays_in_english_schema` 正是钉这一条）。
 fn type_word_cased(coord: &Coordinator, word: &str) {
@@ -96,11 +99,11 @@ fn english_schema_projects_with_shift() {
         return;
     }
     let coord = coord_with(english_config(), "en_shift");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     let page = coord.debug_page_texts();
     assert_eq!(
         page.first().map(String::as_str),
-        Some("Hi"),
+        Some("Hib"),
         "首候选恒是所打原文（含大小写），实际: {page:?}"
     );
     // 判据落在**具体词**上：按首字母扫全列表会被词库自带大写的条目（`Hi-Fi`）搅乱，
@@ -127,14 +130,15 @@ fn english_schema_case_follow_can_be_turned_off() {
     let mut cfg = english_config();
     cfg.schema.english.case_follow_input = false;
     let coord = coord_with(cfg, "en_off");
+    // 这条用 `Hi`：`Hib` 的首页里有 en_ext 自带大写的专名 `Hibernate`，分不出是不是投影产物。
     type_word_cased(&coord, "Hi");
     let page = coord.debug_page_texts();
     assert!(
-        page.iter().any(|t| t == "hibernate"),
+        page.iter().any(|t| t == "his"),
         "关掉后词库候选应保持词库原文（小写），实际: {page:?}"
     );
     assert!(
-        !page.iter().any(|t| t == "Hibernate"),
+        !page.iter().any(|t| t == "His"),
         "关掉后不该有任何投影产物，实际: {page:?}"
     );
 }
@@ -147,16 +151,16 @@ fn lowercase_input_leaves_dict_case_alone() {
         return;
     }
     let coord = coord_with(english_config(), "en_lower");
-    type_word_cased(&coord, "hi");
+    type_word_cased(&coord, "hib");
     let page = coord.debug_page_texts();
     assert!(
         page.iter().any(|t| t == "hibernate"),
         "词库原文原样出现，实际: {page:?}"
     );
-    // ★ 单向规则的正面证据：词库里 `Hi-Fi` 自带大写，全小写输入**不得**把它压成 `hi-fi`。
-    // 这正是 `China` / `iPhone` 那条取舍在真实词库里的样子。
+    // ★ 单向规则的正面证据：en_ext 的专名 `Hibernate` 自带大写，全小写输入**不得**把它压成
+    // 小写。这正是 `China` / `iPhone` 那条取舍在真实词库里的样子。
     assert!(
-        page.iter().any(|t| t == "Hi-Fi"),
+        page.iter().any(|t| t == "Hibernate"),
         "词库自带的大写不该被小写输入压掉，实际: {page:?}"
     );
 }
@@ -211,7 +215,7 @@ fn temp_english_projects_from_entry_capital() {
         return;
     }
     let coord = coord_with(temp_english_config(), "te_on");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     let page = coord.debug_page_texts();
     assert!(
         page.iter().any(|t| t == "Hibernate"),
@@ -229,7 +233,7 @@ fn temp_english_case_follow_can_be_turned_off() {
     let mut cfg = temp_english_config();
     cfg.input.temp_english.case_follow_input = false;
     let coord = coord_with(cfg, "te_off");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     let page = coord.debug_page_texts();
     assert!(
         page.iter().any(|t| t == "hibernate"),
@@ -273,7 +277,7 @@ fn freq_records_dict_original_not_projected_text() {
 
     // 取 hibernation 而不是 hibernate：后者在 en_ext 里另有专名 `Hibernate`，投影后同名时
     // 留下的是那条没被改写的专名（`dedup_by_text`，论坛 t281 审查），选中的就不是投影候选了。
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     let page = coord.debug_page_texts();
     let shown = page
         .iter()
@@ -299,7 +303,7 @@ fn freq_records_dict_original_not_projected_text() {
     );
 }
 
-/// 词库同时有 `hibernate` 与专名 `Hibernate`（en_ext）：输入 `Hi` 时前者投影成 `Hibernate`，
+/// 词库同时有 `hibernate` 与专名 `Hibernate`（en_ext）：输入 `Hib` 时前者投影成 `Hibernate`，
 /// 与后者同名。留下的必须是没被改写的专名（论坛 t281 审查）——选中它，词频记在专名上。
 #[test]
 fn projected_twin_yields_to_real_capitalized_word() {
@@ -312,7 +316,7 @@ fn projected_twin_yields_to_real_capitalized_word() {
     let store = store_at("freq_twin");
     let coord =
         Coordinator::new_headless_with_store(cfg, Some(&data_dir()), std::sync::Arc::clone(&store));
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     let page = coord.debug_page_texts();
     let idx = page
         .iter()
@@ -356,7 +360,7 @@ fn projection_does_not_break_freq_rerank() {
         Some(&data_dir()),
         std::sync::Arc::clone(&store),
     );
-    type_word_cased(&coord, "hi");
+    type_word_cased(&coord, "hib");
     let page = coord.debug_page_texts();
     let idx = page
         .iter()
@@ -366,7 +370,7 @@ fn projection_does_not_break_freq_rerank() {
 
     let coord2 =
         Coordinator::new_headless_with_store(cfg, Some(&data_dir()), std::sync::Arc::clone(&store));
-    type_word_cased(&coord2, "Hi");
+    type_word_cased(&coord2, "Hib");
     let page2 = coord2.debug_page_texts();
     assert_eq!(
         page2.get(1).map(String::as_str),
@@ -388,7 +392,7 @@ fn capslock_cycles_three_variants() {
     let mut cfg = english_config();
     cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     assert!(
         coord.debug_page_texts().iter().any(|t| t == "Hibernate"),
         "默认档：按输入形态投影"
@@ -427,7 +431,7 @@ fn capslock_not_hijacked_when_disabled() {
         return;
     }
     let coord = coord_with(english_config(), "cycle_off");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     assert!(
         !coord.debug_cycle_english_case(),
         "出厂关 ⇒ CapsLock 保持系统原生语义"
@@ -484,7 +488,7 @@ fn capslock_cycle_works_in_temp_english() {
     let mut cfg = temp_english_config();
     cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle_te");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     assert!(coord.debug_cycle_english_case(), "临英也是英文语境");
     assert!(
         coord.debug_page_texts().iter().any(|t| t == "HIBERNATE"),
@@ -503,12 +507,12 @@ fn variant_resets_after_commit() {
     let mut cfg = english_config();
     cfg.input.english_case_cycle_key = "capslock".into();
     let coord = coord_with(cfg, "cycle_reset");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     assert!(coord.debug_cycle_english_case());
     assert!(coord.debug_page_texts().iter().any(|t| t == "HIBERNATE"));
     // 空格上屏首候选，结束这一次组合。
     coord.handle_key_event(&key(0x20, 0));
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     assert!(
         coord.debug_page_texts().iter().any(|t| t == "Hibernate"),
         "下一次组合应回到默认档，实际: {:?}",
@@ -530,7 +534,7 @@ fn tab_can_be_the_cycle_key() {
     let mut cfg = english_config();
     cfg.input.english_case_cycle_key = "tab".into();
     let coord = coord_with(cfg, "cycle_tab");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     assert!(coord.debug_page_texts().iter().any(|t| t == "Hibernate"));
 
     coord.handle_key_event(&key(0x09, 0)); // VK_TAB
@@ -557,7 +561,7 @@ fn only_the_configured_key_cycles() {
     let mut cfg = english_config();
     cfg.input.english_case_cycle_key = "tab".into();
     let coord = coord_with(cfg, "cycle_only_tab");
-    type_word_cased(&coord, "Hi");
+    type_word_cased(&coord, "Hib");
     // 钩子那条路(debug 入口)在配了 tab 时也不该改档：它的调用方 handle_capslock_hook_press
     // 有 VK_CAPITAL 判据, 而钩子本身此时压根不会安装。
     let before = coord.debug_page_texts();
@@ -567,7 +571,7 @@ fn only_the_configured_key_cycles() {
     let mut cfg2 = english_config();
     cfg2.input.english_case_cycle_key = "capslock".into();
     let coord2 = coord_with(cfg2, "cycle_only_caps");
-    type_word_cased(&coord2, "Hi");
+    type_word_cased(&coord2, "Hib");
     coord2.handle_key_event(&key(0x09, 0)); // 配的是 capslock, Tab 不该切档
     assert!(
         coord2.debug_page_texts().iter().any(|t| t == "Hibernate"),
@@ -587,7 +591,7 @@ fn unknown_or_empty_key_disables_the_feature() {
         let mut cfg = english_config();
         cfg.input.english_case_cycle_key = val.into();
         let coord = coord_with(cfg, tag);
-        type_word_cased(&coord, "Hi");
+        type_word_cased(&coord, "Hib");
         coord.handle_key_event(&key(0x09, 0));
         assert!(!coord.debug_cycle_english_case(), "{val:?} 应按关闭处理");
         assert!(

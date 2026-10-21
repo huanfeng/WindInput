@@ -187,10 +187,20 @@ impl Coordinator {
     ) -> Option<QuickFormatScope> {
         let (start, end) = self.page_range(state);
         let idx = start + page_local;
-        if idx >= end || idx >= state.candidates.len() {
+        if idx >= end {
             return None;
         }
-        let (kind, format_id) = parse_quick_cand_id(&state.candidates[idx].id)?;
+        self.quick_format_scope_at(state, idx)
+    }
+
+    /// 同 [`Self::quick_format_scope`]，但按**全量绝对下标**判（移动端候选栏可横滑、展开面板
+    /// 看全部，手里只有绝对下标）。页内版只是在此之上多一道「落在当页」的边界。
+    pub(crate) fn quick_format_scope_at(
+        &self,
+        state: &State,
+        idx: usize,
+    ) -> Option<QuickFormatScope> {
+        let (kind, format_id) = parse_quick_cand_id(&state.candidates.get(idx)?.id)?;
         // 组内下标：只数同类的快捷候选。列表里混着别的来源时，全列表下标会让
         // 「上移一位」跳过好几条。
         let index_in_kind = state
@@ -223,21 +233,54 @@ impl Coordinator {
                 self.quick_history_at(&state, page_local),
             )
         };
+        if !self.quick_format_or_history_op(op, scope, history) {
+            self.candidate_op(op, page_local);
+        }
+    }
+
+    /// 同 [`Self::candidate_or_quick_format_op`]，但按**全量绝对下标**定位（移动端候选长按菜单）。
+    ///
+    /// 不借道翻页：页内版的下标以 `current_page` 为基准，先把页翻到目标所在页再调它，
+    /// 会改掉用户可见的页状态（桌面候选窗、空格上屏的目标都跟着变）。这里三条分支各取
+    /// 绝对下标版的判据，与页内版逐条同源，只是不设「落在当页」那道边界。
+    pub fn candidate_or_quick_format_op_at(&self, op: wind_ui_types::CandidateOp, idx: usize) {
+        let (scope, history) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                self.quick_format_scope_at(&state, idx),
+                self.quick_history_of(&state, idx),
+            )
+        };
+        if !self.quick_format_or_history_op(op, scope, history) {
+            self.candidate_op_at(op, idx);
+        }
+    }
+
+    /// 历史候选 / 格式候选两条分支的执行体；返回 `false` = 两者都不是，交回调用方走词库 shadow。
+    ///
+    /// 页内版与绝对下标版共用这一份：分支写两遍，加一种动作时漏改一边，表现是
+    /// 「桌面右键点得动、手机长按没反应」（或反过来），而且日志干净。
+    fn quick_format_or_history_op(
+        &self,
+        op: wind_ui_types::CandidateOp,
+        scope: Option<QuickFormatScope>,
+        history: Option<String>,
+    ) -> bool {
         // 快捷输入历史候选：只有「删除」有语义（它没有位置可调，也不在任何词库里）。
         // 判据与菜单构造侧同源（`quick_history_at`），其余动作原样忽略。
         if let Some(text) = history {
             if op == wind_ui_types::CandidateOp::Delete {
                 self.delete_quick_history(&text);
             }
-            return;
+            return true;
         }
         let Some(scope) = scope else {
-            return self.candidate_op(op, page_local);
+            return false;
         };
         // 对格式候选无语义的动作（常用/生僻标记）原样忽略：菜单侧的 quick 分支本就不给，
         // 走到这里只可能是热键或协议回传的越界 id。
         let Some(qop) = QuickFormatOp::from_candidate_op(op) else {
-            return;
+            return true;
         };
         self.apply_quick_format_op(&scope, qop);
         // 立即重排：不刷新的话，用户得退出重进才看得到新顺序。
@@ -246,6 +289,7 @@ impl Coordinator {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.update_mix_candidates(&mut state);
         self.notify_ui_update(&state);
+        true
     }
 
     /// 执行一次格式调整：写库 → 回灌镜像。

@@ -45,6 +45,8 @@
 | `src/hotkey_match.rs` | key_down 热键匹配 |
 | `src/web_host.rs` | `WebDataHost` trait（16 方法）+ 转发 impl：设置页数据 RPC（**独立 crate `wind-webdata`**）消费宿主能力的窄面。依赖方向 webdata→coordinator，本 crate 因此不依赖 wind-transfer/fontdb（Android 闭包免 C 依赖、check-android 免 NDK 的关键，Cargo.toml 有⚠注释）。★新增 RPC 需要新宿主能力时**必须加在本 trait 上** |
 | `src/user_words_api.rs` | 用户词管理（分页列表三条分流 / 加词 ü 归一与边界求解 / 删词 / 清空）的**存储域**本体，泛型于 `WebDataHost`。桌面 `dict.*` RPC（wind-webdata）与移动端门面（wind-mobile）共用——从 webdata 下沉是因为 Android 闭包不含 webdata。转义与 JSON 形状仍留 webdata |
+| `src/dict_stats_api.rs` | 系统词库统计 `dict.systemStats` 本体：调 `EngineManager::dict_stats`（选库/缓存/single-flight），混输按主码表与拼音两个成员并排，补实时的用户词/临时词条数。泛型于 `WebDataHost`，webdata 只转发；扫 mmap 不扫 redb，不进 `FULL_SCAN_METHODS` |
+| `src/dict_transfer_api.rs` | 词库导出 / 导入（多段 .wdict 与 Rime/TSV）本体：引擎类型写头与跨类型拒收、段交集、拼音准入契约（`EntryContractStats` / 边界补齐）。泛型于 `WebDataHost`，桌面 `dict.export` / `dict.import`（wind-webdata）与移动端 `dict_export` / `dict_import` 共用，保证两端文件互通。读写盘与 JSON 形状仍留 webdata |
 | `src/freq_learn_tests.rs` | 词频路由/选词记账/自动造词/加词的 crate 内行为测试（白盒零 RPC；原住 webdata 契约测试，按「是否用 web_data_rpc」分拣回归） |
 | `src/host_services.rs` | `HostServices` trait（剪贴板等平台能力注入面）+ 桌面/headless 实现；收录判据见模块文档 |
 | `src/stats.rs` | 输入统计采集 |

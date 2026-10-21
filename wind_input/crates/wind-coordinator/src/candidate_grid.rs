@@ -7,7 +7,7 @@
 //! 高亮项，扩容与末页放宽照常从翻页那条路触发。这里新增的只有两样东西：
 //! - **滚动位置** `State::grid_top`（可见区第一行对应的页）；
 //! - **二维导航**：↑↓ 换行保持列号、←→ 线性移动（越过行尾折到下一行，正是既有的
-//!   `move_up` / `move_down`）、翻页键一次滚一屏、Esc 收起。
+//!   `move_up` / `move_down`）、翻页键逐行滚（PageUp/PageDown 可翻一整屏）、Esc 收起。
 //!
 //! # 下标
 //!
@@ -34,6 +34,17 @@ pub(crate) struct ReorderPositions {
     pub(crate) next: usize,
     /// 末位。
     pub(crate) last: usize,
+}
+
+/// 连续切分类时锚定的位置：用户最初高亮的词与它所在的可见行。
+///
+/// 只拿当前高亮当锚点会漂：高亮的词组在「单字」里没有，落到第一个单字；再切「词组」锚的就是
+/// 这个单字，又落到第一个词组；切回「全部」便停在这个词组上，不是用户原来那个。故切换之间
+/// 高亮没被挪过（仍是 `landed`）就沿用最初的锚点。
+pub(crate) struct GridTabAnchor {
+    text: String,
+    row: usize,
+    landed: Option<String>,
 }
 
 /// 展开态在原地重建前后要保住的位置，见 [`Coordinator::grid_snapshot`]。
@@ -218,11 +229,23 @@ impl Coordinator {
         true
     }
 
-    /// 翻页键：一次滚一屏（可见行数那么多行），高亮随之移动并保持列号。
+    /// 展开态的翻页键：PageUp/PageDown 在 `grid_pageupdown_screen` 开着时翻一整屏，
+    /// 其余翻页键逐行滚（同滚轮）。只看物理键，不管它绑在哪个组。
+    pub(crate) fn grid_page_key(&self, state: &mut State, down: bool, key_code: u32) -> bool {
+        let screen = matches!(key_code, keymap::VK_PRIOR | keymap::VK_NEXT)
+            && self.rt().config.ui.candidate.grid_pageupdown_screen;
+        if screen {
+            self.grid_page(state, down)
+        } else {
+            self.grid_scroll(state, down)
+        }
+    }
+
+    /// 一次滚一屏（可见行数那么多行），高亮随之移动并保持列号。
     ///
     /// 已在最后一行再往下翻，交给末页放宽——与收起态「末页按翻页键」是同一条出路，
     /// 放宽出来的候选追加在末尾，照常滚进来。
-    pub(crate) fn grid_page(&self, state: &mut State, down: bool) -> bool {
+    fn grid_page(&self, state: &mut State, down: bool) -> bool {
         self.clear_hover();
         let Some(top) = state.grid_top else {
             return false;
@@ -260,9 +283,13 @@ impl Coordinator {
         true
     }
 
-    /// 鼠标往下滚 / 点 ›：滚一行；已在最后一行时走末页放宽，与收起态 `page_next` 同一条出路
+    /// 滚一行（滚轮、翻页箭头、逐行的翻页键）。往上到第一行就停住，不像 ↑ 那样收起；
+    /// 往下已在最后一行时走末页放宽，与收起态 `page_next` 同一条出路
     /// （同一个 › 不能展开前会放宽、展开后不会）。
-    pub(crate) fn grid_scroll_down(&self, state: &mut State) -> bool {
+    pub(crate) fn grid_scroll(&self, state: &mut State, down: bool) -> bool {
+        if !down {
+            return state.current_page > 0 && self.grid_move_row(state, false);
+        }
         if self.grid_move_row(state, true) {
             return true;
         }
@@ -471,10 +498,18 @@ impl Coordinator {
         if tab == state.grid_tab || !Self::grid_active(state) {
             return false;
         }
-        let anchor = state
+        let current = state
             .candidates
             .get(self.highlighted_global_index(state))
             .map(|c| c.text.clone());
+        let anchor = match state.grid_tab_anchor.take() {
+            Some(a) if a.landed == current => a,
+            _ => GridTabAnchor {
+                text: current.unwrap_or_default(),
+                row: state.current_page - state.grid_top.unwrap_or(state.current_page),
+                landed: None,
+            },
+        };
         let prev = state.grid_tab;
         // 先回到完整列表：补加载（扩容）只认完整列表，筛选也从它出发。
         if prev != GridTab::All {
@@ -517,13 +552,13 @@ impl Coordinator {
                 if prev != GridTab::All {
                     self.grid_apply_tab(state, prev);
                 }
-                self.grid_land_on(state, anchor.as_deref());
+                self.grid_land_on(state, anchor);
                 return false;
             }
             state.grid_full = std::mem::replace(&mut state.candidates, filtered);
             state.grid_tab = tab;
         }
-        self.grid_land_on(state, anchor.as_deref());
+        self.grid_land_on(state, anchor);
         true
     }
 
@@ -540,20 +575,25 @@ impl Coordinator {
         state.grid_tab = tab;
     }
 
-    /// 切分类后把高亮落到 `text` 那个词上（找不到就第一个），可见区跟过去。
-    fn grid_land_on(&self, state: &mut State, text: Option<&str>) {
-        let idx = text
-            .and_then(|t| state.candidates.iter().position(|c| c.text == t))
+    /// 切分类后把高亮落到锚点那个词上（找不到就第一个），尽量留在原来那一可见行，
+    /// 并记下落点供下一次切换判断高亮是否被挪过。
+    fn grid_land_on(&self, state: &mut State, mut anchor: GridTabAnchor) {
+        let idx = state
+            .candidates
+            .iter()
+            .position(|c| c.text == anchor.text)
             .unwrap_or(0);
         let pp = self.per_page(state.active);
         // 直接写页码、不经 `turn_page`：切分类不是翻页，不该改变 `-` 键的翻页身份（同整句切换）。
         state.current_page = idx / pp;
         state.selected_index = idx % pp;
-        // 可见区从高亮行起、尽量凑满一屏（同在靠后的页上展开）。
+        // 可见区尽量凑满一屏（同在靠后的页上展开）。
         let full_top = self.total_pages(state).saturating_sub(self.grid_rows());
-        state.grid_top = Some(state.current_page.min(full_top));
+        state.grid_top = Some(state.current_page.saturating_sub(anchor.row).min(full_top));
         self.grid_follow(state);
         self.clear_hover();
+        anchor.landed = state.candidates.get(idx).map(|c| c.text.clone());
+        state.grid_tab_anchor = Some(anchor);
     }
 
     /// 候选整份重建（扩容、末页放宽）之后：分类筛选中的话，在新的完整列表上重新筛一遍。
@@ -917,27 +957,71 @@ mod tests {
         assert_eq!(c.state.lock().unwrap().input_cursor_pos, 2);
     }
 
-    /// 翻页键一次滚一屏，高亮随之下移一屏并保持列号；末屏不留空行。
+    /// `-` `=` 逐行移动（同滚轮）：高亮到可见区末行再按，可见区滚一行；首行按 `-` 停住不收起。
     #[test]
-    fn page_key_scrolls_a_screen_when_expanded() {
+    fn page_key_moves_a_row_when_expanded() {
         let (c, _rx) = coord(true);
-        seed(&c, PP * 8); // 8 页
+        seed(&c, PP * 8);
         c.handle_key_event(&key(keymap::VK_EQUAL));
         c.handle_key_event(&key(keymap::VK_RIGHT));
         c.handle_key_event(&key(keymap::VK_EQUAL));
-        // 末页是第 7 页：可见区最多滚到 3..=7，高亮从 0 下移 5 行到第 5 页。
-        assert_eq!(view(&c), (5, 1, Some(3)));
+        assert_eq!(view(&c), (1, 1, Some(0)), "下移一行并保持列号");
+        for _ in 0..3 {
+            c.handle_key_event(&key(keymap::VK_EQUAL));
+        }
+        assert_eq!(view(&c), (4, 1, Some(0)), "到可见区末行");
         c.handle_key_event(&key(keymap::VK_EQUAL));
-        assert_eq!(view(&c), (7, 1, Some(3)), "到底后高亮落到末行");
-        c.handle_key_event(&key(keymap::VK_MINUS));
-        assert_eq!(view(&c), (2, 1, Some(0)));
-        c.handle_key_event(&key(keymap::VK_MINUS));
-        assert_eq!(view(&c), (0, 1, Some(0)), "首屏再往上翻回到首行，不收起");
+        assert_eq!(view(&c), (5, 1, Some(1)), "末行再按，可见区滚一行");
+        for _ in 0..5 {
+            c.handle_key_event(&key(keymap::VK_MINUS));
+        }
+        assert_eq!(view(&c), (0, 1, Some(0)));
         assert!(matches!(
             c.handle_key_event(&key(keymap::VK_MINUS)),
             KeyAction::Consumed
         ));
+        assert_eq!(view(&c), (0, 1, Some(0)), "首行按 - 停住，不收起");
+    }
+
+    /// PageUp/PageDown 一次滚一屏，高亮随之下移一屏并保持列号；末屏不留空行。
+    #[test]
+    fn page_up_down_scrolls_a_screen_when_expanded() {
+        let (c, _rx) = coord(true);
+        seed(&c, PP * 8); // 8 页
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        c.handle_key_event(&key(keymap::VK_RIGHT));
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        // 末页是第 7 页：可见区最多滚到 3..=7，高亮从 0 下移 5 行到第 5 页。
+        assert_eq!(view(&c), (5, 1, Some(3)));
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        assert_eq!(view(&c), (7, 1, Some(3)), "到底后高亮落到末行");
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        assert_eq!(view(&c), (2, 1, Some(0)));
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        assert_eq!(view(&c), (0, 1, Some(0)), "首屏再往上翻回到首行，不收起");
+        assert!(matches!(
+            c.handle_key_event(&key(keymap::VK_PRIOR)),
+            KeyAction::Consumed
+        ));
         assert_eq!(view(&c).2, Some(0));
+    }
+
+    /// 关掉 `grid_pageupdown_screen` 后 PageUp/PageDown 也逐行。
+    #[test]
+    fn page_up_down_moves_a_row_when_screen_off() {
+        let mut cfg = wind_config::Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = true;
+        cfg.ui.candidate.grid_pageupdown_screen = false;
+        let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
+        c.debug_mark_coords_ready();
+        seed(&c, PP * 8);
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        assert_eq!(view(&c), (1, 0, Some(0)));
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        assert_eq!(view(&c), (0, 0, Some(0)), "首行停住，不收起");
     }
 
     /// 高亮行滚出可见区时可见区跟随。
@@ -1129,7 +1213,7 @@ mod tests {
             .expect("应下发展开态的帧")
     }
 
-    /// 只补整行（出厂）：每页 5 个时高亮行 1–5、下一行 6–10（第 10 个由数字键 0 选，序号沿用
+    /// 只补整行（出厂）：每页 5 个时高亮行 1–5、下一行 6–9、0（第 10 个由数字键 0 选，序号沿用
     /// 普通候选窗的写法），数字键的选择范围跟着延到下一行。
     #[test]
     fn indices_continue_onto_whole_rows() {
@@ -1141,7 +1225,7 @@ mod tests {
         assert_eq!((from, count), (5, 10), "高亮在第 2 行：第 2、3 行带号");
         assert_eq!(
             &labels[5..15],
-            &["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+            &["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
         );
         let st = c.state.lock().unwrap();
         assert_eq!(c.select_range(&st), (5, 15), "数字键的范围跟着序号走");
@@ -1160,7 +1244,7 @@ mod tests {
         assert_eq!((from, count), ((ROWS as u16 - 1) * 5, 5));
     }
 
-    /// 逐格档：每页 7 个时编满 10 个，下一行前 3 格带 8、9、10；off 档只编高亮行。
+    /// 逐格档：每页 7 个时编满 10 个，下一行前 3 格带 8、9、0；off 档只编高亮行。
     #[test]
     fn index_fill_cells_and_off() {
         let (c, rx) = coord_with(7, "cells");
@@ -1168,7 +1252,7 @@ mod tests {
         c.handle_key_event(&key(keymap::VK_EQUAL));
         let (from, count, labels) = index_frame(&rx);
         assert_eq!((from, count), (0, 10));
-        assert_eq!(&labels[7..10], &["8", "9", "10"]);
+        assert_eq!(&labels[7..10], &["8", "9", "0"]);
         let (c, rx) = coord_with(5, "off");
         seed(&c, 5 * 4);
         c.handle_key_event(&key(keymap::VK_EQUAL));
@@ -1390,6 +1474,36 @@ mod tests {
         c.handle_key_event(&key(keymap::VK_TAB));
         let st = c.state.lock().unwrap();
         assert_eq!(st.candidates[c.highlighted_global_index(&st)].text, word);
+    }
+
+    /// Tab 转一圈回到「全部」：高亮回到原来那个词、原来那一可见行。中途某个分类里没有它
+    /// （落到第一个）也不改锚点，只要切换之间没挪过高亮。
+    #[test]
+    fn tab_round_trip_returns_to_the_same_cell() {
+        let Some((c, _rx)) = typed_expanded("SHIJIAN") else {
+            return;
+        };
+        // 第二页以后的第一个单字：它在「词组」里没有。
+        let idx = {
+            let st = c.state.lock().unwrap();
+            (PP..st.candidates.len())
+                .find(|&i| wind_candidate::semantic_units(&st.candidates[i].text) == 1)
+                .expect("shijian 第二页以后应有单字")
+        };
+        highlight_flat(&c, idx);
+        let before = {
+            let st = c.state.lock().unwrap();
+            (st.current_page, st.selected_index, st.grid_top)
+        };
+        assert!(before.2.unwrap() < before.0, "前提：高亮不在可见区首行");
+        let n = c.grid_tabs(&c.state.lock().unwrap()).len();
+        assert!(n >= 3, "前提：至少全部 / 单字 / 词组");
+        for _ in 0..n {
+            c.handle_key_event(&key(keymap::VK_TAB));
+        }
+        assert_eq!(tab_of(&c), GridTab::All);
+        let st = c.state.lock().unwrap();
+        assert_eq!((st.current_page, st.selected_index, st.grid_top), before);
     }
 
     /// 在「单字」里触发扩容：扩容重建的是完整列表（带词组），筛选要重新套上。

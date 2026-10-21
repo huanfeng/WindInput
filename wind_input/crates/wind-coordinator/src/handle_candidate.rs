@@ -81,6 +81,9 @@ pub(crate) use wind_candidate::candidate_display_order;
 /// 无从标定：英文词库权重（`hen 800` / `shi 500`）与拼音词库权重（`很 86016`）是两套
 /// 互不相干的量纲。
 ///
+/// 拼音「英文前缀补全」补出来的英文（`meta.from_prefix_complete`）再往后让一段：让过紧随
+/// 其后、吃满整串的拼音真词（`xiaom` 的「小米」），理由见函数内注释。
+///
 /// ⚠️ **取开头的连续段，不是 `rposition`**。用「最后一条常用精确解」作锚会让英文被推到
 /// 列表深处——词频重排可能把某条常用词提到很靠后的位置之后，那条就成了锚。连续段是
 /// 有界的，且与「用户第一屏看到什么」这个真实关切对齐。
@@ -115,10 +118,8 @@ pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, 
     // 有词库背书的候选**不受影响**：`hen` 的「很」、`men` 的「们」、`data` 的「打他」
     // 都是 `is_synthesized == false`，照旧排在英文之前。于是「中文解得好就让位、
     // 解不出或只能靠拼凑就上前」这条线在这里继续成立。
-    let english_exact = {
-        let lower = input.to_lowercase();
-        english.iter().any(|c| c.code == lower)
-    };
+    let lower = input.to_lowercase();
+    let english_exact = english.iter().any(|c| c.code == lower);
     // ②b **混合简拼整句**自 `3934d5cc` 起带 `is_abbrev`（与整串简拼词同层按权重竞争），
     // `is_pinyin_exact_tier` 因此不再认它、`source_tier` 落到 4。但在**这里**它的身份没变：
     // 仍是吃满整串、全为常用字的一种完整解读，此前一直算在开头那段里——不补这一条，
@@ -136,7 +137,38 @@ pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, 
         .iter()
         .take_while(|c| leads_as_exact(c) && !(english_exact && c.is_synthesized))
         .count();
-    rest.splice(pos..pos, english);
+    // ★ 拼音「英文前缀补全」补出来的英文（`meta.from_prefix_complete`，只有
+    // `english_merge::lookup_prefix_complete` 打这个标记）还要让过紧随其后、**吃满整串的拼音
+    // 真词**（非引擎合成）：`xiaom` 的「小米」是简拼残码命中、不在精确档，但它才是用户最
+    // 可能要的；补全出的 `Xiaomi` 只是「也许在打英文」的猜测。只吃一部分输入的「小」不算。
+    //
+    // ⚠️ 两头都要收窄：让位的只认带标记的英文，被让的只认 `source == Pinyin`。按「code 比
+    // 输入长」认英文的话，英文方案自己的前缀候选也会被拆开；不限来源的话，短语（`consumed`
+    // 为 0、被 `effective_consumed` 当吃满）也成了让位对象——英文方案开短语打 `da` 会被拆成
+    // 「精确英文 → 短语 → 前缀英文」（审查查出）。
+    let has_completion = english.iter().any(|c| c.meta.from_prefix_complete);
+    let pos_prefix = if has_completion {
+        pos + rest[pos..]
+            .iter()
+            .take_while(|c| {
+                c.source == CandidateSource::Pinyin
+                    && !c.is_synthesized
+                    && wind_candidate::effective_consumed(c, input.len()) >= input.len()
+            })
+            .count()
+    } else {
+        pos
+    };
+    if pos_prefix == pos {
+        // 没有要让的：英文整块原序插入（英文块内的次序可能是调频排出来的，不能动）。
+        rest.splice(pos..pos, english);
+    } else {
+        let (completion, others): (Vec<Candidate>, Vec<Candidate>) = english
+            .into_iter()
+            .partition(|c| c.meta.from_prefix_complete);
+        rest.splice(pos_prefix..pos_prefix, completion);
+        rest.splice(pos..pos, others);
+    }
     *candidates = rest;
 }
 
@@ -419,6 +451,41 @@ fn make_emoji_candidate(text: String) -> Candidate {
     }
 }
 
+/// 移动端拼音单字母的首批候选上限，见 [`Coordinator::main_path_candidate_limit`]。
+/// 60 是宿主 release 实测 1～1.6ms 的档位（手机约 3～6ms，一帧以内）；100 条宿主已 2～5ms。
+pub(crate) const MOBILE_PINYIN_SINGLE_LIMIT: usize = 60;
+
+impl Coordinator {
+    /// 后台把当前拼音类方案的各个声母各查一遍（移动端在核心就绪、切方案后调）。
+    ///
+    /// 单声母每个字母在进程里**第一次**查询明显更慢（模拟器 20～50ms、之后 3～6ms：词库映射页
+    /// 首次缺页等一次性开销），手机上表现为「换个首字母就卡一下」。这里提前替用户付掉。
+    ///
+    /// ★ 直接查引擎、**不走按键路径**：`prepare` 那种喂假按键的做法会改输入状态，预热若与
+    /// 用户打字交错，假键与退格会插进用户的编码里。查引擎不碰状态、不出候选帧；
+    /// 引擎本就跨线程共享（按键线程、`prepare`、反查索引后台构建都在用）。
+    /// 上限与移动端单字母首批一致，查的正是用户第一下要的那一批。
+    pub fn prewarm_single_initials(self: &std::sync::Arc<Self>) {
+        if self.engine_mgr.current_engine_type() != Some(wind_engine::engine::EngineType::Pinyin) {
+            return;
+        }
+        let this = std::sync::Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("wind-prewarm-initials".into())
+            .spawn(move || {
+                let id = this.engine_mgr.active_schema_id();
+                let t0 = std::time::Instant::now();
+                for b in b"bpmfdtnlgkhjqxzcsrywaeo" {
+                    let key = (*b as char).to_string();
+                    let _ = this
+                        .engine_mgr
+                        .convert_with(&id, &key, MOBILE_PINYIN_SINGLE_LIMIT);
+                }
+                tracing::info!("单字母预热 {id} 用时 {:?}", t0.elapsed());
+            });
+    }
+}
+
 impl Coordinator {
     /// 记录一次选词到 redb FREQ（词频维度：count+1、last_used=now，按 schema+code+text）。
     /// 词频是与权重解耦的独立维度（frequency.md），仅记真实使用数据；redb 事务即时持久。
@@ -511,7 +578,13 @@ impl Coordinator {
         // 码表自动造词：登记这个字是用哪条码打出来的（GH#181）。主输入路的选词 / 顶屏出口
         // 全都经过这里（见上），故挂在这个薄包装里而不是逐个出口。
         self.note_draft_code_hint(cand, code);
-        self.record_selection_cand_in(None, code, cand)
+        self.record_selection_cand_in(None, code, cand);
+        // ★ 混进别的方案（拼音 / 码表的「英文候选」、混输）的英文候选，词频**另记一份进英文桶**
+        // ——与英文方案、临英同一个记频口（开关也按英文方案取），在哪儿选过的英文词，三处都
+        // 受益。上面那条按主方案的记账照旧：主方案读端（`apply_freq_rerank_in`）靠它排序。
+        if cand.source == CandidateSource::English && !self.engine_mgr.active_is_english() {
+            self.record_freq_only(Some(ENGLISH_SCHEMA), code, cand.freq_text(), cand.source);
+        }
     }
 
     /// 同 [`Self::record_selection_cand`]，但可指定**归属方案**（overlay 用）。
@@ -587,7 +660,18 @@ impl Coordinator {
         // 历史先记、与词频文本空不空无关：两条通路独立（理由见 emoji 守卫）。空显示标签的
         // `$CC` 纯文本命令就是 `freq_text` 空而上屏文本非空的例子。
         self.push_commit_history(history_text);
-        let text = freq_text;
+        self.record_freq_only(schema_override, code, freq_text, source);
+    }
+
+    /// [`Self::record_selection_cased_in`] 的词频半边（不记上屏历史）：一次上屏要记进**两个**
+    /// 桶时（混入的英文候选，见 [`Self::record_selection_cand`]），历史只该记一次。
+    fn record_freq_only(
+        &self,
+        schema_override: Option<&str>,
+        code: &str,
+        text: &str,
+        source: CandidateSource,
+    ) {
         // 暂停学习：一切选词记账（主路、临拼、快捷输入、特殊模式、英文头部候选）都汇到这里。
         if text.is_empty() || self.learning_suspended() {
             return;
@@ -1094,7 +1178,40 @@ impl Coordinator {
 
     /// 首次加载候选上限（对齐 Go：短前缀小批量分级加载，长前缀近全量）。
     pub(crate) fn initial_candidate_limit(&self, input: &str) -> usize {
-        Self::initial_candidate_limit_of(self.engine_mgr.current_engine_type(), input)
+        Self::main_path_candidate_limit(
+            self.engine_mgr.current_engine_type(),
+            input,
+            crate::handle_assoc::use_mobile_overrides(),
+        )
+    }
+
+    /// 主路径首批上限：[`Self::initial_candidate_limit_of`]，移动端再对**拼音单字母**收紧到
+    /// [`MOBILE_PINYIN_SINGLE_LIMIT`]。
+    ///
+    /// 单个声母是拼音里展开最宽的输入（简拼覆盖整个声母下的音节），引擎取 k 条的耗时随 k
+    /// 超线性增长（宿主 release 实测 `b`：60 条 1ms、300 条 23ms）。手机上每个词的第一个
+    /// 字母都要在主线程同步付这笔钱，真机就是每打一个词卡一下。
+    ///
+    /// 代价是词频重排只能排池内候选——这由移动端的「滑到尾部扩容」补上
+    /// （[`crate::candidate_pull`] 的 `candidate_window_growing`，与桌面翻页同一个
+    /// [`Self::expand_candidates`]）。桌面不收紧：首页只露 9 个、靠翻页扩容的节奏下，
+    /// 池外常用词会直接从首页消失，而桌面 CPU 上 300 条也不到一帧。
+    ///
+    /// 只管主路径：临拼 / 混输成员 / 临英各自调 `initial_candidate_limit_of`，不受影响。
+    pub(crate) fn main_path_candidate_limit(
+        engine_type: Option<wind_engine::engine::EngineType>,
+        input: &str,
+        mobile: bool,
+    ) -> usize {
+        let base = Self::initial_candidate_limit_of(engine_type, input);
+        if mobile
+            && engine_type == Some(wind_engine::engine::EngineType::Pinyin)
+            && input.chars().count() == 1
+        {
+            base.min(MOBILE_PINYIN_SINGLE_LIMIT)
+        } else {
+            base
+        }
     }
 
     /// 同 [`Self::initial_candidate_limit`]，但按**指定引擎类型**分级。
@@ -1440,7 +1557,7 @@ impl Coordinator {
             // 精确匹配模式（`single_code_input`，仅纯码表方案）：默认抑制短语前缀枚举，只保留上面的
             // 精确码短语（`lookup`）——与码表引擎跳过 `search_prefix` 的行为对齐。混输不适用：其拼音半边
             // 恒前缀匹配，切精确会与拼音割裂（见 `EngineManager::is_codetable`）。
-            // 例外——镜像码表引擎 `single_code_complete`：当前无任何候选（码表 + 精确短语均空）且不超码长时，
+            // 例外——镜像码表引擎 `single_code_complete`：当前无任何候选（码表 + 精确短语均空）时，
             // 放行一次前缀枚举作**补全候选源**，避免精确模式下彻底无候选。
             let ct = self.engine_mgr.codetable_settings();
             // 引擎模式：纯码表 vs 拼音/混输。全局短语的前缀命中按**来源**（来源=短语库、全局、
@@ -1453,11 +1570,8 @@ impl Coordinator {
             // 空码补全的短语侧取数闸门：仅在精确模式抑制了前缀枚举时才可能触发。此处的
             // `candidates.is_empty()` 已是「码表候选 + 精确短语」之和——码表引擎不再抢先把
             // 补全候选塞进来（见 `ConvertResult::completion_hint`），故这个「空」判得准。
-            let complete_fallback = exact_only
-                && ct.single_code_complete
-                && candidates.is_empty()
-                // `<=`：满码长空码也补（论坛 t302），与引擎侧 `completion_hints` 的闸门同口径。
-                && state.input_buffer.chars().count() <= self.engine_mgr.active_max_code_length();
+            // 不设码长闸门（论坛 t302）：满码长乃至超码长空码也补，与引擎侧 `completion_hints` 同口径。
+            let complete_fallback = exact_only && ct.single_code_complete && candidates.is_empty();
             let prefix_hits = if !exact_only || complete_fallback {
                 phrases.lookup_prefix(&state.input_buffer, &recent, min_prefix, &phrase_scope)
             } else {
@@ -1861,6 +1975,8 @@ impl Coordinator {
             // 惰性：`filter` 只在引擎已放行（`Some`）时才求值，故全量扫短语码表的代价不落在
             // 每次按键上——与 `phrase_vetoes_top_code` 的调用点选择同源。
             .filter(|_| !self.phrase_vetoes_auto_commit(state, &state.input_buffer))
+            // 追加候选否决（`input.emoji.block_auto_commit`，出厂关）：见 `emoji_vetoes_auto_commit`。
+            .filter(|_| !self.emoji_vetoes_auto_commit(&state.candidates))
         {
             Some(_) => {
                 // 一致性：自动上屏文本取「实际显示的首候选」，与空格/点选同源，杜绝
@@ -1922,6 +2038,11 @@ impl Coordinator {
         if !ct.auto_commit_at_full {
             return None;
         }
+        // 码表整句开启时满码上屏整体让位（引擎侧在 `CodeTableEngine::new` 关掉，短语这条
+        // 读的是配置、绕过了引擎，须在此同判）。
+        if self.engine_mgr.sentence_input_enabled() {
+            return None;
+        }
         // 无「满码」概念的引擎（拼音 / 双拼）**整体不参与**（论坛 t308）。
         //
         // 开关读的是 `schema.codetable`，拼音方案照样继承全局那一份；而下面的最短码长闸在码长
@@ -1929,7 +2050,7 @@ impl Coordinator {
         // 候选，直通命令 `$CC(…ime.schema…)` 成了唯一一条，打完第三码当场执行。简拼开着时
         // 不触发只是碰巧多了一条简拼候选，换个无拼音解的码照样中招。
         //
-        // ⚠️ 必须问满码长而不是 `active_max_code_length`：后者对混输刻意为 0，用它会把混输
+        // ⚠️ 必须问满码长而不是活跃引擎的 `Engine::max_code_length`：后者对混输刻意为 0，用它会把混输
         // 一并拦下（v0.126.0 的回归）。
         if self.engine_mgr.active_full_code_length() == 0 {
             return None;
@@ -1949,6 +2070,10 @@ impl Coordinator {
         // 引擎侧的 `decide_auto_commit` 不需要这道闸：它按 `c.code == input` 筛码表候选子集，
         // 而 emoji 候选 `code` 恒空（同短语、同英文头部候选）。两处判据不同源，别互相照抄。
         let c = sole_non_emoji(&state.candidates)?;
+        // 同码表侧：用户选择让追加候选阻止自动上屏时，这里同口径否决。
+        if self.emoji_vetoes_auto_commit(&state.candidates) {
+            return None;
+        }
         // 精确码短语（非前缀枚举 / 非组）。命令留待下方按纯文本/副作用分流。
         if !c.is_phrase || c.is_prefix || c.is_group {
             return None;
@@ -2060,6 +2185,16 @@ impl Coordinator {
             ct.auto_commit_min_len,
             self.engine_mgr.active_full_code_length(),
         )
+    }
+
+    /// 候选里有追加出来的 emoji / 附加模块符号，且用户开了 `input.emoji.block_auto_commit`
+    /// ⇒ 否决全码唯一自动上屏（码表与短语两侧共用）。
+    ///
+    /// 判据是「列表里有追加候选」而不追溯宿主：走到自动上屏时列表通常只剩上屏目标这一条
+    /// 词库候选，追加候选也就挂在它身上。
+    fn emoji_vetoes_auto_commit(&self, candidates: &[Candidate]) -> bool {
+        self.rt().config.input.emoji.block_auto_commit
+            && candidates.iter().any(|c| c.is_emoji_suggestion)
     }
 
     /// `$CC` 命令候选的自动上屏结局分流（短语命令 / 词库命令词条共用）：
@@ -4593,6 +4728,23 @@ impl Coordinator {
         if idx >= end || idx >= state.candidates.len() {
             return;
         }
+        self.candidate_op_in(&mut state, op, idx);
+    }
+
+    /// 同 [`Self::candidate_op`]，但按**全量绝对下标**定位（移动端候选长按菜单）。
+    ///
+    /// 不先翻页再调页内版：那会改掉用户可见的页状态。执行体本就按绝对下标工作
+    /// （页内版也是先折成 `start + page_local` 再进去），这里只是省掉那道「落在可选范围」的边界。
+    pub(crate) fn candidate_op_at(&self, op: CandidateOp, idx: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if idx >= state.candidates.len() {
+            return;
+        }
+        self.candidate_op_in(&mut state, op, idx);
+    }
+
+    /// 词条操作执行体，`idx` 为全量绝对下标（调用方已做边界检查）。
+    fn candidate_op_in(&self, state: &mut State, op: CandidateOp, idx: usize) {
         let cand = state.candidates[idx].clone();
         let word = cand.text.clone();
 
@@ -4601,13 +4753,13 @@ impl Coordinator {
         // 直接 return —— 用户点得动、毫无反应、没有任何日志，是最难查的一类错配。
         // 判据与菜单侧 `common_char_mark` 同源（都由它决定给不给这一项）。
         if matches!(op, CandidateOp::ToggleCommon) {
-            self.toggle_common_char(&mut state, &word);
+            self.toggle_common_char(state, &word);
             return;
         }
 
         // 作用域即准入：拿不到落点（无词库归属的 overlay / 空码浏览态）就什么都不做，
         // 与菜单侧「只给复制」是同一个判据的两副面孔。
-        let Some(scope) = self.candidate_op_scope(&state) else {
+        let Some(scope) = self.candidate_op_scope(state) else {
             return;
         };
         let CandidateOpScope {
@@ -4645,7 +4797,7 @@ impl Coordinator {
             return;
         }
         // 位置一律按完整列表计（分类筛选中 `idx` 只是子集下标），见 `reorder_positions`。
-        let pos = self.reorder_positions(&state, idx);
+        let pos = self.reorder_positions(state, idx);
         // 已在首位：置顶是冗余规则，直接忽略（菜单已灰显，热键路径 defensive）。
         if matches!(op, CandidateOp::MoveTop) && pos.here == 0 {
             return;
@@ -4687,17 +4839,17 @@ impl Coordinator {
         // 重新构建候选（会重新应用 Shadow）并重绘。
         // **必须按模式分派**：主路径的 `update_candidates` 读 `input_buffer`，而特殊模式下它
         // 恒为空 —— 在快符里走主路径的后果不是「不刷新」而是候选窗当场被清空。
-        let grid = Self::grid_snapshot(&state);
+        let grid = Self::grid_snapshot(state);
         if special {
             // 返回值是「全码策略请求自动上屏」的意向，此处**刻意丢弃**：编码一个字没变，
             // 用户只是在调整候选顺序，凭空上屏是错的。
-            let _ = self.update_special_candidates(&mut state);
+            let _ = self.update_special_candidates(state);
         } else {
-            self.update_candidates(&mut state);
+            self.update_candidates(state);
         }
         // 展开态：别跳回首行、丢掉分类——用户正在第几行调的就留在第几行。
         if let Some(snap) = grid {
-            self.grid_restore(&mut state, snap);
+            self.grid_restore(state, snap);
         }
         // 用户看到的那一半判据。「记录删掉了、但同文的系统词条目还在」与「根本没删到」
         // 在屏幕上完全同形（都是点了没反应），只有把这一行和上面的「删前命中」并排看
@@ -4709,7 +4861,7 @@ impl Coordinator {
                 word
             );
         }
-        self.notify_ui_update(&state);
+        self.notify_ui_update(state);
     }
 
     /// 右键「删除」按候选来源分流：
@@ -7211,6 +7363,70 @@ mod english_placement_tests {
         );
     }
 
+    fn completion(text: &str, code: &str) -> Candidate {
+        let mut c = en(text, code);
+        c.meta.from_prefix_complete = true;
+        c
+    }
+
+    /// ★ 拼音「英文前缀补全」补出来的英文让位给**吃满整串的拼音真词**：`xiaom` 的「小米」是
+    /// 简拼残码命中，不在精确档，但它才是用户最可能要的；只消费一部分输入的「小」不算。
+    #[test]
+    fn prefix_completion_yields_to_whole_input_words() {
+        let mut v = vec![
+            zh("小米", "xiaomi", false, 5),
+            zh("消灭", "xiaomie", false, 5),
+            zh("小", "xiao", false, 4),
+            completion("Xiaomi", "xiaomi"),
+        ];
+        place_english_after_common_exact(&mut v, "xiaom");
+        assert_eq!(texts(&v), vec!["小米", "消灭", "Xiaomi", "小"]);
+
+        // 中文侧只有残缺解读时，英文整块上前，块内保持原序。
+        let mut v = vec![
+            zh("他", "ta", true, 2),
+            en("table", "table"),
+            completion("tables", "tables"),
+        ];
+        place_english_after_common_exact(&mut v, "table");
+        assert_eq!(texts(&v), vec!["table", "tables", "他"]);
+    }
+
+    /// 让位两头都要收窄：没带补全标记的前缀英文（英文方案 / 混输自己的）不挪；被让的只认
+    /// 拼音真词——短语 `consumed` 为 0 会被当成吃满，不能因此把英文块拆开（审查查出：英文方案
+    /// 开短语打 `da`，曾被拆成「精确英文 → 短语 → 前缀英文」）。
+    #[test]
+    fn unmarked_english_and_phrases_do_not_split_the_block() {
+        let phrase = Candidate {
+            text: "大家好".into(),
+            code: "da".into(),
+            source: CandidateSource::Phrase,
+            is_phrase: true,
+            ..Default::default()
+        };
+        let mut v = vec![phrase.clone(), en("da", "da"), en("data", "data")];
+        place_english_after_common_exact(&mut v, "da");
+        assert_eq!(
+            texts(&v),
+            vec!["da", "data", "大家好"],
+            "未带标记：整块原序"
+        );
+
+        // 带标记也只让拼音，不让短语。
+        let mut v = vec![phrase, en("da", "da"), completion("data", "data")];
+        place_english_after_common_exact(&mut v, "da");
+        assert_eq!(texts(&v), vec!["da", "data", "大家好"]);
+    }
+
+    /// 没有要让的中文时英文整块原序不动——英文方案里调频把 `hello` 排到 `hell` 之前，
+    /// 不得被「精确恒在前」拆回去。
+    #[test]
+    fn english_only_list_keeps_its_order() {
+        let mut v = vec![en("hello", "hello"), en("hell", "hell")];
+        place_english_after_common_exact(&mut v, "hell");
+        assert_eq!(texts(&v), vec!["hello", "hell"]);
+    }
+
     /// 无英文候选 / 空输入时是空操作。
     #[test]
     fn noop_without_english_or_input() {
@@ -7960,5 +8176,40 @@ mod expand_stop_tests {
             (0, 0),
             "高亮夹到当页末项"
         );
+    }
+}
+
+/// 移动端拼音单字母收紧首批上限；桌面、多字母、其它引擎一律不动。
+#[cfg(test)]
+mod mobile_limit_tests {
+    use crate::coordinator::Coordinator;
+    use wind_engine::engine::EngineType;
+
+    #[test]
+    fn mobile_pinyin_single_letter_is_capped_only_there() {
+        let lim = Coordinator::main_path_candidate_limit;
+        let py = Some(EngineType::Pinyin);
+        assert_eq!(lim(py, "b", true), super::MOBILE_PINYIN_SINGLE_LIMIT);
+        assert_eq!(
+            lim(py, "b", false),
+            Coordinator::initial_candidate_limit_of(py, "b"),
+            "桌面不收紧"
+        );
+        assert_eq!(
+            lim(py, "bz", true),
+            Coordinator::initial_candidate_limit_of(py, "bz"),
+            "两字母起不收紧"
+        );
+        for other in [
+            EngineType::English,
+            EngineType::CodeTable,
+            EngineType::Mixed,
+        ] {
+            assert_eq!(
+                lim(Some(other), "t", true),
+                Coordinator::initial_candidate_limit_of(Some(other), "t"),
+                "{other:?} 不受影响（英文 t 曾因上限太小打不出 then）"
+            );
+        }
     }
 }

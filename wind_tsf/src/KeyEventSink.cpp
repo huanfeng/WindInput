@@ -2258,7 +2258,8 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
         }
         else
         {
-            _pTextService->_DoFullStateSync();
+            if (_pTextService->_DoFullStateSync())
+                _pTextService->CancelServiceReadyRetry();
 
             // Re-send caret position after reconnection/state sync so the Go side has
             // a valid anchor before it processes the first post-restart key event.

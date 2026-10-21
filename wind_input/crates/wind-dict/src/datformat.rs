@@ -2134,10 +2134,16 @@ impl WdatReader {
 
     /// 某叶的全部候选 `(text, weight, order, boundary)`，text 直接借 mmap。
     pub fn leaf_entries(&self, leaf: u32) -> Vec<(&str, i32, u32, u64)> {
+        let mut out = Vec::new();
+        self.for_each_leaf_entry(leaf, &mut |t, w, o, b| out.push((t, w, o, b)));
+        out
+    }
+
+    /// [`Self::leaf_entries`] 的回调版：全表扫描时逐叶分配一个 Vec 的开销可观。
+    pub fn for_each_leaf_entry<'a>(&'a self, leaf: u32, f: &mut dyn FnMut(&'a str, i32, u32, u64)) {
         let v = &self.main;
         let (eoff, elen) = self.read_leaf(v, leaf);
         let base = v.entry_off + eoff as usize;
-        let mut out = Vec::with_capacity(elen as usize);
         for i in 0..elen as usize {
             let o = base + i * ENTRY_SIZE;
             if o + ENTRY_SIZE > self.mmap.len() {
@@ -2148,14 +2154,13 @@ impl WdatReader {
             let weight = i32::from_le_bytes(self.mmap[o + 6..o + 10].try_into().unwrap());
             let order = u32::from_le_bytes(self.mmap[o + 10..o + 14].try_into().unwrap());
             let boundary = u64::from_le_bytes(self.mmap[o + 14..o + 22].try_into().unwrap());
-            out.push((
+            f(
                 self.read_string(text_off, text_len),
                 weight,
                 order,
                 boundary,
-            ));
+            );
         }
-        out
     }
 
     pub fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {

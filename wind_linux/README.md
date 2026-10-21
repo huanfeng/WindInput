@@ -43,7 +43,7 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
 
 包里带图形设置程序（`/usr/lib/windinput/wind_setting`）：应用菜单「清风输入法设置」，或输入时按
 `Ctrl+Shift+]`。构建时需要兄弟仓库 `../wind-setting` 与 `../wind-ui-rust`（`SETTING_REPO` 可指定）。
-设置程序的文件对话框依赖 xdg-desktop-portal 或 zenity（包已 Recommends）。
+设置程序的文件对话框依赖 xdg-desktop-portal，弹不出时退 zenity 或 kdialog（包已 Recommends）。
 
 必须在 22.04 上构建：更新的发行版编出的产物带 GLIBC_2.38+ 符号和更新的 fcitx5 ABI，22.04 上加载不了。
 服务由 addon 在连不上时自动拉起（`/usr/lib/windinput/wind_input`，可用 `WIND_INPUT_SERVICE` 覆盖），

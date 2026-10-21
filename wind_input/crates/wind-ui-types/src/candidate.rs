@@ -198,7 +198,7 @@ impl TooltipDoc {
         let deco = SpanStyle {
             role: Some("title"),
             in_title: true,
-            color: None,
+            ..Default::default()
         };
         let mut out = Vec::new();
         for (si, sec) in self.sections.iter().enumerate() {

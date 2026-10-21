@@ -154,6 +154,8 @@ fn resolve_ref(theme: &Resolved, is_tooltip: bool, r: &ColorRef) -> Option<Rgba>
 ///   气泡是 palette `tooltip_text`）。
 /// - `role`：片段角色（归一后的变量名或 `title` / `literal`）；`None` = 无角色（未知变量回显）。
 /// - `in_title`：段名里产出的片段，角色未配色时回落 `title` 角色。
+/// - `separator`：变量值里的分项分隔符（`${chaizi_all:／}` 的 `／`）。②③ 两步先查 `separator`
+///   角色、没配再查 `role`（所在变量）：主题不配 `separator` 时分隔符与变量同色。
 ///
 /// 顺序：① 内联色（选中态有 `selected=` 用它；否则状态改了正文色就回落正文色；否则常态值）
 /// → ② 该状态单列的角色色 → 规则 3（状态改了正文色 ⇒ 正文色）→ ③ 常态角色色 →
@@ -171,6 +173,7 @@ pub fn span_color(
     body_fallback: Rgba,
     role: Option<&str>,
     in_title: bool,
+    separator: bool,
     inline: Option<&InlineColor>,
 ) -> Rgba {
     let body = body_color(node, state, body_fallback);
@@ -187,21 +190,28 @@ pub fn span_color(
         }
         return resolve_ref(theme, is_tooltip, &ic.normal).unwrap_or(body);
     }
-    if let Some(r) = role
-        && let Some(c) = state_patch(node, state).and_then(|n| n.roles.get(r))
-    {
-        return *c;
+    let chain = [separator.then_some("separator"), role];
+    let pick = |n: &RvNode| {
+        chain
+            .iter()
+            .flatten()
+            .find_map(|r| n.roles.get(*r))
+            .copied()
+    };
+    if let Some(c) = state_patch(node, state).and_then(pick) {
+        return c;
     }
     if state_changed_body {
         return body;
     }
-    if let Some(r) = role {
-        if let Some(c) = node.roles.get(r) {
-            return *c;
-        }
-        if in_title && let Some(c) = node.roles.get("title") {
-            return *c;
-        }
+    if let Some(c) = pick(node) {
+        return c;
+    }
+    if role.is_some()
+        && in_title
+        && let Some(c) = node.roles.get("title")
+    {
+        return *c;
     }
     body
 }
@@ -334,7 +344,7 @@ mod tests {
         inline: Option<&str>,
     ) -> Rgba {
         let ic = inline.map(InlineColor::parse);
-        span_color(t, n, tip, st, BODY, role, in_title, ic.as_ref())
+        span_color(t, n, tip, st, BODY, role, in_title, false, ic.as_ref())
     }
 
     use TextState::{Hover, Normal, Selected};
@@ -560,6 +570,59 @@ mod tests {
         );
     }
 
+    fn sep(t: &Resolved, n: &RvNode, st: TextState, role: Option<&str>, in_title: bool) -> Rgba {
+        span_color(t, n, false, st, BODY, role, in_title, true, None)
+    }
+
+    /// 分隔符：配了 `separator` 用它；没配随所在变量的角色（含段名回落 title）；都没配是正文色。
+    #[test]
+    fn separator_role_or_inherits_variable() {
+        let t = theme(false);
+        let both = with_roles(node(), &[("separator", BLUE), ("chaizi_all", GREEN)]);
+        let var_only = with_roles(node(), &[("chaizi_all", GREEN), ("title", RED)]);
+        assert_eq!(sep(&t, &both, Normal, Some("chaizi_all"), false), BLUE);
+        assert_eq!(
+            sc(&t, &both, false, Normal, Some("chaizi_all"), false, None),
+            GREEN,
+            "分项本身不受 separator 影响"
+        );
+        assert_eq!(sep(&t, &var_only, Normal, Some("chaizi_all"), false), GREEN);
+        assert_eq!(sep(&t, &var_only, Normal, Some("dict"), true), RED);
+        assert_eq!(sep(&t, &node(), Normal, Some("chaizi_all"), false), BODY);
+        // 内联色仍优先。
+        let ic = InlineColor::parse("accent");
+        assert_eq!(
+            span_color(
+                &t,
+                &both,
+                false,
+                Normal,
+                BODY,
+                Some("chaizi_all"),
+                false,
+                true,
+                Some(&ic)
+            ),
+            RED
+        );
+    }
+
+    /// 分隔符在状态态里同一顺序：状态单列的 separator / 变量色 → 规则 3 → 常态。
+    #[test]
+    fn separator_follows_state_rules() {
+        let t = theme(false);
+        let mut patch = body_patch(SEL_BODY);
+        patch.roles = [("chaizi_all".to_string(), BLUE)].into();
+        let n = selected(with_roles(node(), &[("separator", GREEN)]), patch);
+        assert_eq!(
+            sep(&t, &n, Selected, Some("chaizi_all"), false),
+            BLUE,
+            "状态单列的变量色先于规则 3"
+        );
+        assert_eq!(sep(&t, &n, Selected, Some("pinyin"), false), SEL_BODY);
+        assert_eq!(sep(&t, &n, Normal, Some("chaizi_all"), false), GREEN);
+    }
+
     // ---------------- 标准色契约（§5.4）----------------
 
     fn factory(name: &str, dark: bool) -> Resolved {
@@ -685,8 +748,17 @@ mod tests {
                     let fb = crate::fallback::COMMENT_TEXT;
                     let body = body_color(&v.comment, state, fb);
                     for role in COMMENT_ROLES {
-                        let got =
-                            span_color(&t, &v.comment, false, state, fb, Some(role), false, None);
+                        let got = span_color(
+                            &t,
+                            &v.comment,
+                            false,
+                            state,
+                            fb,
+                            Some(role),
+                            false,
+                            false,
+                            None,
+                        );
                         assert_eq!(
                             got, body,
                             "{name} dark={dark} {state:?}: 注释 {role} 出厂不该上色"
@@ -700,7 +772,17 @@ mod tests {
                 let fb = t.color("tooltip_text", crate::fallback::TOOLTIP_TEXT);
                 for role in TOOLTIP_ROLES {
                     for in_title in [false, true] {
-                        let got = span_color(&t, tip, true, Normal, fb, Some(role), in_title, None);
+                        let got = span_color(
+                            &t,
+                            tip,
+                            true,
+                            Normal,
+                            fb,
+                            Some(role),
+                            in_title,
+                            false,
+                            None,
+                        );
                         let (r, worst) = (contrast(got, bg), contrast(got, white));
                         assert_ne!(got, fb, "{name} dark={dark}: 气泡 {role} 没着色");
                         assert!(
@@ -949,7 +1031,17 @@ mod tests {
                 ("hover", TextState::Hover),
             ] {
                 for role in PROBE_ROLES {
-                    let col = span_color(&t, c, false, st, COMMENT_FALLBACK, *role, false, None);
+                    let col = span_color(
+                        &t,
+                        c,
+                        false,
+                        st,
+                        COMMENT_FALLBACK,
+                        *role,
+                        false,
+                        false,
+                        None,
+                    );
                     spans.push(format!(
                         "{{\"node\": \"comment\", \"state\": \"{st_name}\", \"role\": {}, \"in_title\": false, \"color\": {}}}",
                         role.map_or("null".into(), |r| format!("\"{r}\"")),
@@ -967,6 +1059,7 @@ mod tests {
                         tip_fb,
                         *role,
                         in_title,
+                        false,
                         None,
                     );
                     spans.push(format!(
@@ -994,6 +1087,7 @@ mod tests {
                         COMMENT_FALLBACK,
                         Some("pinyin"),
                         false,
+                        false,
                         Some(&ic),
                     );
                     inline.push(format!(
@@ -1008,6 +1102,7 @@ mod tests {
                     TextState::Normal,
                     tip_fb,
                     Some("readings"),
+                    false,
                     false,
                     Some(&ic),
                 );
@@ -1078,6 +1173,7 @@ mod tests {
                         TextState::Normal,
                         fb,
                         None,
+                        false,
                         false,
                         Some(&ic),
                     );

@@ -85,6 +85,7 @@
 | 拆字库 | `schemas/` 下，由 `[engine.chaizi].db_path` 指定 | A | `resource` | `coordinator.rs` → `resolve_schema_resource` |
 | 字根字体 | `schemas/` 下，由 `[engine.chaizi].font_path` 指定 | A | `resource` | 同上 |
 | 常用字表 | `schemas/common_chars.txt` | A | `resource` | `coordinator.rs` → `resolve_schema_resource` |
+| 英文词频名次表 | `schemas/english/en_freq.txt` | A | `dict` | `EngineManager::load_table_dict` → `resolve_dict_file` |
 | 双拼布局 | `schemas/shuangpin/{layout}.toml` | A | `shuangpin` | `EngineManager::scan_shuangpin_layouts` |
 | 主题 | `themes/{id}/theme.toml` | A | `theme` | `wind_theme::theme::find_theme_dir` |
 | 系统短语种子 | `system.phrases.toml` | A | `data` | `coordinator.rs` → `resolve_data_file` |

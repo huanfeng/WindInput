@@ -298,6 +298,31 @@ impl CachedDict {
         wdat_path: &Path,
         lowercase_code: bool,
     ) -> anyhow::Result<Self> {
+        Self::load_impl(yaml_path, wdat_path, lowercase_code, None)
+    }
+
+    /// 英文词库：code 列小写化（同 `load_at_with(.., true)`），并按英文词频名次表给没写权重
+    /// 的词条赋权（见 [`crate::freq_rank`]）。
+    ///
+    /// 名次表作为 wdat 的**第二个源**参与指纹：改了它（或它从无到有），缓存就重建。
+    /// 名次表不在时按「缺失」这一稳定事实算指纹、不赋权。
+    ///
+    /// ⚠️ 同一份英文词库的每个读盘点都要走这里：有的带名次表、有的不带，同一槽位的指纹
+    /// 就有两种，两份 wdat 来回重建。
+    pub fn load_english_at(
+        yaml_path: &Path,
+        wdat_path: &Path,
+        ranks_path: &Path,
+    ) -> anyhow::Result<Self> {
+        Self::load_impl(yaml_path, wdat_path, true, Some(ranks_path))
+    }
+
+    fn load_impl(
+        yaml_path: &Path,
+        wdat_path: &Path,
+        lowercase_code: bool,
+        ranks_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
         // wdat-only：用户只投放编译好的二进制词库、不带 yaml 源（对齐 Go 的 wdb-only 分发）。
         //
         // 必须抢在 cache_is_valid 之前：本模式下压根没有 yaml 源，而 cache_is_valid 问的是
@@ -340,9 +365,11 @@ impl CachedDict {
         // tag 带上 lowercase_code：同一份 yaml 在 english / 非 english 两种 dict_type 下
         // 解析结果不同，不区分就会在切换后复用大小写错误的缓存。
         let tag = crate::cache_fp::dict_tag(lowercase_code);
+        // 名次表也是源：它决定写进 wdat 的权重（见 `load_english_at`）。
+        let sources: Vec<&Path> = std::iter::once(yaml_path).chain(ranks_path).collect();
         // 源读不出（权限 / IO 故障）⇒ 没有稳定的缓存可言：直接解析进内存，不落盘。
-        let stamps_before = crate::cache_fp::stamps_of(&[yaml_path]);
-        let content = crate::cache_fp::resolve_slot_fp(wdat_path, &[yaml_path], tag)
+        let stamps_before = crate::cache_fp::stamps_of(&sources);
+        let content = crate::cache_fp::resolve_slot_fp(wdat_path, &sources, tag)
             .map(|fp| (crate::cache_fp::slot_content_path(wdat_path, &fp), fp));
 
         // 指纹对应的文件在 ⇒ 就是它（同时充当拿锁后的复查：等待期间别的线程可能已建好）
@@ -366,11 +393,15 @@ impl CachedDict {
         }
 
         // 加载 yaml
-        let dict = if lowercase_code {
+        let mut dict = if lowercase_code {
             CodetableDict::load_lowercased(yaml_path)?
         } else {
             CodetableDict::load(yaml_path)?
         };
+        if let Some(ranks) = ranks_path.and_then(crate::freq_rank::FreqRanks::load) {
+            let n = dict.apply_freq_ranks(&ranks);
+            info!("英文词频名次：{} 条词条按名次赋权", n);
+        }
         info!(
             "Loaded yaml: {} ({} entries)",
             yaml_path.display(),
@@ -385,7 +416,7 @@ impl CachedDict {
             return Ok(Self::Memory(dict));
         };
         // 指纹是解析**之前**算的；解析期间源被保存，按旧指纹命名的文件就会装着新内容。
-        if !crate::cache_fp::stamps_of(&[yaml_path]).unchanged_since(&stamps_before) {
+        if !crate::cache_fp::stamps_of(&sources).unchanged_since(&stamps_before) {
             warn!(
                 "源 {} 在解析期间被改写，本次不落盘（内存模式），下次启动重来。",
                 yaml_path.display()
@@ -836,10 +867,183 @@ pub fn build_single_char_full_codes_from(
     best.into_iter().map(|(k, (code, _))| (k, code)).collect()
 }
 
+/// [`for_each_code_group`] 交出的一条：文本借自词库，另带排序与音节所需的原始字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupEntry<'a> {
+    /// 在 `dicts` 里的下标（[`CachedDict::Layered`] 的子层都记外层下标）。
+    pub layer: usize,
+    pub text: &'a str,
+    /// 词库里的原始权重（未经 `default_weight` / `weight_spec` 换算）。
+    pub weight: i32,
+    /// 写入时的自然序（同一词库内）。
+    pub order: i32,
+    /// 音节起始位 bitmask，见 [`crate::binformat::DictEntry::boundary`]；0 = 无边界信息。
+    pub boundary: u64,
+}
+
+/// 一个词库按码升序逐组吐条目的拉式源。
+enum GroupSource<'a> {
+    Mmap(&'a WdatReader, crate::datformat::CodeCursor<'a>),
+    Memory(Box<dyn Iterator<Item = (&'a str, &'a [crate::codetable::CodetableEntry])> + 'a>),
+}
+
+impl<'a> GroupSource<'a> {
+    /// 取下一组：条目写进 `out`（先清空），返回码；源耗尽返回 `None`。
+    fn next_group(&mut self, layer: usize, out: &mut Vec<GroupEntry<'a>>) -> Option<String> {
+        out.clear();
+        match self {
+            Self::Mmap(r, cur) => {
+                let (code, leaf) = cur.next()?;
+                let r: &'a WdatReader = r;
+                r.for_each_leaf_entry(leaf, &mut |text, weight, order, boundary| {
+                    out.push(GroupEntry {
+                        layer,
+                        text,
+                        weight,
+                        order: order as i32,
+                        boundary,
+                    })
+                });
+                Some(code)
+            }
+            Self::Memory(it) => {
+                let (code, es) = it.next()?;
+                out.extend(es.iter().map(|e| GroupEntry {
+                    layer,
+                    text: &e.text,
+                    weight: e.weight,
+                    order: e.order,
+                    boundary: e.boundary,
+                }));
+                Some(code.to_string())
+            }
+        }
+    }
+}
+
+fn push_group_sources<'a>(
+    layer: usize,
+    d: &'a CachedDict,
+    out: &mut Vec<(usize, GroupSource<'a>)>,
+) {
+    match d {
+        CachedDict::Mmap(r) => out.push((layer, GroupSource::Mmap(r, r.codes()))),
+        CachedDict::Memory(m) => out.push((layer, GroupSource::Memory(Box::new(m.groups())))),
+        CachedDict::Layered(ls) => ls.iter().for_each(|l| push_group_sources(layer, l, out)),
+    }
+}
+
+/// 多个词库**按码归并**遍历：同一编码在各库里的条目合成一组交给 `f`（库序在前者在前，
+/// 库内保持词库原序），码按字节序升序。
+///
+/// 供词库统计这类「要看整组」的全表扫描用：重码、同码内序位都得先把一组收齐，而
+/// [`CachedDict::for_each_entry`] 是逐条推、还丢了 `order` / `boundary`。各库本身就按码有序
+/// （wdat DFS 与 `CodetableDict` 的 BTreeMap 都是字节序），这里只做 k 路归并，任意时刻只
+/// 持有每库一组，不物化全表。
+///
+/// ⚠️ O(全表)，绝不能进按键链路。
+pub fn for_each_code_group<'a>(
+    dicts: &[&'a CachedDict],
+    f: &mut dyn FnMut(&str, &[GroupEntry<'a>]),
+) {
+    let mut srcs: Vec<(usize, GroupSource<'a>)> = Vec::new();
+    for (i, d) in dicts.iter().enumerate() {
+        push_group_sources(i, d, &mut srcs);
+    }
+    // 每个源的当前组：(码, 条目)；码为 None 即该源已耗尽。条目 Vec 逐组复用。
+    let mut heads: Vec<(Option<String>, Vec<GroupEntry<'a>>)> = srcs
+        .iter_mut()
+        .map(|(layer, s)| {
+            let mut es = Vec::new();
+            (s.next_group(*layer, &mut es), es)
+        })
+        .collect();
+    if let [(code, es)] = heads.as_mut_slice() {
+        // 单库（拼音合并主表的常态）：不必归并。
+        let (layer, s) = &mut srcs[0];
+        while let Some(c) = code.take() {
+            f(&c, es);
+            *code = s.next_group(*layer, es);
+        }
+        return;
+    }
+    let mut buf: Vec<GroupEntry<'a>> = Vec::new();
+    while let Some(min_i) = heads
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (c, _))| c.as_deref().map(|c| (i, c)))
+        .min_by(|a, b| a.1.cmp(b.1))
+        .map(|(i, _)| i)
+    {
+        let Some(min) = heads[min_i].0.take() else {
+            break;
+        };
+        buf.clear();
+        for (i, (c, es)) in heads.iter_mut().enumerate() {
+            if i != min_i && c.as_deref() != Some(min.as_str()) {
+                continue;
+            }
+            buf.extend_from_slice(es);
+            let (layer, s) = &mut srcs[i];
+            *c = s.next_group(*layer, es);
+        }
+        f(&min, &buf);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codetable::CodetableDict;
+
+    /// 两库各有独占码与共有码：归并后码升序、共有码的条目按库序拼成一组，层号对得上；
+    /// mmap 与内存两种形态混用时结果一致。
+    #[test]
+    fn code_groups_merge_layers_in_byte_order() {
+        let mut a = CodetableDict::empty();
+        a.merge_single("aa".into(), "甲".into(), 10, 0);
+        a.merge_single("ab".into(), "乙".into(), 5, 0);
+        a.merge_single("ab".into(), "丙".into(), 3, 0);
+        let mut b = CodetableDict::empty();
+        b.merge_single("a".into(), "丁".into(), 1, 0);
+        b.merge_single("ab".into(), "戊".into(), 7, 0);
+        b.merge_single("b".into(), "己".into(), 2, 0);
+
+        let dir = std::env::temp_dir().join(format!("wind-groups-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut w = WdatWriter::new();
+        a.export_to_wdat(&mut w);
+        let wdat = dir.join("a.wdat");
+        w.write(&wdat).unwrap();
+        let mm = CachedDict::Mmap(Arc::new(WdatReader::open(&wdat).unwrap()));
+        let mem_b = CachedDict::Memory(b);
+
+        type Got = (String, Vec<(usize, String, i32, i32)>);
+        let mut got: Vec<Got> = Vec::new();
+        for_each_code_group(&[&mm, &mem_b], &mut |code, es| {
+            got.push((
+                code.to_string(),
+                es.iter()
+                    .map(|e| (e.layer, e.text.to_string(), e.weight, e.order))
+                    .collect(),
+            ));
+        });
+        let s = |x: &str| x.to_string();
+        assert_eq!(
+            got,
+            vec![
+                (s("a"), vec![(1, s("丁"), 1, 0)]),
+                (s("aa"), vec![(0, s("甲"), 10, 0)]),
+                (
+                    s("ab"),
+                    vec![(0, s("乙"), 5, 0), (0, s("丙"), 3, 1), (1, s("戊"), 7, 0)]
+                ),
+                (s("b"), vec![(1, s("己"), 2, 0)]),
+            ]
+        );
+        drop(mm);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// 单音节 code 的 boundary（只有起点位）。
     fn b1() -> u64 {
@@ -1304,5 +1508,47 @@ mod tests {
         );
         drop(d2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// 英文词库按名次表赋权：前缀补全从字母序变成常用度序；写了权重的条目不动；
+    /// 名次表改了缓存要重建（它是 wdat 的第二个源）。
+    #[test]
+    fn english_ranks_reorder_prefix_and_invalidate_cache() {
+        let dir = wdat_only_dir("en-ranks");
+        let yaml = dir.join("en.dict.yaml");
+        std::fs::write(
+            &yaml,
+            "---\nname: en\n...\nproduce\tproduce\nproduced\tproduced\nproduct\tproduct\nproductive\tproductive\t5\n",
+        )
+        .unwrap();
+        let ranks = dir.join("en_freq.txt");
+        let slot = dir.join("cache/en.wdat");
+        let texts = |d: &CachedDict| -> Vec<String> {
+            d.search_prefix("produc", 10)
+                .into_iter()
+                .map(|h| h.1)
+                .collect()
+        };
+
+        // 反向对照：名次表不在 ⇒ 无权重条目照旧按文件顺序，只有写了权重的 productive 在前。
+        let plain = CachedDict::load_english_at(&yaml, &slot, &ranks).unwrap();
+        assert_eq!(
+            texts(&plain),
+            ["productive", "produce", "produced", "product"]
+        );
+        drop(plain);
+
+        // productive 名列第一：若名次覆盖了它写明的权重 5，它就会跑到最前。
+        std::fs::write(&ranks, "# 注释\nproductive\nproduct\nproduce\nproduced\n").unwrap();
+        let ranked = CachedDict::load_english_at(&yaml, &slot, &ranks).unwrap();
+        let got = texts(&ranked);
+        assert_eq!(
+            got[..3],
+            ["product", "produce", "produced"],
+            "名次表出现后须重建缓存并按名次排，实际 {got:?}"
+        );
+        // productive 写了权重 5：不被名次覆盖，排在有名次的词之后。
+        assert_eq!(got[3], "productive", "写了权重的条目不得被名次覆盖");
+        drop(ranked);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

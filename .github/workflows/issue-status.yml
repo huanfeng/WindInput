@@ -1,0 +1,52 @@
+name: Issue Status
+
+# Issue 标签同步与「等对方回应」自动关闭，逻辑在 .github/scripts/issue-status.js：
+#   - 定时/手动运行时同步标签定义（类型标签从 GitHub 默认英文名原地改名为中文）
+#   - 状态四选一（手动加新状态自动撤旧的）；不挂状态即尚未处理
+#   - 维护者最后发言后 14 天对方无回应 → 打「即将关闭」并提醒；再过 7 天 → 以 not planned 关闭
+#   - 已计划/暂无计划 豁免
+#   - 非维护者回复 → 撤「即将关闭」；提交者回复 → 撤待反馈/无法重现，被自动关闭的帖则重开
+#   - 想延期：手动撤「即将关闭」（本轮不再提醒），或补一句评论（重新计时），或加豁免状态
+# 首次启用先手动触发一次 dry_run：会同步标签，并在日志里列出将处理哪些 issue。
+on:
+  schedule:
+    - cron: "17 1 * * *"
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只列出将被提醒/关闭的 issue，不实际操作"
+        type: boolean
+        default: true
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-status-${{ github.event.issue.number || 'sweep' }}
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'issue_comment' || !github.event.issue.pull_request
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const s = require('./.github/scripts/issue-status.js');
+            const ctx = { github, context, core };
+            switch (context.eventName) {
+              case 'issues':
+                return s.onIssue(ctx);
+              case 'issue_comment':
+                return s.onComment(ctx);
+              default:
+                await s.ensureLabels(ctx);
+                return s.sweep(ctx, String(context.payload.inputs?.dry_run) === 'true');
+            }

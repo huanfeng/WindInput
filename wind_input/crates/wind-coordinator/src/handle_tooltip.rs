@@ -264,6 +264,52 @@ impl Coordinator {
     }
 }
 
+/// 一个候选悬停提示的一段（纯文本），给按下标取提示的宿主（移动端长按）用。
+///
+/// 行取**原始行**（[`RenderedTooltip::raw`]），不带桌面气泡的单行截断与折行——手机卡片
+/// 自己按屏宽折行，截断的 `…` 只会丢信息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateTooltipSection {
+    /// 段名（已求值，如「编码(五笔)」「拆字」）；`None` = 无标题。
+    pub title: Option<String>,
+    /// 与桌面同义：标题与第一行写在同一行（`段名: 内容`）。
+    pub inline: bool,
+    /// 非空。
+    pub lines: Vec<String>,
+}
+
+impl Coordinator {
+    /// 第 `idx`（全量**绝对**下标）个候选的悬停提示，按 `ui.tooltip.sections` 渲染——
+    /// 与桌面候选窗气泡同一份模板、同一份求值上下文（[`crate::coordinator::TooltipEvalCtx`]）。
+    ///
+    /// 越界返回 `None`；提示总开关关着或各段都为空返回空列表。编码段依赖的反查索引没建好时
+    /// 这一次没有编码段（已在后台触发构建，绝不在此等）。
+    pub fn candidate_tooltip_at(&self, idx: usize) -> Option<Vec<CandidateTooltipSection>> {
+        let rt = self.rt();
+        let tip = &rt.tooltip;
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let c = state.candidates.get(idx)?;
+        let full = self.cand_display_text(&state, c);
+        let disp = rt.config.ui.candidate.truncate_display(&full);
+        let ctx = self.tooltip_eval_ctx(&state, tip);
+        let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
+        let rendered = self.render_candidate_tooltip(&state, c, &disp, &full, tip, &ctx, &reverse);
+        Some(
+            rendered
+                .doc
+                .sections
+                .iter()
+                .zip(rendered.raw)
+                .map(|(sec, lines)| CandidateTooltipSection {
+                    title: sec.title.as_ref().map(|t| t.as_str().to_string()),
+                    inline: sec.inline,
+                    lines,
+                })
+                .collect(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

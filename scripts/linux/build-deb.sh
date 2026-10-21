@@ -87,6 +87,8 @@ SHLIBS_DEPENDS="$(cd "$SHL" && dpkg-shlibdeps -O \
 EXTRA_DEPENDS="fcitx5 (>= 5.0.14), libfontconfig1, fonts-noto-cjk | fonts-wqy-microhei | fonts-wqy-zenhei, procps"
 
 mkdir -p "$S/DEBIAN"
+# 文件对话框：门户与 zenity 分开推荐。门户在、但没有文件选择后端时也弹不出来，rfd 那时不退
+# zenity；设置端再兜底试 kdialog。写成「portal | zenity」的话装了门户就不装 zenity，兜底落空。
 SIZE=$(du -sk --apparent-size "$S" | cut -f1)
 cat >"$S/DEBIAN/control" <<CONTROL
 Package: windinput
@@ -97,7 +99,7 @@ Section: utils
 Priority: optional
 Installed-Size: $SIZE
 Depends: $SHLIBS_DEPENDS, $EXTRA_DEPENDS
-Recommends: fcitx5-frontend-gtk3, fcitx5-frontend-qt5 | fcitx5-frontend-qt6, im-config, xclip | wl-clipboard, xdg-utils, xdg-desktop-portal | zenity, libxkbcommon0, fonts-noto-color-emoji
+Recommends: fcitx5-frontend-gtk3, fcitx5-frontend-qt5 | fcitx5-frontend-qt6, im-config, xclip | wl-clipboard, xdg-utils, xdg-desktop-portal, zenity | kdialog, libxkbcommon0, fonts-noto-color-emoji
 Homepage: https://windinput.com
 Description: 清风输入法 (WindInput) —— Fcitx5 输入法引擎
  清风输入法的 Linux 版（测试版）：Rust 服务负责输入逻辑与候选窗渲染，

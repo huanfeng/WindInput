@@ -273,13 +273,14 @@ fn freq_reaches_member_candidates_beyond_quota() {
     let mut cfg = mix_config();
     cfg.schema.english.frequency.enabled = true;
 
-    // 前提①：`history` 原本不在候选面里（即原序排在本成员配额之外）。
+    // 观测词取没有词频名次的 `hitherto`：英文候选按名次排序后，常用的 `history` 已进配额。
+    // 前提①：`hitherto` 原本不在候选面里（即原序排在本成员配额之外）。
     let (store, path) = fresh_store("wind_mix_quota_base.redb");
     let base = mix_candidates_with(cfg.clone(), Arc::clone(&store), "hi");
     assert!(base.len() >= 2, "前提：mix `hi` 应有候选");
     assert!(
-        !base.contains(&"history".to_string()),
-        "前提失效：`history` 已在配额内，这条用例就测不出窗口问题了（前 8: {:?}）",
+        !base.contains(&"hitherto".to_string()),
+        "前提失效：`hitherto` 已在配额内，这条用例就测不出窗口问题了（前 8: {:?}）",
         &base[..8.min(base.len())]
     );
     let _ = std::fs::remove_file(&path);
@@ -288,12 +289,12 @@ fn freq_reaches_member_candidates_beyond_quota() {
     let (store, path) = fresh_store("wind_mix_quota_freq.redb");
     for _ in 0..5 {
         store
-            .record_freq("english", "history", "history")
+            .record_freq("english", "hitherto", "hitherto")
             .expect("record_freq 失败");
     }
     let after = mix_candidates_with(cfg.clone(), Arc::clone(&store), "hi");
     assert!(
-        after.contains(&"history".to_string()),
+        after.contains(&"hitherto".to_string()),
         "学过词频的词应被提进列表，哪怕它在词库原序里排在配额之外（前 8: {:?}）",
         &after[..8.min(after.len())]
     );

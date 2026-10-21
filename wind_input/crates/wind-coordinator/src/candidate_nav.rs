@@ -67,6 +67,7 @@ impl Coordinator {
         state.grid_top = None;
         state.grid_tab = wind_ui_types::GridTab::All;
         state.grid_full.clear();
+        state.grid_tab_anchor = None;
         self.clear_hover();
     }
 

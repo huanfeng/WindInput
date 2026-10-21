@@ -122,8 +122,8 @@ addon 不排字——服务端光栅化（与候选窗同构），像素走各�
   组字中通往主菜单的路，有了状态区入口就多余；且点它时屏幕菜单已先关，服务端随后下发的主菜单
   在 Wayland 下落进候选窗那个 popup surface，把候选窗挤走）。状态区的显示由
   Fcitx5 的 UI 模块决定，我们只挂动作。
-- **按平台摘掉的主菜单项**（`build_main_menu_items`）：「截图所有窗口到文件」（依赖宿主回应
-  `shot.panel` 才出结果 Toast，addon 不接）、输入诊断 HUD（同 macOS）。沿革：工具栏开关与软键盘
+- **按平台摘掉的主菜单项**（`build_main_menu_items`）：输入诊断 HUD（同 macOS）。沿革：「截图所有
+  窗口到文件」曾因依赖宿主回应 `shot.panel` 而摘掉，改为服务进程就地存盘后恢复；工具栏开关与软键盘
   最初也摘掉（当时工具栏不显示、`open_softkeyboard` 在 Linux 直接拒绝），随
   [linux-toolbar-softkeyboard.md](linux-toolbar-softkeyboard.md) 恢复，文案用 Windows 的「显示工具栏」
   （macOS 的「显示状态图标」不出现）。
@@ -355,7 +355,7 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
 - **托盘 / 常驻（`run_resident`）缺失不影响设置端**：`wind_setting` 不用常驻模式也不用托盘；
   输入法自己的状态指示改由 Fcitx5 托盘图标承担（见 §5d）。
 - **已知问题**（windui Linux 后端）：设置程序已开着时，深链转来的切页要等下一次输入事件才显示；
-  文件对话框依赖 xdg-desktop-portal 或 zenity，都没有时点了无反应。
+  文件对话框走 xdg-desktop-portal，弹不出时退 zenity、再退 kdialog；都不行时设置端提示安装 zenity 或 kdialog。
 
 ## 7. 待验证的风险
 

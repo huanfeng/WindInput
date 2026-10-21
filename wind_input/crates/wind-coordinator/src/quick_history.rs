@@ -209,6 +209,11 @@ impl Coordinator {
         if idx >= end {
             return None;
         }
+        self.quick_history_of(state, idx)
+    }
+
+    /// 同 [`Self::quick_history_at`]，但按**全量绝对下标**判（移动端候选长按菜单）。
+    pub(crate) fn quick_history_of(&self, state: &State, idx: usize) -> Option<String> {
         state
             .candidates
             .get(idx)

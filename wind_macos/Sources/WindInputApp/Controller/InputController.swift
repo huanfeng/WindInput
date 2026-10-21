@@ -33,10 +33,8 @@ import os
 @objc(WindInputController)
 public class InputController: IMKInputController {
 
-    // request 连接 I/O 超时 (毫秒): 服务卡死/重启时避免同步 readFrame 在 IMKit 主线程
-    // 无限阻塞 (表现为输入法整体无响应)。正常 UDS roundtrip <1ms; 超时后 catch →
-    // reconnect, 下一键用新连接自愈。push 连接不设此超时 (见 BridgeClient.ioTimeoutMs)。
-    private static let requestIOTimeoutMs = 2000
+    // 超时后 catch → reconnect, 下一键用新连接自愈。
+    private static let requestIOTimeoutMs = BridgeEndpoints.requestIOTimeoutMs
 
     private var bridge: BridgeClient?
     private var keySeq: UInt16 = 0
@@ -503,11 +501,13 @@ public class InputController: IMKInputController {
             let consumed = try sendAndApply(frame, on: bridge, sender: sender, hostShortcut: hostShortcut)
             return consumed ? true : passThroughToHost(event)
         } catch {
-            // 服务重启/卡死后这条连接已死 (write→EPIPE 或 read→EOF/超时)。重连到新服务
+            // 服务重启后这条连接已死 (write→EPIPE 或 read→EOF)。重连到新服务
             // 并**用新连接重试当前键一次**, 让服务重启后第一个键就自愈, 不丢字、不需手动
             // 重启前端。重连或重试仍失败 (如服务尚在重启窗口未就绪) 才透传, 下一键再试。
             NSLog("WindInput[handle] bridge io error: \(error), 重连后重试本键")
             reconnect()
+            // 超时 = 服务卡住而非连接陈旧, 重试只会再等一轮。
+            if error as? IPCError == .timeout { return passThroughToHost(event) }
             // 注意: 上方 guard 把属性 bridge 遮蔽为非可选局部量, 这里须取重连后的 self.bridge。
             guard let fresh = self.bridge else { return passThroughToHost(event) }
             do {

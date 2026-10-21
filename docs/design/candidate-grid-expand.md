@@ -107,8 +107,9 @@ grid_top: Option<usize>,
 |---|---|
 | ← / → | 在行内移动。到行首、行尾时折到上一行末、下一行首 |
 | ↓ / ↑ | 换行并保持列号（目标行较短时落到行尾）。在首行按 ↑ 收起 |
-| `=` / PageDown（`PageNext`） | 向下滚 `rows` 行，高亮跟着下移 `rows` 行并保持列号 |
-| `-` / PageUp（`PagePrev`） | 向上滚 `rows` 行；已在首屏时高亮回到首行，不收起 |
+| `=` 等翻页键（`PageNext`） | 下移一行并保持列号，同滚轮（§5.4）：到可见区末行再按滚一行，到底走末页放宽 |
+| `-` 等翻页键（`PagePrev`） | 上移一行，到首行停住、不收起 |
+| PageDown / PageUp | `grid_pageupdown_screen` 开着（出厂）时滚一整屏（`rows` 行），首屏再上翻回到首行；关掉同上逐行。只看物理键，不管绑在哪组 |
 | Tab / Shift+Tab | 切换分类标签（决策 D5，§8）；没有标签栏时（`grid_categories` 少于两个）照旧是绑定表里的动作，出厂即换行 |
 | 1–9 / 0、`;'`、Alt/Ctrl+数字 | 从高亮行行首起按序号选；序号按 `grid_index_fill` 顺延到下面的行（见 §5.3） |
 | 空格 | 上屏高亮项；分步上屏（拼音只吃掉前一段）时余下那段照样展开，整串上屏才结束 |
@@ -148,7 +149,7 @@ grid_top: Option<usize>,
 - 右键任意格：先切高亮，再弹现有的候选菜单。置顶、删除、设为生僻等菜单项全部照常可用。
   悬停也落到被右键的这一格：菜单开着时鼠标消息到不了候选窗，在另一格上再右键时，悬停若停在
   旧格，旧格的悬停底色会留在原处，看上去像高亮没跟过来（靶机实测）。
-- 滚轮 / 翻页栏的 ‹ ›：展开态滚一行，往上滚到第一行停住、不收起（滚轮滚过头是常事）；
+- 滚轮 / 翻页栏的 ‹ ›：展开态滚一行（与逐行的翻页键同一条路 `grid_scroll`），往上滚到第一行停住、不收起（滚轮滚过头是常事）；
   收起态往下滚与翻页键同语义，先展开。host-render 宿主的滚轮（`handle_candidate_scroll`）
   同此。
 - 悬停：用于驱动提示，见 §7。
@@ -392,6 +393,7 @@ grid_expand         = false   # D2：默认关
 grid_rows           = 5       # 可见行数，夹在 2..=10
 grid_cell_max_chars = 6       # 单格最多几个字，0 = 只受 max_chars 约束
 grid_index_fill     = "rows"  # 序号顺延：rows 只补整行 / cells 逐格编满 10 个 / off 只编高亮行
+grid_pageupdown_screen = true # PageUp/PageDown 翻整屏；其余翻页键恒逐行
 grid_categories     = ["all", "single", "phrase", "rare"]   # P3；可加 "symbol"
 ```
 

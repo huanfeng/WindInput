@@ -254,7 +254,8 @@ public final class CandidatePanelHost {
     private func sendAsync(_ frame: Data) {
         lock.lock()
         if sendClient == nil {
-            sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket)
+            sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket,
+                                            ioTimeoutMs: BridgeEndpoints.requestIOTimeoutMs)
         }
         let c = sendClient
         lock.unlock()
@@ -388,7 +389,8 @@ public final class CandidatePanelHost {
         for attempt in 0..<2 {
             lock.lock()
             if sendClient == nil {
-                sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket)
+                sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket,
+                                                ioTimeoutMs: BridgeEndpoints.requestIOTimeoutMs)
             }
             let c = sendClient
             lock.unlock()
@@ -399,6 +401,7 @@ public final class CandidatePanelHost {
             } catch {
                 NSLog("CandidatePanelHost: requestResponse attempt \(attempt) failed: \(error)")
                 lock.lock(); sendClient?.close(); sendClient = nil; lock.unlock()
+                if error as? IPCError == .timeout { return nil } // 服务卡住, 重试只会再等一轮
                 // 陈旧连接已丢弃; 下一轮 attempt 重建后重试。
             }
         }
@@ -425,14 +428,15 @@ public final class CandidatePanelHost {
     private func sendFrame(_ frame: Data) {
         lock.lock()
         if sendClient == nil {
-            sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket)
+            sendClient = try? BridgeClient(socketPath: BridgeEndpoints.requestSocket,
+                                            ioTimeoutMs: BridgeEndpoints.requestIOTimeoutMs)
         }
         let c = sendClient
         lock.unlock()
         guard let c = c else { return }
         do {
             try c.send(frame)
-            _ = try? c.readFrame()
+            _ = try c.readFrame()
         } catch {
             NSLog("CandidatePanelHost: sendFrame failed: \(error)")
             lock.lock(); sendClient?.close(); sendClient = nil; lock.unlock()

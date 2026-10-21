@@ -12,6 +12,7 @@
 #include "MultilineCommit.h"        // 多行文本粘贴上屏：CRLF 规范化 + 下发值判读
 #include "CompositionPlaceholder.h" // 组合占位识别 + 兜底取值（空格 / ZWSP / 盲文空白，由 core 按应用决定，GH#175）
 #include "WindowTitlePolicy.h" // 窗口标题采集判据（开关 / 截断；compat 的 title 条件）
+#include "ServiceReadyRetryPolicy.h" // focus_gained 补发判决
 #include <vector>
 #include <algorithm>
 #include <shellscalingapi.h>
@@ -3156,6 +3157,7 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                                    _focusSessionId, focusIpcMs);
                 _needsFocusRecovery = FALSE;
                 _focusLostSent = FALSE; // 新会话开始，下次离开文档时须再发一次 focus_lost
+                CancelServiceReadyRetry();
                 // 服务端此刻已知「焦点在可编辑控件里」。置位后，焦点离开时
                 // _ReportEditContextLost 才会在翻转沿补一条 CTX_LOST。
                 _editCtxReported = TRUE;
@@ -3166,6 +3168,8 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             {
                 WIND_LOG_WARN_FMT(L"FocusGained IPC send failed focusSession=%llu", _focusSessionId);
                 _needsFocusRecovery = TRUE;
+                if (_pLangBarItemButton != nullptr)
+                    _pLangBarItemButton->ScheduleFocusRecoveryRetry();
             }
         }
 
@@ -4359,16 +4363,20 @@ BOOL CTextService::_SetConversionMode(BOOL bChinese)
     return SUCCEEDED(hr);
 }
 
-void CTextService::_DoFullStateSync()
+BOOL CTextService::_DoFullStateSync(BOOL fromServiceReady)
 {
     if (_pIPCClient == nullptr)
-        return;
+        return FALSE;
+
+    const int failLevel = fromServiceReady ? 3 /* info */ : 2 /* warn */;
+    _pIPCClient->SetPipeBusyExempt(fromServiceReady);
 
     // Lazy connect: push pipe may reconnect before main pipe is established (service restart).
     if (!_pIPCClient->IsConnected() && !_pIPCClient->Connect())
     {
-        WIND_LOG_WARN(L"_DoFullStateSync: main pipe not connected, skipping\n");
-        return;
+        _pIPCClient->SetPipeBusyExempt(FALSE);
+        WindLog::Output(failLevel, L"_DoFullStateSync: main pipe not connected, skipping\n");
+        return FALSE;
     }
 
     // 异步化（Go 端 server.go::handleClient 走"先 Ack 后处理"）：本调用仅发 fire-and-forget
@@ -4381,18 +4389,15 @@ void CTextService::_DoFullStateSync()
     // explorer.exe 等 shell 宿主进程不再因任何 Go 端 handler 内的跨进程调用形成环形等待。
     WIND_LOG_INFO(L"Sending IMEActivated (async); state will arrive via CMD_ACTIVATION_STATUS_PUSH\n");
 
-    if (!_pIPCClient->SendIMEActivated())
+    BOOL sent = _pIPCClient->SendIMEActivated();
+    if (!sent)
     {
         // Stale pipe: write failed and Disconnect() was called; retry after fresh connect.
-        if (_pIPCClient->Connect())
-        {
-            _pIPCClient->SendIMEActivated();
-        }
-        else
-        {
-            WIND_LOG_WARN(L"_DoFullStateSync: SendIMEActivated failed, toolbar may not show until next focus event\n");
-        }
+        sent = _pIPCClient->Connect() && _pIPCClient->SendIMEActivated();
+        if (!sent)
+            WindLog::Output(failLevel, L"_DoFullStateSync: SendIMEActivated failed\n");
     }
+    _pIPCClient->SetPipeBusyExempt(FALSE);
 
     // 注：清除 _needsStateSync 提前到此处，让后续 KeyEventSink 路径不再触发重复 state sync。
     // 即便 push 暂时未到，下一次焦点切换会重新拉起 activation 流程。
@@ -4411,6 +4416,13 @@ void CTextService::_DoFullStateSync()
 
     // 先前发不出去的 focus_gained（服务没连上）在此补发，带上窗口类名 / 标题。
     TryRecoverFocusState();
+    return sent;
+}
+
+void CTextService::CancelServiceReadyRetry()
+{
+    if (_pLangBarItemButton != nullptr)
+        _pLangBarItemButton->CancelServiceReadyRetry();
 }
 
 // ApplyActivationStatusResponse 在 TSF 线程上把 push pipe 接收到的 activation status 落地。
@@ -4476,6 +4488,46 @@ void CTextService::TryRecoverFocusState()
         WIND_LOG_WARN_FMT(L"Deferred focus recovery send failed focusSession=%llu", _focusSessionId);
         _needsFocusRecovery = FALSE;
     }
+}
+
+BOOL CTextService::RetryFocusRecovery()
+{
+    using wind::svcready::FocusAction;
+    if (_pIPCClient == nullptr)
+        return TRUE;
+    const FocusAction action = wind::svcready::DecideFocusRecovery(
+        _needsFocusRecovery != FALSE, HasFocus() != FALSE, _hasThreadFocus != FALSE,
+        _pIPCClient->IsConnected() != FALSE, _pIPCClient->StateEstablished() != FALSE);
+    switch (action)
+    {
+    case FocusAction::StopRecovered:
+        return TRUE;
+    case FocusAction::StopNoFocus:
+    case FocusAction::StopBackground:
+        WIND_LOG_INFO_FMT(L"Focus resend retry stopped (%ls)\n",
+                          action == FocusAction::StopNoFocus ? L"no focus" : L"background");
+        _needsFocusRecovery = FALSE;
+        return TRUE;
+    case FocusAction::StopAlreadySynced:
+        // 按键路径会在下次按键时 TryRecoverFocusState 补上，这里不抢。
+        WIND_LOG_INFO(L"Focus resend retry stopped (connection already has traffic)\n");
+        return TRUE;
+    case FocusAction::Resend:
+        break;
+    }
+
+    // 只补 focus_gained，不走 _DoFullStateSync：IME_ACTIVATED 会把用户在窗口期里切过的中英重置。
+    if (!_pIPCClient->IsConnected() && !_pIPCClient->Connect())
+        return FALSE;
+    if (!_ResendFocusGained(L"retry"))
+        return FALSE;
+    _needsFocusRecovery = FALSE;
+    _pIPCClient->ClearNeedsSyncFlag();
+    _EndFocusGap();
+    CancelServiceReadyRetry();
+    SendCaretPositionUpdate();
+    WIND_LOG_INFO(L"Focus resend retry succeeded\n");
+    return TRUE;
 }
 
 void CTextService::SetTitleMatchEnabled(BOOL bEnabled)
@@ -5723,13 +5775,13 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
         }
     }
 
-    // 补发 IMN_OPENCANDIDATE 的 IMM32 宿主（见 ImmOpenCandidateNudge.h）：GUI caret 不可用，
+    // 出现过宿主默认位置指纹的线程（见 ImmOpenCandidateNudge.h 的 IsGuiCaretUnreliable）：GUI caret 不可用，
     // 直接判失败，调用方退到 last known（上一次真正发出去的坐标）。
     // 实测（2026-10-04 靶机 Zulu 7u45）：Java 的系统光标恒在窗口客户区原点 (0,54)。JTable 这类
     // 被动客户端按键时报上去，服务端把它当「组合前空闲上报」，25ms 兜底拿它首显——候选窗
     // 先闪到屏幕左边，62ms 后 CARET_RETRY 拿到 Windows 输入编辑框 (473,217) 才跳回。
     // 编辑框位置不随单元格变，last known 恰是它。
-    if (wind::caret::IsImmOpenCandidateHost())
+    if (wind::caret::IsGuiCaretUnreliable())
     {
         WIND_LOG_DEBUG(L"GetCaretPosition: IMM32 宿主不取 GUI caret（恒为窗口原点），交由 last known\n");
         return FALSE;

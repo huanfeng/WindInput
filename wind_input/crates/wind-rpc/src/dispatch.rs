@@ -238,8 +238,37 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
             Ok(out)
         }
         // schema/dict/temp/freq/shadow/stats/theme/phrase 等数据类 RPC 转发到宿主 core。
-        _ => state.core.data_rpc(method, params),
+        // 改方案配置的写方法成功后广播 schema.configChanged，开着的设置页据此重拉该方案。
+        _ => {
+            let out = state.core.data_rpc(method, params)?;
+            if let Some(id) = schema_config_write_id(method, params) {
+                let data = match id {
+                    Some(id) => json!({ "id": id, "method": method }),
+                    None => json!({ "method": method }),
+                };
+                state.events.emit_schema_config_changed(data);
+            }
+            Ok(out)
+        }
     }
+}
+
+/// 会改 `schema.getConfig` 结果的写方法：`Some(Some(id))` 改的是这一个方案，
+/// `Some(None)` 可能动了多个方案（导入方案包、整机还原），载荷不带 id，订阅方按「全部」处理。
+///
+/// 方案配置只经 RPC 写（设置页、`wind_input schema …` 命令都走这里），故在 dispatch 广播即
+/// 覆盖全部写入点。扩展词库开关有两处落点（`schema_overrides/<id>.toml` 与用户分库的
+/// `dicts.toml`），按方法名判比在落盘处各挂一个钩子省事，也不会漏掉后者。
+fn schema_config_write_id<'a>(method: &str, params: &'a Value) -> Option<Option<&'a str>> {
+    let key = match method {
+        "schema.saveConfig" | "schema.resetConfig" | "schema.setDictEnabled" | "schema.delete" => {
+            "id"
+        }
+        "userDicts.setEnabled" | "userdata.purgeSchema" => "schemaId",
+        "scheme.importPackage" | "scheme.importText" | "backup.restore" => return Some(None),
+        _ => return None,
+    };
+    Some(params.get(key).and_then(Value::as_str))
 }
 
 /// `compat.*` 里哪些会改用户层文件：只读方法与 dryRun 导入不广播。
@@ -573,6 +602,10 @@ mod tests {
                 "compat.list" | "compat.schema" | "compat.export" => Ok(json!({ "ok": true })),
                 "compat.upsert" | "compat.import" | "compat.reset" => Ok(json!({ "ok": true })),
                 "compat.broken" => anyhow::bail!("写入失败"),
+                "schema.setDictEnabled"
+                | "schema.saveConfig"
+                | "schema.getConfig"
+                | "scheme.importPackage" => Ok(json!({ "ok": true })),
                 // 两层错误：外层是人话主语，内层才是真正的原因。用来钉住出口不截断
                 // （见 `dispatch` 的文档注释）。
                 "test.layered" => Err(anyhow::anyhow!("底层真正的原因").context("外层的人话")),
@@ -1096,5 +1129,90 @@ mod tests {
         let resp = dispatch(&st, req("compat.broken", json!({})));
         assert!(resp.error.is_some());
         assert!(drain_events(&rx).is_empty(), "失败的写入不应广播");
+    }
+
+    // ── schema.configChanged：改方案配置的写方法成功后广播，带方案 id ──
+
+    #[test]
+    fn schema_config_write_emits_with_id() {
+        let (st, rx) = state_with_events();
+        let p = json!({ "id": "wubi86", "dictId": "ext", "enabled": false });
+        let resp = dispatch(&st, req("schema.setDictEnabled", p));
+        assert_eq!(resp.result.unwrap()["ok"], json!(true), "结果要原样透传");
+        assert!(
+            dispatch(&st, req("schema.saveConfig", json!({ "id": "py" })))
+                .error
+                .is_none()
+        );
+        let got: Vec<(String, Value)> = rx
+            .try_iter()
+            .map(|b| {
+                let v: Value = serde_json::from_slice(&b[4..]).unwrap();
+                (
+                    v["event"].as_str().unwrap().to_string(),
+                    v["data"]["id"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("schema.configChanged".to_string(), json!("wubi86")),
+                ("schema.configChanged".to_string(), json!("py")),
+            ]
+        );
+    }
+
+    /// 导入方案包可能动多个方案：载荷不带 id，订阅方按「全部」处理。
+    #[test]
+    fn multi_schema_write_emits_without_id() {
+        let (st, rx) = state_with_events();
+        let resp = dispatch(&st, req("scheme.importPackage", json!({ "path": "x.zip" })));
+        assert!(resp.error.is_none());
+        let data: Vec<Value> = rx
+            .try_iter()
+            .map(|b| serde_json::from_slice::<Value>(&b[4..]).unwrap())
+            .map(|v| {
+                assert_eq!(v["event"], json!("schema.configChanged"));
+                v["data"].clone()
+            })
+            .collect();
+        assert_eq!(data, vec![json!({ "method": "scheme.importPackage" })]);
+    }
+
+    #[test]
+    fn schema_config_write_methods_and_ids() {
+        let p = json!({ "id": "a", "schemaId": "b" });
+        for (m, want) in [
+            ("schema.saveConfig", Some(Some("a"))),
+            ("schema.resetConfig", Some(Some("a"))),
+            ("schema.setDictEnabled", Some(Some("a"))),
+            ("schema.delete", Some(Some("a"))),
+            ("userDicts.setEnabled", Some(Some("b"))),
+            ("userdata.purgeSchema", Some(Some("b"))),
+            ("scheme.importPackage", Some(None)),
+            ("scheme.importText", Some(None)),
+            ("backup.restore", Some(None)),
+            ("schema.getConfig", None),
+            ("scheme.previewImport", None),
+        ] {
+            assert_eq!(schema_config_write_id(m, &p), want, "{m}");
+        }
+    }
+
+    #[test]
+    fn schema_config_read_or_failed_write_does_not_emit() {
+        let (st, rx) = state_with_events();
+        assert!(
+            dispatch(&st, req("schema.getConfig", json!({ "id": "a" })))
+                .error
+                .is_none()
+        );
+        assert!(
+            dispatch(&st, req("schema.resetConfig", json!({ "id": "a" })))
+                .error
+                .is_some()
+        );
+        assert!(drain_events(&rx).is_empty());
     }
 }

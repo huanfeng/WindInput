@@ -20,6 +20,8 @@
 //! 那是对出厂行为的静默改动。
 //!
 //! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时整族跳过。
+//!
+//! 用例里的观测词是 `tranquil` 而非反馈里的 `translation`，理由见 [`WORD`]。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +31,10 @@ use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_SHIFT};
 use wind_store::Store;
 
-const WORD: &str = "translation";
+/// 观测词取一个**没有词频名次**的词库词：英文候选按词频名次排序后，有名次的常用词
+/// （如反馈里的 `translation`）已在 `t` 的 300 条池内，测不出「池外召回」。无名次的词排在
+/// 所有有名次的词之后（`t` 下有名次的有八百多条），必在池外。
+const WORD: &str = "tranquil";
 const VK_ESCAPE: u32 = 0x1B;
 const VK_SPACE: u32 = 0x20;
 const VK_SEMICOLON: u32 = 0xBA;
@@ -101,7 +106,7 @@ fn commit_text(action: &KeyAction) -> String {
 }
 
 /// 界面最终列表里 `WORD`（任意大小写形）的下标。出厂 `case_follow_input` 开着，临英缓冲
-/// 首字母恒大写 ⇒ 词库候选被投影成 `Translation`，故忽略大小写比。
+/// 首字母恒大写 ⇒ 词库候选被投影成 `Tranquil`，故忽略大小写比。
 fn rank_of_word(coord: &Coordinator) -> Option<usize> {
     coord
         .debug_all_candidate_texts()
@@ -116,16 +121,16 @@ fn english_count(store: &Store, code: &str, text: &str) -> u32 {
         .map_or(0, |r| r.count)
 }
 
-/// 临英打全 `translation` 按空格：上屏的是首条原文 `Translation`（出厂 `raw_candidate = always`）。
+/// 临英打全 `tranquil` 按空格：上屏的是首条原文 `Tranquil`（出厂 `raw_candidate = always`）。
 fn full_space(coord: &Coordinator) {
     enter_temp_english(coord, WORD);
     let text = commit_text(&coord.handle_key_event(&key(VK_SPACE, 0)));
-    assert_eq!(text.trim_end(), "Translation", "前提：空格上屏的是首条原文");
+    assert_eq!(text.trim_end(), "Tranquil", "前提：空格上屏的是首条原文");
 }
 
 // ───────────────────────── ② 头部候选上屏按词库词记 ─────────────────────────
 
-/// 打全按空格（原文 `Translation`）→ 记成词库词 `(translation, translation)`，
+/// 打全按空格（原文 `Tranquil`）→ 记成词库词 `(tranquil, tranquil)`，
 /// 与从列表里选中词库那条是同一行。
 #[test]
 fn raw_head_commit_credits_the_dict_word() {
@@ -140,7 +145,7 @@ fn raw_head_commit_credits_the_dict_word() {
     assert_eq!(
         english_count(&store, WORD, WORD),
         1,
-        "原文 `Translation` 对应词库词 `translation`，应按它记一次"
+        "原文 `Tranquil` 对应词库词 `tranquil`，应按它记一次"
     );
     // 不得另记一条按原文形态的孤儿键（读端永远查不中）。
     let mut rows = Vec::new();
@@ -158,7 +163,7 @@ fn raw_head_commit_credits_the_dict_word() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 打全选小写变形那条（`translation`，头部变形而非词库候选）→ 同样记成词库词。
+/// 打全选小写变形那条（`tranquil`，头部变形而非词库候选）→ 同样记成词库词。
 #[test]
 fn case_variant_commit_credits_the_dict_word() {
     if !has_english_schema() {
@@ -192,11 +197,11 @@ fn raw_head_commit_records_nothing_when_freq_off() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 快捷输入英文成员的头部候选（`;translation` 里的原文 `translation`）上屏 → 记进**英文桶**，
+/// 快捷输入英文成员的头部候选（`;tranquil` 里的原文 `tranquil`）上屏 → 记进**英文桶**，
 /// 不再落到主方案桶。
 ///
 /// 改前它没有来源 ⇒ 反查不到成员方案 ⇒ 归属落回 active（五笔），码表调频开着时写出
-/// `("wubi86", "translation", "translation")` 这条五笔读端永远用不上的行。故这里特意打开
+/// `("wubi86", "tranquil", "tranquil")` 这条五笔读端永远用不上的行。故这里特意打开
 /// 码表调频，才看得见那条错行。
 #[test]
 fn quick_input_head_commit_credits_english_bucket() {
@@ -231,7 +236,7 @@ fn quick_input_head_commit_credits_english_bucket() {
 
 // ───────────────────────── ③ 短前缀召回 ─────────────────────────
 
-/// 端到端：临英打全 `translation` 空格上屏 5 次，再键入 `t`——它进入候选并靠前。
+/// 端到端：临英打全 `tranquil` 空格上屏 5 次，再键入 `t`——它进入候选并靠前。
 ///
 /// 位次依据（英文出厂 `strategy = position`、`promote_prefix = all`）：召回的词放在词库段
 /// **池尾**（`t` 下池子 300 条 ⇒ base_pos ≈ 300），5 次有效使用 ⇒ 目标位次
@@ -300,8 +305,8 @@ fn freq_off_leaves_single_letter_list_unchanged() {
 }
 
 /// 召回只收**仍是词库词**的记录，且验证的是 `(码, 文本)` 这一整条：种一条「码是真实词库码
-/// （`thinking`）、文本却不是词库词（`thinkingx`）」的记录（导入残留 / 词库改过文本），`t` 下的
-/// 列表必须与没有任何记录时逐字相同——只按码验证的话，会把码对应的词库词 `thinking` 召回来，
+/// （`thoughtless`）、文本却不是词库词（`thoughtlessx`）」的记录（导入残留 / 词库改过文本），`t` 下的
+/// 列表必须与没有任何记录时逐字相同——只按码验证的话，会把码对应的词库词 `thoughtless` 召回来，
 /// 借一条不属于它的记录冒出来。词频是排序维度，不是词条来源。
 #[test]
 fn recall_ignores_records_that_are_not_dict_words() {
@@ -313,14 +318,16 @@ fn recall_ignores_records_that_are_not_dict_words() {
     enter_temp_english(&coord, "t");
     let baseline = coord.debug_all_candidate_texts();
     assert!(
-        !baseline.iter().any(|t| t.eq_ignore_ascii_case("thinking")),
-        "前提：`thinking` 不在 `t` 的原始池里（否则测不出误召回）"
+        !baseline
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("thoughtless")),
+        "前提：`thoughtless` 不在 `t` 的原始池里（否则测不出误召回）"
     );
 
     let (store, path) = fresh_store("recall_nondict");
     for _ in 0..5 {
         store
-            .record_freq("english", "thinking", "thinkingx")
+            .record_freq("english", "thoughtless", "thoughtlessx")
             .unwrap();
     }
     let coord =
@@ -389,8 +396,8 @@ fn repeat_candidate(coord: &Coordinator) -> Vec<String> {
     page
 }
 
-/// M1：临英上屏历史记**实际上屏文本**，与词频分开。打 `Translation` 空格上屏后，`;` 重复
-/// 上屏调回来的必须是 `Translation`，不是词频键用的词库原文 `translation`。
+/// M1：临英上屏历史记**实际上屏文本**，与词频分开。打 `Tranquil` 空格上屏后，`;` 重复
+/// 上屏调回来的必须是 `Tranquil`，不是词频键用的词库原文 `tranquil`。
 #[test]
 fn temp_english_history_keeps_committed_case() {
     if !has_english_schema() {
@@ -400,7 +407,7 @@ fn temp_english_history_keeps_committed_case() {
     let coord =
         Coordinator::new_headless_with_store(config(true), Some(&data_dir()), store.clone());
     full_space(&coord);
-    assert_eq!(repeat_candidate(&coord), vec!["Translation".to_string()]);
+    assert_eq!(repeat_candidate(&coord), vec!["Tranquil".to_string()]);
     assert_eq!(english_count(&store, WORD, WORD), 1, "词频照记词库原文");
     let _ = std::fs::remove_file(&path);
 }
@@ -415,13 +422,13 @@ fn temp_english_history_recorded_when_freq_off() {
     let coord =
         Coordinator::new_headless_with_store(config(false), Some(&data_dir()), store.clone());
     full_space(&coord);
-    assert_eq!(repeat_candidate(&coord), vec!["Translation".to_string()]);
+    assert_eq!(repeat_candidate(&coord), vec!["Tranquil".to_string()]);
     assert_eq!(english_count(&store, WORD, WORD), 0, "调频关不记词频");
     let _ = std::fs::remove_file(&path);
 }
 
-/// L4：英文方案主输入路，大写打 `Translation` 空格上屏（头部原文）→ 记到词库词
-/// `(translation, translation)`，不写 `(translation, Translation)` 这条孤儿键。
+/// L4：英文方案主输入路，大写打 `Tranquil` 空格上屏（头部原文）→ 记到词库词
+/// `(tranquil, tranquil)`，不写 `(tranquil, Tranquil)` 这条孤儿键。
 #[test]
 fn english_schema_cased_raw_commit_credits_dict_word() {
     if !has_english_schema() {
@@ -432,21 +439,21 @@ fn english_schema_cased_raw_commit_credits_dict_word() {
     cfg.schema.active = "english".into();
     let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store.clone());
     coord.handle_key_event(&key(b'T' as u32, MOD_SHIFT));
-    for c in "ranslation".chars() {
+    for c in WORD[1..].chars() {
         coord.handle_key_event(&key((c.to_ascii_uppercase() as u32) & 0xFF, 0));
     }
     let text = commit_text(&coord.handle_key_event(&key(VK_SPACE, 0)));
-    assert_eq!(text.trim_end(), "Translation", "前提：空格上屏的是头部原文");
+    assert_eq!(text.trim_end(), "Tranquil", "前提：空格上屏的是头部原文");
     assert_eq!(english_count(&store, WORD, WORD), 1, "应记到词库词");
     assert_eq!(
-        english_count(&store, WORD, "Translation"),
+        english_count(&store, WORD, "Tranquil"),
         0,
         "不得记按原文形态的孤儿键"
     );
     let _ = std::fs::remove_file(&path);
 }
 
-/// T1：快捷输入 `;translation` 高亮原文后按 `,` 顶屏——英文桶记一次、五笔桶为空。
+/// T1：快捷输入 `;tranquil` 高亮原文后按 `,` 顶屏——英文桶记一次、五笔桶为空。
 /// 成员只留 english，使首条（高亮）就是英文原文；码表调频打开才看得见落错桶。
 #[test]
 fn quick_input_punct_commit_of_head_credits_english_bucket() {
@@ -480,7 +487,7 @@ fn quick_input_punct_commit_of_head_credits_english_bucket() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// T2：词已在取回的池里时不重复召回——打 `tran`（`translation` 本就在池内）列表里它只出现
+/// T2：词已在取回的池里时不重复召回——打 `tran`（`tranquil` 本就在池内）列表里它只出现
 /// 一次。关掉大小写投影：投影开着时列表末尾那道去重会把重复条悄悄吃掉，测不出召回自己
 /// 有没有排除池内的词。
 #[test]
@@ -541,7 +548,7 @@ const T_WORDS: &[&str] = &[
 ];
 
 /// L1-a：**先验证、后截断**。同前缀下有 20 条次数更高的非词库记录时，用了 5 次的词库词
-/// `translation` 仍要召回——先截前 16 条再验证的话，名额全被非词库残留占掉。
+/// `tranquil` 仍要召回——先截前 16 条再验证的话，名额全被非词库残留占掉。
 #[test]
 fn recall_validates_before_truncating() {
     if !has_english_schema() {
@@ -569,7 +576,7 @@ fn recall_validates_before_truncating() {
 }
 
 /// L1-b：召回按**衰减后的有效次数**排，与重排同一把尺。30 条一年前用过 50 次的旧记录
-/// （衰减殆尽，重排里提升强度为 0）不得挤掉最近用了 5 次的 `translation`——按原始次数排
+/// （衰减殆尽，重排里提升强度为 0）不得挤掉最近用了 5 次的 `tranquil`——按原始次数排
 /// 的话旧记录全排在前面、占满名额。
 #[test]
 fn recall_ranks_by_decayed_count() {

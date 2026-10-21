@@ -1114,9 +1114,10 @@ impl Engine for MixedEngine {
 
     /// 如实转发主引擎的状态。
     ///
-    /// ⚠️ 返回 true **不等于**混输下整句会触发：`convert` 超码长直接走 `convert_overflow`，
-    /// 只有在没配拼音子引擎（退化为纯码表）时才会经过主引擎。如实转发是为了让协调器的
-    /// 分隔符键在那种退化配置下也能放行，以及让「默认关闭」这件事在外部可观测。
+    /// 构建方只在**没配拼音子引擎**（退化为纯码表、整句真能触发）时才给主引擎开整句
+    /// （见 `EngineManager` 构建混输处），故返回 true 即整句会生效。如实转发让协调器的
+    /// 分隔符键在退化配置下放行，短语满码上屏也据此让位；配着拼音子引擎时恒 false，
+    /// 两者都不受影响。
     fn sentence_input_enabled(&self) -> bool {
         self.primary.sentence_input_enabled()
     }

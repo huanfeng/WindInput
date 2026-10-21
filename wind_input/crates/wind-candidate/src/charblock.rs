@@ -205,7 +205,12 @@ pub fn other_block_name() -> &'static str {
 ///
 /// ★ 与 emoji **刻意不相交**：勾「符号」不该顺带把 emoji 也放进来，否则界面上两个开关
 /// 的关系说不清楚（勾了符号，emoji 那个还有什么用）。「杂项符号」「装饰符号」
-/// 「杂项技术符号」因此不在这里——虽然它们名字里也有「符号」二字。
+/// 「杂项技术符号」这三块 emoji 与非 emoji 混住，因此不整块列在这里，而是由
+/// [`PRESET_SYMBOL_MIXED_BLOCKS`] 扣掉 emoji 字表后并入——否则 `✓ ★ ☐ ⌘` 这批非 emoji
+/// 符号哪个开关都管不到（它们在区块表里，也不算「其它」）。
+///
+/// ⚠️ 本表各块整块并入，其中仍混有少量 emoji（`‼ ™ ↔ ▶ Ⓜ ㊗` 等）：这是既有口径，
+/// 不相交只在上述三块上按码位成立。
 ///
 /// ★ 只收 `is_han ∪ is_pua` **域外**的块。部首、康熙部首、CJK 笔画、各扩展区都在
 /// `common::is_han` 里，本来就是生僻字模式的默认输出，列进来是多余的开关——用户勾了
@@ -236,6 +241,16 @@ const PRESET_SYMBOL_BLOCKS: &[&str] = &[
 /// 预设组「符号」的成员块名。只给 `gen_block_charsets` 用（同 [`block_table`]）。
 pub fn preset_symbol_block_names() -> &'static [&'static str] {
     PRESET_SYMBOL_BLOCKS
+}
+
+/// 预设组「符号」里**扣掉 emoji 后**才并入的块：emoji 与非 emoji 混住的三块。
+///
+/// 扣减用的是出厂 `charsets/emoji.yaml` 那份精确字表，由 `gen_block_charsets` 在生成时做。
+const PRESET_SYMBOL_MIXED_BLOCKS: &[&str] = &["杂项技术符号", "杂项符号", "装饰符号"];
+
+/// 预设组「符号」里扣掉 emoji 后并入的块名。只给 `gen_block_charsets` 用（同 [`block_table`]）。
+pub fn preset_symbol_mixed_block_names() -> &'static [&'static str] {
+    PRESET_SYMBOL_MIXED_BLOCKS
 }
 
 /// 这个字符属于哪个块；表外一律 [`OTHER`]。
