@@ -505,7 +505,7 @@ pub struct CandidateWindow {
     ///
     /// **横竖各一份**（`.0`＝横排、`.1`＝竖排）：协调器按 `ByLayout` 下发两档，这边按
     /// [`Self::vertical`] 取。⚠️ 旋转态的 `vertical` 是 false ⇒ 落横排那份，与候选注释
-    /// 模板的分档口径一致（见 `wind-config` 的 `comment_template`）。
+    /// 模板的分档口径一致（见 `wind-config` 的 `comment_max_chars`）。
     pager_display: (String, String),
     /// 页码文字显示覆盖（""跟随主题/"show"/"hide"）。来自 ui.candidate.page_number_display。
     /// 横竖各一份，口径同 [`Self::pager_display`]。

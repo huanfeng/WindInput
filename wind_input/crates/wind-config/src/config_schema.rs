@@ -218,12 +218,11 @@ const EMOJI_SHOW_AS_VALUES: &[&str] = &["after", "tail", "comment"];
 ///
 /// # 三态键（`Option<T>`，默认 `None`）刻意不登记
 ///
-/// 模式级注释模板 `input.{temp_english,temp_pinyin,url}.comment_template_{vertical,horizontal}`
-/// 不在本表内，**这不是遗漏**：注册表是与 `Config::default()` 的序列化键集反向对照的，
-/// 而这类键的出厂值恰恰是「键不存在」（= 跟随全局），序列化时压根不出现，登记即被判「多余」。
+/// 这类键不在本表内，**这不是遗漏**：注册表是与 `Config::default()` 的序列化键集反向对照的，
+/// 而这类键的出厂值恰恰是「键不存在」，序列化时压根不出现，登记即被判「多余」。
 ///
 /// 不登记同时是**正确**的：`prune_redundant` 只清理「已登记且值等于出厂默认」的键，
-/// 未登记键一律不碰——用户手写的模板因此永远不会被写回逻辑清掉。这与废弃键、
+/// 未登记键一律不碰——用户手写的值因此永远不会被写回逻辑清掉。这与废弃键、
 /// `Map`/`StructList` 下钻子路径归为同一类处置，理由见该函数的「两道保险」。
 static REGISTRY: &[ConfigField] = &[
     // -- schema（方案 + 拼音 + 模式）--
@@ -696,9 +695,6 @@ static REGISTRY: &[ConfigField] = &[
     ),
     f("ui.candidate.grid_pageupdown_screen", Bool),
     f("ui.candidate.grid_categories", StrList),
-    f("ui.candidate.comment_enabled", Bool),
-    f("ui.candidate.comment_template_vertical", Str),
-    f("ui.candidate.comment_template_horizontal", Str),
     f("ui.candidate.comment_max_chars_vertical", Int),
     f("ui.candidate.comment_max_chars_horizontal", Int),
     f("ui.candidate.comment_above", Bool),
@@ -942,16 +938,6 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
         section: "[candidate]",
         note: "方案可覆盖候选窗排列方向；方案没写则用这里的值。",
     },
-    SchemaOverride {
-        key: "ui.candidate.comment_template_vertical",
-        section: "[candidate]",
-        note: "方案可覆盖注释模板；方案没写则用这里的值。",
-    },
-    SchemaOverride {
-        key: "ui.candidate.comment_template_horizontal",
-        section: "[candidate]",
-        note: "方案可覆盖注释模板；方案没写则用这里的值。",
-    },
 ];
 
 /// 查一个全局键是否可被方案级配置覆盖。段前缀登记（`key` 以 `.` 结尾）对该段下所有键成立。
@@ -1116,14 +1102,6 @@ pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static st
         (
             "ui.candidate.layout",
             cand.layout != crate::config::LayoutIntent::Follow,
-        ),
-        (
-            "ui.candidate.comment_template_vertical",
-            cand.comment_template_vertical.is_some(),
-        ),
-        (
-            "ui.candidate.comment_template_horizontal",
-            cand.comment_template_horizontal.is_some(),
         ),
     ];
     checks
@@ -1478,31 +1456,6 @@ mod tests {
         );
     }
 
-    /// L1↔L2 同源：全局注释模板（横竖两份）。`default_comment_template()` 与
-    /// `data/config.toml` 是同一个出厂事实的两份写法，分叉的表现是「删掉配置文件后注释栏变了样」。
-    #[test]
-    fn comment_template_l1_matches_l2() {
-        let l1 = crate::Config::default().ui.candidate;
-        let cand = data_config_toml()
-            .get("ui")
-            .and_then(|u| u.get("candidate"))
-            .cloned()
-            .expect("data/config.toml 缺少 [ui.candidate]");
-        for (k, v) in [
-            ("comment_template_vertical", &l1.comment_template_vertical),
-            (
-                "comment_template_horizontal",
-                &l1.comment_template_horizontal,
-            ),
-        ] {
-            assert_eq!(
-                cand.get(k).and_then(toml::Value::as_str),
-                Some(v.as_str()),
-                "ui.candidate.{k} 的 L1 默认值与 L2 出厂文件不一致"
-            );
-        }
-    }
-
     /// L1↔L2 同源：气泡的单行上限与折行宽度（取值守门在 config.rs `test_tooltip_defaults`，
     /// 行为守门在协调器 `tooltip` 模块的出厂配置用例）。
     #[test]
@@ -1540,12 +1493,20 @@ mod tests {
         assert_eq!(l2_bool("tooltip", "enabled"), l1);
     }
 
-    /// L1↔L2 同源：候选注释总开关（出厂开，同上）。
+    /// L1↔L2 同源：`[ui.comment]` 的总开关、当前态与 Alt 切换方式。
     #[test]
-    fn comment_enabled_l1_matches_l2() {
-        let l1 = crate::Config::default().ui.candidate.comment_enabled;
-        assert!(l1, "ui.candidate.comment_enabled 出厂应为 true");
-        assert_eq!(l2_bool("candidate", "comment_enabled"), l1);
+    fn ui_comment_l1_matches_l2() {
+        let l1 = crate::Config::default().ui.comment;
+        assert!(l1.enabled, "ui.comment.enabled 出厂应为 true");
+        assert_eq!(l2_bool("comment", "enabled"), l1.enabled);
+        let comment = data_config_toml()
+            .get("ui")
+            .and_then(|u| u.get("comment"))
+            .cloned()
+            .expect("data/config.toml 缺少 [ui.comment]");
+        let l2: crate::comment_lib::UiCommentConfig =
+            comment.try_into().expect("[ui.comment] 须能反序列化");
+        assert_eq!(l2, l1, "[ui.comment] 的 L1 默认值与 L2 出厂文件不一致");
     }
 
     /// L1↔L2 同源：方案常驻策略（出厂关，设计 memory-footprint.md §9 D1）。
@@ -2275,12 +2236,6 @@ mod overridden_keys_tests {
                 "[punct.custom_mappings]\n\",\" = [\"，\", \"，\", \"，\", \",\"]\n"
             }
             "ui.candidate.layout" => "[candidate]\nlayout = \"vertical\"\n",
-            "ui.candidate.comment_template_vertical" => {
-                "[candidate]\ncomment_template_vertical = \"x\"\n"
-            }
-            "ui.candidate.comment_template_horizontal" => {
-                "[candidate]\ncomment_template_horizontal = \"x\"\n"
-            }
             other => panic!(
                 "新增了登记项 {other}：在此补一份只设该项的最小方案片段，并让 schema_overridden_keys 认它"
             ),

@@ -706,7 +706,7 @@ english_case_cycle_key = ""
 #   键不可改。只在「中文 + 有候选」时生效，其余时候 Alt+数字（程序菜单加速键）、
 #   Alt+空格（窗口系统菜单）照常归程序。keys.key_actions 里已绑的 Alt 组合优先，本项让位。
 #   候选没有可上屏的内容时什么都不上屏、组合保留（不回落成候选字）。
-#   comment 档而 ui.candidate.comment_enabled = false（注释关着）时按 off 处理：Alt 组合不认领、照常归程序。
+#   comment 档而 ui.comment.enabled = false（注释关着）时按 off 处理：Alt 组合不认领、照常归程序。
 alt_commit = "off"
 # 空码（打了码但一个候选都没有，多半是打错了）时，终结键怎么处置这串废码。
 #   enter_behavior           回车          commit | clear
@@ -1054,17 +1054,6 @@ space_as_input = false
 # 不是布尔：follow 与 vertical 只在全局本身竖排时才有区别（前者跟着变、后者恒定）。
 # 临英常设 horizontal——英文候选一行放得下，全局竖排时反而占屏。
 candidate_layout = "follow"
-# 模式级注释模板（高级，无图形界面）：本模式期间覆盖全局 ui.candidate.comment_template_*。
-#   不写这两个键 = 跟随全局；写空串 "" = 本模式不显示注释；写模板 = 本模式改用它。
-#   「不写」与「写空串」是两回事，所以这里刻意不预置——预置任何值都会改掉默认语义。
-#   临英的典型用法（挂了英汉注释库时，只在打英文时显示释义）：
-# comment_template_vertical   = "${dict}"
-# comment_template_horizontal = "${dict}"
-# 同样的两个键在 [input.temp_pinyin]、[input.url]、[[schema.mix_modes]] 下也可用，
-# 特殊模式的那份在方案文件的 [overlay] 段里。
-# 注释模板共三层：模式级 → 方案级（方案文件 [candidate] 段）→ 全局（下方 [ui.candidate]）。
-# 上面两层都是「不写=跟随下一层」，所以给某个方案单独配注释不必动全局。
-# 说明见 https://windinput.com/docs/settings/appearance/candidate-comment
 
 [input.capslock]
 # 切中英模式（Shift 等切换键）时是否顺手取消大写锁定。仅此一处作用域——
@@ -1489,52 +1478,6 @@ grid_pageupdown_screen = true
 # 展开态的分类标签（Tab / Shift+Tab 或鼠标点击切换）：all 全部、single 单字、phrase 词组、
 # rare 生僻、symbol 符号。只决定有哪些，顺序固定按这个次序；少于两个时不显示标签栏。
 grid_categories = ["all", "single", "phrase", "rare"]
-# 候选注释总开关。关掉后候选不再显示注释（含上方注释条），下面三层注释模板（全局 / 方案 /
-# 模式）一律不生效；关掉后不再计算注释，也不再为它预载反查编码、拆字等数据，省内存。
-# 此时 input.alt_commit = "comment" 按 "off" 处理（Alt+数字照常归程序）。
-comment_enabled = true
-# 候选注释段（候选右侧的小字）模板。横排/竖排各一份、互不影响——两种排布能放的宽度差一个
-# 数量级（竖排每行独占，横排全部候选共享一行）。
-#
-# 语法：
-#   ${name}      变量替换
-#   ${a|b|c}     取首个非空的变量
-#   { ... }      可选段：段内变量全为空则整段（含字面文字）消失
-#   另：空变量会吞掉紧邻的一个空格；整个模板的变量全空时不显示任何内容。
-#
-# 可用变量：
-#   code_hint          引擎产的编码提示（码表前缀候选的剩余编码 si→sikao 标 kao；混输标记「拼」）
-#   code_rev           主码表整词反查编码（仅拼音来源候选，受 schema.pinyin.code_hint_source 门控；
-#                      临时拼音/快捷输入期间改受 input.temp_pinyin.code_hint_source 门控，
-#                      混输方案下改受 schema.mix.pinyin_code_hint 门控）
-#   shuangpin          双拼编码（你好 → 小鹤 nihc）。同受上述门控。
-#                      **全拼方案下照样有值**：布局按「活跃方案→主拼音方案→已装的首个
-#                      双拼方案」回退，一个双拼方案都没装才恒空
-#   pinyin             带声调注音 nǐ hǎo（多音字按词典消歧：「行长」得 háng zhǎng 而非 xíng cháng）
-#   correct_pinyin     带正确拼音提示的候选的整词正确拼音 zhong guo，其余候选为空；
-#                      按 input.correction.hint 的来源勾选过滤，带调随其 tone，
-#                      不依赖提示总开关与 scope
-#   chaizi             拆字字根串，仅单字候选（需方案配了 [engine.chaizi]）
-#   chaizi_code        该字在拆字库里的编码，仅单字候选
-#   chaizi_all[:分隔符] 拆字字根不限字数，默认空格连接；如 ${chaizi_all:／}（可能很长，慎用于横排）
-#   code_rev_all[:分隔符] 主码表全部码位（我 → q/trn/trnt），默认 / 连接
-#   dict               挂载的注释词库里该词的注释（见下方 [[ui.comment_dicts]]）
-#   dict:<id>          只查 id 为 <id> 的那个注释库（${dict} 只取第一个命中的库；多库并排如
-#                      "${dict:en}{ ${dict:chaifen}}"）
-#   dict_all[:分隔符]  全部适用注释库各取一条，按库顺序、相同内容只留一条，默认「；」连接；
-#                      如 ${dict_all:/}（可能很长，慎用于横排）。分隔符里不能有 | 和 }
-#
-# 出厂值 ${code_hint|code_rev|shuangpin} 的回退链含义：优先显示引擎产的编码提示，
-# 没有就显示主码表反查编码，再没有（例如没配主码表的用户）就显示双拼编码。
-# 前两段等价于本功能引入前的固定行为，故配了主码表的用户升级后所见不变。
-# ${code} / ${code_all} 是 ${code_rev} / ${code_rev_all} 的兼容别名，老模板照常可用。
-# 颜色：出厂注释整段是主题的注释色；主题可按变量配「角色色」，模板里也能直接写 $[颜色]{…}
-# （优先于主题），如 "$[info]{${code_hint|code_rev|shuangpin}}"。详见下方链接的「内联颜色」一节。
-# 例：竖排显示字根与注音 → "{〔${chaizi}〕}{ ${pinyin}}"
-# 例：同时看码表码与双拼码 → "${code_hint|code_rev}{ [${shuangpin}]}"
-# 完整说明与更多示例：https://windinput.com/docs/settings/appearance/candidate-comment
-comment_template_vertical = "${code_hint|code_rev|shuangpin}"
-comment_template_horizontal = "${code_hint|code_rev|shuangpin}"
 # 注释段最大字数（0=不限），超出截断并加省略号。横竖各一份：横排全部候选共享一行宽度，
 # 竖排每行独占，能放多少本就不是同一个答案。开启下方 comment_above 后，上限按上下两段各自计算。
 comment_max_chars_vertical = 0
@@ -1603,6 +1546,44 @@ state = "default"
 # Alt 切换注释态的方式：off 关闭 | session 本次会话内(出厂) | persist 写回配置 | hold 按住期间
 alt_switch = "session"
 # 用户模板与分配写在 [[ui.comment.templates]] / [ui.comment.assign.*]，内置的见 system.comments.toml。
+# 旧版的 ui.candidate.comment_enabled、ui.candidate.comment_template_*、各模式的 comment_template_*
+# 启动时自动迁入本段；方案文件里的注释模板不再生效。
+#
+# 模板串（templates 的 text）语法：
+#   ${name}      变量替换
+#   ${a|b|c}     取首个非空的变量
+#   { ... }      可选段：段内变量全为空则整段（含字面文字）消失
+#   另：空变量会吞掉紧邻的一个空格；整个模板的变量全空时不显示任何内容。
+#
+# 可用变量：
+#   code_hint          引擎产的编码提示（码表前缀候选的剩余编码 si→sikao 标 kao；混输标记「拼」）
+#   code_rev           主码表整词反查编码（仅拼音来源候选，受 schema.pinyin.code_hint_source 门控；
+#                      临时拼音/快捷输入期间改受 input.temp_pinyin.code_hint_source 门控，
+#                      混输方案下改受 schema.mix.pinyin_code_hint 门控）
+#   shuangpin          双拼编码（你好 → 小鹤 nihc）。同受上述门控。
+#                      **全拼方案下照样有值**：布局按「活跃方案→主拼音方案→已装的首个
+#                      双拼方案」回退，一个双拼方案都没装才恒空
+#   pinyin             带声调注音 nǐ hǎo（多音字按词典消歧：「行长」得 háng zhǎng 而非 xíng cháng）
+#   correct_pinyin       模糊音命中的候选的整词正确拼音 zhong guo，其余候选为空；
+#                      带调随 input.correction.hint.tone，不依赖 hint 开关
+#   chaizi             拆字字根串，仅单字候选（需方案配了 [engine.chaizi]）
+#   chaizi_code        该字在拆字库里的编码，仅单字候选
+#   chaizi_all[:分隔符] 拆字字根不限字数，默认空格连接；如 ${chaizi_all:／}（可能很长，慎用于横排）
+#   code_rev_all[:分隔符] 主码表全部码位（我 → q/trn/trnt），默认 / 连接
+#   dict               挂载的注释词库里该词的注释（见上方 [[ui.comment_dicts]]）
+#   dict:<id>          只查 id 为 <id> 的那个注释库（${dict} 只取第一个命中的库；多库并排如
+#                      "${dict:en}{ ${dict:chaifen}}"）
+#   dict_all[:分隔符]  全部适用注释库各取一条，按库顺序、相同内容只留一条，默认「；」连接；
+#                      如 ${dict_all:/}（可能很长，慎用于横排）。分隔符里不能有 | 和 }
+#
+# 内置模板 code_hint 即 ${code_hint|code_rev|shuangpin}：优先显示引擎产的编码提示，
+# 没有就显示主码表反查编码，再没有（例如没配主码表的用户）就显示双拼编码。
+# ${code} / ${code_all} 是 ${code_rev} / ${code_rev_all} 的兼容别名，老模板照常可用。
+# 颜色：出厂注释整段是主题的注释色；主题可按变量配「角色色」，模板里也能直接写 $[颜色]{…}
+# （优先于主题），如 "$[info]{${code_hint|code_rev|shuangpin}}"。详见下方链接的「内联颜色」一节。
+# 例：竖排显示字根与注音 → "{〔${chaizi}〕}{ ${pinyin}}"
+# 例：同时看码表码与双拼码 → "${code_hint|code_rev}{ [${shuangpin}]}"
+# 完整说明与更多示例：https://windinput.com/docs/settings/appearance/candidate-comment
 
 [ui.font]
 family = ""

@@ -85,6 +85,83 @@ fn remove_nested(table: &mut toml::Table, path: &[&str]) -> bool {
     removed
 }
 
+fn path_refs(path: &[String]) -> Vec<&str> {
+    path.iter().map(String::as_str).collect()
+}
+
+/// 旧版全局注释模板的出厂值（等于内置模板 `code_hint`）。迁移时全局旧值等于它的视为没写。
+const LEGACY_FACTORY_COMMENT_TEMPLATE: &str = "${code_hint|code_rev|shuangpin}";
+
+/// 从 `t` 摘下 `comment_template_<side>`；非字符串的只删不迁。
+fn take_legacy_template(t: &mut toml::Table, origin: &str, side: &str) -> Option<String> {
+    let key = format!("comment_template_{side}");
+    match t.remove(&key)? {
+        toml::Value::String(s) => Some(s),
+        other => {
+            warn!("{origin}.{key} 不是字符串（{other}），已丢弃");
+            None
+        }
+    }
+}
+
+/// 一处旧注释模板：(`ui.comment.assign` 下的作用范围路径, 来源键前缀, 竖排旧值, 横排旧值)。
+type LegacyCommentSource = (Vec<String>, String, Option<String>, Option<String>);
+
+/// 摘下本层全部旧注释模板键，按 全局 → 五个模式 → `mix_modes` 的顺序返回。
+/// `mix_modes` 条目缺 id 的不动（无处可迁）。
+fn take_legacy_comment_templates(layer: &mut toml::Value) -> Vec<LegacyCommentSource> {
+    let mut out = Vec::new();
+    if let Some(cand) = layer
+        .get_mut("ui")
+        .and_then(|u| u.get_mut("candidate"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        let origin = "ui.candidate";
+        let custom = |s: &String| s != LEGACY_FACTORY_COMMENT_TEMPLATE;
+        let v = take_legacy_template(cand, origin, "vertical").filter(custom);
+        let h = take_legacy_template(cand, origin, "horizontal").filter(custom);
+        out.push((vec!["global".into()], origin.into(), v, h));
+    }
+    if let Some(input) = layer.get_mut("input").and_then(toml::Value::as_table_mut) {
+        for m in ["temp_english", "temp_pinyin", "url", "email", "unicode"] {
+            let Some(t) = input.get_mut(m).and_then(toml::Value::as_table_mut) else {
+                continue;
+            };
+            let origin = format!("input.{m}");
+            let v = take_legacy_template(t, &origin, "vertical");
+            let h = take_legacy_template(t, &origin, "horizontal");
+            out.push((vec!["mode".into(), m.into()], origin, v, h));
+        }
+    }
+    if let Some(mixes) = layer
+        .get_mut("schema")
+        .and_then(|s| s.get_mut("mix_modes"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        for t in mixes.iter_mut().filter_map(toml::Value::as_table_mut) {
+            if !t.contains_key("comment_template_vertical")
+                && !t.contains_key("comment_template_horizontal")
+            {
+                continue;
+            }
+            let id = t
+                .get("id")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() {
+                warn!("schema.mix_modes 有条目缺 id，其注释模板未迁移");
+                continue;
+            }
+            let origin = format!("schema.mix_modes[{id}]");
+            let v = take_legacy_template(t, &origin, "vertical");
+            let h = take_legacy_template(t, &origin, "horizontal");
+            out.push((vec!["mode".into(), format!("mix:{id}")], origin, v, h));
+        }
+    }
+    out
+}
+
 /// 从 `root`（用户层）删除所有与 `preset`（出厂默认 L1⊕L2⊕L2.5）取值相同的叶子键，返回删除数。
 ///
 /// 纯函数、不碰文件系统：[`Config::prune_user_config`] 负责 IO，本函数负责判定，
@@ -1153,12 +1230,12 @@ impl AltCommit {
         }
     }
 
-    /// **生效**档：`comment` 档而候选注释总开关（`ui.candidate.comment_enabled`）关着时按
+    /// **生效**档：`comment` 档而候选注释总开关（`ui.comment.enabled`）关着时按
     /// `Off` 处理——注释恒空，认领 Alt 组合只会把宿主的加速键吞掉。热键登记与协调器分派
     /// 都取这一份，两边口径一致（TSF 吃键集 ⊆ Rust 出字集）。
     pub fn effective(cfg: &Config) -> Self {
         match Self::from_config(&cfg.input.alt_commit) {
-            Self::Comment if !cfg.ui.candidate.comment_enabled => Self::Off,
+            Self::Comment if !cfg.ui.comment.enabled => Self::Off,
             kind => kind,
         }
     }
@@ -3532,25 +3609,6 @@ impl Orientation {
     }
 }
 
-/// 模式级注释模板覆盖（三态）。见 `crate::comment::template_for` 的决策点说明。
-///
-/// - **键缺失**（`None`）= 跟随全局同方向的模板（默认，零回归）
-/// - **非空** = 本模式期间改用该模板
-/// - **空串** = 本模式期间不显示注释
-///
-/// # 为什么是 `Option<String>` 而不是 `String`
-///
-/// 用空串表达「跟随全局」的话，「本模式不要注释」就没法表达了——而这恰恰是本功能最主要的
-/// 用途（反查类模式信息太多、干扰正常输入）。三态里「缺失」与「空」必须是两件事。
-///
-/// # 横竖各一份，与全局同构
-///
-/// 字段名与 `ui.candidate.comment_template_vertical` / `_horizontal` 刻意保持一致，
-/// 且**两个方向各自独立三态**——只覆盖竖排、横排仍跟随全局是合法且常见的配置。
-/// 与 [`LayoutIntent`] 的取值词汇复用同一个理由：让「模式级」与「全局」在用户眼里
-/// 是同一件事的两个层级，而不是两套发明出来的键名。
-pub type CommentTemplateOverride = Option<String>;
-
 /// 自由输入（字面输入）模式：让 mix 能打出 `GetTestData()` / `test_data` / `<TAB>`
 /// 这类**任何 member 都无法接受**的内容。
 ///
@@ -3625,12 +3683,6 @@ pub struct MixModeConfig {
     /// （它本就是 quick_mix 这个实例的属性，却被存在了与实例无关的全局段里）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 本 mix 期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: CommentTemplateOverride,
-    /// 本 mix 期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: CommentTemplateOverride,
     /// 自由（字面）输入，见 [`FreeInputMode`]。默认 `Auto`。
     ///
     /// 每实例独立：一个只做日期/计算的 mix 可以关掉它，保住「打完拼音按逗号顶屏出
@@ -3681,8 +3733,6 @@ impl Default for MixModeConfig {
             trigger_keys: Vec::new(),
             members: Vec::new(),
             candidate_layout: LayoutIntent::default(),
-            comment_template_vertical: None,
-            comment_template_horizontal: None,
             free_input: FreeInputMode::default(),
             // 与 `#[serde(default = "default_true")]` 对齐，见结构体文档的 ⚠️。
             free_input_takes_select_keys: default_true(),
@@ -3738,9 +3788,6 @@ fn default_mix_modes() -> Vec<MixModeConfig> {
         // 与旧 data/config.toml 的 `quick_input.force_vertical = true` 行为一致
         // （mix_modes 不能写进预置文件，故默认值只能落在这里，见 §迁移）。
         candidate_layout: LayoutIntent::Vertical,
-        // None = 跟随全局注释模板（内置 quick_mix 不预设覆盖）
-        comment_template_vertical: None,
-        comment_template_horizontal: None,
         // 出厂开自动自由输入：`;` 是为特殊内容而进的模式，字面输入是它的常见用途。
         free_input: FreeInputMode::Auto,
         // 夺取 `;`/`'` 作字面：它们选第 2/3 候选只是数字键的冗余别名，而 `rock'n'roll`
@@ -4754,14 +4801,6 @@ pub struct TempEnglishConfig {
     /// 典型用法是设 `horizontal`——英文候选一行放得下，全局竖排时反而占屏。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 临英期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
-    /// 典型用法 `"${dict}"`——只在打英文时显示挂载的英汉释义，中文输入不受影响。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: CommentTemplateOverride,
-    /// 临英期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
-    /// 临英常设 `candidate_layout = "horizontal"`，此时生效的是本项而非竖排那份。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: CommentTemplateOverride,
     /// 首候选是用户所打原文（保证能上屏自己输入的内容）。**三档**，见
     /// [`RawCandidateMode`]；出厂 [`RawCandidateMode::Always`]（＝老配置的 `true`，
     /// 保持既有行为——此前这条是硬编码、不可配的）。
@@ -4850,8 +4889,6 @@ impl Default for TempEnglishConfig {
             raw_candidate: RawCandidateMode::Always,
             case_variants: true,
             case_follow_input: true,
-            comment_template_vertical: None,
-            comment_template_horizontal: None,
             phrase_seg: false,
         }
     }
@@ -5296,13 +5333,6 @@ pub struct TempPinyinConfig {
     /// 进入临时拼音期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 临拼期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
-    /// 反查场景的典型用法是设 `"${code}"` 只留编码，或设 `""` 什么都不显示。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: CommentTemplateOverride,
-    /// 临拼期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: CommentTemplateOverride,
     /// 临拼与快捷输入（mix）期间，拼音候选注释里的编码从哪来。值域同 [`CodeHintSource`]。
     ///
     /// 独立于拼音方案那份 `schema.pinyin.code_hint_source`：临拼正是码表用户借拼音反查
@@ -5330,8 +5360,6 @@ impl Default for TempPinyinConfig {
             trigger_keys: default_temp_pinyin_triggers(),
             hotkey: String::new(),
             candidate_layout: LayoutIntent::default(),
-            comment_template_vertical: None,
-            comment_template_horizontal: None,
             code_hint_source: default_temp_pinyin_code_hint_source(),
         }
     }
@@ -5369,12 +5397,6 @@ pub struct UrlConfig {
     /// 进入网址模式期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 网址模式期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: CommentTemplateOverride,
-    /// 网址模式期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: CommentTemplateOverride,
 }
 
 fn default_url_history_max() -> u32 {
@@ -5399,8 +5421,6 @@ impl Default for UrlConfig {
             history_enabled: false,
             history_max: default_url_history_max(),
             candidate_layout: LayoutIntent::default(),
-            comment_template_vertical: None,
-            comment_template_horizontal: None,
         }
     }
 }
@@ -5432,12 +5452,6 @@ pub struct EmailConfig {
     /// 进入邮箱模式期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 邮箱模式期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: CommentTemplateOverride,
-    /// 邮箱模式期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: CommentTemplateOverride,
 }
 
 /// 出厂预置的邮箱后缀。
@@ -5488,8 +5502,6 @@ impl Default for EmailConfig {
             enabled: false,
             suffixes: default_email_suffixes(),
             candidate_layout: LayoutIntent::default(),
-            comment_template_vertical: None,
-            comment_template_horizontal: None,
         }
     }
 }
@@ -5522,12 +5534,6 @@ pub struct UnicodeConfig {
     /// 进入 Unicode 模式期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// Unicode 模式期间的注释模板覆盖（竖排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: CommentTemplateOverride,
-    /// Unicode 模式期间的注释模板覆盖（横排），见 [`CommentTemplateOverride`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: CommentTemplateOverride,
 }
 
 fn default_unicode_prefixes() -> Vec<String> {
@@ -5540,8 +5546,6 @@ impl Default for UnicodeConfig {
             enabled: false,
             prefixes: default_unicode_prefixes(),
             candidate_layout: LayoutIntent::default(),
-            comment_template_vertical: None,
-            comment_template_horizontal: None,
         }
     }
 }
@@ -7047,24 +7051,6 @@ pub struct UiCandidateConfig {
     /// 未知名字忽略。
     #[serde(default = "default_grid_categories")]
     pub grid_categories: Vec<String>,
-    /// 候选注释总开关（默认开）。关掉后不渲染注释段（含上方注释条与 `${code_hint}`），
-    /// 注释模板也不再计入按需加载的需求（反查索引、用户层编码索引、拆字表随之可卸）。
-    ///
-    /// 在注释模板三层裁决（模式级 → 方案级 → 全局）**之上**：关就是关。不用「把模板设空」
-    /// 表达，是因为全局设空会被方案级 / 模式级模板覆盖回来，且模板是专家级字符串
-    /// （设计 `docs/design/memory-footprint.md` §4.3）。
-    #[serde(default = "default_true")]
-    pub comment_enabled: bool,
-    /// **竖排**候选的注释段（候选右侧灰字）模板。语法见 `wind_coordinator::comment`。
-    ///
-    /// 横竖各持一份模板、互不影响：两种排布的可用横向空间差一个数量级（竖排每行独占，
-    /// 横排全部候选共享一行宽度），能放什么本就不是同一个答案。共用一份的结果是
-    /// 「为竖排配的拼音把横排候选窗撑爆」或「为横排收着配的注释让竖排一片空白」。
-    #[serde(default = "default_comment_template")]
-    pub comment_template_vertical: String,
-    /// **横排**候选的注释段模板。见 [`Self::comment_template_vertical`]。
-    #[serde(default = "default_comment_template")]
-    pub comment_template_horizontal: String,
     /// 上方注释条（默认关）：开启后注释模板里的**第一个字面 `\n`**（写在 `{…}` 之外）把注释
     /// 拆成上下两段，上段显示在候选上方一行，下段仍在候选右侧。关闭时不拆分，行为与本项
     /// 引入前逐字节一致。
@@ -7081,8 +7067,7 @@ pub struct UiCandidateConfig {
     /// 判据是**显式声明**：无 `columns:` 的词库一律不算（绝大多数码表是 `text\tcode\tweight`，
     /// 按注释库的默认列序读会把编码整列当成注释）。见 `wind_reverse::declares_comment_column`。
     ///
-    /// 落在 `[ui.candidate]` 而非 `[ui]`：与 `comment_template_*` 同段，说的是同一件事的
-    /// 两半（模板决定显示什么，本键决定去哪儿查）。
+    /// 与注释模板是同一件事的两半：模板决定显示什么，本键决定去哪儿查。
     #[serde(default = "default_true")]
     pub auto_comment_dicts: bool,
     /// **竖排**注释段的最大字数（0=不限），超出截断并加 `…`。
@@ -7169,22 +7154,6 @@ fn default_candidate_shadow() -> String {
 
 fn default_candidate_position_mode() -> String {
     "follow_caret".to_string()
-}
-
-/// 注释段默认模板。前两段（`${code_hint|code_rev}`）**精确等价于本功能引入前的硬编码行为**
-/// （引擎产的剩余编码优先，为空则回退到拼音候选的主码表反查码）。
-///
-/// 出厂默认能用模板原样表达，是 `${a|b}` 回退语法存在的主要理由 —— 没有它，出厂行为
-/// 就得留在代码里作特例，模板便不再是注释内容的唯一真相源。
-fn default_comment_template() -> String {
-    // ⚠️ 必须与 `data/config.toml` 的 `comment_template_*` 逐字一致 —— 两处是同一个出厂
-    // 事实的两份写法（有配置文件时走那边，没有时走这里）。分叉的表现是「删掉配置文件后
-    // 注释栏变了样」，而两处单看都没写错。
-    //
-    // 回退链：引擎产的编码提示 → 主码表反查 → 本方案击键。前两段等价于本功能引入前的
-    // 固定行为，故配了主码表的用户升级后所见不变；第三段只在前两段都空时才出（没配主
-    // 码表的双拼用户，此前那里是空的）。
-    "${code_hint|code_rev|shuangpin}".to_string()
 }
 
 /// 编码显示方式（解析自 ui.candidate.preedit_display）。
@@ -7274,9 +7243,6 @@ impl Default for UiCandidateConfig {
             grid_index_fill: default_grid_index_fill(),
             grid_pageupdown_screen: true,
             grid_categories: default_grid_categories(),
-            comment_enabled: true,
-            comment_template_vertical: default_comment_template(),
-            comment_template_horizontal: default_comment_template(),
             comment_above: false,
             auto_comment_dicts: true,
             comment_max_chars_vertical: 0,
@@ -7333,17 +7299,7 @@ impl UiCandidateConfig {
         self.min_rows.min(self.per_page.max(1)) as u32
     }
 
-    /// 当前排布对应的注释模板（`vertical` 为 true 取竖排那份）。
-    pub fn comment_template(&self, vertical: bool) -> &str {
-        if vertical {
-            &self.comment_template_vertical
-        } else {
-            &self.comment_template_horizontal
-        }
-    }
-
-    /// 当前排布对应的注释段最大字数（0=不限）。与 [`Self::comment_template`] 同构：
-    /// 取哪一份由排布决定，调用方不必各自 `if vertical`。
+    /// 当前排布对应的注释段最大字数（0=不限）。
     pub fn comment_max_chars(&self, vertical: bool) -> usize {
         if vertical {
             self.comment_max_chars_vertical
@@ -7500,7 +7456,7 @@ pub struct TooltipConfig {
     pub sections: Vec<TooltipSection>,
 }
 
-/// 气泡的一段：段名 + 段内容，都是注释模板（语法与变量同 `ui.candidate.comment_template_*`）。
+/// 气泡的一段：段名 + 段内容，都是注释模板（语法与变量同 `ui.comment.templates`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TooltipSection {
     /// 段开关。保留「内置段关着」这种状态：设置页一键就能打开，不必删了再加。
@@ -8980,6 +8936,119 @@ impl Config {
         }
     }
 
+    /// 存量迁移（**层内**）：旧注释模板键与 `ui.candidate.comment_enabled` → `[ui.comment]`。
+    ///
+    /// 来源：全局 `ui.candidate.comment_template_*`、五个模式的 `input.<m>.comment_template_*`、
+    /// `schema.mix_modes[]` 条目的同名键（迁到 `mode."mix:<id>"`，缺 id 的不动）。
+    /// - 每个不同的模板串生成一个用户模板 `migrated_N`，写进对应的 `default_*` 格；空串迁成 `none`；
+    /// - 全局旧值等于旧出厂值 [`LEGACY_FACTORY_COMMENT_TEMPLATE`] 的视为没写；
+    /// - 横竖相同只写竖排；只写了竖排时横排写 `inherit`，保住旧版「横排跟随下一层」；
+    /// - 本层已有同名格 / `enabled` 时不覆盖，旧键照删（幂等）。
+    ///
+    /// 旧键从本层移除；写盘路径（`prune_user_config` / `set_user_value`）都先跑本函数，
+    /// 否则残留旧键会在下次 load 把用户在新形态上的修改打回。
+    fn migrate_comment_templates_value(layer: &mut toml::Value) {
+        if !layer.is_table() {
+            return;
+        }
+        let enabled = layer
+            .get_mut("ui")
+            .and_then(|u| u.get_mut("candidate"))
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|c| c.remove("comment_enabled"));
+        let sources = take_legacy_comment_templates(layer);
+
+        // 要写的格：(格的路径, 旧模板串, 来源键)。旧串 `None` 表示写 `inherit`。
+        let mut writes: Vec<(Vec<String>, Option<String>, String)> = Vec::new();
+        for (scope, origin, v, h) in sources {
+            let cell = |name: &str| {
+                let mut p: Vec<String> = ["ui", "comment", "assign"].map(String::from).into();
+                p.extend(scope.iter().cloned());
+                p.push(name.to_string());
+                p
+            };
+            let key = |side: &str| format!("{origin}.comment_template_{side}");
+            match (v, h) {
+                (Some(v), Some(h)) if v == h => {
+                    writes.push((cell("default_vertical"), Some(v), key("vertical")));
+                }
+                (v, h) => {
+                    let has_v = v.is_some();
+                    if let Some(v) = v {
+                        writes.push((cell("default_vertical"), Some(v), key("vertical")));
+                    }
+                    if h.is_some() || has_v {
+                        writes.push((cell("default_horizontal"), h, key("horizontal")));
+                    }
+                }
+            }
+        }
+        writes.retain(|(p, ..)| get_nested(layer, &path_refs(p)).is_none());
+
+        let mut migrated = Vec::new();
+        let enabled_path = ["ui", "comment", "enabled"];
+        if let Some(on) = enabled.filter(toml::Value::is_bool)
+            && get_nested(layer, &enabled_path).is_none()
+        {
+            set_nested(layer.as_table_mut().expect("已判为表"), &enabled_path, on);
+            migrated.push("ui.candidate.comment_enabled → ui.comment.enabled".to_string());
+        }
+
+        let templates_path = ["ui", "comment", "templates"];
+        let mut templates: Vec<toml::Value> = get_nested(layer, &templates_path)
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let template_count = templates.len();
+        let str_of =
+            |t: &toml::Value, k: &str| t.get(k).and_then(toml::Value::as_str).map(String::from);
+        for (path, text, origin) in writes {
+            let value = match text {
+                None => "inherit".to_string(),
+                Some(t) if t.is_empty() => "none".to_string(),
+                Some(t) => match templates
+                    .iter()
+                    .find(|tpl| str_of(tpl, "text").as_deref() == Some(t.as_str()))
+                    .and_then(|tpl| str_of(tpl, "id"))
+                {
+                    Some(id) => id,
+                    None => {
+                        let id = (1..)
+                            .map(|n| format!("migrated_{n}"))
+                            .find(|id| {
+                                !templates
+                                    .iter()
+                                    .any(|tpl| str_of(tpl, "id").as_deref() == Some(id.as_str()))
+                            })
+                            .expect("序号无上界");
+                        let mut tpl = toml::Table::new();
+                        tpl.insert("id".into(), id.clone().into());
+                        tpl.insert("name".into(), format!("迁移自 {origin}").into());
+                        tpl.insert("text".into(), t.into());
+                        templates.push(tpl.into());
+                        id
+                    }
+                },
+            };
+            migrated.push(format!("{origin} → {}", path.join(".")));
+            set_nested(
+                layer.as_table_mut().expect("已判为表"),
+                &path_refs(&path),
+                value.into(),
+            );
+        }
+        if templates.len() > template_count {
+            set_nested(
+                layer.as_table_mut().expect("已判为表"),
+                &templates_path,
+                templates.into(),
+            );
+        }
+        if !migrated.is_empty() {
+            info!("Migrated legacy comment config: {migrated:?}");
+        }
+    }
+
     /// **层内**迁移：作用在单独一层的 `toml::Value` 上，在 `merge_value` **之前**跑。
     ///
     /// 与 [`Self::load`] 末尾那一族合并后迁移刻意分开，因为**判据不同**：
@@ -9001,6 +9070,7 @@ impl Config {
     fn migrate_user_layer_value(layer: &mut toml::Value) {
         Self::migrate_show_code_hint_value(layer);
         Self::migrate_comment_max_chars_value(layer);
+        Self::migrate_comment_templates_value(layer);
         Self::migrate_font_size_follow_theme_value(layer);
         Self::migrate_langbar_badge_colors_value(layer);
         Self::migrate_tooltip_sections_value(layer);
@@ -9439,6 +9509,7 @@ impl Config {
         Self::migrate_stale_factory_tooltip_sections_value(&mut root);
         Self::migrate_comment_max_chars_value(&mut root);
         Self::migrate_grammar_enabled_value(&mut root);
+        Self::migrate_comment_templates_value(&mut root);
         let migrated = usize::from(root != before);
         // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，**不能**被 preset 取不到时的
         // 提前返回挡住——否则没装 data/config.toml 的环境永远清不掉。
@@ -10513,6 +10584,8 @@ impl Config {
         // 语法模型总开关：老用户只写了 weight + model 时，要在写新值**之前**补上 enabled = true，
         // 否则别的键的保存会把与出厂相同的 weight / model 剪掉，补 true 的依据就丢了。
         Self::migrate_grammar_enabled_value(&mut root);
+        // 旧注释模板键同理：残留的旧键会在下次 load 把用户刚改的分配或删掉的模板补回。
+        Self::migrate_comment_templates_value(&mut root);
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
         // 出厂默认取不到时 `is_default` 恒 false → 退化为「照常写入」的旧行为（安全降级）。
@@ -12175,36 +12248,33 @@ show_source_hint = false
         assert_eq!(prune_redundant(&mut user, &preset), 0, "二次清理应无事可做");
     }
 
-    /// ★ 模式级注释模板（三态 `Option`，**刻意不进注册表**）不得被写回清理掉。
-    ///
-    /// 这类键的出厂值是「键不存在」＝跟随全局，故 preset 里没有它们、注册表也不登记
-    /// （见 `config_schema::REGISTRY` 的说明）。若哪天有人为了「让设置页能看见」把它们
-    /// 补进注册表，`prune_redundant` 的第一道保险就失效——用户手写的模板会在某次保存后
-    /// 被静默删掉，表现为「配了几天突然没了」。本测试是那个改动的拦截点。
+    /// ★ 旧模式级注释模板迁入 `[ui.comment]` 后，迁出来的模板与分配不得被写回清理掉
+    /// （`prune_user_config` 先迁移、再剪枝）。
     #[test]
-    fn prune_keeps_mode_comment_templates() {
-        let preset = preset_sample();
+    fn prune_keeps_migrated_comment_templates() {
+        let preset = toml::Value::try_from(Config::default()).unwrap();
         let mut user = tv(r#"
 [input.temp_english]
 comment_template_vertical = "${dict}"
 comment_template_horizontal = ""
 "#);
-        assert_eq!(prune_redundant(&mut user, &preset), 0, "未登记键一律不碰");
-        assert!(
-            get_nested(
-                &user,
-                &["input", "temp_english", "comment_template_vertical"]
-            )
-            .is_some(),
-            "用户手写的模式级模板必须原样保留"
-        );
-        assert!(
-            get_nested(
-                &user,
-                &["input", "temp_english", "comment_template_horizontal"]
-            )
-            .is_some(),
-            "空串（= 本模式不显示注释）同样是有效配置，不得被当成冗余删除"
+        Config::migrate_comment_templates_value(&mut user);
+        let before = user.clone();
+        assert_eq!(prune_redundant(&mut user, &preset), 0);
+        assert_eq!(user, before, "迁出来的模板与分配必须原样保留");
+        let mode = ["ui", "comment", "assign", "mode", "temp_english"];
+        let cell = |k: &str| {
+            let mut p = mode.to_vec();
+            p.push(k);
+            get_nested(&user, &p)
+                .and_then(toml::Value::as_str)
+                .map(String::from)
+        };
+        assert_eq!(cell("default_vertical").as_deref(), Some("migrated_1"));
+        assert_eq!(
+            cell("default_horizontal").as_deref(),
+            Some("none"),
+            "空串（= 本模式不显示注释）迁成 none"
         );
     }
 
@@ -13878,6 +13948,184 @@ scripts = { latin = 42 }
             "[ui.candidate]\nfont_size = 22\nfont_size_follow_theme = false\n",
         );
         assert_eq!(fs, 22.0);
+    }
+
+    /// 旧注释模板键迁移：跑真实链路（用户层迁移 → ⊕ L1 默认 → 反序列化），返回生效的
+    /// `[ui.comment]` 与迁移后的本层。
+    fn comment_after_migration(
+        user_toml: &str,
+    ) -> (crate::comment_lib::UiCommentConfig, toml::Value) {
+        let mut user: toml::Value = toml::from_str(user_toml).unwrap();
+        Config::migrate_user_layer_value(&mut user);
+        let mut merged = toml::Value::try_from(Config::default()).unwrap();
+        merge_value(&mut merged, user.clone());
+        let cfg: Config = merged.try_into().expect("反序列化");
+        (cfg.ui.comment, user)
+    }
+
+    /// 比对模板时不看 `name`（迁移来源说明）。
+    fn template_id_texts(c: &crate::comment_lib::UiCommentConfig) -> Vec<(String, String)> {
+        c.templates
+            .iter()
+            .map(|t| (t.id.clone(), t.text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn migrates_global_custom_template() {
+        let (c, user) =
+            comment_after_migration("[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n");
+        assert_eq!(
+            template_id_texts(&c),
+            [("migrated_1".to_string(), "${pinyin}".to_string())]
+        );
+        assert!(
+            c.templates[0]
+                .name
+                .contains("ui.candidate.comment_template_vertical")
+        );
+        assert_eq!(
+            c.assign.global.default_vertical.as_deref(),
+            Some("migrated_1")
+        );
+        // 横排旧值缺席 = 旧出厂值，竖排换了模板时横排要显式跟随下一层，否则同层横排会沿用竖排。
+        assert_eq!(
+            c.assign.global.default_horizontal.as_deref(),
+            Some("inherit")
+        );
+        assert!(
+            get_nested(&user, &["ui", "candidate", "comment_template_vertical"]).is_none(),
+            "旧键须从本层移除"
+        );
+    }
+
+    #[test]
+    fn drops_factory_valued_global() {
+        let (c, user) = comment_after_migration(
+            "[ui.candidate]\ncomment_template_vertical = \"${code_hint|code_rev|shuangpin}\"\n\
+             comment_template_horizontal = \"${code_hint|code_rev|shuangpin}\"\n",
+        );
+        assert!(c.templates.is_empty());
+        assert_eq!(c.assign, crate::comment_lib::CommentAssign::default());
+        assert!(get_nested(&user, &["ui", "candidate", "comment_template_vertical"]).is_none());
+        assert!(get_nested(&user, &["ui", "candidate", "comment_template_horizontal"]).is_none());
+        assert!(
+            get_nested(&user, &["ui", "comment"]).is_none(),
+            "不该留下空段"
+        );
+    }
+
+    #[test]
+    fn empty_mode_template_becomes_none() {
+        let (c, user) = comment_after_migration(
+            "[input.temp_english]\ncomment_template_vertical = \"\"\n\
+             comment_template_horizontal = \"\"\n",
+        );
+        let cells = &c.assign.mode["temp_english"];
+        assert_eq!(cells.default_vertical.as_deref(), Some("none"));
+        assert_eq!(cells.default_horizontal, None, "横竖相同只写竖排");
+        assert!(c.templates.is_empty());
+        assert!(
+            get_nested(
+                &user,
+                &["input", "temp_english", "comment_template_vertical"]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn dedupes_identical_texts() {
+        let (c, _) = comment_after_migration(
+            "[input.temp_english]\ncomment_template_vertical = \"${dict}\"\n\
+             comment_template_horizontal = \"${dict}\"\n\
+             [input.url]\ncomment_template_vertical = \"${dict}\"\n\
+             comment_template_horizontal = \"${dict}\"\n",
+        );
+        assert_eq!(
+            template_id_texts(&c),
+            [("migrated_1".to_string(), "${dict}".to_string())]
+        );
+        assert!(
+            c.templates[0].name.contains("input.temp_english"),
+            "name 取第一个来源"
+        );
+        for m in ["temp_english", "url"] {
+            assert_eq!(
+                c.assign.mode[m].default_vertical.as_deref(),
+                Some("migrated_1")
+            );
+        }
+    }
+
+    #[test]
+    fn mix_mode_uses_id() {
+        let (c, user) = comment_after_migration(
+            "[[schema.mix_modes]]\nid = \"quick_mix\"\ncomment_template_vertical = \"${pinyin}\"\n",
+        );
+        let cells = &c.assign.mode["mix:quick_mix"];
+        assert_eq!(cells.default_vertical.as_deref(), Some("migrated_1"));
+        assert_eq!(cells.default_horizontal.as_deref(), Some("inherit"));
+        let mix = get_nested(&user, &["schema", "mix_modes"]).unwrap();
+        assert!(
+            mix.as_array().unwrap()[0]
+                .get("comment_template_vertical")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn comment_enabled_moves() {
+        let (c, user) = comment_after_migration("[ui.candidate]\ncomment_enabled = false\n");
+        assert!(!c.enabled);
+        assert!(get_nested(&user, &["ui", "candidate", "comment_enabled"]).is_none());
+    }
+
+    /// 本层已有同名格 / 同名开关：以新键为准，旧键只删不迁。
+    #[test]
+    fn existing_comment_cells_win() {
+        let (c, _) = comment_after_migration(
+            "[ui.candidate]\ncomment_enabled = false\ncomment_template_vertical = \"${pinyin}\"\n\
+             [ui.comment]\nenabled = true\n\
+             [ui.comment.assign.global]\ndefault_vertical = \"chaizi\"\n",
+        );
+        assert!(c.enabled);
+        assert_eq!(c.assign.global.default_vertical.as_deref(), Some("chaizi"));
+        assert!(c.templates.is_empty(), "没写进任何格的模板串不生成模板");
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let src = "[ui.candidate]\ncomment_enabled = false\n\
+                   comment_template_vertical = \"${pinyin}\"\n\
+                   comment_template_horizontal = \"${chaizi}\"\n\
+                   [input.temp_pinyin]\ncomment_template_vertical = \"${chaizi}\"\n\
+                   [[schema.mix_modes]]\nid = \"quick_mix\"\ncomment_template_vertical = \"\"\n";
+        let mut once: toml::Value = toml::from_str(src).unwrap();
+        Config::migrate_user_layer_value(&mut once);
+        let mut twice = once.clone();
+        Config::migrate_user_layer_value(&mut twice);
+        assert_eq!(once, twice);
+        let c: crate::comment_lib::UiCommentConfig = get_nested(&once, &["ui", "comment"])
+            .cloned()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            template_id_texts(&c),
+            [
+                ("migrated_1".to_string(), "${pinyin}".to_string()),
+                ("migrated_2".to_string(), "${chaizi}".to_string()),
+            ]
+        );
+        assert_eq!(
+            c.assign.global.default_horizontal.as_deref(),
+            Some("migrated_2")
+        );
+        assert_eq!(
+            c.assign.mode["temp_pinyin"].default_vertical.as_deref(),
+            Some("migrated_2")
+        );
     }
 
     /// ★ 旧版写回会剪掉等于出厂值的键：「关跟随、字号保持 18」的文件里只剩 follow=false。

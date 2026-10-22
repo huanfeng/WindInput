@@ -1986,7 +1986,7 @@ mod tests {
     fn alt_commit_comment_with_comments_off_registers_nothing() {
         let mut cfg = Config::default();
         cfg.input.alt_commit = "comment".into();
-        cfg.ui.candidate.comment_enabled = false;
+        cfg.ui.comment.enabled = false;
         assert!(
             alt_entries(&Compiler::new(cfg.clone()).compile()).is_empty(),
             "注释关着时 comment 档等同 off，不该登记 Alt 组合"

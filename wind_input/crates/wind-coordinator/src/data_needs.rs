@@ -640,7 +640,7 @@ mod tests {
         assert_eq!((n.s2t, n.t2s), (true, false), "两向互斥时 s2t 赢，只预载它");
     }
 
-    /// 方案文件里残留的 `[candidate].comment_template_*` 不再算需求：方案文件不参与注释配置。
+    /// 方案文件里残留的 `[candidate].comment_template_*` 不再算需求、只进降级提示：方案文件不参与注释配置。
     #[test]
     fn schema_file_templates_are_ignored() {
         let dir = schema_fixture("facts", "zz_dn", false);
@@ -650,6 +650,10 @@ mod tests {
         let mgr = EngineManager::new(&cfg, Some(&dir));
         let facts = SchemaFacts::collect(&mgr);
         assert!(!derive_in(&plain(), &cfg, &facts).chaizi);
+        assert!(
+            !mgr.behavior_for("zz_dn").degraded_items.is_empty(),
+            "残留键要进降级提示"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
