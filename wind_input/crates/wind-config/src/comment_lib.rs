@@ -116,6 +116,305 @@ impl SystemComments {
     }
 }
 
+/// 方案类型，对应 `[assign.type.<key>]`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaType {
+    CodeTable,
+    Pinyin,
+    Shuangpin,
+    Mixed,
+    English,
+}
+
+impl SchemaType {
+    pub fn key(self) -> &'static str {
+        match self {
+            SchemaType::CodeTable => "codetable",
+            SchemaType::Pinyin => "pinyin",
+            SchemaType::Shuangpin => "shuangpin",
+            SchemaType::Mixed => "mixed",
+            SchemaType::English => "english",
+        }
+    }
+}
+
+/// 解析注释模板时的作用范围：模式（可无）、方案、方案类型。
+#[derive(Debug, Clone, Copy)]
+pub struct CommentScope<'a> {
+    pub mode: Option<&'a str>,
+    pub schema: &'a str,
+    pub schema_type: SchemaType,
+}
+
+/// 模板来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateOrigin {
+    Builtin,
+    User,
+    UserOverridesBuiltin,
+}
+
+/// 一格的值（未知模板 id 在 `build` 时已折成"不写"）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Cell {
+    Inherit,
+    None,
+    Id(String),
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScopeCells {
+    default_vertical: Option<Cell>,
+    default_horizontal: Option<Cell>,
+    detail_vertical: Option<Cell>,
+    detail_horizontal: Option<Cell>,
+}
+
+impl ScopeCells {
+    fn get(&self, state: CommentState, vertical: bool) -> Option<&Cell> {
+        match (state, vertical) {
+            (CommentState::Default, true) => &self.default_vertical,
+            (CommentState::Default, false) => &self.default_horizontal,
+            (CommentState::Detail, true) => &self.detail_vertical,
+            (CommentState::Detail, false) => &self.detail_horizontal,
+        }
+        .as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct MergedAssign {
+    global: ScopeCells,
+    by_type: BTreeMap<String, ScopeCells>,
+    schema: BTreeMap<String, ScopeCells>,
+    mode: BTreeMap<String, ScopeCells>,
+}
+
+/// 合并后的模板表与分配表，按 模式 → 方案 → 类型 → 全局 逐层解析。
+#[derive(Debug, Clone)]
+pub struct CommentLibrary {
+    templates: Vec<(CommentTemplateDef, TemplateOrigin)>,
+    assign: MergedAssign,
+    fallback_default: String,
+    fallback_detail: String,
+}
+
+/// 模板 id 或 `none` 才算有主见；未写与 `inherit` 都继续往下找。
+fn adopt(c: Option<&Cell>) -> Option<&Cell> {
+    match c {
+        Some(Cell::Id(_) | Cell::None) => c,
+        _ => None,
+    }
+}
+
+fn valid_template_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn merge_cell(user: &Option<String>, system: &Option<String>) -> Option<String> {
+    user.clone().or_else(|| system.clone())
+}
+
+fn merge_cells(user: &CommentCells, system: &CommentCells) -> CommentCells {
+    CommentCells {
+        default_vertical: merge_cell(&user.default_vertical, &system.default_vertical),
+        default_horizontal: merge_cell(&user.default_horizontal, &system.default_horizontal),
+        detail_vertical: merge_cell(&user.detail_vertical, &system.detail_vertical),
+        detail_horizontal: merge_cell(&user.detail_horizontal, &system.detail_horizontal),
+    }
+}
+
+fn merge_maps(
+    user: &BTreeMap<String, CommentCells>,
+    system: &BTreeMap<String, CommentCells>,
+) -> BTreeMap<String, CommentCells> {
+    let mut out = system.clone();
+    for (k, u) in user {
+        let merged = match system.get(k) {
+            Some(s) => merge_cells(u, s),
+            None => u.clone(),
+        };
+        out.insert(k.clone(), merged);
+    }
+    out
+}
+
+impl CommentLibrary {
+    /// 合并出厂与用户配置；返回值的第二项是需要提示用户的问题（每条一次）。
+    pub fn build(system: &SystemComments, user: &UiCommentConfig) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+
+        let mut templates: Vec<(CommentTemplateDef, TemplateOrigin)> = Vec::new();
+        for t in &system.templates {
+            if templates.iter().all(|(e, _)| e.id != t.id) {
+                templates.push((t.clone(), TemplateOrigin::Builtin));
+            }
+        }
+        let mut seen_user = std::collections::HashSet::new();
+        for t in &user.templates {
+            if !valid_template_id(&t.id) {
+                warnings.push(format!("用户模板 id 不合法，已忽略: {:?}", t.id));
+                continue;
+            }
+            if !seen_user.insert(t.id.as_str()) {
+                warnings.push(format!("用户模板 id 重复，已忽略后一个: {}", t.id));
+                continue;
+            }
+            match templates.iter_mut().find(|(e, _)| e.id == t.id) {
+                Some(slot) => *slot = (t.clone(), TemplateOrigin::UserOverridesBuiltin),
+                None => templates.push((t.clone(), TemplateOrigin::User)),
+            }
+        }
+
+        let merged = CommentAssign {
+            global: merge_cells(&user.assign.global, &system.assign.global),
+            by_type: merge_maps(&user.assign.by_type, &system.assign.by_type),
+            schema: merge_maps(&user.assign.schema, &system.assign.schema),
+            mode: merge_maps(&user.assign.mode, &system.assign.mode),
+        };
+
+        let mut unknown: Vec<String> = Vec::new();
+        let mut convert = |c: &CommentCells| {
+            let mut one = |v: &Option<String>| -> Option<Cell> {
+                let v = v.as_deref()?;
+                match v {
+                    "inherit" => Some(Cell::Inherit),
+                    "none" => Some(Cell::None),
+                    id if templates.iter().any(|(t, _)| t.id == id) => {
+                        Some(Cell::Id(id.to_string()))
+                    }
+                    id => {
+                        if !unknown.iter().any(|u| u == id) {
+                            unknown.push(id.to_string());
+                        }
+                        None
+                    }
+                }
+            };
+            ScopeCells {
+                default_vertical: one(&c.default_vertical),
+                default_horizontal: one(&c.default_horizontal),
+                detail_vertical: one(&c.detail_vertical),
+                detail_horizontal: one(&c.detail_horizontal),
+            }
+        };
+        let conv_map = |m: &BTreeMap<String, CommentCells>,
+                        f: &mut dyn FnMut(&CommentCells) -> ScopeCells| {
+            m.iter().map(|(k, v)| (k.clone(), f(v))).collect()
+        };
+        let assign = MergedAssign {
+            global: convert(&merged.global),
+            by_type: conv_map(&merged.by_type, &mut convert),
+            schema: conv_map(&merged.schema, &mut convert),
+            mode: conv_map(&merged.mode, &mut convert),
+        };
+        for id in unknown {
+            warnings.push(format!("注释分配引用了不存在的模板 {id}，已按未设置处理"));
+        }
+
+        let builtin_text = |id: &str| {
+            system
+                .templates
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.text.clone())
+                .unwrap_or_default()
+        };
+        let lib = Self {
+            templates,
+            assign,
+            fallback_default: builtin_text("code_hint"),
+            fallback_detail: builtin_text("detail_full"),
+        };
+        (lib, warnings)
+    }
+
+    fn text_of(&self, cell: &Cell) -> &str {
+        match cell {
+            Cell::Id(id) => self
+                .templates
+                .iter()
+                .find(|(t, _)| &t.id == id)
+                .map(|(t, _)| t.text.as_str())
+                .unwrap_or(""),
+            _ => "",
+        }
+    }
+
+    /// 按作用范围解析当前态与排布对应的模板串；`""` = 不显示。
+    pub fn template_text(&self, scope: &CommentScope, state: CommentState, vertical: bool) -> &str {
+        let a = &self.assign;
+        let layers = [
+            scope.mode.and_then(|m| a.mode.get(m)),
+            a.schema.get(scope.schema),
+            a.by_type.get(scope.schema_type.key()),
+            Some(&a.global),
+        ];
+        for layer in layers.into_iter().flatten() {
+            let picked = if vertical {
+                adopt(layer.get(state, true))
+            } else {
+                match layer.get(state, false) {
+                    Some(Cell::Inherit) => None,
+                    Some(c) => Some(c),
+                    None => adopt(layer.get(state, true)),
+                }
+            };
+            if let Some(c) = picked {
+                return self.text_of(c);
+            }
+        }
+        match state {
+            CommentState::Default => &self.fallback_default,
+            CommentState::Detail => &self.fallback_detail,
+        }
+    }
+
+    /// 被任一格引用的模板串加兜底串，去重，供按需加载数据。
+    pub fn referenced_texts(&self) -> Vec<&str> {
+        let a = &self.assign;
+        let mut out: Vec<&str> = Vec::new();
+        let scopes = std::iter::once(&a.global)
+            .chain(a.by_type.values())
+            .chain(a.schema.values())
+            .chain(a.mode.values());
+        for sc in scopes {
+            for c in [
+                &sc.default_vertical,
+                &sc.default_horizontal,
+                &sc.detail_vertical,
+                &sc.detail_horizontal,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Cell::Id(_) = c {
+                    let t = self.text_of(c);
+                    if !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+            }
+        }
+        for t in [
+            self.fallback_default.as_str(),
+            self.fallback_detail.as_str(),
+        ] {
+            if !t.is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    pub fn templates(&self) -> impl Iterator<Item = (&CommentTemplateDef, TemplateOrigin)> {
+        self.templates.iter().map(|(t, o)| (t, *o))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +541,223 @@ mod tests {
         assert_eq!(
             c.assign.mode["mix:q"].default_vertical.as_deref(),
             Some("none")
+        );
+    }
+
+    // ---- 解析链 ----
+
+    fn cells(
+        dv: Option<&str>,
+        dh: Option<&str>,
+        tv: Option<&str>,
+        th: Option<&str>,
+    ) -> CommentCells {
+        let o = |s: Option<&str>| s.map(str::to_string);
+        CommentCells {
+            default_vertical: o(dv),
+            default_horizontal: o(dh),
+            detail_vertical: o(tv),
+            detail_horizontal: o(th),
+        }
+    }
+
+    fn tpl(id: &str, text: &str) -> CommentTemplateDef {
+        CommentTemplateDef {
+            id: id.into(),
+            name: id.into(),
+            text: text.into(),
+        }
+    }
+
+    /// 内置模板：code_hint / detail_full / a / b / c / d，文本为 `T:<id>`。
+    fn sys(assign: CommentAssign) -> SystemComments {
+        SystemComments {
+            templates: ["code_hint", "detail_full", "a", "b", "c", "d"]
+                .iter()
+                .map(|id| tpl(id, &format!("T:{id}")))
+                .collect(),
+            assign,
+            dicts: Vec::new(),
+        }
+    }
+
+    fn scope<'a>(mode: Option<&'a str>) -> CommentScope<'a> {
+        CommentScope {
+            mode,
+            schema: "wubi",
+            schema_type: SchemaType::CodeTable,
+        }
+    }
+
+    fn text(lib: &CommentLibrary, mode: Option<&str>, st: CommentState, v: bool) -> String {
+        lib.template_text(&scope(mode), st, v).to_string()
+    }
+
+    fn global_only() -> CommentAssign {
+        CommentAssign {
+            global: cells(Some("code_hint"), None, Some("detail_full"), None),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn global_only_resolves_both_states_and_layouts() {
+        let (lib, w) = CommentLibrary::build(&sys(global_only()), &UiCommentConfig::default());
+        assert!(w.is_empty());
+        for v in [true, false] {
+            assert_eq!(text(&lib, None, CommentState::Default, v), "T:code_hint");
+            assert_eq!(text(&lib, None, CommentState::Detail, v), "T:detail_full");
+        }
+    }
+
+    #[test]
+    fn mode_beats_schema_beats_type_beats_global() {
+        let mk = |id: &str| cells(None, None, Some(id), None);
+        let mut a = global_only();
+        a.global = mk("a");
+        a.by_type.insert("codetable".into(), mk("b"));
+        a.schema.insert("wubi".into(), mk("c"));
+        a.mode.insert("url".into(), mk("d"));
+        let mut u = UiCommentConfig::default();
+        let want = ["T:d", "T:c", "T:b", "T:a"];
+        let (lib, _) = CommentLibrary::build(&sys(a.clone()), &u);
+        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[0]);
+        u.assign = CommentAssign::default();
+        let mut a2 = a.clone();
+        a2.mode.clear();
+        let (lib, _) = CommentLibrary::build(&sys(a2.clone()), &u);
+        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[1]);
+        a2.schema.clear();
+        let (lib, _) = CommentLibrary::build(&sys(a2.clone()), &u);
+        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[2]);
+        a2.by_type.clear();
+        let (lib, _) = CommentLibrary::build(&sys(a2), &u);
+        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[3]);
+    }
+
+    #[test]
+    fn none_is_an_opinion() {
+        let mut a = global_only();
+        a.mode
+            .insert("url".into(), cells(Some("none"), None, None, None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, Some("url"), CommentState::Default, true), "");
+        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code_hint");
+    }
+
+    #[test]
+    fn user_inherit_skips_system_cell() {
+        let mut a = global_only();
+        a.mode
+            .insert("temp_english".into(), cells(Some("none"), None, None, None));
+        let mut u = UiCommentConfig::default();
+        u.assign.mode.insert(
+            "temp_english".into(),
+            cells(Some("inherit"), None, None, None),
+        );
+        let (lib, _) = CommentLibrary::build(&sys(a), &u);
+        assert_eq!(
+            text(&lib, Some("temp_english"), CommentState::Default, true),
+            "T:code_hint"
+        );
+    }
+
+    #[test]
+    fn horizontal_same_as_vertical_when_unset() {
+        let mut a = global_only();
+        a.schema
+            .insert("wubi".into(), cells(None, None, Some("a"), None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:a");
+    }
+
+    #[test]
+    fn horizontal_inherit_goes_down() {
+        let mut a = global_only();
+        a.global.detail_horizontal = Some("b".into());
+        a.schema
+            .insert("wubi".into(), cells(None, None, Some("a"), Some("inherit")));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:b");
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:a");
+    }
+
+    #[test]
+    fn horizontal_unset_and_vertical_unset_follows_down() {
+        let mut a = global_only();
+        a.global.detail_horizontal = Some("b".into());
+        a.schema
+            .insert("wubi".into(), cells(None, None, None, None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:b");
+        assert_eq!(
+            text(&lib, None, CommentState::Detail, true),
+            "T:detail_full"
+        );
+    }
+
+    #[test]
+    fn unknown_id_follows_and_warns_once() {
+        let mut a = global_only();
+        a.schema
+            .insert("wubi".into(), cells(Some("gone"), None, Some("gone"), None));
+        let (lib, w) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("gone"));
+        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code_hint");
+        assert_eq!(
+            text(&lib, None, CommentState::Detail, true),
+            "T:detail_full"
+        );
+    }
+
+    #[test]
+    fn user_template_overrides_builtin() {
+        let mut u = UiCommentConfig::default();
+        u.templates.push(tpl("code_hint", "X"));
+        let (lib, w) = CommentLibrary::build(&sys(global_only()), &u);
+        assert!(w.is_empty());
+        assert_eq!(text(&lib, None, CommentState::Default, true), "X");
+        let origin = lib
+            .templates()
+            .find(|(t, _)| t.id == "code_hint")
+            .map(|(_, o)| o);
+        assert_eq!(origin, Some(TemplateOrigin::UserOverridesBuiltin));
+    }
+
+    #[test]
+    fn fallback_when_global_empty() {
+        let (lib, _) =
+            CommentLibrary::build(&sys(CommentAssign::default()), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code_hint");
+        assert_eq!(
+            text(&lib, None, CommentState::Detail, false),
+            "T:detail_full"
+        );
+    }
+
+    #[test]
+    fn referenced_texts_covers_detail() {
+        let (lib, _) = CommentLibrary::build(&sys(global_only()), &UiCommentConfig::default());
+        assert!(lib.referenced_texts().contains(&"T:detail_full"));
+        assert!(lib.referenced_texts().contains(&"T:code_hint"));
+    }
+
+    #[test]
+    fn invalid_user_template_id_skipped_and_warned() {
+        let mut u = UiCommentConfig::default();
+        u.templates.push(tpl("Bad-Id", "x"));
+        u.templates.push(tpl("", "x"));
+        u.templates.push(tpl("mine", "first"));
+        u.templates.push(tpl("mine", "second"));
+        let (lib, w) = CommentLibrary::build(&sys(global_only()), &u);
+        assert_eq!(w.len(), 3, "{w:?}");
+        let ids: Vec<&str> = lib.templates().map(|(t, _)| t.id.as_str()).collect();
+        assert!(!ids.contains(&"Bad-Id") && !ids.contains(&""));
+        let mine = lib.templates().find(|(t, _)| t.id == "mine").unwrap();
+        assert_eq!(
+            (mine.0.text.as_str(), mine.1),
+            ("first", TemplateOrigin::User)
         );
     }
 }
