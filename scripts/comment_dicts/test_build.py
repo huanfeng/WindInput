@@ -266,6 +266,88 @@ class ExportFullTest(unittest.TestCase):
         self.assertNotIn("旧", rows)
 
 
+PINYIN_MAP = (
+    "# 汉字拼音反查表\n"
+    "U+90ED: guō  # 郭\n"
+    "U+8299: fú,fù  # 芙\n"
+    "U+672C: běn  # 本\n"
+    "U+6EAA: xī  # 溪\n"
+    "U+5FB7: dé  # 德\n"
+    "U+8D6B: hè  # 赫\n"
+    "U+4E9A: yà  # 亚\n"
+    "U+5415: lǚ  # 吕\n"
+    "U+94F6: yín  # 银\n"
+    "U+884C: xíng,háng  # 行\n"
+)
+
+
+class RomanizationTest(unittest.TestCase):
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.pm = build.load_pinyin_map(write(d.name, "pinyin_map.txt", PINYIN_MAP))
+
+    def drops(self, word, meaning):
+        return build.is_pinyin_romanization(word, meaning, self.pm)
+
+    def test_names_written_as_pinyin_are_dropped(self):
+        self.assertTrue(self.drops("郭芙", "n. Guo Fu"))
+        self.assertTrue(self.drops("本溪", "n. Benxi"))
+
+    def test_separators_case_and_tone_marks_ignored(self):
+        self.assertTrue(self.drops("郭芙", "GUO-FU"))
+        self.assertTrue(self.drops("郭芙", "n. Guō Fù"))
+        self.assertTrue(self.drops("吕", "n. Lu"))
+        self.assertTrue(self.drops("吕", "Lü"))
+
+    def test_polyphone_any_reading_matches(self):
+        self.assertTrue(self.drops("银行", "n. Yinhang"))
+        self.assertTrue(self.drops("银行", "n. Yinxing"))
+
+    def test_real_translations_kept(self):
+        self.assertFalse(self.drops("德赫亚", "n. De Gea"))
+        self.assertFalse(self.drops("银行", "n. bank"))
+        self.assertFalse(self.drops("郭芙", ""))
+
+    def test_unknown_char_never_matches(self):
+        self.assertFalse(self.drops("郭X", "n. Guo X"))
+
+    def test_load_ai_with_pinyin_drops_romanized_rows(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        ai = write(d.name, "ai.tsv", "郭芙\tn. Guo Fu\n银行\tn. bank\n")
+        self.assertEqual(build.load_ai(ai, self.pm), {"银行": "n. bank"})
+        self.assertEqual(len(build.load_ai(ai)), 2)
+
+    def test_lint_ai_reports_count_and_rows(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        ai = write(d.name, "ai.tsv", "# c\n郭芙\tn. Guo Fu\n银行\tn. bank\n本溪\tn. Benxi\n")
+        pm = write(d.name, "pinyin_map.txt", PINYIN_MAP)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            build.main(["lint-ai", ai, "--pinyin", pm])
+        out = buf.getvalue()
+        self.assertIn("2/3", out)
+        self.assertIn("郭芙\tn. Guo Fu", out)
+        self.assertNotIn("银行", out)
+
+    def test_zh_en_command_applies_filter_to_ai_and_refined(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        zh = write(d.name, "zh.dict.yaml", "---\nname: x\n...\n郭芙\ta\t1\n银行\tb\t1\n")
+        cedict = write(d.name, "c.txt", "#! x\n")
+        ai = write(d.name, "ai.tsv", "郭芙\tn. Guo Fu\n银行\tn. bank\n")
+        ref = write(d.name, "ref.tsv", "郭芙\tn. Guo Fu\n")
+        pm = write(d.name, "pinyin_map.txt", PINYIN_MAP)
+        out = os.path.join(d.name, "o.txt")
+        build.main(["zh-en", "--cedict", cedict, "--ai", ai, "--refined", ref, "--pinyin", pm, "--words", zh, "--out", out])
+        with open(out, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("郭芙", text)
+        self.assertIn("银行\tn. bank", text)
+
+
 class ParseTest(unittest.TestCase):
     def test_strict_pos_format_accepted(self):
         got, bad = ai_fill.parse_response("银行\tn. bank\n运行\tv. run; operate", ["银行", "运行"])

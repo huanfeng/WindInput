@@ -776,11 +776,14 @@ assemble_data() {
         mkdir -p "$schemas/comments"
         local ai_tsv="$data/comments-src/zh_en_ai.tsv"
         [ -f "$ai_tsv" ] || ai_tsv=""
+        # 拼音表用于丢掉 AI 释义里拼音化的专名；缺了只是不过滤
+        local pmap_arg=""
+        [ -f "$data/pinyin_map.txt" ] && pmap_arg="$data/pinyin_map.txt"
         python3 -I "$cdict" en-zh --ecdict "$ecdict_csv" \
             --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
             --out "$schemas/comments/en_zh.txt" \
           || warn "英→中释义词库生成失败"
-        python3 -I "$cdict" zh-en --cedict "$cedict_gz" ${ai_tsv:+--ai "$ai_tsv"} \
+        python3 -I "$cdict" zh-en --cedict "$cedict_gz" ${ai_tsv:+--ai "$ai_tsv"} ${pmap_arg:+--pinyin "$pmap_arg"} \
             --words "$pinyin_cn/base.dict.yaml" "$pinyin_cn/ext.dict.yaml" \
                     "$pinyin/ext/idiom.dict.yaml" "$schemas/wubi86/wubi86_jidian.dict.yaml" \
             --out "$schemas/comments/zh_en.txt" \

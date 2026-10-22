@@ -766,6 +766,8 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
             New-Item -ItemType Directory -Path "$schemas\comments" -Force | Out-Null
             $pyRest = @(); if ($py.Count -gt 1) { $pyRest = $py[1..($py.Count - 1)] }
             $aiArgs = @(); if (Test-Path "$data\comments-src\zh_en_ai.tsv") { $aiArgs = @("--ai", "$data\comments-src\zh_en_ai.tsv") }
+            # 拼音表用于丢掉 AI 释义里拼音化的专名; 缺了只是不过滤
+            if (Test-Path "$data\pinyin_map.txt") { $aiArgs += @("--pinyin", "$data\pinyin_map.txt") }
             # build.py 把进度写到 stderr; 全局 $ErrorActionPreference=Stop 下 PS5.1 会把它当错误, 此处临时放宽。
             & $py[0] @pyRest -I $cdict en-zh --ecdict $ecdict --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" --out "$schemas\comments\en_zh.txt"
             if ($LASTEXITCODE -ne 0) { Warn "英→中释义词库生成失败" }

@@ -2,7 +2,7 @@
 """中英释义注释词库生成：ECDICT / CC-CEDICT / AI 补齐 -> en_zh.txt、zh_en.txt。
 
 输出每词一行 `词<TAB>词性. 义项`（CC-CEDICT 无词性，只有义项）。仅用标准库。
-子命令：en-zh、zh-en、export-full、missing、plan、report。用法见 `-h`。
+子命令：en-zh、zh-en、export-full、lint-ai、missing、plan、report。用法见 `-h`。
 """
 
 import argparse
@@ -11,6 +11,7 @@ import gzip
 import os
 import re
 import sys
+import unicodedata
 
 CJK = re.compile(r"[㐀-鿿豈-﫿\U00020000-\U0002ffff]")
 POS_LINE = re.compile(r"^([a-z]{1,6})\.\s*(.*)$")
@@ -269,8 +270,52 @@ def load_cedict_full(path, wanted):
     return {w: " | ".join(dict.fromkeys(e)) for w, e in by_simp.items()}
 
 
-def load_ai(path):
-    """读 词<TAB>释义 的源数据 tsv（zh_en_ai / *_refined）：跳过 # 注释与空释义行。"""
+POS_PREFIX = re.compile(r"^[a-z]{1,6}\.\s*")
+
+
+def _plain(text):
+    """去声调、统一 ü->u，只留小写字母。"""
+    t = unicodedata.normalize("NFD", text.lower().replace("ü", "u"))
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return "".join(c for c in t if "a" <= c <= "z")
+
+
+def load_pinyin_map(path):
+    """读 pinyin_map.txt（`U+XXXX: py1,py2  # 字`）-> {字: {无调拼音}}。"""
+    result = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#") or ":" not in line:
+                continue
+            code, _, rest = line.partition(":")
+            if not code.startswith("U+"):
+                continue
+            readings = {_plain(r) for r in rest.split("#")[0].strip().split(",")}
+            readings.discard("")
+            if readings:
+                result[chr(int(code[2:], 16))] = readings
+    return result
+
+
+def is_pinyin_romanization(word, meaning, pinyin_map):
+    """释义去掉词性、大小写、空格、连字符、撇号、声调后，若恰好是词的无调拼音（多音字任一读音）则为真。
+    专名不得拼音化，这类释义要丢掉。词里有 pinyin_map 没有的字时不判。"""
+    text = _plain(POS_PREFIX.sub("", meaning.strip()))
+    if not text or not word:
+        return False
+    reachable = {0}
+    for ch in word:
+        readings = pinyin_map.get(ch)
+        if not readings:
+            return False
+        reachable = {i + len(r) for i in reachable for r in readings if text.startswith(r, i)}
+        if not reachable:
+            return False
+    return len(text) in reachable
+
+
+def load_ai(path, pinyin_map=None):
+    """（给了 pinyin_map 就丢掉拼音化的释义）读 词<TAB>释义 的源数据 tsv（zh_en_ai / *_refined）：跳过 # 注释与空释义行。"""
     result = {}
     if not path:
         return result
@@ -285,6 +330,8 @@ def load_ai(path):
                 continue
             cols = line.split("\t")
             if len(cols) < 2 or not cols[0].strip() or not cols[1].strip():
+                continue
+            if pinyin_map and is_pinyin_romanization(cols[0].strip(), cols[1], pinyin_map):
                 continue
             result.setdefault(cols[0].strip(), cols[1].strip())
     return result
@@ -354,7 +401,8 @@ def cmd_en_zh(a):
 def cmd_zh_en(a):
     words = zh_words(a.words)
     cedict = load_cedict(a.cedict, set(words))
-    entries = build_zh_en(cedict, load_ai(a.ai), words, load_ai(a.refined))
+    pm = load_pinyin_map(a.pinyin) if a.pinyin else None
+    entries = build_zh_en(cedict, load_ai(a.ai, pm), words, load_ai(a.refined, pm))
     write_entries(entries, a.out, cedict_header(a.cedict))
     print(f"zh_en: {len(entries)}/{len(words)} -> {a.out}", file=sys.stderr)
 
@@ -372,6 +420,22 @@ def cmd_export_full(a):
         header = cedict_header(a.cedict)
     write_entries(entries, a.out, header)
     print(f"export-full {a.direction}: {len(entries)}/{len(words)} -> {a.out}", file=sys.stderr)
+
+
+def cmd_lint_ai(a):
+    pm = load_pinyin_map(a.pinyin)
+    total = bad = 0
+    with open(a.tsv, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            cols = line.split("\t")
+            if not line or line.startswith("#") or len(cols) < 2 or not cols[1].strip():
+                continue
+            total += 1
+            if is_pinyin_romanization(cols[0].strip(), cols[1], pm):
+                bad += 1
+                print(f"{cols[0].strip()}\t{cols[1].strip()}")
+    print(f"拼音化释义: {bad}/{total}（构建时会被丢弃）")
 
 
 def selection(a):
@@ -428,9 +492,15 @@ def main(argv=None):
     s.add_argument("--cedict", required=True)
     s.add_argument("--ai", help="zh_en_ai.tsv")
     s.add_argument("--refined", help="zh_en_cedict_refined.tsv（优先于 CEDICT 原始取义）")
+    s.add_argument("--pinyin", help="pinyin_map.txt：给了就丢掉 AI/refined 里拼音化的释义（专名不得音译）")
     s.add_argument("--words", nargs="+", required=True)
     s.add_argument("--out", required=True)
     s.set_defaults(fn=cmd_zh_en)
+
+    s = sub.add_parser("lint-ai", help="列出 AI/refined tsv 里会被丢掉的拼音化释义")
+    s.add_argument("tsv")
+    s.add_argument("--pinyin", required=True)
+    s.set_defaults(fn=cmd_lint_ai)
 
     s = sub.add_parser("export-full", help="导出未裁剪的全部义项（ai_fill.py refine 的输入）")
     s.add_argument("--direction", choices=["en-zh", "zh-en"], required=True)

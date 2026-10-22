@@ -1022,6 +1022,8 @@ assemble_data() {
         mkdir -p "$data/schemas/comments"
         local ai_args=()
         [[ -f "$data/comments-src/zh_en_ai.tsv" ]] && ai_args=(--ai "$data/comments-src/zh_en_ai.tsv")
+        # 拼音表用于丢掉 AI 释义里拼音化的专名; 缺了只是不过滤
+        [[ -f "$data/pinyin_map.txt" ]] && ai_args+=(--pinyin "$data/pinyin_map.txt")
         python3 -I "$cdict" en-zh --ecdict "$ecdict_csv" \
             --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
             --out "$data/schemas/comments/en_zh.txt" \
