@@ -7164,9 +7164,15 @@ impl Coordinator {
                 .into_iter()
                 .map(|a| a.id)
                 .collect();
+            let builtin: Vec<String> = self
+                .system_comments
+                .dicts
+                .iter()
+                .map(|b| b.id.clone())
+                .collect();
             let name = format!("注释词库「{id}」");
             let Some((list, on)) =
-                crate::handle_cmdbar::set_comment_dict(&configured, &auto, id, want)?
+                crate::handle_cmdbar::set_comment_dict(&configured, &auto, &builtin, id, want)?
             else {
                 // 只有指定了状态才可能「已一致」（取反恒有变化），故 want 必为 Some
                 return self.notify_feature_unchanged(target, &name, want.unwrap_or(true));
@@ -19168,6 +19174,8 @@ pub(crate) fn merge_comment_dicts(
             });
             continue;
         }
+        // 用户自己写的同 id 条目胜出，内置项不再重复出现。
+        claimed.push(spec.id.as_str());
         out.push(EffectiveCommentDict {
             id: spec.id.clone(),
             enabled: spec.enabled,
@@ -19276,6 +19284,14 @@ mod comment_dict_merge_tests {
         assert_eq!(ids(&out), ["zh_en", "mine", "en_zh"]);
         assert!(!out[0].enabled);
         assert!(out[2].enabled);
+    }
+
+    #[test]
+    fn manual_entry_with_builtin_id_wins() {
+        let cfg = [manual("en_zh", "comments/mine.txt", true)];
+        let out = merge_comment_dicts(&cfg, &builtin_dicts(), &[]);
+        assert_eq!(ids(&out), ["en_zh", "zh_en"]);
+        assert!(matches!(out[0].kind, EffectiveCommentKind::Manual { .. }));
     }
 
     #[test]

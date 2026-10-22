@@ -662,6 +662,7 @@ pub(crate) fn state_unchanged_text(target: &str, on: bool) -> String {
 pub(crate) fn set_comment_dict(
     configured: &[wind_config::CommentDictSpec],
     auto_ids: &[String],
+    builtin_ids: &[String],
     id: &str,
     want: Option<bool>,
 ) -> anyhow::Result<Option<(Vec<wind_config::CommentDictSpec>, bool)>> {
@@ -683,6 +684,20 @@ pub(crate) fn set_comment_dict(
         out.push(wind_config::CommentDictSpec {
             id: id.to_string(),
             auto: true,
+            enabled: false,
+            ..Default::default()
+        });
+        return Ok(Some((out, false)));
+    }
+    if builtin_ids.iter().any(|b| b == id) {
+        // 未登记的内置库恒为开（见 `merge_comment_dicts`）
+        let on = want.unwrap_or(false);
+        if on {
+            return Ok(None);
+        }
+        out.push(wind_config::CommentDictSpec {
+            id: id.to_string(),
+            builtin: true,
             enabled: false,
             ..Default::default()
         });
@@ -1269,13 +1284,15 @@ mod feature_toggle_tests {
     #[test]
     fn flips_existing_entry_in_place() {
         let cfg = [manual("en", true), manual("chaifen", false)];
-        let (list, on) = set_comment_dict(&cfg, &[], "chaifen", None)
+        let (list, on) = set_comment_dict(&cfg, &[], &[], "chaifen", None)
             .unwrap()
             .unwrap();
         assert!(on);
         assert_eq!(list.len(), 2);
         assert!(list[0].enabled && list[1].enabled);
-        let (list, on) = set_comment_dict(&list, &[], "en", None).unwrap().unwrap();
+        let (list, on) = set_comment_dict(&list, &[], &[], "en", None)
+            .unwrap()
+            .unwrap();
         assert!(!on && !list[0].enabled);
     }
 
@@ -1284,11 +1301,11 @@ mod feature_toggle_tests {
     fn set_is_noop_when_already_in_state() {
         let cfg = [manual("en", true)];
         assert!(
-            set_comment_dict(&cfg, &[], "en", Some(true))
+            set_comment_dict(&cfg, &[], &[], "en", Some(true))
                 .unwrap()
                 .is_none()
         );
-        let (list, on) = set_comment_dict(&cfg, &[], "en", Some(false))
+        let (list, on) = set_comment_dict(&cfg, &[], &[], "en", Some(false))
             .unwrap()
             .unwrap();
         assert!(!on && !list[0].enabled);
@@ -1300,12 +1317,12 @@ mod feature_toggle_tests {
         let cfg = [manual("en", true)];
         let auto = vec!["auto:pinyin/cn_dicts/corrections.dict.yaml".to_string()];
         assert!(
-            set_comment_dict(&cfg, &auto, &auto[0], Some(true))
+            set_comment_dict(&cfg, &auto, &[], &auto[0], Some(true))
                 .unwrap()
                 .is_none()
         );
         for want in [None, Some(false)] {
-            let (list, on) = set_comment_dict(&cfg, &auto, &auto[0], want)
+            let (list, on) = set_comment_dict(&cfg, &auto, &[], &auto[0], want)
                 .unwrap()
                 .unwrap();
             assert!(!on);
@@ -1314,9 +1331,29 @@ mod feature_toggle_tests {
         }
     }
 
+    /// 内置库（未登记时是开的）：要开不动作；要关 / 取反就追加一条关着的 builtin 空壳。
+    #[test]
+    fn builtin_dict_gets_a_disabled_shell() {
+        let cfg = [manual("en", true)];
+        let builtin = vec!["zh_en".to_string()];
+        assert!(
+            set_comment_dict(&cfg, &[], &builtin, "zh_en", Some(true))
+                .unwrap()
+                .is_none()
+        );
+        for want in [None, Some(false)] {
+            let (list, on) = set_comment_dict(&cfg, &[], &builtin, "zh_en", want)
+                .unwrap()
+                .unwrap();
+            assert!(!on);
+            let shell = &list[1];
+            assert!(shell.id == "zh_en" && shell.builtin && !shell.enabled && !shell.auto);
+        }
+    }
+
     #[test]
     fn unknown_id_is_an_error() {
-        assert!(set_comment_dict(&[manual("en", true)], &[], "nope", Some(true)).is_err());
+        assert!(set_comment_dict(&[manual("en", true)], &[], &[], "nope", Some(true)).is_err());
     }
 }
 
