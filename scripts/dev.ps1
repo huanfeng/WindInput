@@ -766,10 +766,13 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
             New-Item -ItemType Directory -Path "$schemas\comments" -Force | Out-Null
             $pyRest = @(); if ($py.Count -gt 1) { $pyRest = $py[1..($py.Count - 1)] }
             $aiArgs = @(); if (Test-Path "$data\comments-src\zh_en_ai.tsv") { $aiArgs = @("--ai", "$data\comments-src\zh_en_ai.tsv") }
+            # 重整后的源数据(可无): 优先于 ECDICT / CEDICT 原始取义
+            $enRefArgs = @(); if (Test-Path "$data\comments-src\en_zh_refined.tsv") { $enRefArgs = @("--refined", "$data\comments-src\en_zh_refined.tsv") }
+            if (Test-Path "$data\comments-src\zh_en_cedict_refined.tsv") { $aiArgs += @("--refined", "$data\comments-src\zh_en_cedict_refined.tsv") }
             # 拼音表用于丢掉 AI 释义里拼音化的专名; 缺了只是不过滤
             if (Test-Path "$data\pinyin_map.txt") { $aiArgs += @("--pinyin", "$data\pinyin_map.txt") }
             # build.py 把进度写到 stderr; 全局 $ErrorActionPreference=Stop 下 PS5.1 会把它当错误, 此处临时放宽。
-            & $py[0] @pyRest -I $cdict en-zh --ecdict $ecdict --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" --out "$schemas\comments\en_zh.txt"
+            & $py[0] @pyRest -I $cdict en-zh --ecdict $ecdict --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" @enRefArgs --out "$schemas\comments\en_zh.txt"
             if ($LASTEXITCODE -ne 0) { Warn "英→中释义词库生成失败" }
             & $py[0] @pyRest -I $cdict zh-en --cedict $cedict @aiArgs --words "$pinyinCn\base.dict.yaml" "$pinyinCn\ext.dict.yaml" "$pinyin\ext\idiom.dict.yaml" "$schemas\wubi86\wubi86_jidian.dict.yaml" --out "$schemas\comments\zh_en.txt"
             if ($LASTEXITCODE -ne 0) { Warn "中→英释义词库生成失败" }

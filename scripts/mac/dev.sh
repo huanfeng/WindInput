@@ -1022,10 +1022,15 @@ assemble_data() {
         mkdir -p "$data/schemas/comments"
         local ai_args=()
         [[ -f "$data/comments-src/zh_en_ai.tsv" ]] && ai_args=(--ai "$data/comments-src/zh_en_ai.tsv")
+        # 重整后的源数据(可无): 优先于 ECDICT / CEDICT 原始取义
+        local en_args=()
+        [[ -f "$data/comments-src/en_zh_refined.tsv" ]] && en_args=(--refined "$data/comments-src/en_zh_refined.tsv")
+        [[ -f "$data/comments-src/zh_en_cedict_refined.tsv" ]] && ai_args+=(--refined "$data/comments-src/zh_en_cedict_refined.tsv")
         # 拼音表用于丢掉 AI 释义里拼音化的专名; 缺了只是不过滤
         [[ -f "$data/pinyin_map.txt" ]] && ai_args+=(--pinyin "$data/pinyin_map.txt")
         python3 -I "$cdict" en-zh --ecdict "$ecdict_csv" \
             --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
+            ${en_args[@]+"${en_args[@]}"} \
             --out "$data/schemas/comments/en_zh.txt" \
             || warn "英→中释义词库生成失败"
         python3 -I "$cdict" zh-en --cedict "$cedict_gz" ${ai_args[@]+"${ai_args[@]}"} \
