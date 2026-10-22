@@ -447,7 +447,6 @@ impl OverlayPreeditForms {
 }
 
 /// Alt 键自按下起的追踪：按下时刻与「期间是否按过别的键」。
-#[allow(dead_code)]
 pub(crate) struct AltTrack {
     pub down_at: std::time::Instant,
     pub dirty: bool,
@@ -715,7 +714,6 @@ pub(crate) struct State {
     /// 注释态的「按住 Alt」翻转：按住期间为真，与上面那份各自独立地异或。
     pub(crate) comment_hold_flip: bool,
     /// Alt 单击 / 按住的判定中间态：`Some` = Alt 已按下、尚未松开。
-    #[allow(dead_code)]
     pub(crate) alt_track: Option<AltTrack>,
     /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
     /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
@@ -6224,7 +6222,7 @@ impl Coordinator {
     /// 键解释器，是另一层的事。
     pub(crate) fn cancel_session(&self, state: &mut State) -> KeyAction {
         self.note_word_boundary();
-        state.comment_session_flip = false;
+        state.clear_comment_flips();
         match state.active {
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),

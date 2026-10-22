@@ -9,6 +9,7 @@ pub mod candidate_pull;
 #[cfg(test)]
 pub(crate) mod charset_test_support;
 pub(crate) mod comment;
+pub(crate) mod comment_alt;
 #[cfg(all(unix, not(target_os = "android")))]
 pub mod exit_signal;
 /// 设置页预览行的模板样例求值（`comment` 本身不对外，只开放这一块）。

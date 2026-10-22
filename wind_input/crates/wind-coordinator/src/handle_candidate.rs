@@ -2675,7 +2675,7 @@ impl Coordinator {
     fn refill_candidates(&self, state: &mut State) -> InputOutcome {
         // 联想窗被新组合替换（联想态下打字母不经 `exit_assoc`）：注释翻转随旧窗作废。
         if state.assoc_active() {
-            state.comment_session_flip = false;
+            state.clear_comment_flips();
         }
         state.candidates.clear();
         state.preedit = state.input_buffer.clone();
@@ -4808,7 +4808,7 @@ impl Coordinator {
         // 首选已上屏，余码是新的一次组合：不继承上一次的展开（按键入口那道「没有输入会话」
         // 判不到——这一键按下时候选还在）。注释翻转同理。
         state.grid_keep = false;
-        state.comment_session_flip = false;
+        state.clear_comment_flips();
         let _ = self.update_candidates(state); // 余码候选（不再消费其结局）
         let preedit = state.preedit.clone();
         // 顶码 = 部分上屏 + 余码续组合：宿主光标因 top_text 插入而前移，余码组合起点已变。
@@ -4864,7 +4864,7 @@ impl Coordinator {
     pub(crate) fn take_committed_with_highlight(&self, state: &mut State) -> Option<String> {
         self.exit_assoc(state, crate::handle_assoc::AssocExit::TopCommitKey);
         // 顶屏进模式 = 旧候选窗关了，注释翻转不带进新模式。
-        state.comment_session_flip = false;
+        state.clear_comment_flips();
         // 顶屏的高亮候选并进已转换段后造词 / 推 6b（见 `learn_on_top_commit`）。须在
         // `take_committed` 清段之前；主输入路归属活跃方案。
         let highlight = self.highlight_for_top_commit(state);
@@ -5038,7 +5038,7 @@ impl Coordinator {
         }
         let src = cand.phrase_template.clone();
         // 余码是新的一次组合，不继承注释翻转（同 `commit_top_text`）。
-        state.comment_session_flip = false;
+        state.clear_comment_flips();
         state.input_buffer = remainder.to_string();
         preedit_cursor::keep_cased_tail(&state.input_buffer, &mut state.input_buffer_cased);
         state.input_cursor_pos = state.input_buffer.len(); // 顶码后余码续打，光标在余码末尾

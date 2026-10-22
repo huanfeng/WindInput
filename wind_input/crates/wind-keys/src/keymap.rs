@@ -412,6 +412,11 @@ pub fn is_pure_modifier_vk(vk: u32) -> bool {
     (VK_LSHIFT..=VK_RCONTROL).contains(&vk)
 }
 
+/// 该 VK 是否为 Alt（左 / 右 / 不分左右）。不并进 [`is_pure_modifier_vk`]：Alt 不走修饰键轻敲那条路。
+pub fn is_alt_vk(vk: u32) -> bool {
+    matches!(vk, 0xA4 | 0xA5 | 0x12)
+}
+
 /// VK → 组合区前缀字符。无映射时返回 None（调用方自定默认）。
 pub fn vk_to_prefix_char(vk: u32) -> Option<char> {
     KEY_TABLE.iter().find(|d| d.vk == vk).map(|d| d.prefix)

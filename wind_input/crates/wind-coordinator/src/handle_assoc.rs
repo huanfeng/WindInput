@@ -590,7 +590,7 @@ impl Coordinator {
             return false;
         }
         tracing::debug!(reason = ?why, n = state.candidates.len(), "退出联想态");
-        state.comment_session_flip = false;
+        state.clear_comment_flips();
         state.candidates.clear();
         state.preedit.clear();
         self.reset_candidate_view(state);
@@ -733,7 +733,7 @@ impl Coordinator {
         }
         tracing::debug!(n = hits.len(), kind = ?cfg.kind, mode = ?cfg.mode, "进入联想态");
         // 上屏即关了上一个候选窗，其注释翻转不带进联想窗。
-        state.comment_session_flip = false;
+        state.clear_comment_flips();
         // ★ 填进 **`candidates`**（而不是另建一份列表）——联想就是「没有输入缓冲的正常
         // 候选态」。放在这里，翻页 / 上下移高亮 / 二三候选键 / 数字选词 / 鼠标点选 / Esc
         // 取消全部自动可用，因为那些分支的门槛本来就只是「候选非空」。

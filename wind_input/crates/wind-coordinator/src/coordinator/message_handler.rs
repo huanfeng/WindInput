@@ -1007,6 +1007,19 @@ impl MessageHandler for Coordinator {
         // 软键盘状态若在本次按键中变了，返回前推给 C++（吃键判定要用）。**声明在最开头**
         // 是必需的：局部变量逆序析构 ⇒ 它最后走 ⇒ 那时 `state` 的 MutexGuard 已经还了。
         let _sk_push = crate::handle_softkeyboard::SoftKeyboardPushOnDrop(self);
+        // 组字中的 Alt 按下 / 松开（平台只在组字中转发）：只管注释态，吃不吃都在这里定。
+        if keymap::is_alt_vk(data.key_code)
+            && matches!(data.event_type, EVENT_KEY_DOWN | EVENT_KEY_UP)
+        {
+            return self.handle_comment_alt(data);
+        }
+        // 按住 Alt 期间的别的键：照常处理完再收起详细态。声明位置的理由同 `_sk_push`。
+        let _hold_off = (data.event_type == EVENT_KEY_DOWN).then(|| {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            crate::comment_alt::on_other_key(&mut st.alt_track);
+            drop(st);
+            crate::comment::HoldOffOnDrop(self)
+        });
         // 每次按键开始重置统计标志：具体上屏路径调 record_commit 置位，
         // 顶层 record_input_stats 仅在未置位时兜底（对齐 Go handle_key_event 开头 reset）。
         self.stat_recorded
@@ -1024,7 +1037,8 @@ impl MessageHandler for Coordinator {
             }
             // 注释翻转只跟候选窗走：联想窗里翻的要留着（联想入口另行清掉上一次的）。
             if !Self::has_input_session(&st) {
-                st.comment_session_flip = false;
+                st.clear_comment_flips();
+                st.alt_track = None;
             }
         }
 

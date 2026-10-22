@@ -1046,6 +1046,26 @@ fn joined_codes(codes: &str, sep: Option<&str>) -> VarValue {
     VarValue::joined(codes.split('/'), sep.unwrap_or("/"))
 }
 
+/// 按住 Alt 期间的别的键：这一键照常处理完再收起详细态，于是 Alt+数字上屏的是详细注释。
+///
+/// ⚠️ 声明在 `handle_key_event` 开头，理由同 `SoftKeyboardPushOnDrop`：析构时 `state` 锁已还。
+pub(crate) struct HoldOffOnDrop<'a>(pub(crate) &'a crate::coordinator::Coordinator);
+
+impl Drop for HoldOffOnDrop<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.set_comment_hold(&mut state, false);
+    }
+}
+
+impl State {
+    /// 候选窗关闭 / 被新组合替换：两份翻转一并复位（按住那份防 Alt 松开没送到时卡住）。
+    pub(crate) fn clear_comment_flips(&mut self) {
+        self.comment_session_flip = false;
+        self.comment_hold_flip = false;
+    }
+}
+
 impl crate::coordinator::Coordinator {
     /// 当前生效的注释模板串（`""` = 不显示）：按 模式 → 方案 → 方案类型 → 全局 解析当前态与排布那一格。
     ///
@@ -1115,6 +1135,69 @@ impl crate::coordinator::Coordinator {
         state.comment_session_flip = !state.comment_session_flip;
         if !state.candidates.is_empty() {
             self.notify_ui_update(state);
+        }
+    }
+
+    /// 设「按住 Alt」翻转；变了且有候选才重绘。
+    pub(crate) fn set_comment_hold(&self, state: &mut State, on: bool) {
+        if state.comment_hold_flip == on {
+            return;
+        }
+        state.comment_hold_flip = on;
+        if !state.candidates.is_empty() {
+            self.notify_ui_update(state);
+        }
+    }
+
+    /// 组字中 Alt 的按下 / 松开：按 `ui.comment.alt_switch` 切换注释态，判定见 [`crate::comment_alt`]。
+    ///
+    /// 裸 `lalt` / `ralt` 在 `key_actions` / `session_actions` 里都绑不上（两张键名表都不收），
+    /// 故这里不必给用户绑定让位。
+    pub(crate) fn handle_comment_alt(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> wind_bridge::handler::KeyAction {
+        use crate::comment_alt::{AltEffect, AltOutcome, on_alt_down, on_alt_up};
+        use wind_bridge::handler::KeyAction;
+        use wind_config::comment_lib::{AltSwitch, CommentState};
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        let mode = if c.enabled {
+            c.alt_switch
+        } else {
+            AltSwitch::Off
+        };
+        let is_down = data.event_type == wind_ipc::protocol::EVENT_KEY_DOWN;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let has_candidates = !state.candidates.is_empty();
+        let now = std::time::Instant::now();
+        let (outcome, effect) = if is_down {
+            on_alt_down(mode, has_candidates, &mut state.alt_track, now)
+        } else {
+            on_alt_up(mode, has_candidates, &mut state.alt_track, now)
+        };
+        match effect {
+            AltEffect::None => {}
+            AltEffect::ToggleSession => self.toggle_comment_session(&mut state),
+            AltEffect::TogglePersist => {
+                let to = match c.state {
+                    CommentState::Default => CommentState::Detail,
+                    CommentState::Detail => CommentState::Default,
+                };
+                if let Err(e) = self.set_comment_state(&mut state, to) {
+                    tracing::warn!("Alt 切换注释持久态写回失败: {e:#}");
+                }
+            }
+            AltEffect::HoldOn => self.set_comment_hold(&mut state, true),
+            AltEffect::HoldOff => self.set_comment_hold(&mut state, false),
+        }
+        // 松开就不再按住：别让按住翻转卡住（如按住期间改了档位）。
+        if !is_down {
+            self.set_comment_hold(&mut state, false);
+        }
+        match outcome {
+            AltOutcome::Consumed => KeyAction::Consumed,
+            AltOutcome::PassThrough => KeyAction::PassThrough,
         }
     }
 
