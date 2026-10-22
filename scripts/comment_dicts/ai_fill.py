@@ -2,7 +2,7 @@
 """生成中英释义源数据：补齐（fill）与重整（refine），可断点续跑。
 
 - fill：给 CC-CEDICT 没覆盖的中文词生成英文释义。输入每行一词（`build.py plan/missing` 的输出）。
-- refine：输入已有条目 `词<TAB>现有释义`（ECDICT 的 en_zh、CEDICT 的 zh_en），让 AI 从现有义项里
+- refine：输入未裁剪的全部义项 `词<TAB>全部义项`（`build.py export-full` 的输出，别用已裁剪的 en_zh/zh_en），让 AI 从现有义项里
   挑最常用的一两个并补词性。
 两种模式输出同一格式 `词<TAB>词性. 义项`；没有可靠释义的词输出空释义（记空行，下次不再重试）。
 格式不合法的行拒收、不落盘，下次重跑会重试。
@@ -15,6 +15,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -32,9 +33,9 @@ API_URL = "https://api.anthropic.com/v1/messages"
 POS_TAGS = ("n", "v", "vt", "vi", "adj", "adv", "prep", "conj", "pron", "num", "mw", "int", "art", "aux", "det", "abbr")
 VALID_MEANING = re.compile(r"^(?:" + "|".join(POS_TAGS) + r")\. \S[^\t\r\n\x00]*$")
 
-POS_LIST = "n. v. vt. vi. adj. adv. prep. conj. pron. num. mw. int. art. aux. det. abbr."
+POS_LIST = " ".join(t + "." for t in POS_TAGS)
 FORMAT_RULES = f"""- 每词只给最常用的一两个义项，两个义项之间用「{{sep}}」隔开；不给例句，不叠加冷僻义项，尽量短
-- 格式严格为「词性. 义项」，词性是 {POS_LIST} 之一且只写一个，点号后一个空格（如 {{example}}）
+- 格式严格为「词性. 义项」，只能用下列词性之一且只写一个：{POS_LIST}，点号后一个空格（如 {{example}}）
 - 没有可靠释义的词（生僻词、专名、不成词的片段）只输出「词<TAB>」，释义留空，不要硬凑
 - 只输出结果行：每词一行，词与输入完全一致、顺序一致；不要解释，不要编号，不要代码块"""
 
@@ -49,6 +50,7 @@ FILL_PROMPT = """为下列中文词给出最常用的英文释义，供输入法
 """
 
 REFINE_PROMPT = """下列每行是「词<TAB>现有释义」。请从现有释义里挑出最常用的一两个义项，并补上词性，供输入法候选旁的注释使用。
+现有释义可能含多个词性、很多个义项（词性行之间用 ` | ` 隔开）；请判断哪个词性和义项最常用，只挑一两个。
 义项只能来自现有释义（可精简、可调整措辞，不要新增别的义项）；释义语言为{lang}。
 每词输出一行：词<TAB>词性. 义项
 {rules}
@@ -187,12 +189,24 @@ class FileBackend:
     def __init__(self, directory):
         self.dir = directory
 
+    def begin(self, items, mode):
+        """批次目录绑定到一份输入：PROMPT.txt 记输入词表的哈希，不同输入拒绝复用。"""
+        digest = hashlib.sha256("\n".join(f"{w}\t{m}" for w, m in items).encode()).hexdigest()[:16]
+        marker = f"输入哈希: {digest}"
+        prompt = os.path.join(self.dir, "PROMPT.txt")
+        if os.path.exists(prompt):
+            with open(prompt, encoding="utf-8") as f:
+                first = f.readline().strip()
+            if first != "# " + marker:
+                sys.exit(f"批次目录 {self.dir} 属于另一份输入（{first[2:] or '无哈希'}，当前 {marker}），请先清空该目录再跑")
+        else:
+            os.makedirs(self.dir, exist_ok=True)
+            with open(prompt, "w", encoding="utf-8", newline="\n") as f:
+                f.write("# " + marker + "\n")
+                f.write(build_prompt(mode, "zh-en", [("<见 NNNN.in.tsv>", "<现有释义>" if mode == "refine" else "")]))
+
     def fetch(self, index, items, mode, direction):
         os.makedirs(self.dir, exist_ok=True)
-        prompt = os.path.join(self.dir, "PROMPT.txt")
-        if not os.path.exists(prompt):
-            with open(prompt, "w", encoding="utf-8", newline="\n") as f:
-                f.write(build_prompt(mode, direction, [("<见 NNNN.in.tsv>", "<现有释义>")] if mode == "refine" else [("<见 NNNN.in.tsv>", "")]))
         stem = os.path.join(self.dir, f"{index:04d}")
         if not os.path.exists(stem + ".in.tsv"):
             with open(stem + ".in.tsv", "w", encoding="utf-8", newline="\n") as f:
@@ -208,6 +222,8 @@ def run(items, out, backend, mode="fill", direction="zh-en", batch_size=BATCH_SI
     """处理 items 里还没出现在 out 的词；每批写完即落盘，中断后重跑接着来。
     批号按完整 items 顺序固定。limit 只限在线后端本次处理的词数。返回统计 dict。"""
     stats = {"written": 0, "blank": 0, "rejected": 0, "pending_batches": 0}
+    if hasattr(backend, "begin"):
+        backend.begin(items, mode)
     done = done_words(out)
     new_file = not os.path.exists(out) or os.path.getsize(out) == 0
     remaining = limit
@@ -255,7 +271,7 @@ def main(argv=None):
     p.add_argument("--mode", choices=["fill", "refine"], default="fill")
     p.add_argument("--direction", choices=["zh-en", "en-zh"], default="zh-en", help="释义语言；fill 只支持 zh-en")
     p.add_argument("--input", "--missing", dest="input", required=True,
-                   help="fill：每行一词；refine：词<TAB>现有释义（如 build.py 产出的 en_zh.txt / 仅 CEDICT 的 zh_en.txt）")
+                   help="fill：每行一词；refine：build.py export-full 的输出（词<TAB>全部义项）")
     p.add_argument("--out", required=True, help="data/comments-src/ 下的源数据 tsv")
     p.add_argument("--backend", choices=["api", "files"], default="api")
     p.add_argument("--batches-dir", help="files 后端的批次目录")

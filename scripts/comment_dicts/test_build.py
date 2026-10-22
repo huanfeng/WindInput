@@ -233,6 +233,39 @@ class MergePriorityTest(unittest.TestCase):
         self.assertIn("你好\thello; hi\n", text)
 
 
+class ExportFullTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = self.tmp.name
+
+    def test_en_zh_full_keeps_all_pos_lines_and_senses(self):
+        ec = write(self.d, "ecdict.csv", ECDICT_CSV)
+        en = write(self.d, "en.dict.yaml", EN_DICT)
+        out = os.path.join(self.d, "full.tsv")
+        build.main(["export-full", "--direction", "en-zh", "--ecdict", ec, "--words", en, "--out", out])
+        with open(out, encoding="utf-8") as f:
+            rows = dict(l.rstrip("\n").split("\t") for l in f if not l.startswith("#"))
+        self.assertIn("n. 放任", rows["abandon"])  # 非首个词性行
+        self.assertIn("使屈从", rows["abandon"])  # 第 3 个义项
+        self.assertNotIn("\n", rows["abandon"])
+        self.assertIn("亚伦", rows["aaron"])
+        self.assertNotIn("nomatch", rows)
+
+    def test_zh_en_full_merges_all_entries_and_filters_non_gloss(self):
+        cedict = write(self.d, "c.txt", "#! x\n"
+            "行 行 [hang2] /row/line/CL:個|个[ge4]/\n"
+            "行 行 [xing2] /to walk/to go/OK/variant of 衍/\n"
+            "旧 舊 [jiu4] /variant of 舊|旧/\n")
+        zh = write(self.d, "zh.dict.yaml", "---\nname: x\n...\n行\ta\t1\n旧\tb\t1\n")
+        out = os.path.join(self.d, "full.tsv")
+        build.main(["export-full", "--direction", "zh-en", "--cedict", cedict, "--words", zh, "--out", out])
+        with open(out, encoding="utf-8") as f:
+            rows = dict(l.rstrip("\n").split("\t") for l in f if not l.startswith("#"))
+        self.assertEqual(rows["行"], "row; line | to walk; to go; OK")
+        self.assertNotIn("旧", rows)
+
+
 class ParseTest(unittest.TestCase):
     def test_strict_pos_format_accepted(self):
         got, bad = ai_fill.parse_response("银行\tn. bank\n运行\tv. run; operate", ["银行", "运行"])
@@ -275,6 +308,22 @@ class PromptTest(unittest.TestCase):
     def test_refine_prompt_en_zh_asks_chinese(self):
         p = ai_fill.build_prompt("refine", "en-zh", [("bank", "银行; 岸")])
         self.assertIn("中文", p)
+
+
+class PosSetTest(unittest.TestCase):
+    def test_prompt_pos_list_equals_parser_set(self):
+        import re
+        for mode in ("fill", "refine"):
+            p = ai_fill.build_prompt(mode, "zh-en", [("银行", "bank")])
+            self.assertIn("只能用下列词性", p)
+            line = next(l for l in p.splitlines() if "只能用下列词性" in l)
+            listed = set(re.findall(r"([a-z]+)\.", line.split("只能用下列词性", 1)[1]))
+            self.assertEqual(listed, set(ai_fill.POS_TAGS))
+
+    def test_refine_prompt_mentions_many_pos_and_senses(self):
+        p = ai_fill.build_prompt("refine", "zh-en", [("行", "x")])
+        self.assertIn("多个词性", p)
+        self.assertIn("多个义项", p)
 
 
 class RunTest(unittest.TestCase):
@@ -337,6 +386,17 @@ class RunTest(unittest.TestCase):
 
 
 class FileBackendTest(unittest.TestCase):
+    def test_refuses_batches_dir_from_a_different_input(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        bdir = os.path.join(d.name, "b")
+        out = os.path.join(d.name, "o.tsv")
+        ai_fill.run([("甲", "")], out, ai_fill.FileBackend(bdir), today="2026-01-01")
+        ai_fill.run([("甲", "")], out, ai_fill.FileBackend(bdir), today="2026-01-01")  # 同输入可重跑
+        with self.assertRaises(SystemExit) as cm:
+            ai_fill.run([("甲", ""), ("乙", "")], out, ai_fill.FileBackend(bdir), today="2026-01-01")
+        self.assertIn("清空", str(cm.exception))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

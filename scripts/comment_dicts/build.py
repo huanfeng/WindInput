@@ -2,7 +2,7 @@
 """中英释义注释词库生成：ECDICT / CC-CEDICT / AI 补齐 -> en_zh.txt、zh_en.txt。
 
 输出每词一行 `词<TAB>词性. 义项`（CC-CEDICT 无词性，只有义项）。仅用标准库。
-子命令：en-zh、zh-en、missing、plan、report。用法见 `-h`。
+子命令：en-zh、zh-en、export-full、missing、plan、report。用法见 `-h`。
 """
 
 import argparse
@@ -170,7 +170,13 @@ def ecdict_entry(translation):
     return f"{pos}. {meaning}" if pos else meaning
 
 
-def load_ecdict(path, wanted):
+def ecdict_full(translation):
+    """ECDICT translation 全部词性行、全部义项，行间用 ` | ` 连成一行（给重整用，不裁剪）。"""
+    lines = [l.strip() for l in translation.replace("\\n", "\n").split("\n") if l.strip()]
+    return " | ".join(lines)
+
+
+def load_ecdict(path, wanted, entry_fn=ecdict_entry):
     """读 ECDICT csv，只保留词表里的词（精确匹配优先，其次忽略大小写）。返回 {词表词: 释义}。"""
     csv.field_size_limit(1 << 24)
     wanted_lower = {}
@@ -182,7 +188,7 @@ def load_ecdict(path, wanted):
             word = row["word"]
             if word.lower() not in wanted_lower:
                 continue
-            entry = ecdict_entry(row["translation"] or "")
+            entry = entry_fn(row["translation"] or "")
             if not entry:
                 continue
             exact.setdefault(word, entry)
@@ -240,6 +246,27 @@ def load_cedict(path, wanted=None):
     for trad, meaning in by_trad.items():
         by_simp.setdefault(trad, meaning)
     return by_simp
+
+
+def load_cedict_full(path, wanted):
+    """CC-CEDICT 同词所有条目的释义（滤掉变体/参见/量词），条目间 ` | `，条目内 `; `；简体优先、其次繁体。"""
+    by_simp, by_trad = {}, {}
+    with open_text(path) as f:
+        for line in f:
+            m = CEDICT_LINE.match(line) if not line.startswith("#") else None
+            if not m:
+                continue
+            trad, simp, defs = m.groups()
+            if simp not in wanted and trad not in wanted:
+                continue
+            good = [d.strip() for d in defs.split("/") if d.strip() and not CEDICT_NOT_A_GLOSS.match(d.strip())]
+            if not good:
+                continue
+            by_simp.setdefault(simp, []).append("; ".join(good))
+            by_trad.setdefault(trad, []).append("; ".join(good))
+    for trad, entries in by_trad.items():
+        by_simp.setdefault(trad, entries)
+    return {w: " | ".join(dict.fromkeys(e)) for w, e in by_simp.items()}
 
 
 def load_ai(path):
@@ -332,6 +359,21 @@ def cmd_zh_en(a):
     print(f"zh_en: {len(entries)}/{len(words)} -> {a.out}", file=sys.stderr)
 
 
+def cmd_export_full(a):
+    """导出未裁剪的全部义项，供 ai_fill.py --mode refine 作输入。词表范围同 en-zh / zh-en。"""
+    if a.direction == "en-zh":
+        words = load_words(a.words)
+        entries = load_ecdict(a.ecdict, words, ecdict_full)
+        header = ""
+    else:
+        words = zh_words(a.words)
+        full = load_cedict_full(a.cedict, set(words))
+        entries = {w: full[w] for w in words if w in full}
+        header = cedict_header(a.cedict)
+    write_entries(entries, a.out, header)
+    print(f"export-full {a.direction}: {len(entries)}/{len(words)} -> {a.out}", file=sys.stderr)
+
+
 def selection(a):
     general = list(a.general)
     cedict = load_cedict(a.cedict, set(load_words(general + list(a.wubi) + list(a.category))))
@@ -389,6 +431,14 @@ def main(argv=None):
     s.add_argument("--words", nargs="+", required=True)
     s.add_argument("--out", required=True)
     s.set_defaults(fn=cmd_zh_en)
+
+    s = sub.add_parser("export-full", help="导出未裁剪的全部义项（ai_fill.py refine 的输入）")
+    s.add_argument("--direction", choices=["en-zh", "zh-en"], required=True)
+    s.add_argument("--ecdict", help="en-zh 需要")
+    s.add_argument("--cedict", help="zh-en 需要")
+    s.add_argument("--words", nargs="+", required=True, help="同 en-zh / zh-en 的词表")
+    s.add_argument("--out", required=True)
+    s.set_defaults(fn=cmd_export_full)
 
     def selection_args(s):
         s.add_argument("--cedict", required=True)
