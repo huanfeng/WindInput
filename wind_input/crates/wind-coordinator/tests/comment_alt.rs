@@ -12,7 +12,9 @@ use wind_bridge::handler::{CaretData, KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_config::comment_lib::{AltSwitch, CommentState};
 use wind_coordinator::Coordinator;
-use wind_ipc::protocol::{EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, caret_source};
+use wind_ipc::protocol::{
+    EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, MOD_CTRL, MOD_SHIFT, caret_source,
+};
 use wind_ui_types::{CandidateItem, UiCommand};
 
 const VK_LMENU: u32 = 0xA4;
@@ -183,6 +185,44 @@ fn alt_combo_keeping_window_does_not_toggle() {
     assert_eq!(c.debug_candidate_count(), before, "前置条件：候选窗仍开着");
     let act = c.handle_key_event(&up(VK_LMENU));
     assert!(is_pass(&act), "实得 {act:?}");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+/// 平台把按住期间按过的 Shift / Ctrl 粘在 Alt 松开上（桌面 TSF 不转发它们的按下）。
+fn sticky_modifier_is_not_tap(modifier: u32) {
+    if !has_schemas() {
+        return;
+    }
+    let (c, _rx) = typed_gg(cfg());
+    c.handle_key_event(&down(VK_LMENU));
+    let act = c.handle_key_event(&ev(VK_LMENU, modifier, EVENT_KEY_UP));
+    assert!(is_pass(&act), "实得 {act:?}");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+#[test]
+fn alt_shift_is_not_tap() {
+    sticky_modifier_is_not_tap(MOD_SHIFT);
+}
+
+#[test]
+fn alt_ctrl_is_not_tap() {
+    sticky_modifier_is_not_tap(MOD_CTRL);
+}
+
+/// Hold 档带粘滞修饰位照样在松开时复位。
+#[test]
+fn hold_with_sticky_modifier_still_restores() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = cfg();
+    cfg.ui.comment.alt_switch = AltSwitch::Hold;
+    let (c, _rx) = typed_gg(cfg);
+    c.handle_key_event(&down(VK_LMENU));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+    let act = c.handle_key_event(&ev(VK_LMENU, MOD_SHIFT, EVENT_KEY_UP));
+    assert!(is_consumed(&act), "实得 {act:?}");
     assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
 }
 

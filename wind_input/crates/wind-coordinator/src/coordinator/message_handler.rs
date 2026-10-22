@@ -1014,12 +1014,14 @@ impl MessageHandler for Coordinator {
             return self.handle_comment_alt(data);
         }
         // 按住 Alt 期间的别的键：照常处理完再收起详细态。声明位置的理由同 `_sk_push`。
-        let _hold_off = (data.event_type == EVENT_KEY_DOWN).then(|| {
+        let _hold_off = if data.event_type == EVENT_KEY_DOWN {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             crate::comment_alt::on_other_key(&mut st.alt_track);
-            drop(st);
-            crate::comment::HoldOffOnDrop(self)
-        });
+            st.comment_hold_flip
+                .then(|| crate::comment::HoldOffOnDrop(self))
+        } else {
+            None
+        };
         // 每次按键开始重置统计标志：具体上屏路径调 record_commit 置位，
         // 顶层 record_input_stats 仅在未置位时兜底（对齐 Go handle_key_event 开头 reset）。
         self.stat_recorded
@@ -2932,6 +2934,7 @@ impl MessageHandler for Coordinator {
         // 陈旧失焦/噪声层失焦同样证明用户动了别处。详见 menu_close_on_focus_change。
         self.menu_close_on_focus_change("focus_lost");
         self.close_softkeyboard_on_focus_change("focus_lost");
+        self.reset_comment_alt();
         if self.is_stale_focus_event(client_token, "handle_focus_lost") {
             return;
         }
@@ -3224,6 +3227,7 @@ impl MessageHandler for Coordinator {
         // （非陈旧路径的完整清理），两处幂等叠加无副作用。
         self.menu_close_on_focus_change("ime_deactivated");
         self.close_softkeyboard_on_focus_change("ime_deactivated");
+        self.reset_comment_alt();
         // 与 focus_lost 同源的乱序风险：切走本输入法时旧宿主的 IME_DEACTIVATED 同样可能
         // 晚于新宿主的 focus_gained 到达（两者都是 fire-and-forget 异步写）。
         if self.is_stale_focus_event(client_token, "handle_ime_deactivated") {

@@ -1138,6 +1138,13 @@ impl crate::coordinator::Coordinator {
         }
     }
 
+    /// 失焦 / 切走输入法：Alt 松开多半送不到了，判定中间态与按住翻转一并复位。
+    pub(crate) fn reset_comment_alt(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.alt_track = None;
+        self.set_comment_hold(&mut state, false);
+    }
+
     /// 设「按住 Alt」翻转；变了且有候选才重绘。
     pub(crate) fn set_comment_hold(&self, state: &mut State, on: bool) {
         if state.comment_hold_flip == on {
@@ -1151,13 +1158,19 @@ impl crate::coordinator::Coordinator {
 
     /// 组字中 Alt 的按下 / 松开：按 `ui.comment.alt_switch` 切换注释态，判定见 [`crate::comment_alt`]。
     ///
+    /// 平台协议：只在组字中转发 Alt（`key_code` 0xA4 / 0xA5）的按下与松开，不做单击计时；
+    /// `modifiers` 带上这次按住期间按过的 Shift / Ctrl / Win 位（粘滞，按过就一直带到松开）。
+    /// 返回 `Consumed` 则平台吃掉这次事件，`PassThrough` 则放行。
+    ///
     /// 裸 `lalt` / `ralt` 在 `key_actions` / `session_actions` 里都绑不上（两张键名表都不收），
     /// 故这里不必给用户绑定让位。
     pub(crate) fn handle_comment_alt(
         &self,
         data: &wind_bridge::handler::KeyEventData,
     ) -> wind_bridge::handler::KeyAction {
-        use crate::comment_alt::{AltEffect, AltOutcome, on_alt_down, on_alt_up};
+        use crate::comment_alt::{
+            AltEffect, AltOutcome, carries_other_modifier, on_alt_down, on_alt_up, on_other_key,
+        };
         use wind_bridge::handler::KeyAction;
         use wind_config::comment_lib::{AltSwitch, CommentState};
         let rt = self.rt();
@@ -1171,9 +1184,17 @@ impl crate::coordinator::Coordinator {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let has_candidates = !state.candidates.is_empty();
         let now = std::time::Instant::now();
+        let combo = carries_other_modifier(data.modifiers);
         let (outcome, effect) = if is_down {
-            on_alt_down(mode, has_candidates, &mut state.alt_track, now)
+            let r = on_alt_down(mode, has_candidates, &mut state.alt_track, now);
+            if combo {
+                on_other_key(&mut state.alt_track);
+            }
+            r
         } else {
+            if combo {
+                on_other_key(&mut state.alt_track);
+            }
             on_alt_up(mode, has_candidates, &mut state.alt_track, now)
         };
         match effect {

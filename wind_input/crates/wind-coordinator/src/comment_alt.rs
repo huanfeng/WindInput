@@ -27,7 +27,20 @@ pub(crate) enum AltEffect {
     HoldOff,
 }
 
-/// Alt 按下。重复按下（自动连发）保留首次按下的时刻。
+/// Alt 事件是否带了别的修饰位。平台把这次按住期间按过的 Shift / Ctrl / Win 粘在 Alt 事件上
+/// （桌面 TSF 不转发这几个键的按下），带了就不是单击：Alt+Shift 是系统切换输入语言的热键。
+pub(crate) fn carries_other_modifier(modifiers: u32) -> bool {
+    use wind_ipc::protocol::{
+        MOD_CTRL, MOD_LCTRL, MOD_LSHIFT, MOD_RCTRL, MOD_RSHIFT, MOD_SHIFT, MOD_WIN,
+    };
+    modifiers & (MOD_SHIFT | MOD_CTRL | MOD_WIN | MOD_LSHIFT | MOD_RSHIFT | MOD_LCTRL | MOD_RCTRL)
+        != 0
+}
+
+/// Alt 按下。不适用时清掉 track（上次松开没送到时留下的残留）。
+///
+/// 已有且没弄脏的 track 视作同一次按住的自动连发，保留首次按下的时刻；弄脏过的是组合键之后
+/// 的残留（自动连发不会在别的键之后接着发 Alt），按新的一次按下算。
 pub(crate) fn on_alt_down(
     mode: AltSwitch,
     has_candidates: bool,
@@ -35,12 +48,15 @@ pub(crate) fn on_alt_down(
     now: Instant,
 ) -> (AltOutcome, AltEffect) {
     if mode == AltSwitch::Off || !has_candidates {
+        *track = None;
         return (AltOutcome::PassThrough, AltEffect::None);
     }
-    track.get_or_insert(AltTrack {
-        down_at: now,
-        dirty: false,
-    });
+    if !track.as_ref().is_some_and(|t| !t.dirty) {
+        *track = Some(AltTrack {
+            down_at: now,
+            dirty: false,
+        });
+    }
     match mode {
         AltSwitch::Hold => (AltOutcome::Consumed, AltEffect::HoldOn),
         _ => (AltOutcome::PassThrough, AltEffect::None),
@@ -177,6 +193,51 @@ mod tests {
         assert_eq!(
             on_alt_up(AltSwitch::Hold, false, &mut track, t0),
             (O::Consumed, E::HoldOff)
+        );
+    }
+
+    #[test]
+    fn other_modifier_bits_mark_combo() {
+        use wind_ipc::protocol::{MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_SHIFT, MOD_WIN};
+        assert!(!carries_other_modifier(0));
+        assert!(!carries_other_modifier(MOD_ALT));
+        for m in [MOD_SHIFT, MOD_CTRL, MOD_WIN, MOD_LSHIFT] {
+            assert!(carries_other_modifier(m | MOD_ALT), "{m:#x}");
+        }
+    }
+
+    #[test]
+    fn stale_track_is_dropped_when_not_applicable() {
+        let t0 = Instant::now();
+        let mut track = None;
+        on_alt_down(AltSwitch::Hold, true, &mut track, t0);
+        // 松开没送到；下一次按下时已无候选。
+        on_alt_down(AltSwitch::Hold, false, &mut track, t0);
+        assert!(track.is_none());
+        assert_eq!(
+            on_alt_up(AltSwitch::Hold, false, &mut track, t0),
+            (O::PassThrough, E::None),
+            "无候选时的松开不该因残留被吃"
+        );
+    }
+
+    #[test]
+    fn dirty_track_restarts_on_fresh_down() {
+        let t0 = Instant::now();
+        let mut track = None;
+        on_alt_down(AltSwitch::Session, true, &mut track, t0);
+        on_other_key(&mut track);
+        // 组合键之后松开没送到，2 秒后重新单击。
+        let t1 = t0 + Duration::from_secs(2);
+        on_alt_down(AltSwitch::Session, true, &mut track, t1);
+        assert_eq!(
+            on_alt_up(
+                AltSwitch::Session,
+                true,
+                &mut track,
+                t1 + Duration::from_millis(100)
+            ),
+            (O::Consumed, E::ToggleSession)
         );
     }
 
