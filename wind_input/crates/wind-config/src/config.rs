@@ -6159,6 +6159,9 @@ fn default_first_show_mode() -> String {
 pub struct UiConfig {
     #[serde(default)]
     pub candidate: UiCandidateConfig,
+    /// 候选注释的命名模板与默认 / 详细两态（`[ui.comment]`）。
+    #[serde(default)]
+    pub comment: crate::comment_lib::UiCommentConfig,
     #[serde(default)]
     pub font: UiFontConfig,
     #[serde(default)]

@@ -8,6 +8,7 @@ pub mod by_layout;
 pub mod change_hook;
 pub mod charset_def;
 pub mod code_charset;
+pub mod comment_lib;
 pub mod compat_admin;
 /// 兼容规则表的性能基准（`#[ignore]`，见模块头部）。
 #[cfg(test)]

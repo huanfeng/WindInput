@@ -1595,6 +1595,15 @@ shadow = "follow"
 custom_x = 0
 custom_y = 0
 
+[ui.comment]
+# 候选注释总开关。关掉后候选不再显示注释，也不再为它预载反查编码、拆字等数据。
+enabled = true
+# 当前态：default 默认 | detail 详细。切换时写回（Alt 切换方式为 persist 时）。
+state = "default"
+# Alt 切换注释态的方式：off 关闭 | session 本次会话内(出厂) | persist 写回配置 | hold 按住期间
+alt_switch = "session"
+# 用户模板与分配写在 [[ui.comment.templates]] / [ui.comment.assign.*]，内置的见 system.comments.toml。
+
 [ui.font]
 family = ""
 path = ""

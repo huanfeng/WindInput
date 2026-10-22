@@ -162,6 +162,20 @@ const PUNCT_EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear", "clear_no
 /// 运行时却认它——或者反过来。
 pub(crate) const CODE_HINT_SOURCE_VALUES: &[&str] = &["off", "codetable", "shuangpin", "auto"];
 
+/// `ui.comment.assign.global` 的四格键名。⚠️ 与 [`crate::comment_lib::CommentCells`] 的字段名逐项对齐。
+pub(crate) const COMMENT_CELL_KEYS: &[&str] = &[
+    "default_vertical",
+    "default_horizontal",
+    "detail_vertical",
+    "detail_horizontal",
+];
+
+/// `ui.comment.state` 的值域。⚠️ 与 [`crate::comment_lib::CommentState`] 的 serde 名逐项对齐。
+pub(crate) const COMMENT_STATE_VALUES: &[&str] = &["default", "detail"];
+
+/// `ui.comment.alt_switch` 的值域。⚠️ 与 [`crate::comment_lib::AltSwitch`] 的 serde 名逐项对齐。
+pub(crate) const COMMENT_ALT_SWITCH_VALUES: &[&str] = &["off", "session", "persist", "hold"];
+
 /// `input.alt_commit` 的值域。⚠️ 与 [`wind_config::config::AltCommit::from_config`] 逐项对齐。
 pub(crate) const ALT_COMMIT_VALUES: &[&str] = &["off", "pinyin", "pinyin_plain", "comment"];
 
@@ -690,6 +704,14 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.candidate.comment_above", Bool),
     f("ui.candidate.auto_comment_dicts", Bool),
     f("ui.comment_dicts", StructList),
+    f("ui.comment.enabled", Bool),
+    f("ui.comment.state", Enum(COMMENT_STATE_VALUES)),
+    f("ui.comment.alt_switch", Enum(COMMENT_ALT_SWITCH_VALUES)),
+    f("ui.comment.templates", StructList),
+    f("ui.comment.assign.global", Map(COMMENT_CELL_KEYS)),
+    f("ui.comment.assign.type", Map(&[])),
+    f("ui.comment.assign.schema", Map(&[])),
+    f("ui.comment.assign.mode", Map(&[])),
     f("ui.candidate.index_labels", StrList),
     f("ui.candidate.flip_when_above", Bool),
     f("ui.candidate.swap_preedit_when_above", Bool),
@@ -1724,6 +1746,14 @@ mod tests {
         // 的整表覆盖语义纠缠。格式与示例写在 `[ui.toolbar]` 段的注释里（不是数组表，
         // 只是注释），用户照抄即可。
         "ui.toolbar.buttons",
+        // 候选注释的用户模板与分配：用户结构化内容，出厂为空。出厂模板与分配放在
+        // `system.comments.toml`——config.toml 的表逐键深合并，写进这里的出厂行会在用户
+        // 删掉后下次加载又被合并回来。
+        "ui.comment.templates",
+        "ui.comment.assign.global",
+        "ui.comment.assign.type",
+        "ui.comment.assign.schema",
+        "ui.comment.assign.mode",
     ];
 
     /// `data/config.toml` 必须显式列出注册表里的每一个键（豁免名单除外）。
