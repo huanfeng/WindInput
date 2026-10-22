@@ -2766,6 +2766,22 @@ mod eval_var_tests {
             .map(|v| v.to_string())
     }
 
+    /// 随包内置库经 merge + 解析挂上后，`${dict:en_zh}` 读到夹具里的释义。
+    #[test]
+    fn dict_var_reads_builtin() {
+        let co = coord("pinyin");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/comment_data");
+        let specs = crate::coordinator::merge_comment_dicts(&[], &co.system_comments.dicts, &[]);
+        let (paths, ids) = crate::coordinator::resolve_comment_mounts(&specs, Some(&fixture));
+        let mut rl = wind_reverse::ReverseLookup::default();
+        rl.reload_comments(&paths, None);
+        rl.set_comment_ids(&ids);
+        let mut c = word("apple");
+        c.comment.clear();
+        assert_eq!(comment(&co, &rl, "${dict:en_zh}", &c), "n. 苹果");
+        assert_eq!(comment(&co, &rl, "${dict:zh_en}", &word("猫")), "cat");
+    }
+
     // ───────────── `${dict_all}`（论坛 t282） ─────────────
 
     /// 挂两个注释库：英汉释义 + IT 术语，都收了 `configure`。

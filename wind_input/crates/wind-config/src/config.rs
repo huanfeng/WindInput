@@ -6371,6 +6371,10 @@ pub struct CommentDictSpec {
     /// 被删/停用/关掉了总开关）的空壳静默跳过，不告警：那是常态而非配置错误。
     #[serde(default)]
     pub auto: bool,
+    /// **随包内置项的引用条目**：与 `auto` 同形，按 `id` 去认领 `system.comments.toml` 的
+    /// `[[dicts]]`，只保留用户的 `enabled` 与位置；认领不到静默丢弃。
+    #[serde(default)]
+    pub builtin: bool,
     /// 限定生效的方案 id；**留空 = 全部方案**。
     ///
     /// 注释库常常是方案专属的：一份大英汉词典只在英文方案下有意义，挂在五笔方案上

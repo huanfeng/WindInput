@@ -4746,45 +4746,13 @@ impl Coordinator {
         let auto = self.auto_comment_sources();
         let specs = {
             let rt = self.rt();
-            merge_comment_dicts(&rt.config.ui.comment_dicts, &auto)
+            merge_comment_dicts(
+                &rt.config.ui.comment_dicts,
+                &self.system_comments.dicts,
+                &auto,
+            )
         };
-        let mut paths: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
-        // `${dict:id}` 用：每个库被哪些 id 指到（去重合并的那条的 id 也算它的）。
-        let mut ids: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
-        for eff in specs.iter().filter(|e| e.enabled) {
-            // 自动项的路径已经是解析好的绝对路径（检测时就得打开文件），手工项才需要按
-            // `schemas/` 逐层解析。两者到这里汇成同一条流水线。
-            let resolved = match &eff.kind {
-                EffectiveCommentKind::Auto { path } => Some(path.clone()),
-                EffectiveCommentKind::Manual { path } if path.is_empty() => continue,
-                EffectiveCommentKind::Manual { path } => {
-                    Config::resolve_schema_resource(data_dir.as_deref(), path)
-                }
-            };
-            let s = eff;
-            match resolved {
-                // 按**解析后路径**去重：两条 spec 写不同的相对路径却指向同一个文件时
-                // （`a.dict.yaml` 与 `./a.dict.yaml`，或用户目录与安装目录同名文件都被
-                // 解析到同一处），只加载一次。重复加载除了浪费解析时间，还会让优先级
-                // 判定变得依赖「第几次出现」——去重后靠前那条恒胜出。
-                Some(p) if paths.iter().any(|(q, _)| *q == p) => {
-                    info!("注释词库重复挂载，已跳过: {} (id={})", p.display(), s.id);
-                    if let Some((_, v)) = ids.iter_mut().find(|(q, _)| *q == p) {
-                        v.push(s.id.clone());
-                    }
-                }
-                Some(p) => {
-                    ids.push((p.clone(), vec![s.id.clone()]));
-                    paths.push((p, s.schemas.clone()));
-                }
-                // 只 warn 不中断：一个库路径写错不该让其余库一起不加载。
-                None => warn!(
-                    "注释词库不存在（用户/安装目录均未找到）: {} (id={})",
-                    s.display_path(),
-                    s.id
-                ),
-            }
-        }
+        let (paths, ids) = resolve_comment_mounts(&specs, data_dir.as_deref());
         let mut cur = self
             .comment_dict_paths
             .lock()
@@ -19059,15 +19027,99 @@ pub(crate) enum EffectiveCommentKind {
     Manual { path: String },
     /// 自动派生项，`path` 已是绝对路径。
     Auto { path: std::path::PathBuf },
+    /// 随包内置项，`path` 相对 `schemas/`，缺文件时只告警一次。
+    Builtin { path: String },
 }
 
 impl EffectiveCommentDict {
     /// 供日志用的路径串（两种形态各自的原样）。
     pub fn display_path(&self) -> String {
         match &self.kind {
-            EffectiveCommentKind::Manual { path } => path.clone(),
+            EffectiveCommentKind::Manual { path } | EffectiveCommentKind::Builtin { path } => {
+                path.clone()
+            }
             EffectiveCommentKind::Auto { path } => path.display().to_string(),
         }
+    }
+}
+
+/// 把最终挂载序列解析成 `(路径, 方案白名单)` 与 `${dict:id}` 用的 id 表；顺序即优先级。
+pub(crate) fn resolve_comment_mounts(
+    specs: &[EffectiveCommentDict],
+    data_dir: Option<&Path>,
+) -> (
+    Vec<(std::path::PathBuf, Vec<String>)>,
+    Vec<(std::path::PathBuf, Vec<String>)>,
+) {
+    let mut paths: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
+    // `${dict:id}` 用：每个库被哪些 id 指到（去重合并的那条的 id 也算它的）。
+    let mut ids: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
+    for eff in specs.iter().filter(|e| e.enabled) {
+        // 自动项的路径已经是解析好的绝对路径（检测时就得打开文件），手工项才需要按
+        // `schemas/` 逐层解析。两者到这里汇成同一条流水线。
+        let resolved = match &eff.kind {
+            EffectiveCommentKind::Auto { path } => Some(path.clone()),
+            EffectiveCommentKind::Manual { path } if path.is_empty() => continue,
+            EffectiveCommentKind::Manual { path } => {
+                Config::resolve_schema_resource(data_dir, path)
+            }
+            EffectiveCommentKind::Builtin { path } => {
+                let r = Config::resolve_schema_resource(data_dir, path);
+                if r.is_none() {
+                    warn_builtin_comment_missing(&eff.id, path);
+                }
+                r
+            }
+        };
+        let s = eff;
+        match resolved {
+            // 按**解析后路径**去重：两条 spec 写不同的相对路径却指向同一个文件时
+            // （`a.dict.yaml` 与 `./a.dict.yaml`，或用户目录与安装目录同名文件都被
+            // 解析到同一处），只加载一次。重复加载除了浪费解析时间，还会让优先级
+            // 判定变得依赖「第几次出现」——去重后靠前那条恒胜出。
+            Some(p) if paths.iter().any(|(q, _)| *q == p) => {
+                info!("注释词库重复挂载，已跳过: {} (id={})", p.display(), s.id);
+                if let Some((_, v)) = ids.iter_mut().find(|(q, _)| *q == p) {
+                    v.push(s.id.clone());
+                }
+            }
+            Some(p) => {
+                ids.push((p.clone(), vec![s.id.clone()]));
+                paths.push((p, s.schemas.clone()));
+            }
+            // 只 warn 不中断：一个库路径写错不该让其余库一起不加载。
+            None if matches!(s.kind, EffectiveCommentKind::Builtin { .. }) => {}
+            None => warn!(
+                "注释词库不存在（用户/安装目录均未找到）: {} (id={})",
+                s.display_path(),
+                s.id
+            ),
+        }
+    }
+    (paths, ids)
+}
+
+/// 内置注释词库缺文件：每个 id 进程内只告警一次（sync 在每次配置重载都会跑）。
+fn warn_builtin_comment_missing(id: &str, path: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut w = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if !w.iter().any(|x| x == id) {
+        w.push(id.to_string());
+        warn!("内置注释词库缺失，已跳过: {path} (id={id})");
+    }
+}
+
+fn builtin_effective(
+    b: &wind_config::comment_lib::BuiltinCommentDict,
+    enabled: bool,
+) -> EffectiveCommentDict {
+    EffectiveCommentDict {
+        id: b.id.clone(),
+        enabled,
+        schemas: Vec::new(),
+        kind: EffectiveCommentKind::Builtin {
+            path: b.path.clone(),
+        },
     }
 }
 
@@ -19076,8 +19128,9 @@ impl EffectiveCommentDict {
 /// - 配置里 `auto = true` 的条目是**引用空壳**：按 id 去 `auto` 里认领，认领到就用检测出
 ///   的 `path`/`schemas`，只保留用户的 `enabled` 与位置；认领不到则**静默丢弃**（词库被删、
 ///   被停用、或总开关关了——都是常态，不是配置错误）。
+/// - `builtin = true` 的条目同理，按 id 认领随包内置库（`builtin`），认领不到静默丢弃。
 /// - 其余条目原样保留为手工项。
-/// - `auto` 里没被任何空壳认领的，追加到**末尾**并默认启用。
+/// - 没被认领的内置项默认启用，追加在用户项之后；再其后是没被认领的 `auto` 项（同样默认启用）。
 ///
 /// # 为什么新自动项默认排末尾
 ///
@@ -19086,11 +19139,20 @@ impl EffectiveCommentDict {
 /// 之后它就有了空壳，位置从此归用户所有。
 pub(crate) fn merge_comment_dicts(
     configured: &[wind_config::CommentDictSpec],
+    builtin: &[wind_config::comment_lib::BuiltinCommentDict],
     auto: &[AutoCommentSource],
 ) -> Vec<EffectiveCommentDict> {
     let mut out: Vec<EffectiveCommentDict> = Vec::new();
     let mut claimed: Vec<&str> = Vec::new();
     for spec in configured {
+        if spec.builtin {
+            let Some(b) = builtin.iter().find(|b| b.id == spec.id) else {
+                continue;
+            };
+            claimed.push(b.id.as_str());
+            out.push(builtin_effective(b, spec.enabled));
+            continue;
+        }
         if spec.auto {
             let Some(a) = auto.iter().find(|a| a.id == spec.id) else {
                 continue;
@@ -19114,6 +19176,9 @@ pub(crate) fn merge_comment_dicts(
                 path: spec.path.clone(),
             },
         });
+    }
+    for b in builtin.iter().filter(|b| !claimed.contains(&b.id.as_str())) {
+        out.push(builtin_effective(b, true));
     }
     for a in auto.iter().filter(|a| !claimed.contains(&a.id.as_str())) {
         out.push(EffectiveCommentDict {
@@ -19167,12 +19232,91 @@ mod comment_dict_merge_tests {
         v.iter().map(|e| e.id.as_str()).collect()
     }
 
+    fn builtin_dicts() -> Vec<wind_config::comment_lib::BuiltinCommentDict> {
+        ["en_zh", "zh_en"]
+            .iter()
+            .map(|id| wind_config::comment_lib::BuiltinCommentDict {
+                id: id.to_string(),
+                label: id.to_string(),
+                path: format!("comments/{id}.txt"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn builtin_dicts_enabled_by_default() {
+        let out = merge_comment_dicts(&[], &builtin_dicts(), &[]);
+        assert_eq!(ids(&out), ["en_zh", "zh_en"]);
+        assert!(out.iter().all(|e| e.enabled));
+    }
+
+    #[test]
+    fn builtin_sits_between_manual_and_auto() {
+        let cfg = [manual("mine", "comments/mine.txt", true)];
+        let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
+        let out = merge_comment_dicts(&cfg, &builtin_dicts(), &a);
+        assert_eq!(
+            ids(&out),
+            ["mine", "en_zh", "zh_en", "auto:pinyin/frost.dict.yaml"]
+        );
+    }
+
+    #[test]
+    fn user_can_disable_builtin() {
+        let cfg = [
+            CommentDictSpec {
+                id: "zh_en".into(),
+                builtin: true,
+                enabled: false,
+                ..Default::default()
+            },
+            manual("mine", "comments/mine.txt", true),
+        ];
+        let out = merge_comment_dicts(&cfg, &builtin_dicts(), &[]);
+        assert_eq!(ids(&out), ["zh_en", "mine", "en_zh"]);
+        assert!(!out[0].enabled);
+        assert!(out[2].enabled);
+    }
+
+    #[test]
+    fn unknown_builtin_shell_is_dropped() {
+        let cfg = [CommentDictSpec {
+            id: "gone".into(),
+            builtin: true,
+            ..Default::default()
+        }];
+        assert!(merge_comment_dicts(&cfg, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn missing_builtin_dict_is_skipped() {
+        //! 缺文件的内置库跳过，其余库照常挂载。
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/comment_data");
+        let mut dicts = builtin_dicts();
+        dicts.insert(
+            0,
+            wind_config::comment_lib::BuiltinCommentDict {
+                id: "absent".into(),
+                label: String::new(),
+                path: "comments/absent.txt".into(),
+            },
+        );
+        let specs = merge_comment_dicts(&[], &dicts, &[]);
+        for _ in 0..2 {
+            let (paths, ids) = resolve_comment_mounts(&specs, Some(&fixture));
+            assert_eq!(paths.len(), 2);
+            assert_eq!(ids.len(), 2);
+            assert!(ids.iter().all(|(_, v)| v[0] != "absent"));
+        }
+    }
+
     #[test]
     fn new_auto_sources_append_after_manual_entries() {
         //! 没被引用过的自动项排在**末尾** —— 装个新方案不该把用户排好的第一优先级挤下去。
         let cfg = [manual("en", "comments/en.dict.yaml", true)];
         let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
-        let out = merge_comment_dicts(&cfg, &a);
+        let out = merge_comment_dicts(&cfg, &[], &a);
         assert_eq!(ids(&out), ["en", "auto:pinyin/frost.dict.yaml"]);
         assert!(out[1].enabled, "新自动项默认启用");
         assert_eq!(out[1].schemas, ["pinyin"], "白名单取声明它的方案");
@@ -19187,7 +19331,7 @@ mod comment_dict_merge_tests {
             manual("en", "comments/en.dict.yaml", true),
         ];
         let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
-        let out = merge_comment_dicts(&cfg, &a);
+        let out = merge_comment_dicts(&cfg, &[], &a);
         assert_eq!(
             ids(&out),
             ["auto:pinyin/frost.dict.yaml", "en"],
@@ -19210,7 +19354,7 @@ mod comment_dict_merge_tests {
             ..Default::default()
         }];
         let a = [auto("pinyin/frost.dict.yaml", &["pinyin", "wubi_pinyin"])];
-        let out = merge_comment_dicts(&cfg, &a);
+        let out = merge_comment_dicts(&cfg, &[], &a);
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].kind,
@@ -19234,7 +19378,7 @@ mod comment_dict_merge_tests {
             shell("auto:gone.dict.yaml", true),
             manual("en", "comments/en.dict.yaml", true),
         ];
-        let out = merge_comment_dicts(&cfg, &[]);
+        let out = merge_comment_dicts(&cfg, &[], &[]);
         assert_eq!(ids(&out), ["en"]);
     }
 
@@ -19246,7 +19390,7 @@ mod comment_dict_merge_tests {
             manual("a", "comments/a.dict.yaml", true),
             manual("b", "comments/b.dict.yaml", false),
         ];
-        let out = merge_comment_dicts(&cfg, &[]);
+        let out = merge_comment_dicts(&cfg, &[], &[]);
         assert_eq!(ids(&out), ["a", "b"]);
         assert!(out[0].enabled && !out[1].enabled);
         assert_eq!(

@@ -42,6 +42,8 @@ pub trait WebDataHost {
     fn sync_comment_dicts(&self);
     /// 词库自带 `comment` 列自动派生出的注释源（设置页据此列出只读条目）。
     fn auto_comment_sources(&self) -> Vec<crate::coordinator::AutoCommentSource>;
+    /// 随包内置注释词库清单（`system.comments.toml` 的 `[[dicts]]`）。
+    fn system_comment_dicts(&self) -> Vec<wind_config::comment_lib::BuiltinCommentDict>;
     fn sync_chaizi_assets(&self);
     /// 设置页「设为当前」直接切了引擎：通知宿主那是全局意图（按应用方案的全局方案随之更新），
     /// 见 `Coordinator::note_global_schema_set`。
@@ -266,6 +268,9 @@ impl WebDataHost for Coordinator {
     }
     fn auto_comment_sources(&self) -> Vec<crate::coordinator::AutoCommentSource> {
         Coordinator::auto_comment_sources(self)
+    }
+    fn system_comment_dicts(&self) -> Vec<wind_config::comment_lib::BuiltinCommentDict> {
+        self.system_comments.dicts.clone()
     }
     fn sync_chaizi_assets(&self) {
         Coordinator::sync_chaizi_assets(self);

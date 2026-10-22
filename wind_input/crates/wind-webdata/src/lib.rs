@@ -885,7 +885,12 @@ pub trait WebDataRpc: WebDataHost {
                 }),
         )
         .collect();
-        Ok(json!({ "auto": auto, "files": files }))
+        let builtin: Vec<Value> = self
+            .system_comment_dicts()
+            .iter()
+            .map(|b| json!({ "id": b.id, "label": b.label, "rel": b.path, "origin": "builtin" }))
+            .collect();
+        Ok(json!({ "auto": auto, "builtin": builtin, "files": files }))
     }
 
     /// emoji 附加模块清单（内置 + 用户放进 `emoji/` 的 OpenCC 表），供设置页对话框列出。
