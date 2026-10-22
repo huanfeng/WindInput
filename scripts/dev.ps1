@@ -482,6 +482,15 @@ function Download-Dicts {
     Get-Dict "$wubiBase/wubi86_jidian_extra.dict.yaml"          "$rimeWubi\wubi86_jidian_extra.dict.yaml"          "扩展词库"   | Out-Null
     Get-Dict "$wubiBase/wubi86_jidian_extra_district.dict.yaml" "$rimeWubi\wubi86_jidian_extra_district.dict.yaml" "行政区域"   | Out-Null
 
+    # 中英释义底表: ECDICT(MIT) 英->中, CC-CEDICT(CC BY-SA 4.0) 中->英; 由 scripts\comment_dicts\build.py
+    # 按系统词表裁剪后生成内置注释词库 (见 Assemble-Data), 许可见 NOTICE.md。ECDICT 固定到下面的提交;
+    # CC-CEDICT 的 MDBG 导出是每日重生成的滚动快照、无法固定, 快照日期写进 zh_en.txt 头注释。
+    # ⚠ dev.sh 的 download_dicts/assemble_data、mac/dev.sh 的同名函数是同一件事, 改一边要同步另外两边。
+    New-Item -ItemType Directory -Path "$CacheDir\ecdict", "$CacheDir\cedict" -Force | Out-Null
+    Gray "ECDICT / CC-CEDICT (中英释义):"
+    Get-Dict "https://raw.githubusercontent.com/skywind3000/ECDICT/bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b/ecdict.csv" "$CacheDir\ecdict\ecdict.csv" "英汉词典 ~66MB" | Out-Null
+    Get-Dict "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" "$CacheDir\cedict\cedict_1_0_ts_utf-8_mdbg.txt.gz" "汉英词典" | Out-Null
+
     # Unicode CLDR emoji 中文注解 + emoji 白名单。不参与常规构建 —— emoji 命名表
     # (custom_emoji_named.txt) 已入库, 这些原始档只在需要重新生成它时用到:
     #   cargo run -p wind-tools --bin gen_emoji_names -- --cldr .cache\cldr `
@@ -594,6 +603,19 @@ function Remove-UnshippedImports ([string]$main) {
 }
 
 # 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 $outdir\data\
+# 找可用的 Python 3: 返回命令数组 (如 @('python') / @('py','-3')), 没有则 $null。
+# 用 --version 验证而不是只看 Get-Command: 未装 Python 的 Windows 上 python 是指向应用商店的占位 stub。
+function Find-Python3 {
+    foreach ($c in @(@('python'), @('py', '-3'), @('python3'))) {
+        if (-not (Get-Command $c[0] -ErrorAction SilentlyContinue)) { continue }
+        $rest = @(); if ($c.Count -gt 1) { $rest = $c[1..($c.Count - 1)] }
+        $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try { $v = & $c[0] @rest --version 2>&1 | Out-String } catch { $v = "" } finally { $ErrorActionPreference = $old }
+        if ($v -match '^Python 3') { return $c }
+    }
+    return $null
+}
+
 function Assemble-Data ([string]$outdir = $BuildDevDir) {
     $data      = "$outdir\data"
     $schemas   = "$data\schemas"
@@ -725,6 +747,32 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
             Copy-FrostOthers "$rimeFrost\opencc\others.txt" "$data\emoji\frost_others.txt"
         }
     } else { Warn "缺 .cache\rime-frost\opencc\, 白霜 emoji 模块不可用 (运行 gen-data 下载)" }
+
+    # 9. 内置中英释义注释词库 (Python 脚本 scripts\comment_dicts\build.py): en_zh 按英文词表、
+    #    zh_en 按拼音/五笔词表裁剪, 产物只进 build 目录、不入版本库。AI 补齐的源数据
+    #    data\comments-src\zh_en_ai.tsv 入库, 随第 1 步一并复制进来, 用完剥掉不随包分发。
+    #    缺上游或缺 Python 只是释义注释不可用, 用 Warn 不中断构建。
+    $cdict   = "$ProductRoot\scripts\comment_dicts\build.py"
+    $ecdict  = "$CacheDir\ecdict\ecdict.csv"
+    $cedict  = "$CacheDir\cedict\cedict_1_0_ts_utf-8_mdbg.txt.gz"
+    $py      = Find-Python3
+    if (-not $py) {
+        Warn "缺 Python 3 (python / py -3), 中英释义词库不可用"
+    } elseif ((Test-Path $ecdict) -and (Test-Path $cedict)) {
+        Gray "生成中英释义注释词库 (comment_dicts) ..."
+        New-Item -ItemType Directory -Path "$schemas\comments" -Force | Out-Null
+        $pyRest = @(); if ($py.Count -gt 1) { $pyRest = $py[1..($py.Count - 1)] }
+        $aiArgs = @(); if (Test-Path "$data\comments-src\zh_en_ai.tsv") { $aiArgs = @("--ai", "$data\comments-src\zh_en_ai.tsv") }
+        # build.py 把进度写到 stderr; 全局 $ErrorActionPreference=Stop 下 PS5.1 会把它当错误, 此处临时放宽。
+        $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try {
+            & $py[0] @pyRest -I $cdict en-zh --ecdict $ecdict --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" --out "$schemas\comments\en_zh.txt"
+            if ($LASTEXITCODE -ne 0) { Warn "英→中释义词库生成失败" }
+            & $py[0] @pyRest -I $cdict zh-en --cedict $cedict @aiArgs --words "$pinyinCn\base.dict.yaml" "$pinyinCn\ext.dict.yaml" "$pinyin\ext\idiom.dict.yaml" "$schemas\wubi86\wubi86_jidian.dict.yaml" --out "$schemas\comments\zh_en.txt"
+            if ($LASTEXITCODE -ne 0) { Warn "中→英释义词库生成失败" }
+        } finally { $ErrorActionPreference = $old }
+    } else { Warn "缺 .cache\ecdict 或 .cache\cedict, 中英释义词库不可用 (运行 gen-data 下载)" }
+    if (Test-Path "$data\comments-src") { Remove-Item -Recurse -Force "$data\comments-src" }
 
     $cnt = (Get-ChildItem $data -Recurse -File).Count
     Gray "data/ 组装完成 ($cnt 文件)"

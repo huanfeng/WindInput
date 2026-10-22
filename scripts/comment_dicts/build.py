@@ -200,9 +200,22 @@ def render(entries):
     return "".join(f"{w}\t{entries[w]}\n" for w in sorted(entries))
 
 
-def write_entries(entries, out):
+def write_entries(entries, out, header=""):
     with open(out, "w", encoding="utf-8", newline="\n") as f:
+        f.write(header)
         f.write(render(entries))
+
+
+def cedict_header(path):
+    """CC-CEDICT 文件头的 `#!` 行（许可、日期、时间戳），写进产物注释行以便追溯快照。"""
+    lines = []
+    with open_text(path) as f:
+        for line in f:
+            if not line.startswith("#"):
+                break
+            if line.startswith("#!"):
+                lines.append("# CC-CEDICT " + line[2:].strip() + "\n")
+    return "".join(lines)
 
 
 def pct(n, total):
@@ -233,7 +246,7 @@ def cmd_zh_en(a):
     words = zh_words(a.words)
     cedict = load_cedict(a.cedict, set(words))
     entries = build_zh_en(cedict, load_ai(a.ai), words)
-    write_entries(entries, a.out)
+    write_entries(entries, a.out, cedict_header(a.cedict))
     print(f"zh_en: {len(entries)}/{len(words)} -> {a.out}", file=sys.stderr)
 
 

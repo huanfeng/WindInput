@@ -489,12 +489,13 @@ download_dicts() {
     download_file "$OPENCC_BASE/HKVariants.txt"   "$opencc/HKVariants.txt"   "香港字形"
 
     # 中英释义底表：ECDICT(MIT) 英→中，CC-CEDICT(CC BY-SA 4.0) 中→英；由 scripts/comment_dicts/build.py
-    # 按系统词表裁剪后生成内置注释词库（见 assemble_data），许可见 NOTICE.md。同其它上游一样跟随
-    # 默认分支、未固定提交；CC-CEDICT 的 MDBG 导出是每日重生成的滚动快照。
+    # 按系统词表裁剪后生成内置注释词库（见 assemble_data），许可见 NOTICE.md。ECDICT 固定到下面
+    # 的提交；CC-CEDICT 的 MDBG 导出是每日重生成的滚动快照、无法固定，快照日期写进 zh_en.txt 头注释。
+    # ⚠ dev.ps1 的 Download-Dicts/Assemble-Data、mac/dev.sh 的 download_dicts/assemble_data 是同一件事，改一边要同步另外两边。
     local ecdict="$CACHE_DIR/ecdict" cedict="$CACHE_DIR/cedict"
     mkdir -p "$ecdict" "$cedict"
     gray "ECDICT / CC-CEDICT (中英释义):"
-    download_file "https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv" \
+    download_file "https://raw.githubusercontent.com/skywind3000/ECDICT/bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b/ecdict.csv" \
         "$ecdict/ecdict.csv" "英汉词典 ~66MB"
     download_file "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" \
         "$cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" "汉英词典"

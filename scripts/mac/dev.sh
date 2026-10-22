@@ -812,6 +812,16 @@ download_dicts() {
         get_dict "$wubibase/$f.dict.yaml" "$wubi/$f.dict.yaml"
     done
 
+    # 中英释义底表: ECDICT(MIT) 英→中, CC-CEDICT(CC BY-SA 4.0) 中→英; 由 scripts/comment_dicts/build.py
+    # 按系统词表裁剪后生成内置注释词库 (见 assemble_data), 许可见 NOTICE.md。ECDICT 固定到下面的提交;
+    # CC-CEDICT 的 MDBG 导出是每日重生成的滚动快照、无法固定, 快照日期写进 zh_en.txt 头注释。
+    # ⚠ scripts/dev.sh 的 download_dicts/assemble_data、dev.ps1 的同名函数是同一件事, 改一边要同步另外两边。
+    info "ECDICT / CC-CEDICT (中英释义):"
+    get_dict "https://raw.githubusercontent.com/skywind3000/ECDICT/bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b/ecdict.csv" \
+        "$CACHE_DIR/ecdict/ecdict.csv" "英汉词典 ~66MB"
+    get_dict "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" \
+        "$CACHE_DIR/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" "汉英词典"
+
     # 辅助码表: 拼音候选的字形二次筛选 (默认关闭, 见 schema.pinyin.aux_code)。
     # 小鹤/自然码零转换; 笔画表由 gen_aux_code 从 rime-stroke 的 .dict.yaml 转换 + 字集裁剪。
     # ⚠️ rime-stroke 是 LGPL-3.0 —— 同 rime-frost 处理: 只下载不入库, 见 NOTICE.md。
@@ -997,6 +1007,34 @@ assemble_data() {
     else
         warn "缺 .cache/aux-code/, 辅助码不可用 (先跑 gd 下载)"
     fi
+
+    # 9. 内置中英释义注释词库 (Python 脚本 scripts/comment_dicts/build.py): en_zh 按英文词表、
+    # zh_en 按拼音/五笔词表裁剪, 产物只进 build 目录、不入版本库。AI 补齐的源数据
+    # data/comments-src/zh_en_ai.tsv 入库, 随第 1 步一并复制进来, 用完剥掉不随包分发。
+    # 缺上游或缺 python3 只是释义注释不可用, 用 warn 不中断构建。
+    local cdict="$REPO_DIR/scripts/comment_dicts/build.py"
+    local ecdict_csv="$CACHE_DIR/ecdict/ecdict.csv"
+    local cedict_gz="$CACHE_DIR/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "缺 python3, 中英释义词库不可用"
+    elif [[ -f "$ecdict_csv" && -f "$cedict_gz" ]]; then
+        info "生成中英释义注释词库 (comment_dicts) ..."
+        mkdir -p "$data/schemas/comments"
+        local ai_args=()
+        [[ -f "$data/comments-src/zh_en_ai.tsv" ]] && ai_args=(--ai "$data/comments-src/zh_en_ai.tsv")
+        python3 -I "$cdict" en-zh --ecdict "$ecdict_csv" \
+            --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
+            --out "$data/schemas/comments/en_zh.txt" \
+            || warn "英→中释义词库生成失败"
+        python3 -I "$cdict" zh-en --cedict "$cedict_gz" ${ai_args[@]+"${ai_args[@]}"} \
+            --words "$pinyin_cn/base.dict.yaml" "$pinyin_cn/ext.dict.yaml" \
+                    "$pinyin/ext/idiom.dict.yaml" "$data/schemas/wubi86/wubi86_jidian.dict.yaml" \
+            --out "$data/schemas/comments/zh_en.txt" \
+            || warn "中→英释义词库生成失败"
+    else
+        warn "缺 .cache/ecdict 或 .cache/cedict, 中英释义词库不可用 (先跑 gd 下载)"
+    fi
+    rm -rf "$data/comments-src"
 
     info "data/ 组装完成 ($(find "$data" -type f | wc -l | tr -d ' ') 文件)"
     return 0

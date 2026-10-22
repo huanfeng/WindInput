@@ -71,6 +71,12 @@ class BuildTest(unittest.TestCase):
         cedict = build.load_cedict(write(self.d, "c.txt", CEDICT))
         self.assertNotIn("旧", cedict)
 
+    def test_cedict_header_lines_become_comments(self):
+        self.assertEqual(
+            build.cedict_header(write(self.d, "c.txt", "#! date=2026-10-21\n#! time=1\n工 工 [gong1] /work/\n")),
+            "# CC-CEDICT date=2026-10-21\n# CC-CEDICT time=1\n",
+        )
+
     def test_cedict_gz(self):
         p = os.path.join(self.d, "c.txt.gz")
         with gzip.open(p, "wt", encoding="utf-8") as f:
