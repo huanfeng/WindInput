@@ -1022,6 +1022,10 @@ impl MessageHandler for Coordinator {
             if !Self::has_input_session(&st) || st.assoc_active() {
                 st.grid_keep = false;
             }
+            // 注释翻转只跟候选窗走：联想窗里翻的要留着（联想入口另行清掉上一次的）。
+            if !Self::has_input_session(&st) {
+                st.comment_session_flip = false;
+            }
         }
 
         // 方案级行为覆盖的**兜底**同步点：代际未变时是一次 atomic load + 比较，可忽略。

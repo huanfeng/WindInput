@@ -446,6 +446,13 @@ impl OverlayPreeditForms {
     }
 }
 
+/// Alt 键自按下起的追踪：按下时刻与「期间是否按过别的键」。
+#[allow(dead_code)]
+pub(crate) struct AltTrack {
+    pub down_at: std::time::Instant,
+    pub dirty: bool,
+}
+
 /// ⚠️ `Default` **只在测试构建下存在**（`cfg_attr(test, ...)`）。
 ///
 /// 生产侧一律走 `Coordinator::new` 里的显式构造：那里每个字段的初值都有来历
@@ -702,6 +709,14 @@ pub(crate) struct State {
     /// 组合结束的出口有几十处，不逐个清：每次按键开头若已没有候选，就说明是一次新组合，在
     /// `handle_key_event` 开头清掉。
     pub(crate) grid_keep: bool,
+    /// 注释态的「仅本次候选窗」翻转：与持久态（`ui.comment.state`）异或得当前态。
+    /// 组合结束即清（`cancel_session`、进联想、`handle_key_event` 开头无会话时）。
+    pub(crate) comment_session_flip: bool,
+    /// 注释态的「按住 Alt」翻转：按住期间为真，与上面那份各自独立地异或。
+    pub(crate) comment_hold_flip: bool,
+    /// Alt 单击 / 按住的判定中间态：`Some` = Alt 已按下、尚未松开。
+    #[allow(dead_code)]
+    pub(crate) alt_track: Option<AltTrack>,
     /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
     /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
     /// 右键、置顶删除就都不用知道筛选的存在。重建候选的几处（扩容、末页放宽）之后要重新套一次
@@ -3062,6 +3077,9 @@ impl Coordinator {
                 current_page: 0,
                 grid_top: None,
                 grid_keep: false,
+                comment_session_flip: false,
+                comment_hold_flip: false,
+                alt_track: None,
                 grid_tab: wind_ui_types::GridTab::All,
                 grid_full: Vec::new(),
                 grid_tab_anchor: None,
@@ -6206,6 +6224,7 @@ impl Coordinator {
     /// 键解释器，是另一层的事。
     pub(crate) fn cancel_session(&self, state: &mut State) -> KeyAction {
         self.note_word_boundary();
+        state.comment_session_flip = false;
         match state.active {
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),

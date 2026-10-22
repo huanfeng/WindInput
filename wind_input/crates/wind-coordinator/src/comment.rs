@@ -1075,12 +1075,45 @@ impl crate::coordinator::Coordinator {
             .to_string()
     }
 
-    /// 注释当前态。现只读持久态。
+    /// 注释当前态：持久态 ⊕ 本次候选窗翻转 ⊕ 按住 Alt 翻转。
     pub(crate) fn effective_comment_state(
         cfg: &Config,
-        _state: &State,
+        state: &State,
     ) -> wind_config::comment_lib::CommentState {
-        cfg.ui.comment.state
+        use wind_config::comment_lib::CommentState;
+        let persist = cfg.ui.comment.state;
+        if state.comment_session_flip == state.comment_hold_flip {
+            return persist;
+        }
+        match persist {
+            CommentState::Default => CommentState::Detail,
+            CommentState::Detail => CommentState::Default,
+        }
+    }
+
+    /// 改持久态并写回用户层 `ui.comment.state`；只换内存配置、不重载，随后重绘。
+    pub(crate) fn set_comment_state(
+        &self,
+        state: &mut State,
+        to: wind_config::comment_lib::CommentState,
+    ) -> anyhow::Result<()> {
+        use wind_config::comment_lib::CommentState;
+        let value = match to {
+            CommentState::Default => "default",
+            CommentState::Detail => "detail",
+        };
+        Config::set_user_string(&["ui", "comment", "state"], value)?;
+        self.refresh_config_in_memory(|c| c.ui.comment.state = to);
+        self.notify_ui_update(state);
+        Ok(())
+    }
+
+    /// 翻转「仅本次候选窗」的注释态。只重绘、不重新查询。
+    pub(crate) fn toggle_comment_session(&self, state: &mut State) {
+        state.comment_session_flip = !state.comment_session_flip;
+        if !state.candidates.is_empty() {
+            self.notify_ui_update(state);
+        }
     }
 
     /// overlay 反查模式（临时拼音 / 快捷输入）：码表用户借拼音反查编码的场景。
