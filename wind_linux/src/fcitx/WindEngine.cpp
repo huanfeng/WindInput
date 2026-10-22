@@ -1001,7 +1001,8 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     if (event.isRelease()) {
         // 组字中的 Alt 松开：转发给服务，回包 Consumed 才吃（否则宿主照常看到，如激活菜单栏）。
         if (uint32_t avk = altVK(sym); avk != 0) {
-            const bool forward = altHold_.shouldForwardUp(router_.hasComposition());
+            const bool forward =
+                altHold_.shouldForwardUp(altInputSession(router_.hasComposition(), candidatesVisible_));
             const uint32_t mods = statesToModifiers(states) | altHold_.stickyMods();
             altHold_.reset();
             if (forward && sendAltEvent(ic, avk, KEY_EVENT_UP, mods, statesToToggles(states))) {
@@ -1030,7 +1031,7 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     // Shift / Ctrl / Super 粘到 Alt 事件的修饰位上（见 AltHold）。
     altHold_.noteKey(sym, states);
     if (uint32_t avk = altVK(sym); avk != 0) {
-        const bool forward = router_.hasComposition();
+        const bool forward = altInputSession(router_.hasComposition(), candidatesVisible_);
         altHold_.onAltDown(forward);
         if (forward && sendAltEvent(ic, avk, KEY_EVENT_DOWN, statesToModifiers(states) | altHold_.stickyMods(),
                                     statesToToggles(states))) {
@@ -1207,6 +1208,7 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
         hideCandidate();
         return;
     }
+    candidatesVisible_ = true;
     if (!shm_.isOpen() && !shm_.open(shmName())) {
         WIND_WARN() << "打不开候选窗共享内存 " << shmName() << "：" << shm_.lastError();
         return;
@@ -1245,6 +1247,7 @@ void WindEngine::hideAllWayland()
 
 void WindEngine::hideCandidate()
 {
+    candidatesVisible_ = false;
     panel_->hide();
 #ifdef WIND_HAVE_WAYLAND
     if (wlPanel_) {

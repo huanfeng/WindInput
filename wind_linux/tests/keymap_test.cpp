@@ -135,6 +135,11 @@ void TestToggleTap()
 
 void TestAltHold()
 {
+    CASE("组字中 = 有组合或候选窗开着（联想窗组合为空）");
+    CHECK(altInputSession(true, false));
+    CHECK(altInputSession(false, true));
+    CHECK(!altInputSession(false, false));
+
     CASE("Alt_L / Alt_R → VK_LMENU / VK_RMENU");
     CHECK_EQ(altVK(0xffe9), 0xA4u);
     CHECK_EQ(altVK(0xffea), 0xA5u);

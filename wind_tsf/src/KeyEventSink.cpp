@@ -379,6 +379,9 @@ bool CKeyEventSink::_IsLogDumpHotkey(WPARAM vk)
 STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+    // 别的键来了：上一发 Alt 的缓存回包作废（见 AltReplyCache）。
+    if (wind::altkey::MapAltVk(wParam, lParam) == 0)
+        _altReply.Clear();
 
     // 透传上报：本函数有 40+ 个 return，逐个接线必漏；守卫在**出口**统一按最终的
     // `*pfEaten` 判。没吃下 = 这次输入服务端看不见，智能符号的 press2 判定要知道。
@@ -1124,6 +1127,9 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     if (_pTextService->IsPasswordSuppressActive())
         return S_OK;
 
+    // 跳过 OnTestKeyDown 的宿主（QQ 一类）也要记 Alt 按住期间的粘滞修饰位；两边都记是幂等的。
+    _altHold.NoteKey((uint32_t)wParam, CHotkeyManager::GetCurrentModifiers());
+
     // 组字中的 Alt：沿用 OnTestKeyDown 那一发的回包（宿主跳过 test 时才在这里转发）。
     {
         BOOL altEaten = FALSE;
@@ -1754,6 +1760,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+    if (wind::altkey::MapAltVk(wParam, lParam) == 0)
+        _altReply.Clear();
 
     // 合成提交触发键的 keyup 半程：down 已经在 OnTestKeyDown/OnKeyDown 里处理完毕，
     // 这里只需干净吃掉，不流入下面任何 keyup 逻辑（toggle/CapsLock 判据……）。
@@ -2308,13 +2316,12 @@ BOOL CKeyEventSink::_TryForwardAlt(WPARAM wParam, LPARAM lParam, uint8_t eventTy
         return FALSE;
     const bool isDown = (eventType == KEY_EVENT_DOWN);
 
-    if (!inTest && _altForwardedInTest.pending && _altForwardedInTest.eventType == eventType)
+    bool cached = false;
+    if (_altReply.TryReuse(inTest != FALSE, eventType, &cached))
     {
-        *pEaten = _altForwardedInTest.eaten;
-        _altForwardedInTest = {};
+        *pEaten = cached ? TRUE : FALSE;
         return TRUE;
     }
-    _altForwardedInTest = {};
 
     const bool composing = _HasInputSession() != FALSE;
     bool forward;
@@ -2343,7 +2350,7 @@ BOOL CKeyEventSink::_TryForwardAlt(WPARAM wParam, LPARAM lParam, uint8_t eventTy
     WIND_LOG_DEBUG_FMT(L"comment_alt %ls: vk=0x%02X mods=0x%04X eaten=%d\n",
                        isDown ? L"down" : L"up", altVk, mods, eaten ? 1 : 0);
     if (inTest)
-        _altForwardedInTest = {true, eventType, eaten};
+        _altReply.Store(eventType, eaten != FALSE);
     *pEaten = eaten;
     return TRUE;
 }

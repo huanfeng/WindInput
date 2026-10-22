@@ -157,6 +157,8 @@ private:
     ResponseRouter router_;
     ToggleTapDetector tap_;
     AltHold altHold_;
+    /// 候选窗是否开着（服务端推来可见帧时置位，hideCandidate 清）。Alt 转发判据要它：联想窗组合为空。
+    bool candidatesVisible_ = false;
     CapsLockTracker caps_;
     uint16_t keySeq_ = 0;
     bool lastReportedSecure_ = false;

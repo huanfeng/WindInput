@@ -536,14 +536,9 @@ private:
     std::atomic<bool> _ctrlSpaceToggleEnabled{wind::ctrlspace::kDefaultEnabled};
 
     // 组字中 Alt 的转发（注释态切换，判据见 AltKey.h）。_altHold 记这次按住的粘滞修饰位；
-    // _altForwardedInTest 是 OnTest* 已转发的那一发的回包，OnKey* 沿用、不重发。
+    // _altReply 是 OnTest* 已转发的那一发的回包，OnKey* 沿用、不重发。
     wind::altkey::AltHold _altHold;
-    struct AltForwarded
-    {
-        bool pending = false;
-        uint8_t eventType = 0;
-        BOOL eaten = FALSE;
-    } _altForwardedInTest;
+    wind::altkey::AltReplyCache _altReply;
     // 是 Alt 且该转发就转发，*pEaten 为回包（Consumed ⇒ TRUE）；返回是否转发了。
     BOOL _TryForwardAlt(WPARAM wParam, LPARAM lParam, uint8_t eventType, BOOL inTest, BOOL* pEaten);
 

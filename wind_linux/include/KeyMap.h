@@ -75,6 +75,12 @@ private:
 /// Alt_L / Alt_R → VK_LMENU / VK_RMENU；其它键返回 0。
 uint32_t altVK(uint32_t keysym);
 
+/// Alt 转发判据里的「组字中」：有组合，或候选窗开着（联想窗组合为空、候选仍在，也能切注释）。
+inline bool altInputSession(bool hasComposition, bool candidatesVisible)
+{
+    return hasComposition || candidatesVisible;
+}
+
 /// 组字中 Alt 转发给服务（切换注释态）的一次按住记账。协议权威在协调器 `handle_comment_alt`：
 /// 只在组字中转发 Alt 的按下与松开（0xA4 / 0xA5），修饰位带上这次按住期间按过的
 /// Shift / Ctrl / Super（粘滞，按过就一直带到松开）；吃不吃看回包。

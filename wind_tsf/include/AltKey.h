@@ -102,5 +102,47 @@ private:
     uint32_t _sticky = 0;
 };
 
+/// OnTest* 已转发的那一发 Alt 的回包，供随后的 OnKey* 沿用（eventType 与 KEY_EVENT_DOWN/UP 同值）。
+///
+/// - OnKey*：同向的缓存在就沿用并消费，不重发（Chrome 一类宿主不吃也照调 OnKey*）。
+/// - OnTest*：同一次松开被问两遍时沿用、不消费（OnKeyUp 还要用）；按下不复用——自动连发
+///   与重复询问分不开，服务端对连发本就幂等。
+/// - 其它键的 OnTest* 一律清掉，免得只调 OnKey* 的宿主捡到陈旧回包。
+class AltReplyCache
+{
+public:
+    static constexpr uint8_t kDown = 0;
+    static constexpr uint8_t kUp = 1;
+
+    /// 命中则 *eaten 为缓存的回包。未命中时清掉缓存，调用方照常转发。
+    bool TryReuse(bool inTest, uint8_t eventType, bool* eaten)
+    {
+        const bool hit = _pending && _eventType == eventType && (!inTest || eventType == kUp);
+        if (hit)
+        {
+            *eaten = _eaten;
+            if (!inTest)
+                Clear();
+            return true;
+        }
+        Clear();
+        return false;
+    }
+
+    void Store(uint8_t eventType, bool eaten)
+    {
+        _pending = true;
+        _eventType = eventType;
+        _eaten = eaten;
+    }
+
+    void Clear() { *this = AltReplyCache{}; }
+
+private:
+    bool _pending = false;
+    uint8_t _eventType = 0;
+    bool _eaten = false;
+};
+
 } // namespace altkey
 } // namespace wind

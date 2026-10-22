@@ -13,6 +13,11 @@ public struct OptionKeyHold {
 
     public init() {}
 
+    /// 转发判据里的「组字中」: 有组合, 或候选窗开着 (联想窗组合为空、候选仍在, 也能切注释)。
+    public static func inputSession(hasComposition: Bool, candidatesVisible: Bool) -> Bool {
+        hasComposition || candidatesVisible
+    }
+
     /// ⌥ 按下 (flagsChanged 没有自动连发, 每次都是新的一次按住)。
     public mutating func down(forwarded: Bool) {
         active = true

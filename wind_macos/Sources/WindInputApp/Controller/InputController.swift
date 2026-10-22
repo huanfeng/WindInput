@@ -359,7 +359,9 @@ public class InputController: IMKInputController {
     /// 修饰位带上这次按住期间按过的 Shift/Ctrl/Command (协调器 `handle_comment_alt`)。
     private func handleOptionChanged(_ vk: UInt32, pressed: Bool, flags: NSEvent.ModifierFlags,
                                      sender: Any!) -> Bool {
-        let composing = !composition.isEmpty
+        let composing = OptionKeyHold.inputSession(
+            hasComposition: !composition.isEmpty,
+            candidatesVisible: CandidatePanelHost.shared.candidatesVisible)
         let forward: Bool
         if pressed {
             forward = composing

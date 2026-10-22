@@ -32,6 +32,8 @@ public final class CandidatePanelHost {
     public static let shared = CandidatePanelHost()
 
     private let panel: CandidatePanel
+    /// 候选窗是否开着 (仅主线程)。⌥ 转发判据要它: 联想窗组合为空、候选仍在。
+    public var candidatesVisible: Bool { panel.isVisible }
     /// 悬停提示 / 状态气泡 / Toast / 自绘菜单的承载层。仅主线程使用。
     private let overlays = OverlayHost()
     /// 最近一次**实际报给服务端**的候选悬停 (仅主线程)。可能晚于鼠标真实位置: 悬停提示显示着时,

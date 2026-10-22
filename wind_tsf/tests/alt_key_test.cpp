@@ -105,6 +105,40 @@ void TestHotkeyComboMarksSticky()
     Expect(h.StickyMods() == kCtrl, "热键组合里的 Ctrl 记进粘滞位");
 }
 
+void TestReplyCacheKeyReuse()
+{
+    AltReplyCache c;
+    bool eaten = false;
+    c.Store(AltReplyCache::kDown, true);
+    Expect(c.TryReuse(false, AltReplyCache::kDown, &eaten) && eaten, "OnKeyDown 沿用 test 那一发的回包");
+    Expect(!c.TryReuse(false, AltReplyCache::kDown, &eaten), "沿用一次即消费");
+
+    c.Store(AltReplyCache::kDown, false);
+    Expect(!c.TryReuse(false, AltReplyCache::kUp, &eaten), "方向不同不沿用");
+    Expect(!c.TryReuse(false, AltReplyCache::kDown, &eaten), "方向不同时清掉缓存");
+}
+
+void TestReplyCacheTestUpTwice()
+{
+    AltReplyCache c;
+    bool eaten = false;
+    c.Store(AltReplyCache::kUp, true);
+    Expect(c.TryReuse(true, AltReplyCache::kUp, &eaten) && eaten, "同一次松开第二遍 OnTestKeyUp 沿用、不重发");
+    Expect(c.TryReuse(false, AltReplyCache::kUp, &eaten) && eaten, "第二遍 test 不消费，OnKeyUp 仍能沿用");
+
+    c.Store(AltReplyCache::kDown, true);
+    Expect(!c.TryReuse(true, AltReplyCache::kDown, &eaten), "按下的 test 不复用（自动连发照发）");
+}
+
+void TestReplyCacheClearedByOtherKey()
+{
+    AltReplyCache c;
+    bool eaten = false;
+    c.Store(AltReplyCache::kUp, true);
+    c.Clear(); // 别的键的 OnTest*
+    Expect(!c.TryReuse(false, AltReplyCache::kUp, &eaten), "别的键之后不捡陈旧回包");
+}
+
 } // namespace
 
 int main()
@@ -117,6 +151,9 @@ int main()
     TestRepeatKeepsStickyFreshDownResets();
     TestUpForwardedAfterForwardedDown();
     TestHotkeyComboMarksSticky();
+    TestReplyCacheKeyReuse();
+    TestReplyCacheTestUpTwice();
+    TestReplyCacheClearedByOtherKey();
     if (g_failures == 0)
         std::printf("alt_key_test: all passed\n");
     return g_failures == 0 ? 0 : 1;

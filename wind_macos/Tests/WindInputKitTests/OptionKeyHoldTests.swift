@@ -30,6 +30,13 @@ final class OptionKeyHoldTests: XCTestCase {
         XCTAssertFalse(h.shouldForwardUp(composing: false))
     }
 
+    /// 联想窗: 组合为空、候选开着, 仍算组字中。
+    func testInputSessionIncludesVisibleCandidates() {
+        XCTAssertTrue(OptionKeyHold.inputSession(hasComposition: true, candidatesVisible: false))
+        XCTAssertTrue(OptionKeyHold.inputSession(hasComposition: false, candidatesVisible: true))
+        XCTAssertFalse(OptionKeyHold.inputSession(hasComposition: false, candidatesVisible: false))
+    }
+
     /// 按下转发过, 期间上屏关了组字: 松开照样转发 (按住翻转要复原)。
     func testUpForwardedAfterForwardedDown() {
         var h = OptionKeyHold()
