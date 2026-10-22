@@ -92,6 +92,10 @@ fn path_refs(path: &[String]) -> Vec<&str> {
 /// 旧版全局注释模板的出厂值（等于内置模板 `code_hint`）。迁移时全局旧值等于它的视为没写。
 const LEGACY_FACTORY_COMMENT_TEMPLATE: &str = "${code_hint|code_rev|shuangpin}";
 
+/// 出厂分配（`data/system.comments.toml`）里 `default_*` 有值的非全局作用范围。旧版它们跟随全局，
+/// 迁出自定义全局模板时要在这些范围写 `inherit`，否则被出厂格挡住。守门测试对照出厂文件。
+const FACTORY_DEFAULT_SCOPES: &[&[&str]] = &[&["type", "english"], &["mode", "temp_english"]];
+
 /// 从 `t` 摘下 `comment_template_<side>`；非字符串的只删不迁。
 fn take_legacy_template(t: &mut toml::Table, origin: &str, side: &str) -> Option<String> {
     let key = format!("comment_template_{side}");
@@ -8943,6 +8947,7 @@ impl Config {
     /// - 每个不同的模板串生成一个用户模板 `migrated_N`，写进对应的 `default_*` 格；空串迁成 `none`；
     /// - 全局旧值等于旧出厂值 [`LEGACY_FACTORY_COMMENT_TEMPLATE`] 的视为没写；
     /// - 横竖相同只写竖排；只写了竖排时横排写 `inherit`，保住旧版「横排跟随下一层」；
+    /// - 写了自定义全局格时，[`FACTORY_DEFAULT_SCOPES`] 的同名格写 `inherit`，保住「跟随全局」；
     /// - 本层已有同名格 / `enabled` 时不覆盖，旧键照删（幂等）。
     ///
     /// 旧键从本层移除；写盘路径（`prune_user_config` / `set_user_value`）都先跑本函数，
@@ -8984,6 +8989,26 @@ impl Config {
             }
         }
         writes.retain(|(p, ..)| get_nested(layer, &path_refs(p)).is_none());
+        // 迁出了自定义全局格：出厂在中间层写了同名格的作用范围，旧版跟随全局，要显式 `inherit`。
+        let mut shadows = Vec::new();
+        for (p, text, origin) in &writes {
+            if p[3] != "global" || text.is_none() {
+                continue;
+            }
+            for scope in FACTORY_DEFAULT_SCOPES {
+                let mut sp: Vec<String> = ["ui", "comment", "assign"].map(String::from).into();
+                sp.extend(scope.iter().map(|s| s.to_string()));
+                sp.push(p[4].clone());
+                shadows.push((sp, None, origin.clone()));
+            }
+        }
+        for w in shadows {
+            if !writes.iter().any(|(p, ..)| *p == w.0)
+                && get_nested(layer, &path_refs(&w.0)).is_none()
+            {
+                writes.push(w);
+            }
+        }
 
         let mut migrated = Vec::new();
         let enabled_path = ["ui", "comment", "enabled"];
@@ -14092,6 +14117,96 @@ scripts = { latin = 42 }
         assert!(c.enabled);
         assert_eq!(c.assign.global.default_vertical.as_deref(), Some("chaizi"));
         assert!(c.templates.is_empty(), "没写进任何格的模板串不生成模板");
+    }
+
+    fn shipped_system_comments() -> crate::comment_lib::SystemComments {
+        crate::comment_lib::SystemComments::parse(include_str!(
+            "../../../../data/system.comments.toml"
+        ))
+        .expect("出厂 system.comments.toml 应能解析")
+    }
+
+    /// `FACTORY_DEFAULT_SCOPES` 必须等于出厂分配里 `default_*` 有值的非全局作用范围。
+    #[test]
+    fn factory_default_scopes_match_shipped_assign() {
+        let a = shipped_system_comments().assign;
+        let mut got: Vec<Vec<String>> = Vec::new();
+        for (kind, map) in [
+            ("type", &a.by_type),
+            ("schema", &a.schema),
+            ("mode", &a.mode),
+        ] {
+            for (k, c) in map {
+                if c.default_vertical.is_some() || c.default_horizontal.is_some() {
+                    got.push(vec![kind.to_string(), k.clone()]);
+                }
+            }
+        }
+        let mut want: Vec<Vec<String>> = FACTORY_DEFAULT_SCOPES
+            .iter()
+            .map(|s| s.iter().map(|x| x.to_string()).collect())
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "出厂分配变了，同步 FACTORY_DEFAULT_SCOPES");
+    }
+
+    fn migrated_library(user_toml: &str) -> crate::comment_lib::CommentLibrary {
+        let (user, _) = comment_after_migration(user_toml);
+        let (lib, warnings) =
+            crate::comment_lib::CommentLibrary::build(&shipped_system_comments(), &user);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        lib
+    }
+
+    /// 旧全局自定义模板迁移后，临英模式与英文方案仍跟随全局，不被出厂的 `none` 挡住。
+    #[test]
+    fn migrated_global_template_reaches_factory_shadowed_scopes() {
+        use crate::comment_lib::{CommentScope, CommentState, SchemaType};
+        let lib = migrated_library(
+            "[ui.candidate]\ncomment_template_vertical = \"${dict}\"\n\
+             comment_template_horizontal = \"${dict}\"\n",
+        );
+        for scope in [
+            CommentScope {
+                mode: Some("temp_english"),
+                schema: "wubi86",
+                schema_type: SchemaType::CodeTable,
+            },
+            CommentScope {
+                mode: None,
+                schema: "english",
+                schema_type: SchemaType::English,
+            },
+        ] {
+            for vertical in [true, false] {
+                assert_eq!(
+                    lib.template_text(&scope, CommentState::Default, vertical),
+                    "${dict}",
+                    "{scope:?} vertical={vertical}"
+                );
+            }
+        }
+    }
+
+    /// 只改了全局竖排：横排仍是旧出厂的编码提示。
+    #[test]
+    fn migrated_global_vertical_only_keeps_horizontal_factory() {
+        use crate::comment_lib::{CommentScope, CommentState, SchemaType};
+        let lib = migrated_library("[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n");
+        let scope = CommentScope {
+            mode: None,
+            schema: "wubi86",
+            schema_type: SchemaType::CodeTable,
+        };
+        assert_eq!(
+            lib.template_text(&scope, CommentState::Default, true),
+            "${pinyin}"
+        );
+        assert_eq!(
+            lib.template_text(&scope, CommentState::Default, false),
+            LEGACY_FACTORY_COMMENT_TEMPLATE
+        );
     }
 
     #[test]
