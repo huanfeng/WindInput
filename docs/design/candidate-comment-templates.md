@@ -1,6 +1,6 @@
 # 候选注释：命名模板、默认/详细两态与总表设置
 
-> 2026-10-22 设计，待实施。前身：`candidate-comment-layering.md`（三层覆盖）、
+> 2026-10-22 设计，已实施于分支 `feat/comment-templates`。前身：`candidate-comment-layering.md`（三层覆盖）、
 > `candidate-comment-above-line.md`（上方注释条）。本设计**替换**前者的配置面，
 > 不改模板语法与求值（`comment.rs` 的变量、`${a|b}`、`{…}`、`$[色]{…}` 全部保留）。
 
@@ -56,6 +56,9 @@
   回到持久状态。持久为 `detail` 时，临时取反看到的就是 `default`。
   - 输入途中切模式（如进入临时拼音），临时状态**保留**，在新范围的模板上同样生效（我方判断，
     理由：用户的意图是「这一下我想看详细」，与当前在哪个模式无关）。
+  - 但同一键内**上屏了文字**就算候选窗关闭、临时状态复位：切模式顺带顶屏（如五笔 `gg` 后按反引号
+    顶屏再进临拼）、顶码留下余码另起一段、联想被新组字替换，都属此类。
+  - 显式设持久态（按键动词、命令栏）同时清掉临时状态，看到的就是刚设的态。
 - **Alt 行为** `ui.comment.alt_switch`，四档：
   - `off`：不拦 Alt。
   - `session`：单击 Alt 切临时状态。**出厂档**（维护者已定）。
@@ -63,16 +66,18 @@
   - `hold`：按住 Alt 期间临时为另一态，松开恢复。
 - **Alt 的拦截边界**（我方判断，实施须逐条钉测试）：
   - 只在**候选窗可见**时拦；其余时候 Alt 原样交给应用。
+  - **平台与服务分工**：组字中或候选可见时，平台把 Alt 按下 / 松开（`0xA4`/`0xA5`）转发给服务，
+    并带上按住期间按过的 Shift / Ctrl / Win 粘滞修饰位；单击还是组合键由服务判定（见到任一非 Alt
+    修饰位即算组合键），平台只在服务回 `Consumed` 时吃键。
   - 只认「干净的单击」：Alt 按下到松开之间有任何别的键（含 Alt+数字上屏注释、Alt+Tab），
     就不算切换，且不吞那次松开之外的任何键。
   - 左右 Alt 都认（我方判断；如需区分可后续加 `lalt`/`ralt` 取值）。
   - 被拦下的 Alt 松开**必须吃掉**，否则 Windows 应用会激活菜单栏、抢走焦点。
-  - `hold` 档：按住期间又按了别的键，放行该组合键；**先处理组合键、后恢复**。所以按住 Alt 看着详细
+  - `hold` 档：候选可见时**吃掉 Alt 按下**（不吃的话应用先进入 Alt 状态）。按住期间又按了别的键，放行该组合键；**先处理组合键、后恢复**。所以按住 Alt 看着详细
     注释按 Alt+数字（`alt_commit = "comment"`），上屏的就是眼前那份详细注释（我方判断：上屏的应与所见一致）。
     `alt_commit_text` 因此要读当前生效态（持久态 ⊕ 临时态），不能只读持久态。
   - **实现路径**（我方判断）：做成与 `toggle_mode_keys` 同类的修饰键单击判定，不折算进按键表。
-    用户在 `key_actions` / `session_actions` 里显式绑了裸 `lalt` / `ralt` 时，用户绑定优先，
-    启动 `warn` 一次说明 `alt_switch` 被让位。
+    裸 `lalt` / `ralt` 在 `key_actions` / `session_actions` 两表都绑不上，不存在让位问题。
 - 切换只**重绘当前页**：不重新查询、不改候选顺序、不改高亮。
 - **动作命令**：
   - 命令栏：`ime.toggle("comment")` 切持久状态；`ime.set("comment", "default"|"detail")` 直达。
@@ -92,7 +97,11 @@
 模式 → 方案 → 方案类型 → 全局
 ```
 
-四层都在用户配置里，方案文件不参与（见 §6.1）。
+每层的格先看用户配置 `[ui.comment.assign.*]`，再看出厂分配（`data/system.comments.toml`）：
+同一作用范围同一格**用户格胜出**；用户格写 `inherit` 即跳过本层出厂格、直接看下一层。
+方案文件不参与（见 §6.1）。
+
+出厂分配放 `system.comments.toml` 而不放 `config.toml`：后者与用户配置深合并，出厂行用户删不掉。
 
 - **方案类型**取引擎类型，五类：`codetable` / `pinyin` / `shuangpin` / `mixed` / `english`。
   `shuangpin` 是拼音引擎配了双拼布局，按此单独成类；其余直接取 `EngineType`。
@@ -107,15 +116,18 @@
   - 不写 → 本范围竖排格**有值**时同竖排，竖排也不写时跟随上一层横排。
 - **`none`** 是一个有意见的值：压过下层，渲染成空注释（同现行三态里的空串）。
 - 全局层四格**必有值**：内置默认见 §7，用户删掉某格时按内置默认补。
+- `system.comments.toml` 编译期内置一份副本；盘上文件缺失或解析失败时用副本并 `warn`。
+  盘上文件仍是覆盖层（定制层可整份替换）。
 
 ## 6 配置形态
 
-新段 `[ui.comment]`，取代 `ui.candidate` 里的 `comment_enabled` 与两份模板串：
+新段 `[ui.comment]`，取代 `ui.candidate` 里的 `comment_enabled` 与两份模板串。出厂 `config.toml`
+只带 `enabled` / `state` / `alt_switch` 三键；下例的模板与分配是**用户**写的（出厂分配见 §7）：
 
 ```toml
 [ui.comment]
 enabled = true                 # 原 ui.candidate.comment_enabled
-state = "default"              # 持久状态：default / detail，切换时写回
+state = "default"              # 持久状态：default / detail，按键动词、命令栏、Alt persist 档写回
 alt_switch = "session"         # off / session（出厂）/ persist / hold
 
 # 用户模板（内置模板在 data/system.comments.toml，同 id 时用户版覆盖内置版）
@@ -125,31 +137,22 @@ name = "五笔学习"
 text = "${chaizi} ${code_rev}{ · ${pinyin}}"
 
 # 作用范围 → 四格。键名固定为 default_vertical / default_horizontal /
-# detail_vertical / detail_horizontal；值 = 模板 id / "none" / "inherit"（仅横排）。
-[ui.comment.assign.global]
-default_vertical = "code_hint"
-detail_vertical = "detail_full"
-
-[ui.comment.assign.type.codetable]
-detail_vertical = "chaizi_pinyin"
-
+# detail_vertical / detail_horizontal；值 = 模板 id / "none" / "inherit"（跳过本层出厂格）。
 [ui.comment.assign.schema.wubi86]
-default_vertical = "code_hint"
+detail_vertical = "wubi_learn"
 
 [ui.comment.assign.mode.temp_pinyin]
 default_vertical = "pinyin"
-detail_vertical = "chaizi_code"
 
 [ui.comment.assign.mode.temp_english]
-default_vertical = "none"
-detail_vertical = "en_meaning"
+detail_vertical = "inherit"    # 不用出厂的 en_meaning，跟随方案 / 类型 / 全局
 detail_horizontal = "inherit"
 ```
 
 - **模式键名**：`temp_pinyin` / `temp_english` / `url` / `email` / `unicode` / `mix:<mix_mode id>` /
   `special:<方案id>`。TOML 表名里带冒号要加引号：`[ui.comment.assign.mode."mix:quick_mix"]`。
 - **引用了不存在的模板 id**：启动 `warn` 一次，该格按「不写」处理（跟随下一层），不报错不阻断。
-- **模板 id 规则**：`[a-z0-9_]+`。设置端新建时自动生成，用户可改名（改的是 `name`，不是 `id`）。
+- **模板 id 规则**：`[a-z0-9_]+`；`none` / `inherit` 是保留字，用户模板用了即忽略并 `warn`。设置端新建时自动生成，用户可改名（改的是 `name`，不是 `id`）。
 - 方案层的**用户**设置统一在用户配置的 `assign.schema.<id>`，与总表一一对应。
 
 ### 6.1 方案文件不再配置注释（维护者已定）
@@ -167,8 +170,8 @@ detail_horizontal = "inherit"
 
 ## 7 内置模板与出厂分配
 
-内置模板放 `data/system.comments.toml`，与 `system.phrases.toml` / `system.quick.toml` 并列。
-初版清单（我方提议，实施时按实测效果微调）：
+内置模板与出厂分配放 `data/system.comments.toml`（另含内置注释词库清单 `[[dicts]]`），与
+`system.phrases.toml` / `system.quick.toml` 并列。清单：
 
 | id | 显示名 | 模板串（示意） |
 |---|---|---|
@@ -179,15 +182,16 @@ detail_horizontal = "inherit"
 | `chaizi_pinyin` | 拆字+拼音 | `${chaizi}{ · ${pinyin}}` |
 | `en_meaning` | 英文释义 | `${dict:en_zh}` |
 | `zh_english` | 中文对应英文 | `${dict:zh_en}` |
+| `pinyin_english` | 拼音+英文 | `${pinyin}{ · ${dict:zh_en}}` |
 | `detail_full` | 详细（全部） | `${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}` |
 
-出厂分配（我方提议）：
+出厂分配：
 
 | 作用范围 | 默认 | 详细 |
 |---|---|---|
 | 全局 | `code_hint` | `detail_full` |
 | 码表 | 跟随 | `chaizi_pinyin` |
-| 拼音 / 双拼 | 跟随 | `pinyin` 加 `zh_english` 的组合模板（实施时新增） |
+| 拼音 / 双拼 | 跟随 | `pinyin_english` |
 | 英文 | `none` | `en_meaning` |
 | 临时英文 | `none` | `en_meaning` |
 | 临时拼音 | 跟随 | `chaizi_code` |
@@ -206,8 +210,10 @@ detail_horizontal = "inherit"
     CC-CEDICT 覆盖不到的部分用 AI 生成补齐，并抽检。
 - **授权落实**：ECDICT 与 CC-CEDICT 的署名写进第三方声明；AI 生成部分标注来源，与 CC 部分**分文件**
   存放，便于以后替换。
-- **体积**：目标是「尽量覆盖全部系统词库」，最终体积在数据生成后报给维护者确认，再决定内置还是
-  按需下载（维护者：最后确认体积）。
+- **体积**（实测，CEDICT / ECDICT 部分）：
+  - `en_zh`：覆盖词表 21337 词的 93.23%，719 KB（gzip 299 KB）；
+  - `zh_en`（仅 CEDICT）：覆盖 672508 词的 14.39%，4.43 MB（gzip 1.96 MB）；余下 575724 词要靠 AI 补齐。
+  - AI 补齐的规模、成本与「宁缺」尺度**待维护者定**；内置还是按需下载随之再定。
 - **发版节奏**（维护者已定）：AI 补齐、抽检完成后，与模板 / 切换功能**一起发**，不先发半套数据。
   因此释义数据是主线阶段，不是可选的后续工作。生成过程中要持续盯住体积：
   - 每条只留一个词性、最基础的一两个义项；
@@ -243,22 +249,21 @@ detail_horizontal = "inherit"
 
 ## 10 迁移
 
-维护者：当前用户不多，**先评估自动迁移的复杂度**；复杂就接受手动迁移（启动告警 + 文档指引），
-实施第一阶段给出结论。
+结论：`config.toml` 自动迁移，方案侧只告警。
 
-可行的自动迁移思路：每段旧的非空模板串生成一个用户模板，id 按来源取（如 `migrated_global`、
-`migrated_temp_english`），内容相同的去重；再写进对应 `assign.*.default_*`。旧的空串迁成 `none`；
-旧 `comment_enabled` 迁到 `ui.comment.enabled`。
-
-方案文件里的旧键见 §6.1：随包的直接删，用户覆盖层里的并入本节评估。
-
-需要算进复杂度的点：
-- 写回要遵守现有「保留用户内容 + 自检」的写回门禁。
+- `config.toml` 的旧键（全局两份模板串、五个模式的模板串、`schema.mix_modes[]` 的模板串、
+  `ui.candidate.comment_enabled`）启动时迁入 `[ui.comment]`：每段非空模板串生成用户模板
+  `migrated_N`（同文本去重），写进对应作用范围的 `default_*` 格；空串迁成 `none`；
+  `comment_enabled` 迁到 `enabled`。只有竖排有值、横排跟随的，横排写 `inherit`。
+- 迁了全局默认格时，对出厂在下层有同名格的作用范围（如 `type.english`、`mode.temp_english`）
+  写用户 `inherit`，保住老用户「全局模板处处生效」的行为。
+- 方案文件与 `schema_overrides/<id>.toml` 里的旧键不迁移，只启动 `warn`（见 §6.1）。
+- 写回遵守现有「保留用户内容 + 自检」的写回门禁。
 
 ## 11 待维护者定
 
-1. 迁移是自动还是手动：实施第一阶段评估后再报。
-2. 中英释义的最终体积，以及内置还是按需下载：数据生成后再报。
+1. ~~迁移是自动还是手动~~：已定，见 §10。
+2. AI 补齐 `zh_en` 的规模与成本（约 57.6 万词），以及内置还是按需下载：实测体积见 §8。
 3. AI 补齐的抽检方式与抽样比例：生成第一批后，拿样本给维护者看。
 
 ## 12 留给实施者

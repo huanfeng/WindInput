@@ -1,5 +1,7 @@
 # 候选注释的分层与收口
 
+> 已被 `candidate-comment-templates.md` 取代。
+
 > 2026-08-26 设计。P0 实施于 main。
 > 前身：`mode-candidate-layout.md`（模式级三态的形态来源）、`schema-scoped-behavior.md`
 > （方案级 `[punct]`/`[candidate]`/`[phrases]` 三段，本设计是它的第四段）。
