@@ -39,6 +39,10 @@ FORMAT_RULES = f"""- 每词只给最常用的一两个义项，两个义项之�
 - 没有可靠释义的词（生僻词、专名、不成词的片段）只输出「词<TAB>」，释义留空，不要硬凑
 - 只输出结果行：每词一行，词与输入完全一致、顺序一致；不要解释，不要编号，不要代码块"""
 
+# 取词口径（维护者已定）：只给词汇和固定说法释义；短语碎片留空；专名只给通行译名，不拼音化
+POLICY_ZH_EN = """- 只给词汇和固定说法释义（如 视觉效果、药物治疗、言之有理）；短语碎片一律留空：词加虚词、代词加动词、半截句子都算碎片（如 就坐在、你不用担心、最好的办法就是、讲一下、在这样）
+- 专名（人名、作品名、品牌）只在有通行英文名时给出（如 街霸 -> Street Fighter）；没有就留空；绝不音译成拼音（如 绝代双骄 不能写成 Juedai Shuangjiao）"""
+
 EXAMPLES = {"zh-en": ("; ", "`n. bank`、`v. run; operate`"), "en-zh": ("；", "`n. 银行`、`v. 跑；运转`")}
 
 FILL_PROMPT = """为下列中文词给出最常用的英文释义，供输入法候选旁的注释使用。
@@ -65,6 +69,8 @@ LANG = {"zh-en": "英文", "en-zh": "中文"}
 def build_prompt(mode, direction, items):
     sep, example = EXAMPLES[direction]
     rules = FORMAT_RULES.format(sep=sep, example=example)
+    if direction == "zh-en":
+        rules += "\n" + POLICY_ZH_EN
     if mode == "refine":
         lines = "\n".join(f"{w}\t{m}" for w, m in items)
         return REFINE_PROMPT.format(lang=LANG[direction], rules=rules, lines=lines)
@@ -189,21 +195,27 @@ class FileBackend:
     def __init__(self, directory):
         self.dir = directory
 
-    def begin(self, items, mode):
-        """批次目录绑定到一份输入：PROMPT.txt 记输入词表的哈希，不同输入拒绝复用。"""
-        digest = hashlib.sha256("\n".join(f"{w}\t{m}" for w, m in items).encode()).hexdigest()[:16]
-        marker = f"输入哈希: {digest}"
+    def begin(self, items, mode, direction="zh-en"):
+        """批次目录绑定到一份输入：PROMPT.txt 首行记（模式、方向、词表）的哈希，不同输入拒绝复用。
+        旧格式（无哈希行）只警告，并按当前输入重写。"""
+        body = "\n".join(f"{w}\t{m}" for w, m in items)
+        digest = hashlib.sha256(f"{mode}\n{direction}\n{body}".encode()).hexdigest()[:16]
+        first_line = "# 输入哈希: " + digest
         prompt = os.path.join(self.dir, "PROMPT.txt")
         if os.path.exists(prompt):
             with open(prompt, encoding="utf-8") as f:
                 first = f.readline().strip()
-            if first != "# " + marker:
-                sys.exit(f"批次目录 {self.dir} 属于另一份输入（{first[2:] or '无哈希'}，当前 {marker}），请先清空该目录再跑")
-        else:
-            os.makedirs(self.dir, exist_ok=True)
-            with open(prompt, "w", encoding="utf-8", newline="\n") as f:
-                f.write("# " + marker + "\n")
-                f.write(build_prompt(mode, "zh-en", [("<见 NNNN.in.tsv>", "<现有释义>" if mode == "refine" else "")]))
+            if first == first_line:
+                return
+            if not first.startswith("# 输入哈希:"):
+                print(f"警告: 批次目录 {self.dir} 的 PROMPT.txt 是旧格式（无输入哈希），已按当前输入重写", file=sys.stderr)
+            else:
+                sys.exit(f"批次目录 {self.dir} 的输入哈希不同（模式、方向或词表变了），请先清空该目录再跑")
+        os.makedirs(self.dir, exist_ok=True)
+        placeholder = [("<见 NNNN.in.tsv>", "<现有释义>" if mode == "refine" else "")]
+        with open(prompt, "w", encoding="utf-8", newline="\n") as f:
+            f.write(first_line + "\n")
+            f.write(build_prompt(mode, direction, placeholder))
 
     def fetch(self, index, items, mode, direction):
         os.makedirs(self.dir, exist_ok=True)
@@ -223,7 +235,7 @@ def run(items, out, backend, mode="fill", direction="zh-en", batch_size=BATCH_SI
     批号按完整 items 顺序固定。limit 只限在线后端本次处理的词数。返回统计 dict。"""
     stats = {"written": 0, "blank": 0, "rejected": 0, "pending_batches": 0}
     if hasattr(backend, "begin"):
-        backend.begin(items, mode)
+        backend.begin(items, mode, direction)
     done = done_words(out)
     new_file = not os.path.exists(out) or os.path.getsize(out) == 0
     remaining = limit

@@ -385,6 +385,54 @@ class RunTest(unittest.TestCase):
         self.assertIn("claude-sonnet-5-5", head)
 
 
+class FileBackendGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bdir = os.path.join(self.tmp.name, "b")
+        self.out = os.path.join(self.tmp.name, "o.tsv")
+
+    def go(self, items, **kw):
+        return ai_fill.run(items, self.out, ai_fill.FileBackend(self.bdir), today="2026-01-01", **kw)
+
+    def prompt(self):
+        with open(os.path.join(self.bdir, "PROMPT.txt"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_prompt_file_uses_real_mode_and_direction(self):
+        self.go([("bank", "银行; 岸")], mode="refine", direction="en-zh")
+        self.assertIn("中文", self.prompt())
+        self.assertIn("n. 银行", self.prompt())
+
+    def test_different_mode_or_direction_is_refused(self):
+        items = [("银行", "bank")]
+        self.go(items, mode="refine", direction="zh-en")
+        with self.assertRaises(SystemExit) as cm:
+            self.go(items, mode="refine", direction="en-zh")
+        self.assertIn("哈希不同", str(cm.exception))
+        with self.assertRaises(SystemExit):
+            self.go([("银行", "")], mode="fill", direction="zh-en")
+
+    def test_old_format_prompt_warns_and_rewrites_header(self):
+        os.makedirs(self.bdir)
+        with open(os.path.join(self.bdir, "PROMPT.txt"), "w", encoding="utf-8") as f:
+            f.write("为下列中文词给出……\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.go([("甲", "")])
+        self.assertIn("旧格式", err.getvalue())
+        self.assertTrue(self.prompt().startswith("# 输入哈希: "))
+        self.go([("甲", "")])  # 现在是新格式，同输入可重跑
+
+
+class PromptPolicyTest(unittest.TestCase):
+    def test_both_prompts_carry_lexical_and_proper_noun_rules(self):
+        for mode in ("fill", "refine"):
+            p = ai_fill.build_prompt(mode, "zh-en", [("街霸", "x")])
+            for needle in ("视觉效果", "言之有理", "就坐在", "你不用担心", "最好的办法就是", "讲一下", "街霸", "Street Fighter", "绝代双骄", "拼音"):
+                self.assertIn(needle, p)
+
+
 class FileBackendTest(unittest.TestCase):
     def test_refuses_batches_dir_from_a_different_input(self):
         d = tempfile.TemporaryDirectory()
