@@ -66,11 +66,13 @@ REFINE_PROMPT = """下列每行是「词<TAB>现有释义」。请从现有释�
 LANG = {"zh-en": "英文", "en-zh": "中文"}
 
 
-def build_prompt(mode, direction, items):
+def build_prompt(mode, direction, items, extra_rule=None):
     sep, example = EXAMPLES[direction]
     rules = FORMAT_RULES.format(sep=sep, example=example)
     if direction == "zh-en":
         rules += "\n" + POLICY_ZH_EN
+    if extra_rule:
+        rules += "\n- " + extra_rule
     if mode == "refine":
         lines = "\n".join(f"{w}\t{m}" for w, m in items)
         return REFINE_PROMPT.format(lang=LANG[direction], rules=rules, lines=lines)
@@ -182,11 +184,12 @@ class CallBackend:
 
 
 class ApiBackend(CallBackend):
-    def __init__(self):
+    def __init__(self, extra_rule=None):
         super().__init__(None)
+        self.extra_rule = extra_rule
 
     def fetch(self, index, items, mode, direction):
-        return call_claude(build_prompt(mode, direction, items))
+        return call_claude(build_prompt(mode, direction, items, self.extra_rule))
 
 
 class FileBackend:
@@ -195,11 +198,11 @@ class FileBackend:
     def __init__(self, directory):
         self.dir = directory
 
-    def begin(self, items, mode, direction="zh-en"):
+    def begin(self, items, mode, direction="zh-en", extra_rule=None):
         """批次目录绑定到一份输入：PROMPT.txt 首行记（模式、方向、词表）的哈希，不同输入拒绝复用。
         旧格式（无哈希行）只警告，并按当前输入重写。"""
         body = "\n".join(f"{w}\t{m}" for w, m in items)
-        digest = hashlib.sha256(f"{mode}\n{direction}\n{body}".encode()).hexdigest()[:16]
+        digest = hashlib.sha256((f"{mode}\n{direction}\n{body}" + (f"\n{extra_rule}" if extra_rule else "")).encode()).hexdigest()[:16]
         first_line = "# 输入哈希: " + digest
         prompt = os.path.join(self.dir, "PROMPT.txt")
         if os.path.exists(prompt):
@@ -215,7 +218,7 @@ class FileBackend:
         placeholder = [("<见 NNNN.in.tsv>", "<现有释义>" if mode == "refine" else "")]
         with open(prompt, "w", encoding="utf-8", newline="\n") as f:
             f.write(first_line + "\n")
-            f.write(build_prompt(mode, direction, placeholder))
+            f.write(build_prompt(mode, direction, placeholder, extra_rule))
 
     def fetch(self, index, items, mode, direction):
         os.makedirs(self.dir, exist_ok=True)
@@ -230,12 +233,12 @@ class FileBackend:
             return f.read()
 
 
-def run(items, out, backend, mode="fill", direction="zh-en", batch_size=BATCH_SIZE, limit=None, today=None):
+def run(items, out, backend, mode="fill", direction="zh-en", batch_size=BATCH_SIZE, limit=None, today=None, extra_rule=None):
     """处理 items 里还没出现在 out 的词；每批写完即落盘，中断后重跑接着来。
     批号按完整 items 顺序固定。limit 只限在线后端本次处理的词数。返回统计 dict。"""
     stats = {"written": 0, "blank": 0, "rejected": 0, "pending_batches": 0}
     if hasattr(backend, "begin"):
-        backend.begin(items, mode, direction)
+        backend.begin(items, mode, direction, extra_rule)
     done = done_words(out)
     new_file = not os.path.exists(out) or os.path.getsize(out) == 0
     remaining = limit
@@ -289,6 +292,7 @@ def main(argv=None):
     p.add_argument("--batches-dir", help="files 后端的批次目录")
     p.add_argument("--limit", type=int, help="最多处理多少词（试跑用，仅 api）")
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    p.add_argument("--extra-rule", help="追加到提示词规则末尾的一条（fill/refine 通用）；纳入批次目录的输入哈希")
     a = p.parse_args(argv)
     if a.mode == "fill" and a.direction != "zh-en":
         p.error("fill 只支持 --direction zh-en")
@@ -297,8 +301,8 @@ def main(argv=None):
             p.error("files 后端需要 --batches-dir")
         backend = FileBackend(a.batches_dir)
     else:
-        backend = ApiBackend()
-    stats = run(read_items(a.input, a.mode), a.out, backend, a.mode, a.direction, a.batch_size, a.limit)
+        backend = ApiBackend(a.extra_rule)
+    stats = run(read_items(a.input, a.mode), a.out, backend, a.mode, a.direction, a.batch_size, a.limit, extra_rule=a.extra_rule)
     print(
         f"写入 {stats['written']}（其中空释义 {stats['blank']}），拒收 {stats['rejected']}，"
         f"待产出批次 {stats['pending_batches']} -> {a.out}",

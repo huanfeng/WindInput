@@ -433,6 +433,29 @@ class PromptPolicyTest(unittest.TestCase):
                 self.assertIn(needle, p)
 
 
+class ExtraRuleTest(unittest.TestCase):
+    def test_extra_rule_appended_as_last_bullet_in_both_modes(self):
+        for mode in ("fill", "refine"):
+            p = ai_fill.build_prompt(mode, "zh-en", [("银行", "bank")], extra_rule="成语不给义项")
+            rules = p.split("\n\n")[0]
+            self.assertTrue(rules.rstrip().endswith("- 成语不给义项"))
+            self.assertNotIn("成语不给义项", ai_fill.build_prompt(mode, "zh-en", [("银行", "bank")]))
+
+    def test_different_extra_rule_changes_hash_and_is_refused(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        bdir, out = os.path.join(d.name, "b"), os.path.join(d.name, "o.tsv")
+        run = lambda rule: ai_fill.run([("甲", "")], out, ai_fill.FileBackend(bdir), extra_rule=rule, today="2026-01-01")
+        run("规则一")
+        with open(os.path.join(bdir, "PROMPT.txt"), encoding="utf-8") as f:
+            self.assertIn("- 规则一", f.read())
+        run("规则一")
+        with self.assertRaises(SystemExit):
+            run("规则二")
+        with self.assertRaises(SystemExit):
+            run(None)
+
+
 class FileBackendTest(unittest.TestCase):
     def test_refuses_batches_dir_from_a_different_input(self):
         d = tempfile.TemporaryDirectory()
