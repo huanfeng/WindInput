@@ -225,12 +225,18 @@ fn setup_root(repro: &Path) -> PathBuf {
 /// 配置变体（逗号分隔，可叠加）。
 fn apply_variant(cfg: &mut Config, variant: &str) {
     for v in variant.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+        // 内置模板逐个以同 id 用户模板覆盖成去掉该变量的版本。
         let strip = |cfg: &mut Config, var: &str| {
-            for t in [
-                &mut cfg.ui.candidate.comment_template_vertical,
-                &mut cfg.ui.candidate.comment_template_horizontal,
-            ] {
-                *t = t.replace(var, "");
+            let text = std::fs::read_to_string(data_dir().join("system.comments.toml")).unwrap();
+            let sys = wind_config::comment_lib::SystemComments::parse(&text).unwrap();
+            for mut t in sys.templates {
+                match cfg.ui.comment.templates.iter_mut().find(|u| u.id == t.id) {
+                    Some(u) => u.text = u.text.replace(var, ""),
+                    None => {
+                        t.text = t.text.replace(var, "");
+                        cfg.ui.comment.templates.push(t);
+                    }
+                }
             }
         };
         let off_section = |cfg: &mut Config, var: &str| {
@@ -242,7 +248,7 @@ fn apply_variant(cfg: &mut Config, variant: &str) {
         };
         match v {
             "orig" => {}
-            "comment_off" => cfg.ui.candidate.comment_enabled = false,
+            "comment_off" => cfg.ui.comment.enabled = false,
             "tooltip_off" => cfg.ui.tooltip.enabled = false,
             "no_pinyin" => strip(cfg, "${pinyin}"),
             "no_code_rev" => strip(cfg, "${code_rev}"),

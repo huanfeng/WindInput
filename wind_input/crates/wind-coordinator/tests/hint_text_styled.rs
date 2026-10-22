@@ -294,8 +294,14 @@ fn zongguo(tag: &str, tone: bool) -> Vec<CandidateItem> {
     let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
         c.schema.pinyin.fuzzy.zh_z = true;
         c.input.correction.hint.tone = tone;
-        c.ui.candidate.comment_template_vertical = "${correct_pinyin}".into();
-        c.ui.candidate.comment_template_horizontal = "${correct_pinyin}".into();
+        c.ui.comment
+            .templates
+            .push(wind_config::comment_lib::CommentTemplateDef {
+                id: "fz".into(),
+                name: "fz".into(),
+                text: "${correct_pinyin}".into(),
+            });
+        c.ui.comment.assign.global.default_vertical = Some("fz".into());
     });
     type_str(&coord, "zongguo");
     shown(&coord, &rx)

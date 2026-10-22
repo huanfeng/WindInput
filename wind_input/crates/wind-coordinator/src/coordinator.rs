@@ -800,10 +800,9 @@ pub(crate) struct State {
     pub(crate) special_id: u8,
     /// 当前特殊模式的 `[overlay]` 段**快照**（进入时填、退出时清）。
     ///
-    /// 快照而非每次查注册表，三个理由：
-    /// 1. `comment::template_for` 返回借用 `cfg` 的 `&str`（刻意不分配），临时 Vec 借不出来；
-    /// 2. 布局/注释取值在候选更新路径上，省掉每次的整表 clone；
-    /// 3. ★ 注册表按 id 排序，装一个新 overlay 方案会让其后方案的下标平移——快照让
+    /// 快照而非每次查注册表，两个理由：
+    /// 1. 布局取值在候选更新路径上，省掉每次的整表 clone；
+    /// 2. ★ 注册表按 id 排序，装一个新 overlay 方案会让其后方案的下标平移——快照让
     ///    「模式进行中装了方案」不至于把当前模式的行为换成隔壁那个的。
     ///
     /// 这不是 `layout.rs` 反对的那种「进入时保存、退出时回放」：快照的是**只读配置**，
@@ -1507,6 +1506,10 @@ pub struct Coordinator {
     /// system.phrases.toml 路径（None=无 data_dir，如 headless 测试）。
     /// "恢复默认"据此重读文件，使手工编辑无需重启服务即可生效。
     pub(crate) system_phrase_path: Option<std::path::PathBuf>,
+    /// `system.comments.toml`（内置注释模板与出厂分配），启动时读一次。
+    pub(crate) system_comments: wind_config::comment_lib::SystemComments,
+    /// 合并后的注释模板库，配置生效时重建，见 [`Self::rebuild_comment_lib`]。
+    pub(crate) comment_lib: std::sync::RwLock<Arc<wind_config::comment_lib::CommentLibrary>>,
     /// 简繁转换器（OpenCC；None=数据缺失不可用）。变体由配置 features.s2t.variant 决定，
     /// 启动时加载；菜单仅提供开/关。置于 Mutex 兼容 reload 时整体替换。
     pub(crate) s2t: Mutex<Option<wind_transform::s2t::Converter>>,
@@ -2270,6 +2273,35 @@ impl Drop for ChaiziLoadingGuard {
     }
 }
 
+/// 读 `system.comments.toml`；缺失或解析失败时用空表（注释全空）并告警。
+fn load_system_comments(data_dir: Option<&Path>) -> wind_config::comment_lib::SystemComments {
+    let Some(path) = Config::resolve_data_file(data_dir, "system.comments.toml") else {
+        if data_dir.is_some() {
+            warn!("system.comments.toml 缺失（用户/安装目录均未找到），内置注释模板将为空");
+        }
+        return Default::default();
+    };
+    let parsed = std::fs::read_to_string(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|t| wind_config::comment_lib::SystemComments::parse(&t));
+    parsed.unwrap_or_else(|e| {
+        warn!("读取 {} 失败，内置注释模板将为空: {e}", path.display());
+        Default::default()
+    })
+}
+
+/// 合并出厂与用户注释配置，问题逐条告警。
+fn build_comment_lib(
+    system: &wind_config::comment_lib::SystemComments,
+    cfg: &Config,
+) -> wind_config::comment_lib::CommentLibrary {
+    let (lib, warnings) = wind_config::comment_lib::CommentLibrary::build(system, &cfg.ui.comment);
+    for w in warnings {
+        warn!("{w}");
+    }
+    lib
+}
+
 /// 读盘加载一个方向的简繁转换器（`to_traditional` = 简入繁出）。数据缺失返回 `None`。
 ///
 /// 转换链里的**每本 octrie 各自按层序解析**（走 resolve_data_file 这个单文件收口点，
@@ -2705,9 +2737,12 @@ impl Coordinator {
             bundle.compiled_hotkeys.key_down.len(),
             bundle.compiled_hotkeys.key_up.len()
         );
+        let system_comments = load_system_comments(data_dir);
+        let comment_lib = build_comment_lib(&system_comments, &bundle.config);
         // 按需数据（拆字表、简繁表）只装有消费者的，见 `crate::data_needs`。
         let needs = crate::data_needs::DataNeeds::derive(
             &bundle.config,
+            &comment_lib,
             &crate::data_needs::SchemaFacts::collect(&engine_mgr),
         );
         // 模板引用 `${correct_pinyin}` 时拼音引擎要算提示（只翻开关，不重建引擎）。
@@ -3103,6 +3138,8 @@ impl Coordinator {
             system_phrase_path,
             assoc_bigram_path,
             assoc_bigram: std::sync::OnceLock::new(),
+            system_comments,
+            comment_lib: std::sync::RwLock::new(Arc::new(comment_lib)),
             s2t: Mutex::new(s2t),
             t2s: Mutex::new(t2s),
             // 只含出厂基表：用户覆盖住在 store 里，而 store 在本结构体构造之后才可用，
@@ -5022,6 +5059,20 @@ impl Coordinator {
         })
     }
 
+    /// 当前注释模板库快照。
+    pub(crate) fn comment_lib(&self) -> Arc<wind_config::comment_lib::CommentLibrary> {
+        self.comment_lib
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 按新配置重建注释模板库。须在新配置快照换上之前调，使两者同时可见。
+    fn rebuild_comment_lib(&self, cfg: &Config) {
+        let lib = build_comment_lib(&self.system_comments, cfg);
+        *self.comment_lib.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(lib);
+    }
+
     pub(crate) fn refresh_config_in_memory(&self, mutate: impl FnOnce(&mut Config)) {
         let mut cfg = self.rt().config.clone();
         mutate(&mut cfg);
@@ -5031,6 +5082,7 @@ impl Coordinator {
         // `input.rare_char.include_blocks` 在 input 段，改它不会把 schema 标脏，
         // 放进那个分支等于「改了没反应，切一次方案才生效」。见 `rebuild_charsets`。
         self.engine_mgr.rebuild_charsets(&bundle.config);
+        self.rebuild_comment_lib(&bundle.config);
         *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
         // 状态气泡去重缓存只在"内容配置不变"的前提下有效：改了 ui.status.items 之类后，
         // 同一状态该合成出不同文本，留着旧缓存会把改动后的第一次显示误判成"内容没变"而吞掉。
@@ -5069,6 +5121,7 @@ impl Coordinator {
                 let new_cfg = bundle.config.clone();
                 // 同 `refresh_config_in_memory`：字符类 registry 不受 schema_dirty 门控。
                 self.engine_mgr.rebuild_charsets(&new_cfg);
+                self.rebuild_comment_lib(&new_cfg);
                 *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
                 info!("User config hot-reloaded (schema_dirty={})", schema_dirty);
                 // 同 refresh_config_in_memory：设置页改了 ui.status.items 后，旧的去重缓存
@@ -7629,19 +7682,15 @@ impl Coordinator {
         let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
         // 注释段（候选右侧灰字）模板，见 `crate::comment`。横竖各持一份、互不影响：
         // 两种排布的可用横向空间差一个数量级，能放什么本就不是同一个答案。
-        // 模式级覆盖优先于全局（临英可只显示 ${dict}、临拼可整个关掉），见 `comment::template_for`。
-        // 方案级那一层住在方案文件里，只能取到临时 `Arc`——在候选循环外取一次存局部变量，
-        // 模板借用它（`comment_template_for` 的文档说明了为什么不快照进 State）。
-        let schema_behavior = self.engine_mgr.active_behavior();
+        // 按 模式 → 方案 → 方案类型 → 全局 取当前态那一格，见 `comment_template_for`。
         // ⚠️ 注释模板按 `vertical` 位取，旋转态因此走**横排**那一份模板。
         // 这是「旋转态的 vertical 恒为 false ⇒ 所有按方向分叉的配置走横排支」这条总规则的
-        // 一个实例，不是遗漏；要给旋转态单独的模板，用方案级 `[candidate]` 那两个键。
+        // 一个实例，不是遗漏。
         let comment_vertical = self.desired_orientation(state).vertical;
         // 解析一次、循环里逐候选只渲染（模板串对整页相同）。
-        let comment_tpl = crate::comment::Template::parse(self.comment_template_for(
+        let comment_tpl = crate::comment::Template::parse(&self.comment_template_for(
             &rt.config,
             state,
-            &schema_behavior,
             comment_vertical,
         ));
         // 注释段长度预算横竖各一份：横排全部候选共享一行宽度，竖排每行独占。
@@ -10729,7 +10778,7 @@ mod sentence_debug_tag_tests {
 
 #[cfg(test)]
 mod mode_comment_e2e_tests {
-    //! 模式级注释模板走到**发往 UI 的候选**上——决策函数 `comment::template_for` 的单元测试
+    //! 各作用范围的注释分配走到**发往 UI 的候选**上——`comment_template_for` 的单元测试
     //! 证明不了消费端接上了它（本仓反复出现的「半接线」欠账）。
     //!
     //! 注释段在发送路径上算、不回写 `state.candidates`，故这里收 UI 通道断言。放在 crate 内
@@ -11284,11 +11333,9 @@ mod mode_comment_e2e_tests {
         );
     }
 
-    /// 写一个只声明注释模板的方案文件，返回它的 data_dir。
-    ///
-    /// ⚠️ **内置方案一项都不声明**（见 `short_code_yield` 那轮的结论），所以方案级路径
-    /// 出厂状态下走不到，夹具必须自造方案——拿 wubi86 当现成的只会得到一条恒绿的测试。
-    fn data_dir_with_schema(tag: &str, id: &str, candidate_section: &str) -> std::path::PathBuf {
+    /// 写一个码表方案文件（只有方案头），返回它的 data_dir。方案层的注释分配在用户配置里，
+    /// 夹具方案只是给 `assign.schema.<id>` 一个可激活的方案。
+    fn data_dir_with_schema(tag: &str, id: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("wind_cmt_schema_{}_{tag}", std::process::id()));
         let schemas = dir.join("schemas");
@@ -11297,12 +11344,48 @@ mod mode_comment_e2e_tests {
         std::fs::write(
             schemas.join(format!("{id}.schema.toml")),
             format!(
-                "[schema]\nid = \"{id}\"\nname = \"注释测试\"\n[engine]\ntype = \"codetable\"\n\
-                 [candidate]\n{candidate_section}\n"
+                "[schema]\nid = \"{id}\"\nname = \"注释测试\"\n[engine]\ntype = \"codetable\"\n"
             ),
         )
         .unwrap();
         dir
+    }
+
+    /// 四格都指向 `id`。
+    fn all_cells(id: &str) -> wind_config::comment_lib::CommentCells {
+        wind_config::comment_lib::CommentCells {
+            default_vertical: Some(id.into()),
+            default_horizontal: Some(id.into()),
+            detail_vertical: Some(id.into()),
+            detail_horizontal: Some(id.into()),
+        }
+    }
+
+    /// 登记用户模板，返回四格都指向它的分配。
+    fn add_template(
+        cfg: &mut Config,
+        id: &str,
+        text: &str,
+    ) -> wind_config::comment_lib::CommentCells {
+        cfg.ui
+            .comment
+            .templates
+            .push(wind_config::comment_lib::CommentTemplateDef {
+                id: id.into(),
+                name: id.into(),
+                text: text.into(),
+            });
+        all_cells(id)
+    }
+
+    /// 临英四格指向模板「临英${code_hint}」。
+    fn with_temp_english(cfg: &mut Config) {
+        let cells = add_template(cfg, "te", "临英${code_hint}");
+        cfg.ui
+            .comment
+            .assign
+            .mode
+            .insert("temp_english".into(), cells);
     }
 
     /// 直接驱动候选下发：造一条候选、进指定模式，然后走真实的 `notify_ui_update`。
@@ -11340,8 +11423,7 @@ mod mode_comment_e2e_tests {
     fn cfg_with_templates() -> Config {
         let mut c = Config::default();
         // 用字面量而非变量，断言才不依赖词库内容
-        c.ui.candidate.comment_template_vertical = "全局${code_hint}".into();
-        c.ui.candidate.comment_template_horizontal = "全局${code_hint}".into();
+        c.ui.comment.assign.global = add_template(&mut c, "g", "全局${code_hint}");
         c
     }
 
@@ -11351,8 +11433,8 @@ mod mode_comment_e2e_tests {
     fn comment_above_switch_reaches_ui() {
         let run = |on: bool| {
             let mut cfg = Config::default();
-            cfg.ui.candidate.comment_template_vertical = "上${code_hint}\n下${code_hint}".into();
-            cfg.ui.candidate.comment_template_horizontal = "上${code_hint}\n下${code_hint}".into();
+            cfg.ui.comment.assign.global =
+                add_template(&mut cfg, "g", "上${code_hint}\n下${code_hint}");
             cfg.ui.candidate.comment_above = on;
             let (c, rx) = coord_with_ui(cfg);
             emit(&c, None);
@@ -11384,8 +11466,7 @@ mod mode_comment_e2e_tests {
     #[test]
     fn mode_override_reaches_ui() {
         let mut cfg = cfg_with_templates();
-        cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-        cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
+        with_temp_english(&mut cfg);
         let (c, rx) = coord_with_ui(cfg);
 
         emit(&c, None);
@@ -11437,8 +11518,8 @@ mod mode_comment_e2e_tests {
             .collect();
         let tooltip_of = |comment_tpl: &str, whole_tpl: &str| {
             let mut cfg = Config::default();
-            cfg.ui.candidate.comment_template_vertical = format!("${{code_hint}}{comment_tpl}");
-            cfg.ui.candidate.comment_template_horizontal = format!("${{code_hint}}{comment_tpl}");
+            cfg.ui.comment.assign.global =
+                add_template(&mut cfg, "g", &format!("${{code_hint}}{comment_tpl}"));
             let sec = |each: &str, template: &str| wind_config::config::TooltipSection {
                 enabled: true,
                 label: "段".into(),
@@ -11476,19 +11557,22 @@ mod mode_comment_e2e_tests {
         assert!(comment.contains("${no_such_var}") && tooltip.contains("${no_such_var}"));
     }
 
-    /// ★ 空串 = 本模式不显示注释（与「跟随全局」是两回事），且这条语义要一路走到 UI。
+    /// ★ `none` = 本模式不显示注释（与「跟随全局」是两回事），且这条语义要一路走到 UI。
     #[test]
     fn empty_override_hides_comment_at_ui() {
         let mut cfg = cfg_with_templates();
-        cfg.input.temp_pinyin.comment_template_vertical = Some(String::new());
-        cfg.input.temp_pinyin.comment_template_horizontal = Some(String::new());
+        cfg.ui
+            .comment
+            .assign
+            .mode
+            .insert("temp_pinyin".into(), all_cells("none"));
         let (c, rx) = coord_with_ui(cfg);
 
         emit(&c, Some(ModeKind::TempPinyin));
         assert_eq!(
             last_comment(&rx),
             Some(String::new()),
-            "空串必须让本模式不显示注释，而不是回落全局"
+            "none 必须让本模式不显示注释，而不是回落全局"
         );
     }
 
@@ -11496,8 +11580,7 @@ mod mode_comment_e2e_tests {
     #[test]
     fn leaving_mode_restores_global_template() {
         let mut cfg = cfg_with_templates();
-        cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-        cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
+        with_temp_english(&mut cfg);
         let (c, rx) = coord_with_ui(cfg);
 
         emit(&c, Some(ModeKind::TempEnglish));
@@ -11510,32 +11593,27 @@ mod mode_comment_e2e_tests {
         );
     }
 
-    /// ★★★ 三层裁决的**唯一**判别格：模式无意见 + 方案有意图 + 全局有值。
+    /// ★★★ 模式无意见 + 方案有意图 + 类型与全局都有值 ⇒ 方案层胜出；类型层排在全局之上。
     ///
-    /// 两层实现（模式 → 全局）在这一格给「全局码」，三层实现给「方案码」。其余任何格子
-    /// 两种实现都同解——只测别的格子，把方案层整个删掉测试照样全绿。
-    ///
-    /// 同一个用例顺带钉住优先级方向：进模式后必须变回模式级那份，否则就是把方案层
-    /// 错插在了模式层之上。
+    /// 只测别的格子，把方案层或类型层整个删掉测试照样全绿。同一个用例顺带钉住优先级方向：
+    /// 进模式后必须变回模式级那份，否则就是把方案层错插在了模式层之上。
     #[test]
     fn schema_layer_reaches_ui_and_mode_wins_over_it() {
-        let dir = data_dir_with_schema(
-            "wins",
-            "zz_cmt",
-            "comment_template_vertical = \"方案${code_hint}\"\n\
-             comment_template_horizontal = \"方案${code_hint}\"",
-        );
+        let dir = data_dir_with_schema("wins", "zz_cmt");
         let mut cfg = cfg_with_templates();
         cfg.schema.active = "zz_cmt".into();
-        cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-        cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
-        let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
+        let schema = add_template(&mut cfg, "s", "方案${code_hint}");
+        cfg.ui.comment.assign.schema.insert("zz_cmt".into(), schema);
+        let ty = add_template(&mut cfg, "t", "类型${code_hint}");
+        cfg.ui.comment.assign.by_type.insert("codetable".into(), ty);
+        with_temp_english(&mut cfg);
+        let (c, rx) = coord_with_ui_at(cfg.clone(), Some(&dir));
 
         emit(&c, None);
         assert_eq!(
             last_comment(&rx),
             Some("方案码".to_string()),
-            "模式没意见时必须落到方案层，而不是直接跳到全局"
+            "模式没意见时必须落到方案层，而不是直接跳到类型或全局"
         );
 
         emit(&c, Some(ModeKind::TempEnglish));
@@ -11545,46 +11623,58 @@ mod mode_comment_e2e_tests {
             "模式层排在方案层之上"
         );
 
+        cfg.ui.comment.assign.schema.clear();
+        let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
+        emit(&c, None);
+        assert_eq!(
+            last_comment(&rx),
+            Some("类型码".to_string()),
+            "方案层没意见时落到类型层"
+        );
+
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ★ 三态的第三态在**方案层**同样成立：空串 = 本方案不显示注释，不是「跟随全局」。
+    /// ★ `none` 在**方案层**同样成立：本方案不显示注释，不是「跟随全局」。
     #[test]
     fn schema_empty_template_hides_comment() {
-        let dir = data_dir_with_schema(
-            "empty",
-            "zz_cmt2",
-            "comment_template_vertical = \"\"\ncomment_template_horizontal = \"\"",
-        );
+        let dir = data_dir_with_schema("empty", "zz_cmt2");
         let mut cfg = cfg_with_templates();
         cfg.schema.active = "zz_cmt2".into();
+        cfg.ui
+            .comment
+            .assign
+            .schema
+            .insert("zz_cmt2".into(), all_cells("none"));
         let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
 
         emit(&c, None);
         assert_eq!(
             last_comment(&rx),
             Some(String::new()),
-            "方案层空串必须让本方案不显示注释，而不是回落全局"
+            "方案层 none 必须让本方案不显示注释，而不是回落全局"
         );
 
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 方案没声明注释模板（**绝大多数方案的常态**，内置方案一项都不声明）时回落全局。
+    /// 方案没有分配（**绝大多数方案的常态**）时回落全局。
     #[test]
     fn schema_without_templates_follows_global() {
-        let dir = data_dir_with_schema("silent", "zz_cmt3", "layout = \"vertical\"");
+        let dir = data_dir_with_schema("silent", "zz_cmt3");
         let mut cfg = cfg_with_templates();
         cfg.schema.active = "zz_cmt3".into();
+        let other = add_template(&mut cfg, "o", "别的${code_hint}");
+        cfg.ui.comment.assign.schema.insert("wubi86".into(), other);
         let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
 
         emit(&c, None);
         assert_eq!(
             last_comment(&rx),
             Some("全局码".to_string()),
-            "方案没意见就该跟随下一层（全局），不能被空 Option 渲染成空注释"
+            "方案没意见就该跟随下一层（全局），别的方案的分配不串过来"
         );
 
         drop(c);
@@ -11609,32 +11699,31 @@ mod mode_comment_e2e_tests {
         found
     }
 
-    /// 注释总开关在三层裁决之上：全局 / 方案级 / 模式级各一例，开着时各自出注释，
+    /// 注释总开关在逐层裁决之上：全局 / 方案级 / 模式级各一例，开着时各自出注释，
     /// 关掉后全都不出——含 `${code_hint}`（码表引擎产的编码提示）与上方注释条。
     #[test]
     fn comment_switch_off_overrides_all_three_layers() {
-        let dir = data_dir_with_schema(
-            "switch",
-            "zz_cmt_sw",
-            "comment_template_vertical = \"方案${code_hint}\"\n\
-             comment_template_horizontal = \"方案${code_hint}\"",
-        );
+        let dir = data_dir_with_schema("switch", "zz_cmt_sw");
         let run = |enabled: bool| {
-            let mut cfg = cfg_with_templates();
-            cfg.ui.candidate.comment_enabled = enabled;
+            let mut cfg = Config::default();
+            cfg.ui.comment.enabled = enabled;
             // 上方注释条一并开着，全局模板带字面 `\n`：开着时上段进上方条，关掉总开关后
             // 上方条也必须为空——不然它可能是因为模板没拆出上段才空的，断言就是恒绿。
             cfg.ui.candidate.comment_above = true;
-            cfg.ui.candidate.comment_template_vertical = "上${code_hint}\n全局${code_hint}".into();
-            cfg.ui.candidate.comment_template_horizontal =
-                "上${code_hint}\n全局${code_hint}".into();
-            cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-            cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
+            cfg.ui.comment.assign.global =
+                add_template(&mut cfg, "g", "上${code_hint}\n全局${code_hint}");
+            let schema = add_template(&mut cfg, "s", "方案${code_hint}");
+            cfg.ui
+                .comment
+                .assign
+                .schema
+                .insert("zz_cmt_sw".into(), schema);
+            with_temp_english(&mut cfg);
             // 全局层：无方案目录（方案层没意见）、无模式。
             let (g, grx) = coord_with_ui(cfg.clone());
             emit(&g, None);
             let global = last_comment_parts(&grx).expect("应下发候选");
-            // 方案层：方案文件声明了模板、无模式。
+            // 方案层：用户给本方案分配了模板、无模式。
             cfg.schema.active = "zz_cmt_sw".into();
             let (s, srx) = coord_with_ui_at(cfg, Some(&dir));
             emit(&s, None);

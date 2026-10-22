@@ -42,8 +42,15 @@ fn cfg(schema_pinyin_src: &str, mix_hint: bool) -> Config {
     cfg.schema.active = "wubi86_pinyin".into();
     cfg.input.default.chinese_mode = true;
     cfg.input.alt_commit = "comment".into();
-    cfg.ui.candidate.comment_template_vertical = "${code_rev}".into();
-    cfg.ui.candidate.comment_template_horizontal = "${code_rev}".into();
+    cfg.ui
+        .comment
+        .templates
+        .push(wind_config::comment_lib::CommentTemplateDef {
+            id: "rev".into(),
+            name: "rev".into(),
+            text: "${code_rev}".into(),
+        });
+    cfg.ui.comment.assign.global.default_vertical = Some("rev".into());
     cfg.schema.pinyin.code_hint_source = schema_pinyin_src.into();
     cfg.schema.mix.pinyin_code_hint = mix_hint;
     cfg

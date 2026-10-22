@@ -686,16 +686,13 @@ pub struct EngineManager {
     /// 测试钩子：[`Self::build_reverse_index_for`] 被调用的次数（证明短路生效）。
     #[cfg(test)]
     reverse_index_build_calls: std::sync::atomic::AtomicUsize,
-    /// [`Self::schema_data_facts`] 的缓存（全部已安装方案的注释模板）。要扫方案目录、读 N 个
-    /// 方案文件，而协调器在按应用自动切方案（焦点驱动、高频）时也会问它。与 `overlay_cache`
-    /// 同批失效：`invalidate_schema` / `reload_from_config`。
-    data_facts_cache: Mutex<Option<Arc<SchemaDataFacts>>>,
     /// [`Self::active_data_facts`] 的缓存，按活跃方案 id 分键（随活跃方案变，切方案不必失效）。
-    /// 失效点同上。
+    /// 协调器在按应用自动切方案（焦点驱动、高频）时也会问它。与 `overlay_cache` 同批失效：
+    /// `invalidate_schema` / `reload_from_config`。
     active_facts_cache: Mutex<HashMap<String, ActiveDataFacts>>,
-    /// 上面两份缓存的失效代次（同 `aux_settings_gen` 的做法）。
+    /// 上面那份缓存的失效代次（同 `aux_settings_gen` 的做法）。
     data_facts_gen: std::sync::atomic::AtomicU64,
-    /// 测试钩子：上面两份事实被真正重算的次数。
+    /// 测试钩子：上面那份事实被真正重算的次数。
     #[cfg(test)]
     data_facts_builds: std::sync::atomic::AtomicUsize,
 }
@@ -719,17 +716,7 @@ pub struct MemoryReport {
     pub char_pinyin_builds: crate::text_codes::BuildStatsSnapshot,
 }
 
-/// 方案文件里「按需加载」要看的事实（协调器 `DataNeeds` 的材料），见
-/// [`EngineManager::schema_data_facts`]。
-#[derive(Debug, Default, Clone)]
-pub struct SchemaDataFacts {
-    /// 全部已安装方案的方案级注释模板（`[candidate].comment_template_*`，含覆盖层）。
-    pub schema_templates: Vec<String>,
-    /// overlay 方案 `[overlay]` 段的注释模板。
-    pub overlay_templates: Vec<String>,
-}
-
-/// 随活跃方案变的那部分事实，见 [`EngineManager::active_data_facts`]。
+/// 协调器 `DataNeeds` 要看的、随活跃方案变的事实，见 [`EngineManager::active_data_facts`]。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveDataFacts {
     /// 辅助码当下引用了码表方案（[`EngineManager::aux_code_schemas_in_use`] 非空）。
@@ -1045,7 +1032,6 @@ impl EngineManager {
             reverse_index_skipped: Mutex::new(std::collections::HashSet::new()),
             #[cfg(test)]
             reverse_index_build_calls: std::sync::atomic::AtomicUsize::new(0),
-            data_facts_cache: Mutex::new(None),
             active_facts_cache: Mutex::new(HashMap::new()),
             data_facts_gen: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -5866,57 +5852,6 @@ impl EngineManager {
         !self.is_pinyin() && self.codetable_settings().auto_phrase.enabled
     }
 
-    /// 全部已安装方案的注释模板（方案级 + overlay）。有缓存，见 `data_facts_cache`。
-    ///
-    /// 计算在锁外（要读盘），回填前比对失效代次：期间失效过就只用不存，旧结果盖不回去。
-    pub fn schema_data_facts(&self) -> Arc<SchemaDataFacts> {
-        if let Some(f) = self
-            .data_facts_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            return Arc::clone(f);
-        }
-        let generation = self
-            .data_facts_gen
-            .load(std::sync::atomic::Ordering::Acquire);
-        #[cfg(test)]
-        self.data_facts_builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut facts = SchemaDataFacts::default();
-        for id in self.installed_schemas() {
-            let b = self.behavior_for(&id);
-            facts
-                .schema_templates
-                .extend(b.comment_template_vertical.iter().cloned());
-            facts
-                .schema_templates
-                .extend(b.comment_template_horizontal.iter().cloned());
-        }
-        for o in self.overlay_modes() {
-            facts
-                .overlay_templates
-                .extend(o.spec.comment_template_vertical.iter().cloned());
-            facts
-                .overlay_templates
-                .extend(o.spec.comment_template_horizontal.iter().cloned());
-        }
-        let facts = Arc::new(facts);
-        let mut cache = self
-            .data_facts_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if self
-            .data_facts_gen
-            .load(std::sync::atomic::Ordering::Acquire)
-            == generation
-        {
-            *cache = Some(Arc::clone(&facts));
-        }
-        facts
-    }
-
     /// 当前活跃方案下的辅助码 / 自动造词态。有缓存（按活跃方案 id），见 `active_facts_cache`。
     pub fn active_data_facts(&self) -> ActiveDataFacts {
         let active = self.active_schema_id();
@@ -5953,17 +5888,12 @@ impl EngineManager {
         facts
     }
 
-    /// 清上面两份事实缓存并推进失效代次（持两把锁完成，与回填互斥）。
+    /// 清事实缓存并推进失效代次（持锁完成，与回填互斥）。
     fn invalidate_data_facts(&self) {
-        let mut templates = self
-            .data_facts_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let mut active = self
             .active_facts_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *templates = None;
         active.clear();
         self.data_facts_gen
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -9172,16 +9102,12 @@ mod tests {
         use std::sync::atomic::Ordering::Relaxed;
         let mgr = EngineManager::new(&Config::default(), None);
         let builds = || mgr.data_facts_builds.load(Relaxed);
-        mgr.schema_data_facts();
-        mgr.schema_data_facts();
-        assert_eq!(builds(), 1, "连续两次只扫一遍方案文件");
         mgr.active_data_facts();
         mgr.active_data_facts();
-        assert_eq!(builds(), 2, "活跃方案没变就不重算");
+        assert_eq!(builds(), 1, "活跃方案没变就不重算");
         mgr.invalidate_schema("pinyin");
-        mgr.schema_data_facts();
         mgr.active_data_facts();
-        assert_eq!(builds(), 4, "方案失效后重算");
+        assert_eq!(builds(), 2, "方案失效后重算");
     }
 
     /// 单字全码表与反查索引同键同目录、只差扩展名。

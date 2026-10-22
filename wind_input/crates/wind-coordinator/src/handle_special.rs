@@ -113,7 +113,7 @@ impl Coordinator {
         state.candidates.clear();
         state.active = Some(ModeKind::Special(idx));
         state.special_id = idx;
-        // `[overlay]` 段快照：布局/注释/进入即展示三处都取它，见 `State::overlay_spec`。
+        // `[overlay]` 段快照：布局与进入即展示都取它，见 `State::overlay_spec`。
         state.overlay_spec = self
             .engine_mgr
             .overlay_modes()

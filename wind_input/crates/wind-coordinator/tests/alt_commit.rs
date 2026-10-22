@@ -88,8 +88,15 @@ fn comment_mode_commits_rendered_comment_untruncated() {
         return;
     }
     let mut cfg = cfg("comment");
-    cfg.ui.candidate.comment_template_vertical = "[${pinyin}]".into();
-    cfg.ui.candidate.comment_template_horizontal = "[${pinyin}]".into();
+    cfg.ui
+        .comment
+        .templates
+        .push(wind_config::comment_lib::CommentTemplateDef {
+            id: "py".into(),
+            name: "py".into(),
+            text: "[${pinyin}]".into(),
+        });
+    cfg.ui.comment.assign.global.default_vertical = Some("py".into());
     cfg.ui.candidate.comment_max_chars_vertical = 2;
     cfg.ui.candidate.comment_max_chars_horizontal = 2;
     let c = typed(cfg);
@@ -105,8 +112,7 @@ fn empty_annotation_keeps_session() {
         return;
     }
     let mut cfg = cfg("comment");
-    cfg.ui.candidate.comment_template_vertical = String::new();
-    cfg.ui.candidate.comment_template_horizontal = String::new();
+    cfg.ui.comment.assign.global.default_vertical = Some("none".into());
     let c = typed(cfg);
     let before = c.debug_candidate_count();
     let act = c.handle_key_event(&key(0x31, MOD_ALT));

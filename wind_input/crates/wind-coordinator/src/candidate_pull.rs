@@ -211,10 +211,8 @@ impl Coordinator {
         end: usize,
     ) -> Vec<String> {
         let rt = self.rt();
-        let behavior = self.engine_mgr.active_behavior();
-        let tpl = crate::comment::Template::parse(
-            self.comment_template_for(&rt.config, state, &behavior, false),
-        );
+        let tpl =
+            crate::comment::Template::parse(&self.comment_template_for(&rt.config, state, false));
         let max = rt.config.ui.candidate.comment_max_chars(false);
         let ctx = self.tooltip_eval_ctx(state, &rt.tooltip);
         let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
