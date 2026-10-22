@@ -2286,21 +2286,17 @@ impl Drop for ChaiziLoadingGuard {
     }
 }
 
-/// 读 `system.comments.toml`；缺失或解析失败时用空表（注释全空）并告警。
+/// 读 `system.comments.toml`；缺失或解析失败时用内置副本并告警。
 fn load_system_comments(data_dir: Option<&Path>) -> wind_config::comment_lib::SystemComments {
-    let Some(path) = Config::resolve_data_file(data_dir, "system.comments.toml") else {
-        if data_dir.is_some() {
-            warn!("system.comments.toml 缺失（用户/安装目录均未找到），内置注释模板将为空");
-        }
-        return Default::default();
-    };
-    let parsed = std::fs::read_to_string(&path)
-        .map_err(anyhow::Error::from)
-        .and_then(|t| wind_config::comment_lib::SystemComments::parse(&t));
-    parsed.unwrap_or_else(|e| {
-        warn!("读取 {} 失败，内置注释模板将为空: {e}", path.display());
-        Default::default()
-    })
+    let path = Config::resolve_data_file(data_dir, "system.comments.toml");
+    let (sys, warning) =
+        wind_config::comment_lib::SystemComments::load_or_embedded(path.as_deref());
+    if let Some(w) = warning
+        && (data_dir.is_some() || path.is_some())
+    {
+        warn!("{w}");
+    }
+    sys
 }
 
 /// 合并出厂与用户注释配置，问题逐条告警。

@@ -682,6 +682,8 @@ mod tests {
         let schemas = dir.join("schemas");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(schemas.join(id)).unwrap();
+        // 空的出厂表：不让内置副本的分配混进来。
+        std::fs::write(dir.join("system.comments.toml"), "").unwrap();
         let tpl = if plain { "${code_hint}" } else { "${chaizi}" };
         std::fs::write(
             schemas.join(format!("{id}.schema.toml")),
@@ -711,7 +713,7 @@ mod tests {
 
     /// 用户给方案分配了引用拆字的模板 ⇒ 构造期就装上；方案文件里的旧模板键不算 ⇒ 不装。
     ///
-    /// 夹具目录里没有 `system.comments.toml`，出厂分配为空，拆字的消费者只可能来自这两处。
+    /// 夹具的 `system.comments.toml` 是空表，出厂分配为空，拆字的消费者只可能来自这两处。
     #[test]
     fn schema_level_chaizi_loads_at_construction() {
         for (assigned, want) in [(true, true), (false, false)] {

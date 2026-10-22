@@ -114,6 +114,32 @@ impl SystemComments {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         toml::from_str(text).map_err(|e| anyhow::anyhow!("解析 system.comments.toml 失败: {e}"))
     }
+
+    /// 编译期内置的出厂副本，盘上文件缺失或解析失败时兜底（Android 等不带该文件的包也靠它）。
+    pub fn embedded() -> Self {
+        Self::parse(include_str!("../../../../data/system.comments.toml"))
+            .expect("内置 system.comments.toml 应能解析")
+    }
+
+    /// 盘上文件（`path`，已按层序解析）优先；缺失或读/解析失败时用内置副本，第二项是告警原因。
+    pub fn load_or_embedded(path: Option<&std::path::Path>) -> (Self, Option<String>) {
+        let Some(path) = path else {
+            return (
+                Self::embedded(),
+                Some("system.comments.toml 缺失，使用内置副本".into()),
+            );
+        };
+        match std::fs::read_to_string(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|t| Self::parse(&t))
+        {
+            Ok(s) => (s, None),
+            Err(e) => (
+                Self::embedded(),
+                Some(format!("读取 {} 失败，使用内置副本: {e}", path.display())),
+            ),
+        }
+    }
 }
 
 /// 方案类型，对应 `[assign.type.<key>]`。
@@ -293,6 +319,10 @@ impl CommentLibrary {
         for t in &user.templates {
             if !valid_template_id(&t.id) {
                 warnings.push(format!("用户模板 id 不合法，已忽略: {:?}", t.id));
+                continue;
+            }
+            if matches!(t.id.as_str(), "none" | "inherit") {
+                warnings.push(format!("用户模板 id 是保留字，已忽略: {}", t.id));
                 continue;
             }
             if !seen_user.insert(t.id.as_str()) {
@@ -555,8 +585,70 @@ mod tests {
     use super::*;
 
     fn shipped() -> SystemComments {
-        SystemComments::parse(include_str!("../../../../data/system.comments.toml"))
-            .expect("出厂 system.comments.toml 应能解析")
+        SystemComments::embedded()
+    }
+
+    fn code_hint_text() -> String {
+        let s = shipped();
+        s.templates
+            .iter()
+            .find(|t| t.id == "code_hint")
+            .unwrap()
+            .text
+            .clone()
+    }
+
+    fn global_default_of(sys: &SystemComments) -> String {
+        let (lib, _) = CommentLibrary::build(sys, &UiCommentConfig::default());
+        lib.template_text(&scope(None), CommentState::Default, true)
+            .to_string()
+    }
+
+    #[test]
+    fn missing_system_comments_falls_back_to_embedded() {
+        let (sys, w) = SystemComments::load_or_embedded(None);
+        assert!(w.is_some());
+        assert_eq!(global_default_of(&sys), code_hint_text());
+    }
+
+    #[test]
+    fn unparsable_system_comments_falls_back_to_embedded_with_warning() {
+        let p = std::env::temp_dir().join(format!("sys_comments_bad_{}.toml", std::process::id()));
+        std::fs::write(&p, "templates = [[[").unwrap();
+        let (sys, w) = SystemComments::load_or_embedded(Some(&p));
+        let _ = std::fs::remove_file(&p);
+        assert!(w.unwrap().contains("内置副本"));
+        assert_eq!(global_default_of(&sys), code_hint_text());
+    }
+
+    #[test]
+    fn on_disk_system_comments_overrides_embedded() {
+        let p = std::env::temp_dir().join(format!("sys_comments_ok_{}.toml", std::process::id()));
+        std::fs::write(
+            &p,
+            "[[templates]]\nid = \"x\"\ntext = \"X\"\n[assign.global]\ndefault_vertical = \"x\"\n",
+        )
+        .unwrap();
+        let (sys, w) = SystemComments::load_or_embedded(Some(&p));
+        let _ = std::fs::remove_file(&p);
+        assert!(w.is_none());
+        assert_eq!(global_default_of(&sys), "X");
+    }
+
+    #[test]
+    fn reserved_user_template_ids_are_rejected() {
+        let mut u = UiCommentConfig::default();
+        u.templates = vec![tpl("none", "N"), tpl("inherit", "I")];
+        let (lib, w) = CommentLibrary::build(&sys(global_only()), &u);
+        assert_eq!(
+            w.iter().filter(|w| w.contains("保留字")).count(),
+            2,
+            "{w:?}"
+        );
+        assert!(
+            lib.templates()
+                .all(|(t, _)| t.id != "none" && t.id != "inherit")
+        );
     }
 
     #[test]
