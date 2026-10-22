@@ -138,6 +138,42 @@ impl SchemaType {
     }
 }
 
+impl SchemaType {
+    pub const ALL: [SchemaType; 5] = [
+        SchemaType::CodeTable,
+        SchemaType::Pinyin,
+        SchemaType::Shuangpin,
+        SchemaType::Mixed,
+        SchemaType::English,
+    ];
+}
+
+/// 解析链上的一层，按从具体到一般的顺序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignLayer {
+    Mode = 0,
+    Schema = 1,
+    Type = 2,
+    Global = 3,
+}
+
+/// 总表一格的实际结果，见 [`CommentLibrary::effective_table`]。
+/// `scope` / `from_scope` 形如 `global` / `type:codetable` / `schema:<id>` / `mode:<键>`；
+/// `template_id` 为 `None` = 不显示（序列化成格值 `"none"`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EffectiveCell {
+    pub scope: String,
+    pub state: CommentState,
+    pub vertical: bool,
+    #[serde(serialize_with = "id_or_none")]
+    pub template_id: Option<String>,
+    pub from_scope: String,
+}
+
+fn id_or_none<S: serde::Serializer>(id: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(id.as_deref().unwrap_or("none"))
+}
+
 /// 解析注释模板时的作用范围：模式（可无）、方案、方案类型。
 #[derive(Debug, Clone, Copy)]
 pub struct CommentScope<'a> {
@@ -326,8 +362,8 @@ impl CommentLibrary {
         let lib = Self {
             templates,
             assign,
-            fallback_default: builtin_text("code_hint"),
-            fallback_detail: builtin_text("detail_full"),
+            fallback_default: builtin_text(Self::fallback_id(CommentState::Default)),
+            fallback_detail: builtin_text(Self::fallback_id(CommentState::Detail)),
         };
         (lib, warnings)
     }
@@ -344,16 +380,23 @@ impl CommentLibrary {
         }
     }
 
-    /// 按作用范围解析当前态与排布对应的模板串；`""` = 不显示。
-    pub fn template_text(&self, scope: &CommentScope, state: CommentState, vertical: bool) -> &str {
+    /// 从 `start` 那层起按 模式 → 方案 → 类型 → 全局 找第一个有主见的格，带回它所在的层。
+    fn pick(
+        &self,
+        scope: &CommentScope,
+        start: AssignLayer,
+        state: CommentState,
+        vertical: bool,
+    ) -> Option<(AssignLayer, &Cell)> {
         let a = &self.assign;
         let layers = [
-            scope.mode.and_then(|m| a.mode.get(m)),
-            a.schema.get(scope.schema),
-            a.by_type.get(scope.schema_type.key()),
-            Some(&a.global),
+            (AssignLayer::Mode, scope.mode.and_then(|m| a.mode.get(m))),
+            (AssignLayer::Schema, a.schema.get(scope.schema)),
+            (AssignLayer::Type, a.by_type.get(scope.schema_type.key())),
+            (AssignLayer::Global, Some(&a.global)),
         ];
-        for layer in layers.into_iter().flatten() {
+        for (at, layer) in layers.into_iter().skip(start as usize) {
+            let Some(layer) = layer else { continue };
             let picked = if vertical {
                 adopt(layer.get(state, true))
             } else {
@@ -364,13 +407,105 @@ impl CommentLibrary {
                 }
             };
             if let Some(c) = picked {
-                return self.text_of(c);
+                return Some((at, c));
             }
         }
+        None
+    }
+
+    fn fallback_id(state: CommentState) -> &'static str {
         match state {
-            CommentState::Default => &self.fallback_default,
-            CommentState::Detail => &self.fallback_detail,
+            CommentState::Default => "code_hint",
+            CommentState::Detail => "detail_full",
         }
+    }
+
+    /// 按作用范围解析当前态与排布对应的模板串；`""` = 不显示。
+    pub fn template_text(&self, scope: &CommentScope, state: CommentState, vertical: bool) -> &str {
+        match self.pick(scope, AssignLayer::Mode, state, vertical) {
+            Some((_, c)) => self.text_of(c),
+            None => match state {
+                CommentState::Default => &self.fallback_default,
+                CommentState::Detail => &self.fallback_detail,
+            },
+        }
+    }
+
+    /// 总表一格的实际结果：从 `start` 层起解析，胜出的模板 id（`None` = 不显示）与所在层。
+    /// 各层都没写时落到全局的内置兜底。与 [`Self::template_text`] 同一条解析链。
+    pub fn resolve_cell(
+        &self,
+        scope: &CommentScope,
+        start: AssignLayer,
+        state: CommentState,
+        vertical: bool,
+    ) -> (Option<&str>, AssignLayer) {
+        match self.pick(scope, start, state, vertical) {
+            Some((at, Cell::Id(id))) => (Some(id.as_str()), at),
+            Some((at, _)) => (None, at),
+            None => (Some(Self::fallback_id(state)), AssignLayer::Global),
+        }
+    }
+
+    /// 设置端总表每格的实际结果：全局、五个类型常驻，加上出厂与用户分配里出现过的方案行、
+    /// 模式行。方案行的类型由 `type_of` 给；模式行的下层取 `active_schema`（用户此刻看到的）。
+    pub fn effective_table(
+        &self,
+        active_schema: &str,
+        type_of: impl Fn(&str) -> SchemaType,
+    ) -> Vec<EffectiveCell> {
+        let bare = |schema_type| CommentScope {
+            mode: None,
+            schema: "",
+            schema_type,
+        };
+        let mut rows: Vec<(String, CommentScope, AssignLayer)> = vec![(
+            "global".into(),
+            bare(SchemaType::CodeTable),
+            AssignLayer::Global,
+        )];
+        for t in SchemaType::ALL {
+            rows.push((format!("type:{}", t.key()), bare(t), AssignLayer::Type));
+        }
+        for s in self.assign.schema.keys() {
+            let scope = CommentScope {
+                mode: None,
+                schema: s,
+                schema_type: type_of(s),
+            };
+            rows.push((format!("schema:{s}"), scope, AssignLayer::Schema));
+        }
+        let active_type = type_of(active_schema);
+        for m in self.assign.mode.keys() {
+            let scope = CommentScope {
+                mode: Some(m),
+                schema: active_schema,
+                schema_type: active_type,
+            };
+            rows.push((format!("mode:{m}"), scope, AssignLayer::Mode));
+        }
+        let mut out = Vec::with_capacity(rows.len() * 4);
+        for (key, scope, start) in &rows {
+            for state in [CommentState::Default, CommentState::Detail] {
+                for vertical in [true, false] {
+                    let (id, at) = self.resolve_cell(scope, *start, state, vertical);
+                    let from_scope = match at {
+                        AssignLayer::Global => "global".to_string(),
+                        AssignLayer::Type => format!("type:{}", scope.schema_type.key()),
+                        AssignLayer::Schema => format!("schema:{}", scope.schema),
+                        AssignLayer::Mode => format!("mode:{}", scope.mode.unwrap_or_default()),
+                    };
+                    out.push(EffectiveCell {
+                        scope: key.clone(),
+                        state,
+                        vertical,
+                        template_id: id.map(str::to_string),
+                        from_scope,
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// 被任一格引用的模板串加兜底串，去重，供按需加载数据。
@@ -759,5 +894,73 @@ mod tests {
             (mine.0.text.as_str(), mine.1),
             ("first", TemplateOrigin::User)
         );
+    }
+
+    #[test]
+    fn resolve_cell_reports_winner_and_layer() {
+        let mut a = global_only();
+        a.by_type
+            .insert("codetable".into(), cells(None, None, Some("b"), None));
+        a.mode
+            .insert("url".into(), cells(Some("none"), None, None, None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        let sc = scope(Some("url"));
+        assert_eq!(
+            lib.resolve_cell(&sc, AssignLayer::Mode, CommentState::Default, true),
+            (None, AssignLayer::Mode)
+        );
+        assert_eq!(
+            lib.resolve_cell(&sc, AssignLayer::Schema, CommentState::Default, true),
+            (Some("code_hint"), AssignLayer::Global)
+        );
+        assert_eq!(
+            lib.resolve_cell(&sc, AssignLayer::Mode, CommentState::Detail, false),
+            (Some("b"), AssignLayer::Type)
+        );
+        assert_eq!(
+            lib.resolve_cell(&sc, AssignLayer::Global, CommentState::Detail, true),
+            (Some("detail_full"), AssignLayer::Global)
+        );
+    }
+
+    #[test]
+    fn resolve_cell_falls_back_to_builtin_ids() {
+        let (lib, _) =
+            CommentLibrary::build(&sys(CommentAssign::default()), &UiCommentConfig::default());
+        assert_eq!(
+            lib.resolve_cell(&scope(None), AssignLayer::Type, CommentState::Detail, false),
+            (Some("detail_full"), AssignLayer::Global)
+        );
+    }
+
+    #[test]
+    fn effective_table_lists_fixed_and_assigned_rows() {
+        let mut a = global_only();
+        a.schema
+            .insert("wubi".into(), cells(None, None, Some("a"), None));
+        a.mode
+            .insert("url".into(), cells(Some("none"), None, None, None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        let t = lib.effective_table("wubi", |_| SchemaType::CodeTable);
+        assert_eq!(t.len(), (1 + 5 + 1 + 1) * 4);
+        let find = |scope: &str, st: CommentState, v: bool| {
+            t.iter()
+                .find(|c| c.scope == scope && c.state == st && c.vertical == v)
+                .unwrap()
+                .clone()
+        };
+        let c = find("schema:wubi", CommentState::Detail, false);
+        assert_eq!(
+            (c.template_id.as_deref(), c.from_scope.as_str()),
+            (Some("a"), "schema:wubi")
+        );
+        let c = find("mode:url", CommentState::Detail, true);
+        assert_eq!(
+            (c.template_id.as_deref(), c.from_scope.as_str()),
+            (Some("a"), "schema:wubi"),
+            "模式行的下层取当前方案"
+        );
+        let c = find("mode:url", CommentState::Default, true);
+        assert_eq!((c.template_id, c.from_scope.as_str()), (None, "mode:url"));
     }
 }

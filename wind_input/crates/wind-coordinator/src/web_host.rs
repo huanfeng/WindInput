@@ -44,6 +44,12 @@ pub trait WebDataHost {
     fn auto_comment_sources(&self) -> Vec<crate::coordinator::AutoCommentSource>;
     /// 随包内置注释词库清单（`system.comments.toml` 的 `[[dicts]]`）。
     fn system_comment_dicts(&self) -> Vec<wind_config::comment_lib::BuiltinCommentDict>;
+    /// 出厂注释模板与分配（`system.comments.toml`）。
+    fn system_comments(&self) -> &wind_config::comment_lib::SystemComments;
+    /// 按当前配置合并好的注释模板库快照。
+    fn comment_library(&self) -> Arc<wind_config::comment_lib::CommentLibrary>;
+    /// 方案在注释分配表里的类型（`[ui.comment.assign.type]` 的键）。
+    fn comment_schema_type(&self, schema_id: &str) -> wind_config::comment_lib::SchemaType;
     fn sync_chaizi_assets(&self);
     /// 设置页「设为当前」直接切了引擎：通知宿主那是全局意图（按应用方案的全局方案随之更新），
     /// 见 `Coordinator::note_global_schema_set`。
@@ -271,6 +277,15 @@ impl WebDataHost for Coordinator {
     }
     fn system_comment_dicts(&self) -> Vec<wind_config::comment_lib::BuiltinCommentDict> {
         self.system_comments.dicts.clone()
+    }
+    fn system_comments(&self) -> &wind_config::comment_lib::SystemComments {
+        &self.system_comments
+    }
+    fn comment_library(&self) -> Arc<wind_config::comment_lib::CommentLibrary> {
+        Coordinator::comment_lib(self)
+    }
+    fn comment_schema_type(&self, schema_id: &str) -> wind_config::comment_lib::SchemaType {
+        crate::comment::schema_type_of(&self.engine_mgr, schema_id)
     }
     fn sync_chaizi_assets(&self) {
         Coordinator::sync_chaizi_assets(self);

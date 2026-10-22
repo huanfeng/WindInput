@@ -412,6 +412,9 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
 
         // ── dict.*（用户词库）────────────────────
         "comment.sources" => h.web_comment_sources(),
+        // 设置端注释总表：模板表（带来源）、出厂分配、每格实际生效的模板与所在层。
+        // 带 `comment`（未保存的 `[ui.comment]` 草稿）时按草稿算。
+        "comment.library" => h.web_comment_library(params),
         "emoji.modules" => h.web_emoji_modules(),
         "dict.listPaged" => h.web_dict_list_paged(params),
         "dict.search" => h.web_dict_search(params),
@@ -891,6 +894,44 @@ pub trait WebDataRpc: WebDataHost {
             .map(|b| json!({ "id": b.id, "label": b.label, "rel": b.path, "origin": "builtin" }))
             .collect();
         Ok(json!({ "auto": auto, "builtin": builtin, "files": files }))
+    }
+
+    fn web_comment_library(&self, params: &Value) -> anyhow::Result<Value> {
+        use wind_config::comment_lib::{CommentLibrary, TemplateOrigin, UiCommentConfig};
+        let system = self.system_comments();
+        let lib = match params.get("comment").filter(|v| !v.is_null()) {
+            Some(draft) => {
+                let user: UiCommentConfig = serde_json::from_value(draft.clone())
+                    .map_err(|e| anyhow::anyhow!("comment 草稿形态不对: {e}"))?;
+                std::sync::Arc::new(CommentLibrary::build(system, &user).0)
+            }
+            None => self.comment_library(),
+        };
+        let templates: Vec<Value> = lib
+            .templates()
+            .map(|(t, o)| {
+                let origin = match o {
+                    TemplateOrigin::Builtin => "builtin",
+                    TemplateOrigin::User => "user",
+                    TemplateOrigin::UserOverridesBuiltin => "user_overrides_builtin",
+                };
+                let mut v = json!({ "id": t.id, "name": t.name, "text": t.text, "origin": origin });
+                // 被用户覆盖的内置模板带上原版，供设置端「恢复内置」前对照。
+                if o == TemplateOrigin::UserOverridesBuiltin
+                    && let Some(b) = system.templates.iter().find(|b| b.id == t.id)
+                {
+                    v["builtin"] = json!({ "name": b.name, "text": b.text });
+                }
+                v
+            })
+            .collect();
+        let active = self.engine_mgr().active_schema_id();
+        let effective = lib.effective_table(&active, |s| self.comment_schema_type(s));
+        Ok(json!({
+            "templates": templates,
+            "system_assign": system.assign,
+            "effective": effective,
+        }))
     }
 
     /// emoji 附加模块清单（内置 + 用户放进 `emoji/` 的 OpenCC 表），供设置页对话框列出。
@@ -10692,5 +10733,106 @@ mod system_stats_tests {
                 .is_err()
         );
         assert!(c.web_data_rpc("dict.systemStats", &json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod comment_library_tests {
+    //! `comment.library`：模板表带来源，总表每格给出实际生效的模板与所在层。
+    use super::*;
+    use std::sync::Arc;
+    use wind_config::Config;
+    use wind_coordinator::Coordinator;
+    use wind_store::Store;
+
+    fn coord(tag: &str) -> Arc<Coordinator> {
+        let base = std::env::temp_dir().join(format!("wind_cmtlib-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("schemas")).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../data/system.comments.toml"
+            ),
+            base.join("system.comments.toml"),
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
+        Coordinator::new_headless_with_store(Config::default(), Some(&base), store)
+    }
+
+    fn cell<'a>(v: &'a Value, scope: &str, state: &str, vertical: bool) -> &'a Value {
+        v["effective"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["scope"] == scope && e["state"] == state && e["vertical"] == vertical)
+            .unwrap_or_else(|| panic!("effective 缺 {scope}/{state}/{vertical}: {v}"))
+    }
+
+    #[test]
+    fn builtin_templates_and_global_effective() {
+        let v = coord("base")
+            .web_data_rpc("comment.library", &json!({}))
+            .unwrap();
+        let code_hint = v["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == "code_hint")
+            .expect("templates 应含 code_hint");
+        assert_eq!(code_hint["origin"], "builtin");
+        assert_eq!(code_hint["name"], "编码提示");
+        let g = cell(&v, "global", "default", true);
+        assert_eq!(g["template_id"], "code_hint");
+        assert_eq!(g["from_scope"], "global");
+        assert_eq!(
+            v["system_assign"]["type"]["codetable"]["detail_vertical"],
+            "chaizi_pinyin"
+        );
+        let e = cell(&v, "mode:temp_english", "default", true);
+        assert_eq!(e["template_id"], "none");
+        assert_eq!(e["from_scope"], "mode:temp_english");
+        let t = cell(&v, "type:codetable", "default", false);
+        assert_eq!(t["template_id"], "code_hint");
+        assert_eq!(t["from_scope"], "global");
+    }
+
+    #[test]
+    fn draft_comment_param_drives_rows_and_origins() {
+        let v = coord("draft")
+            .web_data_rpc(
+                "comment.library",
+                &json!({"comment": {
+                    "templates": [
+                        {"id": "code_hint", "name": "改", "text": "X"},
+                        {"id": "mine", "name": "我的", "text": "Y"}
+                    ],
+                    "assign": {"schema": {"wubi86": {"detail_vertical": "mine"}}}
+                }}),
+            )
+            .unwrap();
+        let origin = |id: &str| {
+            v["templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == id)
+                .map(|t| t["origin"].clone())
+        };
+        assert_eq!(origin("code_hint"), Some(json!("user_overrides_builtin")));
+        let ch = v["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == "code_hint")
+            .unwrap();
+        assert_eq!(ch["builtin"]["name"], "编码提示");
+        assert_eq!(origin("mine"), Some(json!("user")));
+        let s = cell(&v, "schema:wubi86", "detail", false);
+        assert_eq!(s["template_id"], "mine");
+        assert_eq!(s["from_scope"], "schema:wubi86");
+        let s = cell(&v, "schema:wubi86", "default", true);
+        assert_eq!(s["from_scope"], "global");
     }
 }
