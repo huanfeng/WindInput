@@ -214,6 +214,7 @@ impl Coordinator {
             SessionAction::CaretLeft | SessionAction::CaretRight => Some("光标移动键"),
             SessionAction::Command(_) => Some("命令键"),
             SessionAction::SingleChar(_) => Some("单字键"),
+            SessionAction::CommentState(_) => Some("注释键"),
             SessionAction::None => None,
         }
     }
@@ -345,6 +346,7 @@ impl Coordinator {
             Some(SessionAction::CaretLeft | SessionAction::CaretRight) => Some("光标移动键"),
             Some(SessionAction::Command(_)) => Some("命令键"),
             Some(SessionAction::SingleChar(_)) => Some("单字键"),
+            Some(SessionAction::CommentState(_)) => Some("注释键"),
             Some(
                 SessionAction::SelectCandidate(_)
                 | SessionAction::SelectChar(_)

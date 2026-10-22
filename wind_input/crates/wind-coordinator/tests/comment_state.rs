@@ -333,3 +333,39 @@ fn flip_does_not_requery() {
     let after: Vec<_> = shown(&c, &rx).into_iter().map(|i| i.text).collect();
     assert_eq!(after, before, "下发的候选页不变");
 }
+
+/// 会话表的 `comment_state:session`：只翻转当前候选窗，持久态不变；空闲时放行。
+#[test]
+fn session_verb_toggles_flip_only() {
+    if !has_schemas() {
+        return;
+    }
+    const VK_TAB: u32 = 0x09;
+    let mut cfg = cfg();
+    cfg.keys
+        .session_actions
+        .insert("tab".into(), "comment_state:session".into());
+    let (c, rx) = open(cfg);
+
+    let idle = c.handle_key_event_policed(&key(VK_TAB));
+    assert!(
+        !matches!(idle, KeyAction::Consumed),
+        "空闲时 Tab 要还给宿主，实际 {idle:?}"
+    );
+
+    type_str(&c, "gg");
+    assert_eq!(gg_comments(&c, &rx), GG_DEFAULT);
+    let act = c.handle_key_event_policed(&key(VK_TAB));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "有候选时应吞键，实际 {act:?}"
+    );
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+    assert_eq!(gg_comments(&c, &rx), GG_DETAIL, "翻转后显示详细");
+    c.handle_key_event(&key(0x1B));
+    assert_eq!(
+        c.debug_effective_comment_state(),
+        CommentState::Default,
+        "持久态始终是默认，翻转随会话清掉"
+    );
+}

@@ -37,7 +37,7 @@ pub mod variant;
 pub use code_charset::{CodeCharSet, CodeCharSetError};
 pub use config::{
     AssociationConfig, AuxCodeShare, BoundAction, CUSTOM_DATA_DIR_NAME, CUSTOM_MANIFEST_NAME,
-    CodetableEnglishMerge, CodetableGlobal, CommentDictSpec, Config, CorrectionConfig,
+    CodetableEnglishMerge, CodetableGlobal, CommentDictSpec, CommentStateAction, Config, CorrectionConfig,
     CorrectionRuleToggles, CustomHideList, CustomIdentity, CustomManifest, DEFAULT_DOTA2_ALIAS,
     DEFAULT_LABEL_CAPS, DEFAULT_LABEL_ENGLISH, DOTA2_ALIAS_MAX_LEN, EMOJI_MODULES, EMOJI_USER_DIR,
     EmojiModule, EmojiModuleEntry, HintScope, KeyOrigin, LabelsConfig, LangBarConfig, LayerOrigin,

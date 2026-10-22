@@ -5972,6 +5972,18 @@ impl Coordinator {
                 // 内容，用户正在打的那串码要原样留着。
                 return Some(KeyAction::Consumed);
             }
+            // 注释态：判据与 `SingleChar` 同侧——无会话放行（Tab 等键空闲时要还给宿主），
+            // 有会话即吞键；`session` 档另由 `requires_candidates` 在上游按有候选放行。
+            wind_config::SessionAction::CommentState(a) => {
+                if !Self::has_input_session(state) {
+                    return None;
+                }
+                match self.apply_comment_state_action(state, a) {
+                    Ok(label) => self.show_tip_locked(state, label),
+                    Err(e) => warn!("comment_state: {e}"),
+                }
+                return Some(KeyAction::Consumed);
+            }
             // 上屏高亮：与各模式空格臂**同一个函数**，副作用逐字一致（见 `commit_highlighted`）。
             // 不走空格臂本身——那里有 `space_as_input` 这类**空格键**的变体，本动词不跟；
             // 联想 `space_commits = false` 则跟（判据在 `commit_highlighted` 里）。
@@ -7273,6 +7285,12 @@ impl Coordinator {
             "preedit" => self.cmd_toggle_preedit(),
             "candwin" => self.cmd_toggle_candwin(),
             "layout" => self.cmd_toggle_layout(),
+            // 命令栏入口走 `CoordIme::toggle` 直接返回错误；这里是菜单等无处报错的路径。
+            "comment" => {
+                if let Err(e) = self.cmd_comment_state(None) {
+                    warn!("ime.toggle comment: {e}");
+                }
+            }
             other => {
                 warn!(
                     "ime.toggle: 暂不支持 target {:?}（Rust 平台能力待补）",

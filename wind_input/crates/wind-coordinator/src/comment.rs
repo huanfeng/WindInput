@@ -1138,6 +1138,56 @@ impl crate::coordinator::Coordinator {
         }
     }
 
+    /// 执行一个 `comment_state` 按键动词，返回要弹的状态泡文案（反映执行后的生效态）。
+    ///
+    /// 写盘失败时内存不变，错误交给调用方（按键路径 warn，命令栏返回给用户）。
+    /// 三个消费点（空闲 / 会话表 / 命令栏）共用这一处。
+    pub(crate) fn apply_comment_state_action(
+        &self,
+        state: &mut State,
+        action: wind_config::CommentStateAction,
+    ) -> anyhow::Result<&'static str> {
+        use wind_config::CommentStateAction as A;
+        match action {
+            A::Toggle => {
+                use wind_config::comment_lib::CommentState;
+                let to = match self.rt().config.ui.comment.state {
+                    CommentState::Default => CommentState::Detail,
+                    CommentState::Detail => CommentState::Default,
+                };
+                self.set_comment_state(state, to)?;
+            }
+            A::Set(to) => self.set_comment_state(state, to)?,
+            A::Session => self.toggle_comment_session(state),
+        }
+        Ok(Self::comment_state_label(Self::effective_comment_state(
+            &self.rt().config,
+            state,
+        )))
+    }
+
+    fn comment_state_label(s: wind_config::comment_lib::CommentState) -> &'static str {
+        match s {
+            wind_config::comment_lib::CommentState::Default => "注释:默认",
+            wind_config::comment_lib::CommentState::Detail => "注释:详细",
+        }
+    }
+
+    /// 命令栏 `ime.toggle("comment")` / `ime.set("comment", ...)`：`want` 为 `None` 即取反。
+    pub(crate) fn cmd_comment_state(
+        &self,
+        want: Option<wind_config::comment_lib::CommentState>,
+    ) -> anyhow::Result<()> {
+        use wind_config::CommentStateAction as A;
+        let action = want.map_or(A::Toggle, A::Set);
+        let label = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.apply_comment_state_action(&mut state, action)?
+        };
+        self.show_tip(label);
+        Ok(())
+    }
+
     /// 失焦 / 切走输入法：Alt 松开多半送不到了，判定中间态与按住翻转一并复位。
     pub(crate) fn reset_comment_alt(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

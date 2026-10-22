@@ -590,6 +590,12 @@ platform = 'desktop'
 weight = 2000
 
 [[phrases]]
+code = 'cozs'
+text = '$CC("切注释", ime.toggle("comment"))'
+platform = 'desktop'
+weight = 2000
+
+[[phrases]]
 code = 'cots'
 text = '$CC("切主题", ime.theme_cycle())'
 platform = 'desktop'

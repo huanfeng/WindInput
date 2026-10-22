@@ -853,6 +853,14 @@ impl Coordinator {
                 }
                 Some(KeyAction::Consumed)
             }
+            // 注释态同样原地生效、不顶字（持久态；BoundAction 不含 session 档）。
+            BoundAction::CommentState(a) => {
+                match self.apply_comment_state_action(state, *a) {
+                    Ok(label) => self.show_tip_locked(state, label),
+                    Err(e) => warn!("comment_state: {e}"),
+                }
+                Some(KeyAction::Consumed)
+            }
             BoundAction::Special(id) => {
                 let idx = self.special_mode_idx(id)?;
                 let schema = self.special_schema(idx)?;

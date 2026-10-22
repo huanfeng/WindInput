@@ -314,6 +314,10 @@ impl ImeController for CoordIme {
             if is_feature_target(target) {
                 return c.cmd_set_feature(target, None);
             }
+            // 写盘失败要报给命令栏。
+            if target == "comment" {
+                return c.cmd_comment_state(None);
+            }
             c.cmd_ime_toggle(target);
         }
         Ok(())
@@ -326,6 +330,21 @@ impl ImeController for CoordIme {
             c.cmd_set_feature(target, Some(on))
         } else {
             c.cmd_set_state(target, on)
+        }
+    }
+    fn set_value(&self, target: &str, value: &str) -> anyhow::Result<()> {
+        let Some(c) = self.0.upgrade() else {
+            return Ok(());
+        };
+        match (target, value) {
+            ("comment", "default") => {
+                c.cmd_comment_state(Some(wind_config::comment_lib::CommentState::Default))
+            }
+            ("comment", "detail") => {
+                c.cmd_comment_state(Some(wind_config::comment_lib::CommentState::Detail))
+            }
+            ("comment", _) => anyhow::bail!("comment 的状态需要 default / detail，收到 {value:?}"),
+            _ => anyhow::bail!("ime.set 不支持 target {target:?}"),
         }
     }
     fn open_setting(&self, page: &str, args: &str) -> anyhow::Result<()> {

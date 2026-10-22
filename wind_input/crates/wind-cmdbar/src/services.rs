@@ -161,6 +161,12 @@ pub trait ImeController: Send + Sync {
         let _ = on;
         anyhow::bail!("ime.set 不支持 target {target:?}")
     }
+    /// 把取值型目标设为指定值（`ime.set("comment", "detail")`）；与 [`Self::set`] 的分别是
+    /// 值不是 on / off。默认不支持。
+    fn set_value(&self, target: &str, value: &str) -> anyhow::Result<()> {
+        let _ = value;
+        anyhow::bail!("ime.set 不支持 target {target:?}")
+    }
     /// 打开设置窗口的指定页面。`page` 为规范页 id（schema/input/keys/ui/dict/
     /// advanced/about），空串打开默认页。未知 id 由设置端忽略并落到默认页。
     ///

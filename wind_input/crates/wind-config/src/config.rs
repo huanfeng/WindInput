@@ -1734,6 +1734,10 @@ pub enum BoundAction {
     /// 它切的是**内存临时态**，不写配置——与同族的 `toggle_schema` 一样是「此刻的动作」，
     /// 而不是「改一项设置」。切方案即失效（见 `Coordinator::sync_schema_scope`）。
     SingleChar(SingleCharAction),
+    /// 切候选注释的详细 / 默认态（持久，写回 `ui.comment.state`）。载荷见 [`CommentStateAction`]。
+    ///
+    /// 本表没有「当前候选窗」可言，故不接受 `session` 档（见 [`CommentStateAction::Session`]）。
+    CommentState(CommentStateAction),
     /// 切到指定方案，**再按回到来源**（携带目标方案 id）。
     ///
     /// 往返语义由**运行时来源**兜底，不要求目标方案配对称的绑定。
@@ -1886,6 +1890,8 @@ impl BoundAction {
             | Self::Special(_) => true,
             // 字词范围切的是「这一码出什么」，没有中文候选就无从谈起。
             Self::SingleChar(_) => true,
+            // 注释态是持久设置，与中英态无关。
+            Self::CommentState(_) => false,
             // 命令不改输入状态，英文态下照样该按得动。
             Self::None
             | Self::SoftKeyboard(_)
@@ -1966,6 +1972,16 @@ impl BoundAction {
             return match SingleCharAction::parse_payload(rest) {
                 Some(a) => Self::SingleChar(a),
                 None => Self::None,
+            };
+        }
+        // 注释态 `comment_state[:<default|detail>]`；`session` 档只属于会话表，这里判无效。
+        if s.eq_ignore_ascii_case("comment_state") {
+            return Self::CommentState(CommentStateAction::Toggle);
+        }
+        if let Some(rest) = s.strip_prefix("comment_state:") {
+            return match CommentStateAction::parse_payload(rest) {
+                Some(CommentStateAction::Session) | None => Self::None,
+                Some(a) => Self::CommentState(a),
             };
         }
         let lower = s.to_lowercase();
@@ -2059,6 +2075,9 @@ pub enum SessionAction {
     /// 没绑上」——而用户只是把配置从一张表挪到了另一张。这条纪律见
     /// [`Self::parse`] 里 `aux_code` 那一行的注释。
     SingleChar(SingleCharAction),
+    /// 切候选注释态。**动词与载荷同 [`BoundAction::CommentState`]**，另多一档 `session`
+    /// （只翻转当前候选窗，不写配置）。
+    CommentState(CommentStateAction),
     /// 以词定字：取当前高亮候选词的第 N 个字（**N 从 1 起**）。收编自 `keys.select_char_keys`。
     SelectChar(u8),
     /// 进辅助码筛选：对已出的候选按字形码二次过滤。
@@ -2225,6 +2244,15 @@ impl SessionAction {
                 None => Self::None,
             };
         }
+        if t == "comment_state" {
+            return Self::CommentState(CommentStateAction::Toggle);
+        }
+        if let Some(rest) = t.strip_prefix("comment_state:") {
+            return match CommentStateAction::parse_payload(rest) {
+                Some(a) => Self::CommentState(a),
+                None => Self::None,
+            };
+        }
         match t.as_str() {
             "page_prev" => Self::PagePrev,
             "page_next" => Self::PageNext,
@@ -2254,6 +2282,10 @@ impl SessionAction {
     /// ★ 判据挂在**动作**上而不是写在消费点：消费点有三个（主输入 / mix / 候选导航），
     /// 写在那里就要维护三份一致的守卫，而这类「三处必须一致」的约束本仓已栽过四次。
     pub fn requires_candidates(&self) -> bool {
+        // 注释态：只有翻转当前候选窗（`session`）依赖候选窗；改持久态随时可做。
+        if let Self::CommentState(a) = self {
+            return *a == CommentStateAction::Session;
+        }
         // `SingleChar` 与 `Cancel` 同侧：切换在「打了码还没出候选」时**恰恰最该生效**
         // ——单字模式下某个码本来就可能一条候选都不剩，那时按键若被判成「无事可做」而放行，
         // 用户就再也关不掉它了。
@@ -2333,6 +2365,10 @@ impl std::fmt::Display for SessionAction {
             Self::AuxCode(AuxCodeShare::Solo) => f.write_str("aux_code"),
             Self::AuxCode(AuxCodeShare::PageNext) => f.write_str("aux_code:page_next"),
             Self::SingleChar(a) => write!(f, "single_char:{}", a.as_payload()),
+            Self::CommentState(a) => match a.as_payload() {
+                "" => f.write_str("comment_state"),
+                p => write!(f, "comment_state:{p}"),
+            },
             Self::CommitHighlighted => f.write_str("commit_highlighted"),
             Self::CaretLeft => f.write_str("caret_left"),
             Self::CaretRight => f.write_str("caret_right"),
@@ -4161,6 +4197,46 @@ impl SingleCharAction {
             Self::Set(false) => "off",
             Self::Toggle => "toggle",
             Self::Follow => "follow",
+        }
+    }
+}
+
+/// `comment_state[:<载荷>]` 按键动词的载荷（[`BoundAction::CommentState`] /
+/// [`SessionAction::CommentState`] 共用）。
+///
+/// 载荷：空（裸动词）= 在持久态之间切换；`default` / `detail` = 直达该态；
+/// `session` = 只翻转当前候选窗（仅会话表有意义）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentStateAction {
+    /// 切换持久态（写回 `ui.comment.state`）。
+    Toggle,
+    /// 直达指定持久态。
+    Set(crate::comment_lib::CommentState),
+    /// 只翻转当前候选窗，不写配置。
+    Session,
+}
+
+impl CommentStateAction {
+    /// 解析 `comment_state:` 之后的那一段；未知载荷返回 `None`（同 [`SingleCharAction::parse_payload`]）。
+    pub fn parse_payload(rest: &str) -> Option<Self> {
+        use crate::comment_lib::CommentState;
+        match rest.trim().to_ascii_lowercase().as_str() {
+            "" => Some(Self::Toggle),
+            "default" => Some(Self::Set(CommentState::Default)),
+            "detail" => Some(Self::Set(CommentState::Detail)),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
+
+    /// 配置值（不含 `comment_state:` 前缀）；`Toggle` 为空串，对应裸动词。
+    pub fn as_payload(&self) -> &'static str {
+        use crate::comment_lib::CommentState;
+        match self {
+            Self::Toggle => "",
+            Self::Set(CommentState::Default) => "default",
+            Self::Set(CommentState::Detail) => "detail",
+            Self::Session => "session",
         }
     }
 }
@@ -7999,6 +8075,7 @@ mod bound_action_chinese_only_tests {
             "softkeyboard:num",
             "toggle_schema:english",
             "switch_schema:wubi",
+            "comment_state",
             "none",
         ] {
             assert!(
@@ -8006,6 +8083,60 @@ mod bound_action_chinese_only_tests {
                 "{verb} 不得限中文态"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod comment_state_verb_tests {
+    use super::*;
+    use crate::comment_lib::CommentState;
+
+    #[test]
+    fn parses_comment_state_verbs() {
+        for v in [
+            "comment_state",
+            "comment_state:detail",
+            "comment_state:default",
+        ] {
+            assert!(BoundAction::parse(v).is_enabled(), "{v} 两张表都应认");
+            assert!(SessionAction::parse(v).is_enabled(), "{v} 两张表都应认");
+            assert_eq!(SessionAction::parse(v).to_string(), v);
+        }
+        assert_eq!(
+            BoundAction::parse("comment_state:detail"),
+            BoundAction::CommentState(CommentStateAction::Set(CommentState::Detail))
+        );
+        assert_eq!(
+            SessionAction::parse("comment_state"),
+            SessionAction::CommentState(CommentStateAction::Toggle)
+        );
+        // session 档只属于会话表。
+        assert_eq!(
+            BoundAction::parse("comment_state:session"),
+            BoundAction::None
+        );
+        assert!(!BoundAction::parse("comment_state:session").is_enabled());
+        assert_eq!(
+            SessionAction::parse("comment_state:session"),
+            SessionAction::CommentState(CommentStateAction::Session)
+        );
+        assert_eq!(
+            SessionAction::parse("comment_state:session").to_string(),
+            "comment_state:session"
+        );
+        // 写错的载荷不静默降级。
+        assert_eq!(BoundAction::parse("comment_state:yes"), BoundAction::None);
+        assert_eq!(
+            SessionAction::parse("comment_state:yes"),
+            SessionAction::None
+        );
+    }
+
+    #[test]
+    fn only_session_payload_requires_candidates() {
+        assert!(SessionAction::parse("comment_state:session").requires_candidates());
+        assert!(!SessionAction::parse("comment_state").requires_candidates());
+        assert!(!SessionAction::parse("comment_state:detail").requires_candidates());
     }
 }
 

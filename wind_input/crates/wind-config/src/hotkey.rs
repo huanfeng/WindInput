@@ -92,6 +92,7 @@ fn hotkey_policy_for(action: &crate::config::BoundAction) -> Option<u32> {
         // `Command` 同档：跑的是用户自己的命令，被宿主加速键抢走时换个组合键即可。
         BA::None
         | BA::SingleChar(_)
+        | BA::CommentState(_)
         | BA::ToggleSchema(_)
         | BA::SwitchSchema(_)
         | BA::Action(_)
@@ -1845,6 +1846,8 @@ mod tests {
             "special:fuhao",
             "single_char",
             "single_char:on",
+            "comment_state",
+            "comment_state:detail",
             "softkeyboard",
             "softkeyboard:num",
             // C 类切方案
@@ -1893,6 +1896,8 @@ mod tests {
             ("toggle_s2t", true, false),
             ("toggle_t2s", true, false),
             ("single_char", true, false),
+            ("comment_state", false, false),
+            ("comment_state:detail", false, false),
             ("temp_pinyin", true, true),
             ("temp_english", true, true),
             ("aux_code", true, true),

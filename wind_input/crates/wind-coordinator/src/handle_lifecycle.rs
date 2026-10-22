@@ -694,6 +694,14 @@ impl Coordinator {
                 }
                 Some(KeyAction::Consumed)
             }
+            // 注释态：持久设置，恒吞键；状态泡是空闲时唯一的反馈。
+            BoundAction::CommentState(a) => {
+                match self.apply_comment_state_action(state, *a) {
+                    Ok(label) => self.show_tip_locked(state, label),
+                    Err(e) => warn!("comment_state: {e}"),
+                }
+                Some(KeyAction::Consumed)
+            }
             BoundAction::TempPinyin => {
                 let target = self.engine_mgr.temp_pinyin_target()?;
                 state.active = Some(ModeKind::TempPinyin);
@@ -904,6 +912,7 @@ impl Coordinator {
             | BoundAction::Mix(_)
             | BoundAction::Special(_)
             | BoundAction::SingleChar(_)
+            | BoundAction::CommentState(_)
             | BoundAction::SoftKeyboard(_) => false,
         }
     }
@@ -1042,6 +1051,7 @@ impl Coordinator {
             // `toggle_softkeyboard` 自己处理（它的语义就是「再按一次关掉」）。
             BoundAction::None
             | BoundAction::SingleChar(_)
+            | BoundAction::CommentState(_)
             | BoundAction::SoftKeyboard(_)
             | BoundAction::ToggleSchema(_)
             | BoundAction::SwitchSchema(_)
