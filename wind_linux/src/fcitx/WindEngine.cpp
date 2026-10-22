@@ -850,6 +850,29 @@ void WindEngine::sendKeyUp(fcitx::InputContext* ic, uint32_t vk, uint32_t mods, 
     }
 }
 
+bool WindEngine::sendAltEvent(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods,
+                              uint8_t toggles)
+{
+    if (!ensureConnected()) {
+        return false;
+    }
+    KeyEvent e;
+    e.keyCode = vk;
+    e.modifiers = mods;
+    e.eventType = eventType;
+    e.toggles = toggles;
+    e.eventSeq = ++keySeq_;
+    e.prevChar = prevCharFor(ic);
+    Frame resp;
+    if (!requestWithRetry(encodeKeyEventFrame(e), resp)) {
+        return false;
+    }
+    bool consumed = applyResponse(ic, resp, false);
+    WIND_DEBUG() << "comment_alt vk=" << hex(vk) << (eventType == KEY_EVENT_DOWN ? " down" : " up")
+                 << " mods=" << hex(mods) << (consumed ? " 吃" : " 透传");
+    return consumed;
+}
+
 void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEvent& event)
 {
     fcitx::InputContext* ic = event.inputContext();
@@ -871,6 +894,7 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     // 光标前字符的记账只对「这一个文本框里我们自己打出去的东西」有效，换焦点即作废。
     router_.reset();
     tap_.reset();
+    altHold_.reset();
     caps_.reset();
     eatenKeys_.clear();
     if (!ensureConnected()) {
@@ -975,6 +999,16 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     }
 
     if (event.isRelease()) {
+        // 组字中的 Alt 松开：转发给服务，回包 Consumed 才吃（否则宿主照常看到，如激活菜单栏）。
+        if (uint32_t avk = altVK(sym); avk != 0) {
+            const bool forward = altHold_.shouldForwardUp(router_.hasComposition());
+            const uint32_t mods = statesToModifiers(states) | altHold_.stickyMods();
+            altHold_.reset();
+            if (forward && sendAltEvent(ic, avk, KEY_EVENT_UP, mods, statesToToggles(states))) {
+                event.filterAndAccept();
+            }
+            return;
+        }
         if (uint32_t vk = tap_.onRelease(sym, nowMs()); vk != 0) {
             // 干净的修饰键单击：切中英等。松开事件本身照常交给宿主（宿主要看得见修饰键）。
             if (ensureConnected()) {
@@ -992,6 +1026,18 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     // 菜单开着时按键由服务端转给菜单（方向键 / 回车 / Esc / 其它键关菜单并吞掉）：
     // 键盘操作同样算菜单上的活动，空闲计时重新起算。
     panel_->noteMenuActivity();
+    // 组字中的 Alt 按下：转发给服务切换注释态，回包 Consumed 才吃。按住期间按过的
+    // Shift / Ctrl / Super 粘到 Alt 事件的修饰位上（见 AltHold）。
+    altHold_.noteKey(sym, states);
+    if (uint32_t avk = altVK(sym); avk != 0) {
+        const bool forward = router_.hasComposition();
+        altHold_.onAltDown(forward);
+        if (forward && sendAltEvent(ic, avk, KEY_EVENT_DOWN, statesToModifiers(states) | altHold_.stickyMods(),
+                                    statesToToggles(states))) {
+            event.filterAndAccept();
+        }
+        return;
+    }
     // 修饰键本身的按下不上报（Windows 吃掉切换键的 keydown、macOS 走 flagsChanged 不发）：
     // 单击判定在上面，组合键的修饰状态随下一个键的 states 一起到。
     if (key.isModifier()) {

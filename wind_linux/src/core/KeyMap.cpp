@@ -290,4 +290,40 @@ uint32_t ToggleTapDetector::onRelease(uint32_t keysym, uint64_t nowMs)
     return v;
 }
 
+uint32_t altVK(uint32_t keysym)
+{
+    switch (keysym) {
+    case ks::Alt_L: return vk::LMENU;
+    case ks::Alt_R: return vk::RMENU;
+    default: return 0;
+    }
+}
+
+void AltHold::onAltDown(bool forwarded)
+{
+    if (!active_) {
+        active_ = true;
+        sticky_ = 0;
+        forwarded_ = false;
+    }
+    forwarded_ = forwarded_ || forwarded;
+}
+
+void AltHold::noteKey(uint32_t keysym, uint32_t states)
+{
+    if (!active_) {
+        return;
+    }
+    sticky_ |= statesToModifiers(states) & ~KEYMOD_ALT;
+    switch (keysym) {
+    case ks::Shift_L:
+    case ks::Shift_R: sticky_ |= KEYMOD_SHIFT; break;
+    case ks::Control_L:
+    case ks::Control_R: sticky_ |= KEYMOD_CTRL; break;
+    case ks::Super_L:
+    case ks::Super_R: sticky_ |= KEYMOD_WIN; break;
+    default: break;
+    }
+}
+
 } // namespace windlinux

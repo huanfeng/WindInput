@@ -102,6 +102,8 @@ private:
     /// `toggles` 必须是真实锁定态——服务端拿**每一帧**的 toggles 校准大写锁定镜像，
     /// 发 0 等于告诉它「大写锁定关了」。
     void sendKeyUp(fcitx::InputContext* ic, uint32_t vk, uint32_t mods, uint8_t toggles);
+    /// 组字中 Alt 的按下 / 松开转发给服务（注释态切换）；返回服务是否吃掉。
+    bool sendAltEvent(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods, uint8_t toggles);
     bool applyResponse(fcitx::InputContext* ic, const Frame& resp, bool hostShortcut);
     /// 帧里带中英模式就记下；变了则让 Fcitx5 的 UI 模块重取图标。
     void noteMode(const Frame& frame);
@@ -154,6 +156,7 @@ private:
     BridgeClient bridge_;
     ResponseRouter router_;
     ToggleTapDetector tap_;
+    AltHold altHold_;
     CapsLockTracker caps_;
     uint16_t keySeq_ = 0;
     bool lastReportedSecure_ = false;

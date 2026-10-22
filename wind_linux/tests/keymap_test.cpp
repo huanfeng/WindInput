@@ -133,6 +133,47 @@ void TestToggleTap()
     CHECK_EQ(d.onRelease(0xffe9, 6010), 0u);
 }
 
+void TestAltHold()
+{
+    CASE("Alt_L / Alt_R → VK_LMENU / VK_RMENU");
+    CHECK_EQ(altVK(0xffe9), 0xA4u);
+    CHECK_EQ(altVK(0xffea), 0xA5u);
+    CHECK_EQ(altVK(0xffe1), 0u);
+
+    CASE("按住 Alt 期间按过 Shift 又先松开：松开 Alt 时仍带 Shift；Alt 位不算");
+    AltHold h;
+    h.onAltDown(true);
+    h.noteKey(0xffe1, xstate::Alt); // Shift_L 按下（按下事件的 states 还不含 Shift）
+    h.noteKey('a', xstate::Alt);
+    CHECK_EQ(h.stickyMods(), KEYMOD_SHIFT);
+
+    CASE("Super / Ctrl 自身与 states 里的位都记");
+    h.noteKey(0xffeb, 0);                     // Super_L
+    h.noteKey('x', xstate::Ctrl | xstate::Alt); // Ctrl 已按着的组合
+    CHECK_EQ(h.stickyMods(), KEYMOD_SHIFT | KEYMOD_WIN | KEYMOD_CTRL);
+
+    CASE("自动重复不清粘滞位；复位后清");
+    h.onAltDown(true);
+    CHECK_EQ(h.stickyMods(), KEYMOD_SHIFT | KEYMOD_WIN | KEYMOD_CTRL);
+    h.reset();
+    CHECK_EQ(h.stickyMods(), 0u);
+
+    CASE("Alt 按下前的修饰键不算");
+    AltHold before;
+    before.noteKey(0xffe1, 0);
+    before.onAltDown(true);
+    CHECK_EQ(before.stickyMods(), 0u);
+
+    CASE("按下转发过：组字已结束（Alt+数字上屏）仍转发松开；都不在组字不转发");
+    CHECK(before.shouldForwardUp(false));
+    AltHold idle;
+    idle.onAltDown(false);
+    CHECK(!idle.shouldForwardUp(false));
+    CHECK(idle.shouldForwardUp(true));
+    idle.reset();
+    CHECK(!idle.shouldForwardUp(false));
+}
+
 } // namespace
 
 int main()
@@ -143,5 +184,6 @@ int main()
     TestNumpad();
     TestModifiers();
     TestToggleTap();
+    TestAltHold();
     TEST_MAIN_END();
 }

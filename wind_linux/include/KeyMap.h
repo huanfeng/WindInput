@@ -72,4 +72,28 @@ private:
     uint64_t pressedAtMs_ = 0;
 };
 
+/// Alt_L / Alt_R → VK_LMENU / VK_RMENU；其它键返回 0。
+uint32_t altVK(uint32_t keysym);
+
+/// 组字中 Alt 转发给服务（切换注释态）的一次按住记账。协议权威在协调器 `handle_comment_alt`：
+/// 只在组字中转发 Alt 的按下与松开（0xA4 / 0xA5），修饰位带上这次按住期间按过的
+/// Shift / Ctrl / Super（粘滞，按过就一直带到松开）；吃不吃看回包。
+class AltHold {
+public:
+    /// Alt 按下。已在按住中（自动重复）则保留粘滞位。
+    void onAltDown(bool forwarded);
+    /// 任意按键按下（含修饰键本身）：按住期间记粘滞位。
+    void noteKey(uint32_t keysym, uint32_t states);
+    uint32_t stickyMods() const { return sticky_; }
+    /// 松开是否转发：组字中，或按下转发过（按住翻转要靠松开复原，哪怕期间已上屏）。
+    bool shouldForwardUp(bool composing) const { return composing || (active_ && forwarded_); }
+    /// Alt 松开 / 焦点切换：复位。
+    void reset() { *this = AltHold{}; }
+
+private:
+    bool active_ = false;
+    bool forwarded_ = false;
+    uint32_t sticky_ = 0;
+};
+
 } // namespace windlinux
