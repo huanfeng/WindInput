@@ -488,6 +488,17 @@ download_dicts() {
     download_file "$OPENCC_BASE/TWPhrases.txt"    "$opencc/TWPhrases.txt"    "台湾词汇"
     download_file "$OPENCC_BASE/HKVariants.txt"   "$opencc/HKVariants.txt"   "香港字形"
 
+    # 中英释义底表：ECDICT(MIT) 英→中，CC-CEDICT(CC BY-SA 4.0) 中→英；由 scripts/comment_dicts/build.py
+    # 按系统词表裁剪后生成内置注释词库（见 assemble_data），许可见 NOTICE.md。同其它上游一样跟随
+    # 默认分支、未固定提交；CC-CEDICT 的 MDBG 导出是每日重生成的滚动快照。
+    local ecdict="$CACHE_DIR/ecdict" cedict="$CACHE_DIR/cedict"
+    mkdir -p "$ecdict" "$cedict"
+    gray "ECDICT / CC-CEDICT (中英释义):"
+    download_file "https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv" \
+        "$ecdict/ecdict.csv" "英汉词典 ~66MB"
+    download_file "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" \
+        "$cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" "汉英词典"
+
     # 五笔词库：下载上游原始档，主库与 extra 由 gen_dict 重排/拆分后写入 build 目录；
     # district 不经 gen_dict，原样复制（见 assemble_data）
     local rime_wubi="$CACHE_DIR/rime-wubi"
@@ -749,6 +760,34 @@ assemble_data() {
     else
         warn "缺 .cache/rime-frost/opencc/，白霜 emoji 模块不可用（运行 gen-data 下载）"
     fi
+
+    # 9. 内置中英释义注释词库（Python 脚本 scripts/comment_dicts/build.py）：en_zh 按英文词表、
+    # zh_en 按拼音/五笔词表裁剪，产物只进 build 目录、不入版本库。AI 补齐的源数据
+    # data/comments-src/zh_en_ai.tsv 入库，随第 1 步一并复制进来，用完剥掉不随包分发。
+    # 缺上游或缺 python3 只是释义注释不可用，用 warn 不中断构建。
+    local cdict="$PRODUCT_ROOT/scripts/comment_dicts/build.py"
+    local ecdict_csv="$CACHE_DIR/ecdict/ecdict.csv"
+    local cedict_gz="$CACHE_DIR/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "缺 python3，中英释义词库不可用"
+    elif [ -f "$ecdict_csv" ] && [ -f "$cedict_gz" ]; then
+        gray "生成中英释义注释词库 (comment_dicts) ..."
+        mkdir -p "$schemas/comments"
+        local ai_tsv="$data/comments-src/zh_en_ai.tsv"
+        [ -f "$ai_tsv" ] || ai_tsv=""
+        python3 -I "$cdict" en-zh --ecdict "$ecdict_csv" \
+            --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
+            --out "$schemas/comments/en_zh.txt" \
+          || warn "英→中释义词库生成失败"
+        python3 -I "$cdict" zh-en --cedict "$cedict_gz" ${ai_tsv:+--ai "$ai_tsv"} \
+            --words "$pinyin_cn/base.dict.yaml" "$pinyin_cn/ext.dict.yaml" \
+                    "$pinyin/ext/idiom.dict.yaml" "$schemas/wubi86/wubi86_jidian.dict.yaml" \
+            --out "$schemas/comments/zh_en.txt" \
+          || warn "中→英释义词库生成失败"
+    else
+        warn "缺 .cache/ecdict 或 .cache/cedict，中英释义词库不可用（运行 gen-data 下载）"
+    fi
+    rm -rf "$data/comments-src"
 
     gray "data/ 组装完成 ($(find "$data" -type f | wc -l) 文件)"
 }

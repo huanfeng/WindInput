@@ -91,6 +91,20 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
   `FROST_OTHERS_EXCLUDE` 所列的组后分发）
 - **另用于**: 笔画输入方案词库的权重（取 `cn_dicts/8105`、`41448` 的单字字频，见 rime-stroke 条目）
 
+#### ECDICT
+
+- **用途**: 英→中释义（内置注释词库 `en_zh`），构建期由 `scripts/comment_dicts/build.py`
+  按英文词表裁剪，每词只取第一个词性与前两个义项
+- **仓库**: https://github.com/skywind3000/ECDICT
+- **许可证**: MIT
+
+#### CC-CEDICT
+
+- **用途**: 中→英释义（内置注释词库 `zh_en`），构建期按系统词表裁剪，每词取前两个义项
+- **来源**: https://www.mdbg.net/chinese/dictionary?page=cc-cedict （MDBG 导出）
+- **许可证**: CC BY-SA 4.0；衍生的 `zh_en` 数据同样适用该许可，AI 补齐的部分
+  （`data/comments-src/zh_en_ai.tsv`）另文件存放、不与 CC 数据混合
+
 #### pinyin-data
 
 - **用途**: 汉字现代普通话读音数据，用于生成拼音映射与悬停提示中的拼音显示
