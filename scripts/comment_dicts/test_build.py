@@ -1,7 +1,9 @@
 """build.py / ai_fill.py 的测试。无 pytest 依赖：`python3 -I -m unittest discover -s scripts/comment_dicts`，
 装了 pytest 也能直接跑。"""
 
+import contextlib
 import gzip
+import io
 import importlib.util
 import os
 import tempfile
@@ -101,7 +103,181 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(build.missing_words({}, build.load_ai(write(self.d, "ai.tsv", "生僻词\t\n")), words), words)
 
 
-class AiFillTest(unittest.TestCase):
+def rime(rows, columns=None):
+    head = "---\nname: t\n"
+    if columns:
+        head += "columns:\n" + "".join(f"  - {c}\n" for c in columns)
+    return head + "...\n" + "".join("\t".join(map(str, r)) + "\n" for r in rows)
+
+
+class SelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = self.tmp.name
+        # 通用词库不写 columns：默认 text/code/weight
+        self.base = write(self.d, "base.dict.yaml", rime([
+            ("低频词", "a", 99), ("边界词", "b", 100), ("高频词", "c", 5000),
+            ("已覆盖", "d", 9000), ("单", "e", 9000), ("abc", "f", 9000),
+            ("重复词", "g", 300), ("重复词", "g2", 800), ("跨库词", "h", 400),
+        ]))
+        self.ext = write(self.d, "ext.dict.yaml", rime([("跨库词", "h", 900), ("扩展词", "i", 150)]))
+        self.cat = write(self.d, "name.dict.yaml", rime([("专名甲", "j", 99999), ("专名乙", "k", 99999)]))
+        self.wubi = write(self.d, "wubi.dict.yaml", rime([
+            ("aa", "五笔甲", 50), ("ab", "五笔乙", 70), ("ac", "五笔丙", 60), ("ad", "高频词", 99999),
+            ("ae", "专名甲", 99999), ("af", "已覆盖", 99999), ("ag", "字", 99999), ("ah", "跨库词", 99999),
+        ], ["code", "text", "weight"]))
+        self.cedict = {"已覆盖": "covered"}
+
+    def select(self, **kw):
+        args = dict(cedict=self.cedict, ai={}, general=[self.base, self.ext], wubi=[self.wubi], category=[self.cat])
+        args.update(kw)
+        return build.select_missing(**args)
+
+    def words(self, sel, group=None):
+        return [w for g, w in sel if group is None or g == group]
+
+    def test_frequency_threshold_is_inclusive_and_configurable(self):
+        sel = self.select()
+        self.assertIn("边界词", self.words(sel))
+        self.assertNotIn("低频词", self.words(sel))
+        self.assertIn("低频词", self.words(self.select(min_freq=50)))
+        self.assertNotIn("边界词", self.words(self.select(min_freq=101)))
+
+    def test_weight_of_repeated_word_is_the_max(self):
+        self.assertIn("重复词", self.words(self.select(min_freq=800)))
+
+    def test_covered_single_char_and_non_cjk_excluded(self):
+        sel = self.words(self.select(min_freq=0))
+        for w in ("已覆盖", "单", "abc"):
+            self.assertNotIn(w, sel)
+
+    def test_category_dicts_never_supplemented_even_via_wubi(self):
+        sel = self.words(self.select())
+        self.assertNotIn("专名甲", sel)
+        self.assertNotIn("专名乙", sel)
+
+    def test_wubi_takes_top_n_by_weight_of_words_unknown_to_pinyin(self):
+        sel = self.select(wubi_top=2)
+        self.assertEqual(self.words(sel, "wubi"), ["五笔乙", "五笔丙"])
+        self.assertEqual(self.words(self.select(), "wubi"), ["五笔乙", "五笔丙", "五笔甲"])
+
+    def test_wubi_threshold_is_not_applied_to_wubi(self):
+        self.assertIn("五笔甲", self.words(self.select(min_freq=10**6)))
+
+    def test_cross_source_dedup_keeps_first_group(self):
+        sel = self.select()
+        self.assertEqual(len(self.words(sel)), len(set(self.words(sel))))
+        self.assertEqual(self.words(sel, "base").count("跨库词"), 1)
+        self.assertNotIn("跨库词", self.words(sel, "ext"))
+        self.assertEqual(self.words(sel, "ext"), ["扩展词"])
+
+    def test_ai_covered_words_not_selected_again(self):
+        sel = self.words(self.select(ai={"高频词": "n. x"}))
+        self.assertNotIn("高频词", sel)
+
+    def test_plan_summary_counts_groups_and_batches(self):
+        sel = self.select()
+        text = "\n".join(build.plan_summary(sel, 2))
+        self.assertIn("base", text)
+        self.assertIn("wubi", text)
+        n = len(sel)
+        self.assertIn(f"{n}", text)
+        self.assertIn(f"{(n + 1) // 2} 批", text)
+
+    def test_plan_command_writes_word_list_and_prints_summary(self):
+        cedict = write(self.d, "c.txt", "已覆盖 已覆盖 [x] /covered/\n")
+        out = os.path.join(self.d, "plan.txt")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            build.main(["plan", "--cedict", cedict, "--general", self.base, self.ext,
+                        "--wubi", self.wubi, "--category", self.cat, "--out", out])
+        with open(out, encoding="utf-8") as f:
+            lines = f.read().split()
+        self.assertEqual(lines, self.words(self.select()))
+        self.assertIn("批", buf.getvalue())
+
+
+class MergePriorityTest(unittest.TestCase):
+    def test_zh_en_refined_beats_cedict_beats_ai(self):
+        out = build.build_zh_en(
+            {"甲": "raw-c", "乙": "raw-c2"}, {"甲": "ai", "乙": "ai", "丙": "ai"}, ["甲", "乙", "丙", "丁"],
+            refined={"甲": "n. refined"},
+        )
+        self.assertEqual(out, {"甲": "n. refined", "乙": "raw-c2", "丙": "ai"})
+
+    def test_zh_en_without_refined_unchanged(self):
+        self.assertEqual(build.build_zh_en({"甲": "c"}, {"甲": "a"}, ["甲"]), {"甲": "c"})
+
+    def test_en_zh_refined_overrides_raw(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        ec = write(d.name, "ecdict.csv", ECDICT_CSV)
+        en = write(d.name, "en.dict.yaml", EN_DICT)
+        entries, _ = build.build_en_zh(ec, [en], refined={"abandon": "v. 放弃", "nomatch": "n. 无"})
+        self.assertEqual(entries["abandon"], "v. 放弃")
+        self.assertEqual(entries["aaron"], "亚伦")
+        self.assertEqual(entries["nomatch"], "n. 无")
+
+    def test_zh_en_command_uses_refined_file(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        zh = write(d.name, "zh.dict.yaml", ZH_DICT)
+        cedict = write(d.name, "c.txt", CEDICT)
+        ref = write(d.name, "ref.tsv", "# 来源\n工\tn. work\n")
+        out = os.path.join(d.name, "zh_en.txt")
+        build.main(["zh-en", "--cedict", cedict, "--refined", ref, "--words", zh, "--out", out])
+        with open(out, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("工\tn. work\n", text)
+        self.assertIn("你好\thello; hi\n", text)
+
+
+class ParseTest(unittest.TestCase):
+    def test_strict_pos_format_accepted(self):
+        got, bad = ai_fill.parse_response("银行\tn. bank\n运行\tv. run; operate", ["银行", "运行"])
+        self.assertEqual(got, [("银行", "n. bank"), ("运行", "v. run; operate")])
+        self.assertEqual(bad, [])
+
+    def test_blank_meaning_is_an_answer(self):
+        got, bad = ai_fill.parse_response("生僻词\t", ["生僻词"])
+        self.assertEqual(got, [("生僻词", "")])
+        self.assertEqual(bad, [])
+
+    def test_illegal_lines_rejected_not_recorded(self):
+        text = "甲\tbank\n乙\tn.bank\n丙\tnoun. bank\n丁\tn. 好; n. 坏 extra\u0000\n戊\tn. ok"
+        got, bad = ai_fill.parse_response(text, ["甲", "乙", "丙", "戊"])
+        self.assertEqual(got, [("戊", "n. ok")])
+        self.assertEqual([w for w, _ in bad], ["甲", "乙", "丙"])
+
+    def test_unanswered_words_neither_accepted_nor_rejected(self):
+        got, bad = ai_fill.parse_response("```\n甲\tn. a\n```\n多余\tn. x", ["甲", "乙"])
+        self.assertEqual(got, [("甲", "n. a")])
+        self.assertEqual(bad, [])
+
+    def test_first_answer_wins(self):
+        got, _ = ai_fill.parse_response("甲\tn. a\n甲\tn. b", ["甲"])
+        self.assertEqual(got, [("甲", "n. a")])
+
+
+class PromptTest(unittest.TestCase):
+    def test_fill_prompt_demands_common_sense_with_pos_and_blank(self):
+        p = ai_fill.build_prompt("fill", "zh-en", [("银行", "")])
+        for needle in ("词性. 义项", "银行", "最常用", "空"):
+            self.assertIn(needle, p)
+        self.assertIn("不给例句", p)
+
+    def test_refine_prompt_includes_existing_meanings(self):
+        p = ai_fill.build_prompt("refine", "zh-en", [("银行", "bank; CL:家")])
+        self.assertIn("银行\tbank; CL:家", p)
+        self.assertIn("现有", p)
+
+    def test_refine_prompt_en_zh_asks_chinese(self):
+        p = ai_fill.build_prompt("refine", "en-zh", [("bank", "银行; 岸")])
+        self.assertIn("中文", p)
+
+
+class RunTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -110,38 +286,119 @@ class AiFillTest(unittest.TestCase):
     def test_batches(self):
         self.assertEqual(list(ai_fill.batches(list("abcde"), 2)), [["a", "b"], ["c", "d"], ["e"]])
 
-    def test_parse_response_blank_for_unanswered_and_fenced(self):
-        text = "```\n甲\tn. a\n乙\t\n多余\tn. x\n```"
-        self.assertEqual(
-            ai_fill.parse_response(text, ["甲", "乙", "丙"]),
-            [("甲", "n. a"), ("乙", ""), ("丙", "")],
-        )
+    def test_read_items_fill_and_refine(self):
+        p = write(self.d, "in.tsv", "# c\n甲\n乙\tn. b\n\n")
+        self.assertEqual(ai_fill.read_items(p, "fill"), [("甲", ""), ("乙", "")])
+        self.assertEqual(ai_fill.read_items(p, "refine"), [("乙", "n. b")])
 
     def test_run_resumes_and_never_repeats_words(self):
-        missing = write(self.d, "missing.txt", "甲\n乙\n丙\n丁\n")
+        items = [(w, "") for w in "甲乙丙丁"]
         out = os.path.join(self.d, "ai.tsv")
         calls = []
 
         def fake(batch):
-            calls.append(list(batch))
-            return "\n".join(f"{w}\tn. {w}-en" for w in batch)
+            calls.append([w for w, _ in batch])
+            return "\n".join(f"{w}\tn. {w}-en" for w, _ in batch)
 
-        ai_fill.run(missing, out, batch_size=2, limit=2, call=fake, today="2026-01-01")
+        be = ai_fill.CallBackend(fake)
+        ai_fill.run(items, out, be, batch_size=2, limit=2, today="2026-01-01")
         self.assertEqual(calls, [["甲", "乙"]])
-        ai_fill.run(missing, out, batch_size=2, limit=None, call=fake, today="2026-01-01")
+        ai_fill.run(items, out, be, batch_size=2, today="2026-01-01")
         self.assertEqual(calls, [["甲", "乙"], ["丙", "丁"]])
         with open(out, encoding="utf-8") as f:
-            text = f.read()
-        self.assertEqual(text.count("生成日期"), 1)
+            self.assertEqual(f.read().count("生成日期"), 1)
         self.assertEqual(build.load_ai(out), {w: f"n. {w}-en" for w in "甲乙丙丁"})
 
-    def test_blank_answers_are_recorded_so_not_retried(self):
-        missing = write(self.d, "missing.txt", "甲\n乙\n")
+    def test_blank_answers_recorded_so_not_retried(self):
+        items = [("甲", ""), ("乙", "")]
         out = os.path.join(self.d, "ai.tsv")
-        ai_fill.run(missing, out, batch_size=10, limit=None, call=lambda b: "甲\tn. a", today="2026-01-01")
+        ai_fill.run(items, out, ai_fill.CallBackend(lambda b: "甲\tn. a\n乙\t"), batch_size=10, today="2026-01-01")
         calls = []
-        ai_fill.run(missing, out, batch_size=10, limit=None, call=lambda b: calls.append(b) or "", today="2026-01-01")
+        ai_fill.run(items, out, ai_fill.CallBackend(lambda b: calls.append(b) or ""), batch_size=10, today="2026-01-01")
         self.assertEqual(calls, [])
+
+    def test_rejected_and_unanswered_words_are_retried_next_run(self):
+        items = [("甲", ""), ("乙", ""), ("丙", "")]
+        out = os.path.join(self.d, "ai.tsv")
+        stats = ai_fill.run(items, out, ai_fill.CallBackend(lambda b: "甲\tn. a\n乙\tbad"), batch_size=10, today="2026-01-01")
+        self.assertEqual((stats["written"], stats["rejected"]), (1, 1))
+        seen = []
+        ai_fill.run(items, out, ai_fill.CallBackend(lambda b: seen.append([w for w, _ in b]) or ""), batch_size=10, today="2026-01-01")
+        self.assertEqual(seen, [["乙", "丙"]])
+
+    def test_header_describes_mode(self):
+        out = os.path.join(self.d, "r.tsv")
+        ai_fill.run([("银行", "bank")], out, ai_fill.CallBackend(lambda b: "银行\tn. bank"),
+                    mode="refine", direction="zh-en", today="2026-01-01")
+        with open(out, encoding="utf-8") as f:
+            head = f.readline() + f.readline()
+        self.assertIn("重整", head)
+        self.assertIn("claude-sonnet-5-5", head)
+
+
+class FileBackendTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = self.tmp.name
+        self.bdir = os.path.join(self.d, "batches")
+        self.out = os.path.join(self.d, "ai.tsv")
+        self.items = [(w, "") for w in "甲乙丙丁戊"]
+
+    def run_files(self, **kw):
+        return ai_fill.run(self.items, self.out, ai_fill.FileBackend(self.bdir), batch_size=2, today="2026-01-01", **kw)
+
+    def read(self, name):
+        with open(os.path.join(self.bdir, name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_writes_numbered_input_batches_and_prompt(self):
+        stats = self.run_files()
+        self.assertEqual(sorted(os.listdir(self.bdir)), ["0000.in.tsv", "0001.in.tsv", "0002.in.tsv", "PROMPT.txt"])
+        self.assertEqual(self.read("0000.in.tsv"), "甲\n乙\n")
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual(stats["pending_batches"], 3)
+        self.assertIn("词性. 义项", self.read("PROMPT.txt"))
+
+    def test_refine_batches_carry_existing_meanings(self):
+        be = ai_fill.FileBackend(self.bdir)
+        ai_fill.run([("银行", "bank")], self.out, be, mode="refine", direction="zh-en", today="2026-01-01")
+        self.assertEqual(self.read("0000.in.tsv"), "银行\tbank\n")
+
+    def test_merges_out_files_and_resumes(self):
+        self.run_files()
+        with open(os.path.join(self.bdir, "0000.out.tsv"), "w", encoding="utf-8") as f:
+            f.write("甲\tn. a\n乙\tn. b\n")
+        with open(os.path.join(self.bdir, "0002.out.tsv"), "w", encoding="utf-8") as f:
+            f.write("戊\tn. e\n")
+        stats = self.run_files()
+        self.assertEqual(stats["written"], 3)
+        self.assertEqual(stats["pending_batches"], 1)
+        self.assertEqual(build.load_ai(self.out), {"甲": "n. a", "乙": "n. b", "戊": "n. e"})
+        # 再跑一遍：已合并的不重复，补上 0001
+        with open(os.path.join(self.bdir, "0001.out.tsv"), "w", encoding="utf-8") as f:
+            f.write("丙\tn. c\n丁\tn. d\n")
+        stats = self.run_files()
+        self.assertEqual(stats["written"], 2)
+        self.assertEqual(stats["pending_batches"], 0)
+        self.assertEqual(self.run_files()["written"], 0)
+        self.assertEqual(len(build.load_ai(self.out)), 5)
+
+    def test_batch_numbers_stay_stable_after_merging(self):
+        self.run_files()
+        with open(os.path.join(self.bdir, "0000.out.tsv"), "w", encoding="utf-8") as f:
+            f.write("甲\tn. a\n乙\tn. b\n")
+        self.run_files()
+        self.assertEqual(self.read("0001.in.tsv"), "丙\n丁\n")
+        self.assertFalse(os.path.exists(os.path.join(self.bdir, "0003.in.tsv")))
+
+    def test_invalid_out_rows_rejected_and_stay_pending(self):
+        self.run_files()
+        with open(os.path.join(self.bdir, "0000.out.tsv"), "w", encoding="utf-8") as f:
+            f.write("甲\tn. a\n乙\tnonsense\n")
+        stats = self.run_files()
+        self.assertEqual((stats["written"], stats["rejected"]), (1, 1))
+        self.assertEqual(build.load_ai(self.out), {"甲": "n. a"})
 
 
 if __name__ == "__main__":
