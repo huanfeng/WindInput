@@ -602,8 +602,8 @@ function Remove-UnshippedImports ([string]$main) {
     [IO.File]::WriteAllText($main, ($lines -join "`n"), [Text.UTF8Encoding]::new($false))
 }
 
-# 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 $outdir\data\
-# 找可用的 Python 3: 返回命令数组 (如 @('python') / @('py','-3')), 没有则 $null。
+# 找可用的 Python 3: 输出命令的各段 (如 python / py -3), 没有则无输出; 调用方必须用 @(Find-Python3) 收，
+# 单段命令会被展开成字符串。
 # 用 --version 验证而不是只看 Get-Command: 未装 Python 的 Windows 上 python 是指向应用商店的占位 stub。
 function Find-Python3 {
     foreach ($c in @(@('python'), @('py', '-3'), @('python3'))) {
@@ -613,9 +613,10 @@ function Find-Python3 {
         try { $v = & $c[0] @rest --version 2>&1 | Out-String } catch { $v = "" } finally { $ErrorActionPreference = $old }
         if ($v -match '^Python 3') { return $c }
     }
-    return $null
+    return
 }
 
+# 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 $outdir\data\
 function Assemble-Data ([string]$outdir = $BuildDevDir) {
     $data      = "$outdir\data"
     $schemas   = "$data\schemas"
@@ -755,21 +756,23 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
     $cdict   = "$ProductRoot\scripts\comment_dicts\build.py"
     $ecdict  = "$CacheDir\ecdict\ecdict.csv"
     $cedict  = "$CacheDir\cedict\cedict_1_0_ts_utf-8_mdbg.txt.gz"
-    $py      = Find-Python3
-    if (-not $py) {
+    $py      = @(Find-Python3)
+    if ($py.Count -lt 1 -or -not $py[0] -or "$($py[0])".Length -le 1) {
         Warn "缺 Python 3 (python / py -3), 中英释义词库不可用"
     } elseif ((Test-Path $ecdict) -and (Test-Path $cedict)) {
         Gray "生成中英释义注释词库 (comment_dicts) ..."
-        New-Item -ItemType Directory -Path "$schemas\comments" -Force | Out-Null
-        $pyRest = @(); if ($py.Count -gt 1) { $pyRest = $py[1..($py.Count - 1)] }
-        $aiArgs = @(); if (Test-Path "$data\comments-src\zh_en_ai.tsv") { $aiArgs = @("--ai", "$data\comments-src\zh_en_ai.tsv") }
-        # build.py 把进度写到 stderr; 全局 $ErrorActionPreference=Stop 下 PS5.1 会把它当错误, 此处临时放宽。
         $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         try {
+            New-Item -ItemType Directory -Path "$schemas\comments" -Force | Out-Null
+            $pyRest = @(); if ($py.Count -gt 1) { $pyRest = $py[1..($py.Count - 1)] }
+            $aiArgs = @(); if (Test-Path "$data\comments-src\zh_en_ai.tsv") { $aiArgs = @("--ai", "$data\comments-src\zh_en_ai.tsv") }
+            # build.py 把进度写到 stderr; 全局 $ErrorActionPreference=Stop 下 PS5.1 会把它当错误, 此处临时放宽。
             & $py[0] @pyRest -I $cdict en-zh --ecdict $ecdict --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" --out "$schemas\comments\en_zh.txt"
             if ($LASTEXITCODE -ne 0) { Warn "英→中释义词库生成失败" }
             & $py[0] @pyRest -I $cdict zh-en --cedict $cedict @aiArgs --words "$pinyinCn\base.dict.yaml" "$pinyinCn\ext.dict.yaml" "$pinyin\ext\idiom.dict.yaml" "$schemas\wubi86\wubi86_jidian.dict.yaml" --out "$schemas\comments\zh_en.txt"
             if ($LASTEXITCODE -ne 0) { Warn "中→英释义词库生成失败" }
+        } catch {
+            Warn "中英释义词库生成出错, 已跳过: $($_.Exception.Message)"
         } finally { $ErrorActionPreference = $old }
     } else { Warn "缺 .cache\ecdict 或 .cache\cedict, 中英释义词库不可用 (运行 gen-data 下载)" }
     if (Test-Path "$data\comments-src") { Remove-Item -Recurse -Force "$data\comments-src" }
