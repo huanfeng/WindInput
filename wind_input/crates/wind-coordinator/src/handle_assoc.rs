@@ -590,6 +590,7 @@ impl Coordinator {
             return false;
         }
         tracing::debug!(reason = ?why, n = state.candidates.len(), "退出联想态");
+        state.comment_session_flip = false;
         state.candidates.clear();
         state.preedit.clear();
         self.reset_candidate_view(state);

@@ -710,7 +710,7 @@ pub(crate) struct State {
     /// `handle_key_event` 开头清掉。
     pub(crate) grid_keep: bool,
     /// 注释态的「仅本次候选窗」翻转：与持久态（`ui.comment.state`）异或得当前态。
-    /// 组合结束即清（`cancel_session`、进联想、`handle_key_event` 开头无会话时）。
+    /// 候选窗关闭或被新组合替换即清：`cancel_session`、进出联想、顶码余码、顶屏进模式、`handle_key_event` 开头无会话时。
     pub(crate) comment_session_flip: bool,
     /// 注释态的「按住 Alt」翻转：按住期间为真，与上面那份各自独立地异或。
     pub(crate) comment_hold_flip: bool,

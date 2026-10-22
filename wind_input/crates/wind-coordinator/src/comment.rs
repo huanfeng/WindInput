@@ -1091,7 +1091,7 @@ impl crate::coordinator::Coordinator {
         }
     }
 
-    /// 改持久态并写回用户层 `ui.comment.state`；只换内存配置、不重载，随后重绘。
+    /// 改持久态并写回用户层 `ui.comment.state`（清掉本次翻转）；只换内存配置、不重载，随后重绘。
     pub(crate) fn set_comment_state(
         &self,
         state: &mut State,
@@ -1104,6 +1104,8 @@ impl crate::coordinator::Coordinator {
         };
         Config::set_user_string(&["ui", "comment", "state"], value)?;
         self.refresh_config_in_memory(|c| c.ui.comment.state = to);
+        // 设了什么就看到什么：本次窗口的翻转一并作废。
+        state.comment_session_flip = false;
         self.notify_ui_update(state);
         Ok(())
     }

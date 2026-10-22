@@ -46,12 +46,15 @@ fn set_comment_state_writes_back() {
     let coord = Coordinator::new_headless(load(), None);
     assert_eq!(coord.debug_effective_comment_state(), CommentState::Default);
 
+    // 先翻转一次：设持久态要把它清掉，否则看到的是「详细」取反。
+    coord.debug_toggle_comment_session();
+    assert_eq!(coord.debug_effective_comment_state(), CommentState::Detail);
     coord.debug_set_comment_state(CommentState::Detail).unwrap();
     assert_eq!(user_value(&user).as_deref(), Some("detail"), "应写回用户层");
     assert_eq!(
         coord.debug_effective_comment_state(),
         CommentState::Detail,
-        "内存配置当场生效"
+        "内存配置当场生效，且翻转已清"
     );
 
     drop(coord);

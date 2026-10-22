@@ -117,8 +117,17 @@ fn session_flip_shows_detail_then_resets_on_commit() {
     let (c, rx) = open(cfg());
     type_str(&c, "gg");
     assert_eq!(gg_comments(&c, &rx), GG_DEFAULT);
+    // 翻转自己就要重绘：不再放行首显闸门，只收翻转这一下发出的候选页。
     c.debug_toggle_comment_session();
-    assert_eq!(gg_comments(&c, &rx), GG_DETAIL, "翻转后应显示详细");
+    let pushed = rx
+        .try_iter()
+        .filter_map(|cmd| match cmd {
+            UiCommand::UpdateCandidates { candidates, .. } => Some(candidates),
+            _ => None,
+        })
+        .last()
+        .expect("翻转应当场下发候选页");
+    assert_eq!(first_comments(&pushed, 3), GG_DETAIL, "翻转后应显示详细");
 
     c.handle_key_event(&key(0x20));
     assert_eq!(c.debug_candidate_count(), 0, "前置条件：空格上屏结束会话");
@@ -156,8 +165,9 @@ fn session_flip_resets_before_association() {
     assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
 }
 
+/// 切模式时把首选顶上屏 = 候选窗关了：`gg` 后按反引号，「五」上屏再进临拼，翻转复位。
 #[test]
-fn session_flip_survives_entering_temp_pinyin() {
+fn session_flip_resets_when_mode_switch_commits() {
     if !has_schemas() {
         return;
     }
@@ -165,17 +175,111 @@ fn session_flip_survives_entering_temp_pinyin() {
     type_str(&c, "gg");
     c.debug_toggle_comment_session();
     assert_eq!(gg_comments(&c, &rx), GG_DETAIL);
-    c.handle_key_event(&key(0xC0)); // 反引号进入临拼
+    c.handle_key_event(&key(0xC0)); // 反引号：顶出「五」并进入临拼
     assert!(c.debug_in_temp_pinyin(), "前置条件：反引号应进入临时拼音");
     type_str(&c, "wang");
     let items = shown(&c, &rx);
     let first = items.first().expect("临拼 wang 应有候选");
     assert_eq!(first.text, "往", "前置条件：临拼 wang 首选");
+    // 临拼默认格跟随全局 code_hint：码表反查编码。详细格（chaizi_code）会带拆字。
+    assert_eq!(first.comment.as_str(), "tygg", "翻转应已复位");
+}
+
+/// 不上屏的模式切换保留翻转：拼音 `shi` 后进辅助码（`\`）筛 `h`，仍是详细态。
+#[test]
+fn session_flip_survives_entering_aux_code() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = cfg();
+    cfg.schema.active = "pinyin".into();
+    cfg.schema.pinyin.aux_code.enabled = true;
+    cfg.keys
+        .key_actions
+        .insert("backslash".into(), "aux_code".into());
+    let (c, rx) = open(cfg);
+    type_str(&c, "shi");
+    // 拼音方案 默认=code_hint（拼音出厂不出编码提示）、详细=pinyin_english（无汉英词库时只剩拼音）。
+    assert_eq!(first_comments(&shown(&c, &rx), 3), ["", "", ""]);
+    c.debug_toggle_comment_session();
+    c.handle_key_event(&key(0xDC));
+    type_str(&c, "h");
     assert_eq!(
-        first.comment.as_str(),
-        "\u{e0d1} \u{e147} \u{e002} \u{e000} tygg",
-        "翻转应保留，取临拼的详细格（拆字+编码）"
+        c.debug_active_mode(),
+        Some("aux_code"),
+        "前置条件：已进辅助码"
     );
+    let items = shown(&c, &rx);
+    let texts: Vec<_> = items.iter().take(3).map(|i| i.text.as_str()).collect();
+    assert_eq!(texts, ["事", "式", "石"], "前置条件：筛「横」后的候选");
+    assert_eq!(
+        first_comments(&items, 3),
+        ["shì", "shì", "shí"],
+        "翻转应保留"
+    );
+}
+
+/// 顶码上屏后余码是新组合：`wqvb` 再打 `g` 顶出「你好」，余码 `g` 的候选按持久态。
+#[test]
+fn session_flip_resets_on_top_code_commit() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = cfg();
+    cfg.schema.codetable.top_code_commit = true;
+    let (c, rx) = open(cfg);
+    type_str(&c, "wqvb");
+    c.debug_toggle_comment_session();
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+    let act = c.handle_key_event(&key(u32::from(b'G')));
+    let committed = match act {
+        KeyAction::InsertText { text, .. } => text,
+        KeyAction::CommitThenDeferComposition { commit_text, .. } => commit_text,
+        other => panic!("第五码应顶码上屏，实得 {other:?}"),
+    };
+    assert_eq!(committed, "你好", "前置条件：顶出 wqvb 首选");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+    // 余码再补一码成 `gg`，看下发的注释。
+    type_str(&c, "g");
+    assert_eq!(gg_comments(&c, &rx), GG_DEFAULT, "余码候选应按持久态");
+}
+
+/// 联想窗里翻转可见；从联想窗打字母开始新组合，翻转复位。
+#[test]
+fn session_flip_resets_when_typing_from_association() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = cfg();
+    cfg.input.association.kind = "word".into();
+    cfg.input.association.mode = "one_shot".into();
+    let (c, rx) = open(cfg);
+    type_str(&c, "gg");
+    c.handle_key_event(&key(0x20));
+    assert!(!c.debug_assoc_texts().is_empty(), "前置条件：进联想");
+    c.debug_toggle_comment_session();
+    assert_eq!(
+        first_comments(&shown(&c, &rx), 3),
+        ["· wǔ yī", "· wǔ bǐ", "· wǔ guān"],
+        "联想窗里翻转应显示详细（码表详细格 chaizi_pinyin，词无拆字）"
+    );
+    type_str(&c, "gg");
+    assert!(c.debug_assoc_texts().is_empty(), "前置条件：已离开联想");
+    assert_eq!(gg_comments(&c, &rx), GG_DEFAULT, "新组合应按持久态");
+}
+
+/// Esc 关窗当场复位，不等下一次按键。
+#[test]
+fn escape_resets_session_flip() {
+    if !has_schemas() {
+        return;
+    }
+    let (c, _rx) = open(cfg());
+    type_str(&c, "gg");
+    c.debug_toggle_comment_session();
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+    c.handle_key_event(&key(0x1B));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
 }
 
 #[test]
