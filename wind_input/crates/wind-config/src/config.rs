@@ -113,6 +113,24 @@ type LegacyCommentSource = (Vec<String>, String, Option<String>, Option<String>)
 
 /// 摘下本层全部旧注释模板键，按 全局 → 五个模式 → `mix_modes` 的顺序返回。
 /// `mix_modes` 条目缺 id 的不动（无处可迁）。
+/// 迁移出的模板显示名：`旧版·<范围>`，范围取自格路径（`ui.comment.assign.<范围…>.<格>`）。
+fn legacy_scope_label(cell_path: &[String]) -> String {
+    let scope = &cell_path[3..cell_path.len() - 1];
+    let label = match scope {
+        [g] if g == "global" => "全局",
+        [m, name] if m == "mode" => match name.as_str() {
+            "temp_pinyin" => "临时拼音",
+            "temp_english" => "临时英文",
+            "url" => "网址",
+            "email" => "Email",
+            "unicode" => "Unicode",
+            other => other.strip_prefix("mix:").unwrap_or(other),
+        },
+        other => return format!("旧版·{}", other.join(".")),
+    };
+    format!("旧版·{label}")
+}
+
 fn take_legacy_comment_templates(layer: &mut toml::Value) -> Vec<LegacyCommentSource> {
     let mut out = Vec::new();
     if let Some(cand) = layer
@@ -9087,7 +9105,8 @@ impl Config {
     ///
     /// 来源：全局 `ui.candidate.comment_template_*`、五个模式的 `input.<m>.comment_template_*`、
     /// `schema.mix_modes[]` 条目的同名键（迁到 `mode."mix:<id>"`，缺 id 的不动）。
-    /// - 每个不同的模板串生成一个用户模板 `migrated_N`，写进对应的 `default_*` 格；空串迁成 `none`；
+    /// - 每个不同的模板串生成一个用户模板 `migrated_N`（名为 `旧版·<来源>`，同来源横竖不同时竖排加 `（竖排）`），
+    ///   写进对应的 `default_*` 格；串等于内置模板文本时直接写内置 id，不生成；空串迁成 `none`；
     /// - 全局旧值等于旧出厂值 [`LEGACY_FACTORY_COMMENT_TEMPLATE`] 的视为没写；
     /// - 横竖相同只写横排（竖排不写即同横排）；只写了一边时另一边写 `inherit`，保住旧版
     ///   「没写的一边跟随下一层」；
@@ -9175,6 +9194,8 @@ impl Config {
         let template_count = templates.len();
         let str_of =
             |t: &toml::Value, k: &str| t.get(k).and_then(toml::Value::as_str).map(String::from);
+        let builtin = crate::comment_lib::SystemComments::embedded().templates;
+        let siblings = writes.clone();
         for (path, text, origin) in writes {
             let value = match text {
                 None => "inherit".to_string(),
@@ -9183,6 +9204,7 @@ impl Config {
                     .iter()
                     .find(|tpl| str_of(tpl, "text").as_deref() == Some(t.as_str()))
                     .and_then(|tpl| str_of(tpl, "id"))
+                    .or_else(|| builtin.iter().find(|b| b.text == t).map(|b| b.id.clone()))
                 {
                     Some(id) => id,
                     None => {
@@ -9196,7 +9218,17 @@ impl Config {
                             .expect("序号无上界");
                         let mut tpl = toml::Table::new();
                         tpl.insert("id".into(), id.clone().into());
-                        tpl.insert("name".into(), format!("迁移自 {origin}").into());
+                        let vertical_differs = path.last().is_some_and(|c| c == "default_vertical")
+                            && siblings.iter().any(|(p, other, _)| {
+                                p[..p.len() - 1] == path[..path.len() - 1]
+                                    && p.last().is_some_and(|c| c == "default_horizontal")
+                                    && other.as_ref().is_some_and(|o| *o != t)
+                            });
+                        let mut name = legacy_scope_label(&path);
+                        if vertical_differs {
+                            name.push_str("（竖排）");
+                        }
+                        tpl.insert("name".into(), name.into());
                         tpl.insert("text".into(), t.into());
                         templates.push(tpl.into());
                         id
@@ -14147,16 +14179,12 @@ scripts = { latin = 42 }
     #[test]
     fn migrates_global_custom_template() {
         let (c, user) =
-            comment_after_migration("[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n");
+            comment_after_migration("[ui.candidate]\ncomment_template_vertical = \"${my}\"\n");
         assert_eq!(
             template_id_texts(&c),
-            [("migrated_1".to_string(), "${pinyin}".to_string())]
+            [("migrated_1".to_string(), "${my}".to_string())]
         );
-        assert!(
-            c.templates[0]
-                .name
-                .contains("ui.candidate.comment_template_vertical")
-        );
+        assert_eq!(c.templates[0].name, "旧版·全局");
         assert_eq!(
             c.assign.global.default_vertical.as_deref(),
             Some("migrated_1")
@@ -14207,6 +14235,79 @@ scripts = { latin = 42 }
         );
     }
 
+    fn names_of(c: &crate::comment_lib::UiCommentConfig) -> Vec<(String, String)> {
+        c.templates
+            .iter()
+            .map(|t| (t.id.clone(), t.name.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn migrated_names_cover_every_source_kind() {
+        let (c, _) = comment_after_migration(
+            "[input.temp_pinyin]\ncomment_template_horizontal = \"${a1}\"\n\
+             [input.temp_english]\ncomment_template_horizontal = \"${a2}\"\n\
+             [input.url]\ncomment_template_horizontal = \"${a3}\"\n\
+             [input.email]\ncomment_template_horizontal = \"${a4}\"\n\
+             [input.unicode]\ncomment_template_horizontal = \"${a5}\"\n\
+             [[schema.mix_modes]]\nid = \"qm\"\ncomment_template_horizontal = \"${a6}\"\n",
+        );
+        let mut names: Vec<String> = c.templates.iter().map(|t| t.name.clone()).collect();
+        names.sort();
+        let mut want: Vec<String> = [
+            "旧版·临时拼音",
+            "旧版·临时英文",
+            "旧版·网址",
+            "旧版·Email",
+            "旧版·Unicode",
+            "旧版·qm",
+        ]
+        .map(String::from)
+        .into();
+        want.sort();
+        assert_eq!(names, want);
+    }
+
+    #[test]
+    fn differing_vertical_gets_suffix_horizontal_keeps_plain_name() {
+        let (c, _) = comment_after_migration(
+            "[input.url]\ncomment_template_vertical = \"${v}\"\n\
+             comment_template_horizontal = \"${h}\"\n",
+        );
+        let cells = &c.assign.mode["url"];
+        let name_of = |id: &Option<String>| {
+            c.templates
+                .iter()
+                .find(|t| Some(&t.id) == id.as_ref())
+                .map(|t| t.name.clone())
+        };
+        assert_eq!(
+            name_of(&cells.default_horizontal).as_deref(),
+            Some("旧版·网址")
+        );
+        assert_eq!(
+            name_of(&cells.default_vertical).as_deref(),
+            Some("旧版·网址（竖排）")
+        );
+    }
+
+    #[test]
+    fn old_text_equal_to_builtin_reuses_builtin_id() {
+        let (c, _) = comment_after_migration(
+            "[input.temp_pinyin]\ncomment_template_vertical = \"${pinyin}\"\n\
+             comment_template_horizontal = \"${pinyin}\"\n",
+        );
+        assert!(
+            c.templates.is_empty(),
+            "不生成 migrated_N: {:?}",
+            names_of(&c)
+        );
+        assert_eq!(
+            c.assign.mode["temp_pinyin"].default_horizontal.as_deref(),
+            Some("pinyin")
+        );
+    }
+
     #[test]
     fn dedupes_identical_texts() {
         let (c, _) = comment_after_migration(
@@ -14219,10 +14320,7 @@ scripts = { latin = 42 }
             template_id_texts(&c),
             [("migrated_1".to_string(), "${dict}".to_string())]
         );
-        assert!(
-            c.templates[0].name.contains("input.temp_english"),
-            "name 取第一个来源"
-        );
+        assert!(c.templates[0].name == "旧版·临时英文", "name 取第一个来源");
         for m in ["temp_english", "url"] {
             assert_eq!(
                 c.assign.mode[m].default_horizontal.as_deref(),
@@ -14236,7 +14334,7 @@ scripts = { latin = 42 }
     #[test]
     fn horizontal_only_mode_template_writes_vertical_inherit() {
         let (c, _) =
-            comment_after_migration("[input.url]\ncomment_template_horizontal = \"${pinyin}\"\n");
+            comment_after_migration("[input.url]\ncomment_template_horizontal = \"${my}\"\n");
         let cells = &c.assign.mode["url"];
         assert_eq!(cells.default_horizontal.as_deref(), Some("migrated_1"));
         assert_eq!(cells.default_vertical.as_deref(), Some("inherit"));
@@ -14245,7 +14343,7 @@ scripts = { latin = 42 }
     #[test]
     fn mix_mode_uses_id() {
         let (c, user) = comment_after_migration(
-            "[[schema.mix_modes]]\nid = \"quick_mix\"\ncomment_template_vertical = \"${pinyin}\"\n",
+            "[[schema.mix_modes]]\nid = \"quick_mix\"\ncomment_template_vertical = \"${my}\"\n",
         );
         let cells = &c.assign.mode["mix:quick_mix"];
         assert_eq!(cells.default_vertical.as_deref(), Some("migrated_1"));
@@ -14444,9 +14542,9 @@ scripts = { latin = 42 }
     #[test]
     fn migration_is_idempotent() {
         let src = "[ui.candidate]\ncomment_enabled = false\n\
-                   comment_template_vertical = \"${pinyin}\"\n\
-                   comment_template_horizontal = \"${chaizi}\"\n\
-                   [input.temp_pinyin]\ncomment_template_vertical = \"${chaizi}\"\n\
+                   comment_template_vertical = \"${my1}\"\n\
+                   comment_template_horizontal = \"${my2}\"\n\
+                   [input.temp_pinyin]\ncomment_template_vertical = \"${my2}\"\n\
                    [[schema.mix_modes]]\nid = \"quick_mix\"\ncomment_template_vertical = \"\"\n";
         let mut once: toml::Value = toml::from_str(src).unwrap();
         Config::migrate_user_layer_value(&mut once);
@@ -14461,8 +14559,8 @@ scripts = { latin = 42 }
         assert_eq!(
             template_id_texts(&c),
             [
-                ("migrated_1".to_string(), "${pinyin}".to_string()),
-                ("migrated_2".to_string(), "${chaizi}".to_string()),
+                ("migrated_1".to_string(), "${my1}".to_string()),
+                ("migrated_2".to_string(), "${my2}".to_string()),
             ]
         );
         assert_eq!(
