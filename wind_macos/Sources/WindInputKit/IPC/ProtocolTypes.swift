@@ -240,6 +240,9 @@ public struct HostRenderFramePayload: Equatable {
 public enum KeyEventType: UInt8 {
     case down = 0
     case up   = 1
+    /// 候选显示时 Ctrl 的如实上报 (单击由服务端判), 见 CtrlRawReport 与 protocol.rs 的 EVENT_MOD_DOWN。
+    case modDown = 2
+    case modUp   = 3
 }
 
 public struct KeyEventPayload: Equatable {
