@@ -184,3 +184,25 @@
       另加 `samples` 查询（或在回包里列出可用样例 id 与语种），设置端据此取「中文三条 / 英文三条」。
 - [ ] 用例：每个样例的关键变量值、英文样例下中文变量为空且可选段消失、缺省入参回包不变。
 - [ ] 设置端：mock 同步；模板库预览与分配表预览按作用范围选样例语种（英文类型行、临时英文模式行用英文样例，其余中文）。
+
+### Task 12: Ctrl 也支持按住；候选显示时 Ctrl 按下 / 松开如实上报（维护者 10-23 定）
+
+**动机**：「按住只配 Alt」是平台层只报「已判定的 Ctrl 单击」造成的，不是系统限制。另有一个既有漏洞：Ctrl+数字（置顶）/
+Ctrl+Shift+数字（删除）走 `RegisterHotKey → WM_HOTKEY → DispatchHotkey`，不经 TSF 按键回调，TSF 的待判单击作废不了，
+500ms 内松开会被当成 Ctrl 单击（lctrl 作中英切换键时会顺带切英文；出厂 Ctrl 切换键时会顺带切注释）。
+
+**规则（维护者已定）**：
+- 只要**候选窗显示着**，三端平台层就把 Ctrl（左右分开，0xA2 / 0xA3）的按下与松开如实上报服务端，与切换键、切换方式无关；
+  候选窗不显示时维持原「平台层本地判单击、只报确认过的松开」。平台层仍不吃 Ctrl。
+- 服务端统一判定：按下建 track；之间任何别的键（含 `DispatchHotkey` 送来的 Ctrl+数字、Ctrl+C 等）弄脏 track；松开时干净且 ≤500ms 才算单击。
+  原有消费者（中英切换键、`session_actions` 的 lctrl/rctrl、`lrctrl` 选词）照旧优先，且必须照旧只在「单击」时触发——
+  也就是说服务端要替这些消费者做原来平台层做的单击判定，行为与原来一致。
+- 按住：Ctrl 系也支持 `hold`，**按下立即翻转**、松开恢复（组合键时注释闪一下，维护者接受）；去掉 `effective_mode` 的 hold+ctrl→session 降级。
+- TSF `WM_HOTKEY` 分发处（`DispatchHotkey`）作废待判单击（候选窗不显示那条路也修好）。
+
+**Files**：TSF `wind_tsf/src/KeyEventSink.cpp`（待判逻辑与转发）、`TextService.cpp`/`DispatchHotkey`；Linux Fcitx5 addon（`WindEngine.cpp`、
+`KeyMap.*`）；macOS `InputController.swift`（`handleFlagsChanged` / `sendModifierTap`）；core `comment_switch.rs`、`message_handler.rs` keyup/keydown
+分支、`hotkey.rs`（白名单是否仍需要）、`comment_lib.rs`（`effective_mode`）；设置端 `comment_switch.rs`（去掉「仅 Alt」置灰与提示）；文档站。
+
+**用例**：候选显示时 Ctrl 单击 / 长按 / Ctrl+C / Ctrl+数字（经 DispatchHotkey）各一；中英切换键 lctrl 在候选显示时单击照切、Ctrl+1 不切；
+hold 按下翻转松开恢复、按住期间候选关闭不残留；候选不显示时行为与原来逐项一致；TSF 的 g++ 单测补待判作废。
