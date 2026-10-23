@@ -111,8 +111,6 @@ fn take_legacy_template(t: &mut toml::Table, origin: &str, side: &str) -> Option
 /// 一处旧注释模板：(`ui.comment.assign` 下的作用范围路径, 来源键前缀, 竖排旧值, 横排旧值)。
 type LegacyCommentSource = (Vec<String>, String, Option<String>, Option<String>);
 
-/// 摘下本层全部旧注释模板键，按 全局 → 五个模式 → `mix_modes` 的顺序返回。
-/// `mix_modes` 条目缺 id 的不动（无处可迁）。
 /// 迁移出的模板显示名：`旧版·<范围>`，范围取自格路径（`ui.comment.assign.<范围…>.<格>`）。
 fn legacy_scope_label(cell_path: &[String]) -> String {
     let scope = &cell_path[3..cell_path.len() - 1];
@@ -124,6 +122,7 @@ fn legacy_scope_label(cell_path: &[String]) -> String {
             "url" => "网址",
             "email" => "Email",
             "unicode" => "Unicode",
+            "mix:quick_mix" => "快捷输入",
             other => other.strip_prefix("mix:").unwrap_or(other),
         },
         other => return format!("旧版·{}", other.join(".")),
@@ -131,6 +130,8 @@ fn legacy_scope_label(cell_path: &[String]) -> String {
     format!("旧版·{label}")
 }
 
+/// 摘下本层全部旧注释模板键，按 全局 → 五个模式 → `mix_modes` 的顺序返回。
+/// `mix_modes` 条目缺 id 的不动（无处可迁）。
 fn take_legacy_comment_templates(layer: &mut toml::Value) -> Vec<LegacyCommentSource> {
     let mut out = Vec::new();
     if let Some(cand) = layer
@@ -14348,6 +14349,7 @@ scripts = { latin = 42 }
         let cells = &c.assign.mode["mix:quick_mix"];
         assert_eq!(cells.default_vertical.as_deref(), Some("migrated_1"));
         assert_eq!(cells.default_horizontal.as_deref(), Some("inherit"));
+        assert_eq!(c.templates[0].name, "旧版·快捷输入");
         let mix = get_nested(&user, &["schema", "mix_modes"]).unwrap();
         assert!(
             mix.as_array().unwrap()[0]
