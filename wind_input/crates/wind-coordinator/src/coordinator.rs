@@ -8010,6 +8010,7 @@ impl Coordinator {
         // 凡拿不准就归零。
         wind_keys::capslock_hook::set_should_eat(false);
         wind_keys::capslock_hook::set_alt_gate(0);
+        wind_keys::capslock_hook::set_alt_pid(0);
         // 悬停归零同理：窗口没了，悬停目标不可能还有意义。UI 侧 `CandidateMouse::reset_hover`
         // 清的只是防抖闸门（决定何时**发**事件），高亮与 tooltip 读的是本值——不清这一句，
         // 特殊模式下窗口再次弹出时会带着上次的悬停高亮，鼠标却从未移动过。
@@ -9403,6 +9404,12 @@ impl Coordinator {
             self.hook_alt_mask.load(Relaxed)
         };
         wind_keys::capslock_hook::set_alt_gate(alt);
+        let pid = if alt == 0 {
+            0
+        } else {
+            (self.push_server.active_token() >> 32) as u32
+        };
+        wind_keys::capslock_hook::set_alt_pid(pid);
     }
 
     /// 钩子报告「CapsLock 被按下」（在专用消费线程执行，可安全加锁）。

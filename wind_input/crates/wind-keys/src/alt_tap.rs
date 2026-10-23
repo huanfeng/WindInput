@@ -85,11 +85,14 @@ fn side_bit(vk: u32) -> u32 {
 /// - `gate`：闸门（`GATE_*` 位，0 = 不接管），只在认领时看；
 /// - `time`：钩子事件的系统时间戳（毫秒，会回绕）；
 /// - `others_held`：此刻是否按着 Shift / Ctrl / Win（Ctrl+Alt 等不认领）。只在要认领时才调，
-///   钩子里它是几次 `GetAsyncKeyState`。
+///   钩子里它是几次 `GetAsyncKeyState`；
+/// - `foreground_ok`：前台窗口是否属于活动客户端的进程（候选窗残留时别的程序里的 Alt 不接管）。
+///   同样只在要认领时才调。
 ///
 /// 自动连发：认领后同侧 Alt 的重复按下不重置时刻。若松开丢过（钩子被系统摘掉），残留的认领
 /// 会被下一次按下当成连发：那次按住时长过长不算单击，其松开照常补发，之后自愈。
 #[cfg_attr(not(windows), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_alt(
     press: &mut Option<AltPress>,
     vk: u32,
@@ -98,6 +101,7 @@ pub(crate) fn decide_alt(
     time: u32,
     gate: u32,
     others_held: impl FnOnce() -> bool,
+    foreground_ok: impl FnOnce() -> bool,
 ) -> AltVerdict {
     if origin == Origin::Ours {
         return PASS;
@@ -122,7 +126,7 @@ pub(crate) fn decide_alt(
                 PASS
             }
             None => {
-                if gate & side == 0 || others_held() {
+                if gate & side == 0 || others_held() || !foreground_ok() {
                     return PASS;
                 }
                 let hold = gate & GATE_HOLD != 0;
@@ -179,7 +183,16 @@ mod tests {
         time: u32,
         gate: u32,
     ) -> AltVerdict {
-        decide_alt(press, vk, is_down, Origin::Physical, time, gate, || false)
+        decide_alt(
+            press,
+            vk,
+            is_down,
+            Origin::Physical,
+            time,
+            gate,
+            || false,
+            || true,
+        )
     }
 
     const MASKED_TAP: AltVerdict = AltVerdict {
@@ -259,7 +272,16 @@ mod tests {
     fn injected_other_key_also_interrupts() {
         let mut p = None;
         ev(&mut p, L, true, 1000, BOTH);
-        decide_alt(&mut p, TAB, true, Origin::Injected, 1050, BOTH, || false);
+        decide_alt(
+            &mut p,
+            TAB,
+            true,
+            Origin::Injected,
+            1050,
+            BOTH,
+            || false,
+            || true,
+        );
         assert_eq!(ev(&mut p, L, false, 1100, BOTH), PASS);
     }
 
@@ -275,9 +297,37 @@ mod tests {
     #[test]
     fn modifier_held_before_alt_is_not_claimed() {
         let mut p = None;
-        let v = decide_alt(&mut p, L, true, Origin::Physical, 1000, BOTH, || true);
+        let v = decide_alt(
+            &mut p,
+            L,
+            true,
+            Origin::Physical,
+            1000,
+            BOTH,
+            || true,
+            || true,
+        );
         assert_eq!(v, PASS);
         assert!(p.is_none(), "Ctrl+Alt / Shift+Alt 不认领");
+        assert_eq!(ev(&mut p, L, false, 1100, BOTH), PASS);
+    }
+
+    /// 前台不是活动客户端的进程（候选窗残留在别处）：不认领，松开放行、不补发。
+    #[test]
+    fn foreground_mismatch_is_not_claimed() {
+        let mut p = None;
+        let v = decide_alt(
+            &mut p,
+            L,
+            true,
+            Origin::Physical,
+            1000,
+            BOTH,
+            || false,
+            || false,
+        );
+        assert_eq!(v, PASS);
+        assert!(p.is_none());
         assert_eq!(ev(&mut p, L, false, 1100, BOTH), PASS);
     }
 
@@ -304,18 +354,36 @@ mod tests {
     fn injected_and_own_events_pass_without_state_change() {
         let mut p = None;
         for origin in [Origin::Injected, Origin::Ours] {
-            let v = decide_alt(&mut p, L, true, origin, 1000, BOTH, || false);
+            let v = decide_alt(&mut p, L, true, origin, 1000, BOTH, || false, || true);
             assert_eq!(v, PASS);
             assert!(p.is_none(), "{origin:?} 的 Alt 按下不认领");
         }
         ev(&mut p, L, true, 1000, BOTH);
         // 我们补发的屏蔽键与 Alt 松开：放行，不算打断、不销账。
         for (vk, down) in [(MASK, true), (MASK, false), (L, false)] {
-            let v = decide_alt(&mut p, vk, down, Origin::Ours, 1050, BOTH, || false);
+            let v = decide_alt(
+                &mut p,
+                vk,
+                down,
+                Origin::Ours,
+                1050,
+                BOTH,
+                || false,
+                || true,
+            );
             assert_eq!(v, PASS);
         }
         // 别的程序注入的同侧 Alt 松开也不销账。
-        decide_alt(&mut p, L, false, Origin::Injected, 1060, BOTH, || false);
+        decide_alt(
+            &mut p,
+            L,
+            false,
+            Origin::Injected,
+            1060,
+            BOTH,
+            || false,
+            || true,
+        );
         assert_eq!(ev(&mut p, L, false, 1100, BOTH), MASKED_TAP);
     }
 

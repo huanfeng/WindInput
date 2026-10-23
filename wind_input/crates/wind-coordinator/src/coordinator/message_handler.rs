@@ -2934,6 +2934,7 @@ impl MessageHandler for Coordinator {
         // 与 menu_close 同理放在 stale 判定之前：陈旧失焦同样证明用户动了别处。
         wind_keys::capslock_hook::set_should_eat(false);
         wind_keys::capslock_hook::set_alt_gate(0);
+        wind_keys::capslock_hook::set_alt_pid(0);
         // 关菜单**先于** stale 判定与 reason 分流：菜单的生命周期与输入态无关，
         // 陈旧失焦/噪声层失焦同样证明用户动了别处。详见 menu_close_on_focus_change。
         self.menu_close_on_focus_change("focus_lost");
