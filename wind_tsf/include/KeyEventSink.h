@@ -5,6 +5,7 @@
 #include "SkipKeyTable.h"
 #include "PassthroughNote.h"
 #include "ToggleTapPolicy.h"
+#include "CtrlRawPolicy.h"
 #include "CtrlSpacePolicy.h"
 #include <string>
 #include <cstdint>
@@ -521,6 +522,10 @@ private:
     // 首次记 pending 时置 mouseDownAtPress 并清 GetAsyncKeyState 的「按下过」位；
     // selectionChanged 由 TextService::OnEndEdit 经 NoteSelectionChangedDuringToggle 置位。
     wind::toggletap::TapSignals _pendingTapSignals;
+    // 候选显示时 Ctrl 如实上报的这次按住（判据见 CtrlRawPolicy.h）。与上面的待判单击互斥：
+    // 一次按住在按下那一刻定走哪条路。鼠标记账与待判单击同一套判据，各记各的。
+    wind::ctrlraw::Press _ctrlRaw;
+    wind::toggletap::TapSignals _ctrlRawTapSignals;
     // OnTestKeyDown 是否刚吃下一个 Ctrl+Space。它是「我们独占了这个键」的凭据：
     // TSF 只在 pfEaten=TRUE 后才调 OnKeyDown，吃下就意味着 msctf 不会再拿它当 IME
     // 热键、OPENCLOSE compartment 不会被翻，因此按键侧兜底切换与 compartment 路径
@@ -584,6 +589,15 @@ private:
     // Returns TRUE if a toggle was matched (caller should set pfEaten=TRUE).
     BOOL _DispatchPendingToggleKeyUp(WPARAM wParam);
 
+    // 候选显示时 Ctrl 的如实上报（CtrlRawPolicy.h）。
+    // _NoteKeyDownForCtrlRaw：任意非 Ctrl 的 keydown 记「按住期间按过别的键」。
+    // _TryCtrlRawDown：Ctrl 的 keydown；返回 TRUE = 这次按住走如实上报（已发或重复），调用方放行并返回。
+    // _DispatchCtrlRawUp：Ctrl 的 keyup；是如实上报那次按住就发 MOD_UP。不吃键，调用方照常往下走。
+    void _NoteKeyDownForCtrlRaw(WPARAM wParam);
+    BOOL _TryCtrlRawDown(WPARAM wParam, LPARAM lParam, uint32_t modifiers);
+    void _DispatchCtrlRawUp(WPARAM wParam);
+    static uint32_t _ResolveCtrlVk(WPARAM wParam, uint32_t modifiers);
+
     // 记录「该切换键正等 keyup 触发切换」。OnTestKeyDown 与 OnKeyDown 都会调用：
     // 纯修饰键放行后 TSF 未必再调 OnKeyDown，只在后者记录会让切换失灵。幂等。
     void _MarkPendingToggleKey(WPARAM wParam, uint32_t modifiers);
@@ -591,7 +605,7 @@ private:
     // 取消待切换。给命中热键白名单的组合键用：那些分支都是就地 return，够不着
     // OnTestKeyDown 下方那段统一取消，不显式调用就会「按了热键还顺带切了中英文」。
     void _CancelPendingToggle(WPARAM wParam, const wchar_t* reason);
-    BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType);
+    BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType, uint8_t extraToggles = 0);
     // Returns TRUE if key was handled, FALSE to pass through.
     // outType：收包成功时写入响应类型，失败时不动（热键派发据此判是否交还宿主）。
     BOOL _HandleServiceResponse(ResponseType* outType = nullptr);
