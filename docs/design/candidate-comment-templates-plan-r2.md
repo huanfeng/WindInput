@@ -167,3 +167,20 @@
 
 - [ ] `content/docs/settings/appearance/candidate-comment.mdx`：切换键两键与值域、按住只配 Alt、Windows 选 Alt 会装全局钩子、
       功能键用按键绑定、横排为主的跟随规则、设置端新布局（入口名称）、迁移命名。提交。
+
+## 追加（执行中发现）
+
+### Task 11: 预览样例扩成一组（core）
+
+**Files:** `wind-coordinator/src/comment/preview.rs`、`wind-webdata/src/lib.rs`（`appearance.previewTemplate`）、
+`wind-webdata/tests/appearance_preview_template.rs`；设置端 mock `src/rpc.rs` 的 `mock_preview_template` 同步（只改 mock 与调用方，不动别的 UI）。
+
+现状：只有一个固定样例「你好」，设置端预览三个候选注释完全相同，看不出模板效果。保留「固定样例、不现查词库」的取舍，扩成一组：
+
+- [ ] 中文样例至少 3 个（如 你好 / 中文 / 输入法，各有自己的拼音、双拼、反查码、拆字、`${dict:zh_en}` 英文释义、编码提示），
+      英文样例至少 3 个（如 apple / hello / world，`${dict:en_zh}` 给「词性. 中文义」，`${pinyin}` 等中文变量为空）。
+      `${dict:<id>}` 按 id 取对应语种的样例值；裸 `${dict}` 取该样例的首个释义。
+- [ ] 入参加可选 `sample`（样例 id，缺省 = 原「你好」，保持现有回包与用例不变）；回包加 `candidate`（样例词本身）。
+      另加 `samples` 查询（或在回包里列出可用样例 id 与语种），设置端据此取「中文三条 / 英文三条」。
+- [ ] 用例：每个样例的关键变量值、英文样例下中文变量为空且可选段消失、缺省入参回包不变。
+- [ ] 设置端：mock 同步；模板库预览与分配表预览按作用范围选样例语种（英文类型行、临时英文模式行用英文样例，其余中文）。
