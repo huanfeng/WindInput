@@ -14161,7 +14161,7 @@ scripts = { latin = 42 }
             c.assign.global.default_vertical.as_deref(),
             Some("migrated_1")
         );
-        // 横排旧值缺席 = 旧出厂值，竖排换了模板时横排要显式跟随下一层，否则同层横排会沿用竖排。
+        // 横排旧值缺席 = 旧出厂值：另一边写 `inherit`，挡格据此也覆盖下层出厂的横排格。
         assert_eq!(
             c.assign.global.default_horizontal.as_deref(),
             Some("inherit")
