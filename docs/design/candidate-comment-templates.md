@@ -307,6 +307,8 @@ detail_horizontal = "inherit"
   松开时干净且 ≤500ms 才算；判出单击再按原「确认过的松开」走 keyup 分支，中英切换键、`session_actions`
   的 lctrl / rctrl、`lrctrl` 选词照旧优先，且同样只在单击时触发。TSF 的 `DispatchHotkey` 也作废待判单击
   （候选窗不显示那条旧路的 Ctrl+数字误判单击一并修好）。
+- Shift 按着时单击 Ctrl：如实上报这条路按组合键算（按下带 Shift 位即弄脏），不算单击；旧路在 mac / Linux
+  上会算单击。两路在这点上不一致，保留新行为。
 - 功能键（F1 等）不进切换键：按键绑定里绑 `comment_state` / `comment_state:session` 已能做到。
 - 选了 Alt 的 Windows 用户才装全局低级键盘钩子（与 CapsLock 绑定同一套线程与投递约束）：
   钩子判单击、在 Alt 松开前补一个无含义的屏蔽键压住菜单栏；不选 Alt 时进程里没有这个钩子。

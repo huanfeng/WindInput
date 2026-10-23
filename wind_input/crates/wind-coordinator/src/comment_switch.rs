@@ -76,21 +76,16 @@ pub(crate) struct CtrlTrack {
     pub dirty: bool,
 }
 
-/// 如实上报的 Ctrl 按下：同侧且没弄脏的 track 视作自动连发，保留首次按下的时刻；否则重新起算
-/// （另一侧 Ctrl 还按着时换成这一侧，那一侧的松开就找不到 track，不算单击）。`combo` = 按下时
-/// 已带别的修饰位（Shift / Alt / Win）。
+/// 如实上报的 Ctrl 按下：一律重新起算。平台对同一次按住只发一次按下（连发 / 重复回调在平台层
+/// 就滤掉了），再来一次按下只能是上次松开丢了（Ctrl+Alt+Del、Ctrl+点击切走），沿用旧 track
+/// 只会把这次拖成长按或组合键。另一侧 Ctrl 还按着时换成这一侧，那一侧的松开就找不到 track，
+/// 不算单击。`combo` = 按下时已带别的修饰位（Shift / Alt / Win）。
 pub(crate) fn on_ctrl_raw_down(track: &mut Option<CtrlTrack>, vk: u32, combo: bool, now: Instant) {
-    let repeat = track.is_some_and(|t| t.vk == vk && !t.dirty);
-    if !repeat {
-        *track = Some(CtrlTrack {
-            vk,
-            down_at: now,
-            dirty: false,
-        });
-    }
-    if combo {
-        on_other_ctrl_key(track);
-    }
+    *track = Some(CtrlTrack {
+        vk,
+        down_at: now,
+        dirty: combo,
+    });
 }
 
 /// 如实上报的 Ctrl 松开：是不是单击。干净（期间没有别的键、平台也没报 `not_tap`）、同侧且按住
@@ -526,15 +521,19 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_raw_repeat_keeps_first_press_time() {
+    fn ctrl_raw_second_down_restarts() {
+        // 上次松开丢了：第二次按下重新起算，不被拖成长按。
         let t0 = Instant::now();
         let mut track = None;
         on_ctrl_raw_down(&mut track, 0xA2, false, t0);
-        on_ctrl_raw_down(&mut track, 0xA2, false, t0 + Duration::from_millis(400));
-        assert!(
-            !on_ctrl_raw_up(&mut track, 0xA2, false, t0 + Duration::from_millis(600)),
-            "连发不重置计时"
-        );
+        let t1 = t0 + Duration::from_millis(400);
+        on_ctrl_raw_down(&mut track, 0xA2, false, t1);
+        assert!(on_ctrl_raw_up(
+            &mut track,
+            0xA2,
+            false,
+            t1 + Duration::from_millis(200)
+        ));
     }
 
     #[test]

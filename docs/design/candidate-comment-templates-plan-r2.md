@@ -30,7 +30,7 @@
 - 未发布功能不做兼容：`alt_switch` 直接改名，不迁移。
 - 值域原文：`switch_key`：`ctrl`（出厂）/ `lctrl` / `rctrl` / `alt` / `lalt` / `ralt`；
   `switch_mode`：`off` / `session`（出厂）/ `persist` / `hold`。
-- **按住（hold）只配 Alt**（裁定：Ctrl 的按下三个平台都不送）；`hold` + Ctrl 系按 `session` 处理并启动 `warn` 一次，设置端选 Ctrl 时「按住」置灰并说明。
+- **按住（hold）只配 Alt**（裁定：Ctrl 的按下三个平台都不送）；`hold` + Ctrl 系按 `session` 处理并启动 `warn` 一次，设置端选 Ctrl 时「按住」置灰并说明。（**已由 Task 12 取代**：Ctrl 系也支持按住）
 - 提交信息与注释简短，一句结论，不写日期 / GH 号 / 实测过程。
 - 设置端 UI 改动必须用离屏截图自验：`WIND_RPC_MOCK=1 target/debug/wind_setting --page ui --size W H --screenshot out.png`，
   可加 `--click X Y`（可多次）/ `--hover X Y` / `--rclick X Y` / `--key …`；mock 首启会弹设置向导，先找出关掉它的办法
@@ -56,8 +56,8 @@
 
 - [ ] `SwitchKey { Ctrl, LCtrl, RCtrl, Alt, LAlt, RAlt }`，带 `matches_vk(vk) -> bool`（0xA2/0xA3/0xA4/0xA5）、`is_alt()`；
       `SwitchMode { Off, Session, Persist, Hold }`；`UiCommentConfig` 字段 `switch_key`（默认 Ctrl）、`switch_mode`（默认 Session）。
-- [ ] 有效模式：`effective_mode(key, mode)`，hold + Ctrl 系 → Session，启动 `warn` 一次。
-- [ ] `data/config.toml` 两键注释写清：选 Alt 的 Windows 会装全局键盘钩子；按住只配 Alt；功能键请用按键绑定 `comment_state`。
+- [ ] 有效模式：`effective_mode(key, mode)`，hold + Ctrl 系 → Session，启动 `warn` 一次。（**已由 Task 12 取代**：Ctrl 系也支持按住）
+- [ ] `data/config.toml` 两键注释写清：选 Alt 的 Windows 会装全局键盘钩子；按住只配 Alt；功能键请用按键绑定 `comment_state`。（「按住只配 Alt」**已由 Task 12 取代**）
 - [ ] 用例：解析、默认值、非法值走校验、hold+ctrl 降级。门禁全过。提交。
 
 ### Task 2: 服务端按切换键判定（Ctrl 单击 + 按 Alt 左右过滤）
@@ -126,7 +126,7 @@
 - [ ] 「候选标注」分区行：
   - 「候选注释」：Switch（`ui.comment.enabled`）+「分配…」，样式同「悬停提示」那种 Switch + 按钮行；
   - 「注释模板」：「管理…」→ 模板库对话框（Task 8）；
-  - 「注释切换与显示」：「设置…」→ 对话框：当前状态、切换键（`switch_key`）、切换方式（`switch_mode`，选 Ctrl 系时「按住」置灰并说明）、
+  - 「注释切换与显示」：「设置…」→ 对话框：当前状态、切换键（`switch_key`）、切换方式（`switch_mode`，选 Ctrl 系时「按住」置灰并说明——**已由 Task 12 取代**）、
     上方注释条、横 / 竖最大字数；
   - 「自动使用词库自带的注释」照旧；「注释词库」恢复为独立一行 + 原 `comment_dicts_dialog`（不再挂在注释对话框里）。
 - [ ] 删除 Tab 外壳与对话框里重复的「显示候选注释」开关。
@@ -165,7 +165,7 @@
 
 ### Task 10: 文档同步
 
-- [ ] `content/docs/settings/appearance/candidate-comment.mdx`：切换键两键与值域、按住只配 Alt、Windows 选 Alt 会装全局钩子、
+- [ ] `content/docs/settings/appearance/candidate-comment.mdx`：切换键两键与值域、按住只配 Alt（**已由 Task 12 取代**）、Windows 选 Alt 会装全局钩子、
       功能键用按键绑定、横排为主的跟随规则、设置端新布局（入口名称）、迁移命名。提交。
 
 ## 追加（执行中发现）
