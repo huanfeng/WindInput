@@ -39,6 +39,26 @@ final class CtrlRawReportTests: XCTestCase {
         XCTAssertEqual(r.up(vk: 0xA2), true, "另一侧按下弄脏这次按住")
     }
 
+    /// 丢了一次松开: 同侧再按下时丢掉残留, 不在组字就走旧路。
+    func testStaleSameSideIsDropped() {
+        var r = CtrlRawReport()
+        _ = r.down(vk: 0xA2, composing: true)
+        r.noteOther()
+        XCTAssertFalse(r.down(vk: 0xA2, composing: false))
+        XCTAssertNil(r.vk, "残留已丢, 这次走旧路")
+        XCTAssertNil(r.up(vk: 0xA2))
+        _ = r.down(vk: 0xA2, composing: true)
+        r.noteOther()
+        XCTAssertTrue(r.down(vk: 0xA2, composing: true))
+        XCTAssertEqual(r.up(vk: 0xA2), false, "新的一次是干净的")
+    }
+
+    func testTogglesCarryCapsLock() {
+        XCTAssertEqual(CtrlRawReport.toggles(capsLock: true, notTap: false), 0x01)
+        XCTAssertEqual(CtrlRawReport.toggles(capsLock: true, notTap: true), 0x11)
+        XCTAssertEqual(CtrlRawReport.toggles(capsLock: false, notTap: false), 0)
+    }
+
     func testNoteOtherWithoutPressIsNoop() {
         var r = CtrlRawReport()
         r.noteOther()

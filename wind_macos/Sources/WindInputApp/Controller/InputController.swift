@@ -386,7 +386,8 @@ public class InputController: IMKInputController {
         keySeq &+= 1
         let frame = BinaryCodec.encodeKeyEventFrame(KeyEventPayload(
             keyCode: vk, scanCode: 0, modifiers: KeyHandler.toModifiers(flags) | 0x0002,
-            eventType: type, toggles: notTap ? CtrlRawReport.notTapBit : 0,
+            eventType: type,
+            toggles: CtrlRawReport.toggles(capsLock: flags.contains(.capsLock), notTap: notTap),
             eventSeq: keySeq, prevChar: router.digitTracker.prevChar))
         do {
             try bridge.send(frame)
@@ -435,8 +436,10 @@ public class InputController: IMKInputController {
         switch kc {
         case 56: return (0xA0, NSEvent.ModifierFlags.shift.rawValue)   // 左 Shift → VK_LSHIFT
         case 60: return (0xA1, NSEvent.ModifierFlags.shift.rawValue)   // 右 Shift → VK_RSHIFT
-        case 59: return (0xA2, NSEvent.ModifierFlags.control.rawValue) // 左 Ctrl → VK_LCONTROL
-        case 62: return (0xA3, NSEvent.ModifierFlags.control.rawValue) // 右 Ctrl → VK_RCONTROL
+        // Ctrl 用设备相关位分左右 (NX_DEVICELCTLKEYMASK / NX_DEVICERCTLKEYMASK): 笼统的 .control
+        // 在另一侧还按着时松开这一侧仍为真, 判不出松开。
+        case 59: return (0xA2, 0x0001) // 左 Ctrl → VK_LCONTROL
+        case 62: return (0xA3, 0x2000) // 右 Ctrl → VK_RCONTROL
         case 58: return (0xA4, NSEvent.ModifierFlags.option.rawValue)  // 左 ⌥ → VK_LMENU
         case 61: return (0xA5, NSEvent.ModifierFlags.option.rawValue)  // 右 ⌥ → VK_RMENU
         default: return nil
