@@ -1491,7 +1491,8 @@ comment_above = false
 # 只认显式写了 columns 且含 comment 的词库；派生出的条目在设置页「注释词库」列表里可
 # 单独开关和排序。
 auto_comment_dicts = true
-# 注释词库（供 ${dict} 变量查询）不随附任何内容——词典多有版权，由用户自行放置。
+# 注释词库（供 ${dict} 变量查询）。随包只带英汉/汉英两个释义库（见 system.comments.toml），
+# 它们只能用 ${dict:en_zh} / ${dict:zh_en} 取，裸 ${dict} / ${dict_all} 不查；其余由用户自行放置。
 # 除下方 rime 词库形态外，也能直接放 OpenCC 文本词典（`词<Tab>值…`，无 YAML 头）：值首项
 # 重复词本身时自动丢弃，`---` 开头的行视为注释。
 # 需要时在**用户配置**里按下面的形态增补（出厂为空，故此处不预置）：

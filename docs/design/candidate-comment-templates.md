@@ -201,6 +201,8 @@ detail_horizontal = "inherit"
 - 作为两张**内置注释词库**随包：`en_zh`（英→中）、`zh_en`（中→英），走现有
   `[[ui.comment_dicts]]` 的加载与 `.wcmt` mmap 缓存，不另造机制。内置条目默认 `enabled = true`，
   用户可在注释词库页关掉。
+- 内置库只能按 id 取（`${dict:en_zh}` / `${dict:zh_en}`），裸 `${dict}` / `${dict_all}` 不查：
+  老用户模板里的 `${dict}` 不因升级冒出英文释义，出厂默认态也就不带释义。
 - **内容**：每个词一行，「词性 + 最基础义项」，不要例句、不要多义项堆叠。
   例：`apple → n. 苹果`；`苹果 → n. apple`。
 - **来源**：

@@ -4749,16 +4749,16 @@ impl Coordinator {
             )
         };
         let (paths, ids) = resolve_comment_mounts(&specs, data_dir.as_deref());
+        let named_only = named_only_mounts(&specs, &ids);
         let mut cur = self
             .comment_dict_paths
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if *cur == paths {
             // 挂载集合没变，id 仍可能改了（只改 id 不改路径）：只刷新 id，不重挂
-            self.reverse
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .set_comment_ids(&ids);
+            let mut rl = self.reverse.write().unwrap_or_else(|e| e.into_inner());
+            rl.set_comment_ids(&ids);
+            rl.set_named_only(&named_only);
             return;
         }
         // 注释库缓存与词库 .wdat **同根**：`comment_cache_path` 自己按 schemas 下的目录链分
@@ -4770,6 +4770,7 @@ impl Coordinator {
             let mut rl = self.reverse.write().unwrap_or_else(|e| e.into_inner());
             rl.reload_comments(&paths, cache_dir.as_deref());
             rl.set_comment_ids(&ids);
+            rl.set_named_only(&named_only);
         }
         *cur = paths;
     }
@@ -19046,6 +19047,23 @@ impl EffectiveCommentDict {
 }
 
 /// 把最终挂载序列解析成 `(路径, 方案白名单)` 与 `${dict:id}` 用的 id 表；顺序即优先级。
+/// 只被内置项指到的库：裸 `${dict}` / `${dict_all}` 不查它们，只能 `${dict:id}` 取。
+/// 用户另挂了同一个文件（id 不同）时，那个库就归用户，照常参与裸查。
+pub(crate) fn named_only_mounts(
+    specs: &[EffectiveCommentDict],
+    ids: &[(std::path::PathBuf, Vec<String>)],
+) -> Vec<std::path::PathBuf> {
+    let is_builtin = |id: &str| {
+        specs
+            .iter()
+            .any(|e| e.id == id && matches!(e.kind, EffectiveCommentKind::Builtin { .. }))
+    };
+    ids.iter()
+        .filter(|(_, v)| !v.is_empty() && v.iter().all(|i| is_builtin(i)))
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
 pub(crate) fn resolve_comment_mounts(
     specs: &[EffectiveCommentDict],
     data_dir: Option<&Path>,

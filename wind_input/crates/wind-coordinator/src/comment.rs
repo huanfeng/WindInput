@@ -2776,10 +2776,14 @@ mod eval_var_tests {
         let mut rl = wind_reverse::ReverseLookup::default();
         rl.reload_comments(&paths, None);
         rl.set_comment_ids(&ids);
+        rl.set_named_only(&crate::coordinator::named_only_mounts(&specs, &ids));
         let mut c = word("apple");
         c.comment.clear();
         assert_eq!(comment(&co, &rl, "${dict:en_zh}", &c), "n. 苹果");
         assert_eq!(comment(&co, &rl, "${dict:zh_en}", &word("猫")), "cat");
+        // 老模板的裸 `${dict}` 不因内置库出现而变样
+        assert_eq!(comment(&co, &rl, "${dict}", &c), "");
+        assert_eq!(comment(&co, &rl, "${dict_all}", &word("猫")), "");
     }
 
     // ───────────── `${dict_all}`（论坛 t282） ─────────────
