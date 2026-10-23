@@ -1,6 +1,8 @@
-//! 组字中 Alt 单击 / 按住切换注释态（`ui.comment.switch_mode`）的判定。
+//! 组字中单击切换键（`ui.comment.switch_key`）切换注释态（`ui.comment.switch_mode`）的判定。
 //!
-//! 平台层只在组字中转发 Alt 的按下与松开，不做计时；吃不吃由这里的 [`AltOutcome`] 定。
+//! - Alt：平台层只在组字中转发 Alt 的按下与松开，不做计时；吃不吃由这里的 [`SwitchOutcome`] 定。
+//! - Ctrl：平台只送判过单击的松开（TSF 走 keyup 白名单，mac / Linux 无条件送），见 [`on_ctrl_up`]。
+//!
 //! 判定是纯函数，时刻由调用方传入，便于测出长按、组合键等分支。
 
 use crate::coordinator::AltTrack;
@@ -12,14 +14,14 @@ pub(crate) const ALT_TAP_MAX: Duration = Duration::from_millis(500);
 
 /// 这次 Alt 事件宿主看不看得到。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AltOutcome {
+pub(crate) enum SwitchOutcome {
     PassThrough,
     Consumed,
 }
 
 /// 判定出的注释态动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AltEffect {
+pub(crate) enum SwitchEffect {
     None,
     ToggleSession,
     TogglePersist,
@@ -27,14 +29,39 @@ pub(crate) enum AltEffect {
     HoldOff,
 }
 
-/// Alt 事件是否带了别的修饰位。平台把这次按住期间按过的 Shift / Ctrl / Win 粘在 Alt 事件上
-/// （桌面 TSF 不转发这几个键的按下），带了就不是单击：Alt+Shift 是系统切换输入语言的热键。
-pub(crate) fn carries_other_modifier(modifiers: u32) -> bool {
+/// 切换键事件是否带了别的修饰位，带了就不是单击。
+///
+/// Alt：平台把这次按住期间按过的 Shift / Ctrl / Win 粘在 Alt 事件上（桌面 TSF 不转发这几个键的
+/// 按下）：Alt+Shift 是系统切换输入语言的热键。Ctrl：TSF 送来的松开自带 Ctrl 位，那是它自己的，
+/// 只看 Shift / Alt / Win。
+pub(crate) fn carries_other_modifier(vk: u32, modifiers: u32) -> bool {
     use wind_ipc::protocol::{
-        MOD_CTRL, MOD_LCTRL, MOD_LSHIFT, MOD_RCTRL, MOD_RSHIFT, MOD_SHIFT, MOD_WIN,
+        MOD_ALT, MOD_CTRL, MOD_LCTRL, MOD_LSHIFT, MOD_RCTRL, MOD_RSHIFT, MOD_SHIFT, MOD_WIN,
     };
-    modifiers & (MOD_SHIFT | MOD_CTRL | MOD_WIN | MOD_LSHIFT | MOD_RSHIFT | MOD_LCTRL | MOD_RCTRL)
-        != 0
+    let shift_win = MOD_SHIFT | MOD_WIN | MOD_LSHIFT | MOD_RSHIFT;
+    let others = if is_ctrl_vk(vk) {
+        shift_win | MOD_ALT
+    } else {
+        shift_win | MOD_CTRL | MOD_LCTRL | MOD_RCTRL
+    };
+    modifiers & others != 0
+}
+
+/// 左 / 右 Ctrl（0xA2 / 0xA3）。
+pub(crate) fn is_ctrl_vk(vk: u32) -> bool {
+    matches!(vk, 0xA2 | 0xA3)
+}
+
+/// Ctrl 单击的松开（平台已判过单击）。按住档在调用前已由 `effective_mode` 降为单击档。
+pub(crate) fn on_ctrl_up(mode: SwitchMode, has_candidates: bool, combo: bool) -> SwitchEffect {
+    if !has_candidates || combo {
+        return SwitchEffect::None;
+    }
+    match mode {
+        SwitchMode::Session => SwitchEffect::ToggleSession,
+        SwitchMode::Persist => SwitchEffect::TogglePersist,
+        SwitchMode::Off | SwitchMode::Hold => SwitchEffect::None,
+    }
 }
 
 /// Alt 按下。不适用时清掉 track（上次松开没送到时留下的残留）。
@@ -46,10 +73,10 @@ pub(crate) fn on_alt_down(
     has_candidates: bool,
     track: &mut Option<AltTrack>,
     now: Instant,
-) -> (AltOutcome, AltEffect) {
+) -> (SwitchOutcome, SwitchEffect) {
     if mode == SwitchMode::Off || !has_candidates {
         *track = None;
-        return (AltOutcome::PassThrough, AltEffect::None);
+        return (SwitchOutcome::PassThrough, SwitchEffect::None);
     }
     if !track.as_ref().is_some_and(|t| !t.dirty) {
         *track = Some(AltTrack {
@@ -58,8 +85,8 @@ pub(crate) fn on_alt_down(
         });
     }
     match mode {
-        SwitchMode::Hold => (AltOutcome::Consumed, AltEffect::HoldOn),
-        _ => (AltOutcome::PassThrough, AltEffect::None),
+        SwitchMode::Hold => (SwitchOutcome::Consumed, SwitchEffect::HoldOn),
+        _ => (SwitchOutcome::PassThrough, SwitchEffect::None),
     }
 }
 
@@ -69,22 +96,22 @@ pub(crate) fn on_alt_up(
     has_candidates: bool,
     track: &mut Option<AltTrack>,
     now: Instant,
-) -> (AltOutcome, AltEffect) {
+) -> (SwitchOutcome, SwitchEffect) {
     let Some(t) = track.take() else {
-        return (AltOutcome::PassThrough, AltEffect::None);
+        return (SwitchOutcome::PassThrough, SwitchEffect::None);
     };
     // 按下吃了，松开也吃：按住期间上屏关了窗，松开时已无候选。
     if mode == SwitchMode::Hold {
-        return (AltOutcome::Consumed, AltEffect::HoldOff);
+        return (SwitchOutcome::Consumed, SwitchEffect::HoldOff);
     }
     let tap = !t.dirty && now.saturating_duration_since(t.down_at) <= ALT_TAP_MAX;
     if !has_candidates || !tap {
-        return (AltOutcome::PassThrough, AltEffect::None);
+        return (SwitchOutcome::PassThrough, SwitchEffect::None);
     }
     match mode {
-        SwitchMode::Session => (AltOutcome::Consumed, AltEffect::ToggleSession),
-        SwitchMode::Persist => (AltOutcome::Consumed, AltEffect::TogglePersist),
-        _ => (AltOutcome::PassThrough, AltEffect::None),
+        SwitchMode::Session => (SwitchOutcome::Consumed, SwitchEffect::ToggleSession),
+        SwitchMode::Persist => (SwitchOutcome::Consumed, SwitchEffect::TogglePersist),
+        _ => (SwitchOutcome::PassThrough, SwitchEffect::None),
     }
 }
 
@@ -98,10 +125,10 @@ pub(crate) fn on_other_key(track: &mut Option<AltTrack>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use AltEffect as E;
-    use AltOutcome as O;
+    use SwitchEffect as E;
+    use SwitchOutcome as O;
 
-    fn tap(mode: SwitchMode, held_ms: u64) -> [(AltOutcome, AltEffect); 2] {
+    fn tap(mode: SwitchMode, held_ms: u64) -> [(SwitchOutcome, SwitchEffect); 2] {
         let t0 = Instant::now();
         let mut track = None;
         [
@@ -198,12 +225,38 @@ mod tests {
 
     #[test]
     fn other_modifier_bits_mark_combo() {
-        use wind_ipc::protocol::{MOD_ALT, MOD_CTRL, MOD_LSHIFT, MOD_SHIFT, MOD_WIN};
-        assert!(!carries_other_modifier(0));
-        assert!(!carries_other_modifier(MOD_ALT));
-        for m in [MOD_SHIFT, MOD_CTRL, MOD_WIN, MOD_LSHIFT] {
-            assert!(carries_other_modifier(m | MOD_ALT), "{m:#x}");
+        use wind_ipc::protocol::{
+            MOD_ALT, MOD_CTRL, MOD_LCTRL, MOD_LSHIFT, MOD_RCTRL, MOD_SHIFT, MOD_WIN,
+        };
+        for alt in [0xA4, 0xA5] {
+            assert!(!carries_other_modifier(alt, 0));
+            assert!(!carries_other_modifier(alt, MOD_ALT));
+            for m in [MOD_SHIFT, MOD_CTRL, MOD_WIN, MOD_LSHIFT] {
+                assert!(carries_other_modifier(alt, m | MOD_ALT), "{m:#x}");
+            }
         }
+        // Ctrl 松开自带的 Ctrl 位不算组合键。
+        assert!(!carries_other_modifier(0xA2, MOD_CTRL | MOD_LCTRL));
+        assert!(!carries_other_modifier(0xA3, MOD_CTRL | MOD_RCTRL));
+        assert!(!carries_other_modifier(0xA2, 0));
+        for m in [MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_LSHIFT] {
+            assert!(carries_other_modifier(0xA2, m | MOD_CTRL), "{m:#x}");
+        }
+    }
+
+    #[test]
+    fn ctrl_up_toggles_by_mode() {
+        assert_eq!(
+            on_ctrl_up(SwitchMode::Session, true, false),
+            E::ToggleSession
+        );
+        assert_eq!(
+            on_ctrl_up(SwitchMode::Persist, true, false),
+            E::TogglePersist
+        );
+        assert_eq!(on_ctrl_up(SwitchMode::Off, true, false), E::None);
+        assert_eq!(on_ctrl_up(SwitchMode::Session, false, false), E::None);
+        assert_eq!(on_ctrl_up(SwitchMode::Session, true, true), E::None);
     }
 
     #[test]

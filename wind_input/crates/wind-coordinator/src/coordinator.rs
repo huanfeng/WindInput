@@ -3366,6 +3366,7 @@ impl Coordinator {
         // 档位循环触发键的撞车体检（只告警）。出厂不配 ⇒ 默认直接返回。
         coordinator.warn_english_case_cycle_conflict();
         coordinator.warn_sentence_cycle_conflict();
+        coordinator.warn_comment_switch_conflict();
         coordinator
     }
 

@@ -1016,7 +1016,7 @@ impl MessageHandler for Coordinator {
         // 按住 Alt 期间的别的键：照常处理完再收起详细态。声明位置的理由同 `_sk_push`。
         let _hold_off = if data.event_type == EVENT_KEY_DOWN {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            crate::comment_alt::on_other_key(&mut st.alt_track);
+            crate::comment_switch::on_other_key(&mut st.alt_track);
             st.comment_hold_flip
                 .then(|| crate::comment::HoldOffOnDrop(self))
         } else {
@@ -1271,6 +1271,9 @@ impl MessageHandler for Coordinator {
                 if let Some(status) = status {
                     return KeyAction::StatusUpdate(status);
                 }
+            } else if let Some(act) = self.handle_comment_ctrl_up(data) {
+                // 注释切换键（Ctrl 单击）排在以上各功能之后：撞键时它们优先。
+                return act;
             }
             return KeyAction::PassThrough;
         }

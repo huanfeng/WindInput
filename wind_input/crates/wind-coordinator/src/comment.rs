@@ -65,10 +65,12 @@
 //! 解析/渲染（纯函数 [`parse`] / [`render`]）与变量求值（[`Coordinator::comment_for`]）
 //! 刻意分开，与 `layout.rs` 同构：前者可用任意求值闭包测出完整语法矩阵，不必构造协调器。
 
+use crate::comment_switch::{SwitchEffect, SwitchOutcome};
 use crate::coordinator::State;
 use crate::pipeline::ModeKind;
 use wind_candidate::{Candidate, CandidateSource};
 use wind_config::Config;
+use wind_config::comment_lib::SwitchMode;
 use wind_config::config::CodeHintSource;
 use wind_ui_types::{InlineColor, SpanStyle, StyledText};
 
@@ -1206,11 +1208,43 @@ impl crate::coordinator::Coordinator {
         }
     }
 
-    /// 组字中 Alt 的按下 / 松开：按 `ui.comment.switch_mode` 切换注释态，判定见 [`crate::comment_alt`]。
+    /// 当前生效的切换方式：注释关了即 `Off`，按住档按切换键降级（见 `effective_mode`）。
+    fn comment_switch_mode(c: &wind_config::comment_lib::UiCommentConfig) -> SwitchMode {
+        if c.enabled {
+            wind_config::comment_lib::effective_mode(c.switch_key, c.switch_mode)
+        } else {
+            SwitchMode::Off
+        }
+    }
+
+    /// 执行一次切换判定出的动作。
+    fn apply_switch_effect(&self, state: &mut State, effect: SwitchEffect) {
+        use wind_config::comment_lib::CommentState;
+        match effect {
+            SwitchEffect::None => {}
+            SwitchEffect::ToggleSession => self.toggle_comment_session(state),
+            SwitchEffect::TogglePersist => {
+                let to = match self.rt().config.ui.comment.state {
+                    CommentState::Default => CommentState::Detail,
+                    CommentState::Detail => CommentState::Default,
+                };
+                if let Err(e) = self.set_comment_state(state, to) {
+                    tracing::warn!("切换键切换注释持久态写回失败: {e:#}");
+                }
+            }
+            SwitchEffect::HoldOn => self.set_comment_hold(state, true),
+            SwitchEffect::HoldOff => self.set_comment_hold(state, false),
+        }
+    }
+
+    /// 组字中 Alt 的按下 / 松开：按 `ui.comment.switch_mode` 切换注释态，判定见 [`crate::comment_switch`]。
     ///
     /// 平台协议：只在组字中转发 Alt（`key_code` 0xA4 / 0xA5）的按下与松开，不做单击计时；
     /// `modifiers` 带上这次按住期间按过的 Shift / Ctrl / Win 位（粘滞，按过就一直带到松开）。
     /// 返回 `Consumed` 则平台吃掉这次事件，`PassThrough` 则放行。
+    ///
+    /// 切换键不是这一侧的 Alt（选了 Ctrl 系、或左右不符）：放行、不建 track，只把正在追踪的
+    /// 那次按住记为被打断。
     ///
     /// 裸 `lalt` / `ralt` 在 `key_actions` / `session_actions` 里都绑不上（两张键名表都不收），
     /// 故这里不必给用户绑定让位。
@@ -1218,23 +1252,22 @@ impl crate::coordinator::Coordinator {
         &self,
         data: &wind_bridge::handler::KeyEventData,
     ) -> wind_bridge::handler::KeyAction {
-        use crate::comment_alt::{
-            AltEffect, AltOutcome, carries_other_modifier, on_alt_down, on_alt_up, on_other_key,
-        };
+        use crate::comment_switch::{carries_other_modifier, on_alt_down, on_alt_up, on_other_key};
         use wind_bridge::handler::KeyAction;
-        use wind_config::comment_lib::{CommentState, SwitchMode};
         let rt = self.rt();
         let c = &rt.config.ui.comment;
-        let mode = if c.enabled {
-            wind_config::comment_lib::effective_mode(c.switch_key, c.switch_mode)
-        } else {
-            SwitchMode::Off
-        };
         let is_down = data.event_type == wind_ipc::protocol::EVENT_KEY_DOWN;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !c.switch_key.matches_vk(data.key_code) {
+            if is_down {
+                on_other_key(&mut state.alt_track);
+            }
+            return KeyAction::PassThrough;
+        }
+        let mode = Self::comment_switch_mode(c);
         let has_candidates = !state.candidates.is_empty();
         let now = std::time::Instant::now();
-        let combo = carries_other_modifier(data.modifiers);
+        let combo = carries_other_modifier(data.key_code, data.modifiers);
         let (outcome, effect) = if is_down {
             let r = on_alt_down(mode, has_candidates, &mut state.alt_track, now);
             if combo {
@@ -1247,29 +1280,88 @@ impl crate::coordinator::Coordinator {
             }
             on_alt_up(mode, has_candidates, &mut state.alt_track, now)
         };
-        match effect {
-            AltEffect::None => {}
-            AltEffect::ToggleSession => self.toggle_comment_session(&mut state),
-            AltEffect::TogglePersist => {
-                let to = match c.state {
-                    CommentState::Default => CommentState::Detail,
-                    CommentState::Detail => CommentState::Default,
-                };
-                if let Err(e) = self.set_comment_state(&mut state, to) {
-                    tracing::warn!("Alt 切换注释持久态写回失败: {e:#}");
-                }
-            }
-            AltEffect::HoldOn => self.set_comment_hold(&mut state, true),
-            AltEffect::HoldOff => self.set_comment_hold(&mut state, false),
-        }
+        self.apply_switch_effect(&mut state, effect);
         // 松开就不再按住：别让按住翻转卡住（如按住期间改了档位）。
         if !is_down {
             self.set_comment_hold(&mut state, false);
         }
         match outcome {
-            AltOutcome::Consumed => KeyAction::Consumed,
-            AltOutcome::PassThrough => KeyAction::PassThrough,
+            SwitchOutcome::Consumed => KeyAction::Consumed,
+            SwitchOutcome::PassThrough => KeyAction::PassThrough,
         }
+    }
+
+    /// 启动体检：注释切换键与中英切换键、选词键组、会话绑定撞键 → 告警（形制同
+    /// `warn_english_case_cycle_conflict`）。撞键时那些功能优先，切换键只在它们不接时生效。
+    pub(crate) fn warn_comment_switch_conflict(&self) {
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        if Self::comment_switch_mode(c) == SwitchMode::Off {
+            return;
+        }
+        let mut owners: Vec<&str> = Vec::new();
+        for vk in 0xA2..=0xA5u32 {
+            if !c.switch_key.matches_vk(vk) {
+                continue;
+            }
+            for e in &rt.compiled_hotkeys.key_up {
+                if e.match_hash & 0xFFFF != vk {
+                    continue;
+                }
+                let owner = match e.action.as_str() {
+                    "toggle_mode" => "中英切换键（keys.toggle_mode_keys）",
+                    wind_config::hotkey::SESSION_ACTION => {
+                        "选词键组 / 会话绑定（keys.select_key_groups / session_actions）"
+                    }
+                    "schema_bound" => "修饰键绑定（keys.key_actions / 方案 [key_actions]）",
+                    _ => continue,
+                };
+                if !owners.contains(&owner) {
+                    owners.push(owner);
+                }
+            }
+        }
+        if owners.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            "注释切换键（ui.comment.switch_key = {:?}）同时配作 {}；那些功能优先，它们接手时本键不切换注释。\
+             要用本键切换注释：把切换键换成别的键，或把那些功能改绑到别的键",
+            c.switch_key,
+            owners.join(" / ")
+        );
+    }
+
+    /// Ctrl 单击的松开（`key_code` 0xA2 / 0xA3）：切换键是这一侧的 Ctrl 且有候选 → 切换并吃掉；
+    /// 否则 `None`，落回原语义。
+    ///
+    /// 平台只送判过单击的松开：TSF 按 keyup 白名单（`comment_switch` 那条登记）转发，修饰位自带
+    /// Ctrl；mac / Linux 无条件送、修饰位为 0。keyup 分支里排在选词 / 会话绑定 / CapsLock /
+    /// 方案修饰键绑定 / 中英切换**之后**，撞键时那些功能优先。
+    pub(crate) fn handle_comment_ctrl_up(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> Option<wind_bridge::handler::KeyAction> {
+        use crate::comment_switch::{carries_other_modifier, is_ctrl_vk, on_ctrl_up};
+        if !is_ctrl_vk(data.key_code) {
+            return None;
+        }
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        if !c.switch_key.matches_vk(data.key_code) {
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let effect = on_ctrl_up(
+            Self::comment_switch_mode(c),
+            !state.candidates.is_empty(),
+            carries_other_modifier(data.key_code, data.modifiers),
+        );
+        if effect == SwitchEffect::None {
+            return None;
+        }
+        self.apply_switch_effect(&mut state, effect);
+        Some(wind_bridge::handler::KeyAction::Consumed)
     }
 
     /// overlay 反查模式（临时拼音 / 快捷输入）：码表用户借拼音反查编码的场景。

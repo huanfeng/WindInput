@@ -215,6 +215,24 @@ fn is_function_key_name(name: &str) -> bool {
         .is_some_and(|n| (1..=12).contains(&n) && name.len() == 1 + n.to_string().len())
 }
 
+/// 注释切换键（Ctrl 系）在 `key_up` 表里的 action 名。不得复用 `toggle_mode`，理由同
+/// [`SESSION_ACTION`]。
+pub const COMMENT_SWITCH_ACTION: &str = "comment_switch";
+
+/// 注释切换键要登记的 keyup hash：注释开着、切换方式不是 `off`、切换键是 Ctrl 系时才有。
+/// Alt 系不走 TSF 白名单（mac / Linux 组字中本就转发 Alt）。
+fn comment_switch_key_up_hashes(c: &crate::comment_lib::UiCommentConfig) -> Vec<u32> {
+    use crate::comment_lib::SwitchMode;
+    if !c.enabled || c.switch_mode == SwitchMode::Off || c.switch_key.is_alt() {
+        return Vec::new();
+    }
+    [VK_LCONTROL, VK_RCONTROL]
+        .into_iter()
+        .filter(|&vk| c.switch_key.matches_vk(vk))
+        .filter_map(compile_modifier_key_up_hash)
+        .collect()
+}
+
 /// 会话态键名 → (VK, 是否需 Shift)。支持单个 `shift+` 前缀。
 ///
 /// ⚠️ **这是 `wind_keys::keymap::session_key_name_to_vk` 的第二份实现**，因为
@@ -675,6 +693,21 @@ impl Compiler {
             }
         }
 
+        // ── KeyUp：注释切换键（`ui.comment.switch_key` 选 Ctrl 系）──
+        //
+        // TSF 判过单击才转发 Ctrl 的松开，不登记就收不到。带 SESSION 位：无会话时不改变该键
+        // 原有的吃键条件。已被上面登记过的键不再追加——那些功能优先，键本来就会送到。
+        for hash in comment_switch_key_up_hashes(&self.config.ui.comment) {
+            if result.key_up.iter().any(|e| e.match_hash == hash) {
+                continue;
+            }
+            result.key_up.push(HotkeyEntry {
+                tsf_hash: hash | HOTKEY_POLICY_SESSION,
+                match_hash: hash,
+                action: COMMENT_SWITCH_ACTION.to_string(),
+            });
+        }
+
         // 二三候选键（含修饰键组 lrshift / lrctrl）的登记已并入上面的 `session_actions` 段
         // ——它按键的形态自动分流：可打印键进 key_down + FORWARD_ONLY，修饰键进 key_up。
         //
@@ -959,6 +992,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn comment_switch_ctrl_registers_key_up_with_session_bit() {
+        use crate::comment_lib::{SwitchKey, SwitchMode};
+        let up_of = |key: SwitchKey, mode: SwitchMode, toggle: &[&str]| {
+            let mut cfg = Config::default();
+            cfg.ui.comment.switch_key = key;
+            cfg.ui.comment.switch_mode = mode;
+            cfg.keys.toggle_mode_keys = toggle.iter().map(|s| s.to_string()).collect();
+            cfg.keys.session_actions.clear();
+            cfg.keys.select_key_groups.clear();
+            Compiler::new(cfg)
+                .compile()
+                .key_up
+                .into_iter()
+                .filter(|e| e.action == COMMENT_SWITCH_ACTION)
+                .map(|e| e.tsf_hash)
+                .collect::<Vec<_>>()
+        };
+        let l = key_hash(MOD_CTRL | MOD_LCTRL, VK_LCONTROL);
+        let r = key_hash(MOD_CTRL | MOD_RCTRL, VK_RCONTROL);
+        let s = HOTKEY_POLICY_SESSION;
+        assert_eq!(
+            up_of(SwitchKey::Ctrl, SwitchMode::Session, &[]),
+            [l | s, r | s]
+        );
+        assert_eq!(up_of(SwitchKey::LCtrl, SwitchMode::Persist, &[]), [l | s]);
+        assert_eq!(up_of(SwitchKey::RCtrl, SwitchMode::Hold, &[]), [r | s]);
+        assert!(up_of(SwitchKey::Ctrl, SwitchMode::Off, &[]).is_empty());
+        assert!(up_of(SwitchKey::Alt, SwitchMode::Session, &[]).is_empty());
+        // 已是中英切换键的那一侧不再登记，切换键条目不改它的吃键条件。
+        assert_eq!(
+            up_of(SwitchKey::Ctrl, SwitchMode::Session, &["lctrl"]),
+            [r | s]
+        );
+    }
+
+    #[test]
     fn test_parse_simple_key() {
         let hash = parse_hotkey("lshift").unwrap();
         assert_eq!(hash, 0xA0); // no modifiers, key=0xA0
@@ -1077,7 +1146,15 @@ mod tests {
             compiled.match_key_down(key_hash(MOD_CTRL | MOD_SHIFT, 0x45)),
             Some("switch_engine")
         );
-        assert_eq!(compiled.key_up.len(), 2);
+        // 出厂的注释切换键（Ctrl）另有两条，不计。
+        assert_eq!(
+            compiled
+                .key_up
+                .iter()
+                .filter(|e| e.action == "toggle_mode")
+                .count(),
+            2
+        );
     }
 
     #[test]
