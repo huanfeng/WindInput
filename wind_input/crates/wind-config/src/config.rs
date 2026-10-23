@@ -9089,8 +9089,10 @@ impl Config {
     /// `schema.mix_modes[]` 条目的同名键（迁到 `mode."mix:<id>"`，缺 id 的不动）。
     /// - 每个不同的模板串生成一个用户模板 `migrated_N`，写进对应的 `default_*` 格；空串迁成 `none`；
     /// - 全局旧值等于旧出厂值 [`LEGACY_FACTORY_COMMENT_TEMPLATE`] 的视为没写；
-    /// - 横竖相同只写竖排；只写了竖排时横排写 `inherit`，保住旧版「横排跟随下一层」；
-    /// - 写了自定义全局格时，[`FACTORY_DEFAULT_SCOPES`] 的同名格写 `inherit`，保住「跟随全局」；
+    /// - 横竖相同只写横排（竖排不写即同横排）；只写了一边时另一边写 `inherit`，保住旧版
+    ///   「没写的一边跟随下一层」；
+    /// - 迁出了全局格时，[`FACTORY_DEFAULT_SCOPES`] 里没迁出旧模板的范围，同名格写 `inherit`，
+    ///   保住「跟随全局」（出厂在那些范围写横排格，竖排不写会同横排，所以竖排也要挡）；
     /// - 本层已有同名格 / `enabled` 时不覆盖，旧键照删（幂等）。
     ///
     /// 旧键从本层移除；写盘路径（`prune_user_config` / `set_user_value`）都先跑本函数，
@@ -9118,27 +9120,30 @@ impl Config {
             let key = |side: &str| format!("{origin}.comment_template_{side}");
             match (v, h) {
                 (Some(v), Some(h)) if v == h => {
-                    writes.push((cell("default_vertical"), Some(v), key("vertical")));
+                    writes.push((cell("default_horizontal"), Some(h), key("horizontal")));
                 }
+                (None, None) => {}
                 (v, h) => {
-                    let has_v = v.is_some();
-                    if let Some(v) = v {
-                        writes.push((cell("default_vertical"), Some(v), key("vertical")));
-                    }
-                    if h.is_some() || has_v {
-                        writes.push((cell("default_horizontal"), h, key("horizontal")));
-                    }
+                    writes.push((cell("default_vertical"), v, key("vertical")));
+                    writes.push((cell("default_horizontal"), h, key("horizontal")));
                 }
             }
         }
+        // 本身有旧模板的范围不挡全局：它两边的值已由自己的旧键定下。
+        let own_scopes: Vec<Vec<String>> = writes
+            .iter()
+            .map(|(p, ..)| p[3..p.len() - 1].to_vec())
+            .collect();
+        let migrated_scope = |scope: &[&str]| own_scopes.iter().any(|o| o[..] == *scope);
         writes.retain(|(p, ..)| get_nested(layer, &path_refs(p)).is_none());
         // 迁出了自定义全局格：出厂在中间层写了同名格的作用范围，旧版跟随全局，要显式 `inherit`。
+        // 全局写的 `inherit`（另一边是旧出厂值）也要挡，否则那边落到出厂的 `none` 而不是编码提示。
         let mut shadows = Vec::new();
-        for (p, text, origin) in &writes {
-            if p[3] != "global" || text.is_none() {
+        for (p, _, origin) in &writes {
+            if p[3] != "global" {
                 continue;
             }
-            for scope in FACTORY_DEFAULT_SCOPES {
+            for scope in FACTORY_DEFAULT_SCOPES.iter().filter(|s| !migrated_scope(s)) {
                 let mut sp: Vec<String> = ["ui", "comment", "assign"].map(String::from).into();
                 sp.extend(scope.iter().map(|s| s.to_string()));
                 sp.push(p[4].clone());
@@ -14190,8 +14195,8 @@ scripts = { latin = 42 }
              comment_template_horizontal = \"\"\n",
         );
         let cells = &c.assign.mode["temp_english"];
-        assert_eq!(cells.default_vertical.as_deref(), Some("none"));
-        assert_eq!(cells.default_horizontal, None, "横竖相同只写竖排");
+        assert_eq!(cells.default_horizontal.as_deref(), Some("none"));
+        assert_eq!(cells.default_vertical, None, "横竖相同只写横排");
         assert!(c.templates.is_empty());
         assert!(
             get_nested(
@@ -14220,10 +14225,21 @@ scripts = { latin = 42 }
         );
         for m in ["temp_english", "url"] {
             assert_eq!(
-                c.assign.mode[m].default_vertical.as_deref(),
+                c.assign.mode[m].default_horizontal.as_deref(),
                 Some("migrated_1")
             );
+            assert_eq!(c.assign.mode[m].default_vertical, None);
         }
+    }
+
+    /// 只写了横排：竖排写 `inherit`，否则不写的竖排会同本层横排。
+    #[test]
+    fn horizontal_only_mode_template_writes_vertical_inherit() {
+        let (c, _) =
+            comment_after_migration("[input.url]\ncomment_template_horizontal = \"${pinyin}\"\n");
+        let cells = &c.assign.mode["url"];
+        assert_eq!(cells.default_horizontal.as_deref(), Some("migrated_1"));
+        assert_eq!(cells.default_vertical.as_deref(), Some("inherit"));
     }
 
     #[test]
@@ -14350,6 +14366,79 @@ scripts = { latin = 42 }
             lib.template_text(&scope, CommentState::Default, false),
             LEGACY_FACTORY_COMMENT_TEMPLATE
         );
+    }
+
+    fn shadowed_scopes() -> [crate::comment_lib::CommentScope<'static>; 2] {
+        use crate::comment_lib::{CommentScope, SchemaType};
+        [
+            CommentScope {
+                mode: Some("temp_english"),
+                schema: "wubi86",
+                schema_type: SchemaType::CodeTable,
+            },
+            CommentScope {
+                mode: None,
+                schema: "english",
+                schema_type: SchemaType::English,
+            },
+        ]
+    }
+
+    /// 只改了全局竖排：出厂挡着的范围竖排跟随全局（不沿用出厂的横排 `none`），横排是旧出厂值。
+    #[test]
+    fn migrated_global_vertical_only_reaches_shadowed_scopes() {
+        use crate::comment_lib::CommentState;
+        let lib = migrated_library("[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n");
+        for scope in shadowed_scopes() {
+            assert_eq!(
+                lib.template_text(&scope, CommentState::Default, true),
+                "${pinyin}",
+                "{scope:?}"
+            );
+            assert_eq!(
+                lib.template_text(&scope, CommentState::Default, false),
+                LEGACY_FACTORY_COMMENT_TEMPLATE,
+                "{scope:?}"
+            );
+        }
+    }
+
+    /// 只改了全局横排：出厂挡着的范围横排跟随全局，竖排是旧出厂值。
+    #[test]
+    fn migrated_global_horizontal_only_reaches_shadowed_scopes() {
+        use crate::comment_lib::CommentState;
+        let lib = migrated_library("[ui.candidate]\ncomment_template_horizontal = \"${pinyin}\"\n");
+        for scope in shadowed_scopes() {
+            assert_eq!(
+                lib.template_text(&scope, CommentState::Default, false),
+                "${pinyin}",
+                "{scope:?}"
+            );
+            assert_eq!(
+                lib.template_text(&scope, CommentState::Default, true),
+                LEGACY_FACTORY_COMMENT_TEMPLATE,
+                "{scope:?}"
+            );
+        }
+    }
+
+    /// 本身迁出了旧模板的模式不被全局挡格覆盖：两边都按它自己的旧值。
+    #[test]
+    fn migrated_mode_template_not_shadowed_by_global() {
+        use crate::comment_lib::CommentState;
+        let lib = migrated_library(
+            "[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n\
+             [input.temp_english]\ncomment_template_vertical = \"${dict}\"\n\
+             comment_template_horizontal = \"${dict}\"\n",
+        );
+        let scope = &shadowed_scopes()[0];
+        for vertical in [true, false] {
+            assert_eq!(
+                lib.template_text(scope, CommentState::Default, vertical),
+                "${dict}",
+                "vertical={vertical}"
+            );
+        }
     }
 
     #[test]

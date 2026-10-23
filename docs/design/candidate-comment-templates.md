@@ -110,10 +110,10 @@
 - **模式**沿用现有映射（`comment.rs` 的 `template_for`）：临时拼音、临时英文、快捷输入及其它
   mix_modes 实例、网址、Email、Unicode、引导键特殊模式（`special:<方案id>`）。生僻字、反查、
   辅助码维持「无模式层」。
-- **横排格**：
-  - 写了值 → 用它；
-  - 写 `inherit` → 跟随上一层的**横排**；
-  - 不写 → 本范围竖排格**有值**时同竖排，竖排也不写时跟随上一层横排。
+- **横排为主**（见 §13.2）：
+  - 横排格：写了值 → 用它；写 `inherit` 或不写 → 跟随下一层的**横排**；
+  - 竖排格：写了值 → 用它；写 `inherit` → 跟随下一层的**竖排**；
+    不写 → 本范围横排格**有值**（模板或 `none`）时同横排，横排也没值时跟随下一层竖排（同样按本条判）。
 - **`none`** 是一个有意见的值：压过下层，渲染成空注释（同现行三态里的空串）。
 - 全局层四格**必有值**：内置默认见 §7，用户删掉某格时按内置默认补。
 - `system.comments.toml` 编译期内置一份副本；盘上文件缺失或解析失败时用副本并 `warn`。
@@ -185,7 +185,7 @@ detail_horizontal = "inherit"
 | `pinyin_english` | 拼音+英文 | `${pinyin}{ · ${dict:zh_en}}` |
 | `detail_full` | 详细（全部） | `${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}` |
 
-出厂分配：
+出厂分配（都写在横排格，竖排不写即同横排）：
 
 | 作用范围 | 默认 | 详细 |
 |---|---|---|
@@ -264,9 +264,9 @@ detail_horizontal = "inherit"
 - `config.toml` 的旧键（全局两份模板串、五个模式的模板串、`schema.mix_modes[]` 的模板串、
   `ui.candidate.comment_enabled`）启动时迁入 `[ui.comment]`：每段非空模板串生成用户模板
   `migrated_N`（同文本去重），写进对应作用范围的 `default_*` 格；空串迁成 `none`；
-  `comment_enabled` 迁到 `enabled`。只有竖排有值、横排跟随的，横排写 `inherit`。
+  `comment_enabled` 迁到 `enabled`。横竖相同只写横排；只有一边有值的，另一边写 `inherit`。
 - 迁了全局默认格时，对出厂在下层有同名格的作用范围（如 `type.english`、`mode.temp_english`）
-  写用户 `inherit`，保住老用户「全局模板处处生效」的行为。
+  写用户 `inherit`（全局写了哪格就挡哪格，含写成 `inherit` 的那格；本身迁出了旧模板的范围除外），保住老用户「全局模板处处生效」的行为。
 - 方案文件与 `schema_overrides/<id>.toml` 里的旧键不迁移，只启动 `warn`（见 §6.1）。
 - 写回遵守现有「保留用户内容 + 自检」的写回门禁。
 

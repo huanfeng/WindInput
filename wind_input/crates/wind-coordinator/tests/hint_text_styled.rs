@@ -301,7 +301,7 @@ fn zongguo(tag: &str, tone: bool) -> Vec<CandidateItem> {
                 name: "fz".into(),
                 text: "${correct_pinyin}".into(),
             });
-        c.ui.comment.assign.global.default_vertical = Some("fz".into());
+        c.ui.comment.assign.global.default_horizontal = Some("fz".into());
     });
     type_str(&coord, "zongguo");
     shown(&coord, &rx)

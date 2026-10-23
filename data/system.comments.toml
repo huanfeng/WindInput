@@ -6,8 +6,10 @@
 #
 # 模板串语法见 https://windinput.com/docs/settings/appearance/candidate-comment
 #
-# 格值：模板 id / "none"（不显示）/ "inherit"（跟随下一层）。
-# 键名：default_vertical / default_horizontal / detail_vertical / detail_horizontal。
+# 格值：模板 id / "none"（不显示）/ "inherit"（跟随下一层同排布）。
+# 键名：default_horizontal / default_vertical / detail_horizontal / detail_vertical。
+# 横排为主：竖排格不写时，本层横排格有值就同横排，否则跟随下一层竖排；
+# 横排格不写即跟随下一层横排。出厂分配只写横排格。
 
 [[templates]]
 id = "code_hint"
@@ -56,28 +58,28 @@ text = "${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}"
 
 # 出厂分配
 [assign.global]
-default_vertical = "code_hint"
-detail_vertical = "detail_full"
+default_horizontal = "code_hint"
+detail_horizontal = "detail_full"
 
 [assign.type.codetable]
-detail_vertical = "chaizi_pinyin"
+detail_horizontal = "chaizi_pinyin"
 
 [assign.type.pinyin]
-detail_vertical = "pinyin_english"
+detail_horizontal = "pinyin_english"
 
 [assign.type.shuangpin]
-detail_vertical = "pinyin_english"
+detail_horizontal = "pinyin_english"
 
 [assign.type.english]
-default_vertical = "none"
-detail_vertical = "en_meaning"
+default_horizontal = "none"
+detail_horizontal = "en_meaning"
 
 [assign.mode.temp_english]
-default_vertical = "none"
-detail_vertical = "en_meaning"
+default_horizontal = "none"
+detail_horizontal = "en_meaning"
 
 [assign.mode.temp_pinyin]
-detail_vertical = "chaizi_code"
+detail_horizontal = "chaizi_code"
 
 # 内置注释词库（路径相对数据目录）
 [[dicts]]

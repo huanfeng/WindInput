@@ -50,7 +50,7 @@ fn cfg(schema_pinyin_src: &str, mix_hint: bool) -> Config {
             name: "rev".into(),
             text: "${code_rev}".into(),
         });
-    cfg.ui.comment.assign.global.default_vertical = Some("rev".into());
+    cfg.ui.comment.assign.global.default_horizontal = Some("rev".into());
     cfg.schema.pinyin.code_hint_source = schema_pinyin_src.into();
     cfg.schema.mix.pinyin_code_hint = mix_hint;
     cfg

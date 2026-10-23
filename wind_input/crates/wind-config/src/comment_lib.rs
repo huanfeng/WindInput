@@ -476,14 +476,15 @@ impl CommentLibrary {
         ];
         for (at, layer) in layers.into_iter().skip(start as usize) {
             let Some(layer) = layer else { continue };
+            // 横排为主：竖排没写时同本层横排（横排有主见时），否则看下一层竖排。
             let picked = if vertical {
-                adopt(layer.get(state, true))
-            } else {
-                match layer.get(state, false) {
+                match layer.get(state, true) {
                     Some(Cell::Inherit) => None,
                     Some(c) => Some(c),
-                    None => adopt(layer.get(state, true)),
+                    None => adopt(layer.get(state, false)),
                 }
+            } else {
+                adopt(layer.get(state, false))
             };
             if let Some(c) = picked {
                 return Some((at, c));
@@ -649,7 +650,7 @@ mod tests {
 
     fn global_default_of(sys: &SystemComments) -> String {
         let (lib, _) = CommentLibrary::build(sys, &UiCommentConfig::default());
-        lib.template_text(&scope(None), CommentState::Default, true)
+        lib.template_text(&scope(None), CommentState::Default, false)
             .to_string()
     }
 
@@ -675,7 +676,7 @@ mod tests {
         let p = std::env::temp_dir().join(format!("sys_comments_ok_{}.toml", std::process::id()));
         std::fs::write(
             &p,
-            "[[templates]]\nid = \"x\"\ntext = \"X\"\n[assign.global]\ndefault_vertical = \"x\"\n",
+            "[[templates]]\nid = \"x\"\ntext = \"X\"\n[assign.global]\ndefault_horizontal = \"x\"\n",
         )
         .unwrap();
         let (sys, w) = SystemComments::load_or_embedded(Some(&p));
@@ -718,11 +719,11 @@ mod tests {
             assert!(ids.contains(&want), "缺内置模板 {want}");
         }
         assert_eq!(
-            s.assign.global.default_vertical.as_deref(),
+            s.assign.global.default_horizontal.as_deref(),
             Some("code_hint")
         );
         assert_eq!(
-            s.assign.global.detail_vertical.as_deref(),
+            s.assign.global.detail_horizontal.as_deref(),
             Some("detail_full")
         );
         let dicts: Vec<&str> = s.dicts.iter().map(|d| d.id.as_str()).collect();
@@ -735,7 +736,7 @@ mod tests {
     fn shipped_assign_matches_design_table() {
         let a = shipped().assign;
         let detail = |m: &BTreeMap<String, CommentCells>, k: &str| {
-            m.get(k).and_then(|c| c.detail_vertical.clone())
+            m.get(k).and_then(|c| c.detail_horizontal.clone())
         };
         assert_eq!(
             detail(&a.by_type, "codetable").as_deref(),
@@ -751,7 +752,7 @@ mod tests {
         );
         assert_eq!(detail(&a.by_type, "english").as_deref(), Some("en_meaning"));
         assert_eq!(
-            a.by_type["english"].default_vertical.as_deref(),
+            a.by_type["english"].default_horizontal.as_deref(),
             Some("none")
         );
         assert_eq!(
@@ -759,13 +760,23 @@ mod tests {
             Some("en_meaning")
         );
         assert_eq!(
-            a.mode["temp_english"].default_vertical.as_deref(),
+            a.mode["temp_english"].default_horizontal.as_deref(),
             Some("none")
         );
         assert_eq!(
             detail(&a.mode, "temp_pinyin").as_deref(),
             Some("chaizi_code")
         );
+        let all = std::iter::once(&a.global)
+            .chain(a.by_type.values())
+            .chain(a.schema.values())
+            .chain(a.mode.values());
+        for c in all {
+            assert!(
+                c.default_vertical.is_none() && c.detail_vertical.is_none(),
+                "出厂只写横排格: {c:?}"
+            );
+        }
     }
 
     #[test]
@@ -919,7 +930,7 @@ mod tests {
 
     fn global_only() -> CommentAssign {
         CommentAssign {
-            global: cells(Some("code_hint"), None, Some("detail_full"), None),
+            global: cells(None, Some("code_hint"), None, Some("detail_full")),
             ..Default::default()
         }
     }
@@ -936,95 +947,165 @@ mod tests {
 
     #[test]
     fn mode_beats_schema_beats_type_beats_global() {
-        let mk = |id: &str| cells(None, None, Some(id), None);
+        let mk = |id: &str| cells(None, None, None, Some(id));
         let mut a = global_only();
         a.global = mk("a");
         a.by_type.insert("codetable".into(), mk("b"));
         a.schema.insert("wubi".into(), mk("c"));
         a.mode.insert("url".into(), mk("d"));
-        let mut u = UiCommentConfig::default();
-        let want = ["T:d", "T:c", "T:b", "T:a"];
-        let (lib, _) = CommentLibrary::build(&sys(a.clone()), &u);
-        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[0]);
-        u.assign = CommentAssign::default();
-        let mut a2 = a.clone();
-        a2.mode.clear();
-        let (lib, _) = CommentLibrary::build(&sys(a2.clone()), &u);
-        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[1]);
-        a2.schema.clear();
-        let (lib, _) = CommentLibrary::build(&sys(a2.clone()), &u);
-        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[2]);
-        a2.by_type.clear();
-        let (lib, _) = CommentLibrary::build(&sys(a2), &u);
-        assert_eq!(text(&lib, Some("url"), CommentState::Detail, true), want[3]);
+        let u = UiCommentConfig::default();
+        let check = |a: &CommentAssign, want: &str| {
+            let (lib, _) = CommentLibrary::build(&sys(a.clone()), &u);
+            for v in [false, true] {
+                assert_eq!(text(&lib, Some("url"), CommentState::Detail, v), want);
+            }
+        };
+        check(&a, "T:d");
+        a.mode.clear();
+        check(&a, "T:c");
+        a.schema.clear();
+        check(&a, "T:b");
+        a.by_type.clear();
+        check(&a, "T:a");
     }
 
     #[test]
     fn none_is_an_opinion() {
         let mut a = global_only();
         a.mode
-            .insert("url".into(), cells(Some("none"), None, None, None));
+            .insert("url".into(), cells(None, Some("none"), None, None));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
-        assert_eq!(text(&lib, Some("url"), CommentState::Default, true), "");
-        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code_hint");
+        for v in [false, true] {
+            assert_eq!(text(&lib, Some("url"), CommentState::Default, v), "");
+            assert_eq!(text(&lib, None, CommentState::Default, v), "T:code_hint");
+        }
     }
 
     #[test]
     fn user_inherit_skips_system_cell() {
         let mut a = global_only();
         a.mode
-            .insert("temp_english".into(), cells(Some("none"), None, None, None));
+            .insert("temp_english".into(), cells(None, Some("none"), None, None));
         let mut u = UiCommentConfig::default();
         u.assign.mode.insert(
             "temp_english".into(),
-            cells(Some("inherit"), None, None, None),
+            cells(None, Some("inherit"), None, None),
         );
         let (lib, _) = CommentLibrary::build(&sys(a), &u);
-        assert_eq!(
-            text(&lib, Some("temp_english"), CommentState::Default, true),
-            "T:code_hint"
-        );
+        for v in [false, true] {
+            assert_eq!(
+                text(&lib, Some("temp_english"), CommentState::Default, v),
+                "T:code_hint"
+            );
+        }
     }
 
     #[test]
-    fn horizontal_same_as_vertical_when_unset() {
+    fn vertical_same_as_horizontal_when_unset() {
         let mut a = global_only();
+        a.global.detail_vertical = Some("b".into());
         a.schema
-            .insert("wubi".into(), cells(None, None, Some("a"), None));
+            .insert("wubi".into(), cells(None, None, None, Some("a")));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:a");
         assert_eq!(text(&lib, None, CommentState::Detail, false), "T:a");
     }
 
     #[test]
-    fn horizontal_inherit_goes_down() {
+    fn vertical_same_as_horizontal_none() {
         let mut a = global_only();
-        a.global.detail_horizontal = Some("b".into());
         a.schema
-            .insert("wubi".into(), cells(None, None, Some("a"), Some("inherit")));
+            .insert("wubi".into(), cells(None, Some("none"), None, None));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
-        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:b");
-        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:a");
+        assert_eq!(text(&lib, None, CommentState::Default, true), "");
     }
 
     #[test]
-    fn horizontal_unset_and_vertical_unset_follows_down() {
+    fn vertical_inherit_goes_down() {
         let mut a = global_only();
-        a.global.detail_horizontal = Some("b".into());
+        a.global.detail_vertical = Some("b".into());
+        a.schema
+            .insert("wubi".into(), cells(None, None, Some("inherit"), Some("a")));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:b");
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:a");
+    }
+
+    #[test]
+    fn horizontal_inherit_goes_down_and_vertical_follows_next_layer() {
+        let mut a = global_only();
+        a.global.detail_vertical = Some("b".into());
+        a.schema
+            .insert("wubi".into(), cells(None, None, None, Some("inherit")));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(
+            text(&lib, None, CommentState::Detail, false),
+            "T:detail_full"
+        );
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:b");
+    }
+
+    #[test]
+    fn vertical_written_does_not_affect_horizontal() {
+        let mut a = global_only();
+        a.schema
+            .insert("wubi".into(), cells(None, None, Some("a"), None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:a");
+        assert_eq!(
+            text(&lib, None, CommentState::Detail, false),
+            "T:detail_full"
+        );
+    }
+
+    #[test]
+    fn vertical_unset_and_horizontal_unset_follows_down() {
+        let mut a = global_only();
+        a.global.detail_vertical = Some("b".into());
         a.schema
             .insert("wubi".into(), cells(None, None, None, None));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
-        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:b");
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:b");
         assert_eq!(
-            text(&lib, None, CommentState::Detail, true),
+            text(&lib, None, CommentState::Detail, false),
             "T:detail_full"
         );
+    }
+
+    #[test]
+    fn vertical_unset_with_horizontal_unset_applies_rule_at_next_layer() {
+        // 方案层两格都不写 → 看类型层：类型层竖排也不写、横排有值 → 同类型层横排。
+        let mut a = global_only();
+        a.global.detail_vertical = Some("b".into());
+        a.by_type
+            .insert("codetable".into(), cells(None, None, None, Some("c")));
+        a.schema
+            .insert("wubi".into(), cells(None, None, None, None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:c");
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:c");
+    }
+
+    #[test]
+    fn user_inherit_on_vertical_skips_row_horizontal() {
+        let mut a = global_only();
+        a.global.detail_vertical = Some("b".into());
+        a.by_type
+            .insert("codetable".into(), cells(None, None, None, Some("c")));
+        let mut u = UiCommentConfig::default();
+        u.assign
+            .by_type
+            .insert("codetable".into(), cells(None, None, Some("inherit"), None));
+        let (lib, _) = CommentLibrary::build(&sys(a), &u);
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:b");
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:c");
     }
 
     #[test]
     fn unknown_id_follows_and_warns_once() {
         let mut a = global_only();
         a.schema
-            .insert("wubi".into(), cells(Some("gone"), None, Some("gone"), None));
+            .insert("wubi".into(), cells(None, Some("gone"), None, Some("gone")));
         let (lib, w) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
         assert_eq!(w.len(), 1, "{w:?}");
         assert!(w[0].contains("gone"));
@@ -1089,9 +1170,9 @@ mod tests {
     fn resolve_cell_reports_winner_and_layer() {
         let mut a = global_only();
         a.by_type
-            .insert("codetable".into(), cells(None, None, Some("b"), None));
+            .insert("codetable".into(), cells(None, None, None, Some("b")));
         a.mode
-            .insert("url".into(), cells(Some("none"), None, None, None));
+            .insert("url".into(), cells(None, Some("none"), None, None));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
         let sc = scope(Some("url"));
         assert_eq!(
@@ -1126,9 +1207,9 @@ mod tests {
     fn effective_table_lists_fixed_and_assigned_rows() {
         let mut a = global_only();
         a.schema
-            .insert("wubi".into(), cells(None, None, Some("a"), None));
+            .insert("wubi".into(), cells(None, None, None, Some("a")));
         a.mode
-            .insert("url".into(), cells(Some("none"), None, None, None));
+            .insert("url".into(), cells(None, Some("none"), None, None));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
         let t = lib.effective_table("wubi", |_| SchemaType::CodeTable);
         assert_eq!(t.len(), (1 + 5 + 1 + 1) * 4);
@@ -1151,5 +1232,48 @@ mod tests {
         );
         let c = find("mode:url", CommentState::Default, true);
         assert_eq!((c.template_id, c.from_scope.as_str()), (None, "mode:url"));
+    }
+
+    /// 出厂分配在两种排布下的实际结果（横排为主改写前后一致）。
+    #[test]
+    fn shipped_effective_table_snapshot() {
+        let (lib, w) = CommentLibrary::build(&shipped(), &UiCommentConfig::default());
+        assert!(w.is_empty(), "{w:?}");
+        let t = lib.effective_table("wubi86", |_| SchemaType::CodeTable);
+        let got = |scope: &str, st: CommentState| {
+            let pick = |v: bool| {
+                t.iter()
+                    .find(|c| c.scope == scope && c.state == st && c.vertical == v)
+                    .map(|c| (c.template_id.clone(), c.from_scope.clone()))
+                    .unwrap()
+            };
+            let (h, v) = (pick(false), pick(true));
+            assert_eq!(h, v, "{scope} {st:?}: 竖排应同横排");
+            (h.0.unwrap_or_else(|| "none".into()), h.1)
+        };
+        use CommentState::{Default as D, Detail as T};
+        for (scope, st, id, from) in [
+            ("global", D, "code_hint", "global"),
+            ("global", T, "detail_full", "global"),
+            ("type:codetable", D, "code_hint", "global"),
+            ("type:codetable", T, "chaizi_pinyin", "type:codetable"),
+            ("type:pinyin", D, "code_hint", "global"),
+            ("type:pinyin", T, "pinyin_english", "type:pinyin"),
+            ("type:shuangpin", T, "pinyin_english", "type:shuangpin"),
+            ("type:mixed", D, "code_hint", "global"),
+            ("type:mixed", T, "detail_full", "global"),
+            ("type:english", D, "none", "type:english"),
+            ("type:english", T, "en_meaning", "type:english"),
+            ("mode:temp_english", D, "none", "mode:temp_english"),
+            ("mode:temp_english", T, "en_meaning", "mode:temp_english"),
+            ("mode:temp_pinyin", D, "code_hint", "global"),
+            ("mode:temp_pinyin", T, "chaizi_code", "mode:temp_pinyin"),
+        ] {
+            assert_eq!(
+                got(scope, st),
+                (id.to_string(), from.to_string()),
+                "{scope} {st:?}"
+            );
+        }
     }
 }

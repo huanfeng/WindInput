@@ -10787,12 +10787,14 @@ mod comment_library_tests {
         assert_eq!(g["template_id"], "code_hint");
         assert_eq!(g["from_scope"], "global");
         assert_eq!(
-            v["system_assign"]["type"]["codetable"]["detail_vertical"],
+            v["system_assign"]["type"]["codetable"]["detail_horizontal"],
             "chaizi_pinyin"
         );
-        let e = cell(&v, "mode:temp_english", "default", true);
-        assert_eq!(e["template_id"], "none");
-        assert_eq!(e["from_scope"], "mode:temp_english");
+        for vertical in [false, true] {
+            let e = cell(&v, "mode:temp_english", "default", vertical);
+            assert_eq!(e["template_id"], "none");
+            assert_eq!(e["from_scope"], "mode:temp_english");
+        }
         let t = cell(&v, "type:codetable", "default", false);
         assert_eq!(t["template_id"], "code_hint");
         assert_eq!(t["from_scope"], "global");
@@ -10808,7 +10810,7 @@ mod comment_library_tests {
                         {"id": "code_hint", "name": "改", "text": "X"},
                         {"id": "mine", "name": "我的", "text": "Y"}
                     ],
-                    "assign": {"schema": {"wubi86": {"detail_vertical": "mine"}}}
+                    "assign": {"schema": {"wubi86": {"detail_horizontal": "mine"}}}
                 }}),
             )
             .unwrap();
@@ -10829,9 +10831,11 @@ mod comment_library_tests {
             .unwrap();
         assert_eq!(ch["builtin"]["name"], "编码提示");
         assert_eq!(origin("mine"), Some(json!("user")));
-        let s = cell(&v, "schema:wubi86", "detail", false);
-        assert_eq!(s["template_id"], "mine");
-        assert_eq!(s["from_scope"], "schema:wubi86");
+        for vertical in [false, true] {
+            let s = cell(&v, "schema:wubi86", "detail", vertical);
+            assert_eq!(s["template_id"], "mine", "竖排没写同本行横排");
+            assert_eq!(s["from_scope"], "schema:wubi86");
+        }
         let s = cell(&v, "schema:wubi86", "default", true);
         assert_eq!(s["from_scope"], "global");
     }

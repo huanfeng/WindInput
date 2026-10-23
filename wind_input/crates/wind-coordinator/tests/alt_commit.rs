@@ -96,7 +96,7 @@ fn comment_mode_commits_rendered_comment_untruncated() {
             name: "py".into(),
             text: "[${pinyin}]".into(),
         });
-    cfg.ui.comment.assign.global.default_vertical = Some("py".into());
+    cfg.ui.comment.assign.global.default_horizontal = Some("py".into());
     cfg.ui.candidate.comment_max_chars_vertical = 2;
     cfg.ui.candidate.comment_max_chars_horizontal = 2;
     let c = typed(cfg);
@@ -112,7 +112,7 @@ fn empty_annotation_keeps_session() {
         return;
     }
     let mut cfg = cfg("comment");
-    cfg.ui.comment.assign.global.default_vertical = Some("none".into());
+    cfg.ui.comment.assign.global.default_horizontal = Some("none".into());
     let c = typed(cfg);
     let before = c.debug_candidate_count();
     let act = c.handle_key_event(&key(0x31, MOD_ALT));
