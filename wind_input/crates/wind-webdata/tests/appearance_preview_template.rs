@@ -206,7 +206,7 @@ fn preview_template_contract() {
     let r = call(json!({"template": tpl, "scene": "comment"})).unwrap();
     assert_eq!(r["candidate"], "你好");
     assert_eq!(r["sample"], "nihao");
-    assert_eq!(r["text"], "int. hello (nǐ hǎo) nihk");
+    assert_eq!(r["text"], "int. hello (nǐ hǎo) nihc");
     let ids = |lang: &str| -> Vec<String> {
         r["samples"]
             .as_array()

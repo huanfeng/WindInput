@@ -1542,7 +1542,7 @@ custom_y = 0
 [ui.comment]
 # 候选注释总开关。关掉后候选不再显示注释，也不再为它预载反查编码、拆字等数据。
 enabled = true
-# 当前态：default 默认 | detail 详细。按键动词、命令栏切换时写回；Alt 切换仅 persist 时写回。
+# 当前态：default 默认 | detail 详细。按键动词、命令栏切换时写回；切换键仅 persist 档写回。
 state = "default"
 # 切换键（组字中单击切换注释态）：ctrl 左右任一(出厂) | lctrl | rctrl | alt | lalt | ralt
 # ⚠ 选 Alt 的 Windows 会装全局键盘钩子（用来压住宿主菜单栏）；不选 Alt 则没有。

@@ -1498,7 +1498,7 @@ mod tests {
         assert_eq!(l2_bool("tooltip", "enabled"), l1);
     }
 
-    /// L1↔L2 同源：`[ui.comment]` 的总开关、当前态与 Alt 切换方式。
+    /// L1↔L2 同源：`[ui.comment]` 的总开关、当前态、切换键与切换方式。
     #[test]
     fn ui_comment_l1_matches_l2() {
         let l1 = crate::Config::default().ui.comment;

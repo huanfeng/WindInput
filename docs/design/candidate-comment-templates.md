@@ -59,7 +59,7 @@
   - 但同一键内**上屏了文字**就算候选窗关闭、临时状态复位：切模式顺带顶屏（如五笔 `gg` 后按反引号
     顶屏再进临拼）、顶码留下余码另起一段、联想被新组字替换，都属此类。
   - 显式设持久态（按键动词、命令栏）同时清掉临时状态，看到的就是刚设的态。
-- **Alt 行为** `ui.comment.alt_switch`，四档：
+- **Alt 行为**（已由 §13.1 取代：改为 `switch_key` + `switch_mode`，出厂 Ctrl；下文保留作历史）`ui.comment.alt_switch`，四档：
   - `off`：不拦 Alt。
   - `session`：单击 Alt 切临时状态。**出厂档**（维护者已定）。
   - `persist`：单击 Alt 改持久状态。
@@ -122,13 +122,14 @@
 ## 6 配置形态
 
 新段 `[ui.comment]`，取代 `ui.candidate` 里的 `comment_enabled` 与两份模板串。出厂 `config.toml`
-只带 `enabled` / `state` / `alt_switch` 三键；下例的模板与分配是**用户**写的（出厂分配见 §7）：
+只带 `enabled` / `state` / `switch_key` / `switch_mode` 四键；下例的模板与分配是**用户**写的（出厂分配见 §7）：
 
 ```toml
 [ui.comment]
 enabled = true                 # 原 ui.candidate.comment_enabled
 state = "default"              # 持久状态：default / detail，按键动词、命令栏、Alt persist 档写回
-alt_switch = "session"         # off / session（出厂）/ persist / hold
+switch_key = "ctrl"            # ctrl（出厂）/ lctrl / rctrl / alt / lalt / ralt（§13.1）
+switch_mode = "session"        # off / session（出厂）/ persist / hold
 
 # 用户模板（内置模板在 data/system.comments.toml，同 id 时用户版覆盖内置版）
 [[ui.comment.templates]]
@@ -139,10 +140,10 @@ text = "${chaizi} ${code_rev}{ · ${pinyin}}"
 # 作用范围 → 四格。键名固定为 default_vertical / default_horizontal /
 # detail_vertical / detail_horizontal；值 = 模板 id / "none" / "inherit"（跳过本层出厂格）。
 [ui.comment.assign.schema.wubi86]
-detail_vertical = "wubi_learn"
+detail_horizontal = "wubi_learn"   # 竖排没写 → 同本行横排（§13.2）
 
 [ui.comment.assign.mode.temp_pinyin]
-default_vertical = "pinyin"
+default_horizontal = "pinyin"
 
 [ui.comment.assign.mode.temp_english]
 detail_vertical = "inherit"    # 不用出厂的 en_meaning，跟随方案 / 类型 / 全局

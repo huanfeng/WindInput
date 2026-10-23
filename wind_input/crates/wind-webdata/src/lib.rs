@@ -4122,7 +4122,11 @@ pub trait WebDataRpc: WebDataHost {
             other => anyhow::bail!("未知 scene：{other}"),
         };
         let is_tooltip = scene != TemplateScene::Comment;
-        let sample_id = params.get("sample").and_then(Value::as_str);
+        let sample_id = match params.get("sample") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s.as_str()),
+            Some(v) => anyhow::bail!("sample 须为字符串：{v}"),
+        };
         let preset = wind_coordinator::template_preview::find_sample(sample_id)
             .ok_or_else(|| anyhow::anyhow!("未知样例：{}", sample_id.unwrap_or_default()))?;
         let sample = self.template_sample(template, &scene, preset);

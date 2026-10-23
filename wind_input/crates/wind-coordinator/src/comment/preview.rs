@@ -91,7 +91,7 @@ pub const SAMPLES: &[PreviewSample] = &[
         lang: SampleLang::Zh,
         pinyin: "nǐ hǎo",
         correct_pinyin: "ni hao",
-        shuangpin: "nihk",
+        shuangpin: "nihc",
         code_hint: "hao",
         emoji: "👋",
         code_rev: "wqvb",
@@ -787,7 +787,7 @@ mod tests {
         let c = TemplateScene::Comment;
         assert_eq!(
             with("nihao", tpl, &c),
-            "nǐ hǎo|nihk|wqvb|亻尔 女子|int. hello|hao|hello"
+            "nǐ hǎo|nihc|wqvb|亻尔 女子|int. hello|hao|hello"
         );
         assert_eq!(
             with("zhongwen", tpl, &c),
