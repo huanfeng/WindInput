@@ -6,6 +6,7 @@
 //!
 //! **平台对接**：按键注入按 `cfg` 分平台——Windows 用 Win32 SendInput；macOS 待补
 //! （CGEvent，见 key_inject 的 `cfg(target_os = "macos")` 桩）；其他 Unix 为 no-op。
+pub mod alt_tap;
 pub mod capslock_hook;
 pub mod foreground;
 pub mod key_inject;

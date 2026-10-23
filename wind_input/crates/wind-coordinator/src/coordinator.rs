@@ -1487,10 +1487,11 @@ pub struct Coordinator {
     pub(crate) last_self_commit: Mutex<Option<std::time::Instant>>,
     /// 自动造词写入计数，供临时词库淘汰按次节流（见 `maybe_evict_temp`）。
     pub(crate) auto_phrase_writes: std::sync::atomic::AtomicUsize,
-    /// CapsLock 全局低级键盘钩子。
+    /// 全局低级键盘钩子（CapsLock，兼管 Windows 上的注释切换键 Alt）。
     ///
-    /// ★ **只有用户在 `keys.session_actions` 里真的配了 `capslock` 时才是 `Some`**。没配的
-    /// 用户进程里根本不存在全局键盘钩子——这是本功能唯一的风险控制手段（用户明确要求）。
+    /// ★ **只有用户在 `keys.session_actions` 里真的配了 `capslock`、或注释切换键选了 Alt
+    /// 时才是 `Some`**。没配的用户进程里根本不存在全局键盘钩子——这是本功能唯一的风险
+    /// 控制手段（用户明确要求）。
     ///
     /// 为什么非钩子不可：CapsLock 的锁定态由系统在 TSF **之前**维护，`pfEaten` 压不住；
     /// 而「让它翻转再回敲复原」在快速连按下有竞态（大写会卡住），还会被厂商 OSD 工具
@@ -1500,7 +1501,11 @@ pub struct Coordinator {
     ///
     /// 在 `new` 里就建好并起好消费线程（那里才有 `Arc<Self>`），钩子装卸只是复用它。
     /// 消费线程空闲时阻塞在 channel 上，未装钩子时零开销。
-    capslock_press_tx: std::sync::mpsc::Sender<wind_keys::capslock_hook::CapsEvent>,
+    capslock_press_tx: std::sync::mpsc::Sender<wind_keys::capslock_hook::HookEvent>,
+    /// 钩子装着且 CapsLock 那份要它（只为 Alt 装时为假：CapsLock 照旧归系统）。
+    hook_caps: std::sync::atomic::AtomicBool,
+    /// 钩子装着时要接管的 Alt 侧（`wind_keys::alt_tap::GATE_*`），0 = 不接管。有候选时才下发。
+    hook_alt_mask: std::sync::atomic::AtomicU32,
     /// 这次被钩子接管的 CapsLock 按下已被会话动作（翻页、选词、大小写档位等）用掉：
     /// 松开时就不再当中英切换键处理。只在 CapsLock 动作消费线程里读写。
     caps_press_claimed: std::sync::atomic::AtomicBool,
@@ -3024,7 +3029,7 @@ impl Coordinator {
             (d.chinese_mode, d.full_width, d.chinese_punct)
         };
         let (capslock_press_tx, capslock_press_rx) =
-            std::sync::mpsc::channel::<wind_keys::capslock_hook::CapsEvent>();
+            std::sync::mpsc::channel::<wind_keys::capslock_hook::HookEvent>();
         // 简繁两方向的生效口径（互斥，冲突时 s2t 赢）收在 config 层的单一函数里，
         // 与 reload 那处同源——散着写迟早漏改一处。
         let (conv_s2t, conv_t2s) = config.input.conversion_directions();
@@ -3138,6 +3143,8 @@ impl Coordinator {
             punct: Mutex::new(punct_conv),
             capslock_hook: Mutex::new(None),
             capslock_press_tx,
+            hook_caps: std::sync::atomic::AtomicBool::new(false),
+            hook_alt_mask: std::sync::atomic::AtomicU32::new(0),
             caps_press_claimed: std::sync::atomic::AtomicBool::new(false),
             smart_symbol: Mutex::new(SmartSymbolArm::default()),
             draft_window: Mutex::new(crate::draft_window::DraftWindowBuf::new()),
@@ -3316,7 +3323,14 @@ impl Coordinator {
                 .name("capslock-action".into())
                 .spawn(move || {
                     for ev in capslock_press_rx {
-                        c.handle_capslock_hook_event(ev);
+                        match ev {
+                            wind_keys::capslock_hook::HookEvent::Caps(ev) => {
+                                c.handle_capslock_hook_event(ev)
+                            }
+                            wind_keys::capslock_hook::HookEvent::Alt(ev) => {
+                                c.handle_comment_alt_hook(ev)
+                            }
+                        }
                     }
                     debug!("CapsLock 钩子事件通道已关闭");
                 })
@@ -7995,6 +8009,7 @@ impl Coordinator {
         // 「CapsLock 绑定这一次没生效」，多吃却是「用户在别的应用里 CapsLock 按不动」。
         // 凡拿不准就归零。
         wind_keys::capslock_hook::set_should_eat(false);
+        wind_keys::capslock_hook::set_alt_gate(0);
         // 悬停归零同理：窗口没了，悬停目标不可能还有意义。UI 侧 `CandidateMouse::reset_hover`
         // 清的只是防抖闸门（决定何时**发**事件），高亮与 tooltip 读的是本值——不清这一句，
         // 特殊模式下窗口再次弹出时会带着上次的悬停高亮，鼠标却从未移动过。
@@ -9283,59 +9298,67 @@ impl Coordinator {
     /// 有没有」。安装可能失败（非 Windows、`SetWindowsHookExW` 被拒），也可能事后被系统静默
     /// 移除。凡是要判「这个键归谁管」的地方都必须问本函数——问 `capslock_bound()` 会在钩子
     /// 装不上时把键判给一个不存在的处理者，那正是「按了完全没反应」。
+    ///
+    /// 只为注释切换键 Alt 装的钩子不算：那时 CapsLock 不归它管。
     pub(crate) fn capslock_hook_installed(&self) -> bool {
-        self.capslock_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+        self.hook_caps.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 按配置装/卸 CapsLock 全局钩子（启动与配置热重载时调用）。
+    /// 按配置装/卸全局键盘钩子（启动与配置热重载时调用）：CapsLock 要 ∪ 注释切换键 Alt 要。
     ///
     /// ★ 幂等：已装且仍该装 → 不动（重复 `SetWindowsHookExW` 会留下卸不掉的旧钩子）。
     pub(crate) fn sync_capslock_hook(&self) {
-        let want = self.capslock_bound() || self.capslock_is_toggle_key();
+        use std::sync::atomic::Ordering::Relaxed;
+        let caps = self.capslock_bound() || self.capslock_is_toggle_key();
+        let alt = self.comment_alt_gate_mask();
+        let want = caps || alt != 0;
         let mut slot = self.capslock_hook.lock().unwrap_or_else(|e| e.into_inner());
-        if want == slot.is_some() {
-            // 配置热重载可能只改了「切换按键」：钩子不动，空闲闸门要跟着重算。
-            if want {
-                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                self.sync_capslock_idle_gate(&s);
-            }
+        let installed = if want == slot.is_some() {
             // ★ 「没配所以没装」此前是**完全静默**的：装成功打 INFO、卸载打 INFO，唯独这条
             // 最常见的路径一行都没有。排障时日志里搜不到任何 CapsLock 字样，无从区分
             // 「用户没配」「配了但动词/键名写错被剔除」「装失败」——三者的处置完全不同。
-            if !want {
-                debug!("CapsLock 未配置会话态绑定，不装全局钩子（该键完全交由系统处理）");
+            if want {
+                debug!("全局键盘钩子保留（CapsLock 要: {caps}，注释切换键 Alt 闸门: {alt:#x}）");
+            } else {
+                debug!(
+                    "CapsLock 未配置会话态绑定、注释切换键未选 Alt（或非 Windows），不装全局钩子"
+                );
             }
-            return;
-        }
-        if !want {
+            want
+        } else if !want {
             // Drop 即卸载（内部会先停拦截再停消息泵）。
             *slot = None;
-            wind_keys::capslock_hook::set_should_eat(false);
-            info!("CapsLock 未配置会话态绑定 → 全局钩子已卸载");
-            return;
-        }
-        // 钩子回调在钩子线程执行，**必须只做非阻塞投递**：它超时会被系统静默移除且无从察觉。
-        // 故这里只 send，真正的动作在 new 起的消费线程里做（可安全加锁）。
-        let tx = self.capslock_press_tx.clone();
-        match wind_keys::capslock_hook::CapsLockHook::install(Box::new(move |ev| {
-            let _ = tx.send(ev);
-        })) {
-            Ok(h) => {
-                *slot = Some(h);
-                // 立刻按当前会话状态校准一次，避免装好后到下一次按键之间状态为默认值。
-                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                wind_keys::capslock_hook::set_should_eat(Self::has_input_session(&s));
-                self.sync_capslock_idle_gate(&s);
+            info!("CapsLock 未配置会话态绑定、注释切换键未选 Alt → 全局钩子已卸载");
+            false
+        } else {
+            // 钩子回调在钩子线程执行，**必须只做非阻塞投递**：它超时会被系统静默移除且无从察觉。
+            // 故这里只 send，真正的动作在 new 起的消费线程里做（可安全加锁）。
+            let tx = self.capslock_press_tx.clone();
+            match wind_keys::capslock_hook::CapsLockHook::install(Box::new(move |ev| {
+                let _ = tx.send(ev);
+            })) {
+                Ok(h) => {
+                    *slot = Some(h);
+                    info!("全局键盘钩子：CapsLock 要: {caps}，注释切换键 Alt 闸门: {alt:#x}");
+                    true
+                }
+                Err(e) => {
+                    // 装不上就退化为「CapsLock 绑定 / Alt 切换注释不生效」，不影响其余功能。绝不回退到
+                    // 「翻转再回敲」——那条路已被真机否掉（竞态 + 厂商 OSD 弹窗）。
+                    tracing::error!(
+                        "全局键盘钩子安装失败，CapsLock 绑定 / Alt 切换注释将不生效: {e}"
+                    );
+                    false
+                }
             }
-            Err(e) => {
-                // 装不上就退化为「CapsLock 绑定不生效」，不影响其余功能。绝不回退到
-                // 「翻转再回敲」——那条路已被真机否掉（竞态 + 厂商 OSD 弹窗）。
-                tracing::error!("CapsLock 全局钩子安装失败，该绑定将不生效: {e}");
-            }
-        }
+        };
+        self.hook_caps.store(installed && caps, Relaxed);
+        self.hook_alt_mask
+            .store(if installed { alt } else { 0 }, Relaxed);
+        // 立刻按当前会话状态校准一次（配置热重载可能只改了「切换按键」或切换键）。
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.sync_capslock_gate(&s);
+        self.sync_capslock_idle_gate(&s);
     }
 
     /// 「切换按键」勾了 CapsLock（`keys.toggle_mode_keys` 含 `capslock`）。
@@ -9366,9 +9389,20 @@ impl Coordinator {
     /// ★★ 这个标志为 true 的时间窗必须尽量短。钩子是**全局**的：标志滞留意味着用户在
     /// **别的应用**里按 CapsLock 也切不动大小写——比功能不生效糟糕得多。故凡是会改变
     /// 「有没有输入会话」的出口都要调它，宁可多调（幂等的原子写，开销可忽略）。
+    ///
+    /// Alt 闸门同在这里：有候选时下发切换键那几侧，否则 0。
     pub(crate) fn sync_capslock_gate(&self, state: &State) {
+        use std::sync::atomic::Ordering::Relaxed;
         // 未装钩子时也照常写：装钩子那一刻会重新校准，这里写了不会有副作用。
-        wind_keys::capslock_hook::set_should_eat(Self::has_input_session(state));
+        wind_keys::capslock_hook::set_should_eat(
+            self.hook_caps.load(Relaxed) && Self::has_input_session(state),
+        );
+        let alt = if state.candidates.is_empty() {
+            0
+        } else {
+            self.hook_alt_mask.load(Relaxed)
+        };
+        wind_keys::capslock_hook::set_alt_gate(alt);
     }
 
     /// 钩子报告「CapsLock 被按下」（在专用消费线程执行，可安全加锁）。

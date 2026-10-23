@@ -1239,7 +1239,8 @@ impl crate::coordinator::Coordinator {
 
     /// 组字中 Alt 的按下 / 松开：按 `ui.comment.switch_mode` 切换注释态，判定见 [`crate::comment_switch`]。
     ///
-    /// 平台协议：只在组字中转发 Alt（`key_code` 0xA4 / 0xA5）的按下与松开，不做单击计时；
+    /// 平台协议（mac / Linux；Windows 的 TSF 不转发 Alt，走 [`Self::handle_comment_alt_hook`]）：
+    /// 只在组字中转发 Alt（`key_code` 0xA4 / 0xA5）的按下与松开，不做单击计时；
     /// `modifiers` 带上这次按住期间按过的 Shift / Ctrl / Win 位（粘滞，按过就一直带到松开）。
     /// 返回 `Consumed` 则平台吃掉这次事件，`PassThrough` 则放行。
     ///
@@ -1289,6 +1290,27 @@ impl crate::coordinator::Coordinator {
             SwitchOutcome::Consumed => KeyAction::Consumed,
             SwitchOutcome::PassThrough => KeyAction::PassThrough,
         }
+    }
+
+    /// Windows Alt 钩子投来的事件（在钩子动作消费线程执行），折算见 [`crate::comment_switch::on_hook_alt`]。
+    /// 重绘走 `notify_ui_update`，不需要按键上下文。
+    pub(crate) fn handle_comment_alt_hook(&self, ev: wind_keys::alt_tap::AltEvent) {
+        let mode = Self::comment_switch_mode(&self.rt().config.ui.comment);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let effect = crate::comment_switch::on_hook_alt(mode, !state.candidates.is_empty(), ev);
+        tracing::debug!("注释切换键（Alt 钩子）：{ev:?} → {effect:?}");
+        self.apply_switch_effect(&mut state, effect);
+    }
+
+    /// 钩子要接管的 Alt 侧（`wind_keys::alt_tap::GATE_*`），0 = 不要。只有 Windows 走钩子：
+    /// mac / Linux 的 Alt 由平台转发，走 [`Self::handle_comment_alt`]。
+    pub(crate) fn comment_alt_gate_mask(&self) -> u32 {
+        if !cfg!(windows) {
+            return 0;
+        }
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        crate::comment_switch::alt_gate_mask(c.switch_key, Self::comment_switch_mode(c))
     }
 
     /// 启动体检：注释切换键与中英切换键、选词键组、会话绑定撞键 → 告警（形制同

@@ -174,6 +174,48 @@ pub fn tap_caps_lock() -> anyhow::Result<()> {
     tap_combo(&[], 0x14)
 }
 
+/// 本进程低级钩子补发事件的 `dwExtraInfo` 标记：钩子见到它就放行、不改判定状态。
+pub const INJECT_MARK: usize = 0x5749_4E44;
+
+/// 补在 Alt 松开前的屏蔽键：宿主看到 Alt 期间按过别的键，就不激活菜单栏。
+///
+/// 取未分配的 0x9F：0xE8 已是 TSF 的异步提交触发键（`VK_ASYNC_COMMIT_TRIGGER`，有待提交时会被
+/// 吃掉），共用会让屏蔽偶尔失效。TSF 侧对本键一律放行（`PassthroughNote.h` 的 `kVkMenuMask`）。
+pub const VK_MENU_MASK: u32 = 0x9F;
+
+/// 补发「屏蔽键 down/up + Alt 松开」，带 [`INJECT_MARK`]。在钩子回调里调：一次 `SendInput`，
+/// 不分配、不阻塞。`scan` / `extended` 取被吃掉的那次物理松开的。
+#[cfg(windows)]
+pub fn send_alt_release_masked(alt_vk: u32, scan: u32, extended: bool) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+    };
+    let key = |vk: u32, scan: u32, flags: KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk as u16),
+                wScan: scan as u16,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: INJECT_MARK,
+            },
+        },
+    };
+    let mut alt_flags = KEYEVENTF_KEYUP;
+    if extended {
+        alt_flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    let inputs = [
+        key(VK_MENU_MASK, 0, KEYBD_EVENT_FLAGS(0)),
+        key(VK_MENU_MASK, 0, KEYEVENTF_KEYUP),
+        key(alt_vk, scan, alt_flags),
+    ];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    sent as usize == inputs.len()
+}
+
 /// macOS：修饰键经 CGEvent flags 表达，而非单独 post 修饰键 keyDown。
 ///
 /// macOS 应用识别组合键读的是**事件自带的 flags 字段**——单独 post 一个 kVK_Command

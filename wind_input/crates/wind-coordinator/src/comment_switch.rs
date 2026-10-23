@@ -1,6 +1,8 @@
 //! 组字中单击切换键（`ui.comment.switch_key`）切换注释态（`ui.comment.switch_mode`）的判定。
 //!
-//! - Alt：平台层只在组字中转发 Alt 的按下与松开，不做计时；吃不吃由这里的 [`SwitchOutcome`] 定。
+//! - mac / Linux 的 Alt：平台层只在组字中转发 Alt 的按下与松开，不做计时；吃不吃由这里的 [`SwitchOutcome`] 定。
+//! - Windows 的 Alt：TSF 收不到单独 Alt 的按下，改由服务进程的全局低级键盘钩子判单击 / 按住
+//!   （`wind_keys::alt_tap`），这里只把它投来的事件折成动作，见 [`on_hook_alt`]。
 //! - Ctrl：平台只送判过单击的松开（TSF 走 keyup 白名单，mac / Linux 无条件送），见 [`on_ctrl_up`]。
 //!
 //! 判定是纯函数，时刻由调用方传入，便于测出长按、组合键等分支。
@@ -113,6 +115,46 @@ pub(crate) fn on_alt_up(
         SwitchMode::Persist => (SwitchOutcome::Consumed, SwitchEffect::TogglePersist),
         _ => (SwitchOutcome::PassThrough, SwitchEffect::None),
     }
+}
+
+/// Windows Alt 钩子投来的事件折成动作。事件与处理之间候选窗可能已关：单击与按下就不做，
+/// 按住的松开照样收起（别让按住翻转卡住）。
+pub(crate) fn on_hook_alt(
+    mode: SwitchMode,
+    has_candidates: bool,
+    ev: wind_keys::alt_tap::AltEvent,
+) -> SwitchEffect {
+    use wind_keys::alt_tap::AltEvent;
+    match ev {
+        AltEvent::Tap if has_candidates => match mode {
+            SwitchMode::Session => SwitchEffect::ToggleSession,
+            SwitchMode::Persist => SwitchEffect::TogglePersist,
+            SwitchMode::Off | SwitchMode::Hold => SwitchEffect::None,
+        },
+        AltEvent::HoldDown if has_candidates && mode == SwitchMode::Hold => SwitchEffect::HoldOn,
+        AltEvent::HoldUp => SwitchEffect::HoldOff,
+        _ => SwitchEffect::None,
+    }
+}
+
+/// 钩子的 Alt 闸门值（`wind_keys::alt_tap::GATE_*`）：切换键不是 Alt 系或已关 → 0。
+/// `mode` 是已按 [`wind_config::comment_lib::effective_mode`] 折算、注释总开关也算进去的那个。
+pub(crate) fn alt_gate_mask(key: wind_config::comment_lib::SwitchKey, mode: SwitchMode) -> u32 {
+    use wind_keys::alt_tap::{GATE_HOLD, GATE_LEFT, GATE_RIGHT};
+    if mode == SwitchMode::Off || !key.is_alt() {
+        return 0;
+    }
+    let mut mask = 0;
+    if key.matches_vk(0xA4) {
+        mask |= GATE_LEFT;
+    }
+    if key.matches_vk(0xA5) {
+        mask |= GATE_RIGHT;
+    }
+    if mode == SwitchMode::Hold {
+        mask |= GATE_HOLD;
+    }
+    mask
 }
 
 /// 按住 Alt 期间来了别的键：之后的松开不算单击。
@@ -257,6 +299,48 @@ mod tests {
         assert_eq!(on_ctrl_up(SwitchMode::Off, true, false), E::None);
         assert_eq!(on_ctrl_up(SwitchMode::Session, false, false), E::None);
         assert_eq!(on_ctrl_up(SwitchMode::Session, true, true), E::None);
+    }
+
+    #[test]
+    fn hook_alt_events_map_by_mode() {
+        use wind_keys::alt_tap::AltEvent as A;
+        assert_eq!(
+            on_hook_alt(SwitchMode::Session, true, A::Tap),
+            E::ToggleSession
+        );
+        assert_eq!(
+            on_hook_alt(SwitchMode::Persist, true, A::Tap),
+            E::TogglePersist
+        );
+        assert_eq!(on_hook_alt(SwitchMode::Hold, true, A::Tap), E::None);
+        assert_eq!(on_hook_alt(SwitchMode::Off, true, A::Tap), E::None);
+        assert_eq!(on_hook_alt(SwitchMode::Hold, true, A::HoldDown), E::HoldOn);
+        assert_eq!(on_hook_alt(SwitchMode::Session, true, A::HoldDown), E::None);
+        assert_eq!(on_hook_alt(SwitchMode::Hold, true, A::HoldUp), E::HoldOff);
+    }
+
+    /// 单击 / 按下投到时候选窗已关：不做；按住的松开照样收起。
+    #[test]
+    fn hook_alt_after_window_closed() {
+        use wind_keys::alt_tap::AltEvent as A;
+        assert_eq!(on_hook_alt(SwitchMode::Session, false, A::Tap), E::None);
+        assert_eq!(on_hook_alt(SwitchMode::Persist, false, A::Tap), E::None);
+        assert_eq!(on_hook_alt(SwitchMode::Hold, false, A::HoldDown), E::None);
+        assert_eq!(on_hook_alt(SwitchMode::Hold, false, A::HoldUp), E::HoldOff);
+        assert_eq!(on_hook_alt(SwitchMode::Off, false, A::HoldUp), E::HoldOff);
+    }
+
+    #[test]
+    fn alt_gate_mask_by_key_and_mode() {
+        use wind_config::comment_lib::SwitchKey as K;
+        use wind_keys::alt_tap::{GATE_HOLD as H, GATE_LEFT as L, GATE_RIGHT as R};
+        assert_eq!(alt_gate_mask(K::Alt, SwitchMode::Session), L | R);
+        assert_eq!(alt_gate_mask(K::LAlt, SwitchMode::Persist), L);
+        assert_eq!(alt_gate_mask(K::RAlt, SwitchMode::Hold), R | H);
+        assert_eq!(alt_gate_mask(K::Alt, SwitchMode::Off), 0);
+        for k in [K::Ctrl, K::LCtrl, K::RCtrl] {
+            assert_eq!(alt_gate_mask(k, SwitchMode::Session), 0, "{k:?}");
+        }
     }
 
     #[test]
