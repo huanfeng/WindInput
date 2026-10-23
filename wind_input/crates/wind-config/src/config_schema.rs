@@ -173,8 +173,12 @@ pub(crate) const COMMENT_CELL_KEYS: &[&str] = &[
 /// `ui.comment.state` 的值域。⚠️ 与 [`crate::comment_lib::CommentState`] 的 serde 名逐项对齐。
 pub(crate) const COMMENT_STATE_VALUES: &[&str] = &["default", "detail"];
 
-/// `ui.comment.alt_switch` 的值域。⚠️ 与 [`crate::comment_lib::AltSwitch`] 的 serde 名逐项对齐。
-pub(crate) const COMMENT_ALT_SWITCH_VALUES: &[&str] = &["off", "session", "persist", "hold"];
+/// `ui.comment.switch_key` 的值域。⚠️ 与 [`crate::comment_lib::SwitchKey`] 的 serde 名逐项对齐。
+pub(crate) const COMMENT_SWITCH_KEY_VALUES: &[&str] =
+    &["ctrl", "lctrl", "rctrl", "alt", "lalt", "ralt"];
+
+/// `ui.comment.switch_mode` 的值域。⚠️ 与 [`crate::comment_lib::SwitchMode`] 的 serde 名逐项对齐。
+pub(crate) const COMMENT_SWITCH_MODE_VALUES: &[&str] = &["off", "session", "persist", "hold"];
 
 /// `input.alt_commit` 的值域。⚠️ 与 [`wind_config::config::AltCommit::from_config`] 逐项对齐。
 pub(crate) const ALT_COMMIT_VALUES: &[&str] = &["off", "pinyin", "pinyin_plain", "comment"];
@@ -702,7 +706,8 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.comment_dicts", StructList),
     f("ui.comment.enabled", Bool),
     f("ui.comment.state", Enum(COMMENT_STATE_VALUES)),
-    f("ui.comment.alt_switch", Enum(COMMENT_ALT_SWITCH_VALUES)),
+    f("ui.comment.switch_key", Enum(COMMENT_SWITCH_KEY_VALUES)),
+    f("ui.comment.switch_mode", Enum(COMMENT_SWITCH_MODE_VALUES)),
     f("ui.comment.templates", StructList),
     f("ui.comment.assign.global", Map(COMMENT_CELL_KEYS)),
     f("ui.comment.assign.type", Map(&[])),

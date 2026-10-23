@@ -1,4 +1,4 @@
-//! 组字中单击 / 按住 Alt 切换注释详细态（`ui.comment.alt_switch`）端到端。
+//! 组字中单击 / 按住 Alt 切换注释详细态（`ui.comment.switch_mode`）端到端。
 //!
 //! 平台层只在组字中转发 Alt 的按下与松开（`0xA4` / `0xA5`，不带修饰位），吃不吃由返回值定。
 //! 期望注释取自出厂分配：码表 默认=`code_hint`、详细=`chaizi_pinyin`，同 `comment_state.rs`。
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use wind_bridge::handler::{CaretData, KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
-use wind_config::comment_lib::{AltSwitch, CommentState};
+use wind_config::comment_lib::{CommentState, SwitchKey, SwitchMode};
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{
     EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, MOD_CTRL, MOD_SHIFT, caret_source,
@@ -217,7 +217,8 @@ fn hold_with_sticky_modifier_still_restores() {
         return;
     }
     let mut cfg = cfg();
-    cfg.ui.comment.alt_switch = AltSwitch::Hold;
+    cfg.ui.comment.switch_mode = SwitchMode::Hold;
+    cfg.ui.comment.switch_key = SwitchKey::Alt;
     let (c, _rx) = typed_gg(cfg);
     c.handle_key_event(&down(VK_LMENU));
     assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
@@ -243,7 +244,7 @@ fn alt_switch_off_or_comment_disabled_passes_through() {
         return;
     }
     let mut off = cfg();
-    off.ui.comment.alt_switch = AltSwitch::Off;
+    off.ui.comment.switch_mode = SwitchMode::Off;
     let mut disabled = cfg();
     disabled.ui.comment.enabled = false;
     for cfg in [off, disabled] {
@@ -261,7 +262,8 @@ fn hold_alt_digit_commits_detail_comment() {
         return;
     }
     let mut cfg = cfg();
-    cfg.ui.comment.alt_switch = AltSwitch::Hold;
+    cfg.ui.comment.switch_mode = SwitchMode::Hold;
+    cfg.ui.comment.switch_key = SwitchKey::Alt;
     cfg.input.alt_commit = "comment".into();
     let (c, rx) = typed_gg(cfg);
     let act = c.handle_key_event(&down(VK_LMENU));
@@ -287,7 +289,8 @@ fn hold_release_restores_default() {
         return;
     }
     let mut cfg = cfg();
-    cfg.ui.comment.alt_switch = AltSwitch::Hold;
+    cfg.ui.comment.switch_mode = SwitchMode::Hold;
+    cfg.ui.comment.switch_key = SwitchKey::Alt;
     let (c, rx) = typed_gg(cfg);
     c.handle_key_event(&down(VK_LMENU));
     assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);

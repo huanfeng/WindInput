@@ -15,15 +15,61 @@ pub enum CommentState {
     Detail,
 }
 
-/// Alt 切换态的方式（值域见 `config_schema::COMMENT_ALT_SWITCH_VALUES`）。
+/// 切换键（值域见 `config_schema::COMMENT_SWITCH_KEY_VALUES`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AltSwitch {
+pub enum SwitchKey {
+    /// 左右任一 Ctrl（出厂）。
+    #[default]
+    Ctrl,
+    #[serde(rename = "lctrl")]
+    LCtrl,
+    #[serde(rename = "rctrl")]
+    RCtrl,
+    /// 左右任一 Alt。
+    Alt,
+    #[serde(rename = "lalt")]
+    LAlt,
+    #[serde(rename = "ralt")]
+    RAlt,
+}
+
+impl SwitchKey {
+    /// 该虚拟键码（0xA2 LCtrl / 0xA3 RCtrl / 0xA4 LAlt / 0xA5 RAlt）是否属于本切换键。
+    pub fn matches_vk(self, vk: u32) -> bool {
+        match self {
+            SwitchKey::Ctrl => matches!(vk, 0xA2 | 0xA3),
+            SwitchKey::LCtrl => vk == 0xA2,
+            SwitchKey::RCtrl => vk == 0xA3,
+            SwitchKey::Alt => matches!(vk, 0xA4 | 0xA5),
+            SwitchKey::LAlt => vk == 0xA4,
+            SwitchKey::RAlt => vk == 0xA5,
+        }
+    }
+
+    pub fn is_alt(self) -> bool {
+        matches!(self, SwitchKey::Alt | SwitchKey::LAlt | SwitchKey::RAlt)
+    }
+}
+
+/// 切换注释态的方式（值域见 `config_schema::COMMENT_SWITCH_MODE_VALUES`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchMode {
     Off,
     #[default]
     Session,
     Persist,
     Hold,
+}
+
+/// 有效切换方式：按住只配 Alt，`hold` + Ctrl 系按 `session` 处理。
+pub fn effective_mode(key: SwitchKey, mode: SwitchMode) -> SwitchMode {
+    if mode == SwitchMode::Hold && !key.is_alt() {
+        SwitchMode::Session
+    } else {
+        mode
+    }
 }
 
 /// 命名模板。`id` 只含 `[a-z0-9_]`，`name` 是显示名。
@@ -72,7 +118,9 @@ pub struct UiCommentConfig {
     #[serde(deserialize_with = "crate::tolerant_de::tolerant")]
     pub state: CommentState,
     #[serde(deserialize_with = "crate::tolerant_de::tolerant")]
-    pub alt_switch: AltSwitch,
+    pub switch_key: SwitchKey,
+    #[serde(deserialize_with = "crate::tolerant_de::tolerant")]
+    pub switch_mode: SwitchMode,
     /// 用户模板，同 id 覆盖内置。
     pub templates: Vec<CommentTemplateDef>,
     /// 用户分配，优先于出厂分配。
@@ -84,7 +132,8 @@ impl Default for UiCommentConfig {
         Self {
             enabled: true,
             state: CommentState::Default,
-            alt_switch: AltSwitch::Session,
+            switch_key: SwitchKey::Ctrl,
+            switch_mode: SwitchMode::Session,
             templates: Vec::new(),
             assign: CommentAssign::default(),
         }
@@ -748,19 +797,67 @@ mod tests {
         let c = UiCommentConfig::default();
         assert!(c.enabled);
         assert_eq!(c.state, CommentState::Default);
-        assert_eq!(c.alt_switch, AltSwitch::Session);
+        assert_eq!(c.switch_key, SwitchKey::Ctrl);
+        assert_eq!(c.switch_mode, SwitchMode::Session);
         assert!(c.templates.is_empty());
         assert_eq!(c.assign, CommentAssign::default());
     }
 
     #[test]
+    fn switch_key_parses_all_values_and_matches_vk() {
+        for (name, key, vks) in [
+            ("ctrl", SwitchKey::Ctrl, vec![0xA2, 0xA3]),
+            ("lctrl", SwitchKey::LCtrl, vec![0xA2]),
+            ("rctrl", SwitchKey::RCtrl, vec![0xA3]),
+            ("alt", SwitchKey::Alt, vec![0xA4, 0xA5]),
+            ("lalt", SwitchKey::LAlt, vec![0xA4]),
+            ("ralt", SwitchKey::RAlt, vec![0xA5]),
+        ] {
+            let c: UiCommentConfig = toml::from_str(&format!("switch_key = \"{name}\"")).unwrap();
+            assert_eq!(c.switch_key, key, "{name}");
+            for vk in 0xA2..=0xA5u32 {
+                assert_eq!(key.matches_vk(vk), vks.contains(&vk), "{name} {vk:#x}");
+            }
+            assert_eq!(key.is_alt(), name.ends_with("alt") || name == "alt");
+        }
+        assert!(!SwitchKey::Ctrl.matches_vk(0x41));
+    }
+
+    #[test]
+    fn invalid_switch_values_fall_back_to_defaults() {
+        let c: UiCommentConfig =
+            toml::from_str("switch_key = \"bogus\"\nswitch_mode = \"nope\"").unwrap();
+        assert_eq!(c.switch_key, SwitchKey::Ctrl);
+        assert_eq!(c.switch_mode, SwitchMode::Session);
+    }
+
+    #[test]
+    fn hold_with_ctrl_degrades_to_session() {
+        for k in [SwitchKey::Ctrl, SwitchKey::LCtrl, SwitchKey::RCtrl] {
+            assert_eq!(effective_mode(k, SwitchMode::Hold), SwitchMode::Session);
+        }
+        for k in [SwitchKey::Alt, SwitchKey::LAlt, SwitchKey::RAlt] {
+            assert_eq!(effective_mode(k, SwitchMode::Hold), SwitchMode::Hold);
+        }
+        assert_eq!(
+            effective_mode(SwitchKey::Ctrl, SwitchMode::Persist),
+            SwitchMode::Persist
+        );
+        assert_eq!(
+            effective_mode(SwitchKey::Ctrl, SwitchMode::Off),
+            SwitchMode::Off
+        );
+    }
+
+    #[test]
     fn user_toml_round_trips_with_type_key() {
         let c: UiCommentConfig = toml::from_str(
-            "state = \"detail\"\nalt_switch = \"hold\"\n[assign.type.codetable]\ndetail_vertical = \"x\"\n[assign.mode.\"mix:q\"]\ndefault_vertical = \"none\"\n",
+            "state = \"detail\"\nswitch_key = \"ralt\"\nswitch_mode = \"hold\"\n[assign.type.codetable]\ndetail_vertical = \"x\"\n[assign.mode.\"mix:q\"]\ndefault_vertical = \"none\"\n",
         )
         .unwrap();
         assert_eq!(c.state, CommentState::Detail);
-        assert_eq!(c.alt_switch, AltSwitch::Hold);
+        assert_eq!(c.switch_key, SwitchKey::RAlt);
+        assert_eq!(c.switch_mode, SwitchMode::Hold);
         assert_eq!(
             c.assign.by_type["codetable"].detail_vertical.as_deref(),
             Some("x")

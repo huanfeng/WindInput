@@ -8832,6 +8832,14 @@ impl Config {
         // 救回来的那部分内容仍可能带着类型不对的键。
         config.degradation.unparsable = unparsable;
         config.normalize();
+        {
+            let c = &config.ui.comment;
+            if crate::comment_lib::effective_mode(c.switch_key, c.switch_mode) != c.switch_mode {
+                warn!(
+                    "ui.comment.switch_mode=hold 只配 Alt 切换键，当前切换键不是 Alt，按 session 处理"
+                );
+            }
+        }
         Ok(config)
     }
 

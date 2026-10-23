@@ -1206,7 +1206,7 @@ impl crate::coordinator::Coordinator {
         }
     }
 
-    /// 组字中 Alt 的按下 / 松开：按 `ui.comment.alt_switch` 切换注释态，判定见 [`crate::comment_alt`]。
+    /// 组字中 Alt 的按下 / 松开：按 `ui.comment.switch_mode` 切换注释态，判定见 [`crate::comment_alt`]。
     ///
     /// 平台协议：只在组字中转发 Alt（`key_code` 0xA4 / 0xA5）的按下与松开，不做单击计时；
     /// `modifiers` 带上这次按住期间按过的 Shift / Ctrl / Win 位（粘滞，按过就一直带到松开）。
@@ -1222,13 +1222,13 @@ impl crate::coordinator::Coordinator {
             AltEffect, AltOutcome, carries_other_modifier, on_alt_down, on_alt_up, on_other_key,
         };
         use wind_bridge::handler::KeyAction;
-        use wind_config::comment_lib::{AltSwitch, CommentState};
+        use wind_config::comment_lib::{CommentState, SwitchMode};
         let rt = self.rt();
         let c = &rt.config.ui.comment;
         let mode = if c.enabled {
-            c.alt_switch
+            wind_config::comment_lib::effective_mode(c.switch_key, c.switch_mode)
         } else {
-            AltSwitch::Off
+            SwitchMode::Off
         };
         let is_down = data.event_type == wind_ipc::protocol::EVENT_KEY_DOWN;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

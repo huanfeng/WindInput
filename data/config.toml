@@ -1544,8 +1544,13 @@ custom_y = 0
 enabled = true
 # 当前态：default 默认 | detail 详细。按键动词、命令栏切换时写回；Alt 切换仅 persist 时写回。
 state = "default"
-# Alt 切换注释态的方式：off 关闭 | session 本次会话内(出厂) | persist 写回配置 | hold 按住期间
-alt_switch = "session"
+# 切换键（组字中单击切换注释态）：ctrl 左右任一(出厂) | lctrl | rctrl | alt | lalt | ralt
+# ⚠ 选 Alt 的 Windows 会装全局键盘钩子（用来压住宿主菜单栏）；不选 Alt 则没有。
+# 功能键（F1 等）不在此列，请在按键绑定里绑 comment_state。
+switch_key = "ctrl"
+# 切换方式：off 关闭 | session 本次候选窗内(出厂) | persist 写回配置 | hold 按住期间显示另一态
+# ⚠ hold 只配 Alt；与 Ctrl 系切换键同用时按 session 处理。
+switch_mode = "session"
 # 用户模板与分配写在 [[ui.comment.templates]] / [ui.comment.assign.*]，内置的见 system.comments.toml。
 # 旧版的 ui.candidate.comment_enabled、ui.candidate.comment_template_*、各模式的 comment_template_*
 # 启动时自动迁入本段；方案文件里的注释模板不再生效。
