@@ -290,6 +290,55 @@ uint32_t ToggleTapDetector::onRelease(uint32_t keysym, uint64_t nowMs)
     return v;
 }
 
+uint32_t CtrlRaw::onPress(uint32_t keysym, bool composing)
+{
+    uint32_t v = 0;
+    if (keysym == ks::Control_L) {
+        v = vk::LCONTROL;
+    } else if (keysym == ks::Control_R) {
+        v = vk::RCONTROL;
+    }
+    if (v != 0 && (v == vk_ || v == legacyVK_)) {
+        return 0; // 同一次按住的自动重复
+    }
+    if (vk_ != 0) {
+        dirty_ = true; // 别的键（含另一侧 Ctrl）：这次不再是单击
+    }
+    if (v == 0) {
+        return 0;
+    }
+    if (!composing) {
+        legacyVK_ = v;
+        return 0;
+    }
+    vk_ = v;
+    dirty_ = false;
+    return v;
+}
+
+uint32_t CtrlRaw::onRelease(uint32_t keysym, bool* notTap)
+{
+    uint32_t v = 0;
+    if (keysym == ks::Control_L) {
+        v = vk::LCONTROL;
+    } else if (keysym == ks::Control_R) {
+        v = vk::RCONTROL;
+    }
+    if (v == 0) {
+        return 0;
+    }
+    if (v == legacyVK_) {
+        legacyVK_ = 0;
+    }
+    if (v != vk_) {
+        return 0;
+    }
+    *notTap = dirty_;
+    vk_ = 0;
+    dirty_ = false;
+    return v;
+}
+
 uint32_t altVK(uint32_t keysym)
 {
     switch (keysym) {

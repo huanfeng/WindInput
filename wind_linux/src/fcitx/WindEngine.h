@@ -104,6 +104,8 @@ private:
     void sendKeyUp(fcitx::InputContext* ic, uint32_t vk, uint32_t mods, uint8_t toggles);
     /// 组字中 Alt 的按下 / 松开转发给服务（注释态切换）；返回服务是否吃掉。
     bool sendAltEvent(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods, uint8_t toggles);
+    /// 候选显示时 Ctrl 的如实上报（MOD_DOWN / MOD_UP，见 CtrlRaw）。应用回包，但不看吃不吃：Ctrl 永远交还宿主。
+    void sendCtrlRaw(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods, uint8_t toggles);
     bool applyResponse(fcitx::InputContext* ic, const Frame& resp, bool hostShortcut);
     /// 帧里带中英模式就记下；变了则让 Fcitx5 的 UI 模块重取图标。
     void noteMode(const Frame& frame);
@@ -157,6 +159,7 @@ private:
     ResponseRouter router_;
     ToggleTapDetector tap_;
     AltHold altHold_;
+    CtrlRaw ctrlRaw_;
     /// 候选窗是否开着（服务端推来可见帧时置位，hideCandidate 清）。Alt 转发判据要它：联想窗组合为空。
     bool candidatesVisible_ = false;
     CapsLockTracker caps_;

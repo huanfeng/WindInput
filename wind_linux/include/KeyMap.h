@@ -72,6 +72,29 @@ private:
     uint64_t pressedAtMs_ = 0;
 };
 
+/// 候选显示时 Ctrl 如实上报（`KEY_EVENT_MOD_DOWN` / `KEY_EVENT_MOD_UP`）的一次按住记账，对位 TSF
+/// `CtrlRawPolicy.h`。协议权威在协调器 `handle_ctrl_raw`：
+///
+/// - **按下那一刻**组字中（`altInputSession`）才走这条：按下报 MOD_DOWN、松开报 MOD_UP（哪怕那时
+///   已不在组字），调用方不再按 ToggleTapDetector 的单击上报；否则这次按住整个走旧路。一次按住
+///   只走一条路，服务端不会两边各收到一次。
+/// - 按住期间按过别的键（服务端未必看得见，如透传的 Ctrl+C）→ 松开带 `TOGGLE_MOD_NOT_TAP`。
+///   时长由服务端判。键本身两向都交还宿主。
+class CtrlRaw {
+public:
+    /// 任意按键按下。返回 VK_LCONTROL / VK_RCONTROL = 要报 MOD_DOWN；0 = 不报（别的键、自动重复、旧路）。
+    uint32_t onPress(uint32_t keysym, bool composing);
+    /// 任意按键抬起。返回 VK = 要报 MOD_UP（`*notTap` 给出是否带 NOT_TAP）；0 = 不是如实上报的那次按住。
+    uint32_t onRelease(uint32_t keysym, bool* notTap);
+    /// 焦点切换：作废（松开多半送不到，服务端失焦时也会收起按住翻转）。
+    void reset() { *this = CtrlRaw{}; }
+
+private:
+    uint32_t vk_ = 0;       // 如实上报中的 Ctrl
+    bool dirty_ = false;
+    uint32_t legacyVK_ = 0; // 走旧路按住中的 Ctrl：松开前的自动重复不改路
+};
+
 /// Alt_L / Alt_R → VK_LMENU / VK_RMENU；其它键返回 0。
 uint32_t altVK(uint32_t keysym);
 

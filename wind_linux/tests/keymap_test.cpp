@@ -179,6 +179,53 @@ void TestAltHold()
     CHECK(!idle.shouldForwardUp(false));
 }
 
+void TestCtrlRaw()
+{
+    constexpr uint32_t CtrlL = 0xffe3, CtrlR = 0xffe4;
+    bool notTap = true;
+
+    CASE("组字中按下 Ctrl：报 MOD_DOWN；干净松开报 MOD_UP 不带 NOT_TAP");
+    CtrlRaw r;
+    CHECK_EQ(r.onPress(CtrlL, true), 0xA2u);
+    CHECK_EQ(r.onRelease(CtrlL, &notTap), 0xA2u);
+    CHECK(!notTap);
+
+    CASE("自动重复不再报按下");
+    CHECK_EQ(r.onPress(CtrlR, true), 0xA3u);
+    CHECK_EQ(r.onPress(CtrlR, true), 0u);
+    CHECK_EQ(r.onRelease(CtrlR, &notTap), 0xA3u);
+    CHECK(!notTap);
+
+    CASE("按住期间按过别的键（Ctrl+C）：松开带 NOT_TAP");
+    r.onPress(CtrlL, true);
+    r.onPress('c', true);
+    r.onRelease('c', &notTap);
+    CHECK_EQ(r.onRelease(CtrlL, &notTap), 0xA2u);
+    CHECK(notTap);
+
+    CASE("配对：按下时不在组字 → 整次走旧路；按住中进了组字、自动重复也不改路");
+    CHECK_EQ(r.onPress(CtrlL, false), 0u);
+    CHECK_EQ(r.onPress(CtrlL, true), 0u);
+    CHECK_EQ(r.onRelease(CtrlL, &notTap), 0u);
+    CASE("配对：按下时在组字 → 松开时组字已结束照报");
+    r.onPress(CtrlL, true);
+    CHECK_EQ(r.onRelease(CtrlL, &notTap), 0xA2u);
+
+    CASE("另一侧松开不算这次按住；另一侧按下弄脏");
+    r.onPress(CtrlL, true);
+    CHECK_EQ(r.onRelease(CtrlR, &notTap), 0u);
+    r.onPress(CtrlR, false);
+    CHECK_EQ(r.onRelease(CtrlR, &notTap), 0u);
+    CHECK_EQ(r.onRelease(CtrlL, &notTap), 0xA2u);
+    CHECK(notTap);
+
+    CASE("非 Ctrl 键的抬起不碰；复位后松开不报");
+    CHECK_EQ(r.onPress(CtrlL, true), 0xA2u);
+    CHECK_EQ(r.onRelease('a', &notTap), 0u);
+    r.reset();
+    CHECK_EQ(r.onRelease(CtrlL, &notTap), 0u);
+}
+
 } // namespace
 
 int main()
@@ -190,5 +237,6 @@ int main()
     TestModifiers();
     TestToggleTap();
     TestAltHold();
+    TestCtrlRaw();
     TEST_MAIN_END();
 }

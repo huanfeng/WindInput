@@ -873,6 +873,30 @@ bool WindEngine::sendAltEvent(fcitx::InputContext* ic, uint32_t vk, uint8_t even
     return consumed;
 }
 
+void WindEngine::sendCtrlRaw(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods,
+                             uint8_t toggles)
+{
+    if (!ensureConnected()) {
+        return;
+    }
+    if (eventType == KEY_EVENT_MOD_UP) {
+        sendCaretUpdate(ic); // 判出单击可能切中英：状态气泡锚到当前插入点，同 sendKeyUp
+    }
+    KeyEvent e;
+    e.keyCode = vk;
+    e.modifiers = mods;
+    e.eventType = eventType;
+    e.toggles = toggles;
+    e.eventSeq = ++keySeq_;
+    e.prevChar = prevCharFor(ic);
+    Frame resp;
+    if (requestWithRetry(encodeKeyEventFrame(e), resp)) {
+        applyResponse(ic, resp, false);
+    }
+    WIND_DEBUG() << "ctrl_raw vk=" << hex(vk) << (eventType == KEY_EVENT_MOD_DOWN ? " down" : " up")
+                 << " mods=" << hex(mods) << " toggles=" << hex(toggles);
+}
+
 void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEvent& event)
 {
     fcitx::InputContext* ic = event.inputContext();
@@ -895,6 +919,7 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     router_.reset();
     tap_.reset();
     altHold_.reset();
+    ctrlRaw_.reset();
     caps_.reset();
     eatenKeys_.clear();
     if (!ensureConnected()) {
@@ -990,6 +1015,7 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
         // （带 STATUS_CAPS_LOCK 与「A」标签）。键本身两个方向都交还宿主。
         if (!event.isRelease()) {
             tap_.onPress(sym, nowMs()); // Shift 按住时按 CapsLock：那次 Shift 不再是单击
+            ctrlRaw_.onPress(sym, false);
         } else if (caps && ensureConnected()) {
             uint8_t toggles = statesToToggles(states) & ~TOGGLE_CAPSLOCK;
             sendKeyUp(ic, keysymToVK(sym), statesToModifiers(states),
@@ -1008,6 +1034,14 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
             if (forward && sendAltEvent(ic, avk, KEY_EVENT_UP, mods, statesToToggles(states))) {
                 event.filterAndAccept();
             }
+            return;
+        }
+        // 候选显示时如实上报的那次 Ctrl 按住：报松开，不再按旧路的单击上报（一次按住只走一条路）。
+        bool notTap = false;
+        if (uint32_t rvk = ctrlRaw_.onRelease(sym, &notTap); rvk != 0) {
+            tap_.onRelease(sym, nowMs());
+            const uint8_t toggles = statesToToggles(states) | (notTap ? TOGGLE_MOD_NOT_TAP : 0);
+            sendCtrlRaw(ic, rvk, KEY_EVENT_MOD_UP, statesToModifiers(states) | KEYMOD_CTRL, toggles);
             return;
         }
         if (uint32_t vk = tap_.onRelease(sym, nowMs()); vk != 0) {
@@ -1030,6 +1064,12 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     // 组字中的 Alt 按下：转发给服务切换注释态，回包 Consumed 才吃。按住期间按过的
     // Shift / Ctrl / Super 粘到 Alt 事件的修饰位上（见 AltHold）。
     altHold_.noteKey(sym, states);
+    // 候选显示时 Ctrl 的按下如实上报（单击由服务端判，见 CtrlRaw）；键本身照常交还宿主。
+    if (uint32_t rvk = ctrlRaw_.onPress(sym, altInputSession(router_.hasComposition(), candidatesVisible_));
+        rvk != 0) {
+        sendCtrlRaw(ic, rvk, KEY_EVENT_MOD_DOWN, statesToModifiers(states) | KEYMOD_CTRL, statesToToggles(states));
+        return;
+    }
     if (uint32_t avk = altVK(sym); avk != 0) {
         const bool forward = altInputSession(router_.hasComposition(), candidatesVisible_);
         altHold_.onAltDown(forward);
