@@ -146,6 +146,11 @@ public:
     // vk: 虚拟键码（Win32 VK_*）；mods: 内部 KEYMOD_* 修饰位（不是 TSF MOD_*）。
     // 返回 TRUE ＝ 服务端要这个键交还宿主（由调用方注入，见实现处）。
     BOOL DispatchHotkey(uint32_t vk, uint32_t mods);
+    /// 收到 WM_HOTKEY（不论后面是否分发：前台竞态丢弃、vk 解不出也算）：作废待判单击与
+    /// Ctrl 如实上报的单击——这一键不经按键回调，那里的「别的键取消待判」够不着。
+    void NoteHotkeyMessage();
+    /// 线程失焦：Ctrl 如实上报的记账作废（松开多半送不到了）。
+    void ResetCtrlRaw();
 
     // 把一个已被吃掉的键重放给宿主（_ReplayKeyToHost 的公开入口，给 WM_HOTKEY 派发用）。
     void ReplayKeyToHost(WORD vk) { _ReplayKeyToHost(vk); }

@@ -1793,6 +1793,9 @@ STDAPI CTextService::OnKillThreadFocus()
 {
     WIND_LOG_DEBUG_FMT(L"OnKillThreadFocus called tid=%lu inst=0x%p\n", GetCurrentThreadId(), this);
     _hasThreadFocus = FALSE;
+    // Ctrl 如实上报的松开多半送不到了，丢掉记账（不丢的话下一次同侧 Ctrl 会被当成连发吞掉）。
+    if (_pKeyEventSink != nullptr)
+        _pKeyEventSink->ResetCtrlRaw();
     // 空窗计时**丢弃而非结算**：整个应用失去前台后，用户是去别处干活了，这段时间
     // 再长也不是「想输入却输不进」。不丢的话，切走十分钟再切回来就会记出一条
     // duration=600000ms 的假空窗，把真正要找的那几十毫秒淹在噪声里。
@@ -2197,6 +2200,8 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
         CTextService* self = reinterpret_cast<CTextService*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
         if (self != nullptr && self->_pKeyEventSink != nullptr)
         {
+            // 不论下面分不分发（竞态丢弃、vk 解不出），这都是一次组合键：先作废待判单击。
+            self->_pKeyEventSink->NoteHotkeyMessage();
             // 焦点切换竞态防护：用户按下 Ctrl+= 的瞬间焦点可能正从 App A 切到 App B，
             // 此时 A 的 OnKillThreadFocus 还没来得及 unregister，WM_HOTKEY 会落到
             // A 的 hidden window；如果直接处理，会把加词动作下发到已经失焦的 IME

@@ -30,7 +30,7 @@ enum class Down
 {
     Legacy, // 按下时无会话（或认不出左右）：走旧的待判单击
     Start,  // 新的一次如实上报：发 MOD_DOWN
-    Repeat, // 同一次按住的重复 keydown（自动连发、宿主重复回调）：什么都不发
+    Repeat, // 同一次按住的重复 keydown（自动连发、宿主重复回调首按）：什么都不发
 };
 
 // Ctrl 按下。vk 是解析出的左右键（认不出给 0）；autoRepeat = lParam 第 30 位（这个键此前已按着）；
@@ -38,12 +38,20 @@ enum class Down
 //
 // 路只在一次按住的**第一下**定：旧路按住中（自动连发、或旧路还记着这个键）即使此刻有了会话也
 // 不改走如实上报——否则松开时两边各报一次。
+//
+// 同侧记账还在时：自动连发、或记账干净（宿主重复回调首按）才算 Repeat；弄脏过又来一个非连发的
+// 按下 = 上次松开丢了（Ctrl+Alt+Del、Ctrl+点击切走），丢掉残留按新的一次按下重判，与服务端
+// `on_ctrl_raw_down` 同一判据。
 inline Down OnCtrlDown(Press& p, uint32_t vk, bool hasSession, bool autoRepeat, uint32_t legacyPendingVk)
 {
     if (vk != kVkLControl && vk != kVkRControl)
         return Down::Legacy;
     if (p.vk == vk)
-        return Down::Repeat;
+    {
+        if (autoRepeat || !p.dirty)
+            return Down::Repeat;
+        p = {};
+    }
     if (!hasSession || autoRepeat || legacyPendingVk == vk)
     {
         // 另一侧 Ctrl 正在如实上报：这一侧按下对它是「别的键」。
@@ -69,6 +77,12 @@ inline void OnHotkeyDispatched(Press& p, uint32_t& pendingKey)
 {
     pendingKey = 0;
     OnOtherKey(p);
+}
+
+// 线程失焦（OnKillThreadFocus）：松开多半送不到了，丢掉记账（服务端失焦时也会收起按住翻转）。
+inline void OnFocusLost(Press& p)
+{
+    p = {};
 }
 
 struct Up

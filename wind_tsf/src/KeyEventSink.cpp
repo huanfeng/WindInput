@@ -2361,12 +2361,7 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     // 系统热键已把原键吃下，交还只能由调用方注入（见 TextService WndProc 与
     // CandidateHotkeyPolicy.h 的 OnHotkeyDispatched）。
     //
-    // 这一键不经按键回调，够不着那里「别的键取消待判单击」：在这里作废，否则 Ctrl+数字
-    // 500ms 内松开 Ctrl 会被当成 Ctrl 单击（lctrl 作中英切换键时顺带切英文）。
-    if (_pendingKeyUpKey != 0)
-        WIND_LOG_DEBUG_FMT(L"Cancel pending toggle (wm_hotkey): vk=0x%02X pending=0x%02X\n", vk, _pendingKeyUpKey);
-    wind::ctrlraw::OnHotkeyDispatched(_ctrlRaw, _pendingKeyUpKey);
-    _pendingKeyUpModifiers = 0;
+    // 待判单击的作废在 WM_HOTKEY 入口（NoteHotkeyMessage），不在这里：前台竞态丢弃的那次也要作废。
     if (!_SendKeyToService(vk, mods, KEY_EVENT_DOWN))
     {
         WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);
@@ -2384,6 +2379,22 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     _pendingReplayToHost = FALSE;
     _inHotkeyDispatch = prevInHotkeyDispatch;
     return wind::candhotkey::GivesBackToHost(responseType) ? TRUE : FALSE;
+}
+
+// 这一键不经按键回调，够不着那里「别的键取消待判单击」：在这里作废，否则 Ctrl+数字
+// 500ms 内松开 Ctrl 会被当成 Ctrl 单击（lctrl 作中英切换键时顺带切英文）。
+void CKeyEventSink::NoteHotkeyMessage()
+{
+    if (_pendingKeyUpKey != 0)
+        WIND_LOG_DEBUG_FMT(L"Cancel pending toggle (wm_hotkey): pending=0x%02X\n", _pendingKeyUpKey);
+    wind::ctrlraw::OnHotkeyDispatched(_ctrlRaw, _pendingKeyUpKey);
+    _pendingKeyUpModifiers = 0;
+}
+
+void CKeyEventSink::ResetCtrlRaw()
+{
+    wind::ctrlraw::OnFocusLost(_ctrlRaw);
+    _ctrlRawTapSignals = {};
 }
 
 BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType, uint8_t extraToggles)

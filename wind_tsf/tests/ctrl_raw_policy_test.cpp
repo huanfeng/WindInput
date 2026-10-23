@@ -3,7 +3,8 @@
 // 跑法（纯 C++17、不含 Win32 头）：
 //   g++ -std=c++17 -I../include -o ctrl_raw_test ctrl_raw_policy_test.cpp && ./ctrl_raw_test
 //
-// 变异检验：OnCtrlDown 去掉 Repeat 判断 ⇒ TestRepeatDoesNotRestart 红；OnHotkeyDispatched 不清
+// 变异检验：OnCtrlDown 去掉 Repeat 判断 ⇒ TestRepeatDoesNotRestart 红；Repeat 不看 dirty ⇒
+// TestStaleDirtyPressIsReplaced 红；OnHotkeyDispatched 不清
 // pendingKey ⇒ TestHotkeyCancelsLegacyPending 红；OnCtrlUp 不看 matches ⇒ TestOtherSideUpIsNotOurs 红。
 
 #include "CtrlRawPolicy.h"
@@ -62,8 +63,9 @@ void TestRepeatDoesNotRestart()
 {
     Press p;
     OnCtrlDown(p, kVkLControl, true, false, 0);
+    Expect(OnCtrlDown(p, kVkLControl, true, false, 0) == Down::Repeat, "干净时宿主重复回调首按 ⇒ Repeat");
     OnOtherKey(p);
-    Expect(OnCtrlDown(p, kVkLControl, true, false, 0) == Down::Repeat, "同一侧重复按下 ⇒ Repeat，不再发 MOD_DOWN");
+    Expect(OnCtrlDown(p, kVkLControl, true, true, 0) == Down::Repeat, "自动连发 ⇒ Repeat，不再发 MOD_DOWN");
     Expect(p.dirty, "Repeat 不洗掉 dirty");
 }
 
@@ -122,6 +124,40 @@ void TestOtherSideDownWithoutSessionDirties()
     Expect(OnCtrlUp(p, true, false).notTap, "左 Ctrl 的这次按住被打断");
 }
 
+// 丢了一次松开（Ctrl+Alt+Del、Ctrl+点击切走）：残留是脏的，下一次同侧按下按新的一次重判。
+void TestStaleDirtyPressIsReplaced()
+{
+    Press p;
+    OnCtrlDown(p, kVkLControl, true, false, 0);
+    OnOtherKey(p); // Alt / Del
+    // 松开没送到。回来时无会话：走旧路（lctrl 中英切换照常），残留不再拦着。
+    Expect(OnCtrlDown(p, kVkLControl, false, false, 0) == Down::Legacy, "残留 + 无会话 ⇒ 旧路");
+    Expect(p.vk == 0, "残留已丢");
+    Expect(!OnCtrlUp(p, true, false).report, "旧路的松开不报 MOD_UP");
+
+    // 回来时有会话：重新起一次干净的如实上报。
+    Press q;
+    OnCtrlDown(q, kVkLControl, true, false, 0);
+    OnOtherKey(q);
+    Expect(OnCtrlDown(q, kVkLControl, true, false, 0) == Down::Start, "残留 + 有会话 ⇒ 新的一次");
+    Up u = OnCtrlUp(q, true, false);
+    Expect(u.report && !u.notTap, "新的一次是干净的");
+
+    // 脏但是自动连发：仍是同一次按住。
+    Press r;
+    OnCtrlDown(r, kVkLControl, true, false, 0);
+    OnOtherKey(r);
+    Expect(OnCtrlDown(r, kVkLControl, true, true, 0) == Down::Repeat, "脏 + 自动连发 ⇒ Repeat");
+}
+
+void TestFocusLostDropsPress()
+{
+    Press p;
+    OnCtrlDown(p, kVkLControl, true, false, 0);
+    OnFocusLost(p);
+    Expect(OnCtrlDown(p, kVkLControl, false, false, 0) == Down::Legacy, "失焦后再按下按新的一次判");
+}
+
 void TestUnresolvedSideIsLegacy()
 {
     Press p;
@@ -143,6 +179,8 @@ int main()
     TestOtherSideUpIsNotOurs();
     TestOtherSideDownWithoutSessionDirties();
     TestUnresolvedSideIsLegacy();
+    TestStaleDirtyPressIsReplaced();
+    TestFocusLostDropsPress();
     if (g_failures == 0)
         std::printf("ctrl_raw_policy_test: all passed\n");
     return g_failures == 0 ? 0 : 1;
