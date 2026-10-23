@@ -4069,9 +4069,12 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `appearance.previewTemplate`：模板在当前主题下的渲染效果（设置页输入框下方的预览行）。
     ///
-    /// 入参 `{ template, scene: "comment" | "label" | "content", each?, swatches?: [名字] }`。回包：
+    /// 入参 `{ template, scene: "comment" | "label" | "content", each?, swatches?: [名字], sample? }`。
+    /// `sample` 是样例 id（缺省 = 「你好」），未知 id 报错。回包：
     /// ```text
-    /// { text, fg, bg, runs: [{start, end, rgba}],
+    /// { candidate, sample,                     // 本次用的样例词与它的 id
+    ///   samples: [{id, text, lang: "zh"|"en"}], // 全部可用样例，设置端据此按语种取
+    ///   text, fg, bg, runs: [{start, end, rgba}],
     ///   selected: { fg, bg, runs } | null,      // 仅 comment：高亮候选里的样子
     ///   problems: [{start, end, message}],
     ///   swatches: { 名字: rgba } }              // 入参 swatches 里每个名字写成 `$[名字]` 的实际颜色
@@ -4119,7 +4122,10 @@ pub trait WebDataRpc: WebDataHost {
             other => anyhow::bail!("未知 scene：{other}"),
         };
         let is_tooltip = scene != TemplateScene::Comment;
-        let sample = self.template_sample(template, &scene);
+        let sample_id = params.get("sample").and_then(Value::as_str);
+        let preset = wind_coordinator::template_preview::find_sample(sample_id)
+            .ok_or_else(|| anyhow::anyhow!("未知样例：{}", sample_id.unwrap_or_default()))?;
+        let sample = self.template_sample(template, &scene, preset);
         // 主题现取：与候选窗同一条搜索链、同一个当前主题与明暗。每次预览都从磁盘解析一次
         // （设计 §11 已知局限：低频的设置页操作，不值得为它挂一份缓存）。取不到（主题文件坏了）
         // 时退化为兜底色的预览，并给一条总的提示——不逐个把颜色名误报成「当前主题没有」。
@@ -4267,7 +4273,14 @@ pub trait WebDataRpc: WebDataHost {
             })
             .collect();
 
+        let samples: Vec<Value> = wind_coordinator::template_preview::SAMPLES
+            .iter()
+            .map(|s| json!({"id": s.id, "text": s.text, "lang": s.lang.as_str()}))
+            .collect();
         Ok(json!({
+            "candidate": preset.text,
+            "sample": preset.id,
+            "samples": samples,
             "text": sample.text.as_str(),
             "fg": fg,
             "bg": bg,

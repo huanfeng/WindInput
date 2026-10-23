@@ -193,12 +193,14 @@ pub trait WebDataHost {
     /// 会在加新变量时静默过时。
     fn quick_format_var_hints(&self) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>;
 
-    /// 模板样例求值（设置页预览行，text-span-colors.md §11）：用固定样例按真实模板引擎渲染，
-    /// 附未知变量与内联色的位置。颜色按主题求值不在这里——wind-webdata 自己能加载主题。
+    /// 模板样例求值（设置页预览行，text-span-colors.md §11）：用固定样例（`sample`，取自
+    /// `template_preview::SAMPLES`）按真实模板引擎渲染，附未知变量与内联色的位置。颜色按主题
+    /// 求值不在这里——wind-webdata 自己能加载主题。
     fn template_sample(
         &self,
         template: &str,
         scene: &crate::template_preview::TemplateScene,
+        sample: &crate::template_preview::PreviewSample,
     ) -> crate::template_preview::TemplateSample;
 
     /// 新增一条用户自定义格式，返回分配到的 id。
@@ -239,8 +241,9 @@ impl WebDataHost for Coordinator {
         &self,
         template: &str,
         scene: &crate::template_preview::TemplateScene,
+        sample: &crate::template_preview::PreviewSample,
     ) -> crate::template_preview::TemplateSample {
-        crate::template_preview::sample(template, scene)
+        crate::template_preview::sample_with(template, scene, sample)
     }
     fn engine_mgr(&self) -> &EngineManager {
         &self.engine_mgr

@@ -20,8 +20,183 @@ use std::sync::Arc;
 use wind_theme::InlineColor;
 use wind_ui_types::StyledText;
 
-/// 样例候选。两个字都是 ≥ U+3400 的汉字，逐字段（`han` / `char`）各出一行。
-pub const SAMPLE_TEXT: &str = "你好";
+/// 样例语种：设置端按作用范围选（英文类型、临时英文模式用英文样例，其余中文）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleLang {
+    Zh,
+    En,
+}
+
+impl SampleLang {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Zh => "zh",
+            Self::En => "en",
+        }
+    }
+}
+
+/// 样例候选里一个字的逐字数据（逐字段 `han` / `char` 用）。
+#[derive(Debug)]
+pub struct SampleChar {
+    pub ch: char,
+    pub readings: &'static [&'static str],
+    pub chaizi: &'static str,
+    pub chaizi_code: &'static str,
+}
+
+/// 一个样例候选与它的全部变量值。中文专属变量在英文样例里为空，可选段随之消失。
+#[derive(Debug)]
+pub struct PreviewSample {
+    pub id: &'static str,
+    pub text: &'static str,
+    pub lang: SampleLang,
+    pub pinyin: &'static str,
+    pub correct_pinyin: &'static str,
+    pub shuangpin: &'static str,
+    pub code_hint: &'static str,
+    pub emoji: &'static str,
+    pub code_rev: &'static str,
+    pub code_rev_all: &'static [&'static str],
+    /// `${dict_all}` 的各条；裸 `${dict}` 取第一条。
+    pub dict: &'static [&'static str],
+    /// `${dict:<id>}` 按库 id 取；表里没有的 id 为空（同真实求值查不到）。
+    pub dict_by_id: &'static [(&'static str, &'static str)],
+    pub word_code: &'static str,
+    pub code_source: &'static str,
+    pub debug: &'static str,
+    pub full_text: &'static str,
+    pub chars: &'static [SampleChar],
+}
+
+const fn zh_char(
+    ch: char,
+    readings: &'static [&'static str],
+    chaizi: &'static str,
+    chaizi_code: &'static str,
+) -> SampleChar {
+    SampleChar {
+        ch,
+        readings,
+        chaizi,
+        chaizi_code,
+    }
+}
+
+/// 样例表。第一个（「你好」）是缺省样例；码取自五笔86（极点）词库与拆字表，双拼为小鹤。
+pub const SAMPLES: &[PreviewSample] = &[
+    PreviewSample {
+        id: "nihao",
+        text: "你好",
+        lang: SampleLang::Zh,
+        pinyin: "nǐ hǎo",
+        correct_pinyin: "ni hao",
+        shuangpin: "nihk",
+        code_hint: "hao",
+        emoji: "👋",
+        code_rev: "wqvb",
+        code_rev_all: &["wq", "wqvb"],
+        dict: &["hello", "问候"],
+        dict_by_id: &[("zh_en", "int. hello")],
+        word_code: "wqvb",
+        code_source: "五笔",
+        debug: "来源: 拼音",
+        full_text: "你好，世界",
+        chars: &[
+            zh_char('你', &["nǐ"], "亻尔", "wqiy"),
+            zh_char('好', &["hǎo", "hào"], "女子", "vbg"),
+        ],
+    },
+    PreviewSample {
+        id: "zhongwen",
+        text: "中文",
+        lang: SampleLang::Zh,
+        pinyin: "zhōng wén",
+        correct_pinyin: "zhong wen",
+        shuangpin: "vswf",
+        code_hint: "wen",
+        emoji: "🀄",
+        code_rev: "khyy",
+        code_rev_all: &["khyy"],
+        dict: &["n. Chinese language"],
+        dict_by_id: &[("zh_en", "n. Chinese language")],
+        word_code: "khyy",
+        code_source: "五笔",
+        debug: "来源: 拼音",
+        full_text: "中文",
+        chars: &[
+            zh_char('中', &["zhōng", "zhòng"], "口丨", "khk"),
+            zh_char('文', &["wén"], "亠乂", "yygy"),
+        ],
+    },
+    PreviewSample {
+        id: "shurufa",
+        text: "输入法",
+        lang: SampleLang::Zh,
+        pinyin: "shū rù fǎ",
+        correct_pinyin: "shu ru fa",
+        shuangpin: "uurufa",
+        code_hint: "rufa",
+        emoji: "⌨️",
+        code_rev: "ltif",
+        code_rev_all: &["ltif"],
+        dict: &["n. input method"],
+        dict_by_id: &[("zh_en", "n. input method")],
+        word_code: "ltif",
+        code_source: "五笔",
+        debug: "来源: 拼音",
+        full_text: "输入法",
+        chars: &[
+            zh_char('输', &["shū"], "车俞", "lwgj"),
+            zh_char('入', &["rù"], "丿乀", "tyi"),
+            zh_char('法', &["fǎ"], "氵去", "ifcy"),
+        ],
+    },
+    en_sample("apple", "🍎", &["n. 苹果"], &[("en_zh", "n. 苹果")]),
+    en_sample(
+        "hello",
+        "👋",
+        &["int. 喂；你好"],
+        &[("en_zh", "int. 喂；你好")],
+    ),
+    en_sample("world", "🌍", &["n. 世界"], &[("en_zh", "n. 世界")]),
+];
+
+/// 英文样例：只有释义（`en_zh`）、emoji 与来源，拼音 / 码 / 拆字等中文变量全空。
+const fn en_sample(
+    text: &'static str,
+    emoji: &'static str,
+    dict: &'static [&'static str],
+    dict_by_id: &'static [(&'static str, &'static str)],
+) -> PreviewSample {
+    PreviewSample {
+        id: text,
+        text,
+        lang: SampleLang::En,
+        pinyin: "",
+        correct_pinyin: "",
+        shuangpin: "",
+        code_hint: "",
+        emoji,
+        code_rev: "",
+        code_rev_all: &[],
+        dict,
+        dict_by_id,
+        word_code: "",
+        code_source: "英文",
+        debug: "来源: 英文",
+        full_text: text,
+        chars: &[],
+    }
+}
+
+/// 按 id 取样例；`None` = 缺省样例（「你好」）。
+pub fn find_sample(id: Option<&str>) -> Option<&'static PreviewSample> {
+    match id {
+        None => SAMPLES.first(),
+        Some(id) => SAMPLES.iter().find(|s| s.id == id),
+    }
+}
 
 /// 模板用在哪里。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,18 +314,21 @@ fn is_known(name: &str) -> bool {
 }
 
 /// 样例值。`ch` = 逐字段当前字（整段求值为 `None`）。`None` 返回值 = 未知变量名。
-fn sample_value(name: &str, arg: Option<&str>, ch: Option<char>) -> Option<VarValue> {
+fn sample_value(
+    s: &PreviewSample,
+    name: &str,
+    arg: Option<&str>,
+    ch: Option<char>,
+) -> Option<VarValue> {
     // `_all` 类变量的分隔符参数：样例里用空格连接，参数换掉它。分隔符带 `separator` 标记，同真实求值。
-    let joined =
-        |parts: &[&str], default: &str| Some(VarValue::joined(parts, arg.unwrap_or(default)));
+    let joined = |parts: &mut dyn Iterator<Item = &str>, default: &str| {
+        Some(VarValue::joined(parts, arg.unwrap_or(default)))
+    };
+    let this = ch.and_then(|c| s.chars.iter().find(|x| x.ch == c));
     Some(VarValue::from(match role_of(name) {
         "char" => ch.map(String::from).unwrap_or_default(),
         "readings" => {
-            let all: &[&str] = match ch {
-                Some('你') => &["nǐ"],
-                Some('好') => &["hǎo", "hào"],
-                _ => &[],
-            };
+            let all = this.map_or(&[][..], |x| x.readings);
             let n = arg
                 .and_then(|a| a.trim().parse::<usize>().ok())
                 .unwrap_or(0);
@@ -162,35 +340,44 @@ fn sample_value(name: &str, arg: Option<&str>, ch: Option<char>) -> Option<VarVa
             .unwrap_or_default(),
         "unicode_all" => {
             return Some(VarValue::joined(
-                SAMPLE_TEXT.chars().map(|c| format!("U+{:04X}", c as u32)),
+                s.text.chars().map(|c| format!("U+{:04X}", c as u32)),
                 arg.unwrap_or(" "),
             ));
         }
-        "code_hint" => "hao".into(),
-        "emoji" => "👋".into(),
-        "code_rev" => "wqvb".into(),
+        "code_hint" => s.code_hint.into(),
+        "emoji" => s.emoji.into(),
+        "code_rev" => s.code_rev.into(),
         // 全部码位默认以 `/` 连接（同 `word_codes_in`），参数换掉它。
-        "code_rev_all" => return joined(&["wq", "wqvb"], "/"),
-        "shuangpin" => "nihk".into(),
-        "pinyin" => "nǐ hǎo".into(),
-        "correct_pinyin" => "ni hao".into(),
-        "chaizi" => match ch {
-            Some('好') => "女子".into(),
-            _ => "亻尔".into(),
-        },
-        "chaizi_code" => match ch {
-            Some('好') => "vbg".into(),
-            _ => "wqiy".into(),
-        },
-        "chaizi_all" => return joined(&["亻尔", "女子"], " "),
-        "chaizi_code_all" => return joined(&["wqiy", "vbg"], " "),
+        "code_rev_all" => return joined(&mut s.code_rev_all.iter().copied(), "/"),
+        "shuangpin" => s.shuangpin.into(),
+        "pinyin" => s.pinyin.into(),
+        "correct_pinyin" => s.correct_pinyin.into(),
+        // 逐字段取当前字；整段（注释）取首字，同旧样例。
+        "chaizi" => this.or(s.chars.first()).map_or("", |x| x.chaizi).into(),
+        "chaizi_code" => this
+            .or(s.chars.first())
+            .map_or("", |x| x.chaizi_code)
+            .into(),
+        "chaizi_all" => return joined(&mut s.chars.iter().map(|x| x.chaizi), " "),
+        "chaizi_code_all" => return joined(&mut s.chars.iter().map(|x| x.chaizi_code), " "),
         // `dict_all` 归一到 `dict` 角色（同一份数据），但取值不同：按原名分开。
-        "dict" if name == "dict_all" => return joined(&["hello", "问候"], super::DICT_ALL_SEP),
-        "dict" => "hello".into(),
-        "word_code" => "wqvb".into(),
-        "code_source" => "五笔".into(),
-        "debug" => "来源: 拼音".into(),
-        "full_text" => "你好，世界".into(),
+        "dict" if name == "dict_all" => {
+            return joined(&mut s.dict.iter().copied(), super::DICT_ALL_SEP);
+        }
+        // `${dict:<id>}` 只看那个库，裸 `${dict}` 取首条释义。
+        "dict" => match arg {
+            Some(id) => s
+                .dict_by_id
+                .iter()
+                .find(|(k, _)| *k == id.trim())
+                .map_or("", |(_, v)| v)
+                .into(),
+            None => s.dict.first().copied().unwrap_or_default().into(),
+        },
+        "word_code" => s.word_code.into(),
+        "code_source" => s.code_source.into(),
+        "debug" => s.debug.into(),
+        "full_text" => s.full_text.into(),
         _ => return None,
     }))
 }
@@ -270,14 +457,19 @@ fn scan(
     }
 }
 
-/// 按场景用样例求值并诊断。
+/// 按场景用缺省样例（「你好」）求值并诊断。
 pub fn sample(template: &str, scene: &TemplateScene) -> TemplateSample {
+    sample_with(template, scene, &SAMPLES[0])
+}
+
+/// 按场景用指定样例求值并诊断。
+pub fn sample_with(template: &str, scene: &TemplateScene, s: &PreviewSample) -> TemplateSample {
     let t = Template::parse(template);
     let layer = Layer::of(scene);
     // 场景外的变量与真实渲染一样返回 `None`（原样回显），不给样例值。
     let value = move |name: &str, arg: Option<&str>, ch: Option<char>| {
         if layer.has(name) {
-            sample_value(name, arg, ch)
+            sample_value(s, name, arg, ch)
         } else {
             None
         }
@@ -289,7 +481,8 @@ pub fn sample(template: &str, scene: &TemplateScene) -> TemplateSample {
         TemplateScene::TooltipContent { each } => match each.trim() {
             "han" | "char" => {
                 let han = each.trim() == "han";
-                let rows: Vec<StyledText> = SAMPLE_TEXT
+                let rows: Vec<StyledText> = s
+                    .text
                     .chars()
                     .filter(|c| {
                         if han {
@@ -581,6 +774,80 @@ mod tests {
         assert!(InlineColor::parse("accent,selected").selected.is_none());
     }
 
+    fn with(id: &str, tpl: &str, scene: &TemplateScene) -> String {
+        let s = find_sample(Some(id)).unwrap();
+        sample_with(tpl, scene, s).text.as_str().to_string()
+    }
+
+    /// 每个中文样例的关键变量：拼音、双拼、反查码、拆字、`${dict:zh_en}`、编码提示。
+    #[test]
+    fn chinese_samples_have_their_own_values() {
+        let tpl =
+            "${pinyin}|${shuangpin}|${code_rev}|${chaizi_all}|${dict:zh_en}|${code_hint}|${dict}";
+        let c = TemplateScene::Comment;
+        assert_eq!(
+            with("nihao", tpl, &c),
+            "nǐ hǎo|nihk|wqvb|亻尔 女子|int. hello|hao|hello"
+        );
+        assert_eq!(
+            with("zhongwen", tpl, &c),
+            "zhōng wén|vswf|khyy|口丨 亠乂|n. Chinese language|wen|n. Chinese language"
+        );
+        assert_eq!(
+            with("shurufa", tpl, &c),
+            "shū rù fǎ|uurufa|ltif|车俞 丿乀 氵去|n. input method|rufa|n. input method"
+        );
+        // 中文样例没有英汉库的值。
+        assert_eq!(with("zhongwen", "${dict:en_zh}", &c), "");
+        let han = TemplateScene::TooltipContent { each: "han".into() };
+        assert_eq!(
+            with("shurufa", "${char}：${readings} ${chaizi_code}", &han),
+            "输：shū lwgj\n入：rù tyi\n法：fǎ ifcy"
+        );
+    }
+
+    /// 英文样例：`${dict:en_zh}` 给「词性. 中文义」，中文变量为空、可选段整段消失。
+    #[test]
+    fn english_samples_hide_chinese_variables() {
+        let c = TemplateScene::Comment;
+        for (id, mean) in [
+            ("apple", "n. 苹果"),
+            ("hello", "int. 喂；你好"),
+            ("world", "n. 世界"),
+        ] {
+            assert_eq!(with(id, "${dict:en_zh}", &c), mean);
+            assert_eq!(with(id, "${dict}", &c), mean);
+            assert_eq!(with(id, "${dict:zh_en}", &c), "");
+            assert_eq!(
+                with(
+                    id,
+                    "{(${pinyin})}{[${code_rev}]}{${shuangpin}}${chaizi_all}${code_hint}",
+                    &c
+                ),
+                ""
+            );
+            let han = TemplateScene::TooltipContent { each: "han".into() };
+            assert_eq!(with(id, "${char}：${readings}", &han), "");
+            let each = TemplateScene::TooltipContent {
+                each: "char".into(),
+            };
+            assert_eq!(with(id, "${char}：${chaizi}", &each), "");
+        }
+    }
+
+    /// 样例表：id 唯一、中英各至少三个、缺省是「你好」，未知 id 取不到。
+    #[test]
+    fn sample_table_shape() {
+        assert_eq!(find_sample(None).unwrap().text, "你好");
+        assert!(find_sample(Some("nope")).is_none());
+        let n = |l| SAMPLES.iter().filter(|s| s.lang == l).count();
+        assert!(n(SampleLang::Zh) >= 3 && n(SampleLang::En) >= 3);
+        for (i, a) in SAMPLES.iter().enumerate() {
+            assert!(SAMPLES[i + 1..].iter().all(|b| b.id != a.id), "{}", a.id);
+            assert!(a.chars.iter().all(|c| a.text.contains(c.ch)), "{}", a.id);
+        }
+    }
+
     /// 样例表覆盖契约里的全部变量（否则预览会把合法变量报成未知）。
     #[test]
     fn every_listed_role_has_a_sample_value() {
@@ -588,7 +855,10 @@ mod tests {
             if wind_ui_types::STRUCTURAL_ROLES.contains(r) {
                 continue;
             }
-            assert!(sample_value(r, None, Some('你')).is_some(), "{r}");
+            assert!(
+                sample_value(&SAMPLES[0], r, None, Some('你')).is_some(),
+                "{r}"
+            );
         }
     }
 }

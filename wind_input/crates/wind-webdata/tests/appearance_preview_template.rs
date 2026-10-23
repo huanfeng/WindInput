@@ -200,5 +200,37 @@ fn preview_template_contract() {
     // ⑦ 未知 scene 报错。
     assert!(call(json!({"template": "x", "scene": "nope"})).is_err());
 
+    // ⑧ 样例：缺省是「你好」，回包列出全部样例；`sample` 换样例词，英文样例里中文变量为空、
+    //    可选段消失；未知样例报错。
+    let tpl = "${dict:zh_en}{ (${pinyin})}{ ${shuangpin}}${dict:en_zh}";
+    let r = call(json!({"template": tpl, "scene": "comment"})).unwrap();
+    assert_eq!(r["candidate"], "你好");
+    assert_eq!(r["sample"], "nihao");
+    assert_eq!(r["text"], "int. hello (nǐ hǎo) nihk");
+    let ids = |lang: &str| -> Vec<String> {
+        r["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["lang"] == lang)
+            .map(|s| {
+                format!(
+                    "{}={}",
+                    s["id"].as_str().unwrap(),
+                    s["text"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    assert_eq!(ids("zh"), ["nihao=你好", "zhongwen=中文", "shurufa=输入法"]);
+    assert_eq!(ids("en"), ["apple=apple", "hello=hello", "world=world"]);
+    let r = call(json!({"template": tpl, "scene": "comment", "sample": "shurufa"})).unwrap();
+    assert_eq!(r["candidate"], "输入法");
+    assert_eq!(r["text"], "n. input method (shū rù fǎ) uurufa");
+    let r = call(json!({"template": tpl, "scene": "comment", "sample": "apple"})).unwrap();
+    assert_eq!(r["candidate"], "apple");
+    assert_eq!(r["text"], "n. 苹果");
+    assert!(call(json!({"template": tpl, "scene": "comment", "sample": "nope"})).is_err());
+
     let _ = std::fs::remove_dir_all(&tmp);
 }
