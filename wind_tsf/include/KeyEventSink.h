@@ -6,7 +6,6 @@
 #include "PassthroughNote.h"
 #include "ToggleTapPolicy.h"
 #include "CtrlSpacePolicy.h"
-#include "AltKey.h"
 #include <string>
 #include <cstdint>
 #include <atomic>
@@ -534,13 +533,6 @@ private:
     // 每次重连从默认（开）起步，握手时服务端必推。判据见 CtrlSpacePolicy.h。
     // 写在 IPC 读线程（OnSyncConfig）、读在 TSF 线程（OnTestKeyDown）⇒ atomic。
     std::atomic<bool> _ctrlSpaceToggleEnabled{wind::ctrlspace::kDefaultEnabled};
-
-    // 组字中 Alt 的转发（注释态切换，判据见 AltKey.h）。_altHold 记这次按住的粘滞修饰位；
-    // _altReply 是 OnTest* 已转发的那一发的回包，OnKey* 沿用、不重发。
-    wind::altkey::AltHold _altHold;
-    wind::altkey::AltReplyCache _altReply;
-    // 是 Alt 且该转发就转发，*pEaten 为回包（Consumed ⇒ TRUE）；返回是否转发了。
-    BOOL _TryForwardAlt(WPARAM wParam, LPARAM lParam, uint8_t eventType, BOOL inTest, BOOL* pEaten);
 
     // Maximum duration (ms) for a toggle key press to count as a "tap"
     // Long presses beyond this threshold will NOT trigger mode toggle

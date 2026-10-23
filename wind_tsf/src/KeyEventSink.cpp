@@ -379,9 +379,10 @@ bool CKeyEventSink::_IsLogDumpHotkey(WPARAM vk)
 STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
-    // 别的键来了：上一发 Alt 的缓存回包作废（见 AltReplyCache）。
-    if (wind::altkey::MapAltVk(wParam, lParam) == 0)
-        _altReply.Clear();
+
+    // 服务进程 Alt 钩子注入的屏蔽键：宿主要看到它才不激活菜单栏，一律放行、不转发、不记账。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
 
     // 透传上报：本函数有 40+ 个 return，逐个接线必漏；守卫在**出口**统一按最终的
     // `*pfEaten` 判。没吃下 = 这次输入服务端看不见，智能符号的 press2 判定要知道。
@@ -464,10 +465,6 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     uint32_t modifiers = CHotkeyManager::GetCurrentModifiers();
     uint32_t normalizedMods = CHotkeyManager::NormalizeModifiers(modifiers);
     uint32_t normalizedKeyHash = CHotkeyManager::CalcKeyHash(normalizedMods, (uint32_t)wParam);
-
-    // Alt 按住期间按过的 Shift / Ctrl / Win 粘到 Alt 松开上（Alt+Shift 等不算单击）。
-    // 排在各热键分支之前：它们就地 return，切换键 Shift 也走那里。
-    _altHold.NoteKey((uint32_t)wParam, modifiers);
 
     CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
 
@@ -700,20 +697,6 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         WIND_LOG_DEBUG_FMT(L"OnTestKeyDown: Non-toggle key vk=0x%02X cancels pending toggle\n", (uint32_t)wParam);
         _pendingKeyUpKey = 0;
         _pendingKeyUpModifiers = 0;
-    }
-
-    // 组字中单独按 Alt：转发给服务切换注释态，回包 Consumed 才吃。排在取消待切换之后，
-    // Shift 按住时按 Alt 照旧作废那次切换。
-    {
-        BOOL altEaten = FALSE;
-        if (_TryForwardAlt(wParam, lParam, KEY_EVENT_DOWN, TRUE, &altEaten))
-        {
-            *pfEaten = altEaten;
-            _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::None,
-                            _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
-                            TRUE, altEaten, L"comment_alt");
-            return S_OK;
-        }
     }
 
     // Check basic input keys based on current state
@@ -1014,6 +997,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 {
     *pfEaten = FALSE;
 
+    // 屏蔽键一律放行（见 OnTestKeyDown）。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
+
     // 同 OnTestKeyDown 的守卫，两处都要 —— 但成因不是「宿主跳过 test」，而是**反过来**：
     // Chrome / QQ 等宿主会无视 OnTestKeyDown 的 pfEaten=FALSE **仍调用本函数**（见下方
     // 密码框守卫与 policy 早期闸门那两处同款注释）。也就是说 test 已经跑过、skip 条目
@@ -1126,19 +1113,6 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 此处不挡则按键仍会流进英文配对引擎 / IPC，抑制形同虚设。
     if (_pTextService->IsPasswordSuppressActive())
         return S_OK;
-
-    // 跳过 OnTestKeyDown 的宿主（QQ 一类）也要记 Alt 按住期间的粘滞修饰位；两边都记是幂等的。
-    _altHold.NoteKey((uint32_t)wParam, CHotkeyManager::GetCurrentModifiers());
-
-    // 组字中的 Alt：沿用 OnTestKeyDown 那一发的回包（宿主跳过 test 时才在这里转发）。
-    {
-        BOOL altEaten = FALSE;
-        if (_TryForwardAlt(wParam, lParam, KEY_EVENT_DOWN, FALSE, &altEaten))
-        {
-            *pfEaten = altEaten;
-            return S_OK;
-        }
-    }
 
     // 英文自动配对**不再在此本地处理**：OnTestKeyDown 已按 `PairEngine::ShouldEat` 吃下配对键，
     // 这里直接落到下方的 `_SendKeyToService`，由 core 出字 + 记栈（与「英半自定义标点」同一条路）。
@@ -1760,8 +1734,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
-    if (wind::altkey::MapAltVk(wParam, lParam) == 0)
-        _altReply.Clear();
+
+    // 屏蔽键一律放行（见 OnTestKeyDown）。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
 
     // 合成提交触发键的 keyup 半程：down 已经在 OnTestKeyDown/OnKeyDown 里处理完毕，
     // 这里只需干净吃掉，不流入下面任何 keyup 逻辑（toggle/CapsLock 判据……）。
@@ -1805,17 +1781,6 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
         _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
     }
 
-    // 组字中的 Alt 松开：转发给服务，回包 Consumed 才吃（没吃的松开会激活宿主菜单栏）。
-    // 没吃就继续往下走，配对待执行时照旧由下面吃掉。
-    {
-        BOOL altEaten = FALSE;
-        if (_TryForwardAlt(wParam, lParam, KEY_EVENT_UP, TRUE, &altEaten) && altEaten)
-        {
-            *pfEaten = TRUE;
-            return S_OK;
-        }
-    }
-
     // Intercept modifier release if we have a pending auto-pair action
     if (_pendingPairAction.active)
     {
@@ -1854,6 +1819,10 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
 {
     *pfEaten = FALSE;
 
+    // 屏蔽键一律放行（见 OnTestKeyDown）。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
+
     // 合成提交键（VK_ASYNC_COMMIT_TRIGGER）的 keyup 半程：已在 OnTestKeyUp 里吃过，这里
     // 直接放行返回，避免它被下面 direct_commit / auto-pair / 修饰键状态机等逻辑误当成
     // 真实按键处理——注意与下一行注释里的「顶码触发键」不是同一个概念，只是恰好同名字。
@@ -1884,13 +1853,6 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
 
     // Update modifier state machine for this KeyUp event
     _UpdateModsOnKeyUp(wParam);
-
-    // 组字中的 Alt 松开：沿用 OnTestKeyUp 那一发的回包。不 return：配对待执行要等修饰键全松开。
-    {
-        BOOL altEaten = FALSE;
-        if (_TryForwardAlt(wParam, lParam, KEY_EVENT_UP, FALSE, &altEaten) && altEaten)
-            *pfEaten = TRUE;
-    }
 
     // Execute pending auto-pair action when all modifiers are released
     if (_pendingPairAction.active && !_AreModifiersHeld())
@@ -2284,8 +2246,6 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     // 返回值是「这个键要不要交还宿主」：服务端没收到，或响应是交还类（GivesBackToHost）。
     // 系统热键已把原键吃下，交还只能由调用方注入（见 TextService WndProc 与
     // CandidateHotkeyPolicy.h 的 OnHotkeyDispatched）。
-    // Alt+数字这类组合不经 OnTestKeyDown：在这里记进 Alt 按住期间的粘滞修饰位。
-    _altHold.NoteKey(vk, mods);
     if (!_SendKeyToService(vk, mods, KEY_EVENT_DOWN))
     {
         WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);
@@ -2303,56 +2263,6 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     _pendingReplayToHost = FALSE;
     _inHotkeyDispatch = prevInHotkeyDispatch;
     return wind::candhotkey::GivesBackToHost(responseType) ? TRUE : FALSE;
-}
-
-// 组字中 Alt 的按下 / 松开转发给服务切换注释态，吃不吃看回包（只有 Consumed 才吃：
-// 没吃的单独 Alt 松开会激活宿主菜单栏，组字外必须照常放行）。
-// 吃键决策在 OnTest* 就要定，故在那里同步转发；OnKey* 沿用同一发的回包——Chrome 一类
-// 宿主不吃也照调 OnKey*，重发会让服务端把一次按放看成两次。
-BOOL CKeyEventSink::_TryForwardAlt(WPARAM wParam, LPARAM lParam, uint8_t eventType, BOOL inTest, BOOL* pEaten)
-{
-    const uint32_t altVk = wind::altkey::MapAltVk(wParam, lParam);
-    if (altVk == 0)
-        return FALSE;
-    const bool isDown = (eventType == KEY_EVENT_DOWN);
-
-    bool cached = false;
-    if (_altReply.TryReuse(inTest != FALSE, eventType, &cached))
-    {
-        *pEaten = cached ? TRUE : FALSE;
-        return TRUE;
-    }
-
-    const bool composing = _HasInputSession() != FALSE;
-    bool forward;
-    if (isDown)
-    {
-        forward = wind::altkey::ShouldForwardAlt(composing);
-        _altHold.OnAltDown(wind::altkey::IsRepeat(lParam), forward);
-    }
-    else
-    {
-        forward = _altHold.ShouldForwardUp(composing);
-    }
-    if (!forward)
-    {
-        if (!isDown)
-            _altHold.OnAltUp();
-        return FALSE;
-    }
-
-    const uint32_t mods = CHotkeyManager::GetCurrentModifiers() | _altHold.StickyMods();
-    if (!isDown)
-        _altHold.OnAltUp();
-    BOOL eaten = FALSE;
-    if (_SendKeyToService(altVk, mods, eventType))
-        eaten = _HandleServiceResponse();
-    WIND_LOG_DEBUG_FMT(L"comment_alt %ls: vk=0x%02X mods=0x%04X eaten=%d\n",
-                       isDown ? L"down" : L"up", altVk, mods, eaten ? 1 : 0);
-    if (inTest)
-        _altReply.Store(eventType, eaten != FALSE);
-    *pEaten = eaten;
-    return TRUE;
 }
 
 BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType)
