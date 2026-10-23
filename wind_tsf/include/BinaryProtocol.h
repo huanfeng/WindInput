@@ -165,6 +165,10 @@ constexpr uint16_t CMD_HOST_RENDER_REQUEST = 0x0501; // DLL requests host render
 // ============================================================================
 constexpr uint8_t KEY_EVENT_DOWN = 0;
 constexpr uint8_t KEY_EVENT_UP   = 1;
+// 候选窗显示时 Ctrl 的如实上报（按下 / 松开），单击由服务端判。按下那一刻有输入会话才走这条，
+// 一次按住只走一条路（见 protocol.rs 的 EVENT_MOD_DOWN）。旧 core 对未知类型放行，混搭安全。
+constexpr uint8_t KEY_EVENT_MOD_DOWN = 0x02;
+constexpr uint8_t KEY_EVENT_MOD_UP   = 0x03;
 
 // ============================================================================
 // Toggle key state flags (for KeyPayload.toggles)
@@ -186,6 +190,9 @@ constexpr uint8_t TOGGLE_SCROLLLOCK = 0x04; // ScrollLock is on
 // 标点键、字母数字全透传，服务端既无按键事件也无编码缓冲，只能靠 DLL 如实上报这个事实。
 // 与 _lastPassthroughDigit 同一分工：**DLL 报事实，服务端持策略**。
 constexpr uint8_t TOGGLE_PASSTHROUGH_KEY = 0x08;
+
+// KEY_EVENT_MOD_UP 上：这次按住期间平台看见过服务端看不见的输入（透传的组合键、鼠标），不算单击。
+constexpr uint8_t TOGGLE_MOD_NOT_TAP = 0x10;
 
 // ============================================================================
 // Modifier flags for KeyHash encoding (high 16 bits)

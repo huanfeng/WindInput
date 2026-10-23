@@ -296,6 +296,17 @@ detail_horizontal = "inherit"
 - 配置拆成两键（未发布，直接改名，不兼容 `alt_switch`）：
   - `ui.comment.switch_key`：`ctrl`（**出厂**，左右任一）/ `lctrl` / `rctrl` / `alt` / `lalt` / `ralt`；
   - `ui.comment.switch_mode`：`off` / `session`（出厂）/ `persist` / `hold`，语义同 §4 原四档。
+- 按住（`hold`）Alt / Ctrl 都可用：按下切换键立即翻转、松开恢复（按得多久、期间按没按别的键都恢复）；
+  按住期间按组合键（Ctrl+C、Ctrl+数字）注释会闪一下，接受。按住期间候选窗关了，翻转随之清掉，不残留。
+- Ctrl 的上报（三端一致）：**按下那一刻**有输入会话（组字中或候选窗开着），平台就把这次 Ctrl（左右分开，
+  0xA2 / 0xA3）的按下与松开如实上报（新事件类型 `EVENT_MOD_DOWN` / `EVENT_MOD_UP`），与切换键、切换方式
+  无关，平台不吃 Ctrl；松开带 `TOGGLE_MOD_NOT_TAP` 表示平台看见过服务端看不见的输入（透传的组合键、鼠标）。
+  否则维持原「平台本地判单击、只报确认过的松开」。一次按住只走一条路（按下时定，松开时不再看会话），
+  不会两边各报一次。旧 core 对未知事件类型放行，新 DLL 配旧 core 不会误切。
+- 服务端统一判 Ctrl 单击：按下建 track，其间任何别的键（含 `WM_HOTKEY` 送来的 Ctrl+数字）弄脏，
+  松开时干净且 ≤500ms 才算；判出单击再按原「确认过的松开」走 keyup 分支，中英切换键、`session_actions`
+  的 lctrl / rctrl、`lrctrl` 选词照旧优先，且同样只在单击时触发。TSF 的 `DispatchHotkey` 也作废待判单击
+  （候选窗不显示那条旧路的 Ctrl+数字误判单击一并修好）。
 - 功能键（F1 等）不进切换键：按键绑定里绑 `comment_state` / `comment_state:session` 已能做到。
 - 选了 Alt 的 Windows 用户才装全局低级键盘钩子（与 CapsLock 绑定同一套线程与投递约束）：
   钩子判单击、在 Alt 松开前补一个无含义的屏蔽键压住菜单栏；不选 Alt 时进程里没有这个钩子。

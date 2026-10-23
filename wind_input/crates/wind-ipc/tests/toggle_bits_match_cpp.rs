@@ -48,6 +48,10 @@ fn toggle_bits_agree_with_cpp_header() {
             "TOGGLE_PASSTHROUGH_KEY",
             wind_ipc::protocol::TOGGLE_PASSTHROUGH_KEY,
         ),
+        ("TOGGLE_MOD_NOT_TAP", wind_ipc::protocol::TOGGLE_MOD_NOT_TAP),
+        // 事件类型同理：新类型对不上 = Ctrl 如实上报整条静默失效。
+        ("KEY_EVENT_MOD_DOWN", wind_ipc::protocol::EVENT_MOD_DOWN),
+        ("KEY_EVENT_MOD_UP", wind_ipc::protocol::EVENT_MOD_UP),
     ];
     for (name, rust_val) in cases {
         let cpp_val = constexpr_u8(&src, name)
@@ -72,5 +76,24 @@ fn passthrough_bit_does_not_collide_with_lock_bits() {
     for lock in ["TOGGLE_CAPSLOCK", "TOGGLE_NUMLOCK", "TOGGLE_SCROLLLOCK"] {
         let v = constexpr_u8(&src, lock).unwrap_or_else(|| panic!("缺 {lock}"));
         assert_eq!(pass & v, 0, "TOGGLE_PASSTHROUGH_KEY 与 {lock} 位重叠");
+    }
+}
+
+/// 「不算单击」位同样不得撞锁定态位与透传位。
+#[test]
+fn mod_not_tap_bit_does_not_collide() {
+    let Some(src) = header() else {
+        eprintln!("跳过 toggles 位互斥检查：找不到 BinaryProtocol.h");
+        return;
+    };
+    let bit = constexpr_u8(&src, "TOGGLE_MOD_NOT_TAP").expect("缺 TOGGLE_MOD_NOT_TAP");
+    for other in [
+        "TOGGLE_CAPSLOCK",
+        "TOGGLE_NUMLOCK",
+        "TOGGLE_SCROLLLOCK",
+        "TOGGLE_PASSTHROUGH_KEY",
+    ] {
+        let v = constexpr_u8(&src, other).unwrap_or_else(|| panic!("缺 {other}"));
+        assert_eq!(bit & v, 0, "TOGGLE_MOD_NOT_TAP 与 {other} 位重叠");
     }
 }

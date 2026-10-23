@@ -7,7 +7,7 @@ use super::*;
 // 本模块自己导入，**不挂到 `coordinator.rs` 的那条 use 上**：那个文件是多方共同修改的热点，
 // 往它的 import 行搭一笔会让本功能的提交与别人的改动绑在同一个 hunk 上。
 use wind_config::app_compat::NewlineStyle;
-use wind_ipc::protocol::TOGGLE_PASSTHROUGH_KEY;
+use wind_ipc::protocol::{EVENT_MOD_DOWN, EVENT_MOD_UP, TOGGLE_PASSTHROUGH_KEY};
 
 impl Coordinator {
     /// 光标前最后一段已不是我们上屏的那段（宿主自己出了字、重放了键，或用户挪了光标）：撤销上屏
@@ -1004,6 +1004,11 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_key_event(&self, data: &KeyEventData) -> KeyAction {
+        // 候选显示时如实上报的 Ctrl 按下 / 松开：服务端判单击，判出来再以原样的松开重进本函数
+        // （所以排在一切之前，也不经下面的统计 / 打字节奏 / 软键盘推送）。
+        if matches!(data.event_type, EVENT_MOD_DOWN | EVENT_MOD_UP) {
+            return self.handle_ctrl_raw(data);
+        }
         // 软键盘状态若在本次按键中变了，返回前推给 C++（吃键判定要用）。**声明在最开头**
         // 是必需的：局部变量逆序析构 ⇒ 它最后走 ⇒ 那时 `state` 的 MutexGuard 已经还了。
         let _sk_push = crate::handle_softkeyboard::SoftKeyboardPushOnDrop(self);
@@ -1011,12 +1016,18 @@ impl MessageHandler for Coordinator {
         if keymap::is_alt_vk(data.key_code)
             && matches!(data.event_type, EVENT_KEY_DOWN | EVENT_KEY_UP)
         {
+            if data.event_type == EVENT_KEY_DOWN {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                crate::comment_switch::on_other_ctrl_key(&mut st.ctrl_track);
+            }
             return self.handle_comment_alt(data);
         }
-        // 按住 Alt 期间的别的键：照常处理完再收起详细态。声明位置的理由同 `_sk_push`。
+        // 按住切换键期间的别的键：照常处理完再收起详细态。声明位置的理由同 `_sk_push`。
+        // 同时弄脏 Alt / Ctrl 的单击判定（含 `WM_HOTKEY` 送来的 Ctrl+数字）。
         let _hold_off = if data.event_type == EVENT_KEY_DOWN {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             crate::comment_switch::on_other_key(&mut st.alt_track);
+            crate::comment_switch::on_other_ctrl_key(&mut st.ctrl_track);
             st.comment_hold_flip
                 .then(|| crate::comment::HoldOffOnDrop(self))
         } else {

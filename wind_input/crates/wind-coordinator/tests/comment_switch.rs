@@ -1,7 +1,8 @@
 //! 组字中单击切换键（`ui.comment.switch_key`）切换注释详细态（`ui.comment.switch_mode`）端到端。
 //!
 //! - Alt：平台层只在组字中转发 Alt 的按下与松开（`0xA4` / `0xA5`，不带修饰位），吃不吃由返回值定。
-//! - Ctrl：平台只送判过单击的松开（`0xA2` / `0xA3`；TSF 带 Ctrl 位，mac / Linux 不带）。
+//! - Ctrl：按下时有输入会话，平台如实上报按下与松开（`EVENT_MOD_DOWN` / `EVENT_MOD_UP`），服务端判单击；
+//!   否则平台只送判过单击的松开（`0xA2` / `0xA3`；TSF 带 Ctrl 位，mac / Linux 不带）。
 //!   撞键时中英切换、选词键组、会话绑定优先。
 //! 期望注释取自出厂分配：码表 默认=`code_hint`、详细=`chaizi_pinyin`，同 `comment_state.rs`。
 //!
@@ -15,7 +16,8 @@ use wind_config::Config;
 use wind_config::comment_lib::{CommentState, SwitchKey, SwitchMode};
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{
-    EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, MOD_CTRL, MOD_LCTRL, MOD_RCTRL, MOD_SHIFT, caret_source,
+    EVENT_KEY_DOWN, EVENT_KEY_UP, EVENT_MOD_DOWN, EVENT_MOD_UP, MOD_ALT, MOD_CTRL, MOD_LCTRL,
+    MOD_RCTRL, MOD_SHIFT, TOGGLE_MOD_NOT_TAP, caret_source,
 };
 use wind_ui_types::{CandidateItem, UiCommand};
 
@@ -90,6 +92,43 @@ fn tsf_ctrl_up(vk: u32) -> KeyEventData {
         MOD_RCTRL
     };
     ev(vk, MOD_CTRL | side, EVENT_KEY_UP)
+}
+
+fn ctrl_mods(vk: u32) -> u32 {
+    MOD_CTRL
+        | if vk == VK_LCONTROL {
+            MOD_LCTRL
+        } else {
+            MOD_RCTRL
+        }
+}
+
+/// 如实上报的 Ctrl 按下 / 松开（三端同形：修饰位带 Ctrl 与左右位）。
+fn raw_down(vk: u32) -> KeyEventData {
+    ev(vk, ctrl_mods(vk), EVENT_MOD_DOWN)
+}
+
+fn raw_up(vk: u32) -> KeyEventData {
+    ev(vk, ctrl_mods(vk), EVENT_MOD_UP)
+}
+
+/// 平台报「看见过别的输入」的松开（透传给宿主的 Ctrl+C、Ctrl+点击）。
+fn raw_up_not_tap(vk: u32) -> KeyEventData {
+    KeyEventData {
+        toggles: TOGGLE_MOD_NOT_TAP,
+        ..raw_up(vk)
+    }
+}
+
+/// `WM_HOTKEY` 送来的 Ctrl+数字（置顶）：普通 keydown，不经 TSF 按键回调。
+fn hotkey_ctrl_digit(digit: u32) -> KeyEventData {
+    ev(digit, MOD_CTRL | MOD_LCTRL, EVENT_KEY_DOWN)
+}
+
+fn raw_tap(c: &Coordinator, vk: u32) -> KeyAction {
+    let act = c.handle_key_event_policed(&raw_down(vk));
+    assert!(is_consumed(&act), "如实上报的按下回 Consumed，实得 {act:?}");
+    c.handle_key_event_policed(&raw_up(vk))
 }
 
 fn open(cfg: Config) -> (Arc<Coordinator>, Receiver<UiCommand>) {
@@ -380,7 +419,7 @@ fn ctrl_config_ignores_alt() {
         return;
     }
     let mut hold = ctrl_cfg();
-    // 按住档配 Ctrl 降为单击档，Alt 照样不认。
+    // 按住档配 Ctrl，Alt 照样不认。
     hold.ui.comment.switch_mode = SwitchMode::Hold;
     for cfg in [ctrl_cfg(), hold] {
         let (c, _rx) = typed_gg(cfg);
@@ -532,4 +571,241 @@ fn ctrl_yields_to_lrctrl_select_group() {
         other => panic!("lctrl 应选二候选，实得 {other:?}"),
     }
     assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+// ── Ctrl 如实上报（候选显示时）──
+
+#[test]
+fn raw_ctrl_tap_toggles_session() {
+    if !has_schemas() {
+        return;
+    }
+    let (c, rx) = typed_gg(ctrl_cfg());
+    let act = raw_tap(&c, VK_LCONTROL);
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert_eq!(
+        last_pushed(&rx).as_deref(),
+        Some(&GG_DETAIL.map(String::from)[..]),
+        "松开应当场重绘为详细"
+    );
+    raw_tap(&c, VK_RCONTROL);
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+#[test]
+fn raw_ctrl_long_press_does_not_toggle() {
+    if !has_schemas() {
+        return;
+    }
+    let (c, _rx) = typed_gg(ctrl_cfg());
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    std::thread::sleep(std::time::Duration::from_millis(550));
+    let act = c.handle_key_event(&raw_up(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+/// Ctrl+C 在服务端看不见（透传给宿主）：平台在松开上报 `TOGGLE_MOD_NOT_TAP`。
+#[test]
+fn raw_ctrl_c_passthrough_does_not_toggle() {
+    if !has_schemas() {
+        return;
+    }
+    let (c, _rx) = typed_gg(ctrl_cfg());
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    let act = c.handle_key_event(&raw_up_not_tap(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+/// Ctrl+C 送到了服务端（清掉组合交还宿主）：服务端自己记账，之后的松开不算单击——
+/// lctrl 兼作中英切换键时不顺带切英文。
+#[test]
+fn raw_ctrl_c_seen_by_service_is_not_tap() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = ctrl_cfg();
+    cfg.keys.toggle_mode_keys = vec!["lctrl".into()];
+    let (c, _rx) = typed_gg(cfg);
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    c.handle_key_event_policed(&ev(0x43, MOD_CTRL | MOD_LCTRL, EVENT_KEY_DOWN));
+    assert_eq!(c.debug_candidate_count(), 0, "前置条件：Ctrl+C 清了组合");
+    let act = c.handle_key_event(&raw_up(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert!(c.is_chinese_mode(), "Ctrl+C 之后的松开不切中英");
+}
+
+/// 原漏洞：Ctrl+数字走 `WM_HOTKEY`，TSF 的待判单击作废不了。服务端判定下它弄脏 track。
+#[test]
+fn raw_ctrl_digit_via_hotkey_does_not_toggle() {
+    if !has_schemas() {
+        return;
+    }
+    let (c, _rx) = typed_gg(ctrl_cfg());
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    c.handle_key_event_policed(&hotkey_ctrl_digit(0x31));
+    let act = c.handle_key_event(&raw_up(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+#[test]
+fn raw_ctrl_tap_keeps_toggle_mode_priority() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = ctrl_cfg();
+    cfg.keys.toggle_mode_keys = vec!["lctrl".into()];
+    // Ctrl+1 不切中英。
+    let (c, _rx) = typed_gg(cfg.clone());
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    c.handle_key_event_policed(&hotkey_ctrl_digit(0x31));
+    c.handle_key_event(&raw_up(VK_LCONTROL));
+    assert!(c.is_chinese_mode(), "Ctrl+1 之后的松开不是单击");
+    // 单击照切，且注释不切（中英切换优先）。
+    let (c, _rx) = typed_gg(cfg);
+    let act = raw_tap(&c, VK_LCONTROL);
+    assert!(
+        !c.is_chinese_mode(),
+        "有候选时 lctrl 单击仍切英文，实得 {act:?}"
+    );
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+#[test]
+fn raw_ctrl_tap_keeps_commit_code_binding() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = ctrl_cfg();
+    cfg.keys
+        .session_actions
+        .insert("lctrl".into(), "commit_code".into());
+    let (c, _rx) = typed_gg(cfg);
+    match raw_tap(&c, VK_LCONTROL) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "gg"),
+        other => panic!("lctrl 单击应上屏编码，实得 {other:?}"),
+    }
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+#[test]
+fn raw_ctrl_tap_keeps_lrctrl_select_group() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = ctrl_cfg();
+    cfg.keys.select_key_groups = vec!["lrctrl".into()];
+    let (c, _rx) = typed_gg(cfg.clone());
+    let second = c.debug_page_texts()[1].clone();
+    match raw_tap(&c, VK_LCONTROL) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, second),
+        other => panic!("lctrl 单击应选二候选，实得 {other:?}"),
+    }
+    // 长按 / 组合键不选。
+    let (c, _rx) = typed_gg(cfg);
+    let before = c.debug_page_texts();
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    let act = c.handle_key_event(&raw_up_not_tap(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert_eq!(c.debug_page_texts(), before, "候选未动");
+}
+
+#[test]
+fn raw_ctrl_hold_flips_on_down_restores_on_up() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = ctrl_cfg();
+    cfg.ui.comment.switch_mode = SwitchMode::Hold;
+    let (c, rx) = typed_gg(cfg);
+    let act = c.handle_key_event(&raw_down(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert_eq!(
+        last_pushed(&rx).as_deref(),
+        Some(&GG_DETAIL.map(String::from)[..]),
+        "按下即显示详细"
+    );
+    // 按得再久，松开也恢复；单击判定不另切。
+    std::thread::sleep(std::time::Duration::from_millis(550));
+    c.handle_key_event(&raw_up(VK_LCONTROL));
+    assert_eq!(
+        last_pushed(&rx).as_deref(),
+        Some(&GG_DEFAULT.map(String::from)[..]),
+        "松开当场重绘回默认"
+    );
+    // 短按同样：按下翻、松开回，不留 session 翻转。
+    raw_tap(&c, VK_RCONTROL);
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+#[test]
+fn raw_ctrl_hold_combo_restores() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = ctrl_cfg();
+    cfg.ui.comment.switch_mode = SwitchMode::Hold;
+    let (c, _rx) = typed_gg(cfg);
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+    c.handle_key_event_policed(&hotkey_ctrl_digit(0x31));
+    c.handle_key_event(&raw_up_not_tap(VK_LCONTROL));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+/// 按住期间候选窗关了（Esc 取消）：不残留翻转，下一次组字仍是默认态。
+#[test]
+fn raw_ctrl_hold_window_closed_leaves_no_flip() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = ctrl_cfg();
+    cfg.ui.comment.switch_mode = SwitchMode::Hold;
+    let (c, rx) = typed_gg(cfg);
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+    c.handle_key_event(&down(0x1B));
+    assert_eq!(c.debug_candidate_count(), 0, "前置条件：候选窗已关");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+    // 松开在关窗之后到：照样收起、不切。
+    let act = c.handle_key_event(&raw_up(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    type_str(&c, "gg");
+    assert_eq!(comments(&c, &rx), GG_DEFAULT, "新一次组字是默认态");
+}
+
+/// 松开丢了（失焦）：下一次按下重新起算，不被残留拖成长按。
+#[test]
+fn raw_ctrl_lost_up_then_fresh_tap() {
+    if !has_schemas() {
+        return;
+    }
+    let (c, _rx) = typed_gg(ctrl_cfg());
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    c.handle_key_event_policed(&hotkey_ctrl_digit(0x31));
+    // 松开没送到；过一会儿重新单击。
+    std::thread::sleep(std::time::Duration::from_millis(550));
+    raw_tap(&c, VK_LCONTROL);
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+}
+
+/// 一次按住只走一条路：如实上报的这次按住之后，服务端不会再从别处收到同一下的松开；
+/// 反过来，没走如实上报的按住（按下时无会话）只送确认过的松开。服务端两条各自成立。
+#[test]
+fn raw_and_legacy_paths_are_independent() {
+    if !has_schemas() {
+        return;
+    }
+    let (c, _rx) = typed_gg(ctrl_cfg());
+    // 确认过的松开不碰如实上报的 track：先有一次组合键弄脏的按住……
+    c.handle_key_event(&raw_down(VK_LCONTROL));
+    c.handle_key_event_policed(&hotkey_ctrl_digit(0x31));
+    c.handle_key_event(&raw_up(VK_LCONTROL));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+    // ……之后旧路的一次单击照常切。
+    let act = c.handle_key_event(&tsf_ctrl_up(VK_LCONTROL));
+    assert!(is_consumed(&act), "实得 {act:?}");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
 }

@@ -63,15 +63,6 @@ pub enum SwitchMode {
     Hold,
 }
 
-/// 有效切换方式：按住只配 Alt，`hold` + Ctrl 系按 `session` 处理。
-pub fn effective_mode(key: SwitchKey, mode: SwitchMode) -> SwitchMode {
-    if mode == SwitchMode::Hold && !key.is_alt() {
-        SwitchMode::Session
-    } else {
-        mode
-    }
-}
-
 /// 命名模板。`id` 只含 `[a-z0-9_]`，`name` 是显示名。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -840,24 +831,6 @@ mod tests {
             toml::from_str("switch_key = \"bogus\"\nswitch_mode = \"nope\"").unwrap();
         assert_eq!(c.switch_key, SwitchKey::Ctrl);
         assert_eq!(c.switch_mode, SwitchMode::Session);
-    }
-
-    #[test]
-    fn hold_with_ctrl_degrades_to_session() {
-        for k in [SwitchKey::Ctrl, SwitchKey::LCtrl, SwitchKey::RCtrl] {
-            assert_eq!(effective_mode(k, SwitchMode::Hold), SwitchMode::Session);
-        }
-        for k in [SwitchKey::Alt, SwitchKey::LAlt, SwitchKey::RAlt] {
-            assert_eq!(effective_mode(k, SwitchMode::Hold), SwitchMode::Hold);
-        }
-        assert_eq!(
-            effective_mode(SwitchKey::Ctrl, SwitchMode::Persist),
-            SwitchMode::Persist
-        );
-        assert_eq!(
-            effective_mode(SwitchKey::Ctrl, SwitchMode::Off),
-            SwitchMode::Off
-        );
     }
 
     #[test]

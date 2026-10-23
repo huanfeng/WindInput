@@ -695,9 +695,10 @@ impl Compiler {
 
         // ── KeyUp：注释切换键（`ui.comment.switch_key` 选 Ctrl 系）──
         //
-        // TSF 判过单击才转发 Ctrl 的松开，不登记就收不到。TSF 对修饰键 keyup 不看 SESSION 位：
-        // 有文本上下文就记待判、两向都不吃，无候选时服务端回 PassThrough。已被上面登记过的键
-        // 不再追加——那些功能优先，键本来就会送到。
+        // 候选显示时 TSF 无条件如实上报 Ctrl（`EVENT_MOD_*`），用不着这条；它是 TSF 判无会话、
+        // 服务端却有候选时的退路：TSF 判过单击才转发 Ctrl 的松开，不登记就收不到。TSF 对修饰键
+        // keyup 不看 SESSION 位：有文本上下文就记待判、两向都不吃，无候选时服务端回 PassThrough。
+        // 已被上面登记过的键不再追加——那些功能优先，键本来就会送到。
         for hash in comment_switch_key_up_hashes(&self.config.ui.comment) {
             if result.key_up.iter().any(|e| e.match_hash == hash) {
                 continue;

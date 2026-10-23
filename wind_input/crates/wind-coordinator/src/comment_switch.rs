@@ -3,7 +3,9 @@
 //! - mac / Linux 的 Alt：平台层只在组字中转发 Alt 的按下与松开，不做计时；吃不吃由这里的 [`SwitchOutcome`] 定。
 //! - Windows 的 Alt：TSF 收不到单独 Alt 的按下，改由服务进程的全局低级键盘钩子判单击 / 按住
 //!   （`wind_keys::alt_tap`），这里只把它投来的事件折成动作，见 [`on_hook_alt`]。
-//! - Ctrl：平台只送判过单击的松开（TSF 走 keyup 白名单，mac / Linux 无条件送），见 [`on_ctrl_up`]。
+//! - Ctrl：按下那一刻有输入会话，平台就如实上报这次按下与松开（`EVENT_MOD_DOWN` / `EVENT_MOD_UP`），
+//!   单击由这里判（[`on_ctrl_raw_down`] / [`on_ctrl_raw_up`]），判出单击再按原「确认过的松开」交给
+//!   中英切换、选词、会话绑定等原有消费者；没有会话时平台照旧只送判过单击的松开，见 [`on_ctrl_up`]。
 //!
 //! 判定是纯函数，时刻由调用方传入，便于测出长按、组合键等分支。
 
@@ -54,7 +56,7 @@ pub(crate) fn is_ctrl_vk(vk: u32) -> bool {
     matches!(vk, 0xA2 | 0xA3)
 }
 
-/// Ctrl 单击的松开（平台已判过单击）。按住档在调用前已由 `effective_mode` 降为单击档。
+/// Ctrl 单击的松开（平台已判过单击，或 [`on_ctrl_raw_up`] 判出的单击）。按住档在按下 / 松开时已处理，这里不动。
 pub(crate) fn on_ctrl_up(mode: SwitchMode, has_candidates: bool, combo: bool) -> SwitchEffect {
     if !has_candidates || combo {
         return SwitchEffect::None;
@@ -63,6 +65,73 @@ pub(crate) fn on_ctrl_up(mode: SwitchMode, has_candidates: bool, combo: bool) ->
         SwitchMode::Session => SwitchEffect::ToggleSession,
         SwitchMode::Persist => SwitchEffect::TogglePersist,
         SwitchMode::Off | SwitchMode::Hold => SwitchEffect::None,
+    }
+}
+
+/// 如实上报的 Ctrl 自按下起的追踪：哪一侧、按下时刻、期间是否按过别的键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CtrlTrack {
+    pub vk: u32,
+    pub down_at: Instant,
+    pub dirty: bool,
+}
+
+/// 如实上报的 Ctrl 按下：同侧且没弄脏的 track 视作自动连发，保留首次按下的时刻；否则重新起算
+/// （另一侧 Ctrl 还按着时换成这一侧，那一侧的松开就找不到 track，不算单击）。`combo` = 按下时
+/// 已带别的修饰位（Shift / Alt / Win）。
+pub(crate) fn on_ctrl_raw_down(track: &mut Option<CtrlTrack>, vk: u32, combo: bool, now: Instant) {
+    let repeat = track.is_some_and(|t| t.vk == vk && !t.dirty);
+    if !repeat {
+        *track = Some(CtrlTrack {
+            vk,
+            down_at: now,
+            dirty: false,
+        });
+    }
+    if combo {
+        on_other_ctrl_key(track);
+    }
+}
+
+/// 如实上报的 Ctrl 松开：是不是单击。干净（期间没有别的键、平台也没报 `not_tap`）、同侧且按住
+/// 不超过 [`ALT_TAP_MAX`] 才算；没有 track（按下没送到）不算。无论结果都清掉 track。
+pub(crate) fn on_ctrl_raw_up(
+    track: &mut Option<CtrlTrack>,
+    vk: u32,
+    not_tap: bool,
+    now: Instant,
+) -> bool {
+    let Some(t) = track.take() else {
+        return false;
+    };
+    t.vk == vk && !t.dirty && !not_tap && now.saturating_duration_since(t.down_at) <= ALT_TAP_MAX
+}
+
+/// 按住 Ctrl 期间来了别的键（含 `WM_HOTKEY` 送来的 Ctrl+数字）：之后的松开不算单击。
+pub(crate) fn on_other_ctrl_key(track: &mut Option<CtrlTrack>) {
+    if let Some(t) = track {
+        t.dirty = true;
+    }
+}
+
+/// 按住档的 Ctrl：按下立即翻转（要有候选），松开一律收起（哪怕期间上屏关了窗、按得太久、
+/// 中途改了档位），别让翻转卡住。切换键不是这一侧的 Ctrl → 不动。
+pub(crate) fn ctrl_hold_effect(
+    mode: SwitchMode,
+    key_matches: bool,
+    has_candidates: bool,
+    is_down: bool,
+) -> SwitchEffect {
+    if !key_matches {
+        return SwitchEffect::None;
+    }
+    if !is_down {
+        return SwitchEffect::HoldOff;
+    }
+    if mode == SwitchMode::Hold && has_candidates {
+        SwitchEffect::HoldOn
+    } else {
+        SwitchEffect::None
     }
 }
 
@@ -138,7 +207,7 @@ pub(crate) fn on_hook_alt(
 }
 
 /// 钩子的 Alt 闸门值（`wind_keys::alt_tap::GATE_*`）：切换键不是 Alt 系或已关 → 0。
-/// `mode` 是已按 [`wind_config::comment_lib::effective_mode`] 折算、注释总开关也算进去的那个。
+/// `mode` 是注释总开关也算进去的那个（关了即 `Off`）。
 pub(crate) fn alt_gate_mask(key: wind_config::comment_lib::SwitchKey, mode: SwitchMode) -> u32 {
     use wind_keys::alt_tap::{GATE_HOLD, GATE_LEFT, GATE_RIGHT};
     if mode == SwitchMode::Off || !key.is_alt() {
@@ -396,5 +465,141 @@ mod tests {
             t0 + Duration::from_millis(600),
         );
         assert_eq!(up, (O::PassThrough, E::None), "连发不重置计时");
+    }
+
+    // ── Ctrl 如实上报 ──
+
+    fn ctrl_press(
+        held_ms: u64,
+        between: impl FnOnce(&mut Option<CtrlTrack>),
+        not_tap: bool,
+    ) -> bool {
+        let t0 = Instant::now();
+        let mut track = None;
+        on_ctrl_raw_down(&mut track, 0xA2, false, t0);
+        between(&mut track);
+        let tap = on_ctrl_raw_up(
+            &mut track,
+            0xA2,
+            not_tap,
+            t0 + Duration::from_millis(held_ms),
+        );
+        assert!(track.is_none(), "松开后清掉 track");
+        tap
+    }
+
+    #[test]
+    fn ctrl_raw_clean_short_press_is_tap() {
+        assert!(ctrl_press(100, |_| {}, false));
+        assert!(ctrl_press(500, |_| {}, false), "500ms 恰在阈值内");
+    }
+
+    #[test]
+    fn ctrl_raw_long_press_is_not_tap() {
+        assert!(!ctrl_press(501, |_| {}, false));
+    }
+
+    #[test]
+    fn ctrl_raw_other_key_is_not_tap() {
+        // Ctrl+C / Ctrl+数字（WM_HOTKEY）送到服务端的那一键。
+        assert!(!ctrl_press(50, on_other_ctrl_key, false));
+    }
+
+    #[test]
+    fn ctrl_raw_platform_not_tap_flag() {
+        // 平台看见过服务端看不见的键或鼠标。
+        assert!(!ctrl_press(50, |_| {}, true));
+    }
+
+    #[test]
+    fn ctrl_raw_combo_modifier_at_down_is_not_tap() {
+        let t0 = Instant::now();
+        let mut track = None;
+        on_ctrl_raw_down(&mut track, 0xA2, true, t0);
+        assert!(!on_ctrl_raw_up(&mut track, 0xA2, false, t0));
+    }
+
+    #[test]
+    fn ctrl_raw_up_without_down_is_not_tap() {
+        let mut track = None;
+        assert!(!on_ctrl_raw_up(&mut track, 0xA2, false, Instant::now()));
+    }
+
+    #[test]
+    fn ctrl_raw_repeat_keeps_first_press_time() {
+        let t0 = Instant::now();
+        let mut track = None;
+        on_ctrl_raw_down(&mut track, 0xA2, false, t0);
+        on_ctrl_raw_down(&mut track, 0xA2, false, t0 + Duration::from_millis(400));
+        assert!(
+            !on_ctrl_raw_up(&mut track, 0xA2, false, t0 + Duration::from_millis(600)),
+            "连发不重置计时"
+        );
+    }
+
+    #[test]
+    fn ctrl_raw_other_side_takes_over() {
+        let t0 = Instant::now();
+        let mut track = None;
+        on_ctrl_raw_down(&mut track, 0xA2, false, t0);
+        on_ctrl_raw_down(&mut track, 0xA3, false, t0);
+        assert!(
+            !on_ctrl_raw_up(&mut track, 0xA2, false, t0),
+            "左 Ctrl 的松开找不到 track"
+        );
+        on_ctrl_raw_down(&mut track, 0xA3, false, t0);
+        assert!(on_ctrl_raw_up(&mut track, 0xA3, false, t0));
+    }
+
+    #[test]
+    fn ctrl_raw_dirty_track_restarts_on_fresh_down() {
+        let t0 = Instant::now();
+        let mut track = None;
+        on_ctrl_raw_down(&mut track, 0xA2, false, t0);
+        on_other_ctrl_key(&mut track);
+        // 组合键之后松开没送到，2 秒后重新单击。
+        let t1 = t0 + Duration::from_secs(2);
+        on_ctrl_raw_down(&mut track, 0xA2, false, t1);
+        assert!(on_ctrl_raw_up(
+            &mut track,
+            0xA2,
+            false,
+            t1 + Duration::from_millis(80)
+        ));
+    }
+
+    #[test]
+    fn ctrl_hold_flips_on_down_and_always_restores() {
+        assert_eq!(
+            ctrl_hold_effect(SwitchMode::Hold, true, true, true),
+            E::HoldOn
+        );
+        assert_eq!(
+            ctrl_hold_effect(SwitchMode::Hold, true, false, true),
+            E::None,
+            "无候选不翻"
+        );
+        for mode in [SwitchMode::Hold, SwitchMode::Session, SwitchMode::Off] {
+            for cands in [true, false] {
+                assert_eq!(
+                    ctrl_hold_effect(mode, true, cands, false),
+                    E::HoldOff,
+                    "{mode:?}"
+                );
+            }
+        }
+        assert_eq!(
+            ctrl_hold_effect(SwitchMode::Session, true, true, true),
+            E::None
+        );
+        assert_eq!(
+            ctrl_hold_effect(SwitchMode::Hold, false, true, true),
+            E::None,
+            "另一侧"
+        );
+        assert_eq!(
+            ctrl_hold_effect(SwitchMode::Hold, false, true, false),
+            E::None
+        );
     }
 }

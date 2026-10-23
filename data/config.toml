@@ -1549,7 +1549,7 @@ state = "default"
 # 功能键（F1 等）不在此列，请在按键绑定里绑 comment_state。
 switch_key = "ctrl"
 # 切换方式：off 关闭 | session 本次候选窗内(出厂) | persist 写回配置 | hold 按住期间显示另一态
-# ⚠ hold 只配 Alt；与 Ctrl 系切换键同用时按 session 处理。
+# hold 按下切换键即翻转、松开恢复；按住期间按了别的键（如 Ctrl+C）注释会闪一下。
 switch_mode = "session"
 # 用户模板与分配写在 [[ui.comment.templates]] / [ui.comment.assign.*]，内置的见 system.comments.toml。
 # 旧版的 ui.candidate.comment_enabled、ui.candidate.comment_template_*、各模式的 comment_template_*

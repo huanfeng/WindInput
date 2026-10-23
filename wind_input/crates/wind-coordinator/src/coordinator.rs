@@ -711,10 +711,12 @@ pub(crate) struct State {
     /// 注释态的「仅本次候选窗」翻转：与持久态（`ui.comment.state`）异或得当前态。
     /// 候选窗关闭或被新组合替换即清：`cancel_session`、进出联想、顶码余码、顶屏进模式、`handle_key_event` 开头无会话时。
     pub(crate) comment_session_flip: bool,
-    /// 注释态的「按住 Alt」翻转：按住期间为真，与上面那份各自独立地异或。
+    /// 注释态的「按住切换键」翻转：按住期间为真，与上面那份各自独立地异或。
     pub(crate) comment_hold_flip: bool,
     /// Alt 单击 / 按住的判定中间态：`Some` = Alt 已按下、尚未松开。
     pub(crate) alt_track: Option<AltTrack>,
+    /// 如实上报的 Ctrl（`EVENT_MOD_DOWN`）单击判定中间态：`Some` = 已按下、尚未松开。
+    pub(crate) ctrl_track: Option<crate::comment_switch::CtrlTrack>,
     /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
     /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
     /// 右键、置顶删除就都不用知道筛选的存在。重建候选的几处（扩容、末页放宽）之后要重新套一次
@@ -3079,6 +3081,7 @@ impl Coordinator {
                 comment_session_flip: false,
                 comment_hold_flip: false,
                 alt_track: None,
+                ctrl_track: None,
                 grid_tab: wind_ui_types::GridTab::All,
                 grid_full: Vec::new(),
                 grid_tab_anchor: None,

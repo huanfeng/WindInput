@@ -1190,14 +1190,15 @@ impl crate::coordinator::Coordinator {
         Ok(())
     }
 
-    /// 失焦 / 切走输入法：Alt 松开多半送不到了，判定中间态与按住翻转一并复位。
+    /// 失焦 / 切走输入法：Alt / Ctrl 的松开多半送不到了，判定中间态与按住翻转一并复位。
     pub(crate) fn reset_comment_alt(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.alt_track = None;
+        state.ctrl_track = None;
         self.set_comment_hold(&mut state, false);
     }
 
-    /// 设「按住 Alt」翻转；变了且有候选才重绘。
+    /// 设「按住切换键」翻转；变了且有候选才重绘。
     pub(crate) fn set_comment_hold(&self, state: &mut State, on: bool) {
         if state.comment_hold_flip == on {
             return;
@@ -1208,10 +1209,10 @@ impl crate::coordinator::Coordinator {
         }
     }
 
-    /// 当前生效的切换方式：注释关了即 `Off`，按住档按切换键降级（见 `effective_mode`）。
+    /// 当前生效的切换方式：注释关了即 `Off`。
     fn comment_switch_mode(c: &wind_config::comment_lib::UiCommentConfig) -> SwitchMode {
         if c.enabled {
-            wind_config::comment_lib::effective_mode(c.switch_key, c.switch_mode)
+            c.switch_mode
         } else {
             SwitchMode::Off
         }
@@ -1357,9 +1358,9 @@ impl crate::coordinator::Coordinator {
     /// Ctrl 单击的松开（`key_code` 0xA2 / 0xA3）：切换键是这一侧的 Ctrl 且有候选 → 切换并吃掉；
     /// 否则 `None`，落回原语义。
     ///
-    /// 平台只送判过单击的松开：TSF 按 keyup 白名单（`comment_switch` 那条登记）转发，修饰位自带
-    /// Ctrl；mac / Linux 无条件送、修饰位为 0。keyup 分支里排在选词 / 会话绑定 / CapsLock /
-    /// 方案修饰键绑定 / 中英切换**之后**，撞键时那些功能优先。
+    /// 来源两条：平台判过单击送来的松开（没有输入会话时；TSF 按 keyup 白名单转发、修饰位自带 Ctrl，
+    /// mac / Linux 无条件送、修饰位为 0），或 [`Self::handle_ctrl_raw`] 判出单击后转成的松开。
+    /// keyup 分支里排在选词 / 会话绑定 / CapsLock / 方案修饰键绑定 / 中英切换**之后**，撞键时那些功能优先。
     pub(crate) fn handle_comment_ctrl_up(
         &self,
         data: &wind_bridge::handler::KeyEventData,
@@ -1384,6 +1385,77 @@ impl crate::coordinator::Coordinator {
         }
         self.apply_switch_effect(&mut state, effect);
         Some(wind_bridge::handler::KeyAction::Consumed)
+    }
+
+    /// 如实上报的 Ctrl 按下 / 松开（`EVENT_MOD_DOWN` / `EVENT_MOD_UP`，`key_code` 0xA2 / 0xA3）。
+    ///
+    /// 平台协议（三端一致）：按下那一刻有输入会话（组字中或候选窗开着），就把这次按下与松开原样
+    /// 送来、不吃 Ctrl，松开带上 `TOGGLE_MOD_NOT_TAP` 表示平台看见过服务端看不见的输入；否则走原
+    /// 「平台判单击、只送确认过的松开」。一次按住只走一条路。回包吃不吃平台不看。
+    ///
+    /// - 按下：建 track（[`crate::comment_switch::on_ctrl_raw_down`]）；按住档且切换键是这一侧 → 立即翻转。
+    /// - 松开：按住翻转一律收起；判出单击就构造一个原样的 `EVENT_KEY_UP` 走 keyup 分支，中英切换 /
+    ///   会话绑定 / 选词 / 方案修饰键绑定 / 注释单击的优先级与原来一字不差。
+    ///
+    /// 没人接手的一律回 `Consumed`：`PassThrough` 会让 TSF 冲掉 hold 预览、开挂起的组合，而原来
+    /// 这次按键根本不会送到服务端。
+    pub(crate) fn handle_ctrl_raw(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> wind_bridge::handler::KeyAction {
+        use crate::comment_switch::{
+            carries_other_modifier, ctrl_hold_effect, is_ctrl_vk, on_ctrl_raw_down, on_ctrl_raw_up,
+            on_other_key,
+        };
+        use wind_bridge::handler::KeyAction;
+        use wind_ipc::protocol::{EVENT_KEY_UP, EVENT_MOD_DOWN, TOGGLE_MOD_NOT_TAP};
+        if !is_ctrl_vk(data.key_code) {
+            return KeyAction::Consumed;
+        }
+        let is_down = data.event_type == EVENT_MOD_DOWN;
+        let now = std::time::Instant::now();
+        let combo = carries_other_modifier(data.key_code, data.modifiers);
+        let tap = {
+            let rt = self.rt();
+            let c = &rt.config.ui.comment;
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let tap = if is_down {
+                // Alt 按住期间按 Ctrl：那次 Alt 不再是单击。
+                on_other_key(&mut state.alt_track);
+                on_ctrl_raw_down(&mut state.ctrl_track, data.key_code, combo, now);
+                false
+            } else {
+                let not_tap = combo || data.toggles & TOGGLE_MOD_NOT_TAP != 0;
+                on_ctrl_raw_up(&mut state.ctrl_track, data.key_code, not_tap, now)
+            };
+            let effect = ctrl_hold_effect(
+                Self::comment_switch_mode(c),
+                c.switch_key.matches_vk(data.key_code),
+                !state.candidates.is_empty(),
+                is_down,
+            );
+            self.apply_switch_effect(&mut state, effect);
+            tap
+        };
+        tracing::debug!(
+            "Ctrl 如实上报：vk=0x{:02X} {} mods=0x{:04X} toggles=0x{:02X} → 单击={tap}",
+            data.key_code,
+            if is_down { "按下" } else { "松开" },
+            data.modifiers,
+            data.toggles
+        );
+        if !tap {
+            return KeyAction::Consumed;
+        }
+        let legacy = wind_bridge::handler::KeyEventData {
+            event_type: EVENT_KEY_UP,
+            toggles: data.toggles & !TOGGLE_MOD_NOT_TAP,
+            ..data.clone()
+        };
+        match wind_bridge::handler::MessageHandler::handle_key_event(self, &legacy) {
+            KeyAction::PassThrough => KeyAction::Consumed,
+            act => act,
+        }
     }
 
     /// overlay 反查模式（临时拼音 / 快捷输入）：码表用户借拼音反查编码的场景。

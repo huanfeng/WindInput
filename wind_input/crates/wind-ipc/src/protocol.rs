@@ -1688,6 +1688,11 @@ pub const TOGGLE_CAPSLOCK: u8 = 0x01;
 /// 失效方向是安全的——多报一次只是让用户重按一次 press1，漏报则会删掉用户刚打的字。
 pub const TOGGLE_PASSTHROUGH_KEY: u8 = 0x08;
 
+/// `EVENT_MOD_UP` 上的「平台看见过别的输入」：这次按住期间有服务端看不见的键（透传给宿主的
+/// Ctrl+C、`WM_HOTKEY` 之外的组合键……）或鼠标操作（Ctrl+点击），松开不算单击。
+/// 服务端自己也记按住期间送到的键，两者取并。
+pub const TOGGLE_MOD_NOT_TAP: u8 = 0x10;
+
 /// 计算热键哈希值：(modifiers << 16) | (keyCode & 0xFFFF)
 pub fn calc_key_hash(modifiers: u32, key_code: u32) -> u32 {
     (modifiers << 16) | (key_code & 0xFFFF)
@@ -1819,6 +1824,18 @@ pub const COMMIT_FLAG_REPLACING_HELD: u16 = 0x0008;
 
 pub const EVENT_KEY_DOWN: u8 = 0;
 pub const EVENT_KEY_UP: u8 = 1;
+
+/// 候选窗显示时 Ctrl（0xA2 / 0xA3）的**如实上报**：按下与松开原样送来，单击由服务端判
+/// （`wind-coordinator` 的 `handle_ctrl_raw`）。平台不吃 Ctrl；回包只为同步状态，吃不吃不看它。
+///
+/// 配对规则：平台在**按下那一刻**定这次按住走哪条路——有输入会话就发 `EVENT_MOD_DOWN`、松开发
+/// `EVENT_MOD_UP`（哪怕那时候选已关），否则走原「平台判单击、只送确认过的 `EVENT_KEY_UP`」，
+/// 一次按住只走一条路，不会两边各报一次。
+///
+/// 另起事件类型而不搭 `EVENT_KEY_*`：旧 core 对未知类型一律放行（`handle_key_event` 只认 0 / 1），
+/// 新 DLL 配旧 core 时不会把长按、组合键误当单击；旧 DLL 不发，新 core 照旧。
+pub const EVENT_MOD_DOWN: u8 = 2;
+pub const EVENT_MOD_UP: u8 = 3;
 
 #[cfg(test)]
 mod input_diag_wire_tests {
