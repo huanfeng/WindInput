@@ -123,9 +123,11 @@ e2e 的坑，都踩过：
   翻转不触发 activate，按键前比对、翻转即补报 FocusGained（同 macOS 的安全输入跟随）。
 - 光标：`InputContext::cursorRect()`（X11 客户端是根窗口坐标，正是 wire 坐标系）→
   `CMD_CARET_UPDATE` 12 字节版，y 取行顶、height 取行高。宿主没报过位置（全 0）时不发。
-  GNOME 无 IM-v2、且 `XDG_CURRENT_DESKTOP` 分段里有 `GNOME` 时，`dbus`/`ibus`/`fcitx4` 才按
-  `RelativeRect` / `scaleFactor` / frontend 折到 X11（扩展 `windinput-caret` 补窗口原点；
-  非 GNOME 保持根坐标直通。换算纯函数在 `GnomeCaretGeom`，`gnome_caret_geom_test` 覆盖。
+  GNOME 无 IM-v2、且 `XDG_CURRENT_DESKTOP` 分段里有 `GNOME`、且 IC 的 `display()` 为 `wayland:`
+  时，`dbus`/`ibus`/`fcitx4` 才按 `RelativeRect` / `scaleFactor` / frontend 折到 X11（扩展
+  `windinput-caret` 补窗口原点；`x11:` 组含 XWayland 应用，已是根物理像素，直通）。扩展成功结果
+  在同一次光标更新内复用，约 1s 后失效以免拖窗后粘旧坐标。非 GNOME 保持根坐标直通。换算纯函数在
+  `GnomeCaretGeom`，`gnome_caret_geom_test` 覆盖。
   扩展声明 Shell 47–50，42.9 那次观察装不上它。细则 §7.10 与
   `gnome-shell-extension/README.md`）。
 - 回删（`CMD_REPLACE_BACKWARD`，智能符号 / 撤销上屏）的计数是 **UTF-16 码元**（Windows TSF 的 ACP、

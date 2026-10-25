@@ -26,6 +26,7 @@ option(WIND_VARIANT_DEV "Build the dev variant" OFF)
 add_library(windcore STATIC
     src/core/Bridge.cpp
     src/core/Codec.cpp
+    src/core/GnomeCaretGeom.cpp
     src/core/HostUi.cpp
     src/core/KeyMap.cpp
     src/core/KeySynth.cpp

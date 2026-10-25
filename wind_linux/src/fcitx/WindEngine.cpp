@@ -56,12 +56,23 @@ uint64_t nowMs()
 }
 
 #ifdef WIND_HAVE_WAYLAND
+/// Fcitx5 `InputContext::display()`：`wayland:<socket>` 与 `x11:<name>`（如 `x11::0`）。
+/// XWayland 上的 dbus 客户端落在 `x11:` 组，报的已是根窗口物理像素，不能再走 GNOME 折算。
+bool icOnWaylandDisplay(const fcitx::InputContext* ic)
+{
+    const std::string d = ic->display();
+    return d.size() >= 8 && d.compare(0, 8, "wayland:") == 0;
+}
+
 /// GNOME Wayland、且 Wayland 面板不接管该 IC：dbus / ibus / fcitx4 的候选仍走 X11 面板，
 /// `cursorRect` 不是 XWayland 根坐标。非 GNOME（KDE、treeland、未设置 XDG_CURRENT_DESKTOP）
-/// 保持改动前的根坐标直通，不走 RelativeRect / hostScale。见 §7.10。
+/// 与 `x11:` 显示组（含 XWayland 应用）保持根坐标直通。见 §7.10。
 bool isGnomeX11PanelFrontend(const fcitx::InputContext* ic, const WaylandCandidatePanel* wl)
 {
     if (!wl || !ic || wl->handles(ic)) {
+        return false;
+    }
+    if (!icOnWaylandDisplay(ic)) {
         return false;
     }
     if (!xdgCurrentDesktopIsGnome(std::getenv("XDG_CURRENT_DESKTOP"))) {
@@ -85,10 +96,11 @@ struct ResolvedCaret {
 
 /// 扩展成功换算过的矩形。`hostOutput` 与 `sendCaretUpdate` 谁先跑谁写入，另一方直接复用，
 /// 避免同一次光标更新做两次同步 D-Bus。失败不记：失败的重试节奏由 GnomeCaret 的退避管。
-/// 窗口挪了但相对矩形没变时会沿用上次的绝对坐标，直到矩形、缩放或输入上下文变了——扩展没有
-/// 「窗口移动」可订，不能为这件事在每个按键上再同步问一次总线。
+/// 窗口挪了但相对矩形没变时会沿用上次的绝对坐标；约 1s 后强制失效，偶发多一次同步 D-Bus。
 struct SentCaret {
+    static constexpr uint64_t kReuseMaxMs = 1000;
     bool valid = false;
+    uint64_t atMs = 0;
     const fcitx::InputContext* ic = nullptr;
     int left = 0;
     int top = 0;
@@ -107,16 +119,18 @@ SentCaret g_sentCaret;
 bool sentMatches(const fcitx::InputContext* ic, double buf, double out)
 {
     const fcitx::Rect& r = ic->cursorRect();
-    return g_sentCaret.valid && g_sentCaret.ic == ic && g_sentCaret.left == r.left()
-        && g_sentCaret.top == r.top() && g_sentCaret.width == r.width()
-        && g_sentCaret.height == r.height() && g_sentCaret.sf == ic->scaleFactor()
-        && g_sentCaret.buf == buf && g_sentCaret.out == out;
+    const uint64_t age = nowMs() - g_sentCaret.atMs;
+    return g_sentCaret.valid && age < SentCaret::kReuseMaxMs && g_sentCaret.ic == ic
+        && g_sentCaret.left == r.left() && g_sentCaret.top == r.top()
+        && g_sentCaret.width == r.width() && g_sentCaret.height == r.height()
+        && g_sentCaret.sf == ic->scaleFactor() && g_sentCaret.buf == buf && g_sentCaret.out == out;
 }
 
 void rememberSent(const fcitx::InputContext* ic, double buf, double out, const ResolvedCaret& got)
 {
     const fcitx::Rect& r = ic->cursorRect();
     g_sentCaret = SentCaret{true,
+                            nowMs(),
                             ic,
                             r.left(),
                             r.top(),
