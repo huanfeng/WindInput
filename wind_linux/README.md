@@ -9,6 +9,8 @@ addon（`libwindinput.so`），负责把按键交给清风输入法服务（`win
 依赖：Fcitx5 5.x 开发包（`libfcitx5core-dev` `libfcitx5utils-dev` `libfcitx5config-dev`）、
 `libxcb1-dev` `libxcb-shape0-dev` `libxcb-randr0-dev`（候选窗 / 工具栏）、CMake ≥ 3.16、C++17 编译器。较新的 Fcitx5 头文件（如 Arch 的 5.1.23）
 要 C++20，配置时会自动探测并把 addon 升到 C++20，此时需要支持 C++20 的编译器；也可用 `-DCMAKE_CXX_STANDARD=20` 指定。
+Wayland 候选窗另要 `libwayland-client` 与 `wayland-scanner`。GNOME 光标扩展的客户端还要 `libglib2.0-dev`
+（`gio-2.0`）：只在 Wayland 那一路探测，没有它其余 addon 照常编，只是不问 Shell 扩展。
 
 ```bash
 cmake -S wind_linux -B wind_linux/build/cmake -G Ninja
@@ -51,6 +53,10 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
 
 ## 已知限制
 
+- **GNOME（Wayland）**：没有 input-method-v2，Wayland 原生应用的光标要靠 Shell 扩展
+  `windinput-caret@windinput` 补窗口原点。扩展声明 Shell 47–50；42 与 46（含 Ubuntu 22.04 / 24.04
+  的桌面）装不上。安装、启用，以及「哪一次观察不能算实测」见
+  [gnome-shell-extension/README.md](gnome-shell-extension/README.md)。KDE / treeland 不走这条折算。
 - **KDE Plasma（Wayland）**：要在「系统设置 → 键盘 → 虚拟键盘」里选「Fcitx 5」并重新登录——KWin
   只把输入法协议（input-method-v1）交给它自己拉起的 Fcitx5，否则 Wayland 原生应用里没有候选窗。
   并按 Fcitx5 的建议**不要**设 `QT_IM_MODULE` / `GTK_IM_MODULE`：设了的 Wayland 原生应用走 D-Bus、

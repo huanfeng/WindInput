@@ -31,6 +31,8 @@ Fcitx5 的 `InputContext`。引擎/词库/候选逻辑全在服务里，这里**
 | `data/*.conf.in` | addon / 输入法描述文件模板（构建时生成到 `build/…/share/fcitx5/`） |
 | `data/icons/hicolor` | 图标成品，CMake 装到 `share/icons`。`windinput`（应用图标）由 `scripts/linux/gen-icons.py` 拆自 wind-setting 的 ico；托盘图标的种子 `windinput-zh` / `-en` / `-caps`（运行时图标还没写出时的降级）由 `wind_input/crates/wind-ui/examples/gen_tray_icons.rs` 生成，与运行时图标同一个 `tray_icon::render`（`host_ui_test` 核对文件齐全）。运行时图标不在这里，在用户的 `$XDG_DATA_HOME/icons/hicolor` |
 | `tests/*_test.cpp` | 纯 C++17 单测（不需要 Fcitx5），与 `wind_tsf/tests` 同风格 |
+| `include/GnomeCaretGeom.h` + `src/core/GnomeCaretGeom.cpp` | GNOME 光标折算的纯函数（桌面名 / 前端名 / scale）。D-Bus 客户端在 `src/fcitx/GnomeCaret.cpp`，只在 Wayland 且有 gio 时编进 addon |
+| `gnome-shell-extension/` | Shell 扩展 `windinput-caret@windinput`（Shell 47–50）。安装说明见该目录 README |
 
 `src/core` 与 `include` 不依赖 Fcitx5，能单独编、单独测——这条边界别破。
 
@@ -121,8 +123,11 @@ e2e 的坑，都踩过：
   翻转不触发 activate，按键前比对、翻转即补报 FocusGained（同 macOS 的安全输入跟随）。
 - 光标：`InputContext::cursorRect()`（X11 客户端是根窗口坐标，正是 wire 坐标系）→
   `CMD_CARET_UPDATE` 12 字节版，y 取行顶、height 取行高。宿主没报过位置（全 0）时不发。
-  GNOME 无 IM-v2 时 `dbus`/`ibus`/`fcitx4` 需按 `RelativeRect` / `scaleFactor` / frontend 折到
-  X11（扩展 `windinput-caret` 补窗口原点；细则 §7.10）。
+  GNOME 无 IM-v2、且 `XDG_CURRENT_DESKTOP` 分段里有 `GNOME` 时，`dbus`/`ibus`/`fcitx4` 才按
+  `RelativeRect` / `scaleFactor` / frontend 折到 X11（扩展 `windinput-caret` 补窗口原点；
+  非 GNOME 保持根坐标直通。换算纯函数在 `GnomeCaretGeom`，`gnome_caret_geom_test` 覆盖。
+  扩展声明 Shell 47–50，42.9 那次观察装不上它。细则 §7.10 与
+  `gnome-shell-extension/README.md`）。
 - 回删（`CMD_REPLACE_BACKWARD`，智能符号 / 撤销上屏）的计数是 **UTF-16 码元**（Windows TSF 的 ACP、
   macOS 的 NSRange 同量纲），Fcitx5 的 `deleteSurroundingText` 按码点删：按光标前文本换算
   （`codepointsForUtf16Back`，落在代理对中间宁少删），读不到光标前文本才按码元数直删。配对插入后的
@@ -318,7 +323,7 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 | 能力 | 现状 | 备注 |
 |---|---|---|
 | 候选窗显示（X11） | 已接 | 见上「候选窗（X11）」 |
-| 候选窗显示（Wayland 原生） | 已接（`WaylandPanel`），treeland 真机验过 | 跟着光标走的（候选、tooltip、跟随光标的状态气泡）走 `zwp_input_method_v2` 的 popup surface（KWin 只有 input-method-v1，走 `zwp_input_panel_v1` 的 overlay 面板：KWin 全局只认一个面板、角色拆不掉，故每个显示周期换新 surface，旧的经 `RetiredSurfaces` 延迟销毁，见 `docs/design/linux-kde-input-method-v1.md`），**由合成器按文本光标摆位**（客户端报的 `cursorRect()` 是窗口相对坐标，没法自己摆），合成进同一张位图（tooltip 按服务端落位相对候选窗摆）；按屏幕摆的（Toast、屏幕锚点 / 固定位置的状态气泡）在合成器有 wlr-layer-shell 时各开一个 OVERLAY 层 surface，按锚点 + 边距摆，在任务栏之上，且不论焦点在哪种应用都走这条（XWayland 窗口会被 treeland 压在任务栏下）。气泡右键菜单开在一张铺满输出的透明 layer 底板上（各级菜单是子 surface），坐标即输出坐标，菜单外的点击也由底板接住（代替抓指针；请求 2s 无菜单 / 60s 无点击 / 120s 上限三道兜底收起）。layer surface 收起时连角色对象一起销毁、下次重建（只摘 buffer 时 treeland 不再发 configure）；所有我们的 wl_surface 只建不毁并挂全零 user_data 占位（classicui 的指针回调会读它）。鼠标：点选、翻页、滚轮、悬停、右键菜单；layer 上的气泡可拖（relative-pointer 取位移，surface 自己在动，按 surface 坐标算会乱跳）、Toast 可点击关闭；popup 里只有候选与气泡收鼠标。跟随光标的气泡不能拖；菜单靠近屏幕下 / 右缘可能被合成器裁掉；锚在底 / 右边的 layer 气泡开始拖时可能跳一个任务栏厚度（合成器不告诉独占区）；候选窗落在任务栏处会被盖住（popup 层级归合成器）；GNOME 不支持 input-method-v2，应用走 X11 / XWayland 那条路；KDE Plasma（input-method v1）Kubuntu 26.04 / KWin 6.6.6 真机验过；多显示器 / 混合缩放只近似；arm64 上未实机验 |
+| 候选窗显示（Wayland 原生） | 已接（`WaylandPanel`），treeland 真机验过 | 跟着光标走的（候选、tooltip、跟随光标的状态气泡）走 `zwp_input_method_v2` 的 popup surface（KWin 只有 input-method-v1，走 `zwp_input_panel_v1` 的 overlay 面板：KWin 全局只认一个面板、角色拆不掉，故每个显示周期换新 surface，旧的经 `RetiredSurfaces` 延迟销毁，见 `docs/design/linux-kde-input-method-v1.md`），**由合成器按文本光标摆位**（客户端报的 `cursorRect()` 是窗口相对坐标，没法自己摆），合成进同一张位图（tooltip 按服务端落位相对候选窗摆）；按屏幕摆的（Toast、屏幕锚点 / 固定位置的状态气泡）在合成器有 wlr-layer-shell 时各开一个 OVERLAY 层 surface，按锚点 + 边距摆，在任务栏之上，且不论焦点在哪种应用都走这条（XWayland 窗口会被 treeland 压在任务栏下）。气泡右键菜单开在一张铺满输出的透明 layer 底板上（各级菜单是子 surface），坐标即输出坐标，菜单外的点击也由底板接住（代替抓指针；请求 2s 无菜单 / 60s 无点击 / 120s 上限三道兜底收起）。layer surface 收起时连角色对象一起销毁、下次重建（只摘 buffer 时 treeland 不再发 configure）；所有我们的 wl_surface 只建不毁并挂全零 user_data 占位（classicui 的指针回调会读它）。鼠标：点选、翻页、滚轮、悬停、右键菜单；layer 上的气泡可拖（relative-pointer 取位移，surface 自己在动，按 surface 坐标算会乱跳）、Toast 可点击关闭；popup 里只有候选与气泡收鼠标。跟随光标的气泡不能拖；菜单靠近屏幕下 / 右缘可能被合成器裁掉；锚在底 / 右边的 layer 气泡开始拖时可能跳一个任务栏厚度（合成器不告诉独占区）；候选窗落在任务栏处会被盖住（popup 层级归合成器）；GNOME 不支持 input-method-v2，应用走 X11 / XWayland 那条路（仅当 `XDG_CURRENT_DESKTOP` 分段含 `GNOME` 时按 §7.10 折光标，Shell 扩展见 `gnome-shell-extension/README.md`；非 GNOME 保持直通）；KDE Plasma（input-method v1）Kubuntu 26.04 / KWin 6.6.6 真机验过；多显示器 / 混合缩放只近似；arm64 上未实机验 |
 | 多显示器 | 未做 | 工作区取整个根窗口，不按 RandR 显示器切分：跨屏边缘的翻转/钳制按整块虚拟屏算 |
 | HiDPI（帧 `scale>1`） | 按物理像素原样贴 | X11 没有逻辑坐标，服务端在 Linux 上目前恒发 scale=1 |
 | 候选窗拖动 / 固定位置回报（`pos.candidate` / `pos.candidate.query`） | 未接 | 服务端问位置时不答 = 保留旧值（macOS 不可见时也不答，语义安全） |

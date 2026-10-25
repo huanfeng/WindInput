@@ -399,14 +399,30 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
    `dbus` / `ibus` / `fcitx4` 报的 `cursorRect` 往往不是 XWayland 根坐标。分数缩放下还有
    输出缩放 vs Xft 缓冲缩放两套像素。`GetWindows`/`Eval` 仍拒，做准需要 Shell 内的
    `focus_window`。**做法**（`windinput-caret@windinput`）：
+   - **只在 GNOME 会话走这条路**。`XDG_CURRENT_DESKTOP` 按冒号分段，有一段与 `GNOME` 全等
+     （大小写不敏感，如 `ubuntu:GNOME`）才折算。KDE、treeland 以及没设这个变量的会话保持
+     原来的根坐标直通，不乘 `hostScale`、也不叠窗口原点。
    - 仅 `RelativeRect`：扩展 `TranslateRelativeSpot`（`protocol_to_stage_rect` + compositor
      actor）再折到 X11；无该能力位的绝对屏坐标只缩放，不得叠窗口原点。
    - 扩展 `spotScale`（矩形坐标系）：sf≈缓冲缩放 → 用客户端 sf（已预乘）；sf≈1 且 frontend=ibus
-     → 用输出缩放（相对矩形常已预乘却未报 scale）；sf≈1 且其它前端 → 主题 scale≈1（逻辑相对）；
-     sf≈输出且 ≠缓冲 → 主题 scale≈1（逻辑 DIP，避免误缩后再 ×缓冲缩放）。
-   - 扩展未启用时退回 toolkit 折中——最大化大致可用，浮动窗会偏。
-   源码在 `wind_linux/gnome-shell-extension/windinput-caret@windinput/`。X11 会话与
-   treeland/KWin popup 不受影响。
+     → 用输出缩放（相对矩形常已预乘却未报 scale）；其余（sf≈1 的其它前端，以及 sf>1 但不贴近
+     缓冲缩放的逻辑 DIP）主题 scale≈1。纯函数在 `GnomeCaretGeom`，单测覆盖 frontend × scale。
+   - 扩展未启用时退回 toolkit 折中——最大化大致可用，浮动窗会偏。问总线的连接会缓存；失败后
+     约 3 秒内不再同步重试；同一矩形不重复调用。`hostOutput` 复用 `sendCaretUpdate` 已经成功
+     换算的结果。
+   - **扩展能装上的 Shell 是 47–50，不是 42，也不是 45/46。** ESM 扩展格式从 Shell 45 起；
+     `gi://Mtk` 也从 45 起就有（gnome-shell 45.0 自己的 `windowManager.js` 在 import）。
+     但本扩展调用的 `Meta.Window.protocol_to_stage_rect` 从 mutter 47.0 才进入公开头文件，
+     46.0–46.7 没有。`metadata.json` 因此只声明 47–50。安装与这段核对写在
+     `wind_linux/gnome-shell-extension/README.md`；CMake 在 Wayland 且找到 `gio-2.0` 时把扩展
+     装到 `${datadir}/gnome-shell/extensions/`（没有 gio 不阻塞其余 addon）。
+   - **验证环境还没定。** 2026-10-10 在 Ubuntu 22.04（GNOME Shell 42.9）上看到的是扩展还不存在
+     时的行为：gedit 报 `rect=(344,76 0x18)`，服务端摆到 `(344,96)`。Shell 42 不能加载 ESM
+     扩展，那次不能当作本扩展的实测。Ubuntu 24.04 的 Shell 是 46，同样不在 `shell-version` 里
+     （这是发行版包版本，不是在那台机器上启用过）。47–50 只核对了上游标签里相关符号还在，
+     **没有**在真实 GNOME 会话里对过光标，分数缩放也没有确认。需要作者补测后改这一条。
+   源码在 `wind_linux/gnome-shell-extension/windinput-caret@windinput/`。非 GNOME 的
+   X11 会话与 treeland/KWin popup 不受影响。
 11. **Wayland 下工具栏 / 软键盘记住的位置可能跳角（已知限制）**：Wayland 面板坐标的单位是「合成器逻辑
    坐标 × 服务端此刻的光栅化缩放」（§5b / `OverlayInput.h`「Wayland 面板坐标」），而光栅化缩放跟着焦点
    走：XWayland 应用取 `Xft.dpi`，原生 Wayland 应用取输出缩放。两者不一致时（例如输出 150%、`Xft.dpi`
