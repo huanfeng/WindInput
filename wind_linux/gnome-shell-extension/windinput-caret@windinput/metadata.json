@@ -2,7 +2,7 @@
   "uuid": "windinput-caret@windinput",
   "name": "WindInput Caret",
   "description": "Expose focus-window geometry to WindInput for GNOME Wayland candidate placement when input-method-v2 is unavailable.",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "shell-version": ["47", "48", "49", "50"],
   "url": "https://github.com/huanfeng/WindInput",
   "version": 1
 }

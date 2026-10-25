@@ -48,7 +48,7 @@ target_link_libraries(windcore PUBLIC Threads::Threads)
 enable_testing()
 foreach(t codec_test keymap_test router_test bridge_test protocol_sync_test shm_test launcher_test
         settings_launcher_test menu_test host_ui_test overlay_input_test keysynth_test
-        retired_surfaces_test)
+        retired_surfaces_test gnome_caret_geom_test)
     add_executable(${t} tests/${t}.cpp)
     target_link_libraries(${t} PRIVATE windcore)
     target_compile_definitions(${t} PRIVATE
@@ -65,16 +65,15 @@ if(WIND_BUILD_ADDON)
     # 候选窗的 X11 呈现：自建 xcb 连接 + XShape（无合成器时按 alpha 抠形）+ RandR（工具栏 /
     # 软键盘按输出取名字与工作区）。
     pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb xcb-shape xcb-randr)
-    # GNOME Wayland：查 windinput-caret@windinput 扩展，把窗口相对光标换成绝对坐标
-    pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
+    # gio 只服务 GNOME 光标扩展客户端，且那段代码在 WIND_HAVE_WAYLAND 里。没有 Wayland 时不探测、
+    # 不链接；有 Wayland 但没有 gio 时其余 addon 照常编，只是不编 src/fcitx/GnomeCaret.cpp。
+    set(WIND_GNOME_CARET_EXT OFF)
 
     add_library(windinput MODULE
         src/fcitx/WindEngine.cpp
         src/fcitx/X11Panel.cpp
-        src/fcitx/GnomeCaret.cpp
     )
-    target_link_libraries(windinput PRIVATE windcore Fcitx5::Core Fcitx5::Utils PkgConfig::XCB
-                          PkgConfig::GIO)
+    target_link_libraries(windinput PRIVATE windcore Fcitx5::Core Fcitx5::Utils PkgConfig::XCB)
 
     # 新版 Fcitx5（Arch 等）的头文件用了 std::ranges / std::span / std::source_location，按当前标准编不过
     # 就把 addon 升到 C++20（GH#192）。只探 addon 用到的头文件与日志宏，纯逻辑库与单测不受影响。
@@ -131,6 +130,16 @@ if(WIND_BUILD_ADDON)
         target_include_directories(windinput PRIVATE ${WL_GEN} ${FCITX_WAYLAND_INC})
         target_link_libraries(windinput PRIVATE PkgConfig::WAYLAND_CLIENT)
         target_compile_definitions(windinput PRIVATE WIND_HAVE_WAYLAND=1)
+        pkg_check_modules(GIO IMPORTED_TARGET gio-2.0)
+        if(GIO_FOUND)
+            target_sources(windinput PRIVATE src/fcitx/GnomeCaret.cpp)
+            target_link_libraries(windinput PRIVATE PkgConfig::GIO)
+            target_compile_definitions(windinput PRIVATE WIND_HAVE_GNOME_CARET=1)
+            set(WIND_GNOME_CARET_EXT ON)
+            message(STATUS "GNOME 光标扩展客户端：启用（gio-2.0）")
+        else()
+            message(STATUS "缺 gio-2.0：不编 GNOME 光标扩展客户端")
+        endif()
         message(STATUS "Wayland 候选窗：启用")
     endif()
     if(NOT TARGET windwlproto)
@@ -158,4 +167,10 @@ if(WIND_BUILD_ADDON)
     # wind-ui 的 gen_tray_icons 例子与 scripts/linux/gen-mime-icons.py 一次性生成，构建与打包都
     # 不需要额外工具。
     install(DIRECTORY data/icons/hicolor DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
+    # GNOME Shell 扩展：只在这次构建真的编了客户端时安装，避免没有 Wayland/gio 的包带一份用不上的扩展。
+    # 启用步骤见 gnome-shell-extension/README.md（装上文件不会自动启用）。
+    if(WIND_GNOME_CARET_EXT)
+        install(DIRECTORY gnome-shell-extension/windinput-caret@windinput
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/gnome-shell/extensions)
+    endif()
 endif()

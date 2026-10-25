@@ -1,4 +1,6 @@
 // GNOME Shell 扩展：焦点窗口坐标系下的相对光标 → stage 绝对坐标，经 D-Bus 交给 WindInput。
+// gi://Mtk 从 Shell 45 起就有；protocol_to_stage_rect 从 mutter 47 起才有。shell-version 因此从 47 起。
+// 版本范围与「尚未在真实会话里对过光标」的说明见同目录上一级的 README.md。
 import Gio from 'gi://Gio';
 import Mtk from 'gi://Mtk';
 import St from 'gi://St';

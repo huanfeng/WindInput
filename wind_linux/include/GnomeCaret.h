@@ -16,6 +16,9 @@ struct GnomeSpot {
 };
 
 /// 扩展未装 / 未启用 / 调用失败时返回 nullopt（调用方走无扩展折中）。
+/// 会话总线连接会缓存。失败后约 3 秒内不再 `g_bus_get_sync` / `g_dbus_connection_call_sync`。
+/// 成功结果的「矩形没变就别再问」在调用方，按输入上下文记住，避免另一个窗口的相同相对矩形
+/// 沿用这里的绝对坐标。只在 fcitx 主线程调用。
 std::optional<GnomeSpot> translateRelativeSpot(int32_t x, int32_t y, int32_t w, int32_t h,
                                                double clientScale);
 
