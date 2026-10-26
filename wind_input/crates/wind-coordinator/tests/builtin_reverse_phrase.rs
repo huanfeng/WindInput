@@ -20,16 +20,19 @@ fn layer() -> wind_phrase::PhraseLayer {
     wind_phrase::PhraseLayer::load(&p)
 }
 
-/// ★ `cofc` 必须能解析并求值出「剪贴板那个字的反查」。
+/// ★ `cofc` 必须能解析并求值出「剪贴板整串内容的反查」。
 ///
 /// 本条只管**查得到**的主路径：display 原样等于宿主返回的反查结果。
 /// 「查不到时怎么办」由下一条负责。
+///
+/// ★ 词条写的是 `dict.rev(clip())` —— 省略 n 即**整串**反查，宿主拿到的必须是一整个
+/// 剪贴板文本（「好吧」），而不是它的第 1 个字。复制一个词就该查到这个词的码，这是
+/// 剪贴板反查的主行为；这条断言就是它的守门人。
 #[test]
 fn factory_cofc_parses_and_renders_clipboard_lookup() {
-    let clip = |_n: i64| "好人".to_string();
-    // 只认第 1 个字，模拟真实反查（第 2 个字不该被这条词条查到）。
+    let clip = |_n: i64| "好吧".to_string();
     let reverse = |text: &str, fmt: &str| {
-        assert_eq!(text, "好", "出厂词条应只查剪贴板第 1 个字");
+        assert_eq!(text, "好吧", "出厂词条应查剪贴板整串（省略 n 即整串）");
         // ★ 必须是 `code_rev_all`（全部码位）而不是 `code_rev`（仅最长的全码）——反查回答
         // 的是「这个字怎么打」，简码才是最有用的答案。写死这个断言是为了让人改回只给全码
         // 的那个变量时变红。（0.122 之前这两个变量叫 `code_all` / `code`，现为兼容别名。）
@@ -37,7 +40,7 @@ fn factory_cofc_parses_and_renders_clipboard_lookup() {
             fmt.contains("${code_rev_all}") && fmt.contains("${pinyin}"),
             "默认版式应含全部码位与拼音，实际收到 {fmt:?}"
         );
-        "好: vbg hǎo".to_string()
+        "好吧: hbba hǎo ba".to_string()
     };
     let host = wind_phrase::PhraseHost {
         clip: &clip,
@@ -50,7 +53,7 @@ fn factory_cofc_parses_and_renders_clipboard_lookup() {
         1,
         "cofc 应恰好产出一条候选（解析失败会得到 0 条）"
     );
-    assert_eq!(hits[0].text, "好: vbg hǎo");
+    assert_eq!(hits[0].text, "好吧: hbba hǎo ba");
     assert!(
         hits[0].command_src.is_some(),
         "出厂 cofc 是 $CC：显示与上屏必须分开，否则查不到时无法既提示又不上屏"
