@@ -287,7 +287,7 @@ fn tone_falls_back_to_plain_syllable_without_reading() {
 
 const ZG: &str = "中国\tzhong guo\t3000\n宗\tzong\t100\n";
 
-/// 全局注释分配一个只写 `${correct_pinyin}` 的模板（竖排没写时同横排）。
+/// 拼音类型分配一个只写 `${correct_pinyin}` 的模板（竖排没写时同横排）。
 fn assign_correct_pinyin(c: &mut Config) {
     c.ui.comment
         .templates
@@ -296,7 +296,14 @@ fn assign_correct_pinyin(c: &mut Config) {
             name: "fz".into(),
             text: "${correct_pinyin}".into(),
         });
-    c.ui.comment.assign.global.default_horizontal = Some("fz".into());
+    // 夹具是拼音方案：拼音类型出厂默认态 none，分到类型上。
+    c.ui.comment.assign.by_type.insert(
+        "pinyin".into(),
+        wind_config::comment_lib::CommentCells {
+            default_horizontal: Some("fz".into()),
+            ..Default::default()
+        },
+    );
 }
 
 /// `zongguo`（开 zh↔z）、`hint=false`、注释模板只写 `${correct_pinyin}`。

@@ -96,7 +96,14 @@ fn comment_mode_commits_rendered_comment_untruncated() {
             name: "py".into(),
             text: "[${pinyin}]".into(),
         });
-    cfg.ui.comment.assign.global.default_horizontal = Some("py".into());
+    // 夹具是拼音方案：拼音类型出厂默认态 none，模板分到类型上。
+    cfg.ui.comment.assign.by_type.insert(
+        "pinyin".into(),
+        wind_config::comment_lib::CommentCells {
+            default_horizontal: Some("py".into()),
+            ..Default::default()
+        },
+    );
     cfg.ui.candidate.comment_max_chars_vertical = 2;
     cfg.ui.candidate.comment_max_chars_horizontal = 2;
     let c = typed(cfg);

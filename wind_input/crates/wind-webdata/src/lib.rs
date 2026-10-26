@@ -10792,16 +10792,16 @@ mod comment_library_tests {
         let v = coord("base")
             .web_data_rpc("comment.library", &json!({}))
             .unwrap();
-        let code_hint = v["templates"]
+        let code = v["templates"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|t| t["id"] == "code_hint")
-            .expect("templates 应含 code_hint");
-        assert_eq!(code_hint["origin"], "builtin");
-        assert_eq!(code_hint["name"], "编码提示");
+            .find(|t| t["id"] == "code")
+            .expect("templates 应含 code");
+        assert_eq!(code["origin"], "builtin");
+        assert_eq!(code["name"], "编码");
         let g = cell(&v, "global", "default", true);
-        assert_eq!(g["template_id"], "code_hint");
+        assert_eq!(g["template_id"], "code");
         assert_eq!(g["from_scope"], "global");
         assert_eq!(
             v["system_assign"]["type"]["codetable"]["detail_horizontal"],
@@ -10813,7 +10813,7 @@ mod comment_library_tests {
             assert_eq!(e["from_scope"], "mode:temp_english");
         }
         let t = cell(&v, "type:codetable", "default", false);
-        assert_eq!(t["template_id"], "code_hint");
+        assert_eq!(t["template_id"], "code");
         assert_eq!(t["from_scope"], "global");
     }
 
@@ -10824,7 +10824,7 @@ mod comment_library_tests {
                 "comment.library",
                 &json!({"comment": {
                     "templates": [
-                        {"id": "code_hint", "name": "改", "text": "X"},
+                        {"id": "code", "name": "改", "text": "X"},
                         {"id": "mine", "name": "我的", "text": "Y"}
                     ],
                     "assign": {"schema": {"wubi86": {"detail_horizontal": "mine"}}}
@@ -10839,14 +10839,14 @@ mod comment_library_tests {
                 .find(|t| t["id"] == id)
                 .map(|t| t["origin"].clone())
         };
-        assert_eq!(origin("code_hint"), Some(json!("user_overrides_builtin")));
+        assert_eq!(origin("code"), Some(json!("user_overrides_builtin")));
         let ch = v["templates"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|t| t["id"] == "code_hint")
+            .find(|t| t["id"] == "code")
             .unwrap();
-        assert_eq!(ch["builtin"]["name"], "编码提示");
+        assert_eq!(ch["builtin"]["name"], "编码");
         assert_eq!(origin("mine"), Some(json!("user")));
         for vertical in [false, true] {
             let s = cell(&v, "schema:wubi86", "detail", vertical);

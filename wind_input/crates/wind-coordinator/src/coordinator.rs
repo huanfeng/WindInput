@@ -7690,17 +7690,11 @@ impl Coordinator {
         let scope_prefix = rt.config.input.scope_relax.prefix.as_str();
         // 换位纠错候选的标记（`input.correction.marker`，留空不加）。
         let corrected_prefix = rt.config.input.correction.marker.as_str();
-        // 编码提示(反查):对拼音来源候选,用主码表真实反查索引填 comment(实际填充见下方候选构造,
-        // 受 source==Pinyin 守卫)。门控两类:
-        //  - 普通拼音方案:跟随全局 schema.pinyin.code_hint_source(四档,见 CodeHintSource,出厂 off);
-        //  - 混输方案:跟随 schema.mix.pinyin_code_hint(开关,出厂开);
-        //  - overlay 反查模式(临时拼音 / 快捷输入(mix)内拼音):跟随独立的
-        //    input.temp_pinyin.code_hint_source(出厂 auto,可关),见 comment_hint_source。
-        // 码表类方案/候选的剩余编码由码表引擎在 convert 内填,不在此处理。
+        // 编码提示(反查):拼音来源候选的 `${code_rev}` / `${shuangpin}` 只看候选来源,显不显示
+        // 由分到的注释模板决定(设计 §13.6)。码表类候选的剩余编码由码表引擎在 convert 内填。
         // 悬停提示与注释段共用的整页上下文（编码来源方案、调试归属、注释库作用域…），
         // 见 `TooltipEvalCtx`；移动端按下标取提示走同一份。
         let tip_ctx = self.tooltip_eval_ctx(state, tip);
-        let hint_source = tip_ctx.hint_source;
         // 反查表读锁在候选循环外取一次（写方只有拆字段的装卸：sync_chaizi_assets /
         // ensure_chaizi_async）。
         let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
@@ -7789,23 +7783,10 @@ impl Coordinator {
                 // 上方注释条开关开：模板字面 `\n` 拆出上段（`comment_above`）。开关关走原路径，
                 // 不拆分、字面 `\n` 原样留在 `comment`，`comment_above` 恒空。
                 let (comment_above, comment) = if cand_cfg.comment_above {
-                    self.comment_parts_for(
-                        c,
-                        &comment_tpl,
-                        comment_max,
-                        &reverse,
-                        hint_source,
-                        &dict_schema,
-                    )
+                    self.comment_parts_for(c, &comment_tpl, comment_max, &reverse, &dict_schema)
                 } else {
-                    let comment = self.comment_for(
-                        c,
-                        &comment_tpl,
-                        comment_max,
-                        &reverse,
-                        hint_source,
-                        &dict_schema,
-                    );
+                    let comment =
+                        self.comment_for(c, &comment_tpl, comment_max, &reverse, &dict_schema);
                     (wind_ui_types::StyledText::new(), comment)
                 };
                 let prefix = prefix_of(c);
@@ -10411,7 +10392,6 @@ fn phrase_entries_hash(entries: &[wind_phrase::SystemPhraseEntry]) -> String {
 /// 桌面候选页组装与移动端按绝对下标取提示（[`Coordinator::candidate_tooltip_at`]）共用这一份——
 /// 两边各解析一遍就是两个真相源，漂移后的表现是「同一个候选，电脑上气泡有编码段、手机上没有」。
 pub(crate) struct TooltipEvalCtx {
-    pub(crate) hint_source: wind_config::config::CodeHintSource,
     /// 调试提示上下文：仅有段引用 `${debug}` 时解析（mixed 归属 / 方案 id）。
     dbg_ctx: Option<DebugSchemaCtx>,
     /// `${word_code}` / `${code_source}` 的来源方案；没有段引用它们就是 `None`。
@@ -10430,7 +10410,6 @@ impl Coordinator {
         tip: &crate::tooltip::CompiledTooltip,
     ) -> TooltipEvalCtx {
         let force_hint = Self::forces_code_hint(state);
-        let hint_source = self.comment_hint_source(state);
         let dbg_ctx = if tip.references("debug") {
             // 归属与读写两端同源（`effective_data_schema`）：特殊模式下若这里仍按 active 解析，
             // 调试段显示的计数与排序实际用的不是同一个 key——排查时会被它带偏，
@@ -10481,7 +10460,6 @@ impl Coordinator {
             })
         });
         TooltipEvalCtx {
-            hint_source,
             dbg_ctx,
             code_schema,
             code_source_name,
@@ -10542,7 +10520,7 @@ impl Coordinator {
                     })
                     .unwrap_or_default(),
                 _ => {
-                    return self.eval_var(name, arg, c, reverse, ctx.hint_source, &dict_schema);
+                    return self.eval_var(name, arg, c, reverse, &dict_schema);
                 }
             }))
         };

@@ -71,7 +71,6 @@ use crate::pipeline::ModeKind;
 use wind_candidate::{Candidate, CandidateSource};
 use wind_config::Config;
 use wind_config::comment_lib::SwitchMode;
-use wind_config::config::CodeHintSource;
 use wind_ui_types::{InlineColor, SpanStyle, StyledText};
 
 use std::sync::Arc;
@@ -1460,42 +1459,13 @@ impl crate::coordinator::Coordinator {
 
     /// overlay 反查模式（临时拼音 / 快捷输入）：码表用户借拼音反查编码的场景。
     ///
-    /// 编码来源读 `input.temp_pinyin.code_hint_source`（见 [`Self::comment_hint_source`]），
-    /// `${code_source}` 也据此视作「间接输入」。名字是旧「强制出码」时代的遗留——现在它
-    /// 只判模式，不再无视配置强制放行。
+    /// `${code_source}` 据此视作「间接输入」。名字是旧「强制出码」时代的遗留——现在它
+    /// 只判模式。
     pub(crate) fn forces_code_hint(state: &State) -> bool {
         matches!(
             state.active,
             Some(ModeKind::TempPinyin) | Some(ModeKind::Mix(_))
         )
-    }
-
-    /// 注释段求值用的编码来源档。候选窗渲染与「上屏注释」（`input.alt_commit`）共用，
-    /// 两处各算一份的话，同一条候选显示的注释与上屏的注释会不一样。
-    ///
-    /// 三份开关，模式层优先于方案层：
-    /// - 临拼 / 快捷输入读 `input.temp_pinyin.code_hint_source`（出厂 `auto`，码表用户借
-    ///   拼音反查编码的场景）——哪怕主方案是混输；
-    /// - 混输方案读 `schema.mix.pinyin_code_hint`（出厂开，开 ⇒ 只放行码表反查：混输里的
-    ///   拼音是全拼，双拼编码没意义）；
-    /// - 其余（拼音 / 双拼主方案）读 `schema.pinyin.code_hint_source`（出厂 `off`）。
-    ///
-    /// 码表用户与纯拼音用户习惯相反，所以拆开。混输曾落在最后一档，拼音出厂改 `off` 后
-    /// 混输跟着没了编码提示。
-    /// ★ 临拼那份原样生效、**可以关掉**——旧实现在这里无视配置并集式强制放行反查。
-    pub(crate) fn comment_hint_source(&self, state: &State) -> CodeHintSource {
-        if Self::forces_code_hint(state) {
-            return self.engine_mgr.temp_pinyin_code_hint_source();
-        }
-        let active = self.engine_mgr.active_schema_id();
-        if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("mixed") {
-            return if self.rt().config.schema.mix.pinyin_code_hint {
-                CodeHintSource::CodeTable
-            } else {
-                CodeHintSource::Off
-            };
-        }
-        self.engine_mgr.code_hint_source()
     }
 
     /// 「上屏注释 / 拼音」（`input.alt_commit`，t138）要上屏的文本；空串＝这条候选没有可上屏的。
@@ -1535,14 +1505,7 @@ impl crate::coordinator::Coordinator {
                 let is_mix = matches!(state.active, Some(ModeKind::Mix(_)));
                 let dict_schema = self.comment_dict_scope(state, c, is_mix, &fallback);
                 render(&tpl, 0, |name, arg| {
-                    self.eval_var(
-                        name,
-                        arg,
-                        c,
-                        &reverse,
-                        self.comment_hint_source(state),
-                        &dict_schema,
-                    )
+                    self.eval_var(name, arg, c, &reverse, &dict_schema)
                 })
             }
         }
@@ -1560,11 +1523,10 @@ impl crate::coordinator::Coordinator {
         tpl: &Template,
         max_chars: usize,
         reverse: &wind_reverse::ReverseLookup,
-        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> StyledText {
         tpl.render_whole(max_chars, &|name, arg| {
-            self.eval_var(name, arg, c, reverse, hint_source, dict_schema)
+            self.eval_var(name, arg, c, reverse, dict_schema)
         })
     }
 
@@ -1576,11 +1538,10 @@ impl crate::coordinator::Coordinator {
         tpl: &Template,
         max_chars: usize,
         reverse: &wind_reverse::ReverseLookup,
-        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> (StyledText, StyledText) {
         tpl.render_split(max_chars, &|name, arg| {
-            self.eval_var(name, arg, c, reverse, hint_source, dict_schema)
+            self.eval_var(name, arg, c, reverse, dict_schema)
         })
     }
 
@@ -1809,7 +1770,6 @@ impl crate::coordinator::Coordinator {
         arg: Option<&str>,
         c: &Candidate,
         reverse: &wind_reverse::ReverseLookup,
-        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> Option<VarValue> {
         // 判据是 `chars().count()` 而非 `len()`：扩展区汉字走代理对，按字节数会被当成词组。
@@ -1835,7 +1795,7 @@ impl crate::coordinator::Coordinator {
             // 用 `?` 的话，切到大词库方案后的头几秒里，候选右边会挂着字面的
             // `${code_rev}` 四个字符。
             "code_rev" | "code" => {
-                if hint_source.allows_reverse() && c.source == CandidateSource::Pinyin {
+                if c.source == CandidateSource::Pinyin {
                     self.engine_mgr
                         .codetable_reverse_hint(&c.text)
                         .unwrap_or_default()
@@ -1854,7 +1814,7 @@ impl crate::coordinator::Coordinator {
             // 出厂注释模板不含它 —— 三个码位会把候选行推得很宽，横排尤甚。它是给愿意
             // 用竖排、想一眼看全简码的用户的选项，不是默认。
             "code_rev_all" | "code_all" => {
-                if hint_source.allows_reverse() && c.source == CandidateSource::Pinyin {
+                if c.source == CandidateSource::Pinyin {
                     let sid = self.engine_mgr.code_source_schema();
                     let codes = self
                         .engine_mgr
@@ -1879,7 +1839,7 @@ impl crate::coordinator::Coordinator {
             // 装了双拼方案就能用。会问「这个字双拼怎么敲」的，多半正是用全拼打字、
             // 想往双拼迁移的人。
             "shuangpin" => {
-                if hint_source.allows_shuangpin() && c.source == CandidateSource::Pinyin {
+                if c.source == CandidateSource::Pinyin {
                     self.engine_mgr
                         .shuangpin_code_of(&c.code, c.boundary)
                         .unwrap_or_default()
@@ -2089,7 +2049,7 @@ mod comment_scope_tests {
             "",
             "出厂临英默认态 none"
         );
-        assert_eq!(tpl(&c, mode, CommentState::Detail), shipped("en_meaning"));
+        assert_eq!(tpl(&c, mode, CommentState::Detail), shipped("en_zh"));
     }
 
     #[test]
@@ -2105,7 +2065,7 @@ mod comment_scope_tests {
         );
         assert_eq!(
             tpl(&c, None, CommentState::Default),
-            shipped("code_hint"),
+            shipped("code"),
             "码表类型默认态跟随全局"
         );
     }
@@ -2126,16 +2086,13 @@ mod comment_scope_tests {
             );
         };
         let sp = coord("shuangpin", |_| {});
-        assert_eq!(
-            tpl(&sp, None, CommentState::Detail),
-            shipped("pinyin_english")
-        );
+        assert_eq!(tpl(&sp, None, CommentState::Detail), shipped("pinyin_en"));
         let sp = coord("shuangpin", only_shuangpin);
         assert_eq!(tpl(&sp, None, CommentState::Detail), shipped("chaizi"));
         let py = coord("pinyin", only_shuangpin);
         assert_eq!(
             tpl(&py, None, CommentState::Detail),
-            shipped("pinyin_english"),
+            shipped("pinyin_en"),
             "全拼不受 type.shuangpin 影响"
         );
     }
@@ -2161,7 +2118,7 @@ mod comment_scope_tests {
         );
         assert_eq!(
             tpl(&c, None, CommentState::Default),
-            shipped("code_hint"),
+            shipped("code"),
             "模式格只作用于本模式"
         );
     }
@@ -2210,8 +2167,8 @@ mod comment_scope_tests {
         });
         assert_eq!(
             tpl(&other, None, CommentState::Default),
-            shipped("code_hint"),
-            "方案格只作用于本方案"
+            "",
+            "方案格只作用于本方案（拼音方案出厂默认态不显示）"
         );
     }
 
@@ -2946,9 +2903,9 @@ mod eval_var_tests {
         }
     }
 
-    fn eval(co: &Coordinator, name: &str, c: &Candidate, hint: CodeHintSource) -> Option<String> {
+    fn eval(co: &Coordinator, name: &str, c: &Candidate) -> Option<String> {
         let rev = wind_reverse::ReverseLookup::default();
-        co.eval_var(name, None, c, &rev, hint, "shuangpin")
+        co.eval_var(name, None, c, &rev, "shuangpin")
             .map(|v| v.to_string())
     }
 
@@ -3020,7 +2977,7 @@ mod eval_var_tests {
         c: &Candidate,
         max: usize,
     ) -> String {
-        co.comment_for(c, &Template::parse(tpl), max, rl, CodeHintSource::Off, "")
+        co.comment_for(c, &Template::parse(tpl), max, rl, "")
             .as_str()
             .to_string()
     }
@@ -3059,14 +3016,7 @@ mod eval_var_tests {
         let co = coord("pinyin");
         let (dir, rl) = two_comment_libs("seprole");
         let c = word("configure");
-        let t = co.comment_for(
-            &c,
-            &Template::parse("${dict_all}"),
-            0,
-            &rl,
-            CodeHintSource::Off,
-            "",
-        );
+        let t = co.comment_for(&c, &Template::parse("${dict_all}"), 0, &rl, "");
         let sep: Vec<(u32, u32)> = t
             .spans()
             .iter()
@@ -3207,10 +3157,7 @@ mod eval_var_tests {
     #[test]
     fn shuangpin_code_under_shuangpin_schema() {
         let co = coord("shuangpin");
-        assert_eq!(
-            eval(&co, "shuangpin", &nihao(), CodeHintSource::Auto).as_deref(),
-            Some("nihc")
-        );
+        assert_eq!(eval(&co, "shuangpin", &nihao()).as_deref(), Some("nihc"));
     }
 
     /// ★★ **全拼方案下照样出双拼编码** —— 本轮放宽范围的核心。
@@ -3226,7 +3173,7 @@ mod eval_var_tests {
     fn full_pinyin_schema_still_gets_shuangpin_code() {
         let co = coord("pinyin");
         assert_eq!(
-            eval(&co, "shuangpin", &nihao(), CodeHintSource::Auto).as_deref(),
+            eval(&co, "shuangpin", &nihao()).as_deref(),
             Some("nihc"),
             "全拼方案应回退到已装的双拼方案取布局"
         );
@@ -3240,7 +3187,7 @@ mod eval_var_tests {
         cfg.schema.active = "pinyin".to_string();
         let co = Coordinator::new_headless(cfg, Some(&data_dir()));
         assert_eq!(
-            eval(&co, "shuangpin", &nihao(), CodeHintSource::Auto).as_deref(),
+            eval(&co, "shuangpin", &nihao()).as_deref(),
             Some(""),
             "没装双拼方案时应是「已知变量但为空」，不是未知变量"
         );
@@ -3256,84 +3203,42 @@ mod eval_var_tests {
         let c = nihao();
         for (old, new) in [("code", "code_rev"), ("code_all", "code_rev_all")] {
             assert_eq!(
-                eval(&co, old, &c, CodeHintSource::Auto),
-                eval(&co, new, &c, CodeHintSource::Auto),
+                eval(&co, old, &c),
+                eval(&co, new, &c),
                 "{old} 应与 {new} 等价"
             );
             assert!(
-                eval(&co, old, &c, CodeHintSource::Auto).is_some(),
+                eval(&co, old, &c).is_some(),
                 "{old} 必须是已知变量名（None 会让候选旁显示字面 ${{{old}}}）"
             );
         }
     }
 
-    /// 门控：开关关掉、或候选不是拼音来源时，三个编码变量一律为**空串**而非 None。
+    /// 门控：候选不是拼音来源时，三个编码变量一律为**空串**而非 None。
     ///
     /// 空串才会让 `${code_hint|code_rev}` 这样的回退链继续往下试；None 会中断回退并
     /// 回显变量名。
     #[test]
     fn gate_yields_empty_not_unknown() {
         let co = coord("shuangpin");
-        let c = nihao();
-        for name in ["code_rev", "code_rev_all", "shuangpin"] {
-            assert_eq!(
-                eval(&co, name, &c, CodeHintSource::Off).as_deref(),
-                Some(""),
-                "{name}：开关关掉应为空串"
-            );
-        }
-
         let codetable_cand = Candidate {
             source: CandidateSource::CodeTable,
             ..nihao()
         };
         for name in ["code_rev", "code_rev_all", "shuangpin"] {
             assert_eq!(
-                eval(&co, name, &codetable_cand, CodeHintSource::Auto).as_deref(),
+                eval(&co, name, &codetable_cand).as_deref(),
                 Some(""),
                 "{name}：非拼音来源候选应为空串"
             );
         }
     }
 
-    /// ★ 四档开关各自放行哪个变量——`code_schema` 这一列。
-    ///
-    /// 要害是 **CodeTable 档下 `code_schema` 必须为空**：用户把来源设成「只看码表反查」，
-    /// 哪怕模板里写着 `${code_schema}` 也不该冒出来。这正是「开关管允许哪些来源求值、
-    /// 模板管按什么顺序和格式摆」那句分工的可验证形态。
-    ///
-    /// （`code_rev` 那一列在这里验不了：测试环境没有码表词库，它恒空，分不清是门控关掉
-    /// 还是查不到。纯判据由 `wind-config` 侧的 `code_hint_source_gates` 钉。）
+    /// 编码来源开关已退役（设计 §13.6）：拼音来源候选的双拼编码不再受档位门控。
     #[test]
-    fn hint_source_gates_shuangpin() {
+    fn shuangpin_var_has_no_gate() {
         let co = coord("shuangpin");
-        let c = nihao();
-        for (src, expect) in [
-            (CodeHintSource::Off, ""),
-            (CodeHintSource::CodeTable, ""),
-            (CodeHintSource::Shuangpin, "nihc"),
-            (CodeHintSource::Auto, "nihc"),
-        ] {
-            assert_eq!(
-                eval(&co, "shuangpin", &c, src).as_deref(),
-                Some(expect),
-                "{src:?} 档下 code_schema"
-            );
-        }
-    }
-
-    /// `boundary == 0` 的候选不出击键码——切分不可信，猜错了显示的就是错的编码。
-    #[test]
-    fn zero_boundary_candidate_has_no_keystroke_code() {
-        let co = coord("shuangpin");
-        let c = Candidate {
-            boundary: 0,
-            ..nihao()
-        };
-        assert_eq!(
-            eval(&co, "shuangpin", &c, CodeHintSource::Auto).as_deref(),
-            Some("")
-        );
+        assert_eq!(eval(&co, "shuangpin", &nihao()).as_deref(), Some("nihc"));
     }
 
     /// ★ 两个入口的**词汇表必须一致**：注释段认得的变量名，cmdbar 反查
@@ -3378,7 +3283,7 @@ mod eval_var_tests {
             ..nihao()
         };
         assert_eq!(
-            eval(&co, "chaizi_code_all", &word, CodeHintSource::Auto).as_deref(),
+            eval(&co, "chaizi_code_all", &word).as_deref(),
             Some(""),
             "无拆字数据时应为空串（已知变量），而非 None（未知变量名）"
         );
@@ -3421,152 +3326,42 @@ mod eval_var_tests {
     #[test]
     fn unknown_name_is_none() {
         let co = coord("shuangpin");
-        assert_eq!(
-            eval(&co, "code_rev_typo", &nihao(), CodeHintSource::Auto),
-            None
-        );
+        assert_eq!(eval(&co, "code_rev_typo", &nihao()), None);
     }
 
-    /// 拼音方案 / 临时拼音两份编码来源各配一值，建一个码表常驻的协调器。
-    fn hint_coord(schema_src: &str, temp_src: &str) -> Arc<Coordinator> {
+    /// 出厂分配下当前态、横排落到的模板串。
+    fn factory_tpl(available: &[&str], active: &str, mode: Option<ModeKind>) -> String {
         let mut cfg = Config::default();
-        cfg.schema.available = vec!["pinyin".to_string(), "wubi86".to_string()];
-        cfg.schema.active = "wubi86".to_string();
-        cfg.schema.pinyin.code_hint_source = schema_src.to_string();
-        cfg.input.temp_pinyin.code_hint_source = temp_src.to_string();
-        Coordinator::new_headless(cfg, Some(&data_dir()))
-    }
-
-    fn hint_in(co: &Coordinator, active: Option<ModeKind>) -> CodeHintSource {
+        cfg.schema.available = available.iter().map(|s| s.to_string()).collect();
+        cfg.schema.active = active.to_string();
+        let co = Coordinator::new_headless(cfg.clone(), Some(&data_dir()));
         let st = State {
-            active,
+            active: mode,
             ..Default::default()
         };
-        co.comment_hint_source(&st)
+        co.comment_template_for(&cfg, &st, false)
     }
 
-    const ALL_SOURCES: [(&str, CodeHintSource); 4] = [
-        ("off", CodeHintSource::Off),
-        ("codetable", CodeHintSource::CodeTable),
-        ("shuangpin", CodeHintSource::Shuangpin),
-        ("auto", CodeHintSource::Auto),
-    ];
-
-    /// 临拼 / 快捷输入读 `input.temp_pinyin.code_hint_source`，原样取值、不做并集。
-    ///
-    /// 拼音方案那份刻意配成与之不同的值：两份若还串着读，这里会拿到对方的档位。
+    /// 出厂分配复刻编码来源开关退役前的出厂效果（设计 §13.6）：拼音方案默认不显示编码，
+    /// 码表跟随全局，混输给码表编码，临时拼音与快捷输入给完整回退链——哪怕当前方案是拼音。
     #[test]
-    fn overlay_modes_follow_temp_pinyin_source() {
-        for (temp, want) in ALL_SOURCES {
-            for schema in ["off", "auto"] {
-                let co = hint_coord(schema, temp);
-                for active in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
-                    assert_eq!(
-                        hint_in(&co, active),
-                        want,
-                        "{active:?}：temp_pinyin={temp}, schema.pinyin={schema}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// 主方案（含双拼）读 `schema.pinyin.code_hint_source`，不受临拼那份影响。
-    #[test]
-    fn main_schema_follows_schema_pinyin_source() {
-        for (schema, want) in ALL_SOURCES {
-            for temp in ["off", "auto"] {
-                let co = hint_coord(schema, temp);
-                assert_eq!(
-                    hint_in(&co, None),
-                    want,
-                    "主方案：schema.pinyin={schema}, temp_pinyin={temp}"
-                );
-            }
-        }
-    }
-
-    /// ★ 行为变化：临拼配成 `off` 时反查提示**真的关掉**。
-    ///
-    /// 旧实现对临拼 / 快捷输入无视配置、并集式强制放行反查（`forcing_reverse`），
-    /// 用户关不掉；拆成独立开关后 off 必须生效，哪怕拼音方案那份开着。
-    #[test]
-    fn temp_pinyin_off_really_disables_reverse_hint() {
-        let co = hint_coord("auto", "off");
-        for active in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
-            let src = hint_in(&co, active);
-            assert!(!src.allows_reverse(), "{active:?}：临拼 off 仍放行了反查");
-            assert!(!src.allows_shuangpin(), "{active:?}：临拼 off 仍放行了双拼");
-        }
-    }
-
-    /// 出厂：拼音方案不显示编码，临拼 / 快捷输入两种都放行。
-    #[test]
-    fn factory_defaults_split_by_mode() {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["pinyin".to_string(), "wubi86".to_string()];
-        cfg.schema.active = "wubi86".to_string();
-        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
-        assert_eq!(hint_in(&co, None), CodeHintSource::Off);
+    fn factory_assignment_reproduces_retired_code_hint_defaults() {
+        assert_eq!(factory_tpl(&["pinyin", "wubi86"], "pinyin", None), "");
         assert_eq!(
-            hint_in(&co, Some(ModeKind::TempPinyin)),
-            CodeHintSource::Auto
+            factory_tpl(&["pinyin", "wubi86"], "wubi86", None),
+            "${code_hint|code_rev|shuangpin}"
         );
-        assert_eq!(hint_in(&co, Some(ModeKind::Mix(0))), CodeHintSource::Auto);
-    }
-
-    /// 混输方案为活跃方案、拼音那份与混输那份各配一值的协调器。
-    fn mixed_coord(schema_src: &str, mix_hint: bool) -> Arc<Coordinator> {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
-        cfg.schema.active = "wubi86_pinyin".to_string();
-        cfg.schema.pinyin.code_hint_source = schema_src.to_string();
-        cfg.schema.mix.pinyin_code_hint = mix_hint;
-        Coordinator::new_headless(cfg, Some(&data_dir()))
-    }
-
-    /// 混输方案读 `schema.mix.pinyin_code_hint`，不受拼音方案那份影响。
-    ///
-    /// 拼音那份刻意配成与之相反的值：混输若还读拼音那份（本开关引入前的行为），这里会拿到
-    /// 对方的档位。
-    #[test]
-    fn mixed_schema_follows_mix_switch() {
-        for schema in ["off", "auto"] {
+        assert_eq!(
+            factory_tpl(&["wubi86_pinyin", "pinyin"], "wubi86_pinyin", None),
+            "${code_hint|code_rev}"
+        );
+        for mode in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
             assert_eq!(
-                hint_in(&mixed_coord(schema, true), None),
-                CodeHintSource::CodeTable,
-                "混输开：schema.pinyin={schema}"
-            );
-            assert_eq!(
-                hint_in(&mixed_coord(schema, false), None),
-                CodeHintSource::Off,
-                "混输关：schema.pinyin={schema}"
+                factory_tpl(&["pinyin", "wubi86"], "pinyin", mode),
+                "${code_hint|code_rev|shuangpin}",
+                "{mode:?}"
             );
         }
-    }
-
-    /// 混输方案下进临拼 / 快捷输入，仍按临拼那份——模式层优先于方案层。
-    #[test]
-    fn overlay_modes_in_mixed_schema_follow_temp_pinyin_source() {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
-        cfg.schema.active = "wubi86_pinyin".to_string();
-        cfg.schema.mix.pinyin_code_hint = true;
-        cfg.input.temp_pinyin.code_hint_source = "off".to_string();
-        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
-        for active in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
-            assert_eq!(hint_in(&co, active), CodeHintSource::Off, "{active:?}");
-        }
-    }
-
-    /// 出厂：拼音方案不显示编码，混输方案显示主码表反查编码。
-    #[test]
-    fn factory_mixed_schema_shows_reverse_code() {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
-        cfg.schema.active = "wubi86_pinyin".to_string();
-        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
-        assert_eq!(hint_in(&co, None), CodeHintSource::CodeTable);
     }
 }
 
@@ -4330,9 +4125,7 @@ mod separator_tests {
                 for (name, old) in old {
                     let bare = reverse_text_var(name, arg, text, &rl).unwrap();
                     assert_eq!(&*bare, old, "{name} {text:?} {arg:?}");
-                    let via = co
-                        .eval_var(name, arg, &cand, &rl, CodeHintSource::Off, "")
-                        .unwrap();
+                    let via = co.eval_var(name, arg, &cand, &rl, "").unwrap();
                     assert_eq!(via, bare, "{name} {text:?} {arg:?}");
                 }
             }
@@ -4342,7 +4135,7 @@ mod separator_tests {
             text: "好人".into(),
             ..Default::default()
         };
-        let t = co.comment_for(&cand, &tpl, 0, &rl, CodeHintSource::Off, "");
+        let t = co.comment_for(&cand, &tpl, 0, &rl, "");
         assert_eq!(t.as_str(), "女子／人 vbg+w");
         let seps: Vec<(&str, Option<&str>)> = pieces(&t)
             .into_iter()

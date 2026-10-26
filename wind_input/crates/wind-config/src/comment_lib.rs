@@ -486,8 +486,8 @@ impl CommentLibrary {
 
     fn fallback_id(state: CommentState) -> &'static str {
         match state {
-            CommentState::Default => "code_hint",
-            CommentState::Detail => "detail_full",
+            CommentState::Default => "code",
+            CommentState::Detail => "full",
         }
     }
 
@@ -633,7 +633,7 @@ mod tests {
         let s = shipped();
         s.templates
             .iter()
-            .find(|t| t.id == "code_hint")
+            .find(|t| t.id == "code")
             .unwrap()
             .text
             .clone()
@@ -696,27 +696,26 @@ mod tests {
     fn system_comments_parses_shipped_file() {
         let s = shipped();
         let ids: Vec<&str> = s.templates.iter().map(|t| t.id.as_str()).collect();
-        for want in [
-            "code_hint",
-            "pinyin",
-            "chaizi",
-            "chaizi_code",
-            "chaizi_pinyin",
-            "en_meaning",
-            "zh_english",
-            "pinyin_english",
-            "detail_full",
-        ] {
-            assert!(ids.contains(&want), "缺内置模板 {want}");
-        }
         assert_eq!(
-            s.assign.global.default_horizontal.as_deref(),
-            Some("code_hint")
+            ids,
+            [
+                "code",
+                "code_hint",
+                "code_rev",
+                "shuangpin",
+                "pinyin",
+                "chaizi",
+                "chaizi_code",
+                "chaizi_pinyin",
+                "zh_en",
+                "en_zh",
+                "pinyin_en",
+                "full",
+            ],
+            "设计 §13.6 的内置模板与顺序"
         );
-        assert_eq!(
-            s.assign.global.detail_horizontal.as_deref(),
-            Some("detail_full")
-        );
+        assert_eq!(s.assign.global.default_horizontal.as_deref(), Some("code"));
+        assert_eq!(s.assign.global.detail_horizontal.as_deref(), Some("full"));
         let dicts: Vec<&str> = s.dicts.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(dicts, ["en_zh", "zh_en"]);
         assert_eq!(s.dicts[0].path, "comments/en_zh.txt");
@@ -726,38 +725,20 @@ mod tests {
     #[test]
     fn shipped_assign_matches_design_table() {
         let a = shipped().assign;
-        let detail = |m: &BTreeMap<String, CommentCells>, k: &str| {
-            m.get(k).and_then(|c| c.detail_horizontal.clone())
+        let cell = |m: &BTreeMap<String, CommentCells>, k: &str| {
+            let c = &m[k];
+            (c.default_horizontal.clone(), c.detail_horizontal.clone())
         };
-        assert_eq!(
-            detail(&a.by_type, "codetable").as_deref(),
-            Some("chaizi_pinyin")
-        );
-        assert_eq!(
-            detail(&a.by_type, "pinyin").as_deref(),
-            Some("pinyin_english")
-        );
-        assert_eq!(
-            detail(&a.by_type, "shuangpin").as_deref(),
-            Some("pinyin_english")
-        );
-        assert_eq!(detail(&a.by_type, "english").as_deref(), Some("en_meaning"));
-        assert_eq!(
-            a.by_type["english"].default_horizontal.as_deref(),
-            Some("none")
-        );
-        assert_eq!(
-            detail(&a.mode, "temp_english").as_deref(),
-            Some("en_meaning")
-        );
-        assert_eq!(
-            a.mode["temp_english"].default_horizontal.as_deref(),
-            Some("none")
-        );
-        assert_eq!(
-            detail(&a.mode, "temp_pinyin").as_deref(),
-            Some("chaizi_code")
-        );
+        let s = |v: &str| Some(v.to_string());
+        // 设计 §13.6 出厂分配表。
+        assert_eq!(cell(&a.by_type, "codetable"), (None, s("chaizi_pinyin")));
+        assert_eq!(cell(&a.by_type, "pinyin"), (s("none"), s("pinyin_en")));
+        assert_eq!(cell(&a.by_type, "shuangpin"), (s("none"), s("pinyin_en")));
+        assert_eq!(cell(&a.by_type, "mixed"), (s("code_rev"), None));
+        assert_eq!(cell(&a.by_type, "english"), (s("none"), s("en_zh")));
+        assert_eq!(cell(&a.mode, "temp_english"), (s("none"), s("en_zh")));
+        assert_eq!(cell(&a.mode, "temp_pinyin"), (s("code"), s("chaizi_code")));
+        assert_eq!(cell(&a.mode, "mix:quick_mix"), (s("code"), None));
         let all = std::iter::once(&a.global)
             .chain(a.by_type.values())
             .chain(a.schema.values())
@@ -771,9 +752,9 @@ mod tests {
     }
 
     #[test]
-    fn code_hint_template_matches_legacy_default() {
+    fn code_template_matches_legacy_default() {
         let s = shipped();
-        let t = s.templates.iter().find(|t| t.id == "code_hint").unwrap();
+        let t = s.templates.iter().find(|t| t.id == "code").unwrap();
         assert_eq!(t.text, "${code_hint|code_rev|shuangpin}");
     }
 
@@ -880,7 +861,7 @@ mod tests {
     /// 内置模板：code_hint / detail_full / a / b / c / d，文本为 `T:<id>`。
     fn sys(assign: CommentAssign) -> SystemComments {
         SystemComments {
-            templates: ["code_hint", "detail_full", "a", "b", "c", "d"]
+            templates: ["code", "full", "a", "b", "c", "d"]
                 .iter()
                 .map(|id| tpl(id, &format!("T:{id}")))
                 .collect(),
@@ -903,7 +884,7 @@ mod tests {
 
     fn global_only() -> CommentAssign {
         CommentAssign {
-            global: cells(None, Some("code_hint"), None, Some("detail_full")),
+            global: cells(None, Some("code"), None, Some("full")),
             ..Default::default()
         }
     }
@@ -913,8 +894,8 @@ mod tests {
         let (lib, w) = CommentLibrary::build(&sys(global_only()), &UiCommentConfig::default());
         assert!(w.is_empty());
         for v in [true, false] {
-            assert_eq!(text(&lib, None, CommentState::Default, v), "T:code_hint");
-            assert_eq!(text(&lib, None, CommentState::Detail, v), "T:detail_full");
+            assert_eq!(text(&lib, None, CommentState::Default, v), "T:code");
+            assert_eq!(text(&lib, None, CommentState::Detail, v), "T:full");
         }
     }
 
@@ -950,7 +931,7 @@ mod tests {
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
         for v in [false, true] {
             assert_eq!(text(&lib, Some("url"), CommentState::Default, v), "");
-            assert_eq!(text(&lib, None, CommentState::Default, v), "T:code_hint");
+            assert_eq!(text(&lib, None, CommentState::Default, v), "T:code");
         }
     }
 
@@ -968,7 +949,7 @@ mod tests {
         for v in [false, true] {
             assert_eq!(
                 text(&lib, Some("temp_english"), CommentState::Default, v),
-                "T:code_hint"
+                "T:code"
             );
         }
     }
@@ -1011,10 +992,7 @@ mod tests {
         a.schema
             .insert("wubi".into(), cells(None, None, None, Some("inherit")));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
-        assert_eq!(
-            text(&lib, None, CommentState::Detail, false),
-            "T:detail_full"
-        );
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:full");
         assert_eq!(text(&lib, None, CommentState::Detail, true), "T:b");
     }
 
@@ -1025,10 +1003,7 @@ mod tests {
             .insert("wubi".into(), cells(None, None, Some("a"), None));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
         assert_eq!(text(&lib, None, CommentState::Detail, true), "T:a");
-        assert_eq!(
-            text(&lib, None, CommentState::Detail, false),
-            "T:detail_full"
-        );
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:full");
     }
 
     #[test]
@@ -1039,10 +1014,7 @@ mod tests {
             .insert("wubi".into(), cells(None, None, None, None));
         let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
         assert_eq!(text(&lib, None, CommentState::Detail, true), "T:b");
-        assert_eq!(
-            text(&lib, None, CommentState::Detail, false),
-            "T:detail_full"
-        );
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:full");
     }
 
     #[test]
@@ -1082,23 +1054,20 @@ mod tests {
         let (lib, w) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
         assert_eq!(w.len(), 1, "{w:?}");
         assert!(w[0].contains("gone"));
-        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code_hint");
-        assert_eq!(
-            text(&lib, None, CommentState::Detail, true),
-            "T:detail_full"
-        );
+        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code");
+        assert_eq!(text(&lib, None, CommentState::Detail, true), "T:full");
     }
 
     #[test]
     fn user_template_overrides_builtin() {
         let mut u = UiCommentConfig::default();
-        u.templates.push(tpl("code_hint", "X"));
+        u.templates.push(tpl("code", "X"));
         let (lib, w) = CommentLibrary::build(&sys(global_only()), &u);
         assert!(w.is_empty());
         assert_eq!(text(&lib, None, CommentState::Default, true), "X");
         let origin = lib
             .templates()
-            .find(|(t, _)| t.id == "code_hint")
+            .find(|(t, _)| t.id == "code")
             .map(|(_, o)| o);
         assert_eq!(origin, Some(TemplateOrigin::UserOverridesBuiltin));
     }
@@ -1107,18 +1076,15 @@ mod tests {
     fn fallback_when_global_empty() {
         let (lib, _) =
             CommentLibrary::build(&sys(CommentAssign::default()), &UiCommentConfig::default());
-        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code_hint");
-        assert_eq!(
-            text(&lib, None, CommentState::Detail, false),
-            "T:detail_full"
-        );
+        assert_eq!(text(&lib, None, CommentState::Default, true), "T:code");
+        assert_eq!(text(&lib, None, CommentState::Detail, false), "T:full");
     }
 
     #[test]
     fn referenced_texts_covers_detail() {
         let (lib, _) = CommentLibrary::build(&sys(global_only()), &UiCommentConfig::default());
-        assert!(lib.referenced_texts().contains(&"T:detail_full"));
-        assert!(lib.referenced_texts().contains(&"T:code_hint"));
+        assert!(lib.referenced_texts().contains(&"T:full"));
+        assert!(lib.referenced_texts().contains(&"T:code"));
     }
 
     #[test]
@@ -1154,7 +1120,7 @@ mod tests {
         );
         assert_eq!(
             lib.resolve_cell(&sc, AssignLayer::Schema, CommentState::Default, true),
-            (Some("code_hint"), AssignLayer::Global)
+            (Some("code"), AssignLayer::Global)
         );
         assert_eq!(
             lib.resolve_cell(&sc, AssignLayer::Mode, CommentState::Detail, false),
@@ -1162,7 +1128,7 @@ mod tests {
         );
         assert_eq!(
             lib.resolve_cell(&sc, AssignLayer::Global, CommentState::Detail, true),
-            (Some("detail_full"), AssignLayer::Global)
+            (Some("full"), AssignLayer::Global)
         );
     }
 
@@ -1172,7 +1138,7 @@ mod tests {
             CommentLibrary::build(&sys(CommentAssign::default()), &UiCommentConfig::default());
         assert_eq!(
             lib.resolve_cell(&scope(None), AssignLayer::Type, CommentState::Detail, false),
-            (Some("detail_full"), AssignLayer::Global)
+            (Some("full"), AssignLayer::Global)
         );
     }
 
@@ -1226,21 +1192,22 @@ mod tests {
         };
         use CommentState::{Default as D, Detail as T};
         for (scope, st, id, from) in [
-            ("global", D, "code_hint", "global"),
-            ("global", T, "detail_full", "global"),
-            ("type:codetable", D, "code_hint", "global"),
+            ("global", D, "code", "global"),
+            ("global", T, "full", "global"),
+            ("type:codetable", D, "code", "global"),
             ("type:codetable", T, "chaizi_pinyin", "type:codetable"),
-            ("type:pinyin", D, "code_hint", "global"),
-            ("type:pinyin", T, "pinyin_english", "type:pinyin"),
-            ("type:shuangpin", T, "pinyin_english", "type:shuangpin"),
-            ("type:mixed", D, "code_hint", "global"),
-            ("type:mixed", T, "detail_full", "global"),
+            ("type:pinyin", D, "none", "type:pinyin"),
+            ("type:pinyin", T, "pinyin_en", "type:pinyin"),
+            ("type:shuangpin", T, "pinyin_en", "type:shuangpin"),
+            ("type:mixed", D, "code_rev", "type:mixed"),
+            ("type:mixed", T, "full", "global"),
             ("type:english", D, "none", "type:english"),
-            ("type:english", T, "en_meaning", "type:english"),
+            ("type:english", T, "en_zh", "type:english"),
             ("mode:temp_english", D, "none", "mode:temp_english"),
-            ("mode:temp_english", T, "en_meaning", "mode:temp_english"),
-            ("mode:temp_pinyin", D, "code_hint", "global"),
+            ("mode:temp_english", T, "en_zh", "mode:temp_english"),
+            ("mode:temp_pinyin", D, "code", "mode:temp_pinyin"),
             ("mode:temp_pinyin", T, "chaizi_code", "mode:temp_pinyin"),
+            ("mode:mix:quick_mix", D, "code", "mode:mix:quick_mix"),
         ] {
             assert_eq!(
                 got(scope, st),

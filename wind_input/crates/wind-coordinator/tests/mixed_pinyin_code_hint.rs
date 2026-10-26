@@ -1,7 +1,6 @@
-//! 混输方案下拼音候选的编码提示（`schema.mix.pinyin_code_hint`）端到端。
-//!
-//! 此前混输读的是拼音方案那份 `schema.pinyin.code_hint_source`，拼音出厂改 `off` 后混输
-//! 跟着没了编码提示。这里走完整链路：混输方案打拼音 → 候选注释里有没有主码表编码。
+//! 混输方案下拼音候选的编码提示端到端：出厂分配给混输类型「码表编码」（设计 §13.6，
+//! 取代退役的 `schema.mix.pinyin_code_hint`）。走完整链路：混输方案打拼音 → 候选注释里
+//! 有没有主码表编码。
 //! 注释文本借「上屏注释」（`input.alt_commit = "comment"`）读出——它与候选窗共用同一裁决。
 //!
 //! 缺 `build_dev/data` 时自动跳过并打印原因（本组真跑也只要零点几秒，不能拿耗时判假绿）。
@@ -36,23 +35,22 @@ fn key(key_code: u32, modifiers: u32) -> KeyEventData {
     }
 }
 
-fn cfg(schema_pinyin_src: &str, mix_hint: bool) -> Config {
+/// `mixed_tpl` 为 `Some` 时给混输类型的默认态改分这个模板。
+fn cfg(mixed_tpl: Option<&str>) -> Config {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["wubi86_pinyin".into(), "wubi86".into(), "pinyin".into()];
     cfg.schema.active = "wubi86_pinyin".into();
     cfg.input.default.chinese_mode = true;
     cfg.input.alt_commit = "comment".into();
-    cfg.ui
-        .comment
-        .templates
-        .push(wind_config::comment_lib::CommentTemplateDef {
-            id: "rev".into(),
-            name: "rev".into(),
-            text: "${code_rev}".into(),
-        });
-    cfg.ui.comment.assign.global.default_horizontal = Some("rev".into());
-    cfg.schema.pinyin.code_hint_source = schema_pinyin_src.into();
-    cfg.schema.mix.pinyin_code_hint = mix_hint;
+    if let Some(t) = mixed_tpl {
+        cfg.ui.comment.assign.by_type.insert(
+            "mixed".into(),
+            wind_config::comment_lib::CommentCells {
+                default_horizontal: Some(t.into()),
+                ..Default::default()
+            },
+        );
+    }
     cfg
 }
 
@@ -79,22 +77,25 @@ fn first_comment(cfg: Config) -> Option<String> {
     }
 }
 
-/// 出厂开：拼音那份是 off，混输照样有编码。
+/// 出厂：混输类型分到「码表编码」，拼音候选显示主码表编码。
 #[test]
-fn mixed_shows_codetable_code_even_when_pinyin_source_off() {
+fn mixed_shows_codetable_code_by_factory_assignment() {
     if !has_schemas() {
         eprintln!("跳过：缺少 build_dev/data 的混输方案");
         return;
     }
-    assert_eq!(first_comment(cfg("off", true)).as_deref(), Some("wqvb"));
+    assert_eq!(first_comment(cfg(None)).as_deref(), Some("wqvb"));
 }
 
-/// 关掉混输那份：拼音那份开着也不显示。
+/// 混输类型改分「补全编码」：拼音候选不再显示码表编码。
 #[test]
-fn mixed_switch_off_hides_code_even_when_pinyin_source_on() {
+fn mixed_with_hint_only_template_hides_codetable_code() {
     if !has_schemas() {
         eprintln!("跳过：缺少 build_dev/data 的混输方案");
         return;
     }
-    assert_eq!(first_comment(cfg("auto", false)), None);
+    assert_ne!(
+        first_comment(cfg(Some("code_hint"))).as_deref(),
+        Some("wqvb")
+    );
 }

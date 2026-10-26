@@ -20,8 +20,7 @@
 
 use crate::comment::Template;
 use wind_config::Config;
-use wind_config::comment_lib::CommentLibrary;
-use wind_config::config::CodeHintSource;
+use wind_config::comment_lib::{CommentLibrary, SchemaType};
 use wind_engine::EngineManager;
 
 /// 编码反查（主码表反查索引 + 用户层编码索引）的变量名，含永久兼容别名。
@@ -58,9 +57,9 @@ pub(crate) struct SchemaFacts {
     pub(crate) aux_code_in_use: bool,
     /// 自动造词开着（码表 / 混输方案 + 开关）。造词的查重要主码表反查索引。
     pub(crate) auto_phrase: bool,
-    /// 可用方案里有混输方案（`engine.type = "mixed"`）。`schema.mix.pinyin_code_hint` 只在
-    /// 这时才有消费者。
-    pub(crate) mixed_available: bool,
+    /// 可用方案及其注释方案类型：编码反查要不要预载，按它们各自落到的模板判（见
+    /// [`DataNeeds::derive`]）。为空时（测试构造）退回「任一引用到的模板」的保守判法。
+    pub(crate) schemas: Vec<(String, SchemaType)>,
 }
 
 impl SchemaFacts {
@@ -70,12 +69,50 @@ impl SchemaFacts {
         Self {
             aux_code_in_use: active.aux_code_in_use,
             auto_phrase: active.auto_phrase,
-            mixed_available: mgr
+            schemas: mgr
                 .available_schemas()
                 .iter()
-                .any(|id| mgr.schema_engine_type(id).as_deref() == Some("mixed")),
+                .map(|id| (id.clone(), crate::comment::schema_type_of(mgr, id)))
+                .collect(),
         }
     }
+}
+
+/// 可达上下文里有没有落到引用编码反查变量的模板，见 [`DataNeeds::derive`]。
+fn rev_reachable(cfg: &Config, lib: &CommentLibrary, facts: &SchemaFacts) -> bool {
+    use wind_config::comment_lib::{CommentScope, CommentState};
+    if facts.schemas.is_empty() {
+        return lib
+            .referenced_texts()
+            .iter()
+            .any(|t| refs_any(t, CODE_REV_VARS));
+    }
+    let mut modes: Vec<String> = cfg
+        .schema
+        .mix_modes
+        .iter()
+        .map(|m| format!("mix:{}", m.id))
+        .collect();
+    if cfg.input.temp_pinyin.enabled {
+        modes.push("temp_pinyin".into());
+    }
+    facts.schemas.iter().any(|(id, ty)| {
+        // 码表、英文方案的主路不出拼音来源候选，`${code_rev}` 在那里恒空，不算消费者。
+        let main = (!matches!(ty, SchemaType::CodeTable | SchemaType::English)).then_some(None);
+        main.into_iter()
+            .chain(modes.iter().map(|m| Some(m.as_str())))
+            .any(|mode| {
+                let scope = CommentScope {
+                    mode,
+                    schema: id,
+                    schema_type: *ty,
+                };
+                [CommentState::Default, CommentState::Detail]
+                    .into_iter()
+                    .flat_map(|st| [(st, false), (st, true)])
+                    .any(|(st, v)| refs_any(lib.template_text(&scope, st, v), CODE_REV_VARS))
+            })
+    })
 }
 
 fn refs_any(tpl: &str, names: &[&str]) -> bool {
@@ -88,11 +125,10 @@ impl DataNeeds {
     ///
     /// - 注释模板取 `lib.referenced_texts()`：任一格引用到的模板都算，不论态、排布与作用范围
     ///   （态随 Alt 即时切换，第一次切过去不能是空的）。
-    /// - 注释段的 `${code_rev*}` 只在编码来源档 `allows_reverse()` 时求值。档分三份：临拼 / 快捷
-    ///   输入期间读 `input.temp_pinyin.code_hint_source`，混输方案读 `schema.mix.pinyin_code_hint`，
-    ///   其余读 `schema.pinyin.code_hint_source`（`Coordinator::comment_hint_source`）。模板落在
-    ///   哪档下渲染取决于分配，这里不细分：任一档放行即算（保守侧）。
-    /// - 悬停段**不看**编码来源档：逐字段走 `eval_text_var`，那里的 `${code_rev}` 不带门控；
+    /// - 注释段的 `${code_rev*}` 按**可达上下文实际落到的模板**判（设计 §13.6）：每个可用方案的
+    ///   主路（码表、英文方案的主路不出拼音来源候选，跳过），以及进得去的临时拼音、各快捷输入，
+    ///   两态两排布逐一解析，任一引用即要。纯拼音用户主路默认态是 `none`，出厂不为它预载。
+    /// - 悬停段：逐字段走 `eval_text_var`，那里的 `${code_rev}` 不带门控；
     ///   `${word_code}` / `${code_source}` 任一被引用，候选循环就按词查码（含用户层）。
     /// - 拆字不受任何档门控，模板里写了就要。
     /// - 两个总开关在上面这些之上：`ui.comment.enabled` 关 ⇒ 注释模板都不算；
@@ -100,20 +136,6 @@ impl DataNeeds {
     pub(crate) fn derive(cfg: &Config, lib: &CommentLibrary, facts: &SchemaFacts) -> Self {
         let tip = crate::tooltip::CompiledTooltip::compile(&cfg.ui.tooltip);
         let tip_any = |names: &[&str]| names.iter().any(|n| tip.references(n));
-
-        // 主档：拼音方案那份，或混输方案那份（装了混输方案才有消费者）。
-        let main_rev =
-            CodeHintSource::from_config(&cfg.schema.pinyin.code_hint_source, CodeHintSource::Off)
-                .allows_reverse()
-                || (facts.mixed_available && cfg.schema.mix.pinyin_code_hint);
-        // 临拼档只在临拼 / 快捷输入进得去时才有消费者。
-        let temp_reachable = cfg.input.temp_pinyin.enabled || !cfg.schema.mix_modes.is_empty();
-        let temp_rev = temp_reachable
-            && CodeHintSource::from_config(
-                &cfg.input.temp_pinyin.code_hint_source,
-                CodeHintSource::Auto,
-            )
-            .allows_reverse();
 
         // 注释总开关关着：模板一律不渲染（`comment_template_for` 给空模板），都不算需求。
         // 悬停总开关不必在这里判：关着时 `CompiledTooltip::compile` 已编出空段列表。
@@ -123,7 +145,7 @@ impl DataNeeds {
             Vec::new()
         };
         let comment_any = |names: &[&str]| templates.iter().any(|t| refs_any(t, names));
-        let comment_rev = (temp_rev || main_rev) && comment_any(CODE_REV_VARS);
+        let comment_rev = cfg.ui.comment.enabled && rev_reachable(cfg, lib, facts);
         let comment_chaizi = comment_any(CHAIZI_VARS);
         let correct_pinyin = comment_any(&[CORRECT_PINYIN_VAR]) || tip_any(&[CORRECT_PINYIN_VAR]);
 
@@ -195,11 +217,11 @@ mod tests {
             templates: full
                 .templates
                 .into_iter()
-                .filter(|t| t.id == "code_hint")
+                .filter(|t| t.id == "code")
                 .collect(),
             ..Default::default()
         };
-        sys.assign.global.default_vertical = Some("code_hint".into());
+        sys.assign.global.default_vertical = Some("code".into());
         sys
     }
 
@@ -209,8 +231,30 @@ mod tests {
         DataNeeds::derive(c, &lib, facts)
     }
 
+    /// 默认的方案事实：只装了五笔（码表）。
+    fn facts() -> SchemaFacts {
+        SchemaFacts {
+            schemas: vec![("wubi86".into(), SchemaType::CodeTable)],
+            ..Default::default()
+        }
+    }
+
+    /// 临时拼音与快捷输入两态都不显示：编码反查在注释里再无消费者（取代退役的临拼编码来源 `off`）。
+    fn without_overlay_codes(c: &mut Config) {
+        for m in ["temp_pinyin", "mix:quick_mix"] {
+            c.ui.comment.assign.mode.insert(
+                m.into(),
+                CommentCells {
+                    default_horizontal: Some("none".into()),
+                    detail_horizontal: Some("none".into()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     fn derive(c: &Config) -> DataNeeds {
-        derive_in(&shipped(), c, &SchemaFacts::default())
+        derive_in(&shipped(), c, &facts())
     }
 
     fn derive_with(c: &Config, facts: &SchemaFacts) -> DataNeeds {
@@ -218,7 +262,7 @@ mod tests {
     }
 
     fn derive_plain(c: &Config) -> DataNeeds {
-        derive_in(&plain(), c, &SchemaFacts::default())
+        derive_in(&plain(), c, &facts())
     }
 
     /// 登记用户模板 `id`。
@@ -279,29 +323,47 @@ mod tests {
         assert_eq!(derive(&Config::default()), n, "L1 与 L2 在这几项上应一致");
     }
 
-    /// 关掉悬停[编码]后反查仍然要：出厂全局注释模板含 `${code_rev}`，临拼 / 快捷输入的
-    /// 编码来源出厂 `auto`。把那一档也关了才真正不要。
+    /// 关掉悬停[编码]后反查仍然要：临拼 / 快捷输入出厂分到的模板含 `${code_rev}`。
+    /// 把它们也改成不显示才真正不要。
     #[test]
     fn code_section_off_leaves_temp_pinyin_code_rev_as_consumer() {
         let c = without_code_section(factory());
         let n = derive(&c);
         assert!(
             n.reverse_index && n.user_text,
-            "临拼档 auto + 全局模板 code_rev 仍是消费者"
+            "临拼 / 快捷输入的出厂模板仍是消费者"
         );
 
         let mut off = c.clone();
-        off.input.temp_pinyin.code_hint_source = "off".into();
+        without_overlay_codes(&mut off);
         let n = derive(&off);
         assert!(
             !n.reverse_index && !n.user_text,
-            "两档都不放行反查、悬停又没编码段 ⇒ 都不要"
+            "可达的模板都不含反查变量、悬停又没编码段 ⇒ 都不要"
         );
 
-        // 主方案那档放行同样算。
+        // 主路分到含反查的模板同样算。
+        // 拼音方案主路分到含反查的模板同样算；码表主路不出拼音来源候选，分了也不算。
+        let with_pinyin = SchemaFacts {
+            schemas: vec![
+                ("wubi86".into(), SchemaType::CodeTable),
+                ("pinyin".into(), SchemaType::Pinyin),
+            ],
+            ..Default::default()
+        };
         let mut main = off.clone();
-        main.schema.pinyin.code_hint_source = "codetable".into();
-        assert!(derive(&main).reverse_index && derive(&main).user_text);
+        for ty in ["codetable", "pinyin"] {
+            main.ui.comment.assign.by_type.insert(
+                ty.into(),
+                CommentCells {
+                    default_horizontal: Some("code_rev".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(!derive(&main).reverse_index, "只装五笔：码表主路不算");
+        let n = derive_with(&main, &with_pinyin);
+        assert!(n.reverse_index && n.user_text);
 
         // 临拼与快捷输入都进不去时，临拼档再放行也没有消费者。
         let mut unreachable = c.clone();
@@ -310,32 +372,46 @@ mod tests {
         assert!(!derive(&unreachable).reverse_index);
     }
 
-    /// 混输方案的编码提示开关（`schema.mix.pinyin_code_hint`，出厂开）只在**装了混输方案**
-    /// 时算消费者：纯拼音用户不该为一个用不上的开关常驻反查索引。
+    /// 混输类型出厂给码表编码：只在**装了混输方案**时算消费者，纯拼音用户不为它常驻反查索引；
+    /// 混输改成只要补全编码后也不要。
     #[test]
-    fn mix_pinyin_code_hint_counts_only_with_mixed_schema() {
+    fn mixed_type_counts_only_with_mixed_schema() {
         let mut off = without_code_section(factory());
-        off.input.temp_pinyin.code_hint_source = "off".into();
-        assert!(off.schema.mix.pinyin_code_hint, "前置条件：出厂开");
-        let with_mixed = SchemaFacts {
-            mixed_available: true,
+        without_overlay_codes(&mut off);
+        let pinyin_only = SchemaFacts {
+            schemas: vec![("pinyin".into(), SchemaType::Pinyin)],
             ..Default::default()
         };
-
-        assert!(!derive(&off).reverse_index, "没装混输方案 ⇒ 不要");
+        let with_mixed = SchemaFacts {
+            schemas: vec![
+                ("pinyin".into(), SchemaType::Pinyin),
+                ("wubi86_pinyin".into(), SchemaType::Mixed),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            !derive_with(&off, &pinyin_only).reverse_index,
+            "纯拼音 ⇒ 不要"
+        );
         let n = derive_with(&off, &with_mixed);
         assert!(n.reverse_index && n.user_text, "装了混输方案 ⇒ 要");
 
-        let mut switched_off = off.clone();
-        switched_off.schema.mix.pinyin_code_hint = false;
-        assert!(!derive_with(&switched_off, &with_mixed).reverse_index);
+        let mut hint_only = off.clone();
+        hint_only.ui.comment.assign.by_type.insert(
+            "mixed".into(),
+            CommentCells {
+                default_horizontal: Some("code_hint".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!derive_with(&hint_only, &with_mixed).reverse_index);
     }
 
     /// 其余反查来源：联想、辅助码、自动造词。用户层只跟悬停 / 注释 / 辅助码。
     #[test]
     fn other_reverse_index_consumers() {
         let mut base = without_code_section(factory());
-        base.input.temp_pinyin.code_hint_source = "off".into();
+        without_overlay_codes(&mut base);
         assert!(!derive(&base).reverse_index, "前置条件：基线什么都不要");
 
         let mut assoc = base.clone();
@@ -347,7 +423,7 @@ mod tests {
             &base,
             &SchemaFacts {
                 aux_code_in_use: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(aux.reverse_index && aux.user_text, "辅助码两层都查");
@@ -356,7 +432,7 @@ mod tests {
             &base,
             &SchemaFacts {
                 auto_phrase: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(
@@ -369,7 +445,7 @@ mod tests {
     #[test]
     fn tooltip_code_rev_counts_regardless_of_hint_source() {
         let mut c = without_code_section(factory());
-        c.input.temp_pinyin.code_hint_source = "off".into();
+        without_overlay_codes(&mut c);
         let mut sec = c.ui.tooltip.sections[0].clone();
         sec.label = "码".into();
         sec.each = "han".into();
@@ -582,7 +658,7 @@ mod tests {
             &c,
             &SchemaFacts {
                 aux_code_in_use: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(aux.reverse_index && aux.user_text, "辅助码仍两层都查");
@@ -591,7 +667,7 @@ mod tests {
             &c,
             &SchemaFacts {
                 auto_phrase: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(auto.reverse_index && !auto.user_text, "自动造词仍查重");
@@ -621,7 +697,7 @@ mod tests {
         assert!(!n.chaizi, "悬停关掉 ⇒ 拆字段不算：{n:?}");
         assert!(
             n.reverse_index && n.user_text,
-            "全局注释 ${{code_rev}} + 临拼档 auto 仍是消费者：{n:?}"
+            "临拼落到全局注释 ${{code_rev}} 仍是消费者：{n:?}"
         );
         // 反证上一句确实来自注释：再关注释就都不要了。
         c.ui.comment.enabled = false;
@@ -816,7 +892,7 @@ mod tests {
         }
         let none = wubi(|c| {
             *c = without_code_section(c.clone());
-            c.input.temp_pinyin.code_hint_source = "off".into();
+            without_overlay_codes(c);
         });
         let c = Coordinator::new_headless(none, Some(&data_dir()));
         assert!(!c.data_needs().reverse_index, "前置条件");
@@ -853,7 +929,7 @@ mod tests {
 
         c.refresh_config_in_memory(|cfg| {
             *cfg = without_code_section(cfg.clone());
-            cfg.input.temp_pinyin.code_hint_source = "off".into();
+            without_overlay_codes(cfg);
         });
         c.apply_data_needs();
         assert_eq!(c.engine_mgr.user_text_loaded(), 0, "没有消费者 ⇒ 清空");
@@ -990,7 +1066,7 @@ mod tests {
     fn no_consumers() -> Config {
         wubi(|c| {
             *c = without_code_section(c.clone());
-            c.input.temp_pinyin.code_hint_source = "off".into();
+            without_overlay_codes(c);
         })
     }
 
@@ -1230,11 +1306,17 @@ mod tests {
         let set_tpl = |tpl: &str| {
             c.refresh_config_in_memory(|cfg| {
                 cfg.ui.comment.templates.clear();
-                cfg.ui.comment.assign.global = Default::default();
+                cfg.ui.comment.assign.by_type.remove("pinyin");
                 if !tpl.is_empty() {
                     add_template(cfg, "t", tpl);
-                    cfg.ui.comment.assign.global.default_vertical = Some("t".into());
-                    cfg.ui.comment.assign.global.default_horizontal = Some("t".into());
+                    // 夹具是拼音方案：拼音类型出厂默认态是 none，模板分到类型上。
+                    cfg.ui.comment.assign.by_type.insert(
+                        "pinyin".into(),
+                        CommentCells {
+                            default_horizontal: Some("t".into()),
+                            ..Default::default()
+                        },
+                    );
                 }
             });
             c.apply_data_needs();

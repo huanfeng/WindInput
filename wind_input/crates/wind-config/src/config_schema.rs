@@ -155,13 +155,6 @@ const RARE_PHRASE_VALUES: &[&str] = &["keep", "filter"];
 const PUNCT_EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear", "clear_no_input"];
 
 /// 码表词频应用策略。
-/// `schema.pinyin.code_hint_source` / `input.temp_pinyin.code_hint_source` 共用的值域。
-///
-/// ⚠️ 必须与 [`wind_config::config::CodeHintSource::from_config`] 的 match 臂**逐项对齐**。
-/// 不对齐的表现是第二种漂移：注册表说某个值非法（CLI/设置页据此校验、生成下拉），
-/// 运行时却认它——或者反过来。
-pub(crate) const CODE_HINT_SOURCE_VALUES: &[&str] = &["off", "codetable", "shuangpin", "auto"];
-
 /// `ui.comment.assign.global` 的四格键名。⚠️ 与 [`crate::comment_lib::CommentCells`] 的字段名逐项对齐。
 pub(crate) const COMMENT_CELL_KEYS: &[&str] = &[
     "default_vertical",
@@ -319,10 +312,6 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.auto_phrase.draft_max_entries", Int),
     f("schema.codetable.auto_phrase.draft_flush_batch", Int),
     // 全局拼音
-    f(
-        "schema.pinyin.code_hint_source",
-        Enum(CODE_HINT_SOURCE_VALUES),
-    ),
     f("schema.pinyin.use_smart_compose", Bool),
     // 用户词进整句词图（S2）。**出厂 true**（2026-09-28 起），接用户词与临时词
     // （不接草稿层）。只在 use_smart_compose 开着时有效，UI 侧 enabled_when 挂在它上面。
@@ -407,7 +396,6 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.mix.block_commit_on_pinyin_word", Bool),
     f("schema.mix.pinyin_word_min_weight", Int),
     f("schema.mix.enable_pinyin_abbrev", Bool),
-    f("schema.mix.pinyin_code_hint", Bool),
     f("schema.mix.pinyin_partial_candidates", Bool),
     f("schema.mix.pinyin_partial_candidates_overflow", Bool),
     // 快捷输入：各候选来源的开关与优先级在 schema.mix_modes 的 members 里（有无=开关，
@@ -536,10 +524,6 @@ static REGISTRY: &[ConfigField] = &[
     f(
         "input.temp_pinyin.candidate_layout",
         Enum(LAYOUT_INTENT_VALUES),
-    ),
-    f(
-        "input.temp_pinyin.code_hint_source",
-        Enum(CODE_HINT_SOURCE_VALUES),
     ),
     f("input.url.enabled", Bool),
     f("input.url.prefixes", StrList),

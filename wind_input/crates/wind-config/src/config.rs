@@ -89,12 +89,20 @@ fn path_refs(path: &[String]) -> Vec<&str> {
     path.iter().map(String::as_str).collect()
 }
 
-/// 旧版全局注释模板的出厂值（等于内置模板 `code_hint`）。迁移时全局旧值等于它的视为没写。
+/// 旧版全局注释模板的出厂值（等于内置模板 `code`）。迁移时全局旧值等于它的视为没写。
 const LEGACY_FACTORY_COMMENT_TEMPLATE: &str = "${code_hint|code_rev|shuangpin}";
 
 /// 出厂分配（`data/system.comments.toml`）里 `default_*` 有值的非全局作用范围。旧版它们跟随全局，
 /// 迁出自定义全局模板时要在这些范围写 `inherit`，否则被出厂格挡住。守门测试对照出厂文件。
-const FACTORY_DEFAULT_SCOPES: &[&[&str]] = &[&["type", "english"], &["mode", "temp_english"]];
+const FACTORY_DEFAULT_SCOPES: &[&[&str]] = &[
+    &["type", "pinyin"],
+    &["type", "shuangpin"],
+    &["type", "mixed"],
+    &["type", "english"],
+    &["mode", "temp_english"],
+    &["mode", "temp_pinyin"],
+    &["mode", "mix:quick_mix"],
+];
 
 /// 从 `t` 摘下 `comment_template_<side>`；非字符串的只删不迁。
 fn take_legacy_template(t: &mut toml::Table, origin: &str, side: &str) -> Option<String> {
@@ -1264,71 +1272,10 @@ impl AltCommit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CodeHintSource {
-    /// 两种编码都不显示（旧 `show_code_hint = false`）。
-    Off,
-    /// 只反查主码表（旧 `show_code_hint = true`）。
-    CodeTable,
-    /// 只显示双拼编码。
-    Shuangpin,
-    /// 两者都求值，谁先出由模板的回退链决定。临拼的出厂档。
-    #[default]
-    Auto,
-}
-
-impl CodeHintSource {
-    /// 认不出的值回落 `fallback`，由调用方传入**该字段自己的出厂档**：
-    /// `schema.pinyin.code_hint_source` 传 `Off`，`input.temp_pinyin.code_hint_source` 传 `Auto`。
-    /// 两份出厂值不同，函数内写死单一兜底的话，拼音方案用户手滑写错一个字母就会
-    /// 意外看到编码。写错不弹错误框、不让功能消失，与仓里其它字符串枚举同一取舍。
-    ///
-    /// ⚠️ match 臂必须与 `config_schema::CODE_HINT_SOURCE_VALUES` **逐项对齐**。这里多认
-    /// 一个别名（比如让 `none` 也算 `off`），就会变成「注册表说它非法、运行时却认」——
-    /// CLI 校验与设置页下拉都按注册表办事，用户会撞上「明明能用却填不进去」。
-    pub fn from_config(s: &str, fallback: Self) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "off" => Self::Off,
-            "codetable" => Self::CodeTable,
-            "shuangpin" => Self::Shuangpin,
-            "auto" => Self::Auto,
-            _ => fallback,
-        }
-    }
-
-    /// 允许 `${code_rev}` / `${code_rev_all}`（查主码表反向索引）求值吗？
-    pub fn allows_reverse(self) -> bool {
-        matches!(self, Self::CodeTable | Self::Auto)
-    }
-
-    /// 允许 `${shuangpin}`（双拼编码）求值吗？
-    pub fn allows_shuangpin(self) -> bool {
-        matches!(self, Self::Shuangpin | Self::Auto)
-    }
-}
-
-/// 拼音方案的出厂档：`off`，两种编码都不显示。
-///
-/// 编码反查提示是给码表用户设计的；绝大多数纯拼音/双拼用户不熟悉也不需要，出厂开着
-/// 只会让候选旁多一串看不懂的字母。码表用户照样可以在设置里打开。
-/// 老用户走 [`Config::migrate_show_code_hint_value`]，映到 `codetable` 保持原样。
-///
-/// ⚠️ 临拼/快捷输入不再共用本字段，出厂值也不同，见 `input.temp_pinyin.code_hint_source`
-/// （[`default_temp_pinyin_code_hint_source`]）。
-fn default_code_hint_source() -> String {
-    "off".to_string()
-}
-
 /// 全局拼音配置（[schema.pinyin]）。所有拼音类方案（全拼/双拼/混输拼音子方案）共用，
 /// 无方案级 override。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PinyinGlobalConfig {
-    /// 拼音方案（含双拼）下，候选注释里的编码从哪来。值域与理由见 [`CodeHintSource`]。
-    /// 出厂 `off`（理由见 `default_code_hint_source`）；认不出的值同样回落 `off`。
-    /// 临拼/快捷输入不读本字段，读 `input.temp_pinyin.code_hint_source`；混输方案也不读，
-    /// 读 `schema.mix.pinyin_code_hint`。
-    #[serde(default = "default_code_hint_source")]
-    pub code_hint_source: String,
     #[serde(default = "default_true")]
     pub use_smart_compose: bool,
     /// 让**用户上屏过的词**（用户词 + 临时词）参与整句解码（S2）。**出厂 true**
@@ -1673,7 +1620,6 @@ impl Default for PinyinAbbrev {
 impl Default for PinyinGlobalConfig {
     fn default() -> Self {
         Self {
-            code_hint_source: default_code_hint_source(),
             use_smart_compose: true,
             // 出厂开（2026-09-28 起）。与引擎侧 `pinyin::Config::default()` 同值，
             // UI 侧靠 enabled_when 挂在 use_smart_compose 上防止关了智能组词还显得开着。
@@ -3114,15 +3060,6 @@ pub struct MixGlobal {
     /// `mix_pinyin_abbrev_*` 三条测试守门。
     #[serde(default)]
     pub enable_pinyin_abbrev: bool,
-    /// 混输方案下，拼音候选旁是否显示主码表的编码（反查）。默认开。
-    ///
-    /// 独立于拼音方案那份 `schema.pinyin.code_hint_source`：那份出厂 `off`，照顾的是纯拼音
-    /// 用户；混输用户以码表为主，打拼音时看编码正是学码、补码的场景，共用一份就只能顾一头
-    /// （此前混输读的就是拼音那份，拼音出厂改 off 后混输跟着没了编码提示）。
-    /// 只有开关、不设四档：混输里的拼音是全拼，双拼编码没有意义。
-    /// 临拼 / 快捷输入期间不读本项，读 `input.temp_pinyin.code_hint_source`。
-    #[serde(default = "default_true")]
-    pub pinyin_code_hint: bool,
 }
 
 impl Default for MixGlobal {
@@ -3153,7 +3090,6 @@ impl Default for MixGlobal {
             // 用户把两个否决开关都关掉也无济于事）。混输用户以码表为主，默认让顶码可用；
             // 需要简拼的用户显式打开即可。详见 `data/config.toml` 同名项注释。
             enable_pinyin_abbrev: false,
-            pinyin_code_hint: true,
         }
     }
 }
@@ -5432,24 +5368,10 @@ pub struct TempPinyinConfig {
     /// 进入临时拼音期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 临拼与快捷输入（mix）期间，拼音候选注释里的编码从哪来。值域同 [`CodeHintSource`]。
-    ///
-    /// 独立于拼音方案那份 `schema.pinyin.code_hint_source`：临拼正是码表用户借拼音反查
-    /// 编码的典型场景，出厂 `auto`；拼音方案面向的是纯拼音/双拼用户，出厂 `off`。
-    /// 两类用户习惯相反，共用一份就只能顾一头。设成 `off` 即真正关掉（旧实现强制放行反查、
-    /// 关不掉）。
-    #[serde(default = "default_temp_pinyin_code_hint_source")]
-    pub code_hint_source: String,
 }
 
 fn default_temp_pinyin_triggers() -> Vec<String> {
     vec!["backtick".to_string()]
-}
-
-/// 临拼的编码来源出厂档：`auto`。⛔ 不能复用 [`default_code_hint_source`]——那份出厂是
-/// `off`，复用会把码表用户的反查场景一并关掉。
-fn default_temp_pinyin_code_hint_source() -> String {
-    "auto".to_string()
 }
 
 impl Default for TempPinyinConfig {
@@ -5459,7 +5381,6 @@ impl Default for TempPinyinConfig {
             trigger_keys: default_temp_pinyin_triggers(),
             hotkey: String::new(),
             candidate_layout: LayoutIntent::default(),
-            code_hint_source: default_temp_pinyin_code_hint_source(),
         }
     }
 }
@@ -8835,7 +8756,7 @@ impl Config {
         Self::migrate_force_vertical_value(&mut merged);
         Self::migrate_index_labels_value(&mut merged);
         Self::migrate_empty_code_behavior_value(&mut merged);
-        // ⚠️ `migrate_comment_max_chars_value` / `migrate_show_code_hint_value` **不在这里**，
+        // ⚠️ `migrate_comment_max_chars_value` / `migrate_code_hint_gates_value` **不在这里**，
         // 它们在各层合并前就地跑（见 [`Self::migrate_user_layer_value`]）。判据不同：
         // 那两条要问「用户写过新键吗」，而合并结果里的新键必然存在（L1 就是
         // `Config::default()` 序列化出来的），在这里问永远得到「写过」，迁移一次都不会执行。
@@ -9266,9 +9187,9 @@ impl Config {
     /// custom 层（L2.5）也跑一遍，保住「定制层里的旧值同样被救到」这个既有性质
     /// —— 那是合并后迁移白捡的好处，换成层内跑就得显式保留。
     fn migrate_user_layer_value(layer: &mut toml::Value) {
-        Self::migrate_show_code_hint_value(layer);
         Self::migrate_comment_max_chars_value(layer);
         Self::migrate_comment_templates_value(layer);
+        Self::migrate_code_hint_gates_value(layer);
         Self::migrate_font_size_follow_theme_value(layer);
         Self::migrate_langbar_badge_colors_value(layer);
         Self::migrate_tooltip_sections_value(layer);
@@ -9514,43 +9435,97 @@ impl Config {
         cand.insert("font_size".to_string(), size);
     }
 
-    /// 存量迁移（**须在反序列化前**跑，字段已改名）：`schema.pinyin.show_code_hint`(bool)
-    /// → `schema.pinyin.code_hint_source`(枚举字符串)。
+    /// 编码来源三开关退役（设计 §13.6）：用户层写了的值折成注释分配，旧键摘掉。
     ///
-    /// 映射刻意**不对称**：
-    /// - `true`  → `"codetable"`（**不是** `"auto"`）—— 严格零回归。旧的 true 只表达
-    ///   「显示反查来的码表编码」这一件事；映到 auto 会让**没配主码表**的双拼用户从
-    ///   「注释位空着」变成「显示双拼码」。那不算回归（原本就是空的），但确实是行为变化，
-    ///   该由用户自己去开，而不是升级时替他决定。
-    /// - `false` → `"off"`
+    /// - `schema.pinyin.code_hint_source`（更早的 `schema.pinyin.show_code_hint` 按 true →
+    ///   `codetable`、false → `off` 先折一道）：非 `off` 写拼音、双拼类型的默认横排格；
+    /// - `input.temp_pinyin.code_hint_source`：非 `auto` 写临时拼音与各快捷输入的默认横排格；
+    /// - `schema.mix.pinyin_code_hint = false`：混输类型默认横排格写 `code_hint`（只留补全编码）。
     ///
-    /// 键不存在则不动，让出厂值 `auto` 生效——新装用户一上手就能看到本方案的击键编码。
-    fn migrate_show_code_hint_value(merged: &mut toml::Value) {
-        let Some(old) = merged
-            .get("schema")
-            .and_then(|s| s.get("pinyin"))
-            .and_then(|p| p.get("show_code_hint"))
-            .and_then(toml::Value::as_bool)
-        else {
+    /// 目标格本层已有值时不覆盖（旧版自定义了全局模板的用户，[`Self::migrate_comment_templates_value`]
+    /// 已在这些格写了 `inherit`，跟随他们的全局模板）。旧键照删，幂等。
+    fn migrate_code_hint_gates_value(layer: &mut toml::Value) {
+        let Some(root) = layer.as_table_mut() else {
             return;
         };
-        let Some(py) = merged
-            .get_mut("schema")
-            .and_then(|s| s.get_mut("pinyin"))
-            .and_then(toml::Value::as_table_mut)
-        else {
-            return;
+        let take = |root: &mut toml::Table, path: &[&str]| -> Option<toml::Value> {
+            let (last, parent) = path.split_last()?;
+            let mut t = &mut *root;
+            for k in parent {
+                t = t.get_mut(*k)?.as_table_mut()?;
+            }
+            t.remove(*last)
         };
-        // 用户已经写了新键就不覆盖——他的显式配置比迁移出来的推断更可信。
-        if py.contains_key("code_hint_source") {
-            return;
+        let legacy = take(root, &["schema", "pinyin", "show_code_hint"]).and_then(|v| v.as_bool());
+        let pinyin = take(root, &["schema", "pinyin", "code_hint_source"])
+            .and_then(|v| v.as_str().map(|s| s.trim().to_ascii_lowercase()))
+            .or_else(|| legacy.map(|on| if on { "codetable" } else { "off" }.to_string()));
+        let temp = take(root, &["input", "temp_pinyin", "code_hint_source"])
+            .and_then(|v| v.as_str().map(|s| s.trim().to_ascii_lowercase()));
+        let mix = take(root, &["schema", "mix", "pinyin_code_hint"]).and_then(|v| v.as_bool());
+
+        let mut writes: Vec<(Vec<String>, &str, String)> = Vec::new();
+        let cell = |scope: &[&str]| {
+            let mut p: Vec<String> = ["ui", "comment", "assign"].map(String::from).into();
+            p.extend(scope.iter().map(|s| s.to_string()));
+            p.push("default_horizontal".to_string());
+            p
+        };
+        let pinyin_tpl = match pinyin.as_deref() {
+            Some("codetable") => Some("code_rev"),
+            Some("shuangpin") => Some("shuangpin"),
+            Some("auto") => Some("code"),
+            _ => None,
+        };
+        if let (Some(t), Some(v)) = (pinyin_tpl, &pinyin) {
+            for ty in ["pinyin", "shuangpin"] {
+                writes.push((
+                    cell(&["type", ty]),
+                    t,
+                    format!("schema.pinyin.code_hint_source={v}"),
+                ));
+            }
         }
-        let mapped = if old { "codetable" } else { "off" };
-        py.insert(
-            "code_hint_source".to_string(),
-            toml::Value::String(mapped.to_string()),
-        );
-        info!("Migrated schema.pinyin.show_code_hint={old} → code_hint_source={mapped}");
+        let temp_tpl = match temp.as_deref() {
+            Some("off") => Some("none"),
+            Some("codetable") => Some("code_rev"),
+            Some("shuangpin") => Some("shuangpin"),
+            _ => None,
+        };
+        if let (Some(t), Some(v)) = (temp_tpl, &temp) {
+            // 快捷输入的 id 取本层写的 mix_modes，没写就是出厂那几个。
+            let ids: Vec<String> =
+                match get_nested(&toml::Value::Table(root.clone()), &["schema", "mix_modes"])
+                    .and_then(toml::Value::as_array)
+                {
+                    Some(arr) => arr
+                        .iter()
+                        .filter_map(|m| m.get("id").and_then(toml::Value::as_str))
+                        .map(String::from)
+                        .collect(),
+                    None => default_mix_modes().into_iter().map(|m| m.id).collect(),
+                };
+            let origin = format!("input.temp_pinyin.code_hint_source={v}");
+            writes.push((cell(&["mode", "temp_pinyin"]), t, origin.clone()));
+            for id in ids {
+                writes.push((cell(&["mode", &format!("mix:{id}")]), t, origin.clone()));
+            }
+        }
+        if mix == Some(false) {
+            writes.push((
+                cell(&["type", "mixed"]),
+                "code_hint",
+                "schema.mix.pinyin_code_hint=false".to_string(),
+            ));
+        }
+        for (path, tpl, origin) in writes {
+            let refs = path_refs(&path);
+            if get_nested(&toml::Value::Table(root.clone()), &refs).is_some() {
+                continue;
+            }
+            set_nested(root, &refs, toml::Value::String(tpl.to_string()));
+            info!("Migrated {origin} → {} = {tpl}", path.join("."));
+        }
     }
 
     /// 存量迁移（**须在反序列化前**跑，字段已从 [`QuickInputConfig`] 移除）：
@@ -9708,6 +9683,7 @@ impl Config {
         Self::migrate_comment_max_chars_value(&mut root);
         Self::migrate_grammar_enabled_value(&mut root);
         Self::migrate_comment_templates_value(&mut root);
+        Self::migrate_code_hint_gates_value(&mut root);
         let migrated = usize::from(root != before);
         // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，**不能**被 preset 取不到时的
         // 提前返回挡住——否则没装 data/config.toml 的环境永远清不掉。
@@ -10784,6 +10760,8 @@ impl Config {
         Self::migrate_grammar_enabled_value(&mut root);
         // 旧注释模板键同理：残留的旧键会在下次 load 把用户刚改的分配或删掉的模板补回。
         Self::migrate_comment_templates_value(&mut root);
+        // 编码来源旧开关同理。
+        Self::migrate_code_hint_gates_value(&mut root);
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
         // 出厂默认取不到时 `is_default` 恒 false → 退化为「照常写入」的旧行为（安全降级）。
@@ -14661,205 +14639,110 @@ scripts = { latin = 42 }
         assert_eq!(c.font_size, UiCandidateConfig::default().font_size);
     }
 
-    #[test]
-    fn migrate_show_code_hint_works_through_the_real_layering() {
-        for (old, want) in [(false, "off"), (true, "codetable")] {
-            let mut user: toml::Value =
-                toml::from_str(&format!("[schema.pinyin]\nshow_code_hint = {old}\n")).unwrap();
-            Config::migrate_user_layer_value(&mut user);
-
-            let mut merged = toml::Value::try_from(Config::default()).unwrap();
-            merge_value(&mut merged, user);
-            let cfg: Config = merged.try_into().expect("反序列化");
-
-            assert_eq!(
-                cfg.schema.pinyin.code_hint_source, want,
-                "show_code_hint={old} 应迁移为 {want}"
-            );
-        }
-    }
-
-    /// 用户在设置页显式选过新键之后，旧键**不得**再把它顶回去。
-    ///
-    /// 这是「层内迁移」相对「合并后迁移」的全部意义所在：设置页写回时只写它管的那个键，
-    /// 不会顺手删掉旧键，于是用户配置里两个键长期并存。判据若是在**合并结果**上问
-    /// 「有没有新键」，那永远是有（L1 注入的），迁移一次都不会跑；判据若改成「旧键优先」，
-    /// 用户在设置页的每一次修改都会在下次启动时被打回。只有在**用户层那一份**上问，
-    /// `contains_key` 才真正表示「用户自己写过」。
-    #[test]
-    fn explicit_new_key_wins_over_stale_old_key() {
-        let mut user: toml::Value = toml::from_str(
-            "[schema.pinyin]\nshow_code_hint = true\ncode_hint_source = \"shuangpin\"\n",
-        )
-        .unwrap();
+    /// 用户层跑一遍迁移后合并，取某个注释分配格。
+    fn assign_cell_after_migration(
+        user_toml: &str,
+        path: &[&str],
+    ) -> (toml::Value, Option<String>) {
+        let mut user: toml::Value = toml::from_str(user_toml).unwrap();
         Config::migrate_user_layer_value(&mut user);
-
-        let mut merged = toml::Value::try_from(Config::default()).unwrap();
-        merge_value(&mut merged, user);
-        let cfg: Config = merged.try_into().expect("反序列化");
-        assert_eq!(cfg.schema.pinyin.code_hint_source, "shuangpin");
+        let mut full = vec!["ui", "comment", "assign"];
+        full.extend_from_slice(path);
+        full.push("default_horizontal");
+        let v = get_nested(&user, &full)
+            .and_then(toml::Value::as_str)
+            .map(String::from);
+        (user, v)
     }
 
-    /// ★ `show_code_hint`(bool) → `code_hint_source`(枚举)。
-    ///
-    /// `true → "codetable"` 而**不是** `"auto"`：旧的 true 只表达「显示反查来的码表
-    /// 编码」。映到 auto 会让没配主码表的双拼用户升级后凭空多出一段双拼码——不算回归
-    /// （原本就是空的），但那该由用户自己去开。
+    /// 拼音那份开关（含更早的 `show_code_hint`）折成拼音、双拼类型的默认格；`off` 不写。
     #[test]
-    fn migrate_show_code_hint_maps_true_to_codetable_not_auto() {
-        let mut v: toml::Value =
-            toml::from_str("[schema.pinyin]\nshow_code_hint = true\n").unwrap();
-        Config::migrate_show_code_hint_value(&mut v);
-        let py = v.get("schema").unwrap().get("pinyin").unwrap();
-        assert_eq!(
-            py.get("code_hint_source").and_then(toml::Value::as_str),
-            Some("codetable"),
-            "true 必须映到 codetable —— 映到 auto 会给老用户凭空加显示"
-        );
-
-        // 幂等：每次启动都跑一遍，第二次不得再改。
-        let before = v.clone();
-        Config::migrate_show_code_hint_value(&mut v);
-        assert_eq!(v, before, "迁移必须幂等");
-    }
-
-    #[test]
-    fn migrate_show_code_hint_maps_false_to_off() {
-        let mut v: toml::Value =
-            toml::from_str("[schema.pinyin]\nshow_code_hint = false\n").unwrap();
-        Config::migrate_show_code_hint_value(&mut v);
-        assert_eq!(
-            v.get("schema")
-                .unwrap()
-                .get("pinyin")
-                .unwrap()
-                .get("code_hint_source")
-                .and_then(toml::Value::as_str),
-            Some("off")
-        );
-    }
-
-    /// 用户已经写了新键就不覆盖——显式配置比从旧键推断出来的更可信。
-    #[test]
-    fn migrate_show_code_hint_keeps_explicit_new_key() {
-        let mut v: toml::Value = toml::from_str(
-            "[schema.pinyin]\nshow_code_hint = true\ncode_hint_source = \"shuangpin\"\n",
-        )
-        .unwrap();
-        Config::migrate_show_code_hint_value(&mut v);
-        assert_eq!(
-            v.get("schema")
-                .unwrap()
-                .get("pinyin")
-                .unwrap()
-                .get("code_hint_source")
-                .and_then(toml::Value::as_str),
-            Some("shuangpin")
-        );
-    }
-
-    /// 没有旧键就不动，让出厂值 `off` 生效（纯拼音/双拼用户默认不看编码反查）。
-    #[test]
-    fn migrate_show_code_hint_leaves_fresh_config_alone() {
-        let mut v: toml::Value = toml::from_str("[schema.pinyin]\nseparator = \"auto\"\n").unwrap();
-        let before = v.clone();
-        Config::migrate_show_code_hint_value(&mut v);
-        assert_eq!(v, before);
-        assert_eq!(PinyinGlobalConfig::default().code_hint_source, "off");
-    }
-
-    /// ★ 两份编码来源开关各有各的出厂值：拼音方案 `off`、临时拼音 `auto`。
-    ///
-    /// 临拼那份若复用 `default_code_hint_source`，拼音方案改 off 时会被一并拖成 off——
-    /// 码表用户借临拼反查编码的典型场景就此静默失效。代码默认与 serde 缺键两条路都钉。
-    #[test]
-    fn temp_pinyin_code_hint_source_defaults_to_auto_independently() {
-        let c = Config::default();
-        assert_eq!(c.schema.pinyin.code_hint_source, "off");
-        assert_eq!(c.input.temp_pinyin.code_hint_source, "auto");
-        assert_eq!(
-            CodeHintSource::from_config(&c.input.temp_pinyin.code_hint_source, CodeHintSource::Off),
-            CodeHintSource::Auto,
-            "出厂 auto 须是认出来的 auto，不是兜底落出来的"
-        );
-        // 写了 [input.temp_pinyin] 段但没写本键 → serde default 兜底，仍是 auto。
-        let c = merged_with("[input.temp_pinyin]\nenabled = true\n");
-        assert_eq!(c.input.temp_pinyin.code_hint_source, "auto");
-        // 只改拼音方案那份，不连带临拼。
-        let c = merged_with("[schema.pinyin]\ncode_hint_source = \"shuangpin\"\n");
-        assert_eq!(c.input.temp_pinyin.code_hint_source, "auto");
-        // 临拼那份可以显式关掉。
-        let c = merged_with("[input.temp_pinyin]\ncode_hint_source = \"off\"\n");
-        assert_eq!(c.input.temp_pinyin.code_hint_source, "off");
-        assert_eq!(c.schema.pinyin.code_hint_source, "off");
-    }
-
-    /// 四档各自允许哪些变量求值——「开关管允许哪些来源、模板管怎么摆」的全部含义。
-    #[test]
-    fn code_hint_source_gates() {
-        use CodeHintSource::*;
-        for (src, rev, sch) in [
-            (Off, false, false),
-            (CodeTable, true, false),
-            (Shuangpin, false, true),
-            (Auto, true, true),
+    fn pinyin_code_hint_source_migrates_to_type_cells() {
+        for (src, want) in [
+            (
+                "schema.pinyin.code_hint_source = \"codetable\"",
+                Some("code_rev"),
+            ),
+            (
+                "schema.pinyin.code_hint_source = \"shuangpin\"",
+                Some("shuangpin"),
+            ),
+            ("schema.pinyin.code_hint_source = \"auto\"", Some("code")),
+            ("schema.pinyin.code_hint_source = \"off\"", None),
+            ("schema.pinyin.show_code_hint = true", Some("code_rev")),
+            ("schema.pinyin.show_code_hint = false", None),
         ] {
-            assert_eq!(src.allows_reverse(), rev, "{src:?}.allows_reverse");
-            assert_eq!(src.allows_shuangpin(), sch, "{src:?}.allows_shuangpin");
+            for ty in ["pinyin", "shuangpin"] {
+                let (user, got) = assign_cell_after_migration(src, &["type", ty]);
+                assert_eq!(got.as_deref(), want, "{src} → type.{ty}");
+                let py = get_nested(&user, &["schema", "pinyin"]);
+                assert!(
+                    py.is_none_or(|t| t.get("code_hint_source").is_none()
+                        && t.get("show_code_hint").is_none()),
+                    "{src}：旧键要摘掉"
+                );
+            }
         }
     }
 
-    /// 认不出的值回落调用方传入的 `fallback`（各字段自己的出厂档），不是函数内写死的某一档。
-    ///
-    /// 两份字段出厂值不同（拼音方案 `off`、临拼 `auto`）：写死一档的话，总有一份字段写错
-    /// 后会落到别人的出厂档上——拼音方案用户手滑就意外看到编码。
+    /// 临时拼音那份写临时拼音与各快捷输入；`auto`（出厂）不写。
     #[test]
-    fn unknown_code_hint_source_falls_back_to_given_fallback() {
-        use CodeHintSource::*;
-        for fallback in [Off, CodeTable, Shuangpin, Auto] {
-            assert_eq!(
-                CodeHintSource::from_config("shuangping", fallback),
-                fallback
-            );
-            assert_eq!(CodeHintSource::from_config("", fallback), fallback);
-        }
-        // 大小写与空白不敏感（设置页写回的值与用户手打的都认），且认出来的值不看 fallback。
-        assert_eq!(
-            CodeHintSource::from_config("  CodeTable ", Off),
-            CodeHintSource::CodeTable
+    fn temp_pinyin_code_hint_source_migrates_to_mode_cells() {
+        let (_, got) = assign_cell_after_migration(
+            "input.temp_pinyin.code_hint_source = \"off\"",
+            &["mode", "temp_pinyin"],
+        );
+        assert_eq!(got.as_deref(), Some("none"));
+        let (_, got) = assign_cell_after_migration(
+            "input.temp_pinyin.code_hint_source = \"codetable\"",
+            &["mode", "mix:quick_mix"],
         );
         assert_eq!(
-            CodeHintSource::from_config("OFF", Auto),
-            CodeHintSource::Off
+            got.as_deref(),
+            Some("code_rev"),
+            "没写 mix_modes 时按出厂的快捷输入"
         );
-        assert_eq!(
-            CodeHintSource::from_config(" Auto", Off),
-            CodeHintSource::Auto
+        let (_, got) = assign_cell_after_migration(
+            "input.temp_pinyin.code_hint_source = \"shuangpin\"\n\
+             [[schema.mix_modes]]\nid = \"mine\"\n",
+            &["mode", "mix:mine"],
         );
+        assert_eq!(got.as_deref(), Some("shuangpin"));
+        let (_, got) = assign_cell_after_migration(
+            "input.temp_pinyin.code_hint_source = \"auto\"",
+            &["mode", "temp_pinyin"],
+        );
+        assert_eq!(got, None);
     }
 
-    /// 注册表值域与 `from_config` 的 match 臂必须逐项对齐。
-    ///
-    /// 不对齐 = 注册表说非法、运行时却认（或反过来）。CLI 校验与设置页下拉都按注册表
-    /// 办事，漂移的表现是「明明能用却填不进去」，或「填进去了却没反应」。
+    /// 混输开关关掉 → 混输类型只留补全编码；开着（出厂）不写。
     #[test]
-    fn code_hint_source_values_match_registry() {
-        use CodeHintSource::*;
-        for v in crate::config_schema::CODE_HINT_SOURCE_VALUES {
-            let parsed = CodeHintSource::from_config(v, Off);
-            // 换两个不同的 fallback 结果不变 = 这个值是被 match 臂认出来的，没落到兜底。
-            assert_eq!(
-                CodeHintSource::from_config(v, Auto),
-                parsed,
-                "注册表列出的 {v} 不该落到兜底档"
-            );
-            // 每个列出的值都要能被解析回它自己。
-            assert_eq!(
-                format!("{parsed:?}").to_ascii_lowercase(),
-                v.replace('_', ""),
-                "{v} 解析结果与自身不符"
-            );
-        }
+    fn mix_pinyin_code_hint_false_migrates_to_mixed_type() {
+        let (user, got) =
+            assign_cell_after_migration("schema.mix.pinyin_code_hint = false", &["type", "mixed"]);
+        assert_eq!(got.as_deref(), Some("code_hint"));
+        assert!(get_nested(&user, &["schema", "mix", "pinyin_code_hint"]).is_none());
+        let (_, got) =
+            assign_cell_after_migration("schema.mix.pinyin_code_hint = true", &["type", "mixed"]);
+        assert_eq!(got, None);
+    }
+
+    /// 目标格已有值（含旧全局模板迁移写的 `inherit`）不覆盖；迁移幂等。
+    #[test]
+    fn code_hint_gate_migration_keeps_existing_cells() {
+        let src = "schema.pinyin.code_hint_source = \"codetable\"\n\
+                   [ui.comment.assign.type.pinyin]\ndefault_horizontal = \"pinyin\"\n";
+        let (mut user, got) = assign_cell_after_migration(src, &["type", "pinyin"]);
+        assert_eq!(got.as_deref(), Some("pinyin"));
+        let once = user.clone();
+        Config::migrate_user_layer_value(&mut user);
+        assert_eq!(user, once, "再跑一遍不变");
+
+        // 旧版自定义了全局模板：拼音类型被写成 inherit，跟随用户自己的全局模板。
+        let src = "schema.pinyin.code_hint_source = \"codetable\"\n\
+                   [ui.candidate]\ncomment_template_horizontal = \"${pinyin}\"\n";
+        let (_, got) = assign_cell_after_migration(src, &["type", "pinyin"]);
+        assert_eq!(got.as_deref(), Some("inherit"));
     }
 
     #[test]
@@ -14974,7 +14857,6 @@ scripts = { latin = 42 }
     #[test]
     fn pinyin_global_config_defaults() {
         let c = Config::default();
-        assert_eq!(c.schema.pinyin.code_hint_source, "off");
         assert!(c.schema.pinyin.use_smart_compose);
         assert_eq!(c.schema.pinyin.separator, "auto");
         assert!(!c.schema.pinyin.fuzzy.enabled);
@@ -15067,10 +14949,6 @@ scripts = { latin = 42 }
         assert!(!c.schema.pinyin.fuzzy.ch_c, "ch_c 未覆盖，应保留默认 false");
         assert!(!c.schema.pinyin.fuzzy.sh_s, "sh_s 未覆盖，应保留默认 false");
         // 未覆盖的 pinyin 顶层字段：保留默认值
-        assert_eq!(
-            c.schema.pinyin.code_hint_source, "off",
-            "code_hint_source 未覆盖，应保留出厂档"
-        );
         assert!(
             c.schema.pinyin.use_smart_compose,
             "use_smart_compose 未覆盖，应保留默认 true"

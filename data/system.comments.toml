@@ -12,9 +12,24 @@
 # 横排格不写即跟随下一层横排。出厂分配只写横排格。
 
 [[templates]]
-id = "code_hint"
-name = "编码提示"
+id = "code"
+name = "编码"
 text = "${code_hint|code_rev|shuangpin}"
+
+[[templates]]
+id = "code_hint"
+name = "补全编码"
+text = "${code_hint}"
+
+[[templates]]
+id = "code_rev"
+name = "码表编码"
+text = "${code_hint|code_rev}"
+
+[[templates]]
+id = "shuangpin"
+name = "双拼编码"
+text = "${code_hint|shuangpin}"
 
 [[templates]]
 id = "pinyin"
@@ -28,58 +43,70 @@ text = "${chaizi}"
 
 [[templates]]
 id = "chaizi_code"
-name = "拆字+编码"
-text = "${chaizi} ${chaizi_code}"
+name = "拆字 · 编码"
+text = "${chaizi}{ · ${code_rev|chaizi_code}}"
 
 [[templates]]
 id = "chaizi_pinyin"
-name = "拆字+拼音"
+name = "拆字 · 拼音"
 text = "${chaizi}{ · ${pinyin}}"
 
 [[templates]]
-id = "en_meaning"
+id = "zh_en"
 name = "英文释义"
-text = "${dict:en_zh}"
-
-[[templates]]
-id = "zh_english"
-name = "中文对应英文"
 text = "${dict:zh_en}"
 
 [[templates]]
-id = "pinyin_english"
-name = "拼音+英文"
+id = "en_zh"
+name = "中文释义"
+text = "${dict:en_zh}"
+
+[[templates]]
+id = "pinyin_en"
+name = "拼音 · 英文"
 text = "${pinyin}{ · ${dict:zh_en}}"
 
 [[templates]]
-id = "detail_full"
-name = "详细（全部）"
+id = "full"
+name = "拆字 · 拼音 · 英文"
 text = "${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}"
 
-# 出厂分配
+# 出厂分配。编码类变量（code_rev / shuangpin）不再有档位开关，显不显示全看这里分到的模板：
+# 拼音 / 双拼默认不显示，混输给码表编码，临时拼音与快捷输入给完整的编码回退链。
 [assign.global]
-default_horizontal = "code_hint"
-detail_horizontal = "detail_full"
+default_horizontal = "code"
+detail_horizontal = "full"
 
+# 码表默认态跟随全局：主路上没有拼音来源候选，code 与 code_hint 效果相同。
 [assign.type.codetable]
 detail_horizontal = "chaizi_pinyin"
 
 [assign.type.pinyin]
-detail_horizontal = "pinyin_english"
+default_horizontal = "none"
+detail_horizontal = "pinyin_en"
 
 [assign.type.shuangpin]
-detail_horizontal = "pinyin_english"
+default_horizontal = "none"
+detail_horizontal = "pinyin_en"
+
+[assign.type.mixed]
+default_horizontal = "code_rev"
 
 [assign.type.english]
 default_horizontal = "none"
-detail_horizontal = "en_meaning"
+detail_horizontal = "en_zh"
 
 [assign.mode.temp_english]
 default_horizontal = "none"
-detail_horizontal = "en_meaning"
+detail_horizontal = "en_zh"
 
+# 临时拼音、快捷输入的上级是当前方案（拼音方案下会落到 none），默认态显式写上编码。
 [assign.mode.temp_pinyin]
+default_horizontal = "code"
 detail_horizontal = "chaizi_code"
+
+[assign.mode."mix:quick_mix"]
+default_horizontal = "code"
 
 # 内置注释词库（路径相对数据目录）
 [[dicts]]

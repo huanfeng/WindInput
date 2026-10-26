@@ -225,7 +225,7 @@ impl Coordinator {
                     ctx.mix_comment_scope,
                     &ctx.comment_dict_schema,
                 );
-                self.comment_for(c, &tpl, max, &reverse, ctx.hint_source, &dict_schema)
+                self.comment_for(c, &tpl, max, &reverse, &dict_schema)
                     .as_str()
                     .to_string()
             })

@@ -622,7 +622,7 @@ pub struct EngineManager {
     single_char_codes: Mutex<Option<SingleCharCodeCache>>,
     /// 单字全码表的最后使用（[`Self::use_clock`] 读数），供闲置清扫（[`Self::evict_idle_caches`]）。
     single_char_used: std::sync::atomic::AtomicU64,
-    /// 全局拼音配置（fuzzy/code_hint_source/...）。Mutex 以支持热重载。
+    /// 全局拼音配置（fuzzy/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
     /// 纠错与提示配置（`[input.correction]`），与 `pinyin` 一同决定 [`pinyin_hint_on`]。
     correction_cfg: Mutex<wind_config::CorrectionConfig>,
@@ -1041,39 +1041,6 @@ impl EngineManager {
         // 避免首次切换时同步重熔大词库卡顿。单飞构建锁保证预热与切换不重复构建。
         mgr.ensure_loaded(&active_id);
         mgr
-    }
-
-    /// 拼音方案（含双拼）下，候选注释里的编码从哪来（`schema.pinyin.code_hint_source`）。
-    ///
-    /// 直接读全局 `[schema.pinyin]`，没有方案级 override。临拼 / 快捷输入不读这份，
-    /// 见 [`Self::temp_pinyin_code_hint_source`]。
-    /// （码表类方案的「剩余编码」由码表引擎在 convert 内处理，走的是
-    /// `schema.codetable.show_code_hint`，与本键同名过一阵子，现已各归各名。）
-    pub fn code_hint_source(&self) -> wind_config::config::CodeHintSource {
-        wind_config::config::CodeHintSource::from_config(
-            &self
-                .pinyin
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .code_hint_source,
-            // 认不出的值回落本字段出厂档 `off`（`default_code_hint_source`）。
-            wind_config::config::CodeHintSource::Off,
-        )
-    }
-
-    /// 临拼 / 快捷输入期间，候选注释里的编码从哪来（`input.temp_pinyin.code_hint_source`）。
-    ///
-    /// 与 [`Self::code_hint_source`] 各管一摊、出厂值不同（这份 `auto`、那份 `off`）。
-    pub fn temp_pinyin_code_hint_source(&self) -> wind_config::config::CodeHintSource {
-        wind_config::config::CodeHintSource::from_config(
-            &self
-                .temp_pinyin
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .code_hint_source,
-            // 认不出的值回落本字段出厂档 `auto`（`default_temp_pinyin_code_hint_source`）。
-            wind_config::config::CodeHintSource::Auto,
-        )
     }
 
     /// 当前活跃引擎是否开启整句输入（当前只有码表引擎会返回 true）。
@@ -4085,7 +4052,6 @@ impl EngineManager {
             }
         }
         // 反查索引依赖「启用词库合并」，启用集变了须失效（懒重建）。
-        // 注：编码提示开关已改读全局 schema.pinyin.code_hint_source，无方案级缓存需失效。
         self.reverse_index
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -9627,31 +9593,6 @@ mod tests {
         cfg.schema.english.frequency.code_scope = "candidate".to_string();
         let mgr2 = EngineManager::new(&cfg, None);
         assert!(!mgr2.freq_settings().english_code_by_input);
-    }
-
-    /// ★ 两份编码来源开关写错时各自回落**自己的**出厂档，互不串：拼音方案 → `off`、
-    /// 临拼 → `auto`。共用一个写死的兜底时，拼音方案写错值会意外显示编码。
-    #[test]
-    fn code_hint_source_unknown_value_falls_back_per_field() {
-        use wind_config::config::CodeHintSource;
-        // 前提：兜底档与各自的出厂值字面一致。改了出厂值却忘了改兜底，这里先红。
-        let def = Config::default();
-        assert_eq!(def.schema.pinyin.code_hint_source, "off");
-        assert_eq!(def.input.temp_pinyin.code_hint_source, "auto");
-
-        let mut cfg = Config::default();
-        cfg.schema.pinyin.code_hint_source = "shuangping".to_string();
-        cfg.input.temp_pinyin.code_hint_source = "shuangping".to_string();
-        let mgr = EngineManager::new(&cfg, None);
-        assert_eq!(mgr.code_hint_source(), CodeHintSource::Off);
-        assert_eq!(mgr.temp_pinyin_code_hint_source(), CodeHintSource::Auto);
-
-        // 反向对照：合法值照认，证明上面落的是兜底而非两个方法碰巧固定返回这两档。
-        cfg.schema.pinyin.code_hint_source = "auto".to_string();
-        cfg.input.temp_pinyin.code_hint_source = "off".to_string();
-        let mgr = EngineManager::new(&cfg, None);
-        assert_eq!(mgr.code_hint_source(), CodeHintSource::Auto);
-        assert_eq!(mgr.temp_pinyin_code_hint_source(), CodeHintSource::Off);
     }
 
     #[test]
