@@ -287,6 +287,18 @@ fn tone_falls_back_to_plain_syllable_without_reading() {
 
 const ZG: &str = "中国\tzhong guo\t3000\n宗\tzong\t100\n";
 
+/// 全局注释分配一个只写 `${correct_pinyin}` 的模板（竖排没写时同横排）。
+fn assign_correct_pinyin(c: &mut Config) {
+    c.ui.comment
+        .templates
+        .push(wind_config::comment_lib::CommentTemplateDef {
+            id: "fz".into(),
+            name: "fz".into(),
+            text: "${correct_pinyin}".into(),
+        });
+    c.ui.comment.assign.global.default_horizontal = Some("fz".into());
+}
+
 /// `zongguo`（开 zh↔z）、`hint=false`、注释模板只写 `${correct_pinyin}`。
 fn zongguo(tag: &str, tone: bool) -> Vec<CandidateItem> {
     let f = fixture_with(tag, ZG);
@@ -294,14 +306,7 @@ fn zongguo(tag: &str, tone: bool) -> Vec<CandidateItem> {
     let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
         c.schema.pinyin.fuzzy.zh_z = true;
         c.input.correction.hint.tone = tone;
-        c.ui.comment
-            .templates
-            .push(wind_config::comment_lib::CommentTemplateDef {
-                id: "fz".into(),
-                name: "fz".into(),
-                text: "${correct_pinyin}".into(),
-            });
-        c.ui.comment.assign.global.default_horizontal = Some("fz".into());
+        assign_correct_pinyin(c);
     });
     type_str(&coord, "zongguo");
     shown(&coord, &rx)
@@ -391,8 +396,7 @@ fn template_var_respects_sources() {
         h.fuzzy = false;
         h.misread = true;
         h.correction = false;
-        c.ui.candidate.comment_template_vertical = "${correct_pinyin}".into();
-        c.ui.candidate.comment_template_horizontal = "${correct_pinyin}".into();
+        assign_correct_pinyin(c);
     });
     type_str(&coord, "zongguo");
     let items = shown(&coord, &rx);
@@ -408,8 +412,7 @@ fn template_var_ignores_master_switch() {
     );
     let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
         c.schema.pinyin.fuzzy.zh_z = true;
-        c.ui.candidate.comment_template_vertical = "${correct_pinyin}".into();
-        c.ui.candidate.comment_template_horizontal = "${correct_pinyin}".into();
+        assign_correct_pinyin(c);
     });
     type_str(&coord, "zongguo");
     let items = shown(&coord, &rx);
@@ -424,8 +427,7 @@ fn template_var_correction_source() {
     let items = gognping("var_corr", |c| {
         c.input.correction.hint.enabled = false;
         c.input.correction.hint.correction = true;
-        c.ui.candidate.comment_template_vertical = "${correct_pinyin}".into();
-        c.ui.candidate.comment_template_horizontal = "${correct_pinyin}".into();
+        assign_correct_pinyin(c);
     });
     assert_eq!(item(&items, "*公平").comment.as_str(), "gong ping");
 }

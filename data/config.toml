@@ -1570,8 +1570,9 @@ switch_mode = "session"
 #                      **全拼方案下照样有值**：布局按「活跃方案→主拼音方案→已装的首个
 #                      双拼方案」回退，一个双拼方案都没装才恒空
 #   pinyin             带声调注音 nǐ hǎo（多音字按词典消歧：「行长」得 háng zhǎng 而非 xíng cháng）
-#   correct_pinyin       模糊音命中的候选的整词正确拼音 zhong guo，其余候选为空；
-#                      带调随 input.correction.hint.tone，不依赖 hint 开关
+#   correct_pinyin     带正确拼音提示的候选的整词正确拼音 zhong guo，其余候选为空；
+#                      按 input.correction.hint 的来源勾选过滤，带调随其 tone，
+#                      不依赖提示总开关与 scope
 #   chaizi             拆字字根串，仅单字候选（需方案配了 [engine.chaizi]）
 #   chaizi_code        该字在拆字库里的编码，仅单字候选
 #   chaizi_all[:分隔符] 拆字字根不限字数，默认空格连接；如 ${chaizi_all:／}（可能很长，慎用于横排）
