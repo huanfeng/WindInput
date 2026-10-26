@@ -190,11 +190,12 @@ fn mixed_with_pinyin_keeps_auto_commit_despite_sentence_input() {
     }
 }
 
-/// 五笔整句开着时 `auto` 给出手动分隔符（两个候选键都被占时夺取 `'`）：`'` 是三选键、反引号归临时拼音，两个键都占着，
-/// 此前 `auto` 退化成「不启用」，整句里没法给「旬 qj」与「我 q + 是 j」断词。
-/// 关整句时分隔符判定对码表方案恒假（宿主也不摆「分词」键）。
+/// 五笔整句开着时码表方案也有手动分隔符（整句是分隔符的消歧手段）；关整句时恒无。
+/// 具体是哪个键由 `auto` 按「哪个键空闲」定，**桌面不夺三选键 `'`**：默认配置里反引号归
+/// 临时拼音、`'` 是三选键，两个都占着时桌面 `auto` 不启用，要断词显式配 `separator`。
+/// 本用例用的裸配置没绑反引号，所以落在反引号上——断言的是「有，且按它真的分隔」。
 #[test]
-fn sentence_mode_takes_quote_as_separator() {
+fn sentence_mode_has_separator_when_a_key_is_free() {
     if !has_data() {
         eprintln!("跳过：缺 build_dev 词库");
         return;
@@ -206,10 +207,10 @@ fn sentence_mode_takes_quote_as_separator() {
         "关整句：码表方案没有分隔符"
     );
     let on = coord("sep_on", SENTENCE);
-    // 具体是哪个键取决于配置里谁占着：默认配置反引号归临时拼音 ⇒ 夺 `'`；
-    // 测试用的裸配置没绑反引号 ⇒ 反引号空闲。两种都是对的，断言的是「有，且按它真的分隔」。
     let ch = on.manual_separator_char().expect("开整句：应有分隔符键");
     assert!(ch == '\'' || ch == '`');
+    // 移动端求值：两个键都占着时才夺 `'`，这里反引号空闲，所以两端一致
+    assert_eq!(on.manual_separator_char_as(true), Some(ch));
 
     press(&on, "trnt");
     // 0xDE = VK_OEM_7 = `'`；0xC0 = VK_OEM_3 = 反引号

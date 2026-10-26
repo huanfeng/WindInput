@@ -3102,16 +3102,18 @@ impl Coordinator {
     /// - `auto`（默认 / 未知值）依次找：
     ///   1. `'` 空闲（不是选词键、方案 `[key_actions]` 没绑）→ `'`；
     ///   2. 反引号空闲（同样两项）→ 反引号；
-    ///   3. **都不空闲 → 夺取 `'`**，前提是它没被 `[key_actions]` 绑走，只是个选词键。
+    ///   3. 都不空闲：桌面**不启用**；移动端夺取 `'`（见下）。
     ///
-    /// ★ 第 3 步是双拼与五笔整句的出路：双拼 `'` 是三选键、反引号归辅助码；五笔 `'` 是三选键、
-    /// 反引号归临时拼音，两个键都占着，此前 `auto` 退化成「不启用」，用户要在双拼 / 整句里
-    /// 断词只能自己去写 `separator = "quote"`。`'` 作三选键只是数字键 `3` 的冗余别名，
-    /// 夺取它能力零损失（`MixModeConfig::free_input_takes_select_keys` 同款取舍）；而
-    /// 分隔符臂排在选词分派之前，「收进缓冲」与「不再作选词键」天然是同一个判断的两面。
-    /// 不愿丢这个别名的写 `separator = "none"`（或方案级覆盖）即可。
+    /// ★ 第 3 步桌面与移动端分叉，是刻意的。桌面的 `auto` **不得动选词键**：用户的三选键
+    /// 是实打实的肌肉记忆，双拼（`'` 三选、反引号辅助码）与五笔整句（`'` 三选、反引号
+    /// 临时拼音）下 `auto` 因此不启用，要断词显式写 `separator = "quote"`（或 `backtick`）。
+    /// 手机是触屏，候选靠点、`;` `'` 这两个选词键在软键盘上没有人去按，而「分词」键
+    /// 却需要一个出路，否则双拼、五笔整句下 ⇧ 无事可做。所以移动端 `auto` 夺取 `'`，
+    /// 分隔符臂本就排在选词分派之前，「收进缓冲」与「不再作选词键」是同一个判断的两面。
+    /// 移动端不愿丢它的写 `separator = "none"`。
     ///
-    /// ⚠️ 仍不夺 `[key_actions]` 已绑的键：那条绑定被夺后只剩一条 warn，用户看到「配了没反应」。
+    /// ⚠️ 两端都不夺 `[key_actions]` 已绑的键：那条绑定被夺后只剩一条 warn，用户看到
+    /// 「配了没反应」。
     ///
     /// 每次实时求值（不缓存），`separator`、`select_key_groups` 热更新即时生效。
     /// 缓冲是否为空由调用方判定（空缓冲维持标点路径）。
@@ -3122,6 +3124,12 @@ impl Coordinator {
     /// 一个 `_of(&schema)` 版本。`separator` 本身也按方案取（见
     /// `EngineManager::pinyin_separator_mode_of`）。
     pub(crate) fn manual_separator_vk_of(&self, schema_id: &str) -> Option<u32> {
+        self.manual_separator_vk_resolve(schema_id, crate::handle_assoc::use_mobile_overrides())
+    }
+
+    /// [`Self::manual_separator_vk_of`] 的实体，`mobile` 显式传入——编译期常量
+    /// `use_mobile_overrides()` 在主机上恒为假，不拆出来就没法在桌面测试里守住移动端那一支。
+    fn manual_separator_vk_resolve(&self, schema_id: &str, mobile: bool) -> Option<u32> {
         use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
         let pinyin_ok = self.engine_mgr.is_pinyin_of(schema_id);
         if !pinyin_ok && !self.engine_mgr.sentence_input_enabled_of(schema_id) {
@@ -3138,7 +3146,7 @@ impl Coordinator {
                     Some(VK_QUOTE)
                 } else if free(VK_BACKTICK) {
                     Some(VK_BACKTICK)
-                } else if !bound(VK_QUOTE) {
+                } else if mobile && !bound(VK_QUOTE) {
                     Some(VK_QUOTE)
                 } else {
                     None
@@ -3150,8 +3158,15 @@ impl Coordinator {
     /// 活跃方案的手动分隔符字符（`'` 或 `` ` ``），宿主界面据此决定「分词」键发什么；
     /// `None` = 此刻没有分隔符，宿主不该摆分词键。见 [`Self::manual_separator_vk_of`]。
     pub fn manual_separator_char(&self) -> Option<char> {
+        self.manual_separator_char_as(crate::handle_assoc::use_mobile_overrides())
+    }
+
+    /// 同 [`Self::manual_separator_char`]，但**指定按移动端还是桌面**求值。只给测试用：
+    /// 编译期常量在主机上恒为桌面，移动端那一支（`auto` 夺取 `'`）不经它就测不到。
+    #[doc(hidden)]
+    pub fn manual_separator_char_as(&self, mobile: bool) -> Option<char> {
         use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
-        match self.manual_separator_vk_of(&self.engine_mgr.active_schema_id())? {
+        match self.manual_separator_vk_resolve(&self.engine_mgr.active_schema_id(), mobile)? {
             VK_QUOTE => Some('\''),
             VK_BACKTICK => Some('`'),
             _ => None,
