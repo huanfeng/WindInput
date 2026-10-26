@@ -388,3 +388,82 @@ detail_horizontal = "inherit"
   - `dict:<id>` 按已挂载的词库逐个列出；
   - 上下键移动、回车插入、Esc 关闭；
   - 插入写回打开弹层时记下的选区，焦点还给模板框。
+
+### 13.6 编码来源开关并入注释分配；内置模板重整（维护者已定方案 A）
+
+**为什么**：三个「编码来源」开关决定 `${code_rev}` / `${shuangpin}` 有没有值，模板又决定显示什么，
+两层叠着管同一件事。模板里写了 `${code_rev}`、开关却关着时什么都不显示，用户找不到原因。
+
+**退役的键**（不再读，按下面迁移后从用户配置移除）：
+
+| 键 | 出厂 | 原含义 |
+|---|---|---|
+| `schema.pinyin.code_hint_source` | `off` | 拼音 / 双拼方案（及码表方案）下拼音候选的编码来源 |
+| `input.temp_pinyin.code_hint_source` | `auto` | 临时拼音 / 快捷输入期间的编码来源 |
+| `schema.mix.pinyin_code_hint` | `true` | 混输方案下拼音候选显示码表编码 |
+
+`${code_rev}` 一族与 `${shuangpin}` 从此只看候选来源（拼音来源才有值），不再有档位门控；
+显不显示、显示哪种由分配到的模板决定。`${code_source}` 与上屏注释（`input.alt_commit = "comment"`）
+同样不再读档位。
+
+`schema.codetable.show_code_hint`（码表引擎是否产出「剩余编码」）**本轮不动**：它能按方案在方案文件 /
+`schema_overrides` 里覆盖，迁移要跨文件改写；且它只管 `${code_hint}` 这一个变量，等价的模板写法别扭。
+设置页原位置保留，说明里指向注释分配。
+
+**内置模板**（id 未发布，直接改；分隔统一用「 · 」）：
+
+| id | 名称 | 模板串 | 用途 |
+|---|---|---|---|
+| `code` | 编码 | `${code_hint\|code_rev\|shuangpin}` | 通用：码表补全剩余码，拼音候选给码表编码，没有码表给双拼 |
+| `code_hint` | 补全编码 | `${code_hint}` | 码表前缀候选还要打的剩余编码 |
+| `code_rev` | 码表编码 | `${code_hint\|code_rev}` | 拼音候选反查码表编码（混输、借拼音学码） |
+| `shuangpin` | 双拼编码 | `${code_hint\|shuangpin}` | 拼音候选的双拼键位（全拼学双拼） |
+| `pinyin` | 拼音 | `${pinyin}` | 带调拼音 |
+| `chaizi` | 拆字 | `${chaizi}` | 单字字根 |
+| `chaizi_code` | 拆字 · 编码 | `${chaizi}{ · ${code_rev\|chaizi_code}}` | 字根加码表编码（取不到再用拆字表编码） |
+| `chaizi_pinyin` | 拆字 · 拼音 | `${chaizi}{ · ${pinyin}}` | 码表详细态 |
+| `zh_en` | 英文释义 | `${dict:zh_en}` | 中文候选的英文 |
+| `en_zh` | 中文释义 | `${dict:en_zh}` | 英文候选的中文 |
+| `pinyin_en` | 拼音 · 英文 | `${pinyin}{ · ${dict:zh_en}}` | 拼音详细态 |
+| `full` | 拆字 · 拼音 · 英文 | `${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}` | 全局详细态 |
+
+改名缘由：「编码提示」既是旧变量名又是模板名，用户分不清；「英文释义」实为英文词的中文释义，
+与「中文对应英文」正好说反；「详细（全部）」看不出含什么。
+
+**出厂分配**（横排格；复刻退役前的出厂效果）：
+
+| 作用范围 | 默认 | 详细 |
+|---|---|---|
+| 全局 | `code` | `full` |
+| 码表 | `code_hint` | `chaizi_pinyin` |
+| 拼音 / 双拼 | `none` | `pinyin_en` |
+| 混输 | `code_rev` | 跟随 |
+| 英文 | `none` | `en_zh` |
+| 临时英文 | `none` | `en_zh` |
+| 临时拼音 | `code` | `chaizi_code` |
+| 快捷输入（`mix:quick_mix`） | `code` | 跟随 |
+
+临时拼音、快捷输入的默认态显式写 `code`：它们的上级是当前方案，拼音方案下会落到 `none`，
+而退役前它们读自己那份 `auto`。
+
+**迁移**（只迁用户层写了的值；目标格已有用户值时不覆盖）：
+
+| 旧值 | 写到 | 值 |
+|---|---|---|
+| `schema.pinyin.code_hint_source` = `codetable` / `shuangpin` / `auto` | `type.pinyin`、`type.shuangpin` 的 `default_horizontal` | `code_rev` / `shuangpin` / `code` |
+| `input.temp_pinyin.code_hint_source` = `off` / `codetable` / `shuangpin` | `mode.temp_pinyin` 与各 `mode.mix:<id>` 的 `default_horizontal` | `none` / `code_rev` / `shuangpin` |
+| `schema.mix.pinyin_code_hint` = `false` | `type.mixed` 的 `default_horizontal` | `code_hint` |
+
+更早的 `schema.pinyin.show_code_hint`（bool）先按原规则折成 `code_hint_source` 再走上表。
+旧版自定义了全局注释模板的用户，§10 的迁移已给有出厂格的范围写 `inherit`（`FACTORY_DEFAULT_SCOPES`
+随出厂分配扩到上表全部范围），仍跟随他们的全局模板；其中拼音方案原先被 `off` 挡住的编码变量会开始显示，
+这是唯一的行为差异，迁移时记日志。
+
+**按需预载**：反查表是否预载改为按「可达上下文实际落到的模板」判断：每个可用方案的主路，
+以及进得去的临时拼音、各快捷输入，两态两排布逐一解析，任一模板引用编码反查变量即预载。
+纯拼音用户默认态是 `none`，不预载，与退役前一致。
+
+**设置端**：三处原位置（拼音「编码提示来源」、临时拼音「临时拼音编码提示」、混输「拼音候选显示码表
+编码」）删掉，各留一行说明加跳转「在 候选注释 · 分配 中设置」。首次设置向导的「拼音反查」改为写
+`type.pinyin` / `type.shuangpin` 的默认态（开 = `code_rev`，关 = 删用户格回到出厂 `none`）。
+Android 端的同名设置项不在本仓，另行跟进。
