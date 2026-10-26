@@ -3086,49 +3086,75 @@ impl Coordinator {
     /// `separator` 本身也按方案取（见 `EngineManager::pinyin_separator_mode_of`）：
     /// 临拼引用哪个拼音方案，就用那个方案生效的分隔符策略。
     pub(crate) fn manual_separator_key_of(&self, key_code: u32, schema_id: &str) -> bool {
+        self.manual_separator_vk_of(schema_id) == Some(key_code)
+    }
+
+    /// 指定方案此刻的手动分隔符**是哪个键**；方案不支持 / 策略为 `none` / 没有键可用时 `None`。
+    ///
+    /// 「是不是分隔符」（[`Self::manual_separator_key_of`]）与「宿主界面该给哪个键」
+    /// （[`Self::manual_separator_char`]，手机的「分词」键用）都从这里取，**单一真相源**：
+    /// 键位判定有两份就会出现界面发 `'` 而引擎认反引号，且完全静默。
+    ///
+    /// 规则：
+    /// - 拼音族、码表**整句**放行，其余引擎 `None`（整句是分隔符的消歧手段：二简「旬 qj」
+    ///   与一简「我 q」+「是 j」击键串同形，打分无从区分）。
+    /// - `none` → `None`；`quote` → `'`；`backtick` → 反引号。显式模式尊重用户指定值。
+    /// - `auto`（默认 / 未知值）依次找：
+    ///   1. `'` 空闲（不是选词键、方案 `[key_actions]` 没绑）→ `'`；
+    ///   2. 反引号空闲（同样两项）→ 反引号；
+    ///   3. **都不空闲 → 夺取 `'`**，前提是它没被 `[key_actions]` 绑走，只是个选词键。
+    ///
+    /// ★ 第 3 步是双拼与五笔整句的出路：双拼 `'` 是三选键、反引号归辅助码；五笔 `'` 是三选键、
+    /// 反引号归临时拼音，两个键都占着，此前 `auto` 退化成「不启用」，用户要在双拼 / 整句里
+    /// 断词只能自己去写 `separator = "quote"`。`'` 作三选键只是数字键 `3` 的冗余别名，
+    /// 夺取它能力零损失（`MixModeConfig::free_input_takes_select_keys` 同款取舍）；而
+    /// 分隔符臂排在选词分派之前，「收进缓冲」与「不再作选词键」天然是同一个判断的两面。
+    /// 不愿丢这个别名的写 `separator = "none"`（或方案级覆盖）即可。
+    ///
+    /// ⚠️ 仍不夺 `[key_actions]` 已绑的键：那条绑定被夺后只剩一条 warn，用户看到「配了没反应」。
+    ///
+    /// 每次实时求值（不缓存），`separator`、`select_key_groups` 热更新即时生效。
+    /// 缓冲是否为空由调用方判定（空缓冲维持标点路径）。
+    ///
+    /// ★★ overlay 必须走 `_of(&schema)` 版本。临拼在纯五笔方案下引用的是拼音方案，而
+    /// `engine_mgr.is_pinyin()` 问的是**活跃**引擎（= 码表）⇒ 恒 false ⇒ 临拼下分隔符
+    /// 永远不生效，且完全静默。凡「按当前引擎类型决定行为」的判据，在 overlay 里都需要
+    /// 一个 `_of(&schema)` 版本。`separator` 本身也按方案取（见
+    /// `EngineManager::pinyin_separator_mode_of`）。
+    pub(crate) fn manual_separator_vk_of(&self, schema_id: &str) -> Option<u32> {
         use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
-        // 码表整句与拼音共用下面那套键位判定；两者都不成立时该键维持原本语义。
-        //
-        // ★ 双拼同样放行（原先在此早退，理由「buffer 会与 preedit 发散」）。发散那件事
-        // 已在引擎侧解决：`ShuangpinConverter::convert` 把 `'` 当配对硬边界自行消化，
-        // preedit 逐字节重建使手动与自动的分隔符合流，`consumed_length` 也把那一键算进去。
-        // 见 `docs/design/shuangpin-separator.md`。
-        //
-        // ⚠️ 放行的是**键位判定**，不是默认开启：双拼出厂 `separator = "none"`
-        // （反引号在双拼里归辅助码，见 `shuangpin.schema.toml`），要用得显式配成 `quote`。
         let pinyin_ok = self.engine_mgr.is_pinyin_of(schema_id);
         if !pinyin_ok && !self.engine_mgr.sentence_input_enabled_of(schema_id) {
-            return false;
+            return None;
         }
         match self.engine_mgr.pinyin_separator_mode_of(schema_id).as_str() {
-            "none" => false,
-            "quote" => key_code == VK_QUOTE,
-            "backtick" => key_code == VK_BACKTICK,
-            // auto（及其它未知值兜底）：挑一个当前**空闲**的符号键作分隔符。
-            //
-            // 两类占用都要避让：
-            //  ① 选词键——出厂 `semicolon_quote` 含 `'`，夺走它等于让三选不可用；
-            //  ② 本方案 `[key_actions]` 已绑的功能键——分隔符臂在按键裁决里排在 key_actions
-            //     之前，夺走的话那条绑定**只剩一条 warn 日志**，用户看到的是「配了没反应」。
-            //
-            // ★ 两个键都不空闲时 auto 退化成「不启用」。双拼正是这种情况：`'` 是选词键、
-            // 反引号出厂给了辅助码（`shuangpin.schema.toml`），于是双拼虽然支持分隔符，
-            // auto 下却不会自动占用任何键——要用得显式写 `separator = "quote"`。
-            //
-            // ⚠️ 这条避让**不能改成「双拼一律不给分隔符」**：那会让用户显式配的 `quote`
-            // 也一并失效，而显式模式的含义就是「我知道我在做什么」。判据的维度是
-            // 「这个键空不空闲」，不是「这是什么引擎」。
+            "none" => None,
+            "quote" => Some(VK_QUOTE),
+            "backtick" => Some(VK_BACKTICK),
             _ => {
-                let free = |vk: u32| {
-                    self.select_key_offset(vk).is_none()
-                        && self.bound_action_in_schema(vk, schema_id).is_none()
-                };
+                let bound = |vk: u32| self.bound_action_in_schema(vk, schema_id).is_some();
+                let free = |vk: u32| self.select_key_offset(vk).is_none() && !bound(vk);
                 if free(VK_QUOTE) {
-                    key_code == VK_QUOTE
+                    Some(VK_QUOTE)
+                } else if free(VK_BACKTICK) {
+                    Some(VK_BACKTICK)
+                } else if !bound(VK_QUOTE) {
+                    Some(VK_QUOTE)
                 } else {
-                    key_code == VK_BACKTICK && free(VK_BACKTICK)
+                    None
                 }
             }
+        }
+    }
+
+    /// 活跃方案的手动分隔符字符（`'` 或 `` ` ``），宿主界面据此决定「分词」键发什么；
+    /// `None` = 此刻没有分隔符，宿主不该摆分词键。见 [`Self::manual_separator_vk_of`]。
+    pub fn manual_separator_char(&self) -> Option<char> {
+        use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
+        match self.manual_separator_vk_of(&self.engine_mgr.active_schema_id())? {
+            VK_QUOTE => Some('\''),
+            VK_BACKTICK => Some('`'),
+            _ => None,
         }
     }
 

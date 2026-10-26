@@ -295,7 +295,9 @@ sentence_cycle_key = ""
 # 找单个字时才用得上。写在这里就够了，拼音方案不再单独配。
 single_char = false
 # 手动音节分隔符策略。auto = 动态避让选词键（' 被占作选词键时改用反引号，反之用 '）；
-# 也可显式写 quote / backtick / none。
+# 两个键都被占（双拼：反引号归辅助码；五笔整句：反引号归临时拼音）时**夺取 '**——它作三选键
+# 只是数字 3 的别名，夺走不丢功能；`[key_actions]` 已绑 ' 时才真的不启用。
+# 不愿丢这个三选别名就写 none。也可显式写 quote / backtick / none。
 #
 # ⚠️ 这是**基线**，方案可以覆盖：在方案的 [engine.pinyin] 段（或
 # %APPDATA%\WindInput\schema_overrides\<方案id>.toml）写 separator = "none" 即可。

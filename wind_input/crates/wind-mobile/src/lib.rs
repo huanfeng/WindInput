@@ -611,6 +611,15 @@ impl MobileCore {
             .collect()
     }
 
+    /// 活跃方案此刻的手动音节分隔符字符（`'` 或 `` ` ``）；`None` = 没有，宿主不该摆「分词」键。
+    ///
+    /// 宿主界面的「分词」键发这个字符，引擎侧按同一条规则认它（单一真相源，
+    /// 见 `Coordinator::manual_separator_char`）。取值随方案、`separator` 设置、
+    /// 码表方案的整句开关变化，**每次要用时再问**，别缓存。纯读。
+    pub fn separator_key(&self) -> Option<char> {
+        self.coord.manual_separator_char()
+    }
+
     /// 拉取候选全量的一个窗口。**纯读**，不改状态，可随时调。
     ///
     /// 别在每次按键都拉一大段：序列化与宿主侧的文字测量都在宿主主线程上。

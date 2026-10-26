@@ -41,8 +41,9 @@ files = ["aux_code/flypy_full.txt"]
 #
 # 分隔符臂在按键裁决里排在 key_actions 之前，本可以把这个键夺走（双拼已支持手动分隔符，
 # 见 docs/design/shuangpin-separator.md）。夺不走是因为 separator 的 auto 模式会**避让
-# 本段已绑的键**：双拼下 `'` 被选词键占、反引号被这里占，auto 于是两个都不选。
-# 想在双拼用分隔符，显式写上方 [engine.pinyin] separator = "quote"（那时反引号仍归辅助码）。
+# 本段已绑的键**：双拼下反引号被这里占、`'` 被选词键占，auto 于是**夺取 `'`**作分隔符
+# （`'` 只是三选键，数字 3 照样选；反引号仍归辅助码）。
+# 不想丢 `'` 这个三选别名的，写 [engine.pinyin] separator = "none"。
 [key_actions]
 backtick = "aux_code"
 

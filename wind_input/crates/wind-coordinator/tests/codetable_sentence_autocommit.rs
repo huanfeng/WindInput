@@ -189,3 +189,63 @@ fn mixed_with_pinyin_keeps_auto_commit_despite_sentence_input() {
         other => panic!("混输带拼音时整句不生效，满码上屏应照常，实际 {other:?}"),
     }
 }
+
+/// 五笔整句开着时 `auto` 给出手动分隔符（两个候选键都被占时夺取 `'`）：`'` 是三选键、反引号归临时拼音，两个键都占着，
+/// 此前 `auto` 退化成「不启用」，整句里没法给「旬 qj」与「我 q + 是 j」断词。
+/// 关整句时分隔符判定对码表方案恒假（宿主也不摆「分词」键）。
+#[test]
+fn sentence_mode_takes_quote_as_separator() {
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let off = coord("sep_off", "");
+    assert_eq!(
+        off.manual_separator_char(),
+        None,
+        "关整句：码表方案没有分隔符"
+    );
+    let on = coord("sep_on", SENTENCE);
+    // 具体是哪个键取决于配置里谁占着：默认配置反引号归临时拼音 ⇒ 夺 `'`；
+    // 测试用的裸配置没绑反引号 ⇒ 反引号空闲。两种都是对的，断言的是「有，且按它真的分隔」。
+    let ch = on.manual_separator_char().expect("开整句：应有分隔符键");
+    assert!(ch == '\'' || ch == '`');
+
+    press(&on, "trnt");
+    // 0xDE = VK_OEM_7 = `'`；0xC0 = VK_OEM_3 = 反引号
+    let action = on.handle_key_event(&key(if ch == '\'' { 0xDE } else { 0xC0 }));
+    match action {
+        KeyAction::UpdateComposition { text, .. } => {
+            assert!(text.contains('\''), "`'` 应压入缓冲作分隔符，实际 {text:?}")
+        }
+        other => panic!("`'` 应作分隔符更新组合区，实际 {other:?}"),
+    }
+}
+
+/// 方案级 `separator = "none"` 是夺取 `'` 的逃生口：不愿丢三选别名的用户写它。
+#[test]
+fn sentence_mode_separator_none_keeps_quote_as_select_key() {
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("wind_sentence_sep_none_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ov = root.join("overrides");
+    std::fs::create_dir_all(&ov).unwrap();
+    std::fs::write(
+        ov.join("wubi86.toml"),
+        "[engine.codetable]\nsentence_input = true\n[engine.pinyin]\nseparator = \"none\"\n",
+    )
+    .unwrap();
+    let store = Arc::new(Store::open(root.join("user_data.db")).unwrap());
+    let mut c = Config::default();
+    c.schema.available = vec!["wubi86".into()];
+    c.schema.active = "wubi86".into();
+    c.input.default.chinese_mode = true;
+    let coord =
+        Coordinator::new_headless_with_store_override(c, Some(&data_dir()), store, Some(ov));
+    assert_eq!(coord.manual_separator_char(), None);
+    drop(coord);
+    let _ = std::fs::remove_dir_all(&root);
+}
