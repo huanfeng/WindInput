@@ -101,11 +101,12 @@ default_horizontal = "none"
 detail_horizontal = "en_zh"
 
 # 临时拼音、快捷输入的上级是当前方案（拼音方案下会落到 none），默认态显式写上编码。
+# mode.mix 通配全部快捷输入；单个快捷输入另写 mode."mix:<id>" 覆盖。
 [assign.mode.temp_pinyin]
 default_horizontal = "code"
 detail_horizontal = "chaizi_code"
 
-[assign.mode."mix:quick_mix"]
+[assign.mode.mix]
 default_horizontal = "code"
 
 # 内置注释词库（路径相对数据目录）

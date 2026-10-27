@@ -199,7 +199,7 @@ fn session_flip_survives_entering_aux_code() {
         .insert("backslash".into(), "aux_code".into());
     let (c, rx) = open(cfg);
     type_str(&c, "shi");
-    // 拼音方案 默认=code_hint（拼音出厂不出编码提示）、详细=pinyin_english（无汉英词库时只剩拼音）。
+    // 拼音方案 默认=none（拼音出厂不出编码）、详细=pinyin_en（无汉英词库时只剩拼音）。
     assert_eq!(first_comments(&shown(&c, &rx), 3), ["", "", ""]);
     c.debug_toggle_comment_session();
     c.handle_key_event(&key(0xDC));

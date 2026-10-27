@@ -214,6 +214,9 @@ impl SchemaType {
     ];
 }
 
+/// 通配全部快捷输入的模式键：`mix:<id>` 自己没写的格落到这里，再往下才是当前方案。
+pub const MIX_ALL_MODE: &str = "mix";
+
 /// 解析链上的一层，按从具体到一般的顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignLayer {
@@ -450,23 +453,40 @@ impl CommentLibrary {
         }
     }
 
-    /// 从 `start` 那层起按 模式 → 方案 → 类型 → 全局 找第一个有主见的格，带回它所在的层。
+    /// 从 `start` 那层起按 模式 → 方案 → 类型 → 全局 找第一个有主见的格，带回它所在的层与
+    /// 胜出格的模式键（只有模式层有）。快捷输入 `mix:<id>` 自己没主见时先看通配的 [`MIX_ALL_MODE`]。
     fn pick(
         &self,
         scope: &CommentScope,
         start: AssignLayer,
         state: CommentState,
         vertical: bool,
-    ) -> Option<(AssignLayer, &Cell)> {
+    ) -> Option<(AssignLayer, Option<&str>, &Cell)> {
         let a = &self.assign;
+        let mode_of = |m: &str| {
+            a.mode
+                .get_key_value(m)
+                .map(|(k, l)| (AssignLayer::Mode, Some(k.as_str()), l))
+        };
+        let mix_all = scope
+            .mode
+            .filter(|m| m.starts_with("mix:"))
+            .and_then(|_| mode_of(MIX_ALL_MODE));
         let layers = [
-            (AssignLayer::Mode, scope.mode.and_then(|m| a.mode.get(m))),
-            (AssignLayer::Schema, a.schema.get(scope.schema)),
-            (AssignLayer::Type, a.by_type.get(scope.schema_type.key())),
-            (AssignLayer::Global, Some(&a.global)),
+            scope.mode.and_then(mode_of),
+            mix_all,
+            a.schema
+                .get(scope.schema)
+                .map(|l| (AssignLayer::Schema, None, l)),
+            a.by_type
+                .get(scope.schema_type.key())
+                .map(|l| (AssignLayer::Type, None, l)),
+            Some((AssignLayer::Global, None, &a.global)),
         ];
-        for (at, layer) in layers.into_iter().skip(start as usize) {
-            let Some(layer) = layer else { continue };
+        for (at, key, layer) in layers.into_iter().flatten() {
+            if (at as usize) < start as usize {
+                continue;
+            }
             // 横排为主：竖排没写时同本层横排（横排有主见时），否则看下一层竖排。
             let picked = if vertical {
                 match layer.get(state, true) {
@@ -478,7 +498,7 @@ impl CommentLibrary {
                 adopt(layer.get(state, false))
             };
             if let Some(c) = picked {
-                return Some((at, c));
+                return Some((at, key, c));
             }
         }
         None
@@ -494,7 +514,7 @@ impl CommentLibrary {
     /// 按作用范围解析当前态与排布对应的模板串；`""` = 不显示。
     pub fn template_text(&self, scope: &CommentScope, state: CommentState, vertical: bool) -> &str {
         match self.pick(scope, AssignLayer::Mode, state, vertical) {
-            Some((_, c)) => self.text_of(c),
+            Some((_, _, c)) => self.text_of(c),
             None => match state {
                 CommentState::Default => &self.fallback_default,
                 CommentState::Detail => &self.fallback_detail,
@@ -511,10 +531,22 @@ impl CommentLibrary {
         state: CommentState,
         vertical: bool,
     ) -> (Option<&str>, AssignLayer) {
+        let (id, at, _) = self.resolve_cell_from(scope, start, state, vertical);
+        (id, at)
+    }
+
+    /// 同 [`Self::resolve_cell`]，另带胜出格所在的模式键（模式层才有；快捷输入可能落在通配层）。
+    fn resolve_cell_from(
+        &self,
+        scope: &CommentScope,
+        start: AssignLayer,
+        state: CommentState,
+        vertical: bool,
+    ) -> (Option<&str>, AssignLayer, Option<&str>) {
         match self.pick(scope, start, state, vertical) {
-            Some((at, Cell::Id(id))) => (Some(id.as_str()), at),
-            Some((at, _)) => (None, at),
-            None => (Some(Self::fallback_id(state)), AssignLayer::Global),
+            Some((at, key, Cell::Id(id))) => (Some(id.as_str()), at, key),
+            Some((at, key, _)) => (None, at, key),
+            None => (Some(Self::fallback_id(state)), AssignLayer::Global, None),
         }
     }
 
@@ -559,12 +591,12 @@ impl CommentLibrary {
         for (key, scope, start) in &rows {
             for state in [CommentState::Default, CommentState::Detail] {
                 for vertical in [true, false] {
-                    let (id, at) = self.resolve_cell(scope, *start, state, vertical);
+                    let (id, at, hit) = self.resolve_cell_from(scope, *start, state, vertical);
                     let from_scope = match at {
                         AssignLayer::Global => "global".to_string(),
                         AssignLayer::Type => format!("type:{}", scope.schema_type.key()),
                         AssignLayer::Schema => format!("schema:{}", scope.schema),
-                        AssignLayer::Mode => format!("mode:{}", scope.mode.unwrap_or_default()),
+                        AssignLayer::Mode => format!("mode:{}", hit.unwrap_or_default()),
                     };
                     out.push(EffectiveCell {
                         scope: key.clone(),
@@ -738,7 +770,7 @@ mod tests {
         assert_eq!(cell(&a.by_type, "english"), (s("none"), s("en_zh")));
         assert_eq!(cell(&a.mode, "temp_english"), (s("none"), s("en_zh")));
         assert_eq!(cell(&a.mode, "temp_pinyin"), (s("code"), s("chaizi_code")));
-        assert_eq!(cell(&a.mode, "mix:quick_mix"), (s("code"), None));
+        assert_eq!(cell(&a.mode, MIX_ALL_MODE), (s("code"), None));
         let all = std::iter::once(&a.global)
             .chain(a.by_type.values())
             .chain(a.schema.values())
@@ -858,7 +890,7 @@ mod tests {
         }
     }
 
-    /// 内置模板：code_hint / detail_full / a / b / c / d，文本为 `T:<id>`。
+    /// 内置模板：code / full / a / b / c / d，文本为 `T:<id>`。
     fn sys(assign: CommentAssign) -> SystemComments {
         SystemComments {
             templates: ["code", "full", "a", "b", "c", "d"]
@@ -1132,6 +1164,47 @@ mod tests {
         );
     }
 
+    /// 快捷输入自己没写的格落到通配 `mode.mix`，写了的覆盖它；别的模式不看通配格。
+    #[test]
+    fn mix_modes_fall_back_to_mix_all_cell() {
+        let mut a = global_only();
+        a.mode
+            .insert(MIX_ALL_MODE.into(), cells(None, Some("b"), None, None));
+        a.mode
+            .insert("mix:own".into(), cells(None, None, None, Some("none")));
+        let (lib, _) = CommentLibrary::build(&sys(a), &UiCommentConfig::default());
+        for m in ["mix:own", "mix:other"] {
+            assert_eq!(
+                lib.resolve_cell(
+                    &scope(Some(m)),
+                    AssignLayer::Mode,
+                    CommentState::Default,
+                    false
+                ),
+                (Some("b"), AssignLayer::Mode),
+                "{m}"
+            );
+        }
+        assert_eq!(
+            lib.resolve_cell(
+                &scope(Some("mix:own")),
+                AssignLayer::Mode,
+                CommentState::Detail,
+                false
+            ),
+            (None, AssignLayer::Mode)
+        );
+        assert_eq!(
+            lib.resolve_cell(
+                &scope(Some("url")),
+                AssignLayer::Mode,
+                CommentState::Default,
+                false
+            ),
+            (Some("code"), AssignLayer::Global)
+        );
+    }
+
     #[test]
     fn resolve_cell_falls_back_to_builtin_ids() {
         let (lib, _) =
@@ -1207,7 +1280,7 @@ mod tests {
             ("mode:temp_english", T, "en_zh", "mode:temp_english"),
             ("mode:temp_pinyin", D, "code", "mode:temp_pinyin"),
             ("mode:temp_pinyin", T, "chaizi_code", "mode:temp_pinyin"),
-            ("mode:mix:quick_mix", D, "code", "mode:mix:quick_mix"),
+            ("mode:mix", D, "code", "mode:mix"),
         ] {
             assert_eq!(
                 got(scope, st),

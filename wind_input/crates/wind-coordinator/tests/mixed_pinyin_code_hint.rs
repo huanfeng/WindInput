@@ -94,8 +94,6 @@ fn mixed_with_hint_only_template_hides_codetable_code() {
         eprintln!("跳过：缺少 build_dev/data 的混输方案");
         return;
     }
-    assert_ne!(
-        first_comment(cfg(Some("code_hint"))).as_deref(),
-        Some("wqvb")
-    );
+    // 拼音候选没有补全编码，注释为空 ⇒ Alt+1 吞键。
+    assert_eq!(first_comment(cfg(Some("code_hint"))), None);
 }

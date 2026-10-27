@@ -92,9 +92,9 @@ pub(crate) struct DataNeeds {
 
 判定要点（S1 实施时补全）：
 - 方案级模板取**全部已安装方案**的并集，宁可多装一份拆字表也不要切过去才空。
-- 悬停的逐字段 `${code_rev}` 走 `eval_text_var`，**不看** `code_hint_source`；`${code_source}` 单独
+- 悬停的逐字段 `${code_rev}` 走 `eval_text_var`，不限候选来源；`${code_source}` 单独
   出现也要查编码——两者都计入 `reverse_index`。
-- 出厂结果：反查要、用户层要（全局模板含 `${code_rev}` 且临拼来源出厂 `auto`），拆字、简繁不要。
+- 出厂结果：反查要、用户层要（临时拼音、快捷输入出厂分到含 `${code_rev}` 的「编码」模板），拆字、简繁不要。
   即出厂只省拆字 + 简繁约 2.6 MB（推断）；主要收益在用户关掉功能之后。
 
 判定材料已经现成：`Template::references`（`comment.rs:625`）、`CompiledTooltip::references`

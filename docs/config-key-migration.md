@@ -23,7 +23,10 @@
 | 旧 | 现行 |
 |---|---|
 | `schema.active` / `available` / `primary_codetable` / `primary_pinyin` | 不变 |
-| `pinyin.show_code_hint` | `schema.pinyin.code_hint_source`（0.122 起由布尔改为四档枚举，值迁移见 `Config::migrate_show_code_hint_value`） |
+| `pinyin.show_code_hint` | 已退役：先成 `schema.pinyin.code_hint_source`（四档），后并入注释分配 `ui.comment.assign.type.{pinyin,shuangpin}`，见 `Config::migrate_code_hint_gates_value` |
+| `schema.pinyin.code_hint_source` | 已退役 → `ui.comment.assign.type.{pinyin,shuangpin}.default_horizontal` |
+| `input.temp_pinyin.code_hint_source` | 已退役 → `ui.comment.assign.mode.{temp_pinyin,mix}.default_horizontal` |
+| `schema.mix.pinyin_code_hint` | 已退役 → `ui.comment.assign.type.mixed.default_horizontal`（false 写 `code_hint`） |
 | `pinyin.use_smart_compose` | `schema.pinyin.use_smart_compose` |
 | `pinyin.candidate_order` | `schema.pinyin.candidate_order` |
 | `input.pinyin_separator` | `schema.pinyin.separator` |

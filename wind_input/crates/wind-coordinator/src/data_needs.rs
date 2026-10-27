@@ -127,7 +127,8 @@ impl DataNeeds {
     ///   （态随 Alt 即时切换，第一次切过去不能是空的）。
     /// - 注释段的 `${code_rev*}` 按**可达上下文实际落到的模板**判（设计 §13.6）：每个可用方案的
     ///   主路（码表、英文方案的主路不出拼音来源候选，跳过），以及进得去的临时拼音、各快捷输入，
-    ///   两态两排布逐一解析，任一引用即要。纯拼音用户主路默认态是 `none`，出厂不为它预载。
+    ///   两态两排布逐一解析，任一引用即要。纯拼音方案主路默认态是 `none`，但临拼、快捷输入出厂
+    ///   分到「编码」，所以出厂仍要（与退役前一致）。
     /// - 悬停段：逐字段走 `eval_text_var`，那里的 `${code_rev}` 不带门控；
     ///   `${word_code}` / `${code_source}` 任一被引用，候选循环就按词查码（含用户层）。
     /// - 拆字不受任何档门控，模板里写了就要。
@@ -241,7 +242,7 @@ mod tests {
 
     /// 临时拼音与快捷输入两态都不显示：编码反查在注释里再无消费者（取代退役的临拼编码来源 `off`）。
     fn without_overlay_codes(c: &mut Config) {
-        for m in ["temp_pinyin", "mix:quick_mix"] {
+        for m in ["temp_pinyin", wind_config::comment_lib::MIX_ALL_MODE] {
             c.ui.comment.assign.mode.insert(
                 m.into(),
                 CommentCells {

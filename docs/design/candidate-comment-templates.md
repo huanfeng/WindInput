@@ -151,7 +151,7 @@ detail_horizontal = "inherit"
 ```
 
 - **模式键名**：`temp_pinyin` / `temp_english` / `url` / `email` / `unicode` / `mix:<mix_mode id>` /
-  `special:<方案id>`。TOML 表名里带冒号要加引号：`[ui.comment.assign.mode."mix:quick_mix"]`。
+  `special:<方案id>`；`mix` 通配全部快捷输入，`mix:<id>` 没写的格先落到它，再到当前方案。TOML 表名里带冒号要加引号：`[ui.comment.assign.mode."mix:quick_mix"]`。
 - **引用了不存在的模板 id**：启动 `warn` 一次，该格按「不写」处理（跟随下一层），不报错不阻断。
 - **模板 id 规则**：`[a-z0-9_]+`；`none` / `inherit` 是保留字，用户模板用了即忽略并 `warn`。设置端新建时自动生成，用户可改名（改的是 `name`，不是 `id`）。
 - 方案层的**用户**设置统一在用户配置的 `assign.schema.<id>`，与总表一一对应。
@@ -441,30 +441,32 @@ detail_horizontal = "inherit"
 | 英文 | `none` | `en_zh` |
 | 临时英文 | `none` | `en_zh` |
 | 临时拼音 | `code` | `chaizi_code` |
-| 快捷输入（`mix:quick_mix`） | `code` | 跟随 |
+| 全部快捷输入（`mix`） | `code` | 跟随 |
 
 码表默认态不覆盖：主路上没有拼音来源候选，`code` 与 `code_hint` 效果相同，让用户改全局时码表方案跟着变。
 临时拼音、快捷输入的默认态显式写 `code`：它们的上级是当前方案，拼音方案下会落到 `none`，
-而退役前它们读自己那份 `auto`。
+而退役前它们读自己那份 `auto`。快捷输入写在通配的 `mix` 上，用户自建的快捷输入也覆盖到。
 
 **迁移**（只迁用户层写了的值；目标格已有用户值时不覆盖）：
 
 | 旧值 | 写到 | 值 |
 |---|---|---|
 | `schema.pinyin.code_hint_source` = `codetable` / `shuangpin` / `auto` | `type.pinyin`、`type.shuangpin` 的 `default_horizontal` | `code_rev` / `shuangpin` / `code` |
-| `input.temp_pinyin.code_hint_source` = `off` / `codetable` / `shuangpin` | `mode.temp_pinyin` 与各 `mode.mix:<id>` 的 `default_horizontal` | `none` / `code_rev` / `shuangpin` |
+| `input.temp_pinyin.code_hint_source` = `off` / `codetable` / `shuangpin` | `mode.temp_pinyin` 与 `mode.mix` 的 `default_horizontal` | `none` / `code_rev` / `shuangpin` |
 | `schema.mix.pinyin_code_hint` = `false` | `type.mixed` 的 `default_horizontal` | `code_hint` |
 
 更早的 `schema.pinyin.show_code_hint`（bool）先按原规则折成 `code_hint_source` 再走上表。
 旧版自定义了全局注释模板的用户，§10 的迁移已给有出厂格的范围写 `inherit`（`FACTORY_DEFAULT_SCOPES`
-随出厂分配扩到上表全部范围），仍跟随他们的全局模板；其中拼音方案原先被 `off` 挡住的编码变量会开始显示，
-这是唯一的行为差异，迁移时记日志。
+随出厂分配扩到上表全部范围），仍跟随他们的全局模板，编码开关不再迁入（跳过时记 warn）。原先被收窄的会放开：拼音 `off` / `shuangpin`、
+临拼 `off` / `codetable` / `shuangpin`、混输 `false` 挡住的编码变量会按全局模板照常显示。
+这类用户本就自己写模板，按模板显示即可，不再派生去编码的模板。
 
 **按需预载**：反查表是否预载改为按「可达上下文实际落到的模板」判断：每个可用方案的主路（码表、英文方案的主路不出拼音来源候选，跳过），
 以及进得去的临时拼音、各快捷输入，两态两排布逐一解析，任一模板引用编码反查变量即预载。
-纯拼音用户默认态是 `none`，不预载，与退役前一致。
+纯拼音方案主路默认态是 `none`，但临时拼音、快捷输入出厂分到「编码」，所以出厂仍预载，与退役前一致；
+两者都改成不显示编码才不预载。
 
 **设置端**：三处原位置（拼音「编码提示来源」、临时拼音「临时拼音编码提示」、混输「拼音候选显示码表
 编码」）删掉，各留一行说明加跳转「在 候选注释 · 分配 中设置」。首次设置向导的「拼音反查」改为写
-`type.pinyin` / `type.shuangpin` 的默认态（开 = `code_rev`，关 = 删用户格回到出厂 `none`）。
+`type.pinyin` / `type.shuangpin` 的默认态（任一格不是 `none` 即算开；开 = 把还是 `none` 的格写 `code_rev`，已另选的模板不动；关 = 两格写 `none`，与出厂相同）。
 Android 端的同名设置项不在本仓，另行跟进。

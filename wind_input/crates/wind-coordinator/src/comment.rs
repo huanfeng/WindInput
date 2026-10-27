@@ -3331,7 +3331,17 @@ mod eval_var_tests {
 
     /// 出厂分配下当前态、横排落到的模板串。
     fn factory_tpl(available: &[&str], active: &str, mode: Option<ModeKind>) -> String {
+        factory_tpl_with(available, active, mode, |_| {})
+    }
+
+    fn factory_tpl_with(
+        available: &[&str],
+        active: &str,
+        mode: Option<ModeKind>,
+        tweak: impl FnOnce(&mut Config),
+    ) -> String {
         let mut cfg = Config::default();
+        tweak(&mut cfg);
         cfg.schema.available = available.iter().map(|s| s.to_string()).collect();
         cfg.schema.active = active.to_string();
         let co = Coordinator::new_headless(cfg.clone(), Some(&data_dir()));
@@ -3362,6 +3372,26 @@ mod eval_var_tests {
                 "{mode:?}"
             );
         }
+    }
+
+    /// 用户自建的快捷输入没有自己的格，落到通配的 `mode.mix`，拼音方案下仍显示编码。
+    #[test]
+    fn user_mix_mode_falls_back_to_mix_all_cell() {
+        let add_mine = |c: &mut Config| {
+            let mut m = c.schema.mix_modes[0].clone();
+            m.id = "mine".into();
+            c.schema.mix_modes.push(m);
+        };
+        let idx = Config::default().schema.mix_modes.len() as u8;
+        assert_eq!(
+            factory_tpl_with(
+                &["pinyin", "wubi86"],
+                "pinyin",
+                Some(ModeKind::Mix(idx)),
+                add_mine
+            ),
+            "${code_hint|code_rev|shuangpin}"
+        );
     }
 }
 

@@ -101,8 +101,23 @@ const FACTORY_DEFAULT_SCOPES: &[&[&str]] = &[
     &["type", "english"],
     &["mode", "temp_english"],
     &["mode", "temp_pinyin"],
-    &["mode", "mix:quick_mix"],
+    &["mode", crate::comment_lib::MIX_ALL_MODE],
 ];
+
+/// 退役的编码来源键各自迁到哪些分配范围（见 [`Config::migrate_code_hint_gates_value`]）。
+fn legacy_code_hint_targets(path: &[&str]) -> &'static [&'static [&'static str]] {
+    match path {
+        ["schema", "pinyin", "code_hint_source" | "show_code_hint"] => {
+            &[&["type", "pinyin"], &["type", "shuangpin"]]
+        }
+        ["input", "temp_pinyin", "code_hint_source"] => &[
+            &["mode", "temp_pinyin"],
+            &["mode", crate::comment_lib::MIX_ALL_MODE],
+        ],
+        ["schema", "mix", "pinyin_code_hint"] => &[&["type", "mixed"]],
+        _ => &[],
+    }
+}
 
 /// 从 `t` 摘下 `comment_template_<side>`；非字符串的只删不迁。
 fn take_legacy_template(t: &mut toml::Table, origin: &str, side: &str) -> Option<String> {
@@ -131,6 +146,7 @@ fn legacy_scope_label(cell_path: &[String]) -> String {
             "email" => "Email",
             "unicode" => "Unicode",
             "mix:quick_mix" => "快捷输入",
+            crate::comment_lib::MIX_ALL_MODE => "全部快捷输入",
             other => other.strip_prefix("mix:").unwrap_or(other),
         },
         other => return format!("旧版·{}", other.join(".")),
@@ -1216,21 +1232,6 @@ impl Default for EnglishFrequency {
     }
 }
 
-/// `schema.pinyin.code_hint_source` / `input.temp_pinyin.code_hint_source` 的值域：
-/// 拼音来源候选的注释里，编码从哪来。两个键各管一摊（拼音方案 vs 临拼/快捷输入），值域相同。
-///
-/// 分工是「开关管允许哪些来源求值、模板管按什么顺序和格式摆」，两层不重叠。用户在模板里
-/// 写了某个变量却把它的来源关掉时，该变量恒空——按配置办事。
-///
-/// # 为什么从 bool 改成四档
-///
-/// 旧的 `show_code_hint` 只能回答「要不要显示反查来的码表编码」。用户要的是第三种东西
-/// ——**双拼编码**（GH#128「字或词的后面能不能显示双拼的编码」），它既不在码表词库里、
-/// 也不是「关掉」能表达的。硬塞进 bool 只会变成「开关开着，却显示着我不想要的那种码」。
-///
-/// ★ 改名顺带消解了一处长期的同名冲突：`schema.codetable.show_code_hint` 管的是**码表
-/// 引擎**给前缀候选标剩余编码（敲 `si` 时给 `sikao` 标 `kao`），与本键毫无关系却一直同名。
-/// `docs/design/candidate-comment-layering.md` 把这对同名键记为待办已久。
 /// `input.alt_commit` 的值域：Alt+数字 / Alt+空格 上屏候选的**什么**。
 ///
 /// 一个键兼作开关与内容选择（而不是 bool + 内容两键）：关着时内容无意义，两键组合里有一半
@@ -9439,11 +9440,11 @@ impl Config {
     ///
     /// - `schema.pinyin.code_hint_source`（更早的 `schema.pinyin.show_code_hint` 按 true →
     ///   `codetable`、false → `off` 先折一道）：非 `off` 写拼音、双拼类型的默认横排格；
-    /// - `input.temp_pinyin.code_hint_source`：非 `auto` 写临时拼音与各快捷输入的默认横排格；
+    /// - `input.temp_pinyin.code_hint_source`：非 `auto` 写临时拼音与通配全部快捷输入（`mode.mix`）的默认横排格；
     /// - `schema.mix.pinyin_code_hint = false`：混输类型默认横排格写 `code_hint`（只留补全编码）。
     ///
     /// 目标格本层已有值时不覆盖（旧版自定义了全局模板的用户，[`Self::migrate_comment_templates_value`]
-    /// 已在这些格写了 `inherit`，跟随他们的全局模板）。旧键照删，幂等。
+    /// 已在这些格写了 `inherit`，跟随他们的全局模板；跳过时记 warn）。旧键照删，幂等。
     fn migrate_code_hint_gates_value(layer: &mut toml::Value) {
         let Some(root) = layer.as_table_mut() else {
             return;
@@ -9493,23 +9494,10 @@ impl Config {
             _ => None,
         };
         if let (Some(t), Some(v)) = (temp_tpl, &temp) {
-            // 快捷输入的 id 取本层写的 mix_modes，没写就是出厂那几个。
-            let ids: Vec<String> =
-                match get_nested(&toml::Value::Table(root.clone()), &["schema", "mix_modes"])
-                    .and_then(toml::Value::as_array)
-                {
-                    Some(arr) => arr
-                        .iter()
-                        .filter_map(|m| m.get("id").and_then(toml::Value::as_str))
-                        .map(String::from)
-                        .collect(),
-                    None => default_mix_modes().into_iter().map(|m| m.id).collect(),
-                };
+            // 快捷输入原先都读临拼这份：迁到通配全部快捷输入的那格。
             let origin = format!("input.temp_pinyin.code_hint_source={v}");
             writes.push((cell(&["mode", "temp_pinyin"]), t, origin.clone()));
-            for id in ids {
-                writes.push((cell(&["mode", &format!("mix:{id}")]), t, origin.clone()));
-            }
+            writes.push((cell(&["mode", crate::comment_lib::MIX_ALL_MODE]), t, origin));
         }
         if mix == Some(false) {
             writes.push((
@@ -9520,7 +9508,13 @@ impl Config {
         }
         for (path, tpl, origin) in writes {
             let refs = path_refs(&path);
-            if get_nested(&toml::Value::Table(root.clone()), &refs).is_some() {
+            if let Some(cur) = get_nested(&toml::Value::Table(root.clone()), &refs) {
+                if cur.as_str() == Some("inherit") {
+                    warn!(
+                        "Skipped migrating {origin}: {} follows the custom global template",
+                        path.join(".")
+                    );
+                }
                 continue;
             }
             set_nested(root, &refs, toml::Value::String(tpl.to_string()));
@@ -10778,6 +10772,17 @@ impl Config {
                 set_nested(t, path, value);
             }
         }
+        // 旧客户端直接写退役的编码来源键：这是用户此刻的选择，先摘掉它对应的分配格再迁，
+        // 否则目标格已有值会让迁移跳过，写了等于没写。
+        if let toml::Value::Table(t) = &mut root {
+            for scope in legacy_code_hint_targets(path) {
+                let mut p = vec!["ui", "comment", "assign"];
+                p.extend_from_slice(scope);
+                p.push("default_horizontal");
+                remove_nested(t, &p);
+            }
+        }
+        Self::migrate_code_hint_gates_value(&mut root);
         // 角标旧色值：放在 set_nested **之后**，盘上已有的与本次新传入的一并迁掉
         // （旧写法只读不写）；放在之前则新值里的 `auto` / 8 位色值会原样落盘。
         Self::migrate_langbar_badge_colors_value(&mut root);
@@ -14685,7 +14690,7 @@ scripts = { latin = 42 }
         }
     }
 
-    /// 临时拼音那份写临时拼音与各快捷输入；`auto`（出厂）不写。
+    /// 临时拼音那份写临时拼音与通配全部快捷输入的格；`auto`（出厂）不写。
     #[test]
     fn temp_pinyin_code_hint_source_migrates_to_mode_cells() {
         let (_, got) = assign_cell_after_migration(
@@ -14695,19 +14700,16 @@ scripts = { latin = 42 }
         assert_eq!(got.as_deref(), Some("none"));
         let (_, got) = assign_cell_after_migration(
             "input.temp_pinyin.code_hint_source = \"codetable\"",
-            &["mode", "mix:quick_mix"],
+            &["mode", "mix"],
         );
-        assert_eq!(
-            got.as_deref(),
-            Some("code_rev"),
-            "没写 mix_modes 时按出厂的快捷输入"
-        );
-        let (_, got) = assign_cell_after_migration(
+        assert_eq!(got.as_deref(), Some("code_rev"));
+        let (user, got) = assign_cell_after_migration(
             "input.temp_pinyin.code_hint_source = \"shuangpin\"\n\
              [[schema.mix_modes]]\nid = \"mine\"\n",
-            &["mode", "mix:mine"],
+            &["mode", "mix"],
         );
-        assert_eq!(got.as_deref(), Some("shuangpin"));
+        assert_eq!(got.as_deref(), Some("shuangpin"), "自建快捷输入也走通配格");
+        assert!(get_nested(&user, &["ui", "comment", "assign", "mode", "mix:mine"]).is_none());
         let (_, got) = assign_cell_after_migration(
             "input.temp_pinyin.code_hint_source = \"auto\"",
             &["mode", "temp_pinyin"],
