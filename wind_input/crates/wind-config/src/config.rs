@@ -3997,6 +3997,21 @@ pub struct MobileAssociationConfig {
     /// 「我想打空格却上了个词」。留作开关给习惯「空格选首个联想」的人。
     #[serde(default)]
     pub space_commits: bool,
+    /// 移动端**关**：联想态的二三候选键（`;` `'`）不选联想，照常出标点。
+    /// 手机上选联想只靠点候选；这两个键在软键盘上就是普通标点键，不该被联想截走。
+    /// 桌面相反（[`AssociationConfig::select_keys_commit`] 默认开）。
+    #[serde(default)]
+    pub select_keys_commit: bool,
+    /// 移动端**关**（= 透传）：联想态按回车收起联想并照常换行/发送。语义同
+    /// [`AssociationConfig::enter_cancels_only`]。
+    #[serde(default)]
+    pub enter_cancels_only: bool,
+    /// 移动端**关**（= 透传）：联想态按退格收起联想并照常删字。
+    /// 桌面默认吃键（[`AssociationConfig::backspace_cancels_only`] = true），理由是桌面联想窗
+    /// 弹出时手停在刚打的字上、误触代价大；手机上联想只是候选条里的建议，退格就是要删字，
+    /// 吃掉一次反而成了「删不掉」。
+    #[serde(default)]
+    pub backspace_cancels_only: bool,
 }
 
 impl Default for MobileAssociationConfig {
@@ -4006,6 +4021,9 @@ impl Default for MobileAssociationConfig {
             mode: default_mobile_assoc_mode(),
             punct: true,
             space_commits: false,
+            select_keys_commit: false,
+            enter_cancels_only: false,
+            backspace_cancels_only: false,
         }
     }
 }

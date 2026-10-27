@@ -614,6 +614,24 @@ impl Coordinator {
         AssocConfig::from_config(&rt.config.input.association, mobile)
     }
 
+    /// 读一个联想布尔项：移动端取 `[mobile.association]`，桌面取 `[input.association]`。
+    fn assoc_flag(
+        &self,
+        base: impl Fn(&wind_config::AssociationConfig) -> bool,
+        mobile: impl Fn(&wind_config::MobileAssociationConfig) -> bool,
+    ) -> bool {
+        let rt = self.rt();
+        if use_mobile_overrides() {
+            mobile(&rt.config.mobile.association)
+        } else {
+            base(&rt.config.input.association)
+        }
+    }
+
+    fn assoc_select_keys_commit(&self) -> bool {
+        self.assoc_flag(|a| a.select_keys_commit, |m| m.select_keys_commit)
+    }
+
     /// 按上文算联想候选（不改状态）。`maybe_enter_assoc` 与评测 / 诊断共用这一份。
     pub(crate) fn assoc_hits(
         &self,
@@ -1054,7 +1072,7 @@ impl Coordinator {
     /// 只给 keydown 消费的可打印选词键用（主路符号臂与字母臂）：让出后那一键照常往下走，
     /// 由既有分支收联想并出字 / 进模式——与联想态的其它标点同一条路，这里不另写出口。
     pub(crate) fn assoc_yields_select_key(&self, state: &State) -> bool {
-        state.assoc_active() && !self.rt().config.input.association.select_keys_commit
+        state.assoc_active() && !self.assoc_select_keys_commit()
     }
 
     /// 联想态的**回车**处置（`input.association.enter_cancels_only`，默认 `false` = 透传）。
@@ -1062,7 +1080,7 @@ impl Coordinator {
     /// 默认让回车穿过去：它是终结性动作，用户按它是要发送/换行，而联想窗是输入法自己弹的、
     /// 用户并没在选词。让一个「建议」吞掉一次回车，正事就被挡住了。
     pub(crate) fn assoc_enter(&self, state: &mut State) -> KeyAction {
-        let cancels_only = self.rt().config.input.association.enter_cancels_only;
+        let cancels_only = self.assoc_flag(|a| a.enter_cancels_only, |m| m.enter_cancels_only);
         self.assoc_dismiss_with(state, cancels_only)
     }
 
@@ -1072,7 +1090,8 @@ impl Coordinator {
     /// 却是**删掉刚上屏的字**——不可逆。联想窗弹出时用户的手正停在刚打完的字上，误触退格
     /// 若直接删字，代价远大于多按一次键。要这个行为的人可以开。
     pub(crate) fn assoc_backspace(&self, state: &mut State) -> KeyAction {
-        let cancels_only = self.rt().config.input.association.backspace_cancels_only;
+        let cancels_only =
+            self.assoc_flag(|a| a.backspace_cancels_only, |m| m.backspace_cancels_only);
         self.assoc_dismiss_with(state, cancels_only)
     }
 

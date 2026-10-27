@@ -1924,6 +1924,13 @@ punct = true
 # 移动端联想态空格出空格、收起联想，不选首个联想（汉字后双击空格出「。」也靠它）。
 # 桌面相反（[input.association] 里 space_commits = true）——候选窗里高亮看得见，空格选词顺手。
 space_commits = false
+# 移动端联想态的二三候选键（; '）不选联想：手机上选联想只靠点候选，这两个键就是普通标点键。
+# 桌面相反（[input.association] 里 select_keys_commit = true）。
+select_keys_commit = false
+# 移动端联想态按回车 / 退格都透传给宿主（照常换行、删字），联想只是候选条里的建议，不拦正事。
+# 桌面的退格默认吃键（backspace_cancels_only = true，误触删字代价大），手机上相反。
+enter_cancels_only = false
+backspace_cancels_only = false
 
 [mobile.grammar]
 # 总开关，手机端设置页「方案 → 拼音」里的那个勾。
