@@ -262,6 +262,20 @@ pub(crate) const fn use_mobile_overrides() -> bool {
     cfg!(target_os = "android")
 }
 
+/// 数字键此刻是否进编码缓冲（而不是选候选）。
+///
+/// 只有**移动端、英文方案、已在组码**三者同时成立才进：英文词里常带数字（mp3、h2o、win10），
+/// 软键盘上数字要上滑或切层才打得出，没人会拿它去选候选（点候选更顺手）。
+/// 中文方案不进：打完字接数字是常态，数字仍是「首选上屏 + 数字」（宿主侧处理）。
+/// 桌面不进：物理键盘上数字选词是长期习惯。
+pub(crate) const fn digit_enters_english_buffer(
+    mobile: bool,
+    composing: bool,
+    english: bool,
+) -> bool {
+    mobile && composing && english
+}
+
 /// 词语联想的取数源：词库里以上文为前缀的更长的词。
 ///
 /// ★ 显示整词、上屏只补剩余部分——`AssocHit::commit` 在这里填好，下游不再现算。
@@ -1653,5 +1667,23 @@ mod tests {
             }
         }
         assert_eq!(label.as_deref(), Some(""), "联想态不该显示模式标记");
+    }
+
+    /// 数字进编码只在「移动端 + 英文 + 组码中」三者齐备时成立，缺一不可
+    #[test]
+    fn digit_enters_buffer_only_on_mobile_english_composing() {
+        assert!(digit_enters_english_buffer(true, true, true));
+        assert!(
+            !digit_enters_english_buffer(false, true, true),
+            "桌面数字照旧选词"
+        );
+        assert!(
+            !digit_enters_english_buffer(true, false, true),
+            "没在组码：数字原样出"
+        );
+        assert!(
+            !digit_enters_english_buffer(true, true, false),
+            "中文方案：顶屏 + 数字"
+        );
     }
 }

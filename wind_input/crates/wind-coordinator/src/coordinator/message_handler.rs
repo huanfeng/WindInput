@@ -1892,6 +1892,19 @@ impl MessageHandler for Coordinator {
                     KeyAction::PassThrough
                 }
             }
+            // 移动端英文方案组码中：数字是词的一部分（mp3、h2o、win10），进编码而不是选词。
+            // 判据见 `handle_assoc::digit_enters_english_buffer`；桌面与中文方案不进此臂，数字照旧选词。
+            keymap::VK_0..=keymap::VK_9
+                if data.modifiers & MOD_SHIFT == 0
+                    && crate::handle_assoc::digit_enters_english_buffer(
+                        crate::handle_assoc::use_mobile_overrides(),
+                        !state.input_buffer.is_empty(),
+                        self.engine_mgr.active_is_english(),
+                    ) =>
+            {
+                let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
+                self.accumulate_code_char(&mut state, digit, digit)
+            }
             keymap::VK_1..=keymap::VK_9 if data.modifiers & MOD_SHIFT == 0 => {
                 // 数字键 1-9 选当前页第 N 个候选；越界按 input.overflow.number_key 处理
                 // （ignore 吞键 / commit 上屏高亮 / commit_and_input 顶字+数字，对齐 Go）。
