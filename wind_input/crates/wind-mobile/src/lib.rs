@@ -72,6 +72,8 @@ pub use wind_host::{EditOp, KeyOutcome, TimingHint};
 /// [`MAX_WINDOW`] 要跟着透出而不是让宿主自己记一份：宿主传的 `limit` 超过它会被
 /// 核心静默截断，宿主若按自记的数字判断「还有没有更多」，就会在边界上反复拉空窗口。
 pub use wind_coordinator::candidate_pull::{CandidateWindow, MAX_WINDOW, TextSegment};
+/// 拼音中间修正的数据类型（音节视图 / 备选拼写），见 [`MobileCore::syllable_view`]。
+pub use wind_coordinator::syllable_edit::{SyllableFix, SyllableSpan, SyllableView};
 pub use wind_store::stats_report::StatsSummary;
 
 /// 候选帧：编码栏与候选栏一次渲染所需的全部数据。
@@ -645,6 +647,32 @@ impl MobileCore {
         let outcome = self.coord.select_candidate(index);
         self.coord.note_host_edits(&outcome.ops);
         outcome
+    }
+
+    /// 当前拼音编码的音节拆分与编码光标位置（展开页左栏画它）。
+    /// 非拼音方案 / 双拼 / 无编码 → `None`。
+    pub fn syllable_view(&self) -> Option<SyllableView> {
+        self.coord.syllable_view()
+    }
+
+    /// 第 `idx` 个音节的可替换拼写（模糊音 / 纠错 / 误触），已按改动大小排好。
+    pub fn syllable_fixes(&self, idx: usize) -> Vec<SyllableFix> {
+        self.coord.syllable_fixes(idx)
+    }
+
+    /// 把编码光标放到缓冲 `caret`（字节）处，候选随之只查光标前一段。
+    /// 返回值与 [`Self::key_down`] 同形：宿主执行其中的 `SetComposition` 刷新组合区。
+    pub fn set_syllable_caret(&self, caret: usize) -> KeyOutcome {
+        let outcome = self.coord.set_syllable_caret(caret);
+        self.coord.note_host_edits(&outcome.ops);
+        outcome
+    }
+
+    /// 应用一条修正（缓冲 `[start, end)` 换成 `text`）。不合法 → `None`，什么都没改。
+    pub fn apply_syllable_fix(&self, start: usize, end: usize, text: &str) -> Option<KeyOutcome> {
+        let outcome = self.coord.apply_syllable_fix(start, end, text)?;
+        self.coord.note_host_edits(&outcome.ops);
+        Some(outcome)
     }
 
     /// 第 `index`（**绝对下标**，与 [`Self::candidates`] 同一口径）个候选的长按菜单；

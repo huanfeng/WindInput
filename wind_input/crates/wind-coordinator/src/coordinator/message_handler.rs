@@ -2028,12 +2028,30 @@ impl MessageHandler for Coordinator {
                         KeyAction::Consumed
                     }
                 } else {
+                    // 手机端拼音：← 按音节跳（电脑端仍按字母，见 `query_cut` 的说明）。
+                    // 拆分串对不回缓冲（双拼等）→ None，退回按字母。
+                    let syllable_jump = (data.key_code == keymap::VK_LEFT
+                        && crate::handle_assoc::use_mobile_overrides()
+                        && self.engine_mgr.is_pinyin())
+                    .then(|| {
+                        let split = self
+                            .engine_mgr
+                            .convert(&state.input_buffer, 1)
+                            .preedit_pinyin;
+                        preedit_cursor::syllable_spans(&state.input_buffer, &split)
+                    })
+                    .flatten();
                     let st = &mut *state;
+                    if let Some(spans) = &syllable_jump {
+                        st.input_cursor_pos =
+                            preedit_cursor::syllable_left(spans, st.input_cursor_pos);
+                    }
                     let mut ed = preedit_cursor::BufEdit::new(
                         &mut st.input_buffer,
                         &mut st.input_cursor_pos,
                     );
                     let moved = match data.key_code {
+                        keymap::VK_LEFT if syllable_jump.is_some() => true,
                         keymap::VK_LEFT => ed.move_left(),
                         keymap::VK_RIGHT => ed.move_right(),
                         keymap::VK_HOME => ed.home(),
@@ -2043,6 +2061,10 @@ impl MessageHandler for Coordinator {
                         // 光标移动**不重算候选**（不调 update_candidates）：光标不参与引擎查询，
                         // 候选与 preedit 文本均不变，只是 caret 位置变了。但仍须 notify_ui_update
                         // ——自绘编码栏要据新 caret 重画插入符（"不重算候选" ≠ "不刷新 UI"）。
+                        // 手机端例外：光标在中间时候选只查光标前一段（`query_cut`），移动后必须重算。
+                        if crate::handle_assoc::use_mobile_overrides() {
+                            self.update_candidates(&mut state);
+                        }
                         let display = state.preedit.clone();
                         let caret_pos = self.composition_caret(&state);
                         self.notify_ui_update(&state);

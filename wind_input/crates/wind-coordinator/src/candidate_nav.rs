@@ -298,7 +298,7 @@ impl Coordinator {
             state.selected_index = selected_before;
         } else {
             let limit = state.candidate_limit;
-            self.build_candidates(state, limit);
+            self.build_candidates_at_cursor(state, limit);
         }
         // 判据取「列表里有没有真的出现被滤候选」，而非「总数是否变多」——候选受 limit 截断时
         // 总数可能不变，那样会误判成「没放出东西」而撤销。

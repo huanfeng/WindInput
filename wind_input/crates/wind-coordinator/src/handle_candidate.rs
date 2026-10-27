@@ -2588,6 +2588,75 @@ impl Coordinator {
 
     /// 根据输入缓冲更新候选（动态分级加载：首次小批量，翻页到边界再扩展）。
     /// 返回输入结局（全码自动上屏 / 满码空码清空）；多数调用方忽略，仅正向输入字母时消费。
+    /// 光标限定查询的截断位（字节）：`Some(n)` = 本轮候选只按 `input_buffer[..n]` 去问引擎。
+    ///
+    /// 手机端的拼音「中间修正」：光标挪到某个音节后面，候选就只剩这个音节（及其前缀）的字，
+    /// 选中后上屏、后半截留在编码栏续打（复用分步上屏，见 `partial`）。
+    ///
+    /// ⚠️ **只在 Android 生效**（`use_mobile_overrides`）：电脑端 ←/→ 移光标**不改候选**
+    /// 是既有行为（`State::input_cursor_pos` 注释：光标不参与引擎查询），不能被手机需求顺带改掉。
+    /// 将来电脑端要开，把这里的门换成配置项即可，下游无需再动。
+    /// 仅限普通输入的拼音方案；overlay 模式（临时拼音等）与码表方案不进。
+    fn query_cut(&self, state: &State) -> Option<usize> {
+        cut_position(
+            crate::handle_assoc::use_mobile_overrides(),
+            &state.input_buffer,
+            state.input_cursor_pos,
+            Self::overlay_caret_parts(state).is_none() && self.engine_mgr.is_pinyin(),
+        )
+    }
+
+    /// [`Self::build_candidates`] 的光标感知入口：光标在编码中间时只查光标前那一段。
+    ///
+    /// 做法是**临时**把缓冲截到光标处喂给引擎，查完立刻还原——引擎、短语、词频这几十处读
+    /// `input_buffer` 的地方全都看到一致的「前缀」，一处不用改。还原后补两件事：
+    /// - 候选的 `consumed_length` 一律夹到截断位。引擎对「吃掉整个前缀」的候选常标 0（未标注）
+    ///   或等于前缀长，选词那头会把它们当成「整串匹配」整体上屏、连后半截一起吞掉；夹成截断位后
+    ///   必走分步上屏，后半截留下来。
+    /// - 组合区拆分串换成**整串**的切分（`fang'xiang`），否则编码栏只剩光标前半截。
+    pub(crate) fn build_candidates_at_cursor(
+        &self,
+        state: &mut State,
+        limit: usize,
+    ) -> (usize, InputOutcome) {
+        let Some(cut) = self.query_cut(state) else {
+            return self.build_candidates(state, limit);
+        };
+        let full = state.input_buffer.clone();
+        let full_cased = state.input_buffer_cased.clone();
+        let cased_ok = preedit_cursor::cased_is_valid(&full, &full_cased);
+        state.input_buffer.truncate(cut);
+        if cased_ok {
+            state.input_buffer_cased.truncate(cut);
+        }
+        let result = self.build_candidates(state, limit);
+        state.input_buffer = full;
+        state.input_buffer_cased = full_cased;
+        for c in &mut state.candidates {
+            if c.consumed_length == 0 || c.consumed_length > cut {
+                c.consumed_length = cut;
+            }
+        }
+        let body = self
+            .engine_mgr
+            .convert(&state.input_buffer, 1)
+            .preedit_pinyin;
+        if !body.is_empty() {
+            // 候选自带的切分（`meta.preedit_split`）只覆盖被查询的前缀，且显示时优先于整串拆分：
+            // 不补后半截，编码栏就只剩光标前那几个字母（`fang` 吞掉 `xiang`）。
+            let tail = tail_after_letters(&body, cut);
+            if !tail.is_empty() {
+                for c in &mut state.candidates {
+                    if let Some(own) = c.meta.preedit_split.as_deref() {
+                        c.meta.preedit_split = Some(format!("{own}'{tail}").into());
+                    }
+                }
+            }
+            state.preedit_split_body = body;
+        }
+        result
+    }
+
     pub(crate) fn update_candidates(&self, state: &mut State) -> InputOutcome {
         let outcome = self.refill_candidates(state);
         self.grid_resume(state);
@@ -2659,7 +2728,7 @@ impl Coordinator {
             self.initial_candidate_limit(&state.input_buffer)
         };
         let t0 = std::time::Instant::now();
-        let (engine_count, outcome) = self.build_candidates(state, limit);
+        let (engine_count, outcome) = self.build_candidates_at_cursor(state, limit);
         let t_build = t0.elapsed();
         // 引导字母的「重复上屏」：输入恰为单个引导字母时，把最近一次上屏内容注入候选顶部
         // （对齐 Go），供「引导键 + 选词」重复上一次输入。资格判定见
@@ -2812,7 +2881,7 @@ impl Coordinator {
         }
         let prev_limit = state.candidate_limit;
         // 翻页扩展不消费全码自动上屏（仅正向输入字母时才上屏）。
-        let (engine_count, _) = self.build_candidates(state, new_limit);
+        let (engine_count, _) = self.build_candidates_at_cursor(state, new_limit);
         // 重建后立刻重新展开变体（列表整份重建，变体须随之重展）。
         self.expand_s2t_variants(state);
         // 展开态正在按分类筛选：重建出来的是完整列表，重新筛一遍（见 `grid_reapply_filter`）。
@@ -8704,6 +8773,37 @@ mod expand_stop_tests {
 }
 
 /// 移动端拼音单字母收紧首批上限；桌面、多字母、其它引擎一律不动。
+/// 拼音拆分串（`fang'xiang`）里，跳过前 `letters` 个字母（及随后的隔音符）之后剩下的部分。
+/// `tail_after_letters("fang'xiang", 4)` = `xiang`；字母数用尽 → 空串。
+pub(crate) fn tail_after_letters(body: &str, letters: usize) -> String {
+    let mut seen = 0usize;
+    for (i, ch) in body.char_indices() {
+        if seen >= letters {
+            return body[i..].trim_start_matches('\'').to_string();
+        }
+        if ch != '\'' {
+            seen += 1;
+        }
+    }
+    String::new()
+}
+
+/// [`Coordinator::query_cut`] 的判据（纯函数，便于测试）：只有手机端、光标严格落在编码中间
+/// 且在字符边界、普通拼音输入时才截断。
+pub(crate) fn cut_position(
+    mobile: bool,
+    buffer: &str,
+    cursor: usize,
+    plain_pinyin: bool,
+) -> Option<usize> {
+    (mobile
+        && plain_pinyin
+        && cursor > 0
+        && cursor < buffer.len()
+        && buffer.is_char_boundary(cursor))
+    .then_some(cursor)
+}
+
 #[cfg(test)]
 mod mobile_limit_tests {
     use crate::coordinator::Coordinator;
@@ -8735,5 +8835,51 @@ mod mobile_limit_tests {
                 "{other:?} 不受影响（英文 t 曾因上限太小打不出 then）"
             );
         }
+    }
+
+    #[test]
+    fn cut_position_only_for_mobile_pinyin_with_cursor_inside() {
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 4, true),
+            Some(4)
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 9, true),
+            None,
+            "光标在末尾 = 整串"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 0, true),
+            None,
+            "光标在开头无前缀可查"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(false, "fangxiang", 4, true),
+            None,
+            "电脑端不改既有行为"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 4, false),
+            None,
+            "码表 / overlay 不进"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "你好", 1, true),
+            None,
+            "非字符边界"
+        );
+    }
+
+    #[test]
+    fn tail_after_letters_skips_separators() {
+        use crate::handle_candidate::tail_after_letters;
+        assert_eq!(tail_after_letters("fang'xiang", 4), "xiang");
+        assert_eq!(
+            tail_after_letters("fang'xiang", 6),
+            "ang",
+            "光标在音节中间：余下半个音节"
+        );
+        assert_eq!(tail_after_letters("fang'xiang", 9), "");
+        assert_eq!(tail_after_letters("ni'hao'a", 2), "hao'a");
     }
 }

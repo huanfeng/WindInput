@@ -78,6 +78,7 @@ pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
 pub(crate) mod short_code_yield;
 pub mod stats;
+pub mod syllable_edit;
 pub mod theme_query;
 pub mod theme_style;
 pub(crate) mod tooltip;
