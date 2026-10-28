@@ -146,7 +146,7 @@ fn legacy_scope_label(cell_path: &[String]) -> String {
             "email" => "Email",
             "unicode" => "Unicode",
             "mix:quick_mix" => "快捷输入",
-            crate::comment_lib::MIX_ALL_MODE => "全部快捷输入",
+            crate::comment_lib::MIX_ALL_MODE => "快捷输入（默认）",
             other => other.strip_prefix("mix:").unwrap_or(other),
         },
         other => return format!("旧版·{}", other.join(".")),
@@ -9440,8 +9440,8 @@ impl Config {
     ///
     /// - `schema.pinyin.code_hint_source`（更早的 `schema.pinyin.show_code_hint` 按 true →
     ///   `codetable`、false → `off` 先折一道）：非 `off` 写拼音、双拼类型的默认横排格；
-    /// - `input.temp_pinyin.code_hint_source`：非 `auto` 写临时拼音与通配全部快捷输入（`mode.mix`）的默认横排格；
-    /// - `schema.mix.pinyin_code_hint = false`：混输类型默认横排格写 `code_hint`（只留补全编码）。
+    /// - `input.temp_pinyin.code_hint_source`：非 `auto` 写临时拼音与快捷输入默认（`mode.mix`）的默认横排格；
+    /// - `schema.mix.pinyin_code_hint = false`：混输类型默认横排格写 `code_hint`（只留剩余编码）。
     ///
     /// 目标格本层已有值时不覆盖（旧版自定义了全局模板的用户，[`Self::migrate_comment_templates_value`]
     /// 已在这些格写了 `inherit`，跟随他们的全局模板；跳过时记 warn）。旧键照删，幂等。
@@ -9494,7 +9494,7 @@ impl Config {
             _ => None,
         };
         if let (Some(t), Some(v)) = (temp_tpl, &temp) {
-            // 快捷输入原先都读临拼这份：迁到通配全部快捷输入的那格。
+            // 快捷输入原先都读临拼这份：迁到快捷输入默认的那格。
             let origin = format!("input.temp_pinyin.code_hint_source={v}");
             writes.push((cell(&["mode", "temp_pinyin"]), t, origin.clone()));
             writes.push((cell(&["mode", crate::comment_lib::MIX_ALL_MODE]), t, origin));
@@ -14690,7 +14690,7 @@ scripts = { latin = 42 }
         }
     }
 
-    /// 临时拼音那份写临时拼音与通配全部快捷输入的格；`auto`（出厂）不写。
+    /// 临时拼音那份写临时拼音与快捷输入默认的格；`auto`（出厂）不写。
     #[test]
     fn temp_pinyin_code_hint_source_migrates_to_mode_cells() {
         let (_, got) = assign_cell_after_migration(
@@ -14717,7 +14717,7 @@ scripts = { latin = 42 }
         assert_eq!(got, None);
     }
 
-    /// 混输开关关掉 → 混输类型只留补全编码；开着（出厂）不写。
+    /// 混输开关关掉 → 混输类型只留剩余编码；开着（出厂）不写。
     #[test]
     fn mix_pinyin_code_hint_false_migrates_to_mixed_type() {
         let (user, got) =

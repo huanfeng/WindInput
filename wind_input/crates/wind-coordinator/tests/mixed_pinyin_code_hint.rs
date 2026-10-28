@@ -87,13 +87,13 @@ fn mixed_shows_codetable_code_by_factory_assignment() {
     assert_eq!(first_comment(cfg(None)).as_deref(), Some("wqvb"));
 }
 
-/// 混输类型改分「补全编码」：拼音候选不再显示码表编码。
+/// 混输类型改分「剩余编码」：拼音候选不再显示码表编码。
 #[test]
 fn mixed_with_hint_only_template_hides_codetable_code() {
     if !has_schemas() {
         eprintln!("跳过：缺少 build_dev/data 的混输方案");
         return;
     }
-    // 拼音候选没有补全编码，注释为空 ⇒ Alt+1 吞键。
+    // 拼音候选没有剩余编码，注释为空 ⇒ Alt+1 吞键。
     assert_eq!(first_comment(cfg(Some("code_hint"))), None);
 }

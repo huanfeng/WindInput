@@ -915,7 +915,9 @@ pub trait WebDataRpc: WebDataHost {
                     TemplateOrigin::User => "user",
                     TemplateOrigin::UserOverridesBuiltin => "user_overrides_builtin",
                 };
-                let mut v = json!({ "id": t.id, "name": t.name, "text": t.text, "origin": origin });
+                let mut v = json!({
+                    "id": t.id, "name": t.name, "text": t.text, "desc": t.desc, "origin": origin,
+                });
                 // 被用户覆盖的内置模板带上原版，供设置端「恢复内置」前对照。
                 if o == TemplateOrigin::UserOverridesBuiltin
                     && let Some(b) = system.templates.iter().find(|b| b.id == t.id)
@@ -10799,7 +10801,8 @@ mod comment_library_tests {
             .find(|t| t["id"] == "code")
             .expect("templates 应含 code");
         assert_eq!(code["origin"], "builtin");
-        assert_eq!(code["name"], "编码");
+        assert_eq!(code["name"], "编码（自动）");
+        assert!(code["desc"].as_str().is_some_and(|d| !d.is_empty()));
         let g = cell(&v, "global", "default", true);
         assert_eq!(g["template_id"], "code");
         assert_eq!(g["from_scope"], "global");
@@ -10846,7 +10849,7 @@ mod comment_library_tests {
             .iter()
             .find(|t| t["id"] == "code")
             .unwrap();
-        assert_eq!(ch["builtin"]["name"], "编码");
+        assert_eq!(ch["builtin"]["name"], "编码（自动）");
         assert_eq!(origin("mine"), Some(json!("user")));
         for vertical in [false, true] {
             let s = cell(&v, "schema:wubi86", "detail", vertical);

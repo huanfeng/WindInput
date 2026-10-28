@@ -11403,6 +11403,7 @@ mod mode_comment_e2e_tests {
                 id: id.into(),
                 name: id.into(),
                 text: text.into(),
+                ..Default::default()
             });
         all_cells(id)
     }

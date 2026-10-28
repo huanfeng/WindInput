@@ -63,13 +63,15 @@ pub enum SwitchMode {
     Hold,
 }
 
-/// 命名模板。`id` 只含 `[a-z0-9_]`，`name` 是显示名。
+/// 命名模板。`id` 只含 `[a-z0-9_]`，`name` 是显示名，`desc` 是选模板时显示的一句说明。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommentTemplateDef {
     pub id: String,
     pub name: String,
     pub text: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub desc: String,
 }
 
 /// 一个作用范围的四格；`None` = 不写（跟随下一层）。格值为模板 id / `none` / `inherit`。
@@ -214,7 +216,7 @@ impl SchemaType {
     ];
 }
 
-/// 通配全部快捷输入的模式键：`mix:<id>` 自己没写的格落到这里，再往下才是当前方案。
+/// 快捷输入默认的模式键：`mix:<id>` 自己没写的格落到这里，再往下才是当前方案。
 pub const MIX_ALL_MODE: &str = "mix";
 
 /// 解析链上的一层，按从具体到一般的顺序。
@@ -887,6 +889,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             text: text.into(),
+            ..Default::default()
         }
     }
 

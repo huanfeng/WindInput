@@ -13,23 +13,27 @@
 
 [[templates]]
 id = "code"
-name = "编码"
+name = "编码（自动）"
 text = "${code_hint|code_rev|shuangpin}"
+desc = "码表候选显示剩余编码，拼音候选显示码表编码，没有码表时显示双拼"
 
 [[templates]]
 id = "code_hint"
-name = "补全编码"
+name = "剩余编码"
 text = "${code_hint}"
+desc = "只有码表候选显示还差的编码，拼音候选不显示"
 
 [[templates]]
 id = "code_rev"
 name = "码表编码"
 text = "${code_hint|code_rev}"
+desc = "码表候选显示剩余编码，拼音候选显示它在码表里的编码"
 
 [[templates]]
 id = "shuangpin"
 name = "双拼编码"
 text = "${code_hint|shuangpin}"
+desc = "码表候选显示剩余编码，拼音候选显示双拼编码"
 
 [[templates]]
 id = "pinyin"
@@ -101,7 +105,7 @@ default_horizontal = "none"
 detail_horizontal = "en_zh"
 
 # 临时拼音、快捷输入的上级是当前方案（拼音方案下会落到 none），默认态显式写上编码。
-# mode.mix 通配全部快捷输入；单个快捷输入另写 mode."mix:<id>" 覆盖。
+# mode.mix 是快捷输入的默认（界面上叫「快捷输入（默认）」）；单个快捷输入另写 mode."mix:<id>" 覆盖。
 [assign.mode.temp_pinyin]
 default_horizontal = "code"
 detail_horizontal = "chaizi_code"

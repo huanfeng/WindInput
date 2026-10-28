@@ -272,6 +272,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             text: text.into(),
+            ..Default::default()
         });
     }
 
@@ -374,7 +375,7 @@ mod tests {
     }
 
     /// 混输类型出厂给码表编码：只在**装了混输方案**时算消费者，纯拼音用户不为它常驻反查索引；
-    /// 混输改成只要补全编码后也不要。
+    /// 混输改成只要剩余编码后也不要。
     #[test]
     fn mixed_type_counts_only_with_mixed_schema() {
         let mut off = without_code_section(factory());

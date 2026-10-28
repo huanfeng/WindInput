@@ -95,6 +95,7 @@ fn comment_mode_commits_rendered_comment_untruncated() {
             id: "py".into(),
             name: "py".into(),
             text: "[${pinyin}]".into(),
+            ..Default::default()
         });
     // 夹具是拼音方案：拼音类型出厂默认态 none，模板分到类型上。
     cfg.ui.comment.assign.by_type.insert(

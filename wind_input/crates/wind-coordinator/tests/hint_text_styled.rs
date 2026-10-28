@@ -295,6 +295,7 @@ fn assign_correct_pinyin(c: &mut Config) {
             id: "fz".into(),
             name: "fz".into(),
             text: "${correct_pinyin}".into(),
+            ..Default::default()
         });
     // 夹具是拼音方案：拼音类型出厂默认态 none，分到类型上。
     c.ui.comment.assign.by_type.insert(
