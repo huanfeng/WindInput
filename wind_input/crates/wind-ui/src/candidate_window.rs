@@ -538,13 +538,6 @@ pub struct CandidateWindow {
     /// 展开态（多行网格）的版式；`None` = 普通单行 / 单列。每次 UpdateCandidates 同步。
     /// 设计见 `docs/design/candidate-grid-expand.md`。
     grid: Option<wind_ui_types::CandidateGrid>,
-    /// 本次展开期间窗口内容出现过的最大宽度（设备 px），收起即清零。
-    ///
-    /// 网格按列对齐，列宽随可见区里的候选变：不压住的话每滚一屏窗口就宽一下窄一下。
-    /// 下一帧以它为根容器的宽度下限，于是一次展开期间宽度只增不减（设计 §6.3）。
-    /// `Cell`：在 `&self` 的测量路径里回写。第二项是记下它时的缩放：设备像素跨了 DPI
-    /// 就不可比，换屏后作废重新起算。
-    grid_peak_w: Cell<(f32, f32)>,
     /// 展开态这一帧内容区的 `(左, 右, 顶)`（窗口内坐标，与命中矩形同一坐标系）。
     /// 悬停气泡据此停靠在整个窗口外侧的顶端，见 [`Self::tip_anchor`]。
     grid_box: Cell<(f32, f32, f32)>,
@@ -647,7 +640,6 @@ impl CandidateWindow {
             min_window_height_vertical: 0,
             min_rows: 0,
             grid: None,
-            grid_peak_w: Cell::new((0.0, 0.0)),
             grid_box: Cell::new((0.0, 0.0, 0.0)),
         })
     }
@@ -1493,11 +1485,8 @@ impl CandidateWindow {
         self.total_pages = total_pages.max(1);
     }
 
-    /// 展开态版式（`None` = 收起）。收起时清掉宽度峰值，下次展开从内容实宽重新起算。
+    /// 展开态版式（`None` = 收起）。
     pub fn set_grid(&mut self, grid: Option<wind_ui_types::CandidateGrid>) {
-        if grid.is_none() {
-            self.grid_peak_w.set((0.0, 0.0));
-        }
         // 刚展开：窗口原地往下长，新长出来的格子可能正好落在静止不动的鼠标底下，系统随之补发
         // 一次移动消息 ⇒ 用户什么都没做，悬停高亮与提示就冒出来了。与窗口刚显示同理
         // （`mark_visible`），从这一刻重新起算「鼠标动过没有」。
@@ -1507,13 +1496,10 @@ impl CandidateWindow {
         self.grid = grid;
     }
 
-    /// 记下展开态这一帧的内容区：宽度供下一帧当宽度下限（见 [`Self::grid_peak_w`]），
-    /// 内容盒供悬停气泡停靠（见 [`Self::grid_box`]）。`(left, top)` 是内容区在窗口里的
-    /// 左上（软阴影扩边）。
-    fn note_grid_width(&self, (left, top): (f32, f32), w: f32) {
+    /// 记下展开态这一帧的内容盒，供悬停气泡停靠（见 [`Self::grid_box`]）。`(left, top)` 是
+    /// 内容区在窗口里的左上（软阴影扩边）。
+    fn note_grid_box(&self, (left, top): (f32, f32), w: f32) {
         if self.grid.is_some() {
-            self.grid_peak_w
-                .set((self.grid_peak_px().max(w), self.scale));
             // 气泡贴的是**窗口实际的**右缘：渲染入口随后会按屏幕安全宽度收窄窗口，超宽的网格
             // 按测得宽度记会让气泡离窗口右缘空出一截。与入口那道钳制同一个上限。
             let shown = w.min(self.screen_safety_max_width_px() as f32);
@@ -1552,14 +1538,6 @@ impl CandidateWindow {
             r.y,
             r.y + r.h,
         )
-    }
-
-    /// 本次展开见过的最大宽度（当前缩放下有效；缩放变了视为 0）。
-    fn grid_peak_px(&self) -> f32 {
-        match self.grid_peak_w.get() {
-            (w, s) if s == self.scale => w,
-            _ => 0.0,
-        }
     }
 
     pub fn set_position(&mut self, x: i32, y: i32, caret_height: i32, caret_valid: bool) {
@@ -1680,7 +1658,7 @@ impl CandidateWindow {
         let t_layout0 = Instant::now();
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width((ml as f32, mt as f32), w_f);
+        self.note_grid_box((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         // 竖排最大宽度（behavior.vertical_max_width，单位 dp，默认 0=不限）：仅在用户/主题
         // 显式配置正值时生效。本 View 引擎不支持文本折行，超宽候选在窗口右缘裁切（draw_text
@@ -1852,7 +1830,7 @@ impl CandidateWindow {
         };
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width((ml as f32, mt as f32), w_f);
+        self.note_grid_box((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         if self.vertical && !self.candidates.is_empty() {
             let vmax = self.theme.behavior.vertical_max_width;
@@ -2028,7 +2006,7 @@ impl CandidateWindow {
         };
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width((ml as f32, mt as f32), w_f);
+        self.note_grid_box((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         if self.vertical && !self.candidates.is_empty() {
             let vmax = self.theme.behavior.vertical_max_width;
@@ -3134,12 +3112,7 @@ impl CandidateWindow {
             // 之后的产物，调大它不会回头改 root 的 mw/mh ⇒ 窗口缓冲变大而 root 背景/边框仍按
             // 旧尺寸画，边上露一条透明带，竖排 `fill_cross` 的高亮也不跟着撑。上限（主题
             // `vertical_max_width`）能那么写是因为它是裁切语义，下限不是。
-            // 展开态再叠一层「本次展开见过的最大宽度」：滚一屏列宽就变，不压住窗口会忽宽忽窄。
-            .min_w(if self.grid.is_some() {
-                min_win_w.max(self.grid_peak_px())
-            } else {
-                min_win_w
-            })
+            .min_w(min_win_w)
             .min_h(min_win_h)
             // 高度富余落在**顶部**（仅上翻时）：窗口在光标上方时底边贴光标，空白压在下面
             // 会把候选整体顶离光标，位置反而随内容抖动——正是本功能要消除的东西。
@@ -5479,7 +5452,7 @@ mod grid_tests {
         let w = grid_win(3, 2, 0, SIX);
         let root = laid(&w);
         let width = root.measured_size().0;
-        w.note_grid_width((6.0, 5.0), width);
+        w.note_grid_box((6.0, 5.0), width);
         let cell = hit(&root, 4);
         assert_eq!(
             w.tip_anchor(&cell),
@@ -5573,17 +5546,13 @@ mod grid_tests {
         assert_eq!(hits.iter().filter(|(t, _)| *t >= 0 && *t < 100).count(), 6);
     }
 
-    /// 一次展开期间宽度只增不减：滚到窄的一屏，窗口仍是之前的宽度；收起后复位。
+    /// 展开态宽度跟着当前可见内容走：滚到窄的一屏，窗口缩回（GH#256）。
     #[test]
-    fn width_never_shrinks_while_expanded() {
+    fn width_follows_visible_content_while_expanded() {
         let mut w = grid_win(3, 2, 0, &["一二三四五", "一", "一", "一", "一", "一"]);
         let wide = laid(&w).measured_size().0;
-        w.note_grid_width((0.0, 0.0), wide);
         refill(&mut w, 3, 2, 0, &["一"; 6]);
-        assert_eq!(laid(&w).measured_size().0, wide, "滚到窄的一屏宽度不回缩");
-        w.set_grid(None);
-        w.update("", 0, "", vec![cand("一")], 0, -1, 1, 1);
-        assert!(laid(&w).measured_size().0 < wide, "收起后按内容");
+        assert!(laid(&w).measured_size().0 < wide, "滚到窄的一屏宽度缩回");
     }
 
     fn bg_of(v: &View, tag: i32) -> Option<Option<[u8; 4]>> {
