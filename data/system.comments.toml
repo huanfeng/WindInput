@@ -39,41 +39,49 @@ desc = "码表候选显示剩余编码，拼音候选显示双拼编码"
 id = "pinyin"
 name = "拼音"
 text = "${pinyin}"
+desc = "带调拼音，如「你好」显示 nǐ hǎo"
 
 [[templates]]
 id = "chaizi"
 name = "拆字"
 text = "${chaizi}"
+desc = "单字的拆分字根，词组不显示"
 
 [[templates]]
 id = "chaizi_code"
 name = "拆字 · 编码"
 text = "${chaizi}{ · ${code_rev|chaizi_code}}"
+desc = "单字字根，后面接码表编码（码表里没有时用拆字表的编码）"
 
 [[templates]]
 id = "chaizi_pinyin"
 name = "拆字 · 拼音"
 text = "${chaizi}{ · ${pinyin}}"
+desc = "单字字根，后面接带调拼音"
 
 [[templates]]
 id = "zh_en"
 name = "英文释义"
 text = "${dict:zh_en}"
+desc = "中文候选的英文释义（汉英释义库）"
 
 [[templates]]
 id = "en_zh"
 name = "中文释义"
 text = "${dict:en_zh}"
+desc = "英文候选的中文释义（英汉释义库）"
 
 [[templates]]
 id = "pinyin_en"
 name = "拼音 · 英文"
 text = "${pinyin}{ · ${dict:zh_en}}"
+desc = "带调拼音，后面接英文释义"
 
 [[templates]]
 id = "full"
 name = "拆字 · 拼音 · 英文"
 text = "${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}"
+desc = "拆字、拼音、英文释义，取得到的依次显示"
 
 # 出厂分配。编码类变量（code_rev / shuangpin）不再有档位开关，显不显示全看这里分到的模板：
 # 拼音 / 双拼默认不显示，混输给码表编码，临时拼音与快捷输入给完整的编码回退链。
