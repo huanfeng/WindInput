@@ -24,6 +24,8 @@ use wind_ipc::protocol::{EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, MOD_CTRL, MOD_SH
 
 const PROBE: &str = r#"command:ime.toggle("candwin")"#;
 
+const VK_BACK: u32 = 0x08;
+const VK_F1: u32 = 0x70;
 const VK_TAB: u32 = 0x09;
 const VK_J: u32 = 0x4A;
 const VK_RSHIFT: u32 = 0xA1;
@@ -157,6 +159,29 @@ fn combo_key_runs_command_in_english_mode() {
     assert_probe_ran(&coord);
 }
 
+/// ★ `shift+backspace` 绑命令（t372：一键撤销刚上屏的长词组，绑 `ime.undo_commit()`）：
+/// 空闲态（刚上屏完、没有组合）与组合中途都命中即执行并吞键，不落到退格的原语义。
+#[test]
+fn shift_backspace_runs_command_when_idle() {
+    skip_without_data!();
+    let coord = open_with(bind_key("shift+backspace", PROBE));
+    let act = coord.handle_key_event(&key(VK_BACK, MOD_SHIFT));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "空闲态 Shift+Backspace 命中命令应吞键，实际 {act:?}"
+    );
+    assert_probe_ran(&coord);
+}
+
+#[test]
+fn shift_backspace_runs_command_mid_composition() {
+    skip_without_data!();
+    let coord = open_with(bind_key("shift+backspace", PROBE));
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(VK_BACK, MOD_SHIFT));
+    assert_probe_ran(&coord);
+}
+
 /// 已写成 `$CC(...)` 的也照收（从短语那边抄过来的写法），不被包成嵌套。
 #[test]
 fn combo_key_accepts_cc_wrapped_expression() {
@@ -246,6 +271,22 @@ fn session_key_runs_command_and_keeps_composition() {
     assert_probe_ran(&coord);
     assert_eq!(coord.debug_preedit(), preedit, "组合区不应变");
     assert_eq!(coord.debug_page_texts(), texts, "候选不应变");
+}
+
+/// ★ 功能键 F1 能绑会话态动作（候选中按 F1 触发命令），组合区原样不动。
+#[test]
+fn session_function_key_runs_command() {
+    skip_without_data!();
+    let coord = open_with(bind_session("f1", PROBE));
+    type_str(&coord, "a");
+    let preedit = coord.debug_preedit();
+    let act = coord.handle_key_event(&key(VK_F1, 0));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "会话态 F1 应吞键，实际 {act:?}"
+    );
+    assert_probe_ran(&coord);
+    assert_eq!(coord.debug_preedit(), preedit, "组合区不应变");
 }
 
 /// 会话态命令**不要候选**：打了码没候选时也能按（网址模式是「有会话、无候选」的天然样本）。

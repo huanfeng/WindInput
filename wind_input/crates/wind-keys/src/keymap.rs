@@ -96,6 +96,19 @@ const SESSION_FUNCTION_KEYS: &[(&str, u32)] = &[
     ("lcontrol", VK_LCONTROL),
     ("rctrl", VK_RCONTROL),
     ("rcontrol", VK_RCONTROL),
+    // F1–F12：会话态绑功能（候选中按 F1 切换…）。与 `wind_config::hotkey::session_key_to_vk` 同步。
+    ("f1", 0x70),
+    ("f2", 0x71),
+    ("f3", 0x72),
+    ("f4", 0x73),
+    ("f5", 0x74),
+    ("f6", 0x75),
+    ("f7", 0x76),
+    ("f8", 0x77),
+    ("f9", 0x78),
+    ("f10", 0x79),
+    ("f11", 0x7A),
+    ("f12", 0x7B),
 ];
 
 /// 会话态键名 → [`SessionKey`]。大小写与首尾空白不敏感；不认的名字返回 `None`。

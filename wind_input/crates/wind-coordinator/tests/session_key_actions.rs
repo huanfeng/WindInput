@@ -118,6 +118,12 @@ fn session_key_tables_agree_across_crates() {
         "lcontrol",
         "rctrl",
         "rcontrol",
+        // 功能键：两处表各写一份，靠这里守住。
+        "f1",
+        "f2",
+        "f9",
+        "f12",
+        "shift+f1",
     ];
     for name in names {
         let a = wind_config::hotkey::session_key_to_vk(name);

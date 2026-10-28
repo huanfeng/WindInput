@@ -207,6 +207,13 @@ const VK_OEM_5: u32 = 0xDC; // \
 /// 第二次，本项是第三次；每次往 `key_up` 加东西都要重查这条。
 pub const SESSION_ACTION: &str = "session_action";
 
+/// `f1`..`f12`（小写、无前导零）。
+fn is_function_key_name(name: &str) -> bool {
+    name.strip_prefix('f')
+        .and_then(|n| n.parse::<u32>().ok())
+        .is_some_and(|n| (1..=12).contains(&n) && name.len() == 1 + n.to_string().len())
+}
+
 /// 会话态键名 → (VK, 是否需 Shift)。支持单个 `shift+` 前缀。
 ///
 /// ⚠️ **这是 `wind_keys::keymap::session_key_name_to_vk` 的第二份实现**，因为
@@ -237,6 +244,9 @@ pub fn session_key_to_vk(name: &str) -> Option<(u32, bool)> {
         "rshift" => VK_RSHIFT,
         "lctrl" | "lcontrol" => VK_LCONTROL,
         "rctrl" | "rcontrol" => VK_RCONTROL,
+        // F1–F12：宿主另有原义（帮助 / 重命名…）但组合进行中几乎不会用到，且不产出字符。
+        // 键名表另一半在 `wind_keys::keymap::SESSION_FUNCTION_KEYS`，两处同步。
+        f if is_function_key_name(f) => 0x70 + f[1..].parse::<u32>().ok()? - 1,
         "semicolon" | ";" => VK_OEM_1,
         "quote" | "'" => VK_OEM_7,
         "comma" | "," => VK_OEM_COMMA,
