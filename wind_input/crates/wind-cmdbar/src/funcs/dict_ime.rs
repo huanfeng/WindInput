@@ -19,6 +19,7 @@ pub fn specs() -> Vec<FuncSpec> {
         "ime.theme"       : Ime     (1, 1) effect => fn_ime_theme,   "切换主题并持久化 (= config.set ui.theme.name)", "ime.theme(\"msime\")";
         "ime.theme_cycle" : Ime     (0, 1) effect => fn_theme_cycle, "循环切换主题并持久化; dir 可选 next(默认)/prev", "ime.theme_cycle()";
         "ime.undo_commit" : Ime     (0, 0) effect => fn_undo_commit,"撤销最近一次上屏 (删刚上屏的字符数; 焦点变化或又输入其它内容后退化删 1 个)", "ime.undo_commit()";
+        "ime.reload"      : Ime     (0, 0) effect => fn_ime_reload,"重新读取用户配置并应用 (等同设置端保存后的热重载; 手改 config.toml 后用)", "ime.reload()";
         "ime.pair"        : Ime     (2, 2) effect => fn_ime_pair,   "上屏配对文本并激活配对状态, 光标落两段之间, 可用跳出键 (Tab/Enter) 越过右段", "ime.pair(\"《\", \"》\")"
             named(fn_ime_pair_named, "jump" = "跳出时光标右移的格数; 省略=按右段字符数");
         "setting.open"    : Setting (1, 2) effect => fn_setting_open,"打开设置窗口的指定页面 (schema/input/keys/ui/dict/advanced/about/import; 空串=默认页); args 可选, 原样直通给设置程序", "setting.open(\"dict\", \"--schema=wubi86 --type=shadow\")";
@@ -198,6 +199,13 @@ fn fn_undo_commit(ctx: &dyn EvalContext, _args: &[String]) -> Result<String> {
     Ok(String::new())
 }
 
+fn fn_ime_reload(ctx: &dyn EvalContext, _args: &[String]) -> Result<String> {
+    let ime = ime(ctx, "ime.reload")?;
+    ime.reload_config()
+        .map_err(|e| runtime_err("ime.reload", e))?;
+    Ok(String::new())
+}
+
 fn fn_setting_open(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
     let ime = ime(ctx, "setting.open")?;
     let extra = args.get(1).map(String::as_str).unwrap_or("");
@@ -280,6 +288,10 @@ mod tests {
                 .push(format!("set_value {target}={value}"));
             Ok(())
         }
+        fn reload_config(&self) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push("reload".into());
+            Ok(())
+        }
     }
 
     fn ctx_with(rec: Arc<RecIme>) -> MemoryContext {
@@ -321,6 +333,15 @@ mod tests {
         }
         assert!(fn_ime_set(&ctx, &["emoji".into(), "maybe".into()]).is_err());
         assert!(rec.0.lock().unwrap().is_empty(), "认不出的状态不该调用宿主");
+    }
+
+    /// `ime.reload()` 交宿主重载配置；宿主没实现时报错而不是静默成功。
+    #[test]
+    fn ime_reload_calls_host() {
+        let rec = Arc::new(RecIme(Mutex::new(Vec::new())));
+        let ctx = ctx_with(rec.clone());
+        fn_ime_reload(&ctx, &[]).unwrap();
+        assert_eq!(rec.0.lock().unwrap().pop().unwrap(), "reload");
     }
 
     /// `ime.set("comment", ...)` 的状态是 default / detail：走 `set_value`，on/off 报错且不调用宿主；

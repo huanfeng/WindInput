@@ -167,6 +167,11 @@ pub trait ImeController: Send + Sync {
         let _ = value;
         anyhow::bail!("ime.set 不支持 target {target:?}")
     }
+    /// 重新读取用户配置并应用（`ime.reload`），与设置端保存后的热重载同一条路径。
+    /// 读取失败（语法错误等）返回 `Err`。默认未支持（测试/精简宿主）。
+    fn reload_config(&self) -> anyhow::Result<()> {
+        anyhow::bail!("reload_config: 宿主未支持")
+    }
     /// 打开设置窗口的指定页面。`page` 为规范页 id（schema/input/keys/ui/dict/
     /// advanced/about），空串打开默认页。未知 id 由设置端忽略并落到默认页。
     ///

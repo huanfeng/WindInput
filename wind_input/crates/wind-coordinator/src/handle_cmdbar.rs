@@ -378,6 +378,14 @@ impl ImeController for CoordIme {
         }
         Ok(())
     }
+    fn reload_config(&self) -> anyhow::Result<()> {
+        if let Some(c) = self.0.upgrade()
+            && !c.reload_user_config()
+        {
+            anyhow::bail!("配置读取失败，沿用当前配置（详见日志）");
+        }
+        Ok(())
+    }
     fn pair(&self, left: &str, right: &str, jump_steps: u32) -> anyhow::Result<()> {
         if let Some(c) = self.0.upgrade() {
             c.cmd_pair_commit(left, right, jump_steps);
