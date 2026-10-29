@@ -85,9 +85,10 @@ desc = "拆字、拼音、英文释义，取得到的依次显示"
 
 # 出厂分配。编码类变量（code_rev / shuangpin）不再有档位开关，显不显示全看这里分到的模板：
 # 拼音 / 双拼默认不显示，混输给码表编码，临时拼音给完整的编码回退链，快捷输入不显示。
+# 拆字只给码表用户：码表、混输、临时拼音的详细态带拆字，全局（拼音用户落到这里）不带。
 [assign.global]
 default_horizontal = "code"
-detail_horizontal = "full"
+detail_horizontal = "pinyin_en"
 
 # 码表默认态跟随全局：主路上没有拼音来源候选，code 与 code_hint 效果相同。
 [assign.type.codetable]
@@ -95,14 +96,13 @@ detail_horizontal = "chaizi_pinyin"
 
 [assign.type.pinyin]
 default_horizontal = "none"
-detail_horizontal = "pinyin_en"
 
 [assign.type.shuangpin]
 default_horizontal = "none"
-detail_horizontal = "pinyin_en"
 
 [assign.type.mixed]
 default_horizontal = "code_rev"
+detail_horizontal = "chaizi_pinyin"
 
 [assign.type.english]
 default_horizontal = "none"

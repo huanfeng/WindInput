@@ -808,7 +808,10 @@ mod tests {
             "设计 §13.6 的内置模板与顺序"
         );
         assert_eq!(s.assign.global.default_horizontal.as_deref(), Some("code"));
-        assert_eq!(s.assign.global.detail_horizontal.as_deref(), Some("full"));
+        assert_eq!(
+            s.assign.global.detail_horizontal.as_deref(),
+            Some("pinyin_en")
+        );
         let dicts: Vec<&str> = s.dicts.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(dicts, ["en_zh", "zh_en"]);
         assert_eq!(s.dicts[0].path, "comments/en_zh.txt");
@@ -825,9 +828,12 @@ mod tests {
         let s = |v: &str| Some(v.to_string());
         // 设计 §13.6 出厂分配表。
         assert_eq!(cell(&a.by_type, "codetable"), (None, s("chaizi_pinyin")));
-        assert_eq!(cell(&a.by_type, "pinyin"), (s("none"), s("pinyin_en")));
-        assert_eq!(cell(&a.by_type, "shuangpin"), (s("none"), s("pinyin_en")));
-        assert_eq!(cell(&a.by_type, "mixed"), (s("code_rev"), None));
+        assert_eq!(cell(&a.by_type, "pinyin"), (s("none"), None));
+        assert_eq!(cell(&a.by_type, "shuangpin"), (s("none"), None));
+        assert_eq!(
+            cell(&a.by_type, "mixed"),
+            (s("code_rev"), s("chaizi_pinyin"))
+        );
         assert_eq!(cell(&a.by_type, "english"), (s("none"), s("en_zh")));
         assert_eq!(cell(&a.mode, "temp_english"), (s("none"), s("en_zh")));
         assert_eq!(cell(&a.mode, "temp_pinyin"), (s("code"), s("chaizi_code")));
@@ -1346,14 +1352,14 @@ mod tests {
         use CommentState::{Default as D, Detail as T};
         for (scope, st, id, from) in [
             ("global", D, "code", "global"),
-            ("global", T, "full", "global"),
+            ("global", T, "pinyin_en", "global"),
             ("type:codetable", D, "code", "global"),
             ("type:codetable", T, "chaizi_pinyin", "type:codetable"),
             ("type:pinyin", D, "none", "type:pinyin"),
-            ("type:pinyin", T, "pinyin_en", "type:pinyin"),
-            ("type:shuangpin", T, "pinyin_en", "type:shuangpin"),
+            ("type:pinyin", T, "pinyin_en", "global"),
+            ("type:shuangpin", T, "pinyin_en", "global"),
             ("type:mixed", D, "code_rev", "type:mixed"),
-            ("type:mixed", T, "full", "global"),
+            ("type:mixed", T, "chaizi_pinyin", "type:mixed"),
             ("type:english", D, "none", "type:english"),
             ("type:english", T, "en_zh", "type:english"),
             ("mode:temp_english", D, "none", "mode:temp_english"),
