@@ -25,6 +25,7 @@ const VK_LCONTROL: u32 = 0xA2;
 const VK_RCONTROL: u32 = 0xA3;
 const VK_LMENU: u32 = 0xA4;
 const VK_RMENU: u32 = 0xA5;
+const VK_F1: u32 = 0x70;
 
 const GG_DEFAULT: [&str; 3] = ["", "c", "g"];
 const GG_DETAIL: [&str; 3] = [
@@ -77,7 +78,7 @@ fn cfg() -> Config {
     cfg
 }
 
-/// 出厂切换键（Ctrl，左右任一）。
+/// 切换键 Ctrl（左右任一）。
 fn ctrl_cfg() -> Config {
     let mut cfg = cfg();
     cfg.ui.comment.switch_key = SwitchKey::Ctrl;
@@ -208,6 +209,30 @@ fn alt_tap_rerenders_detail() {
     c.handle_key_event(&down(VK_RMENU));
     let act = c.handle_key_event(&up(VK_RMENU));
     assert!(is_consumed(&act), "右 Alt 单击，实得 {act:?}");
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
+/// 出厂切换键 F1：有候选时按下即切到详细并当场重绘；再按切回；没有候选时放行（还给宿主的帮助键）。
+#[test]
+fn f1_toggles_session_and_passes_through_without_candidates() {
+    if !has_schemas() {
+        return;
+    }
+    let mut f1 = cfg();
+    f1.ui.comment.switch_key = SwitchKey::F1;
+    let (idle, _rx) = open(f1.clone());
+    let act = idle.handle_key_event(&down(VK_F1));
+    assert!(is_pass(&act), "无候选应放行，实得 {act:?}");
+
+    let (c, rx2) = typed_gg(f1);
+    let act = c.handle_key_event(&down(VK_F1));
+    assert!(is_consumed(&act), "有候选应吃掉，实得 {act:?}");
+    assert_eq!(
+        last_pushed(&rx2).as_deref(),
+        Some(&GG_DETAIL.map(String::from)[..]),
+        "按下应当场重绘为详细"
+    );
+    c.handle_key_event(&down(VK_F1));
     assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
 }
 

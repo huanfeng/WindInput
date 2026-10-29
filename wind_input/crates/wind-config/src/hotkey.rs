@@ -220,10 +220,10 @@ fn is_function_key_name(name: &str) -> bool {
 pub const COMMENT_SWITCH_ACTION: &str = "comment_switch";
 
 /// 注释切换键要登记的 keyup hash：注释开着、切换方式不是 `off`、切换键是 Ctrl 系时才有。
-/// Alt 系不走 TSF 白名单（mac / Linux 组字中本就转发 Alt）。
+/// Alt 系不走 TSF 白名单（mac / Linux 组字中本就转发 Alt）；F1 走会话按键表（keydown）。
 fn comment_switch_key_up_hashes(c: &crate::comment_lib::UiCommentConfig) -> Vec<u32> {
     use crate::comment_lib::SwitchMode;
-    if !c.enabled || c.switch_mode == SwitchMode::Off || c.switch_key.is_alt() {
+    if !c.enabled || c.switch_mode == SwitchMode::Off || !c.switch_key.is_ctrl() {
         return Vec::new();
     }
     [VK_LCONTROL, VK_RCONTROL]
@@ -666,7 +666,7 @@ impl Compiler {
         //    转发，登记与否都能工作。这里**仍照旧全部登记**：旧的 `compile_page_key_group`
         //    就是这么做的，收编时顺手改可达性会把一次配置重构变成一次跨进程行为变更，
         //    而后者只有真机才验得了。
-        for (name, verb) in &self.config.keys.effective_session_actions() {
+        for (name, verb) in &self.config.effective_session_actions() {
             if !crate::config::SessionAction::parse(verb).is_enabled() {
                 continue;
             }
@@ -1252,8 +1252,14 @@ mod tests {
             key_hash(0, VK_TAB),
             key_hash(0, VK_OEM_1),
             key_hash(0, VK_OEM_7),
+            // 出厂注释切换键 F1 补进会话按键表，同样只是转发登记。
+            key_hash(0, 0x70),
         ];
-        assert_eq!(forward_only_raw.len(), 6, "样例绑定应展开出 6 个键");
+        assert_eq!(
+            forward_only_raw.len(),
+            7,
+            "样例绑定应展开出 6 个键，另加 F1"
+        );
 
         for e in &compiled.key_down {
             let expected = forward_only_raw.contains(&e.match_hash);

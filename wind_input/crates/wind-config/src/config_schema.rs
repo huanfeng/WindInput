@@ -168,7 +168,7 @@ pub(crate) const COMMENT_STATE_VALUES: &[&str] = &["default", "detail"];
 
 /// `ui.comment.switch_key` 的值域。⚠️ 与 [`crate::comment_lib::SwitchKey`] 的 serde 名逐项对齐。
 pub(crate) const COMMENT_SWITCH_KEY_VALUES: &[&str] =
-    &["ctrl", "lctrl", "rctrl", "alt", "lalt", "ralt"];
+    &["f1", "ctrl", "lctrl", "rctrl", "alt", "lalt", "ralt"];
 
 /// `ui.comment.switch_mode` 的值域。⚠️ 与 [`crate::comment_lib::SwitchMode`] 的 serde 名逐项对齐。
 pub(crate) const COMMENT_SWITCH_MODE_VALUES: &[&str] = &["off", "session", "persist", "hold"];

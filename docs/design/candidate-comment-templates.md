@@ -259,16 +259,16 @@ detail_horizontal = "inherit"
 
 ## 10 迁移
 
-结论：`config.toml` 自动迁移，方案侧只告警。
+**不迁移（维护者 2026-10-29 定，取代原自动迁移方案）**：会配注释模板、编码来源这些选项的都是深度用户，
+迁移规则（全局挡出厂格、横竖拆分、去重命名……）比功能本身还难懂，迁了反而更乱。升级后旧键一律不读，
+由用户在设置里重设；作为**破坏性变更**写进发版说明与文档站升级一节。
 
-- `config.toml` 的旧键（全局两份模板串、五个模式的模板串、`schema.mix_modes[]` 的模板串、
-  `ui.candidate.comment_enabled`）启动时迁入 `[ui.comment]`：每段非空模板串生成用户模板
-  `migrated_N`（同文本去重），写进对应作用范围的 `default_*` 格；空串迁成 `none`；
-  `comment_enabled` 迁到 `enabled`。横竖相同只写横排；只有一边有值的，另一边写 `inherit`。
-- 迁了全局默认格时，对出厂在下层有同名格的作用范围（如 `type.english`、`mode.temp_english`）
-  写用户 `inherit`（全局写了哪格就挡哪格，含写成 `inherit` 的那格；本身迁出了旧模板的范围除外），保住老用户「全局模板处处生效」的行为。
-- 方案文件与 `schema_overrides/<id>.toml` 里的旧键不迁移，只启动 `warn`（见 §6.1）。
-- 写回遵守现有「保留用户内容 + 自检」的写回门禁。
+- 退役键登记 `RETIRED_KEYS`，写回清理时从用户 `config.toml` 删掉：`ui.candidate.comment_enabled`、
+  `ui.candidate.comment_template_*`、五个模式的 `input.<m>.comment_template_*`、`schema.pinyin.code_hint_source`
+  / `show_code_hint`、`input.temp_pinyin.code_hint_source`、`schema.mix.pinyin_code_hint`。
+  `schema.mix_modes[]` 条目里的同名键是数组元素，按路径列不出，留在原处无人读取。
+- 方案文件与 `schema_overrides/<id>.toml`、特殊模式 `[overlay]` 里的旧键只启动 `warn`（见 §6.1）。
+- 没改过这些选项的用户不受影响：新出厂分配复刻了退役前的出厂效果。
 
 ## 11 待维护者定
 
@@ -294,7 +294,11 @@ detail_horizontal = "inherit"
   Alt 松开照常激活宿主菜单栏。Ctrl / Shift 的单击走普通按键通路，`lctrl` 作中英切换键、
   `lrctrl` 选词、`session_actions` 里绑 `lctrl` 都早已可用。
 - 配置拆成两键（未发布，直接改名，不兼容 `alt_switch`）：
-  - `ui.comment.switch_key`：`ctrl`（**出厂**，左右任一）/ `lctrl` / `rctrl` / `alt` / `lalt` / `ralt`；
+  - `ui.comment.switch_key`：`f1`（**出厂**，见下）/ `ctrl`（左右任一）/ `lctrl` / `rctrl` / `alt` / `lalt` / `ralt`；
+    出厂原为 `ctrl`，真机后改 `f1`（维护者 2026-10-29 定）：单击 Ctrl 与中英切换、选词、组合键的干扰太大。
+    F1 不走修饰键单击判定，生效时由 `Config::effective_session_actions` 补一条 `f1` 会话绑定（`session` / `hold`
+    → `comment_state:session`，`persist` → `comment_state`），转发与分派复用会话按键通路；用户自己绑了 F1 的优先。
+    F1 没有按住，`hold` 档按临时切换处理。mac 键码表只补 F1，其余 F 键仍透传；
   - `ui.comment.switch_mode`：`off` / `session`（出厂）/ `persist` / `hold`，语义同 §4 原四档。
 - 按住（`hold`）Alt / Ctrl 都可用：按下切换键立即翻转、松开恢复（按得多久、期间按没按别的键都恢复）；
   按住期间按组合键（Ctrl+C、Ctrl+数字）注释会闪一下，接受。按住期间候选窗关了，翻转随之清掉，不残留。
@@ -322,8 +326,7 @@ detail_horizontal = "inherit"
 
 ### 13.3 迁移命名
 
-- 迁出的模板名用人话：`旧版·全局`、`旧版·临时英文`……（按来源作用范围），不再写配置键全名。
-- 旧模板串与某个内置模板文本相同时直接引用内置 id，不另生成模板。
+已作废：迁移整体取消，见 §10。
 
 ### 13.4 设置端
 
@@ -394,7 +397,7 @@ detail_horizontal = "inherit"
 **为什么**：三个「编码来源」开关决定 `${code_rev}` / `${shuangpin}` 有没有值，模板又决定显示什么，
 两层叠着管同一件事。模板里写了 `${code_rev}`、开关却关着时什么都不显示，用户找不到原因。
 
-**退役的键**（不再读，按下面迁移后从用户配置移除）：
+**退役的键**（不再读、不迁移，写回清理时从用户配置移除）：
 
 | 键 | 出厂 | 原含义 |
 |---|---|---|
@@ -448,19 +451,7 @@ detail_horizontal = "inherit"
 临时拼音、快捷输入的默认态显式写 `code`：它们的上级是当前方案，拼音方案下会落到 `none`，
 而退役前它们读自己那份 `auto`。快捷输入写在通配的 `mix` 上，用户自建的快捷输入也覆盖到。
 
-**迁移**（只迁用户层写了的值；目标格已有用户值时不覆盖）：
-
-| 旧值 | 写到 | 值 |
-|---|---|---|
-| `schema.pinyin.code_hint_source` = `codetable` / `shuangpin` / `auto` | `type.pinyin`、`type.shuangpin` 的 `default_horizontal` | `code_rev` / `shuangpin` / `code` |
-| `input.temp_pinyin.code_hint_source` = `off` / `codetable` / `shuangpin` | `mode.temp_pinyin` 与 `mode.mix` 的 `default_horizontal` | `none` / `code_rev` / `shuangpin` |
-| `schema.mix.pinyin_code_hint` = `false` | `type.mixed` 的 `default_horizontal` | `code_hint` |
-
-更早的 `schema.pinyin.show_code_hint`（bool）先按原规则折成 `code_hint_source` 再走上表。
-旧版自定义了全局注释模板的用户，§10 的迁移已给有出厂格的范围写 `inherit`（`FACTORY_DEFAULT_SCOPES`
-随出厂分配扩到上表全部范围），仍跟随他们的全局模板，编码开关不再迁入（跳过时记 warn）。原先被收窄的会放开：拼音 `off` / `shuangpin`、
-临拼 `off` / `codetable` / `shuangpin`、混输 `false` 挡住的编码变量会按全局模板照常显示。
-这类用户本就自己写模板，按模板显示即可，不再派生去编码的模板。
+**迁移**：不做，见 §10。旧版改过这三个开关的用户升级后回到出厂分配，在注释分配里重设。
 
 **按需预载**：反查表是否预载改为按「可达上下文实际落到的模板」判断：每个可用方案的主路（码表、英文方案的主路不出拼音来源候选，跳过），
 以及进得去的临时拼音、各快捷输入，两态两排布逐一解析，任一模板引用编码反查变量即预载。

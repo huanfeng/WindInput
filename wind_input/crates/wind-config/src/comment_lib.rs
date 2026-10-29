@@ -19,8 +19,12 @@ pub enum CommentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwitchKey {
-    /// 左右任一 Ctrl（出厂）。
+    /// F1（出厂）。不走修饰键单击判定：生效时补进会话按键表（见
+    /// [`crate::Config::effective_session_actions`]），有候选时按下即切换。
     #[default]
+    #[serde(rename = "f1")]
+    F1,
+    /// 左右任一 Ctrl。
     Ctrl,
     #[serde(rename = "lctrl")]
     LCtrl,
@@ -35,7 +39,7 @@ pub enum SwitchKey {
 }
 
 impl SwitchKey {
-    /// 该虚拟键码（0xA2 LCtrl / 0xA3 RCtrl / 0xA4 LAlt / 0xA5 RAlt）是否属于本切换键。
+    /// 该修饰键虚拟键码（0xA2 LCtrl / 0xA3 RCtrl / 0xA4 LAlt / 0xA5 RAlt）是否属于本切换键；F1 恒 false。
     pub fn matches_vk(self, vk: u32) -> bool {
         match self {
             SwitchKey::Ctrl => matches!(vk, 0xA2 | 0xA3),
@@ -44,7 +48,12 @@ impl SwitchKey {
             SwitchKey::Alt => matches!(vk, 0xA4 | 0xA5),
             SwitchKey::LAlt => vk == 0xA4,
             SwitchKey::RAlt => vk == 0xA5,
+            SwitchKey::F1 => false,
         }
+    }
+
+    pub fn is_ctrl(self) -> bool {
+        matches!(self, SwitchKey::Ctrl | SwitchKey::LCtrl | SwitchKey::RCtrl)
     }
 
     pub fn is_alt(self) -> bool {
@@ -125,7 +134,7 @@ impl Default for UiCommentConfig {
         Self {
             enabled: true,
             state: CommentState::Default,
-            switch_key: SwitchKey::Ctrl,
+            switch_key: SwitchKey::F1,
             switch_mode: SwitchMode::Session,
             templates: Vec::new(),
             assign: CommentAssign::default(),
@@ -814,7 +823,7 @@ mod tests {
         let c = UiCommentConfig::default();
         assert!(c.enabled);
         assert_eq!(c.state, CommentState::Default);
-        assert_eq!(c.switch_key, SwitchKey::Ctrl);
+        assert_eq!(c.switch_key, SwitchKey::F1);
         assert_eq!(c.switch_mode, SwitchMode::Session);
         assert!(c.templates.is_empty());
         assert_eq!(c.assign, CommentAssign::default());
@@ -823,6 +832,7 @@ mod tests {
     #[test]
     fn switch_key_parses_all_values_and_matches_vk() {
         for (name, key, vks) in [
+            ("f1", SwitchKey::F1, vec![]),
             ("ctrl", SwitchKey::Ctrl, vec![0xA2, 0xA3]),
             ("lctrl", SwitchKey::LCtrl, vec![0xA2]),
             ("rctrl", SwitchKey::RCtrl, vec![0xA3]),
@@ -835,7 +845,8 @@ mod tests {
             for vk in 0xA2..=0xA5u32 {
                 assert_eq!(key.matches_vk(vk), vks.contains(&vk), "{name} {vk:#x}");
             }
-            assert_eq!(key.is_alt(), name.ends_with("alt") || name == "alt");
+            assert_eq!(key.is_alt(), name.ends_with("alt"));
+            assert_eq!(key.is_ctrl(), name.ends_with("ctrl"));
         }
         assert!(!SwitchKey::Ctrl.matches_vk(0x41));
     }
@@ -844,7 +855,7 @@ mod tests {
     fn invalid_switch_values_fall_back_to_defaults() {
         let c: UiCommentConfig =
             toml::from_str("switch_key = \"bogus\"\nswitch_mode = \"nope\"").unwrap();
-        assert_eq!(c.switch_key, SwitchKey::Ctrl);
+        assert_eq!(c.switch_key, SwitchKey::F1);
         assert_eq!(c.switch_mode, SwitchMode::Session);
     }
 

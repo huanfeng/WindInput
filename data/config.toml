@@ -1524,16 +1524,16 @@ custom_y = 0
 enabled = true
 # 当前态：default 默认 | detail 详细。按键动词、命令栏切换时写回；切换键仅 persist 档写回。
 state = "default"
-# 切换键（组字中单击切换注释态）：ctrl 左右任一(出厂) | lctrl | rctrl | alt | lalt | ralt
+# 切换键（候选窗出现时按它切换注释态）：f1(出厂) | ctrl 左右任一 | lctrl | rctrl | alt | lalt | ralt
+# f1 没有「按住」，hold 档按 session 处理；会话按键里自己绑了 f1 的，那条优先。
 # ⚠ 选 Alt 的 Windows 会装全局键盘钩子（用来压住宿主菜单栏）；不选 Alt 则没有。
-# 功能键（F1 等）不在此列，请在按键绑定里绑 comment_state。
-switch_key = "ctrl"
+switch_key = "f1"
 # 切换方式：off 关闭 | session 本次候选窗内(出厂) | persist 写回配置 | hold 按住期间显示另一态
 # hold 按下切换键即翻转、松开恢复；按住期间按了别的键（如 Ctrl+C）注释会闪一下。
 switch_mode = "session"
 # 用户模板与分配写在 [[ui.comment.templates]] / [ui.comment.assign.*]，内置的见 system.comments.toml。
 # 旧版的 ui.candidate.comment_enabled、ui.candidate.comment_template_*、各模式的 comment_template_*
-# 启动时自动迁入本段；方案文件里的注释模板不再生效。
+# 与编码来源开关不再读取、也不迁移，需在设置里重新配置；方案文件里的注释模板同样不再生效。
 #
 # 模板串（templates 的 text）语法：
 #   ${name}      变量替换

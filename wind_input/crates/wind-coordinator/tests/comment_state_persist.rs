@@ -7,7 +7,7 @@
 use std::path::Path;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
-use wind_config::comment_lib::{CommentState, SwitchMode};
+use wind_config::comment_lib::{CommentState, SwitchKey, SwitchMode};
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_CTRL, MOD_LCTRL};
 
@@ -99,6 +99,7 @@ fn set_comment_state_and_commands_write_back() {
         cfg.schema.active = "wubi86".into();
         cfg.input.default.chinese_mode = true;
         cfg.input.association.kind = "off".into();
+        cfg.ui.comment.switch_key = SwitchKey::Ctrl;
         cfg.ui.comment.switch_mode = SwitchMode::Persist;
         let coord = Coordinator::new_headless(cfg, Some(&data));
         coord.prewarm_indexes();

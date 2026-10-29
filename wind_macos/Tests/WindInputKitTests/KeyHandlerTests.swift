@@ -26,6 +26,13 @@ final class KeyHandlerTests: XCTestCase {
         XCTAssertEqual(KeyHandler.toWindowsVK(0x5A), 0, "0x5A=F20，不该被当成小键盘键")
     }
 
+    /// 只有 F1（注释切换键出厂值）上报；其余 F 键保持透传，不改变它们在宿主里的原义。
+    func testOnlyF1AmongFunctionKeysIsMapped() {
+        XCTAssertEqual(KeyHandler.toWindowsVK(0x7A), 0x70) // F1
+        XCTAssertEqual(KeyHandler.toWindowsVK(0x78), 0)    // F2
+        XCTAssertEqual(KeyHandler.toWindowsVK(0x60), 0)    // F5
+    }
+
     func testKeypadOperatorsMapToNumpadOperators() {
         XCTAssertEqual(KeyHandler.toWindowsVK(0x43), 0x6A) // *
         XCTAssertEqual(KeyHandler.toWindowsVK(0x45), 0x6B) // +

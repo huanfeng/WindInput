@@ -1322,6 +1322,12 @@ impl crate::coordinator::Coordinator {
             return;
         }
         let mut owners: Vec<&str> = Vec::new();
+        // F1 走会话按键表：用户在 session_actions 里自己绑了 F1，那条优先。
+        if c.switch_key == wind_config::comment_lib::SwitchKey::F1
+            && rt.config.keys.session_actions.contains_key("f1")
+        {
+            owners.push("会话绑定（keys.session_actions）");
+        }
         for vk in 0xA2..=0xA5u32 {
             if !c.switch_key.matches_vk(vk) {
                 continue;

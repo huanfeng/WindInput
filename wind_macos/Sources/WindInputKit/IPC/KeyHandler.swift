@@ -72,6 +72,9 @@ public enum KeyHandler {
         case 0x7E: return 0x26 // VK_UP
         case 0x7C: return 0x27 // VK_RIGHT
         case 0x7D: return 0x28 // VK_DOWN
+        // 功能键只收 F1（注释切换键的出厂值）。其余 F 键不映射：映射了组字中就会送到服务端、
+        // 被当作组字中的非字符键吃掉，改变它们在宿主里的原义。
+        case 0x7A: return 0x70 // VK_F1
 
         // 标点 / OEM
         case 0x29: return 0xBA // VK_OEM_1   ;:

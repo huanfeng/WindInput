@@ -85,130 +85,6 @@ fn remove_nested(table: &mut toml::Table, path: &[&str]) -> bool {
     removed
 }
 
-fn path_refs(path: &[String]) -> Vec<&str> {
-    path.iter().map(String::as_str).collect()
-}
-
-/// 旧版全局注释模板的出厂值（等于内置模板 `code`）。迁移时全局旧值等于它的视为没写。
-const LEGACY_FACTORY_COMMENT_TEMPLATE: &str = "${code_hint|code_rev|shuangpin}";
-
-/// 出厂分配（`data/system.comments.toml`）里 `default_*` 有值的非全局作用范围。旧版它们跟随全局，
-/// 迁出自定义全局模板时要在这些范围写 `inherit`，否则被出厂格挡住。守门测试对照出厂文件。
-const FACTORY_DEFAULT_SCOPES: &[&[&str]] = &[
-    &["type", "pinyin"],
-    &["type", "shuangpin"],
-    &["type", "mixed"],
-    &["type", "english"],
-    &["mode", "temp_english"],
-    &["mode", "temp_pinyin"],
-    &["mode", crate::comment_lib::MIX_ALL_MODE],
-];
-
-/// 退役的编码来源键各自迁到哪些分配范围（见 [`Config::migrate_code_hint_gates_value`]）。
-fn legacy_code_hint_targets(path: &[&str]) -> &'static [&'static [&'static str]] {
-    match path {
-        ["schema", "pinyin", "code_hint_source" | "show_code_hint"] => {
-            &[&["type", "pinyin"], &["type", "shuangpin"]]
-        }
-        ["input", "temp_pinyin", "code_hint_source"] => &[
-            &["mode", "temp_pinyin"],
-            &["mode", crate::comment_lib::MIX_ALL_MODE],
-        ],
-        ["schema", "mix", "pinyin_code_hint"] => &[&["type", "mixed"]],
-        _ => &[],
-    }
-}
-
-/// 从 `t` 摘下 `comment_template_<side>`；非字符串的只删不迁。
-fn take_legacy_template(t: &mut toml::Table, origin: &str, side: &str) -> Option<String> {
-    let key = format!("comment_template_{side}");
-    match t.remove(&key)? {
-        toml::Value::String(s) => Some(s),
-        other => {
-            warn!("{origin}.{key} 不是字符串（{other}），已丢弃");
-            None
-        }
-    }
-}
-
-/// 一处旧注释模板：(`ui.comment.assign` 下的作用范围路径, 来源键前缀, 竖排旧值, 横排旧值)。
-type LegacyCommentSource = (Vec<String>, String, Option<String>, Option<String>);
-
-/// 迁移出的模板显示名：`旧版·<范围>`，范围取自格路径（`ui.comment.assign.<范围…>.<格>`）。
-fn legacy_scope_label(cell_path: &[String]) -> String {
-    let scope = &cell_path[3..cell_path.len() - 1];
-    let label = match scope {
-        [g] if g == "global" => "全局",
-        [m, name] if m == "mode" => match name.as_str() {
-            "temp_pinyin" => "临时拼音",
-            "temp_english" => "临时英文",
-            "url" => "网址",
-            "email" => "Email",
-            "unicode" => "Unicode",
-            "mix:quick_mix" => "快捷输入",
-            crate::comment_lib::MIX_ALL_MODE => "快捷输入（默认）",
-            other => other.strip_prefix("mix:").unwrap_or(other),
-        },
-        other => return format!("旧版·{}", other.join(".")),
-    };
-    format!("旧版·{label}")
-}
-
-/// 摘下本层全部旧注释模板键，按 全局 → 五个模式 → `mix_modes` 的顺序返回。
-/// `mix_modes` 条目缺 id 的不动（无处可迁）。
-fn take_legacy_comment_templates(layer: &mut toml::Value) -> Vec<LegacyCommentSource> {
-    let mut out = Vec::new();
-    if let Some(cand) = layer
-        .get_mut("ui")
-        .and_then(|u| u.get_mut("candidate"))
-        .and_then(toml::Value::as_table_mut)
-    {
-        let origin = "ui.candidate";
-        let custom = |s: &String| s != LEGACY_FACTORY_COMMENT_TEMPLATE;
-        let v = take_legacy_template(cand, origin, "vertical").filter(custom);
-        let h = take_legacy_template(cand, origin, "horizontal").filter(custom);
-        out.push((vec!["global".into()], origin.into(), v, h));
-    }
-    if let Some(input) = layer.get_mut("input").and_then(toml::Value::as_table_mut) {
-        for m in ["temp_english", "temp_pinyin", "url", "email", "unicode"] {
-            let Some(t) = input.get_mut(m).and_then(toml::Value::as_table_mut) else {
-                continue;
-            };
-            let origin = format!("input.{m}");
-            let v = take_legacy_template(t, &origin, "vertical");
-            let h = take_legacy_template(t, &origin, "horizontal");
-            out.push((vec!["mode".into(), m.into()], origin, v, h));
-        }
-    }
-    if let Some(mixes) = layer
-        .get_mut("schema")
-        .and_then(|s| s.get_mut("mix_modes"))
-        .and_then(toml::Value::as_array_mut)
-    {
-        for t in mixes.iter_mut().filter_map(toml::Value::as_table_mut) {
-            if !t.contains_key("comment_template_vertical")
-                && !t.contains_key("comment_template_horizontal")
-            {
-                continue;
-            }
-            let id = t
-                .get("id")
-                .and_then(toml::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if id.is_empty() {
-                warn!("schema.mix_modes 有条目缺 id，其注释模板未迁移");
-                continue;
-            }
-            let origin = format!("schema.mix_modes[{id}]");
-            let v = take_legacy_template(t, &origin, "vertical");
-            let h = take_legacy_template(t, &origin, "horizontal");
-            out.push((vec!["mode".into(), format!("mix:{id}")], origin, v, h));
-        }
-    }
-    out
-}
-
 /// 从 `root`（用户层）删除所有与 `preset`（出厂默认 L1⊕L2⊕L2.5）取值相同的叶子键，返回删除数。
 ///
 /// 纯函数、不碰文件系统：[`Config::prune_user_config`] 负责 IO，本函数负责判定，
@@ -299,6 +175,27 @@ const RETIRED_KEYS: &[&[&str]] = &[
     // 落盘、再清本清单。此前它刻意不登记、迁移也不摘旧键，于是旧键在用户文件里常驻，设置页把
     // 竖排改回 0（等于出厂 ⇒ 新键被删）后，下次 load 又被旧键补回原值。
     &["ui", "candidate", "comment_max_chars"],
+    // 候选注释重构（docs/design/candidate-comment-templates.md）：注释模板、开关与三个编码来源
+    // 并入 `[ui.comment]`。**不做值迁移**（维护者定）：会配这些的都是深度用户，让他们重新设置，
+    // 破坏性变更登记在 docs/config-key-migration.md。`schema.mix_modes[]` 条目里的同名键是数组
+    // 元素、无法按路径列出，留在原处无人读取。
+    &["ui", "candidate", "comment_enabled"],
+    &["ui", "candidate", "comment_template_vertical"],
+    &["ui", "candidate", "comment_template_horizontal"],
+    &["input", "temp_english", "comment_template_vertical"],
+    &["input", "temp_english", "comment_template_horizontal"],
+    &["input", "temp_pinyin", "comment_template_vertical"],
+    &["input", "temp_pinyin", "comment_template_horizontal"],
+    &["input", "url", "comment_template_vertical"],
+    &["input", "url", "comment_template_horizontal"],
+    &["input", "email", "comment_template_vertical"],
+    &["input", "email", "comment_template_horizontal"],
+    &["input", "unicode", "comment_template_vertical"],
+    &["input", "unicode", "comment_template_horizontal"],
+    &["schema", "pinyin", "code_hint_source"],
+    &["schema", "pinyin", "show_code_hint"],
+    &["input", "temp_pinyin", "code_hint_source"],
+    &["schema", "mix", "pinyin_code_hint"],
 ];
 
 /// 从用户层删除 [`RETIRED_KEYS`] 里的退役键，返回删除数。
@@ -5194,6 +5091,28 @@ impl Config {
 }
 
 impl Config {
+    /// 运行时生效的会话态按键表：[`KeysConfig::effective_session_actions`] ⊕ 注释切换键。
+    ///
+    /// 注释切换键选 F1 时在这里补一条 `f1` 绑定，转发与分派都走会话按键的现成通路；用户自己
+    /// 在 `session_actions` 里绑过 F1（含 `none`）就让给用户。F1 没有「按住」：`hold` 档按临时切换处理。
+    /// 设置页读写的仍是存储层的 `keys.session_actions`，补的这条不落盘。
+    pub fn effective_session_actions(&self) -> BTreeMap<String, String> {
+        use crate::comment_lib::{SwitchKey, SwitchMode};
+        let mut out = self.keys.effective_session_actions();
+        let c = &self.ui.comment;
+        if c.enabled && c.switch_key == SwitchKey::F1 {
+            let verb = match c.switch_mode {
+                SwitchMode::Off => None,
+                SwitchMode::Persist => Some("comment_state"),
+                SwitchMode::Session | SwitchMode::Hold => Some("comment_state:session"),
+            };
+            if let Some(v) = verb {
+                out.entry("f1".to_string()).or_insert_with(|| v.to_string());
+            }
+        }
+        out
+    }
+
     /// 拼音全局配置的生效取值：`mobile` 时语法模型换成 `[mobile.grammar]`，其余照基线。
     ///
     /// 由引擎在取拼音配置的那一刻按平台调用（Android 构建传 `true`），不进 `Config::load`
@@ -8757,7 +8676,7 @@ impl Config {
         Self::migrate_force_vertical_value(&mut merged);
         Self::migrate_index_labels_value(&mut merged);
         Self::migrate_empty_code_behavior_value(&mut merged);
-        // ⚠️ `migrate_comment_max_chars_value` / `migrate_code_hint_gates_value` **不在这里**，
+        // ⚠️ `migrate_comment_max_chars_value` 等层内迁移**不在这里**，
         // 它们在各层合并前就地跑（见 [`Self::migrate_user_layer_value`]）。判据不同：
         // 那两条要问「用户写过新键吗」，而合并结果里的新键必然存在（L1 就是
         // `Config::default()` 序列化出来的），在这里问永远得到「写过」，迁移一次都不会执行。
@@ -9016,159 +8935,6 @@ impl Config {
         }
     }
 
-    /// 存量迁移（**层内**）：旧注释模板键与 `ui.candidate.comment_enabled` → `[ui.comment]`。
-    ///
-    /// 来源：全局 `ui.candidate.comment_template_*`、五个模式的 `input.<m>.comment_template_*`、
-    /// `schema.mix_modes[]` 条目的同名键（迁到 `mode."mix:<id>"`，缺 id 的不动）。
-    /// - 每个不同的模板串生成一个用户模板 `migrated_N`（名为 `旧版·<来源>`，同来源横竖不同时竖排加 `（竖排）`），
-    ///   写进对应的 `default_*` 格；串等于内置模板文本时直接写内置 id，不生成；空串迁成 `none`；
-    /// - 全局旧值等于旧出厂值 [`LEGACY_FACTORY_COMMENT_TEMPLATE`] 的视为没写；
-    /// - 横竖相同只写横排（竖排不写即同横排）；只写了一边时另一边写 `inherit`，保住旧版
-    ///   「没写的一边跟随下一层」；
-    /// - 迁出了全局格时，[`FACTORY_DEFAULT_SCOPES`] 里没迁出旧模板的范围，同名格写 `inherit`，
-    ///   保住「跟随全局」（出厂在那些范围写横排格，竖排不写会同横排，所以竖排也要挡）；
-    /// - 本层已有同名格 / `enabled` 时不覆盖，旧键照删（幂等）。
-    ///
-    /// 旧键从本层移除；写盘路径（`prune_user_config` / `set_user_value`）都先跑本函数，
-    /// 否则残留旧键会在下次 load 把用户在新形态上的修改打回。
-    fn migrate_comment_templates_value(layer: &mut toml::Value) {
-        if !layer.is_table() {
-            return;
-        }
-        let enabled = layer
-            .get_mut("ui")
-            .and_then(|u| u.get_mut("candidate"))
-            .and_then(toml::Value::as_table_mut)
-            .and_then(|c| c.remove("comment_enabled"));
-        let sources = take_legacy_comment_templates(layer);
-
-        // 要写的格：(格的路径, 旧模板串, 来源键)。旧串 `None` 表示写 `inherit`。
-        let mut writes: Vec<(Vec<String>, Option<String>, String)> = Vec::new();
-        for (scope, origin, v, h) in sources {
-            let cell = |name: &str| {
-                let mut p: Vec<String> = ["ui", "comment", "assign"].map(String::from).into();
-                p.extend(scope.iter().cloned());
-                p.push(name.to_string());
-                p
-            };
-            let key = |side: &str| format!("{origin}.comment_template_{side}");
-            match (v, h) {
-                (Some(v), Some(h)) if v == h => {
-                    writes.push((cell("default_horizontal"), Some(h), key("horizontal")));
-                }
-                (None, None) => {}
-                (v, h) => {
-                    writes.push((cell("default_vertical"), v, key("vertical")));
-                    writes.push((cell("default_horizontal"), h, key("horizontal")));
-                }
-            }
-        }
-        // 本身有旧模板的范围不挡全局：它两边的值已由自己的旧键定下。
-        let own_scopes: Vec<Vec<String>> = writes
-            .iter()
-            .map(|(p, ..)| p[3..p.len() - 1].to_vec())
-            .collect();
-        let migrated_scope = |scope: &[&str]| own_scopes.iter().any(|o| o[..] == *scope);
-        writes.retain(|(p, ..)| get_nested(layer, &path_refs(p)).is_none());
-        // 迁出了自定义全局格：出厂在中间层写了同名格的作用范围，旧版跟随全局，要显式 `inherit`。
-        // 全局写的 `inherit`（另一边是旧出厂值）也要挡，否则那边落到出厂的 `none` 而不是编码提示。
-        let mut shadows = Vec::new();
-        for (p, _, origin) in &writes {
-            if p[3] != "global" {
-                continue;
-            }
-            for scope in FACTORY_DEFAULT_SCOPES.iter().filter(|s| !migrated_scope(s)) {
-                let mut sp: Vec<String> = ["ui", "comment", "assign"].map(String::from).into();
-                sp.extend(scope.iter().map(|s| s.to_string()));
-                sp.push(p[4].clone());
-                shadows.push((sp, None, origin.clone()));
-            }
-        }
-        for w in shadows {
-            if !writes.iter().any(|(p, ..)| *p == w.0)
-                && get_nested(layer, &path_refs(&w.0)).is_none()
-            {
-                writes.push(w);
-            }
-        }
-
-        let mut migrated = Vec::new();
-        let enabled_path = ["ui", "comment", "enabled"];
-        if let Some(on) = enabled.filter(toml::Value::is_bool)
-            && get_nested(layer, &enabled_path).is_none()
-        {
-            set_nested(layer.as_table_mut().expect("已判为表"), &enabled_path, on);
-            migrated.push("ui.candidate.comment_enabled → ui.comment.enabled".to_string());
-        }
-
-        let templates_path = ["ui", "comment", "templates"];
-        let mut templates: Vec<toml::Value> = get_nested(layer, &templates_path)
-            .and_then(toml::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let template_count = templates.len();
-        let str_of =
-            |t: &toml::Value, k: &str| t.get(k).and_then(toml::Value::as_str).map(String::from);
-        let builtin = crate::comment_lib::SystemComments::embedded().templates;
-        let siblings = writes.clone();
-        for (path, text, origin) in writes {
-            let value = match text {
-                None => "inherit".to_string(),
-                Some(t) if t.is_empty() => "none".to_string(),
-                Some(t) => match templates
-                    .iter()
-                    .find(|tpl| str_of(tpl, "text").as_deref() == Some(t.as_str()))
-                    .and_then(|tpl| str_of(tpl, "id"))
-                    .or_else(|| builtin.iter().find(|b| b.text == t).map(|b| b.id.clone()))
-                {
-                    Some(id) => id,
-                    None => {
-                        let id = (1..)
-                            .map(|n| format!("migrated_{n}"))
-                            .find(|id| {
-                                !templates
-                                    .iter()
-                                    .any(|tpl| str_of(tpl, "id").as_deref() == Some(id.as_str()))
-                            })
-                            .expect("序号无上界");
-                        let mut tpl = toml::Table::new();
-                        tpl.insert("id".into(), id.clone().into());
-                        let vertical_differs = path.last().is_some_and(|c| c == "default_vertical")
-                            && siblings.iter().any(|(p, other, _)| {
-                                p[..p.len() - 1] == path[..path.len() - 1]
-                                    && p.last().is_some_and(|c| c == "default_horizontal")
-                                    && other.as_ref().is_some_and(|o| *o != t)
-                            });
-                        let mut name = legacy_scope_label(&path);
-                        if vertical_differs {
-                            name.push_str("（竖排）");
-                        }
-                        tpl.insert("name".into(), name.into());
-                        tpl.insert("text".into(), t.into());
-                        templates.push(tpl.into());
-                        id
-                    }
-                },
-            };
-            migrated.push(format!("{origin} → {}", path.join(".")));
-            set_nested(
-                layer.as_table_mut().expect("已判为表"),
-                &path_refs(&path),
-                value.into(),
-            );
-        }
-        if templates.len() > template_count {
-            set_nested(
-                layer.as_table_mut().expect("已判为表"),
-                &templates_path,
-                templates.into(),
-            );
-        }
-        if !migrated.is_empty() {
-            info!("Migrated legacy comment config: {migrated:?}");
-        }
-    }
-
     /// **层内**迁移：作用在单独一层的 `toml::Value` 上，在 `merge_value` **之前**跑。
     ///
     /// 与 [`Self::load`] 末尾那一族合并后迁移刻意分开，因为**判据不同**：
@@ -9189,8 +8955,6 @@ impl Config {
     /// —— 那是合并后迁移白捡的好处，换成层内跑就得显式保留。
     fn migrate_user_layer_value(layer: &mut toml::Value) {
         Self::migrate_comment_max_chars_value(layer);
-        Self::migrate_comment_templates_value(layer);
-        Self::migrate_code_hint_gates_value(layer);
         Self::migrate_font_size_follow_theme_value(layer);
         Self::migrate_langbar_badge_colors_value(layer);
         Self::migrate_tooltip_sections_value(layer);
@@ -9436,92 +9200,6 @@ impl Config {
         cand.insert("font_size".to_string(), size);
     }
 
-    /// 编码来源三开关退役（设计 §13.6）：用户层写了的值折成注释分配，旧键摘掉。
-    ///
-    /// - `schema.pinyin.code_hint_source`（更早的 `schema.pinyin.show_code_hint` 按 true →
-    ///   `codetable`、false → `off` 先折一道）：非 `off` 写拼音、双拼类型的默认横排格；
-    /// - `input.temp_pinyin.code_hint_source`：非 `auto` 写临时拼音与快捷输入默认（`mode.mix`）的默认横排格；
-    /// - `schema.mix.pinyin_code_hint = false`：混输类型默认横排格写 `code_hint`（只留剩余编码）。
-    ///
-    /// 目标格本层已有值时不覆盖（旧版自定义了全局模板的用户，[`Self::migrate_comment_templates_value`]
-    /// 已在这些格写了 `inherit`，跟随他们的全局模板；跳过时记 warn）。旧键照删，幂等。
-    fn migrate_code_hint_gates_value(layer: &mut toml::Value) {
-        let Some(root) = layer.as_table_mut() else {
-            return;
-        };
-        let take = |root: &mut toml::Table, path: &[&str]| -> Option<toml::Value> {
-            let (last, parent) = path.split_last()?;
-            let mut t = &mut *root;
-            for k in parent {
-                t = t.get_mut(*k)?.as_table_mut()?;
-            }
-            t.remove(*last)
-        };
-        let legacy = take(root, &["schema", "pinyin", "show_code_hint"]).and_then(|v| v.as_bool());
-        let pinyin = take(root, &["schema", "pinyin", "code_hint_source"])
-            .and_then(|v| v.as_str().map(|s| s.trim().to_ascii_lowercase()))
-            .or_else(|| legacy.map(|on| if on { "codetable" } else { "off" }.to_string()));
-        let temp = take(root, &["input", "temp_pinyin", "code_hint_source"])
-            .and_then(|v| v.as_str().map(|s| s.trim().to_ascii_lowercase()));
-        let mix = take(root, &["schema", "mix", "pinyin_code_hint"]).and_then(|v| v.as_bool());
-
-        let mut writes: Vec<(Vec<String>, &str, String)> = Vec::new();
-        let cell = |scope: &[&str]| {
-            let mut p: Vec<String> = ["ui", "comment", "assign"].map(String::from).into();
-            p.extend(scope.iter().map(|s| s.to_string()));
-            p.push("default_horizontal".to_string());
-            p
-        };
-        let pinyin_tpl = match pinyin.as_deref() {
-            Some("codetable") => Some("code_rev"),
-            Some("shuangpin") => Some("shuangpin"),
-            Some("auto") => Some("code"),
-            _ => None,
-        };
-        if let (Some(t), Some(v)) = (pinyin_tpl, &pinyin) {
-            for ty in ["pinyin", "shuangpin"] {
-                writes.push((
-                    cell(&["type", ty]),
-                    t,
-                    format!("schema.pinyin.code_hint_source={v}"),
-                ));
-            }
-        }
-        let temp_tpl = match temp.as_deref() {
-            Some("off") => Some("none"),
-            Some("codetable") => Some("code_rev"),
-            Some("shuangpin") => Some("shuangpin"),
-            _ => None,
-        };
-        if let (Some(t), Some(v)) = (temp_tpl, &temp) {
-            // 快捷输入原先都读临拼这份：迁到快捷输入默认的那格。
-            let origin = format!("input.temp_pinyin.code_hint_source={v}");
-            writes.push((cell(&["mode", "temp_pinyin"]), t, origin.clone()));
-            writes.push((cell(&["mode", crate::comment_lib::MIX_ALL_MODE]), t, origin));
-        }
-        if mix == Some(false) {
-            writes.push((
-                cell(&["type", "mixed"]),
-                "code_hint",
-                "schema.mix.pinyin_code_hint=false".to_string(),
-            ));
-        }
-        for (path, tpl, origin) in writes {
-            let refs = path_refs(&path);
-            if let Some(cur) = get_nested(&toml::Value::Table(root.clone()), &refs) {
-                if cur.as_str() == Some("inherit") {
-                    warn!(
-                        "Skipped migrating {origin}: {} follows the custom global template",
-                        path.join(".")
-                    );
-                }
-                continue;
-            }
-            set_nested(root, &refs, toml::Value::String(tpl.to_string()));
-            info!("Migrated {origin} → {} = {tpl}", path.join("."));
-        }
-    }
-
     /// 存量迁移（**须在反序列化前**跑，字段已从 [`QuickInputConfig`] 移除）：
     /// 废弃键 `schema.quick_input.force_vertical` → 内置 quick_mix 的
     /// [`MixModeConfig::candidate_layout`]。
@@ -9676,8 +9354,6 @@ impl Config {
         Self::migrate_stale_factory_tooltip_sections_value(&mut root);
         Self::migrate_comment_max_chars_value(&mut root);
         Self::migrate_grammar_enabled_value(&mut root);
-        Self::migrate_comment_templates_value(&mut root);
-        Self::migrate_code_hint_gates_value(&mut root);
         let migrated = usize::from(root != before);
         // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，**不能**被 preset 取不到时的
         // 提前返回挡住——否则没装 data/config.toml 的环境永远清不掉。
@@ -10752,10 +10428,6 @@ impl Config {
         // 语法模型总开关：老用户只写了 weight + model 时，要在写新值**之前**补上 enabled = true，
         // 否则别的键的保存会把与出厂相同的 weight / model 剪掉，补 true 的依据就丢了。
         Self::migrate_grammar_enabled_value(&mut root);
-        // 旧注释模板键同理：残留的旧键会在下次 load 把用户刚改的分配或删掉的模板补回。
-        Self::migrate_comment_templates_value(&mut root);
-        // 编码来源旧开关同理。
-        Self::migrate_code_hint_gates_value(&mut root);
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
         // 出厂默认取不到时 `is_default` 恒 false → 退化为「照常写入」的旧行为（安全降级）。
@@ -10772,17 +10444,6 @@ impl Config {
                 set_nested(t, path, value);
             }
         }
-        // 旧客户端直接写退役的编码来源键：这是用户此刻的选择，先摘掉它对应的分配格再迁，
-        // 否则目标格已有值会让迁移跳过，写了等于没写。
-        if let toml::Value::Table(t) = &mut root {
-            for scope in legacy_code_hint_targets(path) {
-                let mut p = vec!["ui", "comment", "assign"];
-                p.extend_from_slice(scope);
-                p.push("default_horizontal");
-                remove_nested(t, &p);
-            }
-        }
-        Self::migrate_code_hint_gates_value(&mut root);
         // 角标旧色值：放在 set_nested **之后**，盘上已有的与本次新传入的一并迁掉
         // （旧写法只读不写）；放在之前则新值里的 `auto` / 8 位色值会原样落盘。
         Self::migrate_langbar_badge_colors_value(&mut root);
@@ -11576,6 +11237,31 @@ mod tests {
     }
 
     /// 有效视图是纯函数：多次调用结果一致，且与调用前后的 normalize 无关。
+    /// 注释切换键选 F1 时补进会话按键表；按档位选动词，关掉或用户自己绑了 F1 就不补。
+    #[test]
+    fn f1_switch_key_joins_session_actions() {
+        use crate::comment_lib::{SwitchKey, SwitchMode};
+        let f1 = |c: &Config| c.effective_session_actions().get("f1").cloned();
+        let mut c = Config::default();
+        assert_eq!(c.ui.comment.switch_key, SwitchKey::F1);
+        assert_eq!(f1(&c).as_deref(), Some("comment_state:session"));
+        c.ui.comment.switch_mode = SwitchMode::Hold;
+        assert_eq!(f1(&c).as_deref(), Some("comment_state:session"));
+        c.ui.comment.switch_mode = SwitchMode::Persist;
+        assert_eq!(f1(&c).as_deref(), Some("comment_state"));
+        c.ui.comment.switch_mode = SwitchMode::Off;
+        assert_eq!(f1(&c), None);
+        c.ui.comment.switch_mode = SwitchMode::Session;
+        c.keys.session_actions.insert("f1".into(), "none".into());
+        assert_eq!(f1(&c).as_deref(), Some("none"), "用户的绑定优先");
+        c.keys.session_actions.clear();
+        c.ui.comment.switch_key = SwitchKey::Ctrl;
+        assert_eq!(f1(&c), None);
+        c.ui.comment.switch_key = SwitchKey::F1;
+        c.ui.comment.enabled = false;
+        assert_eq!(f1(&c), None);
+    }
+
     #[test]
     fn effective_session_actions_is_pure() {
         let mut c = Config::default();
@@ -12427,36 +12113,6 @@ show_source_hint = false
 "#);
         assert_eq!(prune_redundant(&mut user, &preset), 2);
         assert_eq!(prune_redundant(&mut user, &preset), 0, "二次清理应无事可做");
-    }
-
-    /// ★ 旧模式级注释模板迁入 `[ui.comment]` 后，迁出来的模板与分配不得被写回清理掉
-    /// （`prune_user_config` 先迁移、再剪枝）。
-    #[test]
-    fn prune_keeps_migrated_comment_templates() {
-        let preset = toml::Value::try_from(Config::default()).unwrap();
-        let mut user = tv(r#"
-[input.temp_english]
-comment_template_vertical = "${dict}"
-comment_template_horizontal = ""
-"#);
-        Config::migrate_comment_templates_value(&mut user);
-        let before = user.clone();
-        assert_eq!(prune_redundant(&mut user, &preset), 0);
-        assert_eq!(user, before, "迁出来的模板与分配必须原样保留");
-        let mode = ["ui", "comment", "assign", "mode", "temp_english"];
-        let cell = |k: &str| {
-            let mut p = mode.to_vec();
-            p.push(k);
-            get_nested(&user, &p)
-                .and_then(toml::Value::as_str)
-                .map(String::from)
-        };
-        assert_eq!(cell("default_vertical").as_deref(), Some("migrated_1"));
-        assert_eq!(
-            cell("default_horizontal").as_deref(),
-            Some("none"),
-            "空串（= 本模式不显示注释）迁成 none"
-        );
     }
 
     #[test]
@@ -14131,425 +13787,6 @@ scripts = { latin = 42 }
         assert_eq!(fs, 22.0);
     }
 
-    /// 旧注释模板键迁移：跑真实链路（用户层迁移 → ⊕ L1 默认 → 反序列化），返回生效的
-    /// `[ui.comment]` 与迁移后的本层。
-    fn comment_after_migration(
-        user_toml: &str,
-    ) -> (crate::comment_lib::UiCommentConfig, toml::Value) {
-        let mut user: toml::Value = toml::from_str(user_toml).unwrap();
-        Config::migrate_user_layer_value(&mut user);
-        let mut merged = toml::Value::try_from(Config::default()).unwrap();
-        merge_value(&mut merged, user.clone());
-        let cfg: Config = merged.try_into().expect("反序列化");
-        (cfg.ui.comment, user)
-    }
-
-    /// 比对模板时不看 `name`（迁移来源说明）。
-    fn template_id_texts(c: &crate::comment_lib::UiCommentConfig) -> Vec<(String, String)> {
-        c.templates
-            .iter()
-            .map(|t| (t.id.clone(), t.text.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn migrates_global_custom_template() {
-        let (c, user) =
-            comment_after_migration("[ui.candidate]\ncomment_template_vertical = \"${my}\"\n");
-        assert_eq!(
-            template_id_texts(&c),
-            [("migrated_1".to_string(), "${my}".to_string())]
-        );
-        assert_eq!(c.templates[0].name, "旧版·全局");
-        assert_eq!(
-            c.assign.global.default_vertical.as_deref(),
-            Some("migrated_1")
-        );
-        // 横排旧值缺席 = 旧出厂值：另一边写 `inherit`，挡格据此也覆盖下层出厂的横排格。
-        assert_eq!(
-            c.assign.global.default_horizontal.as_deref(),
-            Some("inherit")
-        );
-        assert!(
-            get_nested(&user, &["ui", "candidate", "comment_template_vertical"]).is_none(),
-            "旧键须从本层移除"
-        );
-    }
-
-    #[test]
-    fn drops_factory_valued_global() {
-        let (c, user) = comment_after_migration(
-            "[ui.candidate]\ncomment_template_vertical = \"${code_hint|code_rev|shuangpin}\"\n\
-             comment_template_horizontal = \"${code_hint|code_rev|shuangpin}\"\n",
-        );
-        assert!(c.templates.is_empty());
-        assert_eq!(c.assign, crate::comment_lib::CommentAssign::default());
-        assert!(get_nested(&user, &["ui", "candidate", "comment_template_vertical"]).is_none());
-        assert!(get_nested(&user, &["ui", "candidate", "comment_template_horizontal"]).is_none());
-        assert!(
-            get_nested(&user, &["ui", "comment"]).is_none(),
-            "不该留下空段"
-        );
-    }
-
-    #[test]
-    fn empty_mode_template_becomes_none() {
-        let (c, user) = comment_after_migration(
-            "[input.temp_english]\ncomment_template_vertical = \"\"\n\
-             comment_template_horizontal = \"\"\n",
-        );
-        let cells = &c.assign.mode["temp_english"];
-        assert_eq!(cells.default_horizontal.as_deref(), Some("none"));
-        assert_eq!(cells.default_vertical, None, "横竖相同只写横排");
-        assert!(c.templates.is_empty());
-        assert!(
-            get_nested(
-                &user,
-                &["input", "temp_english", "comment_template_vertical"]
-            )
-            .is_none()
-        );
-    }
-
-    fn names_of(c: &crate::comment_lib::UiCommentConfig) -> Vec<(String, String)> {
-        c.templates
-            .iter()
-            .map(|t| (t.id.clone(), t.name.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn migrated_names_cover_every_source_kind() {
-        let (c, _) = comment_after_migration(
-            "[input.temp_pinyin]\ncomment_template_horizontal = \"${a1}\"\n\
-             [input.temp_english]\ncomment_template_horizontal = \"${a2}\"\n\
-             [input.url]\ncomment_template_horizontal = \"${a3}\"\n\
-             [input.email]\ncomment_template_horizontal = \"${a4}\"\n\
-             [input.unicode]\ncomment_template_horizontal = \"${a5}\"\n\
-             [[schema.mix_modes]]\nid = \"qm\"\ncomment_template_horizontal = \"${a6}\"\n",
-        );
-        let mut names: Vec<String> = c.templates.iter().map(|t| t.name.clone()).collect();
-        names.sort();
-        let mut want: Vec<String> = [
-            "旧版·临时拼音",
-            "旧版·临时英文",
-            "旧版·网址",
-            "旧版·Email",
-            "旧版·Unicode",
-            "旧版·qm",
-        ]
-        .map(String::from)
-        .into();
-        want.sort();
-        assert_eq!(names, want);
-    }
-
-    #[test]
-    fn differing_vertical_gets_suffix_horizontal_keeps_plain_name() {
-        let (c, _) = comment_after_migration(
-            "[input.url]\ncomment_template_vertical = \"${v}\"\n\
-             comment_template_horizontal = \"${h}\"\n",
-        );
-        let cells = &c.assign.mode["url"];
-        let name_of = |id: &Option<String>| {
-            c.templates
-                .iter()
-                .find(|t| Some(&t.id) == id.as_ref())
-                .map(|t| t.name.clone())
-        };
-        assert_eq!(
-            name_of(&cells.default_horizontal).as_deref(),
-            Some("旧版·网址")
-        );
-        assert_eq!(
-            name_of(&cells.default_vertical).as_deref(),
-            Some("旧版·网址（竖排）")
-        );
-    }
-
-    #[test]
-    fn old_text_equal_to_builtin_reuses_builtin_id() {
-        let (c, _) = comment_after_migration(
-            "[input.temp_pinyin]\ncomment_template_vertical = \"${pinyin}\"\n\
-             comment_template_horizontal = \"${pinyin}\"\n",
-        );
-        assert!(
-            c.templates.is_empty(),
-            "不生成 migrated_N: {:?}",
-            names_of(&c)
-        );
-        assert_eq!(
-            c.assign.mode["temp_pinyin"].default_horizontal.as_deref(),
-            Some("pinyin")
-        );
-    }
-
-    #[test]
-    fn dedupes_identical_texts() {
-        let (c, _) = comment_after_migration(
-            "[input.temp_english]\ncomment_template_vertical = \"${dict}\"\n\
-             comment_template_horizontal = \"${dict}\"\n\
-             [input.url]\ncomment_template_vertical = \"${dict}\"\n\
-             comment_template_horizontal = \"${dict}\"\n",
-        );
-        assert_eq!(
-            template_id_texts(&c),
-            [("migrated_1".to_string(), "${dict}".to_string())]
-        );
-        assert!(c.templates[0].name == "旧版·临时英文", "name 取第一个来源");
-        for m in ["temp_english", "url"] {
-            assert_eq!(
-                c.assign.mode[m].default_horizontal.as_deref(),
-                Some("migrated_1")
-            );
-            assert_eq!(c.assign.mode[m].default_vertical, None);
-        }
-    }
-
-    /// 只写了横排：竖排写 `inherit`，否则不写的竖排会同本层横排。
-    #[test]
-    fn horizontal_only_mode_template_writes_vertical_inherit() {
-        let (c, _) =
-            comment_after_migration("[input.url]\ncomment_template_horizontal = \"${my}\"\n");
-        let cells = &c.assign.mode["url"];
-        assert_eq!(cells.default_horizontal.as_deref(), Some("migrated_1"));
-        assert_eq!(cells.default_vertical.as_deref(), Some("inherit"));
-    }
-
-    #[test]
-    fn mix_mode_uses_id() {
-        let (c, user) = comment_after_migration(
-            "[[schema.mix_modes]]\nid = \"quick_mix\"\ncomment_template_vertical = \"${my}\"\n",
-        );
-        let cells = &c.assign.mode["mix:quick_mix"];
-        assert_eq!(cells.default_vertical.as_deref(), Some("migrated_1"));
-        assert_eq!(cells.default_horizontal.as_deref(), Some("inherit"));
-        assert_eq!(c.templates[0].name, "旧版·快捷输入");
-        let mix = get_nested(&user, &["schema", "mix_modes"]).unwrap();
-        assert!(
-            mix.as_array().unwrap()[0]
-                .get("comment_template_vertical")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn comment_enabled_moves() {
-        let (c, user) = comment_after_migration("[ui.candidate]\ncomment_enabled = false\n");
-        assert!(!c.enabled);
-        assert!(get_nested(&user, &["ui", "candidate", "comment_enabled"]).is_none());
-    }
-
-    /// 本层已有同名格 / 同名开关：以新键为准，旧键只删不迁。
-    #[test]
-    fn existing_comment_cells_win() {
-        let (c, _) = comment_after_migration(
-            "[ui.candidate]\ncomment_enabled = false\ncomment_template_vertical = \"${pinyin}\"\n\
-             [ui.comment]\nenabled = true\n\
-             [ui.comment.assign.global]\ndefault_vertical = \"chaizi\"\n",
-        );
-        assert!(c.enabled);
-        assert_eq!(c.assign.global.default_vertical.as_deref(), Some("chaizi"));
-        assert!(c.templates.is_empty(), "没写进任何格的模板串不生成模板");
-    }
-
-    fn shipped_system_comments() -> crate::comment_lib::SystemComments {
-        crate::comment_lib::SystemComments::parse(include_str!(
-            "../../../../data/system.comments.toml"
-        ))
-        .expect("出厂 system.comments.toml 应能解析")
-    }
-
-    /// `FACTORY_DEFAULT_SCOPES` 必须等于出厂分配里 `default_*` 有值的非全局作用范围。
-    #[test]
-    fn factory_default_scopes_match_shipped_assign() {
-        let a = shipped_system_comments().assign;
-        let mut got: Vec<Vec<String>> = Vec::new();
-        for (kind, map) in [
-            ("type", &a.by_type),
-            ("schema", &a.schema),
-            ("mode", &a.mode),
-        ] {
-            for (k, c) in map {
-                if c.default_vertical.is_some() || c.default_horizontal.is_some() {
-                    got.push(vec![kind.to_string(), k.clone()]);
-                }
-            }
-        }
-        let mut want: Vec<Vec<String>> = FACTORY_DEFAULT_SCOPES
-            .iter()
-            .map(|s| s.iter().map(|x| x.to_string()).collect())
-            .collect();
-        got.sort();
-        want.sort();
-        assert_eq!(got, want, "出厂分配变了，同步 FACTORY_DEFAULT_SCOPES");
-    }
-
-    fn migrated_library(user_toml: &str) -> crate::comment_lib::CommentLibrary {
-        let (user, _) = comment_after_migration(user_toml);
-        let (lib, warnings) =
-            crate::comment_lib::CommentLibrary::build(&shipped_system_comments(), &user);
-        assert!(warnings.is_empty(), "{warnings:?}");
-        lib
-    }
-
-    /// 旧全局自定义模板迁移后，临英模式与英文方案仍跟随全局，不被出厂的 `none` 挡住。
-    #[test]
-    fn migrated_global_template_reaches_factory_shadowed_scopes() {
-        use crate::comment_lib::{CommentScope, CommentState, SchemaType};
-        let lib = migrated_library(
-            "[ui.candidate]\ncomment_template_vertical = \"${dict}\"\n\
-             comment_template_horizontal = \"${dict}\"\n",
-        );
-        for scope in [
-            CommentScope {
-                mode: Some("temp_english"),
-                schema: "wubi86",
-                schema_type: SchemaType::CodeTable,
-            },
-            CommentScope {
-                mode: None,
-                schema: "english",
-                schema_type: SchemaType::English,
-            },
-        ] {
-            for vertical in [true, false] {
-                assert_eq!(
-                    lib.template_text(&scope, CommentState::Default, vertical),
-                    "${dict}",
-                    "{scope:?} vertical={vertical}"
-                );
-            }
-        }
-    }
-
-    /// 只改了全局竖排：横排仍是旧出厂的编码提示。
-    #[test]
-    fn migrated_global_vertical_only_keeps_horizontal_factory() {
-        use crate::comment_lib::{CommentScope, CommentState, SchemaType};
-        let lib = migrated_library("[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n");
-        let scope = CommentScope {
-            mode: None,
-            schema: "wubi86",
-            schema_type: SchemaType::CodeTable,
-        };
-        assert_eq!(
-            lib.template_text(&scope, CommentState::Default, true),
-            "${pinyin}"
-        );
-        assert_eq!(
-            lib.template_text(&scope, CommentState::Default, false),
-            LEGACY_FACTORY_COMMENT_TEMPLATE
-        );
-    }
-
-    fn shadowed_scopes() -> [crate::comment_lib::CommentScope<'static>; 2] {
-        use crate::comment_lib::{CommentScope, SchemaType};
-        [
-            CommentScope {
-                mode: Some("temp_english"),
-                schema: "wubi86",
-                schema_type: SchemaType::CodeTable,
-            },
-            CommentScope {
-                mode: None,
-                schema: "english",
-                schema_type: SchemaType::English,
-            },
-        ]
-    }
-
-    /// 只改了全局竖排：出厂挡着的范围竖排跟随全局（不沿用出厂的横排 `none`），横排是旧出厂值。
-    #[test]
-    fn migrated_global_vertical_only_reaches_shadowed_scopes() {
-        use crate::comment_lib::CommentState;
-        let lib = migrated_library("[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n");
-        for scope in shadowed_scopes() {
-            assert_eq!(
-                lib.template_text(&scope, CommentState::Default, true),
-                "${pinyin}",
-                "{scope:?}"
-            );
-            assert_eq!(
-                lib.template_text(&scope, CommentState::Default, false),
-                LEGACY_FACTORY_COMMENT_TEMPLATE,
-                "{scope:?}"
-            );
-        }
-    }
-
-    /// 只改了全局横排：出厂挡着的范围横排跟随全局，竖排是旧出厂值。
-    #[test]
-    fn migrated_global_horizontal_only_reaches_shadowed_scopes() {
-        use crate::comment_lib::CommentState;
-        let lib = migrated_library("[ui.candidate]\ncomment_template_horizontal = \"${pinyin}\"\n");
-        for scope in shadowed_scopes() {
-            assert_eq!(
-                lib.template_text(&scope, CommentState::Default, false),
-                "${pinyin}",
-                "{scope:?}"
-            );
-            assert_eq!(
-                lib.template_text(&scope, CommentState::Default, true),
-                LEGACY_FACTORY_COMMENT_TEMPLATE,
-                "{scope:?}"
-            );
-        }
-    }
-
-    /// 本身迁出了旧模板的模式不被全局挡格覆盖：两边都按它自己的旧值。
-    #[test]
-    fn migrated_mode_template_not_shadowed_by_global() {
-        use crate::comment_lib::CommentState;
-        let lib = migrated_library(
-            "[ui.candidate]\ncomment_template_vertical = \"${pinyin}\"\n\
-             [input.temp_english]\ncomment_template_vertical = \"${dict}\"\n\
-             comment_template_horizontal = \"${dict}\"\n",
-        );
-        let scope = &shadowed_scopes()[0];
-        for vertical in [true, false] {
-            assert_eq!(
-                lib.template_text(scope, CommentState::Default, vertical),
-                "${dict}",
-                "vertical={vertical}"
-            );
-        }
-    }
-
-    #[test]
-    fn migration_is_idempotent() {
-        let src = "[ui.candidate]\ncomment_enabled = false\n\
-                   comment_template_vertical = \"${my1}\"\n\
-                   comment_template_horizontal = \"${my2}\"\n\
-                   [input.temp_pinyin]\ncomment_template_vertical = \"${my2}\"\n\
-                   [[schema.mix_modes]]\nid = \"quick_mix\"\ncomment_template_vertical = \"\"\n";
-        let mut once: toml::Value = toml::from_str(src).unwrap();
-        Config::migrate_user_layer_value(&mut once);
-        let mut twice = once.clone();
-        Config::migrate_user_layer_value(&mut twice);
-        assert_eq!(once, twice);
-        let c: crate::comment_lib::UiCommentConfig = get_nested(&once, &["ui", "comment"])
-            .cloned()
-            .unwrap()
-            .try_into()
-            .unwrap();
-        assert_eq!(
-            template_id_texts(&c),
-            [
-                ("migrated_1".to_string(), "${my1}".to_string()),
-                ("migrated_2".to_string(), "${my2}".to_string()),
-            ]
-        );
-        assert_eq!(
-            c.assign.global.default_horizontal.as_deref(),
-            Some("migrated_2")
-        );
-        assert_eq!(
-            c.assign.mode["temp_pinyin"].default_vertical.as_deref(),
-            Some("migrated_2")
-        );
-    }
-
     /// ★ 旧版写回会剪掉等于出厂值的键：「关跟随、字号保持 18」的文件里只剩 follow=false。
     /// 不补 18 的话会落到新出厂值 0，用户被悄悄切回跟随主题。
     #[test]
@@ -14642,109 +13879,6 @@ scripts = { latin = 42 }
     fn serde_default_of_font_size_matches_default_impl() {
         let c: UiCandidateConfig = toml::from_str("").unwrap();
         assert_eq!(c.font_size, UiCandidateConfig::default().font_size);
-    }
-
-    /// 用户层跑一遍迁移后合并，取某个注释分配格。
-    fn assign_cell_after_migration(
-        user_toml: &str,
-        path: &[&str],
-    ) -> (toml::Value, Option<String>) {
-        let mut user: toml::Value = toml::from_str(user_toml).unwrap();
-        Config::migrate_user_layer_value(&mut user);
-        let mut full = vec!["ui", "comment", "assign"];
-        full.extend_from_slice(path);
-        full.push("default_horizontal");
-        let v = get_nested(&user, &full)
-            .and_then(toml::Value::as_str)
-            .map(String::from);
-        (user, v)
-    }
-
-    /// 拼音那份开关（含更早的 `show_code_hint`）折成拼音、双拼类型的默认格；`off` 不写。
-    #[test]
-    fn pinyin_code_hint_source_migrates_to_type_cells() {
-        for (src, want) in [
-            (
-                "schema.pinyin.code_hint_source = \"codetable\"",
-                Some("code_rev"),
-            ),
-            (
-                "schema.pinyin.code_hint_source = \"shuangpin\"",
-                Some("shuangpin"),
-            ),
-            ("schema.pinyin.code_hint_source = \"auto\"", Some("code")),
-            ("schema.pinyin.code_hint_source = \"off\"", None),
-            ("schema.pinyin.show_code_hint = true", Some("code_rev")),
-            ("schema.pinyin.show_code_hint = false", None),
-        ] {
-            for ty in ["pinyin", "shuangpin"] {
-                let (user, got) = assign_cell_after_migration(src, &["type", ty]);
-                assert_eq!(got.as_deref(), want, "{src} → type.{ty}");
-                let py = get_nested(&user, &["schema", "pinyin"]);
-                assert!(
-                    py.is_none_or(|t| t.get("code_hint_source").is_none()
-                        && t.get("show_code_hint").is_none()),
-                    "{src}：旧键要摘掉"
-                );
-            }
-        }
-    }
-
-    /// 临时拼音那份写临时拼音与快捷输入默认的格；`auto`（出厂）不写。
-    #[test]
-    fn temp_pinyin_code_hint_source_migrates_to_mode_cells() {
-        let (_, got) = assign_cell_after_migration(
-            "input.temp_pinyin.code_hint_source = \"off\"",
-            &["mode", "temp_pinyin"],
-        );
-        assert_eq!(got.as_deref(), Some("none"));
-        let (_, got) = assign_cell_after_migration(
-            "input.temp_pinyin.code_hint_source = \"codetable\"",
-            &["mode", "mix"],
-        );
-        assert_eq!(got.as_deref(), Some("code_rev"));
-        let (user, got) = assign_cell_after_migration(
-            "input.temp_pinyin.code_hint_source = \"shuangpin\"\n\
-             [[schema.mix_modes]]\nid = \"mine\"\n",
-            &["mode", "mix"],
-        );
-        assert_eq!(got.as_deref(), Some("shuangpin"), "自建快捷输入也走通配格");
-        assert!(get_nested(&user, &["ui", "comment", "assign", "mode", "mix:mine"]).is_none());
-        let (_, got) = assign_cell_after_migration(
-            "input.temp_pinyin.code_hint_source = \"auto\"",
-            &["mode", "temp_pinyin"],
-        );
-        assert_eq!(got, None);
-    }
-
-    /// 混输开关关掉 → 混输类型只留剩余编码；开着（出厂）不写。
-    #[test]
-    fn mix_pinyin_code_hint_false_migrates_to_mixed_type() {
-        let (user, got) =
-            assign_cell_after_migration("schema.mix.pinyin_code_hint = false", &["type", "mixed"]);
-        assert_eq!(got.as_deref(), Some("code_hint"));
-        assert!(get_nested(&user, &["schema", "mix", "pinyin_code_hint"]).is_none());
-        let (_, got) =
-            assign_cell_after_migration("schema.mix.pinyin_code_hint = true", &["type", "mixed"]);
-        assert_eq!(got, None);
-    }
-
-    /// 目标格已有值（含旧全局模板迁移写的 `inherit`）不覆盖；迁移幂等。
-    #[test]
-    fn code_hint_gate_migration_keeps_existing_cells() {
-        let src = "schema.pinyin.code_hint_source = \"codetable\"\n\
-                   [ui.comment.assign.type.pinyin]\ndefault_horizontal = \"pinyin\"\n";
-        let (mut user, got) = assign_cell_after_migration(src, &["type", "pinyin"]);
-        assert_eq!(got.as_deref(), Some("pinyin"));
-        let once = user.clone();
-        Config::migrate_user_layer_value(&mut user);
-        assert_eq!(user, once, "再跑一遍不变");
-
-        // 旧版自定义了全局模板：拼音类型被写成 inherit，跟随用户自己的全局模板。
-        let src = "schema.pinyin.code_hint_source = \"codetable\"\n\
-                   [ui.candidate]\ncomment_template_horizontal = \"${pinyin}\"\n";
-        let (_, got) = assign_cell_after_migration(src, &["type", "pinyin"]);
-        assert_eq!(got.as_deref(), Some("inherit"));
     }
 
     #[test]

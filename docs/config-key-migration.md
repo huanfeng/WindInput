@@ -23,10 +23,10 @@
 | 旧 | 现行 |
 |---|---|
 | `schema.active` / `available` / `primary_codetable` / `primary_pinyin` | 不变 |
-| `pinyin.show_code_hint` | 已退役：先成 `schema.pinyin.code_hint_source`（四档），后并入注释分配 `ui.comment.assign.type.{pinyin,shuangpin}`，见 `Config::migrate_code_hint_gates_value` |
-| `schema.pinyin.code_hint_source` | 已退役 → `ui.comment.assign.type.{pinyin,shuangpin}.default_horizontal` |
-| `input.temp_pinyin.code_hint_source` | 已退役 → `ui.comment.assign.mode.{temp_pinyin,mix}.default_horizontal` |
-| `schema.mix.pinyin_code_hint` | 已退役 → `ui.comment.assign.type.mixed.default_horizontal`（false 写 `code_hint`） |
+| `pinyin.show_code_hint` | 已退役（先成 `schema.pinyin.code_hint_source`，后并入注释分配）；**不迁移**，旧键登记 `RETIRED_KEYS` |
+| `schema.pinyin.code_hint_source` | 已退役，**不迁移**：改在注释分配 `ui.comment.assign.type.{pinyin,shuangpin}` 里重设 |
+| `input.temp_pinyin.code_hint_source` | 已退役，**不迁移**：改在 `ui.comment.assign.mode.{temp_pinyin,mix}` 里重设 |
+| `schema.mix.pinyin_code_hint` | 已退役，**不迁移**：改在 `ui.comment.assign.type.mixed` 里重设 |
 | `pinyin.use_smart_compose` | `schema.pinyin.use_smart_compose` |
 | `pinyin.candidate_order` | `schema.pinyin.candidate_order` |
 | `input.pinyin_separator` | `schema.pinyin.separator` |
@@ -103,6 +103,8 @@
 | 旧 | 现行 |
 |---|---|
 | `ui.candidate.*`（12） | 不变 |
+| `ui.candidate.comment_enabled` | 已退役，**不迁移**（0.129 候选注释重构，破坏性变更）：改用 `ui.comment.enabled` |
+| `ui.candidate.comment_template_{vertical,horizontal}`、`input.<模式>.comment_template_*`、`schema.mix_modes[].comment_template_*` | 已退役，**不迁移**：改用命名模板 `[[ui.comment.templates]]` 与分配 `[ui.comment.assign.*]` 重设；方案文件 `[candidate]` / 特殊模式 `[overlay]` 里的同名键只启动告警 |
 | `ui.candidate.font_size_follow_theme` | 并入 `ui.candidate.font_size`（0.123 起，0 = 跟随主题；值迁移见 `Config::migrate_font_size_follow_theme_value`，旧键登记 `RETIRED_KEYS`） |
 | `ui.font.*`（3） | 不变 |
 | `ui.theme.{name,style}` | 不变 |

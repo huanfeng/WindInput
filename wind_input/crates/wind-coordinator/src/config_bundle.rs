@@ -470,7 +470,7 @@ impl ConfigBundle {
         // 映射在加 `cancel` 时立刻成了瓶颈（新动词没有对应的 `NavAction`）。
         // 显式 `none` 与写错的动词都在此过滤掉；后者由上一行的 `warn_unknown_session_actions`
         // 报出来，静默忽略与「功能坏了」完全同形。
-        let effective_session = config.keys.effective_session_actions();
+        let effective_session = config.effective_session_actions();
         let session_keys =
             keymap::KeyBinds::from_binds(effective_session.iter().filter_map(|(name, verb)| {
                 let action = wind_config::SessionAction::parse(verb);
