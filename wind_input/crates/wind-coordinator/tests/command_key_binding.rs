@@ -173,6 +173,19 @@ fn shift_backspace_runs_command_when_idle() {
     assert_probe_ran(&coord);
 }
 
+/// 裸 F1 进热键表（`route_of_key_action`），空闲态也命中并吞键。
+#[test]
+fn bare_function_key_runs_command_when_idle() {
+    skip_without_data!();
+    let coord = open_with(bind_key("f1", PROBE));
+    let act = coord.handle_key_event(&key(VK_F1, 0));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "空闲态裸 F1 命中命令应吞键，实际 {act:?}"
+    );
+    assert_probe_ran(&coord);
+}
+
 #[test]
 fn shift_backspace_runs_command_mid_composition() {
     skip_without_data!();

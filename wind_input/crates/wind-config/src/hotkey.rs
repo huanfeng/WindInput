@@ -113,6 +113,7 @@ fn hotkey_policy_for(action: &crate::config::BoundAction) -> Option<u32> {
 /// | 组合键（带 Ctrl/Alt/Shift/Win） | key_down 热键 → `dispatch_hotkey` | 不与输入争键，可全局拦截 |
 /// | 纯修饰键（`rshift`） | key_up 轻敲 | keydown 不能吃（宿主要看到修饰键），只能在干净单击的 keyup 上判 |
 /// | 单个有字符的键（`backtick`） | keydown 引导键链 | 英文模式下必须让它出字，故排在分水岭之后 |
+/// | 裸 F1–F12 | key_down 热键 | 不产出字符，空闲时 TSF 只有靠热键表才会转发 |
 ///
 /// ⚠ 单键**绝不能**编译进 key_down 热键表：`parse_hotkey("backtick")` 返回的是无修饰位的
 /// 裸 VK，进表后 TSF 会把它当热键转发并吞掉，该符号就再也打不出来了。
@@ -136,6 +137,11 @@ pub fn route_of_key_action(key: &str) -> Option<KeyActionRoute> {
     let vk = raw & 0xFFFF;
     if (VK_LSHIFT..=VK_RCONTROL).contains(&vk) {
         return Some(KeyActionRoute::ModifierKeyUp);
+    }
+    // 裸 F1–F12 不产出字符，进热键表的代价只是「中文模式下该键归输入法」（策略位
+    // `CHINESE_ONLY`），不会像字符键那样打不出字；不进表的话 TSF 在空闲时根本不转发它。
+    if (VK_F1..=VK_F12).contains(&vk) {
+        return Some(KeyActionRoute::Hotkey);
     }
     Some(KeyActionRoute::LeadingKey)
 }
@@ -173,6 +179,8 @@ const HOTKEY_POLICY_GLOBAL: u32 = 0x20000000;
 const HOTKEY_POLICY_FORWARD_ONLY: u32 = 0x10000000;
 
 /// Windows 虚拟键码（toggle / select / page 用）
+const VK_F1: u32 = 0x70;
+const VK_F12: u32 = 0x7B;
 const VK_LSHIFT: u32 = 0xA0;
 const VK_RSHIFT: u32 = 0xA1;
 const VK_LCONTROL: u32 = 0xA2;
@@ -1786,6 +1794,8 @@ mod tests {
         assert_eq!(route_of_key_action("backtick"), Some(LeadingKey));
         assert_eq!(route_of_key_action("semicolon"), Some(LeadingKey));
         assert_eq!(route_of_key_action("z"), Some(LeadingKey));
+        assert_eq!(route_of_key_action("f1"), Some(Hotkey));
+        assert_eq!(route_of_key_action("F12"), Some(Hotkey));
         assert_eq!(route_of_key_action("不存在的键"), None);
     }
 
