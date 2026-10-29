@@ -603,6 +603,9 @@ pub(crate) struct State {
     /// 剩余编码开头）。光标**不参与引擎查询**：`update_candidates` 恒查整串，移动光标不重算
     /// 候选（对齐 Go `inputCursorPos`）。所有读写走 `preedit_cursor::BufEdit`，勿裸改。
     pub(crate) input_cursor_pos: usize,
+    /// 手机端展开页「首单元读法」的当前选择（见 [`crate::leading_reading`]）：只对**记录它时的那份
+    /// 缓冲**有效——缓冲一变（打字、退格、选词吃掉前缀）就自动失效，不用在十几处清缓冲的地方逐个复位。
+    pub(crate) leading: Option<crate::leading_reading::Applied>,
     /// 组合区显示文本（拼音含音节分隔 "ni'hao"；码表为原始编码）。
     /// 仅显示输入码/拼音，绝不包含候选列表。
     pub(crate) preedit: String,
@@ -3006,6 +3009,7 @@ impl Coordinator {
                 input_buffer_cased: String::new(),
                 english_case_variant: crate::english_candidates::CaseVariant::default(),
                 input_cursor_pos: 0,
+                leading: None,
                 preedit: String::new(),
                 preedit_split_body: String::new(),
                 preedit_fp_body: String::new(),

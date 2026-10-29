@@ -2031,7 +2031,7 @@ impl MessageHandler for Coordinator {
                     // 手机端拼音：← 按音节跳（电脑端仍按字母，见 `query_cut` 的说明）。
                     // 拆分串对不回缓冲（双拼等）→ None，退回按字母。
                     let syllable_jump = (data.key_code == keymap::VK_LEFT
-                        && crate::handle_assoc::use_mobile_overrides()
+                        && crate::handle_candidate::cursor_by_syllable()
                         && self.engine_mgr.is_pinyin())
                     .then(|| {
                         let split = self
@@ -2062,7 +2062,7 @@ impl MessageHandler for Coordinator {
                         // 候选与 preedit 文本均不变，只是 caret 位置变了。但仍须 notify_ui_update
                         // ——自绘编码栏要据新 caret 重画插入符（"不重算候选" ≠ "不刷新 UI"）。
                         // 手机端例外：光标在中间时候选只查光标前一段（`query_cut`），移动后必须重算。
-                        if crate::handle_assoc::use_mobile_overrides() {
+                        if crate::handle_candidate::cursor_by_syllable() {
                             self.update_candidates(&mut state);
                         }
                         let display = state.preedit.clone();

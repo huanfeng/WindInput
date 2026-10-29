@@ -3354,6 +3354,13 @@ impl EngineManager {
         self.active_engine()?.shuangpin_full_syllable_count(keys)
     }
 
+    /// 活跃拼音引擎下，音节 `syllable` 按模糊音配置展开的等价读音（没开模糊音 / 非拼音 → 空）。
+    pub fn fuzzy_siblings(&self, syllable: &str) -> Vec<String> {
+        self.active_engine()
+            .map(|e| e.fuzzy_siblings(syllable))
+            .unwrap_or_default()
+    }
+
     /// 当前活跃引擎是否为**纯码表**类型（混输 `Mixed` 不算——其拼音半边恒前缀匹配，
     /// 精确匹配语义只对纯码表方案自洽；供协调器判定短语是否随「精确匹配模式」抑制前缀枚举）。
     pub fn is_codetable(&self) -> bool {

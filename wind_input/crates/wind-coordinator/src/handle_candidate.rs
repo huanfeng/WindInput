@@ -2593,13 +2593,14 @@ impl Coordinator {
     /// 手机端的拼音「中间修正」：光标挪到某个音节后面，候选就只剩这个音节（及其前缀）的字，
     /// 选中后上屏、后半截留在编码栏续打（复用分步上屏，见 `partial`）。
     ///
-    /// ⚠️ **只在 Android 生效**（`use_mobile_overrides`）：电脑端 ←/→ 移光标**不改候选**
-    /// 是既有行为（`State::input_cursor_pos` 注释：光标不参与引擎查询），不能被手机需求顺带改掉。
-    /// 将来电脑端要开，把这里的门换成配置项即可，下游无需再动。
+    /// ⚠️ **默认关**（[`cursor_by_syllable`]）：电脑端 ←/→ 移光标**不改候选**是既有行为
+    /// （`State::input_cursor_pos` 注释：光标不参与引擎查询）。这是给电脑端「移光标改拼音」准备的
+    /// 机制，打开它之前不会改变任何现有行为；手机端不走它，用 [`crate::leading_reading`]。
+    /// 电脑端接入时只需调 [`set_cursor_by_syllable`]（由配置项驱动），下游无需再动。
     /// 仅限普通输入的拼音方案；overlay 模式（临时拼音等）与码表方案不进。
     fn query_cut(&self, state: &State) -> Option<usize> {
         cut_position(
-            crate::handle_assoc::use_mobile_overrides(),
+            cursor_by_syllable(),
             &state.input_buffer,
             state.input_cursor_pos,
             Self::overlay_caret_parts(state).is_none() && self.engine_mgr.is_pinyin(),
@@ -2619,6 +2620,14 @@ impl Coordinator {
         state: &mut State,
         limit: usize,
     ) -> (usize, InputOutcome) {
+        // 手机端「首单元读法」：选了非默认读法时，按改写后的查询串问引擎（见 `leading_reading`）。
+        if let Some(applied) = state
+            .leading
+            .clone()
+            .filter(|a| a.buffer == state.input_buffer)
+        {
+            return self.build_candidates_with_leading(state, limit, &applied);
+        }
         let Some(cut) = self.query_cut(state) else {
             return self.build_candidates(state, limit);
         };
@@ -8786,6 +8795,18 @@ pub(crate) fn tail_after_letters(body: &str, letters: usize) -> String {
         }
     }
     String::new()
+}
+
+static CURSOR_BY_SYLLABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 打开 / 关闭「拼音按音节移光标、候选只查光标前一段」。默认关；电脑端的配置项接入时调用。
+pub fn set_cursor_by_syllable(on: bool) {
+    CURSOR_BY_SYLLABLE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn cursor_by_syllable() -> bool {
+    CURSOR_BY_SYLLABLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// [`Coordinator::query_cut`] 的判据（纯函数，便于测试）：只有手机端、光标严格落在编码中间

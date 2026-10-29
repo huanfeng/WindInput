@@ -5333,6 +5333,16 @@ impl Engine for PinyinEngine {
             .len()
     }
 
+    fn fuzzy_siblings(&self, syllable: &str) -> Vec<String> {
+        if !self.fuzzy_config.any_enabled() {
+            return Vec::new();
+        }
+        fuzzy::FuzzyMatcher::fuzzy_variants(syllable, &self.fuzzy_config)
+            .into_iter()
+            .filter(|v| v != syllable && syllable::STANDARD_SYLLABLES.contains(&v.as_str()))
+            .collect()
+    }
+
     fn shuangpin_full_syllable_count(&self, keys: &str) -> Option<usize> {
         self.shuangpin.as_ref()?.full_syllable_count(keys)
     }
