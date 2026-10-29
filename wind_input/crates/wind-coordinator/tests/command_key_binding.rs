@@ -322,6 +322,27 @@ fn session_toggle_tip_follows_highlight() {
     assert_eq!(coord.debug_hover_target(), -1, "再按一次收起");
 }
 
+/// 绑在 → 上：编码区光标不在末尾时照旧右移光标，到末尾才开关提示（t372）。
+#[test]
+fn toggle_tip_on_right_moves_caret_before_end() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        for (k, v) in [("left", "caret_left"), ("right", "toggle_tip")] {
+            c.keys.session_actions.insert(k.into(), v.into());
+        }
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(0x25, 0)); // ← 光标退到 a|b
+    assert_eq!(coord.debug_hover_target(), -1, "前提：无悬停");
+
+    let act = coord.handle_key_event(&key(0x27, 0)); // → 光标回到末尾，不开提示
+    assert!(matches!(act, KeyAction::Consumed), "应吞键，实际 {act:?}");
+    assert_eq!(coord.debug_hover_target(), -1, "光标没到末尾前 → 只移光标");
+
+    coord.handle_key_event(&key(0x27, 0)); // 已在末尾 → 开提示
+    assert_eq!(coord.debug_hover_target(), 0, "末尾的 → 开提示");
+}
+
 /// 会话态命令**不要候选**：打了码没候选时也能按（网址模式是「有会话、无候选」的天然样本）。
 #[test]
 fn session_key_runs_command_without_candidates() {

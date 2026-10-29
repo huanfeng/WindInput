@@ -5976,7 +5976,25 @@ impl Coordinator {
             }
             // 悬停提示开关：把悬停目标设为高亮项（再按一次清掉），其余全走鼠标悬停那条通路。
             // 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
+            //
+            // 绑在 → 上时（t372）：编码区光标不在末尾，→ 照旧右移光标；到了末尾才开关提示。
+            // 只在主路判（overlay 各有自己的光标与 → 臂，同 `CaretRight`）。
             wind_config::SessionAction::ToggleTip => {
+                if data.key_code == keymap::VK_RIGHT
+                    && state.active.is_none()
+                    && Self::has_input_session(state)
+                {
+                    let moved = preedit_cursor::BufEdit::new_cased(
+                        &mut state.input_buffer,
+                        &mut state.input_cursor_pos,
+                        &mut state.input_buffer_cased,
+                    )
+                    .move_right();
+                    if moved {
+                        self.notify_ui_update(state);
+                        return Some(KeyAction::Consumed);
+                    }
+                }
                 let per_page = self.per_page(state.active);
                 let flat = match state.grid_top {
                     Some(top) => state.current_page.saturating_sub(top) * per_page,
