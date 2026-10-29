@@ -44,7 +44,10 @@ mkdir -p "$WORK_DIR" "$OUT_DIR"
     cargo build --release)
 
 # ── addon ──
-cmake -S "$SRC_DIR/wind_linux" -B "$WORK_DIR/cmake" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+# addon 的版本（fcitx5 输入法列表里的 `Version=`）与产品版本同源。不传就落回
+# project(wind_linux VERSION 0.1.0)，与 Nix 包（nix/addon.nix 传同一个值）显示的版本不一致。
+cmake -S "$SRC_DIR/wind_linux" -B "$WORK_DIR/cmake" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr -DWIND_ADDON_VERSION="$APP_VERSION"
 cmake --build "$WORK_DIR/cmake"
 S="$WORK_DIR/stage/pkg"
 rm -rf "$S"

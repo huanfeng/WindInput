@@ -47,6 +47,10 @@
   Fcitx5 输入法引擎的形式工作；`sudo apt install ./WindInput-*.deb` 安装后，在「Fcitx5 配置」中
   把清风输入法加入输入法列表。系统输入法框架需为 Fcitx5，KDE Plasma 等桌面的额外设置与已知限制见
   [wind_linux/README.md](wind_linux/README.md)
+- **Linux（Nix / NixOS）** — 仓库自带 flake：NixOS 把 `windinput` 包加进
+  `i18n.inputMethod.fcitx5.addons`，其它发行版 `nix profile install github:huanfeng/WindInput#windinput`
+  后把该包加进 Fcitx5 的 addon 目录。构建产物、用法与限制见
+  [docs/design/nix-packaging.md](docs/design/nix-packaging.md)
 
 Windows 版的程序文件与安装包已做数字签名；SmartScreen 需要下载量积累信誉，新版本发布初期
 仍可能拦截，按提示「更多信息 → 仍要运行」继续即可。macOS 版尚未做苹果签名与公证，被
@@ -66,6 +70,7 @@ Gatekeeper 拦下时到「系统设置 → 隐私与安全性」放行。
 | `wind_tsf` | C++ | Windows TSF 输入法框架接口，键盘事件捕获 |
 | `wind_macos` | Swift | macOS IMKit 输入法客户端 |
 | `wind_linux` | C++ | Linux Fcitx5 addon（预览版，见 [wind_linux/README.md](wind_linux/README.md)） |
+| `flake.nix` + `nix/` | Nix | Linux 端的 Nix 打包（服务 + addon + 设置程序 + 词库数据，见 [docs/design/nix-packaging.md](docs/design/nix-packaging.md)） |
 
 发布版安装包还需要以下配套项目，它们在各自的独立仓库中维护：
 
@@ -92,6 +97,9 @@ wind-ui-rust；只有 wind-setting 是 path 依赖（`windui = { path = "../wind
 - **macOS**：Rust stable + Xcode（Swift 5.9+），运行 `scripts/mac/dev.sh`
 - **Linux（交叉编译 Windows 产物）**：`scripts/dev.sh`
 - **Linux（Fcitx5 前端，预览版）**：构建、安装与已知限制见 [wind_linux/README.md](wind_linux/README.md)
+- **Linux（Nix，任意发行版 / NixOS）**：`nix build .#windinput`；开发环境 `nix develop`。
+  词库数据同样在 Nix 内构建（等价于 gen-data），细节见
+  [docs/design/nix-packaging.md](docs/design/nix-packaging.md)
 
 构建脚本会自动下载第三方词库数据并生成完整的数据目录。详细说明见
 [贡献指南](CONTRIBUTING.md)。

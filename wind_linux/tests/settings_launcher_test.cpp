@@ -4,6 +4,16 @@
 
 #include <cstdlib>
 
+// 设置程序的默认路径是编译期宏（打包到非 /usr 前缀时由构建系统注入）。断言按**可失败的性质**
+// 写，别跟宏逐字比：`argv[0]` 与宏同源，`CHECK_EQ(argv[0], WIND_SETTING_PATH)` 恒真。
+// 性质 = 绝对路径 + 末段是 wind_setting —— 注入 store 路径后仍成立，而指向服务、写成相对路径、
+// 丢了文件名都会失败。
+#ifdef WIND_SETTING_PATH
+#define WIND_SETTING_PATH_INJECTED 1
+#else
+#define WIND_SETTING_PATH_INJECTED 0
+#endif
+
 using namespace windlinux;
 
 using Args = std::vector<std::string>;
@@ -47,7 +57,15 @@ int main()
     CASE("argv[0] 恒为设置程序路径；信封内容只进参数位");
     unsetenv("WIND_INPUT_SETTING");
     auto argv = settingsArgv({"/bin/sh", "-c", "evil"});
-    CHECK_EQ(argv[0], std::string("/usr/lib/windinput/wind_setting"));
+    const std::string prog = argv[0];
+    CHECK(!prog.empty() && prog[0] == '/');
+    const std::string tail = "/wind_setting";
+    CHECK(prog.size() >= tail.size() &&
+          prog.compare(prog.size() - tail.size(), tail.size(), tail) == 0);
+#if !WIND_SETTING_PATH_INJECTED
+    // 没注入 = deb / 源码构建：默认值必须是发行布局里那一份（打包脚本按这个路径安装）。
+    CHECK_EQ(prog, std::string("/usr/lib/windinput/wind_setting"));
+#endif
     CHECK_EQ(argv.size(), size_t(4));
     CHECK_EQ(argv[1], std::string("/bin/sh"));
 
