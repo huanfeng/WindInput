@@ -840,7 +840,11 @@ function Verify-DistData ([string]$outdir = $BuildDir) {
         @{ Path = "schemas\aux_code\stroke.txt";     Min = 500000 },
         @{ Path = "schemas\aux_code\flypy_full.txt"; Min = 50000 },
         # 笔画方案词库同为 gen_aux_code 生成物; 全拼默认辅助码经 schema:stroke 引用它
-        @{ Path = "schemas\stroke\stroke.dict.yaml"; Min = 500000 }
+        @{ Path = "schemas\stroke\stroke.dict.yaml"; Min = 500000 },
+        # 内置中英释义注释词库 (comment_dicts\build.py 生成物): 生成失败在组装时只 Warn,
+        # 缺了出厂详细态没有英文 / 中文释义且无任何报错。实测 en_zh 约 527KB、zh_en 约 4.3MB
+        @{ Path = "schemas\comments\en_zh.txt"; Min = 300000 },
+        @{ Path = "schemas\comments\zh_en.txt"; Min = 3000000 }
     )
     Say "`n校验发布数据完整性 → $data"
     foreach ($c in $checks) {

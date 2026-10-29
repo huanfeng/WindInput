@@ -1101,6 +1101,10 @@ verify_dist_data() {
     _check_min "schemas/wubi86/wubi86_jidian_extra_district.dict.yaml" 10000
     # 笔画方案词库同为 gen_aux_code 生成物; 全拼默认辅助码经 schema:stroke 引用它
     _check_min "schemas/stroke/stroke.dict.yaml"                       500000
+    # 内置中英释义注释词库 (comment_dicts/build.py 生成物): 生成失败在组装时只 warn,
+    # 缺了出厂详细态没有英文 / 中文释义且无任何报错。实测 en_zh 约 527KB、zh_en 约 4.3MB
+    _check_min "schemas/comments/en_zh.txt"                            300000
+    _check_min "schemas/comments/zh_en.txt"                            3000000
     local oc; oc=$(ls "$data/opencc"/*.octrie 2>/dev/null | wc -l | tr -d ' ')
     if (( oc < 1 )); then err "  ✗ 缺失: opencc/*.octrie (简繁转换编译失败)"; ok=0
     else info "  ✓ opencc/*.octrie ($oc 个)"; fi

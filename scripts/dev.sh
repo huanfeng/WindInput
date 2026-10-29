@@ -1345,6 +1345,10 @@ verify_dist_data() {
         # 笔画方案词库同为 gen_aux_code 生成物（实测约 1MB）；全拼默认辅助码经 schema:stroke
         # 引用它，缺了则笔画方案与全拼辅助码都用不了，且用户只看得到「没反应」
         "schemas/stroke/stroke.dict.yaml|500000"
+        # 内置中英释义注释词库（comment_dicts/build.py 生成物）：生成失败在组装时只 warn，
+        # 缺了出厂详细态没有英文 / 中文释义且无任何报错。实测 en_zh 约 527KB、zh_en 约 4.3MB
+        "schemas/comments/en_zh.txt|300000"
+        "schemas/comments/zh_en.txt|3000000"
     )
     say "\n校验发布数据完整性 → $data"
     local entry path min sz
