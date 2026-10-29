@@ -33,7 +33,6 @@ f1 = 'command:ime.toggle("candwin")'   # 候选中按 F1 执行命令（示例�
 f2 = "toggle_tip"
 ```
 
-## 未做
+## 后续
 
-- 空闲态（无会话）的功能键绑定：单键不能进热键表（会被 TSF 当热键吞掉，宿主的 F1 帮助等全失效），需 C++ 侧配合，另案。
-- 字母键（u / v / i）作空闲引导键：见看板 C2-117，需方案级设计。
+空闲态裸 F1–F12 与拼音方案级字母引导键见 [idle-function-keys-and-letter-leads.md](idle-function-keys-and-letter-leads.md)。
