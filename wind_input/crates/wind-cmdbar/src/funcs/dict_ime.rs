@@ -11,7 +11,7 @@ use crate::registry::FuncSpec;
 pub fn specs() -> Vec<FuncSpec> {
     func_specs! {
         "dict.add"        : Dict    (1, 2) effect => fn_dict_add,    "把文本加入用户词库; code 可选, 不传时按当前方案规则推导", "dict.add(clip())";
-        "dict.rev"        : Dict    (1, 2) pure   => fn_dict_rev,    "反查文本中某个字的编码与读音; n 为第几个字 (1 起, 默认 1), 超出字数返回空串", "dict.rev(clip())"
+        "dict.rev"        : Dict    (1, 2) pure   => fn_dict_rev,    "反查文本的编码与读音; 省略 n 时整串查 (词/字皆可), 给了 n 则取第 n 个字 (1 起), 越界返回空串", "dict.rev(clip())"
             named(fn_dict_rev_named, "format" = "版式模板, 同候选注释段语法; 变量 ${char}/${code_rev_all}(全部码位)/${code_rev}(仅全码)/${code_schema}(本方案击键)/${pinyin}/${chaizi}/${chaizi_code}/${dict}; 省略='${char}: ${code_rev_all} ${pinyin}'");
         "ime.toggle"      : Ime     (1, 1) effect => fn_ime_toggle,  "切换 IME 状态 (cn-en / fullshape / layout / candwin / s2t / t2s / preedit / toolbar)；数据开关 emoji / emoji:<模块id> / dict:<注释库id>", "ime.toggle(\"cn-en\")";
         "ime.set"         : Ime     (2, 2) effect => fn_ime_set,     "把开关设为指定状态, 已是该状态则只提示不动作; target 为输入状态 (cn-en / fullshape / s2t / t2s / toolbar; cn-en 的 on=中文) 或数据开关 (emoji / emoji:<模块id> / dict:<注释库id>), 状态 on/off (也认 true/false、1/0、开/关)", "ime.set(\"emoji:frost_greek\", \"on\")";
@@ -53,10 +53,20 @@ fn fn_dict_rev(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
     fn_dict_rev_named(ctx, args, &[])
 }
 
-/// `dict.rev(text, n, format="…")`：取 `text` 的第 n 个字（1 起，默认 1）交宿主反查。
+/// `dict.rev(text, n, format="…")`：反查 `text` 的编码与读音。
 ///
-/// 本层**只负责挑字与填默认模板**，渲染在宿主侧（见
-/// [`EvalContext::reverse_lookup`](crate::context::EvalContext::reverse_lookup)）。
+/// 两种用法，**按给没给 `n`** 分工：
+///
+/// - **省略 `n`** —— 整串原样交宿主（出厂 `cofc` 写的就是 `dict.rev(clip())`）。复制
+///   「好吧」查的是「好吧」**这个词**在码表里的码，复制单字自然落回单字。剪贴板反查的
+///   主场就是这个：用户从别处复制来的可能是一个字，也可能是一个词。
+/// - **给了 `n`** —— 取第 n 个字（1 起）：`dict.rev(clip(), 1..N)` 是 `$SS` 逐字展开的
+///   原子操作（写法见 `data/system.phrases.toml` 里 `cofc` 的注释块）。
+///
+/// 本层**只负责挑不挑字与填默认模板**，渲染在宿主侧（见
+/// [`EvalContext::reverse_lookup`](crate::context::EvalContext::reverse_lookup)）。那边收的
+/// 本就是任意文本、并按**词条**查主码表反向索引（`word_codes_display` / `codetable_reverse_hint`），
+/// 故整串这条路不需要宿主做任何改动。
 ///
 /// # 越界与非法 n 一律返回空串而不报错
 ///
@@ -66,22 +76,14 @@ fn fn_dict_rev(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
 /// 落空，由短语层的空串守卫丢掉它。
 ///
 /// `n` 本身写错（非数字）仍然报错——那是词条作者的笔误，不是运行时的正常输入。
+///
+/// 整串模式下「查不到」（文本不是码表词条、纯空白、反查索引尚未建好）同样返回空串，
+/// 由词条的 `default(…, "提示语")` 接住，见 `docs/design/clipboard-reverse-lookup.md`。
 fn fn_dict_rev_named(
     ctx: &dyn EvalContext,
     args: &[String],
     named: &[(String, String)],
 ) -> Result<String> {
-    let n = match args.get(1) {
-        Some(s) => parse_arg_int("dict.rev", s)?,
-        None => 1,
-    };
-    if n < 1 {
-        return Ok(String::new());
-    }
-    // 按 rune 取字：扩展区汉字走代理对，按字节索引会切在半个字上。
-    let Some(ch) = args[0].chars().nth((n - 1) as usize) else {
-        return Ok(String::new());
-    };
     // 空 format 视同省略：`format=""` 多半是词条拼错，退回默认版式比产出空串好查。
     let format = named
         .iter()
@@ -89,6 +91,25 @@ fn fn_dict_rev_named(
         .map(|(_, v)| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_REV_FORMAT);
+    // ★ 省略 n ⇒ 整串反查。宿主按词条查码表反向索引，故「好吧」拿到的是这个词的码，
+    // 单字文本自然落回单字。查不到返回空串（`reverse_render` 的 found 判据），
+    // 由词条的 `default(...)` 回落成提示语。
+    let Some(n) = args.get(1) else {
+        // 纯空白（只复制了个换行）：反查必然空，提前挡掉，免得 `${char}` 把空白
+        // 回显成一条「有内容」的候选。
+        if args[0].trim().is_empty() {
+            return Ok(String::new());
+        }
+        return Ok(ctx.reverse_lookup(&args[0], format));
+    };
+    let n = parse_arg_int("dict.rev", n)?;
+    if n < 1 {
+        return Ok(String::new());
+    }
+    // 按 rune 取字：扩展区汉字走代理对，按字节索引会切在半个字上。
+    let Some(ch) = args[0].chars().nth((n - 1) as usize) else {
+        return Ok(String::new());
+    };
     let mut buf = [0u8; 4];
     Ok(ctx.reverse_lookup(ch.encode_utf8(&mut buf), format))
 }
@@ -302,12 +323,39 @@ mod tests {
         assert!(rec.0.lock().unwrap().is_empty(), "认不出的状态不该调用宿主");
     }
 
-    /// 省略 n 取第 1 个字；省略 format 填默认版式。
+    /// ★ 省略 n ⇒ **整串**反查：复制「好吧」查的是「好吧」这个词，不是它的第一个字。
+    ///
+    /// 这是剪贴板反查的主行为（出厂 `cofc` 就写 `dict.rev(clip())`）。宿主拿整串按词条查
+    /// 主码表反向索引，故命中词条时拿到的是词码；单字文本自然落回单字。
     #[test]
-    fn rev_defaults_to_first_char_and_default_format() {
+    fn rev_defaults_to_whole_text_with_default_format() {
         let ctx = rev_echo_ctx();
-        let out = fn_dict_rev(&ctx, &["好人".to_string()]).unwrap();
+        let out = fn_dict_rev(&ctx, &["好吧".to_string()]).unwrap();
+        assert_eq!(out, format!("好吧|{DEFAULT_REV_FORMAT}"));
+        // 单字也一样走整串，只是整串恰好一个字。
+        assert_eq!(
+            fn_dict_rev(&ctx, &["好".to_string()]).unwrap(),
+            format!("好|{DEFAULT_REV_FORMAT}")
+        );
+    }
+
+    /// 给了 n 就回到「取第 n 个字」：`$SS` 逐字展开依赖它，不能被整串语义吃掉。
+    #[test]
+    fn explicit_n_still_picks_that_char() {
+        let ctx = rev_echo_ctx();
+        let out = fn_dict_rev(&ctx, &["好吧".to_string(), "1".to_string()]).unwrap();
         assert_eq!(out, format!("好|{DEFAULT_REV_FORMAT}"));
+        let out = fn_dict_rev(&ctx, &["好吧".to_string(), "2".to_string()]).unwrap();
+        assert_eq!(out, format!("吧|{DEFAULT_REV_FORMAT}"));
+    }
+
+    /// 纯空白文本（只复制了个换行）在整串模式下直接空串，不回显出一条只有 `: ` 的候选。
+    #[test]
+    fn whole_text_blank_yields_empty() {
+        let ctx = rev_echo_ctx();
+        for t in ["", "   ", "\n", "\t "] {
+            assert_eq!(fn_dict_rev(&ctx, &[t.to_string()]).unwrap(), "", "{t:?}");
+        }
     }
 
     /// n 按 **rune** 定位，不是字节：扩展区汉字走代理对，按字节索引会切在半个字上。

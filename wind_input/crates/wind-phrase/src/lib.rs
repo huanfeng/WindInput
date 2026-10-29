@@ -1177,11 +1177,11 @@ mod tests {
             is_system: true,
             category: String::new(),
         }]);
-        let clip = |_n: i64| "好人".to_string();
-        // 只认「好」，借此模拟「这个字查不到」。
+        let clip = |_n: i64| "好吧".to_string();
+        // 整串反查：只认「好吧」，借此模拟「这个词查不到」。
         let reverse = |text: &str, _fmt: &str| {
-            if text == "好" {
-                "好: vbg hǎo".to_string()
+            if text == "好吧" {
+                "好吧: hbba hǎo ba".to_string()
             } else {
                 String::new()
             }
@@ -1192,7 +1192,7 @@ mod tests {
         };
         let hits = layer.lookup_at("cofc", fixed(), &[], &host, &PhraseScope::ALL);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].text, "好: vbg hǎo");
+        assert_eq!(hits[0].text, "好吧: hbba hǎo ba");
         assert!(
             hits[0].command_src.is_none(),
             "无动作短语：display 即上屏文本，不该被当成命令候选"
