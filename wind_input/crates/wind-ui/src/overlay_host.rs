@@ -155,8 +155,10 @@ pub(crate) fn toast_anchor_code(p: ToastPosition) -> u32 {
 }
 
 /// 状态气泡跟随光标的落位（纯几何）。与 Windows `StatusTip::show` 同一公式：左对齐于
-/// 光标、光标底端下方 `gap` 处叠加用户偏移；下方放不下时上翻到光标顶端上方（不叠偏移）。
-/// `caret_bottom` 是光标底端，`caret_h` 光标高。
+/// 光标、首选侧（`above` 时光标顶端上方，否则底端下方）`gap` 处叠加用户偏移；首选侧放不下时
+/// 翻到另一侧（不叠偏移）。`caret_bottom` 是光标底端，`caret_h` 光标高。
+///
+/// ⚠ 宿主的 `FLIP` 只在**下溢**时改用备选点：首选上方而上方越出工作区时，宿主只会把它夹到上沿。
 pub(crate) fn status_caret_place(
     caret_x: i32,
     caret_bottom: i32,
@@ -164,13 +166,21 @@ pub(crate) fn status_caret_place(
     offset: (i32, i32),
     content_h: u32,
     gap: i32,
+    above: bool,
 ) -> Place {
     let x = caret_x + offset.0;
+    let below = caret_bottom + gap;
+    let top = caret_bottom - caret_h.max(0) - content_h as i32 - gap;
+    let (y, alt_y) = if above {
+        (top + offset.1, below)
+    } else {
+        (below + offset.1, top)
+    };
     Place::Flip {
         x,
-        y: caret_bottom + gap + offset.1,
+        y,
         alt_x: x,
-        alt_y: caret_bottom - caret_h.max(0) - content_h as i32 - gap,
+        alt_y,
     }
 }
 
@@ -321,7 +331,21 @@ pub(crate) struct Overlays {
     status: Option<StatusTip>,
     toast: Option<Toast>,
     theme: Option<Box<wind_theme::Resolved>>,
+    /// 候选窗建议落点的内容盒（宿主坐标单位），没显示为 `None`。跟随光标的状态泡避让它。
+    cand_rect: Option<crate::status_tip::Rect4>,
+    /// 最近一次状态泡的参数与到期时刻（`None` = 常驻）：候选窗出现 / 挪动时按它重新落位。
+    last_status: Option<LastStatus>,
 }
+
+/// 最近一次状态泡：`(文本, 光标 x, 光标行顶, 光标高, 定位, 到期时刻)`。
+type LastStatus = (
+    String,
+    i32,
+    i32,
+    i32,
+    StatusTipPlacement,
+    Option<std::time::Instant>,
+);
 
 /// 可带进后台线程的 Toast 入口：SHM 共享，渲染器在使用线程上现建（截图是偶发动作，
 /// 建一个渲染器的成本淹没在剪贴板外部命令里）。
@@ -400,7 +424,44 @@ impl Overlays {
             status,
             toast,
             theme: None,
+            cand_rect: None,
+            last_status: None,
         }
+    }
+
+    /// 候选窗内容盒（`None` = 收起）。变了而跟随光标的状态泡还在显示，就按原参数重新落位，
+    /// 到期时刻不变（见 docs/design/status-tip-avoid-candidates.md）。
+    pub(crate) fn set_candidate_rect(
+        &mut self,
+        sink: &dyn HostRenderSink,
+        r: Option<crate::status_tip::Rect4>,
+    ) {
+        if self.cand_rect == r {
+            return;
+        }
+        self.cand_rect = r;
+        if let Some(s) = &mut self.status {
+            s.set_candidate_rect(r);
+        }
+        let Some((text, x, top, h, placement, until)) = self.last_status.clone() else {
+            return;
+        };
+        if !matches!(placement, StatusTipPlacement::Caret { .. })
+            || !self.is_shown(OVERLAY_KIND_STATUS)
+        {
+            return;
+        }
+        let dur = match until {
+            None => 0,
+            Some(t) => {
+                let left = t.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return;
+                }
+                left.as_millis().max(1) as u64
+            }
+        };
+        self.show_status(sink, &text, x, top, h, dur, placement);
     }
 
     pub(crate) fn toast_handle(&self) -> ToastHandle {
@@ -453,6 +514,15 @@ impl Overlays {
         duration_ms: u64,
         placement: StatusTipPlacement,
     ) {
+        self.last_status = Some((
+            text.to_string(),
+            x,
+            caret_top,
+            caret_h,
+            placement,
+            (duration_ms > 0)
+                .then(|| std::time::Instant::now() + std::time::Duration::from_millis(duration_ms)),
+        ));
         let ov = self
             .status
             .as_mut()
@@ -511,7 +581,7 @@ mod tests {
     #[test]
     fn caret_place_below_with_offset_and_flip_above_without() {
         // 光标底 120、高 20；偏移 (5, 7)；内容高 30；gap 4。
-        let p = status_caret_place(100, 120, 20, (5, 7), 30, 4);
+        let p = status_caret_place(100, 120, 20, (5, 7), 30, 4, false);
         assert_eq!(
             p,
             Place::Flip {
@@ -519,6 +589,20 @@ mod tests {
                 y: 131,
                 alt_x: 105,
                 alt_y: 120 - 20 - 30 - 4
+            }
+        );
+    }
+
+    #[test]
+    fn caret_place_above_puts_offset_on_top_and_flips_below() {
+        let p = status_caret_place(100, 120, 20, (5, 7), 30, 4, true);
+        assert_eq!(
+            p,
+            Place::Flip {
+                x: 105,
+                y: 120 - 20 - 30 - 4 + 7,
+                alt_x: 105,
+                alt_y: 124
             }
         );
     }

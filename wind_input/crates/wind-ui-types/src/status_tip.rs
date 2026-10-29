@@ -30,13 +30,20 @@ impl StatusTipAnchor {
 
 /// 气泡怎么定位。与 `ShowStatusTip` 顶层的光标坐标配合使用：
 ///
-/// - `Caret`：光标下方（下方放不下上翻），叠加用户偏移；
+/// - `Caret`：光标下方（`above` 时光标上方），放不下翻到另一侧，挡住候选窗时避让；叠加用户偏移；
 /// - `Fixed`：内容左上屏幕坐标；`(0,0)` = 尚未摆过，由渲染端落到**光标所在屏**（故仍需光标）；
 /// - `Anchor`：锚点，不读光标（渲染端取不到前台窗口时才拿光标选屏）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusTipPlacement {
-    Caret { offset_x: i32, offset_y: i32 },
-    Fixed { x: i32, y: i32 },
+    Caret {
+        offset_x: i32,
+        offset_y: i32,
+        above: bool,
+    },
+    Fixed {
+        x: i32,
+        y: i32,
+    },
     Anchor(StatusTipAnchor),
 }
 

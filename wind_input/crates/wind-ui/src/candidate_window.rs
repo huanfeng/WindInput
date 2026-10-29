@@ -427,6 +427,9 @@ pub struct CandidateWindow {
     /// 上次内容锚点屏幕坐标 (px, py)：每帧 place_window 算出新位置后与之比较，微移(<4px*scale)则
     /// 保持原位以抑制宿主 caret 抖动（位置保护）。隐藏时清空，下次组合重新落位。
     last_content_pos: Option<(i32, i32)>,
+    /// 最近一帧内容盒的屏幕矩形 `(left, top, right, bottom)`（不含阴影扩边，宿主坐标单位），
+    /// 隐藏时清空。状态提示泡跟随光标时避让它，见 [`Self::screen_rect`]。
+    content_rect: Option<(i32, i32, i32, i32)>,
     /// 本地窗口当前在屏上的几何 (x, y, w, h)，None = 不在屏上。上屏去重的基线，见 [`plan_present`]。
     #[cfg(windows)]
     presented: Option<(i32, i32, u32, u32)>,
@@ -597,6 +600,7 @@ impl CandidateWindow {
             caret_height: 0,
             caret_valid: false,
             last_content_pos: None,
+            content_rect: None,
             #[cfg(windows)]
             presented: None,
             text_renderer,
@@ -1959,6 +1963,13 @@ impl CandidateWindow {
         } else {
             (shadow.as_ref().map(|s| s.blur).unwrap_or(0.0) / scale).round() as i32
         };
+        let content_top = py + clear_l;
+        self.content_rect = Some((
+            px,
+            content_top,
+            px + ((width - ml - mr) as f32 / scale).round() as i32,
+            content_top + ((height - mt - mb) as f32 / scale).round() as i32,
+        ));
         Some(RenderedFrame {
             // 图像含四向 margin(device)，其屏幕左上(逻辑点) = 内容锚点 − 左/上 margin/scale
             //（纵向再 +可见浓阴影下移，让阴影落在 caret 下方）。
@@ -2142,6 +2153,12 @@ impl CandidateWindow {
         //    重显」都会多减一次阴影，窗口逐次漂移；
         // 2. 拖动中按内容矩形钳制，让可见内容能真正贴到屏幕边缘（含任务栏）。
         self.mouse.borrow_mut().margin = (ml as i32, mt as i32, mr as i32, mb as i32);
+        self.content_rect = Some((
+            screen_x + ml as i32,
+            screen_y + mt as i32,
+            screen_x + width as i32 - mr as i32,
+            screen_y + height as i32 - mb as i32,
+        ));
         Some(RenderedFrame {
             screen_x,
             screen_y,
@@ -4534,6 +4551,7 @@ impl CandidateWindow {
             self.pixel_release.hidden(Instant::now());
         }
         self.visible = false;
+        self.content_rect = None;
         self.last_content_pos = None; // 组合结束，下次显示重新落位
         self.placed_above = false; // 清除上方粘滞，下次组合按下方默认重新判定
         self.report_flip_state(); // 粘滞一清，反转随之失效，须立刻让协调器跟上
@@ -4633,6 +4651,11 @@ impl CandidateWindow {
 
     pub fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    /// 显示中的候选窗内容盒屏幕矩形 `(left, top, right, bottom)`；没显示为 `None`。
+    pub fn screen_rect(&self) -> Option<(i32, i32, i32, i32)> {
+        self.content_rect.filter(|_| self.visible)
     }
 
     /// 当前鼠标悬停项（页内下标；翻页器 tag 或 -1=无）。host 分流写帧时作 rendered_hover_index。

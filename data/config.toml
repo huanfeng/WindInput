@@ -1608,6 +1608,9 @@ position_mode = "follow_caret"
 # 光标坐标拿不到时放哪（只在 follow_caret 下生效）：last（最近一次有效位置）/ hide（不显示）/
 # 上面 7 个锚点之一。给 Illustrator 这类不报光标坐标的应用用锚点，气泡就不会停在别处。
 fallback_position = "last"
+# 跟随光标时的默认位置：below（光标下方）/ above（光标上方）。放不下翻到另一侧；
+# 挡住候选窗时自动避让：先换到光标另一侧，还挡就贴到候选窗外侧。
+caret_side = "below"
 offset_x = 0
 offset_y = 0
 custom_x = 0

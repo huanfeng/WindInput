@@ -744,6 +744,7 @@ static REGISTRY: &[ConfigField] = &[
         "ui.status.fallback_position",
         Enum(&crate::app_compat::STATUS_FALLBACK_POSITIONS),
     ),
+    f("ui.status.caret_side", Enum(&["below", "above"])),
     f("ui.status.offset_x", Int),
     f("ui.status.offset_y", Int),
     f("ui.status.custom_x", Int),

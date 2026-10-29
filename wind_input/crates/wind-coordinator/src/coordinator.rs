@@ -8809,7 +8809,13 @@ impl Coordinator {
         };
         // 定位：固定坐标 / 锚点 / 跟随光标（坐标不可信时按兜底）。规则优先回落全局。
         let placement = match forced.or_else(|| {
-            Self::placement_for(self.status_position(), raw_valid, si.offset_x, si.offset_y)
+            Self::placement_for(
+                self.status_position(),
+                raw_valid,
+                si.offset_x,
+                si.offset_y,
+                si.caret_above(),
+            )
         }) {
             Some(p) => p,
             None => {

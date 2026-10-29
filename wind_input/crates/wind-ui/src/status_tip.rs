@@ -250,7 +250,13 @@ pub struct StatusTip {
     /// 气泡当前是否可见。只为识别「不可见 → 可见」这一沿，好在那一刻重采悬停基线，
     /// 见 [`StatusTip::mark_visible`]。用 `Cell` 是因为 [`StatusTip::hide`] 取 `&self`。
     visible: Cell<bool>,
+    /// 候选窗此刻的屏幕矩形 `(left, top, right, bottom)`，没显示为 `None`。跟随光标时避让它，
+    /// 由管理器在候选窗显示 / 隐藏时设置（见 [`Self::set_candidate_rect`]）。
+    cand_rect: Option<Rect4>,
 }
+
+/// 屏幕矩形 `(left, top, right, bottom)`。
+pub(crate) type Rect4 = (i32, i32, i32, i32);
 
 impl StatusTip {
     /// 无主题时的兜底字号（逻辑像素），与候选窗主题默认一致。
@@ -291,6 +297,7 @@ impl StatusTip {
             base_logical: Self::DEFAULT_FONT_PX,
             mouse,
             visible: Cell::new(false),
+            cand_rect: None,
         })
     }
 
@@ -308,6 +315,11 @@ impl StatusTip {
             self.mouse.borrow_mut().reset_hover();
         }
         self.visible.set(true);
+    }
+
+    /// 候选窗的屏幕矩形（`None` = 没显示）。跟随光标落位时避让它，见 `docs/design/status-tip-avoid-candidates.md`。
+    pub fn set_candidate_rect(&mut self, r: Option<Rect4>) {
+        self.cand_rect = r;
     }
 
     /// DPI 动态化：按显示点所在显示器实时取缩放，变化则更新字号并按新缩放重解析主题几何。
@@ -453,7 +465,17 @@ impl StatusTip {
 
     /// 显示提示文本：左对齐于光标、默认在光标下方（下方不足则上翻），加用户偏移。
     /// `cy` 为光标底端，`caret_h` 为光标高度（上翻定位用）。
-    pub fn show(&mut self, text: &str, cx: i32, cy: i32, caret_h: i32, off_x: i32, off_y: i32) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn show(
+        &mut self,
+        text: &str,
+        cx: i32,
+        cy: i32,
+        caret_h: i32,
+        off_x: i32,
+        off_y: i32,
+        above: bool,
+    ) {
         self.ensure_scale(cx, cy);
         let s = self.scale;
         let (cw, ch, ml, mt) = self.render_bubble(text);
@@ -464,13 +486,20 @@ impl StatusTip {
             return;
         }
         drop(m);
-        // 左对齐于光标、默认光标下方（下方不足上翻），叠加用户偏移；按工作区钳位。
-        // 左对齐而非居中：气泡宽度随 items 勾选项与方案名长度变化，居中会让左边缘随文本
-        // 长短左右横跳；左对齐把左边缘钉在 caret 上，且与候选窗 place_window 同基准。
+        // 左对齐于光标、默认光标下方（或上方，放不下翻到另一侧），挡住候选窗时避让，叠加用户偏移；
+        // 按工作区钳位。左对齐而非居中：气泡宽度随 items 勾选项与方案名长度变化，居中会让左边缘随
+        // 文本长短左右横跳；左对齐把左边缘钉在 caret 上，且与候选窗 place_window 同基准。
         let gap = (4.0 * s).round() as i32;
-        let x = cx + off_x;
-        let y = cy + gap + off_y;
-        let (px, py) = clamp_below_or_above(x, y, cw, ch, cy, caret_h, gap);
+        let (px, py) = clamp_caret_tip(
+            cx + off_x,
+            cy,
+            caret_h,
+            (cw, ch),
+            gap,
+            off_y,
+            above,
+            self.cand_rect,
+        );
         // 基线采样刻意排在 `show` **之前**：窗口出现不会移动鼠标，两处取值物理上相同，
         // 但排在前面就完全不依赖「`show` 内部不会泵到 WM_MOUSEMOVE」这个前提。
         self.mark_visible();
@@ -529,9 +558,11 @@ impl StatusTip {
         placement: StatusTipPlacement,
     ) {
         match placement {
-            StatusTipPlacement::Caret { offset_x, offset_y } => {
-                self.show(text, x, y, caret_h, offset_x, offset_y)
-            }
+            StatusTipPlacement::Caret {
+                offset_x,
+                offset_y,
+                above,
+            } => self.show(text, x, y, caret_h, offset_x, offset_y, above),
             StatusTipPlacement::Fixed { x: fx, y: fy } => self.show_fixed(text, fx, fy, x, y),
             StatusTipPlacement::Anchor(a) => self.show_anchor(text, a, x, y),
         }
@@ -595,6 +626,7 @@ impl StatusTip {
     /// host-render：将状态气泡渲染到 BGRA buffer 并计算屏幕坐标（光标下方/上方）。
     /// 返回 `(bgra, w, h, screen_x, screen_y, software_shadow)`；text 为空返回 None。
     #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
     pub fn render_frame(
         &mut self,
         text: &str,
@@ -603,6 +635,7 @@ impl StatusTip {
         caret_h: i32,
         off_x: i32,
         off_y: i32,
+        above: bool,
     ) -> Option<(Vec<u8>, u32, u32, i32, i32, bool)> {
         if text.is_empty() {
             return None;
@@ -611,10 +644,17 @@ impl StatusTip {
         let s = self.scale;
         let (buf, w, h, cw, ch, ml, mt, has_shadow) = self.render_bubble_to_bgra(text);
         let gap = (4.0 * s).round() as i32;
-        // 与 `show` 同一定位公式（左对齐于光标），两条渲染路径必须一致。
-        let x = cx + off_x;
-        let y = cy + gap + off_y;
-        let (px, py) = clamp_below_or_above(x, y, cw, ch, cy, caret_h, gap);
+        // 与 `show` 同一定位公式（左对齐于光标、避让候选窗），两条渲染路径必须一致。
+        let (px, py) = clamp_caret_tip(
+            cx + off_x,
+            cy,
+            caret_h,
+            (cw, ch),
+            gap,
+            off_y,
+            above,
+            self.cand_rect,
+        );
         Some((buf, w, h, px - ml as i32, py - mt as i32, has_shadow))
     }
 
@@ -672,9 +712,11 @@ impl StatusTip {
         placement: StatusTipPlacement,
     ) -> Option<(Vec<u8>, u32, u32, i32, i32, bool)> {
         match placement {
-            StatusTipPlacement::Caret { offset_x, offset_y } => {
-                self.render_frame(text, x, y, caret_h, offset_x, offset_y)
-            }
+            StatusTipPlacement::Caret {
+                offset_x,
+                offset_y,
+                above,
+            } => self.render_frame(text, x, y, caret_h, offset_x, offset_y, above),
             StatusTipPlacement::Fixed { x: fx, y: fy } => {
                 self.render_frame_fixed(text, fx, fy, x, y)
             }
@@ -702,14 +744,52 @@ impl StatusTip {
         let s = self.scale;
         let (buf, w, h, cw, ch, ml, mt, has_shadow) = self.render_bubble_to_bgra(text);
         let place = match placement {
-            StatusTipPlacement::Caret { offset_x, offset_y } => ol::status_caret_place(
-                x,
-                caret_bottom,
-                caret_h,
-                (offset_x, offset_y),
-                ol::to_host(ch as f32, s) as u32,
-                ol::to_host(4.0 * s, s),
-            ),
+            StatusTipPlacement::Caret {
+                offset_x,
+                offset_y,
+                above,
+            } => {
+                let content = (
+                    ol::to_host(cw as f32, s) as u32,
+                    ol::to_host(ch as f32, s) as u32,
+                );
+                let gap = ol::to_host(4.0 * s, s);
+                let flip = ol::status_caret_place(
+                    x,
+                    caret_bottom,
+                    caret_h,
+                    (offset_x, offset_y),
+                    content.1,
+                    gap,
+                    above,
+                );
+                // 挡住候选窗：按候选窗**建议**落点算避让位置，交宿主随候选窗实际落点平移
+                // （候选窗被宿主翻到光标上方时，提示泡跟着走）。没挡住就照旧翻转落位。
+                let avoid = self.cand_rect.map(|c| {
+                    place_caret_tip(
+                        x + offset_x,
+                        caret_bottom,
+                        caret_h,
+                        content,
+                        gap,
+                        offset_y,
+                        above,
+                        Some(c),
+                        None,
+                    )
+                });
+                match (avoid, flip) {
+                    (Some((ax, ay)), ol::Place::Flip { y, .. }) if ay != y => {
+                        ol::Place::FollowCandidate {
+                            x: ax,
+                            y: ay,
+                            alt_x: ax,
+                            alt_y: ay,
+                        }
+                    }
+                    (_, flip) => flip,
+                }
+            }
             StatusTipPlacement::Fixed { x: fx, y: fy } => {
                 ol::status_fixed_place(fx, fy, x, caret_bottom)
             }
@@ -856,14 +936,67 @@ fn fixed_anchor(fx: i32, fy: i32, caret_x: i32, caret_y: i32, cw: u32, ch: u32) 
     crate::sys::clamp_to_work_area(ax, ay, cw, ch)
 }
 
-/// [`clamp_below_or_above`] 的纯几何内核：在给定工作区 `bounds` 内定位气泡。
+/// 跟随光标的落位（纯几何），返回内容盒左上。规则见 `docs/design/status-tip-avoid-candidates.md`：
+/// 依次试「首选侧 → 光标另一侧 → 候选窗外侧」，取第一个放得下（不出 `bounds`）且不与候选窗
+/// `cand` 相交的；都不行退回首选侧并钳进 `bounds`（下方放不下翻上方、两边都放不下贴下沿，
+/// 与引入避让前一致）。`x` 已含水平偏移；`off_y` 只加在首选侧。`bounds` 为 `None`（外部宿主
+/// 拿不到屏幕几何）时只看候选窗。
 ///
-/// 抽出来是为了可测——原实现整段埋在 `#[cfg(windows)]` + unsafe 里，Linux CI 上一行都跑不到。
-/// 要锁住的性质是**坐标不得假设桌面原点为 (0,0)**：主显示器左上角才是虚拟桌面原点，
+/// 抽出来是为了可测——平台取工作区的部分埋在 `#[cfg(windows)]` + unsafe 里，Linux CI 上跑不到。
+/// 要锁住的性质之一是**坐标不得假设桌面原点为 (0,0)**：主显示器左上角才是虚拟桌面原点，
 /// 摆在主屏左侧/上方的副屏工作区坐标为负，任何 `max(0)` 都会把气泡推回主屏
 /// （见本模块测试 `left_monitor_negative_x_survives`）。
-// 非 Windows 下唯一的调用者在 `#[cfg(windows)]` 分支里，非 test 构建会判其为 dead_code。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_caret_tip(
+    x: i32,
+    caret_bottom: i32,
+    caret_h: i32,
+    size: (u32, u32),
+    gap: i32,
+    off_y: i32,
+    above: bool,
+    cand: Option<Rect4>,
+    bounds: Option<Rect4>,
+) -> (i32, i32) {
+    let (w, h) = (size.0 as i32, size.1 as i32);
+    let caret_top = caret_bottom - caret_h.max(0);
+    let below_y = caret_bottom + gap + if above { 0 } else { off_y };
+    let above_y = caret_top - h - gap + if above { off_y } else { 0 };
+    let x = match bounds {
+        Some((l, _, r, _)) => x.min(r - w).max(l),
+        None => x,
+    };
+    let mut tries = if above {
+        vec![above_y, below_y]
+    } else {
+        vec![below_y, above_y]
+    };
+    if let Some((_, ct, _, cb)) = cand {
+        let (outside_below, outside_above) = (cb + gap, ct - gap - h);
+        if ct + cb >= caret_top + caret_bottom {
+            tries.extend([outside_below, outside_above]);
+        } else {
+            tries.extend([outside_above, outside_below]);
+        }
+    }
+    let fits = |y: i32| bounds.is_none_or(|(_, t, _, b)| y >= t && y + h <= b);
+    let clear =
+        |y: i32| cand.is_none_or(|(l, t, r, b)| x + w <= l || x >= r || y + h <= t || y >= b);
+    if let Some(&y) = tries.iter().find(|&&y| fits(y) && clear(y)) {
+        return (x, y);
+    }
+    if let Some(&y) = tries[..2].iter().find(|&&y| fits(y)) {
+        return (x, y);
+    }
+    let y = match bounds {
+        Some((_, t, _, b)) => tries[0].min(b - h).max(t),
+        None => tries[0],
+    };
+    (x, y)
+}
+
+/// 旧的「下方优先」入口，只剩测试用：等价于不避让、首选下方的 [`place_caret_tip`]。
+#[cfg(test)]
 fn place_below_or_above(
     x: i32,
     y_below: i32,
@@ -873,41 +1006,52 @@ fn place_below_or_above(
     gap: i32,
     bounds: (i32, i32, i32, i32),
 ) -> (i32, i32) {
-    let (bl, bt, br, bb) = bounds;
-    let (wi, hi) = (size.0 as i32, size.1 as i32);
-    let (mut nx, mut ny) = (x, y_below);
-    // 下方放不下 → 上翻到光标上方；上方也放不下则贴工作区下沿。
-    if ny + hi > bb {
-        let above = caret_y - caret_h.max(0) - hi - gap;
-        ny = if above >= bt { above } else { bb - hi };
-    }
-    if nx + wi > br {
-        nx = br - wi;
-    }
-    if nx < bl {
-        nx = bl;
-    }
-    if ny < bt {
-        ny = bt;
-    }
-    (nx, ny)
+    let off_y = y_below - caret_y - gap;
+    place_caret_tip(
+        x,
+        caret_y,
+        caret_h,
+        size,
+        gap,
+        off_y,
+        false,
+        None,
+        Some(bounds),
+    )
 }
 
-/// 把气泡钳制在光标所在显示器工作区：默认 (x, y_below)；下方放不下则上翻到光标上方
-/// （光标顶端 = caret_y - caret_h）；左右越界贴边。返回内容盒左上屏幕坐标。
+/// 跟随光标落位：取光标所在显示器工作区，交 [`place_caret_tip`]。
 ///
 /// 显示器按 **caret 点**反查（`MONITOR_DEFAULTTONEAREST`），故天然跟随光标所在屏；
-/// 查不到工作区时原样返回，**不得**再做任何以 0 为下界的兜底钳制。
-#[cfg_attr(not(windows), allow(unused_variables))]
-fn clamp_below_or_above(
+/// 查不到工作区时只按候选窗避让，**不得**再做任何以 0 为下界的兜底钳制。
+#[allow(clippy::too_many_arguments)]
+fn clamp_caret_tip(
     x: i32,
-    y_below: i32,
-    w: u32,
-    h: u32,
-    caret_y: i32,
+    caret_bottom: i32,
     caret_h: i32,
+    size: (u32, u32),
     gap: i32,
+    off_y: i32,
+    above: bool,
+    cand: Option<Rect4>,
 ) -> (i32, i32) {
+    let bounds = work_area_at(x, caret_bottom);
+    place_caret_tip(
+        x,
+        caret_bottom,
+        caret_h,
+        size,
+        gap,
+        off_y,
+        above,
+        cand,
+        bounds,
+    )
+}
+
+/// 点 `(x, y)` 所在显示器的工作区；非 Windows 或查不到为 `None`。
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn work_area_at(x: i32, y: i32) -> Option<Rect4> {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::POINT;
@@ -915,27 +1059,18 @@ fn clamp_below_or_above(
             GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
         };
         unsafe {
-            let pt = POINT { x, y: caret_y };
-            let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            let mon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
             let mut mi = MONITORINFO {
                 cbSize: std::mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
             };
             if GetMonitorInfoW(mon, &mut mi).as_bool() {
                 let wa = mi.rcWork;
-                return place_below_or_above(
-                    x,
-                    y_below,
-                    (w, h),
-                    caret_y,
-                    caret_h,
-                    gap,
-                    (wa.left, wa.top, wa.right, wa.bottom),
-                );
+                return Some((wa.left, wa.top, wa.right, wa.bottom));
             }
         }
     }
-    (x, y_below)
+    None
 }
 
 impl StatusTip {
@@ -1040,7 +1175,7 @@ mod place_tests {
     //! `MonitorFromPoint` + `rcWork` 算对的结果又拍回非负象限。摆在主屏左侧/上方的副屏
     //! 坐标整块为负，于是气泡被吸到主屏边缘——多显示器下的「气泡永远在主屏」。
     //! 同一病灶本仓在工具栏上踩过一次（`corner_in_work_area` 内明令禁止 `max(0)`）。
-    use super::place_below_or_above;
+    use super::{place_below_or_above, place_caret_tip};
 
     /// 主屏（虚拟桌面原点）与摆在它**左侧**的副屏。副屏工作区 x 全为负数——
     /// 这正是 `max(0)` 会把气泡整块吸回主屏的那种布局。
@@ -1051,6 +1186,78 @@ mod place_tests {
 
     const TIP: (u32, u32) = (120, 34);
     const GAP: i32 = 4;
+
+    /// 光标底 500、高 20（顶 480）；候选窗在光标下方 (300, 504)–(900, 560)。
+    const CARET_B: i32 = 500;
+    const CARET_H: i32 = 20;
+    const CAND_BELOW: (i32, i32, i32, i32) = (300, 504, 900, 560);
+    const CAND_ABOVE: (i32, i32, i32, i32) = (300, 424, 900, 476);
+
+    fn tip(
+        above: bool,
+        cand: Option<(i32, i32, i32, i32)>,
+        bounds: Option<(i32, i32, i32, i32)>,
+    ) -> (i32, i32) {
+        place_caret_tip(300, CARET_B, CARET_H, TIP, GAP, 0, above, cand, bounds)
+    }
+
+    const BELOW_Y: i32 = CARET_B + GAP;
+    const ABOVE_Y: i32 = CARET_B - CARET_H - 34 - GAP;
+
+    #[test]
+    fn caret_side_picks_the_preferred_side_without_candidates() {
+        assert_eq!(tip(false, None, Some(MAIN)), (300, BELOW_Y));
+        assert_eq!(tip(true, None, Some(MAIN)), (300, ABOVE_Y));
+    }
+
+    /// 候选窗在下方挡住首选的下方：换到光标上方。首选上方本就不挡，照旧。
+    #[test]
+    fn candidate_below_pushes_tip_above_the_caret() {
+        assert_eq!(tip(false, Some(CAND_BELOW), Some(MAIN)), (300, ABOVE_Y));
+        assert_eq!(tip(true, Some(CAND_BELOW), Some(MAIN)), (300, ABOVE_Y));
+    }
+
+    /// 候选窗被翻到光标上方：首选下方不挡，照旧下方。
+    #[test]
+    fn candidate_above_leaves_tip_below() {
+        assert_eq!(tip(false, Some(CAND_ABOVE), Some(MAIN)), (300, BELOW_Y));
+        assert_eq!(tip(true, Some(CAND_ABOVE), Some(MAIN)), (300, BELOW_Y));
+    }
+
+    /// 光标贴着屏幕上沿（上方放不下）、候选窗在下方：贴到候选窗下沿外。
+    #[test]
+    fn no_room_above_goes_outside_the_candidate_window() {
+        let top_caret =
+            |cand| place_caret_tip(300, 30, 20, TIP, GAP, 0, false, Some(cand), Some(MAIN));
+        assert_eq!(top_caret((300, 34, 900, 90)), (300, 90 + GAP));
+    }
+
+    /// 提示泡与候选窗左右不重叠时不算挡住。
+    #[test]
+    fn horizontally_disjoint_candidate_does_not_count() {
+        assert_eq!(
+            tip(false, Some((1000, 504, 1400, 560)), Some(MAIN)),
+            (300, BELOW_Y)
+        );
+    }
+
+    /// 外部宿主没有屏幕几何：只按候选窗判，照样换到上方。
+    #[test]
+    fn without_bounds_only_the_candidate_window_matters() {
+        assert_eq!(tip(false, Some(CAND_BELOW), None), (300, ABOVE_Y));
+        assert_eq!(tip(false, None, None), (300, BELOW_Y));
+    }
+
+    /// 偏移只加在首选侧：换到另一侧时不叠。
+    #[test]
+    fn offset_applies_to_the_preferred_side_only() {
+        let p = |above, cand| {
+            place_caret_tip(300, CARET_B, CARET_H, TIP, GAP, 7, above, cand, Some(MAIN))
+        };
+        assert_eq!(p(false, None), (300, BELOW_Y + 7));
+        assert_eq!(p(true, None), (300, ABOVE_Y + 7));
+        assert_eq!(p(false, Some(CAND_BELOW)), (300, ABOVE_Y));
+    }
 
     /// ★ 左侧副屏：负的 x/y 必须原样保留，绝不能被钳到 0（那会跳回主屏）。
     #[test]

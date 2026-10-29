@@ -6707,6 +6707,10 @@ pub struct StatusIndicatorConfig {
     /// [`crate::app_compat::STATUS_FALLBACK_POSITIONS`]；读取请走 [`Self::fallback`]（写错回落 last）。
     #[serde(default = "default_status_fallback_position")]
     pub fallback_position: String,
+    /// follow_caret 下的默认位置："below"（光标下方，默认）| "above"（光标上方）。放不下翻到另一侧；
+    /// 与候选窗重叠时自动避让（见 docs/design/status-tip-avoid-candidates.md）。读取请走 [`Self::caret_above`]。
+    #[serde(default = "default_status_caret_side")]
+    pub caret_side: String,
     /// follow_caret 下相对默认位置（光标下方、左边缘对齐光标）的水平偏移（像素，正=右）。
     #[serde(default)]
     pub offset_x: i32,
@@ -6751,6 +6755,9 @@ fn default_status_position_mode() -> String {
 fn default_status_fallback_position() -> String {
     "last".to_string()
 }
+fn default_status_caret_side() -> String {
+    "below".to_string()
+}
 
 impl StatusIndicatorConfig {
     /// 解析后的定位方式；值域外的字符串回落出厂默认（跟随光标）——字段是自由字符串，
@@ -6758,6 +6765,11 @@ impl StatusIndicatorConfig {
     pub fn position(&self) -> crate::app_compat::StatusPositionMode {
         crate::app_compat::StatusPositionMode::from_config(&self.position_mode)
             .unwrap_or(crate::app_compat::StatusPositionMode::FollowCaret)
+    }
+
+    /// 默认位置是不是光标上方；值域外的字符串按出厂（下方）。
+    pub fn caret_above(&self) -> bool {
+        self.caret_side.eq_ignore_ascii_case("above")
     }
 
     /// 解析后的兜底位置；值域外的字符串回落出厂默认（`last`）。
@@ -6777,6 +6789,7 @@ impl Default for StatusIndicatorConfig {
             schema_name_style: default_schema_name_style(),
             position_mode: default_status_position_mode(),
             fallback_position: default_status_fallback_position(),
+            caret_side: default_status_caret_side(),
             offset_x: 0,
             offset_y: 0,
             custom_x: 0,

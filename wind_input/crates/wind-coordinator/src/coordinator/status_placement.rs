@@ -91,8 +91,13 @@ impl Coordinator {
         raw_valid: bool,
         offset_x: i32,
         offset_y: i32,
+        above: bool,
     ) -> Option<StatusTipPlacement> {
-        let caret = StatusTipPlacement::Caret { offset_x, offset_y };
+        let caret = StatusTipPlacement::Caret {
+            offset_x,
+            offset_y,
+            above,
+        };
         match pos.mode {
             StatusPositionMode::Fixed => Some(StatusTipPlacement::Fixed { x: pos.x, y: pos.y }),
             StatusPositionMode::Anchor(a) => Some(StatusTipPlacement::Anchor(ui_anchor(a))),
@@ -242,6 +247,7 @@ mod tests {
     const CARET: StatusTipPlacement = StatusTipPlacement::Caret {
         offset_x: 3,
         offset_y: 4,
+        above: false,
     };
 
     fn caret_data(x: i32, y: i32, height: i32, source: i32) -> CaretData {
@@ -270,7 +276,7 @@ mod tests {
         };
         let anchor = StatusTipPlacement::Anchor(StatusTipAnchor::ScreenTopRight);
         let a = StatusAnchor::ScreenTopRight;
-        let p = |mode, fb, valid| Coordinator::placement_for(pos(mode, fb), valid, 3, 4);
+        let p = |mode, fb, valid| Coordinator::placement_for(pos(mode, fb), valid, 3, 4, false);
         // 坐标可信：follow_caret 一律跟随光标，兜底不参与。
         assert_eq!(p(M::FollowCaret, F::Hide, true), Some(CARET));
         assert_eq!(p(M::FollowCaret, F::Anchor(a), true), Some(CARET));

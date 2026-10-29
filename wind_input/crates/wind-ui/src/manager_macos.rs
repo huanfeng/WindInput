@@ -1032,6 +1032,8 @@ impl Forwarder {
                 let ov = self.win.render_tooltip_overlay(sx, sy);
                 self.overlays.show_tooltip(&*self.sink, ov);
                 self.visible = true;
+                let rect = self.win.screen_rect();
+                self.overlays.set_candidate_rect(&*self.sink, rect);
                 tracing::debug!(
                     "forwarder pushed host-render frame seq={} {}x{} at ({},{}) scale={}",
                     seq,
@@ -1057,6 +1059,7 @@ impl Forwarder {
             &*self.sink,
             wind_ipc::protocol::overlay::OVERLAY_KIND_TOOLTIP,
         );
+        self.overlays.set_candidate_rect(&*self.sink, None);
         if let Some(shm) = self.shm.as_mut() {
             let seq = shm.write_hidden();
             self.sink
@@ -2078,6 +2081,7 @@ mod tests {
                 StatusTipPlacement::Caret {
                     offset_x: 3,
                     offset_y: 4,
+                    above: false,
                 },
             );
             let m = overlays(&cap, OVERLAY_KIND_STATUS);
@@ -2095,6 +2099,58 @@ mod tests {
             assert_eq!((hdr.width, hdr.height), (m.w, m.h));
             let px = &shm.pixels()[..(m.w * m.h * 4) as usize];
             assert!(px.chunks(4).any(|p| p[3] > 0), "位图不能是全透明");
+        }
+
+        fn caret_status(f: &mut Forwarder) {
+            f.handle(UiCommand::ShowStatusTip {
+                text: "注释:详细".into(),
+                x: 100,
+                y: 200,
+                caret_height: 20,
+                duration_ms: 1500,
+                placement: StatusTipPlacement::Caret {
+                    offset_x: 0,
+                    offset_y: 0,
+                    above: false,
+                },
+            });
+        }
+
+        /// 候选窗显示中弹跟随光标的状态泡：避让到光标上方，交宿主随候选窗实际落点平移。
+        #[test]
+        fn status_tip_avoids_a_visible_candidate_window() {
+            use wind_ipc::protocol::overlay::OVERLAY_PLACE_FOLLOW_CANDIDATE;
+            let cap = Arc::new(Mutex::new(Vec::new()));
+            let (mut f, _ev) = mk(cap.clone(), "_lo_av1");
+            show_two_fixed(&mut f, false, 0, 0);
+            caret_status(&mut f);
+            let m = overlays(&cap, OVERLAY_KIND_STATUS);
+            let m = m.last().expect("应推出状态泡");
+            assert_eq!(m.place, OVERLAY_PLACE_FOLLOW_CANDIDATE);
+            assert!(
+                m.y + m.h as i32 <= 200,
+                "应在光标行顶之上：y={} h={}",
+                m.y,
+                m.h
+            );
+        }
+
+        /// 状态泡先弹、候选窗后出现：按原参数重新落位一次，剩余时长不超过原时长。
+        #[test]
+        fn status_tip_replaces_when_candidates_appear_later() {
+            use wind_ipc::protocol::overlay::OVERLAY_PLACE_FOLLOW_CANDIDATE;
+            let cap = Arc::new(Mutex::new(Vec::new()));
+            let (mut f, _ev) = mk(cap.clone(), "_lo_av2");
+            caret_status(&mut f);
+            assert_eq!(
+                overlays(&cap, OVERLAY_KIND_STATUS)[0].place,
+                OVERLAY_PLACE_FLIP
+            );
+            show_two_fixed(&mut f, false, 0, 0);
+            let m = overlays(&cap, OVERLAY_KIND_STATUS);
+            assert_eq!(m.len(), 2, "候选窗出现后重推一帧");
+            assert_eq!(m[1].place, OVERLAY_PLACE_FOLLOW_CANDIDATE);
+            assert!(m[1].duration > 0 && m[1].duration <= 1500);
         }
 
         #[test]
