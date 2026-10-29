@@ -19,11 +19,35 @@ pub enum CommentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwitchKey {
-    /// F1（出厂）。不走修饰键单击判定：生效时补进会话按键表（见
+    /// 不用切换键（只靠按键绑定、命令栏切换）。
+    None,
+    /// 功能键 F1（出厂）–F12。不走修饰键单击判定：生效时补进会话按键表（见
     /// [`crate::Config::effective_session_actions`]），有候选时按下即切换。
     #[default]
     #[serde(rename = "f1")]
     F1,
+    #[serde(rename = "f2")]
+    F2,
+    #[serde(rename = "f3")]
+    F3,
+    #[serde(rename = "f4")]
+    F4,
+    #[serde(rename = "f5")]
+    F5,
+    #[serde(rename = "f6")]
+    F6,
+    #[serde(rename = "f7")]
+    F7,
+    #[serde(rename = "f8")]
+    F8,
+    #[serde(rename = "f9")]
+    F9,
+    #[serde(rename = "f10")]
+    F10,
+    #[serde(rename = "f11")]
+    F11,
+    #[serde(rename = "f12")]
+    F12,
     /// 左右任一 Ctrl。
     Ctrl,
     #[serde(rename = "lctrl")]
@@ -39,7 +63,7 @@ pub enum SwitchKey {
 }
 
 impl SwitchKey {
-    /// 该修饰键虚拟键码（0xA2 LCtrl / 0xA3 RCtrl / 0xA4 LAlt / 0xA5 RAlt）是否属于本切换键；F1 恒 false。
+    /// 该修饰键虚拟键码（0xA2 LCtrl / 0xA3 RCtrl / 0xA4 LAlt / 0xA5 RAlt）是否属于本切换键；功能键与 `None` 恒 false。
     pub fn matches_vk(self, vk: u32) -> bool {
         match self {
             SwitchKey::Ctrl => matches!(vk, 0xA2 | 0xA3),
@@ -48,8 +72,31 @@ impl SwitchKey {
             SwitchKey::Alt => matches!(vk, 0xA4 | 0xA5),
             SwitchKey::LAlt => vk == 0xA4,
             SwitchKey::RAlt => vk == 0xA5,
-            SwitchKey::F1 => false,
+            _ => false,
         }
+    }
+
+    /// 功能键在会话按键表里的键名（`f1`..`f12`）；不是功能键为 `None`。
+    pub fn function_key_name(self) -> Option<&'static str> {
+        const NAMES: [&str; 12] = [
+            "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+        ];
+        let i = match self {
+            SwitchKey::F1 => 0,
+            SwitchKey::F2 => 1,
+            SwitchKey::F3 => 2,
+            SwitchKey::F4 => 3,
+            SwitchKey::F5 => 4,
+            SwitchKey::F6 => 5,
+            SwitchKey::F7 => 6,
+            SwitchKey::F8 => 7,
+            SwitchKey::F9 => 8,
+            SwitchKey::F10 => 9,
+            SwitchKey::F11 => 10,
+            SwitchKey::F12 => 11,
+            _ => return None,
+        };
+        Some(NAMES[i])
     }
 
     pub fn is_ctrl(self) -> bool {
@@ -65,6 +112,9 @@ impl SwitchKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwitchMode {
+    /// 只在内部用：注释关着、或切换键是「无」时的生效档。不是配置值（不用切换键就把
+    /// `switch_key` 设成 `none`），配置里写了也解析不出、按出厂处理。
+    #[serde(skip)]
     Off,
     #[default]
     Session,
@@ -781,7 +831,7 @@ mod tests {
         assert_eq!(cell(&a.by_type, "english"), (s("none"), s("en_zh")));
         assert_eq!(cell(&a.mode, "temp_english"), (s("none"), s("en_zh")));
         assert_eq!(cell(&a.mode, "temp_pinyin"), (s("code"), s("chaizi_code")));
-        assert_eq!(cell(&a.mode, MIX_ALL_MODE), (s("code"), None));
+        assert_eq!(cell(&a.mode, MIX_ALL_MODE), (s("none"), s("none")));
         let all = std::iter::once(&a.global)
             .chain(a.by_type.values())
             .chain(a.schema.values())
@@ -832,7 +882,9 @@ mod tests {
     #[test]
     fn switch_key_parses_all_values_and_matches_vk() {
         for (name, key, vks) in [
+            ("none", SwitchKey::None, vec![]),
             ("f1", SwitchKey::F1, vec![]),
+            ("f12", SwitchKey::F12, vec![]),
             ("ctrl", SwitchKey::Ctrl, vec![0xA2, 0xA3]),
             ("lctrl", SwitchKey::LCtrl, vec![0xA2]),
             ("rctrl", SwitchKey::RCtrl, vec![0xA3]),
@@ -849,6 +901,20 @@ mod tests {
             assert_eq!(key.is_ctrl(), name.ends_with("ctrl"));
         }
         assert!(!SwitchKey::Ctrl.matches_vk(0x41));
+    }
+
+    #[test]
+    fn function_keys_name_their_session_key_and_off_is_not_a_config_value() {
+        assert_eq!(SwitchKey::F1.function_key_name(), Some("f1"));
+        assert_eq!(SwitchKey::F12.function_key_name(), Some("f12"));
+        assert_eq!(SwitchKey::Ctrl.function_key_name(), None);
+        assert_eq!(SwitchKey::None.function_key_name(), None);
+        let c: UiCommentConfig = toml::from_str("switch_mode = \"off\"").unwrap();
+        assert_eq!(
+            c.switch_mode,
+            SwitchMode::Session,
+            "off 不再是配置值，按出厂处理"
+        );
     }
 
     #[test]
@@ -1294,7 +1360,8 @@ mod tests {
             ("mode:temp_english", T, "en_zh", "mode:temp_english"),
             ("mode:temp_pinyin", D, "code", "mode:temp_pinyin"),
             ("mode:temp_pinyin", T, "chaizi_code", "mode:temp_pinyin"),
-            ("mode:mix", D, "code", "mode:mix"),
+            ("mode:mix", D, "none", "mode:mix"),
+            ("mode:mix", T, "none", "mode:mix"),
         ] {
             assert_eq!(
                 got(scope, st),

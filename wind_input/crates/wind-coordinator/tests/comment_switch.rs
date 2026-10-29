@@ -330,7 +330,7 @@ fn alt_switch_off_or_comment_disabled_passes_through() {
         return;
     }
     let mut off = cfg();
-    off.ui.comment.switch_mode = SwitchMode::Off;
+    off.ui.comment.switch_key = SwitchKey::None;
     let mut disabled = cfg();
     disabled.ui.comment.enabled = false;
     for cfg in [off, disabled] {
@@ -495,13 +495,13 @@ fn ctrl_key_up_is_whitelisted_for_tsf() {
         );
     }
     let mut off = ctrl_cfg();
-    off.ui.comment.switch_mode = SwitchMode::Off;
+    off.ui.comment.switch_key = SwitchKey::None;
     let (c, _rx) = open(off);
     assert!(
         !c.debug_key_up_hotkeys()
             .iter()
             .any(|h| matches!(h & 0xFFFF, VK_LCONTROL | VK_RCONTROL)),
-        "off 档不登记"
+        "切换键为无不登记"
     );
 }
 

@@ -167,11 +167,13 @@ pub(crate) const COMMENT_CELL_KEYS: &[&str] = &[
 pub(crate) const COMMENT_STATE_VALUES: &[&str] = &["default", "detail"];
 
 /// `ui.comment.switch_key` 的值域。⚠️ 与 [`crate::comment_lib::SwitchKey`] 的 serde 名逐项对齐。
-pub(crate) const COMMENT_SWITCH_KEY_VALUES: &[&str] =
-    &["f1", "ctrl", "lctrl", "rctrl", "alt", "lalt", "ralt"];
+pub(crate) const COMMENT_SWITCH_KEY_VALUES: &[&str] = &[
+    "none", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "ctrl",
+    "lctrl", "rctrl", "alt", "lalt", "ralt",
+];
 
 /// `ui.comment.switch_mode` 的值域。⚠️ 与 [`crate::comment_lib::SwitchMode`] 的 serde 名逐项对齐。
-pub(crate) const COMMENT_SWITCH_MODE_VALUES: &[&str] = &["off", "session", "persist", "hold"];
+pub(crate) const COMMENT_SWITCH_MODE_VALUES: &[&str] = &["session", "persist", "hold"];
 
 /// `input.alt_commit` 的值域。⚠️ 与 [`wind_config::config::AltCommit::from_config`] 逐项对齐。
 pub(crate) const ALT_COMMIT_VALUES: &[&str] = &["off", "pinyin", "pinyin_plain", "comment"];

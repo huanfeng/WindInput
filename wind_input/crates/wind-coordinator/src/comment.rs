@@ -1208,9 +1208,9 @@ impl crate::coordinator::Coordinator {
         }
     }
 
-    /// 当前生效的切换方式：注释关了即 `Off`。
+    /// 当前生效的切换方式：注释关了、或切换键是「无」即 `Off`。
     fn comment_switch_mode(c: &wind_config::comment_lib::UiCommentConfig) -> SwitchMode {
-        if c.enabled {
+        if c.enabled && c.switch_key != wind_config::comment_lib::SwitchKey::None {
             c.switch_mode
         } else {
             SwitchMode::Off
@@ -1322,9 +1322,10 @@ impl crate::coordinator::Coordinator {
             return;
         }
         let mut owners: Vec<&str> = Vec::new();
-        // F1 走会话按键表：用户在 session_actions 里自己绑了 F1，那条优先。
-        if c.switch_key == wind_config::comment_lib::SwitchKey::F1
-            && rt.config.keys.session_actions.contains_key("f1")
+        // 功能键走会话按键表：用户在 session_actions 里自己绑了这个键，那条优先。
+        if c.switch_key
+            .function_key_name()
+            .is_some_and(|k| rt.config.keys.session_actions.contains_key(k))
         {
             owners.push("会话绑定（keys.session_actions）");
         }
@@ -3358,8 +3359,8 @@ mod eval_var_tests {
         co.comment_template_for(&cfg, &st, false)
     }
 
-    /// 出厂分配复刻编码来源开关退役前的出厂效果（设计 §13.6）：拼音方案默认不显示编码，
-    /// 码表跟随全局，混输给码表编码，临时拼音与快捷输入给完整回退链——哪怕当前方案是拼音。
+    /// 出厂分配（设计 §13.6）：拼音方案默认不显示编码，码表跟随全局，混输给码表编码，
+    /// 临时拼音给完整回退链——哪怕当前方案是拼音；快捷输入不显示。
     #[test]
     fn factory_assignment_reproduces_retired_code_hint_defaults() {
         assert_eq!(factory_tpl(&["pinyin", "wubi86"], "pinyin", None), "");
@@ -3371,16 +3372,17 @@ mod eval_var_tests {
             factory_tpl(&["wubi86_pinyin", "pinyin"], "wubi86_pinyin", None),
             "${code_hint|code_rev}"
         );
-        for mode in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
-            assert_eq!(
-                factory_tpl(&["pinyin", "wubi86"], "pinyin", mode),
-                "${code_hint|code_rev|shuangpin}",
-                "{mode:?}"
-            );
-        }
+        assert_eq!(
+            factory_tpl(&["pinyin", "wubi86"], "pinyin", Some(ModeKind::TempPinyin)),
+            "${code_hint|code_rev|shuangpin}"
+        );
+        assert_eq!(
+            factory_tpl(&["pinyin", "wubi86"], "wubi86", Some(ModeKind::Mix(0))),
+            ""
+        );
     }
 
-    /// 用户自建的快捷输入没有自己的格，落到通配的 `mode.mix`，拼音方案下仍显示编码。
+    /// 用户自建的快捷输入没有自己的格，落到通配的 `mode.mix`：码表方案下也不显示。
     #[test]
     fn user_mix_mode_falls_back_to_mix_all_cell() {
         let add_mine = |c: &mut Config| {
@@ -3392,11 +3394,11 @@ mod eval_var_tests {
         assert_eq!(
             factory_tpl_with(
                 &["pinyin", "wubi86"],
-                "pinyin",
+                "wubi86",
                 Some(ModeKind::Mix(idx)),
                 add_mine
             ),
-            "${code_hint|code_rev|shuangpin}"
+            ""
         );
     }
 }

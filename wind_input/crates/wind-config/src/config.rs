@@ -5093,21 +5093,21 @@ impl Config {
 impl Config {
     /// 运行时生效的会话态按键表：[`KeysConfig::effective_session_actions`] ⊕ 注释切换键。
     ///
-    /// 注释切换键选 F1 时在这里补一条 `f1` 绑定，转发与分派都走会话按键的现成通路；用户自己
-    /// 在 `session_actions` 里绑过 F1（含 `none`）就让给用户。F1 没有「按住」：`hold` 档按临时切换处理。
+    /// 注释切换键选功能键（F1–F12）时在这里补一条绑定，转发与分派都走会话按键的现成通路；用户自己
+    /// 在 `session_actions` 里绑过这个键（含 `none`）就让给用户。功能键没有「按住」：`hold` 档按临时切换处理。
     /// 设置页读写的仍是存储层的 `keys.session_actions`，补的这条不落盘。
     pub fn effective_session_actions(&self) -> BTreeMap<String, String> {
-        use crate::comment_lib::{SwitchKey, SwitchMode};
+        use crate::comment_lib::SwitchMode;
         let mut out = self.keys.effective_session_actions();
         let c = &self.ui.comment;
-        if c.enabled && c.switch_key == SwitchKey::F1 {
+        if let Some(name) = c.switch_key.function_key_name().filter(|_| c.enabled) {
             let verb = match c.switch_mode {
                 SwitchMode::Off => None,
                 SwitchMode::Persist => Some("comment_state"),
                 SwitchMode::Session | SwitchMode::Hold => Some("comment_state:session"),
             };
             if let Some(v) = verb {
-                out.entry("f1".to_string()).or_insert_with(|| v.to_string());
+                out.entry(name.to_string()).or_insert_with(|| v.to_string());
             }
         }
         out
@@ -11237,9 +11237,9 @@ mod tests {
     }
 
     /// 有效视图是纯函数：多次调用结果一致，且与调用前后的 normalize 无关。
-    /// 注释切换键选 F1 时补进会话按键表；按档位选动词，关掉或用户自己绑了 F1 就不补。
+    /// 注释切换键选功能键时补进会话按键表；按档位选动词，切换键为无、注释关着或用户自己绑了这个键就不补。
     #[test]
-    fn f1_switch_key_joins_session_actions() {
+    fn function_switch_key_joins_session_actions() {
         use crate::comment_lib::{SwitchKey, SwitchMode};
         let f1 = |c: &Config| c.effective_session_actions().get("f1").cloned();
         let mut c = Config::default();
@@ -11249,9 +11249,16 @@ mod tests {
         assert_eq!(f1(&c).as_deref(), Some("comment_state:session"));
         c.ui.comment.switch_mode = SwitchMode::Persist;
         assert_eq!(f1(&c).as_deref(), Some("comment_state"));
-        c.ui.comment.switch_mode = SwitchMode::Off;
-        assert_eq!(f1(&c), None);
         c.ui.comment.switch_mode = SwitchMode::Session;
+        c.ui.comment.switch_key = SwitchKey::None;
+        assert_eq!(f1(&c), None);
+        c.ui.comment.switch_key = SwitchKey::F5;
+        assert_eq!(f1(&c), None);
+        assert_eq!(
+            c.effective_session_actions().get("f5").map(String::as_str),
+            Some("comment_state:session")
+        );
+        c.ui.comment.switch_key = SwitchKey::F1;
         c.keys.session_actions.insert("f1".into(), "none".into());
         assert_eq!(f1(&c).as_deref(), Some("none"), "用户的绑定优先");
         c.keys.session_actions.clear();

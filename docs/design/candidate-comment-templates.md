@@ -129,7 +129,7 @@
 enabled = true                 # 原 ui.candidate.comment_enabled
 state = "default"              # 持久状态：default / detail，按键动词、命令栏、Alt persist 档写回
 switch_key = "ctrl"            # ctrl（出厂）/ lctrl / rctrl / alt / lalt / ralt（§13.1）
-switch_mode = "session"        # off / session（出厂）/ persist / hold
+switch_mode = "session"        # session（出厂）/ persist / hold
 
 # 用户模板（内置模板在 data/system.comments.toml，同 id 时用户版覆盖内置版）
 [[ui.comment.templates]]
@@ -295,6 +295,8 @@ detail_horizontal = "inherit"
   `lrctrl` 选词、`session_actions` 里绑 `lctrl` 都早已可用。
 - 配置拆成两键（未发布，直接改名，不兼容 `alt_switch`）：
   - `ui.comment.switch_key`：`f1`（**出厂**，见下）/ `ctrl`（左右任一）/ `lctrl` / `rctrl` / `alt` / `lalt` / `ralt`；
+    取值另有 `none`（不用切换键）与 `f2`…`f12`；`switch_mode` 不再有 `off`，不用切换键就设 `switch_key = "none"`
+    （维护者 2026-10-29 定：切换方式里留一个「不使用」，与按键总览的绑定容易打架）。
     出厂原为 `ctrl`，真机后改 `f1`（维护者 2026-10-29 定）：单击 Ctrl 与中英切换、选词、组合键的干扰太大。
     F1 不走修饰键单击判定，生效时由 `Config::effective_session_actions` 补一条 `f1` 会话绑定（`session` / `hold`
     → `comment_state:session`，`persist` → `comment_state`），转发与分派复用会话按键通路；用户自己绑了 F1 的优先。
@@ -445,11 +447,11 @@ detail_horizontal = "inherit"
 | 英文 | `none` | `en_zh` |
 | 临时英文 | `none` | `en_zh` |
 | 临时拼音 | `code` | `chaizi_code` |
-| 快捷输入（默认）（`mix`） | `code` | 跟随 |
+| 快捷输入（默认）（`mix`） | `none` | `none` |
 
 码表默认态不覆盖：主路上没有拼音来源候选，`code` 与 `code_hint` 效果相同，让用户改全局时码表方案跟着变。
-临时拼音、快捷输入的默认态显式写 `code`：它们的上级是当前方案，拼音方案下会落到 `none`，
-而退役前它们读自己那份 `auto`。快捷输入写在通配的 `mix` 上，用户自建的快捷输入也覆盖到。
+临时拼音的默认态显式写 `code`：它的上级是当前方案，拼音方案下会落到 `none`。
+快捷输入（通配的 `mix`，用户自建的也覆盖到）两态都 `none`：日期、计算这类候选带注释只是干扰（维护者 2026-10-29 定）。
 
 **迁移**：不做，见 §10。旧版改过这三个开关的用户升级后回到出厂分配，在注释分配里重设。
 

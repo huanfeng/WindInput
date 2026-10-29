@@ -84,7 +84,7 @@ text = "${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}"
 desc = "拆字、拼音、英文释义，取得到的依次显示"
 
 # 出厂分配。编码类变量（code_rev / shuangpin）不再有档位开关，显不显示全看这里分到的模板：
-# 拼音 / 双拼默认不显示，混输给码表编码，临时拼音与快捷输入给完整的编码回退链。
+# 拼音 / 双拼默认不显示，混输给码表编码，临时拼音给完整的编码回退链，快捷输入不显示。
 [assign.global]
 default_horizontal = "code"
 detail_horizontal = "full"
@@ -112,14 +112,16 @@ detail_horizontal = "en_zh"
 default_horizontal = "none"
 detail_horizontal = "en_zh"
 
-# 临时拼音、快捷输入的上级是当前方案（拼音方案下会落到 none），默认态显式写上编码。
-# mode.mix 是快捷输入的默认（界面上叫「快捷输入（默认）」）；单个快捷输入另写 mode."mix:<id>" 覆盖。
+# 临时拼音的上级是当前方案（拼音方案下会落到 none），默认态显式写上编码。
 [assign.mode.temp_pinyin]
 default_horizontal = "code"
 detail_horizontal = "chaizi_code"
 
+# mode.mix 是快捷输入的默认（界面上叫「快捷输入（默认）」）；单个快捷输入另写 mode."mix:<id>" 覆盖。
+# 日期、计算这类候选带注释只是干扰，两态都不显示。
 [assign.mode.mix]
-default_horizontal = "code"
+default_horizontal = "none"
+detail_horizontal = "none"
 
 # 内置注释词库（路径相对数据目录）
 [[dicts]]
