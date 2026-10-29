@@ -31,7 +31,9 @@ pub struct Applied {
 /// 一条读法
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeadingReading {
-    /// 左栏显示的文字，也是写进查询的首单元
+    /// 左栏显示的文字。全拼下与 [`Self::head`] 相同；双拼下显示拼音（`deng`），写进查询的是击键（`dg`）
+    pub label: String,
+    /// 写进查询的首单元形态（全拼是音节 / 声母，双拼是对应的击键）
     pub head: String,
     /// 占原始缓冲的字节数
     pub orig_len: usize,
@@ -90,6 +92,52 @@ pub(crate) fn readings_of(
     out
 }
 
+/// 双拼首单元的读法（纯函数）。首单元是一个击键对，没有「另一种切法」，所以只有三类：
+/// 默认（拼音显示、击键写查询）→ 模糊音兄弟（显示兄弟音节、查询用它对应的击键）→ 只取声母。
+///
+/// - `first_pinyin`：首个击键对转出的全拼音节（`deng`）
+/// - `keys`：原始缓冲，`raw_end`：该音节占的击键字节数
+/// - `siblings`：`(兄弟音节, 它对应的击键)`，击键查不到的调用方已丢掉
+///
+/// 返回 `(label, head, orig_len)`；少于两条 = 没得选，返回空。
+pub(crate) fn sp_readings_of(
+    first_pinyin: &str,
+    keys: &str,
+    raw_end: usize,
+    siblings: &[(String, String)],
+) -> Vec<(String, String, usize)> {
+    if raw_end == 0 || raw_end > keys.len() || !keys.is_char_boundary(raw_end) {
+        return Vec::new();
+    }
+    let default_head = &keys[..raw_end];
+    let mut out: Vec<(String, String, usize)> =
+        vec![(first_pinyin.to_string(), default_head.to_string(), raw_end)];
+    for (label, head) in siblings {
+        if head != default_head && !out.iter().any(|(_, h, _)| h == head) {
+            out.push((label.clone(), head.clone(), raw_end));
+        }
+    }
+    // 只取声母：零声母音节（a/o/e 开头）没有声母可取；声母占一个击键（zh/ch/sh 也是一个键）
+    let initial_len = if first_pinyin.len() >= 2 && matches!(&first_pinyin[..2], "zh" | "ch" | "sh")
+    {
+        2
+    } else {
+        1
+    };
+    let starts_with_vowel = first_pinyin.starts_with(['a', 'o', 'e']);
+    if raw_end > 1 && !starts_with_vowel && first_pinyin.is_char_boundary(initial_len) {
+        out.push((
+            first_pinyin[..initial_len].to_string(),
+            keys[..1].to_string(),
+            1,
+        ));
+    }
+    if out.len() < 2 {
+        out.clear();
+    }
+    out
+}
+
 /// `rest` 是否以一个完整的标准音节开头（空串也算：前缀正好吃完整串）
 fn starts_with_syllable(rest: &str) -> bool {
     rest.is_empty()
@@ -126,18 +174,47 @@ pub(crate) fn unmap_consumed(
 }
 
 impl Coordinator {
-    /// 引擎当前切法下首音节的长度；非全拼 / 拆分串对不回缓冲（双拼）→ `None`
-    fn leading_default_len(&self, buffer: &str) -> Option<usize> {
-        if !self.engine_mgr.is_pinyin() || buffer.is_empty() {
-            return None;
+    /// 首单元的全部读法 `(label, head, orig_len)`，全拼与双拼各走各的；没得选 / 不是拼音 → 空。
+    fn leading_all(&self, buffer: &str) -> Vec<(String, String, usize)> {
+        if buffer.is_empty() || !self.engine_mgr.is_pinyin() {
+            return Vec::new();
+        }
+        if self.engine_mgr.is_shuangpin() {
+            // 双拼：首单元是第一个击键对。拆分串在双拼下是击键切分，不是拼音，不能拿来查音节表
+            let units = self.engine_mgr.shuangpin_units(buffer);
+            let Some((pinyin, start, end)) = units.into_iter().next() else {
+                return Vec::new();
+            };
+            if start != 0 {
+                return Vec::new();
+            }
+            let siblings: Vec<(String, String)> = self
+                .engine_mgr
+                .fuzzy_siblings(&pinyin)
+                .into_iter()
+                .filter_map(|sib| {
+                    let keys = self
+                        .engine_mgr
+                        .shuangpin_code_of_syllables(&[sib.as_str()])?;
+                    Some((sib, keys))
+                })
+                .collect();
+            return sp_readings_of(&pinyin, buffer, end, &siblings);
         }
         let split = self.engine_mgr.convert(buffer, 1).preedit_pinyin;
-        preedit_cursor::syllable_spans(buffer, &split)?
-            .first()
-            .map(|&(_, end)| end)
+        let Some(default_len) = preedit_cursor::syllable_spans(buffer, &split)
+            .and_then(|spans| spans.first().map(|&(_, end)| end))
+        else {
+            return Vec::new();
+        };
+        let siblings = self.engine_mgr.fuzzy_siblings(&buffer[..default_len]);
+        readings_of(buffer, default_len, &siblings)
+            .into_iter()
+            .map(|(head, len)| (head.clone(), head, len))
+            .collect()
     }
 
-    /// 首单元的读法列表（展开页左栏画它）；没得选 / 不是全拼 → 空
+    /// 首单元的读法列表（展开页左栏画它）；没得选 / 不是拼音 → 空
     pub fn leading_readings(&self) -> Vec<LeadingReading> {
         let (buffer, applied) = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -146,23 +223,20 @@ impl Coordinator {
             }
             (st.input_buffer.clone(), st.leading.clone())
         };
-        let Some(default_len) = self.leading_default_len(&buffer) else {
-            return Vec::new();
-        };
-        let siblings = self.engine_mgr.fuzzy_siblings(&buffer[..default_len]);
-        let list = readings_of(&buffer, default_len, &siblings);
         let current = applied
             .filter(|a| a.buffer == buffer)
             .map(|a| (a.head, a.orig_len));
-        list.iter()
+        self.leading_all(&buffer)
+            .into_iter()
             .enumerate()
-            .map(|(i, (head, len))| LeadingReading {
-                head: head.clone(),
-                orig_len: *len,
+            .map(|(i, (label, head, orig_len))| LeadingReading {
                 selected: match &current {
-                    Some((h, l)) => h == head && l == len,
+                    Some((h, l)) => *h == head && *l == orig_len,
                     None => i == 0,
                 },
+                label,
+                head,
+                orig_len,
             })
             .collect()
     }
@@ -295,5 +369,32 @@ mod tests {
         );
         assert_eq!(unmap_consumed(9, 3, 4, 9), 9, "整串");
         assert_eq!(unmap_consumed(0, 3, 4, 9), 0, "0 = 未标注，约定为整串");
+    }
+
+    #[test]
+    fn shuangpin_readings_show_pinyin_but_query_with_keys() {
+        // 小鹤 dg = deng；开了 en/eng 与 an/ang 模糊：兄弟 dang 对应击键 dh
+        let sib = vec![("dang".to_string(), "dh".to_string())];
+        let r = sp_readings_of("deng", "dgfg", 2, &sib);
+        let view: Vec<_> = r
+            .iter()
+            .map(|(l, h, n)| (l.as_str(), h.as_str(), *n))
+            .collect();
+        assert_eq!(view, [("deng", "dg", 2), ("dang", "dh", 2), ("d", "d", 1)]);
+    }
+
+    #[test]
+    fn shuangpin_digraph_initial_is_one_key() {
+        // 小鹤 zh = v：zhong = vs，只取声母显示 zh、查询用击键 v
+        let r = sp_readings_of("zhong", "vsxx", 2, &[]);
+        assert_eq!(r[1], ("zh".to_string(), "v".to_string(), 1));
+    }
+
+    #[test]
+    fn shuangpin_zero_initial_has_no_initial_reading() {
+        // ang 是零声母音节，没有声母可取；也没有兄弟时就没得选
+        assert!(sp_readings_of("ang", "ahxx", 2, &[]).is_empty());
+        let sib = vec![("an".to_string(), "aj".to_string())];
+        assert_eq!(sp_readings_of("ang", "ahxx", 2, &sib).len(), 2);
     }
 }

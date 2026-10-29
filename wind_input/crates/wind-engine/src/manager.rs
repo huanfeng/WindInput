@@ -3354,6 +3354,20 @@ impl EngineManager {
         self.active_engine()?.shuangpin_full_syllable_count(keys)
     }
 
+    /// 活跃双拼引擎把击键串按击键对拆成的音节：`(全拼音节, 击键起, 击键止)`；非双拼 → 空。
+    pub fn shuangpin_units(&self, keys: &str) -> Vec<(String, usize, usize)> {
+        self.active_engine()
+            .map(|e| e.shuangpin_units(keys))
+            .unwrap_or_default()
+    }
+
+    /// 活跃方案是不是双拼（有布局）。
+    pub fn is_shuangpin(&self) -> bool {
+        !self
+            .shuangpin_layout_of(&self.active_schema_id())
+            .is_empty()
+    }
+
     /// 活跃拼音引擎下，音节 `syllable` 按模糊音配置展开的等价读音（没开模糊音 / 非拼音 → 空）。
     pub fn fuzzy_siblings(&self, syllable: &str) -> Vec<String> {
         self.active_engine()

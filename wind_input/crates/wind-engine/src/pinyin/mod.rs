@@ -5333,6 +5333,19 @@ impl Engine for PinyinEngine {
             .len()
     }
 
+    fn shuangpin_units(&self, keys: &str) -> Vec<(String, usize, usize)> {
+        self.shuangpin
+            .as_ref()
+            .map(|c| {
+                c.convert(keys)
+                    .syllables
+                    .into_iter()
+                    .map(|s| (s.pinyin, s.raw_start, s.raw_end))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn fuzzy_siblings(&self, syllable: &str) -> Vec<String> {
         if !self.fuzzy_config.any_enabled() {
             return Vec::new();
