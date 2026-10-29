@@ -419,3 +419,34 @@ fn empty_expression_is_not_a_binding() {
     );
     assert_probe_not_ran(&coord);
 }
+
+/// GH#254：Ctrl+= 开了快捷加词预览后切到英文，加词会话必须随之结束——
+/// 否则 `hotkey_session` 留着，英文模式下 Ctrl+- 乃至单键 `-` 都被吞。
+#[test]
+fn mode_switch_ends_add_word_session() {
+    skip_without_data!();
+    let coord = open_with(|_| {});
+    let minus = |m| coord.handle_key_event(&key(0xBD, m));
+    assert!(
+        matches!(minus(MOD_CTRL), KeyAction::PassThrough),
+        "前提：中文态 Ctrl+- 透传"
+    );
+    assert!(
+        matches!(
+            coord.handle_key_event(&key(0xBB, MOD_CTRL)),
+            KeyAction::Consumed
+        ),
+        "Ctrl+= 默认是加词热键"
+    );
+    // 轻敲左 Shift 切英文
+    coord.handle_key_event(&key(0xA0, 0));
+    coord.handle_key_event(&key_up(0xA0));
+    assert!(
+        matches!(minus(MOD_CTRL), KeyAction::PassThrough),
+        "切英文后 Ctrl+- 应透传给宿主"
+    );
+    assert!(
+        matches!(minus(0), KeyAction::PassThrough),
+        "切英文后单键 - 应透传"
+    );
+}

@@ -9999,6 +9999,12 @@ impl Coordinator {
         upper: bool,
     ) -> String {
         let cased = |code: String| if upper { code.to_uppercase() } else { code };
+        // 快捷加词预览还开着：切中英等于放弃它。不退的话 `add_word_active` 留着，
+        // `hotkey_session` 恒为真，DLL 把所有 Ctrl 组合键（Ctrl+-）乃至单键 `-` 都当作
+        // 加词会话里的键吞掉，英文模式下宿主快捷键整片失效（GH#254）。
+        if state.add_word_active {
+            self.exit_add_word_mode(state);
+        }
         // 切中英 / CapsLock / 系统切换三条路径全部经此。语境变了，上一句中文后面的联想
         // 已无意义。三个调用方随后都会 `notify_ui_hide`，故此处只清状态不动 UI。
         self.exit_assoc(state, crate::handle_assoc::AssocExit::ModeSwitch);
