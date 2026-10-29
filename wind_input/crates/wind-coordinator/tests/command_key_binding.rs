@@ -289,6 +289,26 @@ fn session_function_key_runs_command() {
     assert_eq!(coord.debug_preedit(), preedit, "组合区不应变");
 }
 
+/// ★ `toggle_tip`：把悬停目标设到高亮项，再按一次收起；移动高亮同鼠标离开一样收起（t372）。
+#[test]
+fn session_toggle_tip_follows_highlight() {
+    skip_without_data!();
+    let coord = open_with(bind_session("f2", "toggle_tip"));
+    type_str(&coord, "a");
+    assert_eq!(coord.debug_hover_target(), -1, "前提：无悬停");
+
+    let act = coord.handle_key_event(&key(0x71, 0));
+    assert!(matches!(act, KeyAction::Consumed), "应吞键，实际 {act:?}");
+    assert_eq!(
+        coord.debug_hover_target(),
+        0,
+        "悬停目标 = 高亮项（页内第 0 项）"
+    );
+
+    coord.handle_key_event(&key(0x71, 0));
+    assert_eq!(coord.debug_hover_target(), -1, "再按一次收起");
+}
+
 /// 会话态命令**不要候选**：打了码没候选时也能按（网址模式是「有会话、无候选」的天然样本）。
 #[test]
 fn session_key_runs_command_without_candidates() {

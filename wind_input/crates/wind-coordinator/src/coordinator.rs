@@ -5906,6 +5906,24 @@ impl Coordinator {
             wind_config::SessionAction::CommitHighlighted => {
                 return self.commit_highlighted(state);
             }
+            // 悬停提示开关：把悬停目标设为高亮项（再按一次清掉），其余全走鼠标悬停那条通路。
+            // 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
+            wind_config::SessionAction::ToggleTip => {
+                let per_page = self.per_page(state.active);
+                let flat = match state.grid_top {
+                    Some(top) => state.current_page.saturating_sub(top) * per_page,
+                    None => 0,
+                } + state.selected_index;
+                let target = if self.hover_target() == flat as i32 {
+                    -1
+                } else {
+                    flat as i32
+                };
+                self.hover_index
+                    .store(target, std::sync::atomic::Ordering::Relaxed);
+                self.notify_ui_update(state);
+                return Some(KeyAction::Consumed);
+            }
             // 编码区光标移动（macOS 式方向键，见 design/macos-style-arrow-keys.md）。
             //
             // 只在主路生效：overlay（临拼 / 快捷输入 / Url / Email / Special）各有自己的
@@ -7285,6 +7303,11 @@ impl Coordinator {
         } else {
             "候选窗:显示"
         });
+    }
+
+    /// 当前悬停目标（测试/诊断用）：鼠标悬停与 `toggle_tip` 共用，`-1` = 无。
+    pub fn debug_hover_target(&self) -> i32 {
+        self.hover_target()
     }
 
     /// 候选窗是否被 `ime.toggle("candwin")` 隐藏（测试/诊断用）。

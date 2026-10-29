@@ -2031,6 +2031,11 @@ pub enum SessionAction {
     /// 绑 `commit_highlighted` 就永远移动不了光标，绑移动就永远选不了词。无候选时末尾
     /// 那一下纯吞键（没有可上屏的东西，也不该把 → 交给宿主）。其余边界同 [`Self::CaretLeft`]。
     CaretRight,
+    /// 开 / 关高亮候选的悬停提示气泡（反查编码、拆字等），不用鼠标悬停（t372）。
+    ///
+    /// 走鼠标悬停同一条通路（悬停目标 = 高亮项），气泡内容与定位完全一致；再按一次收起，
+    /// 移动高亮 / 翻页 / 候选刷新都会收起（同鼠标离开）。需要候选；候选没有提示内容时无效果。
+    ToggleTip,
     /// 上屏编码——回车在「有编码」时做的那件事，换一个键来按（极点 / 小鸭用 Ctrl）。
     ///
     /// 恒为上屏编码，**不看 `input.enter_behavior`**：「回车清空编码」是回车这个键的配置，
@@ -2151,6 +2156,7 @@ impl SessionAction {
             "commit_highlighted" => Self::CommitHighlighted,
             "caret_left" => Self::CaretLeft,
             "caret_right" => Self::CaretRight,
+            "toggle_tip" => Self::ToggleTip,
             "commit_code" => Self::CommitCode,
             // `clear` 是 `cancel` 的别名（同一个动作，两种心智），见 `Cancel` 的文档。
             "cancel" | "clear" => Self::Cancel,
@@ -2249,6 +2255,7 @@ impl std::fmt::Display for SessionAction {
             Self::CommitHighlighted => f.write_str("commit_highlighted"),
             Self::CaretLeft => f.write_str("caret_left"),
             Self::CaretRight => f.write_str("caret_right"),
+            Self::ToggleTip => f.write_str("toggle_tip"),
             Self::CommitCode => f.write_str("commit_code"),
             Self::Command(expr) => write!(f, "{COMMAND_VERB_PREFIX}{expr}"),
         }
