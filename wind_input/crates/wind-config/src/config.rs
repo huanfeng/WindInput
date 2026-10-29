@@ -1866,6 +1866,37 @@ impl BoundAction {
     }
 }
 
+/// `caret_right` 在编码区光标已到末尾时的动作（macOS 式 → 键的三种落法）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaretEnd {
+    /// 上屏高亮候选（出厂 / 写 `caret_right`）。
+    Commit,
+    /// 高亮移到下一个候选（`caret_right:next`，macOS「→ 切到下一个候选词」）。
+    Next,
+    /// 开 / 关高亮候选的悬停提示（`caret_right:tip`，等同绑 `toggle_tip`）。
+    Tip,
+}
+
+impl CaretEnd {
+    fn parse_payload(s: &str) -> Option<Self> {
+        match s.trim() {
+            "commit" => Some(Self::Commit),
+            "next" => Some(Self::Next),
+            "tip" => Some(Self::Tip),
+            _ => None,
+        }
+    }
+
+    /// 落盘写法的后缀；默认档为空。
+    fn as_payload(&self) -> &'static str {
+        match self {
+            Self::Commit => "",
+            Self::Next => "next",
+            Self::Tip => "tip",
+        }
+    }
+}
+
 /// **会话态**按键动词（`keys.session_actions` 的值域）。
 ///
 /// 与 [`BoundAction`] 是同构的姊妹表，分野是**触发态**：那张表管「无输入会话时这个键干
@@ -1988,12 +2019,13 @@ pub enum SessionAction {
     /// **overlay 让位**：临拼 / 快捷输入等各有自己的缓冲光标（`state.active` 非 `None`），
     /// 本动词不接管，消费点据此放行。
     CaretLeft,
-    /// 编码区光标右移一字符；**已在末尾 = 上屏高亮候选**（macOS「→ 进入选词」）。
+    /// 编码区光标右移一字符；**已在末尾 = 做 [`CaretEnd`] 指定的动作**，默认上屏高亮候选（macOS「→ 进入选词」）。
+    /// 写法 `caret_right` / `caret_right:commit|next|tip`。
     ///
     /// 边沿语义必须内建在动词里：「光标到末尾那一下改为选词」用静态绑定表达不出来——
     /// 绑 `commit_highlighted` 就永远移动不了光标，绑移动就永远选不了词。无候选时末尾
     /// 那一下纯吞键（没有可上屏的东西，也不该把 → 交给宿主）。其余边界同 [`Self::CaretLeft`]。
-    CaretRight,
+    CaretRight(CaretEnd),
     /// 开 / 关高亮候选的悬停提示气泡（反查编码、拆字等），不用鼠标悬停（t372）。
     ///
     /// 走鼠标悬停同一条通路（悬停目标 = 高亮项），气泡内容与定位完全一致；再按一次收起，
@@ -2116,6 +2148,12 @@ impl SessionAction {
                 None => Self::None,
             };
         }
+        if let Some(rest) = t.strip_prefix("caret_right:") {
+            return match CaretEnd::parse_payload(rest) {
+                Some(a) => Self::CaretRight(a),
+                None => Self::None,
+            };
+        }
         match t.as_str() {
             "page_prev" => Self::PagePrev,
             "page_next" => Self::PageNext,
@@ -2127,7 +2165,7 @@ impl SessionAction {
             "aux_code" => Self::AuxCode(AuxCodeShare::Solo),
             "commit_highlighted" => Self::CommitHighlighted,
             "caret_left" => Self::CaretLeft,
-            "caret_right" => Self::CaretRight,
+            "caret_right" => Self::CaretRight(CaretEnd::Commit),
             "toggle_tip" => Self::ToggleTip,
             "commit_code" => Self::CommitCode,
             // `clear` 是 `cancel` 的别名（同一个动作，两种心智），见 `Cancel` 的文档。
@@ -2164,7 +2202,7 @@ impl SessionAction {
                 | Self::Command(_)
                 | Self::CommitCode
                 | Self::CaretLeft
-                | Self::CaretRight
+                | Self::CaretRight(_)
         )
     }
 
@@ -2234,7 +2272,10 @@ impl std::fmt::Display for SessionAction {
             },
             Self::CommitHighlighted => f.write_str("commit_highlighted"),
             Self::CaretLeft => f.write_str("caret_left"),
-            Self::CaretRight => f.write_str("caret_right"),
+            Self::CaretRight(a) => match a.as_payload() {
+                "" => f.write_str("caret_right"),
+                p => write!(f, "caret_right:{p}"),
+            },
             Self::ToggleTip => f.write_str("toggle_tip"),
             Self::CommitCode => f.write_str("commit_code"),
             Self::Command(expr) => write!(f, "{COMMAND_VERB_PREFIX}{expr}"),
@@ -14759,5 +14800,39 @@ mod status_position_tests {
             ..Default::default()
         };
         assert_eq!(bad.reverse_wildcard_char(), 'z');
+    }
+}
+
+#[cfg(test)]
+mod caret_right_tests {
+    use super::*;
+
+    /// `caret_right[:commit|next|tip]` 往返；默认档不带后缀；写错的载荷不静默降级。
+    #[test]
+    fn caret_right_payload_round_trips() {
+        for (v, want) in [
+            ("caret_right", CaretEnd::Commit),
+            ("caret_right:commit", CaretEnd::Commit),
+            ("caret_right:next", CaretEnd::Next),
+            ("caret_right:tip", CaretEnd::Tip),
+        ] {
+            assert_eq!(
+                SessionAction::parse(v),
+                SessionAction::CaretRight(want),
+                "{v}"
+            );
+        }
+        assert_eq!(
+            SessionAction::parse("caret_right").to_string(),
+            "caret_right"
+        );
+        assert_eq!(
+            SessionAction::parse("caret_right:tip").to_string(),
+            "caret_right:tip"
+        );
+        assert_eq!(
+            SessionAction::parse("caret_right:bogus"),
+            SessionAction::None
+        );
     }
 }

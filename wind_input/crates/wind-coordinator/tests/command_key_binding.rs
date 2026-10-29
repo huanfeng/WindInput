@@ -343,6 +343,39 @@ fn toggle_tip_on_right_moves_caret_before_end() {
     assert_eq!(coord.debug_hover_target(), 0, "末尾的 → 开提示");
 }
 
+/// `caret_right:tip`：光标没到末尾右移，到末尾开关提示（macOS 式 → 与悬停提示合并写法）。
+#[test]
+fn caret_right_tip_moves_then_toggles_tip() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        for (k, v) in [("left", "caret_left"), ("right", "caret_right:tip")] {
+            c.keys.session_actions.insert(k.into(), v.into());
+        }
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(0x25, 0)); // ← a|b
+    coord.handle_key_event(&key(0x27, 0)); // → 回到末尾
+    assert_eq!(coord.debug_hover_target(), -1, "未到末尾前不开提示");
+    coord.handle_key_event(&key(0x27, 0)); // 末尾 → 开提示
+    assert_eq!(coord.debug_hover_target(), 0);
+}
+
+/// `caret_right:next`：到末尾后 → 把高亮移到下一个候选（macOS「→ 切到下一个候选词」）。
+#[test]
+fn caret_right_next_moves_highlight_at_end() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        c.keys
+            .session_actions
+            .insert("right".into(), "caret_right:next".into());
+    });
+    type_str(&coord, "a");
+    assert!(coord.debug_page_texts().len() > 1, "前提：至少两个候选");
+    let before = coord.debug_page_info().1;
+    coord.handle_key_event(&key(0x27, 0));
+    assert_eq!(coord.debug_page_info().1, before + 1, "高亮应下移一位");
+}
+
 /// 会话态命令**不要候选**：打了码没候选时也能按（网址模式是「有会话、无候选」的天然样本）。
 #[test]
 fn session_key_runs_command_without_candidates() {

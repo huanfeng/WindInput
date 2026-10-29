@@ -5839,6 +5839,25 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
+    /// 开 / 关高亮项的悬停提示：悬停目标设为高亮项，已是则清掉。
+    /// 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
+    fn toggle_hover_tip(&self, state: &mut State) -> KeyAction {
+        let per_page = self.per_page(state.active);
+        let flat = match state.grid_top {
+            Some(top) => state.current_page.saturating_sub(top) * per_page,
+            None => 0,
+        } + state.selected_index;
+        let target = if self.hover_target() == flat as i32 {
+            -1
+        } else {
+            flat as i32
+        };
+        self.hover_index
+            .store(target, std::sync::atomic::Ordering::Relaxed);
+        self.notify_ui_update(state);
+        KeyAction::Consumed
+    }
+
     /// 会话态按键绑定的统一执行（配置驱动，见 `keys.session_actions`）：翻页 / 移高亮 /
     /// 取消。普通模式与所有 overlay 模式共用；`include_printable` 区分码表型（`-`/`=` 作
     /// 翻页）与文本/表达式型（临英/快捷输入，`-`/`=` 作输入字符，不夺为动作）。
@@ -5995,20 +6014,7 @@ impl Coordinator {
                         return Some(KeyAction::Consumed);
                     }
                 }
-                let per_page = self.per_page(state.active);
-                let flat = match state.grid_top {
-                    Some(top) => state.current_page.saturating_sub(top) * per_page,
-                    None => 0,
-                } + state.selected_index;
-                let target = if self.hover_target() == flat as i32 {
-                    -1
-                } else {
-                    flat as i32
-                };
-                self.hover_index
-                    .store(target, std::sync::atomic::Ordering::Relaxed);
-                self.notify_ui_update(state);
-                return Some(KeyAction::Consumed);
+                return Some(self.toggle_hover_tip(state));
             }
             // 编码区光标移动（macOS 式方向键，见 design/macos-style-arrow-keys.md）。
             //
@@ -6020,11 +6026,15 @@ impl Coordinator {
             // `caret_right` 在**末尾**改为上屏高亮候选（macOS「→ 进选词」）；无候选时没有
             // 可上屏的东西，纯吞键——组合进行中把 → 交给宿主会移动宿主光标，与组合区错位。
             // 移动成功只刷新组合区（caret 位置变了，缓冲与候选都没变，无需重查）。
-            wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight => {
+            wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight(_) => {
                 if state.active.is_some() || !Self::has_input_session(state) {
                     return None;
                 }
-                let right = matches!(action, wind_config::SessionAction::CaretRight);
+                let end = match action {
+                    wind_config::SessionAction::CaretRight(e) => Some(e),
+                    _ => None,
+                };
+                let right = end.is_some();
                 let moved = {
                     let mut ed = preedit_cursor::BufEdit::new_cased(
                         &mut state.input_buffer,
@@ -6037,11 +6047,21 @@ impl Coordinator {
                         ed.move_left()
                     }
                 };
-                if right && !moved && !state.candidates.is_empty() {
-                    return self.commit_highlighted(state);
+                // 末尾那一下按 `caret_right[:end]` 的末尾动作办：上屏 / 高亮下移 / 开关提示。
+                if let Some(end) = end
+                    && !moved
+                    && !state.candidates.is_empty()
+                {
+                    match end {
+                        wind_config::CaretEnd::Commit => return self.commit_highlighted(state),
+                        wind_config::CaretEnd::Tip => return Some(self.toggle_hover_tip(state)),
+                        // 落到下面统一的 nav 执行，与 `highlight_down` 同一条路。
+                        wind_config::CaretEnd::Next => keymap::NavAction::HighlightDown,
+                    }
+                } else {
+                    self.notify_ui_update(state);
+                    return Some(KeyAction::Consumed);
                 }
-                self.notify_ui_update(state);
-                return Some(KeyAction::Consumed);
             }
             // 上屏编码：这里只登记、吞键，持锁的这一层没法重入分派；由出口
             // `redispatch_commit_code` 把这个键当回车再走一遍。
