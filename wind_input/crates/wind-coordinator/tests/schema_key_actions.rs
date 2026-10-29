@@ -1268,3 +1268,37 @@ fn unbound_letter_gets_no_repeat_candidate() {
     );
     let _ = std::fs::remove_dir_all(&ov);
 }
+
+/// 拼音方案绑字母引导键：只在空缓冲进模式，组码中间的同一个字母照常是编码。
+///
+/// 现场：全拼里 `u` 不能起头，用户在拼音方案级表配 `u = "mix:quick_mix"`。非码表引擎对字母
+/// 绑定不做合理性判断（用户自己的配置）；`nv` / `lv` 里的 `v` 是组码中间，不能被夺。
+/// 断言用 `debug_active_mode`：不进模式时 `u` 也会开出组合区，只看动作类型分不出来。
+#[test]
+fn pinyin_letter_lead_enters_only_on_empty_buffer() {
+    if !has_schemas() {
+        return;
+    }
+    let ov = make_override(
+        "pinyin_letter",
+        "pinyin",
+        "u = \"mix:quick_mix\"\nv = \"mix:quick_mix\"",
+    );
+    let coord = Coordinator::new_headless_with_override(
+        cfg_for("pinyin"),
+        Some(&data_dir()),
+        Some(ov.clone()),
+    );
+
+    // 组码中间：n 之后的 v 是编码，不得进模式。
+    coord.handle_key_event(&key(0x4E)); // N
+    coord.handle_key_event(&key(0x56)); // V
+    assert_eq!(coord.debug_active_mode(), None, "nv 中间的 v 不应作引导键");
+    assert_eq!(coord.debug_preedit(), "nv");
+    coord.handle_key_event(&key(0x1B)); // Esc 清空
+
+    // 空缓冲：u 进快捷输入。
+    coord.handle_key_event(&key(0x55)); // U
+    assert_eq!(coord.debug_active_mode(), Some("mix"), "空缓冲 u 应进模式");
+    let _ = std::fs::remove_dir_all(&ov);
+}

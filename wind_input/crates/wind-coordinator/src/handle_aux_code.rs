@@ -1181,8 +1181,8 @@ mod tests {
     /// 少了这一排的后果：配了 `z = "aux_code"` 的用户在辅助码里再也打不出 `z`——
     /// 而 `z` 是笔画码的「折」、也是形码方案的常用码元。
     ///
-    /// ⚠️ 这条绑定对**进入**本就无效（`bound_action_yield_reason`：字母键仅码表引擎
-    /// 生效，而辅助码只服务拼音）。退出侧比进入侧更宽松，正是不对称的形态。
+    /// ⚠️ 进入侧：码表引擎里 z 绑 `aux_code` 本就无意义（辅助码只服务拼音）；拼音里绑了则
+    /// 空缓冲按 z 即进辅助码，那是用户自己的配置。退出侧不论如何都让字母回到编码。
     #[test]
     fn letter_stays_code_input_even_when_bound_as_trigger() {
         let c = coord_with_data_cfg("sess_zletter", data_dir_with_aux("sess_zletter"), |cfg| {
