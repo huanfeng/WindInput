@@ -1022,6 +1022,10 @@ impl MessageHandler for Coordinator {
             }
             return self.handle_comment_alt(data);
         }
+        // 按住档的功能键切换键：按下（含连发）与松开都在这里接走，排在下面「按住期间的别的键」之前。
+        if let Some(act) = self.handle_comment_fn_hold(data) {
+            return act;
+        }
         // 按住切换键期间的别的键：照常处理完再收起详细态。声明位置的理由同 `_sk_push`。
         // 同时弄脏 Alt / Ctrl 的单击判定（含 `WM_HOTKEY` 送来的 Ctrl+数字）。
         let _hold_off = if data.event_type == EVENT_KEY_DOWN {

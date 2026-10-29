@@ -474,9 +474,33 @@ public class InputController: IMKInputController {
     // MARK: - IMKit hook
 
     /// 告诉 IMKit 本输入法要接收哪些事件。默认只有 keyDown; 必须显式加 flagsChanged
-    /// 才能收到修饰键 (Shift/Ctrl) 变化, 做单击切换检测。
+    /// 才能收到修饰键 (Shift/Ctrl) 变化, 做单击切换检测; keyUp 只认服务端吃掉过按下的功能键
+    /// (见 eatenFnKeyCode), 其余一律交还宿主。
     public override func recognizedEvents(_ sender: Any!) -> Int {
-        return Int(NSEvent.EventTypeMask.keyDown.rawValue | NSEvent.EventTypeMask.flagsChanged.rawValue)
+        return Int(NSEvent.EventTypeMask.keyDown.rawValue | NSEvent.EventTypeMask.flagsChanged.rawValue
+            | NSEvent.EventTypeMask.keyUp.rawValue)
+    }
+
+    /// 服务端吃掉过按下的功能键 (macOS 只映射了 F1): 它的松开也报给服务端 —— 注释切换键选
+    /// 功能键 + 按住档时, 服务端靠松开收起详细态。按下吃了, 松开同样吃掉。
+    private var eatenFnKeyCode: UInt16?
+
+    private func noteEatenFnKey(_ event: NSEvent, consumed: Bool, hostShortcut: Bool) {
+        let vk = KeyHandler.toWindowsVK(event.keyCode)
+        if consumed && !hostShortcut && (0x70...0x7B).contains(vk) {
+            eatenFnKeyCode = event.keyCode
+        }
+    }
+
+    private func handleKeyUp(_ event: NSEvent, client sender: Any!) -> Bool {
+        guard let code = eatenFnKeyCode, code == event.keyCode else { return false }
+        eatenFnKeyCode = nil
+        guard let bridge = bridge else { return true }
+        keySeq &+= 1
+        if let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq) {
+            _ = try? sendAndApply(frame, on: bridge, sender: sender)
+        }
+        return true
     }
 
     // MARK: - 系统输入菜单 (点击菜单栏输入源图标弹出)
@@ -553,6 +577,9 @@ public class InputController: IMKInputController {
         if event.type == .flagsChanged {
             return handleFlagsChanged(event, client: sender)
         }
+        if event.type == .keyUp {
+            return handleKeyUp(event, client: sender)
+        }
         guard event.type == .keyDown else { return false }
         // 任意真实按键出现 → 取消当前修饰键 tap 判定 (Shift+X 不算 tap)。
         pendingModSawOther = true
@@ -589,6 +616,7 @@ public class InputController: IMKInputController {
 
         do {
             let consumed = try sendAndApply(frame, on: bridge, sender: sender, hostShortcut: hostShortcut)
+            noteEatenFnKey(event, consumed: consumed, hostShortcut: hostShortcut)
             return consumed ? true : passThroughToHost(event)
         } catch {
             // 服务重启后这条连接已死 (write→EPIPE 或 read→EOF)。重连到新服务
@@ -602,6 +630,7 @@ public class InputController: IMKInputController {
             guard let fresh = self.bridge else { return passThroughToHost(event) }
             do {
                 let consumed = try sendAndApply(frame, on: fresh, sender: sender, hostShortcut: hostShortcut)
+                noteEatenFnKey(event, consumed: consumed, hostShortcut: hostShortcut)
                 return consumed ? true : passThroughToHost(event)
             } catch {
                 NSLog("WindInput[handle] 重连后重试仍失败: \(error)")

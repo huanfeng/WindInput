@@ -298,9 +298,11 @@ detail_horizontal = "inherit"
     取值另有 `none`（不用切换键）与 `f2`…`f12`；`switch_mode` 不再有 `off`，不用切换键就设 `switch_key = "none"`
     （维护者 2026-10-29 定：切换方式里留一个「不使用」，与按键总览的绑定容易打架）。
     出厂原为 `ctrl`，真机后改 `f1`（维护者 2026-10-29 定）：单击 Ctrl 与中英切换、选词、组合键的干扰太大。
-    F1 不走修饰键单击判定，生效时由 `Config::effective_session_actions` 补一条 `f1` 会话绑定（`session` / `hold`
-    → `comment_state:session`，`persist` → `comment_state`），转发与分派复用会话按键通路；用户自己绑了 F1 的优先。
-    F1 没有按住，`hold` 档按临时切换处理。mac 键码表只补 F1，其余 F 键仍透传；
+    功能键不走修饰键单击判定，生效时由 `Config::effective_session_actions` 补一条会话绑定（`session` / `hold`
+    → `comment_state:session`，`persist` → `comment_state`），转发与分派复用会话按键通路；用户自己绑了同一个键的优先。
+    `hold` 档由协调器 `handle_comment_fn_hold` 先接走有候选时的按下（含连发）与松开；松开靠平台送：TSF 与 Linux
+    记下服务端吃掉过按下的功能键、松开时上报并吃掉，mac 加收 keyUp 做同样的事。mac 键码表只补 F1，其余 F 键仍透传
+    （组字中未绑定的 F 键服务端回 Consumed，映射了就会被吞）；
   - `ui.comment.switch_mode`：`off` / `session`（出厂）/ `persist` / `hold`，语义同 §4 原四档。
 - 按住（`hold`）Alt / Ctrl 都可用：按下切换键立即翻转、松开恢复（按得多久、期间按没按别的键都恢复）；
   按住期间按组合键（Ctrl+C、Ctrl+数字）注释会闪一下，接受。按住期间候选窗关了，翻转随之清掉，不残留。

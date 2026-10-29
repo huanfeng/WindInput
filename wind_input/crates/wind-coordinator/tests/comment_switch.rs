@@ -236,6 +236,34 @@ fn f1_toggles_session_and_passes_through_without_candidates() {
     assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
 }
 
+/// 按住档的功能键：按下显示详细，自动连发不翻回，松开恢复；没有候选时放行。
+#[test]
+fn f1_hold_shows_detail_until_release() {
+    if !has_schemas() {
+        return;
+    }
+    let mut hold = cfg();
+    hold.ui.comment.switch_key = SwitchKey::F1;
+    hold.ui.comment.switch_mode = SwitchMode::Hold;
+    let (idle, _rx) = open(hold.clone());
+    assert!(
+        is_pass(&idle.handle_key_event(&down(VK_F1))),
+        "无候选应放行"
+    );
+
+    let (c, _rx) = typed_gg(hold);
+    assert!(is_consumed(&c.handle_key_event(&down(VK_F1))));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Detail);
+    assert!(is_consumed(&c.handle_key_event(&down(VK_F1))), "连发");
+    assert_eq!(
+        c.debug_effective_comment_state(),
+        CommentState::Detail,
+        "连发不翻回"
+    );
+    assert!(is_consumed(&c.handle_key_event(&up(VK_F1))));
+    assert_eq!(c.debug_effective_comment_state(), CommentState::Default);
+}
+
 #[test]
 fn alt_digit_does_not_toggle() {
     if !has_schemas() {

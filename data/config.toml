@@ -1526,7 +1526,7 @@ enabled = true
 state = "default"
 # 切换键（候选窗出现时按它切换注释态）：none 不用切换键 | f1(出厂)..f12 | ctrl 左右任一 | lctrl | rctrl
 #   | alt 左右任一 | lalt | ralt。不想用切换键就设 none（只靠按键绑定、命令栏切换）。
-# 功能键没有「按住」，hold 档按 session 处理；会话按键里自己绑了同一个键的，那条优先。
+# 会话按键里自己绑了同一个键的，那条优先。
 # ⚠ 选 Alt 的 Windows 会装全局键盘钩子（用来压住宿主菜单栏）；不选 Alt 则没有。
 switch_key = "f1"
 # 切换方式：session 本次候选窗内(出厂) | persist 写回配置 | hold 按住期间显示另一态

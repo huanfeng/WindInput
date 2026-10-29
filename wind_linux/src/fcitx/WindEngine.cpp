@@ -1052,6 +1052,10 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
             return;
         }
         if (eatenKeys_.erase(code) > 0) {
+            // 吃掉过按下的功能键（F1–F12）：松开也报给服务端，按住档的注释切换键靠它收起详细态。
+            if (uint32_t fvk = keysymToVK(sym); fvk >= 0x70 && fvk <= 0x7B && ensureConnected()) {
+                sendKeyUp(ic, fvk, statesToModifiers(states), statesToToggles(states));
+            }
             event.filterAndAccept();
         }
         return;

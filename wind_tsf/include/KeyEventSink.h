@@ -531,6 +531,10 @@ private:
     // 一次按住在按下那一刻定走哪条路。鼠标记账与待判单击同一套判据，各记各的。
     wind::ctrlraw::Press _ctrlRaw;
     wind::toggletap::TapSignals _ctrlRawTapSignals;
+    // 服务端吃掉过按下的那个功能键（F1–F12，不带 Ctrl / Alt），0 = 没有。它的松开也要送给
+    // 服务端（注释切换键选功能键 + 按住档时靠松开收起详细态），见 _DispatchEatenFnKeyUp。
+    UINT _eatenFnKeyVk = 0;
+    BOOL _eatenFnKeyUpSent = FALSE;
     // OnTestKeyDown 是否刚吃下一个 Ctrl+Space。它是「我们独占了这个键」的凭据：
     // TSF 只在 pfEaten=TRUE 后才调 OnKeyDown，吃下就意味着 msctf 不会再拿它当 IME
     // 热键、OPENCLOSE compartment 不会被翻，因此按键侧兜底切换与 compartment 路径
@@ -601,6 +605,7 @@ private:
     void _NoteKeyDownForCtrlRaw(WPARAM wParam);
     BOOL _TryCtrlRawDown(WPARAM wParam, LPARAM lParam, uint32_t modifiers);
     void _DispatchCtrlRawUp(WPARAM wParam);
+    BOOL _DispatchEatenFnKeyUp(WPARAM wParam, BOOL finalize);
     static uint32_t _ResolveCtrlVk(WPARAM wParam, uint32_t modifiers);
 
     // 记录「该切换键正等 keyup 触发切换」。OnTestKeyDown 与 OnKeyDown 都会调用：

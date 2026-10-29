@@ -393,6 +393,30 @@ void CKeyEventSink::_DispatchCtrlRawUp(WPARAM wParam)
         WIND_LOG_ERROR(L"IPC failed for Ctrl raw up\n");
 }
 
+// 服务端吃掉过按下的功能键：把松开也送过去（按住档的注释切换键靠它收起详细态）。按下吃了，
+// 松开同样吃掉，宿主两边都看不到这个键。OnTestKeyUp 先到就由它发、OnKeyUp 只收尾
+// （finalize）；只调 OnTestKeyUp 的宿主（mintty）留下的记账在下一次按下时覆盖。
+// 返回 TRUE = 这次松开属于那个键，调用方吃掉。
+BOOL CKeyEventSink::_DispatchEatenFnKeyUp(WPARAM wParam, BOOL finalize)
+{
+    if (_eatenFnKeyVk == 0 || (UINT)wParam != _eatenFnKeyVk)
+        return FALSE;
+    if (!_eatenFnKeyUpSent)
+    {
+        _eatenFnKeyUpSent = TRUE;
+        if (_SendKeyToService((uint32_t)wParam, 0, KEY_EVENT_UP))
+            _HandleServiceResponse();
+        else
+            WIND_LOG_ERROR(L"IPC failed for function key up\n");
+    }
+    if (finalize)
+    {
+        _eatenFnKeyVk = 0;
+        _eatenFnKeyUpSent = FALSE;
+    }
+    return TRUE;
+}
+
 // ITfKeyEventSink::OnSetFocus —— 名字像是焦点主回调，实际**很不可靠**，不要往这里挂
 // 任何独占职责：AutoCAD 实测整场只触发 2 次，且全是 fForeground=1，从来没有过 0。
 // （曾把 focus_lost 挂在它的 else 分支上，结果 focus_lost 完全断供。）
@@ -1724,6 +1748,11 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     _responseKeyVk = (UINT)wParam;
     *pfEaten = _HandleServiceResponse();
     _responseKeyVk = 0;
+    if (*pfEaten && wParam >= VK_F1 && wParam <= VK_F12 && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
+    {
+        _eatenFnKeyVk = (UINT)wParam;
+        _eatenFnKeyUpSent = FALSE;
+    }
 
     // ── 联想态透传：组合已收口，把这一键还给宿主 ────────────────────────────────
     // 覆盖联想态下**全部**落到透传的键（回车/退格各有开关，Del/Home/End/←→/Insert 等
@@ -1869,6 +1898,12 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
     // Ctrl 如实上报的松开：先于禁用 / 配对拦截等一切闸门（按住翻转靠它收起）。不吃、不返回。
     _DispatchCtrlRawUp(wParam);
 
+    if (_DispatchEatenFnKeyUp(wParam, FALSE))
+    {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
     // Keyboard disabled by system: pass through all keys
     if (_pTextService->IsKeyboardDisabled())
         return S_OK;
@@ -1945,6 +1980,12 @@ STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam
 
     // 同 OnTestKeyUp（那边先到就已清掉记账，这里不再发）。
     _DispatchCtrlRawUp(wParam);
+
+    if (_DispatchEatenFnKeyUp(wParam, TRUE))
+    {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
 
     // direct_commit 顶码：余码新组合在**触发键**的 keyup 才开。先到者开组合，另一处
     // HasDeferredComposition()==FALSE 后自然 no-op。

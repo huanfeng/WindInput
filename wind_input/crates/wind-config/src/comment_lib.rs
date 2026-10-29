@@ -99,6 +99,12 @@ impl SwitchKey {
         Some(NAMES[i])
     }
 
+    /// 功能键的虚拟键码（F1 = 0x70 … F12 = 0x7B）；不是功能键为 `None`。
+    pub fn function_vk(self) -> Option<u32> {
+        let name = self.function_key_name()?;
+        name[1..].parse::<u32>().ok().map(|n| 0x6F + n)
+    }
+
     pub fn is_ctrl(self) -> bool {
         matches!(self, SwitchKey::Ctrl | SwitchKey::LCtrl | SwitchKey::RCtrl)
     }
@@ -915,6 +921,9 @@ mod tests {
         assert_eq!(SwitchKey::F12.function_key_name(), Some("f12"));
         assert_eq!(SwitchKey::Ctrl.function_key_name(), None);
         assert_eq!(SwitchKey::None.function_key_name(), None);
+        assert_eq!(SwitchKey::F1.function_vk(), Some(0x70));
+        assert_eq!(SwitchKey::F12.function_vk(), Some(0x7B));
+        assert_eq!(SwitchKey::Alt.function_vk(), None);
         let c: UiCommentConfig = toml::from_str("switch_mode = \"off\"").unwrap();
         assert_eq!(
             c.switch_mode,

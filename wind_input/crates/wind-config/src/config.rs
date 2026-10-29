@@ -5094,7 +5094,8 @@ impl Config {
     /// 运行时生效的会话态按键表：[`KeysConfig::effective_session_actions`] ⊕ 注释切换键。
     ///
     /// 注释切换键选功能键（F1–F12）时在这里补一条绑定，转发与分派都走会话按键的现成通路；用户自己
-    /// 在 `session_actions` 里绑过这个键（含 `none`）就让给用户。功能键没有「按住」：`hold` 档按临时切换处理。
+    /// 在 `session_actions` 里绑过这个键（含 `none`）就让给用户。`hold` 档也补 `comment_state:session`：
+    /// 这条只负责让平台转发这个键，有候选时的按下与松开由协调器的按住判定先接走。
     /// 设置页读写的仍是存储层的 `keys.session_actions`，补的这条不落盘。
     pub fn effective_session_actions(&self) -> BTreeMap<String, String> {
         use crate::comment_lib::SwitchMode;

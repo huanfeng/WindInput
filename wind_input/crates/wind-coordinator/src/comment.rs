@@ -1237,6 +1237,44 @@ impl crate::coordinator::Coordinator {
         }
     }
 
+    /// 按住档下的功能键切换键：有候选时按下（含自动连发）显示另一态并吃掉，松开收起。
+    ///
+    /// 只管 `hold` 档；其余档位走会话按键表（[`wind_config::Config::effective_session_actions`]）。
+    /// 松开要平台送来：TSF / Linux 送它们吃掉过按下的那个功能键的松开，macOS 只送 F1。
+    /// 带 Ctrl / Alt / Win 的组合不认（那是宿主的快捷键）。
+    pub(crate) fn handle_comment_fn_hold(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> Option<wind_bridge::handler::KeyAction> {
+        use wind_bridge::handler::KeyAction;
+        use wind_ipc::protocol::{EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, MOD_CTRL, MOD_WIN};
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        if Self::comment_switch_mode(c) != SwitchMode::Hold
+            || c.switch_key.function_vk() != Some(data.key_code)
+            || data.modifiers & (MOD_CTRL | MOD_ALT | MOD_WIN) != 0
+        {
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match data.event_type {
+            EVENT_KEY_DOWN if !state.candidates.is_empty() => {
+                self.set_comment_hold(&mut state, true);
+                Some(KeyAction::Consumed)
+            }
+            EVENT_KEY_UP => {
+                let held = state.comment_hold_flip;
+                self.set_comment_hold(&mut state, false);
+                Some(if held {
+                    KeyAction::Consumed
+                } else {
+                    KeyAction::PassThrough
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// 组字中 Alt 的按下 / 松开：按 `ui.comment.switch_mode` 切换注释态，判定见 [`crate::comment_switch`]。
     ///
     /// 平台协议（mac / Linux；Windows 的 TSF 不转发 Alt，走 [`Self::handle_comment_alt_hook`]）：
