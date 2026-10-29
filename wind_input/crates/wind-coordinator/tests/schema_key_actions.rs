@@ -1302,3 +1302,36 @@ fn pinyin_letter_lead_enters_only_on_empty_buffer() {
     assert_eq!(coord.debug_active_mode(), Some("mix"), "空缓冲 u 应进模式");
     let _ = std::fs::remove_dir_all(&ov);
 }
+
+/// GH#264：短语编码 `crr`，拼音下敲 `cr` 默认会前缀列举出来；`min_prefix = 0` 关掉后只剩精确码。
+#[test]
+fn phrase_prefix_listing_can_be_turned_off() {
+    if !has_schemas() {
+        return;
+    }
+    let texts = |min_prefix: usize| {
+        let mut cfg = cfg_for("pinyin");
+        cfg.input.phrase.min_prefix = min_prefix;
+        let coord = Coordinator::new_headless_with_override(cfg, Some(&data_dir()), None);
+        coord.debug_install_phrases(vec![seed("crr", "○短语")]);
+        coord.handle_key_event(&key('C' as u32));
+        coord.handle_key_event(&key('R' as u32));
+        let t = coord.debug_all_candidate_texts();
+        let exact = {
+            coord.handle_key_event(&key('R' as u32));
+            coord.debug_all_candidate_texts()
+        };
+        (t, exact)
+    };
+    let (on, _) = texts(2);
+    assert!(
+        on.iter().any(|t| t == "○短语"),
+        "前提：默认敲 cr 会列出 crr 的短语"
+    );
+    let (off, exact) = texts(0);
+    assert!(
+        !off.iter().any(|t| t == "○短语"),
+        "min_prefix=0 时 cr 不该列出"
+    );
+    assert!(exact.iter().any(|t| t == "○短语"), "精确码 crr 仍要出");
+}
