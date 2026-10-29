@@ -93,16 +93,19 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
 
 #### ECDICT
 
-- **用途**: 英→中释义（内置注释词库 `en_zh`），构建期由 `scripts/comment_dicts/build.py`
-  按英文词表裁剪，每词只取第一个词性与前两个义项
-- **仓库**: https://github.com/skywind3000/ECDICT （构建时固定到提交 `bc015ed2`）
+- **用途**: 英→中释义（内置注释词库 `en_zh`），由 `scripts/comment_dicts/build.py`
+  按英文词表裁剪，每词只取第一个词性与前两个义项。重整版（`en_zh_refined.tsv`）没覆盖的部分
+  以摘录形式存放在 `data/comments-src/en_zh_ecdict_raw.tsv`，构建不再下载原始文件
+- **仓库**: https://github.com/skywind3000/ECDICT （摘录取自提交 `bc015ed2`）
 - **版权**: Copyright (c) 2025 Linwei
 - **许可证**: MIT
 
 #### CC-CEDICT
 
-- **用途**: 中→英释义（内置注释词库 `zh_en`），构建期按系统词表裁剪，每词取前两个义项
-- **来源**: https://www.mdbg.net/chinese/dictionary?page=cc-cedict （MDBG 导出）
+- **用途**: 中→英释义（内置注释词库 `zh_en`），按系统词表裁剪，每词取前两个义项。重整版
+  （`zh_en_cedict_refined.tsv`）没覆盖的部分以摘录形式存放在 `data/comments-src/zh_en_cedict_raw.tsv`
+  （文件头保留原始快照的许可与日期行），构建不再下载原始文件
+- **来源**: https://www.mdbg.net/chinese/dictionary?page=cc-cedict （MDBG 导出，摘录取自 2026-10-21 的快照）
 - **许可证**: CC BY-SA 4.0；已裁剪与格式化（按系统词表筛选条目、取前两个义项、去掉
   量词/变体/参见类条目、重排为每词一行），数据文件头保留原始快照的许可与日期行；衍生的 `zh_en` 数据同样适用该许可，AI 补齐的部分
   （`data/comments-src/zh_en_ai.tsv`）另文件存放、不与 CC 数据混合

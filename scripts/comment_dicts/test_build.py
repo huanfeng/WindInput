@@ -233,6 +233,43 @@ class MergePriorityTest(unittest.TestCase):
         self.assertIn("你好\thello; hi\n", text)
 
 
+class SnapshotTest(unittest.TestCase):
+    """入库的原始释义快照（snapshot → --raw）与直接读上游，产物须逐字节相同。"""
+
+    def test_raw_snapshot_reproduces_upstream_build(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        # 上游释义里本身带 Tab（ECDICT 的 WinXP 就有），快照不能截掉后半截。
+        ec = write(d.name, "ecdict.csv", ECDICT_CSV + 'winxp,x,,"abbr. 操作系统（\tWindows XP）",,,,,0,0,,,\n')
+        en = write(d.name, "en.dict.yaml", EN_DICT + "winxp\twinxp\n")
+        zh = write(d.name, "zh.dict.yaml", ZH_DICT)
+        cedict = write(d.name, "c.txt", CEDICT)
+        en_ref = write(d.name, "en_ref.tsv", "abandon\tv. 放弃\n")
+        zh_ref = write(d.name, "zh_ref.tsv", "工\tn. work\n你好\t\n")
+        ai = write(d.name, "ai.tsv", "生僻词\tn. rare word\n")
+        p = lambda n: os.path.join(d.name, n)
+        build.main(["snapshot", "--ecdict", ec, "--cedict", cedict, "--en-words", en, "--zh-words", zh,
+                    "--en-refined", en_ref, "--zh-refined", zh_ref,
+                    "--en-out", p("en_raw.tsv"), "--zh-out", p("zh_raw.tsv")])
+        build.main(["en-zh", "--ecdict", ec, "--words", en, "--refined", en_ref, "--out", p("en_up.txt")])
+        build.main(["en-zh", "--raw", p("en_raw.tsv"), "--words", en, "--refined", en_ref, "--out", p("en_raw.txt")])
+        build.main(["zh-en", "--cedict", cedict, "--ai", ai, "--refined", zh_ref, "--words", zh, "--out", p("zh_up.txt")])
+        build.main(["zh-en", "--raw", p("zh_raw.tsv"), "--ai", ai, "--refined", zh_ref, "--words", zh,
+                    "--out", p("zh_raw.txt")])
+        read = lambda n: open(p(n), encoding="utf-8").read()
+        self.assertEqual(read("en_up.txt"), read("en_raw.txt"))
+        self.assertEqual(read("zh_up.txt"), read("zh_raw.txt"))
+        self.assertIn("winxp\tabbr. 操作系统（\tWindows XP）\n", read("en_raw.txt"))
+        # 重整版有非空释义的词不进快照；空释义（你好）照旧回退原始释义。
+        self.assertNotIn("abandon", read("en_raw.tsv"))
+        self.assertNotIn("工\t", read("zh_raw.tsv"))
+        self.assertIn("你好\thello; hi\n", read("zh_raw.tsv"))
+
+    def test_upstream_and_raw_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            build.main(["zh-en", "--words", "x", "--out", "y"])
+
+
 class ExportFullTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

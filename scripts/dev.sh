@@ -488,17 +488,7 @@ download_dicts() {
     download_file "$OPENCC_BASE/TWPhrases.txt"    "$opencc/TWPhrases.txt"    "台湾词汇"
     download_file "$OPENCC_BASE/HKVariants.txt"   "$opencc/HKVariants.txt"   "香港字形"
 
-    # 中英释义底表：ECDICT(MIT) 英→中，CC-CEDICT(CC BY-SA 4.0) 中→英；由 scripts/comment_dicts/build.py
-    # 按系统词表裁剪后生成内置注释词库（见 assemble_data），许可见 NOTICE.md。ECDICT 固定到下面
-    # 的提交；CC-CEDICT 的 MDBG 导出是每日重生成的滚动快照、无法固定，快照日期写进 zh_en.txt 头注释。
-    # ⚠ dev.ps1 的 Download-Dicts/Assemble-Data、mac/dev.sh 的 download_dicts/assemble_data 是同一件事，改一边要同步另外两边。
-    local ecdict="$CACHE_DIR/ecdict" cedict="$CACHE_DIR/cedict"
-    mkdir -p "$ecdict" "$cedict"
-    gray "ECDICT / CC-CEDICT (中英释义):"
-    download_file "https://raw.githubusercontent.com/skywind3000/ECDICT/bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b/ecdict.csv" \
-        "$ecdict/ecdict.csv" "英汉词典 ~66MB"
-    download_file "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" \
-        "$cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" "汉英词典"
+    # 中英释义不再下载上游：ECDICT / CC-CEDICT 用到的部分已冻结进 data/comments-src/*_raw.tsv（见 assemble_data）。
 
     # 五笔词库：下载上游原始档，主库与 extra 由 gen_dict 重排/拆分后写入 build 目录；
     # district 不经 gen_dict，原样复制（见 assemble_data）
@@ -763,37 +753,32 @@ assemble_data() {
     fi
 
     # 9. 内置中英释义注释词库（Python 脚本 scripts/comment_dicts/build.py）：en_zh 按英文词表、
-    # zh_en 按拼音/五笔词表裁剪，产物只进 build 目录、不入版本库。AI 补齐的源数据
-    # data/comments-src/zh_en_ai.tsv 入库，随第 1 步一并复制进来，用完剥掉不随包分发。
-    # 缺上游或缺 python3 只是释义注释不可用，用 warn 不中断构建。
-    local cdict="$PRODUCT_ROOT/scripts/comment_dicts/build.py"
-    local ecdict_csv="$CACHE_DIR/ecdict/ecdict.csv"
-    local cedict_gz="$CACHE_DIR/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
+    # zh_en 按拼音/五笔词表裁剪，产物只进 build 目录、不入版本库。源数据全部入库在 data/comments-src/：
+    # 重整版、AI 补齐，以及重整版没覆盖的原始释义快照（*_raw.tsv，ECDICT MIT / CC-CEDICT CC BY-SA 4.0，
+    # 许可见 NOTICE.md）。CC-CEDICT 是每日滚动快照、无法固定版本，冻结进仓后构建可复现、不依赖外网；
+    # 更新上游时手工跑 build.py snapshot 再提交。随第 1 步一并复制进来，用完剥掉不随包分发。
+    # 缺 python3 或生成失败在这里只 warn，发版由 verify_dist_data 拦下。
+    # ⚠ dev.ps1 的 Assemble-Data、mac/dev.sh 的 assemble_data 是同一件事，改一边要同步另外两边。
+    local cdict="$PRODUCT_ROOT/scripts/comment_dicts/build.py" src="$data/comments-src"
     if ! command -v python3 >/dev/null 2>&1; then
         warn "缺 python3，中英释义词库不可用"
-    elif [ -f "$ecdict_csv" ] && [ -f "$cedict_gz" ]; then
+    else
         gray "生成中英释义注释词库 (comment_dicts) ..."
         mkdir -p "$schemas/comments"
-        local ai_tsv="$data/comments-src/zh_en_ai.tsv"
-        [ -f "$ai_tsv" ] || ai_tsv=""
         # 拼音表用于丢掉 AI 释义里拼音化的专名；缺了只是不过滤
-        local en_ref="$data/comments-src/en_zh_refined.tsv" zh_ref="$data/comments-src/zh_en_cedict_refined.tsv"
-        [ -f "$en_ref" ] || en_ref=""
-        [ -f "$zh_ref" ] || zh_ref=""
         local pmap_arg=""
         [ -f "$data/pinyin_map.txt" ] && pmap_arg="$data/pinyin_map.txt"
-        python3 -I "$cdict" en-zh --ecdict "$ecdict_csv" \
+        python3 -I "$cdict" en-zh --raw "$src/en_zh_ecdict_raw.tsv" \
             --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
-            ${en_ref:+--refined "$en_ref"} \
+            --refined "$src/en_zh_refined.tsv" \
             --out "$schemas/comments/en_zh.txt" \
           || warn "英→中释义词库生成失败"
-        python3 -I "$cdict" zh-en --cedict "$cedict_gz" ${ai_tsv:+--ai "$ai_tsv"} ${zh_ref:+--refined "$zh_ref"} ${pmap_arg:+--pinyin "$pmap_arg"} \
+        python3 -I "$cdict" zh-en --raw "$src/zh_en_cedict_raw.tsv" --ai "$src/zh_en_ai.tsv" \
+            --refined "$src/zh_en_cedict_refined.tsv" ${pmap_arg:+--pinyin "$pmap_arg"} \
             --words "$pinyin_cn/base.dict.yaml" "$pinyin_cn/ext.dict.yaml" \
                     "$pinyin/ext/idiom.dict.yaml" "$schemas/wubi86/wubi86_jidian.dict.yaml" \
             --out "$schemas/comments/zh_en.txt" \
           || warn "中→英释义词库生成失败"
-    else
-        warn "缺 .cache/ecdict 或 .cache/cedict，中英释义词库不可用（运行 gen-data 下载）"
     fi
     rm -rf "$data/comments-src"
 

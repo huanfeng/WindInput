@@ -2,7 +2,11 @@
 """中英释义注释词库生成：ECDICT / CC-CEDICT / AI 补齐 -> en_zh.txt、zh_en.txt。
 
 输出每词一行 `词<TAB>词性. 义项`（CC-CEDICT 无词性，只有义项）。仅用标准库。
-子命令：en-zh、zh-en、export-full、lint-ai、missing、plan、report。用法见 `-h`。
+子命令：en-zh、zh-en、snapshot、export-full、lint-ai、missing、plan、report。用法见 `-h`。
+
+构建只读入库的源数据（data/comments-src/）：重整版、AI 补齐，以及重整版没覆盖的那部分原始释义快照
+（`*_raw.tsv`，由 `snapshot` 从 ECDICT / CC-CEDICT 导出）。CC-CEDICT 的 MDBG 导出是每日滚动快照、
+无法固定版本，冻结进仓后构建可复现、不依赖外网；更新上游时重跑 `snapshot` 再提交。
 """
 
 import argparse
@@ -202,10 +206,14 @@ def load_ecdict(path, wanted, entry_fn=ecdict_entry):
     return result
 
 
-def build_en_zh(ecdict_path, word_paths, refined=None):
-    """refined（重整后的源数据）优先于 ECDICT 原始取义；只保留词表里的词。"""
+def build_en_zh(ecdict_path, word_paths, refined=None, raw=None):
+    """refined（重整后的源数据）优先于 ECDICT 原始取义；只保留词表里的词。
+    给了 `raw`（入库的原始释义快照 {词: 释义}）就用它代替读 ECDICT。"""
     words = load_words(word_paths)
-    entries = load_ecdict(ecdict_path, words)
+    if raw is not None:
+        entries = {w: raw[w] for w in words if w in raw}
+    else:
+        entries = load_ecdict(ecdict_path, words)
     for w in words:
         if refined and refined.get(w):
             entries[w] = refined[w]
@@ -337,6 +345,20 @@ def load_ai(path, pinyin_map=None):
     return result
 
 
+def load_raw(path):
+    """读原始释义快照 tsv（`snapshot` 的产物）：只按第一个 Tab 切——上游释义里可能本身带 Tab
+    （ECDICT 的 WinXP 就有），按 load_ai 那样逐列切会截掉后半截。"""
+    result = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            if not line or line.startswith("#") or "\t" not in line:
+                continue
+            w, gloss = line.split("\t", 1)
+            result.setdefault(w, gloss)
+    return result
+
+
 def build_zh_en(cedict, ai, words, refined=None):
     """优先级 refined > CEDICT 原始 > AI；只保留词表里的词。"""
     refined = refined or {}
@@ -392,19 +414,61 @@ def zh_words(paths):
     return [w for w in load_words(paths) if CJK.search(w)]
 
 
+def require_one(a, upstream, flag):
+    if bool(upstream) == bool(a.raw):
+        sys.exit(f"{a.cmd}: --{flag} 与 --raw 二选一")
+
+
+def raw_header(path):
+    """原始释义快照里以 `# CC-CEDICT ` 开头的头注释（快照的许可、日期），原样带进产物。"""
+    with open(path, encoding="utf-8") as f:
+        return "".join(l for l in f if l.startswith("# CC-CEDICT "))
+
+
 def cmd_en_zh(a):
-    entries, words = build_en_zh(a.ecdict, a.words, load_ai(a.refined))
+    require_one(a, a.ecdict, "ecdict")
+    raw = load_raw(a.raw) if a.raw else None
+    entries, words = build_en_zh(a.ecdict, a.words, load_ai(a.refined), raw)
     write_entries(entries, a.out)
     print(f"en_zh: {len(entries)}/{len(words)} -> {a.out}", file=sys.stderr)
 
 
 def cmd_zh_en(a):
+    require_one(a, a.cedict, "cedict")
     words = zh_words(a.words)
-    cedict = load_cedict(a.cedict, set(words))
+    cedict = load_raw(a.raw) if a.raw else load_cedict(a.cedict, set(words))
     pm = load_pinyin_map(a.pinyin) if a.pinyin else None
     entries = build_zh_en(cedict, load_ai(a.ai, pm), words, load_ai(a.refined, pm))
-    write_entries(entries, a.out, cedict_header(a.cedict))
+    header = raw_header(a.raw) if a.raw else cedict_header(a.cedict)
+    write_entries(entries, a.out, header)
     print(f"zh_en: {len(entries)}/{len(words)} -> {a.out}", file=sys.stderr)
+
+
+def cmd_snapshot(a):
+    """从 ECDICT / CC-CEDICT 导出重整版没覆盖的原始释义（构建时 --raw 用它代替上游文件）。
+    词表与过滤口径同 en-zh / zh-en：重整版有非空释义的词不导出，因为构建时它恒优先。"""
+    en_words = load_words(a.en_words)
+    en_ref = load_ai(a.en_refined)
+    en_raw = {w: e for w, e in load_ecdict(a.ecdict, en_words).items() if not en_ref.get(w)}
+    write_entries(
+        en_raw,
+        a.en_out,
+        "# 英→中原始释义快照：ECDICT（MIT，skywind3000/ECDICT），只含 en_zh_refined.tsv 没覆盖的词。\n"
+        "# 由 scripts/comment_dicts/build.py snapshot 导出，勿手改；更新上游时重跑。\n",
+    )
+    zh = zh_words(a.zh_words)
+    pm = load_pinyin_map(a.pinyin) if a.pinyin else None
+    zh_ref = load_ai(a.zh_refined, pm)
+    cedict = load_cedict(a.cedict, set(zh))
+    zh_raw = {w: cedict[w] for w in zh if not zh_ref.get(w) and cedict.get(w)}
+    write_entries(
+        zh_raw,
+        a.zh_out,
+        "# 中→英原始释义快照：CC-CEDICT（CC BY-SA 4.0，www.mdbg.net），只含 zh_en_cedict_refined.tsv 没覆盖的词。\n"
+        "# 由 scripts/comment_dicts/build.py snapshot 导出，勿手改；更新上游时重跑。\n"
+        + cedict_header(a.cedict),
+    )
+    print(f"snapshot: en {len(en_raw)} -> {a.en_out}; zh {len(zh_raw)} -> {a.zh_out}", file=sys.stderr)
 
 
 def cmd_export_full(a):
@@ -481,21 +545,35 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("en-zh", help="ECDICT 按英文词表裁剪")
-    s.add_argument("--ecdict", required=True)
+    s = sub.add_parser("en-zh", help="ECDICT（或入库快照）按英文词表裁剪")
+    s.add_argument("--ecdict", help="ECDICT csv；与 --raw 二选一")
+    s.add_argument("--raw", help="en_zh_ecdict_raw.tsv（入库的原始释义快照）；与 --ecdict 二选一")
     s.add_argument("--words", nargs="+", required=True, help="en.dict.yaml en_ext.dict.yaml")
     s.add_argument("--refined", help="en_zh_refined.tsv（重整后的源数据，优先于 ECDICT 原始取义）")
     s.add_argument("--out", required=True)
     s.set_defaults(fn=cmd_en_zh)
 
-    s = sub.add_parser("zh-en", help="CC-CEDICT + AI 按中文词表裁剪")
-    s.add_argument("--cedict", required=True)
+    s = sub.add_parser("zh-en", help="CC-CEDICT（或入库快照）+ AI 按中文词表裁剪")
+    s.add_argument("--cedict", help="CC-CEDICT 文件；与 --raw 二选一")
+    s.add_argument("--raw", help="zh_en_cedict_raw.tsv（入库的原始释义快照）；与 --cedict 二选一")
     s.add_argument("--ai", help="zh_en_ai.tsv")
     s.add_argument("--refined", help="zh_en_cedict_refined.tsv（优先于 CEDICT 原始取义）")
     s.add_argument("--pinyin", help="pinyin_map.txt：给了就丢掉 AI/refined 里拼音化的释义（专名不得音译）")
     s.add_argument("--words", nargs="+", required=True)
     s.add_argument("--out", required=True)
     s.set_defaults(fn=cmd_zh_en)
+
+    s = sub.add_parser("snapshot", help="从 ECDICT / CC-CEDICT 导出重整版没覆盖的原始释义快照")
+    s.add_argument("--ecdict", required=True)
+    s.add_argument("--cedict", required=True)
+    s.add_argument("--en-words", nargs="+", required=True, help="同 en-zh 的词表")
+    s.add_argument("--zh-words", nargs="+", required=True, help="同 zh-en 的词表")
+    s.add_argument("--en-refined", required=True)
+    s.add_argument("--zh-refined", required=True)
+    s.add_argument("--pinyin", help="同 zh-en：refined 里拼音化的释义不算覆盖")
+    s.add_argument("--en-out", required=True)
+    s.add_argument("--zh-out", required=True)
+    s.set_defaults(fn=cmd_snapshot)
 
     s = sub.add_parser("lint-ai", help="列出 AI/refined tsv 里会被丢掉的拼音化释义")
     s.add_argument("tsv")

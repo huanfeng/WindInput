@@ -482,14 +482,7 @@ function Download-Dicts {
     Get-Dict "$wubiBase/wubi86_jidian_extra.dict.yaml"          "$rimeWubi\wubi86_jidian_extra.dict.yaml"          "扩展词库"   | Out-Null
     Get-Dict "$wubiBase/wubi86_jidian_extra_district.dict.yaml" "$rimeWubi\wubi86_jidian_extra_district.dict.yaml" "行政区域"   | Out-Null
 
-    # 中英释义底表: ECDICT(MIT) 英->中, CC-CEDICT(CC BY-SA 4.0) 中->英; 由 scripts\comment_dicts\build.py
-    # 按系统词表裁剪后生成内置注释词库 (见 Assemble-Data), 许可见 NOTICE.md。ECDICT 固定到下面的提交;
-    # CC-CEDICT 的 MDBG 导出是每日重生成的滚动快照、无法固定, 快照日期写进 zh_en.txt 头注释。
-    # ⚠ dev.sh 的 download_dicts/assemble_data、mac/dev.sh 的同名函数是同一件事, 改一边要同步另外两边。
-    New-Item -ItemType Directory -Path "$CacheDir\ecdict", "$CacheDir\cedict" -Force | Out-Null
-    Gray "ECDICT / CC-CEDICT (中英释义):"
-    Get-Dict "https://raw.githubusercontent.com/skywind3000/ECDICT/bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b/ecdict.csv" "$CacheDir\ecdict\ecdict.csv" "英汉词典 ~66MB" | Out-Null
-    Get-Dict "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" "$CacheDir\cedict\cedict_1_0_ts_utf-8_mdbg.txt.gz" "汉英词典" | Out-Null
+    # 中英释义不再下载上游: ECDICT / CC-CEDICT 用到的部分已冻结进 data\comments-src\*_raw.tsv (见 Assemble-Data)。
 
     # Unicode CLDR emoji 中文注解 + emoji 白名单。不参与常规构建 —— emoji 命名表
     # (custom_emoji_named.txt) 已入库, 这些原始档只在需要重新生成它时用到:
@@ -750,36 +743,33 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
     } else { Warn "缺 .cache\rime-frost\opencc\, 白霜 emoji 模块不可用 (运行 gen-data 下载)" }
 
     # 9. 内置中英释义注释词库 (Python 脚本 scripts\comment_dicts\build.py): en_zh 按英文词表、
-    #    zh_en 按拼音/五笔词表裁剪, 产物只进 build 目录、不入版本库。AI 补齐的源数据
-    #    data\comments-src\zh_en_ai.tsv 入库, 随第 1 步一并复制进来, 用完剥掉不随包分发。
-    #    缺上游或缺 Python 只是释义注释不可用, 用 Warn 不中断构建。
-    $cdict   = "$ProductRoot\scripts\comment_dicts\build.py"
-    $ecdict  = "$CacheDir\ecdict\ecdict.csv"
-    $cedict  = "$CacheDir\cedict\cedict_1_0_ts_utf-8_mdbg.txt.gz"
-    $py      = @(Find-Python3)
+    #    zh_en 按拼音/五笔词表裁剪, 产物只进 build 目录、不入版本库。源数据全部入库在 data\comments-src\:
+    #    重整版、AI 补齐, 以及重整版没覆盖的原始释义快照 (*_raw.tsv, ECDICT MIT / CC-CEDICT CC BY-SA 4.0,
+    #    许可见 NOTICE.md)。冻结进仓后构建可复现、不依赖外网; 更新上游时手工跑 build.py snapshot 再提交。
+    #    随第 1 步一并复制进来, 用完剥掉不随包分发。缺 Python 或生成失败这里只 Warn, 发版由 Verify-DistData 拦下。
+    #    ⚠ dev.sh 与 mac/dev.sh 的同名步骤是同一件事, 改一边要同步另外两边。
+    $cdict = "$ProductRoot\scripts\comment_dicts\build.py"
+    $src   = "$data\comments-src"
+    $py    = @(Find-Python3)
     if ($py.Count -lt 1 -or -not $py[0] -or "$($py[0])".Length -le 1) {
         Warn "缺 Python 3 (python / py -3), 中英释义词库不可用"
-    } elseif ((Test-Path $ecdict) -and (Test-Path $cedict)) {
+    } else {
         Gray "生成中英释义注释词库 (comment_dicts) ..."
         $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         try {
             New-Item -ItemType Directory -Path "$schemas\comments" -Force | Out-Null
             $pyRest = @(); if ($py.Count -gt 1) { $pyRest = $py[1..($py.Count - 1)] }
-            $aiArgs = @(); if (Test-Path "$data\comments-src\zh_en_ai.tsv") { $aiArgs = @("--ai", "$data\comments-src\zh_en_ai.tsv") }
-            # 重整后的源数据(可无): 优先于 ECDICT / CEDICT 原始取义
-            $enRefArgs = @(); if (Test-Path "$data\comments-src\en_zh_refined.tsv") { $enRefArgs = @("--refined", "$data\comments-src\en_zh_refined.tsv") }
-            if (Test-Path "$data\comments-src\zh_en_cedict_refined.tsv") { $aiArgs += @("--refined", "$data\comments-src\zh_en_cedict_refined.tsv") }
             # 拼音表用于丢掉 AI 释义里拼音化的专名; 缺了只是不过滤
-            if (Test-Path "$data\pinyin_map.txt") { $aiArgs += @("--pinyin", "$data\pinyin_map.txt") }
+            $pmArgs = @(); if (Test-Path "$data\pinyin_map.txt") { $pmArgs = @("--pinyin", "$data\pinyin_map.txt") }
             # build.py 把进度写到 stderr; 全局 $ErrorActionPreference=Stop 下 PS5.1 会把它当错误, 此处临时放宽。
-            & $py[0] @pyRest -I $cdict en-zh --ecdict $ecdict --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" @enRefArgs --out "$schemas\comments\en_zh.txt"
+            & $py[0] @pyRest -I $cdict en-zh --raw "$src\en_zh_ecdict_raw.tsv" --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" --refined "$src\en_zh_refined.tsv" --out "$schemas\comments\en_zh.txt"
             if ($LASTEXITCODE -ne 0) { Warn "英→中释义词库生成失败" }
-            & $py[0] @pyRest -I $cdict zh-en --cedict $cedict @aiArgs --words "$pinyinCn\base.dict.yaml" "$pinyinCn\ext.dict.yaml" "$pinyin\ext\idiom.dict.yaml" "$schemas\wubi86\wubi86_jidian.dict.yaml" --out "$schemas\comments\zh_en.txt"
+            & $py[0] @pyRest -I $cdict zh-en --raw "$src\zh_en_cedict_raw.tsv" --ai "$src\zh_en_ai.tsv" --refined "$src\zh_en_cedict_refined.tsv" @pmArgs --words "$pinyinCn\base.dict.yaml" "$pinyinCn\ext.dict.yaml" "$pinyin\ext\idiom.dict.yaml" "$schemas\wubi86\wubi86_jidian.dict.yaml" --out "$schemas\comments\zh_en.txt"
             if ($LASTEXITCODE -ne 0) { Warn "中→英释义词库生成失败" }
         } catch {
             Warn "中英释义词库生成出错, 已跳过: $($_.Exception.Message)"
         } finally { $ErrorActionPreference = $old }
-    } else { Warn "缺 .cache\ecdict 或 .cache\cedict, 中英释义词库不可用 (运行 gen-data 下载)" }
+    }
     if (Test-Path "$data\comments-src") { Remove-Item -Recurse -Force "$data\comments-src" }
 
     $cnt = (Get-ChildItem $data -Recurse -File).Count
