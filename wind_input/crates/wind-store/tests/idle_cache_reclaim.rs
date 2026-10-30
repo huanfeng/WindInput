@@ -23,6 +23,16 @@ const K: CompletionKind = CompletionKind::UrlHistory;
 const TICK: Duration = Duration::from_millis(20);
 const IDLE: Duration = Duration::from_millis(100); // = 5 拍
 
+/// 正向等待的上限：只断言「最终会发生」，不断言多快。
+///
+/// macOS CI 上从起线程到第一次回收实测要 ~1 s（慢拍 200 ms + 五拍静默 + 关库重开时要刷掉
+/// 迁移刚写下的脏页；同一条路径在 `scan_reclaim.rs::a_mark_wakes_an_idle_reclaimer` 里
+/// 量到 370~400 ms，注释记了其中 ~250 ms 与拍长无关）。原先按 `IDLE * 10`（1 s）给，正好
+/// 卡在边界：2026-10-24 与 2026-10-30 的 macOS CI 各红过一次，红的还是不同的用例
+/// （`a_never_used…` 与 `the_after_hook…` 的第一条等待），而 Linux 上同样的等待只要 ~0.3 s。
+/// 放宽只影响「真的坏了」时多等几秒，不影响任何一条断言的判据。
+const WAIT: Duration = Duration::from_secs(10);
+
 fn store(tag: &str) -> (Arc<Store>, std::path::PathBuf) {
     let p = std::env::temp_dir().join(format!("wind_idle_{}_{tag}.redb", std::process::id()));
     let _ = std::fs::remove_file(&p);
@@ -52,7 +62,7 @@ fn an_idle_store_gives_its_page_cache_back() {
     assert_eq!(s.page_cache_drops(), 0, "刚访问完不该立刻丢");
 
     assert!(
-        wait_until(IDLE * 10, || s.page_cache_drops() >= 1),
+        wait_until(WAIT, || s.page_cache_drops() >= 1),
         "空闲 {IDLE:?} 之后该回收一次，实际 drops={}",
         s.page_cache_drops()
     );
@@ -94,7 +104,7 @@ fn a_never_used_store_is_not_reclaimed_on_a_timer() {
     // 开库本身会经 `with_db`（run_migrations / backfill），所以先让那一笔过去：
     // 等第一次回收发生，再看此后是否还继续空转。
     assert!(
-        wait_until(IDLE * 10, || s.page_cache_drops() >= 1),
+        wait_until(WAIT, || s.page_cache_drops() >= 1),
         "前提：开库那一笔访问之后应回收一次"
     );
     let after_first = s.page_cache_drops();
@@ -121,12 +131,12 @@ fn the_after_hook_runs_once_per_reclaim() {
     });
 
     // 开库那一笔访问引发第一次回收（同 a_never_used_store_is_not_reclaimed_on_a_timer）。
-    assert!(wait_until(IDLE * 10, || calls.load(Ordering::SeqCst) >= 1));
+    assert!(wait_until(WAIT, || calls.load(Ordering::SeqCst) >= 1));
     s.legacy_scan_completions(K, "", 0)
         .expect("再访问一次")
         .len();
     assert!(
-        wait_until(IDLE * 10, || calls.load(Ordering::SeqCst) >= 2),
+        wait_until(WAIT, || calls.load(Ordering::SeqCst) >= 2),
         "第二次回收后该再调一次"
     );
     std::thread::sleep(IDLE * 3);
