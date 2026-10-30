@@ -1498,6 +1498,8 @@ layout = "horizontal"
 # ⚠ 后两种依赖候选窗来显示编码，而候选窗在「宿主自绘候选」的场合根本不弹（TSF UI-less 的
 # 全屏游戏 / SDL、D3D 独占全屏）。那种场合下本项自动按 app_inline 走，否则编码一个字都看不见。
 preedit_display = "app_inline"
+# 拼音编码里音节之间显示的分隔符，默认 '，可留空。只改显示，不影响输入与切分。
+syllable_separator = "'"
 # 候选窗上翻到光标上方时的两个正交行为开关（可单独或叠加）：
 flip_when_above = false          # 反转候选项排列顺序（仅竖排 layout="vertical" 生效）
                                  # 反转期间上下条目键（↑↓ / Shift+Tab、Tab）按屏幕方向走，翻页键不受影响

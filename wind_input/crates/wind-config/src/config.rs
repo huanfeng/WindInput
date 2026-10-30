@@ -6910,6 +6910,13 @@ pub struct UiCandidateConfig {
     /// `docs/design/game-compat-tsf-uielement.md` §4.4 末。
     #[serde(default = "default_preedit_display")]
     pub preedit_display: String,
+    /// 拼音编码里音节之间显示的分隔符（`xiao'peng'you` 里的 `'`），默认 `'`，可留空。
+    ///
+    /// **只改显示**：应用里的组合串与候选窗编码栏都换，引擎内部的缓冲、手动分隔符 `'` 的
+    /// 输入与切分一概不变。Unreal Engine 等对资产名校验严格的程序不接受 `'`，留空或换成
+    /// 别的字符即可（GH#267）。只作用于主路拼音；临时英文等模式里的 `'` 是正文，不动。
+    #[serde(default = "default_syllable_separator")]
+    pub syllable_separator: String,
     #[serde(default)]
     pub hide_window: bool,
     /// 候选文本字号：0（默认）= 跟随主题 `behavior.font_size`，>0 = 用户指定。
@@ -7143,6 +7150,10 @@ pub struct UiCandidateConfig {
     pub custom_y: i32,
 }
 
+fn default_syllable_separator() -> String {
+    "'".to_string()
+}
+
 fn default_preedit_display() -> String {
     "app_inline".to_string()
 }
@@ -7225,6 +7236,7 @@ impl Default for UiCandidateConfig {
             per_page_extended: 0,
             layout: "horizontal".to_string(),
             preedit_display: default_preedit_display(),
+            syllable_separator: default_syllable_separator(),
             hide_window: false,
             font_size: 0.0,
             pager_bar_display: ByLayout::default(),

@@ -450,3 +450,38 @@ fn mode_switch_ends_add_word_session() {
         "切英文后单键 - 应透传"
     );
 }
+
+/// GH#267：`ui.candidate.syllable_separator` 只换显示——应用里的组合串不再带 `'`，引擎缓冲与切分不变。
+#[test]
+fn syllable_separator_is_display_only() {
+    skip_without_data!();
+    let run = |sep: &str| {
+        let sep = sep.to_string();
+        let mut c = Config::default();
+        c.schema.available = vec!["wubi86".into(), "pinyin".into()];
+        c.schema.active = "pinyin".into();
+        c.input.default.chinese_mode = true;
+        c.ui.candidate.syllable_separator = sep;
+        let coord = Coordinator::new_headless(c, Some(&data_dir()));
+        let mut last = None;
+        for ch in "xiaopeng".chars() {
+            last = Some(coord.handle_key_event_policed(&key(ch.to_ascii_uppercase() as u32, 0)));
+        }
+        (last.unwrap(), coord.debug_preedit())
+    };
+    let text_of = |a: &KeyAction| match a {
+        KeyAction::UpdateComposition { text, .. } => text.clone(),
+        other => panic!("应是组合更新，实际 {other:?}"),
+    };
+    let (act, _) = run("'");
+    assert!(
+        text_of(&act).contains('\''),
+        "默认仍带 '：{}",
+        text_of(&act)
+    );
+    let (act, internal) = run("");
+    assert_eq!(text_of(&act), "xiaopeng", "留空后应用里没有分隔符");
+    assert!(internal.contains('\''), "引擎内部仍分词：{internal}");
+    let (act, _) = run("·");
+    assert!(text_of(&act).contains('·') && !text_of(&act).contains('\''));
+}

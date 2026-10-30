@@ -647,6 +647,7 @@ static REGISTRY: &[ConfigField] = &[
         "ui.candidate.preedit_display",
         Enum(&["app_inline", "candidate_top", "candidate_inline"]),
     ),
+    f("ui.candidate.syllable_separator", Str),
     f("ui.candidate.hide_window", Bool),
     // 候选窗首显策略的全局默认档。per-app 覆盖走 compat.toml（右键菜单管理），
     // 那里的「跟随全局」一档就是回到本键。

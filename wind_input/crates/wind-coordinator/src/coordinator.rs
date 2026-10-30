@@ -7964,8 +7964,18 @@ impl Coordinator {
         // 编码区**恒下发**：谁来画由 `preedit_host_owned` 表达。
         // 曾经是「in_app 就发空串」——那等于把渲染策略焊进数据通道，自绘编码栏的宿主
         // 拿不到数据（Android 侧一度只能靠改显示模式配置绕开）。
-        let preedit = state.preedit.clone();
-        let preedit_caret = self.ui_caret_bytes(state).min(preedit.len());
+        let mut preedit = state.preedit.clone();
+        let mut preedit_caret = self.ui_caret_bytes(state).min(preedit.len());
+        // 拼音音节分隔符的显示替换（`ui.candidate.syllable_separator`，GH#267）。光标是字节偏移，
+        // 换算时按前缀整体替换后的长度重算。
+        if let Some(sep) = self.syllable_separator_for(state.active.is_none())
+            && preedit.contains('\'')
+        {
+            let head =
+                wind_bridge::handler::apply_syllable_separator(&preedit[..preedit_caret], &sep);
+            preedit = wind_bridge::handler::apply_syllable_separator(&preedit, &sep);
+            preedit_caret = head.len().min(preedit.len());
+        }
         let (cand_fixed, cand_fixed_x, cand_fixed_y) = self.candidate_fixed_pos();
         // mode_label 已在顶部计算（纳入空则隐藏守卫）：作为候选窗内联标记随候选窗一并显示。
         let _ = self.ui_tx.send(UiCommand::UpdateCandidates {
@@ -8571,6 +8581,23 @@ impl Coordinator {
         } else {
             self.rt().config.ui.labels.english_label()
         }
+    }
+
+    /// 拼音音节分隔符的显示替换：配置不是默认 `'`、当前是主路（无独占模式）且活跃引擎是
+    /// 拼音 / 混输时返回新分隔符，否则 `None`。临时英文等模式里的 `'` 是正文，不能换。
+    pub(crate) fn syllable_separator_for(&self, main_path: bool) -> Option<String> {
+        if !main_path {
+            return None;
+        }
+        let sep = self.rt().config.ui.candidate.syllable_separator.clone();
+        if sep == "'" {
+            return None;
+        }
+        matches!(
+            self.engine_mgr.current_engine_type(),
+            Some(wind_engine::EngineType::Pinyin | wind_engine::EngineType::Mixed)
+        )
+        .then_some(sep)
     }
 
     /// 「热键激活的模式活着吗」—— `STATUS_HOTKEY_SESSION` 的判据，**单一真相源**。

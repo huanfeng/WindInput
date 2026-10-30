@@ -194,6 +194,42 @@ pub enum KeyAction {
 }
 
 impl KeyAction {
+    /// 把应用侧组合串里的拼音音节分隔符换成 `sep`（GH#267）。只改**组合串**：已承诺上屏的
+    /// 正文不动；`UpdateComposition` 的光标位置（字符数）按替换后的长度换算。
+    pub fn with_syllable_separator(self, sep: &str) -> KeyAction {
+        match self {
+            KeyAction::UpdateComposition { text, caret_pos } if text.contains('\'') => {
+                KeyAction::UpdateComposition {
+                    caret_pos: map_caret_chars(&text, caret_pos as usize, sep) as _,
+                    text: apply_syllable_separator(&text, sep),
+                }
+            }
+            KeyAction::InsertText {
+                text,
+                new_composition: Some(c),
+                mode_changed,
+                chinese_mode,
+                has_new_composition,
+            } if c.contains('\'') => KeyAction::InsertText {
+                text,
+                new_composition: Some(apply_syllable_separator(&c, sep)),
+                mode_changed,
+                chinese_mode,
+                has_new_composition,
+            },
+            KeyAction::CommitThenDeferComposition {
+                commit_text,
+                deferred_composition,
+                timeout_ms,
+            } if deferred_composition.contains('\'') => KeyAction::CommitThenDeferComposition {
+                commit_text,
+                deferred_composition: apply_syllable_separator(&deferred_composition, sep),
+                timeout_ms,
+            },
+            other => other,
+        }
+    }
+
     /// 非 app_inline（候选窗自行显示 preedit）时，应用侧组合串替换为单个占位字符、光标置前。
     /// 目的：保留一段组合串供应用上报 caret 坐标（候选窗定位），但不在应用内显示真实编码
     /// （避免与候选窗 preedit 重复）。对齐 Go 版"模拟空格 + 光标移前"。
@@ -334,6 +370,18 @@ pub struct CaretData {
     pub composition_rect: Option<(i32, i32, i32, i32)>,
 }
 
+/// 把拼音编码显示串里的音节分隔符 `'` 换成 `sep`（`ui.candidate.syllable_separator`，可为空串）。
+/// 只用于**显示**：引擎内部缓冲与切分不动。
+pub fn apply_syllable_separator(text: &str, sep: &str) -> String {
+    text.replace('\'', sep)
+}
+
+/// [`apply_syllable_separator`] 之后，原串第 `caret` 个字符处的光标换算到新串的字符位置。
+pub fn map_caret_chars(text: &str, caret: usize, sep: &str) -> usize {
+    let quotes = text.chars().take(caret).filter(|&c| c == '\'').count();
+    caret - quotes + quotes * sep.chars().count()
+}
+
 /// MessageHandler trait：协调器实现此接口处理各种事件
 pub trait MessageHandler: Send + Sync {
     /// 处理按键事件
@@ -355,9 +403,17 @@ pub trait MessageHandler: Send + Sync {
         let action = self.handle_key_event(data);
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
+        } else if let Some(sep) = self.syllable_separator() {
+            action.with_syllable_separator(&sep)
         } else {
             action
         }
+    }
+
+    /// 当前该用什么字符显示拼音音节分隔符；`None` = 保持默认 `'`（含非拼音场合）。
+    /// 占位模式下组合串已换成占位符，无需再换。
+    fn syllable_separator(&self) -> Option<String> {
+        None
     }
 
     /// 新客户端连接建立时调用（仅桥接主通道，`pid` 取自 `GetNamedPipeClientProcessId`

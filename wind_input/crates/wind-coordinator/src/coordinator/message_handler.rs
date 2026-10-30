@@ -810,6 +810,16 @@ impl MessageHandler for Coordinator {
         Coordinator::composition_placeholder(self)
     }
 
+    fn syllable_separator(&self) -> Option<String> {
+        let active_none = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active
+            .is_none();
+        self.syllable_separator_for(active_none)
+    }
+
     fn preedit_uses_placeholder(&self) -> bool {
         // 非 app_inline（候选窗自显 preedit）→ 应用侧用占位空格，不重复显示编码。
         //
@@ -998,6 +1008,8 @@ impl MessageHandler for Coordinator {
         }
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
+        } else if let Some(sep) = self.syllable_separator() {
+            action.with_syllable_separator(&sep)
         } else {
             action
         }
