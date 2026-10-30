@@ -119,3 +119,13 @@
 - 钉住的测试：`wind-engine/tests/lookup_disabled_dicts.rs`、`wind-coordinator/tests/codetable_wildcard.rs`、
   `codetable_reverse.rs`
 - 来源：维护者定（论坛 t348 / t361）
+
+## 2026-10-30 · 混输下符号通配键首位作通配（0.129）
+
+- 合入：WindInput `0c3caf8e`；范围：开启通配的五笔拼音混输方案
+- 变化：通配键是符号（如 `?`、`/`、反引号）时，首位按它不再直接上屏标点，而是进缓冲作通配；
+  字母通配键（`z`）首位仍按拼音。
+- 触发条件：`schema.codetable.wildcard` 开且通配键为符号（出厂通配关、键为 `z`）。
+- 回退旧行为：把通配键换回字母，或关闭通配。
+- 钉住的测试：`wind-coordinator/tests/wildcard_symbol_lead.rs`
+- 来源：维护者实测
