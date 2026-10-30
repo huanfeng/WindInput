@@ -1323,6 +1323,9 @@ impl MessageHandler for Coordinator {
         let norm_hash = calc_key_hash(norm_mods, data.key_code);
         if let Some(action) = self.rt().compiled_hotkeys.match_key_down(norm_hash)
             && !action.is_empty()
+            // 裸 F 键在英文模式归宿主（TSF 靠策略位不吃；mac / Linux 整体转发，在这里挡）。
+            && !(hotkey::bare_function_key_needs_chinese(data.key_code, norm_mods, action)
+                && !self.is_chinese_mode())
         {
             debug!(
                 "Hotkey matched (key_down): {} (0x{:08X})",

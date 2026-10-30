@@ -186,6 +186,22 @@ fn bare_function_key_runs_command_when_idle() {
     assert_probe_ran(&coord);
 }
 
+/// 裸 F 键在英文模式归宿主：不执行命令、不吞键（F1 帮助、F5 刷新照常到应用）。
+#[test]
+fn bare_function_key_passes_through_in_english_mode() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        bind_key("f1", PROBE)(c);
+        c.input.default.chinese_mode = false;
+    });
+    let act = coord.handle_key_event(&key(VK_F1, 0));
+    assert!(
+        matches!(act, KeyAction::PassThrough),
+        "英文模式裸 F1 应透传，实际 {act:?}"
+    );
+    assert_probe_not_ran(&coord);
+}
+
 #[test]
 fn shift_backspace_runs_command_mid_composition() {
     skip_without_data!();

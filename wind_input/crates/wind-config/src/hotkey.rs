@@ -146,6 +146,26 @@ pub fn route_of_key_action(key: &str) -> Option<KeyActionRoute> {
     Some(KeyActionRoute::LeadingKey)
 }
 
+/// 裸 F1–F12（不带修饰键）绑的动作是否只在中文模式吃键。
+///
+/// 这类键没有字符产出，宿主自己常用它（F1 帮助、F5 刷新、F11 全屏）；英文模式下输入法不该
+/// 夺走。唯一的例外是「离开 / 返回英文态」那几类动词（`toggle_mode` / `switch_engine` /
+/// `toggle_schema:` / `switch_schema:`）：带上 `CHINESE_ONLY` 就成了英文态切不回来的单程票。
+/// 编译端（策略位）与分派端（服务端守卫）共用本判据，两处不会分叉。
+pub fn bare_function_key_needs_chinese(vk: u32, modifiers: u32, action: &str) -> bool {
+    use crate::config::BoundAction as BA;
+    if modifiers & MOD_GENERIC_MASK != 0 || !(VK_F1..=VK_F12).contains(&vk) {
+        return false;
+    }
+    !matches!(
+        BA::parse(action.trim()),
+        BA::ToggleSchema(_) | BA::SwitchSchema(_)
+    ) && !matches!(
+        BA::parse(action.trim()),
+        BA::Action(a) if matches!(a.as_str(), "toggle_mode" | "switch_engine")
+    )
+}
+
 /// 修饰键常量（与 wind-ipc MOD_* / Go ipc.Mod* 对齐）
 const MOD_SHIFT: u32 = 0x0001;
 const MOD_CTRL: u32 = 0x0002;
@@ -599,6 +619,16 @@ impl Compiler {
                              组合键与单键同一值域（BoundAction），多半是拼错了"
                         );
                         continue;
+                    };
+                    // 裸 F 键：英文模式归宿主（见 `bare_function_key_needs_chinese`）。
+                    let policy = if bare_function_key_needs_chinese(
+                        raw & 0xFFFF,
+                        (raw >> 16) & MOD_GENERIC_MASK,
+                        action,
+                    ) {
+                        policy | HOTKEY_POLICY_CHINESE_ONLY
+                    } else {
+                        policy
                     };
                     result.key_down.push(HotkeyEntry {
                         // match_hash 恒不含策略位——策略位是给 TSF 看的转发/抢占指示，
@@ -1570,6 +1600,37 @@ mod tests {
             "toggle_punct 不应带 GLOBAL 位"
         );
         assert!(tp.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0);
+    }
+
+    /// 裸 F1–F12 绑的动作只在中文模式吃键（宿主的 F1 帮助 / F5 刷新英文态归宿主）；
+    /// 「离开 / 返回英文态」的动词例外；带修饰键的 F 组合键不受影响。
+    #[test]
+    fn bare_function_key_is_chinese_only_except_mode_switch_verbs() {
+        let compile = |key: &str, verb: &str| {
+            let mut cfg = Config::default();
+            cfg.keys
+                .key_actions
+                .insert(key.to_string(), verb.to_string());
+            Compiler::new(cfg)
+                .compile()
+                .key_down
+                .into_iter()
+                .find(|e| e.match_hash == parse_hotkey(key).expect("键名合法"))
+                .expect("应进表")
+                .tsf_hash
+        };
+        assert!(compile("f5", "command:ime.reload()") & HOTKEY_POLICY_CHINESE_ONLY != 0);
+        assert!(compile("f5", "comment_state:detail") & HOTKEY_POLICY_CHINESE_ONLY != 0);
+        assert_eq!(compile("f6", "toggle_mode") & HOTKEY_POLICY_CHINESE_ONLY, 0);
+        assert_eq!(
+            compile("f6", "toggle_schema:wubi86") & HOTKEY_POLICY_CHINESE_ONLY,
+            0
+        );
+        assert_eq!(
+            compile("ctrl+f5", "command:ime.reload()") & HOTKEY_POLICY_CHINESE_ONLY,
+            0,
+            "带修饰键的 F 组合键仍按动词的老规矩"
+        );
     }
 
     /// 特殊模式直达热键写在 `keys.key_actions` 里（`special:<方案id>`），动词**原样**
