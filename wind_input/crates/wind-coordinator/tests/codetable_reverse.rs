@@ -565,12 +565,14 @@ fn reverse_only_lookup_zuia_vs_inline_uuiz() {
         "前置：行内通配确实生效：{inline:?}"
     );
     assert!(
-        inline.iter().all(|(t, _, _)| t != "门头沟区"),
-        "行内通配不查未启用库"
+        inline
+            .iter()
+            .any(|(t, _, c)| t == "门头沟区" && c == "*uuia"),
+        "行内通配也查未启用库，注释带 *：{inline:?}"
     );
 }
 
-/// 混输：反查只查主码表且含未启用库；行内通配（码长内）不含。
+/// 混输：反查与行内通配（码长内）都查主码表的未启用库。
 /// 同时钉住 `build_engine` 对混输 primary 递归透传全局开关（透传丢了，反查这侧就查不到）。
 #[test]
 fn mixed_reverse_sees_xzqy_inline_does_not() {
@@ -599,8 +601,8 @@ fn mixed_reverse_sees_xzqy_inline_does_not() {
     assert!(
         c.debug_all_candidate_texts()
             .iter()
-            .all(|t| t != "门头沟区"),
-        "混输行内通配不查未启用库"
+            .any(|t| t == "门头沟区"),
+        "混输行内通配也查未启用库"
     );
 }
 

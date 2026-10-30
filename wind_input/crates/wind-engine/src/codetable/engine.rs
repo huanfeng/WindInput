@@ -260,10 +260,9 @@ pub struct CodeTableEngine {
     segment_shadow: Option<(Arc<wind_store::Store>, String)>,
     /// 影子层：本方案未启用的扩展词库（reverse-mode spec §4.2）。
     ///
-    /// ★ **只在 [`Self::wildcard_query`] 且 `include_disabled` 时读**——即只有反查模式
-    /// （`convert_reverse`）读它；行内通配（`convert_wildcard`）与普通 `convert`（打字候选、
-    /// 活码探针、顶码、自动上屏复评）都不读。读了就是把未启用库漏进打字 / 行内通配候选，
-    /// 「未启用扩展库只给反查模式」的保证全靠这一条。
+    /// ★ **只在 [`Self::wildcard_query`] 且 `include_disabled` 时读**——即行内通配
+    /// （`convert_wildcard`）与反查模式（`convert_reverse`）读它；普通 `convert`（打字候选、
+    /// 活码探针、顶码、自动上屏复评）不读。读了就是把未启用库漏进打字候选，这一条靠调用方守。
     /// `None` = 开关（`input.reverse.lookup_disabled_dicts`）关 / 无未启用库 / 测试未注入。
     disabled_dicts: Option<super::DisabledDictLayers>,
 }
@@ -703,7 +702,7 @@ impl CodeTableEngine {
     /// 通配查询内核（行内通配与反查模式共用）。语义见 `convert_wildcard`。
     ///
     /// `include_disabled`：是否并查影子层（未启用扩展库）。`false` ⇒ 连 `search_pattern` 都不调
-    /// （不触发影子层加载），结果与没挂影子层时逐条相同。只有反查模式传 `true`。
+    /// （不触发影子层加载），结果与没挂影子层时逐条相同。行内通配与反查模式都传 `true`。
     fn wildcard_query(
         &self,
         input: &str,
@@ -754,6 +753,10 @@ impl CodeTableEngine {
                 c.source = CandidateSource::CodeTable;
                 c.is_exact_code = c.code.chars().count() == n;
                 c.comment = c.code.clone();
+                // 未启用库的命中在注释前加 `*`，让人看出它不在当前启用的词库里。
+                if c.from_disabled_dict {
+                    c.comment.insert(0, '*');
+                }
                 c.is_wildcard = true;
                 c
             })
@@ -1074,7 +1077,7 @@ impl Engine for CodeTableEngine {
     /// 逆切分、英文混入；「精确」改判「等长」（落在 `is_exact_code` 上，协调器重排沿用）；
     /// 注释恒为完整编码（学码价值所在，不受 `show_code_hint` 门控）；
     /// `should_commit` / `should_clear` 恒 false（spec §3.2）。
-    /// 不查影子层（未启用扩展库只给反查模式，见 `convert_reverse`）。
+    /// 影子层（未启用扩展库）挂着就并查，命中注释带 `*`；挂不挂由 `input.reverse.lookup_disabled_dicts` 定。
     fn convert_wildcard(
         &self,
         input: &str,
@@ -1082,7 +1085,7 @@ impl Engine for CodeTableEngine {
         max_candidates: usize,
     ) -> Option<ConvertResult> {
         self.opts.wildcard?;
-        Some(self.wildcard_query(input, pattern, max_candidates, false))
+        Some(self.wildcard_query(input, pattern, max_candidates, true))
     }
 
     fn reverse_wildcard_key(&self) -> Option<char> {
@@ -2981,9 +2984,9 @@ mod tests {
         );
     }
 
-    /// 行内通配不读影子层，连加载都不触发；反查才读。
+    /// 行内通配与反查都并查影子层，命中带 `from_disabled_dict` 且注释以 `*` 起头；已启用的不带。
     #[test]
-    fn convert_wildcard_never_reads_disabled_layers() {
+    fn wildcard_and_reverse_both_read_disabled_layers_with_marker() {
         let e = with_xz(engine_opts(
             &[("uuif", "立法", 10)],
             CommitOptions {
@@ -2991,28 +2994,20 @@ mod tests {
                 ..wildcard_opts(CommitOptions::default())
             },
         ));
-        let r = e
-            .convert_wildcard("uuiz", &slot_pattern("uui?"), 50)
-            .unwrap();
-        assert!(
-            r.candidates
-                .iter()
-                .all(|c| c.text != "门头沟区" && !c.from_disabled_dict)
-        );
-        assert_eq!(
-            e.disabled_dicts().unwrap().load_count(),
-            0,
-            "行内通配不触发加载"
-        );
-        let r = e
-            .convert_reverse("uuiz", &slot_pattern("uui?"), 50)
-            .unwrap();
-        assert!(
-            r.candidates
-                .iter()
-                .any(|c| c.text == "门头沟区" && c.from_disabled_dict)
-        );
-        assert_eq!(e.disabled_dicts().unwrap().load_count(), 1);
+        for r in [
+            e.convert_wildcard("uuiz", &slot_pattern("uui?"), 50)
+                .unwrap(),
+            e.convert_reverse("uuiz", &slot_pattern("uui?"), 50)
+                .unwrap(),
+        ] {
+            let xz = r.candidates.iter().find(|c| c.text == "门头沟区").unwrap();
+            assert!(
+                xz.from_disabled_dict && xz.comment.starts_with('*'),
+                "{xz:?}"
+            );
+            let ok = r.candidates.iter().find(|c| c.text == "立法").unwrap();
+            assert!(!ok.from_disabled_dict && !ok.comment.starts_with('*'));
+        }
     }
 
     /// 仅单字 + 影子层。影子层的词组同样被滤掉；取尽判据是**双边**的——

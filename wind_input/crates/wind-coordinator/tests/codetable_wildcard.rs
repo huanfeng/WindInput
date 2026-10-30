@@ -1298,7 +1298,7 @@ fn tri_of(cfg: Config, keys: &str) -> Vec<(String, String, String)> {
     coord.debug_candidate_triples()
 }
 
-/// 真实数据：开关开着，行内通配与关时逐条相同，不出未启用库的「门头沟区」。
+/// 真实数据：开关开着，行内通配在已启用结果之后追加未启用库的「门头沟区」；关着则不出。
 #[test]
 fn lookup_disabled_dicts_inline_wildcard_excludes_xzqy() {
     if !dict_ready() {
@@ -1308,8 +1308,15 @@ fn lookup_disabled_dicts_inline_wildcard_excludes_xzqy() {
     let off = tri_of(wubi(true, "z"), "uuiz");
     let on = tri_of(lookup_disabled(wubi(true, "z")), "uuiz");
     assert!(!off.is_empty(), "前置：行内通配有结果（防空过）");
-    assert_eq!(on, off);
-    assert!(on.iter().all(|(t, _, _)| t != "门头沟区"), "{on:?}");
+    assert!(
+        off.iter().all(|(t, _, _)| t != "门头沟区"),
+        "关时不查：{off:?}"
+    );
+    assert_eq!(&on[..off.len()], &off[..], "已启用的在前、次序不变");
+    assert!(
+        on.iter().any(|(t, _, c)| t == "门头沟区" && c == "*uuia"),
+        "开时行内通配查到未启用库，注释带 *：{on:?}"
+    );
     assert!(
         reverse_has_xzqy(wubi(true, "z")),
         "对照：同一配置下反查模式查得到门头沟区（影子层确实挂上过）"
@@ -1332,7 +1339,7 @@ fn lookup_disabled_dicts_leaves_plain_typing_identical() {
     }
 }
 
-/// 混输：开关开着，主码表子引擎的行内通配同样不出未启用库。
+/// 混输：开关开着，主码表子引擎的行内通配同样查到未启用库。
 #[test]
 fn mixed_inline_wildcard_excludes_xzqy() {
     if !mixed_ready() {
@@ -1341,7 +1348,7 @@ fn mixed_inline_wildcard_excludes_xzqy() {
     }
     let on = tri_of(lookup_disabled(wubi_pinyin(true)), "uuiz");
     assert!(!on.is_empty(), "前置：混输行内通配有结果（防空过）");
-    assert!(on.iter().all(|(t, _, _)| t != "门头沟区"), "{on:?}");
+    assert!(on.iter().any(|(t, _, _)| t == "门头沟区"), "{on:?}");
     assert!(
         reverse_has_xzqy(wubi_pinyin(true)),
         "对照：同一混输配置下反查模式查得到门头沟区"
