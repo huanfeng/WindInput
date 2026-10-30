@@ -336,7 +336,11 @@ fn toggle_tip_on_right_moves_caret_before_end() {
     assert_eq!(coord.debug_hover_target(), -1, "前提：无悬停");
 
     let act = coord.handle_key_event(&key(0x27, 0)); // → 光标回到末尾，不开提示
-    assert!(matches!(act, KeyAction::Consumed), "应吞键，实际 {act:?}");
+    // 宿主里的组合区插入符要跟着动：回 UpdateComposition（带新位置），不是裸 Consumed。
+    assert!(
+        matches!(act, KeyAction::UpdateComposition { caret_pos: 2, .. }),
+        "应更新组合区插入符到末尾，实际 {act:?}"
+    );
     assert_eq!(coord.debug_hover_target(), -1, "光标没到末尾前 → 只移光标");
 
     coord.handle_key_event(&key(0x27, 0)); // 已在末尾 → 开提示
@@ -484,4 +488,29 @@ fn syllable_separator_is_display_only() {
     assert!(internal.contains('\''), "引擎内部仍分词：{internal}");
     let (act, _) = run("·");
     assert!(text_of(&act).contains('·') && !text_of(&act).contains('\''));
+    let (act, _) = run(" ");
+    assert!(
+        text_of(&act).contains("xiao peng") && !text_of(&act).contains('\''),
+        "空格分隔：{}",
+        text_of(&act)
+    );
+}
+
+/// 只把 → 绑成 `toggle_tip`（← 不绑，走默认移光标）：← 退一格后 → 能回到末尾，且回 UpdateComposition。
+#[test]
+fn toggle_tip_alone_on_right_keeps_caret_movable() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        c.keys
+            .session_actions
+            .insert("right".into(), "toggle_tip".into());
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(0x25, 0)); // 默认 ← 退一格
+    let act = coord.handle_key_event(&key(0x27, 0));
+    assert!(
+        matches!(act, KeyAction::UpdateComposition { caret_pos: 2, .. }),
+        "实际 {act:?}"
+    );
+    assert_eq!(coord.debug_hover_target(), -1);
 }

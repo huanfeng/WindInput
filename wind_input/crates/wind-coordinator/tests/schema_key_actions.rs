@@ -1335,3 +1335,21 @@ fn phrase_prefix_listing_can_be_turned_off() {
     );
     assert!(exact.iter().any(|t| t == "○短语"), "精确码 crr 仍要出");
 }
+
+/// `min_prefix` 只管前缀列举的输入长度；短于它的短语编码，敲全码仍要出。
+#[test]
+fn short_phrase_code_ignores_min_prefix() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = cfg_for("pinyin");
+    cfg.input.phrase.min_prefix = 3;
+    let coord = Coordinator::new_headless_with_override(cfg, Some(&data_dir()), None);
+    coord.debug_install_phrases(vec![seed("c", "○单码"), seed("cr", "○双码")]);
+    coord.handle_key_event(&key('C' as u32));
+    let one = coord.debug_all_candidate_texts();
+    assert!(one.iter().any(|t| t == "○单码"), "1 字符编码应出: {one:?}");
+    coord.handle_key_event(&key('R' as u32));
+    let two = coord.debug_all_candidate_texts();
+    assert!(two.iter().any(|t| t == "○双码"), "2 字符编码应出: {two:?}");
+}

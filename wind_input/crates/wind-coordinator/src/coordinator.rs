@@ -5839,6 +5839,15 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
+    /// 编码区光标移动后的返回：刷新候选窗，并带上组合区新插入符位置（与默认 ←/→ 臂同形）。
+    /// 只回 `Consumed` 的话宿主里的插入符不会跟着动。
+    fn caret_moved_action(&self, state: &mut State) -> KeyAction {
+        let text = state.preedit.clone();
+        let caret_pos = self.composition_caret(state);
+        self.notify_ui_update(state);
+        KeyAction::UpdateComposition { caret_pos, text }
+    }
+
     /// 开 / 关高亮项的悬停提示：悬停目标设为高亮项，已是则清掉。
     /// 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
     fn toggle_hover_tip(&self, state: &mut State) -> KeyAction {
@@ -6010,8 +6019,7 @@ impl Coordinator {
                     )
                     .move_right();
                     if moved {
-                        self.notify_ui_update(state);
-                        return Some(KeyAction::Consumed);
+                        return Some(self.caret_moved_action(state));
                     }
                 }
                 return Some(self.toggle_hover_tip(state));
@@ -6058,8 +6066,9 @@ impl Coordinator {
                         // 落到下面统一的 nav 执行，与 `highlight_down` 同一条路。
                         wind_config::CaretEnd::Next => keymap::NavAction::HighlightDown,
                     }
+                } else if moved {
+                    return Some(self.caret_moved_action(state));
                 } else {
-                    self.notify_ui_update(state);
                     return Some(KeyAction::Consumed);
                 }
             }
