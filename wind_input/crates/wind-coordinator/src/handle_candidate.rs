@@ -1707,9 +1707,10 @@ impl Coordinator {
             // 补全候选塞进来（见 `ConvertResult::completion_hint`），故这个「空」判得准。
             // 不设码长闸门（论坛 t302）：满码长乃至超码长空码也补，与引擎侧 `completion_hints` 同口径。
             let complete_fallback = exact_only && ct.single_code_complete && candidates.is_empty();
-            // `min_prefix = 0` 关闭前缀列举（GH#264：编码 crr 的短语不想在敲 cr 时冒出来），
-            // 只留上面的精确码短语。补全池属「当前无任何候选」的兜底，同样不再取。
-            let prefix_hits = if min_prefix > 0 && (!exact_only || complete_fallback) {
+            // `input.phrase.prefix_match` 关闭前缀列举（GH#264）：只留上面的精确码短语。空码补全兜底
+            // （`complete_fallback`）是精确匹配自己的功能，不受它管。
+            let prefix_match = self.rt().config.input.phrase.prefix_match;
+            let prefix_hits = if (prefix_match && !exact_only) || complete_fallback {
                 phrases.lookup_prefix(&state.input_buffer, &recent, min_prefix, &phrase_scope)
             } else {
                 Vec::new()

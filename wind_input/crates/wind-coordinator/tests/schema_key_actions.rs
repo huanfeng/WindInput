@@ -1309,9 +1309,9 @@ fn phrase_prefix_listing_can_be_turned_off() {
     if !has_schemas() {
         return;
     }
-    let texts = |min_prefix: usize| {
+    let texts = |prefix_match: bool| {
         let mut cfg = cfg_for("pinyin");
-        cfg.input.phrase.min_prefix = min_prefix;
+        cfg.input.phrase.prefix_match = prefix_match;
         let coord = Coordinator::new_headless_with_override(cfg, Some(&data_dir()), None);
         coord.debug_install_phrases(vec![seed("crr", "○短语")]);
         coord.handle_key_event(&key('C' as u32));
@@ -1323,15 +1323,15 @@ fn phrase_prefix_listing_can_be_turned_off() {
         };
         (t, exact)
     };
-    let (on, _) = texts(2);
+    let (on, _) = texts(true);
     assert!(
         on.iter().any(|t| t == "○短语"),
         "前提：默认敲 cr 会列出 crr 的短语"
     );
-    let (off, exact) = texts(0);
+    let (off, exact) = texts(false);
     assert!(
         !off.iter().any(|t| t == "○短语"),
-        "min_prefix=0 时 cr 不该列出"
+        "prefix_match=false 时 cr 不该列出"
     );
     assert!(exact.iter().any(|t| t == "○短语"), "精确码 crr 仍要出");
 }

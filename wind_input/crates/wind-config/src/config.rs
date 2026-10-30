@@ -7645,6 +7645,14 @@ impl Default for TooltipConfig {
 /// 短语前缀列举配置（[input.phrase]，对齐 Go）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhraseConfig {
+    /// 命令短语的前缀列举开关：敲前缀（如 `zz`、`co`）时列出以它开头的短语。关闭后只有编码
+    /// 完全相同的短语才出（GH#264：编码 `crr` 的短语不想在敲 `cr` 时冒出来）。默认开。
+    ///
+    /// 与码表「精确匹配」（`single_code_input`）的关系：精确匹配只管纯码表方案，且本来就不列
+    /// 前缀；本开关对所有方案生效，拼音 / 混输靠它关前缀列举。精确匹配的「空码补全」兜底
+    /// 另有自己的开关，不受本项影响。
+    #[serde(default = "default_true")]
+    pub prefix_match: bool,
     /// 触发前缀导航列举的最小输入长度（原 min_prefix_length）。默认 2。
     #[serde(default = "default_phrase_min_prefix")]
     pub min_prefix: usize,
@@ -7653,6 +7661,7 @@ pub struct PhraseConfig {
 impl Default for PhraseConfig {
     fn default() -> Self {
         Self {
+            prefix_match: true,
             min_prefix: default_phrase_min_prefix(),
         }
     }

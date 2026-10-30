@@ -1233,6 +1233,8 @@ candidate_prefix = "⚡"
 
 # 短语前缀列举（原 [dict.phrase]）
 [input.phrase]
+# 命令短语前缀列举：敲前缀（zz、co）时列出以它开头的短语；关闭后只出编码完全相同的短语。
+prefix_match = true
 min_prefix = 2
 
 [keys]
