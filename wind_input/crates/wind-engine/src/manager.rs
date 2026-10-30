@@ -1943,6 +1943,22 @@ impl EngineManager {
             .map(|l| Arc::clone(&l.engine))
     }
 
+    /// 主码表未启用扩展库里 `text` 的编码（码长升序，已带 `*` 前缀标明未启用）；
+    /// 仅剪贴板反查用——注释 / 悬停 / 查重仍只认已启用词库。开关关或无影子层时为空。
+    pub fn disabled_dict_codes(&self, text: &str) -> Vec<String> {
+        let primary = self
+            .primary_codetable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.loaded_disabled_dict_engine(&primary)
+            .and_then(|e| e.disabled_dict_layers().map(|d| d.codes_of(text)))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| format!("*{c}"))
+            .collect()
+    }
+
     /// 阻塞地把 `schema_id` 已加载引擎的影子层建好（预热线程 / 测试用，**不可进按键链路**）。
     /// 返回是否真的建了；引擎未加载、没挂影子层或已建好时返回 false。
     pub fn prewarm_disabled_dicts(&self, schema_id: &str) -> bool {

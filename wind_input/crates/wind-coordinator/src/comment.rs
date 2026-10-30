@@ -1668,6 +1668,12 @@ impl crate::coordinator::Coordinator {
             // ★ 没就绪时顺手派后台构建（单飞、已就绪即返回，不阻塞）：运行期格式串不在配置里，
             // `DataNeeds` 看不见它，没有别人会替它建——不派的话这条反查永远是空的。
             "code_rev" | "code" => match self.engine_mgr.codetable_reverse_hint(text) {
+                // 已启用词库里没有时，补未启用扩展库的码（`*` 开头，取最长）。
+                Some(code) if code.is_empty() => self
+                    .engine_mgr
+                    .disabled_dict_codes(text)
+                    .pop()
+                    .unwrap_or_default(),
                 Some(code) => code,
                 None => {
                     self.spawn_index_warm(&self.engine_mgr.primary_codetable_id(), false);
@@ -1692,6 +1698,13 @@ impl crate::coordinator::Coordinator {
                         self.spawn_index_warm(&sid, false); // 理由同上
                         String::new()
                     }
+                };
+                // 已启用词库的码之后，追加未启用扩展库的码（`*` 开头）。
+                let extra = self.engine_mgr.disabled_dict_codes(text);
+                let codes = match (codes.is_empty(), extra.is_empty()) {
+                    (_, true) => codes,
+                    (true, false) => extra.join("/"),
+                    (false, false) => format!("{codes}/{}", extra.join("/")),
                 };
                 // `word_codes_display` 固定用 `/` 连接，换分隔符只能在这里替。
                 return Some(joined_codes(&codes, arg));

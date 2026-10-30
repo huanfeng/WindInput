@@ -1,5 +1,5 @@
-//! 未启用扩展词库只给反查模式（开关 `input.reverse.lookup_disabled_dicts`）：
-//! 行内通配与普通打字不看它，注释反查只认已启用词库。自造夹具，不依赖 build_dev/data。
+//! 未启用扩展词库（开关 `input.reverse.lookup_disabled_dicts`）：反查模式、行内通配、剪贴板反查会查，
+//! 注释反查与普通打字不看它。自造夹具，不依赖 build_dev/data。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
@@ -302,4 +302,21 @@ fn no_variant_index_file_is_written() {
             .all(|n| *n == regular),
         "{names:?}"
     );
+}
+
+/// 剪贴板反查专用入口 `disabled_dict_codes`：开关开才有，码带 `*`；注释反查仍不认。
+#[test]
+fn clipboard_reverse_sees_disabled_extra_only_when_switch_on() {
+    let (m, id, _g) = setup("clip", true, true, true);
+    assert!(m.prewarm_reverse_index(&id));
+    m.prewarm_disabled_dicts(&id);
+    assert_eq!(m.disabled_dict_codes("门头沟区"), ["*uuia"]);
+    assert!(
+        m.disabled_dict_codes("立法").is_empty(),
+        "已启用库的词不重复列"
+    );
+    assert_eq!(m.codetable_reverse_hint("门头沟区").as_deref(), Some(""));
+    let (off, id2, _g2) = setup("clip_off", false, true, true);
+    assert!(off.prewarm_reverse_index(&id2));
+    assert!(off.disabled_dict_codes("门头沟区").is_empty());
 }

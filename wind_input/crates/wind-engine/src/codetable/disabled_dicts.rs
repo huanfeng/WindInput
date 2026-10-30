@@ -45,6 +45,8 @@ pub struct DisabledDictLayers {
     wnorm: Option<wind_dict::WeightNorm>,
     /// 已加载的影子 `DictManager`；`None` = 尚未加载或已作废。
     loaded: Mutex<Option<Arc<DictManager>>>,
+    /// 影子集合的「文本 → 编码（按码长升序）」小表，剪贴板反查用；随 `loaded` 一起作废。
+    text_codes: Mutex<Option<Arc<std::collections::HashMap<String, Vec<String>>>>>,
     /// 建过几遍影子 `DictManager`（测试与诊断用）。
     loads: AtomicUsize,
 }
@@ -60,6 +62,7 @@ impl DisabledDictLayers {
             enabled: Mutex::new(enabled.into_iter().collect()),
             wnorm,
             loaded: Mutex::new(None),
+            text_codes: Mutex::new(None),
             loads: AtomicUsize::new(0),
         }
     }
@@ -82,6 +85,31 @@ impl DisabledDictLayers {
     pub fn mark_disabled(&self, id: &str) {
         lock(&self.enabled).remove(id);
         *lock(&self.loaded) = None;
+        *lock(&self.text_codes) = None;
+    }
+
+    /// 影子集合里 `text` 的全部编码（码长升序、去重），剪贴板反查（cmdbar `dict.rev`）用。
+    /// 首次调用扫一遍影子层建小表（阻塞，**别放在按键线程首发**——预热线程会顺手建）。
+    pub fn codes_of(&self, text: &str) -> Vec<String> {
+        let map = {
+            let dm = self.dm();
+            let mut g = lock(&self.text_codes);
+            g.get_or_insert_with(|| {
+                let mut m: std::collections::HashMap<String, Vec<String>> = Default::default();
+                dm.for_each_entry(&mut |code, t, _| {
+                    let v = m.entry(t.to_string()).or_default();
+                    if !v.iter().any(|c| c == code) {
+                        v.push(code.to_string());
+                    }
+                });
+                for v in m.values_mut() {
+                    v.sort_by_key(|c| c.len());
+                }
+                Arc::new(m)
+            })
+            .clone()
+        };
+        map.get(text).cloned().unwrap_or_default()
     }
 
     /// 建过几遍影子 `DictManager`。
@@ -92,7 +120,10 @@ impl DisabledDictLayers {
     /// 预热：把影子集合现在就建好（阻塞读盘，**只可在后台线程调**）。返回是否真的建了——
     /// 已建好的直接返回 false。与查询共用 [`Self::dm`] 那把锁，故与按键线程天然串行。
     pub fn warm(&self) -> bool {
-        self.dm_built().1
+        let built = self.dm_built().1;
+        // 反查小表也在后台建好，免得首次剪贴板反查在按键线程上扫表。
+        let _ = self.codes_of("");
+        built
     }
 
     /// 还没建、且此刻没有别的线程正在建 ⇒ 值得起一个预热线程。不阻塞（`try_lock`）：
