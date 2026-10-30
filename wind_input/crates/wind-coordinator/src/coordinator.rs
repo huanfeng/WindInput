@@ -9842,13 +9842,12 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                let chinese_mode = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .chinese_mode;
+                let (chinese_mode, main_path) = {
+                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    (st.chinese_mode, st.active.is_none())
+                };
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
-                self.push_no_key_ctx_action(&act, chinese_mode);
+                self.push_no_key_ctx_action(&act, chinese_mode, main_path);
                 true
             }
         }

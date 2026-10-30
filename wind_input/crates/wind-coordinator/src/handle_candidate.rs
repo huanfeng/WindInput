@@ -5765,7 +5765,7 @@ impl Coordinator {
             };
             drop(state);
             // commit_selected 已按分支自行 notify_ui_update / notify_ui_hide，此处不再重复。
-            self.push_no_key_ctx_action(&act, chinese_mode);
+            self.push_no_key_ctx_action(&act, chinese_mode, true);
             return Some(act);
         }
         // ── 以下为 overlay 模式（active != None）路径 ──
@@ -5828,7 +5828,7 @@ impl Coordinator {
                 self.push_server
                     .push_commit_to_active(&wind_ipc::codec::encode_clear_composition());
             }
-            _ => self.push_no_key_ctx_action(&act, chinese_mode),
+            _ => self.push_no_key_ctx_action(&act, chinese_mode, false),
         }
         Some(act)
     }
@@ -5861,8 +5861,21 @@ impl Coordinator {
     /// 也就是说这里的缺口仍在：`handle_addword.rs` 里有七处返回 `ClearComposition`，
     /// 加词面板的鼠标点选哪天接进本函数就会再踩一次。届时应当**在此补一臂**，而不是
     /// 在调用点做第三次特判 —— 修现象不修机制，每次修复都正确，每次都不减少下次的概率。
-    pub(crate) fn push_no_key_ctx_action(&self, act: &KeyAction, chinese_mode: bool) {
-        match act {
+    ///
+    /// `main_path`：来自主输入路（非临英 / 快捷输入等 overlay）。组合区里的音节分隔符要照
+    /// `ui.candidate.syllable_separator` 换掉（键盘路径在 `handle_key_event_policed` 收口里换，
+    /// 这条通路不经过它，漏换的现象是鼠标点选首词后应用里又冒出 `'`）。
+    pub(crate) fn push_no_key_ctx_action(
+        &self,
+        act: &KeyAction,
+        chinese_mode: bool,
+        main_path: bool,
+    ) {
+        let act = match self.syllable_separator_for(main_path) {
+            Some(sep) => act.clone().with_syllable_separator(&sep),
+            None => act.clone(),
+        };
+        match &act {
             KeyAction::UpdateComposition { text, caret_pos } => {
                 let encoded = wind_ipc::codec::encode_update_composition(text, *caret_pos);
                 self.push_server.push_commit_to_active(&encoded);

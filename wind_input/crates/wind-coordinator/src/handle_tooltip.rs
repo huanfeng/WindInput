@@ -216,7 +216,7 @@ impl Coordinator {
         match cmd {
             MenuCmd::TooltipCommitSection | MenuCmd::TooltipCommitLine => {
                 match self.tooltip_commit_action(&target, &value) {
-                    Some(act) => self.push_no_key_ctx_action(&act, true),
+                    Some(act) => self.push_no_key_ctx_action(&act, true, false),
                     None => self.tooltip_abandoned(),
                 }
             }
