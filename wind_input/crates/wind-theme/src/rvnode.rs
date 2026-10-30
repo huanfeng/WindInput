@@ -262,11 +262,11 @@ impl RvViews {
 
     /// 以用户 `ui.font.weight`（非 0）为**基准字重**改写主题节点的显式字重（看板 A2-1）。
     ///
-    /// - 普通字重（< 600，且状态 patch 不比其基态重）直接写成用户字重。不能清成 0：
+    /// - 基态节点、以及不比基态重的状态 patch，直接写成用户字重。不能清成 0：
     ///   wind-ui `eff_weight` 按「节点状态 → item 状态 → 节点基态 → item 基态」级联，
     ///   0 会让它越过本节点掉到别处的强调值上（如 `text.hover` 400 回落 `text` 700）；
-    /// - 强调字重（≥ 600，或状态 patch 比基态重，如 `text` 500 / `text.selected` 700）
-    ///   取 max(主题值, 用户值)；用户字重低于主题强调值时，强调仍比普通粗。
+    /// - 状态 patch 比基态重（如 `text.selected` 700）才算强调，取 max(主题值, 用户值)；
+    ///   用户字重低于它时，选中等强调仍比普通粗。
     ///
     /// 状态 patch 比基态时，基态未写字重按常规 400 比较。`user <= 0`（不指定）时什么都不改。
     pub fn apply_user_font_weight(&mut self, user: i32) {
@@ -334,18 +334,16 @@ fn resolve_node_font_family(n: &mut RvNode, resolve: &mut dyn FnMut(&str) -> (St
     }
 }
 
-/// 强调字重的下限：主题写到 600（SemiBold）及以上即视为「刻意加粗」。
-const EMPHASIS_WEIGHT: i32 = 600;
-
-/// `base` = 状态 patch 所依附基态的字重（基态未写按常规 400）；基态节点自身传 `None`，
-/// 只看是否 ≥ 600。
+/// `base` = 状态 patch 所依附基态的字重（基态未写按常规 400）；基态节点自身传 `None`。
+///
+/// 基态节点一律写成用户字重（主题写了 600 加粗，用户选「细」也得变细）；状态 patch 只有
+/// 比基态更重才算强调（如选中 700），取 max(主题, 用户)，其余同样让位于用户字重。
 fn apply_node_user_weight(n: &mut RvNode, user: i32, base: Option<i32>) {
     let own = n.font_weight;
     if own != 0 {
-        n.font_weight = if own >= EMPHASIS_WEIGHT || base.is_some_and(|b| own > b) {
-            own.max(user)
-        } else {
-            user
+        n.font_weight = match base {
+            Some(b) if own > b => own.max(user),
+            _ => user,
         };
     }
     // 状态 patch 与主题原值比，而非改写后的值：改写后基态是用户字重，会让判定随用户值漂移。
@@ -471,8 +469,8 @@ mod font_family_tests {
         assert_eq!(v.comment.font_family, None, "没声明的节点不凭空长出字族");
     }
 
-    /// 用户字重作基准：普通字重（< 600 且不比基态重）直接写成用户字重；
-    /// 强调（≥ 600，或状态 patch 比基态重）取 max(主题, 用户)；可选节点与状态 patch 同样过。
+    /// 用户字重作基准：基态节点（含主题写的加粗）与不比基态重的状态 patch 直接写成用户字重；
+    /// 比基态重的状态 patch 才算强调、取 max(主题, 用户)；可选节点与状态 patch 同样过。
     #[test]
     fn apply_user_font_weight_replaces_plain_and_raises_emphasis() {
         let w = |fw: i32| RvNode {
@@ -491,7 +489,7 @@ mod font_family_tests {
         v.apply_user_font_weight(450);
         assert_eq!(v.text.font_weight, 450, "普通字重让位于用户字重");
         assert_eq!(v.comment.font_weight, 450, "比用户细的普通字重同样让位");
-        assert_eq!(v.index.font_weight, 700, "强调 700 > 用户 450，保留");
+        assert_eq!(v.index.font_weight, 450, "基态 700 也让位于用户字重");
         let ts = v.text.selected.as_ref().unwrap().font_weight;
         assert_eq!(ts, 550, "比基态 500 重即强调，取 max");
         let is = v.item.selected.as_ref().unwrap().font_weight;
@@ -526,7 +524,7 @@ mod font_family_tests {
         };
         v.text.hover = Some(Box::new(w(400)));
         v.apply_user_font_weight(300);
-        assert_eq!(v.text.font_weight, 700, "基态强调保留");
+        assert_eq!(v.text.font_weight, 300, "基态加粗也让位于用户字重");
         assert_eq!(v.text.hover.as_ref().unwrap().font_weight, 300);
 
         // item.selected=700 + text.selected=400 ⇒ 选中文字 300（不回落到 item.selected 700）
@@ -544,7 +542,7 @@ mod font_family_tests {
             ..Default::default()
         };
         v.apply_user_font_weight(300);
-        assert_eq!(v.item.font_weight, 600);
+        assert_eq!(v.item.font_weight, 300);
         assert_eq!(v.text.font_weight, 300);
     }
 

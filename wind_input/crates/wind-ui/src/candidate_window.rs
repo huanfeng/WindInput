@@ -8066,9 +8066,9 @@ mod font_name_resolve_tests {
         assert_eq!(w.theme.views.text.font_weight, 500, "清掉用户字重后原样");
     }
 
-    /// 用户 `ui.font.weight` 压过主题旧字体名拆出的字重；节点显式的强调字重（800）取 max 仍保留。
+    /// 用户 `ui.font.weight` 压过主题旧字体名拆出的字重，也压过节点显式写的加粗字重（800）。
     #[test]
-    fn user_weight_beats_name_weight_but_not_explicit_node_weight() {
+    fn user_weight_beats_name_weight_and_explicit_node_weight() {
         let mut w = win();
         let mut theme = wind_theme::Resolved::default();
         theme.views.comment.font_family = Some("霞鹜文楷 Medium".to_string());
@@ -8083,7 +8083,7 @@ mod font_name_resolve_tests {
         let v = &w.theme.views;
         assert_eq!(v.comment.font_weight, 0, "用户字重生效：节点继承渲染器默认");
         assert_eq!(w.text_renderer.default_weight(), 300);
-        assert_eq!(v.text.font_weight, 800, "节点显式强调字重比用户重，保留");
+        assert_eq!(v.text.font_weight, 300, "节点显式写的加粗也让位于用户字重");
         w.set_font_weight(0);
         assert_eq!(
             w.theme.views.comment.font_weight, 500,
