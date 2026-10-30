@@ -34,6 +34,7 @@
 ///
 /// - `theme_transfer`：外观 → 主题卡里的「导入主题 / 导出当前主题 / 主题市场」三行。
 /// - `theme_editor`：外观 → 「主题编辑器」卡。
+/// - `shuangpin_layout`：方案 → 「双拼」卡里的「双拼布局」下拉（布局属于方案文件，不是配置键）。
 /// - `integration`：高级 → 「系统集成」卡（协议关联 / 文件关联）。
 /// - `config_import`：配置导入的全部入口——高级 → 「导入」卡、侧栏 / 底栏 / 词库窗的右键
 ///   导入菜单、`--page import` 深链（含命令直通车 `setting.open("import")`）。
@@ -48,6 +49,7 @@ pub const SETTINGS_FEATURES: &[&str] = &[
     "wizard",
     "theme_transfer",
     "theme_editor",
+    "shuangpin_layout",
     "integration",
     "config_import",
     "backup",
