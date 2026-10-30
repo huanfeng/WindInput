@@ -8032,10 +8032,9 @@ mod font_name_resolve_tests {
 
     /// 靶机复现（维护者实测「字重无效」）：主题「Switch风格」给 `[text]` 写了 500、
     /// `[text.selected]` 写了 700，用户 `ui.font.weight = 900` 对候选文字一个字都不生效。
-    /// 用户字重是候选文字的**基准**：普通字重让位（节点直接写成用户字重），
-    /// 强调节点（≥ 600 或比基态重）取 max(主题, 用户)。
+    /// 用户字重直接覆盖主题里所有节点（含选中等状态）写了的字重。
     #[test]
-    fn user_weight_replaces_plain_theme_weight_and_raises_emphasis() {
+    fn user_weight_overrides_every_theme_weight() {
         let mut w = win();
         let mut theme = wind_theme::Resolved::default();
         theme.views.text.font_weight = 500;
@@ -8052,15 +8051,15 @@ mod font_name_resolve_tests {
         assert_eq!(
             v.text.selected.as_ref().unwrap().font_weight,
             900,
-            "强调取 max"
+            "选中态同样跟随用户字重"
         );
         w.set_font_weight(300);
         let v = &w.theme.views;
         assert_eq!(v.text.font_weight, 300);
         assert_eq!(
             v.text.selected.as_ref().unwrap().font_weight,
-            700,
-            "用户字重更细时强调保持主题值，仍比普通粗"
+            300,
+            "用户字重直接覆盖，选中态也跟随"
         );
         w.set_font_weight(0);
         assert_eq!(w.theme.views.text.font_weight, 500, "清掉用户字重后原样");

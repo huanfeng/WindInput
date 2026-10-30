@@ -260,21 +260,16 @@ impl RvViews {
         }
     }
 
-    /// 以用户 `ui.font.weight`（非 0）为**基准字重**改写主题节点的显式字重（看板 A2-1）。
+    /// 用户 `ui.font.weight`（非 0）直接覆盖主题里所有节点（含状态 patch）写了的字重（看板 A2-1）。
     ///
-    /// - 基态节点、以及不比基态重的状态 patch，直接写成用户字重。不能清成 0：
-    ///   wind-ui `eff_weight` 按「节点状态 → item 状态 → 节点基态 → item 基态」级联，
-    ///   0 会让它越过本节点掉到别处的强调值上（如 `text.hover` 400 回落 `text` 700）；
-    /// - 状态 patch 比基态重（如 `text.selected` 700）才算强调，取 max(主题值, 用户值)；
-    ///   用户字重低于它时，选中等强调仍比普通粗。
-    ///
-    /// 状态 patch 比基态时，基态未写字重按常规 400 比较。`user <= 0`（不指定）时什么都不改。
+    /// 写成用户字重而不是清成 0：wind-ui `eff_weight` 按「节点状态 → item 状态 → 节点基态 →
+    /// item 基态」级联，0 会让它越过本节点掉到别处的值上。`user <= 0`（不指定）时什么都不改。
     pub fn apply_user_font_weight(&mut self, user: i32) {
         if user <= 0 {
             return;
         }
         for (_, n) in self.font_nodes_mut() {
-            apply_node_user_weight(n, user, None);
+            apply_node_user_weight(n, user);
         }
     }
 
@@ -334,25 +329,16 @@ fn resolve_node_font_family(n: &mut RvNode, resolve: &mut dyn FnMut(&str) -> (St
     }
 }
 
-/// `base` = 状态 patch 所依附基态的字重（基态未写按常规 400）；基态节点自身传 `None`。
-///
-/// 基态节点一律写成用户字重（主题写了 600 加粗，用户选「细」也得变细）；状态 patch 只有
-/// 比基态更重才算强调（如选中 700），取 max(主题, 用户)，其余同样让位于用户字重。
-fn apply_node_user_weight(n: &mut RvNode, user: i32, base: Option<i32>) {
-    let own = n.font_weight;
-    if own != 0 {
-        n.font_weight = match base {
-            Some(b) if own > b => own.max(user),
-            _ => user,
-        };
+/// 节点（含状态 patch）里写了字重的一律换成用户字重；没写的保持 0 = 继承渲染器默认（即用户字重）。
+fn apply_node_user_weight(n: &mut RvNode, user: i32) {
+    if n.font_weight != 0 {
+        n.font_weight = user;
     }
-    // 状态 patch 与主题原值比，而非改写后的值：改写后基态是用户字重，会让判定随用户值漂移。
-    let sub_base = Some(if own != 0 { own } else { base.unwrap_or(400) });
     for sub in [&mut n.selected, &mut n.hover, &mut n.disabled]
         .into_iter()
         .flatten()
     {
-        apply_node_user_weight(sub, user, sub_base);
+        apply_node_user_weight(sub, user);
     }
 }
 
@@ -469,81 +455,34 @@ mod font_family_tests {
         assert_eq!(v.comment.font_family, None, "没声明的节点不凭空长出字族");
     }
 
-    /// 用户字重作基准：基态节点（含主题写的加粗）与不比基态重的状态 patch 直接写成用户字重；
-    /// 比基态重的状态 patch 才算强调、取 max(主题, 用户)；可选节点与状态 patch 同样过。
+    /// 用户字重直接覆盖所有写了字重的节点，含状态 patch 与可选节点；未写的保持继承。
     #[test]
-    fn apply_user_font_weight_replaces_plain_and_raises_emphasis() {
+    fn apply_user_font_weight_overrides_every_written_weight() {
         let w = |fw: i32| RvNode {
             font_weight: fw,
             ..Default::default()
         };
         let mut v = RvViews {
-            text: w(500),
-            index: w(700),
+            text: w(700),
+            index: w(600),
             comment: w(300),
             ..Default::default()
         };
-        v.text.selected = Some(Box::new(w(550)));
-        v.item.selected = Some(Box::new(w(500)));
+        v.text.selected = Some(Box::new(w(800)));
+        v.text.hover = Some(Box::new(w(400)));
+        v.item.selected = Some(Box::new(w(700)));
         v.status = Some(w(400));
         v.apply_user_font_weight(450);
-        assert_eq!(v.text.font_weight, 450, "普通字重让位于用户字重");
-        assert_eq!(v.comment.font_weight, 450, "比用户细的普通字重同样让位");
-        assert_eq!(v.index.font_weight, 450, "基态 700 也让位于用户字重");
-        let ts = v.text.selected.as_ref().unwrap().font_weight;
-        assert_eq!(ts, 550, "比基态 500 重即强调，取 max");
-        let is = v.item.selected.as_ref().unwrap().font_weight;
-        assert_eq!(is, 500, "基态未写（常规 400）时 500 也算强调");
-        assert_eq!(v.status.as_ref().unwrap().font_weight, 450, "可选节点也过");
+        assert_eq!(v.text.font_weight, 450);
+        assert_eq!(v.index.font_weight, 450);
+        assert_eq!(v.comment.font_weight, 450);
+        assert_eq!(v.text.selected.as_ref().unwrap().font_weight, 450);
+        assert_eq!(v.text.hover.as_ref().unwrap().font_weight, 450);
+        assert_eq!(v.item.selected.as_ref().unwrap().font_weight, 450);
+        assert_eq!(v.status.as_ref().unwrap().font_weight, 450);
         assert_eq!(v.item.font_weight, 0, "未写的节点保持继承");
-
-        let mut v = RvViews {
-            index: w(700),
-            ..Default::default()
-        };
-        v.apply_user_font_weight(900);
-        assert_eq!(v.index.font_weight, 900, "用户更重时强调跟到用户字重");
         v.apply_user_font_weight(0);
-        assert_eq!(v.index.font_weight, 900, "0 = 不指定，原样不动");
-    }
-
-    /// 普通节点必须写成用户字重而非清 0：清 0 会让 wind-ui `eff_weight` 的级联
-    /// （节点状态 → item 状态 → 节点基态 → item 基态）越过它掉到强调值上。
-    /// 以下三例按 own 判定：`text.hover` 400 不比基态 700 重、`text.selected` 400 不比
-    /// 基态（未写按 400）重、`text` 400 < 600，都是普通，均应得用户字重 300。
-    #[test]
-    fn plain_weight_is_written_as_user_so_cascade_does_not_fall_to_emphasis() {
-        let w = |fw: i32| RvNode {
-            font_weight: fw,
-            ..Default::default()
-        };
-        // text=700 + text.hover=400 ⇒ 悬停 300（hover patch 不再为 0 而回落基态 700）
-        let mut v = RvViews {
-            text: w(700),
-            ..Default::default()
-        };
-        v.text.hover = Some(Box::new(w(400)));
-        v.apply_user_font_weight(300);
-        assert_eq!(v.text.font_weight, 300, "基态加粗也让位于用户字重");
-        assert_eq!(v.text.hover.as_ref().unwrap().font_weight, 300);
-
-        // item.selected=700 + text.selected=400 ⇒ 选中文字 300（不回落到 item.selected 700）
-        let mut v = RvViews::default();
-        v.item.selected = Some(Box::new(w(700)));
-        v.text.selected = Some(Box::new(w(400)));
-        v.apply_user_font_weight(300);
-        assert_eq!(v.item.selected.as_ref().unwrap().font_weight, 700);
-        assert_eq!(v.text.selected.as_ref().unwrap().font_weight, 300);
-
-        // item=600 + text=400 ⇒ 候选文字 300（不回落到 item 基态 600）
-        let mut v = RvViews {
-            item: w(600),
-            text: w(400),
-            ..Default::default()
-        };
-        v.apply_user_font_weight(300);
-        assert_eq!(v.item.font_weight, 300);
-        assert_eq!(v.text.font_weight, 300);
+        assert_eq!(v.index.font_weight, 450, "0 = 不指定，原样不动");
     }
 
     /// 没配过字体的主题一条都不该报——否则每次换主题都白查一轮 COM。
