@@ -177,7 +177,7 @@ pub struct UserWord {
     pub weight: i32,
 }
 
-/// 一条快捷短语（设置页「快捷短语」列表项）：系统与用户短语的叠加视图。
+/// 一条命令短语（设置页「命令短语」列表项）：系统与用户短语的叠加视图。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Phrase {
     pub code: String,
@@ -980,7 +980,7 @@ impl MobileCore {
             .map_err(|e| e.to_string())
     }
 
-    /// 全部快捷短语（系统 + 用户的叠加视图，按编码升序）。无存储时为空。
+    /// 全部命令短语（系统 + 用户的叠加视图，按编码升序）。无存储时为空。
     ///
     /// 与桌面设置页 `phrase.list` 同一份数据（`Store::list_phrases`），只是不做那层 `\n` 转义。
     pub fn phrases(&self) -> Vec<Phrase> {
@@ -1542,7 +1542,7 @@ mod user_words_tests {
         );
     }
 
-    /// 快捷短语：加 / 列 / 开关 / 删用户短语；只读时拒写。系统短语的叠加与出厂开关语义在
+    /// 命令短语：加 / 列 / 开关 / 删用户短语；只读时拒写。系统短语的叠加与出厂开关语义在
     /// wind-store 的测试里验，这里只验门面这一层。
     #[test]
     fn phrase_add_list_toggle_remove() {

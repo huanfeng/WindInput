@@ -19,7 +19,7 @@ wind-keys = { path = "../wind-keys" }
 wind-ui-types = { path = "../wind-ui-types" }
 # 设置页「统计」的数据：报表算法在 wind-store（与桌面 wind-webdata 共用一份，见 stats_report）
 wind-store = { path = "../wind-store" }
-# 设置页「快捷短语」的预览：按候选同一条求值路径展开模板（日期、符号组名）。两者 coordinator 本就依赖
+# 设置页「命令短语」的预览：按候选同一条求值路径展开模板（日期、符号组名）。两者 coordinator 本就依赖
 wind-phrase = { path = "../wind-phrase" }
 chrono = "0.4"
 tracing = { workspace = true }
