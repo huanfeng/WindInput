@@ -116,6 +116,11 @@ public class InputController: IMKInputController {
         if let prev = Self.lastActivated, prev !== self { sendEmpty(UpstreamCmd.focusLost) }
         Self.lastActivated = self
         sendFocusGained()
+        // macOS IMKit 以前只发 FocusGained/FocusLost，服务端的 IME_ACTIVATED 路径从未走过：
+        // 于是 `input.default.remember_last_state = false` 的「每次激活重置中英」不生效，
+        // 从别家输入法切回清风时会保留切走前的英文状态。补发一次 IME_ACTIVATED，让服务端
+        // 走与 Windows 相同的激活收尾（apply_initial_mode(..., reset_aux = true)）。
+        sendImeActivated()
         sendFrontContext()
     }
 
@@ -160,12 +165,33 @@ public class InputController: IMKInputController {
         let bundleID = currentClient?.bundleIdentifier() ?? ""
         do {
             try bridge.send(BinaryCodec.encodeFocusGainedFrame(
-                clientToken: Self.clientToken(pid: hostPid(for: bundleID), client: currentClient),
+                clientToken: currentClientToken(),
                 inputScopeMask: mask,
                 bundleID: bundleID))
             _ = try bridge.readFrame()
         } catch {
             NSLog("WindInput[sendFocusGained] io error: \(error)")
+            reconnect()
+        }
+    }
+
+    /// 当前焦点 client 的 token；FocusGained 与 IME_ACTIVATED 必须使用同一个。
+    private func currentClientToken() -> UInt64 {
+        let bundleID = currentClient?.bundleIdentifier() ?? ""
+        return Self.clientToken(pid: hostPid(for: bundleID), client: currentClient)
+    }
+
+    /// 发 IME_ACTIVATED。服务端把它当异步命令（不写 ack），故这里只 send、不 readFrame，
+    /// 否则会把后续按键的响应读错位。
+    private func sendImeActivated() {
+        guard let bridge = bridge, bridge.isConnected else { return }
+        do {
+            try bridge.send(BinaryCodec.encodeTokenFrame(
+                cmd: UpstreamCmd.imeActivated,
+                clientToken: currentClientToken(),
+                async: true))
+        } catch {
+            NSLog("WindInput[sendImeActivated] io error: \(error)")
             reconnect()
         }
     }

@@ -83,6 +83,20 @@ final class BinaryCodecTests: XCTestCase {
         XCTAssertEqual(len, 0)
     }
 
+    func testTokenFrame_ImeActivated() throws {
+        // macOS 激活路径补发 IME_ACTIVATED：payload 就是 8 字节 clientToken。
+        let token: UInt64 = (UInt64(0x1234) << 32) | 7
+        let f = BinaryCodec.encodeTokenFrame(
+            cmd: UpstreamCmd.imeActivated, clientToken: token, async: true)
+        XCTAssertEqual(f.count, WireProtocol.headerSize + 8)
+        let (cmd, len, isAsync) = try BinaryCodec.decodeHeader(f)
+        XCTAssertEqual(cmd, UpstreamCmd.imeActivated)
+        XCTAssertEqual(len, 8)
+        XCTAssertTrue(isAsync)
+        let payload = f.subdata(in: WireProtocol.headerSize ..< f.count)
+        XCTAssertEqual(payload.readUInt64LE(at: 0), token)
+    }
+
     func testFocusGainedFrame_InputScopeMask() throws {
         // 密码框: IS_PASSWORD 位 (bit31)。载荷与 Win 端同构 (39B) + bundleID 段。
         let mask: UInt64 = UInt64(1) << 31

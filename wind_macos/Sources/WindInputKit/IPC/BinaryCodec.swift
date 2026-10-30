@@ -121,6 +121,20 @@ public enum BinaryCodec {
         return encodeHeader(cmd: cmd, payloadLen: 0, async: async)
     }
 
+    /// 编码只带 clientToken(u64 LE) 的帧，用于 CMD_IME_ACTIVATED / CMD_IME_DEACTIVATED。
+    ///
+    /// 布局与 Windows TSF 端一致：payload 就是 8 字节 token。macOS 以前只发
+    /// focusGained / focusLost，服务端的 `handle_ime_activated` 从未被调用，于是
+    /// `input.default.remember_last_state = false` 的「每次激活重置中英」不生效。
+    public static func encodeTokenFrame(cmd: UInt16, clientToken: UInt64, async: Bool = false) -> Data {
+        var payload = Data(count: 8)
+        payload.writeUInt32LE(UInt32(truncatingIfNeeded: clientToken), at: 0)
+        payload.writeUInt32LE(UInt32(truncatingIfNeeded: clientToken >> 32), at: 4)
+        var out = encodeHeader(cmd: cmd, payloadLen: UInt32(payload.count), async: async)
+        out.append(payload)
+        return out
+    }
+
     /// 编码 CmdShowContextMenu 请求。simplified=true → 追加 1 字节 [1]（服务端据此返回 IMK
     /// 精简菜单，无子菜单）；false → 空 payload（完整菜单，带子菜单，供候选框右键/菜单栏指示器）。
     public static func encodeShowContextMenuFrame(simplified: Bool) -> Data {
