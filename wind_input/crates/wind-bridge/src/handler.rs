@@ -200,7 +200,7 @@ impl KeyAction {
         match self {
             KeyAction::UpdateComposition { text, caret_pos } if text.contains('\'') => {
                 KeyAction::UpdateComposition {
-                    caret_pos: map_caret_chars(&text, caret_pos as usize, sep) as _,
+                    caret_pos: map_caret_utf16(&text, caret_pos as usize, sep) as _,
                     text: apply_syllable_separator(&text, sep),
                 }
             }
@@ -376,10 +376,22 @@ pub fn apply_syllable_separator(text: &str, sep: &str) -> String {
     text.replace('\'', sep)
 }
 
-/// [`apply_syllable_separator`] 之后，原串第 `caret` 个字符处的光标换算到新串的字符位置。
-pub fn map_caret_chars(text: &str, caret: usize, sep: &str) -> usize {
-    let quotes = text.chars().take(caret).filter(|&c| c == '\'').count();
-    caret - quotes + quotes * sep.chars().count()
+/// [`apply_syllable_separator`] 之后，原串光标位置换算到新串。
+///
+/// 单位是 **UTF-16 码元**（与 `KeyAction::UpdateComposition::caret_pos` 一致）：前缀里有
+/// 扩展 B 区汉字（2 码元）、分隔符是非 BMP 字符（如 emoji）时，按字符数算会偏。
+pub fn map_caret_utf16(text: &str, caret: usize, sep: &str) -> usize {
+    let (mut units, mut quotes) = (0usize, 0usize);
+    for c in text.chars() {
+        if units >= caret {
+            break;
+        }
+        units += c.len_utf16();
+        if c == '\'' {
+            quotes += 1;
+        }
+    }
+    caret - quotes + quotes * sep.encode_utf16().count()
 }
 
 /// MessageHandler trait：协调器实现此接口处理各种事件
@@ -796,5 +808,43 @@ mod focus_data_debug_tests {
         assert!(!s.contains("机密"), "{s}");
         assert!(s.contains("window_title_len: 9"), "{s}");
         assert!(s.contains("Chrome_WidgetWin_1"), "类名照常输出");
+    }
+}
+
+#[cfg(test)]
+mod syllable_separator_tests {
+    use super::*;
+
+    /// 光标是 UTF-16 码元：分隔符换成更长 / 更短 / 非 BMP，光标都要落在同一个音节边界上。
+    #[test]
+    fn caret_follows_separator_in_utf16_units() {
+        let t = "xiao'peng";
+        // 光标在第一个 ' 之后（5 个码元）
+        assert_eq!(map_caret_utf16(t, 5, ""), 4, "去掉分隔符少 1");
+        assert_eq!(map_caret_utf16(t, 5, "'"), 5);
+        assert_eq!(map_caret_utf16(t, 5, "·"), 5, "BMP 单字符与 ' 同长");
+        assert_eq!(map_caret_utf16(t, 5, " "), 5);
+        assert_eq!(map_caret_utf16(t, 5, "😀"), 6, "非 BMP 分隔符占 2 个码元");
+        // 光标在分隔符之前：不受影响
+        assert_eq!(map_caret_utf16(t, 4, "😀"), 4);
+        // 前缀里有扩展 B 区字（2 码元）：按码元数而不是字符数
+        let t = "𠀀xiao'peng";
+        assert_eq!(map_caret_utf16(t, 7, ""), 6);
+        assert_eq!(map_caret_utf16(t, 7, "😀"), 8);
+    }
+
+    #[test]
+    fn with_syllable_separator_maps_caret_and_text() {
+        let act = KeyAction::UpdateComposition {
+            text: "xiao'peng".into(),
+            caret_pos: 9,
+        };
+        match act.with_syllable_separator("") {
+            KeyAction::UpdateComposition { text, caret_pos } => {
+                assert_eq!(text, "xiaopeng");
+                assert_eq!(caret_pos, 8, "光标在末尾仍在末尾");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

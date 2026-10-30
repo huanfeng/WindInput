@@ -980,7 +980,7 @@ pub(crate) const EVAL_VAR_NAMES: &[&str] = &[
     "dict_all",
 ];
 
-/// [`Coordinator::eval_text_var`] 自己的分支（其余交给 [`reverse_text_var`]）。
+/// [`Coordinator::eval_text_var_ex`]（`eval_text_var` 是它的薄包装）自己的分支（其余交给 [`reverse_text_var`]）。
 pub(crate) const EVAL_TEXT_VAR_NAMES: &[&str] = &[
     "code_rev",
     "code",
@@ -1633,7 +1633,7 @@ impl crate::coordinator::Coordinator {
         // `A:` 并当作一条正常候选出现 —— 而正确行为是这条候选压根不该存在。
         let found = std::cell::Cell::new(false);
         let out = render(&tpl, 0, |name, arg| {
-            let v = self.eval_text_var(name, arg, text, &reverse);
+            let v = self.eval_text_var_ex(name, arg, text, &reverse, true);
             if name != "char" && v.as_deref().is_some_and(|s| !s.is_empty()) {
                 found.set(true);
             }
@@ -1658,6 +1658,19 @@ impl crate::coordinator::Coordinator {
         text: &str,
         reverse: &wind_reverse::ReverseLookup,
     ) -> Option<VarValue> {
+        self.eval_text_var_ex(name, arg, text, reverse, false)
+    }
+
+    /// [`Self::eval_text_var`]；`include_disabled` 让 `code_rev` / `code_rev_all` 补上未启用扩展库的码
+    /// （`*` 开头）。只有命令栏的剪贴板反查（`dict.rev`）传 `true`，悬停提示等其余入口一律不带。
+    pub(crate) fn eval_text_var_ex(
+        &self,
+        name: &str,
+        arg: Option<&str>,
+        text: &str,
+        reverse: &wind_reverse::ReverseLookup,
+        include_disabled: bool,
+    ) -> Option<VarValue> {
         Some(VarValue::from(match name {
             // 索引未就绪给空串（而不是 `None`）：`None` 在渲染层专表**未知变量名**，
             // 会原样输出 `${code_rev}` 让用户看见拼写错误。空串则不计入
@@ -1669,7 +1682,7 @@ impl crate::coordinator::Coordinator {
             // `DataNeeds` 看不见它，没有别人会替它建——不派的话这条反查永远是空的。
             "code_rev" | "code" => match self.engine_mgr.codetable_reverse_hint(text) {
                 // 已启用词库里没有时，补未启用扩展库的码（`*` 开头，取最长）。
-                Some(code) if code.is_empty() => self
+                Some(code) if code.is_empty() && include_disabled => self
                     .engine_mgr
                     .disabled_dict_codes(text)
                     .pop()
@@ -1692,15 +1705,20 @@ impl crate::coordinator::Coordinator {
             "code_rev_all" | "code_all" => {
                 let sid = self.engine_mgr.code_source_schema();
                 // 空串的理由同上面的 `code_rev`。
-                let codes = match self.engine_mgr.word_codes_display(&sid, text) {
-                    Some(codes) => codes,
+                let (codes, ready) = match self.engine_mgr.word_codes_display(&sid, text) {
+                    Some(codes) => (codes, true),
                     None => {
                         self.spawn_index_warm(&sid, false); // 理由同上
-                        String::new()
+                        (String::new(), false)
                     }
                 };
-                // 已启用词库的码之后，追加未启用扩展库的码（`*` 开头）。
-                let extra = self.engine_mgr.disabled_dict_codes(text);
+                // 已启用词库的码之后，追加未启用扩展库的码（`*` 开头）。主索引没就绪时不追加：
+                // 只剩 `*` 码会让人误以为这个词只有未启用库里的码；与 `code_rev` 同口径。
+                let extra = if include_disabled && ready {
+                    self.engine_mgr.disabled_dict_codes(text)
+                } else {
+                    Vec::new()
+                };
                 let codes = match (codes.is_empty(), extra.is_empty()) {
                     (_, true) => codes,
                     (true, false) => extra.join("/"),
@@ -4441,7 +4459,7 @@ mod role_contract_tests {
         let coordinator = include_str!("coordinator.rs");
         let mut bodies = vec![
             body_after(comment, "pub(crate) fn eval_var("),
-            body_after(comment, "pub(crate) fn eval_text_var("),
+            body_after(comment, "pub(crate) fn eval_text_var_ex("),
             body_after(comment, "pub(crate) fn reverse_text_var("),
             body_after(comment, "pub(crate) fn role_of("),
             body_after(tooltip, "pub(crate) fn char_var("),
@@ -4478,7 +4496,7 @@ mod role_contract_tests {
             (comment, "pub(crate) fn eval_var(", super::EVAL_VAR_NAMES),
             (
                 comment,
-                "pub(crate) fn eval_text_var(",
+                "pub(crate) fn eval_text_var_ex(",
                 super::EVAL_TEXT_VAR_NAMES,
             ),
             (
@@ -4569,7 +4587,10 @@ mod comment_reverse_regular_tests {
     }
 
     fn coord() -> (std::sync::Arc<Coordinator>, Cleanup) {
-        let id = format!("zz_crs_on_{}", std::process::id());
+        // 同进程里多个用例并行，夹具目录 / 缓存目录必须各用各的，否则一个用例的 Drop 会删掉另一个的。
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("zz_crs_on_{}_{n}", std::process::id());
         let dir = std::env::temp_dir().join(format!("wind_crs_{id}"));
         let _ = std::fs::remove_dir_all(&dir);
         let s = dir.join("schemas");
@@ -4618,6 +4639,34 @@ mod comment_reverse_regular_tests {
             c.engine_mgr.codetable_reverse_hint("门头沟区").as_deref(),
             Some(""),
             "未启用库不进注释反查"
+        );
+    }
+
+    /// 未启用库的 `*` 码只给剪贴板反查（`include_disabled = true`）；悬停提示等其余入口
+    /// 走 `eval_text_var`，不带。
+    #[test]
+    fn disabled_codes_only_reach_clipboard_reverse() {
+        let (c, _g) = coord();
+        c.prewarm_indexes();
+        let rl = wind_reverse::ReverseLookup::default();
+        let val = |name: &str, include: bool| {
+            c.eval_text_var_ex(name, None, "门头沟区", &rl, include)
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_default()
+        };
+        for name in ["code_rev", "code_rev_all"] {
+            assert!(
+                val(name, true).contains("*uuia"),
+                "{name} 剪贴板反查应带 * 码"
+            );
+            assert!(!val(name, false).contains("uuia"), "{name} 悬停等入口不带");
+        }
+        assert!(
+            !format!(
+                "{:?}",
+                c.eval_text_var("code_rev_all", None, "门头沟区", &rl)
+            )
+            .contains("uuia")
         );
     }
 }

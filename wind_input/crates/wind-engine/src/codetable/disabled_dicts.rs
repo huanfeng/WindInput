@@ -22,6 +22,9 @@ use wind_candidate::Candidate;
 use wind_dict::cached::CachedDict;
 use wind_dict::{DictManager, SystemDictLayer};
 
+/// 剪贴板反查小表的条目上限：超过就不建（大词库会让常驻内存数十 MB）。
+const TEXT_CODES_MAX_ENTRIES: usize = 300_000;
+
 /// 读一个扩展库的闭包：由构建方（`EngineManager`）按方案配置捕获路径 / 缓存参数。
 pub type DictLoader = Arc<dyn Fn() -> anyhow::Result<CachedDict> + Send + Sync>;
 
@@ -90,26 +93,46 @@ impl DisabledDictLayers {
 
     /// 影子集合里 `text` 的全部编码（码长升序、去重），剪贴板反查（cmdbar `dict.rev`）用。
     /// 首次调用扫一遍影子层建小表（阻塞，**别放在按键线程首发**——预热线程会顺手建）。
+    ///
+    /// 先取 `text_codes` 锁、再取影子 `DictManager`，建表全程持着前一把：`mark_disabled` 清表时
+    /// 会等到这里建完才清，不会出现「用旧的影子层建出的表写回、之后一直是旧数据」。
+    /// 条目超过 [`TEXT_CODES_MAX_ENTRIES`] 的大词库不建表（常驻内存按条目线性增长），反查对
+    /// 未启用库返回空。
     pub fn codes_of(&self, text: &str) -> Vec<String> {
         let map = {
-            let dm = self.dm();
             let mut g = lock(&self.text_codes);
-            g.get_or_insert_with(|| {
+            if g.is_none() {
+                let dm = self.dm();
                 let mut m: std::collections::HashMap<String, Vec<String>> = Default::default();
+                let (mut n, mut too_big) = (0usize, false);
                 dm.for_each_entry(&mut |code, t, _| {
+                    if too_big {
+                        return;
+                    }
+                    n += 1;
+                    if n > TEXT_CODES_MAX_ENTRIES {
+                        too_big = true;
+                        return;
+                    }
                     let v = m.entry(t.to_string()).or_default();
                     if !v.iter().any(|c| c == code) {
                         v.push(code.to_string());
                     }
                 });
+                if too_big {
+                    tracing::warn!(
+                        "未启用扩展词库条目超过 {TEXT_CODES_MAX_ENTRIES}，剪贴板反查不含它们"
+                    );
+                    m.clear();
+                }
                 for v in m.values_mut() {
                     v.sort_by_key(|c| c.len());
                 }
-                Arc::new(m)
-            })
-            .clone()
+                *g = Some(Arc::new(m));
+            }
+            g.as_ref().cloned()
         };
-        map.get(text).cloned().unwrap_or_default()
+        map.and_then(|m| m.get(text).cloned()).unwrap_or_default()
     }
 
     /// 建过几遍影子 `DictManager`。

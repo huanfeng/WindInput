@@ -1326,6 +1326,13 @@ impl MessageHandler for Coordinator {
             // 裸 F 键在英文模式归宿主（TSF 靠策略位不吃；mac / Linux 整体转发，在这里挡）。
             && !(hotkey::bare_function_key_needs_chinese(data.key_code, norm_mods, action)
                 && !self.is_chinese_mode())
+            // 组字中，会话表里绑了同一个裸 F 键（如出厂注释切换键 F1）时，会话优先：
+            // 全局 `key_actions` 里的 F 键绑定只管空闲态。
+            && !(hotkey::is_bare_function_key(data.key_code, norm_mods)
+                && self.has_active_session()
+                && self
+                    .session_action_for(data.key_code, data.modifiers & MOD_SHIFT != 0, true)
+                    .is_some())
         {
             debug!(
                 "Hotkey matched (key_down): {} (0x{:08X})",

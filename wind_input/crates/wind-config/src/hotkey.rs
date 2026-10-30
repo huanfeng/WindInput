@@ -146,6 +146,11 @@ pub fn route_of_key_action(key: &str) -> Option<KeyActionRoute> {
     Some(KeyActionRoute::LeadingKey)
 }
 
+/// 不带修饰键的 F1–F12。
+pub fn is_bare_function_key(vk: u32, modifiers: u32) -> bool {
+    modifiers & MOD_GENERIC_MASK == 0 && (VK_F1..=VK_F12).contains(&vk)
+}
+
 /// 裸 F1–F12（不带修饰键）绑的动作是否只在中文模式吃键。
 ///
 /// 这类键没有字符产出，宿主自己常用它（F1 帮助、F5 刷新、F11 全屏）；英文模式下输入法不该
@@ -154,7 +159,7 @@ pub fn route_of_key_action(key: &str) -> Option<KeyActionRoute> {
 /// 编译端（策略位）与分派端（服务端守卫）共用本判据，两处不会分叉。
 pub fn bare_function_key_needs_chinese(vk: u32, modifiers: u32, action: &str) -> bool {
     use crate::config::BoundAction as BA;
-    if modifiers & MOD_GENERIC_MASK != 0 || !(VK_F1..=VK_F12).contains(&vk) {
+    if !is_bare_function_key(vk, modifiers) {
         return false;
     }
     !matches!(

@@ -202,6 +202,22 @@ fn bare_function_key_passes_through_in_english_mode() {
     assert_probe_not_ran(&coord);
 }
 
+/// 全局 `key_actions` 与会话表绑了同一个裸 F 键：空闲跑命令，组字中归会话表。
+#[test]
+fn bare_function_key_session_binding_wins_mid_composition() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        bind_key("f1", PROBE)(c);
+        bind_session("f1", "page_next")(c);
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(VK_F1, 0));
+    assert_probe_not_ran(&coord);
+    coord.handle_key_event(&key(0x1B, 0)); // Esc 清空，回到空闲
+    coord.handle_key_event(&key(VK_F1, 0));
+    assert_probe_ran(&coord);
+}
+
 #[test]
 fn shift_backspace_runs_command_mid_composition() {
     skip_without_data!();
@@ -529,4 +545,52 @@ fn toggle_tip_alone_on_right_keeps_caret_movable() {
         "实际 {act:?}"
     );
     assert_eq!(coord.debug_hover_target(), -1);
+}
+
+/// 候选窗编码栏（`UiCommand::UpdateCandidates.preedit`）同样换音节分隔符，光标按字节落在换算后的位置。
+#[test]
+fn syllable_separator_applies_to_candidate_window_preedit() {
+    skip_without_data!();
+    let run = |sep: &str| {
+        let mut c = Config::default();
+        c.schema.available = vec!["wubi86".into(), "pinyin".into()];
+        c.schema.active = "pinyin".into();
+        c.input.default.chinese_mode = true;
+        c.ui.candidate.syllable_separator = sep.to_string();
+        let (coord, rx) = Coordinator::new_headless_with_ui(c, Some(&data_dir()));
+        for ch in "xiaopeng".chars() {
+            coord.handle_key_event(&key(ch.to_ascii_uppercase() as u32, 0));
+        }
+        // 新组合首帧要等权威 caret 才下发 UpdateCandidates（首显闸门），headless 下手动喂一次。
+        coord.handle_caret_update(&wind_bridge::handler::CaretData {
+            x: 100,
+            y: 200,
+            height: 20,
+            composition_start_x: 100,
+            composition_start_y: 200,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
+        });
+        let mut last = None;
+        for cmd in rx.try_iter() {
+            if let wind_ui_types::UiCommand::UpdateCandidates {
+                preedit,
+                preedit_caret,
+                ..
+            } = cmd
+            {
+                last = Some((preedit, preedit_caret));
+            }
+        }
+        last.expect("应收到候选更新")
+    };
+    let (p, caret) = run("'");
+    assert!(p.contains('\''), "默认保留 '：{p}");
+    assert_eq!(caret, p.len(), "光标在末尾");
+    let (p, caret) = run("");
+    assert!(!p.contains('\''), "留空后编码栏没有分隔符：{p}");
+    assert_eq!(caret, p.len(), "光标仍在末尾");
+    let (p, caret) = run("·");
+    assert!(p.contains('·') && !p.contains('\''), "{p}");
+    assert_eq!(caret, p.len(), "多字节分隔符：光标按字节算到末尾");
 }
