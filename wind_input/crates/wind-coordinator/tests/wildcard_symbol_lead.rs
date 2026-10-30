@@ -162,3 +162,44 @@ fn full_code_then_wildcard_key_matches_wildcard_off() {
     );
     assert_eq!(run("full_on", true), off);
 }
+
+/// 五笔拼音混输：符号通配键（`?`、`/`）首位也作通配（符号不是拼音字母，夺不走拼音输入）；
+/// 字母通配键（`z`）首位仍按拼音字面。
+#[test]
+fn mixed_symbol_wildcard_leads_but_letter_stays_literal() {
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let run = |wk: &str, vk: u32, mods: u32| {
+        let ov = std::env::temp_dir().join(format!("wind_wc_mixed_{}_{}", vk, std::process::id()));
+        let _ = std::fs::remove_dir_all(&ov);
+        std::fs::create_dir_all(&ov).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86_pinyin".into(), "wubi86".into(), "pinyin".into()];
+        cfg.schema.active = "wubi86_pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.schema.codetable.wildcard = true;
+        cfg.schema.codetable.wildcard_key = wk.into();
+        let c = Coordinator::new_headless_with_override(cfg, Some(&data_dir()), Some(ov.clone()));
+        let mut k = key(vk);
+        k.modifiers = mods;
+        c.handle_key_event(&k);
+        let buf = c.debug_input_buffer();
+        c.handle_key_event(&key(u32::from(b'G')));
+        let out = (buf, c.debug_page_texts());
+        let _ = std::fs::remove_dir_all(&ov);
+        out
+    };
+    // `?` = Shift+/
+    let (buf, cands) = run("?", 0xBF, 1);
+    assert_eq!(buf, "?", "混输首位 ? 应作通配码元，不是直接上屏标点");
+    assert!(!cands.is_empty(), "?g 应按通配查出候选");
+    let (buf, cands) = run("/", 0xBF, 0);
+    assert_eq!(buf, "/");
+    assert!(!cands.is_empty());
+    // 字母 z：仍按拼音，`zg` 不成通配。
+    let (buf, cands) = run("z", 0x5A, 0);
+    assert_eq!(buf, "z");
+    assert!(cands.is_empty(), "z 首位按拼音字面：{cands:?}");
+}

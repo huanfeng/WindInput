@@ -106,10 +106,12 @@ impl Coordinator {
     /// **符号键与字母分开判**（论坛 t302）：符号通配键首位**作通配**，只有方案级
     /// `[key_actions]` 显式绑了它才让位，见 [`Self::wildcard_symbol_takes_lead`]。
     fn wildcard_lead_yields(&self, key: char) -> bool {
-        // 五笔拼音混输：首位一律字面（spec §10）。z 是拼音声母（`zhang` / `zai`），而混输下
+        // 五笔拼音混输：字母通配键首位一律字面（spec §10）。z 是拼音声母（`zhang` / `zai`），而混输下
         // `has_code_prefix("z")` 只在装了 `zz*` 短语时成立（单字母够不着 `min_pinyin_length`，
         // 五笔主库无 z 码），靠它让位的话没装短语的用户打 `zhang` 会变成 `?hang`。
-        if self.engine_mgr.active_wildcard_mixes_pinyin() {
+        //
+        // 只管字母：符号不是拼音字母，作首码通配不会夺走拼音输入，走下面的符号键判据。
+        if key.is_ascii_alphabetic() && self.engine_mgr.active_wildcard_mixes_pinyin() {
             return true;
         }
         if !key.is_ascii_lowercase() {
@@ -139,8 +141,7 @@ impl Coordinator {
     /// 能出现在任何一位，包括第一位。此前符号键首位一律让位给标点 / 模式，于是反引号要先被
     /// 出厂的临拼触发抢走、再按一次退出临拼，才轮到通配（用户实测「要按两次」）。
     ///
-    /// 让位只剩两种：
-    /// - 混输（spec §10，首位恒字面，理由见 [`Self::wildcard_lead_yields`]）；
+    /// 让位只剩：
     /// - **方案级** `[key_actions]` 显式绑了这个键：同层冲突，显式绑定优先（与
     ///   [`Self::code_char_takes_lead`] 的跨层仲裁同一口径）。全局层的绑定则由
     ///   `code_char_takes_lead` 判让位——全局配置无从知道本方案把它当码元用了。
@@ -148,10 +149,7 @@ impl Coordinator {
     /// 这个键原本的标点产物（反引号 → `·`）就此在首位拿不到，与把符号写进 `input_chars`
     /// 的代价相同；需要时用快捷输入 / 短语出。
     pub(crate) fn wildcard_symbol_takes_lead(&self, key: char) -> bool {
-        if key.is_ascii_alphabetic()
-            || self.engine_mgr.active_wildcard_key() != Some(key)
-            || self.engine_mgr.active_wildcard_mixes_pinyin()
-        {
+        if key.is_ascii_alphabetic() || self.engine_mgr.active_wildcard_key() != Some(key) {
             return false;
         }
         let Some((vk, shift)) = wildcard_key_vk(key) else {
