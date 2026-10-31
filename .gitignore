@@ -48,3 +48,8 @@ data/emoji/
 # scripts/lm/ 的分析脚本跑一次就会留字节码缓存
 __pycache__/
 *.pyc
+
+# Nix: `nix build` 在仓库根留下的结果软链（会被 flake 当成 dirty 文件算进源码）与 direnv 状态
+/result
+/result-*
+.direnv/

@@ -92,18 +92,42 @@ fn main() {
     }
 }
 
-/// 注入编译期版本戳：`WIND_BUILD_TIME`（UTC 构建时刻）+ `WIND_GIT_HASH`（短哈希[-dirty]）。
+/// 注入编译期版本戳：`WIND_BUILD_TIME`（UTC 时间戳）+ `WIND_GIT_HASH`（短哈希[-dirty]）。
 /// 强制每次构建重跑，使时间戳与实际二进制构建时刻一致（否则未提交改动重建时戳会滞后）。
+///
+/// 两个环境变量让产物可复现（Nix 要求同一派生在任意机器上产出同一结果）：
+/// - `SOURCE_DATE_EPOCH`：存在时取这个 Unix 秒作为版本戳，不设则（deb / 本地构建）取当前时刻。
+///   Nix 侧由 `nix/service.nix` 显式传入 flake 源的 `lastModified`（git 源取提交时间，
+///   `path:` 源取源码树 mtime）；stdenv 自带的只是**兜底常量** 315532800（1980-01-01），
+///   并非源码 mtime。值畸形（空串 / 非整数）直接报错，不悄悄退回当前时刻——否则同一份源码
+///   两次构建的二进制不同，既上不了 binary cache，也过不了 `nix build --check`，且只在事后
+///   比对时才暴露。
+/// - `WIND_GIT_HASH_OVERRIDE`：沙箱里没有 `.git`，`git_describe()` 恒为 `unknown`；
+///   Nix 侧把 flake 的 revision 传进来（见 `nix/service.nix`）。
 fn emit_build_stamp() {
     // 引用一个永不存在的路径 → cargo 视为「已变化」→ 每次 `cargo build` 都重跑本脚本。
     println!("cargo:rerun-if-changed=__wind_build_stamp_force_rerun__");
+    // 环境变化必须触发重跑：cargo 不跟踪未声明的环境变量。
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-env-changed=WIND_GIT_HASH_OVERRIDE");
 
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let secs = match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(s) => s.trim().parse::<i64>().unwrap_or_else(|_| {
+            panic!("SOURCE_DATE_EPOCH 不是合法的 Unix 秒：{s:?}；对可复现构建它必须存在且为整数")
+        }),
+        Err(_) => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
     println!("cargo:rustc-env=WIND_BUILD_TIME={}", format_utc(secs));
-    println!("cargo:rustc-env=WIND_GIT_HASH={}", git_describe());
+    // 空串按「未提供」处理：打包侧若传空值，日志会打成 `git:`，不如回落到 git_describe()。
+    let git_hash = std::env::var("WIND_GIT_HASH_OVERRIDE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(git_describe);
+    println!("cargo:rustc-env=WIND_GIT_HASH={git_hash}");
 }
 
 /// git 短哈希；工作树有未提交改动时追加 `-dirty`。git 不可用时返回 `unknown`。
