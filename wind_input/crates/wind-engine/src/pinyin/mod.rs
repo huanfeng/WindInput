@@ -1508,6 +1508,41 @@ impl PinyinEngine {
         }
     }
 
+    /// 前缀回退的末一档：只消费首个声母，召回以它开头的高频单字（沉在词组之后）。
+    ///
+    /// 与 `recall_abbrev_prefix` 的 `MIN_ABBREV_STROKE` 下限分开：单字母本不构成简拼，
+    /// 这里不是在解释「简拼」，而是把首字母当作单字的声母；产出一律 `is_partial`，
+    /// 排在所有整长匹配与词组前缀之后，条数受 `MAX_FALLBACK_PER_CUT` 限制。
+    fn recall_first_initial_chars(&self, initial: &str, cands: &mut Vec<Candidate>) {
+        let base = cands.len();
+        // 音节数上限 1 ⇒ 只取单音节词条（单字），边界对齐位 0 ⇒ 退化为字符前缀匹配。
+        for h in self.dict.search_prefix_with_boundary_syllable_capped(
+            initial,
+            MAX_FALLBACK_PER_CUT * 4,
+            1,
+            0,
+        ) {
+            if cands.len() - base >= MAX_FALLBACK_PER_CUT {
+                break;
+            }
+            if h.text.chars().count() != 1 || cands.iter().any(|c| c.text == h.text) {
+                continue;
+            }
+            cands.push(Candidate {
+                text: h.text,
+                code: h.code,
+                weight: h.weight,
+                natural_order: 999999,
+                source: CandidateSource::Pinyin,
+                is_abbrev: true,
+                is_partial: true,
+                boundary: h.boundary,
+                consumed_length: initial.len(),
+                ..Default::default()
+            });
+        }
+    }
+
     fn recall_abbrev_prefix(&self, stroke: &str, consumed: usize, cands: &mut Vec<Candidate>) {
         let trie = &self.trie;
         let dict = &self.dict;
@@ -3958,10 +3993,6 @@ impl Engine for PinyinEngine {
             }
         }
 
-        // 简拼族（纯简拼 step5 / 混合 step5b / 用户词 step6）是否命中了**整串**击键。
-        // step 6.2 的前缀回退只在这三处全都落空时才启动——整串能打出词就不该降级。
-        let mut abbrev_full_hit = false;
-
         // 整串是否**纯简拼形态**（每字母均为某音节首字母、且非完整音节序列）。
         // 提成变量供 step5 / step6 / step6.2 共用，`enable_abbrev` 仍在短路前（关闭时
         // 连 is_abbreviation 的 Dag 构建都省掉）。
@@ -4027,7 +4058,6 @@ impl Engine for PinyinEngine {
                         // 「夺不了冠」之后。同层之后两者才能按权重/词频正常竞争。
                         if candidates.len() > before {
                             candidates[before].is_abbrev = true;
-                            abbrev_full_hit = true;
                         }
                     }
                 }
@@ -4113,7 +4143,6 @@ impl Engine for PinyinEngine {
                         // ——它的 code 是词的全拼码，与当次击键根本不同域。
                         if candidates.len() > before {
                             candidates[before].is_abbrev = true;
-                            abbrev_full_hit = true;
                         }
                     }
                 }
@@ -4285,7 +4314,6 @@ impl Engine for PinyinEngine {
                     && !self.is_possible_pinyin_sequence(abbr_query)
                 {
                     c.is_abbrev = true;
-                    abbrev_full_hit = true;
                 }
                 // 用户/临时词的前缀补全（is_prefix=true，码更长）：打到词尾附近就提升进完整
                 // 匹配层，否则被首音节同音子短语整层淹没（长词打到第 3-4 音节才给的根因）。
@@ -4397,13 +4425,17 @@ impl Engine for PinyinEngine {
                         c.is_fuzzy = true;
                     }
                     candidates.push(c);
-                    abbrev_full_hit = true;
                 }
             }
         }
 
-        // 6.2 简拼族**前缀回退**：整串一无所获时，退到最长的能命中的前缀，
-        //     余下字母作残码留给下一次输入（分步上屏）。
+        // 6.2 简拼族**前缀回退**：退到更短的前缀，余下字母作残码留给下一次输入（分步上屏）。
+        //
+        //     ★ **整串命中时也照样补**（对齐微软拼音：整长匹配 → 词组前缀 → 首声母单字）。
+        //     补进来的都是 `is_partial`，沉在整长匹配之后，不改变首选；此前整串一命中就
+        //     不再降级，`tymh` 这类只有一个整长词的输入候选只剩 1 条（t371）。
+        //     下面各段「整串一无所获才降级」的论证是**旧设计**，保留作历史背景：它们
+        //     论证的风险（短切点高频词抢首选）在整串命中时由层级键挡住。
         //
         //     真机现场（连打 `bzdnihaobuhao`）：输到 `bzdha` **整串空码**。`bzd` 明明能出
         //     「不知道」，但简拼族的召回一直是「全串或无」——索引按完整简拼串点查、混合
@@ -4442,11 +4474,7 @@ impl Engine for PinyinEngine {
         //     凡含成不了音节的字母（`bzdha`、`bzdnihaobuh`）⇒ 允许降级，且**逐前缀的严格
         //     判定在 `recall_abbrev_prefix` 内部**（每个 stroke 各自过 is_abbreviation /
         //     mixed_patterns），门槛只负责挡掉纯全拼、不负责替前缀把关。
-        if self.config.enable_abbrev
-            && !abbrev_full_hit
-            && !mixed_covered
-            && abbr_query.len() > MIN_ABBREV_STROKE
-        {
+        if self.config.enable_abbrev && !mixed_covered && abbr_query.len() > MIN_ABBREV_STROKE {
             let mut cuts_with_hits = 0usize;
             for take in (MIN_ABBREV_STROKE..abbr_query.len()).rev() {
                 if !abbr_query.is_char_boundary(take) {
@@ -4460,6 +4488,11 @@ impl Engine for PinyinEngine {
                         break;
                     }
                 }
+            }
+            // 最末一档：首声母对应的单字（微软拼音的「整串 → 词组 → 单字」）。
+            // 只对纯简拼形态做：`buxzd` 这类首个音节已打全的串，首字母不是用户的意图。
+            if stroke_is_plain_abbrev {
+                self.recall_first_initial_chars(&abbr_query[..1], &mut candidates);
             }
         }
 

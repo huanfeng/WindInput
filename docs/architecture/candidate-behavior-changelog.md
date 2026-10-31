@@ -47,6 +47,14 @@
   `wind-phrase` 的 `test_cmdbar_array_embedded_command_members`、`dict_value_group_carries_command_members`
 - 来源：内部
 
+## 2026-10-31 · 简拼整长匹配之后逐级补短前缀词组与首声母单字（0.129）
+- 合入：待合入；范围：拼音方案、纯简拼 / 混合简拼
+- 变化：`tymh` 前：只有「头也没回」1 条 → 后：「头也没回」之后依次是 `tym`/`ty` 词组（他也没、同样、体验…），最后是首声母单字（他、它、她…）。`bxzd` 前：只有 4 字词 → 后：4 字词之后补「不想知」「必须」等前缀词组，再补「被、吧、把…」。整长匹配仍在最前，首选不变。
+- 触发条件：出厂即生效；输入须有「成不了音节的字母」（纯全拼不受影响）。首声母单字只在整串是纯简拼形态时补（`buxzd` 首音节已打全，不补 `b` 的单字）。
+- 回退旧行为：`[schema.pinyin.abbrev] enabled = false` 关简拼；仅回退本条无配置，属设计变更
+- 钉住的测试：`wind-engine/tests/pinyin_abbrev_short_fallback.rs`
+- 来源：论坛 t371（A2-100）；对照微软拼音「整长匹配 → 词组 → 单字」
+
 ## 2026-10-24 · 拼音误读表：召回读错的词并提示正确拼音（0.128）
 
 - 合入：feat/pinyin-correction、feat/misread-table-only；范围：全拼、双拼、混输的拼音侧、临时拼音
