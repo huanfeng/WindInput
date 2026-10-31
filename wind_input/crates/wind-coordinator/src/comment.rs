@@ -1632,7 +1632,7 @@ impl crate::coordinator::Coordinator {
         // 字符（英文、标点、生僻字）时，`${char}: ${code} ${pinyin}` 会渲染成孤零零的
         // `A:` 并当作一条正常候选出现 —— 而正确行为是这条候选压根不该存在。
         let found = std::cell::Cell::new(false);
-        let out = render(&tpl, 0, |name, arg| {
+        let out = render(tpl, 0, |name, arg| {
             let v = self.eval_text_var_ex(name, arg, text, &reverse, true);
             if name != "char" && v.as_deref().is_some_and(|s| !s.is_empty()) {
                 found.set(true);

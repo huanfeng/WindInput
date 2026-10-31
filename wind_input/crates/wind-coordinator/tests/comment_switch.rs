@@ -4,6 +4,7 @@
 //! - Ctrl：按下时有输入会话，平台如实上报按下与松开（`EVENT_MOD_DOWN` / `EVENT_MOD_UP`），服务端判单击；
 //!   否则平台只送判过单击的松开（`0xA2` / `0xA3`；TSF 带 Ctrl 位，mac / Linux 不带）。
 //!   撞键时中英切换、选词键组、会话绑定优先。
+//!
 //! 期望注释取自出厂分配：码表 默认=`code_hint`、详细=`chaizi_pinyin`，同 `comment_state.rs`。
 //!
 //! 词典缺失时自动跳过（判据：耗时 0.0x 秒＝假绿）。

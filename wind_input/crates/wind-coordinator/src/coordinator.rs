@@ -19173,13 +19173,13 @@ pub(crate) fn named_only_mounts(
         .collect()
 }
 
+/// 词库路径 → 指到它的 id 列表。
+type PathIds = Vec<(std::path::PathBuf, Vec<String>)>;
+
 pub(crate) fn resolve_comment_mounts(
     specs: &[EffectiveCommentDict],
     data_dir: Option<&Path>,
-) -> (
-    Vec<(std::path::PathBuf, Vec<String>)>,
-    Vec<(std::path::PathBuf, Vec<String>)>,
-) {
+) -> (PathIds, PathIds) {
     let mut paths: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
     // `${dict:id}` 用：每个库被哪些 id 指到（去重合并的那条的 id 也算它的）。
     let mut ids: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();

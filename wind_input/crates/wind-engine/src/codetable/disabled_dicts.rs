@@ -39,6 +39,9 @@ pub struct DisabledDictSource {
     pub load: DictLoader,
 }
 
+/// 文本 → 编码（按码长升序）的小表。
+type TextCodes = Arc<std::collections::HashMap<String, Vec<String>>>;
+
 /// 影子层：懒加载的未启用扩展词库集合。见模块文档。
 pub struct DisabledDictLayers {
     /// 本方案**全部**扩展库来源（含已启用的——它们随时可能被禁用而进影子集合）。
@@ -49,7 +52,7 @@ pub struct DisabledDictLayers {
     /// 已加载的影子 `DictManager`；`None` = 尚未加载或已作废。
     loaded: Mutex<Option<Arc<DictManager>>>,
     /// 影子集合的「文本 → 编码（按码长升序）」小表，剪贴板反查用；随 `loaded` 一起作废。
-    text_codes: Mutex<Option<Arc<std::collections::HashMap<String, Vec<String>>>>>,
+    text_codes: Mutex<Option<TextCodes>>,
     /// 建过几遍影子 `DictManager`（测试与诊断用）。
     loads: AtomicUsize,
 }

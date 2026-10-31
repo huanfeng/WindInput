@@ -777,8 +777,10 @@ mod tests {
 
     #[test]
     fn reserved_user_template_ids_are_rejected() {
-        let mut u = UiCommentConfig::default();
-        u.templates = vec![tpl("none", "N"), tpl("inherit", "I")];
+        let u = UiCommentConfig {
+            templates: vec![tpl("none", "N"), tpl("inherit", "I")],
+            ..Default::default()
+        };
         let (lib, w) = CommentLibrary::build(&sys(global_only()), &u);
         assert_eq!(
             w.iter().filter(|w| w.contains("保留字")).count(),
