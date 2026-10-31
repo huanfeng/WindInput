@@ -359,6 +359,61 @@ where
     de_opt_str_enum(d, "composition_placeholder", PlaceholderChar::from_config)
 }
 
+/// 拼音音节分隔符的应用级覆盖（`ui.candidate.syllable_separator` 的 per-app 版）。
+///
+/// 只改显示；没写 = 跟随全局设置（所以没有 `Default`）。常用档位而非任意字符：
+/// 要任意字符走全局项。典型用途：Unreal Engine 等对资产名校验严格的程序不接受 `'`，选 `none`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyllableSeparator {
+    /// `'`（引擎原样，即全局默认）。
+    Apostrophe,
+    /// 不显示分隔符。
+    None,
+    /// 空格。
+    Space,
+    /// `·`。
+    Dot,
+}
+
+impl SyllableSeparator {
+    /// 配置串 → 枚举。无法识别返回 `None`（＝未配置，跟随全局）。
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "apostrophe" => Some(Self::Apostrophe),
+            "none" => Some(Self::None),
+            "space" => Some(Self::Space),
+            "dot" => Some(Self::Dot),
+            _ => None,
+        }
+    }
+    /// 枚举 → 配置串（写回 compat.toml 用）。
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Apostrophe => "apostrophe",
+            Self::None => "none",
+            Self::Space => "space",
+            Self::Dot => "dot",
+        }
+    }
+    /// 实际显示的分隔符字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Apostrophe => "'",
+            Self::None => "",
+            Self::Space => " ",
+            Self::Dot => "\u{00B7}",
+        }
+    }
+}
+
+fn de_syllable_separator<'de, D>(d: D) -> Result<Option<SyllableSeparator>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    de_opt_str_enum(d, "syllable_separator", SyllableSeparator::from_config)
+}
+
 /// 含换行的上屏文本怎么交给宿主。
 ///
 /// 有的宿主（新版微信）收到 TSF 上屏的多行文本时，会把组合区的编码显示残留在界面上，
@@ -1161,6 +1216,13 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub composition_placeholder: Option<PlaceholderChar>,
+    /// 拼音音节分隔符的显示；`None` = 跟随全局 `ui.candidate.syllable_separator`。见 [`SyllableSeparator`]。
+    #[serde(
+        default,
+        deserialize_with = "de_syllable_separator",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub syllable_separator: Option<SyllableSeparator>,
     /// 含换行的上屏走 TSF 还是剪贴板粘贴；`None` = commit（历史行为）。见 [`MultilineCommit`]。
     #[serde(
         default,
@@ -2687,6 +2749,32 @@ mod tests {
             PlaceholderChar::Space,
             "进程未知 ⇒ 不吃通配"
         );
+    }
+
+    /// `syllable_separator` 解析：认不出的值退化为未配置（跟随全局）；`none` 是真值而非「没配」。
+    #[test]
+    fn syllable_separator_parses() {
+        let compat = AppCompat::from_single_layer_text(
+            r#"
+            [[apps]]
+            process = "ue.exe"
+            syllable_separator = "None"
+            [[apps]]
+            process = "bad.exe"
+            syllable_separator = "tab"
+            "#,
+        );
+        let get = |p: &str| compat.get_rule(p).and_then(|r| r.syllable_separator);
+        assert_eq!(get("ue.exe"), Some(SyllableSeparator::None));
+        assert_eq!(get("bad.exe"), None);
+        for v in [
+            SyllableSeparator::Apostrophe,
+            SyllableSeparator::None,
+            SyllableSeparator::Space,
+            SyllableSeparator::Dot,
+        ] {
+            assert_eq!(SyllableSeparator::from_config(v.as_config()), Some(v));
+        }
     }
 
     /// `multiline_commit` 解析：认不出的值退化为未配置；`process = "*"` 通配与窗口条件照常生效。

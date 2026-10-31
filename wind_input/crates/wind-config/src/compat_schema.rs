@@ -82,6 +82,7 @@ const SMART_METHODS: &[&str] = &["delete_replace", "hold_composition"];
 const CANDIDATE_POSITION_MODES: &[&str] = &["follow_caret", "fixed"];
 const NEWLINE_STYLES: &[&str] = &["keep", "cr", "lf", "crlf"];
 const PLACEHOLDER_CHARS: &[&str] = &["space", "zwsp", "blank"];
+const SYLLABLE_SEPARATORS: &[&str] = &["apostrophe", "none", "space", "dot"];
 const MULTILINE_COMMITS: &[&str] = &["commit", "paste"];
 
 /// 全部字段。顺序即界面内的展示顺序（同组内）。
@@ -308,6 +309,21 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
         advanced: false,
     },
     // ── 输入行为 ──────────────────────────────────────────────────
+    FieldMeta {
+        section: "apps",
+        key: "syllable_separator",
+        kind: Kind::Enum,
+        group: "behavior",
+        label: "拼音音节分隔符",
+        summary: "拼音编码里音节之间显示的符号：撇号 '、不显示、空格或 ·。",
+        problem: "有的软件（如 Unreal Engine 的资产命名框）不接受撇号，编码里带 ' 会被拒绝或弹错。\
+                  选「不显示」即可，只改显示，不影响输入和切分。不设置则跟随全局设置。",
+        hosts: &[],
+        options: SYLLABLE_SEPARATORS,
+        depends_on: None,
+        protocol: false,
+        advanced: false,
+    },
     FieldMeta {
         section: "apps",
         key: "auto_pair",
@@ -559,6 +575,9 @@ pub const OPTION_LABELS: &[(&str, &str)] = &[
     ("space", "空格"),
     ("zwsp", "零宽空格"),
     ("blank", "盲文空白（有宽度、不算空格）"),
+    ("apostrophe", "撇号 '"),
+    ("none", "不显示"),
+    ("dot", "间隔点 ·"),
     ("commit", "直接上屏"),
     ("paste", "粘贴上屏"),
 ];

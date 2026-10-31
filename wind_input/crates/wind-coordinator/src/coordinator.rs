@@ -1085,6 +1085,8 @@ pub(crate) struct ActiveCompat {
 pub(crate) struct ActiveLookups {
     /// 协调器自己发占位时用的字符（`composition_placeholder`，没配 = 空格）。
     pub(crate) composition_placeholder: wind_config::app_compat::PlaceholderChar,
+    /// 拼音音节分隔符的应用级覆盖（`syllable_separator`）；`None` = 跟随全局。
+    pub(crate) syllable_separator: Option<wind_config::app_compat::SyllableSeparator>,
     /// per-app 候选窗定位 `(fixed, x, y)`；`None` = 规则没配定位方式，跟随全局。
     pub(crate) candidate_pos: Option<(bool, i32, i32)>,
     /// `host_drawn_candidates`（UIElement 推断收窗的 opt-in）。进程名未知时取 `"*"` 那条，
@@ -3800,8 +3802,8 @@ impl Coordinator {
 
     /// 按 (进程名, 窗口) 现算 [`ActiveLookups`]。
     pub(crate) fn compute_active_lookups(&self, name: &str, win: &FocusWindow) -> ActiveLookups {
-        let (composition_placeholder, candidate_pos, host_drawn_candidates) = self
-            .with_compat_rule(name, win, |rule| {
+        let (composition_placeholder, candidate_pos, host_drawn_candidates, syllable_separator) =
+            self.with_compat_rule(name, win, |rule| {
                 (
                     rule.and_then(|r| r.composition_placeholder)
                         .unwrap_or_default(),
@@ -3810,6 +3812,7 @@ impl Coordinator {
                         Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
                     }),
                     rule.and_then(|r| r.host_drawn_candidates),
+                    rule.and_then(|r| r.syllable_separator),
                 )
             });
         // 收窗推断对无名进程也认 `"*"`（`get_rule("")` 不吃通配），口径见
@@ -3823,6 +3826,7 @@ impl Coordinator {
         };
         ActiveLookups {
             composition_placeholder,
+            syllable_separator,
             candidate_pos,
             host_drawn_candidates,
         }
@@ -8598,7 +8602,17 @@ impl Coordinator {
         if !main_path {
             return None;
         }
-        let sep = self.rt().config.ui.candidate.syllable_separator.clone();
+        // 应用级覆盖（compat `syllable_separator`）优先，没配跟随全局。
+        let app = self
+            .active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookups
+            .syllable_separator;
+        let sep = match app {
+            Some(s) => s.as_str().to_string(),
+            None => self.rt().config.ui.candidate.syllable_separator.clone(),
+        };
         if sep == "'" {
             return None;
         }
@@ -20212,5 +20226,81 @@ mod exit_flush_tests {
         assert_eq!(store.get_daily_stat(&today).unwrap().chinese, 7);
         drop(c);
         let _ = std::fs::remove_dir_all(&user);
+    }
+}
+
+#[cfg(test)]
+mod syllable_separator_app_tests {
+    //! 应用级 `syllable_separator`：断言落在按键出口（组合串），不是判据返回值。
+    use super::*;
+    use wind_config::app_compat::{AppCompat, AppCompatRule, SyllableSeparator};
+
+    fn data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
+    }
+
+    fn composition_after_typing(c: &Coordinator) -> String {
+        let mut last = KeyAction::Consumed;
+        for ch in "xiaopeng".chars() {
+            last = c.handle_key_event_policed(&KeyEventData {
+                key_code: (ch.to_ascii_uppercase() as u32) & 0xFF,
+                scan_code: 0,
+                modifiers: 0,
+                event_type: EVENT_KEY_DOWN,
+                toggles: 0,
+                event_seq: 0,
+                prev_char: 0,
+            });
+        }
+        match last {
+            KeyAction::UpdateComposition { text, .. } => text,
+            other => panic!("期望组合区更新，实得 {other:?}"),
+        }
+    }
+
+    fn focus(c: &Coordinator, pid: u32, name: &str) {
+        c.pid_names.lock().unwrap().insert(pid, name.into());
+        c.active_compat.lock().unwrap().pid = pid;
+        c.refresh_active_compat_lookups();
+    }
+
+    #[test]
+    fn app_rule_overrides_global_separator() {
+        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
+            eprintln!("skip: 无 build_dev/data");
+            return;
+        }
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
+        cfg.schema.active = "pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        let c = Coordinator::new_headless(cfg, Some(&data_dir()));
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "ue.exe".into(),
+            syllable_separator: Some(SyllableSeparator::None),
+            ..Default::default()
+        }]));
+
+        focus(&c, 7, "ue.exe");
+        assert_eq!(
+            composition_after_typing(&c),
+            "xiaopeng",
+            "配了 none 的应用无分隔符"
+        );
+
+        c.handle_key_event_policed(&KeyEventData {
+            key_code: 0x1B,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
+        });
+        focus(&c, 8, "other.exe");
+        assert!(
+            composition_after_typing(&c).contains('\''),
+            "未配规则的应用跟随全局默认 '"
+        );
     }
 }

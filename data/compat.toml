@@ -155,6 +155,9 @@
 #   multiline_commit:     含换行的上屏文本怎么交给软件："commit" | "paste"｜不写=commit（直接上屏）。
 #                         "paste" 先结束组合，再把文本写入剪贴板并模拟 Ctrl+V 粘贴；只影响含换行的上屏。
 #                         ⚠ 会覆盖剪贴板原有内容且不恢复（不进剪贴板历史）；终端等 Ctrl+V 不是粘贴的软件不要开。
+#   syllable_separator:   拼音编码里音节之间显示的符号："apostrophe"(') | "none" | "space" | "dot"(·)｜不写=跟随全局
+#                         ui.candidate.syllable_separator。只改显示，不影响输入与切分；对拼音/混输生效。
+#                         例：Unreal Engine 的资产命名框不接受 '，对它设 "none"。
 #   caret_offset_x:       光标坐标水平校正（dp，96dpi 基准逻辑像素，正=右，默认 0）。
 #   caret_offset_y:       光标坐标垂直校正（dp，96dpi 基准逻辑像素，正=下，默认 0）。
 #                         用于宿主报告的光标坐标**系统性偏移**的场景（如 Windows Terminal，
