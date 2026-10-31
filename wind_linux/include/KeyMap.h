@@ -88,6 +88,14 @@ public:
     uint32_t onRelease(uint32_t keysym, bool* notTap);
     /// 焦点切换：作废（松开多半送不到，服务端失焦时也会收起按住翻转）。
     void reset() { *this = CtrlRaw{}; }
+    /// 失焦：取走如实上报中的 Ctrl 并复位。返回 VK = 要补报的 MOD_UP（松开送不到了，按 NOT_TAP 报，
+    /// 不让它被当成单击切中英）；0 = 没有按住中的。
+    uint32_t takeHeld()
+    {
+        const uint32_t v = vk_;
+        reset();
+        return v;
+    }
 
 private:
     uint32_t vk_ = 0;       // 如实上报中的 Ctrl

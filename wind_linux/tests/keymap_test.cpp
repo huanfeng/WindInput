@@ -224,6 +224,18 @@ void TestCtrlRaw()
     CHECK_EQ(r.onRelease('a', &notTap), 0u);
     r.reset();
     CHECK_EQ(r.onRelease(CtrlL, &notTap), 0u);
+
+    CASE("失焦取走按住中的 Ctrl 并复位：只取一次，之后松开不再报");
+    CHECK_EQ(r.onPress(CtrlR, true), 0xA3u);
+    CHECK_EQ(r.takeHeld(), 0xA3u);
+    CHECK_EQ(r.takeHeld(), 0u);
+    CHECK_EQ(r.onRelease(CtrlR, &notTap), 0u);
+    CHECK_EQ(r.onPress(CtrlR, true), 0xA3u); // 不再被当成连发吞掉
+    CASE("失焦取走：没有按住中的（含旧路）返回 0");
+    r.reset();
+    CHECK_EQ(r.takeHeld(), 0u);
+    r.onPress(CtrlL, false);
+    CHECK_EQ(r.takeHeld(), 0u);
 }
 
 } // namespace

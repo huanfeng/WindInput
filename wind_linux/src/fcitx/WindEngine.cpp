@@ -951,6 +951,13 @@ void WindEngine::deactivate(const fcitx::InputMethodEntry&, fcitx::InputContextE
     focusUnreported_ = false; // 焦点都走了，不再补报（下次 activate 自会再报）
     // 按住的键先抬起，发给当初按下的那个 IC（通常就是正在失焦的这个）。
     releaseHeldKeys("focus_out");
+    // 按住中的 Ctrl 松开多半送不到本引擎：补报 NOT_TAP 的 MOD_UP，修饰键记账一并复位
+    // （activate 才复位的话，失焦到下次激活之间残留的记账会把同侧 Ctrl 当成连发吞掉）。
+    if (uint32_t rvk = ctrlRaw_.takeHeld(); rvk != 0 && bridge_.isConnected()) {
+        sendCtrlRaw(ic, rvk, KEY_EVENT_MOD_UP, KEYMOD_CTRL, TOGGLE_MOD_NOT_TAP);
+    }
+    tap_.reset();
+    altHold_.reset();
     // 失焦 / 切走输入法：菜单随之收起（服务端也会在 FocusLost 上关，但它有 250ms 的「刚打开」
     // 守卫；本端这条无条件，且先于 FocusLost 报，服务端据此复位）。
     panel_->closeMenu("focus_out");
