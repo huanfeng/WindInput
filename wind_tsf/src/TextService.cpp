@@ -1795,7 +1795,10 @@ STDAPI CTextService::OnKillThreadFocus()
     _hasThreadFocus = FALSE;
     // Ctrl 如实上报的松开多半送不到了，丢掉记账（不丢的话下一次同侧 Ctrl 会被当成连发吞掉）。
     if (_pKeyEventSink != nullptr)
+    {
         _pKeyEventSink->ResetCtrlRaw();
+        _pKeyEventSink->ResetEatenFnKey();
+    }
     // 空窗计时**丢弃而非结算**：整个应用失去前台后，用户是去别处干活了，这段时间
     // 再长也不是「想输入却输不进」。不丢的话，切走十分钟再切回来就会记出一条
     // duration=600000ms 的假空窗，把真正要找的那几十毫秒淹在噪声里。

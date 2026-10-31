@@ -151,6 +151,8 @@ public:
     void NoteHotkeyMessage();
     /// 线程失焦：Ctrl 如实上报的记账作废（松开多半送不到了）。
     void ResetCtrlRaw();
+    // 失焦：吃掉过按下的功能键补报松开并清记账（见实现）。
+    void ResetEatenFnKey();
 
     // 把一个已被吃掉的键重放给宿主（_ReplayKeyToHost 的公开入口，给 WM_HOTKEY 派发用）。
     void ReplayKeyToHost(WORD vk) { _ReplayKeyToHost(vk); }

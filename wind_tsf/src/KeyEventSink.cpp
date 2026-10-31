@@ -2438,6 +2438,20 @@ void CKeyEventSink::ResetCtrlRaw()
     _ctrlRawTapSignals = {};
 }
 
+// 失焦时吃掉过按下的功能键的松开多半送不到：补报一次松开（按住档的注释切换键靠它收起详细态），
+// 再丢掉记账——不丢的话，之后宿主正常处理的同一个键，松开会被误吃。
+void CKeyEventSink::ResetEatenFnKey()
+{
+    if (_eatenFnKeyVk != 0 && !_eatenFnKeyUpSent)
+    {
+        _eatenFnKeyUpSent = TRUE;
+        if (_SendKeyToService((uint32_t)_eatenFnKeyVk, 0, KEY_EVENT_UP))
+            _HandleServiceResponse();
+    }
+    _eatenFnKeyVk = 0;
+    _eatenFnKeyUpSent = FALSE;
+}
+
 BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType, uint8_t extraToggles)
 {
     DWORD startTime = GetTickCount();
