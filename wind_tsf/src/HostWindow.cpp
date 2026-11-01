@@ -1,5 +1,6 @@
 #include "HostWindow.h"
 #include "FileLogger.h"
+#include "HostBandPolicy.h"
 #include "HostClickPolicy.h"
 #include "IPCClient.h"
 #include <climits>
@@ -110,7 +111,10 @@ BOOL CALLBACK BandEnumProc(HWND hwnd, LPARAM lParam)
     auto* data = reinterpret_cast<BandEnumData*>(lParam);
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == data->targetPID)
+    RECT rc = {};
+    GetWindowRect(hwnd, &rc);
+    if (pid == data->targetPID &&
+        wind::hostband::CountsForHostBand(IsWindowVisible(hwnd) != FALSE, rc.right - rc.left, rc.bottom - rc.top))
     {
         DWORD b = 0;
         if (data->pfnGetWindowBand(hwnd, &b) && b > data->bestBand)
@@ -137,12 +141,30 @@ DWORD CHostWindow::GetForegroundHostBand()
 
 DWORD CHostWindow::GetHostBand()
 {
-    // Try the foreground window first
-    DWORD band = GetForegroundHostBand();
-    if (band > 1)
-        return band;
+    DWORD fgBand = GetForegroundHostBand();
+    if (fgBand > 1)
+        return fgBand;
 
-    // Enumerate top-level windows owned by this process.
+    // 本线程焦点/活动窗口的根窗口：前台不是本进程时（Win11 表情面板，前台仍是记事本）
+    // 它是比枚举更直接的依据。取不到就是 0，交给枚举兜底。
+    DWORD focusRootBand = 0;
+    if (_pfnGetWindowBand)
+    {
+        GUITHREADINFO gti = {};
+        gti.cbSize = sizeof(gti);
+        if (GetGUIThreadInfo(GetCurrentThreadId(), &gti))
+        {
+            HWND h = gti.hwndFocus ? gti.hwndFocus : gti.hwndActive;
+            HWND root = h ? GetAncestor(h, GA_ROOT) : nullptr;
+            DWORD b = 0;
+            if (root && _pfnGetWindowBand(root, &b))
+                focusRootBand = b;
+        }
+    }
+    if (focusRootBand > 1)
+        return wind::hostband::PickHostBand(fgBand, focusRootBand, 0);
+
+    // Enumerate visible, non-empty top-level windows owned by this process.
     //
     // ⚠ 前台不是本进程时这里只是猜：SearchHost 开机预启动、界面还没显示时它的窗口不在
     // 开始菜单那一层，据此建的窗口会被开始菜单盖住（2026-10-09 靶机开机首次）。所以建窗
@@ -150,7 +172,7 @@ DWORD CHostWindow::GetHostBand()
     BandEnumData enumData = { GetCurrentProcessId(), _pfnGetWindowBand, 0 };
     EnumWindows(BandEnumProc, (LPARAM)&enumData);
 
-    return enumData.bestBand;
+    return wind::hostband::PickHostBand(fgBand, focusRootBand, enumData.bestBand);
 }
 
 LRESULT CALLBACK CHostWindow::_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
