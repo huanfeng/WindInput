@@ -4236,6 +4236,9 @@ impl Coordinator {
     /// 清掉展开登记并重查；重查后同码确实出现该组的折叠项才算退了一级（返回动作，吞掉按键）。
     /// 否则（无重码，重查仍自动展开）返回 `None`，调用方按普通退格删字符，避免「死键」。
     pub(crate) fn collapse_expanded_group(&self, state: &mut State) -> Option<KeyAction> {
+        if !self.rt().config.input.cmdbar.backspace_collapse_group {
+            return None;
+        }
         let (code, _) = state.expanded_group.take()?;
         if code != state.input_buffer {
             return None;

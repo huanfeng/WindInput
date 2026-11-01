@@ -40,6 +40,7 @@
   - 命令候选按「显示名 + 动作」去重，不再被同名普通候选吞掉。
   - 重码折叠下选中组进入展开态后，Backspace 先退回折叠视图（输入码不变），再按才删码；
     无重码、重查仍自动展开时不吞键，照常删码。Esc 不变（取消整个输入）。仅主路径。
+    开关 `input.cmdbar.backspace_collapse_group`（默认 true，false = Backspace 直接删码）。
 - 触发条件：出厂即生效
 - 回退旧行为：无（设计变更）
 - 钉住的测试：`wind-coordinator/tests/group_expansion_rule.rs`；

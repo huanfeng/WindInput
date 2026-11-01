@@ -5593,6 +5593,9 @@ pub struct CmdbarConfig {
     /// 副作用命令候选（含 ActionEffect）在候选框渲染时的前缀标注（对齐 Go,默认 "⚡"）。
     #[serde(default = "default_candidate_prefix")]
     pub candidate_prefix: String,
+    /// 选中折叠组进入展开态后，Backspace 先退回折叠视图（不删码）；关闭则直接删一个码。
+    #[serde(default = "default_true")]
+    pub backspace_collapse_group: bool,
 }
 
 fn default_candidate_prefix() -> String {
@@ -5604,6 +5607,7 @@ impl Default for CmdbarConfig {
         Self {
             enabled: false,
             candidate_prefix: default_candidate_prefix(),
+            backspace_collapse_group: true,
         }
     }
 }

@@ -1230,6 +1230,8 @@ enabled = false
 [input.cmdbar]
 enabled = false
 candidate_prefix = "⚡"
+# 选中重码折叠的 $SS/$AA 组进入展开态后，Backspace 先退回折叠视图（不删码）；false = 直接删码。
+backspace_collapse_group = true
 
 # 短语前缀列举（原 [dict.phrase]）
 [input.phrase]

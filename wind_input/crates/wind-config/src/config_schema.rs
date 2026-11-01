@@ -571,6 +571,7 @@ static REGISTRY: &[ConfigField] = &[
     f("input.t2s.enabled", Bool),
     f("input.cmdbar.enabled", Bool),
     f("input.cmdbar.candidate_prefix", Str),
+    f("input.cmdbar.backspace_collapse_group", Bool),
     // 短语前缀列举（原 dict.phrase）
     f("input.phrase.prefix_match", Bool),
     f("input.phrase.min_prefix", Int),

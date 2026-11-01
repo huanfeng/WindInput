@@ -145,6 +145,30 @@ fn selecting_folded_group_expands_only_that_group() {
     );
 }
 
+/// 开关关闭：展开态下 Backspace 直接删码，不先退一级。
+#[test]
+fn backspace_collapse_switch_off_deletes_char() {
+    let dir = make_data_dir("swoff", &format!("阿\ta\n乙\tuu\n{SS}\tuu\n"));
+    let mut c = Config::default();
+    c.schema.available = vec!["st".into()];
+    c.schema.active = "st".into();
+    c.input.default.chinese_mode = true;
+    c.input.cmdbar.backspace_collapse_group = false;
+    let ov = std::env::temp_dir().join("wind_grp_rule_ov_swoff");
+    let _ = std::fs::remove_dir_all(&ov);
+    std::fs::create_dir_all(&ov).unwrap();
+    let coord = Coordinator::new_headless_with_override(c, Some(&dir), Some(ov));
+    type_keys(&coord, "uu");
+    let idx = coord
+        .debug_all_candidate_texts()
+        .iter()
+        .position(|t| t == "括号")
+        .unwrap();
+    press(&coord, 0x31 + idx as u32);
+    press(&coord, VK_BACK);
+    assert_eq!(coord.debug_input_buffer(), "u");
+}
+
 /// 无重码自动展开时 Backspace 不能成死键：照常删一个码。
 #[test]
 fn backspace_on_auto_expanded_group_deletes_char() {
