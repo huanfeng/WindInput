@@ -239,6 +239,11 @@ comment = "Win10 开始菜单：同上"
 host_render = true
 
 [[apps]]
+process = "textinputhost.exe"
+comment = "Win11 表情/剪贴板面板（Win+.）：面板在 Band 3，候选框盖不过，同上"
+host_render = true
+
+[[apps]]
 process = "EXCEL.EXE"
 comment = "Excel：进单元格前先在编辑栏报坐标，fast 首显会落在编辑栏，改用 wait"
 first_show_mode = "wait"

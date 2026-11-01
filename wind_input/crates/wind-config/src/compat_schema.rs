@@ -424,12 +424,13 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
         group: "host",
         label: "宿主渲染模式",
         summary: "候选窗由输入法服务绘制，再交给软件内的组件显示。",
-        problem: "Win11 开始菜单、任务栏搜索这类受限进程，普通候选窗盖不住它们的窗口层级。改由服务渲染后经共享内存转交，\
+        problem: "Win11 开始菜单、任务栏搜索、表情面板这类受限进程，普通候选窗盖不住它们的窗口层级。改由服务渲染后经共享内存转交，\
                   才能正常显示。",
         hosts: &[
             "SearchHost.exe",
             "searchapp.exe",
             "startmenuexperiencehost.exe",
+            "textinputhost.exe",
         ],
         options: &[],
         depends_on: None,
