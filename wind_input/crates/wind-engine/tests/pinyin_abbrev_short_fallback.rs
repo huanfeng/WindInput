@@ -83,3 +83,34 @@ fn no_initial_single_char_when_first_syllable_is_complete() {
         "bu 已打全，不该出 ba 的单字「把」: {t:?}"
     );
 }
+
+/// 首声母单字不设小限额：和直接打 `b` 一样，能挑到词库里该声母下的所有单字。
+#[test]
+fn initial_single_chars_are_not_capped_to_a_handful() {
+    let dir = std::env::temp_dir().join("wind_abbrev_short_fallback_many");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wdat = dir.join("t.wdat");
+    let mut w = WdatWriter::new();
+    w.add_with_boundary(
+        "buxiangzhidao".into(),
+        vec![("不想知道".into(), 96, 0, 0b1001000010001)],
+    );
+    w.add_abbrev("bxzd".into(), vec![("buxiangzhidao".into(), 96)]);
+    // 20 个 b 开头的单字（同码不同字），远多于词组前缀的单切点限额
+    let hanzi: Vec<char> = "把爸吧罢霸坝拔跋靶耙钯魃茇菝詙鲌鲅岜灞鲃".chars().collect();
+    let items: Vec<(String, i32, u32, u64)> = hanzi
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.to_string(), 1000 - i as i32, i as u32, 0b1))
+        .collect();
+    w.add_with_boundary("ba".into(), items);
+    w.write(&wdat).unwrap();
+    let e = PinyinEngine::new(
+        PyConfig::default(),
+        CachedDict::load_at(&dir.join("t.dict.yaml"), &wdat).expect("加载 wdat 夹具"),
+    );
+    let t = ui_texts(&e, "bxzd");
+    let singles = t.iter().filter(|x| x.chars().count() == 1).count();
+    assert_eq!(singles, hanzi.len(), "单字应全部可选: {t:?}");
+}

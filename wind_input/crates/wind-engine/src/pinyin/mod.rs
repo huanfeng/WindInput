@@ -1512,19 +1512,15 @@ impl PinyinEngine {
     ///
     /// 与 `recall_abbrev_prefix` 的 `MIN_ABBREV_STROKE` 下限分开：单字母本不构成简拼，
     /// 这里不是在解释「简拼」，而是把首字母当作单字的声母；产出一律 `is_partial`，
-    /// 排在所有整长匹配与词组前缀之后，条数受 `MAX_FALLBACK_PER_CUT` 限制。
-    fn recall_first_initial_chars(&self, initial: &str, cands: &mut Vec<Candidate>) {
+    /// 排在所有整长匹配与词组前缀之后。条数**不套** `MAX_FALLBACK_PER_CUT`：用户期望
+    /// 和直接打首字母一样能挑任意单字，取数量与主路径 step 4 同口径（`limit` 由调用方给）。
+    fn recall_first_initial_chars(&self, initial: &str, limit: usize, cands: &mut Vec<Candidate>) {
         let base = cands.len();
         // 音节数上限 1 ⇒ 只取单音节词条（单字），边界对齐位 0 ⇒ 退化为字符前缀匹配。
-        for h in self.dict.search_prefix_with_boundary_syllable_capped(
-            initial,
-            MAX_FALLBACK_PER_CUT * 4,
-            1,
-            0,
-        ) {
-            if cands.len() - base >= MAX_FALLBACK_PER_CUT {
-                break;
-            }
+        for h in self
+            .dict
+            .search_prefix_with_boundary_syllable_capped(initial, limit, 1, 0)
+        {
             if h.text.chars().count() != 1 || cands.iter().any(|c| c.text == h.text) {
                 continue;
             }
@@ -4492,7 +4488,11 @@ impl Engine for PinyinEngine {
             // 最末一档：首声母对应的单字（微软拼音的「整串 → 词组 → 单字」）。
             // 只对纯简拼形态做：`buxzd` 这类首个音节已打全的串，首字母不是用户的意图。
             if stroke_is_plain_abbrev {
-                self.recall_first_initial_chars(&abbr_query[..1], &mut candidates);
+                self.recall_first_initial_chars(
+                    &abbr_query[..1],
+                    max_candidates.clamp(30, MAX_COMPLETION_CANDIDATES),
+                    &mut candidates,
+                );
             }
         }
 
