@@ -3209,7 +3209,9 @@ impl Coordinator {
 pub(crate) fn candidate_is_group_member(cand: &wind_candidate::Candidate) -> bool {
     cand.is_phrase
         && !cand.is_group
-        && (cand.phrase_template.starts_with("$SS") || cand.phrase_template.starts_with("$AA"))
+        && (cand.is_group_member
+            || cand.phrase_template.starts_with("$SS")
+            || cand.phrase_template.starts_with("$AA"))
 }
 
 /// 右键「删除」菜单项的动态文案与可用性（按候选来源，对齐 Go computeDeleteMenuLabel）：

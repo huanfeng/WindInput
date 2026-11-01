@@ -1437,6 +1437,9 @@ impl Coordinator {
                         for (display, command_src) in items {
                             let mut c = cand.clone();
                             c.text = display;
+                            // 组成员标记：主路汇总全部来源后据此判重码、必要时折回组名候选。
+                            c.group_name = name.clone();
+                            c.group_template = cand.text.clone();
                             if let Some(src) = command_src {
                                 c.phrase_template = src;
                                 c.is_command = true;
@@ -1458,6 +1461,99 @@ impl Coordinator {
         expanded
     }
 
+    /// `$SS`/`$AA` 在**精确码**下的展开态判定。
+    ///
+    /// 规则（前缀匹配恒折叠、不在此处理——那是 `lookup_prefix` / `finalize_candidates` 的前缀臂）：
+    /// - 全码匹配且**无重码**（同码无别的候选、也只有这一组）→ 自动展开成员；
+    /// - 全码匹配但**有重码** → 不自动展开，每组折回一条组名候选（`is_group`），用户选中后
+    ///   才展开；展开靠 `expanded_group` 记录，且只列该组成员（二级选择）。
+    ///
+    /// 为什么重码时不展开：成员动辄十几条，整组涌进候选页会把同码的常规候选挤出首页
+    /// （`zzbd` 既是标点组又有码表词时，词被淹没）。折叠后组名占一个位置，选了才进组。
+    ///
+    /// 「重码」= 另有一条**同码**候选（见 `competes_with_group`），前缀补全、部分消费的
+    /// 拼音候选不算。
+    pub(crate) fn resolve_group_expansion(
+        expanded: Option<&(String, String)>,
+        input: &str,
+        codetable_mode: bool,
+        candidates: Vec<Candidate>,
+    ) -> Vec<Candidate> {
+        let is_member = |c: &Candidate| !c.is_group && !c.group_template.is_empty();
+        if !candidates.iter().any(is_member) {
+            return candidates;
+        }
+        // 用户已选中某组：只列该组成员。组源对不上（词库被改、组被禁用）则走常规判定。
+        if let Some((code, key)) = expanded
+            && code == input
+            && candidates
+                .iter()
+                .any(|c| is_member(c) && c.group_template == *key)
+        {
+            return candidates
+                .into_iter()
+                .filter(|c| is_member(c) && c.group_template == *key)
+                .collect();
+        }
+        let mut keys: Vec<&str> = Vec::new();
+        for c in candidates.iter().filter(|c| is_member(c)) {
+            if !keys.contains(&c.group_template.as_str()) {
+                keys.push(&c.group_template);
+            }
+        }
+        let competitors = candidates
+            .iter()
+            .filter(|c| !is_member(c) && Self::competes_with_group(c, input, codetable_mode))
+            .count();
+        if keys.len() == 1 && competitors == 0 {
+            return candidates;
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(candidates.len());
+        for c in candidates {
+            if !is_member(&c) {
+                out.push(c);
+                continue;
+            }
+            if !seen.insert(c.group_template.clone()) {
+                continue;
+            }
+            // 以首个成员为底折回组名候选：保留来源/权重/精确档标志，抹掉成员自带的命令与文本。
+            let mut g = c;
+            g.text = g.group_name.clone();
+            g.is_group = true;
+            g.is_group_member = false;
+            g.is_command = false;
+            g.group_code = input.to_string();
+            g.phrase_template = if g.is_phrase {
+                g.group_template.clone()
+            } else {
+                String::new()
+            };
+            out.push(g);
+        }
+        out
+    }
+
+    /// 候选是否与「当前输入码的组」构成重码：同码、且整串消费的候选。
+    /// 码表按 `is_exact_code`（精确层）；拼音/混输该标志不齐，改以「非前缀补全 + 消费整串」判，
+    /// 前缀枚举出来的短语导航（组导航、命令导航、静态前缀命中）都不算。
+    fn competes_with_group(c: &Candidate, input: &str, codetable_mode: bool) -> bool {
+        if c.is_group && c.group_code != input {
+            return false;
+        }
+        if c.is_command && !c.group_code.is_empty() && c.group_code != input {
+            return false;
+        }
+        if c.is_exact_code {
+            return true;
+        }
+        if codetable_mode || c.is_prefix || c.is_phrase {
+            return false;
+        }
+        c.consumed_length == 0 || c.consumed_length >= input.len()
+    }
+
     pub(crate) fn build_candidates(
         &self,
         state: &mut State,
@@ -1469,6 +1565,13 @@ impl Coordinator {
         // 这是**唯一**的失效点：`input_buffer.clear()` 有十余个散落调用点，逐个接线必漏一处；
         // 按前缀关系统一淘汰后，缓冲清空、光标中间编辑、方案切换全被这一条覆盖。
         short_code_yield::evict_stale(&mut state.shortcode_tops, &state.input_buffer);
+        if state
+            .expanded_group
+            .as_ref()
+            .is_some_and(|(code, _)| *code != state.input_buffer)
+        {
+            state.expanded_group = None;
+        }
         // 分段上屏进行中**且最后一段来自拼音选词**：剩余编码强制按混输方案的拼音子方案转换，
         // 避免混输让五笔抢首选（你↑选后 hao→虚）。拼音方案 id 取当前混输方案的
         // [engine.mixed].secondary_schema（如 wubi86_pinyin → "pinyin"）。注意不用全局
@@ -1617,7 +1720,15 @@ impl Coordinator {
                 let is_system = hit.is_system;
                 // 稳定 id 取**模板原文**：text 可能是求值结果（date/time/clip），逐日变化。
                 let cand_id = Self::phrase_cand_id(&state.input_buffer, &hit.source_text);
+                // `$SS`/`$AA` 精确码成员：带上组标记（见 `resolve_group_expansion`）。
+                let (group_name, group_template, is_group_member) = match &hit.group {
+                    Some(name) => (name.clone(), hit.source_text.clone(), true),
+                    None => Default::default(),
+                };
                 candidates.push(Candidate {
+                    group_name,
+                    group_template,
+                    is_group_member,
                     // text 存**完整原文，含真换行**——它就是上屏文本，不得在此改写。
                     //
                     // 这里曾调 `clamp_candidate_display` 做「一行化」（换行/制表→空格），
@@ -1818,6 +1929,16 @@ impl Coordinator {
             candidates.retain(|c| !codetable_composed(c));
             state.preedit_codetable_body.clear();
         }
+        // `$SS`/`$AA` 精确码展开态：**所有来源都汇齐之后**才能判重码（词库文件里的组、
+        // 短语库里的组、同码码表词条分属三条通路，任何一条单独都看不全）。
+        if wildcard_pattern.is_none() {
+            candidates = Self::resolve_group_expansion(
+                state.expanded_group.as_ref(),
+                &state.input_buffer,
+                self.engine_mgr.is_codetable(),
+                candidates,
+            );
+        }
         let mixed =
             self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::Mixed);
         // 供跨来源档位判「消费整串」与「码 == 输入」。缓冲恒 ASCII，字节长度与 `consumed_length` 同域。
@@ -1852,7 +1973,11 @@ impl Coordinator {
         let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut deduped: Vec<Candidate> = Vec::with_capacity(candidates.len());
         for c in std::mem::take(&mut candidates) {
-            let key: std::borrow::Cow<str> = if dedup_by_code {
+            let key: std::borrow::Cow<str> = if c.is_command {
+                // 命令候选的身份是「显示名 + 动作」：`$SS` 内嵌的 `$CC` 成员常与别的候选
+                // 同名（显示名只是标签），仅按文本去重会让命令被同名候选吞掉、点不出来。
+                format!("{}\u{2}{}", c.text, c.phrase_template).into()
+            } else if dedup_by_code {
                 format!("{}\u{1}{}", c.text, c.code).into()
             } else {
                 c.text.as_str().into()
@@ -4089,8 +4214,17 @@ impl Coordinator {
 
     /// 前缀导航候选选中：把输入缓冲补全到该组完整码并重查候选（展开成员/精确命令），
     /// 实现"敲 zz → 选标点 → 展开标点字符"的二级选择。返回新 preedit 显示文本。
-    pub(crate) fn complete_to_group_code(&self, state: &mut State, group_code: &str) -> String {
+    ///
+    /// `group_key` 是组的源文本（`$SS(...)`/`$AA(...)`），登记为「用户已选中展开」——
+    /// 重码折叠下重查时靠它展开该组（见 `State::expanded_group`）。
+    pub(crate) fn complete_to_group_code(
+        &self,
+        state: &mut State,
+        group_code: &str,
+        group_key: &str,
+    ) -> String {
         state.input_buffer = group_code.to_string();
+        state.expanded_group = Some((group_code.to_string(), group_key.to_string()));
         state.input_cursor_pos = state.input_buffer.len();
         let _ = self.update_candidates(state);
         self.notify_ui_update(state);
@@ -4119,7 +4253,13 @@ impl Coordinator {
         // 前缀导航候选：补全输入到该组完整码并重查展开（二级选择，不上屏组名）。
         if cand.is_group {
             let code = cand.group_code.clone();
-            let display = self.complete_to_group_code(state, &code);
+            // 组源文本：折叠的词库组记在 `group_template`，短语库的组导航记在 `phrase_template`。
+            let key = if cand.group_template.is_empty() {
+                cand.phrase_template.clone()
+            } else {
+                cand.group_template.clone()
+            };
+            let display = self.complete_to_group_code(state, &code, &key);
             return KeyAction::UpdateComposition {
                 caret_pos: display.chars().count() as u32,
                 text: display,

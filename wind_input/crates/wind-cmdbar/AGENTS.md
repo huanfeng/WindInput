@@ -29,6 +29,7 @@
 - **宿主集成入口只有三个**：`is_cmdbar_grammar(text)` 判路由，`evaluate_phrase(text, ctx, reg)` 解析求值，`run_actions(actions, ctx, reg)` 选中执行。不要直接拼接 `parse` + `evaluate`，phrase.rs 已封装并处理了 `$SS`/`$AA` 分流。
 - **`type(arg)` 是 eval 拦截的特例**，不经 registry 查找，直接产出 `ActionKind::Text`；其余动作函数产出 `ActionKind::Effect`。`run_actions` 先执行所有 Effect（副作用先于上屏），再拼接 Text，这个顺序不能颠倒。
 - **新增内置函数**必须在 `funcs/` 下的对应文件里用 `func_specs!` 宏声明，并在 `registry.rs` 的 `with_builtins()` 或 `full()` 中注册。`pure` 字段关系到 `assert_pure_display`——副作用函数写错 `pure=true` 会让它出现在 display 表达式里，产生候选渲染阶段的副作用。
+- **`ArrayElement.src` 是元素级命令源**：`$SS` 里嵌入的 `$CC` 成员由 AST `Display` 渲染成独立的 `$CC(...)` 文本，宿主把每个成员做成单独的命令候选，选中时按这份源执行（整组源不能用）。`Display` 与解析必须往返等价（`embedded_command_src_round_trips` 钉住）——改 `Display`/转义规则时先跑它。
 - **`$AA` marker** 是 Rust 版新增（Go 版无）：把一个字符串按 Unicode codepoint 拆分为逐字符候选，parser 展开为 `ArrayPhrase`，`expand_array` 处理。不要混淆 `$SS`（显式列举元素）与 `$AA`（自动按字符拆分）。
 - **`${NAME}` 是内部目录变量，不是插值**：字符串里的 `${APP_DIR}` / `${USER_DATA}` / `${LOCAL_DATA}` 在**词法期**展开为绝对目录（`lexer::scan_dir_var` → `wind_config::dir_var`），未知的 `${X}` 原样保留字面。这条豁免必须在**两条**扫描路径上同时生效——`lexer::scan_string`（带引号字符串）与 `parser::scan_template_parts`（无引号模板体）；只改一条，另一条就会把 `{NAME}` 当 `{expr}` 插值 → `UnknownFunc` → 动作静默失败或整条候选被丢弃。想在 `$` 后面紧跟真插值须写 `\${expr}`（`\$` 因此进了转义白名单）。
 - **`Services` 字段均可 `None`**；动作函数缺失服务时返回 `CmdbarError::ServiceUnavailable`，`run_actions` 收集首个错误但不中断后续动作——宿主不需要填满所有字段，但要处理返回的 `Option<CmdbarError>`。

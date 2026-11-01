@@ -676,6 +676,13 @@ pub(crate) struct State {
     /// 改由 `build_candidates` 开头按前缀关系统一淘汰——缓冲清空、光标编辑、方案切换
     /// 全被同一条规则覆盖。
     pub(crate) shortcode_tops: [Option<(String, String)>; 3],
+    /// 用户**显式选中**的 `$SS`/`$AA` 组：`(完整码, 组源文本)`。
+    ///
+    /// 精确码下有重码时组默认折叠成一条组名候选（见 `resolve_group_expansion`），用户选中它
+    /// 才展开成员；选中动作把输入补全到完整码并重查，重查时靠这条记录知道「这次要展开」，
+    /// 否则会又折叠回去、永远进不了二级选择。失效与 `shortcode_tops` 同理——`build_candidates`
+    /// 开头按「输入码已不是记录里的码」统一淘汰，不逐个接线。
+    pub(crate) expanded_group: Option<(String, String)>,
     pub(crate) candidates: Vec<Candidate>,
     /// 当前页内高亮候选下标（0-based，相对当前页）——键盘选中项，空格上屏的目标
     pub(crate) selected_index: usize,
@@ -3075,6 +3082,7 @@ impl Coordinator {
                 sentence_window: 0,
                 sentence_base: Vec::new(),
                 shortcode_tops: [const { None }; 3],
+                expanded_group: None,
                 candidates: Vec::new(),
                 selected_index: 0,
                 current_page: 0,

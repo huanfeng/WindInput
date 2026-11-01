@@ -371,6 +371,25 @@ impl Coordinator {
             .collect()
     }
 
+    /// 全部候选的 `(text, is_command, is_group, phrase_template)`（测试/诊断用）。
+    /// `$SS`/`$AA` 展开态与命令成员的断言要看这几位，`debug_all_candidate_texts` 看不到。
+    pub fn debug_candidate_shapes(&self) -> Vec<(String, bool, bool, String)> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.text.clone(),
+                    c.is_command,
+                    c.is_group,
+                    c.phrase_template.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// 加载 emoji 扩展表（测试/诊断用）：headless 构造器不跑 [`Self::load_data_on_start`]，
     /// 要 emoji 候选的集成测试经此补上。表从 `Config::data_dir()` 读，不认构造时注入的目录。
     pub fn debug_sync_emoji_dict(&self) {
