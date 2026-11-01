@@ -124,14 +124,48 @@ fn selecting_folded_group_expands_only_that_group() {
     assert_eq!(got, ["【】", "（）", "〔〕"], "只列该组成员: {got:?}");
     assert_eq!(f.coord.debug_input_buffer(), "uu", "二级选择不改输入码");
 
+    // Backspace 先退一级：回到折叠视图，输入码不变。
     press(&f.coord, VK_BACK);
+    assert_eq!(f.coord.debug_input_buffer(), "uu", "退一级不删码");
+    let back = texts(&f);
+    assert!(
+        back.iter().any(|t| t == "括号") && back.iter().any(|t| t == "乙"),
+        "{back:?}"
+    );
+    assert!(!back.iter().any(|t| t == "【】"), "{back:?}");
+
+    // 再按一次才真正删码。
+    press(&f.coord, VK_BACK);
+    assert_eq!(f.coord.debug_input_buffer(), "u");
     type_keys(&f.coord, "u");
     let again = texts(&f);
     assert!(
-        again.iter().any(|t| t == "括号"),
-        "重新键入应回到折叠态: {again:?}"
+        again.iter().any(|t| t == "括号") && again.iter().any(|t| t == "乙"),
+        "{again:?}"
     );
-    assert!(again.iter().any(|t| t == "乙"));
+}
+
+/// 无重码自动展开时 Backspace 不能成死键：照常删一个码。
+#[test]
+fn backspace_on_auto_expanded_group_deletes_char() {
+    let f = fixture("nodead", &format!("阿\ta\n{SS}\tuu\n"));
+    type_keys(&f.coord, "uu");
+    assert!(texts(&f).iter().any(|t| t == "【】"));
+    press(&f.coord, VK_BACK);
+    assert_eq!(f.coord.debug_input_buffer(), "u");
+}
+
+/// 前缀导航选中后（无重码，展开）Backspace 同样不吞键。
+#[test]
+fn backspace_after_prefix_nav_select_deletes_char() {
+    let f = fixture("navback", &format!("阿\ta\n{SS}\tuuk\n"));
+    type_keys(&f.coord, "uu");
+    let all = texts(&f);
+    let idx = all.iter().position(|t| t == "括号").unwrap();
+    press(&f.coord, 0x31 + idx as u32);
+    assert_eq!(f.coord.debug_input_buffer(), "uuk");
+    press(&f.coord, VK_BACK);
+    assert_eq!(f.coord.debug_input_buffer(), "uu");
 }
 
 /// 前缀匹配恒折叠成组名（即使没有任何重码）。

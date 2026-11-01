@@ -1779,7 +1779,9 @@ impl MessageHandler for Coordinator {
                 // Backspace：分步撤销——有已转换段则先把最后一段退回拼音（你→ni，码并回剩余
                 // 缓冲前部、重转），否则删光标前一个字符。
                 // 段回退**优先于光标**（不看光标位置，对齐 Go handleBackspace 的分支顺序）。
-                if !state.committed_segs.is_empty() {
+                if let Some(act) = self.collapse_expanded_group(&mut state) {
+                    act
+                } else if !state.committed_segs.is_empty() {
                     self.pop_committed_seg(&mut state)
                 } else if !state.input_buffer.is_empty() {
                     let st = &mut *state;

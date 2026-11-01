@@ -4231,6 +4231,29 @@ impl Coordinator {
         state.preedit.clone()
     }
 
+    /// 展开态退一级：用户选中折叠组后（`expanded_group`）按 Backspace，先回到折叠视图而不删码。
+    ///
+    /// 清掉展开登记并重查；重查后同码确实出现该组的折叠项才算退了一级（返回动作，吞掉按键）。
+    /// 否则（无重码，重查仍自动展开）返回 `None`，调用方按普通退格删字符，避免「死键」。
+    pub(crate) fn collapse_expanded_group(&self, state: &mut State) -> Option<KeyAction> {
+        let (code, _) = state.expanded_group.take()?;
+        if code != state.input_buffer {
+            return None;
+        }
+        let _ = self.update_candidates(state);
+        if !state
+            .candidates
+            .iter()
+            .any(|c| c.is_group && c.group_code == code)
+        {
+            return None;
+        }
+        let text = state.preedit.clone();
+        let caret_pos = self.composition_caret(state);
+        self.notify_ui_update(state);
+        Some(KeyAction::UpdateComposition { caret_pos, text })
+    }
+
     pub(crate) fn commit_selected(
         &self,
         state: &mut State,
