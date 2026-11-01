@@ -1109,6 +1109,8 @@ pub(crate) struct ActiveCompat {
 pub(crate) struct ActiveLookups {
     /// 协调器自己发占位时用的字符（`composition_placeholder`，没配 = 空格）。
     pub(crate) composition_placeholder: wind_config::app_compat::PlaceholderChar,
+    /// 联想态的占位字符（`assoc_placeholder`，没配 = 跟随 `composition_placeholder`，已在此合并）。
+    pub(crate) assoc_placeholder: wind_config::app_compat::PlaceholderChar,
     /// 拼音音节分隔符的应用级覆盖（`syllable_separator`）；`None` = 跟随全局。
     pub(crate) syllable_separator: Option<wind_config::app_compat::SyllableSeparator>,
     /// per-app 候选窗定位 `(fixed, x, y)`；`None` = 规则没配定位方式，跟随全局。
@@ -3893,19 +3895,27 @@ impl Coordinator {
 
     /// 按 (进程名, 窗口) 现算 [`ActiveLookups`]。
     pub(crate) fn compute_active_lookups(&self, name: &str, win: &FocusWindow) -> ActiveLookups {
-        let (composition_placeholder, candidate_pos, host_drawn_candidates, syllable_separator) =
-            self.with_compat_rule(name, win, |rule| {
-                (
-                    rule.and_then(|r| r.composition_placeholder)
-                        .unwrap_or_default(),
-                    rule.and_then(|r| {
-                        let mode = r.candidate_position_mode?;
-                        Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
-                    }),
-                    rule.and_then(|r| r.host_drawn_candidates),
-                    rule.and_then(|r| r.syllable_separator),
-                )
-            });
+        let (
+            composition_placeholder,
+            assoc_placeholder,
+            candidate_pos,
+            host_drawn_candidates,
+            syllable_separator,
+        ) = self.with_compat_rule(name, win, |rule| {
+            let comp = rule
+                .and_then(|r| r.composition_placeholder)
+                .unwrap_or_default();
+            (
+                comp,
+                rule.and_then(|r| r.assoc_placeholder).unwrap_or(comp),
+                rule.and_then(|r| {
+                    let mode = r.candidate_position_mode?;
+                    Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
+                }),
+                rule.and_then(|r| r.host_drawn_candidates),
+                rule.and_then(|r| r.syllable_separator),
+            )
+        });
         // 收窗推断对无名进程也认 `"*"`（`get_rule("")` 不吃通配），口径见
         // `uielement_host_draws_by_inference`。
         let host_drawn_candidates = if name.is_empty() {
@@ -3917,6 +3927,7 @@ impl Coordinator {
         };
         ActiveLookups {
             composition_placeholder,
+            assoc_placeholder,
             syllable_separator,
             candidate_pos,
             host_drawn_candidates,

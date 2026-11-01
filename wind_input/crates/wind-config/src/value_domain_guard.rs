@@ -230,6 +230,7 @@ fn app_compat_seed() -> toml::Value {
         ignore_host_ime_close: Some(true),
         host_drawn_candidates: Some(true),
         composition_placeholder: Some(crate::app_compat::PlaceholderChar::Blank),
+        assoc_placeholder: Some(crate::app_compat::PlaceholderChar::Zwsp),
         syllable_separator: Some(crate::app_compat::SyllableSeparator::None),
         multiline_commit: Some(crate::app_compat::MultilineCommit::Paste),
     };

@@ -267,6 +267,16 @@ impl Coordinator {
             .as_str()
     }
 
+    /// 联想态挂在宿主里的占位字符：`assoc_placeholder`，没配跟随 [`Self::composition_placeholder`]。
+    pub(crate) fn assoc_placeholder(&self) -> &'static str {
+        self.active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookups
+            .assoc_placeholder
+            .as_str()
+    }
+
     /// 测试用：把焦点设成 `pid`/`process`，并让该进程的 compat 规则配 `composition_placeholder = "zwsp"`
     /// （模拟出厂的 Edge 规则）。各路径「在浏览器焦点下出 ZWSP」的测试共用。
     #[cfg(test)]

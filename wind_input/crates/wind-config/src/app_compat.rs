@@ -352,6 +352,13 @@ impl PlaceholderChar {
     }
 }
 
+fn de_assoc_placeholder<'de, D>(d: D) -> Result<Option<PlaceholderChar>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    de_opt_str_enum(d, "assoc_placeholder", PlaceholderChar::from_config)
+}
+
 fn de_composition_placeholder<'de, D>(d: D) -> Result<Option<PlaceholderChar>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1230,6 +1237,16 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub composition_placeholder: Option<PlaceholderChar>,
+    /// 联想态挂在宿主里的占位字符；`None` = 跟随 `composition_placeholder`。
+    ///
+    /// 联想态没有编码，占位组合只为让宿主继续转发按键；有的软件会拿这个字符做特殊处理，
+    /// 可以只给联想态换一个，不动打字时的占位。
+    #[serde(
+        default,
+        deserialize_with = "de_assoc_placeholder",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub assoc_placeholder: Option<PlaceholderChar>,
     /// 拼音音节分隔符的显示；`None` = 跟随全局 `ui.candidate.syllable_separator`。见 [`SyllableSeparator`]。
     #[serde(
         default,
@@ -2275,6 +2292,18 @@ impl AppCompat {
             .unwrap_or_default()
     }
 
+    /// 该进程联想态的占位字符：`assoc_placeholder` 优先，没配跟随 [`Self::composition_placeholder_for`]。
+    pub fn assoc_placeholder_for(&self, process_name: &str) -> PlaceholderChar {
+        if process_name.is_empty() {
+            return PlaceholderChar::default();
+        }
+        let rule = self.get_rule(process_name);
+        rule.as_ref()
+            .and_then(|r| r.assoc_placeholder)
+            .or_else(|| rule.as_ref().and_then(|r| r.composition_placeholder))
+            .unwrap_or_default()
+    }
+
     /// 现算 HostRender 白名单：`host_render = true` 的进程名（原始大小写）。
     ///
     /// 只收**具体进程、无窗口条件**的规则，看的是那条规则自己的值（不与 `"*"` 合成）：白名单是
@@ -2681,6 +2710,34 @@ mod newline_style_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `assoc_placeholder` 优先于 `composition_placeholder`，都没配 = 空格；认不出的值退化为未配置。
+    #[test]
+    fn assoc_placeholder_overrides_then_follows_composition() {
+        let c = AppCompat::from_single_layer_text(
+            r#"
+            [[apps]]
+            process = "*"
+            composition_placeholder = "zwsp"
+
+            [[apps]]
+            process = "a.exe"
+            assoc_placeholder = "Blank"
+
+            [[apps]]
+            process = "b.exe"
+            assoc_placeholder = "bogus"
+            "#,
+        );
+        assert_eq!(c.assoc_placeholder_for("a.exe"), PlaceholderChar::Blank);
+        assert_eq!(
+            c.composition_placeholder_for("a.exe"),
+            PlaceholderChar::Zwsp
+        );
+        assert_eq!(c.assoc_placeholder_for("b.exe"), PlaceholderChar::Zwsp);
+        assert_eq!(c.assoc_placeholder_for("other.exe"), PlaceholderChar::Zwsp);
+        assert_eq!(c.assoc_placeholder_for(""), PlaceholderChar::Space);
+    }
 
     /// GH#175：`composition_placeholder` 解析 + 查表（含 `process = "*"` 通配与具体进程压过通配）。
     #[test]

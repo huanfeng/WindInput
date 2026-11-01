@@ -205,8 +205,9 @@ impl Coordinator {
     ///
     /// # 为什么是那个占位字符
     ///
-    /// 直接复用非嵌入模式的既有约定（[`Coordinator::composition_placeholder`]，默认空格、
-    /// 浏览器按 compat 规则为 ZWSP，GH#175）——占位 **且光标落在它前面**。两半缺一不可：
+    /// 默认复用非嵌入模式的既有约定（[`Coordinator::composition_placeholder`]，默认空格、
+    /// 浏览器按 compat 规则为 ZWSP，GH#175），compat 的 `assoc_placeholder` 可只给联想态另指定
+    /// （[`Coordinator::assoc_placeholder`]）——占位 **且光标落在它前面**。两半缺一不可：
     /// 只放空格不移光标，用户看到插入点凭空右移一格，很突兀（2026-08-16 用户反馈）。
     /// 光标那一半由 C++ 侧按「组合内容恰为占位符」判定（空格与 ZWSP 都认）。
     ///
@@ -214,7 +215,7 @@ impl Coordinator {
     /// **不流进宿主**——而且只在非嵌入模式给：嵌入模式下候选窗本就没有编码栏，
     /// 凭空多一栏会让窗口高度一跳。
     pub(crate) fn assoc_composition(&self) -> &'static str {
-        self.composition_placeholder()
+        self.assoc_placeholder()
     }
 }
 
@@ -1308,6 +1309,30 @@ mod tests {
             c.auto_commit_then_assoc(&mut st, "你好".into(), "你好")
         };
         assert_eq!(placeholder_of(act), " ", "未配规则的应用保持空格");
+    }
+
+    /// `assoc_placeholder` 只改联想态：规则里 composition_placeholder=zwsp、assoc_placeholder=blank
+    /// 时，联想占位是盲文空白，而打字占位（`composition_placeholder()`）仍是 ZWSP。
+    /// 变异检验：`assoc_composition` 改回 `composition_placeholder()` ⇒ 红。
+    #[test]
+    fn assoc_placeholder_overrides_only_the_assoc_state() {
+        use wind_config::app_compat::{AppCompat, AppCompatRule, PlaceholderChar};
+        let c = coord_smart();
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "x.exe".into(),
+            composition_placeholder: Some(PlaceholderChar::Zwsp),
+            assoc_placeholder: Some(PlaceholderChar::Blank),
+            ..Default::default()
+        }]));
+        c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+        c.active_compat.lock().unwrap().pid = 7;
+        c.refresh_active_compat_lookups();
+        assert_eq!(
+            c.assoc_composition(),
+            "\u{2800}",
+            "联想态用 assoc_placeholder"
+        );
+        assert_eq!(c.composition_placeholder(), "\u{200B}", "打字占位不受影响");
     }
 
     /// ★ 桌面默认关，而且**是靠基线段本身就是 `"off"`**——不再有哨兵值参与。

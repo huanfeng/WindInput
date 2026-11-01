@@ -502,6 +502,22 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
     },
     FieldMeta {
         section: "apps",
+        key: "assoc_placeholder",
+        kind: Kind::Enum,
+        group: "host",
+        label: "联想占位字符",
+        summary: "联想候选出现时，输入区里临时放的那个字符：空格、零宽空格或盲文空白。",
+        problem: "联想时没有编码，输入法仍要在软件里挂一个占位字符来接收按键。\
+                  有的软件会对这个字符做特殊处理（如把空格当成输入或触发动作），可以只给联想改用别的字符。\
+                  不设置则跟随「占位字符」。",
+        hosts: &[],
+        options: PLACEHOLDER_CHARS,
+        depends_on: None,
+        protocol: false,
+        advanced: true,
+    },
+    FieldMeta {
+        section: "apps",
         key: "multiline_commit",
         kind: Kind::Enum,
         group: "host",
