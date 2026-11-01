@@ -591,6 +591,12 @@ pub struct View {
     /// ⚠️ 实现是「画完把界外像素还原」，故**本节点自己的背景/边框不受裁剪**（它就是
     /// 裁剪框，画在框上是对的），只裁子节点。
     pub clip: bool,
+    /// 把子树裁到本节点的**圆角轮廓**内（只处理四个圆角处）：子节点配直角（或圆角比本节点小）
+    /// 时，贴边的高亮不会在圆角外露出方角——候选窗据此做出「首尾随窗口大圆弧、内部直角填充」
+    /// 的胶囊形态。与 [`Self::clip`] 的矩形裁剪互补，裁的是矩形里被圆角削掉的那四小块。
+    ///
+    /// 本节点的边框因此推迟到子节点之后绘制（否则贴边的子节点会盖住描边环）。
+    pub clip_corners: bool,
     /// 命中标识：>=0 参与命中收集（如候选下标 / 按钮 id），<0 忽略
     pub tag: i32,
     /// 旋转 90° 呈现整棵子树（蒙古文等纵向书写的脚本用）。
@@ -658,6 +664,7 @@ impl Default for View {
             grow: false,
             fill_cross: false,
             clip: false,
+            clip_corners: false,
             tag: -1,
             rot: Rot::None,
             mw: 0.0,
@@ -702,6 +709,12 @@ impl View {
     /// 把子树裁到本节点矩形内（滚动视口用）。见 [`Self::clip`] 字段说明。
     pub fn clipped(mut self) -> Self {
         self.clip = true;
+        self
+    }
+
+    /// 把子树裁到本节点的圆角轮廓内。见 [`Self::clip_corners`]。
+    pub fn clip_to_corners(mut self) -> Self {
+        self.clip_corners = true;
         self
     }
 
@@ -1287,7 +1300,8 @@ impl View {
         }
         // 边框压在背景图与 z<0 层**之上**（与主题编辑器预览同序）。放在背景图之前的话，
         // 带背景图的主题（窗口整体铺一张图）边框被图盖掉，预览里有、实机没有（t206）。
-        if let Some((bc, bw)) = self.border {
+        let round_clip = self.clip_corners && self.corner_radius > 0.0;
+        if let Some((bc, bw)) = self.border.filter(|_| !round_clip) {
             fill_ring(
                 buf,
                 buf_w,
@@ -1360,6 +1374,12 @@ impl View {
                 );
             }
         }
+        // 圆角裁剪：子节点画完后，把圆角外的像素还原成画子节点之前的样子（见 `clip_corners`）。
+        let corner_saved = if round_clip {
+            snapshot(buf, buf_w, buf_h, r).map(|s| (s, r))
+        } else {
+            None
+        };
         // 子节点。
         //
         // ★ 裁剪用「画完还原界外像素」而不是给每个绘制函数加 clip 参数：底层那十来个
@@ -1389,9 +1409,105 @@ impl View {
                 c.paint(buf, buf_w, buf_h, tr);
             }
         }
+        if let Some((saved, _)) = corner_saved {
+            restore_outside_corners(buf, buf_w, buf_h, r, self.corner_radius, &saved);
+        }
+        // 推迟的边框：压在子节点与圆角裁剪之上。
+        if round_clip && let Some((bc, bw)) = self.border {
+            fill_ring(
+                buf,
+                buf_w,
+                buf_h,
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                bc,
+                self.corner_radius,
+                bw,
+            );
+        }
         // z>=0 覆盖图（在内容上方）。
         for layer in self.layers.iter().filter(|l| l.z >= 0) {
             paint_layer(buf, buf_w, buf_h, r, layer);
+        }
+    }
+}
+
+/// 圆角轮廓之外的像素还原成 `saved`（`snapshot(.., rect)` 的备份），边缘按抗锯齿覆盖率混合。
+///
+/// 轮廓用与 `fill_rounded` 同一套取整与路径渲染成 alpha 掩码，保证裁出的弧线和背景的弧线
+/// 逐像素重合；只遍历四个圆角方块，直边部分不动。
+fn restore_outside_corners(
+    buf: &mut [u8],
+    buf_w: u32,
+    buf_h: u32,
+    rect: Rect,
+    radius: f32,
+    saved: &[u8],
+) {
+    let (sx, sy, sw, sh) = snap_to_pixels(rect.x, rect.y, rect.w, rect.h);
+    let Some((x0, y0, x1, y1)) = clamp_px(
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+        },
+        buf_w,
+        buf_h,
+    ) else {
+        return;
+    };
+    let (mw, mh) = (sw as u32, sh as u32);
+    if mw == 0 || mh == 0 {
+        return;
+    }
+    // 与 snapshot 的范围一致（clamp_px），掩码按 snap 后的矩形画在原点。
+    let mut mask = vec![0u8; (mw * mh * 4) as usize];
+    fill_rounded(
+        &mut mask,
+        mw,
+        mh,
+        0.0,
+        0.0,
+        sw,
+        sh,
+        [255, 255, 255, 255],
+        radius,
+    );
+    let r = (radius.round().max(0.0) as u32)
+        .min(mw / 2)
+        .min(mh / 2)
+        .saturating_add(1);
+    let row = ((x1 - x0) * 4) as usize;
+    for y in y0..y1 {
+        let in_top = (y as f32) < sy + r as f32;
+        let in_bottom = (y as f32) >= sy + sh - r as f32;
+        if !in_top && !in_bottom {
+            continue;
+        }
+        for x in x0..x1 {
+            let in_left = (x as f32) < sx + r as f32;
+            let in_right = (x as f32) >= sx + sw - r as f32;
+            if !in_left && !in_right {
+                continue;
+            }
+            let (mx, my) = (x as i64 - sx as i64, y as i64 - sy as i64);
+            let cov = if mx < 0 || my < 0 || mx >= mw as i64 || my >= mh as i64 {
+                0
+            } else {
+                mask[((my as u32 * mw + mx as u32) * 4 + 3) as usize] as i32
+            };
+            if cov == 255 {
+                continue;
+            }
+            let dst = ((y * buf_w + x) * 4) as usize;
+            let src = (y - y0) as usize * row + ((x - x0) * 4) as usize;
+            for c in 0..4 {
+                let (cur, old) = (buf[dst + c] as i32, saved[src + c] as i32);
+                buf[dst + c] = (old + ((cur - old) * cov + 127) / 255) as u8;
+            }
         }
     }
 }
@@ -3626,6 +3742,32 @@ mod bg_place_tests {
 
     fn alpha(buf: &[u8], bw: usize, x: usize, y: usize) -> u8 {
         buf[(y * bw + x) * 4 + 3]
+    }
+
+    /// 圆角裁剪：贴满窗口的直角子节点，四角被窗口弧线削掉；不开则方角会露出来。
+    #[test]
+    fn clip_corners_trims_square_children_to_rounded_outline() {
+        let build = |clip: bool| {
+            let mut root = View::container(Layout::Column)
+                .bg([255, 255, 255, 255])
+                .radius(12.0);
+            if clip {
+                root = root.clip_to_corners();
+            }
+            root.child(
+                View::container(Layout::Row)
+                    .bg([255, 0, 0, 255])
+                    .fixed_w(60.0)
+                    .fixed_h(40.0),
+            )
+        };
+        let off = paint(build(false), 60.0, 40.0, 60, 40);
+        assert_eq!(rgb(&off, 60, 0, 0), [255, 0, 0], "未开裁剪：方角露出");
+        let on = paint(build(true), 60.0, 40.0, 60, 40);
+        assert_eq!(alpha(&on, 60, 0, 0), 0, "开裁剪：圆角外保持透明");
+        assert_eq!(alpha(&on, 60, 59, 39), 0);
+        assert_eq!(rgb(&on, 60, 30, 20), [255, 0, 0], "内部直角填充不受影响");
+        assert_eq!(rgb(&on, 60, 30, 0), [255, 0, 0], "直边不受影响");
     }
 
     /// 楼主的场景：候选窗最右侧钉一张小图。anchor=right + 向左 4px，落点之外不得被涂。

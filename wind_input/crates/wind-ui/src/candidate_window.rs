@@ -1443,6 +1443,9 @@ impl CandidateWindow {
         self.text_renderer
             .set_base_size(self.base_font_logical * self.scale);
         self.theme = t;
+        if let Some(tip) = self.tooltip.as_mut() {
+            tip.set_candidate_font(self.base_font_logical);
+        }
     }
 
     /// 主题各节点声明的字族逐个查一次存在性，缺的记 warn。见 [`Self::resolve_and_report`]。
@@ -3118,6 +3121,7 @@ impl CandidateWindow {
                 dim(v.window.border_width, 1.0).max(1.0),
             )
             .radius(dim(v.window.border_radius, 8.0))
+            .clip_to_corners()
             .pad(window_pad)
             // band 间距（预编辑条↔候选列表↔翻页）= 主题 candidate_list.band_gap，未配→0（与 Go 一致）。
             .gap(dim(v.window_gap, 0.0))

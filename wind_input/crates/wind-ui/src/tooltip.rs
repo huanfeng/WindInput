@@ -477,6 +477,10 @@ impl WindowMouse for TooltipMouse {
 }
 
 const FONT_PX: f32 = 13.0;
+
+/// 候选基准字号的参照值（逻辑像素）：候选字号 = 它时气泡就是 [`FONT_PX`]。
+/// 候选字号每比它大 / 小 1，气泡跟着大 / 小 1（相对偏移，不等于候选字号）。
+const REF_CANDIDATE_PX: f32 = 18.0;
 const BG: [u8; 4] = wind_theme::fallback::TOOLTIP_BG; // 深灰底（RGBA）
 const FG: [u8; 4] = wind_theme::fallback::TOOLTIP_TEXT;
 
@@ -487,6 +491,8 @@ pub struct Tooltip {
     scale: f32,
     /// 基准字号（逻辑像素）：`FONT_PX` + 主题 tooltip 节点的 `font_size` 偏移。
     base_logical: f32,
+    /// 候选基准字号相对 [`REF_CANDIDATE_PX`] 的偏移，随候选字号设置变化。
+    candidate_delta: f32,
     /// 窗口是否显示中（与 `TooltipMouse` 共享：离开隐藏在那边执行）。
     visible: Rc<Cell<bool>>,
     /// 最近一次显示的内容盒屏幕矩形 `(left, top, right, bottom)`，见 [`Self::content_rect`]。
@@ -546,6 +552,7 @@ impl Tooltip {
             renderer,
             scale,
             base_logical: FONT_PX,
+            candidate_delta: 0.0,
             visible,
             placed: Cell::new((0, 0, 0, 0)),
             bg: BG,
@@ -584,12 +591,28 @@ impl Tooltip {
         }
     }
 
+    /// 候选基准字号（逻辑像素）变化时调用：气泡字号按它相对 [`REF_CANDIDATE_PX`] 的差值同步增减。
+    pub fn set_candidate_font(&mut self, candidate_px: f32) {
+        let delta = candidate_px - REF_CANDIDATE_PX;
+        if (delta - self.candidate_delta).abs() < f32::EPSILON {
+            return;
+        }
+        self.candidate_delta = delta;
+        match self.theme.clone() {
+            Some(t) => self.set_theme(&t),
+            None => {
+                self.base_logical = (FONT_PX + delta).max(8.0);
+                self.renderer.set_base_size(self.base_logical * self.scale);
+            }
+        }
+    }
+
     /// 应用主题（tooltip 底色/文字色 + 位图背景/层）。
     pub fn set_theme(&mut self, theme: &wind_theme::Resolved) {
         self.theme = Some(theme.clone());
-        // 字号：基准 13 + 节点偏移（与主题编辑器预览同语义，不跟全局候选字号走）。
+        // 字号：基准 13 + 候选字号相对偏移 + 主题节点偏移。
         let node_off = theme.views.tooltip.as_ref().map_or(0.0, |n| n.font_size);
-        self.base_logical = (FONT_PX + node_off).max(8.0);
+        self.base_logical = (FONT_PX + self.candidate_delta + node_off).max(8.0);
         self.renderer.set_base_size(self.base_logical * self.scale);
         // palette 兜底 → tooltip 节点覆盖（节点色已在 resolve 阶段合成 palette 默认）。
         self.bg = theme.color("tooltip_bg", BG);
@@ -1842,6 +1865,25 @@ mod tests {
         t.set_theme(&theme);
         assert_eq!(t.renderer.base_size(), base + 4.0 * t.scale);
         // 换回无偏移的主题要回到基准，不能把上一份主题的字号粘住。
+        t.set_theme(&wind_theme::Resolved::default());
+        assert_eq!(t.renderer.base_size(), base);
+    }
+
+    /// 候选字号比参照大 / 小多少，气泡就跟着大 / 小多少，且与主题节点偏移叠加。
+    #[test]
+    fn candidate_font_delta_applies_to_tooltip() {
+        let mut t = tooltip();
+        let base = t.renderer.base_size();
+        t.set_candidate_font(REF_CANDIDATE_PX + 6.0);
+        assert_eq!(t.renderer.base_size(), base + 6.0 * t.scale);
+        let mut theme = wind_theme::Resolved::default();
+        theme.views.tooltip = Some(wind_theme::RvNode {
+            font_size: -2.0,
+            ..Default::default()
+        });
+        t.set_theme(&theme);
+        assert_eq!(t.renderer.base_size(), base + 4.0 * t.scale);
+        t.set_candidate_font(REF_CANDIDATE_PX);
         t.set_theme(&wind_theme::Resolved::default());
         assert_eq!(t.renderer.base_size(), base);
     }
