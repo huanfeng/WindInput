@@ -133,26 +133,54 @@ pub fn load_typed_dirs(dirs: &[PathBuf], name: &str) -> anyhow::Result<Theme> {
     Ok(theme)
 }
 
+/// 能写 `vertical` 的视图节点：候选窗自己的那一套。tooltip / status / toast / toolbar / menu
+/// 是别的窗口，不随候选窗方向换样式；写在它们下面的 `vertical` 被忽略。
+///
+/// ⚠ 主题编辑器 `ViewsEditorV3.vue` 的 `VERTICAL_NODES` 与 `merge.ts` 的 `VERTICAL_NODES`
+/// 是同一份清单，改一边必须改另外两处。
+pub const VERTICAL_NODES: [&str; 11] = [
+    "window",
+    "preedit_bar",
+    "candidate_list",
+    "item",
+    "index",
+    "text",
+    "comment",
+    "comment_above",
+    "accent_bar",
+    "footer_bar",
+    "mode_label",
+];
+
 /// 竖排变体：把 `views.<节点>.vertical` 子表深合并进该节点，其余原样。没有任何节点写
 /// `vertical` 返回 `None`（绝大多数主题，零开销）。
 ///
-/// 只认顶层视图节点（window / item / text …）下的 `vertical`；节点里的状态补丁
-/// （selected / hover）写在 `vertical` 里一并合并。合并语义同 base 链：表逐字段深合并，
-/// 标量覆盖。
+/// 只认 [`VERTICAL_NODES`] 下的 `vertical`；节点里的状态补丁（selected / hover）写在
+/// `vertical` 里一并合并。合并语义同 base 链：表逐字段深合并，标量覆盖；翻页箭头同样
+/// 遵守「本层写了字符就让位继承来的图」（见 [`drop_inherited_arrow_images`]）——竖排里写
+/// `prev_char`，横排的 `prev_image` 不能把它挡死。
 fn vertical_variant(normalized: &Value) -> Option<Value> {
     let views = table_at(normalized, &["views"])?;
-    if !views
-        .values()
-        .any(|n| n.get("vertical").is_some_and(Value::is_table))
-    {
+    if !VERTICAL_NODES.iter().any(|k| {
+        views
+            .get(*k)
+            .and_then(|n| n.get("vertical"))
+            .is_some_and(Value::is_table)
+    }) {
         return None;
     }
     let mut out = normalized.clone();
     let views = table_at_mut(&mut out, &["views"])?;
-    for (_, node) in views.iter_mut() {
+    for key in VERTICAL_NODES {
+        let Some(node) = views.get_mut(key) else {
+            continue;
+        };
         let patch = node.as_table_mut().and_then(|t| t.remove("vertical"));
         if let Some(patch @ Value::Table(_)) = patch {
-            let base = std::mem::replace(node, Value::Table(Default::default()));
+            let mut base = std::mem::replace(node, Value::Table(Default::default()));
+            if key == "footer_bar" {
+                drop_stale_arrow_images(&mut base, &patch);
+            }
             *node = merge(base, patch);
         }
     }
@@ -234,22 +262,24 @@ const ARROW_PAIRS: [(&str, &str); 2] = [("prev_char", "prev_image"), ("next_char
 /// 形态的 `[footer_bar]` 早已被收进 `views` 了。
 fn drop_inherited_arrow_images(base: &mut Value, over: &Value) {
     const PATH: [&str; 2] = ["views", "footer_bar"];
-    let Some(o) = table_at(over, &PATH) else {
+    let (Some(o), Some(b)) = (table_at(over, &PATH), table_at_mut(base, &PATH)) else {
         return;
     };
-    let stale: Vec<&str> = ARROW_PAIRS
-        .iter()
-        .filter(|(c, i)| o.contains_key(*c) && !o.contains_key(*i))
-        .map(|(_, i)| *i)
-        .collect();
-    if stale.is_empty() {
-        return;
+    drop_stale_arrow_images_in(b, o);
+}
+
+/// [`drop_inherited_arrow_images`] 作用在单个 footer_bar 节点上的版本（竖排覆盖用）。
+fn drop_stale_arrow_images(base: &mut Value, over: &Value) {
+    if let (Some(b), Some(o)) = (base.as_table_mut(), over.as_table()) {
+        drop_stale_arrow_images_in(b, o);
     }
-    let Some(b) = table_at_mut(base, &PATH) else {
-        return;
-    };
-    for key in stale {
-        b.remove(key);
+}
+
+fn drop_stale_arrow_images_in(base: &mut toml::value::Table, over: &toml::value::Table) {
+    for (c, i) in ARROW_PAIRS {
+        if over.contains_key(c) && !over.contains_key(i) {
+            base.remove(i);
+        }
     }
 }
 
@@ -317,6 +347,26 @@ mod tests {
     fn no_vertical_patch_means_no_variant() {
         let t = typed_with_vertical("[window]\nradius = 20\n");
         assert!(t.vertical.is_none());
+    }
+
+    /// 只有候选窗自己的节点认 `vertical`；别的窗口（tooltip / status / toast）写了也不产生变体。
+    #[test]
+    fn vertical_on_other_windows_is_ignored() {
+        let t = typed_with_vertical("[tooltip]\nradius = 4\n[tooltip.vertical]\nradius = 9\n");
+        assert!(t.vertical.is_none());
+    }
+
+    /// 竖排里写翻页字符，横排的翻页图不能把它挡死（同 base 链「本层写了字符就让位」）。
+    #[test]
+    fn vertical_arrow_char_drops_horizontal_image() {
+        let t = typed_with_vertical(
+            "[footer_bar]\nprev_image = { ref = \"chevron.svg\" }\n[footer_bar.vertical]\nprev_char = \"^\"\n",
+        );
+        let h = t.views.as_ref().unwrap().footer_bar.prev_image.clone();
+        let v = t.vertical.as_ref().unwrap().views.as_ref().unwrap();
+        assert!(h.is_some(), "横排仍用图");
+        assert!(v.footer_bar.prev_image.is_none(), "竖排的图应让位给字符");
+        assert_eq!(v.footer_bar.prev_char.as_deref(), Some("^"));
     }
 
     #[test]
