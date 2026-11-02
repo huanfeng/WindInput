@@ -3793,17 +3793,22 @@ impl CandidateWindow {
                 let line_h = if list_vertical {
                     text_fs
                 } else {
-                    self.text_renderer
-                        .measure(
-                            "国",
-                            &Self::measure_style(
-                                text_fs,
-                                v.text.font_weight,
-                                v.text.font_family.as_deref(),
-                            ),
-                        )
-                        .height
-                        .max(text_fs)
+                    // 行高取序号 / 文字 / 注释三者最高（与候选行排版一致）。
+                    [
+                        (text_fs, &v.text),
+                        (node_fs(&v.comment), &v.comment),
+                        (index_fs, &v.index),
+                    ]
+                    .into_iter()
+                    .map(|(fs, n)| {
+                        self.text_renderer
+                            .measure(
+                                "国",
+                                &Self::measure_style(fs, n.font_weight, n.font_family.as_deref()),
+                            )
+                            .height
+                    })
+                    .fold(text_fs, f32::max)
                 };
                 line_h + item_pad.t + item_pad.b
             };
