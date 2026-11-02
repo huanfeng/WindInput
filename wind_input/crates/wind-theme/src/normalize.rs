@@ -30,6 +30,7 @@ const VIEW_NODE_KEYS: &[&str] = &[
     "accent_bar",
     "footer_bar",
     "mode_label",
+    "divider",
     "status",
     "tooltip",
     "toast",

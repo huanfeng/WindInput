@@ -297,6 +297,8 @@ pub struct ViewNode {
     pub offset: Option<Dim>,
     /// 仅 accent_bar：条高 = ItemHeight × 此比例。
     pub height_ratio: Option<f32>,
+    /// 仅 divider：线粗（dp）。None=1。
+    pub height: Option<Dim>,
     /// 仅 footer_bar：上/下翻页箭头图（可 SVG + tint 随主题变色）。
     pub prev_image: Option<ViewImage>,
     pub next_image: Option<ViewImage>,
@@ -455,6 +457,10 @@ pub struct Views {
     pub footer_bar: ViewNode,
     #[serde(default)]
     pub mode_label: ViewNode,
+    /// 编码栏与候选区之间的分隔线：颜色 = `background`（缺省取调色板 `separator`，都没有则不画）、
+    /// 线粗 = `height`、`margin` 控制间距与左右缩进、`enabled = false` 强制不画。
+    #[serde(default)]
+    pub divider: ViewNode,
     pub status: Option<ViewNode>,
     pub tooltip: Option<ViewNode>,
     pub toast: Option<ViewNode>,

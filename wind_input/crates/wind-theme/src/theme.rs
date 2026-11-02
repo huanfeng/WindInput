@@ -138,7 +138,7 @@ pub fn load_typed_dirs(dirs: &[PathBuf], name: &str) -> anyhow::Result<Theme> {
 ///
 /// ⚠ 主题编辑器 `ViewsEditorV3.vue` 的 `VERTICAL_NODES` 与 `merge.ts` 的 `VERTICAL_NODES`
 /// 是同一份清单，改一边必须改另外两处。
-pub const VERTICAL_NODES: [&str; 11] = [
+pub const VERTICAL_NODES: [&str; 12] = [
     "window",
     "preedit_bar",
     "candidate_list",
@@ -150,6 +150,7 @@ pub const VERTICAL_NODES: [&str; 11] = [
     "accent_bar",
     "footer_bar",
     "mode_label",
+    "divider",
 ];
 
 /// 竖排变体：把 `views.<节点>.vertical` 子表深合并进该节点，其余原样。没有任何节点写

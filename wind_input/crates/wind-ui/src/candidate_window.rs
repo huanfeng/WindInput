@@ -3231,24 +3231,33 @@ impl CandidateWindow {
                 band = band.child(chip);
             }
             // 翻页栏并入（pager_will_inline）：在末尾装配段追加到此 band 末尾（spacer 右侧）。
-            // 清风设计主题（定义 separator 色）：编码栏底部加一条极淡分隔线（与候选区分）；
-            // 普通/第三方主题（无 separator）不加。
-            let sep_col = t.color("separator", [0, 0, 0, 0]);
-            let preedit_designed = sep_col[3] > 0;
+            // 编码栏与候选区之间的分隔线（`views.divider`）：颜色缺省取调色板 `separator`
+            // （清风设计主题定义），都没有就不画；`enabled = false` 强制不画。
+            // 无 views 块的主题拿到的是全默认 RvViews（bg_color 空），退回直接按名取调色板。
+            let sep_col = v
+                .divider
+                .bg_color
+                .unwrap_or_else(|| t.color("separator", [0, 0, 0, 0]));
+            let preedit_designed = sep_col[3] > 0 && v.divider_enabled != Some(false);
             preedit_band = Some(band);
             if preedit_designed {
-                preedit_sep = Some(
-                    View::container(Layout::Row)
-                        .bg(sep_col)
-                        // 取整：这是「就该 1 个逻辑像素粗」的语义定宽元素，非整数尺寸
-                        // 交给 `snap_to_pixels` 会随落点在 1px/2px 之间变（同 caret_w）。
-                        .fixed_h((1.0 * s).round().max(1.0))
-                        .fill_cross()
-                        .margin(Edges {
-                            b: 4.0 * s,
-                            ..Edges::default()
-                        }),
-                );
+                // 线粗取整：这是「就该 N 个逻辑像素粗」的语义定宽元素，非整数尺寸
+                // 交给 `snap_to_pixels` 会随落点在 1px/2px 之间变（同 caret_w）。
+                let thick = v
+                    .divider_height
+                    .map(|d| d.resolve(s, 0.0))
+                    .unwrap_or(s)
+                    .round()
+                    .max(1.0);
+                let mut line = View::container(Layout::Row)
+                    .bg(sep_col)
+                    .fixed_h(thick)
+                    .fill_cross()
+                    .margin(edges_or(&v.divider.margin, [0.0, 0.0, 4.0, 0.0]));
+                if let Some(r) = v.divider.border_radius {
+                    line = line.radius(r.resolve(s, 0.0));
+                }
+                preedit_sep = Some(line);
             }
         }
 
@@ -6673,6 +6682,48 @@ mod pager_inline_tests {
             band_w, content_w,
             "编码栏只有 {band_w} 宽，窗口内容宽 {content_w}"
         );
+    }
+
+    /// 编码栏下的分隔线：颜色 / 线粗 / 间距走 `views.divider`；`enabled=false` 不画。
+    #[test]
+    fn divider_node_controls_the_preedit_separator() {
+        // 找到编码栏之后紧跟的那条细线（Row、定高、无文字无子节点、背景色 = sep）。
+        let line_of = |root: &View, col: [u8; 4]| -> Option<(f32, f32)> {
+            fn walk(v: &View, col: [u8; 4], out: &mut Option<(f32, f32)>) {
+                if v.text.is_none() && v.children.is_empty() && v.bg == Some(col) {
+                    *out = Some((v.laid_rect().h, v.margin.b));
+                }
+                for c in &v.children {
+                    walk(c, col, out);
+                }
+            }
+            let mut out = None;
+            walk(root, col, &mut out);
+            out
+        };
+        let col = [10, 20, 30, 255];
+        let mut w = bar_win("", false, "a");
+        let mut t = wind_theme::Resolved::default();
+        t.views.divider.bg_color = Some(col);
+        w.set_theme(t.clone());
+        assert_eq!(
+            line_of(&laid(&w, false), col),
+            Some((1.0, 4.0)),
+            "缺省 1px、下距 4"
+        );
+
+        t.views.divider_height = Some(wind_theme::schema::Dim::Dp(3.0));
+        t.views.divider.margin.bottom = Some(wind_theme::schema::Dim::Dp(9.0));
+        w.set_theme(t.clone());
+        assert_eq!(
+            line_of(&laid(&w, false), col),
+            Some((3.0, 9.0)),
+            "线粗与下距可配"
+        );
+
+        t.views.divider_enabled = Some(false);
+        w.set_theme(t);
+        assert_eq!(line_of(&laid(&w, false), col), None, "enabled=false 不画");
     }
 
     /// ★ F-17：**独立**编码栏那条落点同样要为并入的翻页栏留出宽度。

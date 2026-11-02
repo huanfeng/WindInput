@@ -459,6 +459,7 @@ fn resolve_views(v: &Views, palette: &HashMap<String, Rgba>, is_dark: bool) -> R
         accent_bar: build(&v.accent_bar, tk("accent"), None, None),
         footer_bar: build(&v.footer_bar, None, None, None),
         mode_label: build(&v.mode_label, None, None, tk("text_hint")),
+        divider: build(&v.divider, tk("separator"), None, None),
         shadow_color: tk("shadow"),
         ..Default::default()
     };
@@ -523,6 +524,8 @@ fn resolve_views(v: &Views, palette: &HashMap<String, Rgba>, is_dark: bool) -> R
         rv.window_offset_x = po.x;
         rv.window_offset_y = po.y;
     }
+    rv.divider_enabled = v.divider.enabled;
+    rv.divider_height = v.divider.height;
     // accent_bar 启用 + 几何。
     rv.accent_bar_enabled = v.accent_bar.enabled.unwrap_or(false);
     rv.accent_bar_width = v.accent_bar.width;
@@ -1037,6 +1040,36 @@ background = { image = { ref = \"q.png\", mode = \"nine_slice\" } }
         // 不写的主题保持原样：全部拉伸，既有观感不被新字段改掉。
         let item = v.item.bg_image.expect("item 背景图");
         assert_eq!(item.slice_repeat, [false, false]);
+    }
+
+    /// 分隔线节点：颜色缺省取调色板 `separator`，`[divider]` 可覆盖颜色 / 线粗 / 开关。
+    #[test]
+    fn divider_defaults_to_separator_and_can_be_overridden() {
+        let resolve_of = |text: &str| {
+            let value: toml::Value = toml::from_str(text).unwrap();
+            let theme: Theme = crate::normalize::normalize_theme(value).try_into().unwrap();
+            resolve(&theme, false, &[data_dir()]).views
+        };
+        let v = resolve_of("[colors]\nseparator = \"#112233\"\n[window]\nradius = 1\n");
+        assert_eq!(
+            v.divider.bg_color,
+            Some([0x11, 0x22, 0x33, 255]),
+            "缺省取 separator"
+        );
+        assert_eq!(v.divider_enabled, None);
+        assert_eq!(v.divider_height, None);
+
+        let v = resolve_of(
+            "[colors]\nseparator = \"#112233\"\n[divider]\nbackground = \"#445566\"\nheight = 3\nenabled = false\nmargin = [0, 10, 6, 10]\n",
+        );
+        assert_eq!(
+            v.divider.bg_color,
+            Some([0x44, 0x55, 0x66, 255]),
+            "显式色优先"
+        );
+        assert_eq!(v.divider_height, Some(crate::schema::Dim::Dp(3.0)));
+        assert_eq!(v.divider_enabled, Some(false));
+        assert!(v.divider.margin.left.is_some() && v.divider.margin.bottom.is_some());
     }
 
     /// 四个「此前渲染层不读自身盒模型」的节点：背景与边框须完整进 RvNode。

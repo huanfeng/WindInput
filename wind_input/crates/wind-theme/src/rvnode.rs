@@ -150,6 +150,8 @@ pub struct RvViews {
     pub accent_bar: RvNode,
     pub footer_bar: RvNode,
     pub mode_label: RvNode,
+    /// 编码栏分隔线（`views.divider`）：`bg_color` 缺省已回退调色板 `separator`。
+    pub divider: RvNode,
     pub status: Option<RvNode>,
     pub tooltip: Option<RvNode>,
     pub toast: Option<RvNode>,
@@ -172,6 +174,10 @@ pub struct RvViews {
     pub item_spacing: Option<Dim>,
     pub window_gap: Option<Dim>,
     pub row_gap: Option<Dim>,
+    /// `divider.enabled`：None=有颜色就画，Some(false)=强制不画。
+    pub divider_enabled: Option<bool>,
+    /// `divider.height`：线粗（None=1dp）。
+    pub divider_height: Option<Dim>,
     pub accent_bar_enabled: bool,
     pub accent_bar_width: Option<Dim>,
     pub accent_bar_offset: Option<Dim>,
