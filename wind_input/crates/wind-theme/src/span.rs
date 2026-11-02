@@ -353,6 +353,7 @@ mod tests {
             is_dark: dark,
             palette,
             views: Default::default(),
+            views_vertical: None,
             behavior: Default::default(),
             resources: Default::default(),
             asset_dirs: Vec::new(),

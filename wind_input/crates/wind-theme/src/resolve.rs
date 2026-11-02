@@ -55,6 +55,8 @@ pub struct Resolved {
     /// 全部已解析颜色 token（顶层语义 + selection/hover + toolbar_* 等功能前缀）。
     pub palette: HashMap<String, Rgba>,
     pub views: RvViews,
+    /// 竖排覆盖后的视图：主题有 `[节点.vertical]` 时才有。竖排候选窗用它取代 [`Self::views`]。
+    pub views_vertical: Option<RvViews>,
     pub behavior: ResolvedBehavior,
     /// 图片资源：名→绝对路径 / data: URI（相对路径已按 theme 目录解析，按 is_dark 选变体）。
     pub resources: HashMap<String, String>,
@@ -373,6 +375,12 @@ pub fn resolve(theme: &Theme, is_dark: bool, asset_dirs: &[std::path::PathBuf]) 
         Some(v) => resolve_views(v, &palette, is_dark),
         None => RvViews::default(),
     };
+    // 2a. 竖排变体（同一份 palette）。
+    let views_vertical = theme
+        .vertical
+        .as_ref()
+        .and_then(|t| t.views.as_ref())
+        .map(|v| resolve_views(v, &palette, is_dark));
     // 2b. 补主题没写的标准色契约名。排在 views 之后：节点的 palette 默认色（`tk("text")` 之类）
     // 仍只看主题自己写的，兜底只服务于按名求色（内联色）与按名取色的渲染层。
     let mut palette = palette;
@@ -394,6 +402,7 @@ pub fn resolve(theme: &Theme, is_dark: bool, asset_dirs: &[std::path::PathBuf]) 
         is_dark,
         palette,
         views,
+        views_vertical,
         behavior,
         resources,
         asset_dirs: asset_dirs.to_vec(),

@@ -503,6 +503,11 @@ pub struct Theme {
     pub behavior: Option<Behavior>,
     #[serde(default)]
     pub resources: HashMap<String, Ld>,
+    /// 竖排覆盖后的完整主题：任一视图节点写了 `[节点.vertical]` 才有，否则为 `None`。
+    /// 由 [`crate::theme::load_typed_dirs`] 在 Value 层把各节点的 `vertical` 子表深合并进
+    /// 节点后另行类型化得到（不来自 TOML 反序列化）。
+    #[serde(skip)]
+    pub vertical: Option<Box<Theme>>,
 }
 
 #[cfg(test)]

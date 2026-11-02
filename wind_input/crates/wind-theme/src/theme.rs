@@ -120,10 +120,43 @@ pub fn load_typed(themes_dir: &Path, name: &str) -> anyhow::Result<Theme> {
 pub fn load_typed_dirs(dirs: &[PathBuf], name: &str) -> anyhow::Result<Theme> {
     let merged = load_merged_dirs(dirs, name, 0)?;
     let normalized = normalize_theme(merged);
-    let theme: Theme = normalized
+    let vertical = vertical_variant(&normalized);
+    let mut theme: Theme = normalized
         .try_into()
         .map_err(|e| anyhow::anyhow!("type theme {}: {}", name, e))?;
+    if let Some(v) = vertical {
+        theme.vertical =
+            Some(Box::new(v.try_into().map_err(|e| {
+                anyhow::anyhow!("type theme {} (vertical): {}", name, e)
+            })?));
+    }
     Ok(theme)
+}
+
+/// 竖排变体：把 `views.<节点>.vertical` 子表深合并进该节点，其余原样。没有任何节点写
+/// `vertical` 返回 `None`（绝大多数主题，零开销）。
+///
+/// 只认顶层视图节点（window / item / text …）下的 `vertical`；节点里的状态补丁
+/// （selected / hover）写在 `vertical` 里一并合并。合并语义同 base 链：表逐字段深合并，
+/// 标量覆盖。
+fn vertical_variant(normalized: &Value) -> Option<Value> {
+    let views = table_at(normalized, &["views"])?;
+    if !views
+        .values()
+        .any(|n| n.get("vertical").is_some_and(Value::is_table))
+    {
+        return None;
+    }
+    let mut out = normalized.clone();
+    let views = table_at_mut(&mut out, &["views"])?;
+    for (_, node) in views.iter_mut() {
+        let patch = node.as_table_mut().and_then(|t| t.remove("vertical"));
+        if let Some(patch @ Value::Table(_)) = patch {
+            let base = std::mem::replace(node, Value::Table(Default::default()));
+            *node = merge(base, patch);
+        }
+    }
+    Some(out)
 }
 
 /// 读取 themes_dir/<name>/theme.toml 并按 base 链深合并（单目录；兼容旧调用）。
@@ -256,6 +289,35 @@ pub fn merge(base: Value, over: Value) -> Value {
 mod tests {
     use super::*;
     use crate::schema::Dim;
+
+    /// 解析 → 归一化 → 类型化主文与竖排变体（同 `load_typed_dirs` 的后半段）。
+    fn typed_with_vertical(s: &str) -> Theme {
+        let n = crate::normalize::normalize_theme(s.parse::<Value>().unwrap());
+        let v = vertical_variant(&n);
+        let mut t: Theme = n.try_into().unwrap();
+        t.vertical = v.map(|v| Box::new(v.try_into().unwrap()));
+        t
+    }
+
+    /// `[节点.vertical]` 深合并进节点：写了的字段竖排覆盖，没写的沿用横排；横排主文不变。
+    #[test]
+    fn vertical_patch_overlays_only_written_fields() {
+        let t = typed_with_vertical(
+            "[window]\nradius = 20\npadding = [6, 8]\n[window.vertical]\nradius = 6\n[item]\nradius = 4\n",
+        );
+        let h = t.views.as_ref().unwrap();
+        assert_eq!(h.window.border.radius, Some(Dim::Dp(20.0)));
+        let v = t.vertical.as_ref().unwrap().views.as_ref().unwrap();
+        assert_eq!(v.window.border.radius, Some(Dim::Dp(6.0)));
+        assert_eq!(v.window.padding.top, h.window.padding.top, "没写的字段沿用");
+        assert_eq!(v.item.border.radius, Some(Dim::Dp(4.0)));
+    }
+
+    #[test]
+    fn no_vertical_patch_means_no_variant() {
+        let t = typed_with_vertical("[window]\nradius = 20\n");
+        assert!(t.vertical.is_none());
+    }
 
     #[test]
     fn meta_from_text_extracts_name() {
