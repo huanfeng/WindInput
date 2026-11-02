@@ -131,10 +131,7 @@ impl UiManager {
         // 上一轮气泡是否处于交互中，用于识别「交互刚结束」这一沿——理由同
         // `auto_hide` 的 `was_engaged` 字段，见下方使用处。
         let mut tip_was_interacting = false;
-        // 显示中的状态提示泡的参数（文本、光标、定位），隐藏即清。候选窗出现 / 挪动时据此重新落位，
-        // 避让它（见 docs/design/status-tip-avoid-candidates.md）。
-        let mut last_tip: Option<(String, i32, i32, i32, wind_ui_types::StatusTipPlacement)> = None;
-        // 上次告诉提示泡的候选窗矩形：变了才重新落位。
+        // 上次告诉提示泡的候选窗矩形：变了才同步。
         let mut synced_cand_rect: Option<crate::status_tip::Rect4> = None;
 
         // 输入诊断 HUD（惰性创建：首次 ShowInputDiag 时构造，best-effort）
@@ -236,30 +233,15 @@ impl UiManager {
                         hr.hide_kind(HOST_WINDOW_STATUS);
                     }
                     tip_hide_at = None;
-                    last_tip = None;
                 }
             }
-            // 候选窗出现、挪动或收起：告诉提示泡；跟随光标的提示泡还在显示就按原参数重新落位
-            // （隐藏时刻不变）。放在每轮开头：上一轮处理完的候选窗变化在这里接上。
+            // 候选窗出现、挪动或收起：只记下矩形，供下次弹提示泡时避让。显示中的提示泡不再被动换位：
+            // 候选窗后出现本就盖在提示泡上，无碍；反复换位反而会在快速输入时来回跳。
             let cand_rect = candidate_window.screen_rect();
             if cand_rect != synced_cand_rect {
                 synced_cand_rect = cand_rect;
                 if let Some(t) = &mut status_tip {
                     t.set_candidate_rect(cand_rect);
-                    if let Some((text, x, y, ch, placement)) = &last_tip
-                        && matches!(placement, wind_ui_types::StatusTipPlacement::Caret { .. })
-                    {
-                        present_status_tip(
-                            t,
-                            #[cfg(windows)]
-                            host_render.as_ref(),
-                            text,
-                            *x,
-                            *y,
-                            *ch,
-                            *placement,
-                        );
-                    }
                 }
             }
             // toast 到期自动隐藏
@@ -368,7 +350,6 @@ impl UiManager {
                     ch,
                     placement,
                 );
-                last_tip = Some((text, x, y, ch, placement));
                 // dur==0 → 常驻(always):不设隐藏时刻;否则按配置时长自动隐藏。
                 tip_duration_ms = dur;
                 tip_hide_at = if dur == 0 {
@@ -784,7 +765,6 @@ impl UiManager {
                     UiCommand::HideStatusTip => {
                         // 取消待显示的防抖项 + 立即隐藏 + 清隐藏计时(常驻模式失焦)。
                         tip_debounce.cancel();
-                        last_tip = None;
                         if let Some(t) = &status_tip {
                             t.hide();
                         }
