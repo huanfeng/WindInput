@@ -283,6 +283,12 @@ fn parse_range(tpl: &str, pairs: &Pairs, start: usize, end: usize, depth: usize)
             i = close + 1;
             continue;
         }
+        // 字面 `\n`（反斜杠加 n）按换行：兼容旧版单行框里手写的 `\n`，与真换行等价。
+        if b[i] == b'\\' && i + 1 < end && b[i + 1] == b'n' {
+            text.push('\n');
+            i += 2;
+            continue;
+        }
         // 按字符推进，保证切片落在 UTF-8 边界上（模板含中文标签文字）。
         let ch_len = utf8_len(b[i]);
         text.push_str(&tpl[i..(i + ch_len).min(end)]);
@@ -2758,6 +2764,22 @@ mod split_tests {
             ),
             pair("ni hao", "亻尔")
         );
+    }
+
+    /// 字面 `\n`（旧版单行框手写的写法）与真换行等价。
+    #[test]
+    fn literal_backslash_n_is_newline() {
+        assert_eq!(
+            split(
+                "${pinyin}\\n${chaizi}",
+                &[("pinyin", "ni"), ("chaizi", "亻尔")]
+            ),
+            split(
+                "${pinyin}\n${chaizi}",
+                &[("pinyin", "ni"), ("chaizi", "亻尔")]
+            ),
+        );
+        assert_eq!(split("${a}\\nb", &[("a", "a")]), pair("a", "b"));
     }
 
     /// ★ 先拆后 trim：下段变量为空时拼音仍在上方，而不是 `\n` 被尾部 trim 吃掉后掉到右侧。
