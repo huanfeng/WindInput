@@ -1376,7 +1376,7 @@ impl View {
         }
         // 圆角裁剪：子节点画完后，把圆角外的像素还原成画子节点之前的样子（见 `clip_corners`）。
         let corner_saved = if round_clip {
-            snapshot(buf, buf_w, buf_h, r).map(|s| (s, r))
+            CornerSave::take(buf, buf_w, buf_h, r, self.corner_radius)
         } else {
             None
         };
@@ -1409,8 +1409,12 @@ impl View {
                 c.paint(buf, buf_w, buf_h, tr);
             }
         }
-        if let Some((saved, _)) = corner_saved {
-            restore_outside_corners(buf, buf_w, buf_h, r, self.corner_radius, &saved);
+        // z>=0 覆盖图（在内容上方）。先于圆角还原画：覆盖图本身只裁到矩形，要靠还原才进圆角。
+        for layer in self.layers.iter().filter(|l| l.z >= 0) {
+            paint_layer(buf, buf_w, buf_h, r, layer);
+        }
+        if let Some(saved) = corner_saved {
+            saved.restore(buf, buf_w, buf_h);
         }
         // 推迟的边框：压在子节点与圆角裁剪之上。
         if round_clip && let Some((bc, bw)) = self.border {
@@ -1427,86 +1431,154 @@ impl View {
                 bw,
             );
         }
-        // z>=0 覆盖图（在内容上方）。
-        for layer in self.layers.iter().filter(|l| l.z >= 0) {
-            paint_layer(buf, buf_w, buf_h, r, layer);
-        }
     }
 }
 
-/// 圆角轮廓之外的像素还原成 `saved`（`snapshot(.., rect)` 的备份），边缘按抗锯齿覆盖率混合。
+/// 圆角裁剪要还原的像素：窗口矩形四个角上的小块（直边部分不会被圆角削到，不必备份）。
 ///
-/// 轮廓用与 `fill_rounded` 同一套取整与路径渲染成 alpha 掩码，保证裁出的弧线和背景的弧线
-/// 逐像素重合；只遍历四个圆角方块，直边部分不动。
-fn restore_outside_corners(
-    buf: &mut [u8],
-    buf_w: u32,
-    buf_h: u32,
-    rect: Rect,
+/// 备份取在子节点绘制之前；子节点画完后 [`Self::restore`] 把块内圆角轮廓之外的像素按抗锯齿
+/// 覆盖率混回备份，等价于「子节点以圆角轮廓为蒙版绘制」。基于像素而不是改每个绘制函数，
+/// 所以渐变、阴影、文字、图片等任何绘制方式都一视同仁。
+struct CornerSave {
+    /// 窗口矩形（已对齐像素网格）与圆角半径，掩码据此重画。
+    sx: f32,
+    sy: f32,
+    sw: f32,
+    sh: f32,
     radius: f32,
-    saved: &[u8],
-) {
-    let (sx, sy, sw, sh) = snap_to_pixels(rect.x, rect.y, rect.w, rect.h);
-    let Some((x0, y0, x1, y1)) = clamp_px(
-        Rect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
-        },
-        buf_w,
-        buf_h,
-    ) else {
-        return;
-    };
-    let (mw, mh) = (sw as u32, sh as u32);
-    if mw == 0 || mh == 0 {
-        return;
-    }
-    // 与 snapshot 的范围一致（clamp_px），掩码按 snap 后的矩形画在原点。
-    let mut mask = vec![0u8; (mw * mh * 4) as usize];
-    fill_rounded(
-        &mut mask,
-        mw,
-        mh,
-        0.0,
-        0.0,
-        sw,
-        sh,
-        [255, 255, 255, 255],
-        radius,
-    );
-    let r = (radius.round().max(0.0) as u32)
-        .min(mw / 2)
-        .min(mh / 2)
-        .saturating_add(1);
-    let row = ((x1 - x0) * 4) as usize;
-    for y in y0..y1 {
-        let in_top = (y as f32) < sy + r as f32;
-        let in_bottom = (y as f32) >= sy + sh - r as f32;
-        if !in_top && !in_bottom {
-            continue;
+    /// 掩码方块边长（见 `take`）。
+    k: u32,
+    /// 还原块：互不重叠，已夹到缓冲内。
+    blocks: Vec<CornerBlock>,
+}
+
+struct CornerBlock {
+    /// 该块所属的角（决定掩码方块贴在窗口哪个角）。
+    right: bool,
+    bottom: bool,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    saved: Vec<u8>,
+}
+
+impl CornerSave {
+    fn take(buf: &[u8], buf_w: u32, buf_h: u32, rect: Rect, radius: f32) -> Option<Self> {
+        let (sx, sy, sw, sh) = snap_to_pixels(rect.x, rect.y, rect.w, rect.h);
+        if sw < 1.0 || sh < 1.0 {
+            return None;
         }
-        for x in x0..x1 {
-            let in_left = (x as f32) < sx + r as f32;
-            let in_right = (x as f32) >= sx + sw - r as f32;
-            if !in_left && !in_right {
-                continue;
+        let (mw, mh) = (sw as u32, sh as u32);
+        // 圆弧最多占到 k 个像素（+1 容纳抗锯齿的半像素）；与 push_round_rect 的半径钳制同源。
+        let k = (radius.round().max(0.0) as u32)
+            .min(mw / 2)
+            .min(mh / 2)
+            .saturating_add(1);
+        // 左右、上下各一条带；右/下带从 max(k, 总长-k) 起，奇数尺寸下不与左/上带重叠，
+        // 否则同一像素会被混合两次。
+        let cols = [(0, k.min(mw)), (k.max(mw.saturating_sub(k)), mw)];
+        let rows = [(0, k.min(mh)), (k.max(mh.saturating_sub(k)), mh)];
+        let mut blocks = Vec::with_capacity(4);
+        for (ri, &(ya, yb)) in rows.iter().enumerate() {
+            for (ci, &(xa, xb)) in cols.iter().enumerate() {
+                if xb <= xa || yb <= ya {
+                    continue;
+                }
+                let block = Rect {
+                    x: sx + xa as f32,
+                    y: sy + ya as f32,
+                    w: (xb - xa) as f32,
+                    h: (yb - ya) as f32,
+                };
+                let Some((x0, y0, x1, y1)) = clamp_px(block, buf_w, buf_h) else {
+                    continue;
+                };
+                let rect = Rect {
+                    x: x0 as f32,
+                    y: y0 as f32,
+                    w: (x1 - x0) as f32,
+                    h: (y1 - y0) as f32,
+                };
+                if let Some(saved) = snapshot(buf, buf_w, buf_h, rect) {
+                    blocks.push(CornerBlock {
+                        right: ci == 1,
+                        bottom: ri == 1,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        saved,
+                    });
+                }
             }
-            let (mx, my) = (x as i64 - sx as i64, y as i64 - sy as i64);
-            let cov = if mx < 0 || my < 0 || mx >= mw as i64 || my >= mh as i64 {
-                0
-            } else {
-                mask[((my as u32 * mw + mx as u32) * 4 + 3) as usize] as i32
-            };
-            if cov == 255 {
-                continue;
-            }
-            let dst = ((y * buf_w + x) * 4) as usize;
-            let src = (y - y0) as usize * row + ((x - x0) * 4) as usize;
-            for c in 0..4 {
-                let (cur, old) = (buf[dst + c] as i32, saved[src + c] as i32);
-                buf[dst + c] = (old + ((cur - old) * cov + 127) / 255) as u8;
+        }
+        (!blocks.is_empty()).then_some(Self {
+            sx,
+            sy,
+            sw,
+            sh,
+            radius,
+            k,
+            blocks,
+        })
+    }
+
+    /// 圆角轮廓之外的像素还原成备份，边缘按覆盖率混合。
+    ///
+    /// 轮廓掩码用 `fill_rounded` 画同一个窗口矩形（整数平移，覆盖率与背景的弧线一致），
+    /// 但只画该角的 k×k 方块，不分配整窗大小的缓冲。掩码方块始终包住整段圆弧：若画布边缘
+    /// 从弧线中间切过，tiny-skia 会走裁剪光栅化，覆盖率可差到 6%（胶囊形实测）。
+    fn restore(&self, buf: &mut [u8], buf_w: u32, _buf_h: u32) {
+        let (mw, mh) = (self.sw as u32, self.sh as u32);
+        let k = self.k;
+        for b in &self.blocks {
+            // 掩码方块在窗口里的左上角。
+            let mx = self.sx
+                + if b.right {
+                    (mw - k.min(mw)) as f32
+                } else {
+                    0.0
+                };
+            let my = self.sy
+                + if b.bottom {
+                    (mh - k.min(mh)) as f32
+                } else {
+                    0.0
+                };
+            let (mkw, mkh) = (k.min(mw), k.min(mh));
+            let mut mask = vec![0u8; (mkw * mkh * 4) as usize];
+            fill_rounded(
+                &mut mask,
+                mkw,
+                mkh,
+                self.sx - mx,
+                self.sy - my,
+                self.sw,
+                self.sh,
+                [255, 255, 255, 255],
+                self.radius,
+            );
+            let (bw, bh) = (b.x1 - b.x0, b.y1 - b.y0);
+            for y in 0..bh {
+                for x in 0..bw {
+                    let (ax, ay) = ((b.x0 + x) as f32 - mx, (b.y0 + y) as f32 - my);
+                    // 还原块必在掩码方块内（见 `take` 的分带），保险起见越界按圆角外处理。
+                    let cov = if ax < 0.0 || ay < 0.0 || ax >= mkw as f32 || ay >= mkh as f32 {
+                        0
+                    } else {
+                        mask[((ay as u32 * mkw + ax as u32) * 4 + 3) as usize] as i32
+                    };
+                    if cov == 255 {
+                        continue;
+                    }
+                    let dst = (((b.y0 + y) * buf_w + b.x0 + x) * 4) as usize;
+                    let src = ((y * bw + x) * 4) as usize;
+                    for c in 0..4 {
+                        let (cur, old) = (buf[dst + c] as i32, b.saved[src + c] as i32);
+                        buf[dst + c] = (old + ((cur - old) * cov + 127) / 255) as u8;
+                    }
+                }
             }
         }
     }
@@ -3768,6 +3840,117 @@ mod bg_place_tests {
         assert_eq!(alpha(&on, 60, 59, 39), 0);
         assert_eq!(rgb(&on, 60, 30, 20), [255, 0, 0], "内部直角填充不受影响");
         assert_eq!(rgb(&on, 60, 30, 0), [255, 0, 0], "直边不受影响");
+    }
+
+    /// 参照实现：整窗备份 + 整窗掩码（改成四角块之前的做法）。角块版必须与它逐字节一致，
+    /// 含奇数尺寸、胶囊形（半径被钳）、半径大于半边长。
+    #[test]
+    fn corner_save_matches_full_window_reference() {
+        for &(w, h, rad) in &[
+            (60u32, 40u32, 12.0f32),
+            (61, 41, 12.0),
+            (50, 21, 999.0),
+            (51, 20, 999.0),
+            (30, 30, 40.0),
+            (40, 40, 0.4),
+        ] {
+            let (bw, bh) = (w + 6, h + 6);
+            let mut base = vec![0u8; (bw * bh * 4) as usize];
+            fill_rounded(
+                &mut base,
+                bw,
+                bh,
+                3.0,
+                3.0,
+                w as f32,
+                h as f32,
+                [40, 80, 160, 255],
+                rad,
+            );
+            let rect = Rect {
+                x: 3.0,
+                y: 3.0,
+                w: w as f32,
+                h: h as f32,
+            };
+            // 模拟子节点：斜向渐变风格的不规则内容铺满整个窗口矩形。
+            let mut after = base.clone();
+            for y in 3..3 + h {
+                for x in 3..3 + w {
+                    let o = ((y * bw + x) * 4) as usize;
+                    let v = ((x * 7 + y * 13) % 251) as u8;
+                    after[o..o + 4].copy_from_slice(&[v, 255 - v, v / 2, 255]);
+                }
+            }
+            // 新实现。
+            let mut got = after.clone();
+            CornerSave::take(&base, bw, bh, rect, rad)
+                .unwrap()
+                .restore(&mut got, bw, bh);
+            // 参照：整窗掩码。
+            let mut mask = vec![0u8; (w * h * 4) as usize];
+            fill_rounded(&mut mask, w, h, 0.0, 0.0, w as f32, h as f32, [255; 4], rad);
+            let mut want = after.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let cov = mask[((y * w + x) * 4 + 3) as usize] as i32;
+                    let d = (((y + 3) * bw + x + 3) * 4) as usize;
+                    for c in 0..4 {
+                        let (cur, old) = (after[d + c] as i32, base[d + c] as i32);
+                        want[d + c] = (old + ((cur - old) * cov + 127) / 255) as u8;
+                    }
+                }
+            }
+            // tiny-skia 对「部分在画布外」的路径走裁剪光栅化，覆盖率与整窗掩码可差 1 级。
+            if let Some(i) = (0..got.len()).find(|&i| got[i].abs_diff(want[i]) > 1) {
+                let px = (i / 4) as u32;
+                panic!(
+                    "{w}x{h} r={rad}: ({},{}) ch{} got {} want {}",
+                    px % bw,
+                    px / bw,
+                    i % 4,
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    /// 窗口只有一部分在缓冲内（被屏幕边缘截断）时不越界、不 panic。
+    #[test]
+    fn corner_save_survives_rect_partly_outside_buffer() {
+        let mut buf = vec![255u8; 20 * 20 * 4];
+        let rect = Rect {
+            x: -5.0,
+            y: 10.0,
+            w: 40.0,
+            h: 30.0,
+        };
+        let saved = CornerSave::take(&buf, 20, 20, rect, 8.0).unwrap();
+        saved.restore(&mut buf, 20, 20);
+    }
+
+    /// z>=0 覆盖图也要被圆角轮廓裁掉（还原放在它之后）。
+    #[test]
+    fn clip_corners_also_trims_front_layers() {
+        let mut root = View::container(Layout::Column)
+            .bg([255, 255, 255, 255])
+            .radius(12.0)
+            .clip_to_corners();
+        root.layers.push(ViewLayer {
+            path: png_uri(RED, 4, 4),
+            z: 1,
+            place: ImagePlace {
+                w: 60.0,
+                h: 40.0,
+                ..place("top-left")
+            },
+            tint: [0, 0, 0, 0],
+            opacity: 1.0,
+        });
+        let buf = paint(root.fixed_w(60.0).fixed_h(40.0), 60.0, 40.0, 60, 40);
+        assert_eq!(alpha(&buf, 60, 0, 0), 0, "前景层不得露出圆角外");
+        assert_eq!(rgb(&buf, 60, 30, 20), [255, 0, 0]);
     }
 
     /// 楼主的场景：候选窗最右侧钉一张小图。anchor=right + 向左 4px，落点之外不得被涂。
