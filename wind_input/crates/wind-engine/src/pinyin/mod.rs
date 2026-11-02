@@ -709,34 +709,42 @@ const MIN_MIXED_SENTENCE_LEN: usize = 4;
 /// 单字母不构成简拼，退到 1 只会拖出一堆高频单字。
 const MIN_ABBREV_STROKE: usize = 2;
 
-/// 前缀回退单个切点、**单个来源层**的产出上限。
+/// 简拼前缀回退（step 6.2）的**内部**限额，不进用户配置（`wind-config` 不认它）。
 ///
-/// 逐切点限流而非只设总额，是为了保证**短切点也挤得进来**：`bzdhaobuhao` 的
-/// `bzdh` 切点若把配额占满，`bzd`（→「不知道」，词频高 672 倍）就一条都进不来。
-///
-/// ⚠️ **系统层与 store 层各记各的**（`recall_abbrev_prefix` 的 `start` / `store_base`），
-/// 故单切点的实际上限是 **2×** 本值、两个切点合计 4×。共用一份时 ③④ 排在 ①② 之后，
-/// 系统的高频词占满席位 ⇒ 用户自己造的词在长输入下静默出局。调这个值时记得乘 2 再
-/// 对照候选规模（`mixed_partial_pinyin_filter.rs` 记着「219 条残码单字把简拼词压到
-/// 第 221 位」的教训）。
-const MAX_FALLBACK_PER_CUT: usize = 6;
+/// 集中成一个结构，是为了以后调值 / 对不同来源（移动端、混输）分档时只改这一处。
+/// 默认值参考主流输入法实测（2026-11）：微软拼音中间级不限条数，豆包 3 字不限、2 字 8 条。
+#[derive(Debug, Clone)]
+pub struct AbbrevFallbackConfig {
+    /// 前缀回退**参与竞争的切点数**（有产出的才计数）。
+    ///
+    /// 默认 2 = 「最长 + 次长」。相邻切点的竞争才是真实场景（`bzdhaobuhao` 里 `bzdh`→「表彰大会」
+    /// 与 `bzd`→「不知道」），再往下只会引入越来越短、越来越不相关的解释。
+    ///
+    /// ★ **整串无命中时放宽它已被评测否决。** D 类（简拼+全拼混合整句）实测：
+    /// 取 2 → 首词召回 40.30% / 首词命中 2.30%；取 8 → **14.60% / 0.00%**，大幅恶化。
+    /// 原因是短切点的高频词会占据首选并把长切点的正确候选挤出 top-10。整串命中时补进来的
+    /// 候选都沉在整长匹配之后，没有这个风险，但同一个值两种场景共用，改它先重跑 pinyin_eval。
+    pub cuts: usize,
+    /// 切点长度 ≥ 3 个字母（三字词组及以上）时，单切点、**单个来源层**的产出上限。
+    ///
+    /// ⚠️ **系统层与 store 层各记各的**（`recall_abbrev_prefix` 的 `start` / `store_base`），
+    /// 故单切点实际上限是 **2×** 本值。共用一份时用户自己造的词会被系统高频词挤出。
+    /// 调值时对照候选规模（`mixed_partial_pinyin_filter.rs` 记着「219 条残码单字把简拼词压到
+    /// 第 221 位」的教训）。受 `ABBREV_INDEX_LIMIT`（每个简拼键最多 64 个码）约束。
+    pub per_cut_long: usize,
+    /// 切点长度 = 2 个字母（两字词组）时的同类上限。两字词数量大、噪音多，取得比长切点小。
+    pub per_cut_short: usize,
+}
 
-/// 前缀回退**参与竞争的切点数**（有产出的才计数）。
-///
-/// 取 2 = 「最长 + 次长」。相邻切点的竞争才是真实场景（`bzdhaobuhao` 里 `bzdh`→「表彰大会」
-/// 与 `bzd`→「不知道」），再往下只会引入越来越短、越来越不相关的解释：试到 `bz` 时
-/// 「标准/帮助/保证」会凭着高词频（~5 万）挤进前几位，而它们只解释了 11 键里的 2 键。
-///
-/// 这是**软偏好**的落点——不给短切点打折扣（那要按未解释字母数调一个乘性系数，量纲难定
-/// 且依赖本轮最大消费长度、不稳定），而是限制它们**是否入场**。入场后一律同层按词频竞争。
-///
-/// ★ **放宽它已被评测否决，勿再尝试。** D 类（简拼+全拼混合整句）实测：
-/// 取 2 → 首词召回 40.30% / 首词命中 2.30%；取 8 → **14.60% / 0.00%**，大幅恶化。
-/// 原因是短切点的高频词会占据首选并把长切点的正确候选挤出 top-10
-/// （`dltqbandaoer` 首选变成 `dl`→「到了」、`dqsmayou` 变成 `dq`→「地球」）。
-/// 召回率要越过 40% 这个天花板，得让所有切点同时参与、由语言模型仲裁 —— 即简拼段入
-/// lattice（文档 §4.8），不是调这个常量能做到的。
-const MAX_FALLBACK_CUTS: usize = 2;
+impl Default for AbbrevFallbackConfig {
+    fn default() -> Self {
+        Self {
+            cuts: 2,
+            per_cut_long: 50,
+            per_cut_short: 20,
+        }
+    }
+}
 
 /// 全拼降级支路（双拼下按全拼解释击键）的召回条数上限，精确 + 子短语 + 前缀补全合计。
 ///
@@ -933,6 +941,8 @@ pub struct Config {
     /// 算得多、露得少：候选列表里露 `sentence_count` 条，切换键在这 `sentence_max_count`
     /// 条里滚动窗口，切换时不必重新解码。
     pub sentence_max_count: u8,
+    /// 简拼前缀回退的内部限额，见 [`AbbrevFallbackConfig`]。
+    pub abbrev_fallback: AbbrevFallbackConfig,
     /// **双拼方案下**是否额外把击键串当全拼解释一遍（`nihao` → 「你好」）。
     ///
     /// 服务「多人共用一台机器」：主力用户打双拼，偶尔来的人只会全拼。产出的候选整体沉在
@@ -1075,6 +1085,7 @@ impl Default for Config {
             // ⚠️ 与 `wind_config::PinyinGlobalConfig` 那两项**保持同值**。
             sentence_count: 1,
             sentence_max_count: 1,
+            abbrev_fallback: AbbrevFallbackConfig::default(),
         }
     }
 }
@@ -1512,10 +1523,9 @@ impl PinyinEngine {
     ///
     /// 与 `recall_abbrev_prefix` 的 `MIN_ABBREV_STROKE` 下限分开：单字母本不构成简拼，
     /// 这里不是在解释「简拼」，而是把首字母当作单字的声母；产出一律 `is_partial`，
-    /// 排在所有整长匹配与词组前缀之后。条数**不套** `MAX_FALLBACK_PER_CUT`：用户期望
+    /// 排在所有整长匹配与词组前缀之后。条数**不套** `AbbrevFallbackConfig::per_cut_*`：用户期望
     /// 和直接打首字母一样能挑任意单字，取数量与主路径 step 4 同口径（`limit` 由调用方给）。
     fn recall_first_initial_chars(&self, initial: &str, limit: usize, cands: &mut Vec<Candidate>) {
-        let base = cands.len();
         // 音节数上限 1 ⇒ 只取单音节词条（单字），边界对齐位 0 ⇒ 退化为字符前缀匹配。
         for h in self
             .dict
@@ -1542,7 +1552,7 @@ impl PinyinEngine {
     fn recall_abbrev_prefix(&self, stroke: &str, consumed: usize, cands: &mut Vec<Candidate>) {
         let trie = &self.trie;
         let dict = &self.dict;
-        // 本切点的产出配额（见 MAX_FALLBACK_PER_CUT：不逐切点限流，长切点会把额度占满，
+        // 本切点的产出配额（见 `AbbrevFallbackConfig::per_cut_long`：不逐切点限流，长切点会把额度占满，
         // 词频高得多的短切点一条都进不来）。
         //
         // ★ **系统层与 store 层各记各的基准**：配额按 `base` 分段计，系统层 ①② 用 `start`，
@@ -1557,6 +1567,11 @@ impl PinyinEngine {
         // 部分候选统一形态：`is_abbrev` 归入简拼层、`is_partial` 表示只覆盖了输入前缀
         // （沉在完整匹配之后），`consumed_length` **自带击键域的消费数**——下方那个按
         // code/query 关系统一计算 consumed 的循环会跳过它们（见其注释）。
+        let per_cut = if consumed >= 3 {
+            self.config.abbrev_fallback.per_cut_long
+        } else {
+            self.config.abbrev_fallback.per_cut_short
+        };
         let push = |cands: &mut Vec<Candidate>,
                     base: usize,
                     text: String,
@@ -1564,7 +1579,7 @@ impl PinyinEngine {
                     w: i32,
                     boundary: u64,
                     is_fuzzy: bool| {
-            if cands.len() - base >= MAX_FALLBACK_PER_CUT {
+            if cands.len() - base >= per_cut {
                 return;
             }
             if text.is_empty() || cands.iter().any(|c| c.text == text) {
@@ -4448,7 +4463,7 @@ impl Engine for PinyinEngine {
         //     `aobuhao` 成了垃圾。一个结构性偏好压过了三个数量级的词频差异。
         //     切点长短是**来源差异**、不是结构质量差异，只配走 weight，不配做布尔层级键
         //     （同款教训见模糊拼音 `is_fuzzy` 从层级键改惩罚的那一轮）。
-        //     代价是候选变多，用 `MAX_FALLBACK_PER_CUT` / `MAX_FALLBACK_TOTAL` 两道限流兜住。
+        //     代价是候选变多，用 `AbbrevFallbackConfig` 的限额兜住。
         //
         //     ⚠️ 这仍是**启发式**，不是智能组句：简拼段不进 lattice/Viterbi，`bzd|haobuhao`
         //     与 `bzdh|aobuhao` 之间没有语言模型仲裁，只靠词频。真正的解法是把简拼段作为
@@ -4470,7 +4485,7 @@ impl Engine for PinyinEngine {
         //     凡含成不了音节的字母（`bzdha`、`bzdnihaobuh`）⇒ 允许降级，且**逐前缀的严格
         //     判定在 `recall_abbrev_prefix` 内部**（每个 stroke 各自过 is_abbreviation /
         //     mixed_patterns），门槛只负责挡掉纯全拼、不负责替前缀把关。
-        if self.config.enable_abbrev && !mixed_covered && abbr_query.len() > MIN_ABBREV_STROKE {
+        if self.config.enable_abbrev && !mixed_covered && abbr_query.len() >= MIN_ABBREV_STROKE {
             let mut cuts_with_hits = 0usize;
             for take in (MIN_ABBREV_STROKE..abbr_query.len()).rev() {
                 if !abbr_query.is_char_boundary(take) {
@@ -4480,7 +4495,7 @@ impl Engine for PinyinEngine {
                 self.recall_abbrev_prefix(&abbr_query[..take], take, &mut candidates);
                 if candidates.len() > before {
                     cuts_with_hits += 1;
-                    if cuts_with_hits >= MAX_FALLBACK_CUTS {
+                    if cuts_with_hits >= self.config.abbrev_fallback.cuts {
                         break;
                     }
                 }

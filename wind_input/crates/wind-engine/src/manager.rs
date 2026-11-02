@@ -7024,6 +7024,7 @@ impl EngineManager {
                 } else {
                     pg.sentence_max_count
                 },
+                abbrev_fallback: Default::default(),
                 // ⚠️ 补全这两项**不按 `mix_pinyin` 分流**，与上面三项刻意不同：它们约束的是
                 // 「引擎敢预测多少你没打的音节」，这个偏好与「当前是不是混输」无关，是用户
                 // 对候选面的统一取舍。分流会让同一个设置在两种方案下表现不一致。

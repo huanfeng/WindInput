@@ -114,3 +114,36 @@ fn initial_single_chars_are_not_capped_to_a_handful() {
     let singles = t.iter().filter(|x| x.chars().count() == 1).count();
     assert_eq!(singles, hanzi.len(), "单字应全部可选: {t:?}");
 }
+
+/// 两个字母的简拼（`bx`）也要有首声母单字：只有词组、无法选单字是此前的缺口。
+#[test]
+fn two_letter_abbrev_also_gets_initial_single_chars() {
+    let e = PinyinEngine::new(PyConfig::default(), fixture("two_letter"));
+    let t = ui_texts(&e, "bx");
+    assert!(pos(&t, "必须") < pos(&t, "不"), "词组在前、单字在后: {t:?}");
+    assert!(
+        t.contains(&"把".to_string()),
+        "两字母简拼也补首声母单字: {t:?}"
+    );
+}
+
+/// 词组档的条数受内部配置控制：`per_cut_long` 置 1 时 `bxzd` 的三字切点只留 1 条。
+#[test]
+fn per_cut_limit_comes_from_internal_config() {
+    use wind_engine::pinyin::AbbrevFallbackConfig;
+    let cfg = PyConfig {
+        abbrev_fallback: AbbrevFallbackConfig {
+            per_cut_long: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let e = PinyinEngine::new(cfg, fixture("cfg"));
+    let t = ui_texts(&e, "bxzd");
+    // 夹具里 bxz 只有「不想知」一条，bx 有「必须、不想」两条，三者都 ≥ 限额 1 的切点是 bxz
+    assert!(t.contains(&"不想知".to_string()), "{t:?}");
+    assert!(
+        t.contains(&"必须".to_string()),
+        "两字切点走 per_cut_short(20): {t:?}"
+    );
+}
