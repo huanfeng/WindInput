@@ -127,24 +127,87 @@ fn two_letter_abbrev_also_gets_initial_single_chars() {
     );
 }
 
-/// 词组档的条数受内部配置控制：`per_cut_long` 置 1 时 `bxzd` 的三字切点只留 1 条。
+/// 词组档的条数受内部配置控制：`per_cut_short` 置 1 时 `bx` 切点只留权重最高的 1 条。
 #[test]
 fn per_cut_limit_comes_from_internal_config() {
     use wind_engine::pinyin::AbbrevFallbackConfig;
     let cfg = PyConfig {
         abbrev_fallback: AbbrevFallbackConfig {
-            per_cut_long: 1,
+            per_cut_short: 1,
             ..Default::default()
         },
         ..Default::default()
     };
     let e = PinyinEngine::new(cfg, fixture("cfg"));
     let t = ui_texts(&e, "bxzd");
-    // 夹具里 bxz 只有「不想知」一条，bx 有「必须、不想」两条，三者都 ≥ 限额 1 的切点是 bxz
-    assert!(t.contains(&"不想知".to_string()), "{t:?}");
+    // 夹具里 bx 有「必须(51514)、不想(21277)」两条，限额 1 ⇒ 只留「必须」
+    assert!(t.contains(&"必须".to_string()), "{t:?}");
     assert!(
-        t.contains(&"必须".to_string()),
-        "两字切点走 per_cut_short(20): {t:?}"
+        !t.contains(&"不想".to_string()),
+        "per_cut_short=1 时第二条该被截: {t:?}"
+    );
+    // 默认配置则两条都在
+    let e = PinyinEngine::new(PyConfig::default(), fixture("cfg_default"));
+    let t = ui_texts(&e, "bxzd");
+    assert!(t.contains(&"不想".to_string()), "{t:?}");
+}
+
+/// 首音节是完整音节（`baxzd` = ba + xzd）同样不补 `b` 单字——不能只靠 `u` 这类字母碰巧过关。
+#[test]
+fn no_initial_single_char_when_first_syllable_is_ba() {
+    let e = PinyinEngine::new(PyConfig::default(), fixture("ba_first"));
+    let t = ui_texts(&e, "baxzd");
+    assert!(
+        t.iter().all(|x| x.chars().count() != 1 || x != "不"),
+        "ba 已打全，不补 b 开头的单字: {t:?}"
+    );
+}
+
+/// 手动分隔符：回退词组的消费数要换算回含 `'` 的原始输入（`b'z'd` 选 `bz` 的词组只吃 `b'z`）。
+#[test]
+fn separator_input_maps_fallback_consumed_length_to_raw() {
+    let dir = std::env::temp_dir().join("wind_abbrev_short_fallback_sep");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wdat = dir.join("t.wdat");
+    let mut w = WdatWriter::new();
+    w.add_with_boundary("buzhidao".into(), vec![("不知道".into(), 96, 0, 0b10101)]);
+    w.add_with_boundary("bangzhu".into(), vec![("帮助".into(), 5000, 0, 0b10001)]);
+    w.add_abbrev("bzd".into(), vec![("buzhidao".into(), 96)]);
+    w.add_abbrev("bz".into(), vec![("bangzhu".into(), 5000)]);
+    w.write(&wdat).unwrap();
+    let e = PinyinEngine::new(
+        PyConfig::default(),
+        CachedDict::load_at(&dir.join("t.dict.yaml"), &wdat).expect("加载 wdat 夹具"),
+    );
+    let r = e.convert("b'z'd", 50).unwrap();
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.text == "帮助")
+        .unwrap_or_else(|| panic!("缺少回退词组「帮助」: {:?}", r.candidates));
+    assert_eq!(c.consumed_length, 3, "b'z 共 3 字节，剩 `'d`/`d` 续打");
+}
+
+/// 两字母就是声母（`sh`）时首字母 `s` 不是用户的意图，不补 s 开头的单字。
+#[test]
+fn bare_shengmu_pair_does_not_get_first_letter_singles() {
+    let dir = std::env::temp_dir().join("wind_abbrev_short_fallback_sh");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wdat = dir.join("t.wdat");
+    let mut w = WdatWriter::new();
+    w.add_with_boundary("shi".into(), vec![("是".into(), 9000, 0, 0b1)]);
+    w.add_with_boundary("si".into(), vec![("四".into(), 8000, 0, 0b1)]);
+    w.write(&wdat).unwrap();
+    let e = PinyinEngine::new(
+        PyConfig::default(),
+        CachedDict::load_at(&dir.join("t.dict.yaml"), &wdat).expect("加载 wdat 夹具"),
+    );
+    let t = ui_texts(&e, "sh");
+    assert!(
+        !t.contains(&"四".to_string()),
+        "sh 不该补 s 声母单字: {t:?}"
     );
 }
 

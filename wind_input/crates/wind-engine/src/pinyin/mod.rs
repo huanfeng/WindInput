@@ -616,6 +616,21 @@ fn completion_penalized(weight: i32, extra: u32) -> i32 {
 /// 取 1000 是 `push_unique` 的 O(n²) 查重与「单字母可持续翻页」之间的平衡点：
 /// 实测 1000 条约 3.5ms，5000 条则达 54ms。1000 条按每页 9 项可翻 110 页，
 /// 远超实用范围；该上限只约束**补全**，精确匹配候选不受影响。
+/// 剥除手动分隔符 `'` 后的前 `n` 个字节，对应原始输入里的字节长度（不含紧随的分隔符）。
+fn raw_len_for_stripped(input: &str, n: usize) -> usize {
+    let mut seen = 0usize;
+    for (i, ch) in input.char_indices() {
+        if ch == '\'' {
+            continue;
+        }
+        seen += ch.len_utf8();
+        if seen >= n {
+            return i + ch.len_utf8();
+        }
+    }
+    input.len()
+}
+
 const MAX_COMPLETION_CANDIDATES: usize = 1000;
 
 /// 查 `AbbrevSection` 时的取码上限。纯简拼（step 5 / 回退①）与混合简拼（step 5b / 回退②）
@@ -1517,6 +1532,14 @@ impl PinyinEngine {
                 nodes,
             );
         }
+    }
+
+    /// 串的开头已经是完整音节（`baxzd` 的 `ba`、`buxzd` 的 `bu`），或两字母就是声母
+    /// （`sh`/`zh`/`ch`）：此时首字母不是用户要的单字声母，不补首声母单字。
+    fn first_letters_start_a_syllable(&self, abbr_query: &str) -> bool {
+        let max = abbr_query.len().min(6);
+        (2..=max).any(|n| abbr_query.is_char_boundary(n) && self.trie.is_syllable(&abbr_query[..n]))
+            || (abbr_query.len() == 2 && self.is_possible_pinyin_sequence(abbr_query))
     }
 
     /// 前缀回退的末一档：只消费首个声母，召回以它开头的高频单字（沉在词组之后）。
@@ -4507,7 +4530,7 @@ impl Engine for PinyinEngine {
             }
             // 最末一档：首声母对应的单字（微软拼音的「整串 → 词组 → 单字」）。
             // 只对纯简拼形态做：`buxzd` 这类首个音节已打全的串，首字母不是用户的意图。
-            if stroke_is_plain_abbrev {
+            if stroke_is_plain_abbrev && !self.first_letters_start_a_syllable(&abbr_query) {
                 self.recall_first_initial_chars(
                     &abbr_query[..1],
                     max_candidates.clamp(30, MAX_COMPLETION_CANDIDATES),
@@ -4954,6 +4977,11 @@ impl Engine for PinyinEngine {
             // 双拼下同样跳过：简拼的判据本就走 raw_input（击键域），consumed_length 的语义
             // 就是「消费多少击键」，无须再过 map_consumed_length 换算。
             if c.is_abbrev && c.consumed_length != 0 {
+                // 含手动分隔符时，回退给的是剥除 `'` 之后的字节数，换算回原始输入空间，
+                // 否则选中词组后协调器按含 `'` 的缓冲切片会残留错位（`b'z'd` 选 `bz` 的词组）。
+                if has_sep {
+                    c.consumed_length = raw_len_for_stripped(input, c.consumed_length);
+                }
                 continue;
             }
             // 全拼降级候选（step 6.7）同样自带击键域的消费数。**不可再过
