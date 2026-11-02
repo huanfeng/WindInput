@@ -136,8 +136,7 @@ pub fn load_typed_dirs(dirs: &[PathBuf], name: &str) -> anyhow::Result<Theme> {
 /// 能写 `vertical` 的视图节点：候选窗自己的那一套。tooltip / status / toast / toolbar / menu
 /// 是别的窗口，不随候选窗方向换样式；写在它们下面的 `vertical` 被忽略。
 ///
-/// ⚠ 主题编辑器 `ViewsEditorV3.vue` 的 `VERTICAL_NODES` 与 `merge.ts` 的 `VERTICAL_NODES`
-/// 是同一份清单，改一边必须改另外两处。
+/// ⚠ 主题编辑器 `merge.ts` 的 `VERTICAL_NODES` 是同一份清单，改一边必须改另一边。
 pub const VERTICAL_NODES: [&str; 12] = [
     "window",
     "preedit_bar",
