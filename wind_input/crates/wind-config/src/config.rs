@@ -7319,6 +7319,26 @@ impl UiCandidateConfig {
         self.index_labels.get(i).filter(|s| !s.is_empty()).cloned()
     }
 
+    /// 叠上方案级通用补丁（`[candidate]` 里已通过 [`crate::config_schema::split_candidate_patch`]
+    /// 校验的键），得到本方案下的生效配置。补丁空时等价于 `clone`。
+    ///
+    /// 做法是 序列化 → 覆盖同名叶子 → 反序列化：不为每个键写一行赋值，新增可覆盖键不用改这里。
+    /// 任何一步失败（补丁已校验，理论上不会）都退回原值——宁可「方案没生效」也不能带出半份配置。
+    pub fn folded_with(&self, patch: &toml::Table) -> Self {
+        if patch.is_empty() {
+            return self.clone();
+        }
+        let Ok(toml::Value::Table(mut tree)) = toml::Value::try_from(self) else {
+            return self.clone();
+        };
+        for (k, v) in patch {
+            tree.insert(k.clone(), v.clone());
+        }
+        toml::Value::Table(tree)
+            .try_into()
+            .unwrap_or_else(|_| self.clone())
+    }
+
     /// 竖排最小行数的**生效值**：按每页候选数封顶（0=不补）。
     ///
     /// 补出比一页还多的空行只会得到一个大半空白的窗口，故以 `per_page` 为上限。扩展档
@@ -12615,6 +12635,39 @@ active = "x"
         let mut cfg: Config = base.try_into().unwrap();
         cfg.normalize();
         cfg
+    }
+
+    /// 补丁里的键覆盖同名叶子，其余字段（含全局改过的）原样保留。
+    #[test]
+    fn candidate_folded_with_overrides_only_patched_leaves() {
+        let base = UiCandidateConfig {
+            min_rows: 4,
+            per_page_extended: 6,
+            ..Default::default()
+        };
+        let mut patch = toml::Table::new();
+        patch.insert("per_page".into(), toml::Value::Integer(9));
+        let f = base.folded_with(&patch);
+        assert_eq!(f.per_page, 9);
+        assert_eq!(f.min_rows, 4, "未覆盖的项跟随全局");
+        assert_eq!(f.per_page_extended, 6);
+        assert_eq!(base.per_page, 7, "原值不被改动");
+    }
+
+    #[test]
+    fn candidate_folded_with_empty_patch_is_identity() {
+        let base = UiCandidateConfig::default();
+        let f = base.folded_with(&toml::Table::new());
+        assert_eq!(f.per_page, base.per_page);
+    }
+
+    /// 补丁里混进了反序列化不了的值时退回原值，而不是带出半份配置。
+    #[test]
+    fn candidate_folded_with_unparsable_patch_falls_back() {
+        let base = UiCandidateConfig::default();
+        let mut patch = toml::Table::new();
+        patch.insert("per_page".into(), toml::Value::String("x".into()));
+        assert_eq!(base.folded_with(&patch).per_page, base.per_page);
     }
 
     #[test]

@@ -853,6 +853,13 @@ pub struct SchemaOverride {
     pub section: &'static str,
     /// 覆盖语义，一句话，直接进设置页的提示——**写给用户，不是写给维护者**。
     pub note: &'static str,
+    /// 是否由**通用折叠器**生效：`true` ⇒ 方案文件 `[candidate]` 下写同名叶子键即可覆盖，
+    /// 不需要结构体字段，也不需要 `resolved()` 里的一行（见 [`split_candidate_patch`] 与
+    /// `UiCandidateConfig::folded_with`）。目前只支持 `ui.candidate.*` 的精确键。
+    ///
+    /// `false` 的登记是**手写形态**（码表 `resolved()`、标点、`layout` 的三态等），
+    /// 这张表只负责提示，生效逻辑在别处。
+    pub fold: bool,
 }
 
 /// 可被方案级配置覆盖的全局项。
@@ -885,6 +892,7 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
         key: "schema.codetable.",
         section: "[engine.codetable]",
         note: "码表方案可逐项覆盖这里的设置；方案没写的项仍然用这里的值。",
+        fold: false,
     },
     // 调频子段单独登记：段前缀不递归（见 `SchemaOverride::key`）。
     // ⚠️ 与它并列的 `auto_phrase` 子段**刻意不登记**——`CodetableGlobal::resolved` 里
@@ -894,32 +902,38 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
         key: "schema.codetable.frequency.",
         section: "[engine.codetable.frequency]",
         note: "码表方案可逐项覆盖这里的调频设置；方案没写的项仍然用这里的值。",
+        fold: false,
     },
     // 同上：段前缀不递归，英文候选子段要自己登记一条。
     SchemaOverride {
         key: "schema.codetable.english_merge.",
         section: "[engine.codetable.english_merge]",
         note: "码表方案可逐项覆盖这里的英文候选设置；方案没写的项仍然用这里的值。",
+        fold: false,
     },
     SchemaOverride {
         key: "schema.pinyin.aux_code.enabled",
         section: "[engine.aux_code]",
         note: "方案可覆盖这一项；方案没写则用这里的值。",
+        fold: false,
     },
     SchemaOverride {
         key: "schema.pinyin.aux_code.max_phrase_len",
         section: "[engine.aux_code]",
         note: "方案可覆盖这一项；方案没写则用这里的值。",
+        fold: false,
     },
     SchemaOverride {
         key: "schema.pinyin.aux_code.direct",
         section: "[engine.aux_code]",
         note: "方案可覆盖这一项；方案没写则用这里的值。只对双拼方案生效。",
+        fold: false,
     },
     SchemaOverride {
         key: "input.punct.custom_mappings",
         section: "[punct]",
         note: "声明了自己标点表的方案**整表**不用这里的表——不是逐条合并。",
+        fold: false,
     },
     // ★ 这一条是 `PunctSpec::custom_mappings` 的文档点名要求「设置页与文档站必须写明」
     // 的那条推论：整表替换连开关一起换掉，所以关掉总开关，声明了自己标点表的方案
@@ -928,13 +942,74 @@ pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
         key: "input.punct.custom_enabled",
         section: "[punct]",
         note: "声明了自己标点表的方案不受这个开关约束——整表替换时连它一起换掉了。",
+        fold: false,
     },
     SchemaOverride {
         key: "ui.candidate.layout",
         section: "[candidate]",
         note: "方案可覆盖候选窗排列方向；方案没写则用这里的值。",
+        fold: false,
+    },
+    // ── 通用折叠（fold = true）：在方案 `[candidate]` 写同名叶子键即生效 ──
+    // 新增一项只需加一行，并确认它的读取点走 `Coordinator::eff_candidate()`；
+    // `scheme_fold_read_gates` 会拦住绕过它直接读全局值的代码。
+    SchemaOverride {
+        key: "ui.candidate.per_page",
+        section: "[candidate]",
+        note: "方案可覆盖每页候选数；方案没写则用这里的值。临拼、快捷等扩展档不受影响。",
+        fold: true,
     },
 ];
+
+/// 通用折叠键的叶子名（`ui.candidate.` 之后的部分）→ 该登记。非折叠键返回 `None`。
+pub fn candidate_fold_entry(leaf: &str) -> Option<&'static SchemaOverride> {
+    let full = format!("ui.candidate.{leaf}");
+    SCHEMA_OVERRIDES.iter().find(|o| o.fold && o.key == full)
+}
+
+/// 把方案 `[candidate]` 里的通用补丁拆成「可生效的子集」和「问题清单」。
+///
+/// 判据三层，缺一即整条丢弃并进问题清单（写给用户看，所以带键名）：
+/// 1. 是登记过的折叠键（白名单，见 [`SchemaOverride::fold`]）；
+/// 2. 值过注册表校验（类型 / 枚举值域）；
+/// 3. 注册表表达不了的值域在 [`value_in_domain`] 补一刀。
+///
+/// ★ 「写错的值 = 没写」：错值若混进补丁，折叠时会把全局的好值一起盖没。
+pub fn split_candidate_patch(raw: &toml::Table) -> (toml::Table, Vec<String>) {
+    let mut ok = toml::Table::new();
+    let mut problems = Vec::new();
+    for (leaf, value) in raw {
+        let Some(entry) = candidate_fold_entry(leaf) else {
+            let why = if is_known_key(&format!("ui.candidate.{leaf}")) {
+                "该项暂不支持方案级覆盖"
+            } else {
+                "不是可识别的键"
+            };
+            problems.push(format!("[candidate] {leaf}（{why}）"));
+            continue;
+        };
+        if let Err(e) = validate(entry.key, value) {
+            problems.push(format!("[candidate] {leaf}（{e}）"));
+            continue;
+        }
+        if let Some(why) = value_in_domain(leaf, value) {
+            problems.push(format!("[candidate] {leaf}（{why}）"));
+            continue;
+        }
+        ok.insert(leaf.clone(), value.clone());
+    }
+    (ok, problems)
+}
+
+/// 注册表只有类型 / 枚举，表达不了的数值下限在此补。返回 `Some(原因)` 表示越界。
+/// 仅对 [`SchemaOverride::fold`] 的键调用；没有特殊值域的键不用登记。
+fn value_in_domain(leaf: &str, value: &toml::Value) -> Option<&'static str> {
+    match leaf {
+        // 全局侧 0 会被 normalize 成默认值；方案侧「0」没有意义，也不该悄悄变成 7。
+        "per_page" if value.as_integer().is_some_and(|n| n < 1) => Some("至少为 1"),
+        _ => None,
+    }
+}
 
 /// 查一个全局键是否可被方案级配置覆盖。段前缀登记（`key` 以 `.` 结尾）对该段下所有键成立。
 pub fn schema_override_of(key: &str) -> Option<&'static SchemaOverride> {
@@ -1100,11 +1175,19 @@ pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static st
             cand.layout != crate::config::LayoutIntent::Follow,
         ),
     ];
-    checks
+    let mut keys: Vec<&'static str> = checks
         .into_iter()
         .filter(|(_, on)| *on)
         .map(|(k, _)| k)
-        .collect()
+        .collect();
+    // ── 通用折叠键：补丁里有（且值合法）就算覆盖；判据与 `Schema::behavior` 同源 ──
+    let (patch, _) = split_candidate_patch(&cand.ui);
+    keys.extend(
+        patch
+            .keys()
+            .filter_map(|leaf| candidate_fold_entry(leaf).map(|o| o.key)),
+    );
+    keys
 }
 
 /// 把命令行/词条来源的原始字符串按注册表类型解析为 TOML 值（CLI `config set` 与
@@ -2219,6 +2302,30 @@ mod overridden_keys_tests {
         }
     }
 
+    /// 通用折叠登记的结构约束：必须是 `ui.candidate.<叶子>`、落点段是 `[candidate]`、
+    /// 注册表里有这个键，且叶子名不能与 `CandidateSpec` 的强类型字段撞车
+    /// （撞了 serde 会让强类型字段吃掉它，补丁永远收不到——登记成了摆设）。
+    #[test]
+    fn candidate_typed_keys_are_not_foldable() {
+        for o in SCHEMA_OVERRIDES.iter().filter(|o| o.fold) {
+            let leaf = o
+                .key
+                .strip_prefix("ui.candidate.")
+                .unwrap_or_else(|| panic!("{} 不在 ui.candidate. 下，通用折叠器不支持", o.key));
+            assert!(!leaf.contains('.'), "{} 只支持直接子键", o.key);
+            assert_eq!(
+                o.section, "[candidate]",
+                "{} 的落点段必须是 [candidate]",
+                o.key
+            );
+            assert!(is_known_key(o.key), "{} 未在注册表登记", o.key);
+            assert!(
+                !crate::schema::CANDIDATE_TYPED_KEYS.contains(&leaf),
+                "{leaf} 是 CandidateSpec 的强类型字段，不能走通用折叠"
+            );
+        }
+    }
+
     /// 精确登记项的最小方案片段——只设这一项。
     fn minimal_setting_of_exact(key: &str) -> &'static str {
         match key {
@@ -2282,6 +2389,16 @@ mod overridden_keys_tests {
                         (k, format!("[{section}]\n{leaf} = {}\n", sample_value(k)))
                     })
                     .collect()
+            } else if o.fold {
+                // 通用折叠键：片段由注册表类型自动生成，新增一条登记不需要改测试。
+                let leaf = o
+                    .key
+                    .strip_prefix("ui.candidate.")
+                    .expect("fold 键必须在 ui.candidate. 下");
+                vec![(
+                    o.key,
+                    format!("[candidate]\n{leaf} = {}\n", sample_value(o.key)),
+                )]
             } else {
                 vec![(o.key, minimal_setting_of_exact(o.key).to_string())]
             };

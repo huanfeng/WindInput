@@ -9,6 +9,16 @@ use crate::coordinator::Coordinator;
 use crate::pipeline::ModeKind;
 
 impl Coordinator {
+    /// 当前生效的每页候选数（测试/诊断用）。`overlay = true` 时按 overlay 模式（临拼）取档。
+    pub fn debug_per_page(&self, overlay: bool) -> usize {
+        self.per_page(overlay.then_some(ModeKind::TempPinyin))
+    }
+
+    /// 当前下发给 UI 的竖排补位行数（测试/诊断用）：按生效每页数封顶后的 `min_rows`。
+    pub fn debug_candidate_min_rows(&self) -> u32 {
+        self.eff_candidate().effective_min_rows()
+    }
+
     /// 当前**已启用**的方案列表（`schema.available`，测试/诊断用）。
     ///
     /// 与 [`Self::active_schema_id`] 不同，这里回答的是「哪些方案会被启动预热覆盖」。

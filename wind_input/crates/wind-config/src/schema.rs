@@ -851,7 +851,7 @@ impl PunctIntent {
 ///
 /// 字段叫 `layout` 而不是 `candidate_layout`：段名已含 `candidate`，再写就是
 /// `candidate.candidate_layout`（违反 `config-design-rules` §R3 的路径冗余）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CandidateSpec {
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub layout: crate::config::LayoutIntent,
@@ -897,7 +897,28 @@ pub struct CandidateSpec {
     /// `behavior_for` 结果——`[punct]` 段的 `mode` 与 `custom_mappings` 已经是同一个形状。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub text_orientation: crate::config::TextOrientation,
+    /// **通用方案级覆盖**：本段里不属于上面强类型字段的键，原样收下，键名与全局
+    /// `ui.candidate.*` 相同（如 `per_page = 9`）。
+    ///
+    /// 是否生效由 [`crate::config_schema::SCHEMA_OVERRIDES`] 里 `fold = true` 的登记决定，
+    /// 值由 `Schema::behavior` 逐项过注册表校验；未登记 / 值不合法的项只进降级清单。
+    /// 新增一个可被方案覆盖的 `ui.candidate.*` 键**只需登记那一行**，不必再来这里加字段。
+    ///
+    /// 强类型字段（`layout` 等）有各自的语义（三态 / 数据归属 / 代际手动覆盖），不走这条路。
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub ui: toml::Table,
 }
+
+/// [`CandidateSpec`] 里有强类型字段的键——它们不进通用补丁。
+/// 与结构体字段同步；`candidate_typed_keys_are_not_foldable` 守着它们不被登记成通用键。
+#[cfg(test)]
+pub(crate) const CANDIDATE_TYPED_KEYS: [&str; 5] = [
+    "layout",
+    "comment_template_vertical",
+    "comment_template_horizontal",
+    "font_family",
+    "text_orientation",
+];
 
 /// 方案级短语加载（`[phrases]` 段）。
 ///
@@ -944,7 +965,7 @@ fn default_true() -> bool {
 /// 三段合成一个缓存条目而不是各存各的：它们同源（一次 `read_schema`）、同批失效，
 /// 分三个缓存等于同一个方案读三次盘、加三个失效点——`key_actions` / `session_actions`
 /// 那两个缓存已经因为「同批失效要接两处」在注释里互相提醒过一次。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SchemaBehavior {
     pub punct: PunctIntent,
     /// 方案级自定义标点表（整表替换，`None` = 跟随全局）。见 [`PunctSpec::custom_mappings`]。
@@ -954,6 +975,10 @@ pub struct SchemaBehavior {
     /// 会让下一个人理所当然地用同一个 `behavior_for(id)` 结果去喂两条路——而那正是错的。
     pub punct_custom_mappings: Option<std::collections::HashMap<String, Vec<String>>>,
     pub candidate_layout: crate::config::LayoutIntent,
+    /// 方案级通用 UI 覆盖（`[candidate]` 里已登记且值合法的键，键名同全局 `ui.candidate.*`）。
+    /// 空 = 本方案不覆盖任何项。见 [`CandidateSpec::ui`]；折叠方法是
+    /// [`crate::config::UiCandidateConfig::folded_with`]。
+    pub candidate_ui: toml::Table,
     /// 方案级候选文字字族。见 [`CandidateSpec::font_family`]——⚠️ 它的归属判据与同段的
     /// `candidate_layout` **不同**（数据方案 vs 活跃方案），取值时不要复用同一个 behavior。
     pub candidate_font_family: String,
@@ -973,14 +998,19 @@ pub struct SchemaBehavior {
 impl Schema {
     /// 抽出方案级行为覆盖三段。
     pub fn behavior(&self) -> SchemaBehavior {
+        let (candidate_ui, ui_problems) =
+            crate::config_schema::split_candidate_patch(&self.candidate.ui);
+        let mut degraded_items = self.degraded_items_with_retired();
+        degraded_items.extend(ui_problems);
         SchemaBehavior {
             punct: self.punct.mode,
             punct_custom_mappings: self.punct.custom_mappings.clone(),
             candidate_layout: self.candidate.layout,
+            candidate_ui,
             candidate_font_family: self.candidate.font_family.clone(),
             candidate_text_orientation: self.candidate.text_orientation,
             phrases: self.phrases.clone(),
-            degraded_items: self.degraded_items_with_retired(),
+            degraded_items,
         }
     }
 
@@ -1103,6 +1133,49 @@ mod tests {
         assert_eq!(s.behavior().degraded_items.len(), 1);
 
         assert!(Schema::default().behavior().degraded_items.is_empty());
+    }
+
+    /// 通用方案级 UI 覆盖：`[candidate]` 里不属于强类型字段的键被收为补丁，
+    /// 登记在册且值合法的进 `SchemaBehavior`，其余进降级清单；强类型字段不被截走。
+    #[test]
+    fn candidate_generic_keys_become_patch() {
+        let s: Schema = toml::from_str(
+            "[candidate]\nlayout = \"vertical\"\nper_page = 9\nno_such_key = 1\nmin_rows = 3\n",
+        )
+        .expect("方案应解析成功");
+        let b = s.behavior();
+        assert_eq!(b.candidate_layout, crate::config::LayoutIntent::Vertical);
+        assert_eq!(
+            b.candidate_ui.len(),
+            1,
+            "只有 per_page 在白名单内：{:?}",
+            b.candidate_ui
+        );
+        assert_eq!(b.candidate_ui["per_page"].as_integer(), Some(9));
+        // 未登记（no_such_key）与未开放（min_rows 首期不在白名单）都要报给用户，不能静默。
+        assert_eq!(b.degraded_items.len(), 2, "{:?}", b.degraded_items);
+        assert!(b.degraded_items.iter().any(|i| i.contains("no_such_key")));
+        assert!(b.degraded_items.iter().any(|i| i.contains("min_rows")));
+    }
+
+    /// 值类型或值域不对的补丁项整条丢弃（不能让错值盖掉好的全局值），并进降级清单。
+    #[test]
+    fn candidate_generic_bad_value_is_dropped() {
+        for bad in ["\"nine\"", "0", "-3", "1.5"] {
+            let s: Schema = toml::from_str(&format!("[candidate]\nper_page = {bad}\n")).unwrap();
+            let b = s.behavior();
+            assert!(b.candidate_ui.is_empty(), "{bad} 不该生效");
+            assert_eq!(b.degraded_items.len(), 1, "{bad}: {:?}", b.degraded_items);
+            assert!(b.degraded_items[0].contains("per_page"));
+        }
+    }
+
+    /// 没写补丁的方案：补丁为空、降级清单为空。
+    #[test]
+    fn candidate_generic_absent_is_empty() {
+        let b = Schema::default().behavior();
+        assert!(b.candidate_ui.is_empty());
+        assert!(b.degraded_items.is_empty());
     }
 
     #[test]

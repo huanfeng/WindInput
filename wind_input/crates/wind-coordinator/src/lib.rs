@@ -78,6 +78,7 @@ pub(crate) mod quick_history;
 pub mod schema_dicts_api;
 pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
+mod schema_ui;
 pub(crate) mod short_code_yield;
 pub mod stats;
 pub mod theme_query;

@@ -27,6 +27,18 @@
 
 ---
 
+## 2026-11-02 · 方案级每页候选数 `[candidate] per_page`（0.130）
+
+- 合入：待合并；范围：所有方案的主输入路径分页（翻页、数字键选词、展开网格行宽）
+- 变化：方案文件或 `schema_overrides/{id}.toml` 的 `[candidate]` 写 `per_page = N` 后，该方案作为活跃方案时每页 N 条，
+  切走即回到全局 `ui.candidate.per_page`。例：全局 7，五笔声明 `per_page = 5` → 五笔每页 5 条、拼音仍 7 条。
+  临拼 / 快捷等 overlay 模式：`per_page_extended > 0` 不受影响；`= 0` 时跟随五笔生效的 5。
+  值须为不小于 1 的整数，写错（0 / 负数 / 非整数）整条忽略并出现在方案降级提示里，不会变成 7。
+- 触发条件：方案显式声明才生效；出厂方案均不声明，默认行为不变
+- 回退旧行为：删除方案里的 `per_page` 行
+- 钉住的测试：`wind-coordinator/tests/schema_ui_fold.rs`；`wind-config` 的 `candidate_generic_*`、`scheme_fold_read_gates`
+- 来源：内部（通用折叠机制的首个使用者，见 `docs/design/schema-scoped-behavior.md` §3.4）
+
 ## 2026-11-01 · `$SS`/`$AA` 全码有重码时不自动展开；`$SS` 支持内嵌 `$CC` 成员（0.130）
 
 - 合入：待合并；范围：码表 / 拼音 / 混输主输入路径（临拼、临英、特殊模式等 overlay 暂不变）

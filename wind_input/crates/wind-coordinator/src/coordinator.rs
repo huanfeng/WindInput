@@ -2143,6 +2143,8 @@ pub struct Coordinator {
     /// 编码显示方式运行时态（命令栏 ime.toggle("preedit") 循环切换；初值随配置）。
     /// 统一权威：决定候选窗是否显示 preedit（in_app→不显示）及是否内联首单元（embedded）。
     pub(crate) preedit_display: Mutex<PreeditDisplay>,
+    /// 方案级通用 UI 覆盖的折叠缓存，见 `schema_ui.rs`。
+    pub(crate) eff_candidate_cache: Mutex<Option<crate::schema_ui::EffCandidateCache>>,
     /// 候选窗隐藏开关（命令栏 ime.toggle("candwin") 切换；隐藏时 notify_ui_update 不显示候选）。
     hide_candidate_window: Mutex<bool>,
     /// 候选布局方向运行时态（命令栏 ime.toggle("layout") 切换；true=竖排，初值随配置，持久化）。
@@ -3290,6 +3292,7 @@ impl Coordinator {
             preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
             preedit_display: Mutex::new(preedit_display_init),
+            eff_candidate_cache: Mutex::new(None),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),
             candidate_orientation: Mutex::new(candidate_orientation_init),
             candidate_layout_sent: Mutex::new(candidate_orientation_init),
@@ -5770,13 +5773,7 @@ impl Coordinator {
             .ui_tx
             .send(UiCommand::SetCandidateShadow(cand.shadow != "off"));
         // 候选窗尺寸下限（ui.candidate.min_window_width_* / min_window_height_* / min_rows，抗抖动）
-        let _ = self.ui_tx.send(UiCommand::SetCandidateMinSize {
-            width_horizontal: cand.min_window_width_horizontal,
-            width_vertical: cand.min_window_width_vertical,
-            height_horizontal: cand.min_window_height_horizontal,
-            height_vertical: cand.min_window_height_vertical,
-            rows: cand.effective_min_rows(),
-        });
+        self.send_candidate_min_size();
         // 悬停提示延迟（ui.tooltip.delay）
         let _ = self
             .ui_tx

@@ -52,6 +52,8 @@ impl Coordinator {
             return;
         }
         state.schema_scope_gen = generation;
+        // 方案级通用 UI 覆盖（如 per_page）随方案变化，依赖它的下发项要重发。
+        self.send_candidate_min_size();
         // 布局手动值随代际失效。标点态不需要对应动作，理由见模块文档最后一节。
         state.layout_manual = None;
         // 单字输入的临时态随代际失效：切走方案就回到新方案配的取值。
