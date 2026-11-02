@@ -3786,7 +3786,26 @@ impl CandidateWindow {
             let row_h = if pager_will_inline || pager_in_inline_row {
                 preedit_fs.max(footer_fs)
             } else {
-                text_fs + item_pad.t + item_pad.b
+                // 横排时翻页按钮与候选同在一行，行高 = 文字行高 + 内边距，而行高 > 字号（字体
+                // 上下留白）。按字号算会让按钮比行矮几个像素，居中取整后上下不对称，窗口内边距
+                // 为 0 的主题（胶囊）悬停块贴着窗口边缘时一眼可见。行高取与候选文字同款样式量。
+                // 竖排的翻页栏是独立一行，沿用字号算法，免得改动出厂竖排窗口的高度。
+                let line_h = if list_vertical {
+                    text_fs
+                } else {
+                    self.text_renderer
+                        .measure(
+                            "国",
+                            &Self::measure_style(
+                                text_fs,
+                                v.text.font_weight,
+                                v.text.font_family.as_deref(),
+                            ),
+                        )
+                        .height
+                        .max(text_fs)
+                };
+                line_h + item_pad.t + item_pad.b
             };
             // 翻页箭头三档（顺序即主题编辑器「翻页符号」面板上公开写明的契约）：
             // prev/next_image（如 _base 的 chevron SVG + tint）> prev/next_char > 内置文字 ‹ ›。
