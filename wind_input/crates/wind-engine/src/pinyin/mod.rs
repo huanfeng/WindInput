@@ -1527,9 +1527,11 @@ impl PinyinEngine {
     /// 和直接打首字母一样能挑任意单字，取数量与主路径 step 4 同口径（`limit` 由调用方给）。
     fn recall_first_initial_chars(&self, initial: &str, limit: usize, cands: &mut Vec<Candidate>) {
         // 音节数上限 1 ⇒ 只取单音节词条（单字），边界对齐位 0 ⇒ 退化为字符前缀匹配。
-        for h in self
+        for (idx, h) in self
             .dict
             .search_prefix_with_boundary_syllable_capped(initial, limit, 1, 0)
+            .into_iter()
+            .enumerate()
         {
             if h.text.chars().count() != 1 || cands.iter().any(|c| c.text == h.text) {
                 continue;
@@ -1537,8 +1539,11 @@ impl PinyinEngine {
             cands.push(Candidate {
                 text: h.text,
                 code: h.code,
-                weight: h.weight,
-                natural_order: 999999,
+                // 单字权重（字频，量级远高于词组）若原样带入，引擎序里会压过词组，候选上限一收紧
+                // 词组先被截掉。权重置 0、用词库返回序（已按权重降序）当 natural_order 保持单字间先后；
+                // 界面序仍由消费长度决定。也不吃下方裸声母单字提权（同理）。
+                weight: 0,
+                natural_order: idx as i32,
                 source: CandidateSource::Pinyin,
                 is_abbrev: true,
                 is_partial: true,
@@ -4571,7 +4576,8 @@ impl Engine for PinyinEngine {
         // 仅此情形——完整音节输入的单字已靠精确层级(is_prefix=false)就位，无需提权。
         if syllables.is_empty() {
             for c in candidates.iter_mut() {
-                if c.text.chars().count() == 1 {
+                // 简拼前缀回退补的首声母单字（6.2 末档）不提权：要排在词组之后。
+                if c.text.chars().count() == 1 && !(c.is_abbrev && c.is_partial) {
                     c.weight = c.weight.saturating_add(BARE_INITIAL_SINGLE_CHAR_BOOST);
                 }
             }

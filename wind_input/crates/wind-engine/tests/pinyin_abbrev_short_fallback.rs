@@ -147,3 +147,42 @@ fn per_cut_limit_comes_from_internal_config() {
         "两字切点走 per_cut_short(20): {t:?}"
     );
 }
+
+/// 候选上限收紧时（真机约 290 条），词库单字自带的高权重基数不能把词组挤出窗口。
+#[test]
+fn tight_limit_keeps_phrase_prefix_before_single_chars() {
+    let dir = std::env::temp_dir().join("wind_abbrev_short_fallback_tight");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wdat = dir.join("t.wdat");
+    let mut w = WdatWriter::new();
+    w.add_with_boundary(
+        "buxiangzhidao".into(),
+        vec![("不想知道".into(), 96, 0, 0b1001000010001)],
+    );
+    w.add_with_boundary("bixu".into(), vec![("必须".into(), 51514, 0, 0b101)]);
+    w.add_abbrev("bxzd".into(), vec![("buxiangzhidao".into(), 96)]);
+    w.add_abbrev("bx".into(), vec![("bixu".into(), 51514)]);
+    let hanzi: Vec<char> = "把爸吧罢霸坝拔跋靶耙钯魃茇菝詙鲌鲅岜灞鲃".chars().collect();
+    let items: Vec<(String, i32, u32, u64)> = hanzi
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.to_string(), 10_000_000 + 1000 - i as i32, i as u32, 0b1))
+        .collect();
+    w.add_with_boundary("ba".into(), items);
+    w.write(&wdat).unwrap();
+    let e = PinyinEngine::new(
+        PyConfig::default(),
+        CachedDict::load_at(&dir.join("t.dict.yaml"), &wdat).expect("加载 wdat 夹具"),
+    );
+    let mut cands = e
+        .convert("bxzd", 5)
+        .map(|r| r.candidates)
+        .unwrap_or_default();
+    cands.sort_by(|a, b| candidate_display_order(a, b, false, false, "bxzd"));
+    let t: Vec<String> = cands.into_iter().map(|c| c.text).collect();
+    assert!(
+        t.contains(&"必须".to_string()),
+        "上限 5 时词组也要留下: {t:?}"
+    );
+}
