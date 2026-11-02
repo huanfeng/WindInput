@@ -1421,10 +1421,10 @@ impl CandidateWindow {
     fn refresh_effective_theme(&mut self) {
         let mut t = self.theme_source.clone();
         // 竖排（含旋转排版）：主题写了 `[节点.vertical]` 时整套视图换成竖排变体。
-        if self.vertical || self.rotated {
-            if let Some(v) = t.views_vertical.take() {
-                t.views = v;
-            }
+        if (self.vertical || self.rotated)
+            && let Some(v) = t.views_vertical.take()
+        {
+            t.views = v;
         }
         apply_user_font(&mut t.views, &self.user_font_family);
         if !self.theme_shadow {
