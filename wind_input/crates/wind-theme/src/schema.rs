@@ -322,6 +322,10 @@ pub struct ViewNode {
     pub selected: Option<Box<ViewNode>>,
     pub hover: Option<Box<ViewNode>>,
     pub disabled: Option<Box<ViewNode>>,
+    /// 竖排覆盖（`[节点.vertical]`）。在 Value 层由 `theme::vertical_variant` 深合并进节点、
+    /// 另成一份 `Theme.vertical`，所以类型化后的这个字段本身不被读取——声明它是为了让 schema
+    /// 与主题编辑器的字段清单对得上（`pnpm check:engine`）。
+    pub vertical: Option<Box<ViewNode>>,
 }
 
 impl ViewNode {
