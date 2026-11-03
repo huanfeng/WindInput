@@ -716,3 +716,69 @@ fn numeric_lens_letters_still_select_with_history_alongside() {
     let act = coord.handle_key_event(&key(u32::from(b'A'), 0));
     assert_eq!(committed(&act).as_deref(), Some("3"), "a 应选走首选");
 }
+
+/// t253：历史排在英文之后时，用过几次的 `font-size` 与英文词一起按热度重排——打前缀即上首位。
+#[test]
+fn hot_history_joins_english_segment_and_reaches_top() {
+    skip_without_data!();
+    let (coord, store) = open_with("hot_hist", |c| {
+        // 同 GH#253 楼主的配置：只留英文、历史，历史在后；原文与变形候选不显示。
+        c.schema.english.frequency.enabled = true;
+        c.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
+        c.input.temp_english.case_variants = false;
+        c.schema.mix_modes[0].members = vec![
+            "english".to_string(),
+            wind_quick_input::MEMBER_HISTORY.to_string(),
+        ];
+    });
+    for _ in 0..4 {
+        store
+            .record_completion(CompletionKind::QuickHistory, "font-size")
+            .unwrap();
+    }
+    enter_quick(&coord);
+    type_str(&coord, "fo");
+    let texts = coord.debug_page_texts();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("font-size"),
+        "用过 4 次的历史应与英文词按热度比、上到首位，实际 {texts:?}"
+    );
+}
+
+/// t253 反向：英文词 `font` 用得更多时仍在 `font-size` 之前（热度翻转，不是历史一律置顶）。
+#[test]
+fn hotter_english_word_stays_above_history() {
+    skip_without_data!();
+    let (coord, store) = open_with("hot_en", |c| {
+        c.schema.english.frequency.enabled = true;
+        c.schema.mix_modes[0].members = vec![
+            "english".to_string(),
+            wind_quick_input::MEMBER_HISTORY.to_string(),
+        ];
+    });
+    for _ in 0..2 {
+        store
+            .record_completion(CompletionKind::QuickHistory, "font-size")
+            .unwrap();
+    }
+    for _ in 0..8 {
+        enter_quick(&coord);
+        type_str(&coord, "font");
+        let texts = coord.debug_page_texts();
+        let k = texts
+            .iter()
+            .position(|t| t == "font")
+            .expect("前提：英文段里有 font")
+            + 1;
+        coord.handle_key_event(&key(0x30 + k as u32, 0));
+    }
+    enter_quick(&coord);
+    type_str(&coord, "fo");
+    let texts = coord.debug_page_texts();
+    let pos = |w: &str| texts.iter().position(|t| t == w);
+    assert!(
+        pos("font").is_some() && pos("font") < pos("font-size"),
+        "用得更多的 font 应在历史 font-size 之前，实际 {texts:?}"
+    );
+}

@@ -172,3 +172,14 @@
 - 回退旧行为：把通配键换回字母，或关闭通配。
 - 钉住的测试：`wind-coordinator/tests/wildcard_symbol_lead.rs`
 - 来源：维护者实测
+
+## 2026-11-03 · 快捷输入历史并进英文段按热度重排（0.130）
+
+- 合入：见提交 `feat(quick): 快捷输入历史并进英文段`；范围：快捷输入里同时启用英文与历史成员的实例
+- 变化：文本透镜下，命中的历史（如 `font-size`）作为附加候选并入英文段，从第 9 位起算，与英文词
+  同一道词频重排比热度（次数、最近一次），用得多的前移——历史用 3～4 次即可上到英文段首位，
+  而用得更多的英文词（如 `font`）仍在其前。此前历史只落在英文段之后。
+- 触发条件：成员含 `english` 与 `quick_input.history`、缓冲为纯小写前缀、词频开启；与词库同名的历史不并入。
+- 回退旧行为：把历史成员排到英文之前（成员顺序优先），或关闭英文词频。
+- 钉住的测试：`wind-coordinator/tests/quick_input_history.rs`（`hot_history_joins_english_segment_and_reaches_top`、`hotter_english_word_stays_above_history`）
+- 来源：GH#253（维护者定方案 B）

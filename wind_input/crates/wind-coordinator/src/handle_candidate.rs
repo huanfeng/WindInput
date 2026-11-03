@@ -934,6 +934,26 @@ impl Coordinator {
         candidates: &mut [Candidate],
         code: &str,
     ) {
+        self.apply_freq_rerank_with_extra(
+            schema_override,
+            candidates,
+            code,
+            std::collections::HashMap::new(),
+        );
+    }
+
+    /// 同 [`Self::apply_freq_rerank_in`]，另并入调用方给的**外部热度记录**（按候选文本）。
+    ///
+    /// 给不在词频表里、却有自己使用次数的候选用——快捷输入历史并进英文段时借这里与英文词
+    /// 同一把尺比热度（见 `quick_history::quick_history_english_pool`）。外部记录与词频表
+    /// 记录同键时以外部为准（历史候选不会同时是词库词，调用方已去重）。
+    pub(crate) fn apply_freq_rerank_with_extra(
+        &self,
+        schema_override: Option<&str>,
+        candidates: &mut [Candidate],
+        code: &str,
+        extra: std::collections::HashMap<String, FreqRecord>,
+    ) {
         let Some(store) = &self.store else {
             return;
         };
@@ -1033,7 +1053,7 @@ impl Coordinator {
         let found = store.get_freq_batch(&probe).unwrap_or_default();
         // 只为**命中**的候选 clone 文本：五笔单字母下 78 个候选往往只有个位数有词频记录，
         // 先收一份全量文本副本再筛是白 clone 七十多次。
-        let recs: std::collections::HashMap<String, FreqRecord> = rec_keys
+        let mut recs: std::collections::HashMap<String, FreqRecord> = rec_keys
             .into_iter()
             .zip(found)
             .filter_map(|(t, r)| match r {
@@ -1041,6 +1061,7 @@ impl Coordinator {
                 _ => None,
             })
             .collect();
+        recs.extend(extra);
         if recs.is_empty() {
             return;
         }

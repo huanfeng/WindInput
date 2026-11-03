@@ -2730,10 +2730,25 @@ impl Coordinator {
                     &state.mix_buffer,
                 );
                 member_cands.extend(recalled);
-                self.apply_freq_rerank_in(
+                // 快捷输入历史并进英文段、与英文词同一道词频重排比热度（t253）：词组透镜
+                // （缓冲带分词符）下缓冲不是字面前缀，不并。
+                let mut history_recs = std::collections::HashMap::new();
+                if member == "english" && !phrase_only {
+                    let mut at = crate::quick_history::HISTORY_BASE_POS.min(member_cands.len());
+                    for (c, rec) in self.quick_history_english_pool(state) {
+                        if member_cands.iter().any(|m| m.text == c.text) {
+                            continue;
+                        }
+                        history_recs.insert(c.text.clone(), rec);
+                        member_cands.insert(at, c);
+                        at += 1;
+                    }
+                }
+                self.apply_freq_rerank_with_extra(
                     mix_member_owner.as_deref(),
                     &mut member_cands,
                     &state.mix_buffer,
+                    history_recs,
                 );
                 // 纠错候选不占首选（D6）：同主路 helper，放在重排之后、shadow 之前。
                 wind_candidate::drop_corrected_duplicates(&mut member_cands);

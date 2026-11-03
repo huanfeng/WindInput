@@ -51,8 +51,9 @@
 
 use crate::coordinator::{Coordinator, State};
 use crate::handle_mode::MixLens;
-use wind_candidate::Candidate;
+use wind_candidate::{Candidate, CandidateSource};
 use wind_store::completion::CompletionKind;
+use wind_store::freq::FreqRecord;
 
 /// 历史候选的 `Candidate::id` 标记。上屏出口凭它认出「这是一条历史」。
 pub(crate) const QUICK_HISTORY_ID: &str = "quick_input.history";
@@ -62,6 +63,10 @@ pub(crate) const QUICK_HISTORY_ID: &str = "quick_input.history";
 /// Free 透镜里历史排在原文前面，给多了原文会被挤到第二页；文本 / 数字透镜里它与其它成员
 /// 并列，同生僻字成员「最多一页」的理由：别把其余成员整个挤到翻页之外。
 pub(crate) const QUICK_HISTORY_QUOTA: usize = 5;
+
+/// 历史候选并进英文段时的起算位次（0 起）。位置提升按「位次 / 2^有效次数」前移，标定同
+/// 拼音（10→5→2→1）：用 1 次到第 4 位、3 次到首位。
+pub(crate) const HISTORY_BASE_POS: usize = 8;
 
 /// 值不值得记进历史：至少 2 个字符、含字母（纯数字、纯标点不记），且不含空白。
 ///
@@ -139,6 +144,48 @@ impl Coordinator {
                 .map(|(text, _)| cand(text)),
         );
         out
+    }
+
+    /// 文本透镜下并进**英文段**的历史候选，连同各自的热度记录（次数 / 最近一次）。
+    ///
+    /// 历史成员按成员顺序排在英文之后时，`;f` 下 `font-size` 这类带符号的历史永远落在英文段
+    /// 之后；而整体提前又会压住用户常打的 `font`。所以把命中的历史并进英文段、与英文词
+    /// 一起过同一道词频重排：谁用得多谁在前，成员顺序这条原则不动（t253）。
+    ///
+    /// 历史候选从英文段的 [`HISTORY_BASE_POS`] 位起算，由重排按 `位次 / 2^有效次数` 前移；
+    /// 与词库同名的不并入（词库词有自己的词频记录）。
+    pub(crate) fn quick_history_english_pool(&self, state: &State) -> Vec<(Candidate, FreqRecord)> {
+        let buffer = &state.mix_buffer;
+        if buffer.is_empty()
+            || !state.committed_text.is_empty()
+            || !self.mix_has_history(state.mix_id)
+        {
+            return Vec::new();
+        }
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let Ok((rows, _)) = store.list_completions(CompletionKind::QuickHistory, "", 0, 0) else {
+            return Vec::new();
+        };
+        let want = buffer.to_lowercase();
+        rows.into_iter()
+            .filter(|(text, _)| text != buffer && text.to_lowercase().starts_with(&want))
+            .take(QUICK_HISTORY_QUOTA)
+            .map(|(text, rec)| {
+                let cand = Candidate {
+                    text,
+                    id: QUICK_HISTORY_ID.to_string(),
+                    source: CandidateSource::English,
+                    ..Default::default()
+                };
+                let rec = FreqRecord {
+                    count: rec.count,
+                    last_used: rec.last_used,
+                };
+                (cand, rec)
+            })
+            .collect()
     }
 
     /// Free / 大写英文透镜的候选（`seg` = 原文 + 英文段）并上历史。没有历史命中时原样返回。
