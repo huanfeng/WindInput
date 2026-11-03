@@ -4450,6 +4450,7 @@ fn followed_behavior_of(cfg: &wind_config::Config, theme_font: Option<String>) -
     json!({
         "layout": wind_config::Orientation::from_layout_str(&cfg.ui.candidate.layout).layout_str(),
         "fontFamily": font,
+        "perPage": cfg.ui.candidate.per_page,
         "auxEnabled": aux.enabled,
         "auxMaxPhraseLen": aux.max_phrase_len,
         "auxDirect": aux.direct,
@@ -10470,6 +10471,7 @@ mod followed_behavior_tests {
         let mut cfg = wind_config::Config::default();
         cfg.ui.candidate.layout = "vertical".into();
         cfg.ui.font.family = "霞鹜文楷".into();
+        cfg.ui.candidate.per_page = 9;
         cfg.schema.pinyin.aux_code.enabled = true;
         cfg.schema.pinyin.aux_code.max_phrase_len = 3;
         cfg.schema.pinyin.aux_code.direct = true;
@@ -10479,6 +10481,7 @@ mod followed_behavior_tests {
             json!({
                 "layout": "vertical",
                 "fontFamily": "霞鹜文楷",
+                "perPage": 9,
                 "auxEnabled": true,
                 "auxMaxPhraseLen": 3,
                 "auxDirect": true,
