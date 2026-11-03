@@ -10558,6 +10558,20 @@ impl Config {
         Self::migrate_grammar_enabled_value(&mut root);
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
+        // 注释分配的单格 / 单个模板：按名字寻址，不走静态注册表（见 `CommentDynKey`）。
+        let joined = path.join(".");
+        if let Some(dynk) = crate::config_schema::comment_dyn_key(&joined) {
+            let text = value.as_str().unwrap_or_default().to_string();
+            if let toml::Value::Table(t) = &mut root {
+                Self::apply_comment_dyn_key(t, dynk, &text);
+            }
+            let out = toml::to_string_pretty(&root)?;
+            let tmp = file.with_extension("toml.tmp");
+            std::fs::write(&tmp, out)?;
+            std::fs::rename(&tmp, &file)?;
+            crate::change_hook::notify_changed(path, &value_for_hook);
+            return Ok(());
+        }
         // 出厂默认取不到时 `is_default` 恒 false → 退化为「照常写入」的旧行为（安全降级）。
         // `is_known_key` 与 `prune_redundant` 同一道保险：未登记键（废弃键 / Map 子路径）不收口。
         let is_default = crate::config_schema::is_known_key(&path.join("."))
@@ -10585,6 +10599,61 @@ impl Config {
         // 仍是它（见上方剪枝说明），对订阅方语义一致。
         crate::change_hook::notify_changed(path, &value_for_hook);
         Ok(())
+    }
+
+    /// 把一个 [`CommentDynKey`](crate::config_schema::CommentDynKey) 写进用户层表；
+    /// 空串＝删除（格回到下一层 / 删掉该用户模板）。
+    fn apply_comment_dyn_key(
+        root: &mut toml::Table,
+        key: crate::config_schema::CommentDynKey<'_>,
+        text: &str,
+    ) {
+        use crate::config_schema::CommentDynKey;
+        match key {
+            CommentDynKey::Cell { scope, name, cell } => {
+                let mut path = vec!["ui", "comment", "assign", scope];
+                path.extend(name);
+                path.push(cell);
+                if text.is_empty() {
+                    remove_nested(root, &path);
+                } else {
+                    set_nested(root, &path, toml::Value::String(text.to_string()));
+                }
+            }
+            CommentDynKey::Template { id } => {
+                let path = ["ui", "comment", "templates"];
+                let mut list = match get_nested(&toml::Value::Table(root.clone()), &path) {
+                    Some(toml::Value::Array(a)) => a.clone(),
+                    _ => Vec::new(),
+                };
+                let pos = list
+                    .iter()
+                    .position(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+                match (pos, text.is_empty()) {
+                    (Some(i), true) => {
+                        list.remove(i);
+                    }
+                    (Some(i), false) => {
+                        if let Some(t) = list[i].as_table_mut() {
+                            t.insert("text".into(), toml::Value::String(text.into()));
+                        }
+                    }
+                    (None, false) => {
+                        let mut t = toml::Table::new();
+                        t.insert("id".into(), toml::Value::String(id.into()));
+                        t.insert("name".into(), toml::Value::String(id.into()));
+                        t.insert("text".into(), toml::Value::String(text.into()));
+                        list.push(toml::Value::Table(t));
+                    }
+                    (None, true) => {}
+                }
+                if list.is_empty() {
+                    remove_nested(root, &path);
+                } else {
+                    set_nested(root, &path, toml::Value::Array(list));
+                }
+            }
+        }
     }
 
     /// [`set_user_value`](Self::set_user_value) 的字符串便捷形式。
@@ -12580,6 +12649,38 @@ active = "x"
                 vec!["schema".to_string(), "active".to_string()],
             ]
         );
+    }
+
+    #[test]
+    fn comment_dyn_key_writes_cell_and_template_and_blank_deletes() {
+        use crate::config_schema::comment_dyn_key;
+        let mut root = toml::Table::new();
+        let mut put = |k: &str, v: &str| {
+            Config::apply_comment_dyn_key(&mut root, comment_dyn_key(k).unwrap(), v)
+        };
+        put("ui.comment.assign.mode.url.default_vertical", "t1");
+        put("ui.comment.assign.global.detail_horizontal", "none");
+        put("ui.comment.template.t1", "${code}");
+        put("ui.comment.template.t1", "${dict}");
+        put("ui.comment.template.t2", "x");
+        let v = toml::Value::Table(root.clone());
+        let c: crate::comment_lib::UiCommentConfig = get_nested(&v, &["ui", "comment"])
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap();
+        assert_eq!(c.assign.mode["url"].default_vertical.as_deref(), Some("t1"));
+        assert_eq!(c.assign.global.detail_horizontal.as_deref(), Some("none"));
+        assert_eq!(c.templates.len(), 2);
+        assert_eq!(c.templates[0].text, "${dict}");
+        let mut put = |k: &str, v: &str| {
+            Config::apply_comment_dyn_key(&mut root, comment_dyn_key(k).unwrap(), v)
+        };
+        put("ui.comment.assign.mode.url.default_vertical", "");
+        put("ui.comment.assign.global.detail_horizontal", "");
+        put("ui.comment.template.t1", "");
+        put("ui.comment.template.t2", "");
+        assert!(root.is_empty(), "全删后应回收空段: {root:?}");
     }
 
     #[test]

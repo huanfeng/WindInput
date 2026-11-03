@@ -756,14 +756,10 @@ impl CoordConfig {
             );
         }
         let full = cfg.to_json_value()?;
-        let mut cur = &full;
-        for part in key.split('.') {
-            cur = cur
-                .get(part)
-                .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))?;
-        }
+        let cur = wind_config::config_schema::lookup_json_value(&full, key)
+            .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))?;
         Ok(match cur {
-            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::String(s) => s,
             other => other.to_string(),
         })
     }
