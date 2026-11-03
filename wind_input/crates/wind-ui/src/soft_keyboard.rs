@@ -57,6 +57,43 @@ use wind_ui_types::{
     UiEvent, fn_key_repeats, slot_layer,
 };
 
+/// 钉住图标边长（dp）。
+const PIN_ICON_DP: f32 = 13.0;
+
+/// 钉住按钮的两张图标，转成 `data:` URI 一次（`ViewImage` 的源是字符串，且填充缓存以它为键）。
+fn pin_icon(pinned: bool, tint: [u8; 4], size: f32) -> crate::view::ViewImage {
+    use base64::Engine as _;
+    use std::sync::OnceLock;
+    static URIS: OnceLock<[String; 2]> = OnceLock::new();
+    let uris = URIS.get_or_init(|| {
+        let enc = |svg: &str| {
+            format!(
+                "data:image/svg+xml;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(svg)
+            )
+        };
+        [
+            enc(include_str!("../res/icons/pin_off.svg")),
+            enc(include_str!("../res/icons/pin_on.svg")),
+        ]
+    });
+    crate::view::ViewImage {
+        path: uris[usize::from(pinned)].clone(),
+        mode: String::new(),
+        slice: [0.0; 4],
+        slice_repeat: [false; 2],
+        opacity: 1.0,
+        tint: Some(tint),
+        place: Some(crate::view::ImagePlace {
+            anchor: "center".into(),
+            w: size.round(),
+            h: size.round(),
+            ..Default::default()
+        }),
+        scale: 1.0,
+    }
+}
+
 /// 每行的键位个数，与 `wind_softkeyboard::KEY_ROWS` 同构（数字行 / QWERTY / ASDF / ZXCV）。
 ///
 /// 只存**个数**不存键位名：名字随 `SoftKeyCap` 下发，渲染端再存一份就会分叉。
@@ -1065,11 +1102,12 @@ impl SoftKeyboard {
                         )
                         .tag(SOFT_TAG_PIN)
                         .child(
-                            View::leaf("📌", pin_fg)
-                                .font_size(12.0 * s)
-                                .text_align(Align::Center)
+                            // 图标两态各一张 SVG（未钉住=描边斜放，已钉住=实心竖直），按文字色 tint；
+                            // 不用字符：emoji 在各平台字体里形状、彩色与否都不一致，且看不出开关。
+                            View::container(Layout::Row)
                                 .fill_cross()
-                                .grow(),
+                                .grow()
+                                .bg_image(pin_icon(self.pinned, pin_fg, PIN_ICON_DP * s)),
                         ),
                 )
                 .child(View::spacer().grow())
@@ -2902,6 +2940,21 @@ mod tests {
         assert!(!drags_panel(SOFT_TAG_CLOSE), "关闭");
         assert!(!drags_panel(SOFT_TAG_PIN), "钉住");
         assert!(!is_page_tag(SOFT_TAG_PIN), "钉住不是面");
+    }
+
+    /// 两张钉住图标必须能解析且有墨：`rasterize_svg_str_tinted` 解析失败返回 `None`，
+    /// 绘制侧见 `None` 就静默不画——SVG 写错的表现是按钮上什么都没有，其余测试照样绿。
+    #[test]
+    fn pin_icons_rasterize_with_ink() {
+        for (name, svg) in [
+            ("pin_off", include_str!("../res/icons/pin_off.svg")),
+            ("pin_on", include_str!("../res/icons/pin_on.svg")),
+        ] {
+            let pm = crate::image_cache::rasterize_svg_str_tinted(svg, 13, 13, [0, 0, 0, 255])
+                .unwrap_or_else(|| panic!("{name}.svg 解析失败"));
+            let inked = pm.pixels().iter().filter(|p| p.alpha() > 0).count();
+            assert!(inked >= 15, "{name} 在 13px 下只有 {inked} 个像素有墨");
+        }
     }
 
     #[test]
