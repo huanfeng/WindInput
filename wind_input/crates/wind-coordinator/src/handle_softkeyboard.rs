@@ -304,6 +304,9 @@ impl Coordinator {
         if let Some(id) = page {
             self.softkeyboard_goto(id);
         }
+        // 与关闭处的复位成对：UI 事件线程的钉住切换可能夹在「判开着」与关闭之间，
+        // 把已关闭的面板翻成钉住，这里兜底保证每次打开都从未钉住开始。
+        self.softkeyboard_pinned.store(false, Ordering::Relaxed);
         self.softkeyboard_active.store(true, Ordering::Relaxed);
         self.softkeyboard_dirty.store(true, Ordering::Relaxed);
         *self
@@ -387,6 +390,19 @@ impl Coordinator {
     pub(crate) fn close_softkeyboard_on_focus_change(&self, signal: SoftKbFocusSignal) {
         if !self.softkeyboard_is_open() {
             return;
+        }
+        let host_pid = self.softkeyboard_host_pid.load(Ordering::Relaxed);
+        // 宿主跟着最近一次获焦的进程走：钉住期间用户在别的应用里继续用，之后取消钉住时，
+        // 判据要拿「现在这个应用」当宿主，否则在新应用里第一次换焦点就把面板关了。
+        // 宿主未知（0）时同理补记，否则同宿主判据此后永不起作用。
+        if let SoftKbFocusSignal::Gained { pid } = signal
+            && pid != 0
+            && (host_pid == 0 || self.softkeyboard_pinned.load(Ordering::Relaxed))
+        {
+            self.softkeyboard_host_pid.store(pid, Ordering::Relaxed);
+            if host_pid == 0 {
+                return;
+            }
         }
         if self.softkeyboard_pinned.load(Ordering::Relaxed) {
             debug!("softkeyboard: 已钉住，忽略焦点事件 {signal:?}");

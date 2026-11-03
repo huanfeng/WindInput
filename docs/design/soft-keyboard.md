@@ -297,6 +297,7 @@ WS_EX_TOPMOST`（候选窗与工具栏已在用，`wind-ui/src/window.rs`）。
 含整应用失焦、换宿主；Esc / 关闭按钮 / 工具栏 / 菜单仍可关。
 
 - **只对本次打开有效**：任何一条关闭路径都复位，不持久化——忘了钉的面板会一直挡在屏上。
+- ⚠️ 钉住跨应用后，点符号面的文本按**活动 token** 投递；若前台应用不发 focus_gained（别家输入法、桌面），可能送进后台旧宿主，待靶机验证。
 - 真相在协调器 `softkeyboard_pinned`，UI 只管高亮（`UiCommand::SoftKeyboardPinned`，面板隐藏时自行复位）。
 - ★ **唯一入口是 `Coordinator::toggle_softkeyboard_pin()`**。要给钉住绑快捷键，只调它，别再写一份翻转逻辑。
   快捷键本身尚未接线（配置项、`key_actions` 动词、设置页都没有）。
@@ -321,6 +322,15 @@ WS_EX_TOPMOST`（候选窗与工具栏已在用，`wind-ui/src/window.rs`）。
 | `CtxLost` / `NoEditCtx` / `DocChanged`、同进程的 `focus_gained` | 不关（Excel 退出单元格再点下一格，要能连续录入） |
 | `Thread` 失焦、`ime_deactivated`、**另一进程**的 `focus_gained` | 关 |
 | 宿主 pid 未知（开启时无活动宿主 / 事件取不到） | 不关（误留比误关便宜，Esc / 关闭按钮可收） |
+
+宿主 pid 跟着最近一次获焦的进程走（钉住期间用户去了别的应用、再取消钉住，判据以那个应用为准）；
+开启时宿主未知则第一次获焦补记。
+
+**已知限制**：
+- 非 Windows 平台 token 高 32 位是应用标识散列（macOS=bundleId，Linux=程序名），粒度是应用而非进程；
+  且这两端失焦 reason 恒为 `Thread`，同应用内换文本框仍会关——「同宿主不关」目前是 Windows 专属效果。
+- 多进程宿主（WebView2 子进程等）换焦点会被当成跨进程而关；Explorer 多窗口会收到 `Thread` 失焦。
+- `Thread` 失焦与 `ime_deactivated` 目前不看 pid：别的进程退出时发来的也会关。
 
 不用「失焦后延时关闭」：Excel 里从退出编辑到选中下一格可能隔好几秒，延时挡不住。
 

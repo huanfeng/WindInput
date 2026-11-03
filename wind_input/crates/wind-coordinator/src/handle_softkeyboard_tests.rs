@@ -343,6 +343,71 @@ fn pin_does_not_survive_a_close() {
     assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
 }
 
+/// 钉住期间跟着用户去了别的应用，取消钉住后那个应用就是宿主：
+/// 在它里面换焦点不能关（否则「同宿主噪声不关」在新应用里又失效）。
+#[test]
+fn unpinning_in_another_app_adopts_it_as_host() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(1234, Ordering::Relaxed);
+    c.toggle_softkeyboard_pin();
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 5678 });
+    c.toggle_softkeyboard_pin(); // 取消钉住
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 5678 });
+    assert!(c.softkeyboard_is_open(), "新应用内的换焦点不该关");
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 1234 });
+    assert!(!c.softkeyboard_is_open(), "再换回旧应用才算离开");
+}
+
+/// 开启时没有活动宿主（pid 0）：第一次获焦补记，之后同宿主不关、换宿主才关。
+#[test]
+fn unknown_host_is_adopted_on_first_gained() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(0, Ordering::Relaxed);
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 42 });
+    assert!(c.softkeyboard_is_open());
+    assert_eq!(c.softkeyboard_host_pid.load(Ordering::Relaxed), 42);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 42 });
+    assert!(c.softkeyboard_is_open());
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 43 });
+    assert!(!c.softkeyboard_is_open());
+}
+
+/// 竞态兜底：关闭后残留的钉住标志，在下次打开时必须清掉。
+#[test]
+fn open_always_starts_unpinned() {
+    let c = coord();
+    c.softkeyboard_pinned.store(true, Ordering::Relaxed);
+    c.open_softkeyboard(None);
+    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
+}
+
+/// 开启时按活动 token 高 32 位记宿主 pid——接线本身，不是手工 store。
+#[test]
+fn open_records_host_pid_from_active_token() {
+    let c = coord();
+    c.push_server.set_active_token((777u64 << 32) | 5);
+    c.open_softkeyboard(None);
+    assert_eq!(c.softkeyboard_host_pid.load(Ordering::Relaxed), 777);
+}
+
+#[test]
+fn pin_toggle_tells_the_ui() {
+    let (c, rx) = coord_with_ui();
+    c.open_softkeyboard(None);
+    while rx.try_recv().is_ok() {}
+    c.toggle_softkeyboard_pin();
+    let cmds: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        cmds.iter()
+            .any(|m| matches!(m, UiCommand::SoftKeyboardPinned(true))),
+        "应通知 UI 钉住: {cmds:?}"
+    );
+}
+
 #[test]
 fn pin_is_ignored_while_closed() {
     let c = coord();
