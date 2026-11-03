@@ -830,10 +830,20 @@ pub fn registry() -> &'static [ConfigField] {
 
 /// 按点分路径查注册表条目（未登记返回 None）。
 pub fn field(key: &str) -> Option<&'static ConfigField> {
-    REGISTRY
-        .iter()
-        .find(|f| f.key == key)
-        .or_else(|| comment_dyn_key(key).map(CommentDynKey::field))
+    REGISTRY.iter().find(|f| f.key == key)
+}
+
+/// [`field`] 加上 [`CommentDynKey`] 的动态键。**只有 `config get/set` 与 cmdbar `config.*`
+/// 这类「单项按名字读写」的入口用它**；`field` / `is_known_key` 保持只查静态表——动态键在
+/// `Config` 结构体里没有同名字段，被 `config check`、patch、剪枝、设置端写回等一并认作
+/// 「已登记」会让它们对一个并不存在的路径做出错误判断。
+pub fn addressable_field(key: &str) -> Option<&'static ConfigField> {
+    field(key).or_else(|| comment_dyn_key(key).map(CommentDynKey::field))
+}
+
+/// [`addressable_field`] 是否命中。
+pub fn is_addressable_key(key: &str) -> bool {
+    addressable_field(key).is_some()
 }
 
 /// `ui.comment` 下两类**按名字寻址**的动态键，不在静态注册表里（名字是用户数据），
@@ -845,7 +855,8 @@ pub fn field(key: &str) -> Option<&'static ConfigField> {
 /// - 模板文本：`ui.comment.template.<id>`，值为模板串；id 不存在则新建（名称取 id），
 ///   **空串＝删除该用户模板**。
 ///
-/// 名字里可以带 `.`（格名固定，从右侧切）。
+/// 范围名与模板 id 里不能带 `.`；模板 id 须合 `[a-z0-9_]+` 且不是保留字 `none` / `inherit`，
+/// 与注释库加载时的取舍一致（不合格的模板加载时会被丢弃，写入时就该拒绝）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentDynKey<'a> {
     Cell {
@@ -873,14 +884,15 @@ impl CommentDynKey<'_> {
 /// 解析 [`CommentDynKey`]；不是这两类形状返回 `None`。
 pub fn comment_dyn_key(key: &str) -> Option<CommentDynKey<'_>> {
     if let Some(id) = key.strip_prefix("ui.comment.template.") {
-        return (!id.is_empty()).then_some(CommentDynKey::Template { id });
+        return crate::comment_lib::valid_user_template_id(id)
+            .then_some(CommentDynKey::Template { id });
     }
     let rest = key.strip_prefix("ui.comment.assign.")?;
     let (scope, tail) = rest.split_once('.')?;
     let (name, cell) = match scope {
         "global" => (None, tail),
         "type" | "schema" | "mode" => {
-            let (n, c) = tail.rsplit_once('.')?;
+            let (n, c) = tail.split_once('.')?;
             if n.is_empty() {
                 return None;
             }
@@ -1291,7 +1303,7 @@ pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static st
 /// - Float 拒绝 nan/inf/溢出（`Value::from(非有限 f64)` 下游会静默变 null）
 /// - StrList 按逗号拆分；Map/StructList 需 JSON 文本
 pub fn parse_str_value(key: &str, raw: &str) -> Result<toml::Value, String> {
-    let fld = field(key).ok_or(ValidateError::UnknownKey.to_string())?;
+    let fld = addressable_field(key).ok_or(ValidateError::UnknownKey.to_string())?;
     let v = match fld.ty {
         FieldType::Bool => match raw.trim().to_ascii_lowercase().as_str() {
             "true" | "1" | "yes" | "on" => toml::Value::Boolean(true),
@@ -1390,7 +1402,7 @@ fn type_label(ty: FieldType) -> &'static str {
 /// 按注册表校验"键+值"。未登记键、类型不符、枚举越界均返回结构化错误。
 /// 宽松点：`Float` 字段接受整数值（用户常输 18 而非 18.0）。
 pub fn validate(key: &str, value: &toml::Value) -> Result<(), ValidateError> {
-    let f = field(key).ok_or(ValidateError::UnknownKey)?;
+    let f = addressable_field(key).ok_or(ValidateError::UnknownKey)?;
     let type_ok = match f.ty {
         FieldType::Bool => value.is_bool(),
         FieldType::Int => value.is_integer(),
@@ -1436,6 +1448,17 @@ pub fn validate(key: &str, value: &toml::Value) -> Result<(), ValidateError> {
         FieldType::StructList => value.is_array(),
     };
     if type_ok {
+        // 分配格的值：空串（删除）/ none / inherit / 形状合法的模板 id。
+        if let (Some(CommentDynKey::Cell { .. }), Some(v)) = (comment_dyn_key(key), value.as_str())
+            && !v.is_empty()
+            && !matches!(v, "none" | "inherit")
+            && !crate::comment_lib::valid_user_template_id(v)
+        {
+            return Err(ValidateError::EnumOutOfRange {
+                allowed: &["none", "inherit", "<模板 id：小写字母 数字 下划线>"],
+                got: v.to_string(),
+            });
+        }
         Ok(())
     } else {
         Err(ValidateError::TypeMismatch {
@@ -2521,28 +2544,44 @@ mod overridden_keys_tests {
             })
         );
         assert_eq!(
-            comment_dyn_key("ui.comment.assign.mode.mix:a.b.default_horizontal"),
+            comment_dyn_key("ui.comment.assign.mode.mix:quick_mix.default_horizontal"),
             Some(K::Cell {
                 scope: "mode",
-                name: Some("mix:a.b"),
+                name: Some("mix:quick_mix"),
                 cell: "default_horizontal"
             })
         );
         assert_eq!(
-            comment_dyn_key("ui.comment.template.my.tpl"),
-            Some(K::Template { id: "my.tpl" })
+            comment_dyn_key("ui.comment.template.my_tpl"),
+            Some(K::Template { id: "my_tpl" })
         );
         for bad in [
             "ui.comment.assign.global.nope",
             "ui.comment.assign.type.default_vertical",
             "ui.comment.assign.other.x.default_vertical",
             "ui.comment.template.",
+            "ui.comment.template.my.tpl",
+            "ui.comment.template.My",
+            "ui.comment.template.none",
+            "ui.comment.assign.mode.a.b.default_vertical",
         ] {
             assert_eq!(comment_dyn_key(bad), None, "{bad}");
         }
-        assert!(is_known_key(
+        assert!(is_addressable_key(
             "ui.comment.assign.type.pinyin.default_vertical"
         ));
+        assert!(!is_known_key(
+            "ui.comment.assign.type.pinyin.default_vertical"
+        ));
+        // 值形状：模板 id / none / inherit / 空串可，其余拒。
+        let v = |x: &str| {
+            validate(
+                "ui.comment.assign.global.default_vertical",
+                &toml::Value::from(x),
+            )
+        };
+        assert!(v("").is_ok() && v("none").is_ok() && v("my_tpl").is_ok());
+        assert!(v("My Tpl").is_err());
     }
 
     #[test]

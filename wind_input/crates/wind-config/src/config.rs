@@ -10559,18 +10559,17 @@ impl Config {
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
         // 注释分配的单格 / 单个模板：按名字寻址，不走静态注册表（见 `CommentDynKey`）。
+        // 通知必须发**真实存在的路径**（分配的范围表 / 模板数组）——设置端镜像直接按路径写入，
+        // 虚拟键会在里面建出游离子树，之后被它整键写回覆盖。
         let joined = path.join(".");
+        let mut dyn_notify: Option<(Vec<String>, toml::Value)> = None;
         if let Some(dynk) = crate::config_schema::comment_dyn_key(&joined) {
-            let text = value.as_str().unwrap_or_default().to_string();
+            let Some(text) = value.as_str() else {
+                anyhow::bail!("{joined} 的值须为字符串");
+            };
             if let toml::Value::Table(t) = &mut root {
-                Self::apply_comment_dyn_key(t, dynk, &text);
+                dyn_notify = Some(Self::apply_comment_dyn_key(t, dynk, text)?);
             }
-            let out = toml::to_string_pretty(&root)?;
-            let tmp = file.with_extension("toml.tmp");
-            std::fs::write(&tmp, out)?;
-            std::fs::rename(&tmp, &file)?;
-            crate::change_hook::notify_changed(path, &value_for_hook);
-            return Ok(());
         }
         // 出厂默认取不到时 `is_default` 恒 false → 退化为「照常写入」的旧行为（安全降级）。
         // `is_known_key` 与 `prune_redundant` 同一道保险：未登记键（废弃键 / Map 子路径）不收口。
@@ -10579,7 +10578,9 @@ impl Config {
                 .as_ref()
                 .and_then(|p| get_nested(p, path))
                 .is_some_and(|d| *d == value);
-        if let toml::Value::Table(t) = &mut root {
+        if let toml::Value::Table(t) = &mut root
+            && dyn_notify.is_none()
+        {
             if is_default {
                 remove_nested(t, path);
             } else {
@@ -10597,34 +10598,60 @@ impl Config {
         // 落盘成功后通知订阅方（设置界面等）。放在 rename 之后：失败路径提前 `?`
         // 返回，不会误报。传出的是入参值——键被剪枝删除时用户层虽无此键，生效值
         // 仍是它（见上方剪枝说明），对订阅方语义一致。
-        crate::change_hook::notify_changed(path, &value_for_hook);
+        match &dyn_notify {
+            Some((p, v)) => {
+                let p: Vec<&str> = p.iter().map(String::as_str).collect();
+                crate::change_hook::notify_changed(&p, v)
+            }
+            None => crate::change_hook::notify_changed(path, &value_for_hook),
+        }
         Ok(())
     }
 
     /// 把一个 [`CommentDynKey`](crate::config_schema::CommentDynKey) 写进用户层表；
     /// 空串＝删除（格回到下一层 / 删掉该用户模板）。
+    ///
+    /// 返回落盘后**真实存在的**通知路径与该路径上的值。途经的值类型不对（`templates` 不是数组、
+    /// 中间层不是表）时拒写：那是用户手改坏的内容，静默替换等于无备份销毁。
     fn apply_comment_dyn_key(
         root: &mut toml::Table,
         key: crate::config_schema::CommentDynKey<'_>,
         text: &str,
-    ) {
+    ) -> anyhow::Result<(Vec<String>, toml::Value)> {
         use crate::config_schema::CommentDynKey;
         match key {
             CommentDynKey::Cell { scope, name, cell } => {
                 let mut path = vec!["ui", "comment", "assign", scope];
                 path.extend(name);
                 path.push(cell);
+                // 逐级核对：已存在的途经项必须是表。
+                let mut cur = Some(&*root);
+                for (i, k) in path[..path.len() - 1].iter().enumerate() {
+                    cur = match cur.and_then(|t| t.get(*k)) {
+                        Some(toml::Value::Table(t)) => Some(t),
+                        Some(_) => {
+                            anyhow::bail!("用户配置里 [{}] 不是表，拒绝覆盖", path[..=i].join("."))
+                        }
+                        None => None,
+                    };
+                }
                 if text.is_empty() {
                     remove_nested(root, &path);
                 } else {
                     set_nested(root, &path, toml::Value::String(text.to_string()));
                 }
+                let scope_path = vec!["ui", "comment", "assign", scope];
+                let v = get_nested(&toml::Value::Table(root.clone()), &scope_path)
+                    .cloned()
+                    .unwrap_or_else(|| toml::Value::Table(Default::default()));
+                Ok((scope_path.iter().map(|s| s.to_string()).collect(), v))
             }
             CommentDynKey::Template { id } => {
                 let path = ["ui", "comment", "templates"];
                 let mut list = match get_nested(&toml::Value::Table(root.clone()), &path) {
                     Some(toml::Value::Array(a)) => a.clone(),
-                    _ => Vec::new(),
+                    None => Vec::new(),
+                    Some(_) => anyhow::bail!("用户配置里 ui.comment.templates 不是数组，拒绝覆盖"),
                 };
                 let pos = list
                     .iter()
@@ -10639,19 +10666,30 @@ impl Config {
                         }
                     }
                     (None, false) => {
+                        // 与内置同 id 的用户模板会整条替换内置，名称 / 说明沿用内置的，免得被冲成 id。
+                        let sys = crate::comment_lib::SystemComments::embedded();
+                        let builtin = sys.templates.iter().find(|t| t.id == id);
                         let mut t = toml::Table::new();
                         t.insert("id".into(), toml::Value::String(id.into()));
-                        t.insert("name".into(), toml::Value::String(id.into()));
+                        t.insert(
+                            "name".into(),
+                            toml::Value::String(builtin.map_or(id, |b| b.name.as_str()).into()),
+                        );
                         t.insert("text".into(), toml::Value::String(text.into()));
+                        if let Some(b) = builtin.filter(|b| !b.desc.is_empty()) {
+                            t.insert("desc".into(), toml::Value::String(b.desc.clone()));
+                        }
                         list.push(toml::Value::Table(t));
                     }
                     (None, true) => {}
                 }
+                let v = toml::Value::Array(list.clone());
                 if list.is_empty() {
                     remove_nested(root, &path);
                 } else {
                     set_nested(root, &path, toml::Value::Array(list));
                 }
+                Ok((path.iter().map(|s| s.to_string()).collect(), v))
             }
         }
     }
@@ -12656,7 +12694,7 @@ active = "x"
         use crate::config_schema::comment_dyn_key;
         let mut root = toml::Table::new();
         let mut put = |k: &str, v: &str| {
-            Config::apply_comment_dyn_key(&mut root, comment_dyn_key(k).unwrap(), v)
+            Config::apply_comment_dyn_key(&mut root, comment_dyn_key(k).unwrap(), v).unwrap()
         };
         put("ui.comment.assign.mode.url.default_vertical", "t1");
         put("ui.comment.assign.global.detail_horizontal", "none");
@@ -12674,13 +12712,64 @@ active = "x"
         assert_eq!(c.templates.len(), 2);
         assert_eq!(c.templates[0].text, "${dict}");
         let mut put = |k: &str, v: &str| {
-            Config::apply_comment_dyn_key(&mut root, comment_dyn_key(k).unwrap(), v)
+            Config::apply_comment_dyn_key(&mut root, comment_dyn_key(k).unwrap(), v).unwrap()
         };
         put("ui.comment.assign.mode.url.default_vertical", "");
         put("ui.comment.assign.global.detail_horizontal", "");
         put("ui.comment.template.t1", "");
         put("ui.comment.template.t2", "");
         assert!(root.is_empty(), "全删后应回收空段: {root:?}");
+    }
+
+    #[test]
+    fn comment_dyn_key_keeps_builtin_name_reports_real_path_and_refuses_bad_shapes() {
+        use crate::config_schema::comment_dyn_key;
+        let sys = crate::comment_lib::SystemComments::embedded();
+        let b = sys.templates.first().expect("内置模板非空").clone();
+        let mut root = toml::Table::new();
+        let tkey = format!("ui.comment.template.{}", b.id);
+        let (p, v) =
+            Config::apply_comment_dyn_key(&mut root, comment_dyn_key(&tkey).unwrap(), "${code}")
+                .unwrap();
+        assert_eq!(p, ["ui", "comment", "templates"]);
+        assert_eq!(v[0]["name"].as_str(), Some(b.name.as_str()), "名称沿用内置");
+        let (p, v) = Config::apply_comment_dyn_key(
+            &mut root,
+            comment_dyn_key("ui.comment.assign.type.pinyin.default_vertical").unwrap(),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(p, ["ui", "comment", "assign", "type"]);
+        assert_eq!(v["pinyin"]["default_vertical"].as_str(), Some("x"));
+        // 坏形状：拒写且不动原值。
+        let mut bad = toml::Table::new();
+        bad.insert(
+            "ui".into(),
+            toml::Value::Table({
+                let mut c = toml::Table::new();
+                c.insert(
+                    "comment".into(),
+                    toml::Value::Table({
+                        let mut t = toml::Table::new();
+                        t.insert("templates".into(), toml::Value::String("x".into()));
+                        t.insert("assign".into(), toml::Value::String("y".into()));
+                        t
+                    }),
+                );
+                c
+            }),
+        );
+        let before = bad.clone();
+        for k in [
+            "ui.comment.template.t1",
+            "ui.comment.assign.global.default_vertical",
+        ] {
+            assert!(
+                Config::apply_comment_dyn_key(&mut bad, comment_dyn_key(k).unwrap(), "z").is_err(),
+                "{k}"
+            );
+        }
+        assert_eq!(bad, before);
     }
 
     #[test]

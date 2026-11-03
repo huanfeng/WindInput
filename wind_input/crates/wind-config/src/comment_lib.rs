@@ -379,6 +379,11 @@ fn adopt(c: Option<&Cell>) -> Option<&Cell> {
     }
 }
 
+/// 用户模板 id：合 `[a-z0-9_]+` 且不是保留字。
+pub(crate) fn valid_user_template_id(id: &str) -> bool {
+    valid_template_id(id) && !matches!(id, "none" | "inherit")
+}
+
 fn valid_template_id(id: &str) -> bool {
     !id.is_empty()
         && id

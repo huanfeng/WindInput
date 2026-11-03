@@ -744,8 +744,8 @@ impl CoordConfig {
     /// 把用户真实的设置改成「出厂值的反面」——单键版的整表抹除，同样静默、同样不可逆。
     /// 纯读（`get`）不设这道闸：显示一个出厂值不造成任何损失。
     fn load_value(key: &str, require_trustworthy: bool) -> anyhow::Result<String> {
-        use wind_config::config_schema::is_known_key;
-        if !is_known_key(key) {
+        use wind_config::config_schema::is_addressable_key;
+        if !is_addressable_key(key) {
             anyhow::bail!("未登记的配置键: {key}");
         }
         let cfg = wind_config::Config::load(wind_config::Config::data_dir().as_deref())?;
@@ -779,8 +779,8 @@ impl ConfigService for CoordConfig {
     }
 
     fn toggle(&self, key: &str) -> anyhow::Result<String> {
-        use wind_config::config_schema::{FieldType, field};
-        let fld = field(key).ok_or_else(|| anyhow::anyhow!("未登记的配置键: {key}"))?;
+        use wind_config::config_schema::{FieldType, addressable_field};
+        let fld = addressable_field(key).ok_or_else(|| anyhow::anyhow!("未登记的配置键: {key}"))?;
         // 取当前值即取写回的种子，故必须过降级闸。
         let cur = Self::load_value(key, true)?;
         let next: String = match fld.ty {
