@@ -563,19 +563,10 @@ FROST_CELLS="exthot idiom place history name name2 sport geography animal comput
 # ⚠ 与 dev.ps1 的 $FrostOthersExclude、mac/dev.sh 的同名变量同步。
 FROST_OTHERS_EXCLUDE="著名表演艺术家"
 
-# 按分组标题过滤 rime-frost 的 OpenCC 杂项表：$1 源，$2 目标。标题行形如
-# `----------偏旁部首<Tab>----------`（OpenCC 无注释语法，rime-frost 借假词条写标题），
-# 被剔除的组从其标题到下一个标题整段去掉；其余行原样保留（运行时按分组取，见 emojidict::select_sections）。
+# 按分组标题过滤 rime-frost 的 OpenCC 杂项表：$1 源，$2 目标。
+# 规则与标题行的形态见 scripts/lib/strip-frost-sections.awk（Nix 打包共用同一份）。
 strip_frost_sections() {
-    awk -v excl="$FROST_OTHERS_EXCLUDE" '
-        BEGIN { n = split(excl, ex, " ") }
-        /^----------[^\t]*\t-+[ \t]*$/ {
-            name = $0; sub(/^-+/, "", name); sub(/\t.*$/, "", name)
-            skip = 0
-            for (i = 1; i <= n; i++) if (name == ex[i]) skip = 1
-        }
-        !skip { print }
-    ' "$1" > "$2"
+    awk -v excl="$FROST_OTHERS_EXCLUDE" -f "$SCRIPT_DIR/lib/strip-frost-sections.awk" "$1" > "$2"
 }
 
 # 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
@@ -586,25 +577,13 @@ strip_frost_sections() {
 #   主库的一部分、关不掉。随包的组装在 ext/ 而非 cn_dicts_cell/，按下面的存在判据本也会裁，
 #   这里单列是为了标对来源（[扩展词库] 而非 [未随包]）。
 # 其余子表的判据是「输出目录里有没有这个文件」而不是写死名单：以后多发几张不用回来改这里。
-# ⚠ dev.ps1 的 Remove-UnshippedImports、mac/dev.sh 的 strip_unshipped_imports 是同一件事，改一边要同步另外两边。
+# 实现在 scripts/lib/strip-unshipped-imports.awk（Nix 打包共用同一份）；dev.ps1 的
+# Remove-UnshippedImports 与 mac/dev.sh 的 strip_unshipped_imports 仍是各自实现，改规则要同步。
 strip_unshipped_imports() {
     local main="$1" dir
     dir="$(dirname "$main")"
-    awk -v dir="$dir" '
-        /^\.\.\.[[:space:]]*$/ { done = 1 }
-        !done && /^import_tables:/ { inblk = 1; print; next }
-        !done && inblk && /^[^[:space:]#-]/ { inblk = 0 }
-        !done && inblk && match($0, /^[[:space:]]*-[[:space:]]*[^[:space:]#]+/) {
-            entry = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*-[[:space:]]*/, "", entry)
-            if (entry ~ /^cn_dicts_cell\//) {
-                print "  # [扩展词库] " substr($0, RSTART + RLENGTH - length(entry)); next
-            }
-            if (system("test -f \"" dir "/" entry ".dict.yaml\"") != 0) {
-                print "  # [未随包] " substr($0, RSTART + RLENGTH - length(entry)); next
-            }
-        }
-        { print }
-    ' "$main" > "$main.tmp" && mv -f "$main.tmp" "$main"
+    awk -v dir="$dir" -f "$SCRIPT_DIR/lib/strip-unshipped-imports.awk" \
+        "$main" > "$main.tmp" && mv -f "$main.tmp" "$main"
 }
 
 # 从 data/（源）+ .cache/（下载/生成）组装完整运行时数据到 $outdir/data/
