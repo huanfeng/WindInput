@@ -36,6 +36,17 @@ Fcitx5 的 `InputContext`。引擎/词库/候选逻辑全在服务里，这里**
 
 `src/core` 与 `include` 不依赖 Fcitx5，能单独编、单独测——这条边界别破。
 
+打包用的两个 CMake cache 选项：`WIND_SERVICE_PATH` / `WIND_SETTING_PATH`（空 = 源码内置的
+`/usr/lib/windinput/...`），打非 `/usr` 前缀的包（Nix 等）时注入 store 路径。编译定义是
+`PUBLIC`。`settings_launcher_test` 不跟宏逐字比（`argv[0]` 与宏同源，比宏即恒真），断的是
+「绝对路径 + 末段 `wind_setting`」；宏未定义（deb / 源码构建）时才钉住
+`/usr/lib/windinput/wind_setting` 字面量——改源码里的默认值要同步改那条断言。
+
+addon 的版本写进 `share/fcitx5/addon/windinput.conf` 的 `Version=`，来源是第三个 cache 选项
+`WIND_ADDON_VERSION`（空 = 工程版本 `project(... VERSION ...)`；两条打包链都注入
+`docs/VERSION`：`wind_linux/nix/addon.nix` 与 `scripts/linux/build-deb.sh` 各传一次）。改它不用动源码里
+的默认值——不传就落回 `0.1.0`，fcitx5 输入法列表里显示的版本与产品版本脱钩。
+
 ## 构建 / 测试
 
 本机无 root 时先搭用户前缀 SDK（幂等，只写 `~/.local/opt/fcitx5-sdk`，不碰 `/usr`）：
@@ -51,6 +62,21 @@ cmake -S wind_linux -B wind_linux/build/cmake -G Ninja && cmake --build wind_lin
 ctest --test-dir wind_linux/build/cmake         # 同一批单测经 CMake 跑
 scripts/linux/e2e.sh                            # 端到端：真服务 + 真 fcitx5 + DBus 客户端打字
 ```
+
+addon 目标的依赖（`WIND_BUILD_ADDON=ON`，默认）：Fcitx5Core / Fcitx5Utils 头文件、
+`xcb` / `xcb-shape` / `xcb-randr`；有 `wayland-client` + `wayland-scanner` 时再编 Wayland
+候选窗，有 `gio-2.0` 时编 GNOME 光标扩展客户端。只编纯逻辑库与单测用
+`-DWIND_BUILD_ADDON=OFF`，不需要任何 Fcitx5 头文件。
+
+单测只读源码树（`WIND_REPO_DIR` / `WIND_PROTOCOL_RS` 编译定义），写入一律落在 `TMPDIR` 下的
+临时目录，不读 `build_dev/`——因此能在只读源码树（Nix sandbox）里直接跑（`nix build` 的
+`checkPhase` 就是这么用的）。
+
+设置程序（独立仓 `../wind-setting`）同样能原生 Linux 构建：它依赖的 `windui` 支持
+Windows / macOS / Linux 三个平台（`windui` 的 `platform/mod.rs` 只对其它目标
+`compile_error!`；Linux 后端默认 X11，Wayland 桌面经 XWayland，原生 Wayland 后端要
+`WINDUI_BACKEND=wayland` 显式启用），`wind_linux/nix/setting.nix` 已实测把它编成 Nix 包
+（`packages.wind-setting`，见 `wind_linux/nix/AGENTS.md`）。
 
 `e2e.sh` 的做法（改它之前先读脚本头注释）：`dbus-run-session` 起私有会话总线；服务二进制拷进
 临时目录、`data` 下逐项软链到 `build_dev/data`（`system.phrases.toml` 例外：取仓库 `data/` 那份再追加

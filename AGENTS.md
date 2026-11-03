@@ -11,6 +11,7 @@
 | `wind_input/` | Rust 核心服务（cargo workspace：19 个 crate + `apps/service`） | 本文档 + crate 级 AGENTS.md |
 | `wind_tsf/` | C++17 TSF DLL：Windows 输入法接口层，经 Named Pipe 与 Rust 服务通信 | [AGENTS.md](wind_tsf/AGENTS.md) |
 | `wind_macos/` | macOS IMKit `.app`（与 `wind_tsf/` 对位，开发中） | [AGENTS.md](wind_macos/AGENTS.md) |
+| `flake.nix` + `wind_linux/nix/` | Linux 端 Nix 打包（服务 + Fcitx5 addon + 设置程序 + 词库数据；addon 由 `wind_linux/` 构建） | [AGENTS.md](wind_linux/nix/AGENTS.md) |
 | `../wind-setting` | 设置 UI（**独立仓库**，经 JSON-RPC 与核心通信）；改设置界面去那边 | — |
 | `../wind-portable` | 绿色版启动器（独立仓库，不存在时构建脚本自动跳过） | — |
 | `../WindInput-Go` | Go 旧版源码（只读参考；docs 旧文档里的 `../WindInput` 指的是它） | — |
@@ -347,9 +348,9 @@ $env:WIND_REMOTE_SLOT = "off"    # 关掉槽位，与主树共用目录（串台
 
 #### 邻仓 wind-setting：交叉 + wine（`sk` / `st` / `sg`）
 
-`wind-setting` 编不出**原生 Linux** 产物：它依赖 `windui`，而 `windui` 对非 Windows/macOS 目标
-直接 `compile_error!`（rfd 的后端 feature 只是最先爆的那个，修好它照样过不去）。但**交叉到
-Windows 目标一切正常**，测试二进制交给 wine 执行即可：
+`wind-setting` 依赖的 `windui` 已有原生 Linux 后端（默认 X11，Wayland 桌面经 XWayland；Nix 包见
+[wind_linux/AGENTS.md](wind_linux/AGENTS.md)），可直接 `cargo build`；下面这套 cargo-xwin + wine
+用于在 Linux 上**构建、测试 Windows 产物**：
 
 | 命令 | 做什么 | 要 wine |
 |---|---|---|
