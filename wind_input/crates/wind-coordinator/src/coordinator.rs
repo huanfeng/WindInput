@@ -1653,6 +1653,12 @@ pub struct Coordinator {
     /// `State::menu_opened_at`：漏写会让守卫读到上一次的时间戳，于是刚弹出的面板
     /// 被一条迟到的焦点事件当场关掉。
     pub(crate) softkeyboard_opened_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// 软键盘开着时「它在服务哪个宿主进程」，0 = 未知（开启时尚无活动宿主）。
+    ///
+    /// 关闭判据按**宿主进程**粒度而不是按焦点事件粒度：同宿主内的 DocMgr 抖动、退出编辑、
+    /// 换文档都不算「用户离开」（Excel 退出单元格再切到下一格就是这样），只有换了宿主才算。
+    /// 与开启成对写入，见 `open_softkeyboard`。
+    pub(crate) softkeyboard_host_pid: std::sync::atomic::AtomicU32,
     /// 快捷输入格式表的**用户调整**（右键调序 / 停用）运行时镜像，键为格式类别。
     ///
     /// 真相在用户数据目录的 `quick_format.toml`，这里是读缓存：候选生成在热路径上
@@ -3211,6 +3217,7 @@ impl Coordinator {
             last_pushed_hotkey_session: std::sync::atomic::AtomicBool::new(false),
             hotkey_session_force_push: std::sync::atomic::AtomicBool::new(false),
             softkeyboard_opened_at: std::sync::Mutex::new(None),
+            softkeyboard_host_pid: std::sync::atomic::AtomicU32::new(0),
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
             // 而 store 在本结构体构造之后才可用）。headless 无 store 时保持空 = 出厂顺序。
             quick_adjust: std::sync::RwLock::new(std::collections::HashMap::new()),

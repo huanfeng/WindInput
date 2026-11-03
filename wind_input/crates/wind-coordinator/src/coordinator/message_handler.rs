@@ -2706,7 +2706,11 @@ impl MessageHandler for Coordinator {
         // （每次 DocMgr 获焦都发一条，Excel 同一 DocMgr 6ms 抖动、VSCode 一次切换 5 次都会
         // 各发一条），全靠 menu_close_on_focus_change 的守卫期挡住刚弹出的菜单。
         self.menu_close_on_focus_change("focus_gained");
-        self.close_softkeyboard_on_focus_change("focus_gained");
+        self.close_softkeyboard_on_focus_change(
+            crate::handle_softkeyboard::SoftKbFocusSignal::Gained {
+                pid: (data.client_token >> 32) as u32,
+            },
+        );
         // 解析焦点进程的 caret 兼容态（微信 caret_use_top、per-app caret_offset_* 等）。
         // ★★ 必须在下面的 `apply_focus_caret` **之前**跑：那一步会读 `active_compat` 做
         // `caret_use_top`/`caret_offset_*` 变换，若仍在这之后调用，本次焦点事件带来的第一份
@@ -2977,7 +2981,9 @@ impl MessageHandler for Coordinator {
         // 关菜单**先于** stale 判定与 reason 分流：菜单的生命周期与输入态无关，
         // 陈旧失焦/噪声层失焦同样证明用户动了别处。详见 menu_close_on_focus_change。
         self.menu_close_on_focus_change("focus_lost");
-        self.close_softkeyboard_on_focus_change("focus_lost");
+        self.close_softkeyboard_on_focus_change(
+            crate::handle_softkeyboard::SoftKbFocusSignal::Lost(reason),
+        );
         self.reset_comment_alt();
         if self.is_stale_focus_event(client_token, "handle_focus_lost") {
             return;
@@ -3270,7 +3276,9 @@ impl MessageHandler for Coordinator {
         // 同 handle_focus_lost：关菜单先于 stale 判定。下面清 menu_open 的那段仍保留
         // （非陈旧路径的完整清理），两处幂等叠加无副作用。
         self.menu_close_on_focus_change("ime_deactivated");
-        self.close_softkeyboard_on_focus_change("ime_deactivated");
+        self.close_softkeyboard_on_focus_change(
+            crate::handle_softkeyboard::SoftKbFocusSignal::ImeDeactivated,
+        );
         self.reset_comment_alt();
         // 与 focus_lost 同源的乱序风险：切走本输入法时旧宿主的 IME_DEACTIVATED 同样可能
         // 晚于新宿主的 focus_gained 到达（两者都是 fire-and-forget 异步写）。
