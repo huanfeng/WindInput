@@ -1661,7 +1661,15 @@ pub trait WebDataRpc: WebDataHost {
         let schemas: Vec<Value> = o
             .schemas
             .iter()
-            .map(|(id, name)| json!({ "id": id, "name": name }))
+            .map(|(id, name)| {
+                // role（空 / "aux"）：设置页据此把辅助码专用方案排到普通方案前面。
+                let role = self
+                    .engine_mgr()
+                    .schema_merged(id)
+                    .map(|s| s.schema.role.clone())
+                    .unwrap_or_default();
+                json!({ "id": id, "name": name, "role": role })
+            })
             .collect();
         let files: Vec<Value> = o
             .files
