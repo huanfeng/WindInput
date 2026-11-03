@@ -793,6 +793,8 @@ pub trait WebDataRpc: WebDataHost {
                     "builtin": !self.engine_mgr().is_user_schema(id),
                     // 隐藏方案（英文/快符）：设置页据此决定该行显示什么、能配什么。
                     "hidden": self.engine_mgr().schema_is_hidden(id),
+                    // 方案角色（空 / "aux"）：aux = 辅助码专用码表方案，默认不进方案管理常规区。
+                    "role": info.map(|i| i.role.clone()).unwrap_or_default(),
                     // 是否为 **overlay 方案**（方案文件带 `[overlay]` 段）：可由引导键/直达
                     // 热键临时叠加进入（快符/生僻字那类）。设置页据此枚举 `special:<id>`
                     // 动词的可选项，并决定要不要显示 overlay 那一节配置。

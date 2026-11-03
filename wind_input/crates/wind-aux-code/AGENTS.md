@@ -81,6 +81,8 @@
    同一次解析还产出「笔画」码表方案的词库 `schemas/stroke/stroke.dict.yaml`（`--schema-out`），
    全拼出厂引用的是这个方案（`schema:stroke`）而非 `stroke.txt`；`stroke.txt` 照旧生成，
    供 override 里写死旧路径的用户。两份的字与码必须逐一相同，别只改其中一条输出路径。
+- **例外：`shouyou*.txt`（首右形码）随仓库入库**（作者许可，见 `NOTICE.md`），`.gitignore` 对
+   `data/schemas/aux_code/` 用 `*` + `!shouyou*.txt` 放行；`gen_aux_code` 不碰它们。
 - **名称只从第 1 行解析**（`# name: 笔画` / `#name: 笔画`）：`parse_str` 填
    `AuxCodeTable.name`，空则 `load_from_file` 回落文件主干名；`merge` 取首个非空
    （先出现 = 高优）。version/source 一律当注释，不解析。

@@ -38,7 +38,9 @@ data/schemas/wubi86/*.dict.yaml
 # 辅助码表为 gen_aux_code 生成物, 同上不入库
 # (源在 .cache/aux-code/, 由 scripts/dev.* 的 gen-data 下载并生成)
 # ⚠️ 笔画表上游 rime-stroke 是 LGPL-3.0, 按 NOTICE.md 的政策不得入库
-data/schemas/aux_code/
+data/schemas/aux_code/*
+# 首右形码表由使用者提供、已转成 `字=码`，随仓库分发（来源见 NOTICE.md），不走 gen_aux_code
+!data/schemas/aux_code/shouyou*.txt
 
 # emoji 扩展表由 gen-data 从 .cache/rime-emoji/ 原样复制, 不入库
 # ⚠️ 上游 rime-emoji 是 LGPL-3.0, 同上不得入库。与 aux_code 不同的是它**不做**构建期

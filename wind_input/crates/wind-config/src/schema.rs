@@ -195,6 +195,13 @@ pub struct SchemaInfo {
     /// 用于内部 / 被引用的词库配置方案（如 english——仅供临时英文 / 融合英文候选懒加载）。
     #[serde(default)]
     pub hidden: bool,
+    /// 方案角色。空 = 普通输入方案；`"aux"` = 主要充当辅助码来源的码表方案（如笔画）。
+    ///
+    /// aux 方案**仍是可启用的输入方案**（与 `hidden` 不同：hidden 是没有启用概念的
+    /// 特殊方案），只是设置页默认不把它列进方案管理，勾上「显示特殊方案」或已启用时才出现。
+    /// 辅助码来源选择器不看此字段，照旧可选。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
 }
 
 /// 图标主字的**显示宽度**上限（CJK 记 2、其余记 1）——即「一个汉字」或「两个拉丁字符」。
