@@ -487,8 +487,12 @@ Windows/macOS 同口径）。包内 `Version` 把预发布后缀的 `-` 换成 `
 
 **设置程序是私有仓**：没配 `WIND_REPOS_TOKEN`（fork）时整个 Linux 构建跳过并告警，不出缺设置入口的残缺包。
 
-**未做**：rpm（Fedora/openSUSE）与 Arch（PKGBUILD）需各自发行版实测；apt 仓库（签名密钥与托管）；客户端在线升级对 Linux 的消费
-（`latest-linux.json` 已就位，设置程序侧尚无读取方，升级暂走 apt/手动下载）；Wayland。
+**未做**：rpm（Fedora/openSUSE）与 Arch（PKGBUILD）需各自发行版实测；apt 仓库（签名密钥与托管）；Wayland。
+
+**在线升级**：设置程序读 `latest-linux.json`，下载到 `~/.cache/windinput/update/`（0700，避免 `/tmp` 里被别的用户换包）并校验 sha256，
+安装时 `pkexec env DEBIAN_FRONTEND=noninteractive apt-get install -y <deb>`（polkit 授权，apt 解依赖）；无 pkexec 退到
+`xdg-open` 交给桌面软件安装器；都没有则给出 `sudo apt install` 手动命令。不关设置窗口（postinst 只结束服务）；
+装完提示重启 Fcitx5 生效。
 
 **已知风险（审查结论，未处理）**：
 - 给**已发布**的 Release 补挂 `.deb` 不会触发 `release: published`，R2 要靠手动 dispatch `release-published.yml`；
