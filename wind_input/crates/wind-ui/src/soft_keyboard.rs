@@ -1101,14 +1101,13 @@ impl SoftKeyboard {
                             (1.0 * s).max(1.0),
                         )
                         .tag(SOFT_TAG_PIN)
-                        .child(
-                            // 图标两态各一张 SVG（未钉住=描边斜放，已钉住=实心竖直），按文字色 tint；
-                            // 不用字符：emoji 在各平台字体里形状、彩色与否都不一致，且看不出开关。
-                            View::container(Layout::Row)
-                                .fill_cross()
-                                .grow()
-                                .bg_image(pin_icon(self.pinned, pin_fg, PIN_ICON_DP * s)),
-                        ),
+                        // 图标两态各一张 SVG（未钉住=描边斜放，已钉住=实心竖直），按文字色 tint；
+                        // 不用字符：emoji 在各平台字体里形状、彩色与否都不一致，且看不出开关。
+                        //
+                        // ★ 图直接挂在这个**有固定宽高**的按钮节点上，不要套一层无内容的子容器：
+                        // 定位图按 host 节点盒居中并裁到节点盒内，空容器的高度会塌成 0，
+                        // 结果只剩顶上一条线（实测）。
+                        .bg_image(pin_icon(self.pinned, pin_fg, PIN_ICON_DP * s)),
                 )
                 .child(View::spacer().grow())
                 .child(
@@ -2954,6 +2953,41 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name}.svg 解析失败"));
             let inked = pm.pixels().iter().filter(|p| p.alpha() > 0).count();
             assert!(inked >= 15, "{name} 在 13px 下只有 {inked} 个像素有墨");
+        }
+    }
+
+    /// 钉住按钮真正画出图：按 `build` 里同样的节点形状（定宽定高 + 圆角 + 负 margin）绘制，
+    /// 中心一带必须有墨。图曾挂在一个空子容器上，高度塌成 0，被裁得只剩顶上一条线——
+    /// 而上一条测试只验 SVG 能栅格化，验不出这个。
+    #[test]
+    fn pin_button_paints_its_icon() {
+        use crate::text::dwrite::TextRenderer;
+        use crate::view::{Align, Edges, Layout, View};
+        let tr = TextRenderer::new("test", 20.0).unwrap();
+        for pinned in [false, true] {
+            let mut v = View::container(Layout::Row)
+                .fixed_w(60.0)
+                .fixed_h(40.0)
+                .cross(Align::Center)
+                .child(
+                    View::container(Layout::Row)
+                        .fixed_w(32.0)
+                        .fixed_h(24.0)
+                        .margin(Edges {
+                            t: -4.0,
+                            l: -4.0,
+                            ..Default::default()
+                        })
+                        .radius(12.0)
+                        .bg_image(pin_icon(pinned, [0, 0, 0, 255], 13.0)),
+                );
+            v.layout(0.0, 0.0, &tr);
+            let (w, h) = (60usize, 40usize);
+            let mut buf = vec![0u8; w * h * 4];
+            v.paint(&mut buf, w as u32, h as u32, &tr);
+            let inked = buf.chunks(4).filter(|p| p[3] > 0).count();
+            // 13×13 的图钉至少几十个像素；塌成一条线只有十几个。
+            assert!(inked >= 30, "pinned={pinned}: 只画出 {inked} 个像素");
         }
     }
 
