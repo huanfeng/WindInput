@@ -4530,7 +4530,7 @@ impl Engine for PinyinEngine {
             }
             // 最末一档：首声母对应的单字（微软拼音的「整串 → 词组 → 单字」）。
             // 只对纯简拼形态做：`buxzd` 这类首个音节已打全的串，首字母不是用户的意图。
-            if stroke_is_plain_abbrev && !self.first_letters_start_a_syllable(&abbr_query) {
+            if stroke_is_plain_abbrev && !self.first_letters_start_a_syllable(abbr_query) {
                 self.recall_first_initial_chars(
                     &abbr_query[..1],
                     max_candidates.clamp(30, MAX_COMPLETION_CANDIDATES),
