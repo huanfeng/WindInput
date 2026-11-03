@@ -1532,6 +1532,30 @@ pub trait WebDataRpc: WebDataHost {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("punctOverride".to_string(), punct_ov);
                 }
+                // 方案覆盖页要分清一个值来自方案文件还是用户层：只取「本方案行为」那三段
+                // （punct / candidate / phrases），把方案文件层与用户 override 层原样带上。
+                // 合并值（`v` 本身）看不出「用户显式写了一个等于默认的值」，也看不出来源。
+                let pick_behavior = |full: Value| -> Value {
+                    let mut o = serde_json::Map::new();
+                    for k in ["punct", "candidate", "phrases"] {
+                        if let Some(x) = full.get(k) {
+                            o.insert(k.to_string(), x.clone());
+                        }
+                    }
+                    Value::Object(o)
+                };
+                let base_layer = match self.engine_mgr().schema_base(id) {
+                    Some(b) => pick_behavior(serde_json::to_value(b)?),
+                    None => json!({}),
+                };
+                let user_layer = match self.engine_mgr().get_schema_override(id) {
+                    Some(t) => pick_behavior(serde_json::to_value(t)?),
+                    None => json!({}),
+                };
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("schemaBase".to_string(), base_layer);
+                    obj.insert("schemaUserOverride".to_string(), user_layer);
+                }
                 // 首码集里的符号键（键名形式）。给设置页判「按键功能表绑的这个键，是不是
                 // 同一方案的码元首码」——两者同层冲突，内核裁决是绑定优先，于是该符号
                 // 起头的编码在本方案静默失效（见 schema-key-actions.md §4.3）。
