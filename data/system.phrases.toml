@@ -543,7 +543,7 @@ weight = 2000
 #   `{dict.rev(clip(), format="双拼 ${shuangpin}")}`
 [[phrases]]
 code = 'cofc'
-text = '$CC(default(dict.rev(clip()), "剪贴板反查（需先复制文字）"), type(dict.rev(clip())))'
+text = '$CC(default(dict.rev(clip()), "剪贴板反查（需先复制一个字或词）"), type(dict.rev(clip())))'
 platform = 'desktop'
 weight = 2000
 

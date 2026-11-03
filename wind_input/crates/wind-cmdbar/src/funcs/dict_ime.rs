@@ -98,10 +98,13 @@ fn fn_dict_rev_named(
     let Some(n) = args.get(1) else {
         // 纯空白（只复制了个换行）：反查必然空，提前挡掉，免得 `${char}` 把空白
         // 回显成一条「有内容」的候选。
-        if args[0].trim().is_empty() {
+        // 前后空白去掉（从终端/编辑器复制一行常带尾换行，不去就查不到词条）；
+        // 去完仍含换行的是多行文本，不是一个词。长度上限由宿主侧把关。
+        let text = args[0].trim();
+        if text.is_empty() || text.contains(['\n', '\r']) {
             return Ok(String::new());
         }
-        return Ok(ctx.reverse_lookup(&args[0], format));
+        return Ok(ctx.reverse_lookup(text, format));
     };
     let n = parse_arg_int("dict.rev", n)?;
     if n < 1 {
@@ -406,6 +409,17 @@ mod tests {
         assert_eq!(out, format!("好|{DEFAULT_REV_FORMAT}"));
         let out = fn_dict_rev(&ctx, &["好吧".to_string(), "2".to_string()]).unwrap();
         assert_eq!(out, format!("吧|{DEFAULT_REV_FORMAT}"));
+    }
+
+    /// 整串模式：前后空白（尾换行）去掉再查；内部含换行是多行文本，不查。
+    #[test]
+    fn whole_text_trims_and_rejects_multiline() {
+        let ctx = rev_echo_ctx();
+        assert_eq!(
+            fn_dict_rev(&ctx, &[" 好吧\r\n".to_string()]).unwrap(),
+            format!("好吧|{DEFAULT_REV_FORMAT}")
+        );
+        assert_eq!(fn_dict_rev(&ctx, &["好\n吧".to_string()]).unwrap(), "");
     }
 
     /// 纯空白文本（只复制了个换行）在整串模式下直接空串，不回显出一条只有 `: ` 的候选。

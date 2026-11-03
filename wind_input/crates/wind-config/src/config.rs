@@ -5301,7 +5301,7 @@ pub struct RareCharConfig {
 /// 进入方式只由 `keys.key_actions` / 方案 `[key_actions]` / `z_key_action`（动词 `reverse`）
 /// 承载，出厂不绑任何键 ⇒ 默认不可用；**没有**总开关，与生僻字（[`RareCharConfig`]）同。
 /// 绑了键还要活跃方案有反查能力（码表 / 五笔拼音混输），门卫在协调器 `reverse_mode_available`。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReverseConfig {
     /// 反查模式期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
@@ -5311,6 +5311,25 @@ pub struct ReverseConfig {
     /// 出厂关。见 docs/design/codetable-reverse-mode.md §9。
     #[serde(default)]
     pub lookup_disabled_dicts: bool,
+    /// 命令栏整串反查（`dict.rev(clip())` 省略 n）接受的最大字数（按字符计，默认 16）。
+    /// 超过视为「不是一个词」，不查、返回空串，免得复制一大段文字时对全文算拼音/拆字。
+    /// 内部字段，设置页不开放。
+    #[serde(default = "default_clip_max_chars")]
+    pub clip_max_chars: usize,
+}
+
+fn default_clip_max_chars() -> usize {
+    16
+}
+
+impl Default for ReverseConfig {
+    fn default() -> Self {
+        Self {
+            candidate_layout: LayoutIntent::default(),
+            lookup_disabled_dicts: false,
+            clip_max_chars: default_clip_max_chars(),
+        }
+    }
 }
 
 /// 临时拼音配置（[input.temp_pinyin]）。码表方案下临时切到拼音反查。全局唯一。
@@ -14775,6 +14794,16 @@ mod status_position_tests {
             BoundAction::None,
             "未知动词仍回落 None"
         );
+    }
+
+    /// 整串反查字数上限：缺省 16，可被配置覆盖；其余字段缺省不受影响。
+    #[test]
+    fn reverse_clip_max_chars_defaults_to_16_and_parses() {
+        assert_eq!(Config::default().input.reverse.clip_max_chars, 16);
+        let t: ReverseConfig = toml::from_str("lookup_disabled_dicts = true\n").unwrap();
+        assert_eq!(t.clip_max_chars, 16, "缺省段落也是 16，不是 usize 零值");
+        let t: ReverseConfig = toml::from_str("clip_max_chars = 8\n").unwrap();
+        assert_eq!(t.clip_max_chars, 8);
     }
 
     /// 含未启用扩展词库是反查模式专属的全局开关，出厂关。

@@ -65,7 +65,7 @@ fn factory_cofc_parses_and_renders_clipboard_lookup() {
 /// 前缀列举走廉价的 `NavCtx`（不读剪贴板、不查词库，否则要为每条候选摊一次开销到
 /// 按键线程），故 `dict.rev` 在那里恒为空 → `default` 回落到提示语。
 ///
-/// 这**恰好**让提示语兼作命令名：`co` 列表里这一条读作「剪贴板反查（需先复制文字）」，
+/// 这**恰好**让提示语兼作命令名：`co` 列表里这一条读作「剪贴板反查（需先复制一个字或词）」，
 /// 自解释。改提示语时要顺带想一下它在这个位置读起来是否成立。
 #[test]
 fn factory_cofc_shows_meaningful_label_in_prefix_nav() {

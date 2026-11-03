@@ -281,6 +281,10 @@ impl EvalContext for CmdbarCtx<'_> {
         self.host.clipboard_get_text().unwrap_or_default()
     }
     fn reverse_lookup(&self, text: &str, format: &str) -> String {
+        let max = self.coord.rt().config.input.reverse.clip_max_chars;
+        if exceeds_chars(text, max) {
+            return String::new();
+        }
         self.coord.reverse_render(text, format)
     }
     fn sel(&self) -> String {
@@ -1401,5 +1405,24 @@ mod set_state_tests {
         for t in ["layout", "preedit", "candwin", "nope"] {
             assert!(c.cmd_set_state(t, true).is_err(), "{t}");
         }
+    }
+}
+
+/// `text` 的字符数是否超过 `max`。只数到 `max + 1` 就停，剪贴板再大也不全量遍历。
+fn exceeds_chars(text: &str, max: usize) -> bool {
+    text.chars().take(max.saturating_add(1)).count() > max
+}
+
+#[cfg(test)]
+mod reverse_cap_tests {
+    use super::exceeds_chars;
+
+    #[test]
+    fn cap_counts_chars_not_bytes() {
+        assert!(!exceeds_chars("好吧", 2));
+        assert!(exceeds_chars("好吧么", 2));
+        assert!(!exceeds_chars("", 0));
+        assert!(!exceeds_chars(&"好".repeat(16), 16));
+        assert!(exceeds_chars(&"好".repeat(17), 16));
     }
 }
