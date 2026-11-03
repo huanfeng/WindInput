@@ -69,6 +69,7 @@ pub enum SkCmd {
     Layer {
         shift: bool,
     },
+    Pinned(bool),
     /// 主题变更。
     ///
     /// ★ 面板是**惰性创建**的（首次 `Show` 才建窗），而 `SetTheme` 一般只在启动时发一次。
@@ -219,6 +220,7 @@ fn handle(cmd: SkCmd) {
         SkCmd::Hide => with_panel(|k| k.hide()),
         SkCmd::KeyState { slot, down } => with_panel(|k| k.set_key_down(&slot, down)),
         SkCmd::Layer { shift } => with_panel(|k| k.set_layer(shift)),
+        SkCmd::Pinned(pinned) => with_panel(|k| k.set_pinned(pinned)),
     }
 }
 

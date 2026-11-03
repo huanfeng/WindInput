@@ -329,11 +329,29 @@ impl Coordinator {
     /// 保留当前面下标：再开时停在同一面，符合「面板是把工具，放下再拿起来还是刚才那把」。
     pub(crate) fn close_softkeyboard(&self) -> KeyAction {
         if self.softkeyboard_active.swap(false, Ordering::Relaxed) {
+            // 钉住只对本次打开有效：UI 侧 `hide` 自己复位按钮，这里只复位真相。
+            self.softkeyboard_pinned.store(false, Ordering::Relaxed);
             self.softkeyboard_dirty.store(true, Ordering::Relaxed);
             debug!("softkeyboard: closed");
             let _ = self.ui_tx.send(UiCommand::HideSoftKeyboard);
         }
         KeyAction::Consumed
+    }
+
+    /// 开关「钉住」，返回切换后的状态；面板没开时不动、返回 `false`。
+    ///
+    /// 钉住 = 焦点怎么变都不自动关闭（Esc / 关闭按钮 / 工具栏仍可关）。
+    ///
+    /// ★ **这是钉住的唯一入口**：面板按钮（`UiEvent::SoftKeyboardPin`）经此处，将来要给
+    /// 钉住绑快捷键（热键 / 面板内按键）也应只调它，不要再各写一份翻转逻辑。
+    pub(crate) fn toggle_softkeyboard_pin(&self) -> bool {
+        if !self.softkeyboard_is_open() {
+            return false;
+        }
+        let pinned = !self.softkeyboard_pinned.fetch_xor(true, Ordering::Relaxed);
+        debug!("softkeyboard: pinned={pinned}");
+        let _ = self.ui_tx.send(UiCommand::SoftKeyboardPinned(pinned));
+        pinned
     }
 
     /// 焦点事件到达时，面板是否该关。**纯判据**，不碰状态，便于单测。
@@ -368,6 +386,10 @@ impl Coordinator {
     /// 用户点它上面任何一个键都是在改变焦点，它会把自己关掉。
     pub(crate) fn close_softkeyboard_on_focus_change(&self, signal: SoftKbFocusSignal) {
         if !self.softkeyboard_is_open() {
+            return;
+        }
+        if self.softkeyboard_pinned.load(Ordering::Relaxed) {
+            debug!("softkeyboard: 已钉住，忽略焦点事件 {signal:?}");
             return;
         }
         let host_pid = self.softkeyboard_host_pid.load(Ordering::Relaxed);

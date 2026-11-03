@@ -303,6 +303,53 @@ fn unknown_pid_never_closes_on_gained() {
     }
 }
 
+/// 钉住后连整应用失焦、换宿主都不关；这是它存在的全部意义。
+#[test]
+fn pinned_panel_survives_every_focus_signal() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(1234, Ordering::Relaxed);
+    assert!(c.toggle_softkeyboard_pin());
+    expire_focus_guard(&c);
+    for sig in [
+        SoftKbFocusSignal::Lost(FocusLostReason::Thread),
+        SoftKbFocusSignal::Gained { pid: 5678 },
+        SoftKbFocusSignal::ImeDeactivated,
+    ] {
+        c.close_softkeyboard_on_focus_change(sig);
+        assert!(c.softkeyboard_is_open(), "钉住后 {sig:?} 不该关");
+    }
+}
+
+#[test]
+fn toggling_pin_twice_unpins() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    assert!(c.toggle_softkeyboard_pin());
+    assert!(!c.toggle_softkeyboard_pin());
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Lost(FocusLostReason::Thread));
+    assert!(!c.softkeyboard_is_open(), "取消钉住后恢复自动关闭");
+}
+
+/// 钉住只对本次打开有效：手动关掉再开，不能还钉着。
+#[test]
+fn pin_does_not_survive_a_close() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.toggle_softkeyboard_pin();
+    c.close_softkeyboard();
+    c.open_softkeyboard(None);
+    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
+}
+
+#[test]
+fn pin_is_ignored_while_closed() {
+    let c = coord();
+    assert!(!c.toggle_softkeyboard_pin());
+    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
+}
+
 #[test]
 fn reopening_stays_on_the_last_page() {
     let c = coord();

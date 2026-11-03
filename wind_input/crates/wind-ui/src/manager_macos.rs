@@ -775,6 +775,10 @@ impl Forwarder {
             UiCommand::SoftKeyboardLayer { shift } => {
                 self.push_softkeyboard(sk::SkCmd::Layer { shift })
             }
+            #[cfg(target_os = "macos")]
+            UiCommand::SoftKeyboardPinned(pinned) => {
+                self.push_softkeyboard(sk::SkCmd::Pinned(pinned))
+            }
             // ── 软键盘（Linux）：同 Windows `ui_thread`，惰性创建 ──
             #[cfg(all(target_os = "linux", ext_presenter))]
             UiCommand::ShowSoftKeyboard {
@@ -810,6 +814,12 @@ impl Forwarder {
             UiCommand::SoftKeyboardLayer { shift } => {
                 if let Some(k) = &mut self.panels.soft_keyboard {
                     k.set_layer(shift);
+                }
+            }
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            UiCommand::SoftKeyboardPinned(pinned) => {
+                if let Some(k) = &mut self.panels.soft_keyboard {
+                    k.set_pinned(pinned);
                 }
             }
             UiCommand::OpenPath(path) => crate::manager::open_path(&path),

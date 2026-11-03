@@ -59,6 +59,11 @@ pub const SOFT_TAG_CLOSE: i32 = 300_000;
 /// 共用一个的话，鼠标停在右上角的 ✕ 上，底行的 Esc 也会跟着亮。
 /// tag 是命中标识，同一时刻只该有一个控件认领它。
 pub const SOFT_TAG_ESC: i32 = 300_001;
+/// 左上角的钉住按钮：钉住后切换焦点也不自动关闭。
+///
+/// 与关闭按钮对称，落在 `SOFT_TAG_CLOSE` 之后、仍在 `300_000` 段内，故不会被
+/// 标签行的 `is_page_tag`（`PAGE_BASE..CLOSE` 闭区间）吞进去。
+pub const SOFT_TAG_PIN: i32 = 300_002;
 /// 特殊键第 n 个：`SOFT_TAG_FN_BASE + n`（n 是 [`SOFT_FN_KEYS`] 的下标）。
 pub const SOFT_TAG_FN_BASE: i32 = 400_000;
 /// 面板上的 Shift 键。点击**锁定/解锁**第二层，是面板自己的状态，不回送协调器。

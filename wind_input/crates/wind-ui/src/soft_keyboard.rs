@@ -52,9 +52,9 @@ use crate::mac_panel::MacPanel as PanelWindow;
 use crate::window::LayeredWindow as PanelWindow;
 use wind_ui_types::{
     SOFT_FN_CAPS_INDEX, SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_CTRL, SOFT_TAG_ESC,
-    SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE, SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_SHIFT,
-    SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT, SoftKeyCap, UiEvent,
-    fn_key_repeats, slot_layer,
+    SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE, SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_PIN,
+    SOFT_TAG_SHIFT, SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT, SoftKeyCap,
+    UiEvent, fn_key_repeats, slot_layer,
 };
 
 /// 每行的键位个数，与 `wind_softkeyboard::KEY_ROWS` 同构（数字行 / QWERTY / ASDF / ZXCV）。
@@ -381,6 +381,8 @@ pub struct SoftKeyboard {
     caps_on: bool,
     /// 当前面是键盘面：CapsLock 参与字母键的档位显示（见 [`Self::cap_layer`]）。
     send_keys: bool,
+    /// 钉住：只管按钮高亮，真相在协调器（经 `SoftKeyboardPinned` 下发）。隐藏时复位。
+    pinned: bool,
     /// 面板上的 Ctrl 处于粘滞状态：下一次点键位合成 `ctrl+键`，然后自动熄灭。
     ///
     /// ★ 与 Shift 的锁定不同，它**不是层选择器**——Ctrl 不改变键帽上画什么，
@@ -453,6 +455,7 @@ impl SoftKeyboard {
             shift_locked: false,
             caps_on: false,
             send_keys: false,
+            pinned: false,
             ctrl_latched: false,
             tab_scroll: 0.0,
             last_shown_page: usize::MAX,
@@ -578,7 +581,18 @@ impl SoftKeyboard {
         self.render();
     }
 
+    /// 钉住状态变了：只重画按钮。
+    pub fn set_pinned(&mut self, pinned: bool) {
+        if self.pinned != pinned {
+            self.pinned = pinned;
+            if self.visible {
+                self.render();
+            }
+        }
+    }
+
     pub fn hide(&mut self) {
+        self.pinned = false;
         if self.visible {
             self.visible = false;
             self.reset_mouse();
@@ -757,6 +771,10 @@ impl SoftKeyboard {
         }
         if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
             let _ = self.events.send(UiEvent::SoftKeyboardClose);
+            return;
+        }
+        if tag == SOFT_TAG_PIN {
+            let _ = self.events.send(UiEvent::SoftKeyboardPin);
             return;
         }
         if tag == SOFT_TAG_PAGE_PREV || tag == SOFT_TAG_PAGE_NEXT {
@@ -1012,12 +1030,48 @@ impl SoftKeyboard {
         } else {
             ([0, 0, 0, 0], c.hint)
         };
+        // 钉住态用强调色底，未钉住与关闭按钮同一套悬停/按下配色。
+        let pin_down = pressed == SOFT_TAG_PIN;
+        let (pin_bg, pin_fg) = if pin_down {
+            (c.accent_soft, c.accent)
+        } else if self.pinned {
+            (c.accent_soft, c.accent)
+        } else if hover == SOFT_TAG_PIN {
+            (c.hover, c.ink)
+        } else {
+            ([0, 0, 0, 0], c.hint)
+        };
         root = root.child(
             View::container(Layout::Row)
                 .fill_cross()
                 .fixed_h(GRIP_ROW_H_DP * s)
                 .cross(Align::Center)
-                .child(View::container(Layout::Row).fixed_w(close_w))
+                .child(
+                    // 钉住按钮：与关闭按钮左右对称，同样向左上溢出吃回内边距（原理见下面
+                    // 关闭按钮的注释），margin_box 仍等于 close_w × 行高，拖动条保持精确居中。
+                    View::container(Layout::Row)
+                        .fixed_w(close_w + close_inset)
+                        .fixed_h(close_h)
+                        .margin(Edges {
+                            t: -close_rise,
+                            l: -close_inset,
+                            ..Default::default()
+                        })
+                        .radius(close_h * 0.5)
+                        .bg(pin_bg)
+                        .border(
+                            if pin_down { c.accent } else { [0, 0, 0, 0] },
+                            (1.0 * s).max(1.0),
+                        )
+                        .tag(SOFT_TAG_PIN)
+                        .child(
+                            View::leaf("📌", pin_fg)
+                                .font_size(12.0 * s)
+                                .text_align(Align::Center)
+                                .fill_cross()
+                                .grow(),
+                        ),
+                )
                 .child(View::spacer().grow())
                 .child(
                     View::container(Layout::Row)
@@ -2846,6 +2900,8 @@ mod tests {
         assert!(!drags_panel(SOFT_TAG_PAGE_BASE), "标签");
         assert!(!drags_panel(SOFT_TAG_TAB_LEFT), "左箭头");
         assert!(!drags_panel(SOFT_TAG_CLOSE), "关闭");
+        assert!(!drags_panel(SOFT_TAG_PIN), "钉住");
+        assert!(!is_page_tag(SOFT_TAG_PIN), "钉住不是面");
     }
 
     #[test]

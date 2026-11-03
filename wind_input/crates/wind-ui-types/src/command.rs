@@ -322,6 +322,9 @@ pub enum UiCommand {
     /// 与 [`Self::ShowSoftKeyboard`] 分开是因为它每次按键都发，而面板内容不变——
     /// 渲染端据此只重画那一个键帽，不必重排整块面板。
     SoftKeyboardKeyState { slot: String, down: bool },
+    /// 软键盘：钉住状态变了（按钮高亮）。独立于 [`Self::ShowSoftKeyboard`]：钉住不改面板
+    /// 内容与尺寸，没必要整块重排；面板隐藏时自行复位为 `false`。
+    SoftKeyboardPinned(bool),
     /// 软键盘：切层（按住 Shift 显示第二层，松开还原）。
     SoftKeyboardLayer { shift: bool },
     /// 外部宿主（Linux addon）报上来的工具栏 / 软键盘指针事件（`CMD_PANEL_POINTER` 原样转来）：

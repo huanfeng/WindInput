@@ -1120,6 +1120,11 @@ impl UiManager {
                             k.set_layer(shift);
                         }
                     }
+                    UiCommand::SoftKeyboardPinned(pinned) => {
+                        if let Some(k) = &mut soft_keyboard {
+                            k.set_pinned(pinned);
+                        }
+                    }
                     UiCommand::Shutdown => {
                         info!("UI: Shutdown");
                         // host-render 全部隐藏（Shutdown 必达）
