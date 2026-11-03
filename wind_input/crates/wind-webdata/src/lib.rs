@@ -4455,6 +4455,11 @@ pub const READONLY_SIDECAR_FIELDS: &[&str] = &[
     // 表**而不是全局。要做那一档时直接用它，别再去合并值里猜。登记在此则是无论用不用都
     // 不能让它随 saveConfig 落回 override。
     "punctOverride",
+    // 「本方案行为」三段（punct / candidate / phrases）在方案文件层与用户 override 层的原文，
+    // 供方案覆盖页分辨一个值的来源。不剥的话它们会作为 `[schemaBase]` / `[schemaUserOverride]`
+    // 两段落进 override——方案照常能用，但那两段从此谁也不读。
+    "schemaBase",
+    "schemaUserOverride",
     "leadingCodeKeys",
     "keysOverview",
     // 「这张总览的全局层不完整」的说明（段级降级时非 null）。与 `keysOverview` 同进同出：
@@ -10548,6 +10553,18 @@ mod followed_behavior_tests {
             READONLY_SIDECAR_FIELDS.contains(&"followedBehavior"),
             "旁路字段漏登记：{READONLY_SIDECAR_FIELDS:?}"
         );
+    }
+
+    /// 方案覆盖页用的两层原文必须登记为只读旁路字段，否则一次 saveConfig 就把它们
+    /// 当成新键写进用户 override。
+    #[test]
+    fn behavior_layers_are_readonly_sidecars() {
+        for f in ["schemaBase", "schemaUserOverride"] {
+            assert!(
+                READONLY_SIDECAR_FIELDS.contains(&f),
+                "旁路字段 {f} 漏登记：{READONLY_SIDECAR_FIELDS:?}"
+            );
+        }
     }
 }
 
