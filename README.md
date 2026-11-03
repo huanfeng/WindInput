@@ -46,7 +46,9 @@
 - **Linux（预览版）** — `.deb` 安装包（amd64 / arm64，Ubuntu 22.04+、Debian 系发行版），以
   Fcitx5 输入法引擎的形式工作；`sudo apt install ./WindInput-*.deb` 安装后，在「Fcitx5 配置」中
   把清风输入法加入输入法列表。系统输入法框架需为 Fcitx5，KDE Plasma 等桌面的额外设置与已知限制见
-  [wind_linux/README.md](wind_linux/README.md)
+  [wind_linux/README.md](wind_linux/README.md)。Arch 系发行版可用社区维护的 AUR 包
+  [`fcitx5-windinput-bin`](https://aur.archlinux.org/packages/fcitx5-windinput-bin)
+  （**第三方维护，非官方发布**，问题请先向包维护者反馈）
 
 Windows 版的程序文件与安装包已做数字签名；SmartScreen 需要下载量积累信誉，新版本发布初期
 仍可能拦截，按提示「更多信息 → 仍要运行」继续即可。macOS 版尚未做苹果签名与公证，被
