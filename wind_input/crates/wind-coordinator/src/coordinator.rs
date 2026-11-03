@@ -5908,13 +5908,25 @@ impl Coordinator {
         // 只认纯翻页动词：`AuxCode(PageNext)` 共键降级的那一下不归 `keys.overflow.page_key`。
         let is_page_action = matches!(
             action,
-            wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageNext
+            wind_config::SessionAction::PagePrev
+                | wind_config::SessionAction::PageNext
+                | wind_config::SessionAction::PageScreenPrev
+                | wind_config::SessionAction::PageScreenNext
+        );
+        // 「翻屏」动词：展开态翻整屏，未展开时与翻页完全一致（下面落到同一条 nav 执行）。
+        let screen_verb = matches!(
+            action,
+            wind_config::SessionAction::PageScreenPrev | wind_config::SessionAction::PageScreenNext
         );
         let nav = match action {
             wind_config::SessionAction::HighlightUp => keymap::NavAction::HighlightUp,
             wind_config::SessionAction::HighlightDown => keymap::NavAction::HighlightDown,
-            wind_config::SessionAction::PagePrev => keymap::NavAction::PagePrev,
-            wind_config::SessionAction::PageNext => keymap::NavAction::PageNext,
+            wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageScreenPrev => {
+                keymap::NavAction::PagePrev
+            }
+            wind_config::SessionAction::PageNext | wind_config::SessionAction::PageScreenNext => {
+                keymap::NavAction::PageNext
+            }
             wind_config::SessionAction::Cancel => {
                 // 无会话时放行：空闲按 Tab 该是宿主的制表符，不是「取消一个不存在的输入」。
                 // 判据与 `cancel_session` 的适用范围一致，见那里。
@@ -6135,8 +6147,12 @@ impl Coordinator {
             match nav {
                 keymap::NavAction::HighlightUp => self.grid_move_row(state, false),
                 keymap::NavAction::HighlightDown => self.grid_move_row(state, true),
-                keymap::NavAction::PagePrev => self.grid_page_key(state, false, data.key_code),
-                keymap::NavAction::PageNext => self.grid_page_key(state, true, data.key_code),
+                keymap::NavAction::PagePrev => {
+                    self.grid_page_key(state, false, data.key_code, screen_verb)
+                }
+                keymap::NavAction::PageNext => {
+                    self.grid_page_key(state, true, data.key_code, screen_verb)
+                }
             }
         } else {
             match nav {

@@ -158,7 +158,7 @@ fn warn_unknown_session_actions(config: &Config) {
         if wind_config::SessionAction::parse_checked(verb).is_none() {
             warn!(
                 "keys.session_actions[\"{name}\"] = \"{verb}\"：动词无法识别，该绑定被忽略。\
-                 可选 page_prev / page_next / highlight_up / highlight_down / cancel / \
+                 可选 page_prev / page_next / page_screen_prev / page_screen_next / highlight_up / highlight_down / cancel / \
                  select_candidate:N / select_char:N / aux_code / aux_code:page_next / \
                  single_char / single_char:on / single_char:off / single_char:toggle / \
                  single_char:follow / commit_highlighted / commit_code / command:<表达式> / none",

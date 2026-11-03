@@ -1925,7 +1925,9 @@ impl CaretEnd {
 /// # 值域
 ///
 /// - `"none"`：在本态禁用该键（第三态，非「未声明」）
-/// - `"page_prev"` / `"page_next"`：上一页 / 下一页
+/// - `"page_prev"` / `"page_next"`：上一页 / 下一页（候选展开后逐行移动激活行）
+/// - `"page_screen_prev"` / `"page_screen_next"`：上一屏 / 下一屏——**候选展开后**翻一整屏
+///   （`rows` 行），**未展开时与 `page_prev` / `page_next` 完全相同**（翻一页，首次下翻仍先展开）
 /// - `"highlight_up"` / `"highlight_down"`：高亮上移 / 下移
 /// - `"cancel"`（别名 `"clear"`）：放弃当前输入，等同 Esc
 /// - `"select_candidate:N"`：选中当前页第 N 个候选（N 从 1 起、至多 10，`2` 即次选键）
@@ -1940,6 +1942,9 @@ pub enum SessionAction {
     None,
     PagePrev,
     PageNext,
+    /// 展开态翻整屏；未展开时同 `PagePrev`（见 `candidate_grid::grid_page_key`）。
+    PageScreenPrev,
+    PageScreenNext,
     HighlightUp,
     HighlightDown,
     /// 放弃当前输入：清空编码与候选，并退出 overlay 模式。**语义完全等同 Esc**。
@@ -2157,6 +2162,8 @@ impl SessionAction {
         match t.as_str() {
             "page_prev" => Self::PagePrev,
             "page_next" => Self::PageNext,
+            "page_screen_prev" => Self::PageScreenPrev,
+            "page_screen_next" => Self::PageScreenNext,
             "highlight_up" => Self::HighlightUp,
             "highlight_down" => Self::HighlightDown,
             // 与 `BoundAction::parse` 的同名动词逐字一致：同一个功能在两张表里写法不同的话，
@@ -2256,6 +2263,8 @@ impl std::fmt::Display for SessionAction {
             Self::None => f.write_str("none"),
             Self::PagePrev => f.write_str("page_prev"),
             Self::PageNext => f.write_str("page_next"),
+            Self::PageScreenPrev => f.write_str("page_screen_prev"),
+            Self::PageScreenNext => f.write_str("page_screen_next"),
             Self::HighlightUp => f.write_str("highlight_up"),
             Self::HighlightDown => f.write_str("highlight_down"),
             // 别名 `clear` 刻意不回写——规范名只有一个，避免同一份配置在两次保存后

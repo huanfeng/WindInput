@@ -1335,6 +1335,7 @@ key_actions = {}
 #       以及符号键 minus equal lbracket rbracket comma period semicolon quote 等。
 #       只认 shift+ 一种前缀；带 ctrl/alt 的组合键请写在上面的 key_actions 里。
 # 动词：page_prev / page_next / highlight_up / highlight_down
+#       page_screen_prev / page_screen_next(上一屏/下一屏：候选展开后翻整屏，未展开时与翻页相同)
 #       cancel(放弃当前输入，等同 Esc；别名 clear) / none(在本态禁用该键)
 #       select_candidate:N(选中当前页第 N 个候选，N 从 1 起，2 即次选键)
 #       select_char:N(以词定字，取高亮候选词的第 N 个字，N 从 1 起)

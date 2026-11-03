@@ -234,11 +234,19 @@ impl Coordinator {
         true
     }
 
-    /// 展开态的翻页键：PageUp/PageDown 在 `grid_pageupdown_screen` 开着时翻一整屏，
-    /// 其余翻页键逐行滚（同滚轮）。只看物理键，不管它绑在哪个组。
-    pub(crate) fn grid_page_key(&self, state: &mut State, down: bool, key_code: u32) -> bool {
-        let screen = matches!(key_code, keymap::VK_PRIOR | keymap::VK_NEXT)
-            && self.rt().config.ui.candidate.grid_pageupdown_screen;
+    /// 展开态的翻页键：绑了「翻屏」动词（`page_screen_*`）的键恒翻一整屏；PageUp/PageDown 在
+    /// `grid_pageupdown_screen` 开着时也翻一整屏；其余翻页键逐行滚（同滚轮）。
+    /// 物理键的判断不管它绑在哪个组。
+    pub(crate) fn grid_page_key(
+        &self,
+        state: &mut State,
+        down: bool,
+        key_code: u32,
+        screen_verb: bool,
+    ) -> bool {
+        let screen = screen_verb
+            || (matches!(key_code, keymap::VK_PRIOR | keymap::VK_NEXT)
+                && self.rt().config.ui.candidate.grid_pageupdown_screen);
         if screen {
             self.grid_page(state, down)
         } else {
@@ -1027,6 +1035,56 @@ mod tests {
         c.handle_key_event(&key(keymap::VK_PRIOR));
         c.handle_key_event(&key(keymap::VK_PRIOR));
         assert_eq!(view(&c), (0, 0, Some(0)), "首行停住，不收起");
+    }
+
+    /// 把 `.` / `,` 绑成「翻屏」动词；`grid_on` 控制是否开展开。
+    fn coord_screen_verbs(grid_on: bool) -> (Arc<Coordinator>, Receiver<UiCommand>) {
+        let mut cfg = wind_config::Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = grid_on;
+        cfg.keys
+            .session_actions
+            .insert("period".into(), "page_screen_next".into());
+        cfg.keys
+            .session_actions
+            .insert("comma".into(), "page_screen_prev".into());
+        let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
+        c.debug_mark_coords_ready();
+        (c, rx)
+    }
+
+    /// 展开态：绑了翻屏动词的普通键与 PageUp/PageDown 一样翻整屏，而不是逐行。
+    #[test]
+    fn screen_verb_scrolls_a_screen_when_expanded() {
+        let (c, _rx) = coord_screen_verbs(true);
+        seed(&c, PP * 8);
+        c.handle_key_event(&key(keymap::VK_PERIOD)); // 首按只展开
+        assert_eq!(view(&c), (0, 0, Some(0)));
+        c.handle_key_event(&key(keymap::VK_PERIOD));
+        assert_eq!(view(&c), (ROWS, 0, Some(3)), "下移一整屏，可见区跟随");
+        c.handle_key_event(&key(keymap::VK_COMMA));
+        assert_eq!(view(&c).0, 0, "上翻一整屏");
+    }
+
+    /// 未展开（展开功能关着）：翻屏动词就是普通翻一页。
+    #[test]
+    fn screen_verb_pages_one_page_when_not_expanded() {
+        let (c, _rx) = coord_screen_verbs(false);
+        seed(&c, PP * 8);
+        c.handle_key_event(&key(keymap::VK_PERIOD));
+        assert_eq!(view(&c), (1, 0, None), "翻一页，不展开");
+        c.handle_key_event(&key(keymap::VK_COMMA));
+        assert_eq!(view(&c), (0, 0, None));
+    }
+
+    /// 对照：同一环境下 `=` 仍逐行（翻页动词不受翻屏动词影响）。
+    #[test]
+    fn page_verb_still_moves_a_row_next_to_screen_verb() {
+        let (c, _rx) = coord_screen_verbs(true);
+        seed(&c, PP * 8);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        assert_eq!(view(&c), (1, 0, Some(0)));
     }
 
     /// 高亮行滚出可见区时可见区跟随。

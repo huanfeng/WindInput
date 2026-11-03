@@ -110,6 +110,7 @@ grid_top: Option<usize>,
 | `=` 等翻页键（`PageNext`） | 下移一行并保持列号，同滚轮（§5.4）：到可见区末行再按滚一行，到底走末页放宽 |
 | `-` 等翻页键（`PagePrev`） | 上移一行，到首行停住、不收起 |
 | PageDown / PageUp | `grid_pageupdown_screen` 开着（出厂）时滚一整屏（`rows` 行），首屏再上翻回到首行；关掉同上逐行。只看物理键，不管绑在哪组 |
+| 绑了 `page_screen_next` / `page_screen_prev`（上一屏 / 下一屏）的键 | 恒滚一整屏，与 `grid_pageupdown_screen` 无关；**未展开时就是普通翻页**（同 `page_next` / `page_prev`，首次下翻先展开）。与 `page_*` 是两个并列动词：翻页键家族（`=` `,` `.` 等）仍逐行，想让某个键翻整屏就给它绑翻屏动词（GH#272） |
 | Tab / Shift+Tab | 切换分类标签（决策 D5，§8）；没有标签栏时（`grid_categories` 少于两个）照旧是绑定表里的动作，出厂即换行 |
 | 1–9 / 0、`;'`、Alt/Ctrl+数字 | 从高亮行行首起按序号选；序号按 `grid_index_fill` 顺延到下面的行（见 §5.3） |
 | 空格 | 上屏高亮项；分步上屏（拼音只吃掉前一段）时余下那段照样展开，整串上屏才结束 |
