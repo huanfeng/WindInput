@@ -6,11 +6,11 @@ GNOME Wayland 没有 input-method-v2 时，dbus / ibus / fcitx4 报给 Fcitx5 �
 
 `extension.js` 是 ESM（`import` / `export default class`），这种扩展格式从 **GNOME Shell 45** 才有。`import Mtk from 'gi://Mtk'` 同样从 45 就有：gnome-shell 45.0 自己的 `js/ui/windowManager.js` 就是这么写的，[移植说明](https://gjs.guide/extensions/upgrading/gnome-shell-45.html) 也要求用 `Mtk.Rectangle` 换掉 `Meta.Rectangle`。
 
-本扩展还调用 `Meta.Window.protocol_to_stage_rect`。这个方法从 **mutter 47.0** 起出现在 `src/meta/window.h`，46.0–46.7 的头文件里没有，45 更没有。所以 `metadata.json` 的 `shell-version` 只写 **47、48、49、50**。45 / 46 上即使改元数据强行启用，一调用就会因没有该方法失败。
+本扩展还调用 `Meta.Window.protocol_to_stage_rect`。这个方法从 **mutter 47.0** 起出现在 `src/meta/window.h`，46.0–46.7 的头文件里没有，45 更没有。所以 `metadata.json` 的 `shell-version` 从 **47** 起（当前为 47–51）。45 / 46 上即使改元数据强行启用，一调用就会因没有该方法失败。
 
-Shell 51 的移植说明没有改到这里用的 import、`Mtk.Rectangle`、D-Bus 导出；mutter 51.0 仍有 `protocol_to_stage_rect` 与 `get_compositor_private`。尚未有人在 51 上启用过本扩展，元数据里先不写 51。
+Shell 51 的移植说明没有改到这里用的 import、`Mtk.Rectangle`、D-Bus 导出；mutter 51.0 仍有 `protocol_to_stage_rect` 与 `get_compositor_private`。在 GNOME Shell 51.0 / gjs 1.90.0 上已核对 `Mtk.Rectangle`、`Meta.Window.protocol_to_stage_rect`、`Meta.Window.get_compositor_private`、`St.ThemeContext.get_for_stage`、`Gio.DBusExportedObject.wrapJSObject` 均可从 GI 取到；`extension.js` 在独立 D-Bus 会话和真实会话里都跑通了 `GetFocusFrame` / `TranslateRelativeSpot` 的导出与坐标折算，Wayland 原生 Qt 应用（微信 4.1.13）的候选窗已确认跟随光标。分数缩放（输出缩放与 `Xft.dpi` 不一致）、窗口移动后的缓存行为以及多显示器的系统性测试仍未覆盖。
 
-**不要把 Ubuntu 22.04 / GNOME Shell 42.9 当成这个扩展的实测环境。** 2026-10-10 在那台机器上看到的是「还没做扩展」时的光标（gedit 报窗口相对矩形，候选窗不跟窗口走）。Shell 42 不能加载 ESM 扩展。Ubuntu 24.04 的 Shell 是 46，同样不在 `shell-version` 里。上面的版本范围是对照上游标签核对 API 是否存在，**不是**清风在这些 Shell 上对过光标落点。分数缩放（输出缩放与 `Xft.dpi` 不一致）也还没有在真实会话里确认，需要作者补测。
+**不要把 Ubuntu 22.04 / GNOME Shell 42.9 当成这个扩展的实测环境。** 2026-10-10 在那台机器上看到的是「还没做扩展」时的光标（gedit 报窗口相对矩形，候选窗不跟窗口走）。Shell 42 不能加载 ESM 扩展。Ubuntu 24.04 的 Shell 是 46，同样不在 `shell-version` 里；47–50 的版本范围是对照上游标签核对 API 是否存在，并没有在这些 Shell 上对过光标落点。分数缩放（输出缩放与 `Xft.dpi` 不一致）也还没有在真实会话里确认，需要作者补测。
 
 ## 安装
 
