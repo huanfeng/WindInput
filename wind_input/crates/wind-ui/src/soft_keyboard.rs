@@ -1069,9 +1069,7 @@ impl SoftKeyboard {
         };
         // 钉住态用强调色底，未钉住与关闭按钮同一套悬停/按下配色。
         let pin_down = pressed == SOFT_TAG_PIN;
-        let (pin_bg, pin_fg) = if pin_down {
-            (c.accent_soft, c.accent)
-        } else if self.pinned {
+        let (pin_bg, pin_fg) = if pin_down || self.pinned {
             (c.accent_soft, c.accent)
         } else if hover == SOFT_TAG_PIN {
             (c.hover, c.ink)
