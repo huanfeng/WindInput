@@ -2145,10 +2145,9 @@ mod tests {
             );
         }
 
-        /// 状态泡先弹、候选窗后出现：按原参数重新落位一次，剩余时长不超过原时长。
+        /// 状态泡先弹、候选窗后出现：不被动换位，避让只发生在弹提示的那一刻。
         #[test]
-        fn status_tip_replaces_when_candidates_appear_later() {
-            use wind_ipc::protocol::overlay::OVERLAY_PLACE_FOLLOW_CANDIDATE;
+        fn status_tip_stays_put_when_candidates_appear_later() {
             let cap = Arc::new(Mutex::new(Vec::new()));
             let (mut f, _ev) = mk(cap.clone(), "_lo_av2");
             caret_status(&mut f);
@@ -2158,9 +2157,7 @@ mod tests {
             );
             show_two_fixed(&mut f, false, 0, 0);
             let m = overlays(&cap, OVERLAY_KIND_STATUS);
-            assert_eq!(m.len(), 2, "候选窗出现后重推一帧");
-            assert_eq!(m[1].place, OVERLAY_PLACE_FOLLOW_CANDIDATE);
-            assert!(m[1].duration > 0 && m[1].duration <= 1500);
+            assert_eq!(m.len(), 1, "候选窗出现后不重推状态泡");
         }
 
         #[test]
