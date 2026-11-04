@@ -961,6 +961,20 @@ do_upload() {
         return 1
     fi
     say "  ✓ macOS .pkg 在"
+    # ⚠️ .sha256 与主文件必须成对:softprops 并行上传撞上 GH API 5xx 会把个别上传静默
+    #    丢掉、job 依旧绿(0.130.1 实测 linux-amd64.deb 缺失, 只剩它的 .sha256)。
+    #    凡有校验值而无主文件, 就挡在发布点之前。
+    local h base missing=0
+    while IFS= read -r h; do
+        base="${h%.sha256}"
+        if ! printf '%s\n' "$names" | grep -Fx -- "$base" >/dev/null; then
+            err "  ✗ $h 在, 主文件 $base 不在 —— CI/上传把主文件吞了, 修复: 从该 run 的"
+            err "     artifact 取回后 gh release upload $tag <主文件> --clobber 补传, 别重签其它文件。"
+            missing=1
+        fi
+    done < <(printf '%s\n' "$names" | grep '\.sha256$')
+    [ "$missing" = 0 ] || return 1
+    say "  ✓ 校验文件与主文件配对齐全"
 
     cyan "\n端到端校验: 把文件真下回来比对 sha256"
     gray "  上传成功不等于挂上去的就是签名版。"
