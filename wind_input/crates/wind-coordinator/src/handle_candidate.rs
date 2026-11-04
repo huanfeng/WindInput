@@ -1492,8 +1492,11 @@ impl Coordinator {
     /// 为什么重码时不展开：成员动辄十几条，整组涌进候选页会把同码的常规候选挤出首页
     /// （`zzbd` 既是标点组又有码表词时，词被淹没）。折叠后组名占一个位置，选了才进组。
     ///
-    /// 「重码」= 另有一条**同码**候选（见 `competes_with_group`），前缀补全、部分消费的
-    /// 拼音候选不算。
+    /// 「重码」= 另有一条**同码精确候选**（见 `competes_with_group`）：码表精确词 / 精确码
+    /// 短语 / 同码的其他精确命令。前缀补全、部分消费候选、以及拼音域的**普通拼音候选**
+    /// （整句、简拼词、简拼回退补条——组码在拼音型方案下天然是简拼形态，泛在重码是无
+    /// 信息量的常态）都不算。组码是用户精心设计的缩写，拼音型方案下恒让位，优先保证
+    /// 短语全码自动展开；码表域的具体同码词冲突（如 `zzbd` 既有标点组又有码表词）仍折叠。
     pub(crate) fn resolve_group_expansion(
         expanded: Option<&(String, String)>,
         input: &str,
@@ -1556,9 +1559,14 @@ impl Coordinator {
         out
     }
 
-    /// 候选是否与「当前输入码的组」构成重码：同码、且整串消费的候选。
-    /// 码表按 `is_exact_code`（精确层）；拼音/混输该标志不齐，改以「非前缀补全 + 消费整串」判，
-    /// 前缀枚举出来的短语导航（组导航、命令导航、静态前缀命中）都不算。
+    /// 候选是否与「当前输入码的组」构成重码：只认**同码精确候选**。
+    /// 码表精确词与精确码短语都标 `is_exact_code`；前缀枚举出来的短语导航（组导航、
+    /// 命令导航、静态前缀命中）、前缀补全不算。
+    ///
+    /// 拼音域（全拼/双拼/混输的拼音侧，`codetable_mode=false`）的**普通拼音候选一律不算
+    /// 竞争**——曾按「非前缀补全 + 消费整串」判，但简拼形态的组码在那套判据下恒有同码
+    /// 简拼词/回退补条（任意声母组合都能组句），折叠变成常态，短语全码自动展开失效。
+    /// 组码是用户精心设计的缩写，恒让位泛化拼音预测，保证命令短语优先使用。
     fn competes_with_group(c: &Candidate, input: &str, codetable_mode: bool) -> bool {
         if c.is_group && c.group_code != input {
             return false;
@@ -1569,10 +1577,7 @@ impl Coordinator {
         if c.is_exact_code {
             return true;
         }
-        if codetable_mode || c.is_prefix || c.is_phrase {
-            return false;
-        }
-        c.consumed_length == 0 || c.consumed_length >= input.len()
+        codetable_mode || c.is_prefix || c.is_phrase
     }
 
     pub(crate) fn build_candidates(

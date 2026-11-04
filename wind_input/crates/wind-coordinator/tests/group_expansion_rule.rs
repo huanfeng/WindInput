@@ -292,3 +292,62 @@ fn check_command_members(f: &Fixture) {
         gh.3
     );
 }
+
+/// 拼音方案夹具：词库走 rime 音节行（码列含空格），加载建缓存时自动生成简拼索引——
+/// 同码简拼词与短语组同场，正是真机上「组码=声母缩写」的形态。
+fn pinyin_fixture(tag: &str, body: &str) -> Fixture {
+    let dir = std::env::temp_dir().join(format!("wind_grp_rule_py_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let schemas = dir.join("schemas");
+    std::fs::create_dir_all(schemas.join("stp")).unwrap();
+    std::fs::write(
+        schemas.join("stp.schema.toml"),
+        "[schema]\nid = \"stp\"\nname = \"组规则拼音测试\"\n\
+         [engine]\ntype = \"pinyin\"\n\
+         [engine.pinyin]\nscheme = \"full\"\n\
+         [[dictionaries]]\nid = \"main\"\npath = \"stp/t.dict.yaml\"\ntype = \"rime_pinyin\"\ndefault = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        schemas.join("stp/t.dict.yaml"),
+        format!("---\nname: stp\nversion: \"1\"\n...\n{body}"),
+    )
+    .unwrap();
+    let mut c = Config::default();
+    c.schema.available = vec!["stp".into()];
+    c.schema.active = "stp".into();
+    c.input.default.chinese_mode = true;
+    let ov = std::env::temp_dir().join(format!("wind_grp_rule_ov_py_{tag}"));
+    let _ = std::fs::remove_dir_all(&ov);
+    std::fs::create_dir_all(&ov).unwrap();
+    let coord = Coordinator::new_headless_with_override(c, Some(&dir), Some(ov.clone()));
+    Fixture { coord, dir, ov }
+}
+
+/// 拼音域的普通候选不构成组重码：简拼词/回退补条与组同码，组仍全码自动展开。
+/// 组码是用户精心设计的缩写，拼音候选是泛化预测，恒让位（0.130 曾按「消费整串」判，
+/// 简拼形态的组码恒重码恒折叠，短语全码自动展开失效；本用例钉住拼音域不折叠）。
+#[test]
+fn pinyin_abbrev_words_do_not_fold_group() {
+    let f = pinyin_fixture(
+        "py_nofold",
+        &format!("技术\tji shu\t50000\n角色\tju se\t40000\n{SS}\tjs\n"),
+    );
+    type_keys(&f.coord, "js");
+    let got = texts(&f);
+    for m in ["【】", "（）", "〔〕"] {
+        assert!(
+            got.iter().any(|t| t == m),
+            "同码简拼词不得折叠组，应自动展开 {m}: {got:?}"
+        );
+    }
+    assert!(
+        !got.iter().any(|t| t == "括号"),
+        "拼音同码简拼词不算重码，不得折成组名: {got:?}"
+    );
+    // 组展开不是吞词：同码简拼词照常在列表里。
+    assert!(
+        got.iter().any(|t| t == "技术"),
+        "同码简拼词必须还在: {got:?}"
+    );
+}
