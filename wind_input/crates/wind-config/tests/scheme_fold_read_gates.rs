@@ -49,6 +49,10 @@ fn offenders(src: &str, leaves: &[&str], file: &str) -> Vec<String> {
         if code.starts_with("//") {
             continue;
         }
+        // 刻意要全局值的读取点（如「跟随」显示）在行尾写此标记显式豁免。
+        if line.contains("fold-gate:allow") {
+            continue;
+        }
         for leaf in leaves {
             let needle = format!(".ui.candidate.{leaf}");
             if let Some(pos) = line.find(&needle) {
@@ -116,6 +120,8 @@ fn scanner_flags_direct_reads_only() {
         .is_empty(),
         "兄弟键 per_page_extended 不该被误伤"
     );
+    let allowed = "let n = cfg.ui.candidate.per_page; // fold-gate:allow 显示全局值\n";
+    assert!(offenders(allowed, &leaves, "x.rs").is_empty());
     let tail = "fn a() {}\n#[cfg(test)]\nmod t { fn b() { cfg.ui.candidate.per_page = 5; } }\n";
     assert!(offenders(tail, &leaves, "x.rs").is_empty());
 }

@@ -4460,7 +4460,7 @@ fn followed_behavior_of(cfg: &wind_config::Config, theme_font: Option<String>) -
     json!({
         "layout": wind_config::Orientation::from_layout_str(&cfg.ui.candidate.layout).layout_str(),
         "fontFamily": font,
-        "perPage": cfg.ui.candidate.per_page,
+        "perPage": cfg.ui.candidate.per_page, // fold-gate:allow 显示「跟随」的全局值
         "auxEnabled": aux.enabled,
         "auxMaxPhraseLen": aux.max_phrase_len,
         "auxDirect": aux.direct,
