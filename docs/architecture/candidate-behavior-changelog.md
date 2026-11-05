@@ -195,3 +195,13 @@
 - 回退旧行为：把历史成员排到英文之前（成员顺序优先），或关闭英文词频。
 - 钉住的测试：`wind-coordinator/tests/quick_input_history.rs`（`hot_history_joins_english_segment_and_reaches_top`、`hotter_english_word_stays_above_history`）
 - 来源：GH#253（维护者定方案 B）
+
+## 2026-11-05 · 快捷输入历史在 Free / 大写英文透镜按英文调频排（0.130）
+
+- 合入：见提交 `fix(quick): Free/大写英文透镜的历史按英文调频排`；范围：启用历史成员的快捷输入
+- 变化：缓冲带符号或大写（`${R`、`Res`）时，历史候选此前只按累计次数排，不看英文调频策略；
+  现在与文本透镜同一道英文词频重排（「一次到顶」下最近用过的居首）。与缓冲逐字相同的历史仍恒首位。
+- 触发条件：`schema.english.frequency` 开启；策略为 `top` 时差异最明显。
+- 回退旧行为：关闭英文词频（回到次数降序、最近次之）。
+- 钉住的测试：`wind-coordinator/tests/quick_input_history.rs`（`free_lens_history_follows_english_top_strategy`）
+- 来源：用户反馈

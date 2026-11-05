@@ -782,3 +782,38 @@ fn hotter_english_word_stays_above_history() {
         "用得更多的 font 应在历史 font-size 之前，实际 {texts:?}"
     );
 }
+
+/// 英文调频选「一次到顶」时，Free / 大写英文透镜里的历史也按它排：最近用过的在前，
+/// 不再只看累计次数（反馈：`${ResetTime}` 输了几次仍排在老条目 `${reset_time}` 后面）。
+#[test]
+fn free_lens_history_follows_english_top_strategy() {
+    skip_without_data!();
+    for (tag, old, new, typed) in [
+        ("top_sym", "${reset_time}", "${ResetTime}", "${R"),
+        ("top_cap", "Reset_time", "ResetTime", "Res"),
+    ] {
+        let (coord, store) = open_with(tag, |c| {
+            c.schema.english.frequency.enabled = true;
+            c.schema.english.frequency.strategy = "top".into();
+            c.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
+            c.input.temp_english.case_variants = false;
+        });
+        for _ in 0..3 {
+            store
+                .record_completion(CompletionKind::QuickHistory, old)
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store
+            .record_completion(CompletionKind::QuickHistory, new)
+            .unwrap();
+        enter_quick(&coord);
+        type_str(&coord, typed);
+        let texts = coord.debug_page_texts();
+        assert_eq!(
+            texts.first().map(String::as_str),
+            Some(new),
+            "{tag}: 一次到顶下最近用过的历史应居首，实际 {texts:?}"
+        );
+    }
+}
