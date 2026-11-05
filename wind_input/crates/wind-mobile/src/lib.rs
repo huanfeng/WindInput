@@ -51,6 +51,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod config_api;
+mod touch;
+
+pub use touch::{KeySource, PressKey};
 
 use wind_bridge::handler::KeyAction as BridgeKeyAction;
 use wind_bridge::handler::{FocusData, KeyEventData, MessageHandler};
@@ -393,6 +396,11 @@ pub struct MobileCore {
     /// （见 [`MobileCore::config_snapshot`]）——少了它只能读代码默认值，
     /// 设置页会把出厂 config.toml 里的取值显示成默认值。
     data_dir: std::path::PathBuf,
+    /// 刚由 [`Self::press`] / [`Self::select_candidate`] 在英文词后补过一个空格，
+    /// 且此后没有别的输入动作（光标没动、没换框、没按别的键）。句末标点据此把空格挪到标点后面。
+    auto_spaced: AtomicBool,
+    /// 英文词后是否补空格（宿主设置项，默认开），见 [`Self::set_auto_space`]
+    auto_space: AtomicBool,
 }
 
 impl MobileCore {
@@ -490,6 +498,8 @@ impl MobileCore {
             coord,
             warming,
             data_dir: data_dir.to_path_buf(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         })
     }
 
@@ -528,11 +538,17 @@ impl MobileCore {
     /// [`Self::key_down`] / [`Self::select_candidate`] 已按下发的编辑指令跟上。
     /// 读不到就报空串：联想退回只看刚上屏的那段。
     pub fn set_preceding_text(&self, text: String) {
+        // 光标前不是空格了（光标被挪走、正文被改、读不到报空串）：自动补的空格不在原位，
+        // 句末标点不能再换位
+        if !text.ends_with(' ') {
+            self.auto_spaced.store(false, Ordering::Relaxed);
+        }
         self.coord.set_preceding_text(&text);
     }
 
     /// 焦点获得（对应 Android `onStartInput`）。
     pub fn focus_gained(&self) {
+        self.auto_spaced.store(false, Ordering::Relaxed);
         // 新输入框的光标前文由宿主随后报（`set_preceding_text`），在那之前不沿用上一个框的
         self.coord.set_preceding_text("");
         let _ = self.coord.handle_focus_gained(&FocusData {
@@ -556,6 +572,7 @@ impl MobileCore {
 
     /// 焦点丢失（对应 Android `onFinishInput`）。Thread 语义 = 真正离开，清输入态。
     pub fn focus_lost(&self) {
+        self.auto_spaced.store(false, Ordering::Relaxed);
         self.coord.set_preceding_text("");
         self.coord.handle_focus_lost(1, FocusLostReason::Thread);
     }
@@ -660,9 +677,16 @@ impl MobileCore {
     ///
     /// 取代此前「合成数字键」的做法——那条路把选词限死在页内 1-9，第 10 个及以后
     /// 永远点不到。
+    ///
+    /// 英文方案组码中选词，结果后追加补的空格（见 [`Self::press`]）。
     pub fn select_candidate(&self, index: usize) -> KeyOutcome {
-        let outcome = self.coord.select_candidate(index);
+        // 先算再选：选词之后组合已经没了，判不出「是在英文组码中选的」
+        let english = self.coord.latin_input() && self.coord.is_composing();
+        let mut outcome = self.coord.select_candidate(index);
         self.coord.note_host_edits(&outcome.ops);
+        if english {
+            self.append_auto_space(&mut outcome);
+        }
         outcome
     }
 
@@ -1500,6 +1524,8 @@ mod user_words_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         (core, user)
     }
@@ -1652,6 +1678,8 @@ mod dict_transfer_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         (core, user)
     }
@@ -1787,6 +1815,8 @@ mod dict_transfer_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         let err = m.dict_import("pinyin", "aa\t工\n", false).unwrap_err();
         assert!(err.contains("99"), "要把只读原因交给用户: {err}");
@@ -1820,6 +1850,8 @@ mod schema_dicts_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: data_dir(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         }
     }
 
@@ -1939,6 +1971,8 @@ mod schema_dicts_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         let err = m
             .set_schema_dict_enabled("pinyin", "cell_idiom", true)
@@ -2020,6 +2054,8 @@ mod candidate_menu_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         assert!(m.candidate_menu(0).is_empty(), "无候选时菜单为空");
         for ch in ['A', 'A'] {
@@ -2080,6 +2116,8 @@ mod candidate_tooltip_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         assert!(m.candidate_tooltip(0).is_empty(), "无候选时为空");
         for ch in ['W', 'Q', 'V', 'B'] {
@@ -2136,6 +2174,8 @@ mod candidate_tooltip_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         dispatch_key(&m.coord, 'A' as u32, 0);
         let plain = m.candidates(0, 20);
@@ -2175,6 +2215,8 @@ mod candidate_tooltip_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         dispatch_key(&m.coord, 'A' as u32, 0);
         let first = m.candidates(0, 24);
@@ -2217,6 +2259,8 @@ mod candidate_tooltip_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         m.coord.prewarm_single_initials();
         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -2280,6 +2324,8 @@ mod pinyin_hint_tests {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
             data_dir: dir.join("user"),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         (core, dir)
     }
@@ -2388,6 +2434,8 @@ mod session_pump_tests {
             coord,
             warming,
             data_dir: user.clone(),
+            auto_spaced: AtomicBool::new(false),
+            auto_space: AtomicBool::new(true),
         };
         core.key_down('A' as u32, 0);
         let deadline = Instant::now() + Duration::from_secs(10);
