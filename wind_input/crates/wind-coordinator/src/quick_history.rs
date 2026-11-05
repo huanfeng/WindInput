@@ -144,30 +144,27 @@ impl Coordinator {
         };
         // 与缓冲逐字相同的那条（用户把一条记过的历史完整打了出来）：`skip_exact` 时不出，
         // 否则**排首位且不占配额**——它就是原文本身，占了名额其余历史只剩 4 条。
-        let recs: std::collections::HashMap<String, FreqRecord> = rows
-            .iter()
-            .map(|(t, r)| {
-                (
-                    t.clone(),
-                    FreqRecord {
-                        count: r.count,
-                        last_used: r.last_used,
-                    },
-                )
-            })
-            .collect();
         let exact = !skip_exact && rows.iter().any(|(text, _)| text == buffer);
         let mut out: Vec<Candidate> = Vec::with_capacity(QUICK_HISTORY_QUOTA + 1);
         if exact {
             out.push(cand(buffer.clone()));
         }
-        out.extend(
-            rows.into_iter()
-                .filter(|(text, _)| text != buffer)
-                .filter(|(text, _)| text.to_lowercase().starts_with(&want))
-                .take(QUICK_HISTORY_QUOTA)
-                .map(|(text, _)| cand(text)),
-        );
+        let mut recs = std::collections::HashMap::new();
+        for (text, rec) in rows
+            .into_iter()
+            .filter(|(text, _)| text != buffer)
+            .filter(|(text, _)| text.to_lowercase().starts_with(&want))
+            .take(QUICK_HISTORY_QUOTA)
+        {
+            recs.insert(
+                text.clone(),
+                FreqRecord {
+                    count: rec.count,
+                    last_used: rec.last_used,
+                },
+            );
+            out.push(cand(text));
+        }
         (out, recs)
     }
 

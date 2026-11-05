@@ -817,3 +817,30 @@ fn free_lens_history_follows_english_top_strategy() {
         );
     }
 }
+
+/// 英文调频「一次到顶」下，与缓冲逐字相同的历史仍恒首位，不被更近用过的别条顶下去。
+#[test]
+fn free_lens_exact_history_stays_first_under_top_strategy() {
+    skip_without_data!();
+    let (coord, store) = open_with("top_exact", |c| {
+        c.schema.english.frequency.enabled = true;
+        c.schema.english.frequency.strategy = "top".into();
+        c.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
+        c.input.temp_english.case_variants = false;
+    });
+    store
+        .record_completion(CompletionKind::QuickHistory, "${ResetTime}")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store
+        .record_completion(CompletionKind::QuickHistory, "${ResetTime}_x")
+        .unwrap();
+    enter_quick(&coord);
+    type_str(&coord, "${ResetTime}");
+    let texts = coord.debug_page_texts();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("${ResetTime}"),
+        "逐字相同的历史应恒首位，实际 {texts:?}"
+    );
+}
