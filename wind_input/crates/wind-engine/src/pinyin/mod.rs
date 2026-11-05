@@ -38,10 +38,67 @@ use scorer::AbbrevMatcher;
 use shuangpin::ShuangpinConverter;
 use std::sync::{Arc, OnceLock};
 use syllable::SyllableTrie;
+use tracing::debug;
 use viterbi::{ViterbiDecoder, WordNode};
 use wind_candidate::{Candidate, CandidateSource};
 use wind_dict::DictManager;
 use wind_dict::cached::CachedDict;
+
+/// convert 分段计时器：Drop 时若总耗时 ≥15ms，把各段与未命名剩余（`rest`）一次性打进日志。
+/// 仅诊断用——2026-11-04 真机偶发 convert ≥500ms 但本地/靶机探针均不复现，
+/// 需要分段定位瓶颈落点；定位完毕可整块移除。
+pub(crate) struct ConvertStageTimer {
+    tag: &'static str,
+    t: std::time::Instant,
+    stages: Vec<(std::string::String, std::time::Duration)>,
+}
+
+impl ConvertStageTimer {
+    pub(crate) fn new() -> Self {
+        Self::with_tag("")
+    }
+
+    pub(crate) fn with_tag(tag: &'static str) -> Self {
+        Self {
+            tag,
+            t: std::time::Instant::now(),
+            stages: Vec::new(),
+        }
+    }
+
+    pub(crate) fn mark(&mut self, name: impl Into<String>) {
+        let now = std::time::Instant::now();
+        let name = name.into();
+        self.stages.push((name, now - self.t));
+        self.t = now;
+    }
+}
+
+impl Drop for ConvertStageTimer {
+    fn drop(&mut self) {
+        const MIN: std::time::Duration = std::time::Duration::from_millis(15);
+        let tail = self.t.elapsed();
+        let named: std::time::Duration = self
+            .stages
+            .iter()
+            .map(|(_, d)| *d)
+            .sum::<std::time::Duration>();
+        let total = named + tail;
+        if total < MIN {
+            return;
+        }
+        let parts: Vec<String> = self
+            .stages
+            .iter()
+            .map(|(n, d)| format!("{n}={d:?}"))
+            .collect();
+        debug!(
+            "convert 分段[{}]: total={total:?} {} rest={tail:?}",
+            self.tag,
+            parts.join(" ")
+        );
+    }
+}
 
 /// 整句解的**等效词频**：把 Viterbi 路径分换算回词频域，与其余候选同量纲。
 ///
@@ -3103,6 +3160,7 @@ impl Engine for PinyinEngine {
         let allow_partial_final = opts
             .allow_partial_final
             .unwrap_or(self.config.enable_partial_final);
+        let mut timer = ConvertStageTimer::new();
         if input.is_empty() {
             return Ok(ConvertResult::default());
         }
@@ -3311,6 +3369,7 @@ impl Engine for PinyinEngine {
         } else {
             Dag::build(input, trie).maximum_match()
         };
+        timer.mark("seg");
 
         // 完成音节覆盖的连续前缀（从起点算）。
         //
@@ -3363,6 +3422,7 @@ impl Engine for PinyinEngine {
                 candidates[before].meta.fuzzy_typed_boundary = typed;
             }
         }
+        timer.mark("exact");
 
         // （step 1.5「超长词典整词兜底」已删除。它把音节数超过 `max_word_len` 的词典精确
         //  整词按 `score_node` 折算成「单节点等价整句分」并抬到整句量纲，同时标 `is_sentence`
@@ -3544,6 +3604,8 @@ impl Engine for PinyinEngine {
             }
         }
 
+        timer.mark("sent");
+
         // 2c. **残码补全整句解码**：尾部残码作为「待定音节」入图，由 LM 选出最优单字
         //     （`buzhidaok` → 「不知道」+ `k` 补成「看」→ 整句「不知道看」）。
         //
@@ -3681,6 +3743,8 @@ impl Engine for PinyinEngine {
                 }
             }
         }
+
+        timer.mark("sentp");
 
         // 2b. **混合整句解码**：简拼段与全拼段在同一张词图里由 Viterbi 选路径
         //     （`bzdhaobuhao` → 「不知道」+「好不好」→ 整句「不知道好不好」）。
@@ -3857,6 +3921,8 @@ impl Engine for PinyinEngine {
                 }
             }
         }
+
+        timer.mark("mixed");
 
         // 4. 前缀查找（补全词，code 比输入长，如 si→思考）→ 前缀层级，降到精确之后。
         //
@@ -4035,6 +4101,7 @@ impl Engine for PinyinEngine {
         // 整串是否**纯简拼形态**（每字母均为某音节首字母、且非完整音节序列）。
         // 提成变量供 step5 / step6 / step6.2 共用，`enable_abbrev` 仍在短路前（关闭时
         // 连 is_abbreviation 的 Dag 构建都省掉）。
+        timer.mark("prefix");
         let stroke_is_plain_abbrev =
             self.config.enable_abbrev && AbbrevMatcher::is_abbreviation(abbr_query, trie);
 
@@ -4128,6 +4195,9 @@ impl Engine for PinyinEngine {
         } else {
             Vec::new()
         };
+        timer.mark("abbrevs5");
+
+        // 5b. 混合简拼：同一串里混用声母与完整音节（`nhao` = n + hao、`nih` = ni + h）。
         if !mixed_pats.is_empty() {
             // 同一串的多条解释常投影到同一个键（`nhao` 的 [n][hao] 与 `nih` 的 [ni][h] 都是
             // `nh`），按键去重后每个键只点查一次索引。
@@ -4138,6 +4208,7 @@ impl Engine for PinyinEngine {
                 .collect();
             keys.sort_unstable();
             keys.dedup();
+            timer.mark("a5keys");
             for key in &keys {
                 // 与 step5 共用 `ABBREV_INDEX_LIMIT`（两条路径查的是同一张表、同一个键）。
                 // 这里拿到的码还要过一道逐段校验，**绝大多数会被滤掉**，窗口小了几乎一条不剩。
@@ -4186,7 +4257,10 @@ impl Engine for PinyinEngine {
                     }
                 }
             }
+            timer.mark("a5search");
         }
+
+        timer.mark("abbrevs");
 
         // 6. 用户/临时造词层（L：让拼音造的词显现）。查询与主词典相同的码——整串精确 +
         //    各前缀子码（你好 coded「nihao」当输入「nihaoma」时部分消费）+ 前缀补全——
@@ -5210,6 +5284,7 @@ impl Engine for PinyinEngine {
             }
         }
 
+        timer.mark("tail");
         let has_partial = !partial_syllable.is_empty();
         let is_empty = candidates.is_empty();
 

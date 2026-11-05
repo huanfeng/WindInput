@@ -4651,6 +4651,7 @@ impl EngineManager {
     /// `recheck_auto_commit` / `handle_top_code` 三条通路的收口点，一处接线即覆盖拼音、
     /// 码表及以后任何新引擎。详见 [`crate::english_merge`] 模块文档。
     pub fn convert(&self, input: &str, max_candidates: usize) -> ConvertResult {
+        let mut timer = crate::pinyin::ConvertStageTimer::new();
         let Some(engine) = self.active_engine() else {
             return ConvertResult::default();
         };
@@ -4658,6 +4659,7 @@ impl EngineManager {
             warn!("convert error: {}", e);
             ConvertResult::default()
         });
+        timer.mark("engine");
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
             // ★ 判据**只有一个**：中文侧有没有候选。它本身就完整表达了「用户在打中文
             // 还是在打英文」，不必再叠「有没有精确命中」——叠了会在「无精确→有精确」
@@ -4696,6 +4698,7 @@ impl EngineManager {
                 r.is_empty = r.candidates.is_empty();
             }
         }
+        timer.mark("english");
         r
     }
 
@@ -6268,9 +6271,11 @@ impl EngineManager {
         input: &str,
         max_candidates: usize,
     ) -> ConvertResult {
+        let mut timer = crate::pinyin::ConvertStageTimer::new();
         if !self.ensure_loaded(schema_id) {
             return ConvertResult::default();
         }
+        timer.mark(format!("cvwith:{schema_id}"));
         let engine = self.loaded_engine(schema_id);
         match engine {
             Some(e) => e.convert(input, max_candidates).unwrap_or_else(|err| {
