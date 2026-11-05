@@ -2765,14 +2765,14 @@ impl Coordinator {
     ) -> Arc<Self> {
         // 注入 redb Store：码表引擎注册用户词/临时词层，用户词进候选合并。
         // override_dir 为 None 时由 EngineManager 取默认（用户配置目录下的 schema_overrides）。
-        let engine_mgr = match override_dir {
-            Some(od) => {
-                EngineManager::with_store_override(&config, data_dir, store.clone(), Some(od))
-            }
-            None => EngineManager::with_store(&config, data_dir, store.clone()),
-        };
-        // 覆盖层在任何后台线程起来之前定下；桌面恒为 Base，此处是空操作。
-        engine_mgr.apply_config_overlay(profile.config_overlay, &config);
+        // 覆盖层在构造时传入（引擎一次建成）；override_dir 为 None 取默认目录。
+        let engine_mgr = EngineManager::with_store_override_overlay(
+            &config,
+            data_dir,
+            store.clone(),
+            override_dir.or_else(EngineManager::default_override_dir),
+            profile.config_overlay,
+        );
         // 应用兼容规则：系统层(data/compat.toml) + 用户层覆盖。供焦点进程按名查规则
         // （如微信 caret_use_top）。
         let app_compat = wind_config::app_compat::AppCompat::load(data_dir, user_dir.as_deref());

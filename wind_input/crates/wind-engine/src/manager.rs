@@ -620,8 +620,8 @@ pub struct EngineManager {
     single_char_used: std::sync::atomic::AtomicU64,
     /// 全局拼音配置（fuzzy/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
-    /// 取配置时套哪层覆盖（`[mobile.*]`）。构造时为 `Base`，由宿主经
-    /// [`Self::apply_config_overlay`] 改写；重载时继续读它。
+    /// 取配置时套哪层覆盖（`[mobile.*]`）。构造时定下（见
+    /// [`Self::with_store_override_overlay`]），重载时继续读它。
     overlay: Mutex<wind_config::ConfigOverlay>,
     /// 纠错与提示配置（`[input.correction]`），与 `pinyin` 一同决定 [`pinyin_hint_on`]。
     correction_cfg: Mutex<wind_config::CorrectionConfig>,
@@ -920,8 +920,12 @@ impl EngineManager {
         data_dir: Option<&Path>,
         store: Option<Arc<wind_store::Store>>,
     ) -> Self {
-        let override_dir = Config::user_config_dir().map(|d| d.join("schema_overrides"));
-        Self::with_store_override(config, data_dir, store, override_dir)
+        Self::with_store_override(config, data_dir, store, Self::default_override_dir())
+    }
+
+    /// 默认的方案 override 目录：用户配置目录下的 `schema_overrides`。
+    pub fn default_override_dir() -> Option<std::path::PathBuf> {
+        Config::user_config_dir().map(|d| d.join("schema_overrides"))
     }
 
     /// 同 [`with_store`]，但显式指定 override 目录（测试用，避免污染真实用户目录）。
@@ -930,6 +934,23 @@ impl EngineManager {
         data_dir: Option<&Path>,
         store: Option<Arc<wind_store::Store>>,
         override_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self::with_store_override_overlay(
+            config,
+            data_dir,
+            store,
+            override_dir,
+            wind_config::ConfigOverlay::Base,
+        )
+    }
+
+    /// 真实构造入口：覆盖层（`[mobile.*]`）在构造时定下，引擎一次建成，不经重载。
+    pub fn with_store_override_overlay(
+        config: &Config,
+        data_dir: Option<&Path>,
+        store: Option<Arc<wind_store::Store>>,
+        override_dir: Option<std::path::PathBuf>,
+        overlay: wind_config::ConfigOverlay,
     ) -> Self {
         // 初始化缓存根（一次）：%LOCALAPPDATA%\WindInput\cache，提前建好目录
         CACHE_DIR.get_or_init(|| {
@@ -1009,8 +1030,8 @@ impl EngineManager {
             user_text_built: std::sync::OnceLock::new(),
             single_char_codes: Mutex::new(None),
             single_char_used: std::sync::atomic::AtomicU64::new(0),
-            pinyin: Mutex::new(config.pinyin_effective(wind_config::ConfigOverlay::Base)),
-            overlay: Mutex::new(wind_config::ConfigOverlay::Base),
+            pinyin: Mutex::new(config.pinyin_effective(overlay)),
+            overlay: Mutex::new(overlay),
             correction_cfg: Mutex::new(config.input.correction.clone()),
             correction: Mutex::new(Arc::new(
                 crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
@@ -4457,17 +4478,6 @@ impl EngineManager {
     /// 当前取配置时套用的覆盖层。
     pub fn config_overlay(&self) -> wind_config::ConfigOverlay {
         *self.overlay.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// 改写覆盖层并按它重取配置。构造路径在 `EngineManager` 建好后、启动任何后台线程前调用；
-    /// 与当前层相同时是空操作（桌面恒为 `Base`，零开销、零变化）。
-    pub fn apply_config_overlay(&self, overlay: wind_config::ConfigOverlay, config: &Config) {
-        if self.config_overlay() == overlay {
-            return;
-        }
-        *self.overlay.lock().unwrap_or_else(|e| e.into_inner()) = overlay;
-        // 引擎按旧覆盖层建成，必须重建：走与热重载同一条路径。
-        self.reload_from_config(config);
     }
 
     /// 按新配置热重载方案集（无需重建 EngineManager）：重算可用方案、更新上屏策略、
@@ -8863,6 +8873,30 @@ fn pinyin_hint_on(
 
 #[cfg(test)]
 mod tests {
+    /// 覆盖层在构造时就位：不走重载路径（`engines_gen` 仍为 0），生效配置已是 `[mobile.grammar]`。
+    #[test]
+    fn overlay_applied_at_construction_without_rebuild() {
+        let mut cfg = Config::default();
+        cfg.schema.pinyin.grammar.weight = 0.0;
+        cfg.mobile.grammar.weight = 0.7;
+        let m = EngineManager::with_store_override_overlay(
+            &cfg,
+            None,
+            None,
+            None,
+            wind_config::ConfigOverlay::Mobile,
+        );
+        assert_eq!(m.config_overlay(), wind_config::ConfigOverlay::Mobile);
+        assert_eq!(m.pinyin_global().grammar.weight, 0.7);
+        assert_eq!(
+            m.engines_gen.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "构造期不得走重载路径"
+        );
+        let base = EngineManager::new(&cfg, None);
+        assert_eq!(base.pinyin_global().grammar.weight, 0.0);
+    }
+
     use super::*;
 
     #[test]
