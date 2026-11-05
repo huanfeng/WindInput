@@ -41,13 +41,9 @@ fn reload_keeps_mobile_overlay() {
     );
 
     // 用户层改移动段：联想类型与语法权重
-    core.config_set("mobile.association.kind", ConfigValue::Str("smart".into()))
+    core.config_set("mobile.association.kind", ConfigValue::Str("word".into()))
         .unwrap();
     core.config_set("mobile.grammar.weight", ConfigValue::Float(0.42))
-        .unwrap();
-    // 基线语法权重同改一次：它会让方案段变脏、触发引擎热重建，
-    // 重建后生效值必须仍取移动段而不是基线（单改移动段不触发重建，另见报告）
-    core.config_set("schema.pinyin.grammar.weight", ConfigValue::Float(0.11))
         .unwrap();
     core.run_command(MobileCommand::ReloadConfig);
 
@@ -55,7 +51,7 @@ fn reload_keeps_mobile_overlay() {
     let coord = core.debug_coordinator();
     assert_eq!(
         coord.debug_assoc_kind(),
-        "smart",
+        "word",
         "联想按 [mobile.association]"
     );
     assert_eq!(

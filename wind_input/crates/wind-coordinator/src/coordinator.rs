@@ -951,7 +951,11 @@ thread_local! {
 ///   不重建），结果在 `reload_user_config` 里并进 `schema_dirty`。
 /// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
 ///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
-pub(crate) fn engine_reload_needed(old: &Config, new: &Config) -> bool {
+pub(crate) fn engine_reload_needed(
+    old: &Config,
+    new: &Config,
+    overlay: wind_config::ConfigOverlay,
+) -> bool {
     let schema_changed = {
         let mut old_schema = old.schema.clone();
         old_schema.keep_all_loaded = new.schema.keep_all_loaded;
@@ -961,6 +965,10 @@ pub(crate) fn engine_reload_needed(old: &Config, new: &Config) -> bool {
         || old.input.temp_pinyin != new.input.temp_pinyin
         || old.input.temp_english != new.input.temp_english
         || old.input.reverse.lookup_disabled_dicts != new.input.reverse.lookup_disabled_dicts
+        // 引擎的拼音全局配置是 `pinyin_effective(overlay)` 的快照，只在重建时重算。
+        // 移动档下语法取 `[mobile.grammar]`，它不在 `schema` 里——只改它时上面几项都不变，
+        // 引擎就停在旧值。Base 档的有效值就是 `schema.pinyin`，已被 schema_changed 覆盖。
+        || old.pinyin_effective(overlay) != new.pinyin_effective(overlay)
 }
 
 /// 空码时按标点/符号键怎么处置这串废码（`input.punct_on_empty_behavior` 的解释结果）。
@@ -5148,7 +5156,8 @@ impl Coordinator {
                 // `[input.correction]` 由引擎侧同步：只改提示开关的就地生效，改纠错规则 /
                 // 「误读」勾选的并入重建。`|` 不短路：同步必须跑。
                 let schema_dirty =
-                    engine_reload_needed(&old.config, &cfg) | self.engine_mgr.sync_correction(&cfg);
+                    engine_reload_needed(&old.config, &cfg, self.profile().config_overlay)
+                        | self.engine_mgr.sync_correction(&cfg);
                 // 候选窗定位方式切换的边沿检测（见下方 ReportCandidatePos）。
                 let cand_was_fixed = old.config.ui.candidate.is_fixed_position();
                 let was_keep_all = old.config.schema.keep_all_loaded;
@@ -12043,9 +12052,20 @@ mod engine_reload_needed_tests {
         let mut new = old.clone();
         new.input.temp_english.phrase_seg = !old.input.temp_english.phrase_seg;
         assert!(
-            engine_reload_needed(&old, &new),
+            engine_reload_needed(&old, &new, wind_config::ConfigOverlay::Base),
             "临英段变更必须让引擎重建，否则引擎侧镜像会停在旧值"
         );
+    }
+
+    /// 移动档下只改 `[mobile.grammar]` 也必须重建；桌面档不看该段，不得重建。
+    #[test]
+    fn mobile_grammar_change_follows_overlay() {
+        use wind_config::ConfigOverlay::{Base, Mobile};
+        let old = Config::default();
+        let mut new = old.clone();
+        new.mobile.grammar.weight = old.mobile.grammar.weight + 0.1;
+        assert!(engine_reload_needed(&old, &new, Mobile));
+        assert!(!engine_reload_needed(&old, &new, Base));
     }
 
     /// 临拼段同理（既有行为，一并钉住）。
@@ -12054,7 +12074,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.input.temp_pinyin.enabled = !old.input.temp_pinyin.enabled;
-        assert!(engine_reload_needed(&old, &new));
+        assert!(engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// schema 段（含 `schema.english.phrase_seg`）同理。
@@ -12063,7 +12087,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.schema.english.phrase_seg = !old.schema.english.phrase_seg;
-        assert!(engine_reload_needed(&old, &new));
+        assert!(engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// ★ 反向对照：与引擎无关的段变更**不该**触发重建。
@@ -12076,7 +12104,7 @@ mod engine_reload_needed_tests {
         let mut new = old.clone();
         new.ui.toolbar.visible = !old.ui.toolbar.visible;
         assert!(
-            !engine_reload_needed(&old, &new),
+            !engine_reload_needed(&old, &new, wind_config::ConfigOverlay::Base),
             "工具栏可见性与引擎无关，不该触发重建"
         );
     }
@@ -12087,7 +12115,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.input.reverse.lookup_disabled_dicts = !old.input.reverse.lookup_disabled_dicts;
-        assert!(engine_reload_needed(&old, &new));
+        assert!(engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// 反向对照：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 / 后台预热），
@@ -12097,7 +12129,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.schema.keep_all_loaded = !old.schema.keep_all_loaded;
-        assert!(!engine_reload_needed(&old, &new));
+        assert!(!engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// 反向对照：反查模式的候选布局只给协调器读，不该丢词典缓存。
@@ -12106,7 +12142,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.input.reverse.candidate_layout = wind_config::LayoutIntent::Vertical;
-        assert!(!engine_reload_needed(&old, &new));
+        assert!(!engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 }
 
