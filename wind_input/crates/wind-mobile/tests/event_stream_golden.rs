@@ -218,6 +218,15 @@ fn mobile_event_stream_matches_golden() {
         assert!(t0.elapsed() < Duration::from_secs(60), "prepare 迟迟未就绪");
         std::thread::sleep(Duration::from_millis(10));
     }
+    // 反查索引阻塞建好（公开接口，幂等；若后台线程正在建则等它建完）。之后再打一次 w + Esc
+    // 吸收可能的补刷帧（补刷只在编码非空时发），长静默收敛后截断，不进基线
+    core.debug_coordinator().prewarm_indexes();
+    let before_idx = rec.len();
+    letters(&core, "w");
+    settle_quiet(&rec, "索引预热", Duration::from_millis(300));
+    core.key_down(VK_ESCAPE, 0);
+    settle_quiet(&rec, "索引预热后取消", Duration::from_millis(300));
+    rec.truncate(before_idx);
     settle(&rec, "预热结束");
 
     // 每步：先写分隔行、再动作、再等静默
@@ -272,6 +281,7 @@ fn mobile_event_stream_matches_golden() {
     // 冷启动预热（不进基线）：刚切到的拼音方案，首次出候选后会有后台建反查索引的补刷帧
     // （coordinator.rs `spawn_index_warm` 末尾的重渲染）和延时「正在建立词库索引…」提示，
     // 到达时刻取决于建索引耗时。先打一次 n 把它们吸收掉，用 500ms 长静默收敛，再截断记录。
+    core.debug_coordinator().prewarm_indexes();
     let before_warm = rec.len();
     letters(&core, "n");
     settle_quiet(&rec, "拼音预热", Duration::from_millis(500));

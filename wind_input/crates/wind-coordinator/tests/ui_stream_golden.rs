@@ -17,7 +17,7 @@
 //!
 //! 第二段 `first_show_gate_holds_until_caret`（基线 `desktop_ui_stream_gate.txt`）走桌面生产配置
 //! （不设 caret_independent），覆盖首显闸门「先压后放」与 caret 坐标透传到 UpdateCandidates /
-//! ShowStatusTip；只测顺序、不等兜底定时器。
+//! ShowStatusTip；事件驱动预热，兜底定时器依赖见该测试的文档注释。
 //!
 //! 归一化：`UiCommand` 的 Debug 输出里会带出厂数据目录的绝对路径（机器相关），
 //! 一律替换成 `<DATA>`；除此之外不做任何改动。
@@ -102,6 +102,43 @@ fn settle(rx: &Receiver<UiCommand>, step: &str, out: &mut Vec<String>) {
             "步骤「{step}」一直有新消息，无法收敛"
         );
     }
+}
+
+/// 同 [`settle`] 但不写步骤标题（调用方已写）。
+fn settle_no_header(rx: &Receiver<UiCommand>, out: &mut Vec<String>) {
+    let raw = data_dir();
+    let canon = raw.canonicalize().unwrap_or_else(|_| raw.clone());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while let Ok(cmd) = rx.recv_timeout(Duration::from_millis(50)) {
+        out.push(
+            format!("{cmd:?}")
+                .replace(&canon.display().to_string(), "<DATA>")
+                .replace(&raw.display().to_string(), "<DATA>"),
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "一直有新消息，无法收敛"
+        );
+    }
+}
+
+/// 事件驱动预热：按 `w`，`recv` 到含「编码」段的候选帧（反查索引已建好、补刷帧已到）为止，
+/// 再 Esc 并排空。60s 超时即失败。之后的帧都是稳态，不会再有索引补刷。
+fn warm_until_code_segment(coord: &Coordinator, rx: &Receiver<UiCommand>) {
+    letter(coord, 'w');
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let cmd = rx
+            .recv_timeout(left)
+            .expect("60s 内没等到含「编码」段的候选帧");
+        if matches!(&cmd, UiCommand::UpdateCandidates { .. }) && format!("{cmd:?}").contains("编码")
+        {
+            break;
+        }
+    }
+    coord.handle_key_event(&key(VK_ESCAPE));
+    let _ = rx.try_iter().count();
 }
 
 fn compare_golden(name: &str, actual: &str) {
@@ -201,6 +238,8 @@ fn desktop_ui_stream_matches_golden() {
     // prepare，故丢弃不录
     let mut discard = Vec::new();
     settle(&rx, "预热结束", &mut discard);
+    // 再事件驱动地等索引补刷帧到齐（prepare 只保证假键走完，不保证后台建索引完成）
+    warm_until_code_segment(&coord, &rx);
 
     for c in "wqvb".chars() {
         letter(&coord, c);
@@ -238,10 +277,16 @@ fn desktop_ui_stream_matches_golden() {
 
 /// 首显闸门 + 坐标透传（桌面生产路径：不设 caret_independent）。
 ///
-/// 只测「先丢后放」的顺序：没有 caret 时新组合首帧被闸门压住（`notify_ui_update` 里
+/// 只测「先压后放」的顺序：没有 caret 时新组合首帧被闸门压住（`notify_ui_update` 里
 /// `arm_pending_first_show` 后 return），喂权威 caret 后出帧且帧里带着该坐标。
-/// **不等兜底定时器**——预热后先用长静默把 prepare 假键残留的 pending timer 耗尽；
-/// 真正录制的步骤里，gate 的 timer 不会触发（每步都在 caret 到达前/后立刻收敛）。
+///
+/// 实际依赖（没有一项靠 sleep 猜时间）：
+/// - 冷启动：预热时按 `w` 并 `recv` 到含「编码」段的候选帧（即 `spawn_index_warm` 的补刷帧
+///   已到），再 Esc 排空，之后的帧都是稳态。60s 超时即失败。
+/// - 兜底定时器：非 fast 档为硬编码 150ms（first_show.rs `first_show_fallback_ms`），不可配。
+///   录制步骤里按键后用 `try_iter` 立即确认无候选帧并马上喂 caret，间隔是微秒级；
+///   极端调度延迟 >150ms 让定时器先触发时，帧序会变化、测试**明确失败**（不会静默通过）。
+///   Esc 触发 `reset_first_show` 作废预热遗留的 pending 与 timer，不靠等待。
 #[test]
 fn first_show_gate_holds_until_caret() {
     let dd = data_dir();
@@ -254,25 +299,28 @@ fn first_show_gate_holds_until_caret() {
     cfg.input.default.chinese_mode = true;
 
     let (coord, rx) = Coordinator::new_headless_with_ui(cfg, Some(&dd));
-    // 冷启动预热（惰性索引），帧丢弃；长静默让预热遗留的兜底 timer 先走完
     coord.prepare();
     let t0 = std::time::Instant::now();
     while coord.readiness() != wind_host::Readiness::Ready {
         assert!(t0.elapsed() < Duration::from_secs(60), "prepare 迟迟未就绪");
         std::thread::sleep(Duration::from_millis(10));
     }
-    std::thread::sleep(Duration::from_millis(500));
-    let _ = rx.try_iter().count();
+    caret(&coord);
+    warm_until_code_segment(&coord, &rx);
 
     let mut out: Vec<String> = Vec::new();
+    // 按键后不 settle：立刻 try_iter 取走此刻已有的（同步产生的）命令，然后马上喂 caret
+    out.push("## 无 caret 按 w".into());
     letter(&coord, 'w');
-    settle(&rx, "无 caret 按 w", &mut out);
+    let before: Vec<String> = rx.try_iter().map(|c| format!("{c:?}")).collect();
     assert!(
-        !out.iter().any(|l| l.starts_with("UpdateCandidates")),
-        "没有 caret 时首帧应被闸门压住，实际收到: {out:?}"
+        !before.iter().any(|l| l.starts_with("UpdateCandidates")),
+        "没有 caret 时首帧应被闸门压住，实际收到: {before:?}"
     );
+    out.extend(before);
+    out.push("## 喂 caret".into());
     caret(&coord);
-    settle(&rx, "喂 caret", &mut out);
+    settle_no_header(&rx, &mut out);
     assert!(
         out.iter().any(|l| l.starts_with("UpdateCandidates")),
         "喂 caret 后应出候选帧，实际: {out:?}"
