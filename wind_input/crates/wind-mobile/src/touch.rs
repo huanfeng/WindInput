@@ -99,7 +99,7 @@ impl MobileCore {
             if self.coord.is_composing() {
                 if !self.coord.latin_input() {
                     // 中文组码：首选上屏，再出数字（同打标点）。不清 auto_spaced（Kotlin 在此直接返回）
-                    let mut out = self.select_candidate(0);
+                    let mut out = self.select_candidate_plain(0);
                     let ops = vec![EditOp::Commit(d.to_string())];
                     self.coord.note_host_edits(&ops);
                     out.ops.extend(ops);
@@ -440,6 +440,46 @@ mod tests {
         assert!(out.consumed);
         assert_eq!(out.ops.last(), Some(&commit(" ")), "{out:?}");
         assert!(m.auto_spaced.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn select_candidate_plain_adds_no_space() {
+        let Some((m, _rx)) = core("selplain", "english", |_| {}) else {
+            return;
+        };
+        type_str(&m, "hel");
+        assert!(m.candidates(0, 1).total > 0);
+        let out = m.select_candidate_plain(0);
+        assert!(out.consumed);
+        assert!(!out.ops.contains(&commit(" ")), "{out:?}");
+        assert!(!m.auto_spaced.load(Ordering::Relaxed));
+        let dot = m.press(ch('.'), KeySource::Touch);
+        assert!(
+            !dot.ops
+                .iter()
+                .any(|o| matches!(o, EditOp::ReplaceBackward { .. })),
+            "没补空格就不该换位: {dot:?}"
+        );
+    }
+
+    #[test]
+    fn touch_digit_with_association_keeps_ops_order() {
+        let Some((m, _rx)) = core("digassoc", "wubi86", |_| {}) else {
+            return;
+        };
+        type_str(&m, "aa");
+        let out = m.press(ch('1'), KeySource::Touch);
+        assert!(out.consumed);
+        assert_eq!(out.ops.len(), 3, "{out:?}");
+        assert!(
+            matches!(&out.ops[0], EditOp::Commit(t) if t != "1" && !t.is_empty()),
+            "{out:?}"
+        );
+        assert!(
+            matches!(&out.ops[1], EditOp::SetComposition { text, .. } if text == " "),
+            "{out:?}"
+        );
+        assert_eq!(out.ops[2], commit("1"), "{out:?}");
     }
 
     #[test]

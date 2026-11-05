@@ -686,11 +686,20 @@ impl MobileCore {
     pub fn select_candidate(&self, index: usize) -> KeyOutcome {
         // 先算再选：选词之后组合已经没了，判不出「是在英文组码中选的」
         let english = self.coord.latin_input() && self.coord.is_composing();
-        let mut outcome = self.coord.select_candidate(index);
-        self.coord.note_host_edits(&outcome.ops);
+        let mut outcome = self.select_candidate_plain(index);
         if english {
             self.append_auto_space(&mut outcome);
         }
+        outcome
+    }
+
+    /// 同 [`Self::select_candidate`]，但**不补空格、不动 `auto_spaced`**。
+    ///
+    /// 宿主自己要紧接着上屏别的东西（表情、符号、数字键盘的字符）时用：先把首选顶上屏，
+    /// 再接宿主的字符，中间不该夹一个空格。
+    pub fn select_candidate_plain(&self, index: usize) -> KeyOutcome {
+        let outcome = self.coord.select_candidate(index);
+        self.coord.note_host_edits(&outcome.ops);
         outcome
     }
 
