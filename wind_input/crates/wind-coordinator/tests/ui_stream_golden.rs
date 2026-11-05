@@ -15,6 +15,10 @@
 //! 出不出帧取决于定时器与按键谁先到）并等 `prepare` 就绪（冷启动惰性索引未建好时，
 //! 首批候选 tooltip 缺「编码」段），这两项都会让基线随时序抖动，故在录制前去掉。
 //!
+//! 第二段 `first_show_gate_holds_until_caret`（基线 `desktop_ui_stream_gate.txt`）走桌面生产配置
+//! （不设 caret_independent），覆盖首显闸门「先压后放」与 caret 坐标透传到 UpdateCandidates /
+//! ShowStatusTip；只测顺序、不等兜底定时器。
+//!
 //! 归一化：`UiCommand` 的 Debug 输出里会带出厂数据目录的绝对路径（机器相关），
 //! 一律替换成 `<DATA>`；除此之外不做任何改动。
 //!
@@ -25,15 +29,40 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use wind_bridge::handler::{KeyEventData, MessageHandler};
+use wind_bridge::handler::{CaretData, KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
-use wind_ipc::protocol::EVENT_KEY_DOWN;
+use wind_ipc::protocol::{EVENT_KEY_DOWN, caret_source};
 use wind_keys::keymap::{VK_BACK, VK_ESCAPE, VK_SPACE};
 use wind_ui_types::{MenuCmd, MenuKind, UiCommand, UiEvent};
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
+}
+
+/// 有出厂数据返回 true；缺数据时 CI 打印原因返回 false（调用方跳过），否则 panic。
+fn has_data(dd: &std::path::Path) -> bool {
+    if dd.join("schemas/wubi86.schema.toml").exists() {
+        return true;
+    }
+    let msg = format!("缺少出厂数据 {}", dd.display());
+    if std::env::var_os("CI").is_some() {
+        eprintln!("跳过：{msg}（CI 环境）");
+        return false;
+    }
+    panic!("{msg}，本地不允许跳过（设 CI 环境变量可跳过）");
+}
+
+fn caret(coord: &Coordinator) {
+    coord.handle_caret_update(&CaretData {
+        x: 100,
+        y: 200,
+        height: 20,
+        composition_start_x: 100,
+        composition_start_y: 200,
+        source: caret_source::TSF_SELECTION,
+        composition_rect: None,
+    });
 }
 
 fn key(vk: u32) -> KeyEventData {
@@ -147,13 +176,8 @@ fn compare_golden(name: &str, actual: &str) {
 #[test]
 fn desktop_ui_stream_matches_golden() {
     let dd = data_dir();
-    if !dd.join("schemas/wubi86.schema.toml").exists() {
-        let msg = format!("缺少出厂数据 {}", dd.display());
-        if std::env::var_os("CI").is_some() {
-            eprintln!("跳过：{msg}（CI 环境）");
-            return;
-        }
-        panic!("{msg}，本地不允许跳过（设 CI 环境变量可跳过）");
+    if !has_data(&dd) {
+        return;
     }
     let mut cfg = Config::default();
     cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
@@ -173,7 +197,10 @@ fn desktop_ui_stream_matches_golden() {
         assert!(t0.elapsed() < Duration::from_secs(60), "prepare 迟迟未就绪");
         std::thread::sleep(Duration::from_millis(10));
     }
-    settle(&rx, "预热结束", &mut out);
+    // prepare 的假键帧（SetCandidateMinSize / HideCandidates）只属于预热，桌面生产路径不调用
+    // prepare，故丢弃不录
+    let mut discard = Vec::new();
+    settle(&rx, "预热结束", &mut discard);
 
     for c in "wqvb".chars() {
         letter(&coord, c);
@@ -207,4 +234,60 @@ fn desktop_ui_stream_matches_golden() {
     let mut text = out.join("\n");
     text.push('\n');
     compare_golden("desktop_ui_stream.txt", &text);
+}
+
+/// 首显闸门 + 坐标透传（桌面生产路径：不设 caret_independent）。
+///
+/// 只测「先丢后放」的顺序：没有 caret 时新组合首帧被闸门压住（`notify_ui_update` 里
+/// `arm_pending_first_show` 后 return），喂权威 caret 后出帧且帧里带着该坐标。
+/// **不等兜底定时器**——预热后先用长静默把 prepare 假键残留的 pending timer 耗尽；
+/// 真正录制的步骤里，gate 的 timer 不会触发（每步都在 caret 到达前/后立刻收敛）。
+#[test]
+fn first_show_gate_holds_until_caret() {
+    let dd = data_dir();
+    if !has_data(&dd) {
+        return;
+    }
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
+    cfg.schema.active = "wubi86".into();
+    cfg.input.default.chinese_mode = true;
+
+    let (coord, rx) = Coordinator::new_headless_with_ui(cfg, Some(&dd));
+    // 冷启动预热（惰性索引），帧丢弃；长静默让预热遗留的兜底 timer 先走完
+    coord.prepare();
+    let t0 = std::time::Instant::now();
+    while coord.readiness() != wind_host::Readiness::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(60), "prepare 迟迟未就绪");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = rx.try_iter().count();
+
+    let mut out: Vec<String> = Vec::new();
+    letter(&coord, 'w');
+    settle(&rx, "无 caret 按 w", &mut out);
+    assert!(
+        !out.iter().any(|l| l.starts_with("UpdateCandidates")),
+        "没有 caret 时首帧应被闸门压住，实际收到: {out:?}"
+    );
+    caret(&coord);
+    settle(&rx, "喂 caret", &mut out);
+    assert!(
+        out.iter().any(|l| l.starts_with("UpdateCandidates")),
+        "喂 caret 后应出候选帧，实际: {out:?}"
+    );
+    letter(&coord, 'q');
+    settle(&rx, "再按 q", &mut out);
+    letter(&coord, 'v');
+    letter(&coord, 'b');
+    settle(&rx, "再按 vb", &mut out);
+    menu(&coord, MenuCmd::TogglePunct);
+    settle(&rx, "切英文标点", &mut out);
+
+    let mut text = out.join("\n");
+    text.push('\n');
+    assert!(text.contains("caret_x: 100"), "帧里应带 caret 坐标");
+    assert!(text.contains("caret_valid: true"), "帧里应标 caret 有效");
+    compare_golden("desktop_ui_stream_gate.txt", &text);
 }
