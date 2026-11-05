@@ -35,6 +35,20 @@ impl Coordinator {
         self.handle_ui_event(UiEvent::MenuAction(kind));
     }
 
+    /// 弹一条 toast（测试/诊断用）：直通生产入口 [`Self::show_toast`]。
+    pub fn debug_show_toast(&self, text: &str) {
+        self.show_toast(
+            text,
+            wind_ui_types::ToastPosition::BottomCenter,
+            wind_ui_types::ToastKind::Info,
+        );
+    }
+
+    /// 弹一条状态气泡（测试/诊断用）：直通生产入口 [`Self::show_tip`]。
+    pub fn debug_show_tip(&self, text: &str) {
+        self.show_tip(text);
+    }
+
     /// 弹出候选右键菜单（测试/诊断用）：直通生产入口 [`Self::show_candidate_menu`]，菜单项经
     /// UI 通道下发（`UiCommand::ShowCandidateMenu`）。Windows / macOS 的右键由 UI 线程触发、
     /// Linux 的入口 `menu.open` 只在 `ext_presenter` 构建里编译，集成测试都够不着。

@@ -11,7 +11,7 @@ use wind_bridge::handler::{FocusData, KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::{CompositionView, Coordinator, InputProfile, SessionEvent, SessionStatus};
 use wind_ipc::protocol::{EVENT_KEY_DOWN, caret_source};
-use wind_keys::keymap::{VK_A, VK_BACK, VK_ESCAPE, VK_LEFT, VK_SPACE};
+use wind_keys::keymap::{VK_A, VK_BACK, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_SPACE};
 use wind_ui_types::{MenuCmd, MenuKind, UiEvent};
 
 const VK_BACKTICK: u32 = 0xC0;
@@ -40,8 +40,6 @@ fn config(chinese_mode: bool) -> Config {
     cfg.schema.available = vec!["wubi86".into(), "pinyin".into(), "english".into()];
     cfg.schema.active = "wubi86".into();
     cfg.input.default.chinese_mode = chinese_mode;
-    // 英文态默认会收起工具栏，状态事件就发不出来了
-    cfg.ui.toolbar.hide_in_english = false;
     // 联想默认状态不确定，测试自己决定
     cfg.input.association.kind = "off".into();
     cfg
@@ -210,6 +208,64 @@ fn temp_mode_prefix_is_composing() {
     assert!(c.is_composing());
 }
 
+/// 回车上屏只清 `input_buffer` 和候选，不清 `preedit`：残留的 preedit 不能让 composing 卡在 true。
+#[test]
+fn enter_commit_clears_composing() {
+    if !has_data() {
+        return;
+    }
+    let (c, rx) = session_quiet(config(true));
+    letters(&c, "wq");
+    assert!(c.is_composing(), "前提：已在打字中");
+    let _ = drain(&rx);
+    press(&c, VK_RETURN);
+    let evs = drain(&rx);
+    assert!(!c.is_composing(), "回车上屏后不是打字中: {evs:?}");
+    assert_eq!(evs.last(), Some(&SessionEvent::Hide), "{evs:?}");
+}
+
+/// 带候选回车（不止一码）与空格上屏同样不残留。
+#[test]
+fn space_commit_clears_composing() {
+    if !has_data() {
+        return;
+    }
+    let (c, rx) = session_quiet(config(true));
+    letters(&c, "wq");
+    let _ = drain(&rx);
+    press(&c, VK_SPACE);
+    let evs = drain(&rx);
+    assert!(!c.is_composing(), "空格上屏后不是打字中: {evs:?}");
+    if let Some(SessionEvent::View(v)) = evs.last() {
+        assert!(!v.composing, "{v:?}");
+    }
+}
+
+/// 不变量：事件流以 `Hide` 收尾时，`is_composing()` 必为 false。
+/// 覆盖各条上屏/清空出口：无候选空格、满码自动上屏（四码连打）、回车、Esc。
+/// 其中哪些出口会残留 `preedit` 取决于方案数据，所以不逐条钉具体行为，只钉这条不变量。
+#[test]
+fn hide_always_means_not_composing() {
+    if !has_data() {
+        return;
+    }
+    for code in ["w", "wq", "xxxx", "wqvb", "zzzz", "qqqqq"] {
+        for end in [VK_SPACE, VK_RETURN, VK_ESCAPE] {
+            let (c, rx) = session_quiet(config(true));
+            letters(&c, code);
+            let _ = drain(&rx);
+            press(&c, end);
+            let evs = drain(&rx);
+            if matches!(evs.last(), Some(SessionEvent::Hide)) {
+                assert!(
+                    !c.is_composing(),
+                    "{code:?} + 键 {end:#x}：已 Hide 却仍是打字中: {evs:?}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn latin_input_true_in_english_schema() {
     if !has_data() {
@@ -255,18 +311,26 @@ fn latin_input_ignores_custom_label() {
 }
 
 #[test]
-fn toast_and_status_tip_become_notice() {
+fn toast_becomes_notice() {
     if !has_data() {
         return;
     }
     let (c, rx) = session_quiet(config(true));
-    // 切方案会弹状态提示/toast，两者在中立通道里都是 Notice
-    menu(&c, MenuCmd::SchemaEnglish);
+    c.debug_show_toast("提示一");
+    let evs = drain(&rx);
+    assert_eq!(evs, vec![SessionEvent::Notice("提示一".into())]);
+}
+
+#[test]
+fn status_tip_becomes_notice() {
+    if !has_data() {
+        return;
+    }
+    let (c, rx) = session_quiet(config(true));
+    c.debug_show_tip("提示二");
     let evs = drain(&rx);
     assert!(
-        evs.iter()
-            .any(|e| matches!(e, SessionEvent::Notice(t) if !t.is_empty())),
-        "应至少有一条 Notice: {evs:?}"
+        evs.contains(&SessionEvent::Notice("提示二".into())),
+        "{evs:?}"
     );
-    press(&c, VK_ESCAPE);
 }

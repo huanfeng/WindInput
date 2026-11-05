@@ -224,10 +224,16 @@ impl Coordinator {
     }
 }
 
-/// 打字中：有组合区内容且不是联想标识（临时模式引导符算；插入符在开头也算）。
-/// 不用 `input_buffer`：临时模式下它可能为空。
+/// 打字中：有组合区内容、不是联想标识，且确有输入在进行。
+///
+/// 第三项是为回车等上屏出口补的：它们只清 `input_buffer` 和候选，**不清 `preedit`**
+/// （`message_handler.rs` 的 Enter/Space 上屏分支），残留的 `preedit` 不能让状态卡在 true。
+/// 特殊模式（`active` 有值，临时拼音/临英等）下 `input_buffer` 可能为空而编码栏只有引导符，
+/// 那仍是打字中，所以是 `active.is_some() || 缓冲非空`，而不是单看 `input_buffer`。
 pub(crate) fn composing_of(state: &State) -> bool {
-    !state.preedit.is_empty() && !state.assoc_active()
+    !state.preedit.is_empty()
+        && !state.assoc_active()
+        && (state.active.is_some() || !state.input_buffer.is_empty())
 }
 
 /// 帧里的高亮下标。展开态的选中项是平铺下标：高亮行之前的整行都算进去。
