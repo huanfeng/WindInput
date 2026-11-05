@@ -1,0 +1,221 @@
+//! 移动端事件流基线（golden）。
+//!
+//! 用真实的 `MobileCore::new` 配记录型 `MobileEventSink`，固定脚本跑一遍，把宿主收到的
+//! 事件逐行写成「改动后仍存在的字段」，与 `tests/golden/mobile_events.txt` 逐行比较：
+//!
+//! - `C|preedit|caret|mode_label|has_candidates|selected|page|total_pages`
+//! - `H`
+//! - `S|chinese_mode|icon_label|full_width|chinese_punct|s2t_enabled|s2t_shown`
+//! - `T|text`
+//! - `## 步骤名`（脚本自己写的分隔行，不是事件）
+//!
+//! `has_candidates` 取 `!items.is_empty()`；候选文本本身不入基线（后续会改走拉取接口）。
+//! 没有任何路径/时间类内容，无需归一化。
+//!
+//! 重录：`UPDATE_GOLDEN=1 cargo test -p wind-mobile --test event_stream_golden`。
+//! **基线已提交后不得重录。**
+//!
+//! 只放这一个测试：`MobileCore::new` 会写进程环境变量，同进程并行跑多个会互相干扰。
+//! 缺出厂数据直接失败，不跳过。
+
+#![cfg(target_os = "linux")]
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use wind_keys::keymap::{VK_BACK, VK_ESCAPE, VK_SPACE};
+use wind_mobile::{CandidateFrame, InputStatus, MobileCommand, MobileCore, MobileEventSink};
+
+#[derive(Default)]
+struct Recorder {
+    lines: Mutex<Vec<String>>,
+}
+
+impl Recorder {
+    fn push(&self, s: String) {
+        self.lines.lock().unwrap().push(s);
+    }
+    fn len(&self) -> usize {
+        self.lines.lock().unwrap().len()
+    }
+}
+
+impl MobileEventSink for Recorder {
+    fn on_candidates(&self, f: CandidateFrame) {
+        self.push(format!(
+            "C|{}|{}|{}|{}|{}|{}|{}",
+            f.preedit,
+            f.preedit_caret,
+            f.mode_label,
+            !f.items.is_empty(),
+            f.selected,
+            f.page,
+            f.total_pages
+        ));
+    }
+    fn on_hide_candidates(&self) {
+        self.push("H".into());
+    }
+    fn on_status(&self, s: InputStatus) {
+        self.push(format!(
+            "S|{}|{}|{}|{}|{}|{}",
+            s.chinese_mode, s.icon_label, s.full_width, s.chinese_punct, s.s2t_enabled, s.s2t_shown
+        ));
+    }
+    fn on_toast(&self, text: String) {
+        self.push(format!("T|{text}"));
+    }
+}
+
+/// 步骤分隔行。必须在动作**之前**写入，动作引发的事件才落在它后面。
+fn mark(rec: &Recorder, step: &str) {
+    rec.push(format!("## {step}"));
+}
+
+/// 泵线程是异步的：轮询到连续 50ms 无新增事件为止；总超时 20s，超时即失败。
+fn settle(rec: &Recorder, step: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = rec.len();
+    let mut quiet_since = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(5));
+        let n = rec.len();
+        if n != last {
+            last = n;
+            quiet_since = Instant::now();
+        } else if quiet_since.elapsed() >= Duration::from_millis(50) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "步骤「{step}」一直有新事件，无法收敛"
+        );
+    }
+}
+
+fn letters(core: &MobileCore, s: &str) {
+    for c in s.chars() {
+        core.key_down((c.to_ascii_uppercase() as u32) & 0xFF, 0);
+    }
+}
+
+fn compare_golden(name: &str, actual: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    if std::env::var("UPDATE_GOLDEN").is_ok() {
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("读不到对照文件 {}: {e}", path.display()));
+    if expected == actual {
+        return;
+    }
+    let (e, a): (Vec<&str>, Vec<&str>) = (expected.lines().collect(), actual.lines().collect());
+    let first = (0..e.len().max(a.len()))
+        .find(|&i| e.get(i) != a.get(i))
+        .unwrap_or(0);
+    let ctx = |v: &[&str]| {
+        let lo = first.saturating_sub(3);
+        let hi = (first + 4).min(v.len());
+        (lo..hi)
+            .map(|i| format!("{:>5}| {}", i + 1, v[i]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    panic!(
+        "与对照文件 {name} 不一致，首处差异在第 {} 行\n--- 期望 ---\n{}\n--- 实际 ---\n{}",
+        first + 1,
+        ctx(&e),
+        ctx(&a)
+    );
+}
+
+#[test]
+fn mobile_event_stream_matches_golden() {
+    let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
+    assert!(
+        data_dir.join("config.toml").exists()
+            && data_dir.join("schemas/wubi86.schema.toml").exists(),
+        "缺少出厂数据 {}，本录制不允许因缺数据而跳过",
+        data_dir.display()
+    );
+    let user_root = std::env::temp_dir().join(format!("wind-mobile-golden-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&user_root);
+    std::fs::create_dir_all(&user_root).unwrap();
+
+    let rec = Arc::new(Recorder::default());
+    let core = MobileCore::new(&data_dir, &user_root, "wubi86", rec.clone());
+
+    // 预热窗口：等 prepare 的后台线程完成，再等事件静默，之后才开始脚本
+    let t0 = Instant::now();
+    while core.debug_coordinator().readiness() != wind_host::Readiness::Ready {
+        assert!(t0.elapsed() < Duration::from_secs(60), "prepare 迟迟未就绪");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    settle(&rec, "预热结束");
+
+    // 每步：先写分隔行、再动作、再等静默
+    let step = |name: &str, act: &dyn Fn()| {
+        mark(&rec, name);
+        act();
+        settle(&rec, name);
+    };
+
+    step("焦点获得", &|| core.focus_gained());
+    step("输入 wqvb", &|| letters(&core, "wqvb"));
+    step("退格到空", &|| {
+        for _ in 0..4 {
+            core.key_down(VK_BACK, 0);
+        }
+    });
+    step("再输入 wqvb", &|| letters(&core, "wqvb"));
+    step("空格上屏（进入联想）", &|| {
+        core.key_down(VK_SPACE, 0);
+    });
+    step("退格离开联想", &|| {
+        core.key_down(VK_BACK, 0);
+    });
+    step("输入 wq", &|| letters(&core, "wq"));
+    step("Esc 取消", &|| {
+        core.key_down(VK_ESCAPE, 0);
+    });
+
+    let schemas = core.schemas();
+    let wubi = schemas
+        .iter()
+        .position(|s| s.id == "wubi86")
+        .expect("wubi86");
+    let pinyin = schemas
+        .iter()
+        .position(|s| s.id == "pinyin")
+        .expect("pinyin");
+
+    step("切英文", &|| core.run_command(MobileCommand::English));
+    step("切回中文", &|| {
+        core.run_command(MobileCommand::SelectSchema(wubi))
+    });
+    step("切英文标点", &|| {
+        core.run_command(MobileCommand::TogglePunct)
+    });
+    step("切回中文标点", &|| {
+        core.run_command(MobileCommand::TogglePunct)
+    });
+    step("切到拼音方案", &|| {
+        core.run_command(MobileCommand::SelectSchema(pinyin))
+    });
+    step("拼音输入声母 n", &|| letters(&core, "n"));
+    step("拼音 Esc 取消", &|| {
+        core.key_down(VK_ESCAPE, 0);
+    });
+    step("ReloadConfig", &|| {
+        core.run_command(MobileCommand::ReloadConfig)
+    });
+
+    let mut text = rec.lines.lock().unwrap().join("\n");
+    text.push('\n');
+    let _ = std::fs::remove_dir_all(&user_root);
+    compare_golden("mobile_events.txt", &text);
+}
