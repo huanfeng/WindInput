@@ -1475,6 +1475,10 @@ pub struct Coordinator {
     pub(crate) engine_mgr: EngineManager,
     /// 输入行为的平台档位，构造时定下，之后不变。见 [`crate::input_profile`]。
     pub(crate) profile: crate::input_profile::InputProfile,
+    /// 中立输出通道（`new_session` 构造时给）。有它就只发 [`crate::SessionEvent`]，并跳过
+    /// 桌面专属的首显闸门、注释渲染与候选窗布局；`None` = 桌面路径，行为不变。
+    /// 发送点集中在 `session_output.rs`。
+    pub(crate) session_tx: Option<crate::session_output::SessionSender>,
     /// redb 持久化存储（用户词/临时词/词频/影子规则）；None=无持久化（headless 测试）。
     pub(crate) store: Option<Arc<Store>>,
     /// 只读模式的原因（用户数据设计 §7.1 降级保护：meta.toml 版本高于本版本 / 读不出）；
@@ -2517,22 +2521,6 @@ impl Coordinator {
         return false;
     }
 
-    /// 当前是否有活跃组合（编码缓冲非空）。
-    ///
-    /// 供**无 TSF 前置过滤的宿主**（Android IME）做吃键判定：Windows 侧
-    /// `OnTestKeyDown` 在 IPC 往返前就决定吃不吃键，空缓冲的空格/回车/退格/数字
-    /// 根本不会送进协调器；Android 的 `onKeyDown` 没有这一层，宿主必须自己按
-    /// 「有组合才吃功能键」过滤，否则协调器对这些键返回的 `Consumed`（意为
-    /// 「已在输入法内处理」）会被当成消费，宿主既不上屏也不执行默认行为。
-    pub fn is_composing(&self) -> bool {
-        !self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .input_buffer
-            .is_empty()
-    }
-
     /// 就绪状态。见 [`wind_host::Readiness`]。
     pub fn readiness(&self) -> wind_host::Readiness {
         use std::sync::atomic::Ordering;
@@ -2770,6 +2758,34 @@ impl Coordinator {
         override_dir: Option<std::path::PathBuf>,
         storage_readonly: Option<String>,
         profile: crate::input_profile::InputProfile,
+    ) -> Arc<Self> {
+        Self::build_with_session(
+            config,
+            data_dir,
+            push_server,
+            ui_tx,
+            user_dir,
+            store,
+            override_dir,
+            storage_readonly,
+            profile,
+            None,
+        )
+    }
+
+    /// 同 [`Self::build_with_readonly`]，另给中立输出通道（`new_session` 用）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_with_session(
+        config: Config,
+        data_dir: Option<&Path>,
+        push_server: Arc<PushServer>,
+        ui_tx: crate::UiSender,
+        user_dir: Option<std::path::PathBuf>,
+        store: Option<Arc<Store>>,
+        override_dir: Option<std::path::PathBuf>,
+        storage_readonly: Option<String>,
+        profile: crate::input_profile::InputProfile,
+        session_tx: Option<crate::session_output::SessionSender>,
     ) -> Arc<Self> {
         // 注入 redb Store：码表引擎注册用户词/临时词层，用户词进候选合并。
         // override_dir 为 None 时由 EngineManager 取默认（用户配置目录下的 schema_overrides）。
@@ -3183,6 +3199,7 @@ impl Coordinator {
             ui_tx,
             engine_mgr,
             profile,
+            session_tx,
             store,
             storage_readonly,
             punct: Mutex::new(punct_conv),
@@ -5441,17 +5458,17 @@ impl Coordinator {
         duration_ms: u64,
         accent: Option<[u8; 4]>,
     ) {
-        let _ = self.ui_tx.send(UiCommand::ShowToast {
-            text: text.to_string(),
+        self.emit_toast(
+            text.to_string(),
             position,
             kind,
-            duration_ms: if duration_ms == 0 {
+            if duration_ms == 0 {
                 DEFAULT_TOAST_MS
             } else {
                 duration_ms
             },
             accent,
-        });
+        );
     }
 
     /// 确保 `schema_id` 的反查索引在**后台**建好；已就绪、或已有线程在建，则什么都不做。
@@ -5690,13 +5707,13 @@ impl Coordinator {
             )
         };
         drop(rt);
-        let _ = self.ui_tx.send(UiCommand::ShowToast {
+        self.emit_toast(
             text,
-            position: ToastPosition::BottomCenter,
-            kind: ToastKind::Error,
-            duration_ms: 8000,
-            accent: None,
-        });
+            ToastPosition::BottomCenter,
+            ToastKind::Error,
+            8000,
+            None,
+        );
         true
     }
 
@@ -5773,7 +5790,7 @@ impl Coordinator {
             // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
             self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
         }
         self.send_candidate_font(&bundle.config);
         // 翻页栏 / 页码显示覆盖（ui.candidate.pager_bar_display / page_number_display）
@@ -7482,7 +7499,7 @@ impl Coordinator {
             // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
             self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
         }
         self.show_tip(if hidden {
             "候选窗:隐藏"
@@ -7601,6 +7618,20 @@ impl Coordinator {
         (i + 1).to_string()
     }
 
+    /// 展开态带序号的格子（平铺下标区间 `(起点, 个数)`）：从高亮行行首起，按
+    /// `grid_index_fill` 往下顺延，与数字键的选择范围 `select_range` 同源。
+    /// 桌面 `UpdateCandidates` 与中立通道的帧共用。
+    pub(crate) fn grid_index_of(
+        &self,
+        state: &State,
+        grid_range: Option<(usize, usize)>,
+    ) -> Option<(usize, usize)> {
+        grid_range.map(|(vis_start, _)| {
+            let (sel_start, sel_end) = self.select_range(state);
+            (sel_start.saturating_sub(vis_start), sel_end - sel_start)
+        })
+    }
+
     pub(crate) fn notify_ui_update(&self, state: &State) {
         // CapsLock 钩子闸门：本函数是候选/编码状态变化后的必经出口，挂在这里覆盖面最大。
         // 放在最前面，使下方的 early return（无候选无编码 → 隐藏）也走得到。
@@ -7619,7 +7650,7 @@ impl Coordinator {
         };
         if state.candidates.is_empty() && state.input_buffer.is_empty() && mode_label.is_empty() {
             self.clear_hover(); // 组合结束的最常见隐藏出口（不经 notify_ui_hide），须自行归零
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
             self.reset_first_show();
             return;
         }
@@ -7630,7 +7661,7 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner())
         {
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
             self.reset_first_show();
             return;
         }
@@ -7639,8 +7670,15 @@ impl Coordinator {
         if let Some(reason) = self.ui_suppressed_by_host() {
             debug!("候选窗被压住: {reason}");
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
             self.reset_first_show();
+            return;
+        }
+        // 中立通道（移动端）：到这里三道隐藏判断都过了，只发一帧快照。
+        // 下面的候选窗布局 / 字体、首显闸门、注释与悬停提示渲染、锚点与 overlay 帧都是桌面
+        // 候选窗专属，移动端没有对应物（见 session_output 模块文档）。
+        if self.session_tx.is_some() {
+            self.emit_view(state, mode_label);
             return;
         }
         // 模式级候选布局：按当前模式意图叠加全局基线重算方向，与上次下发不同才下发。
@@ -7769,10 +7807,7 @@ impl Coordinator {
         let hover_now = self.hover_target();
         // 展开态带序号的格子（平铺下标区间）：从高亮行行首起，按 `grid_index_fill` 往下顺延，
         // 与数字键的选择范围 `select_range` 同源。
-        let grid_index = grid_range.map(|(vis_start, _)| {
-            let (sel_start, sel_end) = self.select_range(state);
-            (sel_start.saturating_sub(vis_start), sel_end - sel_start)
-        });
+        let grid_index = self.grid_index_of(state, grid_range);
         // 候选序号标签：
         //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c（实例关了字母选词除外）
         //  - 其余（含自由输入）：正常序号
@@ -7939,12 +7974,13 @@ impl Coordinator {
                 active_tab: state.grid_tab as u8,
             }
         });
-        // 展开态的选中项是平铺下标：高亮行之前的整行都算进去。
-        let selected_flat = match grid {
-            Some(g) => g.highlight_row as usize * per_page + state.selected_index,
-            None => state.selected_index,
-        };
-        let selected = selected_flat.min(items.len().saturating_sub(1));
+        // 展开态的选中项是平铺下标：高亮行之前的整行都算进去（与中立通道共用）。
+        let selected = crate::session_output::frame_selected(
+            state,
+            per_page,
+            grid.map(|g| g.highlight_row as usize),
+            items.len(),
+        );
         // 悬停目标独立于选中项：候选越界视为无悬停，翻页器 tag 原样透传
         let hover =
             match self.hover_target() {
@@ -8031,18 +8067,7 @@ impl Coordinator {
         // 编码区**恒下发**：谁来画由 `preedit_host_owned` 表达。
         // 曾经是「in_app 就发空串」——那等于把渲染策略焊进数据通道，自绘编码栏的宿主
         // 拿不到数据（Android 侧一度只能靠改显示模式配置绕开）。
-        let mut preedit = state.preedit.clone();
-        let mut preedit_caret = self.ui_caret_bytes(state).min(preedit.len());
-        // 拼音音节分隔符的显示替换（`ui.candidate.syllable_separator`，GH#267）。光标是字节偏移，
-        // 换算时按前缀整体替换后的长度重算。
-        if let Some(sep) = self.syllable_separator_for(state.active.is_none())
-            && preedit.contains('\'')
-        {
-            let head =
-                wind_bridge::handler::apply_syllable_separator(&preedit[..preedit_caret], &sep);
-            preedit = wind_bridge::handler::apply_syllable_separator(&preedit, &sep);
-            preedit_caret = head.len().min(preedit.len());
-        }
+        let (preedit, preedit_caret) = self.display_preedit(state);
         let (cand_fixed, cand_fixed_x, cand_fixed_y) = self.candidate_fixed_pos();
         // mode_label 已在顶部计算（纳入空则隐藏守卫）：作为候选窗内联标记随候选窗一并显示。
         let _ = self.ui_tx.send(UiCommand::UpdateCandidates {
@@ -8114,7 +8139,7 @@ impl Coordinator {
         // 清的只是防抖闸门（决定何时**发**事件），高亮与 tooltip 读的是本值——不清这一句，
         // 特殊模式下窗口再次弹出时会带着上次的悬停高亮，鼠标却从未移动过。
         self.clear_hover();
-        let _ = self.ui_tx.send(UiCommand::HideCandidates);
+        self.emit_hide();
         self.reset_first_show();
         // Linux：候选收起 ⇒ 候选右键菜单失去操作对象，一并收掉（主菜单不受影响：它可以在没有
         // 候选时打开，一条无关的 HideCandidates 不该把它收掉——与 Windows 连带收掉任何菜单不同）。
@@ -8968,14 +8993,7 @@ impl Coordinator {
                 return;
             }
         };
-        let _ = self.ui_tx.send(UiCommand::ShowStatusTip {
-            text: text.to_string(),
-            x,
-            y,
-            caret_height,
-            duration_ms,
-            placement,
-        });
+        self.emit_status_tip(text.to_string(), x, y, caret_height, duration_ms, placement);
         // 记录实际显示出去的文本，供 show_status 去重。临时提示（模式标记/主题名等）
         // 也记在这里：它们会覆盖掉旧的状态文本，从而使随后的同名状态气泡照常显示，
         // 不会被误判成"内容没变"。

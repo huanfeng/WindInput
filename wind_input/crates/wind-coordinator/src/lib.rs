@@ -80,6 +80,7 @@ pub mod schema_dicts_api;
 pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
 mod schema_ui;
+pub mod session_output;
 pub(crate) mod short_code_yield;
 pub mod stats;
 pub mod theme_query;
@@ -97,6 +98,7 @@ pub(crate) mod wildcard;
 
 pub use coordinator::{Coordinator, request_restart, restart_signal, set_settings_url_provider};
 pub use input_profile::InputProfile;
+pub use session_output::{CompositionView, SessionEvent, SessionStatus};
 pub use ui_sender::UiSender;
 
 /// 窗口所属进程 ID（0 = 查询失败）。

@@ -1512,6 +1512,21 @@ impl Coordinator {
         // 加词面板**不走** notify_ui_update（下方直接发 UpdateCandidates），所以布局重算要在
         // 这里单独接一次——`UpdateCandidates` 的发送点共两处，两处都得接，否则加词的
         // candidate_layout 完全失效（见 layout.rs / docs/design/mode-candidate-layout.md）。
+        // 中立通道（移动端）：没有候选窗布局/字体可重算，只发一帧。值与下面桌面的
+        // `UpdateCandidates` 一致：无编码区、不高亮任何行、单页。
+        if self.session_tx.is_some() {
+            self.emit_view_frame(crate::CompositionView {
+                preedit: String::new(),
+                preedit_caret: 0,
+                composing: false,
+                mode_label: String::new(),
+                has_candidates: true,
+                selected: usize::MAX,
+                page: 1,
+                total_pages: 1,
+            });
+            return;
+        }
         self.sync_candidate_layout(state);
         // 字体同理：同一批发送点，漏一处的表现是加词面板里字体变回默认。
         self.sync_candidate_font(state);
