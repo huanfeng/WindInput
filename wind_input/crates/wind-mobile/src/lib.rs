@@ -15,7 +15,7 @@
 //! 判据不是「Android 用不用得上」，而是「**换成 iOS 还成不成立**」：
 //!
 //! - **留在这里**（移动端形态，与绑定框架无关）：四层配置加载、已装方案扫描与
-//!   激活校正、`preedit_display` 覆盖、`UiCommand` 泵线程、预热闸门、吃键判定转发。
+//!   激活校正、`preedit_display` 覆盖、`SessionEvent` 泵线程、预热闸门、吃键判定转发。
 //! - **归平台仓**（平台专属）：UniFFI/Swift 的类型投影、日志接到 logcat/oslog、
 //!   `cdylib` 产物形态、绑定生成器。
 //!
@@ -26,7 +26,7 @@
 //!
 //! - 正向：[`MobileCore::key_down`] → `Coordinator::handle_key_event` → 同步 [`KeyOutcome`]
 //!   （上屏文本/组合区走按键返回值，与 TSF 宿主同一条主输入路）
-//! - 反向：`Receiver<UiCommand>` 泵线程 → [`MobileEventSink`] 回调（候选/状态/提示）
+//! - 反向：`Receiver<SessionEvent>` 泵线程 → [`MobileEventSink`] 回调（候选/状态/提示）
 //! - 候选：推送帧 [`CandidateFrame`] 只给**当页**（够画编码栏与页码），列表本身由宿主按窗口
 //!   [`MobileCore::candidates`] 拉、按绝对下标 [`MobileCore::select_candidate`] 选。
 //!   这两个口取代了骨架期「合成页内数字键」的做法——那把点选限死在前 9 个，
@@ -55,10 +55,10 @@ pub mod config_api;
 use wind_bridge::handler::KeyAction as BridgeKeyAction;
 use wind_bridge::handler::{FocusData, KeyEventData, MessageHandler};
 use wind_config::Config;
-use wind_coordinator::{Coordinator, InputProfile};
+use wind_coordinator::{CompositionView, Coordinator, InputProfile, SessionEvent, SessionStatus};
 use wind_host::{KeyProbe, Modifiers};
 use wind_ipc::protocol::{EVENT_KEY_DOWN, FocusLostReason, caret_source};
-use wind_ui_types::{CandidateOp, MenuCmd, MenuItemSpec, MenuKind, UiCommand, UiEvent};
+use wind_ui_types::{CandidateOp, MenuCmd, MenuItemSpec, MenuKind, UiEvent};
 
 /// 宿主直接消费的接缝类型，从 [`wind_host`] 原样透出。
 ///
@@ -88,8 +88,10 @@ pub struct CandidateFrame {
     pub preedit_caret: usize,
     /// 模式指示文本（五/拼/英/符…），编码栏左侧角标；空 = 不显示
     pub mode_label: String,
-    /// 当前页候选文本
-    pub items: Vec<String>,
+    /// 是否在「打字中」：有组合串且不是联想态。宿主据此决定提交/退格等的语义
+    pub composing: bool,
+    /// 当前页是否有候选。候选文本不在帧里，宿主按需经 `candidates` 拉取
+    pub has_candidates: bool,
     /// 键盘选中项（**页内**下标），空格上屏目标
     pub selected: usize,
     /// 当前页（1 起）
@@ -102,6 +104,8 @@ pub struct CandidateFrame {
 #[derive(Debug, Clone)]
 pub struct InputStatus {
     pub chinese_mode: bool,
+    /// 键是否按拉丁字母直出：英文方案、中文模式关闭、或不可输入（密码框等）
+    pub latin_input: bool,
     /// 模式主字，最多 2 个字符。中文态取方案的 `[schema] icon_label`（"五"/"拼"），
     /// 非中文态取 `[ui.labels]`（出厂 "英"/"A"，**用户可配**）。
     pub icon_label: String,
@@ -368,7 +372,7 @@ pub enum MobileCommand {
     SetShuangpinLayout(String),
 }
 
-/// 反向通道接收端（由 UiCommand 泵线程调用，**非宿主主线程**，实现方自行切回）。
+/// 反向通道接收端（由 SessionEvent 泵线程调用，**非宿主主线程**，实现方自行切回）。
 pub trait MobileEventSink: Send + Sync {
     /// 候选/编码区更新
     fn on_candidates(&self, frame: CandidateFrame);
@@ -453,22 +457,16 @@ impl MobileCore {
         config_api::apply_mobile_overrides(&mut cfg);
 
         // 用户数据根：redb 落在这里。**不能传 None**——那样系统短语层会整段为空
-        // （详见 `new_headless_with_ui_at` 的说明），词频与自造词也不落盘。
+        // （详见 `new_session` 的说明），词频与自造词也不落盘。
         //
         // 显式声明移动 Profile：平台差异由运行期 Profile 决定，不再靠 `cfg!(target_os)`，
         // 这样主机上的测试与 Android 产物走同一条移动分支。
-        let (coord, rx) = Coordinator::new_headless_with_profile(
-            cfg,
-            Some(data_dir),
-            Some(user_root),
-            InputProfile::mobile(),
-        );
+        let (coord, rx) =
+            Coordinator::new_session(cfg, Some(data_dir), Some(user_root), InputProfile::mobile());
 
         let warming = Arc::new(AtomicBool::new(true));
-        spawn_ui_pump(rx, sink, Arc::clone(&warming));
+        spawn_session_pump(rx, sink, Arc::clone(&warming));
 
-        // 自绘候选条，不提供光标坐标——关掉桌面用的首显闸门等待
-        coord.set_caret_independent(true);
         // 设置页每改一项就重载一次：成功不弹「设置已更新」（失败照常提示）
         coord.set_quiet_reload_toast(true);
         // 强制改写项在每次重载配置后也要再套上（设置页每改一项就重载一次）
@@ -1362,67 +1360,69 @@ fn mount_dirs(data_dir: &Path, user_root: &Path) {
     }
 }
 
-/// 反向通道泵：`Receiver<UiCommand>` → [`MobileEventSink`] 回调。
-fn spawn_ui_pump(
-    rx: std::sync::mpsc::Receiver<UiCommand>,
+/// 反向通道泵：`Receiver<SessionEvent>` → [`MobileEventSink`] 回调。
+///
+/// 对 `SessionEvent` 穷尽匹配（不写 `_`）：核心加了新事件，这里要编译失败而不是静默吞掉。
+fn spawn_session_pump(
+    rx: std::sync::mpsc::Receiver<SessionEvent>,
     sink: Arc<dyn MobileEventSink>,
     warming: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
-        .name("wind-ui-pump".into())
+        .name("wind-session-pump".into())
         .spawn(move || {
-            for cmd in rx {
+            for ev in rx {
                 // 预热喂的假按键会产生候选帧，丢掉——否则键盘刚起来会闪一下候选。
-                // 只挡候选类，状态/提示类照常（预热不改模式，本来也不会产生）。
+                // 只挡 View/Hide，状态/提示类照常（预热不改模式，本来也不会产生）。
                 if warming.load(Ordering::Relaxed)
-                    && matches!(
-                        cmd,
-                        UiCommand::UpdateCandidates { .. } | UiCommand::HideCandidates
-                    )
+                    && matches!(ev, SessionEvent::View(_) | SessionEvent::Hide)
                 {
                     continue;
                 }
-                match cmd {
-                    UiCommand::UpdateCandidates {
+                match ev {
+                    SessionEvent::View(CompositionView {
                         preedit,
                         preedit_caret,
+                        composing,
                         mode_label,
-                        candidates,
+                        has_candidates,
                         selected,
                         page,
                         total_pages,
-                        ..
-                    } => {
-                        sink.on_candidates(CandidateFrame {
-                            preedit,
-                            preedit_caret,
-                            mode_label,
-                            items: candidates.into_iter().map(|c| c.text).collect(),
-                            selected,
-                            page,
-                            total_pages,
-                        });
-                    }
-                    UiCommand::HideCandidates => sink.on_hide_candidates(),
-                    UiCommand::UpdateToolbar(st) => {
-                        sink.on_status(InputStatus {
-                            chinese_mode: st.chinese_mode,
-                            icon_label: st.icon_label,
-                            full_width: st.full_width,
-                            chinese_punct: st.chinese_punct,
-                            s2t_enabled: st.s2t_enabled,
-                            s2t_shown: st.s2t_shown,
-                        });
-                    }
-                    // 状态提示气泡在桌面是独立浮窗，移动端并入 toast 一条通路
-                    UiCommand::ShowToast { text, .. } | UiCommand::ShowStatusTip { text, .. } => {
-                        sink.on_toast(text)
-                    }
-                    _ => {}
+                    }) => sink.on_candidates(CandidateFrame {
+                        preedit,
+                        preedit_caret,
+                        mode_label,
+                        composing,
+                        has_candidates,
+                        selected,
+                        page,
+                        total_pages,
+                    }),
+                    SessionEvent::Hide => sink.on_hide_candidates(),
+                    SessionEvent::Status(SessionStatus {
+                        chinese_mode,
+                        latin_input,
+                        icon_label,
+                        full_width,
+                        chinese_punct,
+                        s2t_enabled,
+                        s2t_shown,
+                    }) => sink.on_status(InputStatus {
+                        chinese_mode,
+                        latin_input,
+                        icon_label,
+                        full_width,
+                        chinese_punct,
+                        s2t_enabled,
+                        s2t_shown,
+                    }),
+                    // 桌面的 toast 与状态气泡在核心里已合为一条 Notice
+                    SessionEvent::Notice(text) => sink.on_toast(text),
                 }
             }
         })
-        .expect("spawn wind-ui-pump");
+        .expect("spawn wind-session-pump");
 }
 
 /// 扫描**各资源层**（user / custom / data）的 `schemas/*.schema.toml`，返回已安装的方案 id。
@@ -1457,9 +1457,7 @@ fn scan_installed_schemas(data_dir: &Path) -> Vec<String> {
     ids
 }
 
-/// 喂键。**不再喂合成 caret**：核心侧 `set_caret_independent(true)` 已让首显闸门
-/// 对自绘候选的宿主直接放行。此前这里必须编造一组非零坐标去骗过闸门
-/// （`height` 写 0 还会被判为「宿主尚未 reflow」整帧丢弃，候选一次都不下发）。
+/// 喂键。**不喂合成 caret**：`new_session` 通道没有桌面的首显闸门，候选帧不依赖光标坐标。
 fn dispatch_key(coord: &Coordinator, vk: u32, modifiers: u32) -> BridgeKeyAction {
     coord.handle_key_event(&KeyEventData {
         key_code: vk,
@@ -1497,7 +1495,7 @@ mod user_words_tests {
             std::fs::write(user.join("meta.toml"), m).unwrap();
         }
         let (coord, _rx) =
-            Coordinator::new_headless_with_ui_at(Config::default(), None, Some(&user));
+            Coordinator::new_session(Config::default(), None, Some(&user), InputProfile::mobile());
         let core = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -1649,7 +1647,7 @@ mod dict_transfer_tests {
         cfg.input.default.chinese_mode = true;
         cfg.schema.codetable.auto_commit_at_full = false;
         let (coord, _rx) =
-            Coordinator::new_headless_with_ui_at(cfg, Some(&data_dir()), Some(&user));
+            Coordinator::new_session(cfg, Some(&data_dir()), Some(&user), InputProfile::mobile());
         let core = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -1784,7 +1782,7 @@ mod dict_transfer_tests {
         )
         .unwrap();
         let (coord, _rx) =
-            Coordinator::new_headless_with_ui_at(Config::default(), None, Some(&user));
+            Coordinator::new_session(Config::default(), None, Some(&user), InputProfile::mobile());
         let m = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -1936,7 +1934,7 @@ mod schema_dicts_tests {
         )
         .unwrap();
         let (coord, _rx) =
-            Coordinator::new_headless_with_ui_at(Config::default(), None, Some(&user));
+            Coordinator::new_session(Config::default(), None, Some(&user), InputProfile::mobile());
         let m = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -2016,7 +2014,8 @@ mod candidate_menu_tests {
         cfg.schema.active = "wubi86".into();
         cfg.input.default.chinese_mode = true;
         cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let (coord, _rx) =
+            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
         let m = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -2075,7 +2074,8 @@ mod candidate_tooltip_tests {
         cfg.schema.active = "wubi86".into();
         cfg.input.default.chinese_mode = true;
         cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let (coord, _rx) =
+            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
         let m = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -2130,7 +2130,8 @@ mod candidate_tooltip_tests {
         cfg.schema.active = "wubi86".into();
         cfg.input.default.chinese_mode = true;
         cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let (coord, _rx) =
+            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
         let m = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -2168,7 +2169,8 @@ mod candidate_tooltip_tests {
         cfg.schema.active = "wubi86".into();
         cfg.input.default.chinese_mode = true;
         cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let (coord, _rx) =
+            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
         let m = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -2209,7 +2211,8 @@ mod candidate_tooltip_tests {
         cfg.schema.available = vec!["pinyin".into()];
         cfg.schema.active = "pinyin".into();
         cfg.input.default.chinese_mode = true;
-        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let (coord, _rx) =
+            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
         let m = MobileCore {
             coord,
             warming: Arc::new(AtomicBool::new(false)),
@@ -2267,10 +2270,11 @@ mod pinyin_hint_tests {
         let h = &mut cfg.input.correction.hint;
         h.enabled = hint;
         h.scope = scope;
-        let (coord, _rx) = Coordinator::new_headless_with_ui_at(
+        let (coord, _rx) = Coordinator::new_session(
             cfg,
             Some(&dir.join("data")),
             Some(&dir.join("user")),
+            InputProfile::mobile(),
         );
         let core = MobileCore {
             coord,
@@ -2337,5 +2341,69 @@ mod pinyin_hint_tests {
         let w = pinguo("off", false, HintScope::All);
         assert!(w.items.iter().any(|t| t == "苹果"), "{:?}", w.items);
         assert!(w.text_segments.iter().all(Vec::is_empty));
+    }
+}
+
+/// 泵线程的预热闸门：只拦 `View` / `Hide`，用户真按键后帧必须到达宿主。
+#[cfg(test)]
+mod session_pump_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Frames(Mutex<Vec<CandidateFrame>>);
+
+    impl MobileEventSink for Frames {
+        fn on_candidates(&self, frame: CandidateFrame) {
+            self.0.lock().unwrap().push(frame);
+        }
+        fn on_hide_candidates(&self) {}
+        fn on_status(&self, _status: InputStatus) {}
+        fn on_toast(&self, _text: String) {}
+    }
+
+    /// warming=true 时调 `key_down`：它会先关掉预热闸门，所以含 preedit 的帧仍要到达 sink。
+    #[test]
+    fn typing_during_warmup_keeps_frames() {
+        let data =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
+        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
+            eprintln!("跳过：词库不存在");
+            return;
+        }
+        let user = std::env::temp_dir().join(format!("wind_mobile_pump_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into()];
+        cfg.schema.active = "wubi86".into();
+        cfg.input.default.chinese_mode = true;
+        let (coord, rx) =
+            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
+        let warming = Arc::new(AtomicBool::new(true));
+        let sink = Arc::new(Frames::default());
+        spawn_session_pump(rx, sink.clone(), Arc::clone(&warming));
+        let core = MobileCore {
+            coord,
+            warming,
+            data_dir: user.clone(),
+        };
+        core.key_down('A' as u32, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if sink
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f.preedit == "a" && f.composing)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "预热期间按键的帧被丢了");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = std::fs::remove_dir_all(&user);
     }
 }

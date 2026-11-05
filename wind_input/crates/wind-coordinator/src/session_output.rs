@@ -39,7 +39,7 @@ pub struct CompositionView {
     pub preedit: String,
     /// 插入符在 `preedit` 内的字节偏移。
     pub preedit_caret: usize,
-    /// 是否在「打字中」：`preedit` 非空且不是联想态。
+    /// 是否在「打字中」：`!preedit.is_empty() && !assoc_active && (active.is_some() || !input_buffer.is_empty())`。
     pub composing: bool,
     /// 模式标记（拼/双/快/英/符），仅候选为空时非空。
     pub mode_label: String,

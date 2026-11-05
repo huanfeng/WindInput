@@ -9,7 +9,7 @@
 //! - `T|text`
 //! - `## 步骤名`（脚本自己写的分隔行，不是事件）
 //!
-//! `has_candidates` 取 `!items.is_empty()`；候选文本本身不入基线（后续会改走拉取接口）。
+//! 候选文本本身不入基线（宿主按需经 `candidates` 拉取）。
 //! 没有任何路径/时间类内容，无需归一化。
 //!
 //! 冷启动帧（预热 prepare 的帧、刚切到的拼音方案的后台索引补刷帧）在录制前预热掉，
@@ -66,7 +66,7 @@ impl MobileEventSink for Recorder {
             f.preedit,
             f.preedit_caret,
             f.mode_label,
-            !f.items.is_empty(),
+            f.has_candidates,
             f.selected,
             f.page,
             f.total_pages
