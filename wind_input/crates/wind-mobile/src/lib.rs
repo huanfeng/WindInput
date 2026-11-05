@@ -15,7 +15,8 @@
 //! 判据不是「Android 用不用得上」，而是「**换成 iOS 还成不成立**」：
 //!
 //! - **留在这里**（移动端形态，与绑定框架无关）：四层配置加载、已装方案扫描与
-//!   激活校正、`preedit_display` 覆盖、`SessionEvent` 泵线程、预热闸门、吃键判定转发。
+//!   激活校正、`preedit_display` 覆盖、`SessionEvent` 泵线程、预热闸门、吃键判定转发，
+//!   以及按键翻译与英文自动空格（`press`，见 `touch.rs`）。
 //! - **归平台仓**（平台专属）：UniFFI/Swift 的类型投影、日志接到 logcat/oslog、
 //!   `cdylib` 产物形态、绑定生成器。
 //!
@@ -24,9 +25,12 @@
 //!
 //! # 通道形状（对应 WindInputAndroid docs/architecture.md §3.1）
 //!
-//! - 正向：[`MobileCore::key_down`] → `Coordinator::handle_key_event` → 同步 [`KeyOutcome`]
-//!   （上屏文本/组合区走按键返回值，与 TSF 宿主同一条主输入路）
-//! - 反向：`Receiver<SessionEvent>` 泵线程 → [`MobileEventSink`] 回调（候选/状态/提示）
+//! - 正向：软键与物理键经 [`MobileCore::press`]（[`PressKey`] + [`KeySource`]）→ 翻译 VK、
+//!   自动空格 → [`MobileCore::key_down`] → `Coordinator::handle_key_event` → 同步 [`KeyOutcome`]
+//!   （上屏文本/组合区走按键返回值，与 TSF 宿主同一条主输入路；`ops` 已含补的空格与标点换位，
+//!   宿主只按序执行）。直出场景（密码框）宿主不得调用 `press`
+//! - 反向：`Receiver<SessionEvent>`（`View`/`Hide`/`Status`/`Notice`）泵线程 →
+//!   [`MobileEventSink`] 回调（候选/状态/提示）
 //! - 候选：推送帧 [`CandidateFrame`] 只给**当页**（够画编码栏与页码），列表本身由宿主按窗口
 //!   [`MobileCore::candidates`] 拉、按绝对下标 [`MobileCore::select_candidate`] 选。
 //!   这两个口取代了骨架期「合成页内数字键」的做法——那把点选限死在前 9 个，
