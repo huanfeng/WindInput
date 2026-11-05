@@ -147,7 +147,7 @@ gh release view v<上一版> --repo huanfeng/WindInput
 
 「其他说明」最后一条，固定句式，**不写帖子号、Issue/PR 号，也不写用户名**：
 
-```
+感谢所有反馈问题、提出建议的用户
 感谢所有在论坛和 GitHub 上反馈问题、提出建议的用户
 ```
 
