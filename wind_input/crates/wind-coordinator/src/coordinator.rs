@@ -7678,6 +7678,15 @@ impl Coordinator {
         // 下面的候选窗布局 / 字体、首显闸门、注释与悬停提示渲染、锚点与 overlay 帧都是桌面
         // 候选窗专属，移动端没有对应物（见 session_output 模块文档）。
         if self.session_tx.is_some() {
+            // 提示卡（长按取 `candidate_tooltip`）要用的两样懒建结构——反查索引、按词查编码的
+            // 用户层——都在首次使用时后台构建，建好后各补刷一帧。若等到长按才触发，补刷帧会
+            // 把刚弹出的提示卡收掉（宿主在任意候选帧上收卡），用户的下一次点击落到键盘上。
+            // 所以在首个候选帧就触发，让补刷帧落在打字这段里。桌面路径每帧组装候选页时
+            // 经 `tooltip_eval_ctx` 触发反查索引；这里不组装候选页，结果丢弃，只要副作用。
+            let ctx = self.tooltip_eval_ctx(state, &self.rt().tooltip);
+            if let Some(sid) = ctx.code_schema.as_deref() {
+                let _ = self.engine_mgr.text_codes(sid);
+            }
             self.emit_view(state, mode_label);
             return;
         }
