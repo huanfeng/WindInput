@@ -1324,7 +1324,7 @@ impl Coordinator {
         Self::main_path_candidate_limit(
             self.engine_mgr.current_engine_type(),
             input,
-            crate::handle_assoc::use_mobile_overrides(),
+            self.profile.pinyin_single_letter_limit,
         )
     }
 
@@ -1344,16 +1344,17 @@ impl Coordinator {
     pub(crate) fn main_path_candidate_limit(
         engine_type: Option<wind_engine::engine::EngineType>,
         input: &str,
-        mobile: bool,
+        single_letter_limit: Option<usize>,
     ) -> usize {
         let base = Self::initial_candidate_limit_of(engine_type, input);
-        if mobile
-            && engine_type == Some(wind_engine::engine::EngineType::Pinyin)
-            && input.chars().count() == 1
-        {
-            base.min(MOBILE_PINYIN_SINGLE_LIMIT)
-        } else {
-            base
+        match single_letter_limit {
+            Some(limit)
+                if engine_type == Some(wind_engine::engine::EngineType::Pinyin)
+                    && input.chars().count() == 1 =>
+            {
+                base.min(limit)
+            }
+            _ => base,
         }
     }
 
@@ -3360,13 +3361,8 @@ impl Coordinator {
     /// 一个 `_of(&schema)` 版本。`separator` 本身也按方案取（见
     /// `EngineManager::pinyin_separator_mode_of`）。
     pub(crate) fn manual_separator_vk_of(&self, schema_id: &str) -> Option<u32> {
-        self.manual_separator_vk_resolve(schema_id, crate::handle_assoc::use_mobile_overrides())
-    }
-
-    /// [`Self::manual_separator_vk_of`] 的实体，`mobile` 显式传入——编译期常量
-    /// `use_mobile_overrides()` 在主机上恒为假，不拆出来就没法在桌面测试里守住移动端那一支。
-    fn manual_separator_vk_resolve(&self, schema_id: &str, mobile: bool) -> Option<u32> {
         use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
+        let may_claim_quote = self.profile.separator_may_claim_quote;
         let pinyin_ok = self.engine_mgr.is_pinyin_of(schema_id);
         if !pinyin_ok && !self.engine_mgr.sentence_input_enabled_of(schema_id) {
             return None;
@@ -3382,7 +3378,7 @@ impl Coordinator {
                     Some(VK_QUOTE)
                 } else if free(VK_BACKTICK) {
                     Some(VK_BACKTICK)
-                } else if mobile && !bound(VK_QUOTE) {
+                } else if may_claim_quote && !bound(VK_QUOTE) {
                     Some(VK_QUOTE)
                 } else {
                     None
@@ -3394,15 +3390,8 @@ impl Coordinator {
     /// 活跃方案的手动分隔符字符（`'` 或 `` ` ``），宿主界面据此决定「分词」键发什么；
     /// `None` = 此刻没有分隔符，宿主不该摆分词键。见 [`Self::manual_separator_vk_of`]。
     pub fn manual_separator_char(&self) -> Option<char> {
-        self.manual_separator_char_as(crate::handle_assoc::use_mobile_overrides())
-    }
-
-    /// 同 [`Self::manual_separator_char`]，但**指定按移动端还是桌面**求值。只给测试用：
-    /// 编译期常量在主机上恒为桌面，移动端那一支（`auto` 夺取 `'`）不经它就测不到。
-    #[doc(hidden)]
-    pub fn manual_separator_char_as(&self, mobile: bool) -> Option<char> {
         use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
-        match self.manual_separator_vk_resolve(&self.engine_mgr.active_schema_id(), mobile)? {
+        match self.manual_separator_vk_of(&self.engine_mgr.active_schema_id())? {
             VK_QUOTE => Some('\''),
             VK_BACKTICK => Some('`'),
             _ => None,
@@ -9051,14 +9040,15 @@ mod mobile_limit_tests {
     fn mobile_pinyin_single_letter_is_capped_only_there() {
         let lim = Coordinator::main_path_candidate_limit;
         let py = Some(EngineType::Pinyin);
-        assert_eq!(lim(py, "b", true), super::MOBILE_PINYIN_SINGLE_LIMIT);
+        let mobile = Some(super::MOBILE_PINYIN_SINGLE_LIMIT);
+        assert_eq!(lim(py, "b", mobile), super::MOBILE_PINYIN_SINGLE_LIMIT);
         assert_eq!(
-            lim(py, "b", false),
+            lim(py, "b", None),
             Coordinator::initial_candidate_limit_of(py, "b"),
             "桌面不收紧"
         );
         assert_eq!(
-            lim(py, "bz", true),
+            lim(py, "bz", mobile),
             Coordinator::initial_candidate_limit_of(py, "bz"),
             "两字母起不收紧"
         );
@@ -9068,7 +9058,7 @@ mod mobile_limit_tests {
             EngineType::Mixed,
         ] {
             assert_eq!(
-                lim(Some(other), "t", true),
+                lim(Some(other), "t", mobile),
                 Coordinator::initial_candidate_limit_of(Some(other), "t"),
                 "{other:?} 不受影响（英文 t 曾因上限太小打不出 then）"
             );

@@ -1399,8 +1399,7 @@ fn separator_off_by_default_for_shuangpin() {
 /// 双拼 `'` 是三选键、反引号归辅助码：桌面 `auto` 不得动选词键（见上一条
 /// [`separator_off_by_default_for_shuangpin`]，要断词显式写 `quote`）；手机是触屏，选词键
 /// 没人按，而「分词」键需要一个出路，所以移动端夺取 `'`（它作三选键只是数字 3 的别名）。
-/// 编译期常量 `use_mobile_overrides()` 在主机上恒为桌面，故用 `manual_separator_char_as`
-/// 显式按移动端求值。
+/// 档位由构造时的 `InputProfile` 决定，主机上直接构造移动档位即可。
 #[test]
 fn separator_auto_takes_quote_on_mobile_only() {
     let d = data_dir();
@@ -1410,14 +1409,20 @@ fn separator_auto_takes_quote_on_mobile_only() {
     let mut cfg = config_with("pinyin");
     cfg.schema.available = vec!["shuangpin".into(), "pinyin".into()];
     cfg.schema.active = "shuangpin".into(); // separator 保持默认 auto
-    let coord = Coordinator::new_headless(cfg, Some(&d));
+    let desktop = Coordinator::new_headless(cfg.clone(), Some(&d));
     assert_eq!(
-        coord.manual_separator_char_as(false),
+        desktop.manual_separator_char(),
         None,
         "桌面 auto 不动选词键"
     );
+    let (mobile, _rx) = Coordinator::new_headless_with_profile(
+        cfg,
+        Some(&d),
+        None,
+        wind_coordinator::InputProfile::mobile(),
+    );
     assert_eq!(
-        coord.manual_separator_char_as(true),
+        mobile.manual_separator_char(),
         Some('\''),
         "移动端 auto 夺取 `'`"
     );
@@ -1441,8 +1446,13 @@ fn separator_none_override_wins_over_mobile_takeover() {
     let mut cfg = config_with("pinyin");
     cfg.schema.available = vec!["shuangpin".into(), "pinyin".into()];
     cfg.schema.active = "shuangpin".into();
-    let coord = Coordinator::new_headless_with_override(cfg, Some(&d), Some(ov));
-    assert_eq!(coord.manual_separator_char_as(true), None);
+    let coord = Coordinator::new_headless_with_override_profile(
+        cfg,
+        Some(&d),
+        Some(ov),
+        wind_coordinator::InputProfile::mobile(),
+    );
+    assert_eq!(coord.manual_separator_char(), None);
 }
 
 /// 全拼的宿主分隔符字符是反引号（`'` 是选词键、反引号空闲），夺取只发生在两个键都被占时。

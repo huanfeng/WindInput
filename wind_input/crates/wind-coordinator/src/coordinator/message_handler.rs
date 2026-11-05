@@ -1959,7 +1959,7 @@ impl MessageHandler for Coordinator {
             keymap::VK_0..=keymap::VK_9
                 if data.modifiers & MOD_SHIFT == 0
                     && crate::handle_assoc::digit_enters_english_buffer(
-                        crate::handle_assoc::use_mobile_overrides(),
+                        self.profile.digit_enters_english_buffer,
                         !state.input_buffer.is_empty(),
                         self.engine_mgr.active_is_english(),
                     ) =>

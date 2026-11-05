@@ -1465,6 +1465,8 @@ pub struct Coordinator {
     /// 发送点——[`crate::UiSender`] 把这两步绑成一次 `send`，漏不掉。详见其模块文档。
     pub(crate) ui_tx: crate::UiSender,
     pub(crate) engine_mgr: EngineManager,
+    /// 输入行为的平台档位，构造时定下，之后不变。见 [`crate::input_profile`]。
+    pub(crate) profile: crate::input_profile::InputProfile,
     /// redb 持久化存储（用户词/临时词/词频/影子规则）；None=无持久化（headless 测试）。
     pub(crate) store: Option<Arc<Store>>,
     /// 只读模式的原因（用户数据设计 §7.1 降级保护：meta.toml 版本高于本版本 / 读不出）；
@@ -2717,6 +2719,11 @@ impl Coordinator {
         }
     }
 
+    /// 构造时选定的输入档位。
+    pub fn profile(&self) -> crate::input_profile::InputProfile {
+        self.profile
+    }
+
     /// 只读模式的原因（用户数据设计 §7.1 降级保护）；`None` = 正常读写。
     pub fn storage_readonly_reason(&self) -> Option<&str> {
         self.storage_readonly.as_deref()
@@ -2740,6 +2747,7 @@ impl Coordinator {
             store,
             override_dir,
             None,
+            crate::input_profile::InputProfile::desktop(),
         )
     }
 
@@ -2753,6 +2761,7 @@ impl Coordinator {
         store: Option<Arc<Store>>,
         override_dir: Option<std::path::PathBuf>,
         storage_readonly: Option<String>,
+        profile: crate::input_profile::InputProfile,
     ) -> Arc<Self> {
         // 注入 redb Store：码表引擎注册用户词/临时词层，用户词进候选合并。
         // override_dir 为 None 时由 EngineManager 取默认（用户配置目录下的 schema_overrides）。
@@ -2762,6 +2771,8 @@ impl Coordinator {
             }
             None => EngineManager::with_store(&config, data_dir, store.clone()),
         };
+        // 覆盖层在任何后台线程起来之前定下；桌面恒为 Base，此处是空操作。
+        engine_mgr.apply_config_overlay(profile.config_overlay, &config);
         // 应用兼容规则：系统层(data/compat.toml) + 用户层覆盖。供焦点进程按名查规则
         // （如微信 caret_use_top）。
         let app_compat = wind_config::app_compat::AppCompat::load(data_dir, user_dir.as_deref());
@@ -2780,6 +2791,7 @@ impl Coordinator {
             &bundle.config,
             &comment_lib,
             &crate::data_needs::SchemaFacts::collect(&engine_mgr),
+            profile.config_overlay,
         );
         // 模板引用 `${correct_pinyin}` 时拼音引擎要算提示（只翻开关，不重建引擎）。
         engine_mgr.set_correct_pinyin_in_templates(needs.correct_pinyin);
@@ -3162,6 +3174,7 @@ impl Coordinator {
             rt: std::sync::RwLock::new(std::sync::Arc::new(bundle)),
             ui_tx,
             engine_mgr,
+            profile,
             store,
             storage_readonly,
             punct: Mutex::new(punct_conv),

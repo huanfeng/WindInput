@@ -63,6 +63,7 @@ pub(crate) mod hint_text;
 pub mod host_services;
 pub mod hotkey_match;
 pub mod input_diag;
+pub mod input_profile;
 pub mod key_convert;
 pub mod key_gate;
 pub(crate) mod key_resolver;
@@ -95,6 +96,7 @@ pub mod web_host;
 pub(crate) mod wildcard;
 
 pub use coordinator::{Coordinator, request_restart, restart_signal, set_settings_url_provider};
+pub use input_profile::InputProfile;
 pub use ui_sender::UiSender;
 
 /// 窗口所属进程 ID（0 = 查询失败）。

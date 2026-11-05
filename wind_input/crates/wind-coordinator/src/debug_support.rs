@@ -98,6 +98,16 @@ impl Coordinator {
             .collect()
     }
 
+    /// 当前生效的联想类型（`off` / `smart` / ...，取 Debug 名小写；测试/诊断用）。
+    pub fn debug_assoc_kind(&self) -> String {
+        format!("{:?}", self.assoc_config().kind).to_lowercase()
+    }
+
+    /// 当前生效的拼音语法模型权重（已套 `[mobile.grammar]` 覆盖；测试/诊断用）。
+    pub fn debug_pinyin_grammar_weight(&self) -> f64 {
+        self.engine_mgr.pinyin_global().grammar.weight
+    }
+
     /// 当前 `state.preedit`（测试/诊断用）。联想态在非嵌入模式下往这里写「联想输入」
     /// 标识，退出联想必须连它一起清掉——集成测试够不着 `state`，只能经这里断言。
     pub fn debug_preedit(&self) -> String {

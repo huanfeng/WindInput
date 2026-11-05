@@ -53,10 +53,6 @@ const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
 /// 加载哪份布局必须同源，否则会出现「设置页显示自然码、打起来是小鹤」。
 pub const DEFAULT_SHUANGPIN_LAYOUT: &str = "xiaohe";
 
-/// 取拼音配置时是否套 `[mobile.*]` 覆盖（当前只有语法模型，见 `Config::pinyin_effective`）。
-/// 与协调器 `use_mobile_overrides` 同一判据：Android 构建即移动端。
-const MOBILE: bool = cfg!(target_os = "android");
-
 /// 码表词频应用策略（见 docs/redesign/frequency.md §3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreqStrategy {
@@ -624,6 +620,9 @@ pub struct EngineManager {
     single_char_used: std::sync::atomic::AtomicU64,
     /// 全局拼音配置（fuzzy/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
+    /// 取配置时套哪层覆盖（`[mobile.*]`）。构造时为 `Base`，由宿主经
+    /// [`Self::apply_config_overlay`] 改写；重载时继续读它。
+    overlay: Mutex<wind_config::ConfigOverlay>,
     /// 纠错与提示配置（`[input.correction]`），与 `pinyin` 一同决定 [`pinyin_hint_on`]。
     correction_cfg: Mutex<wind_config::CorrectionConfig>,
     /// 换位纠错规则（`[input.correction]` 生成），注入全拼引擎的 `FuzzyConfig::correction`；
@@ -1010,7 +1009,8 @@ impl EngineManager {
             user_text_built: std::sync::OnceLock::new(),
             single_char_codes: Mutex::new(None),
             single_char_used: std::sync::atomic::AtomicU64::new(0),
-            pinyin: Mutex::new(config.pinyin_effective(MOBILE)),
+            pinyin: Mutex::new(config.pinyin_effective(wind_config::ConfigOverlay::Base)),
+            overlay: Mutex::new(wind_config::ConfigOverlay::Base),
             correction_cfg: Mutex::new(config.input.correction.clone()),
             correction: Mutex::new(Arc::new(
                 crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
@@ -4446,6 +4446,30 @@ impl EngineManager {
         true
     }
 
+    /// 当前生效的全局拼音配置（已套覆盖层）。测试 / 诊断用。
+    pub fn pinyin_global(&self) -> wind_config::config::PinyinGlobalConfig {
+        self.pinyin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 当前取配置时套用的覆盖层。
+    pub fn config_overlay(&self) -> wind_config::ConfigOverlay {
+        *self.overlay.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 改写覆盖层并按它重取配置。构造路径在 `EngineManager` 建好后、启动任何后台线程前调用；
+    /// 与当前层相同时是空操作（桌面恒为 `Base`，零开销、零变化）。
+    pub fn apply_config_overlay(&self, overlay: wind_config::ConfigOverlay, config: &Config) {
+        if self.config_overlay() == overlay {
+            return;
+        }
+        *self.overlay.lock().unwrap_or_else(|e| e.into_inner()) = overlay;
+        // 引擎按旧覆盖层建成，必须重建：走与热重载同一条路径。
+        self.reload_from_config(config);
+    }
+
     /// 按新配置热重载方案集（无需重建 EngineManager）：重算可用方案、更新上屏策略、
     /// 清空引擎/词频/名称缓存使其按新配置/词典重建，并切到新的活跃方案。
     /// 返回活跃方案是否发生变化（供上层决定是否清输入缓冲、刷新 UI）。
@@ -4539,7 +4563,8 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = config.schema.primary_pinyin.clone();
         // 全局拼音配置变更：更新缓存，引擎缓存随下方 clear() 一起失效，下次按新配置重建。
-        *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.pinyin_effective(MOBILE);
+        *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
+            config.pinyin_effective(self.config_overlay());
         *self
             .correction_cfg
             .lock()

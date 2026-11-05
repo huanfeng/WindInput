@@ -3900,6 +3900,17 @@ impl Default for AssociationConfig {
 
 // ──────────────── mobile（移动端覆盖域）────────────────
 
+/// 取配置时套哪一层覆盖：`Base` = 只看基线段；`Mobile` = 再叠 `[mobile.*]`。
+///
+/// 由宿主在构造协调器时经 `InputProfile` 选定，不再由编译目标决定——这样主机上的
+/// 测试也能走到移动端那一支。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigOverlay {
+    #[default]
+    Base,
+    Mobile,
+}
+
 /// `[mobile]`：**移动端对桌面基线的覆盖**。桌面构建完全无视本域。
 ///
 /// # 为什么单独开一个顶层域
@@ -5164,13 +5175,13 @@ impl Config {
         out
     }
 
-    /// 拼音全局配置的生效取值：`mobile` 时语法模型换成 `[mobile.grammar]`，其余照基线。
+    /// 拼音全局配置的生效取值：`Mobile` 时语法模型换成 `[mobile.grammar]`，其余照基线。
     ///
-    /// 由引擎在取拼音配置的那一刻按平台调用（Android 构建传 `true`），不进 `Config::load`
+    /// 由引擎在取拼音配置的那一刻按构造时传入的 [`ConfigOverlay`] 调用，不进 `Config::load`
     /// ——理由见 [`MobileConfig`]：合并后移动端设置页一保存，就把移动端的值写进了桌面基线。
-    pub fn pinyin_effective(&self, mobile: bool) -> PinyinGlobalConfig {
+    pub fn pinyin_effective(&self, overlay: ConfigOverlay) -> PinyinGlobalConfig {
         let mut p = self.schema.pinyin.clone();
-        if mobile {
+        if overlay == ConfigOverlay::Mobile {
             p.grammar = PinyinGrammar {
                 enabled: self.mobile.grammar.enabled,
                 weight: self.mobile.grammar.weight,
@@ -10912,16 +10923,20 @@ mod tests {
     #[test]
     fn pinyin_grammar_follows_platform_override() {
         let mut cfg = Config::default();
-        let desktop = cfg.pinyin_effective(false).grammar;
+        let desktop = cfg.pinyin_effective(ConfigOverlay::Base).grammar;
         assert_eq!((desktop.weight, desktop.model.as_str()), (0.0, ""));
-        let mobile = cfg.pinyin_effective(true).grammar;
+        let mobile = cfg.pinyin_effective(ConfigOverlay::Mobile).grammar;
         assert_eq!(
             (mobile.weight, mobile.model.as_str()),
             (0.5, "wanxiang-mini.gram")
         );
 
         cfg.mobile.grammar.weight = 0.0;
-        assert_eq!(cfg.pinyin_effective(true).grammar.weight, 0.0, "移动端可关");
+        assert_eq!(
+            cfg.pinyin_effective(ConfigOverlay::Mobile).grammar.weight,
+            0.0,
+            "移动端可关"
+        );
         assert_eq!(cfg.schema.pinyin.grammar.weight, 0.0, "基线不被覆盖值写穿");
     }
 
@@ -10933,17 +10948,23 @@ mod tests {
         cfg.schema.pinyin.grammar.model = "wanxiang-mini.gram".into();
 
         cfg.schema.pinyin.grammar.enabled = false;
-        assert!(!cfg.pinyin_effective(false).grammar.active(), "桌面关");
         assert!(
-            cfg.pinyin_effective(true).grammar.active(),
+            !cfg.pinyin_effective(ConfigOverlay::Base).grammar.active(),
+            "桌面关"
+        );
+        assert!(
+            cfg.pinyin_effective(ConfigOverlay::Mobile).grammar.active(),
             "桌面关不波及手机"
         );
 
         cfg.schema.pinyin.grammar.enabled = true;
         cfg.mobile.grammar.enabled = false;
-        assert!(!cfg.pinyin_effective(true).grammar.active(), "手机关");
         assert!(
-            cfg.pinyin_effective(false).grammar.active(),
+            !cfg.pinyin_effective(ConfigOverlay::Mobile).grammar.active(),
+            "手机关"
+        );
+        assert!(
+            cfg.pinyin_effective(ConfigOverlay::Base).grammar.active(),
             "手机关不波及桌面"
         );
         assert!(cfg.schema.pinyin.grammar.enabled, "基线不被覆盖值写穿");
@@ -10960,7 +10981,7 @@ mod tests {
         merge_value(&mut merged, factory);
         merge_value(&mut merged, user);
         let cfg: Config = merged.try_into().expect("反序列化");
-        cfg.pinyin_effective(false).grammar
+        cfg.pinyin_effective(ConfigOverlay::Base).grammar
     }
 
     /// 桌面出厂：开关关，模型不加载，但 weight / model 已备好。

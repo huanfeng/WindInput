@@ -248,20 +248,6 @@ fn is_modifier_like_vk(vk: u32) -> bool {
     matches!(vk, 0x10 | 0x11 | 0x12 | 0xA4 | 0xA5) || keymap::is_key_up_only_vk(vk)
 }
 
-/// 本平台是否取用 `[mobile.*]` 覆盖段。
-///
-/// ★ 这是**整个联想里唯一一处平台判断**，平台差异全部落在配置文件的
-/// `[mobile.association]` 上。
-///
-/// ⛔ 别把差异改成「值域哨兵」（让 `kind` / `mode` 取 `"auto"`、由本模块按平台解释）：
-/// 那会把平台知识塞进值域，设置界面被迫列一个语义空洞的「自动」选项，而这里也要退化成
-/// 一组 `platform_default_*` 函数——一处判断变成每个字段一处。
-///
-/// ⚠️ 判据是**协调器被编译进哪个宿主**，不是运行时探测。
-pub(crate) const fn use_mobile_overrides() -> bool {
-    cfg!(target_os = "android")
-}
-
 /// 数字键此刻是否进编码缓冲（而不是选候选）。
 ///
 /// 只有**移动端、英文方案、已在组码**三者同时成立才进：英文词里常带数字（mp3、h2o、win10），
@@ -625,7 +611,8 @@ impl Coordinator {
     /// `[input.association]`（移动端再叠 `[mobile.association]`）的运行时视图（热重载快照）。
     pub(crate) fn assoc_config(&self) -> AssocConfig {
         let rt = self.rt();
-        let mobile = use_mobile_overrides().then(|| &rt.config.mobile.association);
+        let mobile = (self.profile.config_overlay == wind_config::ConfigOverlay::Mobile)
+            .then(|| &rt.config.mobile.association);
         AssocConfig::from_config(&rt.config.input.association, mobile)
     }
 
@@ -636,7 +623,7 @@ impl Coordinator {
         mobile: impl Fn(&wind_config::MobileAssociationConfig) -> bool,
     ) -> bool {
         let rt = self.rt();
-        if use_mobile_overrides() {
+        if self.profile.config_overlay == wind_config::ConfigOverlay::Mobile {
             mobile(&rt.config.mobile.association)
         } else {
             base(&rt.config.input.association)
@@ -1300,7 +1287,7 @@ mod tests {
     ///
     /// 断言前提值本身：`[input.association]` 一旦又被写成某个平台哨兵，这里立刻报出来。
     /// 平台差异的唯一落点是 `[mobile.association]`，桌面构建根本不读它
-    /// （由 `use_mobile_overrides` 守着，见 wind-assoc 的 `mobile_section_switches_*`）。
+    /// （由 `InputProfile::config_overlay` 守着，见 wind-assoc 的 `mobile_section_switches_*`）。
     #[test]
     fn desktop_defaults_to_off() {
         let mut cfg = Config::default();
