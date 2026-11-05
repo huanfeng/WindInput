@@ -55,7 +55,7 @@ pub mod config_api;
 use wind_bridge::handler::KeyAction as BridgeKeyAction;
 use wind_bridge::handler::{FocusData, KeyEventData, MessageHandler};
 use wind_config::Config;
-use wind_coordinator::Coordinator;
+use wind_coordinator::{Coordinator, InputProfile};
 use wind_host::{KeyProbe, Modifiers};
 use wind_ipc::protocol::{EVENT_KEY_DOWN, FocusLostReason, caret_source};
 use wind_ui_types::{CandidateOp, MenuCmd, MenuItemSpec, MenuKind, UiCommand, UiEvent};
@@ -454,8 +454,15 @@ impl MobileCore {
 
         // 用户数据根：redb 落在这里。**不能传 None**——那样系统短语层会整段为空
         // （详见 `new_headless_with_ui_at` 的说明），词频与自造词也不落盘。
-        let (coord, rx) =
-            Coordinator::new_headless_with_ui_at(cfg, Some(data_dir), Some(user_root));
+        //
+        // 显式声明移动 Profile：平台差异由运行期 Profile 决定，不再靠 `cfg!(target_os)`，
+        // 这样主机上的测试与 Android 产物走同一条移动分支。
+        let (coord, rx) = Coordinator::new_headless_with_profile(
+            cfg,
+            Some(data_dir),
+            Some(user_root),
+            InputProfile::mobile(),
+        );
 
         let warming = Arc::new(AtomicBool::new(true));
         spawn_ui_pump(rx, sink, Arc::clone(&warming));
@@ -595,6 +602,18 @@ impl MobileCore {
         if switches {
             self.coord.prewarm_single_initials();
         }
+    }
+
+    /// 构造时选定的输入档位。只供测试断言「门面用的是移动 Profile」。
+    #[doc(hidden)]
+    pub fn profile(&self) -> InputProfile {
+        self.coord.profile()
+    }
+
+    /// 底层协调器。只供测试读 `debug_*` 诊断口，宿主不要碰。
+    #[doc(hidden)]
+    pub fn debug_coordinator(&self) -> &Coordinator {
+        &self.coord
     }
 
     /// 可选方案列表。下标即 [`MobileCommand::SelectSchema`] 的取值
