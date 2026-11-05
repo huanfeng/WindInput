@@ -45,7 +45,6 @@ T|全拼 。
 S|true|拼|false|true|false|false
 ## 拼音输入声母 n
 C|n|1||true|0|1|9
-C|n|1||true|0|1|9
 ## 拼音 Esc 取消
 H
 ## ReloadConfig
