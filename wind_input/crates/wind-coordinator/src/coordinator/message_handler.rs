@@ -2675,7 +2675,8 @@ impl MessageHandler for Coordinator {
                                     .unwrap_or_else(|e| e.into_inner())
                                     .pin_quote_left(ch);
                             }
-                            let cursor_offset = out.encode_utf16().count() as u32;
+                            // 从完整文本末尾回退右符号的宽度，顶出的候选前缀不参与定位。
+                            let cursor_offset = right.len_utf16() as u32;
                             let text = format!("{}{}", out, right);
                             return KeyAction::InsertTextWithCursor {
                                 text,

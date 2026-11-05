@@ -56,6 +56,10 @@
 候选比较函数 `wind_candidate::better()`（candidate.rs:131-139）：
 `weight desc → natural_order asc → code asc → consumed_length desc → text asc`。
 
+标点顶屏并自动配对时，协调器将候选前缀与左右符号一并上屏，`InsertTextWithCursor.cursor_offset`
+仅取右符号的 UTF-16 宽度（从全文末尾回退），不能包含候选前缀。TSF 一次传入完整回退格数，
+使立即执行与修饰键松开后执行保持一致。
+
 ### 1.3 EngineManager：懒加载与方案分发
 
 `wind-engine/src/manager.rs`（~2570 行）：

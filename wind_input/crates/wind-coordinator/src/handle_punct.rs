@@ -1052,6 +1052,47 @@ mod pair_commit_tests {
             .map(|e| (e.left.clone(), e.right.clone(), e.jump_steps))
     }
 
+    #[test]
+    fn punct_top_commit_pair_cursor_ignores_candidate_prefix() {
+        for prefix in ["", "你", "你好", "𠮷你好"] {
+            for (key_code, modifiers, pair) in [
+                (keymap::VK_LBRACKET, 0, "【】"),
+                (keymap::VK_9, MOD_SHIFT, "（）"),
+            ] {
+                let c = coord(true);
+                if !prefix.is_empty() {
+                    c.state
+                        .lock()
+                        .unwrap()
+                        .candidates
+                        .push(wind_candidate::Candidate {
+                            text: prefix.into(),
+                            ..Default::default()
+                        });
+                }
+                let act = c.handle_key_event(&KeyEventData {
+                    key_code,
+                    scan_code: 0,
+                    modifiers,
+                    event_type: wind_ipc::protocol::EVENT_KEY_DOWN,
+                    toggles: 0,
+                    event_seq: 0,
+                    prev_char: 0,
+                });
+                match act {
+                    KeyAction::InsertTextWithCursor {
+                        text,
+                        cursor_offset,
+                    } => {
+                        assert_eq!(text, format!("{prefix}{pair}"));
+                        assert_eq!(cursor_offset, 1, "顶屏前缀不应影响配对回退格数");
+                    }
+                    other => panic!("应上屏候选及配对，实际: {other:?}"),
+                }
+            }
+        }
+    }
+
     /// 按一次 Tab（0x09），返回协调器裁决。
     fn tab(c: &Coordinator) -> KeyAction {
         c.handle_key_event(&KeyEventData {

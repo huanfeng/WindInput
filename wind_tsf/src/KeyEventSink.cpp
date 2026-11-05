@@ -2815,8 +2815,8 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             _TrackCommittedTextForSmartPunct(response.text);
             _isComposing = FALSE;
             _hasCandidates = FALSE;
-            for (int i = 0; i < response.cursorOffset; i++)
-                _SimulatePairKey(VK_LEFT);
+            // 一次传入完整格数：修饰键按住时待执行动作会覆盖，逐格调用会只留下最后一格。
+            _SimulatePairKey(VK_LEFT, response.cursorOffset);
             // 配对插入：记一层待跳出深度。它是 core 侧 pair_tracker 的镜像计数，也是本文件
             // 唯一的吃键闸门——Enter 等被会话门控的键靠它放行转发（Tab 本就无条件转发）。
             // 四条配对建立路径（中文标点 / 英文全角 / 英半自定义 / 英半普通）都经此响应。

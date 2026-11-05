@@ -205,3 +205,13 @@
 - 回退旧行为：关闭英文词频（回到次数降序、最近次之）。
 - 钉住的测试：`wind-coordinator/tests/quick_input_history.rs`（`free_lens_history_follows_english_top_strategy`）
 - 来源：用户反馈
+
+## 2026-11-05 · 标点顶屏自动配对按右符号宽度回退光标
+
+- 变化：候选随左符号顶屏时，此前按「候选前缀 + 左符号」长度回退，`你【】` 停在 `你|【】`；
+  现在仅回退右符号宽度，停在 `你【|】`。TSF 将完整格数一次传入，避免 Shift 按住时多次调用覆盖。
+- 触发条件：启用中文自动配对，并由标点顶出候选。
+- 回退配置：无保留错误定位的开关；关闭 `input.auto_pair.chinese` 可停用中文自动配对。
+- 钉住的测试：`handle_punct::pair_commit_tests::punct_top_commit_pair_cursor_ignores_candidate_prefix`
+  （空前缀、单字、词组、扩展汉字，覆盖方括号与 Shift 圆括号）。
+- 来源：Windows 记事本实测及 TSF 日志。
