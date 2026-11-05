@@ -245,10 +245,6 @@ private:
     // 另有三个非按键调用点（同步握手等），它们拿不到 wParam，标志若残留会在下一次按键上
     // 误重放。故两个入口都在调用响应处理**之前**先清零。
     BOOL _pendingReplayToHost = FALSE;
-    // 本次 OnKeyDown 的响应上屏了文字（CommitText 等，见 ResponseCommitsText）。会话中
-    // Ctrl/Alt 组合的 cleanup 判定要用（见 CtrlAltCleanupPolicy.h），与上一项同样只在
-    // OnKeyDown 里、调用响应处理之前清零。
-    BOOL _responseCommitted = FALSE;
     // 正在 DispatchHotkey（WM_HOTKEY 回调）里处理响应：不在按键上下文，上屏要按
     // nonKeyContext 走异步会话。只在 DispatchHotkey 里置位、处理完恢复原值。
     BOOL _inHotkeyDispatch = FALSE;

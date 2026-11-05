@@ -60,6 +60,10 @@
 仅取右符号的 UTF-16 宽度（从全文末尾回退），不能包含候选前缀。TSF 一次传入完整回退格数，
 使立即执行与修饰键松开后执行保持一致。
 
+会话中的宿主快捷键（Ctrl/Alt/Cmd）由协调器显式返回 `ClearCompositionThenPassThrough`，
+先收组合再交还原键；`ClearComposition` 与 `Consumed` 保持消费语义。TSF 不再根据响应后是否
+还有候选、组合或文字上屏来推断键的归属：加词 Ctrl+Enter 打开编辑窗口后也会清空这些状态。
+
 ### 1.3 EngineManager：懒加载与方案分发
 
 `wind-engine/src/manager.rs`（~2570 行）：

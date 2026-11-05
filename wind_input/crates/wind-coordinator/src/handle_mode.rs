@@ -3068,7 +3068,7 @@ impl Coordinator {
         if has_pending {
             exit(self, state);
             self.notify_ui_hide();
-            return Some(KeyAction::ClearComposition);
+            return Some(KeyAction::ClearCompositionThenPassThrough);
         }
         Some(KeyAction::PassThrough)
     }

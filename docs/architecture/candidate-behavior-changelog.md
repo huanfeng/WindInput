@@ -215,3 +215,13 @@
 - 钉住的测试：`handle_punct::pair_commit_tests::punct_top_commit_pair_cursor_ignores_candidate_prefix`
   （空前缀、单字、词组、扩展汉字，覆盖方括号与 Shift 圆括号）。
 - 来源：Windows 记事本实测及 TSF 日志。
+
+## 2026-11-05 · 加词编辑快捷键不再透传给宿主
+
+- 变化：快捷加词面板内 Ctrl+Enter 打开编辑窗口后，此前 TSF 将回车再次交给宿主，可能导致聊天误发送；
+  现在保留服务端的消费决定。面板内只返回 Consumed 的 Ctrl 组合也保持消费。
+- 触发条件：Ctrl+= 进入快捷加词面板，再按 Ctrl+Enter；普通组码及临时模式的宿主快捷键仍清组合后透传。
+- 回退配置：无保留穿透行为的开关；可用独立加词窗口快捷键 Ctrl+Shift+= 绕过面板。
+- 钉住的测试：`shortcut_ownership_tests`、`wind_tsf/tests/ctrl_alt_cleanup_policy_test.cpp`，
+  以及 `input_flow` 的 Ctrl 组合守卫、`quick_input_select_key` 的候选快捷键回归。
+- 来源：论坛 t398、Windows 记事本 TSF 日志。

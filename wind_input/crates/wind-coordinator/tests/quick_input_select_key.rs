@@ -291,7 +291,7 @@ fn temp_pinyin_pin_template_keeps_input() {
     // 宿主快捷键（非置顶/删除模板）仍走兜底守卫：放弃整段。
     let act = coord.handle_key_event(&key(u32::from(b'A'), MOD_CTRL));
     assert!(
-        matches!(act, KeyAction::ClearComposition),
+        matches!(act, KeyAction::ClearCompositionThenPassThrough),
         "Ctrl+A 仍应清组合，实得 {act:?}"
     );
     drop(coord);

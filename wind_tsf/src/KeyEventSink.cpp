@@ -1557,7 +1557,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     if (hasInputSession || isChineseMode)
     {
         // Ctrl/Alt combos during active input session: mark as input key so we can
-        // send to Go for state cleanup. After response, we'll override pfEaten=FALSE.
+        // send to the service; only an explicit pass-through response returns it to the host.
         // Note: registered hotkeys are already caught by isKeyDownHotkey above.
         // IMPORTANT: Exclude modifier keys themselves — pressing Ctrl/Alt alone should
         // not trigger cleanup, to preserve Ctrl+number and Ctrl+Shift+number shortcuts.
@@ -1743,10 +1743,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // This is simpler and matches Weasel's architecture
     // 先清零重放标志：只有本次响应置的位才算数（见其声明处说明）。
     _pendingReplayToHost = FALSE;
-    _responseCommitted = FALSE;
     // 记下本次应答对应的按键：CommitThenDefer 据此只让**这个键**的 keyup 开延迟组合。
     _responseKeyVk = (UINT)wParam;
-    *pfEaten = _HandleServiceResponse();
+    ResponseType keyResponse = ResponseType::Error;
+    *pfEaten = _HandleServiceResponse(&keyResponse);
     _responseKeyVk = 0;
     if (*pfEaten && wParam >= VK_F1 && wParam <= VK_F12 && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
     {
@@ -1838,27 +1838,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 数字键"吃了又吐"（有候选时被吃、coordinator 回 PassThrough）：OnKeyDown 返 FALSE，
     // 输入序列由出口守卫记下（_NoteInputSequenceAtExit），无须在此补设。
 
-    // Ctrl/Alt combo during active session: decide pass-through based on Go's response.
-    // If Go handled the key as a candidate operation (pin/delete) and the composition
-    // is still active, respect Go's decision and eat the key. Only override to FALSE
-    // when Go actually cleared the composition (e.g., Ctrl+S cleanup).
-    // 上屏了候选（快捷输入选词键）同样算服务端用掉了这一键，判据见 CtrlAltCleanupPolicy.h。
-    if (isCtrlAltCleanup && *pfEaten)
-    {
-        if (!wind::ctrlalt::ShouldReturnToHost(_hasCandidates != FALSE, _isComposing != FALSE,
-                                               _responseCommitted != FALSE))
-        {
-            // Go handled it as a candidate action (e.g., Ctrl+number pin/delete),
-            // composition still active — keep pfEaten=TRUE to prevent app from seeing the key.
-            WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt key handled by Go (session still active), eating key\n");
-        }
-        else
-        {
-            // Go cleared composition (cleanup) — pass key through to the host application.
-            WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt cleanup done, overriding to pass-through\n");
-            *pfEaten = FALSE;
-        }
-    }
+    // 服务端显式声明按键归属。加词编辑等动作也会关闭组合，不能据此改判为透传。
+    // ClearCompositionThenPassThrough 已在上面的重放分支处理；其余消费响应均保留吃键决定。
+    if (isCtrlAltCleanup && wind::ctrlalt::ShouldReturnToHost(keyResponse))
+        *pfEaten = FALSE;
 
     _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers,
                     isKeyDownHotkey ? HotkeyType::Hotkey : CHotkeyManager::ClassifyInputKey(wParam, modifiers),
@@ -2636,8 +2619,6 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
     _needsCompositionResync = FALSE;
     _resyncDeadline = 0;
     _resyncFailStreak = 0;
-    // 上屏类响应记一笔，供 OnKeyDown 的 Ctrl/Alt cleanup 判定（见 CtrlAltCleanupPolicy.h）。
-    _responseCommitted = wind::ctrlalt::ResponseCommitsText(response.type) ? TRUE : FALSE;
 
     QueryPerformanceCounter(&midTime);
     int ipcMs = (int)((midTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);
