@@ -245,6 +245,18 @@ fn handle_client(
     use windows::Win32::Foundation::*;
     use windows::Win32::Storage::FileSystem::*;
 
+    // 打字线程提速：hybrid CPU（P 核 + E 核）下服务线程常被放 E 核化解负载，同核还有
+    // 其它常驻线程（WorkBuddy 等后台任务），实测 convert 慢键的 PageFaultCount 差值
+    // 只有正常键的 1/60 —— 大部分时间片在被抢占，直观感受就是出候选顿挫 50–200ms。
+    // 键处理线程提到 HIGHEST（进程保持 Normal），同核排队快得多。失败静默：提不上去
+    // 只影响延迟上限，不破坏功能。
+    unsafe {
+        let _ = windows::Win32::System::Threading::SetThreadPriority(
+            windows::Win32::System::Threading::GetCurrentThread(),
+            windows::Win32::System::Threading::THREAD_PRIORITY_HIGHEST,
+        );
+    }
+
     // 连接建立即通知：`ctx.pid` 是本次唯一能免费拿到、还没被任何消息处理耽搁的对端 pid。
     // 放在读循环之前——命名管道有内核缓冲（见上方 CreateNamedPipeA 的 64KB 收发缓冲区），
     // 对端此刻发消息不会因为我们还没开始 ReadFile 而丢失或阻塞；本调用只影响*本连接*
