@@ -55,8 +55,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod config_api;
+mod schema_settings;
 mod touch;
 
+pub use schema_settings::{SchemaSetting, SchemaSettingGroup, SchemaSettingKind, SchemaSettings};
 pub use touch::{KeySource, PressKey};
 
 use wind_bridge::handler::KeyAction as BridgeKeyAction;
