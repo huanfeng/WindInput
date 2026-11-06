@@ -4,6 +4,7 @@
 #include "IPCClient.h"
 #include "SkipKeyTable.h"
 #include "PassthroughNote.h"
+#include "InputSequenceChar.h"
 #include "ToggleTapPolicy.h"
 #include "CtrlRawPolicy.h"
 #include "CtrlSpacePolicy.h"
@@ -97,7 +98,9 @@ public:
     void ResetComposingState(BOOL keepPairState = FALSE) {
         _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _resyncDeadline = 0; _resyncFailStreak = 0; _skipKeys.Clear(); _pendingPairAction = {};
         _passthrough.Reset();  // 与 skip 表同处清：跨文档带一个陈旧的透传事实过去没有意义
-        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; }
+        // seqChar 同配对状态：中英切换不清（用户定：切换后紧接着打的仍算「英文后」），
+        // 焦点/文档切换清——换了文档，上一个文档末尾是什么与这里无关。
+        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; _seqChar = 0; }
     }
 
     // 配对状态保活：所有按键都应调用（含英文模式的普通字母——协调器在英文模式下收不到
@@ -420,6 +423,16 @@ private:
     static_assert(WindPassthrough::kVkLMenu == VK_LMENU, "VK 漂移");
     static_assert(WindPassthrough::kVkRMenu == VK_RMENU, "VK 漂移");
     static_assert(WindPassthrough::kVkPacket == VK_PACKET, "VK 漂移");
+    static_assert(WindInputSeq::kVkSpace == VK_SPACE, "VK 漂移");
+    static_assert(WindInputSeq::kVkNumpad0 == VK_NUMPAD0, "VK 漂移");
+    static_assert(WindInputSeq::kVkNumpad9 == VK_NUMPAD9, "VK 漂移");
+    static_assert(WindInputSeq::kVkMultiply == VK_MULTIPLY, "VK 漂移");
+    static_assert(WindInputSeq::kVkDivide == VK_DIVIDE, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem1 == VK_OEM_1, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem3 == VK_OEM_3, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem4 == VK_OEM_4, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem7 == VK_OEM_7, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem102 == VK_OEM_102, "VK 漂移");
 
     // `OnTestKeyDown` / `OnKeyDown` 有 40+ 个 return，逐个接线必漏一处（本仓反复吃过的
     // "散点接线"）。用作用域守卫在**函数出口**统一判：析构时 `*pfEaten` 已是最终结论。
@@ -489,7 +502,7 @@ private:
         return 0;
     }
 
-    // 按键侧记录点：挂在 PassthroughNoter 的出口（OnTestKeyDown / OnKeyDown 两处），按最终
+    // 按键侧记录点（同时更新 _seqChar，见 InputSequenceChar.h）：挂在 PassthroughNoter 的出口（OnTestKeyDown / OnKeyDown 两处），按最终
     // `*pfEaten` 判。键进了宿主（判据同透传上报，`WindPassthrough::IsUserKeyIntoHost`：纯修饰键、
     // 自注入键不算）就记「是不是数字」，非数字即清零——CapsLock 字母、翻页热键、Backspace、
     // 方向键、Ctrl+V 都在此清。此前是在几个透传分支里手工接线，散点漏了好几处提前 return。
@@ -506,6 +519,7 @@ private:
     // 数字则记，否则清零（上屏汉字/标点后不该再继承数字状态）。全角数字（U+FF10-FF19）
     // 刻意不记——服务端只认 ASCII 0x30-0x39，记了也不会命中，徒增误判面。
     // 空文本不动状态：没有东西写进文档，光标前是什么并没有改变。
+    // 同时更新 _seqChar（末尾码点，见 InputSequenceChar.h），两者共用这几个上屏记录点。
     void _TrackCommittedTextForSmartPunct(const std::wstring& text);
 
     // ⛔ 这里曾有 CapsLock 的「回敲复原」机制（_RestoreCapsLockToggle / _capsSessionEaten /
@@ -515,6 +529,10 @@ private:
     // **不要在 TSF 侧重新实现它。**
 
     WCHAR _lastPassthroughDigit; // 最近一笔输入若是 ASCII 数字则记之，否则 0——数字后智能标点的唯一依据
+    // 输入序列里最近进文档的字符代表值（KeyPayload.seqChar，取值规则见 InputSequenceChar.h）。
+    // 与 _lastPassthroughDigit 同两个记录点，但**发送时不清零**：服务端只在组合开始那一键锁存它，
+    // 组合期间被吃下的键没有写进文档，光标前是什么并没有变。
+    uint16_t _seqChar;
     // 「自上一个 keydown 送达服务端以来有键进了宿主」的记账。规则与理由见 PassthroughNote.h；
     // 消费点在 _SendKeyToService（仅 keydown 那一发），清理点在 ResetComposingState。
     WindPassthrough::PassthroughState _passthrough;

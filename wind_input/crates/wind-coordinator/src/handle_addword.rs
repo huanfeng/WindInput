@@ -1726,6 +1726,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -1793,6 +1794,7 @@ mod tests {
             toggles,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         // 反向：不带位的按键不动计数（防「每个 keydown 都复位」）。
         c.handle_key_event_policed(&shift(0));

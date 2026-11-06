@@ -5122,6 +5122,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let refused = |c: &Coordinator| {
             assert!(matches!(c.open_softkeyboard(None), KeyAction::PassThrough));
@@ -5503,6 +5504,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let vk_k = 0x4B;
         assert!(!c.softkeyboard_is_open());

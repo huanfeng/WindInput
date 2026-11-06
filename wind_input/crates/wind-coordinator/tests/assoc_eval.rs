@@ -304,6 +304,7 @@ fn assoc_key_path_latency_heavy_user() {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     };
     let (mut pure, mut space) = (Vec::new(), Vec::new());
     let mut nonempty = 0usize;

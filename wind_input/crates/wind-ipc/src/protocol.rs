@@ -733,10 +733,12 @@ impl fmt::Debug for IpcHeader {
 }
 
 // ──────────────────────────────────────────────
-// Key Payload (18 bytes)
+// Key Payload (20 bytes)
 // ──────────────────────────────────────────────
 
-/// 按键事件载荷 (18 bytes)
+/// 按键事件载荷 (20 bytes)。
+///
+/// `seq_char`（偏移 18）是后加的：18 字节的旧包照收，该字段读成 0（= 不可知，依赖它的功能不触发）。
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
 pub struct KeyPayload {
@@ -747,10 +749,14 @@ pub struct KeyPayload {
     pub toggles: u8,    // 锁定态 CapsLock/NumLock/ScrollLock + 搭车位，见 `TOGGLE_*` 常量
     pub event_seq: u16,
     pub prev_char: u16,
+    /// 输入序列里最近进文档的字符代表值，0 = 不可知（C++ `InputSequenceChar.h`）。
+    pub seq_char: u16,
 }
 
 impl KeyPayload {
-    pub const SIZE: usize = 18;
+    pub const SIZE: usize = 20;
+    /// 不带 `seq_char` 的旧布局长度。
+    pub const LEGACY_SIZE: usize = 18;
 
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
@@ -761,11 +767,12 @@ impl KeyPayload {
         buf[13] = self.toggles;
         buf[14..16].copy_from_slice(&self.event_seq.to_le_bytes());
         buf[16..18].copy_from_slice(&self.prev_char.to_le_bytes());
+        buf[18..20].copy_from_slice(&self.seq_char.to_le_bytes());
         buf
     }
 
     pub fn from_bytes(buf: &[u8]) -> Option<Self> {
-        if buf.len() < Self::SIZE {
+        if buf.len() < Self::LEGACY_SIZE {
             return None;
         }
         Some(Self {
@@ -776,6 +783,11 @@ impl KeyPayload {
             toggles: buf[13],
             event_seq: u16::from_le_bytes([buf[14], buf[15]]),
             prev_char: u16::from_le_bytes([buf[16], buf[17]]),
+            seq_char: if buf.len() >= Self::SIZE {
+                u16::from_le_bytes([buf[18], buf[19]])
+            } else {
+                0
+            },
         })
     }
 }
@@ -1679,8 +1691,8 @@ pub const TOGGLE_CAPSLOCK: u8 = 0x01;
 /// （`ipc_failed_*`、只读上下文、Ctrl/Alt 清理透传……）同样置位。那些置位都是对的——键确实
 /// 进了宿主、文档可能变了——而宽的这一侧恰好是安全方向（多报 = 用户重按一次 press1）。
 ///
-/// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的 18 字节布局（两端各有
-/// static_assert，加字段即协议破坏，而真机上 DLL 与 core 会混搭版本）。两个方向都安全：
+/// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的布局（两端各有
+/// static_assert，而真机上 DLL 与 core 会混搭版本；后来的 `seq_char` 只敢追加在末尾）。两个方向都安全：
 /// 旧 core 只读 bit0，旧 DLL 不置位 = 「没透传过」= 原行为。
 ///
 /// 唯一消费者是智能符号的武装态：英文半角下 TSF 只吃标点键，中间打的字母全透传，服务端
@@ -1840,6 +1852,36 @@ pub const EVENT_MOD_UP: u8 = 3;
 #[cfg(test)]
 mod input_diag_wire_tests {
     use super::*;
+
+    #[test]
+    fn key_payload_round_trips_seq_char() {
+        let p = KeyPayload {
+            key_code: 0x41,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: 0,
+            toggles: 0,
+            event_seq: 3,
+            prev_char: 0x31,
+            seq_char: 0x4F60,
+        };
+        let back = KeyPayload::from_bytes(&p.to_bytes()).expect("20 字节可解");
+        assert_eq!({ back.prev_char }, 0x31);
+        assert_eq!({ back.seq_char }, 0x4F60);
+    }
+
+    #[test]
+    fn key_payload_legacy_18_bytes_reads_seq_char_as_unknown() {
+        // 旧 DLL / 旧 macOS 客户端的 18 字节包：照收，seq_char = 0（不可知）。
+        let mut buf = [0u8; 18];
+        buf[0..4].copy_from_slice(&0x41u32.to_le_bytes());
+        buf[16..18].copy_from_slice(&0x35u16.to_le_bytes());
+        let p = KeyPayload::from_bytes(&buf).expect("18 字节旧包仍可解");
+        assert_eq!({ p.key_code }, 0x41);
+        assert_eq!({ p.prev_char }, 0x35);
+        assert_eq!({ p.seq_char }, 0);
+        assert!(KeyPayload::from_bytes(&buf[..17]).is_none());
+    }
 
     #[test]
     fn focus_gained_backward_compat_36_bytes() {

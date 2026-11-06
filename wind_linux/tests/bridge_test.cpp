@@ -89,7 +89,7 @@ void TestRequestResponse()
     CHECK_EQ(resp.cmd, uint16_t(CMD_CONSUMED));
     srv.join();
     CHECK_EQ(seenCmd.load(), uint16_t(CMD_KEY_EVENT));
-    CHECK_EQ(seenLen.load(), 18u);
+    CHECK_EQ(seenLen.load(), 20u);
 
     CASE("对端已关：下一次 request 失败并自动断开（上层据此重连），进程不被 SIGPIPE 杀掉");
     Frame r2;

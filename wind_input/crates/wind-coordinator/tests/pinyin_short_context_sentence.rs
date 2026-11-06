@@ -78,6 +78,7 @@ fn candidates_with(cfg: Config, input: &str) -> Vec<String> {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     }
     coord.debug_all_candidate_texts()
@@ -96,6 +97,7 @@ fn candidates_for(schema: &str, input: &str) -> Vec<String> {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     }
     coord.debug_all_candidate_texts()

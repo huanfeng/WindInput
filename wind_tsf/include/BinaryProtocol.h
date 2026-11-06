@@ -285,7 +285,7 @@ struct BatchHeader
 };
 static_assert(sizeof(BatchHeader) == 4, "BatchHeader must be 4 bytes");
 
-// Key event payload (18 bytes)
+// Key event payload (20 bytes)
 struct KeyPayload
 {
     uint32_t keyCode;     // Virtual key code
@@ -296,8 +296,10 @@ struct KeyPayload
     uint16_t eventSeq;    // Monotonic event sequence number
     uint16_t prevChar;    // Character before caret, 0 if unavailable. ASCII digits come only from
                           // the IME's own input sequence, never from the document (SmartPunctPrevChar.h)
+    uint16_t seqChar;     // Last char the IME saw go into the document (commit tail / passthrough key
+                          // class representative), 0 = unknown. See InputSequenceChar.h
 };
-static_assert(sizeof(KeyPayload) == 18, "KeyPayload must be 18 bytes");
+static_assert(sizeof(KeyPayload) == 20, "KeyPayload must be 20 bytes");
 
 // Caret position payload (20 bytes)
 struct CaretPayload

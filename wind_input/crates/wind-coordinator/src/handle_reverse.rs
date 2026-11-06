@@ -240,6 +240,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     }
 
@@ -317,6 +318,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         })
     }
 

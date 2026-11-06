@@ -33,10 +33,46 @@ void DigitTracker::noteCommittedText(const std::string& utf8)
     prevChar_ = (last >= 0x30 && last <= 0x39) ? uint16_t(last) : 0;
 }
 
+uint16_t SeqTracker::charFromVk(uint32_t vk, uint32_t modifiers)
+{
+    if (modifiers & (KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_WIN)) {
+        return 0; // 宿主快捷键：粘贴进来的是什么看不见
+    }
+    bool shift = (modifiers & KEYMOD_SHIFT) != 0;
+    if (vk >= 0x30 && vk <= 0x39) {
+        return shift ? uint16_t('?') : uint16_t(vk); // Shift+数字是 !@#…
+    }
+    if (vk >= 0x41 && vk <= 0x5A) {
+        return 'a';
+    }
+    if (vk >= 0x60 && vk <= 0x69) {
+        return uint16_t(0x30 + (vk - 0x60));
+    }
+    if (vk == 0x20) {
+        return ' ';
+    }
+    if ((vk >= 0x6A && vk <= 0x6F) || (vk >= 0xBA && vk <= 0xC0) || (vk >= 0xDB && vk <= 0xDE) ||
+        vk == 0xE2) {
+        return '?';
+    }
+    return 0;
+}
+
+void SeqTracker::noteCommittedText(const std::string& utf8)
+{
+    if (utf8.empty()) {
+        return;
+    }
+    uint32_t last = lastCodepoint(utf8);
+    // 辅助平面取高代理：服务端据此把 2/3 号平面认成汉字。
+    seqChar_ = last >= 0x10000 ? uint16_t(0xD800 + ((last - 0x10000) >> 10)) : uint16_t(last);
+}
+
 void ResponseRouter::reset()
 {
     compositionText_.clear();
     digits_.reset();
+    seq_.reset();
     hasHeld_ = false;
     heldSymbol_.clear();
     pendingCommitPrefix_.clear();
@@ -101,6 +137,7 @@ bool ResponseRouter::apply(const Frame& frame, TextSink* sink, bool hostShortcut
             }
             // 光标跨过了那个右标点，光标前必是标点（恒非数字），清零即准确。
             digits_.reset();
+            seq_.noteCursorCrossedSymbol();
         }
         return true;
 
@@ -114,6 +151,7 @@ bool ResponseRouter::apply(const Frame& frame, TextSink* sink, bool hostShortcut
         if (auto p = decodeReplaceBackward(frame.payload); p && sink) {
             if (p->text.empty() && p->count > 0) {
                 digits_.reset(); // 纯删除（ime.undo_commit）：被删掉的数字不能幸存
+                seq_.reset();
             }
             if (p->count > 0) {
                 sink->deleteBeforeCursor(std::min(p->count, kMaxDeleteUnits));
@@ -228,6 +266,7 @@ void ResponseRouter::insertCommitted(const std::string& text, TextSink* sink)
     }
     sink->commitText(text);
     digits_.noteCommittedText(text);
+    seq_.noteCommittedText(text);
 }
 
 void ResponseRouter::applyMarkedText(const std::string& text, size_t caretUtf16, TextSink* sink)

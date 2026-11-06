@@ -844,6 +844,7 @@ void WindEngine::sendKeyUp(fcitx::InputContext* ic, uint32_t vk, uint32_t mods, 
     e.toggles = toggles;
     e.eventSeq = ++keySeq_;
     e.prevChar = prevCharFor(ic);
+    e.seqChar = router_.seqTracker().seqChar();
     Frame resp;
     if (requestWithRetry(encodeKeyEventFrame(e), resp)) {
         applyResponse(ic, resp, false);
@@ -863,6 +864,7 @@ bool WindEngine::sendAltEvent(fcitx::InputContext* ic, uint32_t vk, uint8_t even
     e.toggles = toggles;
     e.eventSeq = ++keySeq_;
     e.prevChar = prevCharFor(ic);
+    e.seqChar = router_.seqTracker().seqChar();
     Frame resp;
     if (!requestWithRetry(encodeKeyEventFrame(e), resp)) {
         return false;
@@ -889,6 +891,7 @@ void WindEngine::sendCtrlRaw(fcitx::InputContext* ic, uint32_t vk, uint8_t event
     e.toggles = toggles;
     e.eventSeq = ++keySeq_;
     e.prevChar = prevCharFor(ic);
+    e.seqChar = router_.seqTracker().seqChar();
     Frame resp;
     if (requestWithRetry(encodeKeyEventFrame(e), resp)) {
         applyResponse(ic, resp, false);
@@ -1098,11 +1101,11 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     uint32_t vk = keysymToVK(sym);
     uint32_t mods = statesToModifiers(states);
     if (vk == 0) {
-        router_.digitTracker().noteKeyPassthrough(0, mods);
+        router_.noteKeyPassthrough(0, mods);
         return; // 未覆盖的键：交还宿主
     }
     if (!ensureConnected()) {
-        router_.digitTracker().noteKeyPassthrough(vk, mods);
+        router_.noteKeyPassthrough(vk, mods);
         return; // 服务不在：直通，下一键再试
     }
 
@@ -1124,9 +1127,10 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     e.toggles = statesToToggles(states);
     e.eventSeq = ++keySeq_;
     e.prevChar = prevCharFor(ic); // 必须在处理本键之前取
+    e.seqChar = router_.seqTracker().seqChar();
     Frame resp;
     if (!requestWithRetry(encodeKeyEventFrame(e), resp)) {
-        router_.digitTracker().noteKeyPassthrough(vk, mods);
+        router_.noteKeyPassthrough(vk, mods);
         return;
     }
     bool consumed = applyResponse(ic, resp, isHostShortcut(states));
@@ -1139,7 +1143,7 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
         eatenKeys_.insert(code);
         event.filterAndAccept();
     } else {
-        router_.digitTracker().noteKeyPassthrough(vk, mods);
+        router_.noteKeyPassthrough(vk, mods);
     }
 }
 

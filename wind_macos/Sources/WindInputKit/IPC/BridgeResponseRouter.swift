@@ -63,6 +63,9 @@ public final class BridgeResponseRouter {
     /// [`SmartPunctDigitTracker`]。**上屏侧**的喂食统一收口在 `insertCommitted`，
     /// 按键侧由 app 层 (`InputController.handle`) 在透传时喂。
     public let digitTracker = SmartPunctDigitTracker()
+    /// `seqChar` 记账（中英间补空格 / 英文后智能标点）。与 `digitTracker` 分开的理由见
+    /// [`InputSequenceTracker`]：组字更新不动它，只在真写进文档时更新。
+    public let seqTracker = InputSequenceTracker()
 
     public init() {}
 
@@ -78,11 +81,13 @@ public final class BridgeResponseRouter {
         guard let client = client else { return }
         client.insertText(text, replacementRange: replacementRange)
         digitTracker.noteCommittedText(text)
+        seqTracker.noteCommittedText(text)
     }
 
     public func reset() {
         composition.clear()
         digitTracker.reset()
+        seqTracker.reset()
         heldSymbol = nil
         pendingCommitPrefix = ""
         cancelHoldTimer()
@@ -181,6 +186,7 @@ public final class BridgeResponseRouter {
                 // insertText**，`insertCommitted` 收口不到。跳过后光标前必是标点（恒非
                 // 数字），清零即准确，不是保守近似。
                 digitTracker.reset()
+                seqTracker.noteCursorCrossedSymbol()
             }
             return true
 
@@ -200,6 +206,7 @@ public final class BridgeResponseRouter {
                 // 在这里却会让被删掉的那个数字幸存下来 —— 文档确实变了。
                 if p.text.isEmpty && count > 0 {
                     digitTracker.reset()
+                    seqTracker.reset()
                 }
                 let sel = client.selectedRange()
                 if count > 0, sel.location != NSNotFound, sel.location >= count {

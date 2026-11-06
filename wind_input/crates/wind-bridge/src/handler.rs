@@ -24,6 +24,10 @@ pub struct KeyEventData {
     pub toggles: u8,
     pub event_seq: u16,
     pub prev_char: u16,
+    /// 输入序列里最近进文档的字符代表值（0 = 不可知）。客户端记账，取值规则见 C++
+    /// `InputSequenceChar.h`；服务端只用它的**类别**（`wind_punct::CharClass`）。
+    /// 与 `prev_char` 是两个事实：后者仍是数字后智能标点 / 智能符号 press2 守卫的输入。
+    pub seq_char: u16,
 }
 
 impl From<&KeyPayload> for KeyEventData {
@@ -36,6 +40,7 @@ impl From<&KeyPayload> for KeyEventData {
             toggles: p.toggles,
             event_seq: p.event_seq,
             prev_char: p.prev_char,
+            seq_char: p.seq_char,
         }
     }
 }

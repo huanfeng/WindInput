@@ -96,6 +96,7 @@ fn key_event(key_code: u32, event_type: u8) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -2180,6 +2181,7 @@ fn test_chinese_punctuation() {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     };
     match coord.handle_key_event(&shifted) {
         KeyAction::InsertText { text, .. } => assert_eq!(text, "！"),

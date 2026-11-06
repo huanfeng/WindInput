@@ -2566,6 +2566,7 @@ impl Coordinator {
                     toggles: 0,
                     event_seq: 0,
                     prev_char: 0,
+                    seq_char: 0,
                 };
                 use wind_bridge::handler::MessageHandler;
                 this.handle_key_event(&key(0x41));
@@ -9920,6 +9921,7 @@ impl Coordinator {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         // ★ **最先**试大小写档位循环：它是「英文输入态下临时夺取本键」，优先级按定义高于
         // 用户给 CapsLock 配的任何会话动作。守卫（开关 / 英文语境 / 有候选）都在函数内部，
@@ -17597,6 +17599,7 @@ mod capslock_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -18724,6 +18727,7 @@ mod input_diag_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -20378,6 +20382,7 @@ mod syllable_separator_app_tests {
                 toggles: 0,
                 event_seq: 0,
                 prev_char: 0,
+                seq_char: 0,
             });
         }
         match last {
@@ -20424,6 +20429,7 @@ mod syllable_separator_app_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
         focus(&c, 8, "other.exe");
         assert!(
