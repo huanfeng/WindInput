@@ -931,7 +931,7 @@ impl MobileCore {
     pub fn refresh_installed_schemas(&self) {
         let mut ids = scan_installed_schemas(&self.data_dir);
         let fallback = config_api::fallback_schema();
-        if !fallback.is_empty() && !ids.iter().any(|s| *s == fallback) {
+        if !fallback.is_empty() && !ids.contains(&fallback) {
             ids.push(fallback);
         }
         config_api::set_installed_schemas(ids);

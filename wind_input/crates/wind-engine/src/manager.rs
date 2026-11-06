@@ -3912,6 +3912,17 @@ impl EngineManager {
         Self::read_override_value(schema_id, dir)
     }
 
+    /// 某方案 override 文件的路径（目录未配置时 `None`；文件不一定存在）。
+    /// 供读改写方区分「文件不存在」与「文件存在但解析失败」——[`Self::get_schema_override`]
+    /// 两者都返回 `None`，拿空表起步写回会把坏文件里的其它内容整份冲掉。
+    pub fn schema_override_path(&self, schema_id: &str) -> Option<std::path::PathBuf> {
+        Some(
+            self.override_dir
+                .as_deref()?
+                .join(format!("{schema_id}.toml")),
+        )
+    }
+
     /// 仅写入某方案 override 层（原子 tmp+rename），**不**使引擎缓存失效。
     /// 供「持久化 + 对已加载引擎 live 生效」的场景（如扩展词库热插拔）使用。
     pub fn persist_schema_override(

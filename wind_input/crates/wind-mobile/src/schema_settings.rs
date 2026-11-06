@@ -284,9 +284,20 @@ impl MobileCore {
         changes: &[(&str, Option<Value>)],
     ) -> Result<(), String> {
         let mgr = self.coord.engine_mgr();
-        let mut ov = mgr
-            .get_schema_override(schema_id)
-            .unwrap_or_else(empty_table);
+        let mut ov = match mgr.get_schema_override(schema_id) {
+            Some(v) => v,
+            // 读不出来有两种：文件不存在（从空表起步）、文件存在但写坏了（拒绝——拿空表写回
+            // 会把里面的扩展词库开关、按键绑定等整份冲掉）
+            None if mgr
+                .schema_override_path(schema_id)
+                .is_some_and(|p| p.exists()) =>
+            {
+                return Err(format!(
+                    "方案覆盖文件 {schema_id}.toml 格式有误，未修改；请先修正或删除该文件"
+                ));
+            }
+            None => empty_table(),
+        };
         for (key, v) in changes {
             match v {
                 Some(v) => set_path(&mut ov, key, v.clone())?,
@@ -713,6 +724,31 @@ mod core_tests {
         let _ = std::fs::write(&file, "[phrases]\nenabled = false\n");
         m.reset_schema_settings("wubi86").unwrap();
         assert!(!file.exists(), "覆盖表删空就删文件");
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn broken_override_file_is_not_overwritten() {
+        if !has_data() {
+            return;
+        }
+        let r = root("broken");
+        let m = core_at(&r);
+        let file = r.join("overrides/wubi86.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let broken = "[[dictionaries]]\nid = \"x\"\nenabled = \n";
+        std::fs::write(&file, broken).unwrap();
+        let e = m.set_schema_setting("wubi86", "phrases.enabled", Some("false"));
+        assert!(e.unwrap_err().contains("格式有误"), "坏文件要拒绝写入");
+        assert!(
+            m.reset_schema_settings("wubi86").is_err(),
+            "全部恢复也不能删坏文件"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            broken,
+            "坏文件原样保留"
+        );
         let _ = std::fs::remove_dir_all(&r);
     }
 
