@@ -463,6 +463,15 @@ pub(crate) struct State {
     pub(crate) chinese_mode: bool,
     pub(crate) full_width: bool,
     pub(crate) chinese_punct: bool,
+    /// 插入点前一字符的类别——中英/中数间补空格与英文后智能标点的「上一笔」。
+    ///
+    /// 两个写入点（见 `crate::auto_spacing`）：无输入会话时的 keydown 按客户端 `seq_char`
+    /// 重新锁存；服务端每发出一笔上屏就改成那笔的末字符。组合中的后续按键不改它——组字键
+    /// 没写进文档，真正的「前一字符」是组合开始时那个。
+    pub(crate) spacing_prev: wind_punct::spacing::CharClass,
+    /// 本次按键 / 点选的上屏是「英文语境下的一个词」，且该语境的 `commit_space` 开着。
+    /// 由原先立即补尾随空格的那些出口置位，统一出口消费后清零（见 `crate::auto_spacing`）。
+    pub(crate) spacing_word_commit: bool,
     /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
     ///
     /// 见 `docs/design/schema-scoped-behavior.md` §4。初值是哨兵 `u64::MAX`，保证首次
@@ -1073,6 +1082,9 @@ pub(crate) struct ActiveCompat {
     pub(crate) auto_pair: Option<bool>,
     /// 本进程的智能符号替换方案；`None` = 跟随全局 `input.symbol.smart_method`。
     pub(crate) smart_method: Option<wind_config::config::SmartMethod>,
+    /// 本进程的中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`，`Some(false)` 关闭。
+    /// 读取见 `Coordinator::auto_spacing_allowed_here`。
+    pub(crate) auto_spacing: Option<bool>,
     /// 光标坐标校正偏移（dp，96dpi 基准逻辑像素，正=右/下）。宿主报告的 caret 系统性偏移时用，
     /// 与 `caret_use_top` 在同两处消费（`apply_focus_caret` / `handle_caret_update`）。
     /// 应用时按目标点所在显示器的 DPI 换算成物理像素，见 [`Coordinator::apply_caret_compat`]。
@@ -3109,6 +3121,8 @@ impl Coordinator {
                 chinese_mode: init_chinese,
                 full_width: init_full,
                 chinese_punct: init_punct,
+                spacing_prev: wind_punct::spacing::CharClass::Other,
+                spacing_word_commit: false,
                 // 哨兵：与任何真实代际都不相等，保证首次 sync_schema_scope 必执行。
                 schema_scope_gen: u64::MAX,
                 punct_before_schema: None,
@@ -3608,6 +3622,7 @@ impl Coordinator {
                         has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                         auto_pair: rule.and_then(|r| r.auto_pair),
                         smart_method: rule.and_then(|r| r.smart_method),
+                        auto_spacing: rule.and_then(|r| r.auto_spacing),
                         caret_offset_x: rule.map(|r| r.caret_offset_x).unwrap_or(0),
                         caret_offset_y: rule.map(|r| r.caret_offset_y).unwrap_or(0),
                         window_hash,

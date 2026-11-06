@@ -883,8 +883,21 @@ impl MessageHandler for Coordinator {
             }
             self.note_host_wrote_text("宿主自行出字");
         }
+        // 中英 / 中数间补空格的「插入点前一字符」：只在组合开始前锁存（见 `crate::auto_spacing`）。
+        // 联想态也算组合开始前——联想候选是上一笔上屏之后的事，光标前就是那一笔的末字。
+        if data.event_type == EVENT_KEY_DOWN {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !Self::has_input_session(&st) || st.assoc_active() {
+                self.latch_spacing_boundary(&mut st, data);
+            }
+        }
         let action = self.handle_key_event(data);
         let action = self.redispatch_commit_code(data, action);
+        // 按需补空格：在换行改写之前，空格是上屏文本的前缀、与换行形式无关。
+        let action = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.apply_auto_spacing(&mut st, action)
+        };
         // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
         // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
         // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
@@ -1853,7 +1866,7 @@ impl MessageHandler for Coordinator {
                         CommitSource::RawInput,
                     );
                     let raw_text = format!("{}{}", prefix, raw_code);
-                    let mut text = self.maybe_convert(&state, &raw_text);
+                    let text = self.maybe_convert(&state, &raw_text);
                     // 原码类上屏也进上屏历史（转换前形态、不含下面补的空格，同回车）。
                     self.push_commit_history(&raw_text);
                     // 英文方案上屏原码 = 词库里没有的原文：英文自动造词的信号。
@@ -1865,12 +1878,10 @@ impl MessageHandler for Coordinator {
                     // `english_space_enabled_in`（语境口径）而非候选口径。与选中候选补空格一致——两者都是
                     // 「一个英文词打完了」，行为分叉才是意外。
                     //
-                    // ⚠️ 下方 VK_RETURN 分支代码与本块**逐行同形**，但**刻意不补**：回车是
-                    // 终结性动作（多伴随换行/提交意图），语义与「接着打下一个词」相反。改这里
-                    // 时别顺手把那边也改了。
+                    // 下方 VK_RETURN 分支与本块逐行同形，同样标记。
                     // 手上有 `state` ⇒ 用带语境的那个：临英与英文方案现在是两份开关。
                     if self.english_space_enabled_in(&state) {
-                        text.push(' ');
+                        state.spacing_word_commit = true;
                     }
                     state.input_buffer.clear();
                     state.input_buffer_cased.clear();
@@ -1930,9 +1941,12 @@ impl MessageHandler for Coordinator {
                         -1,
                         CommitSource::RawInput,
                     );
-                    // ⚠️ 本块与上方 VK_SPACE 空码分支逐行同形，唯一差别是**不补英文空格**
-                    // （`schema.english.commit_space`）：回车是终结性动作，多伴随换行/提交
-                    // 意图，与空格「接着打下一个词」的语义相反。这是刻意的不对称，不是漏接。
+                    // 本块与上方 VK_SPACE 空码分支逐行同形。词间空格（`schema.english.commit_space`）
+                    // 补在词**前面**（`crate::auto_spacing`），所以回车上屏的原码同样要标记成
+                    // 「一个英文词」——旧的「回车不补尾随空格」那条不对称随按需补一起消失了。
+                    if self.english_space_enabled_in(&state) {
+                        state.spacing_word_commit = true;
+                    }
                     let raw_text = format!("{}{}", prefix, raw_code);
                     let text = self.maybe_convert(&state, &raw_text);
                     // 原码类上屏也进上屏历史（`;` 重复上屏取得到）。记**转换前形态**（与选词
@@ -2620,7 +2634,8 @@ impl MessageHandler for Coordinator {
                     }
                     // 引号交替态钉左：开了配对后一次按键即产出完整一对，交替开关不参与决策。
                     let quote_paired = self.pin_quote_left_if_paired(&state, ch);
-                    let piece = self.convert_punct(&state, ch, data.prev_char);
+                    // 「英文后」看紧挨着标点的那段：被顶出的候选 / 原码，没有则是光标前（锁存值）。
+                    let piece = self.convert_punct_after(&state, ch, data.prev_char, &out);
                     state.chinese_punct = saved_chinese_punct;
                     out.push_str(&piece);
                     // 标点字符（候选部分已在标点前顶屏候选处记 Candidate；标点候选已 set
@@ -4629,9 +4644,9 @@ impl MessageHandler for Coordinator {
                 }
             }
         } else if tk == keymap::VK_RETURN {
-            // 回车恒不补：终结性动作，与按键路径的 VK_RETURN 分支同口径。
+            // 回车上屏的原码也是「一个英文词」，与按键路径的 VK_RETURN 分支同口径。
             let (t, s, f) = raw();
-            (t, s, f, false)
+            (t, s, f, self.english_space_enabled_in(&state))
         } else if (keymap::VK_1..=keymap::VK_9).contains(&tk) {
             match state.candidates.get((tk - keymap::VK_1) as usize) {
                 // 数字键选词：候选口径（「所有选中方式一律补」）。
@@ -4668,11 +4683,14 @@ impl MessageHandler for Coordinator {
         self.record_selection(&freq_code, &text, source);
         // 补空格**必须在记账之后**：`record_selection` 记的是词本身，带上尾空格会写出
         // 「hello 」这种与读取端（`apply_freq_rerank` 按候选文本查）永远对不上的词频键。
-        let text = if append_space {
-            format!("{text} ")
-        } else {
-            text
-        };
+        // 词间空格与中英交界空格同按键出口一样按需补在**本笔前面**（`crate::auto_spacing`）。
+        // 这条通路不产 `KeyAction`，故直接调文本级判据。
+        let mut text = text;
+        let full_width = state.full_width;
+        let mut prev = state.spacing_prev;
+        self.space_committed_text(&mut prev, full_width, append_space, &mut text);
+        state.spacing_prev = prev;
+        state.spacing_word_commit = false;
         // 上屏即组合结束：复位首显延迟状态，使下一组合首帧重新延迟到 reflow 后的权威坐标，
         // 避免其锁定到本组合旧坐标（"上屏后立即输入候选窗错位"主场景）。
         self.reset_first_show();

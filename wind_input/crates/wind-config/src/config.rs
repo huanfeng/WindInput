@@ -953,14 +953,18 @@ where
 pub struct EnglishGlobal {
     #[serde(default)]
     pub frequency: EnglishFrequency,
-    /// 英文方案下上屏一个词后**再补一个空格**。
+    /// 英文方案下词与词之间**自动补空格**。
     ///
     /// 英文是词间带空格的语言，连续打词时每次上屏都要多按一次空格。开启后由输入法补上。
     ///
-    /// 生效范围（消费点见 `english_appends_space` / `english_space_enabled`）：
+    /// ★ 自 0.131 起**按需补**：空格补在**下一个英文词前面**，不再在上屏后立即补尾随空格
+    /// （设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）。于是接标点不会得到
+    /// `hello ,`，打完离开也不留多余空格；代价是上屏后光标处暂时看不到那个空格。
+    ///
+    /// 「这是一个英文词」的判定点（消费点见 `english_appends_space` / `english_space_enabled_in`，
+    /// 补空格本身在 `crate::auto_spacing` 统一出口）：
     /// - **所有选中方式**——空格 / 数字键 / 次三选键 / 修饰键选词 / 鼠标点选；
-    /// - **空格上屏原码**（打了词库里没有的词）；
-    /// - **不含**回车上屏原码（终结性动作）、标点键顶屏（会得到 `hello ,`）、顶码。
+    /// - **空格 / 回车上屏原码**（打了词库里没有的词）。
     #[serde(default)]
     pub commit_space: bool,
     /// 首候选是用户所打原文（英文方案下的「输入即内容」保证）。**三档**，
@@ -4390,6 +4394,9 @@ pub struct InputConfig {
     /// 智能符号模式。
     #[serde(default)]
     pub symbol: SymbolConfig,
+    /// 中英 / 中数之间自动补空格（[input.spacing]）。
+    #[serde(default)]
+    pub spacing: SpacingConfig,
     /// 标点配对（输入左括号自动补右括号 + 输右括号智能跳过）。
     #[serde(default)]
     pub auto_pair: AutoPairConfig,
@@ -4521,6 +4528,7 @@ impl Default for InputConfig {
             default: InputDefaultConfig::default(),
             punct: PunctConfig::default(),
             symbol: SymbolConfig::default(),
+            spacing: SpacingConfig::default(),
             auto_pair: AutoPairConfig::default(),
             temp_english: TempEnglishConfig::default(),
             capslock: CapslockConfig::default(),
@@ -4559,6 +4567,19 @@ pub struct PunctConfig {
     /// 参与"数字后智能英文标点"的标点集合。
     #[serde(default = "default_smart_punct_list")]
     pub smart_list: String,
+    /// 英文单词后的标点智能直出英文（`Node.js`、`a/b`、`snake_case`）。默认关。
+    ///
+    /// 「英文后」= 插入点前一字符是拉丁字母：空缓冲按标点时取客户端输入序列记账
+    /// （`KeyPayload.seq_char`），顶屏时取被顶出的那段文本的末字符。用户自己打了空格之后
+    /// 不再算英文后。与数字那一对互相独立（开关与集合各一份）。
+    #[serde(default)]
+    pub smart_after_latin: bool,
+    /// 参与「英文后智能英文标点」的标点集合（存键本身的 ASCII 标点）。
+    ///
+    /// 出厂刻意不含 `,;!?`：中文句子里英文词后接中文逗号很常见（「我用 Python，它……」）。
+    /// `.` 在内的代价是句末英文词后的句号也出 `.`，靠智能符号连按两次换回 `。`。
+    #[serde(default = "default_latin_smart_punct_list")]
+    pub latin_smart_list: String,
     /// 自定义标点映射开关。
     #[serde(default)]
     pub custom_enabled: bool,
@@ -4573,10 +4594,32 @@ impl Default for PunctConfig {
             follow_mode: false,
             smart_after_digit: true,
             smart_list: default_smart_punct_list(),
+            smart_after_latin: false,
+            latin_smart_list: default_latin_smart_punct_list(),
             custom_enabled: false,
             custom_mappings: HashMap::new(),
         }
     }
+}
+
+/// 中英 / 中数之间自动补空格（[input.spacing]）。设计见
+/// `docs/design/auto-spacing-and-latin-smart-punct.md`。
+///
+/// 空格是**下一笔上屏的前缀**，不是上一笔的尾随：交界一侧是标点、空白或不可知时一律不补，
+/// 所以 `hello ,` 这种「补了再删」的情形不会出现。「上一笔末字符」来自客户端的输入序列记账
+/// （`KeyPayload.seq_char`），宿主光标碰巧停在哪个字后面不算。
+///
+/// 按应用关闭见 compat `[[apps]] auto_spacing = false`（自带 pangu 类空格处理的 Markdown
+/// 编辑器、终端）。拉丁字母之间的**词间空格**不归这里管，那是英文输入本身的
+/// `schema.english.commit_space` / `input.temp_english.commit_space`。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpacingConfig {
+    /// 汉字与拉丁字母之间补空格（`中 en 中`）。默认关。
+    #[serde(default)]
+    pub cjk_latin: bool,
+    /// 汉字与数字之间补空格（`共 3 个`）。默认关。
+    #[serde(default)]
+    pub cjk_digit: bool,
 }
 
 /// 智能符号替换方案。两者是「体感」与「兼容性」的取舍，故都保留：
@@ -4848,7 +4891,8 @@ pub struct TempEnglishConfig {
     /// 英文段，其词库候选按本项投影（见 `Coordinator::mix_free_english_segment`）。
     #[serde(default = "default_true")]
     pub case_follow_input: bool,
-    /// 临英选词上屏后自动补一个空格。
+    /// 临英里连打的英文词之间自动补空格（自 0.131 起按需补在**下一个词前面**，见
+    /// [`EnglishGlobal::commit_space`]）。中文与英文之间的空格另见 [`SpacingConfig`]。
     ///
     /// 与 `schema.english.commit_space` 是**两个作用域各一份**，不是两个真相源 ——
     /// 同 [`Self::raw_candidate`] 那一对的理由：用户对「长时打英文」与「中文里插一个
@@ -8366,6 +8410,10 @@ fn default_commit_newline() -> String {
 
 fn default_smart_punct_list() -> String {
     ".,:".to_string()
+}
+
+fn default_latin_smart_punct_list() -> String {
+    "./_:@".to_string()
 }
 
 fn default_enter_behavior() -> String {

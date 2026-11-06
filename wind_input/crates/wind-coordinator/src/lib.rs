@@ -2,6 +2,7 @@
 //!
 //! 与 Go 版本 `wind_input/internal/coordinator/` 对齐。
 
+pub(crate) mod auto_spacing;
 pub(crate) mod aux_code_source;
 pub(crate) mod candidate_grid;
 pub(crate) mod candidate_nav;

@@ -994,6 +994,20 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_pair: Option<bool>,
+    /// 该应用是否启用中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`。
+    ///
+    /// 只能关不能「开」出全局没开的那一档：`Some(true)` 等于跟随全局（取哪几种交界仍由全局
+    /// 两个开关定），存在的意义是在用户层压掉系统规则里的 `false`。必须是 `Option`，理由同
+    /// `auto_pair`。
+    ///
+    /// 典型用途是自带空格处理的 Markdown 编辑器（pangu 类插件）、终端与代码编辑器。
+    /// 拉丁字母之间的词间空格（`commit_space`）属英文输入本身，不受本项影响。
+    #[serde(
+        default,
+        deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_spacing: Option<bool>,
     /// 该应用的密码框是否强制英文；`None` = 跟随全局 `input.password_force_english`（A2-37 / t197）。
     ///
     /// 典型用途是「宿主把普通输入框误报成密码框」：全局开着保护真密码框，只对误报的那个

@@ -27,6 +27,23 @@
 
 ---
 
+## 2026-11-06 · 英文词间空格改为按需补；新增中英 / 中数间空格与英文后智能标点（0.131）
+
+- 合入：待合并；范围：英文方案、临英、快捷输入的英文上屏；中文主路径与各 overlay 的上屏前缀；中文标点状态下的标点转换
+- 变化：
+  - `commit_space`（英文方案 / 临英两份）不再在上屏后立即补尾随空格，改为补在**下一个英文词前面**。
+    例：`hello`（空格）`world`（空格）→ 前：`hello ` + `world ` → 后：`hello` + ` world`；接标点时前：`hello ,` → 后：`hello,`。
+    回车上屏的英文原码现在也算一个词（前面照样补），旧的「回车不补」随之取消。
+  - 新开关 `input.spacing.cjk_latin` / `cjk_digit`（默认都关）：汉字与英文、汉字与数字之间补空格，同样补在后一笔前面。
+    例：五笔「工」后临英 `Python` → ` Python`，再打「工」→ ` 工`。标点永不前补；用户自己按过空格、或输入法不知道光标前是什么时不补。
+  - 新开关 `input.punct.smart_after_latin`（默认关）+ `latin_smart_list`（出厂 `./_:@`）：英文词后的这些标点直出半角。
+    例：临英 `Node` + `.` → 前：`Node。` → 后：`Node.`；`,` 不在出厂列表，仍出 `，`。
+- 触发条件：词间空格的新语义对已开 `commit_space` 的用户即生效；另两项需手动开启
+- 回退旧行为：无（设计变更）；中英空格可按应用关闭（compat `auto_spacing = false`）
+- 钉住的测试：`wind-coordinator/tests/english_commit_space.rs`、`auto_spacing.rs`、`latin_smart_punct.rs`、
+  `quick_input_english_commit.rs`、`temp_english_freq.rs`；判据单测 `wind-punct` `spacing::tests`
+- 来源：内部（设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）
+
 ## 2026-11-06 · 开整句 N-best 时第 1 名合成整句不再掉到第 2 名之后（0.131）
 
 - 合入：待合并；范围：全拼 / 双拼主路径，仅 `sentence_count > 1`

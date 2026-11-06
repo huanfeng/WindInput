@@ -36,6 +36,32 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
+thread_local! {
+    /// 模拟客户端的输入序列记账（`seq_char` = 上一笔上屏的末字符）。按需补空格要靠它知道
+    /// 「上一笔」是什么；每条用例跑在自己的线程上，互不串。
+    static SEQ: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// 记下一次上屏的末字符（键盘之外的上屏——鼠标点选——也要喂）。
+fn note(act: &KeyAction) {
+    if let KeyAction::InsertText { text, .. } = act
+        && let Some(ch) = text.chars().last()
+    {
+        let mut b = [0u16; 2];
+        let u = ch.encode_utf16(&mut b)[0];
+        SEQ.with(|s| s.set(u));
+    }
+}
+
+/// 经按键出口发键（补空格在 `handle_key_event_policed`，直调 `handle_key_event` 看不到）。
+fn send(c: &Coordinator, ev: &KeyEventData) -> KeyAction {
+    let mut ev = ev.clone();
+    ev.seq_char = SEQ.with(|s| s.get());
+    let act = c.handle_key_event_policed(&ev);
+    note(&act);
+    act
+}
+
 /// 英文方案就绪判据：方案定义与**词库**都要在（词库由构建 assemble 注入，不进 git）。
 fn has_english_schema() -> bool {
     let d = data_dir();
@@ -94,16 +120,16 @@ fn enter_temp_english(coord: &Coordinator, word: &str) {
     let mut chars = word.chars();
     let first = chars.next().expect("至少一个字母");
     let vk = (first.to_ascii_uppercase() as u32) & 0xFF;
-    coord.handle_key_event(&key(vk, MOD_SHIFT));
+    send(coord, &key(vk, MOD_SHIFT));
     for c in chars {
-        coord.handle_key_event(&key((c.to_ascii_uppercase() as u32) & 0xFF, 0));
+        send(coord, &key((c.to_ascii_uppercase() as u32) & 0xFF, 0));
     }
 }
 
 /// 主输入路打词（英文方案下，缓冲恒小写）。
 fn type_word(coord: &Coordinator, word: &str) {
     for c in word.chars() {
-        coord.handle_key_event(&key((c.to_ascii_uppercase() as u32) & 0xFF, 0));
+        send(coord, &key((c.to_ascii_uppercase() as u32) & 0xFF, 0));
     }
 }
 
@@ -137,7 +163,7 @@ fn temp_english_selection_records_into_english_bucket() {
 
     enter_temp_english(&coord, "hel");
     let picked = dict_texts(&coord).first().cloned().expect("应有词库候选");
-    coord.handle_key_event(&key(VK_2, 0)); // 数字键 2 = 第 2 条 = 词库首条
+    send(&coord, &key(VK_2, 0)); // 数字键 2 = 第 2 条 = 词库首条
 
     // 默认 `code_scope = "candidate"`：记账码是候选自身的拼写（小写）。
     let code = picked.to_lowercase();
@@ -169,7 +195,7 @@ fn temp_english_records_nothing_when_disabled() {
 
     enter_temp_english(&coord, "hel");
     let picked = dict_texts(&coord).first().cloned().expect("应有词库候选");
-    coord.handle_key_event(&key(VK_2, 0));
+    send(&coord, &key(VK_2, 0));
 
     assert!(
         store
@@ -197,7 +223,7 @@ fn temp_english_literal_text_is_not_recorded() {
     );
 
     enter_temp_english(&coord, "zzqx"); // 词库不会有的串
-    let text = commit_text(&coord.handle_key_event(&key(VK_SPACE, 0)));
+    let text = commit_text(&send(&coord, &key(VK_SPACE, 0)));
     assert_eq!(text.trim_end(), "Zzqx", "空格应上屏原文");
 
     assert!(
@@ -226,7 +252,7 @@ fn temp_english_input_scope_code_is_lowercased() {
 
     enter_temp_english(&coord, "hel");
     let picked = dict_texts(&coord).first().cloned().expect("应有词库候选");
-    coord.handle_key_event(&key(VK_2, 0));
+    send(&coord, &key(VK_2, 0));
 
     assert!(
         store.get_freq("english", "hel", &picked).unwrap().is_some(),
@@ -270,7 +296,7 @@ fn temp_english_candidates_follow_recorded_freq() {
         .unwrap();
 
     // 重新进一次临英，触发候选重建。
-    coord.handle_key_event(&key(0x1B, 0)); // Esc 退出
+    send(&coord, &key(0x1B, 0)); // Esc 退出
     enter_temp_english(&coord, "hel");
     let after = dict_texts(&coord);
 
@@ -353,7 +379,7 @@ fn temp_english_rerank_never_displaces_literal_first() {
         .record_freq("english", &dict[2].to_lowercase(), &dict[2])
         .unwrap();
 
-    coord.handle_key_event(&key(0x1B, 0));
+    send(&coord, &key(0x1B, 0));
     enter_temp_english(&coord, "hel");
 
     assert_eq!(
@@ -391,7 +417,7 @@ fn temp_english_freq_carries_over_to_english_schema() {
         }
         let target = dict[2].clone();
         // 数字键 4 = 页内第 4 条 = 原文 + 词库前三条里的第三条。
-        coord.handle_key_event(&key(0x34, 0));
+        send(&coord, &key(0x34, 0));
         target
     };
 
@@ -428,7 +454,7 @@ fn temp_english_freq_carries_over_to_english_schema() {
 /// 用户对「长时打英文」与「中文里插一个英文词」的取舍本就可能相反 ——
 /// 前者连着打词、补空格顺手；后者插完往往接中文或标点，补上的还得退格删掉。
 #[test]
-fn temp_english_select_appends_space() {
+fn temp_english_select_spaces_before_next_word() {
     if !has_english_schema() {
         return;
     }
@@ -438,8 +464,12 @@ fn temp_english_select_appends_space() {
 
     enter_temp_english(&coord, "hel");
     let picked = dict_texts(&coord).first().cloned().expect("应有词库候选");
-    let text = commit_text(&coord.handle_key_event(&key(VK_2, 0)));
-    assert_eq!(text, format!("{picked} "), "选词上屏应补一个空格");
+    let text = commit_text(&send(&coord, &key(VK_2, 0)));
+    assert_eq!(text, picked, "不再立即补尾随空格");
+    // 按需补：连打的第二个英文词前面补一个空格。
+    enter_temp_english(&coord, "hel");
+    let text = commit_text(&send(&coord, &key(VK_2, 0)));
+    assert_eq!(text, format!(" {picked}"), "第二个词前面应补一个空格");
 }
 
 /// 反向对照：开关关闭时不补。
@@ -454,7 +484,7 @@ fn temp_english_no_space_when_disabled() {
 
     enter_temp_english(&coord, "hel");
     let picked = dict_texts(&coord).first().cloned().expect("应有词库候选");
-    let text = commit_text(&coord.handle_key_event(&key(VK_2, 0)));
+    let text = commit_text(&send(&coord, &key(VK_2, 0)));
     assert_eq!(text, picked, "开关关闭时不得补空格");
 }
 
@@ -474,7 +504,7 @@ fn english_schema_switch_does_not_leak_into_temp_english() {
 
     enter_temp_english(&coord, "hel");
     let picked = dict_texts(&coord).first().cloned().expect("应有词库候选");
-    let text = commit_text(&coord.handle_key_event(&key(VK_2, 0)));
+    let text = commit_text(&send(&coord, &key(VK_2, 0)));
     assert_eq!(
         text, picked,
         "临英该看自己那份开关：英文方案开着不代表临英也补空格"
@@ -495,7 +525,7 @@ fn temp_english_enter_never_appends_space() {
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
 
     enter_temp_english(&coord, "hel");
-    let text = commit_text(&coord.handle_key_event(&key(VK_RETURN, 0)));
+    let text = commit_text(&send(&coord, &key(VK_RETURN, 0)));
     assert_eq!(text, "Hel", "回车上屏原文，且不补空格");
 }
 
@@ -515,15 +545,20 @@ fn temp_english_mouse_select_appends_space() {
     cfg.input.temp_english.commit_space = true;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
 
+    // 先用键盘上屏一个英文词垫底（按需补：空格补在后一个词前面）。
+    enter_temp_english(&coord, "hel");
+    send(&coord, &key(VK_2, 0));
+
     enter_temp_english(&coord, "hel");
     let picked = dict_texts(&coord).first().cloned().expect("应有词库候选");
     let act = coord
         .debug_mouse_select(1)
         .expect("临英鼠标点选应带回上屏动作");
+    note(&act);
     assert_eq!(
         commit_text(&act),
-        format!("{picked} "),
-        "鼠标点选也应补一个空格"
+        format!(" {picked}"),
+        "鼠标点选的词前面也应补一个空格"
     );
     assert_eq!(coord.debug_active_mode(), None, "上屏后退出临英");
 
@@ -532,7 +567,7 @@ fn temp_english_mouse_select_appends_space() {
     let act = coord
         .debug_mouse_select(0)
         .expect("临英鼠标点选应带回上屏动作");
-    assert_eq!(commit_text(&act), "Qzxv ", "点原文也应补一个空格");
+    assert_eq!(commit_text(&act), " Qzxv", "点原文也应补一个空格");
 }
 
 /// 反向对照：开关关闭时鼠标点选不补。
@@ -592,12 +627,14 @@ fn temp_english_mouse_select_full_width() {
     coord.handle_menu_command("toggle_width");
 
     enter_temp_english(&coord, "qzxv");
+    send(&coord, &key(0x20, 0)); // 垫底：先上屏一个全角英文词
+    enter_temp_english(&coord, "qzxv");
     let act = coord
         .debug_mouse_select(0)
         .expect("临英鼠标点选应带回上屏动作");
     assert_eq!(
         commit_text(&act),
-        "Ｑｚｘｖ\u{3000}",
-        "全角态应上屏全角正文 + 全角空格"
+        "\u{3000}Ｑｚｘｖ",
+        "全角态词间补全角空格（补在后一个词前面）"
     );
 }

@@ -1079,7 +1079,7 @@ impl Coordinator {
                         && !cand.is_command
                         && let Some(ch) = punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
                     {
-                        let punct = self.convert_punct_char(state, ch);
+                        let punct = self.convert_punct_after(state, ch, 0, &cand.text);
                         if partial {
                             let out = self.temp_pinyin_partial_top_commit(
                                 state,
@@ -1239,7 +1239,7 @@ impl Coordinator {
                 self.maybe_convert(state, &raw_text)
             }
         };
-        let punct = self.convert_punct_char(state, ch);
+        let punct = self.convert_punct_after(state, ch, 0, &head);
         self.record_commit(&punct, 0, -1, wind_store::stats::CommitSource::Punctuation);
         self.exit_temp_pinyin(state);
         self.notify_ui_hide();
@@ -1478,19 +1478,11 @@ impl Coordinator {
         };
         // 临时英文上屏（独占模式，无分段 committed）：来源临英，英文无编码故 code_len=0。
         self.record_commit(&text, 0, -1, wind_store::stats::CommitSource::TempEnglish);
-        // 补空格排在**记账之后**：带空格的文本进统计表就是一条对不上的脏键。词频侧同理，
-        // 那边更早一步记在 `record_temp_english_selection`（本仓已有三处这样的孤儿键漏网史）。
-        // 全角态下补全角空格——此时上屏的英文本就是全角形，跟着转才一致。
-        let text = if append_space && !text.is_empty() {
-            let sp = if state.full_width {
-                to_full_width(" ")
-            } else {
-                " ".to_string()
-            };
-            format!("{text}{sp}")
-        } else {
-            text
-        };
+        // 词间空格不再拼进文本：只标记「这是一个英文词」，统一出口按需补在下一个词前面
+        // （`crate::auto_spacing`，全角态补全角空格）。记账因此天然不带空格。
+        if append_space && !text.is_empty() {
+            state.spacing_word_commit = true;
+        }
         self.exit_temp_english(state);
         self.notify_ui_hide();
         if text.is_empty() {
@@ -1641,7 +1633,7 @@ impl Coordinator {
         };
         // **原文类**上屏（不经候选：回车、以及 `show_candidates` 关闭时的兜底）。选中候选
         // 一律走 `commit_temp_english_selected`——那条路要记词频，而这里没有候选可记。
-        // 补空格按出口给：回车不补（终结性动作），空格兜底补（对应英文方案「空格上屏原码」）。
+        // `sp` = 这是不是「一个英文词」（词间空格按需补在它前面，见 `crate::auto_spacing`）。
         let commit_text = |this: &Self, state: &mut State, t: String, sp: bool| -> KeyAction {
             this.commit_temp_english_text(state, t, sp)
         };
@@ -1740,6 +1732,10 @@ impl Coordinator {
                 }
                 // 回车：上屏原始输入文本（不取候选）；缓冲空时上屏触发键字符（触发键透传）。
                 // **不补空格**：回车是终结性动作，与英文方案 `VK_RETURN` 空码分支同口径。
+                // 回车上屏的原文同样是「一个英文词」：词间空格补在词前面（`crate::auto_spacing`），
+                // 不是补在回车之后，所以终结性动作也不影响它。空缓冲上屏的是触发键字符，不算。
+                let word =
+                    !state.temp_english_buffer.is_empty() && self.english_space_enabled_in(state);
                 let text = if state.temp_english_buffer.is_empty() {
                     state.temp_english_prefix.clone()
                 } else {
@@ -1750,7 +1746,7 @@ impl Coordinator {
                     self.learn_temp_english_raw(state, &raw);
                     raw
                 };
-                commit_text(self, state, text, false)
+                commit_text(self, state, text, word)
             }
             keymap::VK_A..=keymap::VK_Z => {
                 let shift = data.modifiers & MOD_SHIFT != 0;
@@ -1920,7 +1916,8 @@ impl Coordinator {
                     } else {
                         base
                     };
-                    let punct = self.convert_punct_char(state, ch);
+                    // 标点紧跟在临英原文后面：「英文后」看它（`Node.` 而不是 `Node。`）。
+                    let punct = self.convert_punct_after(state, ch, 0, &base);
                     if !base.is_empty() {
                         self.record_commit(
                             &base,

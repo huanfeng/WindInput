@@ -28,6 +28,32 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
+thread_local! {
+    /// 模拟客户端的输入序列记账（`seq_char` = 上一笔上屏的末字符）。按需补空格要靠它知道
+    /// 「上一笔」是什么；每条用例跑在自己的线程上，互不串。
+    static SEQ: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// 记下一次上屏的末字符（键盘之外的上屏——鼠标点选——也要喂）。
+fn note(act: &KeyAction) {
+    if let KeyAction::InsertText { text, .. } = act
+        && let Some(ch) = text.chars().last()
+    {
+        let mut b = [0u16; 2];
+        let u = ch.encode_utf16(&mut b)[0];
+        SEQ.with(|s| s.set(u));
+    }
+}
+
+/// 经按键出口发键（补空格在 `handle_key_event_policed`，直调 `handle_key_event` 看不到）。
+fn send(c: &Coordinator, ev: &KeyEventData) -> KeyAction {
+    let mut ev = ev.clone();
+    ev.seq_char = SEQ.with(|s| s.get());
+    let act = c.handle_key_event_policed(&ev);
+    note(&act);
+    act
+}
+
 fn has_english_schema() -> bool {
     let d = data_dir();
     d.join("schemas/english.schema.toml").exists() && d.join("schemas/english").is_dir()
@@ -69,9 +95,9 @@ fn coord_with(cfg: Config, tag: &str) -> Arc<Coordinator> {
 
 /// `;` 进快捷输入，再逐字母打 `word`。
 fn enter_quick(coord: &Coordinator, word: &str) {
-    coord.handle_key_event(&key(VK_SEMICOLON));
+    send(coord, &key(VK_SEMICOLON));
     for ch in word.chars() {
-        coord.handle_key_event(&key((ch.to_ascii_uppercase() as u32) & 0xFF));
+        send(coord, &key((ch.to_ascii_uppercase() as u32) & 0xFF));
     }
 }
 
@@ -92,13 +118,13 @@ fn index_of(coord: &Coordinator, want: &str) -> usize {
 
 /// 数字键选中页内下标 `i` 的候选。
 fn press_digit_for(coord: &Coordinator, i: usize) -> KeyAction {
-    coord.handle_key_event(&key(0x31 + i as u32))
+    send(coord, &key(0x31 + i as u32))
 }
 
 /// 空格上屏高亮候选。取 `very`：`v` 开头拼音成员给不出候选，首选必是英文词库那条
 /// （`hello` 之类会被拼音 `he` 占满前几页——「成员顺序即优先级」，不是本文件要测的）。
 #[test]
-fn space_commit_appends_space() {
+fn space_commit_spaces_before_next_word() {
     if !has_english_schema() {
         return;
     }
@@ -110,34 +136,42 @@ fn space_commit_appends_space() {
         Some("very"),
         "前提：`;very` 首选应是 very，实际: {page:?}"
     );
-    let act = c.handle_key_event(&key(VK_SPACE));
-    assert_eq!(commit_text(&act), "very ");
+    let act = send(&c, &key(VK_SPACE));
+    assert_eq!(commit_text(&act), "very", "不再立即补尾随空格");
+    // 按需补：空格补在下一个英文词前面。
+    enter_quick(&c, "very");
+    let act = send(&c, &key(VK_SPACE));
+    assert_eq!(commit_text(&act), " very");
 }
 
-/// 数字键选词库英文候选同样补空格。
+/// 数字键选词库英文候选同样算「一个英文词」。
 #[test]
-fn digit_select_english_appends_space() {
+fn digit_select_english_spaces_before_it() {
     if !has_english_schema() {
         return;
     }
     let c = coord_with(quick_config(true), "digit_on");
+    enter_quick(&c, "very");
+    send(&c, &key(VK_SPACE));
     enter_quick(&c, "vim");
     let i = index_of(&c, "Vimium");
     let act = press_digit_for(&c, i);
-    assert_eq!(commit_text(&act), "Vimium ");
+    assert_eq!(commit_text(&act), " Vimium");
 }
 
 /// 鼠标点选（`select_candidate_at` → `mix_select_at`）同一出口，同样补空格。
 #[test]
-fn mouse_select_appends_space() {
+fn mouse_select_spaces_before_it() {
     if !has_english_schema() {
         return;
     }
     let c = coord_with(quick_config(true), "mouse_on");
+    enter_quick(&c, "very");
+    send(&c, &key(VK_SPACE));
     enter_quick(&c, "vim");
     let i = index_of(&c, "Vim");
     let act = c.debug_mouse_select(i).expect("鼠标点选应带回上屏动作");
-    assert_eq!(commit_text(&act), "Vim ");
+    assert_eq!(commit_text(&act), " Vim");
 }
 
 /// 反向对照：临英那份关着（英文方案那份开着）时不补。
@@ -148,7 +182,7 @@ fn no_space_when_temp_english_switch_off() {
     }
     let c = coord_with(quick_config(false), "space_off");
     enter_quick(&c, "very");
-    let act = c.handle_key_event(&key(VK_SPACE));
+    let act = send(&c, &key(VK_SPACE));
     assert_eq!(commit_text(&act), "very");
 }
 
@@ -166,11 +200,11 @@ fn chinese_candidate_never_appends_space() {
         !first.is_ascii(),
         "前提：`;nihao` 首选应是中文，实际: {page:?}"
     );
-    let act = c.handle_key_event(&key(VK_SPACE));
+    let act = send(&c, &key(VK_SPACE));
     assert_eq!(commit_text(&act), first, "中文候选上屏不该补空格");
 }
 
-/// 回车上屏原文：终结性动作，不补空格（与临英回车同口径）。
+/// 回车上屏原文：上屏文本本身不带空格；它前面补不补看上一笔（与临英回车同口径）。
 #[test]
 fn enter_commits_raw_without_space() {
     if !has_english_schema() {
@@ -178,11 +212,11 @@ fn enter_commits_raw_without_space() {
     }
     let c = coord_with(quick_config(true), "enter");
     enter_quick(&c, "very");
-    let act = c.handle_key_event(&key(VK_RETURN));
+    let act = send(&c, &key(VK_RETURN));
     assert_eq!(commit_text(&act), "very");
 }
 
-/// 全角态：英文候选转全角，补的是全角空格（U+3000），与临英 `commit_temp_english_text` 一致。
+/// 全角态：英文候选转全角，词间补的是全角空格（U+3000），与临英 `commit_temp_english_text` 一致。
 #[test]
 fn full_width_converts_english_and_space() {
     if !has_english_schema() {
@@ -191,8 +225,11 @@ fn full_width_converts_english_and_space() {
     let c = coord_with(quick_config(true), "fw_space");
     c.handle_menu_command("toggle_width");
     enter_quick(&c, "very");
-    let act = c.handle_key_event(&key(VK_SPACE));
-    assert_eq!(commit_text(&act), "ｖｅｒｙ\u{3000}");
+    let act = send(&c, &key(VK_SPACE));
+    assert_eq!(commit_text(&act), "ｖｅｒｙ");
+    enter_quick(&c, "very");
+    let act = send(&c, &key(VK_SPACE));
+    assert_eq!(commit_text(&act), "\u{3000}ｖｅｒｙ");
 }
 
 /// 全角态回车上屏原文同样转全角（对齐临英回车）。
@@ -204,14 +241,14 @@ fn full_width_enter_converts_raw() {
     let c = coord_with(quick_config(false), "fw_enter");
     c.handle_menu_command("toggle_width");
     enter_quick(&c, "very");
-    let act = c.handle_key_event(&key(VK_RETURN));
+    let act = send(&c, &key(VK_RETURN));
     assert_eq!(commit_text(&act), "ｖｅｒｙ");
 }
 
-/// 空格兜底（无候选时上屏缓冲原文）：与临英空格兜底同口径，补空格。
+/// 空格兜底（无候选时上屏缓冲原文）：与临英空格兜底同口径，算「一个英文词」。
 /// 取 `vqzx`：拼音成员不收 `v` 起头，英文词库也无此前缀，候选为空。
 #[test]
-fn space_fallback_appends_space() {
+fn space_fallback_spaces_before_it() {
     if !has_english_schema() {
         return;
     }
@@ -221,14 +258,16 @@ fn space_fallback_appends_space() {
     cfg.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
     cfg.input.temp_english.case_variants = false;
     let c = coord_with(cfg, "fallback");
+    enter_quick(&c, "very");
+    send(&c, &key(VK_SPACE));
     enter_quick(&c, "vqzx");
     assert!(
         c.debug_page_texts().is_empty(),
         "前提：`;vqzx` 应无候选，实际: {:?}",
         c.debug_page_texts()
     );
-    let act = c.handle_key_event(&key(VK_SPACE));
-    assert_eq!(commit_text(&act), "vqzx ");
+    let act = send(&c, &key(VK_SPACE));
+    assert_eq!(commit_text(&act), " vqzx");
 }
 
 /// Free 透镜（缓冲含越界字符，唯一候选＝所打原文）：原文即「所打原码」，与临英的原文候选
@@ -240,18 +279,20 @@ fn free_lens_raw_follows_temp_english() {
     }
     let c = coord_with(quick_config(true), "free");
     c.handle_menu_command("toggle_width");
+    enter_quick(&c, "very");
+    send(&c, &key(VK_SPACE));
     enter_quick(&c, "rock");
-    c.handle_key_event(&key(0xDE)); // '
+    send(&c, &key(0xDE)); // '
     for ch in "n".chars() {
-        c.handle_key_event(&key((ch.to_ascii_uppercase() as u32) & 0xFF));
+        send(&c, &key((ch.to_ascii_uppercase() as u32) & 0xFF));
     }
     assert_eq!(
         c.debug_page_texts(),
         vec!["rock'n".to_string()],
         "前提：`;rock'n` 应落 Free 透镜、唯一候选为原文"
     );
-    let act = c.handle_key_event(&key(VK_SPACE));
-    assert_eq!(commit_text(&act), "ｒｏｃｋ＇ｎ\u{3000}");
+    let act = send(&c, &key(VK_SPACE));
+    assert_eq!(commit_text(&act), "\u{3000}ｒｏｃｋ＇ｎ");
 }
 
 /// ★ 数字透镜不算英文：`;12` 的结果里有一条 `12`，文本恰好等于所打原码，不得被当成
@@ -262,9 +303,9 @@ fn numeric_lens_never_appends_space() {
         return;
     }
     let c = coord_with(quick_config(true), "numeric");
-    c.handle_key_event(&key(VK_SEMICOLON));
-    c.handle_key_event(&key(0x31));
-    c.handle_key_event(&key(0x32));
+    send(&c, &key(VK_SEMICOLON));
+    send(&c, &key(0x31));
+    send(&c, &key(0x32));
     let i = index_of(&c, "12");
     let act = c.debug_mouse_select(i).expect("鼠标点选应带回上屏动作");
     assert_eq!(commit_text(&act), "12", "数字透镜结果不该补空格");
@@ -279,10 +320,10 @@ fn full_width_enter_keeps_numeric_raw() {
     }
     let c = coord_with(quick_config(false), "fw_enter_num");
     c.handle_menu_command("toggle_width");
-    c.handle_key_event(&key(VK_SEMICOLON));
-    c.handle_key_event(&key(0x31));
-    c.handle_key_event(&key(0x32));
-    let act = c.handle_key_event(&key(VK_RETURN));
+    send(&c, &key(VK_SEMICOLON));
+    send(&c, &key(0x31));
+    send(&c, &key(0x32));
+    let act = send(&c, &key(VK_RETURN));
     assert_eq!(commit_text(&act), "12", "数字透镜回车应上屏半角原文");
 }
 
@@ -298,7 +339,7 @@ fn full_width_punct_commit_converts_without_space() {
     let c = coord_with(cfg, "fw_punct");
     c.handle_menu_command("toggle_width");
     enter_quick(&c, "very");
-    let act = c.handle_key_event(&key(0xBC)); // ,
+    let act = send(&c, &key(0xBC)); // ,
     let text = commit_text(&act);
     assert!(
         text.starts_with("ｖｅｒｙ") && text.chars().count() == 5,
@@ -323,7 +364,7 @@ fn full_width_mode_switch_converts_raw() {
     let mut ev = key(0x4A);
     ev.modifiers =
         wind_ipc::protocol::MOD_CTRL | wind_ipc::protocol::MOD_ALT | wind_ipc::protocol::MOD_SHIFT;
-    let act = c.handle_key_event(&ev);
+    let act = send(&c, &ev);
     assert_eq!(commit_text(&act), "ｖｅｒｙ");
 }
 
@@ -337,7 +378,7 @@ fn full_width_enter_converts_pinyin_raw_too() {
     let c = coord_with(quick_config(false), "fw_enter_py");
     c.handle_menu_command("toggle_width");
     enter_quick(&c, "nihao");
-    let act = c.handle_key_event(&key(VK_RETURN));
+    let act = send(&c, &key(VK_RETURN));
     assert_eq!(commit_text(&act), "ｎｉｈａｏ");
 }
 
@@ -350,20 +391,23 @@ fn number_with_unit_counts_as_raw() {
     }
     let c = coord_with(quick_config(true), "unit");
     c.handle_menu_command("toggle_width");
-    c.handle_key_event(&key(VK_SEMICOLON));
+    enter_quick(&c, "very");
+    send(&c, &key(VK_SPACE));
+    send(&c, &key(VK_SEMICOLON));
     for vk in [0x31, 0x32, 0xBE, 0x35] {
-        c.handle_key_event(&key(vk)); // 1 2 . 5
+        send(&c, &key(vk)); // 1 2 . 5
     }
     for vk in [0x47, 0x42] {
         let mut ev = key(vk); // Shift+G Shift+B
         ev.modifiers = wind_ipc::protocol::MOD_SHIFT;
-        c.handle_key_event(&ev);
+        send(&c, &ev);
     }
     assert_eq!(
         c.debug_page_texts(),
         vec!["12.5GB".to_string()],
         "前提：`;12.5GB` 应落 Free 透镜、唯一候选为原文"
     );
-    let act = c.handle_key_event(&key(VK_SPACE));
-    assert_eq!(commit_text(&act), "１２．５ＧＢ\u{3000}");
+    let act = send(&c, &key(VK_SPACE));
+    // 全角字母 / 数字在交界判据里都算「词」字符：前面那个 very 之后补全角空格。
+    assert_eq!(commit_text(&act), "\u{3000}１２．５ＧＢ");
 }

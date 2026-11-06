@@ -3858,17 +3858,18 @@ impl Coordinator {
         // （`record_input_stats`）去清——移动端直调 `handle_key_event`，不走那道兜底。
         self.note_word_boundary();
         self.record_selection_cased_in(None, freq_code, freq_text, text, source);
-        let mut out = match s2t_override {
+        let out = match s2t_override {
             Some(t) => t.to_string(),
             None => self.maybe_convert(state, text),
         };
+        // 英文词：词间空格由统一出口按需补在**下一个词**前面（见 `crate::auto_spacing`）。
         if self.english_appends_space(
             state,
             source,
             text,
             crate::preedit_cursor::cased_or_buffer(&state.input_buffer, &state.input_buffer_cased),
         ) {
-            out.push(' ');
+            state.spacing_word_commit = true;
         }
         state.input_buffer.clear();
         state.preedit.clear();
@@ -4412,20 +4413,19 @@ impl Coordinator {
             // 变体候选（用户明选「齣」类 1对多变体）：末段用覆盖文本、前缀单独转换。
             // 普通候选保持**整体**转换——STPhrases 词级最长匹配可跨 committed/候选边界
             // 消歧（「一」+「出」→「一齣」），拆开会丢掉跨段词级命中。
-            let mut out = match &cand.s2t_override {
+            let out = match &cand.s2t_override {
                 Some(t) => format!("{}{}", self.maybe_convert(state, &state.committed_text), t),
                 None => self.maybe_convert(state, &final_simplified),
             };
-            // 英文补空格（`schema.english.commit_space`）：本分支是英文方案下选词的**唯一**
-            // 出口——空格 / 数字键 / 次三选键 / 修饰键选词 / 鼠标点选 / 数字键越界 overflow
+            // 英文词间空格（`schema.english.commit_space`）：这里只标记「这是一个英文词」，
+            // 空格由统一出口按需补在下一个词前面（`crate::auto_spacing`）。本分支是英文方案下
+            // 选词的**唯一**出口——空格 / 数字键 / 次三选键 / 修饰键选词 / 鼠标点选 / 数字键越界 overflow
             // 六类触发全汇于此，故一处接线即可覆盖，不必按触发键分别接。
             //
             // 只在整串分支补、`partial`（分步提交）分支不补：那里上屏的是词的前半段，后面
             // 还要接着打。英文引擎不设 `consumed_length`（恒 0）⇒ `partial` 恒 false，英文
             // 实际走不到那儿，此处的不对称只是把「万一日后英文也分段」的语义先定死。
             //
-            // 补在 s2t 之后：空格不参与简繁转换，且提前补会让 STPhrases 的词级最长匹配断在
-            // 空格上。
             if self.english_appends_space(
                 state,
                 cand.source,
@@ -4435,7 +4435,7 @@ impl Coordinator {
                     &state.input_buffer_cased,
                 ),
             ) {
-                out.push(' ');
+                state.spacing_word_commit = true;
             }
             // 下一轮联想的**上文**：取简体域的完整文本，而不是上屏的 `out`。
             //
@@ -4611,8 +4611,8 @@ impl Coordinator {
             }
             "commit_and_input" => {
                 // 触发键字符按标点流水线转换（在提交前取，chinese_punct 等状态不受提交影响）。
-                let piece = self.convert_punct(state, key_char, prev_char);
                 let cand = state.candidates[hi].clone();
+                let piece = self.convert_punct_after(state, key_char, prev_char, &cand.text);
                 // 顶屏类出口：造词 / 6b 跟随 `input.top_commit_learn`。
                 let act = self.commit_selected_learn(
                     state,
@@ -4759,10 +4759,10 @@ impl Coordinator {
                 self.commit_selected(state, &cand, state.selected_index as i32)
             }
             "commit_and_input" => {
-                let piece = key_char
-                    .map(|c| self.convert_punct(state, c, prev_char))
-                    .unwrap_or_default();
                 let cand = state.candidates[hi].clone();
+                let piece = key_char
+                    .map(|c| self.convert_punct_after(state, c, prev_char, &cand.text))
+                    .unwrap_or_default();
                 let act = self.commit_selected(state, &cand, state.selected_index as i32);
                 Self::append_to_insert_text(act, &piece)
             }
@@ -5944,6 +5944,8 @@ impl Coordinator {
             } else {
                 self.commit_selected(&mut state, &cand, page_local as i32)
             };
+            // 点选不经按键出口，按需补空格要在推送之前补（见 `crate::auto_spacing`）。
+            let act = self.apply_auto_spacing(&mut state, act);
             drop(state);
             // commit_selected 已按分支自行 notify_ui_update / notify_ui_hide，此处不再重复。
             self.push_no_key_ctx_action(&act, chinese_mode, true);
@@ -6001,6 +6003,7 @@ impl Coordinator {
                 return None;
             }
         };
+        let act = self.apply_auto_spacing(&mut state, act);
         let chinese_mode = state.chinese_mode;
         drop(state);
         match &act {

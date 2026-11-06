@@ -1,12 +1,20 @@
-//! 英文方案「上屏后自动补空格」（`schema.english.commit_space`）端到端测试。
+//! 英文方案「词间自动补空格」（`schema.english.commit_space`）端到端测试。
 //!
 //! 该配置项曾经**四层就位、零处生效**：结构体 / schema 注册 / config.toml / 设置页 GUI
 //! 全有，消费点却只接在 `commit_candidate` 上——而英文引擎恒 `should_commit = false`、
 //! 自动上屏又只认码表来源，那三个调用点在英文方案下**一个都走不到**。开关打开毫无反应。
 //!
 //! 所以本文件的断言重心不是「补了空格」，而是**逐条通路各自补没补**：真正的英文上屏出口
-//! 是 `commit_selected`（六类触发汇于一处）与「空格上屏原码」，而回车上屏原码、标点顶屏
-//! 刻意不补。少测一条，下一次重构就可能把某条通路悄悄改回不生效。
+//! 是 `commit_selected`（六类触发汇于一处）、「空格上屏原码」与「回车上屏原码」。少测一条，
+//! 下一次重构就可能把某条通路悄悄改回不生效。
+//!
+//! # 按需补（2026-11-06 起）
+//!
+//! 空格不再紧跟在上屏的词**后面**，而是补在**下一个词前面**（设计见
+//! `docs/design/auto-spacing-and-latin-smart-punct.md`）：每条用例都断言两件事——
+//! 上屏文本本身不带尾随空格；紧接着的下一个英文词带前缀空格。「上一笔末字符」来自客户端的
+//! 输入序列记账（`seq_char`），这里由 [`Host`] 模拟：它记住上一笔上屏的末字符，随下一键带回。
+//! 按键一律经 `handle_key_event_policed`——补空格在那个出口，直调 `handle_key_event` 看不到。
 //!
 //! ⚠️ 词典缺失时整族静默跳过（判据是**耗时 0.00s**，不是通过条数）——见
 //! `build_dev/data` 相关记录。worktree 中需自备 `build_dev` 链接。
@@ -56,23 +64,74 @@ fn english_config(commit_space: bool) -> Config {
     cfg
 }
 
-fn press_letter(coord: &Coordinator, c: char) -> KeyAction {
-    let vk = (c.to_ascii_uppercase() as u32) & 0xFF;
-    coord.handle_key_event(&key_event(vk, EVENT_KEY_DOWN))
+/// 模拟客户端：只做 DLL 那份输入序列记账（`seq_char` = 上一笔上屏文本的末字符）。
+struct Host {
+    coord: Arc<Coordinator>,
+    seq: std::cell::Cell<u16>,
 }
 
-/// Shift+字母：英文方案下走主路字母臂，大写落进影子串 `input_buffer_cased`，
-/// `input_buffer` 保持小写（见 `handle_lifecycle` 临英门禁处的 ★ 英文方案下不进临英）。
-fn press_letter_shift(coord: &Coordinator, c: char) -> KeyAction {
-    let vk = (c.to_ascii_uppercase() as u32) & 0xFF;
-    let mut ev = key_event(vk, EVENT_KEY_DOWN);
-    ev.modifiers = MOD_SHIFT;
-    coord.handle_key_event(&ev)
-}
+impl Host {
+    fn new(cfg: Config) -> Self {
+        Self {
+            coord: Coordinator::new_headless(cfg, Some(&data_dir())),
+            seq: std::cell::Cell::new(0),
+        }
+    }
 
-fn type_word(coord: &Coordinator, s: &str) {
-    for c in s.chars() {
-        press_letter(coord, c);
+    fn note(&self, action: &KeyAction) {
+        if let KeyAction::InsertText { text, .. } = action
+            && let Some(c) = text.chars().last()
+        {
+            let mut buf = [0u16; 2];
+            self.seq.set(c.encode_utf16(&mut buf)[0]);
+        }
+    }
+
+    fn key_mods(&self, vk: u32, modifiers: u32, event_type: u8) -> KeyAction {
+        let mut ev = key_event(vk, event_type);
+        ev.modifiers = modifiers;
+        ev.seq_char = self.seq.get();
+        let act = self.coord.handle_key_event_policed(&ev);
+        self.note(&act);
+        act
+    }
+
+    fn key(&self, vk: u32) -> KeyAction {
+        self.key_mods(vk, 0, EVENT_KEY_DOWN)
+    }
+
+    fn letter(&self, c: char) -> KeyAction {
+        self.key((c.to_ascii_uppercase() as u32) & 0xFF)
+    }
+
+    /// Shift+字母：英文方案下走主路字母臂，大写落进影子串 `input_buffer_cased`，
+    /// `input_buffer` 保持小写（见 `handle_lifecycle` 临英门禁处的 ★ 英文方案下不进临英）。
+    fn letter_shift(&self, c: char) -> KeyAction {
+        self.key_mods(
+            (c.to_ascii_uppercase() as u32) & 0xFF,
+            MOD_SHIFT,
+            EVENT_KEY_DOWN,
+        )
+    }
+
+    fn type_word(&self, s: &str) {
+        for c in s.chars() {
+            self.letter(c);
+        }
+    }
+
+    fn top(&self) -> String {
+        self.coord
+            .debug_page_texts()
+            .first()
+            .cloned()
+            .expect("应有候选")
+    }
+
+    /// 先上屏一个词垫底（空格选首选），返回它的上屏文本。
+    fn commit_first_word(&self) -> String {
+        self.type_word("hel");
+        commit_text(&self.key(VK_SPACE))
     }
 }
 
@@ -83,297 +142,259 @@ fn commit_text(action: &KeyAction) -> String {
     }
 }
 
-/// 空格选中首选 → 上屏「首选 + 空格」。
+/// 空格选中首选 → 上屏首选本身（不带尾随空格）；下一个词前面补一个空格。
 ///
-/// 断言的是**相对关系**（首选文本 + 一个空格）而非硬编码 `"hello "`：词库内容与排序会随
+/// 断言的是**相对关系**（首选文本前一个空格）而非硬编码 `" hello"`：词库内容与排序会随
 /// 版本变，绑死具体单词只会让测试在无关改动上误报。
 #[test]
-fn space_select_appends_space() {
+fn space_select_spaces_before_next_word() {
     if !has_english_schema() {
         eprintln!("跳过：缺少英文方案或词库");
         return;
     }
-    let coord = Coordinator::new_headless(english_config(true), Some(&data_dir()));
-    assert_eq!(coord.active_schema_id(), "english");
+    let h = Host::new(english_config(true));
+    assert_eq!(h.coord.active_schema_id(), "english");
 
-    type_word(&coord, "hel");
-    let top = coord.debug_page_texts().first().cloned().expect("应有候选");
+    let first = h.commit_first_word();
+    assert!(!first.ends_with(' '), "不再立即补尾随空格: {first:?}");
 
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN)));
-    assert_eq!(text, format!("{top} "), "空格选首选后应补一个空格");
+    h.type_word("hel");
+    let top = h.top();
+    let text = commit_text(&h.key(VK_SPACE));
+    assert_eq!(text, format!(" {top}"), "第二个词前面应补一个空格");
 }
 
 /// 首字母大写时**选中首选**上屏，同样要补空格（t122）。
 ///
-/// 与 `space_select_appends_space` 只差一个 Shift，断言同形。**这条才是 t122 的复现。**
-///
 /// 它落在 `english_appends_space` 上（有候选 → 选中上屏）。此刻的首选是
-/// `english_head_candidates` 用「所打原码」直接构造的原文候选（`source` 为 `None`，
-/// 词库里字面相同的那条已在上游被精确去重吃掉），于是第一分支不命中；第二分支比
-/// `text == input`，`input` 若传成全小写的 `state.input_buffer` 就永不相等 —— 两头落空。
-///
-/// 触发开关是 `raw_candidate`（默认开）而**不是** `case_follow_input`：
-/// `raw_candidate = false` 时首选是词库候选、`source == English`，第一分支直接命中。
-///
-/// 反向验证（2026-09-14 实跑）：把调用点的 `cased_or_buffer(...)` 换回 `&state.input_buffer`，
-/// 本测试即变红（其余 12 条不动）。
+/// `english_head_candidates` 用「所打原码」直接构造的原文候选（`source` 为 `None`），
+/// 于是第一分支不命中；第二分支比 `text == input`，`input` 若传成全小写的
+/// `state.input_buffer` 就永不相等 —— 两头落空。
 #[test]
-fn space_select_appends_space_when_capitalized() {
+fn capitalized_word_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
-    let coord = Coordinator::new_headless(english_config(true), Some(&data_dir()));
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
 
-    press_letter_shift(&coord, 'h');
-    type_word(&coord, "el");
-    let top = coord.debug_page_texts().first().cloned().expect("应有候选");
+    h.letter_shift('h');
+    h.type_word("el");
+    let top = h.top();
     assert!(
         top.starts_with('H'),
         "前提：首选应已按输入投影成首字母大写，实际: {top}"
     );
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN)));
-    assert_eq!(text, format!("{top} "), "首字母大写选首选后应补一个空格");
+    let text = commit_text(&h.key(VK_SPACE));
+    assert_eq!(text, format!(" {top}"), "首字母大写的词前面也应补空格");
 }
 
-/// 选中**大小写变形**候选上屏，同样要补空格（GH#152）。
-///
-/// 变形（`case_variants`，英文方案出厂关）与原文同属 `english_head_candidates` 构造的头部
-/// 候选，`source` 为 `None`；判据第二分支只认「与原码逐字节相等」，于是原文补、变形不补。
-/// 用词库里没有的串，头部三条的位次就是确定的：`[原文, 首字母大写, 全大写]`。
+/// 头部候选里的大小写变形（GH#152）：选它上屏也算「一个英文词」。
 #[test]
-fn case_variant_select_appends_space() {
+fn case_variant_select_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
     let mut cfg = english_config(true);
     cfg.schema.english.case_variants = true;
-    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let h = Host::new(cfg);
+    h.commit_first_word();
 
-    type_word(&coord, "qzxv");
-    let page = coord.debug_page_texts();
+    h.type_word("qzxv");
+    let page = h.coord.debug_page_texts();
     assert_eq!(
         page.get(..3),
         Some(&["qzxv".to_string(), "Qzxv".to_string(), "QZXV".to_string()][..]),
         "前提：头部应为原文 + 两条变形，实际 {page:?}"
     );
+    assert_eq!(commit_text(&h.key(VK_2)), " Qzxv");
 
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_2, EVENT_KEY_DOWN)));
-    assert_eq!(text, "Qzxv ", "选首字母大写变形后应补一个空格");
-
-    type_word(&coord, "qzxv");
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_3, EVENT_KEY_DOWN)));
-    assert_eq!(text, "QZXV ", "选全大写变形后应补一个空格");
+    h.type_word("qzxv");
+    assert_eq!(commit_text(&h.key(VK_3)), " QZXV");
 }
 
-/// CapsLock 全大写档下选首选（原文头部候选被整列套形成全大写）同样补空格。
-///
-/// 档位投影作用于**含头部候选**的整列：原文 `qzxv` 显示为 `QZXV`、`source` 仍为 `None`，
-/// 走的是与变形候选同一条判据。钉住它，免得有人以为档位候选恒是词库来源。
+/// CapsLock 全大写档：整列套形、含头部候选，同样补。
 #[test]
-fn capslock_upper_tier_select_appends_space() {
+fn capslock_upper_tier_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
     let mut cfg = english_config(true);
     cfg.input.english_case_cycle_key = "capslock".into();
-    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let h = Host::new(cfg);
+    h.commit_first_word();
 
-    type_word(&coord, "qzxv");
-    assert!(coord.debug_cycle_english_case(), "前提：应切到全大写档");
-    let top = coord.debug_page_texts().first().cloned().expect("应有候选");
-    assert_eq!(top, "QZXV", "前提：全大写档首选应是套形后的原文");
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN)));
-    assert_eq!(text, "QZXV ", "全大写档选首选后应补一个空格");
+    h.type_word("qzxv");
+    assert!(h.coord.debug_cycle_english_case(), "前提：应切到全大写档");
+    assert_eq!(h.top(), "QZXV", "前提：全大写档首选应是套形后的原文");
+    assert_eq!(commit_text(&h.key(VK_SPACE)), " QZXV");
 }
 
-/// 反向对照：开关关闭时**不得**补空格。
-///
-/// 没有这一条，「恒补空格」的实现也能让上面那条通过——本项的缺陷史正是「判据看着对、
-/// 实际恒不生效」，反向对照是唯一能同时排除「恒开」与「恒关」的断言。
 #[test]
-fn space_select_no_space_when_disabled() {
+fn no_space_when_disabled() {
     if !has_english_schema() {
         return;
     }
-    let coord = Coordinator::new_headless(english_config(false), Some(&data_dir()));
+    let h = Host::new(english_config(false));
+    h.commit_first_word();
 
-    type_word(&coord, "hel");
-    let top = coord.debug_page_texts().first().cloned().expect("应有候选");
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN)));
-    assert_eq!(text, top, "开关关闭时不得补空格");
+    h.type_word("hel");
+    let top = h.top();
+    assert_eq!(commit_text(&h.key(VK_SPACE)), top, "开关关闭时不得补空格");
 }
 
-/// 数字键选词同样补空格——锁住「所有选中方式一律补」的拍板结论。
-///
-/// 空格与数字键在 `commit_selected` 内部汇于同一分支，但那是**当前**的实现事实；本条
-/// 存在的意义是：日后若有人按触发键分流，这条会立刻失败而不是静默漂移。
 #[test]
-fn number_key_select_appends_space() {
+fn number_key_select_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
-    let coord = Coordinator::new_headless(english_config(true), Some(&data_dir()));
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
 
-    type_word(&coord, "hel");
-    let page = coord.debug_page_texts();
+    h.type_word("hel");
+    let page = h.coord.debug_page_texts();
     assert!(
         page.len() >= 2,
         "需至少两个候选才能测数字键 2，实际 {page:?}"
     );
     let second = page[1].clone();
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_2, EVENT_KEY_DOWN)));
-    assert_eq!(text, format!("{second} "), "数字键选词后应补一个空格");
+    assert_eq!(commit_text(&h.key(VK_2)), format!(" {second}"));
 }
 
-/// 鼠标点选同样补空格（第三类触发，走 `mouse_select` → `commit_selected` 主输入路）。
+/// 鼠标点选不经按键出口，补空格在 `select_candidate_at` 推送之前。
 #[test]
-fn mouse_select_appends_space() {
+fn mouse_select_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
-    let coord = Coordinator::new_headless(english_config(true), Some(&data_dir()));
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
 
-    type_word(&coord, "hel");
-    let top = coord.debug_page_texts().first().cloned().expect("应有候选");
-
-    let act = coord
+    h.type_word("hel");
+    let top = h.top();
+    let act = h
+        .coord
         .debug_mouse_select(0)
         .expect("鼠标点选应返回主输入路 action");
-    assert_eq!(
-        commit_text(&act),
-        format!("{top} "),
-        "鼠标点选后应补一个空格"
-    );
+    assert_eq!(commit_text(&act), format!(" {top}"));
 }
 
-/// 打词库里没有的词，**空格**上屏原码 → 也补空格（用户拍板：与选中候选一致）。
-///
-/// 这条走的是与选词完全不同的出口（`VK_SPACE` 空码分支），判据也不同——那里没有候选可依，
-/// 用的是方案口径 `english_space_enabled`。
-///
-/// ⚠️ **必须显式关掉 `raw_candidate`**：它默认开，会把所打原文作为首候选钉进列表，于是
-/// 「无候选」这个前提不再成立、本条要测的兜底出口根本走不到（走的是选中首候选那条）。
-/// 有原文候选时的对应行为另见 `tests/english_head_candidates.rs`。
+/// 「空格上屏原码」（词库里没有的词）：无候选可依，按方案口径。
 #[test]
-fn raw_code_space_commit_appends_space() {
+fn raw_code_space_commit_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
     let mut cfg = english_config(true);
     cfg.schema.english.raw_candidate = RawCandidateMode::Off;
-    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let h = Host::new(cfg);
+    h.commit_first_word();
 
     // 前提：该串在词库中无候选。若日后词库收录了它，前提失效 → 显式失败而非静默变成
     // 「测了另一条通路」。
     let nonsense = "qwxzjv";
-    type_word(&coord, nonsense);
+    h.type_word(nonsense);
     assert_eq!(
-        coord.debug_candidate_count(),
+        h.coord.debug_candidate_count(),
         0,
         "测试前提失效：{nonsense} 现在有候选了，请换一个无候选的串"
     );
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN)));
-    assert_eq!(text, format!("{nonsense} "), "空格上屏原码后应补一个空格");
+    assert_eq!(commit_text(&h.key(VK_SPACE)), format!(" {nonsense}"));
 }
 
-/// 首字母大写时，「空格上屏原码」的**空码兜底分支**照样补空格。
-///
-/// ⚠️ **这条不是 t122 的复现**（复现见 `space_select_appends_space_when_capitalized`）。
-/// 它走的是 `message_handler` 里那条无候选兜底路径，判据只有一句 `english_space_enabled_in`
-/// ——不过候选级判据，所以缺陷期它就是绿的。留着是为了钉住「这条通路对大小写不敏感」，
-/// 免得日后有人把候选级判据一并塞进这里。
-///
-/// 我最初误把它当成 t122 的复现，它一绿就差点据此判定「根因不是大写」。记在这里。
+/// 同上、首字母大写输入（t122 的原码分支）。
 #[test]
-fn raw_code_space_commit_appends_space_when_capitalized() {
+fn raw_code_space_commit_capitalized_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
     let mut cfg = english_config(true);
     cfg.schema.english.raw_candidate = RawCandidateMode::Off;
-    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let h = Host::new(cfg);
+    h.commit_first_word();
 
-    // 与小写那条同一个无候选串，只把首字母改成大写输入。
     let nonsense = "qwxzjv";
-    press_letter_shift(&coord, 'q');
-    type_word(&coord, &nonsense[1..]);
+    h.letter_shift('q');
+    h.type_word(&nonsense[1..]);
     assert_eq!(
-        coord.debug_candidate_count(),
+        h.coord.debug_candidate_count(),
         0,
         "测试前提失效：{nonsense} 现在有候选了，请换一个无候选的串"
     );
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN)));
-    assert_eq!(text, "Qwxzjv ", "首字母大写的原码上屏后应补一个空格");
+    assert_eq!(commit_text(&h.key(VK_SPACE)), " Qwxzjv");
 }
 
-/// 回车上屏原码 **不补**空格——刻意的不对称，不是漏接。
-///
-/// 回车分支与空格空码分支在源码里**逐行同形**，唯一差别就是这个。锁住它，免得日后有人
-/// 「统一两块重复代码」时把不对称一并抹平。
+/// 回车上屏原码：旧语义「回车不补尾随空格」在按需补下变成「回车上屏的词前面照样补」——
+/// 否则「hello（空格）world（回车）」会从 `hello world` 退化成 `helloworld`。
 #[test]
-fn raw_code_enter_commit_does_not_append_space() {
+fn raw_code_enter_commit_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
-    // 同上：关掉原文候选，否则「无候选」的前提不成立。
     let mut cfg = english_config(true);
     cfg.schema.english.raw_candidate = RawCandidateMode::Off;
-    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    let h = Host::new(cfg);
+    h.commit_first_word();
 
     let nonsense = "qwxzjv";
-    type_word(&coord, nonsense);
+    h.type_word(nonsense);
     assert_eq!(
-        coord.debug_candidate_count(),
+        h.coord.debug_candidate_count(),
         0,
         "测试前提失效：{nonsense} 现在有候选了"
     );
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_RETURN, EVENT_KEY_DOWN)));
-    assert_eq!(text, nonsense, "回车上屏原码不得补空格（终结性动作）");
+    assert_eq!(commit_text(&h.key(VK_RETURN)), format!(" {nonsense}"));
 }
 
-/// **非英文方案下不得补空格**——即使开关是开的。
-///
-/// 这是整组里最关键的一条：`english_appends_space` 的两个条件（候选来源是英文、当前方案
-/// 是英文方案）查的**不是同一件事**，而后者极易被当成冗余判断删掉。删掉后临时英文、混输、
-/// 快捷输入里插一个英文词都会莫名多出空格，且英文方案自身的测试一条都跑不到。
+/// 客户端不知道光标前是什么（焦点刚切过来、鼠标挪过光标）⇒ 不补。
 #[test]
-fn non_english_schema_never_appends_space() {
+fn unknown_previous_char_gets_no_space() {
+    if !has_english_schema() {
+        return;
+    }
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
+    h.seq.set(0);
+
+    h.type_word("hel");
+    let top = h.top();
+    assert_eq!(commit_text(&h.key(VK_SPACE)), top);
+}
+
+#[test]
+fn non_english_schema_never_spaces_words() {
     if !has_english_schema() {
         return;
     }
     let mut cfg = english_config(true);
     cfg.schema.active = "wubi86".into(); // 开关照开，只换方案
-    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
-    assert_eq!(coord.active_schema_id(), "wubi86");
+    let h = Host::new(cfg);
+    assert_eq!(h.coord.active_schema_id(), "wubi86");
 
-    type_word(&coord, "aaaa");
-    let top = coord.debug_page_texts().first().cloned().expect("应有候选");
-
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN)));
-    assert_eq!(text, top, "非英文方案下即便开关为真也不得补空格");
+    h.type_word("aaaa");
+    h.key(VK_SPACE);
+    h.type_word("aaaa");
+    let top = h.top();
+    assert_eq!(
+        commit_text(&h.key(VK_SPACE)),
+        top,
+        "非英文方案下即便开关为真也不得补空格"
+    );
 }
 
-/// IPC 强制提交通路（DLL 侧 TSF 排水 / 顶码延迟提交）同样补空格。
-///
-/// 这是一条**独立于按键路径**的上屏通路：只改 `commit_selected` 会得到「键盘空格补了、
-/// 排水路径没补」的间歇性不一致——正是本仓多次栽过的「上屏有多条通路，开关必须处处接」。
+/// IPC barrier 通路（`handle_commit_request`，当前 C++ 侧未接线）与按键路径同口径。
 #[test]
-fn commit_request_space_appends_space() {
+fn commit_request_space_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
-    let coord = Coordinator::new_headless(english_config(true), Some(&data_dir()));
-    type_word(&coord, "hel");
-    let top = coord.debug_page_texts().first().cloned().expect("应有候选");
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
+    h.type_word("hel");
+    let top = h.top();
 
-    let res = coord
+    let res = h
+        .coord
         .handle_commit_request(&CommitRequestData {
             barrier_seq: 1,
             trigger_key: VK_SPACE as u16,
@@ -381,20 +402,21 @@ fn commit_request_space_appends_space() {
             input_buffer: "hel".into(),
         })
         .expect("有输入缓冲时应返回上屏结果");
-    assert_eq!(res.text, format!("{top} "), "IPC 空格提交也应补空格");
+    assert_eq!(res.text, format!(" {top}"));
 }
 
-/// IPC 通路的回车分支不补——与按键路径的回车同口径。
 #[test]
-fn commit_request_enter_does_not_append_space() {
+fn commit_request_enter_gets_space_before_it() {
     if !has_english_schema() {
         return;
     }
-    let coord = Coordinator::new_headless(english_config(true), Some(&data_dir()));
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
     let nonsense = "qwxzjv";
-    type_word(&coord, nonsense);
+    h.type_word(nonsense);
 
-    let res = coord
+    let res = h
+        .coord
         .handle_commit_request(&CommitRequestData {
             barrier_seq: 1,
             trigger_key: VK_RETURN as u16,
@@ -402,20 +424,12 @@ fn commit_request_enter_does_not_append_space() {
             input_buffer: nonsense.into(),
         })
         .expect("有输入缓冲时应返回上屏结果");
-    assert_eq!(res.text, nonsense, "IPC 回车提交不得补空格");
+    assert_eq!(res.text, format!(" {nonsense}"));
 }
 
-/// 补的空格**不得**进入词频记账键。
-///
-/// 记账写入端若把 `"hello "` 写进 FREQ 表，读取端按候选文本 `"hello"` 查将永远查不中——
-/// 用户选了词却毫无变化，且写入本身成功、任何常规测试都不会失败（本仓已有三处这样的
-/// 孤儿键漏网史）。判据是「选过一次后该词升到首位」：记账键一旦带上尾空格，读取端查不中，
-/// 位置纹丝不动。
-///
-/// ⚠️ **必须用 `new_headless_with_store`**：`new_headless` 的 store 是 `None`，词频无处可写、
-/// 读取端也无从查起——用它写这条测试，断言失败与否和尾空格毫无关系。
+/// 前缀空格不得混进词频记账键（`hello ` / ` hello` 都是读端永远查不中的孤儿键）。
 #[test]
-fn appended_space_does_not_pollute_freq_key() {
+fn space_does_not_pollute_freq_key() {
     if !has_english_schema() {
         return;
     }
@@ -426,24 +440,25 @@ fn appended_space_does_not_pollute_freq_key() {
     let mut cfg = english_config(true);
     cfg.schema.english.frequency.enabled = true;
     cfg.schema.english.frequency.strategy = "top".into(); // 一次到顶，位次变化最好判读
-    let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
+    let h = Host {
+        coord: Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store),
+        seq: std::cell::Cell::new(0),
+    };
+    h.commit_first_word();
 
-    type_word(&coord, "hel");
-    let page = coord.debug_page_texts();
+    h.type_word("hel");
+    let page = h.coord.debug_page_texts();
     assert!(page.len() >= 3, "需原文 + 至少两个词库候选，实际 {page:?}");
     // page[0] 恒是所打原文（raw_candidate 默认开），词库段从 1 开始。
     let second = page[2].clone();
-
-    // 数字键 3 选中词库段的第二条（带空格上屏）
-    let text = commit_text(&coord.handle_key_event(&key_event(VK_3, EVENT_KEY_DOWN)));
-    assert_eq!(text, format!("{second} "), "选中时应补空格");
+    assert_eq!(commit_text(&h.key(VK_3)), format!(" {second}"));
 
     // 再打一次同样的码：记账键若干净，该词应升到**词库段**首位。
     //
     // ⚠️ 断言落在 `after[1]` 而不是 `after[0]`——首位恒是原文，调频只在词库段内部生效
     // （原文与变形被 `split_off(dict_start)` 挡在重排之外，见设计文档 §5.2）。
-    type_word(&coord, "hel");
-    let after = coord.debug_page_texts();
+    h.type_word("hel");
+    let after = h.coord.debug_page_texts();
     assert_eq!(
         after.first().map(String::as_str),
         Some("hel"),
@@ -452,22 +467,22 @@ fn appended_space_does_not_pollute_freq_key() {
     assert_eq!(
         after.get(1),
         Some(&second),
-        "选过的词应因调频升到词库段首位；纹丝不动说明记账键被尾空格污染成了孤儿键。实际候选: {after:?}"
+        "选过的词应因调频升到词库段首位；纹丝不动说明记账键被空格污染成了孤儿键。实际候选: {after:?}"
     );
     let _ = std::fs::remove_file(&path);
 }
 
-/// 收尾：keyup 不应产生额外上屏（防止补空格逻辑被误接到 keyup 路径）。
 #[test]
 fn keyup_does_not_emit_extra_space() {
     if !has_english_schema() {
         return;
     }
-    let coord = Coordinator::new_headless(english_config(true), Some(&data_dir()));
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
 
-    type_word(&coord, "hel");
-    coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_DOWN));
-    let up = coord.handle_key_event(&key_event(VK_SPACE, EVENT_KEY_UP));
+    h.type_word("hel");
+    h.key(VK_SPACE);
+    let up = h.key_mods(VK_SPACE, 0, EVENT_KEY_UP);
     assert!(
         !matches!(up, KeyAction::InsertText { .. }),
         "空格 keyup 不应再次上屏，实际: {up:?}"
