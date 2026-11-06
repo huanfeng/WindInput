@@ -490,20 +490,16 @@ impl ConfigBundle {
         }
         // 整句切换键：与会话动作同一张键名表（`session_key_name_to_vk`），组合期间 C++ 本就
         // 把这些键转发过来。写了值却解析不出来 ⇒ 用户以为开了、实际是关的，必须告警。
-        let sentence_cycle_raw = config.schema.pinyin.sentence_cycle_key.trim();
-        let sentence_cycle_key = if sentence_cycle_raw.is_empty() {
-            None
-        } else {
-            let parsed = keymap::session_key_name_to_vk(sentence_cycle_raw);
-            if parsed.is_none() {
-                warn!(
-                    "schema.pinyin.sentence_cycle_key = {:?} 不是可识别的键名，整句切换按关闭处理；\
-                     可用值同 keys.session_actions 的键名（如 tab / backtick，可带 shift+）",
-                    config.schema.pinyin.sentence_cycle_key
-                );
-            }
-            parsed
-        };
+        let sentence_cycle_key = parse_sentence_cycle_key(
+            "schema.pinyin.sentence_cycle_key",
+            &config.schema.pinyin.sentence_cycle_key,
+        );
+        // 码表那把键按**方案**折叠、运行期现取（见 `Coordinator::active_sentence_cycle_key`），
+        // 这里只为全局值把「写错了键名」说出来；方案里写错的同样按关闭处理。
+        parse_sentence_cycle_key(
+            "schema.codetable.sentence_cycle_key",
+            &config.schema.codetable.sentence_cycle_key,
+        );
         let jump_out_on_right_symbol =
             parse_jump_out_on_right_symbol(&config.input.auto_pair.jump_out_keys);
         // 英文模式下需要 DLL 吃下转发的标点键 = 「全局配了英半列自定义」∪「英文智能符号参与集」
@@ -599,6 +595,22 @@ impl ConfigBundle {
             tooltip,
         }
     }
+}
+
+/// 解析整句切换键。空串 = 关闭；写了值却认不出 ⇒ 告警后按关闭处理（用户以为开了、实际是关的）。
+pub(crate) fn parse_sentence_cycle_key(path: &str, raw: &str) -> Option<keymap::SessionKey> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = keymap::session_key_name_to_vk(raw);
+    if parsed.is_none() {
+        warn!(
+            "{path} = {raw:?} 不是可识别的键名，整句切换按关闭处理；\
+             可用值同 keys.session_actions 的键名（如 tab / backtick，可带 shift+）"
+        );
+    }
+    parsed
 }
 
 #[cfg(test)]

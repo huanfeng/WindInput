@@ -2065,7 +2065,7 @@ impl Coordinator {
             if via_mixed_pinyin {
                 1
             } else {
-                usize::from(self.rt().config.schema.pinyin.sentence_count)
+                self.active_sentence_count()
             },
         );
         // 纠错候选不占首选（D6）：放在全部重排之后、shadow 之前——用户置顶仍有最终话语权。
@@ -3440,11 +3440,13 @@ impl Coordinator {
         // ★ 必须排在 `preedit_split_body.is_empty()` 那道守卫**之前**：码表方案下拼音
         // 拆分形态恒空，守卫会直接 return 原始码，后面的分支一条都走不到。
         // （混输方案下两者可能同时非空 —— 那时正是靠下面各分支按高亮候选各选各的。）
-        if wants_codetable_split(
-            &state.preedit_codetable_body,
-            state.candidates.get(self.highlighted_global_index(state)),
-        ) {
-            return &state.preedit_codetable_body;
+        let highlighted = state.candidates.get(self.highlighted_global_index(state));
+        if wants_codetable_split(&state.preedit_codetable_body, highlighted) {
+            // 整句 N-best：备选的切法与名次 1 往往不同，各条自带切分（`meta.preedit_split`），
+            // 高亮到谁显示谁的；没带的（逆切分）用引擎给的那一份。
+            return highlighted
+                .and_then(|c| c.meta.preedit_split.as_deref())
+                .unwrap_or(&state.preedit_codetable_body);
         }
         // 直接辅助码命中项：`前缀音节 + 空格 + 辅码`，让人看出末尾被当成了辅码。排在
         // 「分段上屏中恒拆分」那条之前：分段后剩余缓冲同样可以带辅码。

@@ -9699,7 +9699,31 @@ impl Coordinator {
         );
     }
 
-    /// 整句切换键（`schema.pinyin.sentence_cycle_key`）：在整句池里滚动显示窗口。
+    /// 当前方案该用哪把整句切换键：码表方案取 `schema.codetable.sentence_cycle_key`（按方案折叠），
+    /// 其余取 `schema.pinyin.sentence_cycle_key`。两边各管各的，见 `CodetableGlobal::sentence_count`。
+    pub(crate) fn active_sentence_cycle_key(&self) -> Option<keymap::SessionKey> {
+        if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
+        {
+            let raw = self.engine_mgr.codetable_settings().sentence_cycle_key;
+            let raw = raw.trim();
+            // 写错的键名在建配置时已告警过（全局值），这里静默按关闭处理，免得每次按键刷日志。
+            return (!raw.is_empty())
+                .then(|| keymap::session_key_name_to_vk(raw))
+                .flatten();
+        }
+        self.rt().sentence_cycle_key
+    }
+
+    /// 当前方案的整句块露几条（`place_sentence_block` 用）。规则同 [`Self::active_sentence_cycle_key`]。
+    pub(crate) fn active_sentence_count(&self) -> usize {
+        if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
+        {
+            return usize::from(self.engine_mgr.codetable_settings().sentence_count);
+        }
+        usize::from(self.rt().config.schema.pinyin.sentence_count)
+    }
+
+    /// 整句切换键（拼音 / 码表各一把，见 [`Self::active_sentence_cycle_key`]）：在整句池里滚动显示窗口。
     ///
     /// 与英文大小写档位循环同处「候选显示期间生效的快捷键」这一层、同为**临时夺取**：
     /// 守卫任一不成立即返回 `None`，按键原样落回它本来的语义（Tab 出厂是高亮下移键）。
@@ -9722,7 +9746,7 @@ impl Coordinator {
         if data.modifiers & MOD_SHORTCUT != 0 {
             return None;
         }
-        let key = self.rt().sentence_cycle_key?;
+        let key = self.active_sentence_cycle_key()?;
         if data.key_code != key.vk || (data.modifiers & MOD_SHIFT != 0) != key.shift {
             return None;
         }
@@ -9779,20 +9803,48 @@ impl Coordinator {
     ///
     /// 这不是配置冲突（各自都合法），而是**运行期的优先级夺取**：整句池 ≥ 2 条时那些绑定
     /// 按不出来。不告警的话用户只会看到「Tab 翻页有时好用有时不好用」，无从知道是谁夺走的。
+    ///
+    /// 拼音与码表两把键各体检一次（码表取全局值；方案里另写的不在启动体检范围内）。
     pub(crate) fn warn_sentence_cycle_conflict(&self) {
         let rt = self.rt();
-        let Some(key) = rt.sentence_cycle_key else {
-            return;
-        };
+        let p = &rt.config.schema.pinyin;
+        let c = &rt.config.schema.codetable;
+        let codetable_key = keymap::session_key_name_to_vk(c.sentence_cycle_key.trim());
+        for (path, raw, key, counts) in [
+            (
+                "schema.pinyin.sentence_cycle_key",
+                p.sentence_cycle_key.as_str(),
+                rt.sentence_cycle_key,
+                (p.sentence_count, p.sentence_max_count),
+            ),
+            (
+                "schema.codetable.sentence_cycle_key",
+                c.sentence_cycle_key.as_str(),
+                codetable_key,
+                (c.sentence_count, c.sentence_max_count),
+            ),
+        ] {
+            if let Some(key) = key {
+                self.warn_one_sentence_cycle_conflict(path, raw, key, counts);
+            }
+        }
+    }
+
+    fn warn_one_sentence_cycle_conflict(
+        &self,
+        path: &str,
+        raw: &str,
+        key: keymap::SessionKey,
+        (count, max_count): (u8, u8),
+    ) {
+        let rt = self.rt();
         let vk = key.vk;
         // 键配好了、池子却恒空 ⇒ 用户以为开了、实际永远不生效。「键即开关」的初衷就是不要
         // 第二道闸，而算几条整句事实上成了第二道——至少把它说出来（审查查出）。
-        let p = &rt.config.schema.pinyin;
-        if p.sentence_count.max(p.sentence_max_count) < 2 {
+        if count.max(max_count) < 2 {
             warn!(
-                "整句切换键（schema.pinyin.sentence_cycle_key = {:?}）已配置，但 sentence_count 与 \
-                 sentence_max_count 都小于 2，整句池恒空、切换键永远不会生效；要用它请把备选条数调到 ≥2",
-                p.sentence_cycle_key
+                "整句切换键（{path} = {raw:?}）已配置，但同段的 sentence_count 与 \
+                 sentence_max_count 都小于 2，整句池恒空、切换键永远不会生效；要用它请把备选条数调到 ≥2"
             );
         }
         let mut owners: Vec<&str> = Vec::new();
@@ -9825,10 +9877,9 @@ impl Coordinator {
             return;
         }
         warn!(
-            "整句切换键（schema.pinyin.sentence_cycle_key = {:?}）同时配作 {}；\
-             打拼音且整句算出 ≥2 条时本键归整句切换，那些功能在此期间按不出来。\
+            "整句切换键（{path} = {raw:?}）同时配作 {}；\
+             整句算出 ≥2 条时本键归整句切换，那些功能在此期间按不出来。\
              要保留它们：把 sentence_cycle_key 换成别的键或留空；要保留整句切换：把那些功能改绑到别的键",
-            rt.config.schema.pinyin.sentence_cycle_key,
             owners.join(" / ")
         );
     }

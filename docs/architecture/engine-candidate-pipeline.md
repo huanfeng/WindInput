@@ -146,7 +146,8 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
  └─ ③ 空码补全   search_prefix(input, 8) 取首个 code≠input 的候选
                   仅 single_code_complete 且①②为空且未满码时
  → better() 排序
- → 整句 insert(0)（仅 >max_code_length）/ 逆切分 append（仅 ==max_code_length 且空码）
+ → 整句块插到最前（仅 >max_code_length；N-best 按 schema.codetable.sentence_count，词典组词 + 语法模型）
+   / 逆切分 append（仅 ==max_code_length 且空码）
  → truncate（截断保护精确匹配，见下）
  → show_code_hint 时前缀候选 comment 标注剩余编码
  → 自动上屏判定 / 满码空码清空（has_longer_code 单次求值复用）

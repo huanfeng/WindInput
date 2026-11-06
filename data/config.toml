@@ -104,6 +104,17 @@ wildcard_key = "z"
 # 通配仅单字：通配结果只留单字（行内通配与反查模式都生效），词组不出。方案级，这里是全局基线。
 wildcard_single_only = false
 
+# 码表整句（只在方案自己的 [engine.codetable] 写了 sentence_input = true 时生效；出厂方案都没开）。
+#   sentence_count           候选里露几条整句（1 = 只出一条，出厂）
+#   sentence_max_count       解码时算几条，供整句切换键轮换；不足 sentence_count 时按后者算。两者上限都是 8。
+#   sentence_cycle_key       整句切换键，空串 = 关闭（出厂）。键名与夺取规则同 schema.pinyin.sentence_cycle_key。
+#   sentence_grammar_weight  挂语法模型（随包 wanxiang-mini.gram）的权重，0 = 不挂。1.0 在逐字全码打法上反而掉分，出厂 0.5。
+# 与拼音的 sentence_* 各管各的。
+sentence_count = 1
+sentence_max_count = 1
+sentence_cycle_key = ""
+sentence_grammar_weight = 0.5
+
 # 码元字符集：哪些字符可以进输入缓冲（决定一次按键是打码还是作标点/选词/透传）。
 # 格式为「范围 + 字面」，如 a-x（五笔标准）、a-x/（词库含 /test 这类词条）、a-z0-9（要打 Win10）。
 # `-` 写在首位或末位时作字面。大小写不敏感。出厂空 = 内置默认 a-z。

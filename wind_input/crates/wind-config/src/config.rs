@@ -2362,6 +2362,28 @@ pub struct CodetableGlobal {
     /// 与 `wildcard` 主开关正交。见 reverse-mode spec §2。
     #[serde(default)]
     pub wildcard_single_only: bool,
+    /// 码表整句 N-best：候选列表里**露**几条整句。出厂 1。上限 8。
+    ///
+    /// 只在方案开了整句（`[engine.codetable].sentence_input`）时有消费者。语义与
+    /// `schema.pinyin.sentence_count` 相同，但**各管各的**：码表整句的首选准确率与拼音不在
+    /// 一个水平上，用户很可能只想给其中一边开备选。
+    #[serde(default = "default_sentence_count")]
+    pub sentence_count: u8,
+    /// 码表整句 N-best：解码时**算**几条（整句切换键的池子）。不足 `sentence_count` 时按后者抬。
+    #[serde(default = "default_sentence_count")]
+    pub sentence_max_count: u8,
+    /// 码表整句的切换键。**空串 = 关闭（出厂）**。键名取值、夺取规则同
+    /// `schema.pinyin.sentence_cycle_key`。
+    #[serde(default)]
+    pub sentence_cycle_key: String,
+    /// 码表整句挂语法模型的权重。**0 = 不挂**。出厂 0.5。
+    ///
+    /// 模型固定用随包的 `wanxiang-mini.gram`，不跟 `schema.pinyin.grammar`：拼音桌面端出厂
+    /// 不挂模型，码表整句挂上收益大得多（词组最短码打法首选 56.8% → 79.5%）。权重取 0.5
+    /// 而不是 1.0：1.0 在逐字全码打法上反而掉分（83.5% → 74.4%）。数据见
+    /// `docs/design/codetable-sentence-input.md` §12。
+    #[serde(default = "default_codetable_sentence_grammar_weight")]
+    pub sentence_grammar_weight: f64,
     /// 出简让全：有简码的字，在更长的码位上把首选让给词语（「路」的三简是 `kht`，
     /// 那么 `khtk` 的首选就该给「路上」之类）。值 = **参与让位的简码级别上限**：
     ///
@@ -2467,6 +2489,10 @@ impl Default for CodetableGlobal {
             wildcard: false,
             wildcard_key: default_wildcard_key(),
             wildcard_single_only: false,
+            sentence_count: default_sentence_count(),
+            sentence_max_count: default_sentence_count(),
+            sentence_cycle_key: String::new(),
+            sentence_grammar_weight: default_codetable_sentence_grammar_weight(),
             frequency: CodetableFrequency::default(),
             auto_phrase: AutoPhraseConfig::default(),
         }
@@ -2537,6 +2563,18 @@ impl CodetableGlobal {
         }
         if let Some(v) = o.wildcard_single_only {
             out.wildcard_single_only = v;
+        }
+        if let Some(v) = o.sentence_count {
+            out.sentence_count = v;
+        }
+        if let Some(v) = o.sentence_max_count {
+            out.sentence_max_count = v;
+        }
+        if let Some(v) = &o.sentence_cycle_key {
+            out.sentence_cycle_key = v.clone();
+        }
+        if let Some(v) = o.sentence_grammar_weight {
+            out.sentence_grammar_weight = v;
         }
         // 调频段逐字段折叠。整段缺省 = 全部跟随基线。
         //
@@ -8292,6 +8330,10 @@ impl Default for SystemConfig {
 /// ⚠️ 与引擎 `pinyin::Config::default()` 同值。
 fn default_sentence_count() -> u8 {
     1
+}
+
+fn default_codetable_sentence_grammar_weight() -> f64 {
+    0.5
 }
 
 fn default_true() -> bool {

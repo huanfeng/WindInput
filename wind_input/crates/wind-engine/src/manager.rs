@@ -7197,6 +7197,10 @@ impl EngineManager {
                     mixed_role,
                     schema.engine.codetable.sentence_input,
                 ),
+                // 整句 N-best 是用户偏好（走 `eff` 折叠）。混输下整句不触发（见
+                // `MixedRole::Primary`），读到什么都不会被用到。
+                sentence_count: eff.sentence_count,
+                sentence_max_count: eff.sentence_max_count,
                 // 逆切分：同为方案级引擎固定参数。切点有效性与「与整句同开」的告警在
                 // `CodeTableEngine::new` 里（那里才同时握着 max_code_length 与两个开关）。
                 //
@@ -7309,6 +7313,7 @@ impl EngineManager {
             Some(Box::new(Self::attach_sentence_freq(
                 engine,
                 commit_opts.sentence_input,
+                eff.sentence_grammar_weight,
                 &schemas,
             )))
         }
@@ -8382,15 +8387,28 @@ impl EngineManager {
     /// 但**懒到按键线程上同样不行**：实测首次解码要 ~660 ms（见 `sentence::LazyTables`），
     /// 恰好落在用户敲下第 5 个码那一刻。故这里在交完路径后立刻 `prewarm_sentence()`，
     /// 把两张表推给后台线程——开了整句才付、且不占按键线程。
+    ///
+    /// 语法模型同理：只交路径与权重，模型文件在预热线程里打开（权重 0 时根本不打开）。
     fn attach_sentence_freq(
         engine: CodeTableEngine,
         sentence_on: bool,
+        grammar_weight: f64,
         schemas_dir: &Path,
     ) -> CodeTableEngine {
         if !sentence_on {
             return engine;
         }
-        let engine = engine.with_sentence_schemas_dir(schemas_dir.to_path_buf());
+        // 走 resolve_dict_file：同整句词频，模型同样可能被 custom / user 层替换。
+        let gram = Self::resolve_dict_file(
+            &format!(
+                "pinyin/grammar/{}",
+                crate::codetable::sentence::GRAMMAR_MODEL
+            ),
+            schemas_dir,
+        );
+        let engine = engine
+            .with_sentence_schemas_dir(schemas_dir.to_path_buf())
+            .with_sentence_grammar(gram, grammar_weight);
         engine.prewarm_sentence();
         engine
     }

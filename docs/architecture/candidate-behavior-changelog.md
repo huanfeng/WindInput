@@ -27,6 +27,24 @@
 
 ---
 
+## 2026-11-06 · 码表整句：语法模型、词典组词、N-best（0.131）
+
+- 合入：（待填）；范围：码表方案，仅方案开了 `[engine.codetable] sentence_input = true`
+- 变化：
+  - 整句首选更准：挂上语法模型并能把码表没收的词逐字组出来。`qjkhlgw` 前：旬中国人 → 后：我是中国人。
+    3000 句评测首选：词组最短码打法 56.8% → 90.0%，逐字最短码打法 7.7% → 89.4%。
+  - 用户自造词（拼音库里没有的）在整句里不再总被拆成单字。
+  - 可露多条整句：`sentence_count = 2` 时 `qjkhlgw` 出「我是中国人 / 旬中国人」两条；配了 `sentence_cycle_key` 可轮换。
+    组合区切法跟着高亮的整句走（`q'j'khlg'w` ↔ `qj'khlg'w`）。出厂 1/1 下组合区行为不变。
+  - 码表方案下展开态 Tab 切分类不再被 `schema.pinyin.sentence_cycle_key = "tab"` 挡住（码表看自己那把键）。
+- 触发条件：语法模型与组词在开了整句的方案上出厂即生效；多条整句需调 `schema.codetable.sentence_count`
+- 回退旧行为：`schema.codetable.sentence_grammar_weight = 0` 关语法模型；组词无开关（设计变更）
+- 钉住的测试：`wind-engine` `codetable::sentence::tests::composes_lexicon_word_across_char_units` /
+  `user_word_missing_from_lexicon_gets_floor_frequency` / `grammar_picks_rank_one_and_plain_nbest_fills_the_rest`，
+  `codetable::engine::tests::sentence_nbest_shows_count_and_fills_pool`；
+  `wind-coordinator` `tests/codetable_sentence_nbest.rs`
+- 来源：内部
+
 ## 2026-11-06 · 整句备选不再被第 1 名的同文切分挤掉（0.131）
 
 - 合入：bdf132b8；范围：全拼 / 双拼主路径，仅 `sentence_count > 1`
