@@ -4749,6 +4749,8 @@ impl Engine for PinyinEngine {
         for sent in demote_targets {
             // 「精确整词」判据：码恰好等于已消费输入 `completed`，且非模糊命中、
             // 不在前缀补全/子短语层。含系统词库与 step 6 并入的用户/临时层。
+            // 排除引擎合成的其它整句（N-best 备选）：它不是词条，算进来会让第 1 名降到
+            // 第 2 名之下、名次倒挂。并入了用户/临时词的那条是词条，照算。
             let exact_max = candidates
                 .iter()
                 .filter(|c| {
@@ -4757,6 +4759,7 @@ impl Engine for PinyinEngine {
                         && !c.is_prefix
                         && !c.is_partial
                         && c.code == completed
+                        && !(c.is_synthesized && !c.meta.is_user_dict && !c.meta.is_temp_dict)
                 })
                 .map(|c| c.weight)
                 .max();
@@ -8832,6 +8835,72 @@ s = ["ao"]
     }
 
     // ── 整句让位于精确整词（step 6.5 降级）─────────────────────────────────────
+
+    /// N-best 下合成的第 2 名整句不算「精确整词」：第 1 名不得因它降级而名次倒挂。
+    fn nbest_engine(raw: CodetableDict) -> PinyinEngine {
+        let mut e = PinyinEngine::new(Config::default(), CachedDict::Memory(raw));
+        e.config.sentence_count = 2;
+        e.config.sentence_max_count = 2;
+        e
+    }
+
+    fn nihao_nbest_dict() -> CodetableDict {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("ni".to_string(), "你".to_string(), 492_791, 0);
+        raw.merge_single("ni".to_string(), "泥".to_string(), 30_000, 1);
+        raw.merge_single("hao".to_string(), "好".to_string(), 124_546, 2);
+        raw
+    }
+
+    #[test]
+    fn nbest_alternate_sentence_does_not_demote_top_sentence() {
+        let e = nbest_engine(nihao_nbest_dict());
+        let r = e.convert("nihao", 50).unwrap();
+        let get = |rank: u8| {
+            r.candidates
+                .iter()
+                .find(|c| c.is_sentence && c.sentence_rank == rank)
+                .unwrap_or_else(|| panic!("缺第 {rank} 名整句: {:?}", r.candidates))
+        };
+        let (top, alt) = (get(1), get(2));
+        assert_eq!((top.text.as_str(), alt.text.as_str()), ("你好", "泥好"));
+        assert!(
+            top.is_synthesized && alt.is_synthesized,
+            "两条都应是合成整句"
+        );
+        assert!(
+            !top.is_sentence_demoted,
+            "第 2 名整句不是词条，不得让第 1 名降级"
+        );
+        assert!(
+            top.weight > alt.weight,
+            "第 1 名权重须高于第 2 名: {} vs {}",
+            top.weight,
+            alt.weight
+        );
+    }
+
+    /// 对照：第 2 名与用户词同文时它是词条，第 1 名照旧让位。
+    #[test]
+    fn nbest_alternate_merged_with_user_word_still_demotes_top_sentence() {
+        let store = tmp_store("nbest_alt_user");
+        store
+            .add_user_word("pinyin", "nihao", "泥好", 500, 0b1001)
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreUserLayer::new(store, "pinyin")));
+        let e = nbest_engine(nihao_nbest_dict()).with_store_layers(Arc::new(dm));
+        let r = e.convert("nihao", 50).unwrap();
+        let top = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "你好")
+            .unwrap_or_else(|| panic!("缺「你好」: {:?}", r.candidates));
+        let user = r.candidates.iter().find(|c| c.text == "泥好").unwrap();
+        assert!(user.meta.is_user_dict, "「泥好」应带用户词标记");
+        assert!(top.is_sentence_demoted, "存在精确用户词时第 1 名整句须让位");
+        assert!(top.weight < user.weight);
+    }
 
     /// 用户要求的那条保证：**多个精确整词并列于最大权重时，整句排在它们全部之后**。
     ///
