@@ -899,10 +899,10 @@ mod tests {
         {
             let mut st = seed_composition(&c);
             let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
-            // Ctrl+M 不被当辅助码字符：有输入态 → ClearComposition 退出。
+            // Ctrl+M 不被当辅助码字符：有输入态 → 清掉组合并把键交还宿主（宿主快捷键）。
             let act = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), MOD_CTRL));
             assert_eq!(st.active, None);
-            assert!(matches!(act, KeyAction::ClearComposition));
+            assert!(matches!(act, KeyAction::ClearCompositionThenPassThrough));
         }
         // 无输入态 → PassThrough。
         let mut st2 = seed_composition(&c);
