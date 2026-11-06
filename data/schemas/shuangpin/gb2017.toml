@@ -1,6 +1,6 @@
 [meta]
 id = "gb2017"
-name = "国标双拼 (GB/T 34947-2017)"
+name = "国标双拼" # GB/T 34947-2017
 
 [initials]
 v = "zh"
@@ -9,14 +9,14 @@ u = "sh"
 
 [finals]
 q = ["ia", "ua"]
-w = ["uan", "üan"]
+w = ["uan"]
 e = ["e"]
 r = ["en"]
 t = ["ie"]
 y = ["uai", "iu"]
 u = ["u"]
 i = ["i"]
-o = ["o", "uo"]
+o = ["uo", "o"]
 p = ["ou"]
 a = ["a"]
 s = ["iong", "ong"]
@@ -27,14 +27,14 @@ h = ["eng"]
 j = ["ing"]
 k = ["ai"]
 l = ["in", "er"]
-z = ["un", "ün"]
-x = ["üe"]
+z = ["un"]
+x = ["ue", "ve"]
 c = ["ao"]
-v = ["ü", "ui"]
+v = ["v", "ui"]
 b = ["ei"]
 n = ["iang", "uang"]
 m = ["iao"]
 
-# GB/T 34947-2017 4.1.1 规定，零声母以 `a` 引导
 [zero_initials]
+# GB/T 34947-2017 4.1.1 规定，零声母以 `a` 引导
 a = ["a", "ai", "an", "ang", "ao", "e", "ei", "en", "eng", "er", "o", "ou"]

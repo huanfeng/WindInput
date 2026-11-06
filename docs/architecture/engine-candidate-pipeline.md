@@ -455,12 +455,13 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 `PinyinEngine::with_shuangpin(converter)` 注入，`convert()` 入口先把双拼键串转全拼，后续管线与全拼完全一致。
 
 - **布局是数据不是代码**：`data/schemas/shuangpin/<id>.toml`（内置 xiaohe / ziranma / mspy / sogou /
-  ziguang / abc / shoudao / jiajia），三表：`[initials]` 键→声母、`[finals]` 键→韵母列表、
+  ziguang / abc / shoudao / jiajia / gb2017），三表：`[initials]` 键→声母、`[finals]` 键→韵母列表、
   `[zero_initials]` 键→零声母音节表（首道用 `[zero_pairs]` 显式键对，键位不规则）。
 - 键对转换 `convert_pair()` 三层：零声母（韵母交集/字面/matchesFinal）→ 常规声母+韵母
   （含 z↔zh/c↔ch/s↔sh 对偶兜底 `fuzzy_initial_partners()`）→ 重复键单音节（aa→a，
   **受 `[zero_initials]` 约束**，见下）。
-- **零声母有两个流派，不可互抄**：微软 / 搜狗 / 智能ABC / 紫光用 `O` 引导（`oj`=an、`oh`=ang），
+- **零声母有三个流派，不可互抄**：微软 / 搜狗 / 智能ABC / 紫光用 `O` 引导（`oj`=an、`oh`=ang），
+  国标双拼（`gb2017`）按 GB/T 34947-2017 4.1.1 用 `a` 引导（`af`=an、`ac`=ao；`ao`=o）。
   自然码 / 小鹤用首字母引导（单韵母重复 `aa`/`ee`/`oo`、双字母韵母打字面 `ai`/`an`、
   三字母韵母 `ah`/`eg`）。微软/搜狗曾整段抄自首字母引导的模板，官方 10 个击键全部打不出而
   覆盖率门禁照绿 —— 门禁只问「打不打得出」，问不到「**官方**击键打不打得出」，
