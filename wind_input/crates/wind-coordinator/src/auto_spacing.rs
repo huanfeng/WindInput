@@ -33,6 +33,7 @@ impl Coordinator {
     pub(crate) fn latch_spacing_boundary(&self, state: &mut State, data: &KeyEventData) {
         let doc_space =
             char::from_u32(data.prev_char as u32).is_some_and(|c| c != '\0' && c.is_whitespace());
+        state.spacing_seq_unknown = data.seq_char == 0 && !doc_space;
         state.spacing_prev = if doc_space {
             CharClass::Other
         } else {
@@ -58,9 +59,9 @@ impl Coordinator {
         | KeyAction::CommitReplacingHeld { text, .. } = &action
         {
             // 智能符号替换：光标前换成了替换文本，不补空格（只发生在标点上）。
-            if let Some(c) = text.chars().last() {
-                state.spacing_prev = classify(c);
-            }
+            // 纯删除（撤销上屏）：光标前换成了什么不知道。
+            state.spacing_prev = text.chars().last().map_or(CharClass::Other, classify);
+            state.spacing_last_commit = state.spacing_prev;
             return action;
         }
         let full_width = state.full_width;
@@ -71,11 +72,23 @@ impl Coordinator {
         let Some(text) = committed_text_mut(&mut action) else {
             return action;
         };
-        self.space_committed_text(&mut state.spacing_prev, full_width, word, text);
+        // 客户端不知道光标前是什么（旧 DLL 不报 seqChar、焦点刚切过来）时，英文词间空格退回
+        // 服务端自己记的上一笔——立即补尾随空格的旧实现本来就是无条件的，不能因为改成按需补
+        // 就在混搭版本下整个失效。中英 / 中数交界不退：那两条宁可少补。
+        let mut prev =
+            if word && state.spacing_seq_unknown && state.spacing_prev == CharClass::Other {
+                state.spacing_last_commit
+            } else {
+                state.spacing_prev
+            };
+        self.space_committed_text(&mut prev, full_width, word, text);
+        state.spacing_prev = prev;
         // 先提交再待定一个中文标点：光标前是那个标点（落定与否都是它）。
         if let Some(c) = hold_tail {
             state.spacing_prev = classify(c);
         }
+        state.spacing_last_commit = state.spacing_prev;
+        state.spacing_seq_unknown = false;
         action
     }
 
@@ -100,7 +113,10 @@ impl Coordinator {
             word_space: word,
         };
         let next = classify(head);
-        if needs_space(*prev, next, rules) {
+        let add = needs_space(*prev, next, rules);
+        self.auto_space_prefixed
+            .store(add, std::sync::atomic::Ordering::Relaxed);
+        if add {
             // 全角字母之间的词间空格补全角空格，与旧的立即补口径一致。
             let sp = if full_width && next == CharClass::WideLatin {
                 "\u{3000}"

@@ -346,9 +346,10 @@ fn raw_code_enter_commit_gets_space_before_it() {
     assert_eq!(commit_text(&h.key(VK_RETURN)), format!(" {nonsense}"));
 }
 
-/// 客户端不知道光标前是什么（焦点刚切过来、鼠标挪过光标）⇒ 不补。
+/// 客户端报不出光标前是什么（旧版 DLL 不带 `seq_char`、焦点刚切过来）：英文词间空格退回
+/// 服务端自己记的上一笔。立即补尾随空格的旧实现是无条件的，新 core 配旧 DLL 时不能整个失效。
 #[test]
-fn unknown_previous_char_gets_no_space() {
+fn legacy_client_without_seq_char_keeps_word_space() {
     if !has_english_schema() {
         return;
     }
@@ -358,7 +359,7 @@ fn unknown_previous_char_gets_no_space() {
 
     h.type_word("hel");
     let top = h.top();
-    assert_eq!(commit_text(&h.key(VK_SPACE)), top);
+    assert_eq!(commit_text(&h.key(VK_SPACE)), format!(" {top}"));
 }
 
 #[test]

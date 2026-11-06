@@ -8115,6 +8115,9 @@ void CTextService::OnHoldTimerExpired(BOOL nonKeyContext)
     // 回调进来的 Flush 都走异步会话收口（不走 SendInput 兜底，见 CommitText 内注释）；
     // 按键上下文里的 Flush 保持同步，以确保收口先于后续透传字符。
     CommitText(textToCommit, nonKeyContext);
+    // 待定符号落定 = 文档里多了这个符号：seqChar 跟上（否则「hello，」之后的汉字前会被误补空格）。
+    if (_pKeyEventSink != nullptr)
+        _pKeyEventSink->NoteCommittedSeqChar(textToCommit);
 }
 
 // ─── DeferredComposition（direct_commit 顶码，延迟到 keyup 才开新组合）───────────

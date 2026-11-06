@@ -884,10 +884,11 @@ impl MessageHandler for Coordinator {
             self.note_host_wrote_text("宿主自行出字");
         }
         // 中英 / 中数间补空格的「插入点前一字符」：只在组合开始前锁存（见 `crate::auto_spacing`）。
-        // 联想态也算组合开始前——联想候选是上一笔上屏之后的事，光标前就是那一笔的末字。
+        // 联想态**不**重新锁存：联想是紧接着上一笔上屏的，服务端已把 `spacing_prev` 推进到那一笔
+        // 的末字；客户端那份在某些上屏路径上会慢一拍（上屏后立刻起组合的那几条），拿来覆盖反而错。
         if data.event_type == EVENT_KEY_DOWN {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if !Self::has_input_session(&st) || st.assoc_active() {
+            if !Self::has_input_session(&st) {
                 self.latch_spacing_boundary(&mut st, data);
             }
         }
@@ -2637,6 +2638,16 @@ impl MessageHandler for Coordinator {
                     // 「英文后」看紧挨着标点的那段：被顶出的候选 / 原码，没有则是光标前（锁存值）。
                     let piece = self.convert_punct_after(&state, ch, data.prev_char, &out);
                     state.chinese_punct = saved_chinese_punct;
+                    // 智能符号 press1 在上面（顶屏之前）就按当时能看到的上下文武装了；英文后智能
+                    // 标点看的是被顶出的那段，可能让实际上屏的是另一形态（`_` 而非 `——`）。武装串与
+                    // 光标前的实际内容对不上时 press2 会按武装串的长度删字——删到用户打的字母，
+                    // 故不一致即解除。
+                    {
+                        let mut arm = self.smart_symbol.lock().unwrap_or_else(|e| e.into_inner());
+                        if arm.armed && arm.key == ch && arm.str != piece {
+                            arm.armed = false;
+                        }
+                    }
                     out.push_str(&piece);
                     // 标点字符（候选部分已在标点前顶屏候选处记 Candidate；标点候选已 set
                     // stat_recorded，故此处必须显式记标点，否则顶层 fallback 会跳过它）。
@@ -4690,6 +4701,7 @@ impl MessageHandler for Coordinator {
         let mut prev = state.spacing_prev;
         self.space_committed_text(&mut prev, full_width, append_space, &mut text);
         state.spacing_prev = prev;
+        state.spacing_last_commit = prev;
         state.spacing_word_commit = false;
         // 上屏即组合结束：复位首显延迟状态，使下一组合首帧重新延迟到 reflow 后的权威坐标，
         // 避免其锁定到本组合旧坐标（"上屏后立即输入候选窗错位"主场景）。

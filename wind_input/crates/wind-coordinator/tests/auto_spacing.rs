@@ -189,3 +189,16 @@ fn user_typed_space_suppresses_auto_space() {
     h.passthrough(' ');
     assert_eq!(h.temp_english("Python"), "Python");
 }
+
+/// 客户端报不出光标前是什么时，中英交界**不**退回服务端记录（宁可少补）：焦点切换、
+/// 鼠标挪过光标之后，上一笔是什么与这里无关。
+#[test]
+fn unknown_previous_char_gets_no_cjk_space() {
+    if !ready() {
+        return;
+    }
+    let h = Host::new(config(true, false));
+    h.wubi("aaaa");
+    h.seq.set(0);
+    assert_eq!(h.temp_english("Python"), "Python");
+}

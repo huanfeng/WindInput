@@ -522,6 +522,17 @@ private:
     // 同时更新 _seqChar（末尾码点，见 InputSequenceChar.h），两者共用这几个上屏记录点。
     void _TrackCommittedTextForSmartPunct(const std::wstring& text);
 
+public:
+    /// 只更新 seqChar（数字记账不动）：「上屏后紧接着开组合」与 HoldComposition 落定这类
+    /// 数字记账刻意不记、但文档里确实多了一段的上屏点用。空文本不动。
+    void NoteCommittedSeqChar(const std::wstring& text)
+    {
+        if (!text.empty())
+            _seqChar = WindInputSeq::FromCommittedText(text.c_str(), text.size());
+    }
+
+private:
+
     // ⛔ 这里曾有 CapsLock 的「回敲复原」机制（_RestoreCapsLockToggle / _capsSessionEaten /
     // 自注入放行窗口），2026-08-11 全部移除——TSF 压不住 CapsLock 的锁定态翻转，而事后
     // 回敲在快速连按下有竞态且会触发厂商 OSD 弹窗。CapsLock 的会话态绑定改由服务进程的

@@ -472,6 +472,10 @@ pub(crate) struct State {
     /// 本次按键 / 点选的上屏是「英文语境下的一个词」，且该语境的 `commit_space` 开着。
     /// 由原先立即补尾随空格的那些出口置位，统一出口消费后清零（见 `crate::auto_spacing`）。
     pub(crate) spacing_word_commit: bool,
+    /// 锁存时客户端报的 `seq_char` 是 0（不可知）。只用于英文词间空格的兜底，见 `apply_auto_spacing`。
+    pub(crate) spacing_seq_unknown: bool,
+    /// 服务端自己发出的上一笔上屏的末字符类别（不受锁存覆盖）。
+    pub(crate) spacing_last_commit: wind_punct::spacing::CharClass,
     /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
     ///
     /// 见 `docs/design/schema-scoped-behavior.md` §4。初值是哨兵 `u64::MAX`，保证首次
@@ -2178,6 +2182,9 @@ pub struct Coordinator {
     /// 那次」精准删多个；撤销一次即复位 1、焦点变化亦复位 → 之后回落删 1（宁可少删多按几次，
     /// 也不按陈旧计数误删多个）。
     pub(crate) last_commit_len: std::sync::atomic::AtomicUsize,
+    /// 最近一次上屏的文本开头是不是 `crate::auto_spacing` 补的空格。造词草稿流要把它剥掉：
+    /// 草稿窗口遇到非汉字就断流并丢掉整笔，不剥的话交界后的第一个字永远进不了草稿。
+    pub(crate) auto_space_prefixed: std::sync::atomic::AtomicBool,
     /// 编码显示方式运行时态（命令栏 ime.toggle("preedit") 循环切换；初值随配置）。
     /// 统一权威：决定候选窗是否显示 preedit（in_app→不显示）及是否内联首单元（embedded）。
     pub(crate) preedit_display: Mutex<PreeditDisplay>,
@@ -3123,6 +3130,8 @@ impl Coordinator {
                 chinese_punct: init_punct,
                 spacing_prev: wind_punct::spacing::CharClass::Other,
                 spacing_word_commit: false,
+                spacing_seq_unknown: false,
+                spacing_last_commit: wind_punct::spacing::CharClass::Other,
                 // 哨兵：与任何真实代际都不相等，保证首次 sync_schema_scope 必执行。
                 schema_scope_gen: u64::MAX,
                 punct_before_schema: None,
@@ -3368,6 +3377,7 @@ impl Coordinator {
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
+            auto_space_prefixed: std::sync::atomic::AtomicBool::new(false),
             preedit_display: Mutex::new(preedit_display_init),
             eff_candidate_cache: Mutex::new(None),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),
@@ -9970,9 +9980,11 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                let (chinese_mode, main_path) = {
-                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    (st.chinese_mode, st.active.is_none())
+                // 不经按键出口，按需补空格在这里补（同鼠标点选，见 `crate::auto_spacing`）。
+                let (act, chinese_mode, main_path) = {
+                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let act = self.apply_auto_spacing(&mut st, act);
+                    (act, st.chinese_mode, st.active.is_none())
                 };
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
                 self.push_no_key_ctx_action(&act, chinese_mode, main_path);
