@@ -2203,9 +2203,7 @@ layout = "old"
             .to_string();
         assert!(err.contains("过大"), "{err}");
         assert!(!dest.join("a.schema.toml").exists());
-        let ok = import_package(&pkg, &dest, crate::merge::Strategy::Merge)
-            .ok()
-            .expect("默认上限放行");
+        let ok = import_package(&pkg, &dest, crate::merge::Strategy::Merge).expect("默认上限放行");
         assert_eq!(ok.schema_ids, ["a"]);
     }
 
