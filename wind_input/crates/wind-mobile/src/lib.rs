@@ -82,6 +82,8 @@ pub use wind_coordinator::candidate_pull::{CandidateWindow, MAX_WINDOW, TextSegm
 /// 展开页「首单元读法」的数据类型，见 [`MobileCore::leading_readings`]。
 pub use wind_coordinator::leading_reading::LeadingReading;
 pub use wind_store::stats_report::StatsSummary;
+/// 方案包导入 / 预览 / 删除的实现（与桌面同一份）。绑定层经此引用，不另开一条通往核心的依赖。
+pub use wind_transfer;
 
 /// 候选帧：编码栏与候选栏一次渲染所需的全部数据。
 ///
@@ -903,6 +905,38 @@ impl MobileCore {
                 id: id.clone(),
             })
             .collect()
+    }
+
+    /// 方案包导入 / 删除落盘后调：重扫各层 `schemas/`，刷新已装方案列表。
+    /// 之后另发 [`MobileCommand::ReloadConfig`] 让可选方案与引擎跟上。
+    /// 英文兜底方案（构造时补进列表的那个）不依赖文件，重扫后若丢了就保留旧列表里的它。
+    pub fn refresh_installed_schemas(&self) {
+        let mut ids = scan_installed_schemas(&self.data_dir);
+        if !ids.iter().any(|s| s == config_api::ENGLISH_SCHEMA)
+            && config_api::installed_schemas()
+                .iter()
+                .any(|s| s == config_api::ENGLISH_SCHEMA)
+        {
+            ids.push(config_api::ENGLISH_SCHEMA.to_string());
+            ids.sort();
+        }
+        config_api::set_installed_schemas(ids);
+    }
+
+    /// 方案包的目标目录：`(用户层 schemas, 只读层 schemas 列表)`。
+    /// 只读层 = 出厂数据层（Android 即随 APK 解出的 `data/schemas`）与定制层，永不写、永不删。
+    pub fn scheme_dirs(&self) -> (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+        let mut user = None;
+        let mut system = Vec::new();
+        for layer in Config::resource_layers_named_with(Some(&self.data_dir)) {
+            let dir = layer.path.join("schemas");
+            if layer.name == "user" {
+                user = Some(dir);
+            } else {
+                system.push(dir);
+            }
+        }
+        (user, system)
     }
 
     /// 启用 / 停用一个已装方案。英文与最后一个中文方案关不掉（Err 里写原因）。

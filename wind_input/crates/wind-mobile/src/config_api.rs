@@ -29,7 +29,7 @@
 //! 宿主就能在加载清单时当场比对：清单里有而注册表没有的键，直接报出来。
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, RwLock};
 
 use wind_config::Config;
 use wind_config::config_schema::{self, FieldType};
@@ -198,21 +198,21 @@ fn to_toml(cfg: &Config) -> String {
 // （装了的里头他要的那些）。英文方案恒在其中——它是中英键切换的目标，关掉中英键就失灵；
 // 也因此用户写下的列表恒含 `english`，不会与出厂列表相等而被「等于默认不落盘」剪掉。
 
-/// 已装方案（构造时扫 assets 得到，见 [`set_installed_schemas`]）。覆盖钩子是函数指针、
-/// 捕获不了变量，故放进程级。
-static INSTALLED: OnceLock<Vec<String>> = OnceLock::new();
+/// 已装方案（构造时扫 assets 得到，见 [`set_installed_schemas`]；导入 / 删除方案后重扫刷新）。
+/// 覆盖钩子是函数指针、捕获不了变量，故放进程级。
+static INSTALLED: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
 /// 英文方案 id：中英键切换的目标，恒启用。
 pub const ENGLISH_SCHEMA: &str = "english";
 
-/// 记下已装方案（构造时调一次；同进程再调无效，装了什么在进程生命期内不变）。
+/// 记下已装方案（构造时调；方案包导入 / 删除后再调一次覆盖）。
 pub fn set_installed_schemas(ids: Vec<String>) {
-    let _ = INSTALLED.set(ids);
+    *INSTALLED.write().unwrap_or_else(|e| e.into_inner()) = ids;
 }
 
 /// 已装方案；构造前为空。
-pub fn installed_schemas() -> &'static [String] {
-    INSTALLED.get().map(Vec::as_slice).unwrap_or(&[])
+pub fn installed_schemas() -> Vec<String> {
+    INSTALLED.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// 用户层里显式写下的 `schema.available`（没写过 = `None`）。
@@ -233,7 +233,7 @@ fn user_chosen_schemas() -> Option<Vec<String>> {
 
 /// 当前启用的方案：装了的 ∩ 用户选的（没选过 = 全部），英文恒在。
 pub fn enabled_schemas() -> Vec<String> {
-    enabled_from(installed_schemas(), user_chosen_schemas().as_deref())
+    enabled_from(&installed_schemas(), user_chosen_schemas().as_deref())
 }
 
 /// 把可选方案设成 [`enabled_schemas`]；当前方案不在其中时换成第一个仍启用的中文方案。
@@ -282,7 +282,7 @@ pub fn set_schema_enabled(id: &str, on: bool) -> Result<(), String> {
         return Err("英文方案是中英键切换的目标，不能关闭".to_string());
     }
     let _w = write_guard();
-    let mut list = enabled_from(installed, user_chosen_schemas().as_deref());
+    let mut list = enabled_from(&installed, user_chosen_schemas().as_deref());
     if on {
         if !list.iter().any(|s| s == id) {
             list.push(id.to_string());
