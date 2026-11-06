@@ -405,6 +405,8 @@ pub struct MobileCore {
     auto_spaced: AtomicBool,
     /// 英文词后是否补空格（宿主设置项，默认开），见 [`Self::set_auto_space`]
     auto_space: AtomicBool,
+    /// 触摸键盘的 `;` 是否进快捷输入（宿主设置项，默认关），见 [`Self::set_touch_quick_trigger`]
+    touch_quick_trigger: AtomicBool,
 }
 
 impl MobileCore {
@@ -504,6 +506,7 @@ impl MobileCore {
             data_dir: data_dir.to_path_buf(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         })
     }
 
@@ -1539,6 +1542,7 @@ mod user_words_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         (core, user)
     }
@@ -1693,6 +1697,7 @@ mod dict_transfer_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         (core, user)
     }
@@ -1830,6 +1835,7 @@ mod dict_transfer_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         let err = m.dict_import("pinyin", "aa\t工\n", false).unwrap_err();
         assert!(err.contains("99"), "要把只读原因交给用户: {err}");
@@ -1865,6 +1871,7 @@ mod schema_dicts_tests {
             data_dir: data_dir(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         }
     }
 
@@ -1986,6 +1993,7 @@ mod schema_dicts_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         let err = m
             .set_schema_dict_enabled("pinyin", "cell_idiom", true)
@@ -2069,6 +2077,7 @@ mod candidate_menu_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         assert!(m.candidate_menu(0).is_empty(), "无候选时菜单为空");
         for ch in ['A', 'A'] {
@@ -2131,6 +2140,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         assert!(m.candidate_tooltip(0).is_empty(), "无候选时为空");
         for ch in ['W', 'Q', 'V', 'B'] {
@@ -2189,6 +2199,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         dispatch_key(&m.coord, 'A' as u32, 0);
         let plain = m.candidates(0, 20);
@@ -2230,6 +2241,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         dispatch_key(&m.coord, 'A' as u32, 0);
         let first = m.candidates(0, 24);
@@ -2274,6 +2286,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         m.coord.prewarm_single_initials();
         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -2339,6 +2352,7 @@ mod pinyin_hint_tests {
             data_dir: dir.join("user"),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         (core, dir)
     }
@@ -2449,6 +2463,7 @@ mod session_pump_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         core.key_down('A' as u32, 0);
         let deadline = Instant::now() + Duration::from_secs(10);

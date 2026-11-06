@@ -74,7 +74,28 @@ pub(crate) fn us_layout_vk(c: char) -> Option<(u32, bool)> {
     }
 }
 
+/// 压制某键的引导键身份，析构时清除（任何返回路径都不会漏清）
+struct TriggerSuppress<'a>(&'a wind_coordinator::Coordinator);
+
+impl<'a> TriggerSuppress<'a> {
+    fn new(coord: &'a wind_coordinator::Coordinator, vk: u32) -> Self {
+        coord.set_trigger_suppressed(vk);
+        Self(coord)
+    }
+}
+
+impl Drop for TriggerSuppress<'_> {
+    fn drop(&mut self) {
+        self.0.set_trigger_suppressed(0);
+    }
+}
+
 impl MobileCore {
+    /// 触摸键盘的 `;` 是否进快捷输入（默认关：当普通标点）。物理键盘不受影响。
+    pub fn set_touch_quick_trigger(&self, on: bool) {
+        self.touch_quick_trigger.store(on, Ordering::Relaxed);
+    }
+
     /// 英文词后是否自动补空格（默认开）。关掉后不补空格、不换位。
     pub fn set_auto_space(&self, on: bool) {
         self.auto_space.store(on, Ordering::Relaxed);
@@ -113,7 +134,7 @@ impl MobileCore {
             }
         }
 
-        let outcome = self.engine_press(key, ch);
+        let outcome = self.engine_press(key, ch, source);
         match leading {
             None => outcome,
             Some(mut first) => {
@@ -127,7 +148,7 @@ impl MobileCore {
     }
 
     /// 对应 Kotlin `engineKey`：句末标点换位、清标记、翻译 VK、进引擎、英文空格补空格
-    fn engine_press(&self, key: PressKey, ch: Option<char>) -> KeyOutcome {
+    fn engine_press(&self, key: PressKey, ch: Option<char>, source: KeySource) -> KeyOutcome {
         let english = self.coord.latin_input();
         let composing_before = self.coord.is_composing();
 
@@ -153,7 +174,14 @@ impl MobileCore {
         let Some((vk, modifiers)) = to_vk(key, english) else {
             return KeyOutcome::passthrough();
         };
+        // 触摸 `;` 默认不是引导键：压制期间核心按「该键未绑定」处理（空码出标点，
+        // 有码仍是次选键）。守卫析构即清除，`should_handle_key` 探测与分发都在其覆盖下
+        let _suppress = (source == KeySource::Touch
+            && ch == Some(';')
+            && !self.touch_quick_trigger.load(Ordering::Relaxed))
+        .then(|| TriggerSuppress::new(&self.coord, vk));
         let mut outcome = self.key_down(vk, modifiers);
+        drop(_suppress);
         // 英文方案：有编码时空格上屏原文（引擎只出词本身），这里补上词后的空格
         if outcome.consumed && key == PressKey::Space && english && composing_before {
             self.append_auto_space(&mut outcome);
@@ -238,6 +266,7 @@ mod tests {
             data_dir: user,
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         Some((m, rx))
     }
@@ -686,5 +715,53 @@ mod tests {
             );
             assert!(!m.coord.is_composing());
         }
+    }
+
+    // ---- 触摸 `;` 默认不进快捷输入 ----
+
+    #[test]
+    fn touch_semicolon_is_punct_by_default() {
+        let Some((m, _rx)) = core("semi_off", "wubi86", no_assoc) else {
+            return;
+        };
+        let out = m.press(ch(';'), KeySource::Touch);
+        assert!(out.consumed);
+        assert!(out.ops.contains(&commit("；")), "ops={:?}", out.ops);
+        assert!(!m.coord.is_composing());
+    }
+
+    #[test]
+    fn touch_semicolon_enters_quick_input_when_enabled() {
+        let Some((m, _rx)) = core("semi_on", "wubi86", no_assoc) else {
+            return;
+        };
+        m.set_touch_quick_trigger(true);
+        let out = m.press(ch(';'), KeySource::Touch);
+        assert!(out.consumed);
+        assert!(!out.ops.contains(&commit("；")), "ops={:?}", out.ops);
+        assert!(m.coord.is_composing());
+    }
+
+    #[test]
+    fn physical_semicolon_always_enters_quick_input() {
+        let Some((m, _rx)) = core("semi_phys", "wubi86", no_assoc) else {
+            return;
+        };
+        let out = m.press(ch(';'), KeySource::Physical);
+        assert!(out.consumed);
+        assert!(!out.ops.contains(&commit("；")), "ops={:?}", out.ops);
+        assert!(m.coord.is_composing());
+    }
+
+    #[test]
+    fn touch_semicolon_still_selects_second_candidate() {
+        let Some((m, _rx)) = core("semi_sel", "wubi86", no_assoc) else {
+            return;
+        };
+        type_str(&m, "a");
+        let second = m.candidates(0, 2).items[1].clone();
+        let out = m.press(ch(';'), KeySource::Touch);
+        assert!(out.consumed);
+        assert!(out.ops.contains(&commit(&second)), "ops={:?}", out.ops);
     }
 }

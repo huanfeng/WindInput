@@ -1728,6 +1728,9 @@ pub struct Coordinator {
     host_no_inline_preedit: std::sync::atomic::AtomicBool,
     /// 热重载成功后**不弹**「设置已更新」（移动端）。见 [`Coordinator::set_quiet_reload_toast`]。
     quiet_reload_toast: std::sync::atomic::AtomicBool,
+    /// 被压制的引导键 VK（0=无）。命中时 `bound_action_for` 按「未绑定」处理。
+    /// 见 [`Coordinator::set_trigger_suppressed`]。
+    pub(crate) trigger_suppressed: std::sync::atomic::AtomicU32,
     /// 启动时预热全部已装方案（桌面默认开；移动端关，见构造里的说明）
     pub(crate) eager_prewarm: std::sync::atomic::AtomicBool,
     /// 0=Idle 1=Preparing 2=Ready 3=Failed（见 [`Coordinator::readiness`]）
@@ -2639,6 +2642,15 @@ impl Coordinator {
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 临时压制某个键的「引导键」身份（`vk` 为 0 = 清除）：压制期间该键在
+    /// `bound_action_for` 里按「未绑定」处理，空码时走普通标点管线。
+    /// 只影响引导键绑定，不影响选词键等会话态按键。默认不压制，桌面路径从不调用。
+    /// 宿主应在 `key_down` 前设置、之后立即清除（单线程串行调用）。
+    pub fn set_trigger_suppressed(&self, vk: u32) {
+        self.trigger_suppressed
+            .store(vk, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 声明宿主报的光标坐标可直接当权威（见字段 `host_caret_trusted`）。
     pub fn set_host_caret_trusted(&self, value: bool) {
         self.host_caret_trusted
@@ -3279,6 +3291,7 @@ impl Coordinator {
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
             host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
             quiet_reload_toast: std::sync::atomic::AtomicBool::new(false),
+            trigger_suppressed: std::sync::atomic::AtomicU32::new(0),
             eager_prewarm: std::sync::atomic::AtomicBool::new(true),
             readiness_state: std::sync::atomic::AtomicU8::new(0),
             pending_first_show: Mutex::new(false),

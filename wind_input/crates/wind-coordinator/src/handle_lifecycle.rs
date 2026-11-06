@@ -515,6 +515,15 @@ impl Coordinator {
         key_code: u32,
         use_schema_layer: bool,
     ) -> Option<(BoundAction, bool)> {
+        // 宿主临时压制的引导键（移动端触摸 `;`）：按未绑定处理，三层都不查
+        if key_code != 0
+            && self
+                .trigger_suppressed
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == key_code
+        {
+            return None;
+        }
         // 键名→VK 走与全局层**同一个**解析口（`key_action_name_to_vk`）：两层各留一份解析
         // 规则，就是「同一张表按维度分裂」。这类分裂曾有过一个样本：`hotkey_action_entry`
         // 的动词白名单只认几个，而单键那条路的 `BoundAction` 值域大得多 ⇒
