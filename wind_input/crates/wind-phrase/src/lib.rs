@@ -2071,6 +2071,56 @@ mod tests {
         assert_eq!(got[0].text, "二〇二六年六月十四日");
     }
 
+    /// `date()` 的记号与同名 `$变量` 必须逐日期给出同一个答案（文档推荐用 `date()`，
+    /// 两边若各改各的，用户换个写法就换个结果）。
+    ///
+    /// 日期挑了会分叉的几类：普通日、节日（`$LF` 非空）、闰月、元旦（农历年≠公历年）、
+    /// 年底。两边都经 `lookup_at`，覆盖 `is_cmdbar_grammar` 分发。`$LF` 非节日时两边都
+    /// 应当整条丢弃，故直接比较结果列表而不是逐个 unwrap。
+    #[test]
+    fn date_tokens_match_template_vars() {
+        const VARS: &[&str] = &[
+            "YC", "MC", "DC", "WC", "LY", "LYN", "LZ", "LM", "LD", "LMD", "LF", "ts", "tsms",
+        ];
+        let days = [
+            (2026, 6, 14),
+            (2026, 6, 19),
+            (2020, 6, 1),
+            (2026, 1, 1),
+            (2026, 12, 31),
+        ];
+        for (y, m, d) in days {
+            let now = Local.with_ymd_and_hms(y, m, d, 9, 5, 7).unwrap();
+            for v in VARS {
+                let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
+                for (code, text) in [
+                    ("a", format!("${{{v}}}")),
+                    ("b", format!("{{date(\"{v}\")}}")),
+                ] {
+                    map.insert(
+                        code.into(),
+                        vec![PhraseEntry {
+                            text,
+                            weight: 1,
+                            position: 0,
+                            is_system: true,
+                            category: String::new(),
+                        }],
+                    );
+                }
+                let layer = PhraseLayer { map };
+                let texts = |code: &str| -> Vec<String> {
+                    layer
+                        .lookup_at(code, now, &[], &no_clip(), &PhraseScope::ALL)
+                        .into_iter()
+                        .map(|h| h.text)
+                        .collect()
+                };
+                assert_eq!(texts("a"), texts("b"), "{v} @ {y}-{m}-{d}");
+            }
+        }
+    }
+
     /// 回归：系统短语 `uuid = '$uuid'` 曾因 `expand_var` 没有 `uuid` 分支而整条被丢弃
     /// （打全码无候选），前缀路径却回退显示字面 `$uuid`——同一根因两个相反现象。
     ///

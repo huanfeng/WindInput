@@ -14,6 +14,8 @@ base64 = "0.22"
 uuid = { workspace = true }
 # `${APP_DIR}` 等内部目录变量的单一真相源（词法层展开时查表；见 wind_config::dir_var）
 wind-config = { path = "../wind-config" }
+# 农历换算与中文数字读法：`date()` 的记号与短语 `$变量` 同源（纯逻辑，无平台依赖）。
+wind-quick-input = { path = "../wind-quick-input" }
 
 [lints]
 workspace = true
