@@ -337,7 +337,7 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 | 模式指示 | 托盘 / 面板图标（`subModeIcon`）按模式主字运行时渲染，同 Windows 语言栏：中文为方案标签、英文「英」、大写锁定「A」，自定义方案标签 / `[ui.labels]` 同样上图 | 见设计文档 §5d（含 Windows 状态对照表、宿主图标缓存）。e2e 经 kimpanel 验了图标名与标签随 Shift / CapsLock / 切方案 / 菜单切换、换焦点不回退，并验文件在用户图标目录、是合法 PNG；notificationitem（SNI）取的是同一个值但未单独验，真机托盘（GNOME AppIndicator、KDE、Deepin dde-dock）的实际显示与图标缓存时序未验。缺：角标（全角 / 标点）；密码框里不换「英」；首次安装时若用户图标目录此前不存在，托盘要重启 Fcitx5 后才看得见运行时图标（之前显示种子） |
 | 系统输入法配置里的「配置」按钮 | ExternalOption → 设置程序 | e2e 验了 `Controller1.GetConfig` 的描述与命令可启动；fcitx5-configtool 5.1.6+ 直接启动，22.04（5.0.x）显示一页一个按钮；真机点按钮与 Deepin 配置界面未验 |
 | 非嵌入模式的占位组合 | 不写进应用（addon 过滤） | 见设计文档 §5d |
-| 工具栏 / 软键盘 | 已接（0.127，X11 与 Wayland） | addon 自绘、服务端出像素，见 [linux-toolbar-softkeyboard.md](../docs/design/linux-toolbar-softkeyboard.md)；已知限制见 linux-port.md |
+| 工具栏 / 软键盘 | 已接（0.127，X11 与 Wayland） | Wayland 跨屏拖动保留源 surface 抓取、无输入预览换输出，松手才重绑并报位置（勿在拖动中销毁源角色）；addon 自绘、服务端出像素，见 [linux-toolbar-softkeyboard.md](../docs/design/linux-toolbar-softkeyboard.md)；已知限制见 linux-port.md |
 | 输入诊断 HUD | 不做 | 同 macOS；主菜单里按平台摘掉 |
 | 截图所有窗口到文件（主菜单「高级」） | 已接 | 候选窗与各浮层的像素都在服务进程，就地编码存盘（`manager_macos.rs` 的 `TakeScreenshot`，macOS 同一份）；不含菜单。此前因流程按「像素在宿主」写（`shot.panel`）而摘掉，现已不需要宿主回应 |
 | 按应用独立配置（compat） | 机制可用，真机验过（2026-10-09：两个应用分别默认中文 / 英文，切换焦点时正确切换）；**打包时不带 Windows 内置规则**（`scripts/lib/gen-compat.sh linux` 生成「字段说明 + 零规则」的 Linux 版系统层，各平台兼容策略不共用） | 服务按 `FOCUS_GAINED` 的 bundleId（= `InputContext::program()`）匹配规则，同 macOS；设置端的应用兼容性窗口保留 |
@@ -362,3 +362,9 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 
 新增下行 cmd 必须在 `ResponseRouter::apply` 显式接一臂（default = 消费按键但不出字）；判断接不接
 只看**谁产出**，不看名字像不像 Windows 专有（见 wind_macos/AGENTS.md 同名条目）。
+
+### 桌面启动环境的验证
+
+对 Ghostty 等 GTK 应用调整输入法环境时，必须检查 `.desktop` 的 `DBusActivatable`。
+设为 true 时桌面可能绕过 `Exec=`，要改激活服务环境或关闭 D-Bus 激活。用实际桌面入口启动，
+核对进程环境与 Fcitx5 frontend；仅验证手动 `env GTK_IM_MODULE=wayland …` 不算验证修复。

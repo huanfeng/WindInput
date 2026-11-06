@@ -193,6 +193,8 @@ struct WaylandListeners {
                 } else if (!self->relPtr_) {
                     self->movePanelDrag(*ls, int32_t(std::lround(self->layerPtrX_ - ls->grabX)),
                                         int32_t(std::lround(self->layerPtrY_ - ls->grabY)));
+                    ls->grabX = self->layerPtrX_;
+                    ls->grabY = self->layerPtrY_;
                 }
                 return;
             }
@@ -553,6 +555,7 @@ const wl_pointer_listener WaylandListeners::kPtr = [] {
 
 WaylandCandidatePanel::WaylandCandidatePanel(fcitx::Instance* instance) : instance_(instance)
 {
+    dragPreview_.owner = this;
     statusLs_.owner = this;
     statusLs_.kind = OVERLAY_KIND_STATUS;
     toastLs_.owner = this;
@@ -751,7 +754,7 @@ void WaylandCandidatePanel::teardown(bool alive)
         if (relPtrMgr_) {
             zwp_relative_pointer_manager_v1_destroy(relPtrMgr_);
         }
-        for (LayerSurf* ls : {&statusLs_, &toastLs_, &panels_[0], &panels_[1]}) {
+        for (LayerSurf* ls : {&statusLs_, &toastLs_, &panels_[0], &panels_[1], &dragPreview_}) {
             if (ls->layer) {
                 zwlr_layer_surface_v1_destroy(ls->layer);
             }
@@ -818,7 +821,7 @@ void WaylandCandidatePanel::teardown(bool alive)
             wl_display_flush(display_);
         }
     }
-    for (LayerSurf* ls : {&statusLs_, &toastLs_, &panels_[0], &panels_[1]}) {
+    for (LayerSurf* ls : {&statusLs_, &toastLs_, &panels_[0], &panels_[1], &dragPreview_}) {
         ls->surface = nullptr;
         ls->layer = nullptr;
         ls->viewport = nullptr;
@@ -1605,7 +1608,7 @@ WaylandCandidatePanel::LayerSurf* WaylandCandidatePanel::layerSurfOf(wl_surface*
     if (!s) {
         return nullptr;
     }
-    for (LayerSurf* ls : {&statusLs_, &toastLs_, &panels_[0], &panels_[1]}) {
+    for (LayerSurf* ls : {&statusLs_, &toastLs_, &panels_[0], &panels_[1], &dragPreview_}) {
         if (s == ls->surface) {
             return ls;
         }
@@ -1755,7 +1758,15 @@ void WaylandCandidatePanel::layerConfigured(LayerSurf& ls, uint32_t serial)
 void WaylandCandidatePanel::commitLayer(LayerSurf& ls)
 {
     const SharedFrame& f = ls.frame;
-    wl_buffer* buf = makeBuffer(f.bgra.data(), f.width, f.height, f.stride);
+    // 拖动源保持映射和输入区域，透明像素保留按下时的隐式抓取。
+    // 预览单独映射到目标输出；跨屏不拆源角色，松手仍能收到。
+    const bool dragSource = isPanel(ls) && ls.dragging && &ls != &dragPreview_;
+    std::vector<uint8_t> transparent;
+    if (dragSource) {
+        transparent.resize(f.bgra.size(), 0);
+    }
+    wl_buffer* buf = makeBuffer(dragSource ? transparent.data() : f.bgra.data(),
+                                 f.width, f.height, f.stride);
     if (!buf) {
         return;
     }
@@ -1763,6 +1774,11 @@ void WaylandCandidatePanel::commitLayer(LayerSurf& ls)
     zwlr_layer_surface_v1_set_anchor(ls.layer, ls.anchor);
     zwlr_layer_surface_v1_set_margin(ls.layer, ls.mTop, ls.mRight, ls.mBottom, ls.mLeft);
     applyScale(ls.surface, ls.viewport, f.width, f.height);
+    if (&ls == &dragPreview_) {
+        wl_region* empty = wl_compositor_create_region(compositor_);
+        wl_surface_set_input_region(ls.surface, empty);
+        wl_region_destroy(empty);
+    }
     wl_surface_attach(ls.surface, buf, 0, 0);
     if (compositorVersion_ >= 4) {
         wl_surface_damage_buffer(ls.surface, 0, 0, int32_t(f.width), int32_t(f.height));
@@ -1801,6 +1817,16 @@ void WaylandCandidatePanel::layerClosed(LayerSurf& ls)
     // 合成器收回了这个层（如所在输出被拔掉）：丢掉角色对象，surface 留着，下次显示重建角色
     WIND_DEBUG() << "layer surface kind=" << ls.kind << " 被合成器关闭";
     const bool wasLive = ls.configured;
+    if (&ls == &dragPreview_) {
+        hideLayer(ls);
+        for (auto& panel : panels_) {
+            endPanelDrag(panel, false);
+        }
+        return;
+    }
+    if (isPanel(ls)) {
+        hideLayer(dragPreview_);
+    }
     if (ls.layer) {
         zwlr_layer_surface_v1_destroy(ls.layer);
         ls.layer = nullptr;
@@ -2098,7 +2124,7 @@ bool WaylandCandidatePanel::showPanel(uint32_t kind, const SharedFrame& f, const
     ls->frame = f;
     ls->lw = std::max(1, int32_t(std::lround(f.width / sc)));
     ls->lh = std::max(1, int32_t(std::lround(f.height / sc)));
-    if (ls->mapped
+    if ((ls->mapped || ls->waiting)
         && (ls->dragging
             || (ls->reqValid && p.x == ls->reqX && p.y == ls->reqY && f.width == ls->pixW
                 && f.height == ls->pixH))) {
@@ -2144,6 +2170,11 @@ bool WaylandCandidatePanel::showPanel(uint32_t kind, const SharedFrame& f, const
                      << " t" << mt << " 已映射=" << ls->mapped;
     }
     ls->geo = geo;
+    if (ls->dragging) {
+        dragPreview_.frame = f;
+        dragPreview_.geo = geo;
+        mapLayer(dragPreview_);
+    }
     ls->wanted = true;
     if (ls->layer && ls->boundOutput != ls->outputName) {
         // 换屏：layer surface 的输出建角色时就定了，只能连角色一起重建（指针在上面的话合成器会发离开）
@@ -2164,6 +2195,7 @@ void WaylandCandidatePanel::hidePanel(LayerSurf& ls)
     if (pointerLayer_ == &ls) {
         pointerLayer_ = nullptr;
     }
+    endPanelDrag(ls, false);
     hideLayer(ls); // 连角色对象一起销毁（treeland 对无变化的重提交不发 configure），拖动作废不报
     ls.reqValid = false;
 }
@@ -2259,6 +2291,23 @@ void WaylandCandidatePanel::beginPanelDrag(LayerSurf& ls)
     ls.dragging = true;
     ls.grabX = layerPtrX_;
     ls.grabY = layerPtrY_;
+    const Output* o = outputByName(ls.boundOutput);
+    const Rect out = o ? outputLogicalRect(*o) : noOutputRect();
+    ls.dragX = out.x + ls.mLeft;
+    ls.dragY = out.y + ls.mTop;
+    dragPreview_.kind = ls.kind;
+    dragPreview_.frame = ls.frame;
+    dragPreview_.geo = ls.geo;
+    dragPreview_.lw = ls.lw;
+    dragPreview_.lh = ls.lh;
+    dragPreview_.anchor = ls.anchor;
+    dragPreview_.outputName = ls.boundOutput;
+    dragPreview_.mLeft = ls.mLeft;
+    dragPreview_.mTop = ls.mTop;
+    dragPreview_.mRight = dragPreview_.mBottom = 0;
+    dragPreview_.wanted = true;
+    mapLayer(dragPreview_);
+    commitLayer(ls);
     dragAccX_ = dragAccY_ = 0;
     WIND_DEBUG() << "开始拖动 layer 面板 kind=" << ls.kind << " @(" << ls.mLeft << "," << ls.mTop
                  << ") 相对指针 " << (relPtr_ ? "有" : "无");
@@ -2269,19 +2318,30 @@ void WaylandCandidatePanel::movePanelDrag(LayerSurf& ls, int32_t dx, int32_t dy)
     if (!ls.layer || (dx == 0 && dy == 0)) {
         return;
     }
-    // 整幅位图夹在所在输出里（同 X11 拖动按输出工作区夹）。layer surface 的输出建角色时就定了，
-    // 拖不到别的屏上去。
-    const Output* o = outputByName(ls.boundOutput);
-    const Rect out = o ? usableLogicalRect(*o) : noOutputRect();
-    const Rect r = clampToWorkArea(Rect{ls.mLeft + dx, ls.mTop + dy, ls.lw, ls.lh}, Rect{0, 0, out.w, out.h});
-    if (r.x == ls.mLeft && r.y == ls.mTop) {
-        return;
+    ls.dragX += dx;
+    ls.dragY += dy;
+    std::vector<Rect> outputs;
+    int fallback = 0;
+    for (size_t i = 0; i < outputs_.size(); ++i) {
+        outputs.push_back(usableLogicalRect(*outputs_[i]));
+        if (outputs_[i]->name == dragPreview_.outputName) {
+            fallback = int(i);
+        }
     }
-    ls.mLeft = r.x;
-    ls.mTop = r.y;
-    zwlr_layer_surface_v1_set_margin(ls.layer, ls.mTop, 0, 0, ls.mLeft);
-    wl_surface_commit(ls.surface);
-    wl_display_flush(display_);
+    const Rect desired{ls.dragX, ls.dragY, ls.lw, ls.lh};
+    const auto placement = placePanelDrag(outputs, desired, fallback);
+    const int index = placement.output;
+    const Rect out = index >= 0 ? outputs[size_t(index)] : noOutputRect();
+    const uint32_t target = index >= 0 ? outputs_[size_t(index)]->name : 0;
+    if (dragPreview_.layer && dragPreview_.boundOutput != target) {
+        hideLayer(dragPreview_);
+    }
+    const Rect r = placement.rect;
+    dragPreview_.outputName = target;
+    dragPreview_.mLeft = r.x - out.x;
+    dragPreview_.mTop = r.y - out.y;
+    dragPreview_.wanted = true;
+    mapLayer(dragPreview_);
 }
 
 void WaylandCandidatePanel::movePanelDragBy(LayerSurf& ls, double dx, double dy)
@@ -2300,11 +2360,28 @@ void WaylandCandidatePanel::endPanelDrag(LayerSurf& ls, bool report)
         return;
     }
     ls.dragging = false;
-    if (!report || !ls.mapped || !cb_.panelMoved) {
+    const uint32_t target = dragPreview_.outputName;
+    const int32_t left = dragPreview_.mLeft, top = dragPreview_.mTop;
+    hideLayer(dragPreview_);
+    if (!report) {
+        if (ls.mapped && ls.layer) {
+            commitLayer(ls);
+        }
+        return;
+    }
+    if (ls.layer && ls.boundOutput != target) {
+        hideLayer(ls);
+    }
+    ls.outputName = target;
+    ls.mLeft = left;
+    ls.mTop = top;
+    ls.wanted = true;
+    mapLayer(ls);
+    if (!cb_.panelMoved) {
         return;
     }
     // 松手只报这一次 `pos.*`（拖动中的移动一个都不回传）；输出名与 host.display 同源。
-    const Output* o = outputByName(ls.boundOutput);
+    const Output* o = outputByName(ls.outputName);
     const Rect out = o ? outputLogicalRect(*o) : noOutputRect();
     const auto [x, y] = layerOriginFor(ls.mLeft, ls.mTop, out, reportedScale_);
     const std::string name = o ? o->wlName : std::string();

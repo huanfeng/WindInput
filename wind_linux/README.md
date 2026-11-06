@@ -61,6 +61,20 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
   只把输入法协议（input-method-v1）交给它自己拉起的 Fcitx5，否则 Wayland 原生应用里没有候选窗。
   并按 Fcitx5 的建议**不要**设 `QT_IM_MODULE` / `GTK_IM_MODULE`：设了的 Wayland 原生应用走 D-Bus、
   报的是窗口内坐标，候选窗会落到屏幕左上角。
+- **COSMIC（Wayland）与 Ghostty**：若 `GTK_IM_MODULE=fcitx` 强制 GTK 应用走 D-Bus，
+  应用报的窗口内光标坐标会被 X11 回退路径当成屏幕坐标，导致候选框远离插入点。
+  可对 Ghostty 单独使用 `GTK_IM_MODULE=wayland ghostty --gtk-single-instance=false` 验证；
+  原生通路启用后由合成器摆候选窗。常用启动项可在用户级 `.desktop` 的所有 `Exec=` 中
+  给 Ghostty 加 `/usr/bin/env GTK_IM_MODULE=wayland` 前缀，并将 `DBusActivatable=false`。
+  后者不能遗漏：设为 true 时桌面可忽略 `Exec=`，经 D-Bus / systemd 激活，环境前缀不会生效。
+  若继续使用 D-Bus 激活，则在用户级 `app-com.mitchellh.ghostty.service.d/` 放 drop-in：
+  `[Service]` 下设 `Environment=GTK_IM_MODULE=wayland`，再执行 `systemctl --user daemon-reload`。
+  完全退出旧进程再从实际使用的桌面入口打开，并核对进程环境与 Fcitx5 的 `wayland_v2` 前端；
+  单实例的新窗口会复用旧进程，直接运行测试命令也不能代表桌面启动入口已经修好。
+  COSMIC 启动器与 Dock 的应用列表缓存独立：前者生效而后者仍旧时，需要重新加载 Dock 的
+  App Tray（`cosmic-app-list`）以读取用户级启动项，并从 Dock 本身验证，不能以启动器代替。
+- Wayland 工具栏 / 软键盘可跨屏拖动：拖动源保留隐式指针抓取，透明显示，预览落在目标输出；
+  松手后才重建原窗口的输出绑定并上报位置。位移按全局逻辑坐标累计，不能先夹在源屏内。
 - Fcitx5 默认每个应用各记各的输入法状态，新开的应用从键盘布局起步；想全局一致，在 Fcitx5 配置的
   「全局选项」里把「共享输入状态」设为「所有」（Deepin 出厂即如此）。
 
