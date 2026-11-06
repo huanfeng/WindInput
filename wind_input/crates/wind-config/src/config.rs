@@ -767,6 +767,16 @@ pub struct SchemaConfig {
     /// 每分钟一拍不进配置（R1：程序能定）。
     #[serde(default)]
     pub keep_all_loaded: bool,
+    /// 词库缓存策略（出厂 `"lock"`）：词库、反查索引、注释等只读缓存文件映射后怎么处理。
+    ///
+    /// - `"lock"`：锁定，映射后把页锁在物理内存里，系统不能再回收。
+    /// - `"preload"`：预加载，启动时把缓存整份载入内存，之后允许系统回收。
+    /// - `"off"`：关闭，不做处理，页按需换入、可被系统回收。
+    ///
+    /// 只在桌面服务进程生效，**修改后需重启服务**（已映射的文件不会回头处理）；锁页失败
+    /// （系统配额不够）时静默退化为普通映射，不影响输入。取值由注册表的 `Enum` 校验。
+    #[serde(default = "default_dict_cache_policy")]
+    pub dict_cache_policy: String,
     /// 全局码表配置（所有码表方案公共基线；方案经 schema_overrides 覆盖）。
     #[serde(default)]
     pub codetable: CodetableGlobal,
@@ -815,6 +825,7 @@ impl Default for SchemaConfig {
             primary_codetable: String::new(),
             primary_pinyin: String::new(),
             keep_all_loaded: false,
+            dict_cache_policy: default_dict_cache_policy(),
             codetable: CodetableGlobal::default(),
             pinyin: PinyinGlobalConfig::default(),
             mix: MixGlobal::default(),
@@ -7865,6 +7876,11 @@ pub struct SystemConfig {
     /// [`dota2_compat`]: SystemConfig::dota2_compat
     #[serde(default = "default_dota2_alias")]
     pub dota2_compat_name: String,
+}
+
+/// `schema.dict_cache_policy` 的出厂值。
+fn default_dict_cache_policy() -> String {
+    "lock".to_string()
 }
 
 /// `system.dota2_compat_name` 的出厂值，也是 Dota 2 白名单里我们选定的那条。

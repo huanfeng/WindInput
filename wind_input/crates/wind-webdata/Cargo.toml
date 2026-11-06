@@ -9,6 +9,8 @@ edition.workspace = true
 wind-coordinator = { path = "../wind-coordinator", default-features = false }
 wind-config = { path = "../wind-config" }
 wind-engine = { path = "../wind-engine" }
+# 内存诊断读词库缓存策略的累计字节（wind_dict::mapping）。
+wind-dict = { path = "../wind-dict" }
 wind-aux-code = { path = "../wind-aux-code" }
 wind-store = { path = "../wind-store" }
 # 短语分发导入的能力分级（`phrase.previewImportText`）读 cmdbar 的函数 registry。

@@ -24,7 +24,7 @@
 //! 其后各段偏移（leaf/entry/str）本就在 Header 中显式存储。
 
 use crate::binformat::DictEntry;
-use memmap2::Mmap;
+use crate::mapping::Mapped;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -1376,7 +1376,7 @@ impl Iterator for CodeCursor<'_> {
 }
 
 pub struct WdatReader {
-    mmap: Mmap,
+    mmap: Mapped,
     /// 本 reader 映射的文件路径。
     ///
     /// 不是给日志用的：**二级缓存要靠它认出「我是从哪几个文件派生出来的」**

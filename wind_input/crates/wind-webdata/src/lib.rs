@@ -283,6 +283,17 @@ fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
             "cacheLimitBytes": wind_store::store::DEFAULT_CACHE_SIZE_BYTES,
             "pageCacheDrops": s.page_cache_drops(),
         })),
+        // 词库缓存策略（`schema.dict_cache_policy`）的实际效果：生效的策略、预算，以及当前仍活着
+        // 的映射里：锁定策略下已锁 / 锁页失败的字节数，预加载策略下已载入的字节数，超出预算
+        // 而没处理的字节数；不适用的一项恒为 0。预算 u64::MAX（未设限）报 null。
+        "dictCache": {
+            "policy": wind_dict::mapping::policy().as_config(),
+            "budgetBytes": Some(wind_dict::mapping::budget_bytes()).filter(|b| *b != u64::MAX),
+            "lockedBytes": wind_dict::mapping::locked_bytes(),
+            "lockFailedBytes": wind_dict::mapping::lock_failed_bytes(),
+            "preloadedBytes": wind_dict::mapping::preloaded_bytes(),
+            "overBudgetBytes": wind_dict::mapping::over_budget_bytes(),
+        },
     })
 }
 
@@ -10675,6 +10686,18 @@ mod memory_stats_tests {
             v["redb"].is_null(),
             "全新用户目录不打开旧库，不该报它的缓存上限：{v}"
         );
+        assert!(
+            v["dictCache"]["policy"].is_string(),
+            "dictCache.policy：{v}"
+        );
+        for k in [
+            "lockedBytes",
+            "lockFailedBytes",
+            "preloadedBytes",
+            "overBudgetBytes",
+        ] {
+            assert!(v["dictCache"][k].is_u64(), "dictCache.{k}：{v}");
+        }
     }
 }
 

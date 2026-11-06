@@ -230,6 +230,10 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.primary_codetable", Str),
     f("schema.primary_pinyin", Str),
     f("schema.keep_all_loaded", Bool),
+    f(
+        "schema.dict_cache_policy",
+        Enum(&["lock", "preload", "off"]),
+    ),
     // 全局码表（公共基线；方案经 schema_overrides 覆盖）
     f("schema.codetable.top_code_commit", Bool),
     f("schema.codetable.clear_on_empty_max", Bool),
@@ -1715,6 +1719,20 @@ mod tests {
             .and_then(|t| t.get("keep_all_loaded"))
             .and_then(toml::Value::as_bool)
             .expect("data/config.toml 缺少布尔键 schema.keep_all_loaded");
+        assert_eq!(l2, l1);
+    }
+
+    /// L1↔L2 同源：词库缓存策略（出厂锁定）。
+    #[test]
+    fn dict_cache_policy_l1_matches_l2() {
+        let l1 = crate::Config::default().schema.dict_cache_policy;
+        assert_eq!(l1, "lock", "schema.dict_cache_policy 出厂应为 lock");
+        let l2 = data_config_toml()
+            .get("schema")
+            .and_then(|t| t.get("dict_cache_policy"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .expect("data/config.toml 缺少字符串键 schema.dict_cache_policy");
         assert_eq!(l2, l1);
     }
 

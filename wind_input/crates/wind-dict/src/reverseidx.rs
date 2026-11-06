@@ -45,7 +45,7 @@
 //! 否则 mmap。**两条路走的是同一份字节布局、同一套查找代码**——这是刻意的：反查是低频
 //! 路径，两套实现的分叉会长期无人发现。
 
-use memmap2::Mmap;
+use crate::mapping::Mapped;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -66,7 +66,7 @@ const MAX_CODES_PER_TEXT: usize = u16::MAX as usize;
 /// 两者对上层完全等价——差别只在这些字节算不算「常驻内存」。
 enum IndexData {
     Owned(Vec<u8>),
-    Mapped(Mmap),
+    Mapped(Mapped),
 }
 
 impl IndexData {
