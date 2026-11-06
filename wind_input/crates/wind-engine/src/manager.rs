@@ -5484,12 +5484,30 @@ impl EngineManager {
         self.codetable_settings_of(&self.active_schema_id())
     }
 
+    /// 借用版的 [`Self::codetable_settings`]：缓存命中时不克隆整份设置。逐键路径只取一两个
+    /// 字段时用它。
+    pub fn with_codetable_settings<R>(
+        &self,
+        f: impl FnOnce(&wind_config::CodetableGlobal) -> R,
+    ) -> R {
+        self.with_codetable_settings_of(&self.active_schema_id(), f)
+    }
+
     /// [`Self::codetable_settings`] 的按方案版本：供 overlay/特殊模式取**指定方案**的码表
     /// 全局设置，而不是当前活跃方案的——`codetable_settings()` 内部固定读
     /// `active_schema_id()`，特殊模式引用的方案往往不是活跃方案，同类坑见 `engine_for`
     /// 的注释。用 `loaded_engine_type(schema_id)` 而非 `current_engine_type()` 判混输，
     /// 理由同上：后者也是问活跃方案。
     fn codetable_settings_of(&self, schema_id: &str) -> wind_config::CodetableGlobal {
+        self.with_codetable_settings_of(schema_id, Clone::clone)
+    }
+
+    /// 借用版的 [`Self::codetable_settings_of`]。`f` 在缓存锁内执行，别在里面回调本管理器。
+    pub fn with_codetable_settings_of<R>(
+        &self,
+        schema_id: &str,
+        f: impl FnOnce(&wind_config::CodetableGlobal) -> R,
+    ) -> R {
         let mixed = matches!(self.loaded_engine_type(schema_id), Some(EngineType::Mixed));
         let key = (schema_id.to_string(), mixed);
         if let Some(s) = self
@@ -5498,14 +5516,15 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
         {
-            return s.clone();
+            return f(s);
         }
         let generation = self
             .codetable_settings_gen
             .load(std::sync::atomic::Ordering::Acquire);
         let s = self.resolve_codetable_settings(schema_id, mixed);
-        self.cache_codetable_settings(key, s.clone(), generation);
-        s
+        let out = f(&s);
+        self.cache_codetable_settings(key, s, generation);
+        out
     }
 
     /// 清 `codetable_settings_cache` 并推进失效代次（持锁完成）。

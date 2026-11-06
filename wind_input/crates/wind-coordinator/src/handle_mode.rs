@@ -1886,6 +1886,7 @@ impl Coordinator {
             // 切过来的方案有段被降级 ⇒ 现在说，别等用户自己发现「这个方案某项设置没反应」。
             // 落在切换成功之后：加载失败已由上面的 `show_tip` 交代，两条提示不会撞。
             self.notify_schema_degradation(schema_id);
+            self.warn_schema_sentence_cycle_conflict(schema_id);
         } else {
             // 走到这里说明 `ensure_schema` 之后 `switch_schema` 仍返回 false ——
             // 它只剩「已是当前方案」这一个理由，而那已被上面的幂等分支接走。

@@ -3458,6 +3458,7 @@ impl Coordinator {
         // 档位循环触发键的撞车体检（只告警）。出厂不配 ⇒ 默认直接返回。
         coordinator.warn_english_case_cycle_conflict();
         coordinator.warn_sentence_cycle_conflict();
+        coordinator.warn_schema_sentence_cycle_conflict(&coordinator.engine_mgr.active_schema_id());
         coordinator.warn_comment_switch_conflict();
         coordinator
     }
@@ -9704,12 +9705,13 @@ impl Coordinator {
     pub(crate) fn active_sentence_cycle_key(&self) -> Option<keymap::SessionKey> {
         if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
         {
-            let raw = self.engine_mgr.codetable_settings().sentence_cycle_key;
-            let raw = raw.trim();
-            // 写错的键名在建配置时已告警过（全局值），这里静默按关闭处理，免得每次按键刷日志。
-            return (!raw.is_empty())
-                .then(|| keymap::session_key_name_to_vk(raw))
-                .flatten();
+            // 写错的键名在建配置 / 切方案时已告警过，这里静默按关闭处理，免得每次按键刷日志。
+            return self.engine_mgr.with_codetable_settings(|c| {
+                let raw = c.sentence_cycle_key.trim();
+                (!raw.is_empty())
+                    .then(|| keymap::session_key_name_to_vk(raw))
+                    .flatten()
+            });
         }
         self.rt().sentence_cycle_key
     }
@@ -9718,7 +9720,10 @@ impl Coordinator {
     pub(crate) fn active_sentence_count(&self) -> usize {
         if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
         {
-            return usize::from(self.engine_mgr.codetable_settings().sentence_count);
+            return usize::from(
+                self.engine_mgr
+                    .with_codetable_settings(|c| c.sentence_count),
+            );
         }
         usize::from(self.rt().config.schema.pinyin.sentence_count)
     }
@@ -9804,7 +9809,8 @@ impl Coordinator {
     /// 这不是配置冲突（各自都合法），而是**运行期的优先级夺取**：整句池 ≥ 2 条时那些绑定
     /// 按不出来。不告警的话用户只会看到「Tab 翻页有时好用有时不好用」，无从知道是谁夺走的。
     ///
-    /// 拼音与码表两把键各体检一次（码表取全局值；方案里另写的不在启动体检范围内）。
+    /// 拼音与码表两把键各体检一次（码表取全局值；方案里另写的见
+    /// [`Self::warn_schema_sentence_cycle_conflict`]）。
     pub(crate) fn warn_sentence_cycle_conflict(&self) {
         let rt = self.rt();
         let p = &rt.config.schema.pinyin;
@@ -9827,6 +9833,33 @@ impl Coordinator {
             if let Some(key) = key {
                 self.warn_one_sentence_cycle_conflict(path, raw, key, counts);
             }
+        }
+    }
+
+    /// 码表方案自己写了整句切换键 / 条数（与全局不同）时补一次体检：启动时查活跃方案，
+    /// 切方案后查切到的方案。与全局相同的已由 [`Self::warn_sentence_cycle_conflict`] 查过，跳过。
+    /// 键名写错也在这里告警（逐键路径静默按关闭处理）。
+    pub(crate) fn warn_schema_sentence_cycle_conflict(&self, schema_id: &str) {
+        if self.engine_mgr.loaded_engine_type(schema_id)
+            != Some(wind_engine::engine::EngineType::CodeTable)
+        {
+            return;
+        }
+        let pick = |c: &wind_config::CodetableGlobal| {
+            (
+                c.sentence_cycle_key.clone(),
+                c.sentence_count,
+                c.sentence_max_count,
+            )
+        };
+        let own = self.engine_mgr.with_codetable_settings_of(schema_id, pick);
+        if own == pick(&self.rt().config.schema.codetable) {
+            return;
+        }
+        let (raw, count, max_count) = own;
+        let path = format!("方案 {schema_id} 的 schema.codetable.sentence_cycle_key");
+        if let Some(key) = crate::config_bundle::parse_sentence_cycle_key(&path, &raw) {
+            self.warn_one_sentence_cycle_conflict(&path, &raw, key, (count, max_count));
         }
     }
 
