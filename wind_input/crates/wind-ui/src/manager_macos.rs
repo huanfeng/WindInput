@@ -2036,7 +2036,11 @@ mod tests {
             alt_y: i32,
             anchor: u32,
             margin: i32,
+            /// 内容盒高（位图**像素**），与 `x`/`y`（宿主**点**）不同单位，比较前用 `scale` 折算。
+            content_h: u32,
             duration: i32,
+            /// 位图像素 / 点。取自运行机器真实显示器：Retina 为 2，CI runner 为 1。
+            scale: f32,
         }
 
         fn overlays(cap: &Arc<Mutex<Vec<Vec<u8>>>>, kind: u32) -> Vec<Meta> {
@@ -2059,7 +2063,9 @@ mod tests {
                         alt_y: i(36),
                         anchor: u(40),
                         margin: i(44),
+                        content_h: u(60),
                         duration: i(64),
+                        scale: f32::from_le_bytes(p[68..72].try_into().unwrap()),
                     }
                 })
                 .filter(|m| m.kind == kind)
@@ -2137,11 +2143,15 @@ mod tests {
             let m = overlays(&cap, OVERLAY_KIND_STATUS);
             let m = m.last().expect("应推出状态泡");
             assert_eq!(m.place, OVERLAY_PLACE_FOLLOW_CANDIDATE);
+            // `m.y` 是内容盒左上（点），高度要从位图像素折回点再比：曾直接加位图高 `m.h`
+            // （像素，含软阴影扩边），1 倍屏的 CI 上碰巧成立，Retina 机器上恒失败。
+            let content_bottom = m.y + crate::overlay_host::to_host(m.content_h as f32, m.scale);
             assert!(
-                m.y + m.h as i32 <= 200,
-                "应在光标行顶之上：y={} h={}",
+                content_bottom <= 200,
+                "应在光标行顶之上：y={} content_h={}px scale={}",
                 m.y,
-                m.h
+                m.content_h,
+                m.scale
             );
         }
 
