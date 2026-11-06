@@ -205,6 +205,23 @@ static INSTALLED: RwLock<Vec<String>> = RwLock::new(Vec::new());
 /// 英文方案 id：中英键切换的目标，恒启用。
 pub const ENGLISH_SCHEMA: &str = "english";
 
+/// 构造时的首装兜底方案 id（磁盘上没有它也算已装）。重扫已装方案时要按同一规则补回，
+/// 否则导入 / 删除之后列表会和构造时不一致。
+static FALLBACK_SCHEMA: RwLock<String> = RwLock::new(String::new());
+
+/// 记下首装兜底方案（构造时调一次）。
+pub fn set_fallback_schema(id: &str) {
+    *FALLBACK_SCHEMA.write().unwrap_or_else(|e| e.into_inner()) = id.to_string();
+}
+
+/// 首装兜底方案；构造前为空。
+pub fn fallback_schema() -> String {
+    FALLBACK_SCHEMA
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// 记下已装方案（构造时调；方案包导入 / 删除后再调一次覆盖）。
 pub fn set_installed_schemas(ids: Vec<String>) {
     *INSTALLED.write().unwrap_or_else(|e| e.into_inner()) = ids;

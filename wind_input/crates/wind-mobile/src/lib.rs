@@ -445,6 +445,7 @@ impl MobileCore {
         if !installed.iter().any(|s| s == fallback_schema) {
             installed.push(fallback_schema.to_string());
         }
+        config_api::set_fallback_schema(fallback_schema);
         config_api::set_installed_schemas(installed.clone());
         // 启用的 = 装了的 ∩ 用户在设置里选的（没选过 = 全部），见 `config_api::apply_enabled_schemas`；
         // 重载时覆盖钩子按同一规则重算
@@ -907,18 +908,29 @@ impl MobileCore {
             .collect()
     }
 
-    /// 方案包导入 / 删除落盘后调：重扫各层 `schemas/`，刷新已装方案列表。
-    /// 之后另发 [`MobileCommand::ReloadConfig`] 让可选方案与引擎跟上。
-    /// 英文兜底方案（构造时补进列表的那个）不依赖文件，重扫后若丢了就保留旧列表里的它。
+    /// 方案包导入 / 删除 / 恢复落盘后调（与桌面 `web_scheme_import_package` 同一套收尾）：
+    /// 1. 对 `changed_ids` 逐个使引擎与解析缓存失效——覆盖同 id 方案、恢复自带版本都不改
+    ///    `config.schema`，随后的重载不会重建引擎，不失效就一直用旧定义；失效会扇出到把它当成员的混输；
+    /// 2. 重扫各层 `schemas/` 刷新已装方案列表（规则同构造期：扫描结果 + 首装兜底方案）；
+    /// 3. 重建跨方案派生配置（吃键集等）。
+    ///
+    /// 之后另发 [`MobileCommand::ReloadConfig`] 让可选方案跟上。导入 / 删除**中途失败**也要调
+    /// （`changed_ids` 可空）：落盘是逐文件的，失败时磁盘可能已经变了一部分。
+    pub fn on_schemes_changed(&self, changed_ids: &[String]) {
+        use wind_coordinator::web_host::WebDataHost;
+        for id in changed_ids {
+            self.coord.engine_mgr().invalidate_schema(id);
+        }
+        self.refresh_installed_schemas();
+        self.coord.refresh_schema_derived_config();
+    }
+
+    /// 重扫已装方案列表，规则同构造期：各层扫描结果，再补上首装兜底方案。
     pub fn refresh_installed_schemas(&self) {
         let mut ids = scan_installed_schemas(&self.data_dir);
-        if !ids.iter().any(|s| s == config_api::ENGLISH_SCHEMA)
-            && config_api::installed_schemas()
-                .iter()
-                .any(|s| s == config_api::ENGLISH_SCHEMA)
-        {
-            ids.push(config_api::ENGLISH_SCHEMA.to_string());
-            ids.sort();
+        let fallback = config_api::fallback_schema();
+        if !fallback.is_empty() && !ids.iter().any(|s| *s == fallback) {
+            ids.push(fallback);
         }
         config_api::set_installed_schemas(ids);
     }
