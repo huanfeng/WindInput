@@ -3524,7 +3524,7 @@ impl Engine for PinyinEngine {
                     continue;
                 }
                 let sentence: String = result.words.join("");
-                // 不同切分可能拼出同一串字（`decode_nbest` 不去重），按文本去重后才计名次。
+                // `decode_nbest` 已按文本去重；这里再挡一次（beam 路径、或哈希碰撞）。
                 if sentence.is_empty() || seen.contains(&sentence) {
                     continue;
                 }
@@ -8877,6 +8877,41 @@ s = ["ao"]
             "第 1 名权重须高于第 2 名: {} vs {}",
             top.weight,
             alt.weight
+        );
+    }
+
+    /// 学过的整句成了整串单节点后，第 2 名路径常是它的拆分版（同文）；
+    /// 备选名额不得被同文路径占掉。
+    #[test]
+    fn nbest_alternate_survives_after_top_sentence_is_learned() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("xian".to_string(), "先".to_string(), 300_000, 0);
+        raw.merge_single("xian".to_string(), "西安".to_string(), 60_000, 1);
+        raw.merge_single("chuan".to_string(), "穿".to_string(), 30_000, 2);
+        raw.merge_single("wazi".to_string(), "袜子".to_string(), 5_000, 3);
+        raw.merge_single("chuanwazi".to_string(), "穿袜子".to_string(), 50, 4);
+        let store = tmp_store("nbest_learned_top");
+        // xi|an|chuan|wa|zi → 0/2/4/9/11
+        store
+            .learn_temp_word(
+                "pinyin",
+                "xianchuanwazi",
+                "西安穿袜子",
+                800,
+                0b1010_0001_0101,
+            )
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreTempLayer::new(store, "pinyin")));
+        let e = nbest_engine(raw).with_store_layers(Arc::new(dm));
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 1).as_deref(),
+            Some("西安穿袜子")
+        );
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 2).as_deref(),
+            Some("先穿袜子"),
+            "第 2 名不得被「西安穿袜子」的拆分路径占掉"
         );
     }
 
