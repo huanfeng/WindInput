@@ -8836,7 +8836,6 @@ s = ["ao"]
 
     // ── 整句让位于精确整词（step 6.5 降级）─────────────────────────────────────
 
-    /// N-best 下合成的第 2 名整句不算「精确整词」：第 1 名不得因它降级而名次倒挂。
     fn nbest_engine(raw: CodetableDict) -> PinyinEngine {
         let mut e = PinyinEngine::new(Config::default(), CachedDict::Memory(raw));
         e.config.sentence_count = 2;
@@ -8852,6 +8851,7 @@ s = ["ao"]
         raw
     }
 
+    /// N-best 下合成的第 2 名整句不算「精确整词」：第 1 名不得因它降级而名次倒挂。
     #[test]
     fn nbest_alternate_sentence_does_not_demote_top_sentence() {
         let e = nbest_engine(nihao_nbest_dict());
@@ -8915,16 +8915,18 @@ s = ["ao"]
         );
     }
 
-    /// 对照：第 2 名与用户词同文时它是词条，第 1 名照旧让位。
+    /// 对照：第 2 名与用户词同文时它是词条，第 1 名照旧让位（同只出 1 条时）。
+    /// 关掉整句用用户词：开着时用户词自己进图拿第 1，走不到这条例外。
     #[test]
     fn nbest_alternate_merged_with_user_word_still_demotes_top_sentence() {
         let store = tmp_store("nbest_alt_user");
         store
-            .add_user_word("pinyin", "nihao", "泥好", 500, 0b1001)
+            .add_user_word("pinyin", "nihao", "泥好", 500, 0b101) // ni|hao → 0/2
             .unwrap();
         let dm = DictManager::new();
         dm.register_layer(Box::new(wind_store::StoreUserLayer::new(store, "pinyin")));
-        let e = nbest_engine(nihao_nbest_dict()).with_store_layers(Arc::new(dm));
+        let mut e = nbest_engine(nihao_nbest_dict()).with_store_layers(Arc::new(dm));
+        e.config.sentence_uses_user_words = false;
         let r = e.convert("nihao", 50).unwrap();
         let top = r
             .candidates
