@@ -90,6 +90,33 @@ pub(super) struct CandidateScene {
     pub(super) anim_next: Option<std::time::Duration>,
 }
 
+/// 一帧排版结果：[`CandidateScene::layout`] 产出，`relayout_above` / `hits` / `paint` 消费。
+pub(super) struct SceneFrame {
+    pub(super) root: View,
+    /// 软件阴影；None = 不画（皮肤自带外形、主题或用户关了阴影、调用方不画软件阴影）。
+    pub(super) shadow: Option<crate::view::SoftShadow>,
+    /// 阴影外形的圆角（设备像素）：窗口 `border_radius`，没配按 8dp。
+    pub(super) shadow_radius: f32,
+    /// 内容盒在缓冲里的外扩 `(左, 上, 右, 下)`（设备像素）：皮肤装饰外扩或阴影扩边。
+    pub(super) margins: (u32, u32, u32, u32),
+    /// 根容器量出的自然宽（钳制前，设备像素）。
+    pub(super) natural_w: f32,
+    /// 钳制后的内容盒尺寸（设备像素）。
+    pub(super) content_w: u32,
+    pub(super) content_h: u32,
+    /// 屏幕安全上限真的把内容钳窄了：`(钳前宽, 扣掉扩边后的上限)`。正常为 None。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(super) safety_clamped: Option<(u32, u32)>,
+}
+
+impl SceneFrame {
+    /// 缓冲尺寸 = 内容盒 + 四向扩边。
+    pub(super) fn size(&self) -> (u32, u32) {
+        let (ml, mt, mr, mb) = self.margins;
+        (self.content_w + ml + mr, self.content_h + mt + mb)
+    }
+}
+
 impl CandidateSceneInput<'_> {
     /// 当前排版方向（`self.vertical`）下生效的窗口最小宽度（设备像素；0=不限）。
     ///
@@ -97,7 +124,7 @@ impl CandidateSceneInput<'_> {
     /// 竖排列——无候选时强制横排提示行）：提示态也要延续用户配置的排布方向，否则从
     /// 「只有模式徽标」到「出候选」的那一刻窗口仍会按另一套下限跳一下。
     ///
-    /// 两个消费者共用本函数（`build_tree` 施加到根容器、三个渲染入口对抗主题
+    /// 两个消费者共用本函数（`build_tree` 施加到根容器、[`CandidateScene::layout`] 对抗主题
     /// `behavior.vertical_max_width` 上限），避免两处各算一套而分叉。
     pub(super) fn min_window_w_px(&self) -> u32 {
         let dp = if self.vertical {
@@ -620,6 +647,165 @@ impl CandidateScene {
             v.shadow_color,
             inp.scale,
         )
+    }
+
+    /// 一帧的排版：刷新皮肤几何与装饰动画 → 搭树 → 皮肤布局或按阴影扩边布局 → 宽度钳制
+    /// （竖排主题上限、屏幕安全上限、最小 40×24）→ 皮肤窗体按钳后尺寸重定位。
+    ///
+    /// `inp.above` 须为 false（上翻重排另走 [`Self::relayout_above`]）。`soft_shadow` = 调用方
+    /// 画不画软件阴影：ext_presenter（macOS / Linux 外部宿主）由宿主出系统阴影，传 false，
+    /// 扩边随之为 0。
+    pub(super) fn layout(
+        &mut self,
+        inp: &CandidateSceneInput,
+        clock: skin_frame::AnimClock,
+        soft_shadow: bool,
+    ) -> SceneFrame {
+        self.refresh_skin(inp, clock);
+        let mut root = self.build_tree(inp);
+        // 窗口投影：高斯软影四向扩边（与 Go shadowMargins 对齐），内容布局起点平移到 (ml, mt)，
+        // 窗口显示位置再左上回移 (ml, mt) → 视觉锚点/命中坐标与无阴影时一致，阴影四面溢出。
+        let shadow = if soft_shadow {
+            self.shadow_params(inp)
+        } else {
+            None
+        };
+        let tr = inp.text_renderer;
+        let margins = match self.skin_layout(&mut root, tr) {
+            Some(m) => m,
+            None => {
+                let m = match &shadow {
+                    Some(s) => s.margins(),
+                    None => (0, 0, 0, 0),
+                };
+                root.layout(m.0 as f32, m.1 as f32, tr);
+                m
+            }
+        };
+        let (ml, _, mr, _) = margins;
+        let (w_f, h_f) = root.measured_size();
+        let mut content_w = (w_f.ceil() as u32).max(40);
+        // 竖排最大宽度（behavior.vertical_max_width，单位 dp，默认 0=不限）：仅在用户/主题
+        // 显式配置正值时生效。本 View 引擎不支持文本折行，超宽候选在窗口右缘裁切（draw_text
+        // 按缓冲宽度裁剪，无省略号）——下面的屏幕安全上限是恒生效的另一道独立防线，两者不是
+        // 同一回事。
+        if inp.vertical && !inp.candidates.is_empty() {
+            let vmax = inp.theme.behavior.vertical_max_width;
+            if vmax > 0 {
+                // 单位 dp，换算复用 dp_to_px（与 min_window_width_* 等字段同一套算法）。
+                let vmax_px = Self::dp_to_px(vmax as u32, inp.scale).max(40);
+                // 下限优先于上限：用户显式配的抗抖动宽度不该被主题的裁切上限压回去。
+                // 见 [`CandidateSceneInput::min_window_w_px`]（未配 min 时该值为 0，行为不变）。
+                content_w = content_w.min(vmax_px.max(inp.min_window_w_px()));
+            }
+        }
+        // 屏幕安全上限：横竖排都生效，防止异常长候选（如超长拼音产生的候选）把窗口撑出
+        // 显示器边界。与上面的主题上限是两条独立防线，见 screen_safety_max_width_px 文档。
+        // 钳的对象须是「屏幕能放下的内容宽度」= 屏幕宽度 − 阴影扩边（窗口宽还要再加回
+        // ml+mr）——直接拿 content_w 跟屏幕整宽比，加回扩边后窗口仍会探出屏幕（已实测命中：
+        // natural=5195 safety_max=3840 clamped=3840，但 width=clamped+ml+mr 已经超了 3840）。
+        let safety_max_w = inp.screen_safety_max_width_px().saturating_sub(ml + mr);
+        let before_safety = content_w;
+        content_w = content_w.min(safety_max_w.max(inp.min_window_w_px()));
+        let content_h = (h_f.ceil() as u32).max(24);
+        self.skin_fit_frame(content_w, content_h, tr);
+        let shadow_radius = inp
+            .theme
+            .views
+            .window
+            .border_radius
+            .map(|d| d.resolve(inp.scale, 0.0))
+            .unwrap_or(8.0 * inp.scale);
+        SceneFrame {
+            root,
+            shadow,
+            shadow_radius,
+            margins,
+            natural_w: w_f,
+            content_w,
+            content_h,
+            safety_clamped: (content_w < before_safety).then_some((before_safety, safety_max_w)),
+        }
+    }
+
+    /// 定位定下落在光标上方后调用（`inp.above` = 是否上方）：有生效的「上方专属」布局且不是
+    /// 分槽位皮肤时，按上方布局重建并在原扩边处重排（项数/尺寸/位置不变，仅排列翻转）。
+    pub(super) fn relayout_above(&self, inp: &CandidateSceneInput, f: &mut SceneFrame) {
+        let (flip, swap) = Self::above_layout(
+            inp.above,
+            inp.vertical,
+            inp.opts.flip_when_above,
+            inp.opts.swap_preedit_when_above,
+        );
+        if (flip || swap) && !self.skin_is_free() {
+            let (ml, mt, _, _) = f.margins;
+            f.root = self.build_tree(inp);
+            f.root.layout(ml as f32, mt as f32, inp.text_renderer);
+        }
+    }
+
+    /// 本帧命中矩形（窗口缓冲坐标，内容起点在扩边处）：候选与翻页 + 分槽位皮肤各块。
+    /// 须在 [`Self::relayout_above`] 之后取。
+    pub(super) fn hits(&self, f: &SceneFrame) -> Vec<(i32, Rect)> {
+        let mut out = Vec::new();
+        f.root.collect_hits(&mut out);
+        if let Some(g) = &self.skin_geom {
+            g.collect_part_hits(&mut out);
+        }
+        out
+    }
+
+    /// 画进 `buf`（BGRA 预乘，调用方已清零，宽高为 [`SceneFrame::size`]）：软件阴影 → 皮肤底层
+    /// → 根 → 分槽位各块 → 皮肤上层。
+    ///
+    /// `split_pass` = 把 `hit = pass` 的装饰拆出去（只有 Windows 本地窗口路径置位，且它要先
+    /// 确认穿透窗口建得出来）：主缓冲不画它们，另返回一张同尺寸的穿透层像素 + 是否放主窗口下面。
+    /// 不拆（或皮肤里没有穿透装饰）时返回 None，穿透装饰照 block 画进主缓冲。
+    ///
+    /// 文字后端单独传而不取 `inp`：本地窗口路径画进窗口自己的缓冲，那份可变借用与整份输入
+    /// 的借用冲突。须与排版时是同一个后端。
+    pub(super) fn paint(
+        &self,
+        f: &SceneFrame,
+        buf: &mut [u8],
+        tr: &TextRenderer,
+        split_pass: bool,
+    ) -> Option<(Vec<u8>, bool)> {
+        let (width, height) = f.size();
+        let (ml, mt, _, _) = f.margins;
+        // 先画投影（在内容下方），再画内容覆盖其上。内容盒左上 = (ml, mt)。
+        if let Some(s) = &f.shadow {
+            let radius = f.shadow_radius;
+            s.paint(
+                buf,
+                width,
+                height,
+                ml as f32,
+                mt as f32,
+                f.content_w as f32,
+                f.content_h as f32,
+                radius,
+            );
+        }
+        let split = split_pass && self.skin_geom.as_ref().is_some_and(|g| g.has_pass());
+        if let Some(g) = &self.skin_geom {
+            g.paint(buf, width, height, false, split);
+        }
+        f.root.paint(buf, width, height, tr);
+        if let Some(g) = &self.skin_geom {
+            g.paint_parts(buf, width, height, tr);
+        }
+        if let Some(g) = &self.skin_geom {
+            g.paint(buf, width, height, true, split);
+        }
+        match (&self.skin_geom, split) {
+            (Some(g), true) => {
+                let mut pass = vec![0u8; (width * height * 4) as usize];
+                g.paint_pass(&mut pass, width, height);
+                Some((pass, g.pass_below()))
+            }
+            _ => None,
+        }
     }
 
     /// 按当前状态构建候选视图树（横向布局）。

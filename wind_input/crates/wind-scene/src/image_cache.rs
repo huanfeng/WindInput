@@ -1075,7 +1075,7 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
     tracing::debug!(
         "skin: 动画建帧 {} 帧 {w}x{h}，耗时 {:?}",
         frames.len(),
-        t0.elapsed()
+        crate::clock::now().saturating_duration_since(t0)
     );
     if frames.len() < 2 {
         return None;

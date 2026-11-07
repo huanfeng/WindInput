@@ -1093,8 +1093,8 @@ impl CandidateScene {
         }
     }
 
-    /// 渲染入口对内容尺寸做完钳制（竖排宽度上限、屏幕安全上限、最小 40×24）后调用：窗体按
-    /// 钳后的尺寸画，装饰随之重新定位。外扩量沿用布局时的值——它已经按窗体自然尺寸量过，
+    /// [`CandidateScene::layout`] 对内容尺寸做完钳制（竖排宽度上限、屏幕安全上限、最小 40×24）
+    /// 后调用：窗体按钳后的尺寸画，装饰随之重新定位。外扩量沿用布局时的值——它已经按窗体自然尺寸量过，
     /// 窗体变窄只会让右侧多出一点透明余量，不会让装饰出缓冲。
     pub(super) fn skin_fit_frame(&mut self, content_w: u32, content_h: u32, text: &TextRenderer) {
         let Some(g) = self.skin_geom.as_mut() else {
@@ -1201,21 +1201,27 @@ impl CandidateScene {
 impl CandidateWindow {
     /// 刷新本帧皮肤几何与装饰动画（见 [`CandidateScene::refresh_skin`]）：由隐藏变可见时
     /// 重读动画开关、记动画起点。
-    #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
+    #[cfg(test)]
     pub(super) fn refresh_skin_geom(&mut self) {
         self.refresh_skin_geom_at(std::time::Instant::now());
     }
 
     /// 同 [`Self::refresh_skin_geom`]，时刻由调用方给（金样注入时间用）。
+    #[cfg(test)]
     pub(super) fn refresh_skin_geom_at(&mut self, now: std::time::Instant) {
+        let clock = self.begin_anim_frame(now);
+        self.with_scene(|scene, inp| scene.refresh_skin(inp, clock));
+    }
+
+    /// 一帧开头的窗口侧动画簿记，返回交给场景的时钟：由隐藏变可见时重读动画开关、记动画起点。
+    pub(super) fn begin_anim_frame(&mut self, now: std::time::Instant) -> AnimClock {
         if !self.visible {
             self.refresh_anim_allowed();
             self.anim_start = now;
         }
         // 这一帧就是按此刻重画的，之前登记的「待重绘」作废。
         self.anim_due = false;
-        let clock = self.anim_clock(now);
-        self.with_scene(|scene, inp| scene.refresh_skin(inp, clock));
+        self.anim_clock(now)
     }
 
     /// 此刻的动画时钟：时间轴起点、可见性与动画开关都在窗口侧。

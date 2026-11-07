@@ -476,6 +476,8 @@ pub struct CandidateWindow {
     theme: wind_theme::Resolved,
     /// 协调器下发的原始主题（未叠外观覆盖）。只供 [`Self::refresh_effective_theme`] 读。
     theme_source: wind_theme::Resolved,
+    /// 本帧候选窗所在显示器的工作区，渲染入口开头查一次，见 [`Self::query_screen_extent`]。
+    screen_extent: Option<(u32, u32)>,
     /// 候选树的构建与跨帧状态（皮肤几何、分槽位各块），见 [`scene`]。
     scene: CandidateScene,
     /// 低频选项（上翻、翻页栏、尺寸下限），按引用交给场景。
@@ -654,6 +656,7 @@ impl CandidateWindow {
             window_at: crate::window::window_at,
             theme: wind_theme::Resolved::default(),
             theme_source: wind_theme::Resolved::default(),
+            screen_extent: None,
             scene: CandidateScene::default(),
             scene_opts: CandidateSceneOptions::default(),
             split_pass_decor: false,
@@ -791,7 +794,11 @@ impl CandidateWindow {
     /// Windows 按固定点（固定位置模式）或光标点查——固定位置可能落在与光标不同缩放/不同显示器
     /// 的另一块屏上，取点与 DPI 探测一致。其它平台本地服务进程查不到显示器几何，给 None，
     /// 场景退化为保守的兜底常量（见 [`CandidateSceneInput::screen_safety_max_width_px`]）。
-    fn screen_extent_px(&self) -> Option<(u32, u32)> {
+    ///
+    /// 每帧只在渲染入口开头查一次，存进 [`Self::screen_extent`]（见 [`Self::layout_frame`]），
+    /// 场景输入一律读存下的值：一帧里要借好几次输入，每次都查显示器（失败时每次还刷一条 warn）
+    /// 没有必要，同一帧内光标点与固定点也不会变。
+    fn query_screen_extent(&self) -> Option<(u32, u32)> {
         #[cfg(windows)]
         {
             let (px, py) = match self.fixed_pos {
@@ -802,7 +809,7 @@ impl CandidateWindow {
                 .zip(crate::sys::monitor_work_area_height_at(px, py));
             if extent.is_none() {
                 tracing::warn!(
-                    "screen_extent_px: monitor query failed at ({px},{py}), 退化到兜底常量"
+                    "screen_extent: monitor query failed at ({px},{py}), 退化到兜底常量"
                 );
             }
             extent
@@ -823,6 +830,39 @@ impl CandidateWindow {
         let r = f(&mut scene, &self.scene_input(false));
         self.scene = scene;
         r
+    }
+
+    /// 一帧排版：查一次屏幕工作区、做窗口侧动画簿记，再交场景 [`CandidateScene::layout`]。
+    /// 网格展开态顺带记下内容盒（悬停气泡停靠用）。三个渲染入口共用。
+    fn layout_frame(&mut self, now: Instant, soft_shadow: bool) -> scene::SceneFrame {
+        self.screen_extent = self.query_screen_extent();
+        let clock = self.begin_anim_frame(now);
+        let frame = self.with_scene(|scene, inp| scene.layout(inp, clock, soft_shadow));
+        let (ml, mt, _, _) = frame.margins;
+        self.note_grid_box((ml as f32, mt as f32), frame.natural_w);
+        frame
+    }
+
+    /// 本帧命中矩形存下并同步给鼠标处理器（须在上翻重排之后）。
+    fn sync_hits(&mut self, frame: &scene::SceneFrame) {
+        self.hit_rects = self.scene.hits(frame);
+        let mut m = self.mouse.borrow_mut();
+        m.hit_rects = self.hit_rects.clone();
+        m.skin_frame = self.scene.skin_geom.as_ref().map(|g| g.frame_rect());
+        m.skin_decor = self
+            .scene
+            .skin_geom
+            .as_ref()
+            .map_or_else(Vec::new, |g| g.no_drag_rects());
+        m.skin_click_rects = self
+            .scene
+            .skin_geom
+            .as_ref()
+            .map_or_else(Vec::new, |g| g.click_rects());
+        // 换帧重绘时内容没变，悬停去重基线保持原样。
+        if !self.anim_repaint {
+            m.last_hover = -1;
+        }
     }
 
     /// 下一次装饰换帧的时刻：场景给的是距动画时间轴起点的时长，起点在窗口侧。
@@ -850,7 +890,7 @@ impl CandidateWindow {
             theme: &self.theme,
             base_font_logical: self.base_font_logical,
             scale: self.scale,
-            screen_extent_px: self.screen_extent_px(),
+            screen_extent_px: self.screen_extent,
             text_renderer: &self.text_renderer,
             opts: &self.scene_opts,
         }
@@ -1025,17 +1065,6 @@ impl CandidateWindow {
     /// 设置"上方时交换编码栏与候选栏位置"。来自 ui.candidate.swap_preedit_when_above。
     pub fn set_swap_preedit_when_above(&mut self, swap: bool) {
         self.scene_opts.swap_preedit_when_above = swap;
-    }
-
-    /// 当前落位下是否有生效的「上方专属」布局 —— 有才需要按 `above=true` 重建视图树。
-    fn above_layout_active(&self) -> bool {
-        let (flip, swap) = CandidateScene::above_layout(
-            self.placed_above,
-            self.vertical,
-            self.scene_opts.flip_when_above,
-            self.scene_opts.swap_preedit_when_above,
-        );
-        flip || swap
     }
 
     /// 把「候选项当前是否被反转」上报给协调器（仅在取值变化时发事件）。
@@ -1443,6 +1472,8 @@ impl CandidateWindow {
     #[cfg(not(windows))]
     pub fn show(&mut self) {
         // DPI 动态化：按光标所在显示器实时取缩放，换显示器后自动按新 DPI 渲染。
+        // ⚠️ 本路径一直按光标点取，不像另两个渲染入口那样在固定位置模式下改按固定点取；
+        // 三份管线合并时保持原样，没有顺手统一。
         let new_scale = crate::dpi::scale_for_point(self.x, self.y);
         self.show_at(new_scale, Instant::now());
     }
@@ -1466,55 +1497,12 @@ impl CandidateWindow {
         // ── 渲染计时（定位长按翻页卡顿耗时段）──
         let t_start = Instant::now();
 
-        // 构建并测量 View 树
-        self.refresh_skin_geom_at(now);
-        let mut root = self.scene.build_tree(&self.scene_input(false));
-        let t_build = t_start.elapsed();
-
-        // 窗口投影：高斯软影四向扩边（与 Go shadowMargins 对齐），内容布局起点平移到 (ml, mt)，
-        // 窗口显示位置再左上回移 (ml, mt) → 视觉锚点/命中坐标与无阴影时一致，阴影四面溢出。
-        let shadow = self.scene.shadow_params(&self.scene_input(false));
-        let t_layout0 = Instant::now();
-        let (ml, mt, mr, mb) = match self.scene.skin_layout(&mut root, &self.text_renderer) {
-            Some(m) => m,
-            None => {
-                let m = match &shadow {
-                    Some(s) => s.margins(),
-                    None => (0, 0, 0, 0),
-                };
-                root.layout(m.0 as f32, m.1 as f32, &self.text_renderer);
-                m
-            }
-        };
-        let (w_f, h_f) = root.measured_size();
-        self.note_grid_box((ml as f32, mt as f32), w_f);
-        let mut content_w = (w_f.ceil() as u32).max(40);
-        // 竖排最大宽度（behavior.vertical_max_width，单位 dp，默认 0=不限）：仅在用户/主题
-        // 显式配置正值时生效。本 View 引擎不支持文本折行，超宽候选在窗口右缘裁切（draw_text
-        // 按缓冲宽度裁剪，无省略号）——下面 screen_safety_max_width_px 是恒生效的另一道独立
-        // 防线，两者不是同一回事。
-        if self.vertical && !self.candidates.is_empty() {
-            let vmax = self.theme.behavior.vertical_max_width;
-            if vmax > 0 {
-                // 单位 dp，换算复用 dp_to_px（与 min_window_width_* 等字段同一套算法）。
-                let vmax_px = CandidateScene::dp_to_px(vmax as u32, self.scale).max(40);
-                // 下限优先于上限：用户显式配的抗抖动宽度不该被主题的裁切上限压回去。
-                // 见 [`CandidateWindow::min_window_w_px`]（未配 min 时该值为 0，行为不变）。
-                content_w = content_w.min(vmax_px.max(self.scene_input(false).min_window_w_px()));
-            }
-        }
-        // 屏幕安全上限：横竖排都生效，防止异常长候选（如超长拼音产生的候选）把窗口撑出
-        // 显示器边界。与上面的主题上限是两条独立防线，见 screen_safety_max_width_px 文档。
-        // 钳的对象须是「屏幕能放下的内容宽度」= 屏幕宽度 − 阴影扩边（下方 width 还要再加回
-        // ml+mr），否则加回扩边后窗口仍会探出屏幕（Windows 真机已实测命中此坑）。
-        let safety_max_w = self.screen_safety_max_width_px().saturating_sub(ml + mr);
-        content_w = content_w.min(safety_max_w.max(self.scene_input(false).min_window_w_px()));
-        let content_h = (h_f.ceil() as u32).max(24);
-        self.scene
-            .skin_fit_frame(content_w, content_h, &self.text_renderer);
-        let width = content_w + ml + mr;
-        let height = content_h + mt + mb;
-        let t_layout = t_layout0.elapsed();
+        // 排版（皮肤几何 → 搭树 → 布局 → 宽度钳制），本路径画软件阴影。
+        let mut frame = self.layout_frame(now, true);
+        let (ml, mt, _, _) = frame.margins;
+        let (content_w, content_h) = (frame.content_w, frame.content_h);
+        let (width, height) = frame.size();
+        let t_layout = t_start.elapsed();
 
         // 定位提前到 paint 前（供 flip_when_above 判定）。对齐 Go：每帧据当前光标 + 内容尺寸重算
         // 位置（place_window 负责工作区钳制、上方底边参考、上翻粘滞），再用 4px 阈值抑制微移——
@@ -1548,36 +1536,11 @@ impl CandidateWindow {
         self.last_content_pos = Some((px, py));
         // 上方显示且有开关真正生效 → 按上方布局重建候选树（项数/尺寸/位置不变，仅排列翻转）
         self.report_flip_state();
-        if self.above_layout_active() && !self.scene.skin_is_free() {
-            root = self.scene.build_tree(&self.scene_input(true));
-            root.layout(ml as f32, mt as f32, &self.text_renderer);
-        }
+        self.scene
+            .relayout_above(&self.scene_input(self.placed_above), &mut frame);
 
         // 收集候选命中矩形并同步给鼠标处理器（须在 flip 重建后）
-        self.hit_rects.clear();
-        root.collect_hits(&mut self.hit_rects);
-        if let Some(g) = &self.scene.skin_geom {
-            g.collect_part_hits(&mut self.hit_rects);
-        }
-        {
-            let mut m = self.mouse.borrow_mut();
-            m.hit_rects = self.hit_rects.clone();
-            m.skin_frame = self.scene.skin_geom.as_ref().map(|g| g.frame_rect());
-            m.skin_decor = self
-                .scene
-                .skin_geom
-                .as_ref()
-                .map_or_else(Vec::new, |g| g.no_drag_rects());
-            m.skin_click_rects = self
-                .scene
-                .skin_geom
-                .as_ref()
-                .map_or_else(Vec::new, |g| g.click_rects());
-            // 换帧重绘时内容没变，悬停去重基线保持原样。
-            if !self.anim_repaint {
-                m.last_hover = -1;
-            }
-        }
+        self.sync_hits(&frame);
 
         self.window.resize(width, height);
 
@@ -1587,36 +1550,7 @@ impl CandidateWindow {
             let buf = self.window.buffer_mut();
             let buf_size = (width * height * 4) as usize;
             buf[..buf_size].fill(0);
-            // 先画投影（在内容下方），再画内容覆盖其上。内容盒左上 = (ml, mt)。
-            if let Some(s) = &shadow {
-                let radius = self
-                    .theme
-                    .views
-                    .window
-                    .border_radius
-                    .map(|d| d.resolve(self.scale, 0.0))
-                    .unwrap_or(8.0 * self.scale);
-                s.paint(
-                    buf,
-                    width,
-                    height,
-                    ml as f32,
-                    mt as f32,
-                    content_w as f32,
-                    content_h as f32,
-                    radius,
-                );
-            }
-            if let Some(g) = &self.scene.skin_geom {
-                g.paint(buf, width, height, false, false);
-            }
-            root.paint(buf, width, height, &self.text_renderer);
-            if let Some(g) = &self.scene.skin_geom {
-                g.paint_parts(buf, width, height, &self.text_renderer);
-            }
-            if let Some(g) = &self.scene.skin_geom {
-                g.paint(buf, width, height, true, false);
-            }
+            self.scene.paint(&frame, buf, &self.text_renderer, false);
         }
         let t_paint = t_paint0.elapsed();
 
@@ -1626,12 +1560,12 @@ impl CandidateWindow {
         }
         let t_blit = t_blit0.elapsed();
 
+        // 搭树与布局已并进场景的一次 `layout`，这里只报两者合计。
         tracing::debug!(
-            "render[{}x{} n={}]: build={:?} layout={:?} paint={:?} blit={:?} | total={:?}",
+            "render[{}x{} n={}]: layout={:?} paint={:?} blit={:?} | total={:?}",
             width,
             height,
             self.candidates.len(),
-            t_build,
             t_layout,
             t_paint,
             t_blit,
@@ -1679,47 +1613,13 @@ impl CandidateWindow {
                 .set_base_size(self.base_font_logical * new_scale);
         }
 
-        self.refresh_skin_geom();
-        let mut root = self.scene.build_tree(&self.scene_input(false));
         // macOS 改用系统原生 NSPanel 阴影（.app 端 panel.hasShadow + invalidateShadow，自动沿
         // 圆角内容形状投影），位图内【不画软件阴影】：margin 归零 → 定位精确贴 caret、无偏移，
         // 观感也更 native。software_shadow=false → Swift 侧启用系统窗口阴影。
-        let shadow: Option<crate::view::SoftShadow> = None;
-        let (ml, mt, mr, mb) = match self.scene.skin_layout(&mut root, &self.text_renderer) {
-            Some(m) => m,
-            None => {
-                let m = match &shadow {
-                    Some(s) => s.margins(),
-                    None => (0, 0, 0, 0),
-                };
-                root.layout(m.0 as f32, m.1 as f32, &self.text_renderer);
-                m
-            }
-        };
-        let (w_f, h_f) = root.measured_size();
-        self.note_grid_box((ml as f32, mt as f32), w_f);
-        let mut content_w = (w_f.ceil() as u32).max(40);
-        if self.vertical && !self.candidates.is_empty() {
-            let vmax = self.theme.behavior.vertical_max_width;
-            if vmax > 0 {
-                // 单位 dp，换算复用 dp_to_px（与 min_window_width_* 等字段同一套算法）。
-                let vmax_px = CandidateScene::dp_to_px(vmax as u32, self.scale).max(40);
-                // 下限优先于上限：用户显式配的抗抖动宽度不该被主题的裁切上限压回去。
-                // 见 [`CandidateWindow::min_window_w_px`]（未配 min 时该值为 0，行为不变）。
-                content_w = content_w.min(vmax_px.max(self.scene_input(false).min_window_w_px()));
-            }
-        }
-        // 屏幕安全上限：横竖排都生效，防止异常长候选（如超长拼音产生的候选）把窗口撑出
-        // 显示器边界。与上面的主题上限是两条独立防线，见 screen_safety_max_width_px 文档。
-        // 钳的对象须是「屏幕能放下的内容宽度」= 屏幕宽度 − 阴影扩边（下方 width 还要再加回
-        // ml+mr），否则加回扩边后窗口仍会探出屏幕（Windows 真机已实测命中此坑）。
-        let safety_max_w = self.screen_safety_max_width_px().saturating_sub(ml + mr);
-        content_w = content_w.min(safety_max_w.max(self.scene_input(false).min_window_w_px()));
-        let content_h = (h_f.ceil() as u32).max(24);
-        self.scene
-            .skin_fit_frame(content_w, content_h, &self.text_renderer);
-        let width = content_w + ml + mr;
-        let height = content_h + mt + mb;
+        let mut frame = self.layout_frame(Instant::now(), false);
+        let (ml, mt, mr, mb) = frame.margins;
+        let (content_w, content_h) = (frame.content_w, frame.content_h);
+        let (width, height) = frame.size();
 
         // ── 定位：fixed_pos（用户固定位置）> place_window（跟随光标）──
         //
@@ -1781,68 +1681,17 @@ impl CandidateWindow {
             }
         };
         self.report_flip_state();
-        if self.above_layout_active() && !self.scene.skin_is_free() {
-            root = self.scene.build_tree(&self.scene_input(true));
-            root.layout(ml as f32, mt as f32, &self.text_renderer);
-        }
+        self.scene
+            .relayout_above(&self.scene_input(self.placed_above), &mut frame);
 
         // 命中矩形（窗口缓冲坐标，内容起点 (ml,mt)），同步给鼠标处理器。
-        self.hit_rects.clear();
-        root.collect_hits(&mut self.hit_rects);
-        if let Some(g) = &self.scene.skin_geom {
-            g.collect_part_hits(&mut self.hit_rects);
-        }
-        {
-            let mut m = self.mouse.borrow_mut();
-            m.hit_rects = self.hit_rects.clone();
-            m.skin_frame = self.scene.skin_geom.as_ref().map(|g| g.frame_rect());
-            m.skin_decor = self
-                .scene
-                .skin_geom
-                .as_ref()
-                .map_or_else(Vec::new, |g| g.no_drag_rects());
-            m.skin_click_rects = self
-                .scene
-                .skin_geom
-                .as_ref()
-                .map_or_else(Vec::new, |g| g.click_rects());
-            // 换帧重绘时内容没变，悬停去重基线保持原样。
-            if !self.anim_repaint {
-                m.last_hover = -1;
-            }
-        }
+        self.sync_hits(&frame);
 
-        // 绘制到独立 BGRA 缓冲（透明清屏 → 软影 → 内容）。
+        // 绘制到独立 BGRA 缓冲（透明清屏 → 内容；本路径不画软影）。
         let mut buf = vec![0u8; (width * height * 4) as usize];
-        if let Some(s) = &shadow {
-            let radius = self
-                .theme
-                .views
-                .window
-                .border_radius
-                .map(|d| d.resolve(self.scale, 0.0))
-                .unwrap_or(8.0 * self.scale);
-            s.paint(
-                &mut buf,
-                width,
-                height,
-                ml as f32,
-                mt as f32,
-                content_w as f32,
-                content_h as f32,
-                radius,
-            );
-        }
-        if let Some(g) = &self.scene.skin_geom {
-            g.paint(&mut buf, width, height, false, false);
-        }
-        root.paint(&mut buf, width, height, &self.text_renderer);
-        if let Some(g) = &self.scene.skin_geom {
-            g.paint_parts(&mut buf, width, height, &self.text_renderer);
-        }
-        if let Some(g) = &self.scene.skin_geom {
-            g.paint(&mut buf, width, height, true, false);
-        }
+        self.scene
+            .paint(&frame, &mut buf, &self.text_renderer, false);
+        let shadow = frame.shadow;
 
         self.mark_visible();
         // 关键单位换算：ml/mt/blur 都是 device px（含 scale），而 screen_x/y 是 .app 使用的【逻辑点】
@@ -1906,48 +1755,18 @@ impl CandidateWindow {
                 .set_base_size(self.base_font_logical * new_scale);
         }
 
-        self.refresh_skin_geom();
-        let mut root = self.scene.build_tree(&self.scene_input(false));
-        let shadow = self.scene.shadow_params(&self.scene_input(false));
-        let (ml, mt, mr, mb) = match self.scene.skin_layout(&mut root, &self.text_renderer) {
-            Some(m) => m,
-            None => {
-                let m = match &shadow {
-                    Some(s) => s.margins(),
-                    None => (0, 0, 0, 0),
-                };
-                root.layout(m.0 as f32, m.1 as f32, &self.text_renderer);
-                m
-            }
-        };
-        let (w_f, h_f) = root.measured_size();
-        self.note_grid_box((ml as f32, mt as f32), w_f);
-        let mut content_w = (w_f.ceil() as u32).max(40);
-        if self.vertical && !self.candidates.is_empty() {
-            let vmax = self.theme.behavior.vertical_max_width;
-            if vmax > 0 {
-                // 单位 dp，换算复用 dp_to_px（与 min_window_width_* 等字段同一套算法）。
-                let vmax_px = CandidateScene::dp_to_px(vmax as u32, self.scale).max(40);
-                // 下限优先于上限：用户显式配的抗抖动宽度不该被主题的裁切上限压回去。
-                // 见 [`CandidateWindow::min_window_w_px`]（未配 min 时该值为 0，行为不变）。
-                content_w = content_w.min(vmax_px.max(self.scene_input(false).min_window_w_px()));
-            }
-        }
-        // 屏幕安全上限：横竖排都生效，防止异常长候选（如超长拼音产生的候选）把窗口撑出
-        // 显示器边界。与上面的主题上限是两条独立防线，见 screen_safety_max_width_px 文档。
-        // 钳的对象须是「屏幕能放下的内容宽度」= 屏幕宽度 − 阴影扩边（下方 width 还要再加回
-        // ml+mr）——直接拿 content_w 跟屏幕整宽比，加回扩边后窗口仍会探出屏幕（已实测命中：
-        // natural=5195 safety_max=3840 clamped=3840，但 width=clamped+ml+mr 已经超了 3840）。
-        let safety_max_w = self.screen_safety_max_width_px().saturating_sub(ml + mr);
-        let content_w_before_safety = content_w;
-        content_w = content_w.min(safety_max_w.max(self.scene_input(false).min_window_w_px()));
-        // 正常情况下 `build_tree` 已按同一套预算把文字裁到位，这里量出来的自然宽本就在上限内，
-        // 钳制是恒不生效的兜底。**只在它真的生效时才记日志**——那意味着预算算漏了行内某个成员
-        // （这正是横排内联编码/徽标/翻页栏曾被漏算的形态），是需要看见的异常，不是每帧噪音。
-        if content_w < content_w_before_safety {
+        let mut frame = self.layout_frame(Instant::now(), true);
+        let (ml, mt, mr, mb) = frame.margins;
+        let (content_w, content_h) = (frame.content_w, frame.content_h);
+        let (width, height) = frame.size();
+        // 正常情况下 `build_tree` 已按同一套预算把文字裁到位，屏幕安全上限的钳制是恒不生效的
+        // 兜底。**只在它真的生效时才记日志**——那意味着预算算漏了行内某个成员（这正是横排内联
+        // 编码/徽标/翻页栏曾被漏算的形态），是需要看见的异常，不是每帧噪音。
+        // ⚠️ 只有本路径记这条（三份管线合并前就如此，非 Windows 两条路径从来不记），保持原样。
+        if let Some((natural, safety_max_w)) = frame.safety_clamped {
             tracing::debug!(
                 "candidate width safety-clamp 生效（预算漏算？）: natural={} safety_max_content={} clamped={} margin_lr={} scale={:.2} vertical={}",
-                content_w_before_safety,
+                natural,
                 safety_max_w,
                 content_w,
                 ml + mr,
@@ -1955,11 +1774,6 @@ impl CandidateWindow {
                 self.vertical
             );
         }
-        let content_h = (h_f.ceil() as u32).max(24);
-        self.scene
-            .skin_fit_frame(content_w, content_h, &self.text_renderer);
-        let width = content_w + ml + mr;
-        let height = content_h + mt + mb;
 
         // ── 定位：三级优先级 drag_pin > fixed_pos > place_window(跟随光标) ──
         // 用户已手动拖动过本次组合的候选窗 → 冻结落位：位置固定、上/下方排列也不再翻转，
@@ -2028,79 +1842,19 @@ impl CandidateWindow {
             screen_xy = Some((px - ml as i32, py - mt as i32));
         }
         self.report_flip_state();
-        if self.above_layout_active() && !self.scene.skin_is_free() {
-            root = self.scene.build_tree(&self.scene_input(true));
-            root.layout(ml as f32, mt as f32, &self.text_renderer);
-        }
+        self.scene
+            .relayout_above(&self.scene_input(self.placed_above), &mut frame);
 
-        self.hit_rects.clear();
-        root.collect_hits(&mut self.hit_rects);
-        if let Some(g) = &self.scene.skin_geom {
-            g.collect_part_hits(&mut self.hit_rects);
-        }
-        {
-            let mut m = self.mouse.borrow_mut();
-            m.hit_rects = self.hit_rects.clone();
-            m.skin_frame = self.scene.skin_geom.as_ref().map(|g| g.frame_rect());
-            m.skin_decor = self
-                .scene
-                .skin_geom
-                .as_ref()
-                .map_or_else(Vec::new, |g| g.no_drag_rects());
-            m.skin_click_rects = self
-                .scene
-                .skin_geom
-                .as_ref()
-                .map_or_else(Vec::new, |g| g.click_rects());
-            // 换帧重绘时内容没变，悬停去重基线保持原样。
-            if !self.anim_repaint {
-                m.last_hover = -1;
-            }
-        }
+        self.sync_hits(&frame);
 
         let mut buf = vec![0u8; (width * height * 4) as usize];
-        if let Some(s) = &shadow {
-            let radius = self
-                .theme
-                .views
-                .window
-                .border_radius
-                .map(|d| d.resolve(self.scale, 0.0))
-                .unwrap_or(8.0 * self.scale);
-            s.paint(
-                &mut buf,
-                width,
-                height,
-                ml as f32,
-                mt as f32,
-                content_w as f32,
-                content_h as f32,
-                radius,
-            );
-        }
         // 穿透装饰：只在本地窗口路径（show 置位 split_pass_decor）拆到独立的穿透窗口；
-        // host-render 等路径照旧画进主缓冲（按 block 处理）。
-        let split = self.split_pass_decor
-            && !self.pass_window_failed
-            && self.scene.skin_geom.as_ref().is_some_and(|g| g.has_pass());
-        if let Some(g) = &self.scene.skin_geom {
-            g.paint(&mut buf, width, height, false, split);
-        }
-        root.paint(&mut buf, width, height, &self.text_renderer);
-        if let Some(g) = &self.scene.skin_geom {
-            g.paint_parts(&mut buf, width, height, &self.text_renderer);
-        }
-        if let Some(g) = &self.scene.skin_geom {
-            g.paint(&mut buf, width, height, true, split);
-        }
-        self.pass_layer = match (&self.scene.skin_geom, split) {
-            (Some(g), true) => {
-                let mut pass = vec![0u8; (width * height * 4) as usize];
-                g.paint_pass(&mut pass, width, height);
-                Some((pass, g.pass_below()))
-            }
-            _ => None,
-        };
+        // host-render 等路径照旧画进主缓冲（按 block 处理）。穿透窗口建不出来时也不拆。
+        let split = self.split_pass_decor && !self.pass_window_failed;
+        self.pass_layer = self
+            .scene
+            .paint(&frame, &mut buf, &self.text_renderer, split);
+        let shadow = frame.shadow;
 
         self.mark_visible();
         // 上方三级定位分支穷尽，此处必为 Some；debug 下断言，release 兜底到光标处而非
