@@ -236,6 +236,7 @@ fn load_merged_dirs_at(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Re
     {
         let mut base = load_merged_dirs_at(dirs, base_name, depth + 1)?;
         drop_inherited_arrow_images(&mut base, &value);
+        crate::skin::replace_inherited_variants(&mut base, &value);
         return Ok(merge(base, value));
     }
     Ok(value)

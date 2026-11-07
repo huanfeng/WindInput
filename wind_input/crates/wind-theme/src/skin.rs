@@ -1,0 +1,727 @@
+//! 异形皮肤（`[skin]`）：schema 与求值。设计见 `docs/design/theme-skin-animation.md`。
+//!
+//! 皮肤是窗口级的整体设计：横排 / 竖排 / 嵌入变体各是一整套，互不深合并；base 链上子主题
+//! 写了某个变体就整表替换 base 的同名变体（见 [`replace_inherited_variants`]）。
+//!
+//! 坐标一律是**主图源像素**；渲染期乘倍率 `k`（见 [`RvSkin::factor`]）换算成设备像素。
+
+use serde::Deserialize;
+use toml::Value;
+
+/// 皮肤变体键。顺序无意义；嵌入变体缺省回退对应的非嵌入变体。
+pub const SKIN_VARIANTS: [&str; 4] = [
+    "horizontal",
+    "vertical",
+    "horizontal_embedded",
+    "vertical_embedded",
+];
+
+// ── schema（serde 目标） ──
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct Skin {
+    /// dpi（默认）| font。
+    pub scale_with: Option<String>,
+    /// 源像素 / dp。缺省 1。
+    pub density: Option<f32>,
+    /// `scale_with = "font"` 时的基准字号（逻辑 pt）。缺省 16。
+    pub font_base: Option<f32>,
+    pub horizontal: Option<SkinVariant>,
+    pub vertical: Option<SkinVariant>,
+    pub horizontal_embedded: Option<SkinVariant>,
+    pub vertical_embedded: Option<SkinVariant>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct SkinVariant {
+    pub frame: Option<SkinFrame>,
+    #[serde(default)]
+    pub content: SkinInsets,
+    #[serde(default)]
+    pub decor: Vec<SkinDecor>,
+    #[serde(default)]
+    pub placement: SkinPlacement,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct SkinFrame {
+    #[serde(default)]
+    pub image: String,
+    /// 覆盖 `skin.density`。
+    pub density: Option<f32>,
+    pub stretch_x: Option<Vec<BandSpec>>,
+    pub stretch_y: Option<Vec<BandSpec>>,
+    /// 拉伸带默认填法：stretch | tile | round。
+    pub fill: Option<String>,
+    #[serde(default)]
+    pub srcset: Vec<SrcSetEntry>,
+}
+
+/// 拉伸带：`[from, to]` 或 `{ from, to, fill }`。
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum BandSpec {
+    Pair([f32; 2]),
+    Table {
+        from: f32,
+        to: f32,
+        fill: Option<String>,
+    },
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SrcSetEntry {
+    pub image: String,
+    pub density: f32,
+}
+
+#[derive(Deserialize, Debug, Default, Clone, Copy, PartialEq)]
+pub struct SkinInsets {
+    #[serde(default)]
+    pub left: f32,
+    #[serde(default)]
+    pub top: f32,
+    #[serde(default)]
+    pub right: f32,
+    #[serde(default)]
+    pub bottom: f32,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct SkinDecor {
+    #[serde(default)]
+    pub image: String,
+    #[serde(default)]
+    pub anchor: String,
+    pub pivot: Option<String>,
+    #[serde(default)]
+    pub offset: [f32; 2],
+    /// 目标尺寸（源像素）；缺省取图片自身尺寸（按其 density 换算到主图坐标）。
+    pub size: Option<[f32; 2]>,
+    /// 覆盖 `skin.density`。
+    pub density: Option<f32>,
+    #[serde(default)]
+    pub z: i32,
+    /// block（缺省）| pass（点击穿透到底下的应用）。
+    pub hit: Option<String>,
+    pub opacity: Option<f32>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct SkinPlacement {
+    pub caret: Option<CaretSpec>,
+    pub caret_above: Option<CaretSpec>,
+    /// 装饰不得盖住光标所在行（缺省开）。
+    pub avoid_caret: Option<bool>,
+    /// frame（缺省）：只保证窗体在屏内 | all：连装饰一起。
+    pub clamp: Option<String>,
+}
+
+/// 对齐点：`"frame.top_left"` 或 `{ anchor = "frame.top_left", offset = [180, 260] }`（源像素）。
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum CaretSpec {
+    Name(String),
+    Table {
+        #[serde(default)]
+        anchor: String,
+        #[serde(default)]
+        offset: [f32; 2],
+    },
+}
+
+// ── 求值形态 ──
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum BandFill {
+    #[default]
+    Stretch,
+    Tile,
+    Round,
+}
+
+impl BandFill {
+    fn parse(s: Option<&str>) -> Option<Self> {
+        match s? {
+            "stretch" => Some(Self::Stretch),
+            "tile" => Some(Self::Tile),
+            "round" => Some(Self::Round),
+            other => {
+                tracing::warn!("skin: 未知拉伸带填法 {other:?}，按 stretch");
+                Some(Self::Stretch)
+            }
+        }
+    }
+}
+
+/// 一条拉伸带：源像素半开区间 `[from, to)`。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Band {
+    pub from: f32,
+    pub to: f32,
+    pub fill: BandFill,
+}
+
+/// 某轴的拉伸声明。
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stretch {
+    /// 未写：整轴拉伸。
+    Whole(BandFill),
+    /// 写了空数组：该轴不可伸缩。
+    Fixed,
+    Bands(Vec<Band>),
+}
+
+/// 九方位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Pos9 {
+    /// 0 = 左 / 上，1 = 中，2 = 右 / 下。
+    pub h: u8,
+    pub v: u8,
+}
+
+impl Pos9 {
+    pub const TOP_LEFT: Self = Self { h: 0, v: 0 };
+    pub const BOTTOM_LEFT: Self = Self { h: 0, v: 2 };
+
+    /// `top_left` / `top-left` / `top` / `center` / `bottom_right` …；无法识别返回 None。
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.replace('-', "_");
+        let (mut h, mut v) = (1u8, 1u8);
+        for part in s.split('_').filter(|p| !p.is_empty()) {
+            match part {
+                "left" => h = 0,
+                "right" => h = 2,
+                "top" => v = 0,
+                "bottom" => v = 2,
+                "center" | "middle" => {}
+                _ => return None,
+            }
+        }
+        Some(Self { h, v })
+    }
+
+    /// 盒 `(x, y, w, h)` 上该方位点的坐标。
+    pub fn point(self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
+        (x + w * self.h as f32 / 2.0, y + h * self.v as f32 / 2.0)
+    }
+}
+
+/// 锚点所在的盒。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnchorBox {
+    #[default]
+    Frame,
+    Content,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Anchor {
+    pub on: AnchorBox,
+    pub pos: Pos9,
+}
+
+impl Anchor {
+    /// `frame.top_right` / `content.bottom_left`；省略前缀视为 `frame`。
+    pub fn parse(s: &str) -> Option<Self> {
+        let (on, pos) = match s.split_once('.') {
+            Some(("frame", p)) => (AnchorBox::Frame, p),
+            Some(("content", p)) => (AnchorBox::Content, p),
+            Some((other, _)) => {
+                tracing::warn!("skin: 未知锚点盒 {other:?}（P1 只支持 frame / content）");
+                return None;
+            }
+            None => (AnchorBox::Frame, s),
+        };
+        Some(Self {
+            on,
+            pos: Pos9::parse(pos)?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DecorHit {
+    #[default]
+    Block,
+    Pass,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RvSkinFrame {
+    pub image: String,
+    pub density: f32,
+    pub stretch_x: Stretch,
+    pub stretch_y: Stretch,
+    /// 已按 density 升序。
+    pub srcset: Vec<(String, f32)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RvSkinDecor {
+    pub image: String,
+    pub density: f32,
+    pub anchor: Anchor,
+    pub pivot: Pos9,
+    pub offset: [f32; 2],
+    pub size: Option<[f32; 2]>,
+    pub z: i32,
+    pub hit: DecorHit,
+    pub opacity: f32,
+}
+
+/// 对齐点：锚点 + 偏移（主坐标源像素）。
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct CaretPoint {
+    pub anchor: Anchor,
+    pub offset: [f32; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Clamp {
+    #[default]
+    Frame,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RvPlacement {
+    pub caret: CaretPoint,
+    pub caret_above: CaretPoint,
+    pub avoid_caret: bool,
+    pub clamp: Clamp,
+}
+
+impl Default for RvPlacement {
+    /// 默认对齐窗体角：窗体本身不会压住光标所在行。
+    fn default() -> Self {
+        Self {
+            caret: CaretPoint {
+                anchor: Anchor {
+                    on: AnchorBox::Frame,
+                    pos: Pos9::TOP_LEFT,
+                },
+                offset: [0.0; 2],
+            },
+            caret_above: CaretPoint {
+                anchor: Anchor {
+                    on: AnchorBox::Frame,
+                    pos: Pos9::BOTTOM_LEFT,
+                },
+                offset: [0.0; 2],
+            },
+            avoid_caret: true,
+            clamp: Clamp::Frame,
+        }
+    }
+}
+
+fn resolve_caret(spec: Option<&CaretSpec>, dflt: CaretPoint) -> CaretPoint {
+    let (name, offset) = match spec {
+        None => return dflt,
+        Some(CaretSpec::Name(n)) => (n.as_str(), [0.0; 2]),
+        Some(CaretSpec::Table { anchor, offset }) => (anchor.as_str(), *offset),
+    };
+    let anchor = if name.is_empty() {
+        dflt.anchor
+    } else {
+        Anchor::parse(name).unwrap_or(dflt.anchor)
+    };
+    CaretPoint { anchor, offset }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RvSkinVariant {
+    pub frame: RvSkinFrame,
+    pub content: SkinInsets,
+    /// 已按 z 升序（稳定排序，同 z 保持书写顺序）。
+    pub decor: Vec<RvSkinDecor>,
+    pub placement: RvPlacement,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScaleWith {
+    #[default]
+    Dpi,
+    Font,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct RvSkin {
+    pub scale_with: ScaleWith,
+    /// 主图密度（源像素 / dp），各变体的坐标都按它写。
+    pub density: f32,
+    pub font_base: f32,
+    pub horizontal: Option<RvSkinVariant>,
+    pub vertical: Option<RvSkinVariant>,
+    pub horizontal_embedded: Option<RvSkinVariant>,
+    pub vertical_embedded: Option<RvSkinVariant>,
+}
+
+impl RvSkin {
+    /// 选变体：嵌入变体缺省回退非嵌入；竖排不回退横排（异形图兼容不了两种形态）。
+    pub fn variant(&self, vertical: bool, embedded: bool) -> Option<&RvSkinVariant> {
+        let (plain, emb) = if vertical {
+            (&self.vertical, &self.vertical_embedded)
+        } else {
+            (&self.horizontal, &self.horizontal_embedded)
+        };
+        if embedded {
+            emb.as_ref().or(plain.as_ref())
+        } else {
+            plain.as_ref()
+        }
+    }
+
+    /// 源像素 → 设备像素的倍率。`dpi_scale` 为显示器缩放，`font_size` 为生效基准字号（逻辑）。
+    pub fn factor(&self, dpi_scale: f32, font_size: f32) -> f32 {
+        let s = match self.scale_with {
+            ScaleWith::Dpi => dpi_scale,
+            ScaleWith::Font => dpi_scale * font_size / self.font_base,
+        };
+        s / self.density
+    }
+}
+
+const DEFAULT_FONT_BASE: f32 = 16.0;
+
+fn positive(v: Option<f32>) -> Option<f32> {
+    v.filter(|d| d.is_finite() && *d > 0.0)
+}
+
+fn resolve_stretch(bands: Option<&Vec<BandSpec>>, default_fill: BandFill) -> Stretch {
+    let Some(bands) = bands else {
+        return Stretch::Whole(default_fill);
+    };
+    if bands.is_empty() {
+        return Stretch::Fixed;
+    }
+    let mut out: Vec<Band> = bands
+        .iter()
+        .filter_map(|b| {
+            let (from, to, fill) = match b {
+                BandSpec::Pair([a, b]) => (*a, *b, None),
+                BandSpec::Table { from, to, fill } => (*from, *to, fill.as_deref()),
+            };
+            let band = Band {
+                from: from.min(to).max(0.0),
+                to: from.max(to),
+                fill: BandFill::parse(fill).unwrap_or(default_fill),
+            };
+            (band.to > band.from).then_some(band)
+        })
+        .collect();
+    out.sort_by(|a, b| a.from.total_cmp(&b.from));
+    // 重叠的带合并进前一条（取并集，填法沿用前一条）。
+    let mut merged: Vec<Band> = Vec::with_capacity(out.len());
+    for b in out {
+        match merged.last_mut() {
+            Some(last) if b.from < last.to => last.to = last.to.max(b.to),
+            _ => merged.push(b),
+        }
+    }
+    if merged.is_empty() {
+        Stretch::Fixed
+    } else {
+        Stretch::Bands(merged)
+    }
+}
+
+fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
+    let Some(f) = v.frame.as_ref().filter(|f| !f.image.is_empty()) else {
+        tracing::warn!("skin: 变体缺 frame.image，忽略该变体");
+        return None;
+    };
+    let fill = BandFill::parse(f.fill.as_deref()).unwrap_or_default();
+    let mut srcset: Vec<(String, f32)> = f
+        .srcset
+        .iter()
+        .filter(|e| !e.image.is_empty() && e.density.is_finite() && e.density > 0.0)
+        .map(|e| (e.image.clone(), e.density))
+        .collect();
+    srcset.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let frame_density = positive(f.density).unwrap_or(density);
+    let frame = RvSkinFrame {
+        image: f.image.clone(),
+        density: frame_density,
+        stretch_x: resolve_stretch(f.stretch_x.as_ref(), fill),
+        stretch_y: resolve_stretch(f.stretch_y.as_ref(), fill),
+        srcset,
+    };
+    let mut decor: Vec<RvSkinDecor> = v
+        .decor
+        .iter()
+        .filter(|d| !d.image.is_empty())
+        .filter_map(|d| {
+            let anchor = Anchor::parse(if d.anchor.is_empty() {
+                "frame.top_left"
+            } else {
+                &d.anchor
+            })?;
+            let pivot = match d.pivot.as_deref() {
+                Some(p) => Pos9::parse(p)?,
+                None => anchor.pos,
+            };
+            let hit = match d.hit.as_deref() {
+                None | Some("block") => DecorHit::Block,
+                Some("pass") => DecorHit::Pass,
+                Some(other) => {
+                    tracing::warn!("skin: 未知 decor.hit {other:?}，按 block");
+                    DecorHit::Block
+                }
+            };
+            Some(RvSkinDecor {
+                image: d.image.clone(),
+                density: positive(d.density).unwrap_or(density),
+                anchor,
+                pivot,
+                offset: d.offset,
+                size: d.size.filter(|[w, h]| *w > 0.0 && *h > 0.0),
+                z: d.z,
+                hit,
+                opacity: d.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            })
+        })
+        .collect();
+    decor.sort_by_key(|d| d.z);
+    let p = &v.placement;
+    let dflt = RvPlacement::default();
+    let placement = RvPlacement {
+        caret: resolve_caret(p.caret.as_ref(), dflt.caret),
+        caret_above: resolve_caret(p.caret_above.as_ref(), dflt.caret_above),
+        avoid_caret: p.avoid_caret.unwrap_or(dflt.avoid_caret),
+        clamp: match p.clamp.as_deref() {
+            None | Some("frame") => Clamp::Frame,
+            Some("all") => Clamp::All,
+            Some(other) => {
+                tracing::warn!("skin: 未知 placement.clamp {other:?}，按 frame");
+                Clamp::Frame
+            }
+        },
+    };
+    Some(RvSkinVariant {
+        frame,
+        content: v.content,
+        decor,
+        placement,
+    })
+}
+
+/// typed `Skin` → `RvSkin`。没有任何可用变体时返回 None（等同未配皮肤）。
+pub fn resolve_skin(s: &Skin) -> Option<RvSkin> {
+    let density = positive(s.density).unwrap_or(1.0);
+    let rv = |v: &Option<SkinVariant>| v.as_ref().and_then(|v| resolve_variant(v, density));
+    let out = RvSkin {
+        scale_with: match s.scale_with.as_deref() {
+            Some("font") => ScaleWith::Font,
+            _ => ScaleWith::Dpi,
+        },
+        density,
+        font_base: positive(s.font_base).unwrap_or(DEFAULT_FONT_BASE),
+        horizontal: rv(&s.horizontal),
+        vertical: rv(&s.vertical),
+        horizontal_embedded: rv(&s.horizontal_embedded),
+        vertical_embedded: rv(&s.vertical_embedded),
+    };
+    let any = out.horizontal.is_some()
+        || out.vertical.is_some()
+        || out.horizontal_embedded.is_some()
+        || out.vertical_embedded.is_some();
+    any.then_some(out)
+}
+
+/// base 链合并前：子主题写了的皮肤变体，从 base 里整表拿掉（皮肤是整体设计，逐字段合并没有意义）。
+pub(crate) fn replace_inherited_variants(base: &mut Value, over: &Value) {
+    let Some(over_skin) = over.get("skin").and_then(Value::as_table) else {
+        return;
+    };
+    let Some(base_skin) = base.get_mut("skin").and_then(Value::as_table_mut) else {
+        return;
+    };
+    for key in SKIN_VARIANTS {
+        if over_skin.contains_key(key) {
+            base_skin.remove(key);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Option<RvSkin> {
+        let v: Value = src.parse().unwrap();
+        let s: Skin = v.get("skin").cloned().unwrap().try_into().unwrap();
+        resolve_skin(&s)
+    }
+
+    const SAMPLE: &str = r#"
+[skin]
+density = 3
+[skin.horizontal.frame]
+image = "frame_h"
+stretch_x = [[300, 500], { from = 100, to = 160, fill = "round" }]
+stretch_y = []
+[skin.horizontal.content]
+left = 180
+top = 320
+right = 200
+bottom = 120
+[[skin.horizontal.decor]]
+image = "pet"
+anchor = "frame.top_right"
+pivot = "bottom_right"
+offset = [-80, 20]
+z = 1
+[[skin.horizontal.decor]]
+image = "snow"
+anchor = "content.bottom-left"
+z = -1
+hit = "pass"
+"#;
+
+    #[test]
+    fn bands_are_sorted_and_typed() {
+        let s = parse(SAMPLE).unwrap();
+        let h = s.horizontal.as_ref().unwrap();
+        assert_eq!(
+            h.frame.stretch_x,
+            Stretch::Bands(vec![
+                Band {
+                    from: 100.0,
+                    to: 160.0,
+                    fill: BandFill::Round
+                },
+                Band {
+                    from: 300.0,
+                    to: 500.0,
+                    fill: BandFill::Stretch
+                },
+            ])
+        );
+        assert_eq!(h.frame.stretch_y, Stretch::Fixed, "空数组 = 该轴不可伸缩");
+        assert_eq!(h.frame.density, 3.0, "frame 继承 skin.density");
+    }
+
+    #[test]
+    fn missing_axis_stretches_whole() {
+        let s =
+            parse("[skin.horizontal.frame]\nimage = \"a\"\nfill = \"round\"\nstretch_x = [[1, 2]]")
+                .unwrap();
+        let f = &s.horizontal.unwrap().frame;
+        assert_eq!(f.stretch_y, Stretch::Whole(BandFill::Round));
+    }
+
+    #[test]
+    fn overlapping_bands_merge() {
+        let s = parse("[skin.horizontal.frame]\nimage = \"a\"\nstretch_x = [[10, 30], [20, 40]]")
+            .unwrap();
+        let Stretch::Bands(b) = &s.horizontal.unwrap().frame.stretch_x else {
+            panic!("应为 Bands");
+        };
+        assert_eq!(b.len(), 1);
+        assert_eq!((b[0].from, b[0].to), (10.0, 40.0));
+    }
+
+    #[test]
+    fn decor_sorted_by_z_with_anchor_and_pivot() {
+        let s = parse(SAMPLE).unwrap();
+        let d = &s.horizontal.as_ref().unwrap().decor;
+        assert_eq!(d[0].image, "snow");
+        assert_eq!(d[0].anchor.on, AnchorBox::Content);
+        assert_eq!(d[0].pivot, Pos9::BOTTOM_LEFT, "pivot 缺省同锚点方位");
+        assert_eq!(d[0].hit, DecorHit::Pass);
+        assert_eq!(d[1].image, "pet");
+        assert_eq!(d[1].pivot, Pos9 { h: 2, v: 2 });
+        assert_eq!(d[1].hit, DecorHit::Block, "缺省 block");
+    }
+
+    #[test]
+    fn vertical_never_falls_back_to_horizontal() {
+        let s = parse(SAMPLE).unwrap();
+        assert!(s.variant(false, false).is_some());
+        assert!(s.variant(false, true).is_some(), "嵌入回退非嵌入");
+        assert!(s.variant(true, false).is_none(), "竖排不套横排图");
+        assert!(s.variant(true, true).is_none());
+    }
+
+    #[test]
+    fn variant_without_frame_image_is_dropped() {
+        assert!(parse("[skin.horizontal.content]\nleft = 1").is_none());
+    }
+
+    #[test]
+    fn factor_follows_dpi_or_font() {
+        let mut s = parse(SAMPLE).unwrap();
+        assert_eq!(s.factor(1.5, 20.0), 0.5);
+        s.scale_with = ScaleWith::Font;
+        assert_eq!(s.factor(1.5, 32.0), 1.0, "字号是基准的两倍 → 倍率翻倍");
+    }
+
+    #[test]
+    fn default_placement_aligns_frame_corners() {
+        let s = parse(SAMPLE).unwrap();
+        let p = s.horizontal.unwrap().placement;
+        assert_eq!(p.caret.anchor.on, AnchorBox::Frame);
+        assert_eq!(p.caret_above.anchor.pos, Pos9::BOTTOM_LEFT);
+        assert!(p.avoid_caret, "缺省避让光标行");
+        assert_eq!(p.clamp, Clamp::Frame);
+    }
+
+    #[test]
+    fn caret_point_accepts_name_or_table() {
+        let s = parse(
+            r#"
+[skin.horizontal.frame]
+image = "a"
+[skin.horizontal.placement]
+caret = { anchor = "frame.top_left", offset = [180, 260] }
+caret_above = "content.bottom_left"
+avoid_caret = false
+clamp = "all"
+"#,
+        )
+        .unwrap();
+        let p = s.horizontal.unwrap().placement;
+        assert_eq!(p.caret.offset, [180.0, 260.0]);
+        assert_eq!(p.caret.anchor.pos, Pos9::TOP_LEFT);
+        assert_eq!(p.caret_above.anchor.on, AnchorBox::Content);
+        assert_eq!(p.caret_above.offset, [0.0, 0.0]);
+        assert!(!p.avoid_caret);
+        assert_eq!(p.clamp, Clamp::All);
+    }
+
+    #[test]
+    fn top_level_skin_survives_normalize_and_reaches_resolved() {
+        let n = crate::normalize::normalize_theme(SAMPLE.parse::<Value>().unwrap());
+        assert!(
+            n.get("views").and_then(|v| v.get("skin")).is_none(),
+            "skin 不是视图节点，不能被收进 views"
+        );
+        let t: crate::schema::Theme = n.try_into().unwrap();
+        let r = crate::resolve::resolve(&t, false, &[]);
+        assert_eq!(r.skin.unwrap().horizontal.unwrap().frame.image, "frame_h");
+    }
+
+    #[test]
+    fn child_variant_replaces_base_variant_whole() {
+        let mut base: Value = "[skin.horizontal.frame]\nimage = \"b\"\nstretch_x = [[1, 2]]\n[skin.vertical.frame]\nimage = \"bv\"".parse().unwrap();
+        let over: Value = "[skin.horizontal.frame]\nimage = \"c\"".parse().unwrap();
+        replace_inherited_variants(&mut base, &over);
+        let merged = crate::theme::merge(base, over);
+        let s: Skin = merged.get("skin").cloned().unwrap().try_into().unwrap();
+        let s = resolve_skin(&s).unwrap();
+        let h = s.horizontal.unwrap();
+        assert_eq!(h.frame.image, "c");
+        assert_eq!(
+            h.frame.stretch_x,
+            Stretch::Whole(BandFill::Stretch),
+            "base 的 stretch_x 不能漏进来"
+        );
+        assert_eq!(
+            s.vertical.unwrap().frame.image,
+            "bv",
+            "没覆盖的变体照常继承"
+        );
+    }
+}

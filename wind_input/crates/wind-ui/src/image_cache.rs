@@ -181,6 +181,11 @@ fn decode_bitmap(src: &str) -> Option<image::DynamicImage> {
 ///
 /// 只看扩展名会漏掉 `data:image/svg+xml;base64,...`（它不以 `.svg` 结尾），把矢量图
 /// 丢进位图解码器 —— 那是必然失败且看不出原因的一条路。
+/// 源是否 SVG（皮肤接入层据此回退：皮肤窗体只收位图）。
+pub fn is_svg_source(src: &str) -> bool {
+    is_svg(src)
+}
+
 fn is_svg(src: &str) -> bool {
     match data_uri_mime(src) {
         Some(mime) => mime.eq_ignore_ascii_case("image/svg+xml"),
@@ -296,6 +301,52 @@ struct ImgId(u32);
 
 type FillKey = (ImgId, FillSpec, u32, u32, [u8; 4]);
 
+/// 皮肤位图键：源、倍率百万分值、目标宽高、两轴拉伸声明的摘要。
+type SkinFillKey = (ImgId, u32, u32, u32, u64);
+
+/// 按倍率缩好的源图（预乘 RGBA8）。
+struct Atlas {
+    w: u32,
+    h: u32,
+    rgba: Vec<u8>,
+}
+
+/// 两轴拉伸声明的摘要（FNV-1a over 位模式），进缓存键用。
+fn stretch_digest(x: &wind_theme::skin::Stretch, y: &wind_theme::skin::Stretch) -> u64 {
+    use wind_theme::skin::{BandFill, Stretch};
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut eat = |v: u32| {
+        for b in v.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    };
+    let fill_code = |f: BandFill| match f {
+        BandFill::Stretch => 1,
+        BandFill::Tile => 2,
+        BandFill::Round => 3,
+    };
+    for s in [x, y] {
+        match s {
+            Stretch::Whole(f) => {
+                eat(10);
+                eat(fill_code(*f));
+            }
+            Stretch::Fixed => eat(11),
+            Stretch::Bands(b) => {
+                eat(12);
+                for band in b {
+                    eat(band.from.to_bits());
+                    eat(band.to.to_bits());
+                    eat(fill_code(band.fill));
+                }
+            }
+        }
+        eat(0xFFFF);
+    }
+    h
+}
+
 #[derive(Default)]
 pub struct ImageCache {
     ids: HashMap<String, ImgId>,
@@ -308,6 +359,15 @@ pub struct ImageCache {
     /// 要问一遍原始尺寸，不缓存就是每次重新解析一遍 SVG。
     svg_sizes: HashMap<ImgId, Option<(u32, u32)>>,
     fills: HashMap<FillKey, Option<Pixmap>>,
+    /// 皮肤图集：源图按倍率缩好的预乘 RGBA（键 = 源 + 倍率百万分值），计入 `src_bytes`。
+    /// 百万分而非千分：装饰按目标宽高反推倍率，千分取整会让 3000px 的图缩到 1001 时图集成 1002，
+    /// 再整轴拉伸一次就发虚。
+    /// 图集建好即丢掉对应的源图——皮肤源图通常是几 MB 的大图，常驻的只该是目标尺寸那份。
+    atlases: HashMap<(ImgId, u32), Option<Atlas>>,
+    /// 源图尺寸。皮肤路径建完图集后丢源图，尺寸仍要能答。
+    dims: HashMap<ImgId, (u32, u32)>,
+    /// 皮肤窗体 / 装饰的目标位图，计入 `fill_bytes`。
+    skin_fills: HashMap<SkinFillKey, Option<Pixmap>>,
     /// `src` / `fills` 各自的驻留字节，对账两个预算。
     ///
     /// ⚠️ 两个计数**只在整表清空时归零**，精确性依赖「从不单独删某一条」。谁要加定向
@@ -372,6 +432,9 @@ impl ImageCache {
         self.src.clear();
         self.svg_sizes.clear();
         self.fills.clear();
+        self.atlases.clear();
+        self.dims.clear();
+        self.skin_fills.clear();
         self.src_bytes = 0;
         self.fill_bytes = 0;
         self.last_use = None;
@@ -435,6 +498,7 @@ impl ImageCache {
             // 下一张进来时再清一次。
             if self.src_bytes + bytes > SRC_BUDGET_BYTES {
                 self.src.clear();
+                self.atlases.clear();
                 self.src_bytes = 0;
             }
             self.src_bytes += bytes;
@@ -462,7 +526,130 @@ impl ImageCache {
                 size
             });
         }
-        self.decode(id, path).map(|s| (s.w, s.h))
+        if let Some(d) = self.dims.get(&id) {
+            return Some(*d);
+        }
+        let d = self.decode(id, path).map(|s| (s.w, s.h))?;
+        self.dims.insert(id, d);
+        Some(d)
+    }
+
+    /// 皮肤图集：源图按倍率 `k_micro / 1e6` 缩好的预乘 RGBA。建好后丢掉源图。
+    /// SVG 不走这里（皮肤只收位图；SVG 窗体请用旧的 `nine_slice` 之外的整图拉伸）。
+    fn atlas(&mut self, id: ImgId, path: &str, k_micro: u32) -> Option<&Atlas> {
+        let key = (id, k_micro);
+        if !self.atlases.contains_key(&key) {
+            let k = k_micro as f32 / 1_000_000.0;
+            let built = self.decode(id, path).map(|s| {
+                let (w, h) = (
+                    crate::skin::atlas_len(s.w, k),
+                    crate::skin::atlas_len(s.h, k),
+                );
+                (
+                    (s.w, s.h),
+                    Atlas {
+                        w,
+                        h,
+                        rgba: crate::skin::resample(&s.rgba, s.w, s.h, w, h),
+                    },
+                )
+            });
+            let built = built.map(|(dims, atlas)| {
+                self.dims.insert(id, dims);
+                // 丢源图，字节同步减回（见 `src_bytes` 的不变量说明）。
+                if let Some(Some(src)) = self.src.remove(&id) {
+                    self.src_bytes = self.src_bytes.saturating_sub(src.rgba.len());
+                }
+                atlas
+            });
+            let bytes = built.as_ref().map_or(0, |a| a.rgba.len());
+            if self.src_bytes + bytes > SRC_BUDGET_BYTES {
+                self.src.clear();
+                self.atlases.clear();
+                self.src_bytes = 0;
+            }
+            self.src_bytes += bytes;
+            self.atlases.insert(key, built);
+        }
+        self.atlases.get(&key).and_then(|o| o.as_ref())
+    }
+
+    /// 皮肤位图（BGRA 序 + 预乘）：源图按倍率 `k` 缩成图集，再按两轴拉伸声明（源像素）
+    /// 合成 `w×h`。窗体与装饰共用（装饰传整轴拉伸）。
+    pub fn skin_fill(
+        &mut self,
+        path: &str,
+        k: f32,
+        stretch_x: &wind_theme::skin::Stretch,
+        stretch_y: &wind_theme::skin::Stretch,
+        w: u32,
+        h: u32,
+    ) -> Option<&Pixmap> {
+        self.touch();
+        if w == 0 || h == 0 || !k.is_finite() || k <= 0.0 || is_svg(path) {
+            return None;
+        }
+        let id = self.id_of(path);
+        let k_micro = ((k * 1_000_000.0).round() as u32).max(1);
+        let key = (id, k_micro, w, h, stretch_digest(stretch_x, stretch_y));
+        if !self.skin_fills.contains_key(&key) {
+            let (sw, sh) = self.src_size(path)?;
+            let built = self.atlas(id, path, k_micro).and_then(|a| {
+                use crate::skin::{compose, map_axis, src_segments, taps};
+                let xs = taps(&map_axis(
+                    &src_segments(stretch_x, sw as f32),
+                    sw as f32,
+                    a.w,
+                    w,
+                ));
+                let ys = taps(&map_axis(
+                    &src_segments(stretch_y, sh as f32),
+                    sh as f32,
+                    a.h,
+                    h,
+                ));
+                let rgba = compose(&a.rgba, a.w, &xs, &ys);
+                let mut pm = Pixmap::new(w, h)?;
+                for (p, c) in pm.pixels_mut().iter_mut().zip(rgba.as_chunks::<4>().0) {
+                    // 已预乘；R/B 交换以适配 BGRA 缓冲。
+                    *p = PremultipliedColorU8::from_rgba(c[2], c[1], c[0], c[3])
+                        .unwrap_or_else(transparent);
+                }
+                Some(pm)
+            });
+            let bytes = built.as_ref().map_or(0, |pm| pm.data().len());
+            if self.fill_bytes + bytes > FILL_BUDGET_BYTES {
+                self.fills.clear();
+                self.skin_fills.clear();
+                self.fill_bytes = 0;
+            }
+            self.fill_bytes += bytes;
+            self.skin_fills.insert(key, built);
+        }
+        self.skin_fills.get(&key).and_then(|o| o.as_ref())
+    }
+
+    /// 皮肤某轴的最小目标长度与「倍率下的自然长度」（设备像素）：`(min_w, min_h, nat_w, nat_h)`。
+    /// 只要源图尺寸，不建图集。
+    pub fn skin_metrics(
+        &mut self,
+        path: &str,
+        k: f32,
+        stretch_x: &wind_theme::skin::Stretch,
+        stretch_y: &wind_theme::skin::Stretch,
+    ) -> Option<(u32, u32, u32, u32)> {
+        use crate::skin::{atlas_len, min_len, src_segments};
+        self.touch();
+        let (sw, sh) = self.src_size(path)?;
+        let k_micro = ((k * 1_000_000.0).round() as u32).max(1);
+        let k = k_micro as f32 / 1_000_000.0;
+        let (aw, ah) = (atlas_len(sw, k), atlas_len(sh, k));
+        Some((
+            min_len(&src_segments(stretch_x, sw as f32), sw as f32, aw),
+            min_len(&src_segments(stretch_y, sh as f32), sh as f32, ah),
+            aw,
+            ah,
+        ))
     }
 
     /// 取（或构建）目标尺寸填充位图（BGRA 序 + 预乘）。
@@ -492,6 +679,7 @@ impl ImageCache {
             let bytes = built.as_ref().map_or(0, |pm| pm.data().len());
             if self.fill_bytes + bytes > FILL_BUDGET_BYTES {
                 self.fills.clear();
+                self.skin_fills.clear();
                 self.fill_bytes = 0;
             }
             self.fill_bytes += bytes;

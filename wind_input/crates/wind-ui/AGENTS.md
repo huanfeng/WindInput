@@ -16,6 +16,7 @@
 | `src/wake.rs` | UI 线程唤醒原语：Windows＝auto-reset 事件 + `MsgWaitForMultipleObjectsEx`，非 Windows＝条件变量。消息循环据此「睡到有事发生」，取代早先的固定 8ms 轮询 |
 | `src/window.rs` | `LayeredWindow`：Win32 `UpdateLayeredWindow` 封装 + `WindowMouse` 鼠标 trait + 非 Windows mock；wnd_proc 鼠标分发 |
 | `src/view.rs` | **实际盒模型引擎**：measure→arrange→paint + 命中矩形提取；圆角/边框/阴影/渐变/九宫格背景图/z 层。各窗口共用 |
+| `src/skin.rs` + `src/candidate_window/skin_frame.rs` | 异形皮肤：多段切片轴映射、面积平均缩放、窗体合成（纯函数）+ 候选窗接入（外扩布局、绘制、对齐点、装饰不拖动）；本机出图用 `examples/skin_preview.rs` |
 | `src/candidate_window.rs` | 候选窗：从候选构建 View 树、布局、绘制、鼠标命中/悬停防抖、翻页；含 `CandidateWindowConfig`（`CandidateItem` 已下沉 wind-ui-types，原路径再导出） |
 | `src/toolbar.rs` | 常驻工具栏窗口（中英/方案/标点/全半角），可拖动，命中回送 `ToolbarAction`；横/纵朝向见 `bar_layout` |
 | `src/popup_menu.rs` | 级联弹出菜单（右键候选菜单 + 功能主菜单）；多级子菜单、勾选态、键盘导航经协调器 `MenuKey` 转发 |

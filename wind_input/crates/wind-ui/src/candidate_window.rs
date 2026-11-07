@@ -450,6 +450,20 @@ pub struct CandidateWindow {
     theme: wind_theme::Resolved,
     /// 协调器下发的原始主题（未叠外观覆盖）。只供 [`Self::refresh_effective_theme`] 读。
     theme_source: wind_theme::Resolved,
+    /// 异形皮肤在当前 DPI / 字号下的几何；None = 本帧不启用皮肤。每帧渲染前重算。
+    skin_geom: Option<skin_frame::SkinGeom>,
+    /// 本帧是否把穿透装饰拆到独立窗口：只有本地窗口路径（Windows `show`）置位。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    split_pass_decor: bool,
+    /// 拆出来的穿透装饰像素（与主窗口同尺寸同位置）+ 是否放在主窗口下面。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pass_layer: Option<(Vec<u8>, bool)>,
+    /// 穿透窗口（`WS_EX_TRANSPARENT`，点击直达底下的应用）。首次用到才建。
+    #[cfg(windows)]
+    pass_window: Option<LayeredWindow>,
+    /// 穿透窗口建不出来：之后不再拆，穿透装饰回落到主窗口（按 block）。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pass_window_failed: bool,
     /// 用户外观字体（`ui.font.family`，已 trim）；空 = 跟随主题节点字族。
     user_font_family: String,
     /// 用户全局字重（`ui.font.weight`）；0 = 不指定（取 [`Self::family_weight`]，再无则常规）。
@@ -555,6 +569,9 @@ impl CandidateWindow {
         let tip_for = Rc::new(Cell::new(-1));
         let mouse = Rc::new(RefCell::new(CandidateMouse {
             hit_rects: Vec::new(),
+            skin_frame: None,
+            skin_decor: Vec::new(),
+            pass_hwnd: None,
             events,
             last_hover: -1,
             last_cursor: (i32::MIN, i32::MIN),
@@ -568,6 +585,7 @@ impl CandidateWindow {
             drag_anchor: (0, 0),
             drag_origin: (0, 0),
             drag_pin: None,
+            drag_pin_margin: (0, 0),
             margin: (0, 0, 0, 0),
             double_click: crate::double_click::DoubleClick::new(),
             tip_hold: TipHold::Off,
@@ -611,6 +629,12 @@ impl CandidateWindow {
             window_at: crate::window::window_at,
             theme: wind_theme::Resolved::default(),
             theme_source: wind_theme::Resolved::default(),
+            skin_geom: None,
+            split_pass_decor: false,
+            pass_layer: None,
+            #[cfg(windows)]
+            pass_window: None,
+            pass_window_failed: false,
             user_font_family: String::new(),
             user_font_weight: 0,
             family_weight: 0,
@@ -1591,7 +1615,9 @@ impl CandidateWindow {
     #[cfg(windows)]
     pub fn show(&mut self) {
         let t_start = Instant::now();
+        self.split_pass_decor = true;
         let frame = self.render_frame();
+        self.split_pass_decor = false;
         let t_render = t_start.elapsed();
         match frame {
             None => {
@@ -1618,6 +1644,7 @@ impl CandidateWindow {
                 if reposition {
                     self.window.show(frame.screen_x, frame.screen_y);
                 }
+                self.present_pass_layer(frame.screen_x, frame.screen_y, frame.width, frame.height);
                 let t_pos = t_pos0.elapsed();
                 self.presented = ok.then_some(want);
                 self.update_tooltip(frame.screen_x, frame.screen_y);
@@ -1665,19 +1692,25 @@ impl CandidateWindow {
         let t_start = Instant::now();
 
         // 构建并测量 View 树
+        self.refresh_skin_geom();
         let mut root = self.build_tree(false);
         let t_build = t_start.elapsed();
 
         // 窗口投影：高斯软影四向扩边（与 Go shadowMargins 对齐），内容布局起点平移到 (ml, mt)，
         // 窗口显示位置再左上回移 (ml, mt) → 视觉锚点/命中坐标与无阴影时一致，阴影四面溢出。
         let shadow = self.shadow_params();
-        let (ml, mt, mr, mb) = match &shadow {
-            Some(s) => s.margins(),
-            None => (0, 0, 0, 0),
-        };
-
         let t_layout0 = Instant::now();
-        root.layout(ml as f32, mt as f32, &self.text_renderer);
+        let (ml, mt, mr, mb) = match self.skin_layout(&mut root) {
+            Some(m) => m,
+            None => {
+                let m = match &shadow {
+                    Some(s) => s.margins(),
+                    None => (0, 0, 0, 0),
+                };
+                root.layout(m.0 as f32, m.1 as f32, &self.text_renderer);
+                m
+            }
+        };
         let (w_f, h_f) = root.measured_size();
         self.note_grid_box((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
@@ -1702,6 +1735,7 @@ impl CandidateWindow {
         let safety_max_w = self.screen_safety_max_width_px().saturating_sub(ml + mr);
         content_w = content_w.min(safety_max_w.max(self.min_window_w_px()));
         let content_h = (h_f.ceil() as u32).max(24);
+        self.skin_fit_frame(content_w, content_h);
         let width = content_w + ml + mr;
         let height = content_h + mt + mb;
         let t_layout = t_layout0.elapsed();
@@ -1720,6 +1754,7 @@ impl CandidateWindow {
             content_h,
             self.placed_above,
             offset,
+            &self.skin_place_anchor(1.0),
         );
         self.placed_above = above;
         // 位置稳定性：窗口已显示且新位置与上次内容锚点微移(<4px*scale)→保持原位，吞掉 caret 微抖。
@@ -1748,6 +1783,11 @@ impl CandidateWindow {
         {
             let mut m = self.mouse.borrow_mut();
             m.hit_rects = self.hit_rects.clone();
+            m.skin_frame = self.skin_geom.as_ref().map(|g| g.frame_rect());
+            m.skin_decor = self
+                .skin_geom
+                .as_ref()
+                .map_or_else(Vec::new, |g| g.decor_rects());
             m.last_hover = -1;
         }
 
@@ -1779,7 +1819,13 @@ impl CandidateWindow {
                     radius,
                 );
             }
+            if let Some(g) = &self.skin_geom {
+                g.paint(buf, width, height, false, false);
+            }
             root.paint(buf, width, height, &self.text_renderer);
+            if let Some(g) = &self.skin_geom {
+                g.paint(buf, width, height, true, false);
+            }
         }
         let t_paint = t_paint0.elapsed();
 
@@ -1840,16 +1886,23 @@ impl CandidateWindow {
                 .set_base_size(self.base_font_logical * new_scale);
         }
 
+        self.refresh_skin_geom();
         let mut root = self.build_tree(false);
         // macOS 改用系统原生 NSPanel 阴影（.app 端 panel.hasShadow + invalidateShadow，自动沿
         // 圆角内容形状投影），位图内【不画软件阴影】：margin 归零 → 定位精确贴 caret、无偏移，
         // 观感也更 native。software_shadow=false → Swift 侧启用系统窗口阴影。
         let shadow: Option<crate::view::SoftShadow> = None;
-        let (ml, mt, mr, mb) = match &shadow {
-            Some(s) => s.margins(),
-            None => (0, 0, 0, 0),
+        let (ml, mt, mr, mb) = match self.skin_layout(&mut root) {
+            Some(m) => m,
+            None => {
+                let m = match &shadow {
+                    Some(s) => s.margins(),
+                    None => (0, 0, 0, 0),
+                };
+                root.layout(m.0 as f32, m.1 as f32, &self.text_renderer);
+                m
+            }
         };
-        root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
         self.note_grid_box((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
@@ -1870,6 +1923,7 @@ impl CandidateWindow {
         let safety_max_w = self.screen_safety_max_width_px().saturating_sub(ml + mr);
         content_w = content_w.min(safety_max_w.max(self.min_window_w_px()));
         let content_h = (h_f.ceil() as u32).max(24);
+        self.skin_fit_frame(content_w, content_h);
         let width = content_w + ml + mr;
         let height = content_h + mt + mb;
 
@@ -1884,17 +1938,20 @@ impl CandidateWindow {
                 // 否则 flip_when_above / swap_preedit_when_above 会让内容在一个不动的窗口里倒序。
                 self.placed_above = false;
                 self.last_content_pos = None;
+                // 本路径坐标是逻辑点，尺寸与扩边是设备像素：先换成逻辑点再交给 place_fixed。
+                // 扩边来自皮肤装饰（macOS 不画软阴影）；place_fixed 返回**窗口**左上，加回扩边
+                // 才是内容左上，与下面跟随光标分支的 (px, py) 同义（出口处再统一减扩边）。
+                let s = self.scale.max(1.0);
+                let lg = |v: u32| (v as f32 / s).round() as i32;
                 let (wx, wy) = Self::place_fixed(
                     f,
                     self.x,
                     self.y,
-                    width,
-                    height,
-                    (ml as i32, mt as i32, mr as i32, mb as i32),
+                    lg(width) as u32,
+                    lg(height) as u32,
+                    (lg(ml), lg(mt), lg(mr), lg(mb)),
                 );
-                // place_fixed 返回**窗口**左上（含阴影扩边）；macOS 不画软阴影，扩边恒 0，
-                // 故这里窗口左上就是内容左上，与下面跟随光标分支的 (px, py) 同义。
-                (wx, wy, true)
+                (wx + lg(ml), wy + lg(mt), true)
             }
             None => {
                 // place_window 约定 caret_y 为光标【底端】（下方锚点=底端+gap），但 macOS .app 的
@@ -1909,6 +1966,7 @@ impl CandidateWindow {
                     content_h,
                     self.placed_above,
                     offset,
+                    &self.skin_place_anchor(1.0 / self.scale.max(1.0)),
                 );
                 self.placed_above = above;
                 let (px, py) = match self.last_content_pos {
@@ -1938,6 +1996,11 @@ impl CandidateWindow {
         {
             let mut m = self.mouse.borrow_mut();
             m.hit_rects = self.hit_rects.clone();
+            m.skin_frame = self.skin_geom.as_ref().map(|g| g.frame_rect());
+            m.skin_decor = self
+                .skin_geom
+                .as_ref()
+                .map_or_else(Vec::new, |g| g.decor_rects());
             m.last_hover = -1;
         }
 
@@ -1962,7 +2025,13 @@ impl CandidateWindow {
                 radius,
             );
         }
+        if let Some(g) = &self.skin_geom {
+            g.paint(&mut buf, width, height, false, false);
+        }
         root.paint(&mut buf, width, height, &self.text_renderer);
+        if let Some(g) = &self.skin_geom {
+            g.paint(&mut buf, width, height, true, false);
+        }
 
         self.mark_visible();
         // 关键单位换算：ml/mt/blur 都是 device px（含 scale），而 screen_x/y 是 .app 使用的【逻辑点】
@@ -2026,13 +2095,20 @@ impl CandidateWindow {
                 .set_base_size(self.base_font_logical * new_scale);
         }
 
+        self.refresh_skin_geom();
         let mut root = self.build_tree(false);
         let shadow = self.shadow_params();
-        let (ml, mt, mr, mb) = match &shadow {
-            Some(s) => s.margins(),
-            None => (0, 0, 0, 0),
+        let (ml, mt, mr, mb) = match self.skin_layout(&mut root) {
+            Some(m) => m,
+            None => {
+                let m = match &shadow {
+                    Some(s) => s.margins(),
+                    None => (0, 0, 0, 0),
+                };
+                root.layout(m.0 as f32, m.1 as f32, &self.text_renderer);
+                m
+            }
         };
-        root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
         self.note_grid_box((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
@@ -2069,13 +2145,23 @@ impl CandidateWindow {
             );
         }
         let content_h = (h_f.ceil() as u32).max(24);
+        self.skin_fit_frame(content_w, content_h);
         let width = content_w + ml + mr;
         let height = content_h + mt + mb;
 
         // ── 定位：三级优先级 drag_pin > fixed_pos > place_window(跟随光标) ──
         // 用户已手动拖动过本次组合的候选窗 → 冻结落位：位置固定、上/下方排列也不再翻转，
         // 否则窗口停在原处但内容突然倒序，视觉上会"自己变了个样"。
-        let drag_pin = self.mouse.borrow().drag_pin;
+        // 落位按写入时的扩边记；换算到本帧扩边（无皮肤时两者相等，原样不变）。
+        let drag_pin = {
+            let m = self.mouse.borrow();
+            m.drag_pin.map(|(x, y)| {
+                (
+                    x + m.drag_pin_margin.0 - ml as i32,
+                    y + m.drag_pin_margin.1 - mt as i32,
+                )
+            })
+        };
         let mut screen_xy: Option<(i32, i32)> = match (drag_pin, self.fixed_pos) {
             // 拖动落定：placed_above 保持不变（同上，避免窗口不动而内容倒序）。
             (Some(p), _) => Some(p),
@@ -2108,6 +2194,7 @@ impl CandidateWindow {
                 content_h,
                 self.placed_above,
                 offset,
+                &self.skin_place_anchor(1.0),
             );
             self.placed_above = above;
             let (px, py) = match self.last_content_pos {
@@ -2135,6 +2222,11 @@ impl CandidateWindow {
         {
             let mut m = self.mouse.borrow_mut();
             m.hit_rects = self.hit_rects.clone();
+            m.skin_frame = self.skin_geom.as_ref().map(|g| g.frame_rect());
+            m.skin_decor = self
+                .skin_geom
+                .as_ref()
+                .map_or_else(Vec::new, |g| g.decor_rects());
             m.last_hover = -1;
         }
 
@@ -2158,7 +2250,26 @@ impl CandidateWindow {
                 radius,
             );
         }
+        // 穿透装饰：只在本地窗口路径（show 置位 split_pass_decor）拆到独立的穿透窗口；
+        // host-render 等路径照旧画进主缓冲（按 block 处理）。
+        let split = self.split_pass_decor
+            && !self.pass_window_failed
+            && self.skin_geom.as_ref().is_some_and(|g| g.has_pass());
+        if let Some(g) = &self.skin_geom {
+            g.paint(&mut buf, width, height, false, split);
+        }
         root.paint(&mut buf, width, height, &self.text_renderer);
+        if let Some(g) = &self.skin_geom {
+            g.paint(&mut buf, width, height, true, split);
+        }
+        self.pass_layer = match (&self.skin_geom, split) {
+            (Some(g), true) => {
+                let mut pass = vec![0u8; (width * height * 4) as usize];
+                g.paint_pass(&mut pass, width, height);
+                Some((pass, g.pass_below()))
+            }
+            _ => None,
+        };
 
         self.mark_visible();
         // 上方三级定位分支穷尽，此处必为 Some；debug 下断言，release 兜底到光标处而非
@@ -2508,7 +2619,34 @@ impl CandidateWindow {
     ///
     /// 翻转/钳制整段在 `cfg(windows)` 内（靠 `GetMonitorInfoW` 取显示器边界），非 Windows
     /// 直接返回下方锚点，于是那几个只服务于翻转的局部量在此平台无人读写。
+    /// 皮肤避让：上下方位与偏移都定了之后，若有装饰压住光标所在行（`caret_y - caret_h ..
+    /// caret_y`，上下各留 gap），把窗口沿远离光标的方向推开到不相交为止。只比纵向——横向上
+    /// 光标行左右都可能是正在编辑的文字。`avoid` 为相对窗口左上的矩形。
+    fn avoid_caret_line(
+        y: i32,
+        above: bool,
+        caret_y: i32,
+        caret_h: i32,
+        avoid: &[(i32, i32, i32, i32)],
+    ) -> i32 {
+        let gap = 2;
+        let (line_top, line_bottom) = (caret_y - caret_h.max(0) - gap, caret_y + gap);
+        let mut push = 0;
+        for &(_, ry, _, rh) in avoid {
+            let (top, bottom) = (y + ry, y + ry + rh);
+            if top < line_bottom && bottom > line_top {
+                push = if above {
+                    push.max(bottom - line_top)
+                } else {
+                    push.max(line_bottom - top)
+                };
+            }
+        }
+        if above { y - push } else { y + push }
+    }
+
     #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
+    #[allow(clippy::too_many_arguments)]
     fn place_window(
         caret_x: i32,
         caret_y: i32,
@@ -2517,11 +2655,18 @@ impl CandidateWindow {
         h: u32,
         sticky_above: bool,
         offset: (i32, i32),
+        anchor: &skin_frame::PlaceAnchor,
     ) -> (i32, i32, bool) {
         let (wi, hi) = (w as i32, h as i32);
         // 净锚点（不含 Y 偏移）：方位决策必须基于它，见 apply_offset_y 的说明。
+        // 皮肤对齐点在这里折进锚点：下方让对齐点落在光标底端 + gap，上方让它落在光标顶端 − gap。
         let (ax, below_y, above_y) = Self::caret_anchors(caret_x, caret_y, caret_h, hi, offset.0);
-        let (mut x, mut y) = (ax, Self::apply_offset_y(below_y, false, offset.1));
+        let (below_y, above_y) = (below_y - anchor.below.1, above_y + anchor.above.1);
+        let (cl, ct, cr, cb) = anchor.clamp;
+        let (mut x, mut y) = (
+            ax - anchor.below.0,
+            Self::apply_offset_y(below_y, false, offset.1),
+        );
         let mut above = false;
         #[cfg(windows)]
         {
@@ -2558,8 +2703,8 @@ impl CandidateWindow {
                     // 可行性判定用**净锚点**（不含主题偏移）：偏移只该改变距离，
                     // 不该左右「往上还是往下」——含偏移会让 off_y 越大越容易判成两边都
                     // 放不下，落回下方再被钳到屏幕底、压住光标。
-                    let below_ok = below_y + hi <= wa.bottom;
-                    let above_ok = above_y >= wa.top;
+                    let below_ok = below_y + hi + cb <= wa.bottom;
+                    let above_ok = above_y - ct >= wa.top;
                     // 垂直方位决策：
                     // - 已在上方（sticky）→ 只要上方放得下就保持上方；上方放不下才回落下方（需求 4）。
                     // - 否则默认下方，仅当下方放不下且上方放得下才上翻。
@@ -2574,33 +2719,47 @@ impl CandidateWindow {
                         above,
                         offset.1,
                     );
+                    if above {
+                        x = ax - anchor.above.0;
+                    }
+                    y = Self::avoid_caret_line(y, above, caret_y, caret_h, &anchor.avoid);
                     // 方位定后的越界兜底：贴住对应屏幕边。
                     // 偏移可能把窗口顶出工作区，这里兜回来——所以偏移必须在钳制之前施加。
+                    // 皮肤 clamp = "all" 时 (cl, ct, cr, cb) 是装饰外扩，连装饰一起留在屏内；否则全 0。
                     if above {
-                        if y < wa.top {
-                            y = wa.top;
+                        if y - ct < wa.top {
+                            y = wa.top + ct;
                         }
-                    } else if y + hi > wa.bottom {
-                        y = wa.bottom - hi;
-                        if y < wa.top {
-                            y = wa.top;
+                    } else if y + hi + cb > wa.bottom {
+                        y = wa.bottom - hi - cb;
+                        if y - ct < wa.top {
+                            y = wa.top + ct;
                         }
                     }
                     // 左右钳制（右溢出左移；左溢出贴左）。
-                    if x + wi > wa.right {
-                        x = wa.right - wi;
+                    if x + wi + cr > wa.right {
+                        x = wa.right - wi - cr;
                     }
-                    if x < wa.left {
-                        x = wa.left;
+                    if x - cl < wa.left {
+                        x = wa.left + cl;
                     }
                 }
             }
+        }
+        // 非 Windows 不做翻转，恒在下方；避让照做（它不依赖显示器几何）。
+        #[cfg(not(windows))]
+        {
+            y = Self::avoid_caret_line(y, false, caret_y, caret_h, &anchor.avoid);
         }
         (x, y, above)
     }
 
     /// 窗口投影参数（共享 SoftShadow；读 RvViews 顶层 shadow_* 字段）。
     fn shadow_params(&self) -> Option<crate::view::SoftShadow> {
+        // 皮肤自带外形与阴影，不叠软件阴影。
+        if self.skin_geom.is_some() {
+            return None;
+        }
         let v = &self.theme.views;
         crate::view::SoftShadow::build(
             v.shadow_offset_x,
@@ -2867,7 +3026,10 @@ impl CandidateWindow {
             b: e.bottom.map(|x| x.resolve(s, 0.0)).unwrap_or(d[2] * s),
             l: e.left.map(|x| x.resolve(s, 0.0)).unwrap_or(d[3] * s),
         };
-        let window_pad = edges_or(&v.window.padding, [6.0, 8.0, 6.0, 8.0]);
+        let window_pad = match &self.skin_geom {
+            Some(g) => g.insets,
+            None => edges_or(&v.window.padding, [6.0, 8.0, 6.0, 8.0]),
+        };
         // 内容宽度预算（设备 px）：与渲染入口钳 `content_w` 用的是**同一套算法**（主题
         // vertical_max_width ⊕ 恒生效的屏幕安全网），提前在这里算出来是为了在下面构建候选/
         // 编码栏文字节点时就按预算裁字（带省略号）——而不是等测完整棵树的自然宽度再回头夹
@@ -3128,43 +3290,53 @@ impl CandidateWindow {
             - preedit_bar_right_reserve_px)
             .max(min_text_w);
 
-        let mut root = View::container(Layout::Column)
-            .bg(col(v.window.bg_color, wind_theme::fallback::WINDOW_BG))
-            .border(
-                col(v.window.border_color, [200, 200, 200, 200]),
-                dim(v.window.border_width, 1.0).max(1.0),
-            )
-            .radius(dim(v.window.border_radius, 8.0))
-            .clip_to_corners()
-            .pad(window_pad)
-            // band 间距（预编辑条↔候选列表↔翻页）= 主题 candidate_list.band_gap，未配→0（与 Go 一致）。
-            .gap(dim(v.window_gap, 0.0))
-            // ── 窗口尺寸下限（ui.candidate.min_window_width_* / min_window_height_*）──
-            // 下限量的是整个窗口，故落在根容器上：候选、编码栏、翻页栏都在里面，凑不满的
-            // 部分留空，候选自身照常按内容排布（不拉伸、不改间距）。
-            //
-            // ⛔ 不要改成在渲染入口钳 `content_w`/`content_h`：那是 `root.measured_size()`
-            // 之后的产物，调大它不会回头改 root 的 mw/mh ⇒ 窗口缓冲变大而 root 背景/边框仍按
-            // 旧尺寸画，边上露一条透明带，竖排 `fill_cross` 的高亮也不跟着撑。上限（主题
-            // `vertical_max_width`）能那么写是因为它是裁切语义，下限不是。
-            .min_w(min_win_w)
-            .min_h(min_win_h)
-            // 高度富余落在**顶部**（仅上翻时）：窗口在光标上方时底边贴光标，空白压在下面
-            // 会把候选整体顶离光标，位置反而随内容抖动——正是本功能要消除的东西。
-            // 与 min_rows 的占位行「反转时补顶部」同一判据。
-            .main(if above { Align::End } else { Align::Start });
-        // 窗口背景图（九宫格/拉伸位图皮肤，如 jidian 的 panel）。
-        if let Some(vi) = self.rv_image(v.window.bg_image.as_ref()) {
-            root = root.bg_image(vi);
+        // 皮肤生效：根容器的盒即窗体——不画底色 / 边框 / 圆角（外形由皮肤图决定），
+        // 内边距换成皮肤内容框，最小尺寸取窗体固定段之和。
+        let skin = self.skin_geom.as_ref();
+        let (skin_min_w, skin_min_h) = skin.map_or((0.0, 0.0), |g| (g.min_w, g.min_h));
+        let mut root = match skin {
+            Some(_) => View::container(Layout::Column).pad(window_pad),
+            None => View::container(Layout::Column)
+                .bg(col(v.window.bg_color, wind_theme::fallback::WINDOW_BG))
+                .border(
+                    col(v.window.border_color, [200, 200, 200, 200]),
+                    dim(v.window.border_width, 1.0).max(1.0),
+                )
+                .radius(dim(v.window.border_radius, 8.0))
+                .clip_to_corners()
+                .pad(window_pad),
         }
-        // 窗口背景渐变（叠在底色上、背景图下）。
-        if let Some(g) = self.rv_gradient(v.window.bg_gradient.as_ref()) {
-            root = root.bg_gradient(g);
-        }
-        // 窗口 z 层覆盖图（如 jidian 右下角 mark 水印）。
-        let win_layers = self.rv_layers(&v.window.layers);
-        if !win_layers.is_empty() {
-            root = root.layers(win_layers);
+        // band 间距（预编辑条↔候选列表↔翻页）= 主题 candidate_list.band_gap，未配→0（与 Go 一致）。
+        .gap(dim(v.window_gap, 0.0))
+        // ── 窗口尺寸下限（ui.candidate.min_window_width_* / min_window_height_*）──
+        // 下限量的是整个窗口，故落在根容器上：候选、编码栏、翻页栏都在里面，凑不满的
+        // 部分留空，候选自身照常按内容排布（不拉伸、不改间距）。
+        //
+        // ⛔ 不要改成在渲染入口钳 `content_w`/`content_h`：那是 `root.measured_size()`
+        // 之后的产物，调大它不会回头改 root 的 mw/mh ⇒ 窗口缓冲变大而 root 背景/边框仍按
+        // 旧尺寸画，边上露一条透明带，竖排 `fill_cross` 的高亮也不跟着撑。上限（主题
+        // `vertical_max_width`）能那么写是因为它是裁切语义，下限不是。
+        .min_w(min_win_w.max(skin_min_w))
+        .min_h(min_win_h.max(skin_min_h))
+        // 高度富余落在**顶部**（仅上翻时）：窗口在光标上方时底边贴光标，空白压在下面
+        // 会把候选整体顶离光标，位置反而随内容抖动——正是本功能要消除的东西。
+        // 与 min_rows 的占位行「反转时补顶部」同一判据。
+        .main(if above { Align::End } else { Align::Start });
+        // 窗口背景图 / 渐变 / z 层：皮肤生效时由皮肤接管，不再叠。
+        if skin.is_none() {
+            // 窗口背景图（九宫格/拉伸位图皮肤，如 jidian 的 panel）。
+            if let Some(vi) = self.rv_image(v.window.bg_image.as_ref()) {
+                root = root.bg_image(vi);
+            }
+            // 窗口背景渐变（叠在底色上、背景图下）。
+            if let Some(g) = self.rv_gradient(v.window.bg_gradient.as_ref()) {
+                root = root.bg_gradient(g);
+            }
+            // 窗口 z 层覆盖图（如 jidian 右下角 mark 水印）。
+            let win_layers = self.rv_layers(&v.window.layers);
+            if !win_layers.is_empty() {
+                root = root.layers(win_layers);
+            }
         }
 
         // 预编辑行（主题背景带 + 文本色）。完整渲染 preedit_bar 自身背景：底色 + 位图背景 +
@@ -4606,8 +4778,79 @@ impl CandidateWindow {
         root
     }
 
+    /// 把本帧拆出的穿透装饰推到穿透窗口：与主窗口同位置同尺寸；装饰全在窗体下时插到主窗口
+    /// 下面，否则置于其上。本帧没有穿透装饰则收起。
+    #[cfg(windows)]
+    fn present_pass_layer(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
+        };
+        let Some((pixels, below)) = self.pass_layer.take() else {
+            self.hide_pass_window();
+            return;
+        };
+        if self.pass_window.is_none() {
+            match LayeredWindow::create(None, w.max(1), h.max(1), "WindInputCandidateDecor") {
+                Ok(pw) => {
+                    // 鼠标穿透：同 caret_overlay，LayeredWindow 默认没有这一位，创建后补上。
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_TRANSPARENT,
+                        };
+                        let ex = GetWindowLongPtrW(pw.hwnd(), GWL_EXSTYLE);
+                        SetWindowLongPtrW(
+                            pw.hwnd(),
+                            GWL_EXSTYLE,
+                            ex | WS_EX_TRANSPARENT.0 as isize,
+                        );
+                    }
+                    self.pass_window = Some(pw);
+                }
+                Err(e) => {
+                    tracing::warn!("skin: 穿透窗口创建失败，穿透装饰改画进候选窗: {e}");
+                    self.pass_window_failed = true;
+                    return;
+                }
+            }
+        }
+        let main = self.window.hwnd();
+        let Some(pw) = self.pass_window.as_mut() else {
+            return;
+        };
+        let len = (w * h * 4) as usize;
+        pw.resize(w, h);
+        if pw.buffer()[..len] != pixels[..len] {
+            pw.buffer_mut()[..len].copy_from_slice(&pixels[..len]);
+            if let Err(e) = pw.update() {
+                tracing::warn!("skin: 穿透窗口 update 失败: {e}");
+            }
+        }
+        unsafe {
+            let insert_after = if below { main } else { HWND_TOPMOST };
+            let _ = SetWindowPos(
+                pw.hwnd(),
+                insert_after,
+                x,
+                y,
+                w as i32,
+                h as i32,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+        self.mouse.borrow_mut().pass_hwnd = Some(pw.hwnd());
+    }
+
+    fn hide_pass_window(&mut self) {
+        #[cfg(windows)]
+        if let Some(pw) = &self.pass_window {
+            pw.hide();
+        }
+        self.mouse.borrow_mut().pass_hwnd = None;
+    }
+
     pub fn hide(&mut self) {
         self.window.hide();
+        self.hide_pass_window();
         #[cfg(windows)]
         {
             self.presented = None;
@@ -4640,6 +4883,7 @@ impl CandidateWindow {
     #[cfg(windows)]
     pub fn hide_local_window_only(&mut self) {
         self.window.hide();
+        self.hide_pass_window();
         self.presented = None;
         // 宿主接管绘制：本地气泡无条件收（光标在上面也一样），宽限只按候选悬停走。
         if let Some(t) = self.tooltip.as_mut() {
@@ -4752,6 +4996,11 @@ impl CandidateWindow {
 /// 命中矩形为窗口本地坐标（绘制于 0,0），与 WM_* 的 client 坐标一致。
 pub struct CandidateMouse {
     hit_rects: Vec<(i32, Rect)>,
+    /// 皮肤：窗体矩形与装饰矩形（窗口坐标）。落在装饰上、又不在窗体内的点不起拖。
+    skin_frame: Option<Rect>,
+    skin_decor: Vec<Rect>,
+    /// 皮肤穿透窗口：拖动时跟着主窗口一起挪。
+    pass_hwnd: Option<HWND>,
     events: Sender<UiEvent>,
     /// 已生效（已发出）的悬停目标，去重用
     last_hover: i32,
@@ -4779,6 +5028,9 @@ pub struct CandidateMouse {
     /// 拖动落定位置（窗口左上屏幕坐标）。`Some` 即"本次组合已被用户手动摆放"，
     /// 此后该组合内的每帧渲染都固定用它，不再跟随光标；`hide()`（组合结束）清空。
     drag_pin: Option<(i32, i32)>,
+    /// 写 `drag_pin` 时的扩边（左, 上）。皮肤装饰的扩边会随窗体尺寸变，渲染时据此把落位
+    /// 换算到当前扩边下，窗体才不随内容变化跳动。
+    drag_pin_margin: (i32, i32),
     /// 当前阴影扩边 (left, top, right, bottom)，每帧渲染后由 `render_frame` 同步。
     /// 窗口左上 + (left, top) = **内容**左上，即落盘用的坐标系；四个分量一起用于
     /// 按内容矩形做拖动钳制。
@@ -5114,6 +5366,12 @@ impl CandidateMouse {
         }
         -1
     }
+
+    /// 点落在皮肤装饰上、且不在窗体内：装饰只是挂件，不拖动窗口（设计 §4，P1 的 block）。
+    fn on_decor_only(&self, x: f32, y: f32) -> bool {
+        let in_frame = self.skin_frame.is_some_and(|f| f.contains(x, y));
+        !in_frame && self.skin_decor.iter().any(|r| r.contains(x, y))
+    }
 }
 
 /// 候选窗左键点选：按下记的命中 `pressed` 与松开处的命中 `hit` 是同一项才动作。
@@ -5151,6 +5409,7 @@ impl WindowMouse for CandidateMouse {
                             SetCapture(self.hwnd);
                         }
                     }
+                    _ if self.on_decor_only(x, y) => {}
                     _ => {
                         // 空白区（编码栏/内边距，非候选非翻页键）→ 起拖，整窗跟随光标。
                         // 与工具栏同构：记录光标与窗口起点，SetCapture 保证移出窗口后仍收到消息。
@@ -5192,6 +5451,7 @@ impl WindowMouse for CandidateMouse {
                     // 以真实窗口位置落定，避免累积误差
                     if let Some(pos) = self.window_origin() {
                         self.drag_pin = Some(pos);
+                        self.drag_pin_margin = (self.margin.0, self.margin.1);
                         // 上报**内容左上**（窗口左上 + 阴影扩边）：固定位置模式下协调器把它
                         // 落盘成 custom_x/custom_y；跟随模式下协调器直接忽略——那里的拖动
                         // 只是"临时挪开"，下次组合仍回到光标旁。
@@ -5236,6 +5496,7 @@ impl WindowMouse for CandidateMouse {
                 let (cx, cy) = clamp_content_to_monitor(nx, ny, w, h, self.margin);
                 // 拖动中即写 drag_pin：候选内容若在拖动期间刷新，渲染路径才不会把窗口拽回光标处。
                 self.drag_pin = Some((cx, cy));
+                self.drag_pin_margin = (self.margin.0, self.margin.1);
                 unsafe {
                     let _ = SetWindowPos(
                         self.hwnd,
@@ -5246,6 +5507,17 @@ impl WindowMouse for CandidateMouse {
                         0,
                         SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
                     );
+                    if let Some(p) = self.pass_hwnd {
+                        let _ = SetWindowPos(
+                            p,
+                            HWND_TOPMOST,
+                            cx,
+                            cy,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                        );
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -8455,6 +8727,9 @@ mod tip_hold_tests {
         };
         let m = CandidateMouse {
             hit_rects: vec![(0, r(0.0)), (1, r(20.0))],
+            skin_frame: None,
+            skin_decor: Vec::new(),
+            pass_hwnd: None,
             events: tx,
             last_hover: -1,
             last_cursor: (i32::MIN, i32::MIN),
@@ -8468,6 +8743,7 @@ mod tip_hold_tests {
             drag_anchor: (0, 0),
             drag_origin: (0, 0),
             drag_pin: None,
+            drag_pin_margin: (0, 0),
             margin: (0, 0, 0, 0),
             double_click: crate::double_click::DoubleClick::new(),
             tip_hold: TipHold::Off,
@@ -9868,6 +10144,8 @@ mod comment_above_tests {
 // 渲染 golden 对拍（Linux mock 后端才有绘制调用记录）。见模块文档。
 #[cfg(all(test, mock_text))]
 mod render_golden;
+
+mod skin_frame;
 
 /// 用户外观覆盖：阴影开关与位置偏移（ui.candidate.shadow / offset_x / offset_y）。
 ///

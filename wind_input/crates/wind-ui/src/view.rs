@@ -97,6 +97,52 @@ fn with_shadow_mask<R>(
     })
 }
 
+/// 源图原始尺寸（线程局部图片缓存）。皮肤布局要在绘制前知道它。
+pub fn image_src_size(path: &str) -> Option<(u32, u32)> {
+    IMAGE_CACHE.with(|c| c.borrow_mut().src_size(path))
+}
+
+/// 皮肤位图的最小尺寸与倍率下自然尺寸，见 [`crate::image_cache::ImageCache::skin_metrics`]。
+pub fn skin_metrics(
+    path: &str,
+    k: f32,
+    stretch_x: &wind_theme::skin::Stretch,
+    stretch_y: &wind_theme::skin::Stretch,
+) -> Option<(u32, u32, u32, u32)> {
+    IMAGE_CACHE.with(|c| c.borrow_mut().skin_metrics(path, k, stretch_x, stretch_y))
+}
+
+/// 把一块皮肤位图（窗体或装饰）画到 `rect`（设备像素，已取整）。不裁剪——装饰本来就要伸出窗体。
+#[allow(clippy::too_many_arguments)]
+pub fn paint_skin_image(
+    buf: &mut [u8],
+    buf_w: u32,
+    buf_h: u32,
+    rect: (i32, i32, u32, u32),
+    path: &str,
+    k: f32,
+    stretch_x: &wind_theme::skin::Stretch,
+    stretch_y: &wind_theme::skin::Stretch,
+    opacity: f32,
+) {
+    let (x, y, w, h) = rect;
+    IMAGE_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        let Some(fill) = cache.skin_fill(path, k, stretch_x, stretch_y, w, h) else {
+            return;
+        };
+        draw_clipped(
+            buf,
+            buf_w,
+            buf_h,
+            fill,
+            (x as f32, y as f32, w as f32, h as f32),
+            opacity,
+            None,
+        );
+    });
+}
+
 /// 绘制缓存（背景图 + 阴影蒙版）闲置回收的最早到期时刻，供 UI 消息循环登记进 `next_deadline`。
 pub fn paint_cache_next_deadline() -> Option<std::time::Instant> {
     let image = IMAGE_CACHE.with(|c| c.borrow().next_deadline());

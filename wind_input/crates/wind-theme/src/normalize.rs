@@ -37,7 +37,15 @@ const VIEW_NODE_KEYS: &[&str] = &[
 ];
 
 /// 顶层保留块（非视图节点）。
-const RESERVED_TOP: &[&str] = &["meta", "colors", "behavior", "resources", "base", "views"];
+const RESERVED_TOP: &[&str] = &[
+    "meta",
+    "colors",
+    "behavior",
+    "resources",
+    "base",
+    "views",
+    "skin",
+];
 
 /// 把扁平 TOML 根表归一化为规范嵌套形态。非 Table 顶层原样返回。
 ///

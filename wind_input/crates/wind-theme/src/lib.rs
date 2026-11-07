@@ -10,6 +10,7 @@ pub mod palette;
 pub mod resolve;
 pub mod rvnode;
 pub mod schema;
+pub mod skin;
 pub mod span;
 pub mod theme;
 

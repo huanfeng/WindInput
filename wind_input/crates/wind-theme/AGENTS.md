@@ -15,6 +15,7 @@
 | `src/normalize.rs` | 扁平人写 TOML → 规范嵌套形态：顶层视图表收入 `views.*`、`radius`→`border.radius`、`margin/padding/slice` 简写展开、`shadow.offset=[x,y]` 拆分为 `offset_x/y`、`position_offset=[x,y]`→`{x,y}`、toolbar button `chinese/english`→`mode.*` |
 | `src/palette.rs` | 调色板解析：colors 段 → `HashMap<String, Rgba>`，支持 `${var}` 多跳递归引用 + 环检测 + `{light,dark}` 变体选取 |
 | `src/resolve.rs` | 求值入口：typed `Theme` → `Resolved`；`resolve_view_node`/`resolve_state` 通用节点/状态 patch 求值；`load_resolved_dirs` 便捷入口 |
+| `src/skin.rs` | 异形皮肤 `[skin]`：schema、求值为 `RvSkin`（横 / 竖 / 嵌入变体，竖排不回退横排）、base 链上变体整表替换；设计见 docs/design/theme-skin-animation.md |
 | `src/rvnode.rs` | 渲染消费形态：`RvNode`（颜色已解析为 `Rgba`、几何保持 `Dim` 符号态）、`RvViews`（全节点集合 + 列表级几何）、`RvImage`/`RvGradient` |
 
 ## For AI Agents
