@@ -259,11 +259,14 @@ impl SkinGeom {
         }
     }
 
-    /// 装饰矩形（窗口缓冲坐标）：鼠标层据此判「装饰区不拖动」。
-    pub(super) fn decor_rects(&self) -> Vec<Rect> {
-        self.decor_rects
+    /// 不起拖的装饰矩形（窗口缓冲坐标）：`block`，以及穿透窗口建不出来、回落画进主窗口的 `pass`。
+    /// `drag` 装饰不在其中——按在它上面与按在窗体空白处一样拖动。
+    pub(super) fn no_drag_rects(&self) -> Vec<Rect> {
+        self.decor
             .iter()
-            .map(|&(x, y, w, h)| Rect {
+            .zip(&self.decor_rects)
+            .filter(|(d, _)| d.hit != DecorHit::Drag)
+            .map(|(_, &(x, y, w, h))| Rect {
                 x: x as f32,
                 y: y as f32,
                 w: w as f32,
@@ -750,6 +753,10 @@ mod tests {
     /// 夹具：30×20 窗体图（左上像素红、其余白；x 10..20 / y 8..12 可拉伸）+ 6×6 蓝色装饰，
     /// 装饰挂在窗体右上角外侧（底边右端贴锚点）。
     fn fixture_window(tag: &str) -> CandidateWindow {
+        fixture_window_hit(tag, None)
+    }
+
+    fn fixture_window_hit(tag: &str, hit: Option<&str>) -> CandidateWindow {
         use wind_theme::skin::{BandSpec, Skin, SkinDecor, SkinFrame, SkinInsets, SkinVariant};
         let dir = std::env::temp_dir().join(format!("wind-skin-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -780,6 +787,7 @@ mod tests {
                     anchor: "frame.top_right".into(),
                     pivot: Some("bottom_right".into()),
                     z: 1,
+                    hit: hit.map(Into::into),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -844,9 +852,9 @@ mod tests {
         assert_eq!(px(0, 0)[3], 0);
     }
 
-    #[test]
-    fn decor_outside_frame_does_not_start_drag() {
-        let mut w = fixture_window("mouse");
+    /// 按 `hit` 配一个挂在窗体右上外侧的装饰，返回「窗体外装饰上的一点是否不起拖」等三个判定。
+    fn decor_no_drag(tag: &str, hit: Option<&str>) -> [bool; 3] {
+        let mut w = fixture_window_hit(tag, hit);
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.build_tree(false);
@@ -854,12 +862,27 @@ mod tests {
         let g = w.skin_geom.as_ref().unwrap();
         let mut m = w.mouse.borrow_mut();
         m.skin_frame = Some(g.frame_rect());
-        m.skin_decor = g.decor_rects();
+        m.skin_decor = g.no_drag_rects();
         let (_, _, fw, _) = g.frame;
         let x = fw as f32 - 3.0;
-        assert!(m.on_decor_only(x, 2.0), "窗体外的装饰");
-        assert!(!m.on_decor_only(x, 10.0), "窗体内");
-        assert!(!m.on_decor_only(1.0, 2.0), "外扩区里装饰以外的透明处");
+        [
+            m.on_decor_only(x, 2.0),
+            m.on_decor_only(x, 10.0),
+            m.on_decor_only(1.0, 2.0),
+        ]
+    }
+
+    #[test]
+    fn block_decor_outside_frame_does_not_start_drag() {
+        let [decor, in_frame, gap] = decor_no_drag("mouse-block", Some("block"));
+        assert!(decor, "窗体外的装饰");
+        assert!(!in_frame, "窗体内");
+        assert!(!gap, "外扩区里装饰以外的透明处");
+    }
+
+    #[test]
+    fn decor_drags_window_by_default() {
+        assert_eq!(decor_no_drag("mouse-drag", None), [false; 3]);
     }
 
     #[test]

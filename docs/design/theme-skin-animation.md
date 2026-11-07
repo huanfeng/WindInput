@@ -95,7 +95,7 @@ anchor = "frame.top_right"  # 窗体 / 内容框 / 槽位上的锚点
 pivot = "bottom_right"      # 装饰自身对齐点；缺省同 anchor 的方位
 offset = [-80, 20]          # 源像素
 z = 1                       # <0 在窗体下；0..99 在窗体上、内容下；>=100 在内容上
-hit = "block"               # block（P1）| pass（P2）
+hit = "drag"                # drag（缺省）| block | pass，见 §4
 
 [skin.horizontal.placement]
 caret = "frame.top_left"           # 窗口在光标下方时，与光标对齐的点（缺省即此）
@@ -196,7 +196,8 @@ free 布局下不做上翻交换：槽位由皮肤决定，候选窗翻到光标
 |---|---|---|
 | 槽位内的候选 / 翻页 | 现状 | 现状 |
 | 窗体空白（含内容框空白） | 拖动（现状） | 同左 |
-| 装饰 `hit = "block"` | 接住鼠标、不拖动、不悬停 | 同左 |
+| 装饰 `hit = "drag"`（缺省） | 不透明处接住鼠标，按下拖动候选窗 | 同左 |
+| 装饰 `hit = "block"` | 接住鼠标、不拖动、不悬停（贴纸） | 同左 |
 | 装饰 `hit = "pass"` | 按 block 处理 | 点击穿透到底下的应用 |
 | 全透明像素 | 系统穿透（layered 窗口天然行为） | 同左 |
 
@@ -208,7 +209,10 @@ free 布局下不做上翻交换：槽位由皮肤决定，候选窗翻到光标
 其他平台：macOS 第二个 panel `ignoresMouseEvents = true`，并关掉系统阴影或只给窗体算阴影；Wayland
 输入区改为「窗体矩形 − pass 装饰」；X11 有合成器时 XShape INPUT 按 alpha 掩码扣掉 pass 装饰。
 
-P1 判定「装饰区」：装饰的外接矩形与窗体矩形求差，命中这部分 → 不拖动、不悬停。
+缺省取 `drag`：实测 `pass` 让看起来实心的人物「摸不到」，体感奇怪；拖人物等于拖窗口最符合直觉。
+`pass` 留给雪花、光斑这类氛围装饰。点击互动（点一下换表情等）留给 §6 的事件，届时另加字段，不复用 `hit`。
+
+判定「不拖动的装饰区」：`block`（及回落画进主窗口的 `pass`）装饰的外接矩形与窗体矩形求差，命中 → 不拖动、不悬停。
 
 ## 5. DPI 与缩放
 
@@ -262,7 +266,8 @@ idle_5s = { state = "idle" }
 - 状态机：当前状态循环播放；事件触发一次性片段，播完转 `then`（`@prev` 回原状态）；正在播的一次性片段
   被新事件打断时直接切换。
 - 事件：`show`、`hide`、`typing`（编码变化）、`backspace`、`page`、`select`（数字键 / 点击选词）、
-  `commit`、`empty`（空码）、`mode_cn` / `mode_en`、`idle_<N>s`。
+  `commit`、`empty`（空码）、`mode_cn` / `mode_en`、`idle_<N>s`；`click`（点中本装饰：只对 `drag` / `block`
+  装饰，按下后未超过拖动阈值即松开才算，移动了按拖动处理）。
   其中 `commit`、`mode_*` 目前不经过 UI 线程，需在 `wind-ui-types` 加一条纯数据的 `UiCommand`。
 
 ### 6.3 运行时

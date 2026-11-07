@@ -1793,7 +1793,7 @@ impl CandidateWindow {
             m.skin_decor = self
                 .skin_geom
                 .as_ref()
-                .map_or_else(Vec::new, |g| g.decor_rects());
+                .map_or_else(Vec::new, |g| g.no_drag_rects());
             m.last_hover = -1;
         }
 
@@ -2012,7 +2012,7 @@ impl CandidateWindow {
             m.skin_decor = self
                 .skin_geom
                 .as_ref()
-                .map_or_else(Vec::new, |g| g.decor_rects());
+                .map_or_else(Vec::new, |g| g.no_drag_rects());
             m.last_hover = -1;
         }
 
@@ -2244,7 +2244,7 @@ impl CandidateWindow {
             m.skin_decor = self
                 .skin_geom
                 .as_ref()
-                .map_or_else(Vec::new, |g| g.decor_rects());
+                .map_or_else(Vec::new, |g| g.no_drag_rects());
             m.last_hover = -1;
         }
 
@@ -5429,7 +5429,7 @@ impl CandidateMouse {
         -1
     }
 
-    /// 点落在皮肤装饰上、且不在窗体内：装饰只是挂件，不拖动窗口（设计 §4，P1 的 block）。
+    /// 点落在 `block` 装饰上、且不在窗体内：贴纸式装饰，不拖动窗口（设计 §4）。
     fn on_decor_only(&self, x: f32, y: f32) -> bool {
         let in_frame = self.skin_frame.is_some_and(|f| f.contains(x, y));
         !in_frame && self.skin_decor.iter().any(|r| r.contains(x, y))

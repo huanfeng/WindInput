@@ -126,7 +126,8 @@ pub struct SkinDecor {
     pub density: Option<f32>,
     #[serde(default)]
     pub z: i32,
-    /// block（缺省）| pass（点击穿透到底下的应用）。
+    /// drag（缺省，不透明处按下拖动候选窗）| block（接住鼠标不响应）| pass（点击穿透到底下的应用）。
+    /// 点击互动（如点一下换表情）留给动画事件（设计 §6），届时另加字段，不复用 `hit`。
     pub hit: Option<String>,
     pub opacity: Option<f32>,
 }
@@ -293,8 +294,12 @@ impl Anchor {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DecorHit {
+    /// 不透明处接住鼠标，按下拖动候选窗（与拖窗体一致）。
     #[default]
+    Drag,
+    /// 接住鼠标但不响应（贴纸）。
     Block,
+    /// 整块点击穿透到底下的应用。
     Pass,
 }
 
@@ -552,11 +557,12 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                 None => anchor.pos,
             };
             let hit = match d.hit.as_deref() {
-                None | Some("block") => DecorHit::Block,
+                None | Some("drag") => DecorHit::Drag,
+                Some("block") => DecorHit::Block,
                 Some("pass") => DecorHit::Pass,
                 Some(other) => {
-                    tracing::warn!("skin: 未知 decor.hit {other:?}，按 block");
-                    DecorHit::Block
+                    tracing::warn!("skin: 未知 decor.hit {other:?}，按 drag");
+                    DecorHit::Drag
                 }
             };
             Some(RvSkinDecor {
@@ -771,7 +777,7 @@ hit = "pass"
         assert_eq!(d[0].hit, DecorHit::Pass);
         assert_eq!(d[1].image, "pet");
         assert_eq!(d[1].pivot, Pos9 { h: 2, v: 2 });
-        assert_eq!(d[1].hit, DecorHit::Block, "缺省 block");
+        assert_eq!(d[1].hit, DecorHit::Drag, "缺省 drag");
     }
 
     #[test]
