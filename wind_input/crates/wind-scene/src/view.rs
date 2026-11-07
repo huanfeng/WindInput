@@ -225,6 +225,27 @@ pub fn paint_cache_evict_if_idle(now: std::time::Instant) -> bool {
     image || shadow
 }
 
+/// 在一套**临时**的图片 / 阴影缓存里跑 `f`，跑完丢掉、换回原来那套。
+///
+/// 给一次性出图（设置端预览）用：它画的是别的主题、甚至临时目录里的主题，进了实时窗口
+/// 那套线程局部缓存，大图会触发超预算整体清空（连实时窗口的源图与图集一起），临时路径
+/// 还会让句柄表越积越多。闭包 panic 也会换回原缓存。
+pub fn with_isolated_paint_caches<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<(crate::image_cache::ImageCache, ShadowCache)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some((image, shadow)) = self.0.take() {
+                IMAGE_CACHE.with(|c| *c.borrow_mut() = image);
+                SHADOW_CACHE.with(|c| *c.borrow_mut() = shadow);
+            }
+        }
+    }
+    let image = IMAGE_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let shadow = SHADOW_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let _restore = Restore(Some((image, shadow)));
+    f()
+}
+
 /// 仅测试可见：直接操作线程局部的图片缓存（wind-ui 的等待回收测试要在里面布置陈旧驻留）。
 #[cfg(any(test, feature = "test-util"))]
 pub fn with_image_cache_for_test<R>(f: impl FnOnce(&mut crate::image_cache::ImageCache) -> R) -> R {
@@ -4372,6 +4393,37 @@ mod color_runs_paint_tests {
             colored.measured_size(),
             plain.measured_size(),
             "颜色不参与布局"
+        );
+    }
+}
+
+#[cfg(test)]
+mod isolated_cache_tests {
+    use super::*;
+
+    #[test]
+    fn isolated_paint_caches_leave_live_caches_untouched() {
+        let live = crate::image_cache::anim_fixtures::data_uri(
+            "image/gif",
+            &crate::image_cache::anim_fixtures::gif(2, 2, &[([1, 2, 3, 255], 50)]),
+        );
+        let _ = image_src_size(&live);
+        let before = with_image_cache_for_test(|c| c.ids_len_for_test());
+        assert!(before >= 1);
+        let inner = with_isolated_paint_caches(|| {
+            assert_eq!(
+                with_image_cache_for_test(|c| c.ids_len_for_test()),
+                0,
+                "临时缓存是空的"
+            );
+            let _ = image_src_size("data:image/png;base64,AAAA");
+            with_image_cache_for_test(|c| c.ids_len_for_test())
+        });
+        assert_eq!(inner, 1);
+        assert_eq!(
+            with_image_cache_for_test(|c| c.ids_len_for_test()),
+            before,
+            "换回原缓存"
         );
     }
 }

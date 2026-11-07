@@ -60,6 +60,9 @@ fn render_svg(
     h: u32,
     ts: resvg::tiny_skia::Transform,
 ) -> Option<resvg::tiny_skia::Pixmap> {
+    if !crate::skin::fits_image_limits(w, h) {
+        return None;
+    }
     let mut pm = resvg::tiny_skia::Pixmap::new(w, h)?;
     resvg::render(tree, ts, &mut pm.as_mut());
     Some(pm)
@@ -169,12 +172,34 @@ fn read_source_bytes(src: &str) -> Option<Vec<u8>> {
     std::fs::read(src).ok()
 }
 
-/// 解码位图源：`data:` URI 走内存解码，否则按文件路径打开。
+/// 动画装饰最多解这么多帧，其后的帧丢弃（不可信主题的解码耗时上限）。
+pub const MAX_ANIM_FRAMES: usize = 300;
+
+/// 解码限额：单边 [`crate::skin::MAX_IMAGE_SIDE`]，分配约 [`crate::skin::MAX_IMAGE_PIXELS`] 张 RGBA8。
+fn decode_limits() -> image::Limits {
+    let mut l = image::Limits::default();
+    l.max_image_width = Some(crate::skin::MAX_IMAGE_SIDE);
+    l.max_image_height = Some(crate::skin::MAX_IMAGE_SIDE);
+    l.max_alloc = Some(crate::skin::MAX_IMAGE_PIXELS * 4 + 16 * 1024 * 1024);
+    l
+}
+
+/// 解码位图源：`data:` URI 就地解码，否则读文件；按内容判格式，带解码限额，超限即失败。
 fn decode_bitmap(src: &str) -> Option<image::DynamicImage> {
-    if src.starts_with("data:") {
-        return image::load_from_memory(&decode_data_uri(src)?).ok();
+    let bytes = read_source_bytes(src)?;
+    let reader = || {
+        image::ImageReader::new(std::io::Cursor::new(&bytes[..]))
+            .with_guessed_format()
+            .ok()
+    };
+    let (w, h) = reader()?.into_dimensions().ok()?;
+    if !crate::skin::fits_image_limits(w, h) {
+        tracing::warn!("主题图片尺寸 {w}x{h} 超出上限，不解码: {}", brief(src));
+        return None;
     }
-    image::open(src).ok()
+    let mut r = reader()?;
+    r.limits(decode_limits());
+    r.decode().ok()
 }
 
 /// 是否 SVG：文件看扩展名，`data:` 看 MIME。
@@ -445,6 +470,12 @@ impl ImageCache {
         self.last_use = Some(now);
     }
 
+    /// 仅测试可见：句柄表条目数（缓存里登记过多少个源）。
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn ids_len_for_test(&self) -> usize {
+        self.ids.len()
+    }
+
     /// 仅测试可见：把最后取用时刻挪到过去，模拟闲置。
     #[cfg(any(test, feature = "test-util"))]
     pub fn set_last_use_for_test(&mut self, now: Instant) {
@@ -617,19 +648,23 @@ impl ImageCache {
         let key = (id, k_micro);
         if !self.atlases.contains_key(&key) {
             let k = k_micro as f32 / 1_000_000.0;
-            let built = self.decode(id, path).map(|s| {
+            let built = self.decode(id, path).and_then(|s| {
                 let (w, h) = (
                     crate::skin::atlas_len(s.w, k),
                     crate::skin::atlas_len(s.h, k),
                 );
-                (
+                if !crate::skin::fits_image_limits(w, h) {
+                    tracing::warn!("skin: 图集 {w}x{h} 超出上限，不建: {}", brief(path));
+                    return None;
+                }
+                Some((
                     (s.w, s.h),
                     Atlas {
                         w,
                         h,
                         rgba: crate::skin::resample(&s.rgba, s.w, s.h, w, h),
                     },
-                )
+                ))
             });
             let built = built.map(|(dims, atlas)| {
                 self.dims.insert(id, dims);
@@ -855,7 +890,7 @@ impl ImageCache {
 
     fn build_fill(&mut self, key: FillKey, path: &str) -> Option<Pixmap> {
         let (id, spec, w, h, tint) = key;
-        if w == 0 || h == 0 {
+        if w == 0 || h == 0 || !crate::skin::fits_image_limits(w, h) {
             return None;
         }
         let mut pm = Pixmap::new(w, h)?;
@@ -940,6 +975,9 @@ fn atlas_pixmap(
         a.h,
         h,
     ));
+    if !crate::skin::fits_image_limits(w, h) {
+        return None;
+    }
     let rgba = compose(&a.rgba, a.w, &xs, &ys);
     let mut pm = Pixmap::new(w, h)?;
     for (p, c) in pm.pixels_mut().iter_mut().zip(rgba.as_chunks::<4>().0) {
@@ -1017,20 +1055,25 @@ fn header_dims(src: &str) -> Option<(u32, u32)> {
 
 /// 动画格式（APNG / GIF / 动态 WebP）的逐帧解码器（帧已合成到整张画布）；静态图为 None。
 fn frames_of(bytes: &[u8]) -> Option<image::Frames<'_>> {
-    use image::AnimationDecoder;
     use image::codecs::{gif::GifDecoder, png::PngDecoder, webp::WebPDecoder};
+    use image::{AnimationDecoder, ImageDecoder};
     use std::io::Cursor;
     match image::guess_format(bytes).ok()? {
         image::ImageFormat::Png => {
-            let d = PngDecoder::new(Cursor::new(bytes)).ok()?;
+            let d = PngDecoder::with_limits(Cursor::new(bytes), decode_limits()).ok()?;
             if !d.is_apng().ok()? {
                 return None;
             }
             Some(d.apng().ok()?.into_frames())
         }
-        image::ImageFormat::Gif => Some(GifDecoder::new(Cursor::new(bytes)).ok()?.into_frames()),
+        image::ImageFormat::Gif => {
+            let mut d = GifDecoder::new(Cursor::new(bytes)).ok()?;
+            d.set_limits(decode_limits()).ok()?;
+            Some(d.into_frames())
+        }
         image::ImageFormat::WebP => {
-            let d = WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            let mut d = WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            d.set_limits(decode_limits()).ok()?;
             d.has_animation().then(|| d.into_frames())
         }
         _ => None,
@@ -1045,7 +1088,13 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
     let frames = frames_of(&bytes)?;
     let whole = Stretch::Whole(BandFill::Stretch);
     let mut acc = crate::skin::FrameBudget::new(w as usize * h as usize * 4, budget);
-    for frame in frames {
+    if !header_dims(path).is_some_and(|(sw, sh)| crate::skin::fits_image_limits(sw, sh))
+        || !crate::skin::fits_image_limits(w, h)
+    {
+        tracing::warn!("skin: 动画装饰尺寸超出上限，不解帧: {}", brief(path));
+        return None;
+    }
+    for frame in frames.take(MAX_ANIM_FRAMES) {
         let frame = match frame {
             Ok(f) => f,
             Err(e) => {
@@ -1257,6 +1306,40 @@ mod tests {
     const GREEN: [u8; 4] = [0, 255, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    fn png_uri(w: u32, h: u32) -> String {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba(RED));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        anim_fixtures::data_uri("image/png", &out)
+    }
+
+    #[test]
+    fn decode_rejects_images_over_side_limit() {
+        let side = crate::skin::MAX_IMAGE_SIDE;
+        assert!(decode_bitmap(&png_uri(side, 1)).is_some(), "上限本身可解");
+        assert!(
+            decode_bitmap(&png_uri(side + 1, 1)).is_none(),
+            "单边超限不解码"
+        );
+        let mut c = ImageCache::new();
+        assert_eq!(c.src_size(&png_uri(side + 1, 1)), None);
+    }
+
+    #[test]
+    fn animation_decodes_at_most_max_frames() {
+        let frames: Vec<_> = (0..MAX_ANIM_FRAMES + 20)
+            .map(|i| (vec![(i % 256) as u8, 0, 0, 255], 40))
+            .collect();
+        let uri = anim_fixtures::data_uri("image/png", &anim_fixtures::apng(1, 1, &frames));
+        let mut c = ImageCache::new();
+        let l = c
+            .anim_layout(&uri, 1.0, 1, 1, None, ANIM_BUDGET_BYTES)
+            .expect("动画");
+        assert_eq!(l.raw_frames, MAX_ANIM_FRAMES, "超出的帧不解");
+    }
 
     fn gif_uri(frames: &[([u8; 4], u32)]) -> String {
         anim_fixtures::data_uri("image/gif", &anim_fixtures::gif(4, 4, frames))

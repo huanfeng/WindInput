@@ -457,6 +457,14 @@ fn main() {
     // 9.5 启动本地控制 / 配置 JSON-RPC 服务（命名管道：..._ctrl + ..._events）。
     // 本地授权靠 OS ACL（SDDL），不再需要 token/Origin/CORS/端口发现。
     // 同步线程模型（与 bridge/push 一致），不引入 tokio 到控制路径。
+    // 主题预览缓存键带上构建标识：换一次构建旧图就不再命中。dirty 构建的短哈希不随改动变，
+    // 再带上构建时刻。
+    let git = env!("WIND_GIT_HASH");
+    wind_webdata::set_preview_build_id(if git.ends_with("-dirty") {
+        format!("{git}@{}", env!("WIND_BUILD_TIME"))
+    } else {
+        git.to_string()
+    });
     let core_rpc: Arc<dyn wind_rpc::CoreRpc> = Arc::new(RpcCore(coord_for_web));
     match wind_rpc::RpcServer::new(core_rpc, variant, pipe_suffix) {
         Ok(rpc_server) => {

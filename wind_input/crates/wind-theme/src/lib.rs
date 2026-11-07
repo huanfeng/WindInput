@@ -25,5 +25,6 @@ pub use span::{
     span_color,
 };
 pub use theme::{
-    find_theme_dir, list_theme_ids, load_merged_dirs, meta_from_text, read_meta, validate_text,
+    find_theme_dir, is_plain_slug, list_theme_ids, load_merged_dirs, meta_from_text, read_meta,
+    validate_text,
 };

@@ -720,7 +720,7 @@ impl CandidateScene {
     }
 
     /// 同一条皮肤告警只报一次（几何每帧重求）。
-    fn warn_skin_once(&self, msg: String) {
+    pub(super) fn warn_skin_once(&self, msg: String) {
         if self.skin_warned.borrow_mut().insert(msg.clone()) {
             tracing::warn!("{msg}");
         }
@@ -816,6 +816,18 @@ impl CandidateScene {
         let sx = scale_stretch(&v.frame.stretch_x, band_f);
         let sy = scale_stretch(&v.frame.stretch_y, band_f);
         let frame_k = render_scale / src_density;
+        // 倍率来自主题（density）：窗体图集超出位图上限就整套回退，不去分配它。
+        if let Some((sw, sh)) = crate::view::image_src_size(&frame_path)
+            && !crate::skin::fits_image_limits(
+                crate::skin::atlas_len(sw, frame_k),
+                crate::skin::atlas_len(sh, frame_k),
+            )
+        {
+            self.warn_skin_once(format!(
+                "skin: 窗体图按倍率 {frame_k} 缩放后超出上限，回退普通窗口"
+            ));
+            return None;
+        }
         let Some((min_w, min_h, _, _)) = crate::view::skin_metrics(&frame_path, frame_k, &sx, &sy)
         else {
             tracing::warn!("skin: 窗体图读不出，回退普通窗口");
@@ -889,7 +901,8 @@ impl CandidateScene {
                         (sw as f32 * f, sh as f32 * f)
                     }
                 };
-                let (w, h) = (w.round().max(1.0) as u32, h.round().max(1.0) as u32);
+                // 不可信主题可声明任意大的装饰：按原比例缩进位图上限，别让分配直接 abort。
+                let (w, h) = crate::skin::clamp_to_image_limits(w.round(), h.round());
                 // 每个源：路径、倍率、解帧结果。片段文件按装饰同一目标尺寸铺。
                 let source = |path: &str, decode: bool| {
                     let sw = crate::view::image_src_size(path).map_or(sw, |(w, _)| w);

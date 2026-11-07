@@ -22,6 +22,12 @@ pub const THEME_FILE: &str = "theme.toml";
 /// `theme_chain_dirs`）都经过这里，故打点放此处不会漏。措辞与 `Config::log_user_override`
 /// 一致，便于按 `用户覆盖生效` 一次 grep 出全部生效的覆盖。
 pub fn find_theme_dir(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    // 名字来自 `base = "…"`（不可信主题文本）与 RPC 参数：只认普通 slug，别让 `..` /
+    // 绝对路径把查找带出主题目录群。主题定位全都经过这里，一处挡住全部入口。
+    if !is_plain_slug(name) {
+        tracing::warn!("主题名不是普通 slug，忽略: {name:?}");
+        return None;
+    }
     let mut hit: Option<PathBuf> = None;
     for d in dirs {
         let p = d.join(name);
@@ -82,11 +88,28 @@ pub fn meta_from_text(text: &str) -> Option<Meta> {
     v.get("meta")?.clone().try_into().ok()
 }
 
+/// 主题 id / `base` 引用是否普通 slug：非空，不是 `.` / `..`，不含 `/`、`\\`、`:`、`..`
+/// 与控制字符（于是也不可能是绝对路径或盘符路径）。主题目录名即 id，合法 id 都满足。
+pub fn is_plain_slug(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && !s.contains("..")
+        && !s
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+}
+
 /// 校验主题 toml 文本可解析为合法 Theme（导入前校验）。Err 含原因。
 pub fn validate_text(text: &str) -> anyhow::Result<()> {
     let v: Value = text
         .parse::<Value>()
         .map_err(|e| anyhow::anyhow!("TOML 解析失败: {}", e))?;
+    if let Some(b) = v.get("base").and_then(|b| b.as_str())
+        && !b.is_empty()
+        && !is_plain_slug(b)
+    {
+        anyhow::bail!("base 只能写主题 id（不能含路径）：{b:?}");
+    }
     let n = normalize_theme(v);
     let _theme: Theme = n
         .try_into()
@@ -385,6 +408,20 @@ mod tests {
         assert!(validate_text("[meta]\nname = \"ok\"\n").is_ok());
         // 非法 TOML
         assert!(validate_text("  : : :\n\t- bad").is_err());
+    }
+
+    #[test]
+    fn plain_slug_rejects_paths() {
+        for ok in ["default", "_base", "my-theme.v2", "主题"] {
+            assert!(is_plain_slug(ok), "{ok}");
+        }
+        for bad in [
+            "", ".", "..", "../x", "a/b", "a\\b", "C:x", "/etc", "a..b", "a\nb",
+        ] {
+            assert!(!is_plain_slug(bad), "{bad:?}");
+        }
+        assert!(validate_text("base = \"../../x\"\n").is_err());
+        assert!(find_theme_dir(&[PathBuf::from("/")], "..").is_none());
     }
 
     #[test]

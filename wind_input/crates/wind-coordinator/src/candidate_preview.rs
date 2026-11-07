@@ -51,11 +51,13 @@ impl Coordinator {
     }
 
     /// 投递一次预览请求，返回回执。`theme` 是原始主题（外观覆盖由渲染端叠加）。
+    /// 不再等结果时把 `cancel` 置位，渲染端排到它时就直接丢掉。
     pub fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PreviewReply {
         let cand = self.eff_candidate();
         let n = cand.per_page.clamp(1, PREVIEW_CANDIDATES.len());
@@ -81,6 +83,7 @@ impl Coordinator {
             vertical,
             scale,
             reply: tx,
+            cancel,
         };
         // 投递失败（UI 线程已退出）时请求连同回执发送端一起丢掉，接收端立即断开。
         let _ = self
@@ -103,7 +106,7 @@ mod tests {
         while rx.try_recv().is_ok() {}
         let mut theme = wind_theme::Resolved::default();
         theme.views.index_labels = vec!["a".into(), String::new()];
-        let reply = c.request_candidate_preview(theme, true, 1.5);
+        let reply = c.request_candidate_preview(theme, true, 1.5, Default::default());
         let req = loop {
             match rx.recv().unwrap() {
                 UiCommand::RenderCandidatePreview(r) => break r,
@@ -129,7 +132,12 @@ mod tests {
     #[test]
     fn headless_without_ui_disconnects_immediately() {
         let c = Coordinator::new_headless(Config::default(), None);
-        let reply = c.request_candidate_preview(wind_theme::Resolved::default(), false, 1.0);
+        let reply = c.request_candidate_preview(
+            wind_theme::Resolved::default(),
+            false,
+            1.0,
+            Default::default(),
+        );
         assert!(matches!(
             reply.recv_timeout(std::time::Duration::from_secs(5)),
             Err(mpsc::RecvTimeoutError::Disconnected)

@@ -775,6 +775,16 @@ impl CandidateScene {
         )
     }
 
+    /// 皮肤布局后的整张缓冲（内容盒 + 外扩）在位图上限内。
+    fn skin_buffer_fits(root: &View, (l, t, r, b): (u32, u32, u32, u32)) -> bool {
+        let (w, h) = root.measured_size();
+        let side = |c: f32, a: u32, b: u32| (c.ceil().max(0.0) as u64) + a as u64 + b as u64;
+        let (bw, bh) = (side(w, l, r), side(h, t, b));
+        bw <= crate::skin::MAX_IMAGE_SIDE as u64
+            && bh <= crate::skin::MAX_IMAGE_SIDE as u64
+            && bw * bh <= crate::skin::MAX_IMAGE_PIXELS
+    }
+
     /// 一帧的排版：刷新皮肤几何与装饰动画 → 搭树 → 皮肤布局或按阴影扩边布局 → 宽度钳制
     /// （竖排主题上限、屏幕安全上限、最小 40×24）→ 皮肤窗体按钳后尺寸重定位。
     ///
@@ -798,8 +808,17 @@ impl CandidateScene {
         };
         let tr = inp.text_renderer;
         let margins = match self.skin_layout(&mut root, tr) {
-            Some(m) => m,
-            None => {
+            // 装饰偏移来自主题：外扩大到超出位图上限时整套回退普通窗口，别分配那张缓冲。
+            Some(m) if Self::skin_buffer_fits(&root, m) => m,
+            skinned => {
+                if skinned.is_some() {
+                    self.warn_skin_once(format!(
+                        "skin: 装饰外扩 {skinned:?} 让窗口缓冲超出上限，回退普通窗口"
+                    ));
+                    self.skin_geom = None;
+                    self.anim_next = None;
+                    root = self.build_tree(inp);
+                }
                 let m = match &shadow {
                     Some(s) => s.margins(),
                     None => (0, 0, 0, 0),

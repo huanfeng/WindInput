@@ -366,6 +366,38 @@ pub fn compose(atlas: &[u8], aw: u32, xs: &[Tap], ys: &[Tap]) -> Vec<u8> {
     out
 }
 
+/// 单张位图（解码源、图集、合成目标）的单边上限（像素）。主题可能来自市场，是不可信内容：
+/// 不设上限时一个声明巨大尺寸或倍率的主题能让 UI 线程分配几个 GB 直接 abort。
+pub const MAX_IMAGE_SIDE: u32 = 8192;
+/// 单张位图的总像素上限（约 32 MP，RGBA8 即 128 MiB）。
+pub const MAX_IMAGE_PIXELS: u64 = 32 * 1024 * 1024;
+
+/// `w × h` 在 [`MAX_IMAGE_SIDE`] / [`MAX_IMAGE_PIXELS`] 之内。
+pub fn fits_image_limits(w: u32, h: u32) -> bool {
+    w <= MAX_IMAGE_SIDE && h <= MAX_IMAGE_SIDE && (w as u64) * (h as u64) <= MAX_IMAGE_PIXELS
+}
+
+/// 把目标尺寸（设备像素，可为小数）按原比例缩进上限，至少 1×1。
+pub fn clamp_to_image_limits(w: f32, h: f32) -> (u32, u32) {
+    let (w, h) = (w.max(1.0), h.max(1.0));
+    let side = MAX_IMAGE_SIDE as f32;
+    let mut f = (side / w).min(side / h).min(1.0);
+    let px = (w * f) as f64 * (h * f) as f64;
+    if px > MAX_IMAGE_PIXELS as f64 {
+        f *= (MAX_IMAGE_PIXELS as f64 / px).sqrt() as f32;
+    }
+    let c = |v: f32| ((v * f).round() as u32).clamp(1, MAX_IMAGE_SIDE);
+    let (cw, ch) = (c(w), c(h));
+    // 取整后仍可能略超像素上限，再按长边收一格。
+    if fits_image_limits(cw, ch) {
+        (cw, ch)
+    } else if cw >= ch {
+        (cw - 1, ch)
+    } else {
+        (cw, ch - 1)
+    }
+}
+
 /// 某轴图集长度：源长 × 倍率，至少 1。
 pub fn atlas_len(src_len: u32, k: f32) -> u32 {
     ((src_len as f32 * k).round() as u32).max(1)
@@ -494,6 +526,26 @@ pub fn frame_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_to_image_limits_keeps_aspect_within_bounds() {
+        assert_eq!(clamp_to_image_limits(300.0, 40.0), (300, 40), "上限内原样");
+        assert_eq!(clamp_to_image_limits(0.0, -5.0), (1, 1));
+        for (w, h) in [
+            (1e9, 10.0),
+            (20000.0, 20000.0),
+            (8192.0, 8192.0),
+            (1e6, 1e6),
+        ] {
+            let (cw, ch) = clamp_to_image_limits(w, h);
+            assert!(fits_image_limits(cw, ch), "{w}x{h} → {cw}x{ch}");
+        }
+        let (cw, ch) = clamp_to_image_limits(16384.0, 8192.0);
+        assert!(
+            (cw as f32 / ch as f32 - 2.0).abs() < 0.01,
+            "{cw}x{ch} 保持 2:1"
+        );
+    }
     use wind_theme::skin::Band;
 
     fn bands(list: &[(f32, f32, BandFill)]) -> Stretch {

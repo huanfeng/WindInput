@@ -77,6 +77,7 @@ pub trait WebDataHost {
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply;
     /// 主题强调色两档（设置窗「主题色跟随输入法」），`name` 缺省取当前主题。
     fn theme_accent(&self, name: Option<&str>) -> Option<crate::theme_query::ThemeAccent>;
@@ -346,8 +347,9 @@ impl WebDataHost for Coordinator {
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply {
-        Coordinator::request_candidate_preview(self, theme, vertical, scale)
+        Coordinator::request_candidate_preview(self, theme, vertical, scale, cancel)
     }
     fn theme_accent(&self, name: Option<&str>) -> Option<crate::theme_query::ThemeAccent> {
         Coordinator::theme_accent(self, name)

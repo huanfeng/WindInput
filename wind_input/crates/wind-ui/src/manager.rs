@@ -206,6 +206,8 @@ impl UiManager {
         // 待处理命令队列：每轮排空通道并合并连续候选更新（只渲染最新一帧），
         // 避免长按翻页/连按方向键时 UpdateCandidates 堆积、松键后仍继续刷新。
         let mut pending: std::collections::VecDeque<UiCommand> = std::collections::VecDeque::new();
+        // 设置端预览的待画队列：只在命令通道排空的那一轮画一张，打字永远优先。
+        let mut previews = crate::candidate_window::PreviewQueue::default();
         'main: loop {
             // 状态提示气泡到期自动隐藏。
             // 用户正在与气泡交互（拖动 / 悬停其上 / 右键菜单打开）时**顺延**而非隐藏：
@@ -1061,10 +1063,7 @@ impl UiManager {
                     UiCommand::SetCandidateShadow(on) => {
                         candidate_window.set_theme_shadow(on);
                     }
-                    UiCommand::RenderCandidatePreview(req) => {
-                        // 回执通道容量 1、只回一次，try_send 不会阻塞；对端已超时走掉则丢弃。
-                        let _ = req.reply.try_send(candidate_window.render_preview(&req));
-                    }
+                    UiCommand::RenderCandidatePreview(req) => previews.push(req),
                     UiCommand::SetPagerInPreedit(on) => {
                         candidate_window.set_pager_in_preedit(on);
                     }
@@ -1185,7 +1184,9 @@ impl UiManager {
                 info!("UI: Channel disconnected, shutting down");
                 break 'main;
             }
-            if !had_cmd {
+            // 预览：本轮没有别的命令才画一张；画了就不睡，下一轮先看有没有新命令。
+            let drew_preview = previews.render_one(had_cmd, &mut candidate_window);
+            if !had_cmd && !drew_preview {
                 // 本循环唯一的休眠点：睡到「最近的计时器到期」，或被唤醒（新命令 /
                 // Win32 消息）提前叫醒。
                 //

@@ -7673,6 +7673,7 @@ mod render_golden;
 /// 场景已迁入 wind-scene；保留 `scene::` 这个路径名给本模块与子模块用。
 use wind_scene::candidate as scene;
 mod preview;
+pub use preview::PreviewQueue;
 mod skin_frame;
 
 /// 用户外观覆盖：阴影开关与位置偏移（ui.candidate.shadow / offset_x / offset_y）。

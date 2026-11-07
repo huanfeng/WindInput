@@ -87,17 +87,23 @@
   注释，序号按「用户 > 被预览主题 > 数字」）并投递；不支持预览的渲染端丢掉请求，回执断开，调用方立即得错。
 - 外观覆盖（字体、字号、阴影开关、尺寸下限、翻页栏等）取 UI 线程当前状态，与实时窗口同一个合并函数；
   命令通道 FIFO，`config.setItems` 下发的设置命令先于随后的预览请求生效。预览用独立的 `CandidateScene`，
-  不扰动实时窗口的跨帧状态。软件阴影按平台：ext_presenter（macOS / Linux 外部宿主）不画。
-- 时限：3 秒 + 每张未命中 1 秒，封顶 20 秒（同一批共用）。
+  不扰动实时窗口的跨帧状态；图片 / 阴影缓存也换成临时的一套（`view::with_isolated_paint_caches`），画完即丢，
+  不清掉实时窗口的源图与图集。软件阴影按平台：ext_presenter（macOS / Linux 外部宿主）不画。
+- **不和打字抢 UI 线程**：请求先进 UI 线程本地的 `PreviewQueue`，消息循环只在命令通道排空的那一轮画**一张**，
+  画完不睡、下一轮先看新命令（macOS / Linux 外部宿主的 forwarder 同此）。
+- 时限：3 秒 + 每张未命中 1 秒，封顶 20 秒（同一批共用）。超时或 RPC 返回时请求的 `cancel` 置位，UI 线程排到
+  它就丢掉，不会在积压里继续画已经没人要的图。
+- 在途上限：全进程同时交给 UI 线程的预览至多 **8** 张（`MAX_IN_FLIGHT`）。一批内按波次投递（等本批最早的
+  一张收完再投下一张）；名额全被别的请求占着时该条回「忙」。
 
 ### 7.2 协议
 
 `theme.renderPreview`（单条，失败即 RPC 错误）与 `theme.renderPreviews { items: [...] }`（批量，至多 64 条，
-逐条回执，未命中的一次全部投给 UI 线程）。每条参数：
+逐条回执，未命中的按在途上限分波投给 UI 线程）。每条参数：
 
 | 键 | 说明 |
 |---|---|
-| `name` / `package` / `text` | 至多给一个：已装主题 slug / 主题包路径（`.wtheme`）/ `theme.toml` 文本；都不给 = 当前主题。包与文本先解到临时目录（位图从包里取），base 链在已装主题里找 |
+| `name` / `package` / `text` | 至多给一个：已装主题 slug / 主题包路径（`.wtheme`）/ `theme.toml` 文本（至多 4 MiB）；都不给 = 当前主题。包与文本先解到临时目录（位图从包里取），base 链在已装主题里找 |
 | `style` | `light` / `dark` / `system`；缺省按当前配置 |
 | `layout` | `horizontal` / `vertical`；缺省按 `ui.candidate.layout`（含方案级覆盖） |
 | `scale` | 0.5–4，缺省 1（设置端传自己窗口所在屏的缩放） |
@@ -109,17 +115,39 @@
 ### 7.3 缓存
 
 - 位置：`Config::cache_dir()/theme_previews/`（Windows 为 `%LOCALAPPDATA%\WindInput[Dev]\cache\theme_previews`，
-  便携版在 `<exe>/localdata/cache/theme_previews`）。文件名 `<前缀>.<32 位十六进制键>.png`，前缀是已装主题的
-  slug，包 / 文本为 `_pkg` / `_text`；临时解包目录在其下 `staging/`。
-- 键：128 位 SipHash，覆盖渲染器版本（`wind_ui_types::CANDIDATE_PREVIEW_RENDER_VERSION`，示例内容或候选窗
-  管线会改像素时递增）、外观指纹（`ui.candidate` 含方案级覆盖、`ui.font`、方案级候选字体，有意放宽）、
-  明暗、横竖、缩放，以及 base 链每个主题目录的全部文件（相对路径 + 字节，与目录位置无关）。主题里用绝对
-  路径引用目录外的图不在键内（少见，改了要等清理或升版本）。
-- 命中刷新 mtime。清理：每个服务进程第一次用到预览时一次，之后每批有新图落盘时一次；闲置超过
-  **30 天**的删，余下超过 **50 MiB** 按 mtime 从旧到新淘汰；崩溃残留的临时文件 / 解包目录超过 1 小时删。
+  便携版在 `<exe>/localdata/cache/theme_previews`）。文件名 `<前缀>.<32 位十六进制键>.png`：已装主题的前缀取
+  命中目录的名字，只留 `[A-Za-z0-9._-]`（有字符被换掉时追加原名的短哈希）；包 / 文本为 `_pkg` / `_text`。
+  临时文件 `<前缀>.<键>.tmp-<pid>-<序号>`，临时解包目录在 `staging/`。
+- 键：128 位 SipHash，覆盖
+  - 渲染器版本 `wind_ui_types::CANDIDATE_PREVIEW_RENDER_VERSION`（示例内容或候选窗管线会改像素时递增）；
+  - crate 版本 + 构建标识（服务启动时由 `wind_webdata::set_preview_build_id` 注入 `WIND_GIT_HASH`，dirty 构建再带
+    `WIND_BUILD_TIME`）——换一次构建旧图就不再命中，不全靠人记得递增上面那个常量；
+  - 外观指纹（`ui.candidate` 含方案级覆盖、`ui.font`、方案级候选字体，有意放宽）、明暗、横竖、缩放；
+  - base 链每个主题目录的文件指纹：已装主题取（相对路径、大小、mtime），临时解包的包 / 文本取（相对路径、
+    字节）。文件超过 4096 个或要读的内容超过 64 MiB 时不缓存，直接渲染、内联回传。指向文件的符号链接跟随，
+    指向目录的跳过。
+- 命中先校验 PNG 完整（头 + IEND 收尾），坏的删掉重画；好的刷新 mtime。清理：每个服务进程第一次用到预览
+  时一次，之后每批有新图落盘时一次（本批刚写的不删）；闲置超过 **30 天**的删，余下超过 **50 MiB** 按 mtime
+  从旧到新淘汰；崩溃残留的临时文件 / 解包目录超过 1 小时删；只认本模块的文件名形态，别的文件不碰。
   `theme.delete` 顺带删该主题的图。常量在 `wind-webdata/src/theme_render.rs`。
+- 已知盲区（不改）：
+  - 主题里用绝对路径引用目录外的图，不在键内。
+  - 外观覆盖取 UI 线程当前状态，而指纹取协调器配置：`SetPreeditEmbedded` 这类命令下发与预览请求之间若隔着
+    一次配置变更，那张图可能按旧状态画、按新指纹存（窗口期很短，下次配置变更或清理后纠正）。
+  - 系统字体增删不进键：装了新字体、配置没变时仍命中旧图。
 
-### 7.4 设置端（发版后再做）
+### 7.4 不可信主题的资源上限
+
+主题可能来自市场，下面这些上限同时保护预览与实时窗口（常量在 `wind-scene`）：
+
+- 位图解码：单边 ≤ **8192**、总像素 ≤ **32 MP**（`skin::MAX_IMAGE_SIDE` / `MAX_IMAGE_PIXELS`），先读头判尺寸，解码再设
+  `image::Limits`；APNG / GIF / 动态 WebP 至多解 **300** 帧（`image_cache::MAX_ANIM_FRAMES`），其后丢弃。
+- 合成目标（背景填充、SVG 栅格化、皮肤图集与装饰帧）同一上限，超了不分配。
+- 皮肤：装饰目标尺寸按原比例钳进上限；窗体图集按倍率超限、或装饰外扩让整张窗口缓冲超限时，整套回退普通窗口。
+- `base` 只能写普通 slug（`wind_theme::is_plain_slug`：不含 `/`、`\`、`:`、`..`），`find_theme_dir` 一处挡住全部
+  主题定位入口，`validate_text` 导入时就拒；`theme.delete` 的 `name` 同样校验。
+
+### 7.5 设置端（发版后再做）
 
 - **分组**：新建「主题」分组，排在「外观」之后（按 manifest `groups` 的 order 插一个值）；`ui.theme.name` /
   `ui.theme.style` / `ui.theme.animation` 从「外观 → 主题」卡片移过去。新 label 补拼音首字母表。

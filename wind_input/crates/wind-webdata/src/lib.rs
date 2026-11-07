@@ -14,6 +14,7 @@
 //! 把 wind-transfer/fontdb 等重依赖挡在 Android 闭包之外。
 
 mod theme_render;
+pub use theme_render::set_preview_build_id;
 mod user_dicts;
 
 use serde_json::{Value, json};
@@ -3782,7 +3783,7 @@ pub trait WebDataRpc: WebDataHost {
     /// 和导入（`theme_target_dir` 当场拒）一致：`custom_hides_theme` 的绝对性是写死在
     /// 那边的文档里的，读取侧放行就意味着「列表里看不见、却导得出一个装不回去的包」。
     fn theme_dir_of(&self, slug: &str) -> anyhow::Result<std::path::PathBuf> {
-        if slug.is_empty() || slug.contains('/') || slug.contains('\\') || slug.contains("..") {
+        if !wind_theme::is_plain_slug(slug) {
             anyhow::bail!("非法主题 slug");
         }
         if wind_config::Config::custom_hides_theme(slug) {
@@ -3807,6 +3808,10 @@ pub trait WebDataRpc: WebDataHost {
 
     fn web_theme_delete(&self, params: &Value) -> anyhow::Result<Value> {
         let name = str_param(params, "name")?;
+        // 拼进用户主题目录再 remove_dir_all：`..` / 绝对路径能删到目录外去。
+        if !wind_theme::is_plain_slug(name) {
+            anyhow::bail!("非法主题 slug");
+        }
         let user_dir = self
             .user_themes_dir()
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;

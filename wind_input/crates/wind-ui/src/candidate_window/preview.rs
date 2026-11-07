@@ -1,9 +1,55 @@
 //! 设置端主题预览（`UiCommand::RenderCandidatePreview`）：用实时窗口的文字后端与外观覆盖，
 //! 按请求里的主题、横竖与缩放画一帧示例候选窗，编码成 PNG。不定位、不上屏、不播动画。
+//!
+//! 预览从不和打字抢 UI 线程：请求先进 [`PreviewQueue`]，消息循环只在命令通道排空的那一轮
+//! 画**一张**（见 [`PreviewQueue::take_if_idle`]），请求方已放弃的（`cancel` 置位）直接丢掉。
+
+use std::collections::VecDeque;
 
 use super::CandidateWindow;
 use super::scene::{self, AnimClock, CandidateSceneInput};
 use wind_ui_types::{CandidatePreviewImage, CandidatePreviewRequest};
+
+/// UI 线程本地的预览待画队列。
+#[derive(Default)]
+pub struct PreviewQueue {
+    q: VecDeque<Box<CandidatePreviewRequest>>,
+}
+
+impl PreviewQueue {
+    pub fn push(&mut self, req: Box<CandidatePreviewRequest>) {
+        self.q.push_back(req);
+    }
+
+    /// 还有没画的（含已放弃、待丢的）。
+    pub fn is_empty(&self) -> bool {
+        self.q.is_empty()
+    }
+
+    /// 本轮没有别的命令（`had_cmd` 为假）时取一张还有人等的请求；已放弃的顺手丢掉。
+    /// 有命令时什么也不给：先把打字等命令处理完，下一轮再说。
+    pub fn take_if_idle(&mut self, had_cmd: bool) -> Option<Box<CandidatePreviewRequest>> {
+        if had_cmd {
+            return None;
+        }
+        while let Some(req) = self.q.pop_front() {
+            if !req.cancelled() {
+                return Some(req);
+            }
+        }
+        None
+    }
+
+    /// [`Self::take_if_idle`] 取一张、画完回执。返回画没画。
+    pub fn render_one(&mut self, had_cmd: bool, w: &mut CandidateWindow) -> bool {
+        let Some(req) = self.take_if_idle(had_cmd) else {
+            return false;
+        };
+        // 回执通道容量 1、只回一次，try_send 不会阻塞；对端已超时走掉则丢弃。
+        let _ = req.reply.try_send(w.render_preview(&req));
+        true
+    }
+}
 
 impl CandidateWindow {
     /// 画一帧预览。外观覆盖（字体、字号、阴影开关、尺寸下限、翻页栏等）取本窗口当前状态，
@@ -57,8 +103,13 @@ impl CandidateWindow {
             showing: true,
             allowed: false,
         };
-        let frame =
-            scene::render_candidate(&mut self.preview_scene, &inp, clock, !cfg!(ext_presenter));
+        // 每张图各报各的皮肤告警（跨图去重会让第二次预览同一个坏主题时日志里什么也没有）。
+        self.preview_scene.skin_warned.borrow_mut().clear();
+        // 独立的图片 / 阴影缓存，画完即丢：不清掉实时窗口的源图与图集，临时目录的路径也不留下。
+        let scene_state = &mut self.preview_scene;
+        let frame = crate::view::with_isolated_paint_caches(|| {
+            scene::render_candidate(scene_state, &inp, clock, !cfg!(ext_presenter))
+        });
         let rgba = frame.to_rgba();
         let mut png = Vec::new();
         {
@@ -113,6 +164,7 @@ mod tests {
             vertical,
             scale,
             reply: tx,
+            cancel: Default::default(),
         };
         (req, rx)
     }
@@ -162,6 +214,70 @@ mod tests {
         let (req, _rx) = request(req.theme, true, 2.0);
         let v = w.render_preview(&req).unwrap();
         assert!(v.height > a.height, "竖排 ×2 应更高");
+    }
+
+    #[test]
+    fn queue_yields_to_commands_and_drops_cancelled() {
+        use std::sync::atomic::Ordering;
+        let mut q = PreviewQueue::default();
+        let (a, _ra) = request(wind_theme::Resolved::default(), false, 1.0);
+        let (b, rb) = request(wind_theme::Resolved::default(), false, 1.0);
+        a.cancel.store(true, Ordering::Release);
+        q.push(Box::new(a));
+        q.push(Box::new(b));
+        assert!(q.take_if_idle(true).is_none(), "有命令待处理时不画");
+        assert!(!q.is_empty());
+        let mut w = new_window();
+        assert!(q.render_one(false, &mut w), "跳过已放弃的，画下一张");
+        assert!(rb.try_recv().unwrap().is_ok());
+        assert!(q.is_empty());
+        assert!(!q.render_one(false, &mut w));
+    }
+
+    #[test]
+    fn cancelled_request_is_never_rendered() {
+        use std::sync::atomic::Ordering;
+        let mut q = PreviewQueue::default();
+        let (a, ra) = request(wind_theme::Resolved::default(), false, 1.0);
+        a.cancel.store(true, Ordering::Release);
+        q.push(Box::new(a));
+        let mut w = new_window();
+        assert!(!q.render_one(false, &mut w));
+        assert!(
+            matches!(
+                ra.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            ),
+            "丢掉请求即断开回执，不回图"
+        );
+    }
+
+    #[test]
+    fn preview_does_not_touch_live_image_cache() {
+        let base =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/themes/_base");
+        let live_img = base.join("chevron_prev.svg").to_string_lossy().into_owned();
+        let preview_img = base.join("chevron_next.svg").to_string_lossy().into_owned();
+        // 实时侧先在缓存里有一条（相当于上一次实时 layout 留下的）。
+        assert!(crate::view::image_src_size(&live_img).is_some());
+        let before = crate::view::with_image_cache_for_test(|c| c.ids_len_for_test());
+        // 预览主题的窗口底图是另一张图：不隔离的话它会进实时缓存。
+        let mut theme = wind_theme::Resolved::default();
+        theme.views.window.bg_image = Some(wind_theme::RvImage {
+            reference: preview_img,
+            mode: "stretch".into(),
+            opacity: 1.0,
+            ..Default::default()
+        });
+        let mut w = new_window();
+        let (req, _rx) = request(theme, false, 1.0);
+        w.render_preview(&req).unwrap();
+        assert_eq!(
+            crate::view::with_image_cache_for_test(|c| c.ids_len_for_test()),
+            before,
+            "预览不往实时缓存里加东西，也不清它"
+        );
+        assert!(crate::view::image_src_size(&live_img).is_some());
     }
 
     #[test]

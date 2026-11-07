@@ -153,6 +153,98 @@ mod tests {
         assert!(bare.width < f.width && bare.height < f.height);
     }
 
+    /// 带皮肤的临时主题：16×16 窗体 + 一块装饰（`decor` 是装饰表的额外字段）。
+    fn skin_theme(tag: &str, decor: &str) -> (std::path::PathBuf, wind_theme::Resolved) {
+        let dir = std::env::temp_dir().join(format!(
+            "wind_scene_render_limits_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = dir.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let px = |w, h| image::RgbaImage::from_pixel(w, h, image::Rgba([200, 200, 200, 255]));
+        px(16, 16).save(t.join("frame.png")).unwrap();
+        px(4, 4).save(t.join("dot.png")).unwrap();
+        std::fs::write(
+            t.join("theme.toml"),
+            format!(
+                "[meta]\nname = \"t\"\n[skin]\ndensity = 1\n\
+                 [skin.horizontal.frame]\nimage = \"frame.png\"\n\
+                 stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+                 [[skin.horizontal.decor]]\nimage = \"dot.png\"\nanchor = \"frame.top_left\"\n{decor}\n"
+            ),
+        )
+        .unwrap();
+        let theme = wind_theme::load_resolved(&dir, "t", false).unwrap();
+        assert!(theme.skin.is_some());
+        (dir, theme)
+    }
+
+    fn render_with(theme: &wind_theme::Resolved) -> (CandidateFrame, bool) {
+        let text = MockText::new("", 16.0).unwrap();
+        let opts = CandidateSceneOptions::default();
+        let cands = [cand("你好")];
+        let inp = CandidateSceneInput {
+            candidates: &cands,
+            preedit: "nihao",
+            preedit_caret: 5,
+            mode_label: "",
+            selected: 0,
+            hover: -1,
+            page: 1,
+            total_pages: 1,
+            grid: None,
+            vertical: false,
+            rotated: false,
+            upright: false,
+            preedit_embedded: false,
+            above: false,
+            theme,
+            base_font_logical: 16.0,
+            scale: 1.0,
+            screen_extent_px: Some((1920, 1080)),
+            text_renderer: &text,
+            opts: &opts,
+        };
+        let clock = AnimClock {
+            t: std::time::Duration::ZERO,
+            showing: true,
+            allowed: false,
+        };
+        let mut scene = CandidateScene::default();
+        let f = render_candidate(&mut scene, &inp, clock, false);
+        (f, scene.skin_geom.is_some())
+    }
+
+    #[test]
+    fn hostile_skin_geometry_stays_within_image_limits() {
+        // 正常的装饰：皮肤照常启用。
+        let (d0, ok) = skin_theme("ok", "offset = [2, 2]");
+        assert!(render_with(&ok).1, "正常皮肤应启用");
+        // 偏移大到外扩撑破上限：整套回退普通窗口，缓冲是普通尺寸。
+        let (d1, far) = skin_theme("far", "offset = [100000000, 0]");
+        let (f, skinned) = render_with(&far);
+        assert!(!skinned, "外扩超限应回退");
+        assert!(
+            crate::skin::fits_image_limits(f.width, f.height),
+            "{}x{}",
+            f.width,
+            f.height
+        );
+        // 声明巨大尺寸的装饰：按比例钳进上限，不去分配那么大的位图。
+        let (d2, huge) = skin_theme("huge", "size = [1000000, 1000000]");
+        let (f, _) = render_with(&huge);
+        assert!(
+            crate::skin::fits_image_limits(f.width, f.height),
+            "{}x{}",
+            f.width,
+            f.height
+        );
+        for d in [d0, d1, d2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
     #[test]
     fn to_rgba_swaps_channels_and_unpremultiplies() {
         let f = CandidateFrame {
