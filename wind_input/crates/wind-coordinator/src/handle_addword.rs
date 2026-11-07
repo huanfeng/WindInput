@@ -1537,6 +1537,7 @@ impl Coordinator {
             preedit: String::new(),
             preedit_caret: 0, // 加词面板无编码区
             preedit_host_owned: false,
+            composing: false, // 加词面板不是在打编码
             mode_label: String::new(),
             candidates,
             selected: usize::MAX, // 两行均为提示、非可选候选，不高亮任何行

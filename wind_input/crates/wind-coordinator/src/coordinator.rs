@@ -8143,6 +8143,7 @@ impl Coordinator {
             preedit,
             preedit_caret,
             preedit_host_owned: in_app,
+            composing: crate::session_output::composing_of(state),
             mode_label,
             candidates: items,
             selected,

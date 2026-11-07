@@ -509,6 +509,8 @@ pub struct CandidateWindow {
     skin_input_prev: Option<(String, usize, bool)>,
     /// 上一次工具栏的中英状态：比出 mode_cn / mode_en。
     skin_mode_prev: Option<bool>,
+    /// 上次记日志时的（配置开关, 系统动画效果）：只在变化时记。
+    anim_reported: Option<(bool, bool)>,
     /// 已报过的皮肤片段告警（每帧都重求几何，同一条只报一次；换主题清）。
     skin_warned: RefCell<std::collections::HashSet<String>>,
     /// 装饰动画的时间轴起点：由隐藏变可见时记。
@@ -703,6 +705,7 @@ impl CandidateWindow {
             decor_anims_key: None,
             skin_input_prev: None,
             skin_mode_prev: None,
+            anim_reported: None,
             skin_warned: RefCell::new(std::collections::HashSet::new()),
             anim_start: Instant::now(),
             anim_next: None,
@@ -5713,12 +5716,14 @@ impl WindowMouse for CandidateMouse {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
+                    // 按在 drag 装饰上的不进双击判定：连点人物是在点它，不是要截图。
+                    let on_decor = self.decor_press.is_some();
                     let (x, y) = mouse_pos(lparam);
                     self.release_decor(x, y, cursor_pos());
                     // 双击判定：只收「按下到松开窗口没挪」的空白处单击——拖过一下的不算，
                     // 否则拖完紧跟一次点击也会截图。候选项 / 翻页键走下面的 else，不经这里。
                     let (interval, slop) = crate::double_click::system_thresholds();
-                    if self.window_origin() == Some(self.drag_origin) {
+                    if !on_decor && self.window_origin() == Some(self.drag_origin) {
                         let mut p = POINT::default();
                         unsafe {
                             let _ = GetCursorPos(&mut p);

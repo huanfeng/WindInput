@@ -270,6 +270,8 @@ impl DecorGeom {
 
 /// 皮肤在当前 DPI / 字号下的几何。每帧渲染前由 [`CandidateWindow::refresh_skin_geom`] 重算。
 pub(super) struct SkinGeom {
+    /// 求它时的变体（竖排, 嵌入）。
+    variant_key: (bool, bool),
     frame_path: String,
     /// 窗体图集倍率：设备像素 / 所选窗体图源像素。
     frame_k: f32,
@@ -544,7 +546,8 @@ impl SkinGeom {
 }
 
 /// 装饰文件的帧区间 `[first, last]`（原始帧号）→ 片段。`raw` = 原始帧数，None 为不知道
-/// （关着动画没解帧：只用得到首帧）；越界为 None。降帧后原始第 `i` 帧落在保留的第 `i / stride` 帧。
+/// （关着动画没解帧：只用得到首帧）；越界为 None。降帧后原始第 `i` 帧落在保留的第 `i / stride` 帧，
+/// 区间取落在其中的保留帧（起点向上取整），一个都没有时取终点所在那帧。
 fn frames_clip(
     first: u32,
     last: u32,
@@ -556,11 +559,14 @@ fn frames_clip(
         (None, _) => Some(still()),
         (Some(n), _) if last as usize >= n => None,
         (Some(_), None) => Some(still()),
+        // 有帧生成失败、保留帧前移：映射对不上，按整段播（调用方 warn）。
+        (Some(_), Some(l)) if !l.aligned => Some(ClipTl::whole(0, Some(l))),
         (Some(_), Some(l)) => {
             let stride = l.stride.max(1);
             let len = l.durations.len();
-            let a = (first as usize / stride).min(len - 1);
+            // 首帧向上取整：区间起点被丢掉时取它之后的第一个保留帧，别画到区间外的帧。
             let b = (last as usize / stride).min(len - 1);
+            let a = (first as usize).div_ceil(stride).min(b);
             Some(ClipTl {
                 source: 0,
                 first: a,
@@ -622,7 +628,19 @@ impl CandidateWindow {
 
     /// 重读「播不播动画」：`ui.theme.animation` 且系统没关动画效果。变了就让状态机重来。
     pub(super) fn refresh_anim_allowed(&mut self) {
-        let allowed = self.theme_animation && (self.motion_allowed)();
+        let system = (self.motion_allowed)();
+        let allowed = self.theme_animation && system;
+        // 冻结原因变了记一条：远程桌面等场景系统关了动画效果，看不到动画不是 bug。
+        let why = (self.theme_animation, system);
+        if self.theme.skin.is_some() && self.anim_reported != Some(why) {
+            self.anim_reported = Some(why);
+            tracing::info!(
+                "skin: 主题动画{}（ui.theme.animation={}，系统动画效果={}）",
+                if allowed { "播放" } else { "冻结" },
+                why.0,
+                if why.1 { "开" } else { "关" }
+            );
+        }
         if allowed != self.anim_allowed {
             self.anim_allowed = allowed;
             self.decor_anims_key = None;
@@ -659,6 +677,7 @@ impl CandidateWindow {
             return;
         }
         self.ensure_decor_anims();
+        let key = (self.vertical, self.preedit_embedded);
         let t = std::time::Instant::now().saturating_duration_since(self.anim_start);
         let Some(v) = self
             .theme
@@ -676,10 +695,12 @@ impl CandidateWindow {
             let Some(spec) = v.decor.get(i).map(|d| &d.anim) else {
                 continue;
             };
-            // 还没求过几何（从未显示）时不知道片段时长，只会记常驻状态。
+            // 还没求过几何（从未显示），或几何是另一个变体的（隐藏期间换了横竖 / 嵌入）：
+            // 不知道片段时长，只会记常驻状态。
             let geom = self
                 .skin_geom
                 .as_ref()
+                .filter(|g| g.variant_key == key)
                 .and_then(|g| g.decor.iter().find(|d| d.index == i));
             let tl: &dyn Timelines = match geom {
                 Some(d) => d,
@@ -697,17 +718,32 @@ impl CandidateWindow {
 
     /// 候选更新：比较相邻两次的编码串与页码，喂 `typing` / `backspace` / `page` / `empty`
     /// （`preedit` 取协调器下发的原串，编码由宿主自绘时也照样比）。
-    pub fn note_skin_input(&mut self, preedit: &str, page: usize, no_candidates: bool) {
-        let empty = !preedit.is_empty() && no_candidates;
+    ///
+    /// 只有 `composing`（打字中）的帧才算编码：上屏后进联想时编码串变成空串或联想标识，
+    /// 那不是退格也不是打字。不在打字中的帧之后再打字，按从空串起打算 `typing`。
+    pub fn note_skin_input(
+        &mut self,
+        preedit: &str,
+        composing: bool,
+        page: usize,
+        no_candidates: bool,
+    ) {
+        if self.theme.skin.is_none() {
+            return;
+        }
+        let code = if composing { preedit } else { "" };
+        let empty = composing && no_candidates;
         let prev = self
             .skin_input_prev
-            .replace((preedit.to_string(), page, empty));
+            .replace((code.to_string(), page, empty));
         let (old, old_page, old_empty) = match &prev {
             Some((p, n, e)) => (p.as_str(), Some(*n), *e),
             None => ("", None, false),
         };
-        if preedit != old {
-            let ev = if preedit.len() < old.len() && old.starts_with(preedit) {
+        if !composing {
+            // 联想 / 上屏后的帧：不报编码事件，只记下来作下一帧的基线。
+        } else if code != old {
+            let ev = if code.len() < old.len() && old.starts_with(code) {
                 DecorEvent::Backspace
             } else {
                 DecorEvent::Typing
@@ -723,6 +759,9 @@ impl CandidateWindow {
 
     /// 工具栏状态：中英变了喂 `mode_cn` / `mode_en`（第一次只记下，不算切换）。
     pub fn note_skin_mode(&mut self, chinese: bool) {
+        if self.theme.skin.is_none() {
+            return;
+        }
         if self
             .skin_mode_prev
             .replace(chinese)
@@ -871,7 +910,9 @@ impl CandidateWindow {
                 let mut layouts = vec![main_layout];
                 let mut extra_idx: Vec<(&str, Option<usize>)> = Vec::new();
                 for ((name, path), decode) in extra.into_iter().zip(decode_extra) {
-                    let Some(path) = path else {
+                    // `asset_path` 找不到时原样返回引用名，读不出尺寸才算真缺失（结果缓存，不每帧读盘）。
+                    let Some(path) = path.filter(|p| crate::view::image_src_size(p).is_some())
+                    else {
                         extra_idx.push((name, None));
                         continue;
                     };
@@ -887,6 +928,12 @@ impl CandidateWindow {
                 let clip_of = |c: &DecorClip, what: &dyn Fn() -> String| -> Option<ClipTl> {
                     let tl = match c {
                         DecorClip::Frames { first, last } => {
+                            if layouts[0].as_ref().is_some_and(|l| !l.aligned) {
+                                self.warn_skin_once(format!(
+                                    "skin: 装饰 {} 有帧解码失败，帧区间片段按整段播",
+                                    d.image
+                                ));
+                            }
                             frames_clip(*first, *last, layouts[0].as_ref(), main_raw)
                         }
                         DecorClip::Image(n) => extra_idx
@@ -944,6 +991,7 @@ impl CandidateWindow {
             })
             .collect();
         Some(SkinGeom {
+            variant_key: (self.vertical, self.preedit_embedded),
             frame_path,
             frame_k,
             sx,
@@ -1955,7 +2003,7 @@ mod tests {
         );
         w.show();
         assert_eq!(decor_px(&w), PX_RED, "初始状态 a 的首帧");
-        w.note_skin_input("a", 1, false);
+        w.note_skin_input("a", true, 1, false);
         assert!(
             w.next_deadline().is_some_and(|d| d <= Instant::now()),
             "切了状态要立即醒来重绘"
@@ -1982,7 +2030,7 @@ mod tests {
         let mut w = state_window("sm-diff", on);
         w.show();
         let step = |w: &mut CandidateWindow, pre: &str, page: usize, none: bool| {
-            w.note_skin_input(pre, page, none);
+            w.note_skin_input(pre, true, page, none);
             pump(w);
             decor_px(w)
         };
@@ -2026,7 +2074,7 @@ mod tests {
         ];
         let mut w = state_window("sm-hidden", on);
         w.show();
-        w.note_skin_input("a", 1, false);
+        w.note_skin_input("a", true, 1, false);
         pump(&mut w);
         assert_eq!(decor_px(&w), PX_BLUE);
         w.hide();
@@ -2063,7 +2111,7 @@ mod tests {
         ];
         let mut w = state_window("sm-idle", on);
         w.show();
-        w.note_skin_input("a", 1, false);
+        w.note_skin_input("a", true, 1, false);
         pump(&mut w);
         assert_eq!(decor_px(&w), PX_BLUE);
         w.anim_start -= Duration::from_millis(2050);
@@ -2135,7 +2183,7 @@ mod tests {
         w.show();
         assert_eq!(decor_px(&w), PX_BLUE, "初始状态 b 的首帧（第 2 帧）");
         assert_eq!(w.next_deadline(), None, "不登记换帧");
-        w.note_skin_input("a", 1, false);
+        w.note_skin_input("a", true, 1, false);
         assert!(!w.take_anim_due(), "事件不切换");
         w.show();
         assert_eq!(decor_px(&w), PX_BLUE);
@@ -2155,7 +2203,7 @@ mod tests {
         w.motion_allowed = || false;
         w.show();
         assert_eq!(decor_px(&w), PX_BLUE);
-        w.note_skin_input("a", 1, false);
+        w.note_skin_input("a", true, 1, false);
         assert!(!w.take_anim_due());
     }
 
@@ -2170,7 +2218,7 @@ mod tests {
             w.set_theme(theme);
         }
         w.show();
-        w.note_skin_input("a", 1, false);
+        w.note_skin_input("a", true, 1, false);
         pump(&mut w);
         assert_eq!(decor_px(&w), PX_RED, "越界的状态当作没写，仍在 a");
     }
@@ -2183,12 +2231,33 @@ mod tests {
             durations: vec![200, 200, 200],
             stride: 2,
             raw_frames: 6,
+            aligned: true,
         };
         let c = |a, b| frames_clip(a, b, Some(&l), Some(6)).map(|c| (c.first, c.durations));
         assert_eq!(c(2, 3), Some((1, vec![200])), "2-3 都落在保留的第 1 帧");
-        assert_eq!(c(1, 4), Some((0, vec![200, 200, 200])));
+        assert_eq!(
+            c(1, 4),
+            Some((1, vec![200, 200])),
+            "起点 1 被丢：从它之后的保留帧（原始 2）起，不画区间外的原始 0"
+        );
+        assert_eq!(c(0, 4), Some((0, vec![200, 200, 200])));
+        assert_eq!(
+            c(3, 3),
+            Some((1, vec![200])),
+            "区间里没有保留帧：取终点所在那帧"
+        );
         assert_eq!(c(5, 5), Some((2, vec![200])));
         assert_eq!(c(4, 6), None, "越界");
+        let lost = AnimLayout {
+            aligned: false,
+            ..l.clone()
+        };
+        let whole = frames_clip(2, 3, Some(&lost), Some(6)).unwrap();
+        assert_eq!(
+            (whole.first, whole.durations.len()),
+            (0, 3),
+            "有帧生成失败：映射不可靠，按整段播"
+        );
         assert!(
             frames_clip(0, 0, None, Some(1)).is_some(),
             "静态图只有第 0 帧"
@@ -2198,6 +2267,60 @@ mod tests {
             frames_clip(3, 5, None, None).is_some(),
             "没解帧（关着动画）时不判越界"
         );
+    }
+
+    #[test]
+    fn missing_image_clip_is_dropped() {
+        for (tag, name) in [
+            ("sm-miss-rel", "no_such_clip.gif".to_string()),
+            (
+                "sm-miss-abs",
+                fixture_dir("sm-miss-abs")
+                    .join("gone.gif")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ] {
+            let mut w = state_window(tag, vec![]);
+            {
+                let mut theme = w.theme_source.clone();
+                let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+                let clip = DecorClip::Image(name.clone());
+                v.decor[0].anim.on =
+                    vec![(DecorEvent::Commit, DecorAction::Play { clip, then: None })];
+                w.set_theme(theme);
+            }
+            w.show();
+            {
+                let g = w.skin_geom.as_ref().unwrap();
+                assert_eq!(g.decor[0].sources.len(), 1, "{name}: 缺失文件不进源");
+                assert!(g.decor[0].on[0].is_none(), "{name}: 片段不可用");
+            }
+            w.skin_signal(wind_ui_types::SkinSignal::Commit);
+            assert!(!w.take_anim_due(), "{name}: 引用它的动作当作没写");
+            assert_eq!(decor_px(&w), PX_RED);
+        }
+    }
+
+    #[test]
+    fn leaving_composition_is_not_backspace() {
+        use DecorEvent::*;
+        let on = vec![(Typing, play(1, 1, None)), (Backspace, play(2, 2, None))];
+        let mut w = state_window("sm-assoc", on);
+        w.show();
+        w.note_skin_input("ab", true, 1, false);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_GREEN, "typing");
+        w.anim_start -= Duration::from_millis(150);
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(decor_px(&w), PX_RED, "片段播完");
+        w.note_skin_input("", false, 1, false);
+        assert!(!w.take_anim_due(), "上屏后编码清空不是退格");
+        w.note_skin_input("联", false, 1, false);
+        assert!(!w.take_anim_due(), "联想标识不是打字");
+        w.note_skin_input("x", true, 1, false);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_GREEN, "联想之后再打字照常 typing");
     }
 
     #[test]

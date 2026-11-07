@@ -30,6 +30,9 @@ pub enum UiCommand {
         /// 此前是「不画就不发」，把渲染策略焊在了数据通道上：自绘编码栏的宿主
         /// （Android）想拿数据，只能去改一个显示模式配置项。
         preedit_host_owned: bool,
+        /// 是否在「打字中」：有编码、不在联想态（同中立通道 `CompositionView::composing`）。
+        /// 联想标识、上屏后的空串都不算——渲染端据此区分打字与上屏后的换帧（皮肤装饰事件）。
+        composing: bool,
         /// 模式指示文本（拼/双/快/英/符 或全称）；空=不显示。有 preedit 空间时随候选窗持久显示。
         mode_label: String,
         candidates: Vec<CandidateItem>,

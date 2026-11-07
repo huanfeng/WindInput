@@ -399,6 +399,8 @@ pub struct FrameBudget<T> {
     /// 每隔几帧留一帧（每丢一轮翻倍）。
     stride: usize,
     seen: usize,
+    /// 有该留的帧没生成出来：之后的保留帧前移，原始帧号映射不再可靠。
+    lost: bool,
 }
 
 impl<T> FrameBudget<T> {
@@ -409,6 +411,7 @@ impl<T> FrameBudget<T> {
             budget,
             stride: 1,
             seen: 0,
+            lost: false,
         }
     }
 
@@ -416,7 +419,9 @@ impl<T> FrameBudget<T> {
     pub fn push_with(&mut self, ms: u32, make: impl FnOnce() -> Option<T>) {
         let keep = self.seen.is_multiple_of(self.stride);
         self.seen += 1;
-        match (keep.then(make).flatten(), self.frames.last_mut()) {
+        let made = keep.then(make).flatten();
+        self.lost |= keep && made.is_none();
+        match (made, self.frames.last_mut()) {
             (Some(t), _) => self.frames.push((t, ms)),
             (None, Some(last)) => last.1 = last.1.saturating_add(ms),
             // 首帧就没生成出来：没有前一帧可并。
@@ -453,6 +458,11 @@ impl<T> FrameBudget<T> {
     /// 送入的原始帧数。
     pub fn seen(&self) -> usize {
         self.seen
+    }
+
+    /// 保留帧与原始帧号是否还按 `i / stride` 对得上（有帧生成失败时对不上）。
+    pub fn aligned(&self) -> bool {
+        !self.lost
     }
 
     pub fn finish(self) -> Vec<(T, u32)> {
@@ -727,6 +737,16 @@ mod tests {
         assert_eq!(frame_ms(0, 1, Some(0.001)), MAX_FRAME_MS, "极小 fps");
         assert_eq!(frame_ms(u32::MAX, 1, None), MAX_FRAME_MS, "单帧超长");
         assert_eq!(frame_ms(0, 1, Some(f32::MIN_POSITIVE)), MAX_FRAME_MS);
+    }
+
+    #[test]
+    fn frame_budget_flags_lost_frames_as_misaligned() {
+        let mut b = FrameBudget::new(10, 100);
+        b.push_with(10, || Some(0));
+        assert!(b.aligned());
+        b.push_with(10, || None);
+        b.push_with(10, || Some(2));
+        assert!(!b.aligned(), "第 1 帧没生成，第 2 帧前移到保留下标 1");
     }
 
     #[test]

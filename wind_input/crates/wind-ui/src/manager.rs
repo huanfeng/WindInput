@@ -403,6 +403,7 @@ impl UiManager {
                         preedit,
                         preedit_caret,
                         preedit_host_owned,
+                        composing,
                         mode_label,
                         candidates,
                         selected,
@@ -429,7 +430,12 @@ impl UiManager {
                             caret_y
                         );
                         // 皮肤装饰事件按原编码串比（宿主自绘编码时也照样打字）。
-                        candidate_window.note_skin_input(&preedit, page, candidates.is_empty());
+                        candidate_window.note_skin_input(
+                            &preedit,
+                            composing,
+                            page,
+                            candidates.is_empty(),
+                        );
                         // 编码区归宿主画时，候选窗拿到数据也不显示——数据恒下发，
                         // 显示与否由这个标志决定（数据/渲染解耦，见 UiCommand 注释）。
                         let preedit = if preedit_host_owned {

@@ -288,9 +288,10 @@ pub const ANIM_BUDGET_BYTES: usize = 24 * 1024 * 1024;
 struct Anim {
     frames: Vec<Pixmap>,
     durations: Vec<u32>,
-    /// 降帧步长与原始帧数，见 [`AnimLayout`]。
+    /// 降帧步长、原始帧数与映射是否可靠，见 [`AnimLayout`]。
     stride: usize,
     raw_frames: usize,
+    aligned: bool,
 }
 
 /// 动画的时间轴：保留下来的各帧时长（毫秒），以及原始帧号到保留帧的映射
@@ -300,6 +301,8 @@ pub struct AnimLayout {
     pub durations: Vec<u32>,
     pub stride: usize,
     pub raw_frames: usize,
+    /// false = 有帧解码 / 缩放失败、保留帧前移，原始帧号映射不可靠（帧区间片段按整段播）。
+    pub aligned: bool,
 }
 
 /// 同一源下的动画键：倍率百万分值、目标宽高、fps 覆盖的位模式（0 = 不覆盖）、帧预算份额。
@@ -771,6 +774,7 @@ impl ImageCache {
             durations: a.durations.clone(),
             stride: a.stride,
             raw_frames: a.raw_frames,
+            aligned: a.aligned,
         })
     }
 
@@ -1066,7 +1070,7 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
         });
     }
     let dropped = acc.dropped();
-    let (stride, raw_frames) = (acc.stride(), acc.seen());
+    let (stride, raw_frames, aligned) = (acc.stride(), acc.seen(), acc.aligned());
     let (frames, durations): (Vec<Pixmap>, Vec<u32>) = acc.finish().into_iter().unzip();
     tracing::debug!(
         "skin: 动画建帧 {} 帧 {w}x{h}，耗时 {:?}",
@@ -1089,6 +1093,7 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
         durations,
         stride,
         raw_frames,
+        aligned,
     })
 }
 
@@ -1321,7 +1326,8 @@ mod tests {
             Some(AnimLayout {
                 durations: vec![300, 700],
                 stride: 2,
-                raw_frames: 4
+                raw_frames: 4,
+                aligned: true
             }),
             "原始第 i 帧落在保留的第 i/2 帧"
         );
