@@ -118,7 +118,7 @@ impl MobileCore {
             && self.candidates(0, 1).total > 0
         {
             if self.coord.is_composing() {
-                if !self.coord.latin_input() {
+                if !self.coord.latin_input() && !self.digits_are_input() {
                     // 中文组码：首选上屏，再出数字（同打标点）。不清 auto_spaced（Kotlin 在此直接返回）
                     let mut out = self.select_candidate_plain(0);
                     let ops = vec![EditOp::Commit(d.to_string())];
@@ -127,7 +127,7 @@ impl MobileCore {
                     out.consumed = true;
                     return out;
                 }
-                // 英文组码：数字是词的一部分，交给引擎
+                // 英文组码 / 数字属于输入的模式：数字是缓冲的一部分，交给引擎
             } else {
                 // 联想态：先收起联想，再走引擎
                 leading = Some(self.key_down(keymap::VK_ESCAPE, 0));
@@ -145,6 +145,20 @@ impl MobileCore {
                 first
             }
         }
+    }
+
+    /// 当前模式的缓冲是**文本**而不是编码，数字由引擎自己判定是入缓冲还是选词：
+    /// 快捷输入等融合模式（`;12+3`，算式透镜下数字是输入）、临时英文（`win10`）、
+    /// 网址 / 邮箱（原样累积）、Unicode（十六进制码点）。
+    ///
+    /// 这些模式里候选一进来就有（快捷输入的「重复上屏」），触摸数字若照普通组码
+    /// 「首选上屏 + 数字」，进快捷输入后上滑数字就把重复候选顶上屏了（真机反馈）。
+    /// 编码类模式（临时拼音、特殊码表、生僻字、反查、辅助码）数字不是合法编码，维持原状。
+    fn digits_are_input(&self) -> bool {
+        matches!(
+            self.coord.debug_active_mode(),
+            Some("mix" | "temp_english" | "url" | "email" | "unicode")
+        )
     }
 
     /// 对应 Kotlin `engineKey`：句末标点换位、清标记、翻译 VK、进引擎、英文空格补空格
@@ -763,5 +777,47 @@ mod tests {
         let out = m.press(ch(';'), KeySource::Touch);
         assert!(out.consumed);
         assert!(out.ops.contains(&commit(&second)), "ops={:?}", out.ops);
+    }
+
+    // ---- 快捷输入等「数字属于输入」的模式：触摸数字进缓冲 ----
+
+    /// 组合区文本（最后一条 SetComposition）
+    fn composition(out: &KeyOutcome) -> Option<String> {
+        out.ops.iter().rev().find_map(|o| match o {
+            EditOp::SetComposition { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn touch_digit_enters_quick_input_buffer_with_repeat_candidate() {
+        let Some((m, _rx)) = core("quick_digit", "wubi86", no_assoc) else {
+            return;
+        };
+        m.set_touch_quick_trigger(true);
+        // 先上屏一个字：快捷输入一进来就有「重复上屏」候选（真机反馈的触发条件）
+        type_str(&m, "wqvb");
+        m.press(PressKey::Space, KeySource::Touch);
+        m.press(ch(';'), KeySource::Touch);
+        assert!(
+            m.candidates(0, 1).total > 0,
+            "前提：快捷输入里有重复上屏候选"
+        );
+        let mut last = KeyOutcome::default();
+        for c in "12+3".chars() {
+            last = m.press(ch(c), KeySource::Touch);
+            assert!(
+                !last.ops.iter().any(|o| matches!(o, EditOp::Commit(_))),
+                "{c} 不能上屏: {last:?}"
+            );
+        }
+        assert!(m.coord.is_composing());
+        let comp = composition(&last).unwrap_or_default();
+        assert!(comp.contains("12+3"), "{last:?}");
+        assert!(
+            m.candidates(0, 5).items.iter().any(|t| t == "15"),
+            "算式算得出: {:?}",
+            m.candidates(0, 5).items
+        );
     }
 }
