@@ -1,7 +1,8 @@
 //! 候选窗场景：每帧把纯数据（[`CandidateSceneInput`]）构建成 View 树。
 //!
 //! 窗口侧（[`super::CandidateWindow`]）只负责收集输入、平台查询（DPI、显示器工作区）与上屏；
-//! 树怎么搭只看输入，不读窗口字段。跨帧状态（皮肤几何、分槽位交出的各块）由 [`CandidateScene`] 持有。
+//! 树怎么搭只看输入，不读窗口字段。跨帧状态（皮肤几何、分槽位交出的各块、装饰状态机）由
+//! [`CandidateScene`] 持有；时间由窗口经 [`skin_frame::AnimClock`] 注入。
 //! 方案见 `docs/design/wind-scene-extraction.md` §2。
 
 use super::*;
@@ -79,6 +80,14 @@ pub(super) struct CandidateScene {
     pub(super) skin_geom: Option<skin_frame::SkinGeom>,
     /// 分槽位布局下 `build_tree`（`&self`）交出的各块，由 `skin_layout` 取走排版。
     pub(super) free_parts: RefCell<Vec<(skin_frame::SlotKind, View)>>,
+    /// 皮肤装饰的事件状态机，按当前变体的装饰下标一块一台（见 [`crate::skin_anim`]）。
+    pub(super) decor_anims: Vec<crate::skin_anim::Machine>,
+    /// [`Self::decor_anims`] 对应的变体（竖排, 嵌入）；None = 待重建。
+    pub(super) decor_anims_key: Option<(bool, bool)>,
+    /// 已报过的皮肤片段告警（每帧都重求几何，同一条只报一次；换主题清）。
+    pub(super) skin_warned: RefCell<std::collections::HashSet<String>>,
+    /// 下一次换帧时刻（距动画时间轴起点）；None = 本帧没有在播的动画。隐藏时清空。
+    pub(super) anim_next: Option<std::time::Duration>,
 }
 
 impl CandidateSceneInput<'_> {
@@ -2391,7 +2400,7 @@ impl CandidateScene {
         };
 
         // 皮肤分槽位布局：各块交给皮肤层按槽位摆放，根容器只是一个按窗体尺寸撑开的空盒
-        // （见 `skin_frame::CandidateWindow::skin_layout`）。槽位由皮肤决定，不随上翻交换。
+        // （见 `skin_frame::CandidateScene::skin_layout`）。槽位由皮肤决定，不随上翻交换。
         if let Some(slots) = free_slots {
             let mut cand = View::container(Layout::Column).child(list);
             if let Some(p) = vertical_bottom_pager {

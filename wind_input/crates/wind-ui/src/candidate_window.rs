@@ -502,22 +502,14 @@ pub struct CandidateWindow {
     /// 播不播动画：[`Self::theme_animation`] 且 [`Self::motion_allowed`]，换主题与每次显示时
     /// 刷新。关着时装饰停在初始状态首帧，事件不切换。
     anim_allowed: bool,
-    /// 皮肤装饰的事件状态机，按当前变体的装饰下标一块一台（见 [`crate::skin_anim`]）。
-    decor_anims: Vec<crate::skin_anim::Machine>,
-    /// [`Self::decor_anims`] 对应的变体（竖排, 嵌入）；None = 待重建。
-    decor_anims_key: Option<(bool, bool)>,
     /// 上一次候选更新的（编码串, 页码, 空码）：比出 typing / backspace / page / empty。隐藏时清。
     skin_input_prev: Option<(String, usize, bool)>,
     /// 上一次工具栏的中英状态：比出 mode_cn / mode_en。
     skin_mode_prev: Option<bool>,
     /// 上次记日志时的（配置开关, 系统动画效果）：只在变化时记。
     anim_reported: Option<(bool, bool)>,
-    /// 已报过的皮肤片段告警（每帧都重求几何，同一条只报一次；换主题清）。
-    skin_warned: RefCell<std::collections::HashSet<String>>,
     /// 装饰动画的时间轴起点：由隐藏变可见时记。
     anim_start: Instant,
-    /// 下一次换帧时刻；None = 本帧没有在播的动画。隐藏时清空。
-    anim_next: Option<Instant>,
     /// 换帧到期，待 UI 循环取走后重绘一帧。
     anim_due: bool,
     /// 正在为换帧重绘：不重置悬停、不重摆气泡。
@@ -674,14 +666,10 @@ impl CandidateWindow {
             motion_allowed: system_allows_animation,
             theme_animation: true,
             anim_allowed: system_allows_animation(),
-            decor_anims: Vec::new(),
-            decor_anims_key: None,
             skin_input_prev: None,
             skin_mode_prev: None,
             anim_reported: None,
-            skin_warned: RefCell::new(std::collections::HashSet::new()),
             anim_start: Instant::now(),
-            anim_next: None,
             anim_due: false,
             anim_repaint: false,
             user_font_family: String::new(),
@@ -823,6 +811,23 @@ impl CandidateWindow {
         {
             None
         }
+    }
+
+    /// 借出场景与本帧输入（`above = false`）给需要改场景状态的调用：场景先取出、用完放回，
+    /// 输入只借窗口其余字段。
+    fn with_scene<R>(
+        &mut self,
+        f: impl FnOnce(&mut CandidateScene, &CandidateSceneInput) -> R,
+    ) -> R {
+        let mut scene = std::mem::take(&mut self.scene);
+        let r = f(&mut scene, &self.scene_input(false));
+        self.scene = scene;
+        r
+    }
+
+    /// 下一次装饰换帧的时刻：场景给的是距动画时间轴起点的时长，起点在窗口侧。
+    fn anim_next_at(&self) -> Option<Instant> {
+        self.scene.next_anim_at().map(|d| self.anim_start + d)
     }
 
     /// 本帧场景输入：内容、排布与生效主题都按引用借出，`above` 决定是否按上方专属布局搭。
@@ -1188,8 +1193,8 @@ impl CandidateWindow {
         self.refresh_anim_allowed();
         if self.theme_source.skin != theme.skin {
             crate::view::clear_anim_frames();
-            self.decor_anims_key = None;
-            self.skin_warned.borrow_mut().clear();
+            self.scene.decor_anims_key = None;
+            self.scene.skin_warned.borrow_mut().clear();
         }
         self.theme_source = theme;
         self.refresh_effective_theme();
@@ -1470,7 +1475,7 @@ impl CandidateWindow {
         // 窗口显示位置再左上回移 (ml, mt) → 视觉锚点/命中坐标与无阴影时一致，阴影四面溢出。
         let shadow = self.scene.shadow_params(&self.scene_input(false));
         let t_layout0 = Instant::now();
-        let (ml, mt, mr, mb) = match self.skin_layout(&mut root) {
+        let (ml, mt, mr, mb) = match self.scene.skin_layout(&mut root, &self.text_renderer) {
             Some(m) => m,
             None => {
                 let m = match &shadow {
@@ -1505,7 +1510,8 @@ impl CandidateWindow {
         let safety_max_w = self.screen_safety_max_width_px().saturating_sub(ml + mr);
         content_w = content_w.min(safety_max_w.max(self.scene_input(false).min_window_w_px()));
         let content_h = (h_f.ceil() as u32).max(24);
-        self.skin_fit_frame(content_w, content_h);
+        self.scene
+            .skin_fit_frame(content_w, content_h, &self.text_renderer);
         let width = content_w + ml + mr;
         let height = content_h + mt + mb;
         let t_layout = t_layout0.elapsed();
@@ -1524,7 +1530,7 @@ impl CandidateWindow {
             content_h,
             self.placed_above,
             offset,
-            &self.skin_place_anchor(1.0),
+            &self.scene.skin_place_anchor(1.0, self.scale),
         );
         self.placed_above = above;
         // 位置稳定性：窗口已显示且新位置与上次内容锚点微移(<4px*scale)→保持原位，吞掉 caret 微抖。
@@ -1542,7 +1548,7 @@ impl CandidateWindow {
         self.last_content_pos = Some((px, py));
         // 上方显示且有开关真正生效 → 按上方布局重建候选树（项数/尺寸/位置不变，仅排列翻转）
         self.report_flip_state();
-        if self.above_layout_active() && !self.skin_is_free() {
+        if self.above_layout_active() && !self.scene.skin_is_free() {
             root = self.scene.build_tree(&self.scene_input(true));
             root.layout(ml as f32, mt as f32, &self.text_renderer);
         }
@@ -1679,7 +1685,7 @@ impl CandidateWindow {
         // 圆角内容形状投影），位图内【不画软件阴影】：margin 归零 → 定位精确贴 caret、无偏移，
         // 观感也更 native。software_shadow=false → Swift 侧启用系统窗口阴影。
         let shadow: Option<crate::view::SoftShadow> = None;
-        let (ml, mt, mr, mb) = match self.skin_layout(&mut root) {
+        let (ml, mt, mr, mb) = match self.scene.skin_layout(&mut root, &self.text_renderer) {
             Some(m) => m,
             None => {
                 let m = match &shadow {
@@ -1710,7 +1716,8 @@ impl CandidateWindow {
         let safety_max_w = self.screen_safety_max_width_px().saturating_sub(ml + mr);
         content_w = content_w.min(safety_max_w.max(self.scene_input(false).min_window_w_px()));
         let content_h = (h_f.ceil() as u32).max(24);
-        self.skin_fit_frame(content_w, content_h);
+        self.scene
+            .skin_fit_frame(content_w, content_h, &self.text_renderer);
         let width = content_w + ml + mr;
         let height = content_h + mt + mb;
 
@@ -1753,7 +1760,9 @@ impl CandidateWindow {
                     content_h,
                     self.placed_above,
                     offset,
-                    &self.skin_place_anchor(1.0 / self.scale.max(1.0)),
+                    &self
+                        .scene
+                        .skin_place_anchor(1.0 / self.scale.max(1.0), self.scale),
                 );
                 self.placed_above = above;
                 let (px, py) = match self.last_content_pos {
@@ -1772,7 +1781,7 @@ impl CandidateWindow {
             }
         };
         self.report_flip_state();
-        if self.above_layout_active() && !self.skin_is_free() {
+        if self.above_layout_active() && !self.scene.skin_is_free() {
             root = self.scene.build_tree(&self.scene_input(true));
             root.layout(ml as f32, mt as f32, &self.text_renderer);
         }
@@ -1900,7 +1909,7 @@ impl CandidateWindow {
         self.refresh_skin_geom();
         let mut root = self.scene.build_tree(&self.scene_input(false));
         let shadow = self.scene.shadow_params(&self.scene_input(false));
-        let (ml, mt, mr, mb) = match self.skin_layout(&mut root) {
+        let (ml, mt, mr, mb) = match self.scene.skin_layout(&mut root, &self.text_renderer) {
             Some(m) => m,
             None => {
                 let m = match &shadow {
@@ -1947,7 +1956,8 @@ impl CandidateWindow {
             );
         }
         let content_h = (h_f.ceil() as u32).max(24);
-        self.skin_fit_frame(content_w, content_h);
+        self.scene
+            .skin_fit_frame(content_w, content_h, &self.text_renderer);
         let width = content_w + ml + mr;
         let height = content_h + mt + mb;
 
@@ -2000,7 +2010,7 @@ impl CandidateWindow {
                 content_h,
                 self.placed_above,
                 offset,
-                &self.skin_place_anchor(1.0),
+                &self.scene.skin_place_anchor(1.0, self.scale),
             );
             self.placed_above = above;
             let (px, py) = match self.last_content_pos {
@@ -2018,7 +2028,7 @@ impl CandidateWindow {
             screen_xy = Some((px - ml as i32, py - mt as i32));
         }
         self.report_flip_state();
-        if self.above_layout_active() && !self.skin_is_free() {
+        if self.above_layout_active() && !self.scene.skin_is_free() {
             root = self.scene.build_tree(&self.scene_input(true));
             root.layout(ml as f32, mt as f32, &self.text_renderer);
         }
@@ -2714,7 +2724,7 @@ impl CandidateWindow {
         }
         self.skin_input_prev = None;
         self.visible = false;
-        self.anim_next = None;
+        self.scene.anim_next = None;
         self.anim_due = false;
         self.content_rect = None;
         self.last_content_pos = None; // 组合结束，下次显示重新落位
@@ -2781,8 +2791,8 @@ impl CandidateWindow {
         if let Some(i) = click {
             self.skin_event(wind_theme::skin::DecorEvent::Click, Some(i));
         }
-        if self.visible && self.anim_next.is_some_and(|t| t <= now) {
-            self.anim_next = None;
+        if self.visible && self.anim_next_at().is_some_and(|t| t <= now) {
+            self.scene.anim_next = None;
             self.anim_due = true;
         }
     }
@@ -2838,7 +2848,7 @@ impl CandidateWindow {
             m.deferred,
             self.pixel_release.deadline(),
             // 装饰换帧：只在可见时登记；事件切了画面待重绘时立即醒。
-            self.anim_next.filter(|_| self.visible),
+            self.anim_next_at().filter(|_| self.visible),
             self.anim_due.then(Instant::now),
         ]
         .into_iter()

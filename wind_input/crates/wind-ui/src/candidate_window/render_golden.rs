@@ -885,7 +885,7 @@ fn pipeline(
             m.skin_frame, m.skin_decor, m.skin_click_rects
         ));
     }
-    if let Some(next) = w.anim_next {
+    if let Some(next) = w.anim_next_at() {
         out.push_str(&format!(
             "-- 下次换帧 +{}ms\n",
             next.saturating_duration_since(now).as_millis()
@@ -899,7 +899,7 @@ fn pipeline(
     }
     if let Some(g) = &w.scene.skin_geom {
         out.push_str(&g.golden_dump(fnv1a));
-        let a = w.skin_place_anchor(1.0);
+        let a = w.scene.skin_place_anchor(1.0, w.scale);
         out.push_str(&format!(
             "-- 对齐 下方 {:?} 上方 {:?} 钳制外扩 {:?}\n",
             a.below, a.above, a.clamp
@@ -927,7 +927,7 @@ fn pipeline(
     }
     if tree {
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        let m = match w.skin_layout(&mut root) {
+        let m = match w.scene.skin_layout(&mut root, &w.text_renderer) {
             Some(m) => m,
             None => {
                 let m = w

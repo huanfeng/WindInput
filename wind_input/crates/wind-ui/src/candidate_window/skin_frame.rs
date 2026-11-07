@@ -4,7 +4,8 @@
 //! 接入方式：皮肤生效时根容器不画背景 / 边框 / 阴影，内边距换成皮肤内容框、最小尺寸
 //! 取窗体固定段之和；根容器的盒就是窗体。窗体与装饰在根容器绘制前后各画一遍。
 
-use super::CandidateWindow;
+use super::scene::{CandidateScene, CandidateSceneInput};
+use super::{CandidateWindow, TextRenderer};
 use crate::view::{Edges, Rect, View};
 use wind_theme::skin::{
     Anchor, AnchorBox, BandFill, Clamp, DecorAction, DecorClip, DecorEvent, DecorHit, Pos9,
@@ -268,7 +269,7 @@ impl DecorGeom {
     }
 }
 
-/// 皮肤在当前 DPI / 字号下的几何。每帧渲染前由 [`CandidateWindow::refresh_skin_geom`] 重算。
+/// 皮肤在当前 DPI / 字号下的几何。每帧渲染前由 [`CandidateScene::refresh_skin`] 重算。
 pub(super) struct SkinGeom {
     /// 求它时的变体（竖排, 嵌入）。
     variant_key: (bool, bool),
@@ -629,41 +630,39 @@ fn frames_clip(
     }
 }
 
-impl CandidateWindow {
-    /// 按当前主题、横竖排、嵌入形态、DPI、字号求皮肤几何；不启用皮肤时置 None。
-    /// 由隐藏变可见时记动画起点、各装饰状态机从头播；再按状态机给各装饰选帧，并记下次重算时刻。
-    #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
-    pub(super) fn refresh_skin_geom(&mut self) {
-        self.refresh_skin_geom_at(std::time::Instant::now());
-    }
+/// 装饰动画的时刻，由窗口注入（场景不取时间）。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AnimClock {
+    /// 距动画时间轴起点（窗口由隐藏变可见那一刻）的时长。
+    pub(super) t: std::time::Duration,
+    /// 窗口此刻还不在屏上。刷新时即「这一帧由隐藏变可见」：各装饰状态机从头播。
+    pub(super) showing: bool,
+    /// 播不播动画：`ui.theme.animation` 且系统没关动画效果。关着时装饰停在初始状态首帧。
+    pub(super) allowed: bool,
+}
 
-    /// 同 [`Self::refresh_skin_geom`]，时刻由调用方给（金样注入时间用）。
-    pub(super) fn refresh_skin_geom_at(&mut self, now: std::time::Instant) {
+impl CandidateScene {
+    /// 按当前主题、横竖排、嵌入形态、DPI、字号求皮肤几何；不启用皮肤时置 None。
+    /// 由隐藏变可见时各装饰状态机从头播；再按状态机给各装饰选帧，并记下次重算时刻。
+    pub(super) fn refresh_skin(&mut self, inp: &CandidateSceneInput, clock: AnimClock) {
         use crate::skin_anim::Machine;
-        let showing = !self.visible;
-        if showing {
-            self.refresh_anim_allowed();
-            self.anim_start = now;
-        }
-        // 这一帧就是按此刻重画的，之前登记的「待重绘」作废。
-        self.anim_due = false;
-        self.scene.skin_geom = self.compute_skin_geom();
-        self.ensure_decor_anims(now);
-        let t = now.saturating_duration_since(self.anim_start);
-        let variant = self
+        self.skin_geom = self.compute_skin_geom(inp, clock.allowed);
+        self.ensure_decor_anims(inp, clock);
+        let t = clock.t;
+        let variant = inp
             .theme
             .skin
             .as_ref()
-            .and_then(|s| s.variant(self.vertical, self.preedit_embedded));
+            .and_then(|s| s.variant(inp.vertical, inp.preedit_embedded));
         let mut next = None;
-        if let (Some(g), Some(v)) = (self.scene.skin_geom.as_mut(), variant) {
+        if let (Some(g), Some(v)) = (self.skin_geom.as_mut(), variant) {
             for d in &mut g.decor {
                 let Some(spec) = v.decor.get(d.index).map(|x| &x.anim) else {
                     continue;
                 };
                 let pose = match self.decor_anims.get_mut(d.index) {
-                    Some(m) if self.anim_allowed => {
-                        if showing {
+                    Some(m) if clock.allowed => {
+                        if clock.showing {
                             m.show(spec, t, &*d);
                         }
                         m.seek(spec, t, &*d)
@@ -674,7 +673,12 @@ impl CandidateWindow {
                 next = [next, pose.next].into_iter().flatten().min();
             }
         }
-        self.anim_next = next.map(|n| self.anim_start + n);
+        self.anim_next = next;
+    }
+
+    /// 下一次换帧时刻（距动画时间轴起点）；None = 本帧没有在播的动画。
+    pub(super) fn next_anim_at(&self) -> Option<std::time::Duration> {
+        self.anim_next
     }
 
     /// 同一条皮肤告警只报一次（几何每帧重求）。
@@ -684,36 +688,14 @@ impl CandidateWindow {
         }
     }
 
-    /// 重读「播不播动画」：`ui.theme.animation` 且系统没关动画效果。变了就让状态机重来。
-    pub(super) fn refresh_anim_allowed(&mut self) {
-        let system = (self.motion_allowed)();
-        let allowed = self.theme_animation && system;
-        // 冻结原因变了记一条：远程桌面等场景系统关了动画效果，看不到动画不是 bug。
-        let why = (self.theme_animation, system);
-        if self.theme.skin.is_some() && self.anim_reported != Some(why) {
-            self.anim_reported = Some(why);
-            tracing::info!(
-                "skin: 主题动画{}（ui.theme.animation={}，系统动画效果={}）",
-                if allowed { "播放" } else { "冻结" },
-                why.0,
-                if why.1 { "开" } else { "关" }
-            );
-        }
-        if allowed != self.anim_allowed {
-            self.anim_allowed = allowed;
-            self.decor_anims_key = None;
-        }
-    }
-
     /// 状态机按当前变体的装饰一块一台；换了变体（横竖 / 嵌入）或被作废时重建，回到初始状态。
-    fn ensure_decor_anims(&mut self, now: std::time::Instant) {
-        let key = (self.vertical, self.preedit_embedded);
+    fn ensure_decor_anims(&mut self, inp: &CandidateSceneInput, clock: AnimClock) {
+        let key = (inp.vertical, inp.preedit_embedded);
         if self.decor_anims_key == Some(key) {
             return;
         }
-        let t = now.saturating_duration_since(self.anim_start);
-        let visible = self.visible;
-        self.decor_anims = self
+        let visible = !clock.showing;
+        self.decor_anims = inp
             .theme
             .skin
             .as_ref()
@@ -721,39 +703,35 @@ impl CandidateWindow {
             .map_or_else(Vec::new, |v| {
                 v.decor
                     .iter()
-                    .map(|d| crate::skin_anim::Machine::new(&d.anim, t, visible))
+                    .map(|d| crate::skin_anim::Machine::new(&d.anim, clock.t, visible))
                     .collect()
             });
         self.decor_anims_key = Some(key);
     }
 
     /// 喂一个装饰事件；`only` 只给那一块装饰（`click`）。不播动画时不切换。
-    /// 显示中画面可能变了就登记一次换帧重绘。
-    pub(super) fn skin_event(&mut self, ev: DecorEvent, only: Option<usize>) {
-        self.skin_event_at(ev, only, std::time::Instant::now());
-    }
-
-    /// 同 [`Self::skin_event`]，时刻由调用方给（金样注入时间用）。
-    pub(super) fn skin_event_at(
+    /// 返回画面是否可能变了（显示中由窗口登记换帧重绘）。
+    pub(super) fn decor_event(
         &mut self,
+        inp: &CandidateSceneInput,
         ev: DecorEvent,
         only: Option<usize>,
-        now: std::time::Instant,
-    ) {
+        clock: AnimClock,
+    ) -> bool {
         use crate::skin_anim::{AnyClip, Timelines};
-        if !self.anim_allowed || self.theme.skin.is_none() {
-            return;
+        if !clock.allowed || inp.theme.skin.is_none() {
+            return false;
         }
-        self.ensure_decor_anims(now);
-        let key = (self.vertical, self.preedit_embedded);
-        let t = now.saturating_duration_since(self.anim_start);
-        let Some(v) = self
+        self.ensure_decor_anims(inp, clock);
+        let key = (inp.vertical, inp.preedit_embedded);
+        let t = clock.t;
+        let Some(v) = inp
             .theme
             .skin
             .as_ref()
-            .and_then(|s| s.variant(self.vertical, self.preedit_embedded))
+            .and_then(|s| s.variant(inp.vertical, inp.preedit_embedded))
         else {
-            return;
+            return false;
         };
         let mut changed = false;
         for (i, m) in self.decor_anims.iter_mut().enumerate() {
@@ -766,7 +744,6 @@ impl CandidateWindow {
             // 还没求过几何（从未显示），或几何是另一个变体的（隐藏期间换了横竖 / 嵌入）：
             // 不知道片段时长，只会记常驻状态。
             let geom = self
-                .scene
                 .skin_geom
                 .as_ref()
                 .filter(|g| g.variant_key == key)
@@ -780,97 +757,18 @@ impl CandidateWindow {
                 ev => m.fire(spec, ev, t, tl),
             };
         }
-        if changed && self.visible {
-            self.anim_due = true;
-        }
+        changed
     }
 
-    /// 候选更新：比较相邻两次的编码串与页码，喂 `typing` / `backspace` / `page` / `empty`
-    /// （`preedit` 取协调器下发的原串，编码由宿主自绘时也照样比）。
-    ///
-    /// 只有 `composing`（打字中）的帧才算编码：上屏后进联想时编码串变成空串或联想标识，
-    /// 那不是退格也不是打字。不在打字中的帧之后再打字，按从空串起打算 `typing`。
-    pub fn note_skin_input(
-        &mut self,
-        preedit: &str,
-        composing: bool,
-        page: usize,
-        no_candidates: bool,
-    ) {
-        if self.theme.skin.is_none() {
-            return;
-        }
-        let code = if composing { preedit } else { "" };
-        let empty = composing && no_candidates;
-        let prev = self
-            .skin_input_prev
-            .replace((code.to_string(), page, empty));
-        let (old, old_page, old_empty) = match &prev {
-            Some((p, n, e)) => (p.as_str(), Some(*n), *e),
-            None => ("", None, false),
-        };
-        if !composing {
-            // 联想 / 上屏后的帧：不报编码事件，只记下来作下一帧的基线。
-        } else if code != old {
-            let ev = if code.len() < old.len() && old.starts_with(code) {
-                DecorEvent::Backspace
-            } else {
-                DecorEvent::Typing
-            };
-            self.skin_event(ev, None);
-        } else if old_page.is_some_and(|n| n != page) {
-            self.skin_event(DecorEvent::Page, None);
-        }
-        if empty && !old_empty {
-            self.skin_event(DecorEvent::Empty, None);
-        }
-    }
-
-    /// 工具栏状态：中英变了喂 `mode_cn` / `mode_en`（第一次只记下，不算切换）。
-    pub fn note_skin_mode(&mut self, chinese: bool) {
-        if self.theme.skin.is_none() {
-            return;
-        }
-        if self
-            .skin_mode_prev
-            .replace(chinese)
-            .is_some_and(|c| c != chinese)
-        {
-            let ev = if chinese {
-                DecorEvent::ModeCn
-            } else {
-                DecorEvent::ModeEn
-            };
-            self.skin_event(ev, None);
-        }
-    }
-
-    /// 协调器发来的装饰事件。
-    pub fn skin_signal(&mut self, sig: wind_ui_types::SkinSignal) {
-        match sig {
-            wind_ui_types::SkinSignal::Commit => self.skin_event(DecorEvent::Commit, None),
-        }
-    }
-
-    /// `ui.theme.animation`。
-    pub fn set_theme_animation(&mut self, on: bool) {
-        if self.theme_animation != on {
-            self.theme_animation = on;
-            self.refresh_anim_allowed();
-            // 显示中就地换成播放 / 首帧。
-            self.anim_due = self.visible;
-        }
-    }
-
-    fn compute_skin_geom(&self) -> Option<SkinGeom> {
-        let skin = self.theme.skin.as_ref()?;
-        let v = skin.variant(self.vertical, self.preedit_embedded)?;
+    fn compute_skin_geom(&self, inp: &CandidateSceneInput, anim_allowed: bool) -> Option<SkinGeom> {
+        let skin = inp.theme.skin.as_ref()?;
+        let v = skin.variant(inp.vertical, inp.preedit_embedded)?;
         // 主坐标（skin.density 源像素）→ 设备像素。
-        let k = skin.factor(self.scale, self.base_font_logical);
+        let k = skin.factor(inp.scale, inp.base_font_logical);
         // 渲染缩放：设备像素 / dp。
         let render_scale = k * skin.density;
         let (src_ref, src_density) = pick_source(v, render_scale);
-        let frame_path = crate::theme_assets::asset_path(&self.theme, src_ref)?;
+        let frame_path = crate::theme_assets::asset_path(inp.theme, src_ref)?;
         if crate::image_cache::is_svg_source(&frame_path) {
             tracing::warn!("skin: 窗体图须为位图（SVG 不支持多段切片），回退普通窗口");
             return None;
@@ -899,7 +797,7 @@ impl CandidateWindow {
             .iter()
             .enumerate()
             .filter_map(|(i, d)| {
-                let main = crate::theme_assets::asset_path(&self.theme, &d.image)?;
+                let main = crate::theme_assets::asset_path(inp.theme, &d.image)?;
                 let mut names: Vec<&str> = Vec::new();
                 let clips =
                     d.anim
@@ -919,19 +817,18 @@ impl CandidateWindow {
                 }
                 let extra: Vec<(&str, Option<String>)> = names
                     .into_iter()
-                    .map(|n| (n, crate::theme_assets::asset_path(&self.theme, n)))
+                    .map(|n| (n, crate::theme_assets::asset_path(inp.theme, n)))
                     .collect();
                 // 关着动画也要解帧的唯一情形：初始状态从装饰文件的非 0 帧起。
                 let still_needs_frames = d.anim.initial.is_some_and(
                     |s| matches!(d.anim.states[s].1, DecorClip::Frames { first, .. } if first > 0),
                 );
-                let decode_main = crate::view::image_is_animated(&main)
-                    && (self.anim_allowed || still_needs_frames);
+                let decode_main =
+                    crate::view::image_is_animated(&main) && (anim_allowed || still_needs_frames);
                 let decode_extra: Vec<bool> = extra
                     .iter()
                     .map(|(_, p)| {
-                        self.anim_allowed
-                            && p.as_deref().is_some_and(crate::view::image_is_animated)
+                        anim_allowed && p.as_deref().is_some_and(crate::view::image_is_animated)
                     })
                     .collect();
                 Some((i, d, main, decode_main, extra, decode_extra))
@@ -1060,7 +957,7 @@ impl CandidateWindow {
             })
             .collect();
         Some(SkinGeom {
-            variant_key: (self.vertical, self.preedit_embedded),
+            variant_key: (inp.vertical, inp.preedit_embedded),
             frame_path,
             frame_k,
             sx,
@@ -1081,15 +978,19 @@ impl CandidateWindow {
 
     /// 皮肤布局：先在原点量出窗体（根容器盒）尺寸，按装饰伸出窗体的部分求外扩量，再把
     /// 根容器挪到外扩后的位置。返回外扩 `(左, 上, 右, 下)`；不启用皮肤返回 None（调用方走阴影那条）。
-    pub(super) fn skin_layout(&mut self, root: &mut View) -> Option<(u32, u32, u32, u32)> {
-        self.scene.skin_geom.as_ref()?;
+    pub(super) fn skin_layout(
+        &mut self,
+        root: &mut View,
+        text: &TextRenderer,
+    ) -> Option<(u32, u32, u32, u32)> {
+        self.skin_geom.as_ref()?;
         let free = self.skin_is_free();
         if free {
-            self.skin_measure_parts(root);
+            self.skin_measure_parts(root, text);
         }
-        root.layout(0.0, 0.0, &self.text_renderer);
+        root.layout(0.0, 0.0, text);
         let (w, h) = root.measured_size();
-        let g = self.scene.skin_geom.as_mut()?;
+        let g = self.skin_geom.as_mut()?;
         let frame = Rect {
             x: 0.0,
             y: 0.0,
@@ -1115,29 +1016,26 @@ impl CandidateWindow {
             .into_iter()
             .map(|(x, y, dw, dh)| (x + ml, y + mt, dw, dh))
             .collect();
-        root.layout(ml as f32, mt as f32, &self.text_renderer);
+        root.layout(ml as f32, mt as f32, text);
         if free {
-            self.skin_place_parts();
+            self.skin_place_parts(text);
         }
         Some((ml as u32, mt as u32, mr as u32, mb as u32))
     }
 
     /// 本帧是否分槽位布局。
     pub(super) fn skin_is_free(&self) -> bool {
-        self.scene
-            .skin_geom
-            .as_ref()
-            .is_some_and(|g| g.slots.is_some())
+        self.skin_geom.as_ref().is_some_and(|g| g.slots.is_some())
     }
 
     /// 分槽位：取走 `build_tree` 交出的各块，按自然尺寸排一遍，解出能装下所有槽位的最小窗体，
     /// 写进根容器（空盒）的最小尺寸。
-    fn skin_measure_parts(&mut self, root: &mut View) {
-        let taken = std::mem::take(&mut *self.scene.free_parts.borrow_mut());
+    fn skin_measure_parts(&mut self, root: &mut View, text: &TextRenderer) {
+        let taken = std::mem::take(&mut *self.free_parts.borrow_mut());
         let mut parts: Vec<Part> = taken
             .into_iter()
             .map(|(kind, mut view)| {
-                view.layout(0.0, 0.0, &self.text_renderer);
+                view.layout(0.0, 0.0, text);
                 let (w, h) = view.measured_size();
                 Part {
                     kind,
@@ -1147,7 +1045,7 @@ impl CandidateWindow {
                 }
             })
             .collect();
-        let Some(g) = self.scene.skin_geom.as_mut() else {
+        let Some(g) = self.skin_geom.as_mut() else {
             return;
         };
         let (mut xs, mut ys) = (Vec::new(), Vec::new());
@@ -1184,23 +1082,22 @@ impl CandidateWindow {
     }
 
     /// 分槽位：窗体尺寸与外扩已定，把各块排到最终位置（窗口缓冲坐标）。
-    fn skin_place_parts(&mut self) {
-        let Some(g) = self.scene.skin_geom.as_mut() else {
+    fn skin_place_parts(&mut self, text: &TextRenderer) {
+        let Some(g) = self.skin_geom.as_mut() else {
             return;
         };
         let (ml, mt, fw, fh) = g.frame;
         let pos = g.part_positions(fw as f32, fh as f32);
         for (p, (x, y)) in g.parts.iter_mut().zip(pos) {
-            p.view
-                .layout(ml as f32 + x, mt as f32 + y, &self.text_renderer);
+            p.view.layout(ml as f32 + x, mt as f32 + y, text);
         }
     }
 
     /// 渲染入口对内容尺寸做完钳制（竖排宽度上限、屏幕安全上限、最小 40×24）后调用：窗体按
     /// 钳后的尺寸画，装饰随之重新定位。外扩量沿用布局时的值——它已经按窗体自然尺寸量过，
     /// 窗体变窄只会让右侧多出一点透明余量，不会让装饰出缓冲。
-    pub(super) fn skin_fit_frame(&mut self, content_w: u32, content_h: u32) {
-        let Some(g) = self.scene.skin_geom.as_mut() else {
+    pub(super) fn skin_fit_frame(&mut self, content_w: u32, content_h: u32, text: &TextRenderer) {
+        let Some(g) = self.skin_geom.as_mut() else {
             return;
         };
         let (ml, mt, w, h) = g.frame;
@@ -1224,7 +1121,7 @@ impl CandidateWindow {
             })
             .collect();
         if self.skin_is_free() {
-            self.skin_place_parts();
+            self.skin_place_parts(text);
         }
     }
 
@@ -1235,6 +1132,7 @@ impl CandidateWindow {
         g: &SkinGeom,
         caret_x: f32,
         strip: wind_theme::skin::AvoidStrip,
+        scale: f32,
     ) -> AvoidMask {
         let (ml, mt, mr, mb) = g.margins;
         let (_, _, w, h) = g.frame;
@@ -1244,8 +1142,8 @@ impl CandidateWindow {
         g.paint_at(&mut buf, bw, bh, false, false, true);
         g.paint_at(&mut buf, bw, bh, true, false, true);
         let cx = ml as f32 + caret_x;
-        let x0 = (cx - strip.before * self.scale).floor().max(0.0) as usize;
-        let x1 = ((cx + strip.after * self.scale).ceil().max(0.0) as usize).min(bw as usize);
+        let x0 = (cx - strip.before * scale).floor().max(0.0) as usize;
+        let x1 = ((cx + strip.after * scale).ceil().max(0.0) as usize).min(bw as usize);
         let rows: Vec<bool> = (0..bh as usize)
             .map(|y| {
                 let row = &buf[y * bw as usize * 4..(y + 1) * bw as usize * 4];
@@ -1257,8 +1155,8 @@ impl CandidateWindow {
 
     /// `place_window` 的对齐与避让参数。`f` 把设备像素换到调用方坐标系（ext_presenter 路径是逻辑点，
     /// 传 `1 / scale`；其余传 1）。无皮肤时为默认值（窗体左上 / 左下对齐、无避让、无外扩），与改前一致。
-    pub(super) fn skin_place_anchor(&self, f: f32) -> PlaceAnchor {
-        let Some(g) = &self.scene.skin_geom else {
+    pub(super) fn skin_place_anchor(&self, f: f32, scale: f32) -> PlaceAnchor {
+        let Some(g) = &self.skin_geom else {
             return PlaceAnchor::default();
         };
         let r = |v: f32| (v * f).round() as i32;
@@ -1278,7 +1176,7 @@ impl CandidateWindow {
         let (ax, ay) = point(g.placement.caret_above);
         let (avoid_below, avoid_above) = match g.placement.avoid_caret {
             Some(strip) => {
-                let mask = |caret_x: f32| self.skin_avoid_mask(g, caret_x, strip).scaled(f);
+                let mask = |caret_x: f32| self.skin_avoid_mask(g, caret_x, strip, scale).scaled(f);
                 (Some(mask(bx)), Some(mask(ax)))
             }
             None => (None, None),
@@ -1296,6 +1194,154 @@ impl CandidateWindow {
             avoid_below,
             avoid_above,
             clamp,
+        }
+    }
+}
+
+impl CandidateWindow {
+    /// 刷新本帧皮肤几何与装饰动画（见 [`CandidateScene::refresh_skin`]）：由隐藏变可见时
+    /// 重读动画开关、记动画起点。
+    #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
+    pub(super) fn refresh_skin_geom(&mut self) {
+        self.refresh_skin_geom_at(std::time::Instant::now());
+    }
+
+    /// 同 [`Self::refresh_skin_geom`]，时刻由调用方给（金样注入时间用）。
+    pub(super) fn refresh_skin_geom_at(&mut self, now: std::time::Instant) {
+        if !self.visible {
+            self.refresh_anim_allowed();
+            self.anim_start = now;
+        }
+        // 这一帧就是按此刻重画的，之前登记的「待重绘」作废。
+        self.anim_due = false;
+        let clock = self.anim_clock(now);
+        self.with_scene(|scene, inp| scene.refresh_skin(inp, clock));
+    }
+
+    /// 此刻的动画时钟：时间轴起点、可见性与动画开关都在窗口侧。
+    fn anim_clock(&self, now: std::time::Instant) -> AnimClock {
+        AnimClock {
+            t: now.saturating_duration_since(self.anim_start),
+            showing: !self.visible,
+            allowed: self.anim_allowed,
+        }
+    }
+
+    /// 重读「播不播动画」：`ui.theme.animation` 且系统没关动画效果。变了就让状态机重来。
+    pub(super) fn refresh_anim_allowed(&mut self) {
+        let system = (self.motion_allowed)();
+        let allowed = self.theme_animation && system;
+        // 冻结原因变了记一条：远程桌面等场景系统关了动画效果，看不到动画不是 bug。
+        let why = (self.theme_animation, system);
+        if self.theme.skin.is_some() && self.anim_reported != Some(why) {
+            self.anim_reported = Some(why);
+            tracing::info!(
+                "skin: 主题动画{}（ui.theme.animation={}，系统动画效果={}）",
+                if allowed { "播放" } else { "冻结" },
+                why.0,
+                if why.1 { "开" } else { "关" }
+            );
+        }
+        if allowed != self.anim_allowed {
+            self.anim_allowed = allowed;
+            self.scene.decor_anims_key = None;
+        }
+    }
+
+    /// 喂一个装饰事件；`only` 只给那一块装饰（`click`）。不播动画时不切换。
+    /// 显示中画面可能变了就登记一次换帧重绘。
+    pub(super) fn skin_event(&mut self, ev: DecorEvent, only: Option<usize>) {
+        self.skin_event_at(ev, only, std::time::Instant::now());
+    }
+
+    /// 同 [`Self::skin_event`]，时刻由调用方给（金样注入时间用）。
+    pub(super) fn skin_event_at(
+        &mut self,
+        ev: DecorEvent,
+        only: Option<usize>,
+        now: std::time::Instant,
+    ) {
+        let clock = self.anim_clock(now);
+        let changed = self.with_scene(|scene, inp| scene.decor_event(inp, ev, only, clock));
+        if changed && self.visible {
+            self.anim_due = true;
+        }
+    }
+
+    /// 候选更新：比较相邻两次的编码串与页码，喂 `typing` / `backspace` / `page` / `empty`
+    /// （`preedit` 取协调器下发的原串，编码由宿主自绘时也照样比）。
+    ///
+    /// 只有 `composing`（打字中）的帧才算编码：上屏后进联想时编码串变成空串或联想标识，
+    /// 那不是退格也不是打字。不在打字中的帧之后再打字，按从空串起打算 `typing`。
+    pub fn note_skin_input(
+        &mut self,
+        preedit: &str,
+        composing: bool,
+        page: usize,
+        no_candidates: bool,
+    ) {
+        if self.theme.skin.is_none() {
+            return;
+        }
+        let code = if composing { preedit } else { "" };
+        let empty = composing && no_candidates;
+        let prev = self
+            .skin_input_prev
+            .replace((code.to_string(), page, empty));
+        let (old, old_page, old_empty) = match &prev {
+            Some((p, n, e)) => (p.as_str(), Some(*n), *e),
+            None => ("", None, false),
+        };
+        if !composing {
+            // 联想 / 上屏后的帧：不报编码事件，只记下来作下一帧的基线。
+        } else if code != old {
+            let ev = if code.len() < old.len() && old.starts_with(code) {
+                DecorEvent::Backspace
+            } else {
+                DecorEvent::Typing
+            };
+            self.skin_event(ev, None);
+        } else if old_page.is_some_and(|n| n != page) {
+            self.skin_event(DecorEvent::Page, None);
+        }
+        if empty && !old_empty {
+            self.skin_event(DecorEvent::Empty, None);
+        }
+    }
+
+    /// 工具栏状态：中英变了喂 `mode_cn` / `mode_en`（第一次只记下，不算切换）。
+    pub fn note_skin_mode(&mut self, chinese: bool) {
+        if self.theme.skin.is_none() {
+            return;
+        }
+        if self
+            .skin_mode_prev
+            .replace(chinese)
+            .is_some_and(|c| c != chinese)
+        {
+            let ev = if chinese {
+                DecorEvent::ModeCn
+            } else {
+                DecorEvent::ModeEn
+            };
+            self.skin_event(ev, None);
+        }
+    }
+
+    /// 协调器发来的装饰事件。
+    pub fn skin_signal(&mut self, sig: wind_ui_types::SkinSignal) {
+        match sig {
+            wind_ui_types::SkinSignal::Commit => self.skin_event(DecorEvent::Commit, None),
+        }
+    }
+
+    /// `ui.theme.animation`。
+    pub fn set_theme_animation(&mut self, on: bool) {
+        if self.theme_animation != on {
+            self.theme_animation = on;
+            self.refresh_anim_allowed();
+            // 显示中就地换成播放 / 首帧。
+            self.anim_due = self.visible;
         }
     }
 }
@@ -1430,7 +1476,10 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        let m = w.skin_layout(&mut root).expect("皮肤生效");
+        let m = w
+            .scene
+            .skin_layout(&mut root, &w.text_renderer)
+            .expect("皮肤生效");
         assert_eq!(m, (0, 6, 0, 0), "装饰伸出窗体上方 6px，只在上边外扩");
         let g = w.scene.skin_geom.as_ref().unwrap();
         // 最小尺寸 = 固定段之和：30-10、20-4。
@@ -1455,7 +1504,7 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        let (ml, mt, mr, mb) = w.skin_layout(&mut root).unwrap();
+        let (ml, mt, mr, mb) = w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
         let g = w.scene.skin_geom.as_ref().unwrap();
         let (_, _, fw, fh) = g.frame;
         let (bw, bh) = (fw + ml + mr, fh + mt + mb);
@@ -1477,7 +1526,7 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        w.skin_layout(&mut root).unwrap();
+        w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
         let g = w.scene.skin_geom.as_ref().unwrap();
         let mut m = w.mouse.borrow_mut();
         m.skin_frame = Some(g.frame_rect());
@@ -1510,10 +1559,10 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        w.skin_layout(&mut root).unwrap();
+        w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
         let (_, _, fw, fh) = w.scene.skin_geom.as_ref().unwrap().frame;
         // 渲染入口把宽度钳窄 4px：窗体按钳后宽度画，右上角装饰跟着左移。
-        w.skin_fit_frame(fw - 4, fh);
+        w.scene.skin_fit_frame(fw - 4, fh, &w.text_renderer);
         let g = w.scene.skin_geom.as_ref().unwrap();
         assert_eq!(g.frame, (0, 6, fw - 4, fh));
         assert_eq!(g.decor_rects, vec![(fw as i32 - 10, 0, 6, 6)]);
@@ -1594,8 +1643,8 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        w.skin_layout(&mut root).unwrap();
-        let a = w.skin_place_anchor(1.0);
+        w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
+        let a = w.scene.skin_place_anchor(1.0, w.scale);
         // 内容框左上 (4, 3) 再上移 1 → (4, 2)；上方缺省窗体左下 → 距底 0。
         assert_eq!(a.below, (4, 2));
         assert_eq!(a.above, (0, 0));
@@ -1620,8 +1669,8 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        w.skin_layout(&mut root).unwrap();
-        let a = w.skin_place_anchor(1.0);
+        w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
+        let a = w.scene.skin_place_anchor(1.0, w.scale);
         assert_eq!(a.clamp, (0, 0, 0, 0), "缺省只钳窗体");
         let m = a.avoid_below.as_ref().expect("缺省开避让");
         assert_eq!(m.top, -6, "装饰向上外扩 6px，保护带从那里算起");
@@ -1647,8 +1696,8 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        w.skin_layout(&mut root).unwrap();
-        let a = w.skin_place_anchor(1.0);
+        w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
+        let a = w.scene.skin_place_anchor(1.0, w.scale);
         assert!(
             !a.avoid_below.as_ref().unwrap().any(-6, 0),
             "装饰在保护带右边"
@@ -1670,7 +1719,7 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        let (ml, mt, mr, mb) = w.skin_layout(&mut root).unwrap();
+        let (ml, mt, mr, mb) = w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
         let g = w.scene.skin_geom.as_ref().unwrap();
         assert!(g.has_pass());
         assert!(!g.pass_below(), "z = 1 的穿透装饰要放在主窗口上面");
@@ -1765,9 +1814,9 @@ mod tests {
         }
         w.update("", 0, "", vec![cand("甲"), cand("乙")], 0, -1, 1, 3);
         w.refresh_skin_geom();
-        assert!(w.skin_is_free());
+        assert!(w.scene.skin_is_free());
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        let (ml, mt, _, _) = w.skin_layout(&mut root).unwrap();
+        let (ml, mt, _, _) = w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
         let g = w.scene.skin_geom.as_ref().unwrap();
         let kinds: Vec<SlotKind> = g.parts.iter().map(|p| p.kind).collect();
         assert_eq!(kinds, vec![SlotKind::Candidates, SlotKind::Footer]);
@@ -1947,7 +1996,7 @@ mod tests {
         w.anim_start -= std::time::Duration::from_millis(150);
         w.refresh_skin_geom();
         let mut root = w.scene.build_tree(&w.scene_input(false));
-        let (ml, mt, mr, mb) = w.skin_layout(&mut root).unwrap();
+        let (ml, mt, mr, mb) = w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
         let g = w.scene.skin_geom.as_ref().unwrap();
         let (_, _, fw, fh) = g.frame;
         let (bw, bh) = (fw + ml + mr, fh + mt + mb);
@@ -1971,8 +2020,8 @@ mod tests {
         let mask = |w: &mut CandidateWindow| {
             w.refresh_skin_geom();
             let mut root = w.scene.build_tree(&w.scene_input(false));
-            w.skin_layout(&mut root).unwrap();
-            w.skin_place_anchor(1.0).avoid_below
+            w.scene.skin_layout(&mut root, &w.text_renderer).unwrap();
+            w.scene.skin_place_anchor(1.0, w.scale).avoid_below
         };
         let first = mask(&mut w);
         w.anim_start -= std::time::Duration::from_millis(150);
