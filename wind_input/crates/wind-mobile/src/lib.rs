@@ -964,6 +964,16 @@ impl MobileCore {
         config_api::set_tooltip_section_enabled(&self.data_dir, label, on)
     }
 
+    /// 快捷输入的候选来源：当前与出厂成员序（见 [`config_api::quick_mix_members`]）。
+    pub fn quick_mix_members(&self) -> config_api::QuickMixMembers {
+        config_api::quick_mix_members(&self.data_dir)
+    }
+
+    /// 整列写回快捷输入的候选来源。只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
+    pub fn set_quick_mix_members(&self, members: Vec<String>) -> Result<(), String> {
+        config_api::set_quick_mix_members(&self.data_dir, members)
+    }
+
     // ── 输入统计（设置页「统计」）────────────────────────────────────
     //
     // 算法与桌面设置页同一份（`wind_store::stats_report`），本层只做取句柄与形状转换。
