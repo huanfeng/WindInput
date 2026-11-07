@@ -213,6 +213,14 @@ static MouseAsyncState ReadMouseAsyncState()
     return st;
 }
 
+BOOL CKeyEventSink::BareAssocMouseClicked()
+{
+    if (!_assocBareSession)
+        return FALSE;
+    const MouseAsyncState mouse = ReadMouseAsyncState();
+    return (mouse.down || mouse.pressedSinceLastCall) ? TRUE : FALSE;
+}
+
 void CKeyEventSink::NoteSelectionChangedDuringToggle()
 {
     if (_pendingKeyUpKey == 0 && _ctrlRaw.vk == 0)
@@ -2712,6 +2720,8 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
                     // 候选窗仍开着，故不走下面的收起。
                     _assocBareSession = TRUE;
                     _hotkeyModeSession = TRUE;
+                    // 丢弃此前残留的「鼠标按下过」位（选单元格的那一下点击），之后只认会话期间的点击。
+                    (void)ReadMouseAsyncState();
                     _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
                 }
                 else

@@ -2922,6 +2922,15 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
     {
         _focusSessionId++;
 
+        // 无占位联想中文档焦点反弹：鼠标刚按过 ⇒ 用户点了别处（WPS 点单元格就是这样表现的，
+        // 且不发选区变化），让服务端收掉联想窗，而不是等自动隐藏计时。
+        if (_pKeyEventSink != nullptr && _pKeyEventSink->BareAssocMouseClicked() && _pIPCClient != nullptr &&
+            _pIPCClient->IsConnected())
+        {
+            WIND_LOG_DEBUG(L"bare assoc: 焦点反弹且鼠标刚按过，按用户点击处理\n");
+            _pIPCClient->SendSelectionChanged(0);
+        }
+
         // ── 焦点抖动免疫：判据取「文档变没变」而非「失过焦没有」 ──
         // Excel 在 cell-select → cell-edit 时把**同一个** DocMgr 置空再设回（实测指针
         // 不变、间隔 6ms）；VSCode 一次应用切换伴随 5 次 DocMgr 焦点事件。DocMgr 级
