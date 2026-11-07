@@ -1758,15 +1758,21 @@ impl CandidateWindow {
 
     #[cfg(not(windows))]
     pub fn show(&mut self) {
+        // DPI 动态化：按光标所在显示器实时取缩放，换显示器后自动按新 DPI 渲染。
+        let new_scale = crate::dpi::scale_for_point(self.x, self.y);
+        self.show_at(new_scale, Instant::now());
+    }
+
+    /// 同 [`Self::show`]，DPI 缩放与动画时刻由调用方给（金样注入用）。
+    #[cfg(not(windows))]
+    fn show_at(&mut self, new_scale: f32, now: Instant) {
         // mode_label 非空表示已进入临时模式：即使暂无候选/preedit 也要弹窗显示模式标记。
         if self.candidates.is_empty() && self.preedit.is_empty() && self.mode_label.is_empty() {
             self.hide();
             return;
         }
 
-        // DPI 动态化：按光标所在显示器实时取缩放，换显示器后自动按新 DPI 渲染。
         // 几何/字号全部由 self.scale 派生（build_tree 中现算），更新此值即生效。
-        let new_scale = crate::dpi::scale_for_point(self.x, self.y);
         if (new_scale - self.scale).abs() > 0.01 {
             self.scale = new_scale;
             self.text_renderer
@@ -1777,7 +1783,7 @@ impl CandidateWindow {
         let t_start = Instant::now();
 
         // 构建并测量 View 树
-        self.refresh_skin_geom();
+        self.refresh_skin_geom_at(now);
         let mut root = self.build_tree(false);
         let t_build = t_start.elapsed();
 

@@ -545,6 +545,59 @@ impl SkinGeom {
     }
 }
 
+#[cfg(all(test, mock_text))]
+impl SkinGeom {
+    /// 渲染金样用：几何逐字段转储，每块装饰附「此刻的帧 + 单独画出的像素摘要」。
+    pub(super) fn golden_dump(&self, digest: fn(&[u8]) -> u64) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "skin variant={:?} frame_path={} frame_k={:?} k={:?}\n  sx={:?}\n  sy={:?}\n  min=({:?},{:?}) insets={:?}\n  frame={:?} margins={:?}\n  placement={:?}\n  slots={:?}",
+            self.variant_key,
+            self.frame_path,
+            self.frame_k,
+            self.k,
+            self.sx,
+            self.sy,
+            self.min_w,
+            self.min_h,
+            self.insets,
+            self.frame,
+            self.margins,
+            self.placement,
+            self.slots,
+        );
+        for (d, &rect) in self.decor.iter().zip(&self.decor_rects) {
+            let mut buf = vec![0u8; (d.w * d.h * 4) as usize];
+            d.paint(&mut buf, d.w, d.h, (0, 0, d.w, d.h), d.cur);
+            let srcs: Vec<_> = d
+                .sources
+                .iter()
+                .map(|s| format!("({} k={:?} animated={})", s.path, s.k, s.animated))
+                .collect();
+            let _ = writeln!(
+                out,
+                "  decor[{}] rect={rect:?} z={} hit={:?} opacity={:?} fps={:?} cur={:?} still={:?} 摘要 {:016x}\n    sources={}",
+                d.index,
+                d.z,
+                d.hit,
+                d.opacity,
+                d.fps,
+                d.cur,
+                d.still,
+                digest(&buf),
+                srcs.join(" "),
+            );
+        }
+        for p in &self.parts {
+            let _ = writeln!(out, "  part {:?} {:?}x{:?}", p.kind, p.w, p.h);
+            out.push_str(&p.view.debug_dump());
+        }
+        out
+    }
+}
+
 /// 装饰文件的帧区间 `[first, last]`（原始帧号）→ 片段。`raw` = 原始帧数，None 为不知道
 /// （关着动画没解帧：只用得到首帧）；越界为 None。降帧后原始第 `i` 帧落在保留的第 `i / stride` 帧，
 /// 区间取落在其中的保留帧（起点向上取整），一个都没有时取终点所在那帧。
@@ -579,9 +632,14 @@ fn frames_clip(
 impl CandidateWindow {
     /// 按当前主题、横竖排、嵌入形态、DPI、字号求皮肤几何；不启用皮肤时置 None。
     /// 由隐藏变可见时记动画起点、各装饰状态机从头播；再按状态机给各装饰选帧，并记下次重算时刻。
+    #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
     pub(super) fn refresh_skin_geom(&mut self) {
+        self.refresh_skin_geom_at(std::time::Instant::now());
+    }
+
+    /// 同 [`Self::refresh_skin_geom`]，时刻由调用方给（金样注入时间用）。
+    pub(super) fn refresh_skin_geom_at(&mut self, now: std::time::Instant) {
         use crate::skin_anim::Machine;
-        let now = std::time::Instant::now();
         let showing = !self.visible;
         if showing {
             self.refresh_anim_allowed();
@@ -590,7 +648,7 @@ impl CandidateWindow {
         // 这一帧就是按此刻重画的，之前登记的「待重绘」作废。
         self.anim_due = false;
         self.skin_geom = self.compute_skin_geom();
-        self.ensure_decor_anims();
+        self.ensure_decor_anims(now);
         let t = now.saturating_duration_since(self.anim_start);
         let variant = self
             .theme
@@ -648,12 +706,12 @@ impl CandidateWindow {
     }
 
     /// 状态机按当前变体的装饰一块一台；换了变体（横竖 / 嵌入）或被作废时重建，回到初始状态。
-    fn ensure_decor_anims(&mut self) {
+    fn ensure_decor_anims(&mut self, now: std::time::Instant) {
         let key = (self.vertical, self.preedit_embedded);
         if self.decor_anims_key == Some(key) {
             return;
         }
-        let t = std::time::Instant::now().saturating_duration_since(self.anim_start);
+        let t = now.saturating_duration_since(self.anim_start);
         let visible = self.visible;
         self.decor_anims = self
             .theme
@@ -672,13 +730,23 @@ impl CandidateWindow {
     /// 喂一个装饰事件；`only` 只给那一块装饰（`click`）。不播动画时不切换。
     /// 显示中画面可能变了就登记一次换帧重绘。
     pub(super) fn skin_event(&mut self, ev: DecorEvent, only: Option<usize>) {
+        self.skin_event_at(ev, only, std::time::Instant::now());
+    }
+
+    /// 同 [`Self::skin_event`]，时刻由调用方给（金样注入时间用）。
+    pub(super) fn skin_event_at(
+        &mut self,
+        ev: DecorEvent,
+        only: Option<usize>,
+        now: std::time::Instant,
+    ) {
         use crate::skin_anim::{AnyClip, Timelines};
         if !self.anim_allowed || self.theme.skin.is_none() {
             return;
         }
-        self.ensure_decor_anims();
+        self.ensure_decor_anims(now);
         let key = (self.vertical, self.preedit_embedded);
-        let t = std::time::Instant::now().saturating_duration_since(self.anim_start);
+        let t = now.saturating_duration_since(self.anim_start);
         let Some(v) = self
             .theme
             .skin
