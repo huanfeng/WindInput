@@ -2405,7 +2405,7 @@ impl CandidateScene {
                 .pad(text_pad)
                 .margin(text_margin);
             // 文字叶子的背景（底色/图/渐变）：此前只画边框，配了背景一律不生效，
-            // 「文字药丸」这类样式做不出来。圆角由下面的 eff_border 一并给。
+            // 「文字药丸」这类样式做不出来。
             if let Some(c) = eff_bg(&v.text, is_sel, is_hover) {
                 tleaf = tleaf.bg(c);
             }
@@ -2415,8 +2415,22 @@ impl CandidateScene {
             if let Some(g) = inp.rv_gradient(v.text.bg_gradient.as_ref()) {
                 tleaf = tleaf.bg_gradient(g);
             }
-            if let Some((bc, bw, br)) = eff_border(&v.text, is_sel, is_hover) {
-                tleaf = tleaf.border(bc, bw).radius(br);
+            // 圆角独立于边框：只配底色不配边框时也要生效。
+            let text_st = if is_sel {
+                v.text.selected.as_deref()
+            } else if is_hover {
+                v.text.hover.as_deref()
+            } else {
+                None
+            };
+            if let Some(r) = text_st
+                .and_then(|n| n.border_radius)
+                .or(v.text.border_radius)
+            {
+                tleaf = tleaf.radius(r.resolve(s, 0.0));
+            }
+            if let Some((bc, bw, _)) = eff_border(&v.text, is_sel, is_hover) {
+                tleaf = tleaf.border(bc, bw);
             }
             item = item.child(tleaf);
             // 注释（编码后缀/短语提示）：非空时在候选词右侧以注释样式内联显示。

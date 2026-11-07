@@ -3754,6 +3754,32 @@ mod min_size_tests {
         }
     }
 
+    /// 候选文字只配底色与圆角、不配边框时，非选中行也要带圆角。
+    #[test]
+    fn text_bg_radius_applies_without_border() {
+        let mut w = win(true, 0, THREE);
+        let bg = [1, 2, 3, 255];
+        w.theme.views.text.bg_color = Some(bg);
+        w.theme.views.text.border_radius = Some(wind_theme::schema::Dim::Dp(6.0));
+        let root = w.scene.build_tree(&w.scene_input(false));
+
+        fn find_bg(v: &View, bg: [u8; 4]) -> Option<&View> {
+            if v.bg == Some(bg) {
+                return Some(v);
+            }
+            v.children.iter().find_map(|c| find_bg(c, bg))
+        }
+        fn find_row(v: &View, tag: i32) -> Option<&View> {
+            if v.tag == tag {
+                return Some(v);
+            }
+            v.children.iter().find_map(|c| find_row(c, tag))
+        }
+        let row = find_row(&root, 1).expect("未找到非选中候选行");
+        let leaf = find_bg(row, bg).expect("非选中行的文字叶子应带底色");
+        assert_eq!(leaf.corner_radius, 6.0, "无边框时圆角也须生效");
+    }
+
     /// 占位行不得参与命中收集：鼠标划过或点击空行都不该有任何反应。
     #[test]
     fn placeholder_rows_are_not_hit_targets() {
