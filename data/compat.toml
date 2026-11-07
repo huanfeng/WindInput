@@ -256,6 +256,8 @@ first_show_mode = "wait"
 process = "et.exe"
 comment = "WPS 表格：同 Excel，fast 首显落在上一个单元格，改用 wait"
 first_show_mode = "wait"
+# 联想窗出现时占位空格会干扰单元格自己的提示；联想不挂占位，转发靠上屏应答里的会话标志。
+assoc_placeholder = "none"
 
 # 按顶层窗口类名认浏览器内核，而不是逐个列进程名（Edge / Chrome / 各家套壳浏览器的
 # 进程名数不完）。⚠ Chrome_WidgetWin_* 是整个 Chromium 家族的窗口类，**所有 Electron / CEF 应用
