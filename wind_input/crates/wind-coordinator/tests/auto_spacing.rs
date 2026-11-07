@@ -265,7 +265,7 @@ fn digit_after_cjk_is_output_and_spaced() {
 }
 
 /// 小键盘数字同主键盘：两种小键盘档位（direct 出厂 / follow_main）汉字后都出字补空格；
-/// 开关关着时 macOS / Linux 照旧透传。运算符不在其列。
+/// 开关关着时 macOS / Linux 照旧透传。运算符不在其列：开关开着关着产出一致。
 #[test]
 fn numpad_digit_after_cjk_is_output_and_spaced() {
     if !ready() {
@@ -282,11 +282,18 @@ fn numpad_digit_after_cjk_is_output_and_spaced() {
             KeyAction::InsertText { text, .. } => assert_eq!(text, " 3", "{behavior}"),
             other => panic!("{behavior}: 汉字后的小键盘数字应出字，实际 {other:?}"),
         }
-        let h = Host::new(cfg.clone());
-        h.wubi("aaaa");
-        assert!(
-            !matches!(&h.key(VK_ADD, 0), KeyAction::InsertText { text, .. } if text.starts_with(' ')),
-            "{behavior}: 运算符不补空格"
+        // 运算符与开关无关：开着时的产出必须和关着时一模一样（不补空格，也不改吃 / 透传）。
+        let op_with = |on: bool| {
+            let mut c = cfg.clone();
+            c.input.spacing.cjk_digit = on;
+            let h = Host::new(c);
+            h.wubi("aaaa");
+            format!("{:?}", h.key(VK_ADD, 0))
+        };
+        assert_eq!(
+            op_with(true),
+            op_with(false),
+            "{behavior}: 运算符不受开关影响"
         );
         if !cfg!(windows) {
             cfg.input.spacing.cjk_digit = false;
