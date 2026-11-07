@@ -1294,13 +1294,20 @@ impl View {
             let cy = r.y + r.h * 0.5;
             fill_circle(buf, buf_w, buf_h, cx, cy, r.w.min(r.h) * 0.5, color);
         }
+        // 圆角裁剪：此后画的（z<0 层、子节点、z>=0 层）凡落在圆角外的，最后还原成此刻的像素
+        // （见 `clip_corners`）。备份取在 z<0 层之前，否则底层图会从圆角处露出去。
+        let round_clip = self.clip_corners && self.corner_radius > 0.0;
+        let corner_saved = if round_clip {
+            CornerSave::take(buf, buf_w, buf_h, r, self.corner_radius)
+        } else {
+            None
+        };
         // z<0 覆盖图（在内容下方）。
         for layer in self.layers.iter().filter(|l| l.z < 0) {
             paint_layer(buf, buf_w, buf_h, r, layer);
         }
         // 边框压在背景图与 z<0 层**之上**（与主题编辑器预览同序）。放在背景图之前的话，
         // 带背景图的主题（窗口整体铺一张图）边框被图盖掉，预览里有、实机没有（t206）。
-        let round_clip = self.clip_corners && self.corner_radius > 0.0;
         if let Some((bc, bw)) = self.border.filter(|_| !round_clip) {
             fill_ring(
                 buf,
@@ -1374,12 +1381,6 @@ impl View {
                 );
             }
         }
-        // 圆角裁剪：子节点画完后，把圆角外的像素还原成画子节点之前的样子（见 `clip_corners`）。
-        let corner_saved = if round_clip {
-            CornerSave::take(buf, buf_w, buf_h, r, self.corner_radius)
-        } else {
-            None
-        };
         // 子节点。
         //
         // ★ 裁剪用「画完还原界外像素」而不是给每个绘制函数加 clip 参数：底层那十来个
@@ -3950,6 +3951,29 @@ mod bg_place_tests {
         });
         let buf = paint(root.fixed_w(60.0).fixed_h(40.0), 60.0, 40.0, 60, 40);
         assert_eq!(alpha(&buf, 60, 0, 0), 0, "前景层不得露出圆角外");
+        assert_eq!(rgb(&buf, 60, 30, 20), [255, 0, 0]);
+    }
+
+    /// z<0 覆盖图同样不得露出圆角外：圆角备份要取在它之前。
+    #[test]
+    fn clip_corners_also_trims_back_layers() {
+        let mut root = View::container(Layout::Column)
+            .bg([255, 255, 255, 255])
+            .radius(12.0)
+            .clip_to_corners();
+        root.layers.push(ViewLayer {
+            path: png_uri(RED, 4, 4),
+            z: -1,
+            place: ImagePlace {
+                w: 60.0,
+                h: 40.0,
+                ..place("top-left")
+            },
+            tint: [0, 0, 0, 0],
+            opacity: 1.0,
+        });
+        let buf = paint(root.fixed_w(60.0).fixed_h(40.0), 60.0, 40.0, 60, 40);
+        assert_eq!(alpha(&buf, 60, 59, 39), 0, "底层图不得露出圆角外");
         assert_eq!(rgb(&buf, 60, 30, 20), [255, 0, 0]);
     }
 
