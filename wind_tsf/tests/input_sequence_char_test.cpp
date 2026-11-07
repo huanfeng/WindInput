@@ -78,6 +78,14 @@ int main()
     Expect("latin_not_cjk", WindInputSeq::IsCjk('a'), 0);
     Expect("unknown_not_cjk", WindInputSeq::IsCjk(WindInputSeq::kUnknown), 0);
 
+    // 鼠标挪光标：按着鼠标、没改文本的选区变化才算；透传 / 自己上屏改了文本，不算。
+    using WindInputSeq::CursorMovedByMouse;
+    Expect("mouse_click_moves_cursor", CursorMovedByMouse(true, false, true, false), 1);
+    Expect("typed_char_is_not_a_move", CursorMovedByMouse(true, false, true, true), 0);
+    Expect("no_mouse_is_not_a_move", CursorMovedByMouse(true, false, false, false), 0);
+    Expect("composition_is_not_a_move", CursorMovedByMouse(true, true, true, false), 0);
+    Expect("no_sel_change_is_not_a_move", CursorMovedByMouse(false, false, true, false), 0);
+
     if (g_failures == 0)
         std::printf("input_sequence_char_test: all passed\n");
     return g_failures == 0 ? 0 : 1;

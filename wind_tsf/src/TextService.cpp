@@ -7025,6 +7025,29 @@ STDAPI CTextService::OnEndEdit(ITfContext* pContext, TfEditCookie ecReadOnly, IT
         _pKeyEventSink->NoteSelectionChangedDuringToggle();
     }
 
+    // 鼠标点击 / 拖选挪了光标：输入序列记账看不见，「上一笔」作废（补空格、英文后标点）。
+    // 鼠标按着时才去查这次编辑有没有改文本（透传字符和自己的上屏都会改文本）。只读「此刻按着」
+    // 位，不碰「按下过」位——那一位留给单击切换键的鼠标判定（NoteSelectionChangedDuringToggle）。
+    const bool inComposition = _pComposition != nullptr;
+    const bool mouseDown =
+        ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON)) & 0x8000) != 0;
+    if (_pKeyEventSink != nullptr && WindInputSeq::CursorMovedByMouse(selChanged, inComposition, mouseDown, false))
+    {
+        bool textChanged = true; // 查不出来按「改过」算：宁可沿用记账，也不误作废
+        IEnumTfRanges* pEnum = nullptr;
+        if (SUCCEEDED(pEditRecord->GetTextAndPropertyUpdates(TF_GTP_INCL_TEXT, nullptr, 0, &pEnum)) && pEnum != nullptr)
+        {
+            ITfRange* pChanged = nullptr;
+            ULONG fetched = 0;
+            textChanged = pEnum->Next(1, &pChanged, &fetched) == S_OK && fetched > 0;
+            if (pChanged != nullptr)
+                pChanged->Release();
+            pEnum->Release();
+        }
+        if (!textChanged)
+            _pKeyEventSink->NoteCursorMovedByMouse();
+    }
+
     if (selChanged && _pComposition == nullptr)
     {
         // Notify Go side to reset its smart punct state

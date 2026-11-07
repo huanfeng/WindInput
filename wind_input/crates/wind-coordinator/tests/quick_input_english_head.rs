@@ -25,32 +25,6 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
-thread_local! {
-    /// 模拟客户端的输入序列记账（`seq_char` = 上一笔上屏的末字符）。按需补空格要靠它知道
-    /// 「上一笔」是什么；每条用例跑在自己的线程上，互不串。
-    static SEQ: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
-}
-
-/// 记下一次上屏的末字符（键盘之外的上屏——鼠标点选——也要喂）。
-fn note(act: &KeyAction) {
-    if let KeyAction::InsertText { text, .. } = act
-        && let Some(ch) = text.chars().last()
-    {
-        let mut b = [0u16; 2];
-        let u = ch.encode_utf16(&mut b)[0];
-        SEQ.with(|s| s.set(u));
-    }
-}
-
-/// 经按键出口发键（补空格在 `handle_key_event_policed`，直调 `handle_key_event` 看不到）。
-fn send(c: &Coordinator, ev: &KeyEventData) -> KeyAction {
-    let mut ev = ev.clone();
-    ev.seq_char = SEQ.with(|s| s.get());
-    let act = c.handle_key_event_policed(&ev);
-    note(&act);
-    act
-}
-
 fn has_english_schema() -> bool {
     let d = data_dir();
     d.join("schemas/english.schema.toml").exists() && d.join("schemas/english").is_dir()
@@ -97,9 +71,9 @@ fn coord_with(cfg: Config, tag: &str) -> Arc<Coordinator> {
 }
 
 fn enter_quick(coord: &Coordinator, word: &str) {
-    send(coord, &key(VK_SEMICOLON));
+    coord.handle_key_event(&key(VK_SEMICOLON));
     for ch in word.chars() {
-        send(coord, &key((ch.to_ascii_uppercase() as u32) & 0xFF));
+        coord.handle_key_event(&key((ch.to_ascii_uppercase() as u32) & 0xFF));
     }
 }
 
@@ -216,10 +190,9 @@ fn head_counts_against_member_quota() {
     );
 }
 
-/// 选中变形同样算「一个英文词」（与批 2 联动：变形是所打原码的大小写形态，算英文）：
-/// 词间空格按需补在它前面。
+/// 选中变形同样补空格（与批 2 联动：变形是所打原码的大小写形态，算英文）。
 #[test]
-fn selecting_variant_spaces_before_it() {
+fn selecting_variant_appends_space() {
     if !has_english_schema() {
         return;
     }
@@ -227,8 +200,6 @@ fn selecting_variant_spaces_before_it() {
     cfg.input.temp_english.commit_space = true;
     cfg.schema.english.commit_space = false;
     let c = coord_with(cfg, "variant_space");
-    enter_quick(&c, "very");
-    send(&c, &key(0x20)); // 先上屏一个英文词垫底
     enter_quick(&c, "vqzx");
     let page = c.debug_page_texts();
     let i = page
@@ -236,7 +207,7 @@ fn selecting_variant_spaces_before_it() {
         .position(|t| t == "VQZX")
         .unwrap_or_else(|| panic!("前提：页内应有 VQZX，实际: {page:?}"));
     match c.debug_mouse_select(i).expect("鼠标点选应带回上屏动作") {
-        KeyAction::InsertText { text, .. } => assert_eq!(text, " VQZX"),
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "VQZX "),
         other => panic!("期望上屏动作，实际: {other:?}"),
     }
 }

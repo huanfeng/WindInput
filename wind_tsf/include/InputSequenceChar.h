@@ -90,4 +90,14 @@ inline uint16_t FromCommittedText(const wchar_t* text, size_t len)
     return last;
 }
 
+/// 一次 OnEndEdit 是不是「用户用鼠标把光标挪到了别处」：此刻记账作废（报 kUnknown）。
+///
+/// 选区变化本身不够：透传的字符、输入法自己的上屏也会让选区变（宿主的回声可以晚到几百毫秒，
+/// 服务端按时间分不开）。鼠标按着、且这次编辑没有改动任何文本，才是点击 / 拖选。
+/// 键盘挪光标不靠这里：导航键在按键侧就报了 kUnknown。
+inline bool CursorMovedByMouse(bool selChanged, bool inComposition, bool mouseDown, bool textChanged)
+{
+    return selChanged && !inComposition && mouseDown && !textChanged;
+}
+
 } // namespace WindInputSeq

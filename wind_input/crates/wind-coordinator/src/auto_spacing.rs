@@ -1,12 +1,15 @@
-//! 中英 / 中数间按需补空格的统一出口（设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）。
+//! 中英 / 中数**切换处**补空格的统一出口（设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）。
 //!
-//! 空格是**下一笔上屏的前缀**：上屏点只管产出文本（英文词出口另外打一个「这是一个英文词」
-//! 的标记），补不补、补什么由这里按交界一次性决定。上屏点有几十个，散点接线必漏——同
-//! `handle_key_event_policed` 出口那几道收口的理由。
+//! 空格是**下一笔上屏的前缀**：上屏点只管产出文本，补不补由这里按交界（上一笔末字符 →
+//! 本笔首字符）一次性决定。上屏点有几十个，散点接线必漏——同 `handle_key_event_policed`
+//! 出口那几道收口的理由。
+//!
+//! 英文词的词间空格**不归这里**：开了 `commit_space` 的英文上屏照旧立即补尾随空格（可预期：
+//! 打完 `hello` 就看得见后面有没有空格），尾随空格之后的中文看到的前一字符是空格，自然不再补。
+//! 连续的英文之间这里一概不管。
 //!
 //! 两个出口调到这里：桌面按键（`handle_key_event_policed`）与候选点选（`select_candidate_at`，
-//! 鼠标与移动端候选栏）。移动端按键路径不经前者：移动端有自己的一套英文自动空格
-//! （`wind-mobile` 的 `auto_space`），客户端也不报 `seq_char`，本功能在那里不触发。
+//! 鼠标与移动端候选栏）。移动端按键路径不经前者，客户端也不报 `seq_char`，本功能在那里不触发。
 
 use wind_bridge::handler::{KeyAction, KeyEventData};
 use wind_punct::spacing::{CharClass, SpacingRules, classify, classify_unit, needs_space};
@@ -30,14 +33,11 @@ impl Coordinator {
     ///
     /// 宿主读得回文档、且光标前已是空白时按 `Other` 处理——只会少补不会多补，防的是
     /// Markdown 编辑器插件自己补了空格（输入序列看不见别人写进文档的东西）。
+    /// 客户端不知道（`0` 旧客户端、`SEQ_CHAR_UNKNOWN`）一律 `Other`：宁可少补。
     pub(crate) fn latch_spacing_boundary(&self, state: &mut State, data: &KeyEventData) {
         let doc_space =
             char::from_u32(data.prev_char as u32).is_some_and(|c| c != '\0' && c.is_whitespace());
-        // 0 只来自不带这个字段的旧客户端；新客户端「在记账、但不知道」报 `SEQ_UNKNOWN`。
-        state.spacing_seq_unknown = data.seq_char == 0 && !doc_space;
-        // 用户挪过光标（鼠标点到别处）：客户端记账看不见，那份值已不是光标前的字。
-        let moved = std::mem::take(&mut state.spacing_cursor_moved);
-        state.spacing_prev = if doc_space || moved {
+        state.spacing_prev = if doc_space {
             CharClass::Other
         } else {
             classify_unit(data.seq_char)
@@ -54,20 +54,15 @@ impl Coordinator {
     }
 
     /// 统一出口：按交界给本笔上屏文本补前缀空格，并把「插入点前一字符」推进到本笔末尾。
-    ///
-    /// 无论补不补都要清掉 `spacing_word_commit`：它只描述**这一次**的上屏。
     pub(crate) fn apply_auto_spacing(&self, state: &mut State, mut action: KeyAction) -> KeyAction {
-        let word = std::mem::take(&mut state.spacing_word_commit);
         if let KeyAction::ReplaceBackward { text, .. }
         | KeyAction::CommitReplacingHeld { text, .. } = &action
         {
             // 智能符号替换：光标前换成了替换文本，不补空格（只发生在标点上）。
             // 纯删除（撤销上屏）：光标前换成了什么不知道。
             state.spacing_prev = text.chars().last().map_or(CharClass::Other, classify);
-            state.spacing_last_commit = state.spacing_prev;
             return action;
         }
-        let full_width = state.full_width;
         let hold_tail = match &action {
             KeyAction::CommitAndHoldComposition { hold_text, .. } => hold_text.chars().last(),
             _ => None,
@@ -75,36 +70,20 @@ impl Coordinator {
         let Some(text) = committed_text_mut(&mut action) else {
             return action;
         };
-        // 客户端不知道光标前是什么（旧 DLL 不报 seqChar、焦点刚切过来）时，英文词间空格退回
-        // 服务端自己记的上一笔——立即补尾随空格的旧实现本来就是无条件的，不能因为改成按需补
-        // 就在混搭版本下整个失效。中英 / 中数交界不退：那两条宁可少补。
-        let mut prev =
-            if word && state.spacing_seq_unknown && state.spacing_prev == CharClass::Other {
-                state.spacing_last_commit
-            } else {
-                state.spacing_prev
-            };
-        self.space_committed_text(&mut prev, full_width, word, text);
+        let mut prev = state.spacing_prev;
+        self.space_committed_text(&mut prev, text);
         state.spacing_prev = prev;
         // 先提交再待定一个中文标点：光标前是那个标点（落定与否都是它）。
         if let Some(c) = hold_tail {
             state.spacing_prev = classify(c);
         }
-        state.spacing_last_commit = state.spacing_prev;
-        state.spacing_seq_unknown = false;
         action
     }
 
     /// 文本级的同一判据：按交界补前缀，再把 `prev` 推进到本笔末字符。空文本什么都不动。
     ///
     /// 不经 `KeyAction` 的上屏出口（barrier 的 `CommitResultData`）直接调这个。
-    pub(crate) fn space_committed_text(
-        &self,
-        prev: &mut CharClass,
-        full_width: bool,
-        word: bool,
-        text: &mut String,
-    ) {
+    pub(crate) fn space_committed_text(&self, prev: &mut CharClass, text: &mut String) {
         let Some(head) = text.chars().next() else {
             return;
         };
@@ -113,22 +92,12 @@ impl Coordinator {
         let rules = SpacingRules {
             cjk_latin: allowed && spacing.cjk_latin,
             cjk_digit: allowed && spacing.cjk_digit,
-            word_space: word,
-            // 英文方案里词间空格只归 `commit_space` 管，中英间空格不越界。
-            latin_latin: allowed && spacing.cjk_latin && !self.engine_mgr.active_is_english(),
         };
-        let next = classify(head);
-        let add = needs_space(*prev, next, rules);
+        let add = needs_space(*prev, classify(head), rules);
         self.auto_space_prefixed
             .store(add, std::sync::atomic::Ordering::Relaxed);
         if add {
-            // 全角字母之间的词间空格补全角空格，与旧的立即补口径一致。
-            let sp = if full_width && next == CharClass::WideLatin {
-                "\u{3000}"
-            } else {
-                " "
-            };
-            text.insert_str(0, sp);
+            text.insert(0, ' ');
         }
         if let Some(last) = text.chars().last() {
             *prev = classify(last);
@@ -215,37 +184,24 @@ mod tests {
         assert_eq!(text_of(&c.apply_auto_spacing(&mut st, insert("个"))), " 个");
     }
 
+    /// 英文词自己带了尾随空格（`commit_space`）：之后的汉字看到的前一字符是空格，不再补；
+    /// 连续的英文之间一概不管。
     #[test]
-    fn word_commit_flag_is_one_shot() {
-        let c = coord(false, false);
+    fn trailing_word_space_and_consecutive_latin() {
+        let c = coord(true, false);
         let mut st = State {
-            spacing_prev: CharClass::Latin,
-            spacing_word_commit: true,
+            spacing_prev: CharClass::Cjk,
             ..Default::default()
         };
+        assert_eq!(
+            text_of(&c.apply_auto_spacing(&mut st, insert("Hello "))),
+            " Hello "
+        );
+        assert_eq!(text_of(&c.apply_auto_spacing(&mut st, insert("好"))), "好");
+        st.spacing_prev = CharClass::Latin;
         assert_eq!(
             text_of(&c.apply_auto_spacing(&mut st, insert("world"))),
-            " world"
-        );
-        assert!(!st.spacing_word_commit);
-        assert_eq!(
-            text_of(&c.apply_auto_spacing(&mut st, insert("again"))),
-            "again"
-        );
-    }
-
-    #[test]
-    fn full_width_word_space() {
-        let c = coord(false, false);
-        let mut st = State {
-            full_width: true,
-            spacing_prev: CharClass::WideLatin,
-            spacing_word_commit: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            text_of(&c.apply_auto_spacing(&mut st, insert("ｗｏｒｌｄ"))),
-            "\u{3000}ｗｏｒｌｄ"
+            "world"
         );
     }
 
@@ -269,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn per_app_rule_turns_off_cjk_spacing_but_not_word_space() {
+    fn per_app_rule_turns_off_cjk_spacing() {
         let c = coord(true, true);
         c.active_compat
             .lock()
@@ -282,12 +238,6 @@ mod tests {
         assert_eq!(
             text_of(&c.apply_auto_spacing(&mut st, insert("abc"))),
             "abc"
-        );
-        // 词间空格属英文输入本身，不归应用规则管。
-        st.spacing_word_commit = true;
-        assert_eq!(
-            text_of(&c.apply_auto_spacing(&mut st, insert("def"))),
-            " def"
         );
         c.active_compat
             .lock()

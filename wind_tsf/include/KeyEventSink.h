@@ -531,6 +531,9 @@ public:
             _seqChar = WindInputSeq::FromCommittedText(text.c_str(), text.size());
     }
 
+    /// 鼠标挪过光标（判据见 `WindInputSeq::CursorMovedByMouse`）：输入序列记账作废。
+    void NoteCursorMovedByMouse() { _seqChar = WindInputSeq::kUnknown; }
+
 private:
 
     // ⛔ 这里曾有 CapsLock 的「回敲复原」机制（_RestoreCapsLockToggle / _capsSessionEaten /

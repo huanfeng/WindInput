@@ -531,12 +531,15 @@ impl Coordinator {
         self.mix_lens(state) != MixLens::Numeric && self.mix_has_english(state.mix_id)
     }
 
-    /// 快捷输入的英文上屏是「一个英文词」（按 `input.temp_english.commit_space`）：词间空格由
-    /// 统一出口按需补在下一个词前面（`crate::auto_spacing`），与临英 `commit_temp_english_text`
-    /// 同口径。
-    fn mark_mix_english_word(&self, state: &mut State) {
-        if self.rt().config.input.temp_english.commit_space {
-            state.spacing_word_commit = true;
+    /// 快捷输入英文上屏后要补的空格（按 `input.temp_english.commit_space`）；不补时为空串。
+    /// 全角态补全角空格，与临英 `commit_temp_english_text` 同口径。
+    fn mix_english_space(&self, state: &State) -> &'static str {
+        if !self.rt().config.input.temp_english.commit_space {
+            ""
+        } else if state.full_width {
+            "\u{3000}"
+        } else {
+            " "
         }
     }
 
@@ -2434,9 +2437,11 @@ impl Coordinator {
             };
             // 补空格排在记账与简繁转换之后：带空格的文本进统计表就是一条对不上的脏键。
             // 分步确认那一支（上方）不补——组合区还留着，那不是一次上屏。
-            if english {
-                self.mark_mix_english_word(state);
-            }
+            let out = if english {
+                out + self.mix_english_space(state)
+            } else {
+                out
+            };
             self.exit_mix_mode(state);
             self.notify_ui_hide();
             Self::commit_action(out, true)
@@ -3201,8 +3206,7 @@ impl Coordinator {
                 // 含英文成员的实例对齐临英空格兜底（A2-3b）：全角态转全角、按临英开关
                 // 补空格。数字透镜（算式无结果）不算英文，原样上屏。
                 let out = if self.mix_raw_counts_as_english(state) {
-                    self.mark_mix_english_word(state);
-                    Self::mix_english_width(state, &out)
+                    Self::mix_english_width(state, &out) + self.mix_english_space(state)
                 } else {
                     out
                 };
@@ -3247,11 +3251,9 @@ impl Coordinator {
                 self.push_commit_history(&raw_text);
                 self.learn_mix_literal(state);
                 let out = self.maybe_convert(state, &raw_text);
-                // 含英文成员的实例对齐临英回车（A2-3b）：全角态转全角，同样算「一个英文词」——
-                // 词间空格补在词**前面**（`crate::auto_spacing`），回车上屏的词前面也该有。
-                // 数字透镜除外，判据与空格兜底共用 `mix_raw_counts_as_english`。
+                // 含英文成员的实例对齐临英回车（A2-3b）：全角态转全角；回车是终结性动作，
+                // 不补空格。数字透镜除外，判据与空格兜底共用 `mix_raw_counts_as_english`。
                 let out = if self.mix_raw_counts_as_english(state) {
-                    self.mark_mix_english_word(state);
                     Self::mix_english_width(state, &out)
                 } else {
                     out

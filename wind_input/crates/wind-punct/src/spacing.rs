@@ -1,7 +1,9 @@
 //! 中英 / 中数交界补空格的纯判据（设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）。
 //!
 //! 只回答「前一字符是 X、本笔首字符是 Y，要不要在中间补一个空格」，不碰状态、不碰配置结构：
-//! 「前一字符」从哪来（客户端输入序列 / 服务端上一笔上屏）、空格补成半角还是全角，都是调用方的事。
+//! 「前一字符」从哪来（客户端输入序列 / 服务端上一笔上屏）是调用方的事。
+//!
+//! 只管**切换处**：连续的英文之间不补（英文词的词间空格由英文上屏时按 `commit_space` 立即补）。
 
 /// 字符在补空格判据里的类别。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -12,8 +14,8 @@ pub enum CharClass {
     Latin,
     /// ASCII 数字。全角数字归 [`Self::WideLatin`]。
     Digit,
-    /// 全角字母与全角数字（`ｈｅｌｌｏ`、`１２`）：只参与英文词间空格，不参与中英交界——
-    /// 全角态下的排版本来就不在中英之间补空格。
+    /// 全角字母与全角数字（`ｈｅｌｌｏ`、`１２`）：不参与中英交界——全角态下的排版本来就不在
+    /// 中英之间补空格。
     WideLatin,
     /// 空白、标点、符号、emoji、不可知。
     #[default]
@@ -73,18 +75,6 @@ pub struct SpacingRules {
     pub cjk_latin: bool,
     /// 汉字 ↔ 数字（`input.spacing.cjk_digit`）。
     pub cjk_digit: bool,
-    /// 英文词间空格：本笔是英文语境下的一个词，且该语境的 `commit_space` 开着。
-    pub word_space: bool,
-    /// 中文语境里连着的两个英文词（拉丁字母 ↔ 拉丁字母）：开了中英间空格的人打「中 en en 中」，
-    /// 两个英文词之间同样要隔开。只管字母对字母，数字与字母之间不算（`3kg` 不拆）。
-    pub latin_latin: bool,
-}
-
-fn is_word(c: CharClass) -> bool {
-    matches!(
-        c,
-        CharClass::Latin | CharClass::Digit | CharClass::WideLatin
-    )
 }
 
 /// `prev` = 插入点前一字符的类别，`next` = 本笔上屏文本首字符的类别。
@@ -93,8 +83,6 @@ pub fn needs_space(prev: CharClass, next: CharClass, rules: SpacingRules) -> boo
     match (prev, next) {
         (Cjk, Latin) | (Latin, Cjk) => rules.cjk_latin,
         (Cjk, Digit) | (Digit, Cjk) => rules.cjk_digit,
-        (Latin, Latin) if rules.latin_latin => true,
-        (p, n) if is_word(p) && is_word(n) => rules.word_space,
         _ => false,
     }
 }
@@ -106,22 +94,7 @@ mod tests {
     const ALL: SpacingRules = SpacingRules {
         cjk_latin: true,
         cjk_digit: true,
-        word_space: true,
-        latin_latin: true,
     };
-
-    #[test]
-    fn latin_latin_rule_is_letters_only() {
-        use CharClass::*;
-        let r = SpacingRules {
-            latin_latin: true,
-            ..Default::default()
-        };
-        assert!(needs_space(Latin, Latin, r));
-        assert!(!needs_space(Digit, Latin, r), "3kg 不拆");
-        assert!(!needs_space(Latin, Digit, r));
-        assert!(!needs_space(WideLatin, WideLatin, r));
-    }
 
     #[test]
     fn classify_basic_scripts() {
@@ -166,7 +139,10 @@ mod tests {
         assert!(needs_space(Cjk, Latin, r));
         assert!(needs_space(Latin, Cjk, r));
         assert!(!needs_space(Cjk, Digit, r), "数字另有开关");
-        assert!(!needs_space(Latin, Latin, r), "词间空格另有开关");
+        assert!(
+            !needs_space(Latin, Latin, r),
+            "连续英文不管（词间空格由英文词上屏时自己补）"
+        );
         assert!(!needs_space(Cjk, WideLatin, r), "全角字母不参与中英交界");
         assert!(!needs_space(Other, Latin, r));
         assert!(!needs_space(Latin, Other, r), "标点永不前补");
@@ -186,17 +162,12 @@ mod tests {
     }
 
     #[test]
-    fn word_space_between_word_chars() {
+    fn consecutive_latin_is_left_alone() {
         use CharClass::*;
-        let r = SpacingRules {
-            word_space: true,
-            ..Default::default()
-        };
-        assert!(needs_space(Latin, Latin, r));
-        assert!(needs_space(Digit, Latin, r));
-        assert!(needs_space(WideLatin, WideLatin, r));
-        assert!(!needs_space(Cjk, Latin, r));
-        assert!(!needs_space(Latin, Other, r));
+        assert!(!needs_space(Latin, Latin, ALL));
+        assert!(!needs_space(Digit, Latin, ALL), "3kg 不拆");
+        assert!(!needs_space(WideLatin, WideLatin, ALL));
+        assert!(!needs_space(Cjk, WideLatin, ALL), "全角字母不参与中英交界");
     }
 
     #[test]

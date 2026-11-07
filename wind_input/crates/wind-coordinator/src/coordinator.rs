@@ -469,15 +469,6 @@ pub(crate) struct State {
     /// 重新锁存；服务端每发出一笔上屏就改成那笔的末字符。组合中的后续按键不改它——组字键
     /// 没写进文档，真正的「前一字符」是组合开始时那个。
     pub(crate) spacing_prev: wind_punct::spacing::CharClass,
-    /// 本次按键 / 点选的上屏是「英文语境下的一个词」，且该语境的 `commit_space` 开着。
-    /// 由原先立即补尾随空格的那些出口置位，统一出口消费后清零（见 `crate::auto_spacing`）。
-    pub(crate) spacing_word_commit: bool,
-    /// 锁存时客户端报的 `seq_char` 是 0（不可知）。只用于英文词间空格的兜底，见 `apply_auto_spacing`。
-    pub(crate) spacing_seq_unknown: bool,
-    /// 用户挪过光标（`selection_changed` 判成非回声）：下一次锁存不信客户端那份记账。
-    pub(crate) spacing_cursor_moved: bool,
-    /// 服务端自己发出的上一笔上屏的末字符类别（不受锁存覆盖）。
-    pub(crate) spacing_last_commit: wind_punct::spacing::CharClass,
     /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
     ///
     /// 见 `docs/design/schema-scoped-behavior.md` §4。初值是哨兵 `u64::MAX`，保证首次
@@ -3131,10 +3122,6 @@ impl Coordinator {
                 full_width: init_full,
                 chinese_punct: init_punct,
                 spacing_prev: wind_punct::spacing::CharClass::Other,
-                spacing_word_commit: false,
-                spacing_seq_unknown: false,
-                spacing_cursor_moved: false,
-                spacing_last_commit: wind_punct::spacing::CharClass::Other,
                 // 哨兵：与任何真实代际都不相等，保证首次 sync_schema_scope 必执行。
                 schema_scope_gen: u64::MAX,
                 punct_before_schema: None,
@@ -9985,7 +9972,7 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                // 不经按键出口，按需补空格在这里补（同鼠标点选，见 `crate::auto_spacing`）。
+                // 不经按键出口，中英切换处补空格在这里补（同鼠标点选，见 `crate::auto_spacing`）。
                 let (act, chinese_mode, main_path) = {
                     let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     let act = self.apply_auto_spacing(&mut st, act);

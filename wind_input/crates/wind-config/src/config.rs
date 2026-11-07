@@ -953,18 +953,14 @@ where
 pub struct EnglishGlobal {
     #[serde(default)]
     pub frequency: EnglishFrequency,
-    /// 英文方案下词与词之间**自动补空格**。
+    /// 英文方案下上屏一个词后**再补一个空格**。
     ///
     /// 英文是词间带空格的语言，连续打词时每次上屏都要多按一次空格。开启后由输入法补上。
     ///
-    /// ★ 自 0.131 起**按需补**：空格补在**下一个英文词前面**，不再在上屏后立即补尾随空格
-    /// （设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）。于是接标点不会得到
-    /// `hello ,`，打完离开也不留多余空格；代价是上屏后光标处暂时看不到那个空格。
-    ///
-    /// 「这是一个英文词」的判定点（消费点见 `english_appends_space` / `english_space_enabled_in`，
-    /// 补空格本身在 `crate::auto_spacing` 统一出口）：
+    /// 生效范围（消费点见 `english_appends_space` / `english_space_enabled`）：
     /// - **所有选中方式**——空格 / 数字键 / 次三选键 / 修饰键选词 / 鼠标点选；
-    /// - **空格 / 回车上屏原码**（打了词库里没有的词）。
+    /// - **空格上屏原码**（打了词库里没有的词）；
+    /// - **不含**回车上屏原码（终结性动作）、标点键顶屏（会得到 `hello ,`）、顶码。
     #[serde(default)]
     pub commit_space: bool,
     /// 首候选是用户所打原文（英文方案下的「输入即内容」保证）。**三档**，
@@ -4605,13 +4601,15 @@ impl Default for PunctConfig {
 /// 中英 / 中数之间自动补空格（[input.spacing]）。设计见
 /// `docs/design/auto-spacing-and-latin-smart-punct.md`。
 ///
-/// 空格是**下一笔上屏的前缀**，不是上一笔的尾随：交界一侧是标点、空白或不可知时一律不补，
-/// 所以 `hello ,` 这种「补了再删」的情形不会出现。「上一笔末字符」来自客户端的输入序列记账
+/// 只管**切换处**：空格是切换后那一笔上屏的前缀（`你好` → ` Hello`、`Hello` → ` 世界`），
+/// 交界一侧是标点、空白或不可知时一律不补。「上一笔末字符」来自客户端的输入序列记账
 /// （`KeyPayload.seq_char`），宿主光标碰巧停在哪个字后面不算。
 ///
+/// 连续的英文之间不归这里管：英文词之间的空格是英文输入本身的 `schema.english.commit_space` /
+/// `input.temp_english.commit_space`（上屏时立即补尾随空格，之后接中文看到的是空格，不再补）。
+///
 /// 按应用关闭见 compat `[[apps]] auto_spacing = false`（自带 pangu 类空格处理的 Markdown
-/// 编辑器、终端）。拉丁字母之间的**词间空格**不归这里管，那是英文输入本身的
-/// `schema.english.commit_space` / `input.temp_english.commit_space`。
+/// 编辑器、终端）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpacingConfig {
     /// 汉字与拉丁字母之间补空格（`中 en 中`）。默认关。
@@ -4891,8 +4889,7 @@ pub struct TempEnglishConfig {
     /// 英文段，其词库候选按本项投影（见 `Coordinator::mix_free_english_segment`）。
     #[serde(default = "default_true")]
     pub case_follow_input: bool,
-    /// 临英里连打的英文词之间自动补空格（自 0.131 起按需补在**下一个词前面**，见
-    /// [`EnglishGlobal::commit_space`]）。中文与英文之间的空格另见 [`SpacingConfig`]。
+    /// 临英选词上屏后自动补一个空格。中文与英文之间的空格另见 [`SpacingConfig`]。
     ///
     /// 与 `schema.english.commit_space` 是**两个作用域各一份**，不是两个真相源 ——
     /// 同 [`Self::raw_candidate`] 那一对的理由：用户对「长时打英文」与「中文里插一个

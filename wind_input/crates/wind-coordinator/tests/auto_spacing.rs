@@ -1,6 +1,6 @@
-//! 中英 / 中数间按需补空格（`input.spacing.*`）端到端测试。
+//! 中英 / 中数切换处补空格（`input.spacing.*`）端到端测试。
 //!
-//! 设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`。空格是**下一笔上屏的前缀**，
+//! 设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`。空格是**切换后那一笔上屏的前缀**，
 //! 「上一笔末字符」来自客户端的输入序列记账（`seq_char`），这里由 [`Host`] 模拟。按键一律经
 //! `handle_key_event_policed`——补空格在那个出口。
 //!
@@ -203,18 +203,33 @@ fn unknown_previous_char_gets_no_cjk_space() {
     assert_eq!(h.temp_english("Python"), "Python");
 }
 
-/// 中文语境里连打两个英文词（中 en en 中）：开了中英间空格就隔开，不必另开临英的词间空格。
+/// 开了临英的 `commit_space`：英文词上屏就带尾随空格（看得见、可预期），切到中文时前一字符
+/// 已是空格，不再重复补——得到 `中 Hello World 中`。
 #[test]
-fn two_english_words_in_chinese_text_are_separated() {
+fn trailing_word_space_is_immediate_and_not_doubled() {
     if !ready() {
         return;
     }
     let mut cfg = config(true, false);
-    cfg.input.temp_english.commit_space = false;
+    cfg.input.temp_english.commit_space = true;
     let h = Host::new(cfg);
-    h.wubi("aaaa");
+    let zh = h.wubi("aaaa");
+    assert_eq!(h.temp_english("Hello"), " Hello ");
+    assert_eq!(h.temp_english("World"), "World ");
+    assert_eq!(h.wubi("aaaa"), zh.trim_start(), "尾随空格之后不再前补");
+}
+
+/// 没开 `commit_space`：连续的英文之间不管，切回中文时才补。
+#[test]
+fn consecutive_english_left_alone_without_commit_space() {
+    if !ready() {
+        return;
+    }
+    let h = Host::new(config(true, false));
+    let zh = h.wubi("aaaa");
     assert_eq!(h.temp_english("Hello"), " Hello");
-    assert_eq!(h.temp_english("World"), " World");
+    assert_eq!(h.temp_english("World"), "World");
+    assert_eq!(h.wubi("aaaa"), format!(" {}", zh.trim_start()));
 }
 
 /// 汉字后打数字：DLL 把这个数字吃下交过来（`seq_char` 是汉字），服务端恒出字；开着中数间
@@ -250,16 +265,29 @@ fn digit_after_latin_still_passes_through() {
     assert!(matches!(h.key(0x33, 0), KeyAction::PassThrough));
 }
 
-/// 鼠标把光标点到别处（`selection_changed` 判成用户移动）：下一笔不再按旧的「上一笔」补。
+/// 透传的数字进了宿主，宿主照样发「选区变了」（时间上离上一次自己上屏很远，服务端会判成
+/// 「用户移动光标」）。这不能作废记下的上一笔：数字后的汉字照样要补。鼠标挪光标由客户端
+/// 自己识别（按着鼠标、且这次编辑没改文本），报 `SEQ_CHAR_UNKNOWN`。
 #[test]
-fn cursor_moved_by_mouse_forgets_previous_char() {
+fn selection_echo_after_passthrough_digit_keeps_previous_char() {
+    if !ready() {
+        return;
+    }
+    let h = Host::new(config(false, true));
+    h.passthrough('3');
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    h.coord.handle_selection_changed(0);
+    assert!(h.wubi("aaaa").starts_with(' '), "数字后的汉字前补空格");
+}
+
+/// 客户端报「鼠标挪过光标」（`SEQ_CHAR_UNKNOWN`）：不补。
+#[test]
+fn client_reported_unknown_gets_no_space() {
     if !ready() {
         return;
     }
     let h = Host::new(config(true, false));
     h.wubi("aaaa");
-    // 超过自提交回声的宽限期，才会被判成用户移动光标。
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    h.coord.handle_selection_changed(0);
+    h.seq.set(wind_ipc::protocol::SEQ_CHAR_UNKNOWN);
     assert_eq!(h.temp_english("Python"), "Python");
 }
