@@ -81,6 +81,12 @@ bool isGnomeX11PanelFrontend(const fcitx::InputContext* ic, const WaylandCandida
     return isX11PanelFallbackFrontend(ic->frontend());
 }
 
+/// GNOME 折光标用的 X11 坐标缩放：`Xft.dpi` 里掺着字体缩放，要除掉，只留显示器缩放。
+double gnomeX11CoordScale(X11CandidatePanel& panel)
+{
+    return panel.hostScale(panel.textScaling());
+}
+
 bool needsWindowRelCaretFix(const fcitx::InputContext* ic, const WaylandCandidatePanel* wl)
 {
     return isGnomeX11PanelFrontend(ic, wl)
@@ -708,10 +714,10 @@ HostOutput WindEngine::hostOutput(fcitx::InputContext* ic)
         const double outScale = wlPanel_ ? wlPanel_->scale() : panel_->hostScale();
         if (needsWindowRelCaretFix(ic, wlPanel_.get())) {
             // 与 sendCaretUpdate 共用扩展成功结果：后调用的一方不再同步问总线。
-            const ResolvedCaret got = resolveWindowRelCaret(ic, panel_->hostScale(), outScale);
+            const ResolvedCaret got = resolveWindowRelCaret(ic, gnomeX11CoordScale(*panel_), outScale);
             at = std::make_pair(got.x, got.y);
         } else if (isGnomeX11PanelFrontend(ic, wlPanel_.get())) {
-            auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, panel_->hostScale());
+            auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, gnomeX11CoordScale(*panel_));
             (void)h;
             at = std::make_pair(x, y);
         } else
@@ -758,12 +764,12 @@ void WindEngine::sendCaretUpdate(fcitx::InputContext* ic)
     // GNOME Wayland：相对 → 扩展加窗口原点；绝对 → 只缩放。见 §7.10。
     const double outScale = wlPanel_ ? wlPanel_->scale() : panel_->hostScale();
     if (needsWindowRelCaretFix(ic, wlPanel_.get())) {
-        const ResolvedCaret got = resolveWindowRelCaret(ic, panel_->hostScale(), outScale);
+        const ResolvedCaret got = resolveWindowRelCaret(ic, gnomeX11CoordScale(*panel_), outScale);
         sendAndDrain(encodeCaretUpdateFrame(got.x, got.y, got.h));
         return;
     }
     if (isGnomeX11PanelFrontend(ic, wlPanel_.get())) {
-        auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, panel_->hostScale());
+        auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, gnomeX11CoordScale(*panel_));
         sendAndDrain(encodeCaretUpdateFrame(x, y, h));
         return;
     }

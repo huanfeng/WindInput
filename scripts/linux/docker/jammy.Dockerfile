@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build pkg-config curl ca-certificates git dpkg-dev \
         libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev fcitx5-modules-dev \
-        libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev libwayland-dev libwayland-bin \
+        libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev libwayland-dev libwayland-bin libglib2.0-dev \
     && rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION} \

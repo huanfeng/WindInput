@@ -98,7 +98,13 @@ public:
     /// X11 会话的界面缩放因子：根窗口 RESOURCE_MANAGER 里的 `Xft.dpi / 96`（桌面环境设缩放时都会写它），
     /// 没有时看环境变量 `GDK_SCALE`，再没有按 1.0。已连接上 X 才读得到；没连过（还没显示过候选窗）
     /// 时在这里连一次——只在「没有连接」时才连，不会重连销毁现有窗口。
-    double hostScale();
+    /// `textScaling`：从 `Xft.dpi` 里除掉的 GNOME 字体缩放（见 `xftDpiToX11Scale`）。光栅化用默认 1，
+    /// GNOME 折光标坐标传实际值。`GDK_SCALE` 回落不除。
+    double hostScale(double textScaling = 1.0);
+    /// 字体缩放：XSETTINGS（`_XSETTINGS_S<屏号>` 的属主窗口上的 `_XSETTINGS_SETTINGS`）里的
+    /// `Gdk/UnscaledDPI`，见 `xsettingsTextScaling`。没有 XSETTINGS 管理者、没有这一项时按 1。
+    /// 与 `hostScale` 一样只在没有连接时才连。
+    double textScaling();
     /// 工作区（根窗口，不分显示器）。还没连上 / 连接已坏时返回空（不在这里重连）。
     std::optional<Rect> screenWorkArea();
     /// 当前指针位置（根窗口坐标）。还没连上 / 连接已坏时返回空（不在这里重连）。

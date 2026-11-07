@@ -129,7 +129,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config \
             libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev fcitx5-modules-dev \
-            libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev libwayland-dev libwayland-bin
+            libxcb1-dev libxcb-shape0-dev libxcb-randr0-dev libwayland-dev libwayland-bin libglib2.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
