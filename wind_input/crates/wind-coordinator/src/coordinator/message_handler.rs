@@ -1979,6 +1979,24 @@ impl MessageHandler for Coordinator {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 self.accumulate_code_char(&mut state, digit, digit)
             }
+            // 汉字后打数字、开了中数间空格：DLL 把这个本该透传的数字吃下交过来（判据同 C++
+            // `NumberKeyPolicy.h` 的 `spaceBeforeDigit`），这里必须出字——前缀空格由统一出口补。
+            // 判据只看客户端报的「上一笔是汉字」，**不看**开关与应用规则：DLL 手上的开关可能慢一拍，
+            // 吃了键这边却不出字就是丢键（「C++ 吃键集 ⊆ Rust 出字集」）。
+            keymap::VK_0..=keymap::VK_9
+                if data.modifiers == 0
+                    && state.chinese_mode
+                    && !state.full_width
+                    && !state.caps_lock
+                    && !Self::has_input_session(&state)
+                    && wind_punct::spacing::classify_unit(data.seq_char)
+                        == wind_punct::spacing::CharClass::Cjk =>
+            {
+                let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
+                let text = digit.to_string();
+                self.record_commit(&text, 0, -1, CommitSource::Punctuation);
+                Self::commit_action(text, true)
+            }
             keymap::VK_1..=keymap::VK_9 if data.modifiers & MOD_SHIFT == 0 => {
                 // 数字键 1-9 选当前页第 N 个候选；越界按 input.overflow.number_key 处理
                 // （ignore 吞键 / commit 上屏高亮 / commit_and_input 顶字+数字，对齐 Go）。
@@ -4595,6 +4613,13 @@ impl MessageHandler for Coordinator {
         self.caret_cache_verified
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.note_host_wrote_text("selection_changed");
+        // 补空格 / 英文后标点的「上一笔」随之作废：客户端记账看不见鼠标挪光标。
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.spacing_cursor_moved = true;
+            st.spacing_prev = wind_punct::spacing::CharClass::Other;
+            st.spacing_last_commit = wind_punct::spacing::CharClass::Other;
+        }
     }
 
     fn handle_commit_request(&self, data: &CommitRequestData) -> Option<CommitResultData> {

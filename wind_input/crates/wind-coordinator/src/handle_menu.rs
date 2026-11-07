@@ -971,6 +971,7 @@ impl Coordinator {
         self.push_password_suppress_config(0);
         self.push_english_pair_config(0);
         self.push_composition_placeholder_config(0);
+        self.push_space_before_digit_config(0);
         self.push_multiline_commit_config(0);
         self.push_compat_title_match_config(0);
     }

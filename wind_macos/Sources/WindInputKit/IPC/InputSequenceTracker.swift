@@ -14,20 +14,24 @@ import Foundation
 /// 下一笔中文就被误补一个空格。这里只在**真写进文档**的那几处更新。
 public final class InputSequenceTracker {
 
-    public private(set) var seqChar: UInt16 = 0
+    /// 「在记账、但不知道」。0 只来自不带这个字段的旧客户端，服务端对两者处理不同（Rust
+    /// `wind_ipc::protocol::SEQ_CHAR_UNKNOWN`）。
+    public static let unknown: UInt16 = 0xFFFF
+
+    public private(set) var seqChar: UInt16 = InputSequenceTracker.unknown
 
     public init() {}
 
     /// 焦点切换、文档被我们看不见的方式改写（合成按键、纯删除）时调用。
     public func reset() {
-        seqChar = 0
+        seqChar = Self.unknown
     }
 
     /// 这一键透传进宿主后的代表字符（Windows VK 口径，见 `KeyHandler.toWindowsVK`）。
     public static func charFromVk(vk: UInt32, modifiers: UInt32) -> UInt16 {
         let modShift: UInt32 = 0x0001
         let modNonShift: UInt32 = 0x0002 | 0x0004 | 0x0008   // Ctrl / Alt / Win(⌘)：宿主快捷键
-        if modifiers & modNonShift != 0 { return 0 }
+        if modifiers & modNonShift != 0 { return unknown }
         let shift = modifiers & modShift != 0
         switch vk {
         case 0x30...0x39: return shift ? 0x3F : UInt16(vk)   // Shift+数字是 !@#…
@@ -35,7 +39,7 @@ public final class InputSequenceTracker {
         case 0x60...0x69: return UInt16(0x30 + (vk - 0x60))  // 小键盘数字
         case 0x20: return 0x20
         case 0x6A...0x6F, 0xBA...0xC0, 0xDB...0xDE, 0xE2: return 0x3F  // 可见符号 → '?'
-        default: return 0
+        default: return unknown
         }
     }
 

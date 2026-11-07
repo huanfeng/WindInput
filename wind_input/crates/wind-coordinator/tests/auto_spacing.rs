@@ -202,3 +202,64 @@ fn unknown_previous_char_gets_no_cjk_space() {
     h.seq.set(0);
     assert_eq!(h.temp_english("Python"), "Python");
 }
+
+/// 中文语境里连打两个英文词（中 en en 中）：开了中英间空格就隔开，不必另开临英的词间空格。
+#[test]
+fn two_english_words_in_chinese_text_are_separated() {
+    if !ready() {
+        return;
+    }
+    let mut cfg = config(true, false);
+    cfg.input.temp_english.commit_space = false;
+    let h = Host::new(cfg);
+    h.wubi("aaaa");
+    assert_eq!(h.temp_english("Hello"), " Hello");
+    assert_eq!(h.temp_english("World"), " World");
+}
+
+/// 汉字后打数字：DLL 把这个数字吃下交过来（`seq_char` 是汉字），服务端恒出字；开着中数间
+/// 空格就在前面补一个。
+#[test]
+fn digit_after_cjk_is_output_and_spaced() {
+    if !ready() {
+        return;
+    }
+    let h = Host::new(config(false, true));
+    h.wubi("aaaa");
+    match h.key(0x33, 0) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, " 3"),
+        other => panic!("汉字后的数字应由服务端出字，实际 {other:?}"),
+    }
+    // 开关关着（DLL 手上的开关慢了一拍还是吃了）：照样出字，只是不补——不能丢键。
+    let h = Host::new(config(false, false));
+    h.wubi("aaaa");
+    match h.key(0x33, 0) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "3"),
+        other => panic!("吃下来的数字必须出字，实际 {other:?}"),
+    }
+}
+
+/// 上一笔不是汉字时，空闲数字照旧透传（DLL 也不会交过来）。
+#[test]
+fn digit_after_latin_still_passes_through() {
+    if !ready() {
+        return;
+    }
+    let h = Host::new(config(true, true));
+    h.temp_english("Hello");
+    assert!(matches!(h.key(0x33, 0), KeyAction::PassThrough));
+}
+
+/// 鼠标把光标点到别处（`selection_changed` 判成用户移动）：下一笔不再按旧的「上一笔」补。
+#[test]
+fn cursor_moved_by_mouse_forgets_previous_char() {
+    if !ready() {
+        return;
+    }
+    let h = Host::new(config(true, false));
+    h.wubi("aaaa");
+    // 超过自提交回声的宽限期，才会被判成用户移动光标。
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    h.coord.handle_selection_changed(0);
+    assert_eq!(h.temp_english("Python"), "Python");
+}

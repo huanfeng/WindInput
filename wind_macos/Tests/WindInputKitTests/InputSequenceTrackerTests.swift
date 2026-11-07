@@ -15,9 +15,10 @@ final class InputSequenceTrackerTests: XCTestCase {
     }
 
     func testEditingKeysAndShortcutsAreUnknown() {
-        XCTAssertEqual(InputSequenceTracker.charFromVk(vk: 0x08, modifiers: 0), 0)          // Backspace
-        XCTAssertEqual(InputSequenceTracker.charFromVk(vk: 0x25, modifiers: 0), 0)          // ←
-        XCTAssertEqual(InputSequenceTracker.charFromVk(vk: 0x56, modifiers: 0x0008), 0)     // ⌘V
+        let u = InputSequenceTracker.unknown
+        XCTAssertEqual(InputSequenceTracker.charFromVk(vk: 0x08, modifiers: 0), u)          // Backspace
+        XCTAssertEqual(InputSequenceTracker.charFromVk(vk: 0x25, modifiers: 0), u)          // ←
+        XCTAssertEqual(InputSequenceTracker.charFromVk(vk: 0x56, modifiers: 0x0008), u)     // ⌘V
     }
 
     func testCommittedTextTail() {
@@ -29,7 +30,7 @@ final class InputSequenceTrackerTests: XCTestCase {
         t.noteCommittedText("")      // 空文本不动状态
         XCTAssertEqual(t.seqChar, 0xD840)
         t.reset()
-        XCTAssertEqual(t.seqChar, 0)
+        XCTAssertEqual(t.seqChar, InputSequenceTracker.unknown)
     }
 
     /// 组字更新不动 seqChar：Esc 取消组字后光标前仍是组字前那个字符。

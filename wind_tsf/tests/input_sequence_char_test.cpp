@@ -47,13 +47,13 @@ int main()
     Expect("numpad_decimal_is_symbol", FromVk(0x6E, false, false), '?');
 
     // 编辑/导航/功能键与宿主快捷键：不可知。
-    Expect("backspace_unknown", FromVk(0x08, false, false), 0);
-    Expect("enter_unknown", FromVk(0x0D, false, false), 0);
-    Expect("tab_unknown", FromVk(0x09, false, false), 0);
-    Expect("left_arrow_unknown", FromVk(0x25, false, false), 0);
-    Expect("f5_unknown", FromVk(0x74, false, false), 0);
-    Expect("ctrl_letter_unknown", FromVk('V', false, true), 0);
-    Expect("ctrl_digit_unknown", FromVk('1', false, true), 0);
+    Expect("backspace_unknown", FromVk(0x08, false, false), WindInputSeq::kUnknown);
+    Expect("enter_unknown", FromVk(0x0D, false, false), WindInputSeq::kUnknown);
+    Expect("tab_unknown", FromVk(0x09, false, false), WindInputSeq::kUnknown);
+    Expect("left_arrow_unknown", FromVk(0x25, false, false), WindInputSeq::kUnknown);
+    Expect("f5_unknown", FromVk(0x74, false, false), WindInputSeq::kUnknown);
+    Expect("ctrl_letter_unknown", FromVk('V', false, true), WindInputSeq::kUnknown);
+    Expect("ctrl_digit_unknown", FromVk('1', false, true), WindInputSeq::kUnknown);
 
     // 上屏文本：末尾码点。
     Expect("cjk_tail", Text(L"你好"), 0x597D);
@@ -69,6 +69,14 @@ int main()
     Expect("lone_low_surrogate", Text(lone), 0xDC00);
     Expect("empty_text", FromCommittedText(L"", 0), 0);
     Expect("null_text", FromCommittedText(nullptr, 3), 0);
+
+    // 汉字判定与服务端 classify_unit 同表。
+    Expect("cjk_basic", WindInputSeq::IsCjk(0x4F60), 1);
+    Expect("cjk_ext_b_high_surrogate", WindInputSeq::IsCjk(0xD840), 1);
+    Expect("kana", WindInputSeq::IsCjk(0x3042), 1);
+    Expect("cn_punct_not_cjk", WindInputSeq::IsCjk(0x3002), 0);
+    Expect("latin_not_cjk", WindInputSeq::IsCjk('a'), 0);
+    Expect("unknown_not_cjk", WindInputSeq::IsCjk(WindInputSeq::kUnknown), 0);
 
     if (g_failures == 0)
         std::printf("input_sequence_char_test: all passed\n");

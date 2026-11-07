@@ -938,6 +938,9 @@ constexpr const char* CONFIG_KEY_DIAG_SNAPSHOT = "diag_snapshot";
 // 服务端按本客户端 pid 的 compat 规则 composition_placeholder 现算后逐客户端推送；默认空格。
 // 决策在服务端，DLL 只照做（以及把三种字符都认作占位，见 CompositionPlaceholder.h）。
 constexpr const char* CONFIG_KEY_COMPOSITION_PLACEHOLDER = "composition_placeholder";
+// 中数间补空格（input.spacing.cjk_digit 且本应用 compat 未关）：DLL 据此把汉字后的数字吃下交给
+// core 出「空格 + 数字」。值 enabled(u8)，按客户端现算，推送时机同 composition_placeholder。
+constexpr const char* CONFIG_KEY_SPACE_BEFORE_DIGIT = "space_before_digit";
 // 含换行的上屏是否改走剪贴板粘贴。格式：mode(u8)，0 = commit（默认）、1 = paste；认不出的值按 commit。
 // 服务端按本客户端 pid 的 compat 规则 multiline_commit 现算后逐客户端推送，见 MultilineCommit.h。
 constexpr const char* CONFIG_KEY_MULTILINE_COMMIT = "multiline_commit";

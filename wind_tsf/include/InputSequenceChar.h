@@ -22,6 +22,23 @@
 namespace WindInputSeq
 {
 
+/// 「在记账、但不知道光标前是什么」（导航键、焦点切换、纯删除之后）。与 0 区分：0 只来自不带
+/// 这个字段的旧客户端，服务端对它会退回自己的记录；对本值不会（回车换行后的行首不该补空格）。
+/// 与 Rust `wind_ipc::protocol::SEQ_CHAR_UNKNOWN` 同值。
+constexpr uint16_t kUnknown = 0xFFFF;
+
+/// 是不是汉字类（与服务端 `wind_punct::spacing::classify_unit` 的 `Cjk` 同一张表）。
+/// DLL 只用它决定「汉字后的数字要不要吃下交给服务端补空格」。
+inline bool IsCjk(uint16_t u)
+{
+    return (u >= 0x2E80 && u <= 0x2FDF) || (u >= 0x3040 && u <= 0x309F) ||
+           (u >= 0x30A0 && u <= 0x30FA) || (u >= 0x30FC && u <= 0x30FF) ||
+           (u >= 0x3100 && u <= 0x312F) || (u >= 0x31F0 && u <= 0x31FF) ||
+           (u >= 0x3200 && u <= 0x32FF) || (u >= 0x3400 && u <= 0x4DBF) ||
+           (u >= 0x4E00 && u <= 0x9FFF) || (u >= 0xF900 && u <= 0xFAFF) ||
+           (u >= 0xD840 && u <= 0xD8BF);
+}
+
 constexpr uint32_t kVkSpace = 0x20;
 constexpr uint32_t kVkNumpad0 = 0x60;
 constexpr uint32_t kVkNumpad9 = 0x69;
@@ -33,14 +50,14 @@ constexpr uint32_t kVkOem4 = 0xDB;     // [{ 到 '" 连续四个
 constexpr uint32_t kVkOem7 = 0xDE;
 constexpr uint32_t kVkOem102 = 0xE2;   // 102 键布局的 \|
 
-/// 一次透传进宿主的 keydown 的代表字符；0 = 不产出可见字符（编辑/导航/功能键，或宿主快捷键）。
+/// 一次透传进宿主的 keydown 的代表字符；kUnknown = 不产出可见字符（编辑/导航/功能键，或宿主快捷键）。
 ///
-/// Ctrl/Alt 组合一律 0：它们是宿主快捷键（Ctrl+V 粘贴进来的内容我们看不见），按「不可知」处理。
-/// AltGr（= Ctrl+Alt）在部分布局下也出字，同样报 0——少补一个空格好过多补。
+/// Ctrl/Alt 组合一律 kUnknown：它们是宿主快捷键（Ctrl+V 粘贴进来的内容我们看不见）。
+/// AltGr（= Ctrl+Alt）在部分布局下也出字，同样报不知道——少补一个空格好过多补。
 inline uint16_t FromVk(uint32_t vk, bool shift, bool ctrlOrAlt)
 {
     if (ctrlOrAlt)
-        return 0;
+        return kUnknown;
     if (vk >= '0' && vk <= '9')
         return shift ? '?' : (uint16_t)vk; // Shift+数字是 !@#…
     if (vk >= 'A' && vk <= 'Z')
@@ -52,7 +69,7 @@ inline uint16_t FromVk(uint32_t vk, bool shift, bool ctrlOrAlt)
     if ((vk >= kVkMultiply && vk <= kVkDivide) || (vk >= kVkOem1 && vk <= kVkOem3) ||
         (vk >= kVkOem4 && vk <= kVkOem7) || vk == kVkOem102)
         return '?';
-    return 0;
+    return kUnknown;
 }
 
 /// 经输入法上屏的文本的代表字符：末尾码点的**首个** UTF-16 单元（BMP 即本字符，辅助平面取高

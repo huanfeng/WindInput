@@ -75,6 +75,9 @@ pub struct SpacingRules {
     pub cjk_digit: bool,
     /// 英文词间空格：本笔是英文语境下的一个词，且该语境的 `commit_space` 开着。
     pub word_space: bool,
+    /// 中文语境里连着的两个英文词（拉丁字母 ↔ 拉丁字母）：开了中英间空格的人打「中 en en 中」，
+    /// 两个英文词之间同样要隔开。只管字母对字母，数字与字母之间不算（`3kg` 不拆）。
+    pub latin_latin: bool,
 }
 
 fn is_word(c: CharClass) -> bool {
@@ -90,6 +93,7 @@ pub fn needs_space(prev: CharClass, next: CharClass, rules: SpacingRules) -> boo
     match (prev, next) {
         (Cjk, Latin) | (Latin, Cjk) => rules.cjk_latin,
         (Cjk, Digit) | (Digit, Cjk) => rules.cjk_digit,
+        (Latin, Latin) if rules.latin_latin => true,
         (p, n) if is_word(p) && is_word(n) => rules.word_space,
         _ => false,
     }
@@ -103,7 +107,21 @@ mod tests {
         cjk_latin: true,
         cjk_digit: true,
         word_space: true,
+        latin_latin: true,
     };
+
+    #[test]
+    fn latin_latin_rule_is_letters_only() {
+        use CharClass::*;
+        let r = SpacingRules {
+            latin_latin: true,
+            ..Default::default()
+        };
+        assert!(needs_space(Latin, Latin, r));
+        assert!(!needs_space(Digit, Latin, r), "3kg 不拆");
+        assert!(!needs_space(Latin, Digit, r));
+        assert!(!needs_space(WideLatin, WideLatin, r));
+    }
 
     #[test]
     fn classify_basic_scripts() {

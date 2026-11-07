@@ -342,12 +342,12 @@ void TestSeqTracker()
     r.noteKeyPassthrough(0xBE, 0);                          // .
     CHECK_EQ(r.seqTracker().seqChar(), uint16_t('?'));
     r.noteKeyPassthrough(0x56, KEYMOD_CTRL);                // Ctrl+V
-    CHECK_EQ(r.seqTracker().seqChar(), uint16_t(0));
+    CHECK_EQ(r.seqTracker().seqChar(), SeqTracker::kUnknown);
     r.noteKeyPassthrough(0x37, 0);
     CHECK_EQ(r.digitTracker().prevChar(), uint16_t('7'));  // 两份记账一起喂
     CHECK_EQ(r.seqTracker().seqChar(), uint16_t('7'));
     r.reset();
-    CHECK_EQ(r.seqTracker().seqChar(), uint16_t(0));
+    CHECK_EQ(r.seqTracker().seqChar(), SeqTracker::kUnknown);
 }
 
 void TestDigitTracker()

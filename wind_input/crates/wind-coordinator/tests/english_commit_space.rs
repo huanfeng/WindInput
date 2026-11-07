@@ -362,6 +362,22 @@ fn legacy_client_without_seq_char_keeps_word_space() {
     assert_eq!(commit_text(&h.key(VK_SPACE)), format!(" {top}"));
 }
 
+/// 客户端在记账、但不知道光标前是什么（回车换行、方向键之后，报 `SEQ_CHAR_UNKNOWN`）：
+/// 不退回服务端记录——否则行首的第一个词前面会多一个空格。
+#[test]
+fn known_unknown_previous_char_gets_no_space() {
+    if !has_english_schema() {
+        return;
+    }
+    let h = Host::new(english_config(true));
+    h.commit_first_word();
+    h.seq.set(wind_ipc::protocol::SEQ_CHAR_UNKNOWN);
+
+    h.type_word("hel");
+    let top = h.top();
+    assert_eq!(commit_text(&h.key(VK_SPACE)), top);
+}
+
 #[test]
 fn non_english_schema_never_spaces_words() {
     if !has_english_schema() {

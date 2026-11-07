@@ -36,7 +36,7 @@ void DigitTracker::noteCommittedText(const std::string& utf8)
 uint16_t SeqTracker::charFromVk(uint32_t vk, uint32_t modifiers)
 {
     if (modifiers & (KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_WIN)) {
-        return 0; // 宿主快捷键：粘贴进来的是什么看不见
+        return kUnknown; // 宿主快捷键：粘贴进来的是什么看不见
     }
     bool shift = (modifiers & KEYMOD_SHIFT) != 0;
     if (vk >= 0x30 && vk <= 0x39) {
@@ -55,7 +55,7 @@ uint16_t SeqTracker::charFromVk(uint32_t vk, uint32_t modifiers)
         vk == 0xE2) {
         return '?';
     }
-    return 0;
+    return kUnknown;
 }
 
 void SeqTracker::noteCommittedText(const std::string& utf8)

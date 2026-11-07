@@ -33,8 +33,11 @@ impl Coordinator {
     pub(crate) fn latch_spacing_boundary(&self, state: &mut State, data: &KeyEventData) {
         let doc_space =
             char::from_u32(data.prev_char as u32).is_some_and(|c| c != '\0' && c.is_whitespace());
+        // 0 只来自不带这个字段的旧客户端；新客户端「在记账、但不知道」报 `SEQ_UNKNOWN`。
         state.spacing_seq_unknown = data.seq_char == 0 && !doc_space;
-        state.spacing_prev = if doc_space {
+        // 用户挪过光标（鼠标点到别处）：客户端记账看不见，那份值已不是光标前的字。
+        let moved = std::mem::take(&mut state.spacing_cursor_moved);
+        state.spacing_prev = if doc_space || moved {
             CharClass::Other
         } else {
             classify_unit(data.seq_char)
@@ -111,6 +114,8 @@ impl Coordinator {
             cjk_latin: allowed && spacing.cjk_latin,
             cjk_digit: allowed && spacing.cjk_digit,
             word_space: word,
+            // 英文方案里词间空格只归 `commit_space` 管，中英间空格不越界。
+            latin_latin: allowed && spacing.cjk_latin && !self.engine_mgr.active_is_english(),
         };
         let next = classify(head);
         let add = needs_space(*prev, next, rules);

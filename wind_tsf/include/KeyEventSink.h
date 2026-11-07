@@ -100,7 +100,7 @@ public:
         _passthrough.Reset();  // 与 skip 表同处清：跨文档带一个陈旧的透传事实过去没有意义
         // seqChar 同配对状态：中英切换不清（用户定：切换后紧接着打的仍算「英文后」），
         // 焦点/文档切换清——换了文档，上一个文档末尾是什么与这里无关。
-        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; _seqChar = 0; }
+        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; _seqChar = WindInputSeq::kUnknown; }
     }
 
     // 配对状态保活：所有按键都应调用（含英文模式的普通字母——协调器在英文模式下收不到
@@ -544,6 +544,10 @@ private:
     // 与 _lastPassthroughDigit 同两个记录点，但**发送时不清零**：服务端只在组合开始那一键锁存它，
     // 组合期间被吃下的键没有写进文档，光标前是什么并没有变。
     uint16_t _seqChar;
+    // 中数间补空格开着、且本应用未关（core 经 CONFIG_KEY_SPACE_BEFORE_DIGIT 按客户端现算推来）。
+    // 只决定「汉字后的数字吃不吃」，见 NumberKeyPolicy.h 的 SpaceBeforeDigit。
+    bool _spaceBeforeDigit = false;
+    bool _SpaceBeforeDigitFor(WPARAM vk, uint32_t modifiers) const;
     // 「自上一个 keydown 送达服务端以来有键进了宿主」的记账。规则与理由见 PassthroughNote.h；
     // 消费点在 _SendKeyToService（仅 keydown 那一发），清理点在 ResetComposingState。
     WindPassthrough::PassthroughState _passthrough;

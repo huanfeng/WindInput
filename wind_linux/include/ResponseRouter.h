@@ -72,8 +72,10 @@ private:
 /// 编码末位 'o'，下一笔中文被误补空格。
 class SeqTracker {
 public:
+    /// 「在记账、但不知道」。0 只来自不带这个字段的旧客户端（Rust `SEQ_CHAR_UNKNOWN`）。
+    static constexpr uint16_t kUnknown = 0xFFFF;
     uint16_t seqChar() const { return seqChar_; }
-    void reset() { seqChar_ = 0; }
+    void reset() { seqChar_ = kUnknown; }
     static uint16_t charFromVk(uint32_t vk, uint32_t modifiers);
     void noteKeyPassthrough(uint32_t vk, uint32_t modifiers) { seqChar_ = charFromVk(vk, modifiers); }
     /// 空串不动：没有东西写进文档。
@@ -82,7 +84,7 @@ public:
     void noteCursorCrossedSymbol() { seqChar_ = '?'; }
 
 private:
-    uint16_t seqChar_ = 0;
+    uint16_t seqChar_ = kUnknown;
 };
 
 /// 服务端给的删除 / 光标移动计数是 u32，转 int 取负前先钳住：大于 INT_MAX 时取负是未定义行为；

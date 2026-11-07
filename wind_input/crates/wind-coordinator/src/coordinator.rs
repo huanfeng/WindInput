@@ -474,6 +474,8 @@ pub(crate) struct State {
     pub(crate) spacing_word_commit: bool,
     /// 锁存时客户端报的 `seq_char` 是 0（不可知）。只用于英文词间空格的兜底，见 `apply_auto_spacing`。
     pub(crate) spacing_seq_unknown: bool,
+    /// 用户挪过光标（`selection_changed` 判成非回声）：下一次锁存不信客户端那份记账。
+    pub(crate) spacing_cursor_moved: bool,
     /// 服务端自己发出的上一笔上屏的末字符类别（不受锁存覆盖）。
     pub(crate) spacing_last_commit: wind_punct::spacing::CharClass,
     /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
@@ -3131,6 +3133,7 @@ impl Coordinator {
                 spacing_prev: wind_punct::spacing::CharClass::Other,
                 spacing_word_commit: false,
                 spacing_seq_unknown: false,
+                spacing_cursor_moved: false,
                 spacing_last_commit: wind_punct::spacing::CharClass::Other,
                 // 哨兵：与任何真实代际都不相等，保证首次 sync_schema_scope 必执行。
                 schema_scope_gen: u64::MAX,
@@ -3760,6 +3763,7 @@ impl Coordinator {
                 self.push_password_suppress_config(token);
                 self.push_english_pair_config(token);
                 self.push_composition_placeholder_config(token);
+                self.push_space_before_digit_config(token);
                 self.push_multiline_commit_config(token);
                 // 标题采集开关按进程名算（本进程可能命中标题规则），名字纠正后同样要重推。
                 self.push_compat_title_match_config(token);
@@ -5380,6 +5384,7 @@ impl Coordinator {
                 self.push_cn_passthrough_punct_config(0); // 中文模式该透传的标点：DLL 据此**不**吃
                 self.push_en_passthrough_punct_config(0); // 同上，英文标点态那份（超集）
                 self.push_space_custom_cols_config(0); // 空格行自定义列：DLL 据此吃空缓冲空格
+                self.push_space_before_digit_config(0); // 中数间补空格：DLL 据此吃汉字后的数字
                 self.push_pair_state_ttl_config(0); // 配对状态时效（DLL 侧闸门据此判陈旧）
                 self.push_ctrl_space_toggle_config(0); // Ctrl+空格 切换开关：DLL 据此吃不吃该键（GH#172）
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——

@@ -566,6 +566,9 @@ pub const CONFIG_KEY_DIAG_SNAPSHOT: &str = "diag_snapshot";
 /// 向后兼容：DLL 的 `PlaceholderForKind` 对**认不出的值一律回落空格**，所以只认 0/1 的旧 DLL
 /// 收到 2 时兜底占位是空格（历史行为），不会出错；新加档位照此只追加、不复用旧值。
 pub const CONFIG_KEY_COMPOSITION_PLACEHOLDER: &str = "composition_placeholder";
+/// 中数间补空格（`input.spacing.cjk_digit` 且本应用 compat 未关）：DLL 据此把汉字后的数字吃下
+/// 交给 core。值 enabled(u8)，按客户端现算，推送时机同 [`CONFIG_KEY_COMPOSITION_PLACEHOLDER`]。
+pub const CONFIG_KEY_SPACE_BEFORE_DIGIT: &str = "space_before_digit";
 /// 含换行的上屏是否改走剪贴板粘贴同步键名。格式：`mode(u8)`，0 = commit（TSF 上屏，默认）、
 /// 1 = paste（结束组合后写剪贴板 + 注入 Ctrl+V）。
 ///
@@ -738,7 +741,11 @@ impl fmt::Debug for IpcHeader {
 
 /// 按键事件载荷 (20 bytes)。
 ///
-/// `seq_char`（偏移 18）是后加的：18 字节的旧包照收，该字段读成 0（= 不可知，依赖它的功能不触发）。
+/// `seq_char`（偏移 18）是后加的：18 字节的旧包照收，该字段读成 0。
+///
+/// 两个「不知道」要分开：`0` = 客户端根本不报（旧版），[`SEQ_CHAR_UNKNOWN`] = 客户端在记账、
+/// 但这一刻不知道光标前是什么（导航键、焦点刚切过来）。前者服务端会退回自己的记录保住旧行为，
+/// 后者不会——否则回车换行后行首也会被补上一个空格。
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
 pub struct KeyPayload {
@@ -752,6 +759,9 @@ pub struct KeyPayload {
     /// 输入序列里最近进文档的字符代表值，0 = 不可知（C++ `InputSequenceChar.h`）。
     pub seq_char: u16,
 }
+
+/// [`KeyPayload::seq_char`] 的「在记账、但不知道」（U+FFFF 是非字符，不会是任何上屏文本的末字）。
+pub const SEQ_CHAR_UNKNOWN: u16 = 0xFFFF;
 
 impl KeyPayload {
     pub const SIZE: usize = 20;
