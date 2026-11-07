@@ -406,3 +406,47 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
 - 减少动态效果：Windows `SPI_GETCLIENTAREAANIMATION` 关闭时停在首帧。设置项「关闭主题动画」放到 P5 一起做
   （要动设置端）。
 - 平台：本期只在 Windows 播放；macOS / Linux（ext_presenter）先显示首帧，SHM 推帧放到后续。
+
+## 16. P5 范围（事件状态机）
+
+本期把 §6.2 的 `states` / `on` 接上输入事件，并加「关闭主题动画」设置项。平台同 P4，只在 Windows 播放。
+
+声明（每个装饰各自一台状态机，互不影响）：
+
+```toml
+[skin.horizontal.decor.states]
+idle   = { frames = "0-23" }               # 片段：帧区间（含两端，按文件原始帧号）
+typing = { frames = "24-35" }
+en     = { image = "tiger_en" }            # 片段：另一个文件，整段
+[skin.horizontal.decor.on]
+typing  = { state = "typing" }             # 切换常驻状态
+idle_5s = { state = "idle" }
+commit  = { play = "36-47", then = "idle" }  # 一次性片段，播完转 then
+page    = { play = "48-55" }               # then 缺省 = "@prev"（回到当前常驻状态）
+click   = { play = { image = "tiger_jump" } }
+mode_en = { state = "en" }
+```
+
+- 没写 `states` 的装饰行为同 P4：整个文件循环。写了则初始状态取 `idle`，没有 `idle` 取第一个声明的状态。
+- 常驻状态循环播放；一次性片段播一遍，播完转 `then`；播放中来了新事件，按新事件直接切换。
+- 帧号指文件的原始帧号；预算降帧（隔帧丢弃）后按原始帧号映射到保留下来的帧。
+- 引用了不存在的状态 / 越界帧区间：加载时 warn 并丢弃该条，不影响其它条目。
+- 窗口隐藏时：`state` 类事件照样改常驻状态（下次显示生效），一次性片段丢弃。显示时片段从头播。
+
+事件来源：
+
+| 事件 | 来源 |
+|---|---|
+| `show` | 候选窗从隐藏到显示 |
+| `typing` / `backspace` | 相邻两次 `UpdateCandidates` 的编码串：变短且为原串前缀 = backspace，其余变化 = typing |
+| `page` | 编码串不变、页码变化 |
+| `empty` | 有编码但候选变为空 |
+| `commit` | 协调器两个上屏出口（`handle_key_event_policed`、`select_candidate_at`）真有文本上屏时发 `UiCommand::SkinSignal` |
+| `mode_cn` / `mode_en` | UI 侧比较相邻两次 `UpdateToolbar` 的 `chinese_mode`（首次不算），不另加命令 |
+| `idle_<N>s` | 显示中、距最后一个事件 N 秒（登记 `next_deadline`） |
+| `click` | 在 `drag` / `block` 装饰上按下、未超过拖动阈值即松开 |
+
+`select`（数字键 / 点击选词）本期不单列：它总伴随 `commit`，主题想区分时再加。
+
+关闭：`ui.theme.animation`（缺省 `true`）。关掉或系统关了动画效果时，装饰停在初始状态首帧，事件不再切换。
+设置端在「外观 → 主题」加开关「主题动画」。
