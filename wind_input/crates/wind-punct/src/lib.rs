@@ -109,19 +109,25 @@ pub fn quote_forms(
 /// `Coordinator::handle_english_custom_punct` 的接手判据，同源即不会漂移；空串列（= 回落
 /// 默认转换）不算覆盖，否则会吃下一个自己不出字的键。
 ///
-/// 引号两行（`"1`/`"2`）折回同一个源字符 `"`，任一行有值即视为该键有覆盖。
+/// 引号两行（`"1`/`"2`）折回同一个源字符 `"`，任一行有改写即视为该键有覆盖。
+///
+/// 英半列写的就是原字符本身也不算覆盖：设置端保存一行时四列整行落盘，`-` `=` 等行的英半
+/// 默认值正是原字符。吃下它出的字虽相同，宿主却收不到原始按键，单键快捷键随之失效。
 pub fn custom_english_punct_chars(punct: &PunctConfig) -> Vec<char> {
     if !punct.custom_enabled {
         return Vec::new();
     }
     let mut out: Vec<char> = Vec::new();
     for (key, vals) in &punct.custom_mappings {
-        if vals.get(3).is_none_or(|v| v.is_empty()) {
-            continue; // 英半列无值 → 回落默认转换，不必吃键
-        }
         let Some(src) = wind_transform::punctuation::custom_key_source_char(key) else {
             continue;
         };
+        let Some(en_half) = vals.get(3) else {
+            continue;
+        };
+        if en_half.is_empty() || en_half.chars().eq([src]) {
+            continue; // 英半列无值或等于原字符 → 与透传等价，不必吃键
+        }
         if !out.contains(&src) {
             out.push(src);
         }
@@ -726,6 +732,11 @@ mod tests {
         c.punct.custom_mappings.insert(
             "'1".into(),
             vec!["".into(), "".into(), "".into(), "@".into()],
+        );
+        // 英半列就是原字符本身（设置端整行落盘的默认值）→ 没有改写，不该吃
+        c.punct.custom_mappings.insert(
+            "-".into(),
+            vec!["－".into(), "－".into(), "－".into(), "-".into()],
         );
         assert_eq!(custom_english_punct_chars(&c.punct), vec!['"', '\'']);
 

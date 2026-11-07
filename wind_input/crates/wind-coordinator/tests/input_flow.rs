@@ -8217,6 +8217,53 @@ fn english_mode_uncovered_punct_still_passes_through() {
     );
 }
 
+/// 英半列写的就是原字符本身 = 没有改写，英文模式下必须透传。
+///
+/// 设置端保存一行自定义标点时四列整行落盘，`-` `=` 等行的英半默认值就是原字符；若按
+/// 「非空即覆盖」吃键，core 出的字虽相同，宿主却收不到原始按键，单键快捷键
+/// （Premiere 的 `-`/`=` 缩放）失效。真改写了的键仍要接管。
+#[test]
+fn english_mode_identity_english_half_column_passes_through() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.input.default.chinese_mode = false;
+    cfg.input.punct.custom_enabled = true;
+    // 用户只改了中文半角，英半列是设置端落盘的默认值（原字符本身）
+    cfg.input.punct.custom_mappings.insert(
+        "-".into(),
+        vec!["－".into(), "－".into(), "－".into(), "-".into()],
+    );
+    cfg.input.punct.custom_mappings.insert(
+        "=".into(),
+        vec!["＝".into(), "＝".into(), "＝".into(), "=".into()],
+    );
+    // 英半列真改写了
+    cfg.input.punct.custom_mappings.insert(
+        "/".into(),
+        vec!["、".into(), "／".into(), "、".into(), "÷".into()],
+    );
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+
+    let minus = coord.handle_key_event(&key_event(0xBD, EVENT_KEY_DOWN)); // VK_OEM_MINUS
+    assert!(
+        matches!(minus, KeyAction::PassThrough),
+        "英半列 = 原字符时 `-` 应透传给宿主，实际: {minus:?}"
+    );
+    let equal = coord.handle_key_event(&key_event(0xBB, EVENT_KEY_DOWN)); // VK_OEM_PLUS（无 Shift 为 `=`）
+    assert!(
+        matches!(equal, KeyAction::PassThrough),
+        "英半列 = 原字符时 `=` 应透传给宿主，实际: {equal:?}"
+    );
+    let slash = coord.handle_key_event(&key_event(0xBF, EVENT_KEY_DOWN)); // VK_OEM_2
+    assert_eq!(
+        action_text(&slash).as_deref(),
+        Some("÷"),
+        "英半列真改写的键仍应出用户配的值，实际: {slash:?}"
+    );
+}
+
 /// 自定义映射 × 引号配对：`"1`/`"2` 两行 = **左形/右形**，配对时一次按键两行都用上。
 ///
 /// 语义定名（用户拍板）：界面上的「第一次 / 第二次」实质是左形 / 右形，「第几次」只是没有
