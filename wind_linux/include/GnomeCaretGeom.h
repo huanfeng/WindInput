@@ -31,7 +31,7 @@ double spotScaleForGnomeExt(double clientSf, double x11BufScale, double outputSc
 /// 客户端矩形乘上 mul。高度 ≤0 时按 16。
 CaretPx scaleRectToX11(int left, int top, int height, double mul);
 
-/// RelativeRect、扩展没答上来时的折中：逻辑 DIP（sf>1 且不贴近缓冲缩放）乘缓冲缩放，其余原样。
+/// RelativeRect、扩展没答上来时的折中：sf>1 且不贴近缓冲缩放时按「矩形 / sf × 缓冲缩放」，其余原样。
 /// sf≤1.01 时乘数恒为 1（不再单独写一条恒真分支）。
 CaretPx windowRelCaretToX11(int left, int top, int height, double scaleFactor, double x11BufScale);
 

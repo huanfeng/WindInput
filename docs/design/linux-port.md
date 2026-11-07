@@ -411,7 +411,10 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
      坐标会被多乘一次（只开字体缩放 1.3 时候选窗偏右下、离原点越远偏越多）。字体缩放取 XSETTINGS 的
      `Gdk/UnscaledDPI`（gsd-xsettings 与 `Xft.dpi` 同时写），读不到按 1。光栅化仍用不除的
      `Xft.dpi / 96`，字跟着字体缩放放大。
-   - 扩展未启用时退回 toolkit 折中——最大化大致可用，浮动窗会偏。问总线的连接会缓存；失败后
+   - 扩展未启用时退回 toolkit 折中——最大化大致可用，浮动窗会偏。折中按 fcitx 约定把 RelativeRect
+     当作已按 sf 预乘（fcitx5-gtk 的 GTK3/GTK4 与 fcitx5-qt 都这样报）：sf 远离缓冲缩放时按「矩形 / sf ×
+     缓冲缩放」，例如显示器 150% 时 GTK3 报整数 sf=2、Xwayland 缓冲缩放 1，要除 2。扩展路径的
+     `spotScaleForGnomeExt` 对同一组合给 1，是否同样要按 sf 换算没有 GNOME 47+ 真机验证，未改。问总线的连接会缓存；失败后
      约 3 秒内不再同步重试；同一矩形不重复调用。`hostOutput` 复用 `sendCaretUpdate` 已经成功
      换算的结果。
    - **扩展能装上的 Shell 是 47–50，不是 42，也不是 45/46。** ESM 扩展格式从 Shell 45 起；

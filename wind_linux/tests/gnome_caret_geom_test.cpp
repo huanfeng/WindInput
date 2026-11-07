@@ -209,9 +209,14 @@ int main()
     checkPx("sf1", windowRelCaretToX11(10, 20, 18, 1.0, 2.0), 10, 20, 18);
     checkPx("预乘", windowRelCaretToX11(10, 20, 18, 2.0, 2.0), 10, 20, 18);
     checkPx("边界 0.25", windowRelCaretToX11(10, 20, 18, 1.75, 2.0), 10, 20, 18);
-    checkPx("逻辑 DIP", windowRelCaretToX11(10, 20, 18, 1.5, 2.0), 20, 40, 36);
-    checkPx("|sf-buf|=0.26", windowRelCaretToX11(10, 20, 18, 1.74, 2.0), 20, 40, 36);
-    checkPx("高度缺失", windowRelCaretToX11(10, 20, 0, 1.5, 2.0), 20, 40, 32);
+    checkPx("sf 远离 buf：除 sf 乘 buf", windowRelCaretToX11(15, 30, 18, 1.5, 2.0), 20, 40, 24);
+    checkPx("|sf-buf|=0.26", windowRelCaretToX11(87, 174, 87, 1.74, 2.0), 100, 200, 100);
+    checkPx("高度缺失", windowRelCaretToX11(15, 30, 0, 1.5, 2.0), 20, 40, 21);
+    // 显示器 150%、Xwayland 不按原生缩放（根 960×600、Xft.dpi 96）：GTK3 报整数 sf=2 且已预乘。
+    // .55 Ubuntu 22.04 实抓 gedit：SetCursorRectV2(52,614,0,36, 2.0)。
+    checkPx("GTK3 sf2 / buf1", windowRelCaretToX11(52, 614, 36, 2.0, 1.0), 26, 307, 18);
+    // 同一显示器缩放、Xwayland 原生缩放（Xft.dpi 144）：GTK3 仍报 2。
+    checkPx("GTK3 sf2 / buf1.5", windowRelCaretToX11(52, 614, 36, 2.0, 1.5), 39, 461, 27);
     checkPx("负高度", windowRelCaretToX11(10, 20, -3, 1.0, 2.0), 10, 20, 16);
     checkPx("sf 缺失当 1", windowRelCaretToX11(10, 20, 18, 0.0, 2.0), 10, 20, 18);
 

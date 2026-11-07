@@ -81,9 +81,11 @@ CaretPx windowRelCaretToX11(int left, int top, int height, double scaleFactor, d
 {
     const double buf = x11BufScale > 0.0 ? x11BufScale : 1.0;
     const double sf = scaleFactor > 0.01 ? scaleFactor : 1.0;
-    // 只有「分数 sf 且不像缓冲缩放」才是逻辑 DIP，要乘 buf。sf≤1.01 时这条为假，乘数恒为 1。
-    const bool logicalDip = sf > 1.01 && std::fabs(sf - buf) > 0.25;
-    return scaleRectToX11(left, top, height, logicalDip ? buf : 1.0);
+    // GTK3/GTK4/Qt 报 RelativeRect 时都已按自身 sf 预乘（fcitx5-gtk / fcitx5-qt 上游），逻辑坐标 =
+    // 矩形 / sf。sf 贴近缓冲缩放时两者抵消、原样；sf 远离缓冲缩放（如显示器 150% 时 GTK3 报整数 2、
+    // 缓冲缩放 1）要先除 sf 再乘 buf，否则离窗口原点越远偏得越多。sf≤1.01 不动。
+    const bool rescale = sf > 1.01 && std::fabs(sf - buf) > 0.25;
+    return scaleRectToX11(left, top, height, rescale ? buf / sf : 1.0);
 }
 
 CaretPx absoluteCaretToX11(int left, int top, int height, double scaleFactor, double x11BufScale)
