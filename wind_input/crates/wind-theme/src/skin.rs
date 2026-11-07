@@ -41,6 +41,28 @@ pub struct SkinVariant {
     pub decor: Vec<SkinDecor>,
     #[serde(default)]
     pub placement: SkinPlacement,
+    /// 分槽位（`free`）布局：写了 `slots.candidates` 即启用，编码 / 候选 / 翻页各自锚定。
+    #[serde(default)]
+    pub slots: SkinSlots,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct SkinSlots {
+    pub preedit: Option<SlotSpec>,
+    pub candidates: Option<SlotSpec>,
+    pub footer: Option<SlotSpec>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct SlotSpec {
+    /// 缺省 `content.top_left`。
+    #[serde(default)]
+    pub anchor: String,
+    /// 槽位自身对齐点；缺省同锚点方位。
+    pub pivot: Option<String>,
+    /// 源像素。
+    #[serde(default)]
+    pub offset: [f32; 2],
 }
 
 #[derive(Deserialize, Debug, Default, Clone)]
@@ -360,6 +382,40 @@ fn resolve_caret(spec: Option<&CaretSpec>, dflt: CaretPoint) -> CaretPoint {
     CaretPoint { anchor, offset }
 }
 
+/// 一个槽位：内容按自然尺寸摆放，`pivot` 点落在 `anchor` + `offset` 上。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RvSlot {
+    pub anchor: Anchor,
+    pub pivot: Pos9,
+    pub offset: [f32; 2],
+}
+
+/// 分槽位布局。候选槽必有；编码槽缺省时编码栏叠在候选槽上方一起摆，翻页槽缺省时翻页栏按原规则
+/// 留在候选区里。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RvSlots {
+    pub preedit: Option<RvSlot>,
+    pub candidates: RvSlot,
+    pub footer: Option<RvSlot>,
+}
+
+fn resolve_slot(s: &SlotSpec) -> Option<RvSlot> {
+    let anchor = Anchor::parse(if s.anchor.is_empty() {
+        "content.top_left"
+    } else {
+        &s.anchor
+    })?;
+    let pivot = match s.pivot.as_deref() {
+        Some(p) => Pos9::parse(p)?,
+        None => anchor.pos,
+    };
+    Some(RvSlot {
+        anchor,
+        pivot,
+        offset: s.offset,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RvSkinVariant {
     pub frame: RvSkinFrame,
@@ -367,6 +423,8 @@ pub struct RvSkinVariant {
     /// 已按 z 升序（稳定排序，同 z 保持书写顺序）。
     pub decor: Vec<RvSkinDecor>,
     pub placement: RvPlacement,
+    /// None = `stack` 布局（编码 / 候选 / 翻页照旧纵向堆叠进内容框）。
+    pub slots: Option<RvSlots>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -542,11 +600,25 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
             }
         },
     };
+    let slots = v
+        .slots
+        .candidates
+        .as_ref()
+        .and_then(resolve_slot)
+        .map(|candidates| RvSlots {
+            preedit: v.slots.preedit.as_ref().and_then(resolve_slot),
+            candidates,
+            footer: v.slots.footer.as_ref().and_then(resolve_slot),
+        });
+    if slots.is_none() && (v.slots.preedit.is_some() || v.slots.footer.is_some()) {
+        tracing::warn!("skin: 写了 slots 却没写 slots.candidates，按 stack 布局");
+    }
     Some(RvSkinVariant {
         frame,
         content: v.content,
         decor,
         placement,
+        slots,
     })
 }
 
@@ -770,6 +842,31 @@ clamp = "all"
                 after: 40.0
             })
         );
+    }
+
+    #[test]
+    fn slots_need_candidates_and_default_to_content_top_left() {
+        let s = parse(
+            r#"
+[skin.horizontal.frame]
+image = "a"
+[skin.horizontal.slots.candidates]
+offset = [0, 40]
+[skin.horizontal.slots.footer]
+anchor = "frame.bottom_right"
+offset = [-20, -10]
+"#,
+        )
+        .unwrap();
+        let slots = s.horizontal.unwrap().slots.expect("写了 candidates 即启用");
+        assert_eq!(slots.candidates.anchor.on, AnchorBox::Content);
+        assert_eq!(slots.candidates.pivot, Pos9::TOP_LEFT);
+        assert_eq!(slots.candidates.offset, [0.0, 40.0]);
+        assert!(slots.preedit.is_none());
+        assert_eq!(slots.footer.unwrap().pivot, Pos9 { h: 2, v: 2 });
+        let s = parse("[skin.horizontal.frame]\nimage = \"a\"\n[skin.horizontal.slots.preedit]\n")
+            .unwrap();
+        assert!(s.horizontal.unwrap().slots.is_none(), "缺候选槽按 stack");
     }
 
     #[test]

@@ -7,8 +7,74 @@
 use super::CandidateWindow;
 use crate::view::{Edges, Rect, View};
 use wind_theme::skin::{
-    Anchor, AnchorBox, BandFill, Clamp, DecorHit, Pos9, RvSkinVariant, Stretch,
+    Anchor, AnchorBox, BandFill, Clamp, DecorHit, Pos9, RvSkinVariant, RvSlot, RvSlots, Stretch,
 };
+
+/// 分槽位布局里的一块。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SlotKind {
+    Preedit,
+    Candidates,
+    Footer,
+}
+
+/// 已排版的一块：窗体内位置（相对窗体左上，设备像素）与自然尺寸。
+struct Part {
+    kind: SlotKind,
+    view: View,
+    w: f32,
+    h: f32,
+}
+
+/// 槽位某轴的位置 = `k + a·W`（W 为窗体该轴长度）。`lo`/`hi` 为内容框在该轴两端的内缩，
+/// `on_content` 时锚点按内容框算。
+fn slot_axis(
+    a: f32,
+    on_content: bool,
+    lo: f32,
+    hi: f32,
+    off: f32,
+    pivot: f32,
+    size: f32,
+) -> (f32, f32) {
+    let base = if on_content { lo - a * (lo + hi) } else { 0.0 };
+    (base + off - pivot * size, a)
+}
+
+/// 某块在某轴上的约束：位置 = `k + a·W`，自然长度 `size`，须落在 `[lo, W − hi]` 内——锚在内容框
+/// 上的块不出内容框（那是文字的安全区），锚在窗体上的块不出窗体（`lo = hi = 0`）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AxisFit {
+    k: f32,
+    a: f32,
+    size: f32,
+    lo: f32,
+    hi: f32,
+}
+
+/// 让所有块都落在各自的盒内的最小 W（不小于 `min`）。锚在起始边却伸出起始边界（或锚在末端却
+/// 伸出末端边界）时，窗体多大都放不进去：跳过该约束并告警，交给作者改偏移。
+fn solve_axis(min: f32, parts: &[AxisFit]) -> f32 {
+    let mut w = min;
+    for p in parts {
+        // 起始边：k + aW ≥ lo
+        if p.a > 0.0 {
+            w = w.max((p.lo - p.k) / p.a);
+        } else if p.k < p.lo - 0.5 {
+            tracing::warn!("skin: 槽位伸出起始边 {:.0}px，偏移需调整", p.lo - p.k);
+        }
+        // 末端：k + aW + size ≤ W − hi
+        if p.a < 1.0 {
+            w = w.max((p.k + p.size + p.hi) / (1.0 - p.a));
+        } else if p.k + p.size + p.hi > 0.5 {
+            tracing::warn!(
+                "skin: 槽位伸出末端 {:.0}px，偏移需调整",
+                p.k + p.size + p.hi
+            );
+        }
+    }
+    w.ceil()
+}
 
 /// 保护带内逐行是否有不透明像素（窗体 + 全部装饰的合成结果）。
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -94,7 +160,6 @@ pub(super) struct DecorGeom {
 }
 
 /// 皮肤在当前 DPI / 字号下的几何。每帧渲染前由 [`CandidateWindow::refresh_skin_geom`] 重算。
-#[derive(Clone, Debug)]
 pub(super) struct SkinGeom {
     frame_path: String,
     /// 窗体图集倍率：设备像素 / 所选窗体图源像素。
@@ -107,6 +172,10 @@ pub(super) struct SkinGeom {
     /// 内容框内缩（设备像素）。
     pub(super) insets: Edges,
     placement: wind_theme::skin::RvPlacement,
+    /// 分槽位布局；None = stack。
+    slots: Option<RvSlots>,
+    /// 分槽位布局下本帧排好的各块。
+    parts: Vec<Part>,
     decor: Vec<DecorGeom>,
     /// 本帧布局结果：窗体与各装饰在窗口缓冲内的矩形。
     frame: (i32, i32, u32, u32),
@@ -202,6 +271,77 @@ impl SkinGeom {
             })
             .collect()
     }
+    pub(super) fn slots(&self) -> Option<RvSlots> {
+        self.slots
+    }
+
+    fn slot_of(&self, kind: SlotKind) -> Option<RvSlot> {
+        let s = self.slots?;
+        match kind {
+            SlotKind::Preedit => s.preedit,
+            SlotKind::Candidates => Some(s.candidates),
+            SlotKind::Footer => s.footer,
+        }
+    }
+
+    /// 槽位两轴的 `(k, a)`：位置 = k + a·窗体长度。
+    fn slot_axes(&self, slot: RvSlot, w: f32, h: f32) -> ((f32, f32), (f32, f32)) {
+        let on_content = slot.anchor.on == AnchorBox::Content;
+        let i = self.insets;
+        let x = slot_axis(
+            slot.anchor.pos.h as f32 / 2.0,
+            on_content,
+            i.l,
+            i.r,
+            slot.offset[0] * self.k,
+            slot.pivot.h as f32 / 2.0,
+            w,
+        );
+        let y = slot_axis(
+            slot.anchor.pos.v as f32 / 2.0,
+            on_content,
+            i.t,
+            i.b,
+            slot.offset[1] * self.k,
+            slot.pivot.v as f32 / 2.0,
+            h,
+        );
+        (x, y)
+    }
+
+    /// 窗体为 `fw×fh` 时各块的左上（相对窗体左上）。
+    fn part_positions(&self, fw: f32, fh: f32) -> Vec<(f32, f32)> {
+        self.parts
+            .iter()
+            .map(|p| match self.slot_of(p.kind) {
+                Some(slot) => {
+                    let ((kx, ax), (ky, ay)) = self.slot_axes(slot, p.w, p.h);
+                    ((kx + ax * fw).round(), (ky + ay * fh).round())
+                }
+                None => (self.insets.l, self.insets.t),
+            })
+            .collect()
+    }
+
+    /// 分槽位布局：画各块（根容器之后、盖在内容上的装饰之前）。
+    pub(super) fn paint_parts(
+        &self,
+        buf: &mut [u8],
+        bw: u32,
+        bh: u32,
+        tr: &crate::text::dwrite::TextRenderer,
+    ) {
+        for p in &self.parts {
+            p.view.paint(buf, bw, bh, tr);
+        }
+    }
+
+    pub(super) fn collect_part_hits(&self, out: &mut Vec<(i32, Rect)>) {
+        for p in &self.parts {
+            p.view.collect_hits(out);
+        }
+    }
+
     /// 有没有 `hit = "pass"` 的装饰。
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(super) fn has_pass(&self) -> bool {
@@ -339,6 +479,8 @@ impl CandidateWindow {
             min_h: min_h as f32,
             insets,
             placement: v.placement,
+            slots: v.slots,
+            parts: Vec::new(),
             decor,
             frame: (0, 0, 0, 0),
             decor_rects: Vec::new(),
@@ -351,6 +493,10 @@ impl CandidateWindow {
     /// 根容器挪到外扩后的位置。返回外扩 `(左, 上, 右, 下)`；不启用皮肤返回 None（调用方走阴影那条）。
     pub(super) fn skin_layout(&mut self, root: &mut View) -> Option<(u32, u32, u32, u32)> {
         self.skin_geom.as_ref()?;
+        let free = self.skin_is_free();
+        if free {
+            self.skin_measure_parts(root);
+        }
         root.layout(0.0, 0.0, &self.text_renderer);
         let (w, h) = root.measured_size();
         let g = self.skin_geom.as_mut()?;
@@ -380,7 +526,81 @@ impl CandidateWindow {
             .map(|(x, y, dw, dh)| (x + ml, y + mt, dw, dh))
             .collect();
         root.layout(ml as f32, mt as f32, &self.text_renderer);
+        if free {
+            self.skin_place_parts();
+        }
         Some((ml as u32, mt as u32, mr as u32, mb as u32))
+    }
+
+    /// 本帧是否分槽位布局。
+    pub(super) fn skin_is_free(&self) -> bool {
+        self.skin_geom.as_ref().is_some_and(|g| g.slots.is_some())
+    }
+
+    /// 分槽位：取走 `build_tree` 交出的各块，按自然尺寸排一遍，解出能装下所有槽位的最小窗体，
+    /// 写进根容器（空盒）的最小尺寸。
+    fn skin_measure_parts(&mut self, root: &mut View) {
+        let taken = std::mem::take(&mut *self.free_parts.borrow_mut());
+        let mut parts: Vec<Part> = taken
+            .into_iter()
+            .map(|(kind, mut view)| {
+                view.layout(0.0, 0.0, &self.text_renderer);
+                let (w, h) = view.measured_size();
+                Part {
+                    kind,
+                    view,
+                    w: w.ceil(),
+                    h: h.ceil(),
+                }
+            })
+            .collect();
+        let Some(g) = self.skin_geom.as_mut() else {
+            return;
+        };
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for p in &parts {
+            if let Some(slot) = g.slot_of(p.kind) {
+                let ((kx, ax), (ky, ay)) = g.slot_axes(slot, p.w, p.h);
+                let i = g.insets;
+                let (bx, by) = if slot.anchor.on == AnchorBox::Content {
+                    ((i.l, i.r), (i.t, i.b))
+                } else {
+                    ((0.0, 0.0), (0.0, 0.0))
+                };
+                xs.push(AxisFit {
+                    k: kx,
+                    a: ax,
+                    size: p.w,
+                    lo: bx.0,
+                    hi: bx.1,
+                });
+                ys.push(AxisFit {
+                    k: ky,
+                    a: ay,
+                    size: p.h,
+                    lo: by.0,
+                    hi: by.1,
+                });
+            }
+        }
+        let fw = solve_axis(root.min_w.unwrap_or(0.0), &xs);
+        let fh = solve_axis(root.min_h.unwrap_or(0.0), &ys);
+        root.min_w = Some(fw);
+        root.min_h = Some(fh);
+        g.parts = std::mem::take(&mut parts);
+    }
+
+    /// 分槽位：窗体尺寸与外扩已定，把各块排到最终位置（窗口缓冲坐标）。
+    fn skin_place_parts(&mut self) {
+        let Some(g) = self.skin_geom.as_mut() else {
+            return;
+        };
+        let (ml, mt, fw, fh) = g.frame;
+        let pos = g.part_positions(fw as f32, fh as f32);
+        for (p, (x, y)) in g.parts.iter_mut().zip(pos) {
+            p.view
+                .layout(ml as f32 + x, mt as f32 + y, &self.text_renderer);
+        }
     }
 
     /// 渲染入口对内容尺寸做完钳制（竖排宽度上限、屏幕安全上限、最小 40×24）后调用：窗体按
@@ -410,6 +630,9 @@ impl CandidateWindow {
                 (x + ml, y + mt, dw, dh)
             })
             .collect();
+        if self.skin_is_free() {
+            self.skin_place_parts();
+        }
     }
 
     /// 合成窗体 + 全部装饰，取光标保护带（对齐点横坐标 `caret_x` 向左 `before`、向右 `after`，dp）
@@ -822,6 +1045,108 @@ mod tests {
         // 窗体只在主缓冲。
         assert_eq!(at(&main, ml, mt), 255);
         assert_eq!(at(&pass, ml, mt), 0);
+    }
+
+    fn fit(k: f32, a: f32, size: f32) -> AxisFit {
+        AxisFit {
+            k,
+            a,
+            size,
+            lo: 0.0,
+            hi: 0.0,
+        }
+    }
+
+    #[test]
+    fn solve_axis_fits_slots_anchored_on_both_ends() {
+        // 左锚：从 10 起、宽 50 → W ≥ 60。右锚（a=1）：k=-50，宽 20 → W ≥ 50。
+        assert_eq!(
+            solve_axis(0.0, &[fit(10.0, 0.0, 50.0), fit(-50.0, 1.0, 20.0)]),
+            60.0
+        );
+        assert_eq!(
+            solve_axis(80.0, &[fit(10.0, 0.0, 50.0)]),
+            80.0,
+            "不小于最小尺寸"
+        );
+        // 居中（a=0.5，pivot 0.5）：k = -w/2 → W ≥ w。
+        let (k, a) = slot_axis(0.5, false, 0.0, 0.0, 0.0, 0.5, 40.0);
+        assert_eq!(solve_axis(0.0, &[fit(k, a, 40.0)]), 40.0);
+        // 内容框锚点：左内缩 4、右内缩 5，锚在内容框右端 → k = 4 - (4+5) - 10 = -15。
+        assert_eq!(slot_axis(1.0, true, 4.0, 5.0, 0.0, 1.0, 10.0), (-15.0, 1.0));
+        // 锚在内容框左上的块不出内容框：W ≥ 4 + 50 + 5。
+        let (k, a) = slot_axis(0.0, true, 4.0, 5.0, 0.0, 0.0, 50.0);
+        let content = AxisFit {
+            k,
+            a,
+            size: 50.0,
+            lo: 4.0,
+            hi: 5.0,
+        };
+        assert_eq!(solve_axis(0.0, &[content]), 59.0);
+    }
+
+    fn cand(text: &str) -> wind_ui_types::CandidateItem {
+        wind_ui_types::CandidateItem {
+            text: text.to_string(),
+            text_styled: Default::default(),
+            code: String::new(),
+            label: String::new(),
+            tooltip: Default::default(),
+            comment: Default::default(),
+            comment_above: Default::default(),
+            no_index: false,
+        }
+    }
+
+    #[test]
+    fn free_slots_place_candidates_and_footer_independently() {
+        use wind_theme::skin::{RvSlot, RvSlots};
+        let mut w = fixture_window("free");
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            v.slots = Some(RvSlots {
+                preedit: None,
+                candidates: RvSlot {
+                    anchor: Anchor::parse("content.top_left").unwrap(),
+                    pivot: Pos9::TOP_LEFT,
+                    offset: [0.0, 0.0],
+                },
+                footer: Some(RvSlot {
+                    anchor: Anchor::parse("frame.bottom_right").unwrap(),
+                    pivot: Pos9 { h: 2, v: 2 },
+                    offset: [-1.0, -1.0],
+                }),
+            });
+            w.set_theme(theme);
+        }
+        w.update("", 0, "", vec![cand("甲"), cand("乙")], 0, -1, 1, 3);
+        w.refresh_skin_geom();
+        assert!(w.skin_is_free());
+        let mut root = w.build_tree(false);
+        let (ml, mt, _, _) = w.skin_layout(&mut root).unwrap();
+        let g = w.skin_geom.as_ref().unwrap();
+        let kinds: Vec<SlotKind> = g.parts.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, vec![SlotKind::Candidates, SlotKind::Footer]);
+        let (fx, fy, fw, fh) = g.frame;
+        assert_eq!((fx, fy), (ml as i32, mt as i32));
+        let pos = g.part_positions(fw as f32, fh as f32);
+        // 候选槽贴内容框左上（内缩 4, 3）。
+        assert_eq!(pos[0], (4.0, 3.0));
+        // 翻页槽右下角贴窗体右下、内缩 1。
+        let footer = &g.parts[1];
+        assert_eq!(
+            (pos[1].0 + footer.w, pos[1].1 + footer.h),
+            (fw as f32 - 1.0, fh as f32 - 1.0)
+        );
+        // 窗体装得下两块：候选在内容框里，翻页不压出窗体。
+        assert!(fw as f32 >= 4.0 + g.parts[0].w + 5.0);
+        assert!(pos[1].0 >= 0.0 && pos[1].1 >= 0.0);
+        // 命中区来自各块，候选可点。
+        let mut hits = Vec::new();
+        g.collect_part_hits(&mut hits);
+        assert!(hits.iter().any(|(tag, _)| *tag == 0), "候选 0 的命中区");
     }
 
     #[test]

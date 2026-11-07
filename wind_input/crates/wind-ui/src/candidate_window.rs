@@ -452,6 +452,8 @@ pub struct CandidateWindow {
     theme_source: wind_theme::Resolved,
     /// 异形皮肤在当前 DPI / 字号下的几何；None = 本帧不启用皮肤。每帧渲染前重算。
     skin_geom: Option<skin_frame::SkinGeom>,
+    /// 分槽位布局下 `build_tree`（`&self`）交出的各块，由 `skin_layout` 取走排版。
+    free_parts: RefCell<Vec<(skin_frame::SlotKind, View)>>,
     /// 本帧是否把穿透装饰拆到独立窗口：只有本地窗口路径（Windows `show`）置位。
     #[cfg_attr(not(windows), allow(dead_code))]
     split_pass_decor: bool,
@@ -630,6 +632,7 @@ impl CandidateWindow {
             theme: wind_theme::Resolved::default(),
             theme_source: wind_theme::Resolved::default(),
             skin_geom: None,
+            free_parts: RefCell::new(Vec::new()),
             split_pass_decor: false,
             pass_layer: None,
             #[cfg(windows)]
@@ -1772,7 +1775,7 @@ impl CandidateWindow {
         self.last_content_pos = Some((px, py));
         // 上方显示且有开关真正生效 → 按上方布局重建候选树（项数/尺寸/位置不变，仅排列翻转）
         self.report_flip_state();
-        if self.above_layout_active() {
+        if self.above_layout_active() && !self.skin_is_free() {
             root = self.build_tree(true);
             root.layout(ml as f32, mt as f32, &self.text_renderer);
         }
@@ -1780,6 +1783,9 @@ impl CandidateWindow {
         // 收集候选命中矩形并同步给鼠标处理器（须在 flip 重建后）
         self.hit_rects.clear();
         root.collect_hits(&mut self.hit_rects);
+        if let Some(g) = &self.skin_geom {
+            g.collect_part_hits(&mut self.hit_rects);
+        }
         {
             let mut m = self.mouse.borrow_mut();
             m.hit_rects = self.hit_rects.clone();
@@ -1823,6 +1829,9 @@ impl CandidateWindow {
                 g.paint(buf, width, height, false, false);
             }
             root.paint(buf, width, height, &self.text_renderer);
+            if let Some(g) = &self.skin_geom {
+                g.paint_parts(buf, width, height, &self.text_renderer);
+            }
             if let Some(g) = &self.skin_geom {
                 g.paint(buf, width, height, true, false);
             }
@@ -1985,7 +1994,7 @@ impl CandidateWindow {
             }
         };
         self.report_flip_state();
-        if self.above_layout_active() {
+        if self.above_layout_active() && !self.skin_is_free() {
             root = self.build_tree(true);
             root.layout(ml as f32, mt as f32, &self.text_renderer);
         }
@@ -1993,6 +2002,9 @@ impl CandidateWindow {
         // 命中矩形（窗口缓冲坐标，内容起点 (ml,mt)），同步给鼠标处理器。
         self.hit_rects.clear();
         root.collect_hits(&mut self.hit_rects);
+        if let Some(g) = &self.skin_geom {
+            g.collect_part_hits(&mut self.hit_rects);
+        }
         {
             let mut m = self.mouse.borrow_mut();
             m.hit_rects = self.hit_rects.clone();
@@ -2029,6 +2041,9 @@ impl CandidateWindow {
             g.paint(&mut buf, width, height, false, false);
         }
         root.paint(&mut buf, width, height, &self.text_renderer);
+        if let Some(g) = &self.skin_geom {
+            g.paint_parts(&mut buf, width, height, &self.text_renderer);
+        }
         if let Some(g) = &self.skin_geom {
             g.paint(&mut buf, width, height, true, false);
         }
@@ -2212,13 +2227,16 @@ impl CandidateWindow {
             screen_xy = Some((px - ml as i32, py - mt as i32));
         }
         self.report_flip_state();
-        if self.above_layout_active() {
+        if self.above_layout_active() && !self.skin_is_free() {
             root = self.build_tree(true);
             root.layout(ml as f32, mt as f32, &self.text_renderer);
         }
 
         self.hit_rects.clear();
         root.collect_hits(&mut self.hit_rects);
+        if let Some(g) = &self.skin_geom {
+            g.collect_part_hits(&mut self.hit_rects);
+        }
         {
             let mut m = self.mouse.borrow_mut();
             m.hit_rects = self.hit_rects.clone();
@@ -2259,6 +2277,9 @@ impl CandidateWindow {
             g.paint(&mut buf, width, height, false, split);
         }
         root.paint(&mut buf, width, height, &self.text_renderer);
+        if let Some(g) = &self.skin_geom {
+            g.paint_parts(&mut buf, width, height, &self.text_renderer);
+        }
         if let Some(g) = &self.skin_geom {
             g.paint(&mut buf, width, height, true, split);
         }
@@ -4680,6 +4701,12 @@ impl CandidateWindow {
         }
 
         // ── 装配 ──
+        // 皮肤分槽位布局：配了翻页槽就先把翻页栏拿走，不参与下面的三选一。
+        let free_slots = self.skin_geom.as_ref().and_then(|g| g.slots());
+        let footer_part = match free_slots {
+            Some(slots) if slots.footer.is_some() => pager.take(),
+            _ => None,
+        };
         // 翻页栏归属（按优先级三选一）：
         //   1) pager_will_inline → 追加到编码栏 band 右端（随编码区一同装配，swap 时自动沉底贴光标）
         //   2) 横排 → 并入候选行尾（原行为）
@@ -4752,6 +4779,35 @@ impl CandidateWindow {
             list
         };
 
+        // 皮肤分槽位布局：各块交给皮肤层按槽位摆放，根容器只是一个按窗体尺寸撑开的空盒
+        // （见 `skin_frame::CandidateWindow::skin_layout`）。槽位由皮肤决定，不随上翻交换。
+        if let Some(slots) = free_slots {
+            let mut cand = View::container(Layout::Column).child(list);
+            if let Some(p) = vertical_bottom_pager {
+                cand = cand.child(p);
+            }
+            let mut parts = Vec::with_capacity(3);
+            match (slots.preedit.is_some(), preedit_band) {
+                (true, Some(band)) => parts.push((skin_frame::SlotKind::Preedit, band)),
+                (_, band) => {
+                    // 没配编码槽：编码栏照旧叠在候选上方，一起进候选槽。
+                    let mut col = View::container(Layout::Column);
+                    if let Some(band) = band {
+                        col = col.child(band);
+                        if let Some(sep) = preedit_sep {
+                            col = col.child(sep);
+                        }
+                    }
+                    cand = col.child(cand);
+                }
+            }
+            parts.push((skin_frame::SlotKind::Candidates, cand));
+            if let Some(p) = footer_part {
+                parts.push((skin_frame::SlotKind::Footer, p));
+            }
+            *self.free_parts.borrow_mut() = parts;
+            return root;
+        }
         // 编码区（band + 分隔线）与候选区（list + 竖排底部翻页栏）按 swap_bands 决定上下顺序：
         //   false（正常）：编码区在上、候选区在下 → [band][sep][候选区]
         //   true （上翻）：候选区在上、编码区在下 → [候选区][sep][band]（编码沉底贴光标）

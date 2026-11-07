@@ -133,27 +133,27 @@ clamp = "frame"                    # frame（缺省）只保证窗体在屏内 |
 放进内容框。窗体尺寸 = 内容尺寸 + 四边内缩，再取与最小尺寸的较大者。常见格式的两组内边距
 等价于「内容框 + 编码栏 margin」，这一层已能覆盖它。
 
-**P1b：`free` 布局**。各部分各占一个槽位、分别锚定：
+**P1b：`free` 布局**。写了 `slots.candidates` 即启用；各部分各占一个槽位、分别锚定：
 
 ```toml
-[skin.horizontal.slots.preedit]
-anchor = "frame.top_left"
-offset = [180, 260]
-[skin.horizontal.slots.candidates]
-anchor = "frame.top_left"
-offset = [180, 320]
-[skin.horizontal.slots.footer]   # 翻页 / 页码
+[skin.horizontal.slots.preedit]      # 缺省：编码栏照旧叠在候选上方，一起进候选槽
+anchor = "content.top_left"          # 锚点只认 frame.* / content.*，缺省 content.top_left
+[skin.horizontal.slots.candidates]   # 必填；候选列表（竖排时含底部翻页）
+anchor = "content.bottom_left"
+offset = [0, 0]                      # 源像素
+[skin.horizontal.slots.footer]       # 缺省：翻页栏按原有排版留在候选块里
 anchor = "frame.bottom_right"
-pivot = "bottom_right"
+pivot = "bottom_right"               # 缺省同锚点位置
 offset = [-200, -40]
-[skin.horizontal.slots.hint]     # 上方注释、模式提示
-anchor = "slot.candidates.top_left"
-pivot = "bottom_left"
 ```
 
-槽位按内容自然尺寸从锚点向 pivot 的反方向生长；窗体尺寸取「让所有槽位都落在窗体内」的
-最小值（逐轴独立求解，锚在左 / 上边的槽位约束 `w ≥ offset + 槽宽 + 对侧余量`）。
-相互重叠由作者负责，编辑器给出警告。tooltip、状态提示是独立窗口，不在本设计内，沿用现有九宫格。
+槽位按内容自然尺寸从锚点沿 pivot 反方向生长。窗体尺寸逐轴取闭式最小值，需满足三条：
+一是不小于图的最小尺寸，二是每个槽位落在它所锚的框内（锚内容框的槽位不越出内容框，锚窗体的不越出窗体），
+三是满足 stack 时的内容尺寸下限。槽位互相重叠由作者负责，编辑器给出警告。
+
+free 布局下不做上翻交换：槽位由皮肤决定，候选窗翻到光标上方时只换对齐点，不重排内容。
+`hint`（上方注释、模式提示）槽位暂不做，仍随候选块排版。tooltip 和状态提示是独立窗口，不在本设计内，
+沿用现有九宫格。
 
 ### 3.4 装饰（decor）
 
@@ -359,7 +359,7 @@ P1 已知局限（审查后保留）：
   一并改成「按拉伸带分块缓存、绘制时拼」。
 - 源图尺寸缓存（`dims`）只随闲置回收或预算清空失效；同路径换图（主题热改）可能沿用旧尺寸，切主题即恢复。
 
-P1 未做、明确留给后续的：P1b `free` 槽位；P2 `pass` 穿透、`avoid_caret`、`clamp`、平移进 `place_window`、
+P1 未做、明确留给后续的：P2 `pass` 穿透、`avoid_caret`、`clamp`、平移进 `place_window`、
 macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / 编辑器；P4–P5 动画。
 
 ## 13. P2 进度
@@ -374,3 +374,12 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
 
 未做：macOS 第二个 panel / 系统阴影、Wayland 输入区、X11 XShape、mac/Linux 的「装饰不拖动」——都要改前端进程，
 随帧协议下发装饰矩形；穿透窗口与候选窗混合 z 序（同时有窗体上、下两类穿透装饰时统一放上面）。
+
+## 14. P1b 落点
+
+- schema：`wind-theme/src/skin.rs` 的 `SkinSlots` / `RvSlots`。写了 preedit 或 footer 却没写 candidates 时，
+  记一条警告，按 stack 布局处理。
+- 组装：`build_tree` 把编码栏、候选块、翻页栏经 `free_parts` 交出，根容器只是按窗体尺寸撑开的空盒。
+- 求解与摆放：`skin_frame.rs` 的 `solve_axis`（`AxisFit` 带所锚框的上下界）、`skin_place_parts`。
+  绘制和命中由 `paint_parts`、`collect_part_hits` 完成，候选点击沿用原有标签。
+- 三条渲染路径（非 Windows `show`、ext_presenter、Windows 本地窗口）都接入了；free 时跳过上翻重建。
