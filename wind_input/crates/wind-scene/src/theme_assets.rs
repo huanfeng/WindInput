@@ -114,8 +114,8 @@ fn positioned(im: &RvImage) -> bool {
 
 /// 弹窗类（status / tooltip / toast / menu.root）渐变接线测试的共用夹具：蓝底 + 纯红线性渐变。
 /// 渐变叠在底色之上，接上了取样点就是红，没接上就是蓝。
-#[cfg(test)]
-pub(crate) mod gradient_fixture {
+#[cfg(any(test, feature = "test-util"))]
+pub mod gradient_fixture {
     pub const BG: [u8; 4] = [0, 0, 255, 255];
     pub const RED: [u8; 3] = [255, 0, 0];
     pub const BLUE: [u8; 3] = [0, 0, 255];

@@ -437,7 +437,7 @@ impl ImageCache {
     /// 后 30 秒被整个回收一次，紧接着又全部重建——内存刚还回去就要回来，还白白吃一次
     /// 重建风暴。
     fn touch(&mut self) {
-        self.touch_at(Instant::now());
+        self.touch_at(crate::clock::now());
     }
 
     /// 打点到指定时刻（测试用它陈述「最后一次取用是何时」）。
@@ -446,7 +446,7 @@ impl ImageCache {
     }
 
     /// 仅测试可见：把最后取用时刻挪到过去，模拟闲置。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_last_use_for_test(&mut self, now: Instant) {
         self.touch_at(now);
     }
@@ -471,7 +471,7 @@ impl ImageCache {
     }
 
     fn touch_anim(&mut self) {
-        self.anim_last_use = Some(Instant::now());
+        self.anim_last_use = Some(crate::clock::now());
     }
 
     /// 仅测试可见：把动画表的最后取用时刻挪到过去。
@@ -1040,7 +1040,7 @@ fn frames_of(bytes: &[u8]) -> Option<image::Frames<'_>> {
 /// 逐帧解码动画，每帧与静态装饰同一套缩放合成（面积平均缩到倍率 `k`，再整轴映射到 `w×h`）。
 fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usize) -> Option<Anim> {
     use wind_theme::skin::{BandFill, Stretch};
-    let t0 = Instant::now();
+    let t0 = crate::clock::now();
     let bytes = read_source_bytes(path)?;
     let frames = frames_of(&bytes)?;
     let whole = Stretch::Whole(BandFill::Stretch);
@@ -1197,10 +1197,10 @@ fn nine_axis(d: u32, dlen: u32, slen: u32, s0: u32, s1: u32, repeat: bool) -> Op
 }
 
 /// 测试夹具：现生成的多帧动画（纯色帧，`(RGBA, 帧时长毫秒)`）。
-#[cfg(test)]
-pub(crate) mod anim_fixtures {
+#[cfg(any(test, feature = "test-util"))]
+pub mod anim_fixtures {
     /// 多帧 GIF（循环播放）。GIF 帧时长以 10 ms 为单位。
-    pub(crate) fn gif(w: u32, h: u32, frames: &[([u8; 4], u32)]) -> Vec<u8> {
+    pub fn gif(w: u32, h: u32, frames: &[([u8; 4], u32)]) -> Vec<u8> {
         use image::codecs::gif::{GifEncoder, Repeat};
         let mut out = Vec::new();
         {
@@ -1220,7 +1220,7 @@ pub(crate) mod anim_fixtures {
     }
 
     /// 多帧 APNG，每帧给整张像素（RGBA8，行优先）。
-    pub(crate) fn apng(w: u32, h: u32, frames: &[(Vec<u8>, u32)]) -> Vec<u8> {
+    pub fn apng(w: u32, h: u32, frames: &[(Vec<u8>, u32)]) -> Vec<u8> {
         let mut out = Vec::new();
         {
             let mut enc = png::Encoder::new(&mut out, w, h);
@@ -1237,7 +1237,7 @@ pub(crate) mod anim_fixtures {
         out
     }
 
-    pub(crate) fn data_uri(mime: &str, bytes: &[u8]) -> String {
+    pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
         use base64::Engine as _;
         format!(
             "data:{mime};base64,{}",

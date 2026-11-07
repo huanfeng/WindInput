@@ -6,7 +6,7 @@ edition.workspace = true
 [features]
 # 测试专用 API（`set_last_use_for_test`、`View::debug_dump` 之类）对外开放，给 wind-ui 的测试用；
 # 生产构建不开。wind-ui 在 dev-dependencies 里打开它。
-test-util = []
+test-util = ["dep:png"]
 
 [dependencies]
 # ⛔ 不准依赖 wind-config：它带 uuid / dirs，挡 wasm（主题编辑器）。见 docs/design/wind-scene-extraction.md。
@@ -26,6 +26,12 @@ image = { version = "0.25", default-features = false, features = [
     "gif",
     "bmp",
 ] }
+
+# 只给 test-util 的 APNG 夹具（`image_cache::anim_fixtures`）；版本与 image 依赖的那份一致。
+png = { version = "0.18", optional = true }
+
+[dev-dependencies]
+png = "0.18"
 
 [lints]
 workspace = true

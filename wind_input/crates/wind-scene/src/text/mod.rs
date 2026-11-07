@@ -175,6 +175,91 @@ pub trait TextBackend {
     ) -> Result<(), String>;
 }
 
+/// 本 crate 测试用的文字后端：照抄 wind-ui mock 后端的公式（宽 = 字符数 × 字号 × 0.6，
+/// 高 = 字号 × 1.2），不出像素，只记绘制调用（逐字同 wind-ui mock 的 `draw_log`）。
+#[cfg(test)]
+pub(crate) struct MockText {
+    font_size: f32,
+    draw_log: std::cell::RefCell<Vec<String>>,
+}
+
+#[cfg(test)]
+impl MockText {
+    pub(crate) fn new(_font_family: &str, font_size: f32) -> Result<Self, String> {
+        Ok(Self {
+            font_size,
+            draw_log: std::cell::RefCell::new(Vec::new()),
+        })
+    }
+
+    /// 取走至今的绘制调用记录（取后清空）。
+    pub(crate) fn take_draw_log(&self) -> Vec<String> {
+        std::mem::take(&mut *self.draw_log.borrow_mut())
+    }
+}
+
+#[cfg(test)]
+impl TextBackend for MockText {
+    fn base_size(&self) -> f32 {
+        self.font_size
+    }
+
+    fn measure(&self, text: &str, ts: &TextStyle) -> TextMetrics {
+        if text.is_empty() {
+            return TextMetrics {
+                width: 0.0,
+                height: ts.size * 1.2,
+            };
+        }
+        TextMetrics {
+            width: text.chars().count() as f32 * ts.size * 0.6,
+            height: ts.size * 1.2,
+        }
+    }
+
+    fn draw(
+        &self,
+        _buf: &mut [u8],
+        _buf_width: u32,
+        _buf_height: u32,
+        x: f32,
+        y: f32,
+        text: &str,
+        ts: &TextStyle,
+        color: [u8; 4],
+    ) -> Result<(), String> {
+        self.draw_log.borrow_mut().push(format!(
+            "draw text={text:?} at=({x:?},{y:?}) size={:?} weight={} family={:?} \
+             color={color:?}",
+            ts.size, ts.weight, ts.family,
+        ));
+        Ok(())
+    }
+
+    fn draw_runs(
+        &self,
+        buf: &mut [u8],
+        buf_width: u32,
+        buf_height: u32,
+        x: f32,
+        y: f32,
+        text: &str,
+        ts: &TextStyle,
+        color: [u8; 4],
+        runs: &[ColorRun],
+    ) -> Result<(), String> {
+        if utf16_runs(text, runs).is_empty() {
+            return self.draw(buf, buf_width, buf_height, x, y, text, ts, color);
+        }
+        self.draw_log.borrow_mut().push(format!(
+            "draw_runs text={text:?} at=({x:?},{y:?}) size={:?} weight={} family={:?} \
+             color={color:?} runs={runs:?}",
+            ts.size, ts.weight, ts.family,
+        ));
+        Ok(())
+    }
+}
+
 // 测量缓存键的跨平台测试（`measure_key` 不依赖 DirectWrite，不限平台）。
 //
 // 这里测的是**键的区分度**而非缓存命中：键漏掉任何一项影响测量的输入，后果都是某段文本
