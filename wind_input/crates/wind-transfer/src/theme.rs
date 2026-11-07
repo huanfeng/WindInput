@@ -7,6 +7,13 @@
 //! assets/bg.png     主题引用的图片等资源
 //! ```
 //!
+//! ## 皮肤图片
+//!
+//! `[skin]` 里的图片引用（`frame.image`、`frame.srcset`、`decor.image`、`states` / `on`
+//! 片段里的 `image`，或指向 `[resources]` 的键）一律写成 `assets/…`：包里只有 `assets/**`
+//! 能装资源。导出时引用越界或文件不存在就报错（不自动搬运改写），导入时包里缺引用的
+//! 资源同样报错——缺图的皮肤装上去只会画出一个残缺的窗体。
+//!
 //! ## 为什么不与方案包（`.wpkg`）共用一个后缀
 //!
 //! 扩展名是**路由判据**：设置端靠它分派意图、靠它给 ProgId 挂图标与「打开方式」名称，
@@ -50,9 +57,12 @@ pub const MAX_THEME_ENTRIES: usize = 200;
 
 /// 包内解压后**总**字节上限。
 ///
-/// 主题图片是候选窗尺寸的位图，单张几百 KB 顶天；32 MiB 对任何真实主题都绰绰有余，
-/// 同时把 zip 炸弹挡在把服务进程撑爆之前。
-pub const MAX_THEME_UNCOMPRESSED_BYTES: u64 = 32 * 1024 * 1024;
+/// 皮肤主题带高倍率窗体图与动画装饰，几张 APNG / 动画 WebP 就是十几 MiB；64 MiB 给它们
+/// 留够余量，同时把 zip 炸弹挡在把服务进程撑爆之前。
+pub const MAX_THEME_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 单个图片条目（`assets/**`、`preview.png`）解压后的上限。
+pub const MAX_THEME_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// `theme.toml` / `package.toml` 这类**文本**条目的单条上限。
 ///
@@ -177,7 +187,16 @@ fn scan(package: &Path) -> anyhow::Result<Scanned> {
     }
     let mut declared: u64 = 0;
     for i in 0..archive.len() {
-        declared = declared.saturating_add(archive.by_index_raw(i)?.size());
+        let entry = archive.by_index_raw(i)?;
+        let limit = entry_limit(entry.name());
+        if entry.size() > limit {
+            anyhow::bail!(
+                "主题包条目「{}」解压后过大（声明 {} 字节，上限 {limit}）",
+                entry.name(),
+                entry.size()
+            );
+        }
+        declared = declared.saturating_add(entry.size());
     }
     if declared > MAX_THEME_UNCOMPRESSED_BYTES {
         anyhow::bail!(
@@ -230,6 +249,99 @@ fn scan(package: &Path) -> anyhow::Result<Scanned> {
     })
 }
 
+/// 单条目解压上限：文本条目 4 MiB，其余（图片）16 MiB。
+fn entry_limit(name: &str) -> u64 {
+    if name == THEME_ENTRY_NAME || name == THEME_META_NAME {
+        MAX_THEME_TEXT_BYTES
+    } else {
+        MAX_THEME_IMAGE_BYTES
+    }
+}
+
+/// 已压缩的图片格式用存储模式：再走一遍 deflate 几乎不省字节，只白费解压时间。
+fn entry_options(name: &str) -> zip::write::SimpleFileOptions {
+    let opts = zip::write::SimpleFileOptions::default();
+    let ext = Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png" | "webp" | "gif") => opts.compression_method(zip::CompressionMethod::Stored),
+        _ => opts,
+    }
+}
+
+/// `[skin]` 引用的包内文件：`(原引用, 归一化相对路径)`。
+///
+/// 递归收集 `skin` 表下所有 `image` 字符串（frame / srcset / decor / states / on 一网打尽），
+/// 指向 `[resources]` 键的展开成该资源的路径（含 light / dark 两个变体）。`data:` 内联
+/// 不占包内文件，跳过；其余必须落在 `assets/` 下，否则报错并指出是哪个引用。
+fn skin_asset_refs(text: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let doc: toml::Table = toml::from_str(text)?;
+    let Some(skin) = doc.get("skin") else {
+        return Ok(Vec::new());
+    };
+    fn collect(v: &toml::Value, out: &mut Vec<String>) {
+        match v {
+            toml::Value::Table(t) => {
+                for (k, v) in t {
+                    match v {
+                        toml::Value::String(s) if k == "image" => out.push(s.clone()),
+                        _ => collect(v, out),
+                    }
+                }
+            }
+            toml::Value::Array(a) => a.iter().for_each(|v| collect(v, out)),
+            _ => {}
+        }
+    }
+    let mut images = Vec::new();
+    collect(skin, &mut images);
+
+    let resources = doc.get("resources").and_then(toml::Value::as_table);
+    let mut paths: Vec<String> = Vec::new();
+    for image in images {
+        match resources.and_then(|r| r.get(&image)) {
+            Some(toml::Value::String(p)) => paths.push(p.clone()),
+            Some(toml::Value::Table(t)) => paths.extend(
+                ["light", "dark"]
+                    .iter()
+                    .filter_map(|k| t.get(*k).and_then(toml::Value::as_str))
+                    .map(String::from),
+            ),
+            _ => paths.push(image),
+        }
+    }
+    paths.sort();
+    paths.dedup();
+
+    let mut out = Vec::new();
+    for p in paths {
+        if p.is_empty() || p.starts_with("data:") {
+            continue;
+        }
+        let rel = crate::bundle::validate_entry_rel(&p, "")
+            .ok()
+            .filter(|r| r.len() > THEME_ASSETS_PREFIX.len() && r.starts_with(THEME_ASSETS_PREFIX))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "皮肤引用「{p}」不在 {THEME_ASSETS_PREFIX} 下（皮肤图片要放进主题的 {THEME_ASSETS_PREFIX} 目录，引用写成 {THEME_ASSETS_PREFIX}文件名）"
+                )
+            })?;
+        out.push((p, rel));
+    }
+    Ok(out)
+}
+
+/// 包里要有 `[skin]` 引用的全部资源。
+fn check_skin_refs_in_package(text: &str, s: &Scanned) -> anyhow::Result<()> {
+    for (orig, rel) in skin_asset_refs(text)? {
+        if !s.payload.iter().any(|(_, r)| *r == rel) {
+            anyhow::bail!("主题包缺少皮肤引用的资源「{orig}」");
+        }
+    }
+    Ok(())
+}
+
 /// 从 theme.toml 文本里取展示名/作者/版本，作为 package.toml 缺省时的回退。
 fn meta_from_theme_text(text: &str) -> (String, String, String) {
     wind_theme::meta_from_text(text)
@@ -249,6 +361,7 @@ pub fn preview_package(package: &Path) -> anyhow::Result<ThemePreview> {
     let text = read_theme_text(package, &s.theme_entry)?;
     // 本体先过一遍合法性：预览阶段就说「这主题有问题」，比落盘后再回滚便宜。
     wind_theme::validate_text(&text)?;
+    check_skin_refs_in_package(&text, &s)?;
     let (tname, tauthor, tversion) = meta_from_theme_text(&text);
     let p = &s.meta.package;
     let pick = |a: &str, b: String| {
@@ -288,6 +401,7 @@ where
     let s = scan(package)?;
     let text = read_theme_text(package, &s.theme_entry)?;
     wind_theme::validate_text(&text)?;
+    check_skin_refs_in_package(&text, &s)?;
     let (tname, _, _) = meta_from_theme_text(&text);
     let display_name = if s.meta.package.name.is_empty() {
         tname
@@ -302,7 +416,8 @@ where
     let mut remaining = MAX_THEME_UNCOMPRESSED_BYTES;
     let mut staged: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, rel) in &s.payload {
-        let bytes = crate::bundle::extract_entry_limited(package, name, remaining)?;
+        let limit = remaining.min(entry_limit(rel));
+        let bytes = crate::bundle::extract_entry_limited(package, name, limit)?;
         remaining = remaining.saturating_sub(bytes.len() as u64);
         staged.push((rel.clone(), bytes));
     }
@@ -388,6 +503,14 @@ pub fn export_package(
     let text = std::fs::read_to_string(&theme_path)
         .map_err(|e| anyhow::anyhow!("读不到 {}：{e}", theme_path.display()))?;
     wind_theme::validate_text(&text)?;
+    for (orig, rel) in skin_asset_refs(&text)? {
+        if !theme_dir.join(&rel).is_file() {
+            anyhow::bail!(
+                "皮肤引用「{orig}」指向的文件不存在：{}",
+                theme_dir.join(&rel).display()
+            );
+        }
+    }
     let (name, author, version) = meta_from_theme_text(&text);
 
     let meta = ThemeMeta {
@@ -412,7 +535,7 @@ pub fn export_package(
     w.start_file(THEME_ENTRY_NAME, opts)?;
     w.write_all(text.as_bytes())?;
     if let Some(png) = preview_png {
-        w.start_file(THEME_PREVIEW_NAME, opts)?;
+        w.start_file(THEME_PREVIEW_NAME, entry_options(THEME_PREVIEW_NAME))?;
         w.write_all(png)?;
     }
 
@@ -430,6 +553,7 @@ pub fn export_package(
                 "{THEME_ASSETS_PREFIX}{}",
                 rel.to_string_lossy().replace('\\', "/")
             );
+            let opts = entry_options(&entry);
             w.start_file(entry, opts)?;
             w.write_all(&std::fs::read(&path)?)?;
         }
@@ -462,8 +586,8 @@ mod tests {
     fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
         let mut w = zip::ZipWriter::new(fs::File::create(path).unwrap());
         for (name, data) in entries {
-            w.start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
+            // 图片条目走存储模式，大体积用例不必在 debug 下跑 deflate。
+            w.start_file(*name, entry_options(name)).unwrap();
             w.write_all(data).unwrap();
         }
         w.finish().unwrap();
@@ -767,5 +891,306 @@ mod tests {
         export_package(&src, &p1, None).unwrap();
         export_package(&src, &p2, None).unwrap();
         assert_eq!(names(&p1), names(&p2));
+    }
+
+    // ── 皮肤 ──
+
+    /// 程序生成的单帧 PNG（纯色 RGBA）。
+    fn png_bytes(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+        apng_bytes(w, h, &[rgba])
+    }
+
+    /// 程序生成的 APNG：每帧一种纯色；只有一帧时就是普通 PNG。
+    fn apng_bytes(w: u32, h: u32, frames: &[[u8; 4]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            if frames.len() > 1 {
+                enc.set_animated(frames.len() as u32, 0).unwrap();
+            }
+            let mut wr = enc.write_header().unwrap();
+            for c in frames {
+                let px: Vec<u8> = c.repeat((w * h) as usize);
+                wr.write_image_data(&px).unwrap();
+            }
+            wr.finish().unwrap();
+        }
+        out
+    }
+
+    /// 帧数（APNG 的 acTL；普通 PNG 为 1）。
+    fn png_frame_count(bytes: &[u8]) -> u32 {
+        let r = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        r.info().animation_control.map_or(1, |a| a.num_frames)
+    }
+
+    const SKIN_THEME: &str = r#"[meta]
+name = "皮肤"
+
+[resources]
+frame_main = { light = "assets/frame.png", dark = "assets/frame_dark.png" }
+
+[skin.horizontal.frame]
+image = "frame_main"
+srcset = [{ image = "assets/frame@2x.png", density = 2 }]
+
+[[skin.horizontal.decor]]
+image = "assets/pet.png"
+anchor = "frame.top_right"
+
+[skin.horizontal.decor.states]
+idle = { frames = "0-1", loop = true }
+alt = { image = "assets/alt.png" }
+
+[skin.horizontal.decor.on]
+commit = { play = { image = "assets/jump.png" }, then = "idle" }
+"#;
+
+    /// 皮肤主题目录：窗体走 resources（含暗色变体）+ srcset，装饰是 APNG，
+    /// states / on 各引用另一张图。
+    fn write_skin_theme(dir: &Path) {
+        fs::create_dir_all(dir.join("assets")).unwrap();
+        fs::write(dir.join(THEME_ENTRY_NAME), SKIN_THEME).unwrap();
+        for (n, c) in [
+            ("frame.png", [255, 0, 0, 255]),
+            ("frame_dark.png", [0, 0, 0, 255]),
+            ("frame@2x.png", [255, 0, 0, 255]),
+            ("alt.png", [0, 255, 0, 255]),
+            ("jump.png", [0, 0, 255, 255]),
+        ] {
+            fs::write(dir.join("assets").join(n), png_bytes(4, 4, c)).unwrap();
+        }
+        let pet = apng_bytes(4, 4, &[[255, 255, 0, 255], [0, 255, 255, 255]]);
+        fs::write(dir.join("assets/pet.png"), pet).unwrap();
+    }
+
+    /// 导出 → 导入 → 按实机的解析规则（resources 键优先，否则主题目录 join 引用）
+    /// 找到每一张皮肤图，且 APNG 帧数原样保留。
+    #[test]
+    fn skin_theme_round_trips_and_resolves() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        write_skin_theme(&src);
+        let pkg = t.path().join("skin.wtheme");
+        export_package(&src, &pkg, None).unwrap();
+        assert_eq!(preview_package(&pkg).unwrap().asset_count, 6);
+
+        let themes = t.path().join("themes");
+        import_package(&pkg, &themes.join("skin"), |_| Ok(())).unwrap();
+
+        for dark in [false, true] {
+            let r = wind_theme::resolve::load_resolved_dirs(
+                std::slice::from_ref(&themes),
+                "skin",
+                dark,
+            )
+            .unwrap();
+            // 同 wind-scene `theme_assets::asset_path` 的查找顺序。
+            let locate = |reference: &str| -> PathBuf {
+                r.resources
+                    .get(reference)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| r.asset_dirs[0].join(reference))
+            };
+            let h = r.skin.as_ref().unwrap().horizontal.as_ref().unwrap();
+            let frame = locate(&h.frame.image);
+            assert!(frame.ends_with(if dark { "frame_dark.png" } else { "frame.png" }));
+            assert!(frame.is_file());
+            assert!(locate(&h.frame.srcset[0].0).is_file());
+
+            let decor = &h.decor[0];
+            let pet = fs::read(locate(&decor.image)).unwrap();
+            assert_eq!(png_frame_count(&pet), 2, "动画装饰要原样带过去");
+            let alt = decor.anim.states.iter().find(|(n, _)| n == "alt").unwrap();
+            let wind_theme::skin::DecorClip::Image(alt) = &alt.1 else {
+                panic!("alt 应是另一张图");
+            };
+            assert!(locate(alt).is_file());
+            let Some((_, wind_theme::skin::DecorAction::Play { clip, .. })) = decor.anim.on.first()
+            else {
+                panic!("commit 应是一次性片段");
+            };
+            let wind_theme::skin::DecorClip::Image(jump) = clip else {
+                panic!("commit 片段应是另一张图");
+            };
+            assert!(locate(jump).is_file());
+        }
+    }
+
+    /// 引用越出 assets/：导出报错并指出是哪个引用，不自动搬运。
+    #[test]
+    fn export_rejects_skin_ref_outside_assets() {
+        let t = tempfile::tempdir().unwrap();
+        for bad in ["frame.png", "../frame.png", "/abs/frame.png"] {
+            let src = t.path().join("src");
+            write_skin_theme(&src);
+            fs::write(src.join("frame.png"), png_bytes(2, 2, [1, 2, 3, 255])).unwrap();
+            let text = SKIN_THEME.replace("assets/frame@2x.png", bad);
+            fs::write(src.join(THEME_ENTRY_NAME), text).unwrap();
+            let err = export_package(&src, &t.path().join("o.wtheme"), None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(bad), "要指出是哪个引用：{err}");
+            assert!(err.contains(THEME_ASSETS_PREFIX), "要说清该放哪儿：{err}");
+        }
+    }
+
+    /// resources 键指向的路径同样要在 assets/ 下。
+    #[test]
+    fn export_rejects_resource_path_outside_assets() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        write_skin_theme(&src);
+        let text = SKIN_THEME.replace("\"assets/frame_dark.png\"", "\"frame_dark.png\"");
+        fs::write(src.join(THEME_ENTRY_NAME), text).unwrap();
+        let err = export_package(&src, &t.path().join("o.wtheme"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("frame_dark.png"), "{err}");
+    }
+
+    #[test]
+    fn export_rejects_missing_skin_asset() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        write_skin_theme(&src);
+        fs::remove_file(src.join("assets/jump.png")).unwrap();
+        let err = export_package(&src, &t.path().join("o.wtheme"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("assets/jump.png"), "{err}");
+    }
+
+    /// 包里缺皮肤引用的资源：预览就拦下，导入也不动已装的主题。
+    #[test]
+    fn import_rejects_package_missing_skin_asset() {
+        let t = tempfile::tempdir().unwrap();
+        let pkg = t.path().join("m.wtheme");
+        let text = "[meta]\nname = \"缺图\"\n[skin.horizontal.frame]\nimage = \"assets/frame.png\"\n[[skin.horizontal.decor]]\nimage = \"assets/pet.png\"\n";
+        let frame = png_bytes(2, 2, [1, 2, 3, 255]);
+        write_zip(
+            &pkg,
+            &[
+                (THEME_ENTRY_NAME, text.as_bytes()),
+                ("assets/frame.png", &frame),
+            ],
+        );
+        let err = preview_package(&pkg).unwrap_err().to_string();
+        assert!(err.contains("assets/pet.png"), "{err}");
+
+        let dst = t.path().join("themes").join("x");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join(THEME_ENTRY_NAME), "[meta]\nname = \"原装\"\n").unwrap();
+        let mut verified = false;
+        let err = import_package(&pkg, &dst, |_| {
+            verified = true;
+            Ok(())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("assets/pet.png"), "{err}");
+        assert!(!verified, "缺图在落盘前就该拦下");
+        assert_eq!(
+            fs::read_to_string(dst.join(THEME_ENTRY_NAME)).unwrap(),
+            "[meta]\nname = \"原装\"\n"
+        );
+    }
+
+    /// data: 内联图不占包内文件，不算缺失。
+    #[test]
+    fn skin_data_uri_needs_no_asset() {
+        let t = tempfile::tempdir().unwrap();
+        let pkg = t.path().join("d.wtheme");
+        let text = "[meta]\nname = \"内联\"\n[skin.horizontal.frame]\nimage = \"data:image/svg+xml;base64,PHN2Zy8+\"\n";
+        write_zip(&pkg, &[(THEME_ENTRY_NAME, text.as_bytes())]);
+        preview_package(&pkg).unwrap();
+    }
+
+    const MIB: usize = 1024 * 1024;
+
+    #[test]
+    fn rejects_image_over_single_entry_limit() {
+        let t = tempfile::tempdir().unwrap();
+        let pkg = t.path().join("big.wtheme");
+        let big = vec![0u8; MAX_THEME_IMAGE_BYTES as usize + 1];
+        write_zip(
+            &pkg,
+            &[
+                (THEME_ENTRY_NAME, THEME_TEXT.as_bytes()),
+                ("assets/big.png", &big),
+            ],
+        );
+        let err = preview_package(&pkg).unwrap_err().to_string();
+        assert!(err.contains("assets/big.png"), "要指出是哪张图：{err}");
+    }
+
+    /// 旧上限 32 MiB 装不下、新上限 64 MiB 内的皮肤包能导入。
+    #[test]
+    fn accepts_total_between_old_and_new_limit() {
+        let t = tempfile::tempdir().unwrap();
+        let pkg = t.path().join("ok.wtheme");
+        let img = vec![0u8; 14 * MIB];
+        write_zip(
+            &pkg,
+            &[
+                (THEME_ENTRY_NAME, THEME_TEXT.as_bytes()),
+                ("assets/bg.png", &img),
+                ("assets/b.png", &img),
+                ("assets/c.png", &img),
+            ],
+        );
+        let dst = t.path().join("themes").join("x");
+        import_package(&pkg, &dst, |_| Ok(())).unwrap();
+        assert_eq!(
+            fs::metadata(dst.join("assets/c.png")).unwrap().len(),
+            img.len() as u64
+        );
+    }
+
+    #[test]
+    fn rejects_total_over_limit() {
+        let t = tempfile::tempdir().unwrap();
+        let pkg = t.path().join("huge.wtheme");
+        let img = vec![0u8; 14 * MIB];
+        let names: Vec<String> = (0..5).map(|i| format!("assets/{i}.png")).collect();
+        let mut entries: Vec<(&str, &[u8])> = vec![(THEME_ENTRY_NAME, THEME_TEXT.as_bytes())];
+        entries.extend(names.iter().map(|n| (n.as_str(), img.as_slice())));
+        write_zip(&pkg, &entries);
+        let err = preview_package(&pkg).unwrap_err().to_string();
+        assert!(err.contains("过大"), "{err}");
+    }
+
+    /// PNG / WebP / GIF 用存储模式；文本与其它资源照旧 deflate。
+    #[test]
+    fn export_stores_compressed_images() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("s");
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join(THEME_ENTRY_NAME), THEME_TEXT).unwrap();
+        for n in ["bg.png", "a.WEBP", "b.gif", "c.svg"] {
+            fs::write(src.join("assets").join(n), vec![b'x'; 4096]).unwrap();
+        }
+        let pkg = t.path().join("o.wtheme");
+        export_package(&src, &pkg, Some(&png_bytes(2, 2, [0, 0, 0, 255]))).unwrap();
+
+        let mut a = zip::ZipArchive::new(fs::File::open(&pkg).unwrap()).unwrap();
+        let method =
+            |a: &mut zip::ZipArchive<fs::File>, n: &str| a.by_name(n).unwrap().compression();
+        use zip::CompressionMethod::{Deflated, Stored};
+        for n in [
+            "assets/bg.png",
+            "assets/a.WEBP",
+            "assets/b.gif",
+            THEME_PREVIEW_NAME,
+        ] {
+            assert_eq!(method(&mut a, n), Stored, "{n}");
+        }
+        for n in [THEME_ENTRY_NAME, THEME_META_NAME, "assets/c.svg"] {
+            assert_eq!(method(&mut a, n), Deflated, "{n}");
+        }
     }
 }
