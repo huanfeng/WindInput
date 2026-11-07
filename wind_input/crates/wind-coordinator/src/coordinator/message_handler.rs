@@ -1978,10 +1978,13 @@ impl MessageHandler for Coordinator {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 self.accumulate_code_char(&mut state, digit, digit)
             }
-            // 汉字后打数字、开了中数间空格：DLL 把这个本该透传的数字吃下交过来（判据同 C++
-            // `NumberKeyPolicy.h` 的 `spaceBeforeDigit`），这里必须出字——前缀空格由统一出口补。
-            // 判据只看客户端报的「上一笔是汉字」，**不看**开关与应用规则：DLL 手上的开关可能慢一拍，
-            // 吃了键这边却不出字就是丢键（「C++ 吃键集 ⊆ Rust 出字集」）。
+            // 汉字后打数字、开了中数间空格：出字，前缀空格由统一出口补。
+            //
+            // Windows：DLL 只在它判定要补空格时才把空闲数字吃下交过来（`NumberKeyPolicy.h` 的
+            // `SpaceBeforeDigit`），这里**不看**开关恒出字——DLL 手上的开关可能慢一拍，吃了键这边
+            // 却不出字就是丢键（「C++ 吃键集 ⊆ Rust 出字集」）。
+            // macOS / Linux：客户端每个键都发过来、按回复决定透传，必须看开关——否则开关关着时
+            // 汉字后的数字也被输入法接管，不再交给宿主（数字当快捷键的场景）。
             keymap::VK_0..=keymap::VK_9
                 if data.modifiers == 0
                     && state.chinese_mode
@@ -1989,7 +1992,10 @@ impl MessageHandler for Coordinator {
                     && !state.caps_lock
                     && !Self::has_input_session(&state)
                     && wind_punct::spacing::classify_unit(data.seq_char)
-                        == wind_punct::spacing::CharClass::Cjk =>
+                        == wind_punct::spacing::CharClass::Cjk
+                    && (cfg!(windows)
+                        || (self.rt().config.input.spacing.cjk_digit
+                            && self.auto_spacing_allowed_here())) =>
             {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 let text = digit.to_string();
@@ -2658,8 +2664,8 @@ impl MessageHandler for Coordinator {
                     // 智能符号 press1 在上面（顶屏之前）就按当时能看到的上下文武装了；英文后智能
                     // 标点看的是被顶出的那段，可能让实际上屏的是另一形态（`_` 而非 `——`）。武装串与
                     // 光标前的实际内容对不上时 press2 会按武装串的长度删字——删到用户打的字母，
-                    // 故不一致即解除。
-                    {
+                    // 故不一致即解除。只在英文后智能标点开着时检查：关着时两者同源，旧行为一分不动。
+                    if self.rt().config.input.punct.smart_after_latin {
                         let mut arm = self.smart_symbol.lock().unwrap_or_else(|e| e.into_inner());
                         if arm.armed && arm.key == ch && arm.str != piece {
                             arm.armed = false;

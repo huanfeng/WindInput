@@ -245,12 +245,22 @@ fn digit_after_cjk_is_output_and_spaced() {
         KeyAction::InsertText { text, .. } => assert_eq!(text, " 3"),
         other => panic!("汉字后的数字应由服务端出字，实际 {other:?}"),
     }
-    // 开关关着（DLL 手上的开关慢了一拍还是吃了）：照样出字，只是不补——不能丢键。
+    // 开关关着：
+    // - Windows：到得了这里说明 DLL 已经吃下（开关慢了一拍），照样出字、只是不补——不能丢键；
+    // - macOS / Linux：客户端每个键都发过来，必须照旧透传，交给宿主（数字当快捷键）。
     let h = Host::new(config(false, false));
     h.wubi("aaaa");
-    match h.key(0x33, 0) {
-        KeyAction::InsertText { text, .. } => assert_eq!(text, "3"),
-        other => panic!("吃下来的数字必须出字，实际 {other:?}"),
+    let act = h.key(0x33, 0);
+    if cfg!(windows) {
+        assert!(
+            matches!(&act, KeyAction::InsertText { text, .. } if text == "3"),
+            "吃下来的数字必须出字，实际 {act:?}"
+        );
+    } else {
+        assert!(
+            matches!(act, KeyAction::PassThrough),
+            "开关关着，汉字后的数字应透传，实际 {act:?}"
+        );
     }
 }
 

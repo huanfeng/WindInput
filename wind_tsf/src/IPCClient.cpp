@@ -881,7 +881,7 @@ BOOL CIPCClient::SendKeyEvent(uint32_t keyCode, uint32_t scanCode, uint32_t modi
 
     // seqChar 只记类别不记内容（字母一律报 'a'），但上屏文本的末字仍是用户输入，日志只标有无。
     _LogDebug(L"Sending key event: keyCode=0x%X, mods=0x%X, type=%d, toggles=0x%X, seq=%d, prevChar=0x%X, seqKnown=%d",
-              keyCode, modifiers, eventType, toggles, eventSeq, prevChar, seqChar != 0 ? 1 : 0);
+              keyCode, modifiers, eventType, toggles, eventSeq, prevChar, (seqChar != 0 && seqChar != 0xFFFF) ? 1 : 0);
 
     if (!_SendBinaryMessage(CMD_KEY_EVENT, &payload, sizeof(payload)))
         return FALSE;
