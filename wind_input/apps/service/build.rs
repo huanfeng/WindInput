@@ -29,6 +29,12 @@ fn main() {
         return;
     }
 
+    // 主线程栈 8 MiB（只是保留地址，按需提交）。默认 1 MiB 在 dev 档（工作区 opt-level=1）下
+    // 不够：主题加载链上 serde 访问器每层都是数百 KiB 的帧，曾因此栈溢出、服务循环崩溃。
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+    }
+
     // 图标资源（仅 Windows）。
     let icon = product_root.join("wind_tsf/res/wind_input.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
