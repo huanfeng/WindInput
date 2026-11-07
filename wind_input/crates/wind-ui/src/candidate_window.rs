@@ -4241,7 +4241,7 @@ impl CandidateWindow {
                 .pad(text_pad)
                 .margin(text_margin);
             // 文字叶子的背景（底色/图/渐变）：此前只画边框，配了背景一律不生效，
-            // 「文字药丸」这类样式做不出来。圆角由下面的 eff_border 一并给。
+            // 「文字药丸」这类样式做不出来。
             if let Some(c) = eff_bg(&v.text, is_sel, is_hover) {
                 tleaf = tleaf.bg(c);
             }
@@ -4251,8 +4251,22 @@ impl CandidateWindow {
             if let Some(g) = self.rv_gradient(v.text.bg_gradient.as_ref()) {
                 tleaf = tleaf.bg_gradient(g);
             }
-            if let Some((bc, bw, br)) = eff_border(&v.text, is_sel, is_hover) {
-                tleaf = tleaf.border(bc, bw).radius(br);
+            // 圆角独立于边框：只配底色不配边框时也要生效。
+            let text_st = if is_sel {
+                v.text.selected.as_deref()
+            } else if is_hover {
+                v.text.hover.as_deref()
+            } else {
+                None
+            };
+            if let Some(r) = text_st
+                .and_then(|n| n.border_radius)
+                .or(v.text.border_radius)
+            {
+                tleaf = tleaf.radius(r.resolve(s, 0.0));
+            }
+            if let Some((bc, bw, _)) = eff_border(&v.text, is_sel, is_hover) {
+                tleaf = tleaf.border(bc, bw);
             }
             item = item.child(tleaf);
             // 注释（编码后缀/短语提示）：非空时在候选词右侧以注释样式内联显示。
@@ -5937,6 +5951,32 @@ mod min_size_tests {
             assert_eq!(p.font_weight, r.font_weight, "第 {i} 个子节点字重不一致");
             assert_eq!(p.fixed_h, r.fixed_h, "第 {i} 个子节点固定高不一致");
         }
+    }
+
+    /// 候选文字只配底色与圆角、不配边框时，非选中行也要带圆角。
+    #[test]
+    fn text_bg_radius_applies_without_border() {
+        let mut w = win(true, 0, THREE);
+        let bg = [1, 2, 3, 255];
+        w.theme.views.text.bg_color = Some(bg);
+        w.theme.views.text.border_radius = Some(wind_theme::schema::Dim::Dp(6.0));
+        let root = w.build_tree(false);
+
+        fn find_bg(v: &View, bg: [u8; 4]) -> Option<&View> {
+            if v.bg == Some(bg) {
+                return Some(v);
+            }
+            v.children.iter().find_map(|c| find_bg(c, bg))
+        }
+        fn find_row(v: &View, tag: i32) -> Option<&View> {
+            if v.tag == tag {
+                return Some(v);
+            }
+            v.children.iter().find_map(|c| find_row(c, tag))
+        }
+        let row = find_row(&root, 1).expect("未找到非选中候选行");
+        let leaf = find_bg(row, bg).expect("非选中行的文字叶子应带底色");
+        assert_eq!(leaf.corner_radius, 6.0, "无边框时圆角也须生效");
     }
 
     /// 占位行不得参与命中收集：鼠标划过或点击空行都不该有任何反应。
