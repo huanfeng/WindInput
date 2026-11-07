@@ -96,6 +96,7 @@ public:
     // 也不消除那个右符号，前提仍成立，清掉只会让 Tab/Enter 跳不出去（切走再切回、或
     // 配对里打完字再跳出）。真正让前提失效的是焦点/文档切换与组合被清，那些路径按默认值全清。
     void ResetComposingState(BOOL keepPairState = FALSE) {
+        _EndAssocBareSession();
         _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _resyncDeadline = 0; _resyncFailStreak = 0; _skipKeys.Clear(); _pendingPairAction = {};
         _passthrough.Reset();  // 与 skip 表同处清：跨文档带一个陈旧的透传事实过去没有意义
         // seqChar 同配对状态：中英切换不清（用户定：切换后紧接着打的仍算「英文后」），
@@ -189,7 +190,19 @@ public:
     ///
     /// 根因是拿边沿去表达一个**持续状态**：漏一个事件就永久错。改成服务端权威 +
     /// level-triggered 之后，DLL 侧再加任何本地清位都是第二个真相源，会把这个毛病请回来。
-    void SetCandidateSessionActive(BOOL active) { _hotkeyModeSession = active; }
+    ///
+    /// 服务端说「没有会话了」时，若那个会话是「无占位的联想会话」（`_assocBareSession`），
+    /// 还要在 TSF 线程上补一次候选收起（`_assocBareEndPending`）：本函数会在 AsyncReader
+    /// 线程被调，UIElement / 热键注销不能在这里做。
+    void SetCandidateSessionActive(BOOL active)
+    {
+        _hotkeyModeSession = active;
+        if (!active && _assocBareSession)
+        {
+            _assocBareSession = FALSE;
+            _assocBareEndPending = TRUE;
+        }
+    }
 
     /// 宿主报了选区变化（`OnEndEdit`）：若此刻有 Shift/Ctrl 正等着 keyup 触发切换，
     /// 且鼠标键此刻按着或按住期间按下过，说明是鼠标点选，这次不算单击（论坛 t257）。
@@ -269,6 +282,24 @@ private:
     /// （对照：`IPCClient.h` 要求 ModePush 回调必须用 `InterlockedExchange` 写
     ///   `_bChineseMode`，那是因为它参与更细的时序判定。）
     BOOL _hotkeyModeSession = FALSE;
+    /// 「无占位的联想会话」由本地同步置位的那一份（`COMMIT_FLAG_ASSOC_SESSION`）：
+    /// 宿主里没有组合，转发资格只能靠 `_hotkeyModeSession`，而它的权威是服务端的异步推送，
+    /// 赢不了下一次 OnTestKeyDown——所以上屏应答里同步先置一次，并记下「这一位是我置的」。
+    /// 有了这个记号，ClearComposition / UpdateComposition 等本地已知的结束点才能立刻清位，
+    /// 又不会误清加词等真正由服务端驱动的会话。只在 TSF 线程置位；
+    /// 服务端推 FALSE 时在 AsyncReader 线程清（见 SetCandidateSessionActive）。
+    BOOL _assocBareSession = FALSE;
+    /// 服务端推 FALSE 清掉了无占位联想会话，TSF 线程还欠一次候选收起。
+    BOOL _assocBareEndPending = FALSE;
+    /// 本地结束点：清位（不动加词等服务端会话）。TSF 线程调用。
+    void _EndAssocBareSession()
+    {
+        if (_assocBareSession)
+        {
+            _assocBareSession = FALSE;
+            _hotkeyModeSession = FALSE;
+        }
+    }
     // 配对跳出键（VK 码集合，由 core 经 CONFIG_KEY_JUMP_OUT_KEYS 推送）。英文模式配对直接
     // 据此跳出；中文模式仅用于「有待跳出配对」时放行 Enter 等被会话门控的键转发给协调器。
     std::set<UINT> _jumpOutKeys;

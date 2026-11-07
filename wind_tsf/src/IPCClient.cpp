@@ -1538,6 +1538,7 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.modeChanged = (commitHeader->flags & COMMIT_FLAG_MODE_CHANGED) != 0;
             response.chineseMode = (commitHeader->flags & COMMIT_FLAG_CHINESE_MODE) != 0;
             response.replacingHeld = (commitHeader->flags & COMMIT_FLAG_REPLACING_HELD) != 0;
+            response.assocSession = (commitHeader->flags & COMMIT_FLAG_ASSOC_SESSION) != 0;
 
             // Extract text
             // 边界检查统一用减法形式（len <= size - offset）：textLength 是对端可控的

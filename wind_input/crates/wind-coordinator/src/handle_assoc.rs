@@ -830,6 +830,12 @@ impl Coordinator {
         // 吃下并转发；服务端此刻已不在联想态，回落到 `PassThrough` ⇒ `eaten=0` 的
         // 「吃了再吐」翻转 ⇒ 不补发 `WM_KEYDOWN` 的宿主直接丢键，且组合继续悬着，
         // 被宿主 finalize 后在文档里留下那个占位空格。
+        // 无占位（`none`）时宿主里没有组合，也就没有孤儿；要告知 DLL 的只剩「会话没了」。
+        if self.assoc_placeholder_is_none() {
+            self.push_hotkey_session_if_changed();
+            self.notify_ui_hide();
+            return;
+        }
         self.assoc_placeholder_orphaned
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // 同时**主动**推一条收口命令过去（走既有的 `CMD_CLEAR_COMPOSITION` push 通道，
@@ -1316,12 +1322,14 @@ mod tests {
     /// 变异检验：`assoc_composition` 改回 `composition_placeholder()` ⇒ 红。
     #[test]
     fn assoc_placeholder_overrides_only_the_assoc_state() {
-        use wind_config::app_compat::{AppCompat, AppCompatRule, PlaceholderChar};
+        use wind_config::app_compat::{
+            AppCompat, AppCompatRule, AssocPlaceholder, PlaceholderChar,
+        };
         let c = coord_smart();
         c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
             process: "x.exe".into(),
             composition_placeholder: Some(PlaceholderChar::Zwsp),
-            assoc_placeholder: Some(PlaceholderChar::Blank),
+            assoc_placeholder: Some(AssocPlaceholder::Blank),
             ..Default::default()
         }]));
         c.pid_names.lock().unwrap().insert(7, "x.exe".into());
@@ -1333,6 +1341,53 @@ mod tests {
             "联想态用 assoc_placeholder"
         );
         assert_eq!(c.composition_placeholder(), "\u{200B}", "打字占位不受影响");
+    }
+
+    /// `assoc_placeholder = "none"`：联想态不挂占位组合——`assoc_composition()` 为空串，
+    /// 上屏回的是不带新组合的 `InsertText`；会话判据 `hotkey_session_now()` 与
+    /// `assoc_session_hint()` 为真，退出联想后两者回落。
+    /// 变异检验：`hotkey_session_now` 去掉 `assoc_bare_session_now` 一支 ⇒ 红。
+    #[test]
+    fn assoc_none_mounts_no_placeholder_but_keeps_the_session_flag() {
+        use wind_bridge::handler::MessageHandler;
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        let c = coord_smart();
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "x.exe".into(),
+            assoc_placeholder: Some(AssocPlaceholder::None),
+            ..Default::default()
+        }]));
+        c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+        c.active_compat.lock().unwrap().pid = 7;
+        c.refresh_active_compat_lookups();
+        assert_eq!(c.assoc_composition(), "");
+        assert!(!c.hotkey_session_now(), "前提：尚未进联想");
+        let act = {
+            let mut st = c.state.lock().unwrap();
+            c.auto_commit_then_assoc(&mut st, "你好".into(), "你好")
+        };
+        assert!(c.state.lock().unwrap().assoc_active(), "前提：进了联想态");
+        match act {
+            KeyAction::InsertText {
+                new_composition,
+                has_new_composition,
+                ..
+            } => assert!(new_composition.is_none() && !has_new_composition),
+            other => panic!("none 时应是不带新组合的上屏，实得 {other:?}"),
+        }
+        assert!(
+            c.hotkey_session_now(),
+            "联想会话要经 STATUS_HOTKEY_SESSION 告知 DLL"
+        );
+        assert!(c.assoc_session_hint(), "上屏应答要带 ASSOC_SESSION 标志");
+        {
+            let mut st = c.state.lock().unwrap();
+            c.exit_assoc(&mut st, AssocExit::Timeout);
+        }
+        assert!(
+            !c.hotkey_session_now() && !c.assoc_session_hint(),
+            "退出后回落"
+        );
     }
 
     /// ★ 桌面默认关，而且**是靠基线段本身就是 `"off"`**——不再有哨兵值参与。

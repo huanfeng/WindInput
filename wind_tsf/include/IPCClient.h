@@ -60,6 +60,8 @@ struct ServiceResponse
     bool restartComposition = false; // 提交后需重启编排（嵌入/非嵌入模式统一，非嵌入时 newComposition 为空走占位符路径）
     // 本次提交要替换掉 hold 预览态里待定的中文符号（智能符号 press2），而非追加在它后面。
     bool replacingHeld = false;
+    // 上屏后处于无占位的联想会话（COMMIT_FLAG_ASSOC_SESSION）：不重启组合，但要同步记会话。
+    bool assocSession = false;
 
     // For InsertTextWithCursor
     int cursorOffset = 0;

@@ -58,6 +58,10 @@ impl MessageHandler for DeferredHandler {
         self.with_handler(false, |h| h.preedit_uses_placeholder())
     }
 
+    fn assoc_session_hint(&self) -> bool {
+        self.with_handler(false, |h| h.assoc_session_hint())
+    }
+
     fn composition_placeholder(&self) -> &'static str {
         self.with_handler(crate::handler::COMPOSITION_PLACEHOLDER, |h| {
             h.composition_placeholder()

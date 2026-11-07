@@ -495,7 +495,8 @@ pub(crate) fn dispatch_command(
                     data.key_code
                 );
             }
-            Some(encode_key_action(&action))
+            let assoc_session = handler.assoc_session_hint();
+            Some(encode_key_action(&action, assoc_session))
         }
 
         // ── 提交请求（同步，barrier 机制） ──
@@ -1139,10 +1140,19 @@ fn decode_focus_lost_reason(payload: &[u8]) -> wind_ipc::protocol::FocusLostReas
 /// 将 KeyAction 编码为响应字节
 ///
 /// 与 Go 版 handleKeyEvent 的 switch 分支对齐
-fn encode_key_action(action: &KeyAction) -> Vec<u8> {
+fn encode_key_action(action: &KeyAction, assoc_session: bool) -> Vec<u8> {
     use wind_ipc::codec::*;
 
     match action {
+        KeyAction::InsertText {
+            text,
+            new_composition,
+            mode_changed,
+            chinese_mode,
+            has_new_composition,
+        } if assoc_session && new_composition.is_none() && !*has_new_composition => {
+            encode_commit_text_assoc_session(text, *mode_changed, *chinese_mode)
+        }
         KeyAction::InsertText {
             text,
             new_composition,

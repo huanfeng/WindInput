@@ -1839,6 +1839,10 @@ pub const COMMIT_FLAG_CHINESE_MODE: u16 = 0x0004;
 // bit3 已被 CommitText 的 replacingHeld 占用（见 encode_commit_text_replacing_held），
 // barrier 的 CommitResult 路径不用它——此处登记以免同一位被挪作他用。
 pub const COMMIT_FLAG_REPLACING_HELD: u16 = 0x0008;
+// bit4 曾用于「上屏后候选窗仍有内容」，已废弃勿复用（见 BinaryProtocol.h）。
+/// 本次上屏之后处于「无占位的联想会话」（compat `assoc_placeholder = "none"`）：宿主里没有
+/// 组合，DLL 须**同步**把它记成有输入会话，才能赢得下一次 `OnTestKeyDown` 的竞速。
+pub const COMMIT_FLAG_ASSOC_SESSION: u16 = 0x0020;
 
 // ──────────────────────────────────────────────
 // Event type

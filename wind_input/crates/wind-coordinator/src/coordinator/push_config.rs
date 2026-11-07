@@ -277,6 +277,28 @@ impl Coordinator {
             .as_str()
     }
 
+    /// 联想态不挂占位组合（`assoc_placeholder = "none"`）。此时宿主里没有组合，
+    /// 按键转发资格靠上屏应答的 `COMMIT_FLAG_ASSOC_SESSION` 与 `STATUS_HOTKEY_SESSION` 告知 DLL。
+    pub(crate) fn assoc_placeholder_is_none(&self) -> bool {
+        self.active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookups
+            .assoc_placeholder
+            == wind_config::app_compat::AssocPlaceholder::None
+    }
+
+    /// 此刻是「无占位的联想会话」：联想候选活着、且当前应用配了 `none`。
+    pub(crate) fn assoc_bare_session_now(&self) -> bool {
+        if !self.assoc_placeholder_is_none() {
+            return false;
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .assoc_active()
+    }
+
     /// 测试用：把焦点设成 `pid`/`process`，并让该进程的 compat 规则配 `composition_placeholder = "zwsp"`
     /// （模拟出厂的 Edge 规则）。各路径「在浏览器焦点下出 ZWSP」的测试共用。
     #[cfg(test)]

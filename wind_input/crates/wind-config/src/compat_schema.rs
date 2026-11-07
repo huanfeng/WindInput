@@ -82,6 +82,7 @@ const SMART_METHODS: &[&str] = &["delete_replace", "hold_composition"];
 const CANDIDATE_POSITION_MODES: &[&str] = &["follow_caret", "fixed"];
 const NEWLINE_STYLES: &[&str] = &["keep", "cr", "lf", "crlf"];
 const PLACEHOLDER_CHARS: &[&str] = &["space", "zwsp", "blank"];
+const ASSOC_PLACEHOLDERS: &[&str] = &["space", "zwsp", "blank", "none"];
 const SYLLABLE_SEPARATORS: &[&str] = &["apostrophe", "space", "dot", "none"];
 const MULTILINE_COMMITS: &[&str] = &["commit", "paste"];
 
@@ -509,9 +510,10 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
         summary: "联想候选出现时，输入区里临时放的那个字符：空格、零宽空格或盲文空白。",
         problem: "联想时没有编码，输入法仍要在软件里挂一个占位字符来接收按键。\
                   有的软件会对这个字符做特殊处理（如把空格当成输入或触发动作），可以只给联想改用别的字符。\
-                  不设置则跟随「占位字符」。",
+                  选「不显示」则宿主里什么都不放，兼容性最好，\
+                  但候选窗位置会沿用上一次的光标位置，部分软件可能偏位。不设置则跟随「占位字符」。",
         hosts: &[],
-        options: PLACEHOLDER_CHARS,
+        options: ASSOC_PLACEHOLDERS,
         depends_on: None,
         protocol: false,
         advanced: true,

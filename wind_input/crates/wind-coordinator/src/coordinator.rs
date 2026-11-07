@@ -1110,7 +1110,7 @@ pub(crate) struct ActiveLookups {
     /// 协调器自己发占位时用的字符（`composition_placeholder`，没配 = 空格）。
     pub(crate) composition_placeholder: wind_config::app_compat::PlaceholderChar,
     /// 联想态的占位字符（`assoc_placeholder`，没配 = 跟随 `composition_placeholder`，已在此合并）。
-    pub(crate) assoc_placeholder: wind_config::app_compat::PlaceholderChar,
+    pub(crate) assoc_placeholder: wind_config::app_compat::AssocPlaceholder,
     /// 拼音音节分隔符的应用级覆盖（`syllable_separator`）；`None` = 跟随全局。
     pub(crate) syllable_separator: Option<wind_config::app_compat::SyllableSeparator>,
     /// per-app 候选窗定位 `(fixed, x, y)`；`None` = 规则没配定位方式，跟随全局。
@@ -3907,7 +3907,8 @@ impl Coordinator {
                 .unwrap_or_default();
             (
                 comp,
-                rule.and_then(|r| r.assoc_placeholder).unwrap_or(comp),
+                rule.and_then(|r| r.assoc_placeholder)
+                    .unwrap_or_else(|| comp.into()),
                 rule.and_then(|r| {
                     let mode = r.candidate_position_mode?;
                     Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
@@ -8771,6 +8772,11 @@ impl Coordinator {
     /// composition」，与 DLL 的 `HasActiveComposition()` 成为两个真相源 —— 那正是前一版
     /// （边沿驱动）出问题的形态。宁可多置一位。
     pub(crate) fn hotkey_session_now(&self) -> bool {
+        // 无占位的联想会话也算：宿主里没有组合，DLL 只能靠这一位知道该转发按键。
+        // 先于取 state 锁（`assoc_bare_session_now` 自己会取），避免重入。
+        if self.assoc_bare_session_now() {
+            return true;
+        }
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.add_word_active
             || matches!(

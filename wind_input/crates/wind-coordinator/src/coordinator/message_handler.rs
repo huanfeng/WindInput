@@ -805,6 +805,10 @@ impl MessageHandler for Coordinator {
         });
     }
 
+    fn assoc_session_hint(&self) -> bool {
+        self.assoc_bare_session_now()
+    }
+
     fn composition_placeholder(&self) -> &'static str {
         // GH#175：按焦点应用的 compat 规则取（空格 / ZWSP / U+2800），唯一实现在 push_config.rs。
         Coordinator::composition_placeholder(self)

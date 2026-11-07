@@ -415,6 +415,13 @@ pub trait MessageHandler: Send + Sync {
         COMPOSITION_PLACEHOLDER
     }
 
+    /// 刚处理完的这次按键之后，是否处于「无占位的联想会话」（`assoc_placeholder = "none"`）。
+    /// 为真时 bridge 在上屏应答里置 `COMMIT_FLAG_ASSOC_SESSION`，让 DLL **同步**获知
+    /// 该继续转发按键（宿主里没有组合可供 `HasActiveComposition()` 判断）。默认否。
+    fn assoc_session_hint(&self) -> bool {
+        false
+    }
+
     /// 处理按键并按 preedit 显示策略后处理组合串（bridge 入口应调用此方法）。
     fn handle_key_event_policed(&self, data: &KeyEventData) -> KeyAction {
         let action = self.handle_key_event(data);

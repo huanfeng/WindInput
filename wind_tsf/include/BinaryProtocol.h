@@ -509,6 +509,11 @@ constexpr uint32_t COMMIT_FLAG_CHINESE_MODE       = 0x0004;
 // 本次提交要**替换**掉 HoldComposition 里待定的中文符号（智能符号 press2：「。」→「.」），
 // 而非追加在它后面。只有 press2 会置位；其余提交路径一律追加（见 CTextService::CommitText）。
 constexpr uint32_t COMMIT_FLAG_REPLACING_HELD     = 0x0008;
+// 本次上屏之后处于「无占位的联想会话」（compat assoc_placeholder = "none"）：宿主里没有
+// 组合，所以要在**处理这条应答时同步**把它记成有输入会话，才赢得下一次 OnTestKeyDown 的竞速。
+// 与已废弃的 bit4 不同，这一位随上屏应答本身到达，不靠异步回填。清位见 KeyEventSink 的
+// _EndAssocBareSession / SetCandidateSessionActive。位值与 wind-ipc protocol.rs 一致。
+constexpr uint32_t COMMIT_FLAG_ASSOC_SESSION      = 0x0020;
 // bit4 曾用于「上屏后候选窗仍有内容」（联想态保住 _hasCandidates），**已废弃勿复用**：
 // 那条路要靠服务端应答异步回填标志，赢不了下一次 OnTestKeyDown 的同步判定
 // （真机日志同一行里 composing=0 candidates=1 inputSession=0）。联想改为挂一个占位组合，

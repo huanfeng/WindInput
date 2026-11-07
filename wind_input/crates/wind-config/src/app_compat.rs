@@ -352,11 +352,68 @@ impl PlaceholderChar {
     }
 }
 
-fn de_assoc_placeholder<'de, D>(d: D) -> Result<Option<PlaceholderChar>, D::Error>
+/// 联想态的占位：在 [`PlaceholderChar`] 三档之外多一档 `none`（不挂占位组合）。
+///
+/// 联想态没有编码，占位组合只是为了让宿主继续把按键转发给输入法。`none` 时宿主里什么都不放，
+/// 转发资格改由上屏应答里的 `COMMIT_FLAG_ASSOC_SESSION` 同步告知 DLL（见 `KeyEventSink`）。
+/// 代价：没有组合就没有 range，候选窗位置沿用上屏前最后一次的光标坐标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssocPlaceholder {
+    Space,
+    Zwsp,
+    Blank,
+    /// 不挂占位组合。
+    None,
+}
+
+impl AssocPlaceholder {
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            other => PlaceholderChar::from_config(other).map(Self::from),
+        }
+    }
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Space => "space",
+            Self::Zwsp => "zwsp",
+            Self::Blank => "blank",
+            Self::None => "none",
+        }
+    }
+    /// 写进宿主组合区的字符串；`none` 为空串（调用方据此不开组合）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Space => PlaceholderChar::Space.as_str(),
+            Self::Zwsp => PlaceholderChar::Zwsp.as_str(),
+            Self::Blank => PlaceholderChar::Blank.as_str(),
+            Self::None => "",
+        }
+    }
+}
+
+impl From<PlaceholderChar> for AssocPlaceholder {
+    fn from(p: PlaceholderChar) -> Self {
+        match p {
+            PlaceholderChar::Space => Self::Space,
+            PlaceholderChar::Zwsp => Self::Zwsp,
+            PlaceholderChar::Blank => Self::Blank,
+        }
+    }
+}
+
+impl Default for AssocPlaceholder {
+    fn default() -> Self {
+        PlaceholderChar::default().into()
+    }
+}
+
+fn de_assoc_placeholder<'de, D>(d: D) -> Result<Option<AssocPlaceholder>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    de_opt_str_enum(d, "assoc_placeholder", PlaceholderChar::from_config)
+    de_opt_str_enum(d, "assoc_placeholder", AssocPlaceholder::from_config)
 }
 
 fn de_composition_placeholder<'de, D>(d: D) -> Result<Option<PlaceholderChar>, D::Error>
@@ -1246,7 +1303,7 @@ pub struct AppCompatRule {
         deserialize_with = "de_assoc_placeholder",
         skip_serializing_if = "Option::is_none"
     )]
-    pub assoc_placeholder: Option<PlaceholderChar>,
+    pub assoc_placeholder: Option<AssocPlaceholder>,
     /// 拼音音节分隔符的显示；`None` = 跟随全局 `ui.candidate.syllable_separator`。见 [`SyllableSeparator`]。
     #[serde(
         default,
@@ -2293,14 +2350,18 @@ impl AppCompat {
     }
 
     /// 该进程联想态的占位字符：`assoc_placeholder` 优先，没配跟随 [`Self::composition_placeholder_for`]。
-    pub fn assoc_placeholder_for(&self, process_name: &str) -> PlaceholderChar {
+    pub fn assoc_placeholder_for(&self, process_name: &str) -> AssocPlaceholder {
         if process_name.is_empty() {
-            return PlaceholderChar::default();
+            return AssocPlaceholder::default();
         }
         let rule = self.get_rule(process_name);
         rule.as_ref()
             .and_then(|r| r.assoc_placeholder)
-            .or_else(|| rule.as_ref().and_then(|r| r.composition_placeholder))
+            .or_else(|| {
+                rule.as_ref()
+                    .and_then(|r| r.composition_placeholder)
+                    .map(AssocPlaceholder::from)
+            })
             .unwrap_or_default()
     }
 
@@ -2729,14 +2790,23 @@ mod tests {
             assoc_placeholder = "bogus"
             "#,
         );
-        assert_eq!(c.assoc_placeholder_for("a.exe"), PlaceholderChar::Blank);
+        assert_eq!(c.assoc_placeholder_for("a.exe"), AssocPlaceholder::Blank);
         assert_eq!(
             c.composition_placeholder_for("a.exe"),
             PlaceholderChar::Zwsp
         );
-        assert_eq!(c.assoc_placeholder_for("b.exe"), PlaceholderChar::Zwsp);
-        assert_eq!(c.assoc_placeholder_for("other.exe"), PlaceholderChar::Zwsp);
-        assert_eq!(c.assoc_placeholder_for(""), PlaceholderChar::Space);
+        assert_eq!(c.assoc_placeholder_for("b.exe"), AssocPlaceholder::Zwsp);
+        assert_eq!(c.assoc_placeholder_for("other.exe"), AssocPlaceholder::Zwsp);
+        assert_eq!(c.assoc_placeholder_for(""), AssocPlaceholder::Space);
+        let n = AppCompat::from_single_layer_text(
+            "[[apps]]\nprocess = \"n.exe\"\nassoc_placeholder = \"None\"\n",
+        );
+        assert_eq!(n.assoc_placeholder_for("n.exe"), AssocPlaceholder::None);
+        assert_eq!(AssocPlaceholder::None.as_str(), "");
+        assert_eq!(
+            AssocPlaceholder::from_config("none"),
+            Some(AssocPlaceholder::None)
+        );
     }
 
     /// GH#175：`composition_placeholder` 解析 + 查表（含 `process = "*"` 通配与具体进程压过通配）。

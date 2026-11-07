@@ -491,6 +491,14 @@ bool CKeyEventSink::_IsLogDumpHotkey(WPARAM vk)
 
 STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
+    // 服务端在异步线程宣布无占位联想会话结束（超时隐藏等）：候选收起欠在 TSF 线程补。
+    // 期间若又起了组合/候选就不收。
+    if (_assocBareEndPending)
+    {
+        _assocBareEndPending = FALSE;
+        if (!_pTextService->HasActiveComposition() && !_hasCandidates)
+            _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
+    }
     *pfEaten = FALSE;
 
     // 服务进程 Alt 钩子注入的屏蔽键：宿主要看到它才不激活菜单栏，一律放行、不转发、不记账。
@@ -2668,6 +2676,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
                 WIND_LOG_TRACE_FMT(L"CommitText with restart composition: textLen=%zu, newCompLen=%zu\n",
                              response.text.length(), response.newComposition.length());
 
+                _EndAssocBareSession();
                 _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);
                 // seqChar 照记（数字记账不记，理由见下方分支）：新组合不论最终上屏还是取消，
                 // 已写进文档的末字都是 response.text 的末位。联想态就走这条。
@@ -2695,7 +2704,20 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
 
                 _isComposing = FALSE;
                 _hasCandidates = FALSE;
-                _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
+                _EndAssocBareSession();
+                if (response.assocSession)
+                {
+                    // 无占位的联想会话：宿主里没有组合，转发资格只能在这里**同步**记下
+                    // （服务端的 STATUS_HOTKEY_SESSION 推送是异步的，赢不了下一键）。
+                    // 候选窗仍开着，故不走下面的收起。
+                    _assocBareSession = TRUE;
+                    _hotkeyModeSession = TRUE;
+                    _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
+                }
+                else
+                {
+                    _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
+                }
 
                 int commitMs = (int)((ctMid1.QuadPart - ctStart.QuadPart) * 1000 / freq.QuadPart);
                 WIND_LOG_TRACE_FMT(L"CommitText: atomic commit=%dms\n", commitMs);
@@ -2719,6 +2741,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             QueryPerformanceCounter(&ucStart);
 
             WIND_LOG_TRACE(L"Received UpdateComposition from service\n");
+            _EndAssocBareSession(); // 组合已存在，会话判据改由 HasActiveComposition() 承担
             // 若 HoldComposition 计时器活跃（中文符号待提交），把符号定格并入 prefix，
             // 与新组合内容在同一次 UpdateComposition 内显示（符号无下划线、新内容有，
             // 复用顶码聚合分段）。曾用 Flush（CommitText+立即开新组合）——WPS/微信下
@@ -2747,6 +2770,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
 
     case ResponseType::ClearComposition:
         WIND_LOG_DEBUG(L"Received ClearComposition from service\n");
+        _EndAssocBareSession();
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
@@ -2764,6 +2788,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         // 看到收口后的文档，再看到一个与组合无关的普通按键。OnKeyDown 读下面这一位；
         // DispatchHotkey（WM_HOTKEY 已被系统吃下）按响应类型判，由 WndProc 注入。
         WIND_LOG_DEBUG(L"Received ClearCompositionThenPassThrough from service\n");
+        _EndAssocBareSession();
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
@@ -2915,6 +2940,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             WIND_LOG_DEBUG_FMT(L"Processing CommitThenDefer: commit=%ls defer=%ls timeoutMs=%u\n",
                                response.text.c_str(), response.newComposition.c_str(),
                                response.holdTimeoutMs);
+            _EndAssocBareSession();
             _pTextService->CommitText(response.text, _inHotkeyDispatch);
             // 数字记账不记：余码组合随后就开，光标前是组合内容而非 response.text 末位
             // （同 restartComposition 分支的理由）。seqChar 照记，理由同那个分支。
