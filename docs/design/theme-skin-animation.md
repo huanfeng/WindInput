@@ -427,24 +427,29 @@ click   = { play = { image = "tiger_jump" } }
 mode_en = { state = "en" }
 ```
 
-- 没写 `states` 的装饰行为同 P4：整个文件循环。写了则初始状态取 `idle`，没有 `idle` 取第一个声明的状态。
+- 没写 `states` 的装饰行为同 P4：整个文件循环（`on` 里的一次性片段照样可用）。写了则初始状态取 `idle`，
+  没有 `idle` 取按名字排序的第一个（toml 表不保留书写顺序）。
 - 常驻状态循环播放；一次性片段播一遍，播完转 `then`；播放中来了新事件，按新事件直接切换。
 - 帧号指文件的原始帧号；预算降帧（隔帧丢弃）后按原始帧号映射到保留下来的帧。
 - 引用了不存在的状态 / 越界帧区间：加载时 warn 并丢弃该条，不影响其它条目。
-- 窗口隐藏时：`state` 类事件照样改常驻状态（下次显示生效），一次性片段丢弃。显示时片段从头播。
+- 窗口隐藏时：`state` 类事件照样改常驻状态（下次显示生效），一次性片段丢弃、直接落到它的 `then`
+  （写了的话；上屏多半伴随收窗，`commit = { play = .., then = "idle" }` 靠这条回到 idle）。显示时片段从头播。
+- 静态图当片段时算一帧 1 秒：一次性片段显示 1 秒后转 `then`。
+- 同一个常驻状态再次触发不从头播（连续打字不每键重播）；一次性片段再次触发从头播。
 
 事件来源：
 
 | 事件 | 来源 |
 |---|---|
 | `show` | 候选窗从隐藏到显示 |
+| `hide` | 候选窗从显示到隐藏（此时只有 `state` 与 `then` 生效） |
 | `typing` / `backspace` | 相邻两次 `UpdateCandidates` 的编码串：变短且为原串前缀 = backspace，其余变化 = typing |
 | `page` | 编码串不变、页码变化 |
 | `empty` | 有编码但候选变为空 |
-| `commit` | 协调器两个上屏出口（`handle_key_event_policed`、`select_candidate_at`）真有文本上屏时发 `UiCommand::SkinSignal` |
+| `commit` | 协调器上屏出口真有文本上屏时发 `UiCommand::SkinSignal`：挂在 `apply_auto_spacing`（按键、点选，以及同样经它的气泡上屏与 CapsLock 钩子） |
 | `mode_cn` / `mode_en` | UI 侧比较相邻两次 `UpdateToolbar` 的 `chinese_mode`（首次不算），不另加命令 |
 | `idle_<N>s` | 显示中、距最后一个事件 N 秒（登记 `next_deadline`） |
-| `click` | 在 `drag` / `block` 装饰上按下、未超过拖动阈值即松开 |
+| `click` | 在 `drag` / `block` 装饰上按下、光标未超过系统拖动阈值（`SM_CXDRAG` / `SM_CYDRAG`）即松开 |
 
 `select`（数字键 / 点击选词）本期不单列：它总伴随 `commit`，主题想区分时再加。
 

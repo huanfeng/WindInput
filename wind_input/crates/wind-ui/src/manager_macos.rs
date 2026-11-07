@@ -600,6 +600,9 @@ impl Forwarder {
             UiCommand::SetCandidateSwapWhenAbove(v) => self.win.set_swap_preedit_when_above(v),
             UiCommand::SetCandidateOffset { x, y } => self.win.set_user_offset(x, y),
             UiCommand::SetCandidateShadow(on) => self.win.set_theme_shadow(on),
+            // 本平台暂不播放皮肤动画（只画首帧），开关与事件照收，状态与 Windows 一致。
+            UiCommand::SetThemeAnimation(on) => self.win.set_theme_animation(on),
+            UiCommand::SkinSignal(sig) => self.win.skin_signal(sig),
             UiCommand::SetPagerInPreedit(v) => self.win.set_pager_in_preedit(v),
             UiCommand::SetPagerDisplay { h, v } => self.win.set_pager_display(h, v),
             UiCommand::SetPageNumberDisplay { h, v } => self.win.set_page_number_display(h, v),

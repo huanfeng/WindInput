@@ -132,6 +132,13 @@ pub struct SkinDecor {
     pub opacity: Option<f32>,
     /// 动画装饰的帧率，覆盖文件自带帧时长；非正数忽略。
     pub fps: Option<f32>,
+    /// 状态片段：名 → `{ frames = "a-b" }` 或 `{ image = "x" }`（设计 §16）。逐条宽松解析：
+    /// 写错的条目求值时 warn 并丢弃，不连累整份皮肤。
+    #[serde(default)]
+    pub states: toml::Table,
+    /// 事件 → `{ state = "名" }` 或 `{ play = 片段, then = "名" }`（`then` 缺省 `@prev`）。
+    #[serde(default)]
+    pub on: toml::Table,
 }
 
 #[derive(Deserialize, Debug, Default, Clone)]
@@ -328,6 +335,161 @@ pub struct RvSkinDecor {
     pub opacity: f32,
     /// 覆盖动画文件自带帧时长的帧率；None = 用文件自带的。
     pub fps: Option<f32>,
+    /// 事件状态机；没写 `states` / `on` 时为空（整个文件循环，同 P4）。
+    pub anim: RvDecorAnim,
+}
+
+/// 装饰的一段片段。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecorClip {
+    /// 本装饰文件的帧区间（含两端，文件原始帧号）。
+    Frames { first: u32, last: u32 },
+    /// 另一个文件，整段。
+    Image(String),
+}
+
+/// 装饰状态机认的事件（设计 §16）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecorEvent {
+    Show,
+    Hide,
+    Typing,
+    Backspace,
+    Page,
+    Empty,
+    Commit,
+    ModeCn,
+    ModeEn,
+    /// 显示中、距最后一个事件这么多秒。
+    Idle(u32),
+    Click,
+}
+
+impl DecorEvent {
+    /// `show` / `typing` / `idle_5s` …；无法识别返回 None。
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "show" => Self::Show,
+            "hide" => Self::Hide,
+            "typing" => Self::Typing,
+            "backspace" => Self::Backspace,
+            "page" => Self::Page,
+            "empty" => Self::Empty,
+            "commit" => Self::Commit,
+            "mode_cn" => Self::ModeCn,
+            "mode_en" => Self::ModeEn,
+            "click" => Self::Click,
+            _ => {
+                let n: u32 = s.strip_prefix("idle_")?.strip_suffix('s')?.parse().ok()?;
+                return (n > 0).then_some(Self::Idle(n));
+            }
+        })
+    }
+}
+
+/// 事件触发的动作。状态以 [`RvDecorAnim::states`] 的下标引用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecorAction {
+    /// 切换常驻状态。
+    State(usize),
+    /// 一次性片段，播完转 `then`；None = `@prev`（回到当前常驻状态）。
+    Play {
+        clip: DecorClip,
+        then: Option<usize>,
+    },
+}
+
+/// 一块装饰的事件状态机声明（求值后）。
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RvDecorAnim {
+    /// 按名字排序（toml 表不保留书写顺序）。
+    pub states: Vec<(String, DecorClip)>,
+    /// 初始状态：`idle`，没有则取 `states` 的第一个；没有状态为 None。
+    pub initial: Option<usize>,
+    pub on: Vec<(DecorEvent, DecorAction)>,
+}
+
+impl RvDecorAnim {
+    /// 事件对应的动作（同一事件写了多条时取第一条）。
+    pub fn action(&self, ev: DecorEvent) -> Option<&DecorAction> {
+        self.on.iter().find(|(e, _)| *e == ev).map(|(_, a)| a)
+    }
+}
+
+/// `"a-b"`（含两端）/ `"a"` / 整数 → 帧区间。
+fn parse_frames(v: &Value) -> Option<DecorClip> {
+    let (first, last) = match v {
+        Value::Integer(n) => (u32::try_from(*n).ok()?, u32::try_from(*n).ok()?),
+        Value::String(s) => match s.split_once('-') {
+            Some((a, b)) => (a.trim().parse().ok()?, b.trim().parse().ok()?),
+            None => {
+                let n = s.trim().parse().ok()?;
+                (n, n)
+            }
+        },
+        _ => return None,
+    };
+    (first <= last).then_some(DecorClip::Frames { first, last })
+}
+
+/// 片段：帧区间字符串（`play = "36-47"`），或 `{ frames = .. }` / `{ image = .. }`。
+fn parse_clip(v: &Value) -> Option<DecorClip> {
+    let Some(t) = v.as_table() else {
+        return parse_frames(v);
+    };
+    if let Some(f) = t.get("frames") {
+        return parse_frames(f);
+    }
+    t.get("image")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| DecorClip::Image(s.to_string()))
+}
+
+fn resolve_decor_anim(states: &toml::Table, on: &toml::Table) -> RvDecorAnim {
+    let states: Vec<(String, DecorClip)> = states
+        .iter()
+        .filter_map(|(name, v)| match parse_clip(v) {
+            Some(c) => Some((name.clone(), c)),
+            None => {
+                tracing::warn!("skin: decor.states.{name} 不是合法片段，忽略");
+                None
+            }
+        })
+        .collect();
+    let find = |name: &str| states.iter().position(|(n, _)| n == name);
+    let action = |v: &Value| -> Option<DecorAction> {
+        let t = v.as_table()?;
+        if let Some(s) = t.get("state") {
+            return Some(DecorAction::State(s.as_str().and_then(find)?));
+        }
+        let clip = parse_clip(t.get("play")?)?;
+        let then = match t.get("then") {
+            None => None,
+            Some(Value::String(s)) if s == "@prev" => None,
+            Some(s) => Some(s.as_str().and_then(find)?),
+        };
+        Some(DecorAction::Play { clip, then })
+    };
+    let on: Vec<(DecorEvent, DecorAction)> = on
+        .iter()
+        .filter_map(|(name, v)| {
+            let Some(ev) = DecorEvent::parse(name) else {
+                tracing::warn!("skin: 未知装饰事件 {name:?}，忽略");
+                return None;
+            };
+            let a = action(v);
+            if a.is_none() {
+                tracing::warn!("skin: decor.on.{name} 写法不对或引用了不存在的状态，忽略");
+            }
+            Some((ev, a?))
+        })
+        .collect();
+    RvDecorAnim {
+        initial: find("idle").or((!states.is_empty()).then_some(0)),
+        states,
+        on,
+    }
 }
 
 /// 对齐点：锚点 + 偏移（主坐标源像素）。
@@ -580,6 +742,7 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                 hit,
                 opacity: d.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
                 fps: positive(d.fps),
+                anim: resolve_decor_anim(&d.states, &d.on),
             })
         })
         .collect();
@@ -798,6 +961,112 @@ hit = "pass"
         assert_eq!(fps(""), None, "缺省用文件自带帧时长");
         assert_eq!(fps("fps = 0"), None);
         assert_eq!(fps("fps = -3"), None);
+    }
+
+    fn decor_anim(body: &str) -> RvDecorAnim {
+        let src = format!(
+            "[skin.horizontal.frame]\nimage = \"f\"\n[[skin.horizontal.decor]]\nimage = \"d\"\n{body}"
+        );
+        parse(&src).unwrap().horizontal.unwrap().decor[0]
+            .anim
+            .clone()
+    }
+
+    #[test]
+    fn decor_states_and_events_resolve_to_indices() {
+        let a = decor_anim(
+            r#"
+[skin.horizontal.decor.states]
+idle = { frames = "0-3" }
+busy = { frames = "4-7" }
+alt = { image = "other" }
+[skin.horizontal.decor.on]
+typing = { state = "busy" }
+commit = { play = "8-9", then = "idle" }
+page = { play = { image = "burst" } }
+idle_5s = { state = "idle" }
+mode_en = { play = "10", then = "@prev" }
+"#,
+        );
+        let names: Vec<_> = a.states.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["alt", "busy", "idle"], "按名字排序");
+        assert_eq!(a.initial, Some(2), "初始取 idle");
+        assert_eq!(a.states[0].1, DecorClip::Image("other".into()));
+        assert_eq!(a.states[1].1, DecorClip::Frames { first: 4, last: 7 });
+        assert_eq!(a.action(DecorEvent::Typing), Some(&DecorAction::State(1)));
+        assert_eq!(
+            a.action(DecorEvent::Commit),
+            Some(&DecorAction::Play {
+                clip: DecorClip::Frames { first: 8, last: 9 },
+                then: Some(2)
+            })
+        );
+        assert_eq!(
+            a.action(DecorEvent::Page),
+            Some(&DecorAction::Play {
+                clip: DecorClip::Image("burst".into()),
+                then: None
+            }),
+            "then 缺省 @prev"
+        );
+        assert_eq!(
+            a.action(DecorEvent::ModeEn),
+            Some(&DecorAction::Play {
+                clip: DecorClip::Frames {
+                    first: 10,
+                    last: 10
+                },
+                then: None
+            })
+        );
+        assert_eq!(a.action(DecorEvent::Idle(5)), Some(&DecorAction::State(2)));
+        assert_eq!(a.action(DecorEvent::Click), None);
+    }
+
+    #[test]
+    fn decor_bad_entries_are_dropped_one_by_one() {
+        let a = decor_anim(
+            r#"
+[skin.horizontal.decor.states]
+run = { frames = "3-1" }
+walk = { frames = "x" }
+none = { }
+stand = { frames = 2 }
+[skin.horizontal.decor.on]
+typing = { state = "run" }
+backspace = { state = "stand" }
+commit = { play = "1-2", then = "nowhere" }
+page = { play = "9-3" }
+idle_0s = { state = "stand" }
+idle_xs = { state = "stand" }
+wave = { state = "stand" }
+click = "stand"
+empty = { play = "5-6" }
+"#,
+        );
+        assert_eq!(a.states.len(), 1, "倒序、非数字、空表都丢");
+        assert_eq!(a.states[0].1, DecorClip::Frames { first: 2, last: 2 });
+        assert_eq!(a.initial, Some(0), "没有 idle 取第一个");
+        let evs: Vec<_> = a.on.iter().map(|(e, _)| *e).collect();
+        assert_eq!(evs, [DecorEvent::Backspace, DecorEvent::Empty]);
+    }
+
+    #[test]
+    fn decor_without_states_keeps_whole_file_loop() {
+        let a = decor_anim("[skin.horizontal.decor.on]\nclick = { play = \"0-1\" }\n");
+        assert!(a.states.is_empty());
+        assert_eq!(a.initial, None);
+        assert_eq!(a.on.len(), 1, "无状态时一次性片段照样可用");
+        assert_eq!(decor_anim(""), RvDecorAnim::default());
+    }
+
+    #[test]
+    fn decor_event_names() {
+        assert_eq!(DecorEvent::parse("idle_12s"), Some(DecorEvent::Idle(12)));
+        assert_eq!(DecorEvent::parse("idle_s"), None);
+        assert_eq!(DecorEvent::parse("idle_3"), None);
+        assert_eq!(DecorEvent::parse("mode_cn"), Some(DecorEvent::ModeCn));
+        assert_eq!(DecorEvent::parse("select"), None, "本期不单列");
     }
 
     #[test]

@@ -73,6 +73,7 @@ impl Coordinator {
     }
 
     /// 统一出口：按交界给本笔上屏文本补前缀空格，并把「插入点前一字符」推进到本笔末尾。
+    /// 上屏文本非空时顺带发皮肤装饰的 `commit` 事件（同一个收口，见 [`Self::emit_skin_commit`]）。
     pub(crate) fn apply_auto_spacing(&self, state: &mut State, mut action: KeyAction) -> KeyAction {
         if let KeyAction::ReplaceBackward { text, .. }
         | KeyAction::CommitReplacingHeld { text, .. } = &action
@@ -89,6 +90,9 @@ impl Coordinator {
         let Some(text) = committed_text_mut(&mut action) else {
             return action;
         };
+        if !text.is_empty() {
+            self.emit_skin_commit();
+        }
         let mut prev = state.spacing_prev;
         self.space_committed_text(&mut prev, text);
         state.spacing_prev = prev;
@@ -152,6 +156,55 @@ mod tests {
             KeyAction::CommitThenDeferComposition { commit_text, .. } => commit_text.clone(),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    fn skin_commits(rx: &std::sync::mpsc::Receiver<wind_ui_types::UiCommand>) -> usize {
+        rx.try_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    wind_ui_types::UiCommand::SkinSignal(wind_ui_types::SkinSignal::Commit)
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn commit_with_text_signals_skin() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        let _ = skin_commits(&rx);
+        let mut st = c.state.lock().unwrap();
+        c.apply_auto_spacing(&mut st, insert("1"));
+        drop(st);
+        assert_eq!(skin_commits(&rx), 1);
+    }
+
+    #[test]
+    fn no_text_no_skin_signal() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        let _ = skin_commits(&rx);
+        let mut st = c.state.lock().unwrap();
+        c.apply_auto_spacing(&mut st, insert(""));
+        c.apply_auto_spacing(&mut st, KeyAction::Consumed);
+        c.apply_auto_spacing(&mut st, KeyAction::PassThrough);
+        drop(st);
+        assert_eq!(skin_commits(&rx), 0);
+    }
+
+    #[test]
+    fn session_channel_gets_no_skin_signal() {
+        let (c, events) = Coordinator::new_session(
+            Config::default(),
+            None,
+            None,
+            crate::input_profile::InputProfile::desktop(),
+        );
+        let _: Vec<_> = events.try_iter().collect();
+        let mut st = c.state.lock().unwrap();
+        let act = c.apply_auto_spacing(&mut st, insert("1"));
+        drop(st);
+        assert_eq!(text_of(&act), "1", "上屏本身照常");
+        assert_eq!(events.try_iter().count(), 0, "中立通道没有对应事件");
     }
 
     #[test]

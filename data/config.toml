@@ -1622,6 +1622,8 @@ weight = 0
 [ui.theme]
 name = "default"
 style = "system"
+# 主题动画（皮肤装饰的动图与打字 / 上屏等事件切换）；关掉或系统关了动画效果时停在首帧
+animation = true
 
 [ui.mode_indicator]
 # 进入临时拼音/双拼/快捷/英文/快符等模式时的标识：short=短称(拼/双/快/英/符) | full=全称(临时拼音…) | none=不显示

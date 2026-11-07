@@ -7,7 +7,8 @@
 use super::CandidateWindow;
 use crate::view::{Edges, Rect, View};
 use wind_theme::skin::{
-    Anchor, AnchorBox, BandFill, Clamp, DecorHit, Pos9, RvSkinVariant, RvSlot, RvSlots, Stretch,
+    Anchor, AnchorBox, BandFill, Clamp, DecorAction, DecorClip, DecorEvent, DecorHit, Pos9,
+    RvSkinVariant, RvSlot, RvSlots, Stretch,
 };
 
 /// 分槽位布局里的一块。
@@ -146,9 +147,8 @@ pub(super) struct PlaceAnchor {
 /// 一块装饰的求值结果（设备像素）。
 #[derive(Clone, Debug)]
 pub(super) struct DecorGeom {
-    path: String,
-    /// 图集倍率：设备像素 / 该图源像素。
-    k: f32,
+    /// 在变体 `decor` 里的下标：状态机按它对号（求值失败的装饰会被滤掉，下标不连续）。
+    index: usize,
     w: u32,
     h: u32,
     anchor: Anchor,
@@ -157,24 +157,95 @@ pub(super) struct DecorGeom {
     z: i32,
     hit: DecorHit,
     opacity: f32,
-    /// 动画：fps 覆盖、帧预算份额、各帧时长（毫秒）与当前帧；`durations` 为 None 即静态图。
+    /// 动画：fps 覆盖与帧预算份额（各源同一份额）。
     fps: Option<f32>,
     budget: usize,
-    durations: Option<Vec<u32>>,
-    frame: usize,
+    /// `[0]` = 装饰文件本身，其后是片段 `{ image = .. }` 引用的文件。
+    sources: Vec<DecorSource>,
+    /// 各片段的时间轴，见 [`crate::skin_anim::Timelines`]。
+    base: ClipTl,
+    states: Vec<Option<ClipTl>>,
+    on: Vec<Option<ClipTl>>,
+    /// 此刻画哪个源的第几帧（保留帧下标）；`still` 是初始状态首帧（关动画、避让遮罩用）。
+    cur: (usize, usize),
+    still: (usize, usize),
+}
+
+/// 装饰用到的一个文件。
+#[derive(Clone, Debug)]
+struct DecorSource {
+    path: String,
+    /// 图集倍率：设备像素 / 该图源像素。
+    k: f32,
+    /// 已按动画解出帧；否则按静态图画（首帧）。
+    animated: bool,
+}
+
+/// 一段片段：哪个源、从第几个保留帧起、各帧时长。
+#[derive(Clone, Debug)]
+struct ClipTl {
+    source: usize,
+    first: usize,
+    durations: Vec<u32>,
+}
+
+impl ClipTl {
+    /// 源的整段；没解出动画（静态图）为一帧。
+    fn whole(source: usize, layout: Option<&crate::image_cache::AnimLayout>) -> Self {
+        Self {
+            source,
+            first: 0,
+            durations: layout.map_or_else(
+                || vec![crate::skin_anim::STILL_CLIP_MS],
+                |l| l.durations.clone(),
+            ),
+        }
+    }
+}
+
+impl crate::skin_anim::Timelines for DecorGeom {
+    fn clip(&self, id: crate::skin_anim::ClipId) -> Option<&[u32]> {
+        self.clip_tl(id).map(|c| c.durations.as_slice())
+    }
 }
 
 impl DecorGeom {
-    /// 画到 `rect`：动画画第 `frame` 帧，静态图走窗体同一条整轴拉伸。
-    fn paint(&self, buf: &mut [u8], bw: u32, bh: u32, rect: (i32, i32, u32, u32), frame: usize) {
-        if self.durations.is_some() {
+    fn clip_tl(&self, id: crate::skin_anim::ClipId) -> Option<&ClipTl> {
+        use crate::skin_anim::ClipId;
+        match id {
+            ClipId::Base => Some(&self.base),
+            ClipId::State(i) => self.states.get(i)?.as_ref(),
+            ClipId::On(i) => self.on.get(i)?.as_ref(),
+        }
+    }
+
+    /// 状态机给的帧 → (源, 保留帧下标)。
+    fn locate(&self, pose: crate::skin_anim::Pose) -> (usize, usize) {
+        let c = self.clip_tl(pose.clip).unwrap_or(&self.base);
+        (c.source, c.first + pose.frame)
+    }
+
+    /// 画到 `rect`：动画源画第 `frame` 帧，静态图走窗体同一条整轴拉伸。
+    fn paint(
+        &self,
+        buf: &mut [u8],
+        bw: u32,
+        bh: u32,
+        rect: (i32, i32, u32, u32),
+        at: (usize, usize),
+    ) {
+        let (si, frame) = at;
+        let Some(src) = self.sources.get(si) else {
+            return;
+        };
+        if src.animated {
             crate::view::paint_anim_frame(
                 buf,
                 bw,
                 bh,
                 rect,
-                &self.path,
-                self.k,
+                &src.path,
+                src.k,
                 self.fps,
                 self.budget,
                 frame,
@@ -187,8 +258,8 @@ impl DecorGeom {
                 bw,
                 bh,
                 rect,
-                &self.path,
-                self.k,
+                &src.path,
+                src.k,
                 &whole,
                 &whole,
                 self.opacity,
@@ -312,6 +383,24 @@ impl SkinGeom {
             })
             .collect()
     }
+    /// 能点的装饰（`drag` / `block`）：(变体下标, 矩形, 在窗体下面)，按 z 升序（后者在上）。
+    pub(super) fn click_rects(&self) -> Vec<(usize, Rect, bool)> {
+        self.decor
+            .iter()
+            .zip(&self.decor_rects)
+            .filter(|(d, _)| d.hit != DecorHit::Pass)
+            .map(|(d, &(x, y, w, h))| {
+                let r = Rect {
+                    x: x as f32,
+                    y: y as f32,
+                    w: w as f32,
+                    h: h as f32,
+                };
+                (d.index, r, d.z < 0)
+            })
+            .collect()
+    }
+
     pub(super) fn slots(&self) -> Option<RvSlots> {
         self.slots
     }
@@ -403,25 +492,9 @@ impl SkinGeom {
     pub(super) fn paint_pass(&self, buf: &mut [u8], bw: u32, bh: u32) {
         for (d, &rect) in self.decor.iter().zip(&self.decor_rects) {
             if d.hit == DecorHit::Pass {
-                d.paint(buf, bw, bh, rect, d.frame);
+                d.paint(buf, bw, bh, rect, d.cur);
             }
         }
-    }
-
-    /// 按经过时间给各动画装饰选帧，返回距最近一次换帧的时长；没有动画装饰为 None。
-    pub(super) fn seek(&mut self, elapsed: std::time::Duration) -> Option<std::time::Duration> {
-        let mut next: Option<std::time::Duration> = None;
-        for d in &mut self.decor {
-            if let Some(durations) = &d.durations {
-                let (frame, until) = crate::skin::frame_at(durations, elapsed);
-                d.frame = frame;
-                next = match (next, until) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
-            }
-        }
-        next
     }
 
     /// 画皮肤层：`over = false` 画窗体及其上下的装饰（根容器之前调用），`true` 画盖在内容上的装饰。
@@ -430,7 +503,7 @@ impl SkinGeom {
         self.paint_at(buf, bw, bh, over, skip_pass, false);
     }
 
-    /// 同 [`Self::paint`]；`first_frame` 时动画装饰一律画首帧（避让遮罩用，不随帧变）。
+    /// 同 [`Self::paint`]；`first_frame` 时装饰一律画初始状态首帧（避让遮罩用，不随帧变）。
     fn paint_at(
         &self,
         buf: &mut [u8],
@@ -446,8 +519,7 @@ impl SkinGeom {
                     continue;
                 }
                 if keep(d.z) {
-                    let frame = if first_frame { 0 } else { d.frame };
-                    d.paint(buf, bw, bh, rect, frame);
+                    d.paint(buf, bw, bh, rect, if first_frame { d.still } else { d.cur });
                 }
             }
         };
@@ -471,22 +543,215 @@ impl SkinGeom {
     }
 }
 
+/// 装饰文件的帧区间 `[first, last]`（原始帧号）→ 片段。`raw` = 原始帧数，None 为不知道
+/// （关着动画没解帧：只用得到首帧）；越界为 None。降帧后原始第 `i` 帧落在保留的第 `i / stride` 帧。
+fn frames_clip(
+    first: u32,
+    last: u32,
+    layout: Option<&crate::image_cache::AnimLayout>,
+    raw: Option<usize>,
+) -> Option<ClipTl> {
+    let still = || ClipTl::whole(0, None);
+    match (raw, layout) {
+        (None, _) => Some(still()),
+        (Some(n), _) if last as usize >= n => None,
+        (Some(_), None) => Some(still()),
+        (Some(_), Some(l)) => {
+            let stride = l.stride.max(1);
+            let len = l.durations.len();
+            let a = (first as usize / stride).min(len - 1);
+            let b = (last as usize / stride).min(len - 1);
+            Some(ClipTl {
+                source: 0,
+                first: a,
+                durations: l.durations[a..=b].to_vec(),
+            })
+        }
+    }
+}
+
 impl CandidateWindow {
     /// 按当前主题、横竖排、嵌入形态、DPI、字号求皮肤几何；不启用皮肤时置 None。
-    /// 由隐藏变可见时记动画起点；动画装饰按经过时间选帧，并记下次换帧时刻。
+    /// 由隐藏变可见时记动画起点、各装饰状态机从头播；再按状态机给各装饰选帧，并记下次重算时刻。
     pub(super) fn refresh_skin_geom(&mut self) {
+        use crate::skin_anim::Machine;
         let now = std::time::Instant::now();
-        if !self.visible {
-            self.anim_allowed = (self.motion_allowed)();
+        let showing = !self.visible;
+        if showing {
+            self.refresh_anim_allowed();
             self.anim_start = now;
         }
+        // 这一帧就是按此刻重画的，之前登记的「待重绘」作废。
+        self.anim_due = false;
         self.skin_geom = self.compute_skin_geom();
-        let elapsed = now.saturating_duration_since(self.anim_start);
-        self.anim_next = self
-            .skin_geom
-            .as_mut()
-            .and_then(|g| g.seek(elapsed))
-            .map(|d| now + d);
+        self.ensure_decor_anims();
+        let t = now.saturating_duration_since(self.anim_start);
+        let variant = self
+            .theme
+            .skin
+            .as_ref()
+            .and_then(|s| s.variant(self.vertical, self.preedit_embedded));
+        let mut next = None;
+        if let (Some(g), Some(v)) = (self.skin_geom.as_mut(), variant) {
+            for d in &mut g.decor {
+                let Some(spec) = v.decor.get(d.index).map(|x| &x.anim) else {
+                    continue;
+                };
+                let pose = match self.decor_anims.get_mut(d.index) {
+                    Some(m) if self.anim_allowed => {
+                        if showing {
+                            m.show(spec, t, &*d);
+                        }
+                        m.seek(spec, t, &*d)
+                    }
+                    _ => Machine::still(spec, &*d),
+                };
+                d.cur = d.locate(pose);
+                next = [next, pose.next].into_iter().flatten().min();
+            }
+        }
+        self.anim_next = next.map(|n| self.anim_start + n);
+    }
+
+    /// 同一条皮肤告警只报一次（几何每帧重求）。
+    fn warn_skin_once(&self, msg: String) {
+        if self.skin_warned.borrow_mut().insert(msg.clone()) {
+            tracing::warn!("{msg}");
+        }
+    }
+
+    /// 重读「播不播动画」：`ui.theme.animation` 且系统没关动画效果。变了就让状态机重来。
+    pub(super) fn refresh_anim_allowed(&mut self) {
+        let allowed = self.theme_animation && (self.motion_allowed)();
+        if allowed != self.anim_allowed {
+            self.anim_allowed = allowed;
+            self.decor_anims_key = None;
+        }
+    }
+
+    /// 状态机按当前变体的装饰一块一台；换了变体（横竖 / 嵌入）或被作废时重建，回到初始状态。
+    fn ensure_decor_anims(&mut self) {
+        let key = (self.vertical, self.preedit_embedded);
+        if self.decor_anims_key == Some(key) {
+            return;
+        }
+        let t = std::time::Instant::now().saturating_duration_since(self.anim_start);
+        let visible = self.visible;
+        self.decor_anims = self
+            .theme
+            .skin
+            .as_ref()
+            .and_then(|s| s.variant(key.0, key.1))
+            .map_or_else(Vec::new, |v| {
+                v.decor
+                    .iter()
+                    .map(|d| crate::skin_anim::Machine::new(&d.anim, t, visible))
+                    .collect()
+            });
+        self.decor_anims_key = Some(key);
+    }
+
+    /// 喂一个装饰事件；`only` 只给那一块装饰（`click`）。不播动画时不切换。
+    /// 显示中画面可能变了就登记一次换帧重绘。
+    pub(super) fn skin_event(&mut self, ev: DecorEvent, only: Option<usize>) {
+        use crate::skin_anim::{AnyClip, Timelines};
+        if !self.anim_allowed || self.theme.skin.is_none() {
+            return;
+        }
+        self.ensure_decor_anims();
+        let t = std::time::Instant::now().saturating_duration_since(self.anim_start);
+        let Some(v) = self
+            .theme
+            .skin
+            .as_ref()
+            .and_then(|s| s.variant(self.vertical, self.preedit_embedded))
+        else {
+            return;
+        };
+        let mut changed = false;
+        for (i, m) in self.decor_anims.iter_mut().enumerate() {
+            if only.is_some_and(|o| o != i) {
+                continue;
+            }
+            let Some(spec) = v.decor.get(i).map(|d| &d.anim) else {
+                continue;
+            };
+            // 还没求过几何（从未显示）时不知道片段时长，只会记常驻状态。
+            let geom = self
+                .skin_geom
+                .as_ref()
+                .and_then(|g| g.decor.iter().find(|d| d.index == i));
+            let tl: &dyn Timelines = match geom {
+                Some(d) => d,
+                None => &AnyClip,
+            };
+            changed |= match ev {
+                DecorEvent::Hide => m.hide(spec, t, tl),
+                ev => m.fire(spec, ev, t, tl),
+            };
+        }
+        if changed && self.visible {
+            self.anim_due = true;
+        }
+    }
+
+    /// 候选更新：比较相邻两次的编码串与页码，喂 `typing` / `backspace` / `page` / `empty`
+    /// （`preedit` 取协调器下发的原串，编码由宿主自绘时也照样比）。
+    pub fn note_skin_input(&mut self, preedit: &str, page: usize, no_candidates: bool) {
+        let empty = !preedit.is_empty() && no_candidates;
+        let prev = self
+            .skin_input_prev
+            .replace((preedit.to_string(), page, empty));
+        let (old, old_page, old_empty) = match &prev {
+            Some((p, n, e)) => (p.as_str(), Some(*n), *e),
+            None => ("", None, false),
+        };
+        if preedit != old {
+            let ev = if preedit.len() < old.len() && old.starts_with(preedit) {
+                DecorEvent::Backspace
+            } else {
+                DecorEvent::Typing
+            };
+            self.skin_event(ev, None);
+        } else if old_page.is_some_and(|n| n != page) {
+            self.skin_event(DecorEvent::Page, None);
+        }
+        if empty && !old_empty {
+            self.skin_event(DecorEvent::Empty, None);
+        }
+    }
+
+    /// 工具栏状态：中英变了喂 `mode_cn` / `mode_en`（第一次只记下，不算切换）。
+    pub fn note_skin_mode(&mut self, chinese: bool) {
+        if self
+            .skin_mode_prev
+            .replace(chinese)
+            .is_some_and(|c| c != chinese)
+        {
+            let ev = if chinese {
+                DecorEvent::ModeCn
+            } else {
+                DecorEvent::ModeEn
+            };
+            self.skin_event(ev, None);
+        }
+    }
+
+    /// 协调器发来的装饰事件。
+    pub fn skin_signal(&mut self, sig: wind_ui_types::SkinSignal) {
+        match sig {
+            wind_ui_types::SkinSignal::Commit => self.skin_event(DecorEvent::Commit, None),
+        }
+    }
+
+    /// `ui.theme.animation`。
+    pub fn set_theme_animation(&mut self, on: bool) {
+        if self.theme_animation != on {
+            self.theme_animation = on;
+            self.refresh_anim_allowed();
+            // 显示中就地换成播放 / 首帧。
+            self.anim_due = self.visible;
+        }
     }
 
     fn compute_skin_geom(&self) -> Option<SkinGeom> {
@@ -519,23 +784,61 @@ impl CandidateWindow {
             b: c.bottom * k,
             l: c.left * k,
         };
-        let decor: Vec<_> = v
+        // 每块装饰用到的文件：[0] 是装饰本身，其后是片段 `{ image = .. }` 引用的（去重；
+        // 找不到的记 None，引用它的片段不可用）。
+        let plans: Vec<_> = v
             .decor
             .iter()
-            .filter_map(|d| Some((d, crate::theme_assets::asset_path(&self.theme, &d.image)?)))
+            .enumerate()
+            .filter_map(|(i, d)| {
+                let main = crate::theme_assets::asset_path(&self.theme, &d.image)?;
+                let mut names: Vec<&str> = Vec::new();
+                let clips =
+                    d.anim
+                        .states
+                        .iter()
+                        .map(|(_, c)| c)
+                        .chain(d.anim.on.iter().filter_map(|(_, a)| match a {
+                            DecorAction::Play { clip, .. } => Some(clip),
+                            DecorAction::State(_) => None,
+                        }));
+                for c in clips {
+                    if let DecorClip::Image(n) = c
+                        && !names.contains(&n.as_str())
+                    {
+                        names.push(n);
+                    }
+                }
+                let extra: Vec<(&str, Option<String>)> = names
+                    .into_iter()
+                    .map(|n| (n, crate::theme_assets::asset_path(&self.theme, n)))
+                    .collect();
+                // 关着动画也要解帧的唯一情形：初始状态从装饰文件的非 0 帧起。
+                let still_needs_frames = d.anim.initial.is_some_and(
+                    |s| matches!(d.anim.states[s].1, DecorClip::Frames { first, .. } if first > 0),
+                );
+                let decode_main = crate::view::image_is_animated(&main)
+                    && (self.anim_allowed || still_needs_frames);
+                let decode_extra: Vec<bool> = extra
+                    .iter()
+                    .map(|(_, p)| {
+                        self.anim_allowed
+                            && p.as_deref().is_some_and(crate::view::image_is_animated)
+                    })
+                    .collect();
+                Some((i, d, main, decode_main, extra, decode_extra))
+            })
             .collect();
-        // 动画帧预算按本变体的动画装饰均分，几个动画合计不超 24 MiB；不播放时一律按静态图。
-        let animated: Vec<bool> = decor
+        // 动画帧预算按本变体要解帧的文件均分，合计不超 24 MiB。
+        let n_anim: usize = plans
             .iter()
-            .map(|(_, path)| self.anim_allowed && crate::view::image_is_animated(path))
-            .collect();
-        let budget =
-            crate::image_cache::ANIM_BUDGET_BYTES / animated.iter().filter(|a| **a).count().max(1);
-        let decor = decor
+            .map(|(_, _, _, m, _, x)| *m as usize + x.iter().filter(|b| **b).count())
+            .sum();
+        let budget = crate::image_cache::ANIM_BUDGET_BYTES / n_anim.max(1);
+        let decor = plans
             .into_iter()
-            .zip(animated)
-            .filter_map(|((d, path), animated)| {
-                let (sw, sh) = crate::view::image_src_size(&path)?;
+            .filter_map(|(index, d, main, decode_main, extra, decode_extra)| {
+                let (sw, sh) = crate::view::image_src_size(&main)?;
                 let (w, h) = match d.size {
                     Some([w, h]) => (w * k, h * k),
                     None => {
@@ -544,13 +847,80 @@ impl CandidateWindow {
                     }
                 };
                 let (w, h) = (w.round().max(1.0) as u32, h.round().max(1.0) as u32);
-                let dk = w as f32 / sw.max(1) as f32;
-                let durations = animated
-                    .then(|| crate::view::anim_durations(&path, dk, w, h, d.fps, budget))
-                    .flatten();
-                Some(DecorGeom {
-                    path,
-                    k: dk,
+                // 每个源：路径、倍率、解帧结果。片段文件按装饰同一目标尺寸铺。
+                let source = |path: &str, decode: bool| {
+                    let sw = crate::view::image_src_size(path).map_or(sw, |(w, _)| w);
+                    let k = w as f32 / sw.max(1) as f32;
+                    let layout = decode
+                        .then(|| crate::view::anim_layout(path, k, w, h, d.fps, budget))
+                        .flatten();
+                    (k, layout)
+                };
+                let (main_k, main_layout) = source(&main, decode_main);
+                // 装饰文件的原始帧数：没解帧又是动图时不知道（只在关动画时出现，此时只用首帧）。
+                let main_raw = match &main_layout {
+                    Some(l) => Some(l.raw_frames),
+                    None if decode_main || !crate::view::image_is_animated(&main) => Some(1),
+                    None => None,
+                };
+                let mut sources = vec![DecorSource {
+                    path: main.clone(),
+                    k: main_k,
+                    animated: main_layout.is_some(),
+                }];
+                let mut layouts = vec![main_layout];
+                let mut extra_idx: Vec<(&str, Option<usize>)> = Vec::new();
+                for ((name, path), decode) in extra.into_iter().zip(decode_extra) {
+                    let Some(path) = path else {
+                        extra_idx.push((name, None));
+                        continue;
+                    };
+                    let (k, layout) = source(&path, decode);
+                    sources.push(DecorSource {
+                        path,
+                        k,
+                        animated: layout.is_some(),
+                    });
+                    layouts.push(layout);
+                    extra_idx.push((name, Some(sources.len() - 1)));
+                }
+                let clip_of = |c: &DecorClip, what: &dyn Fn() -> String| -> Option<ClipTl> {
+                    let tl = match c {
+                        DecorClip::Frames { first, last } => {
+                            frames_clip(*first, *last, layouts[0].as_ref(), main_raw)
+                        }
+                        DecorClip::Image(n) => extra_idx
+                            .iter()
+                            .find(|(x, _)| x == n)
+                            .and_then(|(_, si)| *si)
+                            .map(|si| ClipTl::whole(si, layouts[si].as_ref())),
+                    };
+                    if tl.is_none() {
+                        self.warn_skin_once(format!(
+                            "skin: 装饰 {} 的 {} 越界或文件缺失，忽略",
+                            d.image,
+                            what()
+                        ));
+                    }
+                    tl
+                };
+                let states = d
+                    .anim
+                    .states
+                    .iter()
+                    .map(|(n, c)| clip_of(c, &|| format!("states.{n}")))
+                    .collect();
+                let on = d
+                    .anim
+                    .on
+                    .iter()
+                    .map(|(ev, a)| match a {
+                        DecorAction::Play { clip, .. } => clip_of(clip, &|| format!("on.{ev:?}")),
+                        DecorAction::State(_) => None,
+                    })
+                    .collect();
+                let mut g = DecorGeom {
+                    index,
                     w,
                     h,
                     anchor: d.anchor,
@@ -561,9 +931,16 @@ impl CandidateWindow {
                     opacity: d.opacity,
                     fps: d.fps,
                     budget,
-                    durations,
-                    frame: 0,
-                })
+                    sources,
+                    base: ClipTl::whole(0, layouts[0].as_ref()),
+                    states,
+                    on,
+                    cur: (0, 0),
+                    still: (0, 0),
+                };
+                g.still = g.locate(crate::skin_anim::Machine::still(&d.anim, &g));
+                g.cur = g.still;
+                Some(g)
             })
             .collect();
         Some(SkinGeom {
@@ -809,8 +1186,7 @@ mod tests {
 
     fn decor(anchor: &str, pivot: Pos9, off: (f32, f32), w: u32, h: u32) -> DecorGeom {
         DecorGeom {
-            path: String::new(),
-            k: 1.0,
+            index: 0,
             w,
             h,
             anchor: Anchor::parse(anchor).unwrap(),
@@ -821,8 +1197,16 @@ mod tests {
             opacity: 1.0,
             fps: None,
             budget: 0,
-            durations: None,
-            frame: 0,
+            sources: vec![DecorSource {
+                path: String::new(),
+                k: 1.0,
+                animated: false,
+            }],
+            base: ClipTl::whole(0, None),
+            states: Vec::new(),
+            on: Vec::new(),
+            cur: (0, 0),
+            still: (0, 0),
         }
     }
 
@@ -1471,7 +1855,7 @@ mod tests {
         w.anim_start -= std::time::Duration::from_millis(150);
         let second = mask(&mut w);
         assert_eq!(
-            w.skin_geom.as_ref().unwrap().decor[0].frame,
+            w.skin_geom.as_ref().unwrap().decor[0].cur.1,
             1,
             "已换到第二帧"
         );
@@ -1497,12 +1881,355 @@ mod tests {
         }
         w.show();
         let g = w.skin_geom.as_ref().unwrap();
-        assert!(g.decor[0].durations.is_some());
-        assert!(g.decor[1].durations.is_none(), "单帧 GIF 按静态图画");
+        assert!(g.decor[0].sources[0].animated);
+        assert!(!g.decor[1].sources[0].animated, "单帧 GIF 按静态图画");
         assert_eq!(
             g.decor[0].budget,
             crate::image_cache::ANIM_BUDGET_BYTES,
             "唯一的动画独占预算"
         );
+    }
+
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    /// 各色在缓冲里的 BGRA。
+    const PX_RED: [u8; 4] = [0, 0, 255, 255];
+    const PX_GREEN: [u8; 4] = [0, 255, 0, 255];
+    const PX_BLUE: [u8; 4] = [255, 0, 0, 255];
+    const PX_WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    use std::time::{Duration, Instant};
+    use wind_theme::skin::RvDecorAnim;
+
+    /// 装饰是四帧 GIF（红 / 绿 / 蓝 / 白，各 100 ms），状态 `a` = 0-1、`b` = 2-3（初始 a）。
+    fn state_window(tag: &str, on: Vec<(DecorEvent, DecorAction)>) -> CandidateWindow {
+        state_window_with(tag, Some(0), on)
+    }
+
+    fn state_window_with(
+        tag: &str,
+        initial: Option<usize>,
+        on: Vec<(DecorEvent, DecorAction)>,
+    ) -> CandidateWindow {
+        let dir = fixture_dir(tag);
+        let gif = dir.join("decor.gif");
+        let frames = [(RED, 100), (GREEN, 100), (BLUE, 100), (WHITE, 100)];
+        std::fs::write(&gif, crate::image_cache::anim_fixtures::gif(6, 6, &frames)).unwrap();
+        let mut w = fixture_window_decor(&dir, &gif, None);
+        w.motion_allowed = || true;
+        let mut theme = w.theme_source.clone();
+        let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+        v.decor[0].anim = RvDecorAnim {
+            states: vec![
+                ("a".into(), DecorClip::Frames { first: 0, last: 1 }),
+                ("b".into(), DecorClip::Frames { first: 2, last: 3 }),
+            ],
+            initial,
+            on,
+        };
+        w.set_theme(theme);
+        w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
+        w
+    }
+
+    /// 处理一轮 UI 循环里的换帧重绘（同 manager）。
+    fn pump(w: &mut CandidateWindow) {
+        w.tick();
+        if w.take_anim_due() {
+            w.repaint_anim_frame(|w| w.show());
+        }
+    }
+
+    fn play(first: u32, last: u32, then: Option<usize>) -> DecorAction {
+        DecorAction::Play {
+            clip: DecorClip::Frames { first, last },
+            then,
+        }
+    }
+
+    #[test]
+    fn typing_switches_state_and_repaints() {
+        let mut w = state_window(
+            "sm-typing",
+            vec![(DecorEvent::Typing, DecorAction::State(1))],
+        );
+        w.show();
+        assert_eq!(decor_px(&w), PX_RED, "初始状态 a 的首帧");
+        w.note_skin_input("a", 1, false);
+        assert!(
+            w.next_deadline().is_some_and(|d| d <= Instant::now()),
+            "切了状态要立即醒来重绘"
+        );
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_BLUE, "状态 b 从第 2 帧起");
+        w.anim_start -= Duration::from_millis(150);
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(decor_px(&w), PX_WHITE, "b 在 2-3 之间循环");
+        w.anim_start -= Duration::from_millis(100);
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(decor_px(&w), PX_BLUE);
+    }
+
+    #[test]
+    fn input_diff_maps_to_typing_backspace_page_and_empty() {
+        use DecorEvent::*;
+        let on = vec![
+            (Typing, play(1, 1, None)),
+            (Backspace, play(2, 2, None)),
+            (Page, play(3, 3, None)),
+            (Empty, DecorAction::State(1)),
+        ];
+        let mut w = state_window("sm-diff", on);
+        w.show();
+        let step = |w: &mut CandidateWindow, pre: &str, page: usize, none: bool| {
+            w.note_skin_input(pre, page, none);
+            pump(w);
+            decor_px(w)
+        };
+        assert_eq!(step(&mut w, "ab", 1, false), PX_GREEN, "typing");
+        assert_eq!(step(&mut w, "a", 1, false), PX_BLUE, "前缀变短 = backspace");
+        assert_eq!(step(&mut w, "a", 2, false), PX_WHITE, "同编码换页 = page");
+        assert_eq!(
+            step(&mut w, "ac", 2, false),
+            PX_GREEN,
+            "改了一个字也是 typing"
+        );
+        assert_eq!(
+            step(&mut w, "acx", 1, true),
+            PX_BLUE,
+            "空码：typing 之后紧跟 empty，切到 b"
+        );
+    }
+
+    #[test]
+    fn commit_plays_clip_then_lands_on_state() {
+        let on = vec![(DecorEvent::Commit, play(3, 3, Some(1)))];
+        let mut w = state_window("sm-commit", on);
+        w.show();
+        w.skin_signal(wind_ui_types::SkinSignal::Commit);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_WHITE, "一次性片段");
+        assert!(
+            due_within(w.next_deadline(), Duration::from_millis(100)),
+            "片段播完的时刻"
+        );
+        w.anim_start -= Duration::from_millis(100);
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(decor_px(&w), PX_BLUE, "播完转 then = b");
+    }
+
+    #[test]
+    fn hidden_commit_lands_on_then_for_next_show() {
+        let on = vec![
+            (DecorEvent::Typing, DecorAction::State(1)),
+            (DecorEvent::Commit, play(3, 3, Some(0))),
+        ];
+        let mut w = state_window("sm-hidden", on);
+        w.show();
+        w.note_skin_input("a", 1, false);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_BLUE);
+        w.hide();
+        w.skin_signal(wind_ui_types::SkinSignal::Commit);
+        assert!(!w.take_anim_due(), "隐藏时不重绘");
+        w.show();
+        assert_eq!(decor_px(&w), PX_RED, "隐藏时片段丢弃、直接落到 then = a");
+    }
+
+    #[test]
+    fn mode_switch_ignores_first_toolbar_state() {
+        let on = vec![
+            (DecorEvent::ModeEn, DecorAction::State(1)),
+            (DecorEvent::ModeCn, DecorAction::State(0)),
+        ];
+        let mut w = state_window("sm-mode", on);
+        w.show();
+        w.note_skin_mode(false);
+        assert!(!w.take_anim_due(), "首次只记下");
+        assert_eq!(decor_px(&w), PX_RED);
+        w.note_skin_mode(false);
+        assert!(!w.take_anim_due(), "没变");
+        w.note_skin_mode(true);
+        w.note_skin_mode(false);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_BLUE, "切到英文");
+    }
+
+    #[test]
+    fn idle_seconds_after_last_event() {
+        let on = vec![
+            (DecorEvent::Typing, DecorAction::State(1)),
+            (DecorEvent::Idle(2), DecorAction::State(0)),
+        ];
+        let mut w = state_window("sm-idle", on);
+        w.show();
+        w.note_skin_input("a", 1, false);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_BLUE);
+        w.anim_start -= Duration::from_millis(2050);
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(decor_px(&w), PX_RED, "静默 2 秒回 a");
+    }
+
+    #[test]
+    fn idle_is_registered_as_wakeup() {
+        // 只有 idle 会动：初始状态是单帧。
+        let mut w = state_window_with(
+            "sm-idle-wake",
+            Some(0),
+            vec![(DecorEvent::Idle(1), DecorAction::State(1))],
+        );
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            v.decor[0].anim.states[0].1 = DecorClip::Frames { first: 0, last: 0 };
+            w.set_theme(theme);
+        }
+        w.show();
+        let d = w.next_deadline().expect("登记了 idle");
+        let left = d.saturating_duration_since(Instant::now());
+        assert!(left > Duration::from_millis(900) && left <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn click_on_decor_within_drag_threshold() {
+        let on = vec![(DecorEvent::Click, DecorAction::State(1))];
+        let mut w = state_window("sm-click", on);
+        w.show();
+        let (bw, _) = w.window.size();
+        let (x, y) = (bw as f32 - 2.0, 2.0);
+        {
+            let mut m = w.mouse.borrow_mut();
+            m.press_decor(x, y, (100, 100));
+            m.release_decor(x, y, (110, 100));
+            assert_eq!(m.skin_click, None, "挪过拖动阈值是拖动");
+            m.press_decor(x, y, (100, 100));
+            m.release_decor(x, y, (103, 97));
+            assert_eq!(m.skin_click, Some(0));
+        }
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_BLUE);
+        let mut m = w.mouse.borrow_mut();
+        m.press_decor(5.0, 30.0, (0, 0));
+        assert_eq!(m.decor_press, None, "窗体上按下不算装饰");
+    }
+
+    #[test]
+    fn pass_decor_is_not_clickable() {
+        let mut w = state_window("sm-click-pass", vec![]);
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            v.decor[0].hit = DecorHit::Pass;
+            w.set_theme(theme);
+        }
+        w.show();
+        assert!(w.mouse.borrow().skin_click_rects.is_empty());
+    }
+
+    #[test]
+    fn animation_off_freezes_initial_state_first_frame() {
+        let on = vec![(DecorEvent::Typing, DecorAction::State(0))];
+        let mut w = state_window_with("sm-off", Some(1), on);
+        w.set_theme_animation(false);
+        w.show();
+        assert_eq!(decor_px(&w), PX_BLUE, "初始状态 b 的首帧（第 2 帧）");
+        assert_eq!(w.next_deadline(), None, "不登记换帧");
+        w.note_skin_input("a", 1, false);
+        assert!(!w.take_anim_due(), "事件不切换");
+        w.show();
+        assert_eq!(decor_px(&w), PX_BLUE);
+        w.set_theme_animation(true);
+        assert!(w.take_anim_due(), "打开后就地重绘");
+        w.repaint_anim_frame(|w| w.show());
+        assert!(
+            due_within(w.next_deadline(), Duration::from_millis(100)),
+            "开始播放"
+        );
+    }
+
+    #[test]
+    fn system_reduced_motion_also_freezes_states() {
+        let on = vec![(DecorEvent::Typing, DecorAction::State(0))];
+        let mut w = state_window_with("sm-reduced", Some(1), on);
+        w.motion_allowed = || false;
+        w.show();
+        assert_eq!(decor_px(&w), PX_BLUE);
+        w.note_skin_input("a", 1, false);
+        assert!(!w.take_anim_due());
+    }
+
+    #[test]
+    fn out_of_range_state_is_dropped() {
+        let on = vec![(DecorEvent::Typing, DecorAction::State(1))];
+        let mut w = state_window("sm-range", on);
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            v.decor[0].anim.states[1].1 = DecorClip::Frames { first: 2, last: 9 };
+            w.set_theme(theme);
+        }
+        w.show();
+        w.note_skin_input("a", 1, false);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_RED, "越界的状态当作没写，仍在 a");
+    }
+
+    #[test]
+    fn frames_map_onto_kept_frames_after_budget_drop() {
+        use crate::image_cache::AnimLayout;
+        // 原始 6 帧、隔帧丢成 3 帧：保留的是原始 0 / 2 / 4。
+        let l = AnimLayout {
+            durations: vec![200, 200, 200],
+            stride: 2,
+            raw_frames: 6,
+        };
+        let c = |a, b| frames_clip(a, b, Some(&l), Some(6)).map(|c| (c.first, c.durations));
+        assert_eq!(c(2, 3), Some((1, vec![200])), "2-3 都落在保留的第 1 帧");
+        assert_eq!(c(1, 4), Some((0, vec![200, 200, 200])));
+        assert_eq!(c(5, 5), Some((2, vec![200])));
+        assert_eq!(c(4, 6), None, "越界");
+        assert!(
+            frames_clip(0, 0, None, Some(1)).is_some(),
+            "静态图只有第 0 帧"
+        );
+        assert!(frames_clip(1, 1, None, Some(1)).is_none());
+        assert!(
+            frames_clip(3, 5, None, None).is_some(),
+            "没解帧（关着动画）时不判越界"
+        );
+    }
+
+    #[test]
+    fn image_clip_plays_another_file() {
+        let mut w = state_window("sm-image", vec![]);
+        let other = fixture_dir("sm-image").join("other.gif");
+        let frames = [(GREEN, 100), (WHITE, 100)];
+        std::fs::write(
+            &other,
+            crate::image_cache::anim_fixtures::gif(6, 6, &frames),
+        )
+        .unwrap();
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            let clip = DecorClip::Image(other.to_string_lossy().into_owned());
+            v.decor[0].anim.on = vec![(DecorEvent::Commit, DecorAction::Play { clip, then: None })];
+            w.set_theme(theme);
+        }
+        w.show();
+        w.skin_signal(wind_ui_types::SkinSignal::Commit);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_GREEN, "另一个文件的首帧");
+        let g = w.skin_geom.as_ref().unwrap();
+        assert_eq!(g.decor[0].sources.len(), 2);
+        assert_eq!(
+            g.decor[0].budget,
+            crate::image_cache::ANIM_BUDGET_BYTES / 2,
+            "两个动图文件均分预算"
+        );
+        w.anim_start -= Duration::from_millis(250);
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(decor_px(&w), PX_RED, "播完回到 a");
     }
 }

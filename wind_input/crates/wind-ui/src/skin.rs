@@ -445,6 +445,16 @@ impl<T> FrameBudget<T> {
         self.stride > 1
     }
 
+    /// 每隔几帧留一帧：原始第 `i` 帧落在保留下来的第 `i / stride` 帧里。
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// 送入的原始帧数。
+    pub fn seen(&self) -> usize {
+        self.seen
+    }
+
     pub fn finish(self) -> Vec<(T, u32)> {
         self.frames
     }

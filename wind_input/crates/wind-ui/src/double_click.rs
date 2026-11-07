@@ -32,6 +32,20 @@ pub fn system_thresholds() -> (Duration, (i32, i32)) {
     }
 }
 
+/// 系统拖动阈值（`SM_CXDRAG` / `SM_CYDRAG`，像素）：按下后光标挪动不超过它算点击。
+pub fn drag_threshold() -> (i32, i32) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
+        unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) }
+    }
+    #[cfg(not(windows))]
+    {
+        // Windows 出厂值，非 Windows 上只有测试会走到。
+        (4, 4)
+    }
+}
+
 /// 最近一次单击，用于和下一次比对。
 #[derive(Debug, Default)]
 pub struct DoubleClick {

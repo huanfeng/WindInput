@@ -8,6 +8,13 @@ use crate::status_tip::StatusTipPlacement;
 use crate::toast::{ToastKind, ToastPosition};
 use crate::toolbar::{ToolbarItem, ToolbarState};
 
+/// 协调器发给皮肤装饰状态机的事件（其余事件渲染端自己从命令流里比出来）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkinSignal {
+    /// 真有文本上屏。
+    Commit,
+}
+
 /// UI 命令
 #[derive(Debug)]
 pub enum UiCommand {
@@ -201,6 +208,10 @@ pub enum UiCommand {
     SetCandidateOffset { x: i32, y: i32 },
     /// 候选窗是否画主题阴影（false=覆盖为无阴影）。来自 ui.candidate.shadow（"off"→false）。
     SetCandidateShadow(bool),
+    /// 是否播放主题动画（皮肤装饰）。来自 ui.theme.animation；关掉时装饰停在初始状态首帧。
+    SetThemeAnimation(bool),
+    /// 皮肤装饰事件里只有协调器知道的那几个（设计 `theme-skin-animation.md` §16）。仅桌面通道。
+    SkinSignal(SkinSignal),
     /// 翻页栏并入编码所在行右对齐显示（独立编码栏 / 内联编码两种落点）。来自 ui.candidate.pager_in_preedit。
     SetPagerInPreedit(bool),
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。

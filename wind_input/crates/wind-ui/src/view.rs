@@ -153,23 +153,19 @@ pub fn image_is_animated(path: &str) -> bool {
     IMAGE_CACHE.with(|c| c.borrow_mut().is_animated(path))
 }
 
-/// 动画装饰各帧时长（毫秒），见 [`crate::image_cache::ImageCache::anim_durations`]。
-pub fn anim_durations(
+/// 动画装饰的时间轴，见 [`crate::image_cache::ImageCache::anim_layout`]。
+pub fn anim_layout(
     path: &str,
     k: f32,
     w: u32,
     h: u32,
     fps: Option<f32>,
     budget: usize,
-) -> Option<Vec<u32>> {
-    IMAGE_CACHE.with(|c| {
-        c.borrow_mut()
-            .anim_durations(path, k, w, h, fps, budget)
-            .map(<[u32]>::to_vec)
-    })
+) -> Option<crate::image_cache::AnimLayout> {
+    IMAGE_CACHE.with(|c| c.borrow_mut().anim_layout(path, k, w, h, fps, budget))
 }
 
-/// 把动画装饰的第 `frame` 帧画到 `rect`（设备像素）。帧位图与 [`anim_durations`] 同键缓存。
+/// 把动画装饰的第 `frame` 帧画到 `rect`（设备像素）。帧位图与 [`anim_layout`] 同键缓存。
 #[allow(clippy::too_many_arguments)]
 pub fn paint_anim_frame(
     buf: &mut [u8],

@@ -428,6 +428,8 @@ impl UiManager {
                             caret_x,
                             caret_y
                         );
+                        // 皮肤装饰事件按原编码串比（宿主自绘编码时也照样打字）。
+                        candidate_window.note_skin_input(&preedit, page, candidates.is_empty());
                         // 编码区归宿主画时，候选窗拿到数据也不显示——数据恒下发，
                         // 显示与否由这个标志决定（数据/渲染解耦，见 UiCommand 注释）。
                         let preedit = if preedit_host_owned {
@@ -860,6 +862,7 @@ impl UiManager {
                     }
                     UiCommand::UpdateToolbar(tb_state) => {
                         debug!("UI: UpdateToolbar {:?}", tb_state);
+                        candidate_window.note_skin_mode(tb_state.chinese_mode);
                         // 传当前可见性：**内容更新与可见性提升是两件事**。本命令同时承担
                         // 「更新中英·标点·全半角」与「让工具栏出现」，整条延迟会让已显示
                         // 时按 Shift 切中英也慢一档，手感明显退化。
@@ -1042,6 +1045,12 @@ impl UiManager {
                     }
                     UiCommand::SetCandidateOffset { x, y } => {
                         candidate_window.set_user_offset(x, y);
+                    }
+                    UiCommand::SetThemeAnimation(on) => {
+                        candidate_window.set_theme_animation(on);
+                    }
+                    UiCommand::SkinSignal(sig) => {
+                        candidate_window.skin_signal(sig);
                     }
                     UiCommand::SetCandidateShadow(on) => {
                         candidate_window.set_theme_shadow(on);

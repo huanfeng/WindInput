@@ -288,6 +288,18 @@ pub const ANIM_BUDGET_BYTES: usize = 24 * 1024 * 1024;
 struct Anim {
     frames: Vec<Pixmap>,
     durations: Vec<u32>,
+    /// 降帧步长与原始帧数，见 [`AnimLayout`]。
+    stride: usize,
+    raw_frames: usize,
+}
+
+/// 动画的时间轴：保留下来的各帧时长（毫秒），以及原始帧号到保留帧的映射
+/// （原始第 `i` 帧 = 保留的第 `i / stride` 帧）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnimLayout {
+    pub durations: Vec<u32>,
+    pub stride: usize,
+    pub raw_frames: usize,
 }
 
 /// 同一源下的动画键：倍率百万分值、目标宽高、fps 覆盖的位模式（0 = 不覆盖）、帧预算份额。
@@ -745,6 +757,23 @@ impl ImageCache {
             .map(|a| a.durations.as_slice())
     }
 
+    /// 同 [`Self::anim_durations`]，另带降帧映射。
+    pub fn anim_layout(
+        &mut self,
+        path: &str,
+        k: f32,
+        w: u32,
+        h: u32,
+        fps: Option<f32>,
+        budget: usize,
+    ) -> Option<AnimLayout> {
+        self.anim(path, k, w, h, fps, budget).map(|a| AnimLayout {
+            durations: a.durations.clone(),
+            stride: a.stride,
+            raw_frames: a.raw_frames,
+        })
+    }
+
     /// 动画装饰的第 `idx` 帧（对帧数取模）。
     #[allow(clippy::too_many_arguments)]
     pub fn anim_frame(
@@ -1037,6 +1066,7 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
         });
     }
     let dropped = acc.dropped();
+    let (stride, raw_frames) = (acc.stride(), acc.seen());
     let (frames, durations): (Vec<Pixmap>, Vec<u32>) = acc.finish().into_iter().unzip();
     tracing::debug!(
         "skin: 动画建帧 {} 帧 {w}x{h}，耗时 {:?}",
@@ -1054,7 +1084,12 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
             brief(path)
         );
     }
-    Some(Anim { frames, durations })
+    Some(Anim {
+        frames,
+        durations,
+        stride,
+        raw_frames,
+    })
 }
 
 /// 按 `spec` 把源图（`(sw, sh, RGBA8)`，`premult` 标明是否已预乘）采样进 `w×h` 的目标像素。
@@ -1280,6 +1315,15 @@ mod tests {
             frame_px(&mut c, &uri, 128, 1),
             [255, 0, 0, 255],
             "留下的是蓝帧"
+        );
+        assert_eq!(
+            c.anim_layout(&uri, 1.0, 4, 4, None, 128),
+            Some(AnimLayout {
+                durations: vec![300, 700],
+                stride: 2,
+                raw_frames: 4
+            }),
+            "原始第 i 帧落在保留的第 i/2 帧"
         );
     }
 

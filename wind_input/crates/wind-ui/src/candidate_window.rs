@@ -496,8 +496,21 @@ pub struct CandidateWindow {
     pass_window_failed: bool,
     /// 系统是否允许界面动画，默认 [`system_allows_animation`]；测试换桩。
     motion_allowed: fn() -> bool,
-    /// 上一次读到的 [`Self::motion_allowed`]：换主题与每次显示时刷新。关着时装饰停在首帧。
+    /// `ui.theme.animation`（缺省开）。
+    theme_animation: bool,
+    /// 播不播动画：[`Self::theme_animation`] 且 [`Self::motion_allowed`]，换主题与每次显示时
+    /// 刷新。关着时装饰停在初始状态首帧，事件不切换。
     anim_allowed: bool,
+    /// 皮肤装饰的事件状态机，按当前变体的装饰下标一块一台（见 [`crate::skin_anim`]）。
+    decor_anims: Vec<crate::skin_anim::Machine>,
+    /// [`Self::decor_anims`] 对应的变体（竖排, 嵌入）；None = 待重建。
+    decor_anims_key: Option<(bool, bool)>,
+    /// 上一次候选更新的（编码串, 页码, 空码）：比出 typing / backspace / page / empty。隐藏时清。
+    skin_input_prev: Option<(String, usize, bool)>,
+    /// 上一次工具栏的中英状态：比出 mode_cn / mode_en。
+    skin_mode_prev: Option<bool>,
+    /// 已报过的皮肤片段告警（每帧都重求几何，同一条只报一次；换主题清）。
+    skin_warned: RefCell<std::collections::HashSet<String>>,
     /// 装饰动画的时间轴起点：由隐藏变可见时记。
     anim_start: Instant,
     /// 下一次换帧时刻；None = 本帧没有在播的动画。隐藏时清空。
@@ -613,6 +626,9 @@ impl CandidateWindow {
             hit_rects: Vec::new(),
             skin_frame: None,
             skin_decor: Vec::new(),
+            skin_click_rects: Vec::new(),
+            decor_press: None,
+            skin_click: None,
             pass_hwnd: None,
             events,
             last_hover: -1,
@@ -681,7 +697,13 @@ impl CandidateWindow {
             pass_presented: None,
             pass_window_failed: false,
             motion_allowed: system_allows_animation,
+            theme_animation: true,
             anim_allowed: system_allows_animation(),
+            decor_anims: Vec::new(),
+            decor_anims_key: None,
+            skin_input_prev: None,
+            skin_mode_prev: None,
+            skin_warned: RefCell::new(std::collections::HashSet::new()),
             anim_start: Instant::now(),
             anim_next: None,
             anim_due: false,
@@ -1481,9 +1503,11 @@ impl CandidateWindow {
 
     /// 应用主题（协调器下发）。同步更新悬停 tooltip 配色。
     pub fn set_theme(&mut self, theme: wind_theme::Resolved) {
-        self.anim_allowed = (self.motion_allowed)();
+        self.refresh_anim_allowed();
         if self.theme_source.skin != theme.skin {
             crate::view::clear_anim_frames();
+            self.decor_anims_key = None;
+            self.skin_warned.borrow_mut().clear();
         }
         self.theme_source = theme;
         self.refresh_effective_theme();
@@ -1849,6 +1873,10 @@ impl CandidateWindow {
                 .skin_geom
                 .as_ref()
                 .map_or_else(Vec::new, |g| g.no_drag_rects());
+            m.skin_click_rects = self
+                .skin_geom
+                .as_ref()
+                .map_or_else(Vec::new, |g| g.click_rects());
             // 换帧重绘时内容没变，悬停去重基线保持原样。
             if !self.anim_repaint {
                 m.last_hover = -1;
@@ -2073,6 +2101,10 @@ impl CandidateWindow {
                 .skin_geom
                 .as_ref()
                 .map_or_else(Vec::new, |g| g.no_drag_rects());
+            m.skin_click_rects = self
+                .skin_geom
+                .as_ref()
+                .map_or_else(Vec::new, |g| g.click_rects());
             // 换帧重绘时内容没变，悬停去重基线保持原样。
             if !self.anim_repaint {
                 m.last_hover = -1;
@@ -2312,6 +2344,10 @@ impl CandidateWindow {
                 .skin_geom
                 .as_ref()
                 .map_or_else(Vec::new, |g| g.no_drag_rects());
+            m.skin_click_rects = self
+                .skin_geom
+                .as_ref()
+                .map_or_else(Vec::new, |g| g.click_rects());
             // 换帧重绘时内容没变，悬停去重基线保持原样。
             if !self.anim_repaint {
                 m.last_hover = -1;
@@ -5010,7 +5046,9 @@ impl CandidateWindow {
         }
         if self.visible {
             self.pixel_release.hidden(Instant::now());
+            self.skin_event(wind_theme::skin::DecorEvent::Hide, None);
         }
+        self.skin_input_prev = None;
         self.visible = false;
         self.anim_next = None;
         self.anim_due = false;
@@ -5075,6 +5113,10 @@ impl CandidateWindow {
                 self.update_tooltip(wx, wy);
             }
         }
+        let click = self.mouse.borrow_mut().skin_click.take();
+        if let Some(i) = click {
+            self.skin_event(wind_theme::skin::DecorEvent::Click, Some(i));
+        }
         if self.visible && self.anim_next.is_some_and(|t| t <= now) {
             self.anim_next = None;
             self.anim_due = true;
@@ -5131,8 +5173,9 @@ impl CandidateWindow {
             hold,
             m.deferred,
             self.pixel_release.deadline(),
-            // 装饰换帧：只在可见时登记。
+            // 装饰换帧：只在可见时登记；事件切了画面待重绘时立即醒。
             self.anim_next.filter(|_| self.visible),
+            self.anim_due.then(Instant::now),
         ]
         .into_iter()
         .flatten()
@@ -5180,6 +5223,12 @@ pub struct CandidateMouse {
     /// 皮肤：窗体矩形与装饰矩形（窗口坐标）。落在装饰上、又不在窗体内的点不起拖。
     skin_frame: Option<Rect>,
     skin_decor: Vec<Rect>,
+    /// 能点的皮肤装饰（`drag` / `block`）：(变体下标, 矩形, 在窗体下面)，按 z 升序。
+    skin_click_rects: Vec<(usize, Rect, bool)>,
+    /// 左键按下时落在哪块装饰上，与当时的光标屏幕坐标。
+    decor_press: Option<(usize, (i32, i32))>,
+    /// 一次装饰点击（按下后没挪过拖动阈值就松开），待 [`CandidateWindow::tick`] 取走。
+    skin_click: Option<usize>,
     /// 皮肤穿透窗口：拖动时跟着主窗口一起挪。
     pass_hwnd: Option<HWND>,
     events: Sender<UiEvent>,
@@ -5537,6 +5586,7 @@ impl CandidateMouse {
         self.dragging = false;
         self.drag_pin = None;
         self.pressed = None;
+        self.decor_press = None;
     }
 
     fn hit(&self, x: f32, y: f32) -> i32 {
@@ -5548,11 +5598,50 @@ impl CandidateMouse {
         -1
     }
 
+    /// 点中的装饰（变体下标）：最上层的 `drag` / `block` 装饰；窗体下面的装饰被窗体盖住处不算。
+    fn decor_at(&self, x: f32, y: f32) -> Option<usize> {
+        let in_frame = self.skin_frame.is_some_and(|f| f.contains(x, y));
+        self.skin_click_rects
+            .iter()
+            .rev()
+            .find(|(_, r, under)| r.contains(x, y) && !(*under && in_frame))
+            .map(|(i, _, _)| *i)
+    }
+
+    /// 左键按下：记下按在哪块装饰上。
+    fn press_decor(&mut self, x: f32, y: f32, screen: (i32, i32)) {
+        self.decor_press = self.decor_at(x, y).map(|i| (i, screen));
+    }
+
+    /// 左键松开：按下与松开在同一块装饰上、光标没挪过拖动阈值，算一次装饰点击。
+    fn release_decor(&mut self, x: f32, y: f32, screen: (i32, i32)) {
+        if let Some((i, p0)) = self.decor_press.take()
+            && within_drag_threshold(p0, screen, crate::double_click::drag_threshold())
+            && self.decor_at(x, y) == Some(i)
+        {
+            self.skin_click = Some(i);
+        }
+    }
+
     /// 点落在 `block` 装饰上、且不在窗体内：贴纸式装饰，不拖动窗口（设计 §4）。
     fn on_decor_only(&self, x: f32, y: f32) -> bool {
         let in_frame = self.skin_frame.is_some_and(|f| f.contains(x, y));
         !in_frame && self.skin_decor.iter().any(|r| r.contains(x, y))
     }
+}
+
+/// 光标从 `a` 到 `b` 没超出拖动阈值 `(tx, ty)`（系统 `SM_CXDRAG` / `SM_CYDRAG` 口径）。
+fn within_drag_threshold(a: (i32, i32), b: (i32, i32), (tx, ty): (i32, i32)) -> bool {
+    (b.0 - a.0).abs() <= tx && (b.1 - a.1).abs() <= ty
+}
+
+/// 光标屏幕坐标。
+fn cursor_pos() -> (i32, i32) {
+    let mut p = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut p);
+    }
+    (p.x, p.y)
 }
 
 /// 候选窗左键点选：按下记的命中 `pressed` 与松开处的命中 `hit` 是同一项才动作。
@@ -5590,7 +5679,15 @@ impl WindowMouse for CandidateMouse {
                             SetCapture(self.hwnd);
                         }
                     }
-                    _ if self.on_decor_only(x, y) => {}
+                    // 贴纸式装饰不拖窗口；按下只记下来，松开时判是不是一次点击。
+                    _ if self.on_decor_only(x, y) => {
+                        self.press_decor(x, y, cursor_pos());
+                        if self.decor_press.is_some() {
+                            unsafe {
+                                SetCapture(self.hwnd);
+                            }
+                        }
+                    }
                     _ => {
                         // 空白区（编码栏/内边距，非候选非翻页键）→ 起拖，整窗跟随光标。
                         // 与工具栏同构：记录光标与窗口起点，SetCapture 保证移出窗口后仍收到消息。
@@ -5601,6 +5698,8 @@ impl WindowMouse for CandidateMouse {
                         self.drag_anchor = (p.x, p.y);
                         self.drag_origin = self.window_origin().unwrap_or((p.x, p.y));
                         self.dragging = true;
+                        // 按在 drag 装饰上：没挪过拖动阈值就松开算点它一下。
+                        self.press_decor(x, y, (p.x, p.y));
                         unsafe {
                             SetCapture(self.hwnd);
                         }
@@ -5614,6 +5713,8 @@ impl WindowMouse for CandidateMouse {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
+                    let (x, y) = mouse_pos(lparam);
+                    self.release_decor(x, y, cursor_pos());
                     // 双击判定：只收「按下到松开窗口没挪」的空白处单击——拖过一下的不算，
                     // 否则拖完紧跟一次点击也会截图。候选项 / 翻页键走下面的 else，不经这里。
                     let (interval, slop) = crate::double_click::system_thresholds();
@@ -5652,6 +5753,7 @@ impl WindowMouse for CandidateMouse {
                         let _ = ReleaseCapture();
                     }
                     let (x, y) = mouse_pos(lparam);
+                    self.release_decor(x, y, cursor_pos());
                     if let Some(p) = click_on_release(self.pressed.take(), self.hit(x, y)) {
                         let ev = match p {
                             TAG_PAGE_PREV => UiEvent::Page(-1),
@@ -8910,6 +9012,9 @@ mod tip_hold_tests {
             hit_rects: vec![(0, r(0.0)), (1, r(20.0))],
             skin_frame: None,
             skin_decor: Vec::new(),
+            skin_click_rects: Vec::new(),
+            decor_press: None,
+            skin_click: None,
             pass_hwnd: None,
             events: tx,
             last_hover: -1,

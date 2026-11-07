@@ -738,6 +738,7 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.font.scripts", Map(FONT_SCRIPT_KEYS)),
     f("ui.theme.name", Str),
     f("ui.theme.style", Str),
+    f("ui.theme.animation", Bool),
     f("ui.mode_indicator.style", Enum(&["short", "full", "none"])),
     f("ui.tooltip.enabled", Bool),
     f("ui.tooltip.delay", Int),

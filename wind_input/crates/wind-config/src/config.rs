@@ -7614,6 +7614,10 @@ pub struct UiThemeConfig {
     pub name: String,
     #[serde(default)]
     pub style: String,
+    /// 播放主题动画（皮肤装饰的动图与事件切换）。关掉时装饰停在初始状态首帧；系统关了动画
+    /// 效果时同样不播。与上面两项不同，字段级缺省就是 true（没有旧版迁移要兜）。
+    #[serde(default = "default_true")]
+    pub animation: bool,
 }
 
 // 手写 Default：仅供 Config::default()（getDefaults/恢复本页）给出有效初值，
@@ -7623,6 +7627,7 @@ impl Default for UiThemeConfig {
         Self {
             name: "default".to_string(),
             style: "system".to_string(),
+            animation: true,
         }
     }
 }

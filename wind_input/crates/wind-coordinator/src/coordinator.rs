@@ -5876,6 +5876,10 @@ impl Coordinator {
         let _ = self
             .ui_tx
             .send(UiCommand::SetCandidateShadow(cand.shadow != "off"));
+        // 主题动画开关（ui.theme.animation）
+        let _ = self.ui_tx.send(UiCommand::SetThemeAnimation(
+            bundle.config.ui.theme.animation,
+        ));
         // 候选窗尺寸下限（ui.candidate.min_window_width_* / min_window_height_* / min_rows，抗抖动）
         self.send_candidate_min_size();
         // 悬停提示延迟（ui.tooltip.delay）
