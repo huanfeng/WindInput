@@ -59,16 +59,17 @@ double spotScaleForGnomeExt(double clientSf, double x11BufScale, double outputSc
     const double sf = clientSf > 0.01 ? clientSf : 1.0;
     const double buf = x11BufScale > 0.0 ? x11BufScale : 1.0;
     const double out = outputScale > 0.01 ? outputScale : buf;
-    // scale-monitor-framebuffer 下 St 主题 scale 多为 1；toX11 再用扩展回包的 shellScale。
-    constexpr double kShellHint = 1.0;
-    if (sf > 1.01 && std::fabs(sf - buf) <= 0.25) {
-        return sf; // 已按缓冲缩放预乘
+    (void)buf;
+    // GTK3/GTK4/Qt 报的 RelativeRect 都已按自身 sf 预乘（fcitx5-gtk / fcitx5-qt 上游），kimpanel
+    // 扩展也一律用客户端 sf 当除数。显示器 150% 时 GTK3 报整数 2、缓冲缩放可能是 1，同样按 sf 除。
+    if (sf > 1.01) {
+        return sf;
     }
-    // sf≤1.01 且非 ibus，与「sf>1.01 但不贴近缓冲缩放」都按主题 scale 1，合成一条。
-    if (sf <= 1.01 && frontend && std::strcmp(frontend, "ibus") == 0) {
+    // sf≤1.01 的 ibus：相对矩形常已 ×输出缩放却没带 scale。
+    if (frontend && std::strcmp(frontend, "ibus") == 0) {
         return out;
     }
-    return kShellHint;
+    return 1.0;
 }
 
 CaretPx scaleRectToX11(int left, int top, int height, double mul)

@@ -22,9 +22,9 @@ bool xdgCurrentDesktopIsGnome(const char* xdgCurrentDesktop);
 bool isX11PanelFallbackFrontend(const char* frontend);
 
 /// 扩展公式 `coord * (shellScale / spotScale)` 的除数：声明客户端矩形所在坐标系。
-/// - sf 贴近 Xft 缓冲缩放：矩形已预乘，除数就是 sf；
+/// - sf>1.01：矩形已按 sf 预乘（GTK3/GTK4/Qt 都这样报，与 kimpanel 一致），除数就是 sf；
 /// - sf≤1.01 且 frontend 为 ibus：相对矩形常已 ×输出缩放，却没带 scale；
-/// - 其余（sf≤1.01 的其它前端，以及 sf>1 但不贴近缓冲缩放的逻辑 DIP）主题 scale 按 1。
+/// - 其余按 1。`x11BufScale` 保留在签名里，不参与判定。
 double spotScaleForGnomeExt(double clientSf, double x11BufScale, double outputScale,
                             const char* frontend);
 

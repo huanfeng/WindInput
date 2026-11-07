@@ -187,23 +187,23 @@ int main()
         {"sf≈1 fcitx4：主题 scale 1", 1.0, 2.0, 2.0, "fcitx4", 1.0},
         {"sf≈1 未知前端：主题 scale 1", 1.0, 2.0, 2.0, "xim", 1.0},
         {"sf≈1 frontend 空", 1.0, 2.0, 2.0, nullptr, 1.0},
-        {"逻辑 DIP：sf>1 且不像缓冲缩放 → 1（与 sf≈1 非 ibus 同值）", 1.5, 2.0, 1.5, "dbus", 1.0},
-        {"逻辑 DIP：ibus 也不改用输出缩放", 1.5, 2.0, 1.5, "ibus", 1.0},
+        {"sf>1 不贴近缓冲缩放：仍按预乘用 sf", 1.5, 2.0, 1.5, "dbus", 1.5},
+        {"sf>1 的 ibus：用 sf，不用输出缩放", 1.5, 2.0, 1.5, "ibus", 1.5},
+        {"显示器 150%、GTK3 整数 sf2、缓冲缩放 1：用 sf", 2.0, 1.0, 1.5, "dbus", 2.0},
         {"sf 缺失当 1：dbus → 1", 0.0, 2.0, 1.5, "dbus", 1.0},
         {"sf 缺失当 1：ibus → 输出缩放", 0.0, 2.0, 1.5, "ibus", 1.5},
-        {"缓冲缩放缺失当 1：sf=2 不贴近 → 1", 2.0, 0.0, 1.5, "dbus", 1.0},
+        {"缓冲缩放缺失：sf=2 仍用 sf", 2.0, 0.0, 1.5, "dbus", 2.0},
         {"sf 刚好 1.01：仍算 ≤1.01，ibus 用输出", 1.01, 2.0, 1.25, "ibus", 1.25},
-        {"sf 刚超过 1.01 且远离 buf：DIP → 1", 1.02, 2.0, 1.25, "fcitx4", 1.0},
+        {"sf 刚超过 1.01 且远离 buf：用 sf", 1.02, 2.0, 1.25, "fcitx4", 1.02},
         {"sf 刚超过 1.01 且贴近 buf：预乘", 2.2, 2.0, 1.25, "dbus", 2.2},
     };
     for (const Spot& s : spots) {
         testharness::g_case = s.name;
         checkNear(s.name, spotScaleForGnomeExt(s.sf, s.buf, s.out, s.fe), s.expect);
     }
-    // 审查指出的两条冗余分支：返回值相同，合成后仍锁住。
-    CASE("spotScale：sf≤1.01 非 ibus 与逻辑 DIP 都是 1");
+    CASE("spotScale：sf≤1.01 非 ibus 是 1，sf>1 一律是 sf");
     checkNear("sf1 dbus", spotScaleForGnomeExt(1.0, 2.0, 1.5, "dbus"), 1.0);
-    checkNear("dip dbus", spotScaleForGnomeExt(1.5, 2.0, 1.5, "dbus"), 1.0);
+    checkNear("sf1.5 dbus", spotScaleForGnomeExt(1.5, 2.0, 1.5, "dbus"), 1.5);
 
     CASE("windowRel：无扩展折中，sf≤1.01 不乘缓冲缩放");
     checkPx("sf1", windowRelCaretToX11(10, 20, 18, 1.0, 2.0), 10, 20, 18);
@@ -374,6 +374,13 @@ int main()
                 90, 36);
         checkPx("无扩展 RelativeRect 预乘", windowRelCaretToX11(20, 40, 36, 2.0, buf), 20, 40, 36);
         checkPx("无扩展 绝对坐标", absoluteCaretToX11(10, 20, 18, 1.0, buf), 20, 40, 36);
+    }
+
+    CASE("端到端：显示器 150%、Xwayland 缓冲缩放 1，GTK3 报 sf2（.55 gedit 实抓）");
+    {
+        // 最大化 gedit：窗口原点在工作区左上 (70,27)；SetCursorRectV2(104,228,0,36, 2.0)
+        checkPx("有扩展", viaExtension(104, 228, 36, 2.0, 1.0, 1.5, "dbus", 1.0, 70, 27), 122, 141, 18);
+        checkPx("无扩展 RelativeRect", windowRelCaretToX11(104, 228, 36, 2.0, 1.0), 52, 114, 18);
     }
 
     TEST_MAIN_END()
