@@ -28,11 +28,13 @@ inline bool ShouldEatNumberKey(bool hasInputSession, bool chineseMode, bool full
     return hasInputSession || (chineseMode && fullWidth) || (chineseMode && spaceBeforeDigit);
 }
 
-/// 汉字后的数字要不要吃下交给服务端补空格。只认主键盘、不带修饰、CapsLock 关——与服务端那条
-/// 出字臂的判据逐条对应（小键盘、Shift+数字不在其列）。
+/// 汉字后的数字要不要吃下交给服务端补空格。主键盘与小键盘的 0-9（`VK_NUMPAD0..9` = 0x60..0x69）、
+/// 不带修饰、CapsLock 关——与服务端 `digit_after_cjk_outputs` 的判据逐条对应（小键盘 direct 档
+/// 在服务端那条臂出字，follow_main 档被改写成主键盘键后走主键盘那条臂）。运算符、Shift+数字不在其列。
 inline bool SpaceBeforeDigit(bool enabled, bool seqIsCjk, unsigned vk, bool anyModifier, bool capsLock)
 {
-    return enabled && seqIsCjk && vk >= '0' && vk <= '9' && !anyModifier && !capsLock;
+    const bool digit = (vk >= '0' && vk <= '9') || (vk >= 0x60 && vk <= 0x69);
+    return enabled && seqIsCjk && digit && !anyModifier && !capsLock;
 }
 
 } // namespace numberkey

@@ -264,6 +264,42 @@ fn digit_after_cjk_is_output_and_spaced() {
     }
 }
 
+/// 小键盘数字同主键盘：两种小键盘档位（direct 出厂 / follow_main）汉字后都出字补空格；
+/// 开关关着时 macOS / Linux 照旧透传。运算符不在其列。
+#[test]
+fn numpad_digit_after_cjk_is_output_and_spaced() {
+    if !ready() {
+        return;
+    }
+    const VK_NUMPAD3: u32 = 0x63;
+    const VK_ADD: u32 = 0x6B;
+    for behavior in ["direct", "follow_main"] {
+        let mut cfg = config(false, true);
+        cfg.input.numpad_behavior = behavior.into();
+        let h = Host::new(cfg.clone());
+        h.wubi("aaaa");
+        match h.key(VK_NUMPAD3, 0) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, " 3", "{behavior}"),
+            other => panic!("{behavior}: 汉字后的小键盘数字应出字，实际 {other:?}"),
+        }
+        let h = Host::new(cfg.clone());
+        h.wubi("aaaa");
+        assert!(
+            !matches!(&h.key(VK_ADD, 0), KeyAction::InsertText { text, .. } if text.starts_with(' ')),
+            "{behavior}: 运算符不补空格"
+        );
+        if !cfg!(windows) {
+            cfg.input.spacing.cjk_digit = false;
+            let h = Host::new(cfg);
+            h.wubi("aaaa");
+            assert!(
+                matches!(h.key(VK_NUMPAD3, 0), KeyAction::PassThrough),
+                "{behavior}: 开关关着应透传"
+            );
+        }
+    }
+}
+
 /// 上一笔不是汉字时，空闲数字照旧透传（DLL 也不会交过来）。
 #[test]
 fn digit_after_latin_still_passes_through() {

@@ -53,6 +53,25 @@ impl Coordinator {
             != Some(false)
     }
 
+    /// 空闲的数字键（主键盘，或 direct 档的小键盘）是否因「汉字后补空格」由输入法出字。
+    ///
+    /// Windows：DLL 只在它判定要补空格时才把空闲数字吃下交过来（`NumberKeyPolicy.h` 的
+    /// `SpaceBeforeDigit`，条件与这里逐条对应），这里**不看**开关恒出字——DLL 手上的开关可能
+    /// 慢一拍，吃了键这边却不出字就是丢键（「C++ 吃键集 ⊆ Rust 出字集」）。
+    /// macOS / Linux：客户端每个键都发过来、按回复决定透传，必须看开关与应用规则——否则开关
+    /// 关着时汉字后的数字也被输入法接管，不再交给宿主（数字当快捷键的场景）。
+    pub(crate) fn digit_after_cjk_outputs(&self, state: &State, data: &KeyEventData) -> bool {
+        data.modifiers == 0
+            && state.chinese_mode
+            && !state.full_width
+            && !state.caps_lock
+            && !Self::has_input_session(state)
+            && wind_punct::spacing::classify_unit(data.seq_char)
+                == wind_punct::spacing::CharClass::Cjk
+            && (cfg!(windows)
+                || (self.rt().config.input.spacing.cjk_digit && self.auto_spacing_allowed_here()))
+    }
+
     /// 统一出口：按交界给本笔上屏文本补前缀空格，并把「插入点前一字符」推进到本笔末尾。
     pub(crate) fn apply_auto_spacing(&self, state: &mut State, mut action: KeyAction) -> KeyAction {
         if let KeyAction::ReplaceBackward { text, .. }

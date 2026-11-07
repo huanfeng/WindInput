@@ -64,6 +64,9 @@ uint16_t seqChar;  // 输入序列里最近进文档的字符（代表值），0
   一概不管，切回中文时才补。
   - 中文方案主路径里混入的英文词库候选（码表 / 拼音的英文候选）跟随临英那份开关（用户定，2026-11-07）：
     与临英、快捷输入同属「中文里插一个英文词」。原码、短语不算；快捷输入有自己的出口，不重复补。
+  - 英文词后要接标点时用标点**顶屏**（`hello` + `,`），标点紧贴单词、不带尾随空格；`commit_space` 只在选词
+    上屏时补。选词上屏后（已带尾随空格）再按标点**不换位**（用户定，2026-11-07），得 `hello ，`。
+    测试钉在 `auto_spacing.rs` 的 `punct_top_commit_after_english_word_has_no_space`。
   - 曾试过「词间空格也改成补在下一个词前面」：上屏后看不出接下来会不会补，实测体验不可预期，已撤回。
 - 统一出口：`handle_key_event_policed`（桌面按键）与 `select_candidate_at`（鼠标点选、移动端候选栏）的动作
   做一次后处理，给 `InsertText` / `InsertTextWithCursor` / `CommitAndHoldComposition.commit_text` /
@@ -86,12 +89,14 @@ Markdown 编辑器、终端、代码编辑器。
   「序列末字符是汉字且对应开关开」时吃下该键交给服务端出 `" 3"` / `" h"`，受
   「C++ 吃键集 ⊆ Rust 出字集」约束，开关要推给 DLL。
   - 数字（Windows 已做）：开关经 `CONFIG_KEY_SPACE_BEFORE_DIGIT` 按客户端推（全局 `cjk_digit` 且应用未关）；
-    DLL 只吃主键盘、无修饰、CapsLock 关的数字（`NumberKeyPolicy.h`）。Windows 下服务端对「`seq_char` 是汉字的
+    DLL 只吃主键盘与小键盘的 0-9、无修饰、CapsLock 关（`NumberKeyPolicy.h`）。Windows 下服务端对「`seq_char` 是汉字的
     空闲数字键」**恒出字**、不看开关——DLL 的开关慢一拍时最多少补一个空格，不会丢键。
     macOS / Linux 客户端每个键都发给服务端、按回复决定透传，所以那里这条臂**必须看开关**（及应用规则）：
     关着时照旧透传，汉字后的数字仍交给宿主（数字当快捷键的场景不受影响）；开着时顺带也就补上了空格。
-    小键盘未做。
-  - 英文模式首字母：未做。
+    判据单点在 `Coordinator::digit_after_cjk_outputs`，三处出字：主键盘数字臂、小键盘 direct 臂、
+    follow_main 归一化后的小键盘闸（它把数字也当 `punct_char` 先截住，要单独放行）。运算符不在其列。
+  - 英文模式首字母：**不做**（用户定，2026-11-07）：主场景是中文里穿插英文；英文模式下吃字母会让
+    vim、游戏、快捷键多的程序出异常。
 
 ### 3.4 客户端不可知时（退格、方向键……）
 
