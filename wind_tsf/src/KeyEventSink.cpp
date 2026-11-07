@@ -504,6 +504,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     if (_assocBareEndPending)
     {
         _assocBareEndPending = FALSE;
+        _EndAssocBareSession();
         if (!_pTextService->HasActiveComposition() && !_hasCandidates)
             _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
     }
@@ -2665,6 +2666,8 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
     case ResponseType::PassThrough:
         // PassThrough means key was NOT handled, pass to system
         WIND_LOG_DEBUG(L"PassThrough: key not handled, passing to system\n");
+        // 服务端在无占位联想期间不会回 PassThrough（已被改判成收口），收到它就说明服务端已不在联想态。
+        _EndAssocBareSession();
         _pTextService->FlushHoldCompositionIfActive(_inHotkeyDispatch);
         if (_pTextService->HasDeferredComposition())
             _pTextService->StartDeferredCompositionIfPending();
@@ -2833,13 +2836,14 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         // 本机用 UI-less 测试宿主实测：不补这一句，`=`/`↓` 之后宿主停在旧页，
         // 空格上屏的却是新页的词。宿主不自绘时这只是多一次无害的 UpdateUIElement。
         WIND_LOG_DEBUG(L"Key consumed by hotkey\n");
-        if (_hasCandidates)
+        if (_hasCandidates || _assocBareSession)
         {
             _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
         }
         return TRUE;
 
     case ResponseType::InsertTextWithCursor:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             WIND_LOG_DEBUG(L"Processing InsertTextWithCursor response\n");
             _pTextService->CommitText(response.text, _inHotkeyDispatch);
@@ -2886,6 +2890,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         return TRUE;
 
     case ResponseType::ReplaceBackward:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             // 智能符号：删除光标前 N 个字符并插入替换文本。默认走 TSF 同步范围替换
             // （见 TextService::ReplacePrecedingChars），不发合成按键——不依赖修饰键
@@ -2910,6 +2915,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         return TRUE;
 
     case ResponseType::HoldComposition:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             // 智能符号 HoldComposition 方案：press1 将中文符号放入 TSF 组合态，
             // 由 TextService 启动 500ms 计时器自动提交；press2 将直接发 CommitText。
@@ -2922,6 +2928,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         return TRUE;
 
     case ResponseType::CommitAndHold:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             // 标点顶屏 + 智能符号 HoldComposition：**聚合式**——候选文本并入 _pendingCommitPrefix
             // （不真提交、留组合内），中文符号作为 held 放入同一组合，最终一次 CommitText 收口

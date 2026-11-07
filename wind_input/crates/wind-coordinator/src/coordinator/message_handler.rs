@@ -1024,6 +1024,17 @@ impl MessageHandler for Coordinator {
         if matches!(action, KeyAction::ClearCompositionThenPassThrough) {
             self.note_host_wrote_text("交还宿主重放");
         }
+        // 无占位联想（`none`）的会话位对账。内层 `handle_key_event` 返回时的推送早于上面两道改判，
+        // 看不到改判里退出联想（Del / 方向键 / Ctrl+C 落透传）的结果，缓存会停在 TRUE。
+        // 联想活着的每个 keydown 还强推一次：DLL 对「迟到的 FALSE」只置待收，后到的 TRUE
+        // 把它撤销，服务端的真实状态才收敛得回来。只对配了 `none` 的应用，别处零开销。
+        if data.event_type == EVENT_KEY_DOWN && self.assoc_placeholder_is_none() {
+            if self.assoc_bare_session_now() {
+                self.hotkey_session_force_push
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.push_hotkey_session_if_changed();
+        }
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
         } else if let Some(sep) = self.syllable_separator() {

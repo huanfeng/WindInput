@@ -818,6 +818,16 @@ impl Coordinator {
             }
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // 复核：上面的校验在 state 锁外，等锁期间按键线程可能已进了新一轮联想并重置 token，
+        // 不复核就会把新一轮联想误退掉。锁序 state → assoc_hide_token 与 `exit_assoc` 一致。
+        if *self
+            .assoc_hide_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            != token
+        {
+            return;
+        }
         if !state.assoc_active() {
             return;
         }
@@ -1386,6 +1396,51 @@ mod tests {
                 "{placeholder:?}：用户移动光标后联想是否退出"
             );
         }
+    }
+
+    /// 无占位联想里 Del 落到透传、被改判成「收口 + 交还」而退出联想后，会话位缓存必须对齐成 FALSE，
+    /// 否则 DLL 侧的位只能靠本地清位兜底。
+    /// 变异检验：去掉 `handle_key_event_policed` 里的对账推送 ⇒ 红。
+    #[test]
+    fn bare_assoc_released_by_passthrough_realigns_the_session_cache() {
+        use std::sync::atomic::Ordering;
+        use wind_bridge::handler::{KeyEventData, MessageHandler};
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        let c = coord_smart();
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "x.exe".into(),
+            assoc_placeholder: Some(AssocPlaceholder::None),
+            ..Default::default()
+        }]));
+        c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+        c.active_compat.lock().unwrap().pid = 7;
+        c.refresh_active_compat_lookups();
+        {
+            let mut st = c.state.lock().unwrap();
+            c.auto_commit_then_assoc(&mut st, "你好".into(), "你好");
+            assert!(st.assoc_active(), "前提：进了联想态");
+        }
+        c.last_pushed_hotkey_session.store(true, Ordering::Relaxed); // 进联想时已推过 TRUE
+        let del = KeyEventData {
+            key_code: 0x2E,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: wind_ipc::protocol::EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 1,
+            prev_char: 0,
+            seq_char: 0,
+        };
+        let act = c.handle_key_event_policed(&del);
+        assert!(
+            matches!(act, KeyAction::ClearCompositionThenPassThrough),
+            "Del 应被改判成收口+交还，实得 {act:?}"
+        );
+        assert!(!c.state.lock().unwrap().assoc_active(), "联想应已退出");
+        assert!(
+            !c.last_pushed_hotkey_session.load(Ordering::Relaxed),
+            "退出联想后会话位缓存必须对齐成 FALSE（即已推过 FALSE）"
+        );
     }
 
     /// `assoc_placeholder = "none"`：联想态不挂占位组合——`assoc_composition()` 为空串，

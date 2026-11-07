@@ -1141,6 +1141,8 @@ fn decode_focus_lost_reason(payload: &[u8]) -> wind_ipc::protocol::FocusLostReas
 ///
 /// 与 Go 版 handleKeyEvent 的 switch 分支对齐
 fn encode_key_action(action: &KeyAction, assoc_session: bool) -> Vec<u8> {
+    // 标志位只属于「不带新组合的普通上屏」：带新组合的上屏、其它动作一律不置位。
+    // （见 tests::assoc_session_flag_only_on_plain_commit）
     use wind_ipc::codec::*;
 
     match action {
@@ -1222,6 +1224,44 @@ fn encode_status_update_from_data(status: &StatusUpdateData) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ASSOC_SESSION 标志（0x20）只加在不带新组合的 InsertText 上，其它一律不加。
+    #[test]
+    fn assoc_session_flag_only_on_plain_commit() {
+        let flags = |b: &[u8]| {
+            u32::from_le_bytes(
+                b[wind_ipc::protocol::IpcHeader::SIZE..][..4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let plain = KeyAction::InsertText {
+            text: "好".into(),
+            new_composition: None,
+            mode_changed: false,
+            chinese_mode: true,
+            has_new_composition: false,
+        };
+        let with_comp = KeyAction::InsertText {
+            text: "好".into(),
+            new_composition: Some(" ".into()),
+            mode_changed: false,
+            chinese_mode: true,
+            has_new_composition: true,
+        };
+        assert_eq!(flags(&encode_key_action(&plain, true)) & 0x20, 0x20);
+        assert_eq!(flags(&encode_key_action(&plain, false)) & 0x20, 0);
+        assert_eq!(
+            flags(&encode_key_action(&with_comp, true)) & 0x20,
+            0,
+            "带新组合的上屏不置位"
+        );
+        assert_ne!(
+            encode_key_action(&KeyAction::Consumed, true),
+            Vec::<u8>::new()
+        );
+    }
+
     use std::sync::atomic::{AtomicU32, Ordering};
     use wind_ipc::codec::decode_uielement_page;
     use wind_ipc::protocol::{

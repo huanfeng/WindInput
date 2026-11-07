@@ -2310,6 +2310,7 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
                     // false），不再需要 DLL 侧任何清位逻辑。
                     if (self->_pKeyEventSink != nullptr)
                     {
+                        self->_pKeyEventSink->ReleaseAssocBareOwnership();
                         self->_pKeyEventSink->SetCandidateSessionActive(TRUE);
                     }
                 }

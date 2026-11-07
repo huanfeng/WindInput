@@ -200,12 +200,30 @@ public:
     BOOL BareAssocMouseClicked();
     void SetCandidateSessionActive(BOOL active)
     {
-        _hotkeyModeSession = active;
-        if (!active && _assocBareSession)
+        if (active)
         {
-            _assocBareSession = FALSE;
-            _assocBareEndPending = TRUE;
+            // 后到的 TRUE 撤销前面迟到的 FALSE（服务端联想活着时每个 keydown 都会重推 TRUE）。
+            _hotkeyModeSession = TRUE;
+            _assocBareEndPending = FALSE;
+            return;
         }
+        if (_assocBareSession)
+        {
+            // 无占位联想会话的 FALSE 只记下「待收」，由 TSF 线程在下一次 OnTestKeyDown 入口落位：
+            // 本函数在 AsyncReader 线程，直接清位会让同一键的 Test / Key 两阶段判定翻转，
+            // 也可能把刚被上屏应答同步置起的新一轮会话清掉。
+            _assocBareEndPending = TRUE;
+            return;
+        }
+        _hotkeyModeSession = FALSE;
+    }
+
+    /// 服务端接管了会话（加词等热键会话在 WM_HOTKEY 上乐观置位）：无占位联想的归属标记交还，
+    /// 之后 `ResetComposingState` 不会再把这一位清掉（那是加词会话的位，只能由服务端推送清）。
+    void ReleaseAssocBareOwnership()
+    {
+        _assocBareSession = FALSE;
+        _assocBareEndPending = FALSE;
     }
 
     /// 宿主报了选区变化（`OnEndEdit`）：若此刻有 Shift/Ctrl 正等着 keyup 触发切换，
