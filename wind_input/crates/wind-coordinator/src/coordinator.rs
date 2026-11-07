@@ -1843,7 +1843,7 @@ pub struct Coordinator {
     /// ⚠ 不与 [`Self::caret_cache_verified`] 合并：那个答「手里的值可不可信」，本字段答
     /// 「手里的值是不是组合前刚测的」。微信这个场景里前者为真、后者也为真，但正是靠后者
     /// 才能判定 probe 陈旧——合成一个就再也分不出「缓存可信」与「probe 可信」了。
-    caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
+    pub(crate) caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
     /// 本次焦点到达后，**还没有**经历过一次组合期间的权威坐标。
     ///
     /// 专门用来把 `idle_anchor` 逃生口挡在「焦点后的第一个组合」之外。空闲上报在**组合之间**

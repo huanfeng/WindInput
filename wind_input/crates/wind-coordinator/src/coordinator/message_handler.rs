@@ -3604,7 +3604,14 @@ impl MessageHandler for Coordinator {
             self.show_tip(&self.status_indicator_text());
             state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         }
-        let composing = !state.candidates.is_empty() || !state.input_buffer.is_empty();
+        // 无占位的联想（`assoc_placeholder = "none"`）：宿主里没有组合，WPS 等会在上屏后
+        // 上报一个与联想窗无关的远处光标（实测 (1643,756) 一类），照常当「组合中」处理会把
+        // 窗口重新锚过去而飘走。此时只更新缓存，窗口留在联想出现的位置。
+        let bare_assoc = state.input_buffer.is_empty()
+            && state.assoc_active()
+            && self.assoc_placeholder_is_none();
+        let composing =
+            (!state.candidates.is_empty() && !bare_assoc) || !state.input_buffer.is_empty();
         if !composing {
             // 常态、非异常：上屏后到下一键之间宿主仍会上报 caret。注意坐标**已在上面写入
             // state.caret_x/y**，只是不做显示决策——这一条解释了「按键前明明收到过正确坐标，
@@ -4614,6 +4621,18 @@ impl MessageHandler for Coordinator {
         self.caret_cache_verified
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.note_host_wrote_text("selection_changed");
+        // 无占位联想：光标被用户挪走，联想不再有意义，立刻收窗（否则要等自动隐藏计时）。
+        // 宿主只在「光标移动且当前无组合」时回报本事件，恰是无占位联想的形状。
+        if self.assoc_placeholder_is_none() {
+            let exited = {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                self.exit_assoc(&mut st, crate::handle_assoc::AssocExit::CaretMoved)
+            };
+            if exited {
+                self.push_hotkey_session_if_changed();
+                self.notify_ui_hide();
+            }
+        }
     }
 
     fn handle_commit_request(&self, data: &CommitRequestData) -> Option<CommitResultData> {

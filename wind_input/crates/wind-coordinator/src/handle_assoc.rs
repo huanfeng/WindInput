@@ -91,6 +91,9 @@ pub(crate) enum AssocExit {
     ModeActivate,
     /// 自动隐藏计时到期（`hide_after_ms`）。
     Timeout,
+    /// 无占位联想（`assoc_placeholder = "none"`）下用户把光标挪到了别处（点单元格、点击定位）。
+    /// 有占位组合时这件事由宿主终止组合来表达，没有组合就只能靠选区变化回报。
+    CaretMoved,
     /// 顶屏类按键（标点 / 小键盘 / 非码元字符 / 进模式、开软键盘的引导键）。联想态不顶屏，
     /// 只收掉联想再出该键——与空格选联想、Esc 取消后的状态一致（候选、标识、计时一并清）。
     TopCommitKey,
@@ -1343,6 +1346,48 @@ mod tests {
         assert_eq!(c.composition_placeholder(), "\u{200B}", "打字占位不受影响");
     }
 
+    /// 无占位联想下用户挪动光标（点单元格）⇒ 立刻退出联想；自提交回声不算；有占位时不走此路。
+    /// 变异检验：去掉 `handle_selection_changed` 里的退出分支 ⇒ 第一段红。
+    #[test]
+    fn bare_assoc_exits_when_user_moves_the_caret() {
+        use wind_bridge::handler::MessageHandler;
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        for (placeholder, expect_exit) in [
+            (AssocPlaceholder::None, true),
+            (AssocPlaceholder::Space, false),
+        ] {
+            let c = coord_smart();
+            c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+                process: "x.exe".into(),
+                assoc_placeholder: Some(placeholder),
+                ..Default::default()
+            }]));
+            c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+            c.active_compat.lock().unwrap().pid = 7;
+            c.refresh_active_compat_lookups();
+            {
+                let mut st = c.state.lock().unwrap();
+                c.auto_commit_then_assoc(&mut st, "你好".into(), "你好");
+                assert!(st.assoc_active(), "前提：进了联想态");
+            }
+            // 刚自提交：回声，联想不动。
+            *c.last_self_commit.lock().unwrap() = Some(std::time::Instant::now());
+            c.handle_selection_changed(0);
+            assert!(
+                c.state.lock().unwrap().assoc_active(),
+                "{placeholder:?}：回声不该退联想"
+            );
+            // 久远的自提交 ⇒ 用户移动。
+            *c.last_self_commit.lock().unwrap() = None;
+            c.handle_selection_changed(0);
+            assert_eq!(
+                !c.state.lock().unwrap().assoc_active(),
+                expect_exit,
+                "{placeholder:?}：用户移动光标后联想是否退出"
+            );
+        }
+    }
+
     /// `assoc_placeholder = "none"`：联想态不挂占位组合——`assoc_composition()` 为空串，
     /// 上屏回的是不带新组合的 `InsertText`；会话判据 `hotkey_session_now()` 与
     /// `assoc_session_hint()` 为真，退出联想后两者回落。
@@ -1388,6 +1433,51 @@ mod tests {
             !c.hotkey_session_now() && !c.assoc_session_hint(),
             "退出后回落"
         );
+    }
+
+    /// 无占位联想（`none`）时，宿主上屏后上报的远处光标只落缓存、不重新锚定候选窗
+    /// （WPS 实测联想窗会飘到 (1643,756) 一类位置）；有占位组合时照常走显示决策。
+    /// 变异检验：去掉 `message_handler` 里的 `bare_assoc` 判断 ⇒ 第一段红。
+    #[test]
+    fn bare_assoc_ignores_far_caret_reports_for_anchoring() {
+        use std::sync::atomic::Ordering;
+        use wind_bridge::handler::{CaretData, MessageHandler};
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        let far = CaretData {
+            x: 1643,
+            y: 756,
+            height: 20,
+            composition_start_x: 0,
+            composition_start_y: 0,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
+        };
+        for (placeholder, expect_cache_only) in [
+            (AssocPlaceholder::None, true),
+            (AssocPlaceholder::Space, false),
+        ] {
+            let c = coord_smart();
+            c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+                process: "x.exe".into(),
+                assoc_placeholder: Some(placeholder),
+                ..Default::default()
+            }]));
+            c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+            c.active_compat.lock().unwrap().pid = 7;
+            c.refresh_active_compat_lookups();
+            {
+                let mut st = c.state.lock().unwrap();
+                c.auto_commit_then_assoc(&mut st, "你好".into(), "你好");
+                assert!(st.assoc_active(), "前提：进了联想态");
+            }
+            c.caret_cache_is_idle_report.store(false, Ordering::Relaxed);
+            c.handle_caret_update(&far);
+            assert_eq!(
+                c.caret_cache_is_idle_report.load(Ordering::Relaxed),
+                expect_cache_only,
+                "{placeholder:?}：远处光标上报是否只落缓存"
+            );
+        }
     }
 
     /// ★ 桌面默认关，而且**是靠基线段本身就是 `"off"`**——不再有哨兵值参与。
