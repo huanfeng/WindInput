@@ -29,7 +29,7 @@
 
 ## 2026-11-07 · 联想态可不挂占位组合（0.131）
 
-- 合入：（合入后填）；范围：Windows TSF，仅 compat 规则配了 `assoc_placeholder = "none"` 的应用（出厂：Excel、WPS 表格）
+- 合入：2aeb737c..f96bc274（快进合入 main，无合并提交）；范围：Windows TSF，仅 compat 规则配了 `assoc_placeholder = "none"` 的应用（出厂：Excel、WPS 表格）
 - 变化：
   - 联想窗出现时，宿主里不再有占位空格 / 零宽空格，表格自己的单元格提示不被干扰。
   - 联想窗位置钉在联想出现处，不随宿主上报的远处光标飘走。
