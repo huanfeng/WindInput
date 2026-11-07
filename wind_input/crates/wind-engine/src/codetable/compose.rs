@@ -411,3 +411,202 @@ mod tests {
         assert_eq!(codes[&'了'], "bnh");
     }
 }
+
+/// 覆盖评测：真实五笔词库 + 拼音词库，走产品代码 [`WordComposer`]。
+///
+/// ```text
+/// cargo test --release -p wind-engine --lib compose_coverage_eval -- --ignored --nocapture
+/// WIND_CT_CORPUS=sentences.txt  # 可选：另测码表没收的词打不打得出来
+/// ```
+///
+/// 需要 `build_dev/data`。数字只适合横向比较（改动前后），打法是理想化的。
+#[cfg(test)]
+mod coverage_eval {
+    use super::*;
+    use std::collections::HashSet;
+    use wind_config::schema::EncoderRule;
+    use wind_dict::SystemDictLayer;
+
+    fn schemas_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data/schemas")
+    }
+
+    fn wubi() -> Option<(
+        DictManager,
+        HashMap<String, String>,
+        HashMap<String, String>,
+    )> {
+        let base = schemas_dir().join("wubi86");
+        let dm = DictManager::new();
+        let (mut full, mut short) = (HashMap::<String, String>::new(), HashMap::new());
+        for name in ["wubi86_jidian", "wubi86_jidian_extra"] {
+            let yaml = base.join(format!("{name}.dict.yaml"));
+            let wdat = base.join(format!("{name}.dict.wdat"));
+            let d = CachedDict::load_at_with(&yaml, &wdat, false).ok()?;
+            d.for_each_entry(&mut |code, text, _| {
+                if !code.chars().all(|c| c.is_ascii_lowercase()) {
+                    return;
+                }
+                let f = full
+                    .entry(text.to_string())
+                    .or_insert_with(|| code.to_string());
+                if code.len() > f.len() {
+                    *f = code.to_string();
+                }
+                let s: &mut String = short
+                    .entry(text.to_string())
+                    .or_insert_with(|| code.to_string());
+                if code.len() < s.len() {
+                    *s = code.to_string();
+                }
+            });
+            dm.register_layer(Box::new(SystemDictLayer::new(d, name)));
+        }
+        Some((dm, full, short))
+    }
+
+    fn rules() -> EncoderSpec {
+        let r = |eq: usize, range: Vec<usize>, f: &str| EncoderRule {
+            length_equal: eq,
+            length_in_range: range,
+            formula: f.into(),
+        };
+        EncoderSpec {
+            rules: vec![
+                r(2, vec![], "AaAbBaBb"),
+                r(3, vec![], "AaBaCaCb"),
+                r(0, vec![4, 10], "AaBaCaZa"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// 与 `CodeTableEngine::decode_compose` 同一道闸：精确与前缀都没有候选。
+    fn is_empty_code(dm: &DictManager, code: &str) -> bool {
+        dm.search(code, 1).is_empty() && dm.search_prefix(code, 1).is_empty()
+    }
+
+    #[test]
+    #[ignore = "评测：依赖 build_dev 真实词库"]
+    fn compose_coverage_eval() {
+        let Some((dm, full, short)) = wubi() else {
+            eprintln!("!!! 跳过：缺 build_dev 五笔词库");
+            return;
+        };
+        let Some(py) = crate::manager::EngineManager::load_sentence_freq_dict(&schemas_dir())
+        else {
+            eprintln!("!!! 跳过：缺拼音词库");
+            return;
+        };
+        let c = WordComposer::new(4, rules()).with_pinyin_dict(Arc::new(py));
+        let t0 = std::time::Instant::now();
+        let _ = c.compose("wfbn", &dm);
+        println!("建表 {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+
+        // ① 全部 2~4 码空码里，有多少能组出词。
+        let letters: Vec<char> = ('a'..='z').collect();
+        for len in 2..=4usize {
+            let (mut empty, mut hit) = (0usize, 0usize);
+            let mut ex: Vec<String> = Vec::new();
+            let mut idx = vec![0usize; len];
+            let t = std::time::Instant::now();
+            loop {
+                let code: String = idx.iter().map(|&i| letters[i]).collect();
+                if is_empty_code(&dm, &code) {
+                    empty += 1;
+                    let w = c.compose(&code, &dm);
+                    if !w.is_empty() {
+                        hit += 1;
+                        if ex.len() < 6 && hit % 997 == 1 {
+                            ex.push(format!("{code}→{}", w[0].0));
+                        }
+                    }
+                }
+                let mut k = len;
+                while k > 0 {
+                    k -= 1;
+                    idx[k] += 1;
+                    if idx[k] < 26 {
+                        break;
+                    }
+                    idx[k] = 0;
+                }
+                if idx.iter().all(|&i| i == 0) {
+                    break;
+                }
+            }
+            println!(
+                "{len} 码：全部 {} 个，空码 {empty}，能组出词 {hit}（占空码 {:.1}%）  {:.0} ms  例：{}",
+                26usize.pow(len as u32),
+                hit as f64 * 100.0 / empty.max(1) as f64,
+                t.elapsed().as_secs_f64() * 1000.0,
+                ex.join(" ")
+            );
+        }
+
+        // ② 语料里码表没收的多字词：按词组码 / 逐字简码打，能不能组出来。
+        let Some(text) = std::env::var("WIND_CT_CORPUS")
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+        else {
+            println!("（未设 WIND_CT_CORPUS，跳过语料部分）");
+            return;
+        };
+        let data = c.tables.data(&dm, 4).expect("组词表");
+        let codes = single_char_full_codes(&dm, 4);
+        let mut words: HashSet<String> = HashSet::new();
+        for l in text.lines() {
+            let s: Vec<char> = l.rsplit('\t').next().unwrap_or("").trim().chars().collect();
+            let mut i = 0;
+            while i < s.len() {
+                let l = (2..=(s.len() - i).min(6))
+                    .rev()
+                    .find(|&l| {
+                        data.lexicon
+                            .get(&s[i..i + l].iter().collect::<String>())
+                            .is_some()
+                    })
+                    .unwrap_or(1);
+                if l >= 2 {
+                    words.insert(s[i..i + l].iter().collect());
+                }
+                i += l;
+            }
+        }
+        let missing: Vec<&String> = words.iter().filter(|w| !full.contains_key(*w)).collect();
+        let mut tally = |name: &str, code_of: &dyn Fn(&str) -> Option<String>| {
+            let (mut n, mut empty, mut top1, mut top3) = (0, 0, 0, 0);
+            for w in &missing {
+                let Some(code) = code_of(w) else { continue };
+                if code.len() > 4 {
+                    continue;
+                }
+                n += 1;
+                if !is_empty_code(&dm, &code) {
+                    continue;
+                }
+                empty += 1;
+                let got = c.compose(&code, &dm);
+                let pos = got.iter().position(|(t, _)| t == *w);
+                top1 += usize::from(pos == Some(0));
+                top3 += usize::from(pos.is_some_and(|p| p < 3));
+            }
+            let p = |x: usize| x as f64 * 100.0 / n.max(1) as f64;
+            println!(
+                "{name}：{n} 个未收词（≤4 码），是空码 {:.1}%，首选 {:.1}%，前 3 {:.1}%",
+                p(empty),
+                p(top1),
+                p(top3)
+            );
+        };
+        println!("\n语料未收词 {} 个", missing.len());
+        tally("按词组码打", &|w| {
+            crate::encoder::calc_word_code(w, &rules(), |ch| codes.get(&ch).cloned()).ok()
+        });
+        tally("逐字打简码", &|w| {
+            w.chars()
+                .map(|ch| short.get(&ch.to_string()).cloned())
+                .collect::<Option<String>>()
+        });
+    }
+}
