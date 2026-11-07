@@ -325,3 +325,51 @@ fn english_candidate_in_codetable_follows_temp_english_switch() {
     assert_eq!(run(true), " git ", "开着：上屏即补尾随空格");
     assert_eq!(run(false), " git", "关着：只有切换处的前缀");
 }
+
+/// 英文词后直接按标点顶屏（临英、五笔 / 拼音的英文候选）：标点紧贴单词，不带尾随空格——
+/// 开着 `commit_space` 也一样（它只在选词上屏时补）。标点形态跟中文标点状态，开了英文后智能
+/// 标点时列表内的 `.` 出英文。
+#[test]
+fn punct_top_commit_after_english_word_has_no_space() {
+    if !ready() {
+        return;
+    }
+    const VK_OEM_PERIOD: u32 = 0xBE;
+    let text = |a: KeyAction| match a {
+        KeyAction::InsertText { text, .. } => text,
+        other => panic!("标点应顶屏上屏，实际 {other:?}"),
+    };
+    for commit_space in [false, true] {
+        for smart in [false, true] {
+            let mut cfg = config(false, false);
+            cfg.input.temp_english.commit_space = commit_space;
+            cfg.input.punct.smart_after_latin = smart;
+            cfg.schema.codetable.english_merge.enable = true;
+            cfg.schema.codetable.punct_commit = true; // 码表标点顶屏出厂关
+            let mut py = cfg.clone();
+            py.schema.available.push("pinyin".into());
+            py.schema.active = "pinyin".into();
+            py.schema.pinyin.english_merge.enable = true;
+            let period = if smart { "." } else { "。" };
+            for (vk, punct) in [(VK_OEM_COMMA, "，"), (VK_OEM_PERIOD, period)] {
+                let tag = format!("commit_space={commit_space} smart={smart} {punct}");
+                let h = Host::new(cfg.clone());
+                h.key(('H' as u32) & 0xFF, MOD_SHIFT);
+                for c in "ello".chars() {
+                    h.letter(c);
+                }
+                assert_eq!(text(h.key(vk, 0)), format!("Hello{punct}"), "临英 {tag}");
+                let h = Host::new(cfg.clone());
+                for c in "git".chars() {
+                    h.letter(c);
+                }
+                assert_eq!(text(h.key(vk, 0)), format!("git{punct}"), "五笔 {tag}");
+                let h = Host::new(py.clone());
+                for c in "hello".chars() {
+                    h.letter(c);
+                }
+                assert_eq!(text(h.key(vk, 0)), format!("hello{punct}"), "拼音 {tag}");
+            }
+        }
+    }
+}
