@@ -399,6 +399,31 @@ impl CandidateWindowConfig {
     }
 }
 
+/// 系统是否允许界面动画：Windows 读「显示 Windows 中的动画」（`SPI_GETCLIENTAREAANIMATION`），
+/// 查询失败按允许。其它平台本期不播放皮肤动画，只画首帧。
+#[cfg(windows)]
+fn system_allows_animation() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut on: i32 = 1;
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut on as *mut i32 as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok();
+    !ok || on != 0
+}
+
+#[cfg(not(windows))]
+fn system_allows_animation() -> bool {
+    false
+}
+
 /// 候选窗口
 pub struct CandidateWindow {
     window: LayeredWindow,
@@ -463,9 +488,24 @@ pub struct CandidateWindow {
     /// 穿透窗口（`WS_EX_TRANSPARENT`，点击直达底下的应用）。首次用到才建。
     #[cfg(windows)]
     pass_window: Option<LayeredWindow>,
+    /// 穿透窗口当前的屏上几何 (x, y, w, h)；None = 未显示。
+    #[cfg(windows)]
+    pass_presented: Option<(i32, i32, u32, u32)>,
     /// 穿透窗口建不出来：之后不再拆，穿透装饰回落到主窗口（按 block）。
     #[cfg_attr(not(windows), allow(dead_code))]
     pass_window_failed: bool,
+    /// 系统是否允许界面动画，默认 [`system_allows_animation`]；测试换桩。
+    motion_allowed: fn() -> bool,
+    /// 上一次读到的 [`Self::motion_allowed`]：换主题与每次显示时刷新。关着时装饰停在首帧。
+    anim_allowed: bool,
+    /// 装饰动画的时间轴起点：由隐藏变可见时记。
+    anim_start: Instant,
+    /// 下一次换帧时刻；None = 本帧没有在播的动画。隐藏时清空。
+    anim_next: Option<Instant>,
+    /// 换帧到期，待 UI 循环取走后重绘一帧。
+    anim_due: bool,
+    /// 正在为换帧重绘：不重置悬停、不重摆气泡。
+    anim_repaint: bool,
     /// 用户外观字体（`ui.font.family`，已 trim）；空 = 跟随主题节点字族。
     user_font_family: String,
     /// 用户全局字重（`ui.font.weight`）；0 = 不指定（取 [`Self::family_weight`]，再无则常规）。
@@ -637,7 +677,15 @@ impl CandidateWindow {
             pass_layer: None,
             #[cfg(windows)]
             pass_window: None,
+            #[cfg(windows)]
+            pass_presented: None,
             pass_window_failed: false,
+            motion_allowed: system_allows_animation,
+            anim_allowed: system_allows_animation(),
+            anim_start: Instant::now(),
+            anim_next: None,
+            anim_due: false,
+            anim_repaint: false,
             user_font_family: String::new(),
             user_font_weight: 0,
             family_weight: 0,
@@ -1433,6 +1481,10 @@ impl CandidateWindow {
 
     /// 应用主题（协调器下发）。同步更新悬停 tooltip 配色。
     pub fn set_theme(&mut self, theme: wind_theme::Resolved) {
+        self.anim_allowed = (self.motion_allowed)();
+        if self.theme_source.skin != theme.skin {
+            crate::view::clear_anim_frames();
+        }
         self.theme_source = theme;
         self.refresh_effective_theme();
         if let Some(tip) = self.tooltip.as_mut() {
@@ -1650,6 +1702,9 @@ impl CandidateWindow {
                 self.present_pass_layer(frame.screen_x, frame.screen_y, frame.width, frame.height);
                 let t_pos = t_pos0.elapsed();
                 self.presented = ok.then_some(want);
+                if self.anim_repaint {
+                    return;
+                }
                 self.update_tooltip(frame.screen_x, frame.screen_y);
                 tracing::debug!(
                     "render[{}x{} n={}] pos=({},{}) repaint={} reposition={} rdp={}: render={:?} blit={:?} setpos={:?} | total={:?}",
@@ -1794,7 +1849,10 @@ impl CandidateWindow {
                 .skin_geom
                 .as_ref()
                 .map_or_else(Vec::new, |g| g.no_drag_rects());
-            m.last_hover = -1;
+            // 换帧重绘时内容没变，悬停去重基线保持原样。
+            if !self.anim_repaint {
+                m.last_hover = -1;
+            }
         }
 
         self.window.resize(width, height);
@@ -1864,7 +1922,9 @@ impl CandidateWindow {
         self.window.show(px - ml as i32, py - mt as i32);
         let t_tip0 = Instant::now();
         // 命中矩形是窗口缓冲坐标（内容起点在 (ml,mt)）；tooltip 定位须用窗口屏幕原点。
-        self.update_tooltip(px - ml as i32, py - mt as i32);
+        if !self.anim_repaint {
+            self.update_tooltip(px - ml as i32, py - mt as i32);
+        }
         let t_tip = t_tip0.elapsed();
         if t_tip.as_micros() > 200 {
             tracing::debug!("render tooltip={:?}", t_tip);
@@ -2013,7 +2073,10 @@ impl CandidateWindow {
                 .skin_geom
                 .as_ref()
                 .map_or_else(Vec::new, |g| g.no_drag_rects());
-            m.last_hover = -1;
+            // 换帧重绘时内容没变，悬停去重基线保持原样。
+            if !self.anim_repaint {
+                m.last_hover = -1;
+            }
         }
 
         // 绘制到独立 BGRA 缓冲（透明清屏 → 软影 → 内容）。
@@ -2195,6 +2258,10 @@ impl CandidateWindow {
                     (ml as i32, mt as i32, mr as i32, mb as i32),
                 ))
             }
+            // 换帧重绘：内容没变，沿用上一帧落位（拖动中走上面的 drag_pin 分支）。
+            (None, None) if self.anim_repaint && self.visible => self
+                .last_content_pos
+                .map(|(px, py)| (px - ml as i32, py - mt as i32)),
             (None, None) => None,
         };
         if screen_xy.is_none() {
@@ -2245,7 +2312,10 @@ impl CandidateWindow {
                 .skin_geom
                 .as_ref()
                 .map_or_else(Vec::new, |g| g.no_drag_rects());
-            m.last_hover = -1;
+            // 换帧重绘时内容没变，悬停去重基线保持原样。
+            if !self.anim_repaint {
+                m.last_hover = -1;
+            }
         }
 
         let mut buf = vec![0u8; (width * height * 4) as usize];
@@ -4887,25 +4957,46 @@ impl CandidateWindow {
                 tracing::warn!("skin: 穿透窗口 update 失败: {e}");
             }
         }
-        unsafe {
-            let insert_after = if below { main } else { HWND_TOPMOST };
-            let _ = SetWindowPos(
-                pw.hwnd(),
-                insert_after,
-                x,
-                y,
-                w as i32,
-                h as i32,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+        let want = (x, y, w, h);
+        // 换帧重绘不动 z 序（否则每帧置顶会压住气泡 / 菜单）；位置尺寸没变就不调。
+        match (self.anim_repaint, self.pass_presented) {
+            (true, Some(cur)) if cur == want => {}
+            (true, Some(_)) => unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER;
+                let _ = SetWindowPos(
+                    pw.hwnd(),
+                    HWND_TOPMOST,
+                    x,
+                    y,
+                    w as i32,
+                    h as i32,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+            },
+            _ => unsafe {
+                let insert_after = if below { main } else { HWND_TOPMOST };
+                let _ = SetWindowPos(
+                    pw.hwnd(),
+                    insert_after,
+                    x,
+                    y,
+                    w as i32,
+                    h as i32,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            },
         }
+        self.pass_presented = Some(want);
         self.mouse.borrow_mut().pass_hwnd = Some(pw.hwnd());
     }
 
     fn hide_pass_window(&mut self) {
         #[cfg(windows)]
-        if let Some(pw) = &self.pass_window {
-            pw.hide();
+        {
+            if let Some(pw) = &self.pass_window {
+                pw.hide();
+            }
+            self.pass_presented = None;
         }
         self.mouse.borrow_mut().pass_hwnd = None;
     }
@@ -4921,6 +5012,8 @@ impl CandidateWindow {
             self.pixel_release.hidden(Instant::now());
         }
         self.visible = false;
+        self.anim_next = None;
+        self.anim_due = false;
         self.content_rect = None;
         self.last_content_pos = None; // 组合结束，下次显示重新落位
         self.placed_above = false; // 清除上方粘滞，下次组合按下方默认重新判定
@@ -4982,6 +5075,29 @@ impl CandidateWindow {
                 self.update_tooltip(wx, wy);
             }
         }
+        if self.visible && self.anim_next.is_some_and(|t| t <= now) {
+            self.anim_next = None;
+            self.anim_due = true;
+        }
+    }
+
+    /// 取走「装饰换帧到期」标记：为 true 时 UI 循环经 [`Self::repaint_anim_frame`] 重绘一帧。
+    pub fn take_anim_due(&mut self) -> bool {
+        std::mem::take(&mut self.anim_due)
+    }
+
+    /// 是否正在为换帧重绘（host-render 据此跳过气泡帧）。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn is_anim_repaint(&self) -> bool {
+        self.anim_repaint
+    }
+
+    /// 换帧重绘：`paint` 走当前路径（host-render 或本地 `show`）重画一帧。期间不重置悬停去重、
+    /// 不重摆气泡；时间轴起点只在由隐藏变可见时记，这里不动。
+    pub fn repaint_anim_frame(&mut self, paint: impl FnOnce(&mut Self)) {
+        self.anim_repaint = true;
+        paint(self);
+        self.anim_repaint = false;
     }
 
     /// 隐藏满 [`crate::window::HIDDEN_RELEASE_AFTER`] 就释放像素缓冲与（Windows）离屏表面，
@@ -5002,7 +5118,8 @@ impl CandidateWindow {
     ///
     /// 消息循环据此安排唤醒。两个到期源：悬停激活闸门（`engage_at`，用户首次真实移动鼠标到
     /// 候选窗上时武装，到期后悬停才开始响应；激活之后悬停走 `on_message` 即时发出，不再需要
-    /// 唤醒），以及右键压制「等菜单」阶段的兜底超时（见 [`TipHold::AwaitMenu`]）。
+    /// 唤醒），以及右键压制「等菜单」阶段的兜底超时（见 [`TipHold::AwaitMenu`]）；另有隐藏后释放
+    /// 像素缓冲与皮肤装饰换帧。
     pub fn next_deadline(&self) -> Option<std::time::Instant> {
         let m = self.mouse.borrow();
         let hold = match m.tip_hold {
@@ -5014,6 +5131,8 @@ impl CandidateWindow {
             hold,
             m.deferred,
             self.pixel_release.deadline(),
+            // 装饰换帧：只在可见时登记。
+            self.anim_next.filter(|_| self.visible),
         ]
         .into_iter()
         .flatten()

@@ -119,3 +119,7 @@ dispatch2 = "0.3"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# 测试现生成 APNG 夹具；版本与 image 依赖的那份一致，不多编一份。
+png = "0.18"

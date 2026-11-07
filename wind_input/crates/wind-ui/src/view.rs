@@ -143,6 +143,64 @@ pub fn paint_skin_image(
     });
 }
 
+/// 丢掉全部动画帧（换主题时），见 [`crate::image_cache::ImageCache::clear_anims`]。
+pub fn clear_anim_frames() {
+    IMAGE_CACHE.with(|c| c.borrow_mut().clear_anims());
+}
+
+/// 源是否动画格式，见 [`crate::image_cache::ImageCache::is_animated`]。
+pub fn image_is_animated(path: &str) -> bool {
+    IMAGE_CACHE.with(|c| c.borrow_mut().is_animated(path))
+}
+
+/// 动画装饰各帧时长（毫秒），见 [`crate::image_cache::ImageCache::anim_durations`]。
+pub fn anim_durations(
+    path: &str,
+    k: f32,
+    w: u32,
+    h: u32,
+    fps: Option<f32>,
+    budget: usize,
+) -> Option<Vec<u32>> {
+    IMAGE_CACHE.with(|c| {
+        c.borrow_mut()
+            .anim_durations(path, k, w, h, fps, budget)
+            .map(<[u32]>::to_vec)
+    })
+}
+
+/// 把动画装饰的第 `frame` 帧画到 `rect`（设备像素）。帧位图与 [`anim_durations`] 同键缓存。
+#[allow(clippy::too_many_arguments)]
+pub fn paint_anim_frame(
+    buf: &mut [u8],
+    buf_w: u32,
+    buf_h: u32,
+    rect: (i32, i32, u32, u32),
+    path: &str,
+    k: f32,
+    fps: Option<f32>,
+    budget: usize,
+    frame: usize,
+    opacity: f32,
+) {
+    let (x, y, w, h) = rect;
+    IMAGE_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        let Some(pm) = cache.anim_frame(path, k, w, h, fps, budget, frame) else {
+            return;
+        };
+        draw_clipped(
+            buf,
+            buf_w,
+            buf_h,
+            pm,
+            (x as f32, y as f32, w as f32, h as f32),
+            opacity,
+            None,
+        );
+    });
+}
+
 /// 绘制缓存（背景图 + 阴影蒙版）闲置回收的最早到期时刻，供 UI 消息循环登记进 `next_deadline`。
 pub fn paint_cache_next_deadline() -> Option<std::time::Instant> {
     let image = IMAGE_CACHE.with(|c| c.borrow().next_deadline());

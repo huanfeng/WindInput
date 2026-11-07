@@ -314,6 +314,22 @@ impl UiManager {
 
             // 推进鼠标悬停防抖（稳定后才发出 Hover）
             candidate_window.tick();
+            // 皮肤装饰换帧：按当前路径重绘一帧（host-render 有目标走 SHM，否则本地窗口）。
+            if candidate_window.take_anim_due() {
+                candidate_window.repaint_anim_frame(|w| {
+                    #[cfg(windows)]
+                    if let Some(hr) = &host_render
+                        && try_host_render_candidates(hr, w)
+                    {
+                        return;
+                    }
+                    if blocked_by_exclusive_fullscreen("candidate") {
+                        w.hide();
+                    } else {
+                        w.show();
+                    }
+                });
+            }
             // 推进工具栏悬停高亮（按光标位置本地重绘）
             if let Some(t) = &mut toolbar {
                 t.tick();
@@ -1323,6 +1339,10 @@ fn try_host_render_candidates(
             match hr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &params) {
                 Ok(()) => {
                     candidate_window.hide_local_window_only();
+                    // 换帧重绘时悬停与落位都没变，气泡帧不必重写。
+                    if candidate_window.is_anim_repaint() {
+                        return true;
+                    }
                     // 悬停 tooltip 帧联动：有悬停写帧，无悬停隐藏（幂等）。
                     match candidate_window.render_tooltip_frame(frame.screen_x, frame.screen_y) {
                         Some((tt_buf, tt_w, tt_h, tt_x, tt_y, tt_shadow)) => {

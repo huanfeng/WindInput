@@ -371,6 +371,106 @@ pub fn atlas_len(src_len: u32, k: f32) -> u32 {
     ((src_len as f32 * k).round() as u32).max(1)
 }
 
+/// 帧率上限 30：单帧至少 33 ms。
+pub const MIN_FRAME_MS: u32 = 33;
+
+/// 单帧时长上限 60 秒。
+pub const MAX_FRAME_MS: u32 = 60_000;
+
+/// 一帧的显示时长（毫秒）：给了 `fps` 就一律 1/fps；否则取文件自带的 `numer / denom` 毫秒，
+/// 不足 10 ms 按 100 ms（浏览器惯例）。最后钳到 [`MIN_FRAME_MS`, `MAX_FRAME_MS`]。
+pub fn frame_ms(numer: u32, denom: u32, fps: Option<f32>) -> u32 {
+    let ms = match fps.filter(|f| f.is_finite() && *f > 0.0) {
+        Some(f) => (1000.0 / f).round().min(MAX_FRAME_MS as f32) as u32,
+        None => match numer.checked_div(denom) {
+            Some(ms) if ms >= 10 => ms,
+            _ => 100,
+        },
+    };
+    ms.clamp(MIN_FRAME_MS, MAX_FRAME_MS)
+}
+
+/// 逐帧收集动画，合计字节超出预算就隔帧丢弃，被丢帧的时长并入前一帧（总时长不变）。
+/// 流式进行：驻留不超过预算加一帧，注定被丢的帧也不必缩放。
+pub struct FrameBudget<T> {
+    frames: Vec<(T, u32)>,
+    frame_bytes: usize,
+    budget: usize,
+    /// 每隔几帧留一帧（每丢一轮翻倍）。
+    stride: usize,
+    seen: usize,
+}
+
+impl<T> FrameBudget<T> {
+    pub fn new(frame_bytes: usize, budget: usize) -> Self {
+        Self {
+            frames: Vec::new(),
+            frame_bytes,
+            budget,
+            stride: 1,
+            seen: 0,
+        }
+    }
+
+    /// 送入一帧（时长 `ms`）。只在这帧会被留下时才调 `make` 生成像素；`make` 返回 None 时按丢帧处理。
+    pub fn push_with(&mut self, ms: u32, make: impl FnOnce() -> Option<T>) {
+        let keep = self.seen.is_multiple_of(self.stride);
+        self.seen += 1;
+        match (keep.then(make).flatten(), self.frames.last_mut()) {
+            (Some(t), _) => self.frames.push((t, ms)),
+            (None, Some(last)) => last.1 = last.1.saturating_add(ms),
+            // 首帧就没生成出来：没有前一帧可并。
+            (None, None) => {}
+        }
+        while self.frames.len() > 1 && self.frames.len() * self.frame_bytes > self.budget {
+            self.halve();
+        }
+    }
+
+    /// 隔帧丢一轮：奇数位的帧并入前一帧。
+    fn halve(&mut self) {
+        let mut out: Vec<(T, u32)> = Vec::with_capacity(self.frames.len().div_ceil(2));
+        for (i, (t, ms)) in std::mem::take(&mut self.frames).into_iter().enumerate() {
+            match out.last_mut() {
+                Some(last) if i % 2 == 1 => last.1 = last.1.saturating_add(ms),
+                _ => out.push((t, ms)),
+            }
+        }
+        self.frames = out;
+        self.stride *= 2;
+    }
+
+    /// 是否因预算丢过帧。
+    pub fn dropped(&self) -> bool {
+        self.stride > 1
+    }
+
+    pub fn finish(self) -> Vec<(T, u32)> {
+        self.frames
+    }
+}
+
+/// 经过 `elapsed` 时该显示第几帧，以及距下一次换帧还有多久（单帧或空为 None）。
+/// 按总时长取模，不逐帧累加，长时间播放也不漂移。
+pub fn frame_at(
+    durations: &[u32],
+    elapsed: std::time::Duration,
+) -> (usize, Option<std::time::Duration>) {
+    let total: u128 = durations.iter().map(|&d| d as u128 * 1000).sum();
+    if durations.len() < 2 || total == 0 {
+        return (0, None);
+    }
+    let t = elapsed.as_micros() % total;
+    let mut end = 0u128;
+    for (i, &d) in durations.iter().enumerate() {
+        end += d as u128 * 1000;
+        if t < end {
+            return (i, Some(std::time::Duration::from_micros((end - t) as u64)));
+        }
+    }
+    (0, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +625,106 @@ mod tests {
         let out = compose(&atlas, 2, &xs, &ys);
         assert!(out[0] <= out[3]);
         assert_eq!(out[3], 128);
+    }
+    #[test]
+    fn frame_ms_normalizes_short_and_missing_delays() {
+        assert_eq!(frame_ms(80, 1, None), 80);
+        assert_eq!(frame_ms(250, 2, None), 125, "比值换算成毫秒");
+        assert_eq!(frame_ms(0, 1, None), 100, "0 ms 按 100 ms");
+        assert_eq!(frame_ms(9, 1, None), 100, "不足 10 ms 按 100 ms");
+        assert_eq!(frame_ms(10, 1, None), 33, "10 ms 不再改写，但受帧率上限");
+        assert_eq!(frame_ms(5, 0, None), 100, "分母为 0 视作缺失");
+    }
+
+    #[test]
+    fn frame_ms_fps_override_and_cap() {
+        assert_eq!(frame_ms(500, 1, Some(10.0)), 100, "fps 覆盖文件时长");
+        assert_eq!(frame_ms(0, 1, Some(24.0)), 42);
+        assert_eq!(frame_ms(500, 1, Some(60.0)), MIN_FRAME_MS, "帧率上限 30");
+        assert_eq!(frame_ms(20, 1, None), MIN_FRAME_MS);
+        assert_eq!(frame_ms(70, 1, Some(0.0)), 70, "非正 fps 忽略");
+    }
+
+    fn budget_run(n: u32, frame_bytes: usize, budget: usize) -> (Vec<(u32, u32)>, bool, Vec<u32>) {
+        let mut made = Vec::new();
+        let mut b = FrameBudget::new(frame_bytes, budget);
+        for i in 0..n {
+            b.push_with(10 + i, || {
+                made.push(i);
+                Some(i)
+            });
+        }
+        let dropped = b.dropped();
+        (b.finish(), dropped, made)
+    }
+
+    #[test]
+    fn frame_budget_keeps_everything_within_budget() {
+        let (frames, dropped, _) = budget_run(4, 10, 40);
+        assert!(!dropped);
+        assert_eq!(frames, vec![(0, 10), (1, 11), (2, 12), (3, 13)]);
+    }
+
+    #[test]
+    fn frame_budget_drops_every_other_frame_and_conserves_time() {
+        // 7 帧、每帧 10 字节、预算 30：隔帧丢两轮，留 0、4 两帧。
+        let (frames, dropped, made) = budget_run(7, 10, 30);
+        assert!(dropped);
+        assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![0, 4]);
+        let total: u32 = frames.iter().map(|f| f.1).sum();
+        assert_eq!(total, (0..7).map(|i| 10 + i).sum::<u32>(), "总时长守恒");
+        assert_eq!(frames[0].1, 10 + 11 + 12 + 13, "被丢帧的时长并入前一帧");
+        assert!(frames.len() * 10 <= 30);
+        assert!(!made.contains(&5), "注定被丢的帧不生成像素");
+    }
+
+    #[test]
+    fn frame_budget_keeps_one_frame_even_if_it_alone_exceeds() {
+        let (frames, _, _) = budget_run(3, 100, 10);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0], (0, 10 + 11 + 12));
+    }
+
+    #[test]
+    fn frame_at_wraps_and_reports_time_to_next_frame() {
+        use std::time::Duration;
+        let d = [100, 50, 200];
+        let ms = Duration::from_millis;
+        assert_eq!(frame_at(&d, ms(0)), (0, Some(ms(100))));
+        assert_eq!(frame_at(&d, ms(99)), (0, Some(ms(1))));
+        assert_eq!(frame_at(&d, ms(100)), (1, Some(ms(50))), "边界属于下一帧");
+        assert_eq!(frame_at(&d, ms(349)), (2, Some(ms(1))));
+        assert_eq!(
+            frame_at(&d, ms(350)),
+            (0, Some(ms(100))),
+            "总时长处回到首帧"
+        );
+        assert_eq!(
+            frame_at(&d, ms(350 * 1000 + 120)),
+            (1, Some(ms(30))),
+            "按总时长取模"
+        );
+    }
+
+    #[test]
+    fn frame_at_single_frame_never_schedules() {
+        use std::time::Duration;
+        assert_eq!(frame_at(&[100], Duration::from_secs(5)), (0, None));
+        assert_eq!(frame_at(&[], Duration::ZERO), (0, None));
+    }
+    #[test]
+    fn frame_ms_caps_very_long_frames() {
+        assert_eq!(frame_ms(0, 1, Some(0.001)), MAX_FRAME_MS, "极小 fps");
+        assert_eq!(frame_ms(u32::MAX, 1, None), MAX_FRAME_MS, "单帧超长");
+        assert_eq!(frame_ms(0, 1, Some(f32::MIN_POSITIVE)), MAX_FRAME_MS);
+    }
+
+    #[test]
+    fn frame_budget_merged_durations_saturate() {
+        let mut b = FrameBudget::new(10, 10);
+        b.push_with(u32::MAX - 5, || Some(0));
+        b.push_with(100, || Some(1));
+        b.push_with(100, || Some(2));
+        assert_eq!(b.finish(), vec![(0, u32::MAX)]);
     }
 }

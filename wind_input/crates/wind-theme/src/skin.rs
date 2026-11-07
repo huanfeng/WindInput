@@ -130,6 +130,8 @@ pub struct SkinDecor {
     /// 点击互动（如点一下换表情）留给动画事件（设计 §6），届时另加字段，不复用 `hit`。
     pub hit: Option<String>,
     pub opacity: Option<f32>,
+    /// 动画装饰的帧率，覆盖文件自带帧时长；非正数忽略。
+    pub fps: Option<f32>,
 }
 
 #[derive(Deserialize, Debug, Default, Clone)]
@@ -324,6 +326,8 @@ pub struct RvSkinDecor {
     pub z: i32,
     pub hit: DecorHit,
     pub opacity: f32,
+    /// 覆盖动画文件自带帧时长的帧率；None = 用文件自带的。
+    pub fps: Option<f32>,
 }
 
 /// 对齐点：锚点 + 偏移（主坐标源像素）。
@@ -575,6 +579,7 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                 z: d.z,
                 hit,
                 opacity: d.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+                fps: positive(d.fps),
             })
         })
         .collect();
@@ -778,6 +783,21 @@ hit = "pass"
         assert_eq!(d[1].image, "pet");
         assert_eq!(d[1].pivot, Pos9 { h: 2, v: 2 });
         assert_eq!(d[1].hit, DecorHit::Drag, "缺省 drag");
+    }
+
+    #[test]
+    fn decor_fps_keeps_positive_values_only() {
+        let fps = |v: &str| {
+            let src = format!(
+                "[skin.horizontal.frame]\nimage = \"f\"\n[[skin.horizontal.decor]]\nimage = \"d\"\n{v}"
+            );
+            parse(&src).unwrap().horizontal.unwrap().decor[0].fps
+        };
+        assert_eq!(fps("fps = 12"), Some(12.0));
+        assert_eq!(fps("fps = 7.5"), Some(7.5));
+        assert_eq!(fps(""), None, "缺省用文件自带帧时长");
+        assert_eq!(fps("fps = 0"), None);
+        assert_eq!(fps("fps = -3"), None);
     }
 
     #[test]

@@ -157,6 +157,44 @@ pub(super) struct DecorGeom {
     z: i32,
     hit: DecorHit,
     opacity: f32,
+    /// 动画：fps 覆盖、帧预算份额、各帧时长（毫秒）与当前帧；`durations` 为 None 即静态图。
+    fps: Option<f32>,
+    budget: usize,
+    durations: Option<Vec<u32>>,
+    frame: usize,
+}
+
+impl DecorGeom {
+    /// 画到 `rect`：动画画第 `frame` 帧，静态图走窗体同一条整轴拉伸。
+    fn paint(&self, buf: &mut [u8], bw: u32, bh: u32, rect: (i32, i32, u32, u32), frame: usize) {
+        if self.durations.is_some() {
+            crate::view::paint_anim_frame(
+                buf,
+                bw,
+                bh,
+                rect,
+                &self.path,
+                self.k,
+                self.fps,
+                self.budget,
+                frame,
+                self.opacity,
+            );
+        } else {
+            let whole = Stretch::Whole(BandFill::Stretch);
+            crate::view::paint_skin_image(
+                buf,
+                bw,
+                bh,
+                rect,
+                &self.path,
+                self.k,
+                &whole,
+                &whole,
+                self.opacity,
+            );
+        }
+    }
 }
 
 /// 皮肤在当前 DPI / 字号下的几何。每帧渲染前由 [`CandidateWindow::refresh_skin_geom`] 重算。
@@ -363,29 +401,53 @@ impl SkinGeom {
     /// 只画穿透装饰（按 z 序），供独立的穿透窗口用。
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(super) fn paint_pass(&self, buf: &mut [u8], bw: u32, bh: u32) {
-        let whole = Stretch::Whole(BandFill::Stretch);
         for (d, &rect) in self.decor.iter().zip(&self.decor_rects) {
             if d.hit == DecorHit::Pass {
-                crate::view::paint_skin_image(
-                    buf, bw, bh, rect, &d.path, d.k, &whole, &whole, d.opacity,
-                );
+                d.paint(buf, bw, bh, rect, d.frame);
             }
         }
+    }
+
+    /// 按经过时间给各动画装饰选帧，返回距最近一次换帧的时长；没有动画装饰为 None。
+    pub(super) fn seek(&mut self, elapsed: std::time::Duration) -> Option<std::time::Duration> {
+        let mut next: Option<std::time::Duration> = None;
+        for d in &mut self.decor {
+            if let Some(durations) = &d.durations {
+                let (frame, until) = crate::skin::frame_at(durations, elapsed);
+                d.frame = frame;
+                next = match (next, until) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+        }
+        next
     }
 
     /// 画皮肤层：`over = false` 画窗体及其上下的装饰（根容器之前调用），`true` 画盖在内容上的装饰。
     /// `skip_pass`：穿透装饰另由穿透窗口画，这里跳过。
     pub(super) fn paint(&self, buf: &mut [u8], bw: u32, bh: u32, over: bool, skip_pass: bool) {
-        let whole = Stretch::Whole(BandFill::Stretch);
+        self.paint_at(buf, bw, bh, over, skip_pass, false);
+    }
+
+    /// 同 [`Self::paint`]；`first_frame` 时动画装饰一律画首帧（避让遮罩用，不随帧变）。
+    fn paint_at(
+        &self,
+        buf: &mut [u8],
+        bw: u32,
+        bh: u32,
+        over: bool,
+        skip_pass: bool,
+        first_frame: bool,
+    ) {
         let paint_decor = |buf: &mut [u8], keep: &dyn Fn(i32) -> bool| {
             for (d, &rect) in self.decor.iter().zip(&self.decor_rects) {
                 if skip_pass && d.hit == DecorHit::Pass {
                     continue;
                 }
                 if keep(d.z) {
-                    crate::view::paint_skin_image(
-                        buf, bw, bh, rect, &d.path, d.k, &whole, &whole, d.opacity,
-                    );
+                    let frame = if first_frame { 0 } else { d.frame };
+                    d.paint(buf, bw, bh, rect, frame);
                 }
             }
         };
@@ -411,8 +473,20 @@ impl SkinGeom {
 
 impl CandidateWindow {
     /// 按当前主题、横竖排、嵌入形态、DPI、字号求皮肤几何；不启用皮肤时置 None。
+    /// 由隐藏变可见时记动画起点；动画装饰按经过时间选帧，并记下次换帧时刻。
     pub(super) fn refresh_skin_geom(&mut self) {
+        let now = std::time::Instant::now();
+        if !self.visible {
+            self.anim_allowed = (self.motion_allowed)();
+            self.anim_start = now;
+        }
         self.skin_geom = self.compute_skin_geom();
+        let elapsed = now.saturating_duration_since(self.anim_start);
+        self.anim_next = self
+            .skin_geom
+            .as_mut()
+            .and_then(|g| g.seek(elapsed))
+            .map(|d| now + d);
     }
 
     fn compute_skin_geom(&self) -> Option<SkinGeom> {
@@ -445,11 +519,22 @@ impl CandidateWindow {
             b: c.bottom * k,
             l: c.left * k,
         };
-        let decor = v
+        let decor: Vec<_> = v
             .decor
             .iter()
-            .filter_map(|d| {
-                let path = crate::theme_assets::asset_path(&self.theme, &d.image)?;
+            .filter_map(|d| Some((d, crate::theme_assets::asset_path(&self.theme, &d.image)?)))
+            .collect();
+        // 动画帧预算按本变体的动画装饰均分，几个动画合计不超 24 MiB；不播放时一律按静态图。
+        let animated: Vec<bool> = decor
+            .iter()
+            .map(|(_, path)| self.anim_allowed && crate::view::image_is_animated(path))
+            .collect();
+        let budget =
+            crate::image_cache::ANIM_BUDGET_BYTES / animated.iter().filter(|a| **a).count().max(1);
+        let decor = decor
+            .into_iter()
+            .zip(animated)
+            .filter_map(|((d, path), animated)| {
                 let (sw, sh) = crate::view::image_src_size(&path)?;
                 let (w, h) = match d.size {
                     Some([w, h]) => (w * k, h * k),
@@ -459,9 +544,13 @@ impl CandidateWindow {
                     }
                 };
                 let (w, h) = (w.round().max(1.0) as u32, h.round().max(1.0) as u32);
+                let dk = w as f32 / sw.max(1) as f32;
+                let durations = animated
+                    .then(|| crate::view::anim_durations(&path, dk, w, h, d.fps, budget))
+                    .flatten();
                 Some(DecorGeom {
                     path,
-                    k: w as f32 / sw.max(1) as f32,
+                    k: dk,
                     w,
                     h,
                     anchor: d.anchor,
@@ -470,6 +559,10 @@ impl CandidateWindow {
                     z: d.z,
                     hit: d.hit,
                     opacity: d.opacity,
+                    fps: d.fps,
+                    budget,
+                    durations,
+                    frame: 0,
                 })
             })
             .collect();
@@ -650,8 +743,9 @@ impl CandidateWindow {
         let (_, _, w, h) = g.frame;
         let (bw, bh) = (w + ml + mr, h + mt + mb);
         let mut buf = vec![0u8; (bw as usize) * (bh as usize) * 4];
-        g.paint(&mut buf, bw, bh, false, false);
-        g.paint(&mut buf, bw, bh, true, false);
+        // 固定按首帧算：随帧变的话打字时窗口会在按键间跳。
+        g.paint_at(&mut buf, bw, bh, false, false, true);
+        g.paint_at(&mut buf, bw, bh, true, false, true);
         let cx = ml as f32 + caret_x;
         let x0 = (cx - strip.before * self.scale).floor().max(0.0) as usize;
         let x1 = ((cx + strip.after * self.scale).ceil().max(0.0) as usize).min(bw as usize);
@@ -725,6 +819,10 @@ mod tests {
             z: 1,
             hit: DecorHit::Block,
             opacity: 1.0,
+            fps: None,
+            budget: 0,
+            durations: None,
+            frame: 0,
         }
     }
 
@@ -756,18 +854,32 @@ mod tests {
         fixture_window_hit(tag, None)
     }
 
-    fn fixture_window_hit(tag: &str, hit: Option<&str>) -> CandidateWindow {
-        use wind_theme::skin::{BandSpec, Skin, SkinDecor, SkinFrame, SkinInsets, SkinVariant};
+    fn fixture_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("wind-skin-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let frame = dir.join("frame.png");
-        let mut img = image::RgbaImage::from_pixel(30, 20, image::Rgba([255, 255, 255, 255]));
-        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
-        img.save(&frame).unwrap();
+        dir
+    }
+
+    fn fixture_window_hit(tag: &str, hit: Option<&str>) -> CandidateWindow {
+        let dir = fixture_dir(tag);
         let decor = dir.join("decor.png");
         image::RgbaImage::from_pixel(6, 6, image::Rgba([0, 0, 255, 255]))
             .save(&decor)
             .unwrap();
+        fixture_window_decor(&dir, &decor, hit)
+    }
+
+    /// 夹具窗体 + 给定的装饰文件（6×6）。
+    fn fixture_window_decor(
+        dir: &std::path::Path,
+        decor: &std::path::Path,
+        hit: Option<&str>,
+    ) -> CandidateWindow {
+        use wind_theme::skin::{BandSpec, Skin, SkinDecor, SkinFrame, SkinInsets, SkinVariant};
+        let frame = dir.join("frame.png");
+        let mut img = image::RgbaImage::from_pixel(30, 20, image::Rgba([255, 255, 255, 255]));
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save(&frame).unwrap();
         let skin = Skin {
             horizontal: Some(SkinVariant {
                 frame: Some(SkinFrame {
@@ -1206,5 +1318,191 @@ mod tests {
         assert_eq!(pick_source(v, 1.5).0, "a2");
         assert_eq!(pick_source(v, 2.0).0, "a2");
         assert_eq!(pick_source(v, 4.0).0, "a3", "都不够取最大");
+    }
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+    /// 装饰是两帧 GIF（红 100 ms、绿 200 ms）的夹具窗；`motion` 为系统动画开关的桩。
+    fn anim_window(tag: &str, motion: fn() -> bool) -> CandidateWindow {
+        let dir = fixture_dir(tag);
+        let gif = dir.join("decor.gif");
+        let bytes = crate::image_cache::anim_fixtures::gif(6, 6, &[(RED, 100), (GREEN, 200)]);
+        std::fs::write(&gif, bytes).unwrap();
+        let mut w = fixture_window_decor(&dir, &gif, None);
+        w.motion_allowed = motion;
+        w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
+        w
+    }
+
+    /// 装饰右上角的像素（BGRA）：装饰挂在窗体右上外侧，缓冲右上角就是它。
+    fn decor_px(w: &CandidateWindow) -> [u8; 4] {
+        let (bw, _) = w.window.size();
+        let o = ((bw - 1) * 4) as usize;
+        let b = w.window.buffer();
+        [b[o], b[o + 1], b[o + 2], b[o + 3]]
+    }
+
+    /// 期限在 `now` 之后 `max` 之内。
+    fn due_within(d: Option<std::time::Instant>, max: std::time::Duration) -> bool {
+        let now = std::time::Instant::now();
+        d.is_some_and(|t| t > now && t <= now + max)
+    }
+
+    #[test]
+    fn visible_animated_decor_schedules_next_frame() {
+        let mut w = anim_window("anim-visible", || true);
+        w.show();
+        assert!(w.is_visible());
+        assert!(
+            due_within(w.next_deadline(), std::time::Duration::from_millis(100)),
+            "首帧 100 ms 后换帧"
+        );
+        assert_eq!(decor_px(&w), [0, 0, 255, 255], "首帧是红");
+    }
+
+    #[test]
+    fn hidden_window_does_not_wake_for_animation() {
+        let mut w = anim_window("anim-hidden", || true);
+        w.show();
+        w.hide();
+        assert!(
+            !due_within(w.next_deadline(), std::time::Duration::from_secs(1)),
+            "隐藏后只剩释放像素缓冲那类长期限"
+        );
+        w.tick();
+        assert!(!w.take_anim_due());
+    }
+
+    #[test]
+    fn static_decor_does_not_schedule_frames() {
+        let mut w = fixture_window("anim-static");
+        w.motion_allowed = || true;
+        w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
+        w.show();
+        assert_eq!(w.next_deadline(), None);
+    }
+
+    #[test]
+    fn reduced_motion_keeps_first_frame_and_never_wakes() {
+        let mut w = anim_window("anim-reduced", || false);
+        w.show();
+        assert_eq!(w.next_deadline(), None);
+        assert_eq!(decor_px(&w), [0, 0, 255, 255], "停在首帧");
+    }
+
+    #[test]
+    fn due_frame_repaints_without_resetting_timeline_or_hover() {
+        let mut w = anim_window("anim-repaint", || true);
+        w.show();
+        // 等到换帧期限，tick 置标记。
+        let due = w.next_deadline().expect("动画登记了期限");
+        std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+        w.tick();
+        assert!(w.take_anim_due());
+        assert!(!w.take_anim_due(), "标记取走即清");
+        let start = w.anim_start;
+        w.mouse.borrow_mut().last_hover = 0;
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(w.anim_start, start, "重绘不重置时间轴");
+        assert_eq!(w.mouse.borrow().last_hover, 0, "换帧重绘不动悬停去重");
+        assert_eq!(decor_px(&w), [0, 255, 0, 255], "第二帧是绿");
+        assert!(
+            due_within(w.next_deadline(), std::time::Duration::from_millis(200)),
+            "第二帧 200 ms 后回到首帧"
+        );
+        // 普通重绘（内容更新）照旧重置悬停去重。
+        w.show();
+        assert_eq!(w.mouse.borrow().last_hover, -1);
+    }
+
+    #[test]
+    fn showing_again_restarts_the_timeline() {
+        let mut w = anim_window("anim-restart", || true);
+        w.show();
+        w.anim_start -= std::time::Duration::from_millis(150);
+        w.repaint_anim_frame(|w| w.show());
+        assert_eq!(decor_px(&w), [0, 255, 0, 255], "经过 150 ms 在第二帧");
+        w.hide();
+        w.show();
+        assert_eq!(decor_px(&w), [0, 0, 255, 255], "重新显示从首帧开始");
+    }
+
+    #[test]
+    fn pass_decor_layer_follows_animation_frames() {
+        let mut w = anim_window("anim-pass", || true);
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            v.decor[0].hit = DecorHit::Pass;
+            w.set_theme(theme);
+        }
+        w.show();
+        w.anim_start -= std::time::Duration::from_millis(150);
+        w.refresh_skin_geom();
+        let mut root = w.build_tree(false);
+        let (ml, mt, mr, mb) = w.skin_layout(&mut root).unwrap();
+        let g = w.skin_geom.as_ref().unwrap();
+        let (_, _, fw, fh) = g.frame;
+        let (bw, bh) = (fw + ml + mr, fh + mt + mb);
+        let mut pass = vec![0u8; (bw * bh * 4) as usize];
+        g.paint_pass(&mut pass, bw, bh);
+        let o = ((bw - 1) * 4) as usize;
+        assert_eq!(&pass[o..o + 4], &[0, 255, 0, 255], "穿透层画当前帧");
+    }
+    #[test]
+    fn avoid_mask_ignores_current_animation_frame() {
+        // 首帧不透明、第二帧全透明：保护带只按首帧算，换到第二帧结果不变。
+        let dir = fixture_dir("anim-avoid");
+        let gif = dir.join("decor.gif");
+        let clear = [0, 0, 0, 0];
+        let bytes = crate::image_cache::anim_fixtures::gif(6, 6, &[(RED, 100), (clear, 200)]);
+        std::fs::write(&gif, bytes).unwrap();
+        let mut w = fixture_window_decor(&dir, &gif, None);
+        w.motion_allowed = || true;
+        w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
+        w.show();
+        let mask = |w: &mut CandidateWindow| {
+            w.refresh_skin_geom();
+            let mut root = w.build_tree(false);
+            w.skin_layout(&mut root).unwrap();
+            w.skin_place_anchor(1.0).avoid_below
+        };
+        let first = mask(&mut w);
+        w.anim_start -= std::time::Duration::from_millis(150);
+        let second = mask(&mut w);
+        assert_eq!(
+            w.skin_geom.as_ref().unwrap().decor[0].frame,
+            1,
+            "已换到第二帧"
+        );
+        assert!(first.as_ref().unwrap().any(-6, 0), "首帧装饰压在保护带里");
+        assert_eq!(first, second);
+    }
+    #[test]
+    fn single_frame_gif_takes_no_budget_share() {
+        let mut w = anim_window("anim-share", || true);
+        let one = fixture_dir("anim-share").join("one.gif");
+        std::fs::write(
+            &one,
+            crate::image_cache::anim_fixtures::gif(6, 6, &[(RED, 100)]),
+        )
+        .unwrap();
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            let mut d = v.decor[0].clone();
+            d.image = one.to_string_lossy().into_owned();
+            v.decor.push(d);
+            w.set_theme(theme);
+        }
+        w.show();
+        let g = w.skin_geom.as_ref().unwrap();
+        assert!(g.decor[0].durations.is_some());
+        assert!(g.decor[1].durations.is_none(), "单帧 GIF 按静态图画");
+        assert_eq!(
+            g.decor[0].budget,
+            crate::image_cache::ANIM_BUDGET_BYTES,
+            "唯一的动画独占预算"
+        );
     }
 }

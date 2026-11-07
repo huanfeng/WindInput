@@ -281,6 +281,25 @@ const SRC_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 /// 又短到用户端起茶杯的工夫内存就还回去了。
 pub const IDLE_EVICT_AFTER: Duration = Duration::from_secs(30);
 
+/// 动画装饰的帧预算（全部动画合计）。单个动画按调用方给的份额隔帧丢弃，见 [`crate::skin::FrameBudget`]。
+pub const ANIM_BUDGET_BYTES: usize = 24 * 1024 * 1024;
+
+/// 动画装饰：逐帧按倍率缩好、合成到目标尺寸的位图（BGRA 序 + 预乘）与各帧时长（毫秒）。
+struct Anim {
+    frames: Vec<Pixmap>,
+    durations: Vec<u32>,
+}
+
+/// 同一源下的动画键：倍率百万分值、目标宽高、fps 覆盖的位模式（0 = 不覆盖）、帧预算份额。
+type AnimParams = (u32, u32, u32, u32, usize);
+
+/// 动画帧的闲置回收：远长于 [`IDLE_EVICT_AFTER`]。建帧要整份解码加逐帧缩放，随 30 秒回收清掉的话
+/// 每段打字的首键都要在 UI 线程上重建一遍。
+pub const ANIM_IDLE_EVICT_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// 判断动画格式只读源的前这么多字节。
+const SNIFF_BYTES: usize = 64 * 1024;
+
 /// 解码后的源图（unpremult RGBA8，row-major）。
 struct Src {
     w: u32,
@@ -368,6 +387,14 @@ pub struct ImageCache {
     dims: HashMap<ImgId, (u32, u32)>,
     /// 皮肤窗体 / 装饰的目标位图，计入 `fill_bytes`。
     skin_fills: HashMap<SkinFillKey, Option<Pixmap>>,
+    /// 以下动画三表按源串索引、不随 30 秒闲置回收（那会清掉 `ids`），只在换主题、预算溢出、
+    /// 闲置 [`ANIM_IDLE_EVICT_AFTER`] 时清。
+    /// 多帧动画源（APNG / GIF / 动态 WebP 且至少两帧）。
+    animated: std::collections::HashSet<String>,
+    /// 动画装饰的逐帧位图，计入 `anim_bytes`；None = 解出来不足两帧（按静态图画）或解码失败。
+    anims: HashMap<String, HashMap<AnimParams, Option<Anim>>>,
+    anim_bytes: usize,
+    anim_last_use: Option<Instant>,
     /// `src` / `fills` 各自的驻留字节，对账两个预算。
     ///
     /// ⚠️ 两个计数**只在整表清空时归零**，精确性依赖「从不单独删某一条」。谁要加定向
@@ -378,6 +405,8 @@ pub struct ImageCache {
     /// 真正会随宽度爆炸的是 `fills`。
     src_bytes: usize,
     fill_bytes: usize,
+    /// 已判定不是动画的源（随 `ids` 一起回收，不为静态图常驻源串）。
+    not_animated: std::collections::HashSet<ImgId>,
     /// 最后一次被取用的时刻；None = 空缓存，没有什么可回收。
     last_use: Option<Instant>,
 }
@@ -412,7 +441,28 @@ impl ImageCache {
     /// ⚠ 调用方（UI 消息循环）必须把它登记进 `next_deadline`，否则线程睡下去就再也不会
     /// 来收这份内存——闲置回收只在有别的事把线程叫醒时才碰巧发生。
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.last_use.map(|t| t + IDLE_EVICT_AFTER)
+        let main = self.last_use.map(|t| t + IDLE_EVICT_AFTER);
+        let anim = self.anim_last_use.map(|t| t + ANIM_IDLE_EVICT_AFTER);
+        main.into_iter().chain(anim).min()
+    }
+
+    /// 丢掉全部动画帧（换主题时）。
+    pub fn clear_anims(&mut self) {
+        self.animated.clear();
+        self.not_animated.clear();
+        self.anims.clear();
+        self.anim_bytes = 0;
+        self.anim_last_use = None;
+    }
+
+    fn touch_anim(&mut self) {
+        self.anim_last_use = Some(Instant::now());
+    }
+
+    /// 仅测试可见：把动画表的最后取用时刻挪到过去。
+    #[cfg(test)]
+    fn set_anim_last_use_for_test(&mut self, now: Instant) {
+        self.anim_last_use = Some(now);
     }
 
     /// 闲置够久就整个丢掉，返回是否真的清了。
@@ -422,11 +472,17 @@ impl ImageCache {
     /// 串成另一张图。这里全表一起清本不会留下残留，但那个不变量不该依赖「调用顺序恰好
     /// 安全」来维持。
     pub fn evict_if_idle(&mut self, now: Instant) -> bool {
+        let anim = self
+            .anim_last_use
+            .is_some_and(|t| now.saturating_duration_since(t) >= ANIM_IDLE_EVICT_AFTER);
+        if anim {
+            self.clear_anims();
+        }
         let Some(last) = self.last_use else {
-            return false;
+            return anim;
         };
         if now.saturating_duration_since(last) < IDLE_EVICT_AFTER {
-            return false;
+            return anim;
         }
         self.ids.clear();
         self.src.clear();
@@ -435,6 +491,7 @@ impl ImageCache {
         self.atlases.clear();
         self.dims.clear();
         self.skin_fills.clear();
+        self.not_animated.clear();
         self.src_bytes = 0;
         self.fill_bytes = 0;
         self.last_use = None;
@@ -529,7 +586,12 @@ impl ImageCache {
         if let Some(d) = self.dims.get(&id) {
             return Some(*d);
         }
-        let d = self.decode(id, path).map(|s| (s.w, s.h))?;
+        // 动画只读头取尺寸：逐帧解码另走 `build_anim`，原分辨率首帧不该常驻 `src`。
+        let d = if self.is_animated(path) {
+            header_dims(path)?
+        } else {
+            self.decode(id, path).map(|s| (s.w, s.h))?
+        };
         self.dims.insert(id, d);
         Some(d)
     }
@@ -594,29 +656,9 @@ impl ImageCache {
         let key = (id, k_micro, w, h, stretch_digest(stretch_x, stretch_y));
         if !self.skin_fills.contains_key(&key) {
             let (sw, sh) = self.src_size(path)?;
-            let built = self.atlas(id, path, k_micro).and_then(|a| {
-                use crate::skin::{compose, map_axis, src_segments, taps};
-                let xs = taps(&map_axis(
-                    &src_segments(stretch_x, sw as f32),
-                    sw as f32,
-                    a.w,
-                    w,
-                ));
-                let ys = taps(&map_axis(
-                    &src_segments(stretch_y, sh as f32),
-                    sh as f32,
-                    a.h,
-                    h,
-                ));
-                let rgba = compose(&a.rgba, a.w, &xs, &ys);
-                let mut pm = Pixmap::new(w, h)?;
-                for (p, c) in pm.pixels_mut().iter_mut().zip(rgba.as_chunks::<4>().0) {
-                    // 已预乘；R/B 交换以适配 BGRA 缓冲。
-                    *p = PremultipliedColorU8::from_rgba(c[2], c[1], c[0], c[3])
-                        .unwrap_or_else(transparent);
-                }
-                Some(pm)
-            });
+            let built = self
+                .atlas(id, path, k_micro)
+                .and_then(|a| atlas_pixmap(a, (sw, sh), stretch_x, stretch_y, w, h));
             let bytes = built.as_ref().map_or(0, |pm| pm.data().len());
             if self.fill_bytes + bytes > FILL_BUDGET_BYTES {
                 self.fills.clear();
@@ -627,6 +669,96 @@ impl ImageCache {
             self.skin_fills.insert(key, built);
         }
         self.skin_fills.get(&key).and_then(|o| o.as_ref())
+    }
+
+    /// 源是否多帧动画（结果缓存）：先只读文件头判格式，是动画格式再试解前两帧，单帧 GIF 不算。
+    pub fn is_animated(&mut self, path: &str) -> bool {
+        if self.animated.contains(path) {
+            return true;
+        }
+        let id = self.id_of(path);
+        if self.not_animated.contains(&id) {
+            return false;
+        }
+        let a = !is_svg(path)
+            && read_source_prefix(path, SNIFF_BYTES).is_some_and(|b| sniff_animated(&b))
+            && read_source_bytes(path)
+                .and_then(|b| frames_of(&b).map(|f| f.take(2).filter(Result::is_ok).count()))
+                .is_some_and(|n| n >= 2);
+        if a {
+            self.animated.insert(path.to_string());
+        } else {
+            self.not_animated.insert(id);
+        }
+        a
+    }
+
+    /// 动画装饰：按倍率 `k` 逐帧缩好、合成 `w×h`，帧数按 `budget` 字节隔帧丢弃。
+    /// 不足两帧（含单帧 GIF）或解码失败返回 None，调用方按静态图画。
+    fn anim(
+        &mut self,
+        path: &str,
+        k: f32,
+        w: u32,
+        h: u32,
+        fps: Option<f32>,
+        budget: usize,
+    ) -> Option<&Anim> {
+        self.touch_anim();
+        if w == 0 || h == 0 || !k.is_finite() || k <= 0.0 {
+            return None;
+        }
+        let k_micro = ((k * 1_000_000.0).round() as u32).max(1);
+        let key = (k_micro, w, h, fps.map_or(0, f32::to_bits), budget);
+        if !self.anims.get(path).is_some_and(|m| m.contains_key(&key)) {
+            let built = build_anim(path, k_micro as f32 / 1_000_000.0, w, h, fps, budget);
+            let bytes = built
+                .as_ref()
+                .map_or(0, |a| a.frames.iter().map(|f| f.data().len()).sum());
+            if self.anim_bytes + bytes > ANIM_BUDGET_BYTES {
+                self.anims.clear();
+                self.anim_bytes = 0;
+            }
+            self.anim_bytes += bytes;
+            self.anims
+                .entry(path.to_string())
+                .or_default()
+                .insert(key, built);
+        }
+        self.anims
+            .get(path)
+            .and_then(|m| m.get(&key))
+            .and_then(|o| o.as_ref())
+    }
+
+    /// 动画装饰各帧时长（毫秒，已归一化）；不是动画（不足两帧）为 None。
+    pub fn anim_durations(
+        &mut self,
+        path: &str,
+        k: f32,
+        w: u32,
+        h: u32,
+        fps: Option<f32>,
+        budget: usize,
+    ) -> Option<&[u32]> {
+        self.anim(path, k, w, h, fps, budget)
+            .map(|a| a.durations.as_slice())
+    }
+
+    /// 动画装饰的第 `idx` 帧（对帧数取模）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn anim_frame(
+        &mut self,
+        path: &str,
+        k: f32,
+        w: u32,
+        h: u32,
+        fps: Option<f32>,
+        budget: usize,
+        idx: usize,
+    ) -> Option<&Pixmap> {
+        let a = self.anim(path, k, w, h, fps, budget)?;
+        a.frames.get(idx % a.frames.len())
     }
 
     /// 皮肤某轴的最小目标长度与「倍率下的自然长度」（设备像素）：`(min_w, min_h, nat_w, nat_h)`。
@@ -753,6 +885,178 @@ impl ImageCache {
     }
 }
 
+/// 图集（源图 `sw×sh` 按倍率缩好）按两轴拉伸声明合成 `w×h` 的 BGRA 预乘位图。
+fn atlas_pixmap(
+    a: &Atlas,
+    (sw, sh): (u32, u32),
+    stretch_x: &wind_theme::skin::Stretch,
+    stretch_y: &wind_theme::skin::Stretch,
+    w: u32,
+    h: u32,
+) -> Option<Pixmap> {
+    use crate::skin::{compose, map_axis, src_segments, taps};
+    let xs = taps(&map_axis(
+        &src_segments(stretch_x, sw as f32),
+        sw as f32,
+        a.w,
+        w,
+    ));
+    let ys = taps(&map_axis(
+        &src_segments(stretch_y, sh as f32),
+        sh as f32,
+        a.h,
+        h,
+    ));
+    let rgba = compose(&a.rgba, a.w, &xs, &ys);
+    let mut pm = Pixmap::new(w, h)?;
+    for (p, c) in pm.pixels_mut().iter_mut().zip(rgba.as_chunks::<4>().0) {
+        // 已预乘；R/B 交换以适配 BGRA 缓冲。
+        *p = PremultipliedColorU8::from_rgba(c[2], c[1], c[0], c[3]).unwrap_or_else(transparent);
+    }
+    Some(pm)
+}
+
+/// 源的前 `n` 字节（`data:` URI 只解对应长度的 base64）。
+fn read_source_prefix(src: &str, n: usize) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    use std::io::Read as _;
+    if !src.starts_with("data:") {
+        let mut out = Vec::new();
+        std::fs::File::open(src)
+            .ok()?
+            .take(n as u64)
+            .read_to_end(&mut out)
+            .ok()?;
+        return Some(out);
+    }
+    let (head, payload) = src.strip_prefix("data:")?.split_once(',')?;
+    if !head.split(';').any(|p| p.eq_ignore_ascii_case("base64")) {
+        return None;
+    }
+    let want = n.div_ceil(3) * 4;
+    let mut cleaned: String = payload
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .take(want)
+        .collect();
+    // 截断处须落在 4 字符组边界上。
+    if cleaned.len() == want {
+        cleaned.truncate(want - want % 4);
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(cleaned)
+        .ok()
+}
+
+/// 文件头是否动画格式：GIF 一律算（帧数另判）；APNG 看 IDAT 之前有无 acTL；WebP 看 VP8X 的动画位。
+fn sniff_animated(b: &[u8]) -> bool {
+    if b.starts_with(b"GIF8") {
+        return true;
+    }
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut at = 8;
+        while let Some(head) = b.get(at..at + 8) {
+            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            match &head[4..8] {
+                b"acTL" => return true,
+                b"IDAT" => return false,
+                _ => at = at.saturating_add(len).saturating_add(12),
+            }
+        }
+        return false;
+    }
+    b.len() > 20
+        && &b[0..4] == b"RIFF"
+        && &b[8..12] == b"WEBP"
+        && &b[12..16] == b"VP8X"
+        && b[20] & 0x02 != 0
+}
+
+/// 只解析文件头取尺寸。
+fn header_dims(src: &str) -> Option<(u32, u32)> {
+    let bytes = read_source_bytes(src)?;
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// 动画格式（APNG / GIF / 动态 WebP）的逐帧解码器（帧已合成到整张画布）；静态图为 None。
+fn frames_of(bytes: &[u8]) -> Option<image::Frames<'_>> {
+    use image::AnimationDecoder;
+    use image::codecs::{gif::GifDecoder, png::PngDecoder, webp::WebPDecoder};
+    use std::io::Cursor;
+    match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Png => {
+            let d = PngDecoder::new(Cursor::new(bytes)).ok()?;
+            if !d.is_apng().ok()? {
+                return None;
+            }
+            Some(d.apng().ok()?.into_frames())
+        }
+        image::ImageFormat::Gif => Some(GifDecoder::new(Cursor::new(bytes)).ok()?.into_frames()),
+        image::ImageFormat::WebP => {
+            let d = WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            d.has_animation().then(|| d.into_frames())
+        }
+        _ => None,
+    }
+}
+
+/// 逐帧解码动画，每帧与静态装饰同一套缩放合成（面积平均缩到倍率 `k`，再整轴映射到 `w×h`）。
+fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usize) -> Option<Anim> {
+    use wind_theme::skin::{BandFill, Stretch};
+    let t0 = Instant::now();
+    let bytes = read_source_bytes(path)?;
+    let frames = frames_of(&bytes)?;
+    let whole = Stretch::Whole(BandFill::Stretch);
+    let mut acc = crate::skin::FrameBudget::new(w as usize * h as usize * 4, budget);
+    for frame in frames {
+        let frame = match frame {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(
+                    "skin: 动画帧解码失败，只用已解出的帧: {} ({e})",
+                    brief(path)
+                );
+                break;
+            }
+        };
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        acc.push_with(crate::skin::frame_ms(numer, denom, fps), || {
+            let buf = frame.buffer();
+            let (sw, sh) = buf.dimensions();
+            let (aw, ah) = (crate::skin::atlas_len(sw, k), crate::skin::atlas_len(sh, k));
+            let atlas = Atlas {
+                w: aw,
+                h: ah,
+                rgba: crate::skin::resample(buf.as_raw(), sw, sh, aw, ah),
+            };
+            atlas_pixmap(&atlas, (sw, sh), &whole, &whole, w, h)
+        });
+    }
+    let dropped = acc.dropped();
+    let (frames, durations): (Vec<Pixmap>, Vec<u32>) = acc.finish().into_iter().unzip();
+    tracing::debug!(
+        "skin: 动画建帧 {} 帧 {w}x{h}，耗时 {:?}",
+        frames.len(),
+        t0.elapsed()
+    );
+    if frames.len() < 2 {
+        return None;
+    }
+    if dropped {
+        tracing::warn!(
+            "skin: 动画帧超出 {} KiB 预算，隔帧丢弃到 {} 帧: {}",
+            budget / 1024,
+            frames.len(),
+            brief(path)
+        );
+    }
+    Some(Anim { frames, durations })
+}
+
 /// 按 `spec` 把源图（`(sw, sh, RGBA8)`，`premult` 标明是否已预乘）采样进 `w×h` 的目标像素。
 /// 位图各模式与 SVG 的 center / tile（单元已栅格化好）共用；None 处保持透明（Pixmap::new 已清零）。
 fn sample_into(
@@ -852,10 +1156,257 @@ fn nine_axis(d: u32, dlen: u32, slen: u32, s0: u32, s1: u32, repeat: bool) -> Op
     }
 }
 
+/// 测试夹具：现生成的多帧动画（纯色帧，`(RGBA, 帧时长毫秒)`）。
+#[cfg(test)]
+pub(crate) mod anim_fixtures {
+    /// 多帧 GIF（循环播放）。GIF 帧时长以 10 ms 为单位。
+    pub(crate) fn gif(w: u32, h: u32, frames: &[([u8; 4], u32)]) -> Vec<u8> {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let mut out = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut out);
+            enc.set_repeat(Repeat::Infinite).expect("GIF 循环");
+            enc.encode_frames(frames.iter().map(|&(c, ms)| {
+                image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(w, h, image::Rgba(c)),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(ms, 1),
+                )
+            }))
+            .expect("GIF 编码");
+        }
+        out
+    }
+
+    /// 多帧 APNG，每帧给整张像素（RGBA8，行优先）。
+    pub(crate) fn apng(w: u32, h: u32, frames: &[(Vec<u8>, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.set_animated(frames.len() as u32, 0).expect("APNG 帧数");
+            let mut wr = enc.write_header().expect("APNG 头");
+            for (px, ms) in frames {
+                wr.set_frame_delay(*ms as u16, 1000).expect("APNG 帧时长");
+                wr.write_image_data(px).expect("APNG 帧");
+            }
+            wr.finish().expect("APNG 结尾");
+        }
+        out
+    }
+
+    pub(crate) fn data_uri(mime: &str, bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;
+
+    use super::anim_fixtures;
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    fn gif_uri(frames: &[([u8; 4], u32)]) -> String {
+        anim_fixtures::data_uri("image/gif", &anim_fixtures::gif(4, 4, frames))
+    }
+
+    /// 第 `idx` 帧左上像素（BGRA 预乘）。
+    fn frame_px(c: &mut ImageCache, uri: &str, budget: usize, idx: usize) -> [u8; 4] {
+        let pm = c
+            .anim_frame(uri, 1.0, 4, 4, None, budget, idx)
+            .expect("动画帧");
+        let p = pm.pixels()[0];
+        [p.red(), p.green(), p.blue(), p.alpha()]
+    }
+
+    #[test]
+    fn gif_frames_decode_with_normalized_durations() {
+        let uri = gif_uri(&[(RED, 0), (GREEN, 50), (BLUE, 20)]);
+        let mut c = ImageCache::new();
+        assert!(c.is_animated(&uri));
+        assert_eq!(
+            c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES),
+            Some(&[100, 50, 33][..]),
+            "0 ms 按 100 ms，不足 33 ms 钳到帧率上限"
+        );
+        // BGRA：红帧的蓝通道位是 0、红通道位在第三个。
+        assert_eq!(
+            frame_px(&mut c, &uri, ANIM_BUDGET_BYTES, 0),
+            [0, 0, 255, 255]
+        );
+        assert_eq!(
+            frame_px(&mut c, &uri, ANIM_BUDGET_BYTES, 1),
+            [0, 255, 0, 255]
+        );
+        assert_eq!(
+            frame_px(&mut c, &uri, ANIM_BUDGET_BYTES, 5),
+            [255, 0, 0, 255],
+            "帧号对帧数取模"
+        );
+    }
+
+    #[test]
+    fn fps_overrides_every_frame_duration() {
+        let uri = gif_uri(&[(RED, 500), (GREEN, 50)]);
+        let mut c = ImageCache::new();
+        assert_eq!(
+            c.anim_durations(&uri, 1.0, 4, 4, Some(8.0), ANIM_BUDGET_BYTES),
+            Some(&[125, 125][..])
+        );
+    }
+
+    #[test]
+    fn over_budget_animation_drops_every_other_frame() {
+        // 每帧 4×4×4 = 64 字节，预算 128：4 帧隔帧丢成 2 帧（第 0、2 帧），时长并入前一帧。
+        let uri = gif_uri(&[(RED, 100), (GREEN, 200), (BLUE, 300), (WHITE, 400)]);
+        let mut c = ImageCache::new();
+        assert_eq!(
+            c.anim_durations(&uri, 1.0, 4, 4, None, 128),
+            Some(&[300, 700][..])
+        );
+        assert_eq!(
+            frame_px(&mut c, &uri, 128, 1),
+            [255, 0, 0, 255],
+            "留下的是蓝帧"
+        );
+    }
+
+    #[test]
+    fn static_and_single_frame_images_are_not_animations() {
+        let mut c = ImageCache::new();
+        let png = png_data_uri(4, 4, RED);
+        assert!(!c.is_animated(&png));
+        let one = gif_uri(&[(RED, 100)]);
+        assert_eq!(
+            c.anim_durations(&one, 1.0, 4, 4, None, ANIM_BUDGET_BYTES),
+            None,
+            "单帧 GIF 按静态图画"
+        );
+    }
+
+    #[test]
+    fn apng_frames_scale_like_static_images() {
+        // 8×2 竖条纹两帧，缩到 k = 0.5（4×1）：每帧与同像素静态 PNG 走静态路径的结果逐字节一致。
+        let stripes = |a: [u8; 4], b: [u8; 4]| -> Vec<u8> {
+            (0..16)
+                .flat_map(|i| if i % 2 == 0 { a } else { b })
+                .collect()
+        };
+        let f0 = stripes(RED, WHITE);
+        let f1 = stripes(BLUE, GREEN);
+        let uri = anim_fixtures::data_uri(
+            "image/png",
+            &anim_fixtures::apng(8, 2, &[(f0.clone(), 40), (f1.clone(), 120)]),
+        );
+        let mut c = ImageCache::new();
+        assert!(c.is_animated(&uri));
+        assert_eq!(
+            c.anim_durations(&uri, 0.5, 4, 1, None, ANIM_BUDGET_BYTES),
+            Some(&[40, 120][..])
+        );
+        let whole = wind_theme::skin::Stretch::Whole(wind_theme::skin::BandFill::Stretch);
+        for (i, px) in [f0, f1].into_iter().enumerate() {
+            let img = image::RgbaImage::from_raw(8, 2, px).unwrap();
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            let still = anim_fixtures::data_uri("image/png", &png.into_inner());
+            let want = c
+                .skin_fill(&still, 0.5, &whole, &whole, 4, 1)
+                .unwrap()
+                .data()
+                .to_vec();
+            let got = c
+                .anim_frame(&uri, 0.5, 4, 1, None, ANIM_BUDGET_BYTES, i)
+                .unwrap()
+                .data()
+                .to_vec();
+            assert_eq!(got, want, "第 {i} 帧");
+        }
+    }
+
+    #[test]
+    fn animation_frames_outlive_short_idle_eviction() {
+        let uri = gif_uri(&[(RED, 100), (GREEN, 100)]);
+        let mut c = ImageCache::new();
+        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES);
+        let bytes = c.anim_bytes;
+        assert!(bytes > 0);
+        let now = Instant::now();
+        c.set_last_use_for_test(now - IDLE_EVICT_AFTER);
+        assert!(c.evict_if_idle(now));
+        assert_eq!(c.anim_bytes, bytes, "30 秒回收不清动画帧");
+        assert!(
+            c.next_deadline()
+                .is_some_and(|t| t >= now + ANIM_IDLE_EVICT_AFTER - Duration::from_secs(1)),
+            "仍登记动画帧的长闲置期限"
+        );
+        c.set_anim_last_use_for_test(now - ANIM_IDLE_EVICT_AFTER);
+        assert!(c.evict_if_idle(now));
+        assert_eq!((c.anims.len(), c.anim_bytes), (0, 0));
+        assert_eq!(c.next_deadline(), None);
+    }
+
+    #[test]
+    fn clear_anims_drops_frames_for_theme_switch() {
+        let uri = gif_uri(&[(RED, 100), (GREEN, 100)]);
+        let mut c = ImageCache::new();
+        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES);
+        c.clear_anims();
+        assert_eq!((c.anims.len(), c.anim_bytes), (0, 0));
+    }
+
+    #[test]
+    fn animated_source_is_not_kept_at_full_resolution() {
+        let uri = gif_uri(&[(RED, 100), (GREEN, 100)]);
+        let mut c = ImageCache::new();
+        assert_eq!(c.src_size(&uri), Some((4, 4)), "只读头也拿得到尺寸");
+        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES);
+        assert_eq!(c.src_stats(), (0, 0), "原分辨率首帧不常驻");
+    }
+
+    #[test]
+    fn sniff_reads_only_format_headers() {
+        let gif = anim_fixtures::gif(4, 4, &[(RED, 100), (GREEN, 100)]);
+        assert!(sniff_animated(&gif[..8]), "GIF 看签名");
+        let still = image::RgbaImage::from_pixel(4, 4, image::Rgba(RED));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(still)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        assert!(!sniff_animated(&png.into_inner()));
+        let apng = anim_fixtures::apng(1, 1, &[(RED.to_vec(), 40), (GREEN.to_vec(), 40)]);
+        assert!(sniff_animated(&apng[..64]), "APNG 的 acTL 在文件头里");
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0".to_vec();
+        webp.extend([0x02, 0, 0, 0]);
+        assert!(sniff_animated(&webp));
+        webp[20] = 0;
+        assert!(!sniff_animated(&webp));
+    }
+
+    #[test]
+    fn source_prefix_decodes_only_leading_bytes() {
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let uri = anim_fixtures::data_uri("image/gif", &bytes);
+        let head = read_source_prefix(&uri, 100).unwrap();
+        assert!(head.len() >= 100 && head.len() < 110);
+        assert_eq!(&head[..], &bytes[..head.len()]);
+        let short = anim_fixtures::data_uri("image/gif", &bytes[..10]);
+        assert_eq!(read_source_prefix(&short, 100).unwrap(), &bytes[..10]);
+    }
 
     /// 把一张纯色图编码成 `data:image/png;base64,...`——主题编辑器发布图片的形态。
     fn png_data_uri(w: u32, h: u32, rgba: [u8; 4]) -> String {
