@@ -407,6 +407,10 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
    - 扩展 `spotScale`（矩形坐标系）：sf≈缓冲缩放 → 用客户端 sf（已预乘）；sf≈1 且 frontend=ibus
      → 用输出缩放（相对矩形常已预乘却未报 scale）；其余（sf≈1 的其它前端，以及 sf>1 但不贴近
      缓冲缩放的逻辑 DIP）主题 scale≈1。纯函数在 `GnomeCaretGeom`，单测覆盖 frontend × scale。
+   - 缓冲缩放取 `Xft.dpi / 96 / text-scaling-factor`：GNOME 写的 `Xft.dpi` 掺着字体缩放，不除掉
+     坐标会被多乘一次（只开字体缩放 1.3 时候选窗偏右下、离原点越远偏越多）。字体缩放取 XSETTINGS 的
+     `Gdk/UnscaledDPI`（gsd-xsettings 与 `Xft.dpi` 同时写），读不到按 1。光栅化仍用不除的
+     `Xft.dpi / 96`，字跟着字体缩放放大。
    - 扩展未启用时退回 toolkit 折中——最大化大致可用，浮动窗会偏。问总线的连接会缓存；失败后
      约 3 秒内不再同步重试；同一矩形不重复调用。`hostOutput` 复用 `sendCaretUpdate` 已经成功
      换算的结果。

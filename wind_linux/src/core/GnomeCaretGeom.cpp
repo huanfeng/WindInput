@@ -94,6 +94,65 @@ CaretPx absoluteCaretToX11(int left, int top, int height, double scaleFactor, do
     return scaleRectToX11(left, top, height, premult ? 1.0 : buf);
 }
 
+double xftDpiToX11Scale(double xftDpi, double textScaling)
+{
+    const double tsf = (textScaling >= 0.5 && textScaling <= 3.0) ? textScaling : 1.0;
+    double s = std::round(xftDpi / 96.0 / tsf * 100.0) / 100.0;
+    return s < 1.0 ? 1.0 : (s > 4.0 ? 4.0 : s);
+}
+
+double xsettingsTextScaling(const uint8_t* data, size_t len)
+{
+    constexpr char kName[] = "Gdk/UnscaledDPI";
+    constexpr size_t kNameLen = sizeof(kName) - 1;
+    if (!data || len < 12 || data[0] > 1) {
+        return 1.0;
+    }
+    const bool msb = data[0] == 1;
+    auto rd = [&](size_t at, int bytes) {
+        uint32_t v = 0;
+        for (int i = 0; i < bytes; ++i) {
+            const int shift = msb ? (bytes - 1 - i) * 8 : i * 8;
+            v |= uint32_t(data[at + i]) << shift;
+        }
+        return v;
+    };
+    auto pad4 = [](size_t n) { return (n + 3) & ~size_t(3); };
+    const uint32_t count = rd(8, 4);
+    size_t at = 12;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (len - at < 4) {
+            return 1.0;
+        }
+        const uint8_t type = data[at];
+        const size_t nameLen = rd(at + 2, 2);
+        const size_t nameAt = at + 4;
+        const size_t valueAt = nameAt + pad4(nameLen) + 4; // 名字之后是 last-change serial
+        size_t valueLen = 0;
+        if (type == 0) {
+            valueLen = 4;
+        } else if (type == 1) {
+            if (valueAt + 4 > len) {
+                return 1.0;
+            }
+            valueLen = 4 + pad4(rd(valueAt, 4));
+        } else if (type == 2) {
+            valueLen = 8;
+        } else {
+            return 1.0;
+        }
+        if (valueAt + valueLen > len) {
+            return 1.0;
+        }
+        if (type == 0 && nameLen == kNameLen && std::memcmp(data + nameAt, kName, kNameLen) == 0) {
+            const int32_t dpi1024 = int32_t(rd(valueAt, 4));
+            return dpi1024 > 0 ? dpi1024 / 1024.0 / 96.0 : 1.0;
+        }
+        at = valueAt + valueLen;
+    }
+    return 1.0;
+}
+
 double stageToX11Mul(double shellScale, double x11BufScale)
 {
     const double buf = x11BufScale > 0.0 ? x11BufScale : 1.0;
