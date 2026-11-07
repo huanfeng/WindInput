@@ -98,6 +98,7 @@ private:
     HostOutput hostOutput(fcitx::InputContext* ic);
     void sendCaretUpdate(fcitx::InputContext* ic);
     uint16_t prevCharFor(fcitx::InputContext* ic);
+    void noteHostCursor(fcitx::InputContext* ic);
     /// 修饰键单击 / CapsLock 状态通知：发一帧 eventType=UP 的 KeyEvent 并应用其响应。
     /// `toggles` 必须是真实锁定态——服务端拿**每一帧**的 toggles 校准大写锁定镜像，
     /// 发 0 等于告诉它「大写锁定关了」。

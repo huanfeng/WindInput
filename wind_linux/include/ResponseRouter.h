@@ -70,21 +70,69 @@ private:
 /// 首个 UTF-16 单元。
 /// 与 DigitTracker 分开：组合串（预编辑）没写进文档，不动它——否则「打 nihao → Esc」会留下
 /// 编码末位 'o'，下一笔中文被误补空格。
+///
+/// **光标被挪过**（鼠标点到别处）看不见，靠两条补：宿主发 reset（GTK 点击会发）时调 `reset()`；
+/// 宿主支持周边文本时（Qt 系点击只报光标位置、不发 reset），每次按键前用 `noteCursor` 比对预期光标——每次
+/// 写进文档都把预期光标往前推，宿主报来的位置对不上就是被挪过。不支持周边文本的宿主两条都没有。
 class SeqTracker {
 public:
     /// 「在记账、但不知道」。0 只来自不带这个字段的旧客户端（Rust `SEQ_CHAR_UNKNOWN`）。
     static constexpr uint16_t kUnknown = 0xFFFF;
     uint16_t seqChar() const { return seqChar_; }
-    void reset() { seqChar_ = kUnknown; }
+    void reset()
+    {
+        seqChar_ = kUnknown;
+        expectedCursor_ = -1;
+        beforeWrite_ = -1;
+    }
     static uint16_t charFromVk(uint32_t vk, uint32_t modifiers);
-    void noteKeyPassthrough(uint32_t vk, uint32_t modifiers) { seqChar_ = charFromVk(vk, modifiers); }
+    /// 可见字符透传：宿主写进一个字符，光标前进 1；其余键（导航、编辑、快捷键）光标去向不明。
+    void noteKeyPassthrough(uint32_t vk, uint32_t modifiers)
+    {
+        seqChar_ = charFromVk(vk, modifiers);
+        advanceCursor(seqChar_ == kUnknown ? -1 : 1);
+    }
     /// 空串不动：没有东西写进文档。
     void noteCommittedText(const std::string& utf8);
     /// 光标跨过了一个已知是符号的字符（智能跳过右标点）。
-    void noteCursorCrossedSymbol() { seqChar_ = '?'; }
+    void noteCursorCrossedSymbol()
+    {
+        seqChar_ = '?';
+        advanceCursor(1);
+    }
+    /// 写进文档的同时还删过字、挪过光标（智能符号替换、带光标位置的上屏）：预期光标作废，
+    /// 下一次宿主报的位置重新当基准。记账本身不动。
+    void forgetCursor() { expectedCursor_ = beforeWrite_ = -1; }
+    /// 宿主报来光标位置（字符计）。与预期不符 = 被挪过：记账作废。`cursor < 0` = 宿主没给有效值。
+    void noteCursor(int cursor)
+    {
+        if (cursor < 0) {
+            expectedCursor_ = -1;
+            return;
+        }
+        if (expectedCursor_ >= 0 && cursor != expectedCursor_) {
+            // 写进文档前那一刻的位置：宿主晚到的中间态回声（Qt 上屏时先报「编码已清、新字未插」），
+            // 不是被挪过，也不当新基准。
+            if (cursor == beforeWrite_) {
+                return;
+            }
+            seqChar_ = kUnknown;
+        }
+        expectedCursor_ = cursor;
+        beforeWrite_ = -1;
+    }
 
 private:
+    /// `chars < 0` = 光标去向不明。
+    void advanceCursor(int chars)
+    {
+        beforeWrite_ = expectedCursor_;
+        expectedCursor_ = (chars < 0 || expectedCursor_ < 0) ? -1 : expectedCursor_ + chars;
+    }
+
     uint16_t seqChar_ = kUnknown;
+    int expectedCursor_ = -1;
+    int beforeWrite_ = -1;
 };
 
 /// 服务端给的删除 / 光标移动计数是 u32，转 int 取负前先钳住：大于 INT_MAX 时取负是未定义行为；

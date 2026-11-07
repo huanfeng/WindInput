@@ -350,6 +350,52 @@ void TestSeqTracker()
     CHECK_EQ(r.seqTracker().seqChar(), SeqTracker::kUnknown);
 }
 
+void TestSeqTrackerCursor()
+{
+    CASE("seqChar 记账：宿主报的光标与预期不符（鼠标挪过）就作废");
+    ResponseRouter r;
+    FakeSink s;
+    auto& t = r.seqTracker();
+    t.noteCursor(0);                 // 基准
+    r.apply(commit("工工"), &s);     // 预期 2
+    t.noteCursor(2);
+    CHECK_EQ(t.seqChar(), uint16_t(0x5DE5));
+    r.noteKeyPassthrough(0x33, 0);   // 透传 '3'：预期 3
+    t.noteCursor(3);
+    CHECK_EQ(t.seqChar(), uint16_t('3'));
+    t.noteCursor(0);                 // 点到行首
+    CHECK_EQ(t.seqChar(), SeqTracker::kUnknown);
+
+    CASE("上屏时宿主先报「编码已清、新字未插」的中间态：当回声忽略，不误判");
+    t.noteCursor(3);                 // 重新当基准：光标在 3
+    r.apply(commit("工"), &s);       // 预期 4
+    t.noteCursor(3);                 // 中间态回声
+    CHECK_EQ(t.seqChar(), uint16_t(0x5DE5));
+    t.noteCursor(4);                 // 最终态
+    CHECK_EQ(t.seqChar(), uint16_t(0x5DE5));
+    t.noteCursor(3);                 // 已收到最终态之后再报 3：是真被挪过
+    CHECK_EQ(t.seqChar(), SeqTracker::kUnknown);
+
+    CASE("宿主还没报新位置就连打：预期累加，不误判");
+    t.noteCursor(0);                 // 重新当基准
+    r.apply(commit("你"), &s);       // 预期 1
+    r.apply(commit("好"), &s);       // 预期 2
+    t.noteCursor(2);
+    CHECK_EQ(t.seqChar(), uint16_t(0x597D));
+
+    CASE("删过字 / 导航键之后光标去向不明：下一次报的位置重新当基准，不判");
+    r.noteKeyPassthrough(0x25, 0);   // ←
+    r.apply(commit("工"), &s);
+    t.noteCursor(9);
+    CHECK_EQ(t.seqChar(), uint16_t(0x5DE5));
+    t.forgetCursor();
+    t.noteCursor(4);
+    CHECK_EQ(t.seqChar(), uint16_t(0x5DE5));
+    t.noteCursor(-1);                // 宿主给不出有效值
+    t.noteCursor(7);
+    CHECK_EQ(t.seqChar(), uint16_t(0x5DE5));
+}
+
 void TestDigitTracker()
 {
     CASE("数字后智能标点记账：上屏数字记、汉字清零；透传键按产出记；快捷键不记");
@@ -417,6 +463,7 @@ int main()
     TestReplaceBackwardAndCursor();
     TestDigitTracker();
     TestSeqTracker();
+    TestSeqTrackerCursor();
     TestUtf();
     TEST_MAIN_END();
 }

@@ -66,6 +66,12 @@ void SeqTracker::noteCommittedText(const std::string& utf8)
     uint32_t last = lastCodepoint(utf8);
     // 辅助平面取高代理：服务端据此把 2/3 号平面认成汉字。
     seqChar_ = last >= 0x10000 ? uint16_t(0xD800 + ((last - 0x10000) >> 10)) : uint16_t(last);
+    // 预期光标按字符（码点）前进，与 Fcitx 周边文本的光标量纲一致。
+    int chars = 0;
+    for (unsigned char c : utf8) {
+        chars += (c & 0xC0) != 0x80;
+    }
+    advanceCursor(chars);
 }
 
 void ResponseRouter::reset()
@@ -154,6 +160,7 @@ bool ResponseRouter::apply(const Frame& frame, TextSink* sink, bool hostShortcut
                 seq_.reset();
             }
             if (p->count > 0) {
+                seq_.forgetCursor(); // 删了字：预期光标不再按字数推
                 sink->deleteBeforeCursor(std::min(p->count, kMaxDeleteUnits));
             }
             insertCommitted(p->text, sink);
@@ -232,6 +239,7 @@ void ResponseRouter::applyCommitTextWithCursor(const CommitTextWithCursorPayload
     clearPreeditIfAny(sink);
     // 自动配对插入 `（）` 后把光标退回到配对中间。
     if (p.cursorOffset > 0 && sink) {
+        seq_.forgetCursor(); // 光标退回了配对中间
         sink->moveCursor(-static_cast<int>(std::min(p.cursorOffset, kMaxCursorMove)));
     }
 }
