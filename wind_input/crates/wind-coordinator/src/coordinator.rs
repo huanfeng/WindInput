@@ -4491,6 +4491,16 @@ impl Coordinator {
         let d = &bundle.config.input.default;
         let proc = self.cached_proc_name(client_token);
         let chinese = self.initial_chinese_mode_for(&proc, win);
+        // per-app：首次进入就把这个进程的中英态记进表。只在手动切换时记的话，没切过的进程
+        // 表里没有它，下次回来会退回全局「前次状态」——在别的应用里切的那一下就把它带走了。
+        // 有应用规则的进程不记：规则每次都压过记忆表。
+        if d.per_app_scope() && !proc.is_empty() && self.rule_initial_mode(&proc, win).is_none() {
+            self.mode_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(proc.clone())
+                .or_insert(chinese);
+        }
         let rule_punct = self.rule_initial_punct(&proc, win);
         let follow = bundle.config.input.punct.follow_mode;
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -16853,6 +16863,33 @@ mod initial_mode_tests {
         set_focus_proc(&c, 100, "game.exe");
         c.apply_initial_mode(token(100), false);
         assert!(!c.state.lock().unwrap().chinese_mode);
+    }
+
+    /// scope=app + 记忆前次状态：没手动切过的进程也要记住进入时的状态。在 B 里切英文，
+    /// 不得把从没切过的 A 一起带成英文。
+    #[test]
+    fn per_app_scope_records_untoggled_process_on_entry() {
+        let c = coord_with(|cfg| {
+            cfg.input.default.state_scope = "app".into();
+            cfg.input.default.remember_last_state = true;
+            cfg.input.default.chinese_mode = true;
+        });
+        *c.runtime_last.lock().unwrap() = (true, false, true);
+        set_focus_proc(&c, 100, "notepad.exe");
+        c.apply_initial_mode(token(100), false);
+        assert!(c.state.lock().unwrap().chinese_mode);
+        set_focus_proc(&c, 200, "wt.exe");
+        c.apply_initial_mode(token(200), false);
+        // 在 wt 里切英文：手动切换会同时改「前次状态」镜像与本进程的表项。
+        c.state.lock().unwrap().chinese_mode = false;
+        c.record_app_mode(false);
+        *c.runtime_last.lock().unwrap() = (false, false, true);
+        set_focus_proc(&c, 100, "notepad.exe");
+        c.apply_initial_mode(token(100), false);
+        assert!(
+            c.state.lock().unwrap().chinese_mode,
+            "记事本进入时是中文、从没切过，回来仍应是中文"
+        );
     }
 
     /// scope=app：FOCUS_GAINED 同步路径（get_current_mode）命中记忆表时先切换再回传；
