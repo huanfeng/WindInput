@@ -6,8 +6,10 @@
 //! 方案见 `docs/design/wind-scene-extraction.md` §2。
 
 mod skin_geom;
+mod theme;
 
 pub use skin_geom::{AnimClock, AvoidMask, DecorGeom, PlaceAnchor, SkinGeom, SlotKind};
+pub use theme::{EffectiveTheme, ThemeOverrides, effective_base_font_size, effective_theme};
 
 use std::borrow::Cow;
 use std::cell::RefCell;

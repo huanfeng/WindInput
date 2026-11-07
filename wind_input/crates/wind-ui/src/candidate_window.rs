@@ -45,53 +45,6 @@ fn resolve_font_family(family: &str) -> &str {
     if f.is_empty() { DEFAULT_FONT_FAMILY } else { f }
 }
 
-/// 外观字体覆盖主题节点字族（R3「外观覆盖主题」）：用户 `ui.font.family` 非空时，主题
-/// **全部**节点（含状态 patch）的 `font_family` 一律让位——清空后叶子回落渲染器的全局
-/// 字族，即用户字体本身。空 = 不动，主题节点字族照常生效（与改动前一致）。
-///
-/// 完整优先级（候选文字节点）：方案级 `[candidate] font_family` > 用户 `ui.font.family`
-/// > 主题节点 `font_family` > 内置默认 [`DEFAULT_FONT_FAMILY`]；其余节点没有方案级那一档。
-///
-/// `ui.font.fallback` / `ui.font.scripts` **不必**按同一规则处理，主题节点字族本就压不住它们：
-/// - scripts：`create_layout` 里按脚本切段的指派在叶子字族**之后**设置，恒胜过节点字族；
-/// - fallback：默认链另挂了一条不按 base family 筛选的兜底映射（`ensure_fallback` 第 3 段），
-///   base 是主题字族时照样按用户的链接续缺字；CoreText 的 cascade list 是字体级属性，同理。
-///
-/// 所以只有「主字族」这一格会被主题压住，要改的也只有这一格。
-fn apply_user_font(views: &mut wind_theme::RvViews, user_family: &str) {
-    if !user_family.trim().is_empty() {
-        views.clear_font_families();
-    }
-}
-
-/// 用户覆盖为无阴影：清掉窗口阴影的全部字段。`shadow_params` 因此得 None、`margins()` 为 0，
-/// 窗口与内容等大，`window.show(px - ml, py - mt)` 的扩边补偿自然归零。
-/// 主题的 `window_offset_*`（position_offset）刻意保留——它补偿的是发光边等装饰，与阴影无关。
-fn clear_window_shadow(views: &mut wind_theme::RvViews) {
-    views.shadow_offset_x = None;
-    views.shadow_offset_y = None;
-    views.shadow_blur = None;
-    views.shadow_spread = None;
-    views.shadow_spread_offset_x = None;
-    views.shadow_spread_offset_y = None;
-    views.shadow_color = None;
-}
-
-/// 方案级 `[candidate] font_family`（空 = 不覆盖）只作用于候选文字节点，理由见
-/// [`CandidateWindow::text_family_override`]。须在 [`apply_user_font`] 之后叠。
-fn apply_scheme_text_font(views: &mut wind_theme::RvViews, scheme_family: &str) {
-    let f = scheme_family.trim();
-    if !f.is_empty() {
-        views.text.font_family = Some(f.to_string());
-    }
-}
-
-/// 生效候选基准字号（逻辑像素）：用户值 > 0 取用户值，否则主题 `behavior.font_size`
-/// （`ui.candidate.font_size` 的 0 = 跟随主题）。
-fn effective_base_font_size(user: f32, theme: i32) -> f32 {
-    if user > 0.0 { user } else { theme as f32 }
-}
-
 /// 把 `[ui.font]` 的三个键折成渲染层的 [`FontPlan`]。
 ///
 /// 纯函数：它承载了本功能全部的「配置怎么变成方案」的判定（链首归一、未知类名处置），
@@ -411,7 +364,7 @@ pub struct CandidateWindow {
     /// 候选**文字节点**的字族覆盖（方案级 `[candidate] font_family`）；空 = 不覆盖。
     ///
     /// 优先级：方案 > 用户 `ui.font.family`（非空）> 主题节点 `views.text.font_family` >
-    /// 内置默认（见 [`apply_user_font`]）。
+    /// 内置默认（合并见 [`scene::effective_theme`]）。
     /// ⚠️ 只作用于候选文字：序号/编码栏/注释/翻页栏是拉丁与数字，跟着换蒙文字体反而更差；
     /// 要按脚本换字体用全局 `ui.font.scripts`（按字符分，比按节点分更贴合真实问题）。
     text_family_override: String,
@@ -551,7 +504,7 @@ impl CandidateWindow {
             user_font_weight: 0,
             family_weight: 0,
             font_names: RefCell::new(std::collections::HashMap::new()),
-            base_font_logical: effective_base_font_size(
+            base_font_logical: scene::effective_base_font_size(
                 0.0,
                 wind_theme::Resolved::default().behavior.font_size,
             ),
@@ -1110,39 +1063,27 @@ impl CandidateWindow {
     /// 渲染与测量（`build_tree` 里的 `measure_style` 与各叶子）都只读结果，
     /// 两条路径因此天然同源，不在节点构建处散写「用户有值就用用户的」。
     fn refresh_effective_theme(&mut self) {
-        let mut t = self.theme_source.clone();
-        // 竖排（含旋转排版）：主题写了 `[节点.vertical]` 时整套视图换成竖排变体。
-        if (self.vertical || self.rotated)
-            && let Some(v) = t.views_vertical.take()
-        {
-            t.views = v;
-        }
-        apply_user_font(&mut t.views, &self.user_font_family);
-        if !self.theme_shadow {
-            clear_window_shadow(&mut t.views);
-        }
-        // 存在性告警按**生效**字族查：被用户字体覆盖掉的主题字族不会被用到，报它缺字体
-        // 只会误导。方案级覆盖在查完之后才叠上——它有自己的告警（来源名不同）。
-        let declared = t.views.declared_font_families();
-        if declared != self.checked_theme_families {
-            self.warn_missing_theme_families(&declared);
-            self.checked_theme_families = declared;
-        }
-        apply_scheme_text_font(&mut t.views, &self.text_family_override);
-        // 主题节点与方案级字族换成渲染端认得的名字（旧 GDI face name → family + 字重）。
-        // 缓存已由上面的告警检查填好，这里不会再问一遍字体集。
-        // 字重优先级：用户 ui.font.weight（非 0）是基准——主题普通字重让位于它、主题强调字重
-        // （≥ 600 或比基态重，如选中 700）取 max(主题, 用户)——用户字重低于主题强调值时，
-        // 强调仍比普通粗；用户未指定时节点显式字重 > 名字拆出的字重 > 常规。用户指定了字重时也丢弃名字里的字重，未写字重的节点保持
-        // 0 = 继承渲染器默认（即用户字重）。每次都从 theme_source 重算，不会污染原始主题。
-        let user_weight = self.user_font_weight;
-        t.views.apply_user_font_weight(user_weight);
-        t.views.resolve_font_families(|f| {
+        let o = scene::ThemeOverrides {
+            vertical: self.vertical || self.rotated,
+            user_font_family: &self.user_font_family,
+            user_font_weight: self.user_font_weight,
+            scheme_text_family: &self.text_family_override,
+            shadow: self.theme_shadow,
+            font_size: self.font_size_override,
+        };
+        // 字体名解析走本窗口的缓存（见 [`Self::resolve_font`]），旧 GDI face name → family + 字重。
+        let eff = scene::effective_theme(&self.theme_source, &o, |f| {
             let r = self.resolve_font(f);
-            (r.family, if user_weight > 0 { 0 } else { r.weight })
+            (r.family, r.weight)
         });
-        self.base_font_logical =
-            effective_base_font_size(self.font_size_override, t.behavior.font_size);
+        // 存在性告警按**生效**字族查（叠上用户字体之后、方案级字体之前，见
+        // [`scene::EffectiveTheme::declared_families`]）。未变就不再问。
+        if eff.declared_families != self.checked_theme_families {
+            self.warn_missing_theme_families(&eff.declared_families);
+            self.checked_theme_families = eff.declared_families;
+        }
+        let t = eff.theme;
+        self.base_font_logical = eff.base_font_logical;
         // 渲染器的基准字号也要跟上：没显式带字号的节点回落到它（`View` 取 `tr.base_size()`），
         // 只在换 DPI 时更新的话，改字号/换主题后这些节点会停在旧值直到下次换显示器。
         self.text_renderer

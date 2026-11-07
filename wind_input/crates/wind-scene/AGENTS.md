@@ -12,6 +12,7 @@
 |------|-------------|
 | `src/candidate/mod.rs` | 候选窗场景：`CandidateSceneInput`（每帧纯数据）→ `CandidateScene::layout` / `relayout_above` / `hits` / `paint` |
 | `src/candidate/skin_geom.rs` | 候选窗的皮肤几何：求值、外扩布局、分槽位、绘制、避让与对齐点；动画时钟 `AnimClock` 由调用方注入 |
+| `src/candidate/theme.rs` | 生效主题 `effective_theme`（原始主题 + 外观覆盖 `ThemeOverrides`；字体名解析由调用方闭包注入），实时窗口与设置端共用 |
 | `src/text/mod.rs` | `TextMetrics` / `TextStyle` / `ColorRun` / `utf16_runs` / `measure_key` + `TextBackend` trait；测试用 `MockText` |
 | `src/text/script.rs` | 按脚本切字体段（`FontPlan` / `font_runs` / `upright_cells`） |
 | `src/span_runs.rs` | 带样式文字 → 绘制用颜色区间 |
