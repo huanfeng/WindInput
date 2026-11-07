@@ -56,24 +56,18 @@ if args.count > 1 {
 
     switch args[1] {
     case "--register-input-source", "--install":
-        // 总是 (重新) 注册并保持常驻维持注册 —— 不能因「已注册」就早退 (踩过的坑):
-        //   1. 重新部署后 .app 的 cdhash 变化, 必须用新 bundle 重新 TISRegisterInputSource
-        //      刷新注册, 否则系统用旧 cdhash 校验新二进制失配 → 输入法无法切换/激活。
-        //   2. TIS 注册是进程级 lifecycle, 需常驻进程维持 (退出后条目会被系统回收)。install
-        //      会先按路径杀掉旧守护, 此时若早退则没有进程维持注册 → 注册失效。
-        // 本子命令仅由 install_app.sh 调用, 不在正常 IME 启动路径, 重注册无副作用。
+        // 总是 (重新) 注册, 不能因「已注册」就早退: 重新部署后 .app 的 cdhash 变化, 必须用新
+        // bundle 重新 TISRegisterInputSource 刷新注册, 否则系统用旧 cdhash 校验新二进制失配。
+        //
+        // 注册完立即退出, **不能常驻** (同 Squirrel): 同 bundle 有进程在跑时 imklaunchagent
+        // 不再拉起控制器, 而本进程不建 IMKServer → NO Endpoint, 控制器一旦退出就再也打不了字
+        // (macOS 27 实测复现)。注册是持久写入的, 进程退出后不会被回收 (同上实测)。
         let already = enabledModeIDs()
         let st = TISRegisterInputSource(bundleURL)
         print("TISRegisterInputSource bundleURL=\(bundleURL) OSStatus=\(st) wasEnabled=\(!already.isEmpty)")
         // 全新注册 (此前未启用) 失败才视为致命; 重注册已存在的源时 OSStatus 可能为
-        // paramErr 等非 0, 属正常, 仍保持常驻维持现有注册。
-        if already.isEmpty && st != noErr {
-            exit(2)
-        }
-        print("保持进程常驻维持 TIS 注册 (后台等待 SIGTERM 退出)...")
-        // 进入 RunLoop 永久等待信号
-        RunLoop.current.run()
-        exit(0)
+        // paramErr 等非 0, 属正常。
+        exit(already.isEmpty && st != noErr ? 2 : 0)
 
     case "--enable-input-source":
         let modeID = args.count > 2 ? args[2] : selfModeID
