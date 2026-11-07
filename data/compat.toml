@@ -251,6 +251,8 @@ host_render = true
 process = "EXCEL.EXE"
 comment = "Excel：进单元格前先在编辑栏报坐标，fast 首显会落在编辑栏，改用 wait"
 first_show_mode = "wait"
+# 联想窗出现时占位空格会干扰单元格自己的提示；联想不挂占位，转发靠上屏应答里的会话标志。
+assoc_placeholder = "none"
 
 [[apps]]
 process = "et.exe"
