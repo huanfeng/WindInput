@@ -147,6 +147,30 @@ impl MobileCore {
         }
     }
 
+    /// 宿主的「原样上屏」键（九宫数字页的数字、句点、左列符号，123 层的半角句点）。
+    ///
+    /// 这些键平时绕过引擎：中文模式下句点不能变「。」，有编码时数字不能变成选词。但在
+    /// 文本缓冲模式（见 [`Self::digits_are_input`]，如快捷输入的 `;12+3`）里它们是缓冲的
+    /// 一部分，这里照触摸字符键交给引擎。其余情况返回 `consumed == false`、`ops` 为空，
+    /// 宿主维持原样上屏（有编码先顶首选）。只收单个字符，多字符项一律原样上屏。
+    pub fn press_literal(&self, text: &str) -> KeyOutcome {
+        let mut chars = text.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            return KeyOutcome::passthrough();
+        };
+        if !self.digits_are_input() {
+            return KeyOutcome::passthrough();
+        }
+        self.engine_press(
+            PressKey::Char {
+                ch: c,
+                shifted: false,
+            },
+            Some(c),
+            KeySource::Touch,
+        )
+    }
+
     /// 当前模式的缓冲是**文本**而不是编码，数字由引擎自己判定是入缓冲还是选词：
     /// 快捷输入等融合模式（`;12+3`，算式透镜下数字是输入）、临时英文（`win10`）、
     /// 网址 / 邮箱（原样累积）、Unicode（十六进制码点）。
@@ -819,5 +843,59 @@ mod tests {
             "算式算得出: {:?}",
             m.candidates(0, 5).items
         );
+    }
+
+    /// 九宫数字页 / 123 层的「原样上屏」键在快捷输入里进缓冲（真机反馈：切到数字页打
+    /// `12+3`，数字直接顶码上屏，算不了式子）。小数点也是缓冲，不变「。」
+    #[test]
+    fn literal_keys_enter_quick_input_buffer() {
+        let Some((m, _rx)) = core("literal_quick", "wubi86", no_assoc) else {
+            return;
+        };
+        m.set_touch_quick_trigger(true);
+        type_str(&m, "wqvb");
+        m.press(PressKey::Space, KeySource::Touch);
+        m.press(ch(';'), KeySource::Touch);
+        assert!(m.candidates(0, 1).total > 0, "前提：有重复上屏候选");
+        let mut last = KeyOutcome::default();
+        for c in "(1.5+3)*2".chars() {
+            last = m.press_literal(&c.to_string());
+            assert!(last.consumed, "{c} 要被引擎收下: {last:?}");
+            assert!(
+                !last.ops.iter().any(|o| matches!(o, EditOp::Commit(_))),
+                "{c} 不能上屏: {last:?}"
+            );
+        }
+        let comp = composition(&last).unwrap_or_default();
+        assert!(comp.contains("(1.5+3)*2"), "{last:?}");
+        assert!(
+            m.candidates(0, 5).items.iter().any(|t| t == "9"),
+            "算式算得出: {:?}",
+            m.candidates(0, 5).items
+        );
+    }
+
+    /// 普通组码 / 无编码时原样上屏键不进引擎：宿主照旧（有编码先顶首选，再接字符）
+    #[test]
+    fn literal_keys_pass_through_outside_text_buffer() {
+        let Some((m, _rx)) = core("literal_plain", "wubi86", no_assoc) else {
+            return;
+        };
+        let out = m.press_literal("1");
+        assert!(!out.consumed && out.ops.is_empty(), "无编码: {out:?}");
+        let out = m.press_literal(".");
+        assert!(!out.consumed && out.ops.is_empty(), "无编码句点: {out:?}");
+        type_str(&m, "wqvb");
+        for t in ["1", ".", "+"] {
+            let out = m.press_literal(t);
+            assert!(!out.consumed && out.ops.is_empty(), "组码中 {t}: {out:?}");
+            assert!(m.coord.is_composing(), "组码不被动");
+        }
+        // 多字符项在快捷输入里也原样上屏
+        m.set_touch_quick_trigger(true);
+        m.press(PressKey::Space, KeySource::Touch);
+        m.press(ch(';'), KeySource::Touch);
+        let out = m.press_literal("()");
+        assert!(!out.consumed && out.ops.is_empty(), "{out:?}");
     }
 }
