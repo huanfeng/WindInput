@@ -196,7 +196,7 @@ fn laid_out_window(
 /// `build_tree(above)` 在原点排版、画进刚好装下的缓冲：View 树转储 + 像素摘要 + 绘制日志。
 fn tree_case(w: &mut CandidateWindow, label: &str, above: bool) -> String {
     let mut out = String::new();
-    let mut root = w.build_tree(above);
+    let mut root = w.scene.build_tree(&w.scene_input(above));
     root.layout(0.0, 0.0, &w.text_renderer);
     let (mw, mh) = root.measured_size();
     let (bw, bh) = (mw.ceil().max(1.0) as u32, mh.ceil().max(1.0) as u32);
@@ -483,7 +483,7 @@ fn render_fuzzy() -> String {
         active_tab: 0,
     }));
     w.update("ping", 4, "", fuzzy_candidates(), 0, 1, 1, 1);
-    let mut root = w.build_tree(false);
+    let mut root = w.scene.build_tree(&w.scene_input(false));
     root.layout(0.0, 0.0, &w.text_renderer);
     out.push_str("== 候选窗 网格 ==\n");
     out.push_str(&root.debug_dump());
@@ -688,7 +688,7 @@ fn golden_pinyin_hint_grid() {
         hint_cand("品", StyledText::new()),
     ];
     w.update("ping", 4, "", cands, 0, -1, 1, 1);
-    let mut root = w.build_tree(false);
+    let mut root = w.scene.build_tree(&w.scene_input(false));
     root.layout(0.0, 0.0, &w.text_renderer);
     let mut hits = Vec::new();
     root.collect_hits(&mut hits);
@@ -724,7 +724,7 @@ fn golden_pinyin_hint_truncated() {
         w.set_orientation(true, false, false);
         w.theme.behavior.vertical_max_width = vmax;
         w.update("", 0, "", vec![cand], 0, -1, 1, 1);
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         root.layout(0.0, 0.0, &w.text_renderer);
         let dump = root.debug_dump();
         // 候选正文叶子：序号之后第一个带 text 的叶子。
@@ -867,10 +867,12 @@ fn pipeline(
         w.placed_above,
         w.visible
     ));
-    if w.skin_geom.is_none() {
+    if w.scene.skin_geom.is_none() {
         out.push_str(&format!(
             "-- 阴影外扩 {:?}\n",
-            w.shadow_params().map(|s| s.margins())
+            w.scene
+                .shadow_params(&w.scene_input(false))
+                .map(|s| s.margins())
         ));
     }
     for (tag, r) in &w.hit_rects {
@@ -895,7 +897,7 @@ fn pipeline(
             out.push('\n');
         }
     }
-    if let Some(g) = &w.skin_geom {
+    if let Some(g) = &w.scene.skin_geom {
         out.push_str(&g.golden_dump(fnv1a));
         let a = w.skin_place_anchor(1.0);
         out.push_str(&format!(
@@ -924,11 +926,14 @@ fn pipeline(
         }
     }
     if tree {
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         let m = match w.skin_layout(&mut root) {
             Some(m) => m,
             None => {
-                let m = w.shadow_params().map_or((0, 0, 0, 0), |s| s.margins());
+                let m = w
+                    .scene
+                    .shadow_params(&w.scene_input(false))
+                    .map_or((0, 0, 0, 0), |s| s.margins());
                 root.layout(m.0 as f32, m.1 as f32, &w.text_renderer);
                 m
             }

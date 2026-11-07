@@ -647,7 +647,7 @@ impl CandidateWindow {
         }
         // 这一帧就是按此刻重画的，之前登记的「待重绘」作废。
         self.anim_due = false;
-        self.skin_geom = self.compute_skin_geom();
+        self.scene.skin_geom = self.compute_skin_geom();
         self.ensure_decor_anims(now);
         let t = now.saturating_duration_since(self.anim_start);
         let variant = self
@@ -656,7 +656,7 @@ impl CandidateWindow {
             .as_ref()
             .and_then(|s| s.variant(self.vertical, self.preedit_embedded));
         let mut next = None;
-        if let (Some(g), Some(v)) = (self.skin_geom.as_mut(), variant) {
+        if let (Some(g), Some(v)) = (self.scene.skin_geom.as_mut(), variant) {
             for d in &mut g.decor {
                 let Some(spec) = v.decor.get(d.index).map(|x| &x.anim) else {
                     continue;
@@ -766,6 +766,7 @@ impl CandidateWindow {
             // 还没求过几何（从未显示），或几何是另一个变体的（隐藏期间换了横竖 / 嵌入）：
             // 不知道片段时长，只会记常驻状态。
             let geom = self
+                .scene
                 .skin_geom
                 .as_ref()
                 .filter(|g| g.variant_key == key)
@@ -1081,14 +1082,14 @@ impl CandidateWindow {
     /// 皮肤布局：先在原点量出窗体（根容器盒）尺寸，按装饰伸出窗体的部分求外扩量，再把
     /// 根容器挪到外扩后的位置。返回外扩 `(左, 上, 右, 下)`；不启用皮肤返回 None（调用方走阴影那条）。
     pub(super) fn skin_layout(&mut self, root: &mut View) -> Option<(u32, u32, u32, u32)> {
-        self.skin_geom.as_ref()?;
+        self.scene.skin_geom.as_ref()?;
         let free = self.skin_is_free();
         if free {
             self.skin_measure_parts(root);
         }
         root.layout(0.0, 0.0, &self.text_renderer);
         let (w, h) = root.measured_size();
-        let g = self.skin_geom.as_mut()?;
+        let g = self.scene.skin_geom.as_mut()?;
         let frame = Rect {
             x: 0.0,
             y: 0.0,
@@ -1123,13 +1124,16 @@ impl CandidateWindow {
 
     /// 本帧是否分槽位布局。
     pub(super) fn skin_is_free(&self) -> bool {
-        self.skin_geom.as_ref().is_some_and(|g| g.slots.is_some())
+        self.scene
+            .skin_geom
+            .as_ref()
+            .is_some_and(|g| g.slots.is_some())
     }
 
     /// 分槽位：取走 `build_tree` 交出的各块，按自然尺寸排一遍，解出能装下所有槽位的最小窗体，
     /// 写进根容器（空盒）的最小尺寸。
     fn skin_measure_parts(&mut self, root: &mut View) {
-        let taken = std::mem::take(&mut *self.free_parts.borrow_mut());
+        let taken = std::mem::take(&mut *self.scene.free_parts.borrow_mut());
         let mut parts: Vec<Part> = taken
             .into_iter()
             .map(|(kind, mut view)| {
@@ -1143,7 +1147,7 @@ impl CandidateWindow {
                 }
             })
             .collect();
-        let Some(g) = self.skin_geom.as_mut() else {
+        let Some(g) = self.scene.skin_geom.as_mut() else {
             return;
         };
         let (mut xs, mut ys) = (Vec::new(), Vec::new());
@@ -1181,7 +1185,7 @@ impl CandidateWindow {
 
     /// 分槽位：窗体尺寸与外扩已定，把各块排到最终位置（窗口缓冲坐标）。
     fn skin_place_parts(&mut self) {
-        let Some(g) = self.skin_geom.as_mut() else {
+        let Some(g) = self.scene.skin_geom.as_mut() else {
             return;
         };
         let (ml, mt, fw, fh) = g.frame;
@@ -1196,7 +1200,7 @@ impl CandidateWindow {
     /// 钳后的尺寸画，装饰随之重新定位。外扩量沿用布局时的值——它已经按窗体自然尺寸量过，
     /// 窗体变窄只会让右侧多出一点透明余量，不会让装饰出缓冲。
     pub(super) fn skin_fit_frame(&mut self, content_w: u32, content_h: u32) {
-        let Some(g) = self.skin_geom.as_mut() else {
+        let Some(g) = self.scene.skin_geom.as_mut() else {
             return;
         };
         let (ml, mt, w, h) = g.frame;
@@ -1254,7 +1258,7 @@ impl CandidateWindow {
     /// `place_window` 的对齐与避让参数。`f` 把设备像素换到调用方坐标系（ext_presenter 路径是逻辑点，
     /// 传 `1 / scale`；其余传 1）。无皮肤时为默认值（窗体左上 / 左下对齐、无避让、无外扩），与改前一致。
     pub(super) fn skin_place_anchor(&self, f: f32) -> PlaceAnchor {
-        let Some(g) = &self.skin_geom else {
+        let Some(g) = &self.scene.skin_geom else {
             return PlaceAnchor::default();
         };
         let r = |v: f32| (v * f).round() as i32;
@@ -1425,10 +1429,10 @@ mod tests {
         // 只有模式标记：内容远小于窗体最小尺寸。
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         let m = w.skin_layout(&mut root).expect("皮肤生效");
         assert_eq!(m, (0, 6, 0, 0), "装饰伸出窗体上方 6px，只在上边外扩");
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         // 最小尺寸 = 固定段之和：30-10、20-4。
         let (fx, fy, fw, fh) = g.frame;
         assert_eq!((fx, fy), (0, 6));
@@ -1439,7 +1443,10 @@ mod tests {
             (g.insets.l, g.insets.t, g.insets.r, g.insets.b),
             (4.0, 3.0, 5.0, 2.0)
         );
-        assert!(w.shadow_params().is_none(), "皮肤不叠软件阴影");
+        assert!(
+            w.scene.shadow_params(&w.scene_input(false)).is_none(),
+            "皮肤不叠软件阴影"
+        );
     }
 
     #[test]
@@ -1447,9 +1454,9 @@ mod tests {
         let mut w = fixture_window("paint");
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         let (ml, mt, mr, mb) = w.skin_layout(&mut root).unwrap();
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         let (_, _, fw, fh) = g.frame;
         let (bw, bh) = (fw + ml + mr, fh + mt + mb);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
@@ -1469,9 +1476,9 @@ mod tests {
         let mut w = fixture_window_hit(tag, hit);
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         w.skin_layout(&mut root).unwrap();
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         let mut m = w.mouse.borrow_mut();
         m.skin_frame = Some(g.frame_rect());
         m.skin_decor = g.no_drag_rects();
@@ -1502,12 +1509,12 @@ mod tests {
         let mut w = fixture_window("fit");
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         w.skin_layout(&mut root).unwrap();
-        let (_, _, fw, fh) = w.skin_geom.as_ref().unwrap().frame;
+        let (_, _, fw, fh) = w.scene.skin_geom.as_ref().unwrap().frame;
         // 渲染入口把宽度钳窄 4px：窗体按钳后宽度画，右上角装饰跟着左移。
         w.skin_fit_frame(fw - 4, fh);
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         assert_eq!(g.frame, (0, 6, fw - 4, fh));
         assert_eq!(g.decor_rects, vec![(fw as i32 - 10, 0, 6, 6)]);
     }
@@ -1522,7 +1529,7 @@ mod tests {
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         assert!(
-            w.skin_geom.is_none(),
+            w.scene.skin_geom.is_none(),
             "SVG 窗体画不出来，不能当皮肤生效（否则窗口全透明）"
         );
     }
@@ -1586,7 +1593,7 @@ mod tests {
         }
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         w.skin_layout(&mut root).unwrap();
         let a = w.skin_place_anchor(1.0);
         // 内容框左上 (4, 3) 再上移 1 → (4, 2)；上方缺省窗体左下 → 距底 0。
@@ -1612,7 +1619,7 @@ mod tests {
         let mut w = fixture_window("avoid");
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         w.skin_layout(&mut root).unwrap();
         let a = w.skin_place_anchor(1.0);
         assert_eq!(a.clamp, (0, 0, 0, 0), "缺省只钳窗体");
@@ -1639,7 +1646,7 @@ mod tests {
         }
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         w.skin_layout(&mut root).unwrap();
         let a = w.skin_place_anchor(1.0);
         assert!(
@@ -1662,9 +1669,9 @@ mod tests {
         }
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         let (ml, mt, mr, mb) = w.skin_layout(&mut root).unwrap();
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         assert!(g.has_pass());
         assert!(!g.pass_below(), "z = 1 的穿透装饰要放在主窗口上面");
         let (_, _, fw, fh) = g.frame;
@@ -1759,9 +1766,9 @@ mod tests {
         w.update("", 0, "", vec![cand("甲"), cand("乙")], 0, -1, 1, 3);
         w.refresh_skin_geom();
         assert!(w.skin_is_free());
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         let (ml, mt, _, _) = w.skin_layout(&mut root).unwrap();
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         let kinds: Vec<SlotKind> = g.parts.iter().map(|p| p.kind).collect();
         assert_eq!(kinds, vec![SlotKind::Candidates, SlotKind::Footer]);
         let (fx, fy, fw, fh) = g.frame;
@@ -1790,7 +1797,7 @@ mod tests {
         w.set_orientation(true, false, false);
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
-        assert!(w.skin_geom.is_none(), "竖排没配皮肤：不硬套横排图");
+        assert!(w.scene.skin_geom.is_none(), "竖排没配皮肤：不硬套横排图");
     }
 
     #[test]
@@ -1939,9 +1946,9 @@ mod tests {
         w.show();
         w.anim_start -= std::time::Duration::from_millis(150);
         w.refresh_skin_geom();
-        let mut root = w.build_tree(false);
+        let mut root = w.scene.build_tree(&w.scene_input(false));
         let (ml, mt, mr, mb) = w.skin_layout(&mut root).unwrap();
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         let (_, _, fw, fh) = g.frame;
         let (bw, bh) = (fw + ml + mr, fh + mt + mb);
         let mut pass = vec![0u8; (bw * bh * 4) as usize];
@@ -1963,7 +1970,7 @@ mod tests {
         w.show();
         let mask = |w: &mut CandidateWindow| {
             w.refresh_skin_geom();
-            let mut root = w.build_tree(false);
+            let mut root = w.scene.build_tree(&w.scene_input(false));
             w.skin_layout(&mut root).unwrap();
             w.skin_place_anchor(1.0).avoid_below
         };
@@ -1971,7 +1978,7 @@ mod tests {
         w.anim_start -= std::time::Duration::from_millis(150);
         let second = mask(&mut w);
         assert_eq!(
-            w.skin_geom.as_ref().unwrap().decor[0].cur.1,
+            w.scene.skin_geom.as_ref().unwrap().decor[0].cur.1,
             1,
             "已换到第二帧"
         );
@@ -1996,7 +2003,7 @@ mod tests {
             w.set_theme(theme);
         }
         w.show();
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         assert!(g.decor[0].sources[0].animated);
         assert!(!g.decor[1].sources[0].animated, "单帧 GIF 按静态图画");
         assert_eq!(
@@ -2360,7 +2367,7 @@ mod tests {
             }
             w.show();
             {
-                let g = w.skin_geom.as_ref().unwrap();
+                let g = w.scene.skin_geom.as_ref().unwrap();
                 assert_eq!(g.decor[0].sources.len(), 1, "{name}: 缺失文件不进源");
                 assert!(g.decor[0].on[0].is_none(), "{name}: 片段不可用");
             }
@@ -2412,7 +2419,7 @@ mod tests {
         w.skin_signal(wind_ui_types::SkinSignal::Commit);
         pump(&mut w);
         assert_eq!(decor_px(&w), PX_GREEN, "另一个文件的首帧");
-        let g = w.skin_geom.as_ref().unwrap();
+        let g = w.scene.skin_geom.as_ref().unwrap();
         assert_eq!(g.decor[0].sources.len(), 2);
         assert_eq!(
             g.decor[0].budget,
