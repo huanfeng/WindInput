@@ -175,6 +175,56 @@ pub trait TextBackend {
     ) -> Result<(), String>;
 }
 
+/// 把另一个后端的 [`TextBackend::base_size`] 钉成固定值，其余原样转发。
+///
+/// 一次出图（[`crate::candidate::render_candidate`]）用它让基准字号只由场景输入决定
+/// （生效字号 × 缩放），不依赖调用方后端里存着的旧值。
+pub struct SizedText<'a> {
+    pub inner: &'a dyn TextBackend,
+    pub base_size: f32,
+}
+
+impl TextBackend for SizedText<'_> {
+    fn base_size(&self) -> f32 {
+        self.base_size
+    }
+
+    fn measure(&self, text: &str, ts: &TextStyle) -> TextMetrics {
+        self.inner.measure(text, ts)
+    }
+
+    fn draw(
+        &self,
+        buf: &mut [u8],
+        buf_width: u32,
+        buf_height: u32,
+        x: f32,
+        y: f32,
+        text: &str,
+        ts: &TextStyle,
+        color: [u8; 4],
+    ) -> Result<(), String> {
+        self.inner
+            .draw(buf, buf_width, buf_height, x, y, text, ts, color)
+    }
+
+    fn draw_runs(
+        &self,
+        buf: &mut [u8],
+        buf_width: u32,
+        buf_height: u32,
+        x: f32,
+        y: f32,
+        text: &str,
+        ts: &TextStyle,
+        color: [u8; 4],
+        runs: &[ColorRun],
+    ) -> Result<(), String> {
+        self.inner
+            .draw_runs(buf, buf_width, buf_height, x, y, text, ts, color, runs)
+    }
+}
+
 /// 本 crate 测试用的文字后端：照抄 wind-ui mock 后端的公式（宽 = 字符数 × 字号 × 0.6，
 /// 高 = 字号 × 1.2），不出像素，只记绘制调用（逐字同 wind-ui mock 的 `draw_log`）。
 #[cfg(test)]

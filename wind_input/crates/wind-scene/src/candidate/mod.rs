@@ -5,8 +5,11 @@
 //! [`CandidateScene`] 持有；时间经 [`AnimClock`] 注入，文字经 [`TextBackend`] 注入。
 //! 方案见 `docs/design/wind-scene-extraction.md` §2。
 
+mod render;
 mod skin_geom;
 mod theme;
+
+pub use render::{CandidateFrame, render_candidate};
 
 pub use skin_geom::{AnimClock, AvoidMask, DecorGeom, PlaceAnchor, SkinGeom, SlotKind};
 pub use theme::{EffectiveTheme, ThemeOverrides, effective_base_font_size, effective_theme};
