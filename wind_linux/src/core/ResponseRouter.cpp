@@ -8,6 +8,28 @@
 
 namespace windlinux {
 
+namespace {
+
+/// 码点 → seqChar 口径：辅助平面取高代理（服务端据此把 2/3 号平面认成汉字）。
+uint16_t toSeqUnit(uint32_t cp)
+{
+    return cp >= 0x10000 ? uint16_t(0xD800 + ((cp - 0x10000) >> 10)) : uint16_t(cp);
+}
+
+/// 首个码点；空串返回 0。
+uint32_t firstCodepoint(const std::string& utf8)
+{
+    const size_t end = std::min<size_t>(utf8.size(), 4);
+    for (size_t n = 1; n <= end; ++n) {
+        if (n == utf8.size() || (uint8_t(utf8[n]) & 0xC0) != 0x80) {
+            return lastCodepoint(utf8.substr(0, n));
+        }
+    }
+    return utf8.empty() ? 0 : uint8_t(utf8[0]);
+}
+
+} // namespace
+
 uint16_t DigitTracker::digitChar(uint32_t vk, uint32_t modifiers)
 {
     // Ctrl/Alt/Win + 数字是宿主快捷键，一个字符都不往文档写；记了就是幻影数字。
@@ -63,9 +85,35 @@ void SeqTracker::noteCommittedText(const std::string& utf8)
     if (utf8.empty()) {
         return;
     }
-    uint32_t last = lastCodepoint(utf8);
-    // 辅助平面取高代理：服务端据此把 2/3 号平面认成汉字。
-    seqChar_ = last >= 0x10000 ? uint16_t(0xD800 + ((last - 0x10000) >> 10)) : uint16_t(last);
+    seqChar_ = toSeqUnit(lastCodepoint(utf8));
+    writtenFirst_ = int32_t(firstCodepoint(utf8));
+    // 预期光标按字符（码点）前进，与 Fcitx 周边文本的光标量纲一致。
+    int chars = 0;
+    for (unsigned char c : utf8) {
+        chars += (c & 0xC0) != 0x80;
+    }
+    advanceCursor(chars, true);
+}
+
+bool SeqTracker::matchesHostChar(uint32_t cp) const
+{
+    if (seqChar_ == kUnknown) {
+        return true;
+    }
+    if (cp == 0) {
+        return false; // 记着有字，宿主说光标前没字（点到了行首）
+    }
+    const uint16_t u = toSeqUnit(cp);
+    auto isAsciiAlpha = [](uint32_t c) { return (c | 0x20) >= 'a' && (c | 0x20) <= 'z'; };
+    auto isDigit = [](uint32_t c) { return c >= '0' && c <= '9'; };
+    if (seqChar_ == 'a') {
+        return isAsciiAlpha(u); // 透传字母的代表值
+    }
+    if (seqChar_ == '?') {
+        // 透传符号的代表值：按什么键出什么符号看布局，只要求不是字母、数字、空白。
+        return !isAsciiAlpha(u) && !isDigit(u) && u != ' ' && u != '\t' && u != 0x3000;
+    }
+    return u == seqChar_;
 }
 
 void ResponseRouter::reset()
@@ -154,6 +202,7 @@ bool ResponseRouter::apply(const Frame& frame, TextSink* sink, bool hostShortcut
                 seq_.reset();
             }
             if (p->count > 0) {
+                seq_.forgetCursor(); // 删了字：预期光标不再按字数推
                 sink->deleteBeforeCursor(std::min(p->count, kMaxDeleteUnits));
             }
             insertCommitted(p->text, sink);
@@ -232,6 +281,7 @@ void ResponseRouter::applyCommitTextWithCursor(const CommitTextWithCursorPayload
     clearPreeditIfAny(sink);
     // 自动配对插入 `（）` 后把光标退回到配对中间。
     if (p.cursorOffset > 0 && sink) {
+        seq_.forgetCursor(); // 光标退回了配对中间
         sink->moveCursor(-static_cast<int>(std::min(p.cursorOffset, kMaxCursorMove)));
     }
 }

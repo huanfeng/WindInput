@@ -57,7 +57,10 @@ void TestSpaceBeforeDigit()
     Expect(SpaceBeforeDigit(true, true, '3', false, false), "汉字后主键盘数字");
     Expect(!SpaceBeforeDigit(false, true, '3', false, false), "开关关");
     Expect(!SpaceBeforeDigit(true, false, '3', false, false), "上一笔不是汉字");
-    Expect(!SpaceBeforeDigit(true, true, 0x63, false, false), "小键盘不在其列");
+    Expect(SpaceBeforeDigit(true, true, 0x63, false, false), "汉字后小键盘数字");
+    Expect(SpaceBeforeDigit(true, true, 0x60, false, false), "小键盘 0");
+    Expect(!SpaceBeforeDigit(true, true, 0x6A, false, false), "小键盘运算符不在其列");
+    Expect(!SpaceBeforeDigit(true, true, 0x6E, false, false), "小键盘小数点不在其列");
     Expect(!SpaceBeforeDigit(true, true, '3', true, false), "带修饰键（Shift+3 是 #）");
     Expect(!SpaceBeforeDigit(true, true, '3', false, true), "CapsLock 开");
 }

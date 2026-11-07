@@ -774,6 +774,38 @@ void WindEngine::sendCaretUpdate(fcitx::InputContext* ic)
     sendAndDrain(encodeCaretUpdateFrame(r.left(), r.top(), h));
 }
 
+void WindEngine::noteHostCursor(fcitx::InputContext* ic)
+{
+    // Qt 系鼠标点击只报光标位置、不发 reset：按键前拿宿主报的光标比预期（SeqTracker::noteCursor）。
+    // 放在按键时而不是周边文本更新时判：上屏那一刻宿主会先报中间态，到下一键时最终位置早已到了。
+    // 有选区、无效或不支持周边文本：按「宿主给不出」处理。
+    // 光标位置碰巧对得上（点到别的行同一列、点回上屏前的位置）时，再看光标两侧的字。
+    int cursor = -1;
+    int32_t hostPrev = -1;
+    int32_t hostNext = -1;
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        const auto& st = ic->surroundingText();
+        if (st.isValid() && st.anchor() == st.cursor()) {
+            cursor = int(st.cursor());
+            const std::string& text = st.text();
+            const size_t len = fcitx::utf8::length(text);
+            auto charAt = [&](size_t i) -> int32_t {
+                uint32_t cp = fcitx::utf8::getChar(fcitx::utf8::nextNChar(text.begin(), i), text.end());
+                return cp == fcitx::utf8::INVALID_CHAR ? -1 : int32_t(cp);
+            };
+            if (st.cursor() <= len) {
+                hostPrev = st.cursor() == 0 ? 0 : charAt(st.cursor() - 1);
+                hostNext = st.cursor() == len ? 0 : charAt(st.cursor());
+            }
+        }
+    }
+    const uint16_t before = router_.seqTracker().seqChar();
+    router_.seqTracker().noteCursor(cursor, hostPrev, hostNext);
+    if (before != router_.seqTracker().seqChar()) {
+        WIND_DEBUG() << "光标与预期不符（被挪过）：输入序列记账作废 cursor=" << cursor;
+    }
+}
+
 uint16_t WindEngine::prevCharFor(fcitx::InputContext* ic)
 {
     // 「数字后」只认本端记账，宿主光标前字符只在非数字时照报（取舍见 DigitTracker::resolve）。
@@ -993,6 +1025,10 @@ void WindEngine::reset(const fcitx::InputMethodEntry&, fcitx::InputContextEvent&
     // 宿主要求重置（鼠标点击挪了光标、宿主主动 reset）：对位 Windows 的「组合被意外终止」。
     fcitx::InputContext* ic = event.inputContext();
     releaseHeldKeys("reset");
+    // 光标被宿主挪过（鼠标点击等）：补空格 / 英文后标点的「上一笔」作废。不论有没有组合都做——
+    // 空闲时点到别处同样会让记账失真（对位 Windows 的 `CursorMovedByMouse`）。
+    WIND_DEBUG() << "reset：输入序列记账作废 composing=" << router_.hasComposition();
+    router_.seqTracker().reset();
     if (!router_.hasComposition()) {
         return;
     }
@@ -1118,6 +1154,7 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     // 无组合时本端 caret 可能是上一次组字的旧位置，先刷新，让状态气泡/首帧候选锚对地方。
     if (!router_.hasComposition()) {
         sendCaretUpdate(ic);
+        noteHostCursor(ic);
     }
 
     KeyEvent e;

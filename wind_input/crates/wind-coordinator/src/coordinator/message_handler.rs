@@ -1703,6 +1703,10 @@ impl MessageHandler for Coordinator {
             // 只看全角，不看这个开关），出的半角字由下方 `commit_highlight_then_char` 负责。
             if !has_comp && !state.full_width {
                 self.record_commit(&npc.to_string(), 0, -1, CommitSource::Punctuation);
+                // 汉字后的小键盘数字、开了中数间空格：同主键盘那条臂，出字补空格。
+                if npc.is_ascii_digit() && self.digit_after_cjk_outputs(&state, data) {
+                    return Self::commit_action(npc.to_string(), true);
+                }
                 return KeyAction::PassThrough;
             }
             // 命令候选顶屏 → 执行命令（与按空格一致），不上屏 display 标签、不追加该字符。
@@ -1728,6 +1732,10 @@ impl MessageHandler for Coordinator {
             && let Some(ch) = punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
         {
             self.record_commit(&ch.to_string(), 0, -1, CommitSource::Punctuation);
+            // 汉字后的小键盘数字、开了中数间空格：同主键盘数字那条臂出字补空格（DLL 已吃下）。
+            if ch.is_ascii_digit() && self.digit_after_cjk_outputs(&state, data) {
+                return Self::commit_action(ch.to_string(), true);
+            }
             return KeyAction::PassThrough;
         }
 
@@ -1978,25 +1986,9 @@ impl MessageHandler for Coordinator {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 self.accumulate_code_char(&mut state, digit, digit)
             }
-            // 汉字后打数字、开了中数间空格：出字，前缀空格由统一出口补。
-            //
-            // Windows：DLL 只在它判定要补空格时才把空闲数字吃下交过来（`NumberKeyPolicy.h` 的
-            // `SpaceBeforeDigit`），这里**不看**开关恒出字——DLL 手上的开关可能慢一拍，吃了键这边
-            // 却不出字就是丢键（「C++ 吃键集 ⊆ Rust 出字集」）。
-            // macOS / Linux：客户端每个键都发过来、按回复决定透传，必须看开关——否则开关关着时
-            // 汉字后的数字也被输入法接管，不再交给宿主（数字当快捷键的场景）。
-            keymap::VK_0..=keymap::VK_9
-                if data.modifiers == 0
-                    && state.chinese_mode
-                    && !state.full_width
-                    && !state.caps_lock
-                    && !Self::has_input_session(&state)
-                    && wind_punct::spacing::classify_unit(data.seq_char)
-                        == wind_punct::spacing::CharClass::Cjk
-                    && (cfg!(windows)
-                        || (self.rt().config.input.spacing.cjk_digit
-                            && self.auto_spacing_allowed_here())) =>
-            {
+            // 汉字后打数字、开了中数间空格：出字，前缀空格由统一出口补（判据见
+            // `digit_after_cjk_outputs`；小键盘 direct 那条臂共用）。
+            keymap::VK_0..=keymap::VK_9 if self.digit_after_cjk_outputs(&state, data) => {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 let text = digit.to_string();
                 self.record_commit(&text, 0, -1, CommitSource::Punctuation);

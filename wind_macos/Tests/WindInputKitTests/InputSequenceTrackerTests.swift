@@ -33,6 +33,23 @@ final class InputSequenceTrackerTests: XCTestCase {
         XCTAssertEqual(t.seqChar, InputSequenceTracker.unknown)
     }
 
+    /// 记下之后点过鼠标：报「不知道」；下一次记账起按新计数重新算。
+    func testMouseClickAfterRecordReportsUnknown() {
+        let t = InputSequenceTracker()
+        var clicks: UInt32 = 5
+        t.mouseDownCount = { clicks }
+        t.noteCommittedText("你")
+        XCTAssertEqual(t.seqChar, 0x4F60)
+        clicks += 1                       // 用户点了别处
+        XCTAssertEqual(t.seqChar, InputSequenceTracker.unknown)
+        t.noteKeyPassthrough(vk: 0x33, modifiers: 0)
+        XCTAssertEqual(t.seqChar, 0x33, "点击之后的记账照常")
+        // 点选候选：点击先于上屏，上屏记账时已计入，不误判。
+        clicks += 1
+        t.noteCommittedText("好")
+        XCTAssertEqual(t.seqChar, 0x597D)
+    }
+
     /// 组字更新不动 seqChar：Esc 取消组字后光标前仍是组字前那个字符。
     func testRouterUpdateComposition_KeepsSeqChar() {
         let r = BridgeResponseRouter()
