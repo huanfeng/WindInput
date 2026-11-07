@@ -1877,6 +1877,40 @@ impl BoundAction {
     }
 }
 
+/// 翻页动作在「翻不动」时怎么办（`page_prev` / `page_next` 的后缀）。
+///
+/// 外面的 `keys.overflow.page_key` 是全局档；要把策略落到单个键上（「只有逗号翻不动时上屏」，
+/// GH#249），在自定义按键里给那个键绑带后缀的翻页动作。翻不动判定与闸门见
+/// `Coordinator::page_key_overflow_to_punct`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageOverflow {
+    /// 跟随全局档 `keys.overflow.page_key`（出厂 / 写 `page_prev`）。
+    Global,
+    /// 顶高亮候选并输出该键符号（`page_prev:commit_and_input`）。
+    CommitAndInput,
+    /// 吞键，全局档开了上屏也压住（`page_prev:ignore`）。
+    Ignore,
+}
+
+impl PageOverflow {
+    fn parse_payload(s: &str) -> Option<Self> {
+        match s.trim() {
+            "commit_and_input" => Some(Self::CommitAndInput),
+            "ignore" => Some(Self::Ignore),
+            _ => None,
+        }
+    }
+
+    /// 落盘写法的后缀；跟随全局为空。
+    fn as_payload(&self) -> &'static str {
+        match self {
+            Self::Global => "",
+            Self::CommitAndInput => "commit_and_input",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
 /// `caret_right` 在编码区光标已到末尾时的动作（macOS 式 → 键的三种落法）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaretEnd {
@@ -1951,8 +1985,9 @@ impl CaretEnd {
 pub enum SessionAction {
     /// 未启用 / 显式禁用。
     None,
-    PagePrev,
-    PageNext,
+    /// 上一页 / 下一页；载荷是翻不动时的策略（写法 `page_prev` / `page_prev:commit_and_input|ignore`）。
+    PagePrev(PageOverflow),
+    PageNext(PageOverflow),
     /// 展开态翻整屏；未展开时同 `PagePrev`（见 `candidate_grid::grid_page_key`）。
     PageScreenPrev,
     PageScreenNext,
@@ -2164,6 +2199,15 @@ impl SessionAction {
                 None => Self::None,
             };
         }
+        for (prefix, page_next) in [("page_prev:", false), ("page_next:", true)] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                return match PageOverflow::parse_payload(rest) {
+                    Some(o) if page_next => Self::PageNext(o),
+                    Some(o) => Self::PagePrev(o),
+                    None => Self::None,
+                };
+            }
+        }
         if let Some(rest) = t.strip_prefix("caret_right:") {
             return match CaretEnd::parse_payload(rest) {
                 Some(a) => Self::CaretRight(a),
@@ -2171,8 +2215,8 @@ impl SessionAction {
             };
         }
         match t.as_str() {
-            "page_prev" => Self::PagePrev,
-            "page_next" => Self::PageNext,
+            "page_prev" => Self::PagePrev(PageOverflow::Global),
+            "page_next" => Self::PageNext(PageOverflow::Global),
             "page_screen_prev" => Self::PageScreenPrev,
             "page_screen_next" => Self::PageScreenNext,
             "highlight_up" => Self::HighlightUp,
@@ -2272,8 +2316,14 @@ impl std::fmt::Display for SessionAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => f.write_str("none"),
-            Self::PagePrev => f.write_str("page_prev"),
-            Self::PageNext => f.write_str("page_next"),
+            Self::PagePrev(o) => match o.as_payload() {
+                "" => f.write_str("page_prev"),
+                p => write!(f, "page_prev:{p}"),
+            },
+            Self::PageNext(o) => match o.as_payload() {
+                "" => f.write_str("page_next"),
+                p => write!(f, "page_next:{p}"),
+            },
             Self::PageScreenPrev => f.write_str("page_screen_prev"),
             Self::PageScreenNext => f.write_str("page_screen_next"),
             Self::HighlightUp => f.write_str("highlight_up"),
@@ -6005,24 +6055,24 @@ fn default_highlight_keys() -> Vec<String> {
 fn page_key_group_binds(group: &str) -> &'static [(&'static str, SessionAction)] {
     match group.trim().to_lowercase().as_str() {
         "pageupdown" => &[
-            ("pageup", SessionAction::PagePrev),
-            ("pagedown", SessionAction::PageNext),
+            ("pageup", SessionAction::PagePrev(PageOverflow::Global)),
+            ("pagedown", SessionAction::PageNext(PageOverflow::Global)),
         ],
         "minus_equal" => &[
-            ("minus", SessionAction::PagePrev),
-            ("equal", SessionAction::PageNext),
+            ("minus", SessionAction::PagePrev(PageOverflow::Global)),
+            ("equal", SessionAction::PageNext(PageOverflow::Global)),
         ],
         "brackets" => &[
-            ("lbracket", SessionAction::PagePrev),
-            ("rbracket", SessionAction::PageNext),
+            ("lbracket", SessionAction::PagePrev(PageOverflow::Global)),
+            ("rbracket", SessionAction::PageNext(PageOverflow::Global)),
         ],
         "comma_period" => &[
-            ("comma", SessionAction::PagePrev),
-            ("period", SessionAction::PageNext),
+            ("comma", SessionAction::PagePrev(PageOverflow::Global)),
+            ("period", SessionAction::PageNext(PageOverflow::Global)),
         ],
         "shift_tab" => &[
-            ("shift+tab", SessionAction::PagePrev),
-            ("tab", SessionAction::PageNext),
+            ("shift+tab", SessionAction::PagePrev(PageOverflow::Global)),
+            ("tab", SessionAction::PageNext(PageOverflow::Global)),
         ],
         _ => &[],
     }
@@ -6206,16 +6256,6 @@ pub struct OverflowConfig {
     /// 只有这两档——「只顶不出字」没有诉求。
     #[serde(default = "default_overflow_behavior")]
     pub page_key: String,
-    /// **按键级覆盖**（`page_key` 的默认档之上）：键名（wind-keys KEY_TABLE names，如
-    /// `comma` / `period` / `minus` / `equal` / `lbracket` / `rbracket`）→ 策略，值域与
-    /// [`Self::page_key`] 相同。未列出的键回落 `page_key`。
-    ///
-    /// 为什么要有这张表：全局档把 `- = , . [ ]` 一把抓，而有人只要「逗号翻不动时上屏」、
-    /// 其余翻页键**无效就是无效**——行为策略必须能落到单个按键上（GH#249）。键名写错 /
-    /// 值非法由加载期告警（`config_bundle` 的 `warn_unknown_page_key_overrides`）并忽略，
-    /// 不静默吃掉。
-    #[serde(default)]
-    pub page_key_overrides: BTreeMap<String, String>,
 }
 
 fn default_overflow_behavior() -> String {
@@ -6229,7 +6269,6 @@ impl Default for OverflowConfig {
             select_key: default_overflow_behavior(),
             select_char_key: default_overflow_behavior(),
             page_key: default_overflow_behavior(),
-            page_key_overrides: BTreeMap::new(),
         }
     }
 }
@@ -11699,8 +11738,8 @@ mod tests {
     #[test]
     fn only_navigation_actions_require_candidates() {
         for a in [
-            SessionAction::PagePrev,
-            SessionAction::PageNext,
+            SessionAction::PagePrev(PageOverflow::Global),
+            SessionAction::PageNext(PageOverflow::Global),
             SessionAction::HighlightUp,
             SessionAction::HighlightDown,
         ] {
@@ -15233,6 +15272,36 @@ mod status_position_tests {
             ..Default::default()
         };
         assert_eq!(bad.reverse_wildcard_char(), 'z');
+    }
+}
+
+#[cfg(test)]
+mod page_overflow_tests {
+    use super::*;
+
+    /// `page_prev|page_next[:commit_and_input|ignore]` 往返；跟随全局档不带后缀；写错的载荷
+    /// 不静默降级成普通翻页（那会让「配了没生效」无从察觉）。
+    #[test]
+    fn page_payload_round_trips() {
+        for (v, want) in [
+            ("page_prev", SessionAction::PagePrev(PageOverflow::Global)),
+            (
+                "page_prev:commit_and_input",
+                SessionAction::PagePrev(PageOverflow::CommitAndInput),
+            ),
+            (
+                "page_next:ignore",
+                SessionAction::PageNext(PageOverflow::Ignore),
+            ),
+        ] {
+            assert_eq!(SessionAction::parse(v), want, "{v}");
+            assert_eq!(want.to_string(), v, "{v} 应原样写回");
+        }
+        assert_eq!(
+            SessionAction::parse("page_prev:commit"),
+            SessionAction::None
+        );
+        assert_eq!(SessionAction::parse("page_next:"), SessionAction::None);
     }
 }
 

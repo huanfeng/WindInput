@@ -5988,13 +5988,15 @@ impl Coordinator {
             return None;
         }
         // 只认纯翻页动词：`AuxCode(PageNext)` 共键降级的那一下不归 `keys.overflow.page_key`。
-        let is_page_action = matches!(
-            action,
-            wind_config::SessionAction::PagePrev
-                | wind_config::SessionAction::PageNext
-                | wind_config::SessionAction::PageScreenPrev
-                | wind_config::SessionAction::PageScreenNext
-        );
+        // 值是该键翻不动时的策略：翻页动作的后缀，翻屏动词跟随全局档。
+        let page_overflow = match action {
+            wind_config::SessionAction::PagePrev(o) | wind_config::SessionAction::PageNext(o) => {
+                Some(o)
+            }
+            wind_config::SessionAction::PageScreenPrev
+            | wind_config::SessionAction::PageScreenNext => Some(wind_config::PageOverflow::Global),
+            _ => None,
+        };
         // 「翻屏」动词：展开态翻整屏，未展开时与翻页完全一致（下面落到同一条 nav 执行）。
         let screen_verb = matches!(
             action,
@@ -6003,12 +6005,10 @@ impl Coordinator {
         let nav = match action {
             wind_config::SessionAction::HighlightUp => keymap::NavAction::HighlightUp,
             wind_config::SessionAction::HighlightDown => keymap::NavAction::HighlightDown,
-            wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageScreenPrev => {
-                keymap::NavAction::PagePrev
-            }
-            wind_config::SessionAction::PageNext | wind_config::SessionAction::PageScreenNext => {
-                keymap::NavAction::PageNext
-            }
+            wind_config::SessionAction::PagePrev(_)
+            | wind_config::SessionAction::PageScreenPrev => keymap::NavAction::PagePrev,
+            wind_config::SessionAction::PageNext(_)
+            | wind_config::SessionAction::PageScreenNext => keymap::NavAction::PageNext,
             wind_config::SessionAction::Cancel => {
                 // 无会话时放行：空闲按 Tab 该是宿主的制表符，不是「取消一个不存在的输入」。
                 // 判据与 `cancel_session` 的适用范围一致，见那里。
@@ -6250,7 +6250,7 @@ impl Coordinator {
             if let Some(act) = self.after_nav_changed(state) {
                 return Some(act);
             }
-        } else if is_page_action && self.page_key_overflow_to_punct(state, data) {
+        } else if page_overflow.is_some_and(|o| self.page_key_overflow_to_punct(state, data, o)) {
             // 翻不动（`page_next` 的检索范围放宽已在上面先行裁决，放宽了就是 `changed`）：
             // 不消费，让键落到兜底标点臂，由它统一顶高亮候选并出符号（中文标点、全角、
             // 智能符号、自动配对、`punct_commit` 都在那一处）。
@@ -6318,27 +6318,29 @@ impl Coordinator {
     /// 数字另有选词臂）、且本批候选**从未翻过页**时成立——判据取 `state.paged` 而非
     /// `current_page == 0`，理由同 [`Self::symbol_buffer_key_free`]：翻回首页的用户仍在
     /// 翻页，此刻按键突然出字会让人当场打错。
-    fn page_key_overflow_to_punct(&self, state: &State, data: &KeyEventData) -> bool {
+    fn page_key_overflow_to_punct(
+        &self,
+        state: &State,
+        data: &KeyEventData,
+        overflow: wind_config::PageOverflow,
+    ) -> bool {
         state.active.is_none()
             && !state.paged
-            && self.page_key_overflow_commits(data.key_code)
+            && self.page_key_overflow_commits(overflow)
             && punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
                 .is_some_and(|c| !c.is_ascii_digit())
     }
 
-    /// 该翻页键「翻不动时是否顶屏出符号」：按键级覆盖（`keys.overflow.page_key_overrides`）
-    /// 优先，未列出的键回落全局档 `page_key`。键名经 KEY_TABLE 反查 VK 比对；只有翻不动的
-    /// 那一下走到这里，覆盖表至多六条、`key_name_to_vk` 是常量表扫描，开销可忽略。
-    /// 键名写错 / 值非法在加载期已 WARN（`config_bundle::warn_unknown_page_key_overrides`）。
-    fn page_key_overflow_commits(&self, key_code: u32) -> bool {
-        let ov = &self.rt().config.keys.overflow;
-        let behavior = ov
-            .page_key_overrides
-            .iter()
-            .find(|(name, _)| keymap::key_name_to_vk(name) == Some(key_code))
-            .map(|(_, b)| b.as_str())
-            .unwrap_or(&ov.page_key);
-        behavior == "commit_and_input"
+    /// 该翻页键「翻不动时是否顶屏出符号」：绑定动作的后缀（自定义按键里的
+    /// `page_prev:commit_and_input` / `page_prev:ignore`）优先，无后缀回落全局档 `page_key`。
+    fn page_key_overflow_commits(&self, overflow: wind_config::PageOverflow) -> bool {
+        match overflow {
+            wind_config::PageOverflow::CommitAndInput => true,
+            wind_config::PageOverflow::Ignore => false,
+            wind_config::PageOverflow::Global => {
+                self.rt().config.keys.overflow.page_key == "commit_and_input"
+            }
+        }
     }
 
     /// 当前是否有输入会话：正在 overlay 模式里，或普通输入有编码 / 候选 / 已上屏段。
@@ -6903,7 +6905,7 @@ impl Coordinator {
     /// `!shift` 守卫，shift 形态本就不归它们。
     fn symbol_buffer_key_free(&self, state: &State, key_code: u32, shift: bool) -> bool {
         match self.session_action_for(key_code, shift, true) {
-            Some(wind_config::SessionAction::PagePrev) if !state.paged => {}
+            Some(wind_config::SessionAction::PagePrev(_)) if !state.paged => {}
             Some(_) => return false,
             None => {}
         }

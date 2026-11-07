@@ -176,30 +176,6 @@ fn warn_unknown_session_actions(config: &Config) {
     }
 }
 
-/// 加载期告警：`keys.overflow.page_key_overrides` 里认不出的键名 / 策略值。
-///
-/// 与 [`warn_unknown_session_actions`] 同一口径：静默忽略与「这个功能坏了」完全同形。
-/// 非法条目在消费点（`page_key_overflow_behavior`）本就会因查不到 VK 而回落全局档——
-/// 这里告警是为了让「配了没生效」可诊断。
-fn warn_unknown_page_key_overrides(config: &Config) {
-    for (name, behavior) in &config.keys.overflow.page_key_overrides {
-        if keymap::key_name_to_vk(name).is_none() {
-            warn!(
-                "keys.overflow.page_key_overrides[\"{name}\"]：键名无法识别，该覆盖被忽略。\
-                 可选 minus / equal / comma / period / lbracket / rbracket（pageup/pagedown \
-                 不存在翻不动，不在此表）"
-            );
-            continue;
-        }
-        if behavior != "ignore" && behavior != "commit_and_input" {
-            warn!(
-                "keys.overflow.page_key_overrides[\"{name}\"] = \"{behavior}\"：策略值非法，\
-                 该覆盖被忽略。可选 ignore / commit_and_input"
-            );
-        }
-    }
-}
-
 /// 跨方案的按键**并集**：可达性的数据源。
 ///
 /// ★ 与「当前方案下这个键干什么」是两回事，别混用。语义表按活跃方案查
@@ -455,7 +431,6 @@ impl ConfigBundle {
             }
         }
         warn_unknown_session_actions(&config);
-        warn_unknown_page_key_overrides(&config);
         // 会话态按键绑定。数据源是 `effective_session_actions()`＝四组键组配置的展开结果
         // ⊕ `session_actions`（后者优先）。
         //

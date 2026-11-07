@@ -652,7 +652,6 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.overflow.select_char_key", Enum(OVERFLOW_VALUES)),
     f("keys.overflow.page_key", Enum(PAGE_KEY_OVERFLOW_VALUES)),
     // 按键级覆盖（键名 → 策略），整体一张表；设置端编辑控件另案，先用配置文件。
-    f("keys.overflow.page_key_overrides", Map(&[])),
     // -- ui（外观）--
     f("ui.candidate.per_page", Int),
     f("ui.candidate.per_page_extended", Int),
