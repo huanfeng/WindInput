@@ -59,7 +59,7 @@ pub fn encode_header(header: &IpcHeader) -> [u8; 8] {
 /// 从载荷字节解码 KeyPayload
 pub fn decode_key_payload(payload: &[u8]) -> Result<KeyPayload, CodecError> {
     KeyPayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
-        need: KeyPayload::SIZE,
+        need: KeyPayload::LEGACY_SIZE,
         got: payload.len(),
     })
 }

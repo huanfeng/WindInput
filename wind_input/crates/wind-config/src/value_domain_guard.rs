@@ -219,6 +219,7 @@ fn app_compat_seed() -> toml::Value {
         initial_punct: Some(InitialMode::Chinese),
         smart_method: Some(SmartMethod::default()),
         auto_pair: Some(true),
+        auto_spacing: Some(true),
         password_force_english: Some(true),
         schema: Some("pinyin".to_string()),
         composition_start_pair_guard: Some(true),

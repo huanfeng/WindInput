@@ -907,12 +907,22 @@ state_scope = "global"
 follow_mode = false
 smart_after_digit = true
 smart_list = ".,:"
+# 英文单词后的标点直出英文（Node.js、a/b、snake_case）。「英文后」以输入法自己记下的上一笔为准，
+# 自己按了空格之后不算。列表刻意不含 ,;!?——中文句子里英文词后常接中文逗号。
+smart_after_latin = false
+latin_smart_list = "./_:@"
 # custom_enabled 为自定义标点映射总开关；custom_mappings 留空时全部走内置默认转换
 custom_enabled = false
 # 自定义标点映射表：key = 源字符（引号用 "1/"2/'1/'2 区分左右），
 # value = [中文半角, 英文全角, 中文全角, 英文半角]（空串或缺列 = 该状态回退默认转换）。
 # 例：custom_mappings = { "." = ["。", "．", "。", "."] }
 custom_mappings = {}
+
+# 中英 / 中数切换处自动补空格（中 en 中、共 3 个）。空格补在切换后那一笔的前面，交界一侧
+# 是标点或空白时不补；连续的英文之间不管（那是 commit_space）。按应用关闭见 compat.toml 的 auto_spacing。
+[input.spacing]
+cjk_latin = false
+cjk_digit = false
 
 # 智能符号：同一标点在时限内连按两次，删前一字符替换为另一形态。
 # 三个总开关互相独立，各管一种上下文，都默认关：
@@ -1015,8 +1025,9 @@ case_variants = true
 case_follow_input = true
 # commit_space：临英选词上屏后补一个空格。与 [schema.english] 那份是两个作用域各一份
 #   ——长时打英文连着打词、补空格顺手；中文里插一个英文词，插完往往接中文或标点，
-#   补上的空格还得退格删掉。两边取舍本就可能相反，故分开。
+#   补上的空格还得退格删掉。两边取舍本就可能相反，故分开。中英切换处的空格见 [input.spacing]。
 #   ★ 同样作用于**快捷输入里的英文**（英文词库候选与所打原文；中文候选、计算结果不补）。
+#   ★ 也作用于中文方案（五笔 / 拼音等）里混入的英文词库候选。
 #     快捷输入的英文上屏在全角态下也随临英转全角。
 commit_space = false
 # phrase_seg：临英下的词组分词输入。语义、分词符、跳词规则与 [schema.english] 那份完全

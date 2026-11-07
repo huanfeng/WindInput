@@ -201,6 +201,7 @@ fn key(c: &Coordinator, vk: u32) {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     });
 }
 

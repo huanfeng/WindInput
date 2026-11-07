@@ -153,7 +153,10 @@ public enum KeyHandler {
     /// macOS 没有 TSF 那样的现读文档通路, 值由 [`SmartPunctDigitTracker`] 记账得出 ——
     /// 调用方传 `router.digitTracker.prevChar` 即可, **不要**在这里去读宿主文档
     /// (跨进程同步调用, 每键都读会压在按键延迟上)。
-    public static func encodeKeyEvent(_ event: NSEvent, seq: UInt16, prevChar: UInt16 = 0) -> Data? {
+    ///
+    /// `seqChar`: 输入序列末字符代表值, 传 `router.seqTracker.seqChar`（见 [`InputSequenceTracker`]）。
+    public static func encodeKeyEvent(_ event: NSEvent, seq: UInt16, prevChar: UInt16 = 0,
+                                      seqChar: UInt16 = 0) -> Data? {
         let vk = toWindowsVK(event.keyCode)
         // VK==0 的键我们不发, 让 IMKit 自行 PassThrough.
         // (Modifier keys 本身的 keyDown/keyUp 在 IMKit 通常以 .flagsChanged 走, 这里 nil)
@@ -178,7 +181,8 @@ public enum KeyHandler {
             eventType: kind,
             toggles: toggles,
             eventSeq: seq,
-            prevChar: prevChar
+            prevChar: prevChar,
+            seqChar: seqChar
         )
         return BinaryCodec.encodeKeyEventFrame(payload)
     }

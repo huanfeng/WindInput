@@ -97,3 +97,29 @@ fn mod_not_tap_bit_does_not_collide() {
         assert_eq!(bit & v, 0, "TOGGLE_MOD_NOT_TAP 与 {other} 位重叠");
     }
 }
+
+/// `KeyPayload` 的大小两端一致（C++ `static_assert(sizeof(KeyPayload) == N)`）。
+///
+/// 服务端对短包宽容（18 字节旧包读出 `seq_char = 0`），所以 C++ 少发两字节**不会报错**，
+/// 只会让中英间补空格、英文后智能标点在 Windows 上静默不触发。
+#[test]
+fn key_payload_size_agrees_with_cpp_header() {
+    let Some(src) = header() else {
+        eprintln!("跳过 KeyPayload 大小对账：找不到 BinaryProtocol.h");
+        return;
+    };
+    let line = src
+        .lines()
+        .find(|l| l.contains("static_assert(sizeof(KeyPayload)"))
+        .expect("BinaryProtocol.h 里找不到 KeyPayload 的 static_assert");
+    let n: usize = line
+        .split("==")
+        .nth(1)
+        .and_then(|r| {
+            r.split(|c: char| !c.is_ascii_digit())
+                .find(|t| !t.is_empty())
+        })
+        .and_then(|t| t.parse().ok())
+        .expect("static_assert 里抠不到字节数");
+    assert_eq!(n, wind_ipc::protocol::KeyPayload::SIZE);
+}

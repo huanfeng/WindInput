@@ -45,6 +45,7 @@ fn key(key_code: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -337,6 +338,7 @@ fn smart_symbol_press2_after_assoc_exit() {
         );
         let second = c.handle_key_event_policed(&KeyEventData {
             prev_char: '。' as u16,
+            seq_char: 0,
             ..key(VK_PERIOD)
         });
         assert!(

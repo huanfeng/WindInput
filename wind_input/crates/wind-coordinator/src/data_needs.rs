@@ -1289,6 +1289,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         c.handle_key_event(&key(0x1B));
         for ch in "ZONGGUO".chars() {

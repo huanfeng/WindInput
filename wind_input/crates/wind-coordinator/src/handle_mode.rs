@@ -3637,7 +3637,8 @@ impl Coordinator {
                         // 小键盘（direct）无高亮候选：维持既有口径（同主路 `commit_highlight_then_char`）。
                         self.maybe_convert(state, &state.committed_text.clone())
                     };
-                    let punct = self.convert_punct_char(state, ch);
+                    // 标点紧跟在被顶出的那段后面：「英文后」看它（快捷输入里的英文词）。
+                    let punct = self.convert_punct_after(state, ch, 0, &head);
                     // 标点恒在此按 `Punctuation` 单独记（同临英 ⑥）。有高亮候选时上方已记候选段、
                     // 顶层兜底随之跳过，不记就漏；无候选时（只剩已转换前缀 / 空缓冲）也显式记——
                     // 前缀在分步选中时已记过，交给兜底会把「前缀+标点」整串再按「候选」记一遍。

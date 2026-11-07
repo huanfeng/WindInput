@@ -32,6 +32,7 @@ fn press(c: &Coordinator, vk: u32) -> KeyAction {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     })
 }
 
@@ -243,6 +244,7 @@ fn auto_commit_at_full_breaks_adjacency() {
                 toggles: 0,
                 event_seq: 0,
                 prev_char: 0,
+                seq_char: 0,
             };
             if policed {
                 c.handle_key_event_policed(&data)
@@ -309,6 +311,7 @@ fn host_passthrough_breaks_adjacency() {
             toggles,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         })
     };
     let word = |code: &str, first_toggles: u8| {

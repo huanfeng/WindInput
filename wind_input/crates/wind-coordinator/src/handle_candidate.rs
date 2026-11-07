@@ -4132,6 +4132,12 @@ impl Coordinator {
     ///
     /// 判据本体在 [`english_text_counts_as_input`]（纯函数，便于单测钉住短语反例）。
     ///
+    /// # 中文方案里的英文候选
+    ///
+    /// 码表 / 拼音主路径里来自英文词库的候选（`source == English`）跟随
+    /// `input.temp_english.commit_space`——与临英、快捷输入同属「中文里插一个英文词」。
+    /// 原码与短语不在此列（下一段的「非英文语境不会误中」仍对它们成立）。
+    ///
     /// ⚠️ 非英文**语境**不会误中：`english_space_enabled_in` 要么要求 `active_is_english()`
     /// （英文方案），要么要求 `state.active == TempEnglish`（临英 overlay），中文语境下两条
     /// 都不成立。（原文写「`english_space_enabled` 已经要求 `active_is_english()`」——
@@ -4154,7 +4160,18 @@ impl Coordinator {
         // `commit_temp_english_selected`，不再经本函数（此前走这里时拿主路的 `input_buffer`
         // 判原码，临英下恒空 ⇒ 原文与变形永不补空格，全角态也不转）。`_in` 仍保留：
         // 别的通用上屏点若在临英语境下调到这里，读的必须是临英那一份开关。
-        english_text_counts_as_input(source, text, input) && self.english_space_enabled_in(state)
+        if english_text_counts_as_input(source, text, input) && self.english_space_enabled_in(state)
+        {
+            return true;
+        }
+        // 中文方案主路径里混进来的英文词库候选（码表 / 拼音的英文候选）：同是「中文里插一个
+        // 英文词」，跟随临英那份开关，与临英、快捷输入一致。只认 `source == English`——原码、
+        // 短语不算；只在主路径（无 overlay）——快捷输入有自己的出口（`mix_english_space`），
+        // 走到这里会补两遍。
+        source == CandidateSource::English
+            && state.active.is_none()
+            && !self.engine_mgr.active_is_english()
+            && self.rt().config.input.temp_english.commit_space
     }
 
     /// 词频记账用的码——**码表与拼音/英文口径不同**，这是两类方案的语义差异。
@@ -4614,8 +4631,8 @@ impl Coordinator {
             }
             "commit_and_input" => {
                 // 触发键字符按标点流水线转换（在提交前取，chinese_punct 等状态不受提交影响）。
-                let piece = self.convert_punct(state, key_char, prev_char);
                 let cand = state.candidates[hi].clone();
+                let piece = self.convert_punct_after(state, key_char, prev_char, &cand.text);
                 // 顶屏类出口：造词 / 6b 跟随 `input.top_commit_learn`。
                 let act = self.commit_selected_learn(
                     state,
@@ -4762,10 +4779,10 @@ impl Coordinator {
                 self.commit_selected(state, &cand, state.selected_index as i32)
             }
             "commit_and_input" => {
-                let piece = key_char
-                    .map(|c| self.convert_punct(state, c, prev_char))
-                    .unwrap_or_default();
                 let cand = state.candidates[hi].clone();
+                let piece = key_char
+                    .map(|c| self.convert_punct_after(state, c, prev_char, &cand.text))
+                    .unwrap_or_default();
                 let act = self.commit_selected(state, &cand, state.selected_index as i32);
                 Self::append_to_insert_text(act, &piece)
             }
@@ -5947,6 +5964,8 @@ impl Coordinator {
             } else {
                 self.commit_selected(&mut state, &cand, page_local as i32)
             };
+            // 点选不经按键出口，中英切换处补空格要在推送之前补（见 `crate::auto_spacing`）。
+            let act = self.apply_auto_spacing(&mut state, act);
             drop(state);
             // commit_selected 已按分支自行 notify_ui_update / notify_ui_hide，此处不再重复。
             self.push_no_key_ctx_action(&act, chinese_mode, true);
@@ -6004,6 +6023,7 @@ impl Coordinator {
                 return None;
             }
         };
+        let act = self.apply_auto_spacing(&mut state, act);
         let chinese_mode = state.chinese_mode;
         drop(state);
         match &act {
@@ -8897,6 +8917,7 @@ mod expand_stop_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     }
 

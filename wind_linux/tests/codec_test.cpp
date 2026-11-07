@@ -61,7 +61,7 @@ void TestHeader()
 
 void TestKeyEvent()
 {
-    CASE("KeyEvent：18 字节 payload，字段偏移与 KeyPayload 一致");
+    CASE("KeyEvent：20 字节 payload，字段偏移与 KeyPayload 一致");
     KeyEvent e;
     e.keyCode = 0x4E;
     e.modifiers = KEYMOD_SHIFT;
@@ -69,9 +69,10 @@ void TestKeyEvent()
     e.toggles = TOGGLE_CAPSLOCK;
     e.eventSeq = 0x1234;
     e.prevChar = 0x33;
+    e.seqChar = 0x4F60;
     Bytes f = encodeKeyEventFrame(e);
-    CHECK_EQ(f.size(), size_t(8 + 18));
-    CHECK_EQ(u32At(f, 4), 18u);
+    CHECK_EQ(f.size(), size_t(8 + 20));
+    CHECK_EQ(u32At(f, 4), 20u);
     CHECK_EQ(u32At(f, 8), 0x4Eu);
     CHECK_EQ(u32At(f, 12), 0u);
     CHECK_EQ(u32At(f, 16), uint32_t(KEYMOD_SHIFT));
@@ -79,6 +80,7 @@ void TestKeyEvent()
     CHECK_EQ(f[21], uint8_t(TOGGLE_CAPSLOCK));
     CHECK_EQ(u16At(f, 22), uint16_t(0x1234));
     CHECK_EQ(u16At(f, 24), uint16_t(0x33));
+    CHECK_EQ(u16At(f, 26), uint16_t(0x4F60));
 }
 
 void TestFocusGained()

@@ -216,7 +216,14 @@ impl Coordinator {
         match cmd {
             MenuCmd::TooltipCommitSection | MenuCmd::TooltipCommitLine => {
                 match self.tooltip_commit_action(&target, &value) {
-                    Some(act) => self.push_no_key_ctx_action(&act, true, false),
+                    Some(act) => {
+                        // 不经按键出口，中英切换处补空格在这里补（同鼠标点选，见 `crate::auto_spacing`）。
+                        let act = {
+                            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            self.apply_auto_spacing(&mut st, act)
+                        };
+                        self.push_no_key_ctx_action(&act, true, false)
+                    }
                     None => self.tooltip_abandoned(),
                 }
             }
@@ -478,6 +485,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 

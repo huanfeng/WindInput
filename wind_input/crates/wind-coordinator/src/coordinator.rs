@@ -463,6 +463,12 @@ pub(crate) struct State {
     pub(crate) chinese_mode: bool,
     pub(crate) full_width: bool,
     pub(crate) chinese_punct: bool,
+    /// 插入点前一字符的类别——中英/中数间补空格与英文后智能标点的「上一笔」。
+    ///
+    /// 两个写入点（见 `crate::auto_spacing`）：无输入会话时的 keydown 按客户端 `seq_char`
+    /// 重新锁存；服务端每发出一笔上屏就改成那笔的末字符。组合中的后续按键不改它——组字键
+    /// 没写进文档，真正的「前一字符」是组合开始时那个。
+    pub(crate) spacing_prev: wind_punct::spacing::CharClass,
     /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
     ///
     /// 见 `docs/design/schema-scoped-behavior.md` §4。初值是哨兵 `u64::MAX`，保证首次
@@ -1073,6 +1079,9 @@ pub(crate) struct ActiveCompat {
     pub(crate) auto_pair: Option<bool>,
     /// 本进程的智能符号替换方案；`None` = 跟随全局 `input.symbol.smart_method`。
     pub(crate) smart_method: Option<wind_config::config::SmartMethod>,
+    /// 本进程的中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`，`Some(false)` 关闭。
+    /// 读取见 `Coordinator::auto_spacing_allowed_here`。
+    pub(crate) auto_spacing: Option<bool>,
     /// 光标坐标校正偏移（dp，96dpi 基准逻辑像素，正=右/下）。宿主报告的 caret 系统性偏移时用，
     /// 与 `caret_use_top` 在同两处消费（`apply_focus_caret` / `handle_caret_update`）。
     /// 应用时按目标点所在显示器的 DPI 换算成物理像素，见 [`Coordinator::apply_caret_compat`]。
@@ -2166,6 +2175,9 @@ pub struct Coordinator {
     /// 那次」精准删多个；撤销一次即复位 1、焦点变化亦复位 → 之后回落删 1（宁可少删多按几次，
     /// 也不按陈旧计数误删多个）。
     pub(crate) last_commit_len: std::sync::atomic::AtomicUsize,
+    /// 最近一次上屏的文本开头是不是 `crate::auto_spacing` 补的空格。造词草稿流要把它剥掉：
+    /// 草稿窗口遇到非汉字就断流并丢掉整笔，不剥的话交界后的第一个字永远进不了草稿。
+    pub(crate) auto_space_prefixed: std::sync::atomic::AtomicBool,
     /// 编码显示方式运行时态（命令栏 ime.toggle("preedit") 循环切换；初值随配置）。
     /// 统一权威：决定候选窗是否显示 preedit（in_app→不显示）及是否内联首单元（embedded）。
     pub(crate) preedit_display: Mutex<PreeditDisplay>,
@@ -2566,6 +2578,7 @@ impl Coordinator {
                     toggles: 0,
                     event_seq: 0,
                     prev_char: 0,
+                    seq_char: 0,
                 };
                 use wind_bridge::handler::MessageHandler;
                 this.handle_key_event(&key(0x41));
@@ -3108,6 +3121,7 @@ impl Coordinator {
                 chinese_mode: init_chinese,
                 full_width: init_full,
                 chinese_punct: init_punct,
+                spacing_prev: wind_punct::spacing::CharClass::Other,
                 // 哨兵：与任何真实代际都不相等，保证首次 sync_schema_scope 必执行。
                 schema_scope_gen: u64::MAX,
                 punct_before_schema: None,
@@ -3353,6 +3367,7 @@ impl Coordinator {
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
+            auto_space_prefixed: std::sync::atomic::AtomicBool::new(false),
             preedit_display: Mutex::new(preedit_display_init),
             eff_candidate_cache: Mutex::new(None),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),
@@ -3608,6 +3623,7 @@ impl Coordinator {
                         has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                         auto_pair: rule.and_then(|r| r.auto_pair),
                         smart_method: rule.and_then(|r| r.smart_method),
+                        auto_spacing: rule.and_then(|r| r.auto_spacing),
                         caret_offset_x: rule.map(|r| r.caret_offset_x).unwrap_or(0),
                         caret_offset_y: rule.map(|r| r.caret_offset_y).unwrap_or(0),
                         window_hash,
@@ -3735,6 +3751,7 @@ impl Coordinator {
                 self.push_password_suppress_config(token);
                 self.push_english_pair_config(token);
                 self.push_composition_placeholder_config(token);
+                self.push_space_before_digit_config(token);
                 self.push_multiline_commit_config(token);
                 // 标题采集开关按进程名算（本进程可能命中标题规则），名字纠正后同样要重推。
                 self.push_compat_title_match_config(token);
@@ -5355,6 +5372,7 @@ impl Coordinator {
                 self.push_cn_passthrough_punct_config(0); // 中文模式该透传的标点：DLL 据此**不**吃
                 self.push_en_passthrough_punct_config(0); // 同上，英文标点态那份（超集）
                 self.push_space_custom_cols_config(0); // 空格行自定义列：DLL 据此吃空缓冲空格
+                self.push_space_before_digit_config(0); // 中数间补空格：DLL 据此吃汉字后的数字
                 self.push_pair_state_ttl_config(0); // 配对状态时效（DLL 侧闸门据此判陈旧）
                 self.push_ctrl_space_toggle_config(0); // Ctrl+空格 切换开关：DLL 据此吃不吃该键（GH#172）
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——
@@ -10005,6 +10023,7 @@ impl Coordinator {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         // ★ **最先**试大小写档位循环：它是「英文输入态下临时夺取本键」，优先级按定义高于
         // 用户给 CapsLock 配的任何会话动作。守卫（开关 / 英文语境 / 有候选）都在函数内部，
@@ -10038,9 +10057,11 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                let (chinese_mode, main_path) = {
-                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    (st.chinese_mode, st.active.is_none())
+                // 不经按键出口，中英切换处补空格在这里补（同鼠标点选，见 `crate::auto_spacing`）。
+                let (act, chinese_mode, main_path) = {
+                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let act = self.apply_auto_spacing(&mut st, act);
+                    (act, st.chinese_mode, st.active.is_none())
                 };
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
                 self.push_no_key_ctx_action(&act, chinese_mode, main_path);
@@ -17682,6 +17703,7 @@ mod capslock_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -18809,6 +18831,7 @@ mod input_diag_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -20463,6 +20486,7 @@ mod syllable_separator_app_tests {
                 toggles: 0,
                 event_seq: 0,
                 prev_char: 0,
+                seq_char: 0,
             });
         }
         match last {
@@ -20509,6 +20533,7 @@ mod syllable_separator_app_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
         focus(&c, 8, "other.exe");
         assert!(

@@ -4428,6 +4428,9 @@ pub struct InputConfig {
     /// 智能符号模式。
     #[serde(default)]
     pub symbol: SymbolConfig,
+    /// 中英 / 中数之间自动补空格（[input.spacing]）。
+    #[serde(default)]
+    pub spacing: SpacingConfig,
     /// 标点配对（输入左括号自动补右括号 + 输右括号智能跳过）。
     #[serde(default)]
     pub auto_pair: AutoPairConfig,
@@ -4559,6 +4562,7 @@ impl Default for InputConfig {
             default: InputDefaultConfig::default(),
             punct: PunctConfig::default(),
             symbol: SymbolConfig::default(),
+            spacing: SpacingConfig::default(),
             auto_pair: AutoPairConfig::default(),
             temp_english: TempEnglishConfig::default(),
             capslock: CapslockConfig::default(),
@@ -4597,6 +4601,19 @@ pub struct PunctConfig {
     /// 参与"数字后智能英文标点"的标点集合。
     #[serde(default = "default_smart_punct_list")]
     pub smart_list: String,
+    /// 英文单词后的标点智能直出英文（`Node.js`、`a/b`、`snake_case`）。默认关。
+    ///
+    /// 「英文后」= 插入点前一字符是拉丁字母：空缓冲按标点时取客户端输入序列记账
+    /// （`KeyPayload.seq_char`），顶屏时取被顶出的那段文本的末字符。用户自己打了空格之后
+    /// 不再算英文后。与数字那一对互相独立（开关与集合各一份）。
+    #[serde(default)]
+    pub smart_after_latin: bool,
+    /// 参与「英文后智能英文标点」的标点集合（存键本身的 ASCII 标点）。
+    ///
+    /// 出厂刻意不含 `,;!?`：中文句子里英文词后接中文逗号很常见（「我用 Python，它……」）。
+    /// `.` 在内的代价是句末英文词后的句号也出 `.`，靠智能符号连按两次换回 `。`。
+    #[serde(default = "default_latin_smart_punct_list")]
+    pub latin_smart_list: String,
     /// 自定义标点映射开关。
     #[serde(default)]
     pub custom_enabled: bool,
@@ -4611,10 +4628,34 @@ impl Default for PunctConfig {
             follow_mode: false,
             smart_after_digit: true,
             smart_list: default_smart_punct_list(),
+            smart_after_latin: false,
+            latin_smart_list: default_latin_smart_punct_list(),
             custom_enabled: false,
             custom_mappings: HashMap::new(),
         }
     }
+}
+
+/// 中英 / 中数之间自动补空格（[input.spacing]）。设计见
+/// `docs/design/auto-spacing-and-latin-smart-punct.md`。
+///
+/// 只管**切换处**：空格是切换后那一笔上屏的前缀（`你好` → ` Hello`、`Hello` → ` 世界`），
+/// 交界一侧是标点、空白或不可知时一律不补。「上一笔末字符」来自客户端的输入序列记账
+/// （`KeyPayload.seq_char`），宿主光标碰巧停在哪个字后面不算。
+///
+/// 连续的英文之间不归这里管：英文词之间的空格是英文输入本身的 `schema.english.commit_space` /
+/// `input.temp_english.commit_space`（上屏时立即补尾随空格，之后接中文看到的是空格，不再补）。
+///
+/// 按应用关闭见 compat `[[apps]] auto_spacing = false`（自带 pangu 类空格处理的 Markdown
+/// 编辑器、终端）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpacingConfig {
+    /// 汉字与拉丁字母之间补空格（`中 en 中`）。默认关。
+    #[serde(default)]
+    pub cjk_latin: bool,
+    /// 汉字与数字之间补空格（`共 3 个`）。默认关。
+    #[serde(default)]
+    pub cjk_digit: bool,
 }
 
 /// 智能符号替换方案。两者是「体感」与「兼容性」的取舍，故都保留：
@@ -4886,7 +4927,7 @@ pub struct TempEnglishConfig {
     /// 英文段，其词库候选按本项投影（见 `Coordinator::mix_free_english_segment`）。
     #[serde(default = "default_true")]
     pub case_follow_input: bool,
-    /// 临英选词上屏后自动补一个空格。
+    /// 临英选词上屏后自动补一个空格。中文与英文之间的空格另见 [`SpacingConfig`]。
     ///
     /// 与 `schema.english.commit_space` 是**两个作用域各一份**，不是两个真相源 ——
     /// 同 [`Self::raw_candidate`] 那一对的理由：用户对「长时打英文」与「中文里插一个
@@ -4899,6 +4940,9 @@ pub struct TempEnglishConfig {
     ///
     /// ★ 也作用于**快捷输入里的英文**（A2-3b）：英文词库候选与所打原文上屏补空格，
     /// 中文候选与计算结果不补。判据见 `Coordinator::mix_candidate_is_english`。
+    ///
+    /// ★ 也作用于**中文方案主路径里的英文词库候选**（码表 / 拼音的英文混入）：同是「中文里
+    /// 插一个英文词」。原码与短语不补。判据见 `Coordinator::english_appends_space`。
     #[serde(default)]
     pub commit_space: bool,
     /// 临英下的词组分词输入（论坛 t42）：用 `'` 切开各段，每段只打前缀。**默认关**。
@@ -8408,6 +8452,10 @@ fn default_commit_newline() -> String {
 
 fn default_smart_punct_list() -> String {
     ".,:".to_string()
+}
+
+fn default_latin_smart_punct_list() -> String {
+    "./_:@".to_string()
 }
 
 fn default_enter_behavior() -> String {

@@ -72,6 +72,22 @@
 - 钉住的测试：`wind-engine` `pinyin::tests::nbest_alternate_survives_after_top_sentence_is_learned`（旧逻辑下红）
 - 来源：内部
 
+## 2026-11-06 · 新增中英 / 中数切换处空格与英文后智能标点（0.131）
+
+- 合入：6f8150db；范围：中文主路径与各 overlay 的上屏前缀；中文模式空缓冲下汉字后的数字键；中文标点状态下的标点转换
+- 变化：
+  - 新开关 `input.spacing.cjk_latin` / `cjk_digit`（默认都关）：汉字与英文、汉字与数字**切换处**补空格，补在切换后那一笔前面。
+    例：五笔「工」后临英 `Python` → ` Python`，再打「工」→ ` 工`；汉字后打 `3` → ` 3`（主键盘；小键盘未做）。
+    标点永不前补；连续的英文之间不管；用户自己按过空格、鼠标点过别处、或输入法不知道光标前是什么时不补。
+  - `commit_space`（英文方案 / 临英两份）仍是上屏后立即补尾随空格，之后接中文看到的是空格，不再重复补。
+    临英那份新增覆盖中文方案主路径里的英文词库候选（码表 / 拼音的英文混入）：例：五笔 `git`（空格）→ 前：`git` → 后：`git `（开着时）。
+  - 新开关 `input.punct.smart_after_latin`（默认关）+ `latin_smart_list`（出厂 `./_:@`）：英文词后的这些标点直出半角。
+    例：临英 `Node` + `.` → 前：`Node。` → 后：`Node.`；`,` 不在出厂列表，仍出 `，`。
+- 触发条件：均需手动开启（英文候选那条需已开临英的 `commit_space`）
+- 回退旧行为：关掉对应开关；中英空格可按应用关闭（compat `auto_spacing = false`）
+- 钉住的测试：`wind-coordinator/tests/auto_spacing.rs`、`latin_smart_punct.rs`；判据单测 `wind-punct` `spacing::tests`
+- 来源：内部（设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）
+
 ## 2026-11-06 · 开整句 N-best 时第 1 名合成整句不再掉到第 2 名之后（0.131）
 
 - 合入：d203d1e6；范围：全拼 / 双拼主路径，仅 `sentence_count > 1`

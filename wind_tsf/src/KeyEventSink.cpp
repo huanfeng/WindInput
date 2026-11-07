@@ -129,6 +129,7 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _resyncDeadline(0)
     , _resyncFailStreak(0)
     , _lastPassthroughDigit(0)
+    , _seqChar(WindInputSeq::kUnknown)
     , _pendingKeyUpKey(0)
     , _ctrlSpaceEatenInTest(FALSE)
     , _pendingKeyUpModifiers(0)
@@ -978,7 +979,8 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
             // 判据与 OnKeyDown 的 numberPassthrough 同一个函数（NumberKeyPolicy.h）。
             if (keyType == HotkeyType::Number &&
                 wind::numberkey::ShouldEatNumberKey(hasInputSession != FALSE, isChineseMode != FALSE,
-                                                    _pTextService->IsFullWidth() != FALSE))
+                                                    _pTextService->IsFullWidth() != FALSE,
+                                                    _SpaceBeforeDigitFor(wParam, modifiers)))
             {
                 *pfEaten = TRUE;
                 _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
@@ -1094,12 +1096,21 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     return S_OK;
 }
 
+bool CKeyEventSink::_SpaceBeforeDigitFor(WPARAM vk, uint32_t modifiers) const
+{
+    return wind::numberkey::SpaceBeforeDigit(
+        _spaceBeforeDigit, WindInputSeq::IsCjk(_seqChar), (unsigned)vk,
+        (modifiers & (KEYMOD_SHIFT | KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_WIN)) != 0,
+        (GetKeyState(VK_CAPITAL) & 0x0001) != 0);
+}
+
 void CKeyEventSink::_TrackCommittedTextForSmartPunct(const std::wstring& text)
 {
     if (text.empty())
         return;
     WCHAR last = text.back();
     _lastPassthroughDigit = (last >= L'0' && last <= L'9') ? last : 0;
+    _seqChar = WindInputSeq::FromCommittedText(text.c_str(), text.size());
 }
 
 void CKeyEventSink::_NoteInputSequenceAtExit(WPARAM vk, bool eaten, bool suppressed)
@@ -1115,6 +1126,8 @@ void CKeyEventSink::_NoteInputSequenceAtExit(WPARAM vk, bool eaten, bool suppres
     if (GetKeyState(VK_CONTROL) & 0x8000) mods |= KEYMOD_CTRL;
     if (GetKeyState(VK_MENU) & 0x8000) mods |= KEYMOD_ALT;
     _lastPassthroughDigit = _DigitCharFromVk(vk, mods);
+    _seqChar = WindInputSeq::FromVk((uint32_t)vk, (mods & KEYMOD_SHIFT) != 0,
+                                    (mods & (KEYMOD_CTRL | KEYMOD_ALT)) != 0);
     _pTextService->InvalidateCachedPrevChar();
 }
 
@@ -1521,7 +1534,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     BOOL numberPassthrough =
         isChineseMode && CHotkeyManager::ClassifyInputKey(wParam, modifiers) == HotkeyType::Number &&
         !wind::numberkey::ShouldEatNumberKey(hasInputSession != FALSE, true,
-                                             _pTextService->IsFullWidth() != FALSE);
+                                             _pTextService->IsFullWidth() != FALSE,
+                                             _SpaceBeforeDigitFor(wParam, modifiers));
 
     // Track whether this is a Ctrl/Alt combo that needs cleanup-then-passthrough
     BOOL isCtrlAltCleanup = FALSE;
@@ -2545,7 +2559,8 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
         WIND_LOG_DEBUG(L"passthrough_before_key: 上一次按键送达后有键进了宿主，随本事件上报\n");
     }
 
-    BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar);
+    BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar,
+                                           _seqChar);
     // ★ 发送失败 ⇒ 事实从未送达，必须放回去。位已在上面清掉，不放回就是**漏报**——而漏报
     // 正是本机制唯一不可接受的方向（服务端会把下一按判成 press2，删掉用户刚打的字）。
     // SendKeyEvent 返回 FALSE 是本文件显式承认的场景（下游各 ipc_failed_* 分支）。
@@ -2654,6 +2669,9 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
                              response.text.length(), response.newComposition.length());
 
                 _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);
+                // seqChar 照记（数字记账不记，理由见下方分支）：新组合不论最终上屏还是取消，
+                // 已写进文档的末字都是 response.text 的末位。联想态就走这条。
+                NoteCommittedSeqChar(response.text);
                 _isComposing = TRUE;
                 _hasCandidates = TRUE;
                 _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
@@ -2817,6 +2835,8 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             // 深度只减 1：格数是「这一层有多宽」，与「弹掉几层」无关。
             for (uint32_t i = 0; i < response.moveCount; i++)
                 _SimulatePairKey(VK_RIGHT);
+            // 光标跨过了右符号：光标前必是符号。
+            _seqChar = '?';
             if (_pairPendingDepth > 0)
                 _pairPendingDepth--;
         }
@@ -2844,6 +2864,11 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             // 也没有组合会残留（与 CommitText 的 Word 泄漏不同形）。
             WIND_LOG_DEBUG(L"Processing ReplaceBackward response (smart symbol)\n");
             _pTextService->ReplacePrecedingChars(response.replaceCount, response.text);
+            // 纯删除（`ime.undo_commit`）：光标前换成了什么看不见，清零；有替换文本则记它的末位。
+            if (response.text.empty())
+                _seqChar = WindInputSeq::kUnknown;
+            else
+                NoteCommittedSeqChar(response.text);
             _isComposing = FALSE;
             _hasCandidates = FALSE;
         }
@@ -2891,8 +2916,9 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
                                response.text.c_str(), response.newComposition.c_str(),
                                response.holdTimeoutMs);
             _pTextService->CommitText(response.text, _inHotkeyDispatch);
-            // 不记输入序列：余码组合随后就开，光标前是组合内容而非 response.text 末位
-            // （同 restartComposition 分支的理由）。
+            // 数字记账不记：余码组合随后就开，光标前是组合内容而非 response.text 末位
+            // （同 restartComposition 分支的理由）。seqChar 照记，理由同那个分支。
+            NoteCommittedSeqChar(response.text);
             _isComposing = FALSE;
             _hasCandidates = FALSE;
             _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
@@ -3276,6 +3302,13 @@ void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8
         std::wstring text(reinterpret_cast<const wchar_t*>(value.data()), value.size() / 2);
         _pTextService->SetLangBarTooltip(text);
         WIND_LOG_DEBUG_FMT(L"LangBar tooltip updated: %ls\n", text.c_str());
+    }
+    else if (key == CONFIG_KEY_SPACE_BEFORE_DIGIT)
+    {
+        // 格式：enabled(u8)（对齐 Rust push_space_before_digit_config）。
+        if (value.empty()) return;
+        _spaceBeforeDigit = value[0] != 0;
+        WIND_LOG_INFO_FMT(L"Space before digit updated: %d\n", (int)_spaceBeforeDigit);
     }
     else if (key == CONFIG_KEY_COMPOSITION_PLACEHOLDER)
     {

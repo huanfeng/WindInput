@@ -883,8 +883,22 @@ impl MessageHandler for Coordinator {
             }
             self.note_host_wrote_text("宿主自行出字");
         }
+        // 中英 / 中数间补空格的「插入点前一字符」：只在组合开始前锁存（见 `crate::auto_spacing`）。
+        // 联想态**不**重新锁存：联想是紧接着上一笔上屏的，服务端已把 `spacing_prev` 推进到那一笔
+        // 的末字；客户端那份在某些上屏路径上会慢一拍（上屏后立刻起组合的那几条），拿来覆盖反而错。
+        if data.event_type == EVENT_KEY_DOWN {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !Self::has_input_session(&st) {
+                self.latch_spacing_boundary(&mut st, data);
+            }
+        }
         let action = self.handle_key_event(data);
         let action = self.redispatch_commit_code(data, action);
+        // 中英切换处补空格：在换行改写之前，空格是上屏文本的前缀、与换行形式无关。
+        let action = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.apply_auto_spacing(&mut st, action)
+        };
         // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
         // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
         // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
@@ -1964,6 +1978,30 @@ impl MessageHandler for Coordinator {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 self.accumulate_code_char(&mut state, digit, digit)
             }
+            // 汉字后打数字、开了中数间空格：出字，前缀空格由统一出口补。
+            //
+            // Windows：DLL 只在它判定要补空格时才把空闲数字吃下交过来（`NumberKeyPolicy.h` 的
+            // `SpaceBeforeDigit`），这里**不看**开关恒出字——DLL 手上的开关可能慢一拍，吃了键这边
+            // 却不出字就是丢键（「C++ 吃键集 ⊆ Rust 出字集」）。
+            // macOS / Linux：客户端每个键都发过来、按回复决定透传，必须看开关——否则开关关着时
+            // 汉字后的数字也被输入法接管，不再交给宿主（数字当快捷键的场景）。
+            keymap::VK_0..=keymap::VK_9
+                if data.modifiers == 0
+                    && state.chinese_mode
+                    && !state.full_width
+                    && !state.caps_lock
+                    && !Self::has_input_session(&state)
+                    && wind_punct::spacing::classify_unit(data.seq_char)
+                        == wind_punct::spacing::CharClass::Cjk
+                    && (cfg!(windows)
+                        || (self.rt().config.input.spacing.cjk_digit
+                            && self.auto_spacing_allowed_here())) =>
+            {
+                let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
+                let text = digit.to_string();
+                self.record_commit(&text, 0, -1, CommitSource::Punctuation);
+                Self::commit_action(text, true)
+            }
             keymap::VK_1..=keymap::VK_9 if data.modifiers & MOD_SHIFT == 0 => {
                 // 数字键 1-9 选当前页第 N 个候选；越界按 input.overflow.number_key 处理
                 // （ignore 吞键 / commit 上屏高亮 / commit_and_input 顶字+数字，对齐 Go）。
@@ -2620,8 +2658,19 @@ impl MessageHandler for Coordinator {
                     }
                     // 引号交替态钉左：开了配对后一次按键即产出完整一对，交替开关不参与决策。
                     let quote_paired = self.pin_quote_left_if_paired(&state, ch);
-                    let piece = self.convert_punct(&state, ch, data.prev_char);
+                    // 「英文后」看紧挨着标点的那段：被顶出的候选 / 原码，没有则是光标前（锁存值）。
+                    let piece = self.convert_punct_after(&state, ch, data.prev_char, &out);
                     state.chinese_punct = saved_chinese_punct;
+                    // 智能符号 press1 在上面（顶屏之前）就按当时能看到的上下文武装了；英文后智能
+                    // 标点看的是被顶出的那段，可能让实际上屏的是另一形态（`_` 而非 `——`）。武装串与
+                    // 光标前的实际内容对不上时 press2 会按武装串的长度删字——删到用户打的字母，
+                    // 故不一致即解除。只在英文后智能标点开着时检查：关着时两者同源，旧行为一分不动。
+                    if self.rt().config.input.punct.smart_after_latin {
+                        let mut arm = self.smart_symbol.lock().unwrap_or_else(|e| e.into_inner());
+                        if arm.armed && arm.key == ch && arm.str != piece {
+                            arm.armed = false;
+                        }
+                    }
                     out.push_str(&piece);
                     // 标点字符（候选部分已在标点前顶屏候选处记 Candidate；标点候选已 set
                     // stat_recorded，故此处必须显式记标点，否则顶层 fallback 会跳过它）。
@@ -4668,11 +4717,16 @@ impl MessageHandler for Coordinator {
         self.record_selection(&freq_code, &text, source);
         // 补空格**必须在记账之后**：`record_selection` 记的是词本身，带上尾空格会写出
         // 「hello 」这种与读取端（`apply_freq_rerank` 按候选文本查）永远对不上的词频键。
-        let text = if append_space {
+        let mut text = if append_space {
             format!("{text} ")
         } else {
             text
         };
+        // 中英交界空格同按键出口一样补在本笔前面（`crate::auto_spacing`）；这条通路不产
+        // `KeyAction`，故直接调文本级判据。
+        let mut prev = state.spacing_prev;
+        self.space_committed_text(&mut prev, &mut text);
+        state.spacing_prev = prev;
         // 上屏即组合结束：复位首显延迟状态，使下一组合首帧重新延迟到 reflow 后的权威坐标，
         // 避免其锁定到本组合旧坐标（"上屏后立即输入候选窗错位"主场景）。
         self.reset_first_show();
@@ -5467,6 +5521,7 @@ mod shortcut_ownership_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 

@@ -64,6 +64,29 @@ private:
     uint16_t prevChar_ = 0;
 };
 
+/// KeyPayload.seqChar 记账：输入序列里最近进文档的字符代表值（0 = 不可知）。对位 Windows
+/// `wind_tsf/include/InputSequenceChar.h` 与 Swift `InputSequenceTracker`，取值规则三端一致：
+/// 透传键报类别代表值（字母 'a'、数字本身、空格、其余可见符号 '?'），上屏文本取末尾码点的
+/// 首个 UTF-16 单元。
+/// 与 DigitTracker 分开：组合串（预编辑）没写进文档，不动它——否则「打 nihao → Esc」会留下
+/// 编码末位 'o'，下一笔中文被误补空格。
+class SeqTracker {
+public:
+    /// 「在记账、但不知道」。0 只来自不带这个字段的旧客户端（Rust `SEQ_CHAR_UNKNOWN`）。
+    static constexpr uint16_t kUnknown = 0xFFFF;
+    uint16_t seqChar() const { return seqChar_; }
+    void reset() { seqChar_ = kUnknown; }
+    static uint16_t charFromVk(uint32_t vk, uint32_t modifiers);
+    void noteKeyPassthrough(uint32_t vk, uint32_t modifiers) { seqChar_ = charFromVk(vk, modifiers); }
+    /// 空串不动：没有东西写进文档。
+    void noteCommittedText(const std::string& utf8);
+    /// 光标跨过了一个已知是符号的字符（智能跳过右标点）。
+    void noteCursorCrossedSymbol() { seqChar_ = '?'; }
+
+private:
+    uint16_t seqChar_ = kUnknown;
+};
+
 /// 服务端给的删除 / 光标移动计数是 u32，转 int 取负前先钳住：大于 INT_MAX 时取负是未定义行为；
 /// 真实值只有个位数（智能标点、撤销上屏的一段词），上限远高于正常用量。
 constexpr uint32_t kMaxDeleteUnits = 1024;
@@ -97,6 +120,13 @@ public:
     bool hasComposition() const { return !compositionText_.empty(); }
     const std::string& compositionText() const { return compositionText_; }
     DigitTracker& digitTracker() { return digits_; }
+    SeqTracker& seqTracker() { return seq_; }
+    /// 按键透传回宿主：两份记账一起喂（漏喂一份的症状是那一份的功能在某条透传路上失灵）。
+    void noteKeyPassthrough(uint32_t vk, uint32_t modifiers)
+    {
+        digits_.noteKeyPassthrough(vk, modifiers);
+        seq_.noteKeyPassthrough(vk, modifiers);
+    }
 
 private:
     void applyCommitText(const CommitTextPayload& p, TextSink* sink);
@@ -118,6 +148,7 @@ private:
     std::string pendingCommitPrefix_; // 已定格、尚未真上屏的前缀
     uint64_t holdGeneration_ = 0;
     DigitTracker digits_;
+    SeqTracker seq_;
     TimerScheduler scheduler_;
     SinkProvider sinkProvider_;
 };

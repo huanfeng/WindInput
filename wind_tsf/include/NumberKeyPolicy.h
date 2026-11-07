@@ -17,11 +17,22 @@ namespace numberkey
 ///
 /// - 有输入会话：选词 / 翻页 / 顶屏，吃。
 /// - 中文 + 全角、无会话：服务端出全角数字，吃（否则纯 TSF 宿主直接得到半角）。
+/// - 中文半角空闲、汉字后、开了中数间空格（`spaceBeforeDigit`，调用方算好）：吃，服务端出
+///   「空格 + 数字」。服务端对「上一笔是汉字的空闲数字键」恒出字（判据见 message_handler 那条臂），
+///   故 C++ 吃键集 ⊆ Rust 出字集成立。
 /// - 其余（中文半角空闲、英文半角）：不吃，宿主自己出字。英文全角另有 english_fullwidth 分支，
 ///   不经本函数。
-inline bool ShouldEatNumberKey(bool hasInputSession, bool chineseMode, bool fullWidth)
+inline bool ShouldEatNumberKey(bool hasInputSession, bool chineseMode, bool fullWidth,
+                               bool spaceBeforeDigit = false)
 {
-    return hasInputSession || (chineseMode && fullWidth);
+    return hasInputSession || (chineseMode && fullWidth) || (chineseMode && spaceBeforeDigit);
+}
+
+/// 汉字后的数字要不要吃下交给服务端补空格。只认主键盘、不带修饰、CapsLock 关——与服务端那条
+/// 出字臂的判据逐条对应（小键盘、Shift+数字不在其列）。
+inline bool SpaceBeforeDigit(bool enabled, bool seqIsCjk, unsigned vk, bool anyModifier, bool capsLock)
+{
+    return enabled && seqIsCjk && vk >= '0' && vk <= '9' && !anyModifier && !capsLock;
 }
 
 } // namespace numberkey

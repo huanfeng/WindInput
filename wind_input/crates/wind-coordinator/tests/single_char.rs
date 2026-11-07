@@ -39,6 +39,7 @@ fn key_event(key_code: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -400,6 +401,7 @@ fn switching_schema_clears_the_runtime_override() {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     });
     assert_eq!(coord.active_schema_id(), "pinyin", "前置：应已切到拼音");
 

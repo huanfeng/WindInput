@@ -324,6 +324,32 @@ void TestReplaceBackwardAndCursor()
     CHECK(s4.committed == "ok");
 }
 
+void TestSeqTracker()
+{
+    CASE("seqChar 记账：上屏取末码点、透传报类别代表值、组合串不动");
+    ResponseRouter r;
+    FakeSink s;
+    r.apply(commit("你好"), &s);
+    CHECK_EQ(r.seqTracker().seqChar(), uint16_t(0x597D));
+    r.apply(update("wo", 2), &s);
+    CHECK_EQ(r.seqTracker().seqChar(), uint16_t(0x597D)); // 预编辑没写进文档
+    r.apply(commit("\xF0\xA0\x80\x80"), &s);              // U+20000：取高代理
+    CHECK_EQ(r.seqTracker().seqChar(), uint16_t(0xD840));
+    r.noteKeyPassthrough(0x48, 0);                          // H
+    CHECK_EQ(r.seqTracker().seqChar(), uint16_t('a'));
+    r.noteKeyPassthrough(0x20, 0);
+    CHECK_EQ(r.seqTracker().seqChar(), uint16_t(' '));
+    r.noteKeyPassthrough(0xBE, 0);                          // .
+    CHECK_EQ(r.seqTracker().seqChar(), uint16_t('?'));
+    r.noteKeyPassthrough(0x56, KEYMOD_CTRL);                // Ctrl+V
+    CHECK_EQ(r.seqTracker().seqChar(), SeqTracker::kUnknown);
+    r.noteKeyPassthrough(0x37, 0);
+    CHECK_EQ(r.digitTracker().prevChar(), uint16_t('7'));  // 两份记账一起喂
+    CHECK_EQ(r.seqTracker().seqChar(), uint16_t('7'));
+    r.reset();
+    CHECK_EQ(r.seqTracker().seqChar(), SeqTracker::kUnknown);
+}
+
 void TestDigitTracker()
 {
     CASE("数字后智能标点记账：上屏数字记、汉字清零；透传键按产出记；快捷键不记");
@@ -390,6 +416,7 @@ int main()
     TestHoldTimer();
     TestReplaceBackwardAndCursor();
     TestDigitTracker();
+    TestSeqTracker();
     TestUtf();
     TEST_MAIN_END();
 }

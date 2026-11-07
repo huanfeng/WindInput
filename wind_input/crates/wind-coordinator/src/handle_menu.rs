@@ -971,6 +971,7 @@ impl Coordinator {
         self.push_password_suppress_config(0);
         self.push_english_pair_config(0);
         self.push_composition_placeholder_config(0);
+        self.push_space_before_digit_config(0);
         self.push_multiline_commit_config(0);
         self.push_compat_title_match_config(0);
     }
@@ -5122,6 +5123,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let refused = |c: &Coordinator| {
             assert!(matches!(c.open_softkeyboard(None), KeyAction::PassThrough));
@@ -5503,6 +5505,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let vk_k = 0x4B;
         assert!(!c.softkeyboard_is_open());

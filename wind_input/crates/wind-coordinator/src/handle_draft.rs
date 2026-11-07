@@ -77,6 +77,15 @@ impl Coordinator {
                 return;
             }
         };
+        // 输入法补的前缀空格不是用户输入：剥掉再喂（见 `Coordinator::auto_space_prefixed`）。
+        let text = if self
+            .auto_space_prefixed
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            text.strip_prefix([' ', '\u{3000}']).unwrap_or(text)
+        } else {
+            text
+        };
         if text.is_empty() {
             return;
         }
@@ -507,6 +516,25 @@ mod tests {
         let store = Arc::new(Store::open(&db).unwrap());
         let c = Coordinator::new_headless_with_store(cfg_with_ttl(hours), None, Arc::clone(&store));
         (c, store, db)
+    }
+
+    /// 中英交界补的前缀空格不是用户输入：喂草稿流前剥掉。不剥的话草稿窗口见到非汉字就
+    /// 断流并丢掉整笔，`Python` 之后打的第一个字永远进不了草稿。
+    #[test]
+    fn auto_space_prefix_is_stripped_before_feeding_the_draft() {
+        let mut cfg = cfg_with_ttl(24);
+        cfg.schema.codetable.auto_phrase.enabled = true;
+        let c = Coordinator::new_headless(cfg, None);
+        assert!(c.draft_enabled(), "前提：默认方案应启用码表造词");
+        let feed = |prefixed: bool| {
+            c.draft_window.lock().unwrap().terminate();
+            c.auto_space_prefixed
+                .store(prefixed, std::sync::atomic::Ordering::Relaxed);
+            c.note_draft_commit(&Coordinator::commit_action(" 你".into(), true));
+            !c.draft_window.lock().unwrap().is_empty()
+        };
+        assert!(feed(true), "补的空格应被剥掉，「你」进草稿窗口");
+        assert!(!feed(false), "用户自己打的空格照旧断流");
     }
 
     /// 单位换算：配置里是**小时**，存储层的 `ttl_secs` 要的是**秒**。
