@@ -194,6 +194,10 @@ public:
     /// 服务端说「没有会话了」时，若那个会话是「无占位的联想会话」（`_assocBareSession`），
     /// 还要在 TSF 线程上补一次候选收起（`_assocBareEndPending`）：本函数会在 AsyncReader
     /// 线程被调，UIElement / 热键注销不能在这里做。
+    /// 无占位联想会话中，文档焦点反弹（WPS 点单元格）时问一句：鼠标刚按过吗？是 ⇒ 用户点了别处，
+    /// 调用方应让服务端收联想（宿主没有组合，也不一定发选区变化，没有别的信号）。
+    /// 只在会话期间读鼠标状态；会话开始时已丢弃一次旧的「按下过」位。TSF 线程调用。
+    BOOL BareAssocMouseClicked();
     void SetCandidateSessionActive(BOOL active)
     {
         _hotkeyModeSession = active;
@@ -291,10 +295,6 @@ private:
     BOOL _assocBareSession = FALSE;
     /// 服务端推 FALSE 清掉了无占位联想会话，TSF 线程还欠一次候选收起。
     BOOL _assocBareEndPending = FALSE;
-    /// 无占位联想会话中，文档焦点反弹（WPS 点单元格）时问一句：鼠标刚按过吗？是 ⇒ 用户点了别处，
-    /// 调用方应让服务端收联想（宿主没有组合，也不一定发选区变化，没有别的信号）。
-    /// 只在会话期间读鼠标状态；会话开始时已丢弃一次旧的「按下过」位。TSF 线程调用。
-    BOOL BareAssocMouseClicked();
     /// 本地结束点：清位（不动加词等服务端会话）。TSF 线程调用。
     void _EndAssocBareSession()
     {
