@@ -307,6 +307,7 @@ private:
         bool hovered = false;
         bool dragging = false;
         double grabX = 0, grabY = 0;
+        int32_t dragX = 0, dragY = 0; // 未钳制的全局逻辑位置，越过屏幕边界时继续累计
         // ── 工具栏 / 软键盘专用 ──
         uint32_t outputName = 0;  // 该摆在哪块输出（registry 名；0 = 交给合成器挑）
         uint32_t boundOutput = 0; // 当前角色对象建在哪块输出上（输出一经指定不能改，换屏要重建角色）
@@ -321,6 +322,7 @@ private:
     uint32_t layerShellVersion_ = 0;
     LayerSurf statusLs_;
     LayerSurf toastLs_;
+    LayerSurf dragPreview_; // 不接收输入；原 surface 保持映射以保留隐式抓取
     LayerSurf panels_[2]; // 下标 = kind - OVERLAY_KIND_TOOLBAR
     LayerSurf* layerSurfFor(uint32_t kind);
     LayerSurf* panelSurf(uint32_t kind);
