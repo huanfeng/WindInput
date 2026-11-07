@@ -67,8 +67,19 @@ public class InputController: IMKInputController {
     /// 里的按键照常组字 (首字符进缓冲、候选窗出现在对话框后面)。失活时据此判断是否已被取代。
     private static weak var lastActivated: InputController?
 
+    /// 登录以来左 / 右 / 其他鼠标键按下的总次数（触控板轻点计入左键）。
+    private static func mouseDownCount() -> UInt32 {
+        let src = CGEventSourceStateID.combinedSessionState
+        return CGEventSource.counterForEventType(src, eventType: .leftMouseDown)
+            &+ CGEventSource.counterForEventType(src, eventType: .rightMouseDown)
+            &+ CGEventSource.counterForEventType(src, eventType: .otherMouseDown)
+    }
+
     public override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
+        // 鼠标挪光标识别（补空格 / 英文后标点的「上一笔」作废）：只比鼠标按下次数，见
+        // `InputSequenceTracker.mouseDownCount`。不需要辅助功能权限。
+        router.seqTracker.mouseDownCount = InputController.mouseDownCount
 
         // 智能配对的宿主光标移动: kit 层 router 把意图上抛, 这里用 CGEvent 合成方向键。
         // 主线程 async 执行, 确保排在本轮 insertText (宿主已处理) 之后再发方向键。
