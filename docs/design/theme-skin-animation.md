@@ -391,3 +391,18 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
 - 求解与摆放：`skin_frame.rs` 的 `solve_axis`（`AxisFit` 带所锚框的上下界）、`skin_place_parts`。
   绘制和命中由 `paint_parts`、`collect_part_hits` 完成，候选点击沿用原有标签。
 - 三条渲染路径（非 Windows `show`、ext_presenter、Windows 本地窗口）都接入了；free 时跳过上翻重建。
+
+## 15. P4 范围（动画运行时）
+
+本期只做「装饰按文件自带帧循环播放」，状态机与输入事件（§6.2 的 `states` / `on`）留给 P5。
+
+- schema：`decor.fps` 可选，覆盖文件自带帧时长。其余动画字段 P5 再加。
+- 解码：装饰图是 APNG / GIF / 动态 WebP 时按帧解码，逐帧用 §5 的面积平均缩到目标倍率；静态图仍是一帧。
+  帧时长 < 10 ms 按 100 ms（浏览器惯例），帧率上限 30。
+- 预算：每个主题的动画帧合计 24 MiB，超出则隔帧丢弃（时长相应累加）直到落入预算，并 warn。
+- 时间轴：显示时记起点，当前帧 = 经过时间对总时长取模，不逐帧累加，不漂移；窗口隐藏即停（不登记唤醒）。
+- 驱动：候选窗 `next_deadline` 登记下一次换帧时刻，`tick` 到期后由 UI 循环重绘一帧（本地窗口与
+  host-render 两条路径都要）。本期整帧重绘，先在靶机量 CPU，不够再做「静态底图缓存 + 只合成装饰」。
+- 减少动态效果：Windows `SPI_GETCLIENTAREAANIMATION` 关闭时停在首帧。设置项「关闭主题动画」放到 P5 一起做
+  （要动设置端）。
+- 平台：本期只在 Windows 播放；macOS / Linux（ext_presenter）先显示首帧，SHM 推帧放到后续。
