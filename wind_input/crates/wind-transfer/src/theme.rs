@@ -208,6 +208,7 @@ fn scan(package: &Path) -> anyhow::Result<Scanned> {
     let mut theme_entry: Option<String> = None;
     let mut has_preview = false;
     let names: Vec<String> = archive.file_names().map(String::from).collect();
+    let mut seen_folded = std::collections::HashSet::new();
     for name in &names {
         if name.ends_with('/') {
             continue;
@@ -215,6 +216,10 @@ fn scan(package: &Path) -> anyhow::Result<Scanned> {
         // 判根与落盘一律用归一化值：`sub\theme.toml` 的 `contains('/')` 为 false，
         // 拿原名判根会把子目录文件当成根条目。校验同时挡住路径穿越。
         let rel = crate::bundle::validate_entry_rel(name, "")?;
+        // 只差大小写的两个条目在 Windows / macOS 上落成同一个文件，后写的悄悄盖掉先写的。
+        if !seen_folded.insert(rel.to_lowercase()) {
+            anyhow::bail!("主题包里有只差大小写的重名条目「{rel}」");
+        }
         if rel == THEME_META_NAME {
             continue;
         }
@@ -319,13 +324,24 @@ fn skin_asset_refs(text: &str) -> anyhow::Result<Vec<(String, String)>> {
         if p.is_empty() || p.starts_with("data:") {
             continue;
         }
-        let rel = crate::bundle::validate_entry_rel(&p, "")
+        // 去掉 `.` 段（`./assets/x.png` 与 `assets/x.png` 是同一个文件）；尾随点 / 空格、
+        // 保留名由 `validate_entry_rel` 拒绝——Windows 会把它们解析成另一个名字。
+        let cleaned: Vec<&str> = p.split(['/', '\\']).filter(|s| *s != ".").collect();
+        let rel = crate::bundle::validate_entry_rel(&cleaned.join("/"), "")
             .ok()
             .filter(|r| r.len() > THEME_ASSETS_PREFIX.len() && r.starts_with(THEME_ASSETS_PREFIX))
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "皮肤引用「{p}」不在 {THEME_ASSETS_PREFIX} 下（皮肤图片要放进主题的 {THEME_ASSETS_PREFIX} 目录，引用写成 {THEME_ASSETS_PREFIX}文件名）"
-                )
+                // 不像路径的裸名（没有分隔符也没有扩展名）是资源键：多半是子主题引用了
+                // base 的 `[resources]`，而主题包不带父主题。
+                if !p.contains(['/', '\\', '.']) {
+                    anyhow::anyhow!(
+                        "皮肤引用的资源键「{p}」未在本主题定义（主题包不带 base 父主题的资源，请在本主题的 [resources] 里定义并把图放进 {THEME_ASSETS_PREFIX}）"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "皮肤引用「{p}」不在 {THEME_ASSETS_PREFIX} 下（皮肤图片要放进主题的 {THEME_ASSETS_PREFIX} 目录，引用写成 {THEME_ASSETS_PREFIX}文件名）"
+                    )
+                }
             })?;
         out.push((p, rel));
     }
@@ -490,10 +506,12 @@ fn sibling_with_suffix(dir: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
 /// 只收 `theme.toml` 与 `assets/**`——主题目录里可能还有别的东西（编辑器的草稿、
 /// 系统生成的缩略图数据库），一并打进去既胀包又泄露无关文件。
 ///
-/// ⚠️ `assets/**` 的收集**跟随符号链接**（`collect_files` 用 `is_dir()`、写入用
-/// `fs::read`）。主题目录按 id 独占、没有「用户往里手工放东西」的用法，Windows 上建
-/// 符号链接还要管理员权限或开发者模式，所以目前不拦；但这一条一旦不再成立（比如哪天
-/// 允许从任意目录导出），链接指向的仓外文件就会被打进可分发的包里。
+/// `assets/**` 的收集**不跟随符号链接**：链接（指向文件或目录都算，`assets` 本身是链接
+/// 也算）既不进包也不递归，因此链接成环不会无限递归，指向主题目录外（比如家目录）的
+/// 文件也不会被打进可分发的包里。皮肤引用了被跳过的链接时按「文件不存在」报错。
+///
+/// 写包前先按导入侧的规则全部过一遍（条目名、只差大小写的重名、条目数、单条 / 总量
+/// 上限、皮肤引用），任何一条不过就报错并指出是哪个文件，不做出导入时必然被拒的包。
 pub fn export_package(
     theme_dir: &Path,
     out_path: &Path,
@@ -503,16 +521,7 @@ pub fn export_package(
     let text = std::fs::read_to_string(&theme_path)
         .map_err(|e| anyhow::anyhow!("读不到 {}：{e}", theme_path.display()))?;
     wind_theme::validate_text(&text)?;
-    for (orig, rel) in skin_asset_refs(&text)? {
-        if !theme_dir.join(&rel).is_file() {
-            anyhow::bail!(
-                "皮肤引用「{orig}」指向的文件不存在：{}",
-                theme_dir.join(&rel).display()
-            );
-        }
-    }
     let (name, author, version) = meta_from_theme_text(&text);
-
     let meta = ThemeMeta {
         package: ThemePackageInfo {
             format_version: THEME_FORMAT_VERSION,
@@ -522,6 +531,88 @@ pub fn export_package(
             version,
         },
     };
+    let meta_text = toml::to_string_pretty(&meta)?;
+
+    // 资源条目：(包内名, 源文件)。
+    let mut assets: Vec<(String, PathBuf)> = Vec::new();
+    let assets_dir = theme_dir.join("assets");
+    if std::fs::symlink_metadata(&assets_dir).is_ok_and(|m| m.is_dir()) {
+        let mut files: Vec<PathBuf> = Vec::new();
+        collect_files(&assets_dir, &mut files)?;
+        // 条目顺序稳定：同样的输入要打出同样的包，否则每次导出都是「全变了」。
+        files.sort();
+        for path in files {
+            let rel = path
+                .strip_prefix(&assets_dir)
+                .map_err(|_| anyhow::anyhow!("资源路径越界：{}", path.display()))?;
+            let entry = format!(
+                "{THEME_ASSETS_PREFIX}{}",
+                rel.to_string_lossy().replace('\\', "/")
+            );
+            crate::bundle::validate_entry_rel(&entry, "").map_err(|e| {
+                anyhow::anyhow!("资源文件名不能进主题包：{}（{e}）", path.display())
+            })?;
+            assets.push((entry, path));
+        }
+    }
+
+    // 与导入侧同一套门禁，按导入时的口径算。
+    let entry_count = 2 + usize::from(preview_png.is_some()) + assets.len();
+    if entry_count > MAX_THEME_ENTRIES {
+        anyhow::bail!("主题资源过多（打包后 {entry_count} 个条目，上限 {MAX_THEME_ENTRIES}）");
+    }
+    let mut total = (meta_text.len() + text.len()) as u64;
+    if text.len() as u64 > MAX_THEME_TEXT_BYTES {
+        anyhow::bail!(
+            "{} 过大（{} 字节，上限 {MAX_THEME_TEXT_BYTES}）",
+            theme_path.display(),
+            text.len()
+        );
+    }
+    if let Some(png) = preview_png {
+        if png.len() as u64 > MAX_THEME_IMAGE_BYTES {
+            anyhow::bail!(
+                "预览图过大（{} 字节，上限 {MAX_THEME_IMAGE_BYTES}）",
+                png.len()
+            );
+        }
+        total += png.len() as u64;
+    }
+    let mut seen_folded = std::collections::HashMap::new();
+    for (entry, path) in &assets {
+        if let Some(prev) = seen_folded.insert(entry.to_lowercase(), entry) {
+            anyhow::bail!(
+                "资源「{prev}」与「{entry}」只差大小写，在 Windows / macOS 上会落成同一个文件"
+            );
+        }
+        let len = std::fs::metadata(path)?.len();
+        if len > MAX_THEME_IMAGE_BYTES {
+            anyhow::bail!(
+                "资源文件过大：{}（{len} 字节，单个上限 {MAX_THEME_IMAGE_BYTES}）",
+                path.display()
+            );
+        }
+        total += len;
+    }
+    if total > MAX_THEME_UNCOMPRESSED_BYTES {
+        anyhow::bail!("主题资源总量过大（{total} 字节，上限 {MAX_THEME_UNCOMPRESSED_BYTES}）");
+    }
+
+    // 皮肤引用按**实际收集到的条目名**精确比对，不用 `is_file()`：大小写不敏感的文件系统上
+    // `assets/Frame.png` 能打开 `frame.png`，导出过了，导入却按包内名严格比对而失败。
+    for (orig, rel) in skin_asset_refs(&text)? {
+        if assets.iter().any(|(e, _)| *e == rel) {
+            continue;
+        }
+        let folded = rel.to_lowercase();
+        if let Some((e, _)) = assets.iter().find(|(e, _)| e.to_lowercase() == folded) {
+            anyhow::bail!("皮肤引用「{orig}」与资源文件「{e}」大小写不一致");
+        }
+        anyhow::bail!(
+            "皮肤引用「{orig}」指向的文件不存在：{}",
+            theme_dir.join(&rel).display()
+        );
+    }
 
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -531,45 +622,32 @@ pub fn export_package(
     let opts = zip::write::SimpleFileOptions::default();
 
     w.start_file(THEME_META_NAME, opts)?;
-    w.write_all(toml::to_string_pretty(&meta)?.as_bytes())?;
+    w.write_all(meta_text.as_bytes())?;
     w.start_file(THEME_ENTRY_NAME, opts)?;
     w.write_all(text.as_bytes())?;
     if let Some(png) = preview_png {
         w.start_file(THEME_PREVIEW_NAME, entry_options(THEME_PREVIEW_NAME))?;
         w.write_all(png)?;
     }
-
-    let assets = theme_dir.join("assets");
-    if assets.is_dir() {
-        let mut files: Vec<PathBuf> = Vec::new();
-        collect_files(&assets, &mut files)?;
-        // 条目顺序稳定：同样的输入要打出同样的包，否则每次导出都是「全变了」。
-        files.sort();
-        for path in files {
-            let rel = path
-                .strip_prefix(&assets)
-                .map_err(|_| anyhow::anyhow!("资源路径越界：{}", path.display()))?;
-            let entry = format!(
-                "{THEME_ASSETS_PREFIX}{}",
-                rel.to_string_lossy().replace('\\', "/")
-            );
-            let opts = entry_options(&entry);
-            w.start_file(entry, opts)?;
-            w.write_all(&std::fs::read(&path)?)?;
-        }
+    for (entry, path) in assets {
+        let opts = entry_options(&entry);
+        w.start_file(entry, opts)?;
+        w.write_all(&std::fs::read(&path)?)?;
     }
     w.finish()?;
     Ok(())
 }
 
-/// 递归收集目录下的文件（不含目录项）。
+/// 递归收集目录下的普通文件。`file_type()` 不跟随符号链接：链接一律跳过（不进包、
+/// 不递归），所以不会因链接成环而无限递归，也不会把链接指向的外部文件收进来。
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_files(&path, out)?;
-        } else {
-            out.push(path);
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            collect_files(&entry.path(), out)?;
+        } else if ty.is_file() {
+            out.push(entry.path());
         }
     }
     Ok(())
@@ -1192,5 +1270,246 @@ commit = { play = { image = "assets/jump.png" }, then = "idle" }
         for n in [THEME_ENTRY_NAME, THEME_META_NAME, "assets/c.svg"] {
             assert_eq!(method(&mut a, n), Deflated, "{n}");
         }
+    }
+
+    /// 导出时引用与收集到的条目名精确比对：大小写不敏感的文件系统上 `is_file()` 会放行
+    /// `assets/Frame.png` → `frame.png`，做出来的包自己却导不回来。
+    #[test]
+    fn export_rejects_skin_ref_case_mismatch() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        write_skin_theme(&src);
+        let text = SKIN_THEME.replace("assets/alt.png", "assets/Alt.png");
+        fs::write(src.join(THEME_ENTRY_NAME), text).unwrap();
+        let err = export_package(&src, &t.path().join("o.wtheme"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("assets/Alt.png") && err.contains("大小写"),
+            "{err}"
+        );
+    }
+
+    /// `./` 段规范化后按同一个文件处理，导出、导入都认。
+    #[test]
+    fn skin_ref_with_dot_segment_round_trips() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        write_skin_theme(&src);
+        let text = SKIN_THEME.replace("\"assets/pet.png\"", "\"./assets/./pet.png\"");
+        fs::write(src.join(THEME_ENTRY_NAME), text).unwrap();
+        let pkg = t.path().join("o.wtheme");
+        export_package(&src, &pkg, None).unwrap();
+        import_package(&pkg, &t.path().join("themes/x"), |_| Ok(())).unwrap();
+    }
+
+    /// 尾随点 / 空格、保留名：Windows 会解析成另一个文件，直接拒。
+    #[test]
+    fn export_rejects_skin_ref_windows_would_rename() {
+        let t = tempfile::tempdir().unwrap();
+        for bad in ["assets/pet.png.", "assets/pet.png ", "assets/NUL.png"] {
+            let src = t.path().join("src");
+            write_skin_theme(&src);
+            let text = SKIN_THEME.replace("assets/pet.png", bad);
+            fs::write(src.join(THEME_ENTRY_NAME), text).unwrap();
+            let err = export_package(&src, &t.path().join("o.wtheme"), None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(bad), "{bad:?}：{err}");
+        }
+    }
+
+    /// 子主题引用父主题 `[resources]` 的键：说清是资源键没定义，不说「不在 assets/ 下」。
+    #[test]
+    fn export_reports_undefined_resource_key() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join(THEME_ENTRY_NAME),
+            "base = \"parent\"\n[meta]\nname = \"子\"\n[skin.horizontal.frame]\nimage = \"frame_main\"\n",
+        )
+        .unwrap();
+        let err = export_package(&src, &t.path().join("o.wtheme"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("资源键「frame_main」未在本主题定义"), "{err}");
+    }
+
+    #[test]
+    fn export_rejects_oversized_image_before_writing() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("s");
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join(THEME_ENTRY_NAME), THEME_TEXT).unwrap();
+        fs::write(
+            src.join("assets/big.png"),
+            vec![0u8; MAX_THEME_IMAGE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let out = t.path().join("o.wtheme");
+        let err = export_package(&src, &out, None).unwrap_err().to_string();
+        assert!(err.contains("big.png"), "要指出是哪个文件：{err}");
+        assert!(!out.exists(), "不该留下导入时必然被拒的包");
+    }
+
+    #[test]
+    fn export_rejects_total_over_limit() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("s");
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join(THEME_ENTRY_NAME), THEME_TEXT).unwrap();
+        let img = vec![0u8; 14 * MIB];
+        for i in 0..5 {
+            fs::write(src.join(format!("assets/{i}.png")), &img).unwrap();
+        }
+        let err = export_package(&src, &t.path().join("o.wtheme"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("总量过大"), "{err}");
+    }
+
+    #[test]
+    fn export_rejects_too_many_entries() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("s");
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join(THEME_ENTRY_NAME), THEME_TEXT).unwrap();
+        // package.toml + theme.toml + 199 张 = 201。
+        for i in 0..MAX_THEME_ENTRIES - 1 {
+            fs::write(src.join(format!("assets/{i}.png")), b"x").unwrap();
+        }
+        let err = export_package(&src, &t.path().join("o.wtheme"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("过多"), "{err}");
+    }
+
+    /// 只差大小写的资源：大小写敏感的文件系统上导得出，装到 Windows / macOS 却互相覆盖。
+    #[test]
+    fn export_rejects_case_only_duplicate_assets() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("s");
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join(THEME_ENTRY_NAME), THEME_TEXT).unwrap();
+        fs::write(src.join("assets/Bg.png"), b"a").unwrap();
+        if fs::write(src.join("assets/bg.png"), b"b").is_err()
+            || fs::read_dir(src.join("assets")).unwrap().count() < 2
+        {
+            return; // 大小写不敏感的文件系统上造不出这种目录。
+        }
+        let err = export_package(&src, &t.path().join("o.wtheme"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("只差大小写"), "{err}");
+    }
+
+    #[test]
+    fn import_rejects_case_only_duplicate_entries() {
+        let t = tempfile::tempdir().unwrap();
+        let pkg = t.path().join("c.wtheme");
+        write_zip(
+            &pkg,
+            &[
+                (THEME_ENTRY_NAME, THEME_TEXT.as_bytes()),
+                ("assets/bg.png", b"a"),
+                ("assets/BG.png", b"b"),
+            ],
+        );
+        let err = preview_package(&pkg).unwrap_err().to_string();
+        assert!(err.contains("只差大小写"), "{err}");
+    }
+
+    #[test]
+    fn import_rejects_windows_reserved_names() {
+        let t = tempfile::tempdir().unwrap();
+        for bad in ["assets/NUL.png", "assets/con", "assets/x.png."] {
+            let pkg = t.path().join("r.wtheme");
+            write_zip(
+                &pkg,
+                &[(THEME_ENTRY_NAME, THEME_TEXT.as_bytes()), (bad, b"x")],
+            );
+            assert!(preview_package(&pkg).is_err(), "{bad} 该被拒");
+        }
+    }
+
+    /// 撒谎的条目：中央目录与本地头都声明 1 KB，实际解压 17 MiB。规模前筛骗得过，
+    /// 真正读取时的有界读取必须拦下。
+    #[test]
+    fn import_bounds_actual_size_not_declared_size() {
+        let t = tempfile::tempdir().unwrap();
+        let pkg = t.path().join("bomb.wtheme");
+        let name = "assets/bomb.bin";
+        {
+            let mut w = zip::ZipWriter::new(fs::File::create(&pkg).unwrap());
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file(THEME_ENTRY_NAME, opts).unwrap();
+            w.write_all(THEME_TEXT.as_bytes()).unwrap();
+            w.start_file(name, opts).unwrap();
+            w.write_all(&vec![0u8; 17 * MIB]).unwrap();
+            w.finish().unwrap();
+        }
+        // 改写 uncompressed size：本地头 sig 0x04034b50 偏移 22、名字在 30；
+        // 中央目录 sig 0x02014b50 偏移 24、名字在 46。
+        let mut b = fs::read(&pkg).unwrap();
+        let mut patched = 0;
+        for i in 0..b.len().saturating_sub(46 + name.len()) {
+            let (size_at, name_at) = match &b[i..i + 4] {
+                [0x50, 0x4b, 0x03, 0x04] => (22, 30),
+                [0x50, 0x4b, 0x01, 0x02] => (24, 46),
+                _ => continue,
+            };
+            if &b[i + name_at..i + name_at + name.len()] == name.as_bytes() {
+                b[i + size_at..i + size_at + 4].copy_from_slice(&1024u32.to_le_bytes());
+                patched += 1;
+            }
+        }
+        assert_eq!(patched, 2, "本地头与中央目录各改一处");
+        fs::write(&pkg, &b).unwrap();
+        let declared = zip::ZipArchive::new(fs::File::open(&pkg).unwrap())
+            .unwrap()
+            .by_name(name)
+            .unwrap()
+            .size();
+        assert_eq!(declared, 1024, "前筛看到的是撒谎的大小");
+        preview_package(&pkg).expect("前筛按声明大小放行");
+
+        let dst = t.path().join("themes/x");
+        let err = import_package(&pkg, &dst, |_| Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(name) && err.contains("超过上限"), "{err}");
+        assert!(!dst.exists());
+    }
+
+    /// 符号链接不跟随：成环不死循环，指向主题目录外的文件不进包。
+    #[cfg(unix)]
+    #[test]
+    fn export_skips_symlinks() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("s");
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join(THEME_ENTRY_NAME), THEME_TEXT).unwrap();
+        fs::write(src.join("assets/bg.png"), b"bg").unwrap();
+        let outside = t.path().join("secret.txt");
+        fs::write(&outside, b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, src.join("assets/leak.txt")).unwrap();
+        std::os::unix::fs::symlink(src.join("assets"), src.join("assets/loop")).unwrap();
+        std::os::unix::fs::symlink(t.path(), src.join("assets/up")).unwrap();
+
+        let pkg = t.path().join("o.wtheme");
+        export_package(&src, &pkg, None).unwrap();
+        let names: Vec<String> = zip::ZipArchive::new(fs::File::open(&pkg).unwrap())
+            .unwrap()
+            .file_names()
+            .map(String::from)
+            .collect();
+        assert!(names.contains(&"assets/bg.png".to_string()));
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.contains("leak") && !n.contains("loop") && !n.contains("up/")),
+            "{names:?}"
+        );
     }
 }

@@ -149,7 +149,30 @@ pub fn validate_entry_rel(name: &str, required_prefix: &str) -> anyhow::Result<S
     if !ok {
         anyhow::bail!("非法条目(路径穿越): {name}");
     }
+    if let Some(seg) = normalized.split('/').find(|s| !windows_safe_segment(s)) {
+        anyhow::bail!("非法条目(Windows 上无法按原名落盘的文件名「{seg}」): {name}");
+    }
     Ok(normalized)
+}
+
+/// 路径段能否在 Windows 上按原名落盘：拒绝空段（`a//b`）、尾随点或空格（Win32 会悄悄
+/// 截掉，落成另一个名字）、设备保留名（`CON`、`NUL.png`、`COM1` 之类，按首个 `.` 前的
+/// 部分比较，不分大小写）。
+fn windows_safe_segment(seg: &str) -> bool {
+    if seg.is_empty() || seg.ends_with('.') || seg.ends_with(' ') {
+        return false;
+    }
+    let stem = seg
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    !reserved
 }
 
 /// 免全解压读取并校验 manifest.toml。
@@ -287,6 +310,34 @@ mod tests {
         assert!(validate_entry_rel("..\\evil.toml", "").is_err());
         assert!(validate_entry_rel("a\\..\\..\\evil.toml", "").is_err());
         assert!(validate_entry_rel("C:evil.toml", "").is_err());
+    }
+
+    #[test]
+    fn validate_entry_rel_rejects_names_windows_cannot_keep() {
+        for bad in [
+            "CON",
+            "nul",
+            "NUL.png",
+            "assets/com1.txt",
+            "lpt9",
+            "assets/aux.tar.gz",
+            "frame.png.",
+            "frame.png ",
+            "assets./x.png",
+            "a//b",
+        ] {
+            assert!(validate_entry_rel(bad, "").is_err(), "{bad} 该被拒");
+        }
+        for good in [
+            "console.png",
+            "COM0",
+            "com10.png",
+            "nul_.png",
+            "a.b/c.png",
+            ".hidden",
+        ] {
+            assert!(validate_entry_rel(good, "").is_ok(), "{good} 不该被拒");
+        }
     }
 
     #[test]
