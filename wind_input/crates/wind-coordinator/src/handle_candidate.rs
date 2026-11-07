@@ -4129,6 +4129,12 @@ impl Coordinator {
     ///
     /// 判据本体在 [`english_text_counts_as_input`]（纯函数，便于单测钉住短语反例）。
     ///
+    /// # 中文方案里的英文候选
+    ///
+    /// 码表 / 拼音主路径里来自英文词库的候选（`source == English`）跟随
+    /// `input.temp_english.commit_space`——与临英、快捷输入同属「中文里插一个英文词」。
+    /// 原码与短语不在此列（下一段的「非英文语境不会误中」仍对它们成立）。
+    ///
     /// ⚠️ 非英文**语境**不会误中：`english_space_enabled_in` 要么要求 `active_is_english()`
     /// （英文方案），要么要求 `state.active == TempEnglish`（临英 overlay），中文语境下两条
     /// 都不成立。（原文写「`english_space_enabled` 已经要求 `active_is_english()`」——
@@ -4151,7 +4157,18 @@ impl Coordinator {
         // `commit_temp_english_selected`，不再经本函数（此前走这里时拿主路的 `input_buffer`
         // 判原码，临英下恒空 ⇒ 原文与变形永不补空格，全角态也不转）。`_in` 仍保留：
         // 别的通用上屏点若在临英语境下调到这里，读的必须是临英那一份开关。
-        english_text_counts_as_input(source, text, input) && self.english_space_enabled_in(state)
+        if english_text_counts_as_input(source, text, input) && self.english_space_enabled_in(state)
+        {
+            return true;
+        }
+        // 中文方案主路径里混进来的英文词库候选（码表 / 拼音的英文候选）：同是「中文里插一个
+        // 英文词」，跟随临英那份开关，与临英、快捷输入一致。只认 `source == English`——原码、
+        // 短语不算；只在主路径（无 overlay）——快捷输入有自己的出口（`mix_english_space`），
+        // 走到这里会补两遍。
+        source == CandidateSource::English
+            && state.active.is_none()
+            && !self.engine_mgr.active_is_english()
+            && self.rt().config.input.temp_english.commit_space
     }
 
     /// 词频记账用的码——**码表与拼音/英文口径不同**，这是两类方案的语义差异。

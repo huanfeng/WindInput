@@ -4902,6 +4902,9 @@ pub struct TempEnglishConfig {
     ///
     /// ★ 也作用于**快捷输入里的英文**（A2-3b）：英文词库候选与所打原文上屏补空格，
     /// 中文候选与计算结果不补。判据见 `Coordinator::mix_candidate_is_english`。
+    ///
+    /// ★ 也作用于**中文方案主路径里的英文词库候选**（码表 / 拼音的英文混入）：同是「中文里
+    /// 插一个英文词」。原码与短语不补。判据见 `Coordinator::english_appends_space`。
     #[serde(default)]
     pub commit_space: bool,
     /// 临英下的词组分词输入（论坛 t42）：用 `'` 切开各段，每段只打前缀。**默认关**。

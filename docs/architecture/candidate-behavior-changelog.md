@@ -34,10 +34,11 @@
   - 新开关 `input.spacing.cjk_latin` / `cjk_digit`（默认都关）：汉字与英文、汉字与数字**切换处**补空格，补在切换后那一笔前面。
     例：五笔「工」后临英 `Python` → ` Python`，再打「工」→ ` 工`；汉字后打 `3` → ` 3`（Windows 主键盘）。
     标点永不前补；连续的英文之间不管；用户自己按过空格、鼠标点过别处、或输入法不知道光标前是什么时不补。
-  - `commit_space`（英文方案 / 临英两份）不变：仍是上屏后立即补尾随空格，之后接中文看到的是空格，不再重复补。
+  - `commit_space`（英文方案 / 临英两份）仍是上屏后立即补尾随空格，之后接中文看到的是空格，不再重复补。
+    临英那份新增覆盖中文方案主路径里的英文词库候选（码表 / 拼音的英文混入）：例：五笔 `git`（空格）→ 前：`git` → 后：`git `（开着时）。
   - 新开关 `input.punct.smart_after_latin`（默认关）+ `latin_smart_list`（出厂 `./_:@`）：英文词后的这些标点直出半角。
     例：临英 `Node` + `.` → 前：`Node。` → 后：`Node.`；`,` 不在出厂列表，仍出 `，`。
-- 触发条件：三项均需手动开启
+- 触发条件：均需手动开启（英文候选那条需已开临英的 `commit_space`）
 - 回退旧行为：关掉对应开关；中英空格可按应用关闭（compat `auto_spacing = false`）
 - 钉住的测试：`wind-coordinator/tests/auto_spacing.rs`、`latin_smart_punct.rs`；判据单测 `wind-punct` `spacing::tests`
 - 来源：内部（设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）

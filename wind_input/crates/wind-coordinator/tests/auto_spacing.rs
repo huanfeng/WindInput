@@ -291,3 +291,27 @@ fn client_reported_unknown_gets_no_space() {
     h.seq.set(wind_ipc::protocol::SEQ_CHAR_UNKNOWN);
     assert_eq!(h.temp_english("Python"), "Python");
 }
+
+/// 五笔主路径里的英文候选（`english_merge`）：跟随临英的 `commit_space`，与临英、快捷输入一致。
+#[test]
+fn english_candidate_in_codetable_follows_temp_english_switch() {
+    if !ready() {
+        return;
+    }
+    let run = |commit_space: bool| -> String {
+        let mut cfg = config(true, false);
+        cfg.schema.codetable.english_merge.enable = true;
+        cfg.input.temp_english.commit_space = commit_space;
+        let h = Host::new(cfg);
+        h.wubi("aaaa");
+        for c in "git".chars() {
+            h.letter(c);
+        }
+        match h.key(VK_SPACE, 0) {
+            KeyAction::InsertText { text, .. } => text,
+            other => panic!("空格应上屏英文候选 git，实际 {other:?}"),
+        }
+    };
+    assert_eq!(run(true), " git ", "开着：上屏即补尾随空格");
+    assert_eq!(run(false), " git", "关着：只有切换处的前缀");
+}
