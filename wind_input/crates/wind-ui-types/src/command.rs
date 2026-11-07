@@ -360,6 +360,8 @@ pub enum UiCommand {
     /// 外部宿主（Linux addon）的 push 连接（重）建立：它收到 SERVICE_READY 会丢掉手里的工具栏 /
     /// 软键盘，渲染端把此刻可见的原样补推一帧。Windows 从不下发。
     HostReconnected,
+    /// 设置端主题预览：按当前外观画一帧示例候选窗，经请求里的回执送回（见 [`crate::preview`]）。
+    RenderCandidatePreview(Box<crate::CandidatePreviewRequest>),
     /// 关闭 UI
     Shutdown,
     /// 注入 host-render 管理器（Windows）；协调器 `set_host_render` 后下发，

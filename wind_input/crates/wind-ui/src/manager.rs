@@ -1061,6 +1061,10 @@ impl UiManager {
                     UiCommand::SetCandidateShadow(on) => {
                         candidate_window.set_theme_shadow(on);
                     }
+                    UiCommand::RenderCandidatePreview(req) => {
+                        // 回执通道容量 1、只回一次，try_send 不会阻塞；对端已超时走掉则丢弃。
+                        let _ = req.reply.try_send(candidate_window.render_preview(&req));
+                    }
                     UiCommand::SetPagerInPreedit(on) => {
                         candidate_window.set_pager_in_preedit(on);
                     }

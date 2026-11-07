@@ -2616,9 +2616,11 @@ name = "wind-webdata"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "fontdb",
  "serde_json",
+ "siphasher",
  "toml 0.8.23",
  "tracing",
  "wind-aux-code",
@@ -2635,6 +2637,7 @@ dependencies = [
  "wind-store",
  "wind-theme",
  "wind-transfer",
+ "wind-ui-types",
  "zip",
 ]
 

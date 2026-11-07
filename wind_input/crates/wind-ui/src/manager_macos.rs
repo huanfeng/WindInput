@@ -601,6 +601,9 @@ impl Forwarder {
             UiCommand::SetCandidateSwapWhenAbove(v) => self.win.set_swap_preedit_when_above(v),
             UiCommand::SetCandidateOffset { x, y } => self.win.set_user_offset(x, y),
             UiCommand::SetCandidateShadow(on) => self.win.set_theme_shadow(on),
+            UiCommand::RenderCandidatePreview(req) => {
+                let _ = req.reply.try_send(self.win.render_preview(&req));
+            }
             // 本平台不播放皮肤动画（系统动画开关的探测恒为关，装饰停在初始状态首帧、事件不切换）；
             // 开关与事件照样转给候选窗，播放落地时不必再接线。
             UiCommand::SetThemeAnimation(on) => self.win.set_theme_animation(on),

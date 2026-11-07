@@ -6,6 +6,7 @@ pub(crate) mod auto_spacing;
 pub(crate) mod aux_code_source;
 pub(crate) mod candidate_grid;
 pub(crate) mod candidate_nav;
+pub mod candidate_preview;
 pub mod candidate_pull;
 #[cfg(test)]
 pub(crate) mod charset_test_support;

@@ -7660,22 +7660,14 @@ impl Coordinator {
         cand_cfg: &wind_config::config::UiCandidateConfig,
         i: usize,
     ) -> String {
-        if let Some(s) = cand_cfg.user_index_label(i) {
-            return s;
-        }
-        if let Some(s) = self
-            .theme_index_labels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(i)
-            .filter(|s| !s.is_empty())
-        {
-            return s.clone();
-        }
-        if i == 9 {
-            return "0".to_string();
-        }
-        (i + 1).to_string()
+        pick_index_label(
+            cand_cfg,
+            &self
+                .theme_index_labels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            i,
+        )
     }
 
     /// 展开态带序号的格子（平铺下标区间 `(起点, 个数)`）：从高亮行行首起，按
@@ -20603,4 +20595,23 @@ mod syllable_separator_app_tests {
             "未配规则的应用跟随全局默认 '"
         );
     }
+}
+
+/// [`Coordinator::resolve_index_label`] 的裁决本体（主题槽位由调用方给）：设置端预览按
+/// 被预览主题的槽位取，与实时候选窗同一条规则。
+pub(crate) fn pick_index_label(
+    cand_cfg: &wind_config::config::UiCandidateConfig,
+    theme_labels: &[String],
+    i: usize,
+) -> String {
+    if let Some(s) = cand_cfg.user_index_label(i) {
+        return s;
+    }
+    if let Some(s) = theme_labels.get(i).filter(|s| !s.is_empty()) {
+        return s.clone();
+    }
+    if i == 9 {
+        return "0".to_string();
+    }
+    (i + 1).to_string()
 }

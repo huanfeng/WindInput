@@ -307,6 +307,8 @@ pub struct CandidateWindow {
     scene: CandidateScene,
     /// 低频选项（上翻、翻页栏、尺寸下限），按引用交给场景。
     scene_opts: CandidateSceneOptions,
+    /// 设置端预览专用的场景（[`Self::render_preview`]），与实时窗口的 [`Self::scene`] 分开。
+    preview_scene: CandidateScene,
     /// 本帧是否把穿透装饰拆到独立窗口：只有本地窗口路径（Windows `show`）置位。
     #[cfg_attr(not(windows), allow(dead_code))]
     split_pass_decor: bool,
@@ -484,6 +486,7 @@ impl CandidateWindow {
             screen_extent: None,
             scene: CandidateScene::default(),
             scene_opts: CandidateSceneOptions::default(),
+            preview_scene: CandidateScene::default(),
             split_pass_decor: false,
             pass_layer: None,
             #[cfg(windows)]
@@ -7669,6 +7672,7 @@ mod render_golden;
 
 /// 场景已迁入 wind-scene；保留 `scene::` 这个路径名给本模块与子模块用。
 use wind_scene::candidate as scene;
+mod preview;
 mod skin_frame;
 
 /// 用户外观覆盖：阴影开关与位置偏移（ui.candidate.shadow / offset_x / offset_y）。

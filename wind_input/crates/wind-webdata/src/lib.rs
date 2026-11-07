@@ -13,6 +13,7 @@
 //! [`WebDataHost`] 窄面（定义在 wind-coordinator::web_host）触宿主，
 //! 把 wind-transfer/fontdb 等重依赖挡在 Android 闭包之外。
 
+mod theme_render;
 mod user_dicts;
 
 use serde_json::{Value, json};
@@ -609,6 +610,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
             Ok(serde_json::to_value(h.theme_accent(name))?)
         }
         "theme.preview" => h.web_theme_preview(params),
+        "theme.renderPreview" => theme_render::render_one(h, params),
+        "theme.renderPreviews" => theme_render::render_many(h, params),
         "theme.getText" => h.web_theme_get_text(params),
         "theme.delete" => h.web_theme_delete(params),
         "theme.importFromText" => h.web_theme_import_text(params),
@@ -3812,6 +3815,7 @@ pub trait WebDataRpc: WebDataHost {
             anyhow::bail!("内置主题不可删除或主题不存在: {}", name);
         }
         std::fs::remove_dir_all(&target)?;
+        theme_render::forget_theme(name);
         Ok(json!({ "ok": true }))
     }
 
