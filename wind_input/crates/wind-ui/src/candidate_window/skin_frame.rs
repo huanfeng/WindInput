@@ -787,7 +787,7 @@ mod tests {
             ..Default::default()
         };
         let theme = wind_theme::Resolved {
-            skin: wind_theme::skin::resolve_skin(&skin),
+            skin: wind_theme::skin::resolve_skin(&skin).map(Box::new),
             ..Default::default()
         };
         let (tx, _rx) = std::sync::mpsc::channel();
