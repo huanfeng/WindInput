@@ -10,6 +10,8 @@
 ## Key Files
 | File | Description |
 |------|-------------|
+| `src/candidate/mod.rs` | 候选窗场景：`CandidateSceneInput`（每帧纯数据）→ `CandidateScene::layout` / `relayout_above` / `hits` / `paint` |
+| `src/candidate/skin_geom.rs` | 候选窗的皮肤几何：求值、外扩布局、分槽位、绘制、避让与对齐点；动画时钟 `AnimClock` 由调用方注入 |
 | `src/text/mod.rs` | `TextMetrics` / `TextStyle` / `ColorRun` / `utf16_runs` / `measure_key` + `TextBackend` trait；测试用 `MockText` |
 | `src/text/script.rs` | 按脚本切字体段（`FontPlan` / `font_runs` / `upright_cells`） |
 | `src/span_runs.rs` | 带样式文字 → 绘制用颜色区间 |

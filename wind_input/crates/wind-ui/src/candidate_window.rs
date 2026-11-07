@@ -4,7 +4,6 @@
 //! 用 `crate::view` 的盒模型构建候选树（预编辑行 + 候选行[序号|文本] + 翻页指示），
 //! measure/arrange 算出尺寸与每候选的绝对矩形（供鼠标命中），再 paint 到 BGRA 缓冲区。
 
-use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -18,12 +17,15 @@ use crate::sys::{
     SetCursor, SetWindowPos, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_RBUTTONDOWN, WM_SETCURSOR, WPARAM, clamp_content_to_monitor,
 };
-use crate::text::dwrite::{ColorRun, TextRenderer, TextStyle};
+use crate::text::dwrite::TextRenderer;
 use crate::text::font_resolve::{FontNameSource, ResolvedFont, resolve_font_name};
 use crate::text::script::{FontPlan, ScriptClass};
-use crate::view::{Align, Edges, Layout, LeftBar, Rect, View, ViewImage, ViewLayer};
-use wind_theme::DEFAULT_ACCENT_BAR_HEIGHT_RATIO;
-use wind_ui_types::{SpanStyle, StyledText};
+use crate::view::Rect;
+// 下面几组只给本文件的各测试模块（`use super::*`）用：搭树代码迁到 wind-scene 后窗口本身不再用到。
+#[cfg(test)]
+use crate::text::dwrite::{ColorRun, TextStyle};
+#[cfg(test)]
+use crate::view::{Edges, Layout, View};
 
 /// 内置默认字族：`ui.font.family` 为空时用它。
 ///
@@ -90,39 +92,6 @@ fn effective_base_font_size(user: f32, theme: i32) -> f32 {
     if user > 0.0 { user } else { theme as f32 }
 }
 
-/// 注释节点没配文字色时的渲染层兜底（分段着色求色的 `body_fallback` 与之同源）。
-const COMMENT_FALLBACK: [u8; 4] = wind_theme::fallback::COMMENT_TEXT;
-
-/// 候选正文节点没配文字色时的渲染层兜底（模糊音提示求色的 `text_fallback` 与之同源）。
-const TEXT_FALLBACK: [u8; 4] = [30, 30, 30, 255];
-
-/// 候选的文字状态：选中优先于悬停（与 `eff_text` / `wind_theme::span_color` 同一口径）。
-fn text_state(sel: bool, hov: bool) -> wind_theme::TextState {
-    if sel {
-        wind_theme::TextState::Selected
-    } else if hov {
-        wind_theme::TextState::Hover
-    } else {
-        wind_theme::TextState::Normal
-    }
-}
-
-/// 右侧注释实际显示的内容。`merge_above`（旋转 / 直立态）不支持上方注释条（设计
-/// candidate-comment-above-line.md §3.3），上段以 `\n` 接回下段之前，内容不丢；否则原样借用
-/// `comment`——上方条关闭或该候选无上段时一律走借用，与改动前逐字节一致。
-fn right_comment(c: &CandidateItem, merge_above: bool) -> Cow<'_, StyledText> {
-    if !merge_above || c.comment_above.is_empty() {
-        Cow::Borrowed(&c.comment)
-    } else if c.comment.is_empty() {
-        Cow::Borrowed(&c.comment_above)
-    } else {
-        Cow::Owned(StyledText::join(
-            &[c.comment_above.clone(), c.comment.clone()],
-            "\n",
-        ))
-    }
-}
-
 /// 把 `[ui.font]` 的三个键折成渲染层的 [`FontPlan`]。
 ///
 /// 纯函数：它承载了本功能全部的「配置怎么变成方案」的判定（链首归一、未知类名处置），
@@ -169,89 +138,6 @@ pub(crate) fn build_font_plan(
 /// Windows 出厂的 emoji 字族。只在 [`build_font_plan`] 未见用户声明 emoji 类时注入。
 pub const DEFAULT_EMOJI_FAMILY: &str = "Segoe UI Emoji";
 
-/// 换行可见符 U+21B5（`↵`）。取编辑器通用约定（VS Code 等显示换行即此符），
-/// 而非 Control Pictures 区的 `␊`/`␤`——后者字形是小方框里塞 `LF` 字母，
-/// 候选窗字号下几乎认不出，且部分中文字体不覆盖该区段。
-const NEWLINE_GLYPH: char = '\u{21B5}';
-
-/// 制表可见符 U+21E5（`⇥`）。与换行分用不同符号：两者在文本里的语义不同，
-/// 混用一个符号等于告诉用户「这儿有个空白」却不说是哪种。
-const TAB_GLYPH: char = '\u{21E5}';
-
-/// 把候选文本里的换行/制表符替换为可见符号，**仅供显示**。
-///
-/// `Candidate::text` 本身不动——上屏走的仍是含真换行的原文。两者必须分开：
-/// 显示要的是「看得见有个换行」，上屏要的是「真的换行」。
-///
-/// 不这么做的后果不是「看不见」而是「排版坏掉」：DirectWrite 的 `CreateTextLayout`
-/// 把 `\n` 当硬换行，`TextRenderer::measure` 于是返回 N 倍行高，而 `view.rs` 的盒模型
-/// 按内容高布局 → 该候选被撑成多行、整个候选窗变高且行高参差。
-///
-/// CRLF 只出一个符号（不是两个）——它在用户眼里就是一个换行。
-fn visible_whitespace(s: &str) -> Cow<'_, str> {
-    if !s.contains(['\n', '\r', '\t']) {
-        return Cow::Borrowed(s); // 快路径：绝大多数候选无空白控制符，零分配
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        match c {
-            '\r' => {
-                if it.peek() == Some(&'\n') {
-                    it.next();
-                }
-                out.push(NEWLINE_GLYPH);
-            }
-            '\n' => out.push(NEWLINE_GLYPH),
-            '\t' => out.push(TAB_GLYPH),
-            _ => out.push(c),
-        }
-    }
-    Cow::Owned(out)
-}
-
-/// 带样式文字按区间边界切开的各段：`(起, 止, 该段样式)`，覆盖整串、无空段。
-fn styled_segments(src: &StyledText) -> impl Iterator<Item = (usize, usize, SpanStyle)> + '_ {
-    let mut cuts: Vec<usize> = src
-        .spans()
-        .iter()
-        .flat_map(|sp| [sp.start as usize, sp.end as usize])
-        .chain([0, src.len()])
-        .collect();
-    cuts.sort_unstable();
-    cuts.dedup();
-    (1..cuts.len()).map(move |i| (cuts[i - 1], cuts[i], src.style_at(cuts[i - 1])))
-}
-
-/// 候选正文的显示副本（测宽 / 截断 / 绘制共用）：`text_styled` 非空用它（模糊音提示
-/// 「苹(ping)果」），否则 `text`；空白控制符换成可见符号（[`visible_whitespace`]）。
-/// 替换会改字节长度，带区间时逐段各自替换，区间才对得上。
-fn cand_display(c: &CandidateItem) -> StyledText {
-    if c.text_styled.is_empty() {
-        return StyledText::from(visible_whitespace(&c.text).into_owned());
-    }
-    let src = &c.text_styled;
-    if !src.as_str().contains(['\n', '\r', '\t']) {
-        return src.clone();
-    }
-    let mut out = StyledText::new();
-    for (a, b, style) in styled_segments(src) {
-        out.push(&visible_whitespace(&src.as_str()[a..b]), &style);
-    }
-    out
-}
-
-/// 去掉全部模糊音提示段（`(ping)`），其余段样式不变。
-fn without_pinyin_hint(src: &StyledText) -> StyledText {
-    let mut out = StyledText::new();
-    for (a, b, style) in styled_segments(src) {
-        if style.role != Some(wind_theme::PINYIN_HINT_ROLE) {
-            out.push(&src.as_str()[a..b], &style);
-        }
-    }
-    out
-}
-
 /// 本帧上屏要做什么：返回 `(推像素, 摆位)`。`prev` 为窗口当前在屏上的几何，None = 不在屏上。
 ///
 /// 光标在组合内右移会触发协调器 reshow，同一键常连发 2–3 帧内容与位置都不变的刷新；远程桌面下
@@ -269,20 +155,6 @@ fn plan_present(
     }
 }
 
-/// 主题翻页字符 → 实际绘制的文本：未配（空串）时用内置箭头。
-///
-/// 仅空串算「未配」，空白字符不算——主题作者用 `prev_char = " "` 表达的是「这里留白」，
-/// 不能被当成未配置而悄悄换回 ‹ ›。（编辑器那条路进不来这种值：它 trim 后空串即存 undefined，
-/// 手写 toml 才配得出来。）
-///
-/// 只管「字符档画什么」，不管要不要走字符档——箭头图优先，见调用点。
-fn arrow_char<'a>(configured: &'a str, builtin: &'a str) -> &'a str {
-    if configured.is_empty() {
-        builtin
-    } else {
-        configured
-    }
-}
 use crate::window::{LayeredWindow, WindowMouse};
 use scene::{CandidateScene, CandidateSceneInput, CandidateSceneOptions};
 use std::time::{Duration, Instant};
@@ -2212,7 +2084,7 @@ impl CandidateWindow {
         above: bool,
         caret_y: i32,
         caret_h: i32,
-        mask: Option<&skin_frame::AvoidMask>,
+        mask: Option<&scene::AvoidMask>,
     ) -> i32 {
         let Some(m) = mask else {
             return y;
@@ -2241,7 +2113,7 @@ impl CandidateWindow {
         h: u32,
         sticky_above: bool,
         offset: (i32, i32),
-        anchor: &skin_frame::PlaceAnchor,
+        anchor: &scene::PlaceAnchor,
     ) -> (i32, i32, bool) {
         let (wi, hi) = (w as i32, h as i32);
         // 净锚点（不含 Y 偏移）：方位决策必须基于它，见 apply_offset_y 的说明。
@@ -5852,8 +5724,7 @@ mod font_plan_build_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{CandidateScene, CandidateWindow, arrow_char, plan_present, visible_whitespace};
-    use std::borrow::Cow;
+    use super::{CandidateScene, CandidateWindow, plan_present};
 
     #[test]
     fn present_full_when_not_on_screen() {
@@ -5887,23 +5758,6 @@ mod tests {
             plan_present(Some((10, 20, 300, 100)), (10, 20, 100, 300), true),
             (true, true)
         );
-    }
-
-    /// 主题配的翻页字符必须原样落到渲染，只有「一个字符都没配」才回退内置箭头。
-    ///
-    /// 这条以前是断的：渲染侧把 ‹ › 写死，`footer_bar.prev_char` 解析到 RvNode 后无人消费，
-    /// 主题里写什么都被画回内置箭头（而主题编辑器的预览一直照配置画，两边从来没对齐过）。
-    /// 空白不算未配——`prev_char = " "` 是「这里留白」的显式意图，被当成未配置就又变回 ‹ ›，
-    /// 正是同一个 bug 的另一副面孔。
-    #[test]
-    fn arrow_char_falls_back_only_when_unset() {
-        assert_eq!(arrow_char("", "‹"), "‹", "未配 → 内置箭头");
-        assert_eq!(arrow_char("$", "‹"), "$", "配了 ASCII 符号 → 原样");
-        assert_eq!(arrow_char(")", "›"), ")", "配了 ASCII 符号 → 原样");
-        assert_eq!(arrow_char("◀", "‹"), "◀", "配了多字节字符 → 原样");
-        // 多字原样传递；按钮宽度按文本撑开，见 pager_inline_tests 的 multi_char_arrow_*
-        assert_eq!(arrow_char("上页", "‹"), "上页", "配了多字 → 原样");
-        assert_eq!(arrow_char(" ", "‹"), " ", "留白是显式意图，不回退");
     }
 
     /// 主题位置偏移的方向语义：正值恒为「远离光标」——下方向下、上方向上。
@@ -6001,28 +5855,6 @@ mod tests {
                 assert_eq!(format!("{head}{tail}"), text);
             }
         }
-    }
-
-    /// 候选文本的空白控制符须显示为可见符号，且**不得改动其他字符**。
-    ///
-    /// 这只是显示投影——`Candidate::text` 原文不动，上屏走的仍是真换行（见
-    /// [`visible_whitespace`] 的文档）。故本测试只锁「显示成什么样」，
-    /// 不能被误读成「上屏文本也变了」。
-    #[test]
-    fn whitespace_becomes_visible_glyphs() {
-        // 无控制符：原样借用，零分配
-        assert!(matches!(visible_whitespace("你好"), Cow::Borrowed("你好")));
-
-        assert_eq!(visible_whitespace("甲\n乙"), "甲↵乙");
-        assert_eq!(visible_whitespace("丙\t丁"), "丙⇥丁");
-        // CRLF 是**一个**换行，只出一个符号
-        assert_eq!(visible_whitespace("戊\r\n己"), "戊↵己");
-        // 孤立 CR 同样算换行
-        assert_eq!(visible_whitespace("庚\r辛"), "庚↵辛");
-        // 混合 + 连续
-        assert_eq!(visible_whitespace("a\n\tb"), "a↵⇥b");
-        // 普通空格不动——它本来就看得见，替换只会平添噪声
-        assert_eq!(visible_whitespace("甲 乙"), "甲 乙");
     }
 
     /// 固定位置的两个坐标系必须严格互逆。
@@ -7894,7 +7726,8 @@ mod comment_above_tests {
 #[cfg(all(test, mock_text))]
 mod render_golden;
 
-mod scene;
+/// 场景已迁入 wind-scene；保留 `scene::` 这个路径名给本模块与子模块用。
+use wind_scene::candidate as scene;
 mod skin_frame;
 
 /// 用户外观覆盖：阴影开关与位置偏移（ui.candidate.shadow / offset_x / offset_y）。

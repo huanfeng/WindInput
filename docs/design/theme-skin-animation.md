@@ -349,7 +349,7 @@ wind-theme (求值)  →  wind-scene (新, 平台无关)  →  RGBA 缓冲
 | schema、求值、base 整表替换 | `wind-theme/src/skin.rs`（`[skin]` 进 `RESERVED_TOP`，不被 normalize 收进 views） |
 | 轴映射、面积平均、双线性合成（纯函数） | `wind-ui/src/skin.rs` |
 | 图集与皮肤位图缓存（建图集后丢源图，计入原有预算与闲置回收） | `wind-ui/src/image_cache.rs`（`skin_fill` / `skin_metrics`） |
-| 候选窗接入：几何、外扩布局、绘制、对齐点、装饰不拖动 | `wind-ui/src/candidate_window/skin_frame.rs` |
+| 候选窗接入：几何、外扩布局、绘制、对齐点 | `wind-scene/src/candidate/skin_geom.rs`（事件接线、装饰不拖动在 `wind-ui/src/candidate_window/skin_frame.rs` 与鼠标层） |
 | 本机出图 | `cargo run -p wind-ui --features linux-host --example skin_preview -- <主题目录> <主题名> <out.png> [缩放] [vertical]` |
 
 验收：本地用第三方位图皮肤（不入库）按 §1 的格式换算参数，横竖排 1x / 1.5x / 2x 目视还原；夹具测试钉住
@@ -388,7 +388,7 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
 - schema：`wind-theme/src/skin.rs` 的 `SkinSlots` / `RvSlots`。写了 preedit 或 footer 却没写 candidates 时，
   记一条警告，按 stack 布局处理。
 - 组装：`build_tree` 把编码栏、候选块、翻页栏经 `free_parts` 交出，根容器只是按窗体尺寸撑开的空盒。
-- 求解与摆放：`skin_frame.rs` 的 `solve_axis`（`AxisFit` 带所锚框的上下界）、`skin_place_parts`。
+- 求解与摆放：`wind-scene/src/candidate/skin_geom.rs` 的 `solve_axis`（`AxisFit` 带所锚框的上下界）、`skin_place_parts`。
   绘制和命中由 `paint_parts`、`collect_part_hits` 完成，候选点击沿用原有标签。
 - 三条渲染路径（非 Windows `show`、ext_presenter、Windows 本地窗口）都接入了；free 时跳过上翻重建。
 

@@ -1,117 +1,261 @@
-//! 候选窗场景：每帧把纯数据（[`CandidateSceneInput`]）构建成 View 树。
+//! 候选窗场景：每帧把纯数据（[`CandidateSceneInput`]）构建成 View 树、排版、出命中矩形、绘制。
 //!
-//! 窗口侧（[`super::CandidateWindow`]）只负责收集输入、平台查询（DPI、显示器工作区）与上屏；
-//! 树怎么搭只看输入，不读窗口字段。跨帧状态（皮肤几何、分槽位交出的各块、装饰状态机）由
-//! [`CandidateScene`] 持有；时间由窗口经 [`skin_frame::AnimClock`] 注入。
+//! 窗口侧（wind-ui 的 `CandidateWindow`）只负责收集输入、平台查询（DPI、显示器工作区）、定位与
+//! 上屏；树怎么搭只看输入，不读窗口字段。跨帧状态（皮肤几何、分槽位交出的各块、装饰状态机）由
+//! [`CandidateScene`] 持有；时间经 [`AnimClock`] 注入，文字经 [`TextBackend`] 注入。
 //! 方案见 `docs/design/wind-scene-extraction.md` §2。
 
-use super::*;
+mod skin_geom;
+
+pub use skin_geom::{AnimClock, AvoidMask, DecorGeom, PlaceAnchor, SkinGeom, SlotKind};
+
+use std::borrow::Cow;
+use std::cell::RefCell;
+
+use crate::text::{ColorRun, TextBackend, TextStyle};
+use crate::view::{Align, Edges, Layout, LeftBar, Rect, View, ViewImage, ViewLayer};
+use wind_theme::DEFAULT_ACCENT_BAR_HEIGHT_RATIO;
+use wind_ui_types::{
+    CandidateItem, HOVER_PAGE_NEXT as TAG_PAGE_NEXT, HOVER_PAGE_PREV as TAG_PAGE_PREV, SpanStyle,
+    StyledText,
+};
+
+/// 注释节点没配文字色时的渲染层兜底（分段着色求色的 `body_fallback` 与之同源）。
+const COMMENT_FALLBACK: [u8; 4] = wind_theme::fallback::COMMENT_TEXT;
+
+/// 候选正文节点没配文字色时的渲染层兜底（模糊音提示求色的 `text_fallback` 与之同源）。
+const TEXT_FALLBACK: [u8; 4] = [30, 30, 30, 255];
+
+/// 候选的文字状态：选中优先于悬停（与 `eff_text` / `wind_theme::span_color` 同一口径）。
+fn text_state(sel: bool, hov: bool) -> wind_theme::TextState {
+    if sel {
+        wind_theme::TextState::Selected
+    } else if hov {
+        wind_theme::TextState::Hover
+    } else {
+        wind_theme::TextState::Normal
+    }
+}
+
+/// 右侧注释实际显示的内容。`merge_above`（旋转 / 直立态）不支持上方注释条（设计
+/// candidate-comment-above-line.md §3.3），上段以 `\n` 接回下段之前，内容不丢；否则原样借用
+/// `comment`——上方条关闭或该候选无上段时一律走借用，与改动前逐字节一致。
+fn right_comment(c: &CandidateItem, merge_above: bool) -> Cow<'_, StyledText> {
+    if !merge_above || c.comment_above.is_empty() {
+        Cow::Borrowed(&c.comment)
+    } else if c.comment.is_empty() {
+        Cow::Borrowed(&c.comment_above)
+    } else {
+        Cow::Owned(StyledText::join(
+            &[c.comment_above.clone(), c.comment.clone()],
+            "\n",
+        ))
+    }
+}
+
+/// 换行可见符 U+21B5（`↵`）。取编辑器通用约定（VS Code 等显示换行即此符），
+/// 而非 Control Pictures 区的 `␊`/`␤`——后者字形是小方框里塞 `LF` 字母，
+/// 候选窗字号下几乎认不出，且部分中文字体不覆盖该区段。
+const NEWLINE_GLYPH: char = '\u{21B5}';
+
+/// 制表可见符 U+21E5（`⇥`）。与换行分用不同符号：两者在文本里的语义不同，
+/// 混用一个符号等于告诉用户「这儿有个空白」却不说是哪种。
+const TAB_GLYPH: char = '\u{21E5}';
+
+/// 把候选文本里的换行/制表符替换为可见符号，**仅供显示**。
+///
+/// `Candidate::text` 本身不动——上屏走的仍是含真换行的原文。两者必须分开：
+/// 显示要的是「看得见有个换行」，上屏要的是「真的换行」。
+///
+/// 不这么做的后果不是「看不见」而是「排版坏掉」：DirectWrite 的 `CreateTextLayout`
+/// 把 `\n` 当硬换行，`TextRenderer::measure` 于是返回 N 倍行高，而 `view.rs` 的盒模型
+/// 按内容高布局 → 该候选被撑成多行、整个候选窗变高且行高参差。
+///
+/// CRLF 只出一个符号（不是两个）——它在用户眼里就是一个换行。
+fn visible_whitespace(s: &str) -> Cow<'_, str> {
+    if !s.contains(['\n', '\r', '\t']) {
+        return Cow::Borrowed(s); // 快路径：绝大多数候选无空白控制符，零分配
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\r' => {
+                if it.peek() == Some(&'\n') {
+                    it.next();
+                }
+                out.push(NEWLINE_GLYPH);
+            }
+            '\n' => out.push(NEWLINE_GLYPH),
+            '\t' => out.push(TAB_GLYPH),
+            _ => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// 带样式文字按区间边界切开的各段：`(起, 止, 该段样式)`，覆盖整串、无空段。
+fn styled_segments(src: &StyledText) -> impl Iterator<Item = (usize, usize, SpanStyle)> + '_ {
+    let mut cuts: Vec<usize> = src
+        .spans()
+        .iter()
+        .flat_map(|sp| [sp.start as usize, sp.end as usize])
+        .chain([0, src.len()])
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    (1..cuts.len()).map(move |i| (cuts[i - 1], cuts[i], src.style_at(cuts[i - 1])))
+}
+
+/// 候选正文的显示副本（测宽 / 截断 / 绘制共用）：`text_styled` 非空用它（模糊音提示
+/// 「苹(ping)果」），否则 `text`；空白控制符换成可见符号（[`visible_whitespace`]）。
+/// 替换会改字节长度，带区间时逐段各自替换，区间才对得上。
+fn cand_display(c: &CandidateItem) -> StyledText {
+    if c.text_styled.is_empty() {
+        return StyledText::from(visible_whitespace(&c.text).into_owned());
+    }
+    let src = &c.text_styled;
+    if !src.as_str().contains(['\n', '\r', '\t']) {
+        return src.clone();
+    }
+    let mut out = StyledText::new();
+    for (a, b, style) in styled_segments(src) {
+        out.push(&visible_whitespace(&src.as_str()[a..b]), &style);
+    }
+    out
+}
+
+/// 去掉全部模糊音提示段（`(ping)`），其余段样式不变。
+fn without_pinyin_hint(src: &StyledText) -> StyledText {
+    let mut out = StyledText::new();
+    for (a, b, style) in styled_segments(src) {
+        if style.role != Some(wind_theme::PINYIN_HINT_ROLE) {
+            out.push(&src.as_str()[a..b], &style);
+        }
+    }
+    out
+}
+
+/// 主题翻页字符 → 实际绘制的文本：未配（空串）时用内置箭头。
+///
+/// 仅空串算「未配」，空白字符不算——主题作者用 `prev_char = " "` 表达的是「这里留白」，
+/// 不能被当成未配置而悄悄换回 ‹ ›。（编辑器那条路进不来这种值：它 trim 后空串即存 undefined，
+/// 手写 toml 才配得出来。）
+///
+/// 只管「字符档画什么」，不管要不要走字符档——箭头图优先，见调用点。
+fn arrow_char<'a>(configured: &'a str, builtin: &'a str) -> &'a str {
+    if configured.is_empty() {
+        builtin
+    } else {
+        configured
+    }
+}
 
 /// 低频配置：随配置重载才变，与每帧内容分开存。
 #[derive(Default)]
-pub(super) struct CandidateSceneOptions {
+pub struct CandidateSceneOptions {
     /// 候选窗在光标上方时反转候选顺序（仅竖排生效，见 [`CandidateScene::above_layout`]）。
     /// 来自 ui.candidate.flip_when_above。
-    pub(super) flip_when_above: bool,
+    pub flip_when_above: bool,
     /// 候选窗在光标上方时交换编码栏与候选栏位置（编码区整体沉底贴光标）。
     /// 与 flip_when_above 正交：可单独或叠加使用。来自 ui.candidate.swap_preedit_when_above。
-    pub(super) swap_preedit_when_above: bool,
+    pub swap_preedit_when_above: bool,
     /// 翻页栏并入编码栏行、右对齐显示（竖排省一行）。仅"非嵌入编码"（有独立编码栏）时生效。
     /// 来自 ui.candidate.pager_in_preedit。
-    pub(super) pager_in_preedit: bool,
+    pub pager_in_preedit: bool,
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。
     ///
     /// **横竖各一份**（`.0`＝横排、`.1`＝竖排）：协调器按 `ByLayout` 下发两档，这边按
     /// `vertical` 取。⚠️ 旋转态的 `vertical` 是 false ⇒ 落横排那份，与候选注释
     /// 模板的分档口径一致（见 `wind-config` 的 `comment_max_chars`）。
-    pub(super) pager_display: (String, String),
+    pub pager_display: (String, String),
     /// 页码文字显示覆盖（""跟随主题/"show"/"hide"）。来自 ui.candidate.page_number_display。
     /// 横竖各一份，口径同 [`Self::pager_display`]。
-    pub(super) page_number_display: (String, String),
+    pub page_number_display: (String, String),
     /// 横排时窗口最小宽度，单位 dp（0=不限）。来自 ui.candidate.min_window_width_horizontal。
-    pub(super) min_window_width_horizontal: u32,
+    pub min_window_width_horizontal: u32,
     /// 竖排时窗口最小宽度，单位 dp（0=不限）。来自 ui.candidate.min_window_width_vertical。
-    pub(super) min_window_width_vertical: u32,
+    pub min_window_width_vertical: u32,
     /// 横排时窗口最小高度，单位 dp（0=不限）。来自 ui.candidate.min_window_height_horizontal。
-    pub(super) min_window_height_horizontal: u32,
+    pub min_window_height_horizontal: u32,
     /// 竖排时窗口最小高度，单位 dp（0=不限）。来自 ui.candidate.min_window_height_vertical。
-    pub(super) min_window_height_vertical: u32,
+    pub min_window_height_vertical: u32,
     /// 竖排最小行数，不足补透明占位行（0=不补）。来自 ui.candidate.min_rows。
-    pub(super) min_rows: u32,
+    pub min_rows: u32,
 }
 
-/// 构建一帧候选树所需的全部输入。字段含义同窗口上的同名字段（见 [`super::CandidateWindow`]）。
-pub(super) struct CandidateSceneInput<'a> {
+/// 构建一帧候选树所需的全部输入。字段含义同窗口上的同名字段（见 wind-ui 的 `CandidateWindow`）。
+pub struct CandidateSceneInput<'a> {
     // ── 每帧内容 ──
-    pub(super) candidates: &'a [CandidateItem],
-    pub(super) preedit: &'a str,
+    pub candidates: &'a [CandidateItem],
+    pub preedit: &'a str,
     /// `preedit` 内字节偏移（恒在字符边界）。
-    pub(super) preedit_caret: usize,
-    pub(super) mode_label: &'a str,
-    pub(super) selected: usize,
+    pub preedit_caret: usize,
+    pub mode_label: &'a str,
+    pub selected: usize,
     /// 悬停项（页内下标），-1 = 无。
-    pub(super) hover: i32,
-    pub(super) page: usize,
-    pub(super) total_pages: usize,
-    pub(super) grid: Option<wind_ui_types::CandidateGrid>,
+    pub hover: i32,
+    pub page: usize,
+    pub total_pages: usize,
+    pub grid: Option<wind_ui_types::CandidateGrid>,
     // ── 排布 ──
-    pub(super) vertical: bool,
-    pub(super) rotated: bool,
-    pub(super) upright: bool,
-    pub(super) preedit_embedded: bool,
+    pub vertical: bool,
+    pub rotated: bool,
+    pub upright: bool,
+    pub preedit_embedded: bool,
     /// 窗口落在光标上方（按上方专属布局搭，见 [`CandidateScene::above_layout`]）。
-    pub(super) above: bool,
+    pub above: bool,
     // ── 生效主题与尺度 ──
-    pub(super) theme: &'a wind_theme::Resolved,
+    pub theme: &'a wind_theme::Resolved,
     /// 生效的候选基准字号（逻辑像素）。
-    pub(super) base_font_logical: f32,
+    pub base_font_logical: f32,
     /// DPI 缩放（主题几何为逻辑像素，渲染时乘此）。
-    pub(super) scale: f32,
+    pub scale: f32,
     /// 候选窗所在显示器的工作区 `(宽, 高)`（设备像素）；None = 查不到，按兜底常量。
-    pub(super) screen_extent_px: Option<(u32, u32)>,
-    pub(super) text_renderer: &'a TextRenderer,
-    pub(super) opts: &'a CandidateSceneOptions,
+    pub screen_extent_px: Option<(u32, u32)>,
+    pub text_renderer: &'a dyn TextBackend,
+    pub opts: &'a CandidateSceneOptions,
 }
 
 /// 候选窗场景：持有跨帧状态，按 [`CandidateSceneInput`] 构建 View 树。
 #[derive(Default)]
-pub(super) struct CandidateScene {
+pub struct CandidateScene {
     /// 异形皮肤在当前 DPI / 字号下的几何；None = 本帧不启用皮肤。每帧渲染前重算。
-    pub(super) skin_geom: Option<skin_frame::SkinGeom>,
+    pub skin_geom: Option<skin_geom::SkinGeom>,
     /// 分槽位布局下 `build_tree`（`&self`）交出的各块，由 `skin_layout` 取走排版。
-    pub(super) free_parts: RefCell<Vec<(skin_frame::SlotKind, View)>>,
+    pub free_parts: RefCell<Vec<(skin_geom::SlotKind, View)>>,
     /// 皮肤装饰的事件状态机，按当前变体的装饰下标一块一台（见 [`crate::skin_anim`]）。
-    pub(super) decor_anims: Vec<crate::skin_anim::Machine>,
+    pub decor_anims: Vec<crate::skin_anim::Machine>,
     /// [`Self::decor_anims`] 对应的变体（竖排, 嵌入）；None = 待重建。
-    pub(super) decor_anims_key: Option<(bool, bool)>,
+    pub decor_anims_key: Option<(bool, bool)>,
     /// 已报过的皮肤片段告警（每帧都重求几何，同一条只报一次；换主题清）。
-    pub(super) skin_warned: RefCell<std::collections::HashSet<String>>,
+    pub skin_warned: RefCell<std::collections::HashSet<String>>,
     /// 下一次换帧时刻（距动画时间轴起点）；None = 本帧没有在播的动画。隐藏时清空。
-    pub(super) anim_next: Option<std::time::Duration>,
+    pub anim_next: Option<std::time::Duration>,
 }
 
 /// 一帧排版结果：[`CandidateScene::layout`] 产出，`relayout_above` / `hits` / `paint` 消费。
-pub(super) struct SceneFrame {
-    pub(super) root: View,
+pub struct SceneFrame {
+    pub root: View,
     /// 软件阴影；None = 不画（皮肤自带外形、主题或用户关了阴影、调用方不画软件阴影）。
-    pub(super) shadow: Option<crate::view::SoftShadow>,
+    pub shadow: Option<crate::view::SoftShadow>,
     /// 阴影外形的圆角（设备像素）：窗口 `border_radius`，没配按 8dp。
-    pub(super) shadow_radius: f32,
+    pub shadow_radius: f32,
     /// 内容盒在缓冲里的外扩 `(左, 上, 右, 下)`（设备像素）：皮肤装饰外扩或阴影扩边。
-    pub(super) margins: (u32, u32, u32, u32),
+    pub margins: (u32, u32, u32, u32),
     /// 根容器量出的自然宽（钳制前，设备像素）。
-    pub(super) natural_w: f32,
+    pub natural_w: f32,
     /// 钳制后的内容盒尺寸（设备像素）。
-    pub(super) content_w: u32,
-    pub(super) content_h: u32,
+    pub content_w: u32,
+    pub content_h: u32,
     /// 屏幕安全上限真的把内容钳窄了：`(钳前宽, 扣掉扩边后的上限)`。正常为 None。
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) safety_clamped: Option<(u32, u32)>,
+    pub safety_clamped: Option<(u32, u32)>,
 }
 
 impl SceneFrame {
     /// 缓冲尺寸 = 内容盒 + 四向扩边。
-    pub(super) fn size(&self) -> (u32, u32) {
+    pub fn size(&self) -> (u32, u32) {
         let (ml, mt, mr, mb) = self.margins;
         (self.content_w + ml + mr, self.content_h + mt + mb)
     }
@@ -126,7 +270,7 @@ impl CandidateSceneInput<'_> {
     ///
     /// 两个消费者共用本函数（`build_tree` 施加到根容器、[`CandidateScene::layout`] 对抗主题
     /// `behavior.vertical_max_width` 上限），避免两处各算一套而分叉。
-    pub(super) fn min_window_w_px(&self) -> u32 {
+    pub fn min_window_w_px(&self) -> u32 {
         let dp = if self.vertical {
             self.opts.min_window_width_vertical
         } else {
@@ -136,7 +280,7 @@ impl CandidateSceneInput<'_> {
     }
 
     /// 当前排版方向下生效的窗口最小高度（设备像素；0=不限）。见 [`Self::min_window_w_px`]。
-    pub(super) fn min_window_h_px(&self) -> u32 {
+    pub fn min_window_h_px(&self) -> u32 {
         let dp = if self.vertical {
             self.opts.min_window_height_vertical
         } else {
@@ -160,7 +304,7 @@ impl CandidateSceneInput<'_> {
     /// [`crate::sys::clamp_content_to_monitor`] 文档））就退化为一个保守的固定安全值兜底：
     /// 不追求精确，只保证不会出现「宽到完全没法用」的窗口。
     /// TODO: 后续应通过 IPC 把 `.app` 侧的真实屏幕宽度传回来，替换这个兜底常量。
-    pub(super) fn screen_safety_max_width_px(&self) -> u32 {
+    pub fn screen_safety_max_width_px(&self) -> u32 {
         const FALLBACK_SAFETY_DP: u32 = 3000;
         match self.screen_extent_px {
             Some((w, _)) => w,
@@ -176,7 +320,7 @@ impl CandidateSceneInput<'_> {
     /// 与 [`Self::screen_safety_max_width_px`] 分成两个函数而不是加个参数：那三个调用点钳的是
     /// **窗口在屏幕上的宽度**（旋转态下同样是宽度，不该跟着翻），本函数给的是**文字预算的轴**。
     /// 同名同参只会让下一个人在两种语义间随手挑一个。
-    pub(super) fn local_text_extent_px(&self) -> u32 {
+    pub fn local_text_extent_px(&self) -> u32 {
         if !self.rotated {
             return self.screen_safety_max_width_px();
         }
@@ -208,12 +352,7 @@ impl CandidateSceneInput<'_> {
     ///
     /// ⚠️ 不能把判据塞进 [`Self::truncate_text_for_width`] 本身：编码栏与模式徽标也调它，
     /// 而它们**没有**被切成格，量的仍是横向宽度。
-    pub(super) fn truncate_candidate_text(
-        &self,
-        text: &str,
-        style: &TextStyle,
-        max_w: f32,
-    ) -> String {
+    pub fn truncate_candidate_text(&self, text: &str, style: &TextStyle, max_w: f32) -> String {
         if !self.upright {
             return self.truncate_text_for_width(text, style, max_w);
         }
@@ -246,7 +385,7 @@ impl CandidateSceneInput<'_> {
     /// 候选正文（带分段）的截断：放得下原样返回；放不下时若带模糊音提示，**整段去掉全部提示**
     /// 再按原逻辑截正文——提示要么完整、要么不在，不会截出 `(pi…`。截断走
     /// [`Self::truncate_candidate_text`]（结果恒为「前缀 + …」），区间随 `cut_with_mark` 一起裁。
-    pub(super) fn truncate_candidate_styled(
+    pub fn truncate_candidate_styled(
         &self,
         src: &StyledText,
         style: &TextStyle,
@@ -271,7 +410,7 @@ impl CandidateSceneInput<'_> {
     ///
     /// 逐行而非整段：竖排注释模板可以写 `\n` 排成多行，整段二分会在首行超长时把后面几行
     /// 整个裁掉。
-    pub(super) fn truncate_styled_lines(
+    pub fn truncate_styled_lines(
         &self,
         src: &StyledText,
         style: &TextStyle,
@@ -296,12 +435,7 @@ impl CandidateSceneInput<'_> {
         changed.then(|| StyledText::join(&parts, "\n"))
     }
 
-    pub(super) fn truncate_text_for_width(
-        &self,
-        text: &str,
-        style: &TextStyle,
-        max_w: f32,
-    ) -> String {
+    pub fn truncate_text_for_width(&self, text: &str, style: &TextStyle, max_w: f32) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -330,7 +464,7 @@ impl CandidateSceneInput<'_> {
     }
 
     /// 当前排布该用的翻页栏覆盖档。
-    pub(super) fn pager_display_now(&self) -> &str {
+    pub fn pager_display_now(&self) -> &str {
         if self.vertical {
             &self.opts.pager_display.1
         } else {
@@ -339,7 +473,7 @@ impl CandidateSceneInput<'_> {
     }
 
     /// 当前排布该用的页码覆盖档。
-    pub(super) fn page_number_display_now(&self) -> &str {
+    pub fn page_number_display_now(&self) -> &str {
         if self.vertical {
             &self.opts.page_number_display.1
         } else {
@@ -348,7 +482,7 @@ impl CandidateSceneInput<'_> {
     }
 
     /// 是否显示翻页栏（覆盖优先；""跟随主题 behavior）。
-    pub(super) fn pager_visible(&self) -> bool {
+    pub fn pager_visible(&self) -> bool {
         match self.pager_display_now() {
             "hide" => false,
             "always" => true,
@@ -368,7 +502,7 @@ impl CandidateSceneInput<'_> {
     }
 
     /// 翻页栏可见时是否显示页码文字（覆盖优先；""跟随主题 behavior.show_page_number）。
-    pub(super) fn page_number_visible(&self) -> bool {
+    pub fn page_number_visible(&self) -> bool {
         match self.page_number_display_now() {
             "show" => true,
             "hide" => false,
@@ -377,22 +511,18 @@ impl CandidateSceneInput<'_> {
     }
 
     /// 把 image ref 解析为可读绝对路径（委托共享 theme_assets）。
-    pub(super) fn asset_path(&self, reference: &str) -> Option<String> {
+    pub fn asset_path(&self, reference: &str) -> Option<String> {
         crate::theme_assets::asset_path(self.theme, reference)
     }
 
     /// RvImage → 渲染用 ViewImage（委托共享 theme_assets）。
-    pub(super) fn rv_image(&self, im: Option<&wind_theme::RvImage>) -> Option<ViewImage> {
+    pub fn rv_image(&self, im: Option<&wind_theme::RvImage>) -> Option<ViewImage> {
         crate::theme_assets::rv_image(self.theme, im, self.scale)
     }
 
     /// footer 翻页箭头图标（SVG + tint）。无 prev/next_image 时 None（回退文字箭头）。
     /// enabled→tint（如 ${accent}）；disabled→disabled_tint（如 ${text_hint}），缺则回退 tint。
-    pub(super) fn arrow_icon(
-        &self,
-        im: Option<&wind_theme::RvImage>,
-        enabled: bool,
-    ) -> Option<ViewImage> {
+    pub fn arrow_icon(&self, im: Option<&wind_theme::RvImage>, enabled: bool) -> Option<ViewImage> {
         let im = im?;
         let path = self.asset_path(&im.reference)?;
         let tint = if enabled {
@@ -426,7 +556,7 @@ impl CandidateSceneInput<'_> {
     /// 走图标档时实际宽恒为基线，这里仍按文本算 → 预算只会偏大几像素，不会算漏；为省这点
     /// 去重算一遍 `arrow_icon` 的资产解析不划算。
     /// `fs` 由调用处给出（字号是 `build_tree` 内按 base_fs + scale 算的，此处拿不到）。
-    pub(super) fn arrow_slot_w(
+    pub fn arrow_slot_w(
         &self,
         txt: &str,
         base_w: f32,
@@ -439,12 +569,12 @@ impl CandidateSceneInput<'_> {
     }
 
     /// RvImage[] → ViewLayer[]（委托共享 theme_assets）。
-    pub(super) fn rv_layers(&self, layers: &[wind_theme::RvImage]) -> Vec<ViewLayer> {
+    pub fn rv_layers(&self, layers: &[wind_theme::RvImage]) -> Vec<ViewLayer> {
         crate::theme_assets::rv_layers(self.theme, layers, self.scale)
     }
 
     /// RvGradient → 渲染用 ViewGradient（委托共享 theme_assets，弹窗类同一份）。
-    pub(super) fn rv_gradient(
+    pub fn rv_gradient(
         &self,
         g: Option<&wind_theme::RvGradient>,
     ) -> Option<crate::view::ViewGradient> {
@@ -478,8 +608,8 @@ impl CandidateSceneInput<'_> {
     /// 字号/字重/字族/颜色都不同，把它们全收成参数会得到一个七参数函数。不切格时偏移为 0。
     ///
     /// 偏移是给分段颜色用的：着色区间按整串的字节偏移给出，逐格切开后每格要取落在自己范围内的
-    /// 那几段、平移到格内偏移（[`crate::text::dwrite::ColorRun::slice`]）。
-    pub(super) fn upright_text(
+    /// 那几段、平移到格内偏移（[`crate::text::ColorRun::slice`]）。
+    pub fn upright_text(
         &self,
         text: &str,
         caret: Option<usize>,
@@ -512,7 +642,7 @@ impl CandidateSceneInput<'_> {
 
     /// `upright` = 本节点落在旋转包裹层内部（内联编码），需要逐格扶正。
     /// 独立编码栏传 `false`：它在包裹层外面，本就没转过。
-    pub(super) fn preedit_view(&self, fs: f32, max_w: f32, upright: bool) -> View {
+    pub fn preedit_view(&self, fs: f32, max_w: f32, upright: bool) -> View {
         let v = &self.theme.views;
         let display = self.truncate_text_for_width(
             self.preedit,
@@ -550,7 +680,7 @@ impl CandidateSceneInput<'_> {
 
 impl CandidateScene {
     /// dp（逻辑像素）→ 设备像素，0 原样返回（0 是「不限」而非「0 像素」）。
-    pub(super) fn dp_to_px(dp: u32, scale: f32) -> u32 {
+    pub fn dp_to_px(dp: u32, scale: f32) -> u32 {
         if dp == 0 {
             return 0;
         }
@@ -567,7 +697,7 @@ impl CandidateScene {
     ///
     /// 归一化规则照抄 `View::font_weight`（`>0` 才生效）与 `View::font_family`（非空才生效），
     /// 少一条就还是两套样式。
-    pub(super) fn measure_style(fs: f32, weight: i32, family: Option<&str>) -> TextStyle<'_> {
+    pub fn measure_style(fs: f32, weight: i32, family: Option<&str>) -> TextStyle<'_> {
         TextStyle {
             family: family.filter(|s| !s.trim().is_empty()),
             size: fs,
@@ -588,7 +718,7 @@ impl CandidateScene {
     /// `floor` 触发时（固定开销本身已超预算）总和可能超出 `total`——那是无解情形下的取舍：
     /// 宁可溢出被裁掉，也不能少显示候选（选中键位与协调器下发的候选列表绑定，少一个会让用户
     /// 按 8 选到错的词）。
-    pub(super) fn water_fill(demands: &[f32], total: f32, floor: f32) -> Vec<f32> {
+    pub fn water_fill(demands: &[f32], total: f32, floor: f32) -> Vec<f32> {
         let n = demands.len();
         if n == 0 {
             return Vec::new();
@@ -618,20 +748,12 @@ impl CandidateScene {
     ///
     /// 抽成纯函数是为了让「重建视图树的触发条件」与「build_tree 内的实际派生」共用同一份
     /// 判据：否则横排开了 flip 时外层仍会每帧重建一棵与原树完全相同的树，白付 build+layout。
-    pub(super) fn above_layout(
-        above: bool,
-        vertical: bool,
-        flip: bool,
-        swap: bool,
-    ) -> (bool, bool) {
+    pub fn above_layout(above: bool, vertical: bool, flip: bool, swap: bool) -> (bool, bool) {
         (above && vertical && flip, above && swap)
     }
 
     /// 窗口投影参数（共享 SoftShadow；读 RvViews 顶层 shadow_* 字段）。
-    pub(super) fn shadow_params(
-        &self,
-        inp: &CandidateSceneInput,
-    ) -> Option<crate::view::SoftShadow> {
+    pub fn shadow_params(&self, inp: &CandidateSceneInput) -> Option<crate::view::SoftShadow> {
         // 皮肤自带外形与阴影，不叠软件阴影。
         if self.skin_geom.is_some() {
             return None;
@@ -655,10 +777,10 @@ impl CandidateScene {
     /// `inp.above` 须为 false（上翻重排另走 [`Self::relayout_above`]）。`soft_shadow` = 调用方
     /// 画不画软件阴影：ext_presenter（macOS / Linux 外部宿主）由宿主出系统阴影，传 false，
     /// 扩边随之为 0。
-    pub(super) fn layout(
+    pub fn layout(
         &mut self,
         inp: &CandidateSceneInput,
-        clock: skin_frame::AnimClock,
+        clock: skin_geom::AnimClock,
         soft_shadow: bool,
     ) -> SceneFrame {
         self.refresh_skin(inp, clock);
@@ -730,7 +852,7 @@ impl CandidateScene {
 
     /// 定位定下落在光标上方后调用（`inp.above` = 是否上方）：有生效的「上方专属」布局且不是
     /// 分槽位皮肤时，按上方布局重建并在原扩边处重排（项数/尺寸/位置不变，仅排列翻转）。
-    pub(super) fn relayout_above(&self, inp: &CandidateSceneInput, f: &mut SceneFrame) {
+    pub fn relayout_above(&self, inp: &CandidateSceneInput, f: &mut SceneFrame) {
         let (flip, swap) = Self::above_layout(
             inp.above,
             inp.vertical,
@@ -746,7 +868,7 @@ impl CandidateScene {
 
     /// 本帧命中矩形（窗口缓冲坐标，内容起点在扩边处）：候选与翻页 + 分槽位皮肤各块。
     /// 须在 [`Self::relayout_above`] 之后取。
-    pub(super) fn hits(&self, f: &SceneFrame) -> Vec<(i32, Rect)> {
+    pub fn hits(&self, f: &SceneFrame) -> Vec<(i32, Rect)> {
         let mut out = Vec::new();
         f.root.collect_hits(&mut out);
         if let Some(g) = &self.skin_geom {
@@ -764,11 +886,11 @@ impl CandidateScene {
     ///
     /// 文字后端单独传而不取 `inp`：本地窗口路径画进窗口自己的缓冲，那份可变借用与整份输入
     /// 的借用冲突。须与排版时是同一个后端。
-    pub(super) fn paint(
+    pub fn paint(
         &self,
         f: &SceneFrame,
         buf: &mut [u8],
-        tr: &TextRenderer,
+        tr: &dyn TextBackend,
         split_pass: bool,
     ) -> Option<(Vec<u8>, bool)> {
         let (width, height) = f.size();
@@ -814,7 +936,7 @@ impl CandidateScene {
     /// 反转候选（flip_when_above，仅竖排）、交换编码/候选区（swap_preedit_when_above）、翻页栏并入编码栏
     /// （pager_in_preedit，与 above 无关的常驻行为）。任何情形下每项 tag/序号标签/选中判定仍用
     /// 原始索引 i，确保命中/选中映射不受排列变化影响。
-    pub(super) fn build_tree(&self, inp: &CandidateSceneInput) -> View {
+    pub fn build_tree(&self, inp: &CandidateSceneInput) -> View {
         use wind_theme::rvnode::{RvEdges, RvNode};
         use wind_theme::schema::Dim;
         let above = inp.above;
@@ -2586,7 +2708,7 @@ impl CandidateScene {
         };
 
         // 皮肤分槽位布局：各块交给皮肤层按槽位摆放，根容器只是一个按窗体尺寸撑开的空盒
-        // （见 `skin_frame::CandidateScene::skin_layout`）。槽位由皮肤决定，不随上翻交换。
+        // （见 `skin_geom::CandidateScene::skin_layout`）。槽位由皮肤决定，不随上翻交换。
         if let Some(slots) = free_slots {
             let mut cand = View::container(Layout::Column).child(list);
             if let Some(p) = vertical_bottom_pager {
@@ -2594,7 +2716,7 @@ impl CandidateScene {
             }
             let mut parts = Vec::with_capacity(3);
             match (slots.preedit.is_some(), preedit_band) {
-                (true, Some(band)) => parts.push((skin_frame::SlotKind::Preedit, band)),
+                (true, Some(band)) => parts.push((skin_geom::SlotKind::Preedit, band)),
                 (_, band) => {
                     // 没配编码槽：编码栏照旧叠在候选上方，一起进候选槽。
                     let mut col = View::container(Layout::Column);
@@ -2607,9 +2729,9 @@ impl CandidateScene {
                     cand = col.child(cand);
                 }
             }
-            parts.push((skin_frame::SlotKind::Candidates, cand));
+            parts.push((skin_geom::SlotKind::Candidates, cand));
             if let Some(p) = footer_part {
-                parts.push((skin_frame::SlotKind::Footer, p));
+                parts.push((skin_geom::SlotKind::Footer, p));
             }
             *self.free_parts.borrow_mut() = parts;
             return root;
@@ -2644,5 +2766,49 @@ impl CandidateScene {
             }
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 主题配的翻页字符必须原样落到渲染，只有「一个字符都没配」才回退内置箭头。
+    ///
+    /// 这条以前是断的：渲染侧把 ‹ › 写死，`footer_bar.prev_char` 解析到 RvNode 后无人消费，
+    /// 主题里写什么都被画回内置箭头（而主题编辑器的预览一直照配置画，两边从来没对齐过）。
+    /// 空白不算未配——`prev_char = " "` 是「这里留白」的显式意图，被当成未配置就又变回 ‹ ›，
+    /// 正是同一个 bug 的另一副面孔。
+    #[test]
+    fn arrow_char_falls_back_only_when_unset() {
+        assert_eq!(arrow_char("", "‹"), "‹", "未配 → 内置箭头");
+        assert_eq!(arrow_char("$", "‹"), "$", "配了 ASCII 符号 → 原样");
+        assert_eq!(arrow_char(")", "›"), ")", "配了 ASCII 符号 → 原样");
+        assert_eq!(arrow_char("◀", "‹"), "◀", "配了多字节字符 → 原样");
+        // 多字原样传递；按钮宽度按文本撑开，见 pager_inline_tests 的 multi_char_arrow_*
+        assert_eq!(arrow_char("上页", "‹"), "上页", "配了多字 → 原样");
+        assert_eq!(arrow_char(" ", "‹"), " ", "留白是显式意图，不回退");
+    }
+
+    /// 候选文本的空白控制符须显示为可见符号，且**不得改动其他字符**。
+    ///
+    /// 这只是显示投影——`Candidate::text` 原文不动，上屏走的仍是真换行（见
+    /// [`visible_whitespace`] 的文档）。故本测试只锁「显示成什么样」，
+    /// 不能被误读成「上屏文本也变了」。
+    #[test]
+    fn whitespace_becomes_visible_glyphs() {
+        // 无控制符：原样借用，零分配
+        assert!(matches!(visible_whitespace("你好"), Cow::Borrowed("你好")));
+
+        assert_eq!(visible_whitespace("甲\n乙"), "甲↵乙");
+        assert_eq!(visible_whitespace("丙\t丁"), "丙⇥丁");
+        // CRLF 是**一个**换行，只出一个符号
+        assert_eq!(visible_whitespace("戊\r\n己"), "戊↵己");
+        // 孤立 CR 同样算换行
+        assert_eq!(visible_whitespace("庚\r辛"), "庚↵辛");
+        // 混合 + 连续
+        assert_eq!(visible_whitespace("a\n\tb"), "a↵⇥b");
+        // 普通空格不动——它本来就看得见，替换只会平添噪声
+        assert_eq!(visible_whitespace("甲 乙"), "甲 乙");
     }
 }

@@ -792,7 +792,7 @@ fn golden_no_hint_unchanged() {
 // - G5 default 主题 scale 1.5 / 2.0；
 // - G6 展开网格、尺寸下限、只有模式徽标、翻页并入编码行、隐藏翻页。
 
-use super::skin_frame::AvoidMask;
+use super::scene::AvoidMask;
 use std::time::{Duration, Instant};
 
 /// 与 golden 文件对拍；`WIND_UI_BLESS_GOLDEN` 时重录。
