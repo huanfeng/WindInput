@@ -228,9 +228,9 @@ pub struct CandidateScene {
     /// 异形皮肤在当前 DPI / 字号下的几何；None = 本帧不启用皮肤。每帧渲染前重算。
     pub skin_geom: Option<skin_geom::SkinGeom>,
     /// 分槽位布局下 `build_tree`（`&self`）交出的各块，由 `skin_layout` 取走排版。
-    pub free_parts: RefCell<Vec<(skin_geom::SlotKind, View)>>,
+    pub(crate) free_parts: RefCell<Vec<(skin_geom::SlotKind, View)>>,
     /// 皮肤装饰的事件状态机，按当前变体的装饰下标一块一台（见 [`crate::skin_anim`]）。
-    pub decor_anims: Vec<crate::skin_anim::Machine>,
+    pub(crate) decor_anims: Vec<crate::skin_anim::Machine>,
     /// [`Self::decor_anims`] 对应的变体（竖排, 嵌入）；None = 待重建。
     pub decor_anims_key: Option<(bool, bool)>,
     /// 已报过的皮肤片段告警（每帧都重求几何，同一条只报一次；换主题清）。
@@ -254,7 +254,6 @@ pub struct SceneFrame {
     pub content_w: u32,
     pub content_h: u32,
     /// 屏幕安全上限真的把内容钳窄了：`(钳前宽, 扣掉扩边后的上限)`。正常为 None。
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub safety_clamped: Option<(u32, u32)>,
 }
 

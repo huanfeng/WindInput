@@ -4672,8 +4672,8 @@ mod pager_inline_tests {
 ///
 /// ★ 与 [`min_size_tests`] 不同，本组**不 gate 平台**——断言的是不等式（行宽 ≤ 上限）而非
 /// 具体像素值，与文本后端量出多宽无关，故真实 DirectWrite 与 mock 下同样成立。上限也不写死
-/// 常量，直接取 `screen_safety_max_width_px()`，于是 Windows 下用真实屏幕宽、其它平台用兜底
-/// 常量，两边都是有效断言。
+/// 常量，直接取 `screen_safety_max_width_px()`。本组不走渲染入口，`screen_extent` 恒为 None，
+/// 各平台都按兜底常量（3000dp）断言，不涉真实屏幕宽。
 #[cfg(test)]
 mod width_budget_tests {
     use super::*;

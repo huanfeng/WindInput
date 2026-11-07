@@ -7,7 +7,7 @@ use crate::text::SizedText;
 pub struct CandidateFrame {
     pub width: u32,
     pub height: u32,
-    /// 预乘 alpha 的 BGRA（`width × height × 4`），含软件阴影扩边。
+    /// 预乘 alpha 的 BGRA（`width × height × 4`），画软件阴影时含其扩边。
     pub bgra: Vec<u8>,
 }
 
@@ -34,12 +34,23 @@ impl CandidateFrame {
     }
 }
 
-/// 按输入画一帧候选窗，走与实时窗口同一条排版与绘制（软件阴影照画，不拆穿透装饰）。
+/// 按输入画一帧候选窗，走与实时窗口同一条排版与绘制（不拆穿透装饰）。
+///
+/// `soft_shadow` = 画不画软件阴影，与实机对齐：Windows 本地窗口与宿主渲染画（传 true）；
+/// macOS / Linux 外部宿主（ext_presenter）由宿主出系统阴影、服务端不画（传 false，扩边随之为 0）。
 ///
 /// 文字取 `inp.text_renderer`，基准字号钉成 `base_font_logical × scale`（见 [`SizedText`]）。
 /// `inp.above` 为真时按上方专属布局重排（实时窗口由定位决定，这里由调用方指定）。
-/// 每次用一个新场景：装饰动画从 `clock` 给的时刻取帧，没有跨帧状态。
-pub fn render_candidate(inp: &CandidateSceneInput, clock: AnimClock) -> CandidateFrame {
+///
+/// `scene` 由调用方持有、跨次复用：皮肤告警按它去重（每次新建则同一条每张图都报一遍）。
+/// 装饰状态机也留在里面——`clock.allowed` 为假时各装饰取初始状态首帧，与状态机无关；
+/// 要播动画的调用方换皮肤时须像实时窗口的 `set_theme` 那样复位 `decor_anims_key`。
+pub fn render_candidate(
+    scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
+    clock: AnimClock,
+    soft_shadow: bool,
+) -> CandidateFrame {
     let text = SizedText {
         inner: inp.text_renderer,
         base_size: inp.base_font_logical * inp.scale,
@@ -49,8 +60,7 @@ pub fn render_candidate(inp: &CandidateSceneInput, clock: AnimClock) -> Candidat
         text_renderer: &text,
         ..*inp
     };
-    let mut scene = CandidateScene::default();
-    let mut frame = scene.layout(&below, clock, true);
+    let mut frame = scene.layout(&below, clock, soft_shadow);
     if inp.above {
         let above = CandidateSceneInput {
             above: true,
@@ -90,7 +100,9 @@ mod tests {
 
     #[test]
     fn renders_default_theme_frame_with_mock_text() {
-        let theme = wind_theme::Resolved::default();
+        let mut theme = wind_theme::Resolved::default();
+        theme.views.shadow_blur = Some(wind_theme::schema::Dim::Dp(8.0));
+        theme.views.shadow_color = Some([0, 0, 0, 64]);
         let text = MockText::new("", 99.0).unwrap();
         let opts = CandidateSceneOptions::default();
         let cands = [cand("你好"), cand("世界")];
@@ -121,7 +133,8 @@ mod tests {
             showing: true,
             allowed: false,
         };
-        let f = render_candidate(&inp, clock);
+        let mut scene = CandidateScene::default();
+        let f = render_candidate(&mut scene, &inp, clock, true);
         assert!(f.width >= 40 && f.height >= 24, "{}x{}", f.width, f.height);
         assert_eq!(f.bgra.len(), (f.width * f.height * 4) as usize);
         assert!(
@@ -133,8 +146,11 @@ mod tests {
         assert!(log.iter().any(|l| l.contains("\"你好\"")), "{log:?}");
         assert!(!log.iter().any(|l| l.contains("size=99.0")), "{log:?}");
         // 同输入出同一帧。
-        assert_eq!(render_candidate(&inp, clock).bgra, f.bgra);
+        assert_eq!(render_candidate(&mut scene, &inp, clock, true).bgra, f.bgra);
         assert_eq!(f.to_rgba().len(), f.bgra.len());
+        // 不画软件阴影（ext_presenter 形态）：没有扩边，缓冲恰为内容盒，严格更小。
+        let bare = render_candidate(&mut scene, &inp, clock, false);
+        assert!(bare.width < f.width && bare.height < f.height);
     }
 
     #[test]
