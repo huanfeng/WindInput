@@ -10,6 +10,58 @@ use wind_theme::skin::{
     Anchor, AnchorBox, BandFill, Clamp, DecorHit, Pos9, RvSkinVariant, Stretch,
 };
 
+/// 保护带内逐行是否有不透明像素（窗体 + 全部装饰的合成结果）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct AvoidMask {
+    /// 第 0 行相对窗体顶边的位置（装饰向上外扩时为负）。
+    pub(super) top: i32,
+    /// `prefix[i]` = 前 i 行里不透明行的个数，区间查询 O(1)。
+    prefix: Vec<u32>,
+}
+
+/// 低于它的 alpha 视为透明：阴影、柔边那一圈半透明不该把窗口推开。
+const AVOID_ALPHA: u8 = 32;
+
+impl AvoidMask {
+    pub(super) fn from_rows(top: i32, opaque: &[bool]) -> Self {
+        let mut prefix = Vec::with_capacity(opaque.len() + 1);
+        prefix.push(0);
+        for &o in opaque {
+            prefix.push(prefix.last().copied().unwrap_or(0) + o as u32);
+        }
+        Self { top, prefix }
+    }
+
+    pub(super) fn rows(&self) -> i32 {
+        self.prefix.len() as i32 - 1
+    }
+
+    /// 相对窗体顶边的 `[from, to)` 里有没有不透明行。
+    pub(super) fn any(&self, from: i32, to: i32) -> bool {
+        let a = (from - self.top).clamp(0, self.rows()) as usize;
+        let b = (to - self.top).clamp(0, self.rows()) as usize;
+        b > a && self.prefix[b] > self.prefix[a]
+    }
+
+    /// 换坐标系（ext_presenter 路径：设备像素 → 逻辑点，`f = 1 / scale`）：逻辑行覆盖的设备行里
+    /// 有一行不透明就算不透明。
+    fn scaled(&self, f: f32) -> Self {
+        if (f - 1.0).abs() < 1e-6 {
+            return self.clone();
+        }
+        let top = (self.top as f32 * f).floor() as i32;
+        let end = ((self.top + self.rows()) as f32 * f).ceil() as i32;
+        let rows: Vec<bool> = (top..end)
+            .map(|r| {
+                let from = (r as f32 / f).floor() as i32;
+                let to = ((r + 1) as f32 / f).ceil() as i32;
+                self.any(from, to)
+            })
+            .collect();
+        Self::from_rows(top, &rows)
+    }
+}
+
 /// `place_window` 的皮肤参数（调用方坐标系，相对窗体左上）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct PlaceAnchor {
@@ -17,8 +69,10 @@ pub(super) struct PlaceAnchor {
     pub(super) below: (i32, i32),
     /// 上方时对齐光标的点：x 相对窗体左边，y 是**距窗体底边向上**的距离（0 = 底边）。
     pub(super) above: (i32, i32),
-    /// 需避让光标行的装饰矩形（相对窗体左上）；`avoid_caret = false` 时为空。
-    pub(super) avoid: Vec<(i32, i32, i32, i32)>,
+    /// 光标行保护带上的不透明行（下方 / 上方各一份：两种方位对齐的横坐标可能不同）；
+    /// `avoid_caret = false` 时为 None。
+    pub(super) avoid_below: Option<AvoidMask>,
+    pub(super) avoid_above: Option<AvoidMask>,
     /// 屏幕钳制额外留出的外扩（左, 上, 右, 下）；`clamp = "frame"` 时全 0。
     pub(super) clamp: (i32, i32, i32, i32),
 }
@@ -358,6 +412,32 @@ impl CandidateWindow {
             .collect();
     }
 
+    /// 合成窗体 + 全部装饰，取光标保护带（对齐点横坐标 `caret_x` 向左 `before`、向右 `after`，dp）
+    /// 内逐行的不透明情况。行坐标相对窗体顶边（设备像素）。
+    fn skin_avoid_mask(
+        &self,
+        g: &SkinGeom,
+        caret_x: f32,
+        strip: wind_theme::skin::AvoidStrip,
+    ) -> AvoidMask {
+        let (ml, mt, mr, mb) = g.margins;
+        let (_, _, w, h) = g.frame;
+        let (bw, bh) = (w + ml + mr, h + mt + mb);
+        let mut buf = vec![0u8; (bw as usize) * (bh as usize) * 4];
+        g.paint(&mut buf, bw, bh, false, false);
+        g.paint(&mut buf, bw, bh, true, false);
+        let cx = ml as f32 + caret_x;
+        let x0 = (cx - strip.before * self.scale).floor().max(0.0) as usize;
+        let x1 = ((cx + strip.after * self.scale).ceil().max(0.0) as usize).min(bw as usize);
+        let rows: Vec<bool> = (0..bh as usize)
+            .map(|y| {
+                let row = &buf[y * bw as usize * 4..(y + 1) * bw as usize * 4];
+                (x0..x1).any(|x| row[x * 4 + 3] >= AVOID_ALPHA)
+            })
+            .collect();
+        AvoidMask::from_rows(-(mt as i32), &rows)
+    }
+
     /// `place_window` 的对齐与避让参数。`f` 把设备像素换到调用方坐标系（ext_presenter 路径是逻辑点，
     /// 传 `1 / scale`；其余传 1）。无皮肤时为默认值（窗体左上 / 左下对齐、无避让、无外扩），与改前一致。
     pub(super) fn skin_place_anchor(&self, f: f32) -> PlaceAnchor {
@@ -365,7 +445,7 @@ impl CandidateWindow {
             return PlaceAnchor::default();
         };
         let r = |v: f32| (v * f).round() as i32;
-        let (ml, mt, w, h) = g.frame;
+        let (_, _, w, h) = g.frame;
         let frame = Rect {
             x: 0.0,
             y: 0.0,
@@ -379,20 +459,12 @@ impl CandidateWindow {
         };
         let (bx, by) = point(g.placement.caret);
         let (ax, ay) = point(g.placement.caret_above);
-        let avoid = if g.placement.avoid_caret {
-            g.decor_rects
-                .iter()
-                .map(|&(x, y, dw, dh)| {
-                    (
-                        r((x - ml) as f32),
-                        r((y - mt) as f32),
-                        r(dw as f32),
-                        r(dh as f32),
-                    )
-                })
-                .collect()
-        } else {
-            Vec::new()
+        let (avoid_below, avoid_above) = match g.placement.avoid_caret {
+            Some(strip) => {
+                let mask = |caret_x: f32| self.skin_avoid_mask(g, caret_x, strip).scaled(f);
+                (Some(mask(bx)), Some(mask(ax)))
+            }
+            None => (None, None),
         };
         let clamp = match g.placement.clamp {
             Clamp::Frame => (0, 0, 0, 0),
@@ -404,7 +476,8 @@ impl CandidateWindow {
         PlaceAnchor {
             below: (r(bx), r(by)),
             above: (r(ax), r(frame.h - ay)),
-            avoid,
+            avoid_below,
+            avoid_above,
             clamp,
         }
     }
@@ -597,17 +670,45 @@ mod tests {
     }
 
     #[test]
-    fn avoid_pushes_decor_off_the_caret_line() {
-        // 光标行 180..200（底端 200，行高 20），gap 2 → 需避开 178..202。
-        // 下方：窗口 y=202，装饰在窗体上方 -30..0 → 盖住光标行，推到装饰顶 = 202。
-        let y = CandidateWindow::avoid_caret_line(202, false, 200, 20, &[(0, -30, 10, 30)]);
-        assert_eq!(y, 232);
-        // 装饰本来就不碰光标行：不动。
-        let y = CandidateWindow::avoid_caret_line(202, false, 200, 20, &[(0, 5, 10, 5)]);
-        assert_eq!(y, 202);
-        // 上方：窗口底边在 178，装饰向下伸出 10 → 上推 10。
-        let y = CandidateWindow::avoid_caret_line(100, true, 200, 20, &[(0, 70, 10, 18)]);
-        assert_eq!(y, 90);
+    fn avoid_pushes_opaque_rows_off_the_caret_line() {
+        // 光标行 180..200（底端 200，行高 20），gap 2 → 保护带 178..202。
+        // 窗体顶上方 30 行：上 20 行透明、下 10 行（-10..0）不透明。
+        let mut rows = vec![false; 20];
+        rows.extend([true; 10]);
+        rows.extend([true; 20]); // 窗体本身 0..20
+        let m = AvoidMask::from_rows(-30, &rows);
+        // 下方 y=202：不透明的 -10..0 落在 192..202，压线 → 推到 212。透明的那 20 行越过光标行不算。
+        assert_eq!(
+            CandidateWindow::avoid_caret_line(202, false, 200, 20, Some(&m)),
+            212
+        );
+        // 不透明行本来就在保护带以下：不动。
+        let low = AvoidMask::from_rows(0, &[false, false, true]);
+        assert_eq!(
+            CandidateWindow::avoid_caret_line(200, false, 200, 20, Some(&low)),
+            200
+        );
+        // 上方：窗体 0..20 在 y=160 → 160..180，压到 178 → 上推到底边 ≤ 178。
+        let frame = AvoidMask::from_rows(0, &[true; 20]);
+        assert_eq!(
+            CandidateWindow::avoid_caret_line(160, true, 200, 20, Some(&frame)),
+            158
+        );
+        assert_eq!(
+            CandidateWindow::avoid_caret_line(5, false, 200, 20, None),
+            5
+        );
+    }
+
+    #[test]
+    fn mask_scales_to_logical_points() {
+        // 设备行 -4..4，只有 2..4 不透明；缩到 1/2 → 逻辑行 -2..2，只有第 1 行不透明。
+        let mut rows = vec![false; 6];
+        rows.extend([true; 2]);
+        let m = AvoidMask::from_rows(-4, &rows).scaled(0.5);
+        assert_eq!((m.top, m.rows()), (-2, 4));
+        assert!(m.any(1, 2));
+        assert!(!m.any(-2, 1));
     }
 
     #[test]
@@ -622,7 +723,7 @@ mod tests {
                 anchor: Anchor::parse("content.top_left").unwrap(),
                 offset: [0.0, -1.0],
             };
-            v.placement.avoid_caret = false;
+            v.placement.avoid_caret = None;
             w.set_theme(theme);
         }
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
@@ -633,7 +734,10 @@ mod tests {
         // 内容框左上 (4, 3) 再上移 1 → (4, 2)；上方缺省窗体左下 → 距底 0。
         assert_eq!(a.below, (4, 2));
         assert_eq!(a.above, (0, 0));
-        assert!(a.avoid.is_empty(), "关掉 avoid_caret 不该带矩形");
+        assert!(
+            a.avoid_below.is_none() && a.avoid_above.is_none(),
+            "关掉 avoid_caret 不该带保护带"
+        );
         // 非 Windows 下 place_window 恒在下方：对齐点落在光标底端 + 2。
         let (x, y, above) = CandidateWindow::place_window(100, 200, 20, 30, 20, false, (0, 0), &a);
         assert_eq!((x, y, above), (96, 200, false));
@@ -646,23 +750,47 @@ mod tests {
     }
 
     #[test]
-    fn default_avoid_collects_decor_relative_to_frame() {
+    fn default_avoid_sees_decor_pixels_in_strip() {
         let mut w = fixture_window("avoid");
         w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
         w.refresh_skin_geom();
         let mut root = w.build_tree(false);
         w.skin_layout(&mut root).unwrap();
-        let (_, _, fw, _) = w.skin_geom.as_ref().unwrap().frame;
         let a = w.skin_place_anchor(1.0);
-        assert_eq!(
-            a.avoid,
-            vec![(fw as i32 - 6, -6, 6, 6)],
-            "窗体坐标：装饰在窗体上方 6px"
-        );
         assert_eq!(a.clamp, (0, 0, 0, 0), "缺省只钳窗体");
-        // 装饰伸到窗体上方 6px，下方放时会压住光标行 → 整窗下推 6。
+        let m = a.avoid_below.as_ref().expect("缺省开避让");
+        assert_eq!(m.top, -6, "装饰向上外扩 6px，保护带从那里算起");
+        assert!(m.any(-6, 0), "缺省保护带够宽，右上角装饰落在带内");
+        // 装饰伸到窗体上方 6px，下方放时压住光标行 → 整窗下推 6。
         let (_, y, _) = CandidateWindow::place_window(100, 200, 20, 30, 20, false, (0, 0), &a);
         assert_eq!(y, 208);
+    }
+
+    #[test]
+    fn narrow_strip_ignores_decor_far_from_caret() {
+        use wind_theme::skin::AvoidStrip;
+        let mut w = fixture_window("strip");
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            v.placement.avoid_caret = Some(AvoidStrip {
+                before: 0.0,
+                after: 10.0,
+            });
+            w.set_theme(theme);
+        }
+        w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
+        w.refresh_skin_geom();
+        let mut root = w.build_tree(false);
+        w.skin_layout(&mut root).unwrap();
+        let a = w.skin_place_anchor(1.0);
+        assert!(
+            !a.avoid_below.as_ref().unwrap().any(-6, 0),
+            "装饰在保护带右边"
+        );
+        // 光标左侧对齐窗体左缘、带宽 10px：右上角的装饰压不到正在输入的字，窗口不动。
+        let (_, y, _) = CandidateWindow::place_window(100, 200, 20, 30, 20, false, (0, 0), &a);
+        assert_eq!(y, 202);
     }
 
     #[test]

@@ -51,7 +51,9 @@ pub struct SkinFrame {
     pub density: Option<f32>,
     pub stretch_x: Option<Vec<BandSpec>>,
     pub stretch_y: Option<Vec<BandSpec>>,
-    /// 拉伸带默认填法：stretch | tile | round。
+    /// 填法：stretch | tile | round。写了拉伸带时它是各带的缺省（不写为 round：带里的花纹按整数次
+    /// 重复，节奏与两侧固定段一致；拉伸会把针脚、纸纹拉长，和固定段对不上）；没写拉伸带、整轴
+    /// 缩放时它是整轴的填法（不写为 stretch）。
     pub fill: Option<String>,
     #[serde(default)]
     pub srcset: Vec<SrcSetEntry>,
@@ -111,10 +113,37 @@ pub struct SkinDecor {
 pub struct SkinPlacement {
     pub caret: Option<CaretSpec>,
     pub caret_above: Option<CaretSpec>,
-    /// 装饰不得盖住光标所在行（缺省开）。
-    pub avoid_caret: Option<bool>,
+    /// 窗体与装饰的不透明像素不得压住光标行上的保护带（缺省开）。`true` / `false`，或
+    /// `{ before = 200, after = 40 }`：保护带从光标向左 / 向右的宽度（dp）。
+    pub avoid_caret: Option<AvoidSpec>,
     /// frame（缺省）：只保证窗体在屏内 | all：连装饰一起。
     pub clamp: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum AvoidSpec {
+    On(bool),
+    Strip {
+        before: Option<f32>,
+        after: Option<f32>,
+    },
+}
+
+/// 光标行保护带：从光标向左 / 向右的宽度（dp）。左边是刚输入的文字，默认留得宽。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AvoidStrip {
+    pub before: f32,
+    pub after: f32,
+}
+
+impl Default for AvoidStrip {
+    fn default() -> Self {
+        Self {
+            before: 200.0,
+            after: 40.0,
+        }
+    }
 }
 
 /// 对齐点：`"frame.top_left"` 或 `{ anchor = "frame.top_left", offset = [180, 260] }`（源像素）。
@@ -288,7 +317,8 @@ pub enum Clamp {
 pub struct RvPlacement {
     pub caret: CaretPoint,
     pub caret_above: CaretPoint,
-    pub avoid_caret: bool,
+    /// None = 不避让。
+    pub avoid_caret: Option<AvoidStrip>,
     pub clamp: Clamp,
 }
 
@@ -310,7 +340,7 @@ impl Default for RvPlacement {
                 },
                 offset: [0.0; 2],
             },
-            avoid_caret: true,
+            avoid_caret: Some(AvoidStrip::default()),
             clamp: Clamp::Frame,
         }
     }
@@ -389,10 +419,11 @@ fn positive(v: Option<f32>) -> Option<f32> {
     v.filter(|d| d.is_finite() && *d > 0.0)
 }
 
-fn resolve_stretch(bands: Option<&Vec<BandSpec>>, default_fill: BandFill) -> Stretch {
+fn resolve_stretch(bands: Option<&Vec<BandSpec>>, fill: Option<BandFill>) -> Stretch {
     let Some(bands) = bands else {
-        return Stretch::Whole(default_fill);
+        return Stretch::Whole(fill.unwrap_or(BandFill::Stretch));
     };
+    let default_fill = fill.unwrap_or(BandFill::Round);
     if bands.is_empty() {
         return Stretch::Fixed;
     }
@@ -432,7 +463,7 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
         tracing::warn!("skin: 变体缺 frame.image，忽略该变体");
         return None;
     };
-    let fill = BandFill::parse(f.fill.as_deref()).unwrap_or_default();
+    let fill = BandFill::parse(f.fill.as_deref());
     let mut srcset: Vec<(String, f32)> = f
         .srcset
         .iter()
@@ -489,7 +520,19 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
     let placement = RvPlacement {
         caret: resolve_caret(p.caret.as_ref(), dflt.caret),
         caret_above: resolve_caret(p.caret_above.as_ref(), dflt.caret_above),
-        avoid_caret: p.avoid_caret.unwrap_or(dflt.avoid_caret),
+        avoid_caret: match &p.avoid_caret {
+            None | Some(AvoidSpec::On(true)) => dflt.avoid_caret,
+            Some(AvoidSpec::On(false)) => None,
+            Some(AvoidSpec::Strip { before, after }) => {
+                let d = AvoidStrip::default();
+                let w =
+                    |v: Option<f32>, d: f32| v.filter(|x| x.is_finite() && *x >= 0.0).unwrap_or(d);
+                Some(AvoidStrip {
+                    before: w(*before, d.before),
+                    after: w(*after, d.after),
+                })
+            }
+        },
         clamp: match p.clamp.as_deref() {
             None | Some("frame") => Clamp::Frame,
             Some("all") => Clamp::All,
@@ -595,12 +638,35 @@ hit = "pass"
                 Band {
                     from: 300.0,
                     to: 500.0,
-                    fill: BandFill::Stretch
+                    fill: BandFill::Round
                 },
             ])
         );
         assert_eq!(h.frame.stretch_y, Stretch::Fixed, "空数组 = 该轴不可伸缩");
         assert_eq!(h.frame.density, 3.0, "frame 继承 skin.density");
+    }
+
+    #[test]
+    fn bands_default_to_round_and_fill_overrides() {
+        let s = parse("[skin.horizontal.frame]\nimage = \"a\"\nstretch_x = [[1, 2]]").unwrap();
+        let f = s.horizontal.unwrap().frame;
+        let Stretch::Bands(b) = &f.stretch_x else {
+            panic!("应为 Bands");
+        };
+        assert_eq!(b[0].fill, BandFill::Round, "拉伸带缺省整数次重复");
+        assert_eq!(
+            f.stretch_y,
+            Stretch::Whole(BandFill::Stretch),
+            "整轴缺省拉伸"
+        );
+        let s = parse(
+            "[skin.horizontal.frame]\nimage = \"a\"\nfill = \"stretch\"\nstretch_x = [[1, 2]]",
+        )
+        .unwrap();
+        let Stretch::Bands(b) = s.horizontal.unwrap().frame.stretch_x else {
+            panic!("应为 Bands");
+        };
+        assert_eq!(b[0].fill, BandFill::Stretch, "fill 显式写了就照写的来");
     }
 
     #[test]
@@ -664,7 +730,7 @@ hit = "pass"
         let p = s.horizontal.unwrap().placement;
         assert_eq!(p.caret.anchor.on, AnchorBox::Frame);
         assert_eq!(p.caret_above.anchor.pos, Pos9::BOTTOM_LEFT);
-        assert!(p.avoid_caret, "缺省避让光标行");
+        assert_eq!(p.avoid_caret, Some(AvoidStrip::default()), "缺省避让光标行");
         assert_eq!(p.clamp, Clamp::Frame);
     }
 
@@ -687,8 +753,23 @@ clamp = "all"
         assert_eq!(p.caret.anchor.pos, Pos9::TOP_LEFT);
         assert_eq!(p.caret_above.anchor.on, AnchorBox::Content);
         assert_eq!(p.caret_above.offset, [0.0, 0.0]);
-        assert!(!p.avoid_caret);
+        assert_eq!(p.avoid_caret, None);
         assert_eq!(p.clamp, Clamp::All);
+    }
+
+    #[test]
+    fn avoid_strip_accepts_table() {
+        let s = parse(
+            "[skin.horizontal.frame]\nimage = \"a\"\n[skin.horizontal.placement]\navoid_caret = { before = 80 }",
+        )
+        .unwrap();
+        assert_eq!(
+            s.horizontal.unwrap().placement.avoid_caret,
+            Some(AvoidStrip {
+                before: 80.0,
+                after: 40.0
+            })
+        );
     }
 
     #[test]

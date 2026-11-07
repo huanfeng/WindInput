@@ -2619,30 +2619,31 @@ impl CandidateWindow {
     ///
     /// 翻转/钳制整段在 `cfg(windows)` 内（靠 `GetMonitorInfoW` 取显示器边界），非 Windows
     /// 直接返回下方锚点，于是那几个只服务于翻转的局部量在此平台无人读写。
-    /// 皮肤避让：上下方位与偏移都定了之后，若有装饰压住光标所在行（`caret_y - caret_h ..
-    /// caret_y`，上下各留 gap），把窗口沿远离光标的方向推开到不相交为止。只比纵向——横向上
-    /// 光标行左右都可能是正在编辑的文字。`avoid` 为相对窗口左上的矩形。
+    /// 皮肤避让：上下方位与偏移都定了之后，若窗体或装饰的不透明像素落进光标行保护带
+    /// （`caret_y - caret_h .. caret_y`，上下各留 gap；横向范围已在 `mask` 里取好），把窗口沿
+    /// 远离光标的方向逐像素推开到保护带清空为止。透明区越过光标行不算遮挡。
     fn avoid_caret_line(
         y: i32,
         above: bool,
         caret_y: i32,
         caret_h: i32,
-        avoid: &[(i32, i32, i32, i32)],
+        mask: Option<&skin_frame::AvoidMask>,
     ) -> i32 {
+        let Some(m) = mask else {
+            return y;
+        };
         let gap = 2;
         let (line_top, line_bottom) = (caret_y - caret_h.max(0) - gap, caret_y + gap);
-        let mut push = 0;
-        for &(_, ry, _, rh) in avoid {
-            let (top, bottom) = (y + ry, y + ry + rh);
-            if top < line_bottom && bottom > line_top {
-                push = if above {
-                    push.max(bottom - line_top)
-                } else {
-                    push.max(line_bottom - top)
-                };
+        let step = if above { -1 } else { 1 };
+        let mut y = y;
+        // 推够 mask 的总行数 + 保护带高度，必然清空；上限防坏数据死循环。
+        for _ in 0..=(m.rows() + (line_bottom - line_top)).max(0) {
+            if !m.any(line_top - y, line_bottom - y) {
+                break;
             }
+            y += step;
         }
-        if above { y - push } else { y + push }
+        y
     }
 
     #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
@@ -2722,7 +2723,12 @@ impl CandidateWindow {
                     if above {
                         x = ax - anchor.above.0;
                     }
-                    y = Self::avoid_caret_line(y, above, caret_y, caret_h, &anchor.avoid);
+                    let mask = if above {
+                        anchor.avoid_above.as_ref()
+                    } else {
+                        anchor.avoid_below.as_ref()
+                    };
+                    y = Self::avoid_caret_line(y, above, caret_y, caret_h, mask);
                     // 方位定后的越界兜底：贴住对应屏幕边。
                     // 偏移可能把窗口顶出工作区，这里兜回来——所以偏移必须在钳制之前施加。
                     // 皮肤 clamp = "all" 时 (cl, ct, cr, cb) 是装饰外扩，连装饰一起留在屏内；否则全 0。
@@ -2749,7 +2755,7 @@ impl CandidateWindow {
         // 非 Windows 不做翻转，恒在下方；避让照做（它不依赖显示器几何）。
         #[cfg(not(windows))]
         {
-            y = Self::avoid_caret_line(y, false, caret_y, caret_h, &anchor.avoid);
+            y = Self::avoid_caret_line(y, false, caret_y, caret_h, anchor.avoid_below.as_ref());
         }
         (x, y, above)
     }
