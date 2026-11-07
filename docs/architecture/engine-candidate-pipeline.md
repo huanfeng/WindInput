@@ -148,6 +148,7 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
  → better() 排序
  → 整句块插到最前（仅 >max_code_length；N-best 按 schema.codetable.sentence_count，词典组词 + 语法模型）
    / 逆切分 append（仅 ==max_code_length 且空码）
+   / 空码组词 append（码长以内、空码且无更长后继；与整句互斥；沉底、不顶码不自动上屏）
  → truncate（截断保护精确匹配，见下）
  → show_code_hint 时前缀候选 comment 标注剩余编码
  → 自动上屏判定 / 满码空码清空（has_longer_code 单次求值复用）
@@ -168,6 +169,7 @@ DAT 从已排序编码列表 BFS 直接构建，峰值内存仅 base/check 两�
 | `single_code_input` | 精确模式：禁前缀匹配 |
 | `single_code_complete` | 精确模式下的空码补全 |
 | `show_code_hint` | 前缀候选标注剩余编码 |
+| `compose_input` | **空码组词**：码长以内的空码串，按 `[[encoder.rules]]` 反查、或拆码拼字，补出拼音库前 20 万词里的词（`wfbn` →「付了」）。候选带 `is_lexicon_composed`：不参与顶码与满码自动上屏、排序恒沉底（混输在拼音之后）。与 `sentence_input` 互斥。**方案级引擎固定参数，出厂关**。见 [codetable-sentence-input.md](../design/codetable-sentence-input.md) §13 |
 | `split_input` / `split_front_candidates` / `split_trigger` / `split_alt_display` | **逆切分**：满码长（或无后继的未满码）且空码时，切出一个二简作前段、余下归后段，各查一次词典（段候选吃候选调整），拼成组合候选（`hfkn` → `hf`(很可) + `kn`(能) → 「很可能」）。候选 `code` 为整串 ⇒ 后段唯一时被既有 `decide_auto_commit` 认作「恰一个精确匹配」而自动上屏，后段重码时出候选窗；`handle_top_code` 走 `convert(prefix,1)` ⇒ 继续打字母顶的就是切分首选。**方案级引擎固定参数，出厂关**。见 [codetable-split-input.md](../design/codetable-split-input.md) |
 
 配置来源：全局 `schema.codetable.*` + 方案 `[engine.codetable]` 行为字段逐字段折叠（`Some` 覆盖 /

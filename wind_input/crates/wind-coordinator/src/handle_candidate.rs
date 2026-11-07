@@ -1942,7 +1942,7 @@ impl Coordinator {
             }
         }
         drop(phrases);
-        // 码表合成候选（逆切分 / 整句）让位给**精确码短语**（论坛 t307）。
+        // 码表合成候选（逆切分 / 整句 / 空码组词）让位给**精确码短语**（论坛 t307）。
         //
         // 引擎判「空码」只看得见码表：两者的闸门都是「整串无精确解」，而短语在 convert 之后
         // 才由上面追加 ⇒ 短语码在码表里空码时照切不误，`ojs`（直通命令）旁边多出「井三/井所有」，
@@ -1950,7 +1950,8 @@ impl Coordinator {
         //
         // ⚠️ 限定码表来源：拼音整句同样带 `is_sentence`，它与短语本就并列，不归这里管。
         let codetable_composed = |c: &Candidate| {
-            (c.is_split_composed || c.is_sentence) && c.source == CandidateSource::CodeTable
+            (c.is_split_composed || c.is_sentence || c.is_lexicon_composed)
+                && c.source == CandidateSource::CodeTable
         };
         if exact_phrase_shown && candidates.iter().any(codetable_composed) {
             candidates.retain(|c| !codetable_composed(c));

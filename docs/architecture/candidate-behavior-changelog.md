@@ -27,6 +27,22 @@
 
 ---
 
+## 2026-11-07 · 码表空码组词（0.131）
+
+- 合入：待填；范围：码表方案与混输方案，仅方案开了 `[engine.codetable] compose_input = true`
+- 变化：码长以内的空码串（一条候选都没有、也没有更长的码）补出词库里的词，至多 8 条。
+  `wfbn`（「付了」的词组码，码表没收）前：无候选 → 后：促进了 / 拿走了 / 代替了 / 值了 / 付了 …。
+  组词候选不参与顶码与满码自动上屏：空码后再打第 5 码照旧接着组合。混输下排在拼音之后
+  （`yige` 首选仍是「一个」，末尾多一条「词汇表」）。英文混入照常给前缀补全，组词排在英文之后
+  （`fina` → financial … / 教学改革）。与 `sentence_input` 互斥，同开时以整句为准。
+- 触发条件：需在方案的 `[engine.codetable]` 写 `compose_input = true`；出厂关
+- 回退旧行为：`compose_input = false`
+- 钉住的测试：`wind-engine` `codetable::compose::tests`、
+  `codetable::engine::tests::compose_fills_empty_code_but_never_auto_commits` /
+  `top_code_does_not_commit_composed_word`，`mixed::engine::tests::composed_words_trail_pinyin_and_stay_out_of_overflow`；`wind-candidate`
+  `tests::lexicon_composed_sinks_below_pinyin_and_everything_else`；`wind-coordinator` `tests/codetable_compose.rs`
+- 来源：内部
+
 ## 2026-11-06 · 码表整句：语法模型、词典组词、N-best（0.131）
 
 - 合入：14a4e9b0；范围：码表方案，仅方案开了 `[engine.codetable] sentence_input = true`

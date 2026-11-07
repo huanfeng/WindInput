@@ -6510,7 +6510,8 @@ impl Coordinator {
             // 通配结果不参与顶码（spec §3.2）：混输下 4 码通配串 +1 键会把整串判成超长字面串，
             // 通配探测放行、拼音也接不了，前缀恰为顶码前缓冲，显示首选就是通配结果——
             // 在此剔除，与通配关闭 / 纯码表的行为一致（该键只判字面串，不上屏通配结果）。
-            (c.source == CandidateSource::CodeTable && !c.is_wildcard)
+            // 空码组词也不顶：它是按词库猜的，空码多半是打错了码。
+            (c.source == CandidateSource::CodeTable && !c.is_wildcard && !c.is_lexicon_composed)
                 || ((c.is_phrase || c.is_command) && self.phrase_has_exact_code(state, &pre_buf))
         });
         // 在光标处插入（光标在末尾时等价于旧的 push）。后续顶码/候选刷新一律按整串

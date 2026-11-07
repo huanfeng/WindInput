@@ -233,6 +233,51 @@ pub struct ComposeLexicon {
 }
 
 impl ComposeLexicon {
+    /// 拼音库里词频前 [`COMPOSE_LEXICON_SIZE`] 的多字词，外加 `extra` 里的词（不论排第几）。
+    /// 返回 `(表, 入表门槛词频)`；拼音库里没有可收的词时门槛为 [`OOV_FREQ`]。
+    ///
+    /// 两遍扫描：先只收词频找出门槛，再收门槛以上的文本。一遍做完得先把 60 万条文本全部
+    /// 装进内存再排序，峰值多出二三十 MB（虽然在后台线程上，也是实打实的高水位）。
+    pub(crate) fn build(
+        pinyin_dict: &CachedDict,
+        extra: impl IntoIterator<Item = (String, i32)>,
+    ) -> (Self, i32) {
+        let eligible =
+            |text: &str, w: i32| w > 0 && (2..=COMPOSE_MAX_CHARS).contains(&text.chars().count());
+        let mut freqs: Vec<i32> = Vec::new();
+        pinyin_dict.for_each_entry(&mut |_code, text, w| {
+            if eligible(text, w) {
+                freqs.push(w);
+            }
+        });
+        if freqs.is_empty() {
+            return (Self::default(), OOV_FREQ);
+        }
+        // 同词多读音会重复计数，门槛因此略偏高、实收略少于 N——无伤大雅，不值得为它去重。
+        let nth = COMPOSE_LEXICON_SIZE.min(freqs.len()) - 1;
+        let threshold = *freqs.select_nth_unstable_by(nth, |a, b| b.cmp(a)).1;
+        drop(freqs);
+        let mut words: Vec<(String, i32)> = Vec::new();
+        pinyin_dict.for_each_entry(&mut |_code, text, w| {
+            if eligible(text, w) && w >= threshold {
+                words.push((text.to_string(), w));
+            }
+        });
+        words.extend(extra.into_iter().filter(|(t, w)| eligible(t, *w)));
+        (Self::from_words(words), threshold)
+    }
+
+    /// 全部 `(文本, 词频)`，按文本字节序。下标即 [`Self::entry`] 的下标。
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, i32)> {
+        self.index.iter().map(|e| (self.text(e), e.2))
+    }
+
+    /// 第 `i` 条的 `(文本, 词频)`。
+    pub(crate) fn entry(&self, i: usize) -> (&str, i32) {
+        let e = &self.index[i];
+        (self.text(e), e.2)
+    }
+
     /// `words` 可含重复文本（同词多读音），取词频最大的一条。
     fn from_words(mut words: Vec<(String, i32)>) -> Self {
         words.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
@@ -260,7 +305,7 @@ impl ComposeLexicon {
     /// 有没有词以 `prefix` 开头（含等于）。组词 DFS 据此剪枝：拼到一半已不是任何词的前缀，
     /// 再往下拼也组不出词。按字节序排好的表里，以 `prefix` 开头的词恰好落在
     /// `prefix` 的插入点上。
-    fn has_prefix(&self, prefix: &str) -> bool {
+    pub(crate) fn has_prefix(&self, prefix: &str) -> bool {
         let i = self.index.partition_point(|e| self.text(e) < prefix);
         self.index
             .get(i)
@@ -275,7 +320,7 @@ impl ComposeLexicon {
         self.index.is_empty()
     }
 
-    fn heap_bytes(&self) -> usize {
+    pub(crate) fn heap_bytes(&self) -> usize {
         self.blob.capacity() + self.index.capacity() * size_of::<(u32, u32, i32)>()
     }
 }
@@ -323,10 +368,7 @@ impl SentenceFreq {
         }
     }
 
-    /// 组词表：拼音库里词频前 [`COMPOSE_LEXICON_SIZE`] 的多字词。返回 `(表, 入表门槛词频)`。
-    ///
-    /// 两遍扫描：先只收词频找出门槛，再收门槛以上的文本。一遍做完得先把 60 万条文本全部
-    /// 装进内存再排序，峰值多出二三十 MB（虽然在后台线程上，也是实打实的高水位）。
+    /// 组词表，见 [`ComposeLexicon::build`]。
     ///
     /// 码表收了的多字词（`codetable_freq` 里那份）无论排第几都一并收进来：逐字打出来也该认得，
     /// 且组词表要能回答「是不是某个词的前缀」（剪枝用），词就不能分散在两张表里。
@@ -334,34 +376,10 @@ impl SentenceFreq {
         pinyin_dict: &CachedDict,
         codetable_freq: &HashMap<String, i32>,
     ) -> (ComposeLexicon, i32) {
-        let eligible =
-            |text: &str, w: i32| w > 0 && (2..=COMPOSE_MAX_CHARS).contains(&text.chars().count());
-        let mut freqs: Vec<i32> = Vec::new();
-        pinyin_dict.for_each_entry(&mut |_code, text, w| {
-            if eligible(text, w) {
-                freqs.push(w);
-            }
-        });
-        if freqs.is_empty() {
-            return (ComposeLexicon::default(), OOV_FREQ);
-        }
-        // 同词多读音会重复计数，门槛因此略偏高、实收略少于 N——无伤大雅，不值得为它去重。
-        let nth = COMPOSE_LEXICON_SIZE.min(freqs.len()) - 1;
-        let threshold = *freqs.select_nth_unstable_by(nth, |a, b| b.cmp(a)).1;
-        drop(freqs);
-        let mut words: Vec<(String, i32)> = Vec::new();
-        pinyin_dict.for_each_entry(&mut |_code, text, w| {
-            if eligible(text, w) && w >= threshold {
-                words.push((text.to_string(), w));
-            }
-        });
-        words.extend(
-            codetable_freq
-                .iter()
-                .filter(|(t, w)| eligible(t, **w))
-                .map(|(t, w)| (t.clone(), *w)),
-        );
-        (ComposeLexicon::from_words(words), threshold)
+        ComposeLexicon::build(
+            pinyin_dict,
+            codetable_freq.iter().map(|(t, w)| (t.clone(), *w)),
+        )
     }
 
     /// 该文本的整句词频；查不到给 [`OOV_FREQ`]。

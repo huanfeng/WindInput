@@ -207,6 +207,14 @@ fn resolve_sentence_input(role: Option<MixedRole>, own: bool) -> bool {
     }
 }
 
+/// 空码组词开关的最终取值：同 [`resolve_sentence_input`]，混输主引擎取混输方案自己的声明。
+fn resolve_compose_input(role: Option<MixedRole>, own: bool) -> bool {
+    match role {
+        Some(MixedRole::Primary { compose_input, .. }) => compose_input,
+        _ => own,
+    }
+}
+
 /// 逆切分开关的取值来源：独立方案用自己的声明，**混输主引擎一律关闭**。
 ///
 /// # 为什么混输下必须整体关掉（而不是像整句那样「取混输方案自己的声明」）
@@ -252,7 +260,12 @@ enum MixedRole {
     /// 后者的超码长区间已经归拼音管（`MixedEngine::convert` 超码长直接走
     /// `convert_overflow`，根本不经过主引擎），继承过来只会得到一个「配置开着却不生效」
     /// 的状态，那是最难排查的一种。
-    Primary { sentence_input: bool },
+    Primary {
+        sentence_input: bool,
+        /// 空码组词，同 `sentence_input` 取混输方案自己的声明。码长以内的区间混输照常经过主引擎，
+        /// 故它在配着拼音子引擎时也生效（组词候选排在拼音之后，见 `MixedEngine::truncation_tier`）。
+        compose_input: bool,
+    },
     /// 混输次（拼音），携带拼音侧的语境收敛。
     Secondary(MixPinyinOpts),
 }
@@ -4719,8 +4732,10 @@ impl EngineManager {
             // 例外是可选的前缀补全：`complete_min_length`（够长就补；拼音另要求整串不是完整
             // 拼音）。判据与条数上限都在 `english_merge::select`；双拼已在
             // `english_merge_cfg_for` 折掉。
-            let english =
-                crate::english_merge::select(eng.as_ref(), input, r.candidates.is_empty(), &cfg);
+            // 只有空码组词也算「没有中文候选」：组词是猜出来的，不该把英文从前缀补全页降成
+            // 只收整词（`gith` 组出一个词，github 等补全就消失）。
+            let zh_empty = r.candidates.iter().all(|c| c.is_lexicon_composed);
+            let english = crate::english_merge::select(eng.as_ref(), input, zh_empty, &cfg);
             // 通路①（满码自动上屏 / 满码空码清空）的英文守护，两级判据见
             // `english_merge::vetoes_commit`（与通路②③、混输同口径）。
             //
@@ -6856,6 +6871,7 @@ impl EngineManager {
                     // 满码空码清空 / 顶码让位，一个不触发的整句不该白白关掉它们。
                     sentence_input: schema.engine.codetable.sentence_input
                         && m.secondary_schema.is_empty(),
+                    compose_input: schema.engine.codetable.compose_input,
                 }),
                 english_provider,
             )?;
@@ -7220,6 +7236,11 @@ impl EngineManager {
                 // `MixedRole::Primary`），读到什么都不会被用到。
                 sentence_count: eff.sentence_count,
                 sentence_max_count: eff.sentence_max_count,
+                // 空码组词：同整句，方案级引擎固定参数，混输取混输方案自己的声明。
+                compose_input: resolve_compose_input(
+                    mixed_role,
+                    schema.engine.codetable.compose_input,
+                ),
                 // 逆切分：同为方案级引擎固定参数。切点有效性与「与整句同开」的告警在
                 // `CodeTableEngine::new` 里（那里才同时握着 max_code_length 与两个开关）。
                 //
@@ -7328,6 +7349,19 @@ impl EngineManager {
                 && let Some(store) = &store
             {
                 engine = engine.with_segment_shadow(store.clone(), schema_id);
+            }
+            // 空码组词：构词规则取**本次构建的这份 schema**——混输下那是主码表方案的
+            // `[encoder]`，正是组词要用的（编码属于主码表）。与整句互斥由引擎构造时裁决，
+            // 这里注入后引擎会按最终取值决定收不收。
+            if commit_opts.compose_input {
+                engine = engine.with_composer(
+                    crate::codetable::WordComposer::new(
+                        mcl,
+                        schema.encoder.clone().unwrap_or_default(),
+                    )
+                    .with_schemas_dir(schemas.clone()),
+                );
+                engine.prewarm_compose();
             }
             Some(Box::new(Self::attach_sentence_freq(
                 engine,
@@ -9277,14 +9311,16 @@ mod tests {
         // ★ 混输主：`own=true`（primary_schema 开着）也要被压成混输方案自己的取值。
         assert!(!resolve_sentence_input(
             Some(MixedRole::Primary {
-                sentence_input: false
+                sentence_input: false,
+                compose_input: false,
             }),
             true
         ));
         // 混输方案自己声明了 ⇒ 开（当前只在没配拼音子引擎的退化混输下真正生效）。
         assert!(resolve_sentence_input(
             Some(MixedRole::Primary {
-                sentence_input: true
+                sentence_input: true,
+                compose_input: false,
             }),
             false
         ));
@@ -9292,6 +9328,23 @@ mod tests {
         // 混输次（拼音）走不到码表分支，取值等同独立方案即可。
         let sec = Some(MixedRole::Secondary(MixPinyinOpts { abbrev: true }));
         assert!(resolve_sentence_input(sec, true));
+    }
+
+    /// 空码组词在混输下取**混输方案自己**的声明（码长以内照常经过主引擎，能生效）。
+    #[test]
+    fn mixed_primary_compose_input_follows_mixed_schema() {
+        assert!(resolve_compose_input(None, true));
+        let role = |on| {
+            Some(MixedRole::Primary {
+                sentence_input: false,
+                compose_input: on,
+            })
+        };
+        assert!(
+            !resolve_compose_input(role(false), true),
+            "不继承主码表方案"
+        );
+        assert!(resolve_compose_input(role(true), false));
     }
 
     /// 逆切分在**混输主引擎上一律关闭**，谁声明都不行 —— 见 [`resolve_split_input`]：
@@ -9308,7 +9361,8 @@ mod tests {
             assert!(
                 !resolve_split_input(
                     Some(MixedRole::Primary {
-                        sentence_input: false
+                        sentence_input: false,
+                        compose_input: false,
                     }),
                     own
                 ),
@@ -9320,6 +9374,7 @@ mod tests {
         // 缺了它，一个把两个开关一起压死的实现也会让上面那段变绿。
         let sentence_on = Some(MixedRole::Primary {
             sentence_input: true,
+            compose_input: false,
         });
         assert!(
             resolve_sentence_input(sentence_on, false),
