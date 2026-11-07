@@ -1195,6 +1195,13 @@ impl MobileCore {
         Ok(n as u64)
     }
 
+    /// 用户正在操作联想候选（手指按在候选条上、展开面板开着、长按菜单弹着）：
+    /// `true` 暂停联想的自动隐藏，`false` 结束操作、重新计满 `hide_after_ms`。
+    /// 不在联想态时无操作。见 `Coordinator::assoc_hold`。
+    pub fn assoc_hold(&self, hold: bool) {
+        self.coord.assoc_hold(hold);
+    }
+
     /// 联想学习数据的条数（联想里选过的词 + 学到的「下一词」），所有方案合计。
     pub fn assoc_history_count(&self) -> u64 {
         use wind_coordinator::web_host::WebDataHost;

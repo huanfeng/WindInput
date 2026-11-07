@@ -847,6 +847,33 @@ impl Coordinator {
         self.notify_ui_hide();
     }
 
+    /// 宿主告知「用户正在操作联想候选」，期间暂停自动隐藏。
+    ///
+    /// 计时只认按键：触屏上手指滑候选条、长按看提示、打开展开面板挑词都不是按键，
+    /// 于是操作到一半窗就被计时收掉（真机反馈）。桌面的候选窗靠鼠标点、没有这类停留，
+    /// 不调用本函数，行为不变。
+    ///
+    /// - `hold = true`：作废当前计时，操作期间不收；
+    /// - `hold = false`：操作结束，从此刻起重新计满 `hide_after_ms`。
+    ///
+    /// 不在联想态时什么也不做（不能凭空起计时，也不能误伤下一轮联想的计时）。
+    /// 判联想态与改计时在同一把 state 锁里完成：先判后改之间若插进一次退出 + 新一轮联想，
+    /// 这里的 `arm(0)` 会把新一轮的计时作废，那一轮联想就永远不收了。
+    pub fn assoc_hold(&self, hold: bool) {
+        // 配置在取 state 锁之前读，不在 state 锁里再去拿配置锁
+        let ms = if hold {
+            0
+        } else {
+            self.assoc_config().hide_after_ms
+        };
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.assoc_active() {
+            return;
+        }
+        self.arm_assoc_hide(ms);
+        drop(state);
+    }
+
     /// 宿主组合已由别的路径终止 ⇒ 孤儿不复存在，撤掉标记。
     ///
     /// 不撤的后果只是下一次 `PassThrough` 多发一次收口（`EndComposition` 此时是空操作，
@@ -1418,6 +1445,43 @@ mod tests {
         assert!(enter(&c, "你好"), "重新进入");
         c.fire_assoc_hide(t1); // 陈旧令牌
         assert!(!texts(&c).is_empty(), "陈旧计时不得收掉新一轮的联想窗");
+    }
+
+    /// 操作联想候选期间（hold）计时作废：到期回调拿的是旧令牌，收不掉窗。
+    #[test]
+    fn hold_suspends_hide_timer() {
+        let c = coord_smart();
+        assert!(enter(&c, "你好"));
+        let t = *c.assoc_hide_token.lock().unwrap();
+        c.assoc_hold(true);
+        c.fire_assoc_hide(t);
+        assert!(!texts(&c).is_empty(), "按住候选条期间计时不得收窗");
+    }
+
+    /// 松手后重新起计时：新令牌到期照常收窗，旧令牌仍无效。
+    #[test]
+    fn release_rearms_hide_timer() {
+        let c = coord_smart();
+        assert!(enter(&c, "你好"));
+        let t0 = *c.assoc_hide_token.lock().unwrap();
+        c.assoc_hold(true);
+        c.assoc_hold(false);
+        let t1 = *c.assoc_hide_token.lock().unwrap();
+        assert_ne!(t0, t1, "松手须重新起计时");
+        c.fire_assoc_hide(t0);
+        assert!(!texts(&c).is_empty(), "旧计时作废");
+        c.fire_assoc_hide(t1);
+        assert!(texts(&c).is_empty(), "松手后重新计满到期照常收窗");
+    }
+
+    /// 不在联想态时 hold 什么也不做：不动令牌（不误伤之后那一轮联想的计时）。
+    #[test]
+    fn hold_outside_assoc_is_noop() {
+        let c = coord_smart();
+        let t = *c.assoc_hide_token.lock().unwrap();
+        c.assoc_hold(true);
+        c.assoc_hold(false);
+        assert_eq!(t, *c.assoc_hide_token.lock().unwrap());
     }
 
     /// `hide_after_ms = 0` = 不自动隐藏。
