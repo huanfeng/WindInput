@@ -469,20 +469,6 @@ pub struct Candidate {
     /// 引擎内部用，不推送 UI。
     #[serde(skip)]
     pub is_split_composed: bool,
-    /// 该候选由**空码组词**补出：码长以内的空码串，按方案构词规则反查、或拆成几段拼字，
-    /// 拼出的是词库里的词（`[engine.codetable] compose_input`，见 `codetable::compose`）。
-    ///
-    /// 不复用 [[is_split_composed]]：逆切分候选要参与顶码与满码自动上屏（需求如此），本功能
-    /// 两样都不参与——空码多半是打错了码，替用户把猜出来的词送上屏代价太大。
-    ///
-    /// ## 消费者
-    ///
-    /// ① 顶码与满码自动上屏都跳过它；② 排序恒沉底：纯码表下排在其余候选之后，混输下
-    /// 排在拼音之后（[`source_tier`] 档 5）；③ 精确码短语出现时整体让位，同逆切分。
-    ///
-    /// 引擎内部用，不推送 UI。
-    #[serde(skip)]
-    pub is_lexicon_composed: bool,
 
     /// 该候选来自**自动造词的草稿层**：滑窗切出、尚未被任何人用过的猜测词
     /// （`docs/design/auto-phrase-draft-layer.md`）。
@@ -692,7 +678,6 @@ impl Default for Candidate {
             sentence_rank: 0,
             is_synthesized: false,
             is_split_composed: false,
-            is_lexicon_composed: false,
             is_draft: false,
             is_promoted_completion: false,
             is_direct_aux: false,
@@ -1014,12 +999,7 @@ pub fn candidate_display_order(
     // 那里记着「只有一处带上本键」时长词在词频表里进出会导致候选忽隐忽现的事故）。
     let by_consumed = cmp_by_consumed(a, b, input_len);
 
-    // 空码组词沉得最深，连消费长度都排在它后面：它的 `consumed_length` 按约定算吃满整串，
-    // 放在 `by_consumed` 之后会压过只吃一部分的拼音候选（混输开了部分候选时），违背
-    // 「混输下排在全部拼音之后」。按一个布尔分两区，是合法全序，两条非组词候选间恒 Equal。
-    a.is_lexicon_composed
-        .cmp(&b.is_lexicon_composed)
-        .then(by_consumed)
+    by_consumed
         // 逆切分候选沉底（`split_trigger = "no_exact"` 档才看得见效果）。
         //
         // 该档下切分候选与既有的前缀/补全候选同场，只靠 weight 竞争会插进用户本来打得出的
@@ -1185,7 +1165,6 @@ pub fn is_pinyin_exact_tier(c: &Candidate, input_len: usize) -> bool {
 /// 2  码表前缀补全
 /// 3  前缀短语 + 其余来源
 /// 4  拼音其余（前缀补全/子短语/简拼/模糊/生僻） + 英文
-/// 5  码表空码组词（is_lexicon_composed）
 /// ```
 ///
 /// 五笔优先的硬约束：码表精确全码恒在拼音之上，词频重排只在同档内调整。
@@ -1254,8 +1233,6 @@ pub fn source_tier(c: &Candidate, input: &str) -> u8 {
         return 1;
     }
     match c.source {
-        // 空码组词的 `code` 就是整串，不先判会落进档 0、压过拼音。它是猜出来的，排在拼音之后。
-        CodeTable if c.is_lexicon_composed => 5,
         CodeTable if c.code == input => 0, // 码表精确全码（如五笔 cang→駏）
         // 通配等长结果与码表精确同档（spec §10：非首位按通配键是明确意图）。只认
         // `is_wildcard`：非通配路径上 `is_exact_code` 与 `code == input` 同义，不另开口子。
@@ -1683,48 +1660,6 @@ mod wildcard_tier_tests {
             2,
             "对照：非通配候选不因 is_exact_code 提档"
         );
-    }
-
-    /// 空码组词的 `code` 是整串，但恒在拼音之后（混输）、恒在其余候选之后（纯码表）。
-    #[test]
-    fn lexicon_composed_sinks_below_pinyin_and_everything_else() {
-        let composed = Candidate {
-            text: "组词".into(),
-            code: "abcd".into(),
-            source: CandidateSource::CodeTable,
-            is_lexicon_composed: true,
-            weight: 9_000_000,
-            ..Default::default()
-        };
-        let pinyin = Candidate {
-            text: "拼音".into(),
-            code: "abcd".into(),
-            source: CandidateSource::Pinyin,
-            is_prefix: true,
-            weight: 1,
-            ..Default::default()
-        };
-        // 只吃一部分输入的拼音（混输开了部分候选时）：消费长度短于组词，也得排在组词前。
-        let partial = Candidate {
-            text: "阿".into(),
-            code: "a".into(),
-            source: CandidateSource::Pinyin,
-            is_partial: true,
-            consumed_length: 1,
-            ..Default::default()
-        };
-        assert_eq!(source_tier(&composed, "abcd"), 5);
-        assert_eq!(source_tier(&pinyin, "abcd"), 4);
-        for mixed in [true, false] {
-            for other in [&pinyin, &partial] {
-                assert_eq!(
-                    candidate_display_order(other, &composed, false, mixed, "abcd"),
-                    std::cmp::Ordering::Less,
-                    "mixed={mixed} {}",
-                    other.text
-                );
-            }
-        }
     }
 
     /// 锁（实现前即绿）：混输显示序「通配等长 → 拼音精确 → 通配更长」。

@@ -205,9 +205,6 @@ pub struct CommitOptions {
     pub sentence_count: u8,
     /// 整句 N-best：解码时**算**几条（`schema.codetable.sentence_max_count`）。不足露的条数时按后者抬。
     pub sentence_max_count: u8,
-    /// 空码组词：码长以内的空码串补出词库里的词（[`super::compose`]）。与 `sentence_input`
-    /// 互斥，同开时本项让位。语义权威表述在 [`wind_config::schema::CodeTableSpec::compose_input`]。
-    pub compose_input: bool,
     /// 逆切分（切分模式）：**恰好**满码长的串若空码，切成 2+2 两段各查词典再拼接。
     ///
     /// 语义、为什么是方案属性、与 `sentence_input` 的关系，**权威表述在**
@@ -268,8 +265,6 @@ pub struct CodeTableEngine {
     /// 它内部两张表都是 `OnceLock` 懒构建的全表扫描——关闭的方案连这个结构都不建；
     /// 开启的方案由 [`Self::prewarm_sentence`] 在后台线程提前填好，不占按键线程。
     sentence: Option<super::sentence::CodeSentenceDecoder>,
-    /// 空码组词器（`opts.compose_input` 关闭时为 `None`），由构建方经 [`Self::with_composer`] 注入。
-    composer: Option<super::compose::WordComposer>,
     /// 逆切分段候选要吃的**候选调整**（shadow）：`(store, 数据归属方案 id)`。
     ///
     /// 候选调整平时在协调器那层应用（`apply_shadow_in`），而逆切分的两段是本引擎**自己**
@@ -327,14 +322,6 @@ impl CodeTableEngine {
         // 两者占的区间本不重叠（`==` vs `>` 码长），可以同开；但整句会让**顶码整体让位**
         // （见 `handle_top_code`），而逆切分的「后码顶首选上屏」正是靠顶码实现的。
         // 功能仍可用，只是少了那一条交互 —— 说一句，别让人以为是 bug。
-        // 空码组词与整句互斥：整句开着时它不生效（需求如此——开了整句，码长以内的组词由
-        // 用户继续打下去交给整句）。
-        if opts.compose_input && opts.sentence_input {
-            tracing::warn!(
-                "[engine.codetable] compose_input 与 sentence_input 同时开启：二者互斥，以整句为准，空码组词不生效"
-            );
-            opts.compose_input = false;
-        }
         if opts.split_input && opts.sentence_input {
             tracing::warn!(
                 "[engine.codetable] split_input 与 sentence_input 同时开启：整句会让顶码整体让位，\
@@ -346,7 +333,6 @@ impl CodeTableEngine {
             opts,
             dm,
             sentence,
-            composer: None,
             // 默认 `a-z`，与历史硬编码 `VK_A..=VK_Z` 逐键等价。构建方按方案配置
             // 再 `with_charset` 覆盖——如此所有既有调用点（含测试）无需改动。
             charset: wind_config::CodeCharSet::default_alpha(),
@@ -426,58 +412,6 @@ impl CodeTableEngine {
             self.sentence = Some(d.with_pinyin_dict(dict));
         }
         self
-    }
-
-    /// 注入空码组词器。`compose_input` 未开（或因整句让位）时丢弃。
-    pub fn with_composer(mut self, composer: super::compose::WordComposer) -> Self {
-        if self.opts.compose_input {
-            self.composer = Some(composer);
-        }
-        self
-    }
-
-    /// 后台预热空码组词的表。未开启时是 no-op；须在 [`Self::with_composer`] 之后调。
-    pub fn prewarm_compose(&self) {
-        if let Some(c) = &self.composer {
-            c.prewarm(Arc::clone(&self.dm));
-        }
-    }
-
-    /// 空码组词：码长以内、空码、且后面没有更长的码可打时，补出词库里的词。
-    ///
-    /// 候选只显示：`code` 是整串（调频记在这串码下），但带 `is_lexicon_composed`，顶码与
-    /// 满码自动上屏都跳过它，排序恒沉底。至多 [`super::compose::COMPOSE_LIMIT`] 条，按词频。
-    fn decode_compose(
-        &self,
-        input: &str,
-        candidates: &[Candidate],
-        has_longer: bool,
-    ) -> Vec<Candidate> {
-        let Some(composer) = &self.composer else {
-            return Vec::new();
-        };
-        let len = input.chars().count();
-        // 有更长的码可打 ⇒ 用户可能还没打完（精确匹配模式下空列表不等于空码）。
-        if len < 2 || len > self.max_code_length || !candidates.is_empty() || has_longer {
-            return Vec::new();
-        }
-        let words = composer.compose(input, &self.dm);
-        let n = words.len();
-        words
-            .into_iter()
-            .enumerate()
-            .map(|(i, (text, _))| Candidate {
-                text,
-                code: input.to_string(),
-                // 只表达组内次序（已按词频排好）；跨来源先后由 `is_lexicon_composed` 决定。
-                weight: (n - i) as i32,
-                natural_order: i as i32,
-                source: CandidateSource::CodeTable,
-                is_synthesized: true,
-                is_lexicon_composed: true,
-                ..Default::default()
-            })
-            .collect()
     }
 
     /// 本引擎的词典管理器。
@@ -801,14 +735,8 @@ fn decide_auto_commit(
     // ⚠️ **也排除整句候选**（`is_sentence`）：它的 `code` 是整串，超码长时又常是唯一一条
     // `code == input`、且超码长串没有更长后继 ⇒ 不排除的话，开了满码上屏后每多打一码
     // 整句就把自己上屏了（`trntw` → 「我人」），句子永远组不起来（论坛 t350）。
-    //
-    // 空码组词（`is_lexicon_composed`）同理排除：它是猜出来的，空码多半是打错了码。
     let mut exact = candidates.iter().filter(|c| {
-        c.code == input
-            && !c.is_scope_filtered
-            && !c.is_low_confidence()
-            && !c.is_sentence
-            && !c.is_lexicon_composed
+        c.code == input && !c.is_scope_filtered && !c.is_low_confidence() && !c.is_sentence
     });
     let first = exact.next()?;
     if exact.next().is_some() {
@@ -928,15 +856,10 @@ fn merge_disabled_hits(enabled: Vec<Candidate>, disabled: Vec<Candidate>) -> Vec
 
 impl Engine for CodeTableEngine {
     fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
-        let mut v = self
-            .sentence
+        self.sentence
             .as_ref()
             .map(|d| d.memory_parts())
-            .unwrap_or_default();
-        if let Some(c) = &self.composer {
-            v.extend(c.memory_parts());
-        }
-        v
+            .unwrap_or_default()
     }
 
     /// 热插拔扩展词库。**禁用摘层、启用交给重建**，两边不对称，各有理由：
@@ -1120,11 +1043,7 @@ impl Engine for CodeTableEngine {
         // ⚠️ 也必须在下面 `is_empty` 求值**之前**：`should_clear`（满码空码清空）读的正是
         // 那个 `is_empty`。写反了就是「切分出候选了但缓冲被清空」——用户看到候选一闪即逝。
         let (split, split_code) = self.decode_split(input, &candidates);
-        // 空码组词：闸门同样是「这串码一条都没有」，故与逆切分对着**同一份**原始列表判，
-        // 两者同开时都出（组词沉在切分之后，见 `candidate_display_order`）。
-        let composed = self.decode_compose(input, &candidates, has_longer);
         candidates.extend(split);
-        candidates.extend(composed);
 
         // 精确匹配已居首，截断不会再把它挤出配额（此前需一次临时分区保护：单字母等短输入下
         // 前缀候选可达数百，纯按基础序截断会让低权重简码字丢失，此后协调器再排也找不回）。
@@ -1290,13 +1209,10 @@ impl Engine for CodeTableEngine {
         // 码表首选文本；prefix 码表无字（短语专属码如 date/zzbd）时留空，由上层用显示首选
         // （短语/命令）兜底顶码。此处**只判定溢出该顶**（超满码长 + 无全码匹配 + 无更长后继），
         // 「顶什么」交上层——原 `first()?` 短路会让码表无字时顶码整个不触发（短语顶不了）。
-        // 空码组词不顶（它是猜出来的）：前缀只剩组词候选时按「码表无字」交上层。
         let top = self
             .convert(&prefix, 1)
             .ok()
-            .and_then(|r| r.candidates.first().cloned())
-            .filter(|c| !c.is_lexicon_composed)
-            .map(|c| c.text)
+            .and_then(|r| r.candidates.first().map(|c| c.text.clone()))
             .unwrap_or_default();
         Some((top, remainder))
     }
@@ -3353,118 +3269,5 @@ mod tests {
     fn convert_reverse_absent_without_reverse_key() {
         let e = engine_opts(&[("ab", "甲", 10)], CommitOptions::default());
         assert!(e.convert_reverse("ab", "ab", 50).is_none());
-    }
-
-    // ───────────────────────── 空码组词（compose_input） ─────────────────────────
-
-    /// 付 wfi（二简 wf）、了 bnh（一简 b）；码表没收「付了」（词组码 wfbn）。
-    const COMPOSE_ENTRIES: &[(&str, &str, i32)] = &[
-        ("wfi", "付", 800),
-        ("wf", "付", 9950),
-        ("bnh", "了", 900),
-        ("b", "了", 9999),
-    ];
-
-    fn compose_engine(extra: &[(&str, &str, i32)], opts: CommitOptions) -> CodeTableEngine {
-        let mut entries = COMPOSE_ENTRIES.to_vec();
-        entries.extend_from_slice(extra);
-        let mut py = CodetableDict::empty();
-        py.merge_single("fu le".into(), "付了".into(), 500, 0);
-        let rule = |eq: usize, range: Vec<usize>, f: &str| wind_config::schema::EncoderRule {
-            length_equal: eq,
-            length_in_range: range,
-            formula: f.into(),
-        };
-        let spec = wind_config::schema::EncoderSpec {
-            rules: vec![
-                rule(2, vec![], "AaAbBaBb"),
-                rule(3, vec![], "AaBaCaCb"),
-                rule(0, vec![4, 10], "AaBaCaZa"),
-            ],
-            ..Default::default()
-        };
-        engine_opts(&entries, opts).with_composer(
-            super::super::compose::WordComposer::new(4, spec)
-                .with_pinyin_dict(Arc::new(CachedDict::Memory(py))),
-        )
-    }
-
-    fn compose_opts() -> CommitOptions {
-        CommitOptions {
-            compose_input: true,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn compose_fills_empty_code_but_never_auto_commits() {
-        let e = compose_engine(
-            &[],
-            CommitOptions {
-                auto_commit_at_full: true,
-                ..compose_opts()
-            },
-        );
-        let r = e.convert("wfbn", 50).unwrap();
-        let got: Vec<(&str, &str, bool)> = r
-            .candidates
-            .iter()
-            .map(|c| (c.text.as_str(), c.code.as_str(), c.is_lexicon_composed))
-            .collect();
-        assert_eq!(got, [("付了", "wfbn", true)]);
-        assert!(!r.should_commit, "唯一一条 code == input 也不满码上屏");
-        assert_eq!(e.should_auto_commit("wfbn", &r.candidates), None);
-    }
-
-    #[test]
-    fn compose_is_off_by_default_and_yields_to_sentence() {
-        let off = compose_engine(&[], CommitOptions::default());
-        assert!(off.convert("wfbn", 50).unwrap().candidates.is_empty());
-        let both = compose_engine(
-            &[],
-            CommitOptions {
-                sentence_input: true,
-                ..compose_opts()
-            },
-        );
-        assert!(
-            !both
-                .convert("wfbn", 50)
-                .unwrap()
-                .candidates
-                .iter()
-                .any(|c| c.is_lexicon_composed),
-            "与整句互斥，以整句为准"
-        );
-    }
-
-    #[test]
-    fn compose_waits_while_longer_codes_remain() {
-        // 对照：`wfb` 无后继 ⇒ 拆成 付(wf) + 了(b)。
-        let e = compose_engine(&[], compose_opts());
-        assert_eq!(texts_of(&e, "wfb"), ["付了"]);
-        // 精确匹配模式下空列表不等于空码：还有 `wfbq` 可打就不组词。
-        let e = compose_engine(
-            &[("wfbq", "伐", 300)],
-            CommitOptions {
-                single_code_input: true,
-                ..compose_opts()
-            },
-        );
-        assert!(e.convert("wfb", 50).unwrap().candidates.is_empty());
-    }
-
-    #[test]
-    fn top_code_does_not_commit_composed_word() {
-        let e = compose_engine(
-            &[],
-            CommitOptions {
-                top_code_commit: true,
-                ..compose_opts()
-            },
-        );
-        assert_eq!(texts_of(&e, "wfbn"), ["付了"], "前置：前缀出组词");
-        let (top, rest) = e.handle_top_code("wfbnb").expect("溢出照常判定");
-        assert_eq!((top.as_str(), rest.as_str()), ("", "b"), "顶码不取组词候选");
     }
 }

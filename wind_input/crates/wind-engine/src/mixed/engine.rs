@@ -41,7 +41,6 @@ impl MixedEngine {
     /// | 1 | 短语 —— **本引擎恒不可达，见下** |
     /// | 2 | 码表前缀补全、英文精确 |
     /// | 3 | 拼音、英文前缀 |
-    /// | 4 | 码表空码组词（`is_lexicon_composed`） |
     ///
     /// ## 这套档位从前写在权重里
     ///
@@ -73,8 +72,6 @@ impl MixedEngine {
     /// `docs/design/mixed-source-tier-quota.md` §3.3。
     fn truncation_tier(c: &Candidate, ctx: TruncationCtx<'_>) -> u8 {
         match c.source {
-            // 空码组词的 `code` 是整串，不先判会落进档 0。它是猜出来的，排在拼音之后。
-            CandidateSource::CodeTable if c.is_lexicon_composed => 4,
             // 短语先判：短语也走码表来源，但优先于「码是否等于输入」。
             CandidateSource::CodeTable if c.is_phrase => 1,
             CandidateSource::CodeTable if c.code == ctx.codetable_exact => 0,
@@ -832,8 +829,6 @@ impl MixedEngine {
                 .convert(&prefix, max_candidates)
                 .unwrap_or_default()
                 .candidates;
-            // 空码组词只管码长以内：前 N 码前缀上组出的词既不消费整串，也不该在超码长区间露面。
-            codetable.retain(|c| !c.is_lexicon_composed);
             if has_full_or_longer {
                 let full = self
                     .primary
@@ -1064,9 +1059,7 @@ impl Engine for MixedEngine {
         let has_pinyin = !pinyin.is_empty();
         // 上屏否决只数非低置信的拼音候选：满码唯一的五笔字不该被一条打错才凑出来的拼音候选拦下。
         let pinyin_vetoes = pinyin.iter().any(|c| !c.is_low_confidence());
-        // 只有空码组词也算「中文侧空」：组词是猜出来的，不该把英文从前缀补全页降成只收整词。
-        let ct_empty = codetable.iter().all(|c| c.is_lexicon_composed);
-        let english = self.english_for_display(input, ct_empty && !has_pinyin);
+        let english = self.english_for_display(input, codetable.is_empty() && !has_pinyin);
         let mut merged = codetable;
         merged.extend(pinyin);
         merged.extend(english);
@@ -1805,70 +1798,6 @@ mod tests {
         fn completed_syllable_count(&self, _prefix: &str) -> usize {
             self.syllables
         }
-    }
-
-    /// 开了空码组词的码表主引擎：码表没收「付了」（词组码 wfbn），拼音库里有。
-    fn ct_engine_compose() -> Box<dyn Engine> {
-        let mut d = CodetableDict::empty();
-        for (i, (code, text, w)) in [("wfi", "付", 800), ("wf", "付", 9950), ("bnh", "了", 900)]
-            .iter()
-            .enumerate()
-        {
-            d.merge_single(code.to_string(), text.to_string(), *w, i as i32);
-        }
-        let dm = DictManager::new();
-        dm.register_layer(Box::new(SystemDictLayer::new(CachedDict::Memory(d), "sys")));
-        let mut py = CodetableDict::empty();
-        py.merge_single("fu le".into(), "付了".into(), 500, 0);
-        let spec = wind_config::schema::EncoderSpec {
-            rules: vec![wind_config::schema::EncoderRule {
-                length_equal: 2,
-                formula: "AaAbBaBb".into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let opts = CommitOptions {
-            compose_input: true,
-            ..Default::default()
-        };
-        Box::new(
-            CodeTableEngine::new(4, opts, Arc::new(dm)).with_composer(
-                crate::codetable::WordComposer::new(4, spec)
-                    .with_pinyin_dict(Arc::new(CachedDict::Memory(py))),
-            ),
-        )
-    }
-
-    /// 码长以内组词排在拼音之后；超码长（混合 overflow）里前 N 码前缀组出的词不露面。
-    #[test]
-    fn composed_words_trail_pinyin_and_stay_out_of_overflow() {
-        let e = MixedEngine::new(
-            ct_engine_compose(),
-            Some(Box::new(FakePinyin {
-                word: "拼音",
-                syllables: 0,
-            })),
-            None,
-            MixConfig {
-                pinyin_only_overflow: false,
-                ..Default::default()
-            },
-        );
-        let texts = |input: &str| -> Vec<String> {
-            e.convert(input, 50)
-                .unwrap()
-                .candidates
-                .into_iter()
-                .map(|c| c.text)
-                .collect()
-        };
-        assert_eq!(texts("wfbn"), ["拼音", "付了"]);
-        assert!(
-            !texts("wfbnq").iter().any(|t| t == "付了"),
-            "超码长不出组词：{:?}",
-            texts("wfbnq")
-        );
     }
 
     // ── 满码空码清空：拼音「后续可能性」守护 ──

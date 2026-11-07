@@ -389,15 +389,6 @@ pub struct CodeTableSpec {
     /// （见 `CodeTableEngine::new`）。
     #[serde(default)]
     pub sentence_input: bool,
-    /// 空码组词：码长以内的串若空码，按 `[[encoder.rules]]` 反查、或拆成几段拼字，补出
-    /// 拼音词库里的词（码表没收、但这串码打得出的词）。只显示、不参与顶码与满码自动上屏。
-    /// 设计与实测见 `docs/design/codetable-sentence-input.md` §13。
-    ///
-    /// 引擎固定参数，同 `sentence_input`；出厂 `false`。**与 `sentence_input` 互斥**：两者
-    /// 同开时整句生效、本项不生效（构建时告警）。混输方案取混输方案自己的声明，组词候选
-    /// 排在拼音之后。
-    #[serde(default)]
-    pub compose_input: bool,
     /// 逆切分（切分模式）：**恰好** `max_code_length` 长的串若空码，切成前后两段
     /// （各 `max_code_length / 2` 码）各查词典，把结果拼成组合候选。
     /// 设计与判据见 `docs/design/codetable-split-input.md`（需求来源：论坛 t11）。

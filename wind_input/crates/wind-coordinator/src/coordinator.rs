@@ -6528,8 +6528,7 @@ impl Coordinator {
             // 通配结果不参与顶码（spec §3.2）：混输下 4 码通配串 +1 键会把整串判成超长字面串，
             // 通配探测放行、拼音也接不了，前缀恰为顶码前缓冲，显示首选就是通配结果——
             // 在此剔除，与通配关闭 / 纯码表的行为一致（该键只判字面串，不上屏通配结果）。
-            // 空码组词也不顶：它是按词库猜的，空码多半是打错了码。
-            (c.source == CandidateSource::CodeTable && !c.is_wildcard && !c.is_lexicon_composed)
+            (c.source == CandidateSource::CodeTable && !c.is_wildcard)
                 || ((c.is_phrase || c.is_command) && self.phrase_has_exact_code(state, &pre_buf))
         });
         // 在光标处插入（光标在末尾时等价于旧的 push）。后续顶码/候选刷新一律按整串
@@ -10904,7 +10903,9 @@ impl Coordinator {
     /// 光看候选文本分不清「用户词赢了」和「系统词本来就长这样」。
     fn debug_source_label(&self, c: &Candidate, ctx: &DebugSchemaCtx) -> String {
         let base = self.debug_source_base(c, ctx);
-        match sentence_debug_tag(c).or_else(|| composed_debug_tag(c)) {
+        // 逆切分候选的 `code` 是整串、来源是码表，不标出来就和词库词条长得一模一样。
+        let tag = sentence_debug_tag(c).or_else(|| c.is_split_composed.then(|| "逆切分".into()));
+        match tag {
             Some(tag) => format!("{base} · {tag}"),
             None => base,
         }
@@ -11034,38 +11035,6 @@ fn sentence_debug_tag(c: &Candidate) -> Option<String> {
         String::new()
     };
     Some(format!("整句{rank}({kind}{demoted})"))
-}
-
-/// 码表合成候选的身份标记：空码组词、逆切分。两者的 `code` 都是整串、来源都是码表，
-/// 不标出来就和词库里的词条长得一模一样。
-fn composed_debug_tag(c: &Candidate) -> Option<String> {
-    if c.is_lexicon_composed {
-        Some("空码组词".into())
-    } else if c.is_split_composed {
-        Some("逆切分".into())
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-mod composed_debug_tag_tests {
-    use super::*;
-
-    #[test]
-    fn composed_candidates_are_tagged() {
-        let c = |f: fn(&mut Candidate)| {
-            let mut c = Candidate::default();
-            f(&mut c);
-            composed_debug_tag(&c)
-        };
-        assert_eq!(
-            c(|c| c.is_lexicon_composed = true).as_deref(),
-            Some("空码组词")
-        );
-        assert_eq!(c(|c| c.is_split_composed = true).as_deref(), Some("逆切分"));
-        assert_eq!(c(|_| {}), None);
-    }
 }
 
 #[cfg(test)]
