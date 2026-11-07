@@ -27,6 +27,20 @@
 
 ---
 
+## 2026-11-07 · 联想态可不挂占位组合（0.131）
+
+- 合入：（合入后填）；范围：Windows TSF，仅 compat 规则配了 `assoc_placeholder = "none"` 的应用（出厂：Excel、WPS 表格）
+- 变化：
+  - 联想窗出现时，宿主里不再有占位空格 / 零宽空格，表格自己的单元格提示不被干扰。
+  - 联想窗位置钉在联想出现处，不随宿主上报的远处光标飘走。
+  - 点别的单元格（鼠标）或挪光标，联想窗立即消失；前：要等自动隐藏计时到期。
+- 触发条件：该应用的 compat 规则 `assoc_placeholder = "none"`；其它应用不受影响（不写则跟随 `composition_placeholder`）
+- 回退旧行为：把该应用的 `assoc_placeholder` 改回 `space` / `zwsp` / `blank`，或删掉这一行
+- 钉住的测试：`wind-coordinator` `handle_assoc::tests::assoc_none_mounts_no_placeholder_but_keeps_the_session_flag` /
+  `bare_assoc_ignores_far_caret_reports_for_anchoring` / `bare_assoc_exits_when_user_moves_the_caret` /
+  `bare_assoc_released_by_passthrough_realigns_the_session_cache`；`wind-bridge` `server::tests::assoc_session_flag_only_on_plain_commit`
+- 来源：内部（WPS 表格 / Excel 靶机实测）
+
 ## 2026-11-06 · 码表整句：语法模型、词典组词、N-best（0.131）
 
 - 合入：14a4e9b0；范围：码表方案，仅方案开了 `[engine.codetable] sentence_input = true`
