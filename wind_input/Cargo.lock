@@ -2443,6 +2443,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind-scene"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "image",
+ "resvg",
+ "tiny-skia",
+ "tracing",
+ "wind-theme",
+ "wind-ui-types",
+]
+
+[[package]]
 name = "wind-softkeyboard"
 version = "0.1.0"
 dependencies = [
@@ -2550,6 +2563,7 @@ dependencies = [
  "wind-config",
  "wind-ipc",
  "wind-keys",
+ "wind-scene",
  "wind-theme",
  "wind-ui-types",
  "windows",

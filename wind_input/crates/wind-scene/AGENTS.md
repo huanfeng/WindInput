@@ -1,0 +1,14 @@
+<!-- Parent: ../../AGENTS.md -->
+<!-- Updated: 2026-11-07 -->
+
+# wind-scene
+
+## Purpose
+候选窗等浮层渲染的平台无关部分：View 盒模型、图片缓存、异形皮肤、文字公共类型与 `TextBackend` trait。
+从 wind-ui 逐步抽出（P3，方案见 `docs/design/wind-scene-extraction.md`），wind-ui 以 `pub use` 保留原路径。
+
+## For AI Agents
+- **不准依赖 wind-config**（uuid / dirs 挡 wasm）；平台 API、`cfg(windows)` / `cfg(target_os)` 一律不进本 crate。
+- `image` 单独声明、不开 rayon；取时间走 `clock::now()`，别直接 `Instant::now()`。
+- 测试专用 API 用 `#[cfg(any(test, feature = "test-util"))] pub`；wind-ui 的 dev-dependencies 开 `test-util`。
+- 本 crate 的测试文字后端是 `MockText`（与 wind-ui mock 同公式：字符数 × 字号 × 0.6，高 1.2 × 字号）。

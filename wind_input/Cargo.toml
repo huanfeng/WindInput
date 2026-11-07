@@ -16,6 +16,7 @@ members = [
     "crates/wind-host",
     "crates/wind-mobile",
     "crates/wind-ui",
+    "crates/wind-scene",
     "crates/wind-cmdbar",
     "crates/wind-phrase",
     "crates/wind-keys",
