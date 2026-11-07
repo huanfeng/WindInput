@@ -63,7 +63,7 @@ pub mod soft_keyboard;
 /// macOS 软键盘面板的主线程宿主（AppKit 只能在主线程碰，forwarder 是工作线程）。
 #[cfg(target_os = "macos")]
 pub mod softkeyboard_host_macos;
-mod span_runs;
+use wind_scene::span_runs;
 pub mod status_tip;
 pub mod sys;
 /// macOS 系统明暗变更监听。对位 Windows 消息泵里的 `WM_SETTINGCHANGE`。

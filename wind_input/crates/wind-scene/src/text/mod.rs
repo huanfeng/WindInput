@@ -3,6 +3,9 @@
 //! 平台后端（DirectWrite / CoreText / Linux / mock）在 wind-ui 实现 [`TextBackend`]；
 //! 本模块只放它们与 View 共用的平台无关部分。
 
+// 按脚本切字体段的纯逻辑（不依赖任何平台 API）。
+pub mod script;
+
 /// 文本度量信息
 #[derive(Debug, Clone)]
 pub struct TextMetrics {
