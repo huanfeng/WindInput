@@ -779,15 +779,28 @@ void WindEngine::noteHostCursor(fcitx::InputContext* ic)
     // Qt 系鼠标点击只报光标位置、不发 reset：按键前拿宿主报的光标比预期（SeqTracker::noteCursor）。
     // 放在按键时而不是周边文本更新时判：上屏那一刻宿主会先报中间态，到下一键时最终位置早已到了。
     // 有选区、无效或不支持周边文本：按「宿主给不出」处理。
+    // 光标位置碰巧对得上（点到别的行同一列、点回上屏前的位置）时，再看光标两侧的字。
     int cursor = -1;
+    int32_t hostPrev = -1;
+    int32_t hostNext = -1;
     if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
         const auto& st = ic->surroundingText();
         if (st.isValid() && st.anchor() == st.cursor()) {
             cursor = int(st.cursor());
+            const std::string& text = st.text();
+            const size_t len = fcitx::utf8::length(text);
+            auto charAt = [&](size_t i) -> int32_t {
+                uint32_t cp = fcitx::utf8::getChar(fcitx::utf8::nextNChar(text.begin(), i), text.end());
+                return cp == fcitx::utf8::INVALID_CHAR ? -1 : int32_t(cp);
+            };
+            if (st.cursor() <= len) {
+                hostPrev = st.cursor() == 0 ? 0 : charAt(st.cursor() - 1);
+                hostNext = st.cursor() == len ? 0 : charAt(st.cursor());
+            }
         }
     }
     const uint16_t before = router_.seqTracker().seqChar();
-    router_.seqTracker().noteCursor(cursor);
+    router_.seqTracker().noteCursor(cursor, hostPrev, hostNext);
     if (before != router_.seqTracker().seqChar()) {
         WIND_DEBUG() << "光标与预期不符（被挪过）：输入序列记账作废 cursor=" << cursor;
     }
