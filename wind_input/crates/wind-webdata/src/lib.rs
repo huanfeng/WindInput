@@ -4042,8 +4042,8 @@ pub trait WebDataRpc: WebDataHost {
     ///
     /// ⚠️ `path` **不做任何校验**，这条成立的前提是 `path` 永远不由网页或远端决定：
     /// 这条 RPC 只经本机 ctrl 通道调用——设置端「导出…」的路径来自原生保存框，CLI 来自
-    /// 命令行参数；设置端的主题编辑器连接（本机网页的出包路由）也调用它，但 `path` 是
-    /// 设置端在自己的私有临时目录里以独占方式（O_EXCL）新建的文件，网页只给得了 slug。
+    /// 命令行参数。设置端的主题编辑器连接（本机网页路由）若要出包，`path` 必须是设置端
+    /// 在自己的私有临时目录里以独占方式（O_EXCL）新建的文件，网页只能给 slug。
     /// 哪天要让网页或远端影响 `path`，它就是一个任意写——**那时必须先加落点白名单**。
     fn web_theme_export_package(&self, params: &Value) -> anyhow::Result<Value> {
         let slug = str_param(params, "slug")?;
