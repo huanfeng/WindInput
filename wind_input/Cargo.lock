@@ -2468,6 +2468,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind-scene-wasm"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wind-scene",
+ "wind-theme",
+ "wind-ui-types",
+]
+
+[[package]]
 name = "wind-softkeyboard"
 version = "0.1.0"
 dependencies = [
