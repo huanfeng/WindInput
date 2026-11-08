@@ -12,6 +12,7 @@
 #include "Codec.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -94,5 +95,16 @@ Rect placeOverlay(const OverlayFramePayload& p, const Rect& workArea, int32_t sh
 /// 命中测试：返回命中的候选下标（翻页按钮为 -1 上页 / -2 下页）；没命中返回 `kNoHit`。
 constexpr int32_t kNoHit = INT32_MIN;
 int32_t hitTest(const std::vector<CandidateHitRect>& rects, int32_t px, int32_t py);
+
+// ── 皮肤输入区（CMD_CANDIDATE_SKIN，设计 theme-skin-animation.md §17.3）──
+
+/// 候选窗该只在哪些矩形里接鼠标（位图像素，已裁进 `w × h`、去掉空矩形）。皮肤没带输入区表
+/// （普通主题、旧服务）返回空 optional：X11 复位成缺省输入区，Wayland 用整块候选窗。
+/// 带了表但裁完为空，返回空表——整窗都不接鼠标。
+std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin, uint32_t w,
+                                                      uint32_t h);
+
+/// 位图像素矩形折成逻辑坐标（÷ scale）：向外取整，宽高至少 1。Wayland 输入区用。
+Rect toLogicalCover(const Rect& r, double scale);
 
 } // namespace windlinux

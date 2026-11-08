@@ -22,6 +22,11 @@ struct Rect {
     int32_t w = 0;
     int32_t h = 0;
 };
+inline bool operator==(const Rect& a, const Rect& b)
+{
+    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+inline bool operator!=(const Rect& a, const Rect& b) { return !(a == b); }
 
 struct Frame {
     uint16_t cmd = 0;
@@ -255,6 +260,23 @@ struct CandidateHitRect {
 };
 /// CMD_CANDIDATE_RECTS（push）：count u32 + count × (index,x,y,w,h 各 i32)。
 std::optional<std::vector<CandidateHitRect>> decodeCandidateRects(const Bytes& p);
+
+/// CMD_CANDIDATE_SKIN 里的一块装饰。坐标同 CandidateHitRect（位图内设备像素）。
+struct SkinDecor {
+    uint32_t index = 0; // 变体 decor 下标（服务端装饰状态机同号）
+    uint32_t hit = 0;   // SKIN_HIT_*
+    uint32_t flags = 0; // SKIN_DECOR_*
+    Rect rect;
+};
+/// CMD_CANDIDATE_SKIN（push）：flags u32 + frame 4×i32 + decorN u32 + decorN × (index hit flags u32 +
+/// x y w h i32，28 字节) + maskN u32 + maskN × (x y w h i32)。没启用皮肤时 flags = 0、两表为空。
+struct CandidateSkin {
+    uint32_t flags = 0; // SKIN_FLAG_*
+    Rect frame;
+    std::vector<SkinDecor> decor;
+    std::vector<Rect> mask; // 输入区（flags 带 SKIN_FLAG_MASK 时有效）
+};
+std::optional<CandidateSkin> decodeCandidateSkin(const Bytes& p);
 
 struct ExtEnvelope {
     std::string kind;

@@ -1284,6 +1284,16 @@ void WindEngine::onPushFrame(Frame frame)
             panel_->setRects(std::move(*rects));
         }
         break;
+    case CMD_CANDIDATE_SKIN:
+        if (auto skin = decodeCandidateSkin(frame.payload)) {
+#ifdef WIND_HAVE_WAYLAND
+            if (wlPanel_) {
+                wlPanel_->setSkin(*skin);
+            }
+#endif
+            panel_->setSkin(std::move(*skin));
+        }
+        break;
     case CMD_OVERLAY_FRAME:
         if (auto p = decodeOverlayFrame(frame.payload)) {
             onOverlayFrame(*p);
@@ -1330,7 +1340,8 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     }
     wlPanel_->hide();
 #endif
-    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0);
+    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0,
+                 (p.flags & FRAME_FLAG_ANIM_FRAME) != 0);
 }
 
 void WindEngine::hideAllWayland()

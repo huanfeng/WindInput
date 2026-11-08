@@ -289,6 +289,48 @@ void TestDecodeRender()
     CHECK(!decodeExt(e).has_value());
 }
 
+void TestCandidateSkin()
+{
+    CASE("CandidateSkin：偏移按 Rust `encode_candidate_skin` 写死（同一组样例）；截断返回空");
+    Bytes p;
+    for (uint32_t v : {3u, 10u, 20u, 300u, 120u, 2u,                           // flags frame decorN
+                       2u, 2u, 3u, uint32_t(-5), uint32_t(-6), 40u, 50u,       // 穿透装饰
+                       0u, 1u, 0u, 1u, 2u, 3u, 4u,                             // block 装饰
+                       2u, 10u, 20u, 300u, 1u, 0u, 0u, 7u, 8u}) {              // maskN mask
+        append(p, le32(v));
+    }
+    CHECK_EQ(p.size(), size_t(4 + 16 + 4 + 2 * 28 + 4 + 2 * 16));
+    auto s = decodeCandidateSkin(p);
+    CHECK(s.has_value());
+    CHECK_EQ(s->flags, SKIN_FLAG_ACTIVE | SKIN_FLAG_MASK);
+    CHECK_EQ(s->frame.x, 10);
+    CHECK_EQ(s->frame.h, 120);
+    CHECK_EQ(s->decor.size(), size_t(2));
+    CHECK_EQ(s->decor[0].index, 2u);
+    CHECK_EQ(s->decor[0].hit, SKIN_HIT_PASS);
+    CHECK_EQ(s->decor[0].flags, SKIN_DECOR_UNDER | SKIN_DECOR_SPLIT);
+    CHECK_EQ(s->decor[0].rect.x, -5);
+    CHECK_EQ(s->decor[0].rect.y, -6);
+    CHECK_EQ(s->decor[0].rect.h, 50);
+    CHECK_EQ(s->decor[1].hit, SKIN_HIT_BLOCK);
+    CHECK_EQ(s->decor[1].rect.w, 3);
+    CHECK_EQ(s->mask.size(), size_t(2));
+    CHECK_EQ(s->mask[0].w, 300);
+    CHECK_EQ(s->mask[1].h, 8);
+    // 没启用皮肤：28 字节全零。
+    auto none = decodeCandidateSkin(Bytes(28, 0));
+    CHECK(none && none->flags == 0 && none->decor.empty() && none->mask.empty());
+    // 任何一处截断都拒收。
+    for (size_t cut : {size_t(1), size_t(4 * 2 + 16 * 2), size_t(20)}) {
+        Bytes t(p.begin(), p.end() - cut);
+        CHECK(!decodeCandidateSkin(t).has_value());
+    }
+    // 计数大得离谱：拒收，不去分配。
+    Bytes huge = Bytes(20, 0);
+    append(huge, le32(0xFFFFFFFFu));
+    CHECK(!decodeCandidateSkin(huge).has_value());
+}
+
 void TestStableHash()
 {
     CASE("stableHash：空串 0，非空恒非 0 且稳定");
@@ -378,6 +420,7 @@ int main()
     TestDecodeMisc();
     TestDecodeRender();
     TestOverlayDragTail();
+    TestCandidateSkin();
     TestStableHash();
     TEST_MAIN_END();
 }

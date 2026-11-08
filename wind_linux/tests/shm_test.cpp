@@ -274,6 +274,36 @@ void TestHitTest()
     CHECK_EQ(hitTest(rects, 0, 0), kNoHit);
 }
 
+void TestSkinInputRegion()
+{
+    CASE("皮肤输入区：没带表 → 空 optional（缺省输入区）；带表 → 裁进位图、去掉空矩形");
+    CandidateSkin skin;
+    CHECK(!candidateInputRegion(skin, 100, 50).has_value()); // 普通主题
+    skin.flags = SKIN_FLAG_ACTIVE;
+    skin.mask = {{0, 0, 10, 10}};
+    CHECK(!candidateInputRegion(skin, 100, 50).has_value()); // 皮肤但没带表（macOS 形态）
+    skin.flags |= SKIN_FLAG_MASK;
+    skin.mask = {{-4, 2, 10, 5}, {95, 45, 20, 20}, {200, 0, 5, 5}, {3, 3, 0, 4}};
+    auto r = candidateInputRegion(skin, 100, 50);
+    CHECK(r.has_value());
+    CHECK_EQ(r->size(), size_t(2));
+    CHECK((*r)[0].x == 0 && (*r)[0].y == 2 && (*r)[0].w == 6 && (*r)[0].h == 5);
+    CHECK((*r)[1].x == 95 && (*r)[1].y == 45 && (*r)[1].w == 5 && (*r)[1].h == 5);
+    skin.mask.clear();
+    auto empty = candidateInputRegion(skin, 100, 50);
+    CHECK(empty.has_value() && empty->empty()); // 带了表但为空：整窗都不接鼠标
+
+    CASE("位图像素 → 逻辑坐标：向外取整，宽高至少 1");
+    Rect a = toLogicalCover(Rect{3, 4, 5, 1}, 2.0);
+    CHECK(a.x == 1 && a.y == 2 && a.w == 3 && a.h == 1);
+    Rect b = toLogicalCover(Rect{10, 10, 30, 15}, 1.5);
+    CHECK(b.x == 6 && b.y == 6 && b.w == 21 && b.h == 11);
+    Rect c = toLogicalCover(Rect{7, 8, 9, 10}, 1.0);
+    CHECK(c.x == 7 && c.y == 8 && c.w == 9 && c.h == 10);
+    Rect d = toLogicalCover(Rect{7, 8, 9, 10}, 0.0); // 坏缩放按 1
+    CHECK(d.w == 9);
+}
+
 } // namespace
 
 int main()
@@ -285,5 +315,6 @@ int main()
     TestPlacement();
     TestOverlayPlacement();
     TestHitTest();
+    TestSkinInputRegion();
     TEST_MAIN_END();
 }

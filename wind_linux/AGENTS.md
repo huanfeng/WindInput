@@ -182,6 +182,13 @@ addon 在主线程（经 EventDispatcher）按名只读打开 SHM、拷出一帧
   别的用户抢先建了我们的名字，服务端建不了段（候选窗不显示），但拿不到也伪造不了内容。
 - 悬停只报候选下标（≥0）：命中表里 -1/-2 是翻页按钮，而悬停协议里 -1 表示「无」。点击翻页
   按钮直接发负下标的 `CMD_CANDIDATE_SELECT`（服务端按 -1 上页 / -2 下页处理）。滚轮 ±120。
+- **异形皮肤**（设计 `docs/design/theme-skin-animation.md` §17）：每帧在帧本身之前先到一条
+  `CMD_CANDIDATE_SKIN`（`Codec.h` 的 `CandidateSkin`）。带输入区表（`SKIN_FLAG_MASK`）时候选窗
+  `SK_INPUT` 设成表里的矩形（穿透装饰、透明外扩区不接鼠标，ARGB 与无合成器两条路都设），没带就复位成
+  缺省；换算是纯函数 `candidateInputRegion`。帧带 `FRAME_FLAG_ANIM_FRAME`（皮肤动画换帧）时照原位贴图、
+  不 raise。候选窗不能拖，`drag` 装饰在这里等同 `block`。没有 SHAPE 扩展时整窗接鼠标（记一条 warn）。
+  Wayland 同一张表折成逻辑坐标进 `wl_surface` 输入区。e2e：`WIND_E2E_ONLY=skin scripts/linux/e2e.sh`
+  （程序生成的皮肤主题，`xdotool getmouselocation` 判指针下的窗口）。
 
 ## 光栅浮层：状态气泡 / Toast / 悬停提示（X11）
 

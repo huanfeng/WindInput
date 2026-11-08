@@ -67,11 +67,15 @@ public:
     ~X11CandidatePanel();
 
     /// 贴一帧并显示。`x/y` 为服务端建议的左上角（wire 坐标 = 根窗口坐标）。
-    /// 没有 X 连接（无 DISPLAY / 连不上）时返回 false、什么都不做。
-    bool show(const SharedFrame& frame, int32_t x, int32_t y, bool absolute);
+    /// `anim`（FRAME_FLAG_ANIM_FRAME）：皮肤换帧，已显示时照原位贴图、不 raise（否则每帧压住
+    /// tooltip / 菜单）。没有 X 连接（无 DISPLAY / 连不上）时返回 false、什么都不做。
+    bool show(const SharedFrame& frame, int32_t x, int32_t y, bool absolute, bool anim = false);
     void hide();
     /// 命中矩形（CMD_CANDIDATE_RECTS，晚于帧到达）。坐标是位图内的像素。
     void setRects(std::vector<CandidateHitRect> rects) { rects_ = std::move(rects); }
+    /// 皮肤区域（CMD_CANDIDATE_SKIN，先于对应的帧到达，`show` 时生效）：带输入区表时候选窗
+    /// `SK_INPUT` 设成它，否则复位成缺省（整窗）。设计 theme-skin-animation.md §17.3。
+    void setSkin(CandidateSkin skin);
 
     /// 光栅浮层（CMD_OVERLAY_FRAME：tooltip / 状态气泡 / Toast）：各占一个窗口，落位见
     /// `placeOverlay`。`durationMs > 0` 时到点自己藏（计时归宿主，同 macOS `.app`）。
@@ -257,6 +261,13 @@ private:
     int32_t candShiftY_ = 0;
 
     std::vector<CandidateHitRect> rects_;
+    /// 最近一条皮肤区域，以及已设到哪个窗口上的输入区（窗口重建后要补设；相同就不重发）。
+    CandidateSkin skin_;
+    xcb_window_t candInputWindow_ = 0;
+    std::optional<std::vector<Rect>> candInputApplied_;
+    bool warnedNoShapeInput_ = false;
+    /// 按 `skin_` 设候选窗输入区（见 `setSkin`）。
+    void applyCandidateInput();
     int32_t hover_ = -1; // 最近报给服务端的悬停
     ClickGate click_;    // 左键点选：按下记命中，松开同一项才选
     int32_t pendingHover_ = -1;

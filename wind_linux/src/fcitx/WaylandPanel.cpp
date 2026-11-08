@@ -1230,7 +1230,7 @@ bool WaylandCandidatePanel::present(fcitx::InputContext* ic)
     }
     if (n == 1 && placed[0].x == 0 && placed[0].y == 0) {
         const SharedFrame& f = *placed[0].f;
-        return attachPixels(f.bgra.data(), f.width, f.height, f.stride, candW, candH);
+        return attachPixels(f.bgra.data(), f.width, f.height, f.stride, candW, candH, !menuOn);
     }
     const uint32_t stride = canvasW * 4;
     std::vector<uint8_t> canvas(size_t(stride) * canvasH, 0);
@@ -1252,7 +1252,7 @@ bool WaylandCandidatePanel::present(fcitx::InputContext* ic)
             }
         }
     }
-    return attachPixels(canvas.data(), canvasW, canvasH, stride, candW, candH);
+    return attachPixels(canvas.data(), canvasW, canvasH, stride, candW, candH, !menuOn);
 }
 
 wl_buffer* WaylandCandidatePanel::makeBuffer(const uint8_t* data, uint32_t w, uint32_t h,
@@ -1311,8 +1311,15 @@ void WaylandCandidatePanel::applyScale(wl_surface* s, wp_viewport*& vp, uint32_t
     }
 }
 
+void WaylandCandidatePanel::setSkin(CandidateSkin skin)
+{
+    // 服务端先推皮肤区域、再推这一帧（设计 §17.2）：只记下，贴这一帧时设输入区。
+    skin_ = std::move(skin);
+}
+
 bool WaylandCandidatePanel::attachPixels(const uint8_t* data, uint32_t w, uint32_t h,
-                                         uint32_t stride, uint32_t inputW, uint32_t inputH)
+                                         uint32_t stride, uint32_t inputW, uint32_t inputH,
+                                         bool skinMask)
 {
     wl_buffer* buf = makeBuffer(data, w, h, stride);
     if (!buf) {
@@ -1325,8 +1332,17 @@ bool WaylandCandidatePanel::attachPixels(const uint8_t* data, uint32_t w, uint32
     {
         wl_region* region = wl_compositor_create_region(compositor_);
         if (inputW > 0 && inputH > 0) {
-            wl_region_add(region, 0, 0, std::max(1, int(std::lround(inputW / sc))),
-                          std::max(1, int(std::lround(inputH / sc))));
+            // 皮肤带输入区表：候选那一块只按表收（穿透装饰、透明外扩区不收，设计 §17.3）。
+            auto skin = skinMask ? candidateInputRegion(skin_, inputW, inputH) : std::nullopt;
+            if (skin) {
+                for (const Rect& px : *skin) {
+                    const Rect r = toLogicalCover(px, sc);
+                    wl_region_add(region, r.x, r.y, r.w, r.h);
+                }
+            } else {
+                wl_region_add(region, 0, 0, std::max(1, int(std::lround(inputW / sc))),
+                              std::max(1, int(std::lround(inputH / sc))));
+            }
         }
         if (popupStatusRect_) {
             // 状态气泡也收鼠标：悬停保持、右键菜单

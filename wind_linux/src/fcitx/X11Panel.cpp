@@ -471,7 +471,7 @@ void X11CandidatePanel::unmapWindow(Surface& s)
     }
 }
 
-bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool absolute)
+bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool absolute, bool anim)
 {
     if (f.width == 0 || f.height == 0 || f.bgra.empty() || !ensureConnection()) {
         return false;
@@ -483,10 +483,60 @@ bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool ab
         WIND_WARN() << "深度 " << int(cand_.depth) << " 的像素格式不是 32 bpp，候选窗不显示";
         return false;
     }
-    Rect r = placePanel(x, y, int32_t(f.width), int32_t(f.height), workArea(), absolute);
-    candShiftX_ = r.x - x;
-    candShiftY_ = r.y - y;
-    return present(cand_, f, r);
+    // 换帧：内容与落位都没变，照原位贴、不 raise。窗口刚重建（合成器起停）或尺寸变了就按普通帧走。
+    const bool inPlace = anim && cand_.mapped && cand_.pixW == f.width && cand_.pixH == f.height;
+    Rect r = inPlace ? Rect{cand_.x, cand_.y, int32_t(f.width), int32_t(f.height)}
+                     : placePanel(x, y, int32_t(f.width), int32_t(f.height), workArea(), absolute);
+    if (!inPlace) {
+        candShiftX_ = r.x - x;
+        candShiftY_ = r.y - y;
+    }
+    const bool ok = present(cand_, f, r, !inPlace);
+    applyCandidateInput(); // 按这一帧的尺寸与皮肤区域设输入区（窗口可能刚重建）
+    return ok;
+}
+
+void X11CandidatePanel::setSkin(CandidateSkin skin)
+{
+    // 服务端先推皮肤区域、再推这一帧（设计 §17.2）：只记下，`show` 贴完这一帧再设输入区。
+    skin_ = std::move(skin);
+}
+
+void X11CandidatePanel::applyCandidateInput()
+{
+    if (!conn_ || !cand_.window || cand_.pixW == 0) {
+        return;
+    }
+    if (candInputWindow_ != cand_.window) {
+        candInputWindow_ = cand_.window; // 新窗口：输入区是缺省
+        candInputApplied_.reset();
+    }
+    auto region = candidateInputRegion(skin_, cand_.pixW, cand_.pixH);
+    if (region == candInputApplied_) {
+        return;
+    }
+    if (!shapeAvailable_) {
+        if (region && !warnedNoShapeInput_) {
+            warnedNoShapeInput_ = true;
+            WIND_WARN() << "X 服务器没有 SHAPE 扩展：皮肤的穿透装饰按 block 处理（整窗接鼠标）";
+        }
+        return;
+    }
+    if (region) {
+        std::vector<xcb_rectangle_t> rects;
+        rects.reserve(region->size());
+        for (const Rect& r : *region) {
+            rects.push_back({int16_t(r.x), int16_t(r.y), uint16_t(r.w), uint16_t(r.h)});
+        }
+        xcb_shape_rectangles(conn_, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
+                             XCB_CLIP_ORDERING_UNSORTED, cand_.window, 0, 0,
+                             uint32_t(rects.size()), rects.data());
+    } else {
+        // 复位成缺省输入区（无合成器时随 BOUNDING，有合成器时整窗）。
+        xcb_shape_mask(conn_, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT, cand_.window, 0, 0, XCB_NONE);
+    }
+    candInputApplied_ = std::move(region);
+    xcb_flush(conn_);
 }
 
 void X11CandidatePanel::hide()

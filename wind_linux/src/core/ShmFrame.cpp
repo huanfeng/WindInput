@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -203,6 +204,36 @@ int32_t hitTest(const std::vector<CandidateHitRect>& rects, int32_t px, int32_t 
         }
     }
     return kNoHit;
+}
+
+std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin, uint32_t w,
+                                                      uint32_t h)
+{
+    if ((skin.flags & SKIN_FLAG_ACTIVE) == 0 || (skin.flags & SKIN_FLAG_MASK) == 0) {
+        return std::nullopt;
+    }
+    std::vector<Rect> out;
+    out.reserve(skin.mask.size());
+    for (const Rect& r : skin.mask) {
+        const int64_t x0 = std::max<int64_t>(0, r.x), y0 = std::max<int64_t>(0, r.y);
+        const int64_t x1 = std::min<int64_t>(w, int64_t(r.x) + r.w);
+        const int64_t y1 = std::min<int64_t>(h, int64_t(r.y) + r.h);
+        if (x1 > x0 && y1 > y0) {
+            out.push_back(Rect{int32_t(x0), int32_t(y0), int32_t(x1 - x0), int32_t(y1 - y0)});
+        }
+    }
+    return out;
+}
+
+Rect toLogicalCover(const Rect& r, double scale)
+{
+    if (!(scale > 0)) {
+        scale = 1;
+    }
+    const auto x0 = int32_t(std::floor(r.x / scale)), y0 = int32_t(std::floor(r.y / scale));
+    const auto x1 = int32_t(std::ceil((double(r.x) + r.w) / scale));
+    const auto y1 = int32_t(std::ceil((double(r.y) + r.h) / scale));
+    return Rect{x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0)};
 }
 
 } // namespace windlinux

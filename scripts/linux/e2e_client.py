@@ -149,24 +149,25 @@ def candidate_window(classname="wind-candidate"):
 
 
 def xwd_to_png(xwd_bytes, png_path):
-    """把 `xwd -root` 的输出转成 PNG（只支持每像素 4 字节的 ZPixmap，Xvfb 24 位深就是它）。
+    """把 `xwd` 的输出转成 PNG（只支持每像素 3 或 4 字节的 ZPixmap）。
     返回 (宽, 高, 取像素函数)。不引第三方库：e2e 环境里没有 PIL。"""
     import struct
     import zlib
     hdr = struct.unpack(">25I", xwd_bytes[:100])
     header_size, width, height = hdr[0], hdr[4], hdr[5]
     byte_order, bpp, bytes_per_line, ncolors = hdr[7], hdr[11], hdr[12], hdr[19]
-    # 有合成器时 xwd 会在头里写 bits_per_pixel=24，实际每行仍按 4 字节/像素排（bytes_per_line
-    # = 宽×4）——以行宽为准。
-    assert bytes_per_line >= width * 4, f"只支持每像素 4 字节，头 {hdr[:20]}（bpp={bpp}）"
+    # 有 ARGB 窗口（合成器在）时 xwd 走多视觉路径：头里 bits_per_pixel=24，像素按 3 字节紧排，
+    # bytes_per_line 却仍是 宽×4（行尾空着）。按 bits_per_pixel 取，别按行宽推。
+    step = bpp // 8
+    assert step in (3, 4) and bytes_per_line >= width * step, f"不支持的像素格式，头 {hdr[:20]}"
     off = header_size + ncolors * 12
     data = xwd_bytes[off:off + bytes_per_line * height]
 
     def px(x, y):
-        i = y * bytes_per_line + x * 4
-        b = data[i:i + 4]
-        # LSBFirst(0)：内存里依次 B G R x
-        return (b[2], b[1], b[0]) if byte_order == 0 else (b[1], b[2], b[3])
+        i = y * bytes_per_line + x * step
+        b = data[i:i + step]
+        # LSBFirst(0)：内存里依次 B G R (x)；MSBFirst：(x) R G B
+        return (b[2], b[1], b[0]) if byte_order == 0 else tuple(b[step - 3:step])
 
     raw = bytearray()
     for y in range(height):
@@ -2023,6 +2024,147 @@ async def mode_icon_cases(bus, im):
     await c.ic.call_focus_out()
     await asyncio.sleep(0.2)
 
+# ── 异形皮肤（设计 theme-skin-animation.md §17）──────────────────────
+
+def png_bytes(w, h, rgba, frames=None):
+    """程序生成 PNG（RGBA8）；`frames` = [(rgba, 毫秒), …] 时生成 APNG（循环播放）。"""
+    import struct
+    import zlib
+
+    def chunk(tag, body):
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    def idat(px):
+        raw = bytearray()
+        for y in range(h):
+            raw.append(0)
+            raw.extend(px * w)
+        return zlib.compress(bytes(raw), 6)
+
+    out = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+    if not frames:
+        return out + chunk(b"IDAT", idat(rgba)) + chunk(b"IEND", b"")
+    out += chunk(b"acTL", struct.pack(">II", len(frames), 0))
+    seq = 0
+    for i, (px, ms) in enumerate(frames):
+        out += chunk(b"fcTL", struct.pack(">IIIIIHHBB", seq, w, h, 0, 0, ms, 1000, 0, 0))
+        seq += 1
+        if i == 0:
+            out += chunk(b"IDAT", idat(px))
+        else:
+            out += chunk(b"fdAT", struct.pack(">I", seq) + idat(px))
+            seq += 1
+    return out + chunk(b"IEND", b"")
+
+
+SKIN_COLORS = [bytes([255, 0, 0, 255]), bytes([0, 255, 0, 255]), bytes([0, 0, 255, 255]),
+               bytes([255, 255, 0, 255])]
+
+
+def write_skin_theme(name):
+    """60×40 白窗体；右上外侧 24×24 穿透装饰（四色 APNG，每帧 100ms，z = 1）；左上外侧 24×24
+    block 装饰（黑）。主题放用户层 themes/<name>/。"""
+    d = os.path.join(os.environ["W"], "xdg", "config", "WindInput", "themes", name)
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "frame.png"), "wb").write(png_bytes(60, 40, bytes([255, 255, 255, 255])))
+    open(os.path.join(d, "block.png"), "wb").write(png_bytes(24, 24, bytes([0, 0, 0, 255])))
+    open(os.path.join(d, "pass.png"), "wb").write(
+        png_bytes(24, 24, None, [(c, 100) for c in SKIN_COLORS]))
+    open(os.path.join(d, "theme.toml"), "w").write(f"""[meta]
+name = "{name}"
+[skin]
+density = 1
+[skin.horizontal.frame]
+image = "frame.png"
+stretch_x = [[20, 40]]
+stretch_y = [[15, 25]]
+fill = "stretch"
+[skin.horizontal.content]
+left = 6
+top = 6
+right = 6
+bottom = 6
+[[skin.horizontal.decor]]
+image = "pass.png"
+anchor = "frame.top_right"
+pivot = "bottom_left"
+z = 1
+hit = "pass"
+[[skin.horizontal.decor]]
+image = "block.png"
+anchor = "frame.top_left"
+pivot = "bottom_right"
+hit = "block"
+""")
+
+
+def pointer_window(x, y):
+    """指针挪到 (x, y)，返回指针下的顶层窗口 id（十进制串；根窗口为空串）。输入区（XShape
+    SK_INPUT）外的点会落到下面的窗口。"""
+    out = sh("xdotool", "mousemove", str(x), str(y), "getmouselocation", "--shell")
+    for line in out.splitlines():
+        if line.startswith("WINDOW="):
+            return line.split("=", 1)[1]
+    return ""
+
+
+async def skin_cases(bus, im):
+    """异形皮肤：穿透装饰不接鼠标、block 装饰与窗体接；透明外扩区不接；动图装饰按帧推。"""
+    write_skin_theme("e2e-skin")
+    await set_config("ui.theme.name", "e2e-skin")
+    c = await new_ctx(bus, im, "e2e-skin")
+    await c.ic.call_set_cursor_rect(300, 300, 2, 20)
+    await c.type("nihao")
+    win = await wait_window("wind-candidate", True)
+    check("皮肤：候选窗出现", win is not None and win[5], f"window={win}")
+    if not win or not win[5]:
+        return
+    wid, x, y, w, h, _ = win
+    print(f"  皮肤候选窗：{w}x{h} @ ({x},{y})", flush=True)
+    await asyncio.sleep(0.3)  # CMD_CANDIDATE_SKIN 晚于帧到达
+    # 两块装饰都伸出窗体左上 / 右上 24px：窗口上缘 24px 是外扩区。
+    on_pass = pointer_window(x + w - 12, y + 12)
+    on_block = pointer_window(x + 12, y + 12)
+    on_gap = pointer_window(x + w // 2, y + 6)
+    on_frame = pointer_window(x + w // 2, y + 24 + (h - 24) // 2)
+    check("皮肤：穿透装饰上指针落到下面（不是候选窗）", on_pass != wid, f"pass={on_pass} cand={wid}")
+    check("皮肤：block 装饰接鼠标", on_block == wid, f"block={on_block} cand={wid}")
+    check("皮肤：外扩区的透明处不接鼠标", on_gap != wid, f"gap={on_gap} cand={wid}")
+    check("皮肤：窗体接鼠标", on_frame == wid, f"frame={on_frame} cand={wid}")
+    # 动图装饰：显示期间按帧换色（服务端推 FLAG_ANIM_FRAME 帧）。
+    seen = set()
+    for _ in range(12):
+        _, px = screenshot("skin_anim", wid)
+        seen.add(px(w - 12, 12))
+        await asyncio.sleep(0.1)
+    screenshot("skin_candidate", wid)
+    check("皮肤：穿透装饰画在候选窗里且按帧换色", len(seen) >= 2, f"采到 {seen}")
+    # 打字续帧时窗口不动、穿透照旧（输入区随新帧重设）。
+    await c.type("n")
+    await asyncio.sleep(0.4)
+    win2 = candidate_window()
+    on_pass2 = pointer_window(win2[1] + win2[3] - 12, win2[2] + 12) if win2 else ""
+    check("皮肤：换内容后穿透装饰仍不接鼠标", win2 is not None and on_pass2 != win2[0],
+          f"window={win2} pass={on_pass2}")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    c.take()
+    # 换回普通主题：输入区复位（整窗接鼠标，窗口右上角那一点又是候选窗）。
+    await set_config("ui.theme.name", "default")
+    await c.type("nihao")
+    win3 = await wait_window("wind-candidate", True)
+    await asyncio.sleep(0.3)
+    if win3:
+        inside = pointer_window(win3[1] + win3[3] // 2, win3[2] + win3[4] // 2)
+        check("皮肤：换回普通主题后候选窗照常接鼠标", inside == win3[0],
+              f"inside={inside} cand={win3[0]}")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    c.take()
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+
 async def get_config(key):
     """经 `wind_input config get` 读在线服务的配置值（读不到返回空串）。"""
     svc = os.path.join(os.environ["W"], "svc", "wind_input")
@@ -2467,6 +2609,13 @@ async def main():
     if not await wait_ready(a):
         check("服务引擎就绪（120s 内开始组字）", False, "一直透传")
         return 1
+
+    if os.environ.get("WIND_E2E_ONLY") == "skin":
+        await a.ic.call_focus_out()
+        await skin_cases(bus, im)
+        ok = all(results)
+        print(f"{'PASS' if ok else 'FAIL'} 总计 {sum(results)}/{len(results)}", flush=True)
+        return 0 if ok else 1
 
     # 1. 全拼 nihao + 空格 → 你好；组字期间有预编辑、上屏后预编辑清空
     eaten = await a.type("nihao")

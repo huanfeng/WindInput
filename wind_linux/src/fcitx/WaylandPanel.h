@@ -167,6 +167,9 @@ public:
     void setCallbacks(Callbacks cb) { cb_ = std::move(cb); }
     /// 服务端推来的命中表（位图像素坐标）。
     void setRects(std::vector<CandidateHitRect> rects) { rects_ = std::move(rects); }
+    /// 皮肤区域（CMD_CANDIDATE_SKIN）：带输入区表时候选那一块只在表里的矩形接鼠标（穿透装饰、
+    /// 透明外扩区不接），否则整块候选窗接。先于对应的帧到，贴帧时生效。
+    void setSkin(CandidateSkin skin);
 
 private:
     struct Output {
@@ -217,9 +220,10 @@ private:
     void reapRetired(bool all, bool alive = true);
     /// 把各层合成一张位图贴上去；没有任何层在显示就收起 popup。
     bool present(fcitx::InputContext* ic);
-    /// `inputW/H`：位图里接收鼠标的那一块（候选窗）的像素尺寸，0 = 整张都不接收。
+    /// `inputW/H`：位图里接收鼠标的那一块（候选窗）的像素尺寸，0 = 整张都不接收。`skinMask`：
+    /// 候选那一块按皮肤输入区表收（菜单开着时整张都收，传 false）。
     bool attachPixels(const uint8_t* data, uint32_t w, uint32_t h, uint32_t stride,
-                      uint32_t inputW, uint32_t inputH);
+                      uint32_t inputW, uint32_t inputH, bool skinMask);
     void hidePopup();
     void dropPopup();
     /// 位图 → wl_buffer（memfd + wl_shm）；失败返回 nullptr。
@@ -266,6 +270,7 @@ private:
     std::vector<std::unique_ptr<Retired>> retiredRes_;
     RetiredSurfaces retired_;
     wl_buffer* buffer_ = nullptr;            // 最近一次 attach 的（release 时销毁）
+    CandidateSkin skin_;                     // 最近一条皮肤区域
     // 层 0 = 候选，1..3 = OVERLAY_KIND_TOOLTIP/STATUS/TOAST。
     static constexpr int kLayers = 4;
     struct Layer {

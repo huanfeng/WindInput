@@ -572,6 +572,47 @@ std::optional<std::vector<CandidateHitRect>> decodeCandidateRects(const Bytes& p
     return out;
 }
 
+std::optional<CandidateSkin> decodeCandidateSkin(const Bytes& p)
+{
+    Reader r(p);
+    auto rect = [&r] {
+        Rect out;
+        out.x = static_cast<int32_t>(r.u32());
+        out.y = static_cast<int32_t>(r.u32());
+        out.w = static_cast<int32_t>(r.u32());
+        out.h = static_cast<int32_t>(r.u32());
+        return out;
+    };
+    CandidateSkin out;
+    out.flags = r.u32();
+    out.frame = rect();
+    uint32_t n = r.u32();
+    if (!r.ok || !r.has(size_t(n) * 28)) {
+        return std::nullopt;
+    }
+    out.decor.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        SkinDecor d;
+        d.index = r.u32();
+        d.hit = r.u32();
+        d.flags = r.u32();
+        d.rect = rect();
+        out.decor.push_back(d);
+    }
+    uint32_t m = r.u32();
+    if (!r.ok || !r.has(size_t(m) * 16)) {
+        return std::nullopt;
+    }
+    out.mask.reserve(m);
+    for (uint32_t i = 0; i < m; ++i) {
+        out.mask.push_back(rect());
+    }
+    if (!r.ok) {
+        return std::nullopt;
+    }
+    return out;
+}
+
 std::optional<ExtEnvelope> decodeExt(const Bytes& p)
 {
     Reader r(p);
