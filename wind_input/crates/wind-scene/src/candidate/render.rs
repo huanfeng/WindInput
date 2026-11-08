@@ -14,6 +14,8 @@ pub struct CandidateFrame {
     pub nodes: Vec<(NodeKey, Rect)>,
     /// 屏幕安全宽把窗口钳窄了（[`super::SceneFrame::safety_clamped`]）。
     pub safety_clamped: bool,
+    /// 本帧皮肤几何（同 `bgra` 坐标）；None = 没启用皮肤（含回退普通窗口）。
+    pub skin: Option<super::SkinSnapshot>,
 }
 
 impl CandidateFrame {
@@ -61,7 +63,7 @@ pub fn render_candidate(
         base_size: inp.base_font_logical * inp.scale,
     };
     let frame = layout_frame(scene, inp, clock, soft_shadow, &text);
-    paint_frame(scene, &frame, &text)
+    paint_frame(scene, inp, &frame, &text)
 }
 
 /// 同 [`render_candidate`]，但排版出来的缓冲宽或高超过 `max_side`、或像素总数超过
@@ -86,7 +88,7 @@ pub fn render_candidate_within(
             "候选窗尺寸 {w}×{h} 超出上限（单边 {max_side}、共 {max_pixels} 像素）"
         ));
     }
-    Ok(paint_frame(scene, &frame, &text))
+    Ok(paint_frame(scene, inp, &frame, &text))
 }
 
 /// 排版（含上方专属布局的重排）。`text` 是钉好基准字号的文字后端。
@@ -115,6 +117,7 @@ fn layout_frame(
 
 fn paint_frame(
     scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
     frame: &super::SceneFrame,
     text: &SizedText,
 ) -> CandidateFrame {
@@ -127,6 +130,11 @@ fn paint_frame(
         bgra,
         nodes: scene.nodes(frame),
         safety_clamped: frame.safety_clamped.is_some(),
+        skin: scene
+            .skin_geom
+            .as_ref()
+            .zip(inp.theme.skin.as_ref())
+            .and_then(|(g, s)| g.snapshot(s)),
     }
 }
 
@@ -458,6 +466,7 @@ mod tests {
             bgra: vec![10, 20, 30, 255, 64, 32, 16, 128, 9, 9, 9, 0],
             nodes: Vec::new(),
             safety_clamped: false,
+            skin: None,
         };
         assert_eq!(
             f.to_rgba(),

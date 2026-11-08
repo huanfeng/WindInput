@@ -21,10 +21,14 @@
 // 用法:
 //   import { AutoPreviewer, PreviewerFailedError } from './preview.js';
 //   const p = await AutoPreviewer.create();             // 或 create({ wasm: bytes | WebAssembly.Module })
-//   await p.setTheme(toml, { 'assets/bg.png': u8 }, 'my-theme');
-//   const { width, height, rgba, nextMs, nodes } = await p.render({ t_ms: now, animate: true });
+//   const themeWarnings = await p.setTheme(toml, { 'assets/bg.png': u8 }, 'my-theme');
+//   const { width, height, rgba, nextMs, nodes, skin, warnings } = await p.render({ t_ms: now, animate: true });
 //   // nodes: [{ key, x, y, w, h }]，设备像素（同 rgba 坐标，÷ scale 得逻辑像素）
 //   // clamped: 窗口宽过了预览屏（2048 逻辑像素），已按实机截断
+//   // skin: 皮肤几何（矩形同 nodes 坐标）；没启用皮肤为 undefined
+//   // warnings / themeWarnings: 本次调用期间引擎的 `skin:` 告警原文（string[]）
+//   const info = await p.inspectImage(u8);             // { format, width, height, animated, frames: [{ ms }], truncated }
+//   const thumbs = await p.decodeFrames(u8, { max_edge: 64, from: 0, to: 16 }); // [{ index, w, h, ms, rgba }]
 //   // 帧超过 4096 设备像素时抛「帧过大：…」，调用方降 scale 重画
 //   ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
 //   await p.signal('typing');
@@ -174,9 +178,11 @@ export class AutoPreviewer {
     return this.#p;
   }
 
+  /** @returns {Promise<string[]>} 解析期间引擎的 `skin:` 告警 */
   async setTheme(toml, assets = {}, id = undefined) {
-    await this.#call((p) => p.setTheme(toml, assets, id));
+    const warnings = await this.#call((p) => p.setTheme(toml, assets, id));
     this.#theme = [toml, assets, id];
+    return warnings;
   }
 
   /** @param {object | string} opts RenderOpts（对象或 JSON 串） */
@@ -192,6 +198,8 @@ export class AutoPreviewer {
           nextMs: f.nextMs,
           nodes: JSON.parse(f.nodes),
           clamped: f.clamped,
+          skin: f.skin === undefined ? undefined : JSON.parse(f.skin),
+          warnings: f.warnings,
         };
       } finally {
         f.free();
@@ -201,6 +209,20 @@ export class AutoPreviewer {
 
   async signal(name, tMs = undefined) {
     return this.#call((p) => p.signal(name, tMs));
+  }
+
+  /** 图片帧信息（引擎口径，无状态）。@param {Uint8Array} bytes */
+  async inspectImage(bytes) {
+    return this.#call(() => JSON.parse(this.#glue.inspectImage(bytes)));
+  }
+
+  /**
+   * 缩略帧（无状态）。
+   * @param {Uint8Array} bytes
+   * @param {{ max_edge?: number, from?: number, to?: number }} [opts] `[from, to)` 原始帧号
+   */
+  async decodeFrames(bytes, opts = {}) {
+    return this.#call(() => this.#glue.decodeFrames(bytes, JSON.stringify(opts)));
   }
 
   free() {

@@ -10,6 +10,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { deflateSync } from 'node:zlib';
 
 const src = process.argv[2];
 if (!src) {
@@ -74,12 +75,48 @@ globalThis.OffscreenCanvas = class {
   }
 };
 
+/** 纯色 RGBA PNG（node 的 zlib 现编，不用素材）。 */
+function png(w, h, rgba) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buf) => {
+    let c = 0xffffffff;
+    for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const out = Buffer.alloc(12 + data.length);
+    out.writeUInt32BE(data.length, 0);
+    out.write(type, 4, 'latin1');
+    data.copy(out, 8);
+    out.writeUInt32BE(crc(out.subarray(4, 8 + data.length)), 8 + data.length);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr.set([8, 6, 0, 0, 0], 8);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.from(Array(w).fill(rgba).flat())]);
+  const raw = Buffer.concat(Array(h).fill(row));
+  return new Uint8Array(
+    Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      chunk('IHDR', ihdr),
+      chunk('IDAT', deflateSync(raw)),
+      chunk('IEND', Buffer.alloc(0)),
+    ]),
+  );
+}
+
 /** 失败抛错（不直接 exit），让 finally 清掉临时目录。 */
 function check(ok, msg) {
   if (!ok) throw new Error(`冒烟失败：${msg}`);
 }
 
-function throws(fn, needle) {
+function throws(fn, needle = '') {
   try {
     fn();
   } catch (e) {
@@ -152,6 +189,31 @@ try {
   check(before.rgba.length === before.width * before.height * 4, '包装出普通对象');
   check(Array.isArray(before.nodes) && before.nodes[0].key === 'window', '包装解出节点矩形');
   check(typeof before.clamped === 'boolean', '包装带出 clamped');
+  check(before.skin === undefined && Array.isArray(before.warnings), '无皮肤：skin 缺省、warnings 为数组');
+
+  // —— 皮肤回执与帧信息 ——
+  const frame = png(32, 32, [200, 200, 200, 255]);
+  const skinToml =
+    '[meta]\nname = "s"\n[skin]\ndensity = 1\n' +
+    '[skin.horizontal.frame]\nimage = "assets/frame.png"\nstretch_x = [[8, 24]]\n' +
+    'stretch_y = [{ from = 8, to = 24, fill = "zigzag" }]\n' +
+    '[[skin.horizontal.decor]]\nimage = "assets/frame.png"\nanchor = "frame.top_right"\npivot = "center"\n';
+  const tw = await a.setTheme(skinToml, { 'assets/frame.png': frame });
+  check(tw.length === 1 && tw[0].startsWith('skin: 未知拉伸带填法'), `setTheme 告警 ${JSON.stringify(tw)}`);
+  const sf = await a.render({ scale: 2 });
+  const sk = sf.skin;
+  check(sk?.variant === 'horizontal' && sk.k === 2 && sk.renderScale === 2, `skin 段 ${JSON.stringify(sk)?.slice(0, 120)}`);
+  check(sk.axisX.map((s) => s.kind).join() === 'fixed,round,fixed', `轴映射 ${JSON.stringify(sk.axisX)}`);
+  check(sk.decor.length === 1 && sk.decor[0].rect.y < sk.frame.y, '外伸装饰');
+  check(sf.warnings.length === 0, `帧告警 ${JSON.stringify(sf.warnings)}`);
+  const info = await a.inspectImage(frame);
+  check(info.format === 'png' && info.width === 32 && !info.animated && info.frames.length === 1, `inspectImage ${JSON.stringify(info)}`);
+  const thumbs = await a.decodeFrames(frame, { max_edge: 8 });
+  check(thumbs.length === 1 && thumbs[0].w === 8 && thumbs[0].rgba.length === 8 * 8 * 4, 'decodeFrames 缩略');
+  check(thumbs[0].rgba[0] === 200 && thumbs[0].rgba[3] === 255, '缩略帧是直通 RGBA');
+  check(throws(() => m.inspectImage(new Uint8Array([1, 2, 3]))), '认不出的图片报错');
+  check(throws(() => m.decodeFrames(frame, JSON.stringify({ max_edge: 9999 }))), '缩略边长超限报错');
+  await a.setTheme('base = "jade"\n[meta]\nname = "j"\n', {});
   // 同页第二个预览器：独立的胶水模块与线性内存，互不牵连。
   const b = await AutoPreviewer.create({ wasm: wasmBytes });
   check(b.raw.constructor !== a.raw.constructor, '两个预览器各用一份模块');

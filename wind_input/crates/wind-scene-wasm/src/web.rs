@@ -116,6 +116,8 @@ pub struct Frame {
     next_ms: Option<f64>,
     nodes_json: String,
     clamped: bool,
+    skin_json: Option<String>,
+    warnings: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -154,6 +156,19 @@ impl Frame {
     pub fn clamped(&self) -> bool {
         self.clamped
     }
+
+    /// 皮肤几何的 JSON（字段见 `preview::SkinInfo`，矩形同 `nodes` 的设备像素坐标）；
+    /// undefined = 本帧没启用皮肤。
+    #[wasm_bindgen(getter)]
+    pub fn skin(&self) -> Option<String> {
+        self.skin_json.clone()
+    }
+
+    /// 本帧期间引擎的 `skin:` 告警原文。
+    #[wasm_bindgen(getter)]
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 /// 候选窗预览器。同页可建多个，各持主题、资源与缓存。
@@ -175,14 +190,14 @@ impl Previewer {
 
     /// 换主题：`toml` 是 theme.toml 文本；`assets` 是 `{ "assets/a.png": Uint8Array | ArrayBuffer }`
     /// （可省）；`id` 是主题自己的 id（可省，`base` 写成它视同没写）。解析失败抛 Error，message
-    /// 即解析错误原文；当前主题不变。资源内容没变时不重新解码。
+    /// 即解析错误原文；当前主题不变。资源内容没变时不重新解码。返回解析期间引擎的 `skin:` 告警。
     #[wasm_bindgen(js_name = setTheme)]
     pub fn set_theme(
         &mut self,
         toml: &str,
         assets: JsValue,
         id: Option<String>,
-    ) -> Result<(), JsError> {
+    ) -> Result<Vec<String>, JsError> {
         let _g = CallGuard::enter()?;
         let mut list = Vec::new();
         if !assets.is_undefined() && !assets.is_null() {
@@ -225,6 +240,12 @@ impl Previewer {
             nodes_json: serde_json::to_string(&f.nodes)
                 .map_err(|e| JsError::new(&format!("节点矩形序列化失败：{e}")))?,
             clamped: f.clamped,
+            skin_json: f
+                .skin
+                .map(|s| serde_json::to_string(&s))
+                .transpose()
+                .map_err(|e| JsError::new(&format!("皮肤几何序列化失败：{e}")))?,
+            warnings: f.warnings,
         })
     }
 
@@ -234,4 +255,40 @@ impl Previewer {
         let _g = CallGuard::enter()?;
         self.inner.signal(name, t_ms).map_err(|e| JsError::new(&e))
     }
+}
+
+/// 图片的格式、尺寸、帧数与各帧时长（JSON，字段见 `frames::ImageInfo`），按引擎口径（同一个解码器
+/// 与限额）。无状态，不必建 `Previewer`。
+#[wasm_bindgen(js_name = inspectImage)]
+pub fn inspect_image(bytes: &[u8]) -> Result<String, JsError> {
+    let _g = CallGuard::enter()?;
+    let info = crate::frames::inspect_image(bytes).map_err(|e| JsError::new(&e))?;
+    serde_json::to_string(&info).map_err(|e| JsError::new(&format!("帧信息序列化失败：{e}")))
+}
+
+/// 缩略帧：`opts` 是 JSON 串 `{ max_edge?, from?, to? }`（`[from, to)` 原始帧号，一次至多 64 帧，
+/// 最长边至多 256）。返回 `[{ index, w, h, ms, rgba: Uint8ClampedArray }]`（直通 alpha）。
+#[wasm_bindgen(js_name = decodeFrames)]
+pub fn decode_frames(bytes: &[u8], opts: &str) -> Result<js_sys::Array, JsError> {
+    let _g = CallGuard::enter()?;
+    let o: crate::frames::ThumbOpts =
+        serde_json::from_str(if opts.trim().is_empty() { "{}" } else { opts })
+            .map_err(|e| JsError::new(&format!("opts 解析失败：{e}")))?;
+    let thumbs = crate::frames::decode_frames(bytes, &o).map_err(|e| JsError::new(&e))?;
+    let out = js_sys::Array::new();
+    for t in thumbs {
+        let obj = js_sys::Object::new();
+        let set = |k: &str, v: JsValue| {
+            js_sys::Reflect::set(&obj, &JsValue::from_str(k), &v)
+                .map(|_| ())
+                .map_err(|e| JsError::new(&js_err(e)))
+        };
+        set("index", JsValue::from(t.index as u32))?;
+        set("w", JsValue::from(t.w))?;
+        set("h", JsValue::from(t.h))?;
+        set("ms", JsValue::from(t.ms))?;
+        set("rgba", js_sys::Uint8ClampedArray::from(&t.rgba[..]).into())?;
+        out.push(&obj);
+    }
+    Ok(out)
 }

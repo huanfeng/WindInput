@@ -8,7 +8,7 @@ use super::{CandidateScene, CandidateSceneInput};
 use crate::text::TextBackend;
 use crate::view::{Edges, Rect, View};
 use wind_theme::skin::{
-    Anchor, AnchorBox, BandFill, Clamp, DecorAction, DecorClip, DecorEvent, DecorHit, Pos9,
+    Anchor, AnchorBox, BandFill, Clamp, DecorAction, DecorClip, DecorEvent, DecorHit, Pos9, RvSkin,
     RvSkinVariant, RvSlot, RvSlots, Stretch,
 };
 
@@ -170,6 +170,8 @@ pub struct DecorGeom {
     /// 此刻画哪个源的第几帧（保留帧下标）；`still` 是初始状态首帧（关动画、避让遮罩用）。
     cur: (usize, usize),
     still: (usize, usize),
+    /// 此刻的片段与片段内帧号（预览回执用）。
+    pose: (crate::skin_anim::ClipId, usize),
 }
 
 /// 装饰用到的一个文件。
@@ -180,6 +182,8 @@ struct DecorSource {
     k: f32,
     /// 已按动画解出帧；否则按静态图画（首帧）。
     animated: bool,
+    /// 保留帧下标 × 它 = 原始帧号；None = 有帧解码失败、映射不可靠。只给预览回执用。
+    raw_stride: Option<usize>,
 }
 
 /// 一段片段：哪个源、从第几个保留帧起、各帧时长。
@@ -547,6 +551,215 @@ impl SkinGeom {
     }
 }
 
+/// 动画时间轴 → 保留帧换回原始帧号的步长；静态图（没解帧）为 1。
+fn raw_stride(layout: Option<&crate::image_cache::AnimLayout>) -> Option<usize> {
+    match layout {
+        None => Some(1),
+        Some(l) => l.aligned.then_some(l.stride.max(1)),
+    }
+}
+
+/// 皮肤几何的只读快照，给编辑器叠加层（[`super::render_candidate`] 出图时才取，实时窗口不取）。
+/// 矩形与点一律是**设备像素、窗口缓冲坐标**（与出图同一坐标系，含装饰外扩）。
+#[derive(Clone, Debug)]
+pub struct SkinSnapshot {
+    /// 实际所用的变体键（嵌入变体没配时是回退到的非嵌入变体）。
+    pub variant: &'static str,
+    /// 主坐标（`skin.density` 源像素）→ 设备像素。
+    pub k: f32,
+    /// 渲染缩放：设备像素 / dp（= `k × skin.density`）。
+    pub render_scale: f32,
+    /// 所选的窗体源图（主题里的引用：`frame.image` 或 srcset 的某一份）。
+    pub frame_source: String,
+    /// 窗体最小尺寸（固定段之和）。
+    pub min_size: (f32, f32),
+    pub frame: Rect,
+    pub content: Rect,
+    /// 两轴的切片映射：`src` 是 `frame.image` 的源像素（与 `stretch_x/y` 同坐标；选了 srcset 的
+    /// 另一份时已按 density 换回），`dst` 是缓冲坐标。
+    pub axis_x: Vec<SkinAxisSeg>,
+    pub axis_y: Vec<SkinAxisSeg>,
+    /// 分槽位布局各块（stack 布局为空）。
+    pub slots: Vec<SkinSlotRect>,
+    pub decor: Vec<SkinDecorRect>,
+    /// 下方 / 上方时对齐光标的点。
+    pub caret_below: (f32, f32),
+    pub caret_above: (f32, f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkinAxisSeg {
+    pub src: (f32, f32),
+    pub dst: (f32, f32),
+    /// None = 固定段。
+    pub fill: Option<BandFill>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SkinSlotRect {
+    pub kind: SlotKind,
+    /// 锚在内容框上（否则窗体）。
+    pub on_content: bool,
+    pub rect: Rect,
+}
+
+#[derive(Clone, Debug)]
+pub struct SkinDecorRect {
+    /// 在变体 `decor` 里的下标（已按 z 稳定排序；求值失败的装饰不在，下标不连续）。
+    pub index: usize,
+    pub rect: Rect,
+    pub z: i32,
+    pub hit: DecorHit,
+    /// 此刻的片段：`states` 的名字、`on.<事件>`（一次性片段），None = 整个装饰文件。
+    pub clip: Option<String>,
+    /// 片段内第几帧。
+    pub frame: usize,
+    /// 此刻画的是所在文件的第几个原始帧；None = 有帧解码失败、对不上。
+    pub raw: Option<usize>,
+}
+
+/// 事件名（与主题 `on` 表的键同一写法）。
+fn event_name(ev: DecorEvent) -> String {
+    match ev {
+        DecorEvent::Show => "show".into(),
+        DecorEvent::Hide => "hide".into(),
+        DecorEvent::Typing => "typing".into(),
+        DecorEvent::Backspace => "backspace".into(),
+        DecorEvent::Page => "page".into(),
+        DecorEvent::Empty => "empty".into(),
+        DecorEvent::Commit => "commit".into(),
+        DecorEvent::ModeCn => "mode_cn".into(),
+        DecorEvent::ModeEn => "mode_en".into(),
+        DecorEvent::Idle(n) => format!("idle_{n}s"),
+        DecorEvent::Click => "click".into(),
+    }
+}
+
+fn rect_of((x, y, w, h): (i32, i32, u32, u32)) -> Rect {
+    Rect {
+        x: x as f32,
+        y: y as f32,
+        w: w as f32,
+        h: h as f32,
+    }
+}
+
+impl SkinGeom {
+    /// 本帧几何的只读拷贝。`skin` 须是求这份几何时的皮肤（取变体名、源图 density 与片段名）。
+    pub fn snapshot(&self, skin: &RvSkin) -> Option<SkinSnapshot> {
+        let (vertical, embedded) = self.variant_key;
+        let v = skin.variant(vertical, embedded)?;
+        let own_embedded = embedded
+            && if vertical {
+                skin.vertical_embedded.is_some()
+            } else {
+                skin.horizontal_embedded.is_some()
+            };
+        let variant = match (vertical, own_embedded) {
+            (false, false) => "horizontal",
+            (true, false) => "vertical",
+            (false, true) => "horizontal_embedded",
+            (true, true) => "vertical_embedded",
+        };
+        let render_scale = self.k * skin.density;
+        let (src_ref, src_density) = pick_source(v, render_scale);
+        let band_f = src_density / v.frame.density;
+        let frame = rect_of(self.frame);
+        let content = self.content_rect(frame);
+        // 与 `skin_metrics` / 图集同一套倍率取整，切片边界才与画出来的一致。
+        let axes = crate::view::image_src_size(&self.frame_path).map(|(sw, sh)| {
+            let k_micro = ((self.frame_k * 1_000_000.0).round() as u32).max(1);
+            let fk = k_micro as f32 / 1_000_000.0;
+            let axis = |s: &Stretch, src_len: u32, dst_len: u32, origin: f32| {
+                let atlas = crate::skin::atlas_len(src_len, fk);
+                let segs = crate::skin::src_segments(s, src_len as f32);
+                let to_src = |a: u32| a as f32 * src_len as f32 / atlas as f32 / band_f;
+                crate::skin::map_axis(&segs, src_len as f32, atlas, dst_len)
+                    .into_iter()
+                    .map(|m| SkinAxisSeg {
+                        src: (to_src(m.a0), to_src(m.a1)),
+                        dst: (origin + m.d0 as f32, origin + m.d1 as f32),
+                        fill: m.fill,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            (
+                axis(&self.sx, sw, self.frame.2, frame.x),
+                axis(&self.sy, sh, self.frame.3, frame.y),
+            )
+        });
+        let (axis_x, axis_y) = axes.unwrap_or_default();
+        let slots = self
+            .parts
+            .iter()
+            .zip(self.part_positions(frame.w, frame.h))
+            .map(|(p, (x, y))| SkinSlotRect {
+                kind: p.kind,
+                on_content: self
+                    .slot_of(p.kind)
+                    .is_some_and(|s| s.anchor.on == AnchorBox::Content),
+                rect: Rect {
+                    x: frame.x + x,
+                    y: frame.y + y,
+                    w: p.w,
+                    h: p.h,
+                },
+            })
+            .collect();
+        let decor = self
+            .decor
+            .iter()
+            .zip(&self.decor_rects)
+            .map(|(d, &r)| {
+                let anim = v.decor.get(d.index).map(|x| &x.anim);
+                let (clip, frame) = d.pose;
+                let clip = match clip {
+                    crate::skin_anim::ClipId::Base => None,
+                    crate::skin_anim::ClipId::State(i) => {
+                        anim.and_then(|a| a.states.get(i)).map(|(n, _)| n.clone())
+                    }
+                    crate::skin_anim::ClipId::On(i) => anim
+                        .and_then(|a| a.on.get(i))
+                        .map(|(ev, _)| format!("on.{}", event_name(*ev))),
+                };
+                let (si, kept) = d.cur;
+                SkinDecorRect {
+                    index: d.index,
+                    rect: rect_of(r),
+                    z: d.z,
+                    hit: d.hit,
+                    clip,
+                    frame,
+                    raw: d
+                        .sources
+                        .get(si)
+                        .and_then(|s| s.raw_stride)
+                        .map(|st| kept * st),
+                }
+            })
+            .collect();
+        let point = |c: wind_theme::skin::CaretPoint| {
+            let (x, y) = anchor_point(c.anchor, frame, content);
+            (x + c.offset[0] * self.k, y + c.offset[1] * self.k)
+        };
+        Some(SkinSnapshot {
+            variant,
+            k: self.k,
+            render_scale,
+            frame_source: src_ref.to_string(),
+            min_size: (self.min_w, self.min_h),
+            frame,
+            content,
+            axis_x,
+            axis_y,
+            slots,
+            decor,
+            caret_below: point(self.placement.caret),
+            caret_above: point(self.placement.caret_above),
+        })
+    }
+}
+
 #[cfg(any(test, feature = "test-util"))]
 impl SkinGeom {
     /// 本帧窗体在缓冲里的矩形 `(x, y, w, h)`。
@@ -715,6 +928,7 @@ impl CandidateScene {
                     _ => Machine::still(spec, &*d),
                 };
                 d.cur = d.locate(pose);
+                d.pose = (pose.clip, pose.frame);
                 next = [next, pose.next].into_iter().flatten().min();
             }
         }
@@ -930,6 +1144,7 @@ impl CandidateScene {
                     path: main.clone(),
                     k: main_k,
                     animated: main_layout.is_some(),
+                    raw_stride: raw_stride(main_layout.as_ref()),
                 }];
                 let mut layouts = vec![main_layout];
                 let mut extra_idx: Vec<(&str, Option<usize>)> = Vec::new();
@@ -945,6 +1160,7 @@ impl CandidateScene {
                         path,
                         k,
                         animated: layout.is_some(),
+                        raw_stride: raw_stride(layout.as_ref()),
                     });
                     layouts.push(layout);
                     extra_idx.push((name, Some(sources.len() - 1)));
@@ -1008,9 +1224,12 @@ impl CandidateScene {
                     on,
                     cur: (0, 0),
                     still: (0, 0),
+                    pose: (crate::skin_anim::ClipId::Base, 0),
                 };
-                g.still = g.locate(crate::skin_anim::Machine::still(&d.anim, &g));
+                let still = crate::skin_anim::Machine::still(&d.anim, &g);
+                g.still = g.locate(still);
                 g.cur = g.still;
+                g.pose = (still.clip, still.frame);
                 Some(g)
             })
             .collect();
@@ -1277,12 +1496,14 @@ mod tests {
                 path: String::new(),
                 k: 1.0,
                 animated: false,
+                raw_stride: Some(1),
             }],
             base: ClipTl::whole(0, None),
             states: Vec::new(),
             on: Vec::new(),
             cur: (0, 0),
             still: (0, 0),
+            pose: (crate::skin_anim::ClipId::Base, 0),
         }
     }
 

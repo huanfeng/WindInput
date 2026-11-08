@@ -191,9 +191,13 @@ fn decode_limits() -> image::Limits {
 
 /// 解码位图源：`data:` URI 就地解码，否则读文件；按内容判格式，带解码限额，超限即失败。
 fn decode_bitmap(src: &str) -> Option<image::DynamicImage> {
-    let bytes = read_source_bytes(src)?;
+    decode_bitmap_bytes(&read_source_bytes(src)?, src)
+}
+
+/// 同 [`decode_bitmap`]，字节已在手（`src` 只用于日志）。
+fn decode_bitmap_bytes(bytes: &[u8], src: &str) -> Option<image::DynamicImage> {
     let reader = || {
-        image::ImageReader::new(std::io::Cursor::new(&bytes[..]))
+        image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()
     };
@@ -1086,6 +1090,99 @@ fn frames_of(bytes: &[u8]) -> Option<image::Frames<'_>> {
         }
         _ => None,
     }
+}
+
+/// [`walk_frames`] 的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameWalk {
+    /// 按动画播（动画格式且解得出至少两帧）；否则引擎按静态图画首帧。
+    pub animated: bool,
+    /// 回调过的帧数。
+    pub frames: usize,
+    /// 帧数超过 [`MAX_ANIM_FRAMES`]，其后的帧引擎不解（只在走完全程时可能为真）。
+    pub truncated: bool,
+}
+
+/// 图片字节的格式名与尺寸（只读头）。认不出格式、尺寸超出位图上限（引擎不解码这种图）都报错。
+/// 给主题编辑器看帧信息用（`wind-scene-wasm` 的 `inspectImage`）。
+pub fn image_header(bytes: &[u8]) -> Result<(&'static str, u32, u32), String> {
+    use image::ImageFormat as F;
+    let fmt = image::guess_format(bytes).map_err(|_| "认不出图片格式".to_string())?;
+    let name = match fmt {
+        F::Png => "png",
+        F::Jpeg => "jpeg",
+        F::WebP => "webp",
+        F::Gif => "gif",
+        F::Bmp => "bmp",
+        other => {
+            return Err(format!(
+                "不支持的图片格式 {other:?}（只认 PNG / JPEG / WebP / GIF / BMP）"
+            ));
+        }
+    };
+    let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt)
+        .into_dimensions()
+        .map_err(|e| format!("读不出图片尺寸：{e}"))?;
+    if !crate::skin::fits_image_limits(w, h) {
+        return Err(format!(
+            "图片尺寸 {w}x{h} 超出上限（单边 {}、共 {} 像素），引擎不解码",
+            crate::skin::MAX_IMAGE_SIDE,
+            crate::skin::MAX_IMAGE_PIXELS
+        ));
+    }
+    Ok((name, w, h))
+}
+
+/// 逐帧走一遍图片字节，与装饰动画同一个解码器、同一套限额与判定（主题编辑器的帧信息与缩略图用）：
+/// 动画按帧回调 `(原始帧号, 宽, 高, 直通 RGBA, 归一后的时长 ms)`（帧已合成到整张画布；时长不计
+/// 装饰的 `fps` 覆盖），解码出错即停（同建帧时「只用已解出的帧」），至多 [`MAX_ANIM_FRAMES`] 帧；
+/// 静态图（含单帧 GIF）回调一次、时长 0。回调返回 false 即停。
+pub fn walk_frames(
+    bytes: &[u8],
+    mut f: impl FnMut(usize, u32, u32, &[u8], u32) -> bool,
+) -> Result<FrameWalk, String> {
+    image_header(bytes)?;
+    // 同 `ImageCache::is_animated`：文件头是动画格式，且前两帧都解得出。
+    let animated = sniff_animated(&bytes[..bytes.len().min(SNIFF_BYTES)])
+        && frames_of(bytes).is_some_and(|fr| fr.take(2).filter(Result::is_ok).count() >= 2);
+    if !animated {
+        let img = decode_bitmap_bytes(bytes, "（编辑器传入的图片）")
+            .ok_or_else(|| "图片解码失败".to_string())?
+            .to_rgba8();
+        f(0, img.width(), img.height(), img.as_raw(), 0);
+        return Ok(FrameWalk {
+            animated: false,
+            frames: 1,
+            truncated: false,
+        });
+    }
+    let frames = frames_of(bytes).ok_or_else(|| "动画解码失败".to_string())?;
+    let mut n = 0;
+    let mut truncated = false;
+    for frame in frames.take(MAX_ANIM_FRAMES + 1) {
+        let Ok(frame) = frame else { break };
+        if n == MAX_ANIM_FRAMES {
+            truncated = true;
+            break;
+        }
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        let buf = frame.buffer();
+        n += 1;
+        if !f(
+            n - 1,
+            buf.width(),
+            buf.height(),
+            buf.as_raw(),
+            crate::skin::frame_ms(numer, denom, None),
+        ) {
+            break;
+        }
+    }
+    Ok(FrameWalk {
+        animated: true,
+        frames: n,
+        truncated,
+    })
 }
 
 /// 逐帧解码动画，每帧与静态装饰同一套缩放合成（面积平均缩到倍率 `k`，再整轴映射到 `w×h`）。

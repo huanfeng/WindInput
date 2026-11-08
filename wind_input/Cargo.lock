@@ -2476,6 +2476,7 @@ dependencies = [
  "js-sys",
  "serde",
  "serde_json",
+ "tracing",
  "wasm-bindgen",
  "wind-scene",
  "wind-theme",

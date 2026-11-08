@@ -312,7 +312,7 @@ wasm 新增两个模块级函数：
 
 - `inspectImage(bytes) → { width, height, animated, frames: [{ ms }], truncated }`：`ms` 是引擎归一后的帧时长（`frame_ms`），
   `truncated` 表示超过了引擎的最大解帧数；
-- `decodeFrames(bytes, maxEdge, from, to) → [{ w, h, rgba, ms }]`：面积平均缩到 `maxEdge` 的缩略帧，编辑器按可见区间分页取。
+- `decodeFrames(bytes, { max_edge, from, to }) → [{ index, w, h, rgba, ms }]`：面积平均缩到 `max_edge` 的缩略帧（`[from, to)` 原始帧号），编辑器按可见区间分页取。
 
 wasm 里已经编进了 `png` / `gif` / `webp` 解码器，这两个函数只是把 `image_cache::frames_of` 暴露出来。
 
@@ -403,7 +403,7 @@ Frame.skin?: {
 }
 Frame.warnings: string[]        // 本次调用期间 `skin:` 前缀的 WARN 原文
 Previewer.setTheme 同样回带 warnings
-inspectImage(bytes) / decodeFrames(bytes, maxEdge, from, to)
+inspectImage(bytes) / decodeFrames(bytes, { max_edge, from, to })
 ```
 
 - `wind-scene`：`SkinGeom::snapshot()` 返回只读拷贝（轴映射取 `skin::map_axis` 的结果），随 `nodes` 一起填进 `SceneFrame`。

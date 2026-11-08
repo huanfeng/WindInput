@@ -171,6 +171,173 @@ pub struct Frame {
     pub nodes: Vec<NodeRect>,
     /// 窗口宽过了预览屏（[`SCREEN_DP`]），按实机的屏幕安全宽钳窄了。
     pub clamped: bool,
+    /// 皮肤几何；None = 本帧没启用皮肤（没配、变体回退普通窗口、或引擎回退）。
+    pub skin: Option<SkinInfo>,
+    /// 本次调用期间引擎的 `skin:` 告警原文（见 [`crate::warnings`]）。
+    pub warnings: Vec<String>,
+}
+
+/// 矩形（设备像素，与 `rgba` 同坐标）。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct RectInfo {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl From<wind_scene::view::Rect> for RectInfo {
+    fn from(r: wind_scene::view::Rect) -> Self {
+        Self {
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+        }
+    }
+}
+
+/// 一段切片映射。
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AxisSegInfo {
+    /// `frame.image` 的源像素 `[a, b)`（与 `stretch_x/y` 同坐标）。
+    pub src: [f32; 2],
+    /// 设备像素 `[a, b)`（缓冲坐标）。
+    pub dst: [f32; 2],
+    /// `fixed` / `stretch` / `tile` / `round`。
+    pub kind: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SlotInfo {
+    /// `preedit` / `candidates` / `footer`。
+    pub name: &'static str,
+    /// 锚在哪个盒上：`frame` / `content`。
+    #[serde(rename = "box")]
+    pub on: &'static str,
+    pub rect: RectInfo,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClipInfo {
+    /// `states` 的名字、`on.<事件>`（一次性片段）；null = 整个装饰文件。
+    pub state: Option<String>,
+    /// 片段内第几帧。
+    pub frame: usize,
+    /// 此刻画的是文件的第几个原始帧（`inspectImage` 的帧号）；null = 有帧解码失败、对不上。
+    pub raw: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DecorInfo {
+    /// 在变体 `decor` 里的下标（按 z 稳定排序后的；求值失败的装饰不出现）。
+    pub index: usize,
+    pub rect: RectInfo,
+    pub z: i32,
+    /// `drag` / `block` / `pass`。
+    pub hit: &'static str,
+    pub clip: ClipInfo,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CaretInfo {
+    /// 下方 / 上方时对齐光标的点（设备像素，缓冲坐标）。
+    pub below: [f32; 2],
+    pub above: [f32; 2],
+}
+
+/// 帧回执的 `skin` 段。矩形、点、`dst` 一律设备像素、与 `rgba` / `nodes` 同坐标（含装饰外扩与
+/// 阴影扩边；÷ `scale` 得逻辑像素）；`axisX/Y.src` 是窗体图源像素；`k` 把主坐标（`skin.density`
+/// 源像素：`content`、槽位 / 装饰 / 对齐点的 `offset`）换成设备像素。
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkinInfo {
+    /// 实际所用的变体（嵌入没配时是回退到的非嵌入变体）。
+    pub variant: &'static str,
+    pub k: f32,
+    /// 设备像素 / dp（= `k × skin.density`）。
+    pub render_scale: f32,
+    /// 所选的窗体源图引用（`frame.image` 或 srcset 的某一份）。
+    pub frame_source: String,
+    pub min_size: [f32; 2],
+    pub frame: RectInfo,
+    pub content: RectInfo,
+    pub axis_x: Vec<AxisSegInfo>,
+    pub axis_y: Vec<AxisSegInfo>,
+    /// 分槽位布局各块；stack 布局为空。
+    pub slots: Vec<SlotInfo>,
+    pub decor: Vec<DecorInfo>,
+    pub caret: CaretInfo,
+}
+
+fn axis_info(segs: &[wind_scene::candidate::SkinAxisSeg]) -> Vec<AxisSegInfo> {
+    use wind_theme::skin::BandFill;
+    segs.iter()
+        .map(|s| AxisSegInfo {
+            src: [s.src.0, s.src.1],
+            dst: [s.dst.0, s.dst.1],
+            kind: match s.fill {
+                None => "fixed",
+                Some(BandFill::Stretch) => "stretch",
+                Some(BandFill::Tile) => "tile",
+                Some(BandFill::Round) => "round",
+            },
+        })
+        .collect()
+}
+
+impl From<wind_scene::candidate::SkinSnapshot> for SkinInfo {
+    fn from(s: wind_scene::candidate::SkinSnapshot) -> Self {
+        use wind_scene::candidate::SlotKind;
+        use wind_theme::skin::DecorHit;
+        Self {
+            variant: s.variant,
+            k: s.k,
+            render_scale: s.render_scale,
+            frame_source: s.frame_source,
+            min_size: [s.min_size.0, s.min_size.1],
+            frame: s.frame.into(),
+            content: s.content.into(),
+            axis_x: axis_info(&s.axis_x),
+            axis_y: axis_info(&s.axis_y),
+            slots: s
+                .slots
+                .iter()
+                .map(|p| SlotInfo {
+                    name: match p.kind {
+                        SlotKind::Preedit => "preedit",
+                        SlotKind::Candidates => "candidates",
+                        SlotKind::Footer => "footer",
+                    },
+                    on: if p.on_content { "content" } else { "frame" },
+                    rect: p.rect.into(),
+                })
+                .collect(),
+            decor: s
+                .decor
+                .into_iter()
+                .map(|d| DecorInfo {
+                    index: d.index,
+                    rect: d.rect.into(),
+                    z: d.z,
+                    hit: match d.hit {
+                        DecorHit::Drag => "drag",
+                        DecorHit::Block => "block",
+                        DecorHit::Pass => "pass",
+                    },
+                    clip: ClipInfo {
+                        state: d.clip,
+                        frame: d.frame,
+                        raw: d.raw,
+                    },
+                })
+                .collect(),
+            caret: CaretInfo {
+                below: [s.caret_below.0, s.caret_below.1],
+                above: [s.caret_above.0, s.caret_above.1],
+            },
+        }
+    }
 }
 
 /// 一个节点在帧里的矩形：**设备像素**（与 `rgba` 同一坐标系，含阴影扩边；除以 `scale` 得逻辑
@@ -343,13 +510,16 @@ impl<C: Canvas> Preview<C> {
     ///
     /// 资源内容没变（只改了主题文字）时沿用资源代号与图片缓存，皮肤图不重新解码；变了就换新代号、
     /// 丢掉本实例的图片缓存与动画帧。
+    ///
+    /// 返回解析期间引擎的 `skin:` 告警。场景随之重建，按场景去重的告警会在其后首帧再报一次。
     pub fn set_theme(
         &mut self,
         toml: &str,
         id: &str,
         assets: Vec<(String, Vec<u8>)>,
-    ) -> Result<(), String> {
-        self.themes = resolve_text(toml, id)?;
+    ) -> Result<Vec<String>, String> {
+        let (themes, warnings) = crate::warnings::collect(|| resolve_text(toml, id));
+        self.themes = themes?;
         let fp = assets_fingerprint(&assets);
         if fp != self.assets_fp {
             self.assets = Arc::new(build_assets(assets));
@@ -360,7 +530,7 @@ impl<C: Canvas> Preview<C> {
         // 新场景：皮肤告警重新报、装饰状态机重建。
         self.scene = CandidateScene::default();
         self.visible = false;
-        Ok(())
+        Ok(warnings)
     }
 
     /// 按参数搭一帧的场景输入，登记本实例的资源表、换上本实例的缓存，交给 `f`。
@@ -482,10 +652,13 @@ impl<C: Canvas> Preview<C> {
     pub fn render(&mut self, o: &RenderOpts) -> Result<Frame, String> {
         let clock = self.clock(o, o.t_ms);
         let soft_shadow = o.soft_shadow;
-        let frame = self.with_input(o, |scene, inp| {
-            render_candidate_within(scene, inp, clock, soft_shadow, MAX_SIDE, MAX_PIXELS)
-                .map_err(|e| format!("{FRAME_TOO_LARGE}{e}"))
-        })?;
+        let (frame, warnings) = crate::warnings::collect(|| {
+            self.with_input(o, |scene, inp| {
+                render_candidate_within(scene, inp, clock, soft_shadow, MAX_SIDE, MAX_PIXELS)
+                    .map_err(|e| format!("{FRAME_TOO_LARGE}{e}"))
+            })
+        });
+        let frame = frame?;
         self.visible = true;
         self.last = o.clone();
         Ok(Frame {
@@ -505,6 +678,8 @@ impl<C: Canvas> Preview<C> {
                 })
                 .collect(),
             clamped: frame.safety_clamped,
+            skin: frame.skin.map(SkinInfo::from),
+            warnings,
         })
     }
 
@@ -1052,6 +1227,254 @@ mod tests {
         assert!(p.signal("click:0", Some(10.0)).is_ok());
         assert!(p.signal("nonsense", None).is_err());
         assert!(p.signal("click:x", None).is_err());
+    }
+
+    /// 皮肤回执夹具：主坐标 density 2，窗体 32×32 两轴各一条带（y 轴 tile），四边内缩 6，
+    /// 一块伸出窗体右上角的装饰（z 120、block）；`free` 时再分槽位（候选锚内容框左上、翻页锚窗体右下）。
+    fn geom_theme(free: bool, extra: &str) -> (String, Vec<(String, Vec<u8>)>) {
+        let slots = if free {
+            "[skin.horizontal.slots.candidates]\nanchor = \"content.top_left\"\n\
+             [skin.horizontal.slots.footer]\nanchor = \"frame.bottom_right\"\noffset = [-8, -4]\n"
+        } else {
+            ""
+        };
+        let toml = format!(
+            "[meta]\nname = \"g\"\n[skin]\ndensity = 2\n\
+             [skin.horizontal.frame]\nimage = \"assets/frame.png\"\n\
+             stretch_x = [[8, 24]]\nstretch_y = [{{ from = 8, to = 24, fill = \"tile\" }}]\n\
+             [skin.horizontal.content]\nleft = 6\ntop = 6\nright = 6\nbottom = 6\n\
+             [skin.horizontal.placement]\ncaret = {{ anchor = \"content.top_left\", offset = [2, 4] }}\n\
+             {slots}{extra}\
+             [[skin.horizontal.decor]]\nimage = \"assets/dot.png\"\nanchor = \"frame.top_right\"\n\
+             pivot = \"center\"\noffset = [-4, 0]\nz = 120\nhit = \"block\"\n"
+        );
+        let assets = vec![
+            ("assets/frame.png".into(), png(32, 32, [200, 200, 200, 255])),
+            ("assets/dot.png".into(), png(12, 12, [255, 0, 0, 255])),
+        ];
+        (toml, assets)
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> RectInfo {
+        RectInfo { x, y, w, h }
+    }
+
+    fn rect_i((x, y, w, h): (i32, i32, u32, u32)) -> RectInfo {
+        rect(x as f32, y as f32, w as f32, h as f32)
+    }
+
+    /// 回执的皮肤几何就是引擎这一帧求出的那份（stack / free × 1x / 2x），与 `nodes` 同坐标。
+    #[test]
+    fn skin_receipt_matches_engine_geometry() {
+        for free in [false, true] {
+            let (mut p, _) = preview();
+            let (toml, assets) = geom_theme(free, "");
+            let w = p.set_theme(&toml, "", assets).unwrap();
+            assert!(w.is_empty(), "{w:?}");
+            for scale in [1.0f32, 2.0] {
+                let f = p
+                    .render(&RenderOpts {
+                        scale,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let s = f.skin.clone().expect("启用了皮肤");
+                let g = p.scene.skin_geom.as_ref().unwrap();
+                let k = scale / 2.0;
+                let ctx = format!("free={free} scale={scale}");
+                assert_eq!(s.variant, "horizontal", "{ctx}");
+                assert_eq!((s.k, s.render_scale), (k, scale), "{ctx}");
+                assert_eq!(s.frame_source, "assets/frame.png");
+                assert_eq!(s.min_size, [g.min_w, g.min_h], "{ctx}");
+                let fr = rect_i(g.frame_for_test());
+                assert_eq!(s.frame, fr, "{ctx}");
+                let window = f.nodes.iter().find(|n| n.key == "window").unwrap();
+                // 窗体是根容器盒向上取整。
+                assert!(
+                    (window.x, window.y) == (fr.x, fr.y)
+                        && (0.0..1.0).contains(&(fr.w - window.w))
+                        && (0.0..1.0).contains(&(fr.h - window.h)),
+                    "窗体即根容器盒，与 nodes 同坐标（{ctx}）：{window:?} / {fr:?}"
+                );
+                let i = 6.0 * k;
+                assert_eq!(
+                    s.content,
+                    rect(fr.x + i, fr.y + i, fr.w - 2.0 * i, fr.h - 2.0 * i),
+                    "{ctx}"
+                );
+                let rects: Vec<RectInfo> = g
+                    .decor_rects_for_test()
+                    .iter()
+                    .map(|&r| rect_i(r))
+                    .collect();
+                assert_eq!(
+                    s.decor.iter().map(|d| d.rect).collect::<Vec<_>>(),
+                    rects,
+                    "{ctx}"
+                );
+                let d = &s.decor[0];
+                assert!(
+                    d.rect.y < fr.y && d.rect.x + d.rect.w > fr.x + fr.w,
+                    "外伸：{d:?}"
+                );
+                assert_eq!((d.index, d.z, d.hit), (0, 120, "block"));
+                assert_eq!(
+                    d.clip,
+                    ClipInfo {
+                        state: None,
+                        frame: 0,
+                        raw: Some(0)
+                    }
+                );
+                // 切片（Pair 带缺省 round）：源像素按 frame.image 写，目标覆盖整个窗体。
+                for (axis, origin, len, tiled) in [
+                    (&s.axis_x, fr.x, fr.w, "round"),
+                    (&s.axis_y, fr.y, fr.h, "tile"),
+                ] {
+                    let kinds: Vec<&str> = axis.iter().map(|a| a.kind).collect();
+                    assert_eq!(kinds, ["fixed", tiled, "fixed"], "{ctx}");
+                    assert_eq!(axis[1].src, [8.0, 24.0], "{ctx}");
+                    assert_eq!(axis[0].dst[0], origin);
+                    assert_eq!(axis[2].dst[1], origin + len);
+                    assert_eq!(axis[0].dst[1] - axis[0].dst[0], 8.0 * scale / 2.0);
+                }
+                assert_eq!(
+                    s.caret.below,
+                    [fr.x + i + 2.0 * k, fr.y + i + 4.0 * k],
+                    "{ctx}"
+                );
+                assert_eq!(s.caret.above, [fr.x, fr.y + fr.h], "缺省对齐窗体左下");
+                if free {
+                    let names: Vec<&str> = s.slots.iter().map(|x| x.name).collect();
+                    assert_eq!(names, ["candidates", "footer"], "{ctx}");
+                    assert_eq!(
+                        s.slots.iter().map(|x| x.on).collect::<Vec<_>>(),
+                        ["content", "frame"]
+                    );
+                    let sizes = g.parts_for_test();
+                    let pos = g.part_positions_for_test(fr.w, fr.h);
+                    for ((slot, (_, w, h)), (x, y)) in s.slots.iter().zip(sizes).zip(pos) {
+                        assert_eq!(slot.rect, rect(fr.x + x, fr.y + y, w, h), "{ctx}");
+                    }
+                    let footer = s.slots[1].rect;
+                    assert_eq!(
+                        (footer.x + footer.w, footer.y + footer.h),
+                        (fr.x + fr.w - 8.0 * k, fr.y + fr.h - 4.0 * k),
+                        "{ctx}"
+                    );
+                } else {
+                    assert!(s.slots.is_empty());
+                }
+                let json = serde_json::to_string(&s).unwrap();
+                for key in ["renderScale", "frameSource", "minSize", "axisX", "axisY"] {
+                    assert!(json.contains(&format!("\"{key}\":")), "{key}：{json}");
+                }
+                assert_eq!(json.contains("\"box\":"), free, "{json}");
+            }
+        }
+    }
+
+    /// 回执报实际所用的变体：嵌入没配回退非嵌入；配了用嵌入；竖排没配不启用皮肤。
+    #[test]
+    fn skin_receipt_reports_variant_after_fallback() {
+        let (mut p, _) = preview();
+        let (toml, assets) = geom_theme(false, "");
+        p.set_theme(&toml, "", assets.clone()).unwrap();
+        let embedded = RenderOpts {
+            embedded: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            p.render(&embedded).unwrap().skin.unwrap().variant,
+            "horizontal"
+        );
+        let vertical = RenderOpts {
+            vertical: true,
+            ..Default::default()
+        };
+        assert!(
+            p.render(&vertical).unwrap().skin.is_none(),
+            "竖排不回退横排"
+        );
+        let own = format!("{toml}[skin.horizontal_embedded.frame]\nimage = \"assets/frame.png\"\n");
+        p.set_theme(&own, "", assets).unwrap();
+        assert_eq!(
+            p.render(&embedded).unwrap().skin.unwrap().variant,
+            "horizontal_embedded"
+        );
+        assert!(p.render(&RenderOpts::default()).unwrap().skin.is_some());
+        p.set_theme(&bg_theme("bg.png"), "", Vec::new()).unwrap();
+        assert!(
+            p.render(&RenderOpts::default()).unwrap().skin.is_none(),
+            "无皮肤"
+        );
+    }
+
+    /// 引擎的 `skin:` 告警原文随回执带出：解析期的随 `set_theme`，出图期的随帧；非 `skin:` 的不进来。
+    #[test]
+    fn skin_warnings_come_back_verbatim() {
+        let (mut p, _) = preview();
+        // 窗体图密度 0.001：倍率 1000，32 px 的图要缩放成 32000 px，引擎整套回退普通窗口。
+        // 窗口底图 9000×1 超出位图上限：引擎也告警，但不是 `skin:` 前缀。
+        let toml = "[meta]\nname = \"w\"\n\
+                    [window]\nbackground = { image = { ref = \"assets/wide.png\", mode = \"stretch\" } }\n\
+                    [skin]\ndensity = 1\n\
+                    [skin.horizontal.frame]\nimage = \"assets/frame.png\"\ndensity = 0.001\n\
+                    stretch_x = [{ from = 8, to = 24, fill = \"zigzag\" }]\n";
+        let assets = vec![
+            ("assets/frame.png".into(), png(32, 32, [200, 200, 200, 255])),
+            ("assets/wide.png".into(), png(9000, 1, [0, 0, 0, 255])),
+        ];
+        let w = p.set_theme(toml, "", assets).unwrap();
+        assert!(
+            w.len() == 1 && w[0].starts_with("skin: 未知拉伸带填法"),
+            "解析期：{w:?}"
+        );
+        let f = p.render(&RenderOpts::default()).unwrap();
+        assert!(f.skin.is_none(), "回退普通窗口");
+        assert!(
+            f.warnings.len() == 1
+                && f.warnings[0].starts_with("skin: 窗体图按倍率 ")
+                && f.warnings[0].ends_with(" 缩放后超出上限，回退普通窗口"),
+            "只收 skin: 前缀：{:?}",
+            f.warnings
+        );
+        // 同一场景按场景去重，下一帧不再报；换主题（新场景）后首帧再报。
+        assert!(
+            p.render(&RenderOpts::default())
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
+    }
+
+    /// 装饰的片段与帧号：`idle` 第 0 帧；`typing` 后 `busy`（原始第 1 帧）。
+    #[test]
+    fn skin_receipt_reports_decor_clip() {
+        let (mut p, _) = preview();
+        let (toml, assets) = skin_theme(
+            "states = { idle = { frames = \"0\" }, busy = { frames = \"1\" } }\n\
+             on = { typing = { state = \"busy\" } }",
+        );
+        p.set_theme(&toml, "", assets).unwrap();
+        let clip = |f: Frame| f.skin.unwrap().decor[0].clip.clone();
+        assert_eq!(
+            clip(at(&mut p, 0.0)),
+            ClipInfo {
+                state: Some("idle".into()),
+                frame: 0,
+                raw: Some(0)
+            }
+        );
+        p.signal("typing", Some(10.0)).unwrap();
+        assert_eq!(
+            clip(at(&mut p, 20.0)),
+            ClipInfo {
+                state: Some("busy".into()),
+                frame: 0,
+                raw: Some(1)
+            }
+        );
     }
 
     /// 两帧 GIF（各 100ms），4×4 纯色。
