@@ -248,6 +248,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME deferred_composition_policy COMMAND deferred_composition_policy_test)
 
+    add_executable(composition_recover_policy_test tests/composition_recover_policy_test.cpp)
+    target_include_directories(composition_recover_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(composition_recover_policy_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME composition_recover_policy COMMAND composition_recover_policy_test)
+
     add_executable(service_ready_retry_policy_test tests/service_ready_retry_policy_test.cpp)
     target_include_directories(service_ready_retry_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)

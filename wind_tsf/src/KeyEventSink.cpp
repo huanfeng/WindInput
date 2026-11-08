@@ -2488,7 +2488,7 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
             return FALSE;
         }
 
-        if (_pTextService->HasActiveComposition())
+        if (_pTextService->HasCompositionOrRecover())
         {
             // Composition is active — do NOT send CMD_IME_ACTIVATED here.
             // HandleIMEActivated on the Go side clears inputBuffer if non-empty,
@@ -3509,7 +3509,8 @@ BOOL CKeyEventSink::_IsResyncActive()
 //     插入字面空格、退格删掉刚上屏的字（真机复现：skce 顶码后快打 h + 空格）。
 BOOL CKeyEventSink::_HasInputSession()
 {
-    return _pTextService->HasActiveComposition()
+    // 恢复中（宿主收走了组合、缓冲仍在）同样算会话。
+    return _pTextService->HasCompositionOrRecover()
         || _hasCandidates
         // 热键激活的模式（加词 / 临拼 / 特殊 / 生僻字）：它们在
         // `input.caret.*_via_composition = false` 时根本不建 composition，上面两个来源全

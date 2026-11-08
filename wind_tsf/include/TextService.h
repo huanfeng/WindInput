@@ -51,6 +51,8 @@ class CTextService : public ITfTextInputProcessorEx,
     friend class CCommitTextEditSession;
     friend class CReplaceBackwardEditSession;
     friend class CInsertTextEditSession;
+    friend class CDropLeftoverEditSession;
+    friend class CPurgeLeftoverEditSession;
 public:
     CTextService();
     ~CTextService();
@@ -406,6 +408,9 @@ public:
 
     // Check if there's an active composition
     BOOL HasActiveComposition() { return _pComposition != nullptr; }
+    // 有组合，或组合刚被宿主打断、缓冲仍保留着（恢复中）。会清服务端缓冲的同步判据要看它。
+    BOOL HasCompositionOrRecover() { return _pComposition != nullptr || !_recoverLeftover.empty(); }
+    BOOL HasRecoverRecord() const { return !_recoverLeftover.empty(); }
 
     // Clear the "composition just started" flag (used by timer fallback path).
     // 同时作废 EditSession 缓存：缓存是 StartComposition EditSession 内部抓的，
@@ -753,6 +758,23 @@ private:
     std::wstring _pendingCommitPrefix;
     std::wstring _lastCompositionText;  // Cache to skip redundant updates
     int _lastCaretPos = -1;             // Cache caret position to detect cursor movement
+    // 宿主过早终止组合后留在文档里的组合文字（见 CompositionRecoverPolicy.h）；空 = 不在恢复中。
+    // 下一次写文档的编辑会话开头经 _DropRecoverLeftover 核对并删掉。
+    std::wstring _recoverLeftover;
+    ITfContext* _recoverContext = nullptr;   // 残留所在的 context（持有引用）；核对与清除只认它
+    ITfRange* _recoverRange = nullptr;       // 残留区间（终止时组合区间的副本，持有引用），解除时据此清
+    LONG _recoverAcpStart = 0;               // 残留在文档里的起点（ACP 偏移）；核对靠位置，不只靠文字
+    ULONGLONG _lastCompositionWriteTick = 0; // 上次写组合文字的时刻，判「过早终止」用
+    BOOL _caretRejectedOutsideView = FALSE; // 最近一次同步取坐标因越出显示区被弃用，见 GetCaretPosition
+    // 在编辑会话里删掉光标前的残留（光标前恰好是残留才删），并清掉记录。无残留时什么也不做。
+    void _DropRecoverLeftover(TfEditCookie ec, ITfContext* pContext);
+    void _ArmRecover(ITfContext* pContext, ITfRange* pRange, const std::wstring& leftover, LONG acpStart);
+    void _ClearRecoverRecord();
+    void _DisarmRecover(const wchar_t* why); // 解除恢复，并按记下的位置异步清掉残留
+    void _PurgeLeftover(TfEditCookie ec, ITfRange* pRange, const std::wstring& text);
+    // 光标处无选区、恰在残留末尾、且残留文字未变。成立时 *ppLeftover 返回覆盖残留的 range（调用方 Release）。
+    BOOL _LeftoverBeforeCaret(TfEditCookie ec, ITfContext* pContext, ITfRange** ppLeftover);
+    void _RequestDropLeftover(); // 无组合时单独开一个编辑会话删残留（服务端清空缓冲）
     BOOL _asyncEdit;  // Track if last RequestEditSession returned TF_S_ASYNC (Weasel optimization)
 
     // Cached caret position from edit session (for WebView apps where separate
