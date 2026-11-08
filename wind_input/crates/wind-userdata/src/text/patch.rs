@@ -42,17 +42,17 @@ pub enum PatchOp {
 
 fn header(banner: &str, name: &str, syllable_codes: bool) -> String {
     let mut h = format!(
-        "{banner}\n---\nname: {name}\ncolumns: [text, code, weight]\nwind:\n  kind: words\n"
+        "{banner}\n---\nname: {name}\ncolumns: [code, text, weight]\nwind:\n  kind: words\n"
     );
     if syllable_codes {
         h.push_str("  code_spacing: syllable\n");
     }
-    // 文本列在行首：以 `#` 开头的词不能被当成注释，所以正文一开头就关掉注释
+    // 码表方案的码可能以 `#` 开头，不能被当成注释，所以正文一开头就关掉注释
     h.push_str("  escape: true\n...\n# no comment\n");
     h
 }
 
-/// 整文件渲染（迁移 / 清空 / 导入 / 新建）：说明行、LF、无 BOM、`columns: [text, code, weight]`。
+/// 整文件渲染（迁移 / 清空 / 导入 / 新建）：说明行、LF、无 BOM、`columns: [code, text, weight]`。
 pub fn render(name: &str, syllable_codes: bool, rows: &[(String, String, u64, i32)]) -> String {
     render_with(super::banner::USER_DICT, name, syllable_codes, rows)
 }
@@ -66,9 +66,9 @@ pub fn render_with(
 ) -> String {
     let mut s = header(banner, name, syllable_codes);
     for (code, text, boundary, weight) in rows {
-        s.push_str(&wind_wdict::escape_text_field(text));
-        s.push('\t');
         s.push_str(&wind_wdict::join_code_by_boundary(code, *boundary));
+        s.push('\t');
+        s.push_str(&wind_wdict::escape_text_field(text));
         s.push('\t');
         s.push_str(&weight.to_string());
         s.push('\n');
@@ -507,9 +507,9 @@ mod tests {
             &[("nihao".into(), "你好".into(), 0b101, 3)],
         );
         assert!(
-            s.contains("columns: [text, code, weight]") && s.contains("code_spacing: syllable")
+            s.contains("columns: [code, text, weight]") && s.contains("code_spacing: syllable")
         );
-        assert!(s.ends_with("...\n# no comment\n你好\tni hao\t3\n"));
+        assert!(s.ends_with("...\n# no comment\nni hao\t你好\t3\n"));
         assert!(s.starts_with(&format!("{}\n---\n", crate::text::banner::USER_DICT)));
     }
 

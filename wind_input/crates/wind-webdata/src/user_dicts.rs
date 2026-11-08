@@ -365,7 +365,7 @@ mod tests {
         let file = f.root().join(r["file"].as_str().unwrap());
         assert!(file.is_file(), "{r}");
         let mut text = std::fs::read_to_string(&file).unwrap();
-        text.push_str("戈\ta\t100\n");
+        text.push_str("a\t戈\t100\n");
         std::fs::write(&file, &text).unwrap();
         f.rpc("dict.reload", json!({"paths": [file.to_string_lossy()]}))
             .unwrap();
@@ -393,7 +393,7 @@ mod tests {
             "分库开关不进 schema_overrides"
         );
 
-        text.push_str("新词\tb\t5\n");
+        text.push_str("b\t新词\t5\n");
         std::fs::write(&file, &text).unwrap();
         let r = f.rpc("dict.reload", json!({})).unwrap();
         assert!(

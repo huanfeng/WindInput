@@ -711,7 +711,7 @@ mod tests {
             assert!(
                 std::fs::read_to_string(&f)
                     .unwrap()
-                    .contains("你好\tni hao\t9")
+                    .contains("ni hao\t你好\t9")
             );
         }
         let s = Store::open(&p).unwrap();
@@ -1491,8 +1491,8 @@ mod tests {
         let f = s.user_text_path("pinyin");
         let edited = std::fs::read_to_string(&f)
             .unwrap()
-            .replace("他\tta\t1\n", "")
-            + "手改\tshou gai\t3\n";
+            .replace("ta\t他\t1\n", "")
+            + "shou gai\t手改\t3\n";
         std::fs::write(&f, edited).unwrap();
         let g0 = s.words_generation_of("pinyin");
         assert_eq!(s.sync_user_texts(), vec!["pinyin".to_string()]);
@@ -1621,7 +1621,7 @@ mod tests {
         s.add_user_word("wb", "a", "工", 1, 0).unwrap();
         s.flush_user_data().unwrap();
         let f = s.user_text_path("wb");
-        std::fs::write(&f, std::fs::read_to_string(&f).unwrap() + "式\tb\t1\n").unwrap();
+        std::fs::write(&f, std::fs::read_to_string(&f).unwrap() + "b\t式\t1\n").unwrap();
         let p = f.to_string_lossy().to_lowercase().replace('\\', "/");
         assert_eq!(
             s.reload_user_text_paths(&[p]).unwrap(),
@@ -1639,7 +1639,7 @@ mod tests {
         assert!(
             std::fs::read_to_string(s.user_text_path("wb"))
                 .unwrap()
-                .contains("工\ta\t1")
+                .contains("a\t工\t1")
         );
     }
 
