@@ -266,26 +266,48 @@ fn system_allows_animation() -> bool {
     !ok || on != 0
 }
 
-/// macOS 读「减少动态效果」（`com.apple.universalaccess` 的 `reduceMotion`）。服务进程不链 AppKit，
-/// 用不了 `accessibilityDisplayShouldReduceMotion`，走 CFPreferences。读不到（键不存在、该偏好域
-/// 不让读）按允许。
+/// `.app` 报来的「减少动态效果」：0 = 没报过，1 = 关，2 = 开。见 [`set_host_reduce_motion`]。
+#[cfg(target_os = "macos")]
+static HOST_REDUCE_MOTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 记下 `.app` 报来的「减少动态效果」（扩展信封 `host.reduce_motion`）。下一次显示候选窗时生效。
+#[cfg(target_os = "macos")]
+pub fn set_host_reduce_motion(reduce: bool) {
+    HOST_REDUCE_MOTION.store(
+        if reduce { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// macOS「减少动态效果」：以 `.app` 报来的为准（它能用 `accessibilityDisplayShouldReduceMotion`，服务
+/// 进程不链 AppKit）。没报过就读 `com.apple.universalaccess` 的 `reduceMotion`：先同步偏好域免得读到
+/// 进程启动时的旧值；读不到（键不存在、该偏好域不让读）按允许。
 #[cfg(target_os = "macos")]
 fn system_allows_animation() -> bool {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
-    use core_foundation_sys::preferences::CFPreferencesGetAppBooleanValue;
+    use core_foundation_sys::preferences::{
+        CFPreferencesAppSynchronize, CFPreferencesGetAppBooleanValue,
+    };
+    match HOST_REDUCE_MOTION.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
     let key = CFString::from_static_string("reduceMotion");
     let app = CFString::from_static_string("com.apple.universalaccess");
     let mut valid: u8 = 0;
     // SAFETY: 两个 CFString 在调用期间存活；`valid` 是本地变量。
     let reduce = unsafe {
+        CFPreferencesAppSynchronize(app.as_concrete_TypeRef());
         CFPreferencesGetAppBooleanValue(
             key.as_concrete_TypeRef(),
             app.as_concrete_TypeRef(),
             &mut valid,
         )
     };
-    !(valid != 0 && reduce != 0)
+    // valid == 0：键不存在或不是布尔，未知按允许。
+    valid == 0 || reduce == 0
 }
 
 /// Linux 外部宿主：没有统一可靠的「减少动态效果」来源（GNOME 的 `enable-animations` 要起进程或连

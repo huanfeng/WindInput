@@ -92,6 +92,22 @@ public final class CandidatePanelHost {
         // 菜单栏状态菜单复用候选框空白处右键的同一统一菜单树与回发路径, 保证两处一致。
         ModeStatusController.shared.unifiedMenuProvider = { [weak self] in self?.requestUnifiedMenu() }
         ModeStatusController.shared.onUnifiedAction = { [weak self] id in self?.sendMenuAction(id) }
+        // 皮肤动画跟随系统「减少动态效果」：服务进程不链 AppKit，由这边读了报过去。
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in self?.reportReduceMotion() }
+    }
+
+    /// 报系统「减少动态效果」(扩展信封 `host.reduce_motion`)。主线程读设置，后台发 (发送是同步往返)。
+    private func reportReduceMotion() {
+        DispatchQueue.main.async { [weak self] in
+            let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            guard let body = try? JSONSerialization.data(withJSONObject: ["reduce": reduce]) else { return }
+            DispatchQueue.global(qos: .utility).async {
+                self?.sendFrame(BinaryCodec.encodeExtFrame(kind: ExtKind.hostReduceMotion, body: body))
+            }
+        }
     }
 
     // MARK: - 统一菜单复用接口 (供系统输入菜单 InputController.menu 调用)
@@ -318,6 +334,7 @@ public final class CandidatePanelHost {
 
         if connected {
             NSLog("CandidatePanelHost: push subscribed \(BridgeEndpoints.pushSocket)")
+            reportReduceMotion()
         } else {
             NSLog("CandidatePanelHost: push start failed (服务未就绪?) — 安排重连")
             scheduleReconnect()
@@ -460,6 +477,8 @@ public final class CandidatePanelHost {
             // 变成孤立旧段 → 候选窗卡在旧帧不刷新。收到 SERVICE_READY 即强制重开 SHM reader，
             // 下一帧按名重开拿到新段，无需重装/重启 .app。
             lock.lock(); reader?.closeReader(); reader = nil; lock.unlock()
+            // 新服务没有「减少动态效果」的上报值，重报一次。
+            reportReduceMotion()
             // 各浮层的 SHM 段同样被重建; 开着的菜单也随旧服务一并作废。
             DispatchQueue.main.async { [weak self] in
                 self?.lastSuggestedWire = nil

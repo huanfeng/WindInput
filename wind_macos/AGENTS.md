@@ -171,6 +171,8 @@ macOS 侧的通例是「服务进程只光栅化，窗口一律归 `.app`」—�
 - 穿透装饰不画进候选窗位图，另走浮层 `OVERLAY_KIND_DECOR`（SHM `_DEC`），由 `CandidatePanelHost` 交给候选窗的
   子 panel（`ignoresMouseEvents`、不投影，全在窗体下时排在候选窗下面），不经 `OverlayHost`。
 - 帧带 `isAnimFrame`（皮肤动画换帧，≤ 15 帧/秒）时照原位贴、不重算阴影。
+- 系统「减少动态效果」由本端读（`accessibilityDisplayShouldReduceMotion`），连上服务、`serviceReady` 与
+  `accessibilityDisplayOptionsDidChangeNotification` 时经 `host.reduce_motion` 报给服务。
 - 本机编不了 Swift：解码与不拖动判定的单测在 `CandidateSelectCodecTests`，只在 CI 的 macOS job 跑。
 
 ### 候选窗截图 / 提示复制

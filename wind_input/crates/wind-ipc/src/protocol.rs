@@ -386,6 +386,10 @@ pub mod ext_kind {
     pub const POS_SOFTKEYBOARD: &str = "pos.softkeyboard";
     /// 上行（Linux addon）：焦点宿主进入 / 退出全屏。body = `{"fullscreen":bool}`。
     pub const HOST_FULLSCREEN: &str = "host.fullscreen";
+    /// 上行（macOS `.app`）：系统「减少动态效果」。body = `{"reduce":bool}`。`.app` 起来时报一次、
+    /// 系统设置变化时再报（`NSWorkspace.accessibilityDisplayShouldReduceMotion`）；服务端以它为准，
+    /// 没收到时退回读偏好（见 `wind_ui::candidate_window::set_host_reduce_motion`）。
+    pub const HOST_REDUCE_MOTION: &str = "host.reduce_motion";
     /// 下行：问 `.app` 候选窗此刻在哪，答案走上行 [`POS_CANDIDATE`]。body 空。
     pub const POS_CANDIDATE_QUERY: &str = "pos.candidate.query";
     /// 下行：问宿主（`.app` / Linux addon）状态气泡此刻在哪，答案走上行 [`POS_STATUS_TIP`]。

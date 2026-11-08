@@ -663,6 +663,22 @@ impl MessageHandler for Coordinator {
                 }
                 None => tracing::warn!("host.fullscreen 载荷无法解析，忽略"),
             },
+            // macOS `.app`：系统「减少动态效果」，起来时与系统设置变化时报。
+            ext_kind::HOST_REDUCE_MOTION => {
+                let reduce = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v.get("reduce")?.as_bool());
+                match reduce {
+                    #[cfg(all(feature = "desktop-ui", target_os = "macos"))]
+                    Some(r) => {
+                        tracing::debug!("host.reduce_motion: {r}");
+                        wind_ui::candidate_window::set_host_reduce_motion(r);
+                    }
+                    #[cfg(not(all(feature = "desktop-ui", target_os = "macos")))]
+                    Some(_) => {}
+                    None => tracing::warn!("host.reduce_motion 载荷无法解析，忽略"),
+                }
+            }
             // Windows TSF：host render 候选窗落位诊断（SearchHost 写不了 tsf_log，只能看这条）。
             ext_kind::DIAG_HOST_RENDER_PLACED => match host_render_placed_log(body) {
                 Some((true, line)) => tracing::warn!("{line}"),

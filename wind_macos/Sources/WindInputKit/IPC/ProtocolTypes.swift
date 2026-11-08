@@ -123,6 +123,8 @@ public enum ExtKind {
     /// 上行：`.app` 自己把菜单收掉了（空闲超时 / 服务重启 / 断线…），服务端据此复位。
     /// body = `{"reason":"…"}`，只进日志。
     public static let menuDismiss = "menu.dismiss"
+    /// 上行：系统「减少动态效果」。body = `{"reduce":bool}`。连上服务时、服务重启后与系统设置变化时报。
+    public static let hostReduceMotion = "host.reduce_motion"
 }
 
 /// 按键组合 (CmdKeyTap/Hold/Release 解码结果, 及 KeySeq 内单项)。

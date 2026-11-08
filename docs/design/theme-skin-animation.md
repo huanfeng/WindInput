@@ -508,8 +508,11 @@ Fcitx5 addon）只贴图、落位、转发鼠标。盘点基准 `9f165489`：
   不重排 z 序（X11 不 raise——否则每帧压住 tooltip 与菜单；macOS 不 `invalidateShadow`）。旧前端忽略此位，
   按普通帧处理。
 - 候选窗收起时调 `win.hide()`：动画停（不登记唤醒），`hide` 事件照 §16 生效，下次显示时间轴从头。
-- 减少动态效果：macOS 读 `com.apple.universalaccess` 的 `reduceMotion`（CFPreferences；服务进程不链
-  AppKit，`accessibilityDisplayShouldReduceMotion` 用不了）。Linux 没有统一可靠的来源（GNOME 的
+- 减少动态效果：macOS 由 `.app` 读 `NSWorkspace.accessibilityDisplayShouldReduceMotion`，经扩展信封
+  `host.reduce_motion`（`{"reduce":bool}`）报给服务——连上服务、服务重启、系统设置变化
+  （`accessibilityDisplayOptionsDidChangeNotification`）时各报一次；服务进程不链 AppKit，以上报值为准，
+  没收到时退回 CFPreferences 读 `com.apple.universalaccess` 的 `reduceMotion`（先 `AppSynchronize`，
+  `valid == 0` 按未知、允许）。下一次显示候选窗时生效。Linux 没有统一可靠的来源（GNOME 的
   `enable-animations` 要起进程或连 dconf，KDE 另一套），恒为开，只受 `ui.theme.animation` 控制。
 
 ### 17.2 协议：`CMD_CANDIDATE_SKIN`（0x0514，push）
