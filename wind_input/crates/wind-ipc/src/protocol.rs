@@ -263,6 +263,26 @@ pub const CMD_KEY_TYPE: u16 = 0x0512; // 整段 UTF-8 文本（无长度前缀�
 /// 有新帧 / 该隐藏」并带上落位规则。
 /// 布局见 [`crate::codec::encode_overlay_frame`]，常量见 [`overlay`]。
 pub const CMD_OVERLAY_FRAME: u16 = 0x0513;
+/// 候选窗异形皮肤的区域（外部宿主）：窗体矩形、各装饰矩形与鼠标策略、输入区。每个候选帧在
+/// [`CMD_CANDIDATE_RECTS`] 之后推一条，没启用皮肤时 `flags = 0`。布局见
+/// [`crate::codec::encode_candidate_skin`]，常量见 [`skin`]，设计见 theme-skin-animation.md §17.2。
+pub const CMD_CANDIDATE_SKIN: u16 = 0x0514;
+
+/// [`CMD_CANDIDATE_SKIN`] 的枚举值。全部 `u32` 且名字全局唯一（`protocol_sync_test` 逐个比对）。
+pub mod skin {
+    /// `flags`：本帧启用了皮肤。
+    pub const SKIN_FLAG_ACTIVE: u32 = 0x0001;
+    /// `flags`：带输入区表（只 Linux 发；macOS 按 alpha 自动穿透）。
+    pub const SKIN_FLAG_MASK: u32 = 0x0002;
+    /// 装饰的 `hit`。
+    pub const SKIN_HIT_DRAG: u32 = 0;
+    pub const SKIN_HIT_BLOCK: u32 = 1;
+    pub const SKIN_HIT_PASS: u32 = 2;
+    /// 装饰的 `flags`：在窗体下面（z < 0）。
+    pub const SKIN_DECOR_UNDER: u32 = 0x0001;
+    /// 装饰的 `flags`：穿透装饰画在独立层（macOS 子 panel），不在主缓冲。
+    pub const SKIN_DECOR_SPLIT: u32 = 0x0002;
+}
 
 /// [`CMD_OVERLAY_FRAME`] 的枚举值。全部 `u32` 且名字全局唯一：`wind_linux/tests/protocol_sync_test.cpp`
 /// 按 `pub const NAME: u32 = …` 逐个比对 `wind_linux/include/ExtProtocol.h`。
@@ -281,6 +301,9 @@ pub mod overlay {
     /// 指针事件走 [`super::CMD_PANEL_POINTER`]。
     pub const OVERLAY_KIND_TOOLBAR: u32 = 10;
     pub const OVERLAY_KIND_SOFTKEYBOARD: u32 = 11;
+    /// 候选窗的穿透装饰层（macOS）：与候选窗同原点同尺寸，`.app` 挂成候选窗的子 panel、不收鼠标。
+    /// 落位恒为 `OVERLAY_PLACE_EXACT`，坐标即候选窗建议落点（`.app` 跟着候选窗走，不读它）。
+    pub const OVERLAY_KIND_DECOR: u32 = 12;
 
     /// 落位方式（place）。坐标一律指**内容盒**左上（不含软阴影扩边），宿主减去
     /// `content_x/y` 得窗口左上。
@@ -1454,6 +1477,9 @@ impl SharedRenderHeader {
     /// 固定点靠近屏幕底边就会被莫名弹到顶上。置本位即告诉 `.app`：照搬坐标，只做屏幕
     /// 边界钳制，不要翻转。
     pub const FLAG_ABSOLUTE_POS: u32 = 0x0008;
+    /// 换帧：内容没变，只换了皮肤装饰的动画帧。外部宿主照原位贴图，不重新落位、不重排 z 序
+    /// （X11 每帧 raise 会压住 tooltip 与菜单）。旧宿主不认这一位，按普通帧处理。
+    pub const FLAG_ANIM_FRAME: u32 = 0x0010;
 
     pub fn new(x: i32, y: i32, width: u32, height: u32, stride: u32, data_size: u32) -> Self {
         Self {

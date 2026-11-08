@@ -134,6 +134,26 @@ pub struct RenderedFrame {
     pub hit_rects: Vec<(i32, crate::view::Rect)>,
     /// 预乘 BGRA 像素缓冲（width×height×4）
     pub buf: Vec<u8>,
+    /// 皮肤区域（`CMD_CANDIDATE_SKIN`，设计 §17.2）。没启用皮肤为 `Default`（`flags = 0`）。
+    pub skin: wind_ipc::codec::CandidateSkinWire,
+    /// macOS：拆出来的穿透装饰层（与 `buf` 同尺寸）+ 是否垫在主层下面。主层里没有它们。
+    pub pass_layer: Option<(Vec<u8>, bool)>,
+}
+
+#[cfg(ext_presenter)]
+impl RenderedFrame {
+    /// 主层与穿透装饰层合成后的整张位图（截图用）。没拆层时就是 `buf`。
+    pub fn composed(&self) -> Vec<u8> {
+        let mut out = self.buf.clone();
+        if let Some((pass, below)) = &self.pass_layer {
+            if *below {
+                scene::composite_under(&mut out, pass);
+            } else {
+                scene::composite_over(&mut out, pass);
+            }
+        }
+        out
+    }
 }
 
 /// Windows host-render：`render_frame()` 产出的离屏帧（写 SHM + Event 触发用）。
@@ -1503,10 +1523,13 @@ impl CandidateWindow {
         // 命中矩形（窗口缓冲坐标，内容起点 (ml,mt)），同步给鼠标处理器。
         self.sync_hits(&frame);
 
-        // 绘制到独立 BGRA 缓冲（透明清屏 → 内容；本路径不画软影）。
+        // 绘制到独立 BGRA 缓冲（透明清屏 → 内容；本路径不画软影）。穿透装饰先拆出来（§17.2）：
+        // Linux 按主层算输入区再合回去，macOS 另走子 panel。
         let mut buf = vec![0u8; (width * height * 4) as usize];
-        self.scene
-            .paint(&frame, &mut buf, &self.text_renderer, false);
+        let pass = self
+            .scene
+            .paint(&frame, &mut buf, &self.text_renderer, true);
+        let (skin, pass_layer) = self.skin_regions(&mut buf, width, height, pass);
         let shadow = frame.shadow;
 
         self.mark_visible();
@@ -1544,7 +1567,78 @@ impl CandidateWindow {
             absolute_pos: absolute,
             hit_rects: self.hit_rects.clone(),
             buf,
+            skin,
+            pass_layer,
         })
+    }
+
+    /// 外部宿主的皮肤区域（设计 §17.2）。`buf` 是不含穿透装饰的主层，`pass` 是拆出来的穿透装饰层。
+    ///
+    /// Linux：输入区按主层的 alpha 算，然后把穿透装饰合回 `buf`（同一张位图，只是不进输入区）。
+    /// macOS：不发输入区（非不透明窗口按 alpha 自动穿透），穿透装饰层原样交出去给子 panel。
+    #[cfg(ext_presenter)]
+    fn skin_regions(
+        &self,
+        buf: &mut [u8],
+        width: u32,
+        height: u32,
+        pass: Option<(Vec<u8>, bool)>,
+    ) -> (wind_ipc::codec::CandidateSkinWire, Option<(Vec<u8>, bool)>) {
+        use wind_ipc::codec::{CandidateSkinWire, SkinDecorWire};
+        use wind_ipc::protocol::skin::*;
+        use wind_theme::skin::DecorHit;
+        let Some(g) = self.scene.skin_geom.as_ref() else {
+            return (CandidateSkinWire::default(), pass);
+        };
+        let split = cfg!(target_os = "macos");
+        let decor = g
+            .host_decor()
+            .into_iter()
+            .map(|d| {
+                let hit = match d.hit {
+                    DecorHit::Drag => SKIN_HIT_DRAG,
+                    DecorHit::Block => SKIN_HIT_BLOCK,
+                    DecorHit::Pass => SKIN_HIT_PASS,
+                };
+                let mut flags = 0;
+                if d.under {
+                    flags |= SKIN_DECOR_UNDER;
+                }
+                if split && d.hit == DecorHit::Pass {
+                    flags |= SKIN_DECOR_SPLIT;
+                }
+                SkinDecorWire {
+                    index: d.index as u32,
+                    hit,
+                    flags,
+                    rect: d.rect,
+                }
+            })
+            .collect();
+        let f = g.frame_rect();
+        let mut wire = CandidateSkinWire {
+            flags: SKIN_FLAG_ACTIVE,
+            frame: [f.x as i32, f.y as i32, f.w as i32, f.h as i32],
+            decor,
+            mask: Vec::new(),
+        };
+        if split {
+            return (wire, pass);
+        }
+        wire.flags |= SKIN_FLAG_MASK;
+        wire.mask =
+            scene::opaque_rects(buf, width, height, scene::MAX_INPUT_RECTS).unwrap_or_else(|| {
+                tracing::debug!("skin: 输入区矩形超过上限，退化为窗体与装饰矩形");
+                g.coarse_input_rects()
+            });
+        if let Some((p, below)) = pass {
+            if below {
+                scene::composite_under(buf, &p);
+            } else {
+                scene::composite_over(buf, &p);
+            }
+        }
+        (wire, None)
     }
 
     /// Windows host-render：把当前候选状态渲染到一块独立 BGRA 缓冲区并返回，

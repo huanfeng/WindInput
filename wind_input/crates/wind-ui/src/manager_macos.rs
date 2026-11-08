@@ -71,6 +71,11 @@ pub struct Forwarder {
     /// 悬浮工具栏 / 软键盘（Linux）。
     #[cfg(all(target_os = "linux", ext_presenter))]
     panels: Panels,
+    /// 穿透装饰层（macOS 子 panel）的 SHM 段与显示态，见 [`Forwarder::push_decor_layer`]。
+    #[cfg(target_os = "macos")]
+    decor_shm: Option<PosixSharedMemory>,
+    #[cfg(target_os = "macos")]
+    decor_shown: bool,
 }
 
 /// Linux 外部宿主形态的悬浮工具栏与软键盘。
@@ -331,6 +336,10 @@ impl Forwarder {
             #[cfg(all(target_os = "linux", ext_presenter))]
             panels,
             menu,
+            #[cfg(target_os = "macos")]
+            decor_shm: None,
+            #[cfg(target_os = "macos")]
+            decor_shown: false,
         }
     }
 
@@ -941,7 +950,7 @@ impl Forwarder {
             return None;
         }
         let f = self.win.render_frame()?;
-        Some((f.buf, f.width, f.height))
+        Some((f.composed(), f.width, f.height))
     }
 
     /// 状态气泡 / 悬停提示右键菜单里的「截图此窗口」。像素在本进程（该层 SHM），与
@@ -993,7 +1002,14 @@ impl Forwarder {
     /// 内容更新（`UpdateCandidates`）与纯外观变更（换主题/字号…）共用此路径——后者若不
     /// 走这里重推一帧，显示中的候选窗就会停在旧样子。
     fn push_current_frame(&mut self) {
-        match self.win.render_frame() {
+        let f = self.win.render_frame();
+        self.push_frame_out(f, false);
+    }
+
+    /// 推一帧渲染结果；`None` = 该隐藏。`anim` = 皮肤换帧：帧带 `FLAG_ANIM_FRAME`，不重推 tooltip、
+    /// 不重报候选窗矩形（内容没变）。
+    fn push_frame_out(&mut self, f: Option<crate::candidate_window::RenderedFrame>, anim: bool) {
+        match f {
             Some(f) => {
                 let (sx, sy, w, h, scale, soft, absolute) = (
                     f.screen_x,
@@ -1021,6 +1037,9 @@ impl Forwarder {
                         (wire, r.x as i32, r.y as i32, r.w as i32, r.h as i32)
                     })
                     .collect();
+                let skin = encode_candidate_skin(&f.skin);
+                #[cfg(target_os = "macos")]
+                let pass_layer = f.pass_layer;
                 let buf = f.buf;
                 // 先写 SHM 像素并取 seq；shm 建失败则整帧放弃——
                 // 不能只推命中矩形/tooltip 而无底帧，否则 .app 拿到无像素的命中区（不一致）。
@@ -1036,6 +1055,12 @@ impl Forwarder {
                 if absolute {
                     flags |= SharedRenderHeader::FLAG_ABSOLUTE_POS;
                 }
+                if anim {
+                    flags |= SharedRenderHeader::FLAG_ANIM_FRAME;
+                }
+                // 穿透装饰层先于候选帧到：`.app` 收到候选帧时子 panel 已有这一帧的像素。
+                #[cfg(target_os = "macos")]
+                self.push_decor_layer(pass_layer, (sx, sy, w, h), scale);
                 self.sink.push_frame(&encode_host_render_frame(
                     seq,
                     sx,
@@ -1046,13 +1071,16 @@ impl Forwarder {
                     scale.round().max(1.0) as u32,
                 ));
                 self.sink.push_frame(&encode_candidate_rects(&rects));
-                // tooltip 在本进程光栅化，坐标按候选窗建议落点算（宿主平移到实际位置）。
-                // 悬停目标取自候选窗自己的 hover 状态。
-                let ov = self.win.render_tooltip_overlay(sx, sy);
-                self.overlays.show_tooltip(&*self.sink, ov);
+                self.sink.push_frame(&skin);
                 self.visible = true;
-                let rect = self.win.screen_rect();
-                self.overlays.set_candidate_rect(&*self.sink, rect);
+                if !anim {
+                    // tooltip 在本进程光栅化，坐标按候选窗建议落点算（宿主平移到实际位置）。
+                    // 悬停目标取自候选窗自己的 hover 状态。
+                    let ov = self.win.render_tooltip_overlay(sx, sy);
+                    self.overlays.show_tooltip(&*self.sink, ov);
+                    let rect = self.win.screen_rect();
+                    self.overlays.set_candidate_rect(&*self.sink, rect);
+                }
                 tracing::debug!(
                     "forwarder pushed host-render frame seq={} {}x{} at ({},{}) scale={}",
                     seq,
@@ -1074,6 +1102,8 @@ impl Forwarder {
         // 无论 SHM 建没建起来都得落 visible=false：否则外观类命令会对着一个已经隐藏的
         // 候选窗重推帧，把它又推回屏幕上。
         self.visible = false;
+        #[cfg(target_os = "macos")]
+        self.push_decor_layer(None, (0, 0, 0, 0), 1.0);
         self.overlays.hide(
             &*self.sink,
             wind_ipc::protocol::overlay::OVERLAY_KIND_TOOLTIP,
@@ -1084,6 +1114,67 @@ impl Forwarder {
             self.sink
                 .push_frame(&encode_host_render_frame(seq, 0, 0, 0, 0, 0, 1));
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Forwarder {
+    /// 穿透装饰层（设计 §17.3）：写 `_DEC` 段、推 `OVERLAY_KIND_DECOR` 帧，`.app` 贴进候选窗的子 panel。
+    /// `layer` 为 None（本帧没有穿透装饰 / 候选窗收起）时，之前显示过就推一条隐藏帧。
+    /// `at` 是候选窗建议落点与尺寸（`.app` 跟着候选窗走，不读坐标）。
+    fn push_decor_layer(
+        &mut self,
+        layer: Option<(Vec<u8>, bool)>,
+        at: (i32, i32, u32, u32),
+        scale: f32,
+    ) {
+        use wind_ipc::protocol::overlay::{OVERLAY_KIND_DECOR, OVERLAY_PLACE_EXACT};
+        // 垫在候选窗下面还是盖在上面，`.app` 按 `CMD_CANDIDATE_SKIN` 里拆层装饰的 UNDER 位定。
+        let Some((pixels, _below)) = layer else {
+            if std::mem::take(&mut self.decor_shown) {
+                let seq = self
+                    .decor_shm
+                    .as_mut()
+                    .map(|s| s.write_hidden())
+                    .unwrap_or(0);
+                self.sink
+                    .push_frame(&encode_overlay_frame(&OverlayFrameMeta {
+                        kind: OVERLAY_KIND_DECOR,
+                        seq,
+                        ..Default::default()
+                    }));
+            }
+            return;
+        };
+        let (x, y, w, h) = at;
+        if pixels.len() > SHM_MAX - SharedRenderHeader::SIZE {
+            tracing::warn!("skin: 穿透装饰层 {w}x{h} 过大，丢弃");
+            return;
+        }
+        if self.decor_shm.is_none() {
+            self.decor_shm =
+                crate::overlay_host::create_layer_shm(&self.suffix, OVERLAY_KIND_DECOR);
+        }
+        let Some(shm) = self.decor_shm.as_mut() else {
+            return;
+        };
+        let seq = shm.write_frame(0, 0, w, h, &pixels);
+        self.sink
+            .push_frame(&encode_overlay_frame(&OverlayFrameMeta {
+                kind: OVERLAY_KIND_DECOR,
+                seq,
+                width: w,
+                height: h,
+                flags: SharedRenderHeader::FLAG_VISIBLE | SharedRenderHeader::FLAG_CONTENT_READY,
+                place: OVERLAY_PLACE_EXACT,
+                x,
+                y,
+                content_w: w,
+                content_h: h,
+                scale,
+                ..Default::default()
+            }));
+        self.decor_shown = true;
     }
 }
 
@@ -1367,6 +1458,181 @@ mod tests {
             fixed_x: 0,
             fixed_y: 0,
         });
+    }
+
+    /// 皮肤夹具（设计 §17.5）：30×20 白色窗体；右上外侧 8×8 穿透装饰（z = 1），左上外侧 8×8 block
+    /// 装饰。`extra` 追加到穿透装饰那张表（动画用例写 `fps` 等）；`pass_image` 换穿透装饰的文件。
+    fn skin_theme(tag: &str, pass_image: Option<&[u8]>, extra: &str) -> wind_theme::Resolved {
+        let dir = std::env::temp_dir().join(format!("wind_fwd_skin_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = dir.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let px = |w, h, c| image::RgbaImage::from_pixel(w, h, image::Rgba(c));
+        px(30, 20, [255, 255, 255, 255])
+            .save(t.join("frame.png"))
+            .unwrap();
+        px(8, 8, [0, 0, 255, 255])
+            .save(t.join("block.png"))
+            .unwrap();
+        match pass_image {
+            Some(bytes) => std::fs::write(t.join("pass.png"), bytes).unwrap(),
+            None => px(8, 8, [255, 0, 0, 255]).save(t.join("pass.png")).unwrap(),
+        }
+        std::fs::write(
+            t.join("theme.toml"),
+            format!(
+                "[meta]\nname = \"t\"\n[skin]\ndensity = 1\n\
+                 [skin.horizontal.frame]\nimage = \"frame.png\"\n\
+                 stretch_x = [[10, 20]]\nstretch_y = [[8, 12]]\n\
+                 [skin.horizontal.content]\nleft = 4\ntop = 3\nright = 4\nbottom = 3\n\
+                 [[skin.horizontal.decor]]\nimage = \"pass.png\"\nanchor = \"frame.top_right\"\n\
+                 pivot = \"bottom_left\"\nz = 1\nhit = \"pass\"\n{extra}\n\
+                 [[skin.horizontal.decor]]\nimage = \"block.png\"\nanchor = \"frame.top_left\"\n\
+                 pivot = \"bottom_right\"\nhit = \"block\"\n"
+            ),
+        )
+        .unwrap();
+        let theme = wind_theme::load_resolved(&dir, "t", false).unwrap();
+        assert!(theme.skin.is_some());
+        theme
+    }
+
+    /// 解出最近一条 `CMD_CANDIDATE_SKIN`：(flags, 窗体, [(下标, hit, flags, 矩形)], 输入区)。
+    #[allow(clippy::type_complexity)]
+    fn last_skin(
+        cap: &Arc<Mutex<Vec<Vec<u8>>>>,
+    ) -> Option<(u32, [i32; 4], Vec<(u32, u32, u32, [i32; 4])>, Vec<[i32; 4]>)> {
+        let v = cap.lock().unwrap();
+        let f = v.iter().rev().find(|f| cmd_of(f) == CMD_CANDIDATE_SKIN)?;
+        let p = &f[IpcHeader::SIZE..];
+        let u = |o: usize| u32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        let r = |o: usize| -> [i32; 4] { std::array::from_fn(|k| u(o + k * 4) as i32) };
+        let n = u(20) as usize;
+        let decor = (0..n)
+            .map(|k| {
+                let o = 24 + k * 28;
+                (u(o), u(o + 4), u(o + 8), r(o + 12))
+            })
+            .collect();
+        let mo = 24 + n * 28;
+        let mask = (0..u(mo) as usize).map(|k| r(mo + 4 + k * 16)).collect();
+        Some((u(0), r(4), decor, mask))
+    }
+
+    fn covers(rects: &[[i32; 4]], x: i32, y: i32) -> bool {
+        rects
+            .iter()
+            .any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
+    }
+
+    fn center(r: [i32; 4]) -> (i32, i32) {
+        (r[0] + r[2] / 2, r[1] + r[3] / 2)
+    }
+
+    #[test]
+    fn plain_theme_frame_carries_inactive_skin_regions() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk0");
+        show_two(&mut f);
+        let order: Vec<u16> = cap.lock().unwrap().iter().map(|x| cmd_of(x)).collect();
+        let at = |c| order.iter().position(|&x| x == c).unwrap();
+        assert!(
+            at(CMD_CANDIDATE_RECTS) < at(CMD_CANDIDATE_SKIN),
+            "{order:x?}"
+        );
+        let (flags, _, decor, mask) = last_skin(&cap).unwrap();
+        assert_eq!((flags, decor.len(), mask.len()), (0, 0, 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_skin_input_region_leaves_out_pass_decor() {
+        use wind_ipc::protocol::skin::*;
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk1");
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme("mask", None, ""))));
+        show_two(&mut f);
+        let (flags, frame, decor, mask) = last_skin(&cap).expect("皮肤帧要带区域");
+        assert_eq!(flags, SKIN_FLAG_ACTIVE | SKIN_FLAG_MASK);
+        // 求值后的装饰按 z 升序（block z = 0 在前），下标是排序后的位置。
+        let hits: Vec<(u32, u32, u32)> = decor.iter().map(|d| (d.0, d.1, d.2)).collect();
+        assert_eq!(hits, vec![(0, SKIN_HIT_BLOCK, 0), (1, SKIN_HIT_PASS, 0)]);
+        let (block, pass) = (decor[0].3, decor[1].3);
+        assert!(
+            pass[1] < frame[1] && pass[0] >= frame[0] + frame[2],
+            "{pass:?} {frame:?}"
+        );
+        // 窗体与 block 装饰接鼠标，穿透装饰不接；外扩区里装饰以外的透明处也不接。
+        let (fx, fy) = center(frame);
+        assert!(covers(&mask, fx, fy));
+        let (bx, by) = center(block);
+        assert!(covers(&mask, bx, by));
+        let (px, py) = center(pass);
+        assert!(!covers(&mask, px, py), "{mask:?}");
+        assert!(!covers(&mask, frame[0] + frame[2] / 2, 0));
+        // 穿透装饰照样画在位图里（只是不进输入区）。
+        let shm = f.shm.as_ref().unwrap();
+        let w = shm.read_header().width as i32;
+        let a = shm.pixels()[((py * w + px) * 4 + 3) as usize];
+        assert_eq!(a, 255);
+        // 换回普通主题：区域复位。
+        f.handle(UiCommand::SetTheme(Box::default()));
+        assert_eq!(last_skin(&cap).unwrap().0, 0);
+    }
+
+    /// macOS：穿透装饰拆到 `OVERLAY_KIND_DECOR` 层，主层里没有它；不发输入区。只有 CI 的 macOS job 跑得到。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pass_decor_goes_to_its_own_layer() {
+        use wind_ipc::protocol::overlay::OVERLAY_KIND_DECOR;
+        use wind_ipc::protocol::skin::*;
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk4");
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme("split", None, ""))));
+        show_two(&mut f);
+        let (flags, frame, decor, mask) = last_skin(&cap).expect("皮肤帧要带区域");
+        assert_eq!(flags, SKIN_FLAG_ACTIVE);
+        assert!(mask.is_empty());
+        let pass = decor.iter().find(|d| d.1 == SKIN_HIT_PASS).unwrap();
+        assert_eq!(pass.2, SKIN_DECOR_SPLIT);
+        let block = decor.iter().find(|d| d.1 == SKIN_HIT_BLOCK).unwrap();
+        assert_eq!(block.2, 0);
+        // 主层：穿透装饰处透明，窗体不透明。
+        let shm = f.shm.as_ref().unwrap();
+        let w = shm.read_header().width as i32;
+        let alpha = |(x, y): (i32, i32)| shm.pixels()[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(center(pass.3)), 0);
+        assert_eq!(alpha(center(frame)), 255);
+        // 穿透装饰层：先于候选帧推到，像素在 `_DEC` 段里。
+        let v = cap.lock().unwrap();
+        let kinds: Vec<(u16, u32)> = v
+            .iter()
+            .map(|x| (cmd_of(x), u32::from_le_bytes(x[8..12].try_into().unwrap())))
+            .collect();
+        let dec = kinds
+            .iter()
+            .position(|&(c, k)| c == CMD_OVERLAY_FRAME && k == OVERLAY_KIND_DECOR)
+            .expect("要推穿透装饰层");
+        let cand = kinds
+            .iter()
+            .rposition(|&(c, _)| c == CMD_HOST_RENDER_FRAME)
+            .unwrap();
+        assert!(dec < cand, "{kinds:?}");
+        drop(v);
+        let dshm = f.decor_shm.as_ref().unwrap();
+        let o = ((center(pass.3).1 * w + center(pass.3).0) * 4 + 3) as usize;
+        assert_eq!(dshm.pixels()[o], 255);
+        assert!(!covers(&mask, 0, 0));
+        // 收起：穿透装饰层也收。
+        cap.lock().unwrap().clear();
+        f.handle(UiCommand::HideCandidates);
+        assert!(
+            cap.lock()
+                .unwrap()
+                .iter()
+                .any(|x| cmd_of(x) == CMD_OVERLAY_FRAME
+                    && u32::from_le_bytes(x[8..12].try_into().unwrap()) == OVERLAY_KIND_DECOR)
+        );
     }
 
     #[test]

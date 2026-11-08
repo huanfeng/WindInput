@@ -520,7 +520,7 @@ decorN    u32
 decorN ×  { index u32   变体 decor 下标（与 §16 状态机同号）
             hit   u32   0 drag | 1 block | 2 pass
             flags u32   bit0 UNDER（z < 0）；bit1 SPLIT（穿透装饰画在独立层，不在主缓冲）
-            x, y, w, h  4×i32 }                            每条 32 字节
+            x, y, w, h  4×i32 }                            每条 28 字节
 maskN     u32
 maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 ```

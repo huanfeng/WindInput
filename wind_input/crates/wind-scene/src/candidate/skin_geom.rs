@@ -397,6 +397,35 @@ impl SkinGeom {
             })
             .collect()
     }
+
+    /// 各装饰的矩形与鼠标策略，按 z 升序（与绘制同序）。
+    pub fn host_decor(&self) -> Vec<super::host_regions::HostDecor> {
+        self.decor
+            .iter()
+            .zip(&self.decor_rects)
+            .map(|(d, &(x, y, w, h))| super::host_regions::HostDecor {
+                index: d.index,
+                hit: d.hit,
+                under: d.z < 0,
+                rect: [x, y, w as i32, h as i32],
+            })
+            .collect()
+    }
+
+    /// 输入区的退化形：窗体矩形 + 非穿透装饰矩形（可能互相重叠，宿主按并集用）。
+    pub fn coarse_input_rects(&self) -> Vec<[i32; 4]> {
+        let (x, y, w, h) = self.frame;
+        std::iter::once([x, y, w as i32, h as i32])
+            .chain(
+                self.host_decor()
+                    .into_iter()
+                    .filter(|d| d.hit != DecorHit::Pass)
+                    .map(|d| d.rect),
+            )
+            .filter(|r| r[2] > 0 && r[3] > 0)
+            .collect()
+    }
+
     /// 能点的装饰（`drag` / `block`）：(变体下标, 矩形, 在窗体下面)，按 z 升序（后者在上）。
     pub fn click_rects(&self) -> Vec<(usize, Rect, bool)> {
         self.decor

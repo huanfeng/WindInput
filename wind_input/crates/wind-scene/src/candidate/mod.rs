@@ -5,10 +5,12 @@
 //! [`CandidateScene`] 持有；时间经 [`AnimClock`] 注入，文字经 [`TextBackend`] 注入。
 //! 方案见 `docs/design/wind-scene-extraction.md` §2。
 
+mod host_regions;
 mod render;
 mod skin_geom;
 mod theme;
 
+pub use host_regions::{HostDecor, MAX_INPUT_RECTS, composite_over, composite_under, opaque_rects};
 pub use render::{CandidateFrame, render_candidate, render_candidate_within};
 
 pub use skin_geom::{

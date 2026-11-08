@@ -1621,6 +1621,57 @@ pub fn encode_candidate_rects(rects: &[(i32, i32, i32, i32, i32)]) -> Vec<u8> {
     frame(CMD_CANDIDATE_RECTS, p)
 }
 
+/// [`CMD_CANDIDATE_SKIN`] 里的一块装饰。枚举值见 [`crate::protocol::skin`]。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkinDecorWire {
+    /// 变体 `decor` 里的下标（与装饰状态机同号）。
+    pub index: u32,
+    /// `SKIN_HIT_*`。
+    pub hit: u32,
+    /// `SKIN_DECOR_*`。
+    pub flags: u32,
+    /// 缓冲内的设备像素 `x, y, w, h`。
+    pub rect: [i32; 4],
+}
+
+/// [`CMD_CANDIDATE_SKIN`] 的载荷。没启用皮肤时取 `Default`（`flags = 0`、两表为空）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateSkinWire {
+    /// `SKIN_FLAG_*`。
+    pub flags: u32,
+    /// 窗体矩形（缓冲内设备像素）。
+    pub frame: [i32; 4],
+    pub decor: Vec<SkinDecorWire>,
+    /// 输入区矩形（`SKIN_FLAG_MASK` 置位时有效）。
+    pub mask: Vec<[i32; 4]>,
+}
+
+/// CmdCandidateSkin (0x0514)，均小端：flags u32 + frame 4×i32 + decorN u32 +
+/// decorN × (index hit flags u32 + x y w h i32，28B) + maskN u32 + maskN × (x y w h i32)。
+pub fn encode_candidate_skin(s: &CandidateSkinWire) -> Vec<u8> {
+    let mut p = Vec::with_capacity(28 + s.decor.len() * 28 + s.mask.len() * 16);
+    p.extend_from_slice(&s.flags.to_le_bytes());
+    for v in s.frame {
+        p.extend_from_slice(&v.to_le_bytes());
+    }
+    p.extend_from_slice(&(s.decor.len() as u32).to_le_bytes());
+    for d in &s.decor {
+        for v in [d.index, d.hit, d.flags] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in d.rect {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    p.extend_from_slice(&(s.mask.len() as u32).to_le_bytes());
+    for r in &s.mask {
+        for v in r {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    frame(CMD_CANDIDATE_SKIN, p)
+}
+
 /// CmdModeStatus (0x0504): flags:u32 + effective_mode:u32 + labelLen:u32 + label(UTF-8)
 pub fn encode_mode_status(flags: u32, effective_mode: u32, label: &str) -> Vec<u8> {
     let mut p = Vec::new();
@@ -1991,6 +2042,48 @@ mod darwin_push_tests {
         assert_eq!((u(56), u(60)), (110, 30));
         assert_eq!(i(64), 1500);
         assert_eq!(f32::from_le_bytes(p[68..72].try_into().unwrap()), 2.0);
+    }
+
+    #[test]
+    fn candidate_skin_layout_matches_documented_offsets() {
+        use crate::protocol::skin::*;
+        let f = encode_candidate_skin(&CandidateSkinWire {
+            flags: SKIN_FLAG_ACTIVE | SKIN_FLAG_MASK,
+            frame: [10, 20, 300, 120],
+            decor: vec![
+                SkinDecorWire {
+                    index: 2,
+                    hit: SKIN_HIT_PASS,
+                    flags: SKIN_DECOR_UNDER | SKIN_DECOR_SPLIT,
+                    rect: [-5, -6, 40, 50],
+                },
+                SkinDecorWire {
+                    index: 0,
+                    hit: SKIN_HIT_BLOCK,
+                    flags: 0,
+                    rect: [1, 2, 3, 4],
+                },
+            ],
+            mask: vec![[10, 20, 300, 1], [0, 0, 7, 8]],
+        });
+        assert_eq!(cmd_of(&f), CMD_CANDIDATE_SKIN);
+        let p = &f[IpcHeader::SIZE..];
+        assert_eq!(p.len(), 4 + 16 + 4 + 2 * 28 + 4 + 2 * 16);
+        let u = |o: usize| u32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        let i = |o: usize| i32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        assert_eq!(u(0), 3);
+        assert_eq!((i(4), i(8), i(12), i(16)), (10, 20, 300, 120));
+        assert_eq!(u(20), 2);
+        assert_eq!((u(24), u(28), u(32)), (2, 2, 3));
+        assert_eq!((i(36), i(40), i(44), i(48)), (-5, -6, 40, 50));
+        assert_eq!((u(52), u(56), u(60)), (0, 1, 0));
+        assert_eq!((i(64), i(68), i(72), i(76)), (1, 2, 3, 4));
+        assert_eq!(u(80), 2);
+        assert_eq!((i(84), i(88), i(92), i(96)), (10, 20, 300, 1));
+        assert_eq!((i(100), i(104), i(108), i(112)), (0, 0, 7, 8));
+        // 没启用皮肤：28 字节全零。
+        let none = encode_candidate_skin(&CandidateSkinWire::default());
+        assert_eq!(&none[IpcHeader::SIZE..], &[0u8; 28][..]);
     }
 
     #[test]
