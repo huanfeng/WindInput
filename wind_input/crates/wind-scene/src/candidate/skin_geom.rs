@@ -469,6 +469,13 @@ impl SkinGeom {
         }
     }
 
+    /// 同 [`Self::collect_part_hits`]，收的是节点身份（[`View::node`]）。
+    pub fn collect_part_nodes(&self, out: &mut Vec<(u8, Rect)>) {
+        for p in &self.parts {
+            p.view.collect_nodes(out);
+        }
+    }
+
     /// 有没有 `hit = "pass"` 的装饰。
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn has_pass(&self) -> bool {

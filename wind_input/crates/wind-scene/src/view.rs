@@ -677,6 +677,9 @@ pub struct View {
     pub clip_corners: bool,
     /// 命中标识：>=0 参与命中收集（如候选下标 / 按钮 id），<0 忽略
     pub tag: i32,
+    /// 预览节点身份（0 = 无）：只供主题编辑器预览按节点收集矩形（[`View::collect_nodes`]），
+    /// 不参与布局、绘制与命中。取值由场景自定（候选窗见 `candidate::NodeKey`）。
+    pub node: u8,
     /// 旋转 90° 呈现整棵子树（蒙古文等纵向书写的脚本用）。
     ///
     /// # 形态约束（只支持这一种，越界即 debug_assert）
@@ -744,6 +747,7 @@ impl Default for View {
             clip: false,
             clip_corners: false,
             tag: -1,
+            node: 0,
             rot: Rot::None,
             mw: 0.0,
             mh: 0.0,
@@ -903,6 +907,10 @@ impl View {
     }
     pub fn tag(mut self, t: i32) -> Self {
         self.tag = t;
+        self
+    }
+    pub fn node(mut self, id: u8) -> Self {
+        self.node = id;
         self
     }
     pub fn fixed_h(mut self, h: f32) -> Self {
@@ -1316,6 +1324,29 @@ impl View {
 
         for c in &self.children {
             c.collect_hits_clipped(out, child_clip);
+        }
+    }
+
+    /// 先序收集打了 [`View::node`] 的节点矩形（预览点选用，实时窗口不调）。不按 `clip` 裁剪；
+    /// 旋转子树映射回屏幕空间。
+    pub fn collect_nodes(&self, out: &mut Vec<(u8, Rect)>) {
+        if self.node != 0 {
+            out.push((self.node, self.rect));
+        }
+        if self.rot != Rot::None {
+            let mut local = Vec::new();
+            for c in &self.children {
+                c.collect_nodes(&mut local);
+            }
+            out.extend(
+                local
+                    .into_iter()
+                    .map(|(k, r)| (k, rotate_rect(self.rot, r, self.rect))),
+            );
+            return;
+        }
+        for c in &self.children {
+            c.collect_nodes(out);
         }
     }
 

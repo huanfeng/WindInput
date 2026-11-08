@@ -1,7 +1,8 @@
 //! 候选窗一次出图：不定位、不接鼠标，只要像素（设置端预览、主题编辑器用）。
 
-use super::{AnimClock, CandidateScene, CandidateSceneInput};
+use super::{AnimClock, CandidateScene, CandidateSceneInput, NodeKey};
 use crate::text::SizedText;
+use crate::view::Rect;
 
 /// 一帧候选窗位图。
 pub struct CandidateFrame {
@@ -9,6 +10,8 @@ pub struct CandidateFrame {
     pub height: u32,
     /// 预乘 alpha 的 BGRA（`width × height × 4`），画软件阴影时含其扩边。
     pub bgra: Vec<u8>,
+    /// 各节点的矩形（设备像素，同 `bgra` 的坐标），供编辑器预览点选（见 [`CandidateScene::nodes`]）。
+    pub nodes: Vec<(NodeKey, Rect)>,
 }
 
 impl CandidateFrame {
@@ -120,6 +123,7 @@ fn paint_frame(
         width,
         height,
         bgra,
+        nodes: scene.nodes(frame),
     }
 }
 
@@ -196,6 +200,88 @@ mod tests {
         // 不画软件阴影（ext_presenter 形态）：没有扩边，缓冲恰为内容盒，严格更小。
         let bare = render_candidate(&mut scene, &inp, clock, false);
         assert!(bare.width < f.width && bare.height < f.height);
+    }
+
+    /// 节点矩形：键名齐、先序、子节点落在父节点里，坐标与缓冲同一套（含阴影扩边）。
+    #[test]
+    fn frame_lists_node_rects_in_buffer_coords() {
+        let theme = wind_theme::Resolved::default();
+        let text = MockText::new("", 16.0).unwrap();
+        let opts = CandidateSceneOptions::default();
+        let cands = [cand("你好"), cand("世界")];
+        let inp = CandidateSceneInput {
+            candidates: &cands,
+            preedit: "nihao",
+            preedit_caret: 5,
+            mode_label: "",
+            selected: 0,
+            hover: -1,
+            page: 1,
+            total_pages: 2,
+            grid: None,
+            vertical: false,
+            rotated: false,
+            upright: false,
+            preedit_embedded: false,
+            above: false,
+            theme: &theme,
+            base_font_logical: 16.0,
+            scale: 2.0,
+            screen_extent_px: Some((1920, 1080)),
+            text_renderer: &text,
+            opts: &opts,
+        };
+        let clock = AnimClock {
+            t: std::time::Duration::ZERO,
+            showing: true,
+            allowed: false,
+        };
+        let mut scene = CandidateScene::default();
+        let f = render_candidate(&mut scene, &inp, clock, false);
+        let names: Vec<&str> = f.nodes.iter().map(|(k, _)| k.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "window",
+                "preedit_bar",
+                "candidate_list",
+                "item",
+                "index",
+                "item",
+                "index",
+                "footer_bar"
+            ]
+        );
+        let rect = |name: &str| f.nodes.iter().find(|(k, _)| k.name() == name).unwrap().1;
+        let inside = |a: Rect, b: Rect| {
+            a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
+        };
+        let win = rect("window");
+        assert_eq!((win.x, win.y), (0.0, 0.0), "无阴影时窗口贴缓冲左上");
+        assert!(win.w <= f.width as f32 && win.h <= f.height as f32);
+        assert!(inside(rect("item"), rect("candidate_list")));
+        assert!(inside(rect("index"), rect("item")));
+        assert!(inside(rect("candidate_list"), win));
+        // 软件阴影把内容平移到扩边之内，节点矩形跟着平移。
+        let shadowed = {
+            let mut t = theme.clone();
+            t.views.shadow_blur = Some(wind_theme::schema::Dim::Dp(8.0));
+            t.views.shadow_color = Some([0, 0, 0, 64]);
+            render_candidate(
+                &mut scene,
+                &CandidateSceneInput { theme: &t, ..inp },
+                clock,
+                true,
+            )
+        };
+        let w2 = shadowed.nodes[0].1;
+        assert!(w2.x > 0.0 && w2.y > 0.0, "{w2:?}");
+        for id in 0..=9 {
+            if let Some(k) = NodeKey::from_id(id) {
+                assert_eq!(k as u8, id);
+            }
+        }
+        assert_eq!(NodeKey::from_id(0), None);
     }
 
     /// 带皮肤的临时主题：16×16 窗体 + 一块装饰（`decor` 是装饰表的额外字段）。
@@ -345,6 +431,7 @@ mod tests {
             width: 3,
             height: 1,
             bgra: vec![10, 20, 30, 255, 64, 32, 16, 128, 9, 9, 9, 0],
+            nodes: Vec::new(),
         };
         assert_eq!(
             f.to_rgba(),
