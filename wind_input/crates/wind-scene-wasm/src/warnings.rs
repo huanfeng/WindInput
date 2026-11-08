@@ -3,6 +3,14 @@
 //!
 //! 不装全局订阅者（wasm 上全局只能设一次，同模块多个预览器会互相串）：每次调用期间把本模块的
 //! 订阅者设成当前线程的默认（`dispatcher::with_default`），调用前清空缓冲、调用后取走。
+//! `with_default` 是**替换**当前线程的默认订阅者、不是叠加：期间别的订阅者（若有）收不到任何事件。
+//! wasm 里本无别的订阅者；原生宿主若要同时记日志，不该把预览调用包在这里面。
+//!
+//! 约定：只取事件的 `message` 字段（`tracing::warn!("skin: …")` 的格式化正文），其余结构化字段
+//! 不看——引擎的皮肤告警都把全部信息写进正文。
+//!
+//! 资源层的告警（图集 / 动画建帧）只在建缓存那一刻报；资源没变时缓存跨 `set_theme` 沿用，由
+//! `wind_scene::image_cache::replaying_skin_warnings` 让本帧命中的缓存条目重放（见 `Preview::render`）。
 
 use std::cell::RefCell;
 
@@ -15,7 +23,6 @@ use tracing::{Dispatch, Event, Level, Metadata, Subscriber};
 pub const PREFIX: &str = "skin:";
 /// 一次调用至多收这么多条（不可信主题可让同一条告警按装饰数重复出现）。
 pub const MAX_WARNINGS: usize = 64;
-
 thread_local! {
     static BUF: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 只建一次：每建一个 `Dispatch` 都会让 tracing 重算全部调用点的兴趣。

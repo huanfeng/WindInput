@@ -432,6 +432,8 @@ pub struct ImageCache {
     /// 再整轴拉伸一次就发虚。
     /// 图集建好即丢掉对应的源图——皮肤源图通常是几 MB 的大图，常驻的只该是目标尺寸那份。
     atlases: HashMap<(ImgId, u32), Option<Atlas>>,
+    /// 建图集时报过的告警，同键；随 `atlases` 一起清。
+    atlas_warns: HashMap<(ImgId, u32), Vec<String>>,
     /// 源图尺寸。皮肤路径建完图集后丢源图，尺寸仍要能答。
     dims: HashMap<ImgId, (u32, u32)>,
     /// 皮肤窗体 / 装饰的目标位图，计入 `fill_bytes`。
@@ -442,6 +444,8 @@ pub struct ImageCache {
     animated: std::collections::HashSet<String>,
     /// 动画装饰的逐帧位图，计入 `anim_bytes`；None = 解出来不足两帧（按静态图画）或解码失败。
     anims: HashMap<String, HashMap<AnimParams, Option<Anim>>>,
+    /// 建动画帧时报过的告警，同键；随 `anims` 一起清。
+    anim_warns: HashMap<(String, AnimParams), Vec<String>>,
     anim_bytes: usize,
     anim_last_use: Option<Instant>,
     /// `src` / `fills` 各自的驻留字节，对账两个预算。
@@ -506,6 +510,7 @@ impl ImageCache {
         self.animated.clear();
         self.not_animated.clear();
         self.anims.clear();
+        self.anim_warns.clear();
         self.anim_bytes = 0;
         self.anim_last_use = None;
     }
@@ -544,6 +549,7 @@ impl ImageCache {
         self.svg_sizes.clear();
         self.fills.clear();
         self.atlases.clear();
+        self.atlas_warns.clear();
         self.dims.clear();
         self.skin_fills.clear();
         self.not_animated.clear();
@@ -611,6 +617,7 @@ impl ImageCache {
             if self.src_bytes + bytes > SRC_BUDGET_BYTES {
                 self.src.clear();
                 self.atlases.clear();
+                self.atlas_warns.clear();
                 self.src_bytes = 0;
             }
             self.src_bytes += bytes;
@@ -657,13 +664,17 @@ impl ImageCache {
         let key = (id, k_micro);
         if !self.atlases.contains_key(&key) {
             let k = k_micro as f32 / 1_000_000.0;
+            let mut warns = Vec::new();
             let built = self.decode(id, path).and_then(|s| {
                 let (w, h) = (
                     crate::skin::atlas_len(s.w, k),
                     crate::skin::atlas_len(s.h, k),
                 );
                 if !crate::skin::fits_image_limits(w, h) {
-                    tracing::warn!("skin: 图集 {w}x{h} 超出上限，不建: {}", brief(path));
+                    warn_kept(
+                        &mut warns,
+                        format!("skin: 图集 {w}x{h} 超出上限，不建: {}", brief(path)),
+                    );
                     return None;
                 }
                 Some((
@@ -687,10 +698,16 @@ impl ImageCache {
             if self.src_bytes + bytes > SRC_BUDGET_BYTES {
                 self.src.clear();
                 self.atlases.clear();
+                self.atlas_warns.clear();
                 self.src_bytes = 0;
             }
             self.src_bytes += bytes;
             self.atlases.insert(key, built);
+            if !warns.is_empty() {
+                self.atlas_warns.insert(key, warns);
+            }
+        } else if replaying() {
+            replay(self.atlas_warns.get(&key));
         }
         self.atlases.get(&key).and_then(|o| o.as_ref())
     }
@@ -726,6 +743,9 @@ impl ImageCache {
             }
             self.fill_bytes += bytes;
             self.skin_fills.insert(key, built);
+        } else if replaying() {
+            // 合成位图命中时不再经过图集：建图集时的告警在这里重放。
+            replay(self.atlas_warns.get(&(id, k_micro)));
         }
         self.skin_fills.get(&key).and_then(|o| o.as_ref())
     }
@@ -770,12 +790,22 @@ impl ImageCache {
         let k_micro = ((k * 1_000_000.0).round() as u32).max(1);
         let key = (k_micro, w, h, fps.map_or(0, f32::to_bits), budget);
         if !self.anims.get(path).is_some_and(|m| m.contains_key(&key)) {
-            let built = build_anim(path, k_micro as f32 / 1_000_000.0, w, h, fps, budget);
+            let mut warns = Vec::new();
+            let built = build_anim(
+                path,
+                k_micro as f32 / 1_000_000.0,
+                w,
+                h,
+                fps,
+                budget,
+                &mut warns,
+            );
             let bytes = built
                 .as_ref()
                 .map_or(0, |a| a.frames.iter().map(|f| f.data().len()).sum());
             if self.anim_bytes + bytes > ANIM_BUDGET_BYTES {
                 self.anims.clear();
+                self.anim_warns.clear();
                 self.anim_bytes = 0;
             }
             self.anim_bytes += bytes;
@@ -783,6 +813,11 @@ impl ImageCache {
                 .entry(path.to_string())
                 .or_default()
                 .insert(key, built);
+            if !warns.is_empty() {
+                self.anim_warns.insert((path.to_string(), key), warns);
+            }
+        } else if replaying() {
+            replay(self.anim_warns.get(&(path.to_string(), key)));
         }
         self.anims
             .get(path)
@@ -1095,12 +1130,14 @@ fn frames_of(bytes: &[u8]) -> Option<image::Frames<'_>> {
 /// [`walk_frames`] 的结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameWalk {
-    /// 按动画播（动画格式且解得出至少两帧）；否则引擎按静态图画首帧。
+    /// 按动画播（动画格式且解得出至少两帧）；否则引擎按静态图画首帧。超预算时按文件头判断。
     pub animated: bool,
     /// 回调过的帧数。
     pub frames: usize,
     /// 帧数超过 [`MAX_ANIM_FRAMES`]，其后的帧引擎不解（只在走完全程时可能为真）。
     pub truncated: bool,
+    /// 解到的「像素 × 帧」将超过调用方给的预算，就此停下（之后的帧没解）。
+    pub over_budget: bool,
 }
 
 /// 图片字节的格式名与尺寸（只读头）。认不出格式、尺寸超出位图上限（引擎不解码这种图）都报错。
@@ -1137,56 +1174,133 @@ pub fn image_header(bytes: &[u8]) -> Result<(&'static str, u32, u32), String> {
 /// 动画按帧回调 `(原始帧号, 宽, 高, 直通 RGBA, 归一后的时长 ms)`（帧已合成到整张画布；时长不计
 /// 装饰的 `fps` 覆盖），解码出错即停（同建帧时「只用已解出的帧」），至多 [`MAX_ANIM_FRAMES`] 帧；
 /// 静态图（含单帧 GIF）回调一次、时长 0。回调返回 false 即停。
+///
+/// `max_px_frames`：解码量预算（画布像素 × 已解帧数；探测是否超过 [`MAX_ANIM_FRAMES`] 而多解的那一帧
+/// 不计）。解下一帧会超就停、置 `over_budget`，已解出的帧照常回调——不可信输入可以在很小的文件里塞
+/// 几百帧的大画布。判定是不是动画不另解：第 0 帧先留着，解出第 1 帧才按动画回调。帧逐个解、用完即弃，
+/// 驻留只有解码器画布与至多两帧。
 pub fn walk_frames(
     bytes: &[u8],
+    max_px_frames: u64,
     mut f: impl FnMut(usize, u32, u32, &[u8], u32) -> bool,
 ) -> Result<FrameWalk, String> {
-    image_header(bytes)?;
-    // 同 `ImageCache::is_animated`：文件头是动画格式，且前两帧都解得出。
-    let animated = sniff_animated(&bytes[..bytes.len().min(SNIFF_BYTES)])
-        && frames_of(bytes).is_some_and(|fr| fr.take(2).filter(Result::is_ok).count() >= 2);
-    if !animated {
-        let img = decode_bitmap_bytes(bytes, "（编辑器传入的图片）")
-            .ok_or_else(|| "图片解码失败".to_string())?
-            .to_rgba8();
-        f(0, img.width(), img.height(), img.as_raw(), 0);
-        return Ok(FrameWalk {
-            animated: false,
-            frames: 1,
-            truncated: false,
-        });
-    }
-    let frames = frames_of(bytes).ok_or_else(|| "动画解码失败".to_string())?;
-    let mut n = 0;
-    let mut truncated = false;
-    for frame in frames.take(MAX_ANIM_FRAMES + 1) {
-        let Ok(frame) = frame else { break };
-        if n == MAX_ANIM_FRAMES {
-            truncated = true;
-            break;
+    let (_, w, h) = image_header(bytes)?;
+    let px = u64::from(w) * u64::from(h);
+    let over = |n: usize| (n as u64).saturating_mul(px) > max_px_frames;
+    let sniffed = sniff_animated(&bytes[..bytes.len().min(SNIFF_BYTES)]);
+    let mut walk = FrameWalk {
+        animated: false,
+        frames: 0,
+        truncated: false,
+        over_budget: false,
+    };
+    // 同 `ImageCache::is_animated`：文件头是动画格式，且前两帧都解得出。第 0 帧先留着，确认有
+    // 第 1 帧才按动画回调，免得为判定多解一遍。
+    if let Some(mut frames) = sniffed.then(|| frames_of(bytes)).flatten() {
+        let mut first: Option<(image::RgbaImage, u32)> = None;
+        let mut n = 0;
+        loop {
+            if n < MAX_ANIM_FRAMES && over(n + 1) {
+                // 文件头是动画格式：没解到第 1 帧也按动画报。已解的第 0 帧照常回调。
+                walk.animated = true;
+                walk.over_budget = true;
+                if let Some((img, ms0)) = first.take() {
+                    walk.frames = 1;
+                    f(0, img.width(), img.height(), img.as_raw(), ms0);
+                }
+                return Ok(walk);
+            }
+            let Some(Ok(frame)) = frames.next() else {
+                break;
+            };
+            n += 1;
+            if n > MAX_ANIM_FRAMES {
+                walk.truncated = true;
+                break;
+            }
+            let (numer, denom) = frame.delay().numer_denom_ms();
+            let ms = crate::skin::frame_ms(numer, denom, None);
+            let buf = frame.into_buffer();
+            if n == 1 {
+                first = Some((buf, ms));
+                continue;
+            }
+            walk.animated = true;
+            if let Some((img, ms0)) = first.take() {
+                walk.frames = 1;
+                if !f(0, img.width(), img.height(), img.as_raw(), ms0) {
+                    return Ok(walk);
+                }
+            }
+            walk.frames = n;
+            if !f(n - 1, buf.width(), buf.height(), buf.as_raw(), ms) {
+                return Ok(walk);
+            }
         }
-        let (numer, denom) = frame.delay().numer_denom_ms();
-        let buf = frame.buffer();
-        n += 1;
-        if !f(
-            n - 1,
-            buf.width(),
-            buf.height(),
-            buf.as_raw(),
-            crate::skin::frame_ms(numer, denom, None),
-        ) {
-            break;
+        if walk.animated {
+            return Ok(walk);
         }
     }
-    Ok(FrameWalk {
-        animated: true,
-        frames: n,
-        truncated,
-    })
+    if over(1) {
+        walk.over_budget = true;
+        return Ok(walk);
+    }
+    let img = decode_bitmap_bytes(bytes, "（编辑器传入的图片）")
+        .ok_or_else(|| "图片解码失败".to_string())?
+        .to_rgba8();
+    f(0, img.width(), img.height(), img.as_raw(), 0);
+    walk.frames = 1;
+    Ok(walk)
+}
+
+/// 报一条告警并记下（缓存条目带着它，重放时再报）。
+fn warn_kept(out: &mut Vec<String>, msg: String) {
+    tracing::warn!("{msg}");
+    out.push(msg);
+}
+
+thread_local! {
+    /// 置位期间，命中的图集 / 动画缓存条目把建它时报过的告警再报一遍（见 [`replaying_skin_warnings`]）。
+    static REPLAY_WARNINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 跑 `f`，期间命中的图集 / 动画缓存条目重放建它时报过的 `skin:` 告警。
+///
+/// 这些告警（图集超限、动画装饰尺寸超限、帧解码失败、降帧）只在建缓存那一刻报；主题编辑器换主题而
+/// 资源不变时缓存沿用，不重放就再也看不到。只重放**本帧实际用到**的条目：主题改得不再触发（比如改小
+/// 了装饰尺寸，换了缓存键）的旧告警不会回来。实时窗口不调它。
+pub fn replaying_skin_warnings<R>(f: impl FnOnce() -> R) -> R {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REPLAY_WARNINGS.with(|r| r.set(self.0));
+        }
+    }
+    let _reset = Reset(REPLAY_WARNINGS.with(|r| r.replace(true)));
+    f()
+}
+
+fn replaying() -> bool {
+    REPLAY_WARNINGS.with(std::cell::Cell::get)
+}
+
+fn replay(warns: Option<&Vec<String>>) {
+    for m in warns.into_iter().flatten() {
+        tracing::warn!("{m}");
+    }
 }
 
 /// 逐帧解码动画，每帧与静态装饰同一套缩放合成（面积平均缩到倍率 `k`，再整轴映射到 `w×h`）。
-fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usize) -> Option<Anim> {
+/// `warns` 收下建帧时报的 `skin:` 告警（同时照常 `tracing::warn!`），随缓存条目留着供重放。
+fn build_anim(
+    path: &str,
+    k: f32,
+    w: u32,
+    h: u32,
+    fps: Option<f32>,
+    budget: usize,
+    warns: &mut Vec<String>,
+) -> Option<Anim> {
     use wind_theme::skin::{BandFill, Stretch};
     let t0 = crate::clock::now();
     let bytes = read_source_bytes(path)?;
@@ -1196,16 +1310,22 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
     if !header_dims(path).is_some_and(|(sw, sh)| crate::skin::fits_image_limits(sw, sh))
         || !crate::skin::fits_image_limits(w, h)
     {
-        tracing::warn!("skin: 动画装饰尺寸超出上限，不解帧: {}", brief(path));
+        warn_kept(
+            warns,
+            format!("skin: 动画装饰尺寸超出上限，不解帧: {}", brief(path)),
+        );
         return None;
     }
     for frame in frames.take(MAX_ANIM_FRAMES) {
         let frame = match frame {
             Ok(f) => f,
             Err(e) => {
-                tracing::warn!(
-                    "skin: 动画帧解码失败，只用已解出的帧: {} ({e})",
-                    brief(path)
+                warn_kept(
+                    warns,
+                    format!(
+                        "skin: 动画帧解码失败，只用已解出的帧: {} ({e})",
+                        brief(path)
+                    ),
                 );
                 break;
             }
@@ -1235,11 +1355,14 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
         return None;
     }
     if dropped {
-        tracing::warn!(
-            "skin: 动画帧超出 {} KiB 预算，隔帧丢弃到 {} 帧: {}",
-            budget / 1024,
-            frames.len(),
-            brief(path)
+        warn_kept(
+            warns,
+            format!(
+                "skin: 动画帧超出 {} KiB 预算，隔帧丢弃到 {} 帧: {}",
+                budget / 1024,
+                frames.len(),
+                brief(path)
+            ),
         );
     }
     Some(Anim {

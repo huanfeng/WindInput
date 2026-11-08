@@ -324,6 +324,9 @@ pub struct RvSkinFrame {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RvSkinDecor {
+    /// 在 TOML `[[skin.<变体>.decor]]` 里的原始下标（从 0 起，含被丢弃的项）；求值后按 z 排序，
+    /// 本表下标不再等于它。指定义这张变体表的那份 TOML（变体继承自 base 时是 base 的）。
+    pub src_index: usize,
     pub image: String,
     pub density: f32,
     pub anchor: Anchor,
@@ -711,8 +714,9 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
     let mut decor: Vec<RvSkinDecor> = v
         .decor
         .iter()
-        .filter(|d| !d.image.is_empty())
-        .filter_map(|d| {
+        .enumerate()
+        .filter(|(_, d)| !d.image.is_empty())
+        .filter_map(|(src_index, d)| {
             let anchor = Anchor::parse(if d.anchor.is_empty() {
                 "frame.top_left"
             } else {
@@ -732,6 +736,7 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                 }
             };
             Some(RvSkinDecor {
+                src_index,
                 image: d.image.clone(),
                 density: positive(d.density).unwrap_or(density),
                 anchor,
@@ -946,6 +951,21 @@ hit = "pass"
         assert_eq!(d[1].image, "pet");
         assert_eq!(d[1].pivot, Pos9 { h: 2, v: 2 });
         assert_eq!(d[1].hit, DecorHit::Drag, "缺省 drag");
+        assert_eq!(
+            (d[0].src_index, d[1].src_index),
+            (1, 0),
+            "排序后仍记着 TOML 里的原始下标"
+        );
+        let src = "[skin.horizontal.frame]\nimage = \"f\"\n\
+                   [[skin.horizontal.decor]]\nimage = \"\"\n\
+                   [[skin.horizontal.decor]]\nimage = \"a\"\nanchor = \"nope\"\n\
+                   [[skin.horizontal.decor]]\nimage = \"b\"\n";
+        let d = &parse(src).unwrap().horizontal.unwrap().decor;
+        assert_eq!(
+            d.iter().map(|x| x.src_index).collect::<Vec<_>>(),
+            [2],
+            "被丢弃的项也占原始下标"
+        );
     }
 
     #[test]

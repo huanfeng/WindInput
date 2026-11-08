@@ -206,13 +206,47 @@ try {
   check(sk.axisX.map((s) => s.kind).join() === 'fixed,round,fixed', `轴映射 ${JSON.stringify(sk.axisX)}`);
   check(sk.decor.length === 1 && sk.decor[0].rect.y < sk.frame.y, '外伸装饰');
   check(sf.warnings.length === 0, `帧告警 ${JSON.stringify(sf.warnings)}`);
-  const info = await a.inspectImage(frame);
+  const { FrameTools } = await import(pathToFileURL(join(dir, 'preview.js')).href);
+  const tools = await FrameTools.create({ wasm: wasmBytes });
+  const info = await tools.inspectImage(frame);
   check(info.format === 'png' && info.width === 32 && !info.animated && info.frames.length === 1, `inspectImage ${JSON.stringify(info)}`);
-  const thumbs = await a.decodeFrames(frame, { max_edge: 8 });
+  const thumbs = await tools.decodeFrames(frame, { max_edge: 8 });
   check(thumbs.length === 1 && thumbs[0].w === 8 && thumbs[0].rgba.length === 8 * 8 * 4, 'decodeFrames 缩略');
   check(thumbs[0].rgba[0] === 200 && thumbs[0].rgba[3] === 255, '缩略帧是直通 RGBA');
   check(throws(() => m.inspectImage(new Uint8Array([1, 2, 3]))), '认不出的图片报错');
   check(throws(() => m.decodeFrames(frame, JSON.stringify({ max_edge: 9999 }))), '缩略边长超限报错');
+  check(typeof a.inspectImage === 'undefined', '帧信息不挂在预览器上');
+  let normalErr = '';
+  try {
+    await tools.inspectImage(new Uint8Array([1, 2, 3]));
+  } catch (e) {
+    normalErr = String(e?.message ?? e);
+  }
+  check(normalErr.includes('认不出图片格式') && tools.generation === 1, '普通错误不重建帧工具');
+  // 帧工具崩了：换自己的新实例重试，预览器不受牵连。
+  let first = true;
+  const ft = await FrameTools.create({
+    wasm: wasmBytes,
+    onInstance: (api) => {
+      if (first) {
+        first = false;
+        api.inspectImage = () => {
+          throw new WebAssembly.RuntimeError('unreachable');
+        };
+      }
+    },
+  });
+  const gA = a.generation;
+  let crash = '';
+  try {
+    await ft.inspectImage(frame);
+  } catch (e) {
+    crash = e instanceof WebAssembly.RuntimeError ? 'fatal' : String(e);
+  }
+  check(crash === 'fatal' && ft.generation === 2, `崩了原样抛、换新实例：${crash} / ${ft.generation}`);
+  const again = await ft.inspectImage(frame);
+  check(again.width === 32 && ft.generation === 2, `之后的调用用新实例：${ft.generation}`);
+  check(a.generation === gA, '帧工具重建不动预览器');
   await a.setTheme('base = "jade"\n[meta]\nname = "j"\n', {});
   // 同页第二个预览器：独立的胶水模块与线性内存，互不牵连。
   const b = await AutoPreviewer.create({ wasm: wasmBytes });

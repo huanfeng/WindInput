@@ -11,6 +11,11 @@ pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_THUMB_EDGE: u32 = 256;
 /// 一次至多取这么多帧。
 pub const MAX_THUMB_FRAMES: usize = 64;
+/// 一次调用的解码量预算：画布像素 × 解的帧数（帧已合成到整张画布，取 `[from, to)` 也要从第 0 帧解起）。
+/// 384 Mi 约是 1024² 的画布解满引擎的 300 帧；`inspectImage` 超了只报已解出的帧并标 `over_budget`，
+/// `decodeFrames` 超了报错。
+/// 不设它时，16 MiB 内就能塞下 8192×4096 × 300 帧的纯色 APNG（单次解码量约 40 GB 像素字节）。
+pub const MAX_DECODE_PX_FRAMES: u64 = 384 * 1024 * 1024;
 
 /// 一帧的时长。
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -19,8 +24,9 @@ pub struct FrameMs {
     pub ms: u32,
 }
 
-/// `inspect_image` 的结果。
+/// `inspect_image` 的结果（JSON 键 camelCase：`overBudget`）。
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageInfo {
     /// `png` / `jpeg` / `webp` / `gif` / `bmp`。
     pub format: &'static str,
@@ -30,8 +36,12 @@ pub struct ImageInfo {
     pub animated: bool,
     /// 各帧（下标即引擎原始帧号，`states` 的帧区间按它写）。
     pub frames: Vec<FrameMs>,
-    /// 帧数超过引擎的最大解帧数，其后的帧引擎不解、不在 `frames` 里。
+    /// `frames` 不全：帧数超过引擎的最大解帧数（其后的帧引擎也不解），或解码量超了
+    /// [`MAX_DECODE_PX_FRAMES`]（此时 `over_budget`）。
     pub truncated: bool,
+    /// 解码量超预算：`frames` 只有超之前解出的那些（可为空），之后的没解；没解到第 1 帧时
+    /// `animated` 按文件头判断。
+    pub over_budget: bool,
 }
 
 /// 字节数在上限内。
@@ -47,10 +57,14 @@ fn check_bytes(bytes: &[u8]) -> Result<(), String> {
 
 /// 格式、尺寸、帧数与各帧时长。
 pub fn inspect_image(bytes: &[u8]) -> Result<ImageInfo, String> {
+    inspect_within(bytes, MAX_DECODE_PX_FRAMES)
+}
+
+fn inspect_within(bytes: &[u8], budget: u64) -> Result<ImageInfo, String> {
     check_bytes(bytes)?;
     let (format, width, height) = wind_scene::image_cache::image_header(bytes)?;
     let mut frames = Vec::new();
-    let walk = wind_scene::image_cache::walk_frames(bytes, |_, _, _, _, ms| {
+    let walk = wind_scene::image_cache::walk_frames(bytes, budget, |_, _, _, _, ms| {
         frames.push(FrameMs { ms });
         true
     })?;
@@ -60,7 +74,8 @@ pub fn inspect_image(bytes: &[u8]) -> Result<ImageInfo, String> {
         height,
         animated: walk.animated,
         frames,
-        truncated: walk.truncated,
+        truncated: walk.truncated || walk.over_budget,
+        over_budget: walk.over_budget,
     })
 }
 
@@ -115,6 +130,10 @@ fn unpremultiply(px: &mut [u8]) {
 
 /// `[from, to)` 各帧的缩略图（面积平均，同引擎缩放），越过末帧的部分不返回。
 pub fn decode_frames(bytes: &[u8], o: &ThumbOpts) -> Result<Vec<Thumb>, String> {
+    decode_within(bytes, o, MAX_DECODE_PX_FRAMES)
+}
+
+fn decode_within(bytes: &[u8], o: &ThumbOpts, budget: u64) -> Result<Vec<Thumb>, String> {
     check_bytes(bytes)?;
     if !(1..=MAX_THUMB_EDGE).contains(&o.max_edge) {
         return Err(format!(
@@ -133,7 +152,8 @@ pub fn decode_frames(bytes: &[u8], o: &ThumbOpts) -> Result<Vec<Thumb>, String> 
     if to == o.from {
         return Ok(out);
     }
-    wind_scene::image_cache::walk_frames(bytes, |i, w, h, rgba, ms| {
+    // 只解到 `to` 为止（回调返回 false 即停）；之前的帧也得解（合成），一并计入预算。
+    let walk = wind_scene::image_cache::walk_frames(bytes, budget, |i, w, h, rgba, ms| {
         if i >= o.from {
             let f = (o.max_edge as f32 / w.max(h) as f32).min(1.0);
             let (tw, th) = (
@@ -157,6 +177,12 @@ pub fn decode_frames(bytes: &[u8], o: &ThumbOpts) -> Result<Vec<Thumb>, String> 
         }
         i + 1 < to
     })?;
+    if walk.over_budget {
+        let (_, w, h) = wind_scene::image_cache::image_header(bytes)?;
+        return Err(format!(
+            "解码量超出预算：{w}×{h} 的画布解到第 {to} 帧要超过 {budget} 像素·帧"
+        ));
+    }
     Ok(out)
 }
 
@@ -233,6 +259,66 @@ mod tests {
         let info = inspect_image(&anim_fixtures::gif(2, 2, &frames)).unwrap();
         assert!(info.truncated);
         assert_eq!(info.frames.len(), wind_scene::image_cache::MAX_ANIM_FRAMES);
+    }
+
+    /// 解码量超预算时 inspect 只报头信息，decode 报错；只解到 `to`，预算内的照常给。
+    /// （按比例缩小预算测：真实上限 384 Mi 像素·帧的夹具在单测里编码太慢。）
+    #[test]
+    fn decode_volume_is_budgeted() {
+        let (w, h) = (64u32, 32u32);
+        let frames: Vec<([u8; 4], u32)> = (0..10).map(|i| ([i * 20, 0, 0, 255], 100)).collect();
+        let gif = anim_fixtures::gif(w, h, &frames);
+        let px = u64::from(w * h);
+        // 预算 5 帧：解到第 6 帧前停，已解的 5 帧照报。
+        let info = inspect_within(&gif, px * 5).unwrap();
+        assert!(
+            info.over_budget && info.truncated && info.animated,
+            "{info:?}"
+        );
+        assert_eq!((info.width, info.height), (w, h));
+        assert_eq!(info.frames.len(), 5, "保留超之前解出的帧");
+        // 解下一帧前就判（解了才知道有没有下一帧）：恰好用满预算的文件也报超，故多留一帧。
+        let full = inspect_within(&gif, px * 11).unwrap();
+        assert!(!full.over_budget && !full.truncated && full.frames.len() == 10);
+        let o = |from, to| ThumbOpts {
+            max_edge: 8,
+            from,
+            to: Some(to),
+        };
+        let e = decode_within(&gif, &o(6, 8), px * 5).unwrap_err();
+        assert!(e.contains("超出预算"), "{e}");
+        let head = decode_within(&gif, &o(2, 5), px * 5).unwrap();
+        assert_eq!(
+            head.iter().map(|t| t.index).collect::<Vec<_>>(),
+            [2, 3, 4],
+            "只解到 to"
+        );
+        // 只够一帧：第 0 帧照报，按文件头当动画。
+        let tiny = inspect_within(&gif, px).unwrap();
+        assert!(tiny.over_budget && tiny.animated && tiny.frames.len() == 1);
+    }
+
+    /// 恰好 300 帧、预算恰好 300 帧：探测有没有第 301 帧不计预算，不误报截断或超预算。
+    #[test]
+    fn exactly_max_frames_is_not_flagged() {
+        let max = wind_scene::image_cache::MAX_ANIM_FRAMES;
+        let px = 4;
+        let gif = |n: usize| {
+            let frames: Vec<([u8; 4], u32)> = (0..n)
+                .map(|i| ([(i % 256) as u8, 0, 0, 255], 100))
+                .collect();
+            anim_fixtures::gif(2, 2, &frames)
+        };
+        let info = inspect_within(&gif(max), px * max as u64).unwrap();
+        assert!(
+            !info.truncated && !info.over_budget,
+            "{:?}",
+            (info.truncated, info.over_budget)
+        );
+        assert_eq!(info.frames.len(), max);
+        let more = inspect_within(&gif(max + 1), px * max as u64).unwrap();
+        assert!(more.truncated && !more.over_budget);
+        assert_eq!(more.frames.len(), max);
     }
 
     #[test]

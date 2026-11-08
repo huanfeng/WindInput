@@ -27,8 +27,11 @@
 //   // clamped: 窗口宽过了预览屏（2048 逻辑像素），已按实机截断
 //   // skin: 皮肤几何（矩形同 nodes 坐标）；没启用皮肤为 undefined
 //   // warnings / themeWarnings: 本次调用期间引擎的 `skin:` 告警原文（string[]）
-//   const info = await p.inspectImage(u8);             // { format, width, height, animated, frames: [{ ms }], truncated }
-//   const thumbs = await p.decodeFrames(u8, { max_edge: 64, from: 0, to: 16 }); // [{ index, w, h, ms, rgba }]
+//
+//   // 图片帧信息 / 缩略帧：独立的模块实例（不与预览器共享线性内存与重建预算）
+//   const tools = await FrameTools.create();          // 或 create({ wasm: bytes | WebAssembly.Module })
+//   const info = await tools.inspectImage(u8);       // { format, width, height, animated, frames: [{ ms }], truncated, overBudget }
+//   const thumbs = await tools.decodeFrames(u8, { max_edge: 64, from: 0, to: 16 }); // [{ index, w, h, ms, rgba }]
 //   // 帧超过 4096 设备像素时抛「帧过大：…」，调用方降 scale 重画
 //   ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
 //   await p.signal('typing');
@@ -51,6 +54,16 @@ function versioned(path, instance) {
   if (instance !== undefined) u.searchParams.set('instance', String(instance));
   return u.href;
 }
+/** 编译 wasm：已编译的 Module 原样用；URL / 路径按 fetch 流式编译；否则当字节。 */
+async function compileWasm(wasm) {
+  wasm ??= versioned('./wind_scene_bg.wasm');
+  if (wasm instanceof WebAssembly.Module) return wasm;
+  if (typeof wasm === 'string' || wasm instanceof URL) {
+    return WebAssembly.compileStreaming(await fetch(wasm));
+  }
+  return WebAssembly.compile(wasm);
+}
+
 /** 重建预算：这段时间内… */
 export const REBUILD_WINDOW_MS = 10_000;
 /** …至多重建这么多次。 */
@@ -90,16 +103,7 @@ export class AutoPreviewer {
   static async create(opts = {}) {
     const self = new AutoPreviewer();
     self.#onInstance = opts.onInstance ?? null;
-    let wasm = opts.wasm ?? versioned('./wind_scene_bg.wasm');
-    if (!(wasm instanceof WebAssembly.Module)) {
-      if (typeof wasm === 'string' || wasm instanceof URL) {
-        const res = await fetch(wasm);
-        wasm = await WebAssembly.compileStreaming(res);
-      } else {
-        wasm = await WebAssembly.compile(wasm);
-      }
-    }
-    self.#module = wasm;
+    self.#module = await compileWasm(opts.wasm);
     try {
       await self.#load();
     } catch (e) {
@@ -211,19 +215,6 @@ export class AutoPreviewer {
     return this.#call((p) => p.signal(name, tMs));
   }
 
-  /** 图片帧信息（引擎口径，无状态）。@param {Uint8Array} bytes */
-  async inspectImage(bytes) {
-    return this.#call(() => JSON.parse(this.#glue.inspectImage(bytes)));
-  }
-
-  /**
-   * 缩略帧（无状态）。
-   * @param {Uint8Array} bytes
-   * @param {{ max_edge?: number, from?: number, to?: number }} [opts] `[from, to)` 原始帧号
-   */
-  async decodeFrames(bytes, opts = {}) {
-    return this.#call(() => this.#glue.decodeFrames(bytes, JSON.stringify(opts)));
-  }
 
   free() {
     try {
@@ -232,5 +223,93 @@ export class AutoPreviewer {
       // 同 #load。
     }
     this.#p = null;
+  }
+}
+
+/**
+ * 图片帧信息与缩略帧（wasm 的无状态函数 `inspectImage` / `decodeFrames`，按引擎口径）。
+ *
+ * 用**自己的**模块实例：解大动图的峰值内存会永久撑大那份线性内存（wasm 内存不归还），不该落在预览器
+ * 身上；它崩了也不消耗预览器的重建预算。致命错误时换一份新实例供后续调用、这次原样抛错（不重试：
+ * 坏输入是确定性的）。重建预算同 AutoPreviewer（REBUILD_WINDOW_MS 内至多 REBUILD_MAX 次），超了永久
+ * 失败、抛 PreviewerFailedError。旧实例的模块与内存回收不了（ES 模块不卸载），单次峰值由 wasm 侧的
+ * 解码量预算压住。
+ */
+export class FrameTools {
+  #module = null;
+  #glue = null; // { inspectImage, decodeFrames }：本实例胶水的两个函数
+  #onInstance = null;
+  #rebuilds = [];
+  #loading = null;
+  #failed = null;
+  /** 已实例化的次数。 */
+  generation = 0;
+
+  /**
+   * @param {{ wasm?: WebAssembly.Module | BufferSource | URL | string,
+   *           onInstance?: (api: { inspectImage: Function, decodeFrames: Function }) => void }} [opts]
+   *   onInstance：测试 / 调试用，每次（含重建）实例化后调用，可替换 api 上的函数。
+   */
+  static async create(opts = {}) {
+    const self = new FrameTools();
+    self.#onInstance = opts.onInstance ?? null;
+    self.#module = await compileWasm(opts.wasm);
+    await self.#load();
+    return self;
+  }
+
+  get failed() {
+    return this.#failed !== null;
+  }
+
+  #load() {
+    this.#loading ??= (async () => {
+      instances += 1;
+      const glue = await import(/* @vite-ignore */ versioned(GLUE, instances));
+      await glue.default({ module_or_path: this.#module });
+      this.#glue = { inspectImage: glue.inspectImage, decodeFrames: glue.decodeFrames };
+      this.generation += 1;
+      this.#onInstance?.(this.#glue);
+    })().finally(() => {
+      this.#loading = null;
+    });
+    return this.#loading;
+  }
+
+  async #call(fn) {
+    if (this.#loading) await this.#loading;
+    if (this.#failed) throw this.#failed;
+    if (!this.#glue) await this.#load();
+    try {
+      return fn(this.#glue);
+    } catch (e) {
+      if (!isFatal(e)) throw e;
+      const now = Date.now();
+      this.#rebuilds = this.#rebuilds.filter((t) => now - t < REBUILD_WINDOW_MS);
+      if (this.#rebuilds.length >= REBUILD_MAX) {
+        this.#failed = new PreviewerFailedError(e);
+        this.#glue = null;
+        throw this.#failed;
+      }
+      this.#rebuilds.push(now);
+      this.#glue = null;
+      // 换一份新实例给后续调用，这次不重试：坏输入是确定性的，重试只会再崩一次、再耗一份内存。
+      await this.#load();
+      throw e;
+    }
+  }
+
+  /** 格式、尺寸、帧数与各帧时长。@param {Uint8Array} bytes */
+  async inspectImage(bytes) {
+    return this.#call((g) => JSON.parse(g.inspectImage(bytes)));
+  }
+
+  /**
+   * 缩略帧。
+   * @param {Uint8Array} bytes
+   * @param {{ max_edge?: number, from?: number, to?: number }} [opts] `[from, to)` 原始帧号
+   */
+  async decodeFrames(bytes, opts = {}) {
+    return this.#call((g) => g.decodeFrames(bytes, JSON.stringify(opts)));
   }
 }

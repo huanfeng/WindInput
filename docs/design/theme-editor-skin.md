@@ -302,6 +302,8 @@ interface SkinDecorV3 {
 - 复制 = 深拷贝变体（含装饰与动画表），图片按路径共享不复制字节；目标已存在时确认覆盖。换 `frame.image` 后，超出新图尺寸的带与内缩标红。
 - 切页签同时切预览：横排类用横排画布，竖排类用竖排画布，嵌入类打开嵌入开关。
   实际生效的变体以回执 `skin.variant` 为准，与页签不符时在画布角标出。
+  回执装饰的 `srcIndex` 是「定义这张变体表的那份 TOML」里 `[[decor]]` 的下标：变体继承自 base 时指向 base
+  （变体整表替换，不会混两份），对回模型前先看该页签是「继承自 base」还是「本主题覆盖」。
 - base 继承：页签标「继承自 base」或「本主题覆盖」，并写明覆盖即整表替换。
 
 ## 8. 动画
@@ -398,7 +400,7 @@ Frame.skin?: {
   frame: Rect, content: Rect,                                   // 设备像素，与 rgba 同坐标
   axisX / axisY: [{ src: [a, b], dst: [a, b], kind: "fixed" | "stretch" | "tile" | "round" }],
   slots: [{ name, box: "frame" | "content", rect }],           // free 布局才有
-  decor: [{ index, rect, z, hit, clip?: { state, frame, raw } }],
+  decor: [{ index, srcIndex, rect, z, hit, clip: { state, frame, raw } }],  // index = 求值后（z 排序）下标，srcIndex = TOML 原始下标
   caret: { below: [x, y], above: [x, y] },
 }
 Frame.warnings: string[]        // 本次调用期间 `skin:` 前缀的 WARN 原文
@@ -410,7 +412,9 @@ inspectImage(bytes) / decodeFrames(bytes, { max_edge, from, to })
 - `wind-scene-wasm`：装一个最小 tracing `Subscriber`，只收 WARN 且消息以 `skin:` 开头的事件，存进线程局部缓冲，每次 `set_theme` / `render` 前清空、后取出。
   - `warn_skin_once` 的去重以场景为单位，`setTheme` 会重建场景；
   - 所以编辑器以「最近一次 `setTheme` 及其后首帧」的告警为准，之后的帧只并入、不清空。
-- 新函数照 W1 设上限：输入 ≤ 16 MiB，`maxEdge` ≤ 256，一次取帧 ≤ 64。
+- 新函数照 W1 设上限：输入 ≤ 16 MiB，`maxEdge` ≤ 256，一次取帧 ≤ 64，解码量（画布像素 × 帧）≤ 384 Mi（超了 `inspectImage` 只报头信息、`decodeFrames` 报错）。
+  JS 侧由 `preview.js` 的 `FrameTools` 承载，用独立的模块实例：解大动图撑大的线性内存不落在预览器上，崩了也不占预览器的重建预算。
+- 资源层（图集、动画建帧）的 `skin:` 告警只在建缓存时报，而资源没变时缓存跨 `setTheme` 沿用：告警随缓存条目存着，`setTheme` 后首帧让**本帧实际命中**的条目重放（改了 size 等换了缓存键的旧告警不回来）。`setTheme` 的返回值只有解析期告警。
 
 ## 11. 已定事项（维护者，2026-11-08）
 

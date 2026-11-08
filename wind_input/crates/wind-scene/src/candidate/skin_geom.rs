@@ -277,6 +277,13 @@ impl DecorGeom {
 pub struct SkinGeom {
     /// 求它时的变体（竖排, 嵌入）。
     variant_key: (bool, bool),
+    /// 实际所用的变体键（嵌入回退后）。
+    variant: &'static str,
+    /// 所选窗体源图在主题里的引用，及它与 `frame.image` 的像素比（拉伸带换算用）。
+    frame_ref: String,
+    band_f: f32,
+    /// 渲染缩放：设备像素 / dp。
+    render_scale: f32,
     frame_path: String,
     /// 窗体图集倍率：设备像素 / 所选窗体图源像素。
     frame_k: f32,
@@ -551,6 +558,21 @@ impl SkinGeom {
     }
 }
 
+/// 实际所用的变体键：嵌入没配回退非嵌入（同 [`RvSkin::variant`]）。
+fn variant_name(skin: &RvSkin, vertical: bool, embedded: bool) -> &'static str {
+    let own = if vertical {
+        &skin.vertical_embedded
+    } else {
+        &skin.horizontal_embedded
+    };
+    match (vertical, embedded && own.is_some()) {
+        (false, false) => "horizontal",
+        (true, false) => "vertical",
+        (false, true) => "horizontal_embedded",
+        (true, true) => "vertical_embedded",
+    }
+}
+
 /// 动画时间轴 → 保留帧换回原始帧号的步长；静态图（没解帧）为 1。
 fn raw_stride(layout: Option<&crate::image_cache::AnimLayout>) -> Option<usize> {
     match layout {
@@ -605,8 +627,12 @@ pub struct SkinSlotRect {
 
 #[derive(Clone, Debug)]
 pub struct SkinDecorRect {
-    /// 在变体 `decor` 里的下标（已按 z 稳定排序；求值失败的装饰不在，下标不连续）。
+    /// 在求值后变体 `decor`（已按 z 稳定排序）里的下标，即 `click:<N>` 事件用的那个；
+    /// 渲染时求值失败的装饰不在，下标可能不连续。
     pub index: usize,
+    /// 在 TOML `[[skin.<变体>.decor]]` 里的原始下标（编辑器按它对回模型）；指定义这张变体表的
+    /// 那份 TOML（变体继承自 base 时是 base 的）。
+    pub src_index: usize,
     pub rect: Rect,
     pub z: i32,
     pub hit: DecorHit,
@@ -649,21 +675,7 @@ impl SkinGeom {
     pub fn snapshot(&self, skin: &RvSkin) -> Option<SkinSnapshot> {
         let (vertical, embedded) = self.variant_key;
         let v = skin.variant(vertical, embedded)?;
-        let own_embedded = embedded
-            && if vertical {
-                skin.vertical_embedded.is_some()
-            } else {
-                skin.horizontal_embedded.is_some()
-            };
-        let variant = match (vertical, own_embedded) {
-            (false, false) => "horizontal",
-            (true, false) => "vertical",
-            (false, true) => "horizontal_embedded",
-            (true, true) => "vertical_embedded",
-        };
-        let render_scale = self.k * skin.density;
-        let (src_ref, src_density) = pick_source(v, render_scale);
-        let band_f = src_density / v.frame.density;
+        let band_f = self.band_f;
         let frame = rect_of(self.frame);
         let content = self.content_rect(frame);
         // 与 `skin_metrics` / 图集同一套倍率取整，切片边界才与画出来的一致。
@@ -725,6 +737,7 @@ impl SkinGeom {
                 let (si, kept) = d.cur;
                 SkinDecorRect {
                     index: d.index,
+                    src_index: v.decor.get(d.index).map_or(d.index, |x| x.src_index),
                     rect: rect_of(r),
                     z: d.z,
                     hit: d.hit,
@@ -743,10 +756,10 @@ impl SkinGeom {
             (x + c.offset[0] * self.k, y + c.offset[1] * self.k)
         };
         Some(SkinSnapshot {
-            variant,
+            variant: self.variant,
             k: self.k,
-            render_scale,
-            frame_source: src_ref.to_string(),
+            render_scale: self.render_scale,
+            frame_source: self.frame_ref.clone(),
             min_size: (self.min_w, self.min_h),
             frame,
             content,
@@ -1037,6 +1050,7 @@ impl CandidateScene {
         let sx = scale_stretch(&v.frame.stretch_x, band_f);
         let sy = scale_stretch(&v.frame.stretch_y, band_f);
         let frame_k = render_scale / src_density;
+        let frame_ref = src_ref.to_string();
         // 倍率来自主题（density）：窗体图集超出位图上限就整套回退，不去分配它。
         if let Some((sw, sh)) = crate::view::image_src_size(&frame_path)
             && !crate::skin::fits_image_limits(
@@ -1235,6 +1249,10 @@ impl CandidateScene {
             .collect();
         Some(SkinGeom {
             variant_key: (inp.vertical, inp.preedit_embedded),
+            variant: variant_name(skin, inp.vertical, inp.preedit_embedded),
+            frame_ref,
+            band_f,
+            render_scale,
             frame_path,
             frame_k,
             sx,
@@ -1527,6 +1545,25 @@ mod tests {
         // 内容框左下角。
         let d = decor("content.bottom_left", Pos9::TOP_LEFT, (0.0, 0.0), 5, 5);
         assert_eq!(decor_rect(&d, frame, content), (10, 60, 5, 5));
+    }
+
+    #[test]
+    fn raw_stride_maps_kept_frames_back_unless_misaligned() {
+        use crate::image_cache::AnimLayout;
+        let l = |stride, aligned| AnimLayout {
+            durations: vec![100; 3],
+            stride,
+            raw_frames: 6,
+            aligned,
+        };
+        assert_eq!(raw_stride(None), Some(1), "静态图");
+        assert_eq!(
+            raw_stride(Some(&l(2, true))),
+            Some(2),
+            "隔帧丢弃后保留帧 × 2"
+        );
+        assert_eq!(raw_stride(Some(&l(0, true))), Some(1));
+        assert_eq!(raw_stride(Some(&l(2, false))), None, "有帧生成失败：对不上");
     }
 
     #[test]

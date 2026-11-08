@@ -229,9 +229,14 @@ pub struct ClipInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DecorInfo {
-    /// 在变体 `decor` 里的下标（按 z 稳定排序后的；求值失败的装饰不出现）。
+    /// 在求值后变体 `decor`（按 z 稳定排序）里的下标，即 `click:<N>` 用的那个；渲染时求值失败的
+    /// 装饰不出现，下标可能不连续。
     pub index: usize,
+    /// 在 TOML `[[skin.<变体>.decor]]` 里的原始下标（编辑器按它对回模型）。指的是**定义这张变体表的
+    /// 那份 TOML**：变体继承自 base（子主题没写这个变体键）时是 base 里的下标。
+    pub src_index: usize,
     pub rect: RectInfo,
     pub z: i32,
     /// `drag` / `block` / `pass`。
@@ -318,6 +323,7 @@ impl From<wind_scene::candidate::SkinSnapshot> for SkinInfo {
                 .into_iter()
                 .map(|d| DecorInfo {
                     index: d.index,
+                    src_index: d.src_index,
                     rect: d.rect.into(),
                     z: d.z,
                     hit: match d.hit {
@@ -364,6 +370,9 @@ pub struct Preview<C> {
     assets_fp: u64,
     /// 本实例的图片 / 阴影缓存：同页别的实例换主题、清缓存都不波及它。
     caches: PaintCaches,
+    /// 下一帧让命中的图集 / 动画缓存重放建它时的告警（`set_theme` 之后的首帧）：资源没变时缓存
+    /// 跨 `set_theme` 沿用，那些告警不会再报。
+    replay_warnings: bool,
     /// 上一帧已画出（装饰状态机视窗口为显示中）。
     visible: bool,
     /// 状态机按哪种动画开关建的。
@@ -498,6 +507,7 @@ impl<C: Canvas> Preview<C> {
             assets_gen: wind_scene::assets::next_generation(),
             assets_fp: assets_fingerprint(&[]),
             caches: PaintCaches::default(),
+            replay_warnings: false,
             visible: false,
             anim_allowed: false,
             last: RenderOpts::default(),
@@ -511,7 +521,8 @@ impl<C: Canvas> Preview<C> {
     /// 资源内容没变（只改了主题文字）时沿用资源代号与图片缓存，皮肤图不重新解码；变了就换新代号、
     /// 丢掉本实例的图片缓存与动画帧。
     ///
-    /// 返回解析期间引擎的 `skin:` 告警。场景随之重建，按场景去重的告警会在其后首帧再报一次。
+    /// 返回解析期间引擎的 `skin:` 告警。场景随之重建，按场景去重的告警会在其后首帧再报一次；资源层
+    /// （图集 / 动画建帧）的告警也在首帧由命中的缓存条目重放——只放这一帧实际用到的。
     pub fn set_theme(
         &mut self,
         toml: &str,
@@ -527,6 +538,7 @@ impl<C: Canvas> Preview<C> {
             self.assets_fp = fp;
             self.caches = PaintCaches::default();
         }
+        self.replay_warnings = true;
         // 新场景：皮肤告警重新报、装饰状态机重建。
         self.scene = CandidateScene::default();
         self.visible = false;
@@ -652,13 +664,22 @@ impl<C: Canvas> Preview<C> {
     pub fn render(&mut self, o: &RenderOpts) -> Result<Frame, String> {
         let clock = self.clock(o, o.t_ms);
         let soft_shadow = o.soft_shadow;
+        let replay = self.replay_warnings;
         let (frame, warnings) = crate::warnings::collect(|| {
-            self.with_input(o, |scene, inp| {
-                render_candidate_within(scene, inp, clock, soft_shadow, MAX_SIDE, MAX_PIXELS)
-                    .map_err(|e| format!("{FRAME_TOO_LARGE}{e}"))
-            })
+            let mut draw = || {
+                self.with_input(o, |scene, inp| {
+                    render_candidate_within(scene, inp, clock, soft_shadow, MAX_SIDE, MAX_PIXELS)
+                        .map_err(|e| format!("{FRAME_TOO_LARGE}{e}"))
+                })
+            };
+            if replay {
+                wind_scene::image_cache::replaying_skin_warnings(draw)
+            } else {
+                draw()
+            }
         });
         let frame = frame?;
+        self.replay_warnings = false;
         self.visible = true;
         self.last = o.clone();
         Ok(Frame {
@@ -1475,6 +1496,181 @@ mod tests {
                 raw: Some(1)
             }
         );
+    }
+
+    /// 帧多、目标尺寸大的动图装饰：12 帧 × 800² 超 24 MiB 帧预算，引擎隔帧丢弃（stride 2）。
+    /// `idle` 取原始 4–5 帧。
+    fn dropping_theme(extra: &str) -> (String, Vec<(String, Vec<u8>)>) {
+        let toml = format!(
+            "[meta]\nname = \"d\"\n{extra}[skin]\ndensity = 1\n\
+             [skin.horizontal.frame]\nimage = \"assets/frame.png\"\n\
+             [[skin.horizontal.decor]]\nimage = \"assets/anim.gif\"\nsize = [800, 800]\n\
+             states = {{ idle = {{ frames = \"4-5\" }} }}\n"
+        );
+        let frames: Vec<([u8; 4], u32)> = (0..12).map(|i| ([i * 20, 0, 0, 255], 100)).collect();
+        let assets = vec![
+            ("assets/frame.png".into(), png(16, 16, [200, 200, 200, 255])),
+            (
+                "assets/anim.gif".into(),
+                wind_scene::image_cache::anim_fixtures::gif(4, 4, &frames),
+            ),
+        ];
+        (toml, assets)
+    }
+
+    fn is_drop(w: &str) -> bool {
+        w.starts_with("skin: 动画帧超出 ") && w.contains("隔帧丢弃到 6 帧")
+    }
+
+    /// 资源层告警（降帧）只在建缓存时报：资源没变、只改 TOML 再 `set_theme`，首帧由命中的缓存重放；
+    /// 改小装饰尺寸（换了缓存键、不再降帧）后不再报。降帧后 `raw` = 保留帧 × 步长。
+    #[test]
+    fn resource_warnings_survive_toml_only_set_theme() {
+        let (mut p, _) = preview();
+        let (toml, assets) = dropping_theme("");
+        assert!(p.set_theme(&toml, "", assets.clone()).unwrap().is_empty());
+        let f = at(&mut p, 0.0);
+        assert!(f.warnings.iter().any(|w| is_drop(w)), "{:?}", f.warnings);
+        let clip = &f.skin.as_ref().unwrap().decor[0].clip;
+        assert_eq!(
+            (clip.state.as_deref(), clip.raw),
+            (Some("idle"), Some(4)),
+            "原始 4–5 帧隔帧丢弃后落在保留的第 2 帧：2 × 2 = 4"
+        );
+        assert!(at(&mut p, 10.0).warnings.is_empty(), "同场景不重复报");
+        // 只改 TOML、资源不变：缓存沿用、引擎不会再报，首帧由命中的缓存条目重放。
+        let (toml2, _) = dropping_theme("[behavior]\nfont_size = 18\n");
+        assert!(p.set_theme(&toml2, "", assets.clone()).unwrap().is_empty());
+        let f = at(&mut p, 20.0);
+        assert!(
+            f.warnings.iter().any(|w| is_drop(w)),
+            "首帧重放：{:?}",
+            f.warnings
+        );
+        assert!(at(&mut p, 30.0).warnings.is_empty(), "其后不重复");
+        // 改小尺寸：12 帧 × 200² 在预算内，不再降帧；旧条目没被这一帧用到，不重放。
+        let smaller = toml2.replace("size = [800, 800]", "size = [200, 200]");
+        assert!(
+            p.set_theme(&smaller, "", assets.clone())
+                .unwrap()
+                .is_empty()
+        );
+        let f = at(&mut p, 40.0);
+        assert!(!f.warnings.iter().any(|w| is_drop(w)), "{:?}", f.warnings);
+        assert_eq!(
+            f.skin.unwrap().decor[0].clip.raw,
+            Some(4),
+            "不降帧：原始第 4 帧"
+        );
+        // 改回大尺寸：旧条目又被用到，重放。
+        p.set_theme(&toml2, "", assets).unwrap();
+        assert!(at(&mut p, 50.0).warnings.iter().any(|w| is_drop(w)));
+    }
+
+    /// `index` 是求值后（z 排序、丢掉无效项）的下标，`src_index` 是 TOML 里的原始下标。
+    #[test]
+    fn decor_receipt_carries_toml_index() {
+        let (mut p, _) = preview();
+        let toml = "[meta]\nname = \"z\"\n[skin]\ndensity = 1\n\
+                    [skin.horizontal.frame]\nimage = \"assets/frame.png\"\n\
+                    [[skin.horizontal.decor]]\nimage = \"\"\n\
+                    [[skin.horizontal.decor]]\nimage = \"assets/dot.png\"\nz = 5\n\
+                    [[skin.horizontal.decor]]\nimage = \"assets/dot.png\"\nz = -3\n\
+                    [[skin.horizontal.decor]]\nimage = \"assets/missing.png\"\n";
+        let assets = vec![
+            ("assets/frame.png".into(), png(16, 16, [200, 200, 200, 255])),
+            ("assets/dot.png".into(), png(4, 4, [255, 0, 0, 255])),
+        ];
+        p.set_theme(toml, "", assets).unwrap();
+        let s = p.render(&RenderOpts::default()).unwrap().skin.unwrap();
+        let got: Vec<(usize, usize, i32)> = s
+            .decor
+            .iter()
+            .map(|d| (d.index, d.src_index, d.z))
+            .collect();
+        // 求值后：[0] z -3（TOML 2）、[1] 缺图（TOML 3，渲染时丢）、[2] z 5（TOML 1）；TOML 0 空图解析时丢。
+        assert_eq!(got, [(0, 2, -3), (2, 1, 5)]);
+        let json = serde_json::to_string(&s.decor[0]).unwrap();
+        assert!(json.contains("\"srcIndex\":2"), "{json}");
+    }
+
+    /// 选到 srcset 里的另一份源图：`frameSource` 报它，`axis*.src` 仍按 `frame.image` 的像素。
+    #[test]
+    fn srcset_pick_keeps_axis_in_main_image_pixels() {
+        let (mut p, _) = preview();
+        let toml = "[meta]\nname = \"x\"\n[skin]\ndensity = 1\n\
+                    [skin.horizontal.frame]\nimage = \"assets/f1.png\"\nstretch_x = [[8, 24]]\n\
+                    srcset = [{ image = \"assets/f2.png\", density = 2 }]\n";
+        let assets = vec![
+            ("assets/f1.png".into(), png(32, 32, [200, 200, 200, 255])),
+            ("assets/f2.png".into(), png(64, 64, [100, 100, 100, 255])),
+        ];
+        p.set_theme(toml, "", assets).unwrap();
+        let at_scale = |p: &mut Preview<MockCanvas>, scale| {
+            p.render(&RenderOpts {
+                scale,
+                ..Default::default()
+            })
+            .unwrap()
+            .skin
+            .unwrap()
+        };
+        let one = at_scale(&mut p, 1.0);
+        assert_eq!(one.frame_source, "assets/f1.png");
+        let two = at_scale(&mut p, 2.0);
+        assert_eq!(two.frame_source, "assets/f2.png");
+        for s in [&one, &two] {
+            assert_eq!(s.axis_x[1].src, [8.0, 24.0], "{}", s.frame_source);
+            assert_eq!(s.axis_x[2].src, [24.0, 32.0]);
+            let fixed = s.axis_x[0].dst[1] - s.axis_x[0].dst[0];
+            assert_eq!(fixed, 8.0 * s.render_scale, "{}", s.frame_source);
+        }
+    }
+
+    /// 竖排变体与上方布局：回执几何同样就是引擎这一帧的那份。
+    #[test]
+    fn vertical_and_above_receipts_match_engine_geometry() {
+        let (mut p, _) = preview();
+        let (toml, assets) = geom_theme(false, "");
+        let toml = toml.replace("skin.horizontal", "skin.vertical");
+        p.set_theme(&toml, "", assets.clone()).unwrap();
+        let o = RenderOpts {
+            vertical: true,
+            scale: 2.0,
+            ..Default::default()
+        };
+        let f = p.render(&o).unwrap();
+        let s = f.skin.unwrap();
+        let g = p.scene.skin_geom.as_ref().unwrap();
+        assert_eq!(s.variant, "vertical");
+        assert!(f.height > f.width, "{}x{}", f.width, f.height);
+        assert_eq!(s.frame, rect_i(g.frame_for_test()));
+        let rects: Vec<RectInfo> = g
+            .decor_rects_for_test()
+            .iter()
+            .map(|&r| rect_i(r))
+            .collect();
+        assert_eq!(s.decor.iter().map(|d| d.rect).collect::<Vec<_>>(), rects);
+        assert!(
+            p.render(&RenderOpts::default()).unwrap().skin.is_none(),
+            "横排没配"
+        );
+
+        let (toml, _) = geom_theme(false, "");
+        p.set_theme(&toml, "", assets).unwrap();
+        let above = p
+            .render(&RenderOpts {
+                above: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let s = above.skin.unwrap();
+        let g = p.scene.skin_geom.as_ref().unwrap();
+        let fr = rect_i(g.frame_for_test());
+        assert_eq!(s.frame, fr);
+        let window = above.nodes.iter().find(|n| n.key == "window").unwrap();
+        assert_eq!((window.x, window.y), (fr.x, fr.y), "上方重排不挪窗体");
+        assert_eq!(s.caret.above, [fr.x, fr.y + fr.h]);
     }
 
     /// 两帧 GIF（各 100ms），4×4 纯色。

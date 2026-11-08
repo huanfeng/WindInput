@@ -14,7 +14,8 @@ pub struct CandidateFrame {
     pub nodes: Vec<(NodeKey, Rect)>,
     /// 屏幕安全宽把窗口钳窄了（[`super::SceneFrame::safety_clamped`]）。
     pub safety_clamped: bool,
-    /// 本帧皮肤几何（同 `bgra` 坐标）；None = 没启用皮肤（含回退普通窗口）。
+    /// 本帧皮肤几何（同 `bgra` 坐标）：只有 [`render_candidate_within`]（主题编辑器）取；
+    /// None = 没取，或没启用皮肤（含回退普通窗口）。
     pub skin: Option<super::SkinSnapshot>,
 }
 
@@ -63,12 +64,13 @@ pub fn render_candidate(
         base_size: inp.base_font_logical * inp.scale,
     };
     let frame = layout_frame(scene, inp, clock, soft_shadow, &text);
-    paint_frame(scene, inp, &frame, &text)
+    paint_frame(scene, inp, &frame, &text, false)
 }
 
 /// 同 [`render_candidate`]，但排版出来的缓冲宽或高超过 `max_side`、或像素总数超过
 /// `max_pixels` 时不画、返回错误（含尺寸）。给参数与主题都不可信的调用方用（主题编辑器）：
-/// 超大字号、海量候选在分配缓冲与逐像素绘制之前就挡住。
+/// 超大字号、海量候选在分配缓冲与逐像素绘制之前就挡住。另带皮肤几何快照（`skin`，编辑器叠加层用；
+/// [`render_candidate`] 不取）。
 pub fn render_candidate_within(
     scene: &mut CandidateScene,
     inp: &CandidateSceneInput,
@@ -88,7 +90,7 @@ pub fn render_candidate_within(
             "候选窗尺寸 {w}×{h} 超出上限（单边 {max_side}、共 {max_pixels} 像素）"
         ));
     }
-    Ok(paint_frame(scene, inp, &frame, &text))
+    Ok(paint_frame(scene, inp, &frame, &text, true))
 }
 
 /// 排版（含上方专属布局的重排）。`text` 是钉好基准字号的文字后端。
@@ -120,6 +122,7 @@ fn paint_frame(
     inp: &CandidateSceneInput,
     frame: &super::SceneFrame,
     text: &SizedText,
+    with_skin: bool,
 ) -> CandidateFrame {
     let (width, height) = frame.size();
     let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
@@ -130,11 +133,12 @@ fn paint_frame(
         bgra,
         nodes: scene.nodes(frame),
         safety_clamped: frame.safety_clamped.is_some(),
-        skin: scene
-            .skin_geom
-            .as_ref()
-            .zip(inp.theme.skin.as_ref())
-            .and_then(|(g, s)| g.snapshot(s)),
+        skin: with_skin
+            .then(|| {
+                let (g, s) = scene.skin_geom.as_ref().zip(inp.theme.skin.as_ref())?;
+                g.snapshot(s)
+            })
+            .flatten(),
     }
 }
 

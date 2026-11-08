@@ -11,12 +11,12 @@
 | File | Description |
 |------|-------------|
 | `src/preview.rs` | API 本体 `Preview<C>`：`set_theme(toml, id, 资源)` / `render(RenderOpts)` / `signal(事件)`，原生可测；不可信输入的上限 `MAX_*`；帧带节点矩形 `NodeRect`（设备像素，键名同主题节点名）、皮肤几何 `SkinInfo`（取自 `SkinGeom::snapshot`，同坐标）与告警 |
-| `src/frames.rs` | 无状态的图片帧信息 `inspect_image` 与缩略帧 `decode_frames`（引擎 `image_cache::walk_frames` 口径），输入 / 边长 / 帧数上限 |
-| `src/warnings.rs` | 调用期 tracing 收集器：只收 WARN 且以 `skin:` 开头的消息；按调用设成线程默认，不装全局订阅者 |
+| `src/frames.rs` | 无状态的图片帧信息 `inspect_image` 与缩略帧 `decode_frames`（引擎 `image_cache::walk_frames` 口径），输入 / 边长 / 帧数上限与「像素 × 帧」解码量预算 |
+| `src/warnings.rs` | 调用期 tracing 收集器：只收 WARN 且以 `skin:` 开头的消息；按调用设成线程默认（替换不叠加），不装全局订阅者。资源层（图集 / 动画建帧）告警随缓存条目存着，`set_theme` 后首帧由 `image_cache::replaying_skin_warnings` 让本帧命中的条目重放 |
 | `src/canvas.rs` | `Canvas` trait（宿主的测量 / 灰度画一行）+ `CanvasText`（实现 `TextBackend`，覆盖率按颜色区间着色、可能含 emoji 的行黑白两遍对比认彩色字形）；测试用 `mock::MockCanvas`（可模拟宿主失败、彩色字形） |
 | `src/builtin.rs` | 编进产物的 `data/themes/` 内置主题与图片资产 |
 | `src/web.rs` | wasm-bindgen 导出层（仅 wasm32）：`Previewer` / `Frame`、模块级 `inspectImage` / `decodeFrames`，JS 画布接 `js/text.js`（`catch`）；陷入后入口报「已损坏」 |
-| `js/preview.js` | 推荐入口 `AutoPreviewer`：致命错误时重新实例化模块、重放主题（串行化、10 秒 2 次的预算，超了抛 `PreviewerFailedError`）；代办 `frame.free()`。构建脚本复制进产物；产物目录须原样静态发布 |
+| `js/preview.js` | 推荐入口 `AutoPreviewer`（预览）与 `FrameTools`（帧信息 / 缩略帧，独立模块实例、独立重建预算；崩了换新实例、本次原样抛错不重试；旧实例内存回收不了，单次峰值由 `frames.rs` 的解码量预算压住）。`AutoPreviewer`：致命错误时重新实例化模块、重放主题（串行化、10 秒 2 次的预算，超了抛 `PreviewerFailedError`）；代办 `frame.free()`。构建脚本复制进产物；产物目录须原样静态发布 |
 | `js/text.js` | OffscreenCanvas 文字后端，随产物出（wasm-bindgen 的 snippets/） |
 | `js/smoke.mjs` | node 冒烟（假 OffscreenCanvas），`build-scene-wasm.sh` 有 node 时自动跑 |
 
