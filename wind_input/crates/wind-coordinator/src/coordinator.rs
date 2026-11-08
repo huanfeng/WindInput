@@ -20623,11 +20623,5 @@ pub(crate) fn pick_index_label(
     if let Some(s) = cand_cfg.user_index_label(i) {
         return s;
     }
-    if let Some(s) = theme_labels.get(i).filter(|s| !s.is_empty()) {
-        return s.clone();
-    }
-    if i == 9 {
-        return "0".to_string();
-    }
-    (i + 1).to_string()
+    wind_ui_types::theme_index_label(theme_labels, i)
 }

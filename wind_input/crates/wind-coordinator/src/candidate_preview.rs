@@ -6,27 +6,12 @@
 
 use std::sync::mpsc;
 
-use wind_ui_types::{CandidateItem, CandidatePreviewImage, CandidatePreviewRequest, UiCommand};
+use wind_ui_types::{CandidatePreviewImage, CandidatePreviewRequest, UiCommand};
 
 use crate::Coordinator;
 
-/// 示例编码。
-pub const PREVIEW_PREEDIT: &str = "nihao";
-
-/// 示例候选（正文, 注释）：按每页候选数取前若干个，第三个带注释。改动要递增
-/// [`wind_ui_types::CANDIDATE_PREVIEW_RENDER_VERSION`]（缓存键不含示例内容本身）。
-const PREVIEW_CANDIDATES: [(&str, &str); 10] = [
-    ("你好", ""),
-    ("拟好", ""),
-    ("你", "wqiy"),
-    ("尼", ""),
-    ("泥", ""),
-    ("妮", ""),
-    ("倪", ""),
-    ("逆", ""),
-    ("腻", ""),
-    ("匿", ""),
-];
+/// 示例内容在 wind-ui-types，与主题编辑器的 wasm 预览共用。
+pub use wind_ui_types::PREVIEW_PREEDIT;
 
 /// 渲染端的回执。
 pub type PreviewReply = mpsc::Receiver<Result<CandidatePreviewImage, String>>;
@@ -60,21 +45,9 @@ impl Coordinator {
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PreviewReply {
         let cand = self.eff_candidate();
-        let n = cand.per_page.clamp(1, PREVIEW_CANDIDATES.len());
-        let candidates = PREVIEW_CANDIDATES[..n]
-            .iter()
-            .enumerate()
-            .map(|(i, (text, comment))| CandidateItem {
-                text: (*text).to_string(),
-                text_styled: Default::default(),
-                code: String::new(),
-                label: crate::coordinator::pick_index_label(&cand, &theme.views.index_labels, i),
-                tooltip: Default::default(),
-                comment: (*comment).to_string().into(),
-                comment_above: Default::default(),
-                no_index: false,
-            })
-            .collect();
+        let candidates = wind_ui_types::preview_candidates(cand.per_page, |i| {
+            crate::coordinator::pick_index_label(&cand, &theme.views.index_labels, i)
+        });
         let (tx, rx) = mpsc::sync_channel(1);
         let req = CandidatePreviewRequest {
             theme,
