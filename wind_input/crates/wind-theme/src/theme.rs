@@ -225,7 +225,46 @@ pub fn load_typed(themes_dir: &Path, name: &str) -> anyhow::Result<Theme> {
 
 /// 多目录版：base 可在任一目录（如用户主题 `base = "_base"` 继承内置 _base）。
 pub fn load_typed_dirs(dirs: &[PathBuf], name: &str) -> anyhow::Result<Theme> {
-    let merged = load_merged_dirs(dirs, name, 0)?;
+    type_merged(load_merged_dirs(dirs, name, 0)?, name)
+}
+
+/// 不走文件系统的版本：主题文本 + 按 id 取 base 主题文本（取不到 = 不存在）。给没有文件系统的
+/// 调用方用（主题编辑器的 wasm 预览把内置主题编进产物）。合并、归一化与类型化同 [`load_typed_dirs`]；
+/// base 引用同样只认普通 slug（[`is_plain_slug`]）。错误信息含 TOML 的行列，可原样给用户看。
+pub fn load_typed_text(
+    text: &str,
+    base_text: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<Theme> {
+    type_merged(load_merged_text_at(text, "", 0, base_text)?, "(text)")
+}
+
+fn load_merged_text_at(
+    text: &str,
+    name: &str,
+    depth: usize,
+    base_text: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<Value> {
+    if depth > 8 {
+        anyhow::bail!("theme base chain too deep (cycle?) at {}", name);
+    }
+    let value: Value = text.parse::<Value>().map_err(|e| {
+        if name.is_empty() {
+            anyhow::anyhow!("parse theme: {e}")
+        } else {
+            anyhow::anyhow!("parse theme {name}: {e}")
+        }
+    })?;
+    merge_layer(value, name, depth, &mut |base, d| {
+        if !is_plain_slug(base) {
+            anyhow::bail!("base 只能写主题 id（不能含路径）：{base:?}");
+        }
+        let t = base_text(base).ok_or_else(|| anyhow::anyhow!("theme '{}' not found", base))?;
+        load_merged_text_at(&t, base, d, base_text)
+    })
+}
+
+/// 合并完的 Value → 类型化 `Theme`（完整归一化 + 竖排变体）。
+fn type_merged(merged: Value, name: &str) -> anyhow::Result<Theme> {
     let normalized = normalize_theme(merged);
     let vertical = vertical_variant(&normalized);
     let mut theme: Theme = normalized
@@ -321,6 +360,19 @@ fn load_merged_dirs_at(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Re
     let value: Value = text
         .parse::<Value>()
         .map_err(|e| anyhow::anyhow!("parse theme {}: {}", path.display(), e))?;
+    merge_layer(value, name, depth, &mut |base, d| {
+        load_merged_dirs_at(dirs, base, d)
+    })
+}
+
+/// 一层主题（已解析未归一化）→ 归一化后叠到它的 base 链上。`load_base(base 名, 深度)` 取 base
+/// 链合并结果；目录加载与文本加载只在这一步不同。
+fn merge_layer(
+    value: Value,
+    name: &str,
+    depth: usize,
+    load_base: &mut dyn FnMut(&str, usize) -> anyhow::Result<Value>,
+) -> anyhow::Result<Value> {
     // **归一化在合并之前，逐层各做一次**（`normalize_theme` 对已归一化的输入幂等）。
     //
     // 顺序反过来（先合并整条链、最后归一化一次）会坏两处，两处都静默：
@@ -335,13 +387,13 @@ fn load_merged_dirs_at(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Re
     // 归一化提前之后, 进 merge 的两边形态一致、简写都已展开, 深合并才是逐字段的。
     let value = normalize_theme_for_merge(value);
 
-    // base 链继承：先加载 base（跨目录查找），再用本主题覆盖（merge）。
+    // base 链继承：先加载 base，再用本主题覆盖（merge）。
     if let Some(base_name) = value
         .get("base")
         .and_then(|b| b.as_str())
         .filter(|b| !b.is_empty() && *b != name)
     {
-        let mut base = load_merged_dirs_at(dirs, base_name, depth + 1)?;
+        let mut base = load_base(base_name, depth + 1)?;
         drop_inherited_arrow_images(&mut base, &value);
         crate::skin::replace_inherited_variants(&mut base, &value);
         return Ok(merge(base, value));
@@ -959,5 +1011,48 @@ mod tests {
         );
         assert!(footer(&m, "prev_image").is_none(), "嵌套形态也应让位");
         assert_eq!(footer(&m, "prev_char").and_then(|v| v.as_str()), Some("$"));
+    }
+
+    /// 文本加载与目录加载同一条合并链：内置主题逐个比对合并结果（类型化那步两边共用
+    /// `type_merged`；`Theme` 里有 HashMap，Debug 串不能直接比）。
+    #[test]
+    fn text_loading_matches_directory_loading_for_builtins() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/themes");
+        let dirs = vec![root.clone()];
+        let read = |id: &str| std::fs::read_to_string(root.join(id).join(THEME_FILE)).ok();
+        let ids = list_theme_ids(&root);
+        assert!(ids.iter().any(|i| i == "default"), "{ids:?}");
+        for id in ids {
+            let from_dir = load_merged_dirs(&dirs, &id, 0).unwrap();
+            let from_text = load_merged_text_at(&read(&id).unwrap(), "", 0, &read).unwrap();
+            assert_eq!(from_dir, from_text, "{id}");
+            load_typed_text(&read(&id).unwrap(), &read).unwrap();
+        }
+    }
+
+    #[test]
+    fn text_loading_reports_errors() {
+        let none = |_: &str| None;
+        let e = load_typed_text("[meta\nname = 1", &none).unwrap_err();
+        assert!(e.to_string().starts_with("parse theme:"), "{e}");
+        let e = load_typed_text("base = \"missing\"\n", &none).unwrap_err();
+        assert!(e.to_string().contains("missing"), "{e}");
+        // base 只认普通 slug：路径形态连查都不查。
+        let asked = std::cell::Cell::new(false);
+        let spy = |_: &str| {
+            asked.set(true);
+            Some(String::new())
+        };
+        assert!(load_typed_text("base = \"../x\"\n", &spy).is_err());
+        assert!(!asked.get(), "非 slug 的 base 不该去取");
+        // 循环继承止于深度上限。
+        let cyc = |id: &str| {
+            Some(format!(
+                "base = \"{}\"\n",
+                if id == "a" { "b" } else { "a" }
+            ))
+        };
+        let e = load_typed_text("base = \"a\"\n", &cyc).unwrap_err();
+        assert!(e.to_string().contains("too deep"), "{e}");
     }
 }
