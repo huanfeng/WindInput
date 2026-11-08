@@ -38,6 +38,7 @@
 #   pm1/pm2      push 单模块 (tsf/核心, release)
 #   pdm1/pdm2    push 单模块 (dev)
 #   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活pre-commit)  clean
+#   wk           wasm32 检查 (wind-scene / wind-scene-wasm；k 也会跑)
 #   sk=setting-check  st=setting-test  sg=setting-regen   邻仓 ../wind-setting
 #     (交叉到 Windows 目标; st/sg 经 wine 执行。sg = 重生成检入的 capability 快照与 mockdata)
 #     ↑ 只改了 core 配置注册表的话, 先跑 cargo test -p wind-rpc --test wind_setting_assets
@@ -277,7 +278,19 @@ build_portable() {
 
 do_check() {
     say "\n正在运行 cargo check ($TARGET, 全工作区)..."
-    cd "$PROJECT_ROOT" && cargo_xwin check --target "$TARGET" --workspace
+    cd "$PROJECT_ROOT" && cargo_xwin check --target "$TARGET" --workspace || return 1
+    do_wasm_check
+}
+
+# 主题编辑器的 wasm 预览（wind-scene-wasm）及其依赖要能编到 wasm32：wind-scene 不准引入
+# 平台 API / wind-config，漏了只在编辑器构建时才发现。没装 wasm32 目标时跳过（不挡 check）。
+do_wasm_check() {
+    if ! rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
+        warn "未装 wasm32-unknown-unknown 目标，跳过 wasm 检查（rustup target add wasm32-unknown-unknown）"
+        return 0
+    fi
+    say "\n正在运行 cargo check (wasm32-unknown-unknown, wind-scene / wind-scene-wasm)..."
+    cd "$PROJECT_ROOT" && cargo check --target wasm32-unknown-unknown -p wind-scene -p wind-scene-wasm
 }
 
 do_clippy() {
@@ -1950,7 +1963,7 @@ show_menu() {
     echo  "    p1   push 全部 (release)        pd1   push 全部 (dev)"
     echo  "    pm1/pm2  push 模块(tsf/核心)    pdm1/pdm2 (dev)"
     printf '\n%b  代码质量:%b\n' "$C_YELLOW" "$C_RESET"
-    echo  "    k=check  l=clippy  t=test  f=fmt  ci=fmt+clippy+test"
+    echo  "    k=check(含 wk)  wk=wasm32 检查  l=clippy  t=test  f=fmt  ci=fmt+clippy+test"
     printf '\n%b  远程数据 / 实测:%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    r=repl(本机)  dl=pull-data  pc=pull-config  pl=pull-log(pla=全部)"
     printf '\n%b  远程诊断 (靶机现场; 路径直接给 Windows 路径, 含空格不用加引号):%b\n' "$C_YELLOW" "$C_RESET"
@@ -2002,6 +2015,7 @@ dispatch() {
         pdm1)             do_push_module dev tsf ;;
         pdm2)             do_push_module dev core ;;
         k|check)          do_check ;;
+        wk|wasm-check)    do_wasm_check ;;
         l|clippy)         do_clippy ;;
         t|test)           do_test ;;
         sk|setting-check) do_setting_check ;;
