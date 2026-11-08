@@ -12,6 +12,8 @@ pub struct CandidateFrame {
     pub bgra: Vec<u8>,
     /// 各节点的矩形（设备像素，同 `bgra` 的坐标），供编辑器预览点选（见 [`CandidateScene::nodes`]）。
     pub nodes: Vec<(NodeKey, Rect)>,
+    /// 屏幕安全宽把窗口钳窄了（[`super::SceneFrame::safety_clamped`]）。
+    pub safety_clamped: bool,
 }
 
 impl CandidateFrame {
@@ -124,6 +126,7 @@ fn paint_frame(
         height,
         bgra,
         nodes: scene.nodes(frame),
+        safety_clamped: frame.safety_clamped.is_some(),
     }
 }
 
@@ -276,6 +279,28 @@ mod tests {
         };
         let w2 = shadowed.nodes[0].1;
         assert!(w2.x > 0.0 && w2.y > 0.0, "{w2:?}");
+        // 屏幕安全宽把窗口钳窄：报 safety_clamped，节点矩形都钳在缓冲里。
+        let many: Vec<CandidateItem> = (0..9).map(|_| cand("候选候选")).collect();
+        let narrow = render_candidate(
+            &mut scene,
+            &CandidateSceneInput {
+                candidates: &many,
+                screen_extent_px: Some((200, 1080)),
+                ..inp
+            },
+            clock,
+            false,
+        );
+        assert!(narrow.safety_clamped);
+        assert!(!f.safety_clamped);
+        for (k, r) in &narrow.nodes {
+            assert!(
+                r.x >= 0.0 && r.x + r.w <= narrow.width as f32 && r.y + r.h <= narrow.height as f32,
+                "{k:?} {r:?} 出了 {}x{}",
+                narrow.width,
+                narrow.height
+            );
+        }
         for id in 0..=9 {
             if let Some(k) = NodeKey::from_id(id) {
                 assert_eq!(k as u8, id);
@@ -432,6 +457,7 @@ mod tests {
             height: 1,
             bgra: vec![10, 20, 30, 255, 64, 32, 16, 128, 9, 9, 9, 0],
             nodes: Vec::new(),
+            safety_clamped: false,
         };
         assert_eq!(
             f.to_rgba(),

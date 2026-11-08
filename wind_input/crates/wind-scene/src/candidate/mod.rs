@@ -946,7 +946,8 @@ impl CandidateScene {
         out
     }
 
-    /// 各打了 [`NodeKey`] 的节点在缓冲里的矩形（设备像素，先序；皮肤分槽位的各块在根之后）。
+    /// 各打了 [`NodeKey`] 的节点在缓冲里的矩形（设备像素，先序；皮肤分槽位的各块在根之后），
+    /// 与缓冲求交：屏幕安全宽把内容钳窄时，根容器按排版宽会伸出缓冲。完全在缓冲外的节点不列。
     /// 预览点选用，实时窗口不调。
     pub fn nodes(&self, f: &SceneFrame) -> Vec<(NodeKey, Rect)> {
         let mut raw = Vec::new();
@@ -954,8 +955,15 @@ impl CandidateScene {
         if let Some(g) = &self.skin_geom {
             g.collect_part_nodes(&mut raw);
         }
+        let (w, h) = f.size();
+        let buf = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f32,
+            h: h as f32,
+        };
         raw.into_iter()
-            .filter_map(|(id, r)| Some((NodeKey::from_id(id)?, r)))
+            .filter_map(|(id, r)| Some((NodeKey::from_id(id)?, r.intersect(&buf)?)))
             .collect()
     }
 
