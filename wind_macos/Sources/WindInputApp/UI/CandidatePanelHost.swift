@@ -8,6 +8,8 @@ import WindInputKit
 //   1. 启动时 try open /WindInput_SHM, 启 PushClient 订阅 bridge_push.sock
 //   2. 收 CmdHostRenderFrame → snapshot SHM → CGImage → 贴 NSPanel
 //   3. 收 CmdCandidateRects → 存命中矩形, 喂 panel 供鼠标 hit-test
+//   3b. 收 CmdCandidateSkin → 皮肤区域 (系统阴影开关、不拖动区); 穿透装饰层 (OVERLAY_KIND_DECOR)
+//       贴在候选窗的子 panel 上 (设计 theme-skin-animation.md §17.3)
 //   4. NSPanel 鼠标点选 → 发 CmdCandidateSelect 回 Go (经独立 request 连接)
 //   4b. 收 CmdOverlayFrame → 交 OverlayHost (悬停提示 / 状态气泡 / Toast / 自绘菜单, 同样是
 //       服务端光栅化后经 SHM 贴图); 候选悬停与悬停提示的保持 / 宽限在这里协调
@@ -55,6 +57,10 @@ public final class CandidatePanelHost {
     private var push: PushClient?
     private var sendClient: BridgeClient?       // 发 CmdCandidateSelect 用 (request 连接)
     private var latestRects: [CandidateHitRect] = []
+    /// 最近一条皮肤区域 (设备像素)。先于同一帧的 `hostRenderFrame` 到，贴帧时按帧的 scale 换算。
+    private var latestSkin = CandidateSkin()
+    /// 穿透装饰层的 SHM (`_DEC`)。仅主线程使用。
+    private var decorReader: SharedMemoryReader?
     private var currentScale: CGFloat = 1
     private var reconnecting = false            // push 重连排程中, 防重复
     private let lock = NSLock()
@@ -457,11 +463,20 @@ public final class CandidatePanelHost {
             // 各浮层的 SHM 段同样被重建; 开着的菜单也随旧服务一并作废。
             DispatchQueue.main.async { [weak self] in
                 self?.lastSuggestedWire = nil
+                self?.decorReader?.closeReader(); self?.decorReader = nil
                 self?.overlays.serviceRestarted()
             }
         case DownstreamCmd.overlayFrame:
             if let f = OverlayFrame.decode(frame.payload) {
-                DispatchQueue.main.async { [weak self] in self?.overlays.apply(f) }
+                if f.kind == OverlayKind.decor {
+                    DispatchQueue.main.async { [weak self] in self?.applyDecorFrame(f) }
+                } else {
+                    DispatchQueue.main.async { [weak self] in self?.overlays.apply(f) }
+                }
+            }
+        case DownstreamCmd.candidateSkin:
+            if let skin = try? BinaryCodec.decodeCandidateSkinPayload(frame.payload) {
+                lock.lock(); latestSkin = skin; lock.unlock()
             }
         case DownstreamCmd.hostRenderFrame:
             guard let p = try? BinaryCodec.decodeHostRenderFramePayload(frame.payload) else { return }
@@ -566,13 +581,40 @@ public final class CandidatePanelHost {
         let pt = NSPoint(x: CGFloat(p.x), y: CGFloat(p.y))
         let useSoftwareShadow = frame.hasSoftwareShadow
         let absolute = p.isAbsolutePos
-        lock.lock(); currentScale = scale; let rects = Self.scaleRects(latestRects, by: scale); lock.unlock()
+        let anim = p.isAnimFrame
+        lock.lock()
+        currentScale = scale
+        let rects = Self.scaleRects(latestRects, by: scale)
+        let skin = latestSkin.scaled(by: scale)
+        lock.unlock()
         DispatchQueue.main.async { [weak self] in
-            // 软件阴影已渲染在 image 中时禁用系统窗口阴影，避免在画布边缘产生黑边。
-            self?.panel.hasShadow = !useSoftwareShadow
+            // 软件阴影已渲染在 image 中时禁用系统窗口阴影，避免在画布边缘产生黑边；
+            // 皮肤的阴影由图自带 (设计 §3.1)，同样关掉系统阴影。
+            self?.panel.hasShadow = !useSoftwareShadow && !skin.isActive
             self?.lastSuggestedWire = (pt.x, pt.y)
-            self?.panel.show(image: img, atScreenPoint: pt, rects: rects, absolute: absolute)
+            self?.panel.show(image: img, atScreenPoint: pt, rects: rects, skin: skin,
+                             absolute: absolute, anim: anim)
         }
+    }
+
+    /// 穿透装饰层 (`OVERLAY_KIND_DECOR`)：像素交给候选窗的子 panel，下一次候选帧贴上。主线程。
+    private func applyDecorFrame(_ f: OverlayFrame) {
+        guard f.isVisible, f.width > 0, f.height > 0 else {
+            panel.setDecor(image: nil)
+            return
+        }
+        if decorReader == nil {
+            decorReader = try? SharedMemoryReader(name: OverlayHost.shmName(for: OverlayKind.decor),
+                                                  size: 4 * 1024 * 1024)
+        }
+        // 取到的若是更新的一帧 (尺寸不符)，这次放弃：它自己的通知随后就到。
+        guard let snap = decorReader?.snapshot(),
+              snap.width == Int(f.width), snap.height == Int(f.height),
+              let img = Self.makeNSImage(from: snap, scale: CGFloat(max(f.scale, 1))) else {
+            panel.setDecor(image: nil)
+            return
+        }
+        panel.setDecor(image: img)
     }
 
     /// 把 device-px 命中矩形除以 scale → logical 点 (与 NSView 坐标系一致)。

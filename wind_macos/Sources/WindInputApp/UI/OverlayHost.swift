@@ -177,12 +177,13 @@ final class OverlayHost: OverlayPanelDelegate {
         return p
     }
 
-    private static func shmName(for kind: UInt32) -> String {
+    static func shmName(for kind: UInt32) -> String {
         let tail: String
         switch kind {
         case OverlayKind.tooltip: tail = "_TIP"
         case OverlayKind.status: tail = "_STS"
         case OverlayKind.toast: tail = "_TST"
+        case OverlayKind.decor: tail = "_DEC"
         default: tail = "_MN\(kind - OverlayKind.menu)"
         }
         // 与 Rust `wind_bridge::endpoint::overlay_shm_name` 对齐：候选窗那段 + 层后缀。

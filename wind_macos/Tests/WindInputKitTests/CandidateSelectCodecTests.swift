@@ -53,4 +53,75 @@ final class CandidateSelectCodecTests: XCTestCase {
         let rects = try BinaryCodec.decodeCandidateRectsPayload(buf)
         XCTAssertEqual(rects.count, 0)
     }
+
+    /// 偏移照 Rust `candidate_skin_layout_matches_documented_offsets` 那份写死。
+    func testDecodeCandidateSkinPayload() throws {
+        var buf = Data(count: 4 + 16 + 4 + 2 * 28 + 4 + 2 * 16)
+        let put = { (v: Int32, at: Int) in buf.writeUInt32LE(UInt32(bitPattern: v), at: at) }
+        for (o, v) in [(0, 3), (4, 10), (8, 20), (12, 300), (16, 120), (20, 2),
+                       (24, 2), (28, 2), (32, 3), (36, -5), (40, -6), (44, 40), (48, 50),
+                       (52, 0), (56, 1), (60, 0), (64, 1), (68, 2), (72, 3), (76, 4),
+                       (80, 2), (84, 10), (88, 20), (92, 300), (96, 1)] as [(Int, Int32)] {
+            put(v, o)
+        }
+        let skin = try BinaryCodec.decodeCandidateSkinPayload(buf)
+        XCTAssertTrue(skin.isActive)
+        XCTAssertEqual(skin.frame, SkinRect(x: 10, y: 20, w: 300, h: 120))
+        XCTAssertEqual(skin.decor, [
+            CandidateSkin.Decor(index: 2, hit: CandidateSkin.hitPass, flags: 3,
+                                rect: SkinRect(x: -5, y: -6, w: 40, h: 50)),
+            CandidateSkin.Decor(index: 0, hit: CandidateSkin.hitBlock, flags: 0,
+                                rect: SkinRect(x: 1, y: 2, w: 3, h: 4)),
+        ])
+        XCTAssertTrue(skin.splitDecorBelow)
+        // 截断的装饰表报错，不越界读。
+        XCTAssertThrowsError(try BinaryCodec.decodeCandidateSkinPayload(buf.prefix(51)))
+        // 没启用皮肤：28 字节全零。
+        let none = try BinaryCodec.decodeCandidateSkinPayload(Data(count: 28))
+        XCTAssertEqual(none, CandidateSkin())
+        XCTAssertFalse(none.isActive)
+    }
+
+    func testSkinNoDragRegion() {
+        // 窗体 (10,10,100,40)；左上外侧 block 装饰盖进窗体一角；右侧 drag 装饰；下方没拆层的 pass。
+        let skin = CandidateSkin(flags: CandidateSkin.flagActive,
+                                 frame: SkinRect(x: 10, y: 10, w: 100, h: 40), decor: [
+            CandidateSkin.Decor(index: 0, hit: CandidateSkin.hitBlock, flags: 0,
+                                rect: SkinRect(x: 0, y: 0, w: 20, h: 20)),
+            CandidateSkin.Decor(index: 1, hit: CandidateSkin.hitDrag, flags: 0,
+                                rect: SkinRect(x: 110, y: 10, w: 20, h: 20)),
+            CandidateSkin.Decor(index: 2, hit: CandidateSkin.hitPass, flags: 0,
+                                rect: SkinRect(x: 10, y: 50, w: 20, h: 10)),
+            CandidateSkin.Decor(index: 3, hit: CandidateSkin.hitPass,
+                                flags: CandidateSkin.decorSplit | CandidateSkin.decorUnder,
+                                rect: SkinRect(x: 60, y: 50, w: 20, h: 10)),
+        ])
+        XCTAssertTrue(skin.blocksDrag(px: 5, py: 5))      // block 装饰、窗体外
+        XCTAssertFalse(skin.blocksDrag(px: 15, py: 15))   // block 装饰盖进窗体：窗体内照常拖
+        XCTAssertFalse(skin.blocksDrag(px: 120, py: 15))  // drag 装饰
+        XCTAssertTrue(skin.blocksDrag(px: 15, py: 55))    // 没拆层的 pass 按 block
+        XCTAssertFalse(skin.blocksDrag(px: 65, py: 55))   // 拆层的 pass 不在主窗口上
+        XCTAssertFalse(skin.blocksDrag(px: 200, py: 5))   // 都不在
+        XCTAssertTrue(skin.splitDecorBelow)
+        var off = skin
+        off.flags = 0
+        XCTAssertFalse(off.blocksDrag(px: 5, py: 5))      // 没启用皮肤
+        // 逻辑点：Retina 下除以 2。
+        let half = skin.scaled(by: 2)
+        XCTAssertEqual(half.frame, SkinRect(x: 5, y: 5, w: 50, h: 20))
+        XCTAssertTrue(half.blocksDrag(px: 2, py: 2))
+        XCTAssertFalse(half.blocksDrag(px: 7, py: 7))
+    }
+
+    func testSplitDecorAboveWhenAnyIsOverFrame() {
+        let d = { (flags: UInt32) in
+            CandidateSkin.Decor(index: 0, hit: CandidateSkin.hitPass, flags: flags,
+                                rect: SkinRect(x: 0, y: 0, w: 1, h: 1))
+        }
+        let split = CandidateSkin.decorSplit
+        var skin = CandidateSkin(flags: CandidateSkin.flagActive, decor: [d(split | CandidateSkin.decorUnder), d(split)])
+        XCTAssertFalse(skin.splitDecorBelow)
+        skin.decor = [d(0)]
+        XCTAssertFalse(skin.splitDecorBelow)              // 没有拆层装饰
+    }
 }

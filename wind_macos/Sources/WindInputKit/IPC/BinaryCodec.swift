@@ -626,6 +626,32 @@ public enum BinaryCodec {
         }
         return out
     }
+
+    /// 解 CmdCandidateSkin (0x0514 push): flags(u32) + 窗体 4×i32 + decorN(u32) +
+    /// decorN×(index, hit, flags u32 + 矩形 4×i32，28 字节) + maskN(u32) + maskN×矩形。输入区表不解。
+    public static func decodeCandidateSkinPayload(_ buf: Data) throws -> CandidateSkin {
+        func i32(_ off: Int) -> Int32 { Int32(bitPattern: buf.readUInt32LE(at: off)) }
+        func rect(_ off: Int) -> SkinRect { SkinRect(x: i32(off), y: i32(off + 4), w: i32(off + 8), h: i32(off + 12)) }
+        guard buf.count >= 24 else {
+            throw IPCError.payloadTooShort(expected: 24, got: buf.count)
+        }
+        let n = Int(buf.readUInt32LE(at: 20))
+        guard buf.count >= 24 + n * 28 else {
+            throw IPCError.payloadTooShort(expected: 24 + n * 28, got: buf.count)
+        }
+        var decor: [CandidateSkin.Decor] = []
+        decor.reserveCapacity(n)
+        var off = 24
+        for _ in 0..<n {
+            decor.append(CandidateSkin.Decor(
+                index: buf.readUInt32LE(at: off),
+                hit: buf.readUInt32LE(at: off + 4),
+                flags: buf.readUInt32LE(at: off + 8),
+                rect: rect(off + 12)))
+            off += 28
+        }
+        return CandidateSkin(flags: buf.readUInt32LE(at: 0), frame: rect(4), decor: decor)
+    }
 }
 
 // MARK: - Data little-endian helpers
