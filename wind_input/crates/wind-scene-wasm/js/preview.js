@@ -13,17 +13,40 @@
 // 打包器不分析、不改写这条导入。整个产物目录（preview.js、wind_scene.js、wind_scene_bg.wasm、
 // snippets/）必须作为静态文件原样发布到同一目录下，不能交给打包器拆分或改名。
 //
+// 多实例：每个 AutoPreviewer 首次加载起就导入独立 URL 的胶水（`?instance=N`），各持一份模块与
+// 线性内存。版本：以 `preview.js?v=<VERSION>` 导入本文件时，胶水与 wasm 的 URL 都带上同一个
+// `v`，换版本即换 URL，静态托管可以给 immutable 缓存。（胶水对 snippets/text.js 的静态导入不带 v，
+// text.js 的接口变了要连带改名或换目录。）
+//
 // 用法:
 //   import { AutoPreviewer, PreviewerFailedError } from './preview.js';
 //   const p = await AutoPreviewer.create();             // 或 create({ wasm: bytes | WebAssembly.Module })
 //   await p.setTheme(toml, { 'assets/bg.png': u8 }, 'my-theme');
 //   const { width, height, rgba, nextMs, nodes } = await p.render({ t_ms: now, animate: true });
 //   // nodes: [{ key, x, y, w, h }]，设备像素（同 rgba 坐标，÷ scale 得逻辑像素）
+//   // clamped: 窗口宽过了预览屏（2048 逻辑像素），已按实机截断
+//   // 帧超过 4096 设备像素时抛「帧过大：…」，调用方降 scale 重画
 //   ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
 //   await p.signal('typing');
 // render 返回的是普通对象，wasm 侧的 Frame 已在这里 free。
 
 const GLUE = './wind_scene.js';
+/** 产物版本：本文件 URL 上的 `?v=`（编辑器按 VERSION 加），透传给胶水与 wasm 的 URL，缓存不混版本。 */
+const VERSION = new URL(import.meta.url).searchParams.get('v');
+/**
+ * 全模块的胶水实例计数。每个 AutoPreviewer 的每次（含首次）加载都导入一个独立 URL 的胶水，
+ * 各得一份模块与线性内存：同页两个预览器互不牵连，一个崩了不会让另一个（或之后新建的）
+ * 拿到已损坏的那份。
+ */
+let instances = 0;
+
+/** 带版本与实例号的 URL。 */
+function versioned(path, instance) {
+  const u = new URL(path, import.meta.url);
+  if (VERSION) u.searchParams.set('v', VERSION);
+  if (instance !== undefined) u.searchParams.set('instance', String(instance));
+  return u.href;
+}
 /** 重建预算：这段时间内… */
 export const REBUILD_WINDOW_MS = 10_000;
 /** …至多重建这么多次。 */
@@ -63,7 +86,7 @@ export class AutoPreviewer {
   static async create(opts = {}) {
     const self = new AutoPreviewer();
     self.#onInstance = opts.onInstance ?? null;
-    let wasm = opts.wasm ?? new URL('./wind_scene_bg.wasm', import.meta.url);
+    let wasm = opts.wasm ?? versioned('./wind_scene_bg.wasm');
     if (!(wasm instanceof WebAssembly.Module)) {
       if (typeof wasm === 'string' || wasm instanceof URL) {
         const res = await fetch(wasm);
@@ -73,7 +96,13 @@ export class AutoPreviewer {
       }
     }
     self.#module = wasm;
-    await self.#load();
+    try {
+      await self.#load();
+    } catch (e) {
+      // 首次加载就陷入（如构造 Previewer 时 panic）：同样走受预算约束的重建。
+      if (!isFatal(e)) throw e;
+      await self.#rebuild(e);
+    }
     return self;
   }
 
@@ -89,9 +118,9 @@ export class AutoPreviewer {
       // 损坏的实例连 free 都可能抛，整份模块随之丢弃。
     }
     this.#p = null;
-    // 重建时加查询串：同一 URL 的 ES 模块只实例化一次，换 URL 才拿得到一份全新的模块。
-    const url = this.generation === 0 ? GLUE : `${GLUE}?instance=${this.generation + 1}`;
-    this.#glue = await import(/* @vite-ignore */ new URL(url, import.meta.url).href);
+    // 每次都换实例号：同一 URL 的 ES 模块只实例化一次，换 URL 才拿得到一份全新的模块。
+    instances += 1;
+    this.#glue = await import(/* @vite-ignore */ versioned(GLUE, instances));
     await this.#glue.default({ module_or_path: this.#module });
     this.generation += 1;
     this.#p = new this.#glue.Previewer();
@@ -162,6 +191,7 @@ export class AutoPreviewer {
           rgba: f.rgba,
           nextMs: f.nextMs,
           nodes: JSON.parse(f.nodes),
+          clamped: f.clamped,
         };
       } finally {
         f.free();

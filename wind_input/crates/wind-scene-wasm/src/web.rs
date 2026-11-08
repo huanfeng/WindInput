@@ -115,6 +115,7 @@ pub struct Frame {
     rgba: Vec<u8>,
     next_ms: Option<f64>,
     nodes_json: String,
+    clamped: bool,
 }
 
 #[wasm_bindgen]
@@ -146,6 +147,12 @@ impl Frame {
     #[wasm_bindgen(getter)]
     pub fn nodes(&self) -> String {
         self.nodes_json.clone()
+    }
+
+    /// 窗口宽过了预览屏，按屏幕安全宽钳窄了（与实机一样截断）。
+    #[wasm_bindgen(getter)]
+    pub fn clamped(&self) -> bool {
+        self.clamped
     }
 }
 
@@ -217,6 +224,7 @@ impl Previewer {
             next_ms: f.next_ms,
             nodes_json: serde_json::to_string(&f.nodes)
                 .map_err(|e| JsError::new(&format!("节点矩形序列化失败：{e}")))?,
+            clamped: f.clamped,
         })
     }
 

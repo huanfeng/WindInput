@@ -45,7 +45,13 @@
   串行化，且有预算（10 秒内至多 2 次，每次重建都会永久留下一份模块与线性内存），超了抛 `PreviewerFailedError`，
   编辑器据此退回 Canvas2D 旧实现。W2 走 `AutoPreviewer`；直接用 `Previewer` 时要自己 `frame.free()`。
   `preview.js` 按变量路径动态导入胶水，打包器不分析：整个产物目录须作为静态文件原样发布。
-- 预览当作一块 4096 见方的屏幕（`screen_extent_px`），长注释像实机一样被钳宽截断，只有高度靠尺寸闸。
+  每个 `AutoPreviewer` 从首次加载起就导入独立 URL 的胶水（模块级计数器 `?instance=N`），各持一份模块与线性内存：
+  同页两个预览器互不牵连，一个崩了，之后新建的也不会拿到已损坏的那份；首次加载就陷入同样走受预算约束的重建。
+  以 `preview.js?v=<VERSION>` 导入时，胶水与 wasm 的 URL 带同一个 `v`，换版本即换 URL，缓存不会混用两版 ABI。
+- 预览当作一块 2048 × 2048 **逻辑像素**的屏幕（`screen_extent_px` = 2048 × `scale`），长注释像实机一样被钳宽截断，
+  截不截断与缩放无关（曾按 4096 设备像素定死，放大预览时屏幕在逻辑上变窄、拼音提示先被截掉）；scale > 2 时长内容
+  会撞 4096 的尺寸闸，报「帧过大：」，由调用方降缩放重画。回执的 `clamped` 即实机的屏幕安全宽钳制
+  （`SceneFrame::safety_clamped`）——注意它只表示窗口宽被钳，文字按预算截断（含拼音提示整段丢弃）不一定触发它。
 - 内存资源源：`wind-scene` 加 `assets::MemoryAssets`（相对路径 → `Arc<[u8]>`），`theme_assets` 解析相对引用时
   先查它；不开 wasm 也能用（单测在本机跑）。
 - 对外 API（JSON 进出，便于编辑器侧类型化）：
@@ -64,7 +70,10 @@
 
 ### W2：编辑器接入（WindInputThemeEditor）
 
-- 产物放 `src/lib/preview/wasm/`（检入），`VERSION` 记 WindInput 提交号；`pnpm build:wasm` 调邻仓脚本重建。
+- 产物放 `public/scene-wasm/`（检入），`VERSION` 记 WindInput 提交号；`pnpm build:wasm` 调邻仓脚本重建（脚本先出到
+  暂存目录，冒烟过了才整套替换）。放 public 而不是 `src/`：`src/` 里的 js 会被 Vite 当资源改名，`preview.js` 按相对
+  路径的动态导入就断了；public 下 dev 与 `pnpm build` 都原样发布。编辑器按 `VERSION` 给 URL 加 `?v=`，
+  `scene-wasm/*` 因此可以给 immutable 缓存。WindInput 侧改动合入 main 后要重出一次产物，让 `VERSION` 指向 main 上的提交。
 - 预览组件：异步加载 wasm，成功则用它出 `ImageData` 画到预览画布，否则走旧实现；面板加「预览引擎」显示
   当前用的是哪条（便于报问题）。
 - 主题文本：编辑器已有导出 TOML 的序列化，直接喂 `set_theme`；图片用编辑器内存里的字节，不再转 data: URI。

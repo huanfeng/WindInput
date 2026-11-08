@@ -54,11 +54,12 @@ say "cargo build --profile $PROFILE --target wasm32-unknown-unknown -p wind-scen
 RAW="$TARGET_DIR/wasm32-unknown-unknown/$PROFILE/wind_scene_wasm.wasm"
 [ -f "$RAW" ] || die "没有产物：$RAW"
 
-# 只清本脚本的产物：输出目录可能是编辑器仓里检入的目录，别的文件不动。
-mkdir -p "$OUT"
-rm -rf "$OUT"/wind_scene.js "$OUT"/wind_scene.d.ts "$OUT"/wind_scene_bg.wasm \
-    "$OUT"/wind_scene_bg.wasm.d.ts "$OUT"/snippets "$OUT"/VERSION "$OUT"/preview.js
-say "wasm-bindgen $HAVE --target web → $OUT"
+# 先出到输出目录旁的暂存目录，全部成功（含冒烟）后才替换：中途失败不会留下半套产物。
+FINAL="$OUT"
+mkdir -p "$(dirname "$FINAL")"
+OUT="$(mktemp -d "${FINAL%/}.stage.XXXXXX")"
+trap 'rm -rf "$OUT"' EXIT
+say "wasm-bindgen $HAVE --target web → $OUT（暂存）"
 "$BINDGEN" --target web --out-dir "$OUT" --out-name wind_scene "$RAW"
 WASM="$OUT/wind_scene_bg.wasm"
 cp "$WS/crates/wind-scene-wasm/js/preview.js" "$OUT/preview.js"
@@ -90,3 +91,10 @@ if command -v node >/dev/null 2>&1; then
 else
     printf '未装 node，跳过冒烟\n'
 fi
+
+# 替换：只换本脚本的产物——输出目录可能是编辑器仓里检入的目录，别的文件不动。
+mkdir -p "$FINAL"
+rm -rf "$FINAL"/wind_scene.js "$FINAL"/wind_scene.d.ts "$FINAL"/wind_scene_bg.wasm \
+    "$FINAL"/wind_scene_bg.wasm.d.ts "$FINAL"/snippets "$FINAL"/VERSION "$FINAL"/preview.js
+mv "$OUT"/* "$FINAL"/
+say "产物 → $FINAL"

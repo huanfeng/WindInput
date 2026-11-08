@@ -41,6 +41,12 @@ pub const MAX_TEXT_CHARS: usize = 256;
 pub const MAX_T_MS: f64 = 1e12;
 /// 页码与总页数上限。
 pub const MAX_PAGES: usize = 9999;
+/// 预览当作的屏幕边长（逻辑像素）：设备像素 = 它 × `scale`。按逻辑像素定，换缩放时文字预算
+/// 不变、截不截断与缩放无关；scale > 2 时长内容会撞 [`MAX_SIDE`]，报 [`FRAME_TOO_LARGE`]，
+/// 由调用方降缩放重画。
+pub const SCREEN_DP: u32 = 2048;
+/// 帧超过 [`MAX_SIDE`] / [`MAX_PIXELS`] 时报错的前缀（调用方据此降缩放重试）。
+pub const FRAME_TOO_LARGE: &str = "帧过大：";
 
 /// 一条自定义候选。
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -163,6 +169,8 @@ pub struct Frame {
     pub next_ms: Option<f64>,
     /// 各节点的矩形（先序），供编辑器点选与选中描边。
     pub nodes: Vec<NodeRect>,
+    /// 窗口宽过了预览屏（[`SCREEN_DP`]），按实机的屏幕安全宽钳窄了。
+    pub clamped: bool,
 }
 
 /// 一个节点在帧里的矩形：**设备像素**（与 `rgba` 同一坐标系，含阴影扩边；除以 `scale` 得逻辑
@@ -437,9 +445,12 @@ impl<C: Canvas> Preview<C> {
             theme: &eff.theme,
             base_font_logical: eff.base_font_logical,
             scale: o.scale,
-            // 当作一块 MAX_SIDE 见方的屏幕：长注释像实机一样被钳宽（截断），不撞尺寸闸；
-            // 缺省的兜底安全宽 3000dp × scale 在 scale ≥ 1.4 时就超过 MAX_SIDE。
-            screen_extent_px: Some((MAX_SIDE, MAX_SIDE)),
+            // 当作一块 SCREEN_DP 见方的屏幕（逻辑像素）：长注释像实机一样被钳宽截断，且截断与否
+            // 不随缩放变。按设备像素定死的话，放大预览时屏幕在逻辑上变窄，内容会跟着被截。
+            screen_extent_px: Some({
+                let px = (SCREEN_DP as f32 * o.scale).round() as u32;
+                (px, px)
+            }),
             text_renderer: &self.text,
             opts: &self.scene_opts,
         };
@@ -473,6 +484,7 @@ impl<C: Canvas> Preview<C> {
         let soft_shadow = o.soft_shadow;
         let frame = self.with_input(o, |scene, inp| {
             render_candidate_within(scene, inp, clock, soft_shadow, MAX_SIDE, MAX_PIXELS)
+                .map_err(|e| format!("{FRAME_TOO_LARGE}{e}"))
         })?;
         self.visible = true;
         self.last = o.clone();
@@ -492,6 +504,7 @@ impl<C: Canvas> Preview<C> {
                     h: r.h,
                 })
                 .collect(),
+            clamped: frame.safety_clamped,
         })
     }
 
@@ -811,6 +824,35 @@ mod tests {
             })
             .unwrap();
         assert!(f.width <= MAX_SIDE, "{}", f.width);
+        assert!(f.clamped, "过了预览屏宽");
+    }
+
+    /// 预览屏按逻辑像素定：换缩放不改截断（宽度随缩放等比），放大到撞尺寸闸报 FRAME_TOO_LARGE。
+    #[test]
+    fn screen_is_logical_so_zoom_keeps_content() {
+        let (mut p, _) = preview();
+        let o = |scale: f32| RenderOpts {
+            scale,
+            candidates: vec![CandidateOpt {
+                text: "长".into(),
+                comment: "注".repeat(150),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let one = p.render(&o(1.0)).unwrap();
+        let two = p.render(&o(2.0)).unwrap();
+        assert!(!one.clamped && !two.clamped);
+        // 等比（差的是各处取整）。
+        assert!(
+            (two.width as f32 - one.width as f32 * 2.0).abs() <= one.width as f32 * 0.02,
+            "{} vs {}",
+            one.width,
+            two.width
+        );
+        let e = p.render(&o(4.0)).err().expect("4 倍撞 4096");
+        assert!(e.starts_with(FRAME_TOO_LARGE), "{e}");
+        assert!(p.render(&o(1.0)).is_ok());
     }
 
     /// 主题里的字号走同一道闸。

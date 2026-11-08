@@ -151,6 +151,11 @@ try {
   const before = await a.render({});
   check(before.rgba.length === before.width * before.height * 4, '包装出普通对象');
   check(Array.isArray(before.nodes) && before.nodes[0].key === 'window', '包装解出节点矩形');
+  check(typeof before.clamped === 'boolean', '包装带出 clamped');
+  // 同页第二个预览器：独立的胶水模块与线性内存，互不牵连。
+  const b = await AutoPreviewer.create({ wasm: wasmBytes });
+  check(b.raw.constructor !== a.raw.constructor, '两个预览器各用一份模块');
+  b.free();
   a.raw.render = () => {
     throw new WebAssembly.RuntimeError('unreachable');
   };
