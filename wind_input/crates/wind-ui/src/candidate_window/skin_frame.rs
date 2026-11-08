@@ -816,6 +816,20 @@ mod tests {
         }
     }
 
+    /// 外部宿主的限帧闸门（§17.1）：事件切了画面也等到闸门才醒，不在闸门前空转。
+    #[test]
+    fn event_repaint_waits_for_anim_gate() {
+        let mut w = state_window("sm-gate", vec![(DecorEvent::Typing, DecorAction::State(1))]);
+        w.show();
+        let gate = Instant::now() + Duration::from_secs(5);
+        w.set_anim_gate(gate);
+        w.note_skin_input("a", true, 1, false);
+        assert!(
+            w.next_deadline().is_some_and(|d| d >= gate),
+            "闸门没到就登记了唤醒"
+        );
+    }
+
     #[test]
     fn typing_switches_state_and_repaints() {
         let mut w = state_window(
