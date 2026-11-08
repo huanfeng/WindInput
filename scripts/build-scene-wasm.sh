@@ -5,7 +5,8 @@
 # 用法:
 #   ./scripts/build-scene-wasm.sh [输出目录]
 #     输出目录缺省 $CARGO_TARGET_DIR/scene-wasm（未设则 wind_input/target/scene-wasm）。
-#     产物: wind_scene.js + wind_scene_bg.wasm + *.d.ts + snippets/（text.js）+ VERSION（源提交号）。
+#     产物: preview.js（推荐入口：出错自动重建）+ wind_scene.js + wind_scene_bg.wasm + *.d.ts +
+#           snippets/（text.js）+ VERSION（源提交号）。
 #
 # 依赖:
 #   - rustup target add wasm32-unknown-unknown
@@ -56,10 +57,11 @@ RAW="$TARGET_DIR/wasm32-unknown-unknown/$PROFILE/wind_scene_wasm.wasm"
 # 只清本脚本的产物：输出目录可能是编辑器仓里检入的目录，别的文件不动。
 mkdir -p "$OUT"
 rm -rf "$OUT"/wind_scene.js "$OUT"/wind_scene.d.ts "$OUT"/wind_scene_bg.wasm \
-    "$OUT"/wind_scene_bg.wasm.d.ts "$OUT"/snippets "$OUT"/VERSION
+    "$OUT"/wind_scene_bg.wasm.d.ts "$OUT"/snippets "$OUT"/VERSION "$OUT"/preview.js
 say "wasm-bindgen $HAVE --target web → $OUT"
 "$BINDGEN" --target web --out-dir "$OUT" --out-name wind_scene "$RAW"
 WASM="$OUT/wind_scene_bg.wasm"
+cp "$WS/crates/wind-scene-wasm/js/preview.js" "$OUT/preview.js"
 
 if command -v wasm-opt >/dev/null 2>&1; then
     say "wasm-opt -Oz"
@@ -77,7 +79,7 @@ fi
 size_of() { wc -c < "$1" | tr -d ' '; }
 gz_of() { gzip -9 -c "$1" | wc -c | tr -d ' '; }
 say "体积（字节，gzip -9）："
-for f in "$WASM" "$OUT/wind_scene.js" "$OUT"/snippets/*/js/text.js; do
+for f in "$WASM" "$OUT/wind_scene.js" "$OUT/preview.js" "$OUT"/snippets/*/js/text.js; do
     printf '  %-28s %10s  %10s\n' "${f#"$OUT"/}" "$(size_of "$f")" "$(gz_of "$f")"
 done
 printf '  来源 %s\n' "$(cat "$OUT/VERSION")"
