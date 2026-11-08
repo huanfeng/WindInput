@@ -278,7 +278,7 @@ idle_5s = { state = "idle" }
   macOS `accessibilityDisplayShouldReduceMotion`），关闭时停在 `idle` 首帧。
 - 驱动：在 `manager.rs` 的 `next_deadline` 清单登记下一帧时刻。
 - 重绘：静态部分（窗体 + 文字）缓存成一张底图，换帧只重新合成装饰矩形；P2 拆窗后只刷装饰窗口。
-- macOS / Linux 走 SHM 推帧，帧率减半；后续再评估由前端本地播放。
+- macOS / Linux 走 SHM 推帧，帧率减半（取舍见 §17.1）。
 
 ## 7. 主题包
 
@@ -384,8 +384,8 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
   拖动时一起挪，隐藏时一起收。窗口建不出来就回落为画进候选窗（按 block）。
 - host-render（DLL 侧 HostWindow）、macOS、Linux 仍把穿透装饰画进主缓冲，按 block 处理。
 
-未做：macOS 第二个 panel / 系统阴影、Wayland 输入区、X11 XShape、mac/Linux 的「装饰不拖动」——都要改前端进程，
-随帧协议下发装饰矩形；穿透窗口与候选窗混合 z 序（同时有窗体上、下两类穿透装饰时统一放上面）。
+前端进程这一半（macOS 第二个 panel / 系统阴影、Wayland 输入区、X11 XShape、mac/Linux 的「装饰不拖动」）见 §17。
+未做：穿透窗口与候选窗混合 z 序（同时有窗体上、下两类穿透装饰时统一放上面）。
 
 ## 14. P1b 落点
 
@@ -470,3 +470,122 @@ mode_en = { state = "en" }
 
 关闭：`ui.theme.animation`（缺省 `true`）。关掉或系统关了动画效果时，装饰停在初始状态首帧，事件不再切换。
 设置端在「外观 → 主题」加开关「主题动画」。
+
+## 17. P6 Unix 前端（macOS / Linux）
+
+补齐 §13「未做」里前端进程那一半。macOS 与 Linux 都走 ext_presenter：服务进程光栅化候选窗写 SHM，
+push `CMD_HOST_RENDER_FRAME`（几何 + flags）与 `CMD_CANDIDATE_RECTS`（命中矩形），前端（`.app` /
+Fcitx5 addon）只贴图、落位、转发鼠标。盘点基准 `9f165489`：
+
+| 项 | 现状 |
+|---|---|
+| 动画 | 只显示首帧：非 Windows 的 `system_allows_animation` 恒为 false；forwarder 不 `tick`、不登记换帧；收起时不调 `win.hide()`，P5 的 `hide` 事件与时间轴起点在这条路上都不对 |
+| 穿透装饰 | 按 block 画进主缓冲 |
+| 装饰不拖动 | macOS：命中表外一律起拖。Linux：候选窗本来就不能拖（`wind_linux/AGENTS.md`「候选窗拖动 未接」），装饰不在命中表里，点上去既不选词也不悬停，已等同 block |
+| 输入区 | X11 ARGB 路径候选窗整个矩形接鼠标（浮层才按 alpha 设 `SK_INPUT`），皮肤的透明外扩区也挡点击；无合成器路径按 alpha≥128 抠 `BOUNDING`。Wayland 是候选窗整块矩形。macOS 非不透明窗口按 alpha 自动穿透 |
+| macOS 阴影 | `hasShadow = true`，按整窗 alpha 投影：皮肤自带阴影，再叠一层系统阴影，装饰也被投影 |
+
+### 17.1 动画：协议推帧，不做前端本地播放
+
+| | 推帧（采用） | 前端本地播放 |
+|---|---|---|
+| CPU | 每帧服务端整帧重排重绘（Windows P4 实测 ≈0.3%），前端多贴一次图 | 前端只合成装饰矩形，最省 |
+| 带宽 | 15 帧/秒 × 典型 600×240×4 ≈ 8.6 MB/s 本机内存拷贝；Retina 2× 为 4 倍。SHM 上限 4 MB 不变 | 加载时一次性传帧集（每主题至多 24 MiB） |
+| 实现量 | 服务端接上现成的 `next_deadline` / `tick`；前端只认一个新 flag | 底图要拆三层（z < 0 / 窗体与内容之间 / ≥ 100），帧集要另开 SHM 段；状态机（§16 的事件、`idle_<N>s`）在服务端，前端还要收状态切换；C++ X11、C++ Wayland、Swift 三份实现 |
+
+结论：推帧，帧率上限 **15**（Windows 上限 30 的一半）。时间轴仍是经过时间对总时长取模（§15），
+限帧只是跳过中间帧，不漂移。靶机 CPU 不达标再评估本地播放，本期不做。
+
+- forwarder 每轮 `win.tick()`，主循环睡到 `win.next_deadline()`（与限帧闸门取较晚者）；macOS 的主循环
+  也改成按 deadline 醒（原先只等命令）。
+- 换帧走 `repaint_anim_frame`：不重推 tooltip、不重报候选窗矩形给状态气泡。
+- 帧 flags 新增 `FLAG_ANIM_FRAME = 0x0010`：内容没变、只换装饰像素。前端照原位贴图，不重新落位、
+  不重排 z 序（X11 不 raise——否则每帧压住 tooltip 与菜单；macOS 不 `invalidateShadow`）。旧前端忽略此位，
+  按普通帧处理。
+- 候选窗收起时调 `win.hide()`：动画停（不登记唤醒），`hide` 事件照 §16 生效，下次显示时间轴从头。
+- 减少动态效果：macOS 读 `com.apple.universalaccess` 的 `reduceMotion`（CFPreferences；服务进程不链
+  AppKit，`accessibilityDisplayShouldReduceMotion` 用不了）。Linux 没有统一可靠的来源（GNOME 的
+  `enable-animations` 要起进程或连 dconf，KDE 另一套），恒为开，只受 `ui.theme.animation` 控制。
+
+### 17.2 协议：`CMD_CANDIDATE_SKIN`（0x0514，push）
+
+每个候选帧（含换帧）在 `CMD_CANDIDATE_RECTS` 之后推一条，没启用皮肤时也推（`flags = 0`、两表为空），
+前端据此复位。两端前端对未知 cmd 都落 `default` 安静忽略，旧前端不受影响。坐标同 `CMD_CANDIDATE_RECTS`：
+缓冲内的设备像素，macOS / Wayland 前端除以 scale。
+
+```
+flags     u32      bit0 ACTIVE 本帧启用了皮肤；bit1 MASK 带输入区表
+frame     4×i32    窗体矩形 x, y, w, h
+decorN    u32
+decorN ×  { index u32   变体 decor 下标（与 §16 状态机同号）
+            hit   u32   0 drag | 1 block | 2 pass
+            flags u32   bit0 UNDER（z < 0）；bit1 SPLIT（穿透装饰画在独立层，不在主缓冲）
+            x, y, w, h  4×i32 }                            每条 32 字节
+maskN     u32
+maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
+```
+
+- **输入区**（只 Linux 发，`MASK` 置位）：主层（不含穿透装饰）alpha > 0 的像素——与 Windows layered
+  窗口的命中口径一致。逐行取不透明游程成矩形，相邻行游程完全相同的纵向合并；圆角窗体约几十个，
+  人物装饰按其高度每行一两个。超过 **1024** 个时退化为「窗体矩形 ∪ 非穿透装饰矩形」（仍置 `MASK`，
+  表即退化结果），并 debug 一条。
+- 穿透装饰在 Linux 仍画进同一张位图（按 Windows 的统一 z 规则：全在窗体下则垫在主层下面，否则叠在上面），
+  只是不进输入区。macOS 拆到独立层（`SPLIT`），见 §17.3。
+- 不拖动的判定在前端做：`block` 装饰矩形（及没拆出去的 `pass`）内、窗体矩形外 → 不起拖。`drag` 装饰照常起拖。
+  `index` / `UNDER` 先带上，供以后在前端判 `click` 事件（本期不报，见 §17.6）。
+
+### 17.3 各平台
+
+**X11**（`X11Panel`）
+- 收到 `MASK`：候选窗 `SK_INPUT` 设为输入区表（ARGB 与无合成器两条路都设；无合成器时 `BOUNDING` 照旧按
+  alpha ≥ 128 抠形，生效输入区是两者之交）。之后没有 `MASK`（换回普通主题）就把 `SK_INPUT` 复位成缺省
+  （`xcb_shape_mask(..., XCB_NONE)`），恢复整窗接鼠标。窗口重建（合成器起停换 visual）后补设一次。
+- 换帧（`FLAG_ANIM_FRAME`）：沿用上次落位，`present` 不 raise。
+- 候选窗不能拖（现状），装饰不拖动自然成立；`drag` 装饰在 Linux 上与 `block` 一样。
+
+**Wayland**（`WaylandPanel`）
+- 输入区 = 输入区表 ÷ scale，另并上状态气泡矩形（现状）；没有 `MASK` 时照旧是候选窗整块矩形。
+  `wl_surface.set_input_region` 是核心协议，所有合成器都认；KWin 的 input-method-v1 面板走同一条
+  `attachPixels`。popup 由合成器摆位，不能拖。
+
+**macOS**（`CandidatePanel`）
+- 穿透装饰拆到独立层：服务端主缓冲不画 `pass`（主层 alpha 为 0 处窗口天然穿透），穿透装饰另画一张同尺寸
+  位图，写 SHM 段 `_DEC`、推 `CMD_OVERLAY_FRAME`（新层 `OVERLAY_KIND_DECOR = 12`，`OVERLAY_PLACE_EXACT`，
+  坐标即候选窗建议落点）。`.app` 不交给 `OverlayHost`，而是挂在候选窗上的子 panel
+  （`addChildWindow(_:ordered:)`，全在窗体下用 `.below`，否则 `.above`）：`ignoresMouseEvents = true`、
+  `hasShadow = false`、同原点同尺寸，随候选窗拖动与显隐。本帧没有穿透装饰就推该层的隐藏帧。
+- 系统阴影：`ACTIVE` 时主 panel `hasShadow = false`（皮肤阴影由图自带，§3.1），否则照旧开。
+- 装饰不拖动：`mouseDown` 落在不拖动区（§17.2）不起拖，按下与松开都不动作。
+
+### 17.4 降级
+
+| 情形 | 行为 |
+|---|---|
+| X11 无 SHAPE 扩展 | 输入区设不了，整窗接鼠标：穿透装饰按 block，透明外扩区也挡点击（与现状同），启动时记一条 |
+| X11 无合成器 | `BOUNDING` 按 alpha ≥ 128（半透明退化，现状），`SK_INPUT` 照设 |
+| 输入区矩形超上限 | 退化为矩形并集（§17.2） |
+| macOS 子 panel 来不及收到像素 | 主层不含穿透装饰，最坏是那一帧看不到穿透装饰，不会挡点击 |
+| 旧前端 + 新服务 | 新 cmd、新 flag、新层都被忽略：Linux 穿透按 block；macOS 看不到穿透装饰（主层已不画它）——`.app` 与服务同包发布、须一起装，不另做兼容 |
+| 新前端 + 旧服务 | 收不到新 cmd，行为同改前 |
+
+### 17.5 测试
+
+- Rust 原生单测：`wind-ipc` 的 `encode_candidate_skin` 字节布局；`wind-scene` 输入区游程合并（圆角、
+  纵向合并、上限退化、穿透装饰不进表）；`wind-ui`（`linux-host` feature 下的 forwarder 单测）：皮肤帧带
+  `CMD_CANDIDATE_SKIN`，普通主题 `flags = 0`；动画按 deadline 推帧、相邻两帧间隔 ≥ 66 ms、帧带
+  `FLAG_ANIM_FRAME`、换帧不重推 tooltip、收起后不再唤醒。
+- C++ 单测（`make -C wind_linux test`）：`codec_test` 按 Rust 编码器写死的偏移解码；`protocol_sync_test` 钉新
+  cmd / flag / 层；输入区换算纯函数（无皮肤回退整窗、Wayland 缩放、空表）。
+- e2e（本机 Xvfb，`scripts/linux/e2e.sh`）：程序生成的皮肤主题（窗体 + 右上外侧穿透装饰 + 左上外侧
+  block 装饰），打字后 `xdotool mousemove` 到穿透装饰上，`getmouselocation` 报的窗口不是候选窗，挪到
+  窗体上是候选窗；动图装饰（程序生成的两帧 APNG）在候选窗显示期间 `xwd -id` 两次截图不同。
+- macOS：Rust 部分 `cargo check --target aarch64-apple-darwin`；Swift 本机编不了，只能 CI 的 macOS job
+  与真机，判据见报告。
+- 关键逻辑在 `git archive` 导出的副本上做变异验证。
+
+### 17.6 本期不做
+
+- 前端上报装饰 `click`（§16 的事件）：要新增上行消息；协议里先带了 `index` / `UNDER`。
+- Linux 候选窗拖动（与皮肤无关的既有差距）。
+- Linux 的系统「减少动态效果」探测。
+- 前端本地播放动画（§17.1）。
