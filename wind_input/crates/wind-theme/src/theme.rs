@@ -102,20 +102,34 @@ pub fn is_plain_slug(s: &str) -> bool {
         && !s.ends_with(['.', ' '])
         && !lower.ends_with(".wtheme-tmp")
         && !lower.ends_with(".wtheme-old")
-        && !s
-            .split('~')
-            .skip(1)
-            .any(|t| t.starts_with(|c: char| c.is_ascii_digit()))
+        && !looks_like_8dot3(s)
         && !is_windows_reserved_name(s)
         && !s
             .chars()
             .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
 }
 
+/// 是否 Windows 8.3 短名形态（`VERYLO~1`、`AB~12.TOM`）：主名 ≤ 8、扩展名 ≤ 3，
+/// 全 ASCII，主名以 `~数字` 结尾且前面非空。只拦这种形态——它可能是另一个长名目录的别名；
+/// `Theme~2 Dark` 这类长名不受影响，免得已有主题变成列不出、删不掉的孤儿。
+fn looks_like_8dot3(s: &str) -> bool {
+    let (stem, ext) = s.split_once('.').unwrap_or((s, ""));
+    s.is_ascii()
+        && stem.len() <= 8
+        && ext.len() <= 3
+        && !ext.contains('.')
+        && stem.rsplit_once('~').is_some_and(|(head, digits)| {
+            !head.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
 /// 从显示名派生主题 id（调用方没给 slug 时用）：路径分隔符、`:`、控制字符与 8.3 短名
 /// 里的 `~` 换成 `-`，`..` 折成 `-`，去掉首尾空白与末尾的点、空格；仍不合法（保留名之类）
 /// 加 `theme-` 前缀，再不行或为空就用 `theme`。本就合法的名字原样返回。
 pub fn slug_from_name(name: &str) -> String {
+    if is_plain_slug(name.trim()) {
+        return name.trim().to_string();
+    }
     let mut chars = name.trim().chars().peekable();
     let mut s = String::new();
     while let Some(c) = chars.next() {
@@ -495,6 +509,10 @@ mod tests {
             "~",
             "conin",
             "x.wtheme",
+            "a~12b",
+            "Theme~2 Dark",
+            "longname~1",
+            "清风~1",
         ] {
             assert!(is_plain_slug(ok), "{ok}");
         }
@@ -521,7 +539,8 @@ mod tests {
             "COM¹",
             "lpt³",
             "VERYLO~1",
-            "a~12b",
+            "AB~12.TOM",
+            "theme~1",
             "x.wtheme-tmp",
             "x.WTHEME-OLD",
         ] {

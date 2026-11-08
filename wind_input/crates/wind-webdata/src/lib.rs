@@ -3881,13 +3881,28 @@ pub trait WebDataRpc: WebDataHost {
     /// result 字段而非 error 通道——error 通道只有一个 String，客户端只能靠匹配文案来认
     /// 冲突，改一次文案，设置端的覆盖确认就会静默退化成一条普通报错（没有任何测试或编译
     /// 期检查看得见这种耦合）。
-    fn theme_conflict_json(theme_id: &str, display_name: &str) -> Value {
+    /// 撞目录的回执。文案用**已有**主题的显示名：id 从显示名派生后，不同名字可能落到
+    /// 同一目录（`a/b` 与 `a-b`），只报新名字会让用户不知道覆盖的是谁。
+    fn theme_conflict_json(theme_id: &str, display_name: &str, target: &std::path::Path) -> Value {
+        let existing = std::fs::read_to_string(target.join("theme.toml"))
+            .ok()
+            .and_then(|t| wind_theme::meta_from_text(&t))
+            .map(|m| m.name)
+            .filter(|n| !n.trim().is_empty());
+        let error = match &existing {
+            Some(old) if old != display_name => {
+                format!("已有主题「{old}」占用同一目录，导入「{display_name}」会覆盖它")
+            }
+            Some(old) => format!("主题「{old}」已存在"),
+            None => format!("主题目录「{theme_id}」已存在"),
+        };
         json!({
             "ok": false,
             "conflict": true,
             "slug": theme_id,
             "display_name": display_name,
-            "error": format!("主题「{display_name}」已存在"),
+            "existing_name": existing,
+            "error": error,
         })
     }
 
@@ -3927,7 +3942,7 @@ pub trait WebDataRpc: WebDataHost {
         let file = target.join("theme.toml");
         let existed_before = file.exists();
         if existed_before && !force {
-            return Ok(Self::theme_conflict_json(&theme_id, &meta.name));
+            return Ok(Self::theme_conflict_json(&theme_id, &meta.name, &target));
         }
         // 覆盖已存在主题前备份原文本，供依赖链校验失败时回滚。
         let backup = if existed_before {
@@ -4005,7 +4020,11 @@ pub trait WebDataRpc: WebDataHost {
         let preview = wind_transfer::theme::preview_package(package)?;
         let (theme_id, target) = self.theme_target_dir(params, &preview.display_name)?;
         if target.exists() && !force {
-            return Ok(Self::theme_conflict_json(&theme_id, &preview.display_name));
+            return Ok(Self::theme_conflict_json(
+                &theme_id,
+                &preview.display_name,
+                &target,
+            ));
         }
 
         // 依赖链校验交给 transfer 的校验回调：它要在新目录**已就位、旧目录还没删**的

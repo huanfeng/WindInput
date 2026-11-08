@@ -158,6 +158,26 @@ fn import_ids_cannot_escape_user_theme_dir() {
     assert_eq!(ok["display_name"], json!("Nord: Dark"), "{ok}");
     assert!(themes.join("Nord- Dark/theme.toml").exists());
 
+    // ⑤b 两个显示名派生到同一 id（`Nord: Dark` 与 `Nord/ Dark` 都成 `Nord- Dark`）、不强制：
+    //     报冲突不覆盖，文案点出被占目录里**已有**主题的名字。
+    let p = json!({ "yaml": "[meta]\nname = \"Nord/ Dark\"\n", "force": false });
+    let again = coord
+        .web_data_rpc("theme.importFromText", &p)
+        .expect("冲突走回执");
+    assert_eq!(again["conflict"], json!(true), "{again}");
+    assert_eq!(again["slug"], json!("Nord- Dark"), "{again}");
+    assert_eq!(again["existing_name"], json!("Nord: Dark"), "{again}");
+    assert!(
+        again["error"].as_str().unwrap().contains("Nord: Dark"),
+        "{again}"
+    );
+    assert!(
+        std::fs::read_to_string(themes.join("Nord- Dark/theme.toml"))
+            .unwrap()
+            .contains("Nord: Dark"),
+        "不强制时不该覆盖"
+    );
+
     // ⑥ 包导入：package.toml 的 name 穿越、base 合法（依赖校验通过，走成功分支）。
     //    落到主题目录内的派生 id；受害目录不被挪走（不留 victim.wtheme-old），内容原样。
     let pkg = tmp.join("evil.wtheme");
