@@ -1614,7 +1614,11 @@ impl Coordinator {
                 let Ok(id) = e.file_name().into_string() else {
                     continue;
                 };
-                if id.starts_with('_') || !dir.join(&id).join("theme.toml").exists() {
+                // 非普通 slug 的目录（旧版在 Linux/mac 上建出的尾随空格/点之类）列出来也选不了。
+                if id.starts_with('_')
+                    || !wind_theme::is_plain_slug(&id)
+                    || !dir.join(&id).join("theme.toml").exists()
+                {
                     continue;
                 }
                 // 定制版 `[themes] hide` 删掉的主题：在本定制版里**不存在**（见
@@ -1654,7 +1658,10 @@ impl Coordinator {
                     let Ok(id) = e.file_name().into_string() else {
                         continue;
                     };
-                    if id.starts_with('_') || !udir.join(&id).join("theme.toml").exists() {
+                    if id.starts_with('_')
+                        || !wind_theme::is_plain_slug(&id)
+                        || !udir.join(&id).join("theme.toml").exists()
+                    {
                         continue;
                     }
                     // hide 是**绝对**的：用户层放一个同名主题也不会让它复活（见

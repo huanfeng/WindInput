@@ -156,23 +156,10 @@ pub fn validate_entry_rel(name: &str, required_prefix: &str) -> anyhow::Result<S
 }
 
 /// 路径段能否在 Windows 上按原名落盘：拒绝空段（`a//b`）、尾随点或空格（Win32 会悄悄
-/// 截掉，落成另一个名字）、设备保留名（`CON`、`NUL.png`、`COM1` 之类，按首个 `.` 前的
-/// 部分比较，不分大小写）。
+/// 截掉，落成另一个名字）、设备保留名（与主题 id 共用
+/// [`wind_theme::is_windows_reserved_name`]）。
 fn windows_safe_segment(seg: &str) -> bool {
-    if seg.is_empty() || seg.ends_with('.') || seg.ends_with(' ') {
-        return false;
-    }
-    let stem = seg
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .trim_end()
-        .to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.len() == 4
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
-    !reserved
+    !seg.is_empty() && !seg.ends_with(['.', ' ']) && !wind_theme::is_windows_reserved_name(seg)
 }
 
 /// 免全解压读取并校验 manifest.toml。
@@ -325,6 +312,9 @@ mod tests {
             "frame.png ",
             "assets./x.png",
             "a//b",
+            "CONIN$",
+            "assets/conout$.txt",
+            "assets/COM².png",
         ] {
             assert!(validate_entry_rel(bad, "").is_err(), "{bad} 该被拒");
         }

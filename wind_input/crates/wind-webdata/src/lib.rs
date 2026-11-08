@@ -3830,7 +3830,9 @@ pub trait WebDataRpc: WebDataHost {
     /// 只有在用户那边表现为「导入成功却哪儿都找不到」。
     ///
     /// - 传了 `slug`（主题唯一 id）：目录已存在则就地写回（不新建），否则以 slug 建目录；
-    /// - 未传（兼容旧客户端）：退回按 `meta.name` 建目录。
+    ///   slug 不合法直接报错；
+    /// - 未传（设置端的粘贴 / 文件 / 链接 / 包导入都不传）：从显示名（`meta.name` / 包名）
+    ///   派生合法 id（[`wind_theme::slug_from_name`]），「Nord: Dark」「黑/白」也导得进来。
     ///
     /// 定制版 `[themes] hide` 掉的 id **当场拒掉，不给成功回执**：hide 是绝对的（用户层
     /// 同名主题也不复活，见 `Config::custom_hides_theme` 的取舍说明），而导入是用户唯一
@@ -3846,17 +3848,22 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
         // ⚠️ id 来自调用方（slug）或主题文本自身（meta.name / package 的 name），都不可信，
         // 落盘前必须是普通名字：不然 `../../x`、绝对路径、`C:x` 会让目标跳出用户主题目录，
-        // 而导入失败的回滚会对目标做 remove_dir_all。给了不合法的 slug 也报错，不再静默
-        // 退回用显示名。
-        let theme_id = params
+        // 而导入失败的回滚会对目标做 remove_dir_all。显示名只是名字，派生成合法 id；
+        // 给了不合法的 slug 则报错，不再静默退回用显示名。
+        let theme_id = match params
             .get("slug")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| fallback_name.trim())
-            .to_string();
+        {
+            Some(slug) => slug.to_string(),
+            None => wind_theme::slug_from_name(fallback_name),
+        };
         if !wind_theme::is_plain_slug(&theme_id) {
-            anyhow::bail!("主题 id「{theme_id}」不合法：不能含路径分隔符、盘符或「..」");
+            anyhow::bail!(
+                "主题 id「{theme_id}」不合法：不能含路径分隔符、盘符、「..」或 8.3 短名「~数字」，\
+                 不能以点或空格结尾，也不能是 Windows 保留名（CON、AUX、NUL、COM1 等）"
+            );
         }
         if wind_config::Config::custom_hides_theme(&theme_id) {
             anyhow::bail!("本定制版已移除主题 id「{theme_id}」，该 id 不可用；请换一个 id 再导入");
@@ -4033,10 +4040,11 @@ pub trait WebDataRpc: WebDataHost {
     /// 落点由调用方给全路径（与 `scheme.exportPackage` 同形）：core 不猜「导到哪」，
     /// 那是设置端的文件对话框与 CLI 的参数各自该管的事。
     ///
-    /// ⚠️ `path` **不做任何校验**，这条成立的前提是这条 RPC 只经本机 ctrl 通道由设置端
-    /// 与 CLI 调用、不对外暴露。哪天这条链上多一个远程或网页入口，它连同下面的
-    /// `create_dir_all(parent)` 就是一个任意写——**那时必须先加落点白名单再接入**，
-    /// 而不是指望「现在没人远程调」。
+    /// ⚠️ `path` **不做任何校验**，这条成立的前提是 `path` 永远不由网页或远端决定：
+    /// 这条 RPC 只经本机 ctrl 通道调用——设置端「导出…」的路径来自原生保存框，CLI 来自
+    /// 命令行参数；设置端的主题编辑器连接（本机网页的出包路由）也调用它，但 `path` 是
+    /// 设置端在自己的私有临时目录里以独占方式（O_EXCL）新建的文件，网页只给得了 slug。
+    /// 哪天要让网页或远端影响 `path`，它就是一个任意写——**那时必须先加落点白名单**。
     fn web_theme_export_package(&self, params: &Value) -> anyhow::Result<Value> {
         let slug = str_param(params, "slug")?;
         let out = str_param(params, "path")?;

@@ -1,12 +1,14 @@
 //! 主题导入的 id 不能跳出用户主题目录。
 //!
-//! id 来自调用方的 slug 或主题自己的 meta.name，都不可信。曾经 `meta.name = "../../victim"`
+//! id 来自调用方的 slug 或主题自己的 meta.name / 包名，都不可信。曾经 `meta.name = "../../victim"`
 //! 会让目标落到主题目录外，依赖校验失败后的回滚再对它 `remove_dir_all`——整个目录被删。
+//! 没给 slug 时 id 从显示名派生成普通名字；给了不合法的 slug 直接报错。
 //!
 //! ⚠️ 全文件仅此一个 `#[test]`：`Config::user_config_dir()` 走 `WIND_DATADIR_CONF` 且内部
 //! OnceLock 缓存，env 必须在任何初始化之前就位（同 `theme_import_conflict.rs`）。
 
 use serde_json::json;
+use std::io::Write;
 use std::path::Path;
 use wind_config::Config;
 use wind_coordinator::Coordinator;
@@ -16,6 +18,30 @@ fn write_at(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(&p, body).unwrap();
+}
+
+/// 手工打一个主题包（package.toml 的 name 可以随便写，export_package 写不出穿越名）。
+fn write_package(path: &Path, package_name: &str, theme_text: &str) {
+    let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    let opts = zip::write::SimpleFileOptions::default();
+    let meta =
+        format!("[package]\nformat_version = 1\nkind = \"theme\"\nname = \"{package_name}\"\n");
+    w.start_file("package.toml", opts).unwrap();
+    w.write_all(meta.as_bytes()).unwrap();
+    w.start_file("theme.toml", opts).unwrap();
+    w.write_all(theme_text.as_bytes()).unwrap();
+    w.finish().unwrap();
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
 }
 
 #[test]
@@ -63,15 +89,34 @@ fn import_ids_cannot_escape_user_theme_dir() {
         coord.web_data_rpc("theme.importFromText", &p)
     };
 
-    // ① meta.name 穿越、不给 slug：必须报错，受害目录一个字节不动。
-    for name in ["../../victim", "../../../b/victim", "..\\..\\victim"] {
-        let r = import(bad_base(name), None);
-        assert!(r.is_err(), "穿越的 meta.name 必须被拒：{name} → {r:?}");
+    let themes = user.join("themes");
+    let err = |r: anyhow::Result<serde_json::Value>| format!("{:#}", r.expect_err("应报错"));
+
+    // ① meta.name 穿越、不给 slug：id 派生成普通名字留在主题目录内，依赖校验失败的回滚
+    //    只删这个新建的派生目录；受害目录一个字节不动。
+    // 反斜杠在 TOML 基本字符串里要转义，`..\\\\..` 落到 meta.name 里是 `..\..`。
+    for name in ["../../victim", "../../../b/victim", "..\\\\..\\\\victim"] {
+        let e = err(import(bad_base(name), None));
+        assert!(e.contains("依赖校验失败"), "{name} → {e}");
     }
+    assert!(
+        names_in(&themes).is_empty(),
+        "派生目录回滚后不该留下：{:?}",
+        names_in(&themes)
+    );
     // ② 不合法的 slug 不再静默退回显示名，直接报错。
-    for slug in ["../victim", "C:x", "a:b", "x.", "CON", "/abs"] {
-        let r = import(bad_base("正常名字"), Some(slug));
-        assert!(r.is_err(), "不合法的 slug 必须被拒：{slug} → {r:?}");
+    for slug in [
+        "../victim",
+        "C:x",
+        "a:b",
+        "x.",
+        "CON",
+        "/abs",
+        "VERYLO~1",
+        "x.wtheme-old",
+    ] {
+        let e = err(import(bad_base("正常名字"), Some(slug)));
+        assert!(e.contains("不合法"), "不合法的 slug 必须被拒：{slug} → {e}");
     }
     assert!(victim.join("keep.txt").exists(), "受害目录的文件被删了");
     assert!(
@@ -95,14 +140,47 @@ fn import_ids_cannot_escape_user_theme_dir() {
     );
 
     // ④ 正向对照：合法 id 照常导入；新建目录在校验失败时整个撤掉。
-    let ok = import("[meta]\nname = \"我的\"\n".into(), Some("mine")).expect("合法导入");
+    //    slug 两端的空白不算 id 的一部分。
+    let ok = import("[meta]\nname = \"我的\"\n".into(), Some("  mine  ")).expect("合法导入");
     assert_eq!(ok["ok"], json!(true), "{ok}");
+    assert_eq!(ok["slug"], json!("mine"), "{ok}");
     assert!(user.join("themes/mine/theme.toml").exists());
     let r = import(bad_base("新的"), Some("fresh"));
     assert!(r.is_err());
     assert!(
         !user.join("themes/fresh").exists(),
         "本次新建的目录在回滚时应删掉"
+    );
+
+    // ⑤ 不给 slug、显示名含 `:`（设置端的粘贴 / 文件 / 链接导入都这样调）：派生 id 导入成功。
+    let ok = import("[meta]\nname = \"Nord: Dark\"\n".into(), None).expect("显示名派生 id");
+    assert_eq!(ok["slug"], json!("Nord- Dark"), "{ok}");
+    assert_eq!(ok["display_name"], json!("Nord: Dark"), "{ok}");
+    assert!(themes.join("Nord- Dark/theme.toml").exists());
+
+    // ⑥ 包导入：package.toml 的 name 穿越、base 合法（依赖校验通过，走成功分支）。
+    //    落到主题目录内的派生 id；受害目录不被挪走（不留 victim.wtheme-old），内容原样。
+    let pkg = tmp.join("evil.wtheme");
+    write_package(
+        &pkg,
+        "../../victim",
+        "base = \"default\"\n[meta]\nname = \"x\"\n",
+    );
+    let p = json!({ "path": pkg.to_string_lossy(), "force": true });
+    let ok = coord
+        .web_data_rpc("theme.importPackage", &p)
+        .expect("穿越的包名派生成普通 id 后照常导入");
+    assert_eq!(ok["ok"], json!(true), "{ok}");
+    let id = ok["slug"].as_str().unwrap().to_string();
+    assert!(wind_theme::is_plain_slug(&id), "{id:?}");
+    assert!(themes.join(&id).join("theme.toml").exists(), "{id:?}");
+    let victim_parent = victim.parent().unwrap();
+    assert!(!victim_parent.join("victim.wtheme-old").exists());
+    assert!(!victim_parent.join("victim.wtheme-tmp").exists());
+    assert_eq!(names_in(&victim), ["keep.txt", "sub"], "受害目录被改动");
+    assert_eq!(
+        std::fs::read_to_string(victim.join("keep.txt")).unwrap(),
+        "keep"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
