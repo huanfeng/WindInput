@@ -38,7 +38,7 @@ constexpr uint16_t CMD_KEY_RELEASE = 0x0511;
 constexpr uint16_t CMD_KEY_TYPE = 0x0512;
 /// 光栅浮层帧（状态气泡 / Toast / tooltip / 菜单），macOS `.app` 与 Linux addon 共用。布局见 Codec.h `OverlayFramePayload`。
 constexpr uint16_t CMD_OVERLAY_FRAME = 0x0513;
-/// 候选窗异形皮肤的区域（窗体 / 装饰矩形与鼠标策略 / 输入区），每个候选帧在 CMD_CANDIDATE_RECTS 之后一条。
+/// 候选窗异形皮肤的区域（窗体 / 装饰矩形与鼠标策略 / 输入区），每个候选帧先于 CMD_HOST_RENDER_FRAME 一条。
 /// 布局见 Codec.h `CandidateSkin`。
 constexpr uint16_t CMD_CANDIDATE_SKIN = 0x0514;
 

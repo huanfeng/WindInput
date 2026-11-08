@@ -1218,6 +1218,13 @@ void WindEngine::onPushFrame(Frame frame)
         hideCandidate();
         panel_->hideAllOverlays();
         hideAllWayland();
+        // 皮肤区域也是旧服务的：复位成「没皮肤」，新服务的第一帧之前自会再推。
+        panel_->setSkin(CandidateSkin{});
+#ifdef WIND_HAVE_WAYLAND
+        if (wlPanel_) {
+            wlPanel_->setSkin(CandidateSkin{});
+        }
+#endif
         // 工具栏 / 软键盘是旧连接上推来的：丢掉。服务端在 push 连接（重）建立时按自己的状态
         // 重推可见的那几层（新服务没有可见面板，同一服务换了连接则原样补回）。
         hidePanels();
@@ -1340,8 +1347,10 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     }
     wlPanel_->hide();
 #endif
-    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0,
-                 (p.flags & FRAME_FLAG_ANIM_FRAME) != 0);
+    // 换帧只对它自己那一帧成立：SHM 里已是更新的一帧（seq 对不上）时按普通帧贴，免得新内容、
+    // 新尺寸被当成「原位不动」。
+    const bool anim = (p.flags & FRAME_FLAG_ANIM_FRAME) != 0 && f.sequence == p.seq;
+    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0, anim);
 }
 
 void WindEngine::hideAllWayland()

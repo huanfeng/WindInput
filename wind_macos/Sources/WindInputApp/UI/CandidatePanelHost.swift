@@ -476,13 +476,15 @@ public final class CandidatePanelHost {
             // 服务（重）连：服务进程重启会 shm_unlink + 重建 SHM 段（新 inode），本进程旧 mmap
             // 变成孤立旧段 → 候选窗卡在旧帧不刷新。收到 SERVICE_READY 即强制重开 SHM reader，
             // 下一帧按名重开拿到新段，无需重装/重启 .app。
-            lock.lock(); reader?.closeReader(); reader = nil; lock.unlock()
+            // 皮肤区域与穿透装饰层也是旧服务的：复位，新服务的第一帧之前自会再推。
+            lock.lock(); reader?.closeReader(); reader = nil; latestSkin = CandidateSkin(); lock.unlock()
             // 新服务没有「减少动态效果」的上报值，重报一次。
             reportReduceMotion()
             // 各浮层的 SHM 段同样被重建; 开着的菜单也随旧服务一并作废。
             DispatchQueue.main.async { [weak self] in
                 self?.lastSuggestedWire = nil
                 self?.decorReader?.closeReader(); self?.decorReader = nil
+                self?.panel.setDecor(image: nil)
                 self?.overlays.serviceRestarted()
             }
         case DownstreamCmd.overlayFrame:
@@ -600,7 +602,8 @@ public final class CandidatePanelHost {
         let pt = NSPoint(x: CGFloat(p.x), y: CGFloat(p.y))
         let useSoftwareShadow = frame.hasSoftwareShadow
         let absolute = p.isAbsolutePos
-        let anim = p.isAnimFrame
+        // 换帧只对它自己那一帧成立：SHM 里已是更新的一帧 (seq 对不上) 时按普通帧贴。
+        let anim = p.isAnimFrame && frame.sequence == p.seq
         lock.lock()
         currentScale = scale
         let rects = Self.scaleRects(latestRects, by: scale)
@@ -626,11 +629,10 @@ public final class CandidatePanelHost {
             decorReader = try? SharedMemoryReader(name: OverlayHost.shmName(for: OverlayKind.decor),
                                                   size: 4 * 1024 * 1024)
         }
-        // 取到的若是更新的一帧 (尺寸不符)，这次放弃：它自己的通知随后就到。
+        // 取到的若是更新的一帧 (尺寸不符)，这次放弃、保留现有画面：它自己的通知随后就到。
         guard let snap = decorReader?.snapshot(),
               snap.width == Int(f.width), snap.height == Int(f.height),
               let img = Self.makeNSImage(from: snap, scale: CGFloat(max(f.scale, 1))) else {
-            panel.setDecor(image: nil)
             return
         }
         panel.setDecor(image: img)

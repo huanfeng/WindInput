@@ -428,6 +428,10 @@ bool X11CandidatePanel::present(Surface& s, const SharedFrame& f, const Rect& r,
         // 整个矩形都收指针，同 Windows 上 alpha=1 的分层窗口仍可命中。
         applyShape(s, f, XCB_SHAPE_SK_INPUT);
     }
+    if (&s == &cand_) {
+        // 皮肤输入区在 map 之前设好：否则刚出现那一下整窗都接鼠标（窗口可能刚重建）。
+        applyCandidateInput();
+    }
     if (!s.mapped) {
         if (s.overlay) {
             // 悬停基线取「出现那一刻」的指针位置：弹在静止指针下不算悬停（见 HoverGate）。
@@ -491,9 +495,7 @@ bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool ab
         candShiftX_ = r.x - x;
         candShiftY_ = r.y - y;
     }
-    const bool ok = present(cand_, f, r, !inPlace);
-    applyCandidateInput(); // 按这一帧的尺寸与皮肤区域设输入区（窗口可能刚重建）
-    return ok;
+    return present(cand_, f, r, !inPlace);
 }
 
 void X11CandidatePanel::setSkin(CandidateSkin skin)

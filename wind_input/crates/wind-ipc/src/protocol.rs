@@ -264,7 +264,7 @@ pub const CMD_KEY_TYPE: u16 = 0x0512; // 整段 UTF-8 文本（无长度前缀�
 /// 布局见 [`crate::codec::encode_overlay_frame`]，常量见 [`overlay`]。
 pub const CMD_OVERLAY_FRAME: u16 = 0x0513;
 /// 候选窗异形皮肤的区域（外部宿主）：窗体矩形、各装饰矩形与鼠标策略、输入区。每个候选帧在
-/// [`CMD_CANDIDATE_RECTS`] 之后推一条，没启用皮肤时 `flags = 0`。布局见
+/// [`CMD_HOST_RENDER_FRAME`] 之前推一条（前端贴这一帧时就用上它），没启用皮肤时 `flags = 0`。布局见
 /// [`crate::codec::encode_candidate_skin`]，常量见 [`skin`]，设计见 theme-skin-animation.md §17.2。
 pub const CMD_CANDIDATE_SKIN: u16 = 0x0514;
 

@@ -2121,7 +2121,7 @@ async def skin_cases(bus, im):
         return
     wid, x, y, w, h, _ = win
     print(f"  皮肤候选窗：{w}x{h} @ ({x},{y})", flush=True)
-    await asyncio.sleep(0.3)  # CMD_CANDIDATE_SKIN 晚于帧到达
+    await asyncio.sleep(0.3)  # 等首帧贴完、输入区设好（CMD_CANDIDATE_SKIN 先于 CMD_HOST_RENDER_FRAME）
     # 两块装饰都伸出窗体左上 / 右上 24px：窗口上缘 24px 是外扩区。
     on_pass = pointer_window(x + w - 12, y + 12)
     on_block = pointer_window(x + 12, y + 12)
