@@ -54,10 +54,11 @@ say "cargo build --profile $PROFILE --target wasm32-unknown-unknown -p wind-scen
 RAW="$TARGET_DIR/wasm32-unknown-unknown/$PROFILE/wind_scene_wasm.wasm"
 [ -f "$RAW" ] || die "没有产物：$RAW"
 
-# 先出到输出目录旁的暂存目录，全部成功（含冒烟）后才替换：中途失败不会留下半套产物。
+# 先出到临时目录暂存，全部成功（含冒烟）后才替换：中途失败不会留下半套产物。暂存不放在输出目录
+# 旁边——输出目录常是编辑器仓的 public/scene-wasm，进程被杀时残留的暂存目录会被当成静态资源发布。
+# 替换用 mv，跨文件系统时退化为复制，同样只在成功后发生。
 FINAL="$OUT"
-mkdir -p "$(dirname "$FINAL")"
-OUT="$(mktemp -d "${FINAL%/}.stage.XXXXXX")"
+OUT="$(mktemp -d "${TMPDIR:-/tmp}/scene-wasm.stage.XXXXXX")"
 trap 'rm -rf "$OUT"' EXIT
 say "wasm-bindgen $HAVE --target web → $OUT（暂存）"
 "$BINDGEN" --target web --out-dir "$OUT" --out-name wind_scene "$RAW"
