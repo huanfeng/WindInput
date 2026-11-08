@@ -2730,11 +2730,12 @@ impl Coordinator {
         }
     }
 
-    /// Linux addon 的 push 连接每（重）建立一次，就让渲染端补推可见的工具栏 / 软键盘：addon 收到
-    /// SERVICE_READY 会丢掉手里的面板，而同一服务换了连接时面板状态并没有变，不会自己再推。
-    /// 服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
+    /// 外部宿主（Linux addon / macOS `.app`）的 push 连接每（重）建立一次，就让渲染端复位它记着的
+    /// 宿主状态：Linux 补推可见的工具栏 / 软键盘（addon 收到 SERVICE_READY 会丢掉手里的面板，而同一
+    /// 服务换了连接时面板状态并没有变，不会自己再推）；macOS 作废皮肤换帧的分层去重（新 `.app` 手里
+    /// 什么都没有）。服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
     pub fn install_host_reconnect_hook(&self) {
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         {
             let tx = self.ui_tx.clone();
             self.push_server

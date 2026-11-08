@@ -236,4 +236,9 @@ Rect toLogicalCover(const Rect& r, double scale)
     return Rect{x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0)};
 }
 
+bool animInPlace(uint32_t flags, uint32_t notifySeq, uint32_t shmSeq)
+{
+    return (flags & FRAME_FLAG_ANIM_FRAME) != 0 && notifySeq == shmSeq;
+}
+
 } // namespace windlinux

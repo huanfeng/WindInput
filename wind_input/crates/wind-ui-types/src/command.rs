@@ -357,8 +357,9 @@ pub enum UiCommand {
     /// 外部宿主报告焦点窗口进入 / 退出全屏：全屏期间不显示工具栏（对位 Windows 的独占全屏判据）。
     /// Windows 渲染端自己探前台，从不下发。
     SetHostFullscreen(bool),
-    /// 外部宿主（Linux addon）的 push 连接（重）建立：它收到 SERVICE_READY 会丢掉手里的工具栏 /
-    /// 软键盘，渲染端把此刻可见的原样补推一帧。Windows 从不下发。
+    /// 外部宿主（Linux addon / macOS `.app`）的 push 连接（重）建立：Linux 收到 SERVICE_READY 会丢掉
+    /// 手里的工具栏 / 软键盘，渲染端把此刻可见的原样补推一帧；macOS 作废皮肤换帧的分层去重。
+    /// Windows 从不下发。
     HostReconnected,
     /// 设置端主题预览：按当前外观画一帧示例候选窗，经请求里的回执送回（见 [`crate::preview`]）。
     RenderCandidatePreview(Box<crate::CandidatePreviewRequest>),

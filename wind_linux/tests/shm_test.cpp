@@ -306,6 +306,14 @@ void TestSkinInputRegion()
 
 } // namespace
 
+void TestAnimInPlace()
+{
+    CASE("换帧照原位贴：带 ANIM 位且 SHM 就是通知的那一帧");
+    CHECK(animInPlace(FRAME_FLAG_ANIM_FRAME | 1, 7, 7));
+    CHECK(!animInPlace(FRAME_FLAG_ANIM_FRAME, 7, 8)); // SHM 已是更新的一帧：按普通帧
+    CHECK(!animInPlace(1, 7, 7));                     // 普通帧
+}
+
 int main()
 {
     TestReadFrame();
@@ -316,5 +324,6 @@ int main()
     TestOverlayPlacement();
     TestHitTest();
     TestSkinInputRegion();
+    TestAnimInPlace();
     TEST_MAIN_END();
 }

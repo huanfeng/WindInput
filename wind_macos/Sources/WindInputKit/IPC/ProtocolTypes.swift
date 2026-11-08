@@ -239,6 +239,11 @@ public struct HostRenderFramePayload: Equatable {
     public var isAbsolutePos: Bool { flags & 0x8 != 0 }
     /// 皮肤动画换帧 (SharedRenderHeader::FLAG_ANIM_FRAME)：内容与落位都没变，照原位贴图。
     public var isAnimFrame: Bool { flags & 0x10 != 0 }
+    /// 这一帧能不能照原位贴：是换帧，且 SHM 里读到的就是通知的那一帧 (`shmSeq == seq`)。通知与 SHM
+    /// 之间没有锁，读到更新的一帧时内容、尺寸可能都变了，按普通帧贴。与 Linux addon 的 `animInPlace` 同义。
+    public func animInPlace(shmSeq: UInt32) -> Bool {
+        isAnimFrame && seq == shmSeq
+    }
 }
 
 /// 缓冲内的矩形 (x, y, w, h)，单位同所在消息。

@@ -107,4 +107,8 @@ std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin,
 /// 位图像素矩形折成逻辑坐标（÷ scale）：向外取整，宽高至少 1。Wayland 输入区用。
 Rect toLogicalCover(const Rect& r, double scale);
 
+/// 这一帧能不能照原位贴（皮肤动画换帧）：帧带 `FRAME_FLAG_ANIM_FRAME`，且 SHM 里读到的就是通知的那一帧
+/// （`shmSeq == notifySeq`）。通知与 SHM 之间没有锁，读到更新的一帧时内容、尺寸可能都变了，按普通帧贴。
+bool animInPlace(uint32_t flags, uint32_t notifySeq, uint32_t shmSeq);
+
 } // namespace windlinux

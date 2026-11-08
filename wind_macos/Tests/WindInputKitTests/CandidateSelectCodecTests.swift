@@ -139,4 +139,12 @@ final class CandidateSelectCodecTests: XCTestCase {
         skin.decor = [d(0)]
         XCTAssertFalse(skin.splitDecorBelow)              // 没有拆层装饰
     }
+
+    func testAnimInPlaceNeedsMatchingSeq() {
+        let anim = HostRenderFramePayload(seq: 7, x: 0, y: 0, width: 1, height: 1, flags: 0x10 | 0x1)
+        XCTAssertTrue(anim.animInPlace(shmSeq: 7))
+        XCTAssertFalse(anim.animInPlace(shmSeq: 8))   // SHM 已是更新的一帧：按普通帧
+        let plain = HostRenderFramePayload(seq: 7, x: 0, y: 0, width: 1, height: 1, flags: 0x1)
+        XCTAssertFalse(plain.animInPlace(shmSeq: 7))
+    }
 }

@@ -1347,10 +1347,8 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     }
     wlPanel_->hide();
 #endif
-    // 换帧只对它自己那一帧成立：SHM 里已是更新的一帧（seq 对不上）时按普通帧贴，免得新内容、
-    // 新尺寸被当成「原位不动」。
-    const bool anim = (p.flags & FRAME_FLAG_ANIM_FRAME) != 0 && f.sequence == p.seq;
-    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0, anim);
+    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0,
+                 animInPlace(p.flags, p.seq, f.sequence));
 }
 
 void WindEngine::hideAllWayland()

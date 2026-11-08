@@ -543,6 +543,13 @@ impl Forwarder {
                 self.panels.reset_host_state();
                 crate::ext_panel::resend_visible();
             }
+            // 新 `.app` 手里没有候选窗与装饰层：分层去重作废，下一帧两层都推（否则换帧只推装饰层，
+            // 候选窗一直不出来）。
+            #[cfg(target_os = "macos")]
+            UiCommand::HostReconnected => {
+                self.main_hash = None;
+                self.decor_hash = None;
+            }
             UiCommand::ShowStatusTip {
                 text,
                 x,
@@ -1130,6 +1137,15 @@ impl Forwarder {
                     self.overlays.show_tooltip(&*self.sink, ov);
                     let rect = self.win.screen_rect();
                     self.overlays.set_candidate_rect(&*self.sink, rect);
+                    // 内容帧重排了换帧到期（按原始边界）：闸门没过就按刚推出去的这帧重新探测，
+                    // 免得闸门处又采到同一帧（§17.1）。
+                    if let Some(g) = self
+                        .win
+                        .anim_gate()
+                        .filter(|g| *g > std::time::Instant::now())
+                    {
+                        self.win.set_anim_gate(g);
+                    }
                 }
                 tracing::debug!(
                     "forwarder pushed host-render frame seq={} {}x{} at ({},{}) scale={}",
@@ -1515,7 +1531,11 @@ mod tests {
     /// 皮肤夹具（设计 §17.5）：30×20 白色窗体；右上外侧 8×8 穿透装饰（z = 1），左上外侧 8×8 block
     /// 装饰。`extra` 追加到穿透装饰那张表（动画用例写 `fps` 等）；`pass_image` 换穿透装饰的文件。
     fn skin_theme(tag: &str, pass_image: Option<&[u8]>, extra: &str) -> wind_theme::Resolved {
-        let dir = std::env::temp_dir().join(format!("wind_fwd_skin_{tag}_{}", std::process::id()));
+        // 每次调用一个目录：同名 tag 的用例并行跑时，先建的会被后来者 `remove_dir_all` 删掉文件。
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("wind_fwd_skin_{tag}_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let t = dir.join("t");
         std::fs::create_dir_all(&t).unwrap();
@@ -1900,6 +1920,35 @@ mod tests {
         );
     }
 
+    /// `.app` 重连（重启）后手里什么都没有：下一次换帧主层也要推，不能只推装饰层。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reconnect_pushes_main_layer_again() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk7".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "anim",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        f.handle(UiCommand::HostReconnected);
+        cap.lock().unwrap().clear();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(300),
+            |_| {},
+        );
+        let frames = cap
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, x)| cmd_of(x) == CMD_HOST_RENDER_FRAME)
+            .count();
+        assert_eq!(frames, 1, "重连后第一次换帧补推主层，之后照旧去重");
+    }
+
     /// 两帧各 33 ms 的循环：周期 66 ms 恰是闸门间隔，只在闸门处取样会回回采到同一帧。唤醒时刻
     /// 取「闸门之后第一个换成不同帧的边界」，推出去的帧要两色交替（设计 §17.1）。
     #[cfg(target_os = "linux")]
@@ -1968,6 +2017,84 @@ mod tests {
             seq.windows(2).all(|w| w[0] != w[1]),
             "相邻换帧画面相同（采样混叠）：{seq:?}"
         );
+    }
+
+    /// 闸门内来了内容帧（继续打字）：换帧到期按这一帧重新探测，闸门之后推出的仍是另一帧。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn content_frame_inside_gate_reprobes_next_change() {
+        let blink = wind_scene::image_cache::anim_fixtures::apng(
+            8,
+            8,
+            &[
+                ([255, 0, 0, 255].repeat(64), 33),
+                ([0, 255, 0, 255].repeat(64), 33),
+            ],
+        );
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk8".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "blink",
+            Some(&blink),
+            "",
+        ))));
+        show_two(&mut f);
+        let (_, _, decor, _) = {
+            let last = cap
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(_, x)| cmd_of(x) == CMD_CANDIDATE_SKIN)
+                .unwrap()
+                .1
+                .clone();
+            last_skin(&Arc::new(Mutex::new(vec![last]))).unwrap()
+        };
+        let pass = decor
+            .iter()
+            .find(|d| d.1 == wind_ipc::protocol::skin::SKIN_HIT_PASS)
+            .unwrap()
+            .3;
+        let (px, py) = center(pass);
+        let pixel = |f: &Forwarder| {
+            let shm = f.shm.as_ref().unwrap();
+            let w = shm.read_header().width as i32;
+            let o = ((py * w + px) * 4) as usize;
+            shm.pixels()[o..o + 4].to_vec()
+        };
+        let anim_frames = |cap: &Timed| {
+            cap.lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, x)| {
+                    cmd_of(x) == CMD_HOST_RENDER_FRAME
+                        && u32::from_le_bytes(x[28..32].try_into().unwrap())
+                            & SharedRenderHeader::FLAG_ANIM_FRAME
+                            != 0
+                })
+                .count()
+        };
+        // 等下一次换帧推出去。
+        let next_anim = |f: &mut Forwarder| {
+            let n = anim_frames(&cap);
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(400);
+            while anim_frames(&cap) == n && std::time::Instant::now() < until {
+                let wake = f.next_deadline().map_or(until, |d| d.min(until));
+                std::thread::sleep(wake.saturating_duration_since(std::time::Instant::now()));
+                f.tick();
+            }
+            assert!(anim_frames(&cap) > n, "没等到换帧");
+        };
+        for _ in 0..3 {
+            next_anim(&mut f);
+            // 闸门内：内容帧（同样的候选再推一次）。
+            show_two(&mut f);
+            let drawn = pixel(&f);
+            next_anim(&mut f);
+            assert_ne!(pixel(&f), drawn, "闸门之后推出的帧与内容帧画面相同");
+        }
     }
 
     #[cfg(target_os = "linux")]

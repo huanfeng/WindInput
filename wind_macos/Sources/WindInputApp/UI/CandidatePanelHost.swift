@@ -99,14 +99,15 @@ public final class CandidatePanelHost {
         ) { [weak self] _ in self?.reportReduceMotion() }
     }
 
-    /// 报系统「减少动态效果」(扩展信封 `host.reduce_motion`)。主线程读设置，后台发 (发送是同步往返)。
+    /// 报系统「减少动态效果」(扩展信封 `host.reduce_motion`)。主线程读设置、主线程发 (与其它请求
+    /// 同一线程串行用 `sendClient`)；报的是绝对值、重发无害，走带一次重连重试的 `requestResponseIdempotent`。
     private func reportReduceMotion() {
         DispatchQueue.main.async { [weak self] in
             let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            guard let body = try? JSONSerialization.data(withJSONObject: ["reduce": reduce]) else { return }
-            DispatchQueue.global(qos: .utility).async {
-                self?.sendFrame(BinaryCodec.encodeExtFrame(kind: ExtKind.hostReduceMotion, body: body))
-            }
+            guard let self = self,
+                  let body = try? JSONSerialization.data(withJSONObject: ["reduce": reduce]) else { return }
+            _ = self.requestResponseIdempotent(
+                BinaryCodec.encodeExtFrame(kind: ExtKind.hostReduceMotion, body: body))
         }
     }
 
@@ -478,6 +479,12 @@ public final class CandidatePanelHost {
             // 下一帧按名重开拿到新段，无需重装/重启 .app。
             // 皮肤区域与穿透装饰层也是旧服务的：复位，新服务的第一帧之前自会再推。
             lock.lock(); reader?.closeReader(); reader = nil; latestSkin = CandidateSkin(); lock.unlock()
+            // 请求连接也是连着旧服务的：在主线程 (请求都在主线程发) 关掉，免得与进行中的请求并发碰
+            // 同一个 fd；随后排在主线程上的上报按需重建连接。
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock(); self.sendClient?.close(); self.sendClient = nil; self.lock.unlock()
+            }
             // 新服务没有「减少动态效果」的上报值，重报一次。
             reportReduceMotion()
             // 各浮层的 SHM 段同样被重建; 开着的菜单也随旧服务一并作废。
@@ -602,8 +609,7 @@ public final class CandidatePanelHost {
         let pt = NSPoint(x: CGFloat(p.x), y: CGFloat(p.y))
         let useSoftwareShadow = frame.hasSoftwareShadow
         let absolute = p.isAbsolutePos
-        // 换帧只对它自己那一帧成立：SHM 里已是更新的一帧 (seq 对不上) 时按普通帧贴。
-        let anim = p.isAnimFrame && frame.sequence == p.seq
+        let anim = p.animInPlace(shmSeq: frame.sequence)
         lock.lock()
         currentScale = scale
         let rects = Self.scaleRects(latestRects, by: scale)
