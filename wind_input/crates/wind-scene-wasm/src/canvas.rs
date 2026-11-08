@@ -1,10 +1,11 @@
 //! 浏览器 Canvas 文字后端：[`TextBackend`] 的测量与画字交给宿主（wasm 上是 `js/text.js` 的
 //! OffscreenCanvas）。
 //!
-//! 画字只让宿主把**一行**文字用不透明白色栅格化一次（只栅格化落在缓冲里的那段横坐标），回来的
-//! 位图在这里当覆盖率用：近白像素按所在区间的颜色着色，非白像素是彩色字形（emoji）的本色，只乘
-//! 区间颜色的不透明度——与 wind-ui Linux 后端对彩色字形的处理一致。然后 source-over 合成进预乘
-//! BGRA 缓冲。
+//! 画字让宿主把**一行**文字用不透明白色栅格化（只栅格化落在缓冲里的那段横坐标），回来的位图在
+//! 这里当覆盖率用，按所在区间的颜色着色。本行可能含彩色字形（emoji，见 [`may_have_color_glyph`]）
+//! 时再用黑色画一遍对比：两遍颜色差得多的像素是覆盖率，相同的是彩色字形的本色——后者不随区间色
+//! 着色、只乘区间色的不透明度，与 wind-ui Linux 后端对彩色字形的处理一致（emoji 里的白色也保持白）。
+//! 然后 source-over 合成进预乘 BGRA 缓冲。
 //!
 //! 与 Linux 后端对齐的口径：空串行高 = 字号 × 1.2；`\n` 分行（宽取最宽一行、高 = 行数 × 行高）；
 //! 颜色区间重叠时后写的赢；字重钳到 1..=1000。
@@ -27,8 +28,9 @@ pub struct Glyphs {
 pub trait Canvas {
     /// `(宽, 行高)`；行高 = `fontBoundingBoxAscent + fontBoundingBoxDescent`。
     fn measure(&self, text: &str, font: &str) -> Result<(f32, f32), String>;
-    /// 用不透明白色画一行文字，只栅格化文字盒局部横坐标 `[x0, x1)` 那段。
-    fn draw(&self, text: &str, font: &str, x0: i32, x1: i32) -> Result<Glyphs, String>;
+    /// 用不透明的灰度 `ink`（255 = 白、0 = 黑）画一行文字，只栅格化文字盒局部横坐标 `[x0, x1)`
+    /// 那段。彩色字形不随 `ink` 变色。
+    fn draw(&self, text: &str, font: &str, x0: i32, x1: i32, ink: u8) -> Result<Glyphs, String>;
 }
 
 /// 没设字体时的字族栈：与实机默认字体（Windows 的微软雅黑 UI）同一个优先，其余平台按常见中文
@@ -42,8 +44,25 @@ const DEFAULT_WEIGHT: i32 = 400;
 /// 测量缓存条数上限，满了整表清空（同 wind-ui 各后端的做法）。
 const MEASURE_CACHE_CAP: usize = 4096;
 
-/// 回读像素三个通道都不低于它就当作白色覆盖率（getImageData 反预乘有舍入，低 alpha 处不是正 255）。
-const WHITE_MIN: u8 = 250;
+/// 白、黑两遍的同一像素，三个通道都至少差这么多才算覆盖率（彩色字形两遍相同，差 0）。
+const INK_DIFF_MIN: u8 = 128;
+
+/// 这一行可能含彩色字形（emoji）：只有这时才画第二遍（黑色）去分辨，纯中英文行省一次宿主调用。
+/// 宁多勿漏——多判只是多画一遍，漏判则 emoji 被染成文字色。
+pub(crate) fn may_have_color_glyph(line: &str) -> bool {
+    line.chars().any(|c| {
+        matches!(u32::from(c),
+            0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122 | 0x2139
+            | 0x2190..=0x21FF   // 箭头（↔ ↩ 等有 emoji 呈现）
+            | 0x2300..=0x23FF   // ⌚ ⏰ 等
+            | 0x24C2 | 0x25A0..=0x27BF // 几何图形、杂项符号、装饰符号（☀ ✅ ❤）
+            | 0x2900..=0x297F | 0x2B00..=0x2BFF
+            | 0x3030 | 0x303D | 0x3297 | 0x3299
+            | 0xFE0F | 0x200D | 0x20E3 // 呈现选择符、ZWJ、键帽
+            | 0x1F000..=0x1FAFF // 麻将牌 … 符号与象形文字扩展
+            | 0xE0020..=0xE007F) // 旗帜标签
+    })
+}
 
 pub struct CanvasText<C> {
     canvas: C,
@@ -266,11 +285,19 @@ impl<C: Canvas> CanvasText<C> {
                 continue;
             }
             // 只栅格化落在缓冲里的那段（文字盒局部坐标）。
-            let g = self
-                .canvas
-                .draw(line, &font, -ox, (bw as i32).saturating_sub(ox))
-                .map_err(|e| format!("画字失败：{e}"))?;
-            composite(buf, bw, bh, ox + g.x, oy + g.y, &g, &segs)?;
+            let (x0, x1) = (-ox, (bw as i32).saturating_sub(ox));
+            let draw = |ink| {
+                self.canvas
+                    .draw(line, &font, x0, x1, ink)
+                    .map_err(|e| format!("画字失败：{e}"))
+            };
+            let g = draw(255)?;
+            let dark = if may_have_color_glyph(line) {
+                Some(draw(0)?)
+            } else {
+                None
+            };
+            composite(buf, bw, bh, ox + g.x, oy + g.y, &g, dark.as_ref(), &segs)?;
         }
         Ok(())
     }
@@ -283,7 +310,9 @@ impl<C: Canvas> CanvasText<C> {
     }
 }
 
-/// 白色覆盖率位图按列区间着色、source-over 合成进预乘 BGRA 缓冲（缓冲坐标）。
+/// 白色位图按列区间着色、source-over 合成进预乘 BGRA 缓冲（缓冲坐标）。`dark` 是同一行用黑色
+/// 画的那遍：有它时两遍颜色相同的像素是彩色字形本色；没有时全当覆盖率。
+#[allow(clippy::too_many_arguments)]
 fn composite(
     buf: &mut [u8],
     bw: u32,
@@ -291,6 +320,7 @@ fn composite(
     x0: i32,
     y0: i32,
     g: &Glyphs,
+    dark: Option<&Glyphs>,
     segs: &[(i32, i32, [u8; 4])],
 ) -> Result<(), String> {
     if g.rgba.len() as u64 != u64::from(g.w) * u64::from(g.h) * 4 {
@@ -300,6 +330,11 @@ fn composite(
             g.h,
             g.rgba.len()
         ));
+    }
+    if let Some(d) = dark
+        && (d.x, d.y, d.w, d.h, d.rgba.len()) != (g.x, g.y, g.w, g.h, g.rgba.len())
+    {
+        return Err("黑白两遍画字的位图不一致".to_string());
     }
     let gx1 = x0.saturating_add(g.w.min(i32::MAX as u32) as i32);
     let gy1 = y0.saturating_add(g.h.min(i32::MAX as u32) as i32);
@@ -317,8 +352,11 @@ fn composite(
                 if sa == 0 {
                     continue;
                 }
-                // 近白 = 覆盖率，取区间色；否则是彩色字形的本色。
-                let [r, gg, b] = if px[..3].iter().all(|&v| v >= WHITE_MIN) {
+                // 黑白两遍差得多 = 覆盖率，取区间色；相同 = 彩色字形的本色。
+                let coverage = dark.is_none_or(|d| {
+                    (0..3).all(|i| px[i].saturating_sub(d.rgba[s + i]) >= INK_DIFF_MIN)
+                });
+                let [r, gg, b] = if coverage {
                     [cr, cg, cb]
                 } else {
                     [px[0], px[1], px[2]]
@@ -433,7 +471,14 @@ pub(crate) mod mock {
             Ok((text.chars().count() as f32 * s * 0.6, s * 1.2))
         }
 
-        fn draw(&self, text: &str, font: &str, x0: i32, x1: i32) -> Result<Glyphs, String> {
+        fn draw(
+            &self,
+            text: &str,
+            font: &str,
+            x0: i32,
+            x1: i32,
+            ink: u8,
+        ) -> Result<Glyphs, String> {
             if self.fail.get() {
                 return Err("mock draw 抛异常".into());
             }
@@ -449,12 +494,14 @@ pub(crate) mod mock {
             let mut rgba = Vec::with_capacity((w * h * 4) as usize);
             for _ in 0..h {
                 for x in a..a + w as i32 {
-                    let c = chars.get((x as f32 / cell) as usize).copied();
-                    match c {
-                        Some('😀') => {
+                    let i = (x as f32 / cell) as usize;
+                    match chars.get(i).copied() {
+                        // 彩色字形：左半格橙、右半格纯白，都不随 ink 变。
+                        Some('😀') if (x as f32) < (i as f32 + 0.5) * cell => {
                             rgba.extend_from_slice(&[EMOJI_RGB[0], EMOJI_RGB[1], EMOJI_RGB[2], 255])
                         }
-                        _ => rgba.extend_from_slice(&[255, 255, 255, 255]),
+                        Some('😀') => rgba.extend_from_slice(&[255, 255, 255, 255]),
+                        _ => rgba.extend_from_slice(&[ink, ink, ink, 255]),
                     }
                 }
             }
@@ -640,10 +687,11 @@ mod tests {
         assert_eq!(c.draws.borrow().len(), 1, "整行只栅格化一次");
     }
 
-    /// 彩色字形（emoji）保持本色，只乘区间颜色的不透明度。
+    /// 彩色字形（emoji）保持本色——包括它的白色部分——只乘区间颜色的不透明度；只有可能含彩色
+    /// 字形的行才画第二遍。
     #[test]
-    fn color_glyph_keeps_its_own_color() {
-        let (t, _) = backend();
+    fn color_glyph_keeps_its_own_color_including_white() {
+        let (t, c) = backend();
         let (w, h) = (20, 12);
         let mut buf = vec![0u8; (w * h * 4) as usize];
         let runs = [ColorRun {
@@ -651,21 +699,32 @@ mod tests {
             end: 5,
             rgba: [0, 0, 255, 255],
         }];
-        t.draw_runs(
-            &mut buf,
-            w,
-            h,
-            0.0,
-            0.0,
-            "a😀",
-            &TextStyle::new(10.0),
-            [9, 9, 9, 255],
-            &runs,
-        )
-        .unwrap();
+        let ts = TextStyle::new(10.0); // 每格 6 列：a = 0..6，😀 = 6..12（左半橙、右半白）
+        t.draw_runs(&mut buf, w, h, 0.0, 0.0, "a😀", &ts, [9, 9, 9, 255], &runs)
+            .unwrap();
         let [r, g, b] = EMOJI_RGB;
-        assert_eq!(bgra_at(&buf, w, 7, 0), [b, g, r, 255]);
+        assert_eq!(bgra_at(&buf, w, 7, 0), [b, g, r, 255], "橙色部分保持本色");
+        assert_eq!(
+            bgra_at(&buf, w, 10, 0),
+            [255, 255, 255, 255],
+            "白色部分不被染成蓝"
+        );
         assert_eq!(bgra_at(&buf, w, 1, 0), [255, 0, 0, 255], "普通字按区间色");
+        assert_eq!(c.draws.borrow().len(), 2, "含 emoji 的行黑白各画一遍");
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        t.draw(&mut buf, w, h, 0.0, 0.0, "你a", &ts, [0, 0, 255, 255])
+            .unwrap();
+        assert_eq!(c.draws.borrow().len(), 3, "纯中英文行只画一遍");
+    }
+
+    #[test]
+    fn color_glyph_detection() {
+        for yes in ["😀", "a✅", "❤\u{FE0F}", "🇨🇳", "©", "1\u{FE0F}\u{20E3}"] {
+            assert!(may_have_color_glyph(yes), "{yes:?}");
+        }
+        for no in ["你好", "abc", "（全角）", "ㄅ", "…"] {
+            assert!(!may_have_color_glyph(no), "{no:?}");
+        }
     }
 
     #[test]
@@ -765,6 +824,25 @@ mod tests {
             rgba: vec![0; 3],
         };
         let mut buf = vec![0u8; 16];
-        assert!(composite(&mut buf, 2, 2, 0, 0, &g, &[(i32::MIN, i32::MAX, [1; 4])]).is_err());
+        let segs = [(i32::MIN, i32::MAX, [1; 4])];
+        assert!(composite(&mut buf, 2, 2, 0, 0, &g, None, &segs).is_err());
+        let ok = Glyphs {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            rgba: vec![255; 4],
+        };
+        let other = Glyphs {
+            x: 1,
+            y: 0,
+            w: 1,
+            h: 1,
+            rgba: vec![0, 0, 0, 255],
+        };
+        assert!(
+            composite(&mut buf, 2, 2, 0, 0, &ok, Some(&other), &segs).is_err(),
+            "两遍位图不一致"
+        );
     }
 }

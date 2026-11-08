@@ -394,7 +394,9 @@ impl<C: Canvas> Preview<C> {
             theme: &eff.theme,
             base_font_logical: eff.base_font_logical,
             scale: o.scale,
-            screen_extent_px: None,
+            // 当作一块 MAX_SIDE 见方的屏幕：长注释像实机一样被钳宽（截断），不撞尺寸闸；
+            // 缺省的兜底安全宽 3000dp × scale 在 scale ≥ 1.4 时就超过 MAX_SIDE。
+            screen_extent_px: Some((MAX_SIDE, MAX_SIDE)),
             text_renderer: &self.text,
             opts: &self.scene_opts,
         };
@@ -684,6 +686,24 @@ mod tests {
             .unwrap();
         }
         assert!(p.render(&d()).is_ok(), "报错之后照常可用");
+    }
+
+    /// 长注释在高缩放下像实机一样被钳宽，能出图，不报「超出上限」。
+    #[test]
+    fn long_comment_is_clamped_in_width_not_rejected() {
+        let (mut p, _) = preview();
+        let f = p
+            .render(&RenderOpts {
+                scale: 2.0,
+                candidates: vec![CandidateOpt {
+                    text: "长".into(),
+                    comment: "注".repeat(MAX_TEXT_CHARS),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(f.width <= MAX_SIDE, "{}", f.width);
     }
 
     /// 主题里的字号走同一道闸。

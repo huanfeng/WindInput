@@ -17,8 +17,6 @@ if (!src) {
   process.exit(2);
 }
 const dir = mkdtempSync(join(tmpdir(), 'wind-scene-smoke-'));
-cpSync(src, dir, { recursive: true });
-writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
 
 const sizeOf = (font) => Number(/([\d.]+)px/.exec(font)?.[1] ?? 16);
 /** 置位时 measureText 抛异常（模拟浏览器侧出错）。 */
@@ -76,11 +74,9 @@ globalThis.OffscreenCanvas = class {
   }
 };
 
+/** 失败抛错（不直接 exit），让 finally 清掉临时目录。 */
 function check(ok, msg) {
-  if (!ok) {
-    console.error(`冒烟失败：${msg}`);
-    process.exit(1);
-  }
+  if (!ok) throw new Error(`冒烟失败：${msg}`);
 }
 
 function throws(fn, needle) {
@@ -93,6 +89,8 @@ function throws(fn, needle) {
 }
 
 try {
+  cpSync(src, dir, { recursive: true });
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
   const wasmBytes = readFileSync(join(dir, 'wind_scene_bg.wasm'));
   const m = await import(pathToFileURL(join(dir, 'wind_scene.js')).href);
   m.initSync({ module: wasmBytes });
@@ -164,9 +162,40 @@ try {
   }
   check(normal.includes('parse theme') && a.generation === 2, '普通错误不触发重建');
 
+  // 并发调用共用同一次重建。
+  a.raw.render = () => {
+    throw new WebAssembly.RuntimeError('unreachable');
+  };
+  const g0 = a.generation;
+  await Promise.all([a.render({}), a.render({}), a.signal('typing')]);
+  check(a.generation === g0 + 1, `并发调用应只重建一次，实为 ${a.generation - g0}`);
+
+  // 每个实例都崩（持续 panic 的输入）：重建预算用完后永久失败，不再无限重建。
+  const { PreviewerFailedError, REBUILD_MAX } = await import(pathToFileURL(join(dir, 'preview.js')).href);
+  const doom = (inst) => {
+    inst.render = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+  };
+  const z = await AutoPreviewer.create({ wasm: wasmBytes, onInstance: doom });
+  const outcomes = [];
+  for (let i = 0; i < 5; i++) {
+    try {
+      await z.render({});
+      outcomes.push('ok');
+    } catch (e) {
+      outcomes.push(e instanceof PreviewerFailedError ? 'failed' : 'fatal');
+    }
+  }
+  check(z.generation === 1 + REBUILD_MAX, `应只重建 ${REBUILD_MAX} 次，实为 ${z.generation - 1}`);
+  check(z.failed && outcomes.at(-1) === 'failed' && !outcomes.includes('ok'), `结局 ${outcomes}`);
+
   console.log(
     `冒烟通过：横排 ${f.width}x${f.height}、竖排×2 ${v.width}x${v.height}，单帧 ${ms.toFixed(1)} ms，自动重建 OK`,
   );
+} catch (e) {
+  console.error(e?.stack ?? e);
+  process.exitCode = 1;
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

@@ -44,10 +44,11 @@ export function measure(text, font) {
 }
 
 /**
- * 用不透明白色画一行文字，只栅格化文字盒局部横坐标 [x0, x1) 那段（Rust 传缓冲里可见的部分）。
+ * 用不透明灰度 ink（255 = 白、0 = 黑）画一行文字，只栅格化文字盒局部横坐标 [x0, x1) 那段
+ * （Rust 传缓冲里可见的部分）。彩色字形（emoji）不随 ink 变，Rust 侧靠黑白两遍对比把它认出来。
  * 返回 { x, y, w, h, pixels }：位图左上角在文字盒局部坐标里的位置、尺寸、getImageData 的像素。
  */
-export function draw(text, font, x0, x1) {
+export function draw(text, font, x0, x1, ink) {
   const { m, asc, desc } = metrics(text, font);
   const lineH = asc + desc;
   // 字形可能伸出文字盒：左右按 actualBoundingBox 外扩，再各留 1 px。
@@ -67,7 +68,7 @@ export function draw(text, font, x0, x1) {
   c.clearRect(0, 0, w, h);
   c.font = font;
   c.textBaseline = 'alphabetic';
-  c.fillStyle = '#fff';
+  c.fillStyle = `rgb(${ink}, ${ink}, ${ink})`;
   c.fillText(text, -a, top + asc);
   const pixels = c.getImageData(0, 0, w, h).data;
   if (c.canvas.width * c.canvas.height > KEEP_AREA) {

@@ -11,10 +11,10 @@
 | File | Description |
 |------|-------------|
 | `src/preview.rs` | API 本体 `Preview<C>`：`set_theme(toml, id, 资源)` / `render(RenderOpts)` / `signal(事件)`，原生可测；不可信输入的上限 `MAX_*` |
-| `src/canvas.rs` | `Canvas` trait（宿主的测量 / 白色画一行）+ `CanvasText`（实现 `TextBackend`，覆盖率按颜色区间着色、合成进预乘 BGRA）；测试用 `mock::MockCanvas`（可模拟宿主失败） |
+| `src/canvas.rs` | `Canvas` trait（宿主的测量 / 灰度画一行）+ `CanvasText`（实现 `TextBackend`，覆盖率按颜色区间着色、可能含 emoji 的行黑白两遍对比认彩色字形）；测试用 `mock::MockCanvas`（可模拟宿主失败、彩色字形） |
 | `src/builtin.rs` | 编进产物的 `data/themes/` 内置主题与图片资产 |
 | `src/web.rs` | wasm-bindgen 导出层（仅 wasm32）：`Previewer` / `Frame`，JS 画布接 `js/text.js`（`catch`）；陷入后入口报「已损坏」 |
-| `js/preview.js` | 推荐入口 `AutoPreviewer`：致命错误时重新实例化模块、重放主题；代办 `frame.free()`。构建脚本复制进产物 |
+| `js/preview.js` | 推荐入口 `AutoPreviewer`：致命错误时重新实例化模块、重放主题（串行化、10 秒 2 次的预算，超了抛 `PreviewerFailedError`）；代办 `frame.free()`。构建脚本复制进产物；产物目录须原样静态发布 |
 | `js/text.js` | OffscreenCanvas 文字后端，随产物出（wasm-bindgen 的 snippets/） |
 | `js/smoke.mjs` | node 冒烟（假 OffscreenCanvas），`build-scene-wasm.sh` 有 node 时自动跑 |
 

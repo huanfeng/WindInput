@@ -2,8 +2,12 @@
 //!
 //! JS 侧抛的异常经 `catch` 变成 `Err`，只让当前帧失败。Rust 侧的 panic 在 wasm 上不可恢复
 //! （`panic = "abort"` 即陷入 `unreachable`，线程局部缓存可能停在借出状态）：入口处的
-//! 「调用中」标记在陷入后留着不清，此后本模块里任何调用都报「已损坏」，由 `js/preview.js`
+//! 「调用中」标记在陷入后留着不清，此后本模块里的调用都报「已损坏」，由 `js/preview.js`
 //! 的包装重新实例化模块（自动重建）。
+//!
+//! 注意：陷入那个**同一实例**再被调用时，先撞上的是 wasm-bindgen 自己的借用检查（它的
+//! `&mut self` 借用标记也留着），报的是「recursive use of an object detected …」，轮不到这里的
+//! 「已损坏」；同模块里新建的实例或别的实例才会报「已损坏」。`preview.js` 两种都认。
 
 use std::cell::Cell;
 
@@ -19,7 +23,7 @@ extern "C" {
     fn js_measure(text: &str, font: &str) -> Result<js_sys::Float64Array, JsValue>;
 
     #[wasm_bindgen(js_name = draw, catch)]
-    fn js_draw(text: &str, font: &str, x0: i32, x1: i32) -> Result<JsValue, JsValue>;
+    fn js_draw(text: &str, font: &str, x0: i32, x1: i32, ink: u8) -> Result<JsValue, JsValue>;
 }
 
 /// 画字结果单边上限（与 text.js 的 `MAX_SIDE` 一致）。
@@ -87,8 +91,8 @@ impl Canvas for JsCanvas {
         Ok((m.get_index(0) as f32, m.get_index(1) as f32))
     }
 
-    fn draw(&self, text: &str, font: &str, x0: i32, x1: i32) -> Result<Glyphs, String> {
-        let o = js_draw(text, font, x0, x1).map_err(js_err)?;
+    fn draw(&self, text: &str, font: &str, x0: i32, x1: i32, ink: u8) -> Result<Glyphs, String> {
+        let o = js_draw(text, font, x0, x1, ink).map_err(js_err)?;
         let pixels = field(&o, "pixels")?
             .dyn_into::<js_sys::Uint8ClampedArray>()
             .map_err(|_| "画字结果的 pixels 不是 Uint8ClampedArray".to_string())?;
