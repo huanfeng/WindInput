@@ -382,9 +382,10 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
 - `hit = "pass"`：本地窗口路径把穿透装饰画进第二个 `WS_EX_TRANSPARENT` layered 窗口（类名
   `WindInputCandidateDecor`），与候选窗同位置同尺寸；穿透装饰全在窗体下（z < 0）时插到候选窗下面，否则在上面。
   拖动时一起挪，隐藏时一起收。窗口建不出来就回落为画进候选窗（按 block）。
-- host-render（DLL 侧 HostWindow）、macOS、Linux 仍把穿透装饰画进主缓冲，按 block 处理。
+- host-render（DLL 侧 HostWindow）仍把穿透装饰画进主缓冲，按 block 处理。
 
-前端进程这一半（macOS 第二个 panel / 系统阴影、Wayland 输入区、X11 XShape、mac/Linux 的「装饰不拖动」）见 §17。
+macOS / Linux 前端（推帧动画、macOS 第二个 panel 与系统阴影、Wayland 输入区、X11 XShape、「装饰不拖动」）
+已按 §17 实现；Swift 部分本机编不了，只经 CI 与真机验。
 未做：穿透窗口与候选窗混合 z 序（同时有窗体上、下两类穿透装饰时统一放上面）。
 
 ## 14. P1b 落点
