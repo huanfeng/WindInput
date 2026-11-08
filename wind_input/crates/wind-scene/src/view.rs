@@ -39,7 +39,7 @@ const SHADOW_CACHE_CAP: usize = 32;
 struct ShadowCache {
     masks: HashMap<ShadowKey, ShadowMask>,
     /// 最后一次被取用的时刻（命中也算）；None = 空表，没什么可回收。
-    last_use: Option<std::time::Instant>,
+    last_use: Option<crate::clock::Instant>,
 }
 
 /// 模糊后的阴影 alpha 蒙版 + 尺寸与四周留边（`pad`）。
@@ -198,7 +198,7 @@ pub fn paint_anim_frame(
 }
 
 /// 绘制缓存（背景图 + 阴影蒙版）闲置回收的最早到期时刻，供 UI 消息循环登记进 `next_deadline`。
-pub fn paint_cache_next_deadline() -> Option<std::time::Instant> {
+pub fn paint_cache_next_deadline() -> Option<crate::clock::Instant> {
     let image = IMAGE_CACHE.with(|c| c.borrow().next_deadline());
     let shadow = SHADOW_CACHE.with(|c| {
         c.borrow()
@@ -210,7 +210,7 @@ pub fn paint_cache_next_deadline() -> Option<std::time::Instant> {
 
 /// 闲置够久就把背景图缓存 / 阴影蒙版缓存各自整个丢掉（两者各按自己的最后取用计时），
 /// 返回是否真的清了什么（清了才值得记一行日志）。
-pub fn paint_cache_evict_if_idle(now: std::time::Instant) -> bool {
+pub fn paint_cache_evict_if_idle(now: crate::clock::Instant) -> bool {
     let image = IMAGE_CACHE.with(|c| c.borrow_mut().evict_if_idle(now));
     let shadow = SHADOW_CACHE.with(|c| {
         let mut c = c.borrow_mut();

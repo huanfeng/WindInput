@@ -8,9 +8,10 @@
 //! 图片会被打包成后者随 theme.toml 一起发布。两种形态在 `wind_theme` 的求值层与
 //! `theme_assets::asset_path` 里一路同等放行，最终都落到本模块解码。
 
+use crate::clock::Instant;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 #[inline]
@@ -164,10 +165,14 @@ fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// 读取图片源的原始字节：`data:` URI 就地解码，否则按文件路径读。
+/// 读取图片源的原始字节：`data:` URI 就地解码，内存资源（[`crate::assets`]）取登记的字节，
+/// 否则按文件路径读。
 fn read_source_bytes(src: &str) -> Option<Vec<u8>> {
     if src.starts_with("data:") {
         return decode_data_uri(src);
+    }
+    if let Some(mem) = crate::assets::bytes_of(src) {
+        return mem.map(|b| b.to_vec());
     }
     std::fs::read(src).ok()
 }
@@ -991,6 +996,9 @@ fn atlas_pixmap(
 fn read_source_prefix(src: &str, n: usize) -> Option<Vec<u8>> {
     use base64::Engine as _;
     use std::io::Read as _;
+    if let Some(mem) = crate::assets::bytes_of(src) {
+        return mem.map(|b| b[..n.min(b.len())].to_vec());
+    }
     if !src.starts_with("data:") {
         let mut out = Vec::new();
         std::fs::File::open(src)

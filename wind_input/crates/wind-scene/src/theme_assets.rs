@@ -4,17 +4,21 @@
 use crate::view::{ImagePlace, ViewGradient, ViewImage, ViewLayer};
 use wind_theme::{Resolved, RvGradient, RvImage};
 
-/// 把 image ref 解析为可读绝对路径：resources 注册表 → data:/绝对 → 在 asset_dirs（base 链目录）
-/// 搜字面文件（如 _base 的 chevron.svg）。
+/// 把 image ref 解析为可读绝对路径：resources 注册表 → data:/绝对 → 内存资源表（[`crate::assets`]）
+/// → 在 asset_dirs（base 链目录）搜字面文件（如 _base 的 chevron.svg）。resources 解析出的相对
+/// 路径同样先查内存资源表。
 pub fn asset_path(theme: &Resolved, reference: &str) -> Option<String> {
     if reference.is_empty() {
         return None;
     }
     if let Some(p) = theme.resources.get(reference) {
-        return Some(p.clone());
+        return Some(crate::assets::source_key(p).unwrap_or_else(|| p.clone()));
     }
     if reference.starts_with("data:") || std::path::Path::new(reference).is_absolute() {
         return Some(reference.to_string());
+    }
+    if let Some(k) = crate::assets::source_key(reference) {
+        return Some(k);
     }
     for d in &theme.asset_dirs {
         let p = d.join(reference);
@@ -250,6 +254,48 @@ mod tests {
         // 与背景图同口径。
         let bg = rv_image(&theme, Some(&tinted), 1.0).unwrap();
         assert_eq!(bg.tint, Some(out[0].tint));
+    }
+
+    /// 内存资源表：登记过的相对引用（字面 ref 与 resources 解析出的相对路径）改写成内存源串，
+    /// 图片缓存能按它解码；没登记的、data: 与绝对路径照旧。
+    #[test]
+    fn memory_assets_take_relative_refs_first() {
+        let png = {
+            let mut out = Vec::new();
+            image::RgbaImage::from_pixel(3, 2, image::Rgba([255, 0, 0, 255]))
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap();
+            out
+        };
+        let mut mem = crate::assets::MemoryAssets::new();
+        mem.insert("assets/panel.png", png);
+        crate::assets::install(mem);
+        let mut theme = Resolved::default();
+        theme
+            .resources
+            .insert("panel".into(), "./assets/panel.png".into());
+
+        let lit = asset_path(&theme, "assets/panel.png").unwrap();
+        let res = asset_path(&theme, "panel").unwrap();
+        assert!(lit.starts_with("mem:"), "{lit}");
+        assert_eq!(lit, res, "两种写法指向同一个源");
+        let mut cache = crate::image_cache::ImageCache::new();
+        assert_eq!(cache.src_size(&lit), Some((3, 2)), "图片缓存能读内存源");
+
+        assert_eq!(
+            asset_path(&theme, "other.png").as_deref(),
+            Some("other.png")
+        );
+        assert_eq!(
+            asset_path(&theme, "data:image/png;base64,AA==").as_deref(),
+            Some("data:image/png;base64,AA==")
+        );
+        crate::assets::uninstall();
+        assert_eq!(
+            asset_path(&theme, "panel").as_deref(),
+            Some("./assets/panel.png"),
+            "撤表后回到原有解析"
+        );
     }
 
     /// 空 ref = 没有图，不能凭空造一个（调用方据此跳过整层绘制）。
