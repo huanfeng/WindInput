@@ -982,6 +982,51 @@ impl CandidateScene {
         self.anim_next
     }
 
+    /// 不早于 `after` 的第一个**画面会变**的时刻：逐个边界试推各装饰的状态机副本，帧号与本帧
+    /// 画上去的相同的边界跳过。限帧推送时用——只在闸门处取样的话，周期恰为
+    /// 闸门整数倍的快循环每次都采到同一帧（设计 §17.1）。None = 之后不会再变。
+    pub fn next_anim_change(
+        &self,
+        inp: &CandidateSceneInput,
+        after: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        /// 一块装饰最多试推的边界数；超了就在那儿醒一次再算，不让这里成为热点。
+        const MAX_STEPS: usize = 256;
+        self.anim_next?;
+        let g = self.skin_geom.as_ref()?;
+        let v = inp
+            .theme
+            .skin
+            .as_ref()?
+            .variant(inp.vertical, inp.preedit_embedded)?;
+        let mut best: Option<std::time::Duration> = None;
+        for d in &g.decor {
+            let (Some(spec), Some(m)) = (
+                v.decor.get(d.index).map(|x| &x.anim),
+                self.decor_anims.get(d.index),
+            ) else {
+                continue;
+            };
+            let mut m = m.clone();
+            let mut t = after;
+            for step in 0.. {
+                if best.is_some_and(|b| b <= t) {
+                    break;
+                }
+                let pose = m.seek(spec, t, d);
+                if d.locate(pose) != d.cur || step == MAX_STEPS {
+                    best = Some(t);
+                    break;
+                }
+                match pose.next {
+                    Some(n) if n > t => t = n,
+                    _ => break,
+                }
+            }
+        }
+        best
+    }
+
     /// 同一条皮肤告警只报一次（几何每帧重求）。
     pub(super) fn warn_skin_once(&self, msg: String) {
         if self.skin_warned.borrow_mut().insert(msg.clone()) {

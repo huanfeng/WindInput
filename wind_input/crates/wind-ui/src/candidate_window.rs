@@ -393,6 +393,8 @@ pub struct CandidateWindow {
     anim_due: bool,
     /// 正在为换帧重绘：不重置悬停、不重摆气泡。
     anim_repaint: bool,
+    /// 限帧闸门（外部宿主推帧用，见 [`Self::set_anim_gate`]）：换帧到期不早于它。None = 不限。
+    anim_gate: Option<Instant>,
     /// 用户外观字体（`ui.font.family`，已 trim）；空 = 跟随主题节点字族。
     user_font_family: String,
     /// 用户全局字重（`ui.font.weight`）；0 = 不指定（取 [`Self::family_weight`]，再无则常规）。
@@ -553,6 +555,7 @@ impl CandidateWindow {
             anim_start: Instant::now(),
             anim_due: false,
             anim_repaint: false,
+            anim_gate: None,
             user_font_family: String::new(),
             user_font_weight: 0,
             family_weight: 0,
@@ -745,7 +748,25 @@ impl CandidateWindow {
 
     /// 下一次装饰换帧的时刻：场景给的是距动画时间轴起点的时长，起点在窗口侧。
     fn anim_next_at(&self) -> Option<Instant> {
-        self.scene.next_anim_at().map(|d| self.anim_start + d)
+        let at = self.scene.next_anim_at().map(|d| self.anim_start + d)?;
+        Some(self.anim_gate.map_or(at, |g| at.max(g)))
+    }
+
+    /// 设限帧闸门：此后换帧到期不早于 `at`，且跳过画面不会变的边界（设计 §17.1）。在推出一帧
+    /// 换帧之后调，「画面会不会变」按刚推出去的那帧比。只管换帧：悬停、提示保持、释放像素照旧到期。
+    pub fn set_anim_gate(&mut self, at: Instant) {
+        self.anim_gate = Some(at);
+        if self.scene.next_anim_at().is_none() {
+            return;
+        }
+        let after = at.saturating_duration_since(self.anim_start);
+        let next = self.scene.next_anim_change(&self.scene_input(false), after);
+        self.scene.anim_next = next;
+    }
+
+    /// 限帧闸门（[`Self::set_anim_gate`]）；None = 不限。
+    pub fn anim_gate(&self) -> Option<Instant> {
+        self.anim_gate
     }
 
     /// 本帧场景输入：内容、排布与生效主题都按引用借出，`above` 决定是否按上方专属布局搭。
@@ -2543,7 +2564,11 @@ impl CandidateWindow {
             self.pixel_release.deadline(),
             // 装饰换帧：只在可见时登记；事件切了画面待重绘时立即醒。
             self.anim_next_at().filter(|_| self.visible),
-            self.anim_due.then(Instant::now),
+            // 闸门没到不醒：外部宿主到闸门才取走这一帧。
+            self.anim_due.then(|| {
+                self.anim_gate
+                    .map_or_else(Instant::now, |g| g.max(Instant::now()))
+            }),
         ]
         .into_iter()
         .flatten()

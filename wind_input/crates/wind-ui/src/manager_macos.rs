@@ -71,8 +71,6 @@ pub struct Forwarder {
     /// 悬浮工具栏 / 软键盘（Linux）。
     #[cfg(all(target_os = "linux", ext_presenter))]
     panels: Panels,
-    /// 皮肤动画限帧：早于此刻不推换帧（设计 §17.1，上限 [`EXT_ANIM_MIN_INTERVAL`]）。
-    anim_gate: std::time::Instant,
     /// 穿透装饰层（macOS 子 panel）的 SHM 段与显示态，见 [`Forwarder::push_decor_layer`]。
     #[cfg(target_os = "macos")]
     decor_shm: Option<PosixSharedMemory>,
@@ -341,7 +339,6 @@ impl Forwarder {
             #[cfg(all(target_os = "linux", ext_presenter))]
             panels,
             menu,
-            anim_gate: std::time::Instant::now(),
             #[cfg(target_os = "macos")]
             decor_shm: None,
             #[cfg(target_os = "macos")]
@@ -925,18 +922,21 @@ impl Forwarder {
             let _ = self.win.take_anim_due();
             return;
         }
-        if now < self.anim_gate || !self.win.take_anim_due() {
+        // 限帧闸门在候选窗里（[`CandidateWindow::set_anim_gate`]）：只管换帧，悬停等到期照常。
+        if self.win.anim_gate().is_some_and(|g| now < g) || !self.win.take_anim_due() {
             return;
         }
-        self.anim_gate = now + EXT_ANIM_MIN_INTERVAL;
         let mut frame = None;
         self.win.repaint_anim_frame(|w| frame = w.render_frame());
         self.push_frame_out(frame, true);
+        // 推完再起算：相邻两帧的推送间隔不小于上限（渲染耗时不吃掉间隔）。
+        self.win
+            .set_anim_gate(std::time::Instant::now() + EXT_ANIM_MIN_INTERVAL);
     }
 
-    /// 主循环最多睡到这一刻；`None` = 只等命令。候选窗的到期时刻不早于限帧闸门。
+    /// 主循环最多睡到这一刻；`None` = 只等命令。
     fn next_deadline(&self) -> Option<std::time::Instant> {
-        let cand = self.win.next_deadline().map(|d| d.max(self.anim_gate));
+        let cand = self.win.next_deadline();
         #[cfg(all(target_os = "linux", ext_presenter))]
         let panels = self.panels.next_deadline(std::time::Instant::now());
         #[cfg(not(all(target_os = "linux", ext_presenter)))]
@@ -1761,6 +1761,11 @@ mod tests {
                 .all(|(_, fl)| fl & SharedRenderHeader::FLAG_ANIM_FRAME != 0),
             "换帧都带 FLAG_ANIM_FRAME"
         );
+        let gaps: Vec<_> = frames.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(
+            gaps.iter().all(|g| *g >= EXT_ANIM_MIN_INTERVAL),
+            "相邻两帧间隔不小于限帧上限：{gaps:?}"
+        );
         assert!(colors.len() >= 2, "装饰像素没有换帧：{colors:?}");
         // 换帧不重推 tooltip / 候选窗矩形（只有候选帧、命中矩形、皮肤区域三种）。
         assert!(cap.lock().unwrap().iter().all(|(_, x)| matches!(
@@ -1768,15 +1773,19 @@ mod tests {
             CMD_HOST_RENDER_FRAME | CMD_CANDIDATE_RECTS | CMD_CANDIDATE_SKIN
         )));
         // 闸门没到：换帧到期也不推，到期时刻不早于闸门。
-        f.anim_gate = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        f.win
+            .set_anim_gate(std::time::Instant::now() + std::time::Duration::from_secs(5));
         cap.lock().unwrap().clear();
         let spin = std::time::Instant::now() + std::time::Duration::from_millis(150);
         while std::time::Instant::now() < spin {
             f.tick();
         }
         assert!(cap.lock().unwrap().is_empty(), "闸门内推了帧");
-        assert!(f.next_deadline().is_some_and(|d| d >= f.anim_gate));
-        f.anim_gate = std::time::Instant::now();
+        assert!(
+            f.next_deadline()
+                .is_some_and(|d| d >= f.win.anim_gate().unwrap())
+        );
+        f.win.set_anim_gate(std::time::Instant::now());
         // 收起后不再唤醒、不再推帧。
         f.handle(UiCommand::HideCandidates);
         cap.lock().unwrap().clear();
@@ -1791,6 +1800,76 @@ mod tests {
             |_| {},
         );
         assert!(cap.lock().unwrap().is_empty());
+    }
+
+    /// 两帧各 33 ms 的循环：周期 66 ms 恰是闸门间隔，只在闸门处取样会回回采到同一帧。唤醒时刻
+    /// 取「闸门之后第一个换成不同帧的边界」，推出去的帧要两色交替（设计 §17.1）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn skin_animation_alternates_frames_when_period_matches_gate() {
+        let blink = wind_scene::image_cache::anim_fixtures::apng(
+            8,
+            8,
+            &[
+                ([255, 0, 0, 255].repeat(64), 33),
+                ([0, 255, 0, 255].repeat(64), 33),
+            ],
+        );
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk4".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "blink",
+            Some(&blink),
+            "",
+        ))));
+        show_two(&mut f);
+        let (_, _, decor, _) = {
+            let last = cap
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(_, x)| cmd_of(x) == CMD_CANDIDATE_SKIN)
+                .unwrap()
+                .1
+                .clone();
+            last_skin(&Arc::new(Mutex::new(vec![last]))).unwrap()
+        };
+        let pass = decor
+            .iter()
+            .find(|d| d.1 == wind_ipc::protocol::skin::SKIN_HIT_PASS)
+            .unwrap()
+            .3;
+        let (px, py) = center(pass);
+        let count = |cap: &Timed| {
+            cap.lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, x)| cmd_of(x) == CMD_HOST_RENDER_FRAME)
+                .count()
+        };
+        let mut seen = count(&cap);
+        let mut seq = Vec::new();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(800),
+            |f| {
+                let n = count(&cap);
+                if n > seen {
+                    seen = n;
+                    let shm = f.shm.as_ref().unwrap();
+                    let w = shm.read_header().width as i32;
+                    let o = ((py * w + px) * 4) as usize;
+                    seq.push(shm.pixels()[o..o + 4].to_vec());
+                }
+            },
+        );
+        assert!(seq.len() >= 4, "800ms 只推了 {} 帧", seq.len());
+        assert!(
+            seq.windows(2).all(|w| w[0] != w[1]),
+            "相邻换帧画面相同（采样混叠）：{seq:?}"
+        );
     }
 
     #[cfg(target_os = "linux")]
