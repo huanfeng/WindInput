@@ -267,6 +267,8 @@ final class CandidatePanel: NSPanel {
     /// 下一次 `show` 要贴的穿透装饰层 (nil = 本帧没有)。服务端先推它、再推候选帧。
     private var decorImage: NSImage?
     private var decorOrder: NSWindow.OrderingMode?
+    /// 最近一帧穿透装饰是否排在候选窗下面 (`show` 时按皮肤区域记下)。
+    private var decorBelow = false
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
@@ -348,15 +350,22 @@ final class CandidatePanel: NSPanel {
             self.setFrameOrigin(origin)
         }
         self.orderFrontRegardless()
-        syncDecor(size: size, below: skin.splitDecorBelow)
+        decorBelow = skin.splitDecorBelow
+        syncDecor(size: size, below: decorBelow)
         // 系统原生窗口阴影按内容 alpha 形状计算且会缓存；内容/尺寸变化后必须 invalidate，
         // 否则阴影残留旧形状或退化为矩形（候选窗为透明背景 + 圆角位图，需据新形状重算）。
         if self.hasShadow && !inPlace { self.invalidateShadow() }
     }
 
-    /// 存下一帧的穿透装饰层像素 (nil = 没有)，随后的 `show` 贴上。
+    /// 存穿透装饰层像素 (nil = 没有)。候选窗在屏上且尺寸相符就立刻换上——换帧时主层没变，服务端
+    /// 只推这一层、不推候选帧；尺寸不符 (内容变了) 则等随后的候选帧，由 `show` 一起贴。
     func setDecor(image: NSImage?) {
         decorImage = image
+        guard isVisible else { return }
+        let size = content.frame.size
+        if image == nil || image?.size == size {
+            syncDecor(size: size, below: decorBelow)
+        }
     }
 
     /// 让穿透装饰子 panel 与候选窗同原点同尺寸，按 `below` 排在候选窗下面或上面。

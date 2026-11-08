@@ -76,6 +76,11 @@ pub struct Forwarder {
     decor_shm: Option<PosixSharedMemory>,
     #[cfg(target_os = "macos")]
     decor_shown: bool,
+    /// 上一次推出去的主层 / 穿透装饰层像素哈希（macOS）：换帧时没变的那层不推。收起时清。
+    #[cfg(target_os = "macos")]
+    main_hash: Option<u64>,
+    #[cfg(target_os = "macos")]
+    decor_hash: Option<u64>,
 }
 
 /// 外部宿主上皮肤动画相邻两帧的最小间隔：Windows 上限 30 帧/秒，这里减半（设计 §17.1）。
@@ -343,6 +348,10 @@ impl Forwarder {
             decor_shm: None,
             #[cfg(target_os = "macos")]
             decor_shown: false,
+            #[cfg(target_os = "macos")]
+            main_hash: None,
+            #[cfg(target_os = "macos")]
+            decor_hash: None,
         }
     }
 
@@ -1069,12 +1078,24 @@ impl Forwarder {
                 #[cfg(target_os = "macos")]
                 let pass_layer = f.pass_layer;
                 let buf = f.buf;
+                // macOS 穿透装饰拆在独立层：换帧多半只动它，主层像素不变就只推装饰层。
+                #[cfg(target_os = "macos")]
+                let main_hash = pixel_hash(&buf);
+                #[cfg(target_os = "macos")]
+                if anim && self.visible && self.main_hash == Some(main_hash) {
+                    self.push_decor_layer(pass_layer, (sx, sy, w, h), scale, anim);
+                    return;
+                }
                 // 先写 SHM 像素并取 seq；shm 建失败则整帧放弃——
                 // 不能只推命中矩形/tooltip 而无底帧，否则 .app 拿到无像素的命中区（不一致）。
                 let seq = match self.ensure_shm() {
                     Some(shm) => shm.write_frame(sx, sy, w, h, &buf),
                     None => return,
                 };
+                #[cfg(target_os = "macos")]
+                {
+                    self.main_hash = Some(main_hash);
+                }
                 let mut flags =
                     SharedRenderHeader::FLAG_VISIBLE | SharedRenderHeader::FLAG_CONTENT_READY;
                 if soft {
@@ -1090,7 +1111,7 @@ impl Forwarder {
                 // 设输入区 / 阴影，子 panel 也已有这一帧的像素。
                 self.sink.push_frame(&skin);
                 #[cfg(target_os = "macos")]
-                self.push_decor_layer(pass_layer, (sx, sy, w, h), scale);
+                self.push_decor_layer(pass_layer, (sx, sy, w, h), scale, anim);
                 self.sink.push_frame(&encode_host_render_frame(
                     seq,
                     sx,
@@ -1134,7 +1155,10 @@ impl Forwarder {
         // 候选窗自己的收起簿记：皮肤动画停、`hide` 事件、下次显示重新落位（同 Windows `hide`）。
         self.win.hide();
         #[cfg(target_os = "macos")]
-        self.push_decor_layer(None, (0, 0, 0, 0), 1.0);
+        {
+            self.push_decor_layer(None, (0, 0, 0, 0), 1.0, false);
+            self.main_hash = None;
+        }
         self.overlays.hide(
             &*self.sink,
             wind_ipc::protocol::overlay::OVERLAY_KIND_TOOLTIP,
@@ -1148,6 +1172,15 @@ impl Forwarder {
     }
 }
 
+/// 像素哈希：判断一层换帧前后变没变。
+#[cfg(target_os = "macos")]
+fn pixel_hash(px: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    px.hash(&mut h);
+    h.finish()
+}
+
 #[cfg(target_os = "macos")]
 impl Forwarder {
     /// 穿透装饰层（设计 §17.3）：写 `_DEC` 段、推 `OVERLAY_KIND_DECOR` 帧，`.app` 贴进候选窗的子 panel。
@@ -1158,10 +1191,12 @@ impl Forwarder {
         layer: Option<(Vec<u8>, bool)>,
         at: (i32, i32, u32, u32),
         scale: f32,
+        anim: bool,
     ) {
         use wind_ipc::protocol::overlay::{OVERLAY_KIND_DECOR, OVERLAY_PLACE_EXACT};
         // 垫在候选窗下面还是盖在上面，`.app` 按 `CMD_CANDIDATE_SKIN` 里拆层装饰的 UNDER 位定。
         let Some((pixels, _below)) = layer else {
+            self.decor_hash = None;
             if std::mem::take(&mut self.decor_shown) {
                 let seq = self
                     .decor_shm
@@ -1178,6 +1213,11 @@ impl Forwarder {
             return;
         };
         let (x, y, w, h) = at;
+        // 换帧时这层没变（动的是主层里的装饰）：不重推。
+        let hash = pixel_hash(&pixels);
+        if anim && self.decor_shown && self.decor_hash == Some(hash) {
+            return;
+        }
         if pixels.len() > SHM_MAX - SharedRenderHeader::SIZE {
             tracing::warn!("skin: 穿透装饰层 {w}x{h} 过大，丢弃");
             return;
@@ -1206,6 +1246,7 @@ impl Forwarder {
                 ..Default::default()
             }));
         self.decor_shown = true;
+        self.decor_hash = Some(hash);
     }
 }
 
@@ -1647,13 +1688,13 @@ mod tests {
     }
 
     /// 带到达时刻的推帧记录。
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     type Timed = Arc<Mutex<Vec<(std::time::Instant, Vec<u8>)>>>;
 
     /// 记下每帧到达时刻的 sink（动画用例）。
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct TimedSink(Timed);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl wind_bridge::HostRenderSink for TimedSink {
         fn push_frame(&self, f: &[u8]) {
             self.0
@@ -1664,7 +1705,7 @@ mod tests {
     }
 
     /// 按 `next_deadline` 睡、醒来 `tick`，直到 `until`（主循环没有命令时的行为）。每轮之后调 `each`。
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn drive_until(
         f: &mut Forwarder,
         until: std::time::Instant,
@@ -1683,7 +1724,7 @@ mod tests {
     }
 
     /// 四帧（红 / 绿 / 蓝 / 白）各 40 ms 的 8×8 APNG：25 帧/秒，快过限帧闸门。
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn fast_apng() -> Vec<u8> {
         let solid = |c: [u8; 4]| (c.repeat(64), 40);
         wind_scene::image_cache::anim_fixtures::apng(
@@ -1800,6 +1841,41 @@ mod tests {
             |_| {},
         );
         assert!(cap.lock().unwrap().is_empty());
+    }
+
+    /// macOS 穿透装饰拆在独立层：换帧时主层像素不变就只推装饰层，装饰层不变也不推。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_anim_frames_push_only_the_changed_layer() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk5".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "anim",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        cap.lock().unwrap().clear();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(500),
+            |_| {},
+        );
+        let v = cap.lock().unwrap();
+        let decor = v
+            .iter()
+            .filter(|(_, x)| {
+                cmd_of(x) == CMD_OVERLAY_FRAME
+                    && u32::from_le_bytes(x[8..12].try_into().unwrap())
+                        == wind_ipc::protocol::overlay::OVERLAY_KIND_DECOR
+            })
+            .count();
+        assert!(decor >= 2, "穿透装饰层在换帧：{decor}");
+        assert!(
+            v.iter().all(|(_, x)| cmd_of(x) == CMD_OVERLAY_FRAME),
+            "主层没变不推候选帧 / 命中矩形 / 皮肤区域"
+        );
     }
 
     /// 两帧各 33 ms 的循环：周期 66 ms 恰是闸门间隔，只在闸门处取样会回回采到同一帧。唤醒时刻

@@ -111,6 +111,21 @@ final class CandidateSelectCodecTests: XCTestCase {
         XCTAssertEqual(half.frame, SkinRect(x: 5, y: 5, w: 50, h: 20))
         XCTAssertTrue(half.blocksDrag(px: 2, py: 2))
         XCTAssertFalse(half.blocksDrag(px: 7, py: 7))
+        // 非整数倍：向外取整，装饰边缘不缩进去。
+        let odd = CandidateSkin(flags: CandidateSkin.flagActive, decor: [
+            CandidateSkin.Decor(index: 0, hit: CandidateSkin.hitBlock, flags: 0,
+                                rect: SkinRect(x: 3, y: 3, w: 4, h: 4)),
+        ]).scaled(by: 2)
+        XCTAssertEqual(odd.decor[0].rect, SkinRect(x: 1, y: 1, w: 3, h: 3))
+        // 1.5 倍：(10, 10, 30, 15) → [6.67, 26.67) × [6.67, 16.67) 外包。
+        let frac = CandidateSkin(flags: CandidateSkin.flagActive,
+                                 frame: SkinRect(x: 10, y: 10, w: 30, h: 15)).scaled(by: 1.5)
+        XCTAssertEqual(frac.frame, SkinRect(x: 6, y: 6, w: 21, h: 11))
+    }
+
+    func testSkinRectContainsDoesNotOverflow() {
+        let r = SkinRect(x: Int32.max - 1, y: 0, w: 10, h: 1)
+        XCTAssertTrue(r.contains(px: CGFloat(Int32.max), py: 0))
     }
 
     func testSplitDecorAboveWhenAnyIsOverFrame() {

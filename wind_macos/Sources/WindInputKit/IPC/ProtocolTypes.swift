@@ -251,10 +251,20 @@ public struct SkinRect: Equatable {
         self.x = x; self.y = y; self.w = w; self.h = h
     }
     public func contains(px: CGFloat, py: CGFloat) -> Bool {
-        px >= CGFloat(x) && px < CGFloat(x + w) && py >= CGFloat(y) && py < CGFloat(y + h)
+        // 在 CGFloat 里加：Int32 相加溢出会直接 trap。
+        px >= CGFloat(x) && px < CGFloat(x) + CGFloat(w)
+            && py >= CGFloat(y) && py < CGFloat(y) + CGFloat(h)
     }
-    func scaled(by s: Int32) -> SkinRect {
-        SkinRect(x: x / s, y: y / s, w: w / s, h: h / s)
+    /// 设备像素 → 逻辑点：浮点除、向外取整 (左上取 floor、右下取 ceil)，不让装饰边缘缩进去。
+    func scaled(by s: CGFloat) -> SkinRect {
+        let x0 = (CGFloat(x) / s).rounded(.down), y0 = (CGFloat(y) / s).rounded(.down)
+        let x1 = ((CGFloat(x) + CGFloat(w)) / s).rounded(.up)
+        let y1 = ((CGFloat(y) + CGFloat(h)) / s).rounded(.up)
+        return SkinRect(x: Self.clamp(x0), y: Self.clamp(y0),
+                        w: Self.clamp(x1 - x0), h: Self.clamp(y1 - y0))
+    }
+    private static func clamp(_ v: CGFloat) -> Int32 {
+        Int32(max(CGFloat(Int32.min), min(CGFloat(Int32.max), v)))
     }
 }
 
@@ -306,10 +316,10 @@ public struct CandidateSkin: Equatable {
         }
     }
 
-    /// 设备像素 → 逻辑点 (与 `CandidatePanelHost.scaleRects` 同一取整)。
+    /// 设备像素 → 逻辑点 (向外取整，见 `SkinRect.scaled`)。
     public func scaled(by scale: CGFloat) -> CandidateSkin {
-        let s = Int32(scale)
-        if s <= 1 { return self }
+        guard scale.isFinite, scale > 1 else { return self }
+        let s = scale
         return CandidateSkin(flags: flags, frame: frame.scaled(by: s), decor: decor.map {
             Decor(index: $0.index, hit: $0.hit, flags: $0.flags, rect: $0.rect.scaled(by: s))
         })
