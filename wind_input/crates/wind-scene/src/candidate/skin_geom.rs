@@ -1621,6 +1621,52 @@ mod tests {
         assert_eq!(decor_rect(&d, frame, content), (10, 60, 5, 5));
     }
 
+    /// 输入区退化形（§17.2）：窗体 + block / drag 装饰，穿透装饰与零面积的不进。
+    #[test]
+    fn coarse_input_rects_leave_out_pass_decor() {
+        let with = |hit, index| DecorGeom {
+            hit,
+            index,
+            ..decor("frame.top_left", Pos9::TOP_LEFT, (0.0, 0.0), 8, 8)
+        };
+        let g = SkinGeom {
+            variant_key: (false, false),
+            variant: "horizontal",
+            frame_ref: String::new(),
+            band_f: 1.0,
+            render_scale: 1.0,
+            frame_path: String::new(),
+            frame_k: 1.0,
+            sx: Stretch::Fixed,
+            sy: Stretch::Fixed,
+            min_w: 0.0,
+            min_h: 0.0,
+            insets: Edges::default(),
+            placement: Default::default(),
+            slots: None,
+            parts: Vec::new(),
+            decor: vec![
+                with(DecorHit::Block, 0),
+                with(DecorHit::Pass, 1),
+                with(DecorHit::Drag, 2),
+                with(DecorHit::Block, 3),
+            ],
+            frame: (24, 24, 60, 40),
+            decor_rects: vec![
+                (0, 0, 24, 24),
+                (84, 0, 24, 24),
+                (84, 64, 8, 8),
+                (0, 64, 0, 8),
+            ],
+            margins: (24, 24, 24, 24),
+            k: 1.0,
+        };
+        assert_eq!(
+            g.coarse_input_rects(),
+            vec![[24, 24, 60, 40], [0, 0, 24, 24], [84, 64, 8, 8]]
+        );
+    }
+
     #[test]
     fn raw_stride_maps_kept_frames_back_unless_misaligned() {
         use crate::image_cache::AnimLayout;
