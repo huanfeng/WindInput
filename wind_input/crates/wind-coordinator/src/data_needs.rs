@@ -134,7 +134,12 @@ impl DataNeeds {
     /// - 拆字不受任何档门控，模板里写了就要。
     /// - 两个总开关在上面这些之上：`ui.comment.enabled` 关 ⇒ 注释模板都不算；
     ///   `ui.tooltip.enabled` 关 ⇒ 悬停段都不算（设计 §4.3）。
-    pub(crate) fn derive(cfg: &Config, lib: &CommentLibrary, facts: &SchemaFacts) -> Self {
+    pub(crate) fn derive(
+        cfg: &Config,
+        lib: &CommentLibrary,
+        facts: &SchemaFacts,
+        overlay: wind_config::ConfigOverlay,
+    ) -> Self {
         let tip = crate::tooltip::CompiledTooltip::compile(&cfg.ui.tooltip);
         let tip_any = |names: &[&str]| names.iter().any(|n| tip.references(n));
 
@@ -151,7 +156,8 @@ impl DataNeeds {
         let correct_pinyin = comment_any(&[CORRECT_PINYIN_VAR]) || tip_any(&[CORRECT_PINYIN_VAR]);
 
         let tip_code = tip_any(&["word_code", "code_source"]) || tip_any(CODE_REV_VARS);
-        let mobile = crate::handle_assoc::use_mobile_overrides().then_some(&cfg.mobile.association);
+        let mobile =
+            (overlay == wind_config::ConfigOverlay::Mobile).then_some(&cfg.mobile.association);
         let assoc_on = wind_assoc::AssocConfig::from_config(&cfg.input.association, mobile).kind
             != wind_assoc::AssocKind::Off;
         let (s2t, t2s) = cfg.input.conversion_directions();
@@ -179,6 +185,7 @@ impl crate::coordinator::Coordinator {
             &self.rt().config,
             &self.comment_lib(),
             &SchemaFacts::collect(&self.engine_mgr),
+            self.profile.config_overlay,
         )
     }
 }
@@ -229,7 +236,7 @@ mod tests {
     fn derive_in(sys: &SystemComments, c: &Config, facts: &SchemaFacts) -> DataNeeds {
         let (lib, warnings) = CommentLibrary::build(sys, &c.ui.comment);
         assert!(warnings.is_empty(), "{warnings:?}");
-        DataNeeds::derive(c, &lib, facts)
+        DataNeeds::derive(c, &lib, facts, wind_config::ConfigOverlay::Base)
     }
 
     /// 默认的方案事实：只装了五笔（码表）。
@@ -1282,6 +1289,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         c.handle_key_event(&key(0x1B));
         for ch in "ZONGGUO".chars() {

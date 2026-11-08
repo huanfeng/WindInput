@@ -1,0 +1,91 @@
+# 渲染金样的皮肤夹具（render_golden.rs）。图片全部由测试现场程序生成（中性几何形状与纯色），
+# 不入库；这里只有参数。改这里或生成函数都会改变金样，须按 render_golden 模块文档重录。
+#
+# 覆盖：横排（多拉伸带 tile/round/stretch、srcset、三档 z、block / pass / drag、伸出窗体的外扩、
+# 对齐点带偏移、avoid 保护带、clamp = all）、竖排（整轴拉伸 + 单带）、横排嵌入变体。
+
+[meta]
+name = "皮肤夹具"
+version = "1.0"
+
+[item.selected]
+background = "#3070C040"
+
+[item.hover]
+background = "#00000014"
+
+[skin]
+density = 2
+
+[skin.horizontal.frame]
+image = "frame_h.png"
+srcset = [{ image = "frame_h_lo.png", density = 1 }]
+stretch_x = [{ from = 16, to = 24, fill = "tile" }, [40, 48]]
+stretch_y = [{ from = 16, to = 32, fill = "stretch" }]
+
+[skin.horizontal.content]
+left = 12
+top = 10
+right = 14
+bottom = 8
+
+[[skin.horizontal.decor]]
+image = "disc.png"
+anchor = "frame.bottom_left"
+pivot = "center"
+offset = [4, -4]
+z = -1
+
+[[skin.horizontal.decor]]
+image = "diamond.png"
+anchor = "content.top_right"
+pivot = "top_right"
+z = 10
+hit = "block"
+
+[[skin.horizontal.decor]]
+image = "bar.png"
+anchor = "frame.top_right"
+pivot = "bottom_right"
+offset = [-8, 4]
+z = 150
+hit = "pass"
+opacity = 0.75
+
+[skin.horizontal.placement]
+caret = { anchor = "frame.top_left", offset = [16, 8] }
+caret_above = "frame.bottom_left"
+avoid_caret = { before = 60, after = 20 }
+clamp = "all"
+
+[skin.vertical.frame]
+image = "frame_v.png"
+stretch_y = [[16, 48]]
+
+[skin.vertical.content]
+left = 10
+top = 12
+right = 10
+bottom = 12
+
+[[skin.vertical.decor]]
+image = "bar.png"
+anchor = "frame.top_left"
+pivot = "bottom_left"
+offset = [6, 2]
+z = 150
+
+[skin.horizontal_embedded.frame]
+image = "frame_h.png"
+stretch_x = [[8, 56]]
+stretch_y = [[12, 36]]
+
+[skin.horizontal_embedded.content]
+left = 8
+top = 8
+right = 8
+bottom = 8
+
+[skin.horizontal_embedded.placement]
+caret = { anchor = "content.top_left", offset = [0, -4] }
+avoid_caret = false

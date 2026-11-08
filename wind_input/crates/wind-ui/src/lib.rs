@@ -29,7 +29,6 @@ pub mod dpi;
 pub mod ext_panel;
 #[cfg(target_os = "macos")]
 pub mod global_hotkey_macos;
-pub mod image_cache;
 pub mod input_diag_hud;
 /// macOS 输入源切换（TISSelectInputSource）。对位 Windows 的 DirectSwitchHotkeys 注册表。
 #[cfg(target_os = "macos")]
@@ -61,14 +60,15 @@ pub mod soft_keyboard;
 /// macOS 软键盘面板的主线程宿主（AppKit 只能在主线程碰，forwarder 是工作线程）。
 #[cfg(target_os = "macos")]
 pub mod softkeyboard_host_macos;
-mod span_runs;
+use wind_scene::span_runs;
+// 渲染的平台无关部分已迁入 wind-scene，原路径再导出（`view` 另有本 crate 的 mpsc 辅助，见该模块）。
+pub use wind_scene::{image_cache, skin, skin_anim, theme_assets};
 pub mod status_tip;
 pub mod sys;
 /// macOS 系统明暗变更监听。对位 Windows 消息泵里的 `WM_SETTINGCHANGE`。
 #[cfg(target_os = "macos")]
 pub mod system_theme_macos;
 pub mod text;
-pub mod theme_assets;
 pub mod toast;
 pub mod toolbar;
 pub mod toolbar_gate;

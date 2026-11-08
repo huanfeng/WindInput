@@ -856,7 +856,7 @@ BOOL CIPCClient::_SendBinaryMessage(uint16_t command, const void* payload, uint3
 // ============================================================================
 
 BOOL CIPCClient::SendKeyEvent(uint32_t keyCode, uint32_t scanCode, uint32_t modifiers, uint8_t eventType,
-                              uint8_t toggles, uint16_t eventSeq, uint16_t prevChar)
+                              uint8_t toggles, uint16_t eventSeq, uint16_t prevChar, uint16_t seqChar)
 {
     if (!_ShouldAttemptOperation())
     {
@@ -877,9 +877,11 @@ BOOL CIPCClient::SendKeyEvent(uint32_t keyCode, uint32_t scanCode, uint32_t modi
     payload.toggles = toggles;
     payload.eventSeq = eventSeq;
     payload.prevChar = prevChar;
+    payload.seqChar = seqChar;
 
-    _LogDebug(L"Sending key event: keyCode=0x%X, mods=0x%X, type=%d, toggles=0x%X, seq=%d, prevChar=0x%X",
-              keyCode, modifiers, eventType, toggles, eventSeq, prevChar);
+    // seqChar 只记类别不记内容（字母一律报 'a'），但上屏文本的末字仍是用户输入，日志只标有无。
+    _LogDebug(L"Sending key event: keyCode=0x%X, mods=0x%X, type=%d, toggles=0x%X, seq=%d, prevChar=0x%X, seqKnown=%d",
+              keyCode, modifiers, eventType, toggles, eventSeq, prevChar, (seqChar != 0 && seqChar != 0xFFFF) ? 1 : 0);
 
     if (!_SendBinaryMessage(CMD_KEY_EVENT, &payload, sizeof(payload)))
         return FALSE;
@@ -1536,6 +1538,7 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             response.modeChanged = (commitHeader->flags & COMMIT_FLAG_MODE_CHANGED) != 0;
             response.chineseMode = (commitHeader->flags & COMMIT_FLAG_CHINESE_MODE) != 0;
             response.replacingHeld = (commitHeader->flags & COMMIT_FLAG_REPLACING_HELD) != 0;
+            response.assocSession = (commitHeader->flags & COMMIT_FLAG_ASSOC_SESSION) != 0;
 
             // Extract text
             // 边界检查统一用减法形式（len <= size - offset）：textLength 是对端可控的

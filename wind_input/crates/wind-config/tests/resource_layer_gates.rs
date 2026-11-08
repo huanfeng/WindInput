@@ -89,8 +89,9 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/wind-mobile/src/lib.rs",
-        1,
-        "scan_installed_schemas 已按层序（在 resource_layers_with 的循环体内拼 schemas）",
+        2,
+        "scan_installed_schemas 已按层序（在 resource_layers_with 的循环体内拼 schemas）；\
+         scheme_dirs 同样在 resource_layers_named_with 的循环体内逐层拼 schemas（方案包导入/删除的目标）",
     ),
     (
         "crates/wind-webdata/src/lib.rs",

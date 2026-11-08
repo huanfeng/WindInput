@@ -55,6 +55,8 @@ fn spawn_screenshot_work(tag: &'static str, work: impl FnOnce() + Send + 'static
 
 pub struct Forwarder {
     win: CandidateWindow,
+    /// 设置端预览的待画队列：命令通道空着时才画一张（见 [`run_loop`]）。
+    previews: crate::candidate_window::PreviewQueue,
     shm: Option<PosixSharedMemory>,
     sink: Arc<dyn HostRenderSink>,
     suffix: String,
@@ -319,6 +321,7 @@ impl Forwarder {
         let panels = Panels::new(ev_tx.clone());
         Self {
             win,
+            previews: Default::default(),
             shm: None,
             sink,
             suffix,
@@ -385,6 +388,7 @@ impl Forwarder {
                 preedit,
                 preedit_caret,
                 preedit_host_owned,
+                composing: _,
                 mode_label,
                 candidates,
                 selected,
@@ -600,6 +604,11 @@ impl Forwarder {
             UiCommand::SetCandidateSwapWhenAbove(v) => self.win.set_swap_preedit_when_above(v),
             UiCommand::SetCandidateOffset { x, y } => self.win.set_user_offset(x, y),
             UiCommand::SetCandidateShadow(on) => self.win.set_theme_shadow(on),
+            UiCommand::RenderCandidatePreview(req) => self.previews.push(req),
+            // 本平台不播放皮肤动画（系统动画开关的探测恒为关，装饰停在初始状态首帧、事件不切换）；
+            // 开关与事件照样转给候选窗，播放落地时不必再接线。
+            UiCommand::SetThemeAnimation(on) => self.win.set_theme_animation(on),
+            UiCommand::SkinSignal(sig) => self.win.skin_signal(sig),
             UiCommand::SetPagerInPreedit(v) => self.win.set_pager_in_preedit(v),
             UiCommand::SetPagerDisplay { h, v } => self.win.set_pager_display(h, v),
             UiCommand::SetPageNumberDisplay { h, v } => self.win.set_page_number_display(h, v),
@@ -1078,6 +1087,25 @@ impl Forwarder {
     }
 }
 
+impl Forwarder {
+    /// 有待画的预览时不阻塞等命令：通道里有命令先取命令（`Some(Some)`），通道空了就画一张预览
+    /// （`Some(None)`，调用方接着转下一轮）。没有待画的预览返回 None，由调用方照常阻塞等待。
+    /// 通道已断开时也返回 None，交给阻塞等待那一路去发现。
+    fn next_queued_cmd(&mut self, rx: &Receiver<UiCommand>) -> Option<Option<UiCommand>> {
+        if self.previews.is_empty() {
+            return None;
+        }
+        match rx.try_recv() {
+            Ok(cmd) => Some(Some(cmd)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.previews.render_one(false, &mut self.win);
+                Some(None)
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        }
+    }
+}
+
 pub fn forwarder_thread(
     rx: Receiver<UiCommand>,
     ev_tx: Sender<UiEvent>,
@@ -1095,7 +1123,15 @@ pub fn forwarder_thread(
 /// （`manager.rs` 的消息循环负责的那件事）就一次都不会发生。
 #[cfg(target_os = "macos")]
 fn run_loop(fwd: &mut Forwarder, rx: &Receiver<UiCommand>) {
-    while let Some(cmd) = crate::view::recv_evicting_idle(rx) {
+    loop {
+        let cmd = match fwd.next_queued_cmd(rx) {
+            Some(Some(cmd)) => cmd,
+            Some(None) => continue,
+            None => match crate::view::recv_evicting_idle(rx) {
+                Some(cmd) => cmd,
+                None => break,
+            },
+        };
         if matches!(cmd, UiCommand::Shutdown) {
             break;
         }
@@ -1110,6 +1146,15 @@ fn run_loop(fwd: &mut Forwarder, rx: &Receiver<UiCommand>) {
     use crate::view::Recv;
     loop {
         fwd.tick();
+        match fwd.next_queued_cmd(rx) {
+            Some(Some(UiCommand::Shutdown)) => break,
+            Some(Some(cmd)) => {
+                fwd.handle(cmd);
+                continue;
+            }
+            Some(None) => continue,
+            None => {}
+        }
         match crate::view::recv_evicting_idle_until(rx, fwd.next_deadline()) {
             Recv::Cmd(UiCommand::Shutdown) | Recv::Disconnected => break,
             Recv::Cmd(cmd) => fwd.handle(cmd),
@@ -1166,6 +1211,7 @@ mod tests {
             preedit: "a".into(),
             preedit_caret: 1,
             preedit_host_owned: false,
+            composing: false,
             mode_label: "".into(),
             candidates: vec![item("中"), item("国")],
             selected: 0,
@@ -1213,6 +1259,7 @@ mod tests {
             preedit: "a".into(),
             preedit_caret: 1,
             preedit_host_owned: false,
+            composing: false,
             mode_label: "".into(),
             candidates: vec![item("中"), item("国")],
             selected: 0,
@@ -1304,6 +1351,7 @@ mod tests {
             preedit: "a".into(),
             preedit_caret: 1,
             preedit_host_owned: false,
+            composing: false,
             mode_label: "".into(),
             candidates: vec![item("中"), item("国")],
             selected: 0,
@@ -1432,6 +1480,7 @@ mod tests {
             preedit: "a".into(),
             preedit_caret: 1,
             preedit_host_owned: false,
+            composing: false,
             mode_label: "".into(),
             candidates: vec![item("中")],
             selected: 0,
@@ -2036,7 +2085,11 @@ mod tests {
             alt_y: i32,
             anchor: u32,
             margin: i32,
+            /// 内容盒高（位图**像素**），与 `x`/`y`（宿主**点**）不同单位，比较前用 `scale` 折算。
+            content_h: u32,
             duration: i32,
+            /// 位图像素 / 点。取自运行机器真实显示器：Retina 为 2，CI runner 为 1。
+            scale: f32,
         }
 
         fn overlays(cap: &Arc<Mutex<Vec<Vec<u8>>>>, kind: u32) -> Vec<Meta> {
@@ -2059,7 +2112,9 @@ mod tests {
                         alt_y: i(36),
                         anchor: u(40),
                         margin: i(44),
+                        content_h: u(60),
                         duration: i(64),
+                        scale: f32::from_le_bytes(p[68..72].try_into().unwrap()),
                     }
                 })
                 .filter(|m| m.kind == kind)
@@ -2137,11 +2192,15 @@ mod tests {
             let m = overlays(&cap, OVERLAY_KIND_STATUS);
             let m = m.last().expect("应推出状态泡");
             assert_eq!(m.place, OVERLAY_PLACE_FOLLOW_CANDIDATE);
+            // `m.y` 是内容盒左上（点），高度要从位图像素折回点再比：曾直接加位图高 `m.h`
+            // （像素，含软阴影扩边），1 倍屏的 CI 上碰巧成立，Retina 机器上恒失败。
+            let content_bottom = m.y + crate::overlay_host::to_host(m.content_h as f32, m.scale);
             assert!(
-                m.y + m.h as i32 <= 200,
-                "应在光标行顶之上：y={} h={}",
+                content_bottom <= 200,
+                "应在光标行顶之上：y={} content_h={}px scale={}",
                 m.y,
-                m.h
+                m.content_h,
+                m.scale
             );
         }
 
@@ -2250,6 +2309,7 @@ mod tests {
                 preedit: "ni".into(),
                 preedit_caret: 2,
                 preedit_host_owned: false,
+                composing: false,
                 mode_label: "".into(),
                 candidates: vec![cand.clone()],
                 selected: 0,

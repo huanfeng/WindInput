@@ -2,9 +2,11 @@
 //!
 //! 与 Go 版本 `wind_input/internal/coordinator/` 对齐。
 
+pub(crate) mod auto_spacing;
 pub(crate) mod aux_code_source;
 pub(crate) mod candidate_grid;
 pub(crate) mod candidate_nav;
+pub mod candidate_preview;
 pub mod candidate_pull;
 #[cfg(test)]
 pub(crate) mod charset_test_support;
@@ -63,6 +65,7 @@ pub(crate) mod hint_text;
 pub mod host_services;
 pub mod hotkey_match;
 pub mod input_diag;
+pub mod input_profile;
 pub mod key_convert;
 pub mod key_gate;
 pub(crate) mod key_resolver;
@@ -79,6 +82,7 @@ pub mod schema_dicts_api;
 pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
 mod schema_ui;
+pub mod session_output;
 pub(crate) mod short_code_yield;
 pub mod stats;
 pub mod theme_query;
@@ -95,6 +99,8 @@ pub mod web_host;
 pub(crate) mod wildcard;
 
 pub use coordinator::{Coordinator, request_restart, restart_signal, set_settings_url_provider};
+pub use input_profile::InputProfile;
+pub use session_output::{CompositionView, SessionEvent, SessionStatus};
 pub use ui_sender::UiSender;
 
 /// 窗口所属进程 ID（0 = 查询失败）。

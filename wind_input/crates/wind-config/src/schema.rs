@@ -505,6 +505,18 @@ pub struct CodeTableSpec {
     /// 见 `docs/design/codetable-reverse-mode.md` §2。
     #[serde(default)]
     pub wildcard_single_only: Option<bool>,
+    /// 整句露几条（`None` = 跟随全局 `schema.codetable.sentence_count`）。
+    #[serde(default)]
+    pub sentence_count: Option<u8>,
+    /// 整句算几条（`None` = 跟随全局 `schema.codetable.sentence_max_count`）。
+    #[serde(default)]
+    pub sentence_max_count: Option<u8>,
+    /// 整句切换键（`None` = 跟随全局 `schema.codetable.sentence_cycle_key`）。
+    #[serde(default)]
+    pub sentence_cycle_key: Option<String>,
+    /// 整句语法模型权重（`None` = 跟随全局 `schema.codetable.sentence_grammar_weight`）。
+    #[serde(default)]
+    pub sentence_grammar_weight: Option<f64>,
     /// 方案级调频覆盖（`[engine.codetable.frequency]`）。
     ///
     /// 缺省 = 整段跟随基线。特殊方案的基线是内置默认（不继承全局 `schema.codetable`，

@@ -146,6 +146,7 @@ impl Coordinator {
             store,
             None, // 生产路径：override 目录由 EngineManager 取用户配置目录下的默认值
             storage_readonly,
+            crate::input_profile::InputProfile::desktop(),
         );
 
         // 鼠标事件处理线程：候选窗的点击/悬停/滚轮经此回到协调器
@@ -333,6 +334,21 @@ impl Coordinator {
         data_dir: Option<&Path>,
         override_dir: Option<std::path::PathBuf>,
     ) -> Arc<Self> {
+        Self::new_headless_with_override_profile(
+            config,
+            data_dir,
+            override_dir,
+            crate::input_profile::InputProfile::desktop(),
+        )
+    }
+
+    /// 同 [`Self::new_headless_with_override`]，另指定输入档位（测试用）。
+    pub fn new_headless_with_override_profile(
+        config: Config,
+        data_dir: Option<&Path>,
+        override_dir: Option<std::path::PathBuf>,
+        profile: crate::input_profile::InputProfile,
+    ) -> Arc<Self> {
         let (ui_tx, _rx) = std::sync::mpsc::channel();
         // 接收端当场丢弃，没有 UI 线程可唤醒。
         let ui_tx = crate::UiSender::without_wake(ui_tx);
@@ -341,7 +357,7 @@ impl Coordinator {
             suffix: String::new(),
             write_timeout_ms: 30_000,
         }));
-        Self::build(
+        Self::build_with_readonly(
             config,
             data_dir,
             push_server,
@@ -349,6 +365,8 @@ impl Coordinator {
             None,
             None,
             override_dir,
+            None,
+            profile,
         )
     }
 
@@ -376,6 +394,62 @@ impl Coordinator {
         data_dir: Option<&Path>,
         user_dir: Option<&Path>,
     ) -> (Arc<Self>, std::sync::mpsc::Receiver<UiCommand>) {
+        Self::new_headless_with_profile(
+            config,
+            data_dir,
+            user_dir,
+            crate::input_profile::InputProfile::desktop(),
+        )
+    }
+
+    /// 中立输出通道的构造器（移动端宿主用）：只发 [`crate::SessionEvent`]，不发桌面 `UiCommand`。
+    ///
+    /// 与 [`Self::new_headless_with_profile`] 同样开 redb store、同样无 UI 线程；区别是
+    /// 协调器带着 `session_tx`，于是 `notify_ui_update` 等出口改发中立事件，并跳过首显闸门、
+    /// 注释渲染与候选窗布局。内部仍有一条 `UiSender` 给其余约 250 处桌面发送点，接收端当场
+    /// 丢弃，那些发送在这里静默失败。
+    pub fn new_session(
+        config: Config,
+        data_dir: Option<&Path>,
+        user_dir: Option<&Path>,
+        profile: crate::input_profile::InputProfile,
+    ) -> (Arc<Self>, std::sync::mpsc::Receiver<crate::SessionEvent>) {
+        let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+        let ui_tx = crate::UiSender::without_wake(ui_tx);
+        drop(ui_rx);
+        let (session_tx, session_rx) = std::sync::mpsc::channel();
+        let push_server = Arc::new(PushServer::new(PushConfig {
+            suffix: String::new(),
+            write_timeout_ms: 30_000,
+        }));
+        let user_dir = user_dir.map(|d| d.to_path_buf());
+        let (store, storage_readonly) =
+            Self::open_user_store_checked(user_dir.as_deref(), StateChoice::Derived);
+        (
+            Self::build_with_session(
+                config,
+                data_dir,
+                push_server,
+                ui_tx,
+                user_dir,
+                store,
+                None,
+                storage_readonly,
+                profile,
+                Some(session_tx),
+            ),
+            session_rx,
+        )
+    }
+
+    /// 无头 + UI 通道 + 用户数据目录 + **指定输入档位**。移动端宿主与档位测试走这里；
+    /// 其余无头构造器一律是桌面档位。
+    pub fn new_headless_with_profile(
+        config: Config,
+        data_dir: Option<&Path>,
+        user_dir: Option<&Path>,
+        profile: crate::input_profile::InputProfile,
+    ) -> (Arc<Self>, std::sync::mpsc::Receiver<UiCommand>) {
         let (ui_tx, rx) = std::sync::mpsc::channel();
         // rx 交给测试直接读命令，不经 UI 线程，故无需唤醒通路。
         let ui_tx = crate::UiSender::without_wake(ui_tx);
@@ -397,6 +471,7 @@ impl Coordinator {
                 store,
                 None,
                 storage_readonly,
+                profile,
             ),
             rx,
         )

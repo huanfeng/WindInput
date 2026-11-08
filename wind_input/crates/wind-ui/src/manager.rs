@@ -206,6 +206,8 @@ impl UiManager {
         // 待处理命令队列：每轮排空通道并合并连续候选更新（只渲染最新一帧），
         // 避免长按翻页/连按方向键时 UpdateCandidates 堆积、松键后仍继续刷新。
         let mut pending: std::collections::VecDeque<UiCommand> = std::collections::VecDeque::new();
+        // 设置端预览的待画队列：只在命令通道排空的那一轮画一张，打字永远优先。
+        let mut previews = crate::candidate_window::PreviewQueue::default();
         'main: loop {
             // 状态提示气泡到期自动隐藏。
             // 用户正在与气泡交互（拖动 / 悬停其上 / 右键菜单打开）时**顺延**而非隐藏：
@@ -314,6 +316,22 @@ impl UiManager {
 
             // 推进鼠标悬停防抖（稳定后才发出 Hover）
             candidate_window.tick();
+            // 皮肤装饰换帧：按当前路径重绘一帧（host-render 有目标走 SHM，否则本地窗口）。
+            if candidate_window.take_anim_due() {
+                candidate_window.repaint_anim_frame(|w| {
+                    #[cfg(windows)]
+                    if let Some(hr) = &host_render
+                        && try_host_render_candidates(hr, w)
+                    {
+                        return;
+                    }
+                    if blocked_by_exclusive_fullscreen("candidate") {
+                        w.hide();
+                    } else {
+                        w.show();
+                    }
+                });
+            }
             // 推进工具栏悬停高亮（按光标位置本地重绘）
             if let Some(t) = &mut toolbar {
                 t.tick();
@@ -387,6 +405,7 @@ impl UiManager {
                         preedit,
                         preedit_caret,
                         preedit_host_owned,
+                        composing,
                         mode_label,
                         candidates,
                         selected,
@@ -411,6 +430,13 @@ impl UiManager {
                             total_pages,
                             caret_x,
                             caret_y
+                        );
+                        // 皮肤装饰事件按原编码串比（宿主自绘编码时也照样打字）。
+                        candidate_window.note_skin_input(
+                            &preedit,
+                            composing,
+                            page,
+                            candidates.is_empty(),
                         );
                         // 编码区归宿主画时，候选窗拿到数据也不显示——数据恒下发，
                         // 显示与否由这个标志决定（数据/渲染解耦，见 UiCommand 注释）。
@@ -844,6 +870,7 @@ impl UiManager {
                     }
                     UiCommand::UpdateToolbar(tb_state) => {
                         debug!("UI: UpdateToolbar {:?}", tb_state);
+                        candidate_window.note_skin_mode(tb_state.chinese_mode);
                         // 传当前可见性：**内容更新与可见性提升是两件事**。本命令同时承担
                         // 「更新中英·标点·全半角」与「让工具栏出现」，整条延迟会让已显示
                         // 时按 Shift 切中英也慢一档，手感明显退化。
@@ -1027,9 +1054,16 @@ impl UiManager {
                     UiCommand::SetCandidateOffset { x, y } => {
                         candidate_window.set_user_offset(x, y);
                     }
+                    UiCommand::SetThemeAnimation(on) => {
+                        candidate_window.set_theme_animation(on);
+                    }
+                    UiCommand::SkinSignal(sig) => {
+                        candidate_window.skin_signal(sig);
+                    }
                     UiCommand::SetCandidateShadow(on) => {
                         candidate_window.set_theme_shadow(on);
                     }
+                    UiCommand::RenderCandidatePreview(req) => previews.push(req),
                     UiCommand::SetPagerInPreedit(on) => {
                         candidate_window.set_pager_in_preedit(on);
                     }
@@ -1150,7 +1184,9 @@ impl UiManager {
                 info!("UI: Channel disconnected, shutting down");
                 break 'main;
             }
-            if !had_cmd {
+            // 预览：本轮没有别的命令才画一张；画了就不睡，下一轮先看有没有新命令。
+            let drew_preview = previews.render_one(had_cmd, &mut candidate_window);
+            if !had_cmd && !drew_preview {
                 // 本循环唯一的休眠点：睡到「最近的计时器到期」，或被唤醒（新命令 /
                 // Win32 消息）提前叫醒。
                 //
@@ -1323,6 +1359,10 @@ fn try_host_render_candidates(
             match hr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &params) {
                 Ok(()) => {
                     candidate_window.hide_local_window_only();
+                    // 换帧重绘时悬停与落位都没变，气泡帧不必重写。
+                    if candidate_window.is_anim_repaint() {
+                        return true;
+                    }
                     // 悬停 tooltip 帧联动：有悬停写帧，无悬停隐藏（幂等）。
                     match candidate_window.render_tooltip_frame(frame.screen_x, frame.screen_y) {
                         Some((tt_buf, tt_w, tt_h, tt_x, tt_y, tt_shadow)) => {

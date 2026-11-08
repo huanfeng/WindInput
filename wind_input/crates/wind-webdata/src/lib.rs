@@ -13,6 +13,8 @@
 //! [`WebDataHost`] 窄面（定义在 wind-coordinator::web_host）触宿主，
 //! 把 wind-transfer/fontdb 等重依赖挡在 Android 闭包之外。
 
+mod theme_render;
+pub use theme_render::set_preview_build_id;
 mod user_dicts;
 
 use serde_json::{Value, json};
@@ -283,6 +285,17 @@ fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
             "cacheLimitBytes": wind_store::store::DEFAULT_CACHE_SIZE_BYTES,
             "pageCacheDrops": s.page_cache_drops(),
         })),
+        // 词库缓存策略（`schema.dict_cache_policy`）的实际效果：生效的策略、预算，以及当前仍活着
+        // 的映射里：锁定策略下已锁 / 锁页失败的字节数，预加载策略下已载入的字节数，超出预算
+        // 而没处理的字节数；不适用的一项恒为 0。预算 u64::MAX（未设限）报 null。
+        "dictCache": {
+            "policy": wind_dict::mapping::policy().as_config(),
+            "budgetBytes": Some(wind_dict::mapping::budget_bytes()).filter(|b| *b != u64::MAX),
+            "lockedBytes": wind_dict::mapping::locked_bytes(),
+            "lockFailedBytes": wind_dict::mapping::lock_failed_bytes(),
+            "preloadedBytes": wind_dict::mapping::preloaded_bytes(),
+            "overBudgetBytes": wind_dict::mapping::over_budget_bytes(),
+        },
     })
 }
 
@@ -598,6 +611,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
             Ok(serde_json::to_value(h.theme_accent(name))?)
         }
         "theme.preview" => h.web_theme_preview(params),
+        "theme.renderPreview" => theme_render::render_one(h, params),
+        "theme.renderPreviews" => theme_render::render_many(h, params),
         "theme.getText" => h.web_theme_get_text(params),
         "theme.delete" => h.web_theme_delete(params),
         "theme.importFromText" => h.web_theme_import_text(params),
@@ -3768,7 +3783,7 @@ pub trait WebDataRpc: WebDataHost {
     /// 和导入（`theme_target_dir` 当场拒）一致：`custom_hides_theme` 的绝对性是写死在
     /// 那边的文档里的，读取侧放行就意味着「列表里看不见、却导得出一个装不回去的包」。
     fn theme_dir_of(&self, slug: &str) -> anyhow::Result<std::path::PathBuf> {
-        if slug.is_empty() || slug.contains('/') || slug.contains('\\') || slug.contains("..") {
+        if !wind_theme::is_plain_slug(slug) {
             anyhow::bail!("非法主题 slug");
         }
         if wind_config::Config::custom_hides_theme(slug) {
@@ -3793,6 +3808,10 @@ pub trait WebDataRpc: WebDataHost {
 
     fn web_theme_delete(&self, params: &Value) -> anyhow::Result<Value> {
         let name = str_param(params, "name")?;
+        // 拼进用户主题目录再 remove_dir_all：`..` / 绝对路径能删到目录外去。
+        if !wind_theme::is_plain_slug(name) {
+            anyhow::bail!("非法主题 slug");
+        }
         let user_dir = self
             .user_themes_dir()
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
@@ -3801,6 +3820,7 @@ pub trait WebDataRpc: WebDataHost {
             anyhow::bail!("内置主题不可删除或主题不存在: {}", name);
         }
         std::fs::remove_dir_all(&target)?;
+        theme_render::forget_theme(name);
         Ok(json!({ "ok": true }))
     }
 
@@ -3810,7 +3830,9 @@ pub trait WebDataRpc: WebDataHost {
     /// 只有在用户那边表现为「导入成功却哪儿都找不到」。
     ///
     /// - 传了 `slug`（主题唯一 id）：目录已存在则就地写回（不新建），否则以 slug 建目录；
-    /// - 未传（兼容旧客户端）：退回按 `meta.name` 建目录。
+    ///   slug 不合法直接报错；
+    /// - 未传（设置端的粘贴 / 文件 / 链接 / 包导入都不传）：从显示名（`meta.name` / 包名）
+    ///   派生合法 id（[`wind_theme::slug_from_name`]），「Nord: Dark」「黑/白」也导得进来。
     ///
     /// 定制版 `[themes] hide` 掉的 id **当场拒掉，不给成功回执**：hide 是绝对的（用户层
     /// 同名主题也不复活，见 `Config::custom_hides_theme` 的取舍说明），而导入是用户唯一
@@ -3824,18 +3846,32 @@ pub trait WebDataRpc: WebDataHost {
         let user_dir = self
             .user_themes_dir()
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
-        let slug = params
+        // ⚠️ id 来自调用方（slug）或主题文本自身（meta.name / package 的 name），都不可信，
+        // 落盘前必须是普通名字：不然 `../../x`、绝对路径、`C:x` 会让目标跳出用户主题目录，
+        // 而导入失败的回滚会对目标做 remove_dir_all。显示名只是名字，派生成合法 id；
+        // 给了不合法的 slug 则报错，不再静默退回用显示名。
+        let theme_id = match params
             .get("slug")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|s| {
-                !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
-            });
-        let theme_id = slug.unwrap_or(fallback_name).to_string();
+            .filter(|s| !s.is_empty())
+        {
+            Some(slug) => slug.to_string(),
+            None => wind_theme::slug_from_name(fallback_name),
+        };
+        if !wind_theme::is_plain_slug(&theme_id) {
+            anyhow::bail!(
+                "主题 id「{theme_id}」不合法：不能含路径分隔符、盘符、「..」或 8.3 短名「~数字」，\
+                 不能以点或空格结尾，也不能是 Windows 保留名（CON、AUX、NUL、COM1 等）"
+            );
+        }
         if wind_config::Config::custom_hides_theme(&theme_id) {
             anyhow::bail!("本定制版已移除主题 id「{theme_id}」，该 id 不可用；请换一个 id 再导入");
         }
         let target = user_dir.join(&theme_id);
+        if target.parent() != Some(user_dir.as_path()) {
+            anyhow::bail!("主题 id「{theme_id}」不合法");
+        }
         Ok((theme_id, target))
     }
 
@@ -3845,13 +3881,28 @@ pub trait WebDataRpc: WebDataHost {
     /// result 字段而非 error 通道——error 通道只有一个 String，客户端只能靠匹配文案来认
     /// 冲突，改一次文案，设置端的覆盖确认就会静默退化成一条普通报错（没有任何测试或编译
     /// 期检查看得见这种耦合）。
-    fn theme_conflict_json(theme_id: &str, display_name: &str) -> Value {
+    /// 撞目录的回执。文案用**已有**主题的显示名：id 从显示名派生后，不同名字可能落到
+    /// 同一目录（`a/b` 与 `a-b`），只报新名字会让用户不知道覆盖的是谁。
+    fn theme_conflict_json(theme_id: &str, display_name: &str, target: &std::path::Path) -> Value {
+        let existing = std::fs::read_to_string(target.join("theme.toml"))
+            .ok()
+            .and_then(|t| wind_theme::meta_from_text(&t))
+            .map(|m| m.name)
+            .filter(|n| !n.trim().is_empty());
+        let error = match &existing {
+            Some(old) if old != display_name => {
+                format!("已有主题「{old}」占用同一目录，导入「{display_name}」会覆盖它")
+            }
+            Some(old) => format!("主题「{old}」已存在"),
+            None => format!("主题目录「{theme_id}」已存在"),
+        };
         json!({
             "ok": false,
             "conflict": true,
             "slug": theme_id,
             "display_name": display_name,
-            "error": format!("主题「{display_name}」已存在"),
+            "existing_name": existing,
+            "error": error,
         })
     }
 
@@ -3891,7 +3942,7 @@ pub trait WebDataRpc: WebDataHost {
         let file = target.join("theme.toml");
         let existed_before = file.exists();
         if existed_before && !force {
-            return Ok(Self::theme_conflict_json(&theme_id, &meta.name));
+            return Ok(Self::theme_conflict_json(&theme_id, &meta.name, &target));
         }
         // 覆盖已存在主题前备份原文本，供依赖链校验失败时回滚。
         let backup = if existed_before {
@@ -3899,6 +3950,8 @@ pub trait WebDataRpc: WebDataHost {
         } else {
             None
         };
+        // 回滚只删本次新建的目录：目录原本就在（哪怕里面没有 theme.toml）时只撤掉写入的文件。
+        let created_dir = !target.exists();
         std::fs::create_dir_all(&target)?;
         let tmp = file.with_extension("toml.tmp");
         std::fs::write(&tmp, text.as_bytes())?;
@@ -3913,8 +3966,11 @@ pub trait WebDataRpc: WebDataHost {
                 Some(bytes) => {
                     let _ = std::fs::write(&file, bytes);
                 }
-                None => {
+                None if created_dir => {
                     let _ = std::fs::remove_dir_all(&target);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&file);
                 }
             }
             anyhow::bail!(
@@ -3964,7 +4020,11 @@ pub trait WebDataRpc: WebDataHost {
         let preview = wind_transfer::theme::preview_package(package)?;
         let (theme_id, target) = self.theme_target_dir(params, &preview.display_name)?;
         if target.exists() && !force {
-            return Ok(Self::theme_conflict_json(&theme_id, &preview.display_name));
+            return Ok(Self::theme_conflict_json(
+                &theme_id,
+                &preview.display_name,
+                &target,
+            ));
         }
 
         // 依赖链校验交给 transfer 的校验回调：它要在新目录**已就位、旧目录还没删**的
@@ -3999,10 +4059,11 @@ pub trait WebDataRpc: WebDataHost {
     /// 落点由调用方给全路径（与 `scheme.exportPackage` 同形）：core 不猜「导到哪」，
     /// 那是设置端的文件对话框与 CLI 的参数各自该管的事。
     ///
-    /// ⚠️ `path` **不做任何校验**，这条成立的前提是这条 RPC 只经本机 ctrl 通道由设置端
-    /// 与 CLI 调用、不对外暴露。哪天这条链上多一个远程或网页入口，它连同下面的
-    /// `create_dir_all(parent)` 就是一个任意写——**那时必须先加落点白名单再接入**，
-    /// 而不是指望「现在没人远程调」。
+    /// ⚠️ `path` **不做任何校验**，这条成立的前提是 `path` 永远不由网页或远端决定：
+    /// 这条 RPC 只经本机 ctrl 通道调用——设置端「导出…」的路径来自原生保存框，CLI 来自
+    /// 命令行参数。设置端的主题编辑器连接（本机网页路由）若要出包，`path` 必须是设置端
+    /// 在自己的私有临时目录里以独占方式（O_EXCL）新建的文件，网页只能给 slug。
+    /// 哪天要让网页或远端影响 `path`，它就是一个任意写——**那时必须先加落点白名单**。
     fn web_theme_export_package(&self, params: &Value) -> anyhow::Result<Value> {
         let slug = str_param(params, "slug")?;
         let out = str_param(params, "path")?;
@@ -9650,8 +9711,8 @@ short_code_yield_level = 2
         // 断文案:否则哪天这个夹具因为别的原因(比如主题本身没通过 validate)提前失败,
         // 下面那两条「旧包还在」就会在一个根本没走到打包的路径上假绿。
         assert!(
-            e.contains("条目过多"),
-            "应因条目数越过上限而失败，实际: {e}"
+            e.contains("主题资源过多"),
+            "应因条目数越过上限而失败（导出前就按导入口径拦下），实际: {e}"
         );
         assert!(
             e.contains("导出主题"),
@@ -10675,6 +10736,18 @@ mod memory_stats_tests {
             v["redb"].is_null(),
             "全新用户目录不打开旧库，不该报它的缓存上限：{v}"
         );
+        assert!(
+            v["dictCache"]["policy"].is_string(),
+            "dictCache.policy：{v}"
+        );
+        for k in [
+            "lockedBytes",
+            "lockFailedBytes",
+            "preloadedBytes",
+            "overBudgetBytes",
+        ] {
+            assert!(v["dictCache"][k].is_u64(), "dictCache.{k}：{v}");
+        }
     }
 }
 

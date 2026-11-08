@@ -229,8 +229,10 @@ host-render DLL 一直在发这个帧、服务端收下什么也不做——两�
 - Bundle 结构（Contents/{Info.plist, MacOS, Resources/lproj, _CodeSignature, PkgInfo}）
 - Hardened runtime（`codesign --options runtime`）
 - 真证书签名（本机自签 trusted，`scripts/mac/dev.sh sign-setup` 建）
-- IME 自身 `--register-input-source` 子命令 + RunLoop 常驻（TIS 注册是进程级
-  lifecycle，register API 调完进程退出 mode 会被清掉）
+- IME 自身 `--register-input-source` 子命令，注册完**立即退出**（同 Squirrel）。
+  ⚠️ 不能常驻：同 bundle 有进程在跑时 imklaunchagent 不再拉起控制器，常驻进程又不建
+  IMKServer → `NO Endpoint`，控制器一退出就再也打不了字（GH#186，macOS 27 实测复现）。
+  注册是持久的，进程退出后不会被回收（同次实测：换 cdhash 重注册后退出，输入源仍在、可用）
 - `TISRegisterInputSource(bundleURL)` 真把 mode 持久写进 TIS DB
 
 本机自签路径（`sign-setup` + `p1`/`pm1`）可以端到端跑起来，无需 Apple Developer
@@ -336,7 +338,7 @@ SHM / socket / config 全部变体隔离（漏一处即冲突，如曾漏 SHM �
 | `Sources/WindInputKit/IPC/BridgeClient.swift` | UDS 阻塞客户端；`init(socketPath:, ioTimeoutMs:)` 可选 I/O 超时（`SO_RCVTIMEO`/`SO_SNDTIMEO`，0=不设）。request 连接设 2s——服务卡死/重启时同步 `readFrame` 超时抛错而非在 IMKit 主线程无限 hang（上层 catch → reconnect 自愈）；push 连接（PushClient）必须保持 0（长期空闲等服务端推送，否则被读超时误判断连）。**`connect()` 必设 `SO_NOSIGPIPE`**: 否则对端（Rust 服务）重启后向死连接 `write` 触发 SIGPIPE → 默认处置直接**杀死 .app 进程**（表现为服务重启后输入法彻底失灵、需强制重启前端）；设此项后 `write` 改返回 EPIPE 由 `send()` 抛错交上层重连。request/push/sendClient 都用此构造，一处覆盖 |
 | `Sources/WindInputKit/IPC/BridgeResponseRouter.swift` | 把响应帧路由到 `TextInputClient` 调用。**新增 cmd 必须在此显式接一臂**——`default` 是"消费按键但不出字"，漏接的表现是按键被吃掉、屏幕上什么都没有（历史案例：`commitThenDefer` 漏接导致码表顶码上屏丢字） |
 | `Sources/WindInputSmoke/main.swift` | `swift run wind-smoke` — 连 bridge + push，打印帧 |
-| `Sources/WindInputApp/main.swift` | `.app` 入口：默认启 IMKServer + NSApp.run; 也支持 `--register-input-source` / `--enable-input-source` / `--select-input-source` 子命令。`--register-input-source` **总是重注册 + RunLoop 常驻**，不因「已注册」早退（重新部署 .app 的 cdhash 变，必须重注册刷新否则无法切换；install 已先杀旧守护，早退会让注册失去维持进程而失效）。变体隔离：mode-id 检查用 `Bundle.main.bundleIdentifier + "."` 前缀精确匹配（避免 `WindInput`/`WindInputDev` 子串互串） |
+| `Sources/WindInputApp/main.swift` | `.app` 入口：默认启 IMKServer + NSApp.run; 也支持 `--register-input-source` / `--enable-input-source` / `--select-input-source` 子命令。`--register-input-source` **总是重注册、注册完立即退出**：不因「已注册」跳过（重新部署 .app 的 cdhash 变，必须重注册刷新否则无法切换）；不常驻（常驻进程占着 bundle 会让系统不再拉起控制器，见「安装与 TIS 注册」）。变体隔离：mode-id 检查用 `Bundle.main.bundleIdentifier + "."` 前缀精确匹配（避免 `WindInput`/`WindInputDev` 子串互串） |
 | `Sources/WindInputApp/Controller/InputController.swift` | `IMKInputController` 子类，同步 KeyEvent roundtrip，路由 PassThrough/Consumed/CommitText/UpdateComposition; `activateServer`/`deactivateServer` 发 FocusGained/FocusLost（驱动协调器 imeActivated → 指示器）; **密码框适配**（对齐 Win 36614ae）: `activateServer` 用 `IsSecureEventInputEnabled()` 探测，命中则在帧 payload 携带 InputScope bitmask 的 IS_PASSWORD 位（bit31），协调器据此对密码框强制英文半角直通（模式图标不变）; `deactivateServer` 失焦时若仍有 marked text 先 `setMarkedText("")` 清残留 + 清本端 composition。`menu()` 重写：点系统输入源图标弹出统一菜单（复用 UnifiedMenuBuilder）; 选中项经 IMK `doCommandBySelector` → `imkMenuCommand:` 读 NSMenuItem.tag 回发 CmdMenuAction。**自愈重连**: bridge 连接持有在实例字段，`activateServer`/`handle` 入口 `ensureConnected()` 懒重连; `handle` 的 `send`/`readFrame` 经 `sendAndApply` 执行，失败 catch → `reconnect()` 后**用新连接重试当前键一次**（服务重启后第一个键就自愈，不丢字）; 连接用 `ioTimeoutMs=2000` + `SO_NOSIGPIPE`。**智能配对光标**: `router.moveHostCursor` 闭包把 kit 层的 `CursorMove` 意图用 `KeySynthesizer` 合成 ←/→ 方向键（主线程 async，排在 insertText 后）; 需辅助功能授权，未授权静默降级 |
 | `Sources/WindInputApp/Controller/KeyHandler.swift` | `NSEvent.keyCode` → Win VK 映射 + Modifier 编码 + KeyEvent 帧构造 |
 | `Sources/WindInputApp/UI/CandidatePanelHost.swift` | 候选框承载层：订阅 push，收 CmdHostRenderFrame→SHM→NSPanel、CmdCandidateRects→hit-test、CmdModeStatus→ModeStatusController、CmdOverlayFrame→`OverlayHost`（悬停提示 / 状态气泡 / Toast / 自绘菜单）; 协调候选悬停与悬停提示的保持 / 宽限; 命令直通车按键：CmdKeyTap/Hold/Release/Seq→`KeySynthesizer` CGEvent 合成，CmdKeyType→`activeResponder.applyPushResponse`→router `insertText` 上屏; 鼠标选词回发。导出 `unifiedMenuItems()`/`sendMenuAction(_:)` 供菜单栏指示器 / 系统输入菜单复用同一 IPC 请求与回发路径 |

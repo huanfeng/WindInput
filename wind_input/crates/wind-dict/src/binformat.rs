@@ -3,7 +3,7 @@
 //! 与 Go 版本 `wind_input/internal/dict/binformat/` 对齐。
 //! 支持 V2（10字节条目）和 V3（14字节条目，含 Order 字段）。
 
-use memmap2::Mmap;
+use crate::mapping::Mapped;
 use std::fs::File;
 use std::path::Path;
 use tracing::info;
@@ -101,7 +101,7 @@ pub struct DictEntry {
 
 /// 二进制词典读取器（mmap 零拷贝）
 pub struct DictReader {
-    mmap: Mmap,
+    mmap: Mapped,
     header: DictFileHeader,
     entry_size: usize,
 }

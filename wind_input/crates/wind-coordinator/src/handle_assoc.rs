@@ -91,6 +91,9 @@ pub(crate) enum AssocExit {
     ModeActivate,
     /// 自动隐藏计时到期（`hide_after_ms`）。
     Timeout,
+    /// 无占位联想（`assoc_placeholder = "none"`）下用户把光标挪到了别处（点单元格、点击定位）。
+    /// 有占位组合时这件事由宿主终止组合来表达，没有组合就只能靠选区变化回报。
+    CaretMoved,
     /// 顶屏类按键（标点 / 小键盘 / 非码元字符 / 进模式、开软键盘的引导键）。联想态不顶屏，
     /// 只收掉联想再出该键——与空格选联想、Esc 取消后的状态一致（候选、标识、计时一并清）。
     TopCommitKey,
@@ -205,8 +208,9 @@ impl Coordinator {
     ///
     /// # 为什么是那个占位字符
     ///
-    /// 直接复用非嵌入模式的既有约定（[`Coordinator::composition_placeholder`]，默认空格、
-    /// 浏览器按 compat 规则为 ZWSP，GH#175）——占位 **且光标落在它前面**。两半缺一不可：
+    /// 默认复用非嵌入模式的既有约定（[`Coordinator::composition_placeholder`]，默认空格、
+    /// 浏览器按 compat 规则为 ZWSP，GH#175），compat 的 `assoc_placeholder` 可只给联想态另指定
+    /// （[`Coordinator::assoc_placeholder`]）——占位 **且光标落在它前面**。两半缺一不可：
     /// 只放空格不移光标，用户看到插入点凭空右移一格，很突兀（2026-08-16 用户反馈）。
     /// 光标那一半由 C++ 侧按「组合内容恰为占位符」判定（空格与 ZWSP 都认）。
     ///
@@ -214,7 +218,7 @@ impl Coordinator {
     /// **不流进宿主**——而且只在非嵌入模式给：嵌入模式下候选窗本就没有编码栏，
     /// 凭空多一栏会让窗口高度一跳。
     pub(crate) fn assoc_composition(&self) -> &'static str {
-        self.composition_placeholder()
+        self.assoc_placeholder()
     }
 }
 
@@ -246,20 +250,6 @@ fn is_modifier_like_vk(vk: u32) -> bool {
     // 0xA4/0xA5      = VK_LMENU / VK_RMENU
     // is_key_up_only_vk = 0xA0..=0xA3 四个纯修饰键 + VK_CAPITAL
     matches!(vk, 0x10 | 0x11 | 0x12 | 0xA4 | 0xA5) || keymap::is_key_up_only_vk(vk)
-}
-
-/// 本平台是否取用 `[mobile.*]` 覆盖段。
-///
-/// ★ 这是**整个联想里唯一一处平台判断**，平台差异全部落在配置文件的
-/// `[mobile.association]` 上。
-///
-/// ⛔ 别把差异改成「值域哨兵」（让 `kind` / `mode` 取 `"auto"`、由本模块按平台解释）：
-/// 那会把平台知识塞进值域，设置界面被迫列一个语义空洞的「自动」选项，而这里也要退化成
-/// 一组 `platform_default_*` 函数——一处判断变成每个字段一处。
-///
-/// ⚠️ 判据是**协调器被编译进哪个宿主**，不是运行时探测。
-pub(crate) const fn use_mobile_overrides() -> bool {
-    cfg!(target_os = "android")
 }
 
 /// 数字键此刻是否进编码缓冲（而不是选候选）。
@@ -625,7 +615,8 @@ impl Coordinator {
     /// `[input.association]`（移动端再叠 `[mobile.association]`）的运行时视图（热重载快照）。
     pub(crate) fn assoc_config(&self) -> AssocConfig {
         let rt = self.rt();
-        let mobile = use_mobile_overrides().then(|| &rt.config.mobile.association);
+        let mobile = (self.profile.config_overlay == wind_config::ConfigOverlay::Mobile)
+            .then(|| &rt.config.mobile.association);
         AssocConfig::from_config(&rt.config.input.association, mobile)
     }
 
@@ -636,7 +627,7 @@ impl Coordinator {
         mobile: impl Fn(&wind_config::MobileAssociationConfig) -> bool,
     ) -> bool {
         let rt = self.rt();
-        if use_mobile_overrides() {
+        if self.profile.config_overlay == wind_config::ConfigOverlay::Mobile {
             mobile(&rt.config.mobile.association)
         } else {
             base(&rt.config.input.association)
@@ -827,6 +818,16 @@ impl Coordinator {
             }
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // 复核：上面的校验在 state 锁外，等锁期间按键线程可能已进了新一轮联想并重置 token，
+        // 不复核就会把新一轮联想误退掉。锁序 state → assoc_hide_token 与 `exit_assoc` 一致。
+        if *self
+            .assoc_hide_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            != token
+        {
+            return;
+        }
         if !state.assoc_active() {
             return;
         }
@@ -842,6 +843,12 @@ impl Coordinator {
         // 吃下并转发；服务端此刻已不在联想态，回落到 `PassThrough` ⇒ `eaten=0` 的
         // 「吃了再吐」翻转 ⇒ 不补发 `WM_KEYDOWN` 的宿主直接丢键，且组合继续悬着，
         // 被宿主 finalize 后在文档里留下那个占位空格。
+        // 无占位（`none`）时宿主里没有组合，也就没有孤儿；要告知 DLL 的只剩「会话没了」。
+        if self.assoc_placeholder_is_none() {
+            self.push_hotkey_session_if_changed();
+            self.notify_ui_hide();
+            return;
+        }
         self.assoc_placeholder_orphaned
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // 同时**主动**推一条收口命令过去（走既有的 `CMD_CLEAR_COMPOSITION` push 通道，
@@ -858,6 +865,33 @@ impl Coordinator {
         //   `UpdateComposition`（`Fate::Absorbs`）顺手撤掉。
         self.push_end_composition();
         self.notify_ui_hide();
+    }
+
+    /// 宿主告知「用户正在操作联想候选」，期间暂停自动隐藏。
+    ///
+    /// 计时只认按键：触屏上手指滑候选条、长按看提示、打开展开面板挑词都不是按键，
+    /// 于是操作到一半窗就被计时收掉（真机反馈）。桌面的候选窗靠鼠标点、没有这类停留，
+    /// 不调用本函数，行为不变。
+    ///
+    /// - `hold = true`：作废当前计时，操作期间不收；
+    /// - `hold = false`：操作结束，从此刻起重新计满 `hide_after_ms`。
+    ///
+    /// 不在联想态时什么也不做（不能凭空起计时，也不能误伤下一轮联想的计时）。
+    /// 判联想态与改计时在同一把 state 锁里完成：先判后改之间若插进一次退出 + 新一轮联想，
+    /// 这里的 `arm(0)` 会把新一轮的计时作废，那一轮联想就永远不收了。
+    pub fn assoc_hold(&self, hold: bool) {
+        // 配置在取 state 锁之前读，不在 state 锁里再去拿配置锁
+        let ms = if hold {
+            0
+        } else {
+            self.assoc_config().hide_after_ms
+        };
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.assoc_active() {
+            return;
+        }
+        self.arm_assoc_hide(ms);
+        drop(state);
     }
 
     /// 宿主组合已由别的路径终止 ⇒ 孤儿不复存在，撤掉标记。
@@ -1296,11 +1330,216 @@ mod tests {
         assert_eq!(placeholder_of(act), " ", "未配规则的应用保持空格");
     }
 
+    /// `assoc_placeholder` 只改联想态：规则里 composition_placeholder=zwsp、assoc_placeholder=blank
+    /// 时，联想占位是盲文空白，而打字占位（`composition_placeholder()`）仍是 ZWSP。
+    /// 变异检验：`assoc_composition` 改回 `composition_placeholder()` ⇒ 红。
+    #[test]
+    fn assoc_placeholder_overrides_only_the_assoc_state() {
+        use wind_config::app_compat::{
+            AppCompat, AppCompatRule, AssocPlaceholder, PlaceholderChar,
+        };
+        let c = coord_smart();
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "x.exe".into(),
+            composition_placeholder: Some(PlaceholderChar::Zwsp),
+            assoc_placeholder: Some(AssocPlaceholder::Blank),
+            ..Default::default()
+        }]));
+        c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+        c.active_compat.lock().unwrap().pid = 7;
+        c.refresh_active_compat_lookups();
+        assert_eq!(
+            c.assoc_composition(),
+            "\u{2800}",
+            "联想态用 assoc_placeholder"
+        );
+        assert_eq!(c.composition_placeholder(), "\u{200B}", "打字占位不受影响");
+    }
+
+    /// 无占位联想下用户挪动光标（点单元格）⇒ 立刻退出联想；自提交回声不算；有占位时不走此路。
+    /// 变异检验：去掉 `handle_selection_changed` 里的退出分支 ⇒ 第一段红。
+    #[test]
+    fn bare_assoc_exits_when_user_moves_the_caret() {
+        use wind_bridge::handler::MessageHandler;
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        for (placeholder, expect_exit) in [
+            (AssocPlaceholder::None, true),
+            (AssocPlaceholder::Space, false),
+        ] {
+            let c = coord_smart();
+            c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+                process: "x.exe".into(),
+                assoc_placeholder: Some(placeholder),
+                ..Default::default()
+            }]));
+            c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+            c.active_compat.lock().unwrap().pid = 7;
+            c.refresh_active_compat_lookups();
+            {
+                let mut st = c.state.lock().unwrap();
+                c.auto_commit_then_assoc(&mut st, "你好".into(), "你好");
+                assert!(st.assoc_active(), "前提：进了联想态");
+            }
+            // 刚自提交：回声，联想不动。
+            *c.last_self_commit.lock().unwrap() = Some(std::time::Instant::now());
+            c.handle_selection_changed(0);
+            assert!(
+                c.state.lock().unwrap().assoc_active(),
+                "{placeholder:?}：回声不该退联想"
+            );
+            // 久远的自提交 ⇒ 用户移动。
+            *c.last_self_commit.lock().unwrap() = None;
+            c.handle_selection_changed(0);
+            assert_eq!(
+                !c.state.lock().unwrap().assoc_active(),
+                expect_exit,
+                "{placeholder:?}：用户移动光标后联想是否退出"
+            );
+        }
+    }
+
+    /// 无占位联想里 Del 落到透传、被改判成「收口 + 交还」而退出联想后，会话位缓存必须对齐成 FALSE，
+    /// 否则 DLL 侧的位只能靠本地清位兜底。
+    /// 变异检验：去掉 `handle_key_event_policed` 里的对账推送 ⇒ 红。
+    #[test]
+    fn bare_assoc_released_by_passthrough_realigns_the_session_cache() {
+        use std::sync::atomic::Ordering;
+        use wind_bridge::handler::{KeyEventData, MessageHandler};
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        let c = coord_smart();
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "x.exe".into(),
+            assoc_placeholder: Some(AssocPlaceholder::None),
+            ..Default::default()
+        }]));
+        c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+        c.active_compat.lock().unwrap().pid = 7;
+        c.refresh_active_compat_lookups();
+        {
+            let mut st = c.state.lock().unwrap();
+            c.auto_commit_then_assoc(&mut st, "你好".into(), "你好");
+            assert!(st.assoc_active(), "前提：进了联想态");
+        }
+        c.last_pushed_hotkey_session.store(true, Ordering::Relaxed); // 进联想时已推过 TRUE
+        let del = KeyEventData {
+            key_code: 0x2E,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: wind_ipc::protocol::EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 1,
+            prev_char: 0,
+            seq_char: 0,
+        };
+        let act = c.handle_key_event_policed(&del);
+        assert!(
+            matches!(act, KeyAction::ClearCompositionThenPassThrough),
+            "Del 应被改判成收口+交还，实得 {act:?}"
+        );
+        assert!(!c.state.lock().unwrap().assoc_active(), "联想应已退出");
+        assert!(
+            !c.last_pushed_hotkey_session.load(Ordering::Relaxed),
+            "退出联想后会话位缓存必须对齐成 FALSE（即已推过 FALSE）"
+        );
+    }
+
+    /// `assoc_placeholder = "none"`：联想态不挂占位组合——`assoc_composition()` 为空串，
+    /// 上屏回的是不带新组合的 `InsertText`；会话判据 `hotkey_session_now()` 与
+    /// `assoc_session_hint()` 为真，退出联想后两者回落。
+    /// 变异检验：`hotkey_session_now` 去掉 `assoc_bare_session_now` 一支 ⇒ 红。
+    #[test]
+    fn assoc_none_mounts_no_placeholder_but_keeps_the_session_flag() {
+        use wind_bridge::handler::MessageHandler;
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        let c = coord_smart();
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "x.exe".into(),
+            assoc_placeholder: Some(AssocPlaceholder::None),
+            ..Default::default()
+        }]));
+        c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+        c.active_compat.lock().unwrap().pid = 7;
+        c.refresh_active_compat_lookups();
+        assert_eq!(c.assoc_composition(), "");
+        assert!(!c.hotkey_session_now(), "前提：尚未进联想");
+        let act = {
+            let mut st = c.state.lock().unwrap();
+            c.auto_commit_then_assoc(&mut st, "你好".into(), "你好")
+        };
+        assert!(c.state.lock().unwrap().assoc_active(), "前提：进了联想态");
+        match act {
+            KeyAction::InsertText {
+                new_composition,
+                has_new_composition,
+                ..
+            } => assert!(new_composition.is_none() && !has_new_composition),
+            other => panic!("none 时应是不带新组合的上屏，实得 {other:?}"),
+        }
+        assert!(
+            c.hotkey_session_now(),
+            "联想会话要经 STATUS_HOTKEY_SESSION 告知 DLL"
+        );
+        assert!(c.assoc_session_hint(), "上屏应答要带 ASSOC_SESSION 标志");
+        {
+            let mut st = c.state.lock().unwrap();
+            c.exit_assoc(&mut st, AssocExit::Timeout);
+        }
+        assert!(
+            !c.hotkey_session_now() && !c.assoc_session_hint(),
+            "退出后回落"
+        );
+    }
+
+    /// 无占位联想（`none`）时，宿主上屏后上报的远处光标只落缓存、不重新锚定候选窗
+    /// （WPS 实测联想窗会飘到 (1643,756) 一类位置）；有占位组合时照常走显示决策。
+    /// 变异检验：去掉 `message_handler` 里的 `bare_assoc` 判断 ⇒ 第一段红。
+    #[test]
+    fn bare_assoc_ignores_far_caret_reports_for_anchoring() {
+        use std::sync::atomic::Ordering;
+        use wind_bridge::handler::{CaretData, MessageHandler};
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        let far = CaretData {
+            x: 1643,
+            y: 756,
+            height: 20,
+            composition_start_x: 0,
+            composition_start_y: 0,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
+        };
+        for (placeholder, expect_cache_only) in [
+            (AssocPlaceholder::None, true),
+            (AssocPlaceholder::Space, false),
+        ] {
+            let c = coord_smart();
+            c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+                process: "x.exe".into(),
+                assoc_placeholder: Some(placeholder),
+                ..Default::default()
+            }]));
+            c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+            c.active_compat.lock().unwrap().pid = 7;
+            c.refresh_active_compat_lookups();
+            {
+                let mut st = c.state.lock().unwrap();
+                c.auto_commit_then_assoc(&mut st, "你好".into(), "你好");
+                assert!(st.assoc_active(), "前提：进了联想态");
+            }
+            c.caret_cache_is_idle_report.store(false, Ordering::Relaxed);
+            c.handle_caret_update(&far);
+            assert_eq!(
+                c.caret_cache_is_idle_report.load(Ordering::Relaxed),
+                expect_cache_only,
+                "{placeholder:?}：远处光标上报是否只落缓存"
+            );
+        }
+    }
+
     /// ★ 桌面默认关，而且**是靠基线段本身就是 `"off"`**——不再有哨兵值参与。
     ///
     /// 断言前提值本身：`[input.association]` 一旦又被写成某个平台哨兵，这里立刻报出来。
     /// 平台差异的唯一落点是 `[mobile.association]`，桌面构建根本不读它
-    /// （由 `use_mobile_overrides` 守着，见 wind-assoc 的 `mobile_section_switches_*`）。
+    /// （由 `InputProfile::config_overlay` 守着，见 wind-assoc 的 `mobile_section_switches_*`）。
     #[test]
     fn desktop_defaults_to_off() {
         let mut cfg = Config::default();
@@ -1431,6 +1670,43 @@ mod tests {
         assert!(enter(&c, "你好"), "重新进入");
         c.fire_assoc_hide(t1); // 陈旧令牌
         assert!(!texts(&c).is_empty(), "陈旧计时不得收掉新一轮的联想窗");
+    }
+
+    /// 操作联想候选期间（hold）计时作废：到期回调拿的是旧令牌，收不掉窗。
+    #[test]
+    fn hold_suspends_hide_timer() {
+        let c = coord_smart();
+        assert!(enter(&c, "你好"));
+        let t = *c.assoc_hide_token.lock().unwrap();
+        c.assoc_hold(true);
+        c.fire_assoc_hide(t);
+        assert!(!texts(&c).is_empty(), "按住候选条期间计时不得收窗");
+    }
+
+    /// 松手后重新起计时：新令牌到期照常收窗，旧令牌仍无效。
+    #[test]
+    fn release_rearms_hide_timer() {
+        let c = coord_smart();
+        assert!(enter(&c, "你好"));
+        let t0 = *c.assoc_hide_token.lock().unwrap();
+        c.assoc_hold(true);
+        c.assoc_hold(false);
+        let t1 = *c.assoc_hide_token.lock().unwrap();
+        assert_ne!(t0, t1, "松手须重新起计时");
+        c.fire_assoc_hide(t0);
+        assert!(!texts(&c).is_empty(), "旧计时作废");
+        c.fire_assoc_hide(t1);
+        assert!(texts(&c).is_empty(), "松手后重新计满到期照常收窗");
+    }
+
+    /// 不在联想态时 hold 什么也不做：不动令牌（不误伤之后那一轮联想的计时）。
+    #[test]
+    fn hold_outside_assoc_is_noop() {
+        let c = coord_smart();
+        let t = *c.assoc_hide_token.lock().unwrap();
+        c.assoc_hold(true);
+        c.assoc_hold(false);
+        assert_eq!(t, *c.assoc_hide_token.lock().unwrap());
     }
 
     /// `hide_after_ms = 0` = 不自动隐藏。

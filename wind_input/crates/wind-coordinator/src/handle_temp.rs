@@ -1079,7 +1079,7 @@ impl Coordinator {
                         && !cand.is_command
                         && let Some(ch) = punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
                     {
-                        let punct = self.convert_punct_char(state, ch);
+                        let punct = self.convert_punct_after(state, ch, 0, &cand.text);
                         if partial {
                             let out = self.temp_pinyin_partial_top_commit(
                                 state,
@@ -1239,7 +1239,7 @@ impl Coordinator {
                 self.maybe_convert(state, &raw_text)
             }
         };
-        let punct = self.convert_punct_char(state, ch);
+        let punct = self.convert_punct_after(state, ch, 0, &head);
         self.record_commit(&punct, 0, -1, wind_store::stats::CommitSource::Punctuation);
         self.exit_temp_pinyin(state);
         self.notify_ui_hide();
@@ -1920,7 +1920,8 @@ impl Coordinator {
                     } else {
                         base
                     };
-                    let punct = self.convert_punct_char(state, ch);
+                    // 标点紧跟在临英原文后面：「英文后」看它（`Node.` 而不是 `Node。`）。
+                    let punct = self.convert_punct_after(state, ch, 0, &base);
                     if !base.is_empty() {
                         self.record_commit(
                             &base,

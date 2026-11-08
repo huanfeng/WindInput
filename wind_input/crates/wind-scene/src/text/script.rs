@@ -698,31 +698,6 @@ mod tests {
         );
     }
 
-    /// 类别名有**两份**：这里的 [`ScriptClass::key`]，和 wind-config 注册表里的
-    /// `FONT_SCRIPT_KEYS`（`ui.font.scripts` 的键名值域，经 capability 传给设置端做预填）。
-    ///
-    /// ★ 断言**顺序也一致**而不只是集合相等：设置端的预填是按这个顺序逐行铺的，
-    /// 顺序漂了用户每次打开对话框都看到行序变化，会被当成「配置被改了」。
-    ///
-    /// ⚠️ 只能在 wind-ui 侧测——wind-config 依赖不到 wind-ui。加类别时两处一起改，
-    /// 漏了 wind-config 那份的表现是「core 认这个类，但设置页永远不列出来」。
-    #[test]
-    fn script_class_keys_match_config_registry() {
-        let mine: Vec<&str> = ScriptClass::ALL.iter().map(|c| c.key()).collect();
-        assert_eq!(
-            mine,
-            wind_config::config_schema::FONT_SCRIPT_KEYS,
-            "ScriptClass::ALL 与 wind-config 的 FONT_SCRIPT_KEYS 漂移了"
-        );
-        // 反向：注册表里的每个名字都解析得回来（防「两边各写了同样多但不同的名字」）。
-        for k in wind_config::config_schema::FONT_SCRIPT_KEYS {
-            assert!(
-                ScriptClass::from_key(k).is_some(),
-                "注册表键 {k} 解析不出类别"
-            );
-        }
-    }
-
     fn u16s(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
     }

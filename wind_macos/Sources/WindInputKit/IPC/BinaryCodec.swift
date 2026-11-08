@@ -5,7 +5,7 @@ import Foundation
 // 字节布局 (all little-endian):
 //   Header (8 bytes): u16 version | u16 cmd | u32 length
 //   KeyEvent payload (18 bytes): u32 keyCode | u32 scanCode | u32 modifiers
-//                                | u8 type | u8 toggles | u16 seq | u16 prevChar
+//                                | u8 type | u8 toggles | u16 seq | u16 prevChar | u16 seqChar
 //
 // version 字段:
 //   - 高 4 位是 major version, 必须等于 ProtocolVersion >> 12 (= 0x1)
@@ -78,7 +78,7 @@ public enum BinaryCodec {
     // MARK: - KeyEvent payload
 
     public static func encodeKeyEventFrame(_ p: KeyEventPayload) -> Data {
-        var payload = Data(count: 18)
+        var payload = Data(count: 20)
         payload.writeUInt32LE(p.keyCode,   at: 0)
         payload.writeUInt32LE(p.scanCode,  at: 4)
         payload.writeUInt32LE(p.modifiers, at: 8)
@@ -86,6 +86,7 @@ public enum BinaryCodec {
         payload[13] = p.toggles
         payload.writeUInt16LE(p.eventSeq, at: 14)
         payload.writeUInt16LE(p.prevChar, at: 16)
+        payload.writeUInt16LE(p.seqChar, at: 18)
 
         var out = encodeHeader(cmd: UpstreamCmd.keyEvent, payloadLen: UInt32(payload.count))
         out.append(payload)
@@ -103,6 +104,7 @@ public enum BinaryCodec {
         let toggles   = buf[buf.startIndex + 13]
         let seq       = buf.readUInt16LE(at: 14)
         let prevChar: UInt16 = buf.count >= 18 ? buf.readUInt16LE(at: 16) : 0
+        let seqChar: UInt16 = buf.count >= 20 ? buf.readUInt16LE(at: 18) : 0
 
         return KeyEventPayload(
             keyCode: keyCode,
@@ -111,7 +113,8 @@ public enum BinaryCodec {
             eventType: KeyEventType(rawValue: evtRaw) ?? .down,
             toggles: toggles,
             eventSeq: seq,
-            prevChar: prevChar
+            prevChar: prevChar,
+            seqChar: seqChar
         )
     }
 

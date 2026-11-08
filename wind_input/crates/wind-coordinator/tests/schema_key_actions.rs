@@ -85,6 +85,7 @@ fn key(vk: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -322,6 +323,7 @@ fn key_up(vk: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 

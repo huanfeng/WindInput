@@ -65,6 +65,8 @@ pub struct Resolved {
     pub asset_dirs: Vec<std::path::PathBuf>,
     /// 任务栏语言栏图标主字色（token `langbar_text_cn` / `langbar_text_en`）。
     pub langbar_text: LangbarTextColors,
+    /// 异形皮肤；None = 未配（或没有可用变体）。
+    pub skin: Option<Box<crate::skin::RvSkin>>,
 }
 
 /// 任务栏语言栏图标主字色，四格独立。
@@ -407,6 +409,11 @@ pub fn resolve(theme: &Theme, is_dark: bool, asset_dirs: &[std::path::PathBuf]) 
         resources,
         asset_dirs: asset_dirs.to_vec(),
         langbar_text: resolve_langbar_text(theme.colors.as_ref()),
+        skin: theme
+            .skin
+            .as_deref()
+            .and_then(crate::skin::resolve_skin)
+            .map(Box::new),
     }
 }
 

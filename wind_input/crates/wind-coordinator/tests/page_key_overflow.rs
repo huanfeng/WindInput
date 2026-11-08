@@ -41,6 +41,7 @@ fn key_event(key_code: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -403,40 +404,39 @@ fn overlay_temp_pinyin_unaffected() {
     }
 }
 
-// ───────────────────────── 按键级覆盖（page_key_overrides）─────────────────────────
-// 设计：docs/design/keys-overflow-per-key.md。全局档保留为默认，覆盖表把策略落到单键——
-// 「有人只要逗号翻不动时上屏，其余翻页键无效就是无效」（GH#249）。
+// ───────────────────────── 按键级策略（翻页动作的后缀）─────────────────────────
+// 设计：docs/design/keys-overflow-per-key.md。全局档保留为默认，自定义按键里给单个键绑
+// `page_prev:commit_and_input` / `page_prev:ignore` 把策略落到这个键上——「有人只要逗号翻不动
+// 时上屏，其余翻页键无效就是无效」（GH#249）。
 
-/// 覆盖表优先于全局档：全局 `ignore`，只把 `,` 配成上屏出符号——同方案下 `,` 上屏「你好，」、
-/// `.` 未列出、回落全局档仍吞键（不被殃及）。
+/// 后缀优先于全局档：全局 `ignore`，只把 `,` 绑成「上一页（翻不动时上屏）」——同方案下 `,`
+/// 上屏「你好，」、`.` 是不带后缀的翻页、回落全局档仍吞键（不被殃及）。
 #[test]
-fn comma_override_commits_and_period_falls_back() {
+fn comma_suffix_commits_and_period_falls_back() {
     if !data_ready() {
         return;
     }
     let mut cfg = wubi_config("ignore");
     cfg.keys.page_keys = vec!["comma_period".into()];
     cfg.keys
-        .overflow
-        .page_key_overrides
-        .insert("comma".into(), "commit_and_input".into());
+        .session_actions
+        .insert("comma".into(), "page_prev:commit_and_input".into());
     let c = coord(cfg);
     type_wqvb(&c);
     let act = press_vk(&c, VK_COMMA);
     assert_eq!(
         committed(&act),
         Some("你好，"),
-        "覆盖档：`,` 翻不动应顶屏出符号，实际: {act:?}"
+        "带后缀：`,` 翻不动应顶屏出符号，实际: {act:?}"
     );
 
-    // 同样配置，`.` 未列出 → 回落全局 `ignore`，吞键。
+    // 同样配置，`.` 不带后缀 → 回落全局 `ignore`，吞键。
     let cfg2 = {
         let mut cfg = wubi_config("ignore");
         cfg.keys.page_keys = vec!["comma_period".into()];
         cfg.keys
-            .overflow
-            .page_key_overrides
-            .insert("comma".into(), "commit_and_input".into());
+            .session_actions
+            .insert("comma".into(), "page_prev:commit_and_input".into());
         cfg
     };
     let c2 = coord(cfg2);
@@ -444,14 +444,14 @@ fn comma_override_commits_and_period_falls_back() {
     let act = press_vk(&c2, VK_PERIOD);
     assert!(
         matches!(act, KeyAction::Consumed),
-        "未列出的 `.` 应回落全局档吞键，实际: {act:?}"
+        "不带后缀的 `.` 应回落全局档吞键，实际: {act:?}"
     );
 }
 
-/// 显式压制：全局 `commit_and_input`，把 `,` 覆盖回 `ignore`——「用户能关」正是
-/// 覆盖表存在的理由；未列出的 `.` 仍按全局档上屏。
+/// 显式压制：全局 `commit_and_input`，`,` 绑 `page_prev:ignore`——「用户能关」正是
+/// 按键级策略存在的理由；不带后缀的 `.` 仍按全局档上屏。
 #[test]
-fn override_ignore_suppresses_global_commit() {
+fn suffix_ignore_suppresses_global_commit() {
     if !data_ready() {
         return;
     }
@@ -459,9 +459,8 @@ fn override_ignore_suppresses_global_commit() {
         let mut cfg = wubi_config("commit_and_input");
         cfg.keys.page_keys = vec!["comma_period".into()];
         cfg.keys
-            .overflow
-            .page_key_overrides
-            .insert("comma".into(), "ignore".into());
+            .session_actions
+            .insert("comma".into(), "page_prev:ignore".into());
         coord(cfg)
     };
     let c = mk();
@@ -469,7 +468,7 @@ fn override_ignore_suppresses_global_commit() {
     let act = press_vk(&c, VK_COMMA);
     assert!(
         matches!(act, KeyAction::Consumed),
-        "覆盖为 ignore：`,` 应吞键，实际: {act:?}"
+        "`:ignore`：`,` 应吞键，实际: {act:?}"
     );
 
     let c2 = mk();
@@ -478,22 +477,21 @@ fn override_ignore_suppresses_global_commit() {
     assert_eq!(
         committed(&act),
         Some("你好。"),
-        "未列出的 `.` 走全局档上屏，实际: {act:?}"
+        "不带后缀的 `.` 走全局档上屏，实际: {act:?}"
     );
 }
 
-/// 覆盖档同样守「翻过页仍吞键」红线：翻页中途永远不出符号。
+/// 带后缀同样守「翻过页仍吞键」红线：翻页中途永远不出符号。
 #[test]
-fn override_paged_still_swallows() {
+fn suffix_paged_still_swallows() {
     if !data_ready() {
         return;
     }
     let mut cfg = pinyin_config("ignore", "");
     cfg.keys.page_keys = vec!["comma_period".into()];
     cfg.keys
-        .overflow
-        .page_key_overrides
-        .insert("comma".into(), "commit_and_input".into());
+        .session_actions
+        .insert("comma".into(), "page_prev:commit_and_input".into());
     let c = coord(cfg);
     type_gong(&c);
     press_vk(&c, VK_PERIOD);

@@ -13,6 +13,7 @@
 #include "CompositionPlaceholder.h" // 组合占位识别 + 兜底取值（空格 / ZWSP / 盲文空白，由 core 按应用决定，GH#175）
 #include "WindowTitlePolicy.h" // 窗口标题采集判据（开关 / 截断；compat 的 title 条件）
 #include "ServiceReadyRetryPolicy.h" // focus_gained 补发判决
+#include "CompositionRecoverPolicy.h" // 宿主过早终止组合后接上（受控输入框回写 value）
 #include <vector>
 #include <algorithm>
 #include <shellscalingapi.h>
@@ -291,6 +292,98 @@ private:
     ITfComposition* _pComposition;  // Owned composition pointer
 };
 
+// 只删残留的编辑会话：恢复中服务端清空了缓冲（Esc、退格删光），残留要跟着撤掉。
+class CDropLeftoverEditSession : public ITfEditSession
+{
+public:
+    CDropLeftoverEditSession(CTextService* pTextService, ITfContext* pContext)
+        : _refCount(1), _pTextService(pTextService), _pContext(pContext)
+    {
+        _pTextService->AddRef();
+        _pContext->AddRef();
+    }
+    ~CDropLeftoverEditSession()
+    {
+        _pTextService->Release();
+        _pContext->Release();
+    }
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj)
+    {
+        if (ppvObj == nullptr) return E_INVALIDARG;
+        *ppvObj = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession))
+        {
+            *ppvObj = (ITfEditSession*)this;
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&_refCount); }
+    STDMETHODIMP_(ULONG) Release()
+    {
+        LONG cr = InterlockedDecrement(&_refCount);
+        if (cr == 0) delete this;
+        return cr;
+    }
+    STDMETHODIMP DoEditSession(TfEditCookie ec)
+    {
+        _pTextService->_DropRecoverLeftover(ec, _pContext);
+        return S_OK;
+    }
+
+private:
+    LONG _refCount;
+    CTextService* _pTextService;
+    ITfContext* _pContext;
+};
+
+// 恢复解除时清掉残留。接管调用方给的 range 引用（记录在请求前就已清掉，见 _DisarmRecover）。
+class CPurgeLeftoverEditSession : public ITfEditSession
+{
+public:
+    CPurgeLeftoverEditSession(CTextService* pTextService, ITfRange* pRange, const std::wstring& text)
+        : _refCount(1), _pTextService(pTextService), _pRange(pRange), _text(text)
+    {
+        _pTextService->AddRef();
+    }
+    ~CPurgeLeftoverEditSession()
+    {
+        _pTextService->Release();
+        _pRange->Release();
+    }
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj)
+    {
+        if (ppvObj == nullptr) return E_INVALIDARG;
+        *ppvObj = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession))
+        {
+            *ppvObj = (ITfEditSession*)this;
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&_refCount); }
+    STDMETHODIMP_(ULONG) Release()
+    {
+        LONG cr = InterlockedDecrement(&_refCount);
+        if (cr == 0) delete this;
+        return cr;
+    }
+    STDMETHODIMP DoEditSession(TfEditCookie ec)
+    {
+        _pTextService->_PurgeLeftover(ec, _pRange, _text);
+        return S_OK;
+    }
+
+private:
+    LONG _refCount;
+    CTextService* _pTextService;
+    ITfRange* _pRange;
+    std::wstring _text;
+};
+
 // EditSession for committing text atomically (end composition + insert text in one session)
 // This prevents race conditions where async EndComposition clears text inserted by a subsequent InsertText.
 class CCommitTextEditSession : public ITfEditSession
@@ -344,7 +437,7 @@ public:
     // ITfEditSession
     // 在当前选区直接插入文本 (不经 composition)。用于无 active composition 的兜底路径
     // (鼠标上屏 / GetRange 失败)。
-    HRESULT _InsertAtSelection(TfEditCookie ec, const std::wstring& text)
+    HRESULT _InsertAtSelection(TfEditCookie ec, const std::wstring& text, DWORD flags = 0)
     {
         if (text.empty())
             return S_OK;
@@ -358,7 +451,7 @@ public:
         }
 
         ITfRange* pRange = nullptr;
-        hr = pInsertAtSel->InsertTextAtSelection(ec, 0, text.c_str(), (LONG)text.length(), &pRange);
+        hr = pInsertAtSel->InsertTextAtSelection(ec, flags, text.c_str(), (LONG)text.length(), &pRange);
         pInsertAtSel->Release();
 
         if (FAILED(hr))
@@ -385,6 +478,28 @@ public:
         // 「本会话确实跑过」——**必须是函数第一句**，且与成败无关。CommitText 靠它区分
         // 「宿主没给锁、会话一次都没执行」与「执行了但没写成」，两者的善后相反。见 WasExecuted()。
         _executed = TRUE;
+
+        // 恢复中（宿主过早终止过组合）：同一会话里删残留，再不带组合地插入上屏文字。Chromium 只要见到
+        // 本次编辑里开过组合（含 InsertTextAtSelection 默认建的组合），就先把文字当组合送给页面再提交；
+        // 受控输入框在两步之间回写 value 会打断组合，上屏文字重复一份。不开组合时它只发一次删除加一次
+        // insertText，与微软拼音相同。
+        BOOL recoverInsert = _recoverDropped;
+        if (_pComposition == nullptr && _pTextService->HasRecoverRecord())
+        {
+            _pTextService->_DropRecoverLeftover(ec, _pContext);
+            recoverInsert = TRUE;
+        }
+        if (_pComposition == nullptr && recoverInsert && !_paste)
+        {
+            // 只对 Chromium 不建默认组合；别的宿主照旧（默认组合让 IMM32 桥接的程序仍按 IME 上屏看待）。
+            const DWORD flags = CCaretEditSession::IsChromiumContext(_pContext) ? TF_IAS_NO_DEFAULT_COMPOSITION : 0;
+            HRESULT hr = _InsertAtSelection(ec, _text, flags);
+            WIND_LOG_DEBUG_FMT(L"Recover: commit without composition hr=0x%08X\n", hr);
+            if (FAILED(hr))
+                return hr;
+            _success = TRUE;
+            return S_OK;
+        }
 
         // 标准 IME 提交语义: 把最终上屏文字 SetText 到 composition range 后再
         // EndComposition, 让宿主应用通过 OnEndComposition 看到的 range 内容就是
@@ -525,6 +640,8 @@ public:
     }
 
     BOOL GetSuccess() const { return _success; }
+    void SetRecoverDropped() { _recoverDropped = TRUE; }
+
 
     // 组合是否仍在本对象手里。
     //
@@ -555,6 +672,7 @@ private:
     BOOL _paste;
     BOOL _success;
     BOOL _executed;  // DoEditSession 跑过没有（与成败无关）；见 WasExecuted()
+    BOOL _recoverDropped = FALSE; // 残留已在上屏前单独一把锁里删掉（见 CommitText），照恢复中上屏处理
 };
 
 // EditSession：把光标前 count 个字符替换为 text（智能符号纠错替换）。
@@ -729,6 +847,9 @@ public:
         // 1. If no composition exists, start one
         if (_pTextService->_pComposition == nullptr)
         {
+            // 恢复中：先删掉上一次被宿主终止时留下的编码，再用完整缓冲在原处重开组合。
+            _pTextService->_DropRecoverLeftover(ec, _pContext);
+
             // Get current selection (cursor position) to start composition there
             TF_SELECTION tfSelection;
             ULONG cFetched;
@@ -829,6 +950,8 @@ public:
 
         if (SUCCEEDED(hr))
         {
+            _pTextService->_lastCompositionWriteTick = GetTickCount64();
+
             // 4. Apply display attribute to show underline
             // Skip for placeholder text to avoid any visual artifacts
             // 服务端自己发来的占位（非嵌入模式的编码替身、联想态等，文本恰为占位字符）同样不加
@@ -918,7 +1041,8 @@ private:
                 // 同 GetCaretPositionFromTSF：跳过退化矩形(h<=0)与越界坐标，避免把不可信坐标
                 // 缓存后被后续路径取用。越界时不缓存，留待 fallback 链重新求解。
                 // 越界判据同样已从「前台窗口」放宽为「所有显示器」，理由见那里的注释。
-                if (h > 0 && !IsScreenPointOutsideAllMonitors(caretRect.left, caretRect.top))
+                if (h > 0 && !IsScreenPointOutsideAllMonitors(caretRect.left, caretRect.top)
+                    && !CCaretEditSession::IsOutsideViewExt(pContextView, caretRect))
                 {
                     _pTextService->_cachedCaretRect = caretRect;
                     _pTextService->_hasCachedCaretPos = TRUE;
@@ -1142,6 +1266,7 @@ CTextService::CTextService()
 
 CTextService::~CTextService()
 {
+    _ClearRecoverRecord(); // 兜底：正常已在 Deactivate 里解除
     if (_pLastActiveDocMgr != nullptr)
     {
         _pLastActiveDocMgr->Release();
@@ -1464,6 +1589,7 @@ STDAPI CTextService::Deactivate()
     }
 
     // End any active composition before deactivating
+    _DisarmRecover(L"deactivate");
     EndComposition();
 
     // 清理候选 UI 元素（必须在 ThreadMgr 释放之前）
@@ -2310,6 +2436,7 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
                     // false），不再需要 DLL 侧任何清位逻辑。
                     if (self->_pKeyEventSink != nullptr)
                     {
+                        self->_pKeyEventSink->ReleaseAssocBareOwnership();
                         self->_pKeyEventSink->SetCandidateSessionActive(TRUE);
                     }
                 }
@@ -2921,6 +3048,15 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
     if (pDocMgrFocus != nullptr)
     {
         _focusSessionId++;
+
+        // 无占位联想中文档焦点反弹：鼠标刚按过 ⇒ 用户点了别处（WPS 点单元格就是这样表现的，
+        // 且不发选区变化），让服务端收掉联想窗，而不是等自动隐藏计时。
+        if (_pKeyEventSink != nullptr && _pKeyEventSink->BareAssocMouseClicked() && _pIPCClient != nullptr &&
+            _pIPCClient->IsConnected())
+        {
+            WIND_LOG_DEBUG(L"bare assoc: 焦点反弹且鼠标刚按过，按用户点击处理\n");
+            _pIPCClient->SendSelectionChanged(0);
+        }
 
         // ── 焦点抖动免疫：判据取「文档变没变」而非「失过焦没有」 ──
         // Excel 在 cell-select → cell-edit 时把**同一个** DocMgr 置空再设回（实测指针
@@ -4587,7 +4723,7 @@ void CTextService::ResyncFocusForTitleMatch()
     // DocMgr 焦点的后台进程都会补发 focus_gained、冒充前台，活动客户端落到最后发到的那个。
     if (!wind::window_title::ShouldResyncFocusOnSwitch(_focusSentTitleBlind != FALSE, IsTitleMatchEnabled() != FALSE,
                                                        HasFocus() != FALSE && _hasThreadFocus != FALSE,
-                                                       HasActiveComposition() != FALSE))
+                                                       HasCompositionOrRecover() != FALSE))
         return;
     if (_pIPCClient == nullptr || !_pIPCClient->IsConnected())
         return;
@@ -4977,6 +5113,8 @@ public:
     // ITfEditSession
     STDMETHODIMP DoEditSession(TfEditCookie ec)
     {
+        _pTextService->_DropRecoverLeftover(ec, _pContext);
+
         // Get ITfInsertAtSelection interface
         ITfInsertAtSelection* pInsertAtSel = nullptr;
         HRESULT hr = _pContext->QueryInterface(IID_ITfInsertAtSelection, (void**)&pInsertAtSel);
@@ -5143,6 +5281,7 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
                                            RECT* pCompRect, BOOL* pHasCompRect, BOOL* pIsDefaultPos,
                                            BOOL* pUsedImmCandidateForm)
 {
+    _caretRejectedOutsideView = FALSE;
     if (pUsedCompStart)
     {
         *pUsedCompStart = FALSE;
@@ -5190,7 +5329,8 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
     BOOL usedImm = FALSE;
     BOOL result = CCaretEditSession::GetCaretAndCompositionStartRect(
         pContext, _tfClientId, _pComposition, &rc, &rcCompStart, &hasCompStart,
-        (LONG)GetPendingCommitPrefixLength(), &usedCompStart, pCompRect, pHasCompRect, &usedImm);
+        (LONG)GetPendingCommitPrefixLength(), &usedCompStart, pCompRect, pHasCompRect, &usedImm,
+        &_caretRejectedOutsideView);
     pContext->Release();
 
     if (pUsedCompStart)
@@ -5797,6 +5937,14 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
         return TRUE;
     }
 
+    // 宿主给的是落在本输入框外的旧坐标：别拿 Win32 光标顶替（Chromium 的系统光标同样是旧值），
+    // 交调用方沿用上次坐标。
+    if (_caretRejectedOutsideView)
+    {
+        WIND_LOG_DEBUG(L"GetCaretPosition: TSF 坐标越出显示区，交由 last known\n");
+        return FALSE;
+    }
+
     // For console windows, use specialized handling
     if (isConsole)
     {
@@ -6106,7 +6254,8 @@ void CTextService::_EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX
 // 返回 FALSE 表示请求根本没发出去（无焦点 context 等），调用方需自己兜底。
 BOOL CTextService::RequestCaretPositionUpdateAsync(CaretProbeKind kind)
 {
-    if (_pThreadMgr == nullptr || _pComposition == nullptr)
+    // 恢复中组合已被宿主收走、编码仍在候选窗里：照样要取坐标（无组合时按选区取）。
+    if (_pThreadMgr == nullptr || !HasCompositionOrRecover())
     {
         return FALSE;
     }
@@ -6205,7 +6354,7 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
             return;
         }
     }
-    else if (_pComposition == nullptr)
+    else if (!HasCompositionOrRecover())
     {
         WIND_LOG_DEBUG(L"OnAsyncCaretRectReady: composition already ended, dropping\n");
         return;
@@ -6782,6 +6931,56 @@ STDAPI CTextService::OnCompositionTerminated(TfEditCookie ecWrite, ITfCompositio
     _lastCompositionText.clear();
     _lastCaretPos = -1;
 
+    // 宿主刚写完组合就终止（受控输入框回写 value）：保留缓冲、残留不动，下一键接上。
+    // 不通知 KeyEventSink / 服务端，两边的组合态与候选原样保留。见 CompositionRecoverPolicy.h。
+    if (_pComposition != nullptr && _pComposition == pComposition)
+    {
+        std::wstring leftover;
+        LONG leftoverAcp = 0;
+        ITfContext* pLeftContext = nullptr;
+        ITfRange* pLeftClone = nullptr;
+        ITfRange* pLeftRange = nullptr;
+        if (SUCCEEDED(pComposition->GetRange(&pLeftRange)) && pLeftRange != nullptr)
+        {
+            WCHAR buf[wind::recover::kMaxLeftoverLen + 1] = {};
+            ULONG got = 0;
+            if (SUCCEEDED(pLeftRange->GetText(ecWrite, 0, buf, (ULONG)wind::recover::kMaxLeftoverLen + 1, &got)))
+                leftover.assign(buf, got);
+            // 记下残留的位置：之后核对要求光标恰在它末尾，光标前碰巧是同样的字母不算。
+            // 宿主不给 ACP 偏移就无从核对位置，不进恢复。
+            ITfRangeACP* pAcp = nullptr;
+            LONG acpStart = 0, cch = 0;
+            if (FAILED(pLeftRange->QueryInterface(IID_ITfRangeACP, (void**)&pAcp)) || pAcp == nullptr ||
+                FAILED(pAcp->GetExtent(&acpStart, &cch)) || cch != (LONG)leftover.length())
+                leftover.clear();
+            if (pAcp != nullptr)
+                pAcp->Release();
+            leftoverAcp = acpStart;
+            (void)pLeftRange->GetContext(&pLeftContext);
+            if (FAILED(pLeftRange->Clone(&pLeftClone)))
+                pLeftClone = nullptr;
+            pLeftRange->Release();
+        }
+        const ULONGLONG since = GetTickCount64() - _lastCompositionWriteTick;
+        if (pLeftContext != nullptr && pLeftClone != nullptr &&
+            wind::recover::ShouldRecover(since, holdWasActive, _pendingCommitPrefix.length(), leftover.length()))
+        {
+            _ArmRecover(pLeftContext, pLeftClone, leftover, leftoverAcp);
+            pLeftContext->Release();
+            _hasCachedCaretPos = FALSE; // 缓存的是已终止那次组合的坐标
+            WIND_LOG_INFO_FMT(L"OnCompositionTerminated: host ended composition %llums after write, keeping buffer (leftoverLen=%zu)\n",
+                              since, leftover.length());
+            _pComposition->Release();
+            _pComposition = nullptr;
+            _compositionJustStarted = FALSE;
+            return S_OK;
+        }
+        if (pLeftContext != nullptr)
+            pLeftContext->Release();
+        if (pLeftClone != nullptr)
+            pLeftClone->Release();
+    }
+
     // Only release if this is the same composition we're tracking
     // It may have already been released in DoEditSession
     if (_pComposition != nullptr && _pComposition == pComposition)
@@ -7011,6 +7210,23 @@ STDAPI CTextService::OnEndEdit(ITfContext* pContext, TfEditCookie ecReadOnly, IT
     BOOL selChanged = FALSE;
     pEditRecord->GetSelectionStatus(&selChanged);
 
+    // 恢复中光标离开了残留末尾（点到别处、方向键交给宿主等）：不再接上，按宿主终止组合复位，
+    // 服务端随之清缓冲。否则下一键会在新位置拿光标前碰巧相同的字当残留删。
+    if (selChanged && !_recoverLeftover.empty())
+    {
+        ITfRange* pLeft = nullptr;
+        if (_LeftoverBeforeCaret(ecReadOnly, pContext, &pLeft))
+        {
+            pLeft->Release();
+        }
+        else
+        {
+            _DisarmRecover(L"caret moved");
+            if (_pKeyEventSink != nullptr)
+                _pKeyEventSink->OnCompositionUnexpectedlyTerminated();
+        }
+    }
+
     // When selection changes outside of composition (e.g., mouse click, arrow keys),
     // notify Go to reset smart punct state.
     // During composition, Go tracks state internally via key events.
@@ -7023,6 +7239,29 @@ STDAPI CTextService::OnEndEdit(ITfContext* pContext, TfEditCookie ecReadOnly, IT
     if (selChanged && _pKeyEventSink != nullptr)
     {
         _pKeyEventSink->NoteSelectionChangedDuringToggle();
+    }
+
+    // 鼠标点击 / 拖选挪了光标：输入序列记账看不见，「上一笔」作废（补空格、英文后标点）。
+    // 鼠标按着时才去查这次编辑有没有改文本（透传字符和自己的上屏都会改文本）。只读「此刻按着」
+    // 位，不碰「按下过」位——那一位留给单击切换键的鼠标判定（NoteSelectionChangedDuringToggle）。
+    const bool inComposition = _pComposition != nullptr;
+    const bool mouseDown =
+        ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON)) & 0x8000) != 0;
+    if (_pKeyEventSink != nullptr && WindInputSeq::CursorMovedByMouse(selChanged, inComposition, mouseDown, false))
+    {
+        bool textChanged = true; // 查不出来按「改过」算：宁可沿用记账，也不误作废
+        IEnumTfRanges* pEnum = nullptr;
+        if (SUCCEEDED(pEditRecord->GetTextAndPropertyUpdates(TF_GTP_INCL_TEXT, nullptr, 0, &pEnum)) && pEnum != nullptr)
+        {
+            ITfRange* pChanged = nullptr;
+            ULONG fetched = 0;
+            textChanged = pEnum->Next(1, &pChanged, &fetched) == S_OK && fetched > 0;
+            if (pChanged != nullptr)
+                pChanged->Release();
+            pEnum->Release();
+        }
+        if (!textChanged)
+            _pKeyEventSink->NoteCursorMovedByMouse();
     }
 
     if (selChanged && _pComposition == nullptr)
@@ -7517,6 +7756,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
 
     if (full.empty() && pCompToEnd == nullptr)
     {
+        _DisarmRecover(L"empty commit");
         WIND_LOG_DEBUG(L"CommitText: Nothing to do (no text, no composition)\n");
         return TRUE;
     }
@@ -7527,6 +7767,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
     {
         WIND_LOG_DEBUG(L"CommitText: Can't get DocMgr, falling back\n");
         if (pCompToEnd != nullptr) pCompToEnd->Release();
+        _DisarmRecover(L"commit fallback");
         goto fallback;
     }
 
@@ -7539,11 +7780,29 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
         {
             WIND_LOG_DEBUG(L"CommitText: Can't get Context, falling back\n");
             if (pCompToEnd != nullptr) pCompToEnd->Release();
+            _DisarmRecover(L"commit fallback");
             goto fallback;
+        }
+
+        // 恢复中且宿主是 Chromium：残留先在单独一把锁里删掉，上屏会话再插入。删和插混在同一把锁里，
+        // 受控输入框上屏文字照样重复一份（实测）；分两把锁时页面先收到删除、再收到一次 insertText。
+        // 非按键上下文不能发同步会话，改发异步，TSF 按请求顺序执行，仍排在上屏会话之前。
+        BOOL recoverDropped = FALSE;
+        if (pCompToEnd == nullptr && HasRecoverRecord() && CCaretEditSession::IsChromiumContext(pContext))
+        {
+            CDropLeftoverEditSession* pDrop = new CDropLeftoverEditSession(this, pContext);
+            HRESULT hrDropSession = S_OK;
+            HRESULT hrDrop = pContext->RequestEditSession(
+                _tfClientId, pDrop, (nonKeyContext ? TF_ES_ASYNC : TF_ES_SYNC) | TF_ES_READWRITE, &hrDropSession);
+            pDrop->Release();
+            recoverDropped = SUCCEEDED(hrDrop);
+            WIND_LOG_DEBUG_FMT(L"Recover: drop in its own lock hr=0x%08X hrSession=0x%08X\n", hrDrop, hrDropSession);
         }
 
         CCommitTextEditSession* pEditSession = new CCommitTextEditSession(this, pContext, pCompToEnd, full, paste);
         // pCompToEnd ownership transferred to pEditSession
+        if (recoverDropped)
+            pEditSession->SetRecoverDropped();
 
         if (nonKeyContext)
         {
@@ -7727,6 +7986,9 @@ void CTextService::CleanupInputStateForDocChange(ITfDocumentMgr* pDocMgrHint, ui
     WIND_LOG_DEBUG_FMT(L"CleanupInputStateForDocChange reason=%ls hint=0x%p focusLostSent=%d sendLost=%d",
                        FocusLostReasonName(reason), pDocMgrHint, _focusLostSent ? 1 : 0, sendFocusLost ? 1 : 0);
 
+    // 换了文档：残留属于旧文档，不能拿新文档的光标去核对删除。
+    _DisarmRecover(L"doc change");
+
     // 先结束 composition 再发 focus_lost：EndComposition 会清空 composition 范围的文本，
     // 顺序反了则服务端已清 buffer 而宿主里仍留着未清的 composition 文本。
     EndComposition(pDocMgrHint);
@@ -7827,6 +8089,8 @@ void CTextService::EndComposition(ITfDocumentMgr* pDocMgrHint, BOOL nonKeyContex
     // If there's no active composition, nothing to do
     if (_pComposition == nullptr)
     {
+        if (!_recoverLeftover.empty())
+            _RequestDropLeftover();
         WIND_LOG_DEBUG(L"EndComposition: No active composition\n");
         return;
     }
@@ -7896,6 +8160,155 @@ void CTextService::EndComposition(ITfDocumentMgr* pDocMgrHint, BOOL nonKeyContex
 
     pEditSession->Release();
     pContext->Release();
+}
+
+void CTextService::_ArmRecover(ITfContext* pContext, ITfRange* pRange, const std::wstring& leftover, LONG acpStart)
+{
+    _ClearRecoverRecord();
+    _recoverLeftover = leftover;
+    _recoverAcpStart = acpStart;
+    _recoverContext = pContext;
+    _recoverContext->AddRef();
+    _recoverRange = pRange; // 接管调用方的引用
+}
+
+void CTextService::_ClearRecoverRecord()
+{
+    _recoverLeftover.clear();
+    if (_recoverContext != nullptr)
+    {
+        _recoverContext->Release();
+        _recoverContext = nullptr;
+    }
+    if (_recoverRange != nullptr)
+    {
+        _recoverRange->Release();
+        _recoverRange = nullptr;
+    }
+}
+
+void CTextService::_DisarmRecover(const wchar_t* why)
+{
+    if (_recoverLeftover.empty())
+        return;
+    // 先取走再清记录：清残留的会话可能当场执行，它触发的 OnEndEdit 不能再见到这条记录。
+    const std::wstring text = _recoverLeftover;
+    ITfContext* pContext = _recoverContext;
+    ITfRange* pRange = _recoverRange;
+    pContext->AddRef();
+    pRange->AddRef();
+    _ClearRecoverRecord();
+
+    // 不再接上：按原先「宿主意外终止就清掉组合文字」的语义清残留（原先在终止回调里就清，恢复把它
+    // 推迟到了这里）。Chromium 例外：原先那次清除在它上面本就不生效；它把无组合的删改译成相对页面
+    // 当前光标的删除，光标已挪开时删到的是别处的字。
+    HRESULT hr = S_FALSE;
+    if (!CCaretEditSession::IsChromiumContext(pContext))
+    {
+        CPurgeLeftoverEditSession* pPurge = new CPurgeLeftoverEditSession(this, pRange, text);
+        pRange = nullptr; // 引用交给会话
+        HRESULT hrSession = S_OK;
+        // Deactivate 里请求时宿主若排队，会话可能被 TSF 丢弃，残留就留在文档里（与宿主自己 finalize 等同）。
+        hr = pContext->RequestEditSession(_tfClientId, pPurge, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrSession);
+        pPurge->Release();
+    }
+    if (pRange != nullptr)
+        pRange->Release();
+    pContext->Release();
+    WIND_LOG_DEBUG_FMT(L"Recover: disarmed (%ls), purge hr=0x%08X\n", why, hr);
+}
+
+void CTextService::_PurgeLeftover(TfEditCookie ec, ITfRange* pRange, const std::wstring& text)
+{
+    // 区间随宿主的编辑漂移（与组合区间同一机制）；里面仍是那段残留才清。
+    WCHAR buf[wind::recover::kMaxLeftoverLen + 1] = {};
+    ULONG got = 0;
+    HRESULT hr = E_FAIL;
+    if (SUCCEEDED(pRange->GetText(ec, 0, buf, (ULONG)wind::recover::kMaxLeftoverLen + 1, &got)) &&
+        std::wstring(buf, got) == text)
+    {
+        hr = pRange->SetText(ec, 0, L"", 0);
+    }
+    WIND_LOG_DEBUG_FMT(L"Recover: purge leftover len=%zu hr=0x%08X\n", text.length(), hr);
+}
+
+void CTextService::_RequestDropLeftover()
+{
+    if (_recoverContext == nullptr)
+        return;
+    CDropLeftoverEditSession* pEditSession = new CDropLeftoverEditSession(this, _recoverContext);
+    HRESULT hrSession = S_OK;
+    HRESULT hr = _recoverContext->RequestEditSession(_tfClientId, pEditSession, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+                                                     &hrSession);
+    pEditSession->Release();
+    if (FAILED(hr))
+        _DisarmRecover(L"edit session refused");
+}
+
+BOOL CTextService::_LeftoverBeforeCaret(TfEditCookie ec, ITfContext* pContext, ITfRange** ppLeftover)
+{
+    *ppLeftover = nullptr;
+    if (_recoverLeftover.empty() || pContext == nullptr || pContext != _recoverContext)
+        return FALSE;
+    TF_SELECTION sel = {};
+    ULONG fetched = 0;
+    if (FAILED(pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) || fetched == 0 ||
+        sel.range == nullptr)
+        return FALSE;
+    ITfRange* pRange = sel.range; // 取得所有权
+    const LONG len = (LONG)_recoverLeftover.length();
+    BOOL empty = FALSE;
+    LONG caretAcp = -1, cch = 0, shifted = 0;
+    ITfRangeACP* pAcp = nullptr;
+    if (SUCCEEDED(pRange->QueryInterface(IID_ITfRangeACP, (void**)&pAcp)) && pAcp != nullptr)
+    {
+        if (FAILED(pAcp->GetExtent(&caretAcp, &cch)))
+            caretAcp = -1;
+        pAcp->Release();
+    }
+    WCHAR buf[wind::recover::kMaxLeftoverLen + 1] = {};
+    ULONG got = 0;
+    if (FAILED(pRange->IsEmpty(ec, &empty)) || !empty || caretAcp != _recoverAcpStart + len ||
+        FAILED(pRange->ShiftStart(ec, -len, &shifted, nullptr)) || shifted != -len ||
+        FAILED(pRange->GetText(ec, 0, buf, (ULONG)wind::recover::kMaxLeftoverLen + 1, &got)) ||
+        std::wstring(buf, got) != _recoverLeftover)
+    {
+        WIND_LOG_DEBUG_FMT(L"Recover: leftover not before caret (len=%ld caret=%ld start=%ld got=%lu)\n",
+                           len, caretAcp, _recoverAcpStart, got);
+        pRange->Release();
+        return FALSE;
+    }
+    *ppLeftover = pRange;
+    return TRUE;
+}
+
+void CTextService::_DropRecoverLeftover(TfEditCookie ec, ITfContext* pContext)
+{
+    if (_recoverLeftover.empty() || pContext == nullptr)
+        return;
+    ITfRange* pRange = nullptr;
+    const BOOL found = _LeftoverBeforeCaret(ec, pContext, &pRange);
+    const LONG len = (LONG)_recoverLeftover.length();
+    if (!found)
+    {
+        // 光标不在残留末尾、或不是残留所在的 context：不接上，残留另开会话处理（不与本会话的写入混在
+        // 同一把锁里）。
+        _DisarmRecover(L"leftover not before caret");
+        return;
+    }
+    _ClearRecoverRecord();
+    HRESULT hr = pRange->SetText(ec, 0, L"", 0);
+    if (SUCCEEDED(hr))
+    {
+        pRange->Collapse(ec, TF_ANCHOR_START);
+        TF_SELECTION newSel = {};
+        newSel.range = pRange;
+        newSel.style.ase = TF_AE_NONE;
+        newSel.style.fInterimChar = FALSE;
+        pContext->SetSelection(ec, 1, &newSel);
+    }
+    WIND_LOG_DEBUG_FMT(L"Recover: dropped leftover len=%ld hr=0x%08X\n", len, hr);
+    pRange->Release();
 }
 
 void CTextService::ResetComposingState(BOOL keepPairState)
@@ -8115,6 +8528,9 @@ void CTextService::OnHoldTimerExpired(BOOL nonKeyContext)
     // 回调进来的 Flush 都走异步会话收口（不走 SendInput 兜底，见 CommitText 内注释）；
     // 按键上下文里的 Flush 保持同步，以确保收口先于后续透传字符。
     CommitText(textToCommit, nonKeyContext);
+    // 待定符号落定 = 文档里多了这个符号：seqChar 跟上（否则「hello，」之后的汉字前会被误补空格）。
+    if (_pKeyEventSink != nullptr)
+        _pKeyEventSink->NoteCommittedSeqChar(textToCommit);
 }
 
 // ─── DeferredComposition（direct_commit 顶码，延迟到 keyup 才开新组合）───────────

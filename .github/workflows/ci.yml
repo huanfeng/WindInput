@@ -72,6 +72,13 @@ jobs:
           ! cargo tree -p wind-coordinator --no-default-features -e normal | grep -q "wind-ui v"
           ! cargo tree -p wind-mobile --target aarch64-linux-android -e normal | grep -qE "zstd-sys|bzip2-sys|fontdb"
 
+      # 平台差异只能由运行期 InputProfile 决定。编译期的 `cfg!(target_os = "android")` 会让主机
+      # 上永远只测到桌面那一支，移动分支无人覆盖——这条守着它不被写回协调器 / 引擎。
+      - name: 协调器与引擎无编译期平台判断
+        working-directory: wind_input
+        run: |
+          ! grep -rnE 'cfg!\(target_os = "android"\)|use_mobile_overrides' crates/wind-coordinator/src crates/wind-engine/src
+
       # wind_tsf 里被刻意剥出来的纯逻辑（判据/表结构，不含 Win32 头）——g++ 就能跑，
       # 约 10 秒。⚠ 上面那步交叉编译只保证 DLL 能编出来，**一条断言都不会执行**；
       # 这些测试此前只有手敲 g++ 才跑得到，等于不存在。在「游戏兼容这类改动无法在
@@ -120,7 +127,7 @@ jobs:
     name: macOS Build & Test
     needs: changes
     if: needs.changes.outputs.macos == 'true'
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
 

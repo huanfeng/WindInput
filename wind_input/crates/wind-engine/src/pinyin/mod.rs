@@ -38,10 +38,67 @@ use scorer::AbbrevMatcher;
 use shuangpin::ShuangpinConverter;
 use std::sync::{Arc, OnceLock};
 use syllable::SyllableTrie;
+use tracing::debug;
 use viterbi::{ViterbiDecoder, WordNode};
 use wind_candidate::{Candidate, CandidateSource};
 use wind_dict::DictManager;
 use wind_dict::cached::CachedDict;
+
+/// convert 分段计时器：Drop 时若总耗时 ≥15ms，把各段与未命名剩余（`rest`）一次性打进日志。
+/// 仅诊断用——2026-11-04 真机偶发 convert ≥500ms 但本地/靶机探针均不复现，
+/// 需要分段定位瓶颈落点；定位完毕可整块移除。
+pub(crate) struct ConvertStageTimer {
+    tag: &'static str,
+    t: std::time::Instant,
+    stages: Vec<(std::string::String, std::time::Duration)>,
+}
+
+impl ConvertStageTimer {
+    pub(crate) fn new() -> Self {
+        Self::with_tag("")
+    }
+
+    pub(crate) fn with_tag(tag: &'static str) -> Self {
+        Self {
+            tag,
+            t: std::time::Instant::now(),
+            stages: Vec::new(),
+        }
+    }
+
+    pub(crate) fn mark(&mut self, name: impl Into<String>) {
+        let now = std::time::Instant::now();
+        let name = name.into();
+        self.stages.push((name, now - self.t));
+        self.t = now;
+    }
+}
+
+impl Drop for ConvertStageTimer {
+    fn drop(&mut self) {
+        const MIN: std::time::Duration = std::time::Duration::from_millis(15);
+        let tail = self.t.elapsed();
+        let named: std::time::Duration = self
+            .stages
+            .iter()
+            .map(|(_, d)| *d)
+            .sum::<std::time::Duration>();
+        let total = named + tail;
+        if total < MIN {
+            return;
+        }
+        let parts: Vec<String> = self
+            .stages
+            .iter()
+            .map(|(n, d)| format!("{n}={d:?}"))
+            .collect();
+        debug!(
+            "convert 分段[{}]: total={total:?} {} rest={tail:?}",
+            self.tag,
+            parts.join(" ")
+        );
+    }
+}
 
 /// 整句解的**等效词频**：把 Viterbi 路径分换算回词频域，与其余候选同量纲。
 ///
@@ -3103,6 +3160,7 @@ impl Engine for PinyinEngine {
         let allow_partial_final = opts
             .allow_partial_final
             .unwrap_or(self.config.enable_partial_final);
+        let mut timer = ConvertStageTimer::new();
         if input.is_empty() {
             return Ok(ConvertResult::default());
         }
@@ -3311,6 +3369,7 @@ impl Engine for PinyinEngine {
         } else {
             Dag::build(input, trie).maximum_match()
         };
+        timer.mark("seg");
 
         // 完成音节覆盖的连续前缀（从起点算）。
         //
@@ -3363,6 +3422,7 @@ impl Engine for PinyinEngine {
                 candidates[before].meta.fuzzy_typed_boundary = typed;
             }
         }
+        timer.mark("exact");
 
         // （step 1.5「超长词典整词兜底」已删除。它把音节数超过 `max_word_len` 的词典精确
         //  整词按 `score_node` 折算成「单节点等价整句分」并抬到整句量纲，同时标 `is_sentence`
@@ -3464,7 +3524,7 @@ impl Engine for PinyinEngine {
                     continue;
                 }
                 let sentence: String = result.words.join("");
-                // 不同切分可能拼出同一串字（`decode_nbest` 不去重），按文本去重后才计名次。
+                // `decode_nbest` 已按文本去重；这里再挡一次（beam 路径、或哈希碰撞）。
                 if sentence.is_empty() || seen.contains(&sentence) {
                     continue;
                 }
@@ -3543,6 +3603,8 @@ impl Engine for PinyinEngine {
                 }
             }
         }
+
+        timer.mark("sent");
 
         // 2c. **残码补全整句解码**：尾部残码作为「待定音节」入图，由 LM 选出最优单字
         //     （`buzhidaok` → 「不知道」+ `k` 补成「看」→ 整句「不知道看」）。
@@ -3681,6 +3743,8 @@ impl Engine for PinyinEngine {
                 }
             }
         }
+
+        timer.mark("sentp");
 
         // 2b. **混合整句解码**：简拼段与全拼段在同一张词图里由 Viterbi 选路径
         //     （`bzdhaobuhao` → 「不知道」+「好不好」→ 整句「不知道好不好」）。
@@ -3857,6 +3921,8 @@ impl Engine for PinyinEngine {
                 }
             }
         }
+
+        timer.mark("mixed");
 
         // 4. 前缀查找（补全词，code 比输入长，如 si→思考）→ 前缀层级，降到精确之后。
         //
@@ -4035,6 +4101,7 @@ impl Engine for PinyinEngine {
         // 整串是否**纯简拼形态**（每字母均为某音节首字母、且非完整音节序列）。
         // 提成变量供 step5 / step6 / step6.2 共用，`enable_abbrev` 仍在短路前（关闭时
         // 连 is_abbreviation 的 Dag 构建都省掉）。
+        timer.mark("prefix");
         let stroke_is_plain_abbrev =
             self.config.enable_abbrev && AbbrevMatcher::is_abbreviation(abbr_query, trie);
 
@@ -4128,6 +4195,9 @@ impl Engine for PinyinEngine {
         } else {
             Vec::new()
         };
+        timer.mark("abbrevs5");
+
+        // 5b. 混合简拼：同一串里混用声母与完整音节（`nhao` = n + hao、`nih` = ni + h）。
         if !mixed_pats.is_empty() {
             // 同一串的多条解释常投影到同一个键（`nhao` 的 [n][hao] 与 `nih` 的 [ni][h] 都是
             // `nh`），按键去重后每个键只点查一次索引。
@@ -4138,6 +4208,7 @@ impl Engine for PinyinEngine {
                 .collect();
             keys.sort_unstable();
             keys.dedup();
+            timer.mark("a5keys");
             for key in &keys {
                 // 与 step5 共用 `ABBREV_INDEX_LIMIT`（两条路径查的是同一张表、同一个键）。
                 // 这里拿到的码还要过一道逐段校验，**绝大多数会被滤掉**，窗口小了几乎一条不剩。
@@ -4186,7 +4257,10 @@ impl Engine for PinyinEngine {
                     }
                 }
             }
+            timer.mark("a5search");
         }
+
+        timer.mark("abbrevs");
 
         // 6. 用户/临时造词层（L：让拼音造的词显现）。查询与主词典相同的码——整串精确 +
         //    各前缀子码（你好 coded「nihao」当输入「nihaoma」时部分消费）+ 前缀补全——
@@ -4675,6 +4749,8 @@ impl Engine for PinyinEngine {
         for sent in demote_targets {
             // 「精确整词」判据：码恰好等于已消费输入 `completed`，且非模糊命中、
             // 不在前缀补全/子短语层。含系统词库与 step 6 并入的用户/临时层。
+            // 排除引擎合成的其它整句（N-best 备选）：它不是词条，算进来会让第 1 名降到
+            // 第 2 名之下、名次倒挂。并入了用户/临时词的那条是词条，照算。
             let exact_max = candidates
                 .iter()
                 .filter(|c| {
@@ -4683,6 +4759,7 @@ impl Engine for PinyinEngine {
                         && !c.is_prefix
                         && !c.is_partial
                         && c.code == completed
+                        && !(c.is_synthesized && !c.meta.is_user_dict && !c.meta.is_temp_dict)
                 })
                 .map(|c| c.weight)
                 .max();
@@ -5210,6 +5287,7 @@ impl Engine for PinyinEngine {
             }
         }
 
+        timer.mark("tail");
         let has_partial = !partial_syllable.is_empty();
         let is_empty = candidates.is_empty();
 
@@ -8757,6 +8835,109 @@ s = ["ao"]
     }
 
     // ── 整句让位于精确整词（step 6.5 降级）─────────────────────────────────────
+
+    fn nbest_engine(raw: CodetableDict) -> PinyinEngine {
+        let mut e = PinyinEngine::new(Config::default(), CachedDict::Memory(raw));
+        e.config.sentence_count = 2;
+        e.config.sentence_max_count = 2;
+        e
+    }
+
+    fn nihao_nbest_dict() -> CodetableDict {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("ni".to_string(), "你".to_string(), 492_791, 0);
+        raw.merge_single("ni".to_string(), "泥".to_string(), 30_000, 1);
+        raw.merge_single("hao".to_string(), "好".to_string(), 124_546, 2);
+        raw
+    }
+
+    /// N-best 下合成的第 2 名整句不算「精确整词」：第 1 名不得因它降级而名次倒挂。
+    #[test]
+    fn nbest_alternate_sentence_does_not_demote_top_sentence() {
+        let e = nbest_engine(nihao_nbest_dict());
+        let r = e.convert("nihao", 50).unwrap();
+        let get = |rank: u8| {
+            r.candidates
+                .iter()
+                .find(|c| c.is_sentence && c.sentence_rank == rank)
+                .unwrap_or_else(|| panic!("缺第 {rank} 名整句: {:?}", r.candidates))
+        };
+        let (top, alt) = (get(1), get(2));
+        assert_eq!((top.text.as_str(), alt.text.as_str()), ("你好", "泥好"));
+        assert!(
+            top.is_synthesized && alt.is_synthesized,
+            "两条都应是合成整句"
+        );
+        assert!(
+            !top.is_sentence_demoted,
+            "第 2 名整句不是词条，不得让第 1 名降级"
+        );
+        assert!(
+            top.weight > alt.weight,
+            "第 1 名权重须高于第 2 名: {} vs {}",
+            top.weight,
+            alt.weight
+        );
+    }
+
+    /// 学过的整句成了整串单节点后，第 2 名路径常是它的拆分版（同文）；
+    /// 备选名额不得被同文路径占掉。
+    #[test]
+    fn nbest_alternate_survives_after_top_sentence_is_learned() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("xian".to_string(), "先".to_string(), 300_000, 0);
+        raw.merge_single("xian".to_string(), "西安".to_string(), 60_000, 1);
+        raw.merge_single("chuan".to_string(), "穿".to_string(), 30_000, 2);
+        raw.merge_single("wazi".to_string(), "袜子".to_string(), 5_000, 3);
+        raw.merge_single("chuanwazi".to_string(), "穿袜子".to_string(), 50, 4);
+        let store = tmp_store("nbest_learned_top");
+        // xi|an|chuan|wa|zi → 0/2/4/9/11
+        store
+            .learn_temp_word(
+                "pinyin",
+                "xianchuanwazi",
+                "西安穿袜子",
+                800,
+                0b1010_0001_0101,
+            )
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreTempLayer::new(store, "pinyin")));
+        let e = nbest_engine(raw).with_store_layers(Arc::new(dm));
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 1).as_deref(),
+            Some("西安穿袜子")
+        );
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 2).as_deref(),
+            Some("先穿袜子"),
+            "第 2 名不得被「西安穿袜子」的拆分路径占掉"
+        );
+    }
+
+    /// 对照：第 2 名与用户词同文时它是词条，第 1 名照旧让位（同只出 1 条时）。
+    /// 关掉整句用用户词：开着时用户词自己进图拿第 1，走不到这条例外。
+    #[test]
+    fn nbest_alternate_merged_with_user_word_still_demotes_top_sentence() {
+        let store = tmp_store("nbest_alt_user");
+        store
+            .add_user_word("pinyin", "nihao", "泥好", 500, 0b101) // ni|hao → 0/2
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreUserLayer::new(store, "pinyin")));
+        let mut e = nbest_engine(nihao_nbest_dict()).with_store_layers(Arc::new(dm));
+        e.config.sentence_uses_user_words = false;
+        let r = e.convert("nihao", 50).unwrap();
+        let top = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "你好")
+            .unwrap_or_else(|| panic!("缺「你好」: {:?}", r.candidates));
+        let user = r.candidates.iter().find(|c| c.text == "泥好").unwrap();
+        assert!(user.meta.is_user_dict, "「泥好」应带用户词标记");
+        assert!(top.is_sentence_demoted, "存在精确用户词时第 1 名整句须让位");
+        assert!(top.weight < user.weight);
+    }
 
     /// 用户要求的那条保证：**多个精确整词并列于最大权重时，整句排在它们全部之后**。
     ///

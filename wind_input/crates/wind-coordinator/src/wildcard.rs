@@ -203,8 +203,8 @@ impl Coordinator {
             SessionAction::SelectChar(_) => Some("以词定字键"),
             SessionAction::AuxCode(AuxCodeShare::Solo) => Some("辅助码键"),
             SessionAction::AuxCode(AuxCodeShare::PageNext) => Some("辅助码/翻页键"),
-            SessionAction::PagePrev
-            | SessionAction::PageNext
+            SessionAction::PagePrev(_)
+            | SessionAction::PageNext(_)
             | SessionAction::PageScreenPrev
             | SessionAction::PageScreenNext => Some("翻页键"),
             SessionAction::HighlightUp | SessionAction::HighlightDown => Some("高亮键"),
@@ -338,8 +338,8 @@ impl Coordinator {
         // 作通配进缓冲，报出来是误报。共键 `aux_code:page_next` 被拒后降级为翻页，照吃。
         let owner = match self.session_action_for(vk, shift, true) {
             Some(
-                SessionAction::PagePrev
-                | SessionAction::PageNext
+                SessionAction::PagePrev(_)
+                | SessionAction::PageNext(_)
                 | SessionAction::PageScreenPrev
                 | SessionAction::PageScreenNext,
             ) => Some("翻页键"),

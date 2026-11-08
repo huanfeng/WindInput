@@ -253,6 +253,7 @@ public struct KeyEventPayload: Equatable {
     public var toggles: UInt8
     public var eventSeq: UInt16
     public var prevChar: UInt16  // 0 = unavailable
+    public var seqChar: UInt16   // 0 = unknown，见 InputSequenceTracker
 
     public init(keyCode: UInt32,
                 scanCode: UInt32 = 0,
@@ -260,7 +261,8 @@ public struct KeyEventPayload: Equatable {
                 eventType: KeyEventType = .down,
                 toggles: UInt8 = 0,
                 eventSeq: UInt16 = 0,
-                prevChar: UInt16 = 0) {
+                prevChar: UInt16 = 0,
+                seqChar: UInt16 = 0) {
         self.keyCode = keyCode
         self.scanCode = scanCode
         self.modifiers = modifiers
@@ -268,6 +270,7 @@ public struct KeyEventPayload: Equatable {
         self.toggles = toggles
         self.eventSeq = eventSeq
         self.prevChar = prevChar
+        self.seqChar = seqChar
     }
 }
 

@@ -1,0 +1,448 @@
+#### scale 1.5
+== 候选窗 横排 ==
+Column padding=Edges { l: 7.5, t: 7.5, r: 7.5, b: 7.5 } bg=Some([255, 255, 255, 255]) radius=18.0 border=Some(([226, 229, 235, 255], 1.0)) m=(501.0,126.8) rect=Rect { x: 0.0, y: 0.0, w: 501.0, h: 126.8 }
+  Row padding=Edges { l: 12.0, t: 9.0, r: 12.0, b: 9.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=12.0 fill=true m=(486.0,50.4) rect=Rect { x: 7.5, y: 7.5, w: 486.0, h: 50.4 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(27.0) caret=Some(3) caret_w=2.0 m=(81.0,32.4) rect=Rect { x: 19.5, y: 16.5, w: 81.0, h: 32.4 }
+    Row grow=true m=(346.8,0.0) rect=Rect { x: 100.5, y: 32.7, w: 346.8, h: 0.0 }
+    Row margin=Edges { l: 18.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 465.3, y: 16.5, w: 16.2, h: 32.4 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 6.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(486.0,2.0) rect=Rect { x: 7.5, y: 57.9, w: 486.0, h: 2.0 }
+  Row cross=Center m=(486.0,53.4) rect=Rect { x: 7.5, y: 65.9, w: 486.0, h: 53.4 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([59, 130, 246, 26]) radius=12.0 tag=0 m=(97.2,53.4) rect=Rect { x: 7.5, y: 65.9, w: 97.2, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 22.5, y: 81.8, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("好") color=[37, 99, 235, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 39.3, y: 76.4, w: 16.2, h: 32.4 }
+      Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("vb") color=[154, 160, 174, 255] size=Some(21.0) m=(25.2,25.2) rect=Rect { x: 64.5, y: 80.0, w: 25.2, h: 25.2 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([0, 0, 0, 8]) radius=12.0 tag=1 m=(97.2,53.4) rect=Rect { x: 104.7, y: 65.9, w: 97.2, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 119.7, y: 81.8, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("号") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 136.5, y: 76.4, w: 16.2, h: 32.4 }
+      Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("kg") color=[154, 160, 174, 255] size=Some(21.0) m=(25.2,25.2) rect=Rect { x: 161.7, y: 80.0, w: 25.2, h: 25.2 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 tag=2 m=(63.0,53.4) rect=Rect { x: 201.9, y: 65.9, w: 63.0, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 216.9, y: 81.8, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("浩") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 233.7, y: 76.4, w: 16.2, h: 32.4 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 tag=3 m=(138.6,53.4) rect=Rect { x: 264.9, y: 65.9, w: 138.6, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 279.9, y: 81.8, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[74, 74, 74, 255] size=Some(27.0) m=(32.4,32.4) rect=Rect { x: 296.69998, y: 76.4, w: 32.4, h: 32.4 }
+      Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[154, 160, 174, 255] size=Some(21.0) m=(50.4,25.2) rect=Rect { x: 338.09998, y: 80.0, w: 50.4, h: 25.2 }
+    Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(78.0,53.4) rect=Rect { x: 415.5, y: 65.9, w: 78.0, h: 53.4 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(53.4) radius=12.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(21.0) align=Center m=(39.0,53.4) rect=Rect { x: 415.5, y: 65.9, w: 39.0, h: 53.4 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(21.0) m=(0.0,25.2) rect=Rect { x: 454.5, y: 80.0, w: 0.0, h: 25.2 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(53.4) radius=12.0 text=Some("›") color=[59, 130, 246, 255] size=Some(21.0) align=Center tag=100001 m=(39.0,53.4) rect=Rect { x: 454.5, y: 65.9, w: 39.0, h: 53.4 }
+-- 绘制 501x127 像素摘要 1b94a5679332afff
+draw text="nihao" at=(19.5,16.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(465.3,16.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(22.5,81.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(39.3,76.4) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(64.5,80.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(119.7,81.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(136.5,76.4) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(161.7,80.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(216.9,81.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(233.7,76.4) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(279.9,81.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(296.69998,76.4) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(338.09998,80.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(428.7,80.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(454.5,80.0) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(467.7,80.0) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 候选窗 竖排 ==
+Column padding=Edges { l: 7.5, t: 7.5, r: 7.5, b: 7.5 } bg=Some([255, 255, 255, 255]) radius=18.0 border=Some(([226, 229, 235, 255], 1.0)) m=(154.2,335.0) rect=Rect { x: 0.0, y: 0.0, w: 154.2, h: 335.0 }
+  Row padding=Edges { l: 12.0, t: 9.0, r: 12.0, b: 9.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=12.0 fill=true m=(139.2,50.4) rect=Rect { x: 7.5, y: 7.5, w: 139.2, h: 50.4 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(27.0) caret=Some(3) caret_w=2.0 m=(81.0,32.4) rect=Rect { x: 19.5, y: 16.5, w: 81.0, h: 32.4 }
+    Row grow=true m=(0.0,0.0) rect=Rect { x: 100.5, y: 32.7, w: 0.0, h: 0.0 }
+    Row margin=Edges { l: 18.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 118.5, y: 16.5, w: 16.2, h: 32.4 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 6.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(139.2,2.0) rect=Rect { x: 7.5, y: 57.9, w: 139.2, h: 2.0 }
+  Column fill=true m=(139.2,213.6) rect=Rect { x: 7.5, y: 65.9, w: 139.2, h: 213.6 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([59, 130, 246, 26]) radius=12.0 fill=true tag=0 m=(139.2,53.4) rect=Rect { x: 7.5, y: 65.9, w: 139.2, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 22.5, y: 81.8, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("好") color=[37, 99, 235, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 39.3, y: 76.4, w: 16.2, h: 32.4 }
+      Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("vb") color=[154, 160, 174, 255] size=Some(21.0) m=(25.2,25.2) rect=Rect { x: 64.5, y: 80.0, w: 25.2, h: 25.2 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([0, 0, 0, 8]) radius=12.0 fill=true tag=1 m=(139.2,53.4) rect=Rect { x: 7.5, y: 119.3, w: 139.2, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 22.5, y: 135.2, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("号") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 39.3, y: 129.8, w: 16.2, h: 32.4 }
+      Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("kg") color=[154, 160, 174, 255] size=Some(21.0) m=(25.2,25.2) rect=Rect { x: 64.5, y: 133.40001, w: 25.2, h: 25.2 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 fill=true tag=2 m=(139.2,53.4) rect=Rect { x: 7.5, y: 172.70001, w: 139.2, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 22.5, y: 188.6, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("浩") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 39.3, y: 183.20001, w: 16.2, h: 32.4 }
+    Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 fill=true tag=3 m=(139.2,53.4) rect=Rect { x: 7.5, y: 226.1, w: 139.2, h: 53.4 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 22.5, y: 242.0, w: 10.8, h: 21.6 }
+      Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[74, 74, 74, 255] size=Some(27.0) m=(32.4,32.4) rect=Rect { x: 39.3, y: 236.6, w: 32.4, h: 32.4 }
+      Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[154, 160, 174, 255] size=Some(21.0) m=(50.4,25.2) rect=Rect { x: 80.7, y: 240.20001, w: 50.4, h: 25.2 }
+  Row cross=Center fill=true m=(139.2,48.0) rect=Rect { x: 7.5, y: 279.5, w: 139.2, h: 48.0 }
+    Row grow=true m=(24.599998,0.0) rect=Rect { x: 7.5, y: 303.5, w: 24.599998, h: 0.0 }
+    Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(78.0,48.0) rect=Rect { x: 44.1, y: 279.5, w: 78.0, h: 48.0 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(48.0) radius=12.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(21.0) align=Center m=(39.0,48.0) rect=Rect { x: 44.1, y: 279.5, w: 39.0, h: 48.0 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(21.0) m=(0.0,25.2) rect=Rect { x: 83.1, y: 290.9, w: 0.0, h: 25.2 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(48.0) radius=12.0 text=Some("›") color=[59, 130, 246, 255] size=Some(21.0) align=Center tag=100001 m=(39.0,48.0) rect=Rect { x: 83.1, y: 279.5, w: 39.0, h: 48.0 }
+    Row grow=true m=(24.599998,0.0) rect=Rect { x: 122.1, y: 303.5, w: 24.599998, h: 0.0 }
+-- 绘制 155x335 像素摘要 2c0ffc08617dcf9b
+draw text="nihao" at=(19.5,16.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(118.5,16.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(22.5,81.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(39.3,76.4) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(64.5,80.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(22.5,135.2) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(39.3,129.8) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(64.5,133.40001) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(22.5,188.6) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(39.3,183.20001) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(22.5,242.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(39.3,236.6) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(80.7,240.20001) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(57.3,290.9) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(83.1,290.9) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(96.299995,290.9) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 候选窗 旋转 ==
+Column padding=Edges { l: 7.5, t: 7.5, r: 7.5, b: 7.5 } bg=Some([255, 255, 255, 255]) radius=18.0 border=Some(([226, 229, 235, 255], 1.0)) m=(228.6,260.0) rect=Rect { x: 0.0, y: 0.0, w: 228.6, h: 260.0 }
+  Row padding=Edges { l: 12.0, t: 9.0, r: 12.0, b: 9.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=12.0 fill=true m=(213.6,50.4) rect=Rect { x: 7.5, y: 7.5, w: 213.6, h: 50.4 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(27.0) caret=Some(3) caret_w=2.0 m=(81.0,32.4) rect=Rect { x: 19.5, y: 16.5, w: 81.0, h: 32.4 }
+    Row grow=true m=(74.40001,0.0) rect=Rect { x: 100.5, y: 32.7, w: 74.40001, h: 0.0 }
+    Row margin=Edges { l: 18.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 192.90001, y: 16.5, w: 16.2, h: 32.4 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 6.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(213.6,2.0) rect=Rect { x: 7.5, y: 57.9, w: 213.6, h: 2.0 }
+  Row rot=Cw m=(213.6,138.6) rect=Rect { x: 7.5, y: 65.9, w: 213.6, h: 138.6 }
+    Column fill=true m=(138.6,213.6) rect=Rect { x: 0.0, y: 0.0, w: 138.6, h: 213.6 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 fill=true tag=3 m=(138.6,53.4) rect=Rect { x: 0.0, y: 0.0, w: 138.6, h: 53.4 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 15.0, y: 15.900001, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[74, 74, 74, 255] size=Some(27.0) m=(32.4,32.4) rect=Rect { x: 31.8, y: 10.5, w: 32.4, h: 32.4 }
+        Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[154, 160, 174, 255] size=Some(21.0) m=(50.4,25.2) rect=Rect { x: 73.2, y: 14.1, w: 50.4, h: 25.2 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 fill=true tag=2 m=(138.6,53.4) rect=Rect { x: 0.0, y: 53.4, w: 138.6, h: 53.4 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 15.0, y: 69.3, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("浩") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 31.8, y: 63.9, w: 16.2, h: 32.4 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([0, 0, 0, 8]) radius=12.0 fill=true tag=1 m=(138.6,53.4) rect=Rect { x: 0.0, y: 106.8, w: 138.6, h: 53.4 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 15.0, y: 122.700005, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("号") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 31.8, y: 117.3, w: 16.2, h: 32.4 }
+        Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("kg") color=[154, 160, 174, 255] size=Some(21.0) m=(25.2,25.2) rect=Rect { x: 57.0, y: 120.9, w: 25.2, h: 25.2 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([59, 130, 246, 26]) radius=12.0 fill=true tag=0 m=(138.6,53.4) rect=Rect { x: 0.0, y: 160.20001, w: 138.6, h: 53.4 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 15.0, y: 176.1, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } text=Some("好") color=[37, 99, 235, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 31.8, y: 170.70001, w: 16.2, h: 32.4 }
+        Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("vb") color=[154, 160, 174, 255] size=Some(21.0) m=(25.2,25.2) rect=Rect { x: 57.0, y: 174.30002, w: 25.2, h: 25.2 }
+  Row cross=Center fill=true m=(213.6,48.0) rect=Rect { x: 7.5, y: 204.5, w: 213.6, h: 48.0 }
+    Row grow=true m=(61.800003,0.0) rect=Rect { x: 7.5, y: 228.5, w: 61.800003, h: 0.0 }
+    Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(78.0,48.0) rect=Rect { x: 81.3, y: 204.5, w: 78.0, h: 48.0 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(48.0) radius=12.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(21.0) align=Center m=(39.0,48.0) rect=Rect { x: 81.3, y: 204.5, w: 39.0, h: 48.0 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(21.0) m=(0.0,25.2) rect=Rect { x: 120.3, y: 215.9, w: 0.0, h: 25.2 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(48.0) radius=12.0 text=Some("›") color=[59, 130, 246, 255] size=Some(21.0) align=Center tag=100001 m=(39.0,48.0) rect=Rect { x: 120.3, y: 204.5, w: 39.0, h: 48.0 }
+    Row grow=true m=(61.800003,0.0) rect=Rect { x: 159.3, y: 228.5, w: 61.800003, h: 0.0 }
+-- 绘制 229x260 像素摘要 8d0bb7c9c19c43cd
+draw text="nihao" at=(19.5,16.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(192.90001,16.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(15.0,15.900001) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(31.8,10.5) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(73.2,14.1) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(15.0,69.3) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(31.8,63.9) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(15.0,122.700005) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(31.8,117.3) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(57.0,120.9) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(15.0,176.1) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(31.8,170.70001) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(57.0,174.30002) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(94.5,215.9) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(120.3,215.9) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(133.5,215.9) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 候选窗 直立 ==
+Column padding=Edges { l: 7.5, t: 7.5, r: 7.5, b: 7.5 } bg=Some([255, 255, 255, 255]) radius=18.0 border=Some(([226, 229, 235, 255], 1.0)) m=(163.8,352.1) rect=Rect { x: 0.0, y: 0.0, w: 163.8, h: 352.1 }
+  Row padding=Edges { l: 12.0, t: 9.0, r: 12.0, b: 9.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=12.0 fill=true m=(148.8,50.4) rect=Rect { x: 7.5, y: 7.5, w: 148.8, h: 50.4 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(27.0) caret=Some(3) caret_w=2.0 m=(81.0,32.4) rect=Rect { x: 19.5, y: 16.5, w: 81.0, h: 32.4 }
+    Row grow=true m=(9.600006,0.0) rect=Rect { x: 100.5, y: 32.7, w: 9.600006, h: 0.0 }
+    Row margin=Edges { l: 18.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 128.1, y: 16.5, w: 16.2, h: 32.4 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 6.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(148.8,2.0) rect=Rect { x: 7.5, y: 57.9, w: 148.8, h: 2.0 }
+  Row rot=Cw m=(148.8,230.70001) rect=Rect { x: 7.5, y: 65.9, w: 148.8, h: 230.70001 }
+    Column fill=true m=(230.70001,148.8) rect=Rect { x: 0.0, y: 0.0, w: 230.70001, h: 148.8 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 fill=true tag=3 m=(230.70001,37.2) rect=Rect { x: 0.0, y: 0.0, w: 230.70001, h: 37.2 }
+        Row rot=Ccw m=(21.6,12.3) rect=Rect { x: 15.0, y: 12.450001, w: 21.6, h: 12.3 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 0.0, y: 0.0, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(64.8,16.2) rect=Rect { x: 41.1, y: 10.5, w: 64.8, h: 16.2 }
+          Row rot=Ccw m=(32.4,16.2) rect=Rect { x: 41.1, y: 10.5, w: 32.4, h: 16.2 }
+            Row text=Some("你") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 0.0, y: 0.0, w: 16.2, h: 32.4 }
+          Row rot=Ccw m=(32.4,16.2) rect=Rect { x: 73.5, y: 10.5, w: 32.4, h: 16.2 }
+            Row text=Some("好") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 0.0, y: 0.0, w: 16.2, h: 32.4 }
+        Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(100.8,12.6) rect=Rect { x: 114.9, y: 12.3, w: 100.8, h: 12.6 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 114.9, y: 12.3, w: 25.2, h: 12.6 }
+            Row text=Some("w") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 140.1, y: 12.3, w: 25.2, h: 12.6 }
+            Row text=Some("q") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 165.3, y: 12.3, w: 25.2, h: 12.6 }
+            Row text=Some("v") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 190.5, y: 12.3, w: 25.2, h: 12.6 }
+            Row text=Some("b") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center radius=12.0 fill=true tag=2 m=(230.70001,37.2) rect=Rect { x: 0.0, y: 37.2, w: 230.70001, h: 37.2 }
+        Row rot=Ccw m=(21.6,12.3) rect=Rect { x: 15.0, y: 49.65, w: 21.6, h: 12.3 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 0.0, y: 0.0, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(32.4,16.2) rect=Rect { x: 41.1, y: 47.7, w: 32.4, h: 16.2 }
+          Row rot=Ccw m=(32.4,16.2) rect=Rect { x: 41.1, y: 47.7, w: 32.4, h: 16.2 }
+            Row text=Some("浩") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 0.0, y: 0.0, w: 16.2, h: 32.4 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([0, 0, 0, 8]) radius=12.0 fill=true tag=1 m=(230.70001,37.2) rect=Rect { x: 0.0, y: 74.4, w: 230.70001, h: 37.2 }
+        Row rot=Ccw m=(21.6,12.3) rect=Rect { x: 15.0, y: 86.85, w: 21.6, h: 12.3 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 0.0, y: 0.0, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(32.4,16.2) rect=Rect { x: 41.1, y: 84.9, w: 32.4, h: 16.2 }
+          Row rot=Ccw m=(32.4,16.2) rect=Rect { x: 41.1, y: 84.9, w: 32.4, h: 16.2 }
+            Row text=Some("号") color=[74, 74, 74, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 0.0, y: 0.0, w: 16.2, h: 32.4 }
+        Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(50.4,12.6) rect=Rect { x: 82.5, y: 86.700005, w: 50.4, h: 12.6 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 82.5, y: 86.700005, w: 25.2, h: 12.6 }
+            Row text=Some("k") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 107.7, y: 86.700005, w: 25.2, h: 12.6 }
+            Row text=Some("g") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+      Row padding=Edges { l: 15.0, t: 10.5, r: 15.0, b: 10.5 } cross=Center bg=Some([59, 130, 246, 26]) radius=12.0 fill=true tag=0 m=(230.70001,37.2) rect=Rect { x: 0.0, y: 111.600006, w: 230.70001, h: 37.2 }
+        Row rot=Ccw m=(21.6,12.3) rect=Rect { x: 15.0, y: 124.05, w: 21.6, h: 12.3 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 1.5, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(18.0) m=(10.8,21.6) rect=Rect { x: 0.0, y: 0.0, w: 10.8, h: 21.6 }
+        Row margin=Edges { l: 4.5, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(32.4,16.2) rect=Rect { x: 41.1, y: 122.100006, w: 32.4, h: 16.2 }
+          Row rot=Ccw m=(32.4,16.2) rect=Rect { x: 41.1, y: 122.100006, w: 32.4, h: 16.2 }
+            Row text=Some("好") color=[37, 99, 235, 255] size=Some(27.0) m=(16.2,32.4) rect=Rect { x: 0.0, y: 0.0, w: 16.2, h: 32.4 }
+        Row margin=Edges { l: 9.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(50.4,12.6) rect=Rect { x: 82.5, y: 123.90001, w: 50.4, h: 12.6 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 82.5, y: 123.90001, w: 25.2, h: 12.6 }
+            Row text=Some("v") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+          Row rot=Ccw m=(25.2,12.6) rect=Rect { x: 107.7, y: 123.90001, w: 25.2, h: 12.6 }
+            Row text=Some("b") color=[154, 160, 174, 255] size=Some(21.0) m=(12.6,25.2) rect=Rect { x: 0.0, y: 0.0, w: 12.6, h: 25.2 }
+  Row cross=Center fill=true m=(148.8,48.0) rect=Rect { x: 7.5, y: 296.6, w: 148.8, h: 48.0 }
+    Row grow=true m=(29.400002,0.0) rect=Rect { x: 7.5, y: 320.6, w: 29.400002, h: 0.0 }
+    Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(78.0,48.0) rect=Rect { x: 48.9, y: 296.6, w: 78.0, h: 48.0 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(48.0) radius=12.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(21.0) align=Center m=(39.0,48.0) rect=Rect { x: 48.9, y: 296.6, w: 39.0, h: 48.0 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(21.0) m=(0.0,25.2) rect=Rect { x: 87.9, y: 308.0, w: 0.0, h: 25.2 }
+      Row cross=Center fixed_w=Some(39.0) fixed_h=Some(48.0) radius=12.0 text=Some("›") color=[59, 130, 246, 255] size=Some(21.0) align=Center tag=100001 m=(39.0,48.0) rect=Rect { x: 87.9, y: 296.6, w: 39.0, h: 48.0 }
+    Row grow=true m=(29.400002,0.0) rect=Rect { x: 126.9, y: 320.6, w: 29.400002, h: 0.0 }
+-- 绘制 164x353 像素摘要 f37049c5a51918a7
+draw text="nihao" at=(19.5,16.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(128.1,16.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(62.100002,308.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(87.9,308.0) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(101.1,308.0) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+#### scale 2
+== 候选窗 横排 ==
+Column padding=Edges { l: 10.0, t: 10.0, r: 10.0, b: 10.0 } bg=Some([255, 255, 255, 255]) radius=24.0 border=Some(([226, 229, 235, 255], 1.0)) m=(668.0,168.4) rect=Rect { x: 0.0, y: 0.0, w: 668.0, h: 168.4 }
+  Row padding=Edges { l: 16.0, t: 12.0, r: 16.0, b: 12.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=16.0 fill=true m=(648.0,67.2) rect=Rect { x: 10.0, y: 10.0, w: 648.0, h: 67.2 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(36.0) caret=Some(3) caret_w=2.0 m=(108.00001,43.2) rect=Rect { x: 26.0, y: 21.999998, w: 108.00001, h: 43.2 }
+    Row grow=true m=(462.4,0.0) rect=Rect { x: 134.0, y: 43.6, w: 462.4, h: 0.0 }
+    Row margin=Edges { l: 24.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 620.4, y: 21.999998, w: 21.6, h: 43.2 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 8.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(648.0,2.0) rect=Rect { x: 10.0, y: 77.2, w: 648.0, h: 2.0 }
+  Row cross=Center m=(648.0,71.2) rect=Rect { x: 10.0, y: 87.2, w: 648.0, h: 71.2 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([59, 130, 246, 26]) radius=16.0 tag=0 m=(129.6,71.2) rect=Rect { x: 10.0, y: 87.2, w: 129.6, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 30.0, y: 108.399994, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("好") color=[37, 99, 235, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 52.4, y: 101.2, w: 21.6, h: 43.2 }
+      Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("vb") color=[154, 160, 174, 255] size=Some(28.0) m=(33.600002,33.600002) rect=Rect { x: 86.0, y: 105.99999, w: 33.600002, h: 33.600002 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([0, 0, 0, 8]) radius=16.0 tag=1 m=(129.6,71.2) rect=Rect { x: 139.6, y: 87.2, w: 129.6, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 159.6, y: 108.399994, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("号") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 182.0, y: 101.2, w: 21.6, h: 43.2 }
+      Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("kg") color=[154, 160, 174, 255] size=Some(28.0) m=(33.600002,33.600002) rect=Rect { x: 215.6, y: 105.99999, w: 33.600002, h: 33.600002 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 tag=2 m=(84.0,71.2) rect=Rect { x: 269.2, y: 87.2, w: 84.0, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 289.2, y: 108.399994, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("浩") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 311.6, y: 101.2, w: 21.6, h: 43.2 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 tag=3 m=(184.80002,71.2) rect=Rect { x: 353.2, y: 87.2, w: 184.80002, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 373.2, y: 108.399994, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[74, 74, 74, 255] size=Some(36.0) m=(43.2,43.2) rect=Rect { x: 395.6, y: 101.2, w: 43.2, h: 43.2 }
+      Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[154, 160, 174, 255] size=Some(28.0) m=(67.200005,33.600002) rect=Rect { x: 450.80002, y: 105.99999, w: 67.200005, h: 33.600002 }
+    Row margin=Edges { l: 16.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(104.0,71.2) rect=Rect { x: 554.0, y: 87.2, w: 104.0, h: 71.2 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(71.2) radius=16.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(28.0) align=Center m=(52.0,71.2) rect=Rect { x: 554.0, y: 87.2, w: 52.0, h: 71.2 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(28.0) m=(0.0,33.600002) rect=Rect { x: 606.0, y: 105.99999, w: 0.0, h: 33.600002 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(71.2) radius=16.0 text=Some("›") color=[59, 130, 246, 255] size=Some(28.0) align=Center tag=100001 m=(52.0,71.2) rect=Rect { x: 606.0, y: 87.2, w: 52.0, h: 71.2 }
+-- 绘制 668x169 像素摘要 cec0bf7fb31226bf
+draw text="nihao" at=(26.0,21.999998) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(620.4,21.999998) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(30.0,108.399994) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(52.4,101.2) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(86.0,105.99999) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(159.6,108.399994) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(182.0,101.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(215.6,105.99999) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(289.2,108.399994) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(311.6,101.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(373.2,108.399994) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(395.6,101.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(450.80002,105.99999) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(571.6,105.99999) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(606.0,105.99999) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(623.6,105.99999) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 候选窗 竖排 ==
+Column padding=Edges { l: 10.0, t: 10.0, r: 10.0, b: 10.0 } bg=Some([255, 255, 255, 255]) radius=24.0 border=Some(([226, 229, 235, 255], 1.0)) m=(205.6,446.0) rect=Rect { x: 0.0, y: 0.0, w: 205.6, h: 446.0 }
+  Row padding=Edges { l: 16.0, t: 12.0, r: 16.0, b: 12.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=16.0 fill=true m=(185.6,67.2) rect=Rect { x: 10.0, y: 10.0, w: 185.6, h: 67.2 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(36.0) caret=Some(3) caret_w=2.0 m=(108.00001,43.2) rect=Rect { x: 26.0, y: 21.999998, w: 108.00001, h: 43.2 }
+    Row grow=true m=(0.0,0.0) rect=Rect { x: 134.0, y: 43.6, w: 0.0, h: 0.0 }
+    Row margin=Edges { l: 24.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 158.0, y: 21.999998, w: 21.6, h: 43.2 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 8.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(185.6,2.0) rect=Rect { x: 10.0, y: 77.2, w: 185.6, h: 2.0 }
+  Column fill=true m=(185.6,284.8) rect=Rect { x: 10.0, y: 87.2, w: 185.6, h: 284.8 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([59, 130, 246, 26]) radius=16.0 fill=true tag=0 m=(185.6,71.2) rect=Rect { x: 10.0, y: 87.2, w: 185.6, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 30.0, y: 108.399994, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("好") color=[37, 99, 235, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 52.4, y: 101.2, w: 21.6, h: 43.2 }
+      Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("vb") color=[154, 160, 174, 255] size=Some(28.0) m=(33.600002,33.600002) rect=Rect { x: 86.0, y: 105.99999, w: 33.600002, h: 33.600002 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([0, 0, 0, 8]) radius=16.0 fill=true tag=1 m=(185.6,71.2) rect=Rect { x: 10.0, y: 158.4, w: 185.6, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 30.0, y: 179.59999, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("号") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 52.4, y: 172.4, w: 21.6, h: 43.2 }
+      Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("kg") color=[154, 160, 174, 255] size=Some(28.0) m=(33.600002,33.600002) rect=Rect { x: 86.0, y: 177.2, w: 33.600002, h: 33.600002 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 fill=true tag=2 m=(185.6,71.2) rect=Rect { x: 10.0, y: 229.59999, w: 185.6, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 30.0, y: 250.79999, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("浩") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 52.4, y: 243.59999, w: 21.6, h: 43.2 }
+    Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 fill=true tag=3 m=(185.6,71.2) rect=Rect { x: 10.0, y: 300.8, w: 185.6, h: 71.2 }
+      Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 30.0, y: 322.0, w: 14.400001, h: 28.800001 }
+      Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[74, 74, 74, 255] size=Some(36.0) m=(43.2,43.2) rect=Rect { x: 52.4, y: 314.8, w: 43.2, h: 43.2 }
+      Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[154, 160, 174, 255] size=Some(28.0) m=(67.200005,33.600002) rect=Rect { x: 107.600006, y: 319.59998, w: 67.200005, h: 33.600002 }
+  Row cross=Center fill=true m=(185.6,64.0) rect=Rect { x: 10.0, y: 372.0, w: 185.6, h: 64.0 }
+    Row grow=true m=(32.800003,0.0) rect=Rect { x: 10.0, y: 404.0, w: 32.800003, h: 0.0 }
+    Row margin=Edges { l: 16.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(104.0,64.0) rect=Rect { x: 58.800003, y: 372.0, w: 104.0, h: 64.0 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(64.0) radius=16.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(28.0) align=Center m=(52.0,64.0) rect=Rect { x: 58.800003, y: 372.0, w: 52.0, h: 64.0 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(28.0) m=(0.0,33.600002) rect=Rect { x: 110.8, y: 387.2, w: 0.0, h: 33.600002 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(64.0) radius=16.0 text=Some("›") color=[59, 130, 246, 255] size=Some(28.0) align=Center tag=100001 m=(52.0,64.0) rect=Rect { x: 110.8, y: 372.0, w: 52.0, h: 64.0 }
+    Row grow=true m=(32.800003,0.0) rect=Rect { x: 162.8, y: 404.0, w: 32.800003, h: 0.0 }
+-- 绘制 206x446 像素摘要 8f703e99ed8e394b
+draw text="nihao" at=(26.0,21.999998) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(158.0,21.999998) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(30.0,108.399994) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(52.4,101.2) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(86.0,105.99999) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(30.0,179.59999) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(52.4,172.4) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(86.0,177.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(30.0,250.79999) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(52.4,243.59999) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(30.0,322.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(52.4,314.8) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(107.600006,319.59998) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(76.4,387.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(110.8,387.2) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(128.4,387.2) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 候选窗 旋转 ==
+Column padding=Edges { l: 10.0, t: 10.0, r: 10.0, b: 10.0 } bg=Some([255, 255, 255, 255]) radius=24.0 border=Some(([226, 229, 235, 255], 1.0)) m=(304.8,346.0) rect=Rect { x: 0.0, y: 0.0, w: 304.8, h: 346.0 }
+  Row padding=Edges { l: 16.0, t: 12.0, r: 16.0, b: 12.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=16.0 fill=true m=(284.8,67.2) rect=Rect { x: 10.0, y: 10.0, w: 284.8, h: 67.2 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(36.0) caret=Some(3) caret_w=2.0 m=(108.00001,43.2) rect=Rect { x: 26.0, y: 21.999998, w: 108.00001, h: 43.2 }
+    Row grow=true m=(99.19998,0.0) rect=Rect { x: 134.0, y: 43.6, w: 99.19998, h: 0.0 }
+    Row margin=Edges { l: 24.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 257.19998, y: 21.999998, w: 21.6, h: 43.2 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 8.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(284.8,2.0) rect=Rect { x: 10.0, y: 77.2, w: 284.8, h: 2.0 }
+  Row rot=Cw m=(284.8,184.80002) rect=Rect { x: 10.0, y: 87.2, w: 284.8, h: 184.80002 }
+    Column fill=true m=(184.80002,284.8) rect=Rect { x: 0.0, y: 0.0, w: 184.80002, h: 284.8 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 fill=true tag=3 m=(184.80002,71.2) rect=Rect { x: 0.0, y: 0.0, w: 184.80002, h: 71.2 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 20.0, y: 21.199997, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[74, 74, 74, 255] size=Some(36.0) m=(43.2,43.2) rect=Rect { x: 42.4, y: 13.999998, w: 43.2, h: 43.2 }
+        Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[154, 160, 174, 255] size=Some(28.0) m=(67.200005,33.600002) rect=Rect { x: 97.600006, y: 18.799997, w: 67.200005, h: 33.600002 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 fill=true tag=2 m=(184.80002,71.2) rect=Rect { x: 0.0, y: 71.2, w: 184.80002, h: 71.2 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 20.0, y: 92.399994, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("浩") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 42.4, y: 85.2, w: 21.6, h: 43.2 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([0, 0, 0, 8]) radius=16.0 fill=true tag=1 m=(184.80002,71.2) rect=Rect { x: 0.0, y: 142.4, w: 184.80002, h: 71.2 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 20.0, y: 163.59999, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("号") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 42.4, y: 156.4, w: 21.6, h: 43.2 }
+        Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("kg") color=[154, 160, 174, 255] size=Some(28.0) m=(33.600002,33.600002) rect=Rect { x: 76.0, y: 161.2, w: 33.600002, h: 33.600002 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([59, 130, 246, 26]) radius=16.0 fill=true tag=0 m=(184.80002,71.2) rect=Rect { x: 0.0, y: 213.59999, w: 184.80002, h: 71.2 }
+        Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 20.0, y: 234.79999, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("好") color=[37, 99, 235, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 42.4, y: 227.59999, w: 21.6, h: 43.2 }
+        Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("vb") color=[154, 160, 174, 255] size=Some(28.0) m=(33.600002,33.600002) rect=Rect { x: 76.0, y: 232.4, w: 33.600002, h: 33.600002 }
+  Row cross=Center fill=true m=(284.8,64.0) rect=Rect { x: 10.0, y: 272.0, w: 284.8, h: 64.0 }
+    Row grow=true m=(82.399994,0.0) rect=Rect { x: 10.0, y: 304.0, w: 82.399994, h: 0.0 }
+    Row margin=Edges { l: 16.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(104.0,64.0) rect=Rect { x: 108.399994, y: 272.0, w: 104.0, h: 64.0 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(64.0) radius=16.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(28.0) align=Center m=(52.0,64.0) rect=Rect { x: 108.399994, y: 272.0, w: 52.0, h: 64.0 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(28.0) m=(0.0,33.600002) rect=Rect { x: 160.4, y: 287.2, w: 0.0, h: 33.600002 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(64.0) radius=16.0 text=Some("›") color=[59, 130, 246, 255] size=Some(28.0) align=Center tag=100001 m=(52.0,64.0) rect=Rect { x: 160.4, y: 272.0, w: 52.0, h: 64.0 }
+    Row grow=true m=(82.399994,0.0) rect=Rect { x: 212.4, y: 304.0, w: 82.399994, h: 0.0 }
+-- 绘制 305x346 像素摘要 0dad0e581d7526a1
+draw text="nihao" at=(26.0,21.999998) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(257.19998,21.999998) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(20.0,21.199997) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(42.4,13.999998) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(97.600006,18.799997) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(20.0,92.399994) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(42.4,85.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(20.0,163.59999) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(42.4,156.4) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(76.0,161.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(20.0,234.79999) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(42.4,227.59999) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(76.0,232.4) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(125.99999,287.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(160.4,287.2) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(178.0,287.2) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 候选窗 直立 ==
+Column padding=Edges { l: 10.0, t: 10.0, r: 10.0, b: 10.0 } bg=Some([255, 255, 255, 255]) radius=24.0 border=Some(([226, 229, 235, 255], 1.0)) m=(218.4,468.8) rect=Rect { x: 0.0, y: 0.0, w: 218.4, h: 468.8 }
+  Row padding=Edges { l: 16.0, t: 12.0, r: 16.0, b: 12.0 } cross=Center bg=Some([0, 0, 0, 0]) radius=16.0 fill=true m=(198.4,67.2) rect=Rect { x: 10.0, y: 10.0, w: 198.4, h: 67.2 }
+    Row text=Some("nihao") color=[90, 96, 114, 255] size=Some(36.0) caret=Some(3) caret_w=2.0 m=(108.00001,43.2) rect=Rect { x: 26.0, y: 21.999998, w: 108.00001, h: 43.2 }
+    Row grow=true m=(12.799988,0.0) rect=Rect { x: 134.0, y: 43.6, w: 12.799988, h: 0.0 }
+    Row margin=Edges { l: 24.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("拼") color=[154, 160, 174, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 170.79999, y: 21.999998, w: 21.6, h: 43.2 }
+  Row margin=Edges { l: 0.0, t: 0.0, r: 0.0, b: 8.0 } fixed_h=Some(2.0) bg=Some([0, 0, 0, 18]) fill=true m=(198.4,2.0) rect=Rect { x: 10.0, y: 77.2, w: 198.4, h: 2.0 }
+  Row rot=Cw m=(198.4,307.6) rect=Rect { x: 10.0, y: 87.2, w: 198.4, h: 307.6 }
+    Column fill=true m=(307.6,198.4) rect=Rect { x: 0.0, y: 0.0, w: 307.6, h: 198.4 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 fill=true tag=3 m=(307.6,49.6) rect=Rect { x: 0.0, y: 0.0, w: 307.6, h: 49.6 }
+        Row rot=Ccw m=(28.800001,16.400002) rect=Rect { x: 20.0, y: 16.599998, w: 28.800001, h: 16.400002 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("4") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 0.0, y: 0.0, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(86.4,21.6) rect=Rect { x: 54.800003, y: 13.999999, w: 86.4, h: 21.6 }
+          Row rot=Ccw m=(43.2,21.6) rect=Rect { x: 54.800003, y: 13.999999, w: 43.2, h: 21.6 }
+            Row text=Some("你") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 0.0, y: 0.0, w: 21.6, h: 43.2 }
+          Row rot=Ccw m=(43.2,21.6) rect=Rect { x: 98.0, y: 13.999999, w: 43.2, h: 21.6 }
+            Row text=Some("好") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 0.0, y: 0.0, w: 21.6, h: 43.2 }
+        Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(134.40001,16.800001) rect=Rect { x: 153.20001, y: 16.399998, w: 134.40001, h: 16.800001 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 153.20001, y: 16.399998, w: 33.600002, h: 16.800001 }
+            Row text=Some("w") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 186.80002, y: 16.399998, w: 33.600002, h: 16.800001 }
+            Row text=Some("q") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 220.40002, y: 16.399998, w: 33.600002, h: 16.800001 }
+            Row text=Some("v") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 254.00003, y: 16.399998, w: 33.600002, h: 16.800001 }
+            Row text=Some("b") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center radius=16.0 fill=true tag=2 m=(307.6,49.6) rect=Rect { x: 0.0, y: 49.6, w: 307.6, h: 49.6 }
+        Row rot=Ccw m=(28.800001,16.400002) rect=Rect { x: 20.0, y: 66.2, w: 28.800001, h: 16.400002 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("3") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 0.0, y: 0.0, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(43.2,21.6) rect=Rect { x: 54.800003, y: 63.6, w: 43.2, h: 21.6 }
+          Row rot=Ccw m=(43.2,21.6) rect=Rect { x: 54.800003, y: 63.6, w: 43.2, h: 21.6 }
+            Row text=Some("浩") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 0.0, y: 0.0, w: 21.6, h: 43.2 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([0, 0, 0, 8]) radius=16.0 fill=true tag=1 m=(307.6,49.6) rect=Rect { x: 0.0, y: 99.2, w: 307.6, h: 49.6 }
+        Row rot=Ccw m=(28.800001,16.400002) rect=Rect { x: 20.0, y: 115.799995, w: 28.800001, h: 16.400002 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("2") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 0.0, y: 0.0, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(43.2,21.6) rect=Rect { x: 54.800003, y: 113.2, w: 43.2, h: 21.6 }
+          Row rot=Ccw m=(43.2,21.6) rect=Rect { x: 54.800003, y: 113.2, w: 43.2, h: 21.6 }
+            Row text=Some("号") color=[74, 74, 74, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 0.0, y: 0.0, w: 21.6, h: 43.2 }
+        Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(67.200005,16.800001) rect=Rect { x: 110.0, y: 115.6, w: 67.200005, h: 16.800001 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 110.0, y: 115.6, w: 33.600002, h: 16.800001 }
+            Row text=Some("k") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 143.6, y: 115.6, w: 33.600002, h: 16.800001 }
+            Row text=Some("g") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+      Row padding=Edges { l: 20.0, t: 14.0, r: 20.0, b: 14.0 } cross=Center bg=Some([59, 130, 246, 26]) radius=16.0 fill=true tag=0 m=(307.6,49.6) rect=Rect { x: 0.0, y: 148.79999, w: 307.6, h: 49.6 }
+        Row rot=Ccw m=(28.800001,16.400002) rect=Rect { x: 20.0, y: 165.4, w: 28.800001, h: 16.400002 }
+          Row margin=Edges { l: 0.0, t: 0.0, r: 2.0, b: 0.0 } text=Some("1") color=[154, 160, 174, 255] size=Some(24.0) m=(14.400001,28.800001) rect=Rect { x: 0.0, y: 0.0, w: 14.400001, h: 28.800001 }
+        Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(43.2,21.6) rect=Rect { x: 54.800003, y: 162.79999, w: 43.2, h: 21.6 }
+          Row rot=Ccw m=(43.2,21.6) rect=Rect { x: 54.800003, y: 162.79999, w: 43.2, h: 21.6 }
+            Row text=Some("好") color=[37, 99, 235, 255] size=Some(36.0) m=(21.6,43.2) rect=Rect { x: 0.0, y: 0.0, w: 21.6, h: 43.2 }
+        Row margin=Edges { l: 12.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(67.200005,16.800001) rect=Rect { x: 110.0, y: 165.19998, w: 67.200005, h: 16.800001 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 110.0, y: 165.19998, w: 33.600002, h: 16.800001 }
+            Row text=Some("v") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+          Row rot=Ccw m=(33.600002,16.800001) rect=Rect { x: 143.6, y: 165.19998, w: 33.600002, h: 16.800001 }
+            Row text=Some("b") color=[154, 160, 174, 255] size=Some(28.0) m=(16.800001,33.600002) rect=Rect { x: 0.0, y: 0.0, w: 16.800001, h: 33.600002 }
+  Row cross=Center fill=true m=(198.4,64.0) rect=Rect { x: 10.0, y: 394.8, w: 198.4, h: 64.0 }
+    Row grow=true m=(39.199997,0.0) rect=Rect { x: 10.0, y: 426.8, w: 39.199997, h: 0.0 }
+    Row margin=Edges { l: 16.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(104.0,64.0) rect=Rect { x: 65.2, y: 394.8, w: 104.0, h: 64.0 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(64.0) radius=16.0 text=Some("‹") color=[154, 160, 174, 255] size=Some(28.0) align=Center m=(52.0,64.0) rect=Rect { x: 65.2, y: 394.8, w: 52.0, h: 64.0 }
+      Row text=Some("") color=[90, 96, 114, 255] size=Some(28.0) m=(0.0,33.600002) rect=Rect { x: 117.2, y: 410.0, w: 0.0, h: 33.600002 }
+      Row cross=Center fixed_w=Some(52.0) fixed_h=Some(64.0) radius=16.0 text=Some("›") color=[59, 130, 246, 255] size=Some(28.0) align=Center tag=100001 m=(52.0,64.0) rect=Rect { x: 117.2, y: 394.8, w: 52.0, h: 64.0 }
+    Row grow=true m=(39.199997,0.0) rect=Rect { x: 169.2, y: 426.8, w: 39.199997, h: 0.0 }
+-- 绘制 219x469 像素摘要 46d5743405ba4613
+draw text="nihao" at=(26.0,21.999998) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(170.79999,21.999998) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(82.799995,410.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(117.2,410.0) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(134.79999,410.0) size=28.0 weight=0 family=None color=[59, 130, 246, 255]

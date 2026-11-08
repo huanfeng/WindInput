@@ -971,6 +971,7 @@ impl Coordinator {
         self.push_password_suppress_config(0);
         self.push_english_pair_config(0);
         self.push_composition_placeholder_config(0);
+        self.push_space_before_digit_config(0);
         self.push_multiline_commit_config(0);
         self.push_compat_title_match_config(0);
     }
@@ -3166,6 +3167,9 @@ impl Coordinator {
         } else {
             self.mode_icon_label(chinese_mode, caps_lock)
         };
+        // 只有移动端事件通道用得上；桌面不多做这次引擎查询
+        let latin_input =
+            self.session_tx.is_some() && self.latin_input_with(input_blocked, chinese_mode);
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let tb = ToolbarState {
             chinese_mode,
@@ -3188,7 +3192,7 @@ impl Coordinator {
         // 必须先于 UpdateToolbar：反序会先在旧屏渲染一帧再跳。
         self.sync_toolbar_monitor();
         if self.take_toolbar_push_if_changed(ToolbarPush::Shown(Box::new(tb.clone()))) {
-            let _ = self.ui_tx.send(UiCommand::UpdateToolbar(tb));
+            self.emit_status(tb, latin_input);
         }
         // HUD 刷新收口于此（两个出口各一次）。诊断 HUD 展示的 ime_active /
         // has_edit_context 正是上面那道合取的输入，而**凡是改动它们的路径都必须调
@@ -5119,6 +5123,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let refused = |c: &Coordinator| {
             assert!(matches!(c.open_softkeyboard(None), KeyAction::PassThrough));
@@ -5500,6 +5505,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let vk_k = 0x4B;
         assert!(!c.softkeyboard_is_open());

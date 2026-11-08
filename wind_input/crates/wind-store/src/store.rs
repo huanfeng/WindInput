@@ -1357,7 +1357,7 @@ mod tests {
         s.flush_user_data().unwrap();
         let dir = s.user_text_dir().join("pinyin");
         let temp = std::fs::read_to_string(dir.join("temp.dict.yaml")).unwrap();
-        assert!(temp.contains("你好\tni hao\t10\t1\t"), "{temp}");
+        assert!(temp.contains("ni hao\t你好\t10\t1\t"), "{temp}");
         assert!(dir.join("freq.table.yaml").is_file());
         assert!(dir.join("assoc.table.yaml").is_file());
     }

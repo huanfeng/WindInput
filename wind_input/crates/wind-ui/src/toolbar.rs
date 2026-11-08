@@ -214,6 +214,7 @@ impl Toolbar {
             pos: None,
             anchor_br: None,
             dragging: false,
+            press_cell: false,
             anchor: (0, 0),
             origin: (0, 0),
             hover_idx: -1,
@@ -1047,6 +1048,8 @@ pub struct ToolbarMouse {
     /// 永久顶掉用户原本摆的位置——回到大屏也回不来了。让意图留在原处，每帧重算即可。
     anchor_br: Option<(i32, i32)>,
     dragging: bool,
+    /// 在格上按下、尚未移过拖动阈值：再移过阈值就转成拖动，原地抬起仍是点击。
+    press_cell: bool,
     /// 拖动起点：光标屏幕坐标
     anchor: (i32, i32),
     /// 拖动起点：窗口屏幕坐标
@@ -1215,6 +1218,42 @@ impl ToolbarMouse {
     }
 }
 
+/// 在格上按下也能拖动（移过阈值才算拖，原地抬起仍是点击）。仅 Windows：Linux 宿主由
+/// addon 按拖动柄区域本地拖，这里再起一次拖动会和它打架。
+const CELL_DRAG: bool = cfg!(windows);
+
+/// `WM_MOUSEMOVE` 的 wParam：左键按住。
+const MK_LBUTTON: usize = 0x0001;
+
+/// 系统拖动阈值（全宽，跟随用户设置）。
+fn drag_threshold() -> (i32, i32) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
+        (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG))
+    }
+    #[cfg(not(windows))]
+    {
+        (4, 4)
+    }
+}
+
+/// 光标从按下点移出以按下点为中心、`thr` 为全宽的矩形即算开始拖动（同 `DragDetect`）。
+fn drag_started(anchor: (i32, i32), p: (i32, i32), thr: (i32, i32)) -> bool {
+    (p.0 - anchor.0).abs() > thr.0 / 2 || (p.1 - anchor.1).abs() > thr.1 / 2
+}
+
+impl ToolbarMouse {
+    /// 进入拖动态：拖动中不显示悬停。
+    fn start_drag(&mut self) {
+        self.dragging = true;
+        if self.hover_idx != -1 {
+            self.hover_idx = -1;
+            self.dirty = true;
+        }
+    }
+}
+
 impl WindowMouse for ToolbarMouse {
     fn on_message(
         &mut self,
@@ -1228,18 +1267,20 @@ impl WindowMouse for ToolbarMouse {
         let cy = ((v >> 16) & 0xFFFF) as i16 as f32;
         match msg {
             WM_LBUTTONDOWN => {
-                if self.cell_at(cx, cy).is_none() {
-                    // 非单元格（拖动柄区）→ 开始拖动
+                let on_cell = self.cell_at(cx, cy).is_some();
+                if !on_cell || CELL_DRAG {
                     let mut p = POINT::default();
                     unsafe {
                         let _ = GetCursorPos(&mut p);
                     }
                     self.anchor = (p.x, p.y);
                     self.origin = self.pos.unwrap_or((p.x, p.y));
-                    self.dragging = true;
-                    if self.hover_idx != -1 {
-                        self.hover_idx = -1; // 拖动中不显示悬停
-                        self.dirty = true;
+                    if on_cell {
+                        // 格上按下：先不拖，移过阈值再转拖动（见 WM_MOUSEMOVE）。
+                        self.press_cell = true;
+                    } else {
+                        // 拖动柄区 → 直接开始拖动
+                        self.start_drag();
                     }
                     unsafe {
                         SetCapture(self.hwnd);
@@ -1249,6 +1290,24 @@ impl WindowMouse for ToolbarMouse {
             }
             WM_MOUSEMOVE => {
                 self.cursor_inside = true;
+                if self.press_cell {
+                    if _wparam.0 & MK_LBUTTON == 0 {
+                        // 抬起没送到（捕获被抢走）：放弃这次按下，别让悬停移动变成拖动。
+                        self.press_cell = false;
+                        unsafe {
+                            let _ = ReleaseCapture();
+                        }
+                    } else {
+                        let mut p = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut p);
+                        }
+                        if drag_started(self.anchor, (p.x, p.y), drag_threshold()) {
+                            self.press_cell = false;
+                            self.start_drag();
+                        }
+                    }
+                }
                 if self.dragging {
                     let mut p = POINT::default();
                     unsafe {
@@ -1300,6 +1359,12 @@ impl WindowMouse for ToolbarMouse {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                if self.press_cell {
+                    self.press_cell = false;
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                }
                 if self.dragging {
                     self.dragging = false;
                     unsafe {
@@ -1954,6 +2019,7 @@ mod cell_anchor_tests {
             pos: Some((1000, 500)),
             anchor_br: None,
             dragging: false,
+            press_cell: false,
             anchor: (0, 0),
             origin: (0, 0),
             hover_idx: -1,
@@ -1966,6 +2032,34 @@ mod cell_anchor_tests {
 
     fn cell(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    /// 拖动阈值是以按下点为中心的全宽矩形：阈值内的手抖仍算点击，出界才转拖动。
+    #[test]
+    fn drag_starts_only_past_the_threshold() {
+        let a = (100, 100);
+        assert!(!drag_started(a, (102, 98), (4, 4)), "2px 内是手抖");
+        assert!(drag_started(a, (103, 100), (4, 4)), "横向出界");
+        assert!(drag_started(a, (100, 97), (4, 4)), "纵向出界");
+    }
+
+    /// 格上原地按下抬起：照常触发格动作，且不进入拖动。
+    #[test]
+    fn click_on_cell_without_moving_still_fires() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut m = mouse(
+            false,
+            vec![(ToolbarAction::TogglePunct, cell(12.0, 0.0, 30.0, 40.0))],
+        );
+        m.events = tx;
+        let at = LPARAM(20 | (20 << 16));
+        m.on_message(HWND::default(), WM_LBUTTONDOWN, WPARAM(MK_LBUTTON), at);
+        m.on_message(HWND::default(), WM_LBUTTONUP, WPARAM(0), at);
+        assert!(!m.dragging && !m.press_cell);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiEvent::Toolbar(ToolbarAction::TogglePunct))
+        ));
     }
 
     /// 横条：菜单横向贴到**格的左缘**，纵向仍取整条顶边（向上展开）。

@@ -47,7 +47,7 @@
 
 ### Internal
 
-无（`Cargo.toml` 中无 `wind-*` 依赖；通过 `Services` trait 与宿主解耦）。
+`wind-config`（目录变量）、`wind-quick-input`（`date()` 的农历 / 中文数字记号，与短语 `$变量` 同源；纯逻辑，反向依赖不得出现）。副作用能力通过 `Services` trait 与宿主解耦。
 
 ### External
 

@@ -1,0 +1,37 @@
+[package]
+name = "wind-scene"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# 测试专用 API（`set_last_use_for_test`、`View::debug_dump` 之类）对外开放，给 wind-ui 的测试用；
+# 生产构建不开。wind-ui 在 dev-dependencies 里打开它。
+test-util = ["dep:png"]
+
+[dependencies]
+# ⛔ 不准依赖 wind-config：它带 uuid / dirs，挡 wasm（主题编辑器）。见 docs/design/wind-scene-extraction.md。
+wind-theme = { path = "../wind-theme" }
+wind-ui-types = { path = "../wind-ui-types" }
+tiny-skia = { workspace = true }
+# 与 wind-ui 同版本、同特性，理由见 wind-ui/Cargo.toml。
+resvg = { version = "0.44", default-features = false, features = ["raster-images"] }
+base64 = "0.22"
+tracing = { workspace = true }
+# 不走 workspace 那份：它开了 rayon，wasm 上不可用。rayon 在 image 0.25 里只作用于 avif / exr，
+# 这里两者都不开，去掉不改解码行为；wind-ui 自己仍依赖 workspace 那份，同一构建里特性照常合并。
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+    "gif",
+    "bmp",
+] }
+
+# 只给 test-util 的 APNG 夹具（`image_cache::anim_fixtures`）；版本与 image 依赖的那份一致。
+png = { version = "0.18", optional = true }
+
+[dev-dependencies]
+png = "0.18"
+
+[lints]
+workspace = true

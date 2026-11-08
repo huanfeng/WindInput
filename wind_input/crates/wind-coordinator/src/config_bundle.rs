@@ -176,30 +176,6 @@ fn warn_unknown_session_actions(config: &Config) {
     }
 }
 
-/// 加载期告警：`keys.overflow.page_key_overrides` 里认不出的键名 / 策略值。
-///
-/// 与 [`warn_unknown_session_actions`] 同一口径：静默忽略与「这个功能坏了」完全同形。
-/// 非法条目在消费点（`page_key_overflow_behavior`）本就会因查不到 VK 而回落全局档——
-/// 这里告警是为了让「配了没生效」可诊断。
-fn warn_unknown_page_key_overrides(config: &Config) {
-    for (name, behavior) in &config.keys.overflow.page_key_overrides {
-        if keymap::key_name_to_vk(name).is_none() {
-            warn!(
-                "keys.overflow.page_key_overrides[\"{name}\"]：键名无法识别，该覆盖被忽略。\
-                 可选 minus / equal / comma / period / lbracket / rbracket（pageup/pagedown \
-                 不存在翻不动，不在此表）"
-            );
-            continue;
-        }
-        if behavior != "ignore" && behavior != "commit_and_input" {
-            warn!(
-                "keys.overflow.page_key_overrides[\"{name}\"] = \"{behavior}\"：策略值非法，\
-                 该覆盖被忽略。可选 ignore / commit_and_input"
-            );
-        }
-    }
-}
-
 /// 跨方案的按键**并集**：可达性的数据源。
 ///
 /// ★ 与「当前方案下这个键干什么」是两回事，别混用。语义表按活跃方案查
@@ -455,7 +431,6 @@ impl ConfigBundle {
             }
         }
         warn_unknown_session_actions(&config);
-        warn_unknown_page_key_overrides(&config);
         // 会话态按键绑定。数据源是 `effective_session_actions()`＝四组键组配置的展开结果
         // ⊕ `session_actions`（后者优先）。
         //
@@ -490,20 +465,16 @@ impl ConfigBundle {
         }
         // 整句切换键：与会话动作同一张键名表（`session_key_name_to_vk`），组合期间 C++ 本就
         // 把这些键转发过来。写了值却解析不出来 ⇒ 用户以为开了、实际是关的，必须告警。
-        let sentence_cycle_raw = config.schema.pinyin.sentence_cycle_key.trim();
-        let sentence_cycle_key = if sentence_cycle_raw.is_empty() {
-            None
-        } else {
-            let parsed = keymap::session_key_name_to_vk(sentence_cycle_raw);
-            if parsed.is_none() {
-                warn!(
-                    "schema.pinyin.sentence_cycle_key = {:?} 不是可识别的键名，整句切换按关闭处理；\
-                     可用值同 keys.session_actions 的键名（如 tab / backtick，可带 shift+）",
-                    config.schema.pinyin.sentence_cycle_key
-                );
-            }
-            parsed
-        };
+        let sentence_cycle_key = parse_sentence_cycle_key(
+            "schema.pinyin.sentence_cycle_key",
+            &config.schema.pinyin.sentence_cycle_key,
+        );
+        // 码表那把键按**方案**折叠、运行期现取（见 `Coordinator::active_sentence_cycle_key`），
+        // 这里只为全局值把「写错了键名」说出来；方案里写错的同样按关闭处理。
+        parse_sentence_cycle_key(
+            "schema.codetable.sentence_cycle_key",
+            &config.schema.codetable.sentence_cycle_key,
+        );
         let jump_out_on_right_symbol =
             parse_jump_out_on_right_symbol(&config.input.auto_pair.jump_out_keys);
         // 英文模式下需要 DLL 吃下转发的标点键 = 「全局配了英半列自定义」∪「英文智能符号参与集」
@@ -599,6 +570,22 @@ impl ConfigBundle {
             tooltip,
         }
     }
+}
+
+/// 解析整句切换键。空串 = 关闭；写了值却认不出 ⇒ 告警后按关闭处理（用户以为开了、实际是关的）。
+pub(crate) fn parse_sentence_cycle_key(path: &str, raw: &str) -> Option<keymap::SessionKey> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = keymap::session_key_name_to_vk(raw);
+    if parsed.is_none() {
+        warn!(
+            "{path} = {raw:?} 不是可识别的键名，整句切换按关闭处理；\
+             可用值同 keys.session_actions 的键名（如 tab / backtick，可带 shift+）"
+        );
+    }
+    parsed
 }
 
 #[cfg(test)]

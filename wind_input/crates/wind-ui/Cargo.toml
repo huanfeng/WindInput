@@ -14,6 +14,8 @@ linux-host = ["dep:ttf-parser", "dep:ab_glyph_rasterizer", "dep:rustybuzz", "win
 # 表现层协议类型（UiCommand/UiEvent 等）的定义处；本 crate 原路径 pub use 再导出。
 wind-ui-types = { path = "../wind-ui-types" }
 wind-theme = { path = "../wind-theme" }
+# 候选窗渲染的平台无关部分（View / 图片缓存 / 皮肤 / 文字公共类型），原路径在 lib.rs 再导出。
+wind-scene = { path = "../wind-scene" }
 wind-candidate = { path = "../wind-candidate" }
 wind-bridge = { path = "../wind-bridge" }
 # 协议常量与结构：语言栏图标 SHM 的尺寸档与变体表（langbar_icon）、host-render 常量
@@ -119,3 +121,9 @@ dispatch2 = "0.3"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# 测试专用 API（缓存时钟回拨、View 调试转储等）。
+wind-scene = { path = "../wind-scene", features = ["test-util"] }
+# 测试现生成 APNG 夹具；版本与 image 依赖的那份一致，不多编一份。
+png = "0.18"

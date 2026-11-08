@@ -4,6 +4,7 @@
 #include "IPCClient.h"
 #include "SkipKeyTable.h"
 #include "PassthroughNote.h"
+#include "InputSequenceChar.h"
 #include "ToggleTapPolicy.h"
 #include "CtrlRawPolicy.h"
 #include "CtrlSpacePolicy.h"
@@ -95,9 +96,12 @@ public:
     // 也不消除那个右符号，前提仍成立，清掉只会让 Tab/Enter 跳不出去（切走再切回、或
     // 配对里打完字再跳出）。真正让前提失效的是焦点/文档切换与组合被清，那些路径按默认值全清。
     void ResetComposingState(BOOL keepPairState = FALSE) {
+        _EndAssocBareSession();
         _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _resyncDeadline = 0; _resyncFailStreak = 0; _skipKeys.Clear(); _pendingPairAction = {};
         _passthrough.Reset();  // 与 skip 表同处清：跨文档带一个陈旧的透传事实过去没有意义
-        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; }
+        // seqChar 同配对状态：中英切换不清（用户定：切换后紧接着打的仍算「英文后」），
+        // 焦点/文档切换清——换了文档，上一个文档末尾是什么与这里无关。
+        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; _seqChar = WindInputSeq::kUnknown; }
     }
 
     // 配对状态保活：所有按键都应调用（含英文模式的普通字母——协调器在英文模式下收不到
@@ -186,7 +190,41 @@ public:
     ///
     /// 根因是拿边沿去表达一个**持续状态**：漏一个事件就永久错。改成服务端权威 +
     /// level-triggered 之后，DLL 侧再加任何本地清位都是第二个真相源，会把这个毛病请回来。
-    void SetCandidateSessionActive(BOOL active) { _hotkeyModeSession = active; }
+    ///
+    /// 服务端说「没有会话了」时，若那个会话是「无占位的联想会话」（`_assocBareSession`），
+    /// 还要在 TSF 线程上补一次候选收起（`_assocBareEndPending`）：本函数会在 AsyncReader
+    /// 线程被调，UIElement / 热键注销不能在这里做。
+    /// 无占位联想会话中，文档焦点反弹（WPS 点单元格）时问一句：鼠标刚按过吗？是 ⇒ 用户点了别处，
+    /// 调用方应让服务端收联想（宿主没有组合，也不一定发选区变化，没有别的信号）。
+    /// 只在会话期间读鼠标状态；会话开始时已丢弃一次旧的「按下过」位。TSF 线程调用。
+    BOOL BareAssocMouseClicked();
+    void SetCandidateSessionActive(BOOL active)
+    {
+        if (active)
+        {
+            // 后到的 TRUE 撤销前面迟到的 FALSE（服务端联想活着时每个 keydown 都会重推 TRUE）。
+            _hotkeyModeSession = TRUE;
+            _assocBareEndPending = FALSE;
+            return;
+        }
+        if (_assocBareSession)
+        {
+            // 无占位联想会话的 FALSE 只记下「待收」，由 TSF 线程在下一次 OnTestKeyDown 入口落位：
+            // 本函数在 AsyncReader 线程，直接清位会让同一键的 Test / Key 两阶段判定翻转，
+            // 也可能把刚被上屏应答同步置起的新一轮会话清掉。
+            _assocBareEndPending = TRUE;
+            return;
+        }
+        _hotkeyModeSession = FALSE;
+    }
+
+    /// 服务端接管了会话（加词等热键会话在 WM_HOTKEY 上乐观置位）：无占位联想的归属标记交还，
+    /// 之后 `ResetComposingState` 不会再把这一位清掉（那是加词会话的位，只能由服务端推送清）。
+    void ReleaseAssocBareOwnership()
+    {
+        _assocBareSession = FALSE;
+        _assocBareEndPending = FALSE;
+    }
 
     /// 宿主报了选区变化（`OnEndEdit`）：若此刻有 Shift/Ctrl 正等着 keyup 触发切换，
     /// 且鼠标键此刻按着或按住期间按下过，说明是鼠标点选，这次不算单击（论坛 t257）。
@@ -245,10 +283,6 @@ private:
     // 另有三个非按键调用点（同步握手等），它们拿不到 wParam，标志若残留会在下一次按键上
     // 误重放。故两个入口都在调用响应处理**之前**先清零。
     BOOL _pendingReplayToHost = FALSE;
-    // 本次 OnKeyDown 的响应上屏了文字（CommitText 等，见 ResponseCommitsText）。会话中
-    // Ctrl/Alt 组合的 cleanup 判定要用（见 CtrlAltCleanupPolicy.h），与上一项同样只在
-    // OnKeyDown 里、调用响应处理之前清零。
-    BOOL _responseCommitted = FALSE;
     // 正在 DispatchHotkey（WM_HOTKEY 回调）里处理响应：不在按键上下文，上屏要按
     // nonKeyContext 走异步会话。只在 DispatchHotkey 里置位、处理完恢复原值。
     BOOL _inHotkeyDispatch = FALSE;
@@ -270,6 +304,24 @@ private:
     /// （对照：`IPCClient.h` 要求 ModePush 回调必须用 `InterlockedExchange` 写
     ///   `_bChineseMode`，那是因为它参与更细的时序判定。）
     BOOL _hotkeyModeSession = FALSE;
+    /// 「无占位的联想会话」由本地同步置位的那一份（`COMMIT_FLAG_ASSOC_SESSION`）：
+    /// 宿主里没有组合，转发资格只能靠 `_hotkeyModeSession`，而它的权威是服务端的异步推送，
+    /// 赢不了下一次 OnTestKeyDown——所以上屏应答里同步先置一次，并记下「这一位是我置的」。
+    /// 有了这个记号，ClearComposition / UpdateComposition 等本地已知的结束点才能立刻清位，
+    /// 又不会误清加词等真正由服务端驱动的会话。只在 TSF 线程置位；
+    /// 服务端推 FALSE 时在 AsyncReader 线程清（见 SetCandidateSessionActive）。
+    BOOL _assocBareSession = FALSE;
+    /// 服务端推 FALSE 清掉了无占位联想会话，TSF 线程还欠一次候选收起。
+    BOOL _assocBareEndPending = FALSE;
+    /// 本地结束点：清位（不动加词等服务端会话）。TSF 线程调用。
+    void _EndAssocBareSession()
+    {
+        if (_assocBareSession)
+        {
+            _assocBareSession = FALSE;
+            _hotkeyModeSession = FALSE;
+        }
+    }
     // 配对跳出键（VK 码集合，由 core 经 CONFIG_KEY_JUMP_OUT_KEYS 推送）。英文模式配对直接
     // 据此跳出；中文模式仅用于「有待跳出配对」时放行 Enter 等被会话门控的键转发给协调器。
     std::set<UINT> _jumpOutKeys;
@@ -424,6 +476,16 @@ private:
     static_assert(WindPassthrough::kVkLMenu == VK_LMENU, "VK 漂移");
     static_assert(WindPassthrough::kVkRMenu == VK_RMENU, "VK 漂移");
     static_assert(WindPassthrough::kVkPacket == VK_PACKET, "VK 漂移");
+    static_assert(WindInputSeq::kVkSpace == VK_SPACE, "VK 漂移");
+    static_assert(WindInputSeq::kVkNumpad0 == VK_NUMPAD0, "VK 漂移");
+    static_assert(WindInputSeq::kVkNumpad9 == VK_NUMPAD9, "VK 漂移");
+    static_assert(WindInputSeq::kVkMultiply == VK_MULTIPLY, "VK 漂移");
+    static_assert(WindInputSeq::kVkDivide == VK_DIVIDE, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem1 == VK_OEM_1, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem3 == VK_OEM_3, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem4 == VK_OEM_4, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem7 == VK_OEM_7, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem102 == VK_OEM_102, "VK 漂移");
 
     // `OnTestKeyDown` / `OnKeyDown` 有 40+ 个 return，逐个接线必漏一处（本仓反复吃过的
     // "散点接线"）。用作用域守卫在**函数出口**统一判：析构时 `*pfEaten` 已是最终结论。
@@ -493,7 +555,7 @@ private:
         return 0;
     }
 
-    // 按键侧记录点：挂在 PassthroughNoter 的出口（OnTestKeyDown / OnKeyDown 两处），按最终
+    // 按键侧记录点（同时更新 _seqChar，见 InputSequenceChar.h）：挂在 PassthroughNoter 的出口（OnTestKeyDown / OnKeyDown 两处），按最终
     // `*pfEaten` 判。键进了宿主（判据同透传上报，`WindPassthrough::IsUserKeyIntoHost`：纯修饰键、
     // 自注入键不算）就记「是不是数字」，非数字即清零——CapsLock 字母、翻页热键、Backspace、
     // 方向键、Ctrl+V 都在此清。此前是在几个透传分支里手工接线，散点漏了好几处提前 return。
@@ -510,7 +572,22 @@ private:
     // 数字则记，否则清零（上屏汉字/标点后不该再继承数字状态）。全角数字（U+FF10-FF19）
     // 刻意不记——服务端只认 ASCII 0x30-0x39，记了也不会命中，徒增误判面。
     // 空文本不动状态：没有东西写进文档，光标前是什么并没有改变。
+    // 同时更新 _seqChar（末尾码点，见 InputSequenceChar.h），两者共用这几个上屏记录点。
     void _TrackCommittedTextForSmartPunct(const std::wstring& text);
+
+public:
+    /// 只更新 seqChar（数字记账不动）：「上屏后紧接着开组合」与 HoldComposition 落定这类
+    /// 数字记账刻意不记、但文档里确实多了一段的上屏点用。空文本不动。
+    void NoteCommittedSeqChar(const std::wstring& text)
+    {
+        if (!text.empty())
+            _seqChar = WindInputSeq::FromCommittedText(text.c_str(), text.size());
+    }
+
+    /// 鼠标挪过光标（判据见 `WindInputSeq::CursorMovedByMouse`）：输入序列记账作废。
+    void NoteCursorMovedByMouse() { _seqChar = WindInputSeq::kUnknown; }
+
+private:
 
     // ⛔ 这里曾有 CapsLock 的「回敲复原」机制（_RestoreCapsLockToggle / _capsSessionEaten /
     // 自注入放行窗口），2026-08-11 全部移除——TSF 压不住 CapsLock 的锁定态翻转，而事后
@@ -519,6 +596,14 @@ private:
     // **不要在 TSF 侧重新实现它。**
 
     WCHAR _lastPassthroughDigit; // 最近一笔输入若是 ASCII 数字则记之，否则 0——数字后智能标点的唯一依据
+    // 输入序列里最近进文档的字符代表值（KeyPayload.seqChar，取值规则见 InputSequenceChar.h）。
+    // 与 _lastPassthroughDigit 同两个记录点，但**发送时不清零**：服务端只在组合开始那一键锁存它，
+    // 组合期间被吃下的键没有写进文档，光标前是什么并没有变。
+    uint16_t _seqChar;
+    // 中数间补空格开着、且本应用未关（core 经 CONFIG_KEY_SPACE_BEFORE_DIGIT 按客户端现算推来）。
+    // 只决定「汉字后的数字吃不吃」，见 NumberKeyPolicy.h 的 SpaceBeforeDigit。
+    bool _spaceBeforeDigit = false;
+    bool _SpaceBeforeDigitFor(WPARAM vk, uint32_t modifiers) const;
     // 「自上一个 keydown 送达服务端以来有键进了宿主」的记账。规则与理由见 PassthroughNote.h；
     // 消费点在 _SendKeyToService（仅 keydown 那一发），清理点在 ResetComposingState。
     WindPassthrough::PassthroughState _passthrough;

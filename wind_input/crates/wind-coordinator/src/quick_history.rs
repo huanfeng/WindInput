@@ -102,6 +102,19 @@ impl Coordinator {
         state: &State,
         skip_exact: bool,
     ) -> Vec<Candidate> {
+        self.quick_history_candidates_with_recs(state, skip_exact).0
+    }
+
+    /// 同 [`Self::quick_history_candidates`]，另返回各候选文本的热度记录（供词频重排）。
+    pub(crate) fn quick_history_candidates_with_recs(
+        &self,
+        state: &State,
+        skip_exact: bool,
+    ) -> (
+        Vec<Candidate>,
+        std::collections::HashMap<String, FreqRecord>,
+    ) {
+        let none = (Vec::new(), std::collections::HashMap::new());
         let buffer = &state.mix_buffer;
         // 已有分步上屏段时不出：记录端同样不记这种状态（见 `learn_mix_literal`），
         // 出了也只会把「中文段 + 历史」拼成一次上屏，分段里的造词就丢了。
@@ -109,10 +122,10 @@ impl Coordinator {
             || !state.committed_text.is_empty()
             || !self.mix_has_history(state.mix_id)
         {
-            return Vec::new();
+            return none;
         }
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return none;
         };
         // 全量取出再按小写前缀过滤：store 只提供区分大小写的前缀扫描，而条数有
         // `history_max` 封顶（出厂 1000），逐键一次读事务可以接受。
@@ -120,7 +133,7 @@ impl Coordinator {
             Ok((rows, _)) => rows,
             Err(e) => {
                 tracing::debug!("快捷输入历史读取失败: {e}");
-                return Vec::new();
+                return none;
             }
         };
         let want = buffer.to_lowercase();
@@ -136,14 +149,23 @@ impl Coordinator {
         if exact {
             out.push(cand(buffer.clone()));
         }
-        out.extend(
-            rows.into_iter()
-                .filter(|(text, _)| text != buffer)
-                .filter(|(text, _)| text.to_lowercase().starts_with(&want))
-                .take(QUICK_HISTORY_QUOTA)
-                .map(|(text, _)| cand(text)),
-        );
-        out
+        let mut recs = std::collections::HashMap::new();
+        for (text, rec) in rows
+            .into_iter()
+            .filter(|(text, _)| text != buffer)
+            .filter(|(text, _)| text.to_lowercase().starts_with(&want))
+            .take(QUICK_HISTORY_QUOTA)
+        {
+            recs.insert(
+                text.clone(),
+                FreqRecord {
+                    count: rec.count,
+                    last_used: rec.last_used,
+                },
+            );
+            out.push(cand(text));
+        }
+        (out, recs)
     }
 
     /// 文本透镜下并进**英文段**的历史候选，连同各自的热度记录（次数 / 最近一次）。
@@ -206,11 +228,15 @@ impl Coordinator {
         raw_pinned: bool,
     ) -> Vec<Candidate> {
         use wind_candidate::CandidateSource;
-        let hist = self.quick_history_candidates(state, false);
+        let (mut hist, recs) = self.quick_history_candidates_with_recs(state, false);
         if hist.is_empty() {
             return seg;
         }
         let raw = state.mix_buffer.as_str();
+        // 历史段与文本透镜同一把尺：按英文调频（一次到顶 / 位置提升…）重排。
+        // 逐字相同的那条是原文本身，恒首位不参与。
+        let skip = usize::from(hist.first().is_some_and(|h| h.text == raw));
+        self.apply_freq_rerank_with_extra(Some("english"), &mut hist[skip..], raw, recs);
         // 原文格**按位置认**：钉了原文时 `seg` 首格就是它——`mix_free_english_segment` 先放
         // 头部、去重保留首次出现。按文本认会在两处失手：头部格被同名词库词占据
         // （`merge_head_with_dict`），以及大小写档位把它改写成 `HEL` / `hel`。

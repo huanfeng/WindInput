@@ -18,8 +18,8 @@ toml = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
-# build_guard 判活：proc_pidinfo 取进程启动时间。
-[target.'cfg(target_os = "macos")'.dependencies]
+# macOS：build_guard 判活（proc_pidinfo 取进程启动时间）；unix：mapping 钉住模式的 mlock。
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [lints]

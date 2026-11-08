@@ -171,7 +171,9 @@ if(WIND_BUILD_ADDON)
     # GNOME Shell 扩展：只在这次构建真的编了客户端时安装，避免没有 Wayland/gio 的包带一份用不上的扩展。
     # 启用步骤见 gnome-shell-extension/README.md（装上文件不会自动启用）。
     if(WIND_GNOME_CARET_EXT)
+        # 两份同接口：新格式（Shell 45–51）与旧格式（42–44），各自的 shell-version 只让对应 Shell 启用。
         install(DIRECTORY gnome-shell-extension/windinput-caret@windinput
+                          gnome-shell-extension/windinput-caret-legacy@windinput
             DESTINATION ${CMAKE_INSTALL_DATADIR}/gnome-shell/extensions)
     endif()
 endif()

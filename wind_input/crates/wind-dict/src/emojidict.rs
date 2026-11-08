@@ -32,7 +32,7 @@
 //! ★ 与 `.wcmt` 不同，**同一 text 至多一条**——重复键在 [`write_emoji_wemj`] 构建时就已合并
 //! （见该函数关于繁→简撞键的说明）。查询端因此不需要组迭代。
 
-use memmap2::Mmap;
+use crate::mapping::Mapped;
 use std::fs::File;
 use std::path::Path;
 use tracing::{info, warn};
@@ -44,7 +44,7 @@ const ENTRY_SIZE: usize = 8;
 
 /// emoji 扩展表 mmap 读取器。
 pub struct EmojiReader {
-    mmap: Mmap,
+    mmap: Mapped,
     entry_count: u32,
     index_off: u32,
     str_off: u32,

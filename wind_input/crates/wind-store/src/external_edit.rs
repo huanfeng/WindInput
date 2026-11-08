@@ -573,15 +573,15 @@ mod tests {
         assert_eq!(sess.kind.as_str(), "words");
         assert_eq!(sess.file, "pinyin/user.dict.yaml");
         let text = std::fs::read_to_string(&sess.path).unwrap();
-        assert!(text.contains("你好\tni hao\t9"), "begin 先折回：{text}");
-        assert!(text.contains("世界\tshi jie\t5"), "{text}");
+        assert!(text.contains("ni hao\t你好\t9"), "begin 先折回：{text}");
+        assert!(text.contains("shi jie\t世界\t5"), "{text}");
         // 外部编辑：删一行、改一行权重
         let edited = text
             .lines()
-            .filter(|l| !l.starts_with("世界"))
+            .filter(|l| !l.starts_with("shi jie\t世界\t"))
             .map(|l| {
-                if l.starts_with("你好") {
-                    "你好\tni hao\t20".to_string()
+                if l.starts_with("ni hao\t你好\t") {
+                    "ni hao\t你好\t20".to_string()
                 } else {
                     l.to_string()
                 }
@@ -605,8 +605,8 @@ mod tests {
         assert!(r.changed);
         assert!(r.issues.is_empty());
         let after = std::fs::read_to_string(&sess.path).unwrap();
-        assert!(after.contains("你好\tni hao\t20"), "{after}");
-        assert!(after.contains("测试\tce shi\t3"), "{after}");
+        assert!(after.contains("ni hao\t你好\t20"), "{after}");
+        assert!(after.contains("ce shi\t测试\t3"), "{after}");
         assert!(!after.contains("世界"), "删掉的行不复活：{after}");
         assert_eq!(
             words(&s),
@@ -646,7 +646,7 @@ mod tests {
         let text = std::fs::read_to_string(&sess.path).unwrap();
         std::fs::write(
             &sess.path,
-            text.replace("你好\tni hao\t9", "你好\tni hao\t20"),
+            text.replace("ni hao\t你好\t9", "ni hao\t你好\t20"),
         )
         .unwrap();
         s.end_edit("pinyin/user.dict.yaml").unwrap();
@@ -693,7 +693,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&sess.path).unwrap(), before);
         s.end_edit("pinyin/user.dict.yaml").unwrap();
         let after = std::fs::read_to_string(&sess.path).unwrap();
-        assert!(after.contains("你好\tni hao\t9"), "{after}");
+        assert!(after.contains("ni hao\t你好\t9"), "{after}");
     }
 
     /// 临时词 / 词频也能编辑：开始前折回、编辑期间暂停写回；界面的删除 / 清空 / 转正 / 导入挡住，
@@ -714,7 +714,7 @@ mod tests {
         );
         let edited: String = text
             .lines()
-            .filter(|l| !l.starts_with("世界"))
+            .filter(|l| !l.contains("\t世界\t"))
             .map(|l| format!("{l}\n"))
             .collect();
         std::fs::write(&sess.path, &edited).unwrap();

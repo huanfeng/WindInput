@@ -22,6 +22,12 @@ pub const THEME_FILE: &str = "theme.toml";
 /// `theme_chain_dirs`）都经过这里，故打点放此处不会漏。措辞与 `Config::log_user_override`
 /// 一致，便于按 `用户覆盖生效` 一次 grep 出全部生效的覆盖。
 pub fn find_theme_dir(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    // 名字来自 `base = "…"`（不可信主题文本）与 RPC 参数：只认普通 slug，别让 `..` /
+    // 绝对路径把查找带出主题目录群。主题定位全都经过这里，一处挡住全部入口。
+    if !is_plain_slug(name) {
+        tracing::warn!("主题名不是普通 slug，忽略: {name:?}");
+        return None;
+    }
     let mut hit: Option<PathBuf> = None;
     for d in dirs {
         let p = d.join(name);
@@ -82,11 +88,110 @@ pub fn meta_from_text(text: &str) -> Option<Meta> {
     v.get("meta")?.clone().try_into().ok()
 }
 
+/// 主题 id / `base` 引用是否普通 slug：非空，不是 `.` / `..`，不含 `/`、`\\`、`:`、`..`
+/// 与控制字符（于是也不可能是绝对路径或盘符路径）；也不是 Windows 保留设备名（`CON`、
+/// `NUL.txt` 之类），不以点或空格结尾（Windows 会悄悄去掉，两个 id 落到同一目录），
+/// 不含 8.3 短名形态（`~` 后跟数字，`VERYLO~1` 可能指向另一个长名目录），不以
+/// `.wtheme-tmp` / `.wtheme-old` 结尾（包导入拿它们作兄弟临时目录）。
+/// 主题目录名即 id，合法 id 都满足。
+pub fn is_plain_slug(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    !s.is_empty()
+        && s != "."
+        && !s.contains("..")
+        && !s.ends_with(['.', ' '])
+        && !lower.ends_with(".wtheme-tmp")
+        && !lower.ends_with(".wtheme-old")
+        && !looks_like_8dot3(s)
+        && !is_windows_reserved_name(s)
+        && !s
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+}
+
+/// 是否 Windows 8.3 短名形态（`VERYLO~1`、`AB~12.TOM`）：主名 ≤ 8、扩展名 ≤ 3，
+/// 全 ASCII，主名以 `~数字` 结尾且前面非空。只拦这种形态——它可能是另一个长名目录的别名；
+/// `Theme~2 Dark` 这类长名不受影响，免得已有主题变成列不出、删不掉的孤儿。
+fn looks_like_8dot3(s: &str) -> bool {
+    let (stem, ext) = s.split_once('.').unwrap_or((s, ""));
+    s.is_ascii()
+        && stem.len() <= 8
+        && ext.len() <= 3
+        && !ext.contains('.')
+        && stem.rsplit_once('~').is_some_and(|(head, digits)| {
+            !head.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// 从显示名派生主题 id（调用方没给 slug 时用）：路径分隔符、`:`、控制字符与 8.3 短名
+/// 里的 `~` 换成 `-`，`..` 折成 `-`，去掉首尾空白与末尾的点、空格；仍不合法（保留名之类）
+/// 加 `theme-` 前缀，再不行或为空就用 `theme`。本就合法的名字原样返回。
+pub fn slug_from_name(name: &str) -> String {
+    if is_plain_slug(name.trim()) {
+        return name.trim().to_string();
+    }
+    let mut chars = name.trim().chars().peekable();
+    let mut s = String::new();
+    while let Some(c) = chars.next() {
+        let bad = matches!(c, '/' | '\\' | ':')
+            || c.is_control()
+            || (c == '~' && chars.peek().is_some_and(char::is_ascii_digit));
+        s.push(if bad { '-' } else { c });
+    }
+    while s.contains("..") {
+        s = s.replace("..", "-");
+    }
+    let s = s.trim_end_matches(['.', ' ']);
+    if s.is_empty() {
+        return "theme".to_string();
+    }
+    if is_plain_slug(s) {
+        return s.to_string();
+    }
+    let prefixed = format!("theme-{s}");
+    if is_plain_slug(&prefixed) {
+        prefixed
+    } else {
+        "theme".to_string()
+    }
+}
+
+/// Windows 保留设备名（不分大小写，按首个 `.` 前的部分比较，带不带扩展名都算）：
+/// `CON` `PRN` `AUX` `NUL` `CONIN$` `CONOUT$`、`COM1`–`COM9` / `LPT1`–`LPT9` 及上标
+/// `COM¹²³` / `LPT¹²³`。
+pub fn is_windows_reserved_name(s: &str) -> bool {
+    let stem = s
+        .split('.')
+        .next()
+        .unwrap_or(s)
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let rest = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
+    matches!(
+        rest,
+        Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+    )
+}
+
 /// 校验主题 toml 文本可解析为合法 Theme（导入前校验）。Err 含原因。
 pub fn validate_text(text: &str) -> anyhow::Result<()> {
     let v: Value = text
         .parse::<Value>()
         .map_err(|e| anyhow::anyhow!("TOML 解析失败: {}", e))?;
+    if let Some(b) = v.get("base").and_then(|b| b.as_str())
+        && !b.is_empty()
+        && !is_plain_slug(b)
+    {
+        anyhow::bail!("base 只能写主题 id（不能含路径）：{b:?}");
+    }
     let n = normalize_theme(v);
     let _theme: Theme = n
         .try_into()
@@ -105,6 +210,8 @@ pub fn list_theme_ids(dir: &Path) -> Vec<String> {
         .flatten()
         .filter(|e| e.path().join("theme.toml").is_file())
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        // 旧版在 Linux/mac 上可能建出尾随空格/点之类的目录：列出来也选不了（定位只认普通 slug）。
+        .filter(|id| is_plain_slug(id))
         .collect();
     ids.sort();
     ids
@@ -236,6 +343,7 @@ fn load_merged_dirs_at(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Re
     {
         let mut base = load_merged_dirs_at(dirs, base_name, depth + 1)?;
         drop_inherited_arrow_images(&mut base, &value);
+        crate::skin::replace_inherited_variants(&mut base, &value);
         return Ok(merge(base, value));
     }
     Ok(value)
@@ -384,6 +492,86 @@ mod tests {
         assert!(validate_text("[meta]\nname = \"ok\"\n").is_ok());
         // 非法 TOML
         assert!(validate_text("  : : :\n\t- bad").is_err());
+    }
+
+    #[test]
+    fn plain_slug_rejects_paths() {
+        for ok in [
+            "default",
+            "_base",
+            "my-theme.v2",
+            "主题",
+            "清风·浅",
+            "console",
+            "com0",
+            "lpt",
+            "a~b",
+            "~",
+            "conin",
+            "x.wtheme",
+            "a~12b",
+            "Theme~2 Dark",
+            "longname~1",
+            "清风~1",
+        ] {
+            assert!(is_plain_slug(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "C:x",
+            "/etc",
+            "a..b",
+            "a\nb",
+            "x.",
+            "x ",
+            "CON",
+            "nul",
+            "Aux.txt",
+            "com1",
+            "LPT9.toml",
+            "CONIN$",
+            "conout$.txt",
+            "COM¹",
+            "lpt³",
+            "VERYLO~1",
+            "AB~12.TOM",
+            "theme~1",
+            "x.wtheme-tmp",
+            "x.WTHEME-OLD",
+        ] {
+            assert!(!is_plain_slug(bad), "{bad:?}");
+        }
+        assert!(validate_text("base = \"../../x\"\n").is_err());
+        assert!(find_theme_dir(&[PathBuf::from("/")], "..").is_none());
+    }
+
+    #[test]
+    fn slug_from_name_derives_plain_ids() {
+        for (name, want) in [
+            ("我的主题", "我的主题"),
+            ("  mine  ", "mine"),
+            ("Nord: Dark", "Nord- Dark"),
+            ("黑/白", "黑-白"),
+            ("a\\b", "a-b"),
+            ("../../victim", "----victim"),
+            ("v1.0...", "v1.0-"),
+            ("尾巴. . ", "尾巴"),
+            ("Aux", "theme-Aux"),
+            ("com1.v2", "theme-com1.v2"),
+            ("VERYLO~1", "VERYLO-1"),
+            ("x.wtheme-tmp", "theme"),
+            ("", "theme"),
+            (" . ", "theme"),
+        ] {
+            let got = slug_from_name(name);
+            assert_eq!(got, want, "{name:?}");
+            assert!(is_plain_slug(&got), "{name:?} → {got:?}");
+        }
     }
 
     #[test]

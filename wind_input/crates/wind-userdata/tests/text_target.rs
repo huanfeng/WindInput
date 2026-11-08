@@ -57,7 +57,7 @@ fn fold_writes_text_and_reads_back_after_reopen() {
     up(&ud, "nihao", "你好", 9, 0b101);
     ud.fold(Target::User, "py").unwrap();
     let s = std::fs::read_to_string(&file).unwrap();
-    assert!(s.contains("你好\tni hao\t9"), "{s}");
+    assert!(s.contains("ni hao\t你好\t9"), "{s}");
     assert_eq!(ud.pending(Target::User, "py"), 0);
     drop(ud);
     let ud = UserData::open(Dirs {
@@ -79,7 +79,7 @@ fn hand_edit_wins_and_pending_ops_still_overlay() {
     ud.fold(Target::User, "py").unwrap();
     let s = std::fs::read_to_string(&file)
         .unwrap()
-        .replace("先\txian\t1\n", "");
+        .replace("xian\t先\t1\n", "");
     std::fs::write(&file, s).unwrap();
     up(&ud, "hao", "好", 2, 0b1);
     assert!(ud.sync_text(Target::User, "py").unwrap(), "指纹变了要重建");
@@ -108,7 +108,7 @@ fn editor_save_during_fold_discards_the_round() {
                 return;
             }
             let s = std::fs::read_to_string(&file).unwrap();
-            std::fs::write(&file, format!("{s}手改\tshou gai\t1\n")).unwrap();
+            std::fs::write(&file, format!("{s}shou gai\t手改\t1\n")).unwrap();
         }
     }));
     assert!(ud.fold(Target::User, "py").is_err());
@@ -121,7 +121,7 @@ fn editor_save_during_fold_discards_the_round() {
     ud.sync_text(Target::User, "py").unwrap();
     ud.fold(Target::User, "py").unwrap();
     let s = std::fs::read_to_string(&file).unwrap();
-    assert!(s.contains("手改") && s.contains("好\thao\t2"), "{s}");
+    assert!(s.contains("手改") && s.contains("hao\t好\t2"), "{s}");
 }
 
 /// Review Focus 4：被删除 vs 读不了。
@@ -139,7 +139,7 @@ fn deleted_file_vs_unreadable_file() {
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
-            .contains("好\thao\t2"),
+            .contains("hao\t好\t2"),
         "之后的写入新建文件"
     );
     #[cfg(unix)]
@@ -257,7 +257,7 @@ fn fold_or_compact_before_bind_keeps_ops_for_text() {
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
-            .contains("好\thao\t2")
+            .contains("hao\t好\t2")
     );
 }
 
@@ -269,7 +269,7 @@ fn readonly_instance_binds_without_writing() {
     up(&ud, "nihao", "你好", 9, 0b101);
     ud.fold(Target::User, "py").unwrap();
     let mut s = std::fs::read_to_string(&file).unwrap();
-    s.push_str("手改\tshou gai\t1\n");
+    s.push_str("shou gai\t手改\t1\n");
     std::fs::write(&file, s).unwrap();
     let state_before = std::fs::read(d.join("state/journal/state")).unwrap();
     let w_before = wdats(&d);
@@ -453,5 +453,5 @@ fn held_text_target_is_not_folded_until_released() {
     assert!(!ud.is_held(Target::User, "py"));
     assert_eq!(ud.pending(Target::User, "py"), 0, "释放即折回");
     let s = std::fs::read_to_string(&file).unwrap();
-    assert!(s.contains("你好\tni hao\t9"), "{s}");
+    assert!(s.contains("ni hao\t你好\t9"), "{s}");
 }

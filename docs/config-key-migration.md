@@ -97,6 +97,7 @@
 | `input.overflow.number_key` | `keys.overflow.number_key` |
 | `input.overflow.select_key` | `keys.overflow.select_key` |
 | `input.overflow.select_char_key` | `keys.overflow.select_char_key` |
+| `keys.overflow.page_key_overrides` | 已退役，**不迁移**（0.131，破坏性变更）：改在 `keys.session_actions` 里给单键写翻页动作后缀，如 `minus = "page_prev:ignore"`；旧键登记 `RETIRED_KEYS` |
 
 ## ui（36；仅 tooltip 拍平，顶层名保留 ui）
 

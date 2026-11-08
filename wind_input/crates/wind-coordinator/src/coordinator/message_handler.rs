@@ -805,6 +805,10 @@ impl MessageHandler for Coordinator {
         });
     }
 
+    fn assoc_session_hint(&self) -> bool {
+        self.assoc_bare_session_now()
+    }
+
     fn composition_placeholder(&self) -> &'static str {
         // GH#175：按焦点应用的 compat 规则取（空格 / ZWSP / U+2800），唯一实现在 push_config.rs。
         Coordinator::composition_placeholder(self)
@@ -883,8 +887,22 @@ impl MessageHandler for Coordinator {
             }
             self.note_host_wrote_text("宿主自行出字");
         }
+        // 中英 / 中数间补空格的「插入点前一字符」：只在组合开始前锁存（见 `crate::auto_spacing`）。
+        // 联想态**不**重新锁存：联想是紧接着上一笔上屏的，服务端已把 `spacing_prev` 推进到那一笔
+        // 的末字；客户端那份在某些上屏路径上会慢一拍（上屏后立刻起组合的那几条），拿来覆盖反而错。
+        if data.event_type == EVENT_KEY_DOWN {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !Self::has_input_session(&st) {
+                self.latch_spacing_boundary(&mut st, data);
+            }
+        }
         let action = self.handle_key_event(data);
         let action = self.redispatch_commit_code(data, action);
+        // 中英切换处补空格：在换行改写之前，空格是上屏文本的前缀、与换行形式无关。
+        let action = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.apply_auto_spacing(&mut st, action)
+        };
         // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
         // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
         // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
@@ -1005,6 +1023,17 @@ impl MessageHandler for Coordinator {
         // 里才改成重放的。
         if matches!(action, KeyAction::ClearCompositionThenPassThrough) {
             self.note_host_wrote_text("交还宿主重放");
+        }
+        // 无占位联想（`none`）的会话位对账。内层 `handle_key_event` 返回时的推送早于上面两道改判，
+        // 看不到改判里退出联想（Del / 方向键 / Ctrl+C 落透传）的结果，缓存会停在 TRUE。
+        // 联想活着的每个 keydown 还强推一次：DLL 对「迟到的 FALSE」只置待收，后到的 TRUE
+        // 把它撤销，服务端的真实状态才收敛得回来。只对配了 `none` 的应用，别处零开销。
+        if data.event_type == EVENT_KEY_DOWN && self.assoc_placeholder_is_none() {
+            if self.assoc_bare_session_now() {
+                self.hotkey_session_force_push
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.push_hotkey_session_if_changed();
         }
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
@@ -1561,15 +1590,12 @@ impl MessageHandler for Coordinator {
         // Ctrl/Alt/Cmd 组合（非热键）：有输入则清空并隐藏候选窗，否则透传。
         // 必须 notify_ui_hide：否则候选窗残留（如 Ctrl+A 时卡死，需再输入才复位）。
         //
-        // ⚠ 这里返回 `ClearComposition` 的语义是「清掉组合」，**不是**「这个键归我了」。
-        // 宿主必须照旧执行它的快捷键——TSF 靠 `OnTestKeyDown` 压根不转发这类键来保证，
-        // macOS 无那层前置闸门，故由 `BridgeResponseRouter` 对快捷键组合把这一帧判为
-        // 「不消费」（见 Swift 侧 `hostShortcut` 参数）。改动本分支的返回值前先读那里。
+        // 显式声明「收组合后交还当前键」，避免宿主靠组合状态猜测归属。
         if data.modifiers & MOD_SHORTCUT != 0 {
             if !state.input_buffer.is_empty() || !state.committed_text.is_empty() {
                 self.reset_pinyin_composition(&mut state);
                 self.notify_ui_hide();
-                return KeyAction::ClearComposition;
+                return KeyAction::ClearCompositionThenPassThrough;
             }
             return KeyAction::PassThrough;
         }
@@ -1692,6 +1718,10 @@ impl MessageHandler for Coordinator {
             // 只看全角，不看这个开关），出的半角字由下方 `commit_highlight_then_char` 负责。
             if !has_comp && !state.full_width {
                 self.record_commit(&npc.to_string(), 0, -1, CommitSource::Punctuation);
+                // 汉字后的小键盘数字、开了中数间空格：同主键盘那条臂，出字补空格。
+                if npc.is_ascii_digit() && self.digit_after_cjk_outputs(&state, data) {
+                    return Self::commit_action(npc.to_string(), true);
+                }
                 return KeyAction::PassThrough;
             }
             // 命令候选顶屏 → 执行命令（与按空格一致），不上屏 display 标签、不追加该字符。
@@ -1717,6 +1747,10 @@ impl MessageHandler for Coordinator {
             && let Some(ch) = punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
         {
             self.record_commit(&ch.to_string(), 0, -1, CommitSource::Punctuation);
+            // 汉字后的小键盘数字、开了中数间空格：同主键盘数字那条臂出字补空格（DLL 已吃下）。
+            if ch.is_ascii_digit() && self.digit_after_cjk_outputs(&state, data) {
+                return Self::commit_action(ch.to_string(), true);
+            }
             return KeyAction::PassThrough;
         }
 
@@ -1959,13 +1993,21 @@ impl MessageHandler for Coordinator {
             keymap::VK_0..=keymap::VK_9
                 if data.modifiers & MOD_SHIFT == 0
                     && crate::handle_assoc::digit_enters_english_buffer(
-                        crate::handle_assoc::use_mobile_overrides(),
+                        self.profile.digit_enters_english_buffer,
                         !state.input_buffer.is_empty(),
                         self.engine_mgr.active_is_english(),
                     ) =>
             {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 self.accumulate_code_char(&mut state, digit, digit)
+            }
+            // 汉字后打数字、开了中数间空格：出字，前缀空格由统一出口补（判据见
+            // `digit_after_cjk_outputs`；小键盘 direct 那条臂共用）。
+            keymap::VK_0..=keymap::VK_9 if self.digit_after_cjk_outputs(&state, data) => {
+                let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
+                let text = digit.to_string();
+                self.record_commit(&text, 0, -1, CommitSource::Punctuation);
+                Self::commit_action(text, true)
             }
             keymap::VK_1..=keymap::VK_9 if data.modifiers & MOD_SHIFT == 0 => {
                 // 数字键 1-9 选当前页第 N 个候选；越界按 input.overflow.number_key 处理
@@ -2623,8 +2665,19 @@ impl MessageHandler for Coordinator {
                     }
                     // 引号交替态钉左：开了配对后一次按键即产出完整一对，交替开关不参与决策。
                     let quote_paired = self.pin_quote_left_if_paired(&state, ch);
-                    let piece = self.convert_punct(&state, ch, data.prev_char);
+                    // 「英文后」看紧挨着标点的那段：被顶出的候选 / 原码，没有则是光标前（锁存值）。
+                    let piece = self.convert_punct_after(&state, ch, data.prev_char, &out);
                     state.chinese_punct = saved_chinese_punct;
+                    // 智能符号 press1 在上面（顶屏之前）就按当时能看到的上下文武装了；英文后智能
+                    // 标点看的是被顶出的那段，可能让实际上屏的是另一形态（`_` 而非 `——`）。武装串与
+                    // 光标前的实际内容对不上时 press2 会按武装串的长度删字——删到用户打的字母，
+                    // 故不一致即解除。只在英文后智能标点开着时检查：关着时两者同源，旧行为一分不动。
+                    if self.rt().config.input.punct.smart_after_latin {
+                        let mut arm = self.smart_symbol.lock().unwrap_or_else(|e| e.into_inner());
+                        if arm.armed && arm.key == ch && arm.str != piece {
+                            arm.armed = false;
+                        }
+                    }
                     out.push_str(&piece);
                     // 标点字符（候选部分已在标点前顶屏候选处记 Candidate；标点候选已 set
                     // stat_recorded，故此处必须显式记标点，否则顶层 fallback 会跳过它）。
@@ -2675,7 +2728,8 @@ impl MessageHandler for Coordinator {
                                     .unwrap_or_else(|e| e.into_inner())
                                     .pin_quote_left(ch);
                             }
-                            let cursor_offset = out.encode_utf16().count() as u32;
+                            // 从完整文本末尾回退右符号的宽度，顶出的候选前缀不参与定位。
+                            let cursor_offset = right.len_utf16() as u32;
                             let text = format!("{}{}", out, right);
                             return KeyAction::InsertTextWithCursor {
                                 text,
@@ -3561,7 +3615,14 @@ impl MessageHandler for Coordinator {
             self.show_tip(&self.status_indicator_text());
             state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         }
-        let composing = !state.candidates.is_empty() || !state.input_buffer.is_empty();
+        // 无占位的联想（`assoc_placeholder = "none"`）：宿主里没有组合，WPS 等会在上屏后
+        // 上报一个与联想窗无关的远处光标（实测 (1643,756) 一类），照常当「组合中」处理会把
+        // 窗口重新锚过去而飘走。此时只更新缓存，窗口留在联想出现的位置。
+        let bare_assoc = state.input_buffer.is_empty()
+            && state.assoc_active()
+            && self.assoc_placeholder_is_none();
+        let composing =
+            (!state.candidates.is_empty() && !bare_assoc) || !state.input_buffer.is_empty();
         if !composing {
             // 常态、非异常：上屏后到下一键之间宿主仍会上报 caret。注意坐标**已在上面写入
             // state.caret_x/y**，只是不做显示决策——这一条解释了「按键前明明收到过正确坐标，
@@ -4571,6 +4632,18 @@ impl MessageHandler for Coordinator {
         self.caret_cache_verified
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.note_host_wrote_text("selection_changed");
+        // 无占位联想：光标被用户挪走，联想不再有意义，立刻收窗（否则要等自动隐藏计时）。
+        // 宿主只在「光标移动且当前无组合」时回报本事件，恰是无占位联想的形状。
+        if self.assoc_placeholder_is_none() {
+            let exited = {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                self.exit_assoc(&mut st, crate::handle_assoc::AssocExit::CaretMoved)
+            };
+            if exited {
+                self.push_hotkey_session_if_changed();
+                self.notify_ui_hide();
+            }
+        }
     }
 
     fn handle_commit_request(&self, data: &CommitRequestData) -> Option<CommitResultData> {
@@ -4670,11 +4743,16 @@ impl MessageHandler for Coordinator {
         self.record_selection(&freq_code, &text, source);
         // 补空格**必须在记账之后**：`record_selection` 记的是词本身，带上尾空格会写出
         // 「hello 」这种与读取端（`apply_freq_rerank` 按候选文本查）永远对不上的词频键。
-        let text = if append_space {
+        let mut text = if append_space {
             format!("{text} ")
         } else {
             text
         };
+        // 中英交界空格同按键出口一样补在本笔前面（`crate::auto_spacing`）；这条通路不产
+        // `KeyAction`，故直接调文本级判据。
+        let mut prev = state.spacing_prev;
+        self.space_committed_text(&mut prev, &mut text);
+        state.spacing_prev = prev;
         // 上屏即组合结束：复位首显延迟状态，使下一组合首帧重新延迟到 reflow 后的权威坐标，
         // 避免其锁定到本组合旧坐标（"上屏后立即输入候选窗错位"主场景）。
         self.reset_first_show();
@@ -5453,5 +5531,84 @@ mod menu_open_decode_tests {
             let r = decode(&format!(r#"{{"target":-1,"x":1,"y":2,"work":{work}}}"#));
             assert_eq!(r.work, [0; 4], "work={work}");
         }
+    }
+}
+
+#[cfg(test)]
+mod shortcut_ownership_tests {
+    use super::*;
+
+    fn key(key_code: u32, modifiers: u32) -> KeyEventData {
+        KeyEventData {
+            key_code,
+            modifiers,
+            scan_code: 0,
+            event_type: EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
+            seq_char: 0,
+        }
+    }
+
+    #[test]
+    fn add_word_ctrl_enter_consumes_key_after_closing_panel() {
+        let c = Coordinator::new_headless(wind_config::Config::default(), None);
+        c.state.lock().unwrap().add_word_active = true;
+        let action = c.handle_key_event(&key(keymap::VK_RETURN, wind_ipc::protocol::MOD_CTRL));
+        assert!(matches!(action, KeyAction::ClearComposition));
+        assert!(!c.state.lock().unwrap().add_word_active);
+        assert!(crate::edit_ops::to_outcome(action).consumed);
+    }
+
+    #[test]
+    fn add_word_other_ctrl_combos_remain_consumed() {
+        let c = Coordinator::new_headless(wind_config::Config::default(), None);
+        c.state.lock().unwrap().add_word_active = true;
+        let action = c.handle_key_event(&key(
+            keymap::key_name_to_vk_with_letters("s").unwrap(),
+            wind_ipc::protocol::MOD_CTRL,
+        ));
+        assert!(matches!(action, KeyAction::Consumed));
+        assert!(c.state.lock().unwrap().add_word_active);
+    }
+
+    #[test]
+    fn host_shortcuts_explicitly_release_key_after_cleanup() {
+        for vk in [
+            keymap::key_name_to_vk_with_letters("c").unwrap(),
+            keymap::key_name_to_vk_with_letters("s").unwrap(),
+        ] {
+            let c = Coordinator::new_headless(wind_config::Config::default(), None);
+            c.state.lock().unwrap().committed_text = "你".into();
+            let action = c.handle_key_event(&key(vk, wind_ipc::protocol::MOD_CTRL));
+            assert!(
+                matches!(action, KeyAction::ClearCompositionThenPassThrough),
+                "{action:?}"
+            );
+            assert!(!crate::edit_ops::to_outcome(action).consumed);
+            assert!(c.state.lock().unwrap().committed_text.is_empty());
+        }
+    }
+
+    #[test]
+    fn overlay_host_shortcut_explicitly_releases_key() {
+        let c = Coordinator::new_headless(wind_config::Config::default(), None);
+        let mut state = c.state.lock().unwrap();
+        state.committed_text = "你".into();
+        let action = c
+            .overlay_ctrl_alt_guard(
+                &mut state,
+                &key(
+                    keymap::key_name_to_vk_with_letters("c").unwrap(),
+                    wind_ipc::protocol::MOD_CTRL,
+                ),
+                true,
+                |_, st| st.committed_text.clear(),
+            )
+            .unwrap();
+        assert!(matches!(action, KeyAction::ClearCompositionThenPassThrough));
+        assert!(!crate::edit_ops::to_outcome(action).consumed);
+        assert!(state.committed_text.is_empty());
     }
 }

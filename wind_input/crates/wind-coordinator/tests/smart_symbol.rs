@@ -44,6 +44,7 @@ fn press(coord: &Coordinator, vk: u32, prev_char: u16) -> KeyAction {
         toggles: 0,
         event_seq: 0,
         prev_char,
+        seq_char: 0,
     })
 }
 
@@ -369,6 +370,7 @@ fn press_mod(coord: &Coordinator, vk: u32, modifiers: u32, prev_char: u16) -> Ke
         toggles: 0,
         event_seq: 0,
         prev_char,
+        seq_char: 0,
     })
 }
 
@@ -503,6 +505,7 @@ fn press_policed(coord: &Coordinator, vk: u32, prev_char: u16) -> KeyAction {
         toggles: 0,
         event_seq: 0,
         prev_char,
+        seq_char: 0,
     })
 }
 
@@ -730,6 +733,7 @@ fn press_policed_toggles(coord: &Coordinator, vk: u32, prev_char: u16, toggles: 
         toggles,
         event_seq: 0,
         prev_char,
+        seq_char: 0,
     })
 }
 
@@ -819,6 +823,7 @@ fn passthrough_flag_on_keyup_does_not_disarm() {
         toggles: TOGGLES_PASSTHROUGH,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     });
     let a2 = press_policed_toggles(&coord, VK_OEM_PERIOD, '.' as u16, 0);
     assert_eq!(

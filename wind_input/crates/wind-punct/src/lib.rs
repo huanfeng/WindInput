@@ -24,6 +24,8 @@
 //! 仍吃 `&InputConfig` 的是读 `symbol.*` 的那几个（[`participates`] /
 //! [`english_participates`] / [`english_smart_source_chars`]）——智能符号**不下放**方案级。
 
+pub mod spacing;
+
 use wind_config::config::{InputConfig, PunctConfig};
 use wind_transform::fullwidth::to_full_width;
 use wind_transform::punctuation::PunctuationConverter;
@@ -45,6 +47,13 @@ pub fn is_smart_punct_after_digit(punct: &PunctConfig, ch: char, prev_char: u16)
     }
     // 数字 '0'..='9' = 0x30..=0x39
     (0x30..=0x39).contains(&prev_char)
+}
+
+/// 英文后智能标点：中文标点模式下，若 ch 在英文后智能列表、且插入点前一字符是拉丁字母，
+/// 则该标点按英文（半角）输出（`Node.js` 不转 `Node。js`）。`latin_before` 由调用方给出
+/// ——它来自输入序列记账或被顶出的文本，不是文档现读（见 `spacing` 模块）。
+pub fn is_smart_punct_after_latin(punct: &PunctConfig, ch: char, latin_before: bool) -> bool {
+    punct.smart_after_latin && latin_before && punct.latin_smart_list.contains(ch)
 }
 
 /// 自定义标点映射的列号：中半 0 / 英全 1 / 中全 2 / 英半 3。
@@ -100,19 +109,25 @@ pub fn quote_forms(
 /// `Coordinator::handle_english_custom_punct` 的接手判据，同源即不会漂移；空串列（= 回落
 /// 默认转换）不算覆盖，否则会吃下一个自己不出字的键。
 ///
-/// 引号两行（`"1`/`"2`）折回同一个源字符 `"`，任一行有值即视为该键有覆盖。
+/// 引号两行（`"1`/`"2`）折回同一个源字符 `"`，任一行有改写即视为该键有覆盖。
+///
+/// 英半列写的就是原字符本身也不算覆盖：设置端保存一行时四列整行落盘，`-` `=` 等行的英半
+/// 默认值正是原字符。吃下它出的字虽相同，宿主却收不到原始按键，单键快捷键随之失效。
 pub fn custom_english_punct_chars(punct: &PunctConfig) -> Vec<char> {
     if !punct.custom_enabled {
         return Vec::new();
     }
     let mut out: Vec<char> = Vec::new();
     for (key, vals) in &punct.custom_mappings {
-        if vals.get(3).is_none_or(|v| v.is_empty()) {
-            continue; // 英半列无值 → 回落默认转换，不必吃键
-        }
         let Some(src) = wind_transform::punctuation::custom_key_source_char(key) else {
             continue;
         };
+        let Some(en_half) = vals.get(3) else {
+            continue;
+        };
+        if en_half.is_empty() || en_half.chars().eq([src]) {
+            continue; // 英半列无值或等于原字符 → 与透传等价，不必吃键
+        }
         if !out.contains(&src) {
             out.push(src);
         }
@@ -144,7 +159,23 @@ pub fn convert_punct(
     ch: char,
     prev_char: u16,
 ) -> String {
-    let smart_en = chinese_punct && is_smart_punct_after_digit(punct, ch, prev_char);
+    convert_punct_ctx(conv, punct, chinese_punct, full_width, ch, prev_char, false)
+}
+
+/// [`convert_punct`]，另带「插入点前一字符是不是拉丁字母」（英文后智能标点）。
+/// 两种智能直出英文同一优先级（自定义映射之后、中文标点之前），任一命中即按英文列。
+pub fn convert_punct_ctx(
+    conv: &mut PunctuationConverter,
+    punct: &PunctConfig,
+    chinese_punct: bool,
+    full_width: bool,
+    ch: char,
+    prev_char: u16,
+    latin_before: bool,
+) -> String {
+    let smart_en = chinese_punct
+        && (is_smart_punct_after_digit(punct, ch, prev_char)
+            || is_smart_punct_after_latin(punct, ch, latin_before));
     let is_chinese_punct = chinese_punct && !smart_en;
 
     // 1. 自定义映射优先（四状态均可配置）。开关与映射表同取自传入的**生效** `PunctConfig`
@@ -486,6 +517,53 @@ mod tests {
     }
 
     #[test]
+    fn smart_punct_after_latin_needs_switch_list_and_latin_before() {
+        let mut c = cfg();
+        assert!(!c.punct.smart_after_latin, "出厂关");
+        assert!(!is_smart_punct_after_latin(&c.punct, '.', true));
+        c.punct.smart_after_latin = true;
+        assert!(is_smart_punct_after_latin(&c.punct, '.', true));
+        assert!(is_smart_punct_after_latin(&c.punct, '_', true));
+        assert!(
+            !is_smart_punct_after_latin(&c.punct, ',', true),
+            "出厂列表不含逗号"
+        );
+        assert!(
+            !is_smart_punct_after_latin(&c.punct, '.', false),
+            "前一字符不是字母"
+        );
+    }
+
+    #[test]
+    fn convert_punct_ctx_latin_before_goes_english() {
+        let mut conv = PunctuationConverter::new();
+        let mut c = cfg();
+        c.punct.smart_after_latin = true;
+        assert_eq!(
+            convert_punct_ctx(&mut conv, &c.punct, true, false, '.', 0, true),
+            "."
+        );
+        assert_eq!(
+            convert_punct_ctx(&mut conv, &c.punct, true, false, '_', 0, true),
+            "_"
+        );
+        assert_eq!(
+            convert_punct_ctx(&mut conv, &c.punct, true, false, '.', 0, false),
+            "。"
+        );
+        // 逗号不在出厂列表：英文后照出中文逗号（「我用 Python，」）。
+        assert_eq!(
+            convert_punct_ctx(&mut conv, &c.punct, true, false, ',', 0, true),
+            "，"
+        );
+        // 英文标点状态本来就出英文，不受影响。
+        assert_eq!(
+            convert_punct_ctx(&mut conv, &c.punct, false, false, '.', 0, true),
+            "."
+        );
+    }
+
+    #[test]
     fn convert_punct_chinese_and_fullwidth() {
         let mut conv = PunctuationConverter::new();
         let c = cfg();
@@ -654,6 +732,11 @@ mod tests {
         c.punct.custom_mappings.insert(
             "'1".into(),
             vec!["".into(), "".into(), "".into(), "@".into()],
+        );
+        // 英半列就是原字符本身（设置端整行落盘的默认值）→ 没有改写，不该吃
+        c.punct.custom_mappings.insert(
+            "-".into(),
+            vec!["－".into(), "－".into(), "－".into(), "-".into()],
         );
         assert_eq!(custom_english_punct_chars(&c.punct), vec!['"', '\'']);
 

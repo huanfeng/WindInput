@@ -1,6 +1,7 @@
 #include "X11Panel.h"
 
 #include "ExtProtocol.h"
+#include "GnomeCaretGeom.h"
 #include "Menu.h"
 
 #include <fcitx-utils/log.h>
@@ -1372,7 +1373,7 @@ double clampScale(double s)
 
 } // namespace
 
-double X11CandidatePanel::hostScale()
+double X11CandidatePanel::hostScale(double textScaling)
 {
     if (!conn_) {
         ensureConnection(); // 没有连接才连：不会销毁任何现有窗口 / 事件源
@@ -1388,7 +1389,7 @@ double X11CandidatePanel::hostScale()
                         : 0.0;
             std::free(r);
             if (dpi > 0.0) {
-                return clampScale(dpi / 96.0);
+                return xftDpiToX11Scale(dpi, textScaling);
             }
         }
     }
@@ -1398,6 +1399,38 @@ double X11CandidatePanel::hostScale()
         }
     }
     return 1.0;
+}
+
+double X11CandidatePanel::textScaling()
+{
+    if (!conn_) {
+        ensureConnection();
+    }
+    if (!connectionUsable()) {
+        return 1.0;
+    }
+    const xcb_atom_t sel = internAtom(conn_, "_XSETTINGS_S" + std::to_string(screenNum_));
+    const xcb_atom_t prop = internAtom(conn_, "_XSETTINGS_SETTINGS");
+    if (sel == XCB_ATOM_NONE || prop == XCB_ATOM_NONE) {
+        return 1.0;
+    }
+    auto owner = xcb_get_selection_owner_reply(conn_, xcb_get_selection_owner(conn_, sel), nullptr);
+    const xcb_window_t win = owner ? owner->owner : XCB_NONE;
+    std::free(owner);
+    if (win == XCB_NONE) {
+        return 1.0;
+    }
+    xcb_get_property_cookie_t ck =
+        xcb_get_property(conn_, 0, win, prop, XCB_GET_PROPERTY_TYPE_ANY, 0, 65536);
+    xcb_get_property_reply_t* r = xcb_get_property_reply(conn_, ck, nullptr);
+    if (!r) {
+        return 1.0;
+    }
+    const int len = r->format == 8 ? xcb_get_property_value_length(r) : 0;
+    const double ts = xsettingsTextScaling(static_cast<const uint8_t*>(xcb_get_property_value(r)),
+                                           size_t(len > 0 ? len : 0));
+    std::free(r);
+    return ts;
 }
 
 bool X11CandidatePanel::connectionUsable() const

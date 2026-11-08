@@ -69,6 +69,16 @@ pub trait WebDataHost {
 
     /// 主题对外观可覆盖键给出的值（设置端「跟随主题（值）」），见 `theme_query.rs`。
     fn theme_follow_values(&self) -> Option<crate::theme_query::ThemeFollowValues>;
+    /// 设置端主题预览（见 [`crate::candidate_preview`]）：当前候选排列是否竖排、外观指纹、投递出图请求。
+    fn candidate_preview_vertical(&self) -> bool;
+    fn candidate_preview_fingerprint(&self) -> String;
+    fn request_candidate_preview(
+        &self,
+        theme: wind_theme::Resolved,
+        vertical: bool,
+        scale: f32,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> crate::candidate_preview::PreviewReply;
     /// 主题强调色两档（设置窗「主题色跟随输入法」），`name` 缺省取当前主题。
     fn theme_accent(&self, name: Option<&str>) -> Option<crate::theme_query::ThemeAccent>;
 
@@ -325,6 +335,21 @@ impl WebDataHost for Coordinator {
     }
     fn theme_follow_values(&self) -> Option<crate::theme_query::ThemeFollowValues> {
         Coordinator::theme_follow_values(self)
+    }
+    fn candidate_preview_vertical(&self) -> bool {
+        Coordinator::candidate_preview_vertical(self)
+    }
+    fn candidate_preview_fingerprint(&self) -> String {
+        Coordinator::candidate_preview_fingerprint(self)
+    }
+    fn request_candidate_preview(
+        &self,
+        theme: wind_theme::Resolved,
+        vertical: bool,
+        scale: f32,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> crate::candidate_preview::PreviewReply {
+        Coordinator::request_candidate_preview(self, theme, vertical, scale, cancel)
     }
     fn theme_accent(&self, name: Option<&str>) -> Option<crate::theme_query::ThemeAccent> {
         Coordinator::theme_accent(self, name)

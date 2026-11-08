@@ -352,6 +352,70 @@ impl PlaceholderChar {
     }
 }
 
+/// 联想态的占位：在 [`PlaceholderChar`] 三档之外多一档 `none`（不挂占位组合）。
+///
+/// 联想态没有编码，占位组合只是为了让宿主继续把按键转发给输入法。`none` 时宿主里什么都不放，
+/// 转发资格改由上屏应答里的 `COMMIT_FLAG_ASSOC_SESSION` 同步告知 DLL（见 `KeyEventSink`）。
+/// 代价：没有组合就没有 range，候选窗位置沿用上屏前最后一次的光标坐标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssocPlaceholder {
+    Space,
+    Zwsp,
+    Blank,
+    /// 不挂占位组合。
+    None,
+}
+
+impl AssocPlaceholder {
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            other => PlaceholderChar::from_config(other).map(Self::from),
+        }
+    }
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Space => "space",
+            Self::Zwsp => "zwsp",
+            Self::Blank => "blank",
+            Self::None => "none",
+        }
+    }
+    /// 写进宿主组合区的字符串；`none` 为空串（调用方据此不开组合）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Space => PlaceholderChar::Space.as_str(),
+            Self::Zwsp => PlaceholderChar::Zwsp.as_str(),
+            Self::Blank => PlaceholderChar::Blank.as_str(),
+            Self::None => "",
+        }
+    }
+}
+
+impl From<PlaceholderChar> for AssocPlaceholder {
+    fn from(p: PlaceholderChar) -> Self {
+        match p {
+            PlaceholderChar::Space => Self::Space,
+            PlaceholderChar::Zwsp => Self::Zwsp,
+            PlaceholderChar::Blank => Self::Blank,
+        }
+    }
+}
+
+impl Default for AssocPlaceholder {
+    fn default() -> Self {
+        PlaceholderChar::default().into()
+    }
+}
+
+fn de_assoc_placeholder<'de, D>(d: D) -> Result<Option<AssocPlaceholder>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    de_opt_str_enum(d, "assoc_placeholder", AssocPlaceholder::from_config)
+}
+
 fn de_composition_placeholder<'de, D>(d: D) -> Result<Option<PlaceholderChar>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -994,6 +1058,20 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_pair: Option<bool>,
+    /// 该应用是否启用中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`。
+    ///
+    /// 只能关不能「开」出全局没开的那一档：`Some(true)` 等于跟随全局（取哪几种交界仍由全局
+    /// 两个开关定），存在的意义是在用户层压掉系统规则里的 `false`。必须是 `Option`，理由同
+    /// `auto_pair`。
+    ///
+    /// 典型用途是自带空格处理的 Markdown 编辑器（pangu 类插件）、终端与代码编辑器。
+    /// 拉丁字母之间的词间空格（`commit_space`）属英文输入本身，不受本项影响。
+    #[serde(
+        default,
+        deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_spacing: Option<bool>,
     /// 该应用的密码框是否强制英文；`None` = 跟随全局 `input.password_force_english`（A2-37 / t197）。
     ///
     /// 典型用途是「宿主把普通输入框误报成密码框」：全局开着保护真密码框，只对误报的那个
@@ -1216,6 +1294,16 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub composition_placeholder: Option<PlaceholderChar>,
+    /// 联想态挂在宿主里的占位字符；`None` = 跟随 `composition_placeholder`。
+    ///
+    /// 联想态没有编码，占位组合只为让宿主继续转发按键；有的软件会拿这个字符做特殊处理，
+    /// 可以只给联想态换一个，不动打字时的占位。
+    #[serde(
+        default,
+        deserialize_with = "de_assoc_placeholder",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub assoc_placeholder: Option<AssocPlaceholder>,
     /// 拼音音节分隔符的显示；`None` = 跟随全局 `ui.candidate.syllable_separator`。见 [`SyllableSeparator`]。
     #[serde(
         default,
@@ -2261,6 +2349,22 @@ impl AppCompat {
             .unwrap_or_default()
     }
 
+    /// 该进程联想态的占位字符：`assoc_placeholder` 优先，没配跟随 [`Self::composition_placeholder_for`]。
+    pub fn assoc_placeholder_for(&self, process_name: &str) -> AssocPlaceholder {
+        if process_name.is_empty() {
+            return AssocPlaceholder::default();
+        }
+        let rule = self.get_rule(process_name);
+        rule.as_ref()
+            .and_then(|r| r.assoc_placeholder)
+            .or_else(|| {
+                rule.as_ref()
+                    .and_then(|r| r.composition_placeholder)
+                    .map(AssocPlaceholder::from)
+            })
+            .unwrap_or_default()
+    }
+
     /// 现算 HostRender 白名单：`host_render = true` 的进程名（原始大小写）。
     ///
     /// 只收**具体进程、无窗口条件**的规则，看的是那条规则自己的值（不与 `"*"` 合成）：白名单是
@@ -2667,6 +2771,43 @@ mod newline_style_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `assoc_placeholder` 优先于 `composition_placeholder`，都没配 = 空格；认不出的值退化为未配置。
+    #[test]
+    fn assoc_placeholder_overrides_then_follows_composition() {
+        let c = AppCompat::from_single_layer_text(
+            r#"
+            [[apps]]
+            process = "*"
+            composition_placeholder = "zwsp"
+
+            [[apps]]
+            process = "a.exe"
+            assoc_placeholder = "Blank"
+
+            [[apps]]
+            process = "b.exe"
+            assoc_placeholder = "bogus"
+            "#,
+        );
+        assert_eq!(c.assoc_placeholder_for("a.exe"), AssocPlaceholder::Blank);
+        assert_eq!(
+            c.composition_placeholder_for("a.exe"),
+            PlaceholderChar::Zwsp
+        );
+        assert_eq!(c.assoc_placeholder_for("b.exe"), AssocPlaceholder::Zwsp);
+        assert_eq!(c.assoc_placeholder_for("other.exe"), AssocPlaceholder::Zwsp);
+        assert_eq!(c.assoc_placeholder_for(""), AssocPlaceholder::Space);
+        let n = AppCompat::from_single_layer_text(
+            "[[apps]]\nprocess = \"n.exe\"\nassoc_placeholder = \"None\"\n",
+        );
+        assert_eq!(n.assoc_placeholder_for("n.exe"), AssocPlaceholder::None);
+        assert_eq!(AssocPlaceholder::None.as_str(), "");
+        assert_eq!(
+            AssocPlaceholder::from_config("none"),
+            Some(AssocPlaceholder::None)
+        );
+    }
 
     /// GH#175：`composition_placeholder` 解析 + 查表（含 `process = "*"` 通配与具体进程压过通配）。
     #[test]

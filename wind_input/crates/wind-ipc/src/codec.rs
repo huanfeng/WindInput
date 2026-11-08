@@ -59,7 +59,7 @@ pub fn encode_header(header: &IpcHeader) -> [u8; 8] {
 /// 从载荷字节解码 KeyPayload
 pub fn decode_key_payload(payload: &[u8]) -> Result<KeyPayload, CodecError> {
     KeyPayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
-        need: KeyPayload::SIZE,
+        need: KeyPayload::LEGACY_SIZE,
         got: payload.len(),
     })
 }
@@ -283,7 +283,17 @@ pub fn encode_commit_text(
         chinese_mode,
         has_new_composition,
         false,
+        false,
     )
+}
+
+/// 编码带「无占位联想会话」标志的 CommitText 响应（flags bit5，见 `COMMIT_FLAG_ASSOC_SESSION`）。
+pub fn encode_commit_text_assoc_session(
+    text: &str,
+    mode_changed: bool,
+    chinese_mode: bool,
+) -> Vec<u8> {
+    encode_commit_text_inner(text, None, mode_changed, chinese_mode, false, false, true)
 }
 
 /// 编码带 replacingHeld 标志的 CommitText 响应 (CMD_COMMIT_TEXT 0x0101, flags bit3)。
@@ -296,7 +306,24 @@ pub fn encode_commit_text(
 /// 一处（全角空格/数字、临时英文、各独占模式出字……），把安全的那一侧设为默认，新增路径
 /// 自动正确；只有这一个真正要覆盖的点显式声明。
 pub fn encode_commit_text_replacing_held(text: &str, chinese_mode: bool) -> Vec<u8> {
-    encode_commit_text_inner(text, None, false, chinese_mode, false, true)
+    encode_commit_text_inner(text, None, false, chinese_mode, false, true, false)
+}
+
+#[cfg(test)]
+mod assoc_session_flag_tests {
+    use super::*;
+
+    /// 无占位联想会话的标志位只在该编码器里置；普通上屏不带。
+    #[test]
+    fn assoc_session_flag_only_on_its_encoder() {
+        let flags = |b: &[u8]| u32::from_le_bytes(b[IpcHeader::SIZE..][..4].try_into().unwrap());
+        let off = encode_commit_text("好", None, false, true, false);
+        let on = encode_commit_text_assoc_session("好", false, true);
+        assert_eq!(flags(&off) & 0x20, 0);
+        assert_eq!(flags(&on) & 0x20, 0x20);
+        assert_eq!(0x20, crate::protocol::COMMIT_FLAG_ASSOC_SESSION as u32);
+        assert_eq!(flags(&on) & 0x02, 0, "不重启组合");
+    }
 }
 
 fn encode_commit_text_inner(
@@ -306,6 +333,7 @@ fn encode_commit_text_inner(
     chinese_mode: bool,
     has_new_composition: bool,
     replacing_held: bool,
+    assoc_session: bool,
 ) -> Vec<u8> {
     let text_bytes = text.as_bytes();
     let comp_bytes = new_composition.map(|s| s.as_bytes());
@@ -323,6 +351,9 @@ fn encode_commit_text_inner(
     }
     if replacing_held {
         flags |= 0x08;
+    }
+    if assoc_session {
+        flags |= 0x20;
     }
 
     let total = 12 + text_bytes.len() + comp_len;

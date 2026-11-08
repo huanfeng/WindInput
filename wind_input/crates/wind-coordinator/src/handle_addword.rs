@@ -1509,6 +1509,21 @@ impl Coordinator {
 
     /// 显示加词预览候选窗（三行，内容见 [`Self::add_word_panel_rows`]）。
     fn show_add_word_preview(&self, state: &State) {
+        // 中立通道（移动端）：没有候选窗布局/字体可重算，只发一帧。值与下面桌面的
+        // `UpdateCandidates` 一致：无编码区、不高亮任何行、单页。
+        if self.session_tx.is_some() {
+            self.emit_view_frame(crate::CompositionView {
+                preedit: String::new(),
+                preedit_caret: 0,
+                composing: false,
+                mode_label: String::new(),
+                has_candidates: true,
+                selected: usize::MAX,
+                page: 1,
+                total_pages: 1,
+            });
+            return;
+        }
         // 加词面板**不走** notify_ui_update（下方直接发 UpdateCandidates），所以布局重算要在
         // 这里单独接一次——`UpdateCandidates` 的发送点共两处，两处都得接，否则加词的
         // candidate_layout 完全失效（见 layout.rs / docs/design/mode-candidate-layout.md）。
@@ -1522,6 +1537,7 @@ impl Coordinator {
             preedit: String::new(),
             preedit_caret: 0, // 加词面板无编码区
             preedit_host_owned: false,
+            composing: false, // 加词面板不是在打编码
             mode_label: String::new(),
             candidates,
             selected: usize::MAX, // 两行均为提示、非可选候选，不高亮任何行
@@ -1711,6 +1727,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -1778,6 +1795,7 @@ mod tests {
             toggles,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         // 反向：不带位的按键不动计数（防「每个 keydown 都复位」）。
         c.handle_key_event_policed(&shift(0));

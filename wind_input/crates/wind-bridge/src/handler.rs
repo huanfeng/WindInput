@@ -24,6 +24,10 @@ pub struct KeyEventData {
     pub toggles: u8,
     pub event_seq: u16,
     pub prev_char: u16,
+    /// 输入序列里最近进文档的字符代表值（0 = 不可知）。客户端记账，取值规则见 C++
+    /// `InputSequenceChar.h`；服务端只用它的**类别**（`wind_punct::CharClass`）。
+    /// 与 `prev_char` 是两个事实：后者仍是数字后智能标点 / 智能符号 press2 守卫的输入。
+    pub seq_char: u16,
 }
 
 impl From<&KeyPayload> for KeyEventData {
@@ -36,6 +40,7 @@ impl From<&KeyPayload> for KeyEventData {
             toggles: p.toggles,
             event_seq: p.event_seq,
             prev_char: p.prev_char,
+            seq_char: p.seq_char,
         }
     }
 }
@@ -408,6 +413,13 @@ pub trait MessageHandler: Send + Sync {
     /// 的 compat 规则 `composition_placeholder` 覆盖。
     fn composition_placeholder(&self) -> &'static str {
         COMPOSITION_PLACEHOLDER
+    }
+
+    /// 刚处理完的这次按键之后，是否处于「无占位的联想会话」（`assoc_placeholder = "none"`）。
+    /// 为真时 bridge 在上屏应答里置 `COMMIT_FLAG_ASSOC_SESSION`，让 DLL **同步**获知
+    /// 该继续转发按键（宿主里没有组合可供 `HasActiveComposition()` 判断）。默认否。
+    fn assoc_session_hint(&self) -> bool {
+        false
     }
 
     /// 处理按键并按 preedit 显示策略后处理组合串（bridge 入口应调用此方法）。

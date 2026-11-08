@@ -358,6 +358,7 @@ mod tests {
             resources: Default::default(),
             asset_dirs: Vec::new(),
             langbar_text: Default::default(),
+            skin: None,
         }
     }
 

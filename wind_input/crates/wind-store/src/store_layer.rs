@@ -566,7 +566,7 @@ mod tests {
         assert!(
             std::fs::read_to_string(s.user_text_path("pinyin"))
                 .unwrap()
-                .contains("你好\tni hao")
+                .contains("ni hao\t你好")
         );
     }
 }

@@ -355,9 +355,14 @@ impl TooltipMouse {
     }
 
     /// 离开 / 复查判定为离开：就地隐藏窗口，并同步共享的显示态。
+    ///
+    /// 同时把悬停清成「无」：光标从候选进了气泡后，候选窗的悬停一直停在原候选上（交给气泡的
+    /// 离开跟踪），气泡在这里自己收起时光标既不在气泡上、也不在所属候选行上。不清的话协调器
+    /// 仍记着原候选，光标移回它时悬停「没变」、不重绘，气泡再也不出来。
     fn hide_now(&mut self) {
         self.settle_hidden();
         self.visible.set(false);
+        let _ = self.events.send(UiEvent::Hover(-1));
         #[cfg(windows)]
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
@@ -1555,6 +1560,10 @@ mod tests {
         recheck_fires(&t);
         assert!(!t.shown(), "离开隐藏须同步 visible");
         assert!(!t.mouse_over.get());
+        assert!(
+            matches!(_rx.try_recv(), Ok(UiEvent::Hover(-1))),
+            "气泡自己收起时悬停清成「无」，移回原候选才会重新出气泡"
+        );
         t.hide();
         assert!(!t.shown());
         t.show(&Arc::new(doc()), 0, 10, 10, 20);
@@ -1789,6 +1798,7 @@ mod tests {
         mouse_leave(&t);
         recheck_fires(&t);
         assert!(t.shown(), "回到候选行：气泡留下");
+        assert!(_rx.try_recv().is_err(), "回到候选行不清悬停");
         let m = t.mouse.borrow();
         assert!(!t.mouse_over.get() && !m.tracking && !m.recheck_pending);
     }

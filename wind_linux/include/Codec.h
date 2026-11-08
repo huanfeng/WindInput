@@ -58,9 +58,10 @@ struct KeyEvent {
     uint8_t toggles = 0;    // TOGGLE_CAPSLOCK / TOGGLE_NUMLOCK
     uint16_t eventSeq = 0;
     uint16_t prevChar = 0;  // 光标前一字符（UTF-16，0 = 不可用）
+    uint16_t seqChar = 0;   // 输入序列末字符代表值（0 = 不可知），见 SeqTracker
 };
 
-/// CMD_KEY_EVENT：18 字节 payload（KeyPayload）。对位 Swift `encodeKeyEventFrame`。
+/// CMD_KEY_EVENT：20 字节 payload（KeyPayload）。对位 Swift `encodeKeyEventFrame`。
 Bytes encodeKeyEventFrame(const KeyEvent& e);
 
 /// CMD_FOCUS_GAINED：39 字节定长段 + `bundleIdLen u32 + bundleId` + `windowClassLen u32 +

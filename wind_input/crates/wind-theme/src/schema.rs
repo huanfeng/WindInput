@@ -513,6 +513,10 @@ pub struct Theme {
     pub behavior: Option<Behavior>,
     #[serde(default)]
     pub resources: HashMap<String, Ld>,
+    /// 异形皮肤（见 `crate::skin`）。
+    #[serde(default)]
+    /// 装箱：多数主题不配皮肤，且 `Theme` 在 serde 访问器里按值搬运，内联会抬高加载链的栈帧。
+    pub skin: Option<Box<crate::skin::Skin>>,
     /// 竖排覆盖后的完整主题：任一视图节点写了 `[节点.vertical]` 才有，否则为 `None`。
     /// 由 [`crate::theme::load_typed_dirs`] 在 Value 层把各节点的 `vertical` 子表深合并进
     /// 节点后另行类型化得到（不来自 TOML 反序列化）。

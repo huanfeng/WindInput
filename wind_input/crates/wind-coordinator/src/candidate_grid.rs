@@ -368,8 +368,7 @@ impl Coordinator {
         let bound = self.session_action_for(keymap::VK_TAB, shift, true);
         let default_like = matches!(bound, None | Some(A::HighlightUp) | Some(A::HighlightDown));
         let sentence_key = self
-            .rt()
-            .sentence_cycle_key
+            .active_sentence_cycle_key()
             .is_some_and(|k| k.vk == keymap::VK_TAB && k.shift == shift);
         default_like && !sentence_key
     }
@@ -751,6 +750,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 

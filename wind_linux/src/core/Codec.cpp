@@ -163,7 +163,8 @@ Bytes encodeKeyEventFrame(const KeyEvent& e)
     p.push_back(e.toggles);
     putU16(p, e.eventSeq);
     putU16(p, e.prevChar);
-    static_assert(sizeof(KeyPayload) == 18, "KeyPayload 布局变了，同步这里");
+    putU16(p, e.seqChar);
+    static_assert(sizeof(KeyPayload) == 20, "KeyPayload 布局变了，同步这里");
     return frame(CMD_KEY_EVENT, p);
 }
 

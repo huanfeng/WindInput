@@ -285,7 +285,7 @@ struct BatchHeader
 };
 static_assert(sizeof(BatchHeader) == 4, "BatchHeader must be 4 bytes");
 
-// Key event payload (18 bytes)
+// Key event payload (20 bytes)
 struct KeyPayload
 {
     uint32_t keyCode;     // Virtual key code
@@ -296,8 +296,10 @@ struct KeyPayload
     uint16_t eventSeq;    // Monotonic event sequence number
     uint16_t prevChar;    // Character before caret, 0 if unavailable. ASCII digits come only from
                           // the IME's own input sequence, never from the document (SmartPunctPrevChar.h)
+    uint16_t seqChar;     // Last char the IME saw go into the document (commit tail / passthrough key
+                          // class representative), 0 = unknown. See InputSequenceChar.h
 };
-static_assert(sizeof(KeyPayload) == 18, "KeyPayload must be 18 bytes");
+static_assert(sizeof(KeyPayload) == 20, "KeyPayload must be 20 bytes");
 
 // Caret position payload (20 bytes)
 struct CaretPayload
@@ -507,6 +509,11 @@ constexpr uint32_t COMMIT_FLAG_CHINESE_MODE       = 0x0004;
 // 本次提交要**替换**掉 HoldComposition 里待定的中文符号（智能符号 press2：「。」→「.」），
 // 而非追加在它后面。只有 press2 会置位；其余提交路径一律追加（见 CTextService::CommitText）。
 constexpr uint32_t COMMIT_FLAG_REPLACING_HELD     = 0x0008;
+// 本次上屏之后处于「无占位的联想会话」（compat assoc_placeholder = "none"）：宿主里没有
+// 组合，所以要在**处理这条应答时同步**把它记成有输入会话，才赢得下一次 OnTestKeyDown 的竞速。
+// 与已废弃的 bit4 不同，这一位随上屏应答本身到达，不靠异步回填。清位见 KeyEventSink 的
+// _EndAssocBareSession / SetCandidateSessionActive。位值与 wind-ipc protocol.rs 一致。
+constexpr uint32_t COMMIT_FLAG_ASSOC_SESSION      = 0x0020;
 // bit4 曾用于「上屏后候选窗仍有内容」（联想态保住 _hasCandidates），**已废弃勿复用**：
 // 那条路要靠服务端应答异步回填标志，赢不了下一次 OnTestKeyDown 的同步判定
 // （真机日志同一行里 composing=0 candidates=1 inputSession=0）。联想改为挂一个占位组合，
@@ -936,6 +943,9 @@ constexpr const char* CONFIG_KEY_DIAG_SNAPSHOT = "diag_snapshot";
 // 服务端按本客户端 pid 的 compat 规则 composition_placeholder 现算后逐客户端推送；默认空格。
 // 决策在服务端，DLL 只照做（以及把三种字符都认作占位，见 CompositionPlaceholder.h）。
 constexpr const char* CONFIG_KEY_COMPOSITION_PLACEHOLDER = "composition_placeholder";
+// 中数间补空格（input.spacing.cjk_digit 且本应用 compat 未关）：DLL 据此把汉字后的数字吃下交给
+// core 出「空格 + 数字」。值 enabled(u8)，按客户端现算，推送时机同 composition_placeholder。
+constexpr const char* CONFIG_KEY_SPACE_BEFORE_DIGIT = "space_before_digit";
 // 含换行的上屏是否改走剪贴板粘贴。格式：mode(u8)，0 = commit（默认）、1 = paste；认不出的值按 commit。
 // 服务端按本客户端 pid 的 compat 规则 multiline_commit 现算后逐客户端推送，见 MultilineCommit.h。
 constexpr const char* CONFIG_KEY_MULTILINE_COMMIT = "multiline_commit";

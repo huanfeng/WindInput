@@ -35,6 +35,20 @@ impl Coordinator {
         self.handle_ui_event(UiEvent::MenuAction(kind));
     }
 
+    /// 弹一条 toast（测试/诊断用）：直通生产入口 [`Self::show_toast`]。
+    pub fn debug_show_toast(&self, text: &str) {
+        self.show_toast(
+            text,
+            wind_ui_types::ToastPosition::BottomCenter,
+            wind_ui_types::ToastKind::Info,
+        );
+    }
+
+    /// 弹一条状态气泡（测试/诊断用）：直通生产入口 [`Self::show_tip`]。
+    pub fn debug_show_tip(&self, text: &str) {
+        self.show_tip(text);
+    }
+
     /// 弹出候选右键菜单（测试/诊断用）：直通生产入口 [`Self::show_candidate_menu`]，菜单项经
     /// UI 通道下发（`UiCommand::ShowCandidateMenu`）。Windows / macOS 的右键由 UI 线程触发、
     /// Linux 的入口 `menu.open` 只在 `ext_presenter` 构建里编译，集成测试都够不着。
@@ -96,6 +110,16 @@ impl Coordinator {
                 }
             })
             .collect()
+    }
+
+    /// 当前生效的联想类型（`off` / `smart` / ...，取 Debug 名小写；测试/诊断用）。
+    pub fn debug_assoc_kind(&self) -> String {
+        format!("{:?}", self.assoc_config().kind).to_lowercase()
+    }
+
+    /// 当前生效的拼音语法模型权重（已套 `[mobile.grammar]` 覆盖；测试/诊断用）。
+    pub fn debug_pinyin_grammar_weight(&self) -> f64 {
+        self.engine_mgr.pinyin_global().grammar.weight
     }
 
     /// 当前 `state.preedit`（测试/诊断用）。联想态在非嵌入模式下往这里写「联想输入」

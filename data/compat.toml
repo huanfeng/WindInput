@@ -152,6 +152,10 @@
 #                         出厂按窗口类名给 Chromium（含所有 Electron 应用）与 Firefox 开（见下方
 #                         两条 class 规则）。不要给 WPS 等软件改：它们靠那个空格才能给出有效的
 #                         光标位置。支持 process = "*" 通配与 class / title 窗口条件。
+#   assoc_placeholder:    联想态的占位字符："space" | "zwsp" | "blank" | "none"｜不写=跟随 composition_placeholder。
+#                         联想没有编码，输入法仍要挂一个占位组合来接收按键；软件对该字符有特殊处理时，
+#                         可只给联想换一个，不影响打字时的占位。
+#                         "none" = 联想时宿主里不挂任何占位（兼容性最好；候选窗位置沿用上次光标）。
 #   multiline_commit:     含换行的上屏文本怎么交给软件："commit" | "paste"｜不写=commit（直接上屏）。
 #                         "paste" 先结束组合，再把文本写入剪贴板并模拟 Ctrl+V 粘贴；只影响含换行的上屏。
 #                         ⚠ 会覆盖剪贴板原有内容且不恢复（不进剪贴板历史）；终端等 Ctrl+V 不是粘贴的软件不要开。
@@ -247,11 +251,15 @@ host_render = true
 process = "EXCEL.EXE"
 comment = "Excel：进单元格前先在编辑栏报坐标，fast 首显会落在编辑栏，改用 wait"
 first_show_mode = "wait"
+# 联想窗出现时占位空格会干扰单元格自己的提示；联想不挂占位，转发靠上屏应答里的会话标志。
+assoc_placeholder = "none"
 
 [[apps]]
 process = "et.exe"
 comment = "WPS 表格：同 Excel，fast 首显落在上一个单元格，改用 wait"
 first_show_mode = "wait"
+# 联想窗出现时占位空格会干扰单元格自己的提示；联想不挂占位，转发靠上屏应答里的会话标志。
+assoc_placeholder = "none"
 
 # 按顶层窗口类名认浏览器内核，而不是逐个列进程名（Edge / Chrome / 各家套壳浏览器的
 # 进程名数不完）。⚠ Chrome_WidgetWin_* 是整个 Chromium 家族的窗口类，**所有 Electron / CEF 应用

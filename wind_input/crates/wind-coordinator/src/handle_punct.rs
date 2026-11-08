@@ -70,6 +70,27 @@ impl Coordinator {
         wind_punct::is_smart_punct_after_digit(&self.rt().config.input.punct, ch, prev_char)
     }
 
+    /// 「标点前一字符是拉丁字母」的**默认**口径：锁存的 `state.spacing_prev`
+    /// （见 `crate::auto_spacing`）。
+    ///
+    /// 只在**没有输入会话**（或联想态）时成立——那时 `spacing_prev` 正是光标前那个字符。
+    /// 组合中它停在组合开始前，顶屏出口要用被顶出那段文本的末字符，走
+    /// [`Self::convert_punct_after`]，不能用这里的值。
+    fn latin_before_idle(state: &State) -> bool {
+        (!Self::has_input_session(state) || state.assoc_active())
+            && state.spacing_prev == wind_punct::spacing::CharClass::Latin
+    }
+
+    /// 英文后智能标点（反向判定用）：同 [`Self::is_smart_punct_after_digit`]，判据见
+    /// [`Self::latin_before_idle`]。
+    pub(crate) fn is_smart_punct_after_latin_idle(&self, state: &State, ch: char) -> bool {
+        wind_punct::is_smart_punct_after_latin(
+            &self.rt().config.input.punct,
+            ch,
+            Self::latin_before_idle(state),
+        )
+    }
+
     /// 小键盘恒半角（`input.numpad_half_width`）对**本次按键**是否生效。
     ///
     /// 为真时调用方必须**原样输出 ASCII**：跳过整条标点流水线（自定义映射 / 中文标点 /
@@ -107,6 +128,26 @@ impl Coordinator {
     ///
     /// `prev_char` 为光标前一字符的 UTF-16 单元（0=不可用），用于数字后智能判定。
     pub(crate) fn convert_punct(&self, state: &State, ch: char, prev_char: u16) -> String {
+        self.convert_punct_latin(state, ch, prev_char, Self::latin_before_idle(state))
+    }
+
+    /// 顶屏出口的标点转换：标点紧跟在 `committed`（被顶出的候选 / 原码）后面上屏，「英文后」
+    /// 看它的末字符；`committed` 为空时退回 [`Self::convert_punct`] 的默认口径。
+    pub(crate) fn convert_punct_after(
+        &self,
+        state: &State,
+        ch: char,
+        prev_char: u16,
+        committed: &str,
+    ) -> String {
+        let latin = match committed.chars().last() {
+            Some(c) => wind_punct::spacing::classify(c) == wind_punct::spacing::CharClass::Latin,
+            None => Self::latin_before_idle(state),
+        };
+        self.convert_punct_latin(state, ch, prev_char, latin)
+    }
+
+    fn convert_punct_latin(&self, state: &State, ch: char, prev_char: u16, latin: bool) -> String {
         // 小键盘恒半角：整条流水线跳过（不只是第 4 步）。`ch` 进来时已是 ASCII 原形，
         // 故原样返回即可，无须回推字符。这是本开关最主要的一处收口——英文全角、
         // CapsLock 全角、follow_main 归一化后的数字/标点臂、临英的 convert_punct_char
@@ -117,13 +158,14 @@ impl Coordinator {
         let bundle = self.rt();
         let punct = self.effective_punct(&bundle, state);
         let mut conv = self.punct.lock().unwrap_or_else(|e| e.into_inner());
-        wind_punct::convert_punct(
+        wind_punct::convert_punct_ctx(
             &mut conv,
             &punct,
             state.chinese_punct,
             state.full_width,
             ch,
             prev_char,
+            latin,
         )
     }
 
@@ -272,7 +314,10 @@ impl Coordinator {
         if !sym.smart_mode {
             return None;
         }
-        let reverse = self.is_smart_punct_after_digit(ch, prev_char);
+        // 英文后智能标点同样反向。⚠️ 只认空闲态（见 `latin_before_idle`）：主路顶屏时 press1
+        // 在顶屏之前就武装了，那时还拿不到被顶出候选的末字符，故顶屏场景不反向（与数字后同）。
+        let reverse = self.is_smart_punct_after_digit(ch, prev_char)
+            || self.is_smart_punct_after_latin_idle(state, ch);
         let cn = self.compute_punct_str_pure(state, ch, true)?;
         if !self.smart_symbol_participates(&cn) {
             return None;
@@ -1052,6 +1097,48 @@ mod pair_commit_tests {
             .map(|e| (e.left.clone(), e.right.clone(), e.jump_steps))
     }
 
+    #[test]
+    fn punct_top_commit_pair_cursor_ignores_candidate_prefix() {
+        for prefix in ["", "你", "你好", "𠮷你好"] {
+            for (key_code, modifiers, pair) in [
+                (keymap::VK_LBRACKET, 0, "【】"),
+                (keymap::VK_9, MOD_SHIFT, "（）"),
+            ] {
+                let c = coord(true);
+                if !prefix.is_empty() {
+                    c.state
+                        .lock()
+                        .unwrap()
+                        .candidates
+                        .push(wind_candidate::Candidate {
+                            text: prefix.into(),
+                            ..Default::default()
+                        });
+                }
+                let act = c.handle_key_event(&KeyEventData {
+                    key_code,
+                    scan_code: 0,
+                    modifiers,
+                    event_type: wind_ipc::protocol::EVENT_KEY_DOWN,
+                    toggles: 0,
+                    event_seq: 0,
+                    prev_char: 0,
+                    seq_char: 0,
+                });
+                match act {
+                    KeyAction::InsertTextWithCursor {
+                        text,
+                        cursor_offset,
+                    } => {
+                        assert_eq!(text, format!("{prefix}{pair}"));
+                        assert_eq!(cursor_offset, 1, "顶屏前缀不应影响配对回退格数");
+                    }
+                    other => panic!("应上屏候选及配对，实际: {other:?}"),
+                }
+            }
+        }
+    }
+
     /// 按一次 Tab（0x09），返回协调器裁决。
     fn tab(c: &Coordinator) -> KeyAction {
         c.handle_key_event(&KeyEventData {
@@ -1062,6 +1149,7 @@ mod pair_commit_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         })
     }
 

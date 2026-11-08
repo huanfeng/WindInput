@@ -1614,7 +1614,11 @@ impl Coordinator {
                 let Ok(id) = e.file_name().into_string() else {
                     continue;
                 };
-                if id.starts_with('_') || !dir.join(&id).join("theme.toml").exists() {
+                // 非普通 slug 的目录（旧版在 Linux/mac 上建出的尾随空格/点之类）列出来也选不了。
+                if id.starts_with('_')
+                    || !wind_theme::is_plain_slug(&id)
+                    || !dir.join(&id).join("theme.toml").exists()
+                {
                     continue;
                 }
                 // 定制版 `[themes] hide` 删掉的主题：在本定制版里**不存在**（见
@@ -1654,7 +1658,10 @@ impl Coordinator {
                     let Ok(id) = e.file_name().into_string() else {
                         continue;
                     };
-                    if id.starts_with('_') || !udir.join(&id).join("theme.toml").exists() {
+                    if id.starts_with('_')
+                        || !wind_theme::is_plain_slug(&id)
+                        || !udir.join(&id).join("theme.toml").exists()
+                    {
                         continue;
                     }
                     // hide 是**绝对**的：用户层放一个同名主题也不会让它复活（见
@@ -1886,6 +1893,7 @@ impl Coordinator {
             // 切过来的方案有段被降级 ⇒ 现在说，别等用户自己发现「这个方案某项设置没反应」。
             // 落在切换成功之后：加载失败已由上面的 `show_tip` 交代，两条提示不会撞。
             self.notify_schema_degradation(schema_id);
+            self.warn_schema_sentence_cycle_conflict(schema_id);
         } else {
             // 走到这里说明 `ensure_schema` 之后 `switch_schema` 仍返回 false ——
             // 它只剩「已是当前方案」这一个理由，而那已被上面的幂等分支接走。
@@ -3068,7 +3076,7 @@ impl Coordinator {
         if has_pending {
             exit(self, state);
             self.notify_ui_hide();
-            return Some(KeyAction::ClearComposition);
+            return Some(KeyAction::ClearCompositionThenPassThrough);
         }
         Some(KeyAction::PassThrough)
     }
@@ -3636,7 +3644,8 @@ impl Coordinator {
                         // 小键盘（direct）无高亮候选：维持既有口径（同主路 `commit_highlight_then_char`）。
                         self.maybe_convert(state, &state.committed_text.clone())
                     };
-                    let punct = self.convert_punct_char(state, ch);
+                    // 标点紧跟在被顶出的那段后面：「英文后」看它（快捷输入里的英文词）。
+                    let punct = self.convert_punct_after(state, ch, 0, &head);
                     // 标点恒在此按 `Punctuation` 单独记（同临英 ⑥）。有高亮候选时上方已记候选段、
                     // 顶层兜底随之跳过，不记就漏；无候选时（只剩已转换前缀 / 空缓冲）也显式记——
                     // 前缀在分步选中时已记过，交给兜底会把「前缀+标点」整串再按「候选」记一遍。

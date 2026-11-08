@@ -141,8 +141,8 @@ app_name_for_variant() { [[ "$VARIANT" == dev ]] && echo "WindInputDev" || echo 
 # 背景: 服务重启会断开 app 侧的请求 socket; app 不会自动重连该通道 (仅 push 通道靠
 # SERVICE_READY 重连), 不重拉则表现为「装完/重启服务后按键无响应」。Windows 侧 TSF DLL
 # 由各宿主进程自动重连, macOS 的 IMKit .app 常驻进程需显式踢一下。
-# 只杀控制器实例, 保留 --register-input-source 守护 (维持 TIS 注册); IME 非当前输入源时
-# 无控制器进程在跑, pgrep 落空即静默跳过。
+# 只杀控制器实例 (--register-input-source 注册完即退出, 这里不应再见到它; 万一碰上正在注册的
+# 那一刻也别杀); IME 非当前输入源时无控制器进程在跑, pgrep 落空即静默跳过。
 kick_ime_app() {
     local appname pids pid args killed=0
     appname="$(app_name_for_variant)"
@@ -150,7 +150,7 @@ kick_ime_app() {
     for pid in $pids; do
         args=$(ps -o args= -p "$pid" 2>/dev/null || true)
         case "$args" in
-            *--register-input-source*) ;;                # 保留注册守护
+            *--register-input-source*) ;;                # 正在注册, 别打断
             *) kill "$pid" 2>/dev/null && killed=1 ;;     # 只杀控制器实例
         esac
     done
@@ -1171,7 +1171,7 @@ app_install() {
     if [[ $DO_UNINSTALL -eq 1 ]]; then
         bold "==> Uninstall $APP_NAME (full purge)"
 
-        # 1. 杀本变体的 IME 进程 (含 --register-input-source 后台守护)。按 .app 路径定位,
+        # 1. 杀本变体的 IME 进程 (含旧版残留的 --register-input-source 守护)。按 .app 路径定位,
         #    两变体进程同名 WindInput, 不能用进程名匹配 (会误杀另一变体)。
         info "kill $APP_NAME processes"
         pkill -9 -f "$APP_NAME.app/Contents/MacOS/$EXE_NAME" 2>/dev/null || true
@@ -1344,29 +1344,23 @@ PY
 
     # 4c'. 踢掉第 1 步之后又被 IMK 拉起的控制器: pkill 后到 cp 完成前, 清风正被选中的宿主
     #     会让 IMK 立刻重拉一个 (可能还是旧二进制)。第 1 步杀过了不等于干净, 别删这一步。
-    #     **必须在起注册守护之前做, 之后绝不能再踢**:
+    #     **必须在注册之前做, 之后绝不能再踢**:
     #     注册一发生, 当前选中清风的宿主会让 imklaunchagent 立即拉起一个**新**控制器
-    #     (launchd: "spawned … because launch job demand"), 它是唯一持有 IMK 端点的进程。
-    #     旧版在注册后 sleep 1 再 kick, 恰好把这个新控制器杀掉 (实测 macOS 27: 19:00:54 与
-    #     20:35:20 两次都是"拉起 <1s 即被杀")。此后同 bundle 只剩不建 IMKServer 的注册守护,
-    #     imklaunchagent 每次要端点都是 NO Endpoint —— 切走切回、重开宿主都无效, 只有
-    #     重启 (守护消失) 才恢复, 即 GH#186。是否中招取决于安装那一刻清风是否正被选中且
-    #     有聚焦的文本框 (如授权对话框), 所以时有时无。
+    #     (launchd: "spawned … because launch job demand"), 它是唯一持有 IMK 端点的进程,
+    #     踢掉它就要等下一个宿主来要端点 (实测 macOS 27: 旧版在注册后 sleep 1 再 kick,
+    #     恰好把这个新控制器杀掉)。
     kick_ime_app
 
     # 4d. 调本 .app 自身 binary 的 --register-input-source 立即注册 (免重启即可在 picker 出现).
     #     macOS Tahoe (26) 起 TIS 仅接受来自 IME 自身进程的 TISRegisterInputSource 调用
     #     (校验 codesign identity 匹配 bundleID), 外部 swift CLI 调 silently no-op.
     local APP_EXEC="$INSTALL_APP/Contents/MacOS/WindInput"
-    local REGISTER_PID
     if [[ -x "$APP_EXEC" ]]; then
-        # 重要: register 进程保持运行以维持 TIS 注册 (踩过的坑: register 完立刻 exit 后
-        # mode 可能被系统在几秒内清掉). 后台 fork, 主流程不阻塞.
-        info "$APP_EXEC --register-input-source (后台常驻维持注册)"
-        "$APP_EXEC" --register-input-source > /tmp/wind_register.log 2>&1 &
-        REGISTER_PID=$!
-        sleep 1  # 等 TIS DB 写完
-        info "    PID=$REGISTER_PID (要停止后台 register: kill $REGISTER_PID)"
+        # 前台跑, 注册完即退出。**别改回常驻**: 同 bundle 有进程在跑时 imklaunchagent 不再拉起
+        # 控制器, 而它不建 IMKServer → NO Endpoint, 控制器一退出就再也打不了字 (GH#186)。
+        info "$APP_EXEC --register-input-source"
+        "$APP_EXEC" --register-input-source > /tmp/wind_register.log 2>&1 \
+            || warn "注册失败 (退出码 $?), 见 /tmp/wind_register.log"
         head -2 /tmp/wind_register.log 2>/dev/null | sed 's/^/    /'
     fi
 

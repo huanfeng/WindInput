@@ -230,6 +230,10 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.primary_codetable", Str),
     f("schema.primary_pinyin", Str),
     f("schema.keep_all_loaded", Bool),
+    f(
+        "schema.dict_cache_policy",
+        Enum(&["lock", "preload", "off"]),
+    ),
     // 全局码表（公共基线；方案经 schema_overrides 覆盖）
     f("schema.codetable.top_code_commit", Bool),
     f("schema.codetable.clear_on_empty_max", Bool),
@@ -261,6 +265,10 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.wildcard", Bool),
     f("schema.codetable.wildcard_key", Str),
     f("schema.codetable.wildcard_single_only", Bool),
+    f("schema.codetable.sentence_count", Int),
+    f("schema.codetable.sentence_max_count", Int),
+    f("schema.codetable.sentence_cycle_key", Str),
+    f("schema.codetable.sentence_grammar_weight", Float),
     // 码元字符集：范围+字面的自由文本（如 `a-x/`、`a-z0-9`），值域无法枚举故用 Str；
     // 解析与非法回落见 `CodeCharSet`。空 = 内置默认 `a-z`。
     f("schema.codetable.input_chars", Str),
@@ -465,8 +473,12 @@ static REGISTRY: &[ConfigField] = &[
     f("input.punct.follow_mode", Bool),
     f("input.punct.smart_after_digit", Bool),
     f("input.punct.smart_list", Str),
+    f("input.punct.smart_after_latin", Bool),
+    f("input.punct.latin_smart_list", Str),
     f("input.punct.custom_enabled", Bool),
     f("input.punct.custom_mappings", Map(&[])),
+    f("input.spacing.cjk_latin", Bool),
+    f("input.spacing.cjk_digit", Bool),
     f("input.symbol.smart_mode", Bool),
     f("input.symbol.smart_timeout_ms", Int),
     f("input.symbol.smart_chars", Str),
@@ -640,7 +652,6 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.overflow.select_char_key", Enum(OVERFLOW_VALUES)),
     f("keys.overflow.page_key", Enum(PAGE_KEY_OVERFLOW_VALUES)),
     // 按键级覆盖（键名 → 策略），整体一张表；设置端编辑控件另案，先用配置文件。
-    f("keys.overflow.page_key_overrides", Map(&[])),
     // -- ui（外观）--
     f("ui.candidate.per_page", Int),
     f("ui.candidate.per_page_extended", Int),
@@ -727,6 +738,7 @@ static REGISTRY: &[ConfigField] = &[
     f("ui.font.scripts", Map(FONT_SCRIPT_KEYS)),
     f("ui.theme.name", Str),
     f("ui.theme.style", Str),
+    f("ui.theme.animation", Bool),
     f("ui.mode_indicator.style", Enum(&["short", "full", "none"])),
     f("ui.tooltip.enabled", Bool),
     f("ui.tooltip.delay", Int),
@@ -1194,6 +1206,22 @@ pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static st
         (
             "schema.codetable.wildcard_single_only",
             ct.wildcard_single_only.is_some(),
+        ),
+        (
+            "schema.codetable.sentence_count",
+            ct.sentence_count.is_some(),
+        ),
+        (
+            "schema.codetable.sentence_max_count",
+            ct.sentence_max_count.is_some(),
+        ),
+        (
+            "schema.codetable.sentence_cycle_key",
+            ct.sentence_cycle_key.is_some(),
+        ),
+        (
+            "schema.codetable.sentence_grammar_weight",
+            ct.sentence_grammar_weight.is_some(),
         ),
         // 码元字符集用空串表达「未设置」（见 `CodetableGlobal::resolved`）。
         ("schema.codetable.input_chars", !ct.input_chars.is_empty()),
@@ -1715,6 +1743,20 @@ mod tests {
             .and_then(|t| t.get("keep_all_loaded"))
             .and_then(toml::Value::as_bool)
             .expect("data/config.toml 缺少布尔键 schema.keep_all_loaded");
+        assert_eq!(l2, l1);
+    }
+
+    /// L1↔L2 同源：词库缓存策略（出厂锁定）。
+    #[test]
+    fn dict_cache_policy_l1_matches_l2() {
+        let l1 = crate::Config::default().schema.dict_cache_policy;
+        assert_eq!(l1, "lock", "schema.dict_cache_policy 出厂应为 lock");
+        let l2 = data_config_toml()
+            .get("schema")
+            .and_then(|t| t.get("dict_cache_policy"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .expect("data/config.toml 缺少字符串键 schema.dict_cache_policy");
         assert_eq!(l2, l1);
     }
 

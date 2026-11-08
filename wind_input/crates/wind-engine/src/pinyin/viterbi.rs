@@ -122,16 +122,35 @@ struct DpEntry {
     syl_mask: u64,
     /// 见 `WordNode::canon`（精确节点为 `None`，克隆不分配）。
     canon: Option<(String, u64)>,
+    /// 起点到此处已拼出文本的哈希（与切分无关），K=1 时恒 0。
+    text_key: u64,
 }
+
+/// 在 `prev` 之后接上 `word` 的文本哈希：逐字节 FNV-1a，故「西安|穿袜子」与「西安穿袜子」同值。
+fn extend_text_key(prev: u64, word: &str) -> u64 {
+    word.bytes()
+        .fold(prev, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+const TEXT_KEY_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// 往**降序**的 top-K 列表里插入一条，超出 `k` 的丢弃。
 ///
 /// ⚠️ 插入位置取「第一个**严格小于**它的位置」，即分数相等时新来的排在既有之后 ——
 /// 这与单路径 DP 那句「严格大于才覆盖 ⇒ 相等分数保留先到的」是同一条 tie-break 规则。
 /// K=1 时本函数与那句等价，这正是「K=1 逐位不变」的依据。
+///
+/// 同一位置已拼文本相同的两条只留分高者：往后怎么接都拼出同样的句子，留两条只会
+/// 占掉 K 个名额（学过的整句成了单节点后，第 2 名常就是它的拆分版，备选被挤掉）。
 fn push_topk(list: &mut Vec<DpEntry>, entry: DpEntry, k: usize) {
     if k == 0 {
         return;
+    }
+    if let Some(i) = list.iter().position(|x| x.text_key == entry.text_key) {
+        if list[i].log_prob >= entry.log_prob {
+            return;
+        }
+        list.remove(i);
     }
     let pos = list
         .iter()
@@ -452,9 +471,8 @@ impl ViterbiDecoder {
     /// **`k == 1` 时与单路径 DP 逐位相同**（tie-break 见 [`push_topk`]），这是整个
     /// N-best 改造的零回归依据：出厂 `sentence_max_count = 1` 走的就是这条。
     ///
-    /// 返回按分数降序，**未按文本去重** —— 不同切分可能拼出同一串字
-    /// （`xi'an` 的 xi|an 与 xian 都可能落到同一个词上），去重要在调用方连同
-    /// 「凑够 N 条」一起做，因为去重后条数会少于 k。
+    /// 返回按分数降序、**文本互不相同**的至多 `k` 条：不同切分拼出同一串字时
+    /// （`xi'an` 的 xi|an 与 xian、学过的整句与它的拆分）只留分高的那条，见 [`push_topk`]。
     fn decode_dp_nbest(nodes: &[Vec<WordNode>], input_len: usize, k: usize) -> Vec<ViterbiResult> {
         let k = k.max(1);
         // dp[i] = 到达位置 i 的 top-K 路径（降序）。空 = 该位置不可达
@@ -467,6 +485,7 @@ impl ViterbiDecoder {
             word: String::new(),
             syl_mask: 0,
             canon: None,
+            text_key: if k > 1 { TEXT_KEY_SEED } else { 0 },
         });
 
         // nodes[end_pos] = 所有在字节位置 end_pos 结束的词（与 LatticeBuilder::build 的
@@ -492,6 +511,11 @@ impl ViterbiDecoder {
                         word: node.word.clone(),
                         syl_mask: node.syl_mask,
                         canon: node.canon.clone(),
+                        text_key: if k > 1 {
+                            extend_text_key(prev.text_key, &node.word)
+                        } else {
+                            0
+                        },
                     };
                     push_topk(&mut dp[end_pos], entry, k);
                 }

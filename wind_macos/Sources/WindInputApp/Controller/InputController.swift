@@ -67,8 +67,19 @@ public class InputController: IMKInputController {
     /// 里的按键照常组字 (首字符进缓冲、候选窗出现在对话框后面)。失活时据此判断是否已被取代。
     private static weak var lastActivated: InputController?
 
+    /// 登录以来左 / 右 / 其他鼠标键按下的总次数（触控板轻点计入左键）。
+    private static func mouseDownCount() -> UInt32 {
+        let src = CGEventSourceStateID.combinedSessionState
+        return CGEventSource.counterForEventType(src, eventType: .leftMouseDown)
+            &+ CGEventSource.counterForEventType(src, eventType: .rightMouseDown)
+            &+ CGEventSource.counterForEventType(src, eventType: .otherMouseDown)
+    }
+
     public override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
+        // 鼠标挪光标识别（补空格 / 英文后标点的「上一笔」作废）：只比鼠标按下次数，见
+        // `InputSequenceTracker.mouseDownCount`。不需要辅助功能权限。
+        router.seqTracker.mouseDownCount = InputController.mouseDownCount
 
         // 智能配对的宿主光标移动: kit 层 router 把意图上抛, 这里用 CGEvent 合成方向键。
         // 主线程 async 执行, 确保排在本轮 insertText (宿主已处理) 之后再发方向键。
@@ -112,6 +123,7 @@ public class InputController: IMKInputController {
         // 数字后智能标点的记账只对「这一个文本框里我们自己打出去的东西」有效，换了焦点
         // 就全部作废 —— 不清的话，在 A 框敲完 "3" 切到 B 框打标点会错出半角。
         router.digitTracker.reset()
+        router.seqTracker.reset()
         // 激活即确保连上 (装完首次激活 / 重启后并发竞态时 init 那次可能没连上)。
         ensureConnected()
         // 旧控制器还没失活 (跨宿主切换系统先激活新 client): 它欠的 FocusLost 在这里先补上,
@@ -388,7 +400,8 @@ public class InputController: IMKInputController {
             keyCode: vk, scanCode: 0, modifiers: KeyHandler.toModifiers(flags) | 0x0002,
             eventType: type,
             toggles: CtrlRawReport.toggles(capsLock: flags.contains(.capsLock), notTap: notTap),
-            eventSeq: keySeq, prevChar: router.digitTracker.prevChar))
+            eventSeq: keySeq, prevChar: router.digitTracker.prevChar,
+            seqChar: router.seqTracker.seqChar))
         do {
             try bridge.send(frame)
             let resp = try bridge.readFrame()
@@ -419,7 +432,8 @@ public class InputController: IMKInputController {
         keySeq &+= 1
         let frame = BinaryCodec.encodeKeyEventFrame(KeyEventPayload(
             keyCode: vk, scanCode: 0, modifiers: mods, eventType: pressed ? .down : .up,
-            eventSeq: keySeq, prevChar: router.digitTracker.prevChar))
+            eventSeq: keySeq, prevChar: router.digitTracker.prevChar,
+            seqChar: router.seqTracker.seqChar))
         do {
             try bridge.send(frame)
             let resp = try bridge.readFrame()
@@ -460,7 +474,8 @@ public class InputController: IMKInputController {
         // prevChar」这个故障的特征值, 留着就是给下次排查埋一个假阳性。
         let frame = BinaryCodec.encodeKeyEventFrame(KeyEventPayload(
             keyCode: vk, scanCode: 0, modifiers: 0, eventType: .up, eventSeq: keySeq,
-            prevChar: router.digitTracker.prevChar))
+            prevChar: router.digitTracker.prevChar,
+            seqChar: router.seqTracker.seqChar))
         do {
             try bridge.send(frame)
             let resp = try bridge.readFrame()
@@ -598,7 +613,8 @@ public class InputController: IMKInputController {
         // prevChar 取自本端记账 (macOS 无现读文档通路), 供服务端判「数字后智能标点」。
         // 必须在处理本键**之前**取: 本键的响应回来后 tracker 就被更新成新的光标前字符了。
         guard let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq,
-                                                    prevChar: router.digitTracker.prevChar) else {
+                                                    prevChar: router.digitTracker.prevChar,
+                                                    seqChar: router.seqTracker.seqChar) else {
             // VK 未映射 → 这一键 IMKit 自行透传给宿主, 同样要记账。
             return passThroughToHost(event)
         }
@@ -650,6 +666,9 @@ public class InputController: IMKInputController {
     @discardableResult
     private func passThroughToHost(_ event: NSEvent) -> Bool {
         router.digitTracker.noteKeyPassthrough(
+            vk: KeyHandler.toWindowsVK(event.keyCode),
+            modifiers: KeyHandler.toModifiers(event.modifierFlags))
+        router.seqTracker.noteKeyPassthrough(
             vk: KeyHandler.toWindowsVK(event.keyCode),
             modifiers: KeyHandler.toModifiers(event.modifierFlags))
         return false
@@ -732,6 +751,7 @@ public class InputController: IMKInputController {
     /// 作废记账回落默认行为 (标点按中文出), 好过拿着陈旧的数字错出半角。
     public func invalidateDigitTracking() {
         router.digitTracker.reset()
+        router.seqTracker.reset()
     }
 
     public func applyPushResponse(_ frame: Frame) {

@@ -2233,6 +2233,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wind-config",
+ "wind-quick-input",
 ]
 
 [[package]]
@@ -2372,6 +2373,7 @@ dependencies = [
  "wind-keys",
  "wind-phrase",
  "wind-store",
+ "wind-transfer",
  "wind-ui-types",
 ]
 
@@ -2441,6 +2443,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind-scene"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "image",
+ "png 0.18.1",
+ "resvg",
+ "tiny-skia",
+ "tracing",
+ "wind-theme",
+ "wind-ui-types",
+]
+
+[[package]]
 name = "wind-softkeyboard"
 version = "0.1.0"
 dependencies = [
@@ -2498,6 +2514,7 @@ name = "wind-transfer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -2535,6 +2552,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "png 0.18.1",
  "resvg",
  "rustybuzz",
  "serde_json",
@@ -2547,6 +2565,7 @@ dependencies = [
  "wind-config",
  "wind-ipc",
  "wind-keys",
+ "wind-scene",
  "wind-theme",
  "wind-ui-types",
  "windows",
@@ -2597,9 +2616,11 @@ name = "wind-webdata"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "fontdb",
  "serde_json",
+ "siphasher",
  "toml 0.8.23",
  "tracing",
  "wind-aux-code",
@@ -2608,6 +2629,7 @@ dependencies = [
  "wind-cmdbar",
  "wind-config",
  "wind-coordinator",
+ "wind-dict",
  "wind-engine",
  "wind-keys",
  "wind-quick-input",
@@ -2615,6 +2637,7 @@ dependencies = [
  "wind-store",
  "wind-theme",
  "wind-transfer",
+ "wind-ui-types",
  "zip",
 ]
 

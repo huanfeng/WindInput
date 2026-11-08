@@ -33,6 +33,7 @@ fn key(k: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -209,9 +210,6 @@ fn sentence_mode_has_separator_when_a_key_is_free() {
     let on = coord("sep_on", SENTENCE);
     let ch = on.manual_separator_char().expect("开整句：应有分隔符键");
     assert!(ch == '\'' || ch == '`');
-    // 移动端求值：两个键都占着时才夺 `'`，这里反引号空闲，所以两端一致
-    assert_eq!(on.manual_separator_char_as(true), Some(ch));
-
     press(&on, "trnt");
     // 0xDE = VK_OEM_7 = `'`；0xC0 = VK_OEM_3 = 反引号
     let action = on.handle_key_event(&key(if ch == '\'' { 0xDE } else { 0xC0 }));

@@ -1,0 +1,52 @@
+## 焦点获得
+S|true|五|false|true|false|false
+## 输入 wqvb
+C|w|1||true|0|1|15
+C|wq|2||true|0|1|26
+C|wqv|3||true|0|1|2
+C|wqvb|4||true|0|1|1
+## 退格到空
+C|wqv|3||true|0|1|2
+C|wq|2||true|0|1|26
+C|w|1||true|0|1|15
+H
+## 再输入 wqvb
+C|w|1||true|0|1|15
+C|wq|2||true|0|1|26
+C|wqv|3||true|0|1|2
+C|wqvb|4||true|0|1|1
+## 空格上屏（进入联想）
+C|联想输入|0||true|0|1|2
+## 退格离开联想
+H
+## 输入 wq
+C|w|1||true|0|1|15
+C|wq|2||true|0|1|26
+## Esc 取消
+H
+## 切英文
+T|英 .
+S|false|英|false|true|false|false
+H
+H
+## 切回中文
+H
+T|五笔 。
+S|true|五|false|true|false|false
+## 切英文标点
+T|五笔 .
+S|true|五|false|false|false|false
+## 切回中文标点
+T|五笔 。
+S|true|五|false|true|false|false
+## 切到拼音方案
+H
+T|全拼 。
+S|true|拼|false|true|false|false
+## 拼音输入声母 n
+C|n|1||true|0|1|9
+## 拼音 Esc 取消
+H
+## ReloadConfig
+H
+S|true|拼|false|true|false|false

@@ -2,7 +2,7 @@
 //!
 //! 候选窗注释、自绘气泡、macOS 气泡三处共用：求色一律走 `wind_theme::span_color`。
 
-use crate::text::dwrite::ColorRun;
+use crate::text::ColorRun;
 use wind_theme::{Resolved, Rgba, RvNode, RvViews, TextState, span_color};
 use wind_ui_types::StyledText;
 
@@ -12,7 +12,7 @@ use wind_ui_types::StyledText;
 /// 全被丢弃 ⇒ 叶子不带颜色区间，走与分段着色之前**同一条**绘制路径（`draw` 而非
 /// `draw_runs`），View 树逐字段相同。零回归因此是结构性质，golden 对拍只是确认。
 /// （首发时出厂主题即如此；2026-09-28 起 `_base` 配了角色色，设计 §18。）
-pub(crate) fn color_runs(
+pub fn color_runs(
     theme: &Resolved,
     node: &RvNode,
     is_tooltip: bool,
@@ -50,7 +50,7 @@ pub(crate) fn color_runs(
 /// 候选正文的颜色区间：只有模糊音提示段（`pinyin_hint`）着色，取色走
 /// [`wind_theme::pinyin_hint_color`]；其余段按正文色、不建区间。与 [`color_runs`] 同样丢掉
 /// 等于正文色的区间（不带提示的候选恒为空 ⇒ 绘制路径与改动前相同）。
-pub(crate) fn pinyin_hint_runs(
+pub fn pinyin_hint_runs(
     text_node: &RvNode,
     comment_node: &RvNode,
     state: TextState,
@@ -94,7 +94,7 @@ pub(crate) fn pinyin_hint_runs(
 ///
 /// 任一层带背景图 / 渐变 / 覆盖图、或窗口底本身不透明度不足（透到桌面）时取不到可靠值，
 /// 返回 `None`（提示回落该态注释色）。
-pub(crate) fn candidate_backdrop(v: &RvViews, state: TextState) -> Option<Rgba> {
+pub fn candidate_backdrop(v: &RvViews, state: TextState) -> Option<Rgba> {
     fn patch(n: &RvNode, state: TextState) -> Option<&RvNode> {
         match state {
             TextState::Selected => n.selected.as_deref(),

@@ -33,6 +33,7 @@ fn labels(index_labels: Vec<String>) -> Option<Vec<String>> {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     });
     coord.handle_caret_update(&CaretData {
         x: 100,

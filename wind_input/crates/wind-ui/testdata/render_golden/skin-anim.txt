@@ -1,0 +1,221 @@
+== 管线 t=0 首帧 ×1 ==
+-- 窗口 408x80 像素摘要 b067c7ecb2128b04 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+-- 下次换帧 +100ms
+draw text="nihao" at=(14.0,10.0) size=18.0 weight=0 family=None color=[100, 100, 100, 255]
+draw text="拼" at=(377.2,10.0) size=18.0 weight=0 family=None color=[120, 120, 128, 255]
+draw text="1" at=(14.0,41.6) size=18.0 weight=0 family=None color=[66, 133, 244, 255]
+draw text="好" at=(28.8,41.6) size=18.0 weight=0 family=None color=[30, 30, 30, 255]
+draw text="vb" at=(45.6,41.6) size=18.0 weight=0 family=None color=[150, 150, 150, 255]
+draw text="2" at=(85.2,41.6) size=18.0 weight=0 family=None color=[66, 133, 244, 255]
+draw text="号" at=(100.0,41.6) size=18.0 weight=0 family=None color=[30, 30, 30, 255]
+draw text="kg" at=(116.8,41.6) size=18.0 weight=0 family=None color=[150, 150, 150, 255]
+draw text="3" at=(156.4,41.6) size=18.0 weight=0 family=None color=[66, 133, 244, 255]
+draw text="浩" at=(171.2,41.6) size=18.0 weight=0 family=None color=[30, 30, 30, 255]
+draw text="4" at=(200.0,41.6) size=18.0 weight=0 family=None color=[66, 133, 244, 255]
+draw text="你好" at=(214.8,41.6) size=18.0 weight=0 family=None color=[30, 30, 30, 255]
+draw text="wqvb" at=(242.40001,41.6) size=18.0 weight=0 family=None color=[150, 150, 150, 255]
+draw text="‹" at=(313.2,41.6) size=18.0 weight=0 family=None color=[150, 150, 150, 255]
+draw text="1/2" at=(333.6,41.6) size=18.0 weight=0 family=None color=[100, 100, 100, 255]
+draw text="›" at=(375.6,41.6) size=18.0 weight=0 family=None color=[66, 133, 244, 255]
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 81e11cce85b7f7a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=true)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 t=150 帧中 ×1 ==
+-- 窗口 408x80 像素摘要 2c1627a3753546c4 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+-- 下次换帧 +50ms
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 1) still=(0, 0) 摘要 72a798fb38f3a9a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=true)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 t=250 typing 后 ×1 ==
+-- 窗口 408x80 像素摘要 aac93041553f0b44 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+-- 下次换帧 +100ms
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 2) still=(0, 0) 摘要 8615d4763a53dda5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=true)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 t=380 typing 中 ×1 ==
+-- 窗口 408x80 像素摘要 8b4a7dfb16902884 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+-- 下次换帧 +70ms
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 3) still=(0, 0) 摘要 c598b4fdcc9257a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=true)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 t=450 上屏片段中 ×1 ==
+-- 窗口 408x80 像素摘要 5b08fa288e695944 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+-- 下次换帧 +50ms
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 4) still=(0, 0) 摘要 0b5dfcfc62e7a5a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=true)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 t=550 上屏片段第二帧 ×1 ==
+-- 窗口 408x80 像素摘要 46f8af27612ea804 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+-- 下次换帧 +50ms
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 5) still=(0, 0) 摘要 28592e274791b3a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=true)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 t=650 落定 idle ×1 ==
+-- 窗口 408x80 像素摘要 b067c7ecb2128b04 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+-- 下次换帧 +50ms
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 81e11cce85b7f7a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=true)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 关动画 t=0 ×1 ==
+-- 窗口 408x80 像素摘要 b067c7ecb2128b04 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 81e11cce85b7f7a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=false)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无
+== 管线 关动画 t=150 ×1 ==
+-- 窗口 408x80 像素摘要 b067c7ecb2128b04 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 命中 0 Rect { x: 6.0, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 1 Rect { x: 77.2, y: 34.6, w: 71.2, h: 35.6 }
+-- 命中 2 Rect { x: 148.4, y: 34.6, w: 43.6, h: 35.6 }
+-- 命中 3 Rect { x: 192.0, y: 34.6, w: 103.600006, h: 35.6 }
+-- 命中 100001 Rect { x: 366.0, y: 34.6, w: 30.0, h: 35.6 }
+-- 鼠标 窗体=Some(Rect { x: 0.0, y: 2.0, w: 403.0, h: 73.0 }) 不拖动=[] 可点击=[(0, Rect { x: 398.0, y: 70.0, w: 10.0, h: 10.0 }, true), (1, Rect { x: 397.0, y: 0.0, w: 4.0, h: 4.0 }, false)]
+skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=0.5
+  sx=Bands([Band { from: 16.0, to: 48.0, fill: Round }])
+  sy=Bands([Band { from: 16.0, to: 32.0, fill: Round }])
+  min=(16.0,16.0) insets=Edges { l: 6.0, t: 5.0, r: 7.0, b: 4.0 }
+  frame=(0, 2, 403, 73) margins=(0, 2, 5, 5)
+  placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: None, clamp: Frame }
+  slots=None
+  decor[0] rect=(398, 70, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+    sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
+  decor[1] rect=(397, 0, 4, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 81e11cce85b7f7a5
+    sources=(<skin>/skinfix/anim.png k=0.5 animated=false)
+-- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
+-- 保护带 下方 无
+-- 保护带 上方 无

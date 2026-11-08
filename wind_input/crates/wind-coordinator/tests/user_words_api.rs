@@ -187,6 +187,7 @@ fn added_word_is_visible_to_engine_immediately() {
                 toggles: 0,
                 event_seq: 0,
                 prev_char: 0,
+                seq_char: 0,
             });
         }
         c.candidate_window(0, 50).items
@@ -200,6 +201,7 @@ fn added_word_is_visible_to_engine_immediately() {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     };
 

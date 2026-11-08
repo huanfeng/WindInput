@@ -27,6 +27,76 @@
 
 ---
 
+## 2026-11-07 · 联想态可不挂占位组合（0.131）
+
+- 合入：2aeb737c..f96bc274（快进合入 main，无合并提交）；范围：Windows TSF，仅 compat 规则配了 `assoc_placeholder = "none"` 的应用（出厂：Excel、WPS 表格）
+- 变化：
+  - 联想窗出现时，宿主里不再有占位空格 / 零宽空格，表格自己的单元格提示不被干扰。
+  - 联想窗位置钉在联想出现处，不随宿主上报的远处光标飘走。
+  - 点别的单元格（鼠标）或挪光标，联想窗立即消失；前：要等自动隐藏计时到期。
+- 触发条件：该应用的 compat 规则 `assoc_placeholder = "none"`；其它应用不受影响（不写则跟随 `composition_placeholder`）
+- 回退旧行为：把该应用的 `assoc_placeholder` 改回 `space` / `zwsp` / `blank`，或删掉这一行
+- 钉住的测试：`wind-coordinator` `handle_assoc::tests::assoc_none_mounts_no_placeholder_but_keeps_the_session_flag` /
+  `bare_assoc_ignores_far_caret_reports_for_anchoring` / `bare_assoc_exits_when_user_moves_the_caret` /
+  `bare_assoc_released_by_passthrough_realigns_the_session_cache`；`wind-bridge` `server::tests::assoc_session_flag_only_on_plain_commit`
+- 来源：内部（WPS 表格 / Excel 靶机实测）
+
+## 2026-11-06 · 码表整句：语法模型、词典组词、N-best（0.131）
+
+- 合入：14a4e9b0；范围：码表方案，仅方案开了 `[engine.codetable] sentence_input = true`
+- 变化：
+  - 整句首选更准：挂上语法模型并能把码表没收的词逐字组出来。`qjkhlgw` 前：旬中国人 → 后：我是中国人。
+    3000 句评测首选：词组最短码打法 56.8% → 90.0%，逐字最短码打法 7.7% → 89.4%。
+  - 用户自造词（拼音库里没有的）在整句里不再总被拆成单字。
+  - 可露多条整句：`sentence_count = 2` 时 `qjkhlgw` 出「我是中国人 / 旬中国人」两条；配了 `sentence_cycle_key` 可轮换。
+    组合区切法跟着高亮的整句走（`q'j'khlg'w` ↔ `qj'khlg'w`）。出厂 1/1 下组合区行为不变。
+  - 码表方案下展开态 Tab 切分类不再被 `schema.pinyin.sentence_cycle_key = "tab"` 挡住（码表看自己那把键）。
+- 触发条件：语法模型与组词在开了整句的方案上出厂即生效；多条整句需调 `schema.codetable.sentence_count`
+- 回退旧行为：`schema.codetable.sentence_grammar_weight = 0` 关语法模型；组词无开关（设计变更）
+- 钉住的测试：`wind-engine` `codetable::sentence::tests::composes_lexicon_word_across_char_units` /
+  `user_word_missing_from_lexicon_gets_floor_frequency` / `grammar_picks_rank_one_and_plain_nbest_fills_the_rest`，
+  `codetable::engine::tests::sentence_nbest_shows_count_and_fills_pool`；
+  `wind-coordinator` `tests/codetable_sentence_nbest.rs`
+- 来源：内部
+
+## 2026-11-06 · 整句备选不再被第 1 名的同文切分挤掉（0.131）
+
+- 合入：bdf132b8；范围：全拼 / 双拼主路径，仅 `sentence_count > 1`
+- 变化：N-best 原取「前 k 条路径」再按文本去重，同一句的不同切分会占掉名额，备选就露不出来。现改为解码时按已拼文本去重，前 k 条即 k 条不同的句子。
+  例：`xianchuanwazi`、露 2 条，选过一次「西安穿袜子」（学成整串临时词）后再输 → 前：西安穿袜子 / 先传 …（先穿袜子消失）；后：西安穿袜子 / 先穿袜子。
+  `woshizhongguoren`、露 2 条 → 前：没有备选；后：我是中国人 / 卧室中国人。
+- 触发条件：需把智能组词显示条数调到 ≥ 2；出厂 (1, 1) 不变
+- 回退旧行为：无（修复）
+- 钉住的测试：`wind-engine` `pinyin::tests::nbest_alternate_survives_after_top_sentence_is_learned`（旧逻辑下红）
+- 来源：内部
+
+## 2026-11-06 · 新增中英 / 中数切换处空格与英文后智能标点（0.131）
+
+- 合入：6f8150db、57a94412；范围：中文主路径与各 overlay 的上屏前缀；中文模式空缓冲下汉字后的数字键；中文标点状态下的标点转换
+- 变化：
+  - 新开关 `input.spacing.cjk_latin` / `cjk_digit`（默认都关）：汉字与英文、汉字与数字**切换处**补空格，补在切换后那一笔前面。
+    例：五笔「工」后临英 `Python` → ` Python`，再打「工」→ ` 工`；汉字后打 `3` → ` 3`（主键盘、小键盘都算）。
+    标点永不前补；连续的英文之间不管；用户自己按过空格、鼠标点过别处、或输入法不知道光标前是什么时不补。
+  - `commit_space`（英文方案 / 临英两份）仍是上屏后立即补尾随空格，之后接中文看到的是空格，不再重复补。
+    临英那份新增覆盖中文方案主路径里的英文词库候选（码表 / 拼音的英文混入）：例：五笔 `git`（空格）→ 前：`git` → 后：`git `（开着时）。
+  - 新开关 `input.punct.smart_after_latin`（默认关）+ `latin_smart_list`（出厂 `./_:@`）：英文词后的这些标点直出半角。
+    例：临英 `Node` + `.` → 前：`Node。` → 后：`Node.`；`,` 不在出厂列表，仍出 `，`。
+- 触发条件：均需手动开启（英文候选那条需已开临英的 `commit_space`）
+- 回退旧行为：关掉对应开关；中英空格可按应用关闭（compat `auto_spacing = false`）
+- 钉住的测试：`wind-coordinator/tests/auto_spacing.rs`、`latin_smart_punct.rs`；判据单测 `wind-punct` `spacing::tests`
+- 来源：内部（设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`）
+
+## 2026-11-06 · 开整句 N-best 时第 1 名合成整句不再掉到第 2 名之后（0.131）
+
+- 合入：d203d1e6；范围：全拼 / 双拼主路径，仅 `sentence_count > 1`
+- 变化：第 1 名是多词拼出的整句时，第 2 名整句曾被当作「精确整词」，第 1 名因此降到它之下，块外排序后名次倒挂。
+  例：`xianchuanwazi`、露 2 条 → 前：先穿袜子 / 西安穿袜子；后：西安穿袜子 / 先穿袜子。露 3 条 → 前：先穿袜子 / 西安川娃子 / 西安穿袜子；后：西安穿袜子 / 先穿袜子 / 西安川娃子。
+  第 2 名与用户 / 临时词同文时它算词条，第 1 名照旧让位；第 1 名本身是词典词时（如 `nihao`→你好）不受影响。
+- 触发条件：需把智能组词显示条数调到 ≥ 2；出厂 (1, 1) 不变
+- 回退旧行为：无（修复）
+- 钉住的测试：`wind-engine` `pinyin::tests::nbest_alternate_sentence_does_not_demote_top_sentence`（旧判据下红）、`nbest_alternate_merged_with_user_word_still_demotes_top_sentence`
+- 来源：内部
+
 ## 2026-11-04 · `$SS`/`$AA` 重码折叠只认同码精确候选，拼音域普通候选恒让位（0.131）
 
 - 合入：92fa87c2；范围：全拼 / 双拼 / 混输主路径（码表方案不变）
@@ -195,3 +265,33 @@
 - 回退旧行为：把历史成员排到英文之前（成员顺序优先），或关闭英文词频。
 - 钉住的测试：`wind-coordinator/tests/quick_input_history.rs`（`hot_history_joins_english_segment_and_reaches_top`、`hotter_english_word_stays_above_history`）
 - 来源：GH#253（维护者定方案 B）
+
+## 2026-11-05 · 快捷输入历史在 Free / 大写英文透镜按英文调频排（0.130）
+
+- 合入：见提交 `fix(quick): Free/大写英文透镜的历史按英文调频排`；范围：启用历史成员的快捷输入
+- 变化：缓冲带符号或大写（`${R`、`Res`）时，历史候选此前只按累计次数排，不看英文调频策略；
+  现在与文本透镜同一道英文词频重排（「一次到顶」下最近用过的居首）。与缓冲逐字相同的历史仍恒首位。
+- 触发条件：`schema.english.frequency` 开启；策略为 `top` 时差异最明显。数字 / 词组透镜下的历史成员仍按次数降序，不过调频。
+- 回退旧行为：关闭英文词频（回到次数降序、最近次之）。
+- 钉住的测试：`wind-coordinator/tests/quick_input_history.rs`（`free_lens_history_follows_english_top_strategy`）
+- 来源：用户反馈
+
+## 2026-11-05 · 标点顶屏自动配对按右符号宽度回退光标
+
+- 变化：候选随左符号顶屏时，此前按「候选前缀 + 左符号」长度回退，`你【】` 停在 `你|【】`；
+  现在仅回退右符号宽度，停在 `你【|】`。TSF 将完整格数一次传入，避免 Shift 按住时多次调用覆盖。
+- 触发条件：启用中文自动配对，并由标点顶出候选。
+- 回退配置：无保留错误定位的开关；关闭 `input.auto_pair.chinese` 可停用中文自动配对。
+- 钉住的测试：`handle_punct::pair_commit_tests::punct_top_commit_pair_cursor_ignores_candidate_prefix`
+  （空前缀、单字、词组、扩展汉字，覆盖方括号与 Shift 圆括号）。
+- 来源：Windows 记事本实测及 TSF 日志。
+
+## 2026-11-05 · 加词编辑快捷键不再透传给宿主
+
+- 变化：快捷加词面板内 Ctrl+Enter 打开编辑窗口后，此前 TSF 将回车再次交给宿主，可能导致聊天误发送；
+  现在保留服务端的消费决定。面板内只返回 Consumed 的 Ctrl 组合也保持消费。
+- 触发条件：Ctrl+= 进入快捷加词面板，再按 Ctrl+Enter；普通组码及临时模式的宿主快捷键仍清组合后透传。
+- 回退配置：无保留穿透行为的开关；可用独立加词窗口快捷键 Ctrl+Shift+= 绕过面板。
+- 钉住的测试：`shortcut_ownership_tests`、`wind_tsf/tests/ctrl_alt_cleanup_policy_test.cpp`，
+  以及 `input_flow` 的 Ctrl 组合守卫、`quick_input_select_key` 的候选快捷键回归。
+- 来源：论坛 t398、Windows 记事本 TSF 日志。

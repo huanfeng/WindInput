@@ -112,9 +112,6 @@ fn attach_parent_console() {
     }
 }
 
-/// 性能测试模式的标记文件名（放在本地数据目录，即 `logs\` 的上一级）。
-const PERF_PRELOAD_MARKER: &str = "perf_preload";
-
 fn main() {
     // CLI 子命令（config/schema/...）：在服务启动前拦截，处理完即退出。
     // 注意保持在单例检查之前——CLI 进程不该被「另一实例已运行」挡掉。
@@ -259,15 +256,35 @@ fn main() {
     startup_trace::stage("singleton-ok");
 
     // 2. 初始化日志（含启动滚动：至此才确定本实例会真正运行）
-    init_logger();
+    // 配置在此读一次，日志级别与下面的词库缓存策略共用，不再各读各的。
+    let startup_cfg = wind_config::Config::load(wind_config::Config::data_dir().as_deref()).ok();
+    init_logger(
+        startup_cfg
+            .as_ref()
+            .map(|c| c.debug.clone())
+            .unwrap_or_default(),
+    );
     startup_trace::stage("logger-ready");
 
-    // 性能测试模式：本地数据目录下有 `perf_preload` 标记文件时，词库整份拷进内存，
-    // 排除 mmap 读盘对按键延迟的影响。须在加载任何词库之前打开。
-    if wind_config::Config::local_dir().is_some_and(|d| d.join(PERF_PRELOAD_MARKER).exists()) {
-        wind_dict::mapping::set_preload(true);
-        info!("性能测试模式：词库将整份载入内存（{PERF_PRELOAD_MARKER} 标记文件）");
-    }
+    // 词库缓存策略（`schema.dict_cache_policy`）：锁定 / 预加载 / 关闭。须在加载任何词库之前
+    // 设定；运行期改键不生效（已映射的文件不会回头处理），设置页提示需重启。
+    // 读不到配置时取出厂值，与 `Config::default()` 同源。
+    let policy_name = startup_cfg.as_ref().map_or_else(
+        || wind_config::Config::default().schema.dict_cache_policy,
+        |c| c.schema.dict_cache_policy.clone(),
+    );
+    drop(startup_cfg);
+    let cache_policy = wind_dict::mapping::CachePolicy::from_config(&policy_name);
+    wind_dict::mapping::set_policy(cache_policy);
+    // 预算：锁定与预加载都占物理内存，按机器内存封顶（算法见 `default_budget`），超出的文件
+    // 按普通映射使用，避免超大词库 / 大语法模型把内存吃光。
+    let cache_budget = wind_dict::mapping::default_budget();
+    wind_dict::mapping::set_budget(cache_budget);
+    info!(
+        "词库缓存策略：{}（schema.dict_cache_policy），预算 {} MB",
+        cache_policy.as_config(),
+        cache_budget / (1024 * 1024)
+    );
 
     let pipe_suffix = wind_config::variant::pipe_suffix();
     let variant = if wind_config::variant::is_dev() {
@@ -440,6 +457,14 @@ fn main() {
     // 9.5 启动本地控制 / 配置 JSON-RPC 服务（命名管道：..._ctrl + ..._events）。
     // 本地授权靠 OS ACL（SDDL），不再需要 token/Origin/CORS/端口发现。
     // 同步线程模型（与 bridge/push 一致），不引入 tokio 到控制路径。
+    // 主题预览缓存键带上构建标识：换一次构建旧图就不再命中。dirty 构建的短哈希不随改动变，
+    // 再带上构建时刻。
+    let git = env!("WIND_GIT_HASH");
+    wind_webdata::set_preview_build_id(if git.ends_with("-dirty") {
+        format!("{git}@{}", env!("WIND_BUILD_TIME"))
+    } else {
+        git.to_string()
+    });
     let core_rpc: Arc<dyn wind_rpc::CoreRpc> = Arc::new(RpcCore(coord_for_web));
     match wind_rpc::RpcServer::new(core_rpc, variant, pipe_suffix) {
         Ok(rpc_server) => {
@@ -659,12 +684,7 @@ fn spawn_detached_self(restarted: bool) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
-fn init_logger() {
-    // 读取配置（失败时用默认值，不阻断日志初始化）
-    let cfg_debug = wind_config::Config::load(wind_config::Config::data_dir().as_deref())
-        .map(|c| c.debug)
-        .unwrap_or_default();
-
+fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
     // RUST_LOG 最优先，其次 debug.log_level，默认 info。
     // info 级别日志不得包含用户输入内容、词库词条等隐私数据。
     //
@@ -672,7 +692,7 @@ fn init_logger() {
     // 门控读的是同一个函数。两边各算一遍必然漂移成「主日志写着、轨迹停了」，而这两份
     // 日志恰恰是用来互相印证的（轨迹存在的全部意义就是主日志失效时仍留痕）。
     //
-    // 用 `_from` 变体而不是自己加载的那个：配置上面刚 load 过，`Config::load` 是一次
+    // 用 `_from` 变体而不是自己加载的那个：配置在 main 里刚 load 过，`Config::load` 是一次
     // 多层合并 + 多个文件读取，为一个字段再走一遍白占启动时间。
     let level = startup_trace::effective_log_level_from(&cfg_debug.log_level);
 

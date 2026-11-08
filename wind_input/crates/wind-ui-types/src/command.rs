@@ -8,6 +8,13 @@ use crate::status_tip::StatusTipPlacement;
 use crate::toast::{ToastKind, ToastPosition};
 use crate::toolbar::{ToolbarItem, ToolbarState};
 
+/// 协调器发给皮肤装饰状态机的事件（其余事件渲染端自己从命令流里比出来）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkinSignal {
+    /// 真有文本上屏。
+    Commit,
+}
+
 /// UI 命令
 #[derive(Debug)]
 pub enum UiCommand {
@@ -23,6 +30,9 @@ pub enum UiCommand {
         /// 此前是「不画就不发」，把渲染策略焊在了数据通道上：自绘编码栏的宿主
         /// （Android）想拿数据，只能去改一个显示模式配置项。
         preedit_host_owned: bool,
+        /// 是否在「打字中」：有编码、不在联想态（同中立通道 `CompositionView::composing`）。
+        /// 联想标识、上屏后的空串都不算——渲染端据此区分打字与上屏后的换帧（皮肤装饰事件）。
+        composing: bool,
         /// 模式指示文本（拼/双/快/英/符 或全称）；空=不显示。有 preedit 空间时随候选窗持久显示。
         mode_label: String,
         candidates: Vec<CandidateItem>,
@@ -201,6 +211,10 @@ pub enum UiCommand {
     SetCandidateOffset { x: i32, y: i32 },
     /// 候选窗是否画主题阴影（false=覆盖为无阴影）。来自 ui.candidate.shadow（"off"→false）。
     SetCandidateShadow(bool),
+    /// 是否播放主题动画（皮肤装饰）。来自 ui.theme.animation；关掉时装饰停在初始状态首帧。
+    SetThemeAnimation(bool),
+    /// 皮肤装饰事件里只有协调器知道的那几个（设计 `theme-skin-animation.md` §16）。仅桌面通道。
+    SkinSignal(SkinSignal),
     /// 翻页栏并入编码所在行右对齐显示（独立编码栏 / 内联编码两种落点）。来自 ui.candidate.pager_in_preedit。
     SetPagerInPreedit(bool),
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。
@@ -346,6 +360,8 @@ pub enum UiCommand {
     /// 外部宿主（Linux addon）的 push 连接（重）建立：它收到 SERVICE_READY 会丢掉手里的工具栏 /
     /// 软键盘，渲染端把此刻可见的原样补推一帧。Windows 从不下发。
     HostReconnected,
+    /// 设置端主题预览：按当前外观画一帧示例候选窗，经请求里的回执送回（见 [`crate::preview`]）。
+    RenderCandidatePreview(Box<crate::CandidatePreviewRequest>),
     /// 关闭 UI
     Shutdown,
     /// 注入 host-render 管理器（Windows）；协调器 `set_host_render` 后下发，

@@ -1000,6 +1000,9 @@ Register-ScheduledTask -TaskName 'WindInputDeployBoot' -Action \$a -Force | Out-
 Start-ScheduledTask -TaskName 'WindInputDeployBoot'; Start-Sleep -Seconds 2; \
 Unregister-ScheduledTask -TaskName 'WindInputDeployBoot' -Confirm:\$false" >/dev/null 2>&1 || true
         sleep 2
+        # 计划任务拉起的进程默认 BelowNormal —— WorkBuddy 等前台任务一跑就被排队,
+        # 用户手感是打字卡 50-110ms。每次启动后把优先级抬回 Normal(正式版自启就是 Normal)。
+        remote_ps "Get-Process -Name '$name' -EA SilentlyContinue | ForEach-Object { try { \$_.PriorityClass='Normal' } catch {} }" >/dev/null 2>&1 || true
         # 每行: pid|映像MD5|映像路径。映像已被改名让路的旧进程，Path 指向 .old_*，MD5 对不上。
         out="$(remote_ps "Get-Process -Name '$name' -EA SilentlyContinue | ForEach-Object { \
 \$h=''; try { \$h=(Get-FileHash -Algorithm MD5 -LiteralPath \$_.Path -EA Stop).Hash } catch {}; \

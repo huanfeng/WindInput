@@ -1,0 +1,36 @@
+# 渲染金样的皮肤夹具：分槽位（free）布局。横排整表替换 base 的同名变体，竖排沿用 base。
+base = "skinfix"
+
+[meta]
+name = "皮肤夹具·分槽位"
+version = "1.0"
+
+[skin.horizontal.frame]
+image = "frame_h.png"
+stretch_x = [[16, 48]]
+stretch_y = [[16, 32]]
+
+[skin.horizontal.content]
+left = 12
+top = 10
+right = 14
+bottom = 8
+
+[skin.horizontal.slots.preedit]
+anchor = "content.top_left"
+
+[skin.horizontal.slots.candidates]
+anchor = "content.bottom_left"
+pivot = "bottom_left"
+
+[skin.horizontal.slots.footer]
+anchor = "frame.bottom_right"
+pivot = "bottom_right"
+offset = [-8, -8]
+
+[[skin.horizontal.decor]]
+image = "diamond.png"
+anchor = "frame.top_left"
+pivot = "center"
+z = 150
+hit = "block"

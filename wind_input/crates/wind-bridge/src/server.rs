@@ -245,6 +245,18 @@ fn handle_client(
     use windows::Win32::Foundation::*;
     use windows::Win32::Storage::FileSystem::*;
 
+    // 打字线程提速：hybrid CPU（P 核 + E 核）下服务线程常被放 E 核化解负载，同核还有
+    // 其它常驻线程（WorkBuddy 等后台任务），实测 convert 慢键的 PageFaultCount 差值
+    // 只有正常键的 1/60 —— 大部分时间片在被抢占，直观感受就是出候选顿挫 50–200ms。
+    // 键处理线程提到 HIGHEST（进程保持 Normal），同核排队快得多。失败静默：提不上去
+    // 只影响延迟上限，不破坏功能。
+    unsafe {
+        let _ = windows::Win32::System::Threading::SetThreadPriority(
+            windows::Win32::System::Threading::GetCurrentThread(),
+            windows::Win32::System::Threading::THREAD_PRIORITY_HIGHEST,
+        );
+    }
+
     // 连接建立即通知：`ctx.pid` 是本次唯一能免费拿到、还没被任何消息处理耽搁的对端 pid。
     // 放在读循环之前——命名管道有内核缓冲（见上方 CreateNamedPipeA 的 64KB 收发缓冲区），
     // 对端此刻发消息不会因为我们还没开始 ReadFile 而丢失或阻塞；本调用只影响*本连接*
@@ -483,7 +495,8 @@ pub(crate) fn dispatch_command(
                     data.key_code
                 );
             }
-            Some(encode_key_action(&action))
+            let assoc_session = handler.assoc_session_hint();
+            Some(encode_key_action(&action, assoc_session))
         }
 
         // ── 提交请求（同步，barrier 机制） ──
@@ -1127,10 +1140,21 @@ fn decode_focus_lost_reason(payload: &[u8]) -> wind_ipc::protocol::FocusLostReas
 /// 将 KeyAction 编码为响应字节
 ///
 /// 与 Go 版 handleKeyEvent 的 switch 分支对齐
-fn encode_key_action(action: &KeyAction) -> Vec<u8> {
+fn encode_key_action(action: &KeyAction, assoc_session: bool) -> Vec<u8> {
+    // 标志位只属于「不带新组合的普通上屏」：带新组合的上屏、其它动作一律不置位。
+    // （见 tests::assoc_session_flag_only_on_plain_commit）
     use wind_ipc::codec::*;
 
     match action {
+        KeyAction::InsertText {
+            text,
+            new_composition,
+            mode_changed,
+            chinese_mode,
+            has_new_composition,
+        } if assoc_session && new_composition.is_none() && !*has_new_composition => {
+            encode_commit_text_assoc_session(text, *mode_changed, *chinese_mode)
+        }
         KeyAction::InsertText {
             text,
             new_composition,
@@ -1200,6 +1224,44 @@ fn encode_status_update_from_data(status: &StatusUpdateData) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ASSOC_SESSION 标志（0x20）只加在不带新组合的 InsertText 上，其它一律不加。
+    #[test]
+    fn assoc_session_flag_only_on_plain_commit() {
+        let flags = |b: &[u8]| {
+            u32::from_le_bytes(
+                b[wind_ipc::protocol::IpcHeader::SIZE..][..4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let plain = KeyAction::InsertText {
+            text: "好".into(),
+            new_composition: None,
+            mode_changed: false,
+            chinese_mode: true,
+            has_new_composition: false,
+        };
+        let with_comp = KeyAction::InsertText {
+            text: "好".into(),
+            new_composition: Some(" ".into()),
+            mode_changed: false,
+            chinese_mode: true,
+            has_new_composition: true,
+        };
+        assert_eq!(flags(&encode_key_action(&plain, true)) & 0x20, 0x20);
+        assert_eq!(flags(&encode_key_action(&plain, false)) & 0x20, 0);
+        assert_eq!(
+            flags(&encode_key_action(&with_comp, true)) & 0x20,
+            0,
+            "带新组合的上屏不置位"
+        );
+        assert_ne!(
+            encode_key_action(&KeyAction::Consumed, true),
+            Vec::<u8>::new()
+        );
+    }
+
     use std::sync::atomic::{AtomicU32, Ordering};
     use wind_ipc::codec::decode_uielement_page;
     use wind_ipc::protocol::{

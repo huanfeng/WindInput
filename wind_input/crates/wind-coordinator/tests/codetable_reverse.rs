@@ -39,6 +39,7 @@ fn key_act(c: &Coordinator, vk: u32, shift: bool) -> wind_bridge::handler::KeyAc
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     })
 }
 fn letters(c: &Coordinator, s: &str) {
@@ -402,6 +403,7 @@ fn reverse_modifier_binding_in_pinyin_still_toggles_mode() {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     });
     assert!(!c.is_chinese_mode(), "门卫没过不吞键：RShift 照常切中英");
 }

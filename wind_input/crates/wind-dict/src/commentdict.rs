@@ -21,7 +21,7 @@
 //!
 //! 同 text 的多条相邻，组内保持**挂载顺序**（供 code 消歧与「先到先得」）。
 
-use memmap2::Mmap;
+use crate::mapping::Mapped;
 use std::fs::File;
 use std::path::Path;
 use tracing::{info, warn};
@@ -33,7 +33,7 @@ const ENTRY_SIZE: usize = 12;
 
 /// 注释表 mmap 读取器。
 pub struct CommentReader {
-    mmap: Mmap,
+    mmap: Mapped,
     entry_count: u32,
     index_off: u32,
     str_off: u32,

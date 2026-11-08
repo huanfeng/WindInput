@@ -32,6 +32,12 @@ primary_pinyin = ""
 #          只在后台检查一遍词库缓存（过期就重建、建完即释放），首次切过去时再加载（缓存新鲜时
 #          很快）；30 分钟没用的方案自动卸载。省内存。
 keep_all_loaded = false
+# 词库缓存策略（词库、反查索引、注释等只读缓存文件映射后怎么处理）。
+#   "lock"   ：锁定，不让系统回收缓存。
+#   "preload"：预加载，启动时把缓存载入内存，允许系统回收。
+#   "off"    ：关闭，不做处理。
+# 修改后需重启服务生效。
+dict_cache_policy = "lock"
 
 # ── 刻意不在本文件出现的一个键（实例集合，注册表类型 StructList）────────────
 # schema.mix_modes      临时融合模式列表（代码默认 = 内置「快捷」quick_mix，`;` 触发，
@@ -97,6 +103,17 @@ wildcard = false
 wildcard_key = "z"
 # 通配仅单字：通配结果只留单字（行内通配与反查模式都生效），词组不出。方案级，这里是全局基线。
 wildcard_single_only = false
+
+# 码表整句（只在方案自己的 [engine.codetable] 写了 sentence_input = true 时生效；出厂方案都没开）。
+#   sentence_count           候选里露几条整句（1 = 只出一条，出厂）
+#   sentence_max_count       解码时算几条，供整句切换键轮换；不足 sentence_count 时按后者算。两者上限都是 8。
+#   sentence_cycle_key       整句切换键，空串 = 关闭（出厂）。键名与夺取规则同 schema.pinyin.sentence_cycle_key。
+#   sentence_grammar_weight  挂语法模型（随包 wanxiang-mini.gram）的权重，0 = 不挂。1.0 在逐字全码打法上反而掉分，出厂 0.5。
+# 与拼音的 sentence_* 各管各的。
+sentence_count = 1
+sentence_max_count = 1
+sentence_cycle_key = ""
+sentence_grammar_weight = 0.5
 
 # 码元字符集：哪些字符可以进输入缓冲（决定一次按键是打码还是作标点/选词/透传）。
 # 格式为「范围 + 字面」，如 a-x（五笔标准）、a-x/（词库含 /test 这类词条）、a-z0-9（要打 Win10）。
@@ -890,12 +907,22 @@ state_scope = "global"
 follow_mode = false
 smart_after_digit = true
 smart_list = ".,:"
+# 英文单词后的标点直出英文（Node.js、a/b、snake_case）。「英文后」以输入法自己记下的上一笔为准，
+# 自己按了空格之后不算。列表刻意不含 ,;!?——中文句子里英文词后常接中文逗号。
+smart_after_latin = false
+latin_smart_list = "./_:@"
 # custom_enabled 为自定义标点映射总开关；custom_mappings 留空时全部走内置默认转换
 custom_enabled = false
 # 自定义标点映射表：key = 源字符（引号用 "1/"2/'1/'2 区分左右），
 # value = [中文半角, 英文全角, 中文全角, 英文半角]（空串或缺列 = 该状态回退默认转换）。
 # 例：custom_mappings = { "." = ["。", "．", "。", "."] }
 custom_mappings = {}
+
+# 中英 / 中数切换处自动补空格（中 en 中、共 3 个）。空格补在切换后那一笔的前面，交界一侧
+# 是标点或空白时不补；连续的英文之间不管（那是 commit_space）。按应用关闭见 compat.toml 的 auto_spacing。
+[input.spacing]
+cjk_latin = false
+cjk_digit = false
 
 # 智能符号：同一标点在时限内连按两次，删前一字符替换为另一形态。
 # 三个总开关互相独立，各管一种上下文，都默认关：
@@ -998,8 +1025,9 @@ case_variants = true
 case_follow_input = true
 # commit_space：临英选词上屏后补一个空格。与 [schema.english] 那份是两个作用域各一份
 #   ——长时打英文连着打词、补空格顺手；中文里插一个英文词，插完往往接中文或标点，
-#   补上的空格还得退格删掉。两边取舍本就可能相反，故分开。
+#   补上的空格还得退格删掉。两边取舍本就可能相反，故分开。中英切换处的空格见 [input.spacing]。
 #   ★ 同样作用于**快捷输入里的英文**（英文词库候选与所打原文；中文候选、计算结果不补）。
+#   ★ 也作用于中文方案（五笔 / 拼音等）里混入的英文词库候选。
 #     快捷输入的英文上屏在全角态下也随临英转全角。
 commit_space = false
 # phrase_seg：临英下的词组分词输入。语义、分词符、跳词规则与 [schema.english] 那份完全
@@ -1335,6 +1363,9 @@ key_actions = {}
 #       以及符号键 minus equal lbracket rbracket comma period semicolon quote 等。
 #       只认 shift+ 一种前缀；带 ctrl/alt 的组合键请写在上面的 key_actions 里。
 # 动词：page_prev / page_next / highlight_up / highlight_down
+#       page_prev:commit_and_input / page_next:ignore 等(翻页，带后缀指定这个键翻不动时的处理，
+#           值域同下面 [keys.overflow] 的 page_key；不带后缀跟随 page_key。例：只让逗号在首页
+#           翻不动时上屏 → comma = "page_prev:commit_and_input")
 #       page_screen_prev / page_screen_next(上一屏/下一屏：候选展开后翻整屏，未展开时与翻页相同)
 #       cancel(放弃当前输入，等同 Esc；别名 clear) / none(在本态禁用该键)
 #       select_candidate:N(选中当前页第 N 个候选，N 从 1 起，2 即次选键)
@@ -1399,12 +1430,6 @@ select_char_key = "ignore"
 # ⚠ 与 input.buffer_symbol_chars 的优先级：其中的符号在组码中先进缓冲。出厂它是 "-"，所以首页
 #   按 - 仍是接着打码；想让首页的 - 也顶屏出字，需把 buffer_symbol_chars 清空（= 号不受影响）。
 page_key = "ignore"
-# 按键级覆盖：键名 → 策略，未列出的键回落上面的 page_key。为「有人只要逗号翻不动时
-# 上屏、其余翻页键无效就是无效」而设（GH#249，设计 docs/design/keys-overflow-per-key.md）。
-# 键名取 minus / equal / comma / period / lbracket / rbracket（PageUp/PageDown 不存在
-# 翻不动，不在此表）；策略值域同 page_key。键名写错 / 值非法启动时 WARN 并忽略。例：
-#   page_key_overrides = { comma = "commit_and_input" }
-page_key_overrides = { }
 
 [ui.candidate]
 # 候选窗首显策略（全局默认档）：新组合的候选窗「何时」显示，是快与准之间的取舍。
@@ -1597,6 +1622,8 @@ weight = 0
 [ui.theme]
 name = "default"
 style = "system"
+# 主题动画（皮肤装饰的动图与打字 / 上屏等事件切换）；关掉或系统关了动画效果时停在首帧
+animation = true
 
 [ui.mode_indicator]
 # 进入临时拼音/双拼/快捷/英文/快符等模式时的标识：short=短称(拼/双/快/英/符) | full=全称(临时拼音…) | none=不显示
