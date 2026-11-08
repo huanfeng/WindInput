@@ -10,7 +10,7 @@ namespace ctrlalt
 {
 
 /// 只有显式透传响应才把当前键交给宿主。
-/// ClearCompositionThenPassThrough 还要求先收组合，再重放原键。
+/// ClearCompositionThenPassThrough 的组合已在响应处理时收掉，之后同样原生交还（不重放）。
 inline bool ShouldReturnToHost(ResponseType type)
 {
     return type == ResponseType::PassThrough || type == ResponseType::ClearCompositionThenPassThrough;

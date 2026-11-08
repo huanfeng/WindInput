@@ -1796,7 +1796,14 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 且那条的门是 `!(*pfEaten)`。于是「联想态 + _pairPendingDepth>0 时按 Tab/Enter」会
     // 从这里 return，depth 不归零 ⇒ 下一次同键仍被吃下转发、再走一轮才自愈。
     // **不丢键**（键照样重放给宿主），只是多一次 IPC 往返，且 TTL 兜底仍在，故不特殊处理。
-    if (_pendingReplayToHost)
+    // Ctrl/Alt 组合（isCtrlAltCleanup）例外：不重放，交给下方按原生透传还给宿主（v0.130.1 起的
+    // 行为）。重放只补主键、修饰键靠物理按键还按着，按键处理稍慢而 Ctrl 先松开时宿主会收到
+    // 一个普通字母（Ctrl+C 打出 c）。hold 期间的 Ctrl 组合另有重放理由，见下方 hold 分支。
+    if (_pendingReplayToHost && isCtrlAltCleanup)
+    {
+        _pendingReplayToHost = FALSE;
+    }
+    else if (_pendingReplayToHost)
     {
         _pendingReplayToHost = FALSE;
         _ReplayKeyToHost((WORD)wParam);
@@ -1870,7 +1877,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 输入序列由出口守卫记下（_NoteInputSequenceAtExit），无须在此补设。
 
     // 服务端显式声明按键归属。加词编辑等动作也会关闭组合，不能据此改判为透传。
-    // ClearCompositionThenPassThrough 已在上面的重放分支处理；其余消费响应均保留吃键决定。
+    // PassThrough / ClearCompositionThenPassThrough 在这里原生交还；其余消费响应均保留吃键决定。
     if (isCtrlAltCleanup && wind::ctrlalt::ShouldReturnToHost(keyResponse))
         *pfEaten = FALSE;
 
