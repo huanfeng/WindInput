@@ -51,8 +51,12 @@
 - 对外 API（JSON 进出，便于编辑器侧类型化）：
   - `Previewer::new()`；`set_theme(toml, assets, id?)` → 解析错误原样返回（编辑器显示在面板）；base 只认内置主题，
     `base` 写成自己的 `id` 视同没写；
-  - `render(opts)` → `{ width, height, rgba }`。`opts`：明暗、横竖、嵌入、上翻、`scale`、候选条数与内容、编码、
-    选中 / 悬停、页码、`t_ms`；缺省给与 core 预览（`candidate_preview.rs`）同一套示例内容；
+  - `render(opts)` → `{ width, height, rgba, nextMs, nodes }`。`opts`：明暗、横竖、嵌入、上翻、`scale`、候选条数与
+    内容（正文、注释、上方注释条、拼音提示的字节区间）、编码、选中 / 悬停、页码、`t_ms`；缺省给与 core 预览
+    （`candidate_preview.rs`）同一套示例内容。`nodes` 是各节点的矩形（`[{ key, x, y, w, h }]`，设备像素，与 `rgba`
+    同坐标），`key` 是主题节点名（`window` / `preedit_bar` / `divider` / `candidate_list` / `item` / `index` /
+    `comment_above` / `footer_bar`），供编辑器点选与选中描边：场景构建处给节点打 `View::node` 标签，只有
+    `render_candidate*` 出图时收集，实时窗口不收；
   - `signal(name, t_ms?)`：typing / page / commit / click / `click:N` / show / hide 等，驱动装饰状态机。
 - 测试：本机原生跑 API 层（文字用 mock）；`wasm-bindgen-test` 不引入，浏览器端由 W2 的编辑器测试覆盖。
 - 构建脚本 `scripts/build-scene-wasm.sh`：`cargo build --release --target wasm32-unknown-unknown` →

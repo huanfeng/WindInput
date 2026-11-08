@@ -10,7 +10,7 @@
 ## Key Files
 | File | Description |
 |------|-------------|
-| `src/preview.rs` | API 本体 `Preview<C>`：`set_theme(toml, id, 资源)` / `render(RenderOpts)` / `signal(事件)`，原生可测；不可信输入的上限 `MAX_*` |
+| `src/preview.rs` | API 本体 `Preview<C>`：`set_theme(toml, id, 资源)` / `render(RenderOpts)` / `signal(事件)`，原生可测；不可信输入的上限 `MAX_*`；帧带节点矩形 `NodeRect`（设备像素，键名同主题节点名） |
 | `src/canvas.rs` | `Canvas` trait（宿主的测量 / 灰度画一行）+ `CanvasText`（实现 `TextBackend`，覆盖率按颜色区间着色、可能含 emoji 的行黑白两遍对比认彩色字形）；测试用 `mock::MockCanvas`（可模拟宿主失败、彩色字形） |
 | `src/builtin.rs` | 编进产物的 `data/themes/` 内置主题与图片资产 |
 | `src/web.rs` | wasm-bindgen 导出层（仅 wasm32）：`Previewer` / `Frame`，JS 画布接 `js/text.js`（`catch`）；陷入后入口报「已损坏」 |

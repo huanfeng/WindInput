@@ -114,6 +114,7 @@ pub struct Frame {
     height: u32,
     rgba: Vec<u8>,
     next_ms: Option<f64>,
+    nodes_json: String,
 }
 
 #[wasm_bindgen]
@@ -138,6 +139,13 @@ impl Frame {
     #[wasm_bindgen(getter, js_name = nextMs)]
     pub fn next_ms(&self) -> Option<f64> {
         self.next_ms
+    }
+
+    /// 各节点矩形的 JSON：`[{ key, x, y, w, h }]`，设备像素（同 `rgba` 坐标，除以 `scale` 得逻辑
+    /// 像素），先序；`key` 是主题节点名（`window` / `item` / `index` …）。
+    #[wasm_bindgen(getter)]
+    pub fn nodes(&self) -> String {
+        self.nodes_json.clone()
     }
 }
 
@@ -207,6 +215,8 @@ impl Previewer {
             height: f.height,
             rgba: f.rgba,
             next_ms: f.next_ms,
+            nodes_json: serde_json::to_string(&f.nodes)
+                .map_err(|e| JsError::new(&format!("节点矩形序列化失败：{e}")))?,
         })
     }
 

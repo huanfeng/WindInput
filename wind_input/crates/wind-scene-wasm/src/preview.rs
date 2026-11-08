@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wind_scene::assets::MemoryAssets;
 use wind_scene::candidate::{
     AnimClock, CandidateScene, CandidateSceneInput, CandidateSceneOptions, ThemeOverrides,
@@ -50,6 +50,33 @@ pub struct CandidateOpt {
     pub comment: String,
     /// 序号标签；空 = 主题槽位，再空按数字。
     pub label: String,
+    /// 上方注释条文字（`ui.candidate.comment_above` 开时的上段）；空 = 无上段。
+    pub comment_above: String,
+    /// 正确拼音提示段在 `text` 里的字节区间 `[起, 止)`（模糊音「中(zhong)文」里的 `(zhong)`）。
+    pub hint: Option<[usize; 2]>,
+}
+
+/// 候选正文：有提示区间就切成「前 / 提示 / 后」三段，提示段带拼音提示角色。
+fn candidate_styled(c: &CandidateOpt) -> Result<wind_ui_types::StyledText, String> {
+    let mut out = wind_ui_types::StyledText::new();
+    let Some([a, b]) = c.hint else {
+        return Ok(out);
+    };
+    let t = &c.text;
+    if !(a <= b && b <= t.len() && t.is_char_boundary(a) && t.is_char_boundary(b)) {
+        return Err(format!("拼音提示区间 [{a}, {b}) 不在 {t:?} 的字符边界上"));
+    }
+    let plain = wind_ui_types::SpanStyle::default();
+    out.push(&t[..a], &plain);
+    out.push(
+        &t[a..b],
+        &wind_ui_types::SpanStyle {
+            role: Some(wind_theme::PINYIN_HINT_ROLE),
+            ..Default::default()
+        },
+    );
+    out.push(&t[b..], &plain);
+    Ok(out)
 }
 
 /// `render` / `signal` 的参数（JSON，字段全可省）。
@@ -134,6 +161,19 @@ pub struct Frame {
     pub rgba: Vec<u8>,
     /// 下一次换帧时刻（毫秒，同 `t_ms` 的时间轴）；None = 画面静止，不必再画。
     pub next_ms: Option<f64>,
+    /// 各节点的矩形（先序），供编辑器点选与选中描边。
+    pub nodes: Vec<NodeRect>,
+}
+
+/// 一个节点在帧里的矩形：**设备像素**（与 `rgba` 同一坐标系，含阴影扩边；除以 `scale` 得逻辑
+/// 像素）。`key` 是主题 `views.candidate` 下的节点名（`window` / `item` / `index` …）。
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NodeRect {
+    pub key: &'static str,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 pub struct Preview<C> {
@@ -252,6 +292,7 @@ fn validate(o: &RenderOpts) -> Result<(), String> {
         check_len("候选", &c.text)?;
         check_len("注释", &c.comment)?;
         check_len("序号标签", &c.label)?;
+        check_len("上方注释", &c.comment_above)?;
     }
     if let Some(p) = &o.preedit {
         check_len("编码", p)?;
@@ -352,21 +393,23 @@ impl<C: Canvas> Preview<C> {
             o.candidates
                 .iter()
                 .enumerate()
-                .map(|(i, c)| CandidateItem {
-                    text: c.text.clone(),
-                    text_styled: Default::default(),
-                    code: String::new(),
-                    label: if c.label.is_empty() {
-                        wind_ui_types::theme_index_label(labels, i)
-                    } else {
-                        c.label.clone()
-                    },
-                    tooltip: Default::default(),
-                    comment: c.comment.clone().into(),
-                    comment_above: Default::default(),
-                    no_index: false,
+                .map(|(i, c)| {
+                    Ok(CandidateItem {
+                        text: c.text.clone(),
+                        text_styled: candidate_styled(c)?,
+                        code: String::new(),
+                        label: if c.label.is_empty() {
+                            wind_ui_types::theme_index_label(labels, i)
+                        } else {
+                            c.label.clone()
+                        },
+                        tooltip: Default::default(),
+                        comment: c.comment.clone().into(),
+                        comment_above: c.comment_above.clone().into(),
+                        no_index: false,
+                    })
                 })
-                .collect()
+                .collect::<Result<_, String>>()?
         };
         let preedit = o
             .preedit
@@ -438,6 +481,17 @@ impl<C: Canvas> Preview<C> {
             height: frame.height,
             rgba: frame.to_rgba(),
             next_ms: self.scene.next_anim_at().map(|d| d.as_secs_f64() * 1000.0),
+            nodes: frame
+                .nodes
+                .iter()
+                .map(|(k, r)| NodeRect {
+                    key: k.name(),
+                    x: r.x,
+                    y: r.y,
+                    w: r.w,
+                    h: r.h,
+                })
+                .collect(),
         })
     }
 
@@ -530,6 +584,59 @@ mod tests {
             "出厂 7 条，不画第 10 条"
         );
         assert_eq!(f.next_ms, None, "无皮肤无动画");
+    }
+
+    #[test]
+    fn candidates_take_comment_above_and_pinyin_hint() {
+        let (mut p, c) = preview();
+        let o: RenderOpts = serde_json::from_str(
+            r#"{"candidates":[{"text":"中(zhong)文","hint":[3,10],"comment_above":"zhōng wén"},{"text":"众"}]}"#,
+        )
+        .unwrap();
+        let f = p.render(&o).unwrap();
+        font_of(&c, "zhōng wén");
+        assert!(f.nodes.iter().any(|n| n.key == "comment_above"));
+        let bad: RenderOpts =
+            serde_json::from_str(r#"{"candidates":[{"text":"中文","hint":[1,3]}]}"#).unwrap();
+        let e = p.render(&bad).err().unwrap();
+        assert!(e.contains("字符边界"), "{e}");
+    }
+
+    #[test]
+    fn frame_carries_node_rects_in_device_pixels() {
+        let (mut p, _) = preview();
+        let one = p.render(&RenderOpts::default()).unwrap();
+        let two = p
+            .render(&RenderOpts {
+                scale: 2.0,
+                ..Default::default()
+            })
+            .unwrap();
+        let keys: Vec<&str> = one.nodes.iter().map(|n| n.key).collect();
+        for want in [
+            "window",
+            "preedit_bar",
+            "candidate_list",
+            "item",
+            "index",
+            "footer_bar",
+        ] {
+            assert!(keys.contains(&want), "缺 {want}：{keys:?}");
+        }
+        assert_eq!(keys.iter().filter(|k| **k == "item").count(), 7);
+        let item = |f: &Frame| f.nodes.iter().find(|n| n.key == "item").unwrap().clone();
+        let (a, b) = (item(&one), item(&two));
+        assert!(
+            (b.w - a.w * 2.0).abs() <= 2.0,
+            "设备像素随 scale：{a:?} / {b:?}"
+        );
+        for n in &two.nodes {
+            assert!(n.x >= 0.0 && n.y >= 0.0, "{n:?}");
+            assert!(n.x + n.w <= two.width as f32 + 0.5, "{n:?}");
+            assert!(n.y + n.h <= two.height as f32 + 0.5, "{n:?}");
+        }
+        let json = serde_json::to_string(&one.nodes[0]).unwrap();
+        assert!(json.starts_with(r#"{"key":"window","x":"#), "{json}");
     }
 
     #[test]

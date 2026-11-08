@@ -100,7 +100,12 @@ try {
   const raw = p.render('{}');
   const f = { width: raw.width, height: raw.height };
   const rgba = raw.rgba;
+  const nodes = JSON.parse(raw.nodes);
   raw.free();
+  check(
+    nodes[0]?.key === 'window' && nodes.some((n) => n.key === 'item'),
+    `节点矩形 ${nodes.map((n) => n.key).join(',')}`,
+  );
   check(f.width > f.height && f.height > 0, `横排尺寸 ${f.width}x${f.height}`);
   check(rgba.length === f.width * f.height * 4, '像素长度');
   let opaque = 0;
@@ -145,6 +150,7 @@ try {
   await a.setTheme('base = "jade"\n[meta]\nname = "j"\n', {});
   const before = await a.render({});
   check(before.rgba.length === before.width * before.height * 4, '包装出普通对象');
+  check(Array.isArray(before.nodes) && before.nodes[0].key === 'window', '包装解出节点矩形');
   a.raw.render = () => {
     throw new WebAssembly.RuntimeError('unreachable');
   };

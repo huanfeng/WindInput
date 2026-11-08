@@ -17,7 +17,8 @@
 //   import { AutoPreviewer, PreviewerFailedError } from './preview.js';
 //   const p = await AutoPreviewer.create();             // 或 create({ wasm: bytes | WebAssembly.Module })
 //   await p.setTheme(toml, { 'assets/bg.png': u8 }, 'my-theme');
-//   const { width, height, rgba, nextMs } = await p.render({ t_ms: now, animate: true });
+//   const { width, height, rgba, nextMs, nodes } = await p.render({ t_ms: now, animate: true });
+//   // nodes: [{ key, x, y, w, h }]，设备像素（同 rgba 坐标，÷ scale 得逻辑像素）
 //   ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
 //   await p.signal('typing');
 // render 返回的是普通对象，wasm 侧的 Frame 已在这里 free。
@@ -155,7 +156,13 @@ export class AutoPreviewer {
     return this.#call((p) => {
       const f = p.render(json);
       try {
-        return { width: f.width, height: f.height, rgba: f.rgba, nextMs: f.nextMs };
+        return {
+          width: f.width,
+          height: f.height,
+          rgba: f.rgba,
+          nextMs: f.nextMs,
+          nodes: JSON.parse(f.nodes),
+        };
       } finally {
         f.free();
       }
