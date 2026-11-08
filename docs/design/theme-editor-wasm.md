@@ -18,7 +18,7 @@
 已知差异（接受）：浏览器的字形光栅与 DirectWrite / CoreText 不逐像素一致（抗锯齿、hinting）；行高取
 `fontBoundingBoxAscent + fontBoundingBoxDescent`，与 DirectWrite 行高在个别字体上差 1 px；画字位置取整到像素
 （不做亚像素定位）；字体回退由浏览器按 CSS 字族栈做，不走方案的按脚本指派（`ui.font.scripts`）与回退链；
-彩色字形（emoji）的判定是「回读像素非近白」，emoji 里的近白区域会随区间色着色。
+彩色字形（emoji）靠黑白两遍对比认出（只对可能含 emoji 的行画第二遍），码位判定之外的彩色字形会被当成普通字着色。
 
 与 wind-ui Linux 文字后端**对齐**的口径：空串行高 = 字号 × 1.2；`\n` 分行（宽取最宽一行、高 = 行数 × 行高）；
 颜色区间重叠时后写的赢；字重钳到 1..=1000；字号非有限或非正时用基准字号。
@@ -32,8 +32,8 @@
 - 新 crate `wind_input/crates/wind-scene-wasm`（`cdylib`，`wasm-bindgen`），只依赖 `wind-scene` / `wind-theme` /
   `wind-ui-types`；本机 `cargo check --target wasm32-unknown-unknown` 进 `dev.sh` 现有的 wasm 检查。
 - `CanvasText`：实现 `TextBackend`，经 `#[wasm_bindgen(catch)] extern` 调 JS 提供的 `measure(text, font) -> [w, h]` 与
-  `draw(text, font, x0, x1) -> {x, y, w, h, pixels}`（一行文字、不透明白色、只栅格化缓冲里可见的横坐标段；Rust
-  侧把白色当覆盖率按颜色区间着色）；测量按 `measure_key` 缓存。JS 抛异常只让当前帧失败。JS 侧实现随产物一起出
+  `draw(text, font, x0, x1, ink) -> {x, y, w, h, pixels}`（一行文字、不透明灰度 `ink`、只栅格化缓冲里可见的横坐标段；
+  Rust 侧把白色那遍当覆盖率按颜色区间着色，可能含 emoji 的行再画一遍黑色，两遍相同的像素是彩色字形本色）；测量按 `measure_key` 缓存。JS 抛异常只让当前帧失败。JS 侧实现随产物一起出
   （`text.js`）。
 - 不可信输入一律设上限（`preview.rs` 的 `MAX_*`）：缩放 ≤ 8、生效字号 ≤ 200（参数与主题 `behavior.font_size`
   同一道闸）、候选 ≤ 50 条、单条文字 ≤ 256 字、`t_ms` 钳到 1e12；排版出的帧单边 > 4096 或像素 > 4096×2048 在
@@ -41,8 +41,11 @@
 - 多实例：每个 `Previewer` 持自己的资源表（带代号）与图片 / 阴影缓存（`wind_scene::view::PaintCaches`），用前
   登记、换上，同页两个预览互不踩；资源内容没变时 `set_theme` 沿用代号与缓存，皮肤图不重新解码。
 - 不可恢复的错误（Rust panic 在 wasm 上即陷入）：模块入口的「调用中」标记留着不清，此后调用一律报「已损坏」；
-  产物里的 `preview.js`（`AutoPreviewer`）遇到这类错误自动重新实例化模块、重放最近一次 `setTheme` 并重试。
-  W2 走 `AutoPreviewer`；直接用 `Previewer` 时要自己 `frame.free()`。
+  产物里的 `preview.js`（`AutoPreviewer`）遇到这类错误自动重新实例化模块、重放最近一次 `setTheme` 并重试；重建
+  串行化，且有预算（10 秒内至多 2 次，每次重建都会永久留下一份模块与线性内存），超了抛 `PreviewerFailedError`，
+  编辑器据此退回 Canvas2D 旧实现。W2 走 `AutoPreviewer`；直接用 `Previewer` 时要自己 `frame.free()`。
+  `preview.js` 按变量路径动态导入胶水，打包器不分析：整个产物目录须作为静态文件原样发布。
+- 预览当作一块 4096 见方的屏幕（`screen_extent_px`），长注释像实机一样被钳宽截断，只有高度靠尺寸闸。
 - 内存资源源：`wind-scene` 加 `assets::MemoryAssets`（相对路径 → `Arc<[u8]>`），`theme_assets` 解析相对引用时
   先查它；不开 wasm 也能用（单测在本机跑）。
 - 对外 API（JSON 进出，便于编辑器侧类型化）：
