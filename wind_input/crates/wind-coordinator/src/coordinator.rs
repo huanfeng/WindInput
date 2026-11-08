@@ -957,6 +957,7 @@ thread_local! {
 ///   不重建），结果在 `reload_user_config` 里并进 `schema_dirty`。
 /// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
 ///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
+/// - `schema.dict_cache_policy`：只在服务启动时读一次（改了要重启才生效），重建引擎也换不了策略。
 pub(crate) fn engine_reload_needed(
     old: &Config,
     new: &Config,
@@ -965,6 +966,7 @@ pub(crate) fn engine_reload_needed(
     let schema_changed = {
         let mut old_schema = old.schema.clone();
         old_schema.keep_all_loaded = new.schema.keep_all_loaded;
+        old_schema.dict_cache_policy = new.schema.dict_cache_policy.clone();
         old_schema != new.schema
     };
     schema_changed
@@ -12302,6 +12304,20 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.schema.keep_all_loaded = !old.schema.keep_all_loaded;
+        assert!(!engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
+    }
+
+    /// 反向对照：词库缓存策略只在启动时读，改它重建引擎也不生效，不该触发重建。
+    #[test]
+    fn dict_cache_policy_change_does_not_require_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.schema.dict_cache_policy = "off".to_string();
+        assert_ne!(old.schema.dict_cache_policy, new.schema.dict_cache_policy);
         assert!(!engine_reload_needed(
             &old,
             &new,
