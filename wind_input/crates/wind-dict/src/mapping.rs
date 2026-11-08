@@ -232,8 +232,11 @@ fn map_file_with(file: &File, policy: CachePolicy) -> std::io::Result<Mapped> {
                     Ok(m)
                 }
                 Err(e) => {
+                    // 拷不进私有内存（多半是内存紧张）就退回普通映射，与锁页失败同样处理：
+                    // 缓存策略只影响快慢，不能让词库因此加载不了。
                     PRELOADED.fetch_sub(len, Ordering::Relaxed);
-                    Err(e)
+                    tracing::warn!("词库缓存预加载失败，退回普通映射（{} KB）：{e}", len / 1024);
+                    Ok(Mapped::plain(mapped))
                 }
             },
             None => {
