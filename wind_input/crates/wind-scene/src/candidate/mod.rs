@@ -9,7 +9,7 @@ mod render;
 mod skin_geom;
 mod theme;
 
-pub use render::{CandidateFrame, render_candidate};
+pub use render::{CandidateFrame, render_candidate, render_candidate_within};
 
 pub use skin_geom::{AnimClock, AvoidMask, DecorGeom, PlaceAnchor, SkinGeom, SlotKind};
 pub use theme::{EffectiveTheme, ThemeOverrides, effective_base_font_size, effective_theme};

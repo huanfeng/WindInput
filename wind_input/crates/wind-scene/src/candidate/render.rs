@@ -55,9 +55,46 @@ pub fn render_candidate(
         inner: inp.text_renderer,
         base_size: inp.base_font_logical * inp.scale,
     };
+    let frame = layout_frame(scene, inp, clock, soft_shadow, &text);
+    paint_frame(scene, &frame, &text)
+}
+
+/// 同 [`render_candidate`]，但排版出来的缓冲宽或高超过 `max_side`、或像素总数超过
+/// `max_pixels` 时不画、返回错误（含尺寸）。给参数与主题都不可信的调用方用（主题编辑器）：
+/// 超大字号、海量候选在分配缓冲与逐像素绘制之前就挡住。
+pub fn render_candidate_within(
+    scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
+    clock: AnimClock,
+    soft_shadow: bool,
+    max_side: u32,
+    max_pixels: u64,
+) -> Result<CandidateFrame, String> {
+    let text = SizedText {
+        inner: inp.text_renderer,
+        base_size: inp.base_font_logical * inp.scale,
+    };
+    let frame = layout_frame(scene, inp, clock, soft_shadow, &text);
+    let (w, h) = frame.size();
+    if w > max_side || h > max_side || u64::from(w) * u64::from(h) > max_pixels {
+        return Err(format!(
+            "候选窗尺寸 {w}×{h} 超出上限（单边 {max_side}、共 {max_pixels} 像素）"
+        ));
+    }
+    Ok(paint_frame(scene, &frame, &text))
+}
+
+/// 排版（含上方专属布局的重排）。`text` 是钉好基准字号的文字后端。
+fn layout_frame(
+    scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
+    clock: AnimClock,
+    soft_shadow: bool,
+    text: &SizedText,
+) -> super::SceneFrame {
     let below = CandidateSceneInput {
         above: false,
-        text_renderer: &text,
+        text_renderer: text,
         ..*inp
     };
     let mut frame = scene.layout(&below, clock, soft_shadow);
@@ -68,9 +105,17 @@ pub fn render_candidate(
         };
         scene.relayout_above(&above, &mut frame);
     }
+    frame
+}
+
+fn paint_frame(
+    scene: &mut CandidateScene,
+    frame: &super::SceneFrame,
+    text: &SizedText,
+) -> CandidateFrame {
     let (width, height) = frame.size();
     let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
-    scene.paint(&frame, &mut bgra, &text, false);
+    scene.paint(frame, &mut bgra, text, false);
     CandidateFrame {
         width,
         height,
@@ -243,6 +288,55 @@ mod tests {
         for d in [d0, d1, d2] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    /// 超限的帧在绘制前挡住；不超限时与 `render_candidate` 同一帧。
+    #[test]
+    fn within_rejects_oversized_frames() {
+        let theme = wind_theme::Resolved::default();
+        let text = MockText::new("", 16.0).unwrap();
+        let opts = CandidateSceneOptions::default();
+        let cands = [cand("你好")];
+        let inp = CandidateSceneInput {
+            candidates: &cands,
+            preedit: "nihao",
+            preedit_caret: 5,
+            mode_label: "",
+            selected: 0,
+            hover: -1,
+            page: 1,
+            total_pages: 1,
+            grid: None,
+            vertical: false,
+            rotated: false,
+            upright: false,
+            preedit_embedded: false,
+            above: false,
+            theme: &theme,
+            base_font_logical: 16.0,
+            scale: 1.0,
+            screen_extent_px: Some((1920, 1080)),
+            text_renderer: &text,
+            opts: &opts,
+        };
+        let clock = AnimClock {
+            t: std::time::Duration::ZERO,
+            showing: true,
+            allowed: false,
+        };
+        let mut scene = CandidateScene::default();
+        let full = render_candidate(&mut scene, &inp, clock, false);
+        let ok = render_candidate_within(&mut scene, &inp, clock, false, 4096, 1 << 24).unwrap();
+        assert_eq!(ok.bgra, full.bgra);
+        let e = render_candidate_within(&mut scene, &inp, clock, false, full.width - 1, 1 << 24)
+            .err()
+            .expect("单边超限");
+        assert!(
+            e.contains(&format!("{}×{}", full.width, full.height)),
+            "{e}"
+        );
+        let px = u64::from(full.width) * u64::from(full.height);
+        assert!(render_candidate_within(&mut scene, &inp, clock, false, 4096, px - 1).is_err());
     }
 
     #[test]

@@ -225,25 +225,42 @@ pub fn paint_cache_evict_if_idle(now: crate::clock::Instant) -> bool {
     image || shadow
 }
 
+/// 一套图片 / 阴影绘制缓存，由调用方持有（见 [`with_paint_caches`]）。
+#[derive(Default)]
+pub struct PaintCaches {
+    image: crate::image_cache::ImageCache,
+    shadow: ShadowCache,
+}
+
+/// 换上调用方持有的那套缓存跑 `f`，跑完把它（连同 `f` 里新增的条目）收回 `caches`、换回原来
+/// 那套。闭包 panic 也会换回。
+///
+/// 给同线程里多个互不相干的出图方用（同页两个编辑器预览）：各用各的缓存，一方换主题清缓存不
+/// 波及另一方，一方的大图也不会挤爆另一方的预算。
+pub fn with_paint_caches<R>(caches: &mut PaintCaches, f: impl FnOnce() -> R) -> R {
+    struct Swap<'a>(&'a mut PaintCaches);
+    impl Drop for Swap<'_> {
+        fn drop(&mut self) {
+            swap_paint_caches(self.0);
+        }
+    }
+    swap_paint_caches(caches);
+    let _back = Swap(caches);
+    f()
+}
+
+fn swap_paint_caches(c: &mut PaintCaches) {
+    IMAGE_CACHE.with(|i| std::mem::swap(&mut *i.borrow_mut(), &mut c.image));
+    SHADOW_CACHE.with(|s| std::mem::swap(&mut *s.borrow_mut(), &mut c.shadow));
+}
+
 /// 在一套**临时**的图片 / 阴影缓存里跑 `f`，跑完丢掉、换回原来那套。
 ///
 /// 给一次性出图（设置端预览）用：它画的是别的主题、甚至临时目录里的主题，进了实时窗口
 /// 那套线程局部缓存，大图会触发超预算整体清空（连实时窗口的源图与图集一起），临时路径
 /// 还会让句柄表越积越多。闭包 panic 也会换回原缓存。
 pub fn with_isolated_paint_caches<R>(f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<(crate::image_cache::ImageCache, ShadowCache)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            if let Some((image, shadow)) = self.0.take() {
-                IMAGE_CACHE.with(|c| *c.borrow_mut() = image);
-                SHADOW_CACHE.with(|c| *c.borrow_mut() = shadow);
-            }
-        }
-    }
-    let image = IMAGE_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut()));
-    let shadow = SHADOW_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut()));
-    let _restore = Restore(Some((image, shadow)));
-    f()
+    with_paint_caches(&mut PaintCaches::default(), f)
 }
 
 /// 仅测试可见：直接操作线程局部的图片缓存（wind-ui 的等待回收测试要在里面布置陈旧驻留）。
@@ -4425,5 +4442,21 @@ mod isolated_cache_tests {
             before,
             "换回原缓存"
         );
+    }
+
+    /// 调用方持有的缓存跨次保留自己的条目，且与线程当前那套互不串。
+    #[test]
+    fn owned_paint_caches_keep_their_entries() {
+        let ids = || with_image_cache_for_test(|c| c.ids_len_for_test());
+        let before = ids();
+        let mut a = PaintCaches::default();
+        with_paint_caches(&mut a, || {
+            let _ = image_src_size("data:image/png;base64,AAAA");
+        });
+        assert_eq!(ids(), before, "线程当前那套不变");
+        let n = with_paint_caches(&mut a, ids);
+        assert_eq!(n, 1, "第二次换上时条目还在");
+        let mut b = PaintCaches::default();
+        assert_eq!(with_paint_caches(&mut b, ids), 0, "另一套是空的");
     }
 }

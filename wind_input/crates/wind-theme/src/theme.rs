@@ -228,21 +228,24 @@ pub fn load_typed_dirs(dirs: &[PathBuf], name: &str) -> anyhow::Result<Theme> {
     type_merged(load_merged_dirs(dirs, name, 0)?, name)
 }
 
-/// 不走文件系统的版本：主题文本 + 按 id 取 base 主题文本（取不到 = 不存在）。给没有文件系统的
-/// 调用方用（主题编辑器的 wasm 预览把内置主题编进产物）。合并、归一化与类型化同 [`load_typed_dirs`]；
-/// base 引用同样只认普通 slug（[`is_plain_slug`]）。错误信息含 TOML 的行列，可原样给用户看。
+/// 不走文件系统的版本：主题文本 + 它自己的 id（可空）+ 按 id 取 base 主题文本。给没有文件系统的
+/// 调用方用（主题编辑器的 wasm 预览把内置主题编进产物）；取不到 base 时由 `base_text` 给出错误
+/// （调用方最清楚该怎么说明）。合并、归一化与类型化同 [`load_typed_dirs`]：base 引用只认普通 slug
+/// （[`is_plain_slug`]），`base` 写成自己的 id 视同没写。错误信息含 TOML 的行列，可原样给用户看。
 pub fn load_typed_text(
     text: &str,
-    base_text: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    base_text: &dyn Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<Theme> {
-    type_merged(load_merged_text_at(text, "", 0, base_text)?, "(text)")
+    let label = if name.is_empty() { "(text)" } else { name };
+    type_merged(load_merged_text_at(text, name, 0, base_text)?, label)
 }
 
 fn load_merged_text_at(
     text: &str,
     name: &str,
     depth: usize,
-    base_text: &dyn Fn(&str) -> Option<String>,
+    base_text: &dyn Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<Value> {
     if depth > 8 {
         anyhow::bail!("theme base chain too deep (cycle?) at {}", name);
@@ -258,8 +261,7 @@ fn load_merged_text_at(
         if !is_plain_slug(base) {
             anyhow::bail!("base 只能写主题 id（不能含路径）：{base:?}");
         }
-        let t = base_text(base).ok_or_else(|| anyhow::anyhow!("theme '{}' not found", base))?;
-        load_merged_text_at(&t, base, d, base_text)
+        load_merged_text_at(&base_text(base)?, base, d, base_text)
     })
 }
 
@@ -1019,40 +1021,48 @@ mod tests {
     fn text_loading_matches_directory_loading_for_builtins() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/themes");
         let dirs = vec![root.clone()];
-        let read = |id: &str| std::fs::read_to_string(root.join(id).join(THEME_FILE)).ok();
+        let read = |id: &str| Ok(std::fs::read_to_string(root.join(id).join(THEME_FILE))?);
         let ids = list_theme_ids(&root);
         assert!(ids.iter().any(|i| i == "default"), "{ids:?}");
         for id in ids {
             let from_dir = load_merged_dirs(&dirs, &id, 0).unwrap();
-            let from_text = load_merged_text_at(&read(&id).unwrap(), "", 0, &read).unwrap();
+            let text = read(&id).unwrap();
+            let from_text = load_merged_text_at(&text, &id, 0, &read).unwrap();
             assert_eq!(from_dir, from_text, "{id}");
-            load_typed_text(&read(&id).unwrap(), &read).unwrap();
+            load_typed_text(&text, &id, &read).unwrap();
         }
     }
 
     #[test]
     fn text_loading_reports_errors() {
-        let none = |_: &str| None;
-        let e = load_typed_text("[meta\nname = 1", &none).unwrap_err();
+        let none = |b: &str| -> anyhow::Result<String> { anyhow::bail!("没有 {b}") };
+        let e = load_typed_text("[meta\nname = 1", "", &none).unwrap_err();
         assert!(e.to_string().starts_with("parse theme:"), "{e}");
-        let e = load_typed_text("base = \"missing\"\n", &none).unwrap_err();
-        assert!(e.to_string().contains("missing"), "{e}");
+        let e = load_typed_text("base = \"missing\"\n", "", &none).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "没有 missing",
+            "取不到 base 的说明由调用方给"
+        );
         // base 只认普通 slug：路径形态连查都不查。
         let asked = std::cell::Cell::new(false);
         let spy = |_: &str| {
             asked.set(true);
-            Some(String::new())
+            Ok(String::new())
         };
-        assert!(load_typed_text("base = \"../x\"\n", &spy).is_err());
+        assert!(load_typed_text("base = \"../x\"\n", "", &spy).is_err());
         assert!(!asked.get(), "非 slug 的 base 不该去取");
+        // base 写成自己的 id 视同没写（同目录加载）。
+        load_typed_text("base = \"mine\"\n", "mine", &spy).unwrap();
+        assert!(!asked.get(), "指向自己的 base 不该去取");
         // 循环继承止于深度上限。
         let cyc = |id: &str| {
-            Some(format!(
+            Ok(format!(
                 "base = \"{}\"\n",
                 if id == "a" { "b" } else { "a" }
             ))
         };
-        let e = load_typed_text("base = \"a\"\n", &cyc).unwrap_err();
+        let e = load_typed_text("base = \"a\"\n", "", &cyc).unwrap_err();
         assert!(e.to_string().contains("too deep"), "{e}");
     }
 }

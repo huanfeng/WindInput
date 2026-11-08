@@ -1,21 +1,46 @@
 //! 预览 API 本体（与 JS 无关，原生目标上用 mock 画布单测）：主题文本 + 资源 → 一帧候选窗 RGBA。
 //!
 //! 渲染走与设置端预览（wind-ui `candidate_window/preview.rs`）同一条路：
-//! [`effective_theme`] 叠外观覆盖 → [`render_candidate`]。动画由调用方给时刻（`t_ms`），
+//! [`effective_theme`] 叠外观覆盖 → [`render_candidate_within`]。动画由调用方给时刻（`t_ms`），
 //! 事件经 [`Preview::signal`] 喂装饰状态机。
+//!
+//! 参数与主题都来自编辑器（主题可能是从市场导入的不可信文本），一律设上限：参数超限直接报错，
+//! 生效字号超限报错，排版出来的帧超过 [`MAX_SIDE`] / [`MAX_PIXELS`] 在分配缓冲之前报错。
+//! 本期不支持旋转（rotated）与直立（upright）排版、不支持展开网格。
 
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
+use wind_scene::assets::MemoryAssets;
 use wind_scene::candidate::{
     AnimClock, CandidateScene, CandidateSceneInput, CandidateSceneOptions, ThemeOverrides,
-    effective_theme, render_candidate,
+    effective_theme, render_candidate_within,
 };
+use wind_scene::view::PaintCaches;
 use wind_theme::Resolved;
 use wind_theme::skin::DecorEvent;
 use wind_ui_types::CandidateItem;
 
 use crate::canvas::{Canvas, CanvasText};
+
+/// 帧缓冲单边上限（设备像素）。
+pub const MAX_SIDE: u32 = 4096;
+/// 帧缓冲像素总数上限（RGBA 约 32 MB）。
+pub const MAX_PIXELS: u64 = 4096 * 2048;
+/// 生效候选字号上限（逻辑像素；`font_size` 参数与主题 `behavior.font_size` 都受它管）。
+pub const MAX_FONT_SIZE: f32 = 200.0;
+/// DPI 缩放上限。
+pub const MAX_SCALE: f32 = 8.0;
+/// 自定义候选条数上限。
+pub const MAX_CANDIDATES: usize = 50;
+/// 单条文字（候选、注释、标签、编码、字族名）的字符数上限。
+pub const MAX_TEXT_CHARS: usize = 256;
+/// `t_ms` 钳到这里（约 31 年）。
+pub const MAX_T_MS: f64 = 1e12;
+/// 页码与总页数上限。
+pub const MAX_PAGES: usize = 9999;
 
 /// 一条自定义候选。
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -117,6 +142,13 @@ pub struct Preview<C> {
     themes: [Resolved; 2],
     scene: CandidateScene,
     scene_opts: CandidateSceneOptions,
+    /// 本实例的资源表（内置资产 + 调用方资源）与代号；每次排版 / 绘制前登记成本线程的当前表。
+    assets: Arc<MemoryAssets>,
+    assets_gen: u64,
+    /// 调用方资源的指纹（路径 + 长度 + 内容哈希），没变就沿用代号与缓存，不重新解码。
+    assets_fp: u64,
+    /// 本实例的图片 / 阴影缓存：同页别的实例换主题、清缓存都不波及它。
+    caches: PaintCaches,
     /// 上一帧已画出（装饰状态机视窗口为显示中）。
     visible: bool,
     /// 状态机按哪种动画开关建的。
@@ -125,33 +157,57 @@ pub struct Preview<C> {
     last: RenderOpts,
 }
 
-/// `t_ms` → 时间轴时长（负数、NaN 当 0）。
+/// `t_ms` → 时间轴时长：负数、NaN 当 0，钳到 [`MAX_T_MS`]。
 fn duration_ms(t_ms: f64) -> Duration {
-    if t_ms.is_finite() && t_ms > 0.0 {
-        Duration::from_secs_f64(t_ms / 1000.0)
+    let ms = if t_ms.is_finite() {
+        t_ms.clamp(0.0, MAX_T_MS)
     } else {
-        Duration::ZERO
-    }
+        0.0
+    };
+    Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(Duration::ZERO)
 }
 
-/// 主题文本 → `[亮, 暗]`，base 链在内置主题里找。
-fn resolve_text(toml: &str) -> Result<[Resolved; 2], String> {
-    let t = wind_theme::load_typed_text(toml, &crate::builtin::theme_text)
-        .map_err(|e| format!("{e:#}"))?;
+/// 编辑器预览的 base 只能是编进产物的内置主题。
+fn builtin_base(id: &str) -> anyhow::Result<String> {
+    crate::builtin::theme_text(id).ok_or_else(|| {
+        let ids: Vec<_> = crate::builtin::theme_ids().collect();
+        anyhow::anyhow!(
+            "base 主题 {id:?} 不是内置主题：编辑器预览只认内置主题作 base（{}）",
+            ids.join(" / ")
+        )
+    })
+}
+
+/// 主题文本 → `[亮, 暗]`。
+fn resolve_text(toml: &str, id: &str) -> Result<[Resolved; 2], String> {
+    let t = wind_theme::load_typed_text(toml, id, &builtin_base).map_err(|e| format!("{e:#}"))?;
     Ok([
         wind_theme::resolve(&t, false, &[]),
         wind_theme::resolve(&t, true, &[]),
     ])
 }
 
-/// 内置资产 + 调用方资源（同名覆盖内置）登记进本线程的内存资源表。
-fn install_assets(assets: Vec<(String, Vec<u8>)>) {
-    let mut m = wind_scene::assets::MemoryAssets::new();
+/// 调用方资源的指纹：按路径排序后的（路径, 长度, 内容哈希）。
+fn assets_fingerprint(assets: &[(String, Vec<u8>)]) -> u64 {
+    let mut v: Vec<&(String, Vec<u8>)> = assets.iter().collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (p, b) in v {
+        p.hash(&mut h);
+        b.len().hash(&mut h);
+        b.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// 内置资产 + 调用方资源（同名覆盖内置）。
+fn build_assets(assets: Vec<(String, Vec<u8>)>) -> MemoryAssets {
+    let mut m = MemoryAssets::new();
     crate::builtin::add_assets(&mut m);
     for (path, bytes) in assets {
         m.insert(&path, bytes);
     }
-    wind_scene::assets::install(m);
+    m
 }
 
 /// 事件名 → 装饰事件与目标装饰：`typing` / `commit` / `idle_5s` …，`click` 给全部装饰，
@@ -163,45 +219,108 @@ fn parse_signal(name: &str) -> Option<(DecorEvent, Option<usize>)> {
     Some((DecorEvent::parse(name)?, None))
 }
 
+/// 一段文字不超过 [`MAX_TEXT_CHARS`] 个字符。
+fn check_len(what: &str, s: &str) -> Result<(), String> {
+    let n = s.chars().count();
+    if n > MAX_TEXT_CHARS {
+        return Err(format!("{what}过长：{n} 字（上限 {MAX_TEXT_CHARS}）"));
+    }
+    Ok(())
+}
+
+/// 参数上限（生效字号另在主题叠加之后查）。
+fn validate(o: &RenderOpts) -> Result<(), String> {
+    if !(o.scale.is_finite() && o.scale > 0.0 && o.scale <= MAX_SCALE) {
+        return Err(format!(
+            "缩放比例无效：{}（须在 (0, {MAX_SCALE}]）",
+            o.scale
+        ));
+    }
+    if !(o.font_size.is_finite() && (0.0..=MAX_FONT_SIZE).contains(&o.font_size)) {
+        return Err(format!(
+            "字号无效：{}（0 = 跟随主题，否则须在 (0, {MAX_FONT_SIZE}]）",
+            o.font_size
+        ));
+    }
+    if o.candidates.len() > MAX_CANDIDATES {
+        return Err(format!(
+            "候选过多：{} 条（上限 {MAX_CANDIDATES}）",
+            o.candidates.len()
+        ));
+    }
+    for c in &o.candidates {
+        check_len("候选", &c.text)?;
+        check_len("注释", &c.comment)?;
+        check_len("序号标签", &c.label)?;
+    }
+    if let Some(p) = &o.preedit {
+        check_len("编码", p)?;
+    }
+    check_len("模式标签", &o.mode_label)?;
+    check_len("字族名", &o.font_family)?;
+    if o.page > MAX_PAGES || o.total_pages > MAX_PAGES {
+        return Err(format!("页码超限（上限 {MAX_PAGES}）"));
+    }
+    if o.selected > MAX_CANDIDATES || o.hover > MAX_CANDIDATES as i32 {
+        return Err(format!("选中 / 悬停下标超限（上限 {MAX_CANDIDATES}）"));
+    }
+    Ok(())
+}
+
 impl<C: Canvas> Preview<C> {
     /// 预览内置 `default` 主题、只有内置资产。
     pub fn new(canvas: C) -> Self {
         let themes = crate::builtin::theme_text(crate::builtin::DEFAULT_THEME)
-            .and_then(|t| resolve_text(&t).ok())
+            .and_then(|t| resolve_text(&t, crate::builtin::DEFAULT_THEME).ok())
             .unwrap_or_default();
-        install_assets(Vec::new());
         Self {
             text: CanvasText::new(canvas),
             themes,
             scene: CandidateScene::default(),
             scene_opts: CandidateSceneOptions::default(),
+            assets: Arc::new(build_assets(Vec::new())),
+            assets_gen: wind_scene::assets::next_generation(),
+            assets_fp: assets_fingerprint(&[]),
+            caches: PaintCaches::default(),
             visible: false,
             anim_allowed: false,
             last: RenderOpts::default(),
         }
     }
 
-    /// 换主题与资源（路径 → 字节，相对主题目录，如 `assets/panel.png`）。解析失败返回错误
-    /// 原文（含 TOML 行列），当前主题与资源不变。
-    pub fn set_theme(&mut self, toml: &str, assets: Vec<(String, Vec<u8>)>) -> Result<(), String> {
-        self.themes = resolve_text(toml)?;
-        install_assets(assets);
-        // 新场景：皮肤告警重新报、装饰状态机重建；旧主题的动画帧丢掉。
+    /// 换主题与资源（路径 → 字节，相对主题目录，如 `assets/panel.png`）。`id` 是主题自己的 id
+    /// （可空；`base` 写成它视同没写，同目录加载）。解析失败返回错误原文（含 TOML 行列），当前
+    /// 主题与资源不变。
+    ///
+    /// 资源内容没变（只改了主题文字）时沿用资源代号与图片缓存，皮肤图不重新解码；变了就换新代号、
+    /// 丢掉本实例的图片缓存与动画帧。
+    pub fn set_theme(
+        &mut self,
+        toml: &str,
+        id: &str,
+        assets: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), String> {
+        self.themes = resolve_text(toml, id)?;
+        let fp = assets_fingerprint(&assets);
+        if fp != self.assets_fp {
+            self.assets = Arc::new(build_assets(assets));
+            self.assets_gen = wind_scene::assets::next_generation();
+            self.assets_fp = fp;
+            self.caches = PaintCaches::default();
+        }
+        // 新场景：皮肤告警重新报、装饰状态机重建。
         self.scene = CandidateScene::default();
         self.visible = false;
-        wind_scene::view::clear_anim_frames();
         Ok(())
     }
 
-    /// 按参数搭一帧的场景输入交给 `f`。
+    /// 按参数搭一帧的场景输入，登记本实例的资源表、换上本实例的缓存，交给 `f`。
     fn with_input<R>(
         &mut self,
         o: &RenderOpts,
-        f: impl FnOnce(&mut CandidateScene, &CandidateSceneInput) -> R,
+        f: impl FnOnce(&mut CandidateScene, &CandidateSceneInput) -> Result<R, String>,
     ) -> Result<R, String> {
-        if !(o.scale.is_finite() && o.scale > 0.0 && o.scale <= 8.0) {
-            return Err(format!("缩放比例无效：{}", o.scale));
-        }
+        validate(o)?;
         self.text.set_family(&o.font_family);
         self.text.set_weight(o.font_weight);
         let src = &self.themes[usize::from(o.dark)];
@@ -218,6 +337,12 @@ impl<C: Canvas> Preview<C> {
             // 浏览器按 CSS 字族名找字体，名字原样用。
             |f| (f.to_string(), 0),
         );
+        let size = eff.base_font_logical;
+        if !(size.is_finite() && size > 0.0 && size <= MAX_FONT_SIZE) {
+            return Err(format!(
+                "生效字号 {size} 超出范围（须在 (0, {MAX_FONT_SIZE}]）"
+            ));
+        }
         let labels = &src.views.index_labels;
         let candidates: Vec<CandidateItem> = if o.candidates.is_empty() {
             wind_ui_types::preview_candidates(o.per_page, |i| {
@@ -273,7 +398,14 @@ impl<C: Canvas> Preview<C> {
             text_renderer: &self.text,
             opts: &self.scene_opts,
         };
-        Ok(f(&mut self.scene, &inp))
+        wind_scene::assets::install(self.assets_gen, &self.assets);
+        let scene = &mut self.scene;
+        let r = wind_scene::view::with_paint_caches(&mut self.caches, || f(scene, &inp));
+        // 宿主（JS）调用失败：这一帧作废。
+        if let Some(e) = self.text.take_error() {
+            return Err(e);
+        }
+        r
     }
 
     /// 本帧的动画时钟；动画开关变了让状态机重建。
@@ -289,12 +421,13 @@ impl<C: Canvas> Preview<C> {
         }
     }
 
-    /// 画一帧。第一帧（或 `show` 之后）各装饰状态机从 `t_ms` 起从头播。
+    /// 画一帧。第一帧（或 `show` 之后）各装饰状态机从 `t_ms` 起从头播。出错（参数超限、帧超限、
+    /// 宿主画字失败）时实例照常可用，下一帧照常画。
     pub fn render(&mut self, o: &RenderOpts) -> Result<Frame, String> {
         let clock = self.clock(o, o.t_ms);
         let soft_shadow = o.soft_shadow;
         let frame = self.with_input(o, |scene, inp| {
-            render_candidate(scene, inp, clock, soft_shadow)
+            render_candidate_within(scene, inp, clock, soft_shadow, MAX_SIDE, MAX_PIXELS)
         })?;
         self.visible = true;
         self.last = o.clone();
@@ -319,8 +452,9 @@ impl<C: Canvas> Preview<C> {
         let (ev, only) = parse_signal(name).ok_or_else(|| format!("未知事件：{name}"))?;
         let last = self.last.clone();
         let clock = self.clock(&last, t_ms.unwrap_or(last.t_ms));
-        let changed =
-            self.with_input(&last, |scene, inp| scene.decor_event(inp, ev, only, clock))?;
+        let changed = self.with_input(&last, |scene, inp| {
+            Ok(scene.decor_event(inp, ev, only, clock))
+        })?;
         if ev == DecorEvent::Hide {
             self.visible = false;
         }
@@ -347,6 +481,15 @@ mod tests {
             .count()
     }
 
+    fn count_px(f: &Frame, rgba: [u8; 4]) -> usize {
+        f.rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| **p == rgba)
+            .count()
+    }
+
     /// 编码成 PNG 的纯色图。
     fn png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -359,6 +502,17 @@ mod tests {
         out
     }
 
+    /// 某段文字被画时用的 CSS 字体串。
+    fn font_of(c: &MockCanvas, text: &str) -> String {
+        let draws = c.draws.borrow();
+        draws
+            .iter()
+            .find(|(t, _, _)| t == text)
+            .unwrap_or_else(|| panic!("没画 {text}：{draws:?}"))
+            .1
+            .clone()
+    }
+
     #[test]
     fn default_theme_renders_sample_candidates() {
         let (mut p, c) = preview();
@@ -366,12 +520,11 @@ mod tests {
         assert_eq!(f.rgba.len(), (f.width * f.height * 4) as usize);
         assert!(f.width > f.height, "横排是宽条：{}x{}", f.width, f.height);
         assert!(opaque_px(&f) > 0, "窗口底色应画出");
-        let draws = c.draws.borrow();
         for want in ["你好", "拟好", "wqiy", "nihao"] {
-            assert!(draws.iter().any(|(t, _, _)| t == want), "{want}: {draws:?}");
+            font_of(&c, want);
         }
         assert!(
-            !draws.iter().any(|(t, _, _)| t == "匿"),
+            !c.draws.borrow().iter().any(|(t, _, _)| t == "匿"),
             "出厂 7 条，不画第 10 条"
         );
         assert_eq!(f.next_ms, None, "无皮肤无动画");
@@ -381,20 +534,19 @@ mod tests {
     fn opts_parse_from_partial_json_and_change_layout() {
         let (mut p, c) = preview();
         let o: RenderOpts = serde_json::from_str(
-            r#"{"vertical":true,"scale":2,"candidates":[{"text":"甲"},{"text":"乙","comment":"注","label":"b"}],"preedit":"jy"}"#,
+            r#"{"vertical":true,"scale":2,"font_size":15,"candidates":[{"text":"甲"},{"text":"乙","comment":"注","label":"b"}],"preedit":"jy"}"#,
         )
         .unwrap();
         let v = p.render(&o).unwrap();
         assert!(v.height > v.width, "竖排是高条：{}x{}", v.width, v.height);
-        let draws = c.draws.borrow();
-        for want in ["甲", "乙", "注", "b", "jy"] {
-            assert!(draws.iter().any(|(t, _, _)| t == want), "{want}: {draws:?}");
+        for want in ["乙", "注", "b", "jy"] {
+            font_of(&c, want);
         }
+        // 候选正文按生效字号 × 缩放画。
         assert!(
-            draws
-                .iter()
-                .any(|(_, f, _)| f.contains(" 32px ") || f.contains(" 28px ")),
-            "×2 缩放的字号：{draws:?}"
+            font_of(&c, "甲").contains(" 30px "),
+            "{}",
+            font_of(&c, "甲")
         );
     }
 
@@ -416,7 +568,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(bare.width <= light.width && bare.height <= light.height);
+        assert!(bare.width < light.width && bare.height < light.height);
     }
 
     #[test]
@@ -428,8 +580,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let draws = c.draws.borrow();
-        let f = &draws.iter().find(|(t, _, _)| t == "你好").unwrap().1;
+        let f = font_of(&c, "你好");
         assert!(f.contains("\"Noto Serif SC\""), "{f}");
         assert!(f.starts_with("700 "), "{f}");
     }
@@ -438,79 +589,298 @@ mod tests {
     fn set_theme_errors_verbatim_and_keeps_current_theme() {
         let (mut p, _) = preview();
         let before = p.render(&RenderOpts::default()).unwrap().rgba;
-        let e = p.set_theme("[meta\nname = 1", Vec::new()).unwrap_err();
+        let e = p.set_theme("[meta\nname = 1", "", Vec::new()).unwrap_err();
         assert!(e.contains("parse theme"), "{e}");
-        let e = p.set_theme("base = \"nope\"\n", Vec::new()).unwrap_err();
-        assert!(e.contains("nope"), "{e}");
+        let e = p
+            .set_theme("base = \"nope\"\n", "", Vec::new())
+            .unwrap_err();
+        assert!(e.contains("\"nope\"") && e.contains("只认内置主题"), "{e}");
         assert_eq!(p.render(&RenderOpts::default()).unwrap().rgba, before);
+        // 编辑的就是 default 本身：base 指向自己视同没写。
+        p.set_theme(
+            "base = \"mine\"\n[meta]\nname = \"m\"\n",
+            "mine",
+            Vec::new(),
+        )
+        .unwrap();
+    }
+
+    /// 参数上限：每一条都报错、不 panic、不卡死，且实例之后照常可用。
+    #[test]
+    fn oversized_params_are_rejected() {
+        let (mut p, _) = preview();
+        let d = RenderOpts::default;
+        let many = vec![
+            CandidateOpt {
+                text: "字".into(),
+                ..Default::default()
+            };
+            MAX_CANDIDATES + 1
+        ];
+        let long = CandidateOpt {
+            text: "字".repeat(MAX_TEXT_CHARS + 1),
+            ..Default::default()
+        };
+        let cases = [
+            RenderOpts { scale: 0.0, ..d() },
+            RenderOpts { scale: 9.0, ..d() },
+            RenderOpts {
+                scale: f32::NAN,
+                ..d()
+            },
+            RenderOpts {
+                font_size: 100_000.0,
+                ..d()
+            },
+            RenderOpts {
+                font_size: f32::INFINITY,
+                ..d()
+            },
+            RenderOpts {
+                font_size: -1.0,
+                ..d()
+            },
+            RenderOpts {
+                candidates: many,
+                ..d()
+            },
+            RenderOpts {
+                candidates: vec![long],
+                ..d()
+            },
+            RenderOpts {
+                preedit: Some("a".repeat(MAX_TEXT_CHARS + 1)),
+                ..d()
+            },
+            RenderOpts {
+                total_pages: MAX_PAGES + 1,
+                ..d()
+            },
+            RenderOpts {
+                selected: 1 << 40,
+                ..d()
+            },
+        ];
+        for (i, o) in cases.iter().enumerate() {
+            assert!(p.render(o).is_err(), "第 {i} 条应报错");
+        }
+        // 字号在上限内、缩放顶格：帧超限，在分配缓冲之前报错。
+        let e = p
+            .render(&RenderOpts {
+                font_size: MAX_FONT_SIZE,
+                scale: MAX_SCALE,
+                ..d()
+            })
+            .err()
+            .expect("帧超限");
+        assert!(e.contains("超出上限"), "{e}");
+        // 时刻钳住而不是 panic。
+        for t in [1e300, f64::INFINITY, f64::NAN, -5.0] {
+            p.render(&RenderOpts {
+                t_ms: t,
+                animate: true,
+                ..d()
+            })
+            .unwrap();
+        }
+        assert!(p.render(&d()).is_ok(), "报错之后照常可用");
+    }
+
+    /// 主题里的字号走同一道闸。
+    #[test]
+    fn theme_font_size_is_bounded_too() {
+        let (mut p, _) = preview();
+        p.set_theme(
+            "base = \"default\"\n[behavior]\nfont_size = 100000\n",
+            "",
+            Vec::new(),
+        )
+        .unwrap();
+        let e = p
+            .render(&RenderOpts::default())
+            .err()
+            .expect("主题字号超限");
+        assert!(e.contains("生效字号"), "{e}");
         assert!(
             p.render(&RenderOpts {
-                scale: 0.0,
+                font_size: 16.0,
                 ..Default::default()
             })
-            .is_err()
+            .is_ok(),
+            "用户字号覆盖后可画"
         );
+    }
+
+    /// 宿主（JS）调用失败：这一帧报错，实例不报废，恢复后照常画。
+    #[test]
+    fn host_failure_fails_the_frame_only() {
+        let (mut p, c) = preview();
+        let good = p.render(&RenderOpts::default()).unwrap().rgba;
+        c.fail.set(true);
+        let e = p
+            .render(&RenderOpts {
+                font_family: "X".into(), // 换字族清测量缓存，迫使再问宿主
+                ..Default::default()
+            })
+            .err()
+            .expect("宿主失败");
+        assert!(e.contains("mock"), "{e}");
+        c.fail.set(false);
+        assert_eq!(p.render(&RenderOpts::default()).unwrap().rgba, good);
     }
 
     /// 继承内置主题、背景图来自调用方的资源表：底图的颜色出现在帧里。
     #[test]
     fn theme_with_base_and_memory_asset() {
         let (mut p, _) = preview();
-        let toml = "base = \"default\"\n[meta]\nname = \"t\"\n\
-                    [window]\nbackground = { image = { ref = \"assets/bg.png\", mode = \"stretch\" } }\n";
         p.set_theme(
-            toml,
-            vec![("assets/bg.png".into(), png(4, 4, [0, 200, 0, 255]))],
+            &bg_theme("bg.png"),
+            "",
+            vec![("bg.png".into(), png(4, 4, [0, 200, 0, 255]))],
         )
         .unwrap();
         let f = p.render(&RenderOpts::default()).unwrap();
-        let green = f
-            .rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|px| **px == [0, 200, 0, 255])
-            .count();
-        assert!(green > 100, "底图应铺开：{green}");
+        assert!(count_px(&f, [0, 200, 0, 255]) > 100, "底图应铺开");
     }
 
-    /// 皮肤动画：装饰按 `t_ms` 换帧，`next_ms` 报下一次换帧；`signal` 认得事件名。
+    fn bg_theme(r: &str) -> String {
+        format!(
+            "base = \"default\"\n[meta]\nname = \"t\"\n\
+             [window]\nbackground = {{ image = {{ ref = \"{r}\", mode = \"stretch\" }} }}\n"
+        )
+    }
+
+    /// 同线程两个实例：各持资源表与缓存，一方换主题 / 资源不让另一方的图失效。
     #[test]
-    fn skin_animation_follows_t_ms_and_signals() {
-        let (mut p, _) = preview();
-        let toml = "[meta]\nname = \"s\"\n[skin]\ndensity = 1\n\
-                    [skin.horizontal.frame]\nimage = \"frame.png\"\n\
-                    stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
-                    [[skin.horizontal.decor]]\nimage = \"dot.gif\"\nanchor = \"frame.top_left\"\n";
-        let gif = gif2([255, 0, 0, 255], [0, 0, 255, 255]);
-        p.set_theme(
-            toml,
-            vec![
-                ("frame.png".into(), png(16, 16, [200, 200, 200, 255])),
-                ("dot.gif".into(), gif),
-            ],
+    fn two_previews_do_not_clobber_each_other() {
+        let (mut a, _) = preview();
+        let (mut b, _) = preview();
+        let green = [0, 200, 0, 255];
+        let blue = [0, 0, 200, 255];
+        a.set_theme(
+            &bg_theme("bg.png"),
+            "",
+            vec![("bg.png".into(), png(4, 4, green))],
         )
         .unwrap();
-        let at = |p: &mut Preview<MockCanvas>, t: f64| {
-            p.render(&RenderOpts {
-                animate: true,
-                t_ms: t,
-                ..Default::default()
-            })
-            .unwrap()
-        };
+        let fa = a.render(&RenderOpts::default()).unwrap();
+        b.set_theme(
+            &bg_theme("bg.png"),
+            "",
+            vec![("bg.png".into(), png(4, 4, blue))],
+        )
+        .unwrap();
+        let fb = b.render(&RenderOpts::default()).unwrap();
+        assert!(count_px(&fb, blue) > 100);
+        assert_eq!(
+            a.render(&RenderOpts::default()).unwrap().rgba,
+            fa.rgba,
+            "A 不受 B 影响"
+        );
+        b.set_theme(&bg_theme("bg.png"), "", Vec::new()).unwrap();
+        assert_eq!(
+            a.render(&RenderOpts::default()).unwrap().rgba,
+            fa.rgba,
+            "B 换资源也不影响 A"
+        );
+    }
+
+    /// 资源没变时沿用代号与缓存（只改主题文字不重新解码）；变了换代号。
+    #[test]
+    fn unchanged_assets_keep_generation() {
+        let (mut p, _) = preview();
+        let assets = || vec![("bg.png".into(), png(4, 4, [0, 200, 0, 255]))];
+        p.set_theme(&bg_theme("bg.png"), "", assets()).unwrap();
+        let g = p.assets_gen;
+        p.set_theme(
+            &format!("{}\n[behavior]\nfont_size = 18\n", bg_theme("bg.png")),
+            "",
+            assets(),
+        )
+        .unwrap();
+        assert_eq!(p.assets_gen, g, "资源没变沿用代号");
+        p.set_theme(
+            &bg_theme("bg.png"),
+            "",
+            vec![("bg.png".into(), png(4, 4, [1, 2, 3, 255]))],
+        )
+        .unwrap();
+        assert_ne!(p.assets_gen, g, "内容变了换代号");
+    }
+
+    /// 两帧 GIF 当装饰：`idle` 停第 0 帧（红）、`typing` 转 `busy`（第 1 帧，蓝）。
+    fn skin_theme(anim: &str) -> (String, Vec<(String, Vec<u8>)>) {
+        let toml = format!(
+            "[meta]\nname = \"s\"\n[skin]\ndensity = 1\n\
+             [skin.horizontal.frame]\nimage = \"frame.png\"\n\
+             stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+             [[skin.horizontal.decor]]\nimage = \"dot.gif\"\nanchor = \"frame.top_left\"\n{anim}\n"
+        );
+        let assets = vec![
+            ("frame.png".into(), png(16, 16, [200, 200, 200, 255])),
+            ("dot.gif".into(), gif2([255, 0, 0, 255], [0, 0, 255, 255])),
+        ];
+        (toml, assets)
+    }
+
+    fn at(p: &mut Preview<MockCanvas>, t: f64) -> Frame {
+        p.render(&RenderOpts {
+            animate: true,
+            t_ms: t,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// 皮肤动画：装饰按 `t_ms` 换帧，`next_ms` 报下一次换帧；不播动画停在首帧。
+    #[test]
+    fn skin_animation_follows_t_ms() {
+        let (mut p, _) = preview();
+        let (toml, assets) = skin_theme("");
+        p.set_theme(&toml, "", assets).unwrap();
         let f0 = at(&mut p, 0.0);
         assert_eq!(f0.next_ms, Some(100.0), "两帧各 100ms");
         let f1 = at(&mut p, 150.0);
         assert_ne!(f0.rgba, f1.rgba, "第二帧换了颜色");
         let f2 = at(&mut p, 250.0);
         assert_eq!(f0.rgba, f2.rgba, "循环回第一帧");
-        // 不播动画：停在首帧，不报换帧。
         let still = p.render(&RenderOpts::default()).unwrap();
         assert_eq!(still.next_ms, None);
-        assert!(p.signal("typing", None).is_ok());
-        assert!(p.signal("click:0", Some(10.0)).is_ok());
+    }
+
+    /// `signal` 真的驱动状态机：`typing` 之后装饰换到 `busy` 的帧。
+    #[test]
+    fn signal_drives_decor_state_machine() {
+        let (mut p, _) = preview();
+        let (toml, assets) = skin_theme(
+            "states = { idle = { frames = \"0\" }, busy = { frames = \"1\" } }\n\
+             on = { typing = { state = \"busy\" } }",
+        );
+        p.set_theme(&toml, "", assets).unwrap();
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let f0 = at(&mut p, 0.0);
+        assert!(
+            count_px(&f0, red) > 0 && count_px(&f0, blue) == 0,
+            "初始 idle = 红"
+        );
+        assert_eq!(at(&mut p, 500.0).rgba, f0.rgba, "没事件就停在 idle");
+        assert!(p.signal("typing", Some(600.0)).unwrap(), "typing 改了画面");
+        let f1 = at(&mut p, 650.0);
+        assert!(
+            count_px(&f1, blue) > 0 && count_px(&f1, red) == 0,
+            "typing 后 = 蓝"
+        );
+        // show 只让常驻状态从头播，不回 idle；换主题才回初始状态。
         assert!(p.signal("show", None).unwrap());
+        assert_eq!(at(&mut p, 700.0).rgba, f1.rgba);
+        let (toml, assets) = skin_theme(
+            "states = { idle = { frames = \"0\" }, busy = { frames = \"1\" } }\n\
+             on = { typing = { state = \"busy\" } }",
+        );
+        p.set_theme(&toml, "", assets).unwrap();
+        assert_eq!(at(&mut p, 800.0).rgba, f0.rgba, "换主题回到 idle");
+        assert!(p.signal("click:0", Some(10.0)).is_ok());
         assert!(p.signal("nonsense", None).is_err());
         assert!(p.signal("click:x", None).is_err());
     }

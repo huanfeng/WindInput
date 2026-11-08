@@ -99,7 +99,8 @@ mod tests {
         assert_eq!(listed, files);
         for id in ids {
             let text = theme_text(&id).unwrap();
-            wind_theme::load_typed_text(&text, &theme_text).unwrap();
+            let base = |b: &str| theme_text(b).ok_or_else(|| anyhow::anyhow!("没有 {b}"));
+            wind_theme::load_typed_text(&text, &id, &base).unwrap();
         }
     }
 }

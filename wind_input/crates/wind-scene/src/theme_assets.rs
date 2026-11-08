@@ -269,7 +269,7 @@ mod tests {
         };
         let mut mem = crate::assets::MemoryAssets::new();
         mem.insert("assets/panel.png", png);
-        crate::assets::install(mem);
+        crate::assets::install(crate::assets::next_generation(), &std::sync::Arc::new(mem));
         let mut theme = Resolved::default();
         theme
             .resources

@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 wind-scene = { path = "../wind-scene" }
 wind-theme = { path = "../wind-theme" }
 wind-ui-types = { path = "../wind-ui-types" }
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
