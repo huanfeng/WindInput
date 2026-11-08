@@ -494,7 +494,8 @@ Fcitx5 addon）只贴图、落位、转发鼠标。盘点基准 `9f165489`：
 | 实现量 | 服务端接上现成的 `next_deadline` / `tick`；前端只认一个新 flag | 底图要拆三层（z < 0 / 窗体与内容之间 / ≥ 100），帧集要另开 SHM 段；状态机（§16 的事件、`idle_<N>s`）在服务端，前端还要收状态切换；C++ X11、C++ Wayland、Swift 三份实现 |
 
 结论：推帧，帧率上限 **15**（Windows 上限 30 的一半）。时间轴仍是经过时间对总时长取模（§15），
-限帧只是跳过中间帧，不漂移。靶机 CPU 不达标再评估本地播放，本期不做。
+限帧只是跳过中间帧，不漂移。代价是采样混叠：周期恰为 66 ms 整数倍附近的快循环（如两帧各 33 ms 的眨眼）
+可能每次都采到同一帧，看起来不动；常见的 12–24 帧/秒动画不受影响。靶机 CPU 不达标再评估本地播放，本期不做。
 
 - forwarder 每轮 `win.tick()`，主循环睡到 `win.next_deadline()`（与限帧闸门取较晚者）；macOS 的主循环
   也改成按 deadline 醒（原先只等命令）。
@@ -509,8 +510,9 @@ Fcitx5 addon）只贴图、落位、转发鼠标。盘点基准 `9f165489`：
 
 ### 17.2 协议：`CMD_CANDIDATE_SKIN`（0x0514，push）
 
-每个候选帧（含换帧）在 `CMD_CANDIDATE_RECTS` 之后推一条，没启用皮肤时也推（`flags = 0`、两表为空），
-前端据此复位。两端前端对未知 cmd 都落 `default` 安静忽略，旧前端不受影响。坐标同 `CMD_CANDIDATE_RECTS`：
+每个候选帧（含换帧）在 `CMD_HOST_RENDER_FRAME` 之前推一条，没启用皮肤时也推（`flags = 0`、两表为空），
+前端据此复位。先到是为了让前端贴这一帧时就用上这一帧的输入区与阴影设置，不必等下一条消息再改。
+两端前端对未知 cmd 都落 `default` 安静忽略，旧前端不受影响。坐标同 `CMD_CANDIDATE_RECTS`：
 缓冲内的设备像素，macOS / Wayland 前端除以 scale。
 
 ```
@@ -572,8 +574,8 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 
 - Rust 原生单测：`wind-ipc` 的 `encode_candidate_skin` 字节布局；`wind-scene` 输入区游程合并（圆角、
   纵向合并、上限退化、穿透装饰不进表）；`wind-ui`（`linux-host` feature 下的 forwarder 单测）：皮肤帧带
-  `CMD_CANDIDATE_SKIN`，普通主题 `flags = 0`；动画按 deadline 推帧、相邻两帧间隔 ≥ 66 ms、帧带
-  `FLAG_ANIM_FRAME`、换帧不重推 tooltip、收起后不再唤醒。
+  `CMD_CANDIDATE_SKIN`，普通主题 `flags = 0`；动画按 deadline 推帧、帧数不超过限帧上限、闸门内空转
+  不出帧、帧带 `FLAG_ANIM_FRAME`、换帧不重推 tooltip、收起后不再出帧；皮肤区域先于候选帧。
 - C++ 单测（`make -C wind_linux test`）：`codec_test` 按 Rust 编码器写死的偏移解码；`protocol_sync_test` 钉新
   cmd / flag / 层；输入区换算纯函数（无皮肤回退整窗、Wayland 缩放、空表）。
 - e2e（本机 Xvfb，`scripts/linux/e2e.sh`）：程序生成的皮肤主题（窗体 + 右上外侧穿透装饰 + 左上外侧

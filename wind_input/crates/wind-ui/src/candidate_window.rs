@@ -246,7 +246,8 @@ impl CandidateWindowConfig {
 }
 
 /// 系统是否允许界面动画：Windows 读「显示 Windows 中的动画」（`SPI_GETCLIENTAREAANIMATION`），
-/// 查询失败按允许。其它平台本期不播放皮肤动画，只画首帧。
+/// 查询失败按允许。macOS / Linux 外部宿主见下面两个同名函数（设计 §17.1）；其余形态（开发机上的
+/// 非 Windows 本地窗口，只供测试与出图）不播放，只画首帧。
 #[cfg(windows)]
 fn system_allows_animation() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -265,7 +266,36 @@ fn system_allows_animation() -> bool {
     !ok || on != 0
 }
 
-#[cfg(not(windows))]
+/// macOS 读「减少动态效果」（`com.apple.universalaccess` 的 `reduceMotion`）。服务进程不链 AppKit，
+/// 用不了 `accessibilityDisplayShouldReduceMotion`，走 CFPreferences。读不到（键不存在、该偏好域
+/// 不让读）按允许。
+#[cfg(target_os = "macos")]
+fn system_allows_animation() -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::preferences::CFPreferencesGetAppBooleanValue;
+    let key = CFString::from_static_string("reduceMotion");
+    let app = CFString::from_static_string("com.apple.universalaccess");
+    let mut valid: u8 = 0;
+    // SAFETY: 两个 CFString 在调用期间存活；`valid` 是本地变量。
+    let reduce = unsafe {
+        CFPreferencesGetAppBooleanValue(
+            key.as_concrete_TypeRef(),
+            app.as_concrete_TypeRef(),
+            &mut valid,
+        )
+    };
+    !(valid != 0 && reduce != 0)
+}
+
+/// Linux 外部宿主：没有统一可靠的「减少动态效果」来源（GNOME 的 `enable-animations` 要起进程或连
+/// dconf，KDE 另一套），恒为允许，只受 `ui.theme.animation` 控制。
+#[cfg(all(target_os = "linux", ext_presenter))]
+fn system_allows_animation() -> bool {
+    true
+}
+
+#[cfg(not(any(windows, target_os = "macos", all(target_os = "linux", ext_presenter))))]
 fn system_allows_animation() -> bool {
     false
 }
