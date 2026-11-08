@@ -2802,6 +2802,44 @@ mod tests {
             assert!(!visible(m.last().unwrap()), "候选窗藏了 tooltip 也得藏");
         }
 
+        /// 皮肤动画换帧期间悬停提示开着：换帧只换候选窗像素，不重推 tooltip。
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn skin_anim_frames_do_not_repush_tooltip() {
+            let cap = Arc::new(Mutex::new(Vec::new()));
+            let (mut f, _ev) = mk(cap.clone(), "_lo6a");
+            f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+                "anim",
+                Some(&fast_apng()),
+                "",
+            ))));
+            update(&mut f, &tip_cand(), 0);
+            assert_eq!(
+                overlays(&cap, OVERLAY_KIND_TOOLTIP).len(),
+                1,
+                "悬停提示先出来"
+            );
+            let frames = |cap: &Arc<Mutex<Vec<Vec<u8>>>>| {
+                cap.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|x| cmd_of(x) == CMD_HOST_RENDER_FRAME)
+                    .count()
+            };
+            let before = frames(&cap);
+            drive_until(
+                &mut f,
+                std::time::Instant::now() + std::time::Duration::from_millis(400),
+                |_| {},
+            );
+            assert!(frames(&cap) > before, "动画在换帧");
+            assert_eq!(
+                overlays(&cap, OVERLAY_KIND_TOOLTIP).len(),
+                1,
+                "换帧不重推 tooltip"
+            );
+        }
+
         fn tooltip_menu_requests(
             ev: &std::sync::mpsc::Receiver<UiEvent>,
         ) -> Vec<(i32, i32, i32, Option<wind_ui_types::TooltipHit>, u64)> {
