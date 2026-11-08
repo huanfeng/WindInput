@@ -196,6 +196,10 @@ const RETIRED_KEYS: &[&[&str]] = &[
     &["schema", "pinyin", "show_code_hint"],
     &["input", "temp_pinyin", "code_hint_source"],
     &["schema", "mix", "pinyin_code_hint"],
+    // 按键级翻页溢出覆盖表，被翻页动作后缀取代（`page_prev:ignore` 这类写在 `keys.session_actions`
+    // 里，见 docs/design/keys-overflow-per-key.md）。**不做值迁移**（维护者定，0.131 破坏性变更）：
+    // 旧值已被 serde 丢弃，这里只把它从用户文件里清掉，免得看起来还在生效。
+    &["keys", "overflow", "page_key_overrides"],
 ];
 
 /// 从用户层删除 [`RETIRED_KEYS`] 里的退役键，返回删除数。
