@@ -1878,6 +1878,28 @@ mod tests {
         );
     }
 
+    /// 限帧闸门只管换帧：别的到期（这里是收起后释放像素）不被推迟到闸门之后。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn anim_gate_does_not_delay_other_deadlines() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk6");
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "gate",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        f.win.set_anim_gate(far);
+        f.handle(UiCommand::HideCandidates);
+        let d = f.next_deadline().expect("收起后要为释放像素登记唤醒");
+        assert!(
+            d <= std::time::Instant::now() + crate::window::HIDDEN_RELEASE_AFTER,
+            "释放像素被推迟到了闸门之后"
+        );
+    }
+
     /// 两帧各 33 ms 的循环：周期 66 ms 恰是闸门间隔，只在闸门处取样会回回采到同一帧。唤醒时刻
     /// 取「闸门之后第一个换成不同帧的边界」，推出去的帧要两色交替（设计 §17.1）。
     #[cfg(target_os = "linux")]
