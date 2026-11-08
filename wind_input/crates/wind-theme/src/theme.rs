@@ -89,14 +89,33 @@ pub fn meta_from_text(text: &str) -> Option<Meta> {
 }
 
 /// 主题 id / `base` 引用是否普通 slug：非空，不是 `.` / `..`，不含 `/`、`\\`、`:`、`..`
-/// 与控制字符（于是也不可能是绝对路径或盘符路径）。主题目录名即 id，合法 id 都满足。
+/// 与控制字符（于是也不可能是绝对路径或盘符路径）；也不是 Windows 保留设备名（`CON`、
+/// `NUL.txt` 之类），不以点或空格结尾（Windows 会悄悄去掉，两个 id 落到同一目录）。
+/// 主题目录名即 id，合法 id 都满足。
 pub fn is_plain_slug(s: &str) -> bool {
     !s.is_empty()
         && s != "."
         && !s.contains("..")
+        && !s.ends_with(['.', ' '])
+        && !is_windows_reserved_name(s)
         && !s
             .chars()
             .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+}
+
+/// Windows 保留设备名（不分大小写，带不带扩展名都算）。
+fn is_windows_reserved_name(s: &str) -> bool {
+    let stem = s
+        .split('.')
+        .next()
+        .unwrap_or(s)
+        .trim_end()
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0')
 }
 
 /// 校验主题 toml 文本可解析为合法 Theme（导入前校验）。Err 含原因。
@@ -412,11 +431,36 @@ mod tests {
 
     #[test]
     fn plain_slug_rejects_paths() {
-        for ok in ["default", "_base", "my-theme.v2", "主题"] {
+        for ok in [
+            "default",
+            "_base",
+            "my-theme.v2",
+            "主题",
+            "清风·浅",
+            "console",
+            "com0",
+            "lpt",
+        ] {
             assert!(is_plain_slug(ok), "{ok}");
         }
         for bad in [
-            "", ".", "..", "../x", "a/b", "a\\b", "C:x", "/etc", "a..b", "a\nb",
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "C:x",
+            "/etc",
+            "a..b",
+            "a\nb",
+            "x.",
+            "x ",
+            "CON",
+            "nul",
+            "Aux.txt",
+            "com1",
+            "LPT9.toml",
         ] {
             assert!(!is_plain_slug(bad), "{bad:?}");
         }

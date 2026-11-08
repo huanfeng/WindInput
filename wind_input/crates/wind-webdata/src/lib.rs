@@ -3844,18 +3844,27 @@ pub trait WebDataRpc: WebDataHost {
         let user_dir = self
             .user_themes_dir()
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
-        let slug = params
+        // ⚠️ id 来自调用方（slug）或主题文本自身（meta.name / package 的 name），都不可信，
+        // 落盘前必须是普通名字：不然 `../../x`、绝对路径、`C:x` 会让目标跳出用户主题目录，
+        // 而导入失败的回滚会对目标做 remove_dir_all。给了不合法的 slug 也报错，不再静默
+        // 退回用显示名。
+        let theme_id = params
             .get("slug")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|s| {
-                !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
-            });
-        let theme_id = slug.unwrap_or(fallback_name).to_string();
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| fallback_name.trim())
+            .to_string();
+        if !wind_theme::is_plain_slug(&theme_id) {
+            anyhow::bail!("主题 id「{theme_id}」不合法：不能含路径分隔符、盘符或「..」");
+        }
         if wind_config::Config::custom_hides_theme(&theme_id) {
             anyhow::bail!("本定制版已移除主题 id「{theme_id}」，该 id 不可用；请换一个 id 再导入");
         }
         let target = user_dir.join(&theme_id);
+        if target.parent() != Some(user_dir.as_path()) {
+            anyhow::bail!("主题 id「{theme_id}」不合法");
+        }
         Ok((theme_id, target))
     }
 
@@ -3919,6 +3928,8 @@ pub trait WebDataRpc: WebDataHost {
         } else {
             None
         };
+        // 回滚只删本次新建的目录：目录原本就在（哪怕里面没有 theme.toml）时只撤掉写入的文件。
+        let created_dir = !target.exists();
         std::fs::create_dir_all(&target)?;
         let tmp = file.with_extension("toml.tmp");
         std::fs::write(&tmp, text.as_bytes())?;
@@ -3933,8 +3944,11 @@ pub trait WebDataRpc: WebDataHost {
                 Some(bytes) => {
                     let _ = std::fs::write(&file, bytes);
                 }
-                None => {
+                None if created_dir => {
                     let _ = std::fs::remove_dir_all(&target);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&file);
                 }
             }
             anyhow::bail!(
