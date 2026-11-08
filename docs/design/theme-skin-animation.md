@@ -253,8 +253,8 @@ image = "tiger"            # 动画文件；静态图同字段
 anchor = "frame.top_right"
 fps = 24                   # 可选，覆盖文件自带帧时长
 [skin.horizontal.decor.states]
-idle   = { frames = "0-23", loop = true }
-typing = { frames = "24-35", loop = true }
+idle   = { frames = "0-23" }
+typing = { frames = "24-35" }
 [skin.horizontal.decor.on]
 commit  = { play = "36-47", then = "idle" }
 page    = { play = "48-55", then = "@prev" }
