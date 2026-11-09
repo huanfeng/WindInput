@@ -61,6 +61,22 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
   只把输入法协议（input-method-v1）交给它自己拉起的 Fcitx5，否则 Wayland 原生应用里没有候选窗。
   并按 Fcitx5 的建议**不要**设 `QT_IM_MODULE` / `GTK_IM_MODULE`：设了的 Wayland 原生应用走 D-Bus、
   报的是窗口内坐标，候选窗会落到屏幕左上角。
+- **COSMIC（Wayland）与 Ghostty**：原生 Wayland 窗口若使用 `GTK_IM_MODULE=fcitx` 走 D-Bus，
+  在部分环境下光标的窗口内坐标会进入 X11 回退路径，候选框因而远离插入点。可先单独运行
+  `env GTK_IM_MODULE=wayland ghostty --gtk-single-instance=false`，检查候选框位置与菜单是否都正常。
+  若原生通路下右键和顶部菜单闪退，可参考 [COSMIC 的输入法抓取冲突报告](https://github.com/pop-os/cosmic-comp/issues/3032)；
+  本机验证可用的临时方案是 `env GDK_BACKEND=x11 GTK_IM_MODULE=fcitx ghostty --gtk-single-instance=false`，
+  同时验证中文输入、候选位置和菜单。这是选择 XWayland 通路，不能视为原生 Wayland 问题已修复。
+  确定可用后，把对应环境前缀写入用户级 `.desktop` 的所有 `Exec=`（含“新建窗口”动作）。
+  必须同时检查 `DBusActivatable`：设为 true 时桌面可以忽略 `Exec=`，经 D-Bus / systemd 激活。
+  可以设为 false，或在用户级 `app-com.mitchellh.ghostty.service.d/` 放 drop-in：在 `[Service]` 下
+  写入对应的 `Environment=GTK_IM_MODULE=wayland`；选择 X11 方案时则写
+  `Environment=GDK_BACKEND=x11` 与 `Environment=GTK_IM_MODULE=fcitx`，然后执行
+  `systemctl --user daemon-reload`。已有 drop-in 也要保持一致，避免从其他入口激活时回到旧环境。
+  完全退出旧进程，再从实际使用的桌面入口启动，核对进程环境、Fcitx5 frontend 和上述功能；
+  单实例的新窗口会复用旧进程，仅验证手动启动不代表桌面入口已修好。
+  COSMIC 启动器与 Dock 的应用列表缓存独立：前者生效而后者仍旧时，需要重新加载 Dock 的
+  App Tray（`cosmic-app-list`）以读取用户级启动项，再从 Dock 本身验证。
 - Fcitx5 默认每个应用各记各的输入法状态，新开的应用从键盘布局起步；想全局一致，在 Fcitx5 配置的
   「全局选项」里把「共享输入状态」设为「所有」（Deepin 出厂即如此）。
 
