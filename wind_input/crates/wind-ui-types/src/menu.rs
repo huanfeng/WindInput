@@ -169,12 +169,13 @@ pub enum MenuCmd {
     /// 「固定位置」给那些 caret 坐标本就报不准的宿主（自绘控件、坐标系错、多进程窗口
     /// 偏移）：位置由用户拖一次定下，存在该应用**自己**的规则里，不与别的应用共用。
     CandidatePositionRule(u8),
-    /// 为当前焦点应用设置「忽略宿主关闭输入法」（compat.toml 的 ignore_host_ime_close）。
-    /// 参数：0=跟随默认（清除规则）1=忽略 2=不忽略。
+    /// 为当前焦点应用设置「软件切换中英」（compat.toml 的 ignore_host_ime_switch）。
+    /// 参数：0=跟随全局（清除规则）1=忽略 2=采纳。
     ///
-    /// 给 WinForms `ImeMode.Disable` / WPF `IsInputMethodEnabled=False` 这类宿主：它们在
-    /// 焦点落到按钮等控件时关掉的是**全局**中英状态，于是「点一下按钮就变成英文」。
-    IgnoreHostImeCloseRule(u8),
+    /// 给自作主张写 compartment 的宿主：WinForms `ImeMode.Disable` / WPF
+    /// `IsInputMethodEnabled=False` 在焦点落到按钮时关掉**全局**中英状态（「点一下按钮就变成
+    /// 英文」），也有宿主在内部焦点切换时把它打开（英文态被切成中文）。开和关两个方向都管。
+    IgnoreHostImeSwitchRule(u8),
     /// 为当前焦点应用设置「密码框强制英文」（compat.toml 的 password_force_english）。
     /// 参数：0=跟随全局（清除规则）1=开 2=关。
     ///
@@ -237,7 +238,7 @@ impl MenuKind {
     /// id 区间：1 复制｜10-19 词条操作｜100-199 固定命令｜1000+ 方案｜2000+ 主题｜3000+ 过滤｜
     /// 4000+ 明暗｜5000+ 候选窗首显｜6000+ 初始中英｜7000+ 初始标点｜8000+ 诊断 HUD 分区｜
     /// 9000+ 自动配对｜10000+ 语言栏图标角标形状｜11000+ 软键盘面｜12000+ 候选窗定位｜
-    /// 13000+ 忽略宿主关闭输入法｜14000+ 密码框强制英文｜15000+ 按应用方案｜
+    /// 13000+ 软件切换中英｜14000+ 密码框强制英文｜15000+ 按应用方案｜
     /// 16000+ 按应用状态气泡定位｜17000+ 按应用状态气泡兜底位置｜18000+ 按应用整条规则启用 / 禁用。
     pub fn to_menu_id(self) -> i32 {
         match self {
@@ -296,7 +297,7 @@ impl MenuKind {
                 MenuCmd::InitialPunct(m) => 7000 + m as i32,
                 MenuCmd::AutoPairRule(m) => 9000 + m as i32,
                 MenuCmd::CandidatePositionRule(m) => 12000 + m as i32,
-                MenuCmd::IgnoreHostImeCloseRule(m) => 13000 + m as i32,
+                MenuCmd::IgnoreHostImeSwitchRule(m) => 13000 + m as i32,
                 MenuCmd::PasswordForceEnglishRule(m) => 14000 + m as i32,
                 MenuCmd::AppSchemaRule(m) => 15000 + m as i32,
                 MenuCmd::StatusPositionRule(m) => 16000 + m as i32,
@@ -369,7 +370,7 @@ impl MenuKind {
             7000..=7999 => MenuCmd::InitialPunct((id - 7000) as u8),
             9000..=9999 => MenuCmd::AutoPairRule((id - 9000) as u8),
             12000..=12999 => MenuCmd::CandidatePositionRule((id - 12000) as u8),
-            13000..=13999 => MenuCmd::IgnoreHostImeCloseRule((id - 13000) as u8),
+            13000..=13999 => MenuCmd::IgnoreHostImeSwitchRule((id - 13000) as u8),
             14000..=14255 => MenuCmd::PasswordForceEnglishRule((id - 14000) as u8),
             15000..=15999 => MenuCmd::AppSchemaRule((id - 15000) as u16),
             16000..=16255 => MenuCmd::StatusPositionRule((id - 16000) as u8),

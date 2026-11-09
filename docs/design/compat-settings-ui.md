@@ -17,7 +17,7 @@
 
 ## 2. 现状（设计依据）
 
-- 核心 `wind-config/src/app_compat.rs`：`AppCompatRule` 27 字段，全部容错反序列化。三层加载：`data/compat.toml` < `data_custom` < 用户层。同名进程整条覆盖，唯独 `ProtocolFields` 的 4 个字段（`composition_start_pair_guard`、`pin_anchor_when_start_drifts`、`ignore_host_ime_close`、`host_drawn_candidates`）用户未写时继承。
+- 核心 `wind-config/src/app_compat.rs`：`AppCompatRule` 27 字段，全部容错反序列化。三层加载：`data/compat.toml` < `data_custom` < 用户层。同名进程整条覆盖，唯独 `ProtocolFields` 的 4 个字段（`composition_start_pair_guard`、`pin_anchor_when_start_drifts`、`ignore_host_ime_close`、`host_drawn_candidates`）用户未写时继承。（`ignore_host_ime_close` 0.132 起改名 `ignore_host_ime_switch`。）
 - 没有「禁用 / 删除系统条目」的语法；没有 compat 的 schema（字段含义只在注释里）；`wind-rpc` 没有任何 compat 方法。
 - 重载只有 `Coordinator::reload_app_compat`（`handle_menu.rs:901`），且只被右键菜单路径调用；同 pid 的 `active_compat` 缓存不会自动刷新。
 - 用户层写入是 `update_user_rule` → `render_user_compat` 整份重写，非原子；TOML 语法错误时整份文件被静默跳过。
@@ -178,8 +178,9 @@
 - 写入统一走 `apply_edits`：`Set` / `Clear`（清除：系统层设了它就写 `unset`）/ `Inherit`（还原：删掉用户层关于它的
   一切痕迹）三种编辑，最后过 `normalize`——按**运行时效果**判断冗余（去掉某个键后叠加结果不变的键与 `unset` 都删，
   整行没内容就删整行）。「已修改」因此永远意味着有真正的差异，不会有视图里看不见的空壳。
-- 右键菜单：包装函数签名不变，内部改为字段编辑。菜单第一档「跟随全局」= `Clear`；`ignore_host_ime_close` 的第一档是
-  「跟随内置规则」= `Inherit`（它没有全局设置项，下层就是出厂）。菜单读不到系统层（数据目录解析不出来）时，
+- 右键菜单：包装函数签名不变，内部改为字段编辑。菜单第一档「跟随全局」= `Clear`；`ignore_host_ime_close` 的第一档曾是
+  「跟随内置规则」= `Inherit`（当时没有全局设置项，下层就是出厂）。它改名 `ignore_host_ime_switch`、有了全局项
+  `input.ignore_host_ime_switch` 之后，第一档同样是「跟随全局」= `Clear`。菜单读不到系统层（数据目录解析不出来）时，
   清除字段保守地写 `unset`，不凭「系统里没有」去省。
 - 设置端：`compat.upsert` 的补丁 `null` = 清除（`Clear`），`compat.resetField` = `Inherit`——界面上每个系统设了值的字段，
   在「跟随全局」之外多一个「出厂」状态。`Kind::InheritBool` 取消（不再有特殊三态），`protocol` 标记仅作提示。

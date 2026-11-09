@@ -1781,8 +1781,8 @@ pub const MODE_SWITCH_SOURCE_MASK: u32 = 0xF000_0000;
 
 /// 这次 compartment 变化发生时 **Ctrl 正被按住**（由 DLL 现场取 `GetAsyncKeyState`）。
 ///
-/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 关 IME」。两者走
-/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_close` 必须放过
+/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 切中英」。两者走
+/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_switch` 必须放过
 /// 前者（否则该应用里系统热键彻底失灵）。判据由**发起方交代**，服务端不去猜——同款
 /// 判据已在 C++ 的 CapsLock 联动抑制窗用过并经真机验证。
 pub const MODE_SWITCH_CTRL_HELD: u32 = 0x0800_0000;
