@@ -1056,7 +1056,7 @@ impl Forwarder {
     fn push_frame_out(&mut self, f: Option<crate::candidate_window::RenderedFrame>, anim: bool) {
         match f {
             Some(f) => {
-                let (sx, sy, w, h, scale, soft, absolute) = (
+                let (sx, sy, w, h, scale, soft, absolute, content) = (
                     f.screen_x,
                     f.screen_y,
                     f.width,
@@ -1064,6 +1064,7 @@ impl Forwarder {
                     f.scale,
                     f.software_shadow,
                     f.absolute_pos,
+                    f.content_offset,
                 );
                 // 翻页器命中矩形的内部 tag(HOVER_PAGE_PREV/NEXT=100000/100001)重映射为
                 // Swift/Go 约定的 -1(上页)/-2(下页)，否则 100000>=0 会被 .app 误当候选选中
@@ -1128,6 +1129,7 @@ impl Forwarder {
                     h,
                     flags,
                     scale.round().max(1.0) as u32,
+                    content,
                 ));
                 self.sink.push_frame(&encode_candidate_rects(&rects));
                 self.visible = true;
@@ -1184,7 +1186,7 @@ impl Forwarder {
         if let Some(shm) = self.shm.as_mut() {
             let seq = shm.write_hidden();
             self.sink
-                .push_frame(&encode_host_render_frame(seq, 0, 0, 0, 0, 0, 1));
+                .push_frame(&encode_host_render_frame(seq, 0, 0, 0, 0, 0, 1, (0, 0)));
         }
     }
 }
@@ -1450,6 +1452,19 @@ mod tests {
 
         let (x, y, flags) = last_render_frame(&cap).expect("应推出 host render frame");
         assert_eq!((x, y), (640, 480), "固定位置必须原样下发，不再按光标推算");
+        let v = cap.lock().unwrap();
+        let p = &v
+            .iter()
+            .rev()
+            .find(|f| cmd_of(f) == CMD_HOST_RENDER_FRAME)
+            .unwrap()[8..];
+        assert_eq!(p.len(), 36, "帧末尾带内容偏移");
+        assert_eq!(
+            &p[28..36],
+            &[0u8; 8],
+            "无皮肤外扩：窗口左上即内容左上，偏移为 0"
+        );
+        drop(v);
         assert_ne!(
             flags & SharedRenderHeader::FLAG_ABSOLUTE_POS,
             0,

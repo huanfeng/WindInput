@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace windlinux {
@@ -80,6 +81,14 @@ private:
 /// 坐标系：屏幕左上为原点、y 向下（X11 根窗口坐标 = wire 坐标）。
 Rect placePanel(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& workArea, bool absolute);
 
+/// 候选窗落位多一级：本次组合里拖过（`pin` = 拖到的**内容**左上）就按它摆，窗口 = 锚 − 本帧内容偏移，
+/// 只夹进工作区、不翻转；否则同 `placePanel`。优先级 锚 > 固定位置（absolute）> 跟随光标。锚记内容
+/// 左上而不是窗口左上：组合中途装饰外扩变了（换皮肤 / 换方向），内容仍停在拖到的地方。对位 Windows
+/// `drag_pin` + `drag_pin_margin`。
+Rect placeCandidate(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& workArea, bool absolute,
+                    const std::optional<std::pair<int32_t, int32_t>>& pin, int32_t contentX,
+                    int32_t contentY);
+
 /// 光栅浮层（CMD_OVERLAY_FRAME）的落位：返回**窗口**矩形（尺寸 = 位图尺寸）。服务端拿不到
 /// 屏幕几何，只给「首选点 + 备选点」或「锚点 + 留白」，这里按工作区选定，公式逐条对位
 /// Windows 各窗口的本地定位（`status_tip.rs` / `toast.rs` / `tooltip.rs`）：
@@ -109,6 +118,10 @@ std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin,
 /// 的 under 装饰被窗体盖住，不算。对位 Windows `CandidateMouse::decor_at`。皮肤没启用返回 -1。
 /// 调用方先判候选命中：点在候选 / 翻页按钮上的不算装饰点击。
 int32_t decorAt(const CandidateSkin& skin, int32_t x, int32_t y);
+
+/// 位图像素点 `(x, y)` 是不是「不拖动的装饰区」：落在 `block` / `pass` 装饰的矩形里、且不在窗体内
+/// （窗体内的部分照样拖，同 Windows `on_decor_only` 与设计 §4）。皮肤没启用返回 false。`drag` 装饰不算。
+bool onNoDragDecor(const CandidateSkin& skin, int32_t x, int32_t y);
 
 /// 位图像素矩形折成逻辑坐标（÷ scale）：向外取整，宽高至少 1。Wayland 输入区用。
 Rect toLogicalCover(const Rect& r, double scale);

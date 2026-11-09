@@ -515,6 +515,10 @@ std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p)
     if (out.scale == 0) {
         out.scale = 1;
     }
+    if (p.size() >= 36) {
+        out.contentX = getI32(p.data() + 28);
+        out.contentY = getI32(p.data() + 32);
+    }
     return out;
 }
 

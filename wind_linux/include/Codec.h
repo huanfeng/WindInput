@@ -213,9 +213,14 @@ struct HostRenderFramePayload {
     uint32_t height = 0;
     uint32_t flags = 0;
     uint32_t scale = 1;
+    /// 窗口左上 → 内容左上（`ui.candidate.custom_x/y` 同义）的偏移，单位同 x/y。拖完按它换回内容
+    /// 左上报 `pos.candidate`。36 字节版的扩展字段，旧服务的短帧按 0。
+    int32_t contentX = 0;
+    int32_t contentY = 0;
     bool visible() const { return (flags & 0x1) != 0; }
 };
-/// CMD_HOST_RENDER_FRAME（push）：seq,x,y,w,h,flags 各 u32/i32（24 字节）[+ scale u32]。
+/// CMD_HOST_RENDER_FRAME（push）：seq,x,y,w,h,flags 各 u32/i32（24 字节）[+ scale u32]
+/// [+ contentX contentY i32]。
 std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p);
 
 /// CMD_OVERLAY_FRAME（push）：一层浮层（状态气泡 / Toast / tooltip）有新帧或该隐藏。

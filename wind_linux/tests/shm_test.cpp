@@ -194,6 +194,21 @@ void TestPlacement()
     CASE("翻转后仍越界 → 夹进工作区");
     r = placePanel(100, 100, 300, 1000, Rect{0, 0, 1920, 1080}, false);
     CHECK(r.y >= 0 && r.y + 1000 <= 1080);
+
+    CASE("候选窗拖动锚：锚 > 固定位置 > 跟随光标；窗口 = 锚 − 内容偏移，只钳制不翻转");
+    const std::optional<std::pair<int32_t, int32_t>> none;
+    r = placeCandidate(100, 200, 300, 150, wa, false, none, 8, 12);
+    CHECK(r.x == 100 && r.y == 200); // 没锚：同 placePanel，不套内容偏移
+    r = placeCandidate(100, 1000, 300, 150, wa, false, none, 8, 12);
+    CHECK_EQ(r.y, 1000 - 18 - 150); // 没锚的跟随照旧翻转
+    const auto pin = std::make_optional(std::make_pair(int32_t(500), int32_t(400)));
+    r = placeCandidate(100, 200, 300, 150, wa, false, pin, 8, 12);
+    CHECK(r.x == 492 && r.y == 388); // 锚压过跟随光标
+    r = placeCandidate(640, 480, 300, 150, wa, true, pin, 8, 12);
+    CHECK(r.x == 492 && r.y == 388); // 锚压过固定位置
+    r = placeCandidate(100, 200, 300, 150, wa, false,
+                       std::make_optional(std::make_pair(int32_t(500), int32_t(1000))), 0, 0);
+    CHECK_EQ(r.y, 1080 - 150); // 锚贴底：钳制而不是翻到光标上方
 }
 
 OverlayFramePayload overlay(uint32_t place, int32_t x, int32_t y, int32_t altX, int32_t altY)
@@ -329,6 +344,26 @@ void TestDecorAt()
     CHECK_EQ(decorAt(skin, 60, 50), -1); // 窗体内空白
 }
 
+void TestNoDragDecor()
+{
+    CASE("不拖动区：窗体外的 block / pass 装饰；drag 装饰与窗体内照拖");
+    CandidateSkin skin;
+    skin.frame = {20, 20, 100, 60};
+    skin.decor = {
+        {7, SKIN_HIT_BLOCK, 0, {0, 0, 40, 40}}, // 伸进窗体左上角
+        {3, SKIN_HIT_DRAG, 0, {100, 0, 40, 40}},
+        {9, SKIN_HIT_PASS, 0, {0, 70, 30, 30}},
+    };
+    CHECK(!onNoDragDecor(skin, 5, 5)); // 皮肤没启用
+    skin.flags = SKIN_FLAG_ACTIVE;
+    CHECK(onNoDragDecor(skin, 5, 5));
+    CHECK(!onNoDragDecor(skin, 30, 30)); // block 伸进窗体的那截：按窗体拖
+    CHECK(!onNoDragDecor(skin, 105, 5)); // drag 装饰
+    CHECK(onNoDragDecor(skin, 5, 85));   // pass（回落成 block 时也接得到鼠标）
+    CHECK(!onNoDragDecor(skin, 60, 50)); // 窗体内空白
+    CHECK(!onNoDragDecor(skin, 40, 5));  // 右边界开区间
+}
+
 void TestAnimInPlace()
 {
     CASE("换帧照原位贴：带 ANIM 位且 SHM 就是通知的那一帧");
@@ -342,6 +377,7 @@ int main()
     TestReadFrame();
     TestRejectBad();
     TestDecorAt();
+    TestNoDragDecor();
     TestOpenMissing();
     TestOpenGuards();
     TestPlacement();

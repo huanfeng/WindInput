@@ -571,12 +571,12 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
   alpha ≥ 128 抠形，生效输入区是两者之交）。之后没有 `MASK`（换回普通主题）就把 `SK_INPUT` 复位成缺省
   （`xcb_shape_mask(..., XCB_NONE)`），恢复整窗接鼠标。窗口重建（合成器起停换 visual）后补设一次。
 - 换帧（`FLAG_ANIM_FRAME`）：沿用上次落位，`present` 不 raise。
-- 候选窗不能拖（现状），装饰不拖动自然成立；`drag` 装饰在 Linux 上与 `block` 一样。
+- 候选窗拖动（§17.7）：空白处与 `drag` 装饰起拖，窗体外的 `block` / `pass` 装饰不拖。
 
 **Wayland**（`WaylandPanel`）
 - 输入区 = 输入区表 ÷ scale，另并上状态气泡矩形（现状）；没有 `MASK` 时照旧是候选窗整块矩形。
   `wl_surface.set_input_region` 是核心协议，所有合成器都认；KWin 的 input-method-v1 面板走同一条
-  `attachPixels`。popup 由合成器摆位，不能拖。
+  `attachPixels`。popup 由合成器摆位，不能拖（§17.7）：`drag` 装饰在原生 Wayland 应用里与 `block` 一样。
 
 **macOS**（`CandidatePanel`）
 - 穿透装饰拆到独立层：服务端主缓冲不画 `pass`（主层 alpha 为 0 处窗口天然穿透），穿透装饰另画一张同尺寸
@@ -615,17 +615,20 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
   服务重启后靠 addon 重读门户（`Read`，两层 variant）再报。挑选规则与 kdeglobals 解析是 C++ 单测。
 - macOS：Rust 部分 `cargo check --target aarch64-apple-darwin`；Swift 本机编不了，只能 CI 的 macOS job
   与真机，判据见报告。
+- 候选窗拖动（§17.7）：C++ 单测拖动阈值、不拖动区、锚的优先级、候选帧 36 字节解码；Rust 单测固定位置下
+  「帧坐标 + 内容偏移」回到 `custom_x/y`、帧长 36 字节；e2e（Xvfb，两条透明路径）按住空白处 / `drag` 装饰
+  拖动窗口跟手、`block` 装饰上拖不动、阈值内松开不算拖、续帧不弹回、收起后回到光标旁、切固定位置时应答
+  查询落盘内容左上、固定位置下拖动落盘且重显不漂。
 - 关键逻辑在 `git archive` 导出的副本上做变异验证。
 
 ### 17.6 本期不做
 
-- Linux 候选窗拖动（与皮肤无关的既有差距）：方案见 §17.7，未实施，等维护者定其中的取舍。
 - 前端本地播放动画（§17.1）。
 
-### 17.7 Linux 候选窗拖动（方案，未实施）
+### 17.7 Linux 候选窗拖动
 
 目标与 Windows `CandidateMouse` 一致：空白处（编码栏、内边距）与 `drag` 装饰起拖，`block` 装饰（窗体外）
-不拖、只判点击，候选 / 翻页按钮照旧点选。现状是 Linux 候选窗不能拖，`drag` 装饰等同 `block`（§17.3）。
+不拖、只判点击，候选 / 翻页按钮照旧点选。改前 Linux 候选窗不能拖，`drag` 装饰等同 `block`。
 
 **平台能不能做**
 
@@ -658,9 +661,21 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 按住空白拖动）断言窗口跟随、继续打字不弹回、收起后回到光标旁；固定位置模式下松手后 `custom_x/y` 落盘为
 内容左上；`block` 装饰上按住拖不动、`drag` 装饰上能拖。
 
-**规模与待定**：X11Panel 拖动状态机与锚、候选帧协议加字段（两端编解码与同步测试）、引擎应答查询、
-e2e，约 300 行。动到协议字段与跨平台语义，按约定先停：等维护者定 2 的 (a) / (b)，以及 Wayland 原生
-应用不支持是否可以接受。
+**定案与实现**（维护者定：走 (a)；原生 Wayland 应用不支持可以接受）
+
+- 协议：`CMD_HOST_RENDER_FRAME` 由 28 字节加长到 36 字节，尾部 `contentX` / `contentY`（i32）= 窗口左上到
+  内容左上的偏移。服务端取 `(ml, mt − clear)`（与 `render_frame` 摆窗口时减掉的同一组量；外部宿主这条路
+  不画软阴影，实际只有装饰外扩，`clear` 恒 0），故固定位置下「帧坐标 + 偏移」正好是 `custom_x/y`，「拖动 → 落盘 → 重显」不漂。macOS `.app`
+  与旧 addon 按长度只读前 28 字节；新 addon 收旧服务的短帧按 0。
+- X11 / XWayland（`X11Panel`）：按下时排除候选 / 翻页按钮与不拖动区（`onNoDragDecor`：窗体外的 `block` /
+  `pass` 装饰矩形），其余 `CandidateDragGate.press`；挪过 4 px 后跟随（`xcb_configure_window`，fleur 光标，
+  悬停清掉、提示随之收起），窗口夹进工作区。没过阈值的松开不算拖：窗口不动、不报，装饰点击照判。
+  拖动锚记内容左上，`placeCandidate` 按「锚 − 本帧偏移」摆、只钳制不翻转；`candShift` 按实际落点算，
+  跟随候选窗的浮层随之平移。候选窗收起（隐藏帧）清锚。
+- 上报与应答：松手报 `pos.candidate`（内容左上）；引擎应 `pos.candidate.query` 报 X11 候选窗当前内容
+  左上，候选窗不在屏上（含原生 Wayland 应用那条路）不答，服务端保留旧值。
+- **限制**：原生 Wayland 应用的候选窗不能拖，也不答查询；同一会话里 XWayland 应用能拖、原生应用不能。
+  拖动夹回按整块根窗口的工作区，不分显示器（同状态气泡）。不跟 Windows 的「空白处双击截图」。
 
 ### 17.8 Windows DLL host-render 的穿透装饰
 

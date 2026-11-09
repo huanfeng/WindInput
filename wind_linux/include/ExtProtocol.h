@@ -85,6 +85,8 @@ inline constexpr const char* EXT_KIND_MENU_OPEN = "menu.open";
 inline constexpr const char* EXT_KIND_MENU_DISMISS = "menu.dismiss";
 /// 上行：状态气泡拖动落点 / 应询回报的当前位置（内容左上）。落不落盘由服务端按定位方式定。
 inline constexpr const char* EXT_KIND_POS_STATUS_TIP = "pos.status_tip";
+/// 上行：候选窗拖动落点 / 应询回报的当前位置（内容左上，同 `ui.candidate.custom_x/y`）。
+inline constexpr const char* EXT_KIND_POS_CANDIDATE = "pos.candidate";
 /// 上行：工具栏 / 软键盘拖动落点。body `{"x":..,"y":..,"output":"DP-1"}`，内容盒左上，output 可缺省。
 inline constexpr const char* EXT_KIND_POS_TOOLBAR = "pos.toolbar";
 inline constexpr const char* EXT_KIND_POS_SOFTKEYBOARD = "pos.softkeyboard";
@@ -104,6 +106,8 @@ inline constexpr const char* EXT_KIND_HOST_REDUCE_MOTION = "host.reduce_motion";
 inline constexpr const char* EXT_KIND_SKIN_DECOR_CLICK = "skin.decor_click";
 /// 下行：服务端问状态气泡此刻在哪（切「固定位置」时以当前位置落盘）。气泡不在屏上不答。
 inline constexpr const char* EXT_KIND_POS_STATUS_TIP_QUERY = "pos.status_tip.query";
+/// 下行：服务端问候选窗此刻在哪（切「固定位置」时以当前位置落盘）。候选窗不在屏上不答。
+inline constexpr const char* EXT_KIND_POS_CANDIDATE_QUERY = "pos.candidate.query";
 
 // ── `menu.open` 的 target 里「不是候选」的几档（protocol.rs `menu_target`）──
 constexpr int32_t MENU_TARGET_MAIN = -1;

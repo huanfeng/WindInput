@@ -475,7 +475,8 @@ void X11CandidatePanel::unmapWindow(Surface& s)
     }
 }
 
-bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool absolute, bool anim)
+bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool absolute, bool anim,
+                             int32_t contentX, int32_t contentY)
 {
     if (f.width == 0 || f.height == 0 || f.bgra.empty() || !ensureConnection()) {
         return false;
@@ -489,13 +490,46 @@ bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool ab
     }
     // 换帧：内容与落位都没变，照原位贴、不 raise。窗口刚重建（合成器起停）或尺寸变了就按普通帧走。
     const bool inPlace = anim && cand_.mapped && cand_.pixW == f.width && cand_.pixH == f.height;
+    candContentX_ = contentX;
+    candContentY_ = contentY;
+    candSuggestX_ = x;
+    candSuggestY_ = y;
     Rect r = inPlace ? Rect{cand_.x, cand_.y, int32_t(f.width), int32_t(f.height)}
-                     : placePanel(x, y, int32_t(f.width), int32_t(f.height), workArea(), absolute);
+                     : placeCandidate(x, y, int32_t(f.width), int32_t(f.height), workArea(),
+                                      absolute, candPin_, contentX, contentY);
     if (!inPlace) {
         candShiftX_ = r.x - x;
         candShiftY_ = r.y - y;
     }
     return present(cand_, f, r, !inPlace);
+}
+
+std::optional<std::pair<int32_t, int32_t>> X11CandidatePanel::candidateContentOrigin() const
+{
+    if (!cand_.mapped) {
+        return std::nullopt;
+    }
+    return std::make_pair(cand_.x + candContentX_, cand_.y + candContentY_);
+}
+
+void X11CandidatePanel::moveCandidate(int32_t wx, int32_t wy)
+{
+    if (!conn_ || !cand_.window || !cand_.mapped) {
+        return;
+    }
+    // 与下一帧按锚摆时同一条钳制（placeCandidate 的锚分支），松手后不会再跳一下。
+    const Rect r = placePanel(wx, wy, int32_t(cand_.pixW), int32_t(cand_.pixH), workArea(), true);
+    candPin_ = std::make_pair(r.x + candContentX_, r.y + candContentY_);
+    candShiftX_ = r.x - candSuggestX_;
+    candShiftY_ = r.y - candSuggestY_;
+    if (r.x == cand_.x && r.y == cand_.y) {
+        return;
+    }
+    const uint32_t xy[] = {uint32_t(r.x), uint32_t(r.y)};
+    xcb_configure_window(conn_, cand_.window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, xy);
+    xcb_flush(conn_);
+    cand_.x = r.x;
+    cand_.y = r.y;
 }
 
 void X11CandidatePanel::setSkin(CandidateSkin skin)
@@ -543,6 +577,11 @@ void X11CandidatePanel::applyCandidateInput()
 
 void X11CandidatePanel::hide()
 {
+    if (candDrag_.moving()) {
+        setMoveCursor(cand_, false);
+    }
+    candDrag_.cancel();
+    candPin_.reset(); // 拖动位置只在本次组合内有效，下次输入回到建议落点（同 Windows reset_drag）
     unmap(cand_);
     rects_.clear();
     hover_ = -1;
@@ -781,6 +820,13 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
             // 候选 / 翻页按钮之外：按在皮肤装饰上的，松开时判是不是点了它（同 Windows）
             decorClick_.press(hit == kNoHit ? decorAt(skin_, e->event_x, e->event_y) : -1,
                               e->root_x, e->root_y);
+            // 空白处与 drag 装饰起拖（block 装饰在窗体外的部分只判点击）。按下带来的隐式抓取
+            // 让指针移出窗口后仍收到移动与松开。
+            if (hit == kNoHit && !onNoDragDecor(skin_, e->event_x, e->event_y)) {
+                candDrag_.press(e->root_x, e->root_y, cand_.x, cand_.y);
+            } else {
+                candDrag_.cancel();
+            }
         } else if (e->detail == 3 && cb_.contextMenu) {
             // 右键：命中候选 → 候选菜单，空白 / 翻页按钮 → 主菜单（同 Windows right_click）。
             // 悬停先清掉：菜单开着时候选窗收不到移动事件，残留的高亮会一直挂着。
@@ -795,6 +841,17 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
     case XCB_BUTTON_RELEASE: {
         auto* e = reinterpret_cast<xcb_button_release_event_t*>(ev);
         if (e->event != cand_.window || e->detail != 1) {
+            break;
+        }
+        if (candDrag_.release()) {
+            // 拖过：松手只报落点，不再判点选 / 装饰点击（下一次按下会重置两道闸门）。固定位置
+            // 模式下它就是新的 custom_x/y，跟随光标模式下服务端不落盘（判据在服务端 save_candidate_pos）。
+            setMoveCursor(cand_, false);
+            if (auto at = candidateContentOrigin(); at && cb_.candidateMoved) {
+                WIND_DEBUG() << "候选窗拖动松手，上报内容左上 (" << at->first << "," << at->second
+                             << ")";
+                cb_.candidateMoved(at->first, at->second);
+            }
             break;
         }
         const int32_t hit = hitTest(rects_, e->event_x, e->event_y);
@@ -812,6 +869,15 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
     case XCB_MOTION_NOTIFY: {
         auto* e = reinterpret_cast<xcb_motion_notify_event_t*>(ev);
         if (e->event != cand_.window) {
+            break;
+        }
+        const bool wasMoving = candDrag_.moving();
+        if (auto to = candDrag_.move(e->root_x, e->root_y)) {
+            if (!wasMoving) {
+                setMoveCursor(cand_, true);
+                setHover(-1); // 拖动中不悬停：悬停提示随之收起，不留在原处
+            }
+            moveCandidate(to->first, to->second);
             break;
         }
         int32_t idx = hitTest(rects_, e->event_x, e->event_y);
@@ -1124,11 +1190,16 @@ void X11CandidatePanel::endDrag(bool report)
 
 void X11CandidatePanel::setDragCursor(bool on)
 {
-    Surface* sp = surfaceOf(drag_.kind);
-    if (!conn_ || !sp || !sp->window) {
+    if (Surface* sp = surfaceOf(drag_.kind)) {
+        setMoveCursor(*sp, on);
+    }
+}
+
+void X11CandidatePanel::setMoveCursor(Surface& s, bool on)
+{
+    if (!conn_ || !s.window) {
         return;
     }
-    Surface& s = *sp;
     if (on && !dragCursor_) {
         // 光标字体里的 fleur（四向箭头，XC_fleur = 52，掩码是下一个字形），同 Windows IDC_SIZEALL。
         xcb_font_t font = xcb_generate_id(conn_);

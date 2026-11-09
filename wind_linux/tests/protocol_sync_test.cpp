@@ -166,6 +166,9 @@ int main()
     CHECK_EQ(rustStr("SKIN_DECOR_CLICK"), std::string(windlinux::EXT_KIND_SKIN_DECOR_CLICK));
     CHECK_EQ(rustStr("POS_STATUS_TIP_QUERY"),
              std::string(windlinux::EXT_KIND_POS_STATUS_TIP_QUERY));
+    CHECK_EQ(rustStr("POS_CANDIDATE"), std::string(windlinux::EXT_KIND_POS_CANDIDATE));
+    CHECK_EQ(rustStr("POS_CANDIDATE_QUERY"),
+             std::string(windlinux::EXT_KIND_POS_CANDIDATE_QUERY));
 
     CASE("menu.open 的非候选 target（有符号）与 protocol.rs `menu_target` 一致");
     SYNC("MENU_TARGET_MAIN", windlinux::MENU_TARGET_MAIN);

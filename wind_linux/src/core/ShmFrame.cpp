@@ -125,6 +125,16 @@ Rect placePanel(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& wa, bool
     return r;
 }
 
+Rect placeCandidate(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& wa, bool absolute,
+                    const std::optional<std::pair<int32_t, int32_t>>& pin, int32_t contentX,
+                    int32_t contentY)
+{
+    if (pin) {
+        return placePanel(pin->first - contentX, pin->second - contentY, w, h, wa, true);
+    }
+    return placePanel(x, y, w, h, wa, absolute);
+}
+
 Rect placeOverlay(const OverlayFramePayload& p, const Rect& wa, int32_t shiftX, int32_t shiftY)
 {
     const int32_t cw = p.contentW ? int32_t(p.contentW) : int32_t(p.width);
@@ -245,6 +255,26 @@ int32_t decorAt(const CandidateSkin& skin, int32_t x, int32_t y)
         return int32_t(it->index);
     }
     return -1;
+}
+
+bool onNoDragDecor(const CandidateSkin& skin, int32_t x, int32_t y)
+{
+    if ((skin.flags & SKIN_FLAG_ACTIVE) == 0) {
+        return false;
+    }
+    auto in = [x, y](const Rect& r) {
+        return x >= r.x && y >= r.y && int64_t(x) < int64_t(r.x) + r.w
+               && int64_t(y) < int64_t(r.y) + r.h;
+    };
+    if (in(skin.frame)) {
+        return false;
+    }
+    for (const SkinDecor& d : skin.decor) {
+        if (d.hit != SKIN_HIT_DRAG && in(d.rect)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Rect toLogicalCover(const Rect& r, double scale)

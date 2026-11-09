@@ -189,6 +189,31 @@ int main()
         g.press(0, 0, 0);
         CHECK_EQ(g.release(0, 0, 0), 0); // 下标 0 是合法装饰
     }
+    CASE("CandidateDragGate：挪过阈值才跟随，过了就一直跟；没过阈值的松开不算拖");
+    {
+        CandidateDragGate g;
+        CHECK(!g.move(10, 10).has_value()); // 没按下
+        g.press(100, 100, 50, 60);
+        CHECK(!g.move(104, 96).has_value()); // 阈值内
+        CHECK(!g.moving());
+        auto o = g.move(105, 100);
+        CHECK(o.has_value());
+        CHECK(o->first == 55 && o->second == 60);
+        o = g.move(100, 101); // 回到阈值内也接着跟
+        CHECK(o.has_value());
+        CHECK(o->first == 50 && o->second == 61);
+        CHECK(g.release());
+        CHECK(!g.release()); // 只交一次
+        CHECK(!g.move(200, 200).has_value());
+        g.press(100, 100, 50, 60);
+        g.move(103, 103);
+        CHECK(!g.release()); // 阈值内松开：是点击
+        g.press(100, 100, 50, 60);
+        g.move(100, 120);
+        g.cancel();
+        CHECK(!g.moving());
+        CHECK(!g.release()); // 收起后的松开
+    }
     CASE("host.reduce_motion：{reduce}");
     {
         std::string kind;

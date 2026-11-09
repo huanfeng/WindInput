@@ -534,6 +534,25 @@ mod tests {
         );
     }
 
+    /// 外部宿主拖完报的是「窗口左上 + content_offset」：固定位置下它必须正好回到配置的点，
+    /// 否则每次「拖动 → 落盘 → 重显」窗口都漂一截装饰外扩（§17.7）。
+    #[cfg(ext_presenter)]
+    #[test]
+    fn content_offset_maps_window_back_to_fixed_point() {
+        let mut w = fixture_window("content-offset");
+        w.update("", 0, "中", vec![cand("中")], 0, -1, 1, 1);
+        w.set_fixed_position(Some((300, 200)));
+        let f = w.render_frame().expect("有内容应出帧");
+        assert!(f.content_offset.1 > 0, "装饰伸出窗体上方：窗口比内容高");
+        assert_eq!(
+            (
+                f.screen_x + f.content_offset.0,
+                f.screen_y + f.content_offset.1
+            ),
+            (300, 200)
+        );
+    }
+
     fn cand(text: &str) -> wind_ui_types::CandidateItem {
         wind_ui_types::CandidateItem {
             text: text.to_string(),

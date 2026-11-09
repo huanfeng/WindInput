@@ -358,6 +358,9 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
         reportFullscreen(effectiveFullscreen(on, waylandPanels));
     };
     cb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
+    cb.candidateMoved = [this](int32_t x, int32_t y) {
+        sendAndDrain(encodePosFrame(EXT_KIND_POS_CANDIDATE, x, y));
+    };
     panel_ = std::make_unique<X11CandidatePanel>(instance_->eventLoop(), std::move(cb));
     // 没连着就不报（不为这一条去拉起服务）：连上时 reconnect 按现值补报。
     motion_ = std::make_unique<DesktopMotion>(instance_->eventLoop(), [this](bool reduce) {
@@ -1365,7 +1368,7 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     wlPanel_->hide();
 #endif
     panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0,
-                 animInPlace(p.flags, p.seq, f.sequence));
+                 animInPlace(p.flags, p.seq, f.sequence), p.contentX, p.contentY);
 }
 
 void WindEngine::hideAllWayland()
@@ -1404,6 +1407,14 @@ void WindEngine::onExt(const ExtEnvelope& ext)
         }
         if (at) {
             sendAndDrain(encodePosFrame(EXT_KIND_POS_STATUS_TIP, at->first, at->second));
+        }
+        return;
+    }
+    if (ext.kind == EXT_KIND_POS_CANDIDATE_QUERY) {
+        // 同上，问的是候选窗。Wayland 原生应用的候选窗由合成器摆位、本端不知道它在哪，不答
+        // （此时 X11 候选窗已收起，candidateContentOrigin 为空）。
+        if (auto at = panel_->candidateContentOrigin()) {
+            sendAndDrain(encodePosFrame(EXT_KIND_POS_CANDIDATE, at->first, at->second));
         }
         return;
     }

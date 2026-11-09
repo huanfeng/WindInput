@@ -218,7 +218,7 @@ void TestDecodeMisc()
 
 void TestDecodeRender()
 {
-    CASE("HostRenderFrame 24/28 字节；OverlayFrame 68 字节；CandidateRects；Ext 信封");
+    CASE("HostRenderFrame 24/28/36 字节；OverlayFrame 68 字节；CandidateRects；Ext 信封");
     Bytes f;
     for (uint32_t v : {7u, uint32_t(-10), 20u, 100u, 50u, 0x9u}) {
         append(f, le32(v));
@@ -231,6 +231,12 @@ void TestDecodeRender()
     CHECK((fr->flags & FRAME_FLAG_ABSOLUTE_POS) != 0);
     append(f, le32(2));
     CHECK_EQ(decodeHostRenderFrame(f)->scale, 2u);
+    CHECK_EQ(decodeHostRenderFrame(f)->contentX, 0); // 旧服务的 28 字节帧：内容偏移按 0
+    CHECK_EQ(decodeHostRenderFrame(f)->contentY, 0);
+    append(f, le32(12));
+    append(f, le32(uint32_t(-5)));
+    CHECK_EQ(decodeHostRenderFrame(f)->contentX, 12);
+    CHECK_EQ(decodeHostRenderFrame(f)->contentY, -5);
     CHECK(!decodeHostRenderFrame(Bytes(20, 0)).has_value());
 
     // CMD_OVERLAY_FRAME：偏移按 Rust `encode_overlay_frame` 写死（布局改了两边一起改）。

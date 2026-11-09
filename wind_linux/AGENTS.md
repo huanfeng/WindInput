@@ -186,13 +186,20 @@ addon 在主线程（经 EventDispatcher）按名只读打开 SHM、拷出一帧
   `CMD_CANDIDATE_SKIN`（`Codec.h` 的 `CandidateSkin`）。带输入区表（`SKIN_FLAG_MASK`）时候选窗
   `SK_INPUT` 设成表里的矩形（穿透装饰、透明外扩区不接鼠标，ARGB 与无合成器两条路都设），没带就复位成
   缺省；换算是纯函数 `candidateInputRegion`。帧带 `FRAME_FLAG_ANIM_FRAME`（皮肤动画换帧）时照原位贴图、
-  不 raise。候选窗不能拖，`drag` 装饰在这里等同 `block`。没有 SHAPE 扩展时整窗接鼠标（记一条 warn）。
+  不 raise。没有 SHAPE 扩展时整窗接鼠标（记一条 warn）。
   Wayland 同一张表折成逻辑坐标进 `wl_surface` 输入区。候选 / 翻页按钮之外按在 drag / block 装饰上
   （`decorAt`）、松开仍在同一块上且没挪过阈值（`DecorClickGate`），经 `skin.decor_click` 报 index，服务端
   触发它的 `click` 事件。系统「减少动态效果」由 `DesktopMotion` 读设置门户（Fcitx5 自带的 DBus 封装，
   异步）与 kdeglobals，经 `host.reduce_motion` 报服务，挑选规则是纯函数 `pickReduceMotion`（§17.1）。
   e2e：`WIND_E2E_ONLY=skin scripts/linux/e2e.sh`
   （程序生成的皮肤主题，`xdotool getmouselocation` 判指针下的窗口）。
+- **候选窗拖动**（X11 / XWayland，设计 §17.7）：空白处与 `drag` 装饰左键起拖，窗体外的 `block` / `pass`
+  装饰（`onNoDragDecor`）与候选 / 翻页按钮不拖。本端拖，同状态气泡：按下的隐式抓取收移动，挪过 4 px
+  （`CandidateDragGate`）才跟随，没过就松开按点击处理（装饰点击照判）。本次组合记拖动锚（拖到的内容
+  左上），后续帧按锚摆（`placeCandidate`：锚 > 固定位置 > 跟随光标），候选窗收起时清。松手报
+  `pos.candidate`（内容左上 = 窗口左上 + 候选帧尾的 `contentX/Y`），应 `pos.candidate.query` 报当前
+  内容左上；落不落盘由服务端按定位方式定。原生 Wayland 应用的候选窗是合成器摆位的 popup，**不能拖**，
+  也不答查询。
 
 ## 光栅浮层：状态气泡 / Toast / 悬停提示（X11）
 
@@ -339,7 +346,7 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 | 候选窗显示（Wayland 原生） | 已接（`WaylandPanel`），treeland 真机验过 | 跟着光标走的（候选、tooltip、跟随光标的状态气泡）走 `zwp_input_method_v2` 的 popup surface（KWin 只有 input-method-v1，走 `zwp_input_panel_v1` 的 overlay 面板：KWin 全局只认一个面板、角色拆不掉，故每个显示周期换新 surface，旧的经 `RetiredSurfaces` 延迟销毁，见 `docs/design/linux-kde-input-method-v1.md`），**由合成器按文本光标摆位**（客户端报的 `cursorRect()` 是窗口相对坐标，没法自己摆），合成进同一张位图（tooltip 按服务端落位相对候选窗摆）；按屏幕摆的（Toast、屏幕锚点 / 固定位置的状态气泡）在合成器有 wlr-layer-shell 时各开一个 OVERLAY 层 surface，按锚点 + 边距摆，在任务栏之上，且不论焦点在哪种应用都走这条（XWayland 窗口会被 treeland 压在任务栏下）。气泡右键菜单开在一张铺满输出的透明 layer 底板上（各级菜单是子 surface），坐标即输出坐标，菜单外的点击也由底板接住（代替抓指针；请求 2s 无菜单 / 60s 无点击 / 120s 上限三道兜底收起）。layer surface 收起时连角色对象一起销毁、下次重建（只摘 buffer 时 treeland 不再发 configure）；所有我们的 wl_surface 只建不毁并挂全零 user_data 占位（classicui 的指针回调会读它）。鼠标：点选、翻页、滚轮、悬停、右键菜单；layer 上的气泡可拖（relative-pointer 取位移，surface 自己在动，按 surface 坐标算会乱跳）、Toast 可点击关闭；popup 里只有候选与气泡收鼠标。跟随光标的气泡不能拖；菜单靠近屏幕下 / 右缘可能被合成器裁掉；锚在底 / 右边的 layer 气泡开始拖时可能跳一个任务栏厚度（合成器不告诉独占区）；候选窗落在任务栏处会被盖住（popup 层级归合成器）；GNOME 不支持 input-method-v2，应用走 X11 / XWayland 那条路（仅当 `XDG_CURRENT_DESKTOP` 分段含 `GNOME` 时按 §7.10 折光标，Shell 扩展见 `gnome-shell-extension/README.md`；非 GNOME 保持直通）；KDE Plasma（input-method v1）Kubuntu 26.04 / KWin 6.6.6 真机验过；多显示器 / 混合缩放只近似；arm64 上未实机验 |
 | 多显示器 | 未做 | 工作区取整个根窗口，不按 RandR 显示器切分：跨屏边缘的翻转/钳制按整块虚拟屏算 |
 | HiDPI（帧 `scale>1`） | 按物理像素原样贴 | X11 没有逻辑坐标，服务端在 Linux 上目前恒发 scale=1 |
-| 候选窗拖动 / 固定位置回报（`pos.candidate` / `pos.candidate.query`） | 未接（方案见 `docs/design/theme-skin-animation.md` §17.7，待定） | 服务端问位置时不答 = 保留旧值（macOS 不可见时也不答，语义安全） |
+| 候选窗拖动 / 固定位置回报（`pos.candidate` / `pos.candidate.query`） | 已接（X11 / XWayland），e2e 覆盖 | 见上「候选窗拖动」。缺：原生 Wayland 应用（popup 由合成器摆位，协议里没有移动请求）——同一会话里 XWayland 应用能拖、原生应用不能；拖动夹回按整块根窗口工作区（不分显示器）；不跟 Windows 的「空白处双击截图」 |
 | 候选右键菜单 / 功能主菜单 | 已接（X11） | 见上「自绘菜单」。缺：Wayland；多显示器（工作区取整块根窗口）；点菜单外那一下被菜单吃掉（同 X11 原生菜单，Windows 会透传）；菜单开着时在候选上再右键只关菜单、不接着弹新菜单（Windows 会） |
 | tooltip / 状态气泡 / toast | 已接（X11），含鼠标交互 | 见上「光栅浮层」：悬停保持、气泡拖动与右键菜单、提示右键菜单（复制 / 上屏 / 截图）、Toast 点击关闭，e2e 逐项覆盖。缺：Wayland；多显示器（拖动夹回按整块根窗口）；「截图所有窗口到文件」（`TakeScreenshot` 的 `shot.panel`）仍只截候选窗（气泡 / 提示菜单里的「截图此窗口」已可用）；提示菜单开着时点在提示上只关菜单、不接着弹新菜单（Windows 会重新请求） |
 | 多显示器下的浮层锚点 | 未做 | 工作区取整个根窗口（同候选窗）：Toast / 锚点气泡落在整块虚拟屏的角上，而不是光标所在显示器 |

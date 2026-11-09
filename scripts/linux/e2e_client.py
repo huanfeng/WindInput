@@ -2184,6 +2184,136 @@ async def skin_cases(bus, im):
     await asyncio.sleep(0.2)
 
 
+def write_drag_skin_theme(name):
+    """60×40 白窗体；左上外侧 24×24 block 装饰（黑），右上外侧 24×24 drag 装饰（绿）。"""
+    d = os.path.join(os.environ["W"], "xdg", "config", "WindInput", "themes", name)
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "frame.png"), "wb").write(png_bytes(60, 40, bytes([255, 255, 255, 255])))
+    open(os.path.join(d, "block.png"), "wb").write(png_bytes(24, 24, BLOCK_IDLE))
+    open(os.path.join(d, "drag.png"), "wb").write(png_bytes(24, 24, bytes([0, 255, 0, 255])))
+    open(os.path.join(d, "theme.toml"), "w").write(f"""[meta]
+name = "{name}"
+[skin]
+density = 1
+[skin.horizontal.frame]
+image = "frame.png"
+stretch_x = [[20, 40]]
+stretch_y = [[15, 25]]
+fill = "stretch"
+[skin.horizontal.content]
+left = 6
+top = 6
+right = 6
+bottom = 6
+[[skin.horizontal.decor]]
+image = "block.png"
+anchor = "frame.top_left"
+pivot = "bottom_right"
+hit = "block"
+[[skin.horizontal.decor]]
+image = "drag.png"
+anchor = "frame.top_right"
+pivot = "bottom_left"
+hit = "drag"
+""")
+
+
+def candidate_config_int(key):
+    """用户 config.toml 里 `[ui.candidate]` 段的整数键（状态气泡段有同名键，不能按行首直接搜）。"""
+    import re
+    m = re.search(r"^\[ui\.candidate\]\s*$(.*?)(?=^\[|\Z)", user_config(), re.M | re.S)
+    return config_int(m.group(1), key) if m else None
+
+
+def candidate_drag_reports():
+    return sum("候选窗拖动松手" in l for l in fcitx_log_lines())
+
+
+async def candidate_drag_cases(bus, im):
+    """候选窗本端拖动（X11，设计 §17.7）：空白处与 drag 装饰起拖、block 装饰不拖；本次组合内续帧
+    按拖动锚摆，收起后回到光标旁；固定位置模式下 pos.candidate.query 应答与松手上报都是内容左上，
+    重显不漂。"""
+    write_drag_skin_theme("e2e-skin-drag")
+    await set_config("ui.theme.name", "e2e-skin-drag")
+    c = await new_ctx(bus, im, "e2e-cand-drag")
+    await c.ic.call_set_cursor_rect(300, 300, 2, 20)
+    sh("xdotool", "mousemove", "5", "5")
+    await c.type("nihao")
+    w0 = await wait_window("wind-candidate", True)
+    check("拖动：候选窗出现", w0 is not None and w0[5], f"window={w0}")
+    if not w0 or not w0[5]:
+        return
+    await asyncio.sleep(0.3)
+    wid, x0, y0, _, _, _ = w0
+    # 窗体左上内边距里（两块装饰都伸出窗体上方 24px、左侧 24px）：空白处。
+    bx, by = 24 + 2, 24 + 2
+
+    async def moved_by(px, py, dx, dy):
+        before = candidate_window()
+        await drag(before[1] + px, before[2] + py, dx, dy)
+        after = candidate_window()
+        return before, after, (after[1] - before[1], after[2] - before[2])
+
+    n0 = candidate_drag_reports()
+    _, w1, d = await moved_by(bx, by, 80, 50)
+    check("拖动：按住空白处拖动，窗口跟手", d == (80, 50), f"位移={d}")
+    check("拖动：松手上报 pos.candidate", candidate_drag_reports() == n0 + 1,
+          f"上报 {candidate_drag_reports() - n0} 次")
+    check("拖动：没选词", c.take() == "")
+    await c.type("n")
+    await asyncio.sleep(0.4)
+    w2 = candidate_window()
+    check("拖动：组合内续帧按拖动锚摆（不弹回光标旁）", (w2[1], w2[2]) == (w1[1], w1[2]),
+          f"拖后={w1} 续帧={w2}")
+    _, _, d = await moved_by(12, 12, 60, 40)
+    check("拖动：block 装饰上按住拖不动", d == (0, 0), f"位移={d}")
+    _, _, d = await moved_by(w2[3] - 12, 12, -40, 30)
+    check("拖动：drag 装饰上能拖", d == (-40, 30), f"位移={d}")
+    # 没过阈值的松开是点击，不是拖动：窗口不动、不报。
+    n1 = candidate_drag_reports()
+    _, _, d = await moved_by(bx, by, 3, 3)
+    check("拖动：阈值内松开不算拖", d == (0, 0) and candidate_drag_reports() == n1,
+          f"位移={d} 上报 {candidate_drag_reports() - n1} 次")
+    cfg = candidate_config_int("custom_x")
+    check("拖动：跟随光标模式下不落盘", cfg in (None, 0), f"custom_x={cfg}")
+    await c.key("Escape")
+    c.take()
+    await c.type("nihao")
+    await asyncio.sleep(0.4)
+    w3 = await wait_window("wind-candidate", True)
+    check("拖动：收起后再输入回到光标旁", w3 is not None and (w3[1], w3[2]) == (x0, y0),
+          f"首显={w0} 再显={w3}")
+
+    # 固定位置：显示中切过去 → 服务端问 pos.candidate.query → 以当前位置落盘（内容左上）。
+    await set_config("ui.candidate.position_mode", "fixed")
+    pinned = await wait_until(lambda: candidate_config_int("custom_x") is not None, 3)
+    fx, fy = candidate_config_int("custom_x"), candidate_config_int("custom_y")
+    off = (fx - w3[1], fy - w3[2]) if pinned else None
+    check("拖动：切固定位置时应答 pos.candidate.query，落盘内容左上", pinned and off[0] >= 24
+          and off[1] >= 24, f"custom=({fx},{fy}) 窗口=({w3[1]},{w3[2]})")
+    if not pinned:
+        return
+    _, w4, d = await moved_by(bx, by, -70, 40)
+    ok = await wait_until(lambda: (candidate_config_int("custom_x"),
+                                   candidate_config_int("custom_y")) == (fx - 70, fy + 40), 3)
+    check("拖动：固定位置模式下松手落盘（custom_x/y 随落点更新）", d == (-70, 40) and ok,
+          f"位移={d} custom=({candidate_config_int('custom_x')},{candidate_config_int('custom_y')})")
+    await c.key("Escape")
+    c.take()
+    await c.type("nihao")
+    await asyncio.sleep(0.4)
+    w5 = await wait_window("wind-candidate", True)
+    check("拖动：固定位置重显停在拖到的地方（不漂一截装饰外扩）",
+          w5 is not None and (w5[1], w5[2]) == (w4[1], w4[2]), f"拖后={w4} 重显={w5}")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    c.take()
+    await set_config("ui.candidate.position_mode", "follow_caret")
+    await set_config("ui.theme.name", "default")
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+
 class FakePortal:
     """扮演设置门户（`org.freedesktop.portal.Settings`）的 GNOME 后端，只答 `enable-animations`。
     fcitx5 早于它起来：addon 首读落空，之后靠 SettingChanged 信号或服务重启时的重读拿到值。"""
@@ -2743,6 +2873,7 @@ async def main():
     if os.environ.get("WIND_E2E_ONLY") == "skin":
         await a.ic.call_focus_out()
         await skin_cases(bus, im)
+        await candidate_drag_cases(bus, im)
         await skin_motion_cases(bus, im)
         ok = all(results)
         print(f"{'PASS' if ok else 'FAIL'} 总计 {sum(results)}/{len(results)}", flush=True)

@@ -1587,7 +1587,13 @@ fn frame(cmd: u16, payload: Vec<u8>) -> Vec<u8> {
     out
 }
 
-/// CmdHostRenderFrame (0x0502): seq:u32 + x:i32 + y:i32 + w:u32 + h:u32 + flags:u32 + scale:u32 (28B)
+/// CmdHostRenderFrame (0x0502): seq:u32 + x:i32 + y:i32 + w:u32 + h:u32 + flags:u32 + scale:u32
+/// + contentX:i32 + contentY:i32 (36B)。
+///
+/// `contentX/Y` = 窗口左上到内容左上（`custom_x/y` 同义）的偏移，与 x/y 同单位；宿主本地拖动后用它
+/// 把窗口落点换回内容左上报 `pos.candidate`（theme-skin-animation.md §17.7）。末尾追加：只读前 28
+/// 字节的旧宿主不受影响。
+#[allow(clippy::too_many_arguments)]
 pub fn encode_host_render_frame(
     seq: u32,
     x: i32,
@@ -1596,8 +1602,9 @@ pub fn encode_host_render_frame(
     h: u32,
     flags: u32,
     scale: u32,
+    content: (i32, i32),
 ) -> Vec<u8> {
-    let mut p = Vec::with_capacity(28);
+    let mut p = Vec::with_capacity(36);
     p.extend_from_slice(&seq.to_le_bytes());
     p.extend_from_slice(&x.to_le_bytes());
     p.extend_from_slice(&y.to_le_bytes());
@@ -1605,6 +1612,8 @@ pub fn encode_host_render_frame(
     p.extend_from_slice(&h.to_le_bytes());
     p.extend_from_slice(&flags.to_le_bytes());
     p.extend_from_slice(&scale.to_le_bytes());
+    p.extend_from_slice(&content.0.to_le_bytes());
+    p.extend_from_slice(&content.1.to_le_bytes());
     frame(CMD_HOST_RENDER_FRAME, p)
 }
 
@@ -1990,9 +1999,9 @@ mod darwin_push_tests {
     }
 
     #[test]
-    fn host_render_frame_layout_is_28_bytes_le() {
-        let f = encode_host_render_frame(7, -3, 20, 100, 40, 0x3, 2);
-        assert_eq!(f.len(), 8 + 28);
+    fn host_render_frame_layout_is_36_bytes_le() {
+        let f = encode_host_render_frame(7, -3, 20, 100, 40, 0x3, 2, (12, -5));
+        assert_eq!(f.len(), 8 + 36);
         assert_eq!(cmd_of(&f), CMD_HOST_RENDER_FRAME);
         let p = &f[8..];
         assert_eq!(u32::from_le_bytes(p[0..4].try_into().unwrap()), 7);
@@ -2002,6 +2011,8 @@ mod darwin_push_tests {
         assert_eq!(u32::from_le_bytes(p[16..20].try_into().unwrap()), 40);
         assert_eq!(u32::from_le_bytes(p[20..24].try_into().unwrap()), 0x3);
         assert_eq!(u32::from_le_bytes(p[24..28].try_into().unwrap()), 2);
+        assert_eq!(i32::from_le_bytes(p[28..32].try_into().unwrap()), 12);
+        assert_eq!(i32::from_le_bytes(p[32..36].try_into().unwrap()), -5);
     }
 
     #[test]

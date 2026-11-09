@@ -138,6 +138,9 @@ pub struct RenderedFrame {
     pub skin: wind_ipc::codec::CandidateSkinWire,
     /// macOS：拆出来的穿透装饰层（与 `buf` 同尺寸）+ 是否垫在主层下面。主层里没有它们。
     pub pass_layer: Option<(Vec<u8>, bool)>,
+    /// 窗口左上 → 内容左上（`ui.candidate.custom_x/y` 同义）的偏移，单位同 `screen_x/y`。宿主本地拖动后
+    /// 按它把窗口落点换回内容左上报 `pos.candidate`（皮肤装饰外扩时非零，设计 §17.7）。
+    pub content_offset: (i32, i32),
 }
 
 #[cfg(ext_presenter)]
@@ -1652,6 +1655,7 @@ impl CandidateWindow {
             buf,
             skin,
             pass_layer,
+            content_offset: (ml_l, mt_l - clear_l),
         })
     }
 
