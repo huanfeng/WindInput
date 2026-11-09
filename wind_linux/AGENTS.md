@@ -362,9 +362,3 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 
 新增下行 cmd 必须在 `ResponseRouter::apply` 显式接一臂（default = 消费按键但不出字）；判断接不接
 只看**谁产出**，不看名字像不像 Windows 专有（见 wind_macos/AGENTS.md 同名条目）。
-
-### 桌面启动环境的验证
-
-对 Ghostty 等 GTK 应用调整输入法环境时，必须检查 `.desktop` 的 `DBusActivatable`。
-设为 true 时桌面可能绕过 `Exec=`，要改激活服务环境或关闭 D-Bus 激活。用实际桌面入口启动，
-核对进程环境与 Fcitx5 frontend；仅验证手动 `env GTK_IM_MODULE=wayland …` 不算验证修复。
