@@ -543,6 +543,7 @@ impl Forwarder {
                 self.panels.reset_host_state();
                 crate::ext_panel::resend_visible();
             }
+            UiCommand::SkinDecorClick(index) => self.win.skin_decor_click(index),
             // 新 `.app` 手里没有候选窗与装饰层：分层去重作废，下一帧两层都推（否则换帧只推装饰层，
             // 候选窗一直不出来）。
             #[cfg(target_os = "macos")]

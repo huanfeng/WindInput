@@ -4922,6 +4922,30 @@ mod linux_menu_tests {
         );
     }
 
+    /// 宿主报来的皮肤装饰点击原样交给渲染端；载荷坏了就丢。
+    #[test]
+    fn host_decor_click_reaches_the_ui() {
+        let (c, rx) = coord();
+        c.handle_ext(
+            wind_ipc::protocol::ext_kind::SKIN_DECOR_CLICK,
+            br#"{"index":2}"#,
+        );
+        assert!(
+            drain(&rx)
+                .iter()
+                .any(|m| matches!(m, UiCommand::SkinDecorClick(2)))
+        );
+        c.handle_ext(
+            wind_ipc::protocol::ext_kind::SKIN_DECOR_CLICK,
+            br#"{"index":"x"}"#,
+        );
+        assert!(
+            !drain(&rx)
+                .iter()
+                .any(|m| matches!(m, UiCommand::SkinDecorClick(_)))
+        );
+    }
+
     #[test]
     fn host_dismiss_and_disconnect_reset_menu_open() {
         let (c, rx) = coord();

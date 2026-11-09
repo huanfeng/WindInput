@@ -679,6 +679,19 @@ impl MessageHandler for Coordinator {
                     None => tracing::warn!("host.reduce_motion 载荷无法解析，忽略"),
                 }
             }
+            // Linux addon / macOS `.app`：候选窗皮肤装饰上点了一下（判定在宿主，同 Windows）。
+            #[cfg(ext_presenter)]
+            ext_kind::SKIN_DECOR_CLICK => match serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v.get("index")?.as_u64())
+            {
+                Some(i) => {
+                    let _ = self
+                        .ui_tx
+                        .send(wind_ui_types::UiCommand::SkinDecorClick(i as usize));
+                }
+                None => tracing::warn!("skin.decor_click 载荷无法解析，忽略"),
+            },
             // Windows TSF：host render 候选窗落位诊断（SearchHost 写不了 tsf_log，只能看这条）。
             ext_kind::DIAG_HOST_RENDER_PLACED => match host_render_placed_log(body) {
                 Some((true, line)) => tracing::warn!("{line}"),

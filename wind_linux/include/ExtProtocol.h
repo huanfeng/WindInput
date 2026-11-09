@@ -97,6 +97,9 @@ inline constexpr const char* EXT_KIND_HOST_FULLSCREEN = "host.fullscreen";
 /// 能力位（否则服务端把编码画进候选窗）；scale：界面缩放因子（见 protocol.rs `HOST_DISPLAY`）；output：焦点所在输出名（可缺省）；work：该输出的工作区 [左,上,右,下]（可缺省，与 output 成对报）。
 /// panels：能力声明，本 addon 能贴工具栏 / 软键盘浮层（恒报 true；旧 addon 不报 → 服务端不开软键盘）。
 inline constexpr const char* EXT_KIND_HOST_DISPLAY = "host.display";
+/// 上行：点了候选窗上的一块皮肤装饰（drag / block）。body `{"index":N}`，N 为 CMD_CANDIDATE_SKIN
+/// 里该装饰的 index。服务端触发它的 click 事件；旧服务不认这个 kind，安静忽略。
+inline constexpr const char* EXT_KIND_SKIN_DECOR_CLICK = "skin.decor_click";
 /// 下行：服务端问状态气泡此刻在哪（切「固定位置」时以当前位置落盘）。气泡不在屏上不答。
 inline constexpr const char* EXT_KIND_POS_STATUS_TIP_QUERY = "pos.status_tip.query";
 

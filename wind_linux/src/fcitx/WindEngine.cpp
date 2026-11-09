@@ -356,6 +356,7 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
 #endif
         reportFullscreen(effectiveFullscreen(on, waylandPanels));
     };
+    cb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
     panel_ = std::make_unique<X11CandidatePanel>(instance_->eventLoop(), std::move(cb));
 #ifdef WIND_HAVE_WAYLAND
     wlPanel_ = std::make_unique<WaylandCandidatePanel>(instance_);
@@ -393,6 +394,7 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
         wcb.panelMoved = [this](uint32_t kind, int32_t x, int32_t y, const std::string& output) {
             reportPanelPos(kind, x, y, output);
         };
+        wcb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
         wlPanel_->setCallbacks(std::move(wcb));
     }
     // layer-shell 绑上了：工具栏 / 软键盘改摆在 Wayland 坐标系里。输出 / 工作区按这套重报；

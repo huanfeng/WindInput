@@ -512,7 +512,8 @@ impl UiManager {
                     | UiCommand::PanelPointer { .. }
                     | UiCommand::PanelMoved { .. }
                     | UiCommand::SetHostFullscreen(_)
-                    | UiCommand::HostReconnected => {}
+                    | UiCommand::HostReconnected
+                    | UiCommand::SkinDecorClick(_) => {}
                     UiCommand::CopyToClipboard(text) => {
                         crate::popup_menu::set_clipboard_text(&text);
                     }

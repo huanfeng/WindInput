@@ -11,6 +11,7 @@
 #include "ShmFrame.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -188,6 +189,34 @@ public:
 
 private:
     int32_t pressed_ = kNoHit;
+};
+
+/// 皮肤装饰点击（`skin.decor_click`）：按下与松开落在同一块装饰上（`decorAt` 的结果）、指针没挪过
+/// 拖动阈值（各轴 ≤ `kDecorClickSlop` 像素，Windows `SM_CXDRAG` 出厂值），算点了它一下。对位
+/// Windows `CandidateMouse::press_decor` / `release_decor`。坐标系由调用方定，前后一致即可。
+constexpr int32_t kDecorClickSlop = 4;
+class DecorClickGate {
+public:
+    void press(int32_t decor, int32_t x, int32_t y)
+    {
+        decor_ = decor;
+        x_ = x;
+        y_ = y;
+    }
+    /// 返回要报的装饰下标，不报返回 -1。每次按下只交出一次。
+    int32_t release(int32_t decor, int32_t x, int32_t y)
+    {
+        const int32_t d = decor_;
+        decor_ = -1;
+        const bool still = std::abs(x - x_) <= kDecorClickSlop && std::abs(y - y_) <= kDecorClickSlop;
+        return d >= 0 && d == decor && still ? d : -1;
+    }
+    void cancel() { decor_ = -1; }
+
+private:
+    int32_t decor_ = -1;
+    int32_t x_ = 0;
+    int32_t y_ = 0;
 };
 
 /// 窗口矩形里是否包含屏幕点（半开区间）。

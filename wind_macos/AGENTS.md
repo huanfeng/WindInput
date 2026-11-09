@@ -168,6 +168,8 @@ macOS 侧的通例是「服务进程只光栅化，窗口一律归 `.app`」—�
 
 - 每个候选帧之前先到一条 `CMD_CANDIDATE_SKIN`（`CandidateSkin`）：`ACTIVE` 时关系统窗口阴影（皮肤阴影由图
   自带）；`mouseDown` 落在不拖动区（`blocksDrag`：block 装饰内、窗体外）不起拖。
+- 装饰点击：候选 / 翻页键之外按在 drag / block 装饰上（`decorAt`），松开时仍在同一块上、没挪过拖动阈值，
+  经 `skin.decor_click` 报 index，服务端触发它的 `click` 事件。
 - 穿透装饰不画进候选窗位图，另走浮层 `OVERLAY_KIND_DECOR`（SHM `_DEC`），由 `CandidatePanelHost` 交给候选窗的
   子 panel（`ignoresMouseEvents`、不投影，全在窗体下时排在候选窗下面），不经 `OverlayHost`。
 - 帧带 `isAnimFrame`（皮肤动画换帧，≤ 15 帧/秒）时照原位贴、不重算阴影。

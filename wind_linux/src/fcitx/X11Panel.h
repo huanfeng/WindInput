@@ -61,6 +61,8 @@ public:
         /// 活动窗口的全屏状态（`_NET_ACTIVE_WINDOW` 的 `_NET_WM_STATE_FULLSCREEN`）。每次重查都调，
         /// 去重在引擎（`FullscreenReporter`）。
         std::function<void(bool fullscreen)> fullscreenChanged;
+        /// 点了候选窗上的一块皮肤装饰（`decorAt` 的下标）→ `skin.decor_click`。
+        std::function<void(uint32_t index)> decorClick;
     };
 
     X11CandidatePanel(fcitx::EventLoop& loop, Callbacks cb);
@@ -270,6 +272,7 @@ private:
     void applyCandidateInput();
     int32_t hover_ = -1; // 最近报给服务端的悬停
     ClickGate click_;    // 左键点选：按下记命中，松开同一项才选
+    DecorClickGate decorClick_; // 皮肤装饰点击：候选命中之外、按下松开同一块装饰
     int32_t pendingHover_ = -1;
     std::unique_ptr<fcitx::EventSourceTime> hoverDefer_; // 延后报的悬停变化
     uint64_t hoverDue_ = 0;                              // hoverDefer_ 的到期时刻（微秒）

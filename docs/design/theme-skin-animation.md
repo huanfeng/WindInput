@@ -541,7 +541,13 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 - 穿透装饰在 Linux 仍画进同一张位图（按 Windows 的统一 z 规则：全在窗体下则垫在主层下面，否则叠在上面），
   只是不进输入区。macOS 拆到独立层（`SPLIT`），见 §17.3。
 - 不拖动的判定在前端做：`block` 装饰矩形（及没拆出去的 `pass`）内、窗体矩形外 → 不起拖。`drag` 装饰照常起拖。
-  `index` / `UNDER` 先带上，供以后在前端判 `click` 事件（本期不报，见 §17.6）。
+- 装饰点击（§16 的 `click`）也在前端判，判完报上行扩展信封 `skin.decor_click`（`{"index":N}`，N 即上表的
+  `index`），服务端经 `UiCommand::SkinDecorClick` 交给候选窗触发该装饰的 `click`（`skin_decor_click`，窗口收起时
+  丢弃）。判定与 Windows `CandidateMouse` 一致：先判候选 / 翻页按钮命中，命中了就不算装饰；否则取点下的
+  最上层 `drag` / `block` 装饰（表按 z 升序倒着找，`pass` 不算，窗体内的 `UNDER` 装饰被窗体盖住也不算）；
+  松开时仍在同一块上、各轴位移不超过拖动阈值才报（Linux 取 4 px，同 Windows 出厂的 `SM_CXDRAG`；macOS
+  沿用本端起拖的 3 pt）。纯函数：Linux `decorAt` + `DecorClickGate`，macOS `CandidateSkin.decorAt`。
+  旧服务不认这个 kind，`handle_ext` 落 `_` 分支安静忽略；新服务 + 旧前端只是没人报，`click` 不触发。
 
 ### 17.3 各平台
 
@@ -575,7 +581,7 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 | 输入区矩形超上限 | 退化为矩形并集（§17.2） |
 | macOS 子 panel 来不及收到像素 | 主层不含穿透装饰，最坏是那一帧看不到穿透装饰，不会挡点击 |
 | 旧前端 + 新服务 | 新 cmd、新 flag、新层都被忽略：Linux 穿透按 block；macOS 看不到穿透装饰（主层已不画它）——`.app` 与服务同包发布、须一起装，不另做兼容 |
-| 新前端 + 旧服务 | 收不到新 cmd，行为同改前 |
+| 新前端 + 旧服务 | 收不到新 cmd，行为同改前；上报的 `skin.decor_click` 被当未知扩展忽略 |
 
 ### 17.5 测试
 
@@ -587,14 +593,15 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
   cmd / flag / 层；输入区换算纯函数（无皮肤回退整窗、Wayland 缩放、空表）。
 - e2e（本机 Xvfb，`scripts/linux/e2e.sh`）：程序生成的皮肤主题（窗体 + 右上外侧穿透装饰 + 左上外侧
   block 装饰），打字后 `xdotool mousemove` 到穿透装饰上，`getmouselocation` 报的窗口不是候选窗，挪到
-  窗体上是候选窗；动图装饰（程序生成的两帧 APNG）在候选窗显示期间 `xwd -id` 两次截图不同。
+  窗体上是候选窗；动图装饰（程序生成的两帧 APNG）在候选窗显示期间 `xwd -id` 两次截图不同；`xdotool click`
+  点 block 装饰，它的 `click` 切了状态（换色）、不上屏、候选窗不收。装饰点击的命中与闸门另有 C++ / Swift 单测，
+  服务端收到 `skin.decor_click` 的路由有协调器单测。
 - macOS：Rust 部分 `cargo check --target aarch64-apple-darwin`；Swift 本机编不了，只能 CI 的 macOS job
   与真机，判据见报告。
 - 关键逻辑在 `git archive` 导出的副本上做变异验证。
 
 ### 17.6 本期不做
 
-- 前端上报装饰 `click`（§16 的事件）：要新增上行消息；协议里先带了 `index` / `UNDER`。
 - Linux 候选窗拖动（与皮肤无关的既有差距）。
 - Linux 的系统「减少动态效果」探测。
 - 前端本地播放动画（§17.1）。

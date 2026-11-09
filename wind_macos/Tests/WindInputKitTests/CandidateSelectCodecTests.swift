@@ -123,6 +123,32 @@ final class CandidateSelectCodecTests: XCTestCase {
         XCTAssertEqual(frac.frame, SkinRect(x: 6, y: 6, w: 21, h: 11))
     }
 
+    func testDecorAtPicksTopmostClickableDecor() {
+        let d = { (index: UInt32, hit: UInt32, flags: UInt32, x: Int32, y: Int32, w: Int32) in
+            CandidateSkin.Decor(index: index, hit: hit, flags: flags,
+                                rect: SkinRect(x: x, y: y, w: w, h: w))
+        }
+        let skin = CandidateSkin(flags: CandidateSkin.flagActive,
+                                 frame: SkinRect(x: 20, y: 20, w: 100, h: 60), decor: [
+            d(7, CandidateSkin.hitBlock, CandidateSkin.decorUnder, 0, 0, 40), // 底层，伸进窗体
+            d(3, CandidateSkin.hitDrag, 0, 100, 0, 40),
+            d(5, CandidateSkin.hitBlock, 0, 120, 0, 30), // 压在 3 上面
+            d(9, CandidateSkin.hitPass, 0, 0, 70, 30),
+        ])
+        XCTAssertEqual(skin.decorAt(px: 5, py: 5), 7)     // 窗体外的 under 装饰
+        XCTAssertNil(skin.decorAt(px: 30, py: 30))        // 同一块落在窗体内：被窗体盖住
+        XCTAssertEqual(skin.decorAt(px: 105, py: 5), 3)
+        XCTAssertEqual(skin.decorAt(px: 125, py: 5), 5)   // 重叠取上层
+        XCTAssertEqual(skin.decorAt(px: 130, py: 35), 3)  // 上层下方露出的一截
+        XCTAssertNil(skin.decorAt(px: 150, py: 5))        // 右边界开区间
+        XCTAssertNil(skin.decorAt(px: 5, py: 75))         // pass 不接鼠标
+        XCTAssertNil(skin.decorAt(px: 60, py: 50))        // 窗体内空白
+        var off = skin
+        off.flags = 0
+        XCTAssertNil(off.decorAt(px: 5, py: 5))           // 没启用皮肤
+        XCTAssertEqual(ExtKind.skinDecorClick, "skin.decor_click")
+    }
+
     func testSkinRectContainsDoesNotOverflow() {
         let r = SkinRect(x: Int32.max - 1, y: 0, w: 10, h: 1)
         XCTAssertTrue(r.contains(px: CGFloat(Int32.max), py: 0))

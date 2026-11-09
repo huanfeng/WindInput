@@ -390,6 +390,11 @@ pub mod ext_kind {
     /// 系统设置变化时再报（`NSWorkspace.accessibilityDisplayShouldReduceMotion`）；服务端以它为准，
     /// 没收到时退回读偏好（见 `wind_ui::candidate_window::set_host_reduce_motion`）。
     pub const HOST_REDUCE_MOTION: &str = "host.reduce_motion";
+    /// 上行（Linux addon / macOS `.app`）：在候选窗的皮肤装饰（`drag` / `block`）上点了一下。body =
+    /// `{"index":N}`，`N` 是 `CMD_CANDIDATE_SKIN` 装饰表里的 `index`（变体 `decor` 下标）。判定同 Windows：
+    /// 按下与松开在同一块最上层的装饰上、没挪过拖动阈值；窗体下面的装饰被窗体盖住处不算。服务端给这块
+    /// 装饰触发 `click` 事件（设计 theme-skin-animation.md §16 / §17.2）。
+    pub const SKIN_DECOR_CLICK: &str = "skin.decor_click";
     /// 下行：问 `.app` 候选窗此刻在哪，答案走上行 [`POS_CANDIDATE`]。body 空。
     pub const POS_CANDIDATE_QUERY: &str = "pos.candidate.query";
     /// 下行：问宿主（`.app` / Linux addon）状态气泡此刻在哪，答案走上行 [`POS_STATUS_TIP`]。

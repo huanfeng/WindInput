@@ -169,6 +169,33 @@ int main()
         g.press(kNoHit);
         CHECK_EQ(g.release(kNoHit), kNoHit);
     }
+    CASE("DecorClickGate：同一块装饰、没挪过阈值才算点击，且只交一次");
+    {
+        DecorClickGate g;
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(3, 104, 96), 3);
+        CHECK_EQ(g.release(3, 104, 96), -1);
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(3, 105, 100), -1); // 挪过阈值：是在拖
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(3, 100, 95), -1);
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(4, 100, 100), -1); // 松开在别的装饰上
+        g.press(-1, 0, 0);
+        CHECK_EQ(g.release(-1, 0, 0), -1); // 没按在装饰上
+        g.press(0, 0, 0);
+        g.cancel();
+        CHECK_EQ(g.release(0, 0, 0), -1); // 收起后的松开
+        g.press(0, 0, 0);
+        CHECK_EQ(g.release(0, 0, 0), 0); // 下标 0 是合法装饰
+    }
+    CASE("skin.decor_click：{index}");
+    {
+        std::string kind;
+        const std::string body = extBody(encodeDecorClickFrame(12), kind);
+        CHECK_EQ(kind, std::string("skin.decor_click"));
+        CHECK_EQ(body, std::string(R"({"index":12})"));
+    }
     CASE("ClickGate：候选窗收起后的松开不选");
     {
         ClickGate g;

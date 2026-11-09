@@ -547,6 +547,7 @@ void X11CandidatePanel::hide()
     rects_.clear();
     hover_ = -1;
     click_.cancel();
+    decorClick_.cancel();
     cancelTipTimers();
     // tooltip 挂在候选窗上：候选窗藏了它必须一起藏（服务端也会推隐藏帧，这里兜底）。
     hideOverlay(OVERLAY_KIND_TOOLTIP);
@@ -775,7 +776,11 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
         }
         disarm(hoverDefer_); // 点下去就以点的这一处为准，别让延后的悬停随后改掉它
         if (e->detail == 1) {
-            click_.press(hitTest(rects_, e->event_x, e->event_y)); // 松开时才选，见 ClickGate
+            const int32_t hit = hitTest(rects_, e->event_x, e->event_y);
+            click_.press(hit); // 松开时才选，见 ClickGate
+            // 候选 / 翻页按钮之外：按在皮肤装饰上的，松开时判是不是点了它（同 Windows）
+            decorClick_.press(hit == kNoHit ? decorAt(skin_, e->event_x, e->event_y) : -1,
+                              e->root_x, e->root_y);
         } else if (e->detail == 3 && cb_.contextMenu) {
             // 右键：命中候选 → 候选菜单，空白 / 翻页按钮 → 主菜单（同 Windows right_click）。
             // 悬停先清掉：菜单开着时候选窗收不到移动事件，残留的高亮会一直挂着。
@@ -792,9 +797,15 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
         if (e->event != cand_.window || e->detail != 1) {
             break;
         }
-        const int32_t idx = click_.release(hitTest(rects_, e->event_x, e->event_y));
+        const int32_t hit = hitTest(rects_, e->event_x, e->event_y);
+        const int32_t decor = decorClick_.release(
+            hit == kNoHit ? decorAt(skin_, e->event_x, e->event_y) : -1, e->root_x, e->root_y);
+        const int32_t idx = click_.release(hit);
         if (idx != kNoHit && cb_.select) {
             cb_.select(idx);
+        }
+        if (decor >= 0 && cb_.decorClick) {
+            cb_.decorClick(uint32_t(decor));
         }
         break;
     }

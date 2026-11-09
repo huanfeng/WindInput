@@ -170,6 +170,7 @@ struct WaylandListeners {
         }
         self->pointerInside_ = false;
         self->click_.cancel();
+        self->decorClick_.cancel();
         self->setHover(-1);
         self->updatePopupStatusHover();
     }
@@ -285,9 +286,14 @@ struct WaylandListeners {
         if (!pressed) {
             // 左键点选在松开时生效（ClickGate）：按下时的隐式抓取让松开仍落在本 surface 上
             if (button == kBtnLeft) {
+                const auto [px, py] = self->pointerPx();
+                const int32_t decor = self->decorClick_.release(self->decorAtPointer(), px, py);
                 const int32_t idx = self->click_.release(self->hitAtPointer());
                 if (idx != kNoHit && self->cb_.select) {
                     self->cb_.select(idx);
+                }
+                if (decor >= 0 && self->cb_.decorClick) {
+                    self->cb_.decorClick(uint32_t(decor));
                 }
             }
             return;
@@ -308,6 +314,8 @@ struct WaylandListeners {
         }
         if (button == kBtnLeft) {
             self->click_.press(self->hitAtPointer());
+            const auto [px, py] = self->pointerPx();
+            self->decorClick_.press(self->decorAtPointer(), px, py);
         } else if (button == kBtnRight && self->cb_.contextMenu) {
             // 命中候选 → 候选菜单，空白 / 翻页按钮 → 主菜单（同 X11 与 Windows）。
             // 悬停先清掉：菜单开着时候选窗收不到悬停，残留的高亮会一直挂着。
@@ -1496,9 +1504,24 @@ void WaylandCandidatePanel::updatePopupStatusHover()
 
 int32_t WaylandCandidatePanel::hitAtPointer() const
 {
+    const auto [px, py] = pointerPx();
+    return hitTest(rects_, px, py);
+}
+
+std::pair<int32_t, int32_t> WaylandCandidatePanel::pointerPx() const
+{
     // 命中表是位图像素坐标，指针是 surface 逻辑坐标，差的就是服务端的光栅化缩放。
-    return hitTest(rects_, int32_t(std::lround(pointerX_ * reportedScale_)),
-                   int32_t(std::lround(pointerY_ * reportedScale_)));
+    return {int32_t(std::lround(pointerX_ * reportedScale_)),
+            int32_t(std::lround(pointerY_ * reportedScale_))};
+}
+
+int32_t WaylandCandidatePanel::decorAtPointer() const
+{
+    if (hitAtPointer() != kNoHit) {
+        return -1;
+    }
+    const auto [px, py] = pointerPx();
+    return decorAt(skin_, px, py);
 }
 
 void WaylandCandidatePanel::updateHover()
@@ -1525,6 +1548,7 @@ void WaylandCandidatePanel::hidePopup()
         return;
     }
     click_.cancel(); // 收起后的松开不再选
+    decorClick_.cancel();
     // 销毁 popup 角色（合成器据此摘窗，下一次显示重建时按当时的文本光标矩形重新摆位——只摘 buffer
     // 不销毁角色，treeland 会让候选窗一直钉在第一次出现的地方），但 **wl_surface 本身留着**：
     // 它一旦销毁，鼠标恰好正进入它时迟到的 `wl_pointer.enter` 带的是已销毁对象（libwayland 交给

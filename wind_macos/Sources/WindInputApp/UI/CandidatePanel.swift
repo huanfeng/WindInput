@@ -31,6 +31,8 @@ final class CandidateContentView: NSView {
     var onScroll: ((Int32) -> Void)?              // 滚轮 (delta, WHEEL_DELTA 倍数, 正=上滚)
     var onDragMoved: (() -> Void)?                // 拖动进行中 (每次位移后)
     var onDragEnded: (() -> Void)?                // 空白区拖动松手 (整窗已移到新位置)
+    /// 点了一块皮肤装饰 (`CandidateSkin.decorAt` 的 index) → `skin.decor_click`。
+    var onDecorClick: ((UInt32) -> Void)?
     /// 拖动起点：光标屏幕位置 + 窗口起始左下角。nil = 未在拖动。
     /// 记锚点差值而不是每次跟随光标当前点，是为了不把「按下点在窗口内的偏移」丢掉。
     private var dragAnchor: NSPoint?
@@ -43,6 +45,9 @@ final class CandidateContentView: NSView {
     private static let dragThreshold: CGFloat = 3
     /// 按下时命中的候选/翻页键。选词等到**松开**且仍落在同一项上才发, 见 `mouseUp`。
     private var pressedIndex: Int?
+    /// 按下时落在哪块装饰上 (候选 / 翻页键之外) 与光标屏幕位置：松开时仍在同一块上、没挪过拖动
+    /// 阈值，算点了它一下 (同 Windows `press_decor` / `release_decor`)。
+    private var pressedDecor: (index: UInt32, at: NSPoint)?
     /// 本帧皮肤区域 (逻辑点)：按下落在不拖动区 (block 装饰) 时不起拖，见 `CandidateSkin.blocksDrag`。
     var skin = CandidateSkin()
     override var isFlipped: Bool { true } // top-left 原点, 与 wire/rects 坐标系一致
@@ -105,11 +110,13 @@ final class CandidateContentView: NSView {
     override func mouseDown(with event: NSEvent) {
         // 上一次点击的残留先清掉: 按下期间窗口被收起时, 那次的 mouseUp 不一定送得到。
         pressedIndex = nil
+        pressedDecor = nil
         dragAnchor = nil
         dragOrigin = nil
         dragMoved = false
         if let idx = hitIndex(event) { pressedIndex = idx; return }
         let p = convert(event.locationInWindow, from: nil)
+        pressedDecor = skin.decorAt(px: p.x, py: p.y).map { (index: $0, at: NSEvent.mouseLocation) }
         if skin.blocksDrag(px: p.x, py: p.y) { return }
         // 空白区（编码栏/内边距，非候选非翻页键）→ 起拖，整窗跟随光标。与 Windows 侧
         // WM_LBUTTONDOWN 的同一分支同构（那边用 SetCapture 保证移出窗口后仍收到消息；
@@ -142,7 +149,15 @@ final class CandidateContentView: NSView {
     /// 是系统处理这次点击的哪一步把它摆回来的没有查明 (拦掉推迟到松开的窗口排序无效);
     /// 改成整个点击结束再选之后, 收起后的窗口不再回来。
     override func mouseUp(with event: NSEvent) {
-        defer { dragAnchor = nil; dragOrigin = nil; dragMoved = false }
+        defer { dragAnchor = nil; dragOrigin = nil; dragMoved = false; pressedDecor = nil }
+        if let d = pressedDecor, !dragMoved {
+            let now = NSEvent.mouseLocation
+            let p = convert(event.locationInWindow, from: nil)
+            if abs(now.x - d.at.x) < Self.dragThreshold, abs(now.y - d.at.y) < Self.dragThreshold,
+               skin.decorAt(px: p.x, py: p.y) == d.index {
+                onDecorClick?(d.index)
+            }
+        }
         if let idx = pressedIndex {
             pressedIndex = nil
             // 按下后移出该项再松开 = 放弃 (按钮的通行语义)。
@@ -231,6 +246,11 @@ final class CandidatePanel: NSPanel {
     var onScroll: ((Int32) -> Void)? {
         get { content.onScroll }
         set { content.onScroll = newValue }
+    }
+    /// 点了一块皮肤装饰 (index 同 `CMD_CANDIDATE_SKIN`)。
+    var onDecorClick: ((UInt32) -> Void)? {
+        get { content.onDecorClick }
+        set { content.onDecorClick = newValue }
     }
     /// 拖动落定回调, 参数为 wire 坐标 (top-left) 下的窗口左上角。
     /// 服务端据当前定位方式决定落不落盘: 固定位置=重新摆放并写配置; 跟随光标=只是临时挪开。

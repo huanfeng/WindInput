@@ -137,6 +137,8 @@ public:
             panelPointer;
         /// 工具栏 / 软键盘拖完：内容盒左上（面板坐标）与所在输出名（拿不到为空串）。
         std::function<void(uint32_t kind, int32_t x, int32_t y, const std::string& output)> panelMoved;
+        /// 点了候选窗上的一块皮肤装饰（同 X11 的 decorClick）。
+        std::function<void(uint32_t index)> decorClick;
     };
     /// 状态气泡此刻在 layer-shell 上的内容盒左上（输出坐标，位图像素）；不在 layer-shell 上
     /// 显示时为空（服务端「固定位置」落盘询问用）。
@@ -465,8 +467,13 @@ private:
     double pointerX_ = 0, pointerY_ = 0; // surface 内逻辑坐标
     int32_t hover_ = -1;
     ClickGate click_; // 左键点选：按下记命中，松开同一项才选
+    DecorClickGate decorClick_; // 皮肤装饰点击：候选命中之外、按下松开同一块装饰
     /// 指针在位图里的命中（kNoHit / 候选下标 / 翻页 -1 -2）。
     int32_t hitAtPointer() const;
+    /// 指针下可点的皮肤装饰（`decorAt`），点在候选 / 翻页按钮上的不算，没有返回 -1。
+    int32_t decorAtPointer() const;
+    /// 指针的位图像素坐标（装饰点击的拖动阈值按它判）。
+    std::pair<int32_t, int32_t> pointerPx() const;
     void setHover(int32_t index);
     void updateHover();
     bool warnedProbe_ = false;

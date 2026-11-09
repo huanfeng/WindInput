@@ -306,6 +306,29 @@ void TestSkinInputRegion()
 
 } // namespace
 
+void TestDecorAt()
+{
+    CASE("装饰点击命中：最上层的 drag / block，pass 不算，窗体内的 under 不算");
+    CandidateSkin skin;
+    skin.frame = {20, 20, 100, 60};
+    skin.decor = {
+        {7, SKIN_HIT_BLOCK, SKIN_DECOR_UNDER, {0, 0, 40, 40}}, // 底层，伸进窗体左上角
+        {3, SKIN_HIT_DRAG, 0, {100, 0, 40, 40}},
+        {5, SKIN_HIT_BLOCK, 0, {120, 0, 30, 30}}, // 压在 3 上面
+        {9, SKIN_HIT_PASS, 0, {0, 70, 30, 30}},
+    };
+    CHECK_EQ(decorAt(skin, 5, 5), -1); // 皮肤没启用
+    skin.flags = SKIN_FLAG_ACTIVE;
+    CHECK_EQ(decorAt(skin, 5, 5), 7);    // 窗体外的 under 装饰
+    CHECK_EQ(decorAt(skin, 30, 30), -1); // 同一块落在窗体内：被窗体盖住
+    CHECK_EQ(decorAt(skin, 105, 5), 3);
+    CHECK_EQ(decorAt(skin, 125, 5), 5); // 重叠取上层
+    CHECK_EQ(decorAt(skin, 130, 35), 3); // 上层下方露出的一截
+    CHECK_EQ(decorAt(skin, 150, 5), -1); // 右边界开区间
+    CHECK_EQ(decorAt(skin, 5, 75), -1);  // pass 不接鼠标
+    CHECK_EQ(decorAt(skin, 60, 50), -1); // 窗体内空白
+}
+
 void TestAnimInPlace()
 {
     CASE("换帧照原位贴：带 ANIM 位且 SHM 就是通知的那一帧");
@@ -318,6 +341,7 @@ int main()
 {
     TestReadFrame();
     TestRejectBad();
+    TestDecorAt();
     TestOpenMissing();
     TestOpenGuards();
     TestPlacement();

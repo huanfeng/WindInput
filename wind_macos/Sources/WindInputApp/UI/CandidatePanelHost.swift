@@ -89,6 +89,11 @@ public final class CandidatePanelHost {
             self?.sendFrame(BinaryCodec.encodeCandidateScrollFrame(delta: delta))
         }
         panel.onMoved = { [weak self] x, y in self?.reportPos(ExtKind.posCandidate, x, y) }
+        panel.onDecorClick = { [weak self] index in
+            guard let body = try? JSONSerialization.data(withJSONObject: ["index": Int(index)])
+            else { return }
+            self?.sendFrame(BinaryCodec.encodeExtFrame(kind: ExtKind.skinDecorClick, body: body))
+        }
         // 菜单栏状态菜单复用候选框空白处右键的同一统一菜单树与回发路径, 保证两处一致。
         ModeStatusController.shared.unifiedMenuProvider = { [weak self] in self?.requestUnifiedMenu() }
         ModeStatusController.shared.onUnifiedAction = { [weak self] id in self?.sendMenuAction(id) }

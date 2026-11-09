@@ -125,6 +125,9 @@ public enum ExtKind {
     public static let menuDismiss = "menu.dismiss"
     /// 上行：系统「减少动态效果」。body = `{"reduce":bool}`。连上服务时、服务重启后与系统设置变化时报。
     public static let hostReduceMotion = "host.reduce_motion"
+    /// 上行：点了候选窗上的一块皮肤装饰 (drag / block)。body = `{"index":N}`，N 为
+    /// `CMD_CANDIDATE_SKIN` 里该装饰的 index；服务端触发它的 click 事件，旧服务安静忽略。
+    public static let skinDecorClick = "skin.decor_click"
 }
 
 /// 按键组合 (CmdKeyTap/Hold/Release 解码结果, 及 KeySeq 内单项)。
@@ -319,6 +322,18 @@ public struct CandidateSkin: Equatable {
             (d.hit == Self.hitBlock || (d.hit == Self.hitPass && !d.isSplit))
                 && d.rect.contains(px: px, py: py)
         }
+    }
+
+    /// 点落在哪块可点的装饰上 (`drag` / `block`；`pass` 不接鼠标)，返回其 index。重叠取最上层
+    /// (表按 z 升序)；窗体内的 under 装饰被窗体盖住，不算。对位 Windows `CandidateMouse::decor_at`。
+    /// 调用方先判候选命中：点在候选 / 翻页按钮上的不算装饰点击。
+    public func decorAt(px: CGFloat, py: CGFloat) -> UInt32? {
+        guard isActive else { return nil }
+        let inFrame = frame.contains(px: px, py: py)
+        return decor.last { d in
+            d.hit != Self.hitPass && d.rect.contains(px: px, py: py)
+                && !(d.flags & Self.decorUnder != 0 && inFrame)
+        }?.index
     }
 
     /// 设备像素 → 逻辑点 (向外取整，见 `SkinRect.scaled`)。

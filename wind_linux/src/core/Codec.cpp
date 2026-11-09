@@ -318,6 +318,11 @@ Bytes encodePosFrame(const std::string& kind, int32_t x, int32_t y, const std::s
     return encodeExtFrame(kind, body + "}");
 }
 
+Bytes encodeDecorClickFrame(uint32_t index)
+{
+    return encodeExtFrame(EXT_KIND_SKIN_DECOR_CLICK, "{\"index\":" + std::to_string(index) + "}");
+}
+
 Bytes encodeHostFullscreenFrame(bool fullscreen)
 {
     return encodeExtFrame(EXT_KIND_HOST_FULLSCREEN,

@@ -104,6 +104,12 @@ int32_t hitTest(const std::vector<CandidateHitRect>& rects, int32_t px, int32_t 
 std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin, uint32_t w,
                                                       uint32_t h);
 
+/// 位图像素点 `(x, y)` 落在哪块可点的皮肤装饰上（`drag` / `block`；`pass` 不接鼠标），返回其
+/// `index`（服务端装饰状态机同号），没有返回 -1。重叠时取最上层（表按 z 升序，倒着找）；窗体内
+/// 的 under 装饰被窗体盖住，不算。对位 Windows `CandidateMouse::decor_at`。皮肤没启用返回 -1。
+/// 调用方先判候选命中：点在候选 / 翻页按钮上的不算装饰点击。
+int32_t decorAt(const CandidateSkin& skin, int32_t x, int32_t y);
+
 /// 位图像素矩形折成逻辑坐标（÷ scale）：向外取整，宽高至少 1。Wayland 输入区用。
 Rect toLogicalCover(const Rect& r, double scale);
 

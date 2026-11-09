@@ -2057,17 +2057,20 @@ def png_bytes(w, h, rgba, frames=None):
     return out + chunk(b"IEND", b"")
 
 
+BLOCK_IDLE = bytes([0, 0, 0, 255])
+BLOCK_HIT = bytes([255, 0, 255, 255])
 SKIN_COLORS = [bytes([255, 0, 0, 255]), bytes([0, 255, 0, 255]), bytes([0, 0, 255, 255]),
                bytes([255, 255, 0, 255])]
 
 
 def write_skin_theme(name):
     """60×40 白窗体；右上外侧 24×24 穿透装饰（四色 APNG，每帧 100ms，z = 1）；左上外侧 24×24
-    block 装饰（黑）。主题放用户层 themes/<name>/。"""
+    block 装饰（两帧：常驻黑，点中切品红）。主题放用户层 themes/<name>/。"""
     d = os.path.join(os.environ["W"], "xdg", "config", "WindInput", "themes", name)
     os.makedirs(d, exist_ok=True)
     open(os.path.join(d, "frame.png"), "wb").write(png_bytes(60, 40, bytes([255, 255, 255, 255])))
-    open(os.path.join(d, "block.png"), "wb").write(png_bytes(24, 24, bytes([0, 0, 0, 255])))
+    open(os.path.join(d, "block.png"), "wb").write(
+        png_bytes(24, 24, None, [(BLOCK_IDLE, 100), (BLOCK_HIT, 100)]))
     open(os.path.join(d, "pass.png"), "wb").write(
         png_bytes(24, 24, None, [(c, 100) for c in SKIN_COLORS]))
     open(os.path.join(d, "theme.toml"), "w").write(f"""[meta]
@@ -2095,6 +2098,11 @@ image = "block.png"
 anchor = "frame.top_left"
 pivot = "bottom_right"
 hit = "block"
+[skin.horizontal.decor.states]
+idle = {{ frames = "0-0" }}
+hit = {{ frames = "1-1" }}
+[skin.horizontal.decor.on]
+click = {{ state = "hit" }}
 """)
 
 
@@ -2139,6 +2147,17 @@ async def skin_cases(bus, im):
         await asyncio.sleep(0.1)
     screenshot("skin_candidate", wid)
     check("皮肤：穿透装饰画在候选窗里且按帧换色", len(seen) >= 2, f"采到 {seen}")
+    # 点 block 装饰：宿主报 skin.decor_click，服务端触发它的 click 事件（切到「hit」状态，品红）；
+    # 不选词、候选窗不收。
+    block_before = px(12, 12)
+    sh("xdotool", "mousemove", str(x + 12), str(y + 12), "click", "1")
+    await asyncio.sleep(0.4)
+    _, px2 = screenshot("skin_decor_click", wid)
+    check("皮肤：点 block 装饰触发它的 click 事件", px2(12, 12) != block_before,
+          f"点前 {block_before} 点后 {px2(12, 12)}")
+    shown = candidate_window()
+    check("皮肤：点装饰不上屏、候选窗不收", c.take() == "" and bool(shown and shown[5]),
+          f"window={shown}")
     # 打字续帧时窗口不动、穿透照旧（输入区随新帧重设）。
     await c.type("n")
     await asyncio.sleep(0.4)

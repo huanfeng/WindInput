@@ -68,6 +68,14 @@ impl CandidateWindow {
         self.skin_event_at(ev, only, std::time::Instant::now());
     }
 
+    /// 外部宿主报来的装饰点击（扩展信封 `skin.decor_click`）：给这块装饰触发 `click`。候选窗不在屏上
+    /// （点击晚于收起到达）时丢掉。
+    pub fn skin_decor_click(&mut self, index: usize) {
+        if self.visible {
+            self.skin_event(DecorEvent::Click, Some(index));
+        }
+    }
+
     /// 同 [`Self::skin_event`]，时刻由调用方给（金样注入时间用）。
     pub(super) fn skin_event_at(
         &mut self,
@@ -972,6 +980,30 @@ mod tests {
         let d = w.next_deadline().expect("登记了 idle");
         let left = d.saturating_duration_since(Instant::now());
         assert!(left > Duration::from_millis(900) && left <= Duration::from_secs(1));
+    }
+
+    /// 外部宿主报来的装饰点击（`skin.decor_click`）与本地判出的点击同样触发 `click`；收起后到的
+    /// （宿主那头的点击晚于收起）丢掉，不改下次显示的状态。
+    #[test]
+    fn host_reported_decor_click_fires_click() {
+        let on = vec![(DecorEvent::Click, DecorAction::State(1))];
+        let mut w = state_window("sm-host-click", on.clone());
+        w.show();
+        w.skin_decor_click(0);
+        assert!(
+            w.next_deadline().is_some_and(|d| d <= Instant::now()),
+            "切了状态要立即醒来重绘"
+        );
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_BLUE, "click 切到状态 b");
+
+        let mut w = state_window("sm-host-click-hidden", on);
+        w.show();
+        w.hide();
+        w.skin_decor_click(0);
+        w.show();
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_RED, "收起后到的点击不切状态");
     }
 
     #[test]

@@ -361,6 +361,9 @@ pub enum UiCommand {
     /// 手里的工具栏 / 软键盘，渲染端把此刻可见的原样补推一帧；macOS 作废皮肤换帧的分层去重。
     /// Windows 从不下发。
     HostReconnected,
+    /// 外部宿主（Linux addon / macOS `.app`）报来的皮肤装饰点击：变体 `decor` 下标。渲染端给这块装饰
+    /// 触发 `click` 事件（Windows 本地窗口自己判点击，不经这里）。
+    SkinDecorClick(usize),
     /// 设置端主题预览：按当前外观画一帧示例候选窗，经请求里的回执送回（见 [`crate::preview`]）。
     RenderCandidatePreview(Box<crate::CandidatePreviewRequest>),
     /// 关闭 UI

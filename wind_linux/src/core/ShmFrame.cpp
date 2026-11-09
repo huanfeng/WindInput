@@ -225,6 +225,28 @@ std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin,
     return out;
 }
 
+int32_t decorAt(const CandidateSkin& skin, int32_t x, int32_t y)
+{
+    if ((skin.flags & SKIN_FLAG_ACTIVE) == 0) {
+        return -1;
+    }
+    auto in = [x, y](const Rect& r) {
+        return x >= r.x && y >= r.y && int64_t(x) < int64_t(r.x) + r.w
+               && int64_t(y) < int64_t(r.y) + r.h;
+    };
+    const bool inFrame = in(skin.frame);
+    for (auto it = skin.decor.rbegin(); it != skin.decor.rend(); ++it) {
+        if (it->hit == SKIN_HIT_PASS || !in(it->rect)) {
+            continue;
+        }
+        if ((it->flags & SKIN_DECOR_UNDER) != 0 && inFrame) {
+            continue;
+        }
+        return int32_t(it->index);
+    }
+    return -1;
+}
+
 Rect toLogicalCover(const Rect& r, double scale)
 {
     if (!(scale > 0)) {
