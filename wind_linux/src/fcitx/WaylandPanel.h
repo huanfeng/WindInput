@@ -359,7 +359,7 @@ private:
     void beginPanelDrag(LayerSurf& ls);
     void movePanelDrag(LayerSurf& ls, int32_t dx, int32_t dy);
     void movePanelDragBy(LayerSurf& ls, double dx, double dy);
-    void endPanelDrag(LayerSurf& ls, bool report);
+    void endPanelDrag(LayerSurf& ls, bool report, bool restoreSource = true);
     /// 合成器收回了面板的角色（输出被拔）/ 输出没了：按现有输出重摆还想显示的面板。
     void onPanelRetry();
     struct PanelMotion {

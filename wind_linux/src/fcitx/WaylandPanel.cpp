@@ -191,10 +191,12 @@ struct WaylandListeners {
                 if (!ls->dragging) {
                     self->panelPointer(*ls, PANEL_POINTER_MOTION, 0);
                 } else if (!self->relPtr_) {
-                    self->movePanelDrag(*ls, int32_t(std::lround(self->layerPtrX_ - ls->grabX)),
-                                        int32_t(std::lround(self->layerPtrY_ - ls->grabY)));
-                    ls->grabX = self->layerPtrX_;
-                    ls->grabY = self->layerPtrY_;
+                    const int32_t dx = int32_t(std::lround(self->layerPtrX_ - ls->grabX));
+                    const int32_t dy = int32_t(std::lround(self->layerPtrY_ - ls->grabY));
+                    self->movePanelDrag(*ls, dx, dy);
+                    // 只扣除已消费的整数位移，保留慢速移动 / 分数缩放产生的小数余量。
+                    ls->grabX += dx;
+                    ls->grabY += dy;
                 }
                 return;
             }
@@ -2195,7 +2197,8 @@ void WaylandCandidatePanel::hidePanel(LayerSurf& ls)
     if (pointerLayer_ == &ls) {
         pointerLayer_ = nullptr;
     }
-    endPanelDrag(ls, false);
+    // 接下来直接销毁源角色，不再提交真实像素，避免收起前闪现一帧。
+    endPanelDrag(ls, false, false);
     hideLayer(ls); // 连角色对象一起销毁（treeland 对无变化的重提交不发 configure），拖动作废不报
     ls.reqValid = false;
 }
@@ -2354,7 +2357,7 @@ void WaylandCandidatePanel::movePanelDragBy(LayerSurf& ls, double dx, double dy)
     movePanelDrag(ls, ix, iy);
 }
 
-void WaylandCandidatePanel::endPanelDrag(LayerSurf& ls, bool report)
+void WaylandCandidatePanel::endPanelDrag(LayerSurf& ls, bool report, bool restoreSource)
 {
     if (!ls.dragging) {
         return;
@@ -2364,7 +2367,7 @@ void WaylandCandidatePanel::endPanelDrag(LayerSurf& ls, bool report)
     const int32_t left = dragPreview_.mLeft, top = dragPreview_.mTop;
     hideLayer(dragPreview_);
     if (!report) {
-        if (ls.mapped && ls.layer) {
+        if (restoreSource && ls.mapped && ls.layer) {
             commitLayer(ls);
         }
         return;
