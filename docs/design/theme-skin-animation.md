@@ -582,11 +582,36 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
   （`xcb_shape_mask(..., XCB_NONE)`），恢复整窗接鼠标。窗口重建（合成器起停换 visual）后补设一次。
 - 换帧（`FLAG_ANIM_FRAME`）：沿用上次落位，`present` 不 raise。
 - 候选窗拖动（§17.7）：空白处与 `drag` 装饰起拖，窗体外的 `block` / `pass` 装饰不拖。
+- 贴屏幕边：越界钳制与「下方放不下翻到光标上方」都按**窗体**矩形判（`placePanel` 的 `box`，取
+  `candidateAnchorBox`），透明外扩撞到屏幕边不算越界——否则贴右 / 贴顶时内容会被外扩推离光标。拖动松手
+  的钳制同一条。
 
 **Wayland**（`WaylandPanel`）
 - 输入区 = 输入区表 ÷ scale，另并上状态气泡矩形（现状）；没有 `MASK` 时照旧是候选窗整块矩形。
   `wl_surface.set_input_region` 是核心协议，所有合成器都认；KWin 的 input-method-v1 面板走同一条
   `attachPixels`。popup 由合成器摆位，不能拖（§17.7）：`drag` 装饰在原生 Wayland 应用里与 `block` 一样。
+
+**Wayland：内容偏移**
+- 问题：v2 popup（treeland / sway）与 v1 overlay 面板（KWin）都由合成器摆位，规则是**主 surface 的左上贴光标
+  矩形左下**，放不下按主 surface 的高翻到上方（KWin 见 `inputpanelv1window.cpp` Overlay 分支）。位图带外扩时
+  整张贴在主 surface 上，内容框就落在光标下方「上外扩」那么远的地方，翻转也按整张的高提前触发。
+- 做法（`planWaylandSkin`）：锚块取皮肤的窗体（`candidateAnchorBox`；没皮肤时是整张，照旧整张贴）。
+  - **拆层**（默认，有 `wl_subcompositor` 就走）：主 surface 只占窗体大小、全透明、输入区为空；整张位图
+    放子 surface（`place_below`，`set_position` = −窗体左上 ÷ scale，取整），输入区（输入区表、状态气泡）都设在
+    子 surface 上。合成器按主 surface 摆位与翻转，内容框贴光标；子 surface 超出主 surface 的部分照常画、
+    照常收鼠标（KWin 的命中会递归进子 surface）。子 surface 先提交、主 surface 后提交（同步模式）。
+  - **裁切**（没有 `wl_subcompositor`，或环境变量 `WINDINPUT_WAYLAND_SKIN_CLIP=1`）：只贴窗体左上起的那部分
+    （左 / 上外扩丢掉，右 / 下保留），主 surface 原点 = 窗体左上，指针坐标加回它。
+  - 环境变量只作排障逃生口，不进设置项，也不按合成器分名单。treeland 是否会裁掉超出主 surface 的部分
+    （它的事件项设了 `ItemClipsChildrenToShape`）待维护者把 5.50 切到 treeland 会话后真机验，验出会裁再补名单。
+- 指针：子 surface 的局部坐标就是位图坐标；主 surface 的局部坐标加主 surface 原点。命中、悬停、菜单仍按位图
+  坐标做，与之前一致。子 surface 随主 surface 建、随它退役（v1 每个显示周期换 surface，见
+  `RetiredSurfaces`），指针停在子 surface 上按它挂的主 surface 记。
+- **placement 锚点规则在 Wayland 上不生效**：§3.1 `[skin.*.placement]` 的 `caret` / `caret_above` 是服务端按光标
+  屏幕坐标算的，Wayland 下服务端拿不到屏幕坐标、落位交给合成器，内容框总是贴光标左下（翻转时贴光标左上），
+  锚点与偏移都不起作用。
+- 验证：KDE 6.6.6 嵌套 KWin（`--virtual`）+ 真 fcitx5 + konsole，fake input 打字与点击，1×、1.25×、1.5×、
+  贴底翻转、候选变宽后重新摆位、强制裁切各跑一遍。
 
 **macOS**（`CandidatePanel`）
 - 穿透装饰拆到独立层：服务端主缓冲不画 `pass`（主层 alpha 为 0 处窗口天然穿透），穿透装饰另画一张同尺寸

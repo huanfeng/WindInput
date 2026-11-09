@@ -498,7 +498,8 @@ bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool ab
     candSuggestY_ = y;
     Rect r = inPlace ? Rect{cand_.x, cand_.y, int32_t(f.width), int32_t(f.height)}
                      : placeCandidate(x, y, int32_t(f.width), int32_t(f.height), workArea(),
-                                      absolute, candPin_, candContentX_, candContentY_);
+                                      absolute, candPin_, candContentX_, candContentY_,
+                                      candidateAnchorBox(skin_, f.width, f.height));
     if (!inPlace) {
         candShiftX_ = r.x - x;
         candShiftY_ = r.y - y;
@@ -520,7 +521,8 @@ void X11CandidatePanel::moveCandidate(int32_t wx, int32_t wy)
         return;
     }
     // 与下一帧按锚摆时同一条钳制（placeCandidate 的锚分支），松手后不会再跳一下。
-    const Rect r = placePanel(wx, wy, int32_t(cand_.pixW), int32_t(cand_.pixH), workArea(), true);
+    const Rect r = placePanel(wx, wy, int32_t(cand_.pixW), int32_t(cand_.pixH), workArea(), true,
+                              candidateAnchorBox(skin_, cand_.pixW, cand_.pixH));
     candPin_ = std::make_pair(r.x + candContentX_, r.y + candContentY_);
     candShiftX_ = r.x - candSuggestX_;
     candShiftY_ = r.y - candSuggestY_;

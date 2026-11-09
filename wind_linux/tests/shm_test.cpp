@@ -364,6 +364,109 @@ void TestNoDragDecor()
     CHECK(!onNoDragDecor(skin, 40, 5));  // 右边界开区间
 }
 
+void TestContentBoxPlacement()
+{
+    // 644×197 的皮肤窗口，窗体在 (8,100) 140×68：装饰往上外扩 100、往右外扩一大截。
+    const Rect wa{0, 0, 1600, 1150};
+    const Rect box{8, 100, 470, 68};
+    CASE("放得下：窗口照服务端给的点，不因外扩挪动");
+    Rect r = placePanel(400, 300, 644, 197, wa, false, box);
+    CHECK(r.x == 400 && r.y == 300);
+
+    CASE("贴顶：只有透明外扩出了屏幕，窗体还在屏内 → 不推");
+    r = placePanel(400, -60, 644, 197, wa, false, box);
+    CHECK(r.x == 400 && r.y == -60);
+    CASE("贴顶：窗体出了屏幕 → 按窗体夹回（窗体顶 = 工作区顶）");
+    r = placePanel(400, -120, 644, 197, wa, false, box);
+    CHECK_EQ(r.y + box.y, 0);
+
+    CASE("贴右：装饰外扩出右边不推；窗体出右边才按窗体回拉");
+    r = placePanel(1050, 300, 644, 197, wa, false, box);
+    CHECK_EQ(r.x, 1050);
+    r = placePanel(1200, 300, 644, 197, wa, false, box);
+    CHECK_EQ(r.x + box.x + box.w, 1600);
+
+    CASE("贴左：窗体左溢按窗体推回");
+    r = placePanel(-20, 300, 644, 197, wa, false, box);
+    CHECK_EQ(r.x + box.x, 0);
+
+    CASE("贴底翻转按窗体高判：窗体放得下就不翻（整窗下沿虽出界）");
+    r = placePanel(400, 1150 - 197 + 10, 644, 197, wa, false, box);
+    CHECK_EQ(r.y, 1150 - 197 + 10);
+    CASE("贴底翻转：窗体放不下 → 窗体翻到光标上方（让出 18px），窗口跟着换算");
+    const int32_t y = 1100 - box.y; // 窗体顶 1100，下沿 1168 出界
+    r = placePanel(400, y, 644, 197, wa, false, box);
+    CHECK_EQ(r.y + box.y, 1100 - 18 - box.h);
+
+    CASE("固定位置：只按窗体钳制");
+    r = placePanel(400, 1200, 644, 197, wa, true, box);
+    CHECK_EQ(r.y + box.y + box.h, 1150);
+
+    CASE("拖动锚也按窗体钳制");
+    r = placeCandidate(400, 300, 644, 197, wa, false,
+                       std::make_optional(std::make_pair(int32_t(1580), int32_t(500))), 8, 100, box);
+    CHECK_EQ(r.x + box.x + box.w, 1600);
+
+    CASE("box 为空 / 退化：按整窗（旧行为）");
+    r = placePanel(1800, 200, 300, 150, Rect{0, 0, 1920, 1080}, false, Rect{0, 0, 0, 0});
+    CHECK_EQ(r.x, 1620);
+}
+
+void TestAnchorBox()
+{
+    CandidateSkin skin;
+    CASE("没启用皮肤：整个位图");
+    skin.frame = Rect{8, 100, 470, 68};
+    Rect b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.x == 0 && b.y == 0 && b.w == 644 && b.h == 197);
+    CASE("启用皮肤：窗体");
+    skin.flags = SKIN_FLAG_ACTIVE;
+    b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.x == 8 && b.y == 100 && b.w == 470 && b.h == 68);
+    CASE("窗体出了位图（皮肤与帧不同步）：退回整个位图");
+    b = candidateAnchorBox(skin, 400, 197);
+    CHECK(b.x == 0 && b.w == 400);
+    b = candidateAnchorBox(skin, 644, 160);
+    CHECK(b.y == 0 && b.h == 160);
+    skin.frame = Rect{-1, 100, 470, 68};
+    b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.x == 0 && b.w == 644);
+    skin.frame = Rect{8, 100, 0, 68};
+    b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.w == 644);
+}
+
+void TestWaylandSkinPlan()
+{
+    const Rect anchor{8, 100, 470, 68};
+    CASE("有子 surface：拆层，主 surface 只占窗体、原点在窗体左上");
+    WaylandSkinPlan p = planWaylandSkin(anchor, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Split);
+    CHECK(p.originX == 8 && p.originY == 100 && p.mainW == 470 && p.mainH == 68);
+    CASE("没有 wl_subcompositor：裁掉左 / 上外扩，右 / 下保留");
+    p = planWaylandSkin(anchor, 644, 197, false, false);
+    CHECK(p.mode == WaylandSkinMode::Clip);
+    CHECK(p.originX == 8 && p.originY == 100 && p.mainW == 636 && p.mainH == 97);
+    CASE("强制裁切压过子 surface");
+    p = planWaylandSkin(anchor, 644, 197, true, true);
+    CHECK(p.mode == WaylandSkinMode::Clip);
+    CASE("锚块就是整张：整张贴");
+    p = planWaylandSkin(Rect{0, 0, 644, 197}, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Whole && p.originX == 0 && p.mainW == 644 && p.mainH == 197);
+    CASE("只往右 / 下外扩也拆：摆位按窗体");
+    p = planWaylandSkin(Rect{0, 0, 470, 68}, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Split && p.originX == 0 && p.mainW == 470 && p.mainH == 68);
+    CASE("锚块出界：整张贴");
+    p = planWaylandSkin(Rect{200, 150, 470, 68}, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Whole && p.mainW == 644);
+    CASE("环境变量只认 1");
+    CHECK(waylandSkinClipForced("1"));
+    CHECK(!waylandSkinClipForced(nullptr));
+    CHECK(!waylandSkinClipForced("0"));
+    CHECK(!waylandSkinClipForced(""));
+    CHECK(!waylandSkinClipForced("true"));
+}
+
 void TestAnimInPlace()
 {
     CASE("换帧照原位贴：带 ANIM 位且 SHM 就是通知的那一帧");
@@ -393,5 +496,8 @@ int main()
     TestHitTest();
     TestSkinInputRegion();
     TestAnimInPlace();
+    TestContentBoxPlacement();
+    TestAnchorBox();
+    TestWaylandSkinPlan();
     TEST_MAIN_END();
 }
