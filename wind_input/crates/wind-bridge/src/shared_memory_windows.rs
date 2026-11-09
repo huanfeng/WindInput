@@ -131,6 +131,7 @@ impl WindowsSharedMemory {
                 rendered_hover_index: p.rendered_hover_index,
                 target_instance_id: p.target_instance_id,
                 software_shadow: p.software_shadow,
+                pass: p.pass,
             },
         )?;
         self.sequence = new_seq;
@@ -264,6 +265,7 @@ mod tests {
                 rendered_hover_index: 1,
                 target_instance_id: 42,
                 software_shadow: false,
+                pass: None,
             })
             .unwrap();
         assert_eq!(seq, 1);
@@ -300,6 +302,7 @@ mod tests {
                 rendered_hover_index: -1,
                 target_instance_id: 1,
                 software_shadow: false,
+                pass: None,
             })
             .unwrap();
         let s2 = shm.write_hidden(0);

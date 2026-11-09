@@ -240,7 +240,10 @@ pub const CMD_CARET_PENDING: u16 = 0x0303;
 pub const CMD_CARET_PROBE: u16 = 0x0304;
 
 // Host Render
+/// DLL 请求 host-render。载荷可缺省（旧 DLL）；新 DLL 带 4 字节能力位（u32 LE，`HOST_RENDER_CAP_*`）。
 pub const CMD_HOST_RENDER_REQUEST: u16 = 0x0501;
+/// 能力位：DLL 能把穿透装饰层（`SharedRenderHeader::FLAG_PASS_LAYER`）画进单独的穿透窗口。
+pub const HOST_RENDER_CAP_PASS_LAYER: u32 = 0x0001;
 
 // darwin 专用 host-render push 帧（方向与上行 0x05xx 由 push 通道语义区分）。
 // 字节布局须与 Swift wind_macos/.../BinaryCodec.swift decoder 及 Go binary_codec.go 一致。
@@ -1471,7 +1474,10 @@ pub struct SharedRenderHeader {
     pub rects_offset: u32,         // @44 hit 矩形表相对 SHM 基址偏移
     pub rendered_hover_index: i32, // @48 高亮候选索引（-1 无 / -2,-3 翻页）
     pub target_instance_id: u32,   // @52 darwin 忽略
-    pub reserved: [u32; 2],        // @56..64
+    /// @56 穿透装饰层（[`Self::FLAG_PASS_LAYER`]）像素相对 SHM 基址的偏移，与主层同尺寸同 stride；
+    /// 0 = 本帧没有。只 Windows DLL host-render 用。
+    pub pass_offset: u32,
+    pub reserved: u32, // @60..64
 }
 
 impl SharedRenderHeader {
@@ -1490,6 +1496,12 @@ impl SharedRenderHeader {
     /// 换帧：内容没变，只换了皮肤装饰的动画帧。外部宿主照原位贴图，不重新落位、不重排 z 序
     /// （X11 每帧 raise 会压住 tooltip 与菜单）。旧宿主不认这一位，按普通帧处理。
     pub const FLAG_ANIM_FRAME: u32 = 0x0010;
+    /// 帧带一层穿透装饰（`hit = "pass"`，在 [`Self::pass_offset`]）：主层不含它们，DLL 画进第二个
+    /// `WS_EX_TRANSPARENT` 窗口，点击直达宿主（设计 theme-skin-animation.md §17.8）。只在 DLL
+    /// 声明了 [`HOST_RENDER_CAP_PASS_LAYER`] 时发，旧 DLL 收到的仍是合成好的单层。
+    pub const FLAG_PASS_LAYER: u32 = 0x0020;
+    /// 穿透装饰全在窗体下（z < 0）：穿透窗口排在候选窗下面，否则在上面。
+    pub const FLAG_PASS_BELOW: u32 = 0x0040;
 
     pub fn new(x: i32, y: i32, width: u32, height: u32, stride: u32, data_size: u32) -> Self {
         Self {
@@ -1507,7 +1519,8 @@ impl SharedRenderHeader {
             rects_offset: 0,
             rendered_hover_index: -1,
             target_instance_id: 0,
-            reserved: [0; 2],
+            pass_offset: 0,
+            reserved: 0,
         }
     }
 

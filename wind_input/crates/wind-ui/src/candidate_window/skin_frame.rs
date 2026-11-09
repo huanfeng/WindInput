@@ -503,6 +503,37 @@ mod tests {
         assert_eq!(at(&pass, ml, mt), 0);
     }
 
+    /// DLL host-render（§17.8）：DLL 声明了穿透层能力时穿透装饰拆到 `pass_layer`，主层那里透明；
+    /// 没声明（旧 DLL）时合在主层里，不带 `pass_layer`。
+    #[cfg(windows)]
+    #[test]
+    fn host_frame_splits_pass_decor_only_when_asked() {
+        let mut w = fixture_window_hit("host-pass", Some("pass"));
+        w.update("", 0, "中", vec![cand("中")], 0, -1, 1, 1);
+        let alpha = |b: &[u8], bw: u32| b[((bw - 1) * 4 + 3) as usize];
+        let split = w.render_host_frame(true).expect("有内容应出帧");
+        let (pass, below) = split.pass_layer.as_ref().expect("要求拆层就有穿透层");
+        assert!(!below, "z = 1 在窗体上面");
+        assert_eq!(pass.len(), split.buf.len());
+        assert_eq!(
+            alpha(&split.buf, split.width),
+            0,
+            "主层右上角（穿透装饰处）透明"
+        );
+        assert_eq!(alpha(pass, split.width), 255);
+        let merged = w.render_host_frame(false).expect("有内容应出帧");
+        assert!(merged.pass_layer.is_none());
+        assert_eq!(
+            alpha(&merged.buf, merged.width),
+            255,
+            "旧 DLL：穿透装饰合在主层"
+        );
+        assert!(
+            w.render_frame().unwrap().pass_layer.is_none(),
+            "其余出帧口不拆"
+        );
+    }
+
     fn cand(text: &str) -> wind_ui_types::CandidateItem {
         wind_ui_types::CandidateItem {
             text: text.to_string(),

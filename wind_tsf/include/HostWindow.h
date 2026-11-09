@@ -76,6 +76,14 @@ private:
     // Hide the window
     void _HideWindow();
 
+    // UpdateLayeredWindow one BGRA frame (header geometry) into hwnd. pass (may be null) is a
+    // pass-through decor layer composited into the copy first (fallback when _hwndPass is missing).
+    BOOL _BlitLayered(HWND hwnd, const SharedRenderHeader* header, const void* pixels,
+                      const void* pass, bool passBelow);
+    // Show / position the pass-through decor window for this frame, or hide it (passPixels null).
+    void _PresentPassLayer(const SharedRenderHeader* header, const void* passPixels);
+    void _HidePassWindow();
+
     // Try to resolve CreateWindowInBand and GetWindowBand from user32.dll
     BOOL _ResolveAPIs();
 
@@ -100,6 +108,9 @@ private:
 
     // Window state
     HWND _hwnd;
+    // 皮肤穿透装饰窗口（只候选窗有）：WS_EX_TRANSPARENT，与 _hwnd 同 band、同 owner、同位置同尺寸，
+    // 点击直达宿主（设计 theme-skin-animation.md §17.8）。建不出来为 NULL，穿透层合回主层。
+    HWND _hwndPass;
     ATOM _wndClassAtom;
     BOOL _active;
     DWORD _currentBand; // Band of the current window (0 if no window)

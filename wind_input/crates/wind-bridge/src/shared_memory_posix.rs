@@ -93,6 +93,7 @@ impl PosixSharedMemory {
                 rendered_hover_index: -1,
                 target_instance_id: 0,
                 software_shadow: false,
+                pass: None,
             },
         );
         self.sequence

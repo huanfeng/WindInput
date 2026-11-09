@@ -2,6 +2,7 @@
 #include "FileLogger.h"
 #include "HostBandPolicy.h"
 #include "HostClickPolicy.h"
+#include "HostPassLayerPolicy.h"
 #include "IPCClient.h"
 #include <climits>
 #ifndef WHEEL_DELTA
@@ -21,6 +22,9 @@
 #ifndef WS_EX_NOACTIVATE
 #define WS_EX_NOACTIVATE  0x08000000
 #endif
+#ifndef WS_EX_TRANSPARENT
+#define WS_EX_TRANSPARENT 0x00000020
+#endif
 
 static const wchar_t* HOST_WND_CLASS = L"WindInputHostCandidateWnd";
 // Accessed only on the UI thread (STA). No synchronization needed.
@@ -28,6 +32,7 @@ static ATOM s_hostWndClassAtom = 0;
 
 CHostWindow::CHostWindow()
     : _hwnd(NULL)
+    , _hwndPass(NULL)
     , _wndClassAtom(0)
     , _active(FALSE)
     , _currentBand(0)
@@ -532,6 +537,20 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
     WIND_LOG_INFO_FMT(L"HostWindow: Created Band window, hwnd=0x%p, band=%u, actual=%u\n",
         _hwnd, band, actualBand);
 
+    // 皮肤穿透装饰窗口：同 owner、同（回退后的）band，鼠标穿透。不设 GWLP_USERDATA，窗口过程按
+    // 无实例处理（只回 DefWindowProc）。建不出来不算失败：穿透层合回主层（按 block）。
+    if (_windowKind == HOST_WINDOW_CANDIDATE)
+    {
+        _hwndPass = _pfnCreateWindowInBand(
+            exStyle | WS_EX_TRANSPARENT, _wndClassAtom, L"", style, 0, 0, 1, 1,
+            owner, NULL, g_hInstance, NULL, band);
+        if (!_hwndPass)
+        {
+            WIND_LOG_WARN_FMT(L"HostWindow: pass-through decor window failed at band=%u err=%u; "
+                              L"pass decor drawn into the candidate\n", band, GetLastError());
+        }
+    }
+
     // Show the window (non-activating)
     ShowWindow(_hwnd, SW_SHOWNA);
 
@@ -660,6 +679,11 @@ void CHostWindow::Uninitialize()
         DestroyWindow(_hwnd);
         _hwnd = NULL;
     }
+    if (_hwndPass)
+    {
+        DestroyWindow(_hwndPass);
+        _hwndPass = NULL;
+    }
 
     // Unmap shared memory
     if (_pSharedMem)
@@ -703,6 +727,11 @@ BOOL CHostWindow::UpdateBand(DWORD newBand)
     {
         DestroyWindow(_hwnd);
         _hwnd = NULL;
+    }
+    if (_hwndPass)
+    {
+        DestroyWindow(_hwndPass);
+        _hwndPass = NULL;
     }
 
     _requestedBand = newBand;
@@ -798,18 +827,39 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
     // paint, so a click landing right after the repaint hit-tests against fresh rects.
     _UpdateHitRects(header);
 
+    // 皮肤穿透装饰层（只发给声明了能力的 DLL）。穿透窗口没有时合回主层。
+    const uint32_t passOff = wind::hostpass::PassLayerOffset(
+        header->flags, header->passOffset, header->dataSize, _maxBufferSize);
+    const void* pass = passOff ? (const char*)_pSharedMem + passOff : nullptr;
+    const bool passBelow = wind::hostpass::PassLayerBelow(header->flags);
+
+    BOOL ok = _BlitLayered(_hwnd, header, pixelData, _hwndPass ? nullptr : pass, passBelow);
+    if (ok)
+    {
+        // Bring to topmost z-order within the band on every frame.
+        // Without this, the host process's own windows (e.g., taskbar search popup)
+        // can cover the candidate window when both share the same or adjacent bands.
+        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    _PresentPassLayer(header, ok && _hwndPass ? pass : nullptr);
+}
+
+BOOL CHostWindow::_BlitLayered(HWND hwnd, const SharedRenderHeader* header, const void* pixels,
+                               const void* pass, bool passBelow)
+{
     int width = (int)header->width;
     int height = (int)header->height;
 
     // Get screen DC
     HDC hdcScreen = GetDC(NULL);
-    if (!hdcScreen) return;
+    if (!hdcScreen) return FALSE;
 
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
     if (!hdcMem)
     {
         ReleaseDC(NULL, hdcScreen);
-        return;
+        return FALSE;
     }
 
     // Create DIB section
@@ -827,13 +877,19 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
     {
         DeleteDC(hdcMem);
         ReleaseDC(NULL, hdcScreen);
-        return;
+        return FALSE;
     }
 
     HGDIOBJ oldBmp = SelectObject(hdcMem, hBitmap);
 
     // Copy BGRA pixels from shared memory (already in correct format for Windows)
-    memcpy(bits, pixelData, header->dataSize);
+    memcpy(bits, pixels, header->dataSize);
+    if (pass)
+    {
+        wind::hostpass::CompositePass(static_cast<uint8_t*>(bits),
+                                      static_cast<const uint8_t*>(pass), header->dataSize,
+                                      passBelow);
+    }
 
     // UpdateLayeredWindow with position + content
     POINT ptSrc = { 0, 0 };
@@ -846,7 +902,7 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
     blend.AlphaFormat = AC_SRC_ALPHA;
 
     BOOL ok = UpdateLayeredWindow(
-        _hwnd,
+        hwnd,
         hdcScreen,
         &ptDst,
         &size,
@@ -862,20 +918,38 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
         WIND_LOG_WARN_FMT(L"HostWindow: UpdateLayeredWindow failed, err=%u\n", GetLastError());
     }
 
-    if (ok)
-    {
-        // Bring to topmost z-order within the band on every frame.
-        // Without this, the host process's own windows (e.g., taskbar search popup)
-        // can cover the candidate window when both share the same or adjacent bands.
-        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    }
-
     // Cleanup
     SelectObject(hdcMem, oldBmp);
     DeleteObject(hBitmap);
     DeleteDC(hdcMem);
     ReleaseDC(NULL, hdcScreen);
+    return ok;
+}
+
+void CHostWindow::_PresentPassLayer(const SharedRenderHeader* header, const void* passPixels)
+{
+    if (!_hwndPass)
+    {
+        return;
+    }
+    if (!passPixels || !_BlitLayered(_hwndPass, header, passPixels, nullptr, false))
+    {
+        _HidePassWindow();
+        return;
+    }
+    // 与服务端本地窗口路径同一规则：装饰全在窗体下 → 紧贴候选窗下面，否则置于其上（候选窗刚
+    // HWND_TOPMOST 过，这里再 TOPMOST 就落在它上面）。
+    HWND after = wind::hostpass::PassLayerBelow(header->flags) ? _hwnd : HWND_TOPMOST;
+    SetWindowPos(_hwndPass, after, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void CHostWindow::_HidePassWindow()
+{
+    if (_hwndPass && IsWindowVisible(_hwndPass))
+    {
+        ShowWindow(_hwndPass, SW_HIDE);
+    }
 }
 
 void CHostWindow::_HideWindow()
@@ -898,4 +972,5 @@ void CHostWindow::_HideWindow()
     {
         ShowWindow(_hwnd, SW_HIDE);
     }
+    _HidePassWindow();
 }

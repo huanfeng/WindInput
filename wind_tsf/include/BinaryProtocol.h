@@ -158,7 +158,9 @@ constexpr uint16_t CMD_BATCH_RESPONSE     = 0x0F02; // Batch response container
 // ============================================================================
 // Host render commands (C++ -> Go)
 // ============================================================================
-constexpr uint16_t CMD_HOST_RENDER_REQUEST = 0x0501; // DLL requests host render setup
+constexpr uint16_t CMD_HOST_RENDER_REQUEST = 0x0501; // DLL requests host render setup (payload: caps u32)
+// Capability bits sent in CMD_HOST_RENDER_REQUEST (old services ignore the payload).
+constexpr uint32_t HOST_RENDER_CAP_PASS_LAYER = 0x0001; // can show the pass-through decor layer
 
 // ============================================================================
 // Key event types
@@ -560,9 +562,14 @@ constexpr uint32_t SHARED_RENDER_VERSION = 1;
 // Shared memory flags
 constexpr uint32_t SHARED_FLAG_VISIBLE       = 0x0001; // Window should be visible
 constexpr uint32_t SHARED_FLAG_CONTENT_READY = 0x0002; // New content is ready to render
-// 0x0004 = SOFTWARE_SHADOW, 0x0008 = ABSOLUTE_POS: both are consumed only by the macOS
-// `.app` host, which renders panels itself. Listed here so the bit space stays visible
-// when adding a flag on the Windows side (see wind-ipc/src/protocol.rs SharedRenderHeader).
+// 0x0004 = SOFTWARE_SHADOW, 0x0008 = ABSOLUTE_POS, 0x0010 = ANIM_FRAME: consumed only by the
+// macOS / Linux hosts. Listed here so the bit space stays visible when adding a flag on the
+// Windows side (see wind-ipc/src/protocol.rs SharedRenderHeader).
+// 穿透装饰层（皮肤 `hit = "pass"`，设计 theme-skin-animation.md §17.8）：帧带第二层像素（在
+// passOffset，与主层同尺寸），画进 WS_EX_TRANSPARENT 的第二个窗口，点击直达宿主；BELOW = 全在窗体下，
+// 排在候选窗下面。判读见 HostPassLayerPolicy.h。只发给声明了 HOST_RENDER_CAP_PASS_LAYER 的 DLL。
+constexpr uint32_t SHARED_FLAG_PASS_LAYER = 0x0020;
+constexpr uint32_t SHARED_FLAG_PASS_BELOW = 0x0040;
 
 // Max shared memory size (4MB, covers up to ~1024x1024 BGRA)
 constexpr uint32_t MAX_SHARED_RENDER_SIZE = 4 * 1024 * 1024;
@@ -598,7 +605,10 @@ struct SharedRenderHeader
     // stamps the active instance here. A render thread renders only when this matches its
     // own _instanceId, otherwise it hides — so exactly one band window shows the frame.
     uint32_t targetInstanceId;
-    uint32_t reserved[2];// Padding to 64 bytes
+    // Byte offset from SHM base to the pass-through decor layer (SHARED_FLAG_PASS_LAYER);
+    // 0 = none. Same width/height/stride as the main pixels.
+    uint32_t passOffset;
+    uint32_t reserved;   // Padding to 64 bytes
 };
 static_assert(sizeof(SharedRenderHeader) == 64, "SharedRenderHeader must be 64 bytes");
 

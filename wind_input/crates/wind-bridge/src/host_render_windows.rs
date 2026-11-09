@@ -11,8 +11,8 @@ use anyhow::{Context, bail};
 use tracing::info;
 use tracing::warn;
 use wind_ipc::protocol::{
-    HOST_WINDOW_CANDIDATE, HOST_WINDOW_KIND_COUNT, HOST_WINDOW_STATUS, HOST_WINDOW_TOOLTIP,
-    HostRenderSetupEntry, MAX_SHARED_RENDER_SIZE,
+    HOST_RENDER_CAP_PASS_LAYER, HOST_WINDOW_CANDIDATE, HOST_WINDOW_KIND_COUNT, HOST_WINDOW_STATUS,
+    HOST_WINDOW_TOOLTIP, HostRenderSetupEntry, MAX_SHARED_RENDER_SIZE,
 };
 
 use crate::named_event::NamedEvent;
@@ -32,12 +32,15 @@ const ALL_KINDS: [u32; HOST_WINDOW_KIND_COUNT] = [
 pub struct HostRenderTarget {
     pub pid: u32,
     pub instance_id: u32, // == conn_id（由服务器从 1 起分配）
+    /// 该实例的 DLL 声明能画穿透装饰层（`HOST_RENDER_CAP_PASS_LAYER`）。旧 DLL 不声明 → 合成成单层发。
+    pub pass_layer: bool,
 }
 
 struct ClientState {
     pid: u32,
     setup_seq: u64,
     events: HashMap<u32, Arc<NamedEvent>>, // kind → 私有 Event
+    caps: u32,                             // HOST_RENDER_CAP_*（请求载荷里带的）
 }
 
 struct Inner {
@@ -177,6 +180,7 @@ impl HostRenderManager {
         &self,
         conn_id: u32,
         pid: u32,
+        caps: u32,
     ) -> anyhow::Result<(u32, Vec<HostRenderSetupEntry>)> {
         if conn_id == 0 {
             bail!("setup: conn_id 必须 >= 1（0 保留为广播 target）");
@@ -225,6 +229,7 @@ impl HostRenderManager {
                 pid,
                 setup_seq: seq,
                 events,
+                caps,
             },
         );
         info!("host_render setup: conn_id={conn_id} pid={pid} seq={seq}");
@@ -253,13 +258,12 @@ impl HostRenderManager {
     pub fn active_target(&self) -> Option<HostRenderTarget> {
         let inner = self.inner.lock().unwrap();
         let (conn_id, pid) = inner.active?;
-        inner
-            .clients
-            .contains_key(&conn_id)
-            .then_some(HostRenderTarget {
-                pid,
-                instance_id: conn_id,
-            })
+        let cs = inner.clients.get(&conn_id)?;
+        Some(HostRenderTarget {
+            pid,
+            instance_id: conn_id,
+            pass_layer: cs.caps & HOST_RENDER_CAP_PASS_LAYER != 0,
+        })
     }
 
     /// 写帧到全局 SHM，登记 visible_owner，唤醒目标 pid 全部实例（锁外 SetEvent）
@@ -293,6 +297,7 @@ impl HostRenderManager {
                 rendered_hover_index: p.rendered_hover_index,
                 target_instance_id: target.instance_id,
                 software_shadow: p.software_shadow,
+                pass: p.pass,
             };
             shm.write_frame(&modified)
                 .map_err(|_| anyhow::anyhow!("write_frame_for_kind: 帧过大 kind={kind}"))?;
@@ -468,7 +473,7 @@ mod tests {
     fn setup_returns_three_entries_with_instance_id() {
         let mgr = make_mgr("S1");
         let pid = std::process::id();
-        let (instance_id, entries) = mgr.setup(1, pid).expect("setup should succeed");
+        let (instance_id, entries) = mgr.setup(1, pid, 0).expect("setup should succeed");
         assert_eq!(instance_id, 1);
         assert_eq!(entries.len(), 3, "should return entries for all 3 kinds");
         let mut kinds: Vec<u32> = entries.iter().map(|e| e.window_kind).collect();
@@ -492,7 +497,7 @@ mod tests {
         let pid = std::process::id();
         let suffix = format!("_S2_{}", pid);
         let mgr = HostRenderManager::new(&suffix, vec!["notepad.exe".to_string()]);
-        let result = mgr.setup(1, pid);
+        let result = mgr.setup(1, pid, 0);
         assert!(result.is_err(), "未命中白名单应返回 Err");
     }
 
@@ -511,11 +516,25 @@ mod tests {
         );
     }
 
+    /// DLL 在请求里声明了穿透层能力，活跃目标才带 `pass_layer`；旧 DLL（能力 0）不带。
+    #[test]
+    fn active_target_carries_pass_layer_capability() {
+        let mgr = make_mgr("SCAP");
+        let pid = std::process::id();
+        mgr.setup(1, pid, 0).expect("setup");
+        mgr.setup(2, pid, HOST_RENDER_CAP_PASS_LAYER)
+            .expect("setup");
+        mgr.note_focus(1, pid);
+        assert!(!mgr.active_target().unwrap().pass_layer);
+        mgr.note_focus(2, pid);
+        assert!(mgr.active_target().unwrap().pass_layer);
+    }
+
     #[test]
     fn write_frame_records_visible_owner_and_hide_clears() {
         let mgr = make_mgr("S4");
         let pid = std::process::id();
-        let (instance_id, _) = mgr.setup(1, pid).expect("setup");
+        let (instance_id, _) = mgr.setup(1, pid, 0).expect("setup");
         mgr.note_focus(1, pid);
         let target = mgr.active_target().expect("active_target 应为 Some");
         assert_eq!(target.instance_id, instance_id);
@@ -539,6 +558,7 @@ mod tests {
             rendered_hover_index: -1,
             target_instance_id: 0, // 应被 target.instance_id 覆盖
             software_shadow: false,
+            pass: None,
         };
         mgr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &frame)
             .expect("write_frame");
@@ -612,10 +632,10 @@ mod tests {
         let mgr = make_mgr("S6");
         let pid = std::process::id();
 
-        mgr.setup(1, pid).expect("第一次 setup");
+        mgr.setup(1, pid, 0).expect("第一次 setup");
         let seq_a = mgr.setup_seq_of(1);
 
-        mgr.setup(1, pid).expect("第二次 setup（重连）");
+        mgr.setup(1, pid, 0).expect("第二次 setup（重连）");
         let seq_b = mgr.setup_seq_of(1);
         assert_ne!(seq_a, seq_b, "两次 setup seq 应不同");
 
@@ -653,9 +673,9 @@ mod tests {
         let mgr = make_mgr("S8");
         let pid = std::process::id();
         // conn_id == 0 应 Err
-        assert!(mgr.setup(0, pid).is_err(), "setup(0, ..) 应返回 Err");
+        assert!(mgr.setup(0, pid, 0).is_err(), "setup(0, ..) 应返回 Err");
         // conn_id >= 1 应成功，instance_id == conn_id != 0
-        let (instance_id, _) = mgr.setup(1, pid).expect("setup(1, ..) 应成功");
+        let (instance_id, _) = mgr.setup(1, pid, 0).expect("setup(1, ..) 应成功");
         assert_eq!(instance_id, 1);
         assert_ne!(instance_id, 0);
     }
@@ -691,8 +711,8 @@ mod tests {
         let pid = std::process::id();
 
         // conn1 和 conn2 同 pid
-        let (_, entries1) = mgr.setup(1, pid).expect("setup conn1");
-        let (_, entries2) = mgr.setup(2, pid).expect("setup conn2");
+        let (_, entries1) = mgr.setup(1, pid, 0).expect("setup conn1");
+        let (_, entries2) = mgr.setup(2, pid, 0).expect("setup conn2");
 
         // 取 conn1 的 CANDIDATE event 名称
         let evt1_name = entries1
@@ -731,6 +751,7 @@ mod tests {
             rendered_hover_index: -1,
             target_instance_id: 0,
             software_shadow: false,
+            pass: None,
         };
         mgr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &frame)
             .expect("write_frame");
@@ -755,7 +776,7 @@ mod tests {
         use wind_ipc::protocol::SharedRenderHeader;
 
         // conn1 setup 并写帧 → 成为 CANDIDATE owner
-        mgr.setup(1, pid).expect("setup conn1");
+        mgr.setup(1, pid, 0).expect("setup conn1");
         let seq1 = mgr.setup_seq_of(1);
         mgr.note_focus(1, pid);
         let target1 = mgr.active_target().expect("active_target conn1");
@@ -778,12 +799,13 @@ mod tests {
             rendered_hover_index: -1,
             target_instance_id: 0,
             software_shadow: false,
+            pass: None,
         };
         mgr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target1, &frame)
             .expect("write_frame conn1");
 
         // conn2 setup 并写帧 → 抢占 CANDIDATE owner（target_instance_id == 2）
-        mgr.setup(2, pid).expect("setup conn2");
+        mgr.setup(2, pid, 0).expect("setup conn2");
         mgr.note_focus(2, pid);
         let target2 = mgr.active_target().expect("active_target conn2");
         assert_eq!(target2.instance_id, 2);

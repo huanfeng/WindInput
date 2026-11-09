@@ -175,6 +175,9 @@ pub struct RenderedFrame {
     pub hit_rects: Vec<(i32, crate::view::Rect)>,
     /// 预乘 BGRA 像素缓冲（width×height×4）
     pub buf: Vec<u8>,
+    /// 拆出来的穿透装饰层（与 `buf` 同尺寸）+ 是否垫在主层下面。只 [`CandidateWindow::render_host_frame`]
+    /// 按要求拆，其余路径为 `None`（穿透装饰在 `buf` 里）。
+    pub pass_layer: Option<(Vec<u8>, bool)>,
 }
 
 /// 候选词数据类型已下沉至 wind-ui-types；再导出保持 `wind_ui::candidate_window::CandidateItem`
@@ -1326,7 +1329,7 @@ impl CandidateWindow {
     #[cfg(windows)]
     pub fn show(&mut self) {
         let t_start = Instant::now();
-        self.split_pass_decor = true;
+        self.split_pass_decor = !self.pass_window_failed;
         let frame = self.render_frame();
         self.split_pass_decor = false;
         let t_render = t_start.elapsed();
@@ -1838,12 +1841,11 @@ impl CandidateWindow {
         self.sync_hits(&frame);
 
         let mut buf = vec![0u8; (width * height * 4) as usize];
-        // 穿透装饰：只在本地窗口路径（show 置位 split_pass_decor）拆到独立的穿透窗口；
-        // host-render 等路径照旧画进主缓冲（按 block 处理）。穿透窗口建不出来时也不拆。
-        let split = self.split_pass_decor && !self.pass_window_failed;
-        self.pass_layer = self
-            .scene
-            .paint(&frame, &mut buf, &self.text_renderer, split);
+        // 穿透装饰：本地窗口路径（show，穿透窗口建得出来时）与能画穿透层的 DLL host-render
+        // （render_host_frame）拆到独立的穿透窗口；其余照旧画进主缓冲（按 block 处理）。
+        self.pass_layer =
+            self.scene
+                .paint(&frame, &mut buf, &self.text_renderer, self.split_pass_decor);
         let shadow = frame.shadow;
 
         self.mark_visible();
@@ -1871,6 +1873,21 @@ impl CandidateWindow {
             software_shadow: shadow.is_some(),
             hit_rects: self.hit_rects.clone(),
             buf,
+            pass_layer: None,
+        })
+    }
+
+    /// DLL host-render 的出帧口：`split_pass` 时把穿透装饰拆进 [`RenderedFrame::pass_layer`]（DLL 声明
+    /// 了 `HOST_RENDER_CAP_PASS_LAYER`），否则合在主层里。
+    #[cfg(windows)]
+    pub fn render_host_frame(&mut self, split_pass: bool) -> Option<RenderedFrame> {
+        self.split_pass_decor = split_pass;
+        let frame = self.render_frame();
+        self.split_pass_decor = false;
+        let pass = self.pass_layer.take();
+        frame.map(|f| RenderedFrame {
+            pass_layer: pass,
+            ..f
         })
     }
 

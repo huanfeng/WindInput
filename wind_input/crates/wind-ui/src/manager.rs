@@ -1286,6 +1286,7 @@ fn present_status_tip(
                 rendered_hover_index: -1,
                 target_instance_id: 0,
                 software_shadow: sw,
+                pass: None,
             };
             match hr.write_frame_for_kind(HOST_WINDOW_STATUS, &target, &p) {
                 Ok(()) => {
@@ -1318,8 +1319,8 @@ fn try_host_render_candidates(
     let Some(target) = hr.active_target() else {
         return false;
     };
-    match candidate_window.render_frame() {
-        Some(frame) => {
+    match candidate_window.render_host_frame(target.pass_layer) {
+        Some(mut frame) => {
             let rects: Vec<HostRenderHitRect> = frame
                 .hit_rects
                 .iter()
@@ -1339,25 +1340,49 @@ fn try_host_render_candidates(
                     h: r.h as i32,
                 })
                 .collect();
-            let params = FrameParams {
-                sequence: 0,
-                x: frame.screen_x,
-                y: frame.screen_y,
-                width: frame.width,
-                height: frame.height,
-                bgra: &frame.buf,
-                rects: &rects,
-                // C++ 以此为 hover 去重基线（_UpdateHitRects → _lastHoverIndex），值域是
-                // C++ hover 约定（-1 无 / -2 上页 / -3 下页）——内部 tag 须同步重映射。
-                rendered_hover_index: match candidate_window.hover() {
-                    i if i == HOVER_PAGE_PREV => -2,
-                    i if i == HOVER_PAGE_NEXT => -3,
-                    i => i,
-                },
-                target_instance_id: 0,
-                software_shadow: frame.software_shadow,
+            // C++ 以此为 hover 去重基线（_UpdateHitRects → _lastHoverIndex），值域是
+            // C++ hover 约定（-1 无 / -2 上页 / -3 下页）——内部 tag 须同步重映射。
+            let rendered_hover_index = match candidate_window.hover() {
+                i if i == HOVER_PAGE_PREV => -2,
+                i if i == HOVER_PAGE_NEXT => -3,
+                i => i,
             };
-            match hr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &params) {
+            let (x, y, width, height) = (frame.screen_x, frame.screen_y, frame.width, frame.height);
+            let software_shadow = frame.software_shadow;
+            let write = |bgra: &[u8], pass: Option<(&[u8], bool)>| {
+                let params = FrameParams {
+                    sequence: 0,
+                    x,
+                    y,
+                    width,
+                    height,
+                    bgra,
+                    rects: &rects,
+                    rendered_hover_index,
+                    target_instance_id: 0,
+                    software_shadow,
+                    pass,
+                };
+                hr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &params)
+            };
+            let pass_layer = frame.pass_layer.take();
+            let mut written = write(
+                &frame.buf,
+                pass_layer.as_ref().map(|(p, below)| (p.as_slice(), *below)),
+            );
+            // 带穿透层放不下（SHM 4 MiB，两层各一份像素）：合回主层按单层再写（穿透装饰按 block）。
+            if written.is_err()
+                && let Some((pass, below)) = pass_layer
+            {
+                tracing::debug!("host render: 带穿透层的候选帧放不下，合成单层再写");
+                if below {
+                    wind_scene::candidate::composite_under(&mut frame.buf, &pass);
+                } else {
+                    wind_scene::candidate::composite_over(&mut frame.buf, &pass);
+                }
+                written = write(&frame.buf, None);
+            }
+            match written {
                 Ok(()) => {
                     candidate_window.hide_local_window_only();
                     // 换帧重绘时悬停与落位都没变，气泡帧不必重写。
@@ -1378,6 +1403,7 @@ fn try_host_render_candidates(
                                 rendered_hover_index: -1,
                                 target_instance_id: 0,
                                 software_shadow: tt_shadow,
+                                pass: None,
                             };
                             if let Err(e) =
                                 hr.write_frame_for_kind(HOST_WINDOW_TOOLTIP, &target, &tt_params)

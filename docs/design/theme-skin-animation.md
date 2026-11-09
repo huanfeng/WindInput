@@ -382,7 +382,7 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
 - `hit = "pass"`：本地窗口路径把穿透装饰画进第二个 `WS_EX_TRANSPARENT` layered 窗口（类名
   `WindInputCandidateDecor`），与候选窗同位置同尺寸；穿透装饰全在窗体下（z < 0）时插到候选窗下面，否则在上面。
   拖动时一起挪，隐藏时一起收。窗口建不出来就回落为画进候选窗（按 block）。
-- host-render（DLL 侧 HostWindow）仍把穿透装饰画进主缓冲，按 block 处理。
+- host-render（DLL 侧 HostWindow）：DLL 声明能力后同样拆到第二个穿透窗口，见 §17.8；旧 DLL 仍按 block。
 
 macOS / Linux 前端（推帧动画、macOS 第二个 panel 与系统阴影、Wayland 输入区、X11 XShape、「装饰不拖动」）
 已按 §17 实现；Swift 部分本机编不了，只经 CI 与真机验。
@@ -661,3 +661,30 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 **规模与待定**：X11Panel 拖动状态机与锚、候选帧协议加字段（两端编解码与同步测试）、引擎应答查询、
 e2e，约 300 行。动到协议字段与跨平台语义，按约定先停：等维护者定 2 的 (a) / (b)，以及 Wayland 原生
 应用不支持是否可以接受。
+
+### 17.8 Windows DLL host-render 的穿透装饰
+
+SearchHost 这类宿主里的候选窗是 DLL 在宿主进程里用 `CreateWindowInBand` 建的 band 窗口（`CHostWindow`），
+像素由服务端经 SHM 推。原先服务端把穿透装饰画进主层，整块接鼠标（按 block）。现在与本地窗口路径
+（`WindInputCandidateDecor`）同一做法：
+
+- **能力协商**：`CMD_HOST_RENDER_REQUEST` 原本没有载荷，新 DLL 带 4 字节能力位（`HOST_RENDER_CAP_PASS_LAYER = 1`）。
+  旧服务不读载荷，照旧回 setup；新服务按连接记下（`HostRenderTarget.pass_layer`）。只给声明了能力的 DLL 发拆层帧。
+- **帧格式**：`SharedRenderHeader` 的保留字 @56 改作 `pass_offset`；帧带 `FLAG_PASS_LAYER = 0x20`（`FLAG_PASS_BELOW = 0x40`
+  表示装饰全在窗体下）时，与主层同尺寸的穿透层追加在矩形表之后。主层不含穿透装饰（透明处天然穿透）。
+- **DLL**：候选 kind 建窗时多建一个同 owner、同 band 的 `WS_EX_TRANSPARENT` layered 窗口，每帧与主窗口同位置同尺寸贴图；
+  BELOW 时紧贴候选窗下面，否则 `HWND_TOPMOST` 置于其上。没有穿透层的帧收起它，隐藏 / 换 band / 卸载时一起走。
+- **退路**（都退成原先的按 block 显示）：
+  - 旧 DLL + 新服务：没声明能力，服务端发合成好的单层。
+  - 新 DLL + 旧服务：收不到拆层帧，同改前。
+  - 穿透窗口建不出来（`CreateWindowInBand` 第二次失败）：DLL 把穿透层合回主层（`CompositePass`，与服务端
+    `composite_over/under` 同一算式）再贴。
+  - 两层放不下 SHM（4 MiB）：服务端合成单层重写。
+- **做不到 / 不做**：
+  - 窗体上、下两类穿透装饰同时存在时一律放上面（同本地路径，§13）。
+  - 「在上」的穿透窗口是 band 内 `HWND_TOPMOST`，可能盖住同 band 的悬停提示 / 状态气泡（它们 owned 于候选窗）；
+    本地路径同样如此。要按 owner 链精排得把三个窗口的建窗顺序一起改，本期不做。
+  - band 窗口能否在受限宿主（AppContainer）里再建一个，只能靶机验证；建不出来走上面的退路，日志有一条 warn。
+- **测试**：Rust 帧编码（偏移、上下位、尺寸不符不写、放不下报错）、能力位按连接记录（服务端分发 + 管理器，经 wine 跑）、
+  拆层出帧（`render_host_frame`，`#[cfg(windows)]`，只在 Windows 上跑）；C++ 纯函数 `HostPassLayerPolicy.h`
+  （偏移校验、越界 / 溢出、上下位、合成算式，与两边协议常量对拍），`g++` 本机跑。
