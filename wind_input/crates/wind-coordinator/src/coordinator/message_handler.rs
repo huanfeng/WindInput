@@ -663,18 +663,18 @@ impl MessageHandler for Coordinator {
                 }
                 None => tracing::warn!("host.fullscreen 载荷无法解析，忽略"),
             },
-            // macOS `.app`：系统「减少动态效果」，起来时与系统设置变化时报。
+            // macOS `.app` / Linux addon：系统「减少动态效果」，连上时与系统设置变化时报。
             ext_kind::HOST_REDUCE_MOTION => {
                 let reduce = serde_json::from_slice::<serde_json::Value>(body)
                     .ok()
                     .and_then(|v| v.get("reduce")?.as_bool());
                 match reduce {
-                    #[cfg(all(feature = "desktop-ui", target_os = "macos"))]
+                    #[cfg(all(feature = "desktop-ui", ext_presenter))]
                     Some(r) => {
                         tracing::debug!("host.reduce_motion: {r}");
                         wind_ui::candidate_window::set_host_reduce_motion(r);
                     }
-                    #[cfg(not(all(feature = "desktop-ui", target_os = "macos")))]
+                    #[cfg(not(all(feature = "desktop-ui", ext_presenter)))]
                     Some(_) => {}
                     None => tracing::warn!("host.reduce_motion 载荷无法解析，忽略"),
                 }

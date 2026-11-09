@@ -189,6 +189,13 @@ int main()
         g.press(0, 0, 0);
         CHECK_EQ(g.release(0, 0, 0), 0); // 下标 0 是合法装饰
     }
+    CASE("host.reduce_motion：{reduce}");
+    {
+        std::string kind;
+        CHECK_EQ(extBody(encodeReduceMotionFrame(true), kind), std::string(R"({"reduce":true})"));
+        CHECK_EQ(kind, std::string("host.reduce_motion"));
+        CHECK_EQ(extBody(encodeReduceMotionFrame(false), kind), std::string(R"({"reduce":false})"));
+    }
     CASE("skin.decor_click：{index}");
     {
         std::string kind;

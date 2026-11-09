@@ -162,6 +162,7 @@ int main()
     CHECK_EQ(rustStr("POS_SOFTKEYBOARD"), std::string(windlinux::EXT_KIND_POS_SOFTKEYBOARD));
     CHECK_EQ(rustStr("HOST_FULLSCREEN"), std::string(windlinux::EXT_KIND_HOST_FULLSCREEN));
     CHECK_EQ(rustStr("HOST_DISPLAY"), std::string(windlinux::EXT_KIND_HOST_DISPLAY));
+    CHECK_EQ(rustStr("HOST_REDUCE_MOTION"), std::string(windlinux::EXT_KIND_HOST_REDUCE_MOTION));
     CHECK_EQ(rustStr("SKIN_DECOR_CLICK"), std::string(windlinux::EXT_KIND_SKIN_DECOR_CLICK));
     CHECK_EQ(rustStr("POS_STATUS_TIP_QUERY"),
              std::string(windlinux::EXT_KIND_POS_STATUS_TIP_QUERY));

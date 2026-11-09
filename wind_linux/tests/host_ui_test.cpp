@@ -396,5 +396,43 @@ int main()
         CHECK(src.find("pub const COMPOSITION_PLACEHOLDER: &str = \" \";") != std::string::npos);
     }
 
+    CASE("kdeglobals：只认 [KDE] 组的 AnimationDurationFactor，带修饰的键、空格、注释都照认");
+    CHECK(!kdeAnimationFactor("").has_value());
+    CHECK(!kdeAnimationFactor("[General]\nAnimationDurationFactor=0\n").has_value());
+    CHECK(kdeAnimationFactor("[General]\nx=1\n[KDE]\nAnimationDurationFactor=0\n") == 0.0);
+    CHECK(kdeAnimationFactor("[KDE]\n# c\n AnimationDurationFactor = 0.5\r\n") == 0.5);
+    CHECK(kdeAnimationFactor("[KDE]\nAnimationDurationFactor[$i]=0\n") == 0.0);
+    CHECK(!kdeAnimationFactor("[KDE]\nAnimationDurationFactor=fast\n").has_value());
+    CHECK(!kdeAnimationFactor("[KDE]\nAnimationDurationFactor=0x\n").has_value());
+    CHECK(kdeAnimationFactor("[KDE]\nAnimationDurationFactor=1\nAnimationDurationFactor=0\n") == 0.0);
+    CHECK(!kdeAnimationFactor("[KDE][Other]\nAnimationDurationFactor=0\n").has_value());
+
+    CASE("减少动态效果：reduced-motion 优先；其余按桌面挑 KDE / GNOME，都没有不报");
+    {
+        MotionSources s;
+        CHECK(!pickReduceMotion(s, "GNOME").has_value());
+        s.gnomeAnimations = 0;
+        CHECK(pickReduceMotion(s, "GNOME") == true);
+        CHECK(pickReduceMotion(s, "KDE") == true); // KDE 会话没有 KDE 的值：退回 GNOME 的
+        s.kdeFileFactor = 1;
+        CHECK(pickReduceMotion(s, "KDE") == false);      // KDE 会话先看 KDE
+        CHECK(pickReduceMotion(s, "ubuntu:GNOME") == true); // GNOME 会话先看 GNOME
+        s.kdePortalFactor = 0;
+        CHECK(pickReduceMotion(s, "KDE") == true); // 门户优先于文件
+        CHECK(pickReduceMotion(s, "X-Cinnamon:KDE") == true);
+        CHECK(pickReduceMotion(s, "KDEX") == true); // 不是 KDE：看 GNOME（同样是关）
+        s.gnomeAnimations = 1;
+        CHECK(pickReduceMotion(s, "KDEX") == false);
+        s.reducedMotion = 0;
+        CHECK(pickReduceMotion(s, "KDE") == false); // 跨桌面的新键说了算
+        s.reducedMotion = 1;
+        CHECK(pickReduceMotion(s, "GNOME") == true);
+        MotionSources k;
+        k.kdeFileFactor = 0;
+        CHECK(pickReduceMotion(k, "") == true); // 别的桌面只有 KDE 的值：用它
+        k.kdeFileFactor = 0.25;
+        CHECK(pickReduceMotion(k, "") == false);
+    }
+
     TEST_MAIN_END();
 }

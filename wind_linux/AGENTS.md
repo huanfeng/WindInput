@@ -189,7 +189,9 @@ addon 在主线程（经 EventDispatcher）按名只读打开 SHM、拷出一帧
   不 raise。候选窗不能拖，`drag` 装饰在这里等同 `block`。没有 SHAPE 扩展时整窗接鼠标（记一条 warn）。
   Wayland 同一张表折成逻辑坐标进 `wl_surface` 输入区。候选 / 翻页按钮之外按在 drag / block 装饰上
   （`decorAt`）、松开仍在同一块上且没挪过阈值（`DecorClickGate`），经 `skin.decor_click` 报 index，服务端
-  触发它的 `click` 事件。e2e：`WIND_E2E_ONLY=skin scripts/linux/e2e.sh`
+  触发它的 `click` 事件。系统「减少动态效果」由 `DesktopMotion` 读设置门户（Fcitx5 自带的 DBus 封装，
+  异步）与 kdeglobals，经 `host.reduce_motion` 报服务，挑选规则是纯函数 `pickReduceMotion`（§17.1）。
+  e2e：`WIND_E2E_ONLY=skin scripts/linux/e2e.sh`
   （程序生成的皮肤主题，`xdotool getmouselocation` 判指针下的窗口）。
 
 ## 光栅浮层：状态气泡 / Toast / 悬停提示（X11）

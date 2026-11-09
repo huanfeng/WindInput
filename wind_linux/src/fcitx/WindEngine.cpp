@@ -1,5 +1,6 @@
 #include "WindEngine.h"
 
+#include "DesktopMotion.h"
 #include "ExtProtocol.h"
 #include "GnomeCaret.h"
 #include "GnomeCaretGeom.h"
@@ -358,6 +359,12 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
     };
     cb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
     panel_ = std::make_unique<X11CandidatePanel>(instance_->eventLoop(), std::move(cb));
+    // 没连着就不报（不为这一条去拉起服务）：连上时 reconnect 按现值补报。
+    motion_ = std::make_unique<DesktopMotion>(instance_->eventLoop(), [this](bool reduce) {
+        if (bridge_.isConnected()) {
+            sendAndDrain(encodeReduceMotionFrame(reduce));
+        }
+    });
 #ifdef WIND_HAVE_WAYLAND
     wlPanel_ = std::make_unique<WaylandCandidatePanel>(instance_);
     {
@@ -539,6 +546,10 @@ bool WindEngine::reconnect()
                 reportFocus(ic);
             }
             focusUnreported_ = false;
+        }
+        // 「减少动态效果」：断开期间变了的没报出去（见 motion_ 的回调），每次连上都按现值补一次。
+        if (const auto reduce = motion_ ? motion_->current() : std::nullopt) {
+            sendAndDrain(encodeReduceMotionFrame(*reduce));
         }
         return true;
     }
@@ -1248,6 +1259,10 @@ void WindEngine::onPushFrame(Frame frame)
             // 免得工具栏盖在全屏应用上。首次连上也补——早于复位报的那次会被冲掉。
             if (fullscreen_.resyncAfterRestart()) {
                 sendAndDrain(encodeHostFullscreenFrame(true));
+            }
+            // 「减少动态效果」：服务端记的是进程级的值，新服务没有；读不到就不报（服务端按允许）。
+            if (const auto reduce = motion_->refresh()) {
+                sendAndDrain(encodeReduceMotionFrame(*reduce));
             }
             if (hadMenu) {
                 sendAndDrain(encodeMenuDismissFrame("service_ready"));

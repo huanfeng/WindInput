@@ -386,9 +386,10 @@ pub mod ext_kind {
     pub const POS_SOFTKEYBOARD: &str = "pos.softkeyboard";
     /// 上行（Linux addon）：焦点宿主进入 / 退出全屏。body = `{"fullscreen":bool}`。
     pub const HOST_FULLSCREEN: &str = "host.fullscreen";
-    /// 上行（macOS `.app`）：系统「减少动态效果」。body = `{"reduce":bool}`。`.app` 起来时报一次、
-    /// 系统设置变化时再报（`NSWorkspace.accessibilityDisplayShouldReduceMotion`）；服务端以它为准，
-    /// 没收到时退回读偏好（见 `wind_ui::candidate_window::set_host_reduce_motion`）。
+    /// 上行（macOS `.app` / Linux addon）：系统「减少动态效果」。body = `{"reduce":bool}`。连上服务时报一次、
+    /// 系统设置变化时再报（macOS `NSWorkspace.accessibilityDisplayShouldReduceMotion`；Linux 读设置门户与
+    /// kdeglobals，读不到就不报）；服务端以它为准，没收到时 macOS 退回读偏好、Linux 按允许（见
+    /// `wind_ui::candidate_window::set_host_reduce_motion`）。
     pub const HOST_REDUCE_MOTION: &str = "host.reduce_motion";
     /// 上行（Linux addon / macOS `.app`）：在候选窗的皮肤装饰（`drag` / `block`）上点了一下。body =
     /// `{"index":N}`，`N` 是 `CMD_CANDIDATE_SKIN` 装饰表里的 `index`（变体 `decor` 下标）。判定同 Windows：

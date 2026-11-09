@@ -15,7 +15,7 @@ import sys
 import time
 
 from dbus_next.aio import MessageBus
-from dbus_next import Variant  # noqa: F401  (保留：调试时常用)
+from dbus_next import Variant
 
 SERVICE = "org.fcitx.Fcitx5"
 IM_PATH = "/org/freedesktop/portal/inputmethod"
@@ -2184,6 +2184,117 @@ async def skin_cases(bus, im):
     await asyncio.sleep(0.2)
 
 
+class FakePortal:
+    """扮演设置门户（`org.freedesktop.portal.Settings`）的 GNOME 后端，只答 `enable-animations`。
+    fcitx5 早于它起来：addon 首读落空，之后靠 SettingChanged 信号或服务重启时的重读拿到值。"""
+
+    def __init__(self, bus):
+        from dbus_next import DBusError
+        from dbus_next.service import ServiceInterface, method, signal
+
+        outer = self
+
+        class Iface(ServiceInterface):
+            def __init__(self):
+                super().__init__("org.freedesktop.portal.Settings")
+
+            @method()
+            def Read(self, namespace: "s", key: "s") -> "v":  # noqa: N802,F821
+                if (namespace, key) == ("org.gnome.desktop.interface", "enable-animations"):
+                    # 旧接口 Read 的回包套两层 variant（ReadOne 才是一层）
+                    return Variant("v", Variant("b", outer.animations))
+                raise DBusError("org.freedesktop.portal.Error.NotFound", "没有这个键")
+
+            @signal()
+            def SettingChanged(self, namespace, key, value) -> "ssv":  # noqa: N802,F821
+                return [namespace, key, value]
+
+        self.animations = True
+        self.iface = Iface()
+        self.bus = bus
+
+    async def start(self):
+        """接过 `org.freedesktop.portal.Desktop`。私有会话总线照样按本机的 .service 文件激活了真门户
+        （addon 首读时；它在这条总线上没有后端，一律答 UnknownMethod）：杀掉这个私有总线的子进程，
+        排队的名字随之落到本端。返回是否拿到。"""
+        from dbus_next.constants import RequestNameReply
+
+        name = "org.freedesktop.portal.Desktop"
+        self.bus.export("/org/freedesktop/portal/desktop", self.iface)
+        if await self.bus.request_name(name) == RequestNameReply.PRIMARY_OWNER:
+            return True
+        intro = await self.bus.introspect("org.freedesktop.DBus", "/org/freedesktop/DBus")
+        daemon = self.bus.get_proxy_object("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                           intro).get_interface("org.freedesktop.DBus")
+        owner = await daemon.call_get_name_owner(name)
+        pid = await daemon.call_get_connection_unix_process_id(owner)
+        print(f"  私有总线上已有门户（pid {pid}），结束它", flush=True)
+        os.kill(pid, 15)
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if await daemon.call_get_name_owner(name) == self.bus.unique_name:
+                return True
+        return False
+
+    def set(self, animations):
+        self.animations = animations
+        self.iface.SettingChanged("org.gnome.desktop.interface", "enable-animations",
+                                  Variant("b", animations))
+
+
+async def skin_anim_colors(c):
+    """打字显示皮肤候选窗，1 秒内采右上穿透装饰（四色动图）的像素，返回采到的颜色集合，再收起。"""
+    await c.type("nihao")
+    win = await wait_window("wind-candidate", True)
+    seen = set()
+    if win and win[5]:
+        await asyncio.sleep(0.3)
+        for _ in range(10):
+            _, px = screenshot("skin_motion", win[0])
+            seen.add(px(win[3] - 12, 12))
+            await asyncio.sleep(0.1)
+    await c.key("Escape")
+    c.take()
+    await asyncio.sleep(0.2)
+    return seen
+
+
+async def skin_motion_cases(bus, im):
+    """系统「减少动态效果」（§17.1）：addon 读设置门户报 host.reduce_motion，服务端冻结皮肤动画。"""
+    await set_config("ui.theme.name", "e2e-skin")
+    portal = FakePortal(bus)
+    check("减少动态效果：扮演设置门户", await portal.start())
+    c = await new_ctx(bus, im, "e2e-skin-motion")
+    await c.ic.call_set_cursor_rect(300, 300, 2, 20)
+    portal.set(False)
+    await asyncio.sleep(0.3)
+    frozen = await skin_anim_colors(c)
+    check("减少动态效果：门户报 GNOME 关动画后皮肤动画冻结", len(frozen) == 1, f"采到 {frozen}")
+    portal.set(True)
+    await asyncio.sleep(0.3)
+    moving = await skin_anim_colors(c)
+    check("减少动态效果：门户报开动画后皮肤动画恢复", len(moving) >= 2, f"采到 {moving}")
+    restart = os.environ.get("WIND_E2E_RESTART")
+    if restart:
+        # 不发信号：新服务没有这个值，只能靠 addon 在 SERVICE_READY 时向门户重读（Read）再报。
+        portal.animations = False
+        rc = await asyncio.to_thread(subprocess.run, [restart])
+        await c.ic.call_focus_in()
+        ready = await wait_ready(c)
+        # 新服务的 SERVICE_READY 晚于首次按键连上（约 1 秒），重读的回包再晚一点；值在下一次显示时
+        # 生效。多显示几次，看最终是否冻结。
+        for _ in range(4):
+            again = await skin_anim_colors(c)
+            if len(again) == 1:
+                break
+        check("减少动态效果：服务重启后 addon 重读门户再报", rc.returncode == 0 and ready
+              and len(again) == 1, f"rc={rc.returncode} ready={ready} 采到 {again}")
+        portal.set(True)
+    await set_config("ui.theme.name", "default")
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+
 async def get_config(key):
     """经 `wind_input config get` 读在线服务的配置值（读不到返回空串）。"""
     svc = os.path.join(os.environ["W"], "svc", "wind_input")
@@ -2632,6 +2743,7 @@ async def main():
     if os.environ.get("WIND_E2E_ONLY") == "skin":
         await a.ic.call_focus_out()
         await skin_cases(bus, im)
+        await skin_motion_cases(bus, im)
         ok = all(results)
         print(f"{'PASS' if ok else 'FAIL'} 总计 {sum(results)}/{len(results)}", flush=True)
         return 0 if ok else 1

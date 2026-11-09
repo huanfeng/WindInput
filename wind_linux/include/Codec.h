@@ -131,6 +131,8 @@ Bytes encodePosFrame(const std::string& kind, int32_t x, int32_t y);
 /// 上行扩展信封 `pos.toolbar` / `pos.softkeyboard`：body = `{"x":X,"y":Y,"output":"…"}`，内容盒
 /// 左上的屏幕坐标；`output` 为空时不带该字段（与 host.display 同源，两处要么都报要么都不报）。
 Bytes encodePosFrame(const std::string& kind, int32_t x, int32_t y, const std::string& output);
+/// 上行扩展信封 `host.reduce_motion`：body = `{"reduce":true|false}`。
+Bytes encodeReduceMotionFrame(bool reduce);
 /// 上行扩展信封 `skin.decor_click`：body = `{"index":N}`。
 Bytes encodeDecorClickFrame(uint32_t index);
 /// 上行扩展信封 `host.fullscreen`：body = `{"fullscreen":true|false}`。

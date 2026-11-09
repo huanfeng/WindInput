@@ -266,12 +266,13 @@ fn system_allows_animation() -> bool {
     !ok || on != 0
 }
 
-/// `.app` 报来的「减少动态效果」：0 = 没报过，1 = 关，2 = 开。见 [`set_host_reduce_motion`]。
-#[cfg(target_os = "macos")]
+/// 宿主（macOS `.app` / Linux addon）报来的「减少动态效果」：0 = 没报过，1 = 关，2 = 开。见
+/// [`set_host_reduce_motion`]。
+#[cfg(ext_presenter)]
 static HOST_REDUCE_MOTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// 记下 `.app` 报来的「减少动态效果」（扩展信封 `host.reduce_motion`）。下一次显示候选窗时生效。
-#[cfg(target_os = "macos")]
+/// 记下宿主报来的「减少动态效果」（扩展信封 `host.reduce_motion`）。下一次显示候选窗时生效。
+#[cfg(ext_presenter)]
 pub fn set_host_reduce_motion(reduce: bool) {
     HOST_REDUCE_MOTION.store(
         if reduce { 2 } else { 1 },
@@ -310,11 +311,17 @@ fn system_allows_animation() -> bool {
     valid == 0 || reduce == 0
 }
 
-/// Linux 外部宿主：没有统一可靠的「减少动态效果」来源（GNOME 的 `enable-animations` 要起进程或连
-/// dconf，KDE 另一套），恒为允许，只受 `ui.theme.animation` 控制。
+/// Linux 外部宿主：以 addon 报来的为准（它读设置门户与 kdeglobals，设计 §17.1）；没报过（读不到、
+/// 旧 addon）按允许，只受 `ui.theme.animation` 控制。
 #[cfg(all(target_os = "linux", ext_presenter))]
 fn system_allows_animation() -> bool {
-    true
+    host_motion_allowed(HOST_REDUCE_MOTION.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// [`HOST_REDUCE_MOTION`] 的取值 → 允不允许动画：只有报过「减少」才不允许。
+#[cfg(all(target_os = "linux", ext_presenter))]
+fn host_motion_allowed(host: u8) -> bool {
+    host != 2
 }
 
 #[cfg(not(any(windows, target_os = "macos", all(target_os = "linux", ext_presenter))))]
@@ -3337,6 +3344,17 @@ impl WindowMouse for CandidateMouse {
 
 /// 设计 §7：候选窗隐藏 30 秒后释放像素缓冲（Windows 另释放 DirectWrite 离屏表面），
 /// 下次显示按当时尺寸重建、画出来逐字节一致。
+#[cfg(all(test, target_os = "linux", ext_presenter))]
+mod host_motion_tests {
+    /// Linux addon 报的「减少动态效果」：没报过、报了「不减少」都允许，只有报了「减少」才冻结。
+    #[test]
+    fn only_reported_reduce_freezes() {
+        assert!(super::host_motion_allowed(0));
+        assert!(super::host_motion_allowed(1));
+        assert!(!super::host_motion_allowed(2));
+    }
+}
+
 #[cfg(all(test, mock_text))]
 mod pixel_release_tests {
     use super::*;

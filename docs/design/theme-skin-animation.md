@@ -275,7 +275,7 @@ idle_5s = { state = "idle" }
 - 加载时解码成目标倍率的帧（同 §5），每个主题动画帧预算 24 MiB，超出则降帧率（隔帧丢弃）并 warn。
 - 帧率上限 30；窗口隐藏即暂停。
 - 设置项「关闭主题动画」（默认开），同时跟随系统减少动态效果（Windows `SPI_GETCLIENTAREAANIMATION`、
-  macOS `accessibilityDisplayShouldReduceMotion`），关闭时停在 `idle` 首帧。
+  macOS `accessibilityDisplayShouldReduceMotion`、Linux 设置门户 / kdeglobals，见 §17.1），关闭时停在 `idle` 首帧。
 - 驱动：在 `manager.rs` 的 `next_deadline` 清单登记下一帧时刻。
 - 重绘：静态部分（窗体 + 文字）缓存成一张底图，换帧只重新合成装饰矩形；P2 拆窗后只刷装饰窗口。
 - macOS / Linux 走 SHM 推帧，帧率减半（取舍见 §17.1）。
@@ -512,8 +512,23 @@ Fcitx5 addon）只贴图、落位、转发鼠标。盘点基准 `9f165489`：
   `host.reduce_motion`（`{"reduce":bool}`）报给服务——连上服务、服务重启、系统设置变化
   （`accessibilityDisplayOptionsDidChangeNotification`）时各报一次；服务进程不链 AppKit，以上报值为准，
   没收到时退回 CFPreferences 读 `com.apple.universalaccess` 的 `reduceMotion`（先 `AppSynchronize`，
-  `valid == 0` 按未知、允许）。下一次显示候选窗时生效。Linux 没有统一可靠的来源（GNOME 的
-  `enable-animations` 要起进程或连 dconf，KDE 另一套），恒为开，只受 `ui.theme.animation` 控制。
+  `valid == 0` 按未知、允许）。下一次显示候选窗时生效。
+- Linux 同样由宿主（Fcitx5 addon，`DesktopMotion`）读、经同一个 `host.reduce_motion` 报，服务端没收到按允许。
+  来源与取舍：
+  - **设置门户**（`org.freedesktop.portal.Settings`）：`org.freedesktop.appearance` `reduced-motion`
+    （跨桌面的新键，1 = 减少）、`org.gnome.desktop.interface` `enable-animations`、`org.kde.kdeglobals.KDE`
+    `AnimationDurationFactor`（0 = 关）。走 Fcitx5 自带的 DBus 封装（`fcitx-utils/dbus`，挂在 Fcitx5 事件
+    循环上、异步），不引入新依赖，也不像 gsettings / dconf 那样要起进程或链 GLib；`SettingChanged`
+    信号让设置改了即时生效。Fcitx5 编译时关了 DBus（头文件不在）就只剩下一条。
+  - **kdeglobals 文件**（`$XDG_CONFIG_HOME/kdeglobals` 的 `[KDE] AnimationDurationFactor`）：没有门户的
+    KDE 会话也读得到；只在 addon 起来与服务（重）启时读，改了要等下一次。
+  - 挑选（`pickReduceMotion`）：`reduced-motion` 有值以它为准；否则 `XDG_CURRENT_DESKTOP` 含 `KDE` 时先 KDE
+    （门户优先于文件）后 GNOME，别的桌面先 GNOME 后 KDE——GNOME 会话里留着 KDE 应用写的 kdeglobals、
+    KDE 会话里 GNOME 的键是 gsettings 出厂值，都不能代表本桌面的设置。都读不到不报。
+  - 不做：直接读 dconf 数据库（GVariant 数据库格式，要自己解析）、调 `gsettings`（起进程，且 Flatpak /
+    非 GNOME 环境常常没有）。没有门户的 GNOME 会话（极少）因此按允许。
+  - 门户在 addon 首读时可能还没起来（D-Bus 按需拉起，或桌面晚于 Fcitx5）：信号照收；服务（重）启时
+    向门户重读一轮；每次连上服务都按现值补报一次（断开期间变了的不丢）。
 
 ### 17.2 协议：`CMD_CANDIDATE_SKIN`（0x0514，push）
 
@@ -595,7 +610,9 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
   block 装饰），打字后 `xdotool mousemove` 到穿透装饰上，`getmouselocation` 报的窗口不是候选窗，挪到
   窗体上是候选窗；动图装饰（程序生成的两帧 APNG）在候选窗显示期间 `xwd -id` 两次截图不同；`xdotool click`
   点 block 装饰，它的 `click` 切了状态（换色）、不上屏、候选窗不收。装饰点击的命中与闸门另有 C++ / Swift 单测，
-  服务端收到 `skin.decor_click` 的路由有协调器单测。
+  服务端收到 `skin.decor_click` 的路由有协调器单测。同组另起一个扮演设置门户的 DBus 服务（接过私有会话
+  总线上被按需拉起的真门户的名字）：发 `SettingChanged` 关动画后再显示，动图装饰不再换色，开回来恢复；
+  服务重启后靠 addon 重读门户（`Read`，两层 variant）再报。挑选规则与 kdeglobals 解析是 C++ 单测。
 - macOS：Rust 部分 `cargo check --target aarch64-apple-darwin`；Swift 本机编不了，只能 CI 的 macOS job
   与真机，判据见报告。
 - 关键逻辑在 `git archive` 导出的副本上做变异验证。
@@ -603,5 +620,4 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 ### 17.6 本期不做
 
 - Linux 候选窗拖动（与皮肤无关的既有差距）。
-- Linux 的系统「减少动态效果」探测。
 - 前端本地播放动画（§17.1）。
