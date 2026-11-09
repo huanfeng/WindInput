@@ -237,6 +237,13 @@ void TestDecodeRender()
     append(f, le32(uint32_t(-5)));
     CHECK_EQ(decodeHostRenderFrame(f)->contentX, 12);
     CHECK_EQ(decodeHostRenderFrame(f)->contentY, -5);
+    append(f, le32(99)); // 以后再追加字段：照旧按前缀读
+    CHECK(decodeHostRenderFrame(f).has_value());
+    for (size_t n : {25u, 26u, 27u, 29u, 32u, 35u}) {
+        CHECK(!decodeHostRenderFrame(Bytes(f.begin(), f.begin() + n)).has_value()); // 截断 / 错位
+    }
+    CHECK(decodeHostRenderFrame(Bytes(f.begin(), f.begin() + 24)).has_value());
+    CHECK(decodeHostRenderFrame(Bytes(f.begin(), f.begin() + 36)).has_value());
     CHECK(!decodeHostRenderFrame(Bytes(20, 0)).has_value());
 
     // CMD_OVERLAY_FRAME：偏移按 Rust `encode_overlay_frame` 写死（布局改了两边一起改）。

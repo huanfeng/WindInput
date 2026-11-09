@@ -196,12 +196,9 @@ int main()
         g.press(100, 100, 50, 60);
         CHECK(!g.move(104, 96).has_value()); // 阈值内
         CHECK(!g.moving());
-        auto o = g.move(105, 100);
-        CHECK(o.has_value());
-        CHECK(o->first == 55 && o->second == 60);
-        o = g.move(100, 101); // 回到阈值内也接着跟
-        CHECK(o.has_value());
-        CHECK(o->first == 50 && o->second == 61);
+        using P = std::optional<std::pair<int32_t, int32_t>>;
+        CHECK(g.move(105, 100) == P(std::make_pair(55, 60)));
+        CHECK(g.move(100, 101) == P(std::make_pair(50, 61))); // 回到阈值内也接着跟
         CHECK(g.release());
         CHECK(!g.release()); // 只交一次
         CHECK(!g.move(200, 200).has_value());
@@ -213,6 +210,18 @@ int main()
         g.cancel();
         CHECK(!g.moving());
         CHECK(!g.release()); // 收起后的松开
+        // 松开事件丢了：之后来的移动里左键已没按着，按松开收尾，闸门放掉、不再跟随。
+        CHECK(!g.releaseIfUp(false).has_value()); // 没按下
+        g.press(100, 100, 50, 60);
+        g.move(120, 100);
+        CHECK(!g.releaseIfUp(true).has_value()); // 左键还按着：照常
+        CHECK(g.moving());
+        CHECK(g.releaseIfUp(false) == std::optional<bool>(true)); // 拖过：要报落点
+        CHECK(!g.moving());
+        CHECK(!g.move(130, 130).has_value()); // 之后的悬停不带着窗口走
+        g.press(100, 100, 50, 60);
+        CHECK(g.releaseIfUp(false) == std::optional<bool>(false)); // 没拖过：不报
+        CHECK(!g.move(130, 130).has_value());
     }
     CASE("host.reduce_motion：{reduce}");
     {

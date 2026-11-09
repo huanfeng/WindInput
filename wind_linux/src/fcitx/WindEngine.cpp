@@ -1368,7 +1368,7 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     wlPanel_->hide();
 #endif
     panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0,
-                 animInPlace(p.flags, p.seq, f.sequence), p.contentX, p.contentY);
+                 animInPlace(p.flags, p.seq, f.sequence), frameContentOffset(p, f.sequence));
 }
 
 void WindEngine::hideAllWayland()

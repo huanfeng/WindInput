@@ -256,7 +256,17 @@ public:
         cancel();
         return moved;
     }
-    /// 候选窗收起 / 窗口重建：按下作废。
+    /// 一次移动事件里左键是否还按着（`held`）。松开事件可能丢（按住期间窗口重建、别的抓取插进来），
+    /// 之后指针悬停也带着闸门走；左键已经没按着就按松开收尾：返回这次是不是拖了（同 `release`），
+    /// 没按下 / 左键仍按着返回空。对位状态气泡拖动的同一处兜底。
+    std::optional<bool> releaseIfUp(bool held)
+    {
+        if (!armed_ || held) {
+            return std::nullopt;
+        }
+        return release();
+    }
+    /// 候选窗收起 / 窗口重建 / 右键 / 菜单打开：按下作废。
     void cancel()
     {
         armed_ = false;

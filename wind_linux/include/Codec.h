@@ -220,7 +220,7 @@ struct HostRenderFramePayload {
     bool visible() const { return (flags & 0x1) != 0; }
 };
 /// CMD_HOST_RENDER_FRAME（push）：seq,x,y,w,h,flags 各 u32/i32（24 字节）[+ scale u32]
-/// [+ contentX contentY i32]。
+/// [+ contentX contentY i32]。长度只认 24、28 与 ≥ 36，其余（截断 / 错位）拒收。
 std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p);
 
 /// CMD_OVERLAY_FRAME（push）：一层浮层（状态气泡 / Toast / tooltip）有新帧或该隐藏。

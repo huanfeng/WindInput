@@ -220,10 +220,8 @@ std::optional<bool> DesktopMotion::refresh()
 {
     sources_.kdeFileFactor = readKdeglobalsFile();
     readPortal();
-    // 不经 onChange：调用方按返回值报，这里再报就是重复的一条。
-    if (const auto now = pick()) {
-        last_ = now;
-    }
+    // 不经 onChange：调用方按返回值报，这里再报就是重复的一条。哪一路都没有了就回到「不报」。
+    last_ = pick();
     return last_;
 }
 
@@ -251,7 +249,13 @@ std::optional<bool> DesktopMotion::pick() const
 void DesktopMotion::update()
 {
     const auto now = pick();
-    if (!now || now == last_) {
+    if (!now) {
+        // 来源全失效（门户换了实现、键都读不到了）：回到「不报」，下次连上服务不再补报旧结论。
+        // 已报给服务端的那条不撤——协议里没有「未知」，服务端按最后一次的值。
+        last_.reset();
+        return;
+    }
+    if (now == last_) {
         return;
     }
     last_ = now;

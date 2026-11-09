@@ -130,4 +130,10 @@ Rect toLogicalCover(const Rect& r, double scale);
 /// （`shmSeq == notifySeq`）。通知与 SHM 之间没有锁，读到更新的一帧时内容、尺寸可能都变了，按普通帧贴。
 bool animInPlace(uint32_t flags, uint32_t notifySeq, uint32_t shmSeq);
 
+/// 这一帧的内容偏移（候选帧尾的 `contentX/Y`）能不能用：偏移在通知里，像素与窗口坐标在 SHM 里，两者
+/// 之间没有锁。SHM 读到的就是通知的那一帧（`shmSeq == p.seq`）才返回，否则空——调用方沿用上一次的偏移
+/// （偏移只随皮肤 / 方向变，比按错帧的尺寸去拼更接近真值）。
+std::optional<std::pair<int32_t, int32_t>> frameContentOffset(const HostRenderFramePayload& p,
+                                                              uint32_t shmSeq);
+
 } // namespace windlinux

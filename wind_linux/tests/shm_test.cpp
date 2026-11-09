@@ -370,6 +370,14 @@ void TestAnimInPlace()
     CHECK(animInPlace(FRAME_FLAG_ANIM_FRAME | 1, 7, 7));
     CHECK(!animInPlace(FRAME_FLAG_ANIM_FRAME, 7, 8)); // SHM 已是更新的一帧：按普通帧
     CHECK(!animInPlace(1, 7, 7));                     // 普通帧
+
+    CASE("内容偏移只取通知与 SHM 同帧时的那份");
+    HostRenderFramePayload p;
+    p.seq = 7;
+    p.contentX = 24;
+    p.contentY = -3;
+    CHECK(frameContentOffset(p, 7) == std::make_optional(std::make_pair(int32_t(24), int32_t(-3))));
+    CHECK(!frameContentOffset(p, 8).has_value()); // SHM 已是更新的一帧：沿用上一次的
 }
 
 int main()

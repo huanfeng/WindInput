@@ -500,7 +500,9 @@ std::optional<std::vector<KeyComboPayload>> decodeKeySeq(const Bytes& p)
 
 std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p)
 {
-    if (p.size() < 24) {
+    // 只认三版布局：24（无 scale）、28（+ scale）、≥ 36（+ 内容偏移，往后再加的字段照旧按前缀读）。
+    // 夹在中间的长度是截断或错位的帧，按某一版去读只会读出半个字段。
+    if (p.size() != 24 && p.size() != 28 && p.size() < 36) {
         return std::nullopt;
     }
     HostRenderFramePayload out;

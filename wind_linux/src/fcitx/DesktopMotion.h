@@ -26,7 +26,7 @@ public:
     /// `onChange`，调用方自己报）；另向门户重发一轮读取（门户晚于本端起来时补上），回包与此刻
     /// 不同再经 `onChange` 报。
     std::optional<bool> refresh();
-    /// 此刻的结论（没读到为空）。
+    /// 此刻的结论（没读到、或读到过但来源都已失效时为空）。
     std::optional<bool> current() const { return last_; }
 
     /// 门户的一个值到了（读到的回包或 SettingChanged）：认得的键记下，结论变了调 `onChange`。

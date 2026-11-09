@@ -293,4 +293,13 @@ bool animInPlace(uint32_t flags, uint32_t notifySeq, uint32_t shmSeq)
     return (flags & FRAME_FLAG_ANIM_FRAME) != 0 && notifySeq == shmSeq;
 }
 
+std::optional<std::pair<int32_t, int32_t>> frameContentOffset(const HostRenderFramePayload& p,
+                                                              uint32_t shmSeq)
+{
+    if (shmSeq != p.seq) {
+        return std::nullopt;
+    }
+    return std::make_pair(p.contentX, p.contentY);
+}
+
 } // namespace windlinux

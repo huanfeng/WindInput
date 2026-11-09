@@ -476,7 +476,7 @@ void X11CandidatePanel::unmapWindow(Surface& s)
 }
 
 bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool absolute, bool anim,
-                             int32_t contentX, int32_t contentY)
+                             std::optional<std::pair<int32_t, int32_t>> content)
 {
     if (f.width == 0 || f.height == 0 || f.bgra.empty() || !ensureConnection()) {
         return false;
@@ -490,13 +490,15 @@ bool X11CandidatePanel::show(const SharedFrame& f, int32_t x, int32_t y, bool ab
     }
     // 换帧：内容与落位都没变，照原位贴、不 raise。窗口刚重建（合成器起停）或尺寸变了就按普通帧走。
     const bool inPlace = anim && cand_.mapped && cand_.pixW == f.width && cand_.pixH == f.height;
-    candContentX_ = contentX;
-    candContentY_ = contentY;
+    if (content) {
+        candContentX_ = content->first;
+        candContentY_ = content->second;
+    }
     candSuggestX_ = x;
     candSuggestY_ = y;
     Rect r = inPlace ? Rect{cand_.x, cand_.y, int32_t(f.width), int32_t(f.height)}
                      : placeCandidate(x, y, int32_t(f.width), int32_t(f.height), workArea(),
-                                      absolute, candPin_, contentX, contentY);
+                                      absolute, candPin_, candContentX_, candContentY_);
     if (!inPlace) {
         candShiftX_ = r.x - x;
         candShiftY_ = r.y - y;
@@ -575,12 +577,31 @@ void X11CandidatePanel::applyCandidateInput()
     xcb_flush(conn_);
 }
 
-void X11CandidatePanel::hide()
+void X11CandidatePanel::endCandidateDrag(bool moved)
+{
+    if (!moved) {
+        return;
+    }
+    // 拖过：松手只报落点，不再判点选 / 装饰点击（下一次按下会重置两道闸门）。固定位置模式下它就是
+    // 新的 custom_x/y，跟随光标模式下服务端不落盘（判据在服务端 save_candidate_pos）。
+    setMoveCursor(cand_, false);
+    if (auto at = candidateContentOrigin(); at && cb_.candidateMoved) {
+        WIND_DEBUG() << "候选窗拖动松手，上报内容左上 (" << at->first << "," << at->second << ")";
+        cb_.candidateMoved(at->first, at->second);
+    }
+}
+
+void X11CandidatePanel::cancelCandidateDrag()
 {
     if (candDrag_.moving()) {
         setMoveCursor(cand_, false);
     }
     candDrag_.cancel();
+}
+
+void X11CandidatePanel::hide()
+{
+    cancelCandidateDrag();
     candPin_.reset(); // 拖动位置只在本次组合内有效，下次输入回到建议落点（同 Windows reset_drag）
     unmap(cand_);
     rects_.clear();
@@ -829,7 +850,9 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
             }
         } else if (e->detail == 3 && cb_.contextMenu) {
             // 右键：命中候选 → 候选菜单，空白 / 翻页按钮 → 主菜单（同 Windows right_click）。
-            // 悬停先清掉：菜单开着时候选窗收不到移动事件，残留的高亮会一直挂着。
+            // 悬停先清掉：菜单开着时候选窗收不到移动事件，残留的高亮会一直挂着。左键拖到一半
+            // 按右键：拖动作废（菜单要抓指针，之后的松开不会再来）。
+            cancelCandidateDrag();
             setHover(-1);
             cb_.contextMenu(contextMenuTarget(hitTest(rects_, e->event_x, e->event_y)),
                             e->root_x, e->root_y);
@@ -844,14 +867,7 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
             break;
         }
         if (candDrag_.release()) {
-            // 拖过：松手只报落点，不再判点选 / 装饰点击（下一次按下会重置两道闸门）。固定位置
-            // 模式下它就是新的 custom_x/y，跟随光标模式下服务端不落盘（判据在服务端 save_candidate_pos）。
-            setMoveCursor(cand_, false);
-            if (auto at = candidateContentOrigin(); at && cb_.candidateMoved) {
-                WIND_DEBUG() << "候选窗拖动松手，上报内容左上 (" << at->first << "," << at->second
-                             << ")";
-                cb_.candidateMoved(at->first, at->second);
-            }
+            endCandidateDrag(true);
             break;
         }
         const int32_t hit = hitTest(rects_, e->event_x, e->event_y);
@@ -870,6 +886,10 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
         auto* e = reinterpret_cast<xcb_motion_notify_event_t*>(ev);
         if (e->event != cand_.window) {
             break;
+        }
+        // 松开事件丢了：左键已经没按着，按松开收尾，指针随后只是悬停。
+        if (auto moved = candDrag_.releaseIfUp((e->state & XCB_KEY_BUT_MASK_BUTTON_1) != 0)) {
+            endCandidateDrag(*moved);
         }
         const bool wasMoving = candDrag_.moving();
         if (auto to = candDrag_.move(e->root_x, e->root_y)) {
@@ -1288,6 +1308,7 @@ bool X11CandidatePanel::showMenuLevel(uint32_t level, const SharedFrame& f,
         if (!armed(menuDeadline_)) {
             armMenuDeadline(); // 第 0 级被重建时 first 也为真：上限不因此顺延
         }
+        cancelCandidateDrag(); // 菜单抓走指针：候选窗不会再收到这次按下的松开
         // 菜单开着期间指针事件只进菜单：悬停提示的延后 / 宽限到期也不该来动它（去留等菜单收起）。
         menuActive_ = true;
         cancelTipTimers();

@@ -72,11 +72,12 @@ public:
 
     /// 贴一帧并显示。`x/y` 为服务端建议的左上角（wire 坐标 = 根窗口坐标）。
     /// `anim`（FRAME_FLAG_ANIM_FRAME）：皮肤换帧，已显示时照原位贴图、不 raise（否则每帧压住
-    /// tooltip / 菜单）。`contentX/Y`：窗口左上 → 内容左上的偏移（候选帧尾的字段），拖动锚与
-    /// 上报位置按它换算。本次组合里拖过就按拖动锚摆（`placeCandidate`）。
+    /// tooltip / 菜单）。`content`：窗口左上 → 内容左上的偏移（候选帧尾的字段），拖动锚与
+    /// 上报位置按它换算；空 = 这一帧的偏移不可信（见 `frameContentOffset`），沿用上一次的。
+    /// 本次组合里拖过就按拖动锚摆（`placeCandidate`）。
     /// 没有 X 连接（无 DISPLAY / 连不上）时返回 false、什么都不做。
     bool show(const SharedFrame& frame, int32_t x, int32_t y, bool absolute, bool anim,
-              int32_t contentX, int32_t contentY);
+              std::optional<std::pair<int32_t, int32_t>> content);
     void hide();
     /// 命中矩形（CMD_CANDIDATE_RECTS，晚于帧到达）。坐标是位图内的像素。
     void setRects(std::vector<CandidateHitRect> rects) { rects_ = std::move(rects); }
@@ -241,6 +242,10 @@ private:
     void setMoveCursor(Surface& s, bool on);
     /// 候选窗拖到窗口左上 `(wx, wy)`（夹进工作区），拖动锚随之更新。
     void moveCandidate(int32_t wx, int32_t wy);
+    /// 候选窗拖动收尾：`moved`（拖过）时复位光标、报落点。闸门由调用方先放掉。
+    void endCandidateDrag(bool moved);
+    /// 候选窗拖动作废（不报）：复位光标、放掉闸门。拖到一半的窗口留在原处。
+    void cancelCandidateDrag();
     /// 菜单收起后按指针的真实位置重定：悬停提示去留、候选悬停、气泡 / Toast 的悬停。
     void resyncAfterMenu();
     bool pointerOn(const Surface& s, const std::optional<std::pair<int32_t, int32_t>>& p) const;

@@ -52,6 +52,9 @@ ctest --test-dir wind_linux/build/cmake         # 同一批单测经 CMake 跑
 scripts/linux/e2e.sh                            # 端到端：真服务 + 真 fcitx5 + DBus 客户端打字
 ```
 
+两条单测入口**都要跑**：`make` 用 `-O1 -Werror`（与 CI 同），CMake 不带优化、不 `-Werror`——`maybe-uninitialized`
+这类只在优化后出现的告警只有 `make` 那条看得见，只跑 CMake 会把编不过的测试当成全过。
+
 `e2e.sh` 的做法（改它之前先读脚本头注释）：`dbus-run-session` 起私有会话总线；服务二进制拷进
 临时目录、`data` 下逐项软链到 `build_dev/data`（`system.phrases.toml` 例外：取仓库 `data/` 那份再追加
 e2e 专用的按键合成短语——`build_dev/data` 是构建时的拷贝，可能落后于短语改动），配置/数据/缓存全用 `XDG_*_HOME` 隔离，socket 走
@@ -198,8 +201,8 @@ addon 在主线程（经 EventDispatcher）按名只读打开 SHM、拷出一帧
   （`CandidateDragGate`）才跟随，没过就松开按点击处理（装饰点击照判）。本次组合记拖动锚（拖到的内容
   左上），后续帧按锚摆（`placeCandidate`：锚 > 固定位置 > 跟随光标），候选窗收起时清。松手报
   `pos.candidate`（内容左上 = 窗口左上 + 候选帧尾的 `contentX/Y`），应 `pos.candidate.query` 报当前
-  内容左上；落不落盘由服务端按定位方式定。原生 Wayland 应用的候选窗是合成器摆位的 popup，**不能拖**，
-  也不答查询。
+  内容左上；落不落盘由服务端按定位方式定。松开事件丢了（移动里左键已没按着）按松开收尾，右键 / 菜单打开
+  时拖动作废。原生 Wayland 应用的候选窗是合成器摆位的 popup，**不能拖**，也不答查询。
 
 ## 光栅浮层：状态气泡 / Toast / 悬停提示（X11）
 
