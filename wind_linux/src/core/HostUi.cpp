@@ -1,6 +1,7 @@
 #include "HostUi.h"
 
 #include "Bridge.h"
+#include "GnomeCaretGeom.h"
 
 #include "KeyMap.h"
 #include "Protocol.h"
@@ -272,6 +273,19 @@ std::string trimmed(const std::string& s)
     return s.substr(b, e - b + 1);
 }
 
+/// 去掉组名 / 键名尾部的 KConfig 修饰（`[$i]` 锁定、`[$e]` 展开等，可以叠几个）。
+std::string stripKConfigMarkers(std::string s)
+{
+    while (s.size() >= 4 && s.back() == ']') {
+        const auto open = s.rfind("[$");
+        if (open == std::string::npos || open == 0) {
+            break;
+        }
+        s = trimmed(s.substr(0, open));
+    }
+    return s;
+}
+
 } // namespace
 
 std::optional<double> parseDecimal(const std::string& s)
@@ -288,7 +302,9 @@ std::optional<double> parseDecimal(const std::string& s)
 
 std::optional<double> kdeAnimationFactor(const std::string& kdeglobals)
 {
-    std::istringstream in(kdeglobals);
+    // 编辑器存出来的文件可能带 UTF-8 BOM：留着的话第一行的组名比不上。
+    const bool bom = kdeglobals.compare(0, 3, "\xEF\xBB\xBF") == 0;
+    std::istringstream in(bom ? kdeglobals.substr(3) : kdeglobals);
     std::string line;
     bool inKde = false;
     std::optional<double> out;
@@ -298,7 +314,7 @@ std::optional<double> kdeAnimationFactor(const std::string& kdeglobals)
             continue;
         }
         if (t[0] == '[') {
-            inKde = t == "[KDE]";
+            inKde = stripKConfigMarkers(t) == "[KDE]"; // `[KDE][$i]`：整组锁定，仍是 KDE 组
             continue;
         }
         const auto eq = t.find('=');
@@ -341,11 +357,7 @@ std::optional<bool> pickReduceMotion(const MotionSources& s, const std::string& 
     if (s.gnomeAnimations) {
         gnome = *s.gnomeAnimations == 0;
     }
-    bool onKde = false;
-    std::istringstream in(xdgCurrentDesktop);
-    for (std::string part; std::getline(in, part, ':');) {
-        onKde = onKde || part == "KDE";
-    }
+    const bool onKde = xdgCurrentDesktopHas(xdgCurrentDesktop.c_str(), "KDE");
     return onKde ? (kde ? kde : gnome) : (gnome ? gnome : kde);
 }
 

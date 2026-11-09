@@ -150,6 +150,8 @@ struct MotionSources {
 std::optional<double> parseDecimal(const std::string& s);
 
 /// `kdeglobals` 文本里 `[KDE]` 组的 `AnimationDurationFactor`；没有该组 / 该键、值不是数返回空。
+/// 组名与键名尾部的 KConfig 修饰（`[KDE][$i]`、`AnimationDurationFactor[$i]`）先剥掉再比；开头的
+/// UTF-8 BOM 忽略。`[KDE][Other]` 是子组，不算。
 std::optional<double> kdeAnimationFactor(const std::string& kdeglobals);
 
 /// 用户配置目录下 `kdeglobals` 的路径：`$XDG_CONFIG_HOME/kdeglobals`（未设或非绝对路径时
@@ -157,7 +159,7 @@ std::optional<double> kdeAnimationFactor(const std::string& kdeglobals);
 std::string kdeglobalsPath();
 
 /// 要不要减少动态效果；哪一路都没读到返回空（不报，服务端按允许）。`reduced-motion` 有值就以它为准；
-/// 否则按桌面取：`XDG_CURRENT_DESKTOP`（冒号分隔）含 `KDE` 时先 KDE（门户优先于文件）后 GNOME，
+/// 否则按桌面取：`XDG_CURRENT_DESKTOP`（冒号分隔，`xdgCurrentDesktopHas`）含 `KDE` 时先 KDE（门户优先于文件）后 GNOME，
 /// 别的桌面先 GNOME 后 KDE——GNOME 会话里留着 KDE 应用写的 kdeglobals 很常见，反之 KDE 会话里
 /// GNOME 的键是 gsettings 的出厂值，都不能代表用户在本桌面的设置。
 std::optional<bool> pickReduceMotion(const MotionSources& s, const std::string& xdgCurrentDesktop);

@@ -69,8 +69,18 @@ impl CandidateWindow {
     }
 
     /// 外部宿主报来的装饰点击（扩展信封 `skin.decor_click`）：给这块装饰触发 `click`。候选窗不在屏上
-    /// （点击晚于收起到达）时丢掉。
+    /// （点击晚于收起到达）时丢掉；当前这一帧没有这块可点的装饰（下标越界、`pass`、宿主还按换皮肤
+    /// 之前的那一帧报的）也丢掉——宿主的话只是线索，核对过才算数。
     pub fn skin_decor_click(&mut self, index: usize) {
+        let known = self.scene.skin_geom.as_ref().is_some_and(|g| {
+            g.host_decor()
+                .iter()
+                .any(|d| d.index == index && d.hit != wind_theme::skin::DecorHit::Pass)
+        });
+        if !known {
+            tracing::debug!("skin.decor_click index={index} 不是当前帧可点的装饰，丢弃");
+            return;
+        }
         if self.visible {
             self.skin_event(DecorEvent::Click, Some(index));
         }
@@ -1054,6 +1064,38 @@ mod tests {
         w.show();
         pump(&mut w);
         assert_eq!(decor_px(&w), PX_RED, "收起后到的点击不切状态");
+    }
+
+    /// 宿主报的下标不在当前帧的装饰表里（越界 / 穿透装饰）：丢掉，不切状态。
+    #[test]
+    fn host_reported_decor_click_checks_index_and_hit() {
+        let on = vec![(DecorEvent::Click, DecorAction::State(1))];
+        let mut w = state_window("sm-host-click-oob", on.clone());
+        w.show();
+        w.skin_decor_click(5);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_RED, "越界下标不切状态");
+
+        // 0 号是穿透装饰；另挂一块可点的 1 号在左上角（不遮 0 号）：核对要落在报来的那一块上。
+        let mut w = state_window("sm-host-click-pass", on);
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            let mut other = v.decor[0].clone();
+            other.anchor = Anchor::parse("frame.top_left").unwrap();
+            other.pivot = Pos9::parse("bottom_right").unwrap();
+            v.decor[0].hit = DecorHit::Pass;
+            v.decor.push(other);
+            w.set_theme(theme);
+        }
+        w.show();
+        w.skin_decor_click(0);
+        pump(&mut w);
+        assert_eq!(
+            decor_px(&w),
+            PX_RED,
+            "穿透装饰不接点击（有别的可点装饰也一样）"
+        );
     }
 
     #[test]

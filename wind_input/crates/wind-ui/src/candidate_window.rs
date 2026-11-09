@@ -3363,8 +3363,6 @@ impl WindowMouse for CandidateMouse {
     }
 }
 
-/// 设计 §7：候选窗隐藏 30 秒后释放像素缓冲（Windows 另释放 DirectWrite 离屏表面），
-/// 下次显示按当时尺寸重建、画出来逐字节一致。
 #[cfg(all(test, target_os = "linux", ext_presenter))]
 mod host_motion_tests {
     /// Linux addon 报的「减少动态效果」：没报过、报了「不减少」都允许，只有报了「减少」才冻结。
@@ -3376,6 +3374,8 @@ mod host_motion_tests {
     }
 }
 
+/// 设计 §7：候选窗隐藏 30 秒后释放像素缓冲（Windows 另释放 DirectWrite 离屏表面），
+/// 下次显示按当时尺寸重建、画出来逐字节一致。
 #[cfg(all(test, mock_text))]
 mod pixel_release_tests {
     use super::*;

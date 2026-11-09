@@ -33,8 +33,13 @@ public:
     void onPortalValue(const std::string& ns, const std::string& key, std::optional<double> value);
 
 private:
+    std::optional<bool> pick() const;
     void update();
+    /// 向门户重发一轮读取（清掉上一轮还没回的）。**不得在 Read 回调里调用**：清 `reads` 会销毁正在
+    /// 执行的那个回调的 slot。回调里要再读用 `readKey`（只追加）。
     void readPortal();
+    /// 读一个键；回包 NoReply 时再试 `retries` 次。
+    void readKey(const std::string& ns, const std::string& key, int retries);
 
     struct Portal;
     std::unique_ptr<Portal> portal_; // 连不上会话总线 / Fcitx5 没带 DBus 时为空

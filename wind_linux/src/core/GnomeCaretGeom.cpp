@@ -6,18 +6,18 @@
 namespace windlinux {
 namespace {
 
-bool segmentIsGnome(const char* s, size_t n)
+char lower(char c)
 {
-    constexpr char kName[] = "gnome";
-    if (n != sizeof(kName) - 1) {
+    return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c;
+}
+
+bool segmentIs(const char* s, size_t n, const char* name)
+{
+    if (n != std::strlen(name)) {
         return false;
     }
     for (size_t i = 0; i < n; ++i) {
-        char c = s[i];
-        if (c >= 'A' && c <= 'Z') {
-            c = char(c - 'A' + 'a');
-        }
-        if (c != kName[i]) {
+        if (lower(s[i]) != lower(name[i])) {
             return false;
         }
     }
@@ -28,14 +28,19 @@ bool segmentIsGnome(const char* s, size_t n)
 
 bool xdgCurrentDesktopIsGnome(const char* xdgCurrentDesktop)
 {
-    if (!xdgCurrentDesktop || !*xdgCurrentDesktop) {
+    return xdgCurrentDesktopHas(xdgCurrentDesktop, "GNOME");
+}
+
+bool xdgCurrentDesktopHas(const char* xdgCurrentDesktop, const char* name)
+{
+    if (!xdgCurrentDesktop || !*xdgCurrentDesktop || !name) {
         return false;
     }
     const char* p = xdgCurrentDesktop;
     while (*p) {
         const char* colon = std::strchr(p, ':');
         const size_t n = colon ? size_t(colon - p) : std::strlen(p);
-        if (segmentIsGnome(p, n)) {
+        if (segmentIs(p, n, name)) {
             return true;
         }
         if (!colon) {

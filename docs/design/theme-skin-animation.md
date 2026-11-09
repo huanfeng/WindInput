@@ -521,14 +521,21 @@ Fcitx5 addon）只贴图、落位、转发鼠标。盘点基准 `9f165489`：
     循环上、异步），不引入新依赖，也不像 gsettings / dconf 那样要起进程或链 GLib；`SettingChanged`
     信号让设置改了即时生效。Fcitx5 编译时关了 DBus（头文件不在）就只剩下一条。
   - **kdeglobals 文件**（`$XDG_CONFIG_HOME/kdeglobals` 的 `[KDE] AnimationDurationFactor`）：没有门户的
-    KDE 会话也读得到；只在 addon 起来与服务（重）启时读，改了要等下一次。
+    KDE 会话也读得到；只在 addon 起来与服务（重）启时读，改了要等下一次。组名 / 键名尾部的 KConfig 修饰
+    （`[KDE][$i]` 锁定等）剥掉再比，开头的 UTF-8 BOM 忽略。**只读用户层**：系统层（`$XDG_CONFIG_DIRS` 下的
+    kdeglobals，管理员下发的默认值 / 锁定）不读——要按 KConfig 的层叠与 `$i` 锁定语义合并才对，为一个
+    动画倍率不值得；有门户的 KDE 会话门户给的已是合并后的值，缺的只是「没有门户 + 只在系统层设了」这种情形。
   - 挑选（`pickReduceMotion`）：`reduced-motion` 有值以它为准；否则 `XDG_CURRENT_DESKTOP` 含 `KDE` 时先 KDE
     （门户优先于文件）后 GNOME，别的桌面先 GNOME 后 KDE——GNOME 会话里留着 KDE 应用写的 kdeglobals、
     KDE 会话里 GNOME 的键是 gsettings 出厂值，都不能代表本桌面的设置。都读不到不报。
   - 不做：直接读 dconf 数据库（GVariant 数据库格式，要自己解析）、调 `gsettings`（起进程，且 Flatpak /
     非 GNOME 环境常常没有）。没有门户的 GNOME 会话（极少）因此按允许。
-  - 门户在 addon 首读时可能还没起来（D-Bus 按需拉起，或桌面晚于 Fcitx5）：信号照收；服务（重）启时
-    向门户重读一轮；每次连上服务都按现值补报一次（断开期间变了的不丢）。
+  - 门户在 addon 首读时可能还没起来（D-Bus 按需拉起，或桌面晚于 Fcitx5）：信号照收；读的超时 5 秒，没回音
+    （NoReply）再试两次；门户上线（`ServiceWatcher` 见到 `org.freedesktop.portal.Desktop` 有了属主）与服务
+    （重）启时向门户重读一轮；每次连上服务都按现值补报一次（断开期间变了的不丢）。某个键读失败（门户不认 /
+    一直没回音 / 回包不是 variant）就当这一路没读到，不留上一个门户给的旧值。回包与信号先核整条消息的签名
+    （`Read` 回包 `v`、`SettingChanged` `ssv`）再读：Fcitx5 的 sd-bus 封装对基本类型 peek 会抛异常，在 DBus
+    回调里就是整个 fcitx5 退出。
 
 ### 17.2 协议：`CMD_CANDIDATE_SKIN`（0x0514，push）
 
@@ -561,7 +568,10 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
   丢弃）。判定与 Windows `CandidateMouse` 一致：先判候选 / 翻页按钮命中，命中了就不算装饰；否则取点下的
   最上层 `drag` / `block` 装饰（表按 z 升序倒着找，`pass` 不算，窗体内的 `UNDER` 装饰被窗体盖住也不算）；
   松开时仍在同一块上、各轴位移不超过拖动阈值才报（Linux 取 4 px，同 Windows 出厂的 `SM_CXDRAG`；macOS
-  沿用本端起拖的 3 pt）。纯函数：Linux `decorAt` + `DecorClickGate`，macOS `CandidateSkin.decorAt`。
+  沿用本端起拖的 3 pt）。两处已知的细小差异，不改：装饰矩形的命中 Linux / macOS 按半开区间（右 / 下边那一行
+  像素不算），Windows `Rect::contains` 是闭区间，边上差 1 像素；阈值 Linux、Windows 是「不超过」（≤ 4），
+  macOS 是「严格小于」3 pt。服务端收到后按当前帧核对：`index` 不是这一帧里可点的装饰（越界、`pass`、宿主
+  按换皮肤前的旧帧报的）就丢掉。纯函数：Linux `decorAt` + `DecorClickGate`，macOS `CandidateSkin.decorAt`。
   旧服务不认这个 kind，`handle_ext` 落 `_` 分支安静忽略；新服务 + 旧前端只是没人报，`click` 不触发。
 
 ### 17.3 各平台

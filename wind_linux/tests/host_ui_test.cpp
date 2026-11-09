@@ -406,6 +406,10 @@ int main()
     CHECK(!kdeAnimationFactor("[KDE]\nAnimationDurationFactor=0x\n").has_value());
     CHECK(kdeAnimationFactor("[KDE]\nAnimationDurationFactor=1\nAnimationDurationFactor=0\n") == 0.0);
     CHECK(!kdeAnimationFactor("[KDE][Other]\nAnimationDurationFactor=0\n").has_value());
+    CHECK(kdeAnimationFactor("[KDE][$i]\nAnimationDurationFactor=0\n") == 0.0); // 整组锁定
+    CHECK(kdeAnimationFactor("[KDE][$i][$e]\nAnimationDurationFactor=0\n") == 0.0);
+    CHECK(!kdeAnimationFactor("[KDE][$i]x\nAnimationDurationFactor=0\n").has_value());
+    CHECK(kdeAnimationFactor("\xEF\xBB\xBF[KDE]\nAnimationDurationFactor=0\n") == 0.0); // BOM
 
     CASE("减少动态效果：reduced-motion 优先；其余按桌面挑 KDE / GNOME，都没有不报");
     {
@@ -421,6 +425,10 @@ int main()
         CHECK(pickReduceMotion(s, "KDE") == true); // 门户优先于文件
         CHECK(pickReduceMotion(s, "X-Cinnamon:KDE") == true);
         CHECK(pickReduceMotion(s, "KDEX") == true); // 不是 KDE：看 GNOME（同样是关）
+        s.kdePortalFactor = 1;
+        CHECK(pickReduceMotion(s, "kde") == false);       // 桌面名不分大小写
+        CHECK(pickReduceMotion(s, "ubuntu:Kde") == false);
+        s.kdePortalFactor = 0;
         s.gnomeAnimations = 1;
         CHECK(pickReduceMotion(s, "KDEX") == false);
         s.reducedMotion = 0;

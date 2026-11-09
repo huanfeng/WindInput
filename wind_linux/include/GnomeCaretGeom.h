@@ -13,6 +13,10 @@ struct CaretPx {
     int h = 0;
 };
 
+/// `XDG_CURRENT_DESKTOP`（冒号分隔的桌面名列表，如 `ubuntu:GNOME`）里有没有一段与 `name` 全等
+/// （ASCII 大小写不敏感）。空串 / 空指针一律没有。
+bool xdgCurrentDesktopHas(const char* xdgCurrentDesktop, const char* name);
+
 /// `XDG_CURRENT_DESKTOP` 是冒号分隔的桌面名列表（如 `ubuntu:GNOME`）。
 /// 任一段与 `GNOME` 全等（大小写不敏感）才算 GNOME。`GNOME-Classic` 单独一段不算，
 /// 经典会话实际是 `GNOME-Classic:GNOME`。空串 / 不含该段（KDE、treeland）不算。
