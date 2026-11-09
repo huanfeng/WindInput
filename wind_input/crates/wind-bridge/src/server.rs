@@ -1035,6 +1035,9 @@ pub(crate) fn dispatch_command(
             None
         }
 
+        // 纯异步上报，由 handle_client 在响应写出后处理，这里只需认领，免得落进下面报未知命令。
+        CMD_INPUT_STATE_REPORT | CMD_DIAG_SNAPSHOT => None,
+
         _ => {
             warn!("Unknown command: 0x{:04X}", command);
             if is_async {
