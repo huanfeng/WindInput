@@ -349,6 +349,14 @@ fn host_render_placed_log(body: &[u8]) -> Option<(bool, String)> {
         show(num("actual")),
         flag("owner").map_or("?", |b| if b { "true" } else { "false" }),
     );
+    // 候选窗的皮肤穿透装饰窗口建没建出来（旧 DLL 不报这一项）。
+    if let Some(pass) = flag("pass") {
+        line.push_str(if pass {
+            " pass=true"
+        } else {
+            " pass=false（穿透装饰合回主层、不能点穿）"
+        });
+    }
     if trigger != "recheck" {
         return Some((false, line));
     }
@@ -4851,6 +4859,22 @@ mod ext_envelope_tests {
         assert!(!warn);
         assert!(line.contains("pid=7 trigger=setup probed=1 requested=1 actual=1 owner=false"));
         assert!(!line.contains("prev_"));
+        assert!(!line.contains("pass="), "旧 DLL 不报穿透窗口，不编");
+
+        // 新 DLL 报穿透装饰窗口建没建出来。
+        let (_, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"setup","probed":1,"requested":1,"actual":1,"owner":true,"pass":false}"#,
+        )
+        .unwrap();
+        assert!(line.contains("owner=true pass=false"), "{line}");
+        let (_, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"setup","probed":1,"requested":1,"actual":1,"owner":true,"pass":true}"#,
+        )
+        .unwrap();
+        assert!(
+            line.contains("pass=true") && !line.contains("合回"),
+            "{line}"
+        );
 
         // recheck 且 band 变了（开机预启动那条）：WARN。
         let (warn, line) = host_render_placed_log(

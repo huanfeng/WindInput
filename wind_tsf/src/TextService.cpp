@@ -3715,6 +3715,7 @@ void CTextService::_ReportHostRenderPlaced(const wind::hostband::Placement* prev
     now.requestedBand = candidate->GetRequestedBand();
     now.actualBand = candidate->GetCurrentBand();
     now.hasOwner = candidate->HasOwner() != FALSE;
+    now.hasPassWindow = candidate->HasPassWindow() != FALSE;
     std::vector<uint8_t> payload = wind::hostband::EncodeExt(
         wind::hostband::kPlacedKind, wind::hostband::PlacedBody(GetCurrentProcessId(), now, prev));
     _pIPCClient->SendAsync(CMD_EXT, payload.data(), (uint32_t)payload.size());

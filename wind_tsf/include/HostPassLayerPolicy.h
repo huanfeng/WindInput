@@ -34,6 +34,23 @@ inline uint32_t PassLayerOffset(uint32_t flags, uint32_t passOffset, uint32_t da
     return passOffset;
 }
 
+// 本帧穿透层怎么呈现：没有穿透层 → None；有穿透窗口且贴进去了 → Window；否则（穿透窗口没建出来 /
+// 这一帧贴图失败）→ Merge，合回主层按 block 显示，不能让装饰凭空消失一帧。
+enum class PassPresent
+{
+    None,
+    Window,
+    Merge,
+};
+inline PassPresent PlanPassPresent(bool hasLayer, bool hasWindow, bool windowBlitOk)
+{
+    if (!hasLayer)
+    {
+        return PassPresent::None;
+    }
+    return hasWindow && windowBlitOk ? PassPresent::Window : PassPresent::Merge;
+}
+
 // 穿透窗口排在候选窗下面（装饰全在窗体下）还是上面。
 inline bool PassLayerBelow(uint32_t flags)
 {

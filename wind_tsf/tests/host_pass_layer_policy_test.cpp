@@ -40,6 +40,14 @@ void TestOffset()
     Expect(PassLayerOffset(kFlagPassLayer, 0xFFFFFFF0u, 0x20, buf) == 0, "相加溢出 ⇒ 不信");
 }
 
+void TestPlanPresent()
+{
+    Expect(PlanPassPresent(false, true, true) == PassPresent::None, "没有穿透层 ⇒ 不管");
+    Expect(PlanPassPresent(true, true, true) == PassPresent::Window, "穿透窗口贴上了 ⇒ 走窗口");
+    Expect(PlanPassPresent(true, true, false) == PassPresent::Merge, "穿透窗口贴图失败 ⇒ 合回主层");
+    Expect(PlanPassPresent(true, false, false) == PassPresent::Merge, "没有穿透窗口 ⇒ 合回主层");
+}
+
 void TestBelow()
 {
     Expect(PassLayerBelow(kFlagPassLayer | kFlagPassBelow), "BELOW 位 ⇒ 在下");
@@ -95,6 +103,7 @@ int main()
 {
     TestOffset();
     TestBelow();
+    TestPlanPresent();
     TestComposite();
     TestSyncedWithProtocol();
     if (g_failures == 0)

@@ -227,28 +227,17 @@ LRESULT CALLBACK CHostWindow::_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 // _UpdateHitRects snapshots the embedded rect table of a freshly rendered frame.
 // Called on the render thread; guarded by _rectLock against UI-thread hit-testing.
-void CHostWindow::_UpdateHitRects(const SharedRenderHeader* header)
+void CHostWindow::_UpdateHitRects(const FrameSnapshot& frame)
 {
     if (!_rectLockInit)
         return;
 
+    const SharedRenderHeader* header = &frame.header;
     EnterCriticalSection(&_rectLock);
     _frameX = header->x;
     _frameY = header->y;
-    _hitRects.clear();
-
-    uint32_t count = header->rectCount;
-    if (count > MAX_HOST_RENDER_RECTS)
-        count = MAX_HOST_RENDER_RECTS;
-
-    // Validate the table lies fully within the mapped buffer before reading it.
-    uint64_t tableEnd = (uint64_t)header->rectsOffset + (uint64_t)count * sizeof(HostRenderHitRect);
-    if (count > 0 && header->rectsOffset >= sizeof(SharedRenderHeader) && tableEnd <= _maxBufferSize)
-    {
-        const HostRenderHitRect* table =
-            reinterpret_cast<const HostRenderHitRect*>((const char*)_pSharedMem + header->rectsOffset);
-        _hitRects.assign(table, table + count);
-    }
+    // 表已在拷帧时按帧头拷贝校验、截到上限（HostFrameSnapshot.h）。
+    _hitRects = frame.rects;
     // Sync the hover-dedup baseline to what Go actually highlighted in THIS frame. When a
     // content change (typing) clears the highlight without any mouse event, Go renders with
     // renderedHoverIndex = -1; adopting it here means a later real move back onto the same
@@ -772,7 +761,10 @@ void CHostWindow::_RenderLoop()
             if (!_pSharedMem || !_hwnd)
                 continue;
 
-            const SharedRenderHeader* header = (const SharedRenderHeader*)_pSharedMem;
+            // 帧头只读这一次：服务端随时会改写 SHM，下面的校验与拷贝全按这份拷贝。
+            const uint8_t* shm = static_cast<const uint8_t*>(_pSharedMem);
+            const SharedRenderHeader hdr = wind::hostframe::CopyHeader<SharedRenderHeader>(shm);
+            const SharedRenderHeader* header = &hdr;
 
             // Validate magic
             if (header->magic != SHARED_RENDER_MAGIC)
@@ -807,9 +799,15 @@ void CHostWindow::_RenderLoop()
             if (header->width == 0 || header->height == 0)
                 continue;
 
-            // Get pointer to pixel data (right after header)
-            const void* pixelData = (const char*)_pSharedMem + sizeof(SharedRenderHeader);
-            _RenderFrame(header, pixelData);
+            // 像素 / 命中矩形 / 穿透层拷出来；拷的途中被改写过（sequence 变了）就丢掉这一帧——
+            // 服务端写完那一帧会再发一次事件，下一轮按它画。
+            if (!wind::hostframe::CopyPayload(shm, _maxBufferSize, hdr, MAX_HOST_RENDER_RECTS, _frame))
+            {
+                WIND_LOG_DEBUG_FMT(L"HostWindow: frame %u rewritten while copying, dropped\n",
+                                   header->sequence);
+                continue;
+            }
+            _RenderFrame(_frame);
         }
         else
         {
@@ -821,28 +819,56 @@ void CHostWindow::_RenderLoop()
     WIND_LOG_INFO(L"HostWindow: Render thread stopped\n");
 }
 
-void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pixelData)
+void CHostWindow::_RenderFrame(const FrameSnapshot& frame)
 {
     // Capture this frame's hit geometry + screen origin for mouse routing before we
     // paint, so a click landing right after the repaint hit-tests against fresh rects.
-    _UpdateHitRects(header);
+    _UpdateHitRects(frame);
 
-    // 皮肤穿透装饰层（只发给声明了能力的 DLL）。穿透窗口没有时合回主层。
-    const uint32_t passOff = wind::hostpass::PassLayerOffset(
-        header->flags, header->passOffset, header->dataSize, _maxBufferSize);
-    const void* pass = passOff ? (const char*)_pSharedMem + passOff : nullptr;
+    // 皮肤穿透装饰层（只发给声明了能力的 DLL）：先贴穿透窗口，贴不上（或没有穿透窗口）就合回主层，
+    // 不让装饰凭空消失一帧。
+    const SharedRenderHeader* header = &frame.header;
+    const bool hasPass = !frame.pass.empty();
     const bool passBelow = wind::hostpass::PassLayerBelow(header->flags);
+    const bool passOk = hasPass && _hwndPass &&
+                        _BlitLayered(_hwndPass, header, frame.pass.data(), nullptr, false);
+    const auto plan = wind::hostpass::PlanPassPresent(hasPass, _hwndPass != NULL, passOk);
+    const void* merge = plan == wind::hostpass::PassPresent::Merge ? frame.pass.data() : nullptr;
 
-    BOOL ok = _BlitLayered(_hwnd, header, pixelData, _hwndPass ? nullptr : pass, passBelow);
-    if (ok)
+    if (!_BlitLayered(_hwnd, header, frame.pixels.data(), merge, passBelow))
     {
-        // Bring to topmost z-order within the band on every frame.
-        // Without this, the host process's own windows (e.g., taskbar search popup)
-        // can cover the candidate window when both share the same or adjacent bands.
-        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        _HidePassWindow(); // 主层没贴上：别留下一块孤零零的装饰
+        return;
     }
-    _PresentPassLayer(header, ok && _hwndPass ? pass : nullptr);
+    // Bring to topmost z-order within the band on every frame.
+    // Without this, the host process's own windows (e.g., taskbar search popup)
+    // can cover the candidate window when both share the same or adjacent bands.
+    _PlaceWindows(plan == wind::hostpass::PassPresent::Window, passBelow);
+}
+
+void CHostWindow::_PlaceWindows(bool withPass, bool passBelow)
+{
+    const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+    if (!withPass)
+    {
+        _HidePassWindow();
+        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        return;
+    }
+    // 与服务端本地窗口路径同一规则：装饰全在窗体下 → 穿透窗紧贴候选窗下面，否则在上面。在上的那个
+    // TOPMOST、另一个插在它后面，一次提交：分两次 SetWindowPos 的话，两窗会先后各跳一下。
+    HWND top = passBelow ? _hwnd : _hwndPass;
+    HWND under = passBelow ? _hwndPass : _hwnd;
+    HDWP batch = BeginDeferWindowPos(2);
+    if (batch)
+        batch = DeferWindowPos(batch, top, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (batch)
+        batch = DeferWindowPos(batch, under, top, 0, 0, 0, 0, flags);
+    if (!batch || !EndDeferWindowPos(batch))
+    {
+        SetWindowPos(top, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(under, top, 0, 0, 0, 0, flags);
+    }
 }
 
 BOOL CHostWindow::_BlitLayered(HWND hwnd, const SharedRenderHeader* header, const void* pixels,
@@ -926,24 +952,6 @@ BOOL CHostWindow::_BlitLayered(HWND hwnd, const SharedRenderHeader* header, cons
     return ok;
 }
 
-void CHostWindow::_PresentPassLayer(const SharedRenderHeader* header, const void* passPixels)
-{
-    if (!_hwndPass)
-    {
-        return;
-    }
-    if (!passPixels || !_BlitLayered(_hwndPass, header, passPixels, nullptr, false))
-    {
-        _HidePassWindow();
-        return;
-    }
-    // 与服务端本地窗口路径同一规则：装饰全在窗体下 → 紧贴候选窗下面，否则置于其上（候选窗刚
-    // HWND_TOPMOST 过，这里再 TOPMOST 就落在它上面）。
-    HWND after = wind::hostpass::PassLayerBelow(header->flags) ? _hwnd : HWND_TOPMOST;
-    SetWindowPos(_hwndPass, after, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-}
-
 void CHostWindow::_HidePassWindow()
 {
     if (_hwndPass && IsWindowVisible(_hwndPass))
@@ -973,4 +981,5 @@ void CHostWindow::_HideWindow()
         ShowWindow(_hwnd, SW_HIDE);
     }
     _HidePassWindow();
+    wind::hostframe::ReleaseBuffers(_frame); // 只在渲染线程调，与拷帧同线程
 }
