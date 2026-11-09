@@ -619,5 +619,45 @@ maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
 
 ### 17.6 本期不做
 
-- Linux 候选窗拖动（与皮肤无关的既有差距）。
+- Linux 候选窗拖动（与皮肤无关的既有差距）：方案见 §17.7，未实施，等维护者定其中的取舍。
 - 前端本地播放动画（§17.1）。
+
+### 17.7 Linux 候选窗拖动（方案，未实施）
+
+目标与 Windows `CandidateMouse` 一致：空白处（编码栏、内边距）与 `drag` 装饰起拖，`block` 装饰（窗体外）
+不拖、只判点击，候选 / 翻页按钮照旧点选。现状是 Linux 候选窗不能拖，`drag` 装饰等同 `block`（§17.3）。
+
+**平台能不能做**
+
+- X11：候选窗是 override-redirect 窗口（不抢焦点、不加边框），不归窗口管理器管，`_NET_WM_MOVERESIZE`
+  对它无效（那是请 WM 代拖受管窗口）。可行的是本端拖，同状态气泡现有的做法：左键按下记锚点，按下
+  带来的隐式抓取保证指针移出窗口仍收到移动；挪过阈值（4 px）后 `xcb_configure_window` 跟随；松手报
+  `pos.candidate`。没过阈值就松开，按 §17.2 判 `drag` 装饰点击（`DecorClickGate` 已有）。
+- Wayland：候选窗是 input-method-v2 的 popup surface（KWin 是 input-method-v1 的 input panel），由合成器
+  按文本光标摆位，协议里没有移动请求；`xdg_toplevel.move` 只对 toplevel 有效，不适用。**不支持**。
+  XWayland 应用里的候选窗走 X11 那条，可以拖——同一会话里两类应用行为不一，需要维护者认可。
+
+**落位语义要补的三件**
+
+1. 本次组合内的拖动锚（drag pin）：Windows、macOS 都由前端记，组合内后续帧（翻页、继续输入）按锚摆，
+   收起清掉；否则下一帧就被服务端的建议点拽回光标旁。X11 `show()` 现在每帧按建议点 `placePanel`，要加
+   一级：锚 > 固定位置（`FRAME_FLAG_ABSOLUTE_POS`）> 跟随光标；跟随候选窗的浮层（悬停提示）的平移量
+   `candShift` 随之按锚算。
+2. 上报坐标：`pos.candidate` 约定是**内容**左上（`ui.candidate.custom_x/y` 同义，Windows 报窗口左上 +
+   阴影扩边）。Linux 候选帧（`CMD_HOST_RENDER_FRAME`）只有整幅位图的位置与尺寸，X11 无合成器时软阴影
+   画在位图里，本端换算不出内容左上。两条路：
+   - (a) 候选帧尾追加 `contentX` / `contentY`（同 `CMD_OVERLAY_FRAME` 的字段；旧 addon 按长度只读前段，
+     新 addon 收旧服务的短帧按 0）。语义自包含，不依赖服务端记住哪一帧。
+   - (b) 服务端对 Linux 宿主把 `pos.candidate` 当窗口左上，用最近一帧的扩边换算。协议不动，但同一个 kind
+     在两个平台上含义不同。
+   倾向 (a)。
+3. 「固定位置」切换时服务端问当前位置（`pos.candidate.query`）：macOS 应答；Linux 有了锚之后服务端不知道
+   窗口实际在哪，addon 要同样应答（现在只答 `pos.status_tip.query`，见 wind_linux/AGENTS.md 的差距表）。
+
+**测试**：C++ 单测拖动判定（阈值、按在候选 / block 装饰上不起拖、锚的优先级）；e2e（Xvfb，`xdotool`
+按住空白拖动）断言窗口跟随、继续打字不弹回、收起后回到光标旁；固定位置模式下松手后 `custom_x/y` 落盘为
+内容左上；`block` 装饰上按住拖不动、`drag` 装饰上能拖。
+
+**规模与待定**：X11Panel 拖动状态机与锚、候选帧协议加字段（两端编解码与同步测试）、引擎应答查询、
+e2e，约 300 行。动到协议字段与跨平台语义，按约定先停：等维护者定 2 的 (a) / (b)，以及 Wayland 原生
+应用不支持是否可以接受。
