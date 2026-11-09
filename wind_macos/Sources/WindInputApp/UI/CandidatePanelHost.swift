@@ -626,7 +626,7 @@ public final class CandidatePanelHost {
             self?.panel.hasShadow = !useSoftwareShadow && !skin.isActive
             self?.lastSuggestedWire = (pt.x, pt.y)
             self?.panel.show(image: img, atScreenPoint: pt, rects: rects, skin: skin,
-                             absolute: absolute, anim: anim)
+                             absolute: absolute, anim: anim, above: p.above, placeBox: p.placeBox)
         }
     }
 

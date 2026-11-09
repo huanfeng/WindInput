@@ -1066,6 +1066,7 @@ impl Forwarder {
                     f.absolute_pos,
                     f.content_offset,
                 );
+                let (above, place_box) = (f.above_pos, f.place_box);
                 // 翻页器命中矩形的内部 tag(HOVER_PAGE_PREV/NEXT=100000/100001)重映射为
                 // Swift/Go 约定的 -1(上页)/-2(下页)，否则 100000>=0 会被 .app 误当候选选中
                 // (index 100000) → 翻页失效；候选 tag(>=0)原样。对齐 Go forwarder_darwin。
@@ -1130,6 +1131,8 @@ impl Forwarder {
                     flags,
                     scale.round().max(1.0) as u32,
                     content,
+                    above,
+                    place_box,
                 ));
                 self.sink.push_frame(&encode_candidate_rects(&rects));
                 self.visible = true;
@@ -1185,8 +1188,18 @@ impl Forwarder {
         self.overlays.set_candidate_rect(&*self.sink, None);
         if let Some(shm) = self.shm.as_mut() {
             let seq = shm.write_hidden();
-            self.sink
-                .push_frame(&encode_host_render_frame(seq, 0, 0, 0, 0, 0, 1, (0, 0)));
+            self.sink.push_frame(&encode_host_render_frame(
+                seq,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                (0, 0),
+                (0, 0),
+                (0, 0, 0, 0),
+            ));
         }
     }
 }
@@ -1458,7 +1471,7 @@ mod tests {
             .rev()
             .find(|f| cmd_of(f) == CMD_HOST_RENDER_FRAME)
             .unwrap()[8..];
-        assert_eq!(p.len(), 36, "帧末尾带内容偏移");
+        assert_eq!(p.len(), 60, "帧末尾带内容偏移、上方点与落位框");
         assert_eq!(
             &p[28..36],
             &[0u8; 8],

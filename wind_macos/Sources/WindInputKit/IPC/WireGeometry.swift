@@ -41,20 +41,37 @@ public enum WireGeometry {
     /// 跟随光标的候选窗落位：wire 左上（光标底端下方）+ 窗口尺寸 → Cocoa 左下角。
     ///
     /// `visibleFrame` 必须是**光标所在屏**的可见区（GH#179：曾用主屏，副屏上的候选窗被一把
-    /// 钳回主屏右边缘）。超出左右边回拉；下方放不下翻到光标上方，翻了仍
-    /// 越界再兜底夹进可见区。`aboveGap` 是翻到上方时离锚点的距离：候选窗要让出整行光标（18），
-    /// 状态气泡只留一线（2），与各自原先的写法一致。
+    /// 钳回主屏右边缘）。超出左右边回拉；下方放不下翻到光标上方，翻了仍越界再兜底夹进可见区。
+    ///
+    /// - `above`：服务端算好的「翻到上方时」的窗口 wire 左上（候选帧 aboveX/aboveY，按 Windows 上翻
+    ///   规则：皮肤 `caret_above` 对齐点、上方避让、偏移远离光标）。给了就用它；没给（状态气泡、旧帧）
+    ///   退回估算：窗口底边放在锚点上方 `aboveGap` 处——候选窗让出整行光标（18），状态气泡只留一线（2）。
+    /// - `box`：判翻转与夹边用的框，相对窗口左上的 wire 矩形（y 向下；候选帧 box*：内容框，皮肤
+    ///   `clamp = "all"` 时连装饰外扩）。皮肤的透明外扩撞到屏幕边不算越界，否则内容框会被推离光标、
+    ///   且装饰会让候选窗提前翻上去。缺省整个窗口。
     public static func followCaretOrigin(wireX: CGFloat, wireY: CGFloat, size: CGSize,
                                          screenHeight: CGFloat, visibleFrame vf: CGRect,
-                                         aboveGap: CGFloat = 18) -> CGPoint {
-        let caretBottomLine = flipY(wireY, screenHeight: screenHeight)
+                                         aboveGap: CGFloat = 18,
+                                         above: CGPoint? = nil, box: CGRect? = nil) -> CGPoint {
+        let b = box.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil }
+            ?? CGRect(origin: .zero, size: size)
+        // 框在窗口内的 Cocoa 偏移（距窗口左下）。
+        let dx = b.minX
+        let dy = size.height - b.maxY
         var x = wireX
-        var y = caretBottomLine - size.height
-        if x + size.width > vf.maxX { x = vf.maxX - size.width }
-        if x < vf.minX { x = vf.minX }
-        if y < vf.minY { y = caretBottomLine + aboveGap }
-        if y + size.height > vf.maxY { y = vf.maxY - size.height }
-        if y < vf.minY { y = vf.minY }
+        var y = flipY(wireY, screenHeight: screenHeight) - size.height
+        if y + dy < vf.minY {
+            if let a = above {
+                x = a.x
+                y = flipY(a.y, screenHeight: screenHeight) - size.height
+            } else {
+                y = flipY(wireY, screenHeight: screenHeight) + aboveGap
+            }
+        }
+        if x + dx + b.width > vf.maxX { x = vf.maxX - b.width - dx }
+        if x + dx < vf.minX { x = vf.minX - dx }
+        if y + dy + b.height > vf.maxY { y = vf.maxY - b.height - dy }
+        if y + dy < vf.minY { y = vf.minY - dy }
         return CGPoint(x: x, y: y)
     }
 

@@ -212,8 +212,8 @@ public struct CandidateHitRect: Equatable {
     }
 }
 
-// HostRenderFramePayload — CmdHostRenderFrame (0x0502) 24 字节 payload.
-// 与 Go internal/ipc/binary_protocol.go HostRenderFramePayload 镜像。
+// HostRenderFramePayload — CmdHostRenderFrame (0x0502) payload，24 / 28 / 36 / 60 字节逐版追加。
+// 布局对照 Rust wind-ipc `encode_host_render_frame`。
 public struct HostRenderFramePayload: Equatable {
     public let seq: UInt32
     public let x: Int32           // logical 点 (top-left)
@@ -222,12 +222,22 @@ public struct HostRenderFramePayload: Equatable {
     public let height: UInt32
     public let flags: UInt32
     public let scale: UInt32      // HiDPI 渲染倍率; logical 尺寸 = 像素/scale (1=非 Retina, 2=Retina)
+    /// 窗口左上 → 内容左上的偏移 (logical 点)。36 字节版起有，短帧为 0。
+    public let contentX: Int32
+    public let contentY: Int32
+    /// 跟随光标时翻到光标上方的窗口左上 (wire logical 点)；60 字节版起有，短帧为 nil。
+    public let above: CGPoint?
+    /// 判翻转与夹边用的框：相对窗口左上的 wire 矩形 (logical 点, y 向下)；60 字节版起有。
+    public let placeBox: CGRect?
 
     public init(seq: UInt32, x: Int32, y: Int32, width: UInt32, height: UInt32,
-                flags: UInt32, scale: UInt32 = 1) {
+                flags: UInt32, scale: UInt32 = 1, contentX: Int32 = 0, contentY: Int32 = 0,
+                above: CGPoint? = nil, placeBox: CGRect? = nil) {
         self.seq = seq; self.x = x; self.y = y
         self.width = width; self.height = height; self.flags = flags
         self.scale = max(1, scale)
+        self.contentX = contentX; self.contentY = contentY
+        self.above = above; self.placeBox = placeBox
     }
 
     /// 帧可见 (SharedRenderHeader::FLAG_VISIBLE)。

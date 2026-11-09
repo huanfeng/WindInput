@@ -141,6 +141,13 @@ pub struct RenderedFrame {
     /// 窗口左上 → 内容左上（`ui.candidate.custom_x/y` 同义）的偏移，单位同 `screen_x/y`。宿主本地拖动后
     /// 按它把窗口落点换回内容左上报 `pos.candidate`（皮肤装饰外扩时非零，设计 §17.7）。
     pub content_offset: (i32, i32),
+    /// 跟随光标时翻到光标上方的窗口左上（单位同 `screen_x/y`）。服务端拿不到屏幕几何、不翻转，
+    /// 上下由宿主按可见区定；上方点按 Windows `place_window` 的上翻规则算（皮肤 `caret_above`
+    /// 对齐点、上方避让、偏移远离光标）。固定位置时同 `screen_x/y`。
+    pub above_pos: (i32, i32),
+    /// 宿主判翻转、夹边用的框（相对窗口左上的 x, y, w, h，单位同上）：内容框，皮肤 `clamp = "all"`
+    /// 时连装饰外扩。与 Windows `place_window` 的 `hi + cb` / `- ct` 同口径。
+    pub place_box: (i32, i32, i32, i32),
 }
 
 #[cfg(ext_presenter)]
@@ -1548,7 +1555,7 @@ impl CandidateWindow {
         // Windows 那边还有第三级 `drag_pin`（本次组合内冻结拖动落位）。macOS 的拖动发生在
         // `.app` 侧的 NSPanel 上，服务进程这边的 mouse handler 是不产生事件的 mock，
         // `drag_pin` 恒为 None——会话内的落位冻结由 `.app` 自己记（见 CandidatePanel.dragPin）。
-        let (px, py, absolute) = match self.fixed_pos {
+        let (px, py, absolute, above_xy, clamp) = match self.fixed_pos {
             Some(f) => {
                 // 固定位置下窗口不随光标上下移动，"上翻"随之失去意义：placed_above 必须归 false，
                 // 否则 flip_when_above / swap_preedit_when_above 会让内容在一个不动的窗口里倒序。
@@ -1567,13 +1574,17 @@ impl CandidateWindow {
                     lg(height) as u32,
                     (lg(ml), lg(mt), lg(mr), lg(mb)),
                 );
-                (wx + lg(ml), wy + lg(mt), true)
+                let (cx, cy) = (wx + lg(ml), wy + lg(mt));
+                (cx, cy, true, (cx, cy), (0, 0, 0, 0))
             }
             None => {
                 // place_window 约定 caret_y 为光标【底端】（下方锚点=底端+gap），但 macOS .app 的
                 // caretRectToWire 发的是光标行【顶端】(top-left)，故这里把行高补上传光标底端 =
                 // self.y + self.caret_height，候选窗才落在光标行下方、不遮挡输入。
                 let offset = self.position_offset_px();
+                let anchor = self
+                    .scene
+                    .skin_place_anchor(1.0 / self.scale.max(1.0), self.scale);
                 let (px0, py0, above) = Self::place_window(
                     self.x,
                     self.y + self.caret_height,
@@ -1582,9 +1593,7 @@ impl CandidateWindow {
                     content_h,
                     self.placed_above,
                     offset,
-                    &self
-                        .scene
-                        .skin_place_anchor(1.0 / self.scale.max(1.0), self.scale),
+                    &anchor,
                 );
                 self.placed_above = above;
                 let (px, py) = match self.last_content_pos {
@@ -1599,7 +1608,17 @@ impl CandidateWindow {
                     _ => (px0, py0),
                 };
                 self.last_content_pos = Some((px, py));
-                (px, py, false)
+                // 上方点交给宿主（它才知道下方放不放得下）。微移抑制按下方点的取舍同样平移。
+                let s = self.scale.max(1.0);
+                let (ax, ay) = Self::place_above(
+                    self.x,
+                    self.y + self.caret_height,
+                    self.caret_height,
+                    (content_h as f32 / s).round() as u32,
+                    offset,
+                    &anchor,
+                );
+                (px, py, false, (ax + px - px0, ay + py - py0), anchor.clamp)
             }
         };
         self.report_flip_state();
@@ -1641,6 +1660,14 @@ impl CandidateWindow {
             px + ((width - ml - mr) as f32 / scale).round() as i32,
             content_top + ((height - mt - mb) as f32 / scale).round() as i32,
         ));
+        let content_offset = (ml_l, mt_l - clear_l);
+        let (cl, ct, cr, cb) = clamp;
+        let place_box = (
+            content_offset.0 - cl,
+            content_offset.1 - ct,
+            ((width - ml - mr) as f32 / scale).round() as i32 + cl + cr,
+            ((height - mt - mb) as f32 / scale).round() as i32 + ct + cb,
+        );
         Some(RenderedFrame {
             // 图像含四向 margin(device)，其屏幕左上(逻辑点) = 内容锚点 − 左/上 margin/scale
             //（纵向再 +可见浓阴影下移，让阴影落在 caret 下方）。
@@ -1655,7 +1682,9 @@ impl CandidateWindow {
             buf,
             skin,
             pass_layer,
-            content_offset: (ml_l, mt_l - clear_l),
+            content_offset,
+            above_pos: (above_xy.0 - content_offset.0, above_xy.1 - content_offset.1),
+            place_box,
         })
     }
 
@@ -2242,6 +2271,24 @@ impl CandidateWindow {
         y
     }
 
+    /// 翻到光标上方时的内容左上（钳制之前）：皮肤上方对齐点（`caret_above`）落在光标顶端 − gap，
+    /// 偏移向上（远离光标），再按上方保护带避让。Windows 在 `place_window` 里判定上翻后走这里；
+    /// 外部宿主拿不到屏幕几何，服务端把这个点连同下方点一起交给宿主选（`RenderedFrame::above_pos`）。
+    #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
+    fn place_above(
+        caret_x: i32,
+        caret_y: i32,
+        caret_h: i32,
+        h: u32,
+        offset: (i32, i32),
+        anchor: &scene::PlaceAnchor,
+    ) -> (i32, i32) {
+        let (ax, _, above_y) = Self::caret_anchors(caret_x, caret_y, caret_h, h as i32, offset.0);
+        let y = Self::apply_offset_y(above_y + anchor.above.1, true, offset.1);
+        let y = Self::avoid_caret_line(y, true, caret_y, caret_h, anchor.avoid_above.as_ref());
+        (ax - anchor.above.0, y)
+    }
+
     #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
     #[allow(clippy::too_many_arguments)]
     fn place_window(
@@ -2310,21 +2357,18 @@ impl CandidateWindow {
                     } else {
                         !below_ok && above_ok
                     };
-                    // 方位定后再施加偏移：上方向上、下方向下，均为远离光标。
-                    y = Self::apply_offset_y(
-                        if above { above_y } else { below_y },
-                        above,
-                        offset.1,
-                    );
+                    // 方位定后再施加偏移：上方向上、下方向下，均为远离光标；再按该方位的保护带避让。
                     if above {
-                        x = ax - anchor.above.0;
-                    }
-                    let mask = if above {
-                        anchor.avoid_above.as_ref()
+                        (x, y) = Self::place_above(caret_x, caret_y, caret_h, h, offset, anchor);
                     } else {
-                        anchor.avoid_below.as_ref()
-                    };
-                    y = Self::avoid_caret_line(y, above, caret_y, caret_h, mask);
+                        y = Self::avoid_caret_line(
+                            y,
+                            false,
+                            caret_y,
+                            caret_h,
+                            anchor.avoid_below.as_ref(),
+                        );
+                    }
                     // 方位定后的越界兜底：贴住对应屏幕边。
                     // 偏移可能把窗口顶出工作区，这里兜回来——所以偏移必须在钳制之前施加。
                     // 皮肤 clamp = "all" 时 (cl, ct, cr, cb) 是装饰外扩，连装饰一起留在屏内；否则全 0。

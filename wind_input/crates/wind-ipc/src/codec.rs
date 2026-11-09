@@ -1588,11 +1588,13 @@ fn frame(cmd: u16, payload: Vec<u8>) -> Vec<u8> {
 }
 
 /// CmdHostRenderFrame (0x0502): seq:u32 + x:i32 + y:i32 + w:u32 + h:u32 + flags:u32 + scale:u32
-/// + contentX:i32 + contentY:i32 (36B)。
+/// + contentX:i32 + contentY:i32 (36B) + aboveX:i32 + aboveY:i32 + boxX boxY boxW boxH:i32 (60B)。
 ///
 /// `contentX/Y` = 窗口左上到内容左上（`custom_x/y` 同义）的偏移，与 x/y 同单位；宿主本地拖动后用它
-/// 把窗口落点换回内容左上报 `pos.candidate`（theme-skin-animation.md §17.7）。末尾追加：只读前 28
-/// 字节的旧宿主不受影响。
+/// 把窗口落点换回内容左上报 `pos.candidate`（theme-skin-animation.md §17.7）。
+/// `aboveX/Y` = 跟随光标时翻到光标上方的窗口左上；`box*` = 判翻转与夹边用的框（相对窗口左上，
+/// 内容框，皮肤 `clamp = "all"` 时连装饰外扩）。服务端不翻转，宿主按可见区在 x/y 与 aboveX/Y 间选
+/// （§17.3 macOS）。都是末尾追加：按长度只读前段的旧宿主不受影响。
 #[allow(clippy::too_many_arguments)]
 pub fn encode_host_render_frame(
     seq: u32,
@@ -1603,8 +1605,10 @@ pub fn encode_host_render_frame(
     flags: u32,
     scale: u32,
     content: (i32, i32),
+    above: (i32, i32),
+    place_box: (i32, i32, i32, i32),
 ) -> Vec<u8> {
-    let mut p = Vec::with_capacity(36);
+    let mut p = Vec::with_capacity(60);
     p.extend_from_slice(&seq.to_le_bytes());
     p.extend_from_slice(&x.to_le_bytes());
     p.extend_from_slice(&y.to_le_bytes());
@@ -1614,6 +1618,10 @@ pub fn encode_host_render_frame(
     p.extend_from_slice(&scale.to_le_bytes());
     p.extend_from_slice(&content.0.to_le_bytes());
     p.extend_from_slice(&content.1.to_le_bytes());
+    let (bx, by, bw, bh) = place_box;
+    for v in [above.0, above.1, bx, by, bw, bh] {
+        p.extend_from_slice(&v.to_le_bytes());
+    }
     frame(CMD_HOST_RENDER_FRAME, p)
 }
 
@@ -1999,9 +2007,20 @@ mod darwin_push_tests {
     }
 
     #[test]
-    fn host_render_frame_layout_is_36_bytes_le() {
-        let f = encode_host_render_frame(7, -3, 20, 100, 40, 0x3, 2, (12, -5));
-        assert_eq!(f.len(), 8 + 36);
+    fn host_render_frame_layout_is_60_bytes_le() {
+        let f = encode_host_render_frame(
+            7,
+            -3,
+            20,
+            100,
+            40,
+            0x3,
+            2,
+            (12, -5),
+            (-3, -70),
+            (12, 6, 76, 30),
+        );
+        assert_eq!(f.len(), 8 + 60);
         assert_eq!(cmd_of(&f), CMD_HOST_RENDER_FRAME);
         let p = &f[8..];
         assert_eq!(u32::from_le_bytes(p[0..4].try_into().unwrap()), 7);
@@ -2013,6 +2032,9 @@ mod darwin_push_tests {
         assert_eq!(u32::from_le_bytes(p[24..28].try_into().unwrap()), 2);
         assert_eq!(i32::from_le_bytes(p[28..32].try_into().unwrap()), 12);
         assert_eq!(i32::from_le_bytes(p[32..36].try_into().unwrap()), -5);
+        let i = |o: usize| i32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        assert_eq!((i(36), i(40)), (-3, -70));
+        assert_eq!((i(44), i(48), i(52), i(56)), (12, 6, 76, 30));
     }
 
     #[test]

@@ -247,7 +247,7 @@ pub const HOST_RENDER_CAP_PASS_LAYER: u32 = 0x0001;
 
 // darwin 专用 host-render push 帧（方向与上行 0x05xx 由 push 通道语义区分）。
 // 字节布局须与 Swift wind_macos/.../BinaryCodec.swift decoder 及 Go binary_codec.go 一致。
-pub const CMD_HOST_RENDER_FRAME: u16 = 0x0502; // SHM 新帧就绪通知 (seq+几何+flags+scale+内容偏移, 36B)
+pub const CMD_HOST_RENDER_FRAME: u16 = 0x0502; // SHM 新帧就绪通知 (seq+几何+flags+scale+内容偏移+上方点与落位框, 60B)
 pub const CMD_CANDIDATE_RECTS: u16 = 0x0503; // 候选命中矩形 (panel-local)
 pub const CMD_MODE_STATUS: u16 = 0x0504; // 输入模式状态 (菜单栏指示器)
 pub const CMD_MENU_SHOW: u16 = 0x0506; // 统一菜单树 (响应 CmdShowContextMenu)

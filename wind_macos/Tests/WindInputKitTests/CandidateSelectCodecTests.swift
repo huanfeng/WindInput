@@ -173,4 +173,22 @@ final class CandidateSelectCodecTests: XCTestCase {
         let plain = HostRenderFramePayload(seq: 7, x: 0, y: 0, width: 1, height: 1, flags: 0x1)
         XCTAssertFalse(plain.animInPlace(shmSeq: 7))
     }
+
+    /// 候选帧按长度逐段取：60 字节带内容偏移、上方点与落位框，对照 Rust `encode_host_render_frame` 的布局。
+    func testHostRenderFrameDecodesTailByLength() throws {
+        let vals: [Int32] = [7, -3, 20, 100, 40, 0x3, 2, 12, -5, -3, -70, 12, 6, 76, 30]
+        var buf = Data(count: vals.count * 4)
+        for (i, v) in vals.enumerated() { buf.writeUInt32LE(UInt32(bitPattern: v), at: i * 4) }
+        let full = try BinaryCodec.decodeHostRenderFramePayload(buf)
+        XCTAssertEqual(full.scale, 2)
+        XCTAssertEqual(full.contentX, 12); XCTAssertEqual(full.contentY, -5)
+        XCTAssertEqual(full.above, CGPoint(x: -3, y: -70))
+        XCTAssertEqual(full.placeBox, CGRect(x: 12, y: 6, width: 76, height: 30))
+
+        let mid = try BinaryCodec.decodeHostRenderFramePayload(buf.prefix(36))
+        XCTAssertEqual(mid.contentY, -5)
+        XCTAssertNil(mid.above); XCTAssertNil(mid.placeBox)
+        let old = try BinaryCodec.decodeHostRenderFramePayload(buf.prefix(28))
+        XCTAssertEqual(old.contentX, 0); XCTAssertNil(old.above)
+    }
 }

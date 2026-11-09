@@ -563,6 +563,40 @@ mod tests {
         );
     }
 
+    /// 外部宿主自己判上下：帧带上翻的窗口左上与内容框。上方点按 Windows 上翻规则——`caret_above`
+    /// 对齐点落在光标顶端 − 2，而不是由宿主拿下方点估一个行高去翻。
+    #[cfg(ext_presenter)]
+    #[test]
+    fn follow_caret_frame_carries_above_point_and_content_box() {
+        use wind_theme::skin::{Anchor, CaretPoint};
+        let mut w = fixture_window("above-point");
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            // 对齐点在窗体左下再上移 4：窗体下沿比光标顶端 − 2 低 4。关掉避让，免得它把偏差推平。
+            v.placement.caret_above = CaretPoint {
+                anchor: Anchor::parse("frame.bottom_left").unwrap(),
+                offset: [0.0, -4.0],
+            };
+            v.placement.avoid_caret = None;
+            w.set_theme(theme);
+        }
+        w.update("", 0, "中", vec![cand("中")], 0, -1, 1, 1);
+        w.set_position(100, 180, 20, true);
+        let f = w.render_frame().expect("有内容应出帧");
+        let (ox, oy) = f.content_offset;
+        assert!(oy > 0, "装饰伸出窗体上方");
+        let (bx, by, bw, bh) = f.place_box;
+        assert_eq!((bx, by), (ox, oy), "clamp 缺省只按窗体：框 = 内容框");
+        assert_eq!(bh, f.height as i32 - oy, "装饰只向上外扩");
+        assert!(bw > 0);
+        // 下方：内容框上沿 = 光标底端 200 + 2。
+        assert_eq!(f.screen_y + oy, 202);
+        // 上方：对齐点 = 光标顶端 180 − 2，窗体下沿再低 4。
+        assert_eq!(f.above_pos.1 + by + bh, 182);
+        assert_eq!(f.above_pos.0, f.screen_x, "上下对齐点横向都在窗体左缘");
+    }
+
     fn cand(text: &str) -> wind_ui_types::CandidateItem {
         wind_ui_types::CandidateItem {
             text: text.to_string(),

@@ -331,8 +331,10 @@ final class CandidatePanel: NSPanel {
     /// 落位三级优先: dragPin (本次组合内已拖过) > absolute (固定位置) > 跟随光标。
     ///
     /// `anim` = 皮肤动画换帧 (内容与落位都没变)：已在屏上且尺寸未变时照原位贴，不重新落位。
+    /// `above` / `placeBox` = 跟随光标时上翻的窗口 wire 左上与判翻转用的框 (见 `WireGeometry.followCaretOrigin`)。
     func show(image: NSImage, atScreenPoint p: NSPoint, rects: [CandidateHitRect],
-              skin: CandidateSkin = CandidateSkin(), absolute: Bool = false, anim: Bool = false) {
+              skin: CandidateSkin = CandidateSkin(), absolute: Bool = false, anim: Bool = false,
+              above: CGPoint? = nil, placeBox: CGRect? = nil) {
         let inPlace = anim && isVisible && frame.size == image.size
         content.frame = NSRect(origin: .zero, size: image.size)
         content.update(image: image, rects: rects)
@@ -360,13 +362,15 @@ final class CandidatePanel: NSPanel {
                 self.setFrameOrigin(origin)
             }
         } else {
-            // wire 点 = 光标底端，按它所在的屏钳边界（GH#179：用主屏钳会把副屏上的候选窗拽回主屏）。
-            // 往上挪 4pt 回到光标行内（服务端在光标底端下留了 2pt 间隙）：上下叠放的两块屏，
-            // 光标贴在上屏底边时，wire 点会越过分界线落到下屏。
-            let caretScreen = PanelGeometry.screen(wireX: p.x, wireY: p.y - 4) ?? screen
+            // 内容框左上 = 光标底端下 2pt，按它所在的屏钳边界（GH#179：用主屏钳会把副屏上的候选窗拽回
+            // 主屏）。往上挪 4pt 回到光标行内：上下叠放的两块屏，光标贴在上屏底边时，内容框左上会越过
+            // 分界线落到下屏。皮肤装饰外扩时 wire 点是窗口左上、在内容框外，故按框的位置找屏。
+            let probeX = p.x + (placeBox?.minX ?? 0), probeY = p.y + (placeBox?.minY ?? 0)
+            let caretScreen = PanelGeometry.screen(wireX: probeX, wireY: probeY - 4) ?? screen
             let origin = WireGeometry.followCaretOrigin(
                 wireX: p.x, wireY: p.y, size: size,
-                screenHeight: screen.frame.height, visibleFrame: caretScreen.visibleFrame)
+                screenHeight: screen.frame.height, visibleFrame: caretScreen.visibleFrame,
+                above: above, box: placeBox)
             self.setFrameOrigin(origin)
         }
         self.orderFrontRegardless()

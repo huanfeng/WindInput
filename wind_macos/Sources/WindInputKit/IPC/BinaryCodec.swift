@@ -356,22 +356,34 @@ public enum BinaryCodec {
         return StatePushPayload(flags: flags, iconLabel: label)
     }
 
-    /// 解 CmdHostRenderFrame payload (0x0502, push). 布局 24 字节 LE:
-    /// seq:u32 + x:i32 + y:i32 + w:u32 + h:u32 + flags:u32
+    /// 解 CmdHostRenderFrame payload (0x0502, push). 布局 LE:
+    /// seq:u32 + x:i32 + y:i32 + w:u32 + h:u32 + flags:u32 (24B) + scale:u32 (28B)
+    /// + contentX:i32 + contentY:i32 (36B) + aboveX aboveY boxX boxY boxW boxH:i32 (60B)。
+    /// 各段按长度取，缺的按旧语义 (scale=1、偏移 0、无上方点与框)。
     public static func decodeHostRenderFramePayload(_ buf: Data) throws -> HostRenderFramePayload {
         guard buf.count >= 24 else {
             throw IPCError.payloadTooShort(expected: 24, got: buf.count)
         }
-        // scale 是 28 字节版的扩展字段; 旧 24 字节帧默认 scale=1。
+        let i32 = { (o: Int) in Int32(bitPattern: buf.readUInt32LE(at: o)) }
         let scale = buf.count >= 28 ? buf.readUInt32LE(at: 24) : 1
+        let content = buf.count >= 36 ? (i32(28), i32(32)) : (0, 0)
+        var above: CGPoint?
+        var box: CGRect?
+        if buf.count >= 60 {
+            above = CGPoint(x: CGFloat(i32(36)), y: CGFloat(i32(40)))
+            box = CGRect(x: CGFloat(i32(44)), y: CGFloat(i32(48)),
+                         width: CGFloat(i32(52)), height: CGFloat(i32(56)))
+        }
         return HostRenderFramePayload(
             seq: buf.readUInt32LE(at: 0),
-            x: Int32(bitPattern: buf.readUInt32LE(at: 4)),
-            y: Int32(bitPattern: buf.readUInt32LE(at: 8)),
+            x: i32(4),
+            y: i32(8),
             width: buf.readUInt32LE(at: 12),
             height: buf.readUInt32LE(at: 16),
             flags: buf.readUInt32LE(at: 20),
-            scale: scale
+            scale: scale,
+            contentX: content.0, contentY: content.1,
+            above: above, placeBox: box
         )
     }
 
