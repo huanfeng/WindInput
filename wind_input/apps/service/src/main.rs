@@ -460,6 +460,7 @@ fn main() {
     // 主题预览缓存键带上构建标识：换一次构建旧图就不再命中。dirty 构建的短哈希不随改动变，
     // 再带上构建时刻。
     let git = env!("WIND_GIT_HASH");
+    wind_rpc::set_build_id(git);
     wind_webdata::set_preview_build_id(if git.ends_with("-dirty") {
         format!("{git}@{}", env!("WIND_BUILD_TIME"))
     } else {
