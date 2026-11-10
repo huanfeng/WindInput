@@ -158,6 +158,8 @@ pub struct DecorGeom {
     z: i32,
     hit: DecorHit,
     opacity: f32,
+    /// 镜像：各源合成到 `w×h` 后再翻；外接框与命中矩形不变。
+    flip: wind_theme::Flip,
     /// 动画：fps 覆盖与帧预算份额（各源同一份额）。
     fps: Option<f32>,
     budget: usize,
@@ -253,6 +255,7 @@ impl DecorGeom {
                 src.k,
                 self.fps,
                 self.budget,
+                self.flip,
                 frame,
                 self.opacity,
             );
@@ -267,6 +270,7 @@ impl DecorGeom {
                 src.k,
                 &whole,
                 &whole,
+                self.flip,
                 self.opacity,
             );
         }
@@ -581,6 +585,7 @@ impl SkinGeom {
             self.frame_k,
             &self.sx,
             &self.sy,
+            wind_theme::Flip::NONE,
             1.0,
         );
         paint_decor(buf, &|z| (0..Z_OVER_CONTENT).contains(&z));
@@ -665,6 +670,8 @@ pub struct SkinDecorRect {
     pub rect: Rect,
     pub z: i32,
     pub hit: DecorHit,
+    /// 镜像（只翻像素，`rect` 不变）。
+    pub flip: wind_theme::Flip,
     /// 此刻的片段：`states` 的名字、`on.<事件>`（一次性片段），None = 整个装饰文件。
     pub clip: Option<String>,
     /// 片段内第几帧。
@@ -770,6 +777,7 @@ impl SkinGeom {
                     rect: rect_of(r),
                     z: d.z,
                     hit: d.hit,
+                    flip: d.flip,
                     clip,
                     frame,
                     raw: d
@@ -857,11 +865,12 @@ impl SkinGeom {
                 .collect();
             let _ = writeln!(
                 out,
-                "  decor[{}] rect={rect:?} z={} hit={:?} opacity={:?} fps={:?} cur={:?} still={:?} 摘要 {:016x}\n    sources={}",
+                "  decor[{}] rect={rect:?} z={} hit={:?} opacity={:?} flip={} fps={:?} cur={:?} still={:?} 摘要 {:016x}\n    sources={}",
                 d.index,
                 d.z,
                 d.hit,
                 d.opacity,
+                d.flip.name().unwrap_or("-"),
                 d.fps,
                 d.cur,
                 d.still,
@@ -1217,7 +1226,7 @@ impl CandidateScene {
                     let sw = crate::view::image_src_size(path).map_or(sw, |(w, _)| w);
                     let k = w as f32 / sw.max(1) as f32;
                     let layout = decode
-                        .then(|| crate::view::anim_layout(path, k, w, h, d.fps, budget))
+                        .then(|| crate::view::anim_layout(path, k, w, h, d.fps, budget, d.flip))
                         .flatten();
                     (k, layout)
                 };
@@ -1304,6 +1313,7 @@ impl CandidateScene {
                     z: d.z,
                     hit: d.hit,
                     opacity: d.opacity,
+                    flip: d.flip,
                     fps: d.fps,
                     budget,
                     sources,
@@ -1582,6 +1592,7 @@ mod tests {
             z: 1,
             hit: DecorHit::Block,
             opacity: 1.0,
+            flip: wind_theme::Flip::NONE,
             fps: None,
             budget: 0,
             sources: vec![DecorSource {

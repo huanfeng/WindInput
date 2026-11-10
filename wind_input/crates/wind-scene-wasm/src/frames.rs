@@ -227,7 +227,16 @@ mod tests {
             let m = std::sync::Arc::new(m);
             wind_scene::assets::install(wind_scene::assets::next_generation(), &m);
             let key = wind_scene::assets::source_key(name).unwrap();
-            let layout = wind_scene::view::anim_layout(&key, 1.0, 8, 4, None, 1 << 30).unwrap();
+            let layout = wind_scene::view::anim_layout(
+                &key,
+                1.0,
+                8,
+                4,
+                None,
+                1 << 30,
+                wind_theme::Flip::NONE,
+            )
+            .unwrap();
             let ms: Vec<u32> = info.frames.iter().map(|f| f.ms).collect();
             assert_eq!(ms, layout.durations, "{name}");
             assert_eq!(info.frames.len(), layout.raw_frames, "{name}");

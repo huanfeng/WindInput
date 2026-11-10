@@ -78,6 +78,7 @@ type BandV3 = [number, number] | { from: number; to: number; fill?: Fill; extra?
 interface SkinDecorV3 {
   image: string; anchor?: string; pivot?: string; offset?: [number, number]; size?: [number, number];
   density?: number; z?: number; hit?: "drag" | "block" | "pass"; opacity?: number; fps?: number;
+  flip?: "x" | "y" | "xy";                                       // 只翻像素；SkinFrameV3 没有这个键
   states?: Record<string, ClipEntry>; on?: Record<string, ActionEntry>; extra?;
 }
 // ClipEntry / ActionEntry：能认出的解析成 { frames } | { image } / { state } | { play, then }；
@@ -400,7 +401,8 @@ Frame.skin?: {
   frame: Rect, content: Rect,                                   // 设备像素，与 rgba 同坐标
   axisX / axisY: [{ src: [a, b], dst: [a, b], kind: "fixed" | "stretch" | "tile" | "round" }],
   slots: [{ name, box: "frame" | "content", rect }],           // free 布局才有
-  decor: [{ index, srcIndex, rect, z, hit, clip: { state, frame, raw } }],  // index = 求值后（z 排序）下标，srcIndex = TOML 原始下标
+  decor: [{ index, srcIndex, rect, z, hit, flip, clip: { state, frame, raw } }],  // index = 求值后（z 排序）下标，srcIndex = TOML 原始下标
+                                                                // flip: "x" | "y" | "xy" | null（不翻）；rect 按源图算，翻不翻都一样
   caret: { below: [x, y], above: [x, y] },
 }
 Frame.warnings: string[]        // 本次调用期间 `skin:` 前缀的 WARN 原文

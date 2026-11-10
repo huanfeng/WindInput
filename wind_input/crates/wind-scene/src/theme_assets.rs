@@ -44,6 +44,7 @@ pub fn rv_image(theme: &Resolved, im: Option<&RvImage>, scale: f32) -> Option<Vi
         tint: im.tint,
         place: positioned(im).then(|| image_place(im, scale)),
         scale,
+        flip: im.flip,
     })
 }
 
@@ -60,6 +61,7 @@ pub fn rv_layers(theme: &Resolved, layers: &[RvImage], scale: f32) -> Vec<ViewLa
                 opacity: im.opacity,
                 // 口径同 rv_image：未配 / transparent 都落成 alpha=0 = 不染色。
                 tint: im.tint.unwrap_or([0, 0, 0, 0]),
+                flip: im.flip,
             })
         })
         .collect()
@@ -254,6 +256,20 @@ mod tests {
         // 与背景图同口径。
         let bg = rv_image(&theme, Some(&tinted), 1.0).unwrap();
         assert_eq!(bg.tint, Some(out[0].tint));
+    }
+
+    /// flip 透传到背景图与图层（同 tint：一环漏掉就是「配了不生效」）。
+    #[test]
+    fn rv_image_and_layers_carry_flip() {
+        let theme = Resolved::default();
+        let flip = wind_theme::Flip { x: true, y: false };
+        let im = RvImage {
+            reference: "mark.png".to_string(),
+            flip,
+            ..Default::default()
+        };
+        assert_eq!(rv_image(&theme, Some(&im), 1.0).unwrap().flip, flip);
+        assert_eq!(rv_layers(&theme, &[im], 1.0)[0].flip, flip);
     }
 
     /// 内存资源表：登记过的相对引用（字面 ref 与 resources 解析出的相对路径）改写成内存源串，

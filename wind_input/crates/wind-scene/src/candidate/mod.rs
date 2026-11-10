@@ -596,6 +596,7 @@ impl CandidateSceneInput<'_> {
             tint,
             place: None,
             scale: self.scale,
+            flip: im.flip,
         })
     }
 

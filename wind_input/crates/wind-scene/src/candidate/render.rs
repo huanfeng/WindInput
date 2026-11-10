@@ -349,6 +349,11 @@ mod tests {
     }
 
     fn render_with(theme: &wind_theme::Resolved) -> (CandidateFrame, bool) {
+        let (f, scene) = render_scene(theme);
+        (f, scene.skin_geom.is_some())
+    }
+
+    fn render_scene(theme: &wind_theme::Resolved) -> (CandidateFrame, CandidateScene) {
         let text = MockText::new("", 16.0).unwrap();
         let opts = CandidateSceneOptions::default();
         let cands = [cand("你好")];
@@ -381,7 +386,7 @@ mod tests {
         };
         let mut scene = CandidateScene::default();
         let f = render_candidate(&mut scene, &inp, clock, false);
-        (f, scene.skin_geom.is_some())
+        (f, scene)
     }
 
     #[test]
@@ -476,5 +481,93 @@ mod tests {
             f.to_rgba(),
             vec![30, 20, 10, 255, 32, 64, 128, 128, 0, 0, 0, 0]
         );
+    }
+
+    /// 装饰 flip 只翻像素：外接框、命中 / 穿透矩形与不翻时一致，框内像素左右互换；
+    /// `states` 引用的附加文件同样翻。
+    #[test]
+    fn decor_flip_mirrors_pixels_but_keeps_rects() {
+        let dir =
+            std::env::temp_dir().join(format!("wind_scene_decor_flip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = dir.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([200, 200, 200, 255]))
+            .save(t.join("frame.png"))
+            .unwrap();
+        // 非对称：首列一色、其余另一色。
+        let two = |a: [u8; 4], b: [u8; 4]| {
+            image::RgbaImage::from_fn(4, 4, |x, _| image::Rgba(if x == 0 { a } else { b }))
+        };
+        two([255, 0, 0, 255], [0, 0, 255, 255])
+            .save(t.join("dot.png"))
+            .unwrap();
+        two([0, 255, 0, 255], [255, 255, 255, 255])
+            .save(t.join("alt.png"))
+            .unwrap();
+        let load = |decor: &str| {
+            std::fs::write(
+                t.join("theme.toml"),
+                format!(
+                    "[meta]\nname = \"t\"\n[skin]\ndensity = 1\n\
+                     [skin.horizontal.frame]\nimage = \"frame.png\"\n\
+                     stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+                     [[skin.horizontal.decor]]\nimage = \"dot.png\"\nanchor = \"frame.top_left\"\n\
+                     pivot = \"bottom_right\"\nz = -1\nhit = \"pass\"\n{decor}\n"
+                ),
+            )
+            .unwrap();
+            wind_theme::load_resolved(&dir, "t", false).unwrap()
+        };
+        // 左上像素 RGB（BGRA 预乘，全不透明）。
+        let rgb = |f: &CandidateFrame, x: i32, y: i32| {
+            let i = ((y as u32 * f.width + x as u32) * 4) as usize;
+            [f.bgra[i + 2], f.bgra[i + 1], f.bgra[i]]
+        };
+        // 外接框、宿主区域、粗输入区、可点矩形、窗体框，逐字段对拍（Rect 没有 PartialEq）。
+        let rects = |s: &CandidateScene| {
+            let g = s.skin_geom.as_ref().expect("皮肤启用");
+            format!(
+                "{:?}",
+                (
+                    g.decor_rects_for_test(),
+                    g.host_decor(),
+                    g.coarse_input_rects(),
+                    g.click_rects(),
+                    g.frame_for_test(),
+                    g.no_drag_rects(),
+                )
+            )
+        };
+        for (extra, left, right) in [
+            ("", [255, 0, 0], [0, 0, 255]),
+            (
+                "states = { idle = { image = \"alt.png\" } }",
+                [0, 255, 0],
+                [255, 255, 255],
+            ),
+        ] {
+            let (plain, ps) = render_scene(&load(extra));
+            let ft = load(&format!("flip = \"x\"\n{extra}"));
+            let (flipped, fs) = render_scene(&ft);
+            assert_eq!(rects(&ps), rects(&fs), "{extra:?}：几何随 flip 变了");
+            assert_eq!((plain.width, plain.height), (flipped.width, flipped.height));
+            let (x, y, w, _) = ps.skin_geom.as_ref().unwrap().decor_rects_for_test()[0];
+            let last = x + w as i32 - 1;
+            assert_eq!(
+                (rgb(&plain, x, y), rgb(&plain, last, y)),
+                (left, right),
+                "{extra:?}"
+            );
+            assert_eq!(
+                (rgb(&flipped, x, y), rgb(&flipped, last, y)),
+                (right, left),
+                "{extra:?}"
+            );
+            let skin = ft.skin.as_deref().unwrap();
+            let snap = fs.skin_geom.as_ref().unwrap().snapshot(skin).unwrap();
+            assert_eq!(snap.decor[0].flip, wind_theme::Flip { x: true, y: false });
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -241,6 +241,8 @@ pub struct DecorInfo {
     pub z: i32,
     /// `drag` / `block` / `pass`。
     pub hit: &'static str,
+    /// 镜像：`x` / `y` / `xy`（同主题写法）；null = 不翻。只翻像素，`rect` 按源图算、与不翻时相同。
+    pub flip: Option<&'static str>,
     pub clip: ClipInfo,
 }
 
@@ -331,6 +333,7 @@ impl From<wind_scene::candidate::SkinSnapshot> for SkinInfo {
                         DecorHit::Block => "block",
                         DecorHit::Pass => "pass",
                     },
+                    flip: d.flip.name(),
                     clip: ClipInfo {
                         state: d.clip,
                         frame: d.frame,
@@ -1592,6 +1595,45 @@ mod tests {
         assert_eq!(got, [(0, 2, -3), (2, 1, 5)]);
         let json = serde_json::to_string(&s.decor[0]).unwrap();
         assert!(json.contains("\"srcIndex\":2"), "{json}");
+    }
+
+    /// 回执带装饰的 `flip`（不翻为 null），外接框与不翻时一致；窗体写 flip 报告警、照常出图。
+    #[test]
+    fn decor_receipt_carries_flip_and_frame_flip_warns() {
+        let (mut p, _) = preview();
+        let (toml, assets) = geom_theme(false, "");
+        assert!(p.set_theme(&toml, "", assets.clone()).unwrap().is_empty());
+        let plain = p.render(&RenderOpts::default()).unwrap().skin.unwrap();
+        assert_eq!(plain.decor[0].flip, None);
+        let json = serde_json::to_string(&plain.decor[0]).unwrap();
+        assert!(json.contains("\"flip\":null"), "{json}");
+        let flipped = toml.replace("hit = \"block\"\n", "hit = \"block\"\nflip = \"xy\"\n");
+        assert_ne!(flipped, toml);
+        assert!(
+            p.set_theme(&flipped, "", assets.clone())
+                .unwrap()
+                .is_empty()
+        );
+        let s = p.render(&RenderOpts::default()).unwrap().skin.unwrap();
+        assert_eq!(s.decor[0].flip, Some("xy"));
+        assert_eq!(s.decor[0].rect, plain.decor[0].rect, "只翻像素，外接框不变");
+        let json = serde_json::to_string(&s.decor[0]).unwrap();
+        assert!(json.contains("\"flip\":\"xy\""), "{json}");
+        // 非法值：告警、按不翻。
+        let bad = toml.replace("hit = \"block\"\n", "hit = \"block\"\nflip = \"left\"\n");
+        let w = p.set_theme(&bad, "", assets.clone()).unwrap();
+        assert!(w.iter().any(|w| w.contains("decor.flip")), "{w:?}");
+        let s = p.render(&RenderOpts::default()).unwrap().skin.unwrap();
+        assert_eq!(s.decor[0].flip, None);
+        // 窗体不开放 flip。
+        let frame = toml.replace(
+            "image = \"assets/frame.png\"\n",
+            "image = \"assets/frame.png\"\nflip = \"x\"\n",
+        );
+        assert_ne!(frame, toml);
+        let w = p.set_theme(&frame, "", assets).unwrap();
+        assert!(w.iter().any(|w| w.contains("frame 不支持 flip")), "{w:?}");
+        assert!(p.render(&RenderOpts::default()).unwrap().skin.is_some());
     }
 
     /// 选到 srcset 里的另一份源图：`frameSource` 报它，`axis*.src` 仍按 `frame.image` 的像素。

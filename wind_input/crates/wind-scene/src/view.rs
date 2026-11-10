@@ -123,12 +123,13 @@ pub fn paint_skin_image(
     k: f32,
     stretch_x: &wind_theme::skin::Stretch,
     stretch_y: &wind_theme::skin::Stretch,
+    flip: wind_theme::Flip,
     opacity: f32,
 ) {
     let (x, y, w, h) = rect;
     IMAGE_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
-        let Some(fill) = cache.skin_fill(path, k, stretch_x, stretch_y, w, h) else {
+        let Some(fill) = cache.skin_fill(path, k, stretch_x, stretch_y, w, h, flip) else {
             return;
         };
         draw_clipped(
@@ -161,8 +162,9 @@ pub fn anim_layout(
     h: u32,
     fps: Option<f32>,
     budget: usize,
+    flip: wind_theme::Flip,
 ) -> Option<crate::image_cache::AnimLayout> {
-    IMAGE_CACHE.with(|c| c.borrow_mut().anim_layout(path, k, w, h, fps, budget))
+    IMAGE_CACHE.with(|c| c.borrow_mut().anim_layout(path, k, w, h, fps, budget, flip))
 }
 
 /// 把动画装饰的第 `frame` 帧画到 `rect`（设备像素）。帧位图与 [`anim_layout`] 同键缓存。
@@ -176,13 +178,14 @@ pub fn paint_anim_frame(
     k: f32,
     fps: Option<f32>,
     budget: usize,
+    flip: wind_theme::Flip,
     frame: usize,
     opacity: f32,
 ) {
     let (x, y, w, h) = rect;
     IMAGE_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
-        let Some(pm) = cache.anim_frame(path, k, w, h, fps, budget, frame) else {
+        let Some(pm) = cache.anim_frame(path, k, w, h, fps, budget, flip, frame) else {
             return;
         };
         draw_clipped(
@@ -356,6 +359,8 @@ pub struct ViewImage {
     pub place: Option<ImagePlace>,
     /// DPI 缩放：SVG 的 center / tile 以「文档尺寸 × scale」为单元（位图按纹理像素，不用它）。
     pub scale: f32,
+    /// 镜像：按 mode 合成到目标尺寸后再翻；切片与定位按源图写、不翻。
+    pub flip: wind_theme::Flip,
 }
 
 /// 图片在 host 内的定位：九宫锚点 + 偏移 + 目标尺寸。背景图与覆盖图共用。
@@ -446,6 +451,8 @@ pub struct ViewLayer {
     /// 单色染色，语义同背景图 [`ViewImage::tint`]（alpha 蒙版）；`[0,0,0,0]`=原样。
     /// 图层不支持 disabled_tint。
     pub tint: [u8; 4],
+    /// 镜像，语义同背景图 [`ViewImage::flip`]。
+    pub flip: wind_theme::Flip,
 }
 
 /// 背景渐变（叠在底色之上、背景图之下，裁到圆角内）。
@@ -2008,6 +2015,7 @@ fn fill_spec_of(img: &ViewImage) -> crate::image_cache::FillSpec {
         ],
         repeat: img.slice_repeat,
         scale_milli: (img.scale * 1000.0).round().max(1.0) as u32,
+        flip: img.flip,
     }
 }
 
@@ -2023,7 +2031,10 @@ fn paint_layer(buf: &mut [u8], buf_w: u32, buf_h: u32, host: Rect, layer: &ViewL
         };
         let Some(fill) = cache.fill(
             &layer.path,
-            crate::image_cache::FillSpec::stretch(),
+            crate::image_cache::FillSpec {
+                flip: layer.flip,
+                ..crate::image_cache::FillSpec::stretch()
+            },
             lw as u32,
             lh as u32,
             layer.tint,
@@ -2700,6 +2711,7 @@ mod fill_spec_tests {
             tint: None,
             place: None,
             scale: 1.5,
+            flip: wind_theme::Flip { x: true, y: true },
         };
 
         let spec = fill_spec_of(&img);
@@ -2712,6 +2724,7 @@ mod fill_spec_tests {
         // 切片取整到源图纹理像素；负值夹到 0（主题写反了不该变成天文数字）。
         assert_eq!(spec.slice, [1, 3, 3, 0]);
         assert_eq!(spec.repeat, [true, false], "中段重复没传到光栅化");
+        assert_eq!(spec.flip, img.flip, "镜像没传到光栅化");
     }
 
     /// 不写 mode/repeat 的图 = 整体拉伸，与既有主题一致。
@@ -2726,6 +2739,7 @@ mod fill_spec_tests {
             tint: None,
             place: None,
             scale: 1.0,
+            flip: wind_theme::Flip::NONE,
         };
         assert_eq!(fill_spec_of(&img), crate::image_cache::FillSpec::stretch());
     }
@@ -3737,6 +3751,7 @@ mod paint_order_tests {
                 tint: None,
                 place: None,
                 scale: 1.0,
+                flip: wind_theme::Flip::NONE,
             });
         v.layout(0.0, 0.0, &tr);
         let (w, h) = (20usize, 20usize);
@@ -3802,6 +3817,7 @@ mod bg_place_tests {
             tint: None,
             place,
             scale: 1.0,
+            flip: wind_theme::Flip::NONE,
         }
     }
 
@@ -3966,6 +3982,7 @@ mod bg_place_tests {
             },
             tint: [0, 0, 0, 0],
             opacity: 1.0,
+            flip: wind_theme::Flip::NONE,
         });
         let buf = paint(root.fixed_w(60.0).fixed_h(40.0), 60.0, 40.0, 60, 40);
         assert_eq!(alpha(&buf, 60, 0, 0), 0, "前景层不得露出圆角外");
@@ -3989,6 +4006,7 @@ mod bg_place_tests {
             },
             tint: [0, 0, 0, 0],
             opacity: 1.0,
+            flip: wind_theme::Flip::NONE,
         });
         let buf = paint(root.fixed_w(60.0).fixed_h(40.0), 60.0, 40.0, 60, 40);
         assert_eq!(alpha(&buf, 60, 59, 39), 0, "底层图不得露出圆角外");
@@ -4237,6 +4255,7 @@ mod bg_place_tests {
                 place: p,
                 opacity: 1.0,
                 tint: [0, 0, 0, 0],
+                flip: wind_theme::Flip::NONE,
             }]),
             40.0,
             20.0,
@@ -4285,6 +4304,7 @@ mod bg_place_tests {
             place,
             opacity: 1.0,
             tint: [0, 0, 0, 0],
+            flip: wind_theme::Flip::NONE,
         }
     }
 
@@ -4404,6 +4424,45 @@ mod bg_place_tests {
         assert_eq!(rgb(&full, w, 27, 6), [0, 0, 255], "没有拉伸铺满");
         assert_eq!(alpha(&full, w, 0, 0), 0);
         assert!(full == placed, "铺满与等尺寸定位不一致");
+    }
+
+    /// flip 接到背景图（铺满 / 定位）与图层的绘制：左红右蓝翻成左蓝右红，摆放位置不变。
+    #[test]
+    fn flip_reaches_bg_image_and_layer_paint() {
+        let x = wind_theme::Flip { x: true, y: false };
+        let (w, h) = (30usize, 12usize);
+        let flipped = |place: Option<ImagePlace>| ViewImage {
+            flip: x,
+            ..image(two_tone_uri(), place)
+        };
+        let full = paint(node().bg_image(flipped(None)), w as f32, h as f32, w, h);
+        assert_eq!(rgb(&full, w, 2, 6), [0, 0, 255], "铺满背景图没翻");
+        assert_eq!(rgb(&full, w, 27, 6), [255, 0, 0]);
+        let p = ImagePlace {
+            w: 10.0,
+            h: 4.0,
+            off_x: 5.0,
+            ..place("top-left")
+        };
+        let placed = paint(
+            node().bg_image(flipped(Some(p.clone()))),
+            w as f32,
+            h as f32,
+            w,
+            h,
+        );
+        assert_eq!(rgb(&placed, w, 5, 1), [0, 0, 255], "定位背景图没翻");
+        assert_eq!(rgb(&placed, w, 14, 1), [255, 0, 0]);
+        assert_eq!(rgb(&placed, w, 4, 1), WHITE, "只翻像素，摆放位置不动");
+        assert_eq!(rgb(&placed, w, 15, 1), WHITE);
+        let lay = ViewLayer {
+            flip: x,
+            ..layer(two_tone_uri(), 1, p)
+        };
+        let buf = paint(node().layers(vec![lay]), w as f32, h as f32, w, h);
+        assert_eq!(rgb(&buf, w, 5, 1), [0, 0, 255], "图层没翻");
+        assert_eq!(rgb(&buf, w, 14, 1), [255, 0, 0]);
+        assert_eq!(rgb(&buf, w, 4, 1), WHITE);
     }
 }
 
