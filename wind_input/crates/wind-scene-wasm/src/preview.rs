@@ -1597,6 +1597,43 @@ mod tests {
         assert!(json.contains("\"srcIndex\":2"), "{json}");
     }
 
+    /// 装饰（本身或片段引用的附加源）是 SVG：告警、不画，回执里也没有这块装饰。
+    #[test]
+    fn svg_decor_warns_instead_of_silently_vanishing() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#f00"/></svg>"##.to_vec();
+        let (toml, mut assets) = geom_theme(false, "");
+        assets.push(("assets/dot.svg".into(), svg));
+        let (mut p, _) = preview();
+        let main = toml.replace("assets/dot.png", "assets/dot.svg");
+        assert_ne!(main, toml);
+        p.set_theme(&main, "", assets.clone()).unwrap();
+        let f = p.render(&RenderOpts::default()).unwrap();
+        assert!(
+            f.warnings
+                .iter()
+                .any(|w| w == "skin: decor 不支持 SVG（assets/dot.svg），不画"),
+            "{:?}",
+            f.warnings
+        );
+        assert!(f.skin.unwrap().decor.is_empty(), "SVG 装饰不该出现在回执里");
+        // 附加源是 SVG：装饰本身照画，片段不可用。
+        let extra = toml.replace(
+            "hit = \"block\"\n",
+            "hit = \"block\"\nstates = { idle = { image = \"assets/dot.svg\" } }\n",
+        );
+        assert_ne!(extra, toml);
+        p.set_theme(&extra, "", assets).unwrap();
+        let f = p.render(&RenderOpts::default()).unwrap();
+        assert!(
+            f.warnings
+                .iter()
+                .any(|w| w == "skin: decor 不支持 SVG（assets/dot.svg），不画"),
+            "{:?}",
+            f.warnings
+        );
+        assert_eq!(f.skin.unwrap().decor.len(), 1, "主图是位图，装饰照画");
+    }
+
     /// 回执带装饰的 `flip`（不翻为 null），外接框与不翻时一致；窗体写 flip 报告警、照常出图。
     #[test]
     fn decor_receipt_carries_flip_and_frame_flip_warns() {

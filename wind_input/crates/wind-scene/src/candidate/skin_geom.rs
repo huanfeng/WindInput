@@ -1166,6 +1166,17 @@ impl CandidateScene {
             .enumerate()
             .filter_map(|(i, d)| {
                 let main = crate::theme_assets::asset_path(inp.theme, &d.image)?;
+                // 装饰走位图图集（`skin_fill` 对 SVG 不出图）：明说，别静默不画。同窗体。
+                let svg = |path: &str, name: &str| {
+                    let is = crate::image_cache::is_svg_source(path);
+                    if is {
+                        self.warn_skin_once(format!("skin: decor 不支持 SVG（{name}），不画"));
+                    }
+                    is
+                };
+                if svg(&main, &d.image) {
+                    return None;
+                }
                 let mut names: Vec<&str> = Vec::new();
                 let clips =
                     d.anim
@@ -1185,7 +1196,10 @@ impl CandidateScene {
                 }
                 let extra: Vec<(&str, Option<String>)> = names
                     .into_iter()
-                    .map(|n| (n, crate::theme_assets::asset_path(inp.theme, n)))
+                    .map(|n| {
+                        let p = crate::theme_assets::asset_path(inp.theme, n);
+                        (n, p.filter(|p| !svg(p, n)))
+                    })
                     .collect();
                 // 关着动画也要解帧的唯一情形：初始状态从装饰文件的非 0 帧起。
                 let still_needs_frames = d.anim.initial.is_some_and(
