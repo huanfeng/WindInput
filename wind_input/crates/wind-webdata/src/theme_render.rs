@@ -119,6 +119,8 @@ struct Prepared {
     /// 主题在临时目录里（包 / 文本）：指纹取内容；否则取文件元数据。
     staged: bool,
     is_dark: bool,
+    /// 画哪个窗（`kind` 参数；缺省 = 候选窗，与不带 kind 的旧请求一致）。
+    kind: wind_ui_types::PreviewKind,
     vertical: bool,
     scale: f32,
     inline: bool,
@@ -280,6 +282,7 @@ fn render_batch_with<H: WebDataRpc + ?Sized>(
             theme,
             p.vertical,
             p.scale,
+            p.kind,
             p.draft.as_ref(),
             Arc::clone(&cancel),
         );
@@ -393,10 +396,20 @@ fn prepare<H: WebDataRpc + ?Sized>(
         Some("system") => wind_coordinator::theme_style::system_prefers_dark(),
         Some(o) => anyhow::bail!("style 只能是 light / dark / system（收到 {o}）"),
     };
+    let kind = match s("kind") {
+        None => wind_ui_types::PreviewKind::default(),
+        Some(k) => wind_ui_types::PreviewKind::parse(k)
+            .ok_or_else(|| anyhow::anyhow!("kind 只能是 candidate / toolbar（收到 {k}）"))?,
+    };
+    // 缺省朝向按形态取各自的当前配置：候选窗看候选排列、工具栏看 `ui.toolbar.vertical`；
+    // 草稿给了看草稿（`ui.candidate.layout` / `ui.toolbar.vertical` 同理）。
     let vertical = match s("layout") {
-        None => draft
-            .as_ref()
-            .map_or_else(|| h.candidate_preview_vertical(), |d| d.vertical),
+        None => match (draft.as_ref(), kind) {
+            (Some(d), wind_ui_types::PreviewKind::Toolbar) => d.toolbar_vertical,
+            (Some(d), _) => d.vertical,
+            (None, wind_ui_types::PreviewKind::Toolbar) => h.toolbar_preview_vertical(),
+            (None, _) => h.candidate_preview_vertical(),
+        },
         Some("horizontal") => false,
         Some("vertical") => true,
         Some(o) => anyhow::bail!("layout 只能是 horizontal / vertical（收到 {o}）"),
@@ -445,6 +458,7 @@ fn prepare<H: WebDataRpc + ?Sized>(
         slug,
         staged: staging.is_some(),
         is_dark,
+        kind,
         vertical,
         scale,
         inline,
@@ -510,6 +524,11 @@ fn cache_key(
     h.write_u8(0xff);
     h.write(fingerprint.as_bytes());
     h.write_u8(0xff);
+    // 形态进键：同一主题、同一参数下候选窗与工具栏是两张不同的图，缓存文件不能互顶。
+    h.write_u8(match p.kind {
+        wind_ui_types::PreviewKind::Candidate => 0,
+        wind_ui_types::PreviewKind::Toolbar => 1,
+    });
     h.write_u8(p.is_dark as u8);
     h.write_u8(p.vertical as u8);
     h.write_u32(p.scale.to_bits());
@@ -862,6 +881,7 @@ mod tests {
             slug: slug.into(),
             staged,
             is_dark: false,
+            kind: wind_ui_types::PreviewKind::Candidate,
             vertical: false,
             scale: 1.0,
             inline: false,
@@ -1172,6 +1192,74 @@ mod tests {
         assert!(png_complete(&std::fs::read(&path).unwrap()));
         assert_eq!(remove_theme_previews(&cache, "default"), 3);
         let _ = std::fs::remove_dir_all(cache);
+    }
+
+    /// `kind` 参数：缺省 = 候选窗（不带 kind 的旧请求行为不变）、非法值报错不出图、
+    /// `toolbar` 进请求结构；缺省朝向按形态取各自的当前配置（工具栏看 `ui.toolbar.vertical`），
+    /// `layout` 参数对两种形态都仍然生效。
+    #[test]
+    fn kind_param_defaults_validates_and_rides_request() {
+        let _g = serial();
+        let (c, _seen, held) = coord_with_fake_ui(true);
+        let cache = tmp("kind");
+        use wind_coordinator::web_host::WebDataHost;
+        // inline=true：一律进 UI 线程，不落盘，防串台。
+        let one = |item: Value| {
+            let mut it = item;
+            it["inline"] = json!(true);
+            render_batch(c.as_ref(), &[it], Some(&cache)).pop().unwrap()
+        };
+
+        let bad = one(json!({ "name": "default", "kind": "bar" }));
+        assert!(!ok(&bad), "{bad:?}");
+        assert!(
+            bad["error"].as_str().unwrap().starts_with("kind 只能是"),
+            "{bad:?}"
+        );
+        assert!(
+            held.lock().unwrap().is_empty(),
+            "坏 kind 在 prepare 阶段就拒，不出图"
+        );
+
+        let out = one(json!({ "name": "default" }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            req.kind,
+            wind_ui_types::PreviewKind::Candidate,
+            "缺省 = 候选窗"
+        );
+
+        let out = one(json!({ "name": "default", "kind": "toolbar" }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.kind, wind_ui_types::PreviewKind::Toolbar);
+        assert_eq!(
+            req.vertical,
+            c.toolbar_preview_vertical(),
+            "缺省朝向取 ui.toolbar.vertical"
+        );
+
+        let out = one(json!({
+            "name": "default",
+            "kind": "toolbar",
+            "layout": "vertical"
+        }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert!(req.vertical, "layout 参数仍然生效");
+        let _ = std::fs::remove_dir_all(cache);
+    }
+
+    /// 缓存键含形态：同一主题同一参数下，候选窗与工具栏的键不同，缓存文件不互顶。
+    #[test]
+    fn cache_key_differs_between_kinds() {
+        let root = tmp("kindkey");
+        two_themes(&root);
+        let mut p = prepared(vec![root], "child", false);
+        let k0 = key(1, "b", "fp", &p);
+        p.kind = wind_ui_types::PreviewKind::Toolbar;
+        assert_ne!(k0, key(1, "b", "fp", &p), "形态要进缓存键");
     }
 
     /// 带草稿 `ui` 的请求：草稿外观随请求到 UI 线程，结果内联、不落盘；坏参数报错。

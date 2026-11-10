@@ -8,7 +8,9 @@ use std::collections::VecDeque;
 
 use super::CandidateWindow;
 use super::scene::{self, AnimClock, CandidateSceneInput};
-use wind_ui_types::{CandidatePreviewImage, CandidatePreviewRequest, PreviewAppearance};
+use wind_ui_types::{
+    CandidatePreviewImage, CandidatePreviewRequest, PreviewAppearance, PreviewKind,
+};
 
 /// 渲染器的全局字体状态（草稿字体临时换上前的旧值）。
 #[derive(PartialEq)]
@@ -74,10 +76,15 @@ impl CandidateWindow {
         }
         // 草稿外观：字体先换到渲染器上（全局字族 / 默认字重 / 字体方案是渲染器状态，不在主题里），
         // 画完换回；其余覆盖只进本帧的输入，不碰窗口状态。
-        let swapped = req
-            .appearance
-            .as_ref()
-            .and_then(|a| self.swap_preview_font(a));
+        // 工具栏预览不走字体替换：实时工具栏用固定字族字号（[`crate::toolbar::FONT_FAMILY`]），
+        // 不随用户字体配置变，预览也不该变。
+        let swapped = (req.kind == PreviewKind::Candidate)
+            .then(|| {
+                req.appearance
+                    .as_ref()
+                    .and_then(|a| self.swap_preview_font(a))
+            })
+            .flatten();
         let out = self.render_preview_frame(req);
         if let Some(live) = swapped {
             self.text_renderer.set_font_family(&live.family);
@@ -142,6 +149,9 @@ impl CandidateWindow {
         &mut self,
         req: &CandidatePreviewRequest,
     ) -> Result<CandidatePreviewImage, String> {
+        if req.kind == PreviewKind::Toolbar {
+            return self.render_toolbar_preview(req);
+        }
         let a = req.appearance.as_ref();
         let o = scene::ThemeOverrides {
             vertical: req.vertical,
@@ -220,6 +230,66 @@ impl CandidateWindow {
             png,
         })
     }
+
+    /// 工具栏预览（`kind = toolbar`）：配色 / 几何 / 绘制全部走实时工具栏（[`crate::toolbar`]）
+    /// 的同一套折算与画笔——`ToolbarSkin` / `ToolbarDims` / `toolbar_frame` / `paint_toolbar`
+    /// 均为窗口路径共用，预览不抄第二份。
+    ///
+    /// 与实时工具栏同源的还有两处：格子展开 [`crate::toolbar::expand_cells`]（含空布局回落）
+    /// 与固定字族字号 [`crate::toolbar::FONT_FAMILY`] / [`crate::toolbar::Toolbar::FONT_PX`]
+    /// （工具栏不随用户字体配置变）。状态取请求里的 `toolbar_state`，没带就是
+    /// [`wind_ui_types::preview_toolbar_state`] 的固定样本——预览不跟真机状态走。
+    fn render_toolbar_preview(
+        &mut self,
+        req: &CandidatePreviewRequest,
+    ) -> Result<CandidatePreviewImage, String> {
+        let state = req
+            .toolbar_state
+            .clone()
+            .unwrap_or_else(wind_ui_types::preview_toolbar_state);
+        let cells = crate::toolbar::expand_cells(&req.toolbar_items, &state);
+        let skin = crate::toolbar::ToolbarSkin::from_theme(&req.theme);
+        let dims = crate::toolbar::ToolbarDims::from_theme(&req.theme);
+        let frame = crate::toolbar::toolbar_frame(&dims, req.scale, req.vertical, cells.len());
+        let mut buf = vec![0u8; frame.w as usize * frame.h as usize * 4];
+        let renderer = crate::text::dwrite::TextRenderer::new(
+            crate::toolbar::FONT_FAMILY,
+            crate::toolbar::Toolbar::FONT_PX * req.scale,
+        )?;
+        // 预防性隔离：toolbar 绘制目前走的路径不进图片/绘制缓存，包上这层是给
+        // 将来加缓存上保险——现在没有实际隔离收益，别把它当成已生效的防线。
+        crate::view::with_isolated_paint_caches(|| {
+            crate::toolbar::paint_toolbar(
+                &mut buf,
+                frame.w,
+                frame.h,
+                &frame,
+                &cells,
+                req.vertical,
+                -1, // 预览没有鼠标，无悬停格
+                &skin,
+                &state,
+                &renderer,
+            );
+        });
+        // 出图前换格式：绘制缓冲是预乘 BGRA（窗口/预览同一套 paint_toolbar），直接当
+        // RGBA 编码 PNG 会把 R/B 交换、把预乘值当直通值——半透明像素被系统性压暗偏色，
+        // 真机反馈的「预览色差」正是这个。转换与候选窗预览的 [`CandidateFrame::to_rgba`]
+        // 共用一份（格式转换不抄第二处）。
+        let rgba = wind_scene::candidate::premultiplied_bgra_to_rgba(buf);
+        let mut png = Vec::new();
+        {
+            use image::ImageEncoder;
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&rgba, frame.w, frame.h, image::ExtendedColorType::Rgba8)
+                .map_err(|e| format!("预览图编码失败：{e}"))?;
+        }
+        Ok(CandidatePreviewImage {
+            width: frame.w,
+            height: frame.h,
+            png,
+        })
+    }
 }
 
 #[cfg(all(test, mock_text))]
@@ -250,10 +320,13 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let req = CandidatePreviewRequest {
             theme,
+            kind: PreviewKind::Candidate,
             preedit: "nihao".into(),
             candidates: vec![cand("你好", ""), cand("拟好", ""), cand("你", "wqiy")],
             vertical,
             scale,
+            toolbar_items: Vec::new(),
+            toolbar_state: None,
             appearance: None,
             reply: tx,
             cancel: Default::default(),
@@ -426,5 +499,118 @@ mod tests {
         let mut w = new_window();
         let (req, _rx) = request(wind_theme::Resolved::default(), false, 0.0);
         assert!(w.render_preview(&req).is_err());
+    }
+
+    fn toolbar_request(theme: wind_theme::Resolved, vertical: bool) -> CandidatePreviewRequest {
+        let (mut req, _rx) = request(theme, vertical, 1.0);
+        req.kind = PreviewKind::Toolbar;
+        req
+    }
+
+    /// 工具栏预览按实时工具栏的形状出图：横条是宽条、纵条是高条，画面非空；
+    /// 空 items 走 expand_cells 的全集回落，不至于画出一条空带。
+    #[test]
+    fn toolbar_preview_has_bar_shape_and_content() {
+        let dirs = vec![themes_dir()];
+        let theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        let mut w = new_window();
+        let img = w
+            .render_preview(&toolbar_request(theme.clone(), false))
+            .unwrap();
+        assert!(
+            img.width > img.height,
+            "横条应是宽条：{}x{}",
+            img.width,
+            img.height
+        );
+        let d = decode(&img);
+        assert_eq!((d.width(), d.height()), (img.width, img.height));
+        assert!(d.pixels().any(|p| p.0[3] > 0), "画面应有内容");
+
+        let v = w.render_preview(&toolbar_request(theme, true)).unwrap();
+        assert!(v.height > v.width, "纵条应是高条：{}x{}", v.width, v.height);
+    }
+
+    /// 工具栏预览不随草稿字体变（实时工具栏用固定字族字号，不随用户字体配置走），
+    /// 且与候选窗预览是两种不同的画面。
+    #[test]
+    fn toolbar_preview_ignores_draft_font_and_differs_from_candidate() {
+        let dirs = vec![themes_dir()];
+        let theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        let mut w = new_window();
+        let base = w
+            .render_preview(&toolbar_request(theme.clone(), false))
+            .unwrap();
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.kind = PreviewKind::Toolbar;
+        req.appearance = Some(appearance(40.0, "Draft Sans"));
+        let big = w.render_preview(&req).unwrap();
+        assert_eq!(
+            (big.width, big.height),
+            (base.width, base.height),
+            "草稿字体不进工具栏预览"
+        );
+
+        let (cand_req, _rx) = request(theme, false, 1.0);
+        let cand = w.render_preview(&cand_req).unwrap();
+        assert_ne!(
+            decode(&base).into_raw(),
+            decode(&cand).into_raw(),
+            "工具栏与候选窗预览应是两种画面"
+        );
+    }
+
+    /// 工具栏预览 PNG 是直通 RGBA：高亮格底色 = 主题 accent 叠底色的合成原色（R/B 不换、
+    /// alpha 直通）。
+    /// 绘制缓冲是预乘 BGRA（窗口/预览同一套 paint_toolbar），直接当 RGBA 编码会 R/B 交换、
+    /// 把预乘值当直通值——设置端按 PNG 直通语义合成后偏暗偏色，真机反馈的「预览色差」
+    /// 正是这个（候选窗预览有 to_rgba 转换，工具栏此前漏了）。alpha<255 的反预乘另见
+    /// [`toolbar_preview_unpremultiplies_semitransparent_bg`]。
+    #[test]
+    fn toolbar_preview_png_is_straight_rgba() {
+        let dirs = vec![themes_dir()];
+        let theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        let mut w = new_window();
+        let img = w.render_preview(&toolbar_request(theme, false)).unwrap();
+        let d = decode(&img);
+        // 高亮格（样本态中文开，Mode 格）。高亮块内缩 inset=4 后为 x 14..40、y 4..26，
+        // 取 (20,5)——圆角弧内、避开居中文字。
+        // default 主题（继承 _qingfeng）皮肤实测：bg=[255,255,255,247]（半透明白底）、
+        // hl_bg=[59,130,246,26]（10% 淡蓝高亮）。高亮格期望 = accent@10% 叠底色后反预乘
+        // 的合成原色 ≈ [235,242,254,247]；旧路径（预乘字节当直通写出）给 [228,234,247,247]，
+        // 各通道暗 6-7。容差 ±2 同时钉「未压暗」与「R/B 未交换」（交换后 R=254 偏差超 18）。
+        let got = d.get_pixel(20, 5).0;
+        let want = [235, 242, 254, 247];
+        for ch in 0..4 {
+            let dv = (got[ch] as i32 - want[ch]).abs();
+            assert!(
+                dv <= 2,
+                "高亮格底色应为主题 accent@10% 合成原色（R/B 未交换、未预乘压暗）：got {got:?} want {want:?}（通道 {ch} 偏差 {dv}）"
+            );
+        }
+        // 常态格底（Punct 格左上角，图标 bbox 外）：半透明白底 α=247 直通写出（白色上
+        // R/B 与反预乘都不可辨——247 反预乘恰好整除得 255——此点只钉 alpha 不被涂改）。
+        assert_eq!(
+            d.get_pixel(46, 5).0,
+            [255, 255, 255, 247],
+            "常态格底应为主题 bg 直通原色（α=247）"
+        );
+    }
+
+    /// 半透明底色的反预乘：预乘值（255×128/255=128）当直通值写出会压暗一半；
+    /// 正确转换应还原出原色 [255,255,255,128]。
+    #[test]
+    fn toolbar_preview_unpremultiplies_semitransparent_bg() {
+        let dirs = vec![themes_dir()];
+        let mut theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        theme.views.toolbar_bg_color = Some([255, 255, 255, 128]);
+        let mut w = new_window();
+        let img = w.render_preview(&toolbar_request(theme, false)).unwrap();
+        let d = decode(&img);
+        assert_eq!(
+            d.get_pixel(46, 5).0,
+            [255, 255, 255, 128],
+            "半透明底色应按原 alpha 直通写出，不被预乘压暗"
+        );
     }
 }

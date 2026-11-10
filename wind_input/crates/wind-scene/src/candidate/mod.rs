@@ -11,7 +11,9 @@ mod skin_geom;
 mod theme;
 
 pub use host_regions::{HostDecor, MAX_INPUT_RECTS, composite_over, composite_under, opaque_rects};
-pub use render::{CandidateFrame, render_candidate, render_candidate_within};
+pub use render::{
+    CandidateFrame, premultiplied_bgra_to_rgba, render_candidate, render_candidate_within,
+};
 
 pub use skin_geom::{
     AnimClock, AvoidMask, DecorGeom, PlaceAnchor, SkinAxisSeg, SkinDecorRect, SkinGeom,

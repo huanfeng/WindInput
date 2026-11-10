@@ -1,8 +1,9 @@
-//! 设置端主题预览：协调器请渲染端按当前外观画一帧示例候选窗（[`UiCommand::RenderCandidatePreview`]）。
+//! 设置端主题预览：协调器请渲染端按当前外观画一帧（[`UiCommand::RenderCandidatePreview`]），
+//! 默认是候选窗（[`PreviewKind::Candidate`]），也可画悬浮工具栏（[`PreviewKind::Toolbar`]）。
 //!
 //! [`UiCommand::RenderCandidatePreview`]: crate::UiCommand::RenderCandidatePreview
 
-use crate::CandidateItem;
+use crate::{CandidateItem, ToolbarItem, ToolbarState};
 
 /// 预览渲染器版本：示例内容、排版或绘制（wind-scene / wind-ui 的候选窗管线）有改动、会让同一份
 /// 输入画出不同像素时递增。它进预览缓存键，旧图随之失效。
@@ -63,15 +64,79 @@ pub fn theme_index_label(theme_labels: &[String], i: usize) -> String {
     (i + 1).to_string()
 }
 
+/// `kind = Toolbar` 的固定样本状态（与 [`PREVIEW_CANDIDATES`] 同一条约定：样本值写死，
+/// 改动即旧图失效）。中文模式、标签「中」、无大写锁定、标点/全角默认、简繁关、软键盘关、
+/// 输入不被阻——工具栏预览不应跟着真机状态变，格式随 `ui.toolbar` 走。
+///
+/// 不直接用 [`ToolbarState::default`]：默认值今天恰好等于样本，但那不是它的语义
+/// （default 描述「协调器还没推送前的初值」），样本要求的是「永不随时间变」。
+pub fn preview_toolbar_state() -> ToolbarState {
+    ToolbarState {
+        chinese_mode: true,
+        icon_label: "中".to_string(),
+        caps_lock: false,
+        full_width: false,
+        chinese_punct: true,
+        s2t_enabled: false,
+        t2s_enabled: false,
+        s2t_shown: false,
+        soft_keyboard_on: false,
+        input_blocked: false,
+    }
+}
+
+/// 预览画什么：候选窗（默认）或悬浮工具栏。
+///
+/// 不派生 serde：本 crate 零 serde（见 crate 文档），线上的取值口径是
+/// [`PreviewKind::parse`] / [`PreviewKind::as_str`]，RPC 层（wind-webdata）按它校验字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewKind {
+    /// 示例候选窗（现状）。
+    #[default]
+    Candidate,
+    /// 悬浮工具栏（`ui.toolbar` 画的那样：中英 / 标点 / 全半角 / 简繁 / 软键盘 / 设置格）。
+    Toolbar,
+}
+
+impl PreviewKind {
+    /// 条目字符串协议：`theme.renderPreview` 的 `kind` 参数按这一份判决。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "candidate" => Some(Self::Candidate),
+            "toolbar" => Some(Self::Toolbar),
+            _ => None,
+        }
+    }
+
+    /// [`Self::parse`] 的逆（文档 / 调试用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Toolbar => "toolbar",
+        }
+    }
+}
+
 /// 一次预览请求。主题是**原始**主题（未叠外观覆盖），字体、字号、阴影开关等覆盖由渲染端按
 /// 当前状态叠加，与实时候选窗同一处合并。
 #[derive(Debug)]
 pub struct CandidatePreviewRequest {
     pub theme: wind_theme::Resolved,
+    /// 画哪个窗（缺省即候选窗：不带 kind 的旧请求等价 `Candidate`）。
+    pub kind: PreviewKind,
     pub preedit: String,
     pub candidates: Vec<CandidateItem>,
-    /// 竖排（不旋转、不直立）。
+    /// 竖排（不旋转、不直立）。`kind = Toolbar` 时语义为工具栏纵向排列
+    /// （`ui.toolbar.vertical`）。
     pub vertical: bool,
+    /// `kind = Toolbar` 时工具栏的渲染项（顺序即绘制顺序，协调器
+    /// `parse_toolbar_items` 的产物；候选格等状态由 [`preview_toolbar_state`] 的样本表达）。
+    /// `kind = Candidate` 时忽略。
+    pub toolbar_items: Vec<ToolbarItem>,
+    /// `kind = Toolbar` 时工具栏的状态（缺省 = [`preview_toolbar_state`] 的固定样本）。
+    /// `kind = Candidate` 时忽略。
+    pub toolbar_state: Option<ToolbarState>,
+
     /// DPI 缩放。
     pub scale: f32,
     /// 设置端草稿外观；`None` = 用渲染端窗口当前的外观状态（与实时候选窗一致）。
@@ -129,6 +194,27 @@ pub struct CandidatePreviewImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// kind 的取值口径：`parse` / `as_str` 互逆，缺省是候选窗（与不带 kind 的旧请求一致）。
+    #[test]
+    fn preview_kind_values_are_round_trippable_and_default_to_candidate() {
+        assert_eq!(PreviewKind::default(), PreviewKind::Candidate);
+        for k in [PreviewKind::Candidate, PreviewKind::Toolbar] {
+            assert_eq!(PreviewKind::parse(k.as_str()), Some(k), "{}", k.as_str());
+        }
+        assert_eq!(
+            PreviewKind::parse("candidate"),
+            Some(PreviewKind::Candidate)
+        );
+        assert_eq!(PreviewKind::parse("toolbar"), Some(PreviewKind::Toolbar));
+        assert_eq!(
+            PreviewKind::parse("Candidate"),
+            None,
+            "大小写敏感，拼错必须报错而不是静默画候选窗"
+        );
+        assert_eq!(PreviewKind::parse(""), None);
+        assert_eq!(PreviewKind::parse("cand"), None);
+    }
 
     #[test]
     fn sample_clamps_count_and_labels_fall_back_to_digits() {

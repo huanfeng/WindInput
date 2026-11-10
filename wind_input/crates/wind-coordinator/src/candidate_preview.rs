@@ -6,7 +6,10 @@
 
 use std::sync::mpsc;
 
-use wind_ui_types::{CandidatePreviewImage, CandidatePreviewRequest, PreviewAppearance, UiCommand};
+use wind_ui_types::{
+    CandidatePreviewImage, CandidatePreviewRequest, PreviewAppearance, PreviewKind, ToolbarItem,
+    UiCommand,
+};
 
 use crate::Coordinator;
 
@@ -22,17 +25,19 @@ impl Coordinator {
         wind_config::Orientation::from_layout_str(&self.eff_candidate().layout).vertical
     }
 
-    /// 影响预览像素的外观配置指纹：候选窗配置（含方案级覆盖）、字体配置、方案级候选字体。
-    /// 有意放宽（候选窗配置整段都算），宁可多重画也不留旧图。
+    /// 影响预览像素的外观配置指纹：候选窗配置（含方案级覆盖）、字体配置、方案级候选字体
+    /// 与工具栏段（`ui.toolbar`，供 `kind = toolbar` 预览的磁盘缓存键——items 在协调器侧
+    /// 才解析成渲染项，指纹取原配置整段）。有意放宽（整段都算），宁可多重画也不留旧图。
     pub fn candidate_preview_fingerprint(&self) -> String {
         let cand = self.eff_candidate();
         let font = &self.rt().config.ui.font;
+        let tb = &self.rt().config.ui.toolbar;
         let scheme_font = self
             .candidate_font_sent
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        format!("{:?}\n{:?}\n{:?}", *cand, font, scheme_font)
+        format!("{:?}\n{:?}\n{:?}\n{:?}", *cand, font, scheme_font, tb)
     }
 
     /// 设置端草稿（`theme.renderPreview` 的 `ui` 参数，草稿配置的 `ui` 子树）叠到当前生效配置上，
@@ -91,6 +96,13 @@ impl Coordinator {
             theme_style: cfg.ui.theme.style.clone(),
             candidate,
             appearance,
+            toolbar_vertical: cfg.ui.toolbar.vertical,
+            // 草案里没有 `ui.toolbar` 段的键时，这些就是当前生效值：draft 树以当前配置打底，
+            // 叠层只整值替换登记过的键，天然带出「改了什么、没改什么」。
+            toolbar_items: crate::coordinator::parse_toolbar_items(
+                &cfg.ui.toolbar.items,
+                &cfg.ui.toolbar.buttons,
+            ),
         })
     }
 
@@ -107,14 +119,23 @@ impl Coordinator {
         }
     }
 
+    /// 工具栏预览的缺省格子（`kind = toolbar` 且 `draft` 没带发布会上时的格子来源）：
+    /// 当前生效配置的 `ui.toolbar`，与实机 `apply_ui_config` 下发的同一份解析。
+    fn toolbar_items_effective(&self) -> Vec<ToolbarItem> {
+        let tb = &self.rt().config.ui.toolbar;
+        crate::coordinator::parse_toolbar_items(&tb.items, &tb.buttons)
+    }
+
     /// 投递一次预览请求，返回回执。`theme` 是原始主题（外观覆盖由渲染端叠加）；`draft` 给了就按
-    /// 草稿出图（候选数、序号、注释开关取草稿，外观整组替代渲染端当前状态）。
+    /// 草稿出图（候选数、序号、注释开关取草稿，外观整组替代渲染端当前状态）；
+    /// `kind = Toolbar` 时画的是工具栏（格子取草稿的 `ui.toolbar.items`，没带草稿取当前生效配置）。
     /// 不再等结果时把 `cancel` 置位，渲染端排到它时就直接丢掉。
     pub fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        kind: PreviewKind,
         draft: Option<&PreviewDraft>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PreviewReply {
@@ -131,13 +152,24 @@ impl Coordinator {
                 c.comment = Default::default();
             }
         }
+        // 工具栏预览复用候选样本填充 candidates（渲染端在 toolbar 分支不消费它们），
+        // 让请求结构不用拆成两个：样本值无关紧要，别读它。
         let (tx, rx) = mpsc::sync_channel(1);
+        let toolbar_items = match kind {
+            PreviewKind::Toolbar => draft
+                .map(|d| d.toolbar_items.clone())
+                .unwrap_or_else(|| self.toolbar_items_effective()),
+            PreviewKind::Candidate => Vec::new(),
+        };
         let req = CandidatePreviewRequest {
             theme,
+            kind,
             preedit: wind_ui_types::preview_preedit(&cand.syllable_separator),
             candidates,
             vertical,
             scale,
+            toolbar_items,
+            toolbar_state: None,
             appearance: draft.map(|d| d.appearance.clone()),
             reply: tx,
             cancel,
@@ -163,6 +195,11 @@ pub struct PreviewDraft {
     pub theme_name: String,
     pub theme_style: String,
     pub appearance: PreviewAppearance,
+    /// 草稿的工具栏纵向排列（`ui.toolbar.vertical`；`kind = toolbar` 预览的缺省朝向）。
+    pub toolbar_vertical: bool,
+    /// 草稿的工具栏渲染项（`ui.toolbar.items`，`parse_toolbar_items` 的产物；
+    /// `kind = toolbar` 预览的格子来源。草案没写这条键 = 当前生效值）。
+    pub toolbar_items: Vec<ToolbarItem>,
 }
 
 /// 字体名、链长的上限（草稿是不可信输入）。
@@ -252,7 +289,14 @@ mod tests {
         while rx.try_recv().is_ok() {}
         let mut theme = wind_theme::Resolved::default();
         theme.views.index_labels = vec!["a".into(), String::new()];
-        let reply = c.request_candidate_preview(theme, true, 1.5, None, Default::default());
+        let reply = c.request_candidate_preview(
+            theme,
+            true,
+            1.5,
+            PreviewKind::Candidate,
+            None,
+            Default::default(),
+        );
         let req = loop {
             match rx.recv().unwrap() {
                 UiCommand::RenderCandidatePreview(r) => break r,
@@ -276,12 +320,57 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_request_fills_items_from_effective_config() {
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        while rx.try_recv().is_ok() {}
+        let reply = c.request_candidate_preview(
+            wind_theme::Resolved::default(),
+            false,
+            1.0,
+            PreviewKind::Toolbar,
+            None,
+            Default::default(),
+        );
+        let req = loop {
+            match rx.recv().unwrap() {
+                UiCommand::RenderCandidatePreview(r) => break r,
+                _ => continue,
+            }
+        };
+        assert!(
+            !req.toolbar_items.is_empty(),
+            "不带草稿时格子取当前生效 ui.toolbar"
+        );
+        assert!(req.toolbar_state.is_none(), "状态走渲染端的固定样本");
+        assert!(
+            !req.candidates.is_empty(),
+            "候选样本照填（toolbar 分支不消费）"
+        );
+        let _ = reply;
+    }
+
+    #[test]
+    fn draft_carries_toolbar_segment() {
+        let c = Coordinator::new_headless(Config::default(), None);
+        let ui: toml::Value =
+            toml::from_str("[toolbar]\nvertical = true\nitems = [\"mode\", \"settings\"]").unwrap();
+        let d = c.candidate_preview_draft(&ui).unwrap();
+        assert!(d.toolbar_vertical, "草稿的 ui.toolbar.vertical");
+        assert_eq!(
+            d.toolbar_items,
+            vec![ToolbarItem::Mode, ToolbarItem::Settings],
+            "草稿的 ui.toolbar.items"
+        );
+    }
+
+    #[test]
     fn headless_without_ui_disconnects_immediately() {
         let c = Coordinator::new_headless(Config::default(), None);
         let reply = c.request_candidate_preview(
             wind_theme::Resolved::default(),
             false,
             1.0,
+            PreviewKind::Candidate,
             None,
             Default::default(),
         );

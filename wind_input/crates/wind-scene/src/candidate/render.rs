@@ -19,26 +19,35 @@ pub struct CandidateFrame {
     pub skin: Option<super::SkinSnapshot>,
 }
 
-impl CandidateFrame {
-    /// 转成直通 alpha 的 RGBA（PNG、`<canvas>` 等要的格式）。
-    pub fn to_rgba(&self) -> Vec<u8> {
-        let mut out = self.bgra.clone();
-        for px in out.as_chunks_mut::<4>().0 {
-            px.swap(0, 2);
-            let a = px[3] as u32;
-            match a {
-                255 => {}
-                // 全透明像素的 RGB 无意义，归零。
-                0 => px[..3].fill(0),
-                // 预乘值理应 ≤ a，个别路径写出过 c > a 的像素，钳到 255。
-                _ => {
-                    for c in &mut px[..3] {
-                        *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
-                    }
+/// 预乘 BGRA 绘制缓冲 → 直通 RGBA（PNG、`<canvas>` 等通用格式）。
+///
+/// 窗口绘制缓冲按 `UpdateLayeredWindow`（`AC_SRC_ALPHA`）的约定维护为**预乘 BGRA**；
+/// 直接当 RGBA 编码会把 R/B 交换、把预乘值当直通值，半透明像素被系统性压暗偏色
+/// （见 `screenshot::unpremultiply` 的文档）。候选窗预览（[`CandidateFrame::to_rgba`]）
+/// 与工具栏预览（wind-ui `render_toolbar_preview`）出图共用这一份，格式转换不抄第二处。
+pub fn premultiplied_bgra_to_rgba(mut buf: Vec<u8>) -> Vec<u8> {
+    for px in buf.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+        let a = px[3] as u32;
+        match a {
+            255 => {}
+            // 全透明像素的 RGB 无意义，归零。
+            0 => px[..3].fill(0),
+            // 预乘值理应 ≤ a，个别路径写出过 c > a 的像素，钳到 255。
+            _ => {
+                for c in &mut px[..3] {
+                    *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
                 }
             }
         }
-        out
+    }
+    buf
+}
+
+impl CandidateFrame {
+    /// 转成直通 alpha 的 RGBA（PNG、`<canvas>` 等要的格式）。
+    pub fn to_rgba(&self) -> Vec<u8> {
+        premultiplied_bgra_to_rgba(self.bgra.clone())
     }
 }
 
