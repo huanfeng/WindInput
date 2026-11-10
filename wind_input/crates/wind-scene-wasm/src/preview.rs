@@ -1752,6 +1752,73 @@ mod tests {
         assert_eq!(s.caret.above, [fr.x, fr.y + fr.h]);
     }
 
+    /// 亮暗皮肤夹具：窗体、装饰、装饰 `states` 的附加源都经 `[resources]` 的 `{ light, dark }`
+    /// 引用，亮暗两套各一种颜色；`dark_size` 改暗色窗体的边长（同尺寸是 16）。
+    const LIGHT: [[u8; 4]; 3] = [[201, 202, 203, 255], [250, 10, 10, 255], [10, 250, 10, 255]];
+    const DARK: [[u8; 4]; 3] = [[31, 32, 33, 255], [10, 10, 250, 255], [250, 250, 10, 255]];
+    fn light_dark_theme(dark_size: u32) -> (String, Vec<(String, Vec<u8>)>) {
+        let toml = "[meta]\nname = \"ld\"\n\
+             [resources]\n\
+             frame = { light = \"assets/frame-light.png\", dark = \"assets/frame-dark.png\" }\n\
+             dot = { light = \"assets/dot-light.png\", dark = \"assets/dot-dark.png\" }\n\
+             busy = { light = \"assets/busy-light.png\", dark = \"assets/busy-dark.png\" }\n\
+             [skin]\ndensity = 1\n\
+             [skin.horizontal.frame]\nimage = \"frame\"\n\
+             stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+             [[skin.horizontal.decor]]\nimage = \"dot\"\nanchor = \"frame.top_left\"\n\
+             [[skin.horizontal.decor]]\nimage = \"dot\"\nanchor = \"frame.top_right\"\n\
+             states = { idle = { image = \"busy\" } }\n"
+            .to_string();
+        let assets = vec![
+            ("assets/frame-light.png".into(), png(16, 16, LIGHT[0])),
+            (
+                "assets/frame-dark.png".into(),
+                png(dark_size, dark_size, DARK[0]),
+            ),
+            ("assets/dot-light.png".into(), png(6, 6, LIGHT[1])),
+            ("assets/dot-dark.png".into(), png(6, 6, DARK[1])),
+            ("assets/busy-light.png".into(), png(6, 6, LIGHT[2])),
+            ("assets/busy-dark.png".into(), png(6, 6, DARK[2])),
+        ];
+        (toml, assets)
+    }
+
+    fn dark(on: bool) -> RenderOpts {
+        RenderOpts {
+            dark: on,
+            ..Default::default()
+        }
+    }
+
+    /// 窗体、装饰、附加源按预览明暗取 `[resources]` 的对应变体；亮暗交替画不串缓存。
+    #[test]
+    fn skin_images_follow_light_dark_resources() {
+        let (mut p, _) = preview();
+        let (toml, assets) = light_dark_theme(16);
+        let w = p.set_theme(&toml, "", assets).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let light = p.render(&dark(false)).unwrap();
+        let dark_f = p.render(&dark(true)).unwrap();
+        for (f, want, other) in [(&light, LIGHT, DARK), (&dark_f, DARK, LIGHT)] {
+            assert!(f.warnings.is_empty(), "{:?}", f.warnings);
+            for (w, o) in want.iter().zip(other) {
+                assert!(count_px(f, *w) > 0, "缺 {w:?}");
+                assert_eq!(count_px(f, o), 0, "混进了另一侧的 {o:?}");
+            }
+        }
+        assert_eq!(light.skin.as_ref().unwrap().frame_source, "frame");
+        assert_eq!(
+            light.skin.as_ref().unwrap().frame,
+            dark_f.skin.as_ref().unwrap().frame,
+            "同尺寸：几何不随明暗变"
+        );
+        // 来回切：每次都画回各自那套（图片缓存按解析后的源区分）。
+        for _ in 0..2 {
+            assert_eq!(p.render(&dark(false)).unwrap().rgba, light.rgba);
+            assert_eq!(p.render(&dark(true)).unwrap().rgba, dark_f.rgba);
+        }
+    }
+
     /// 两帧 GIF（各 100ms），4×4 纯色。
     fn gif2(a: [u8; 4], b: [u8; 4]) -> Vec<u8> {
         use ::image::codecs::gif::{GifEncoder, Repeat};

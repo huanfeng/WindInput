@@ -306,6 +306,67 @@ mod tests {
         assert_eq!(px(0, 0)[3], 0);
     }
 
+    /// 切明暗走的是 `push_theme` → `SetTheme`：同一主题按新明暗重新求值后下发。窗体与装饰经
+    /// `[resources]` 的 `{ light, dark }` 引用时，窗口换上对应那张图，来回切不串。
+    #[test]
+    fn set_theme_with_other_dark_swaps_skin_images() {
+        let root = fixture_dir("light-dark");
+        let dir = root.join("ld");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        let px = |name: &str, w: u32, rgba: [u8; 4]| {
+            image::RgbaImage::from_pixel(w, w, image::Rgba(rgba))
+                .save(dir.join("assets").join(name))
+                .unwrap();
+        };
+        px("frame-light.png", 16, [200, 0, 0, 255]);
+        px("frame-dark.png", 16, [0, 200, 0, 255]);
+        px("dot-light.png", 6, [0, 0, 200, 255]);
+        px("dot-dark.png", 6, [200, 200, 0, 255]);
+        std::fs::write(
+            dir.join("theme.toml"),
+            "[meta]\nname = \"ld\"\n\
+             [resources]\n\
+             frame = { light = \"assets/frame-light.png\", dark = \"assets/frame-dark.png\" }\n\
+             dot = { light = \"assets/dot-light.png\", dark = \"assets/dot-dark.png\" }\n\
+             [skin.horizontal.frame]\nimage = \"frame\"\n\
+             stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+             [[skin.horizontal.decor]]\nimage = \"dot\"\nanchor = \"frame.top_right\"\n\
+             pivot = \"bottom_right\"\n",
+        )
+        .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w =
+            CandidateWindow::new(super::super::CandidateWindowConfig::default(), tx).unwrap();
+        w.scale = 1.0;
+        w.set_orientation(false, false, false);
+        // 返回 (窗体左上, 装饰) 两点的 BGRA。
+        let mut paint = |dark: bool| {
+            let theme =
+                wind_theme::load_resolved_dirs(std::slice::from_ref(&root), "ld", dark).unwrap();
+            w.set_theme(theme);
+            w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
+            w.refresh_skin_geom();
+            let mut tree = w.scene.build_tree(&w.scene_input(false));
+            let (ml, mt, mr, mb) = w.scene.skin_layout(&mut tree, &w.text_renderer).unwrap();
+            let g = w.scene.skin_geom.as_ref().unwrap();
+            let (_, _, fw, fh) = g.frame_for_test();
+            let (bw, bh) = (fw + ml + mr, fh + mt + mb);
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            g.paint(&mut buf, bw, bh, false, false);
+            let at = |x: u32, y: u32| {
+                let o = ((y * bw + x) * 4) as usize;
+                [buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]
+            };
+            [at(ml, mt), at(bw - 1, 0)]
+        };
+        let light = [[0, 0, 200, 255], [200, 0, 0, 255]];
+        let dark = [[0, 200, 0, 255], [0, 200, 200, 255]];
+        for _ in 0..2 {
+            assert_eq!(paint(false), light);
+            assert_eq!(paint(true), dark);
+        }
+    }
+
     /// 按 `hit` 配一个挂在窗体右上外侧的装饰，返回「窗体外装饰上的一点是否不起拖」等三个判定。
     fn decor_no_drag(tag: &str, hit: Option<&str>) -> [bool; 3] {
         let mut w = fixture_window_hit(tag, hit);
