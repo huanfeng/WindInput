@@ -8,7 +8,15 @@ use std::collections::VecDeque;
 
 use super::CandidateWindow;
 use super::scene::{self, AnimClock, CandidateSceneInput};
-use wind_ui_types::{CandidatePreviewImage, CandidatePreviewRequest};
+use wind_ui_types::{CandidatePreviewImage, CandidatePreviewRequest, PreviewAppearance};
+
+/// 渲染器的全局字体状态（草稿字体临时换上前的旧值）。
+#[derive(PartialEq)]
+struct RendererFont {
+    family: String,
+    weight: i32,
+    plan: crate::text::script::FontPlan,
+}
 
 /// UI 线程本地的预览待画队列。
 #[derive(Default)]
@@ -64,17 +72,100 @@ impl CandidateWindow {
         if !(req.scale.is_finite() && req.scale > 0.0) {
             return Err(format!("缩放比例无效：{}", req.scale));
         }
+        // 草稿外观：字体先换到渲染器上（全局字族 / 默认字重 / 字体方案是渲染器状态，不在主题里），
+        // 画完换回；其余覆盖只进本帧的输入，不碰窗口状态。
+        let swapped = req
+            .appearance
+            .as_ref()
+            .and_then(|a| self.swap_preview_font(a));
+        let out = self.render_preview_frame(req);
+        if let Some(live) = swapped {
+            self.text_renderer.set_font_family(&live.family);
+            self.text_renderer.set_default_weight(live.weight);
+            self.text_renderer.set_font_plan(live.plan);
+        }
+        out
+    }
+
+    /// 草稿字体与渲染器当前的不同时换成草稿的，返回换回去要的旧值；相同时什么也不做。
+    /// 字体名走 [`Self::resolve_font`]（与配置重载同一解析），但不记日志：草稿还没保存。
+    fn swap_preview_font(&mut self, a: &PreviewAppearance) -> Option<RendererFont> {
+        let font_of = |w: &Self,
+                       family: &str,
+                       weight: i32,
+                       fallback: &[String],
+                       scripts: &[(String, Vec<String>)]| {
+            let r = w.resolve_font(super::resolve_font_family(family));
+            let fallback: Vec<String> = fallback.iter().map(|f| w.resolve_font(f).family).collect();
+            let scripts: Vec<(String, Vec<String>)> = scripts
+                .iter()
+                .map(|(k, chain)| {
+                    (
+                        k.clone(),
+                        chain.iter().map(|f| w.resolve_font(f).family).collect(),
+                    )
+                })
+                .collect();
+            RendererFont {
+                plan: super::build_font_plan(&r.family, &fallback, &scripts),
+                weight: if weight > 0 {
+                    weight.clamp(1, 950)
+                } else {
+                    r.weight
+                },
+                family: r.family,
+            }
+        };
+        let draft = font_of(
+            self,
+            &a.font_family,
+            a.font_weight,
+            &a.font_fallback,
+            &a.font_scripts,
+        );
+        // 换回的是渲染器此刻的原值（不按配置重算：两者万一不一致，也不能让预览改掉实时窗口）。
+        let live = RendererFont {
+            plan: self.text_renderer.font_plan().clone(),
+            weight: self.text_renderer.default_weight(),
+            family: self.text_renderer.font_family().to_string(),
+        };
+        if draft == live {
+            return None;
+        }
+        self.text_renderer.set_font_family(&draft.family);
+        self.text_renderer.set_default_weight(draft.weight);
+        self.text_renderer.set_font_plan(draft.plan);
+        Some(live)
+    }
+
+    fn render_preview_frame(
+        &mut self,
+        req: &CandidatePreviewRequest,
+    ) -> Result<CandidatePreviewImage, String> {
+        let a = req.appearance.as_ref();
         let o = scene::ThemeOverrides {
             vertical: req.vertical,
-            user_font_family: &self.user_font_family,
-            user_font_weight: self.user_font_weight,
+            user_font_family: a.map_or(&self.user_font_family, |a| &a.font_family),
+            user_font_weight: a.map_or(self.user_font_weight, |a| a.font_weight.clamp(0, 950)),
             scheme_text_family: &self.text_family_override,
-            shadow: self.theme_shadow,
-            font_size: self.font_size_override,
+            shadow: a.map_or(self.theme_shadow, |a| a.shadow),
+            font_size: a.map_or(self.font_size_override, |a| a.font_size.max(0.0)),
         };
         let eff = scene::effective_theme(&req.theme, &o, |f| {
             let r = self.resolve_font(f);
             (r.family, r.weight)
+        });
+        let draft_opts = a.map(|a| scene::CandidateSceneOptions {
+            flip_when_above: self.scene_opts.flip_when_above,
+            swap_preedit_when_above: self.scene_opts.swap_preedit_when_above,
+            pager_in_preedit: a.pager_in_preedit,
+            pager_display: a.pager_display.clone(),
+            page_number_display: a.page_number_display.clone(),
+            min_window_width_horizontal: a.min_size[0],
+            min_window_width_vertical: a.min_size[1],
+            min_window_height_horizontal: a.min_size[2],
+            min_window_height_vertical: a.min_size[3],
+            min_rows: a.min_size[4],
         });
         let inp = CandidateSceneInput {
             candidates: &req.candidates,
@@ -89,14 +180,14 @@ impl CandidateWindow {
             vertical: req.vertical,
             rotated: false,
             upright: false,
-            preedit_embedded: self.preedit_embedded,
+            preedit_embedded: a.map_or(self.preedit_embedded, |a| a.preedit_embedded),
             above: false,
             theme: &eff.theme,
             base_font_logical: eff.base_font_logical,
             scale: req.scale,
             screen_extent_px: None,
             text_renderer: &self.text_renderer,
-            opts: &self.scene_opts,
+            opts: draft_opts.as_ref().unwrap_or(&self.scene_opts),
         };
         let clock = AnimClock {
             t: std::time::Duration::ZERO,
@@ -163,6 +254,7 @@ mod tests {
             candidates: vec![cand("你好", ""), cand("拟好", ""), cand("你", "wqiy")],
             vertical,
             scale,
+            appearance: None,
             reply: tx,
             cancel: Default::default(),
         };
@@ -250,6 +342,55 @@ mod tests {
             ),
             "丢掉请求即断开回执，不回图"
         );
+    }
+
+    fn appearance(font_size: f32, family: &str) -> PreviewAppearance {
+        PreviewAppearance {
+            font_family: family.into(),
+            font_fallback: vec![],
+            font_scripts: vec![],
+            font_weight: 0,
+            font_size,
+            shadow: true,
+            preedit_embedded: false,
+            pager_in_preedit: false,
+            pager_display: Default::default(),
+            page_number_display: Default::default(),
+            min_size: [0; 5],
+        }
+    }
+
+    /// 草稿外观只作用于这一帧：字号变大图就变大，字体临时换上、画完换回，窗口状态不动。
+    #[test]
+    fn draft_appearance_applies_to_frame_only() {
+        let dirs = vec![themes_dir()];
+        let theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        let mut w = new_window();
+        let (req, _rx) = request(theme.clone(), false, 1.0);
+        let live = w.render_preview(&req).unwrap();
+        let family = w.text_renderer.font_family().to_string();
+
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.appearance = Some(appearance(40.0, "Draft Sans"));
+        let big = w.render_preview(&req).unwrap();
+        assert!(
+            big.height > live.height && big.width > live.width,
+            "字号 40 应更大"
+        );
+        assert_eq!(w.text_renderer.font_family(), family, "字体换回原值");
+
+        let mut tall = appearance(0.0, "");
+        tall.min_size = [0, 0, 200, 0, 0];
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.appearance = Some(tall);
+        assert!(
+            w.render_preview(&req).unwrap().height >= 200,
+            "尺寸下限取草稿"
+        );
+
+        let (req, _rx) = request(theme, false, 1.0);
+        let again = w.render_preview(&req).unwrap();
+        assert_eq!((again.width, again.height), (live.width, live.height));
     }
 
     #[test]

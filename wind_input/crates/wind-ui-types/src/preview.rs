@@ -68,10 +68,41 @@ pub struct CandidatePreviewRequest {
     pub vertical: bool,
     /// DPI 缩放。
     pub scale: f32,
+    /// 设置端草稿外观；`None` = 用渲染端窗口当前的外观状态（与实时候选窗一致）。
+    pub appearance: Option<PreviewAppearance>,
     /// 回执：渲染端处理完回送一次；不支持预览的渲染端直接丢掉请求（发送端随之断开）。
     pub reply: std::sync::mpsc::SyncSender<Result<CandidatePreviewImage, String>>,
     /// 请求方已不再等（超时或 RPC 已返回）时置位：渲染端开画前查它，置位的直接丢掉。
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// 设置端草稿配置折算出的外观状态，整组替代渲染端窗口的同名状态（字段与协调器
+/// `apply_ui_config` 下发的那几条 `UiCommand` 一一对应）。方案级候选字体不在其中：它随方案走，
+/// 草稿改不了，仍取窗口当前值。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewAppearance {
+    /// `ui.font.family`（原样，空 = 跟随主题节点字族）。
+    pub font_family: String,
+    /// `ui.font.fallback`。
+    pub font_fallback: Vec<String>,
+    /// `ui.font.scripts`（脚本类名 → 字体链）。
+    pub font_scripts: Vec<(String, Vec<String>)>,
+    /// `ui.font.weight`（0 = 不指定）。
+    pub font_weight: i32,
+    /// `ui.candidate.font_size`（0 = 跟随主题）。
+    pub font_size: f32,
+    /// 是否采用主题阴影（`ui.candidate.shadow != "off"`）。
+    pub shadow: bool,
+    /// 编码嵌入候选行首（`ui.candidate.preedit_display`）。
+    pub preedit_embedded: bool,
+    /// `ui.candidate.pager_in_preedit`。
+    pub pager_in_preedit: bool,
+    /// `ui.candidate.pager_bar_display`（横排档, 竖排档）。
+    pub pager_display: (String, String),
+    /// `ui.candidate.page_number_display`（横排档, 竖排档）。
+    pub page_number_display: (String, String),
+    /// 尺寸下限：横排宽、竖排宽、横排高、竖排高、最小行数（含方案级覆盖）。
+    pub min_size: [u32; 5],
 }
 
 impl CandidatePreviewRequest {

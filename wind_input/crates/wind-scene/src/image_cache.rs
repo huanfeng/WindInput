@@ -1066,28 +1066,9 @@ fn read_source_prefix(src: &str, n: usize) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// 文件头是否动画格式：GIF 一律算（帧数另判）；APNG 看 IDAT 之前有无 acTL；WebP 看 VP8X 的动画位。
+/// 文件头是否动画格式，判据在 [`wind_theme::skin::sniff_animated`]（设置端「主题信息」也用它）。
 fn sniff_animated(b: &[u8]) -> bool {
-    if b.starts_with(b"GIF8") {
-        return true;
-    }
-    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
-        let mut at = 8;
-        while let Some(head) = b.get(at..at + 8) {
-            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
-            match &head[4..8] {
-                b"acTL" => return true,
-                b"IDAT" => return false,
-                _ => at = at.saturating_add(len).saturating_add(12),
-            }
-        }
-        return false;
-    }
-    b.len() > 20
-        && &b[0..4] == b"RIFF"
-        && &b[8..12] == b"WEBP"
-        && &b[12..16] == b"VP8X"
-        && b[20] & 0x02 != 0
+    wind_theme::skin::sniff_animated(b)
 }
 
 /// 只解析文件头取尺寸。

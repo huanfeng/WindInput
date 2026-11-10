@@ -28,6 +28,8 @@ pub const PREVIEW_MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 8;
 /// 一次批量的条数上限。
 const MAX_BATCH: usize = 64;
+/// `ui` 参数（草稿配置的 `ui` 子树，JSON）的上限。
+const MAX_DRAFT_BYTES: usize = 256 * 1024;
 /// `text` 参数的上限，与包内 `theme.toml` 同。
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 /// 算缓存键时最多读这么多字节的主题内容（只有临时解包的才读内容）；超出就不缓存，直接渲染。
@@ -121,6 +123,8 @@ struct Prepared {
     scale: f32,
     inline: bool,
     staging: Option<Staging>,
+    /// 设置端草稿外观（`ui` 参数）：给了就不查也不写磁盘缓存，一律内联。
+    draft: Option<wind_coordinator::candidate_preview::PreviewDraft>,
 }
 
 /// 已投给 UI 线程、等回执的一条。drop 时置位取消（UI 线程排到它就丢掉），并还名额、删临时目录。
@@ -214,14 +218,18 @@ fn render_batch_with<H: WebDataRpc + ?Sized>(
                 continue;
             }
         };
-        let key = match cache_key(
-            wind_ui_types::CANDIDATE_PREVIEW_RENDER_VERSION,
-            &stamp,
-            &fingerprint,
-            &p,
-        ) {
-            Ok(k) => k,
-            Err(e) => {
+        // 草稿预览是一次性的（改一下字号就是一张新图），不落盘。
+        let key = match p.draft.is_none().then(|| {
+            cache_key(
+                wind_ui_types::CANDIDATE_PREVIEW_RENDER_VERSION,
+                &stamp,
+                &fingerprint,
+                &p,
+            )
+        }) {
+            None => None,
+            Some(Ok(k)) => k,
+            Some(Err(e)) => {
                 out[i] = err_json(&format!("读取主题文件失败：{e}"));
                 continue;
             }
@@ -268,18 +276,25 @@ fn render_batch_with<H: WebDataRpc + ?Sized>(
             }
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        let rx = h.request_candidate_preview(theme, p.vertical, p.scale, Arc::clone(&cancel));
+        let rx = h.request_candidate_preview(
+            theme,
+            p.vertical,
+            p.scale,
+            p.draft.as_ref(),
+            Arc::clone(&cancel),
+        );
         let path = key
             .as_ref()
             .zip(cache)
             .map(|(k, d)| d.join(format!("{}.{k}.png", p.prefix)));
+        let uncached = key.is_none();
         in_flight.push_back(Pending {
             index: i,
             rx,
             path,
             key: key.unwrap_or_default(),
-            // 不缓存（键算不出）时只能内联。
-            inline: p.inline || cache.is_none(),
+            // 不缓存（键算不出、草稿）时只能内联。
+            inline: p.inline || cache.is_none() || uncached,
             cancel,
             _slot: slot,
             _staging: p.staging,
@@ -346,22 +361,42 @@ fn prepare<H: WebDataRpc + ?Sized>(
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty())
     };
+    let draft = match item.get("ui") {
+        None | Some(Value::Null) => None,
+        Some(ui) => {
+            let len = serde_json::to_string(ui).map_or(usize::MAX, |t| t.len());
+            if len > MAX_DRAFT_BYTES {
+                anyhow::bail!("ui 参数过大（{len} 字节，上限 {MAX_DRAFT_BYTES}）");
+            }
+            Some(h.candidate_preview_draft(&crate::json_to_toml(ui))?)
+        }
+    };
     let source = match (s("name"), s("package"), s("text")) {
         (Some(n), None, None) => Source::Installed(n.to_string()),
         (None, Some(p), None) => Source::Package(PathBuf::from(p)),
         (None, None, Some(t)) => Source::Text(t.to_string()),
-        (None, None, None) => Source::Installed(h.current_theme_name()),
+        (None, None, None) => Source::Installed(
+            draft
+                .as_ref()
+                .map_or_else(|| h.current_theme_name(), |d| d.theme_name.clone()),
+        ),
         _ => anyhow::bail!("name / package / text 只能给一个"),
     };
     let is_dark = match s("style") {
-        None => h.current_theme_is_dark(),
+        None => match &draft {
+            Some(d) => wind_coordinator::theme_style::ThemeStyle::from_config(&d.theme_style)
+                .resolve_dark(),
+            None => h.current_theme_is_dark(),
+        },
         Some("light") => false,
         Some("dark") => true,
         Some("system") => wind_coordinator::theme_style::system_prefers_dark(),
         Some(o) => anyhow::bail!("style 只能是 light / dark / system（收到 {o}）"),
     };
     let vertical = match s("layout") {
-        None => h.candidate_preview_vertical(),
+        None => draft
+            .as_ref()
+            .map_or_else(|| h.candidate_preview_vertical(), |d| d.vertical),
         Some("horizontal") => false,
         Some("vertical") => true,
         Some(o) => anyhow::bail!("layout 只能是 horizontal / vertical（收到 {o}）"),
@@ -414,6 +449,7 @@ fn prepare<H: WebDataRpc + ?Sized>(
         scale,
         inline,
         staging,
+        draft,
     })
 }
 
@@ -830,6 +866,7 @@ mod tests {
             scale: 1.0,
             inline: false,
             staging: None,
+            draft: None,
         }
     }
 
@@ -1134,6 +1171,60 @@ mod tests {
         assert_eq!(seen.load(Ordering::SeqCst), 14);
         assert!(png_complete(&std::fs::read(&path).unwrap()));
         assert_eq!(remove_theme_previews(&cache, "default"), 3);
+        let _ = std::fs::remove_dir_all(cache);
+    }
+
+    /// 带草稿 `ui` 的请求：草稿外观随请求到 UI 线程，结果内联、不落盘；坏参数报错。
+    #[test]
+    fn draft_ui_rides_request_and_skips_disk_cache() {
+        let _g = serial();
+        let (c, seen, held) = coord_with_fake_ui(true);
+        let cache = tmp("draft");
+        let ui = json!({
+            "candidate": { "font_size": 999, "per_page": 3, "layout": "vertical" },
+            "font": { "family": "Noto Sans", "weight": "粗" },
+            "comment": { "enabled": false },
+            "no_such": 1,
+        });
+        let out = render_batch(
+            c.as_ref(),
+            &[
+                json!({ "name": "default", "ui": ui }),
+                json!({ "name": "default", "ui": 3 }),
+                json!({ "name": "default", "ui": { "font": { "family": "x".repeat(MAX_DRAFT_BYTES) } } }),
+            ],
+            Some(&cache),
+        );
+        assert!(ok(&out[0]), "{out:?}");
+        assert!(out[0]["png"].is_string(), "草稿预览一律内联");
+        assert!(out[0].get("path").is_none_or(Value::is_null), "{}", out[0]);
+        assert!(!ok(&out[1]) && !ok(&out[2]), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        let leftovers = std::fs::read_dir(&cache)
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .filter(|e| e.path().is_file())
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0, "草稿预览不写缓存");
+
+        // 假 UI 线程先回执、后存请求：等它存好。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while held.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let req = held.lock().unwrap().pop().unwrap();
+        assert!(req.vertical, "layout 缺省取草稿的排列");
+        assert_eq!(req.candidates.len(), 3);
+        assert!(
+            req.candidates.iter().all(|c| c.comment.is_empty()),
+            "注释关"
+        );
+        let a = req.appearance.as_ref().expect("带草稿外观");
+        assert_eq!(a.font_size, 72.0, "字号夹到设置页上限");
+        assert_eq!(a.font_family, "Noto Sans");
+        assert_eq!(a.font_weight, 0, "类型不符的叶子丢弃，回落当前值");
         let _ = std::fs::remove_dir_all(cache);
     }
 

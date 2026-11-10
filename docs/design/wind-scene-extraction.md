@@ -108,9 +108,12 @@
 | `layout` | `horizontal` / `vertical`；缺省按 `ui.candidate.layout`（含方案级覆盖） |
 | `scale` | 0.5–4，缺省 1（设置端传自己窗口所在屏的缩放） |
 | `inline` | 真则回执另带 `png`（base64）；取不到缓存目录时总是内联 |
+| `ui` | 设置端草稿配置的 `ui` 子树（JSON，至多 256 KiB）：登记过的键整值替换当前生效配置里的同名键（不深合并）后出图——候选数、序号、注释开关、字体、字号、字重、阴影、编码嵌入、翻页栏、尺寸下限取草稿（含方案级覆盖），`name` / `style` / `layout` 缺省也按草稿（草稿主题没装或被定制版藏掉时同实机降级为 `default`）。只收注册表登记的 `ui.*` 键，类型 / 枚举不符的叶子丢弃，数值夹到设置页取值范围；**不查也不写磁盘缓存**，回执一律内联、无 `path`。不给 = 行为不变 |
 
 回执：`{ ok: true, path, width, height, hash, cached }`（`path` 是缓存里的 PNG，设置端同机直接读）
 或 `{ ok: false, error }`。
+
+`theme.list` 每项：`{ name, display_name, author, version, builtin, dir, base, skin, animated }`——`dir` 只给用户主题（内置为空串），`base` 是主题文件自己写的继承名（没写为空串），`skin` 是否带异形皮肤，`animated` 皮肤是否会动（装饰写了事件状态机，或框图 / 装饰图含 srcset 各档的文件头是动画格式；只读头部，GIF 一律按动图算）。
 
 ### 7.3 缓存
 

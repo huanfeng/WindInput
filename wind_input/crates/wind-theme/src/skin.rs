@@ -839,6 +839,30 @@ pub(crate) fn replace_inherited_variants(base: &mut Value, over: &Value) {
     }
 }
 
+/// 图片文件头是否动画格式（读文件头前 64 KiB 足够）：GIF 一律算（帧数另判）；APNG 看 IDAT 之前有无 acTL；WebP 看 VP8X 的动画位。
+pub fn sniff_animated(b: &[u8]) -> bool {
+    if b.starts_with(b"GIF8") {
+        return true;
+    }
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut at = 8;
+        while let Some(head) = b.get(at..at + 8) {
+            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            match &head[4..8] {
+                b"acTL" => return true,
+                b"IDAT" => return false,
+                _ => at = at.saturating_add(len).saturating_add(12),
+            }
+        }
+        return false;
+    }
+    b.len() > 20
+        && &b[0..4] == b"RIFF"
+        && &b[8..12] == b"WEBP"
+        && &b[12..16] == b"VP8X"
+        && b[20] & 0x02 != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -72,11 +72,17 @@ pub trait WebDataHost {
     /// 设置端主题预览（见 [`crate::candidate_preview`]）：当前候选排列是否竖排、外观指纹、投递出图请求。
     fn candidate_preview_vertical(&self) -> bool;
     fn candidate_preview_fingerprint(&self) -> String;
+    /// 草稿 `ui` 子树叠到当前配置上（见 `Coordinator::candidate_preview_draft`）。
+    fn candidate_preview_draft(
+        &self,
+        ui: &toml::Value,
+    ) -> anyhow::Result<crate::candidate_preview::PreviewDraft>;
     fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        draft: Option<&crate::candidate_preview::PreviewDraft>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply;
     /// 主题强调色两档（设置窗「主题色跟随输入法」），`name` 缺省取当前主题。
@@ -342,14 +348,21 @@ impl WebDataHost for Coordinator {
     fn candidate_preview_fingerprint(&self) -> String {
         Coordinator::candidate_preview_fingerprint(self)
     }
+    fn candidate_preview_draft(
+        &self,
+        ui: &toml::Value,
+    ) -> anyhow::Result<crate::candidate_preview::PreviewDraft> {
+        Coordinator::candidate_preview_draft(self, ui)
+    }
     fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        draft: Option<&crate::candidate_preview::PreviewDraft>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply {
-        Coordinator::request_candidate_preview(self, theme, vertical, scale, cancel)
+        Coordinator::request_candidate_preview(self, theme, vertical, scale, draft, cancel)
     }
     fn theme_accent(&self, name: Option<&str>) -> Option<crate::theme_query::ThemeAccent> {
         Coordinator::theme_accent(self, name)
