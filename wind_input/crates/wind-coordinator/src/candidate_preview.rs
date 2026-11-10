@@ -130,6 +130,7 @@ impl Coordinator {
     /// 草稿出图（候选数、序号、注释开关取草稿，外观整组替代渲染端当前状态）；
     /// `kind = Toolbar` 时画的是工具栏（格子取草稿的 `ui.toolbar.items`，没带草稿取当前生效配置）。
     /// 不再等结果时把 `cancel` 置位，渲染端排到它时就直接丢掉。
+    #[allow(clippy::too_many_arguments)] // 与 trait 同款：fit 两维直排，见 web_host 上的注
     pub fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
@@ -137,6 +138,8 @@ impl Coordinator {
         scale: f32,
         kind: PreviewKind,
         draft: Option<&PreviewDraft>,
+        fit_w: Option<u32>,
+        fit_h: Option<u32>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PreviewReply {
         let live = self.eff_candidate();
@@ -168,6 +171,8 @@ impl Coordinator {
             candidates,
             vertical,
             scale,
+            fit_w,
+            fit_h,
             toolbar_items,
             toolbar_state: None,
             appearance: draft.map(|d| d.appearance.clone()),
@@ -295,6 +300,8 @@ mod tests {
             1.5,
             PreviewKind::Candidate,
             None,
+            None,
+            None,
             Default::default(),
         );
         let req = loop {
@@ -306,6 +313,7 @@ mod tests {
         assert_eq!(req.preedit, PREVIEW_PREEDIT, "出厂分隔符就是 '");
         assert!(req.vertical);
         assert_eq!(req.scale, 1.5);
+        assert_eq!(req.fit_w, None, "缺省不约束");
         let labels: Vec<_> = req.candidates.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["a", "2", "3"], "主题槽位优先、空槽回落数字");
         assert!(req.candidates.iter().any(|c| !c.comment.is_empty()));
@@ -328,6 +336,8 @@ mod tests {
             false,
             1.0,
             PreviewKind::Toolbar,
+            None,
+            None,
             None,
             Default::default(),
         );
@@ -371,6 +381,8 @@ mod tests {
             false,
             1.0,
             PreviewKind::Candidate,
+            None,
+            None,
             None,
             Default::default(),
         );

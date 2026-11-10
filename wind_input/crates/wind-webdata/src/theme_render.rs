@@ -123,6 +123,10 @@ struct Prepared {
     kind: wind_ui_types::PreviewKind,
     vertical: bool,
     scale: f32,
+    /// 目标框逻辑尺寸（`fit_w` / `fit_h` 参数；`None` = 不约束）。渲染端按它折算渲染倍率，
+    /// 进缓存键（生效倍率由 fit 与自然尺寸共同决定，fit 原值进键即保证倍率变了键必变）。
+    fit_w: Option<u32>,
+    fit_h: Option<u32>,
     inline: bool,
     staging: Option<Staging>,
     /// 设置端草稿外观（`ui` 参数）：给了就不查也不写磁盘缓存，一律内联。
@@ -284,6 +288,8 @@ fn render_batch_with<H: WebDataRpc + ?Sized>(
             p.scale,
             p.kind,
             p.draft.as_ref(),
+            p.fit_w,
+            p.fit_h,
             Arc::clone(&cancel),
         );
         let path = key
@@ -421,6 +427,22 @@ fn prepare<H: WebDataRpc + ?Sized>(
             .filter(|x| (0.5..=4.0).contains(x))
             .ok_or_else(|| anyhow::anyhow!("scale 须是 0.5–4 之间的数"))? as f32,
     };
+    // fit 目标框（逻辑像素）：可只给其一，缺省 = 不约束。非整数或 ≤0 整条报错不出图
+    // （kind 同款：坏参数在 prepare 阶段就拒），u32 装不下也算非法。
+    let fit = |k: &str| -> anyhow::Result<Option<u32>> {
+        match item.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => {
+                let n = v
+                    .as_u64()
+                    .filter(|n| (1..=u32::MAX as u64).contains(n))
+                    .ok_or_else(|| anyhow::anyhow!("{k} 只能是正整数（收到 {v}）"))?;
+                Ok(Some(n as u32))
+            }
+        }
+    };
+    let fit_w = fit("fit_w")?;
+    let fit_h = fit("fit_h")?;
     let inline = item.get("inline").and_then(Value::as_bool).unwrap_or(false) || cache.is_none();
     let installed = h.theme_dirs();
     let (prefix, slug, dirs, staging) = match source {
@@ -461,6 +483,8 @@ fn prepare<H: WebDataRpc + ?Sized>(
         kind,
         vertical,
         scale,
+        fit_w,
+        fit_h,
         inline,
         staging,
         draft,
@@ -532,6 +556,21 @@ fn cache_key(
     h.write_u8(p.is_dark as u8);
     h.write_u8(p.vertical as u8);
     h.write_u32(p.scale.to_bits());
+    // fit 目标框进键：生效倍率 = 请求 scale × r，r 由 fit 与该请求下的自然尺寸折算（渲染端
+    // 算），而自然尺寸由键里其余成分（主题内容 / 外观指纹 / 版本 / 形态 / 朝向 / 缩放）决定
+    // ——fit 原值进键即保证倍率变了键必变，不会两个不同倍率折算出同一个键回错图。两个都
+    // 缺省时不写任何字节：与旧版键完全一致，历史缓存图继续命中。
+    if p.fit_w.is_some() || p.fit_h.is_some() {
+        for v in [p.fit_w, p.fit_h] {
+            match v {
+                Some(n) => {
+                    h.write_u8(1);
+                    h.write_u32(n);
+                }
+                None => h.write_u8(0),
+            }
+        }
+    }
     let mut budget = HashBudget {
         files: MAX_HASH_FILES,
         bytes: MAX_HASH_BYTES,
@@ -884,6 +923,8 @@ mod tests {
             kind: wind_ui_types::PreviewKind::Candidate,
             vertical: false,
             scale: 1.0,
+            fit_w: None,
+            fit_h: None,
             inline: false,
             staging: None,
             draft: None,
@@ -931,6 +972,12 @@ mod tests {
             let mut q = prepared(dirs.clone(), "child", staged);
             q.scale = 1.5;
             assert_ne!(k0, key(1, "b", "fp", &q), "缩放");
+            let mut q = prepared(dirs.clone(), "child", staged);
+            q.fit_w = Some(584);
+            assert_ne!(k0, key(1, "b", "fp", &q), "fit_w 进键");
+            let mut q = prepared(dirs.clone(), "child", staged);
+            q.fit_h = Some(184);
+            assert_ne!(k0, key(1, "b", "fp", &q), "fit_h 进键");
             // base 链上的资源变了（同长度内容 + 推后 mtime，元数据指纹也看得见）
             let bg = root.join("base_t/assets/bg.png");
             std::fs::write(&bg, b"two").unwrap();
@@ -1260,6 +1307,62 @@ mod tests {
         let k0 = key(1, "b", "fp", &p);
         p.kind = wind_ui_types::PreviewKind::Toolbar;
         assert_ne!(k0, key(1, "b", "fp", &p), "形态要进缓存键");
+    }
+
+    /// `fit_w` / `fit_h` 参数：缺省不进请求（不约束，行为与旧请求一致）、可只给其一、
+    /// 非整数 / 0 / 负数 / 超出 u32 整条报错不出图（kind 同款：prepare 阶段就拒）。
+    #[test]
+    fn fit_param_defaults_validates_and_rides_request() {
+        let _g = serial();
+        let (c, _seen, held) = coord_with_fake_ui(true);
+        let cache = tmp("fit");
+        // inline=true：一律进 UI 线程，不落盘，防串台。
+        let one = |item: Value| {
+            let mut it = item;
+            it["inline"] = json!(true);
+            render_batch(c.as_ref(), &[it], Some(&cache)).pop().unwrap()
+        };
+
+        for (v, why) in [
+            (json!(0), "0"),
+            (json!(-3), "负数"),
+            (json!(2.5), "非整数"),
+            (json!("584"), "字符串"),
+            (json!(u64::MAX), "超出 u32"),
+        ] {
+            let bad = one(json!({ "name": "default", "fit_w": v }));
+            assert!(!ok(&bad), "{why} 应报错：{bad:?}");
+            assert!(
+                bad["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("fit_w 只能是正整数"),
+                "{why} 文案：{bad:?}"
+            );
+        }
+        assert!(
+            held.lock().unwrap().is_empty(),
+            "坏 fit 在 prepare 阶段就拒，不出图"
+        );
+
+        let out = one(json!({ "name": "default" }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.fit_w, None, "缺省不约束");
+        assert_eq!(req.fit_h, None);
+
+        let out = one(json!({ "name": "default", "fit_w": 584, "fit_h": 184 }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.fit_w, Some(584));
+        assert_eq!(req.fit_h, Some(184));
+
+        let out = one(json!({ "name": "default", "fit_h": 184 }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.fit_w, None, "只给一维");
+        assert_eq!(req.fit_h, Some(184));
+        let _ = std::fs::remove_dir_all(cache);
     }
 
     /// 带草稿 `ui` 的请求：草稿外观随请求到 UI 线程，结果内联、不落盘；坏参数报错。

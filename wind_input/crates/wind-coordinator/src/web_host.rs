@@ -80,6 +80,7 @@ pub trait WebDataHost {
         &self,
         ui: &toml::Value,
     ) -> anyhow::Result<crate::candidate_preview::PreviewDraft>;
+    #[allow(clippy::too_many_arguments)] // fit 两维是 RPC 契约的直排参数，打包反而遮住「可只给一维」
     fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
@@ -87,6 +88,8 @@ pub trait WebDataHost {
         scale: f32,
         kind: wind_ui_types::PreviewKind,
         draft: Option<&crate::candidate_preview::PreviewDraft>,
+        fit_w: Option<u32>,
+        fit_h: Option<u32>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply;
     /// 主题强调色两档（设置窗「主题色跟随输入法」），`name` 缺省取当前主题。
@@ -368,9 +371,13 @@ impl WebDataHost for Coordinator {
         scale: f32,
         kind: wind_ui_types::PreviewKind,
         draft: Option<&crate::candidate_preview::PreviewDraft>,
+        fit_w: Option<u32>,
+        fit_h: Option<u32>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply {
-        Coordinator::request_candidate_preview(self, theme, vertical, scale, kind, draft, cancel)
+        Coordinator::request_candidate_preview(
+            self, theme, vertical, scale, kind, draft, fit_w, fit_h, cancel,
+        )
     }
     fn theme_accent(&self, name: Option<&str>) -> Option<crate::theme_query::ThemeAccent> {
         Coordinator::theme_accent(self, name)

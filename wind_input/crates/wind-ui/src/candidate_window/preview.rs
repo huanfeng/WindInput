@@ -74,6 +74,10 @@ impl CandidateWindow {
         if !(req.scale.is_finite() && req.scale > 0.0) {
             return Err(format!("缩放比例无效：{}", req.scale));
         }
+        // fit 参数是正整数（RPC 层挡住 0 与非整数）；这里挡内部 API 直调，防折算时除零歧义。
+        if req.fit_w == Some(0) || req.fit_h == Some(0) {
+            return Err("fit_w / fit_h 只能是正整数（收到 0）".to_string());
+        }
         // 草稿外观：字体先换到渲染器上（全局字族 / 默认字重 / 字体方案是渲染器状态，不在主题里），
         // 画完换回；其余覆盖只进本帧的输入，不碰窗口状态。
         // 工具栏预览不走字体替换：实时工具栏用固定字族字号（[`crate::toolbar::FONT_FAMILY`]），
@@ -177,7 +181,7 @@ impl CandidateWindow {
             min_window_height_vertical: a.min_size[3],
             min_rows: a.min_size[4],
         });
-        let inp = CandidateSceneInput {
+        let mut inp = CandidateSceneInput {
             candidates: &req.candidates,
             preedit: &req.preedit,
             preedit_caret: req.preedit.len(),
@@ -204,13 +208,21 @@ impl CandidateWindow {
             showing: true,
             allowed: false,
         };
-        // 每张图各报各的皮肤告警（跨图去重会让第二次预览同一个坏主题时日志里什么也没有）。
-        self.preview_scene.skin_warned.borrow_mut().clear();
-        // 独立的图片 / 阴影缓存，画完即丢：不清掉实时窗口的源图与图集，临时目录的路径也不留下。
-        let scene_state = &mut self.preview_scene;
-        let frame = crate::view::with_isolated_paint_caches(|| {
-            scene::render_candidate(scene_state, &inp, clock, !cfg!(ext_presenter))
-        });
+        // fit 折算要先有自然逻辑尺寸：它就是本渲染在同一请求输入下的产出（含草稿尺寸下限、
+        // 横竖排与字号等），所以按请求 scale 渲第一遍测出 n；折算出放大（r > 1）时把 scale
+        // 提到 scale × r 重渲第二遍——矢量内容高倍率渲染是锐利的，设置端 Contain 后不再
+        // 双线性放大。r = 1 时只渲一遍，路径与不带 fit 的旧请求完全一致。
+        let mut frame = render_preview_pass(&mut self.preview_scene, &inp, clock);
+        let r = wind_ui_types::preview_fit_ratio(
+            req.fit_w,
+            req.fit_h,
+            frame.width as f32 / req.scale,
+            frame.height as f32 / req.scale,
+        );
+        if r > 1.0 {
+            inp.scale = req.scale * r;
+            frame = render_preview_pass(&mut self.preview_scene, &inp, clock);
+        }
         let rgba = frame.to_rgba();
         let mut png = Vec::new();
         {
@@ -250,11 +262,15 @@ impl CandidateWindow {
         let cells = crate::toolbar::expand_cells(&req.toolbar_items, &state);
         let skin = crate::toolbar::ToolbarSkin::from_theme(&req.theme);
         let dims = crate::toolbar::ToolbarDims::from_theme(&req.theme);
-        let frame = crate::toolbar::toolbar_frame(&dims, req.scale, req.vertical, cells.len());
+        // fit 折算：toolbar_frame 是纯函数，scale = 1 直接给逻辑尺寸 n，不用先渲一遍。
+        let n = crate::toolbar::toolbar_frame(&dims, 1.0, req.vertical, cells.len());
+        let r = wind_ui_types::preview_fit_ratio(req.fit_w, req.fit_h, n.w as f32, n.h as f32);
+        let s = req.scale * r;
+        let frame = crate::toolbar::toolbar_frame(&dims, s, req.vertical, cells.len());
         let mut buf = vec![0u8; frame.w as usize * frame.h as usize * 4];
         let renderer = crate::text::dwrite::TextRenderer::new(
             crate::toolbar::FONT_FAMILY,
-            crate::toolbar::Toolbar::FONT_PX * req.scale,
+            crate::toolbar::Toolbar::FONT_PX * s,
         )?;
         // 预防性隔离：toolbar 绘制目前走的路径不进图片/绘制缓存，包上这层是给
         // 将来加缓存上保险——现在没有实际隔离收益，别把它当成已生效的防线。
@@ -292,6 +308,21 @@ impl CandidateWindow {
     }
 }
 
+/// 渲一遍候选窗预览帧（按 `inp.scale` 出物理像素）。皮肤告警每遍重报（跨遍去重会让
+/// 坏主题在第二遍里无声），绘制缓存隔离——预览不进也不清实时窗口的图片 / 阴影缓存。
+/// 拿 `&mut CandidateScene` 而不是窗口：`inp` 里已借了窗口的其它字段（文字后端等），
+/// 拿整个窗口会撞借用。
+fn render_preview_pass(
+    scene_state: &mut super::CandidateScene,
+    inp: &CandidateSceneInput,
+    clock: AnimClock,
+) -> wind_scene::candidate::CandidateFrame {
+    scene_state.skin_warned.borrow_mut().clear();
+    crate::view::with_isolated_paint_caches(|| {
+        scene::render_candidate(scene_state, inp, clock, !cfg!(ext_presenter))
+    })
+}
+
 #[cfg(all(test, mock_text))]
 mod tests {
     use super::*;
@@ -325,6 +356,8 @@ mod tests {
             candidates: vec![cand("你好", ""), cand("拟好", ""), cand("你", "wqiy")],
             vertical,
             scale,
+            fit_w: None,
+            fit_h: None,
             toolbar_items: Vec::new(),
             toolbar_state: None,
             appearance: None,
@@ -501,6 +534,79 @@ mod tests {
         assert!(w.render_preview(&req).is_err());
     }
 
+    /// fit 目标框：缺省旧行为不变（与不带 fit 的旧请求同尺寸）；fit = 自然尺寸时倍率 1、
+    /// 同图；fit 放大按 Contain 比重渲（封顶 3）；只给一维按该维算；fit 小于自然不缩小；
+    /// fit = 0 报错。
+    ///
+    /// 放大档断言用 ±5% 区间：布局各环节的 ceil / 取整在倍率下有累计量化差（scale_eff=2
+    /// 的物理尺寸 ≠ scale=1 基准 × 2 的精确整数倍，实测偏差最大 ~3.7%），5% 是留了余量的
+    /// 实测上限——设置端 Contain 只缩小或 1:1，图略大略小不伤锐利度。
+    #[test]
+    fn fit_scales_output_without_touching_content_layout() {
+        let dirs = vec![themes_dir()];
+        let theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        let mut w = new_window();
+        let (base_req, _rx) = request(theme.clone(), false, 1.0);
+        let base = w.render_preview(&base_req).unwrap();
+        let (bw, bh) = (base.width, base.height);
+        assert!(bw > bh);
+        let near = |got: u32, want: f32, why: &str| {
+            let d = (got as f32 - want).abs() / want;
+            assert!(d <= 0.05, "{why}：got {got}，want {want}（偏差 {d:.1}%）");
+        };
+
+        // fit = 自然尺寸 → 倍率 1，逐字节同图。
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.fit_w = Some(bw);
+        req.fit_h = Some(bh);
+        let one = w.render_preview(&req).unwrap();
+        assert_eq!((one.width, one.height), (bw, bh), "fit = 自然尺寸 → 倍率 1");
+        assert_eq!(
+            decode(&one).into_raw(),
+            decode(&base).into_raw(),
+            "同倍率同图"
+        );
+
+        // 两维 ×2 → 出图 ≈2 倍。
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.fit_w = Some(bw * 2);
+        req.fit_h = Some(bh * 2);
+        let two = w.render_preview(&req).unwrap();
+        near(two.width, 2.0 * bw as f32, "fit ×2 → 出图 ≈2 倍（宽）");
+        near(two.height, 2.0 * bh as f32, "fit ×2 → 出图 ≈2 倍（高）");
+
+        // 异常大的 fit 封顶 3。
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.fit_w = Some(bw * 10);
+        req.fit_h = Some(bh * 10);
+        let capped = w.render_preview(&req).unwrap();
+        near(capped.width, 3.0 * bw as f32, "封顶 3（宽）");
+        near(capped.height, 3.0 * bh as f32, "封顶 3（高）");
+
+        // 只给一维按该维算，另一维随 Contain 同倍率。
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.fit_w = Some(bw * 2);
+        let wide = w.render_preview(&req).unwrap();
+        near(wide.width, 2.0 * bw as f32, "只给一维（宽）");
+        near(wide.height, 2.0 * bh as f32, "只给一维（高）");
+
+        // fit 小于自然尺寸：不缩小，仍 1:1。
+        let (mut req, _rx) = request(theme.clone(), false, 1.0);
+        req.fit_w = Some(bw / 2);
+        req.fit_h = Some(bh / 2);
+        let small = w.render_preview(&req).unwrap();
+        assert_eq!(
+            (small.width, small.height),
+            (bw, bh),
+            "fit 小于自然 → 不缩小"
+        );
+
+        // fit = 0 报错（内部 API 直调的纵深防御；RPC 层同样挡）。
+        let (mut req, _rx) = request(theme, false, 1.0);
+        req.fit_w = Some(0);
+        assert!(w.render_preview(&req).is_err(), "fit = 0 报错");
+    }
+
     fn toolbar_request(theme: wind_theme::Resolved, vertical: bool) -> CandidatePreviewRequest {
         let (mut req, _rx) = request(theme, vertical, 1.0);
         req.kind = PreviewKind::Toolbar;
@@ -557,6 +663,38 @@ mod tests {
             decode(&base).into_raw(),
             decode(&cand).into_raw(),
             "工具栏与候选窗预览应是两种画面"
+        );
+    }
+
+    /// 工具栏预览同样吃 fit：fit 放大按 toolbar_frame 折算（纯几何，scale 直接进 Dim
+    /// 解析），出图 ≈ 目标倍率；画面非空。
+    #[test]
+    fn toolbar_preview_fit_scales_output() {
+        let dirs = vec![themes_dir()];
+        let theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        let mut w = new_window();
+        let base = w
+            .render_preview(&toolbar_request(theme.clone(), false))
+            .unwrap();
+        let (bw, bh) = (base.width, base.height);
+
+        let mut req = toolbar_request(theme, false);
+        req.fit_w = Some(bw * 2);
+        req.fit_h = Some(bh * 2);
+        let two = w.render_preview(&req).unwrap();
+        let near = |got: u32, want: f32, why: &str| {
+            let d = (got as f32 - want).abs() / want;
+            assert!(d <= 0.05, "{why}：got {got}，want {want}（偏差 {d:.1}%）");
+        };
+        near(two.width, 2.0 * bw as f32, "toolbar fit ×2（宽）");
+        near(two.height, 2.0 * bh as f32, "toolbar fit ×2（高）");
+        assert!(
+            image::load_from_memory_with_format(&two.png, image::ImageFormat::Png)
+                .unwrap()
+                .to_rgba8()
+                .pixels()
+                .any(|p| p.0[3] > 0),
+            "画面应有内容"
         );
     }
 

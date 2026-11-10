@@ -64,6 +64,34 @@ pub fn theme_index_label(theme_labels: &[String], i: usize) -> String {
     (i + 1).to_string()
 }
 
+/// fit 目标框折算渲染倍率的上限：防异常大的 fit 撑爆 PNG（本意只是「设置端 Contain 后
+/// 不发糊」，不是无界放大）。
+pub const MAX_FIT_RATIO: f32 = 3.0;
+
+/// 按 fit 目标框折算渲染倍率：`r = clamp(min(fit_w/n_w, fit_h/n_h), 1, [MAX_FIT_RATIO])`，
+/// 只给一维就按给的那维算。`n_*` 是该形态的自然逻辑尺寸（渲染端取：candidate = 该请求下
+/// 候选窗的自然窗口尺寸，toolbar = toolbar_frame 的逻辑尺寸）。自然尺寸非正或 fit ≤ 0
+/// （应被上游校验挡住的异常值）时返回 1，不放大——fit 是出图更锐利的优化，不能让它把图撑爆。
+pub fn preview_fit_ratio(
+    fit_w: Option<u32>,
+    fit_h: Option<u32>,
+    natural_w: f32,
+    natural_h: f32,
+) -> f32 {
+    let one = |fit: Option<u32>, n: f32| {
+        if n <= 0.0 {
+            return None; // 异常自然尺寸：不放大（fit 是优化，不能让它把图撑爆）。
+        }
+        fit.filter(|f| *f > 0).map(|f| f as f32 / n)
+    };
+    let r = match (one(fit_w, natural_w), one(fit_h, natural_h)) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(r), None) | (None, Some(r)) => r,
+        (None, None) => 1.0,
+    };
+    r.clamp(1.0, MAX_FIT_RATIO)
+}
+
 /// `kind = Toolbar` 的固定样本状态（与 [`PREVIEW_CANDIDATES`] 同一条约定：样本值写死，
 /// 改动即旧图失效）。中文模式、标签「中」、无大写锁定、标点/全角默认、简繁关、软键盘关、
 /// 输入不被阻——工具栏预览不应跟着真机状态变，格式随 `ui.toolbar` 走。
@@ -139,6 +167,11 @@ pub struct CandidatePreviewRequest {
 
     /// DPI 缩放。
     pub scale: f32,
+    /// 目标框逻辑尺寸（`fit_w` / `fit_h` 参数，可只给其一；`None` = 不约束，出图与旧请求
+    /// 一致）。渲染端按 `min(fit/n)` 的 Contain 比折算渲染倍率（clamp 到 1..=[MAX_FIT_RATIO]）
+    /// 重渲染，设置端 Contain 时只缩小或 1:1，不再双线性放大发糊。
+    pub fit_w: Option<u32>,
+    pub fit_h: Option<u32>,
     /// 设置端草稿外观；`None` = 用渲染端窗口当前的外观状态（与实时候选窗一致）。
     pub appearance: Option<PreviewAppearance>,
     /// 回执：渲染端处理完回送一次；不支持预览的渲染端直接丢掉请求（发送端随之断开）。
@@ -214,6 +247,46 @@ mod tests {
         );
         assert_eq!(PreviewKind::parse(""), None);
         assert_eq!(PreviewKind::parse("cand"), None);
+    }
+
+    /// fit 折算：缺省 = 1；Contain 比取两维 min、只给一维按该维算；clamp 到 1..=3；
+    /// 自然尺寸非正与 fit ≤ 0 的异常值不放大（防撑爆，正常调用到不了这里）。
+    #[test]
+    fn fit_ratio_clamps_contain_ratio() {
+        let n = (240.0, 64.0);
+        assert_eq!(preview_fit_ratio(None, None, n.0, n.1), 1.0, "缺省不放大");
+        assert_eq!(
+            preview_fit_ratio(Some(240), Some(64), n.0, n.1),
+            1.0,
+            "fit = 自然尺寸 → 倍率 1"
+        );
+        assert_eq!(
+            preview_fit_ratio(Some(480), Some(128), n.0, n.1),
+            2.0,
+            "两维取 min"
+        );
+        assert_eq!(
+            preview_fit_ratio(Some(960), Some(128), n.0, n.1),
+            2.0,
+            "窄的一维说了算"
+        );
+        assert_eq!(
+            preview_fit_ratio(Some(480), None, n.0, n.1),
+            2.0,
+            "只给一维按该维算"
+        );
+        assert_eq!(
+            preview_fit_ratio(Some(2400), Some(640), n.0, n.1),
+            3.0,
+            "封顶 3"
+        );
+        assert_eq!(
+            preview_fit_ratio(Some(120), Some(64), n.0, n.1),
+            1.0,
+            "fit 小于自然 → 不缩小，仍 1:1"
+        );
+        assert_eq!(preview_fit_ratio(Some(480), None, 0.0, 64.0), 1.0);
+        assert_eq!(preview_fit_ratio(Some(0), None, n.0, n.1), 1.0);
     }
 
     #[test]
