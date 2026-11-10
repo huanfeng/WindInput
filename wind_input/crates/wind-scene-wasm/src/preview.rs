@@ -1819,6 +1819,79 @@ mod tests {
         }
     }
 
+    /// 暗色窗体图与亮色尺寸不同：告警、窗体改用亮色图（几何同亮色），尺寸一致的装饰照换暗色。
+    #[test]
+    fn mismatched_dark_frame_falls_back_to_light_image() {
+        let (mut p, _) = preview();
+        let (toml, assets) = light_dark_theme(20);
+        p.set_theme(&toml, "", assets).unwrap();
+        let light = p.render(&dark(false)).unwrap();
+        assert!(
+            light.warnings.is_empty(),
+            "亮色不校验：{:?}",
+            light.warnings
+        );
+        let f = p.render(&dark(true)).unwrap();
+        assert_eq!(
+            f.warnings,
+            ["skin: frame 的暗色图 20x20 与亮色图 16x16 尺寸不同，改用亮色图"]
+        );
+        assert!(count_px(&f, LIGHT[0]) > 0 && count_px(&f, DARK[0]) == 0);
+        assert!(count_px(&f, DARK[1]) > 0 && count_px(&f, DARK[2]) > 0);
+        let (s, ls) = (f.skin.unwrap(), light.skin.unwrap());
+        assert_eq!((s.min_size, s.axis_x), (ls.min_size, ls.axis_x));
+        // 装饰主图同理；附加源本就按装饰尺寸铺，不受此限。
+        let (toml, mut assets) = light_dark_theme(16);
+        assets[3].1 = png(8, 8, DARK[1]);
+        assets[5].1 = png(9, 9, DARK[2]);
+        p.set_theme(&toml, "", assets).unwrap();
+        let f = p.render(&dark(true)).unwrap();
+        assert_eq!(
+            f.warnings,
+            ["skin: dot 的暗色图 8x8 与亮色图 6x6 尺寸不同，改用亮色图"]
+        );
+        assert!(count_px(&f, LIGHT[1]) > 0 && count_px(&f, DARK[1]) == 0);
+        assert!(count_px(&f, DARK[0]) > 0 && count_px(&f, DARK[2]) > 0);
+        let d = f.skin.unwrap().decor;
+        assert!(
+            d.iter().all(|d| (d.rect.w, d.rect.h) == (6.0, 6.0)),
+            "{d:?}"
+        );
+    }
+
+    /// 暗色窗体图读不出、亮色读得出：告警、改用亮色图，皮肤照常（不退回普通窗口）。
+    #[test]
+    fn unreadable_dark_frame_falls_back_to_light_image() {
+        let (mut p, _) = preview();
+        let (toml, mut assets) = light_dark_theme(16);
+        assets.remove(1);
+        p.set_theme(&toml, "", assets).unwrap();
+        let f = p.render(&dark(true)).unwrap();
+        assert_eq!(f.warnings, ["skin: frame 的暗色图读不出，改用亮色图"]);
+        assert!(f.skin.is_some(), "皮肤照常");
+        assert!(count_px(&f, LIGHT[0]) > 0 && count_px(&f, DARK[1]) > 0);
+    }
+
+    /// 暗色窗体图是 SVG：不拿亮色顶替，交给窗体的 SVG 告警（暗色下回退普通窗口）。
+    #[test]
+    fn svg_dark_frame_keeps_svg_warning() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#f00"/></svg>"##.to_vec();
+        let (toml, mut assets) = light_dark_theme(16);
+        assets[1] = ("assets/frame-dark.svg".into(), svg);
+        let toml = toml.replace("assets/frame-dark.png", "assets/frame-dark.svg");
+        let (mut p, _) = preview();
+        p.set_theme(&toml, "", assets).unwrap();
+        let f = p.render(&dark(true)).unwrap();
+        assert!(f.skin.is_none(), "暗色回退普通窗口");
+        assert!(
+            f.warnings.iter().any(|w| w.contains("SVG")),
+            "{:?}",
+            f.warnings
+        );
+        assert!(!f.warnings.iter().any(|w| w.contains("改用亮色图")));
+        assert!(p.render(&dark(false)).unwrap().skin.is_some(), "亮色照常");
+    }
+
     /// 两帧 GIF（各 100ms），4×4 纯色。
     fn gif2(a: [u8; 4], b: [u8; 4]) -> Vec<u8> {
         use ::image::codecs::gif::{GifEncoder, Repeat};

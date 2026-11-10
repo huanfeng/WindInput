@@ -203,6 +203,45 @@ free 布局下不做上翻交换：槽位由皮肤决定，候选窗翻到光标
   对齐点时保护带不随之重算。
 - `position_offset` 继续叠加，语义不变。
 
+### 3.7 明暗
+
+皮肤没有专门的暗色写法：图片引用先查 `[resources]`（`theme_assets::asset_path`），而 `[resources]` 的
+`{ light, dark }` 在求值时按明暗选一侧（缺一侧回退另一侧）。把皮肤图登记成资源键即可随明暗换图：
+
+```toml
+[resources]
+frame = { light = "assets/frame-light.png", dark = "assets/frame-dark.png" }
+pet   = { light = "assets/pet-light.gif",   dark = "assets/pet-dark.gif" }
+pet_idle = { light = "assets/idle-light.gif", dark = "assets/idle-dark.gif" }
+
+[skin.horizontal.frame]
+image = "frame"
+stretch_x = [[300, 500]]
+[[skin.horizontal.decor]]
+image = "pet"
+states = { idle = { image = "pet_idle" } }  # 附加源同样可以是亮暗资源键
+```
+
+适用于窗体 `image`、srcset 各份、装饰 `image`、`states` / `on` 的 `{ image = .. }` 附加源。皮肤的其余字段
+（切片、拉伸带、`content`、槽位、装饰锚点与偏移、`states` 的帧区间）**只写一份**，亮暗共用。
+
+- 约束：同一资源键的亮暗两图**像素尺寸相同**；动图的帧数也应一致（帧区间片段按帧号取，暗色帧数不够的
+  片段按 §16 的越界规则丢弃）。
+- 尺寸不一致：暗色求值时，窗体图与装饰主图若与亮色那张尺寸不同，告警
+  `skin: <引用> 的暗色图 WxH 与亮色图 WxH 尺寸不同，改用亮色图`，该图在暗色下改用亮色那张（几何与亮色
+  完全一致）。不按各自尺寸求几何：拉伸带与 `content` 是按某一张图的像素写的，换个尺寸要么切错、要么
+  内容框错位，且窗口形状随明暗跳变；也不回退普通窗口——只是一张图画错，没必要把整套皮肤丢掉。以亮色为准：
+  作者通常先按亮色图定切片。附加源本就按装饰尺寸铺满，不受此限。装饰显式写了 `size` 时同样按主图尺寸
+  校验（几何虽不依赖它，规则保持一条）。
+- 暗色图读不出、亮色读得出：同样告警 `skin: <引用> 的暗色图读不出，改用亮色图` 并改用亮色那张，不让整套
+  皮肤退回普通窗口。亮暗任一侧是 SVG 时不顶替，照旧交给 SVG 告警（§3.4）。
+- 落点：`Resolved::light_resources`（暗色求值时记下亮暗不同的键的亮色路径），
+  `CandidateScene::skin_image_path` 比对两图尺寸：`ImageCache::header_size` 只读文件头（不解码、源图不常驻；
+  已解过的图直接答 `dims`），结果存独立的 `header_sizes` 表，随闲置回收一起清。
+- 切换时机：实时窗口在明暗变化时由协调器 `push_theme` 重新求值下发（`UiCommand::SetTheme`），几何每帧
+  按当前主题重求；图片缓存与动画帧缓存按解析后的路径区分，亮暗来回切不串。装饰状态机不因切明暗重建。
+  编辑器预览（wasm）一次求出亮暗两份，按 `RenderOpts.dark` 取用。
+
 ## 4. 鼠标
 
 | 区域 | P1 | P2 |

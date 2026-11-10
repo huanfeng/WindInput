@@ -102,6 +102,11 @@ pub fn image_src_size(path: &str) -> Option<(u32, u32)> {
     IMAGE_CACHE.with(|c| c.borrow_mut().src_size(path))
 }
 
+/// 只读文件头的图片尺寸，见 [`crate::image_cache::ImageCache::header_size`]。
+pub fn image_header_size(path: &str) -> Option<(u32, u32)> {
+    IMAGE_CACHE.with(|c| c.borrow_mut().header_size(path))
+}
+
 /// 皮肤位图的最小尺寸与倍率下自然尺寸，见 [`crate::image_cache::ImageCache::skin_metrics`]。
 pub fn skin_metrics(
     path: &str,

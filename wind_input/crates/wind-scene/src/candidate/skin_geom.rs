@@ -1115,6 +1115,36 @@ impl CandidateScene {
         changed
     }
 
+    /// 皮肤图（窗体、装饰主图）的源：按明暗取 `[resources]` 的变体。几何按图的像素尺寸求，
+    /// 暗色那张与亮色尺寸不同、或读不出而亮色读得出时，告警、改用亮色那张——拉伸带、`content`
+    /// 只写一份，换个尺寸就对不上；整套退回普通窗口又不值。只读文件头比尺寸（结果缓存）。
+    /// 任一侧是 SVG 照旧返回暗色那张，交给调用方的 SVG 告警。
+    fn skin_image_path(&self, theme: &wind_theme::Resolved, reference: &str) -> Option<String> {
+        let path = crate::theme_assets::asset_path(theme, reference)?;
+        let Some(light) = crate::theme_assets::light_asset_path(theme, reference) else {
+            return Some(path);
+        };
+        if crate::image_cache::is_svg_source(&path) || crate::image_cache::is_svg_source(&light) {
+            return Some(path);
+        }
+        let Some((lw, lh)) = crate::view::image_header_size(&light) else {
+            return Some(path);
+        };
+        match crate::view::image_header_size(&path) {
+            Some((dw, dh)) if (dw, dh) == (lw, lh) => Some(path),
+            Some((dw, dh)) => {
+                self.warn_skin_once(format!(
+                    "skin: {reference} 的暗色图 {dw}x{dh} 与亮色图 {lw}x{lh} 尺寸不同，改用亮色图"
+                ));
+                Some(light)
+            }
+            None => {
+                self.warn_skin_once(format!("skin: {reference} 的暗色图读不出，改用亮色图"));
+                Some(light)
+            }
+        }
+    }
+
     fn compute_skin_geom(&self, inp: &CandidateSceneInput, anim_allowed: bool) -> Option<SkinGeom> {
         let skin = inp.theme.skin.as_ref()?;
         let v = skin.variant(inp.vertical, inp.preedit_embedded)?;
@@ -1123,7 +1153,7 @@ impl CandidateScene {
         // 渲染缩放：设备像素 / dp。
         let render_scale = k * skin.density;
         let (src_ref, src_density) = pick_source(v, render_scale);
-        let frame_path = crate::theme_assets::asset_path(inp.theme, src_ref)?;
+        let frame_path = self.skin_image_path(inp.theme, src_ref)?;
         if crate::image_cache::is_svg_source(&frame_path) {
             tracing::warn!("skin: 窗体图须为位图（SVG 不支持多段切片），回退普通窗口");
             return None;
@@ -1165,7 +1195,7 @@ impl CandidateScene {
             .iter()
             .enumerate()
             .filter_map(|(i, d)| {
-                let main = crate::theme_assets::asset_path(inp.theme, &d.image)?;
+                let main = self.skin_image_path(inp.theme, &d.image)?;
                 // 装饰走位图图集（`skin_fill` 对 SVG 不出图）：明说，别静默不画。同窗体。
                 let svg = |path: &str, name: &str| {
                     let is = crate::image_cache::is_svg_source(path);

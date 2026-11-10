@@ -356,6 +356,7 @@ mod tests {
             views_vertical: None,
             behavior: Default::default(),
             resources: Default::default(),
+            light_resources: Default::default(),
             asset_dirs: Vec::new(),
             langbar_text: Default::default(),
             skin: None,

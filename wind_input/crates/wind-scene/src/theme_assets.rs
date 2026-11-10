@@ -29,6 +29,13 @@ pub fn asset_path(theme: &Resolved, reference: &str) -> Option<String> {
     Some(reference.to_string())
 }
 
+/// 暗色求值时，资源键亮暗两侧不是同一张图：返回亮色那张的源串（同 [`asset_path`] 的形态）；
+/// 亮色求值、不是资源键、两侧同图时 None。
+pub fn light_asset_path(theme: &Resolved, reference: &str) -> Option<String> {
+    let p = theme.light_resources.get(reference)?;
+    Some(crate::assets::source_key(p).unwrap_or_else(|| p.clone()))
+}
+
 /// RvImage → 渲染用 ViewImage（reference 解析为绝对路径）。
 ///
 /// 配了定位字段（见 [`positioned`]）才带 `place`，否则铺满节点——与改前逐像素一致。

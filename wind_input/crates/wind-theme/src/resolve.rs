@@ -60,6 +60,9 @@ pub struct Resolved {
     pub behavior: ResolvedBehavior,
     /// 图片资源：名→绝对路径 / data: URI（相对路径已按 theme 目录解析，按 is_dark 选变体）。
     pub resources: HashMap<String, String>,
+    /// 暗色求值时，亮暗两侧路径不同的资源 → 亮色那侧的路径（同 [`Self::resources`] 已解析）。
+    /// 亮色求值时为空。皮肤据此校验亮暗两图尺寸一致，不一致改用亮色图。
+    pub light_resources: HashMap<String, String>,
     /// 资产搜索目录（self + base 链）：用于视图节点里**字面** image ref（如 _base 的 chevron.svg，
     /// 不在 resources 注册表）解析为绝对路径——派生主题继承 base 的图标需到 base 目录查找。
     pub asset_dirs: Vec<std::path::PathBuf>,
@@ -406,6 +409,16 @@ pub fn resolve(theme: &Theme, is_dark: bool, asset_dirs: &[std::path::PathBuf]) 
                 .map(|p| (name.clone(), resolve_image_path(p, theme_dir)))
         })
         .collect();
+    let light_resources = theme
+        .resources
+        .iter()
+        .filter(|_| is_dark)
+        .filter_map(|(name, ref_ld)| {
+            let light = ref_ld.select(false)?;
+            (Some(light) != ref_ld.select(true))
+                .then(|| (name.clone(), resolve_image_path(light, theme_dir)))
+        })
+        .collect();
 
     Resolved {
         is_dark,
@@ -414,6 +427,7 @@ pub fn resolve(theme: &Theme, is_dark: bool, asset_dirs: &[std::path::PathBuf]) 
         views_vertical,
         behavior,
         resources,
+        light_resources,
         asset_dirs: asset_dirs.to_vec(),
         langbar_text: resolve_langbar_text(theme.colors.as_ref()),
         skin: theme
@@ -1286,6 +1300,10 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                 .unwrap()
                 .ends_with("panel-dark.png")
         );
+        // 暗色另记亮色那侧（皮肤校验亮暗尺寸用）；亮色求值不记，亮暗同图的键也不记。
+        assert!(d.light_resources["panel"].ends_with("panel.png"));
+        assert!(!d.light_resources.contains_key("mark"));
+        assert!(r.light_resources.is_empty());
         // 其它窗口也吃九宫格
         let status = r.views.status.as_ref().expect("status rvnode");
         assert!(status.bg_image.is_some());

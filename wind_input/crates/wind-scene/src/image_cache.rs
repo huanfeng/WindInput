@@ -440,6 +440,9 @@ pub struct ImageCache {
     atlas_warns: HashMap<(ImgId, u32), Vec<String>>,
     /// 源图尺寸。皮肤路径建完图集后丢源图，尺寸仍要能答。
     dims: HashMap<ImgId, (u32, u32)>,
+    /// 只读文件头得到的位图尺寸（[`Self::header_size`]），None = 读不出。与 `dims` 分开：`dims`
+    /// 只记解得出的图，`src_size` 对解不出的图答 None。
+    header_sizes: HashMap<ImgId, Option<(u32, u32)>>,
     /// 皮肤窗体 / 装饰的目标位图，计入 `fill_bytes`。
     skin_fills: HashMap<SkinFillKey, Option<Pixmap>>,
     /// 以下动画三表按源串索引、不随 30 秒闲置回收（那会清掉 `ids`），只在换主题、预算溢出、
@@ -555,6 +558,7 @@ impl ImageCache {
         self.atlases.clear();
         self.atlas_warns.clear();
         self.dims.clear();
+        self.header_sizes.clear();
         self.skin_fills.clear();
         self.not_animated.clear();
         self.src_bytes = 0;
@@ -660,6 +664,23 @@ impl ImageCache {
         };
         self.dims.insert(id, d);
         Some(d)
+    }
+
+    /// 只读文件头的尺寸，不解码、不让源图常驻（皮肤比对亮暗两图尺寸用）。SVG 同 [`Self::src_size`]
+    /// 取文档尺寸；已解过的位图直接答 `dims`。读不出（缺文件、认不出格式）返回 None，结果缓存。
+    pub fn header_size(&mut self, path: &str) -> Option<(u32, u32)> {
+        if is_svg(path) {
+            return self.src_size(path);
+        }
+        self.touch();
+        let id = self.id_of(path);
+        if let Some(d) = self.dims.get(&id) {
+            return Some(*d);
+        }
+        *self
+            .header_sizes
+            .entry(id)
+            .or_insert_with(|| header_dims(path))
     }
 
     /// 皮肤图集：源图按倍率 `k_micro / 1e6` 缩好的预乘 RGBA。建好后丢掉源图。
@@ -2153,6 +2174,25 @@ mod tests {
             .pixel(0, 0)
             .expect("像素");
         assert_eq!((px.blue(), px.green(), px.alpha()), (255, 0, 255));
+    }
+
+    /// 读头取尺寸：不解码、源图不常驻；读不出答 None 且缓存；闲置回收一并清。
+    #[test]
+    fn header_size_reads_header_without_decoding() {
+        let uri = png_data_uri(3, 2, [255, 0, 0, 255]);
+        let mut cache = ImageCache::new();
+        assert_eq!(cache.header_size(&uri), Some((3, 2)));
+        assert_eq!(cache.src_stats(), (0, 0), "只读头，不解码");
+        assert_eq!(cache.header_size("/nonexistent/x.png"), None);
+        assert_eq!(cache.header_sizes.len(), 2, "读不出也缓存");
+        assert_eq!(
+            cache.header_size(&svg_data_uri(4, 5, "#0000ff")),
+            Some((4, 5)),
+            "SVG 取文档尺寸"
+        );
+        let late = crate::clock::now() + IDLE_EVICT_AFTER + Duration::from_secs(1);
+        assert!(cache.evict_if_idle(late));
+        assert!(cache.header_sizes.is_empty(), "闲置回收一并清");
     }
 
     /// 九宫中段**平铺**：目标变宽只是多重复几次，纹理本身不缩放。
