@@ -8,6 +8,8 @@
 use serde::Deserialize;
 use toml::Value;
 
+use crate::rvnode::Flip;
+
 /// 皮肤变体键。顺序无意义；嵌入变体缺省回退对应的非嵌入变体。
 pub const SKIN_VARIANTS: [&str; 4] = [
     "horizontal",
@@ -79,6 +81,9 @@ pub struct SkinFrame {
     pub fill: Option<String>,
     #[serde(default)]
     pub srcset: Vec<SrcSetEntry>,
+    /// 窗体**不支持** `flip`：拉伸带与 content 按源图写，翻了像素就和它们对不上。只为认出这个
+    /// 写错的键、告警后忽略（serde 对未知键静默，作者会以为生效了）。
+    pub flip: Option<Value>,
 }
 
 /// 拉伸带：`[from, to]` 或 `{ from, to, fill }`。
@@ -132,6 +137,9 @@ pub struct SkinDecor {
     pub opacity: Option<f32>,
     /// 动画装饰的帧率，覆盖文件自带帧时长；非正数忽略。
     pub fps: Option<f32>,
+    /// 镜像：x（左右）| y（上下）| xy；缺省不翻。只翻像素：anchor / pivot / offset / size /
+    /// 命中矩形按源图写、不变。作用于本装饰的全部帧，含 `states` / `on` 引用的附加文件。
+    pub flip: Option<String>,
     /// 状态片段：名 → `{ frames = "a-b" }` 或 `{ image = "x" }`（设计 §16）。逐条宽松解析：
     /// 写错的条目求值时 warn 并丢弃，不连累整份皮肤。
     #[serde(default)]
@@ -338,6 +346,8 @@ pub struct RvSkinDecor {
     pub opacity: f32,
     /// 覆盖动画文件自带帧时长的帧率；None = 用文件自带的。
     pub fps: Option<f32>,
+    /// 镜像（各源合成到目标尺寸后再翻）。
+    pub flip: Flip,
     /// 事件状态机；没写 `states` / `on` 时为空（整个文件循环，同 P4）。
     pub anim: RvDecorAnim,
 }
@@ -703,6 +713,9 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
         .map(|e| (e.image.clone(), e.density))
         .collect();
     srcset.sort_by(|a, b| a.1.total_cmp(&b.1));
+    if f.flip.is_some() {
+        tracing::warn!("skin: frame 不支持 flip（拉伸带与 content 按源图写），忽略");
+    }
     let frame_density = positive(f.density).unwrap_or(density);
     let frame = RvSkinFrame {
         image: f.image.clone(),
@@ -735,6 +748,13 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                     DecorHit::Drag
                 }
             };
+            let flip = match d.flip.as_deref() {
+                None => Flip::NONE,
+                Some(s) => Flip::parse(s).unwrap_or_else(|| {
+                    tracing::warn!("skin: 未知 decor.flip {s:?}（只认 x / y / xy），按不翻");
+                    Flip::NONE
+                }),
+            };
             Some(RvSkinDecor {
                 src_index,
                 image: d.image.clone(),
@@ -747,6 +767,7 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                 hit,
                 opacity: d.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
                 fps: positive(d.fps),
+                flip,
                 anim: resolve_decor_anim(&d.states, &d.on),
             })
         })
@@ -1005,6 +1026,41 @@ hit = "pass"
         assert_eq!(fps(""), None, "缺省用文件自带帧时长");
         assert_eq!(fps("fps = 0"), None);
         assert_eq!(fps("fps = -3"), None);
+    }
+
+    #[test]
+    fn decor_flip_accepts_x_y_xy_and_defaults_to_none() {
+        let flip = |v: &str| {
+            let src = format!(
+                "[skin.horizontal.frame]\nimage = \"f\"\n[[skin.horizontal.decor]]\nimage = \"d\"\nanchor = \"frame.top_right\"\noffset = [-5, 3]\n{v}"
+            );
+            parse(&src).unwrap().horizontal.unwrap().decor[0].clone()
+        };
+        assert_eq!(flip("").flip, Flip::NONE);
+        assert_eq!(flip("flip = \"x\"").flip, Flip { x: true, y: false });
+        assert_eq!(flip("flip = \"y\"").flip, Flip { x: false, y: true });
+        assert_eq!(flip("flip = \"xy\"").flip, Flip { x: true, y: true });
+        assert_eq!(flip("flip = \"left\"").flip, Flip::NONE, "非法值按不翻");
+        // 只翻像素：定位字段照源图写的原样。
+        let (a, b) = (flip(""), flip("flip = \"x\""));
+        assert_eq!((a.anchor, a.pivot, a.offset), (b.anchor, b.pivot, b.offset));
+        // 非字符串是类型错误，与 hit / anchor 同一口径。
+        let v: Value = "[skin.horizontal.frame]\nimage = \"f\"\n[[skin.horizontal.decor]]\nimage = \"d\"\nflip = true"
+            .parse()
+            .unwrap();
+        assert!(v["skin"].clone().try_into::<Skin>().is_err());
+    }
+
+    /// 窗体不开放 flip：写了只告警，窗体照常求值。
+    #[test]
+    fn frame_flip_is_not_supported() {
+        let src = "[skin.horizontal.frame]\nimage = \"f\"\nflip = \"x\"\nstretch_x = [[1, 2]]";
+        let v: Value = src.parse().unwrap();
+        let s: Skin = v["skin"].clone().try_into().unwrap();
+        let frame = s.horizontal.as_ref().and_then(|v| v.frame.as_ref());
+        assert!(frame.unwrap().flip.is_some(), "认得出这个键才能告警");
+        let h = resolve_skin(&s).unwrap().horizontal.unwrap();
+        assert_eq!(h.frame.image, "f");
     }
 
     fn decor_anim(body: &str) -> RvDecorAnim {

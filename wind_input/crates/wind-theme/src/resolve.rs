@@ -8,7 +8,7 @@
 
 use crate::palette::{Rgba, parse_hex, resolve_palette};
 use crate::rvnode::{
-    DEFAULT_ACCENT_BAR_HEIGHT_RATIO, RvEdges, RvGradient, RvImage, RvNode, RvViews,
+    DEFAULT_ACCENT_BAR_HEIGHT_RATIO, Flip, RvEdges, RvGradient, RvImage, RvNode, RvViews,
 };
 use crate::schema::{Ld, Theme, ViewGradient, ViewImage, ViewNode, Views};
 use std::collections::HashMap;
@@ -146,6 +146,13 @@ fn to_rv_image(im: &ViewImage, palette: &HashMap<String, Rgba>, is_dark: bool) -
         h: im.size.h,
         tint: resolve_color(im.tint.as_ref(), palette, is_dark),
         disabled_tint: resolve_color(im.disabled_tint.as_ref(), palette, is_dark),
+        flip: match im.flip.as_deref() {
+            None => Flip::NONE,
+            Some(s) => Flip::parse(s).unwrap_or_else(|| {
+                tracing::warn!("主题图片 flip 取值非法 {s:?}（只认 x / y / xy），按不翻");
+                Flip::NONE
+            }),
+        },
     }
 }
 
@@ -1047,6 +1054,53 @@ background = { image = { ref = \"q.png\", mode = \"nine_slice\" } }
         // 不写的主题保持原样：全部拉伸，既有观感不被新字段改掉。
         let item = v.item.bg_image.expect("item 背景图");
         assert_eq!(item.slice_repeat, [false, false]);
+    }
+
+    /// `flip` 走到背景图、图层与翻页箭头；非法值按不翻，不连累整份主题。
+    #[test]
+    fn flip_reaches_bg_image_layers_and_arrows() {
+        let text = "\
+[window]
+background = { image = { ref = \"p.png\", flip = \"x\" } }
+layers = [{ ref = \"a.png\", flip = \"y\" }, { ref = \"b.png\", flip = \"xy\" }, { ref = \"c.png\" }]
+
+[item]
+background = { image = { ref = \"q.png\", flip = \"z\" } }
+
+[footer_bar]
+prev_image = { ref = \"prev.svg\", flip = \"x\" }
+";
+        let value: toml::Value = toml::from_str(text).unwrap();
+        let theme: Theme = crate::normalize::normalize_theme(value).try_into().unwrap();
+        let v = resolve(&theme, false, &[data_dir()]).views;
+        let x = Flip { x: true, y: false };
+        assert_eq!(v.window.bg_image.expect("窗口背景图").flip, x);
+        let layers: Vec<Flip> = v.window.layers.iter().map(|l| l.flip).collect();
+        assert_eq!(
+            layers,
+            [
+                Flip { x: false, y: true },
+                Flip { x: true, y: true },
+                Flip::NONE
+            ]
+        );
+        assert_eq!(
+            v.item.bg_image.expect("item 背景图").flip,
+            Flip::NONE,
+            "非法值按不翻"
+        );
+        assert_eq!(v.footer_bar.prev_image.expect("翻页箭头").flip, x);
+    }
+
+    #[test]
+    fn flip_names_round_trip() {
+        for s in ["x", "y", "xy"] {
+            assert_eq!(Flip::parse(s).and_then(Flip::name), Some(s));
+        }
+        assert_eq!(Flip::NONE.name(), None);
+        for bad in ["", "X", "yx", "both", "none"] {
+            assert_eq!(Flip::parse(bad), None, "{bad:?}");
+        }
     }
 
     /// 分隔线节点：颜色缺省取调色板 `separator`，`[divider]` 可覆盖颜色 / 线粗 / 开关。
