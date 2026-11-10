@@ -76,7 +76,7 @@ else
     printf '未装 wasm-opt（binaryen），跳过 -Oz\n'
 fi
 
-(cd "$REPO_ROOT" && git describe --always --dirty --abbrev=12) > "$OUT/VERSION"
+(cd "$REPO_ROOT" && git describe --always --dirty --long --abbrev=12) > "$OUT/VERSION"
 
 size_of() { wc -c < "$1" | tr -d ' '; }
 gz_of() { gzip -9 -c "$1" | wc -c | tr -d ' '; }
