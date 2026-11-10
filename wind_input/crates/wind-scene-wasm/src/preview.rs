@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(f.rgba.len(), (f.width * f.height * 4) as usize);
         assert!(f.width > f.height, "横排是宽条：{}x{}", f.width, f.height);
         assert!(opaque_px(&f) > 0, "窗口底色应画出");
-        for want in ["你好", "拟好", "wqiy", "nihao"] {
+        for want in ["你好", "拟好", "wqiy", "ni'hao"] {
             font_of(&c, want);
         }
         assert!(

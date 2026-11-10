@@ -6,10 +6,16 @@ use crate::CandidateItem;
 
 /// 预览渲染器版本：示例内容、排版或绘制（wind-scene / wind-ui 的候选窗管线）有改动、会让同一份
 /// 输入画出不同像素时递增。它进预览缓存键，旧图随之失效。
-pub const CANDIDATE_PREVIEW_RENDER_VERSION: u32 = 1;
+pub const CANDIDATE_PREVIEW_RENDER_VERSION: u32 = 2;
 
-/// 示例编码。
-pub const PREVIEW_PREEDIT: &str = "nihao";
+/// 示例编码：拼音带音节分隔符 `'`，显示时按 `ui.candidate.syllable_separator` 换（见
+/// [`preview_preedit`]）。
+pub const PREVIEW_PREEDIT: &str = "ni'hao";
+
+/// 按音节分隔符显示的示例编码（`sep` 可为空串）。与实机编码栏同一换法：只换 `'`。
+pub fn preview_preedit(sep: &str) -> String {
+    PREVIEW_PREEDIT.replace('\'', sep)
+}
 
 /// 示例候选（正文, 注释）：按每页候选数取前若干个，第三个带注释。改动要递增
 /// [`CANDIDATE_PREVIEW_RENDER_VERSION`]（缓存键不含示例内容本身）。设置端预览（协调器）与
@@ -132,5 +138,8 @@ mod tests {
         let labels: Vec<_> = all.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["a", "2", "3", "4", "5", "6", "7", "8", "9", "0"]);
         assert_eq!(all[2].comment.as_str(), "wqiy");
+        assert_eq!(preview_preedit("'"), "ni'hao");
+        assert_eq!(preview_preedit(" "), "ni hao");
+        assert_eq!(preview_preedit(""), "nihao");
     }
 }

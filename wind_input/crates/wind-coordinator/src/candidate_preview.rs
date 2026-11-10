@@ -134,7 +134,7 @@ impl Coordinator {
         let (tx, rx) = mpsc::sync_channel(1);
         let req = CandidatePreviewRequest {
             theme,
-            preedit: PREVIEW_PREEDIT.to_string(),
+            preedit: wind_ui_types::preview_preedit(&cand.syllable_separator),
             candidates,
             vertical,
             scale,
@@ -168,6 +168,7 @@ pub struct PreviewDraft {
 /// 字体名、链长的上限（草稿是不可信输入）。
 const MAX_FONT_NAME_CHARS: usize = 256;
 const MAX_FONT_CHAIN: usize = 32;
+const MAX_SEPARATOR_CHARS: usize = 8;
 
 /// 逐层下钻草稿：静态注册表登记过的键（`field`；动态的注释寻址键不收——`Config` 里没有同名
 /// 字段）整值过注册表校验（Map / 结构数组也按整值），通过的收进 `out`；未登记的表继续下钻，
@@ -219,6 +220,9 @@ fn clamp_preview_ui(ui: &mut wind_config::config::UiConfig) {
         *v = (*v).min(1200);
     }
     c.min_rows = c.min_rows.min(9);
+    if let Some((i, _)) = c.syllable_separator.char_indices().nth(MAX_SEPARATOR_CHARS) {
+        c.syllable_separator.truncate(i);
+    }
     let f = &mut ui.font;
     f.weight = f.weight.clamp(0, 950);
     let cut = |s: &mut String| {
@@ -255,7 +259,7 @@ mod tests {
                 _ => continue,
             }
         };
-        assert_eq!(req.preedit, PREVIEW_PREEDIT);
+        assert_eq!(req.preedit, PREVIEW_PREEDIT, "出厂分隔符就是 '");
         assert!(req.vertical);
         assert_eq!(req.scale, 1.5);
         let labels: Vec<_> = req.candidates.iter().map(|c| c.label.as_str()).collect();
@@ -319,6 +323,7 @@ mod tests {
             min_rows = 99
             per_page = 3
             shadow = "off"
+            syllable_separator = " "
             bogus = 1
             [font]
             weight = 5000
@@ -335,6 +340,7 @@ mod tests {
         assert_eq!(d.appearance.font_weight, 950);
         assert_eq!(d.appearance.min_size[4], 3, "最小行数按每页数封顶");
         assert!(!d.appearance.shadow && !d.comments);
+        assert_eq!(d.candidate.syllable_separator, " ");
         assert_eq!(
             d.appearance.font_scripts,
             vec![("latin".to_string(), vec!["A".to_string(), "B".to_string()])]

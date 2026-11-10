@@ -1181,7 +1181,7 @@ mod tests {
         let (c, seen, held) = coord_with_fake_ui(true);
         let cache = tmp("draft");
         let ui = json!({
-            "candidate": { "font_size": 999, "per_page": 3, "layout": "vertical" },
+            "candidate": { "font_size": 999, "per_page": 3, "layout": "vertical", "syllable_separator": " " },
             "font": { "family": "Noto Sans", "weight": "粗" },
             "comment": { "enabled": false },
             "no_such": 1,
@@ -1217,6 +1217,7 @@ mod tests {
         let req = held.lock().unwrap().pop().unwrap();
         assert!(req.vertical, "layout 缺省取草稿的排列");
         assert_eq!(req.candidates.len(), 3);
+        assert_eq!(req.preedit, "ni hao", "示例编码按草稿的音节分隔符显示");
         assert!(
             req.candidates.iter().all(|c| c.comment.is_empty()),
             "注释关"
