@@ -1162,15 +1162,17 @@ mod tests {
             while let Ok(cmd) = rx.recv() {
                 if let UiCommand::RenderCandidatePreview(req) = cmd {
                     let n = s.fetch_add(1, Ordering::SeqCst) as u32 + 1;
+                    // 先存请求再回执：调用方一收到回执就会去 `held` 里取这条请求。
+                    let (tx, vertical) = (req.reply.clone(), req.vertical);
+                    hd.lock().unwrap().push(req);
                     if reply {
-                        let w = if req.vertical { 7 } else { 100 + n };
-                        let _ = req.reply.try_send(Ok(CandidatePreviewImage {
+                        let w = if vertical { 7 } else { 100 + n };
+                        let _ = tx.try_send(Ok(CandidatePreviewImage {
                             width: w,
                             height: 30,
                             png: fake_png(w, 30),
                         }));
                     }
-                    hd.lock().unwrap().push(req);
                 }
             }
         });
@@ -1400,11 +1402,6 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(leftovers, 0, "草稿预览不写缓存");
 
-        // 假 UI 线程先回执、后存请求：等它存好。
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while held.lock().unwrap().is_empty() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
         let req = held.lock().unwrap().pop().unwrap();
         assert!(req.vertical, "layout 缺省取草稿的排列");
         assert_eq!(req.candidates.len(), 3);
