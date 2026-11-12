@@ -144,6 +144,8 @@ fn dict_report_json(out: &dict_transfer_api::DictImportOutcome) -> Value {
                 o.insert("added".into(), json!(w.added));
                 o.insert("updated".into(), json!(w.updated));
                 o.insert("unchanged".into(), json!(w.unchanged));
+                // 导入不撤删除规则：入了库但被候选调整隐藏、打不出来的条数。
+                o.insert("hiddenByShadow".into(), json!(s.hidden_by_shadow));
             } else {
                 o.insert("imported".into(), json!(s.imported));
             }
@@ -2888,12 +2890,13 @@ pub trait WebDataRpc: WebDataHost {
                 promoted.push((r.code, r.text));
             }
         }
+        // 批量转正不撤删除规则，只报其中被隐藏的条数。
         let words: Vec<(&str, &str)> = promoted
             .iter()
             .map(|(c, t)| (c.as_str(), t.as_str()))
             .collect();
-        user_words_api::clear_deleted_for_added(self, &schema, &words);
-        Ok(json!(promoted.len() as u64))
+        let hidden = user_words_api::count_hidden_by_shadow(self, &schema, &words);
+        Ok(json!({ "promoted": promoted.len() as u64, "hiddenByShadow": hidden }))
     }
 
     fn web_temp_clear(&self, params: &Value) -> anyhow::Result<Value> {
@@ -5179,10 +5182,10 @@ outside: rare
         );
     }
 
-    /// 设置页改词（`dict.update` 的 upsert）与手动转正（`temp.promote` / `temp.promoteAll`）
-    /// 是显式加词：撤掉同码同文的删除规则，别的词的删除规则不动。
+    /// 设置页改词（`dict.update` 的 upsert）与单条手动转正（`temp.promote`）是显式加词：撤掉同码
+    /// 同文的删除规则，别的词的删除规则不动。全部转正（`temp.promoteAll`）是批量操作：不撤，报数。
     #[test]
-    fn explicit_update_and_promote_clear_delete_rules() {
+    fn single_update_and_promote_clear_but_promote_all_only_counts() {
         let c = coord("readd_clear");
         let store = c.user_store().expect("有 store");
         for (code, text) in [("nihao", "你好"), ("haoya", "好呀"), ("shijie", "世界")] {
@@ -5217,12 +5220,23 @@ outside: rare
         .unwrap();
         assert!(deleted("haoya").is_empty(), "手动转正应撤删除规则");
 
-        c.web_data_rpc(
-            "temp.promoteAll",
-            &serde_json::json!({ "schemaId": "pinyin" }),
-        )
-        .unwrap();
-        assert!(deleted("shijie").is_empty(), "全部转正应撤删除规则");
+        // 全部转正是批量操作：不撤，只报数
+        let r = c
+            .web_data_rpc(
+                "temp.promoteAll",
+                &serde_json::json!({ "schemaId": "pinyin" }),
+            )
+            .unwrap();
+        assert_eq!(
+            r,
+            serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }),
+            "转正 1 条、其中 1 条被隐藏"
+        );
+        assert_eq!(
+            deleted("shijie"),
+            vec!["世界".to_string()],
+            "全部转正不撤删除规则"
+        );
     }
 
     /// 临时词库与用户词库同款：列表显示带空格，remove / promote 收到后各自拆回扁平码。

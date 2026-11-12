@@ -265,6 +265,9 @@ pub struct DictSectionOutcome {
     pub skipped: usize,
     /// 准入契约的分类统计（只有词条段过闸：`userWords` / `tempWords`）。
     pub contract: Option<EntryContractStats>,
+    /// 本段导入的词里被候选调整删除规则隐藏的条数（仅 `userWords`，其余段恒 0）。导入不撤规则，
+    /// 这些词入了库但打不出来，靠这个数提示用户去恢复。
+    pub hidden_by_shadow: usize,
 }
 
 /// 导入结果。
@@ -333,7 +336,9 @@ pub fn import<H: WebDataHost + ?Sized>(
                 rows
             },
         )?;
-        clear_deleted_for_imported(h, &data_schema, &added);
+        // 批量导入不撤删除规则（一批里混着用户删过的词，不该悄悄全复活），只报数。
+        // 段里若带 shadow 规则，按导入之后的规则算。
+        let hidden = hidden_among_imported(h, &data_schema, &added);
         let sections = rep
             .sections
             .into_iter()
@@ -343,6 +348,11 @@ pub fn import<H: WebDataHost + ?Sized>(
                     .iter()
                     .position(|(k, _)| *k == s.key)
                     .map(|i| contract.swap_remove(i).1),
+                hidden_by_shadow: if s.key == DictSection::UserWords.key() {
+                    hidden
+                } else {
+                    0
+                },
                 key: s.key,
                 words: s.words,
                 imported: s.imported,
@@ -364,7 +374,7 @@ pub fn import<H: WebDataHost + ?Sized>(
         }
         let c = store.import_user_words(&data_schema, &rows)?;
         let added: Vec<(String, String)> = rows.iter().map(stored_key).collect();
-        clear_deleted_for_imported(h, &data_schema, &added);
+        let hidden = hidden_among_imported(h, &data_schema, &added);
         Ok(DictImportOutcome {
             format: fmt,
             sections: vec![DictSectionOutcome {
@@ -376,6 +386,7 @@ pub fn import<H: WebDataHost + ?Sized>(
                 // 同口径；按类别的分列在 `contract` 里。
                 skipped: skipped + contract.rejected + contract.unfilled_skipped,
                 contract: Some(contract),
+                hidden_by_shadow: hidden,
             }],
         })
     }
@@ -389,17 +400,17 @@ fn stored_key(r: &WordIo) -> (String, String) {
     )
 }
 
-/// 导入是用户显式要这些词：撤掉同码同文的删除规则（见 [`crate::user_words_api::clear_deleted_for_added`]）。
-fn clear_deleted_for_imported<H: WebDataHost + ?Sized>(
+/// 导入的词里有几条被候选调整的删除规则隐藏（见 [`user_words_api::count_hidden_by_shadow`]）。
+fn hidden_among_imported<H: WebDataHost + ?Sized>(
     h: &H,
     data_schema: &str,
     added: &[(String, String)],
-) {
+) -> usize {
     let words: Vec<(&str, &str)> = added
         .iter()
         .map(|(c, t)| (c.as_str(), t.as_str()))
         .collect();
-    user_words_api::clear_deleted_for_added(h, data_schema, &words);
+    user_words_api::count_hidden_by_shadow(h, data_schema, &words)
 }
 
 #[cfg(test)]

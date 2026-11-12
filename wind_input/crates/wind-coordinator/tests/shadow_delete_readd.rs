@@ -3,7 +3,7 @@
 //! 删系统词走候选调整（shadow）的 `delete` 规则，读端 `apply_shadow` 按文本过滤、不看来源，
 //! 于是加回来的用户词被同一条规则一并滤掉——「加了词但永远打不出」。修法：显式加词成功后
 //! 清掉同 (数据方案, 编码, 文本) 的 `delete` 规则；自动学词 / 自动晋升**不清**（删过的词
-//! 不该因为又打到一次就复活）。
+//! 不该因为又打到一次就复活），批量导入也不清、只报数。
 //!
 //! 每条用例都先断言「删除确实生效」再加词，否则加词前候选本就在，断言出现等于没测。
 //! 最终候选一律经 Coordinator 取（引擎位次 ≠ 界面位次）。
@@ -273,9 +273,47 @@ fn mixed_readd_via_dict_add_shows_again() {
     assert_back(&cfg, &store, "aa", &victim, "混输下 dict.add 加词");
 }
 
-/// 导入（TSV 走 Rime/TSV 分支）：导入的词同样是用户显式要的。
+/// 导入是批量操作：**不撤**删除规则（一批里混着用户删过的词，不该悄悄全复活），只在结果的
+/// `userWords` 段报「其中几条被隐藏」。`extra` 是一条没被删过的词，确认计数不是导入条数。
+fn assert_import_keeps_rule_and_counts(
+    cfg: &Config,
+    store: &Arc<Store>,
+    victim: &str,
+    out: &wind_coordinator::dict_transfer_api::DictImportOutcome,
+    how: &str,
+) {
+    let words = out
+        .sections
+        .iter()
+        .find(|s| s.key == "userWords")
+        .unwrap_or_else(|| panic!("{how}：结果应有 userWords 段，实际 {out:?}"));
+    assert_eq!(words.imported, 2, "前提：{how}导入两条，实际 {words:?}");
+    assert_eq!(
+        words.hidden_by_shadow, 1,
+        "{how}：两条里一条被隐藏，实际 {words:?}"
+    );
+    assert!(
+        store
+            .get_user_words("wubi86", "aa")
+            .unwrap()
+            .iter()
+            .any(|r| r.text == victim),
+        "前提：{how}把词写进了用户词库"
+    );
+    let after = candidates(cfg, store, "aa");
+    assert!(
+        !after.iter().any(|t| t == victim),
+        "{how}不撤删除规则，`{victim}` 应仍隐藏，实际 {after:?}"
+    );
+    assert!(
+        after.iter().any(|t| t == "测词"),
+        "未删过的导入词照常出现，实际 {after:?}"
+    );
+}
+
+/// 导入（TSV 走 Rime/TSV 分支）。
 #[test]
-fn import_tsv_clears_delete_rule() {
+fn import_tsv_keeps_delete_rule_and_counts_hidden() {
     if !has_schemas() {
         eprintln!("跳过：缺 build_dev 词库");
         return;
@@ -284,21 +322,21 @@ fn import_tsv_clears_delete_rule() {
     let store = fresh_store("ct_import_tsv");
     let (victim, _) = delete_second(&cfg, &store, "aa");
     let coord = open(&cfg, &store);
-    wind_coordinator::dict_transfer_api::import(
+    let out = wind_coordinator::dict_transfer_api::import(
         &*coord,
         "wubi86",
-        &format!("aa\t{victim}\t100\n"),
+        &format!("aa\t{victim}\t100\naa\t测词\t100\n"),
         false,
         false,
         None,
     )
     .unwrap();
-    assert_back(&cfg, &store, "aa", &victim, "TSV 导入");
+    assert_import_keeps_rule_and_counts(&cfg, &store, &victim, &out, "TSV 导入");
 }
 
-/// 导入（WindDict 多段分支）：文件只带用户词段。
+/// 导入（WindDict 多段分支）。
 #[test]
-fn import_wdict_clears_delete_rule() {
+fn import_wdict_keeps_delete_rule_and_counts_hidden() {
     if !has_schemas() {
         eprintln!("跳过：缺 build_dev 词库");
         return;
@@ -308,13 +346,15 @@ fn import_wdict_clears_delete_rule() {
     let (victim, _) = delete_second(&cfg, &store, "aa");
     let src = fresh_store("ct_import_wdict_src");
     src.add_user_word("wubi86", "aa", &victim, 100, 0).unwrap();
+    src.add_user_word("wubi86", "aa", "测词", 100, 0).unwrap();
     let text = src
         .export_dict_wdict("wubi86", "2026-01-01T00:00:00+08:00")
         .unwrap();
     let coord = open(&cfg, &store);
-    wind_coordinator::dict_transfer_api::import(&*coord, "wubi86", &text, false, false, None)
-        .unwrap();
-    assert_back(&cfg, &store, "aa", &victim, "wdict 导入");
+    let out =
+        wind_coordinator::dict_transfer_api::import(&*coord, "wubi86", &text, false, false, None)
+            .unwrap();
+    assert_import_keeps_rule_and_counts(&cfg, &store, &victim, &out, "wdict 导入");
 }
 
 /// 翻页找候选并选中，返回上屏文本（None = 仍在组合区）。

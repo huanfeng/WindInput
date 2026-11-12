@@ -264,38 +264,50 @@ impl Store {
         self.modify_shadow(schema, code, |rec| rec.apply_remove(word, cand_id))
     }
 
-    /// 撤销 `words`（存储域的 `(扁平码, 文本)`）对应的删除规则，返回撤掉的条数。显式加词后调用：
-    /// 读端按文本过滤、不看来源，规则留着会把加回来的同文用户词一并滤掉。
+    /// `words`（存储域的 `(扁平码, 文本)`）命中的删除规则，每条为 `(规则键, 文本, 命中的词条码)`。
     ///
     /// 规则键是**输入码**，与词条码不一定同形（全拼保留手动分隔符 `'`、ü 可能敲成 `v`），由
-    /// `key_forms` 给出键在词条码域里的候选形态，任一形态命中即撤。只动 `delete`，置顶规则不碰。
-    /// 命中按文件现状判（先 sync，手改优先），无命中时不写文件。
+    /// `key_forms` 给出键在词条码域里的候选形态，任一形态命中即算。只看 `delete`，置顶不算。
+    /// 按文件现状判（先 sync，手改优先）。
+    fn deleted_hits(
+        &self,
+        schema: &str,
+        words: &[(&str, &str)],
+        key_forms: &dyn Fn(&str) -> Vec<String>,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let want: std::collections::HashSet<(&str, &str)> = words.iter().copied().collect();
+        let t = self.shadow_table(schema)?;
+        t.sync();
+        let doc = t.doc();
+        let mut out = Vec::new();
+        for r in doc.rows.iter().filter(|r| doc.get(r, "action") == "delete") {
+            let (code, text) = (doc.get(r, "code"), doc.get(r, "text"));
+            if let Some(k) = key_forms(code)
+                .into_iter()
+                .find(|k| want.contains(&(k.as_str(), text)))
+            {
+                out.push((code.to_string(), text.to_string(), k));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 撤销 `words` 命中的删除规则（判据见 [`Self::deleted_hits`]），返回撤掉的条数。单条显式加词后
+    /// 调用：读端按文本过滤、不看来源，规则留着会把加回来的同文用户词一并滤掉。无命中时不写文件。
     pub fn clear_deleted_for_words(
         &self,
         schema: &str,
         words: &[(&str, &str)],
         key_forms: &dyn Fn(&str) -> Vec<String>,
     ) -> anyhow::Result<usize> {
-        if words.is_empty() {
-            return Ok(0);
-        }
-        let want: std::collections::HashSet<(&str, &str)> = words.iter().copied().collect();
-        let hits: std::collections::HashSet<(String, String)> = {
-            let t = self.shadow_table(schema)?;
-            t.sync();
-            let doc = t.doc();
-            doc.rows
-                .iter()
-                .filter(|r| doc.get(r, "action") == "delete")
-                .map(|r| (doc.get(r, "code"), doc.get(r, "text")))
-                .filter(|(code, text)| {
-                    key_forms(code)
-                        .iter()
-                        .any(|k| want.contains(&(k.as_str(), *text)))
-                })
-                .map(|(code, text)| (code.to_string(), text.to_string()))
-                .collect()
-        };
+        let hits: std::collections::HashSet<(String, String)> = self
+            .deleted_hits(schema, words, key_forms)?
+            .into_iter()
+            .map(|(code, text, _)| (code, text))
+            .collect();
         if hits.is_empty() {
             return Ok(0);
         }
@@ -307,6 +319,21 @@ impl Store {
                 .retain(|d| !hits.contains(&(code.to_string(), d.clone())));
         })?;
         Ok(hits.len())
+    }
+
+    /// `words` 里被删除规则隐藏的那些（返回 `(词条码, 文本)`），只读。批量导入 / 全部转正不撤规则，
+    /// 用它在结果里报数。
+    pub fn words_hidden_by_shadow(
+        &self,
+        schema: &str,
+        words: &[(&str, &str)],
+        key_forms: &dyn Fn(&str) -> Vec<String>,
+    ) -> anyhow::Result<std::collections::HashSet<(String, String)>> {
+        Ok(self
+            .deleted_hits(schema, words, key_forms)?
+            .into_iter()
+            .map(|(_, text, word_code)| (word_code, text))
+            .collect())
     }
 
     /// 取某 code 的 Shadow 规则（无则 None）。按键路径：只读内存，不碰文件、不碰 redb。
@@ -595,6 +622,26 @@ mod tests {
             s.get_shadow_rules("py", "nh").unwrap().unwrap().deleted,
             vec!["你好".to_string()],
             "别的编码（简拼）上的删除不动"
+        );
+
+        // 只读计数：按词条去重（`nh` 上的规则不算 `nihao` 的），不改文件
+        s.delete_shadow("py", "nihao", "你好").unwrap();
+        s.delete_shadow("py", "ni'hao", "你好").unwrap();
+        let hidden = s
+            .words_hidden_by_shadow(
+                "py",
+                &[("nihao", "你好"), ("nihao", "拟好"), ("hao", "好")],
+                &strip,
+            )
+            .unwrap();
+        assert_eq!(
+            hidden.len(),
+            2,
+            "「你好」两条规则只算一个词，加「拟好」，实际 {hidden:?}"
+        );
+        assert!(
+            s.get_shadow_rules("py", "ni'hao").unwrap().is_some(),
+            "计数不撤规则"
         );
 
         // 恒等归一：`ni'hao` 不再等于 `nihao`
