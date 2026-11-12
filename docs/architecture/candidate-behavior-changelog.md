@@ -37,8 +37,11 @@
     输入原文那一条不受屏蔽：`raw_candidate = always` 照常钉首位；`in_dict` 档下被屏蔽的词仍算「词库里的词」，
     打全它（大小写跟随下打 `Help` 亦然）原文条照出，空格 / 回车上屏原文。单字母仍只按编码隐藏。
   - 英文用户词 / 临时词：删掉这段文字在所有编码下的条目、词频与联想，并屏蔽；自动造词不再把它学回来。
-  - 头部原文候选（所打原文 / 大小写变形）：前：删除写一条读端永远命中不了的规则 → 后：在词库里按「精确 → 忽略
-    大小写」找到对应词就按那个词删（打 `usa` 删的是词库的 `USA`）；找不到（`wxyzqk`）删除灰掉、热键不执行。
+  - 头部原文候选（所打原文 / 大小写变形，无码）：前：删除写一条读端永远命中不了的规则 → 后：只有字面就是所打原文、
+    且词库有字面相同的词时按那个词删；单独出现的原文条（`wxyzqk`；`usa`，词库只有 `USA`；屏蔽 `ok` 后的原文条 `ok`）
+    与大小写变形条（`Us` 下的 `us` / `US`）删除灰掉、热键不执行，不再连带屏蔽同码的别的写法。
+  - 临英里置顶 / 删除后候选窗当场按临英重建：前：按主输入路重建、读空缓冲，候选窗被清空 → 后：原文条与其余候选留着。
+  - 码表 / 拼音系统词库里的模板词条（`$Y年$M月$D日`）删除：规则记模板源文本，读端认展开后的候选，删了当场不出、跨日有效。
   - 大小写跟随 / CapsLock 档下的置顶、删除、恢复默认：前：规则按显示形态（`Held`、`HELP`）落键、读端比词库原文，
     点了不生效、「恢复默认」恒灰 → 后：按词库原文落键，当场生效。
   - 拼音、码表、混输里混入的英文用户词 / 临时词：前：删除找错桶，一条都删不到 → 后：去 `english` 桶按编码真删。
@@ -49,7 +52,8 @@
     混输拼音段分段上屏拼出被屏蔽的词不再学进拼音桶。码表段的删除仍按编码。
 - 触发条件：出厂即生效
 - 回退旧行为：无（设计变更 / 缺陷修复）
-- 钉住的测试：`wind-coordinator` `tests/english_block_word.rs`、`tests/mixed_pinyin_block_word.rs`；
+- 钉住的测试：`wind-coordinator` `tests/english_block_word.rs`、`tests/mixed_pinyin_block_word.rs`、
+  `tests/template_system_word_delete.rs`；`wind-candidate` `shadow::tests::deletes_by_template_source`；
   `wind-store` `shadow::tests::english_block_rows_are_case_sensitive`；
   `wind-coordinator` `english_candidates::tests::in_dict_counts_blocked_word`
 - 来源：内部（§8 第 11、12 条）
