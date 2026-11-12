@@ -163,7 +163,67 @@ pub fn add<H: WebDataHost + ?Sized>(
         .user_store()
         .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
     let (code, boundary) = normalize_add_code(h, &schema, code, text);
-    store.add_user_word(&schema, &code, text, weight, boundary)
+    store.add_user_word(&schema, &code, text, weight, boundary)?;
+    clear_deleted_for_added(h, &schema, &[(&code, text)]);
+    Ok(())
+}
+
+/// **显式**加词（加词对话框 / 快捷加词 / 命令栏 `dict.add`、设置页加词改词、手动转正、导入）
+/// 成功后的收口：撤掉同 (数据方案, 编码, 文本) 的候选调整删除规则。
+///
+/// 读端 `apply_shadow` 按文本过滤、不看来源：用户删过某个系统词后再手动加回同码同文的词，
+/// 规则不撤就永远打不出来。**自动**学词 / 自动晋升不走这里——删过的词不该因为又打到一次就复活。
+///
+/// - `data_schema`：词条落库的数据方案（已折叠）。活跃方案的规则桶与之不同时（混输：规则在
+///   混输自己的桶、词落主码表 / 拼音）一并清活跃方案那个桶。
+/// - `words`：存储域的 `(扁平码, 文本)`。规则键是输入码（`Coordinator::shadow_code_of`）：码表
+///   与词条码同形；全拼保留手动分隔符 `'`，故拼音桶的键去掉 `'` 再比；双拼完整转换时键已是
+///   连写全拼，与词条码同形。简拼、前缀等别的编码上的规则不动。
+///
+/// 清理失败只记日志：词已经加进去了，不能因为规则文件被外部编辑占着就报加词失败。
+pub fn clear_deleted_for_added<H: WebDataHost + ?Sized>(
+    h: &H,
+    data_schema: &str,
+    words: &[(&str, &str)],
+) {
+    let Some(store) = h.user_store() else {
+        return;
+    };
+    if words.is_empty() {
+        return;
+    }
+    let em = h.engine_mgr();
+    let mut buckets = vec![data_schema.to_string()];
+    let active = em.active_schema_id();
+    let feeds_active = [
+        wind_candidate::CandidateSource::CodeTable,
+        wind_candidate::CandidateSource::Pinyin,
+    ]
+    .into_iter()
+    .any(|src| em.write_data_schema_id(&active, src).as_deref() == Some(data_schema));
+    if feeds_active {
+        let b = em.data_schema_id(&active);
+        if !buckets.contains(&b) {
+            buckets.push(b);
+        }
+    }
+    // 只去分隔符，不做 ü 归一：双拼未完整转换时键是原始击键，`v` 是布局键，归一会把它改成
+    // 另一个码（见 `normalize_u_umlaut` 的 ⚠）。
+    let pinyin = data_schema == wind_engine::manager::PINYIN_DATA_SCHEMA;
+    let key_norm = |k: &str| -> String {
+        if pinyin {
+            k.replace('\'', "")
+        } else {
+            k.to_string()
+        }
+    };
+    for b in &buckets {
+        match store.clear_deleted_for_words(b, words, &key_norm) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!("加词：撤销 {n} 条删除规则 schema={b}"),
+            Err(e) => tracing::warn!("加词：撤销删除规则失败 schema={b}: {e}"),
+        }
+    }
 }
 
 /// 删词。`code` 接受带音节空格的显示码，`text` 是存储域真实文本。不存在静默成功。

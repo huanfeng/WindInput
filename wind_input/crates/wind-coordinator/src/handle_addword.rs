@@ -496,6 +496,7 @@ impl Coordinator {
             anyhow::bail!("混输方案主码表缺失，无法归属加词");
         };
         store.add_user_word(&schema, &code, word, ADD_WORD_WEIGHT, boundary)?;
+        crate::user_words_api::clear_deleted_for_added(self, &schema, &[(&code, word)]);
         debug!("dict.add: 已加词 {} -> {}", code, word);
         Ok(word.to_string())
     }
@@ -1191,6 +1192,11 @@ impl Coordinator {
             };
             match store.add_user_word(&schema, &code, &word, ADD_WORD_WEIGHT, boundary) {
                 Ok(_) => {
+                    crate::user_words_api::clear_deleted_for_added(
+                        self,
+                        &schema,
+                        &[(&code, &word)],
+                    );
                     // 注：dict.changed 广播在 RPC dispatch 层（EventSink），协调器不持有该 sink，
                     // 故此处不发事件——与现有 web_dict_add 一致；设置端用户词库视图重开时刷新。
                     debug!("addword: 已加词 {} -> {}", code, word);

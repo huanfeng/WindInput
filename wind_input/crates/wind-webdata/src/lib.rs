@@ -1082,6 +1082,7 @@ pub trait WebDataRpc: WebDataHost {
         if !store.update_user_word_weight(&schema, &code, text, weight)? {
             store.add_user_word(&schema, &code, text, weight, boundary)?;
         }
+        user_words_api::clear_deleted_for_added(self, &schema, &[(&code, text)]);
         Ok(json!({ "ok": true }))
     }
 
@@ -2854,7 +2855,11 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         // 列表项的 code 带音节空格（见 web_temp_list），key 是扁平的。
         let (code, _) = wind_store::wdict::split_spaced_code(code);
-        store.promote_temp_word(&schema, &code, &store_text(text))?;
+        let text = store_text(text);
+        // 手动转正是显式动作（自动晋升走 `maybe_promote_temp`，不清）。
+        if store.promote_temp_word(&schema, &code, &text)? {
+            user_words_api::clear_deleted_for_added(self, &schema, &[(&code, &text)]);
+        }
         Ok(json!({ "ok": true }))
     }
 
@@ -2877,13 +2882,18 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        let mut n = 0u64;
+        let mut promoted = Vec::new();
         for r in store.search_temp_words_prefix(&schema, "", 0)? {
             if store.promote_temp_word(&schema, &r.code, &r.text)? {
-                n += 1;
+                promoted.push((r.code, r.text));
             }
         }
-        Ok(json!(n))
+        let words: Vec<(&str, &str)> = promoted
+            .iter()
+            .map(|(c, t)| (c.as_str(), t.as_str()))
+            .collect();
+        user_words_api::clear_deleted_for_added(self, &schema, &words);
+        Ok(json!(promoted.len() as u64))
     }
 
     fn web_temp_clear(&self, params: &Value) -> anyhow::Result<Value> {
@@ -5167,6 +5177,52 @@ outside: rare
             store.get_user_words("pinyin", "nihao").unwrap().is_empty(),
             "remove 收到带空格的码须先拆再删"
         );
+    }
+
+    /// 设置页改词（`dict.update` 的 upsert）与手动转正（`temp.promote` / `temp.promoteAll`）
+    /// 是显式加词：撤掉同码同文的删除规则，别的词的删除规则不动。
+    #[test]
+    fn explicit_update_and_promote_clear_delete_rules() {
+        let c = coord("readd_clear");
+        let store = c.user_store().expect("有 store");
+        for (code, text) in [("nihao", "你好"), ("haoya", "好呀"), ("shijie", "世界")] {
+            store.delete_shadow("pinyin", code, text).unwrap();
+        }
+        store.delete_shadow("pinyin", "nihao", "拟好").unwrap();
+        store
+            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0b1001)
+            .unwrap();
+        store
+            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
+            .unwrap();
+        let deleted = |code: &str| {
+            store
+                .get_shadow_rules("pinyin", code)
+                .unwrap()
+                .map(|r| r.deleted)
+                .unwrap_or_default()
+        };
+
+        c.web_data_rpc(
+            "dict.update",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "ni hao", "text": "你好", "weight": 5 }),
+        )
+        .unwrap();
+        assert_eq!(deleted("nihao"), vec!["拟好".to_string()], "只撤「你好」");
+
+        c.web_data_rpc(
+            "temp.promote",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "hao ya", "text": "好呀" }),
+        )
+        .unwrap();
+        assert!(deleted("haoya").is_empty(), "手动转正应撤删除规则");
+
+        c.web_data_rpc(
+            "temp.promoteAll",
+            &serde_json::json!({ "schemaId": "pinyin" }),
+        )
+        .unwrap();
+        assert!(deleted("shijie").is_empty(), "全部转正应撤删除规则");
     }
 
     /// 临时词库与用户词库同款：列表显示带空格，remove / promote 收到后各自拆回扁平码。

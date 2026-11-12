@@ -264,6 +264,44 @@ impl Store {
         self.modify_shadow(schema, code, |rec| rec.apply_remove(word, cand_id))
     }
 
+    /// 撤销 `words`（存储域的 `(扁平码, 文本)`）对应的删除规则，返回撤掉的条数。显式加词后调用：
+    /// 读端按文本过滤、不看来源，规则留着会把加回来的同文用户词一并滤掉。
+    ///
+    /// 规则键是**输入码**，与词条码不一定同形（全拼保留手动分隔符 `'`），由 `key_norm` 把键
+    /// 归一到词条码的域后再比。只动 `delete`，置顶规则不碰。无命中时不写文件。
+    pub fn clear_deleted_for_words(
+        &self,
+        schema: &str,
+        words: &[(&str, &str)],
+        key_norm: &dyn Fn(&str) -> String,
+    ) -> anyhow::Result<usize> {
+        if words.is_empty() {
+            return Ok(0);
+        }
+        let want: std::collections::HashSet<(&str, &str)> = words.iter().copied().collect();
+        let hits: std::collections::HashSet<(String, String)> = {
+            let doc = self.shadow_table(schema)?.doc();
+            doc.rows
+                .iter()
+                .filter(|r| doc.get(r, "action") == "delete")
+                .map(|r| (doc.get(r, "code"), doc.get(r, "text")))
+                .filter(|(code, text)| want.contains(&(key_norm(code).as_str(), *text)))
+                .map(|(code, text)| (code.to_string(), text.to_string()))
+                .collect()
+        };
+        if hits.is_empty() {
+            return Ok(0);
+        }
+        let mut codes: Vec<&str> = hits.iter().map(|(c, _)| c.as_str()).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        self.modify_shadows(schema, &codes, &mut |code, rec| {
+            rec.deleted
+                .retain(|d| !hits.contains(&(code.to_string(), d.clone())));
+        })?;
+        Ok(hits.len())
+    }
+
     /// 取某 code 的 Shadow 规则（无则 None）。按键路径：只读内存，不碰文件、不碰 redb。
     pub fn get_shadow_rules(
         &self,
@@ -522,6 +560,44 @@ mod tests {
         let p = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// 只撤同 (码, 文) 的删除规则：同码别的词、同文别的码、置顶都不动；键经 `key_norm` 归一后比。
+    #[test]
+    fn clear_deleted_for_words_only_touches_matching_deletes() {
+        let path = tmp("wind_sh_clear_del.redb");
+        let s = Store::open(&path).unwrap();
+        s.delete_shadow("py", "nihao", "你好").unwrap();
+        s.delete_shadow("py", "nihao", "拟好").unwrap();
+        s.delete_shadow("py", "ni'hao", "你好").unwrap();
+        s.delete_shadow("py", "nh", "你好").unwrap();
+        s.pin_shadow("py", "nihao", "你号", None, 0).unwrap();
+        let strip = |k: &str| k.replace('\'', "");
+
+        assert_eq!(
+            s.clear_deleted_for_words("py", &[("nihao", "你好")], &strip)
+                .unwrap(),
+            2,
+            "`nihao` 与 `ni'hao` 两条同文删除都该撤"
+        );
+        let nihao = s.get_shadow_rules("py", "nihao").unwrap().unwrap();
+        assert_eq!(nihao.deleted, vec!["拟好".to_string()]);
+        assert_eq!(nihao.pinned.len(), 1, "置顶不动");
+        assert!(s.get_shadow_rules("py", "ni'hao").unwrap().is_none());
+        assert_eq!(
+            s.get_shadow_rules("py", "nh").unwrap().unwrap().deleted,
+            vec!["你好".to_string()],
+            "别的编码（简拼）上的删除不动"
+        );
+
+        // 恒等归一：`ni'hao` 不再等于 `nihao`
+        s.delete_shadow("wb", "a'b", "工").unwrap();
+        assert_eq!(
+            s.clear_deleted_for_words("wb", &[("ab", "工")], &|k: &str| k.to_string())
+                .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -318,6 +318,7 @@ pub fn import<H: WebDataHost + ?Sized>(
         // 准入契约注入闸口：store 拿不到引擎，求解链只能由这一层供给（同 `CodePolicy`）。
         // 逐段收集统计——两段各报各的，混成一份会把临时词的拒收算到用户词头上。
         let mut contract: Vec<(&'static str, EntryContractStats)> = Vec::new();
+        let mut added: Vec<(String, String)> = Vec::new();
         let rep = store.import_dict_sections_wdict(
             &data_schema,
             content,
@@ -326,9 +327,13 @@ pub fn import<H: WebDataHost + ?Sized>(
             &mut |sec, rows| {
                 let (rows, st) = apply_pinyin_entry_contract(h, schema_id, rows, fill_boundary);
                 contract.push((sec.key(), st));
+                if sec == DictSection::UserWords {
+                    added.extend(rows.iter().map(stored_key));
+                }
                 rows
             },
         )?;
+        clear_deleted_for_imported(h, &data_schema, &added);
         let sections = rep
             .sections
             .into_iter()
@@ -358,6 +363,8 @@ pub fn import<H: WebDataHost + ?Sized>(
             store.clear_user_words(&data_schema)?;
         }
         let c = store.import_user_words(&data_schema, &rows)?;
+        let added: Vec<(String, String)> = rows.iter().map(stored_key).collect();
+        clear_deleted_for_imported(h, &data_schema, &added);
         Ok(DictImportOutcome {
             format: fmt,
             sections: vec![DictSectionOutcome {
@@ -372,6 +379,27 @@ pub fn import<H: WebDataHost + ?Sized>(
             }],
         })
     }
+}
+
+/// 导入行的存储域键 `(扁平码, 文本)`：码拆音节空格，同 `Store::import_user_words` 落库口径。
+fn stored_key(r: &WordIo) -> (String, String) {
+    (
+        wind_store::wdict::split_spaced_code(&r.code).0,
+        r.text.clone(),
+    )
+}
+
+/// 导入是用户显式要这些词：撤掉同码同文的删除规则（见 [`crate::user_words_api::clear_deleted_for_added`]）。
+fn clear_deleted_for_imported<H: WebDataHost + ?Sized>(
+    h: &H,
+    data_schema: &str,
+    added: &[(String, String)],
+) {
+    let words: Vec<(&str, &str)> = added
+        .iter()
+        .map(|(c, t)| (c.as_str(), t.as_str()))
+        .collect();
+    user_words_api::clear_deleted_for_added(h, data_schema, &words);
 }
 
 #[cfg(test)]
