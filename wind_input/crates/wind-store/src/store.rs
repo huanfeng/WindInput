@@ -220,6 +220,9 @@ pub struct Store {
     pub(crate) shadows: Mutex<
         std::collections::HashMap<String, std::sync::Arc<wind_userdata::text::table::TextTable>>,
     >,
+    /// 各方案「屏蔽这个词」集合的缓存（`code = *` 的 delete 行），按算它时的表内容（`Arc` 指针）
+    /// 判新旧：表一换（写入 / 同步到外部改动）下次取时重算，按键路径只比一次指针。
+    pub(crate) blocked_words: Mutex<std::collections::HashMap<String, crate::shadow::BlockedCache>>,
     /// 外部编辑会话：文件绝对路径 → 会话。只在内存，重启即无。
     pub(crate) edit_sessions:
         Mutex<std::collections::BTreeMap<PathBuf, crate::external_edit::EditEntry>>,
@@ -358,6 +361,7 @@ impl Store {
             text_dir: loc.text_dir.clone(),
             legacy_done: std::sync::atomic::AtomicBool::new(loc.legacy_done),
             shadows: Mutex::new(std::collections::HashMap::new()),
+            blocked_words: Mutex::new(std::collections::HashMap::new()),
             phrase_sys: Default::default(),
             completions: Mutex::new(Default::default()),
             completion_io: Mutex::new(()),

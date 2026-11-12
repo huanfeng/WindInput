@@ -104,6 +104,22 @@ impl ShadowRecord {
 /// Shadow 文件的列。
 pub const SHADOW_COLS: &[&str] = &["code", "text", "action", "position", "cand_id"];
 
+/// 「屏蔽这个词」的规则键：`code = *` 的 `delete` 行表示该数据方案下**所有编码**都不出这段文字
+/// （拼音按文字删除，见设计 system-dict-patch-and-candidate-adjust §4a）。它不是输入码，
+/// [`Store::get_shadow_rules`] 不按它返回规则。
+pub const BLOCK_ALL_CODES: &str = "*";
+
+/// 能否按文字屏蔽：至少两个字。单字全局屏蔽等于这个字打不出，只按编码隐藏。
+pub fn is_blockable_word(text: &str) -> bool {
+    text.chars().nth(1).is_some()
+}
+
+/// 屏蔽集合缓存：算它时的表内容（只比指针）+ 结果。
+pub(crate) type BlockedCache = (
+    std::sync::Arc<wind_userdata::text::table::TableDoc>,
+    std::sync::Arc<std::collections::HashSet<String>>,
+);
+
 fn record_of_rows<'a>(
     doc: &wind_userdata::text::table::TableDoc,
     rows: impl Iterator<Item = &'a wind_userdata::text::table::TableRow>,
@@ -285,6 +301,18 @@ impl Store {
         let mut out = Vec::new();
         for r in doc.rows.iter().filter(|r| doc.get(r, "action") == "delete") {
             let (code, text) = (doc.get(r, "code"), doc.get(r, "text"));
+            // 屏蔽行不看编码：同文的词条一律算命中（单字不按文字屏蔽，同 `blocked_words`）。
+            if code == BLOCK_ALL_CODES {
+                if is_blockable_word(text) {
+                    out.extend(
+                        words
+                            .iter()
+                            .filter(|(_, t)| *t == text)
+                            .map(|(c, t)| (code.to_string(), t.to_string(), c.to_string())),
+                    );
+                }
+                continue;
+            }
             if let Some(k) = key_forms(code)
                 .into_iter()
                 .find(|k| want.contains(&(k.as_str(), text)))
@@ -337,14 +365,51 @@ impl Store {
     }
 
     /// 取某 code 的 Shadow 规则（无则 None）。按键路径：只读内存，不碰文件、不碰 redb。
+    /// 屏蔽组（[`BLOCK_ALL_CODES`]）不是输入码，不按它返回，见 [`Self::blocked_words`]。
     pub fn get_shadow_rules(
         &self,
         schema: &str,
         code: &str,
     ) -> anyhow::Result<Option<ShadowRecord>> {
+        if code == BLOCK_ALL_CODES {
+            return Ok(None);
+        }
         let doc = self.shadow_table(schema)?.doc();
         let rec = record_of_rows(&doc, doc.rows.iter().filter(|r| doc.get(r, "code") == code));
         Ok((!rec.is_empty()).then_some(rec))
+    }
+
+    /// 屏蔽这个词：写一条 `code = *` 的删除规则（该数据方案下所有编码都不出这段文字）。
+    /// 单字拒绝——见 [`is_blockable_word`]。
+    pub fn block_word(&self, schema: &str, text: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(is_blockable_word(text), "单字不能按文字屏蔽");
+        self.delete_shadow(schema, BLOCK_ALL_CODES, text)
+    }
+
+    /// 某方案被屏蔽的文字（`code = *` 的删除行，单字不算）。按键路径：只读内存，表内容不变时
+    /// 直接返回上次的结果（比一次指针）；写入或 [`Self::sync_shadows`] 换了表内容后重算。
+    pub fn blocked_words(
+        &self,
+        schema: &str,
+    ) -> anyhow::Result<std::sync::Arc<std::collections::HashSet<String>>> {
+        let doc = self.shadow_table(schema)?.doc();
+        let mut cache = self.blocked_words.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((d, set)) = cache.get(schema)
+            && std::sync::Arc::ptr_eq(d, &doc)
+        {
+            return Ok(set.clone());
+        }
+        let set: std::collections::HashSet<String> = doc
+            .rows
+            .iter()
+            .filter(|r| doc.get(r, "code") == BLOCK_ALL_CODES && doc.get(r, "action") == "delete")
+            .map(|r| doc.get(r, "text"))
+            .filter(|t| is_blockable_word(t))
+            .map(str::to_string)
+            .collect();
+        let set = std::sync::Arc::new(set);
+        cache.insert(schema.to_string(), (doc, set.clone()));
+        Ok(set)
     }
 
     /// 单个方案的 Shadow 文件重新载入；变了返回 true。
@@ -656,6 +721,68 @@ mod tests {
 
     /// 命中按文件现状判：表已载入后文件被外部改过（这里拿另一份库生成的规则文件覆盖），
     /// 不先 sync 就看不见新写进去的删除规则。
+    /// 屏蔽行（`code = *`）：进屏蔽集合、不当输入码匹配；单字不收；加词按文字撤、批量计数按文字算。
+    #[test]
+    fn block_word_rows() {
+        let path = tmp("wind_sh_block.redb");
+        let s = Store::open(&path).unwrap();
+        s.block_word("py", "时间").unwrap();
+        assert!(s.block_word("py", "是").is_err(), "单字不能按文字屏蔽");
+        s.delete_shadow("py", "shijian", "实践").unwrap();
+        let set = s.blocked_words("py").unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("时间"));
+        assert!(
+            std::sync::Arc::ptr_eq(&set, &s.blocked_words("py").unwrap()),
+            "表没变时复用缓存"
+        );
+        assert!(
+            s.get_shadow_rules("py", BLOCK_ALL_CODES).unwrap().is_none(),
+            "屏蔽组不是输入码"
+        );
+        assert!(
+            s.list_shadow_rules("py")
+                .unwrap()
+                .iter()
+                .any(|(c, r)| c == BLOCK_ALL_CODES && r.deleted == vec!["时间".to_string()]),
+            "规则列表照常列出屏蔽组"
+        );
+
+        let same = |k: &str| vec![k.to_string()];
+        let hidden = s
+            .words_hidden_by_shadow("py", &[("sj", "时间"), ("shijian", "时间")], &same)
+            .unwrap();
+        assert_eq!(hidden.len(), 2, "按文字算，任何编码都命中：{hidden:?}");
+        assert_eq!(
+            s.clear_deleted_for_words("py", &[("shijian", "时间")], &same)
+                .unwrap(),
+            1
+        );
+        assert!(s.blocked_words("py").unwrap().is_empty(), "加词撤销屏蔽");
+        assert_eq!(
+            s.get_shadow_rules("py", "shijian")
+                .unwrap()
+                .unwrap()
+                .deleted,
+            vec!["实践".to_string()],
+            "按编码的删除不动"
+        );
+
+        // 手改出的单字屏蔽行不生效
+        s.delete_shadow("py", BLOCK_ALL_CODES, "是").unwrap();
+        assert!(s.blocked_words("py").unwrap().is_empty());
+        s.block_word("py", "时间").unwrap();
+        assert!(
+            s.remove_shadow_rule("py", BLOCK_ALL_CODES, "时间", None)
+                .is_ok()
+        );
+        assert!(
+            s.blocked_words("py").unwrap().is_empty(),
+            "规则列表能删屏蔽行"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn clear_deleted_for_words_sees_hand_edited_file() {
         let path = tmp("wind_sh_clear_sync.redb");
