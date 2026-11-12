@@ -326,11 +326,11 @@ SVG 也进资源仓（导入包、上传、「移入资源仓」都是），SVG 
 
 wasm 新增两个模块级函数：
 
-- `inspectImage(bytes) → { width, height, animated, frames: [{ ms }], truncated }`：`ms` 是引擎归一后的帧时长（`frame_ms`），
-  `truncated` 表示超过了引擎的最大解帧数；
+- `inspectImage(bytes) → { format, width, height, animated, frames: [{ ms }], truncated, overBudget }`：`ms` 是引擎归一后的帧时长（`frame_ms`），
+  `truncated` 表示没解全（超过引擎的最大解帧数，或超了解码预算），`overBudget` 单指后者；
 - `decodeFrames(bytes, { max_edge, from, to }) → [{ index, w, h, rgba, ms }]`：面积平均缩到 `max_edge` 的缩略帧（`[from, to)` 原始帧号），编辑器按可见区间分页取。
 
-wasm 里已经编进了 `png` / `gif` / `webp` 解码器，这两个函数只是把 `image_cache::frames_of` 暴露出来。
+wasm 里已经编进了 `png` / `gif` / `webp` 解码器，这两个函数走 `image_cache::walk_frames`。
 
 缩略条：
 
@@ -423,11 +423,11 @@ Previewer.setTheme 同样回带 warnings
 inspectImage(bytes) / decodeFrames(bytes, { max_edge, from, to })
 ```
 
-- `wind-scene`：`SkinGeom::snapshot()` 返回只读拷贝（轴映射取 `skin::map_axis` 的结果），随 `nodes` 一起填进 `SceneFrame`。
+- `wind-scene`：`SkinGeom::snapshot()` 返回只读拷贝（轴映射取 `skin::map_axis` 的结果），由 `render_candidate_within` 填进 `CandidateFrame`。
 - `wind-scene-wasm`：装一个最小 tracing `Subscriber`，只收 WARN 且消息以 `skin:` 开头的事件，存进线程局部缓冲，每次 `set_theme` / `render` 前清空、后取出。
   - `warn_skin_once` 的去重以场景为单位，`setTheme` 会重建场景；
   - 所以编辑器以「最近一次 `setTheme` 及其后首帧」的告警为准，之后的帧只并入、不清空。
-- 新函数照 W1 设上限：输入 ≤ 16 MiB，`maxEdge` ≤ 256，一次取帧 ≤ 64，解码量（画布像素 × 帧）≤ 384 Mi（超了 `inspectImage` 只报头信息、`decodeFrames` 报错）。
+- 新函数照 W1 设上限：输入 ≤ 16 MiB，`max_edge` ≤ 256，一次取帧 ≤ 64，解码量（画布像素 × 帧）≤ 384 Mi（超了 `inspectImage` 只报超之前已解出的帧并标 `overBudget`，`decodeFrames` 报错）。
   JS 侧由 `preview.js` 的 `FrameTools` 承载，用独立的模块实例：解大动图撑大的线性内存不落在预览器上，崩了也不占预览器的重建预算。
 - 资源层（图集、动画建帧）的 `skin:` 告警只在建缓存时报，而资源没变时缓存跨 `setTheme` 沿用：告警随缓存条目存着，`setTheme` 后首帧让**本帧实际命中**的条目重放（改了 size 等换了缓存键的旧告警不回来）。`setTheme` 的返回值只有解析期告警。
 
