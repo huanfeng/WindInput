@@ -1582,6 +1582,7 @@ impl Default for PinyinGlobalConfig {
 /// - `"special:<id>"`：进指定特殊模式
 /// - `"toggle_schema:<id>"`：切到指定方案，再按回来
 /// - `"switch_schema:<id>"`：切到指定方案，单向（仅全局 `keys.key_actions`，见该变体说明）
+/// - `"set_mode:english"` / `"set_mode:chinese"`：**定向**切到英文/中文态（幂等：已在目标态无操作）
 /// - `"command:<cmdbar 表达式>"`：执行一段命令（同工具栏自定义按钮），见 [`BoundAction::Command`]
 ///
 /// 未知值一律解析成 [`BoundAction::None`]（不静默变成别的功能）；指向不存在的 id 由消费端
@@ -1701,6 +1702,8 @@ impl BoundAction {
         "open_settings",
         "open_dictionary",
         "take_screenshot",
+        "set_mode:english",
+        "set_mode:chinese",
     ];
 
     /// 该动作是否**只能绑无字符键**（修饰键）。
@@ -1711,7 +1714,7 @@ impl BoundAction {
     ///
     /// | 动作 | 限修饰键 | why |
     /// |---|---|---|
-    /// | `toggle_mode` / `switch_engine` / `toggle_schema:*` / `switch_schema:*` | 是 | 正是用来离开/返回英文态的 |
+    /// | `toggle_mode` / `switch_engine` / `set_mode:english` / `set_mode:chinese` / `toggle_schema:*` / `switch_schema:*` | 是 | 正是用来离开/返回英文态的 |
     /// | `toggle_punct` / `toggle_s2t` / `toggle_t2s` / `take_screenshot` … | 否 | 本就只在中文态有意义（全局那份也带 `CHINESE_ONLY`） |
     ///
     /// 这与「键有没有字符」是**正交的两问**，合起来才定得了插入点，见
@@ -1719,7 +1722,10 @@ impl BoundAction {
     pub fn requires_modifier_key(&self) -> bool {
         match self {
             Self::ToggleSchema(_) | Self::SwitchSchema(_) => true,
-            Self::Action(a) => matches!(a.as_str(), "toggle_mode" | "switch_engine"),
+            Self::Action(a) => matches!(
+                a.as_str(),
+                "toggle_mode" | "switch_engine" | "set_mode:english" | "set_mode:chinese"
+            ),
             _ => false,
         }
     }
@@ -8165,6 +8171,9 @@ mod bound_action_chinese_only_tests {
             // 中英/方案切换：**恰恰**要在非中文态按得动，否则切过去回不来。
             ("toggle_mode", false),
             ("switch_engine", false),
+            // 定向中英切换：同 toggle_mode，两态都要按得动。
+            ("set_mode:english", false),
+            ("set_mode:chinese", false),
             // 两模式下都该生效。
             ("toggle_full_width", false),
             ("toggle_toolbar", false),
@@ -8231,6 +8240,42 @@ mod bound_action_chinese_only_tests {
                 !BoundAction::parse(verb).only_in_chinese_mode(),
                 "{verb} 不得限中文态"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod set_mode_verb_tests {
+    use super::*;
+
+    /// 两个定向动词解析成 A 类动作，大小写与首尾空白不敏感。
+    #[test]
+    fn parses_set_mode_verbs() {
+        assert_eq!(
+            BoundAction::parse("set_mode:english"),
+            BoundAction::Action("set_mode:english".into())
+        );
+        assert_eq!(
+            BoundAction::parse("SET_MODE:CHINESE"),
+            BoundAction::Action("set_mode:chinese".into())
+        );
+        // 载荷只认两个固定值，拼错落 None（与 single_char:yes 同口径：静默降级比没绑上更难查）。
+        for bad in ["set_mode:", "set_mode", "set_mode:foo", "set_mode:en"] {
+            assert_eq!(
+                BoundAction::parse(bad),
+                BoundAction::None,
+                "{bad} 不应解析成有效动作"
+            );
+        }
+    }
+
+    /// 定向切换与 toggle_mode 同族：限修饰键（离开英文态的手段），两态都按得动。
+    #[test]
+    fn set_mode_is_modifier_only_and_works_in_both_modes() {
+        for verb in ["set_mode:english", "set_mode:chinese"] {
+            let a = BoundAction::parse(verb);
+            assert!(a.requires_modifier_key(), "{verb} 必须限修饰键");
+            assert!(!a.only_in_chinese_mode(), "{verb} 两态都要按得动");
         }
     }
 }

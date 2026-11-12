@@ -3392,7 +3392,7 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_toggle_mode(&self) -> (Option<StatusUpdateData>, String) {
-        self.handle_toggle_mode_cased(false)
+        self.handle_switch_mode_cased(None, false)
     }
 
     fn handle_system_mode_switch(
@@ -5072,22 +5072,28 @@ mod ext_envelope_tests {
 impl Coordinator {
     /// 同 `MessageHandler::handle_toggle_mode`，`upper` 为真时切英文上屏的原码转大写
     /// （CapsLock 作切换键且开了 `input.capslock.commit_upper`）。
-    pub(crate) fn handle_toggle_mode_cased(
+    pub(crate) fn handle_switch_mode_cased(
         &self,
+        target: Option<bool>,
         upper: bool,
     ) -> (Option<StatusUpdateData>, String) {
         // 模式变更的四个入口都打一条同形日志（见 handle_system_mode_switch 的说明）。
         // 本入口 = 本地切换键（Shift 等），按键侧另有 `toggle_mode key_up` 记录键码，
         // 但那条只在 policed 路径上，菜单/热键触发的 toggle 走不到，故这里仍要打。
         tracing::debug!(
-            "toggle_mode: {} -> 翻转",
-            if self.is_chinese_mode() { "中" } else { "英" }
+            "switch_mode: {} -> {}",
+            if self.is_chinese_mode() { "中" } else { "英" },
+            match target {
+                Some(true) => "置中文",
+                Some(false) => "置英文",
+                None => "翻转",
+            }
         );
         // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，出厂语义是"回到可输入中文
         // 的状态"（对齐搜狗）——取消锁定并归位中文，而非翻转 chinese_mode；否则
         // chinese_mode 原本为 true（被 CapsLock 压制）时翻转反而落到英文，切换仍然无效。
         // 落点可配（`input.capslock.mode_after_cancel`，论坛 t283 要「取消大写并进英文」），
-        // 判定见 `mode_after_caps_cancel`。
+        // 判定见 `mode_after_caps_cancel`。定向切换（`set_mode:*`）沿用同一约定。
         let caps_cancelled = self.cancel_caps_on_switch();
         // 中英切换 = 一段输入结束。须在取 state 锁之前调用：terminate_auto_phrase 内部
         // 走词库 IO，不可在持 state 锁时进行。
@@ -5100,7 +5106,7 @@ impl Coordinator {
                 state.chinese_mode,
             )
         } else {
-            !state.chinese_mode
+            target.unwrap_or(!state.chinese_mode)
         };
         let chinese = state.chinese_mode;
         // 标点随中英文切换（对齐 Go）：开启 punct_follow_mode 时，标点中/英跟随当前模式。

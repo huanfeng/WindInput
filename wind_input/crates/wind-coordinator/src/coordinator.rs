@@ -9293,13 +9293,27 @@ impl Coordinator {
         self.toggle_mode_with_commit_cased(false)
     }
 
-    /// 同 [`Self::toggle_mode_with_commit`]，`upper` 见 `handle_toggle_mode_cased`。
+    /// 同 [`Self::toggle_mode_with_commit`]，`upper` 见 `handle_switch_mode_cased`。
     pub(crate) fn toggle_mode_with_commit_cased(
         &self,
         upper: bool,
     ) -> (Option<StatusUpdateData>, SwitchCommit) {
         let had_pending = self.has_pending_composition();
-        let (status, text) = self.handle_toggle_mode_cased(upper);
+        let (status, text) = self.handle_switch_mode_cased(None, upper);
+        (status, SwitchCommit { text, had_pending })
+    }
+
+    /// **定向**模式切换（`set_mode:english` / `set_mode:chinese`）：把中英态置为目标值。
+    ///
+    /// 与 toggle 的差别只在终态：`target.unwrap_or(取反)`（见 `handle_switch_mode_cased`）。
+    /// 已在目标态时同样走一遍完整切换流程——状态位不变、编码照常上屏，对外表现为幂等
+    /// 无操作（状态泡会刷新一次，无感知差异）。
+    pub(crate) fn set_mode_with_commit(
+        &self,
+        chinese: bool,
+    ) -> (Option<StatusUpdateData>, SwitchCommit) {
+        let had_pending = self.has_pending_composition();
+        let (status, text) = self.handle_switch_mode_cased(Some(chinese), false);
         (status, SwitchCommit { text, had_pending })
     }
 
@@ -9312,6 +9326,12 @@ impl Coordinator {
         match action {
             "toggle_mode" => {
                 let (status, commit) = self.toggle_mode_with_commit();
+                status
+                    .is_some()
+                    .then(|| self.schema_switch_key_action(commit))
+            }
+            "set_mode:english" | "set_mode:chinese" => {
+                let (status, commit) = self.set_mode_with_commit(action.ends_with("chinese"));
                 status
                     .is_some()
                     .then(|| self.schema_switch_key_action(commit))
@@ -9332,6 +9352,11 @@ impl Coordinator {
         match action {
             "toggle_mode" => {
                 let (status, commit) = self.toggle_mode_with_commit();
+                self.push_switch_commit(&commit);
+                status.is_some()
+            }
+            "set_mode:english" | "set_mode:chinese" => {
+                let (status, commit) = self.set_mode_with_commit(action.ends_with("chinese"));
                 self.push_switch_commit(&commit);
                 status.is_some()
             }
