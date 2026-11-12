@@ -5388,10 +5388,12 @@ impl Coordinator {
                 CandidateOp::MoveDown => {
                     store.pin_shadow(&sh_schema, &code, &word, cand_id, pos.next)
                 }
-                // ⚠️ Delete 走 `raw_code`（击键）而非归一码：它落的是短语表 / 用户词库，
-                // 两者的键空间都是击键域（短语按 `input_buffer` 召回），与 shadow 不同。
-                // 双拼下混用会让短语删除静默失效——写进 `hao`、读的是 `hc`。
-                CandidateOp::Delete => self.delete_candidate_by_source(&schema, &raw_code, &cand),
+                // ⚠️ Delete 的短语 / 用户词分支走 `raw_code`（击键）：两者的键空间都是击键域
+                // （短语按 `input_buffer` 召回），双拼下用归一码会写进 `hao`、读的是 `hc`。
+                // 系统词落 shadow，与读端同取归一码 `code`，否则双拼下删了不生效。
+                CandidateOp::Delete => {
+                    self.delete_candidate_by_source(&schema, &raw_code, &code, &cand)
+                }
                 CandidateOp::Reset => store.remove_shadow_rule(&sh_schema, &code, &word, cand_id),
                 // 不可达：它在上面就 early-return 了（落点是全局常用字覆盖表，不是 shadow）。
                 // 保持不 panic —— 菜单 id 由 IPC 回传，让一个越界值把输入法打崩不值当。
@@ -5442,11 +5444,13 @@ impl Coordinator {
     ///   **两个标记各删各的表**：同文双记录（先自动学过、后来又手动加词——`add_user_word`
     ///   不清临时表）时只删一张，剩下那张继续供出同一条候选，表现与没删一模一样。
     /// - 其它（系统码表/拼音）→ shadow 软隐藏；单字同样允许（旧版单字保护已取消：
-    ///   shadow 按 code+word 键控，仅该编码下隐藏，设置页可恢复）。
+    ///   shadow 按 code+word 键控，仅该编码下隐藏，设置页可恢复）。键取 `shadow_code`
+    ///   （读端同款归一码，见 `shadow_code_of`），不是击键 `code`。
     fn delete_candidate_by_source(
         &self,
         schema: &str,
         code: &str,
+        shadow_code: &str,
         cand: &Candidate,
     ) -> anyhow::Result<()> {
         let Some(store) = &self.store else {
@@ -5581,9 +5585,9 @@ impl Coordinator {
         let sh = self.engine_mgr.data_schema_id(schema);
         debug!(
             "delete_candidate: 分支=shadow 隐藏 schema={} code={} text={}（该候选未被判为用户词/临时词）",
-            sh, code, cand.text
+            sh, shadow_code, cand.text
         );
-        store.delete_shadow(&sh, code, &cand.text)
+        store.delete_shadow(&sh, shadow_code, &cand.text)
     }
 
     /// 候选词操作热键匹配（对齐 Go matchCandidateActionKey，但 `0` 扩展为第 10 候选）。

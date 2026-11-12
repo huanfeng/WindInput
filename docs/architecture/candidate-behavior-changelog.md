@@ -27,6 +27,18 @@
 
 ---
 
+## 2026-11-12 · 双拼下右键删除系统词生效（0.132）
+
+- 合入：未合入（分支 fix/shadow-delete-readd）；范围：双拼方案主输入路
+- 变化：双拼完整转换时右键删除系统词，前：规则写在击键码（`nihc`）上、读端按全拼归一码（`nihao`）取，
+  删了照样出现 → 后：规则写在 `nihao` 上，当场隐藏，与全拼方案共享（全拼打 `nihao` 也隐藏，同置顶的既有口径）。
+  短语、用户词、临时词的删除不变（仍按击键码）。旧版写在击键码上的规则从未生效，留在文件里无影响。
+- 触发条件：出厂即生效
+- 回退旧行为：无（缺陷修复）
+- 钉住的测试：`wind-coordinator` `tests/shadow_delete_readd.rs::shuangpin_delete_writes_normalized_code` /
+  `shuangpin_readd_via_settings_shows_again`
+- 来源：内部
+
 ## 2026-11-12 · 删过的系统词再手动加回，候选重新出现（0.132）
 
 - 合入：未合入（分支 fix/shadow-delete-readd）；范围：全部方案类型（码表 / 全拼 / 双拼 / 混输）
@@ -39,7 +51,7 @@
   - 混输方案下加词，连混输自己那份规则一起撤。
 - 触发条件：出厂即生效
 - 回退旧行为：无（缺陷修复）
-- 钉住的测试：`wind-coordinator` `tests/shadow_delete_readd.rs`（码表 / 全拼 / 分隔符 / 混输 / 两种导入 /
+- 钉住的测试：`wind-coordinator` `tests/shadow_delete_readd.rs`（码表 / 全拼 / 分隔符 / 双拼 / 混输 / 两种导入 /
   自动学词不复活）；`wind-store` `shadow::tests::clear_deleted_for_words_only_touches_matching_deletes`
 - 来源：内部
 

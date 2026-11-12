@@ -185,6 +185,48 @@ fn pinyin_readd_after_delete_under_separator() {
     assert_back(&cfg, &store, "ni'hao", &victim, "dict.add 加词");
 }
 
+/// 双拼（小鹤 `nihc` = ni hao）删系统词：规则键须是读端同款的归一码（连写全拼 `nihao`），
+/// 落拼音族共享桶。前：写端用击键 `nihc`，读端用 `nihao`，删了不生效。
+#[test]
+fn shuangpin_delete_writes_normalized_code() {
+    if !has_schemas() {
+        return;
+    }
+    let cfg = config("shuangpin");
+    let store = fresh_store("sp_delete");
+    let (victim, (_, code)) = delete_second(&cfg, &store, "nihc");
+    assert_eq!(code, "nihao", "前提：双拼完整转换时作用域码是连写全拼");
+    assert_eq!(
+        store
+            .get_shadow_rules("pinyin", "nihao")
+            .unwrap()
+            .map(|r| r.deleted),
+        Some(vec![victim.clone()])
+    );
+    assert!(store.get_shadow_rules("pinyin", "nihc").unwrap().is_none());
+    // 与全拼共享同一条规则
+    let full = candidates(&config("pinyin"), &store, "nihao");
+    assert!(
+        !full.contains(&victim),
+        "全拼 `nihao` 也应隐藏，实际 {full:?}"
+    );
+}
+
+/// 双拼删系统词 → 设置页加回：用户词码是全拼，与归一后的规则键同域，共用同一条清理；
+/// 双拼方案 id 经 `data_schema_id` 折叠到拼音桶后能清到。
+#[test]
+fn shuangpin_readd_via_settings_shows_again() {
+    if !has_schemas() {
+        return;
+    }
+    let cfg = config("shuangpin");
+    let store = fresh_store("sp_settings");
+    let (victim, _) = delete_second(&cfg, &store, "nihc");
+    let coord = open(&cfg, &store);
+    wind_coordinator::user_words_api::add(&*coord, "shuangpin", "nihao", &victim, 0).unwrap();
+    assert_back(&cfg, &store, "nihc", &victim, "设置页加词");
+}
+
 /// 混输（`wubi86_pinyin`）：删除规则落在混输方案自己的桶，加词落主码表 `wubi86`。
 /// 活跃方案是混输时，加词也要清掉混输桶里的那条。
 #[test]
