@@ -711,7 +711,7 @@ impl Coordinator {
         }
         // 拼音「屏蔽这个词」：在各源**之内**滤掉，`associate` 按源配额截取时空出的格由同源
         // 后面的补上；滤在汇聚之后会少条数。全被滤光 = 没有联想，调用方照常不进联想态。
-        let blocked = self.pinyin_blocked_words(&self.assoc_data_schema());
+        let blocked = self.blocked_words_in(&self.assoc_data_schema());
         let filtered: Vec<SkipBlocked<'_>>;
         if let Some(blocked) = blocked.as_deref() {
             filtered = providers

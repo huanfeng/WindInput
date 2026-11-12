@@ -2423,6 +2423,11 @@ impl Coordinator {
         // 混输没有，返回 None 是对的）。与写端 `candidate_or_quick_format_op` 同源。
         let quick = self.quick_format_scope_at(&state, idx);
         let history = self.quick_history_of(&state, idx).is_some();
+        // 删除作用的候选（英文头部原文候选换成对应词库词，找不到 = 删除不可用），与写端
+        // `candidate_op_in` 同一判据。
+        let delete_target = scope
+            .as_ref()
+            .and_then(|sc| self.delete_target(&state, &sc.schema, &cand));
         drop(state);
 
         let op = |o: CandidateOp| MenuKind::Op(o);
@@ -2489,7 +2494,9 @@ impl Coordinator {
         // 判据与写端 `candidate_op` 同源，见 `candidate_op_scope`。
         let mut items = if let Some(scope) = scope {
             let cand_id = (!cand.id.is_empty()).then_some(cand.id.as_str());
-            let has_rule = self.shadow_has_rule(&scope.schema, &scope.code, &word, cand_id);
+            // 规则键是词库原文，与写端同取 `freq_text`（英文大小写投影后 `text` 对不上）。
+            let has_rule =
+                self.shadow_has_rule(&scope.schema, &scope.code, cand.freq_text(), cand_id);
             // 拼音普通候选**只放行置顶**，前移/后移仍禁（`position=0` 位置语义稳定，
             // `position=N` 在候选集变动后失去意义）；命令候选不受限。
             // 引擎类型来自 scope：特殊模式问的是它引用的方案，照抄主方案会在「主方案拼音 +
@@ -2508,7 +2515,10 @@ impl Coordinator {
             let pinyin_locked = is_pinyin && !cand.is_command;
             let can_pin = !group_member && !emoji;
             let movable = !pinyin_locked && !group_member && !emoji;
-            let (delete_label, delete_enabled) = candidate_delete_menu(&cand);
+            let (delete_label, delete_enabled) = match &delete_target {
+                Some(t) => candidate_delete_menu(t),
+                None => (candidate_delete_menu(&cand).0, false),
+            };
             let has_rule = has_rule && !emoji;
 
             vec![

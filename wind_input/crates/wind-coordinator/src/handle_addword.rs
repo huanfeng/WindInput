@@ -710,11 +710,11 @@ impl Coordinator {
             self.engine_mgr.data_schema_id(owner) // 拼音族折叠到 "pinyin"，与 record_freq 写读一致
         };
         // 拼音「屏蔽这个词」优先于自动学词（设计 §4a）：分段上屏拼出被屏蔽的词照常上屏、不学，
-        // 否则手滑造出的错词下次又原样出现。只管拼音型方案自己的产出，混输维持原样。
-        if self.engine_mgr.schema_engine_type(owner).as_deref() == Some("pinyin")
-            && self
-                .pinyin_blocked_words(&schema)
-                .is_some_and(|b| b.contains(&text))
+        // 否则手滑造出的错词下次又原样出现。落 `pinyin` 桶的都管：拼音方案、临拼 / 快捷输入的
+        // 拼音段、混输的拼音段（§8 第 12 条，与拼音方案共用屏蔽）。
+        if self
+            .blocked_words_in(&schema)
+            .is_some_and(|b| b.contains(&text))
         {
             debug!("auto-learn: {} 已被屏蔽，跳过", text);
             return None;

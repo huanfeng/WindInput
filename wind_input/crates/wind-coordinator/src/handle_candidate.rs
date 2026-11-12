@@ -2214,8 +2214,14 @@ impl Coordinator {
                 && raw.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
             let raw_mode =
                 crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
-            let want_raw =
-                crate::english_candidates::wants_raw_candidate(raw_mode, raw, &candidates);
+            let blocked = self.blocked_words_in(&self.engine_mgr.active_schema_id());
+            let want_raw = crate::english_candidates::wants_raw_candidate(
+                raw_mode,
+                raw,
+                &candidates,
+                blocked.as_deref(),
+                follow_case,
+            );
             // 大小写变形跟着原文走：`ip'pro` 连原文都不产，`IP'PRO` 更没有意义；而
             // `o'clock` 保住了原文，它的变形照旧有用（想打全大写）。判据统一成
             // 「原文产不产」，不另立一套。
@@ -2665,15 +2671,21 @@ impl Coordinator {
             return false;
         };
         // 候选调整按 data_schema_id 归属（拼音族折叠共享；码表/混输各自独立）。
-        let schema = self.engine_mgr.data_schema_id(
-            &schema_override
-                .map(str::to_string)
-                .unwrap_or_else(|| self.engine_mgr.active_schema_id()),
-        );
-        // 拼音「屏蔽这个词」：按文字、不论编码与来源（引擎已在截断前滤过一遍，这里兜住
-        // 协调器自己并进来的候选，如短语、快捷输入历史）。
-        if let Some(blocked) = self.pinyin_blocked_words(&schema) {
-            candidates.retain(|c| !blocked.contains(&c.text));
+        let schema_id = schema_override
+            .map(str::to_string)
+            .unwrap_or_else(|| self.engine_mgr.active_schema_id());
+        let schema = self.engine_mgr.data_schema_id(&schema_id);
+        // 「屏蔽这个词」：按词库原文、不论编码与来源（引擎 / 引擎管理器已在截断前滤过一遍，这里
+        // 兜住协调器自己并进来的候选，如短语、快捷输入历史、英文词频召回）。拼音 / 英文数据方案
+        // 管全部候选；混输只管拼音来源——拼音段与拼音方案共用屏蔽，码表段的同文词不受影响。
+        if let Some(blocked) = self.blocked_words_in(&schema) {
+            candidates.retain(|c| !blocked.contains(c.freq_text()));
+        } else if self.engine_mgr.schema_engine_type(&schema_id).as_deref() == Some("mixed")
+            && let Some(blocked) = self.blocked_words_in(wind_engine::manager::PINYIN_DATA_SCHEMA)
+        {
+            candidates.retain(|c| {
+                c.source != CandidateSource::Pinyin || !blocked.contains(c.freq_text())
+            });
         }
         let rec = match store.get_shadow_rules(&schema, code) {
             Ok(Some(r)) => r,
@@ -2694,13 +2706,13 @@ impl Coordinator {
         wind_candidate::apply_shadow(candidates, &rec.deleted, &pinned) > 0
     }
 
-    /// 拼音数据方案被「屏蔽这个词」的文字（候选调整里 `code = *` 的删除行）；`data_schema` 不是
-    /// 拼音、或没有屏蔽词时 `None`。按键路径：只读内存（store 按表内容缓存）。
-    pub(crate) fn pinyin_blocked_words(
+    /// 数据方案被「屏蔽这个词」的文字（候选调整里 `code = *` 的删除行，只有拼音与英文有）；
+    /// 其它方案、或没有屏蔽词时 `None`。按键路径：只读内存（store 按表内容缓存）。
+    pub(crate) fn blocked_words_in(
         &self,
         data_schema: &str,
     ) -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
-        if data_schema != wind_engine::manager::PINYIN_DATA_SCHEMA {
+        if !wind_store::shadow::supports_block(data_schema) {
             return None;
         }
         self.store
@@ -5396,6 +5408,17 @@ impl Coordinator {
             // 候选调整按 data_schema_id 归属（拼音族折叠）；Delete 分支仍传原始 schema，
             // 供 delete_candidate_by_source 对用户词/临时词按来源分流（混输）。
             let sh_schema = self.engine_mgr.data_schema_id(&schema);
+            // 拼音 / 英文桶里 `*` 是「屏蔽这个词」的组键，不是输入码：缓冲恰为 `*`（临英由触发键
+            // 进入、`allow_symbols` 放行 `*` 才打得出）时不写规则，免得混进屏蔽组。
+            if wind_store::shadow::supports_block(&sh_schema)
+                && code == wind_store::shadow::BLOCK_ALL_CODES
+            {
+                return;
+            }
+            // 规则键取词库原文（`freq_text`）：读端 `apply_shadow_in` 在大小写投影、模板展开之前
+            // 比对，取 `text` 的话英文大小写跟随（`hel` 显示成 `Hel`）与 CapsLock 档下的置顶 /
+            // 删除写进去也命中不了。短语与模板词另按 `cand_id` 定位，不受影响。
+            let word = cand.freq_text().to_string();
             // 稳定 id：短语候选有（`phrase:{code}:{模板原文}`），码表/拼音静态候选无（空串 →
             // None → 落回 word 匹配）。**必须在此传下去**——`word` 记的是当次求值结果，
             // `date`/`time` 类短语次日即失配，规则表现为「昨天调好、今天被还原」。
@@ -5412,9 +5435,11 @@ impl Coordinator {
                 // ⚠️ Delete 的短语 / 用户词分支走 `raw_code`（击键）：两者的键空间都是击键域
                 // （短语按 `input_buffer` 召回），双拼下用归一码会写进 `hao`、读的是 `hc`。
                 // 系统词落 shadow，与读端同取归一码 `code`，否则双拼下删了不生效。
-                CandidateOp::Delete => {
-                    self.delete_candidate_by_source(&schema, &raw_code, &code, &cand)
-                }
+                // 英文头部原文候选按对应的词库词删，找不到就不删（菜单同判据灰掉）。
+                CandidateOp::Delete => match self.delete_target(state, &schema, &cand) {
+                    Some(t) => self.delete_candidate_by_source(&schema, &raw_code, &code, &t),
+                    None => Ok(()),
+                },
                 CandidateOp::Reset => store.remove_shadow_rule(&sh_schema, &code, &word, cand_id),
                 // 不可达：它在上面就 early-return 了（落点是全局常用字覆盖表，不是 shadow）。
                 // 保持不 panic —— 菜单 id 由 IPC 回传，让一个越界值把输入法打崩不值当。
@@ -5497,15 +5522,37 @@ impl Coordinator {
             return Ok(());
         }
         // 拼音的多字词按**文字**删（设计 §4a）：用户删的是「这个词」，不是「这个码下的它」。
-        // 只认拼音来源：拼音方案里混入的英文词归英文桶，仍走下面的老路。
+        // 只认拼音来源、且写进 `pinyin` 桶的（拼音方案，混输的拼音段——§8 第 12 条）：拼音方案里
+        // 混入的英文词归英文桶，混输的码表段仍按编码，都走下面的老路。
         if cand.source == CandidateSource::Pinyin
-            && self.engine_mgr.data_schema_id(schema) == wind_engine::manager::PINYIN_DATA_SCHEMA
-            && wind_store::shadow::is_blockable_word(&cand.text)
+            && self
+                .engine_mgr
+                .write_data_schema_id(schema, CandidateSource::Pinyin)
+                .as_deref()
+                == Some(wind_engine::manager::PINYIN_DATA_SCHEMA)
+            && wind_store::shadow::is_blockable_word(cand.freq_text())
         {
             return self.delete_pinyin_word(store, cand);
         }
+        // 英文同理（§8 第 11 条）：只在英文数据方案（英文方案、临英）里按文字屏蔽；混在拼音 /
+        // 码表 / 混输里的英文仍按各自方案、各自编码隐藏。
+        if cand.source == CandidateSource::English
+            && self.engine_mgr.data_schema_id(schema) == ENGLISH_SCHEMA
+            && wind_store::shadow::is_blockable_word(cand.freq_text())
+        {
+            return self.delete_english_word(store, cand);
+        }
         if cand.meta.is_user_dict || cand.meta.is_temp_dict {
-            let Some(sid) = self.engine_mgr.write_data_schema_id(schema, cand.source) else {
+            // 混在拼音 / 码表 / 混输里的英文出自共享英文引擎，用户词与临时词在 `english` 桶；
+            // 按宿主方案取桶的话拼音 / 码表落到宿主桶、混输归因不了，一律删不到。
+            let sid = if cand.source == CandidateSource::English
+                && self.engine_mgr.schema_engine_type(schema).as_deref() != Some("english")
+            {
+                Some(ENGLISH_SCHEMA.to_string())
+            } else {
+                self.engine_mgr.write_data_schema_id(schema, cand.source)
+            };
+            let Some(sid) = sid else {
                 debug!("delete_candidate: 无法归因存储方案，跳过 '{}'", cand.text);
                 return Ok(());
             };
@@ -5610,13 +5657,38 @@ impl Coordinator {
             }
             return err.map_or(Ok(()), Err);
         }
-        // 候选调整（系统词软隐藏）按 data_schema_id 归属（拼音族折叠）。
+        // 候选调整（系统词软隐藏）按 data_schema_id 归属（拼音族折叠）。键取词库原文，
+        // 与读端同形（英文大小写投影之前）。
         let sh = self.engine_mgr.data_schema_id(schema);
         debug!(
             "delete_candidate: 分支=shadow 隐藏 schema={} code={} text={}（该候选未被判为用户词/临时词）",
             sh, shadow_code, cand.text
         );
-        store.delete_shadow(&sh, shadow_code, &cand.text)
+        store.delete_shadow(&sh, shadow_code, cand.freq_text())
+    }
+
+    /// 右键删除实际作用的候选。英文头部原文候选（所打原文 / 它的大小写变形，无来源）没有词库
+    /// 落点：在英文数据方案里按 `english_head_dict_word` 的口径（精确 → 忽略大小写）找回对应的
+    /// 词库词，按那个词删；找不到时 `None`，删除不可用（菜单灰掉、热键不执行）——写成规则也是
+    /// 读端永远命中不了的孤儿键。其余候选原样返回。
+    pub(crate) fn delete_target(
+        &self,
+        state: &State,
+        schema: &str,
+        cand: &Candidate,
+    ) -> Option<Candidate> {
+        if self.engine_mgr.data_schema_id(schema) != ENGLISH_SCHEMA {
+            return Some(cand.clone());
+        }
+        let buf = if state.active == Some(ModeKind::TempEnglish) {
+            state.temp_english_buffer.as_str()
+        } else {
+            crate::preedit_cursor::cased_or_buffer(&state.input_buffer, &state.input_buffer_cased)
+        };
+        if !crate::english_candidates::is_english_head_candidate(cand, buf) {
+            return Some(cand.clone());
+        }
+        self.english_exact_dict_word(schema, buf, cand.freq_text())
     }
 
     /// 拼音右键删多字词（设计 §4a）：一律**屏蔽这个词**（写 `code = *` 的删除行，所有输入串、
@@ -5641,7 +5713,30 @@ impl Coordinator {
             }
         }
         debug!("delete_candidate: 分支=拼音屏蔽这个词 text={}", cand.text);
-        store.block_word(ds, &cand.text)
+        store.block_word(ds, cand.freq_text())
+    }
+
+    /// 英文右键删 ≥2 字母的词（§8 第 11 条）：屏蔽这个词（`english` 桶 `code = *` 的删除行，键是
+    /// 词库原文、不归一大小写）。用户词 / 临时词先真删这段文字在所有编码下的条目、词频与联想，
+    /// 理由同 [`Self::delete_pinyin_word`]：只删不屏蔽，自动造词会把它再学回来。
+    fn delete_english_word(
+        &self,
+        store: &wind_store::Store,
+        cand: &Candidate,
+    ) -> anyhow::Result<()> {
+        let text = cand.freq_text();
+        if cand.meta.is_user_dict || cand.meta.is_temp_dict {
+            let n = store.purge_word(ENGLISH_SCHEMA, text)?;
+            debug!(
+                "delete_candidate: 分支=英文按文字真删 text={} 删掉 {} 条",
+                text, n
+            );
+            if n == 0 {
+                warn!("delete_candidate: 英文用户词 / 临时词一条都没删到");
+            }
+        }
+        debug!("delete_candidate: 分支=英文屏蔽这个词 text={}", text);
+        store.block_word(ENGLISH_SCHEMA, text)
     }
 
     /// 候选词操作热键匹配（对齐 Go matchCandidateActionKey，但 `0` 扩展为第 10 候选）。

@@ -1412,7 +1412,14 @@ impl Coordinator {
             && buf.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
         let raw_mode =
             crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
-        let want_raw = crate::english_candidates::wants_raw_candidate(raw_mode, &buf, &dict_part);
+        let blocked = self.blocked_words_in(ENGLISH_SCHEMA);
+        let want_raw = crate::english_candidates::wants_raw_candidate(
+            raw_mode,
+            &buf,
+            &dict_part,
+            blocked.as_deref(),
+            self.rt().config.input.temp_english.case_follow_input,
+        );
         // 变形跟着原文走（同主输入路）。临英出厂 `case_variants = true`，不管的话
         // `ip'pro` 会先出 `Ip'pro` / `ip'pro` / `IP'PRO` 三条才轮到词组。
         let want_variants = want_variants && (!phrase_active || want_raw);

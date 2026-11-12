@@ -2811,10 +2811,14 @@ impl Coordinator {
                         phrase_only,
                     );
                     let want_variants = te.case_variants && !phrase_only;
+                    // mix 文本缓冲恒小写：大小写跟随在这里无事可做（见上）。
+                    let blocked = self.blocked_words_in(member);
                     let want_raw = crate::english_candidates::wants_raw_candidate(
                         raw_mode,
                         &state.mix_buffer,
                         &member_cands,
+                        blocked.as_deref(),
+                        false,
                     );
                     let heads = crate::english_candidates::english_head_candidates(
                         &state.mix_buffer,
@@ -2956,7 +2960,14 @@ impl Coordinator {
             RawCandidateMode::InDict if !queried => RawCandidateMode::Always,
             m => m,
         };
-        let raw_pinned = crate::english_candidates::wants_raw_candidate(raw_mode, raw, &dict);
+        let blocked = self.blocked_words_in(EN);
+        let raw_pinned = crate::english_candidates::wants_raw_candidate(
+            raw_mode,
+            raw,
+            &dict,
+            blocked.as_deref(),
+            te.case_follow_input,
+        );
         // 变形还要求词库真的查过，同临英 `want_variants`：候选关着时变形冒出来，原文又不出，
         // 首格就成了变形、空格上屏一个用户没打的形态。此时段为空，落到下方的补位原文。
         let head = crate::english_candidates::english_head_candidates(
