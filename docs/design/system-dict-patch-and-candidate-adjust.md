@@ -182,7 +182,7 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 ```
 系统词库
   主词库                       ← 只读浏览 + 补丁编辑；子表（41448 大字表等）暂不拆开关
-  分类词库  已启用 3 / 16       ← 点开右栏是「分类清单」
+  分类词库              3/16   ← 点开右栏是「分类清单」（已启用 / 总数）
     · 成语        48721        ← 只列已启用的，带勾选框，可直接关
     · 地名         6401
     · 网络热词     2087
@@ -192,9 +192,11 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 临时词库 / 词频 / 候选调整（现状）
 ```
 
-- **分类清单**（右栏）：表格列「启用 / 名称 / 说明 / 条数 / 来源（随包·我放入的）」，顶部搜索框 + 「只看已启用」；可按 `DictSpec` 新增的 `group` 字段分组折叠（人名地名 / 文化 / 专业 / 网络……，随包 16 张在方案文件里补 `group`）。中栏只露已启用项，16 张乃至用户放进来的几十张都不会刷屏。
+- **分类清单**（右栏，已实现）：每行「启用勾选 / 名称与说明 / 条数」，顶部「只看已启用」+ 搜索（名称、说明）；按 `DictSpec` 的 `group` 分组列出（不折叠），组序随方案文件，未写 `group` 的随包库归「其他」、发现目录（`dir:`）登记的归「我放入的」，这两组排最后——来源因此不另设一列。随包 16 张的分组见 §8 第 14 条，五笔「行政区域」归人名地名、其余附加库不分组。中栏只露已启用项（勾掉即从中栏消失），点节点或其下任一项都打开清单；清单不是表格类别，不占子标签、不进导出。
+- **开关**拨动即生效，同用户分库：拼音族折叠域对每个成员方案各调一次 `schema.setDictEnabled`，任一失败就把已改的改回去；core 广播 `schema.configChanged` 时词库窗也重取清单。方案没有可选的分类词库（如混输）时整组不出。
+- **条数**按词库文件数正文行（`EngineManager::dict_file_entries`，按大小与 mtime 缓存），停用的库也有，不加载、不建 wdat；只数本文件不含 `import_tables`，文件不在（含只投放 wdat）为空。
 - **浏览系统词库**：65 万条不做全量分页列表，只做**搜索**（按编码前缀或词文本；文本走 `reverseidx`），结果用 `table_virtual_server`。每行标状态（原始 / 已改权重 / 已屏蔽），右键：屏蔽、改权重、恢复。顶部「加词」写进用户词库。
-- 「方案管理 → 扩展词库」一节**过渡期保留**开关，顶部加一行提示「已可在词库管理中设置」+ 跳转，过几版再删（§8 第 14 条）。
+- 「方案管理 → 扩展词库」一节**过渡期保留**开关，节说明一句「也可在『词库管理 → 系统词库 → 分类词库』里开关」，过几版再删（§8 第 14 条）。方案对话框够不着开词库窗的入口（要 `AppState`），故只给文字、没做跳转。
 
 ### 6.2 候选调整页
 
@@ -203,7 +205,7 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 
 ### 6.3 RPC（新增）
 
-`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（清单 + 条数 + 来源 + group）。开关继续用 `schema.setDictEnabled`。
+`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（已实现：返回数组，每项 `{id, label, description, group, enabled, source: "bundled"|"dir", count}`，口径同 `schema_dicts_api::list`——不含主库与 `user:` 分库；`group`/`count` 缺时为 null）。开关继续用 `schema.setDictEnabled`。
 
 ## 7 分阶段
 
