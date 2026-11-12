@@ -142,6 +142,22 @@ fn first_single_char(cfg: &Config, store: &Arc<Store>, input: &str) -> String {
         .unwrap_or_else(|| panic!("前提：`{input}` 首页应有单字，实际 {page:?}"))
 }
 
+/// 拼音桶 `code` 上恰有一条删除规则 `victim`（按编码，不是按文字屏蔽）。
+fn assert_rule_at(store: &Store, code: &str, victim: &str) {
+    assert_eq!(
+        store
+            .get_shadow_rules("pinyin", code)
+            .unwrap()
+            .map(|r| r.deleted),
+        Some(vec![victim.to_string()]),
+        "规则应写在 `{code}` 上"
+    );
+    assert!(
+        store.blocked_words("pinyin").unwrap().is_empty(),
+        "单字不按文字屏蔽"
+    );
+}
+
 fn assert_back(cfg: &Config, store: &Arc<Store>, input: &str, victim: &str, how: &str) {
     let back = candidates(cfg, store, input);
     assert!(
@@ -197,11 +213,17 @@ fn pinyin_readd_via_settings_shows_again() {
     }
     let cfg = config("pinyin");
     let store = fresh_store("py_settings");
-    let (victim, (schema, code)) = delete_second(&cfg, &store, "nihao");
+    let single = first_single_char(&cfg, &store, "nihao");
+    let (victim, (schema, code)) = delete_on_page(&cfg, &store, "nihao", Some(&single));
     assert_eq!((schema.as_str(), code.as_str()), ("pinyin", "nihao"));
+    assert_rule_at(&store, "nihao", &victim);
     let coord = open(&cfg, &store);
     // 设置页列表/输入框的码带音节空格，存储域是扁平码
     wind_coordinator::user_words_api::add(&*coord, "pinyin", "ni hao", &victim, 0).unwrap();
+    assert!(
+        store.get_shadow_rules("pinyin", "nihao").unwrap().is_none(),
+        "规则已撤"
+    );
     assert_back(&cfg, &store, "nihao", &victim, "设置页加词");
 }
 
@@ -216,10 +238,19 @@ fn pinyin_readd_after_delete_under_separator() {
     let mut cfg = config("pinyin");
     cfg.keys.select_key_groups.clear(); // 出厂 `;'` 选二三候选，会把 `'` 吃掉
     let store = fresh_store("py_sep");
-    let (victim, (_, code)) = delete_second(&cfg, &store, "ni'hao");
+    let single = first_single_char(&cfg, &store, "ni'hao");
+    let (victim, (_, code)) = delete_on_page(&cfg, &store, "ni'hao", Some(&single));
     assert_eq!(code, "ni'hao", "前提：全拼 shadow 键保留分隔符");
+    assert_rule_at(&store, "ni'hao", &victim);
     let coord = open(&cfg, &store);
     coord.debug_run_command(&format!(r#"$CC("加词", dict.add("{victim}", "nihao"))"#));
+    assert!(
+        store
+            .get_shadow_rules("pinyin", "ni'hao")
+            .unwrap()
+            .is_none(),
+        "`ni'hao` 上的规则去掉分隔符后与 `nihao` 对齐，应已撤"
+    );
     assert_back(&cfg, &store, "ni'hao", &victim, "dict.add 加词");
 }
 
@@ -262,9 +293,15 @@ fn shuangpin_readd_via_settings_shows_again() {
     }
     let cfg = config("shuangpin");
     let store = fresh_store("sp_settings");
-    let (victim, _) = delete_second(&cfg, &store, "nihc");
+    let single = first_single_char(&cfg, &store, "nihc");
+    let (victim, _) = delete_on_page(&cfg, &store, "nihc", Some(&single));
+    assert_rule_at(&store, "nihao", &victim);
     let coord = open(&cfg, &store);
     wind_coordinator::user_words_api::add(&*coord, "shuangpin", "nihao", &victim, 0).unwrap();
+    assert!(
+        store.get_shadow_rules("pinyin", "nihao").unwrap().is_none(),
+        "规则已撤"
+    );
     assert_back(&cfg, &store, "nihc", &victim, "设置页加词");
 }
 
@@ -570,8 +607,9 @@ fn temp_english_delete_with_uppercase_buffer_takes_effect() {
     );
 }
 
-/// 快捷加词（Ctrl+= → 回车，`confirm_add_word`）：删「你好」后分两次上屏「你」「好」，
-/// 用快捷加词把最近两字加回，`nihao` 下重新出现。
+/// 快捷加词（Ctrl+= → 回车，`confirm_add_word`）：「你好」在 `nihao` 下有按编码的删除规则
+/// （存量，或设置页手加的「隐藏」；右键删多字词现为按文字屏蔽），分两次上屏「你」「好」，
+/// 用快捷加词把最近两字加回，规则撤掉、`nihao` 下重新出现。
 #[test]
 fn quick_add_word_readd_shows_again() {
     if !has_schemas() {
@@ -580,7 +618,12 @@ fn quick_add_word_readd_shows_again() {
     }
     let cfg = config("pinyin");
     let store = fresh_store("py_quick_add");
-    let (victim, _) = delete_on_page(&cfg, &store, "nihao", Some("你好"));
+    let victim = "你好".to_string();
+    store.delete_shadow("pinyin", "nihao", &victim).unwrap();
+    assert!(
+        !candidates(&cfg, &store, "nihao").contains(&victim),
+        "前提：规则生效"
+    );
 
     let coord = open(&cfg, &store);
     type_keys(&coord, "ni");
@@ -596,6 +639,10 @@ fn quick_add_word_readd_shows_again() {
             .iter()
             .any(|r| r.text == victim),
         "前提：快捷加词应把「你好」写进用户词库"
+    );
+    assert!(
+        store.get_shadow_rules("pinyin", "nihao").unwrap().is_none(),
+        "规则已撤"
     );
     assert_back(&cfg, &store, "nihao", &victim, "快捷加词");
 }
