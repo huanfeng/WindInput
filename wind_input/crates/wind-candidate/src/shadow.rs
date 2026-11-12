@@ -49,9 +49,10 @@ impl ShadowPinRule {
 ///        排序键 `(position 升序, 原始索引降序)` 使较老项先 insert、最新项最后 insert 停在最前；
 ///      - 位置越界时钳到末尾。
 ///
-/// `deleted` 仍是纯文本匹配：走 shadow 删除的只有系统码表/拼音候选（静态文本），
-/// 短语删除走 `set_phrase_enabled`（按 `(code, phrase_template)` 定位，本就是稳定键，
-/// 见 `delete_candidate_by_source`），故删除侧没有动态候选可失配。
+/// `deleted` 是纯文本匹配，认候选的显示文本与词库原文（[`Candidate::freq_text`]）两种形态：
+/// 写端记词库原文，模板系统词（`$` / `{}` 词条）在读端可能已展开成当天的文本。短语删除走
+/// `set_phrase_enabled`（按 `(code, phrase_template)` 定位，本就是稳定键，见
+/// `delete_candidate_by_source`），不经这里。
 ///
 /// # 返回值：实际**就位**的置顶规则条数
 ///
@@ -71,7 +72,9 @@ pub fn apply_shadow(
     pinned: &[ShadowPinRule],
 ) -> usize {
     if !deleted.is_empty() {
-        candidates.retain(|c| !deleted.iter().any(|d| d == &c.text));
+        // 写端记的是词库原文（`freq_text`：模板展开前、大小写投影前）；读端此时候选可能已展开
+        // （模板系统词在主路先展开再过 shadow），故两种形态都认。存量规则记的是显示文本，也认。
+        candidates.retain(|c| !deleted.iter().any(|d| d == &c.text || d == c.freq_text()));
     }
     // 按 position 升序应用；同一 position 内按"最新在前"（入参 index 小者更近）就位。
     // 契约：pinned 为最新在前（store apply_pin insert(0) + coordinator 原序传入）。
@@ -131,6 +134,15 @@ mod tests {
             cand_id: Some(id.to_string()),
             position,
         }
+    }
+
+    /// 删除规则记的是模板源文本（`freq_text`），候选已展开成当天文本时同样命中。
+    #[test]
+    fn deletes_by_template_source() {
+        let mut c = cands(&["甲", "2026年11月12日"]);
+        c[1].template_source = Some("$Y年$M月$D日".to_string());
+        apply_shadow(&mut c, &["$Y年$M月$D日".to_string()], &[]);
+        assert_eq!(texts(&c), ["甲"]);
     }
 
     #[test]
