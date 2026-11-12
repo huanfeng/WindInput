@@ -119,6 +119,13 @@ pub trait WebDataHost {
         duration_ms: u64,
     ) -> Result<(), String>;
 
+    /// 输入状态开关（RPC `ime.get/set/toggle`，CLI `wind_input ime`）：`cn-en`（true = 中文）/
+    /// `fullshape` / `s2t` / `t2s` / `toolbar`。与命令栏 `ime.set` / `ime.toggle` 同一落点，
+    /// 状态气泡、工具栏刷新都在里面。`set` 返回是否真的改动；CLI 不要「已是…」提示（`notify`=false）。
+    fn ime_state_get(&self, target: &str) -> anyhow::Result<bool>;
+    fn ime_state_set(&self, target: &str, on: bool, notify: bool) -> anyhow::Result<bool>;
+    fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool>;
+
     /// 字符类：设置页列表（全部类，按 `order` 升序＝仲裁顺序）。
     fn charset_rows(&self) -> Vec<crate::handle_charset::CharsetClassRow>;
 
@@ -508,6 +515,15 @@ impl WebDataHost for Coordinator {
         replace: bool,
     ) -> anyhow::Result<crate::handle_quick_format::QuickImportOutcome> {
         Coordinator::import_quick_format(self, content, replace)
+    }
+    fn ime_state_get(&self, target: &str) -> anyhow::Result<bool> {
+        Coordinator::ime_state_get(self, target)
+    }
+    fn ime_state_set(&self, target: &str, on: bool, notify: bool) -> anyhow::Result<bool> {
+        Coordinator::ime_state_set(self, target, on, notify)
+    }
+    fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool> {
+        Coordinator::ime_state_toggle(self, target)
     }
     fn ui_toast(
         &self,

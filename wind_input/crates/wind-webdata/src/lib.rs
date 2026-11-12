@@ -407,6 +407,40 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(json!({ "ok": true }))
         }
+        // 输入状态开关（CLI `wind_input ime`、外部脚本）。目标 / 值域校验在宿主侧，错误原样回传。
+        // `get` 不带 target = 取全部。`set` 默认不弹「已是…」提示（脚本会反复调用），要提示传 notify。
+        "ime.get" => {
+            const ALL: [&str; 5] = ["cn-en", "fullshape", "s2t", "t2s", "toolbar"];
+            let target = params.get("target").and_then(Value::as_str);
+            match target {
+                Some(t) => Ok(json!({ "target": t, "on": h.ime_state_get(t)? })),
+                None => {
+                    let mut m = serde_json::Map::new();
+                    for t in ALL {
+                        m.insert(t.to_string(), json!(h.ime_state_get(t)?));
+                    }
+                    Ok(Value::Object(m))
+                }
+            }
+        }
+        "ime.set" => {
+            let target = str_param(params, "target")?;
+            let on = params
+                .get("on")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow::anyhow!("缺少布尔参数 on"))?;
+            let notify = params
+                .get("notify")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let changed = h.ime_state_set(target, on, notify)?;
+            Ok(json!({ "target": target, "on": on, "changed": changed }))
+        }
+        "ime.toggle" => {
+            let target = str_param(params, "target")?;
+            let on = h.ime_state_toggle(target)?;
+            Ok(json!({ "target": target, "on": on }))
+        }
         "schema.delete" => h.web_schema_delete(params),
         "schema.references" => Ok(json!({})), // 引用关系（删除安全检查）：暂返空，前端宽松消费
         "scheme.exportPackage" => h.web_scheme_export_package(params),
@@ -5207,6 +5241,42 @@ outside: rare
                 );
             }
         }
+    }
+
+    /// ime.get / set / toggle：中英切换幂等、取反回新值、未知目标报错，且 get 不带目标回全部。
+    #[test]
+    fn ime_state_rpcs_set_toggle_get() {
+        let c = coord("ime_state_rpcs");
+        let call = |m: &str, p: Value| c.web_data_rpc(m, &p);
+
+        let all = call("ime.get", json!({})).unwrap();
+        for t in ["cn-en", "fullshape", "s2t", "t2s", "toolbar"] {
+            assert!(all.get(t).is_some_and(Value::is_boolean), "{t}: {all}");
+        }
+
+        let cur = call("ime.get", json!({"target": "cn-en"})).unwrap()["on"]
+            .as_bool()
+            .unwrap();
+        // 设成当前值：不改动
+        let r = call("ime.set", json!({"target": "cn-en", "on": cur})).unwrap();
+        assert_eq!(r["changed"], json!(false), "{r}");
+        // 设成另一值：改动，且 get 读到新值
+        let r = call("ime.set", json!({"target": "cn-en", "on": !cur})).unwrap();
+        assert_eq!(r["changed"], json!(true), "{r}");
+        assert_eq!(
+            call("ime.get", json!({"target": "cn-en"})).unwrap()["on"],
+            json!(!cur)
+        );
+        // toggle 回到原值，并回报切换后的值
+        let r = call("ime.toggle", json!({"target": "cn-en"})).unwrap();
+        assert_eq!(r["on"], json!(cur), "{r}");
+
+        assert!(call("ime.get", json!({"target": "layout"})).is_err());
+        assert!(call("ime.toggle", json!({"target": "layout"})).is_err());
+        assert!(
+            call("ime.set", json!({"target": "cn-en"})).is_err(),
+            "缺 on"
+        );
     }
 
     /// dict.reload / dict.flush：分派在表里；reload 越界路径报错。

@@ -24,6 +24,7 @@ mod backup_cli;
 mod cli_util;
 mod config_cli;
 mod dict_cli;
+mod ime_cli;
 mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
@@ -52,6 +53,7 @@ fn print_root_usage() {
          backup    整机备份创建/查看/还原（需 core 在线）\n  \
          restart   重启输入法服务（未运行则直接启动）\n  \
          ui        桌面提示：ui toast <文案>（需 core 在线）\n  \
+         ime       输入状态：中英/全半角/简繁/工具栏的查看与切换（需 core 在线）\n  \
          system    系统集成：Dota 2 兼容等（写 HKLM，需管理员权限）\n  \
          help      显示本帮助；--version 显示版本\n\
          \n\
@@ -134,6 +136,7 @@ fn main() {
                 | "backup"
                 | "restart"
                 | "ui"
+                | "ime"
                 | "help"
                 | "--help"
                 | "-h"
@@ -160,6 +163,7 @@ fn main() {
             Some("backup") => backup_cli::run(&cli_args[2..]),
             Some("restart") => restart_cli::run(&cli_args[2..]),
             Some("ui") => ui_cli::run(&cli_args[2..]),
+            Some("ime") => ime_cli::run(&cli_args[2..]),
             #[cfg(windows)]
             Some("system") => system_cli::run(&cli_args[2..]),
             Some("help" | "--help" | "-h") => {

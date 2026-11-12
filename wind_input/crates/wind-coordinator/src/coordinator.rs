@@ -7413,26 +7413,51 @@ impl Coordinator {
     /// `cn-en` 读的是 `chinese_mode`（用户选的中英），不含 CapsLock 临时英文：`set` 回答的是
     /// 「切到中文」，CapsLock 松开后自然回到中文。
     pub(crate) fn cmd_set_state(&self, target: &str, on: bool) -> anyhow::Result<()> {
-        let cur = {
-            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            match target {
-                "cn-en" => s.chinese_mode,
-                "fullshape" => s.full_width,
-                "s2t" => s.s2t_enabled,
-                "t2s" => s.t2s_enabled,
-                "toolbar" => s.toolbar_visible,
-                _ => anyhow::bail!(
-                    "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
-                ),
+        self.ime_state_set(target, on, true).map(|_| ())
+    }
+
+    /// 输入状态开关的当前值（`cn-en` 为 true = 中文）。目标只认 cn-en / fullshape / s2t / t2s / toolbar。
+    pub fn ime_state_get(&self, target: &str) -> anyhow::Result<bool> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match target {
+            "cn-en" => Ok(s.chinese_mode),
+            "fullshape" => Ok(s.full_width),
+            "s2t" => Ok(s.s2t_enabled),
+            "t2s" => Ok(s.t2s_enabled),
+            "toolbar" => Ok(s.toolbar_visible),
+            _ => anyhow::bail!(
+                "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
+            ),
+        }
+    }
+
+    /// 把输入状态开关设为 `on`；返回是否真的改动。
+    ///
+    /// 已是目标状态时不动作，`notify_unchanged` 决定要不要弹「已是…」——命令栏要（短语没有
+    /// 别的反馈渠道），CLI 脚本不要（反复调用会天天弹）。改动时走 `ime.toggle` 同一条路径，
+    /// 自带状态气泡与工具栏刷新，不另弹提示。
+    pub fn ime_state_set(
+        &self,
+        target: &str,
+        on: bool,
+        notify_unchanged: bool,
+    ) -> anyhow::Result<bool> {
+        if self.ime_state_get(target)? == on {
+            if notify_unchanged {
+                let text = crate::handle_cmdbar::state_unchanged_text(target, on);
+                self.notify_set_unchanged(target, &text);
             }
-        };
-        if cur == on {
-            let text = crate::handle_cmdbar::state_unchanged_text(target, on);
-            self.notify_set_unchanged(target, &text);
-            return Ok(());
+            return Ok(false);
         }
         self.cmd_ime_toggle(target);
-        Ok(())
+        Ok(true)
+    }
+
+    /// 取反输入状态开关，返回切换后的值（RPC `ime.toggle`）。目标须是上述五个之一。
+    pub fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool> {
+        let cur = self.ime_state_get(target)?;
+        self.cmd_ime_toggle(target);
+        Ok(!cur)
     }
 
     pub(crate) fn cmd_ime_toggle(&self, target: &str) {
