@@ -24,6 +24,6 @@ mod server;
 
 pub(crate) use dispatch::APP_VERSION;
 
-pub use dispatch::{CoreRpc, DispatchState, dispatch};
+pub use dispatch::{CoreRpc, DispatchState, dispatch, set_build_id};
 pub use events::EventSink;
 pub use server::{RpcServer, ctrl_endpoint, events_endpoint};

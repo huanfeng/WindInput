@@ -259,8 +259,8 @@ public:
     // System mode switch (Ctrl+Space): sync request to Go with target mode
     // Go will check CommitOnSwitch and return commitText if needed
     // source 只进服务端日志：让「宿主写 compartment」与「按键兜底」在服务端日志里可分辨。
-    // ctrlHeld 是判据不是日志：服务端的 ignore_host_ime_close 靠它放行 Ctrl+Space
-    // （系统热键与宿主关 IME 走同一条 compartment 通路，不交代就分不出）。
+    // ctrlHeld 是判据不是日志：服务端的 ignore_host_ime_switch 靠它放行 Ctrl+Space
+    // （系统热键与宿主切中英走同一条 compartment 通路，不交代就分不出）。
     BOOL SendSystemModeSwitch(bool chineseMode, ModeSwitchSource source, bool ctrlHeld,
                               ServiceResponse& response);
 

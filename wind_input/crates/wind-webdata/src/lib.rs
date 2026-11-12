@@ -4376,17 +4376,92 @@ pub trait WebDataRpc: WebDataHost {
             .into_iter()
             .map(|(id, display, builtin)| {
                 let meta = wind_theme::read_meta(&dirs, &id);
+                let dir = wind_theme::theme::find_theme_dir(&dirs, &id);
+                let base = dir
+                    .as_ref()
+                    .and_then(|d| {
+                        std::fs::read_to_string(d.join(wind_transfer::theme::THEME_ENTRY_NAME)).ok()
+                    })
+                    .and_then(|t| t.parse::<toml::Value>().ok())
+                    .and_then(|v| v.get("base")?.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let (skin, animated) = wind_theme::load_resolved_dirs(&dirs, &id, false)
+                    .map(|t| theme_skin_summary(&t))
+                    .unwrap_or_default();
                 json!({
                     "name": id,
                     "display_name": display,
                     "author": meta.as_ref().map(|m| m.author.clone()).unwrap_or_default(),
                     "version": meta.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
                     "builtin": builtin,
+                    // 内置主题的目录是安装目录里的实现细节，只给用户主题。
+                    "dir": dir
+                        .filter(|_| !builtin)
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default(),
+                    "base": base,
+                    "skin": skin,
+                    "animated": animated,
                 })
             })
             .collect();
         Ok(json!(out))
     }
+}
+
+/// 主题是否带异形皮肤、皮肤是否会动：装饰写了事件状态机，或框图 / 装饰图（含 srcset 的各档）
+/// 文件头是动画格式（[`wind_theme::skin::sniff_animated`]，只读头部不解码；GIF 一律按动图算，
+/// 单帧 GIF 会误报）。给设置端「主题信息」看的概要。
+fn theme_skin_summary(t: &wind_theme::Resolved) -> (bool, bool) {
+    let Some(skin) = t.skin.as_deref() else {
+        return (false, false);
+    };
+    let variants = [
+        &skin.horizontal,
+        &skin.vertical,
+        &skin.horizontal_embedded,
+        &skin.vertical_embedded,
+    ];
+    let variants = variants.into_iter().flatten();
+    if variants
+        .clone()
+        .flat_map(|v| &v.decor)
+        .any(|d| !d.anim.states.is_empty() || !d.anim.on.is_empty())
+    {
+        return (true, true);
+    }
+    let animated = variants
+        .flat_map(|v| {
+            let frame = std::iter::once(v.frame.image.as_str())
+                .chain(v.frame.srcset.iter().map(|(p, _)| p.as_str()));
+            let decor = v.decor.iter().map(|d| d.image.as_str());
+            frame.chain(decor).collect::<Vec<_>>()
+        })
+        .any(|r| image_file_animated(t, r));
+    (true, animated)
+}
+
+/// 读图片文件头（至多 64 KiB）判是不是动图；读不到（含 data: 内联图）算不是。图片引用的
+/// 解析顺序同渲染端 `wind_scene::theme_assets::asset_path`：资源表 → 绝对路径 → base 链目录。
+fn image_file_animated(t: &wind_theme::Resolved, reference: &str) -> bool {
+    use std::io::Read as _;
+    let path = match t.resources.get(reference) {
+        Some(p) => std::path::PathBuf::from(p),
+        None if std::path::Path::new(reference).is_absolute() => reference.into(),
+        None => match t
+            .asset_dirs
+            .iter()
+            .map(|d| d.join(reference))
+            .find(|p| p.is_file())
+        {
+            Some(p) => p,
+            None => return false,
+        },
+    };
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(64 * 1024).read_to_end(&mut head))
+        .is_ok_and(|_| wind_theme::skin::sniff_animated(&head))
 }
 
 // 不用 blanket impl：`Arc<Coordinator>` 的方法解析会先命中 T=Arc 的 blanket 候选、
@@ -10944,5 +11019,70 @@ mod comment_library_tests {
         }
         let s = cell(&v, "schema:wubi86", "default", true);
         assert_eq!(s["from_scope"], "global");
+    }
+}
+
+#[cfg(test)]
+mod theme_list_tests {
+    use super::*;
+
+    fn data_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data")
+    }
+
+    /// 内置主题不给目录，`base` 取主题文件自己写的那一级。
+    #[test]
+    fn list_reports_base_and_hides_builtin_dir() {
+        let c = wind_coordinator::Coordinator::new_headless(
+            wind_config::Config::default(),
+            Some(&data_dir()),
+        );
+        let list = c.web_theme_list().unwrap();
+        let def = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "default")
+            .expect("列出 default");
+        assert_eq!(def["builtin"], true);
+        assert_eq!(def["dir"], "");
+        assert_eq!(def["base"], "_qingfeng");
+        assert_eq!(def["skin"], false);
+        assert_eq!(def["animated"], false);
+    }
+
+    #[test]
+    fn skin_summary_flags_animated_decor() {
+        let root = std::env::temp_dir().join(format!("wind_skin_summary_{}", std::process::id()));
+        let write = |slug: &str, decor: &str| {
+            let d = root.join(slug);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join(wind_transfer::theme::THEME_ENTRY_NAME),
+                format!(
+                    "[skin.horizontal.frame]\nimage = \"f.png\"\n[[skin.horizontal.decor]]\nimage = \"{decor}\"\n"
+                ),
+            )
+            .unwrap();
+        };
+        write("still", "d.png");
+        write("moving", "d.gif");
+        // 扩展名不算数，看文件头：静态的 .webp 不是动图，GIF 签名才是。
+        std::fs::write(root.join("still/d.png"), b"\x89PNG\r\n\x1a\n\0\0\0\0IDAT").unwrap();
+        std::fs::write(root.join("moving/d.gif"), b"GIF89a").unwrap();
+        write("webp", "d.webp");
+        std::fs::write(root.join("webp/d.webp"), b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0").unwrap();
+        let dirs = vec![root.clone()];
+        let sum = |slug: &str| {
+            theme_skin_summary(&wind_theme::load_resolved_dirs(&dirs, slug, false).unwrap())
+        };
+        assert_eq!(sum("still"), (true, false));
+        assert_eq!(sum("moving"), (true, true));
+        assert_eq!(sum("webp"), (true, false));
+        assert_eq!(
+            theme_skin_summary(&wind_theme::Resolved::default()),
+            (false, false)
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

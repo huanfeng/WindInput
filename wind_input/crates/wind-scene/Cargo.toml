@@ -30,6 +30,10 @@ image = { version = "0.25", default-features = false, features = [
 # 只给 test-util 的 APNG 夹具（`image_cache::anim_fixtures`）；版本与 image 依赖的那份一致。
 png = { version = "0.18", optional = true }
 
+# wasm32 上 `std::time::Instant::now` 运行即 panic，`clock` 垫片换成它（浏览器 `performance.now()`）。
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [dev-dependencies]
 png = "0.18"
 

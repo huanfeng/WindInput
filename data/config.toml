@@ -771,6 +771,14 @@ top_commit_learn = true
 # 关掉后 TSF 侧的吃键门控同步放行，输入诊断 HUD 仍照常显示宿主报的 InputScope。
 password_force_english = true
 
+# 忽略软件自己切换中英：有的软件会自作主张把输入法切成中文或英文（点一下按钮就变英文、
+# 内部切换焦点时又变中文）。开启后这类请求一律不采纳，开和关两个方向都算；
+# 按住 Ctrl 的系统热键 Ctrl+空格 照常放行。
+# ⚠ 全局开启有代价：gvim 等软件依赖这个状态保存/恢复中英，会因此失灵；
+#   按应用锁定中英的外部工具（如 KBLSwitch、AutoHotkey 脚本）也会被一并忽略。
+# 更推荐只对出问题的软件开启：compat.toml 的 ignore_host_ime_switch（写了就以它为准）。
+ignore_host_ime_switch = false
+
 # 检索范围放宽（filter_mode = "smart" 时的增强，见 docs/design/smart-filter-scope-relax.md）
 #
 # 智能档会滤掉「同码位已有常用字」的生僻字，代价是唯一编码被占的字彻底打不出——如五笔

@@ -215,7 +215,7 @@ impl Coordinator {
     pub(crate) fn run_menu_cmd(&self, cmd: MenuCmd) {
         match cmd {
             MenuCmd::SchemaEnglish => {
-                // ctrl_held=false：菜单点的，与按键无关。它只被 `ignore_host_ime_close`
+                // ctrl_held=false：菜单点的，与按键无关。它只被 `ignore_host_ime_switch`
                 // 消费，而那条规则只拦 compartment 来源，菜单永远照办。
                 self.handle_system_mode_switch(
                     false,
@@ -297,7 +297,7 @@ impl Coordinator {
             MenuCmd::AutoPairRule(m) => self.set_auto_pair_rule(m),
             MenuCmd::CompatRuleEnabled(m) => self.set_compat_rule_enabled(m == 1),
             MenuCmd::CandidatePositionRule(m) => self.set_candidate_position_rule(m),
-            MenuCmd::IgnoreHostImeCloseRule(m) => self.set_ignore_host_ime_close_rule(m),
+            MenuCmd::IgnoreHostImeSwitchRule(m) => self.set_ignore_host_ime_switch_rule(m),
             MenuCmd::PasswordForceEnglishRule(m) => self.set_password_force_english_rule(m),
             MenuCmd::AppSchemaRule(m) => self.set_app_schema_rule(m),
             MenuCmd::StatusPositionRule(m) => self.set_status_position_rule(m),
@@ -617,13 +617,13 @@ impl Coordinator {
         self.show_status();
     }
 
-    /// 为当前焦点应用设置「忽略宿主关闭输入法」，并写入用户层 compat.toml。
-    /// `mode_id`：0=跟随默认（清除规则，照常采纳）1=忽略 2=显式不忽略。
+    /// 为当前焦点应用设置「软件切换中英」（忽略 / 采纳宿主写 compartment 引起的中英切换），
+    /// 并写入用户层 compat.toml。`mode_id`：0=跟随全局（清除）1=忽略 2=显式采纳。
     ///
     /// 三步与 [`Self::set_first_show_mode`] 同构。**没有第四步**：判定发生在服务端的
     /// `handle_system_mode_switch`，DLL 侧不需要知道这条规则（它照发不误，被拒后由既有的
     /// 仲裁回路把 compartment 拉回），所以不必给 DLL 推任何东西。
-    pub(crate) fn set_ignore_host_ime_close_rule(&self, mode_id: u8) {
+    pub(crate) fn set_ignore_host_ime_switch_rule(&self, mode_id: u8) {
         let enabled = match mode_id {
             1 => Some(true),
             2 => Some(false),
@@ -631,28 +631,28 @@ impl Coordinator {
         };
         let name = self.active_process_name();
         if name.is_empty() {
-            tracing::warn!("set_ignore_host_ime_close_rule: 当前焦点进程未知，忽略本次设置");
+            tracing::warn!("set_ignore_host_ime_switch_rule: 当前焦点进程未知，忽略本次设置");
             return;
         }
         let Some(user_dir) = self.compat_dirs.1.clone() else {
-            tracing::warn!("set_ignore_host_ime_close_rule: 无用户配置目录，无法持久化");
+            tracing::warn!("set_ignore_host_ime_switch_rule: 无用户配置目录，无法持久化");
             return;
         };
-        if let Err(e) = wind_config::app_compat::set_user_ignore_host_ime_close(
+        if let Err(e) = wind_config::app_compat::set_user_ignore_host_ime_switch(
             &user_dir,
-            self.menu_writeback_target(&name, &["ignore_host_ime_close"]),
+            self.menu_writeback_target(&name, &["ignore_host_ime_switch"]),
             enabled,
         ) {
-            tracing::error!("set_ignore_host_ime_close_rule: 写用户 compat.toml 失败: {e}");
+            tracing::error!("set_ignore_host_ime_switch_rule: 写用户 compat.toml 失败: {e}");
             return;
         }
         self.reload_app_compat();
         tracing::info!(
-            "忽略宿主关闭输入法 for process={name}: {}",
+            "软件切换中英 for process={name}: {}",
             match enabled {
                 Some(true) => "忽略",
-                Some(false) => "不忽略",
-                None => "(follow-default)",
+                Some(false) => "采纳",
+                None => "(follow-global)",
             }
         );
         self.show_status();
@@ -1763,11 +1763,11 @@ impl Coordinator {
             // 勾选显示的是**焦点窗口**生效中的值（与 auto_pair 读 active_compat 同口径）；菜单写回
             // 仍只写纯进程键（带窗口条件的规则 P4 之前只能手写），见 app_compat 的写回接口。
             let proc_win = self.active_focus_window();
-            let (cur_cand_pos, cur_ignore_close, cur_pfe, cur_schema, cur_status, cur_status_fb) =
+            let (cur_cand_pos, cur_ignore_switch, cur_pfe, cur_schema, cur_status, cur_status_fb) =
                 self.with_compat_rule(&proc, &proc_win, |rule| {
                     (
                         rule.and_then(|r| r.candidate_position_mode),
-                        rule.and_then(|r| r.ignore_host_ime_close),
+                        rule.and_then(|r| r.ignore_host_ime_switch),
                         rule.and_then(|r| r.password_force_english),
                         rule.and_then(|r| r.schema.clone()),
                         rule.and_then(|r| r.status_position_mode),
@@ -1993,36 +1993,33 @@ impl Coordinator {
                         ),
                     ],
                 ),
-                // 给 WinForms/WPF 那类「焦点落到按钮就关掉全局 IME」的宿主。
+                // 给自作主张写 compartment 切中英的宿主：WinForms/WPF 那类「焦点落到按钮就关掉
+                // 全局 IME」，以及内部焦点切换时把 IME 打开的（SSMS，GH#312）。开和关两个方向都管。
                 //
-                // 第一档写「跟随内置规则」而不是「跟随全局」：这一项**没有**全局设置项，
-                // 它的低层是出厂 compat.toml：第一档 = 还原（不留任何用户层痕迹，继承出厂值），
-                // 写盘时对应 `FieldEdit::Inherit` 而不是「清除」。
-                // 写「跟随全局」会让用户去设置页找一个并不存在的开关。
-                //
-                // 第三档「采纳」与第一档在**当前**行为上可能相同，但语义不同：第一档是
-                // 「听内置的」，第三档是「不管内置说什么，这个应用就是要采纳」。出厂给某个
-                // 宿主开了忽略、而用户不认同时，只有第三档能盖住它。
+                // 第一档「跟随全局」= 清除（下层设了就写 `unset`），全局开关是
+                // `input.ignore_host_ime_switch`。第三档「采纳」与第一档在**当前**行为上可能
+                // 相同，但语义不同：第一档听全局的，第三档是「不管全局怎么设，这个应用就是要
+                // 采纳」——全局开了忽略、而某个应用（gvim）依赖这个状态时，只有第三档能盖住它。
                 M::submenu(
-                    "宿主关闭输入法",
+                    "软件切换中英",
                     vec![
                         M::leaf(
-                            "跟随内置规则",
-                            cmd(MenuCmd::IgnoreHostImeCloseRule(0)),
+                            "跟随全局",
+                            cmd(MenuCmd::IgnoreHostImeSwitchRule(0)),
                             enabled,
-                            cur_ignore_close.is_none(),
+                            cur_ignore_switch.is_none(),
                         ),
                         M::leaf(
                             "忽略",
-                            cmd(MenuCmd::IgnoreHostImeCloseRule(1)),
+                            cmd(MenuCmd::IgnoreHostImeSwitchRule(1)),
                             enabled,
-                            cur_ignore_close == Some(true),
+                            cur_ignore_switch == Some(true),
                         ),
                         M::leaf(
                             "采纳",
-                            cmd(MenuCmd::IgnoreHostImeCloseRule(2)),
+                            cmd(MenuCmd::IgnoreHostImeSwitchRule(2)),
                             enabled,
-                            cur_ignore_close == Some(false),
+                            cur_ignore_switch == Some(false),
                         ),
                     ],
                 ),
@@ -4570,7 +4567,7 @@ mod compat_reload_tests {
             ("status_position_mode", "状态提示位置"),
             ("status_fallback_position", "坐标不可用时"),
             ("auto_pair", "符号自动配对"),
-            ("ignore_host_ime_close", "宿主关闭输入法"),
+            ("ignore_host_ime_switch", "软件切换中英"),
             ("password_force_english", "密码框强制英文"),
         ] {
             let label = COMPAT_FIELDS
@@ -4922,6 +4919,30 @@ mod linux_menu_tests {
                 }
             )),
             "{cmds:?}"
+        );
+    }
+
+    /// 宿主报来的皮肤装饰点击原样交给渲染端；载荷坏了就丢。
+    #[test]
+    fn host_decor_click_reaches_the_ui() {
+        let (c, rx) = coord();
+        c.handle_ext(
+            wind_ipc::protocol::ext_kind::SKIN_DECOR_CLICK,
+            br#"{"index":2}"#,
+        );
+        assert!(
+            drain(&rx)
+                .iter()
+                .any(|m| matches!(m, UiCommand::SkinDecorClick(2)))
+        );
+        c.handle_ext(
+            wind_ipc::protocol::ext_kind::SKIN_DECOR_CLICK,
+            br#"{"index":"x"}"#,
+        );
+        assert!(
+            !drain(&rx)
+                .iter()
+                .any(|m| matches!(m, UiCommand::SkinDecorClick(_)))
         );
     }
 

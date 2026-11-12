@@ -1259,7 +1259,9 @@ BOOL CIPCClient::SendHostRenderRequest(ServiceResponse& response)
     }
 
     _LogInfo(L"Sending host_render_request");
-    if (!_SendBinaryMessage(CMD_HOST_RENDER_REQUEST, nullptr, 0))
+    // 能力位：旧服务不读载荷（照旧回 setup），新服务据此决定发不发穿透装饰层。
+    const uint32_t caps = HOST_RENDER_CAP_PASS_LAYER;
+    if (!_SendBinaryMessage(CMD_HOST_RENDER_REQUEST, &caps, sizeof(caps)))
     {
         return FALSE;
     }

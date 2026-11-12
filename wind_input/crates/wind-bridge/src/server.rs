@@ -710,7 +710,11 @@ pub(crate) fn dispatch_command(
             #[cfg(windows)]
             {
                 if let Some(mgr) = host_render {
-                    match mgr.setup(ctx.conn_id, ctx.pid) {
+                    // 载荷：新 DLL 带 4 字节能力位，旧 DLL 为空（= 0，穿透装饰合成成单层发）。
+                    let caps = payload
+                        .get(..4)
+                        .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+                    match mgr.setup(ctx.conn_id, ctx.pid, caps) {
                         Ok((instance_id, entries)) => {
                             return Some(encode_host_render_setup(instance_id, &entries));
                         }
@@ -1034,6 +1038,9 @@ pub(crate) fn dispatch_command(
             }
             None
         }
+
+        // 纯异步上报，由 handle_client 在响应写出后处理，这里只需认领，免得落进下面报未知命令。
+        CMD_INPUT_STATE_REPORT | CMD_DIAG_SNAPSHOT => None,
 
         _ => {
             warn!("Unknown command: 0x{:04X}", command);
@@ -1585,7 +1592,7 @@ mod tests {
         let _ = dispatch_command(&handler, CMD_KEY_EVENT, false, &[], ctx, Some(&mgr));
 
         // setup 后 active_target 应指向键事件来源的 conn 7
-        mgr.setup(7, pid).expect("setup 应成功");
+        mgr.setup(7, pid, 0).expect("setup 应成功");
         let target = mgr.active_target().expect("键事件应已刷新 active");
         assert_eq!(target.instance_id, 7, "active 实例应为键事件来源连接");
     }
@@ -1625,6 +1632,32 @@ mod tests {
             3,
             "应含三 kind 条目"
         );
+    }
+
+    /// 请求载荷里的能力位记到该实例上：带穿透层能力的 DLL 才拿到拆层帧，空载荷（旧 DLL）不拆。
+    #[cfg(windows)]
+    #[test]
+    fn host_render_request_records_capabilities() {
+        let pid = std::process::id();
+        let mgr = HostRenderManager::new(&format!("_srv_caps_{pid}"), vec!["*".to_string()]);
+        let handler: Arc<dyn MessageHandler> = Arc::new(RecordingHandler::default());
+        let caps = wind_ipc::protocol::HOST_RENDER_CAP_PASS_LAYER.to_le_bytes();
+        for (conn_id, payload) in [(1u32, &[][..]), (2, &caps[..])] {
+            let ctx = ClientCtx { conn_id, pid };
+            dispatch_command(
+                &handler,
+                CMD_HOST_RENDER_REQUEST,
+                false,
+                payload,
+                ctx,
+                Some(&mgr),
+            )
+            .expect("同步命令应有响应");
+        }
+        mgr.note_focus(1, pid);
+        assert!(!mgr.active_target().unwrap().pass_layer, "空载荷 = 旧 DLL");
+        mgr.note_focus(2, pid);
+        assert!(mgr.active_target().unwrap().pass_layer);
     }
 
     /// 未命中白名单的连接请求应回 ACK（DLL 退回进程内渲染）。

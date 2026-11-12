@@ -113,6 +113,9 @@ fn emit_build_stamp() {
 }
 
 /// git 短哈希；工作树有未提交改动时追加 `-dirty`。git 不可用时返回 `unknown`。
+///
+/// 判脏忽略未跟踪文件（与 `git describe --dirty` 的口径一致，编辑器按它比对预览引擎版本）。
+/// 会影响预览缓存键：只是没那么容易判脏，缓存更少失效。
 fn git_describe() -> String {
     use std::process::Command;
     let hash = Command::new("git")
@@ -124,7 +127,7 @@ fn git_describe() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
     let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .output()
         .ok()
         .filter(|o| o.status.success())

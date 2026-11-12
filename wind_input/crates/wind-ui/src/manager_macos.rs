@@ -71,7 +71,20 @@ pub struct Forwarder {
     /// 悬浮工具栏 / 软键盘（Linux）。
     #[cfg(all(target_os = "linux", ext_presenter))]
     panels: Panels,
+    /// 穿透装饰层（macOS 子 panel）的 SHM 段与显示态，见 [`Forwarder::push_decor_layer`]。
+    #[cfg(target_os = "macos")]
+    decor_shm: Option<PosixSharedMemory>,
+    #[cfg(target_os = "macos")]
+    decor_shown: bool,
+    /// 上一次推出去的主层 / 穿透装饰层像素哈希（macOS）：换帧时没变的那层不推。收起时清。
+    #[cfg(target_os = "macos")]
+    main_hash: Option<u64>,
+    #[cfg(target_os = "macos")]
+    decor_hash: Option<u64>,
 }
+
+/// 外部宿主上皮肤动画相邻两帧的最小间隔：Windows 上限 30 帧/秒，这里减半（设计 §17.1）。
+pub(crate) const EXT_ANIM_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(66);
 
 /// Linux 外部宿主形态的悬浮工具栏与软键盘。
 ///
@@ -331,6 +344,14 @@ impl Forwarder {
             #[cfg(all(target_os = "linux", ext_presenter))]
             panels,
             menu,
+            #[cfg(target_os = "macos")]
+            decor_shm: None,
+            #[cfg(target_os = "macos")]
+            decor_shown: false,
+            #[cfg(target_os = "macos")]
+            main_hash: None,
+            #[cfg(target_os = "macos")]
+            decor_hash: None,
         }
     }
 
@@ -522,6 +543,14 @@ impl Forwarder {
                 self.panels.reset_host_state();
                 crate::ext_panel::resend_visible();
             }
+            UiCommand::SkinDecorClick(index) => self.win.skin_decor_click(index),
+            // 新 `.app` 手里没有候选窗与装饰层：分层去重作废，下一帧两层都推（否则换帧只推装饰层，
+            // 候选窗一直不出来）。
+            #[cfg(target_os = "macos")]
+            UiCommand::HostReconnected => {
+                self.main_hash = None;
+                self.decor_hash = None;
+            }
             UiCommand::ShowStatusTip {
                 text,
                 x,
@@ -605,8 +634,7 @@ impl Forwarder {
             UiCommand::SetCandidateOffset { x, y } => self.win.set_user_offset(x, y),
             UiCommand::SetCandidateShadow(on) => self.win.set_theme_shadow(on),
             UiCommand::RenderCandidatePreview(req) => self.previews.push(req),
-            // 本平台不播放皮肤动画（系统动画开关的探测恒为关，装饰停在初始状态首帧、事件不切换）；
-            // 开关与事件照样转给候选窗，播放落地时不必再接线。
+            // 皮肤动画由本线程按 deadline 推帧（`tick_candidate`，设计 §17.1）。
             UiCommand::SetThemeAnimation(on) => self.win.set_theme_animation(on),
             UiCommand::SkinSignal(sig) => self.win.skin_signal(sig),
             UiCommand::SetPagerInPreedit(v) => self.win.set_pager_in_preedit(v),
@@ -895,16 +923,42 @@ impl Forwarder {
         }
     }
 
-    /// 推进工具栏 / 软键盘的计时与鼠标动作（主循环每轮一次）。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    /// 推进计时（主循环每轮一次）：候选窗的皮肤换帧，Linux 另有工具栏 / 软键盘的计时与鼠标动作。
     fn tick(&mut self) {
+        #[cfg(all(target_os = "linux", ext_presenter))]
         self.panels.tick();
+        self.tick_candidate(std::time::Instant::now());
+    }
+
+    /// 候选窗的 `tick`，换帧到期且过了限帧闸门就推一帧（`FLAG_ANIM_FRAME`）。没到闸门的换帧留着，
+    /// [`Self::next_deadline`] 睡到闸门再来。
+    fn tick_candidate(&mut self, now: std::time::Instant) {
+        self.win.tick();
+        if !self.visible {
+            // 收起后不该再有换帧（`win.hide` 已停）；万一有，丢掉，免得主循环被立即唤醒空转。
+            let _ = self.win.take_anim_due();
+            return;
+        }
+        // 限帧闸门在候选窗里（[`CandidateWindow::set_anim_gate`]）：只管换帧，悬停等到期照常。
+        if self.win.anim_gate().is_some_and(|g| now < g) || !self.win.take_anim_due() {
+            return;
+        }
+        let mut frame = None;
+        self.win.repaint_anim_frame(|w| frame = w.render_frame());
+        self.push_frame_out(frame, true);
+        // 推完再起算：相邻两帧的推送间隔不小于上限（渲染耗时不吃掉间隔）。
+        self.win
+            .set_anim_gate(std::time::Instant::now() + EXT_ANIM_MIN_INTERVAL);
     }
 
     /// 主循环最多睡到这一刻；`None` = 只等命令。
-    #[cfg(all(target_os = "linux", ext_presenter))]
     fn next_deadline(&self) -> Option<std::time::Instant> {
-        self.panels.next_deadline(std::time::Instant::now())
+        let cand = self.win.next_deadline();
+        #[cfg(all(target_os = "linux", ext_presenter))]
+        let panels = self.panels.next_deadline(std::time::Instant::now());
+        #[cfg(not(all(target_os = "linux", ext_presenter)))]
+        let panels = None;
+        [cand, panels].into_iter().flatten().min()
     }
 
     /// 把一条软键盘命令转运给主线程宿主。
@@ -941,7 +995,7 @@ impl Forwarder {
             return None;
         }
         let f = self.win.render_frame()?;
-        Some((f.buf, f.width, f.height))
+        Some((f.composed(), f.width, f.height))
     }
 
     /// 状态气泡 / 悬停提示右键菜单里的「截图此窗口」。像素在本进程（该层 SHM），与
@@ -993,9 +1047,16 @@ impl Forwarder {
     /// 内容更新（`UpdateCandidates`）与纯外观变更（换主题/字号…）共用此路径——后者若不
     /// 走这里重推一帧，显示中的候选窗就会停在旧样子。
     fn push_current_frame(&mut self) {
-        match self.win.render_frame() {
+        let f = self.win.render_frame();
+        self.push_frame_out(f, false);
+    }
+
+    /// 推一帧渲染结果；`None` = 该隐藏。`anim` = 皮肤换帧：帧带 `FLAG_ANIM_FRAME`，不重推 tooltip、
+    /// 不重报候选窗矩形（内容没变）。
+    fn push_frame_out(&mut self, f: Option<crate::candidate_window::RenderedFrame>, anim: bool) {
+        match f {
             Some(f) => {
-                let (sx, sy, w, h, scale, soft, absolute) = (
+                let (sx, sy, w, h, scale, soft, absolute, content) = (
                     f.screen_x,
                     f.screen_y,
                     f.width,
@@ -1003,7 +1064,9 @@ impl Forwarder {
                     f.scale,
                     f.software_shadow,
                     f.absolute_pos,
+                    f.content_offset,
                 );
+                let (above, place_box) = (f.above_pos, f.place_box);
                 // 翻页器命中矩形的内部 tag(HOVER_PAGE_PREV/NEXT=100000/100001)重映射为
                 // Swift/Go 约定的 -1(上页)/-2(下页)，否则 100000>=0 会被 .app 误当候选选中
                 // (index 100000) → 翻页失效；候选 tag(>=0)原样。对齐 Go forwarder_darwin。
@@ -1021,13 +1084,28 @@ impl Forwarder {
                         (wire, r.x as i32, r.y as i32, r.w as i32, r.h as i32)
                     })
                     .collect();
+                let skin = encode_candidate_skin(&f.skin);
+                #[cfg(target_os = "macos")]
+                let pass_layer = f.pass_layer;
                 let buf = f.buf;
+                // macOS 穿透装饰拆在独立层：换帧多半只动它，主层像素不变就只推装饰层。
+                #[cfg(target_os = "macos")]
+                let main_hash = pixel_hash(&buf);
+                #[cfg(target_os = "macos")]
+                if anim && self.visible && self.main_hash == Some(main_hash) {
+                    self.push_decor_layer(pass_layer, (sx, sy, w, h), scale, anim);
+                    return;
+                }
                 // 先写 SHM 像素并取 seq；shm 建失败则整帧放弃——
                 // 不能只推命中矩形/tooltip 而无底帧，否则 .app 拿到无像素的命中区（不一致）。
                 let seq = match self.ensure_shm() {
                     Some(shm) => shm.write_frame(sx, sy, w, h, &buf),
                     None => return,
                 };
+                #[cfg(target_os = "macos")]
+                {
+                    self.main_hash = Some(main_hash);
+                }
                 let mut flags =
                     SharedRenderHeader::FLAG_VISIBLE | SharedRenderHeader::FLAG_CONTENT_READY;
                 if soft {
@@ -1036,6 +1114,14 @@ impl Forwarder {
                 if absolute {
                     flags |= SharedRenderHeader::FLAG_ABSOLUTE_POS;
                 }
+                if anim {
+                    flags |= SharedRenderHeader::FLAG_ANIM_FRAME;
+                }
+                // 皮肤区域与穿透装饰层都先于候选帧到：前端收到候选帧时就按这一帧的区域
+                // 设输入区 / 阴影，子 panel 也已有这一帧的像素。
+                self.sink.push_frame(&skin);
+                #[cfg(target_os = "macos")]
+                self.push_decor_layer(pass_layer, (sx, sy, w, h), scale, anim);
                 self.sink.push_frame(&encode_host_render_frame(
                     seq,
                     sx,
@@ -1044,15 +1130,29 @@ impl Forwarder {
                     h,
                     flags,
                     scale.round().max(1.0) as u32,
+                    content,
+                    above,
+                    place_box,
                 ));
                 self.sink.push_frame(&encode_candidate_rects(&rects));
-                // tooltip 在本进程光栅化，坐标按候选窗建议落点算（宿主平移到实际位置）。
-                // 悬停目标取自候选窗自己的 hover 状态。
-                let ov = self.win.render_tooltip_overlay(sx, sy);
-                self.overlays.show_tooltip(&*self.sink, ov);
                 self.visible = true;
-                let rect = self.win.screen_rect();
-                self.overlays.set_candidate_rect(&*self.sink, rect);
+                if !anim {
+                    // tooltip 在本进程光栅化，坐标按候选窗建议落点算（宿主平移到实际位置）。
+                    // 悬停目标取自候选窗自己的 hover 状态。
+                    let ov = self.win.render_tooltip_overlay(sx, sy);
+                    self.overlays.show_tooltip(&*self.sink, ov);
+                    let rect = self.win.screen_rect();
+                    self.overlays.set_candidate_rect(&*self.sink, rect);
+                    // 内容帧重排了换帧到期（按原始边界）：闸门没过就按刚推出去的这帧重新探测，
+                    // 免得闸门处又采到同一帧（§17.1）。
+                    if let Some(g) = self
+                        .win
+                        .anim_gate()
+                        .filter(|g| *g > std::time::Instant::now())
+                    {
+                        self.win.set_anim_gate(g);
+                    }
+                }
                 tracing::debug!(
                     "forwarder pushed host-render frame seq={} {}x{} at ({},{}) scale={}",
                     seq,
@@ -1074,6 +1174,13 @@ impl Forwarder {
         // 无论 SHM 建没建起来都得落 visible=false：否则外观类命令会对着一个已经隐藏的
         // 候选窗重推帧，把它又推回屏幕上。
         self.visible = false;
+        // 候选窗自己的收起簿记：皮肤动画停、`hide` 事件、下次显示重新落位（同 Windows `hide`）。
+        self.win.hide();
+        #[cfg(target_os = "macos")]
+        {
+            self.push_decor_layer(None, (0, 0, 0, 0), 1.0, false);
+            self.main_hash = None;
+        }
         self.overlays.hide(
             &*self.sink,
             wind_ipc::protocol::overlay::OVERLAY_KIND_TOOLTIP,
@@ -1081,9 +1188,97 @@ impl Forwarder {
         self.overlays.set_candidate_rect(&*self.sink, None);
         if let Some(shm) = self.shm.as_mut() {
             let seq = shm.write_hidden();
-            self.sink
-                .push_frame(&encode_host_render_frame(seq, 0, 0, 0, 0, 0, 1));
+            self.sink.push_frame(&encode_host_render_frame(
+                seq,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                (0, 0),
+                (0, 0),
+                (0, 0, 0, 0),
+            ));
         }
+    }
+}
+
+/// 像素哈希：判断一层换帧前后变没变。
+#[cfg(target_os = "macos")]
+fn pixel_hash(px: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    px.hash(&mut h);
+    h.finish()
+}
+
+#[cfg(target_os = "macos")]
+impl Forwarder {
+    /// 穿透装饰层（设计 §17.3）：写 `_DEC` 段、推 `OVERLAY_KIND_DECOR` 帧，`.app` 贴进候选窗的子 panel。
+    /// `layer` 为 None（本帧没有穿透装饰 / 候选窗收起）时，之前显示过就推一条隐藏帧。
+    /// `at` 是候选窗建议落点与尺寸（`.app` 跟着候选窗走，不读坐标）。
+    fn push_decor_layer(
+        &mut self,
+        layer: Option<(Vec<u8>, bool)>,
+        at: (i32, i32, u32, u32),
+        scale: f32,
+        anim: bool,
+    ) {
+        use wind_ipc::protocol::overlay::{OVERLAY_KIND_DECOR, OVERLAY_PLACE_EXACT};
+        // 垫在候选窗下面还是盖在上面，`.app` 按 `CMD_CANDIDATE_SKIN` 里拆层装饰的 UNDER 位定。
+        let Some((pixels, _below)) = layer else {
+            self.decor_hash = None;
+            if std::mem::take(&mut self.decor_shown) {
+                let seq = self
+                    .decor_shm
+                    .as_mut()
+                    .map(|s| s.write_hidden())
+                    .unwrap_or(0);
+                self.sink
+                    .push_frame(&encode_overlay_frame(&OverlayFrameMeta {
+                        kind: OVERLAY_KIND_DECOR,
+                        seq,
+                        ..Default::default()
+                    }));
+            }
+            return;
+        };
+        let (x, y, w, h) = at;
+        // 换帧时这层没变（动的是主层里的装饰）：不重推。
+        let hash = pixel_hash(&pixels);
+        if anim && self.decor_shown && self.decor_hash == Some(hash) {
+            return;
+        }
+        if pixels.len() > SHM_MAX - SharedRenderHeader::SIZE {
+            tracing::warn!("skin: 穿透装饰层 {w}x{h} 过大，丢弃");
+            return;
+        }
+        if self.decor_shm.is_none() {
+            self.decor_shm =
+                crate::overlay_host::create_layer_shm(&self.suffix, OVERLAY_KIND_DECOR);
+        }
+        let Some(shm) = self.decor_shm.as_mut() else {
+            return;
+        };
+        let seq = shm.write_frame(0, 0, w, h, &pixels);
+        self.sink
+            .push_frame(&encode_overlay_frame(&OverlayFrameMeta {
+                kind: OVERLAY_KIND_DECOR,
+                seq,
+                width: w,
+                height: h,
+                flags: SharedRenderHeader::FLAG_VISIBLE | SharedRenderHeader::FLAG_CONTENT_READY,
+                place: OVERLAY_PLACE_EXACT,
+                x,
+                y,
+                content_w: w,
+                content_h: h,
+                scale,
+                ..Default::default()
+            }));
+        self.decor_shown = true;
+        self.decor_hash = Some(hash);
     }
 }
 
@@ -1120,28 +1315,8 @@ pub fn forwarder_thread(
 /// forwarder 主循环，收到 `Shutdown` 或发送端全部断开即返回。
 ///
 /// 不是裸 `for cmd in rx`：那样线程永远阻塞在 recv 上，背景图缓存的闲置回收
-/// （`manager.rs` 的消息循环负责的那件事）就一次都不会发生。
-#[cfg(target_os = "macos")]
-fn run_loop(fwd: &mut Forwarder, rx: &Receiver<UiCommand>) {
-    loop {
-        let cmd = match fwd.next_queued_cmd(rx) {
-            Some(Some(cmd)) => cmd,
-            Some(None) => continue,
-            None => match crate::view::recv_evicting_idle(rx) {
-                Some(cmd) => cmd,
-                None => break,
-            },
-        };
-        if matches!(cmd, UiCommand::Shutdown) {
-            break;
-        }
-        fwd.handle(cmd);
-    }
-}
-
-/// Linux 多一件事：工具栏 / 软键盘有计时器，等命令时最多睡到最近的 deadline，醒来 `tick`。
-/// 闲置回收照旧挂在等待上（`recv_evicting_idle_until`）。
-#[cfg(all(target_os = "linux", ext_presenter))]
+/// （`manager.rs` 的消息循环负责的那件事）就一次都不会发生。等命令时最多睡到最近的 deadline
+/// （皮肤换帧；Linux 另有工具栏 / 软键盘的计时），醒来 `tick`。
 fn run_loop(fwd: &mut Forwarder, rx: &Receiver<UiCommand>) {
     use crate::view::Recv;
     loop {
@@ -1290,6 +1465,19 @@ mod tests {
 
         let (x, y, flags) = last_render_frame(&cap).expect("应推出 host render frame");
         assert_eq!((x, y), (640, 480), "固定位置必须原样下发，不再按光标推算");
+        let v = cap.lock().unwrap();
+        let p = &v
+            .iter()
+            .rev()
+            .find(|f| cmd_of(f) == CMD_HOST_RENDER_FRAME)
+            .unwrap()[8..];
+        assert_eq!(p.len(), 60, "帧末尾带内容偏移、上方点与落位框");
+        assert_eq!(
+            &p[28..36],
+            &[0u8; 8],
+            "无皮肤外扩：窗口左上即内容左上，偏移为 0"
+        );
+        drop(v);
         assert_ne!(
             flags & SharedRenderHeader::FLAG_ABSOLUTE_POS,
             0,
@@ -1367,6 +1555,596 @@ mod tests {
             fixed_x: 0,
             fixed_y: 0,
         });
+    }
+
+    /// 皮肤夹具（设计 §17.5）：30×20 白色窗体；右上外侧 8×8 穿透装饰（z = 1），左上外侧 8×8 block
+    /// 装饰。`extra` 追加到穿透装饰那张表（动画用例写 `fps` 等）；`pass_image` 换穿透装饰的文件。
+    fn skin_theme(tag: &str, pass_image: Option<&[u8]>, extra: &str) -> wind_theme::Resolved {
+        // 每次调用一个目录：同名 tag 的用例并行跑时，先建的会被后来者 `remove_dir_all` 删掉文件。
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("wind_fwd_skin_{tag}_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = dir.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let px = |w, h, c| image::RgbaImage::from_pixel(w, h, image::Rgba(c));
+        px(30, 20, [255, 255, 255, 255])
+            .save(t.join("frame.png"))
+            .unwrap();
+        px(8, 8, [0, 0, 255, 255])
+            .save(t.join("block.png"))
+            .unwrap();
+        match pass_image {
+            Some(bytes) => std::fs::write(t.join("pass.png"), bytes).unwrap(),
+            None => px(8, 8, [255, 0, 0, 255]).save(t.join("pass.png")).unwrap(),
+        }
+        std::fs::write(
+            t.join("theme.toml"),
+            format!(
+                "[meta]\nname = \"t\"\n[skin]\ndensity = 1\n\
+                 [skin.horizontal.frame]\nimage = \"frame.png\"\n\
+                 stretch_x = [[10, 20]]\nstretch_y = [[8, 12]]\n\
+                 [skin.horizontal.content]\nleft = 4\ntop = 3\nright = 4\nbottom = 3\n\
+                 [[skin.horizontal.decor]]\nimage = \"pass.png\"\nanchor = \"frame.top_right\"\n\
+                 pivot = \"bottom_left\"\nz = 1\nhit = \"pass\"\n{extra}\n\
+                 [[skin.horizontal.decor]]\nimage = \"block.png\"\nanchor = \"frame.top_left\"\n\
+                 pivot = \"bottom_right\"\nhit = \"block\"\n"
+            ),
+        )
+        .unwrap();
+        let theme = wind_theme::load_resolved(&dir, "t", false).unwrap();
+        assert!(theme.skin.is_some());
+        theme
+    }
+
+    /// 解出最近一条 `CMD_CANDIDATE_SKIN`：(flags, 窗体, [(下标, hit, flags, 矩形)], 输入区)。
+    #[allow(clippy::type_complexity)]
+    fn last_skin(
+        cap: &Arc<Mutex<Vec<Vec<u8>>>>,
+    ) -> Option<(u32, [i32; 4], Vec<(u32, u32, u32, [i32; 4])>, Vec<[i32; 4]>)> {
+        let v = cap.lock().unwrap();
+        let f = v.iter().rev().find(|f| cmd_of(f) == CMD_CANDIDATE_SKIN)?;
+        let p = &f[IpcHeader::SIZE..];
+        let u = |o: usize| u32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        let r = |o: usize| -> [i32; 4] { std::array::from_fn(|k| u(o + k * 4) as i32) };
+        let n = u(20) as usize;
+        let decor = (0..n)
+            .map(|k| {
+                let o = 24 + k * 28;
+                (u(o), u(o + 4), u(o + 8), r(o + 12))
+            })
+            .collect();
+        let mo = 24 + n * 28;
+        let mask = (0..u(mo) as usize).map(|k| r(mo + 4 + k * 16)).collect();
+        Some((u(0), r(4), decor, mask))
+    }
+
+    fn covers(rects: &[[i32; 4]], x: i32, y: i32) -> bool {
+        rects
+            .iter()
+            .any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
+    }
+
+    fn center(r: [i32; 4]) -> (i32, i32) {
+        (r[0] + r[2] / 2, r[1] + r[3] / 2)
+    }
+
+    #[test]
+    fn plain_theme_frame_carries_inactive_skin_regions() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk0");
+        show_two(&mut f);
+        let order: Vec<u16> = cap.lock().unwrap().iter().map(|x| cmd_of(x)).collect();
+        let at = |c| order.iter().position(|&x| x == c).unwrap();
+        assert!(
+            at(CMD_CANDIDATE_SKIN) < at(CMD_HOST_RENDER_FRAME),
+            "{order:x?}"
+        );
+        let (flags, _, decor, mask) = last_skin(&cap).unwrap();
+        assert_eq!((flags, decor.len(), mask.len()), (0, 0, 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_skin_input_region_leaves_out_pass_decor() {
+        use wind_ipc::protocol::skin::*;
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk1");
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme("mask", None, ""))));
+        show_two(&mut f);
+        let (flags, frame, decor, mask) = last_skin(&cap).expect("皮肤帧要带区域");
+        assert_eq!(flags, SKIN_FLAG_ACTIVE | SKIN_FLAG_MASK);
+        // 求值后的装饰按 z 升序（block z = 0 在前），下标是排序后的位置。
+        let hits: Vec<(u32, u32, u32)> = decor.iter().map(|d| (d.0, d.1, d.2)).collect();
+        assert_eq!(hits, vec![(0, SKIN_HIT_BLOCK, 0), (1, SKIN_HIT_PASS, 0)]);
+        let (block, pass) = (decor[0].3, decor[1].3);
+        assert!(
+            pass[1] < frame[1] && pass[0] >= frame[0] + frame[2],
+            "{pass:?} {frame:?}"
+        );
+        // 窗体与 block 装饰接鼠标，穿透装饰不接；外扩区里装饰以外的透明处也不接。
+        let (fx, fy) = center(frame);
+        assert!(covers(&mask, fx, fy));
+        let (bx, by) = center(block);
+        assert!(covers(&mask, bx, by));
+        let (px, py) = center(pass);
+        assert!(!covers(&mask, px, py), "{mask:?}");
+        assert!(!covers(&mask, frame[0] + frame[2] / 2, 0));
+        // 穿透装饰照样画在位图里（只是不进输入区）。
+        let shm = f.shm.as_ref().unwrap();
+        let w = shm.read_header().width as i32;
+        let a = shm.pixels()[((py * w + px) * 4 + 3) as usize];
+        assert_eq!(a, 255);
+        // 换回普通主题：区域复位。
+        f.handle(UiCommand::SetTheme(Box::default()));
+        assert_eq!(last_skin(&cap).unwrap().0, 0);
+    }
+
+    /// macOS：穿透装饰拆到 `OVERLAY_KIND_DECOR` 层，主层里没有它；不发输入区。只有 CI 的 macOS job 跑得到。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pass_decor_goes_to_its_own_layer() {
+        use wind_ipc::protocol::overlay::OVERLAY_KIND_DECOR;
+        use wind_ipc::protocol::skin::*;
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk4");
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme("split", None, ""))));
+        show_two(&mut f);
+        let (flags, frame, decor, mask) = last_skin(&cap).expect("皮肤帧要带区域");
+        assert_eq!(flags, SKIN_FLAG_ACTIVE);
+        assert!(mask.is_empty());
+        let pass = decor.iter().find(|d| d.1 == SKIN_HIT_PASS).unwrap();
+        assert_eq!(pass.2, SKIN_DECOR_SPLIT);
+        let block = decor.iter().find(|d| d.1 == SKIN_HIT_BLOCK).unwrap();
+        assert_eq!(block.2, 0);
+        // 主层：穿透装饰处透明，窗体不透明。
+        let shm = f.shm.as_ref().unwrap();
+        let w = shm.read_header().width as i32;
+        let alpha = |(x, y): (i32, i32)| shm.pixels()[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(center(pass.3)), 0);
+        assert_eq!(alpha(center(frame)), 255);
+        // 穿透装饰层：先于候选帧推到，像素在 `_DEC` 段里。
+        let v = cap.lock().unwrap();
+        let kinds: Vec<(u16, u32)> = v
+            .iter()
+            .map(|x| (cmd_of(x), u32::from_le_bytes(x[8..12].try_into().unwrap())))
+            .collect();
+        let dec = kinds
+            .iter()
+            .position(|&(c, k)| c == CMD_OVERLAY_FRAME && k == OVERLAY_KIND_DECOR)
+            .expect("要推穿透装饰层");
+        let cand = kinds
+            .iter()
+            .rposition(|&(c, _)| c == CMD_HOST_RENDER_FRAME)
+            .unwrap();
+        assert!(dec < cand, "{kinds:?}");
+        drop(v);
+        let dshm = f.decor_shm.as_ref().unwrap();
+        let o = ((center(pass.3).1 * w + center(pass.3).0) * 4 + 3) as usize;
+        assert_eq!(dshm.pixels()[o], 255);
+        assert!(!covers(&mask, 0, 0));
+        // 收起：穿透装饰层也收。
+        cap.lock().unwrap().clear();
+        f.handle(UiCommand::HideCandidates);
+        assert!(
+            cap.lock()
+                .unwrap()
+                .iter()
+                .any(|x| cmd_of(x) == CMD_OVERLAY_FRAME
+                    && u32::from_le_bytes(x[8..12].try_into().unwrap()) == OVERLAY_KIND_DECOR)
+        );
+    }
+
+    /// 带到达时刻的推帧记录。
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    type Timed = Arc<Mutex<Vec<(std::time::Instant, Vec<u8>)>>>;
+
+    /// 记下每帧到达时刻的 sink（动画用例）。
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct TimedSink(Timed);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl wind_bridge::HostRenderSink for TimedSink {
+        fn push_frame(&self, f: &[u8]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((std::time::Instant::now(), f.to_vec()));
+        }
+    }
+
+    /// 按 `next_deadline` 睡、醒来 `tick`，直到 `until`（主循环没有命令时的行为）。每轮之后调 `each`。
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn drive_until(
+        f: &mut Forwarder,
+        until: std::time::Instant,
+        mut each: impl FnMut(&mut Forwarder),
+    ) {
+        loop {
+            let now = std::time::Instant::now();
+            if now >= until {
+                return;
+            }
+            let wake = f.next_deadline().map_or(until, |d| d.min(until));
+            std::thread::sleep(wake.saturating_duration_since(now));
+            f.tick();
+            each(f);
+        }
+    }
+
+    /// 四帧（红 / 绿 / 蓝 / 白）各 40 ms 的 8×8 APNG：25 帧/秒，快过限帧闸门。
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn fast_apng() -> Vec<u8> {
+        let solid = |c: [u8; 4]| (c.repeat(64), 40);
+        wind_scene::image_cache::anim_fixtures::apng(
+            8,
+            8,
+            &[
+                solid([255, 0, 0, 255]),
+                solid([0, 255, 0, 255]),
+                solid([0, 0, 255, 255]),
+                solid([255, 255, 255, 255]),
+            ],
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn skin_animation_pushes_throttled_anim_frames_until_hidden() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk2".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "anim",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        let (_, _, decor, _) = {
+            let v = cap.lock().unwrap();
+            let last = v
+                .iter()
+                .rev()
+                .find(|(_, x)| cmd_of(x) == CMD_CANDIDATE_SKIN)
+                .unwrap()
+                .1
+                .clone();
+            drop(v);
+            let tmp = Arc::new(Mutex::new(vec![last]));
+            last_skin(&tmp).unwrap()
+        };
+        let pass = decor
+            .iter()
+            .find(|d| d.1 == wind_ipc::protocol::skin::SKIN_HIT_PASS)
+            .unwrap()
+            .3;
+        let (px, py) = center(pass);
+        cap.lock().unwrap().clear();
+        // 显示期间：按 deadline 换帧，像素在红绿之间变。
+        let mut colors = std::collections::BTreeSet::new();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(700),
+            |f| {
+                let shm = f.shm.as_ref().unwrap();
+                let w = shm.read_header().width as i32;
+                let o = ((py * w + px) * 4) as usize;
+                colors.insert(shm.pixels()[o..o + 4].to_vec());
+            },
+        );
+        let frames: Vec<(std::time::Instant, u32)> = cap
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, x)| cmd_of(x) == CMD_HOST_RENDER_FRAME)
+            .map(|(t, x)| (*t, u32::from_le_bytes(x[28..32].try_into().unwrap())))
+            .collect();
+        // 25 帧/秒的动图按 15 帧/秒上限推：700ms 至多 11 帧（机器忙时只会更少）。
+        assert!(
+            (2..=11).contains(&frames.len()),
+            "700ms 内推了 {} 帧",
+            frames.len()
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|(_, fl)| fl & SharedRenderHeader::FLAG_ANIM_FRAME != 0),
+            "换帧都带 FLAG_ANIM_FRAME"
+        );
+        let gaps: Vec<_> = frames.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(
+            gaps.iter().all(|g| *g >= EXT_ANIM_MIN_INTERVAL),
+            "相邻两帧间隔不小于限帧上限：{gaps:?}"
+        );
+        assert!(colors.len() >= 2, "装饰像素没有换帧：{colors:?}");
+        // 换帧不重推 tooltip / 候选窗矩形（只有候选帧、命中矩形、皮肤区域三种）。
+        assert!(cap.lock().unwrap().iter().all(|(_, x)| matches!(
+            cmd_of(x),
+            CMD_HOST_RENDER_FRAME | CMD_CANDIDATE_RECTS | CMD_CANDIDATE_SKIN
+        )));
+        // 闸门没到：换帧到期也不推，到期时刻不早于闸门。
+        f.win
+            .set_anim_gate(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        cap.lock().unwrap().clear();
+        let spin = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        while std::time::Instant::now() < spin {
+            f.tick();
+        }
+        assert!(cap.lock().unwrap().is_empty(), "闸门内推了帧");
+        assert!(
+            f.next_deadline()
+                .is_some_and(|d| d >= f.win.anim_gate().unwrap())
+        );
+        f.win.set_anim_gate(std::time::Instant::now());
+        // 收起后不再唤醒、不再推帧。
+        f.handle(UiCommand::HideCandidates);
+        cap.lock().unwrap().clear();
+        assert!(
+            f.next_deadline()
+                .is_none_or(|d| d > std::time::Instant::now() + std::time::Duration::from_secs(1)),
+            "收起后不该为动画登记唤醒"
+        );
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(200),
+            |_| {},
+        );
+        assert!(cap.lock().unwrap().is_empty());
+    }
+
+    /// macOS 穿透装饰拆在独立层：换帧时主层像素不变就只推装饰层，装饰层不变也不推。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_anim_frames_push_only_the_changed_layer() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk5".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "anim",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        cap.lock().unwrap().clear();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(500),
+            |_| {},
+        );
+        let v = cap.lock().unwrap();
+        let decor = v
+            .iter()
+            .filter(|(_, x)| {
+                cmd_of(x) == CMD_OVERLAY_FRAME
+                    && u32::from_le_bytes(x[8..12].try_into().unwrap())
+                        == wind_ipc::protocol::overlay::OVERLAY_KIND_DECOR
+            })
+            .count();
+        assert!(decor >= 2, "穿透装饰层在换帧：{decor}");
+        assert!(
+            v.iter().all(|(_, x)| cmd_of(x) == CMD_OVERLAY_FRAME),
+            "主层没变不推候选帧 / 命中矩形 / 皮肤区域"
+        );
+    }
+
+    /// 限帧闸门只管换帧：别的到期（这里是收起后释放像素）不被推迟到闸门之后。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn anim_gate_does_not_delay_other_deadlines() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk6");
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "gate",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        f.win.set_anim_gate(far);
+        f.handle(UiCommand::HideCandidates);
+        let d = f.next_deadline().expect("收起后要为释放像素登记唤醒");
+        assert!(
+            d <= std::time::Instant::now() + crate::window::HIDDEN_RELEASE_AFTER,
+            "释放像素被推迟到了闸门之后"
+        );
+    }
+
+    /// `.app` 重连（重启）后手里什么都没有：下一次换帧主层也要推，不能只推装饰层。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reconnect_pushes_main_layer_again() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk7".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "anim",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        f.handle(UiCommand::HostReconnected);
+        cap.lock().unwrap().clear();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(300),
+            |_| {},
+        );
+        let frames = cap
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, x)| cmd_of(x) == CMD_HOST_RENDER_FRAME)
+            .count();
+        assert_eq!(frames, 1, "重连后第一次换帧补推主层，之后照旧去重");
+    }
+
+    /// 两帧各 33 ms 的循环：周期 66 ms 恰是闸门间隔，只在闸门处取样会回回采到同一帧。唤醒时刻
+    /// 取「闸门之后第一个换成不同帧的边界」，推出去的帧要两色交替（设计 §17.1）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn skin_animation_alternates_frames_when_period_matches_gate() {
+        let blink = wind_scene::image_cache::anim_fixtures::apng(
+            8,
+            8,
+            &[
+                ([255, 0, 0, 255].repeat(64), 33),
+                ([0, 255, 0, 255].repeat(64), 33),
+            ],
+        );
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk4".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "blink",
+            Some(&blink),
+            "",
+        ))));
+        show_two(&mut f);
+        let (_, _, decor, _) = {
+            let last = cap
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(_, x)| cmd_of(x) == CMD_CANDIDATE_SKIN)
+                .unwrap()
+                .1
+                .clone();
+            last_skin(&Arc::new(Mutex::new(vec![last]))).unwrap()
+        };
+        let pass = decor
+            .iter()
+            .find(|d| d.1 == wind_ipc::protocol::skin::SKIN_HIT_PASS)
+            .unwrap()
+            .3;
+        let (px, py) = center(pass);
+        let count = |cap: &Timed| {
+            cap.lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, x)| cmd_of(x) == CMD_HOST_RENDER_FRAME)
+                .count()
+        };
+        let mut seen = count(&cap);
+        let mut seq = Vec::new();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(800),
+            |f| {
+                let n = count(&cap);
+                if n > seen {
+                    seen = n;
+                    let shm = f.shm.as_ref().unwrap();
+                    let w = shm.read_header().width as i32;
+                    let o = ((py * w + px) * 4) as usize;
+                    seq.push(shm.pixels()[o..o + 4].to_vec());
+                }
+            },
+        );
+        assert!(seq.len() >= 4, "800ms 只推了 {} 帧", seq.len());
+        assert!(
+            seq.windows(2).all(|w| w[0] != w[1]),
+            "相邻换帧画面相同（采样混叠）：{seq:?}"
+        );
+    }
+
+    /// 闸门内来了内容帧（继续打字）：换帧到期按这一帧重新探测，闸门之后推出的仍是另一帧。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn content_frame_inside_gate_reprobes_next_change() {
+        let blink = wind_scene::image_cache::anim_fixtures::apng(
+            8,
+            8,
+            &[
+                ([255, 0, 0, 255].repeat(64), 33),
+                ([0, 255, 0, 255].repeat(64), 33),
+            ],
+        );
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (ev_tx, _ev) = std::sync::mpsc::channel();
+        let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk8".into());
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "blink",
+            Some(&blink),
+            "",
+        ))));
+        show_two(&mut f);
+        let (_, _, decor, _) = {
+            let last = cap
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(_, x)| cmd_of(x) == CMD_CANDIDATE_SKIN)
+                .unwrap()
+                .1
+                .clone();
+            last_skin(&Arc::new(Mutex::new(vec![last]))).unwrap()
+        };
+        let pass = decor
+            .iter()
+            .find(|d| d.1 == wind_ipc::protocol::skin::SKIN_HIT_PASS)
+            .unwrap()
+            .3;
+        let (px, py) = center(pass);
+        let pixel = |f: &Forwarder| {
+            let shm = f.shm.as_ref().unwrap();
+            let w = shm.read_header().width as i32;
+            let o = ((py * w + px) * 4) as usize;
+            shm.pixels()[o..o + 4].to_vec()
+        };
+        let anim_frames = |cap: &Timed| {
+            cap.lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, x)| {
+                    cmd_of(x) == CMD_HOST_RENDER_FRAME
+                        && u32::from_le_bytes(x[28..32].try_into().unwrap())
+                            & SharedRenderHeader::FLAG_ANIM_FRAME
+                            != 0
+                })
+                .count()
+        };
+        // 等下一次换帧推出去。
+        let next_anim = |f: &mut Forwarder| {
+            let n = anim_frames(&cap);
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(400);
+            while anim_frames(&cap) == n && std::time::Instant::now() < until {
+                let wake = f.next_deadline().map_or(until, |d| d.min(until));
+                std::thread::sleep(wake.saturating_duration_since(std::time::Instant::now()));
+                f.tick();
+            }
+            assert!(anim_frames(&cap) > n, "没等到换帧");
+        };
+        for _ in 0..3 {
+            next_anim(&mut f);
+            // 闸门内：内容帧（同样的候选再推一次）。
+            show_two(&mut f);
+            let drawn = pixel(&f);
+            next_anim(&mut f);
+            assert_ne!(pixel(&f), drawn, "闸门之后推出的帧与内容帧画面相同");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn theme_animation_off_keeps_first_frame() {
+        let cap = Arc::new(Mutex::new(Vec::new()));
+        let (mut f, _ev) = mk(cap.clone(), "_sk3");
+        f.handle(UiCommand::SetThemeAnimation(false));
+        f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+            "frozen",
+            Some(&fast_apng()),
+            "",
+        ))));
+        show_two(&mut f);
+        cap.lock().unwrap().clear();
+        drive_until(
+            &mut f,
+            std::time::Instant::now() + std::time::Duration::from_millis(200),
+            |_| {},
+        );
+        assert!(cap.lock().unwrap().is_empty(), "关了主题动画不推换帧");
     }
 
     #[test]
@@ -2355,6 +3133,44 @@ mod tests {
             f.handle(UiCommand::HideCandidates);
             let m = overlays(&cap, OVERLAY_KIND_TOOLTIP);
             assert!(!visible(m.last().unwrap()), "候选窗藏了 tooltip 也得藏");
+        }
+
+        /// 皮肤动画换帧期间悬停提示开着：换帧只换候选窗像素，不重推 tooltip。
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn skin_anim_frames_do_not_repush_tooltip() {
+            let cap = Arc::new(Mutex::new(Vec::new()));
+            let (mut f, _ev) = mk(cap.clone(), "_lo6a");
+            f.handle(UiCommand::SetTheme(Box::new(skin_theme(
+                "anim",
+                Some(&fast_apng()),
+                "",
+            ))));
+            update(&mut f, &tip_cand(), 0);
+            assert_eq!(
+                overlays(&cap, OVERLAY_KIND_TOOLTIP).len(),
+                1,
+                "悬停提示先出来"
+            );
+            let frames = |cap: &Arc<Mutex<Vec<Vec<u8>>>>| {
+                cap.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|x| cmd_of(x) == CMD_HOST_RENDER_FRAME)
+                    .count()
+            };
+            let before = frames(&cap);
+            drive_until(
+                &mut f,
+                std::time::Instant::now() + std::time::Duration::from_millis(400),
+                |_| {},
+            );
+            assert!(frames(&cap) > before, "动画在换帧");
+            assert_eq!(
+                overlays(&cap, OVERLAY_KIND_TOOLTIP).len(),
+                1,
+                "换帧不重推 tooltip"
+            );
         }
 
         fn tooltip_menu_requests(

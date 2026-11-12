@@ -91,6 +91,7 @@ fn pin_icon(pinned: bool, tint: [u8; 4], size: f32) -> crate::view::ViewImage {
             ..Default::default()
         }),
         scale: 1.0,
+        flip: wind_theme::Flip::NONE,
     }
 }
 

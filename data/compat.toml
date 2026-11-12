@@ -103,14 +103,18 @@
 #   candidate_x:          fixed 时本应用的候选框位置（屏幕坐标，物理像素，默认 0）。
 #   candidate_y:          同上。每个应用各记一份，互不影响；(0,0) = 尚未设定，首次显示
 #                         落在屏幕默认位置，拖动一次即记住。
-#   ignore_host_ime_close:
-#                         忽略本应用「关闭输入法」的请求：true | false｜不写=按出厂规则
-#                         （出厂未配即采纳）。
+#   ignore_host_ime_switch:
+#                         忽略本应用自己切换中英的请求（开和关两个方向都算）：
+#                         true | false｜不写=跟随全局 config.toml 的 [input] ignore_host_ime_switch
+#                         （出厂 false，即照常采纳）。
 #                         部分 .NET 应用（WinForms 的 ImeMode.Disable、WPF 的
 #                         IsInputMethodEnabled=False）在焦点落到按钮等控件时会关掉**全局**
-#                         中英状态，表现为「点一下按钮就变成英文，回到输入框也不恢复」。
-#                         开启后这类请求不再采纳，中文状态保持不变。
+#                         中英状态，表现为「点一下按钮就变成英文，回到输入框也不恢复」；
+#                         也有应用在内部切换焦点时把输入法打开，英文状态下被切成中文。
+#                         开启后这类请求不再采纳，中英状态保持不变。
 #                         Ctrl+Space 不受影响（按住 Ctrl 时一律放行），仍可正常切中英。
+#                         旧键名 ignore_host_ime_close 仍可读（按本字段的双向语义生效），
+#                         经右键菜单或设置页改写时会换成新键名。
 #   host_drawn_candidates:
 #                         这个宿主把候选串读走时，是否当它在自己画候选、从而收起我们的框：
 #                         不写=否（默认）｜true=是｜false=显式关闭。
@@ -176,7 +180,7 @@
 # 逐字段的功能与解决的问题以 wind-config 的 compat_schema 为准，帮助页读的也是它。
 #
 # first_show_mode / initial_mode / initial_punct / auto_pair / candidate_position_mode /
-# ignore_host_ime_close 对应右键菜单：「应用独立配置（<进程名>）」子菜单，各自单选。
+# ignore_host_ime_switch 对应右键菜单：「应用独立配置（<进程名>）」子菜单，各自单选。
 # （菜单切换会写入用户层 compat.toml，不改本文件）
 # smart_method、caret_offset_*、host_drawn_candidates 与 candidate_x/y 不进菜单：
 # 前三者按需手工编辑用户层 compat.toml，候选框位置由拖动候选框设定。

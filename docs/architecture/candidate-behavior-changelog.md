@@ -27,6 +27,21 @@
 
 ---
 
+## 2026-11-08 · Linux 皮肤穿透装饰改为整层合成，与 block 装饰交叉叠放时绘制顺序变化（0.132）
+
+- 合入：9a0904c9（Linux 穿透装饰拆层）；范围：Linux（X11 / Wayland）候选窗，仅启用了带 `hit = "pass"` 装饰的皮肤主题
+- 变化：
+  - 穿透装饰先从主层拆出来算输入区，再整层合回：所有穿透装饰都在窗体下（z < 0）时垫在主层最下面，否则盖在
+    主层最上面（连同候选文字与 z ≥ 100 的装饰）。前：所有装饰按 z 交错画进同一张位图。
+  - 只有穿透装饰与 block / drag 装饰交叉叠放时看得出来：例如 block 装饰 z = 120、穿透装饰 z = 10 且两者重叠，
+    前：block 在上 → 后：穿透装饰在上；两块都在窗体下、block 的 z 更大时同理反过来。
+  - 与 Windows 本地窗口路径（穿透装饰在独立窗口里）的叠放规则一致；macOS 拆到子 panel，同一规则。
+- 触发条件：出厂即生效（主题里有穿透装饰且与其它装饰重叠）
+- 回退旧行为：无（设计变更：穿透装饰须单独成层，输入区才能不含它）；主题作者可调 z，让两类装饰不交叉
+- 钉住的测试：`wind-ui` `manager_macos::tests::linux_skin_input_region_leaves_out_pass_decor`；
+  `wind-scene` `candidate::host_regions::tests::premultiplied_over_and_under`
+- 来源：内部（设计 theme-skin-animation.md §17.2）
+
 ## 2026-11-07 · 联想态可不挂占位组合（0.131）
 
 - 合入：2aeb737c..f96bc274（快进合入 main，无合并提交）；范围：Windows TSF，仅 compat 规则配了 `assoc_placeholder = "none"` 的应用（出厂：Excel、WPS 表格）

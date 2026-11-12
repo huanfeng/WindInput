@@ -28,6 +28,8 @@ pub const PREVIEW_MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 8;
 /// 一次批量的条数上限。
 const MAX_BATCH: usize = 64;
+/// `ui` 参数（草稿配置的 `ui` 子树，JSON）的上限。
+const MAX_DRAFT_BYTES: usize = 256 * 1024;
 /// `text` 参数的上限，与包内 `theme.toml` 同。
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 /// 算缓存键时最多读这么多字节的主题内容（只有临时解包的才读内容）；超出就不缓存，直接渲染。
@@ -117,10 +119,18 @@ struct Prepared {
     /// 主题在临时目录里（包 / 文本）：指纹取内容；否则取文件元数据。
     staged: bool,
     is_dark: bool,
+    /// 画哪个窗（`kind` 参数；缺省 = 候选窗，与不带 kind 的旧请求一致）。
+    kind: wind_ui_types::PreviewKind,
     vertical: bool,
     scale: f32,
+    /// 目标框逻辑尺寸（`fit_w` / `fit_h` 参数；`None` = 不约束）。渲染端按它折算渲染倍率，
+    /// 进缓存键（生效倍率由 fit 与自然尺寸共同决定，fit 原值进键即保证倍率变了键必变）。
+    fit_w: Option<u32>,
+    fit_h: Option<u32>,
     inline: bool,
     staging: Option<Staging>,
+    /// 设置端草稿外观（`ui` 参数）：给了就不查也不写磁盘缓存，一律内联。
+    draft: Option<wind_coordinator::candidate_preview::PreviewDraft>,
 }
 
 /// 已投给 UI 线程、等回执的一条。drop 时置位取消（UI 线程排到它就丢掉），并还名额、删临时目录。
@@ -214,14 +224,18 @@ fn render_batch_with<H: WebDataRpc + ?Sized>(
                 continue;
             }
         };
-        let key = match cache_key(
-            wind_ui_types::CANDIDATE_PREVIEW_RENDER_VERSION,
-            &stamp,
-            &fingerprint,
-            &p,
-        ) {
-            Ok(k) => k,
-            Err(e) => {
+        // 草稿预览是一次性的（改一下字号就是一张新图），不落盘。
+        let key = match p.draft.is_none().then(|| {
+            cache_key(
+                wind_ui_types::CANDIDATE_PREVIEW_RENDER_VERSION,
+                &stamp,
+                &fingerprint,
+                &p,
+            )
+        }) {
+            None => None,
+            Some(Ok(k)) => k,
+            Some(Err(e)) => {
                 out[i] = err_json(&format!("读取主题文件失败：{e}"));
                 continue;
             }
@@ -268,18 +282,28 @@ fn render_batch_with<H: WebDataRpc + ?Sized>(
             }
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        let rx = h.request_candidate_preview(theme, p.vertical, p.scale, Arc::clone(&cancel));
+        let rx = h.request_candidate_preview(
+            theme,
+            p.vertical,
+            p.scale,
+            p.kind,
+            p.draft.as_ref(),
+            p.fit_w,
+            p.fit_h,
+            Arc::clone(&cancel),
+        );
         let path = key
             .as_ref()
             .zip(cache)
             .map(|(k, d)| d.join(format!("{}.{k}.png", p.prefix)));
+        let uncached = key.is_none();
         in_flight.push_back(Pending {
             index: i,
             rx,
             path,
             key: key.unwrap_or_default(),
-            // 不缓存（键算不出）时只能内联。
-            inline: p.inline || cache.is_none(),
+            // 不缓存（键算不出、草稿）时只能内联。
+            inline: p.inline || cache.is_none() || uncached,
             cancel,
             _slot: slot,
             _staging: p.staging,
@@ -346,22 +370,52 @@ fn prepare<H: WebDataRpc + ?Sized>(
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty())
     };
+    let draft = match item.get("ui") {
+        None | Some(Value::Null) => None,
+        Some(ui) => {
+            let len = serde_json::to_string(ui).map_or(usize::MAX, |t| t.len());
+            if len > MAX_DRAFT_BYTES {
+                anyhow::bail!("ui 参数过大（{len} 字节，上限 {MAX_DRAFT_BYTES}）");
+            }
+            Some(h.candidate_preview_draft(&crate::json_to_toml(ui))?)
+        }
+    };
     let source = match (s("name"), s("package"), s("text")) {
         (Some(n), None, None) => Source::Installed(n.to_string()),
         (None, Some(p), None) => Source::Package(PathBuf::from(p)),
         (None, None, Some(t)) => Source::Text(t.to_string()),
-        (None, None, None) => Source::Installed(h.current_theme_name()),
+        (None, None, None) => Source::Installed(
+            draft
+                .as_ref()
+                .map_or_else(|| h.current_theme_name(), |d| d.theme_name.clone()),
+        ),
         _ => anyhow::bail!("name / package / text 只能给一个"),
     };
     let is_dark = match s("style") {
-        None => h.current_theme_is_dark(),
+        None => match &draft {
+            Some(d) => wind_coordinator::theme_style::ThemeStyle::from_config(&d.theme_style)
+                .resolve_dark(),
+            None => h.current_theme_is_dark(),
+        },
         Some("light") => false,
         Some("dark") => true,
         Some("system") => wind_coordinator::theme_style::system_prefers_dark(),
         Some(o) => anyhow::bail!("style 只能是 light / dark / system（收到 {o}）"),
     };
+    let kind = match s("kind") {
+        None => wind_ui_types::PreviewKind::default(),
+        Some(k) => wind_ui_types::PreviewKind::parse(k)
+            .ok_or_else(|| anyhow::anyhow!("kind 只能是 candidate / toolbar（收到 {k}）"))?,
+    };
+    // 缺省朝向按形态取各自的当前配置：候选窗看候选排列、工具栏看 `ui.toolbar.vertical`；
+    // 草稿给了看草稿（`ui.candidate.layout` / `ui.toolbar.vertical` 同理）。
     let vertical = match s("layout") {
-        None => h.candidate_preview_vertical(),
+        None => match (draft.as_ref(), kind) {
+            (Some(d), wind_ui_types::PreviewKind::Toolbar) => d.toolbar_vertical,
+            (Some(d), _) => d.vertical,
+            (None, wind_ui_types::PreviewKind::Toolbar) => h.toolbar_preview_vertical(),
+            (None, _) => h.candidate_preview_vertical(),
+        },
         Some("horizontal") => false,
         Some("vertical") => true,
         Some(o) => anyhow::bail!("layout 只能是 horizontal / vertical（收到 {o}）"),
@@ -373,6 +427,22 @@ fn prepare<H: WebDataRpc + ?Sized>(
             .filter(|x| (0.5..=4.0).contains(x))
             .ok_or_else(|| anyhow::anyhow!("scale 须是 0.5–4 之间的数"))? as f32,
     };
+    // fit 目标框（逻辑像素）：可只给其一，缺省 = 不约束。非整数或 ≤0 整条报错不出图
+    // （kind 同款：坏参数在 prepare 阶段就拒），u32 装不下也算非法。
+    let fit = |k: &str| -> anyhow::Result<Option<u32>> {
+        match item.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => {
+                let n = v
+                    .as_u64()
+                    .filter(|n| (1..=u32::MAX as u64).contains(n))
+                    .ok_or_else(|| anyhow::anyhow!("{k} 只能是正整数（收到 {v}）"))?;
+                Ok(Some(n as u32))
+            }
+        }
+    };
+    let fit_w = fit("fit_w")?;
+    let fit_h = fit("fit_h")?;
     let inline = item.get("inline").and_then(Value::as_bool).unwrap_or(false) || cache.is_none();
     let installed = h.theme_dirs();
     let (prefix, slug, dirs, staging) = match source {
@@ -410,10 +480,14 @@ fn prepare<H: WebDataRpc + ?Sized>(
         slug,
         staged: staging.is_some(),
         is_dark,
+        kind,
         vertical,
         scale,
+        fit_w,
+        fit_h,
         inline,
         staging,
+        draft,
     })
 }
 
@@ -474,9 +548,29 @@ fn cache_key(
     h.write_u8(0xff);
     h.write(fingerprint.as_bytes());
     h.write_u8(0xff);
+    // 形态进键：同一主题、同一参数下候选窗与工具栏是两张不同的图，缓存文件不能互顶。
+    h.write_u8(match p.kind {
+        wind_ui_types::PreviewKind::Candidate => 0,
+        wind_ui_types::PreviewKind::Toolbar => 1,
+    });
     h.write_u8(p.is_dark as u8);
     h.write_u8(p.vertical as u8);
     h.write_u32(p.scale.to_bits());
+    // fit 目标框进键：生效倍率 = 请求 scale × r，r 由 fit 与该请求下的自然尺寸折算（渲染端
+    // 算），而自然尺寸由键里其余成分（主题内容 / 外观指纹 / 版本 / 形态 / 朝向 / 缩放）决定
+    // ——fit 原值进键即保证倍率变了键必变，不会两个不同倍率折算出同一个键回错图。两个都
+    // 缺省时不写任何字节：与旧版键完全一致，历史缓存图继续命中。
+    if p.fit_w.is_some() || p.fit_h.is_some() {
+        for v in [p.fit_w, p.fit_h] {
+            match v {
+                Some(n) => {
+                    h.write_u8(1);
+                    h.write_u32(n);
+                }
+                None => h.write_u8(0),
+            }
+        }
+    }
     let mut budget = HashBudget {
         files: MAX_HASH_FILES,
         bytes: MAX_HASH_BYTES,
@@ -826,10 +920,14 @@ mod tests {
             slug: slug.into(),
             staged,
             is_dark: false,
+            kind: wind_ui_types::PreviewKind::Candidate,
             vertical: false,
             scale: 1.0,
+            fit_w: None,
+            fit_h: None,
             inline: false,
             staging: None,
+            draft: None,
         }
     }
 
@@ -874,6 +972,12 @@ mod tests {
             let mut q = prepared(dirs.clone(), "child", staged);
             q.scale = 1.5;
             assert_ne!(k0, key(1, "b", "fp", &q), "缩放");
+            let mut q = prepared(dirs.clone(), "child", staged);
+            q.fit_w = Some(584);
+            assert_ne!(k0, key(1, "b", "fp", &q), "fit_w 进键");
+            let mut q = prepared(dirs.clone(), "child", staged);
+            q.fit_h = Some(184);
+            assert_ne!(k0, key(1, "b", "fp", &q), "fit_h 进键");
             // base 链上的资源变了（同长度内容 + 推后 mtime，元数据指纹也看得见）
             let bg = root.join("base_t/assets/bg.png");
             std::fs::write(&bg, b"two").unwrap();
@@ -1058,15 +1162,17 @@ mod tests {
             while let Ok(cmd) = rx.recv() {
                 if let UiCommand::RenderCandidatePreview(req) = cmd {
                     let n = s.fetch_add(1, Ordering::SeqCst) as u32 + 1;
+                    // 先存请求再回执：调用方一收到回执就会去 `held` 里取这条请求。
+                    let (tx, vertical) = (req.reply.clone(), req.vertical);
+                    hd.lock().unwrap().push(req);
                     if reply {
-                        let w = if req.vertical { 7 } else { 100 + n };
-                        let _ = req.reply.try_send(Ok(CandidatePreviewImage {
+                        let w = if vertical { 7 } else { 100 + n };
+                        let _ = tx.try_send(Ok(CandidatePreviewImage {
                             width: w,
                             height: 30,
                             png: fake_png(w, 30),
                         }));
                     }
-                    hd.lock().unwrap().push(req);
                 }
             }
         });
@@ -1134,6 +1240,180 @@ mod tests {
         assert_eq!(seen.load(Ordering::SeqCst), 14);
         assert!(png_complete(&std::fs::read(&path).unwrap()));
         assert_eq!(remove_theme_previews(&cache, "default"), 3);
+        let _ = std::fs::remove_dir_all(cache);
+    }
+
+    /// `kind` 参数：缺省 = 候选窗（不带 kind 的旧请求行为不变）、非法值报错不出图、
+    /// `toolbar` 进请求结构；缺省朝向按形态取各自的当前配置（工具栏看 `ui.toolbar.vertical`），
+    /// `layout` 参数对两种形态都仍然生效。
+    #[test]
+    fn kind_param_defaults_validates_and_rides_request() {
+        let _g = serial();
+        let (c, _seen, held) = coord_with_fake_ui(true);
+        let cache = tmp("kind");
+        use wind_coordinator::web_host::WebDataHost;
+        // inline=true：一律进 UI 线程，不落盘，防串台。
+        let one = |item: Value| {
+            let mut it = item;
+            it["inline"] = json!(true);
+            render_batch(c.as_ref(), &[it], Some(&cache)).pop().unwrap()
+        };
+
+        let bad = one(json!({ "name": "default", "kind": "bar" }));
+        assert!(!ok(&bad), "{bad:?}");
+        assert!(
+            bad["error"].as_str().unwrap().starts_with("kind 只能是"),
+            "{bad:?}"
+        );
+        assert!(
+            held.lock().unwrap().is_empty(),
+            "坏 kind 在 prepare 阶段就拒，不出图"
+        );
+
+        let out = one(json!({ "name": "default" }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            req.kind,
+            wind_ui_types::PreviewKind::Candidate,
+            "缺省 = 候选窗"
+        );
+
+        let out = one(json!({ "name": "default", "kind": "toolbar" }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.kind, wind_ui_types::PreviewKind::Toolbar);
+        assert_eq!(
+            req.vertical,
+            c.toolbar_preview_vertical(),
+            "缺省朝向取 ui.toolbar.vertical"
+        );
+
+        let out = one(json!({
+            "name": "default",
+            "kind": "toolbar",
+            "layout": "vertical"
+        }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert!(req.vertical, "layout 参数仍然生效");
+        let _ = std::fs::remove_dir_all(cache);
+    }
+
+    /// 缓存键含形态：同一主题同一参数下，候选窗与工具栏的键不同，缓存文件不互顶。
+    #[test]
+    fn cache_key_differs_between_kinds() {
+        let root = tmp("kindkey");
+        two_themes(&root);
+        let mut p = prepared(vec![root], "child", false);
+        let k0 = key(1, "b", "fp", &p);
+        p.kind = wind_ui_types::PreviewKind::Toolbar;
+        assert_ne!(k0, key(1, "b", "fp", &p), "形态要进缓存键");
+    }
+
+    /// `fit_w` / `fit_h` 参数：缺省不进请求（不约束，行为与旧请求一致）、可只给其一、
+    /// 非整数 / 0 / 负数 / 超出 u32 整条报错不出图（kind 同款：prepare 阶段就拒）。
+    #[test]
+    fn fit_param_defaults_validates_and_rides_request() {
+        let _g = serial();
+        let (c, _seen, held) = coord_with_fake_ui(true);
+        let cache = tmp("fit");
+        // inline=true：一律进 UI 线程，不落盘，防串台。
+        let one = |item: Value| {
+            let mut it = item;
+            it["inline"] = json!(true);
+            render_batch(c.as_ref(), &[it], Some(&cache)).pop().unwrap()
+        };
+
+        for (v, why) in [
+            (json!(0), "0"),
+            (json!(-3), "负数"),
+            (json!(2.5), "非整数"),
+            (json!("584"), "字符串"),
+            (json!(u64::MAX), "超出 u32"),
+        ] {
+            let bad = one(json!({ "name": "default", "fit_w": v }));
+            assert!(!ok(&bad), "{why} 应报错：{bad:?}");
+            assert!(
+                bad["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("fit_w 只能是正整数"),
+                "{why} 文案：{bad:?}"
+            );
+        }
+        assert!(
+            held.lock().unwrap().is_empty(),
+            "坏 fit 在 prepare 阶段就拒，不出图"
+        );
+
+        let out = one(json!({ "name": "default" }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.fit_w, None, "缺省不约束");
+        assert_eq!(req.fit_h, None);
+
+        let out = one(json!({ "name": "default", "fit_w": 584, "fit_h": 184 }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.fit_w, Some(584));
+        assert_eq!(req.fit_h, Some(184));
+
+        let out = one(json!({ "name": "default", "fit_h": 184 }));
+        assert!(ok(&out), "{out:?}");
+        let req = held.lock().unwrap().pop().unwrap();
+        assert_eq!(req.fit_w, None, "只给一维");
+        assert_eq!(req.fit_h, Some(184));
+        let _ = std::fs::remove_dir_all(cache);
+    }
+
+    /// 带草稿 `ui` 的请求：草稿外观随请求到 UI 线程，结果内联、不落盘；坏参数报错。
+    #[test]
+    fn draft_ui_rides_request_and_skips_disk_cache() {
+        let _g = serial();
+        let (c, seen, held) = coord_with_fake_ui(true);
+        let cache = tmp("draft");
+        let ui = json!({
+            "candidate": { "font_size": 999, "per_page": 3, "layout": "vertical", "syllable_separator": " " },
+            "font": { "family": "Noto Sans", "weight": "粗" },
+            "comment": { "enabled": false },
+            "no_such": 1,
+        });
+        let out = render_batch(
+            c.as_ref(),
+            &[
+                json!({ "name": "default", "ui": ui }),
+                json!({ "name": "default", "ui": 3 }),
+                json!({ "name": "default", "ui": { "font": { "family": "x".repeat(MAX_DRAFT_BYTES) } } }),
+            ],
+            Some(&cache),
+        );
+        assert!(ok(&out[0]), "{out:?}");
+        assert!(out[0]["png"].is_string(), "草稿预览一律内联");
+        assert!(out[0].get("path").is_none_or(Value::is_null), "{}", out[0]);
+        assert!(!ok(&out[1]) && !ok(&out[2]), "{out:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        let leftovers = std::fs::read_dir(&cache)
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .filter(|e| e.path().is_file())
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0, "草稿预览不写缓存");
+
+        let req = held.lock().unwrap().pop().unwrap();
+        assert!(req.vertical, "layout 缺省取草稿的排列");
+        assert_eq!(req.candidates.len(), 3);
+        assert_eq!(req.preedit, "ni hao", "示例编码按草稿的音节分隔符显示");
+        assert!(
+            req.candidates.iter().all(|c| c.comment.is_empty()),
+            "注释关"
+        );
+        let a = req.appearance.as_ref().expect("带草稿外观");
+        assert_eq!(a.font_size, 72.0, "字号夹到设置页上限");
+        assert_eq!(a.font_family, "Noto Sans");
+        assert_eq!(a.font_weight, 0, "类型不符的叶子丢弃，回落当前值");
         let _ = std::fs::remove_dir_all(cache);
     }
 

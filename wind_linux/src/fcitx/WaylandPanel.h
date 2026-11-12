@@ -15,6 +15,10 @@
 // 一个面板，故每个显示周期换新 surface，旧的经 RetiredSurfaces 延迟销毁
 // （docs/design/linux-kde-input-method-v1.md）。
 //
+// 皮肤的装饰可以外扩到窗体之外，而合成器只按主 surface 摆位（surface 左上贴光标左下）：主 surface
+// 只占窗体、整张位图放在子 surface 上（位置 = −窗体左上），没有 wl_subcompositor 时只贴窗体左上起的
+// 部分（设计 theme-skin-animation.md §17.3「内容偏移」，`planWaylandSkin`）。
+//
 // 例外是工具栏 / 软键盘（kind 10 / 11）：它们常驻屏幕、不跟光标，各开一个 TOP 层的 layer surface，
 // 按「所在输出 + top|left 边距」摆。坐标系见 OverlayInput.h 的「Wayland 面板坐标」。KDE（v1 会话）
 // 同样走 layer-shell，不碰 v1 面板（KWin 全局只认一个面板）。
@@ -137,6 +141,8 @@ public:
             panelPointer;
         /// 工具栏 / 软键盘拖完：内容盒左上（面板坐标）与所在输出名（拿不到为空串）。
         std::function<void(uint32_t kind, int32_t x, int32_t y, const std::string& output)> panelMoved;
+        /// 点了候选窗上的一块皮肤装饰（同 X11 的 decorClick）。
+        std::function<void(uint32_t index)> decorClick;
     };
     /// 状态气泡此刻在 layer-shell 上的内容盒左上（输出坐标，位图像素）；不在 layer-shell 上
     /// 显示时为空（服务端「固定位置」落盘询问用）。
@@ -167,6 +173,9 @@ public:
     void setCallbacks(Callbacks cb) { cb_ = std::move(cb); }
     /// 服务端推来的命中表（位图像素坐标）。
     void setRects(std::vector<CandidateHitRect> rects) { rects_ = std::move(rects); }
+    /// 皮肤区域（CMD_CANDIDATE_SKIN）：带输入区表时候选那一块只在表里的矩形接鼠标（穿透装饰、
+    /// 透明外扩区不接），否则整块候选窗接。先于对应的帧到，贴帧时生效。
+    void setSkin(CandidateSkin skin);
 
 private:
     struct Output {
@@ -217,9 +226,18 @@ private:
     void reapRetired(bool all, bool alive = true);
     /// 把各层合成一张位图贴上去；没有任何层在显示就收起 popup。
     bool present(fcitx::InputContext* ic);
-    /// `inputW/H`：位图里接收鼠标的那一块（候选窗）的像素尺寸，0 = 整张都不接收。
+    /// `inputW/H`：位图里接收鼠标的那一块（候选窗）的像素尺寸，0 = 整张都不接收。`skinMask`：
+    /// 候选那一块按皮肤输入区表收（菜单开着时整张都收，传 false）。`plan`：按皮肤窗体拆层 / 裁切。
     bool attachPixels(const uint8_t* data, uint32_t w, uint32_t h, uint32_t stride,
-                      uint32_t inputW, uint32_t inputH);
+                      uint32_t inputW, uint32_t inputH, bool skinMask, const WaylandSkinPlan& plan);
+    /// 子 surface（拆层时放整张位图）：没有就建，挂在当前 surface 下面。
+    bool ensureChild();
+    /// 子 surface 摘 buffer（随下一次主 surface 提交生效）。
+    void unmapChild();
+    /// 指针事件里的 surface 是不是候选窗这一组（主 surface 或子 surface）。
+    bool isPopupSurface(const wl_surface* s) const { return s && (s == surface_ || s == child_); }
+    /// RetiredSurfaces 按主 surface 记指针：子 surface 换成它挂的那个主 surface。
+    uintptr_t retiredKey(wl_surface* s) const;
     void hidePopup();
     void dropPopup();
     /// 位图 → wl_buffer（memfd + wl_shm）；失败返回 nullptr。
@@ -249,6 +267,17 @@ private:
     wl_seat* seat_ = nullptr;
     wl_pointer* pointer_ = nullptr;
     wl_surface* surface_ = nullptr;
+    // 拆层用的子 surface（随 surface_ 建、随它退役）。
+    wl_surface* child_ = nullptr;
+    wl_subsurface* childSub_ = nullptr;
+    wp_viewport* childViewport_ = nullptr;
+    bool childMapped_ = false;
+    bool forceClip_ = false; // WINDINPUT_WAYLAND_SKIN_CLIP=1：强制裁切（排障）
+    // 主 surface 左上在位图里的位置（位图像素）：裁切时指针坐标要加回它。
+    int32_t mainOriginX_ = 0, mainOriginY_ = 0;
+    WaylandSkinMode lastMode_ = WaylandSkinMode::Whole; // 只在贴法变了时记日志
+    // 指针此刻所在 surface 的原点在位图里的位置（逻辑坐标）：pointerX_/Y_ = 局部坐标 + 它。
+    double ptrOffX_ = 0, ptrOffY_ = 0;
     zwp_input_method_v2* im_ = nullptr;      // 当前 popup 挂在哪个输入法对象上
     zwp_input_popup_surface_v2* popup_ = nullptr;
     // surface 拿过哪种角色（角色一经指定终身不变，换另一种只能换 surface）。
@@ -262,10 +291,14 @@ private:
         wp_viewport* viewport = nullptr;
         zwp_input_panel_surface_v1* role = nullptr;
         wl_callback* sync = nullptr;
+        wl_surface* child = nullptr;
+        wl_subsurface* childSub = nullptr;
+        wp_viewport* childViewport = nullptr;
     };
     std::vector<std::unique_ptr<Retired>> retiredRes_;
     RetiredSurfaces retired_;
     wl_buffer* buffer_ = nullptr;            // 最近一次 attach 的（release 时销毁）
+    CandidateSkin skin_;                     // 最近一条皮肤区域
     // 层 0 = 候选，1..3 = OVERLAY_KIND_TOOLTIP/STATUS/TOAST。
     static constexpr int kLayers = 4;
     struct Layer {
@@ -457,11 +490,16 @@ private:
     Callbacks cb_;
     std::vector<CandidateHitRect> rects_;
     bool pointerInside_ = false;
-    double pointerX_ = 0, pointerY_ = 0; // surface 内逻辑坐标
+    double pointerX_ = 0, pointerY_ = 0; // 位图的逻辑坐标（主 / 子 surface 的局部坐标已换算）
     int32_t hover_ = -1;
     ClickGate click_; // 左键点选：按下记命中，松开同一项才选
+    DecorClickGate decorClick_; // 皮肤装饰点击：候选命中之外、按下松开同一块装饰
     /// 指针在位图里的命中（kNoHit / 候选下标 / 翻页 -1 -2）。
     int32_t hitAtPointer() const;
+    /// 指针下可点的皮肤装饰（`decorAt`），点在候选 / 翻页按钮上的不算，没有返回 -1。
+    int32_t decorAtPointer() const;
+    /// 指针的位图像素坐标（装饰点击的拖动阈值按它判）。
+    std::pair<int32_t, int32_t> pointerPx() const;
     void setHover(int32_t index);
     void updateHover();
     bool warnedProbe_ = false;

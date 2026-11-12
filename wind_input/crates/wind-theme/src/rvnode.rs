@@ -40,6 +40,44 @@ impl RvEdges {
     }
 }
 
+/// 图片左右 / 上下镜像（`flip = "x" | "y" | "xy"`）。只翻像素：锚点、偏移、尺寸、九宫切片、
+/// 拉伸带、命中矩形都按源图写、不随之镜像。背景图 / 图层 / 翻页箭头与皮肤装饰共用。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Flip {
+    /// 左右镜像。
+    pub x: bool,
+    /// 上下镜像。
+    pub y: bool,
+}
+
+impl Flip {
+    pub const NONE: Self = Self { x: false, y: false };
+
+    /// `"x"` / `"y"` / `"xy"`；其余返回 None（调用方告警后按不翻）。
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "x" => Self { x: true, y: false },
+            "y" => Self { x: false, y: true },
+            "xy" => Self { x: true, y: true },
+            _ => return None,
+        })
+    }
+
+    /// 主题里的写法；不翻为 None。
+    pub fn name(self) -> Option<&'static str> {
+        match (self.x, self.y) {
+            (false, false) => None,
+            (true, false) => Some("x"),
+            (false, true) => Some("y"),
+            (true, true) => Some("xy"),
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.x || self.y
+    }
+}
+
 /// 渲染消费形态图片 spec（背景填充图 / layers 覆盖图 / footer 箭头共用）。不含解码位图。
 #[derive(Clone, Debug, Default)]
 pub struct RvImage {
@@ -67,6 +105,8 @@ pub struct RvImage {
     pub tint: Option<Rgba>,
     /// 禁用态染色（仅 footer 箭头）。
     pub disabled_tint: Option<Rgba>,
+    /// 镜像（合成到目标尺寸后再翻）。
+    pub flip: Flip,
 }
 
 /// 渐变 spec（stop 已解析颜色 + 按 pos 升序）。

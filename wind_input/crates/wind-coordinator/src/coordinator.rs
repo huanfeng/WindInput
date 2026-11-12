@@ -1451,7 +1451,7 @@ pub(crate) enum CapsCancelSwitch {
 
 impl CapsCancelSwitch {
     /// 按 `CMD_SYSTEM_MODE_SWITCH` 的来源分派。「是不是用户按的」判据与
-    /// [`Coordinator::host_ime_close_ignored`] 同源：系统热键（Ctrl+空格）翻 compartment 时
+    /// [`Coordinator::host_ime_switch_ignored`] 同源：系统热键（Ctrl+空格）翻 compartment 时
     /// Ctrl 尚未释放，宿主自己写则没有伴随按键；按键侧兜底（`CtrlSpaceKey`）恒算用户发起。
     /// 菜单是用户**明确点了目标**，没有「切一下」的歧义，按请求。
     pub(crate) fn from_system(
@@ -2730,11 +2730,12 @@ impl Coordinator {
         }
     }
 
-    /// Linux addon 的 push 连接每（重）建立一次，就让渲染端补推可见的工具栏 / 软键盘：addon 收到
-    /// SERVICE_READY 会丢掉手里的面板，而同一服务换了连接时面板状态并没有变，不会自己再推。
-    /// 服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
+    /// 外部宿主（Linux addon / macOS `.app`）的 push 连接每（重）建立一次，就让渲染端复位它记着的
+    /// 宿主状态：Linux 补推可见的工具栏 / 软键盘（addon 收到 SERVICE_READY 会丢掉手里的面板，而同一
+    /// 服务换了连接时面板状态并没有变，不会自己再推）；macOS 作废皮肤换帧的分层去重（新 `.app` 手里
+    /// 什么都没有）。服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
     pub fn install_host_reconnect_hook(&self) {
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         {
             let tx = self.ui_tx.clone();
             self.push_server
@@ -4236,22 +4237,23 @@ impl Coordinator {
         self.with_compat_rule(proc_name, win, |r| r.and_then(|r| r.initial_mode))
     }
 
-    /// 这次系统模式切换是不是「宿主自作主张关 IME」，且当前应用配了忽略。
+    /// 这次系统模式切换是不是「宿主自作主张切中英」，且当前应用（或全局）配了忽略。
     ///
-    /// 四个条件缺一不可（顺序即成本，先便宜的）：
-    /// 1. **是关不是开**——开 IME 从不拦，宿主想给中文是好事；
-    /// 2. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
+    /// 不看方向：开和关一样拦（宿主关 IME 让用户点一下按钮就变英文；SSMS 内部焦点切换把
+    /// OPENCLOSE 写成开，英文态被切成中文、第一键被吃，GH#312）。三个条件缺一不可
+    /// （顺序即成本，先便宜的）：
+    /// 1. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
     ///    否则该应用里中英切换彻底失灵（判据由 DLL 现场采样，见 `MODE_SWITCH_CTRL_HELD`）；
-    /// 3. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
-    /// 4. 该应用显式配了 `ignore_host_ime_close = true`。
-    pub(crate) fn host_ime_close_ignored(
+    /// 2. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
+    /// 3. 生效值为真：该应用规则写了 `ignore_host_ime_switch` 就以它为准，没写取全局
+    ///    `input.ignore_host_ime_switch`（出厂关）。
+    pub(crate) fn host_ime_switch_ignored(
         &self,
-        chinese_mode: bool,
         source: wind_ipc::protocol::ModeSwitchSource,
         ctrl_held: bool,
     ) -> bool {
         use wind_ipc::protocol::ModeSwitchSource as Src;
-        if chinese_mode || ctrl_held {
+        if ctrl_held {
             return false;
         }
         if !matches!(
@@ -4260,8 +4262,8 @@ impl Coordinator {
         ) {
             return false;
         }
-        self.with_active_compat_rule(|r| r.and_then(|r| r.ignore_host_ime_close))
-            .unwrap_or(false)
+        self.with_active_compat_rule(|r| r.and_then(|r| r.ignore_host_ime_switch))
+            .unwrap_or_else(|| self.rt().config.input.ignore_host_ime_switch)
     }
 
     /// 查 `compat.toml` 中该进程（该窗口）的初始中英标点规则；`None` = 未配置（不干预）。
@@ -16562,13 +16564,13 @@ mod caret_compat_tests {
         );
     }
 
-    /// `ignore_host_ime_close` 的四条判据逐一钉死。
+    /// `ignore_host_ime_switch` 的判据逐一钉死，开和关两个方向各走一遍。
     ///
-    /// ★ 第二条（Ctrl 按住放行）是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主关 IME
-    /// 走**同一条** compartment 通路、载荷完全相同，若不放行，开了这条规则的应用里
-    /// Ctrl+Space 会彻底失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
+    /// ★ Ctrl 按住放行是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主写 compartment
+    /// 走**同一条**通路、载荷完全相同，若不放行，开了这条规则的应用里 Ctrl+Space 会彻底
+    /// 失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
     #[test]
-    fn ignore_host_ime_close_gates() {
+    fn ignore_host_ime_switch_gates() {
         use wind_ipc::protocol::ModeSwitchSource as Src;
         let c = coord();
         let pid = 96032u32;
@@ -16579,28 +16581,108 @@ mod caret_compat_tests {
         c.active_compat.lock().unwrap().pid = pid;
         let rules = vec![wind_config::app_compat::AppCompatRule {
             process: "x60_toolbox.exe".into(),
-            ignore_host_ime_close: Some(true),
+            ignore_host_ime_switch: Some(true),
             ..Default::default()
         }];
         *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
 
-        // 宿主写 compartment 关 IME、无伴随按键 ⇒ 拦。这就是「点一下按钮就变英文」那条。
-        assert!(c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
-        assert!(c.host_ime_close_ignored(false, Src::CompartmentConversion, false));
+        // 宿主写 compartment、无伴随按键 ⇒ 拦。判据不看方向：开和关两个方向都拦
+        // （关：点按钮变英文；开：SSMS 焦点切换把英文态切成中文，GH#312），方向由
+        // tests/ignore_host_ime_switch.rs 经 handle_system_mode_switch 各走一遍。
+        assert!(c.host_ime_switch_ignored(Src::CompartmentOpenClose, false));
+        assert!(c.host_ime_switch_ignored(Src::CompartmentConversion, false));
         // Ctrl 按住 ⇒ 用户在按 Ctrl+Space，必须放行。
-        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, true));
-        // 开 IME 从不拦——宿主想给中文是好事。
-        assert!(!c.host_ime_close_ignored(true, Src::CompartmentOpenClose, false));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentOpenClose, true));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentConversion, true));
         // 我们自己发起的两条路径永远照办，否则按键兜底与菜单会失灵。
-        assert!(!c.host_ime_close_ignored(false, Src::CtrlSpaceKey, false));
-        assert!(!c.host_ime_close_ignored(false, Src::Menu, false));
+        assert!(!c.host_ime_switch_ignored(Src::CtrlSpaceKey, false));
+        assert!(!c.host_ime_switch_ignored(Src::Menu, false));
 
-        // 换成没配规则的应用 ⇒ 一律照办（这条规则必须是显式声明才生效）。
+        // 换成没配规则的应用、全局出厂关 ⇒ 一律照办。
         c.pid_names
             .lock()
             .unwrap()
             .insert(pid, "notepad.exe".to_string());
-        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentOpenClose, false));
+    }
+
+    /// 生效值 = 按应用 `Some(v)` 优先，`None`（含没有规则）取全局 `input.ignore_host_ime_switch`。
+    #[test]
+    fn ignore_host_ime_switch_per_app_overrides_global() {
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        let mut cfg = Config::default();
+        assert!(!cfg.input.ignore_host_ime_switch, "出厂关");
+        cfg.input.ignore_host_ime_switch = true;
+        let c = Coordinator::new_headless(cfg, None);
+        let pid = 4242u32;
+        c.active_compat.lock().unwrap().pid = pid;
+        let rules = vec![
+            wind_config::app_compat::AppCompatRule {
+                process: "adopt.exe".into(),
+                ignore_host_ime_switch: Some(false),
+                ..Default::default()
+            },
+            wind_config::app_compat::AppCompatRule {
+                process: "follow.exe".into(),
+                auto_pair: Some(false),
+                ..Default::default()
+            },
+        ];
+        *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
+        let at = |name: &str| {
+            c.pid_names.lock().unwrap().insert(pid, name.to_string());
+        };
+
+        at("follow.exe");
+        assert!(
+            c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "规则没写这一项 ⇒ 跟随全局（开）"
+        );
+        assert!(
+            !c.host_ime_switch_ignored(Src::CompartmentOpenClose, true),
+            "全局开着也照样放行 Ctrl+Space"
+        );
+        assert!(!c.host_ime_switch_ignored(Src::Menu, false));
+        at("notepad.exe");
+        assert!(
+            c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "没有规则 ⇒ 跟随全局（开）"
+        );
+        at("adopt.exe");
+        assert!(
+            !c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "按应用显式采纳压过全局"
+        );
+    }
+
+    /// 拒绝之后必须**再异步推一次状态**（`CMD_STATE_PUSH`），不能只靠同步回包——理由见
+    /// `handle_system_mode_switch` 那段 ★★★：只回包时 compartment 会停在宿主写的值上，
+    /// Ctrl+Space 变哑。两个方向各验一次。
+    #[test]
+    fn ignore_host_ime_switch_rejection_pushes_state() {
+        use wind_bridge::handler::MessageHandler;
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        let pushed_state = |frames: &[Vec<u8>]| {
+            frames.iter().any(|f| {
+                wind_ipc::codec::decode_header(f)
+                    .is_ok_and(|h| h.command == wind_ipc::protocol::CMD_STATE_PUSH)
+            })
+        };
+        for start_chinese in [true, false] {
+            let mut cfg = Config::default();
+            cfg.input.default.chinese_mode = start_chinese;
+            cfg.input.ignore_host_ime_switch = true;
+            let c = Coordinator::new_headless(cfg, None);
+            assert_eq!(c.is_chinese_mode(), start_chinese, "前提：起步模式");
+            let cap = c.push_server.attach_capture_client(7);
+            c.handle_system_mode_switch(!start_chinese, Src::CompartmentOpenClose, false);
+            assert_eq!(c.is_chinese_mode(), start_chinese, "被拒，模式不变");
+            let frames: Vec<Vec<u8>> = cap.try_iter().collect();
+            assert!(
+                pushed_state(&frames),
+                "start_chinese={start_chinese}：拒绝后必须推一次状态"
+            );
+        }
     }
 
     /// per-app 定位规则**整条**压过全局，坐标必须与定位方式同层取。
@@ -19359,8 +19441,8 @@ mod input_diag_tests {
             ("set_candidate_position_rule", &|c| {
                 c.set_candidate_position_rule(1)
             }),
-            ("set_ignore_host_ime_close_rule", &|c| {
-                c.set_ignore_host_ime_close_rule(1)
+            ("set_ignore_host_ime_switch_rule", &|c| {
+                c.set_ignore_host_ime_switch_rule(1)
             }),
             ("set_auto_pair_rule", &|c| c.set_auto_pair_rule(2)),
             ("set_status_fallback_rule", &|c| {
@@ -20623,11 +20705,5 @@ pub(crate) fn pick_index_label(
     if let Some(s) = cand_cfg.user_index_label(i) {
         return s;
     }
-    if let Some(s) = theme_labels.get(i).filter(|s| !s.is_empty()) {
-        return s.clone();
-    }
-    if i == 9 {
-        return "0".to_string();
-    }
-    (i + 1).to_string()
+    wind_ui_types::theme_index_label(theme_labels, i)
 }

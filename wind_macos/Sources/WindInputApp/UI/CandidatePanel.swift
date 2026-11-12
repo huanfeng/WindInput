@@ -31,6 +31,8 @@ final class CandidateContentView: NSView {
     var onScroll: ((Int32) -> Void)?              // 滚轮 (delta, WHEEL_DELTA 倍数, 正=上滚)
     var onDragMoved: (() -> Void)?                // 拖动进行中 (每次位移后)
     var onDragEnded: (() -> Void)?                // 空白区拖动松手 (整窗已移到新位置)
+    /// 点了一块皮肤装饰 (`CandidateSkin.decorAt` 的 index) → `skin.decor_click`。
+    var onDecorClick: ((UInt32) -> Void)?
     /// 拖动起点：光标屏幕位置 + 窗口起始左下角。nil = 未在拖动。
     /// 记锚点差值而不是每次跟随光标当前点，是为了不把「按下点在窗口内的偏移」丢掉。
     private var dragAnchor: NSPoint?
@@ -43,6 +45,11 @@ final class CandidateContentView: NSView {
     private static let dragThreshold: CGFloat = 3
     /// 按下时命中的候选/翻页键。选词等到**松开**且仍落在同一项上才发, 见 `mouseUp`。
     private var pressedIndex: Int?
+    /// 按下时落在哪块装饰上 (候选 / 翻页键之外) 与光标屏幕位置：松开时仍在同一块上、没挪过拖动
+    /// 阈值，算点了它一下 (同 Windows `press_decor` / `release_decor`)。
+    private var pressedDecor: (index: UInt32, at: NSPoint)?
+    /// 本帧皮肤区域 (逻辑点)：按下落在不拖动区 (block 装饰) 时不起拖，见 `CandidateSkin.blocksDrag`。
+    var skin = CandidateSkin()
     override var isFlipped: Bool { true } // top-left 原点, 与 wire/rects 坐标系一致
 
     func update(image: NSImage, rects: [CandidateHitRect]) {
@@ -103,10 +110,14 @@ final class CandidateContentView: NSView {
     override func mouseDown(with event: NSEvent) {
         // 上一次点击的残留先清掉: 按下期间窗口被收起时, 那次的 mouseUp 不一定送得到。
         pressedIndex = nil
+        pressedDecor = nil
         dragAnchor = nil
         dragOrigin = nil
         dragMoved = false
         if let idx = hitIndex(event) { pressedIndex = idx; return }
+        let p = convert(event.locationInWindow, from: nil)
+        pressedDecor = skin.decorAt(px: p.x, py: p.y).map { (index: $0, at: NSEvent.mouseLocation) }
+        if skin.blocksDrag(px: p.x, py: p.y) { return }
         // 空白区（编码栏/内边距，非候选非翻页键）→ 起拖，整窗跟随光标。与 Windows 侧
         // WM_LBUTTONDOWN 的同一分支同构（那边用 SetCapture 保证移出窗口后仍收到消息；
         // AppKit 在 mouseDown 之后会把整条拖动序列都发给本视图，无需额外捕获）。
@@ -138,7 +149,15 @@ final class CandidateContentView: NSView {
     /// 是系统处理这次点击的哪一步把它摆回来的没有查明 (拦掉推迟到松开的窗口排序无效);
     /// 改成整个点击结束再选之后, 收起后的窗口不再回来。
     override func mouseUp(with event: NSEvent) {
-        defer { dragAnchor = nil; dragOrigin = nil; dragMoved = false }
+        defer { dragAnchor = nil; dragOrigin = nil; dragMoved = false; pressedDecor = nil }
+        if let d = pressedDecor, !dragMoved {
+            let now = NSEvent.mouseLocation
+            let p = convert(event.locationInWindow, from: nil)
+            if abs(now.x - d.at.x) < Self.dragThreshold, abs(now.y - d.at.y) < Self.dragThreshold,
+               skin.decorAt(px: p.x, py: p.y) == d.index {
+                onDecorClick?(d.index)
+            }
+        }
         if let idx = pressedIndex {
             pressedIndex = nil
             // 按下后移出该项再松开 = 放弃 (按钮的通行语义)。
@@ -228,6 +247,11 @@ final class CandidatePanel: NSPanel {
         get { content.onScroll }
         set { content.onScroll = newValue }
     }
+    /// 点了一块皮肤装饰 (index 同 `CMD_CANDIDATE_SKIN`)。
+    var onDecorClick: ((UInt32) -> Void)? {
+        get { content.onDecorClick }
+        set { content.onDecorClick = newValue }
+    }
     /// 拖动落定回调, 参数为 wire 坐标 (top-left) 下的窗口左上角。
     /// 服务端据当前定位方式决定落不落盘: 固定位置=重新摆放并写配置; 跟随光标=只是临时挪开。
     var onMoved: ((Int32, Int32) -> Void)?
@@ -242,6 +266,29 @@ final class CandidatePanel: NSPanel {
     /// Cocoa 原点是左下角，直接拿它 `setFrameOrigin` 等于钉住**底边**，组合中窗口高度一变
     /// （preedit 出现、竖排行数变化），用户看着的上沿就往上爬。
     private var dragPin: (x: CGFloat, y: CGFloat)?
+
+    /// 拆出的穿透装饰层 (设计 theme-skin-animation.md §17.3)：同原点同尺寸的子 panel，不接鼠标、
+    /// 不投影，作为子窗口随候选窗拖动与显隐。点击穿过它与候选窗的透明处落到下面的应用。
+    private lazy var decorPanel: NSPanel = {
+        let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: true)
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = false
+        p.ignoresMouseEvents = true
+        p.level = self.level
+        p.collectionBehavior = self.collectionBehavior
+        p.hidesOnDeactivate = false
+        let v = NSImageView()
+        v.imageScaling = .scaleAxesIndependently
+        p.contentView = v
+        return p
+    }()
+    /// 下一次 `show` 要贴的穿透装饰层 (nil = 本帧没有)。服务端先推它、再推候选帧。
+    private var decorImage: NSImage?
+    private var decorOrder: NSWindow.OrderingMode?
+    /// 最近一帧穿透装饰是否排在候选窗下面 (`show` 时按皮肤区域记下)。
+    private var decorBelow = false
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
@@ -262,6 +309,10 @@ final class CandidatePanel: NSPanel {
         self.contentView = content
         content.onDragMoved = { [weak self] in self?.pinCurrentPosition() }
         content.onDragEnded = { [weak self] in self?.finishDrag() }
+        // 早于 NSApplication 构造时窗口不会交给窗口服务器, 之后显示全是静默空操作 (见 main.swift)。
+        if windowNumber == 0 {
+            NSLog("CandidatePanel: windowNumber == 0, 窗口未注册到窗口服务器, 候选框将不会显示; 须在 NSApplication.shared 之后构造")
+        }
     }
 
     /// 以窗口**当前真实位置**落 dragPin（避免按位移累加产生误差）。
@@ -282,10 +333,16 @@ final class CandidatePanel: NSPanel {
     /// absolute=该点是用户固定位置的绝对坐标 (见 HostRenderFramePayload.isAbsolutePos)。
     ///
     /// 落位三级优先: dragPin (本次组合内已拖过) > absolute (固定位置) > 跟随光标。
+    ///
+    /// `anim` = 皮肤动画换帧 (内容与落位都没变)：已在屏上且尺寸未变时照原位贴，不重新落位。
+    /// `above` / `placeBox` = 跟随光标时上翻的窗口 wire 左上与判翻转用的框 (见 `WireGeometry.followCaretOrigin`)。
     func show(image: NSImage, atScreenPoint p: NSPoint, rects: [CandidateHitRect],
-              absolute: Bool = false) {
+              skin: CandidateSkin = CandidateSkin(), absolute: Bool = false, anim: Bool = false,
+              above: CGPoint? = nil, placeBox: CGRect? = nil) {
+        let inPlace = anim && isVisible && frame.size == image.size
         content.frame = NSRect(origin: .zero, size: image.size)
         content.update(image: image, rects: rects)
+        content.skin = skin
         self.setContentSize(image.size)
 
         guard let screen = PanelGeometry.referenceScreen else {
@@ -294,7 +351,9 @@ final class CandidatePanel: NSPanel {
         }
         let size = image.size
 
-        if let pin = dragPin {
+        if inPlace {
+            // 换帧：原位不动。
+        } else if let pin = dragPin {
             // 拖过就钉住: 内容刷新 (翻页/继续输入) 不把窗口拽回光标处。按左上角重新换算 ——
             // 高度变化时上沿不动; 并夹进可见区, 内容变宽变高后原落点可能已越界。
             if let origin = PanelGeometry.cocoaOrigin(wireX: pin.x, wireY: pin.y, size: size) {
@@ -307,19 +366,58 @@ final class CandidatePanel: NSPanel {
                 self.setFrameOrigin(origin)
             }
         } else {
-            // wire 点 = 光标底端，按它所在的屏钳边界（GH#179：用主屏钳会把副屏上的候选窗拽回主屏）。
-            // 往上挪 4pt 回到光标行内（服务端在光标底端下留了 2pt 间隙）：上下叠放的两块屏，
-            // 光标贴在上屏底边时，wire 点会越过分界线落到下屏。
-            let caretScreen = PanelGeometry.screen(wireX: p.x, wireY: p.y - 4) ?? screen
+            // 内容框左上 = 光标底端下 2pt，按它所在的屏钳边界（GH#179：用主屏钳会把副屏上的候选窗拽回
+            // 主屏）。往上挪 4pt 回到光标行内：上下叠放的两块屏，光标贴在上屏底边时，内容框左上会越过
+            // 分界线落到下屏。皮肤装饰外扩时 wire 点是窗口左上、在内容框外，故按框的位置找屏。
+            let probeX = p.x + (placeBox?.minX ?? 0), probeY = p.y + (placeBox?.minY ?? 0)
+            let caretScreen = PanelGeometry.screen(wireX: probeX, wireY: probeY - 4) ?? screen
             let origin = WireGeometry.followCaretOrigin(
                 wireX: p.x, wireY: p.y, size: size,
-                screenHeight: screen.frame.height, visibleFrame: caretScreen.visibleFrame)
+                screenHeight: screen.frame.height, visibleFrame: caretScreen.visibleFrame,
+                above: above, box: placeBox)
             self.setFrameOrigin(origin)
         }
         self.orderFrontRegardless()
+        decorBelow = skin.splitDecorBelow
+        syncDecor(size: size, below: decorBelow)
         // 系统原生窗口阴影按内容 alpha 形状计算且会缓存；内容/尺寸变化后必须 invalidate，
         // 否则阴影残留旧形状或退化为矩形（候选窗为透明背景 + 圆角位图，需据新形状重算）。
-        if self.hasShadow { self.invalidateShadow() }
+        if self.hasShadow && !inPlace { self.invalidateShadow() }
+    }
+
+    /// 存穿透装饰层像素 (nil = 没有)。候选窗在屏上且尺寸相符就立刻换上——换帧时主层没变，服务端
+    /// 只推这一层、不推候选帧；尺寸不符 (内容变了) 则等随后的候选帧，由 `show` 一起贴。
+    func setDecor(image: NSImage?) {
+        decorImage = image
+        guard isVisible else { return }
+        let size = content.frame.size
+        if image == nil || image?.size == size {
+            syncDecor(size: size, below: decorBelow)
+        }
+    }
+
+    /// 让穿透装饰子 panel 与候选窗同原点同尺寸，按 `below` 排在候选窗下面或上面。
+    private func syncDecor(size: NSSize, below: Bool) {
+        guard let img = decorImage, img.size == size else {
+            detachDecor()
+            return
+        }
+        let dp = decorPanel
+        (dp.contentView as? NSImageView)?.image = img
+        dp.setFrame(NSRect(origin: frame.origin, size: size), display: true)
+        let order: NSWindow.OrderingMode = below ? .below : .above
+        if dp.parent !== self || decorOrder != order {
+            if dp.parent != nil { removeChildWindow(dp) }
+            addChildWindow(dp, ordered: order)
+            decorOrder = order
+        }
+    }
+
+    private func detachDecor() {
+        guard decorOrder != nil else { return }
+        removeChildWindow(decorPanel)
+        decorPanel.orderOut(nil)
+        decorOrder = nil
     }
 
     /// 更新命中矩形 (CmdCandidateRects 帧晚于 render 帧到达)。
@@ -350,6 +448,7 @@ final class CandidatePanel: NSPanel {
         // 组合结束 → 解除拖动冻结, 下次显示重新跟随光标 (固定位置模式则继续由服务端发绝对
         // 坐标)。对齐 Windows 侧 hide() 里的 reset_drag()。
         dragPin = nil
+        detachDecor()
         self.orderOut(nil)
     }
 }

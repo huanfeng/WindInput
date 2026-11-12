@@ -240,11 +240,14 @@ pub const CMD_CARET_PENDING: u16 = 0x0303;
 pub const CMD_CARET_PROBE: u16 = 0x0304;
 
 // Host Render
+/// DLL 请求 host-render。载荷可缺省（旧 DLL）；新 DLL 带 4 字节能力位（u32 LE，`HOST_RENDER_CAP_*`）。
 pub const CMD_HOST_RENDER_REQUEST: u16 = 0x0501;
+/// 能力位：DLL 能把穿透装饰层（`SharedRenderHeader::FLAG_PASS_LAYER`）画进单独的穿透窗口。
+pub const HOST_RENDER_CAP_PASS_LAYER: u32 = 0x0001;
 
 // darwin 专用 host-render push 帧（方向与上行 0x05xx 由 push 通道语义区分）。
 // 字节布局须与 Swift wind_macos/.../BinaryCodec.swift decoder 及 Go binary_codec.go 一致。
-pub const CMD_HOST_RENDER_FRAME: u16 = 0x0502; // SHM 新帧就绪通知 (seq+几何+flags+scale, 28B)
+pub const CMD_HOST_RENDER_FRAME: u16 = 0x0502; // SHM 新帧就绪通知 (seq+几何+flags+scale+内容偏移+上方点与落位框, 60B)
 pub const CMD_CANDIDATE_RECTS: u16 = 0x0503; // 候选命中矩形 (panel-local)
 pub const CMD_MODE_STATUS: u16 = 0x0504; // 输入模式状态 (菜单栏指示器)
 pub const CMD_MENU_SHOW: u16 = 0x0506; // 统一菜单树 (响应 CmdShowContextMenu)
@@ -263,6 +266,26 @@ pub const CMD_KEY_TYPE: u16 = 0x0512; // 整段 UTF-8 文本（无长度前缀�
 /// 有新帧 / 该隐藏」并带上落位规则。
 /// 布局见 [`crate::codec::encode_overlay_frame`]，常量见 [`overlay`]。
 pub const CMD_OVERLAY_FRAME: u16 = 0x0513;
+/// 候选窗异形皮肤的区域（外部宿主）：窗体矩形、各装饰矩形与鼠标策略、输入区。每个候选帧在
+/// [`CMD_HOST_RENDER_FRAME`] 之前推一条（前端贴这一帧时就用上它），没启用皮肤时 `flags = 0`。布局见
+/// [`crate::codec::encode_candidate_skin`]，常量见 [`skin`]，设计见 theme-skin-animation.md §17.2。
+pub const CMD_CANDIDATE_SKIN: u16 = 0x0514;
+
+/// [`CMD_CANDIDATE_SKIN`] 的枚举值。全部 `u32` 且名字全局唯一（`protocol_sync_test` 逐个比对）。
+pub mod skin {
+    /// `flags`：本帧启用了皮肤。
+    pub const SKIN_FLAG_ACTIVE: u32 = 0x0001;
+    /// `flags`：带输入区表（只 Linux 发；macOS 按 alpha 自动穿透）。
+    pub const SKIN_FLAG_MASK: u32 = 0x0002;
+    /// 装饰的 `hit`。
+    pub const SKIN_HIT_DRAG: u32 = 0;
+    pub const SKIN_HIT_BLOCK: u32 = 1;
+    pub const SKIN_HIT_PASS: u32 = 2;
+    /// 装饰的 `flags`：在窗体下面（z < 0）。
+    pub const SKIN_DECOR_UNDER: u32 = 0x0001;
+    /// 装饰的 `flags`：穿透装饰画在独立层（macOS 子 panel），不在主缓冲。
+    pub const SKIN_DECOR_SPLIT: u32 = 0x0002;
+}
 
 /// [`CMD_OVERLAY_FRAME`] 的枚举值。全部 `u32` 且名字全局唯一：`wind_linux/tests/protocol_sync_test.cpp`
 /// 按 `pub const NAME: u32 = …` 逐个比对 `wind_linux/include/ExtProtocol.h`。
@@ -281,6 +304,9 @@ pub mod overlay {
     /// 指针事件走 [`super::CMD_PANEL_POINTER`]。
     pub const OVERLAY_KIND_TOOLBAR: u32 = 10;
     pub const OVERLAY_KIND_SOFTKEYBOARD: u32 = 11;
+    /// 候选窗的穿透装饰层（macOS）：与候选窗同原点同尺寸，`.app` 挂成候选窗的子 panel、不收鼠标。
+    /// 落位恒为 `OVERLAY_PLACE_EXACT`，坐标即候选窗建议落点（`.app` 跟着候选窗走，不读它）。
+    pub const OVERLAY_KIND_DECOR: u32 = 12;
 
     /// 落位方式（place）。坐标一律指**内容盒**左上（不含软阴影扩边），宿主减去
     /// `content_x/y` 得窗口左上。
@@ -363,6 +389,16 @@ pub mod ext_kind {
     pub const POS_SOFTKEYBOARD: &str = "pos.softkeyboard";
     /// 上行（Linux addon）：焦点宿主进入 / 退出全屏。body = `{"fullscreen":bool}`。
     pub const HOST_FULLSCREEN: &str = "host.fullscreen";
+    /// 上行（macOS `.app` / Linux addon）：系统「减少动态效果」。body = `{"reduce":bool}`。连上服务时报一次、
+    /// 系统设置变化时再报（macOS `NSWorkspace.accessibilityDisplayShouldReduceMotion`；Linux 读设置门户与
+    /// kdeglobals，读不到就不报）；服务端以它为准，没收到时 macOS 退回读偏好、Linux 按允许（见
+    /// `wind_ui::candidate_window::set_host_reduce_motion`）。
+    pub const HOST_REDUCE_MOTION: &str = "host.reduce_motion";
+    /// 上行（Linux addon / macOS `.app`）：在候选窗的皮肤装饰（`drag` / `block`）上点了一下。body =
+    /// `{"index":N}`，`N` 是 `CMD_CANDIDATE_SKIN` 装饰表里的 `index`（变体 `decor` 下标）。判定同 Windows：
+    /// 按下与松开在同一块最上层的装饰上、没挪过拖动阈值；窗体下面的装饰被窗体盖住处不算。服务端给这块
+    /// 装饰触发 `click` 事件（设计 theme-skin-animation.md §16 / §17.2）。
+    pub const SKIN_DECOR_CLICK: &str = "skin.decor_click";
     /// 下行：问 `.app` 候选窗此刻在哪，答案走上行 [`POS_CANDIDATE`]。body 空。
     pub const POS_CANDIDATE_QUERY: &str = "pos.candidate.query";
     /// 下行：问宿主（`.app` / Linux addon）状态气泡此刻在哪，答案走上行 [`POS_STATUS_TIP`]。
@@ -1438,7 +1474,10 @@ pub struct SharedRenderHeader {
     pub rects_offset: u32,         // @44 hit 矩形表相对 SHM 基址偏移
     pub rendered_hover_index: i32, // @48 高亮候选索引（-1 无 / -2,-3 翻页）
     pub target_instance_id: u32,   // @52 darwin 忽略
-    pub reserved: [u32; 2],        // @56..64
+    /// @56 穿透装饰层（[`Self::FLAG_PASS_LAYER`]）像素相对 SHM 基址的偏移，与主层同尺寸同 stride；
+    /// 0 = 本帧没有。只 Windows DLL host-render 用。
+    pub pass_offset: u32,
+    pub reserved: u32, // @60..64
 }
 
 impl SharedRenderHeader {
@@ -1454,6 +1493,15 @@ impl SharedRenderHeader {
     /// 固定点靠近屏幕底边就会被莫名弹到顶上。置本位即告诉 `.app`：照搬坐标，只做屏幕
     /// 边界钳制，不要翻转。
     pub const FLAG_ABSOLUTE_POS: u32 = 0x0008;
+    /// 换帧：内容没变，只换了皮肤装饰的动画帧。外部宿主照原位贴图，不重新落位、不重排 z 序
+    /// （X11 每帧 raise 会压住 tooltip 与菜单）。旧宿主不认这一位，按普通帧处理。
+    pub const FLAG_ANIM_FRAME: u32 = 0x0010;
+    /// 帧带一层穿透装饰（`hit = "pass"`，在 [`Self::pass_offset`]）：主层不含它们，DLL 画进第二个
+    /// `WS_EX_TRANSPARENT` 窗口，点击直达宿主（设计 theme-skin-animation.md §17.8）。只在 DLL
+    /// 声明了 [`HOST_RENDER_CAP_PASS_LAYER`] 时发，旧 DLL 收到的仍是合成好的单层。
+    pub const FLAG_PASS_LAYER: u32 = 0x0020;
+    /// 穿透装饰全在窗体下（z < 0）：穿透窗口排在候选窗下面，否则在上面。
+    pub const FLAG_PASS_BELOW: u32 = 0x0040;
 
     pub fn new(x: i32, y: i32, width: u32, height: u32, stride: u32, data_size: u32) -> Self {
         Self {
@@ -1471,7 +1519,8 @@ impl SharedRenderHeader {
             rects_offset: 0,
             rendered_hover_index: -1,
             target_instance_id: 0,
-            reserved: [0; 2],
+            pass_offset: 0,
+            reserved: 0,
         }
     }
 
@@ -1781,8 +1830,8 @@ pub const MODE_SWITCH_SOURCE_MASK: u32 = 0xF000_0000;
 
 /// 这次 compartment 变化发生时 **Ctrl 正被按住**（由 DLL 现场取 `GetAsyncKeyState`）。
 ///
-/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 关 IME」。两者走
-/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_close` 必须放过
+/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 切中英」。两者走
+/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_switch` 必须放过
 /// 前者（否则该应用里系统热键彻底失灵）。判据由**发起方交代**，服务端不去猜——同款
 /// 判据已在 C++ 的 CapsLock 联动抑制窗用过并经真机验证。
 pub const MODE_SWITCH_CTRL_HELD: u32 = 0x0800_0000;

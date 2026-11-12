@@ -5,13 +5,20 @@
 //! [`CandidateScene`] 持有；时间经 [`AnimClock`] 注入，文字经 [`TextBackend`] 注入。
 //! 方案见 `docs/design/wind-scene-extraction.md` §2。
 
+mod host_regions;
 mod render;
 mod skin_geom;
 mod theme;
 
-pub use render::{CandidateFrame, render_candidate};
+pub use host_regions::{HostDecor, MAX_INPUT_RECTS, composite_over, composite_under, opaque_rects};
+pub use render::{
+    CandidateFrame, premultiplied_bgra_to_rgba, render_candidate, render_candidate_within,
+};
 
-pub use skin_geom::{AnimClock, AvoidMask, DecorGeom, PlaceAnchor, SkinGeom, SlotKind};
+pub use skin_geom::{
+    AnimClock, AvoidMask, DecorGeom, PlaceAnchor, SkinAxisSeg, SkinDecorRect, SkinGeom,
+    SkinSlotRect, SkinSnapshot, SlotKind,
+};
 pub use theme::{EffectiveTheme, ThemeOverrides, effective_base_font_size, effective_theme};
 
 use std::borrow::Cow;
@@ -153,6 +160,52 @@ fn arrow_char<'a>(configured: &'a str, builtin: &'a str) -> &'a str {
         builtin
     } else {
         configured
+    }
+}
+
+/// 预览点选的节点身份（[`View::node`]），名字即主题 `views.candidate` 下的节点名，与主题
+/// 编辑器结构树的键一致。只有预览（[`CandidateScene::nodes`]）收集，实时窗口只多存一个字节。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeKey {
+    Window = 1,
+    PreeditBar,
+    Divider,
+    CandidateList,
+    Item,
+    Index,
+    CommentAbove,
+    FooterBar,
+}
+
+impl NodeKey {
+    const ALL: [NodeKey; 8] = [
+        NodeKey::Window,
+        NodeKey::PreeditBar,
+        NodeKey::Divider,
+        NodeKey::CandidateList,
+        NodeKey::Item,
+        NodeKey::Index,
+        NodeKey::CommentAbove,
+        NodeKey::FooterBar,
+    ];
+
+    pub fn from_id(id: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| *k as u8 == id)
+    }
+
+    /// 主题里的节点名（`window` / `preedit_bar` …）。
+    pub fn name(self) -> &'static str {
+        match self {
+            NodeKey::Window => "window",
+            NodeKey::PreeditBar => "preedit_bar",
+            NodeKey::Divider => "divider",
+            NodeKey::CandidateList => "candidate_list",
+            NodeKey::Item => "item",
+            NodeKey::Index => "index",
+            NodeKey::CommentAbove => "comment_above",
+            NodeKey::FooterBar => "footer_bar",
+        }
     }
 }
 
@@ -545,6 +598,7 @@ impl CandidateSceneInput<'_> {
             tint,
             place: None,
             scale: self.scale,
+            flip: im.flip,
         })
     }
 
@@ -898,6 +952,27 @@ impl CandidateScene {
             g.collect_part_hits(&mut out);
         }
         out
+    }
+
+    /// 各打了 [`NodeKey`] 的节点在缓冲里的矩形（设备像素，先序；皮肤分槽位的各块在根之后），
+    /// 与缓冲求交：屏幕安全宽把内容钳窄时，根容器按排版宽会伸出缓冲。完全在缓冲外的节点不列。
+    /// 预览点选用，实时窗口不调。
+    pub fn nodes(&self, f: &SceneFrame) -> Vec<(NodeKey, Rect)> {
+        let mut raw = Vec::new();
+        f.root.collect_nodes(&mut raw);
+        if let Some(g) = &self.skin_geom {
+            g.collect_part_nodes(&mut raw);
+        }
+        let (w, h) = f.size();
+        let buf = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f32,
+            h: h as f32,
+        };
+        raw.into_iter()
+            .filter_map(|(id, r)| Some((NodeKey::from_id(id)?, r.intersect(&buf)?)))
+            .collect()
     }
 
     /// 画进 `buf`（BGRA 预乘，调用方已清零，宽高为 [`SceneFrame::size`]）：软件阴影 → 皮肤底层
@@ -1314,7 +1389,8 @@ impl CandidateScene {
         // 高度富余落在**顶部**（仅上翻时）：窗口在光标上方时底边贴光标，空白压在下面
         // 会把候选整体顶离光标，位置反而随内容抖动——正是本功能要消除的东西。
         // 与 min_rows 的占位行「反转时补顶部」同一判据。
-        .main(if above { Align::End } else { Align::Start });
+        .main(if above { Align::End } else { Align::Start })
+        .node(NodeKey::Window as u8);
         // 窗口背景图 / 渐变 / z 层：皮肤生效时由皮肤接管，不再叠。
         if skin.is_none() {
             // 窗口背景图（九宫格/拉伸位图皮肤，如 jidian 的 panel）。
@@ -1341,6 +1417,7 @@ impl CandidateScene {
         let mut preedit_sep: Option<View> = None;
         if !inp.preedit.is_empty() && !inp.preedit_embedded {
             let mut band = View::container(Layout::Row)
+                .node(NodeKey::PreeditBar as u8)
                 .cross(Align::Center)
                 .bg(col(v.preedit_bar.bg_color, [240, 240, 240, 255]))
                 // 圆角：preedit_bar 自己的优先，未配才跟随 item（历史行为——此前只读
@@ -1415,6 +1492,7 @@ impl CandidateScene {
                     .round()
                     .max(1.0);
                 let mut line = View::container(Layout::Row)
+                    .node(NodeKey::Divider as u8)
                     .bg(sep_col)
                     .fixed_h(thick)
                     .fill_cross()
@@ -1490,7 +1568,8 @@ impl CandidateScene {
             }
             // 候选区内边距（默认全 0=零回归）。footer_bar 不加这项——它的 padding
             // 已被翻页箭头消费（fpad），容器再加一层会双重生效。
-            .pad(list_pad),
+            .pad(list_pad)
+            .node(NodeKey::CandidateList as u8),
             &v.candidate_list,
         );
 
@@ -2038,7 +2117,8 @@ impl CandidateScene {
                 decorate_box(
                     View::container(Layout::Row)
                         .cross(Align::Center)
-                        .margin(edges_or(&v.footer_bar.margin, [0.0, 0.0, 0.0, 8.0])),
+                        .margin(edges_or(&v.footer_bar.margin, [0.0, 0.0, 0.0, 8.0]))
+                        .node(NodeKey::FooterBar as u8),
                     &v.footer_bar,
                 )
                 .child(arrow(
@@ -2278,7 +2358,8 @@ impl CandidateScene {
                 .pad(item_pad)
                 .margin(edges_or(&v.item.margin, [0.0; 4]))
                 .radius(item_radius)
-                .tag(i as i32);
+                .tag(i as i32)
+                .node(NodeKey::Item as u8);
             // 竖排时撑满列宽（等于最宽候选的宽度），高亮背景宽度统一，与 Go 行为一致。
             if list_vertical {
                 item = item.fill_cross();
@@ -2310,6 +2391,7 @@ impl CandidateScene {
                 };
                 // 圆圈样式 → 方形节点 + 真圆背景 + 居中数字。
                 let mut idx_leaf = View::leaf(marker, idx_color)
+                    .node(NodeKey::Index as u8)
                     .font_size(index_fs)
                     .font_weight(eff_weight(&v.index, &v.item, is_sel, is_hover))
                     .font_family(v.index.font_family.clone())
@@ -2520,6 +2602,7 @@ impl CandidateScene {
                         text.into_string(),
                         eff_text(&v.comment_above, base, is_sel, is_hover),
                     )
+                    .node(NodeKey::CommentAbove as u8)
                     .font_size(above_fs)
                     .font_weight(weight)
                     .font_family(above_family.clone())

@@ -8,10 +8,12 @@
 //! 图片会被打包成后者随 theme.toml 一起发布。两种形态在 `wind_theme` 的求值层与
 //! `theme_assets::asset_path` 里一路同等放行，最终都落到本模块解码。
 
+use crate::clock::Instant;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
+use wind_theme::Flip;
 
 #[inline]
 fn transparent() -> PremultipliedColorU8 {
@@ -164,10 +166,14 @@ fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// 读取图片源的原始字节：`data:` URI 就地解码，否则按文件路径读。
+/// 读取图片源的原始字节：`data:` URI 就地解码，内存资源（[`crate::assets`]）取登记的字节，
+/// 否则按文件路径读。
 fn read_source_bytes(src: &str) -> Option<Vec<u8>> {
     if src.starts_with("data:") {
         return decode_data_uri(src);
+    }
+    if let Some(mem) = crate::assets::bytes_of(src) {
+        return mem.map(|b| b.to_vec());
     }
     std::fs::read(src).ok()
 }
@@ -186,9 +192,13 @@ fn decode_limits() -> image::Limits {
 
 /// 解码位图源：`data:` URI 就地解码，否则读文件；按内容判格式，带解码限额，超限即失败。
 fn decode_bitmap(src: &str) -> Option<image::DynamicImage> {
-    let bytes = read_source_bytes(src)?;
+    decode_bitmap_bytes(&read_source_bytes(src)?, src)
+}
+
+/// 同 [`decode_bitmap`]，字节已在手（`src` 只用于日志）。
+fn decode_bitmap_bytes(bytes: &[u8], src: &str) -> Option<image::DynamicImage> {
     let reader = || {
-        image::ImageReader::new(std::io::Cursor::new(&bytes[..]))
+        image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()
     };
@@ -243,6 +253,8 @@ pub struct FillSpec {
     /// DPI 缩放 ×1000（整数才能进缓存键）。仅 SVG 的 center / tile 用：单元尺寸 =
     /// 文档尺寸 × scale，scale 不同单元就不同，必须分开缓存。位图按纹理像素，不看它。
     pub scale_milli: u32,
+    /// 镜像：按上面几项合成到目标尺寸后再翻（tile 的起铺相位因此落在翻转后的那一侧）。
+    pub flip: Flip,
 }
 
 impl FillSpec {
@@ -253,6 +265,7 @@ impl FillSpec {
             slice: [0; 4],
             repeat: [false; 2],
             scale_milli: 1000,
+            flip: Flip::NONE,
         }
     }
 }
@@ -330,8 +343,8 @@ pub struct AnimLayout {
     pub aligned: bool,
 }
 
-/// 同一源下的动画键：倍率百万分值、目标宽高、fps 覆盖的位模式（0 = 不覆盖）、帧预算份额。
-type AnimParams = (u32, u32, u32, u32, usize);
+/// 同一源下的动画键：倍率百万分值、目标宽高、fps 覆盖的位模式（0 = 不覆盖）、帧预算份额、镜像。
+type AnimParams = (u32, u32, u32, u32, usize, Flip);
 
 /// 动画帧的闲置回收：远长于 [`IDLE_EVICT_AFTER`]。建帧要整份解码加逐帧缩放，随 30 秒回收清掉的话
 /// 每段打字的首键都要在 UI 线程上重建一遍。
@@ -360,8 +373,8 @@ struct ImgId(u32);
 
 type FillKey = (ImgId, FillSpec, u32, u32, [u8; 4]);
 
-/// 皮肤位图键：源、倍率百万分值、目标宽高、两轴拉伸声明的摘要。
-type SkinFillKey = (ImgId, u32, u32, u32, u64);
+/// 皮肤位图键：源、倍率百万分值、目标宽高、两轴拉伸声明的摘要、镜像。图集不分翻与不翻。
+type SkinFillKey = (ImgId, u32, u32, u32, u64, Flip);
 
 /// 按倍率缩好的源图（预乘 RGBA8）。
 struct Atlas {
@@ -423,8 +436,13 @@ pub struct ImageCache {
     /// 再整轴拉伸一次就发虚。
     /// 图集建好即丢掉对应的源图——皮肤源图通常是几 MB 的大图，常驻的只该是目标尺寸那份。
     atlases: HashMap<(ImgId, u32), Option<Atlas>>,
+    /// 建图集时报过的告警，同键；随 `atlases` 一起清。
+    atlas_warns: HashMap<(ImgId, u32), Vec<String>>,
     /// 源图尺寸。皮肤路径建完图集后丢源图，尺寸仍要能答。
     dims: HashMap<ImgId, (u32, u32)>,
+    /// 只读文件头得到的位图尺寸（[`Self::header_size`]），None = 读不出。与 `dims` 分开：`dims`
+    /// 只记解得出的图，`src_size` 对解不出的图答 None。
+    header_sizes: HashMap<ImgId, Option<(u32, u32)>>,
     /// 皮肤窗体 / 装饰的目标位图，计入 `fill_bytes`。
     skin_fills: HashMap<SkinFillKey, Option<Pixmap>>,
     /// 以下动画三表按源串索引、不随 30 秒闲置回收（那会清掉 `ids`），只在换主题、预算溢出、
@@ -433,6 +451,8 @@ pub struct ImageCache {
     animated: std::collections::HashSet<String>,
     /// 动画装饰的逐帧位图，计入 `anim_bytes`；None = 解出来不足两帧（按静态图画）或解码失败。
     anims: HashMap<String, HashMap<AnimParams, Option<Anim>>>,
+    /// 建动画帧时报过的告警，同键；随 `anims` 一起清。
+    anim_warns: HashMap<(String, AnimParams), Vec<String>>,
     anim_bytes: usize,
     anim_last_use: Option<Instant>,
     /// `src` / `fills` 各自的驻留字节，对账两个预算。
@@ -497,6 +517,7 @@ impl ImageCache {
         self.animated.clear();
         self.not_animated.clear();
         self.anims.clear();
+        self.anim_warns.clear();
         self.anim_bytes = 0;
         self.anim_last_use = None;
     }
@@ -535,7 +556,9 @@ impl ImageCache {
         self.svg_sizes.clear();
         self.fills.clear();
         self.atlases.clear();
+        self.atlas_warns.clear();
         self.dims.clear();
+        self.header_sizes.clear();
         self.skin_fills.clear();
         self.not_animated.clear();
         self.src_bytes = 0;
@@ -602,6 +625,7 @@ impl ImageCache {
             if self.src_bytes + bytes > SRC_BUDGET_BYTES {
                 self.src.clear();
                 self.atlases.clear();
+                self.atlas_warns.clear();
                 self.src_bytes = 0;
             }
             self.src_bytes += bytes;
@@ -642,19 +666,40 @@ impl ImageCache {
         Some(d)
     }
 
+    /// 只读文件头的尺寸，不解码、不让源图常驻（皮肤比对亮暗两图尺寸用）。SVG 同 [`Self::src_size`]
+    /// 取文档尺寸；已解过的位图直接答 `dims`。读不出（缺文件、认不出格式）返回 None，结果缓存。
+    pub fn header_size(&mut self, path: &str) -> Option<(u32, u32)> {
+        if is_svg(path) {
+            return self.src_size(path);
+        }
+        self.touch();
+        let id = self.id_of(path);
+        if let Some(d) = self.dims.get(&id) {
+            return Some(*d);
+        }
+        *self
+            .header_sizes
+            .entry(id)
+            .or_insert_with(|| header_dims(path))
+    }
+
     /// 皮肤图集：源图按倍率 `k_micro / 1e6` 缩好的预乘 RGBA。建好后丢掉源图。
     /// SVG 不走这里（皮肤只收位图；SVG 窗体请用旧的 `nine_slice` 之外的整图拉伸）。
     fn atlas(&mut self, id: ImgId, path: &str, k_micro: u32) -> Option<&Atlas> {
         let key = (id, k_micro);
         if !self.atlases.contains_key(&key) {
             let k = k_micro as f32 / 1_000_000.0;
+            let mut warns = Vec::new();
             let built = self.decode(id, path).and_then(|s| {
                 let (w, h) = (
                     crate::skin::atlas_len(s.w, k),
                     crate::skin::atlas_len(s.h, k),
                 );
                 if !crate::skin::fits_image_limits(w, h) {
-                    tracing::warn!("skin: 图集 {w}x{h} 超出上限，不建: {}", brief(path));
+                    warn_kept(
+                        &mut warns,
+                        format!("skin: 图集 {w}x{h} 超出上限，不建: {}", brief(path)),
+                    );
                     return None;
                 }
                 Some((
@@ -678,16 +723,23 @@ impl ImageCache {
             if self.src_bytes + bytes > SRC_BUDGET_BYTES {
                 self.src.clear();
                 self.atlases.clear();
+                self.atlas_warns.clear();
                 self.src_bytes = 0;
             }
             self.src_bytes += bytes;
             self.atlases.insert(key, built);
+            if !warns.is_empty() {
+                self.atlas_warns.insert(key, warns);
+            }
+        } else if replaying() {
+            replay(self.atlas_warns.get(&key));
         }
         self.atlases.get(&key).and_then(|o| o.as_ref())
     }
 
     /// 皮肤位图（BGRA 序 + 预乘）：源图按倍率 `k` 缩成图集，再按两轴拉伸声明（源像素）
-    /// 合成 `w×h`。窗体与装饰共用（装饰传整轴拉伸）。
+    /// 合成 `w×h`，最后按 `flip` 镜像。窗体与装饰共用（装饰传整轴拉伸；窗体恒不翻）。
+    #[allow(clippy::too_many_arguments)]
     pub fn skin_fill(
         &mut self,
         path: &str,
@@ -696,6 +748,7 @@ impl ImageCache {
         stretch_y: &wind_theme::skin::Stretch,
         w: u32,
         h: u32,
+        flip: Flip,
     ) -> Option<&Pixmap> {
         self.touch();
         if w == 0 || h == 0 || !k.is_finite() || k <= 0.0 || is_svg(path) {
@@ -703,12 +756,20 @@ impl ImageCache {
         }
         let id = self.id_of(path);
         let k_micro = ((k * 1_000_000.0).round() as u32).max(1);
-        let key = (id, k_micro, w, h, stretch_digest(stretch_x, stretch_y));
+        let key = (
+            id,
+            k_micro,
+            w,
+            h,
+            stretch_digest(stretch_x, stretch_y),
+            flip,
+        );
         if !self.skin_fills.contains_key(&key) {
             let (sw, sh) = self.src_size(path)?;
             let built = self
                 .atlas(id, path, k_micro)
-                .and_then(|a| atlas_pixmap(a, (sw, sh), stretch_x, stretch_y, w, h));
+                .and_then(|a| atlas_pixmap(a, (sw, sh), stretch_x, stretch_y, w, h))
+                .map(|pm| flipped(pm, flip));
             let bytes = built.as_ref().map_or(0, |pm| pm.data().len());
             if self.fill_bytes + bytes > FILL_BUDGET_BYTES {
                 self.fills.clear();
@@ -717,6 +778,9 @@ impl ImageCache {
             }
             self.fill_bytes += bytes;
             self.skin_fills.insert(key, built);
+        } else if replaying() {
+            // 合成位图命中时不再经过图集：建图集时的告警在这里重放。
+            replay(self.atlas_warns.get(&(id, k_micro)));
         }
         self.skin_fills.get(&key).and_then(|o| o.as_ref())
     }
@@ -743,8 +807,9 @@ impl ImageCache {
         a
     }
 
-    /// 动画装饰：按倍率 `k` 逐帧缩好、合成 `w×h`，帧数按 `budget` 字节隔帧丢弃。
+    /// 动画装饰：按倍率 `k` 逐帧缩好、合成 `w×h`、按 `flip` 镜像，帧数按 `budget` 字节隔帧丢弃。
     /// 不足两帧（含单帧 GIF）或解码失败返回 None，调用方按静态图画。
+    #[allow(clippy::too_many_arguments)]
     fn anim(
         &mut self,
         path: &str,
@@ -753,20 +818,32 @@ impl ImageCache {
         h: u32,
         fps: Option<f32>,
         budget: usize,
+        flip: Flip,
     ) -> Option<&Anim> {
         self.touch_anim();
         if w == 0 || h == 0 || !k.is_finite() || k <= 0.0 {
             return None;
         }
         let k_micro = ((k * 1_000_000.0).round() as u32).max(1);
-        let key = (k_micro, w, h, fps.map_or(0, f32::to_bits), budget);
+        let key = (k_micro, w, h, fps.map_or(0, f32::to_bits), budget, flip);
         if !self.anims.get(path).is_some_and(|m| m.contains_key(&key)) {
-            let built = build_anim(path, k_micro as f32 / 1_000_000.0, w, h, fps, budget);
+            let mut warns = Vec::new();
+            let built = build_anim(
+                path,
+                k_micro as f32 / 1_000_000.0,
+                w,
+                h,
+                fps,
+                budget,
+                flip,
+                &mut warns,
+            );
             let bytes = built
                 .as_ref()
                 .map_or(0, |a| a.frames.iter().map(|f| f.data().len()).sum());
             if self.anim_bytes + bytes > ANIM_BUDGET_BYTES {
                 self.anims.clear();
+                self.anim_warns.clear();
                 self.anim_bytes = 0;
             }
             self.anim_bytes += bytes;
@@ -774,6 +851,11 @@ impl ImageCache {
                 .entry(path.to_string())
                 .or_default()
                 .insert(key, built);
+            if !warns.is_empty() {
+                self.anim_warns.insert((path.to_string(), key), warns);
+            }
+        } else if replaying() {
+            replay(self.anim_warns.get(&(path.to_string(), key)));
         }
         self.anims
             .get(path)
@@ -782,6 +864,7 @@ impl ImageCache {
     }
 
     /// 动画装饰各帧时长（毫秒，已归一化）；不是动画（不足两帧）为 None。
+    #[allow(clippy::too_many_arguments)]
     pub fn anim_durations(
         &mut self,
         path: &str,
@@ -790,12 +873,14 @@ impl ImageCache {
         h: u32,
         fps: Option<f32>,
         budget: usize,
+        flip: Flip,
     ) -> Option<&[u32]> {
-        self.anim(path, k, w, h, fps, budget)
+        self.anim(path, k, w, h, fps, budget, flip)
             .map(|a| a.durations.as_slice())
     }
 
-    /// 同 [`Self::anim_durations`]，另带降帧映射。
+    /// 同 [`Self::anim_durations`]，另带降帧映射。`flip` 与画帧时同值才命中同一份帧。
+    #[allow(clippy::too_many_arguments)]
     pub fn anim_layout(
         &mut self,
         path: &str,
@@ -804,13 +889,15 @@ impl ImageCache {
         h: u32,
         fps: Option<f32>,
         budget: usize,
+        flip: Flip,
     ) -> Option<AnimLayout> {
-        self.anim(path, k, w, h, fps, budget).map(|a| AnimLayout {
-            durations: a.durations.clone(),
-            stride: a.stride,
-            raw_frames: a.raw_frames,
-            aligned: a.aligned,
-        })
+        self.anim(path, k, w, h, fps, budget, flip)
+            .map(|a| AnimLayout {
+                durations: a.durations.clone(),
+                stride: a.stride,
+                raw_frames: a.raw_frames,
+                aligned: a.aligned,
+            })
     }
 
     /// 动画装饰的第 `idx` 帧（对帧数取模）。
@@ -823,9 +910,10 @@ impl ImageCache {
         h: u32,
         fps: Option<f32>,
         budget: usize,
+        flip: Flip,
         idx: usize,
     ) -> Option<&Pixmap> {
-        let a = self.anim(path, k, w, h, fps, budget)?;
+        let a = self.anim(path, k, w, h, fps, budget, flip)?;
         a.frames.get(idx % a.frames.len())
     }
 
@@ -875,7 +963,7 @@ impl ImageCache {
         };
         let key = (self.id_of(path), spec, w, h, tint);
         if !self.fills.contains_key(&key) {
-            let built = self.build_fill(key, path);
+            let built = self.build_fill(key, path).map(|pm| flipped(pm, spec.flip));
             let bytes = built.as_ref().map_or(0, |pm| pm.data().len());
             if self.fill_bytes + bytes > FILL_BUDGET_BYTES {
                 self.fills.clear();
@@ -987,10 +1075,30 @@ fn atlas_pixmap(
     Some(pm)
 }
 
+/// 已合成到目标尺寸的位图按 `flip` 镜像（原地，逐像素搬动、不重采样）。
+fn flipped(mut pm: Pixmap, flip: Flip) -> Pixmap {
+    let w = pm.width() as usize;
+    let px = pm.pixels_mut();
+    if flip.x {
+        px.chunks_exact_mut(w).for_each(<[_]>::reverse);
+    }
+    if flip.y {
+        let rows = px.len() / w;
+        for top in 0..rows / 2 {
+            let (head, tail) = px.split_at_mut((rows - 1 - top) * w);
+            head[top * w..(top + 1) * w].swap_with_slice(&mut tail[..w]);
+        }
+    }
+    pm
+}
+
 /// 源的前 `n` 字节（`data:` URI 只解对应长度的 base64）。
 fn read_source_prefix(src: &str, n: usize) -> Option<Vec<u8>> {
     use base64::Engine as _;
     use std::io::Read as _;
+    if let Some(mem) = crate::assets::bytes_of(src) {
+        return mem.map(|b| b[..n.min(b.len())].to_vec());
+    }
     if !src.starts_with("data:") {
         let mut out = Vec::new();
         std::fs::File::open(src)
@@ -1019,28 +1127,9 @@ fn read_source_prefix(src: &str, n: usize) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// 文件头是否动画格式：GIF 一律算（帧数另判）；APNG 看 IDAT 之前有无 acTL；WebP 看 VP8X 的动画位。
+/// 文件头是否动画格式，判据在 [`wind_theme::skin::sniff_animated`]（设置端「主题信息」也用它）。
 fn sniff_animated(b: &[u8]) -> bool {
-    if b.starts_with(b"GIF8") {
-        return true;
-    }
-    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
-        let mut at = 8;
-        while let Some(head) = b.get(at..at + 8) {
-            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
-            match &head[4..8] {
-                b"acTL" => return true,
-                b"IDAT" => return false,
-                _ => at = at.saturating_add(len).saturating_add(12),
-            }
-        }
-        return false;
-    }
-    b.len() > 20
-        && &b[0..4] == b"RIFF"
-        && &b[8..12] == b"WEBP"
-        && &b[12..16] == b"VP8X"
-        && b[20] & 0x02 != 0
+    wind_theme::skin::sniff_animated(b)
 }
 
 /// 只解析文件头取尺寸。
@@ -1080,8 +1169,182 @@ fn frames_of(bytes: &[u8]) -> Option<image::Frames<'_>> {
     }
 }
 
+/// [`walk_frames`] 的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameWalk {
+    /// 按动画播（动画格式且解得出至少两帧）；否则引擎按静态图画首帧。超预算时按文件头判断。
+    pub animated: bool,
+    /// 回调过的帧数。
+    pub frames: usize,
+    /// 帧数超过 [`MAX_ANIM_FRAMES`]，其后的帧引擎不解（只在走完全程时可能为真）。
+    pub truncated: bool,
+    /// 解到的「像素 × 帧」将超过调用方给的预算，就此停下（之后的帧没解）。
+    pub over_budget: bool,
+}
+
+/// 图片字节的格式名与尺寸（只读头）。认不出格式、尺寸超出位图上限（引擎不解码这种图）都报错。
+/// 给主题编辑器看帧信息用（`wind-scene-wasm` 的 `inspectImage`）。
+pub fn image_header(bytes: &[u8]) -> Result<(&'static str, u32, u32), String> {
+    use image::ImageFormat as F;
+    let fmt = image::guess_format(bytes).map_err(|_| "认不出图片格式".to_string())?;
+    let name = match fmt {
+        F::Png => "png",
+        F::Jpeg => "jpeg",
+        F::WebP => "webp",
+        F::Gif => "gif",
+        F::Bmp => "bmp",
+        other => {
+            return Err(format!(
+                "不支持的图片格式 {other:?}（只认 PNG / JPEG / WebP / GIF / BMP）"
+            ));
+        }
+    };
+    let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt)
+        .into_dimensions()
+        .map_err(|e| format!("读不出图片尺寸：{e}"))?;
+    if !crate::skin::fits_image_limits(w, h) {
+        return Err(format!(
+            "图片尺寸 {w}x{h} 超出上限（单边 {}、共 {} 像素），引擎不解码",
+            crate::skin::MAX_IMAGE_SIDE,
+            crate::skin::MAX_IMAGE_PIXELS
+        ));
+    }
+    Ok((name, w, h))
+}
+
+/// 逐帧走一遍图片字节，与装饰动画同一个解码器、同一套限额与判定（主题编辑器的帧信息与缩略图用）：
+/// 动画按帧回调 `(原始帧号, 宽, 高, 直通 RGBA, 归一后的时长 ms)`（帧已合成到整张画布；时长不计
+/// 装饰的 `fps` 覆盖），解码出错即停（同建帧时「只用已解出的帧」），至多 [`MAX_ANIM_FRAMES`] 帧；
+/// 静态图（含单帧 GIF）回调一次、时长 0。回调返回 false 即停。
+///
+/// `max_px_frames`：解码量预算（画布像素 × 已解帧数；探测是否超过 [`MAX_ANIM_FRAMES`] 而多解的那一帧
+/// 不计）。解下一帧会超就停、置 `over_budget`，已解出的帧照常回调——不可信输入可以在很小的文件里塞
+/// 几百帧的大画布。判定是不是动画不另解：第 0 帧先留着，解出第 1 帧才按动画回调。帧逐个解、用完即弃，
+/// 驻留只有解码器画布与至多两帧。
+pub fn walk_frames(
+    bytes: &[u8],
+    max_px_frames: u64,
+    mut f: impl FnMut(usize, u32, u32, &[u8], u32) -> bool,
+) -> Result<FrameWalk, String> {
+    let (_, w, h) = image_header(bytes)?;
+    let px = u64::from(w) * u64::from(h);
+    let over = |n: usize| (n as u64).saturating_mul(px) > max_px_frames;
+    let sniffed = sniff_animated(&bytes[..bytes.len().min(SNIFF_BYTES)]);
+    let mut walk = FrameWalk {
+        animated: false,
+        frames: 0,
+        truncated: false,
+        over_budget: false,
+    };
+    // 同 `ImageCache::is_animated`：文件头是动画格式，且前两帧都解得出。第 0 帧先留着，确认有
+    // 第 1 帧才按动画回调，免得为判定多解一遍。
+    if let Some(mut frames) = sniffed.then(|| frames_of(bytes)).flatten() {
+        let mut first: Option<(image::RgbaImage, u32)> = None;
+        let mut n = 0;
+        loop {
+            if n < MAX_ANIM_FRAMES && over(n + 1) {
+                // 文件头是动画格式：没解到第 1 帧也按动画报。已解的第 0 帧照常回调。
+                walk.animated = true;
+                walk.over_budget = true;
+                if let Some((img, ms0)) = first.take() {
+                    walk.frames = 1;
+                    f(0, img.width(), img.height(), img.as_raw(), ms0);
+                }
+                return Ok(walk);
+            }
+            let Some(Ok(frame)) = frames.next() else {
+                break;
+            };
+            n += 1;
+            if n > MAX_ANIM_FRAMES {
+                walk.truncated = true;
+                break;
+            }
+            let (numer, denom) = frame.delay().numer_denom_ms();
+            let ms = crate::skin::frame_ms(numer, denom, None);
+            let buf = frame.into_buffer();
+            if n == 1 {
+                first = Some((buf, ms));
+                continue;
+            }
+            walk.animated = true;
+            if let Some((img, ms0)) = first.take() {
+                walk.frames = 1;
+                if !f(0, img.width(), img.height(), img.as_raw(), ms0) {
+                    return Ok(walk);
+                }
+            }
+            walk.frames = n;
+            if !f(n - 1, buf.width(), buf.height(), buf.as_raw(), ms) {
+                return Ok(walk);
+            }
+        }
+        if walk.animated {
+            return Ok(walk);
+        }
+    }
+    if over(1) {
+        walk.over_budget = true;
+        return Ok(walk);
+    }
+    let img = decode_bitmap_bytes(bytes, "（编辑器传入的图片）")
+        .ok_or_else(|| "图片解码失败".to_string())?
+        .to_rgba8();
+    f(0, img.width(), img.height(), img.as_raw(), 0);
+    walk.frames = 1;
+    Ok(walk)
+}
+
+/// 报一条告警并记下（缓存条目带着它，重放时再报）。
+fn warn_kept(out: &mut Vec<String>, msg: String) {
+    tracing::warn!("{msg}");
+    out.push(msg);
+}
+
+thread_local! {
+    /// 置位期间，命中的图集 / 动画缓存条目把建它时报过的告警再报一遍（见 [`replaying_skin_warnings`]）。
+    static REPLAY_WARNINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 跑 `f`，期间命中的图集 / 动画缓存条目重放建它时报过的 `skin:` 告警。
+///
+/// 这些告警（图集超限、动画装饰尺寸超限、帧解码失败、降帧）只在建缓存那一刻报；主题编辑器换主题而
+/// 资源不变时缓存沿用，不重放就再也看不到。只重放**本帧实际用到**的条目：主题改得不再触发（比如改小
+/// 了装饰尺寸，换了缓存键）的旧告警不会回来。实时窗口不调它。
+pub fn replaying_skin_warnings<R>(f: impl FnOnce() -> R) -> R {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REPLAY_WARNINGS.with(|r| r.set(self.0));
+        }
+    }
+    let _reset = Reset(REPLAY_WARNINGS.with(|r| r.replace(true)));
+    f()
+}
+
+fn replaying() -> bool {
+    REPLAY_WARNINGS.with(std::cell::Cell::get)
+}
+
+fn replay(warns: Option<&Vec<String>>) {
+    for m in warns.into_iter().flatten() {
+        tracing::warn!("{m}");
+    }
+}
+
 /// 逐帧解码动画，每帧与静态装饰同一套缩放合成（面积平均缩到倍率 `k`，再整轴映射到 `w×h`）。
-fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usize) -> Option<Anim> {
+/// `warns` 收下建帧时报的 `skin:` 告警（同时照常 `tracing::warn!`），随缓存条目留着供重放。
+#[allow(clippy::too_many_arguments)]
+fn build_anim(
+    path: &str,
+    k: f32,
+    w: u32,
+    h: u32,
+    fps: Option<f32>,
+    budget: usize,
+    flip: Flip,
+    warns: &mut Vec<String>,
+) -> Option<Anim> {
     use wind_theme::skin::{BandFill, Stretch};
     let t0 = crate::clock::now();
     let bytes = read_source_bytes(path)?;
@@ -1091,16 +1354,22 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
     if !header_dims(path).is_some_and(|(sw, sh)| crate::skin::fits_image_limits(sw, sh))
         || !crate::skin::fits_image_limits(w, h)
     {
-        tracing::warn!("skin: 动画装饰尺寸超出上限，不解帧: {}", brief(path));
+        warn_kept(
+            warns,
+            format!("skin: 动画装饰尺寸超出上限，不解帧: {}", brief(path)),
+        );
         return None;
     }
     for frame in frames.take(MAX_ANIM_FRAMES) {
         let frame = match frame {
             Ok(f) => f,
             Err(e) => {
-                tracing::warn!(
-                    "skin: 动画帧解码失败，只用已解出的帧: {} ({e})",
-                    brief(path)
+                warn_kept(
+                    warns,
+                    format!(
+                        "skin: 动画帧解码失败，只用已解出的帧: {} ({e})",
+                        brief(path)
+                    ),
                 );
                 break;
             }
@@ -1115,7 +1384,7 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
                 h: ah,
                 rgba: crate::skin::resample(buf.as_raw(), sw, sh, aw, ah),
             };
-            atlas_pixmap(&atlas, (sw, sh), &whole, &whole, w, h)
+            atlas_pixmap(&atlas, (sw, sh), &whole, &whole, w, h).map(|pm| flipped(pm, flip))
         });
     }
     let dropped = acc.dropped();
@@ -1130,11 +1399,14 @@ fn build_anim(path: &str, k: f32, w: u32, h: u32, fps: Option<f32>, budget: usiz
         return None;
     }
     if dropped {
-        tracing::warn!(
-            "skin: 动画帧超出 {} KiB 预算，隔帧丢弃到 {} 帧: {}",
-            budget / 1024,
-            frames.len(),
-            brief(path)
+        warn_kept(
+            warns,
+            format!(
+                "skin: 动画帧超出 {} KiB 预算，隔帧丢弃到 {} 帧: {}",
+                budget / 1024,
+                frames.len(),
+                brief(path)
+            ),
         );
     }
     Some(Anim {
@@ -1336,7 +1608,7 @@ mod tests {
         let uri = anim_fixtures::data_uri("image/png", &anim_fixtures::apng(1, 1, &frames));
         let mut c = ImageCache::new();
         let l = c
-            .anim_layout(&uri, 1.0, 1, 1, None, ANIM_BUDGET_BYTES)
+            .anim_layout(&uri, 1.0, 1, 1, None, ANIM_BUDGET_BYTES, Flip::NONE)
             .expect("动画");
         assert_eq!(l.raw_frames, MAX_ANIM_FRAMES, "超出的帧不解");
     }
@@ -1348,7 +1620,7 @@ mod tests {
     /// 第 `idx` 帧左上像素（BGRA 预乘）。
     fn frame_px(c: &mut ImageCache, uri: &str, budget: usize, idx: usize) -> [u8; 4] {
         let pm = c
-            .anim_frame(uri, 1.0, 4, 4, None, budget, idx)
+            .anim_frame(uri, 1.0, 4, 4, None, budget, Flip::NONE, idx)
             .expect("动画帧");
         let p = pm.pixels()[0];
         [p.red(), p.green(), p.blue(), p.alpha()]
@@ -1360,7 +1632,7 @@ mod tests {
         let mut c = ImageCache::new();
         assert!(c.is_animated(&uri));
         assert_eq!(
-            c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES),
+            c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES, Flip::NONE),
             Some(&[100, 50, 33][..]),
             "0 ms 按 100 ms，不足 33 ms 钳到帧率上限"
         );
@@ -1385,7 +1657,7 @@ mod tests {
         let uri = gif_uri(&[(RED, 500), (GREEN, 50)]);
         let mut c = ImageCache::new();
         assert_eq!(
-            c.anim_durations(&uri, 1.0, 4, 4, Some(8.0), ANIM_BUDGET_BYTES),
+            c.anim_durations(&uri, 1.0, 4, 4, Some(8.0), ANIM_BUDGET_BYTES, Flip::NONE),
             Some(&[125, 125][..])
         );
     }
@@ -1396,7 +1668,7 @@ mod tests {
         let uri = gif_uri(&[(RED, 100), (GREEN, 200), (BLUE, 300), (WHITE, 400)]);
         let mut c = ImageCache::new();
         assert_eq!(
-            c.anim_durations(&uri, 1.0, 4, 4, None, 128),
+            c.anim_durations(&uri, 1.0, 4, 4, None, 128, Flip::NONE),
             Some(&[300, 700][..])
         );
         assert_eq!(
@@ -1405,7 +1677,7 @@ mod tests {
             "留下的是蓝帧"
         );
         assert_eq!(
-            c.anim_layout(&uri, 1.0, 4, 4, None, 128),
+            c.anim_layout(&uri, 1.0, 4, 4, None, 128, Flip::NONE),
             Some(AnimLayout {
                 durations: vec![300, 700],
                 stride: 2,
@@ -1423,7 +1695,7 @@ mod tests {
         assert!(!c.is_animated(&png));
         let one = gif_uri(&[(RED, 100)]);
         assert_eq!(
-            c.anim_durations(&one, 1.0, 4, 4, None, ANIM_BUDGET_BYTES),
+            c.anim_durations(&one, 1.0, 4, 4, None, ANIM_BUDGET_BYTES, Flip::NONE),
             None,
             "单帧 GIF 按静态图画"
         );
@@ -1446,7 +1718,7 @@ mod tests {
         let mut c = ImageCache::new();
         assert!(c.is_animated(&uri));
         assert_eq!(
-            c.anim_durations(&uri, 0.5, 4, 1, None, ANIM_BUDGET_BYTES),
+            c.anim_durations(&uri, 0.5, 4, 1, None, ANIM_BUDGET_BYTES, Flip::NONE),
             Some(&[40, 120][..])
         );
         let whole = wind_theme::skin::Stretch::Whole(wind_theme::skin::BandFill::Stretch);
@@ -1458,12 +1730,12 @@ mod tests {
                 .unwrap();
             let still = anim_fixtures::data_uri("image/png", &png.into_inner());
             let want = c
-                .skin_fill(&still, 0.5, &whole, &whole, 4, 1)
+                .skin_fill(&still, 0.5, &whole, &whole, 4, 1, Flip::NONE)
                 .unwrap()
                 .data()
                 .to_vec();
             let got = c
-                .anim_frame(&uri, 0.5, 4, 1, None, ANIM_BUDGET_BYTES, i)
+                .anim_frame(&uri, 0.5, 4, 1, None, ANIM_BUDGET_BYTES, Flip::NONE, i)
                 .unwrap()
                 .data()
                 .to_vec();
@@ -1475,7 +1747,7 @@ mod tests {
     fn animation_frames_outlive_short_idle_eviction() {
         let uri = gif_uri(&[(RED, 100), (GREEN, 100)]);
         let mut c = ImageCache::new();
-        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES);
+        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES, Flip::NONE);
         let bytes = c.anim_bytes;
         assert!(bytes > 0);
         let now = Instant::now();
@@ -1497,7 +1769,7 @@ mod tests {
     fn clear_anims_drops_frames_for_theme_switch() {
         let uri = gif_uri(&[(RED, 100), (GREEN, 100)]);
         let mut c = ImageCache::new();
-        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES);
+        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES, Flip::NONE);
         c.clear_anims();
         assert_eq!((c.anims.len(), c.anim_bytes), (0, 0));
     }
@@ -1507,7 +1779,7 @@ mod tests {
         let uri = gif_uri(&[(RED, 100), (GREEN, 100)]);
         let mut c = ImageCache::new();
         assert_eq!(c.src_size(&uri), Some((4, 4)), "只读头也拿得到尺寸");
-        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES);
+        c.anim_durations(&uri, 1.0, 4, 4, None, ANIM_BUDGET_BYTES, Flip::NONE);
         assert_eq!(c.src_stats(), (0, 0), "原分辨率首帧不常驻");
     }
 
@@ -1904,6 +2176,25 @@ mod tests {
         assert_eq!((px.blue(), px.green(), px.alpha()), (255, 0, 255));
     }
 
+    /// 读头取尺寸：不解码、源图不常驻；读不出答 None 且缓存；闲置回收一并清。
+    #[test]
+    fn header_size_reads_header_without_decoding() {
+        let uri = png_data_uri(3, 2, [255, 0, 0, 255]);
+        let mut cache = ImageCache::new();
+        assert_eq!(cache.header_size(&uri), Some((3, 2)));
+        assert_eq!(cache.src_stats(), (0, 0), "只读头，不解码");
+        assert_eq!(cache.header_size("/nonexistent/x.png"), None);
+        assert_eq!(cache.header_sizes.len(), 2, "读不出也缓存");
+        assert_eq!(
+            cache.header_size(&svg_data_uri(4, 5, "#0000ff")),
+            Some((4, 5)),
+            "SVG 取文档尺寸"
+        );
+        let late = crate::clock::now() + IDLE_EVICT_AFTER + Duration::from_secs(1);
+        assert!(cache.evict_if_idle(late));
+        assert!(cache.header_sizes.is_empty(), "闲置回收一并清");
+    }
+
     /// 九宫中段**平铺**：目标变宽只是多重复几次，纹理本身不缩放。
     ///
     /// 对照组是拉伸——候选窗宽度每变一下中段就被重新压缩一次（用户看到的「呼吸」），
@@ -1918,6 +2209,7 @@ mod tests {
             slice: [0; 4],
             repeat: [true, false],
             scale_milli: 1000,
+            flip: Flip::NONE,
         };
         let stretch = FillSpec {
             repeat: [false, false],
@@ -1965,6 +2257,7 @@ mod tests {
             slice: [0; 4],
             repeat: [false, true],
             scale_milli: 1000,
+            flip: Flip::NONE,
         };
         let pm = cache.fill(&uri, spec, 1, 6, [0; 4]).expect("纵向平铺");
         let col: Vec<u8> = (0..6)
@@ -1985,6 +2278,7 @@ mod tests {
             slice: [0, 2, 0, 2],
             repeat: [true, false],
             scale_milli: 1000,
+            flip: Flip::NONE,
         };
         // 目标 3 < 左右切片和 4 ⇒ 整轴按比例拉伸：src = d*10/3 → 0, 3, 6
         let pm = cache.fill(&uri, spec, 3, 1, [0; 4]).expect("退化仍要出图");
@@ -2002,6 +2296,7 @@ mod tests {
             slice: [0, 2, 0, 2],
             repeat: [true, true],
             scale_milli: 1000,
+            flip: Flip::NONE,
         };
         let pm = cache.fill(&uri, spec, 8, 1, [0; 4]).expect("退化仍要出图");
         assert_eq!(row_reds(pm, 8), vec![10, 10, 20, 20, 30, 30, 40, 40]);
@@ -2223,5 +2518,202 @@ mod tests {
         let s = brief(&long);
         assert!(s.len() < 200, "日志标识不该带上整条 data: URI：{s}");
         assert_eq!(brief("/themes/x/panel.png"), "/themes/x/panel.png");
+    }
+
+    // ── flip ──
+
+    const FLIPS: [Flip; 3] = [
+        Flip { x: true, y: false },
+        Flip { x: false, y: true },
+        Flip { x: true, y: true },
+    ];
+
+    /// 非对称夹具：`w×h`，每个像素的红色分量各不相同（行优先递增）。
+    fn png_grid_uri(w: u32, h: u32) -> String {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(20 + 30 * (y * w + x)) as u8, 0, 0, 255])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("PNG 编码");
+        anim_fixtures::data_uri("image/png", &png.into_inner())
+    }
+
+    /// 由不翻的结果推出翻转后应有的像素（逐像素镜像，与实现无关的独立算法）。
+    fn mirrored(pm: &Pixmap, f: Flip) -> Vec<PremultipliedColorU8> {
+        let (w, h) = (pm.width(), pm.height());
+        let mut out = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let sx = if f.x { w - 1 - x } else { x };
+                let sy = if f.y { h - 1 - y } else { y };
+                out.push(pm.pixel(sx, sy).unwrap());
+            }
+        }
+        out
+    }
+
+    fn assert_asymmetric(pm: &Pixmap) {
+        let (w, h) = (pm.width(), pm.height());
+        assert_ne!(pm.pixel(0, 0), pm.pixel(w - 1, 0), "夹具左右须不对称");
+        assert_ne!(pm.pixel(0, 0), pm.pixel(0, h - 1), "夹具上下须不对称");
+    }
+
+    #[test]
+    fn fill_flips_after_composing_and_keys_apart() {
+        let uri = png_grid_uri(3, 2);
+        let mut c = ImageCache::new();
+        let plain = c
+            .fill(&uri, FillSpec::stretch(), 6, 4, [0; 4])
+            .unwrap()
+            .clone();
+        assert_asymmetric(&plain);
+        for f in FLIPS {
+            let spec = FillSpec {
+                flip: f,
+                ..FillSpec::stretch()
+            };
+            let got = c.fill(&uri, spec, 6, 4, [0; 4]).unwrap();
+            assert_eq!(got.pixels(), mirrored(&plain, f).as_slice(), "{f:?}");
+        }
+        // x：首末列互换。
+        let x = FillSpec {
+            flip: FLIPS[0],
+            ..FillSpec::stretch()
+        };
+        let got = c.fill(&uri, x, 6, 4, [0; 4]).unwrap().clone();
+        assert_eq!(got.pixel(0, 0), plain.pixel(5, 0));
+        assert_eq!(got.pixel(5, 0), plain.pixel(0, 0));
+        // 翻过之后再取不翻的，仍是原图：缓存键分得开、没被就地翻坏。
+        let again = c.fill(&uri, FillSpec::stretch(), 6, 4, [0; 4]).unwrap();
+        assert_eq!(again.data(), plain.data());
+    }
+
+    /// 九宫按源图切、合成后整体翻：右缘出现的是源图左切片。
+    #[test]
+    fn nine_slice_flip_mirrors_the_composed_result() {
+        let uri = png_stripes_data_uri(&[10, 20, 30, 40]);
+        let mut c = ImageCache::new();
+        let spec = FillSpec {
+            mode: mode_code("nine_slice"),
+            slice: [0, 1, 0, 1],
+            ..FillSpec::stretch()
+        };
+        let plain = row_reds(c.fill(&uri, spec, 8, 1, [0; 4]).unwrap(), 8);
+        let flipped = FillSpec {
+            flip: FLIPS[0],
+            ..spec
+        };
+        let got = row_reds(c.fill(&uri, flipped, 8, 1, [0; 4]).unwrap(), 8);
+        let mut want = plain.clone();
+        want.reverse();
+        assert_eq!(got, want);
+        assert_eq!((got[0], got[7]), (40, 10));
+    }
+
+    /// tile 先按原相位铺满再整块翻：`x` 时从右缘起铺，末尾那截不完整的单元落到左侧。
+    #[test]
+    fn tile_flip_starts_from_right_edge() {
+        let uri = png_stripes_data_uri(&[10, 20, 30, 40]);
+        let mut c = ImageCache::new();
+        let tile = FillSpec {
+            mode: mode_code("tile"),
+            ..FillSpec::stretch()
+        };
+        // 6 不是单元宽 4 的整数倍。
+        let plain = row_reds(c.fill(&uri, tile, 6, 1, [0; 4]).unwrap(), 6);
+        assert_eq!(
+            plain,
+            [10, 20, 30, 40, 10, 20],
+            "不翻：从左缘起铺、右侧裁掉"
+        );
+        let flipped = FillSpec {
+            flip: FLIPS[0],
+            ..tile
+        };
+        let got = row_reds(c.fill(&uri, flipped, 6, 1, [0; 4]).unwrap(), 6);
+        assert_eq!(got[5], 10, "末列 = 源图首列：从右缘起铺");
+        assert_eq!(&got[2..], [40, 30, 20, 10], "右侧是一整个（镜像的）单元");
+        assert_eq!(&got[..2], [20, 10], "不完整的那截落在左侧");
+    }
+
+    /// SVG（整盒栅格化与 center 单元两条路径）同样在合成后翻。
+    #[test]
+    fn svg_fill_flips_like_bitmaps() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"><rect width="8" height="4" fill="#0000ff"/><rect width="2" height="1" fill="#ff0000"/></svg>"##;
+        let uri = format!(
+            "data:image/svg+xml;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(svg)
+        );
+        let mut c = ImageCache::new();
+        for mode in ["stretch", "center"] {
+            let spec = FillSpec {
+                mode: mode_code(mode),
+                ..FillSpec::stretch()
+            };
+            let plain = c.fill(&uri, spec, 8, 4, [0; 4]).unwrap().clone();
+            assert_asymmetric(&plain);
+            for f in FLIPS {
+                let got = c
+                    .fill(&uri, FillSpec { flip: f, ..spec }, 8, 4, [0; 4])
+                    .unwrap();
+                assert_eq!(got.pixels(), mirrored(&plain, f).as_slice(), "{mode} {f:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn skin_fill_flips_and_shares_the_atlas() {
+        // 奇数宽高：中行 / 中列原地不动。
+        use wind_theme::skin::{BandFill, Stretch};
+        let whole = Stretch::Whole(BandFill::Stretch);
+        let uri = png_grid_uri(3, 2);
+        let mut c = ImageCache::new();
+        let plain = c
+            .skin_fill(&uri, 1.0, &whole, &whole, 5, 3, Flip::NONE)
+            .unwrap()
+            .clone();
+        assert_asymmetric(&plain);
+        let atlases = c.atlases.len();
+        for f in FLIPS {
+            let got = c.skin_fill(&uri, 1.0, &whole, &whole, 5, 3, f).unwrap();
+            assert_eq!(got.pixels(), mirrored(&plain, f).as_slice(), "{f:?}");
+        }
+        assert_eq!(c.atlases.len(), atlases, "图集翻与不翻共用");
+        assert_eq!(c.skin_fills.len(), 4, "合成位图按翻转位分开缓存");
+        let again = c
+            .skin_fill(&uri, 1.0, &whole, &whole, 5, 3, Flip::NONE)
+            .unwrap();
+        assert_eq!(again.data(), plain.data(), "不串图");
+    }
+
+    #[test]
+    fn anim_flips_every_frame() {
+        // 2×1 两帧：左右颜色不同，且两帧互不相同。
+        let frames = [([RED, BLUE].concat(), 100), ([GREEN, WHITE].concat(), 100)];
+        let uri = anim_fixtures::data_uri("image/png", &anim_fixtures::apng(2, 1, &frames));
+        let mut c = ImageCache::new();
+        let px = |c: &mut ImageCache, f: Flip, i: usize| {
+            let pm = c
+                .anim_frame(&uri, 1.0, 2, 1, None, ANIM_BUDGET_BYTES, f, i)
+                .expect("动画帧");
+            (pm.pixel(0, 0).unwrap(), pm.pixel(1, 0).unwrap())
+        };
+        for i in 0..2 {
+            let (l, r) = px(&mut c, Flip::NONE, i);
+            assert_ne!(l, r, "第 {i} 帧夹具须不对称");
+            assert_eq!(px(&mut c, FLIPS[0], i), (r, l), "第 {i} 帧要翻");
+            assert_eq!(px(&mut c, FLIPS[1], i), (l, r), "1 像素高，上下翻不变");
+            assert_eq!(px(&mut c, Flip::NONE, i), (l, r), "不串图");
+        }
+        assert_eq!(c.anims[&uri].len(), 3, "动画按翻转位分开缓存");
+        assert_eq!(
+            c.anim_layout(&uri, 1.0, 2, 1, None, ANIM_BUDGET_BYTES, FLIPS[0])
+                .map(|l| l.durations),
+            c.anim_layout(&uri, 1.0, 2, 1, None, ANIM_BUDGET_BYTES, Flip::NONE)
+                .map(|l| l.durations),
+            "翻转不改时间轴"
+        );
     }
 }

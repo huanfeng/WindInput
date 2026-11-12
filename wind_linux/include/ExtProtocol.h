@@ -38,6 +38,19 @@ constexpr uint16_t CMD_KEY_RELEASE = 0x0511;
 constexpr uint16_t CMD_KEY_TYPE = 0x0512;
 /// 光栅浮层帧（状态气泡 / Toast / tooltip / 菜单），macOS `.app` 与 Linux addon 共用。布局见 Codec.h `OverlayFramePayload`。
 constexpr uint16_t CMD_OVERLAY_FRAME = 0x0513;
+/// 候选窗异形皮肤的区域（窗体 / 装饰矩形与鼠标策略 / 输入区），每个候选帧先于 CMD_HOST_RENDER_FRAME 一条。
+/// 布局见 Codec.h `CandidateSkin`。
+constexpr uint16_t CMD_CANDIDATE_SKIN = 0x0514;
+
+// ── CMD_CANDIDATE_SKIN 的枚举（protocol.rs `pub mod skin`）──
+constexpr uint32_t SKIN_FLAG_ACTIVE = 0x0001;
+/// 带输入区表：候选窗只在这些矩形里接鼠标（穿透装饰、透明外扩区不接）。
+constexpr uint32_t SKIN_FLAG_MASK = 0x0002;
+constexpr uint32_t SKIN_HIT_DRAG = 0;
+constexpr uint32_t SKIN_HIT_BLOCK = 1;
+constexpr uint32_t SKIN_HIT_PASS = 2;
+constexpr uint32_t SKIN_DECOR_UNDER = 0x0001;
+constexpr uint32_t SKIN_DECOR_SPLIT = 0x0002;
 
 // ── CMD_OVERLAY_FRAME 的枚举（protocol.rs `pub mod overlay`）──
 constexpr uint32_t OVERLAY_KIND_TOOLTIP = 1;
@@ -49,6 +62,8 @@ constexpr uint32_t OVERLAY_MENU_LEVELS = 6;
 /// 悬浮工具栏 / 软键盘：帧尾多一段拖动区（count u32 + count × x y w h i32）。
 constexpr uint32_t OVERLAY_KIND_TOOLBAR = 10;
 constexpr uint32_t OVERLAY_KIND_SOFTKEYBOARD = 11;
+/// 候选窗的穿透装饰层（只 macOS 用；本端收不到，列出来供同步测试核对）。
+constexpr uint32_t OVERLAY_KIND_DECOR = 12;
 constexpr uint32_t OVERLAY_PLACE_ABSOLUTE = 0;
 constexpr uint32_t OVERLAY_PLACE_FLIP = 1;
 constexpr uint32_t OVERLAY_PLACE_FOLLOW_CANDIDATE = 2;
@@ -70,6 +85,8 @@ inline constexpr const char* EXT_KIND_MENU_OPEN = "menu.open";
 inline constexpr const char* EXT_KIND_MENU_DISMISS = "menu.dismiss";
 /// 上行：状态气泡拖动落点 / 应询回报的当前位置（内容左上）。落不落盘由服务端按定位方式定。
 inline constexpr const char* EXT_KIND_POS_STATUS_TIP = "pos.status_tip";
+/// 上行：候选窗拖动落点 / 应询回报的当前位置（内容左上，同 `ui.candidate.custom_x/y`）。
+inline constexpr const char* EXT_KIND_POS_CANDIDATE = "pos.candidate";
 /// 上行：工具栏 / 软键盘拖动落点。body `{"x":..,"y":..,"output":"DP-1"}`，内容盒左上，output 可缺省。
 inline constexpr const char* EXT_KIND_POS_TOOLBAR = "pos.toolbar";
 inline constexpr const char* EXT_KIND_POS_SOFTKEYBOARD = "pos.softkeyboard";
@@ -82,8 +99,15 @@ inline constexpr const char* EXT_KIND_HOST_FULLSCREEN = "host.fullscreen";
 /// 能力位（否则服务端把编码画进候选窗）；scale：界面缩放因子（见 protocol.rs `HOST_DISPLAY`）；output：焦点所在输出名（可缺省）；work：该输出的工作区 [左,上,右,下]（可缺省，与 output 成对报）。
 /// panels：能力声明，本 addon 能贴工具栏 / 软键盘浮层（恒报 true；旧 addon 不报 → 服务端不开软键盘）。
 inline constexpr const char* EXT_KIND_HOST_DISPLAY = "host.display";
+/// 上行：系统「减少动态效果」。body `{"reduce":bool}`。服务（重）启与设置变化时报，读不到不报。
+inline constexpr const char* EXT_KIND_HOST_REDUCE_MOTION = "host.reduce_motion";
+/// 上行：点了候选窗上的一块皮肤装饰（drag / block）。body `{"index":N}`，N 为 CMD_CANDIDATE_SKIN
+/// 里该装饰的 index。服务端触发它的 click 事件；旧服务不认这个 kind，安静忽略。
+inline constexpr const char* EXT_KIND_SKIN_DECOR_CLICK = "skin.decor_click";
 /// 下行：服务端问状态气泡此刻在哪（切「固定位置」时以当前位置落盘）。气泡不在屏上不答。
 inline constexpr const char* EXT_KIND_POS_STATUS_TIP_QUERY = "pos.status_tip.query";
+/// 下行：服务端问候选窗此刻在哪（切「固定位置」时以当前位置落盘）。候选窗不在屏上不答。
+inline constexpr const char* EXT_KIND_POS_CANDIDATE_QUERY = "pos.candidate.query";
 
 // ── `menu.open` 的 target 里「不是候选」的几档（protocol.rs `menu_target`）──
 constexpr int32_t MENU_TARGET_MAIN = -1;
@@ -99,5 +123,7 @@ constexpr uint64_t INPUT_SCOPE_PASSWORD_BIT = uint64_t(1) << 31;
 constexpr uint32_t FRAME_FLAG_SOFTWARE_SHADOW = 0x0004;
 /// 帧 flags：`(x, y)` 是固定位置的绝对屏幕坐标，不是按光标推算的落点。
 constexpr uint32_t FRAME_FLAG_ABSOLUTE_POS = 0x0008;
+/// 帧 flags：换帧（内容没变，只换皮肤装饰的动画帧）——照原位贴图，不重新落位、不 raise。
+constexpr uint32_t FRAME_FLAG_ANIM_FRAME = 0x0010;
 
 } // namespace windlinux

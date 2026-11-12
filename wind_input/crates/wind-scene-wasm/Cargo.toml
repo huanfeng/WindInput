@@ -1,0 +1,33 @@
+[package]
+name = "wind-scene-wasm"
+version.workspace = true
+edition.workspace = true
+description = "主题编辑器的候选窗预览：wind-scene 编成 wasm，文字回调浏览器 Canvas"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# ⛔ 只准依赖这三个本仓 crate（不准 wind-config：uuid / dirs 挡 wasm）。见 docs/design/theme-editor-wasm.md。
+wind-scene = { path = "../wind-scene" }
+wind-theme = { path = "../wind-theme" }
+wind-ui-types = { path = "../wind-ui-types" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# 收引擎的 `skin:` 告警（src/warnings.rs）；wind-scene 本就依赖它。
+tracing = { workspace = true }
+
+# JS 胶水只在 wasm32 上编；原生目标（单测）走 `Canvas` trait 的 mock。
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+[dev-dependencies]
+# 单测要 `*_for_test` 几何与 `anim_fixtures`。
+wind-scene = { path = "../wind-scene", features = ["test-util"] }
+# 只给单测造夹具图（PNG / 两帧 GIF）；版本同 wind-scene 那份。
+image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+
+[lints]
+workspace = true

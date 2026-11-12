@@ -4,6 +4,7 @@
 //! 不碰任何平台 API；文字经 [`text::TextBackend`] 由调用方注入。方案见
 //! `docs/design/wind-scene-extraction.md`。
 
+pub mod assets;
 pub mod candidate;
 pub mod clock;
 pub mod image_cache;

@@ -134,6 +134,36 @@ pub struct RenderedFrame {
     pub hit_rects: Vec<(i32, crate::view::Rect)>,
     /// 预乘 BGRA 像素缓冲（width×height×4）
     pub buf: Vec<u8>,
+    /// 皮肤区域（`CMD_CANDIDATE_SKIN`，设计 §17.2）。没启用皮肤为 `Default`（`flags = 0`）。
+    pub skin: wind_ipc::codec::CandidateSkinWire,
+    /// macOS：拆出来的穿透装饰层（与 `buf` 同尺寸）+ 是否垫在主层下面。主层里没有它们。
+    pub pass_layer: Option<(Vec<u8>, bool)>,
+    /// 窗口左上 → 内容左上（`ui.candidate.custom_x/y` 同义）的偏移，单位同 `screen_x/y`。宿主本地拖动后
+    /// 按它把窗口落点换回内容左上报 `pos.candidate`（皮肤装饰外扩时非零，设计 §17.7）。
+    pub content_offset: (i32, i32),
+    /// 跟随光标时翻到光标上方的窗口左上（单位同 `screen_x/y`）。服务端拿不到屏幕几何、不翻转，
+    /// 上下由宿主按可见区定；上方点按 Windows `place_window` 的上翻规则算（皮肤 `caret_above`
+    /// 对齐点、上方避让、偏移远离光标）。固定位置时同 `screen_x/y`。
+    pub above_pos: (i32, i32),
+    /// 宿主判翻转、夹边用的框（相对窗口左上的 x, y, w, h，单位同上）：内容框，皮肤 `clamp = "all"`
+    /// 时连装饰外扩。与 Windows `place_window` 的 `hi + cb` / `- ct` 同口径。
+    pub place_box: (i32, i32, i32, i32),
+}
+
+#[cfg(ext_presenter)]
+impl RenderedFrame {
+    /// 主层与穿透装饰层合成后的整张位图（截图用）。没拆层时就是 `buf`。
+    pub fn composed(&self) -> Vec<u8> {
+        let mut out = self.buf.clone();
+        if let Some((pass, below)) = &self.pass_layer {
+            if *below {
+                scene::composite_under(&mut out, pass);
+            } else {
+                scene::composite_over(&mut out, pass);
+            }
+        }
+        out
+    }
 }
 
 /// Windows host-render：`render_frame()` 产出的离屏帧（写 SHM + Event 触发用）。
@@ -155,6 +185,9 @@ pub struct RenderedFrame {
     pub hit_rects: Vec<(i32, crate::view::Rect)>,
     /// 预乘 BGRA 像素缓冲（width×height×4）
     pub buf: Vec<u8>,
+    /// 拆出来的穿透装饰层（与 `buf` 同尺寸）+ 是否垫在主层下面。只 [`CandidateWindow::render_host_frame`]
+    /// 按要求拆，其余路径为 `None`（穿透装饰在 `buf` 里）。
+    pub pass_layer: Option<(Vec<u8>, bool)>,
 }
 
 /// 候选词数据类型已下沉至 wind-ui-types；再导出保持 `wind_ui::candidate_window::CandidateItem`
@@ -226,7 +259,8 @@ impl CandidateWindowConfig {
 }
 
 /// 系统是否允许界面动画：Windows 读「显示 Windows 中的动画」（`SPI_GETCLIENTAREAANIMATION`），
-/// 查询失败按允许。其它平台本期不播放皮肤动画，只画首帧。
+/// 查询失败按允许。macOS / Linux 外部宿主见下面两个同名函数（设计 §17.1）；其余形态（开发机上的
+/// 非 Windows 本地窗口，只供测试与出图）不播放，只画首帧。
 #[cfg(windows)]
 fn system_allows_animation() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -245,7 +279,65 @@ fn system_allows_animation() -> bool {
     !ok || on != 0
 }
 
-#[cfg(not(windows))]
+/// 宿主（macOS `.app` / Linux addon）报来的「减少动态效果」：0 = 没报过，1 = 关，2 = 开。见
+/// [`set_host_reduce_motion`]。
+#[cfg(ext_presenter)]
+static HOST_REDUCE_MOTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 记下宿主报来的「减少动态效果」（扩展信封 `host.reduce_motion`）。下一次显示候选窗时生效。
+#[cfg(ext_presenter)]
+pub fn set_host_reduce_motion(reduce: bool) {
+    HOST_REDUCE_MOTION.store(
+        if reduce { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// macOS「减少动态效果」：以 `.app` 报来的为准（它能用 `accessibilityDisplayShouldReduceMotion`，服务
+/// 进程不链 AppKit）。没报过就读 `com.apple.universalaccess` 的 `reduceMotion`：先同步偏好域免得读到
+/// 进程启动时的旧值；读不到（键不存在、该偏好域不让读）按允许。
+#[cfg(target_os = "macos")]
+fn system_allows_animation() -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::preferences::{
+        CFPreferencesAppSynchronize, CFPreferencesGetAppBooleanValue,
+    };
+    match HOST_REDUCE_MOTION.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let key = CFString::from_static_string("reduceMotion");
+    let app = CFString::from_static_string("com.apple.universalaccess");
+    let mut valid: u8 = 0;
+    // SAFETY: 两个 CFString 在调用期间存活；`valid` 是本地变量。
+    let reduce = unsafe {
+        CFPreferencesAppSynchronize(app.as_concrete_TypeRef());
+        CFPreferencesGetAppBooleanValue(
+            key.as_concrete_TypeRef(),
+            app.as_concrete_TypeRef(),
+            &mut valid,
+        )
+    };
+    // valid == 0：键不存在或不是布尔，未知按允许。
+    valid == 0 || reduce == 0
+}
+
+/// Linux 外部宿主：以 addon 报来的为准（它读设置门户与 kdeglobals，设计 §17.1）；没报过（读不到、
+/// 旧 addon）按允许，只受 `ui.theme.animation` 控制。
+#[cfg(all(target_os = "linux", ext_presenter))]
+fn system_allows_animation() -> bool {
+    host_motion_allowed(HOST_REDUCE_MOTION.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// [`HOST_REDUCE_MOTION`] 的取值 → 允不允许动画：只有报过「减少」才不允许。
+#[cfg(all(target_os = "linux", ext_presenter))]
+fn host_motion_allowed(host: u8) -> bool {
+    host != 2
+}
+
+#[cfg(not(any(windows, target_os = "macos", all(target_os = "linux", ext_presenter))))]
 fn system_allows_animation() -> bool {
     false
 }
@@ -343,6 +435,8 @@ pub struct CandidateWindow {
     anim_due: bool,
     /// 正在为换帧重绘：不重置悬停、不重摆气泡。
     anim_repaint: bool,
+    /// 限帧闸门（外部宿主推帧用，见 [`Self::set_anim_gate`]）：换帧到期不早于它。None = 不限。
+    anim_gate: Option<Instant>,
     /// 用户外观字体（`ui.font.family`，已 trim）；空 = 跟随主题节点字族。
     user_font_family: String,
     /// 用户全局字重（`ui.font.weight`）；0 = 不指定（取 [`Self::family_weight`]，再无则常规）。
@@ -503,6 +597,7 @@ impl CandidateWindow {
             anim_start: Instant::now(),
             anim_due: false,
             anim_repaint: false,
+            anim_gate: None,
             user_font_family: String::new(),
             user_font_weight: 0,
             family_weight: 0,
@@ -695,7 +790,25 @@ impl CandidateWindow {
 
     /// 下一次装饰换帧的时刻：场景给的是距动画时间轴起点的时长，起点在窗口侧。
     fn anim_next_at(&self) -> Option<Instant> {
-        self.scene.next_anim_at().map(|d| self.anim_start + d)
+        let at = self.scene.next_anim_at().map(|d| self.anim_start + d)?;
+        Some(self.anim_gate.map_or(at, |g| at.max(g)))
+    }
+
+    /// 设限帧闸门：此后换帧到期不早于 `at`，且跳过画面不会变的边界（设计 §17.1）。在推出一帧
+    /// 换帧之后调，「画面会不会变」按刚推出去的那帧比。只管换帧：悬停、提示保持、释放像素照旧到期。
+    pub fn set_anim_gate(&mut self, at: Instant) {
+        self.anim_gate = Some(at);
+        if self.scene.next_anim_at().is_none() {
+            return;
+        }
+        let after = at.saturating_duration_since(self.anim_start);
+        let next = self.scene.next_anim_change(&self.scene_input(false), after);
+        self.scene.anim_next = next;
+    }
+
+    /// 限帧闸门（[`Self::set_anim_gate`]）；None = 不限。
+    pub fn anim_gate(&self) -> Option<Instant> {
+        self.anim_gate
     }
 
     /// 本帧场景输入：内容、排布与生效主题都按引用借出，`above` 决定是否按上方专属布局搭。
@@ -1226,7 +1339,7 @@ impl CandidateWindow {
     #[cfg(windows)]
     pub fn show(&mut self) {
         let t_start = Instant::now();
-        self.split_pass_decor = true;
+        self.split_pass_decor = !self.pass_window_failed;
         let frame = self.render_frame();
         self.split_pass_decor = false;
         let t_render = t_start.elapsed();
@@ -1442,7 +1555,7 @@ impl CandidateWindow {
         // Windows 那边还有第三级 `drag_pin`（本次组合内冻结拖动落位）。macOS 的拖动发生在
         // `.app` 侧的 NSPanel 上，服务进程这边的 mouse handler 是不产生事件的 mock，
         // `drag_pin` 恒为 None——会话内的落位冻结由 `.app` 自己记（见 CandidatePanel.dragPin）。
-        let (px, py, absolute) = match self.fixed_pos {
+        let (px, py, absolute, above_xy, clamp) = match self.fixed_pos {
             Some(f) => {
                 // 固定位置下窗口不随光标上下移动，"上翻"随之失去意义：placed_above 必须归 false，
                 // 否则 flip_when_above / swap_preedit_when_above 会让内容在一个不动的窗口里倒序。
@@ -1461,13 +1574,17 @@ impl CandidateWindow {
                     lg(height) as u32,
                     (lg(ml), lg(mt), lg(mr), lg(mb)),
                 );
-                (wx + lg(ml), wy + lg(mt), true)
+                let (cx, cy) = (wx + lg(ml), wy + lg(mt));
+                (cx, cy, true, (cx, cy), (0, 0, 0, 0))
             }
             None => {
                 // place_window 约定 caret_y 为光标【底端】（下方锚点=底端+gap），但 macOS .app 的
                 // caretRectToWire 发的是光标行【顶端】(top-left)，故这里把行高补上传光标底端 =
                 // self.y + self.caret_height，候选窗才落在光标行下方、不遮挡输入。
                 let offset = self.position_offset_px();
+                let anchor = self
+                    .scene
+                    .skin_place_anchor(1.0 / self.scale.max(1.0), self.scale);
                 let (px0, py0, above) = Self::place_window(
                     self.x,
                     self.y + self.caret_height,
@@ -1476,9 +1593,7 @@ impl CandidateWindow {
                     content_h,
                     self.placed_above,
                     offset,
-                    &self
-                        .scene
-                        .skin_place_anchor(1.0 / self.scale.max(1.0), self.scale),
+                    &anchor,
                 );
                 self.placed_above = above;
                 let (px, py) = match self.last_content_pos {
@@ -1493,7 +1608,17 @@ impl CandidateWindow {
                     _ => (px0, py0),
                 };
                 self.last_content_pos = Some((px, py));
-                (px, py, false)
+                // 上方点交给宿主（它才知道下方放不放得下）。微移抑制按下方点的取舍同样平移。
+                let s = self.scale.max(1.0);
+                let (ax, ay) = Self::place_above(
+                    self.x,
+                    self.y + self.caret_height,
+                    self.caret_height,
+                    (content_h as f32 / s).round() as u32,
+                    offset,
+                    &anchor,
+                );
+                (px, py, false, (ax + px - px0, ay + py - py0), anchor.clamp)
             }
         };
         self.report_flip_state();
@@ -1503,10 +1628,13 @@ impl CandidateWindow {
         // 命中矩形（窗口缓冲坐标，内容起点 (ml,mt)），同步给鼠标处理器。
         self.sync_hits(&frame);
 
-        // 绘制到独立 BGRA 缓冲（透明清屏 → 内容；本路径不画软影）。
+        // 绘制到独立 BGRA 缓冲（透明清屏 → 内容；本路径不画软影）。穿透装饰先拆出来（§17.2）：
+        // Linux 按主层算输入区再合回去，macOS 另走子 panel。
         let mut buf = vec![0u8; (width * height * 4) as usize];
-        self.scene
-            .paint(&frame, &mut buf, &self.text_renderer, false);
+        let pass = self
+            .scene
+            .paint(&frame, &mut buf, &self.text_renderer, true);
+        let (skin, pass_layer) = self.skin_regions(&mut buf, width, height, pass);
         let shadow = frame.shadow;
 
         self.mark_visible();
@@ -1532,6 +1660,14 @@ impl CandidateWindow {
             px + ((width - ml - mr) as f32 / scale).round() as i32,
             content_top + ((height - mt - mb) as f32 / scale).round() as i32,
         ));
+        let content_offset = (ml_l, mt_l - clear_l);
+        let (cl, ct, cr, cb) = clamp;
+        let place_box = (
+            content_offset.0 - cl,
+            content_offset.1 - ct,
+            ((width - ml - mr) as f32 / scale).round() as i32 + cl + cr,
+            ((height - mt - mb) as f32 / scale).round() as i32 + ct + cb,
+        );
         Some(RenderedFrame {
             // 图像含四向 margin(device)，其屏幕左上(逻辑点) = 内容锚点 − 左/上 margin/scale
             //（纵向再 +可见浓阴影下移，让阴影落在 caret 下方）。
@@ -1544,7 +1680,81 @@ impl CandidateWindow {
             absolute_pos: absolute,
             hit_rects: self.hit_rects.clone(),
             buf,
+            skin,
+            pass_layer,
+            content_offset,
+            above_pos: (above_xy.0 - content_offset.0, above_xy.1 - content_offset.1),
+            place_box,
         })
+    }
+
+    /// 外部宿主的皮肤区域（设计 §17.2）。`buf` 是不含穿透装饰的主层，`pass` 是拆出来的穿透装饰层。
+    ///
+    /// Linux：输入区按主层的 alpha 算，然后把穿透装饰合回 `buf`（同一张位图，只是不进输入区）。
+    /// macOS：不发输入区（非不透明窗口按 alpha 自动穿透），穿透装饰层原样交出去给子 panel。
+    #[cfg(ext_presenter)]
+    fn skin_regions(
+        &self,
+        buf: &mut [u8],
+        width: u32,
+        height: u32,
+        pass: Option<(Vec<u8>, bool)>,
+    ) -> (wind_ipc::codec::CandidateSkinWire, Option<(Vec<u8>, bool)>) {
+        use wind_ipc::codec::{CandidateSkinWire, SkinDecorWire};
+        use wind_ipc::protocol::skin::*;
+        use wind_theme::skin::DecorHit;
+        let Some(g) = self.scene.skin_geom.as_ref() else {
+            return (CandidateSkinWire::default(), pass);
+        };
+        let split = cfg!(target_os = "macos");
+        let decor = g
+            .host_decor()
+            .into_iter()
+            .map(|d| {
+                let hit = match d.hit {
+                    DecorHit::Drag => SKIN_HIT_DRAG,
+                    DecorHit::Block => SKIN_HIT_BLOCK,
+                    DecorHit::Pass => SKIN_HIT_PASS,
+                };
+                let mut flags = 0;
+                if d.under {
+                    flags |= SKIN_DECOR_UNDER;
+                }
+                if split && d.hit == DecorHit::Pass {
+                    flags |= SKIN_DECOR_SPLIT;
+                }
+                SkinDecorWire {
+                    index: d.index as u32,
+                    hit,
+                    flags,
+                    rect: d.rect,
+                }
+            })
+            .collect();
+        let f = g.frame_rect();
+        let mut wire = CandidateSkinWire {
+            flags: SKIN_FLAG_ACTIVE,
+            frame: [f.x as i32, f.y as i32, f.w as i32, f.h as i32],
+            decor,
+            mask: Vec::new(),
+        };
+        if split {
+            return (wire, pass);
+        }
+        wire.flags |= SKIN_FLAG_MASK;
+        wire.mask =
+            scene::opaque_rects(buf, width, height, scene::MAX_INPUT_RECTS).unwrap_or_else(|| {
+                tracing::debug!("skin: 输入区矩形超过上限，退化为窗体与装饰矩形");
+                g.coarse_input_rects()
+            });
+        if let Some((p, below)) = pass {
+            if below {
+                scene::composite_under(buf, &p);
+            } else {
+                scene::composite_over(buf, &p);
+            }
+        }
+        (wire, None)
     }
 
     /// Windows host-render：把当前候选状态渲染到一块独立 BGRA 缓冲区并返回，
@@ -1664,12 +1874,11 @@ impl CandidateWindow {
         self.sync_hits(&frame);
 
         let mut buf = vec![0u8; (width * height * 4) as usize];
-        // 穿透装饰：只在本地窗口路径（show 置位 split_pass_decor）拆到独立的穿透窗口；
-        // host-render 等路径照旧画进主缓冲（按 block 处理）。穿透窗口建不出来时也不拆。
-        let split = self.split_pass_decor && !self.pass_window_failed;
-        self.pass_layer = self
-            .scene
-            .paint(&frame, &mut buf, &self.text_renderer, split);
+        // 穿透装饰：本地窗口路径（show，穿透窗口建得出来时）与能画穿透层的 DLL host-render
+        // （render_host_frame）拆到独立的穿透窗口；其余照旧画进主缓冲（按 block 处理）。
+        self.pass_layer =
+            self.scene
+                .paint(&frame, &mut buf, &self.text_renderer, self.split_pass_decor);
         let shadow = frame.shadow;
 
         self.mark_visible();
@@ -1697,6 +1906,21 @@ impl CandidateWindow {
             software_shadow: shadow.is_some(),
             hit_rects: self.hit_rects.clone(),
             buf,
+            pass_layer: None,
+        })
+    }
+
+    /// DLL host-render 的出帧口：`split_pass` 时把穿透装饰拆进 [`RenderedFrame::pass_layer`]（DLL 声明
+    /// 了 `HOST_RENDER_CAP_PASS_LAYER`），否则合在主层里。
+    #[cfg(windows)]
+    pub fn render_host_frame(&mut self, split_pass: bool) -> Option<RenderedFrame> {
+        self.split_pass_decor = split_pass;
+        let frame = self.render_frame();
+        self.split_pass_decor = false;
+        let pass = self.pass_layer.take();
+        frame.map(|f| RenderedFrame {
+            pass_layer: pass,
+            ..f
         })
     }
 
@@ -2047,6 +2271,24 @@ impl CandidateWindow {
         y
     }
 
+    /// 翻到光标上方时的内容左上（钳制之前）：皮肤上方对齐点（`caret_above`）落在光标顶端 − gap，
+    /// 偏移向上（远离光标），再按上方保护带避让。Windows 在 `place_window` 里判定上翻后走这里；
+    /// 外部宿主拿不到屏幕几何，服务端把这个点连同下方点一起交给宿主选（`RenderedFrame::above_pos`）。
+    #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
+    fn place_above(
+        caret_x: i32,
+        caret_y: i32,
+        caret_h: i32,
+        h: u32,
+        offset: (i32, i32),
+        anchor: &scene::PlaceAnchor,
+    ) -> (i32, i32) {
+        let (ax, _, above_y) = Self::caret_anchors(caret_x, caret_y, caret_h, h as i32, offset.0);
+        let y = Self::apply_offset_y(above_y + anchor.above.1, true, offset.1);
+        let y = Self::avoid_caret_line(y, true, caret_y, caret_h, anchor.avoid_above.as_ref());
+        (ax - anchor.above.0, y)
+    }
+
     #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
     #[allow(clippy::too_many_arguments)]
     fn place_window(
@@ -2115,21 +2357,18 @@ impl CandidateWindow {
                     } else {
                         !below_ok && above_ok
                     };
-                    // 方位定后再施加偏移：上方向上、下方向下，均为远离光标。
-                    y = Self::apply_offset_y(
-                        if above { above_y } else { below_y },
-                        above,
-                        offset.1,
-                    );
+                    // 方位定后再施加偏移：上方向上、下方向下，均为远离光标；再按该方位的保护带避让。
                     if above {
-                        x = ax - anchor.above.0;
-                    }
-                    let mask = if above {
-                        anchor.avoid_above.as_ref()
+                        (x, y) = Self::place_above(caret_x, caret_y, caret_h, h, offset, anchor);
                     } else {
-                        anchor.avoid_below.as_ref()
-                    };
-                    y = Self::avoid_caret_line(y, above, caret_y, caret_h, mask);
+                        y = Self::avoid_caret_line(
+                            y,
+                            false,
+                            caret_y,
+                            caret_h,
+                            anchor.avoid_below.as_ref(),
+                        );
+                    }
                     // 方位定后的越界兜底：贴住对应屏幕边。
                     // 偏移可能把窗口顶出工作区，这里兜回来——所以偏移必须在钳制之前施加。
                     // 皮肤 clamp = "all" 时 (cl, ct, cr, cb) 是装饰外扩，连装饰一起留在屏内；否则全 0。
@@ -2419,7 +2658,11 @@ impl CandidateWindow {
             self.pixel_release.deadline(),
             // 装饰换帧：只在可见时登记；事件切了画面待重绘时立即醒。
             self.anim_next_at().filter(|_| self.visible),
-            self.anim_due.then(Instant::now),
+            // 闸门没到不醒：外部宿主到闸门才取走这一帧。
+            self.anim_due.then(|| {
+                self.anim_gate
+                    .map_or_else(Instant::now, |g| g.max(Instant::now()))
+            }),
         ]
         .into_iter()
         .flatten()
@@ -3161,6 +3404,17 @@ impl WindowMouse for CandidateMouse {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux", ext_presenter))]
+mod host_motion_tests {
+    /// Linux addon 报的「减少动态效果」：没报过、报了「不减少」都允许，只有报了「减少」才冻结。
+    #[test]
+    fn only_reported_reduce_freezes() {
+        assert!(super::host_motion_allowed(0));
+        assert!(super::host_motion_allowed(1));
+        assert!(!super::host_motion_allowed(2));
     }
 }
 

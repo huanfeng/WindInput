@@ -559,6 +559,21 @@ mod imp {
             Ok(runs.take())
         }
 
+        /// 最近一次设进来的全局字族（设置端预览临时换字体后据此换回）。
+        pub fn font_family(&self) -> String {
+            let end = self
+                .family
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(self.family.len());
+            String::from_utf16_lossy(&self.family[..end])
+        }
+
+        /// 最近一次设进来的全局默认字重。
+        pub fn default_weight(&self) -> i32 {
+            self.default_weight
+        }
+
         /// 设全局默认字重（`ui.font.weight` 或旧字体名里带的字重；0 = 常规）。
         ///
         /// 三处缓存都要清：TextFormat 按字号缓存、字重就烧在它里面；测量与行高缓存的键里

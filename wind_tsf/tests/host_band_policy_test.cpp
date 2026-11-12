@@ -66,13 +66,17 @@ void TestStableAfterRebuild()
 void TestPlacedBody()
 {
     CASE("落位 body：setup 不带 prev，recheck 带上旧窗依据");
-    Placement now = { 13, 13, 13, true };
+    Placement now = { 13, 13, 13, true, true };
     CHECK(PlacedBody(42, now, nullptr) ==
-          "{\"pid\":42,\"trigger\":\"setup\",\"probed\":13,\"requested\":13,\"actual\":13,\"owner\":true}");
-    Placement prev = { 0, 1, 1, false };
+          "{\"pid\":42,\"trigger\":\"setup\",\"probed\":13,\"requested\":13,\"actual\":13,\"owner\":true,"
+          "\"pass\":true}");
+    Placement prev = { 0, 1, 1, false, false };
     CHECK(PlacedBody(42, now, &prev) ==
           "{\"pid\":42,\"trigger\":\"recheck\",\"probed\":13,\"requested\":13,\"actual\":13,\"owner\":true,"
-          "\"prev_probed\":0,\"prev_requested\":1,\"prev_actual\":1,\"prev_owner\":false}");
+          "\"pass\":true,\"prev_probed\":0,\"prev_requested\":1,\"prev_actual\":1,\"prev_owner\":false}");
+    CASE("落位 body：穿透装饰窗口没建出来 ⇒ pass=false");
+    Placement noPass = { 13, 13, 13, true, false };
+    CHECK(PlacedBody(42, noPass, nullptr).find("\"pass\":false}") != std::string::npos);
 }
 
 void TestEncodeExt()

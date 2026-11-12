@@ -349,6 +349,14 @@ fn host_render_placed_log(body: &[u8]) -> Option<(bool, String)> {
         show(num("actual")),
         flag("owner").map_or("?", |b| if b { "true" } else { "false" }),
     );
+    // 候选窗的皮肤穿透装饰窗口建没建出来（旧 DLL 不报这一项）。
+    if let Some(pass) = flag("pass") {
+        line.push_str(if pass {
+            " pass=true"
+        } else {
+            " pass=false（穿透装饰合回主层、不能点穿）"
+        });
+    }
     if trigger != "recheck" {
         return Some((false, line));
     }
@@ -662,6 +670,35 @@ impl MessageHandler for Coordinator {
                         .send(wind_ui_types::UiCommand::SetHostFullscreen(on));
                 }
                 None => tracing::warn!("host.fullscreen 载荷无法解析，忽略"),
+            },
+            // macOS `.app` / Linux addon：系统「减少动态效果」，连上时与系统设置变化时报。
+            ext_kind::HOST_REDUCE_MOTION => {
+                let reduce = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v.get("reduce")?.as_bool());
+                match reduce {
+                    #[cfg(all(feature = "desktop-ui", ext_presenter))]
+                    Some(r) => {
+                        tracing::debug!("host.reduce_motion: {r}");
+                        wind_ui::candidate_window::set_host_reduce_motion(r);
+                    }
+                    #[cfg(not(all(feature = "desktop-ui", ext_presenter)))]
+                    Some(_) => {}
+                    None => tracing::warn!("host.reduce_motion 载荷无法解析，忽略"),
+                }
+            }
+            // Linux addon / macOS `.app`：候选窗皮肤装饰上点了一下（判定在宿主，同 Windows）。
+            #[cfg(ext_presenter)]
+            ext_kind::SKIN_DECOR_CLICK => match serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v.get("index")?.as_u64())
+            {
+                Some(i) => {
+                    let _ = self
+                        .ui_tx
+                        .send(wind_ui_types::UiCommand::SkinDecorClick(i as usize));
+                }
+                None => tracing::warn!("skin.decor_click 载荷无法解析，忽略"),
             },
             // Windows TSF：host render 候选窗落位诊断（SearchHost 写不了 tsf_log，只能看这条）。
             ext_kind::DIAG_HOST_RENDER_PLACED => match host_render_placed_log(body) {
@@ -3403,7 +3440,7 @@ impl MessageHandler for Coordinator {
     ) -> (Option<StatusUpdateData>, String) {
         // GH#172：用户关掉了 Ctrl+空格 切换（`keys.ctrl_space_toggle` 或自定义按键里绑 none），
         // 而这次翻转是用户按出来的（系统输入法开关热键 / 按键侧兜底）⇒ 拒绝，回包仍是当前
-        // 模式，DLL 据此把 compartment 拉回。与下面 ignore_host_ime_close 同一条仲裁回路，
+        // 模式，DLL 据此把 compartment 拉回。与下面 ignore_host_ime_switch 同一条仲裁回路，
         // 「必须再异步推一次状态」的理由也相同（见那里的 ★★★）。判据见 `ctrl_space` 模块。
         if self.ctrl_space_switch_rejected(chinese_mode, source, ctrl_held) {
             tracing::debug!(
@@ -3415,27 +3452,31 @@ impl MessageHandler for Coordinator {
             self.push_state_update();
             return (Some(self.build_status()), String::new());
         }
-        // per-app「忽略宿主关闭输入法」：拒绝后**不改模式**，回包仍是当前模式。DLL 侧
-        // `_ApplyModeSwitch` 见到 `newChineseMode != requestedMode` 会把 compartment 拉回
-        // 真实模式——这条仲裁回路早就存在（密码框强制英文用的就是它），不必新开通道。
-        if self.host_ime_close_ignored(chinese_mode, source, ctrl_held) {
+        // 「忽略软件切换中英」（per-app 优先，未配跟随全局）：拒绝后**不改模式**，回包仍是
+        // 当前模式。DLL 侧 `_ApplyModeSwitch` 见到 `newChineseMode != requestedMode` 会把
+        // compartment 拉回真实模式——这条仲裁回路早就存在（密码框强制英文用的就是它），
+        // 不必新开通道。开和关两个方向同一处理。
+        if self.host_ime_switch_ignored(source, ctrl_held) {
             let cur = self.is_chinese_mode();
             tracing::debug!(
-                "system_mode_switch: source={} 请求 英，已按 ignore_host_ime_close 拒绝（保持{}）",
+                "system_mode_switch: source={} 请求 {}，已按 ignore_host_ime_switch 拒绝（保持{}）",
                 source.as_str(),
+                if chinese_mode { "中" } else { "英" },
                 if cur { "中" } else { "英" }
             );
             // ★★★ 必须再异步推一次状态，**不能只靠同步回包**。
             //
-            // 宿主刚把 OPENCLOSE 写成 0，而我们保持中文 ⇒ compartment 与真实模式脱节。
-            // DLL 收到同步回包后确实会 `_SetOpenCloseCompartment`，但那一次发生在 `OnChange`
-            // 调用栈里——内部「值相同就不写」的守卫会读到尚未落定的旧值而跳过（实测回读
-            // 8/8 为 0，见 project_tsf_openclose_compartment_semantics）。
+            // 宿主刚把 OPENCLOSE 写成与真实模式相反的值（关时写 0、开时写 1），而我们保持原
+            // 模式 ⇒ compartment 与真实模式脱节。DLL 收到同步回包后确实会
+            // `_SetOpenCloseCompartment`，但那一次发生在 `OnChange` 调用栈里——内部「值相同
+            // 就不写」的守卫会读到尚未落定的旧值而跳过（关的方向实测回读 8/8 为 0，见
+            // project_tsf_openclose_compartment_semantics）。
             //
-            // 脱节的后果不是「图标不同步」这种小事，而是**Ctrl+Space 变哑**：compartment
-            // 停在 0、模式是中文，用户按 Ctrl+Space 把它翻成 1，`_ApplyModeSwitch` 一看
-            // 「1 == 当前中文」直接 no-op 早退，按了没反应；要按第二次（此时 0 又等于关，
-            // 且 Ctrl 按住会放行）才切得动——正是当年「按三次才切一次」那个病的形状。
+            // 脱节的后果不是「图标不同步」这种小事，而是**Ctrl+Space 变哑**：以关为例，
+            // compartment 停在 0、模式是中文，用户按 Ctrl+Space 把它翻成 1，`_ApplyModeSwitch`
+            // 一看「1 == 当前中文」直接 no-op 早退，按了没反应；要按第二次（此时 0 又等于关，
+            // 且 Ctrl 按住会放行）才切得动——正是当年「按三次才切一次」那个病的形状。开的方向
+            // 镜像对称（compartment 停在 1、模式是英文）。
             //
             // 状态推送走 `UpdateFullStatus`，那里的 `_SetOpenCloseCompartment` 是无条件的，
             // 且在 WM_UPDATE_STATUS 消息上下文里执行（已脱离 OnChange），守卫读到的是落定值。
@@ -3462,7 +3503,7 @@ impl MessageHandler for Coordinator {
         //
         // ⚠ 改写了目标时回包的模式就与请求不同——DLL 的 `_ApplyModeSwitch` 见到
         // `newChineseMode != requestedMode` 会把 compartment 拉回真实模式，与 per-app
-        // 「忽略宿主关闭输入法」拒绝请求走的是同一条仲裁回路。
+        // 「忽略软件切换中英」拒绝请求走的是同一条仲裁回路。
         let chinese_mode = if self.cancel_caps_on_switch() {
             Self::mode_after_caps_cancel(
                 &self.rt().config.input.capslock.mode_after_cancel,
@@ -4818,6 +4859,22 @@ mod ext_envelope_tests {
         assert!(!warn);
         assert!(line.contains("pid=7 trigger=setup probed=1 requested=1 actual=1 owner=false"));
         assert!(!line.contains("prev_"));
+        assert!(!line.contains("pass="), "旧 DLL 不报穿透窗口，不编");
+
+        // 新 DLL 报穿透装饰窗口建没建出来。
+        let (_, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"setup","probed":1,"requested":1,"actual":1,"owner":true,"pass":false}"#,
+        )
+        .unwrap();
+        assert!(line.contains("owner=true pass=false"), "{line}");
+        let (_, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"setup","probed":1,"requested":1,"actual":1,"owner":true,"pass":true}"#,
+        )
+        .unwrap();
+        assert!(
+            line.contains("pass=true") && !line.contains("合回"),
+            "{line}"
+        );
 
         // recheck 且 band 变了（开机预启动那条）：WARN。
         let (warn, line) = host_render_placed_log(

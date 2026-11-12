@@ -96,6 +96,7 @@ pivot = "bottom_right"      # 装饰自身对齐点；缺省同 anchor 的方位
 offset = [-80, 20]          # 源像素
 z = 1                       # <0 在窗体下；0..99 在窗体上、内容下；>=100 在内容上
 hit = "drag"                # drag（缺省）| block | pass，见 §4
+# flip = "x"                # 镜像：x（左右）| y（上下）| xy；缺省不翻，见 §3.4
 
 [skin.horizontal.placement]
 caret = "frame.top_left"           # 窗口在光标下方时，与光标对齐的点（缺省即此）
@@ -162,6 +163,18 @@ free 布局下不做上翻交换：槽位由皮肤决定，候选窗翻到光标
 - 可伸出窗体：窗口画布按所有装饰的外包围盒外扩，和现有阴影外扩 margin 合并处理。
 - `z` 分三档（窗体下 / 窗体与内容之间 / 内容之上）。盖在文字上的装饰要作者自觉，编辑器提示。
 - 装饰也可以用 `[[skin.*.decor]]` 引用动画（§6）。
+- 窗体与装饰都不支持 SVG（走位图图集）：窗体是 SVG 时回退普通窗口；装饰本身是 SVG 时整块丢弃，片段引用的附加源是 SVG
+  时该片段不可用，都告警 `skin: decor 不支持 SVG（<引用>），不画`（wasm 回执可收到）。
+- `flip = "x" | "y" | "xy"` 镜像装饰（缺省不翻）：同一张人物图放到窗体另一侧时换个朝向，不必再画一张。
+  **只翻像素**：`anchor` / `pivot` / `offset` / `size`、外接框与命中矩形都按源图写、不随之镜像
+  （想让装饰换到左侧，另写锚点）。作用于该装饰的全部帧，含 `states` / `on` 里 `{ image = .. }` 引用的
+  附加文件。非法值告警后按不翻。
+  - 落点：在已合成到目标尺寸的位图上翻（静态 `ImageCache::skin_fill`、动画 `build_anim` 逐帧），
+    缓存键带翻转位；按倍率缩好的图集翻与不翻共用。同一动画源翻与不翻（如左右各一只的同一张动图）各占一份
+    帧缓存，都计入 24 MiB 动画预算。
+  - 鼠标与宿主区域不用改：不透明区（Linux 输入区 `opaque_rects`、保护带遮罩、Windows 分层窗口的 alpha
+    命中）取自最终缓冲，装饰矩形（`CMD_CANDIDATE_SKIN` 的装饰表、穿透窗口）取外接框，翻转都不改它们。
+  - 窗体 `frame` **不开放** `flip`：拉伸带与 `content` 按源图写，翻了像素就和它们对不上。写了告警、忽略。
 
 ### 3.5 横竖与嵌入的独立性
 
@@ -189,6 +202,45 @@ free 布局下不做上翻交换：槽位由皮肤决定，候选窗翻到光标
 - 保护带只在定位时按当前尺寸合成一次（图片走缓存），横坐标取对齐前的对齐点；水平钳制把窗口推离
   对齐点时保护带不随之重算。
 - `position_offset` 继续叠加，语义不变。
+
+### 3.7 明暗
+
+皮肤没有专门的暗色写法：图片引用先查 `[resources]`（`theme_assets::asset_path`），而 `[resources]` 的
+`{ light, dark }` 在求值时按明暗选一侧（缺一侧回退另一侧）。把皮肤图登记成资源键即可随明暗换图：
+
+```toml
+[resources]
+frame = { light = "assets/frame-light.png", dark = "assets/frame-dark.png" }
+pet   = { light = "assets/pet-light.gif",   dark = "assets/pet-dark.gif" }
+pet_idle = { light = "assets/idle-light.gif", dark = "assets/idle-dark.gif" }
+
+[skin.horizontal.frame]
+image = "frame"
+stretch_x = [[300, 500]]
+[[skin.horizontal.decor]]
+image = "pet"
+states = { idle = { image = "pet_idle" } }  # 附加源同样可以是亮暗资源键
+```
+
+适用于窗体 `image`、srcset 各份、装饰 `image`、`states` / `on` 的 `{ image = .. }` 附加源。皮肤的其余字段
+（切片、拉伸带、`content`、槽位、装饰锚点与偏移、`states` 的帧区间）**只写一份**，亮暗共用。
+
+- 约束：同一资源键的亮暗两图**像素尺寸相同**；动图的帧数也应一致（帧区间片段按帧号取，暗色帧数不够的
+  片段按 §16 的越界规则丢弃）。
+- 尺寸不一致：暗色求值时，窗体图与装饰主图若与亮色那张尺寸不同，告警
+  `skin: <引用> 的暗色图 WxH 与亮色图 WxH 尺寸不同，改用亮色图`，该图在暗色下改用亮色那张（几何与亮色
+  完全一致）。不按各自尺寸求几何：拉伸带与 `content` 是按某一张图的像素写的，换个尺寸要么切错、要么
+  内容框错位，且窗口形状随明暗跳变；也不回退普通窗口——只是一张图画错，没必要把整套皮肤丢掉。以亮色为准：
+  作者通常先按亮色图定切片。附加源本就按装饰尺寸铺满，不受此限。装饰显式写了 `size` 时同样按主图尺寸
+  校验（几何虽不依赖它，规则保持一条）。
+- 暗色图读不出、亮色读得出：同样告警 `skin: <引用> 的暗色图读不出，改用亮色图` 并改用亮色那张，不让整套
+  皮肤退回普通窗口。亮暗任一侧是 SVG 时不顶替，照旧交给 SVG 告警（§3.4）。
+- 落点：`Resolved::light_resources`（暗色求值时记下亮暗不同的键的亮色路径），
+  `CandidateScene::skin_image_path` 比对两图尺寸：`ImageCache::header_size` 只读文件头（不解码、源图不常驻；
+  已解过的图直接答 `dims`），结果存独立的 `header_sizes` 表，随闲置回收一起清。
+- 切换时机：实时窗口在明暗变化时由协调器 `push_theme` 重新求值下发（`UiCommand::SetTheme`），几何每帧
+  按当前主题重求；图片缓存与动画帧缓存按解析后的路径区分，亮暗来回切不串。装饰状态机不因切明暗重建。
+  编辑器预览（wasm）一次求出亮暗两份，按 `RenderOpts.dark` 取用。
 
 ## 4. 鼠标
 
@@ -253,8 +305,8 @@ image = "tiger"            # 动画文件；静态图同字段
 anchor = "frame.top_right"
 fps = 24                   # 可选，覆盖文件自带帧时长
 [skin.horizontal.decor.states]
-idle   = { frames = "0-23", loop = true }
-typing = { frames = "24-35", loop = true }
+idle   = { frames = "0-23" }
+typing = { frames = "24-35" }
 [skin.horizontal.decor.on]
 commit  = { play = "36-47", then = "idle" }
 page    = { play = "48-55", then = "@prev" }
@@ -275,10 +327,10 @@ idle_5s = { state = "idle" }
 - 加载时解码成目标倍率的帧（同 §5），每个主题动画帧预算 24 MiB，超出则降帧率（隔帧丢弃）并 warn。
 - 帧率上限 30；窗口隐藏即暂停。
 - 设置项「关闭主题动画」（默认开），同时跟随系统减少动态效果（Windows `SPI_GETCLIENTAREAANIMATION`、
-  macOS `accessibilityDisplayShouldReduceMotion`），关闭时停在 `idle` 首帧。
+  macOS `accessibilityDisplayShouldReduceMotion`、Linux 设置门户 / kdeglobals，见 §17.1），关闭时停在 `idle` 首帧。
 - 驱动：在 `manager.rs` 的 `next_deadline` 清单登记下一帧时刻。
 - 重绘：静态部分（窗体 + 文字）缓存成一张底图，换帧只重新合成装饰矩形；P2 拆窗后只刷装饰窗口。
-- macOS / Linux 走 SHM 推帧，帧率减半；后续再评估由前端本地播放。
+- macOS / Linux 走 SHM 推帧，帧率减半（取舍见 §17.1）。
 
 ## 7. 主题包
 
@@ -382,10 +434,11 @@ macOS 系统阴影与 Wayland 输入区；P3 起的共享 crate / 设置端 / �
 - `hit = "pass"`：本地窗口路径把穿透装饰画进第二个 `WS_EX_TRANSPARENT` layered 窗口（类名
   `WindInputCandidateDecor`），与候选窗同位置同尺寸；穿透装饰全在窗体下（z < 0）时插到候选窗下面，否则在上面。
   拖动时一起挪，隐藏时一起收。窗口建不出来就回落为画进候选窗（按 block）。
-- host-render（DLL 侧 HostWindow）、macOS、Linux 仍把穿透装饰画进主缓冲，按 block 处理。
+- host-render（DLL 侧 HostWindow）：DLL 声明能力后同样拆到第二个穿透窗口，见 §17.8；旧 DLL 仍按 block。
 
-未做：macOS 第二个 panel / 系统阴影、Wayland 输入区、X11 XShape、mac/Linux 的「装饰不拖动」——都要改前端进程，
-随帧协议下发装饰矩形；穿透窗口与候选窗混合 z 序（同时有窗体上、下两类穿透装饰时统一放上面）。
+macOS / Linux 前端（推帧动画、macOS 第二个 panel 与系统阴影、Wayland 输入区、X11 XShape、「装饰不拖动」）
+已按 §17 实现；Swift 部分本机编不了，只经 CI 与真机验。
+未做：穿透窗口与候选窗混合 z 序（同时有窗体上、下两类穿透装饰时统一放上面）。
 
 ## 14. P1b 落点
 
@@ -470,3 +523,299 @@ mode_en = { state = "en" }
 
 关闭：`ui.theme.animation`（缺省 `true`）。关掉或系统关了动画效果时，装饰停在初始状态首帧，事件不再切换。
 设置端在「外观 → 主题」加开关「主题动画」。
+
+## 17. P6 Unix 前端（macOS / Linux）
+
+补齐 §13「未做」里前端进程那一半。macOS 与 Linux 都走 ext_presenter：服务进程光栅化候选窗写 SHM，
+push `CMD_HOST_RENDER_FRAME`（几何 + flags）与 `CMD_CANDIDATE_RECTS`（命中矩形），前端（`.app` /
+Fcitx5 addon）只贴图、落位、转发鼠标。盘点基准 `9f165489`：
+
+| 项 | 现状 |
+|---|---|
+| 动画 | 只显示首帧：非 Windows 的 `system_allows_animation` 恒为 false；forwarder 不 `tick`、不登记换帧；收起时不调 `win.hide()`，P5 的 `hide` 事件与时间轴起点在这条路上都不对 |
+| 穿透装饰 | 按 block 画进主缓冲 |
+| 装饰不拖动 | macOS：命中表外一律起拖。Linux：候选窗本来就不能拖（`wind_linux/AGENTS.md`「候选窗拖动 未接」），装饰不在命中表里，点上去既不选词也不悬停，已等同 block |
+| 输入区 | X11 ARGB 路径候选窗整个矩形接鼠标（浮层才按 alpha 设 `SK_INPUT`），皮肤的透明外扩区也挡点击；无合成器路径按 alpha≥128 抠 `BOUNDING`。Wayland 是候选窗整块矩形。macOS 非不透明窗口按 alpha 自动穿透 |
+| macOS 阴影 | `hasShadow = true`，按整窗 alpha 投影：皮肤自带阴影，再叠一层系统阴影，装饰也被投影 |
+
+### 17.1 动画：协议推帧，不做前端本地播放
+
+| | 推帧（采用） | 前端本地播放 |
+|---|---|---|
+| CPU | 每帧服务端整帧重排重绘（Windows P4 实测 ≈0.3%），前端多贴一次图 | 前端只合成装饰矩形，最省 |
+| 带宽 | 15 帧/秒 × 典型 600×240×4 ≈ 8.6 MB/s 本机内存拷贝；Retina 2× 为 4 倍。SHM 上限 4 MB 不变 | 加载时一次性传帧集（每主题至多 24 MiB） |
+| 实现量 | 服务端接上现成的 `next_deadline` / `tick`；前端只认一个新 flag | 底图要拆三层（z < 0 / 窗体与内容之间 / ≥ 100），帧集要另开 SHM 段；状态机（§16 的事件、`idle_<N>s`）在服务端，前端还要收状态切换；C++ X11、C++ Wayland、Swift 三份实现 |
+
+结论：推帧，帧率上限 **15**（Windows 上限 30 的一半）。时间轴仍是经过时间对总时长取模（§15），
+限帧只是跳过中间帧，不漂移。只在闸门处取样会混叠：周期恰为 66 ms 整数倍的快循环（如两帧各 33 ms 的
+眨眼）回回采到同一帧，看起来不动。所以唤醒时刻取「闸门之后第一个会换成不同帧号的边界」：推完一帧后，
+候选窗按刚推出去的帧号，在各装饰状态机的副本上逐个边界试推，帧号相同的边界跳过（`next_anim_change`）。
+上例因此 A、B 交替，只是每帧停留约 99 ms。靶机 CPU 不达标再评估本地播放，本期不做。
+
+- forwarder 每轮 `win.tick()`，主循环睡到 `win.next_deadline()`；macOS 的主循环也改成按 deadline 醒
+  （原先只等命令）。闸门在候选窗里（`set_anim_gate`，推完一帧才起算，相邻两帧推送间隔 ≥ 66 ms），只约束
+  换帧到期；悬停激活、提示保持、隐藏后释放像素照常到期。
+- 换帧走 `repaint_anim_frame`：不重推 tooltip、不重报候选窗矩形给状态气泡。
+- 帧 flags 新增 `FLAG_ANIM_FRAME = 0x0010`：内容没变、只换装饰像素。前端照原位贴图，不重新落位、
+  不重排 z 序（X11 不 raise——否则每帧压住 tooltip 与菜单；macOS 不 `invalidateShadow`）。旧前端忽略此位，
+  按普通帧处理。
+- 候选窗收起时调 `win.hide()`：动画停（不登记唤醒），`hide` 事件照 §16 生效，下次显示时间轴从头。
+- 减少动态效果：macOS 由 `.app` 读 `NSWorkspace.accessibilityDisplayShouldReduceMotion`，经扩展信封
+  `host.reduce_motion`（`{"reduce":bool}`）报给服务——连上服务、服务重启、系统设置变化
+  （`accessibilityDisplayOptionsDidChangeNotification`）时各报一次；服务进程不链 AppKit，以上报值为准，
+  没收到时退回 CFPreferences 读 `com.apple.universalaccess` 的 `reduceMotion`（先 `AppSynchronize`，
+  `valid == 0` 按未知、允许）。下一次显示候选窗时生效。
+- Linux 同样由宿主（Fcitx5 addon，`DesktopMotion`）读、经同一个 `host.reduce_motion` 报，服务端没收到按允许。
+  来源与取舍：
+  - **设置门户**（`org.freedesktop.portal.Settings`）：`org.freedesktop.appearance` `reduced-motion`
+    （跨桌面的新键，1 = 减少）、`org.gnome.desktop.interface` `enable-animations`、`org.kde.kdeglobals.KDE`
+    `AnimationDurationFactor`（0 = 关）。走 Fcitx5 自带的 DBus 封装（`fcitx-utils/dbus`，挂在 Fcitx5 事件
+    循环上、异步），不引入新依赖，也不像 gsettings / dconf 那样要起进程或链 GLib；`SettingChanged`
+    信号让设置改了即时生效。Fcitx5 编译时关了 DBus（头文件不在）就只剩下一条。
+  - **kdeglobals 文件**（`$XDG_CONFIG_HOME/kdeglobals` 的 `[KDE] AnimationDurationFactor`）：没有门户的
+    KDE 会话也读得到；只在 addon 起来与服务（重）启时读，改了要等下一次。组名 / 键名尾部的 KConfig 修饰
+    （`[KDE][$i]` 锁定等）剥掉再比，开头的 UTF-8 BOM 忽略。**只读用户层**：系统层（`$XDG_CONFIG_DIRS` 下的
+    kdeglobals，管理员下发的默认值 / 锁定）不读——要按 KConfig 的层叠与 `$i` 锁定语义合并才对，为一个
+    动画倍率不值得；有门户的 KDE 会话门户给的已是合并后的值，缺的只是「没有门户 + 只在系统层设了」这种情形。
+  - 挑选（`pickReduceMotion`）：`reduced-motion` 有值以它为准；否则 `XDG_CURRENT_DESKTOP` 含 `KDE` 时先 KDE
+    （门户优先于文件）后 GNOME，别的桌面先 GNOME 后 KDE——GNOME 会话里留着 KDE 应用写的 kdeglobals、
+    KDE 会话里 GNOME 的键是 gsettings 出厂值，都不能代表本桌面的设置。都读不到不报。
+  - 不做：直接读 dconf 数据库（GVariant 数据库格式，要自己解析）、调 `gsettings`（起进程，且 Flatpak /
+    非 GNOME 环境常常没有）。没有门户的 GNOME 会话（极少）因此按允许。
+  - 门户在 addon 首读时可能还没起来（D-Bus 按需拉起，或桌面晚于 Fcitx5）：信号照收；读的超时 5 秒，没回音
+    （NoReply）再试两次；门户上线（`ServiceWatcher` 见到 `org.freedesktop.portal.Desktop` 有了属主）与服务
+    （重）启时向门户重读一轮；每次连上服务都按现值补报一次（断开期间变了的不丢）。某个键读失败（门户不认 /
+    一直没回音 / 回包不是 variant）就当这一路没读到，不留上一个门户给的旧值。回包与信号先核整条消息的签名
+    （`Read` 回包 `v`、`SettingChanged` `ssv`）再读：Fcitx5 的 sd-bus 封装对基本类型 peek 会抛异常，在 DBus
+    回调里就是整个 fcitx5 退出。
+
+### 17.2 协议：`CMD_CANDIDATE_SKIN`（0x0514，push）
+
+每个候选帧（含换帧）在 `CMD_HOST_RENDER_FRAME` 之前推一条，没启用皮肤时也推（`flags = 0`、两表为空），
+前端据此复位。先到是为了让前端贴这一帧时就用上这一帧的输入区与阴影设置，不必等下一条消息再改。
+两端前端对未知 cmd 都落 `default` 安静忽略，旧前端不受影响。坐标同 `CMD_CANDIDATE_RECTS`：
+缓冲内的设备像素，macOS / Wayland 前端除以 scale。
+
+```
+flags     u32      bit0 ACTIVE 本帧启用了皮肤；bit1 MASK 带输入区表
+frame     4×i32    窗体矩形 x, y, w, h
+decorN    u32
+decorN ×  { index u32   变体 decor 下标（与 §16 状态机同号）
+            hit   u32   0 drag | 1 block | 2 pass
+            flags u32   bit0 UNDER（z < 0）；bit1 SPLIT（穿透装饰画在独立层，不在主缓冲）
+            x, y, w, h  4×i32 }                            每条 28 字节
+maskN     u32
+maskN ×   { x, y, w, h  4×i32 }                            输入区矩形
+```
+
+- **输入区**（只 Linux 发，`MASK` 置位）：主层（不含穿透装饰）alpha > 0 的像素——与 Windows layered
+  窗口的命中口径一致。逐行取不透明游程成矩形，相邻行游程完全相同的纵向合并；圆角窗体约几十个，
+  人物装饰按其高度每行一两个。超过 **1024** 个时退化为「窗体矩形 ∪ 非穿透装饰矩形」（仍置 `MASK`，
+  表即退化结果），并 debug 一条。
+- 穿透装饰在 Linux 仍画进同一张位图（按 Windows 的统一 z 规则：全在窗体下则垫在主层下面，否则叠在上面），
+  只是不进输入区。macOS 拆到独立层（`SPLIT`），见 §17.3。
+- 不拖动的判定在前端做：`block` 装饰矩形（及没拆出去的 `pass`）内、窗体矩形外 → 不起拖。`drag` 装饰照常起拖。
+- 装饰点击（§16 的 `click`）也在前端判，判完报上行扩展信封 `skin.decor_click`（`{"index":N}`，N 即上表的
+  `index`），服务端经 `UiCommand::SkinDecorClick` 交给候选窗触发该装饰的 `click`（`skin_decor_click`，窗口收起时
+  丢弃）。判定与 Windows `CandidateMouse` 一致：先判候选 / 翻页按钮命中，命中了就不算装饰；否则取点下的
+  最上层 `drag` / `block` 装饰（表按 z 升序倒着找，`pass` 不算，窗体内的 `UNDER` 装饰被窗体盖住也不算）；
+  松开时仍在同一块上、各轴位移不超过拖动阈值才报（Linux 取 4 px，同 Windows 出厂的 `SM_CXDRAG`；macOS
+  沿用本端起拖的 3 pt）。两处已知的细小差异，不改：装饰矩形的命中 Linux / macOS 按半开区间（右 / 下边那一行
+  像素不算），Windows `Rect::contains` 是闭区间，边上差 1 像素；阈值 Linux、Windows 是「不超过」（≤ 4），
+  macOS 是「严格小于」3 pt。服务端收到后按当前帧核对：`index` 不是这一帧里可点的装饰（越界、`pass`、宿主
+  按换皮肤前的旧帧报的）就丢掉。纯函数：Linux `decorAt` + `DecorClickGate`，macOS `CandidateSkin.decorAt`。
+  旧服务不认这个 kind，`handle_ext` 落 `_` 分支安静忽略；新服务 + 旧前端只是没人报，`click` 不触发。
+
+### 17.3 各平台
+
+**X11**（`X11Panel`）
+- 收到 `MASK`：候选窗 `SK_INPUT` 设为输入区表（ARGB 与无合成器两条路都设；无合成器时 `BOUNDING` 照旧按
+  alpha ≥ 128 抠形，生效输入区是两者之交）。之后没有 `MASK`（换回普通主题）就把 `SK_INPUT` 复位成缺省
+  （`xcb_shape_mask(..., XCB_NONE)`），恢复整窗接鼠标。窗口重建（合成器起停换 visual）后补设一次。
+- 换帧（`FLAG_ANIM_FRAME`）：沿用上次落位，`present` 不 raise。
+- 候选窗拖动（§17.7）：空白处与 `drag` 装饰起拖，窗体外的 `block` / `pass` 装饰不拖。
+- 贴屏幕边：越界钳制与「下方放不下翻到光标上方」都按**窗体**矩形判（`placePanel` 的 `box`，取
+  `candidateAnchorBox`），透明外扩撞到屏幕边不算越界——否则贴右 / 贴顶时内容会被外扩推离光标。拖动松手
+  的钳制同一条。
+
+**Wayland**（`WaylandPanel`）
+- 输入区 = 输入区表 ÷ scale，另并上状态气泡矩形（现状）；没有 `MASK` 时照旧是候选窗整块矩形。
+  `wl_surface.set_input_region` 是核心协议，所有合成器都认；KWin 的 input-method-v1 面板走同一条
+  `attachPixels`。popup 由合成器摆位，不能拖（§17.7）：`drag` 装饰在原生 Wayland 应用里与 `block` 一样。
+
+**Wayland：内容偏移**
+- 问题：v2 popup（treeland / sway）与 v1 overlay 面板（KWin）都由合成器摆位，规则是**主 surface 的左上贴光标
+  矩形左下**，放不下按主 surface 的高翻到上方（KWin 见 `inputpanelv1window.cpp` Overlay 分支）。位图带外扩时
+  整张贴在主 surface 上，内容框就落在光标下方「上外扩」那么远的地方，翻转也按整张的高提前触发。
+- 做法（`planWaylandSkin`）：锚块取皮肤的窗体（`candidateAnchorBox`；没皮肤时是整张，照旧整张贴）。
+  - **拆层**（默认，有 `wl_subcompositor` 就走）：主 surface 只占窗体大小、全透明、输入区为空；整张位图
+    放子 surface（`place_below`，`set_position` = −窗体左上 ÷ scale，取整），输入区（输入区表、状态气泡）都设在
+    子 surface 上。合成器按主 surface 摆位与翻转，内容框贴光标；子 surface 超出主 surface 的部分照常画、
+    照常收鼠标（KWin 的命中会递归进子 surface）。子 surface 先提交、主 surface 后提交（同步模式）。
+  - **裁切**（没有 `wl_subcompositor`，或环境变量 `WINDINPUT_WAYLAND_SKIN_CLIP=1`）：只贴窗体左上起的那部分
+    （左 / 上外扩丢掉，右 / 下保留），主 surface 原点 = 窗体左上，指针坐标加回它。
+  - 环境变量只作排障逃生口，不进设置项，也不按合成器分名单。treeland 是否会裁掉超出主 surface 的部分
+    （它的事件项设了 `ItemClipsChildrenToShape`）待维护者把 5.50 切到 treeland 会话后真机验，验出会裁再补名单。
+- 指针：子 surface 的局部坐标就是位图坐标；主 surface 的局部坐标加主 surface 原点。命中、悬停、菜单仍按位图
+  坐标做，与之前一致。子 surface 随主 surface 建、随它退役（v1 每个显示周期换 surface，见
+  `RetiredSurfaces`），指针停在子 surface 上按它挂的主 surface 记。
+- **placement 锚点规则在 Wayland 上不生效**：§3.1 `[skin.*.placement]` 的 `caret` / `caret_above` 是服务端按光标
+  屏幕坐标算的，Wayland 下服务端拿不到屏幕坐标、落位交给合成器，内容框总是贴光标左下（翻转时贴光标左上），
+  锚点与偏移都不起作用。
+- 验证：KDE 6.6.6 嵌套 KWin（`--virtual`）+ 真 fcitx5 + konsole，fake input 打字与点击，1×、1.25×、1.5×、
+  贴底翻转、候选变宽后重新摆位、强制裁切各跑一遍。
+
+**macOS**（`CandidatePanel`）
+- 穿透装饰拆到独立层：服务端主缓冲不画 `pass`（主层 alpha 为 0 处窗口天然穿透），穿透装饰另画一张同尺寸
+  位图，写 SHM 段 `_DEC`、推 `CMD_OVERLAY_FRAME`（新层 `OVERLAY_KIND_DECOR = 12`，`OVERLAY_PLACE_EXACT`，
+  坐标即候选窗建议落点）。`.app` 不交给 `OverlayHost`，而是挂在候选窗上的子 panel
+  （`addChildWindow(_:ordered:)`，全在窗体下用 `.below`，否则 `.above`）：`ignoresMouseEvents = true`、
+  `hasShadow = false`、同原点同尺寸，随候选窗拖动与显隐。本帧没有穿透装饰就推该层的隐藏帧。
+- 系统阴影：`ACTIVE` 时主 panel `hasShadow = false`（皮肤阴影由图自带，§3.1），否则照旧开。
+- 装饰不拖动：`mouseDown` 落在不拖动区（§17.2）不起拖，按下与松开都不动作。
+- 跟随光标的上下翻转：服务端拿不到屏幕几何、不翻转，帧坐标是「下方」的窗口左上（已减装饰外扩）。改前 `.app`
+  把它当光标底端，按整窗高度判翻转、翻上去把窗口底边放在它上方 18pt，内容框比该在的位置（光标顶端 − 2）
+  高出「上外扩 + 下外扩 + 14 − 行高」，装饰还让候选窗提前翻。现在候选帧再加长到 60 字节，尾部 `aboveX/Y`（上翻的窗口左上，服务端按
+  Windows `place_window` 的上翻规则算：`caret_above` 对齐点落在光标顶端 − 2、偏移远离光标、上方避让；
+  与 Windows 共用 `place_above`）与 `box*`（相对窗口左上的内容框，`clamp = "all"` 时连装饰外扩）。`.app` 按框判
+  下方放不放得下、放不下用上方点，左右与上下夹边也按框（透明外扩可伸出屏外）。无皮肤时框 = 整窗，上翻后
+  窗口底边 = 光标顶端 − 2（改前是光标底端 − 16，按 18pt 估的行高），主题 Y 偏移上翻时改为向上。
+  与 Windows 的差别：没有上翻粘滞；上下都放不下时照旧翻上去再夹边（Windows 留在下方贴屏底）；内容不按上翻重排。
+
+### 17.4 降级
+
+| 情形 | 行为 |
+|---|---|
+| X11 无 SHAPE 扩展 | 输入区设不了，整窗接鼠标：穿透装饰按 block，透明外扩区也挡点击（与现状同），启动时记一条 |
+| X11 无合成器 | `BOUNDING` 按 alpha ≥ 128（半透明退化，现状），`SK_INPUT` 照设 |
+| 输入区矩形超上限 | 退化为矩形并集（§17.2） |
+| macOS 子 panel 来不及收到像素 | 主层不含穿透装饰，最坏是那一帧看不到穿透装饰，不会挡点击 |
+| 旧前端 + 新服务 | 新 cmd、新 flag、新层都被忽略：Linux 穿透按 block；macOS 看不到穿透装饰（主层已不画它）——`.app` 与服务同包发布、须一起装，不另做兼容 |
+| 新前端 + 旧服务 | 收不到新 cmd，行为同改前；上报的 `skin.decor_click` 被当未知扩展忽略 |
+
+### 17.5 测试
+
+- Rust 原生单测：`wind-ipc` 的 `encode_candidate_skin` 字节布局；`wind-scene` 输入区游程合并（圆角、
+  纵向合并、上限退化、穿透装饰不进表）；`wind-ui`（`linux-host` feature 下的 forwarder 单测）：皮肤帧带
+  `CMD_CANDIDATE_SKIN`，普通主题 `flags = 0`；动画按 deadline 推帧、帧数不超过限帧上限、闸门内空转
+  不出帧、帧带 `FLAG_ANIM_FRAME`、换帧不重推 tooltip、收起后不再出帧；皮肤区域先于候选帧。
+- C++ 单测（`make -C wind_linux test`）：`codec_test` 按 Rust 编码器写死的偏移解码；`protocol_sync_test` 钉新
+  cmd / flag / 层；输入区换算纯函数（无皮肤回退整窗、Wayland 缩放、空表）。
+- e2e（本机 Xvfb，`scripts/linux/e2e.sh`）：程序生成的皮肤主题（窗体 + 右上外侧穿透装饰 + 左上外侧
+  block 装饰），打字后 `xdotool mousemove` 到穿透装饰上，`getmouselocation` 报的窗口不是候选窗，挪到
+  窗体上是候选窗；动图装饰（程序生成的两帧 APNG）在候选窗显示期间 `xwd -id` 两次截图不同；`xdotool click`
+  点 block 装饰，它的 `click` 切了状态（换色）、不上屏、候选窗不收。装饰点击的命中与闸门另有 C++ / Swift 单测，
+  服务端收到 `skin.decor_click` 的路由有协调器单测。同组另起一个扮演设置门户的 DBus 服务（接过私有会话
+  总线上被按需拉起的真门户的名字）：发 `SettingChanged` 关动画后再显示，动图装饰不再换色，开回来恢复；
+  服务重启后靠 addon 重读门户（`Read`，两层 variant）再报。挑选规则与 kdeglobals 解析是 C++ 单测。
+- macOS：Rust 部分 `cargo check --target aarch64-apple-darwin`；Swift 本机编不了，只能 CI 的 macOS job
+  与真机，判据见报告。
+- 候选窗拖动（§17.7）：C++ 单测拖动阈值、不拖动区、锚的优先级、候选帧 36 字节解码；Rust 单测固定位置下
+  「帧坐标 + 内容偏移」回到 `custom_x/y`、帧长 36 字节；e2e（Xvfb，两条透明路径）按住空白处 / `drag` 装饰
+  拖动窗口跟手、`block` 装饰上拖不动、阈值内松开不算拖、续帧不弹回、收起后回到光标旁、切固定位置时应答
+  查询落盘内容左上、固定位置下拖动落盘且重显不漂。
+- 关键逻辑在 `git archive` 导出的副本上做变异验证。
+
+### 17.6 本期不做
+
+- 前端本地播放动画（§17.1）。
+
+### 17.7 Linux 候选窗拖动
+
+目标与 Windows `CandidateMouse` 一致：空白处（编码栏、内边距）与 `drag` 装饰起拖，`block` 装饰（窗体外）
+不拖、只判点击，候选 / 翻页按钮照旧点选。改前 Linux 候选窗不能拖，`drag` 装饰等同 `block`。
+
+**平台能不能做**
+
+- X11：候选窗是 override-redirect 窗口（不抢焦点、不加边框），不归窗口管理器管，`_NET_WM_MOVERESIZE`
+  对它无效（那是请 WM 代拖受管窗口）。可行的是本端拖，同状态气泡现有的做法：左键按下记锚点，按下
+  带来的隐式抓取保证指针移出窗口仍收到移动；挪过阈值（4 px）后 `xcb_configure_window` 跟随；松手报
+  `pos.candidate`。没过阈值就松开，按 §17.2 判 `drag` 装饰点击（`DecorClickGate` 已有）。
+- Wayland：候选窗是 input-method-v2 的 popup surface（KWin 是 input-method-v1 的 input panel），由合成器
+  按文本光标摆位，协议里没有移动请求；`xdg_toplevel.move` 只对 toplevel 有效，不适用。**不支持**。
+  XWayland 应用里的候选窗走 X11 那条，可以拖——同一会话里两类应用行为不一，需要维护者认可。
+
+**落位语义要补的三件**
+
+1. 本次组合内的拖动锚（drag pin）：Windows、macOS 都由前端记，组合内后续帧（翻页、继续输入）按锚摆，
+   收起清掉；否则下一帧就被服务端的建议点拽回光标旁。X11 `show()` 现在每帧按建议点 `placePanel`，要加
+   一级：锚 > 固定位置（`FRAME_FLAG_ABSOLUTE_POS`）> 跟随光标；跟随候选窗的浮层（悬停提示）的平移量
+   `candShift` 随之按锚算。
+2. 上报坐标：`pos.candidate` 约定是**内容**左上（`ui.candidate.custom_x/y` 同义，Windows 报窗口左上 +
+   阴影扩边）。Linux 候选帧（`CMD_HOST_RENDER_FRAME`）只有整幅位图的位置与尺寸，X11 无合成器时软阴影
+   画在位图里，本端换算不出内容左上。两条路：
+   - (a) 候选帧尾追加 `contentX` / `contentY`（同 `CMD_OVERLAY_FRAME` 的字段；旧 addon 按长度只读前段，
+     新 addon 收旧服务的短帧按 0）。语义自包含，不依赖服务端记住哪一帧。
+   - (b) 服务端对 Linux 宿主把 `pos.candidate` 当窗口左上，用最近一帧的扩边换算。协议不动，但同一个 kind
+     在两个平台上含义不同。
+   倾向 (a)。
+3. 「固定位置」切换时服务端问当前位置（`pos.candidate.query`）：macOS 应答；Linux 有了锚之后服务端不知道
+   窗口实际在哪，addon 要同样应答（现在只答 `pos.status_tip.query`，见 wind_linux/AGENTS.md 的差距表）。
+
+**测试**：C++ 单测拖动判定（阈值、按在候选 / block 装饰上不起拖、锚的优先级）；e2e（Xvfb，`xdotool`
+按住空白拖动）断言窗口跟随、继续打字不弹回、收起后回到光标旁；固定位置模式下松手后 `custom_x/y` 落盘为
+内容左上；`block` 装饰上按住拖不动、`drag` 装饰上能拖。
+
+**定案与实现**（维护者定：走 (a)；原生 Wayland 应用不支持可以接受）
+
+- 协议：`CMD_HOST_RENDER_FRAME` 由 28 字节加长到 36 字节，尾部 `contentX` / `contentY`（i32）= 窗口左上到
+  内容左上的偏移。服务端取 `(ml, mt − clear)`（与 `render_frame` 摆窗口时减掉的同一组量；外部宿主这条路
+  不画软阴影，实际只有装饰外扩，`clear` 恒 0），故固定位置下「帧坐标 + 偏移」正好是 `custom_x/y`，「拖动 → 落盘 → 重显」不漂。旧 addon 按长度
+  只读前 28 字节（macOS `.app` 后来读到 60 字节，见 §17.3）；新 addon 收旧服务的短帧按 0。
+- X11 / XWayland（`X11Panel`）：按下时排除候选 / 翻页按钮与不拖动区（`onNoDragDecor`：窗体外的 `block` /
+  `pass` 装饰矩形），其余 `CandidateDragGate.press`；挪过 4 px 后跟随（`xcb_configure_window`，fleur 光标，
+  悬停清掉、提示随之收起），窗口夹进工作区。没过阈值的松开不算拖：窗口不动、不报，装饰点击照判。
+  拖动锚记内容左上，`placeCandidate` 按「锚 − 本帧偏移」摆、只钳制不翻转；`candShift` 按实际落点算，
+  跟随候选窗的浮层随之平移。候选窗收起（隐藏帧）清锚。
+- 上报与应答：松手报 `pos.candidate`（内容左上）；引擎应 `pos.candidate.query` 报 X11 候选窗当前内容
+  左上，候选窗不在屏上（含原生 Wayland 应用那条路）不答，服务端保留旧值。
+- 收尾的兜底：松开事件可能丢（按住期间窗口重建、别的抓取插进来），之后的移动里左键已没按着就按松开收尾
+  （拖过就报落点），不让闸门一直按着、窗口跟着悬停的指针走（同状态气泡）。按右键、菜单打开（要抓指针，
+  之后的松开不会再来）时拖动作废，不报，窗口留在拖到的地方：服务端不知道这次挪动，固定位置模式下候选窗
+  收起再显示时回到旧的 `custom_x/y`。
+- 帧的两处一致性：候选帧只认 24 / 28 / ≥ 36 字节，夹在中间的长度是截断或错位，拒收；内容偏移在通知里、
+  像素与窗口坐标在 SHM 里，两者之间没有锁，SHM 读到的就是通知的那一帧才更新偏移，否则沿用上一次的
+  （`frameContentOffset`）。
+- 锚的清除时机与 Windows 一致：Windows `reset_drag` 只在 `hide()`（收起，或内容为空时 `show()` 转 `hide()`）里调。
+  顶字（上屏的同时开始下一段组合、候选窗不收起）两边都保留锚；服务端在两段之间推了空帧时两边都清。
+- **限制**：原生 Wayland 应用的候选窗不能拖，也不答查询；同一会话里 XWayland 应用能拖、原生应用不能。
+  拖动夹回按整块根窗口的工作区，不分显示器（同状态气泡），且夹的是窗口矩形。不跟 Windows 的「空白处双击截图」。
+- **登记，未做**：与 Windows `clamp_content_to_monitor` 对齐——按**内容**矩形夹进指针所在显示器的工作区（RandR
+  monitor，拿不到退回整块根窗口）。要同时改拖动中的夹边与 `placeCandidate` 锚分支的钳制，否则松手后下一帧
+  又按窗口矩形夹回去、跳一下；与状态气泡的夹边一起做。
+
+### 17.8 Windows DLL host-render 的穿透装饰
+
+SearchHost 这类宿主里的候选窗是 DLL 在宿主进程里用 `CreateWindowInBand` 建的 band 窗口（`CHostWindow`），
+像素由服务端经 SHM 推。原先服务端把穿透装饰画进主层，整块接鼠标（按 block）。现在与本地窗口路径
+（`WindInputCandidateDecor`）同一做法：
+
+- **能力协商**：`CMD_HOST_RENDER_REQUEST` 原本没有载荷，新 DLL 带 4 字节能力位（`HOST_RENDER_CAP_PASS_LAYER = 1`）。
+  旧服务不读载荷，照旧回 setup；新服务按连接记下（`HostRenderTarget.pass_layer`）。只给声明了能力的 DLL 发拆层帧。
+- **帧格式**：`SharedRenderHeader` 的保留字 @56 改作 `pass_offset`；帧带 `FLAG_PASS_LAYER = 0x20`（`FLAG_PASS_BELOW = 0x40`
+  表示装饰全在窗体下）时，与主层同尺寸的穿透层追加在矩形表之后。主层不含穿透装饰（透明处天然穿透）。
+- **DLL**：候选 kind 建窗时多建一个同 owner、同 band 的 `WS_EX_TRANSPARENT` layered 窗口，每帧与主窗口同位置同尺寸贴图；
+  BELOW 时紧贴候选窗下面，否则置于其上：在上的那个 `HWND_TOPMOST`、另一个插在它后面，经 `DeferWindowPos`
+  一次提交（分两次 `SetWindowPos` 两窗会先后各跳一下；批量提交失败再退回逐个摆）。没有穿透层的帧收起它，
+  隐藏 / 换 band / 卸载时一起走。这一帧穿透窗口贴图失败也合回主层（`PlanPassPresent`），装饰不凭空消失。
+  落位上报 `diag.host_render_placed` 带 `pass`（穿透窗口建没建出来），旧 DLL 不报这一项。
+- **拷帧**（`HostFrameSnapshot.h`）：渲染线程与服务端之间没有锁。内存安全靠帧头只拷一次、之后的校验与偏移
+  都用这份拷贝，且拷贝要自洽（宽 × 高 × 4 == dataSize、stride == 宽 × 4，帧头读到新旧混杂的一份就丢帧）；像素、
+  命中矩形、穿透层拷进 DLL 自己的缓冲。拷完再核一次 sequence，只能发现拷的途中帧头已经换了；服务端正在写像素、
+  帧头还没改时拷到的会撕裂一帧，下一帧纠正，不做 seqlock。代价是每帧多一次像素拷贝，候选窗收起时缓冲放掉。
+- **退路**（都退成原先的按 block 显示）：
+  - 旧 DLL + 新服务：没声明能力，服务端发合成好的单层。
+  - 新 DLL + 旧服务：收不到拆层帧，同改前。
+  - 穿透窗口建不出来（`CreateWindowInBand` 第二次失败）：DLL 把穿透层合回主层（`CompositePass`，与服务端
+    `composite_over/under` 同一算式）再贴。
+  - 两层放不下 SHM（4 MiB）：服务端合成单层重写。
+- **做不到 / 不做**：
+  - 窗体上、下两类穿透装饰同时存在时一律放上面（同本地路径，§13）。
+  - 「在上」的穿透窗口是 band 内 `HWND_TOPMOST`，可能盖住同 band 的悬停提示 / 状态气泡（它们 owned 于候选窗）；
+    本地路径同样如此。要按 owner 链精排得把三个窗口的建窗顺序一起改，本期不做。
+  - band 窗口能否在受限宿主（AppContainer）里再建一个，只能靶机验证；建不出来走上面的退路，日志有一条 warn。
+- **测试**：Rust 帧编码（偏移、上下位、尺寸不符不写、放不下报错）、能力位按连接记录（服务端分发 + 管理器，经 wine 跑）、
+  拆层出帧（`render_host_frame`，`#[cfg(windows)]`，只在 Windows 上跑）；C++ 纯函数 `HostPassLayerPolicy.h`
+  （偏移校验、越界 / 溢出、上下位、合成算式、穿透层呈现方式，与两边协议常量对拍）、`HostFrameSnapshot.h`
+  （按帧头拷贝取长度、拷完 sequence 变了丢帧、越界拒收，镜像帧头与 `BinaryProtocol.h` 对拍），`g++` 本机跑。
+  z 序批量提交与贴图失败的分支是 Win32 调用，只能靶机看。

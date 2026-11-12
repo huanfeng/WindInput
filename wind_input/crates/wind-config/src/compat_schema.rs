@@ -455,17 +455,20 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
     },
     FieldMeta {
         section: "apps",
-        key: "ignore_host_ime_close",
+        key: "ignore_host_ime_switch",
         kind: Kind::TriBool,
         group: "host",
-        label: "宿主关闭输入法",
-        summary: "软件自己要求关闭输入法时忽略它（按住 Ctrl 的系统热键仍然放行）。",
-        problem: "部分 WinForms / WPF 编写的软件（如某些工具箱、游戏平台客户端）在你点一下按钮后会把输入法整体关掉，你就被切成了英文，回到文本框还不一定恢复。\
-                  开启后忽略这类关闭请求。⚠ 不能全局启用：有的软件（如 gvim）依赖这个状态来保存和恢复。",
+        label: "软件切换中英",
+        summary: "软件自己要求切到中文或英文时是否忽略它，开和关两个方向都算（按住 Ctrl 的系统热键 Ctrl+空格 仍然放行）。",
+        problem: "有的软件会自作主张切换中英：部分 WinForms / WPF 编写的软件（如某些工具箱、游戏平台客户端）在你点一下按钮后把输入法切成英文，\
+                  回到文本框还不一定恢复；也有软件在内部切换焦点时把你切成中文，英文状态下打的第一个键被吃掉。\
+                  选「忽略」后这类请求不再采纳，中英状态保持不变；不设置则跟随全局设置（出厂不忽略）。\
+                  ⚠ 不建议全局开启：有的软件（如 gvim）依赖这个状态来保存和恢复中英，全局忽略会让它们失灵；\
+                  按应用锁定中英的外部工具（如 KBLSwitch、AutoHotkey 脚本）也会被一并忽略。最好只对出问题的软件开启。",
         hosts: &[],
         options: &[],
         depends_on: None,
-        protocol: true,
+        protocol: false,
         advanced: true,
     },
     FieldMeta {
@@ -623,11 +626,11 @@ const FIELD_OPTION_LABELS: &[(&str, &str, &str)] =
     &[("status_position_mode", "fixed", "固定（取当前位置）")];
 
 /// 三态开关三档（跟随 / 真 / 假）的显示名，默认「跟随全局 / 开 / 关」；个别字段的菜单用词不同
-/// （例如「宿主关闭输入法」是「忽略 / 采纳」，与字段的 true/false 语义方向一致但说法不同）。
+/// （例如「软件切换中英」是「忽略 / 采纳」，与字段的 true/false 语义方向一致但说法不同）。
 const TRI_LABELS: &[(&str, [&str; 3])] = &[
     ("auto_pair", ["跟随全局", "启用", "禁用"]),
     ("auto_spacing", ["跟随全局", "启用", "禁用"]),
-    ("ignore_host_ime_close", ["跟随内置规则", "忽略", "采纳"]),
+    ("ignore_host_ime_switch", ["跟随全局", "忽略", "采纳"]),
 ];
 
 /// 三态开关的三档显示名（下标 0 = 跟随，1 = true，2 = false）。

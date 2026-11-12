@@ -318,6 +318,17 @@ Bytes encodePosFrame(const std::string& kind, int32_t x, int32_t y, const std::s
     return encodeExtFrame(kind, body + "}");
 }
 
+Bytes encodeReduceMotionFrame(bool reduce)
+{
+    return encodeExtFrame(EXT_KIND_HOST_REDUCE_MOTION,
+                          std::string("{\"reduce\":") + (reduce ? "true" : "false") + "}");
+}
+
+Bytes encodeDecorClickFrame(uint32_t index)
+{
+    return encodeExtFrame(EXT_KIND_SKIN_DECOR_CLICK, "{\"index\":" + std::to_string(index) + "}");
+}
+
 Bytes encodeHostFullscreenFrame(bool fullscreen)
 {
     return encodeExtFrame(EXT_KIND_HOST_FULLSCREEN,
@@ -489,7 +500,9 @@ std::optional<std::vector<KeyComboPayload>> decodeKeySeq(const Bytes& p)
 
 std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p)
 {
-    if (p.size() < 24) {
+    // 只认三版布局：24（无 scale）、28（+ scale）、≥ 36（+ 内容偏移，往后再加的字段照旧按前缀读）。
+    // 夹在中间的长度是截断或错位的帧，按某一版去读只会读出半个字段。
+    if (p.size() != 24 && p.size() != 28 && p.size() < 36) {
         return std::nullopt;
     }
     HostRenderFramePayload out;
@@ -503,6 +516,10 @@ std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p)
     out.scale = p.size() >= 28 ? getU32(p.data() + 24) : 1;
     if (out.scale == 0) {
         out.scale = 1;
+    }
+    if (p.size() >= 36) {
+        out.contentX = getI32(p.data() + 28);
+        out.contentY = getI32(p.data() + 32);
     }
     return out;
 }
@@ -568,6 +585,47 @@ std::optional<std::vector<CandidateHitRect>> decodeCandidateRects(const Bytes& p
         h.w = static_cast<int32_t>(r.u32());
         h.h = static_cast<int32_t>(r.u32());
         out.push_back(h);
+    }
+    return out;
+}
+
+std::optional<CandidateSkin> decodeCandidateSkin(const Bytes& p)
+{
+    Reader r(p);
+    auto rect = [&r] {
+        Rect out;
+        out.x = static_cast<int32_t>(r.u32());
+        out.y = static_cast<int32_t>(r.u32());
+        out.w = static_cast<int32_t>(r.u32());
+        out.h = static_cast<int32_t>(r.u32());
+        return out;
+    };
+    CandidateSkin out;
+    out.flags = r.u32();
+    out.frame = rect();
+    uint32_t n = r.u32();
+    if (!r.ok || !r.has(size_t(n) * 28)) {
+        return std::nullopt;
+    }
+    out.decor.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        SkinDecor d;
+        d.index = r.u32();
+        d.hit = r.u32();
+        d.flags = r.u32();
+        d.rect = rect();
+        out.decor.push_back(d);
+    }
+    uint32_t m = r.u32();
+    if (!r.ok || !r.has(size_t(m) * 16)) {
+        return std::nullopt;
+    }
+    out.mask.reserve(m);
+    for (uint32_t i = 0; i < m; ++i) {
+        out.mask.push_back(rect());
+    }
+    if (!r.ok) {
+        return std::nullopt;
     }
     return out;
 }

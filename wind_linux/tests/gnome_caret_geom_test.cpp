@@ -155,6 +155,11 @@ int main()
     CHECK(!xdgCurrentDesktopIsGnome("X-GNOME"));
     CHECK(!xdgCurrentDesktopIsGnome("treeland"));
     CHECK(!xdgCurrentDesktopIsGnome("Deepin"));
+    CHECK(xdgCurrentDesktopHas("X-Cinnamon:kde", "KDE"));
+    CHECK(xdgCurrentDesktopHas("KDE", "kde"));
+    CHECK(!xdgCurrentDesktopHas("KDEX", "KDE"));
+    CHECK(!xdgCurrentDesktopHas("KD", "KDE"));
+    CHECK(!xdgCurrentDesktopHas("KDE", nullptr));
 
     CASE("X11 面板回退前端：只认 dbus / ibus / fcitx4");
     CHECK(isX11PanelFallbackFrontend("dbus"));

@@ -29,11 +29,11 @@ skin variant=(false, false) frame_path=<skin>/skinfix/frame_h_lo.png frame_k=1.0
   frame=(3, 2, 403, 73) margins=(3, 2, 0, 3)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [16.0, 8.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 60.0, after: 20.0 }), clamp: All }
   slots=None
-  decor[0] rect=(0, 68, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+  decor[0] rect=(0, 68, 10, 10) z=-1 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
     sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
-  decor[1] rect=(393, 7, 6, 6) z=10 hit=Block opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 40f23b812d8fefa5
+  decor[1] rect=(393, 7, 6, 6) z=10 hit=Block opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 40f23b812d8fefa5
     sources=(<skin>/skinfix/diamond.png k=0.5 animated=false)
-  decor[2] rect=(394, 0, 8, 4) z=150 hit=Pass opacity=0.75 fps=None cur=(0, 0) still=(0, 0) 摘要 1b9e01148481b995
+  decor[2] rect=(394, 0, 8, 4) z=150 hit=Pass opacity=0.75 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 1b9e01148481b995
     sources=(<skin>/skinfix/bar.png k=0.5 animated=false)
 -- 对齐 下方 (8, 4) 上方 (0, 0) 钳制外扩 (3, 2, 0, 3)
 -- 保护带 下方 top=-2 rows=78
@@ -100,7 +100,7 @@ skin variant=(true, false) frame_path=<skin>/skinfix/frame_v.png frame_k=0.5 k=0
   frame=(0, 3, 114, 214) margins=(0, 3, 0, 0)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 200.0, after: 40.0 }), clamp: Frame }
   slots=None
-  decor[0] rect=(3, 0, 8, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 4c05063e873b83bd
+  decor[0] rect=(3, 0, 8, 4) z=150 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 4c05063e873b83bd
     sources=(<skin>/skinfix/bar.png k=0.5 animated=false)
 -- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
 -- 保护带 下方 top=-3 rows=217
@@ -231,7 +231,7 @@ skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.5 k=
   frame=(3, 3, 303, 45) margins=(3, 3, 0, 0)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 200.0, after: 40.0 }), clamp: Frame }
   slots=Some(RvSlots { preedit: Some(RvSlot { anchor: Anchor { on: Content, pos: Pos9 { h: 0, v: 0 } }, pivot: Pos9 { h: 0, v: 0 }, offset: [0.0, 0.0] }), candidates: RvSlot { anchor: Anchor { on: Content, pos: Pos9 { h: 0, v: 2 } }, pivot: Pos9 { h: 0, v: 2 }, offset: [0.0, 0.0] }, footer: Some(RvSlot { anchor: Anchor { on: Frame, pos: Pos9 { h: 2, v: 2 } }, pivot: Pos9 { h: 2, v: 2 }, offset: [-8.0, -8.0] }) })
-  decor[0] rect=(0, 0, 6, 6) z=150 hit=Block opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 40f23b812d8fefa5
+  decor[0] rect=(0, 0, 6, 6) z=150 hit=Block opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 40f23b812d8fefa5
     sources=(<skin>/skinfix/diamond.png k=0.5 animated=false)
   part Preedit 93.0x28.0
 Row padding=Edges { l: 8.0, t: 3.0, r: 8.0, b: 3.0 } cross=Center bg=Some([240, 240, 240, 255]) radius=4.0 fill=true m=(92.8,27.6) rect=Rect { x: 9.0, y: 8.0, w: 92.8, h: 27.6 }
@@ -299,11 +299,11 @@ skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.75 k
   frame=(5, 3, 605, 109) margins=(5, 3, 0, 5)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [16.0, 8.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 60.0, after: 20.0 }), clamp: All }
   slots=None
-  decor[0] rect=(0, 102, 15, 15) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 18bd817ddbd86b60
+  decor[0] rect=(0, 102, 15, 15) z=-1 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 18bd817ddbd86b60
     sources=(<skin>/skinfix/disc.png k=0.75 animated=false)
-  decor[1] rect=(591, 11, 9, 9) z=10 hit=Block opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 48dbc5387e46e0e0
+  decor[1] rect=(591, 11, 9, 9) z=10 hit=Block opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 48dbc5387e46e0e0
     sources=(<skin>/skinfix/diamond.png k=0.75 animated=false)
-  decor[2] rect=(592, 0, 12, 6) z=150 hit=Pass opacity=0.75 fps=None cur=(0, 0) still=(0, 0) 摘要 5a451482fe7aaefd
+  decor[2] rect=(592, 0, 12, 6) z=150 hit=Pass opacity=0.75 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 5a451482fe7aaefd
     sources=(<skin>/skinfix/bar.png k=0.75 animated=false)
 -- 对齐 下方 (12, 6) 上方 (0, 0) 钳制外扩 (5, 3, 0, 5)
 -- 保护带 下方 top=-3 rows=117
@@ -370,7 +370,7 @@ skin variant=(true, false) frame_path=<skin>/skinfix/frame_v.png frame_k=0.75 k=
   frame=(0, 5, 171, 321) margins=(0, 5, 0, 0)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 200.0, after: 40.0 }), clamp: Frame }
   slots=None
-  decor[0] rect=(5, 0, 12, 6) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 f2c1655ba3868d2d
+  decor[0] rect=(5, 0, 12, 6) z=150 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 f2c1655ba3868d2d
     sources=(<skin>/skinfix/bar.png k=0.75 animated=false)
 -- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
 -- 保护带 下方 top=-5 rows=326
@@ -505,7 +505,7 @@ skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=0.75 k
   frame=(5, 5, 455, 68) margins=(5, 5, 0, 0)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 200.0, after: 40.0 }), clamp: Frame }
   slots=Some(RvSlots { preedit: Some(RvSlot { anchor: Anchor { on: Content, pos: Pos9 { h: 0, v: 0 } }, pivot: Pos9 { h: 0, v: 0 }, offset: [0.0, 0.0] }), candidates: RvSlot { anchor: Anchor { on: Content, pos: Pos9 { h: 0, v: 2 } }, pivot: Pos9 { h: 0, v: 2 }, offset: [0.0, 0.0] }, footer: Some(RvSlot { anchor: Anchor { on: Frame, pos: Pos9 { h: 2, v: 2 } }, pivot: Pos9 { h: 2, v: 2 }, offset: [-8.0, -8.0] }) })
-  decor[0] rect=(0, 0, 9, 9) z=150 hit=Block opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 48dbc5387e46e0e0
+  decor[0] rect=(0, 0, 9, 9) z=150 hit=Block opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 48dbc5387e46e0e0
     sources=(<skin>/skinfix/diamond.png k=0.75 animated=false)
   part Preedit 140.0x42.0
 Row padding=Edges { l: 12.0, t: 4.5, r: 12.0, b: 4.5 } cross=Center bg=Some([240, 240, 240, 255]) radius=6.0 fill=true m=(139.2,41.4) rect=Rect { x: 14.0, y: 13.0, w: 139.2, h: 41.4 }
@@ -575,11 +575,11 @@ skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=1.0 k=
   frame=(6, 4, 806, 145) margins=(6, 4, 0, 6)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [16.0, 8.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 60.0, after: 20.0 }), clamp: All }
   slots=None
-  decor[0] rect=(0, 135, 20, 20) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b2d282aa560e7725
+  decor[0] rect=(0, 135, 20, 20) z=-1 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 b2d282aa560e7725
     sources=(<skin>/skinfix/disc.png k=1.0 animated=false)
-  decor[1] rect=(786, 14, 12, 12) z=10 hit=Block opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 5f1b58ba404c3b85
+  decor[1] rect=(786, 14, 12, 12) z=10 hit=Block opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 5f1b58ba404c3b85
     sources=(<skin>/skinfix/diamond.png k=1.0 animated=false)
-  decor[2] rect=(788, 0, 16, 8) z=150 hit=Pass opacity=0.75 fps=None cur=(0, 0) still=(0, 0) 摘要 3782bc218277a28d
+  decor[2] rect=(788, 0, 16, 8) z=150 hit=Pass opacity=0.75 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 3782bc218277a28d
     sources=(<skin>/skinfix/bar.png k=1.0 animated=false)
 -- 对齐 下方 (16, 8) 上方 (0, 0) 钳制外扩 (6, 4, 0, 6)
 -- 保护带 下方 top=-4 rows=155
@@ -648,7 +648,7 @@ skin variant=(true, false) frame_path=<skin>/skinfix/frame_v.png frame_k=1.0 k=1
   frame=(0, 6, 228, 428) margins=(0, 6, 0, 0)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 200.0, after: 40.0 }), clamp: Frame }
   slots=None
-  decor[0] rect=(6, 0, 16, 8) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 963e74944408fd15
+  decor[0] rect=(6, 0, 16, 8) z=150 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 963e74944408fd15
     sources=(<skin>/skinfix/bar.png k=1.0 animated=false)
 -- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
 -- 保护带 下方 top=-6 rows=434
@@ -785,7 +785,7 @@ skin variant=(false, false) frame_path=<skin>/skinfix/frame_h.png frame_k=1.0 k=
   frame=(6, 6, 606, 90) margins=(6, 6, 0, 0)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 200.0, after: 40.0 }), clamp: Frame }
   slots=Some(RvSlots { preedit: Some(RvSlot { anchor: Anchor { on: Content, pos: Pos9 { h: 0, v: 0 } }, pivot: Pos9 { h: 0, v: 0 }, offset: [0.0, 0.0] }), candidates: RvSlot { anchor: Anchor { on: Content, pos: Pos9 { h: 0, v: 2 } }, pivot: Pos9 { h: 0, v: 2 }, offset: [0.0, 0.0] }, footer: Some(RvSlot { anchor: Anchor { on: Frame, pos: Pos9 { h: 2, v: 2 } }, pivot: Pos9 { h: 2, v: 2 }, offset: [-8.0, -8.0] }) })
-  decor[0] rect=(0, 0, 12, 12) z=150 hit=Block opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 5f1b58ba404c3b85
+  decor[0] rect=(0, 0, 12, 12) z=150 hit=Block opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 5f1b58ba404c3b85
     sources=(<skin>/skinfix/diamond.png k=1.0 animated=false)
   part Preedit 186.0x56.0
 Row padding=Edges { l: 16.0, t: 6.0, r: 16.0, b: 6.0 } cross=Center bg=Some([240, 240, 240, 255]) radius=8.0 fill=true m=(185.6,55.2) rect=Rect { x: 18.0, y: 16.0, w: 185.6, h: 55.2 }
@@ -855,7 +855,7 @@ skin variant=(true, true) frame_path=<skin>/skinfix/frame_v.png frame_k=0.5 k=0.
   frame=(0, 3, 114, 242) margins=(0, 3, 0, 0)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [0.0, 0.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 200.0, after: 40.0 }), clamp: Frame }
   slots=None
-  decor[0] rect=(3, 0, 8, 4) z=150 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 4c05063e873b83bd
+  decor[0] rect=(3, 0, 8, 4) z=150 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 4c05063e873b83bd
     sources=(<skin>/skinfix/bar.png k=0.5 animated=false)
 -- 对齐 下方 (0, 0) 上方 (0, 0) 钳制外扩 (0, 0, 0, 0)
 -- 保护带 下方 top=-3 rows=245
@@ -907,11 +907,11 @@ skin variant=(false, false) frame_path=<skin>/skinfix/frame_h_lo.png frame_k=1.0
   frame=(3, 2, 40, 45) margins=(3, 2, 0, 3)
   placement=RvPlacement { caret: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 0 } }, offset: [16.0, 8.0] }, caret_above: CaretPoint { anchor: Anchor { on: Frame, pos: Pos9 { h: 0, v: 2 } }, offset: [0.0, 0.0] }, avoid_caret: Some(AvoidStrip { before: 60.0, after: 20.0 }), clamp: All }
   slots=None
-  decor[0] rect=(0, 40, 10, 10) z=-1 hit=Drag opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
+  decor[0] rect=(0, 40, 10, 10) z=-1 hit=Drag opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 b7d93b2e64802485
     sources=(<skin>/skinfix/disc.png k=0.5 animated=false)
-  decor[1] rect=(30, 7, 6, 6) z=10 hit=Block opacity=1.0 fps=None cur=(0, 0) still=(0, 0) 摘要 40f23b812d8fefa5
+  decor[1] rect=(30, 7, 6, 6) z=10 hit=Block opacity=1.0 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 40f23b812d8fefa5
     sources=(<skin>/skinfix/diamond.png k=0.5 animated=false)
-  decor[2] rect=(31, 0, 8, 4) z=150 hit=Pass opacity=0.75 fps=None cur=(0, 0) still=(0, 0) 摘要 1b9e01148481b995
+  decor[2] rect=(31, 0, 8, 4) z=150 hit=Pass opacity=0.75 flip=- fps=None cur=(0, 0) still=(0, 0) 摘要 1b9e01148481b995
     sources=(<skin>/skinfix/bar.png k=0.5 animated=false)
 -- 对齐 下方 (8, 4) 上方 (0, 0) 钳制外扩 (3, 2, 0, 3)
 -- 保护带 下方 top=-2 rows=50

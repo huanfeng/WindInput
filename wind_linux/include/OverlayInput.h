@@ -11,6 +11,7 @@
 #include "ShmFrame.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -188,6 +189,98 @@ public:
 
 private:
     int32_t pressed_ = kNoHit;
+};
+
+/// 皮肤装饰点击（`skin.decor_click`）：按下与松开落在同一块装饰上（`decorAt` 的结果）、指针没挪过
+/// 拖动阈值（各轴 ≤ `kDecorClickSlop` 像素，Windows `SM_CXDRAG` 出厂值），算点了它一下。对位
+/// Windows `CandidateMouse::press_decor` / `release_decor`。坐标系由调用方定，前后一致即可。
+constexpr int32_t kDecorClickSlop = 4;
+class DecorClickGate {
+public:
+    void press(int32_t decor, int32_t x, int32_t y)
+    {
+        decor_ = decor;
+        x_ = x;
+        y_ = y;
+    }
+    /// 返回要报的装饰下标，不报返回 -1。每次按下只交出一次。
+    int32_t release(int32_t decor, int32_t x, int32_t y)
+    {
+        const int32_t d = decor_;
+        decor_ = -1;
+        const bool still = std::abs(x - x_) <= kDecorClickSlop && std::abs(y - y_) <= kDecorClickSlop;
+        return d >= 0 && d == decor && still ? d : -1;
+    }
+    void cancel() { decor_ = -1; }
+
+private:
+    int32_t decor_ = -1;
+    int32_t x_ = 0;
+    int32_t y_ = 0;
+};
+
+/// 候选窗本端拖动（X11 / XWayland；原生 Wayland 的 popup 由合成器摆位，不能拖，设计 §17.7）。按在
+/// 空白处或 `drag` 装饰上时 `press`（候选 / 翻页按钮与 `onNoDragDecor` 由调用方先排除）；指针任一轴挪过
+/// `kDecorClickSlop` 才开始跟随——没过阈值就松开是一次点击（`DecorClickGate` 判装饰点击），窗口不动、
+/// 不报位置。过了阈值之后一直跟随，回到原处也不算点击。坐标一律是根窗口坐标。对位 Windows
+/// `CandidateMouse` 的 `dragging` / `drag_anchor` / `drag_origin`。
+class CandidateDragGate {
+public:
+    /// 按下：指针 `(px, py)`，窗口左上 `(wx, wy)`。
+    void press(int32_t px, int32_t py, int32_t wx, int32_t wy)
+    {
+        armed_ = true;
+        moving_ = false;
+        px_ = px;
+        py_ = py;
+        wx_ = wx;
+        wy_ = wy;
+    }
+    /// 指针移到 `(px, py)`：已在跟随（含这一步刚过阈值）返回窗口该去的左上（未夹工作区），否则空。
+    std::optional<std::pair<int32_t, int32_t>> move(int32_t px, int32_t py)
+    {
+        if (!armed_) {
+            return std::nullopt;
+        }
+        if (!moving_
+            && std::abs(px - px_) <= kDecorClickSlop && std::abs(py - py_) <= kDecorClickSlop) {
+            return std::nullopt;
+        }
+        moving_ = true;
+        return std::make_pair(wx_ + px - px_, wy_ + py - py_);
+    }
+    /// 松开：返回这次是不是拖了（是的话调用方报落点、不再判点击）。每次按下只交一次。
+    bool release()
+    {
+        const bool moved = armed_ && moving_;
+        cancel();
+        return moved;
+    }
+    /// 一次移动事件里左键是否还按着（`held`）。松开事件可能丢（按住期间窗口重建、别的抓取插进来），
+    /// 之后指针悬停也带着闸门走；左键已经没按着就按松开收尾：返回这次是不是拖了（同 `release`），
+    /// 没按下 / 左键仍按着返回空。对位状态气泡拖动的同一处兜底。
+    std::optional<bool> releaseIfUp(bool held)
+    {
+        if (!armed_ || held) {
+            return std::nullopt;
+        }
+        return release();
+    }
+    /// 候选窗收起 / 窗口重建 / 右键 / 菜单打开：按下作废。
+    void cancel()
+    {
+        armed_ = false;
+        moving_ = false;
+    }
+    bool moving() const { return armed_ && moving_; }
+
+private:
+    bool armed_ = false;
+    bool moving_ = false;
+    int32_t px_ = 0;
+    int32_t py_ = 0;
+    int32_t wx_ = 0;
+    int32_t wy_ = 0;
 };
 
 /// 窗口矩形里是否包含屏幕点（半开区间）。

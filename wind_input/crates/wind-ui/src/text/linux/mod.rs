@@ -228,6 +228,16 @@ impl TextRenderer {
         self.font_size = size;
     }
 
+    /// 最近一次设进来的全局字族（设置端预览临时换字体后据此换回）。
+    pub fn font_family(&self) -> &str {
+        &self.family
+    }
+
+    /// 最近一次设进来的全局默认字重。
+    pub fn default_weight(&self) -> i32 {
+        self.default_weight
+    }
+
     /// 切换全局字族（`ui.font.family` 变更时调用）。
     pub fn set_font_family(&mut self, font_family: &str) {
         if self.family != font_family {

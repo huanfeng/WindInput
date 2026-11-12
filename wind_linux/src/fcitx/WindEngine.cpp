@@ -1,5 +1,6 @@
 #include "WindEngine.h"
 
+#include "DesktopMotion.h"
 #include "ExtProtocol.h"
 #include "GnomeCaret.h"
 #include "GnomeCaretGeom.h"
@@ -356,7 +357,17 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
 #endif
         reportFullscreen(effectiveFullscreen(on, waylandPanels));
     };
+    cb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
+    cb.candidateMoved = [this](int32_t x, int32_t y) {
+        sendAndDrain(encodePosFrame(EXT_KIND_POS_CANDIDATE, x, y));
+    };
     panel_ = std::make_unique<X11CandidatePanel>(instance_->eventLoop(), std::move(cb));
+    // 没连着就不报（不为这一条去拉起服务）：连上时 reconnect 按现值补报。
+    motion_ = std::make_unique<DesktopMotion>(instance_->eventLoop(), [this](bool reduce) {
+        if (bridge_.isConnected()) {
+            sendAndDrain(encodeReduceMotionFrame(reduce));
+        }
+    });
 #ifdef WIND_HAVE_WAYLAND
     wlPanel_ = std::make_unique<WaylandCandidatePanel>(instance_);
     {
@@ -393,6 +404,7 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
         wcb.panelMoved = [this](uint32_t kind, int32_t x, int32_t y, const std::string& output) {
             reportPanelPos(kind, x, y, output);
         };
+        wcb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
         wlPanel_->setCallbacks(std::move(wcb));
     }
     // layer-shell 绑上了：工具栏 / 软键盘改摆在 Wayland 坐标系里。输出 / 工作区按这套重报；
@@ -537,6 +549,10 @@ bool WindEngine::reconnect()
                 reportFocus(ic);
             }
             focusUnreported_ = false;
+        }
+        // 「减少动态效果」：断开期间变了的没报出去（见 motion_ 的回调），每次连上都按现值补一次。
+        if (const auto reduce = motion_ ? motion_->current() : std::nullopt) {
+            sendAndDrain(encodeReduceMotionFrame(*reduce));
         }
         return true;
     }
@@ -1218,6 +1234,13 @@ void WindEngine::onPushFrame(Frame frame)
         hideCandidate();
         panel_->hideAllOverlays();
         hideAllWayland();
+        // 皮肤区域也是旧服务的：复位成「没皮肤」，新服务的第一帧之前自会再推。
+        panel_->setSkin(CandidateSkin{});
+#ifdef WIND_HAVE_WAYLAND
+        if (wlPanel_) {
+            wlPanel_->setSkin(CandidateSkin{});
+        }
+#endif
         // 工具栏 / 软键盘是旧连接上推来的：丢掉。服务端在 push 连接（重）建立时按自己的状态
         // 重推可见的那几层（新服务没有可见面板，同一服务换了连接则原样补回）。
         hidePanels();
@@ -1239,6 +1262,10 @@ void WindEngine::onPushFrame(Frame frame)
             // 免得工具栏盖在全屏应用上。首次连上也补——早于复位报的那次会被冲掉。
             if (fullscreen_.resyncAfterRestart()) {
                 sendAndDrain(encodeHostFullscreenFrame(true));
+            }
+            // 「减少动态效果」：服务端记的是进程级的值，新服务没有；读不到就不报（服务端按允许）。
+            if (const auto reduce = motion_->refresh()) {
+                sendAndDrain(encodeReduceMotionFrame(*reduce));
             }
             if (hadMenu) {
                 sendAndDrain(encodeMenuDismissFrame("service_ready"));
@@ -1282,6 +1309,16 @@ void WindEngine::onPushFrame(Frame frame)
             }
 #endif
             panel_->setRects(std::move(*rects));
+        }
+        break;
+    case CMD_CANDIDATE_SKIN:
+        if (auto skin = decodeCandidateSkin(frame.payload)) {
+#ifdef WIND_HAVE_WAYLAND
+            if (wlPanel_) {
+                wlPanel_->setSkin(*skin);
+            }
+#endif
+            panel_->setSkin(std::move(*skin));
         }
         break;
     case CMD_OVERLAY_FRAME:
@@ -1330,7 +1367,8 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     }
     wlPanel_->hide();
 #endif
-    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0);
+    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0,
+                 animInPlace(p.flags, p.seq, f.sequence), frameContentOffset(p, f.sequence));
 }
 
 void WindEngine::hideAllWayland()
@@ -1369,6 +1407,14 @@ void WindEngine::onExt(const ExtEnvelope& ext)
         }
         if (at) {
             sendAndDrain(encodePosFrame(EXT_KIND_POS_STATUS_TIP, at->first, at->second));
+        }
+        return;
+    }
+    if (ext.kind == EXT_KIND_POS_CANDIDATE_QUERY) {
+        // 同上，问的是候选窗。Wayland 原生应用的候选窗由合成器摆位、本端不知道它在哪，不答
+        // （此时 X11 候选窗已收起，candidateContentOrigin 为空）。
+        if (auto at = panel_->candidateContentOrigin()) {
+            sendAndDrain(encodePosFrame(EXT_KIND_POS_CANDIDATE, at->first, at->second));
         }
         return;
     }

@@ -18,7 +18,7 @@ pub use palette::{Rgba, composite_over, contrast_ratio};
 pub use resolve::{
     LangbarTextColors, Resolved, ResolvedBehavior, load_resolved, load_resolved_dirs, resolve,
 };
-pub use rvnode::{DEFAULT_ACCENT_BAR_HEIGHT_RATIO, RvGradient, RvImage, RvNode, RvViews};
+pub use rvnode::{DEFAULT_ACCENT_BAR_HEIGHT_RATIO, Flip, RvGradient, RvImage, RvNode, RvViews};
 pub use schema::Meta;
 pub use span::{
     Atom, ColorRef, InlineColor, PINYIN_HINT_ROLE, TextState, body_color, pinyin_hint_color,
@@ -26,5 +26,5 @@ pub use span::{
 };
 pub use theme::{
     find_theme_dir, is_plain_slug, is_windows_reserved_name, list_theme_ids, load_merged_dirs,
-    meta_from_text, read_meta, slug_from_name, validate_text,
+    load_typed_text, meta_from_text, read_meta, slug_from_name, validate_text,
 };
