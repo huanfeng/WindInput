@@ -996,6 +996,14 @@ impl Engine for MixedEngine {
         a || b || c
     }
 
+    /// 拼音「屏蔽这个词」转给拼音子引擎：混输拼音段与拼音方案共用 `pinyin` 桶的屏蔽集（建图排除、
+    /// 整句换替补都在子引擎里）。码表段不受影响——码表不按文字屏蔽。
+    fn set_blocked_words(&self, words: std::sync::Arc<std::collections::HashSet<String>>) {
+        if let Some(s) = &self.secondary {
+            s.set_blocked_words(words);
+        }
+    }
+
     fn convert(&self, input: &str, max_candidates: usize) -> anyhow::Result<ConvertResult> {
         if input.is_empty() {
             return Ok(ConvertResult::default());

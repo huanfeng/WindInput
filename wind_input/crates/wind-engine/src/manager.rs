@@ -4693,9 +4693,9 @@ impl EngineManager {
 
     /// 把拼音「屏蔽这个词」集合（拼音数据方案候选调整里 `code = *` 的删除行）推给拼音引擎。
     /// 每次转换前调：集合由 store 按表内容缓存，规则写入 / 文件同步后自然换新，引擎侧同一份
-    /// 只比一次指针。只推拼音型引擎——混输内部的拼音子引擎不在引擎表里、不受影响。
+    /// 只比一次指针。拼音型引擎与混输（转给它的拼音子引擎，混输拼音段与拼音方案共用屏蔽）。
     fn push_blocked_words(&self, engine: &dyn Engine) {
-        if engine.engine_type() != EngineType::Pinyin {
+        if !matches!(engine.engine_type(), EngineType::Pinyin | EngineType::Mixed) {
             return;
         }
         let Some(store) = &self.store else {
@@ -4705,6 +4705,33 @@ impl EngineManager {
             Ok(set) => engine.set_blocked_words(set),
             Err(e) => debug!("读取拼音屏蔽词失败: {e}"),
         }
+    }
+
+    /// `engine.convert`，英文方案（`english`）再滤掉「屏蔽这个词」的词库词。
+    ///
+    /// 英文引擎是**共享**实例：拼音 / 码表 / 混输里混入的英文也用它（`shared_english_engine`
+    /// 直调，不经这里），而那些混入的英文按宿主方案各自隐藏、不读英文屏蔽集（设计 §8 第 11 条），
+    /// 故屏蔽集不推进引擎，只在按英文方案取候选（英文方案主路、临英、快捷输入英文成员）时在这里滤。
+    /// 多取屏蔽条数再滤、截回 `max_candidates`，空出的名额由后面的词补上。
+    fn convert_unblocked(
+        &self,
+        engine: &dyn Engine,
+        schema_id: &str,
+        input: &str,
+        max_candidates: usize,
+    ) -> anyhow::Result<ConvertResult> {
+        let blocked = (engine.engine_type() == EngineType::English && schema_id == ENGLISH_SCHEMA)
+            .then(|| self.store.as_ref()?.blocked_words(ENGLISH_SCHEMA).ok())
+            .flatten()
+            .filter(|set| !set.is_empty());
+        let Some(blocked) = blocked else {
+            return engine.convert(input, max_candidates);
+        };
+        let mut r = engine.convert(input, max_candidates.saturating_add(blocked.len()))?;
+        r.candidates.retain(|c| !blocked.contains(&c.text));
+        r.candidates.truncate(max_candidates);
+        r.is_empty = r.candidates.is_empty();
+        Ok(r)
     }
 
     /// 转换输入为候选（分发到当前引擎），必要时混入英文候选。
@@ -4718,10 +4745,17 @@ impl EngineManager {
             return ConvertResult::default();
         };
         self.push_blocked_words(engine.as_ref());
-        let mut r = engine.convert(input, max_candidates).unwrap_or_else(|e| {
-            warn!("convert error: {}", e);
-            ConvertResult::default()
-        });
+        let mut r = self
+            .convert_unblocked(
+                engine.as_ref(),
+                &self.active_schema_id(),
+                input,
+                max_candidates,
+            )
+            .unwrap_or_else(|e| {
+                warn!("convert error: {}", e);
+                ConvertResult::default()
+            });
         timer.mark("engine");
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
             // ★ 判据**只有一个**：中文侧有没有候选。它本身就完整表达了「用户在打中文
@@ -6366,10 +6400,12 @@ impl EngineManager {
             self.push_blocked_words(e.as_ref());
         }
         match engine {
-            Some(e) => e.convert(input, max_candidates).unwrap_or_else(|err| {
-                warn!("convert_with error: {}", err);
-                ConvertResult::default()
-            }),
+            Some(e) => self
+                .convert_unblocked(e.as_ref(), schema_id, input, max_candidates)
+                .unwrap_or_else(|err| {
+                    warn!("convert_with error: {}", err);
+                    ConvertResult::default()
+                }),
             None => ConvertResult::default(),
         }
     }
