@@ -43,6 +43,10 @@ pub const PINYIN_DATA_SCHEMA: &str = "pinyin";
 /// 分词索引随用户词库规模增长，那台机器 18 万条）。
 pub const ENGLISH_SCHEMA: &str = "english";
 
+/// 英文方案按屏蔽词多取候选的上限（见 `EngineManager::convert_unblocked`）：屏蔽集是用户一条条
+/// 右键删出来的，同一前缀下几十条已是极端，再多就不值得为补满一页而放大查询。
+const ENGLISH_BLOCK_EXTRA_CAP: usize = 64;
+
 /// 英文词频名次表（相对 `schemas/`）：给英文词库里没写权重的词条按名次赋权，
 /// 见 `wind_dict::freq_rank` 与 [`EngineManager::load_table_dict`]。
 const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
@@ -4712,7 +4716,9 @@ impl EngineManager {
     /// 英文引擎是**共享**实例：拼音 / 码表 / 混输里混入的英文也用它（`shared_english_engine`
     /// 直调，不经这里），而那些混入的英文按宿主方案各自隐藏、不读英文屏蔽集（设计 §8 第 11 条），
     /// 故屏蔽集不推进引擎，只在按英文方案取候选（英文方案主路、临英、快捷输入英文成员）时在这里滤。
-    /// 多取屏蔽条数再滤、截回 `max_candidates`，空出的名额由后面的词补上。
+    /// 多取「可能出现在这次结果里」的屏蔽词条数再滤、截回 `max_candidates`，空出的名额由后面的词
+    /// 补上。估数按文字以输入为前缀（忽略大小写）计、封顶 [`ENGLISH_BLOCK_EXTRA_CAP`]：英文词库
+    /// 按码前缀查，码是小写化的词文；词组（码与文字不同形）漏估时只少补一格，不会多出屏蔽词。
     fn convert_unblocked(
         &self,
         engine: &dyn Engine,
@@ -4727,7 +4733,17 @@ impl EngineManager {
         let Some(blocked) = blocked else {
             return engine.convert(input, max_candidates);
         };
-        let mut r = engine.convert(input, max_candidates.saturating_add(blocked.len()))?;
+        let lower = input.to_lowercase();
+        let extra = blocked
+            .iter()
+            .filter(|w| {
+                w.len() >= lower.len()
+                    && w.is_char_boundary(lower.len())
+                    && w[..lower.len()].eq_ignore_ascii_case(&lower)
+            })
+            .take(ENGLISH_BLOCK_EXTRA_CAP)
+            .count();
+        let mut r = engine.convert(input, max_candidates.saturating_add(extra))?;
         r.candidates.retain(|c| !blocked.contains(&c.text));
         r.candidates.truncate(max_candidates);
         r.is_empty = r.candidates.is_empty();
