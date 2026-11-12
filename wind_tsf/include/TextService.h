@@ -764,6 +764,7 @@ private:
     ITfContext* _recoverContext = nullptr;   // 残留所在的 context（持有引用）；核对与清除只认它
     ITfRange* _recoverRange = nullptr;       // 残留区间（终止时组合区间的副本，持有引用），解除时据此清
     LONG _recoverAcpStart = 0;               // 残留在文档里的起点（ACP 偏移）；核对靠位置，不只靠文字
+    ULONGLONG _recoverArmTick = 0;           // 进入恢复的时刻，焦点空档判「宿主在转移输入」用
     ULONGLONG _lastCompositionWriteTick = 0; // 上次写组合文字的时刻，判「过早终止」用
     BOOL _caretRejectedOutsideView = FALSE; // 最近一次同步取坐标因越出显示区被弃用，见 GetCaretPosition
     // 在编辑会话里删掉光标前的残留（光标前恰好是残留才删），并清掉记录。无残留时什么也不做。
