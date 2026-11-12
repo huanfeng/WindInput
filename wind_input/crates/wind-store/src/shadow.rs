@@ -104,17 +104,25 @@ impl ShadowRecord {
 /// Shadow 文件的列。
 pub const SHADOW_COLS: &[&str] = &["code", "text", "action", "position", "cand_id"];
 
-/// 「屏蔽这个词」的规则键：拼音数据方案里 `code = *` 的 `delete` 行表示**所有编码**都不出这段文字
-/// （拼音按文字删除，见设计 system-dict-patch-and-candidate-adjust §4a）。它在拼音桶里不是输入码，
-/// [`Store::get_shadow_rules`] 不按它返回规则。其它方案里 `*` 是普通编码（码表通配键浏览态）。
+/// 「屏蔽这个词」的规则键：拼音 / 英文数据方案里 `code = *` 的 `delete` 行表示**所有编码**都不出这段
+/// 文字（按文字删除，见设计 system-dict-patch-and-candidate-adjust §4a、§8 第 11 条）。它在这两个桶里
+/// 不是输入码，[`Store::get_shadow_rules`] 不按它返回规则。其它方案里 `*` 是普通编码（码表通配键
+/// 浏览态）。英文桶的输入码是小写化的英文缓冲：英文方案码元只有字母，临英缓冲以字母开头，只有
+/// 「触发键进临英 + `allow_symbols` 放行 `*`」才可能打出恰为 `*` 的缓冲——那时英文词库无候选，
+/// 能调的只有原文条，协调器对这个码不写规则（`candidate_op_in`）。
 pub const BLOCK_ALL_CODES: &str = "*";
 
-/// 按文字屏蔽只在这个数据方案里有（拼音族折叠后的存储归属 id）。
-pub const BLOCK_SCHEMA: &str = "pinyin";
+/// 按文字屏蔽只在这些数据方案里有：拼音族折叠后的 `pinyin`，与英文方案 / 临时英文共用的 `english`。
+pub const BLOCK_SCHEMAS: &[&str] = &["pinyin", "english"];
+
+/// `schema` 是否支持按文字屏蔽。
+pub fn supports_block(schema: &str) -> bool {
+    BLOCK_SCHEMAS.contains(&schema)
+}
 
 /// `schema` 里的 `code` 是不是屏蔽组。
 fn is_block_group(schema: &str, code: &str) -> bool {
-    schema == BLOCK_SCHEMA && code == BLOCK_ALL_CODES
+    supports_block(schema) && code == BLOCK_ALL_CODES
 }
 
 /// 能否按文字屏蔽：至少两个字。单字全局屏蔽等于这个字打不出，只按编码隐藏。
@@ -435,19 +443,19 @@ impl Store {
     /// 屏蔽这个词：写一条 `code = *` 的删除规则（该数据方案下所有编码都不出这段文字）。
     /// 单字拒绝——见 [`is_blockable_word`]。
     pub fn block_word(&self, schema: &str, text: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(schema == BLOCK_SCHEMA, "只有拼音能按文字屏蔽");
+        anyhow::ensure!(supports_block(schema), "只有拼音与英文能按文字屏蔽");
         anyhow::ensure!(is_blockable_word(text), "单字不能按文字屏蔽");
         self.delete_shadow(schema, BLOCK_ALL_CODES, text)
     }
 
-    /// 拼音数据方案被屏蔽的文字（`code = *` 的删除行，单字不算；其它方案恒空）。按键路径：
+    /// 拼音 / 英文数据方案被屏蔽的文字（`code = *` 的删除行，单字 / 单字母不算；其它方案恒空）。按键路径：
     /// 只读内存，表内容不变时直接返回上次的结果（比一次指针）；写入或 [`Self::sync_shadows`]
     /// 换了表内容后重算。
     pub fn blocked_words(
         &self,
         schema: &str,
     ) -> anyhow::Result<std::sync::Arc<std::collections::HashSet<String>>> {
-        if schema != BLOCK_SCHEMA {
+        if !supports_block(schema) {
             return Ok(Default::default());
         }
         let doc = self.shadow_table(schema)?.doc();
@@ -867,7 +875,40 @@ mod tests {
         assert!(!is_blockable_word("好\u{200D}"), "尾随连接符不成字");
     }
 
-    /// `*` 的「屏蔽这个词」语义只在拼音数据方案：码表（通配键 `*` 浏览态）里它就是普通编码。
+    /// 英文桶同样认屏蔽行：键是词库原文、不归一大小写（`ok` 与 `OK` 是两个词），单字母不收。
+    #[test]
+    fn english_block_rows_are_case_sensitive() {
+        let path = tmp("wind_sh_block_en.redb");
+        let s = Store::open(&path).unwrap();
+        s.block_word("english", "OK").unwrap();
+        assert!(
+            s.block_word("english", "x").is_err(),
+            "单字母不能按文字屏蔽"
+        );
+        let set = s.blocked_words("english").unwrap();
+        assert!(set.contains("OK") && !set.contains("ok"));
+        assert!(
+            s.get_shadow_rules("english", BLOCK_ALL_CODES)
+                .unwrap()
+                .is_none()
+        );
+        let same = |k: &str| vec![k.to_string()];
+        assert!(
+            s.words_hidden_by_shadow("english", &[("ok", "ok")], &same)
+                .unwrap()
+                .is_empty(),
+            "小写的 ok 不算被屏蔽"
+        );
+        assert_eq!(
+            s.clear_deleted_for_words("english", &[("ok", "OK")], &same)
+                .unwrap(),
+            1
+        );
+        assert!(s.blocked_words("english").unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `*` 的「屏蔽这个词」语义只在拼音 / 英文数据方案：码表（通配键 `*` 浏览态）里它就是普通编码。
     #[test]
     fn star_is_plain_code_outside_pinyin() {
         let path = tmp("wind_sh_star_ct.redb");
@@ -881,7 +922,10 @@ mod tests {
             "码表的 `*` 是输入码，规则照常读出"
         );
         assert!(s.blocked_words("wb").unwrap().is_empty());
-        assert!(s.block_word("wb", "工作").is_err(), "只有拼音能按文字屏蔽");
+        assert!(
+            s.block_word("wb", "工作").is_err(),
+            "只有拼音与英文能按文字屏蔽"
+        );
         let same = |k: &str| vec![k.to_string()];
         assert!(
             s.words_hidden_by_shadow("wb", &[("aaaa", "工作")], &same)
