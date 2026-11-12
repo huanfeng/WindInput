@@ -64,6 +64,37 @@ pub fn theme_index_label(theme_labels: &[String], i: usize) -> String {
     (i + 1).to_string()
 }
 
+/// 预览出图的单边像素上限。预览请求来自 ctrl 管道，参数与草稿外观都不可信：主题尺寸、
+/// 字号、scale、fit 叠乘起来能要出几十 GB 的缓冲，分配失败即整个服务进程 abort。
+pub const MAX_PREVIEW_EDGE_PX: u32 = 8192;
+/// 预览出图的总像素上限（RGBA 约 96 MiB）。
+pub const MAX_PREVIEW_PIXELS: u64 = 24 * 1024 * 1024;
+/// 草稿工具栏格数上限：实机能配的条目远少于此，再多只会把条拉长。
+pub const MAX_PREVIEW_TOOLBAR_ITEMS: usize = 64;
+
+/// `w`×`h` 设备像素是否在预览出图预算内。分配缓冲**之前**调。
+pub fn preview_size_ok(w: u32, h: u32) -> bool {
+    w > 0
+        && h > 0
+        && w <= MAX_PREVIEW_EDGE_PX
+        && h <= MAX_PREVIEW_EDGE_PX
+        && u64::from(w) * u64::from(h) <= MAX_PREVIEW_PIXELS
+}
+
+/// 把 fit 倍率压到出图预算内：`base_*` 是 r = 1 时的设备像素尺寸。压不进（r = 1 已超）
+/// 时返回 1，由 [`preview_size_ok`] 拒掉。
+pub fn cap_fit_ratio(r: f32, base_w: f32, base_h: f32) -> f32 {
+    if r <= 1.0 || base_w <= 0.0 || base_h <= 0.0 {
+        return r.max(1.0);
+    }
+    let edge = MAX_PREVIEW_EDGE_PX as f32;
+    let by_area = (MAX_PREVIEW_PIXELS as f32 / (base_w * base_h)).sqrt();
+    r.min(edge / base_w)
+        .min(edge / base_h)
+        .min(by_area)
+        .max(1.0)
+}
+
 /// fit 目标框折算渲染倍率的上限：防异常大的 fit 撑爆 PNG（本意只是「设置端 Contain 后
 /// 不发糊」，不是无界放大）。
 pub const MAX_FIT_RATIO: f32 = 3.0;
@@ -251,6 +282,24 @@ mod tests {
 
     /// fit 折算：缺省 = 1；Contain 比取两维 min、只给一维按该维算；clamp 到 1..=3；
     /// 自然尺寸非正与 fit ≤ 0 的异常值不放大（防撑爆，正常调用到不了这里）。
+    #[test]
+    fn preview_budget_rejects_oversized_and_caps_fit() {
+        assert!(preview_size_ok(MAX_PREVIEW_EDGE_PX, 1));
+        assert!(!preview_size_ok(MAX_PREVIEW_EDGE_PX + 1, 1), "单边超限");
+        assert!(!preview_size_ok(8000, 8000), "单边没超但总像素超");
+        assert!(!preview_size_ok(0, 10), "零尺寸");
+        // 预算内的放大原样保留。
+        assert_eq!(cap_fit_ratio(2.0, 100.0, 50.0), 2.0);
+        // 压到单边上限。
+        let r = cap_fit_ratio(3.0, 4000.0, 100.0);
+        assert!((r * 4000.0 - MAX_PREVIEW_EDGE_PX as f32).abs() < 1.0);
+        // 压到总像素上限。
+        let r = cap_fit_ratio(3.0, 4000.0, 4000.0);
+        assert!(((4000.0 * r) * (4000.0 * r)) as u64 <= MAX_PREVIEW_PIXELS + 4000 * 8);
+        // r = 1 都装不下：不放大，交给 preview_size_ok 拒。
+        assert_eq!(cap_fit_ratio(3.0, 9000.0, 10.0), 1.0);
+    }
+
     #[test]
     fn fit_ratio_clamps_contain_ratio() {
         let n = (240.0, 64.0);

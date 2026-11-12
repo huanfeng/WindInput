@@ -219,9 +219,13 @@ impl CandidateWindow {
             frame.width as f32 / req.scale,
             frame.height as f32 / req.scale,
         );
+        let r = wind_ui_types::cap_fit_ratio(r, frame.width as f32, frame.height as f32);
         if r > 1.0 {
             inp.scale = req.scale * r;
             frame = render_preview_pass(&mut self.preview_scene, &inp, clock);
+        }
+        if !wind_ui_types::preview_size_ok(frame.width, frame.height) {
+            return Err(format!("预览图过大：{}×{}", frame.width, frame.height));
         }
         let rgba = frame.to_rgba();
         let mut png = Vec::new();
@@ -265,8 +269,13 @@ impl CandidateWindow {
         // fit 折算：toolbar_frame 是纯函数，scale = 1 直接给逻辑尺寸 n，不用先渲一遍。
         let n = crate::toolbar::toolbar_frame(&dims, 1.0, req.vertical, cells.len());
         let r = wind_ui_types::preview_fit_ratio(req.fit_w, req.fit_h, n.w as f32, n.h as f32);
+        let r = wind_ui_types::cap_fit_ratio(r, n.w as f32 * req.scale, n.h as f32 * req.scale);
         let s = req.scale * r;
         let frame = crate::toolbar::toolbar_frame(&dims, s, req.vertical, cells.len());
+        // 主题尺寸与格数都不可信，分配前先过预算（toolbar_frame 的 u32 尺寸溢出时饱和，同样被拒）。
+        if !wind_ui_types::preview_size_ok(frame.w, frame.h) {
+            return Err(format!("预览图过大：{}×{}", frame.w, frame.h));
+        }
         let mut buf = vec![0u8; frame.w as usize * frame.h as usize * 4];
         let renderer = crate::text::dwrite::TextRenderer::new(
             crate::toolbar::FONT_FAMILY,
@@ -696,6 +705,28 @@ mod tests {
                 .any(|p| p.0[3] > 0),
             "画面应有内容"
         );
+    }
+
+    /// 超出出图预算的工具栏请求在**分配之前**被拒：格数 × 倍率 × fit 叠乘能要出几十 GB，
+    /// 分配失败即服务进程 abort。fit 先被压回预算内，压不进的直接报错。
+    #[test]
+    fn toolbar_preview_rejects_oversized_frame_before_allocating() {
+        let dirs = vec![themes_dir()];
+        let theme = wind_theme::load_resolved_dirs(&dirs, "default", false).unwrap();
+        let mut w = new_window();
+
+        // fit 要的远超预算：被压回预算内，照常出图。
+        let mut req = toolbar_request(theme.clone(), false);
+        req.fit_w = Some(u32::MAX);
+        let img = w.render_preview(&req).expect("fit 应被压回预算内");
+        assert!(wind_ui_types::preview_size_ok(img.width, img.height));
+
+        // 格数本身就超出单边上限：r = 1 也装不下，直接报错。
+        let mut req = toolbar_request(theme, false);
+        req.scale = 4.0;
+        req.toolbar_items = vec![wind_ui_types::ToolbarItem::Mode; 20_000];
+        let err = w.render_preview(&req).unwrap_err();
+        assert!(err.contains("过大"), "应报预览图过大，实得 {err}");
     }
 
     /// 工具栏预览 PNG 是直通 RGBA：高亮格底色 = 主题 accent 叠底色的合成原色（R/B 不换、

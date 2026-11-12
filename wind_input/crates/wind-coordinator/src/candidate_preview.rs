@@ -99,10 +99,15 @@ impl Coordinator {
             toolbar_vertical: cfg.ui.toolbar.vertical,
             // 草案里没有 `ui.toolbar` 段的键时，这些就是当前生效值：draft 树以当前配置打底，
             // 叠层只整值替换登记过的键，天然带出「改了什么、没改什么」。
-            toolbar_items: crate::coordinator::parse_toolbar_items(
-                &cfg.ui.toolbar.items,
-                &cfg.ui.toolbar.buttons,
-            ),
+            toolbar_items: {
+                let mut items = crate::coordinator::parse_toolbar_items(
+                    &cfg.ui.toolbar.items,
+                    &cfg.ui.toolbar.buttons,
+                );
+                // 草稿来自 RPC，不可信：格数不设限就能把工具栏拉到任意长。
+                items.truncate(wind_ui_types::MAX_PREVIEW_TOOLBAR_ITEMS);
+                items
+            },
         })
     }
 
