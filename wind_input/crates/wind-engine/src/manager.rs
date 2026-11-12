@@ -4691,6 +4691,22 @@ impl EngineManager {
         None
     }
 
+    /// 把拼音「屏蔽这个词」集合（拼音数据方案候选调整里 `code = *` 的删除行）推给拼音引擎。
+    /// 每次转换前调：集合由 store 按表内容缓存，规则写入 / 文件同步后自然换新，引擎侧同一份
+    /// 只比一次指针。只推拼音型引擎——混输内部的拼音子引擎不在引擎表里、不受影响。
+    fn push_blocked_words(&self, engine: &dyn Engine) {
+        if engine.engine_type() != EngineType::Pinyin {
+            return;
+        }
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.blocked_words(PINYIN_DATA_SCHEMA) {
+            Ok(set) => engine.set_blocked_words(set),
+            Err(e) => debug!("读取拼音屏蔽词失败: {e}"),
+        }
+    }
+
     /// 转换输入为候选（分发到当前引擎），必要时混入英文候选。
     ///
     /// 英文混入接在**这一层**而不是各引擎内部：本管理器同时是 `convert` /
@@ -4701,6 +4717,7 @@ impl EngineManager {
         let Some(engine) = self.active_engine() else {
             return ConvertResult::default();
         };
+        self.push_blocked_words(engine.as_ref());
         let mut r = engine.convert(input, max_candidates).unwrap_or_else(|e| {
             warn!("convert error: {}", e);
             ConvertResult::default()
@@ -6319,6 +6336,9 @@ impl EngineManager {
             return ConvertResult::default();
         }
         let engine = self.loaded_engine(schema_id);
+        if let Some(e) = &engine {
+            self.push_blocked_words(e.as_ref());
+        }
         match engine {
             Some(e) => e
                 .convert_with_opts(input, max_candidates, opts)
@@ -6342,6 +6362,9 @@ impl EngineManager {
         }
         timer.mark(format!("cvwith:{schema_id}"));
         let engine = self.loaded_engine(schema_id);
+        if let Some(e) = &engine {
+            self.push_blocked_words(e.as_ref());
+        }
         match engine {
             Some(e) => e.convert(input, max_candidates).unwrap_or_else(|err| {
                 warn!("convert_with error: {}", err);
