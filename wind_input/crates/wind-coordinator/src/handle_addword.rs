@@ -709,6 +709,16 @@ impl Coordinator {
             }
             self.engine_mgr.data_schema_id(owner) // 拼音族折叠到 "pinyin"，与 record_freq 写读一致
         };
+        // 拼音「屏蔽这个词」优先于自动学词（设计 §4a）：分段上屏拼出被屏蔽的词照常上屏、不学，
+        // 否则手滑造出的错词下次又原样出现。只管拼音型方案自己的产出，混输维持原样。
+        if self.engine_mgr.schema_engine_type(owner).as_deref() == Some("pinyin")
+            && self
+                .pinyin_blocked_words(&schema)
+                .is_some_and(|b| b.contains(&text))
+        {
+            debug!("auto-learn: {} 已被屏蔽，跳过", text);
+            return None;
+        }
         // 查重用户词库：同「码+词」已在用户层则不再写临时层（对齐码表侧 `flush_auto_phrase`
         // 的查重②）。已经是用户词的，再进临时层既无晋升意义、又让候选面多一条同文项。
         //

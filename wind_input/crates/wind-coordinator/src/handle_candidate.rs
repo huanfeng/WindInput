@@ -2670,6 +2670,11 @@ impl Coordinator {
                 .map(str::to_string)
                 .unwrap_or_else(|| self.engine_mgr.active_schema_id()),
         );
+        // 拼音「屏蔽这个词」：按文字、不论编码与来源（引擎已在截断前滤过一遍，这里兜住
+        // 协调器自己并进来的候选，如短语、快捷输入历史）。
+        if let Some(blocked) = self.pinyin_blocked_words(&schema) {
+            candidates.retain(|c| !blocked.contains(&c.text));
+        }
         let rec = match store.get_shadow_rules(&schema, code) {
             Ok(Some(r)) => r,
             _ => return false,
@@ -2687,6 +2692,22 @@ impl Coordinator {
             })
             .collect();
         wind_candidate::apply_shadow(candidates, &rec.deleted, &pinned) > 0
+    }
+
+    /// 拼音数据方案被「屏蔽这个词」的文字（候选调整里 `code = *` 的删除行）；`data_schema` 不是
+    /// 拼音、或没有屏蔽词时 `None`。按键路径：只读内存（store 按表内容缓存）。
+    pub(crate) fn pinyin_blocked_words(
+        &self,
+        data_schema: &str,
+    ) -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
+        if data_schema != wind_engine::manager::PINYIN_DATA_SCHEMA {
+            return None;
+        }
+        self.store
+            .as_ref()?
+            .blocked_words(data_schema)
+            .ok()
+            .filter(|set| !set.is_empty())
     }
 
     /// 简繁 1对多变体展开：s2t 开启时，对最终候选列表中的**单字**候选，紧跟其后插入
@@ -5475,6 +5496,14 @@ impl Coordinator {
             self.rebuild_phrases();
             return Ok(());
         }
+        // 拼音的多字词按**文字**删（设计 §4a）：用户删的是「这个词」，不是「这个码下的它」。
+        // 只认拼音来源：拼音方案里混入的英文词归英文桶，仍走下面的老路。
+        if cand.source == CandidateSource::Pinyin
+            && self.engine_mgr.data_schema_id(schema) == wind_engine::manager::PINYIN_DATA_SCHEMA
+            && wind_store::shadow::is_blockable_word(&cand.text)
+        {
+            return self.delete_pinyin_word(store, cand);
+        }
         if cand.meta.is_user_dict || cand.meta.is_temp_dict {
             let Some(sid) = self.engine_mgr.write_data_schema_id(schema, cand.source) else {
                 debug!("delete_candidate: 无法归因存储方案，跳过 '{}'", cand.text);
@@ -5588,6 +5617,33 @@ impl Coordinator {
             sh, shadow_code, cand.text
         );
         store.delete_shadow(&sh, shadow_code, &cand.text)
+    }
+
+    /// 拼音右键删多字词（设计 §4a）：
+    /// - 用户词 / 临时词 → 真删这段文字在拼音数据方案下**所有编码**的用户 / 临时条目，连同词频
+    ///   与联想记录，不留屏蔽记录（「当作没输入过」）。同文的系统词还在就照常显示——删的是
+    ///   「我加的词」。
+    /// - 其余（系统词、整句 / 合成候选；拼音的用户分库编进系统词典，候选上分不出来，也归这里）
+    ///   → 屏蔽这个词：写 `code = *` 的删除行，所有输入串、所有来源都不再出现它。
+    fn delete_pinyin_word(
+        &self,
+        store: &wind_store::Store,
+        cand: &Candidate,
+    ) -> anyhow::Result<()> {
+        let ds = wind_engine::manager::PINYIN_DATA_SCHEMA;
+        if cand.meta.is_user_dict || cand.meta.is_temp_dict {
+            let n = store.purge_word(ds, cand.freq_text())?;
+            debug!(
+                "delete_candidate: 分支=拼音按文字真删 text={} 删掉 {} 条",
+                cand.text, n
+            );
+            if n == 0 {
+                warn!("delete_candidate: 拼音用户词 / 临时词一条都没删到");
+            }
+            return Ok(());
+        }
+        debug!("delete_candidate: 分支=拼音屏蔽这个词 text={}", cand.text);
+        store.block_word(ds, &cand.text)
     }
 
     /// 候选词操作热键匹配（对齐 Go matchCandidateActionKey，但 `0` 扩展为第 10 候选）。

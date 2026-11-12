@@ -5,6 +5,9 @@
 //! 清掉同 (数据方案, 编码, 文本) 的 `delete` 规则；自动学词 / 自动晋升**不清**（删过的词
 //! 不该因为又打到一次就复活），批量导入也不清、只报数。
 //!
+//! 拼音右键删多字词改为按文字屏蔽（`code = *`），加词同样撤它；按文字的专项用例在
+//! `pinyin_block_word.rs`。本文件里验证规则键形态的拼音用例改删单字。
+//!
 //! 每条用例都先断言「删除确实生效」再加词，否则加词前候选本就在，断言出现等于没测。
 //! 最终候选一律经 Coordinator 取（引擎位次 ≠ 界面位次）。
 //!
@@ -127,6 +130,18 @@ fn delete_on_page(
     (victim, scope)
 }
 
+/// 首页第一个单字候选。拼音删多字词按文字屏蔽（`code = *`，见 `pinyin_block_word.rs`），
+/// 只有单字仍按编码记规则——验证规则键形态的用例删它。
+fn first_single_char(cfg: &Config, store: &Arc<Store>, input: &str) -> String {
+    let coord = open(cfg, store);
+    type_keys(&coord, input);
+    let page = coord.debug_page_texts();
+    page.iter()
+        .find(|t| t.chars().count() == 1)
+        .cloned()
+        .unwrap_or_else(|| panic!("前提：`{input}` 首页应有单字，实际 {page:?}"))
+}
+
 fn assert_back(cfg: &Config, store: &Arc<Store>, input: &str, victim: &str, how: &str) {
     let back = candidates(cfg, store, input);
     assert!(
@@ -209,7 +224,7 @@ fn pinyin_readd_after_delete_under_separator() {
 }
 
 /// 双拼（小鹤 `nihc` = ni hao）删系统词：规则键须是读端同款的归一码（连写全拼 `nihao`），
-/// 落拼音族共享桶。前：写端用击键 `nihc`，读端用 `nihao`，删了不生效。
+/// 落拼音族共享桶。前：写端用击键 `nihc`，读端用 `nihao`，删了不生效。删单字（多字词按文字屏蔽）。
 #[test]
 fn shuangpin_delete_writes_normalized_code() {
     if !has_schemas() {
@@ -218,7 +233,8 @@ fn shuangpin_delete_writes_normalized_code() {
     }
     let cfg = config("shuangpin");
     let store = fresh_store("sp_delete");
-    let (victim, (_, code)) = delete_second(&cfg, &store, "nihc");
+    let single = first_single_char(&cfg, &store, "nihc");
+    let (victim, (_, code)) = delete_on_page(&cfg, &store, "nihc", Some(&single));
     assert_eq!(code, "nihao", "前提：双拼完整转换时作用域码是连写全拼");
     assert_eq!(
         store
@@ -389,14 +405,9 @@ fn auto_learn_does_not_revive_deleted_word() {
     cfg.schema.pinyin.auto_learn.promote_count = 1;
     let store = fresh_store("py_auto");
 
-    let coord = open(&cfg, &store);
-    type_keys(&coord, "nihao");
-    let page = coord.debug_page_texts();
-    let idx = page
-        .iter()
-        .position(|t| t == "你好")
-        .unwrap_or_else(|| panic!("前提：`nihao` 首页应有「你好」，实际 {page:?}"));
-    coord.debug_candidate_op(CandidateOp::Delete, idx);
+    // 按编码的删除规则（存量，或设置页手加的「隐藏」）。右键删多字词现在是按文字屏蔽，
+    // 屏蔽下根本不学，见 `pinyin_block_word.rs::segmented_commit_of_blocked_word_is_not_learned`。
+    store.delete_shadow("pinyin", "nihao", "你好").unwrap();
     assert!(!candidates(&cfg, &store, "nihao").contains(&"你好".to_string()));
 
     let coord = open(&cfg, &store);
@@ -445,6 +456,9 @@ fn pinyin_readd_after_delete_under_v_spelling() {
 
 /// 反向：双拼未完整转换时规则键是原始击键（小鹤 `jvq`，末尾单键拼不成音节），`v` 是布局键。
 /// 它 ü 归一后（`juq`）切不成全拼，不得据此撤掉——哪怕加的词码恰好就是 `juq`。
+///
+/// 规则直接写进 store：`jvq` 首页全是多字词，右键删会按文字屏蔽（`code = *`），而这里验的是
+/// 按编码的存量规则（或设置页手加的「隐藏」）。
 #[test]
 fn shuangpin_uncovered_key_not_cleared_by_v_form() {
     if !has_schemas() {
@@ -453,8 +467,22 @@ fn shuangpin_uncovered_key_not_cleared_by_v_form() {
     }
     let cfg = config("shuangpin");
     let store = fresh_store("sp_uncovered");
-    let (victim, (_, code)) = delete_second(&cfg, &store, "jvq");
+    let coord = open(&cfg, &store);
+    type_keys(&coord, "jvq");
+    let page = coord.debug_page_texts();
+    let victim = page
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| panic!("前提：`jvq` 首页至少两条候选，实际 {page:?}"));
+    let (_, code) = coord
+        .debug_candidate_op_scope()
+        .expect("前提：主输入路应有候选调整作用域");
     assert_eq!(code, "jvq", "前提：未完整转换时规则键是原始击键");
+    store.delete_shadow("pinyin", &code, &victim).unwrap();
+    assert!(
+        !candidates(&cfg, &store, "jvq").contains(&victim),
+        "前提：规则生效"
+    );
     let coord = open(&cfg, &store);
     wind_coordinator::user_words_api::add(&*coord, "shuangpin", "juq", &victim, 0).unwrap();
     assert_eq!(

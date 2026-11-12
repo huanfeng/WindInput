@@ -5239,6 +5239,45 @@ outside: rare
         );
     }
 
+    /// 拼音「屏蔽这个词」行（`code = *`）在候选调整列表里照常列出、能按 `shadow.removeRule` 删；
+    /// 全部转正的计数按文字算上它。
+    #[test]
+    fn block_row_listed_removable_and_counted() {
+        let c = coord("block_row");
+        let store = c.user_store().expect("有 store");
+        store.block_word("pinyin", "世界").unwrap();
+        let list = c
+            .web_data_rpc("shadow.list", &serde_json::json!({ "schemaId": "pinyin" }))
+            .unwrap();
+        let arr = list.as_array().expect("数组");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["code"], "*");
+        assert_eq!(arr[0]["word"], "世界");
+        assert_eq!(arr[0]["type"], "delete");
+
+        store
+            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
+            .unwrap();
+        let r = c
+            .web_data_rpc(
+                "temp.promoteAll",
+                &serde_json::json!({ "schemaId": "pinyin" }),
+            )
+            .unwrap();
+        assert_eq!(r, serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }));
+        assert!(
+            store.blocked_words("pinyin").unwrap().contains("世界"),
+            "全部转正不撤屏蔽"
+        );
+
+        c.web_data_rpc(
+            "shadow.removeRule",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "*", "word": "世界" }),
+        )
+        .unwrap();
+        assert!(store.blocked_words("pinyin").unwrap().is_empty());
+    }
+
     /// 临时词库与用户词库同款：列表显示带空格，remove / promote 收到后各自拆回扁平码。
     /// **三处必须同改**——只改列表就成了「显示得了、删不掉、也晋升不了」。
     #[test]

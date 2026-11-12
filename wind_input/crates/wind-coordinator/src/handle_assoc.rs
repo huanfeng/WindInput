@@ -718,7 +718,11 @@ impl Coordinator {
         // 前文末尾就是它，去掉才接得上整词。
         let preceding = self.preceding_text();
         let preceding = preceding.strip_suffix(on_screen).unwrap_or(&preceding);
-        let hits = self.assoc_hits(&cfg, preceding, text, self.assoc_char_wise());
+        let mut hits = self.assoc_hits(&cfg, preceding, text, self.assoc_char_wise());
+        // 拼音「屏蔽这个词」：联想出的整词同样不出。
+        if let Some(blocked) = self.pinyin_blocked_words(&self.assoc_data_schema()) {
+            hits.retain(|h| !blocked.contains(&h.text));
+        }
         if hits.is_empty() {
             return false;
         }
