@@ -118,8 +118,53 @@ fn is_block_group(schema: &str, code: &str) -> bool {
 }
 
 /// 能否按文字屏蔽：至少两个字。单字全局屏蔽等于这个字打不出，只按编码隐藏。
+///
+/// 「字」按用户看到的算：变体选择符、肤色修饰、组合附加符、标签字符、零宽（不）连接符不单独成字，
+/// 零宽连接符后面那个字并进前一个（`👨‍👩‍👧`），一对区域指示符是一面旗。
 pub fn is_blockable_word(text: &str) -> bool {
-    text.chars().nth(1).is_some()
+    let mut n = 0;
+    let mut after_zwj = false;
+    let mut half_flag = false;
+    for c in text.chars() {
+        if c == '\u{200D}' {
+            after_zwj = true;
+            continue;
+        }
+        if is_attached_mark(c) {
+            continue;
+        }
+        if std::mem::take(&mut after_zwj) {
+            continue;
+        }
+        if ('\u{1F1E6}'..='\u{1F1FF}').contains(&c) {
+            half_flag = !half_flag;
+            if !half_flag {
+                continue; // 旗的后一半
+            }
+        } else {
+            half_flag = false;
+        }
+        n += 1;
+        if n >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 附在前一个字上、自己不成字的码位。
+fn is_attached_mark(c: char) -> bool {
+    matches!(c,
+        '\u{0300}'..='\u{036F}'      // 组合附加符
+        | '\u{1AB0}'..='\u{1AFF}'
+        | '\u{1DC0}'..='\u{1DFF}'
+        | '\u{20D0}'..='\u{20FF}'    // 含组合键帽 U+20E3
+        | '\u{FE00}'..='\u{FE0F}'    // 变体选择符
+        | '\u{FE20}'..='\u{FE2F}'
+        | '\u{200C}'                 // 零宽不连接符
+        | '\u{1F3FB}'..='\u{1F3FF}'  // 肤色修饰
+        | '\u{E0000}'..='\u{E007F}'  // 标签字符
+        | '\u{E0100}'..='\u{E01EF}') // 变体选择符补充
 }
 
 /// 屏蔽集合缓存：算它时的表内容（只比指针）+ 结果。
@@ -799,6 +844,27 @@ mod tests {
             "规则列表能删屏蔽行"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 字数按用户看到的字算：带变体选择符 / 肤色 / 组合附加符 / 零宽连接的单个符号、国旗都是一个字。
+    #[test]
+    fn blockable_word_counts_visible_chars() {
+        for one in [
+            "好",
+            "❤\u{FE0F}",
+            "👍\u{1F3FD}",
+            "👨\u{200D}👩\u{200D}👧",
+            "🇨🇳",
+            "e\u{301}",
+            "1\u{FE0F}\u{20E3}",
+            "",
+        ] {
+            assert!(!is_blockable_word(one), "{one:?} 是一个字");
+        }
+        for two in ["你好", "❤\u{FE0F}❤\u{FE0F}", "🇨🇳🇯🇵", "e\u{301}好"] {
+            assert!(is_blockable_word(two), "{two:?} 至少两个字");
+        }
+        assert!(!is_blockable_word("好\u{200D}"), "尾随连接符不成字");
     }
 
     /// `*` 的「屏蔽这个词」语义只在拼音数据方案：码表（通配键 `*` 浏览态）里它就是普通编码。
