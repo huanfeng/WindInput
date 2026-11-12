@@ -1447,6 +1447,10 @@ pub(crate) enum CapsCancelSwitch {
     /// **恒按请求落地**、不吃 `mode_after_cancel` 的改写——宿主请求「中文」时 CapsLock
     /// 恰好开着被取消，不能因为用户选了 `english` 就落成英文。
     Host(bool),
+    /// 定向切换（`set_mode:english` / `set_mode:chinese`）：用户**明确点了目标**，
+    /// 取消锁定只是附带动作，模式必须直达目标——出厂 `mode_after_cancel` 只该管
+    /// 「切一下」这种没有方向的翻转（Shift / 切换键）。
+    Directed(bool),
 }
 
 impl CapsCancelSwitch {
@@ -4420,6 +4424,8 @@ impl Coordinator {
         current: bool,
     ) -> bool {
         match (setting, switch) {
+            // 定向切换直达目标，排最前（与 Host/System 同级，不吃 setting 的改写）。
+            (_, CapsCancelSwitch::Directed(requested)) => requested,
             (_, CapsCancelSwitch::Host(requested)) => requested,
             ("english", _) => false,
             ("toggle", CapsCancelSwitch::Toggle) => !current,
@@ -17644,11 +17650,23 @@ mod initial_mode_tests {
     /// Ctrl+空格 按它自己请求的方向；`english` 两条路都进英文（楼主要的就是这个）。
     #[test]
     fn mode_after_caps_cancel_matrix() {
-        use super::CapsCancelSwitch::{System, Toggle};
+        use super::CapsCancelSwitch::{Directed, System, Toggle};
         let f = Coordinator::mode_after_caps_cancel;
         for cur in [true, false] {
+            // 定向切换（set_mode:*）：用户点了目标，任何 setting 都直达目标——
+            // 归位配置只该管「切一下」这种没有方向的翻转。回归案例：CapsLock 开着按
+            // set_mode:english，出厂 `chinese` 曾把它按回中文，用户看来就是「没反应」。
+            for setting in ["chinese", "toggle", "english", "bogus", ""] {
+                assert!(
+                    f(setting, Directed(true), cur),
+                    "{setting}/Directed(中文) 应直达中文"
+                );
+                assert!(
+                    !f(setting, Directed(false), cur),
+                    "{setting}/Directed(英文) 应直达英文"
+                );
+            }
             // 出厂：Shift 归位中文（不看当前模式），Ctrl+空格 按请求。
-            assert!(f("chinese", Toggle, cur), "chinese/Shift 应归位中文");
             for req in [true, false] {
                 assert_eq!(
                     f("chinese", System(req), cur),

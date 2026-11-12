@@ -5090,10 +5090,12 @@ impl Coordinator {
             }
         );
         // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，出厂语义是"回到可输入中文
+        // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，出厂语义是"回到可输入中文
         // 的状态"（对齐搜狗）——取消锁定并归位中文，而非翻转 chinese_mode；否则
         // chinese_mode 原本为 true（被 CapsLock 压制）时翻转反而落到英文，切换仍然无效。
         // 落点可配（`input.capslock.mode_after_cancel`，论坛 t283 要「取消大写并进英文」），
-        // 判定见 `mode_after_caps_cancel`。定向切换（`set_mode:*`）沿用同一约定。
+        // 判定见 `mode_after_caps_cancel`。定向切换（`set_mode:*`）带明确目标：取消锁定的
+        // 同时直达目标态（`CapsCancelSwitch::Directed`），归位配置只管没有方向的翻转。
         let caps_cancelled = self.cancel_caps_on_switch();
         // 中英切换 = 一段输入结束。须在取 state 锁之前调用：terminate_auto_phrase 内部
         // 走词库 IO，不可在持 state 锁时进行。
@@ -5102,7 +5104,10 @@ impl Coordinator {
         state.chinese_mode = if caps_cancelled {
             Self::mode_after_caps_cancel(
                 &self.rt().config.input.capslock.mode_after_cancel,
-                CapsCancelSwitch::Toggle,
+                match target {
+                    Some(t) => CapsCancelSwitch::Directed(t),
+                    None => CapsCancelSwitch::Toggle,
+                },
                 state.chinese_mode,
             )
         } else {
