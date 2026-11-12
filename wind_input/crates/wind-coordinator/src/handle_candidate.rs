@@ -2214,7 +2214,11 @@ impl Coordinator {
                 && raw.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
             let raw_mode =
                 crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
-            let blocked = self.blocked_words_in(&self.engine_mgr.active_schema_id());
+            let blocked = self.blocked_words_in(
+                &self
+                    .engine_mgr
+                    .data_schema_id(&self.engine_mgr.active_schema_id()),
+            );
             let want_raw = crate::english_candidates::wants_raw_candidate(
                 raw_mode,
                 raw,
@@ -5461,6 +5465,9 @@ impl Coordinator {
             // 返回值是「全码策略请求自动上屏」的意向，此处**刻意丢弃**：编码一个字没变，
             // 用户只是在调整候选顺序，凭空上屏是错的。
             let _ = self.update_special_candidates(state);
+        } else if state.active == Some(ModeKind::TempEnglish) {
+            // 临英的码在 `temp_english_buffer`，主路径读空的 `input_buffer` 会把候选窗当场清空。
+            self.update_temp_english_candidates(state);
         } else {
             self.update_candidates(state);
         }
@@ -5667,10 +5674,14 @@ impl Coordinator {
         store.delete_shadow(&sh, shadow_code, cand.freq_text())
     }
 
-    /// 右键删除实际作用的候选。英文头部原文候选（所打原文 / 它的大小写变形，无来源）没有词库
-    /// 落点：在英文数据方案里按 `english_head_dict_word` 的口径（精确 → 忽略大小写）找回对应的
-    /// 词库词，按那个词删；找不到时 `None`，删除不可用（菜单灰掉、热键不执行）——写成规则也是
-    /// 读端永远命中不了的孤儿键。其余候选原样返回。
+    /// 右键删除实际作用的候选。英文头部候选（所打原文 / 它的大小写变形，无来源）没有词库落点：
+    /// 在英文数据方案里只认**字面就是所打原文**、且词库里有**字面相同**的词那一种，按那个词删；
+    /// 其余一律 `None`，删除不可用（菜单灰掉、热键不执行）。
+    ///
+    /// 不放宽到忽略大小写：原文条单独出现时，字面相同的词库词本该已占据那一格
+    /// （`merge_head_with_dict`），剩下的同码异形词是列表里另一行——打 `Help` 删原文条会屏蔽下面那行
+    /// `help`，`ok` 删过后再删原文条 `ok` 会屏蔽 `OK`。变形条（`Us`）更对应不到唯一一个词。
+    /// 写成规则也是读端永远命中不了的孤儿键。其余候选原样返回。
     pub(crate) fn delete_target(
         &self,
         state: &State,
@@ -5688,7 +5699,11 @@ impl Coordinator {
         if !crate::english_candidates::is_english_head_candidate(cand, buf) {
             return Some(cand.clone());
         }
-        self.english_exact_dict_word(schema, buf, cand.freq_text())
+        if cand.text != buf {
+            return None;
+        }
+        self.english_exact_dict_word(schema, buf, buf)
+            .filter(|w| w.text == buf)
     }
 
     /// 拼音右键删多字词（设计 §4a）：一律**屏蔽这个词**（写 `code = *` 的删除行，所有输入串、

@@ -154,7 +154,21 @@ fn temp_english_delete_blocks_word_by_dict_text() {
             "前提：临英 `{input}` 有词库词 help"
         );
     }
-    delete_on_page(&cfg, &store, "Hel", "Help");
+    let coord = open(&cfg, &store);
+    type_str(&coord, "Hel");
+    let page = coord.debug_page_texts();
+    let idx = page
+        .iter()
+        .position(|t| t == "Help")
+        .expect("前提：首页有 Help");
+    coord.debug_candidate_op(CandidateOp::Delete, idx);
+    let now = coord.debug_page_texts();
+    assert_eq!(
+        now.first().map(String::as_str),
+        Some("Hel"),
+        "当场重建，原文条仍在：{now:?}"
+    );
+    assert!(!now.iter().any(|t| t == "Help"), "当场不再出：{now:?}");
     assert_eq!(blocked(&store, "english"), vec!["help".to_string()]);
     assert!(
         store.get_shadow_rules("english", "hel").unwrap().is_none(),
@@ -322,50 +336,130 @@ fn english_pin_under_case_follow_takes_effect() {
     assert!(reset.enabled, "置顶过的词「恢复默认」可用");
 }
 
-/// 头部原文候选：词库里找不到对应词时删除灰掉、热键不写任何规则；找得到（`usa` → 词库 `USA`）
-/// 时按那个词的原文屏蔽。
+/// 头部候选（无码）只在字面就是所打原文、且词库有字面相同的词时才可删；单独出现的原文条
+/// （`wxyzqk`；`usa`，词库只有 `USA`）与大小写变形条一律不可删：菜单灰掉、热键不写规则。
 #[test]
 fn head_raw_candidate_delete() {
     skip_without_data!();
     let cfg = config("english");
     let store = fresh_store("head");
-    let coord = open(&cfg, &store);
-    type_str(&coord, "wxyzqk");
-    let page = coord.debug_candidate_triples();
-    assert_eq!(
-        page.first().map(|c| (c.0.as_str(), c.1.as_str())),
-        Some(("wxyzqk", "")),
-        "前提：首位是无码的原文条，实际 {page:?}"
-    );
-    assert!(!delete_item(&coord, 0).enabled, "非词库原文：删除灰掉");
-    coord.debug_candidate_op(CandidateOp::Delete, 0);
+    for input in ["wxyzqk", "usa"] {
+        let coord = open(&cfg, &store);
+        type_str(&coord, input);
+        let page = coord.debug_candidate_triples();
+        assert_eq!(
+            page.first().map(|c| (c.0.as_str(), c.1.as_str())),
+            Some((input, "")),
+            "前提：首位是无码的原文条，实际 {page:?}"
+        );
+        assert!(
+            !delete_item(&coord, 0).enabled,
+            "`{input}` 原文条：删除灰掉"
+        );
+        coord.debug_candidate_op(CandidateOp::Delete, 0);
+    }
     assert!(
         store.list_shadow_rules("english").unwrap().is_empty(),
         "热键路径也不写规则"
     );
+    assert!(
+        has_dict_word(&triples(&cfg, &store, "usa"), "USA"),
+        "USA 照出"
+    );
+}
 
+/// 删了 `ok` 后，`ok` 的原文条单独出现：删它不得屏蔽同码的 `OK`。
+#[test]
+fn head_raw_after_block_does_not_hit_other_case() {
+    skip_without_data!();
+    let cfg = config("english");
+    let store = fresh_store("ok_head");
     let coord = open(&cfg, &store);
-    type_str(&coord, "usa");
+    type_str(&coord, "ok");
     let page = coord.debug_candidate_triples();
     assert_eq!(
         page.first().map(|c| (c.0.as_str(), c.1.as_str())),
-        Some(("usa", "")),
-        "前提：`usa` 首位是原文条（词库只有 USA），实际 {page:?}"
+        Some(("ok", "ok")),
+        "前提：词库的 ok 占着原文那一格，实际 {page:?}"
     );
-    assert!(delete_item(&coord, 0).enabled);
     coord.debug_candidate_op(CandidateOp::Delete, 0);
-    assert_eq!(blocked(&store, "english"), vec!["USA".to_string()]);
+    assert_eq!(blocked(&store, "english"), vec!["ok".to_string()]);
     let coord = open(&cfg, &store);
-    type_str(&coord, "usa");
-    let after = coord.debug_candidate_triples();
-    assert!(!after.iter().any(|(t, _, _)| t == "USA"), "{after:?}");
+    type_str(&coord, "ok");
+    let page = coord.debug_candidate_triples();
     assert_eq!(
-        after.first().map(|c| c.0.as_str()),
-        Some("usa"),
-        "原文条仍在"
+        page.first().map(|c| (c.0.as_str(), c.1.as_str())),
+        Some(("ok", "")),
+        "屏蔽后首位是无码的原文条，实际 {page:?}"
     );
-    // 屏蔽后按码查词也查不到它（引擎管理器在截断前滤掉），原文条又成了无落点的候选
-    assert!(!delete_item(&coord, 0).enabled, "屏蔽后原文条无对应词库词");
+    assert!(!delete_item(&coord, 0).enabled);
+    coord.debug_candidate_op(CandidateOp::Delete, 0);
+    assert_eq!(
+        blocked(&store, "english"),
+        vec!["ok".to_string()],
+        "OK 不被连带屏蔽"
+    );
+    assert!(triples(&cfg, &store, "ok").iter().any(|(t, _)| t == "OK"));
+}
+
+/// 不跟随大小写时打 `Help`：原文条 `Help` 与词库行 `help` 分列，删原文条不得屏蔽 `help`。
+#[test]
+fn head_raw_does_not_hit_lower_dict_row() {
+    skip_without_data!();
+    let mut cfg = config("english");
+    cfg.schema.english.case_follow_input = false;
+    let store = fresh_store("help_head");
+    let coord = open(&cfg, &store);
+    type_str(&coord, "Help");
+    let page = coord.debug_candidate_triples();
+    assert_eq!(
+        page.first().map(|c| (c.0.as_str(), c.1.as_str())),
+        Some(("Help", "")),
+        "前提：首位是无码的原文条，实际 {page:?}"
+    );
+    assert!(
+        page.iter().any(|(t, c, _)| t == "help" && !c.is_empty()),
+        "前提：{page:?}"
+    );
+    assert!(!delete_item(&coord, 0).enabled);
+    coord.debug_candidate_op(CandidateOp::Delete, 0);
+    assert!(blocked(&store, "english").is_empty());
+}
+
+/// 临英的大小写变形条（≠ 所打原文的头部候选）一律不可删：它对应不到唯一一个词库词。
+#[test]
+fn case_variant_head_not_deletable() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let store = fresh_store("variant");
+    let coord = open(&cfg, &store);
+    type_str(&coord, "Us");
+    let page = coord.debug_candidate_triples();
+    let variants: Vec<usize> = page
+        .iter()
+        .enumerate()
+        .filter(|(_, (t, c, _))| c.is_empty() && t != "Us" && t.eq_ignore_ascii_case("us"))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !variants.is_empty(),
+        "前提：临英 `Us` 有变形条，实际 {page:?}"
+    );
+    for i in variants {
+        assert!(
+            !delete_item(&coord, i).enabled,
+            "变形条 {:?} 不可删",
+            page[i]
+        );
+        coord.debug_candidate_op(CandidateOp::Delete, i);
+        assert_eq!(
+            coord.debug_candidate_triples(),
+            page,
+            "临英里操作后按临英重建候选，窗口不被清空"
+        );
+    }
+    assert!(blocked(&store, "english").is_empty());
+    assert!(store.list_shadow_rules("english").unwrap().is_empty());
 }
 
 /// 英文用户词：真删所有编码条目再屏蔽；单条显式加词撤销屏蔽。

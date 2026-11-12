@@ -2812,7 +2812,7 @@ impl Coordinator {
                     );
                     let want_variants = te.case_variants && !phrase_only;
                     // mix 文本缓冲恒小写：大小写跟随在这里无事可做（见上）。
-                    let blocked = self.blocked_words_in(member);
+                    let blocked = self.blocked_words_in(&self.engine_mgr.data_schema_id(member));
                     let want_raw = crate::english_candidates::wants_raw_candidate(
                         raw_mode,
                         &state.mix_buffer,
@@ -2960,7 +2960,7 @@ impl Coordinator {
             RawCandidateMode::InDict if !queried => RawCandidateMode::Always,
             m => m,
         };
-        let blocked = self.blocked_words_in(EN);
+        let blocked = self.blocked_words_in(&self.engine_mgr.data_schema_id(EN));
         let raw_pinned = crate::english_candidates::wants_raw_candidate(
             raw_mode,
             raw,

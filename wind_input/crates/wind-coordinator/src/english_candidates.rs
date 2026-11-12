@@ -118,8 +118,11 @@ pub(crate) fn wants_raw_candidate(
                 || blocked.is_some_and(|b| {
                     b.contains(raw)
                         || (follow_case
-                            && b.iter()
-                                .any(|w| project_to_input_case(raw, w).as_deref() == Some(raw)))
+                            && b.iter().any(|w| {
+                                // 先按忽略大小写预筛：投影要分配，屏蔽集里绝大多数词与原文无关。
+                                w.eq_ignore_ascii_case(raw)
+                                    && project_to_input_case(raw, w).as_deref() == Some(raw)
+                            }))
                 })
         }
     }
@@ -429,7 +432,8 @@ impl crate::coordinator::Coordinator {
 
     /// 按英文词库的键规则找 `head_text` 对应的词库词：码 = 小写化的缓冲，在**精确码**命中里先找
     /// 字面相同的，再找仅大小写不同的。返回词库原样的那条候选（`text` 即词库原文）。
-    /// 记词频（[`Self::english_head_dict_word`]）与右键删除头部原文候选（`delete_target`）共用。
+    /// 记词频（[`Self::english_head_dict_word`]）与右键删除头部原文候选（`delete_target`，它只收
+    /// 字面相同的那支）共用。
     /// 被「屏蔽这个词」的词查不到（引擎管理器已滤掉）。
     pub(crate) fn english_exact_dict_word(
         &self,
