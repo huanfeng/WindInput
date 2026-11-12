@@ -269,7 +269,8 @@ fn segmented_commit_of_blocked_word_is_not_learned() {
     assert!(!has(&cfg, &store, "nihao", "你好"));
 }
 
-/// 删多字用户词：所有编码下的用户 / 临时条目都删掉，词频与联想记录清掉，不写屏蔽行。
+/// 删多字用户词：所有编码下的用户 / 临时条目都删掉，词频与联想记录清掉，并屏蔽这个词
+/// （只删不屏蔽，分段上屏或组句又会把它造回来）。
 #[test]
 fn delete_user_word_purges_all_codes() {
     if !has_schemas() {
@@ -303,14 +304,18 @@ fn delete_user_word_purges_all_codes() {
     assert!(store.get_temp_words("pinyin", "nihaoa").unwrap().is_empty());
     assert!(store.get_freq("pinyin", "nihao", "倪豪").unwrap().is_none());
     assert!(store.assoc_history("pinyin", "倪豪", 0).unwrap().is_empty());
-    assert!(blocked(&store).is_empty(), "用户词不留屏蔽记录");
-    assert!(store.list_shadow_rules("pinyin").unwrap().is_empty());
+    assert_eq!(blocked(&store), vec!["倪豪".to_string()], "同时屏蔽");
+    assert_eq!(
+        store.list_shadow_rules("pinyin").unwrap().len(),
+        1,
+        "只有那条 `*` 行"
+    );
     assert!(!has(&cfg, &store, "lihao", "倪豪"));
 }
 
-/// 合并候选（系统词 + 同文用户词）：只删用户那条，系统那条照常显示，不屏蔽。
+/// 合并候选（系统词 + 同文用户词）：真删用户那条并屏蔽，系统那条也不再出现。
 #[test]
-fn delete_merged_candidate_removes_only_user_entry() {
+fn delete_merged_candidate_purges_and_blocks() {
     if !has_schemas() {
         eprintln!("跳过：缺 build_dev 词库");
         return;
@@ -322,8 +327,59 @@ fn delete_merged_candidate_removes_only_user_entry() {
         .unwrap();
     delete_on_page(&cfg, &store, "nihao", "你好");
     assert!(store.get_user_words("pinyin", "nihao").unwrap().is_empty());
-    assert!(blocked(&store).is_empty());
-    assert!(has(&cfg, &store, "nihao", "你好"), "系统词照常显示");
+    assert_eq!(blocked(&store), vec!["你好".to_string()]);
+    assert!(!has(&cfg, &store, "nihao", "你好"), "系统那条也不出现");
+    assert!(!has(&cfg, &store, "nh", "你好"));
+}
+
+/// GH#269 的形态：选过的整句学进了临时词库，删掉它后候选消失，再分段上屏也不会学回来。
+#[test]
+fn delete_learned_sentence_stays_gone() {
+    if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let mut cfg = config("pinyin");
+    cfg.schema.pinyin.auto_learn.enabled = true;
+    cfg.schema.pinyin.auto_learn.promote_count = 0; // 留在临时词库
+    let store = fresh_store("learned");
+    let input = "tazaijialikanshu";
+    let word = "他在家里看书"; // 词库里没有，整句合成
+    let learned = |store: &Store| {
+        let mut n = 0;
+        store
+            .for_each_temp_word("pinyin", "", &mut |w| {
+                n += usize::from(w.text == word);
+                true
+            })
+            .unwrap();
+        n
+    };
+    let coord = open(&cfg, &store);
+    type_keys(&coord, input);
+    assert_eq!(pick(&coord, word).as_deref(), Some(word), "前提：整句可选");
+    assert_eq!(learned(&store), 1, "前提：选中的合成整句学进临时词库");
+
+    delete_on_page(&cfg, &store, input, word);
+    assert_eq!(learned(&store), 0, "临时词真删");
+    assert_eq!(blocked(&store), vec![word.to_string()], "并屏蔽");
+    let after = candidates(&cfg, &store, input);
+    assert!(!after.iter().any(|t| t == word), "候选消失，实际 {after:?}");
+    let (text, rest) = space_commit(&cfg, &store, input);
+    assert!(rest.is_empty(), "首选仍覆盖整串，剩 `{rest}`");
+    assert_ne!(text, word);
+
+    // 分段上屏又拼出它：上屏照常、不学回
+    let coord = open(&cfg, &store);
+    type_keys(&coord, input);
+    let mut out = String::new();
+    for seg in ["他", "在", "家里", "看书"] {
+        if let Some(t) = pick(&coord, seg) {
+            out = t;
+        }
+    }
+    assert_eq!(out, word, "前提：分段上屏拼出整句");
+    assert_eq!(learned(&store), 0, "不再学回");
 }
 
 /// 单条显式加词撤销屏蔽（所有编码都回来）；批量导入不撤，结果里按文字计入被隐藏数。
