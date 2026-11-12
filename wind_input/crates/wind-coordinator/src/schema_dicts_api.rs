@@ -22,6 +22,7 @@
 //! - **用户分库的列表**：它有自己的条目数 / 文件 / 损坏状态等字段，见 `userDicts.list`，
 //!   [`list`] 只列方案文件（含发现目录）登记的附加库。
 
+use serde_json::{Value, json};
 use wind_config::schema::DictSpec;
 use wind_store::user_dicts::ID_PREFIX;
 
@@ -35,6 +36,13 @@ pub struct SchemaDictEntry {
     pub description: String,
     /// 当前生效的开关：用户覆盖 ?? 方案 `default_enabled` ?? 关。
     pub enabled: bool,
+    /// 方案文件写的分组（`group`）；发现目录登记的库没有。
+    pub group: Option<String>,
+    /// 由 `[[dictionary_dirs]]` 自动登记（`dir:` 前缀，见 `EngineManager::inject_dir_dicts`），
+    /// 不是方案文件手写的。
+    pub from_dir: bool,
+    /// 词库文件，相对 `schemas/`。
+    pub path: String,
 }
 
 /// 列出 `schema_id` 的附加词库，按方案文件顺序（发现目录登记的排在声明的之后）。
@@ -59,8 +67,39 @@ pub fn list<H: WebDataHost + ?Sized>(
             description: d.description.clone(),
             // `is_enabled` 对非主库即「enabled ?? default_enabled ?? false」，与引擎加载判据同一份
             enabled: d.is_enabled(),
+            group: d.group.clone(),
+            from_dir: d.id.starts_with(DIR_PREFIX),
+            path: d.path.clone(),
         })
         .collect())
+}
+
+/// 发现目录登记的库的 id 前缀（`EngineManager::inject_dir_dicts` 生成）。
+const DIR_PREFIX: &str = "dir:";
+
+/// `sysDict.categories`：设置端词库窗「分类词库」清单。口径同 [`list`]，每项另带
+/// `group`、`source`（`"bundled"` 方案文件登记 / `"dir"` 发现目录登记）与 `count`。
+///
+/// `count` 读词库文件计数（`EngineManager::dict_file_entries`，按文件大小与 mtime 缓存），
+/// 停用的库也有；文件不在给 null。
+pub fn categories<H: WebDataHost + ?Sized>(h: &H, schema_id: &str) -> anyhow::Result<Value> {
+    let mgr = h.engine_mgr();
+    Ok(Value::Array(
+        list(h, schema_id)?
+            .into_iter()
+            .map(|d| {
+                json!({
+                    "id": d.id,
+                    "label": d.label,
+                    "description": d.description,
+                    "group": d.group,
+                    "enabled": d.enabled,
+                    "source": if d.from_dir { "dir" } else { "bundled" },
+                    "count": mgr.dict_file_entries(&d.path),
+                })
+            })
+            .collect(),
+    ))
 }
 
 /// 设 `schema_id` 的附加词库 `dict_id` 启用与否：持久化后对已加载引擎即时生效。

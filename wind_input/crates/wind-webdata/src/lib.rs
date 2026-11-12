@@ -6,6 +6,7 @@
 //! 接入进度：契约全部数据域方法均接通真实 store/engine/theme：
 //! - schema.*（含三层合并 getConfig/saveConfig/resetConfig/setDictEnabled/delete）
 //! - dict.*（含 encode/genPinyin 反查出码）、temp.*、freq.*、shadow.*、phrase.*、stats.*、theme.*
+//! - sysDict.categories（词库窗的分类词库清单）
 //! - `schema.references` 暂返 `{}`（删除安全检查未用，前端宽松消费）；
 //!   无 store/themes 时各方法返回合法空集（降级，不报错）。
 //!
@@ -484,6 +485,11 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         ),
+        // 词库窗「系统词库 → 分类词库」清单（带分组、来源、条数）：本体在
+        // `wind_coordinator::schema_dicts_api::categories`；开关仍走 `schema.setDictEnabled`。
+        "sysDict.categories" => {
+            wind_coordinator::schema_dicts_api::categories(h, str_param(params, "schema")?)
+        }
         // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
         // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
         // 深链带了参数就不会调它——那时用户的意图已经明确。
@@ -11092,6 +11098,144 @@ mod system_stats_tests {
                 .is_err()
         );
         assert!(c.web_data_rpc("dict.systemStats", &json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sys_dict_categories_tests {
+    //! `sysDict.categories`：分类词库清单的形状（group / source / count），停用库也有条数，
+    //! 发现目录登记的库 source 为 dir，开关后再取即反映新状态。
+    use super::*;
+    use std::sync::Arc;
+    use wind_config::Config;
+    use wind_coordinator::Coordinator;
+    use wind_store::Store;
+
+    /// 码表 `zm2`：主库 + 停用的分组库 + 文件缺失的库 + `zm2/ext/` 下一张未登记的库；
+    /// 混输 `mx2` 没有自己的附加库。
+    fn coord(tag: &str) -> Arc<Coordinator> {
+        let base = std::env::temp_dir().join(format!("wind_syscats-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let schemas = base.join("schemas");
+        std::fs::create_dir_all(schemas.join("zm2/ext")).unwrap();
+        std::fs::write(
+            schemas.join("zm2.schema.toml"),
+            "[schema]\nid = \"zm2\"\nname = \"码二\"\n[engine]\ntype = \"codetable\"\n\
+             [engine.codetable]\nmax_code_length = 4\n\
+             [[dictionaries]]\nid = \"main\"\npath = \"zm2/zm2.dict.yaml\"\ndefault = true\n\
+             [[dictionaries]]\nid = \"term\"\nlabel = \"术语\"\ndescription = \"专业词\"\n\
+             group = \"专业术语\"\npath = \"zm2/term.dict.yaml\"\ndefault_enabled = false\n\
+             [[dictionaries]]\nid = \"ghost\"\nlabel = \"缺文件\"\npath = \"zm2/ghost.dict.yaml\"\n\
+             default_enabled = true\n",
+        )
+        .unwrap();
+        let head = "---\nname: x\nversion: \"1\"\n...\n";
+        std::fs::write(
+            schemas.join("zm2/zm2.dict.yaml"),
+            format!("{head}甲\ta\t9\n乙\tb\t5\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zm2/term.dict.yaml"),
+            format!("{head}算法\taaaa\t1\n# 注释\n\n编译\tbbbb\t1\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zm2/ext/mine.dict.yaml"),
+            "---\nname: 我的词\n...\n丙\tc\t1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("mx2.schema.toml"),
+            "[schema]\nid = \"mx2\"\nname = \"混\"\n[engine]\ntype = \"mixed\"\n\
+             [engine.mixed]\nprimary_schema = \"zm2\"\n",
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
+        let mut cfg = Config::default();
+        cfg.schema.active = "zm2".into();
+        cfg.schema.available = vec!["zm2".into(), "mx2".into()];
+        // override 落临时目录：开关测试会写它，不能碰本机配置。
+        Coordinator::new_headless_with_store_override(
+            cfg,
+            Some(&base),
+            store,
+            Some(base.join("overrides")),
+        )
+    }
+
+    fn item<'a>(v: &'a Value, id: &str) -> &'a Value {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap_or_else(|| panic!("清单里没有 {id}: {v}"))
+    }
+
+    #[test]
+    fn lists_groups_sources_and_counts_without_main() {
+        let c = coord("shape");
+        let v = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+            .unwrap();
+        let ids: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            ["term", "ghost", "dir:zm2/ext/mine"],
+            "不含主库，按方案顺序"
+        );
+        assert_eq!(
+            item(&v, "term"),
+            &json!({
+                "id": "term", "label": "术语", "description": "专业词",
+                "group": "专业术语", "enabled": false, "source": "bundled", "count": 2,
+            }),
+            "停用的库也有条数"
+        );
+        let ghost = item(&v, "ghost");
+        assert_eq!(
+            (&ghost["enabled"], &ghost["count"]),
+            (&json!(true), &Value::Null)
+        );
+        assert_eq!(ghost["group"], Value::Null, "没写 group 给 null");
+        let mine = item(&v, "dir:zm2/ext/mine");
+        assert_eq!(
+            (
+                &mine["source"],
+                &mine["label"],
+                &mine["count"],
+                &mine["group"]
+            ),
+            (&json!("dir"), &json!("我的词"), &json!(1), &Value::Null)
+        );
+    }
+
+    #[test]
+    fn reflects_toggle_and_rejects_bad_input() {
+        let c = coord("toggle");
+        c.web_data_rpc(
+            "schema.setDictEnabled",
+            &json!({"id": "zm2", "dictId": "term", "enabled": true}),
+        )
+        .unwrap();
+        let v = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+            .unwrap();
+        assert_eq!(item(&v, "term")["enabled"], true);
+        let mx = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "mx2"}))
+            .unwrap();
+        assert_eq!(mx, json!([]), "混输没有自己的附加库");
+        assert!(
+            c.web_data_rpc("sysDict.categories", &json!({"schema": "nope"}))
+                .is_err()
+        );
+        assert!(c.web_data_rpc("sysDict.categories", &json!({})).is_err());
     }
 }
 

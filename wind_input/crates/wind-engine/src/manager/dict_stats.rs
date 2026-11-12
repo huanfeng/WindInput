@@ -343,6 +343,65 @@ impl EngineManager {
     }
 }
 
+/// [`EngineManager::dict_file_entries`] 的缓存：文件绝对路径 → (大小, mtime, 条数)。
+type EntryCountCache = HashMap<std::path::PathBuf, (u64, Option<std::time::SystemTime>, u64)>;
+static ENTRY_COUNTS: std::sync::OnceLock<std::sync::Mutex<EntryCountCache>> =
+    std::sync::OnceLock::new();
+
+impl EngineManager {
+    /// 一张词库文件的条目数（设置端「分类词库」清单用）：按方案里的 `path` 经覆盖解析定位
+    /// `.dict.yaml`，数正文行。停用的库也数得出——只读文本，不加载、不建 wdat（同上面「停用的
+    /// 库只列不计」的顾虑）。按（大小, mtime）缓存，文件没变不重扫。
+    ///
+    /// 只数这一个文件，不含它 `import_tables` 引进来的子表。文件不在（含只投放了 wdat 的库）
+    /// 或读不出返回 `None`。
+    pub fn dict_file_entries(&self, rel: &str) -> Option<u64> {
+        let schemas_dir = self.data_dir.as_deref()?.join("schemas");
+        let path = Self::resolve_dict_file(rel, &schemas_dir);
+        let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+        let stamp = (meta.len(), meta.modified().ok());
+        let cache = ENTRY_COUNTS.get_or_init(Default::default);
+        if let Some(&(len, mtime, n)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&path)
+            && (len, mtime) == stamp
+        {
+            return Some(n);
+        }
+        let n = count_dict_entries(std::io::BufReader::new(std::fs::File::open(&path).ok()?))?;
+        cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path, (stamp.0, stamp.1, n));
+        Some(n)
+    }
+}
+
+/// 数 `.dict.yaml` 的词条行：跳过 `---` 到 `...` 的 YAML 头、空行与 `#` 注释。没有 YAML 头的
+/// 文件从头数。读到非 UTF-8 返回 `None`。
+fn count_dict_entries(r: impl std::io::BufRead) -> Option<u64> {
+    let mut in_head = false;
+    let mut started = false;
+    let mut n = 0u64;
+    for line in r.lines() {
+        let line = line.ok()?;
+        let t = line.trim_end();
+        if in_head {
+            in_head = t != "...";
+            continue;
+        }
+        if t.trim_start().is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if !started && t == "---" {
+            in_head = true;
+            started = true;
+            continue;
+        }
+        started = true;
+        n += 1;
+    }
+    Some(n)
+}
+
 /// 通规三级 → 三个累进字集（一级 / 一二级 / 全表）。分节读不出三级时不出字集统计。
 fn common_han_charsets(text: &str) -> Vec<Charset> {
     let levels = wind_dict::stats::parse_common_han_levels(text);
@@ -474,6 +533,35 @@ mod tests {
         assert_eq!(s.charsets[2].missing_chars, ["丢", "乙"]);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 停用的库也数得出；文件变了重数；文件不在给 None。
+    #[test]
+    fn file_entries_count_disabled_dicts_and_follow_changes() {
+        let base = fixture("entries");
+        let m = mgr(&base);
+        assert_eq!(m.dict_file_entries("ct/main.dict.yaml"), Some(6));
+        assert_eq!(m.dict_file_entries("ct/off.dict.yaml"), Some(1), "停用库");
+        write(
+            &base.join("schemas/ct/off.dict.yaml"),
+            "---\nname: x\n...\nzz\t乙\t1\nzy\t丙\t1\n",
+        );
+        assert_eq!(m.dict_file_entries("ct/off.dict.yaml"), Some(2), "改了重数");
+        assert_eq!(m.dict_file_entries("ct/none.dict.yaml"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn count_skips_head_comments_and_blank_lines() {
+        let text =
+            "# Rime dictionary\n\n---\nname: x\n# 头里的注释\n...\n甲\ta\n\n# 注释\n乙\tb\t1\n";
+        assert_eq!(count_dict_entries(text.as_bytes()), Some(2));
+        assert_eq!(
+            count_dict_entries("甲\ta\n乙\tb\n".as_bytes()),
+            Some(2),
+            "无头"
+        );
+        assert_eq!(count_dict_entries(&b"\xff\xfe\n"[..]), None);
     }
 
     #[test]

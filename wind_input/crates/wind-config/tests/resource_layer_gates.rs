@@ -72,9 +72,9 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/wind-engine/src/manager/dict_stats.rs",
-        1,
-        "词库统计只把 data 层根交给 load_dict_individually → resolve_dict_file，层序在它内部展开，\
-         与 manager.rs 那 4 处同理",
+        2,
+        "词库统计与分类词库计数（dict_file_entries）都只把 data 层根交给 resolve_dict_file \
+         （统计经 load_dict_individually），层序在它内部展开，与 manager.rs 那 4 处同理",
     ),
     (
         "crates/wind-config/src/config.rs",
