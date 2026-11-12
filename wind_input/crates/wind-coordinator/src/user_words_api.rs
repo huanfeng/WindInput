@@ -174,11 +174,14 @@ pub fn add<H: WebDataHost + ?Sized>(
 /// 读端 `apply_shadow` 按文本过滤、不看来源：用户删过某个系统词后再手动加回同码同文的词，
 /// 规则不撤就永远打不出来。**自动**学词 / 自动晋升不走这里——删过的词不该因为又打到一次就复活。
 ///
-/// - `data_schema`：词条落库的数据方案（已折叠）。活跃方案的规则桶与之不同时（混输：规则在
-///   混输自己的桶、词落主码表 / 拼音）一并清活跃方案那个桶。
+/// - `data_schema`：词条落库的数据方案（已折叠）。混输方案的规则记在混输自己的桶里、词却落主码表 /
+///   拼音，故已启用（及当前）的混输方案里以它为成员的，各自的桶一并清——用户可能在混输下删、
+///   切到纯码表后再加。
 /// - `words`：存储域的 `(扁平码, 文本)`。规则键是输入码（`Coordinator::shadow_code_of`）：码表
-///   与词条码同形；全拼保留手动分隔符 `'`，故拼音桶的键去掉 `'` 再比；双拼完整转换时键已是
-///   连写全拼，与词条码同形。简拼、前缀等别的编码上的规则不动。
+///   与词条码同形，原样比；双拼完整转换时键已是连写全拼。拼音桶的键先去掉手动分隔符 `'`，
+///   再补一个 ü 归一形态（全拼敲 `xv` / `lue` 删的词，词条码归一成 `xu` / `lve`），任一命中即撤。
+///   ü 形态只在归一后能整段切成全拼音节时才补：双拼未完整转换时键是原始击键（`v` 是布局键），
+///   那类串归一后多半切不成全拼，不该据此撤。简拼、前缀等别的编码上的规则不动。
 ///
 /// 清理失败只记日志：词已经加进去了，不能因为规则文件被外部编辑占着就报加词失败。
 pub fn clear_deleted_for_added<H: WebDataHost + ?Sized>(
@@ -194,31 +197,40 @@ pub fn clear_deleted_for_added<H: WebDataHost + ?Sized>(
     }
     let em = h.engine_mgr();
     let mut buckets = vec![data_schema.to_string()];
-    let active = em.active_schema_id();
-    let feeds_active = [
-        wind_candidate::CandidateSource::CodeTable,
-        wind_candidate::CandidateSource::Pinyin,
-    ]
-    .into_iter()
-    .any(|src| em.write_data_schema_id(&active, src).as_deref() == Some(data_schema));
-    if feeds_active {
-        let b = em.data_schema_id(&active);
-        if !buckets.contains(&b) {
+    let mut schemas = em.available_schemas();
+    schemas.push(em.active_schema_id());
+    for s in &schemas {
+        if em.schema_engine_type(s).as_deref() != Some("mixed") {
+            continue;
+        }
+        let member = [
+            wind_candidate::CandidateSource::CodeTable,
+            wind_candidate::CandidateSource::Pinyin,
+        ]
+        .into_iter()
+        .any(|src| em.write_data_schema_id(s, src).as_deref() == Some(data_schema));
+        let b = em.data_schema_id(s);
+        if member && !buckets.contains(&b) {
             buckets.push(b);
         }
     }
-    // 只去分隔符，不做 ü 归一：双拼未完整转换时键是原始击键，`v` 是布局键，归一会把它改成
-    // 另一个码（见 `normalize_u_umlaut` 的 ⚠）。
     let pinyin = data_schema == wind_engine::manager::PINYIN_DATA_SCHEMA;
-    let key_norm = |k: &str| -> String {
-        if pinyin {
-            k.replace('\'', "")
-        } else {
-            k.to_string()
+    let key_forms = |k: &str| -> Vec<String> {
+        if !pinyin {
+            return vec![k.to_string()];
         }
+        let flat = k.replace('\'', "");
+        let mut forms = Vec::with_capacity(2);
+        if let std::borrow::Cow::Owned(u) = wind_engine::pinyin::spelling::normalize_u_umlaut(&flat)
+            && wind_engine::pinyin::syllable::is_full_pinyin_code(&u, 0)
+        {
+            forms.push(u);
+        }
+        forms.push(flat);
+        forms
     };
     for b in &buckets {
-        match store.clear_deleted_for_words(b, words, &key_norm) {
+        match store.clear_deleted_for_words(b, words, &key_forms) {
             Ok(0) => {}
             Ok(n) => tracing::debug!("加词：撤销 {n} 条删除规则 schema={b}"),
             Err(e) => tracing::warn!("加词：撤销删除规则失败 schema={b}: {e}"),

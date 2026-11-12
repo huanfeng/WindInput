@@ -267,25 +267,32 @@ impl Store {
     /// 撤销 `words`（存储域的 `(扁平码, 文本)`）对应的删除规则，返回撤掉的条数。显式加词后调用：
     /// 读端按文本过滤、不看来源，规则留着会把加回来的同文用户词一并滤掉。
     ///
-    /// 规则键是**输入码**，与词条码不一定同形（全拼保留手动分隔符 `'`），由 `key_norm` 把键
-    /// 归一到词条码的域后再比。只动 `delete`，置顶规则不碰。无命中时不写文件。
+    /// 规则键是**输入码**，与词条码不一定同形（全拼保留手动分隔符 `'`、ü 可能敲成 `v`），由
+    /// `key_forms` 给出键在词条码域里的候选形态，任一形态命中即撤。只动 `delete`，置顶规则不碰。
+    /// 命中按文件现状判（先 sync，手改优先），无命中时不写文件。
     pub fn clear_deleted_for_words(
         &self,
         schema: &str,
         words: &[(&str, &str)],
-        key_norm: &dyn Fn(&str) -> String,
+        key_forms: &dyn Fn(&str) -> Vec<String>,
     ) -> anyhow::Result<usize> {
         if words.is_empty() {
             return Ok(0);
         }
         let want: std::collections::HashSet<(&str, &str)> = words.iter().copied().collect();
         let hits: std::collections::HashSet<(String, String)> = {
-            let doc = self.shadow_table(schema)?.doc();
+            let t = self.shadow_table(schema)?;
+            t.sync();
+            let doc = t.doc();
             doc.rows
                 .iter()
                 .filter(|r| doc.get(r, "action") == "delete")
                 .map(|r| (doc.get(r, "code"), doc.get(r, "text")))
-                .filter(|(code, text)| want.contains(&(key_norm(code).as_str(), *text)))
+                .filter(|(code, text)| {
+                    key_forms(code)
+                        .iter()
+                        .any(|k| want.contains(&(k.as_str(), *text)))
+                })
                 .map(|(code, text)| (code.to_string(), text.to_string()))
                 .collect()
         };
@@ -572,7 +579,7 @@ mod tests {
         s.delete_shadow("py", "ni'hao", "你好").unwrap();
         s.delete_shadow("py", "nh", "你好").unwrap();
         s.pin_shadow("py", "nihao", "你号", None, 0).unwrap();
-        let strip = |k: &str| k.replace('\'', "");
+        let strip = |k: &str| vec![k.replace('\'', "")];
 
         assert_eq!(
             s.clear_deleted_for_words("py", &[("nihao", "你好")], &strip)
@@ -593,11 +600,34 @@ mod tests {
         // 恒等归一：`ni'hao` 不再等于 `nihao`
         s.delete_shadow("wb", "a'b", "工").unwrap();
         assert_eq!(
-            s.clear_deleted_for_words("wb", &[("ab", "工")], &|k: &str| k.to_string())
+            s.clear_deleted_for_words("wb", &[("ab", "工")], &|k: &str| vec![k.to_string()])
                 .unwrap(),
             0
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 命中按文件现状判：表已载入后文件被外部改过（这里拿另一份库生成的规则文件覆盖），
+    /// 不先 sync 就看不见新写进去的删除规则。
+    #[test]
+    fn clear_deleted_for_words_sees_hand_edited_file() {
+        let path = tmp("wind_sh_clear_sync.redb");
+        let s = Store::open(&path).unwrap();
+        assert!(s.get_shadow_rules("py", "nihao").unwrap().is_none()); // 表载入内存
+        let path2 = tmp("wind_sh_clear_sync2.redb");
+        let s2 = Store::open(&path2).unwrap();
+        s2.delete_shadow("py", "nihao", "你好").unwrap();
+        let dst = s.shadow_path("py");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(s2.shadow_path("py"), &dst).unwrap();
+
+        let n = s
+            .clear_deleted_for_words("py", &[("nihao", "你好")], &|k: &str| vec![k.to_string()])
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(s.get_shadow_rules("py", "nihao").unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]

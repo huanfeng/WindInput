@@ -88,18 +88,37 @@ fn candidates(cfg: &Config, store: &Arc<Store>, input: &str) -> Vec<String> {
 /// 打 `input`，把首页第 2 条（非首选，免得撞自动上屏）右键删除，返回被删的词与写端作用域。
 /// 断言删除已生效——后续「重新出现」的断言才有意义。
 fn delete_second(cfg: &Config, store: &Arc<Store>, input: &str) -> (String, (String, String)) {
+    delete_on_page(cfg, store, input, None)
+}
+
+/// 同 [`delete_second`]，`want` 给定时删首页上的那一条。
+fn delete_on_page(
+    cfg: &Config,
+    store: &Arc<Store>,
+    input: &str,
+    want: Option<&str>,
+) -> (String, (String, String)) {
     let coord = open(cfg, store);
     type_keys(&coord, input);
     let page = coord.debug_page_texts();
-    assert!(
-        page.len() >= 2,
-        "前提：`{input}` 首页至少两条候选，实际 {page:?}"
-    );
-    let victim = page[1].clone();
+    let idx = match want {
+        Some(w) => page
+            .iter()
+            .position(|t| t == w)
+            .unwrap_or_else(|| panic!("前提：`{input}` 首页应有「{w}」，实际 {page:?}")),
+        None => {
+            assert!(
+                page.len() >= 2,
+                "前提：`{input}` 首页至少两条候选，实际 {page:?}"
+            );
+            1
+        }
+    };
+    let victim = page[idx].clone();
     let scope = coord
         .debug_candidate_op_scope()
         .expect("前提：主输入路应有候选调整作用域");
-    coord.debug_candidate_op(CandidateOp::Delete, 1);
+    coord.debug_candidate_op(CandidateOp::Delete, idx);
     let after = candidates(cfg, store, input);
     assert!(
         !after.contains(&victim),
@@ -116,10 +135,11 @@ fn assert_back(cfg: &Config, store: &Arc<Store>, input: &str, victim: &str, how:
     );
 }
 
-/// 码表：删系统词 → 命令栏 `dict.add` 加回（与快捷加词同一条 `try_dict_add`）→ 重新出现。
+/// 码表：删系统词 → 命令栏 `dict.add` 加回（`try_dict_add`）→ 重新出现。
 #[test]
 fn codetable_readd_via_dict_add_shows_again() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let cfg = config("wubi86");
@@ -142,6 +162,7 @@ fn codetable_readd_via_dict_add_shows_again() {
 #[test]
 fn codetable_readd_via_settings_shows_again() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let cfg = config("wubi86");
@@ -156,6 +177,7 @@ fn codetable_readd_via_settings_shows_again() {
 #[test]
 fn pinyin_readd_via_settings_shows_again() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let cfg = config("pinyin");
@@ -173,6 +195,7 @@ fn pinyin_readd_via_settings_shows_again() {
 #[test]
 fn pinyin_readd_after_delete_under_separator() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let mut cfg = config("pinyin");
@@ -190,6 +213,7 @@ fn pinyin_readd_after_delete_under_separator() {
 #[test]
 fn shuangpin_delete_writes_normalized_code() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let cfg = config("shuangpin");
@@ -217,6 +241,7 @@ fn shuangpin_delete_writes_normalized_code() {
 #[test]
 fn shuangpin_readd_via_settings_shows_again() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let cfg = config("shuangpin");
@@ -236,6 +261,7 @@ fn mixed_readd_via_dict_add_shows_again() {
             .join("schemas/wubi86_pinyin.schema.toml")
             .exists()
     {
+        eprintln!("跳过：缺 build_dev 词库或混输方案");
         return;
     }
     let cfg = config("wubi86_pinyin");
@@ -251,6 +277,7 @@ fn mixed_readd_via_dict_add_shows_again() {
 #[test]
 fn import_tsv_clears_delete_rule() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let cfg = config("wubi86");
@@ -273,6 +300,7 @@ fn import_tsv_clears_delete_rule() {
 #[test]
 fn import_wdict_clears_delete_rule() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let cfg = config("wubi86");
@@ -313,6 +341,7 @@ fn pick(coord: &Coordinator, want: &str) -> Option<String> {
 #[test]
 fn auto_learn_does_not_revive_deleted_word() {
     if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
         return;
     }
     let mut cfg = config("pinyin");
@@ -348,4 +377,157 @@ fn auto_learn_does_not_revive_deleted_word() {
         !after.contains(&"你好".to_string()),
         "自动学词不得清掉用户的删除规则，实际 {after:?}"
     );
+}
+
+/// 全拼敲 `xv` 删的词（规则键 `xv`），设置页加回时码被 ü 归一成 `xu`：拼音桶的键补一个 ü 归一形态再比。
+#[test]
+fn pinyin_readd_after_delete_under_v_spelling() {
+    if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let cfg = config("pinyin");
+    let store = fresh_store("py_v");
+    let (victim, (_, code)) = delete_on_page(&cfg, &store, "xv", Some("需"));
+    assert_eq!(code, "xv", "前提：全拼规则键是原始击键");
+    let coord = open(&cfg, &store);
+    wind_coordinator::user_words_api::add(&*coord, "pinyin", "xv", &victim, 0).unwrap();
+    assert!(
+        store
+            .get_user_words("pinyin", "xu")
+            .unwrap()
+            .iter()
+            .any(|r| r.text == victim),
+        "前提：设置页加词把 `xv` 归一成 `xu` 落库"
+    );
+    assert_back(&cfg, &store, "xv", &victim, "设置页加词");
+}
+
+/// 反向：双拼未完整转换时规则键是原始击键（小鹤 `jvq`，末尾单键拼不成音节），`v` 是布局键。
+/// 它 ü 归一后（`juq`）切不成全拼，不得据此撤掉——哪怕加的词码恰好就是 `juq`。
+#[test]
+fn shuangpin_uncovered_key_not_cleared_by_v_form() {
+    if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let cfg = config("shuangpin");
+    let store = fresh_store("sp_uncovered");
+    let (victim, (_, code)) = delete_second(&cfg, &store, "jvq");
+    assert_eq!(code, "jvq", "前提：未完整转换时规则键是原始击键");
+    let coord = open(&cfg, &store);
+    wind_coordinator::user_words_api::add(&*coord, "shuangpin", "juq", &victim, 0).unwrap();
+    assert_eq!(
+        store
+            .get_shadow_rules("pinyin", "jvq")
+            .unwrap()
+            .map(|r| r.deleted),
+        Some(vec![victim.clone()]),
+        "双拼原始击键上的删除规则不该被 ü 形态撤掉"
+    );
+}
+
+/// 混输下删、切到纯码表后在设置页加回、再切回混输：混输桶不随当前方案，只要混输方案已启用且以
+/// 该数据方案为成员就清。
+#[test]
+fn mixed_bucket_cleared_when_adding_from_codetable() {
+    if !has_schemas()
+        || !data_dir()
+            .join("schemas/wubi86_pinyin.schema.toml")
+            .exists()
+    {
+        eprintln!("跳过：缺 build_dev 词库或混输方案");
+        return;
+    }
+    let mixed = config("wubi86_pinyin");
+    let store = fresh_store("mixed_from_ct");
+    let (victim, _) = delete_second(&mixed, &store, "aa");
+    let coord = open(&config("wubi86"), &store);
+    wind_coordinator::user_words_api::add(&*coord, "wubi86", "aa", &victim, 0).unwrap();
+    assert_back(&mixed, &store, "aa", &victim, "纯码表下设置页加词");
+}
+
+fn key_mods(k: u32, modifiers: u32) -> KeyEventData {
+    KeyEventData {
+        modifiers,
+        ..key(k)
+    }
+}
+
+/// 临时英文：缓冲带大写（Shift+H 进入即 `Hels`），作用域码取小写 `hels`。删系统英文词的规则要写在
+/// 读端同款的 `hels` 上；前：写在击键 `Hels` 上，删了照样出现。
+///
+/// 删的是词库里本身大写的词（`Helsinki`）。词库小写、靠大小写跟随显示成大写的词（`Help`）
+/// 删了仍会出现：规则记的是显示文本、读端比的是词库文本，那是另一处问题，本用例不覆盖。
+#[test]
+fn temp_english_delete_with_uppercase_buffer_takes_effect() {
+    let d = data_dir();
+    if !d.join("schemas/english.schema.toml").exists()
+        || !d.join("schemas/wubi86.schema.toml").exists()
+    {
+        eprintln!("跳过：缺 build_dev 英文 / 五笔方案");
+        return;
+    }
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["wubi86".into(), "english".into()];
+    cfg.schema.active = "wubi86".into();
+    cfg.input.default.chinese_mode = true;
+    let store = fresh_store("temp_en");
+    let enter = |coord: &Coordinator| {
+        coord.handle_key_event(&key_mods(u32::from(b'H'), wind_ipc::protocol::MOD_SHIFT));
+        type_keys(coord, "els");
+    };
+    let coord = open(&cfg, &store);
+    enter(&coord);
+    let page = coord.debug_page_texts();
+    // 首页前几条是输入原样的大小写变体（`Hels` / `hels` / `HELS`），删的要是词库词。
+    let idx = page
+        .iter()
+        .position(|t| t == "Helsinki")
+        .unwrap_or_else(|| panic!("前提：临英 `Hels` 首页应有词库词「Helsinki」，实际 {page:?}"));
+    let victim = page[idx].clone();
+    assert_eq!(
+        coord.debug_candidate_op_scope().map(|s| s.1),
+        Some("hels".to_string()),
+        "前提：临英作用域码是小写化缓冲"
+    );
+    coord.debug_candidate_op(CandidateOp::Delete, idx);
+
+    let again = open(&cfg, &store);
+    enter(&again);
+    let after = again.debug_all_candidate_texts();
+    assert!(
+        !after.contains(&victim),
+        "临英删除后 `{victim}` 应隐藏，实际 {after:?}"
+    );
+}
+
+/// 快捷加词（Ctrl+= → 回车，`confirm_add_word`）：删「你好」后分两次上屏「你」「好」，
+/// 用快捷加词把最近两字加回，`nihao` 下重新出现。
+#[test]
+fn quick_add_word_readd_shows_again() {
+    if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let cfg = config("pinyin");
+    let store = fresh_store("py_quick_add");
+    let (victim, _) = delete_on_page(&cfg, &store, "nihao", Some("你好"));
+
+    let coord = open(&cfg, &store);
+    type_keys(&coord, "ni");
+    assert_eq!(pick(&coord, "你").as_deref(), Some("你"));
+    type_keys(&coord, "hao");
+    assert_eq!(pick(&coord, "好").as_deref(), Some("好"));
+    coord.handle_key_event(&key_mods(0xBB, wind_ipc::protocol::MOD_CTRL)); // Ctrl+=
+    coord.handle_key_event(&key(0x0D)); // 回车确认
+    assert!(
+        store
+            .get_user_words("pinyin", "nihao")
+            .unwrap()
+            .iter()
+            .any(|r| r.text == victim),
+        "前提：快捷加词应把「你好」写进用户词库"
+    );
+    assert_back(&cfg, &store, "nihao", &victim, "快捷加词");
 }

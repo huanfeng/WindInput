@@ -27,16 +27,20 @@
 
 ---
 
-## 2026-11-12 · 双拼下右键删除系统词生效（0.132）
+## 2026-11-12 · 双拼、临时英文下右键删除系统词生效（0.132）
 
-- 合入：未合入（分支 fix/shadow-delete-readd）；范围：双拼方案主输入路
-- 变化：双拼完整转换时右键删除系统词，前：规则写在击键码（`nihc`）上、读端按全拼归一码（`nihao`）取，
-  删了照样出现 → 后：规则写在 `nihao` 上，当场隐藏，与全拼方案共享（全拼打 `nihao` 也隐藏，同置顶的既有口径）。
-  短语、用户词、临时词的删除不变（仍按击键码）。旧版写在击键码上的规则从未生效，留在文件里无影响。
+- 合入：未合入（分支 fix/shadow-delete-readd）；范围：双拼方案主输入路；临时英文
+- 变化：删除系统词的规则改写在读端同款的归一码上，此前写在击键码上、删了照样出现。
+  - 双拼完整转换时：前：写在 `nihc` 上、读端取 `nihao` → 后：写在 `nihao` 上，当场隐藏，与全拼方案共享
+    （全拼打 `nihao` 也隐藏，同置顶的既有口径）。
+  - 临时英文缓冲带大写（Shift+H 进入）时：前：写在 `Hels` 上、读端取小写 `hels` → 后：写在 `hels` 上，
+    删「Helsinki」这类词库里本身大写的词当场隐藏。词库小写、靠大小写跟随显示成大写的词（`Help`）删了仍出现，未改。
+  - 短语、用户词、临时词的删除不变（仍按击键码）。
+  - 旧版写在击键码上的规则从未生效，设置页规则列表里可能残留这类无效条目，可手动恢复。
 - 触发条件：出厂即生效
 - 回退旧行为：无（缺陷修复）
 - 钉住的测试：`wind-coordinator` `tests/shadow_delete_readd.rs::shuangpin_delete_writes_normalized_code` /
-  `shuangpin_readd_via_settings_shows_again`
+  `shuangpin_readd_via_settings_shows_again` / `temp_english_delete_with_uppercase_buffer_takes_effect`
 - 来源：内部
 
 ## 2026-11-12 · 删过的系统词再手动加回，候选重新出现（0.132）
@@ -45,14 +49,18 @@
 - 变化：
   - 右键删掉一个系统词后，再手动加同码同文的词（加词对话框 / 快捷加词 / 命令栏 `dict.add`、设置页加词或改词、
     设置页手动转正、导入词库），该码下这条候选重新出现，并撤掉那条删除规则。前：删除规则按文本过滤、不看来源，
-    加回的用户词一并被滤掉，永远打不出。例：五笔 `aa` 删「戒」再加「戒 aa」；全拼 `nihao`（含 `ni'hao`）删「拟好」再加。
+    加回的用户词一并被滤掉，永远打不出。例：五笔 `aa` 删「戒」再加「戒 aa」；全拼 `nihao`（含 `ni'hao`）删「拟好」再加；
+    全拼 `xv` 删「需」再加（词条码归一成 `xu`，也认）。
   - 只撤**同编码**上的删除：在简拼 `nh` 上删的词，加 `nihao` 后 `nh` 下仍隐藏。置顶规则不动。
   - 自动学词、临时词达阈值自动晋升**不撤**：删过的词不会因为又分步打出一次而复活。
-  - 混输方案下加词，连混输自己那份规则一起撤。
+  - 混输方案的规则单独记账：已启用的混输方案里以该码表 / 拼音为成员的，规则一起撤（混输下删、切到纯码表再加也算）。
+  - 双拼未完整转换时规则记在原始击键上（如 `jvq`），不按 ü 归一后的形态去撤。
 - 触发条件：出厂即生效
 - 回退旧行为：无（缺陷修复）
-- 钉住的测试：`wind-coordinator` `tests/shadow_delete_readd.rs`（码表 / 全拼 / 分隔符 / 双拼 / 混输 / 两种导入 /
-  自动学词不复活）；`wind-store` `shadow::tests::clear_deleted_for_words_only_touches_matching_deletes`
+- 钉住的测试：`wind-coordinator` `tests/shadow_delete_readd.rs`（码表 / 全拼 / 分隔符 / ü 拼写 / 双拼 / 双拼未完整转换不撤 /
+  混输 / 混输切码表加回 / 快捷加词 / 两种导入 / 自动学词不复活）；`wind-store`
+  `shadow::tests::clear_deleted_for_words_only_touches_matching_deletes` / `clear_deleted_for_words_sees_hand_edited_file`；
+  `wind-webdata` `tests::explicit_update_and_promote_clear_delete_rules`
 - 来源：内部
 
 ## 2026-11-08 · Linux 皮肤穿透装饰改为整层合成，与 block 装饰交叉叠放时绘制顺序变化（0.132）
