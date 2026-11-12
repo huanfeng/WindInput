@@ -344,17 +344,19 @@ impl EngineManager {
 }
 
 /// [`EngineManager::dict_file_entries`] 的缓存：文件绝对路径 → (大小, mtime, 条数)。
-type EntryCountCache = HashMap<std::path::PathBuf, (u64, Option<std::time::SystemTime>, u64)>;
+type EntryCountCache =
+    HashMap<std::path::PathBuf, (u64, Option<std::time::SystemTime>, Option<u64>)>;
 static ENTRY_COUNTS: std::sync::OnceLock<std::sync::Mutex<EntryCountCache>> =
     std::sync::OnceLock::new();
 
 impl EngineManager {
     /// 一张词库文件的条目数（设置端「分类词库」清单用）：按方案里的 `path` 经覆盖解析定位
-    /// `.dict.yaml`，数正文行。停用的库也数得出——只读文本，不加载、不建 wdat（同上面「停用的
-    /// 库只列不计」的顾虑）。按（大小, mtime）缓存，文件没变不重扫。
+    /// `.dict.yaml`，按加载器的口径数正文行（[`count_dict_entries`]）。停用的库也数得出——只读
+    /// 文本，不加载、不建 wdat（同上面「停用的库只列不计」的顾虑）。按（大小, mtime）缓存，
+    /// 文件没变不重扫。
     ///
-    /// 只数这一个文件，不含它 `import_tables` 引进来的子表。文件不在（含只投放了 wdat 的库）
-    /// 或读不出返回 `None`。
+    /// 写了 `import_tables` 的库返回 `None`：词条有一部分（包装库是全部）在子表里，只数本文件
+    /// 会少算。文件不在（含只投放了 wdat 的库）或读不出也是 `None`。
     pub fn dict_file_entries(&self, rel: &str) -> Option<u64> {
         let schemas_dir = self.data_dir.as_deref()?.join("schemas");
         let path = Self::resolve_dict_file(rel, &schemas_dir);
@@ -364,42 +366,41 @@ impl EngineManager {
         if let Some(&(len, mtime, n)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&path)
             && (len, mtime) == stamp
         {
-            return Some(n);
+            return n;
         }
-        let n = count_dict_entries(std::io::BufReader::new(std::fs::File::open(&path).ok()?))?;
+        let n = if Self::read_dict_head(&path).1.is_empty() {
+            Some(count_dict_entries(&std::fs::read_to_string(&path).ok()?))
+        } else {
+            None
+        };
         cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(path, (stamp.0, stamp.1, n));
-        Some(n)
+        n
     }
 }
 
-/// 数 `.dict.yaml` 的词条行：跳过 `---` 到 `...` 的 YAML 头、空行与 `#` 注释。没有 YAML 头的
-/// 文件从头数。读到非 UTF-8 返回 `None`。
-fn count_dict_entries(r: impl std::io::BufRead) -> Option<u64> {
-    let mut in_head = false;
-    let mut started = false;
+/// 数 rime 词库正文的词条行，口径同加载器（`wind_dict::rime_body_layout`）：去 BOM，正文从
+/// 独占一行的 `...` 之后算起（没有就没有正文），跳过空行与 `#` 注释——`# no comment` 指令
+/// 之后的 `#` 行是数据。
+fn count_dict_entries(raw: &str) -> u64 {
+    let text = wind_utils::text::normalize_input(raw);
+    let Some((body, cutoff)) = wind_dict::rime_body_layout(&text) else {
+        return 0;
+    };
+    let mut off = body;
     let mut n = 0u64;
-    for line in r.lines() {
-        let line = line.ok()?;
+    for line in text[body..].split_inclusive('\n') {
+        let start = off;
+        off += line.len();
         let t = line.trim_end();
-        if in_head {
-            in_head = t != "...";
+        if t.is_empty() || (t.starts_with('#') && cutoff.is_none_or(|c| start <= c)) {
             continue;
         }
-        if t.trim_start().is_empty() || t.starts_with('#') {
-            continue;
-        }
-        if !started && t == "---" {
-            in_head = true;
-            started = true;
-            continue;
-        }
-        started = true;
         n += 1;
     }
-    Some(n)
+    n
 }
 
 /// 通规三级 → 三个累进字集（一级 / 一二级 / 全表）。分节读不出三级时不出字集统计。
@@ -551,17 +552,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 计数口径与加载器一致：BOM 不影响找 `...`，没有 `...` 就没有正文，`# no comment` 之后
+    /// 的 `#` 行是数据。
+    #[test]
+    fn count_follows_the_loader_layout() {
+        assert_eq!(
+            count_dict_entries("\u{feff}---\nname: x\n...\n甲\ta\n"),
+            1,
+            "BOM"
+        );
+        assert_eq!(count_dict_entries("甲\ta\n乙\tb\n"), 0, "没有 ... 即零条");
+        assert_eq!(
+            count_dict_entries("---\n...\n# 注释\n甲\ta\n# no comment\n#\tjing\n"),
+            2,
+            "# no comment 之后的 # 行算数据，指令行本身不算"
+        );
+    }
+
+    /// 只有 import_tables 的包装库：本文件没有词条，计数给 None 而不是 0。
+    #[test]
+    fn wrapper_with_only_imports_has_no_count() {
+        let base = fixture("wrapper");
+        write(
+            &base.join("schemas/ct/wrap.dict.yaml"),
+            "---\nname: wrap\nimport_tables:\n  - off\n...\n",
+        );
+        let m = mgr(&base);
+        assert_eq!(m.dict_file_entries("ct/wrap.dict.yaml"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn count_skips_head_comments_and_blank_lines() {
         let text =
             "# Rime dictionary\n\n---\nname: x\n# 头里的注释\n...\n甲\ta\n\n# 注释\n乙\tb\t1\n";
-        assert_eq!(count_dict_entries(text.as_bytes()), Some(2));
-        assert_eq!(
-            count_dict_entries("甲\ta\n乙\tb\n".as_bytes()),
-            Some(2),
-            "无头"
-        );
-        assert_eq!(count_dict_entries(&b"\xff\xfe\n"[..]), None);
+        assert_eq!(count_dict_entries(text), 2);
     }
 
     #[test]

@@ -106,6 +106,22 @@ fn bundled_dicts_carry_groups() {
             .group
             .clone()
     };
+    // 全拼、双拼两份方案文件的 (id, group) 逐项一致，分组恰是规格的五个。
+    let pairs = |schema: &str| -> Vec<(String, Option<String>)> {
+        api::list(&*c, schema)
+            .unwrap()
+            .into_iter()
+            .filter(|d| !d.from_dir)
+            .map(|d| (d.id, d.group))
+            .collect()
+    };
+    assert_eq!(pairs("pinyin"), pairs("shuangpin"));
+    let mut groups: Vec<String> = pairs("pinyin").into_iter().filter_map(|(_, g)| g).collect();
+    groups.sort();
+    groups.dedup();
+    let mut want = ["人名地名", "文史", "网络", "专业术语", "体育棋类"].map(String::from);
+    want.sort();
+    assert_eq!(groups, want);
     for schema in ["pinyin", "shuangpin"] {
         let groups: Vec<(String, Option<String>)> = api::list(&*c, schema)
             .unwrap()

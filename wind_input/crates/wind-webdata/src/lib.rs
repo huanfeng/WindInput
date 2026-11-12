@@ -11111,9 +11111,21 @@ mod sys_dict_categories_tests {
     use wind_coordinator::Coordinator;
     use wind_store::Store;
 
+    /// 夹具：协调器 + 临时数据根；离开作用域（含断言失败）即删临时目录。
+    struct Fixture {
+        c: Arc<Coordinator>,
+        base: std::path::PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
     /// 码表 `zm2`：主库 + 停用的分组库 + 文件缺失的库 + `zm2/ext/` 下一张未登记的库；
     /// 混输 `mx2` 没有自己的附加库。
-    fn coord(tag: &str) -> Arc<Coordinator> {
+    fn coord(tag: &str) -> Fixture {
         let base = std::env::temp_dir().join(format!("wind_syscats-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let schemas = base.join("schemas");
@@ -11156,12 +11168,13 @@ mod sys_dict_categories_tests {
         cfg.schema.active = "zm2".into();
         cfg.schema.available = vec!["zm2".into(), "mx2".into()];
         // override 落临时目录：开关测试会写它，不能碰本机配置。
-        Coordinator::new_headless_with_store_override(
+        let c = Coordinator::new_headless_with_store_override(
             cfg,
             Some(&base),
             store,
             Some(base.join("overrides")),
-        )
+        );
+        Fixture { c, base }
     }
 
     fn item<'a>(v: &'a Value, id: &str) -> &'a Value {
@@ -11174,7 +11187,8 @@ mod sys_dict_categories_tests {
 
     #[test]
     fn lists_groups_sources_and_counts_without_main() {
-        let c = coord("shape");
+        let f = coord("shape");
+        let c = &f.c;
         let v = c
             .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
             .unwrap();
@@ -11217,7 +11231,8 @@ mod sys_dict_categories_tests {
 
     #[test]
     fn reflects_toggle_and_rejects_bad_input() {
-        let c = coord("toggle");
+        let f = coord("toggle");
+        let c = &f.c;
         c.web_data_rpc(
             "schema.setDictEnabled",
             &json!({"id": "zm2", "dictId": "term", "enabled": true}),
