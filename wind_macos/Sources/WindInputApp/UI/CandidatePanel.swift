@@ -309,6 +309,10 @@ final class CandidatePanel: NSPanel {
         self.contentView = content
         content.onDragMoved = { [weak self] in self?.pinCurrentPosition() }
         content.onDragEnded = { [weak self] in self?.finishDrag() }
+        // 早于 NSApplication 构造时窗口不会交给窗口服务器, 之后显示全是静默空操作 (见 main.swift)。
+        if windowNumber == 0 {
+            NSLog("CandidatePanel: windowNumber == 0, 窗口未注册到窗口服务器, 候选框将不会显示; 须在 NSApplication.shared 之后构造")
+        }
     }
 
     /// 以窗口**当前真实位置**落 dragPin（避免按位移累加产生误差）。
