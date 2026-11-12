@@ -29,7 +29,7 @@
 
 ## 2026-11-12 · 双拼、临时英文下右键删除系统词生效（0.132）
 
-- 合入：未合入（分支 fix/shadow-delete-readd）；范围：双拼方案主输入路；临时英文
+- 合入：5cf62ed8；范围：双拼方案主输入路；临时英文
 - 变化：删除系统词的规则改写在读端同款的归一码上，此前写在击键码上、删了照样出现。
   - 双拼完整转换时：前：写在 `nihc` 上、读端取 `nihao` → 后：写在 `nihao` 上，当场隐藏，与全拼方案共享
     （全拼打 `nihao` 也隐藏，同置顶的既有口径）。
@@ -41,11 +41,11 @@
 - 回退旧行为：无（缺陷修复）
 - 钉住的测试：`wind-coordinator` `tests/shadow_delete_readd.rs::shuangpin_delete_writes_normalized_code` /
   `shuangpin_readd_via_settings_shows_again` / `temp_english_delete_with_uppercase_buffer_takes_effect`
-- 来源：内部
+- 来源：GH#269
 
 ## 2026-11-12 · 删过的系统词再手动加回，候选重新出现（0.132）
 
-- 合入：未合入（分支 fix/shadow-delete-readd）；范围：全部方案类型（码表 / 全拼 / 双拼 / 混输）
+- 合入：507ef005、317fce3a、380b8968；范围：全部方案类型（码表 / 全拼 / 双拼 / 混输）
 - 变化：
   - 右键删掉一个系统词后，再手动加同码同文的词（加词对话框 / 快捷加词 / 命令栏 `dict.add`、设置页加词或改词、
     设置页单条转正），该码下这条候选重新出现，并撤掉那条删除规则。前：删除规则按文本过滤、不看来源，
@@ -64,7 +64,7 @@
   混输 / 混输切码表加回 / 快捷加词 / 两种导入不撤且报数 / 自动学词不复活）；`wind-store`
   `shadow::tests::clear_deleted_for_words_only_touches_matching_deletes` / `clear_deleted_for_words_sees_hand_edited_file`；
   `wind-webdata` `tests::single_update_and_promote_clear_but_promote_all_only_counts`
-- 来源：内部
+- 来源：GH#308
 
 ## 2026-11-08 · Linux 皮肤穿透装饰改为整层合成，与 block 装饰交叉叠放时绘制顺序变化（0.132）
 
