@@ -402,3 +402,53 @@ fn codetable_delete_stays_per_code() {
     );
     assert!(!has(&cfg, &store, "aaaa", &victim));
 }
+
+/// 联想：被屏蔽的整词不出，且是在截断**之前**滤——条数与没屏蔽时一样，空出的格由后面的补上。
+#[test]
+fn association_skips_blocked_word_before_truncation() {
+    if !has_schemas() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let mut cfg = config("pinyin");
+    cfg.input.symbol.smart_mode = false;
+    cfg.input.association.kind = "word".to_string();
+    cfg.input.association.mode = "one_shot".to_string();
+    let suggest = |store: &Arc<Store>| {
+        let coord = open(&cfg, store);
+        coord.prewarm_indexes();
+        coord.debug_assoc_suggest("中")
+    };
+    let store = fresh_store("assoc");
+    let before = suggest(&store);
+    let victim = before
+        .iter()
+        .find(|t| t.chars().count() >= 2)
+        .cloned()
+        .unwrap_or_else(|| panic!("前提：「中」应有多字联想，实际 {before:?}"));
+    store.block_word("pinyin", &victim).unwrap();
+    let after = suggest(&store);
+    assert!(
+        !after.contains(&victim),
+        "联想不应再出「{victim}」，实际 {after:?}"
+    );
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "先滤后截，条数不少：前 {before:?} 后 {after:?}"
+    );
+
+    // 真实上屏路径：选「中」进联想态，同样不出
+    let coord = open(&cfg, &store);
+    coord.prewarm_indexes();
+    type_keys(&coord, "zhong");
+    // 进联想态时上屏走的是 `CommitThenDeferComposition`，不是 `InsertText`，返回值不看
+    let _ = pick(&coord, "中");
+    let shown = coord.debug_assoc_texts();
+    assert!(!shown.is_empty(), "前提：上屏后进了联想态");
+    assert!(
+        !shown.contains(&victim),
+        "联想态不应出「{victim}」，实际 {shown:?}"
+    );
+    assert_eq!(shown.len(), before.len(), "联想态条数不少：{shown:?}");
+}

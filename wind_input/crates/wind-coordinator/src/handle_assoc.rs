@@ -427,6 +427,20 @@ impl AssocProvider for HistoryWords<'_> {
     }
 }
 
+/// 滤掉被屏蔽文字的联想源包装（拼音「屏蔽这个词」）。
+struct SkipBlocked<'a> {
+    inner: &'a dyn AssocProvider,
+    blocked: &'a std::collections::HashSet<String>,
+}
+
+impl AssocProvider for SkipBlocked<'_> {
+    fn suggest(&self, ctx: &AssocContext<'_>, limit: usize) -> Vec<AssocHit> {
+        let mut hits = self.inner.suggest(ctx, limit);
+        hits.retain(|h| !self.blocked.contains(&h.text));
+        hits
+    }
+}
+
 impl Coordinator {
     /// 词语联想的数据归属 id（store 键里的 schema）：联想词源方案折叠后的数据域。
     fn assoc_data_schema(&self) -> String {
@@ -695,6 +709,21 @@ impl Coordinator {
         if let Some(b) = &bigram {
             providers.push((AssocSource::Bigram, b));
         }
+        // 拼音「屏蔽这个词」：在各源**之内**滤掉，`associate` 按源配额截取时空出的格由同源
+        // 后面的补上；滤在汇聚之后会少条数。全被滤光 = 没有联想，调用方照常不进联想态。
+        let blocked = self.pinyin_blocked_words(&self.assoc_data_schema());
+        let filtered: Vec<SkipBlocked<'_>>;
+        if let Some(blocked) = blocked.as_deref() {
+            filtered = providers
+                .iter()
+                .map(|(_, p)| SkipBlocked { inner: *p, blocked })
+                .collect();
+            providers = providers
+                .iter()
+                .zip(&filtered)
+                .map(|((src, _), f)| (*src, f as &dyn AssocProvider))
+                .collect();
+        }
         wind_assoc::associate(&ctx, cfg, &providers)
     }
 
@@ -718,11 +747,7 @@ impl Coordinator {
         // 前文末尾就是它，去掉才接得上整词。
         let preceding = self.preceding_text();
         let preceding = preceding.strip_suffix(on_screen).unwrap_or(&preceding);
-        let mut hits = self.assoc_hits(&cfg, preceding, text, self.assoc_char_wise());
-        // 拼音「屏蔽这个词」：联想出的整词同样不出。
-        if let Some(blocked) = self.pinyin_blocked_words(&self.assoc_data_schema()) {
-            hits.retain(|h| !blocked.contains(&h.text));
-        }
+        let hits = self.assoc_hits(&cfg, preceding, text, self.assoc_char_wise());
         if hits.is_empty() {
             return false;
         }
