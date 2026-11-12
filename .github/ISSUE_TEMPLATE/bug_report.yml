@@ -7,6 +7,15 @@ body:
       value: |
         感谢你提交 Bug 反馈！请尽量详细地描述问题，以便我们复现和修复。
 
+        > ### 📋 输入相关的问题，请附上日志
+        > 一份日志能省掉十轮来回。**抓取方式：**
+        > 1. 设置 → **高级 → 日志设置**，把「输入法服务日志级别」和「TSF 端日志级别」调到 `debug`，然后**重启输入法服务**和出问题的程序
+        > 2. 能稳定复现的：先点 **日志打包 → 清理**，重启输入法服务，**干净复现一次**，再点 **打包到桌面**
+        > 3. 偶发、不是百分百复现的：不用清理，**写清楚出问题的时间点**，尽快打包即可
+        > 4. 把桌面上生成的 zip 拖进下方「截图或日志」
+        >
+        > ⚠️ debug 日志含你输入的内容，发之前请自查；排查完记得把级别调回去。完整说明：[反馈问题时如何提交日志](https://windinput.com/docs/reference/report-logs)
+
   - type: textarea
     id: description
     attributes:
@@ -106,15 +115,24 @@ body:
       description: 在哪个应用中出现了此问题？（如 Edge、VS Code、微信等）
       placeholder: Microsoft Edge
 
+  - type: input
+    id: occurred-at
+    attributes:
+      label: 问题发生的时间点
+      description: 精确到分钟，日志里靠它定位。偶发问题尤其必填
+      placeholder: "2026-11-12 14:32 左右"
+
   - type: textarea
     id: screenshots
     attributes:
       label: 截图或日志
       description: |
-        如有截图请在此粘贴。日志文件位置：
+        请把设置「高级 → 日志设置 → 日志打包 → 打包到桌面」生成的 zip 拖到这里（抓取方式见页面顶部）。
+        没法用一键打包时，手动打包日志目录：
         - Windows 安装版：`%LOCALAPPDATA%\WindInput\logs\`
         - Windows 便携版：`<程序目录>\localdata\logs\`
         - macOS：`~/Library/Application Support/WindInput/logs/`
+        - Linux：`~/.local/share/WindInput/logs/`
 
   - type: textarea
     id: additional
