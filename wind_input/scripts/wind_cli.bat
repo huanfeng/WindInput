@@ -22,7 +22,7 @@ rem 已知子命令与帮助/版本旗标：原样透传
 rem ⚠️ 本名单必须与 apps\service\src\main.rs 里拦截 CLI 的 matches! 保持同步：
 rem 漏一个子命令不会报"未知命令"，而是被下面的兼容分支塞进 `config`，
 rem 得到一句风马牛不相及的配置错误——排查时很难想到问题出在这份名单上。
-for %%s in (config schema dict phrase backup restart ui system help --help -h --version -V) do (
+for %%s in (config schema dict phrase backup restart ui ime system help --help -h --version -V) do (
     if "%~1"=="%%s" goto passthrough
 )
 
