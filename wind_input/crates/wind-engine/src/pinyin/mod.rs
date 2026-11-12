@@ -1259,6 +1259,7 @@ impl PinyinEngine {
 
     /// 单路解码；整句文字恰为被屏蔽的文字（由更小的块拼成）时用 N-best 多取几条、取第一条
     /// 不是的，全被屏蔽则按解码失败返回。无屏蔽或没撞上时就是 `decode`，不多解一次。
+    /// 替补不看语法模型（挂了模型时 `decode_nbest` 只回 1 条）。
     fn decode_unblocked(&self, lattice: &[Vec<WordNode>], len: usize) -> viterbi::ViterbiResult {
         let result = self.viterbi.decode(lattice, len);
         let blocked = self.blocked_words();
@@ -1266,7 +1267,7 @@ impl PinyinEngine {
             return result;
         }
         self.viterbi
-            .decode_nbest(lattice, len, 1 + BLOCKED_SENTENCE_EXTRA)
+            .decode_nbest_lexical(lattice, len, 1 + BLOCKED_SENTENCE_EXTRA)
             .into_iter()
             .find(|r| !sentence_blocked(&blocked, &r.words))
             .unwrap_or(viterbi::ViterbiResult {
@@ -3588,9 +3589,12 @@ impl Engine for PinyinEngine {
             // 没撞上屏蔽词时不多解一次，循环与原来逐条相同。
             let blocked = self.blocked_words();
             if results.iter().any(|r| sentence_blocked(&blocked, &r.words)) {
-                results =
-                    self.viterbi
-                        .decode_nbest(&lattice, input_len, pool_k + BLOCKED_SENTENCE_EXTRA);
+                // 不看语法模型：挂了模型时 `decode_nbest` 只回 1 条，没有替补可取。
+                results = self.viterbi.decode_nbest_lexical(
+                    &lattice,
+                    input_len,
+                    pool_k + BLOCKED_SENTENCE_EXTRA,
+                );
                 results.retain(|r| !sentence_blocked(&blocked, &r.words));
             }
             for result in results {
@@ -6565,6 +6569,17 @@ i = ["i"]
         assert_ne!(s.text, "时间");
         assert_eq!(s.code, "shijian");
         assert_eq!(s.text.chars().count(), 2);
+    }
+
+    /// 挂了语法模型时 `decode_nbest` 只回 1 条：撞上屏蔽词也要有替补整句，不能整条丢掉、首选退成半截。
+    #[test]
+    fn blocked_sentence_with_grammar_still_has_replacement() {
+        let eng = weighted_engine(SHIJIAN_WORDS).with_grammar(Arc::new(grammar::NullGrammar));
+        assert_eq!(sentence_of(&eng, "shijian").unwrap().text, "时间", "前提");
+        block(&eng, &["时间"]);
+        let s = sentence_of(&eng, "shijian").expect("挂语法模型时同样换下一条整句");
+        assert_ne!(s.text, "时间");
+        assert_eq!(s.code, "shijian");
     }
 
     /// 被屏蔽的文字作为更长整句的一段、由更小的块拼出，不拦。
