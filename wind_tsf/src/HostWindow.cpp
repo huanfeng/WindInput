@@ -771,9 +771,11 @@ void CHostWindow::_RenderLoop()
                 continue;
 
             // Check if this is a new frame
+            // _lastSequence 只在这一帧真正处理完（隐藏或画出）时才记：帧头可能读到写了一半的
+            // （新 sequence 配旧尺寸），校验或拷帧失败时若已记下，服务端写完再发的事件会因
+            // sequence 相同被当成旧帧跳过，候选窗停在旧内容上。
             if (header->sequence == _lastSequence)
                 continue;
-            _lastSequence = header->sequence;
 
             // Frame targeting: multiple TextService instances in this process share the one
             // global SHM and each was signaled. Render only if the frame is visible AND aimed
@@ -784,6 +786,7 @@ void CHostWindow::_RenderLoop()
             BOOL forMe = (header->targetInstanceId == _instanceId);
             if (!visible || !forMe)
             {
+                _lastSequence = header->sequence;
                 _HideWindow();
                 continue;
             }
@@ -807,6 +810,7 @@ void CHostWindow::_RenderLoop()
                                    header->sequence);
                 continue;
             }
+            _lastSequence = header->sequence;
             _RenderFrame(_frame);
         }
         else

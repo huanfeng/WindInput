@@ -647,7 +647,7 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
     }
 }
 
-/// 把整条工具栏画进 `buf`（尺寸 `w`×`h`，RGBA）。**窗口路径与预览共用的唯一绘制实现**：
+/// 把整条工具栏画进 `buf`（尺寸 `w`×`h`，预乘 BGRA）。**窗口路径与预览共用的唯一绘制实现**：
 /// 实时窗口（[`Toolbar::render`]）与设置端工具栏预览（`candidate_window::preview`）各出各的
 /// 缓冲区，配色 / 几何 / 图标 / 命中矩形全部出自同一份——本仓在同构双实现漂移上反复吃亏，
 /// 绘制代码禁止再抄第二份。
