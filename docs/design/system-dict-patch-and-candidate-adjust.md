@@ -165,10 +165,11 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 
 - **多条 pin 互相挤位**（`wind-candidate/src/shadow.rs` 的 `apply_shadow`）：按 position 升序逐条「摘出再插入」，后处理的规则摘自己时若原位置比先就位的更靠前，先就位的被往前挤一格（例：`[x,B,y,A,z,w,v]`，A→3、B→5，结果 A 实在第 2 位）。只钉第 1 位不触发，所以拼音只开放置顶时没暴露。改为两阶段：先把所有命中项摘出，再按 position 升序（同位置后写在前）插回。
 - **写端下标与读端不在同一个列表上**：`reorder_positions` 读的是 `state.candidates`，里面已含 shadow 之后才插入的简繁变体（`expand_s2t_variants`，凭 `s2t_override.is_some()` 识别）、单字母重复上屏项、emoji；读端按插入之前的列表解释 position，开了简繁时偏大。写下标时跳过这些后插入项。
+  - 实现：`candidate_grid::inserted_after_shadow` 认这三类（重复上屏项凭 `natural_order == LEADING_REPEAT_ORDER` 且无来源无码）；变体的位置取它的原字。英文方案的头部候选（原文 + 大小写变形，占位的词库词被挪到头部）也在 shadow 之后插入，本期未纳入，英文方案调位仍按含头部的列表写。
 
 ### 5.3 语义
 
-- position = **界面序的全表下标**（翻页不影响；N ≤ 每页条数，菜单只列到每页条数）。取值范围受首批候选上限（桌面 300）限制，目标不在列表里则规则不生效，也不计入 `user_pinned`（现有契约）。
+- position = **界面序的全表下标**（翻页不影响；菜单只列到每页条数，上限 20，且不超过候选条数；当前所在名次那一项灰，写端同判据忽略）。取值范围受首批候选上限（桌面 300）限制，目标不在列表里则规则不生效，也不计入 `user_pinned`（现有契约）。
 - 与整句：position 计数含整句候选；整句切换键（N-best）换槽位时若与被钉词同文，被钉的词会被去重删掉（已知、少见）。
 - 两个词钉同一位：后写的在前、先写的顺延，规则不丢。
 - 与屏蔽/隐藏互斥：pin 清同词的 deleted、delete 清同词的 pin（现有）。**`*` 屏蔽行在另一个组，不被 pin 清除**：设置页给被屏蔽的词加位置规则时提示「该词已被屏蔽，固定位置不会生效」；右键路径里被屏蔽的词本就不出候选，点不到。
@@ -190,7 +191,7 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 | 步 | 内容 | 可独立发布 |
 |---|---|---|
 | A | 5.2 两处修复 + 单测（多条 pin 乱序、简繁开启下写下标）；码表前移/后移同时受益 | ✓ |
-| B | 核心：`CandidateOp::PinAt(n)`（菜单 id 区间、移动端动作表 `pin_at_N`）、子菜单、写端放行拼音（`handle_candidate.rs` `candidate_op_in` 与 `handle_menu.rs` 判据同源改，两端逐字对应）、混输拼音段同步放行 | ✓ |
+| B | 核心：`CandidateOp::PinAt(n)`（菜单 id 20–39 对应 N=1–20、移动端动作名 `pin_at_N`、摊平后文案「固定到第 N 位」）、子菜单、写端放行拼音（`handle_candidate.rs` `candidate_op_in` 与 `handle_menu.rs` 判据同源改，两端逐字对应）、混输拼音段同步放行 | ✓ |
 | C | 设置端：位置 1 基显示/填写、屏蔽词提示 | ✓ |
 | D | 文档站（`dict/index.mdx` 现写「拼音只能置顶」）、发版说明、changelog、文档站 | — |
 
