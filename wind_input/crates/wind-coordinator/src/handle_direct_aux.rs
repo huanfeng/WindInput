@@ -187,8 +187,8 @@ impl Coordinator {
             crate::postprocess::profile::DIRECT_AUX_MERGE,
             &crate::postprocess::PassCtx {
                 owner: None,
-                freq_code: "",
-                shadow_code: prefix_shadow,
+                freq_code: None,
+                shadow_code: Some(prefix_shadow),
             },
         );
 
@@ -299,8 +299,8 @@ impl Coordinator {
             crate::postprocess::profile::DIRECT_AUX_PREFIX,
             &crate::postprocess::PassCtx {
                 owner: None,
-                freq_code: prefix,
-                shadow_code: "",
+                freq_code: Some(prefix),
+                shadow_code: None,
             },
         );
         (pool, r.preedit_pinyin, r.shadow_code)

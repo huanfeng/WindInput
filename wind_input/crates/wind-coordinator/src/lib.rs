@@ -85,6 +85,8 @@ pub(crate) mod schema_scope;
 mod schema_ui;
 pub mod session_output;
 pub(crate) mod short_code_yield;
+#[cfg(test)]
+pub(crate) mod source_scan;
 pub mod stats;
 pub mod theme_query;
 pub mod theme_style;

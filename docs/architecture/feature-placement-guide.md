@@ -138,7 +138,7 @@ K8 那五个 `if let Some` 已经是一张有序表，不再抽成函数指针�
 `apply_shadow*`**。主链在调频与 shadow 之间另有英文定位、整句块、纠错护顶、直接辅助码，之后有
 空码补全收口、出简让全、emoji 扩展、自动上屏复核（细节见 engine-candidate-pipeline.md §8）。
 
-已收进步骤表（`wind-coordinator/src/postprocess.rs`，接哪几步以 profile 常量为准）：
+各路径都经步骤表（`wind-coordinator/src/postprocess.rs`）执行，接哪几步以 profile 常量为准：
 
 | 路径 | 函数 | profile |
 |---|---|---|
@@ -146,21 +146,36 @@ K8 那五个 `if let Some` 已经是一张有序表，不再抽成函数指针�
 | 整句池 | 同上，`sentence_pool` | `SENTENCE_POOL`（过滤、单字、shadow） |
 | 空码补全池 | 同上，`completion_pool` | `COMPLETION_POOL`（过滤、单字、shadow） |
 | 直接辅助码前缀池 | `handle_direct_aux.rs::decode_direct_prefix` / `merge_direct_hits_into` | `DIRECT_AUX_PREFIX`（过滤、单字、调频）+ 合并前 `DIRECT_AUX_MERGE` |
+| 临时拼音 | `handle_temp.rs::refill_temp_pinyin_candidates` | `TEMP_PINYIN_PRE`（过滤、调频）+ 纠错护顶后 `TEMP_PINYIN_SHADOW` |
+| 临时英文 | `handle_temp.rs::refill_temp_english_candidates` | `TEMP_ENGLISH`（调频、shadow） |
+| mix 自由英文段 | `handle_mode.rs::mix_free_english_segment` | `MIX_ENGLISH_SEGMENT`（调频、shadow） |
+| 特殊 / 生僻字模式 | `handle_special.rs::update_special_candidates` | `SPECIAL_PRE`（调频）或生僻字 `RARE_CHAR_PRE`（空）+ `SPECIAL_SHADOW` |
+| 候选反查 | `handle_reverse.rs::build_reverse_candidates` | `REVERSE`（过滤） |
 
-尚未收进（§5.4 第 3 步）：
+留在表外的两处，调频都用 `apply_freq_rerank_with_extra`（要并入快捷输入历史的外部热度记录，步骤表的
+`FreqRerank` 不带这个输入）：
 
-| 路径 | 函数 | 接了哪几步 |
-|---|---|---|
-| 临时拼音 | `handle_temp.rs::refill_temp_pinyin_candidates` | 过滤、调频、shadow |
-| 临时英文 | `handle_temp.rs::refill_temp_english_candidates` | 调频、shadow |
-| mix 融合 | `handle_mode.rs::refill_mix_candidates` / `mix_free_english_segment` | 调频、shadow（刻意不接过滤，理由见源码注释） |
-| 特殊 / 生僻字 / 反查模式 | `handle_special.rs::update_special_candidates` | 调频、shadow |
-| 候选反查 | `handle_reverse.rs::build_reverse_candidates` | 过滤 |
+- mix 成员段（`handle_mode.rs::refill_mix_candidates`）：调频与 shadow 之间还夹着纠错护顶，shadow
+  直接调 `apply_shadow_in`；
+- 快捷输入历史并进英文段（`quick_history.rs::mix_free_with_history`）。
+
+不为这两处扩 `PassCtx`。
+
+**未定项**：临时拼音从未接单字（`SingleChar`）。第 3 步按纯重构保持现状，是否该接待定。
 
 翻页扩容（`expand_candidates`）经 `build_candidates_at_cursor` 回到主链整链重建，不是独立路径。
-「shadow 取码同源」那条源码扫描测试（`every_shadow_read_goes_through_normalized_code`）同时扫
-`apply_shadow*` 的实参与 `PassCtx { shadow_code: … }` 字段；「emoji 三条路都接」那条仍是独立扫描
-（emoji 不在步骤表内）。
+
+守卫（`handle_candidate.rs` 的源码扫描测试；生产代码统一经 `source_scan::production_code` 取得，
+它按 rustfmt 缩进剔除每个 `#[cfg(test)]` 条目，真实文件上的覆盖由探针测试钉住）：
+
+- `every_shadow_read_goes_through_normalized_code`：`apply_shadow*` 的实参与 `PassCtx { shadow_code }`
+  字段都须取归一后的码；
+- `schema_scoped_reads_writes_and_debug_share_one_source`：读写调试三端与 `PassCtx { owner }`
+  字段都须取自登记过的归属来源；
+- `postprocess.rs` 内：每个 profile 是规范顺序的子序列；主链单字先于 shadow；两个池接过滤、单字、
+  shadow；两个池的调用点用的是各自的 profile。
+
+emoji 不在步骤表内，「emoji 各路都接」仍是独立扫描。
 
 ### 4.3 上屏出口（现状）
 
@@ -185,19 +200,27 @@ K8 那五个 `if let Some` 已经是一张有序表，不再抽成函数指针�
 原则：**至少两三个真实消费者才抽象**；能用 enum + 常量表达的不用 trait 对象；顺序理由是
 「逐对」的地方用直排代码，不用注册表。
 
-### 5.1 后处理步骤表（P4）——主链与三个池已落地，见 `postprocess.rs`
+### 5.1 后处理步骤表（P4）——已落地，见 `postprocess.rs`
 
 ```rust
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Pass { Filter, SingleChar, FreqRerank, Shadow } // 声明顺序 = 规范顺序
 
-pub(crate) struct PassCtx<'a> { owner: Option<&'a str>, freq_code: &'a str, shadow_code: &'a str }
+// 码为 None 表示本 profile 不含对应步骤；profile 含该步而码缺失时 debug 断言、release 记错并跳过
+pub(crate) struct PassCtx<'a> {
+    owner: Option<&'a str>,
+    freq_code: Option<&'a str>,
+    shadow_code: Option<&'a str>,
+}
 
 fn run_passes(&self, state: &State, list: &mut Vec<Candidate>, profile: &[Pass], ctx: &PassCtx)
     -> PassOutcome; // 含 user_pinned
 
-const SIDE_POOL: &[Pass] = &[Pass::Filter, Pass::SingleChar, Pass::Shadow];
-const MIX_MEMBER: &[Pass] = &[Pass::FreqRerank, Pass::Shadow]; // 不接过滤的理由写在常量旁
+pub(crate) mod profile {
+    pub(crate) const SENTENCE_POOL: &[Pass] = &[Filter, SingleChar, Shadow];
+    pub(crate) const TEMP_ENGLISH: &[Pass] = &[FreqRerank, Shadow]; // 不接过滤的理由写在常量旁
+    // …其余见 §4.2
+}
 ```
 
 - 每条路径用一个 profile 常量声明自己接哪几步；单测断言每个 profile 都是规范顺序的子序列。
@@ -231,7 +254,7 @@ fn finish_desktop_key(&self, data: &KeyEventData, action: KeyAction) -> KeyActio
 |---|---|---|---|
 | 1 | 本文、按键链槽位编号、§8 现状修正 | 无行为变化 | 完成 |
 | 2 | 引入 `Pass` / `run_passes`，替换主链、整句池、补全池、直接辅助码 | 全量测试 `--no-fail-fast`；8 组配置逐键候选导出前后 md5 一致 | 完成 |
-| 3 | 临拼、临英、mix、特殊、反查改用 profile | 同上 + 各模式测试 | 未开始 |
+| 3 | 临拼、临英、mix 自由英文段、特殊、反查改用 profile | 同上 + 临拼/临英/快捷输入/生僻字/反查 6 组导出前后 md5 一致 | 完成 |
 | 4 | 抽 `finish_session_action`，逐字复现现状；缺口逐项定案 | smart_symbol / auto_spacing / freq_learn 测试 | 未开始 |
 | 5 | 以模式为键的 `match` 去掉 `_ =>` | 编译通过 | 未开始 |
 | 6 | 清掉 §6.3 的读盘点 | 计数测试（见 §6.2） | 完成 |

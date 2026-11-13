@@ -2945,8 +2945,16 @@ impl Coordinator {
             let mix_member_owner = Some(EN.to_string());
             let recalled = self.english_freq_recall(mix_member_owner.as_deref(), &dict, &code);
             dict.extend(recalled);
-            self.apply_freq_rerank_in(mix_member_owner.as_deref(), &mut dict, &code);
-            self.apply_shadow_in(mix_member_owner.as_deref(), &mut dict, &code);
+            self.run_passes(
+                state,
+                &mut dict,
+                crate::postprocess::profile::MIX_ENGLISH_SEGMENT,
+                &crate::postprocess::PassCtx {
+                    owner: mix_member_owner.as_deref(),
+                    freq_code: Some(&code),
+                    shadow_code: Some(&code),
+                },
+            );
             if te.case_follow_input {
                 cased = crate::english_candidates::apply_english_case(
                     &mut dict,

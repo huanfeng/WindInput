@@ -2028,8 +2028,8 @@ impl Coordinator {
             crate::postprocess::profile::MAIN_PRE,
             &crate::postprocess::PassCtx {
                 owner: None,
-                freq_code: &state.input_buffer,
-                shadow_code: "",
+                freq_code: Some(&state.input_buffer),
+                shadow_code: None,
             },
         );
         // 英文候选定位：排在「中文常用精确解」之后、其余候选之前。
@@ -2088,15 +2088,15 @@ impl Coordinator {
                 crate::postprocess::profile::MAIN_SHADOW,
                 &crate::postprocess::PassCtx {
                     owner: None,
-                    freq_code: "",
-                    shadow_code: &shadow_code,
+                    freq_code: None,
+                    shadow_code: Some(&shadow_code),
                 },
             )
             .user_pinned;
         let pool_ctx = crate::postprocess::PassCtx {
             owner: None,
-            freq_code: "",
-            shadow_code: &shadow_code,
+            freq_code: None,
+            shadow_code: Some(&shadow_code),
         };
         // 整句池走**同一条过滤链**（同补全池的理由）：它直接拷自引擎结果，不过滤的话切换键能
         // 把用户隐藏掉的整句、被检索范围滤掉的生僻字整句换回来（审查查出）。shadow 的置顶会
@@ -6768,7 +6768,8 @@ mod finalize_candidates_tests {
         let mut bad: Vec<String> = Vec::new();
         for (name, src) in sources {
             // 只看 `#[cfg(test)]` 之前的部分：测试自己用字面量直接构造键是合法的。
-            let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let prod = crate::source_scan::production_code(src);
+            let prod = prod.as_str();
             // 三个名字都扫：
             // - `record_selection_cand` 是从候选本身分流 emoji 的薄包装，记账码的口径约束
             //   对它同样成立，漏扫它就等于给新调用点开了后门；
@@ -6852,8 +6853,10 @@ mod finalize_candidates_tests {
         // 大小写投影拆出 `record_selection_cased_in` 后 = 15：`record_selection_in` 内部新增一处
         // 转调（净增 1），而 `record_selection_cand_in` 是把原有的 `_in` 调用**改成** `_cased_in`
         // （改调不是新增）。⚠️ 一开始按「两处各加一个」写成 16，被本断言当场逮住。
+        // 改用 `production_code` 剔测试条目后，`coordinator.rs` 九百多行之后的生产代码不再被
+        // 截掉，实扫 21。
         assert!(
-            checked >= 15,
+            checked >= 21,
             "只扫到 {checked} 个 record_selection 调用点，远少于预期——\
              调用点被改名或本测试的扫描方式失效了，先修测试再说"
         );
@@ -6874,9 +6877,12 @@ mod finalize_candidates_tests {
             "None",
             "owner.as_deref()",
             "self.effective_data_schema(state).as_deref()",
-            // 转发层：`record_selection` / `apply_freq_rerank` / `apply_shadow` 三个薄包装
-            // 把自己的参数原样传下去。
+            // 转发层：`record_selection` 薄包装与 `apply_freq_rerank_with_extra` 把自己的参数
+            // 原样传下去。
             "schema_override",
+            // 后处理步骤表的转发层：`run_passes` 原样传 `PassCtx.owner`；归属在构造 `PassCtx`
+            // 处受本测试检查（见下方对 `PassCtx` 字面量 owner 字段的扫描）。
+            "ctx.owner",
             // 临英：归属恒是内置英文方案，与 `effective_data_schema` 对 `TempEnglish` 的
             // 返回值是同一个常量（那边写成 `Some(ENGLISH_SCHEMA.to_string())`）。三处读写
             // 端直接用常量而不绕 state，取值同源，故等同于走了那个函数。
@@ -6921,11 +6927,16 @@ mod finalize_candidates_tests {
             ("handle_temp.rs", include_str!("handle_temp.rs")),
             // mix（快捷输入）同理。
             ("handle_mode.rs", include_str!("handle_mode.rs")),
+            // 后处理步骤表（转发）与经它读写的两条路径。
+            ("postprocess.rs", include_str!("postprocess.rs")),
+            ("handle_direct_aux.rs", include_str!("handle_direct_aux.rs")),
+            ("handle_reverse.rs", include_str!("handle_reverse.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
         for (name, src) in sources {
-            let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let prod = crate::source_scan::production_code(src);
+            let prod = prod.as_str();
             for call in CALLS {
                 for (off, _) in prod.match_indices(call) {
                     let args = &prod[off + call.len()..];
@@ -6955,6 +6966,17 @@ mod finalize_candidates_tests {
                 }
             }
         }
+        // 经后处理步骤表读写的路径，归属写在 `PassCtx { owner: <方案>, .. }` 里。
+        for (name, src) in sources {
+            let prod = crate::source_scan::production_code(src);
+            for val in crate::source_scan::pass_ctx_field_values(&prod, "owner") {
+                let val = val.unwrap_or_else(|| "<缺 owner 字段>".to_string());
+                checked += 1;
+                if !ALLOWED.contains(&val.as_str()) {
+                    bad.push(format!("{name}: PassCtx 的 owner `{val}`"));
+                }
+            }
+        }
         assert!(
             bad.is_empty(),
             "以下调用点的方案归属不是取自 effective_data_schema：\n  {}\n\
@@ -6967,9 +6989,11 @@ mod finalize_candidates_tests {
         // ⚠️ 下限须**随 sources 扩容一起上调**，否则余量翻倍等于容忍悄悄丢掉调用点：
         // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）；
         // 临拼词频改走 `record_selection_in` 后 +2 = 15；mix 读写接入 + handle_mode.rs 进表 = 20；`_cand_in` 进 CALLS = 21。
+        // 改用 `production_code`（不再截断于首个 `#[cfg(test)]`）+ 步骤表三文件进表 + 扫
+        // `PassCtx { owner }` 后实扫 33。
         // 与下调时同一条纪律——变动前先确认是「合并/删除」还是「漏调」。
         assert!(
-            checked >= 21,
+            checked >= 33,
             "只扫到 {checked} 个方案归属调用点，少于预期——扫描方式失效了，先修测试"
         );
     }
@@ -7007,7 +7031,8 @@ mod finalize_candidates_tests {
         let mut bad: Vec<String> = Vec::new();
         for (file, sig, label) in TARGETS {
             let full = src(file);
-            let prod = full.split("#[cfg(test)]").next().unwrap_or(full);
+            let prod = crate::source_scan::production_code(full);
+            let prod = prod.as_str();
             let Some(off) = prod.find(sig) else {
                 panic!("{label}: 找不到 `{sig}` —— 函数被改名了，先修测试再说");
             };
@@ -7051,9 +7076,9 @@ mod finalize_candidates_tests {
             "code",
             // 菜单灰显走 `candidate_op_scope` 的产物，其 `code` 已在那里归一（同写端一处取值）。
             "scope.code",
-            // 后处理步骤表的转发层：`run_passes` 原样传 `PassCtx` 里的码，码在构造 `PassCtx`
-            // 处受本测试检查（见下方对 `PassCtx {` 字段的扫描）。
-            "ctx.shadow_code",
+            // 直接辅助码的前缀池：前缀下的归一码为空时回落到前缀击键本身（与 `shadow_code_of`
+            // 同一条回落规则，只是作用在前缀而非整串缓冲上）。
+            "prefix_shadow",
         ];
         const CALLS: &[&str] = &[
             ".apply_shadow(",
@@ -7072,13 +7097,16 @@ mod finalize_candidates_tests {
             ("handle_temp.rs", include_str!("handle_temp.rs")),
             // mix 的读取点在成员段内，码同样取引擎归一码。
             ("handle_mode.rs", include_str!("handle_mode.rs")),
-            // 后处理步骤表：shadow 的唯一读取点在这里，码来自 `PassCtx`。
+            // 后处理步骤表：`run_passes` 里的那次读取，码从 `PassCtx` 原样解包成 `shadow_code`。
             ("postprocess.rs", include_str!("postprocess.rs")),
+            // 直接辅助码的前缀池（经 `PassCtx`）。
+            ("handle_direct_aux.rs", include_str!("handle_direct_aux.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
         for (name, src) in sources {
-            let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let prod = crate::source_scan::production_code(src);
+            let prod = prod.as_str();
             for call in CALLS {
                 // `apply_shadow_in` 多一个前置的 schema 实参，码是第 3 个；`apply_shadow` 是第 2 个。
                 let code_pos = if *call == ".apply_shadow_in(" { 2 } else { 1 };
@@ -7119,21 +7147,22 @@ mod finalize_candidates_tests {
                     }
                 }
             }
-            // 经后处理步骤表读 shadow 的路径，码写在 `PassCtx { .., shadow_code: <码>, .. }` 里。
-            for (off, _) in prod.match_indices("PassCtx {") {
-                let body = &prod[off..];
-                let body = &body[..body.find('}').unwrap_or(body.len())];
-                let Some(f) = body.find("shadow_code:") else {
+            // 经后处理步骤表读 shadow 的路径，码写在 `PassCtx { .., shadow_code: Some(<码>), .. }`
+            // 里；`None` = 该 profile 不读 shadow，不计数。
+            for val in crate::source_scan::pass_ctx_field_values(prod, "shadow_code") {
+                let Some(val) = val else {
                     bad.push(format!("{name}: PassCtx 字面量缺 shadow_code 字段"));
                     continue;
                 };
-                let val = &body[f + "shadow_code:".len()..];
-                let val = val[..val.find(',').unwrap_or(val.len())]
-                    .trim()
-                    .trim_start_matches('&')
-                    .trim();
+                if val == "None" {
+                    continue;
+                }
+                let inner = val
+                    .strip_prefix("Some(")
+                    .and_then(|v| v.strip_suffix(')'))
+                    .map(|v| v.trim().trim_start_matches('&').trim());
                 checked += 1;
-                if !ALLOWED.contains(&val) {
+                if !inner.is_some_and(|v| ALLOWED.contains(&v)) {
                     bad.push(format!("{name}: PassCtx 的 shadow_code `{val}`"));
                 }
             }
@@ -7147,8 +7176,9 @@ mod finalize_candidates_tests {
             bad.join("\n  ")
         );
         // ⚠️ 同上：`handle_temp.rs` 进 sources 后实扫 9（原 7、下限留在 5）；mix 接入后 10。
+        // 步骤表改造后 shadow 码写在 `PassCtx { shadow_code }`，扫字面量 + direct_aux 进表后 12。
         assert!(
-            checked >= 10,
+            checked >= 12,
             "只扫到 {checked} 个 shadow 读取点，少于预期——调用点被改名或扫描失效了，先修测试"
         );
     }
