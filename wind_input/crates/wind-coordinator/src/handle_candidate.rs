@@ -413,6 +413,13 @@ fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usi
     }
 }
 
+/// 「固定到第 N 位」给不给：英文引擎（英文方案、临英）不给——头部候选（原文、大小写变形、
+/// 被挪进头部的词库词）在 shadow 之后才插入，名次会偏头部条数。菜单与写端同用，引擎类型取自
+/// `CandidateOpScope`（按引擎类型判，自建的英文类方案 id 不叫 `english` 也认得）。
+pub(crate) fn pin_at_offered(engine_type: Option<wind_engine::EngineType>) -> bool {
+    engine_type != Some(wind_engine::EngineType::English)
+}
+
 /// 单字母重复上屏项（`refill_candidates` 插在首位）的 `natural_order`，调位口径据它认出这一项
 /// （见 `candidate_grid::inserted_after_shadow`）。
 pub(crate) const LEADING_REPEAT_ORDER: i32 = -1;
@@ -5483,10 +5490,11 @@ impl Coordinator {
             return;
         }
         // 固定到第 N 位：N 是界面名次，折算成读端 position（见 `pin_at_slots`）；已在该位、
-        // 落不到的格子、英文数据方案一律忽略。判据与菜单 `pin_at_submenu` 同源。
+        // 落不到的格子（含列表里有 emoji 扩展时的整组）、英文引擎一律忽略。判据与菜单
+        // `pin_at_submenu` 同源。
         let pin_at_pos = match op {
             CandidateOp::PinAt(n) => {
-                if !self.pin_at_offered(&schema) {
+                if !pin_at_offered(engine_type) {
                     return;
                 }
                 match self.pin_at_slots(state, idx).position_for(n) {
@@ -5527,10 +5535,15 @@ impl Coordinator {
                     } else {
                         pos.next
                     };
-                    if to != pos.here {
-                        self.swap_pinned_neighbor(store, &sh_schema, &code, state, to, pos.here);
-                    }
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, to)
+                    let nb = (to != pos.here)
+                        .then(|| self.candidate_at_read_rank(state, to))
+                        .flatten();
+                    let neighbor = nb
+                        .as_ref()
+                        .map(|c| (c.freq_text(), (!c.id.is_empty()).then_some(c.id.as_str())));
+                    store.move_shadow_swapping(
+                        &sh_schema, &code, &word, cand_id, to, neighbor, pos.here,
+                    )
                 }
                 // ⚠️ Delete 的短语 / 用户词分支走 `raw_code`（击键）：两者的键空间都是击键域
                 // （短语按 `input_buffer` 召回），双拼下用归一码会写进 `hao`、读的是 `hc`。
@@ -5593,43 +5606,6 @@ impl Coordinator {
             );
         }
         self.notify_ui_update(state);
-    }
-
-    /// 「固定到第 N 位」给不给：英文数据方案（英文方案、临英）不给——头部候选（原文、大小写
-    /// 变形、被挪进头部的词库词）在 shadow 之后才插入，名次会偏头部条数。菜单与写端同用。
-    pub(crate) fn pin_at_offered(&self, schema: &str) -> bool {
-        self.engine_mgr.data_schema_id(schema) != "english"
-    }
-
-    /// 前移 / 后移的交换：读端第 `to` 位的邻居若有自己的固定规则，改写到 `here`。
-    fn swap_pinned_neighbor(
-        &self,
-        store: &wind_store::Store,
-        sh_schema: &str,
-        code: &str,
-        state: &State,
-        to: usize,
-        here: usize,
-    ) {
-        let Some(nb) = self.candidate_at_read_rank(state, to) else {
-            return;
-        };
-        let nb_id = (!nb.id.is_empty()).then_some(nb.id.as_str());
-        let nb_word = nb.freq_text();
-        let has_pin = store
-            .get_shadow_rules(sh_schema, code)
-            .ok()
-            .flatten()
-            .is_some_and(|rec| {
-                rec.pinned.iter().any(|p| {
-                    wind_store::shadow::ShadowRecord::same_target(
-                        &p.word, &p.cand_id, nb_word, nb_id,
-                    )
-                })
-            });
-        if has_pin && let Err(e) = store.pin_shadow(sh_schema, code, nb_word, nb_id, here) {
-            warn!("candidate op swap failed: {}", e);
-        }
     }
 
     /// 右键「删除」按候选来源分流：
@@ -9516,5 +9492,21 @@ mod mobile_limit_tests {
         );
         assert_eq!(tail_after_letters("fang'xiang", 9), "");
         assert_eq!(tail_after_letters("ni'hao'a", 2), "hao'a");
+    }
+}
+
+#[cfg(test)]
+mod pin_at_offered_tests {
+    use super::pin_at_offered;
+    use wind_engine::EngineType;
+
+    /// 按引擎类型判：英文类方案无论 id 叫什么都不给，其余都给。
+    #[test]
+    fn only_english_engine_is_excluded() {
+        assert!(!pin_at_offered(Some(EngineType::English)));
+        for t in [EngineType::Pinyin, EngineType::CodeTable, EngineType::Mixed] {
+            assert!(pin_at_offered(Some(t)), "{t:?}");
+        }
+        assert!(pin_at_offered(None));
     }
 }

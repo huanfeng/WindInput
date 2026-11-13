@@ -457,6 +457,8 @@ fn move_down_onto_pinned_neighbor_swaps_back() {
 }
 
 /// 置顶 b 得 `[b,a,c]`，再后移 b 回到 `[a,b,c]`。
+///
+/// 对照用例：a 没有规则，不触发交换，修复前也是绿的；钉住的是「置顶后再后移」这条路不回归。
 #[test]
 fn move_top_then_move_down_restores() {
     skip_without_data!();
@@ -469,6 +471,8 @@ fn move_top_then_move_down_restores() {
 }
 
 /// 对照（前移）：置顶 c 得 `[c,a,b,d]`，前移 a 与 c 交换得 `[a,c,b,d]`。
+///
+/// 对照用例：前移写的规则是最新的、同位时排在前面，本身就等于交换，修复前也是绿的。
 #[test]
 fn move_up_onto_pinned_neighbor_swaps() {
     skip_without_data!();
@@ -565,9 +569,10 @@ fn pin_at_counts_ui_slots_with_s2t_variants() {
     let (y, word) = distinct_at(&all, chu + 3);
     // 变体那一格（界面第 chu+2 位）落不到。
     let (_, kids) = pin_menu(&coord, y).unwrap();
-    if let Some(k) = kids.get(chu + 1) {
-        assert!(!k.2, "变体那一格应灰：{kids:?}");
-    }
+    let k = kids
+        .get(chu + 1)
+        .unwrap_or_else(|| panic!("前提：子菜单列到变体那一格（第 {} 位）：{kids:?}", chu + 2));
+    assert!(!k.2, "变体那一格应灰：{kids:?}");
     coord.candidate_or_quick_format_op_at(CandidateOp::PinAt((chu + 2) as u8), y);
     assert!(
         probe.get_shadow_rules("wubi86", "bm").unwrap().is_none(),
@@ -589,4 +594,57 @@ fn pin_at_counts_ui_slots_with_s2t_variants() {
         let now = again.debug_all_candidate_texts();
         assert_eq!(pos_of(&now, &word), Some(t), "界面第 {} 位：{now:?}", t + 1);
     }
+}
+
+/// 两条规则同在第 2 位（Y 新），界面 `[a,Y,X,…]`；前移 X 得 `[a,X,Y,…]`。
+///
+/// 前移写下的规则最新、同位时排在前面，本身就是交换的效果，故这一条**不依赖**交换代码
+/// （去掉交换实测仍绿）；真正依赖交换的是后移，见 `move_down_onto_pinned_neighbor_swaps_back`。
+#[test]
+fn move_up_past_same_position_pin() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let store = fresh_store("ct_up_same");
+    let base = ct_top(&cfg, &store, 5);
+    let (x, y) = (&base[3], &base[4]);
+    store.pin_shadow("wubi86", "aa", x, None, 1).unwrap();
+    store.pin_shadow("wubi86", "aa", y, None, 1).unwrap();
+    assert_eq!(
+        ct_top(&cfg, &store, 3),
+        [base[0].clone(), y.clone(), x.clone()]
+    );
+    ct_op(&cfg, &store, CandidateOp::MoveUp, 2);
+    assert_eq!(
+        ct_top(&cfg, &store, 3),
+        [base[0].clone(), x.clone(), y.clone()]
+    );
+}
+
+/// 本码下有一条按短语 id 定位的规则，它记的旧求值文本恰好与邻居同文：后移时邻居（没有那个
+/// id）不算「有规则」，那条 id 规则原样保留，不被交换改写或清掉。
+#[test]
+fn swap_ignores_id_rule_with_same_stale_text() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let store = fresh_store("ct_swap_id");
+    let base = ct_top(&cfg, &store, 3);
+    store
+        .pin_shadow("wubi86", "aa", &base[1], Some("phrase:aa:stale"), 7)
+        .unwrap();
+    ct_op(&cfg, &store, CandidateOp::MoveDown, 0);
+    let rec = store.get_shadow_rules("wubi86", "aa").unwrap().unwrap();
+    let id_rule = rec
+        .pinned
+        .iter()
+        .find(|p| p.cand_id.as_deref() == Some("phrase:aa:stale"))
+        .unwrap_or_else(|| panic!("id 规则被清掉：{:?}", rec.pinned));
+    assert_eq!(id_rule.position, 7, "id 规则不被改写");
+    assert!(
+        !rec.pinned
+            .iter()
+            .any(|p| p.cand_id.is_none() && p.word == base[1]),
+        "不给邻居新写按词规则：{:?}",
+        rec.pinned
+    );
+    assert_eq!(ct_top(&cfg, &store, 2), [base[1].clone(), base[0].clone()]);
 }

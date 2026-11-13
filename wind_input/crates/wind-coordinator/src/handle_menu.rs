@@ -2560,8 +2560,8 @@ impl Coordinator {
                 ),
                 M::leaf(delete_label, op(CandidateOp::Delete), delete_enabled, false),
             ];
-            // 英文数据方案（英文方案、临英）不给，见 `pin_at_offered`。
-            if self.pin_at_offered(&scope.schema) {
+            // 英文引擎（英文方案、临英）不给，见 `pin_at_offered`。
+            if crate::handle_candidate::pin_at_offered(scope.engine_type) {
                 items.insert(1, pin_at_submenu(per_page, &pin_slots, can_pin));
             }
             // 按文字屏蔽的词另给「只在这个码下不出」：写端 `candidate_op_in` 同判据、同目标词，
@@ -3247,7 +3247,8 @@ impl Coordinator {
 }
 
 /// 「固定到第 N 位 ▸ 第 1 位…第 K 位」子菜单，K = 每页条数（不超过 [`PIN_AT_MAX`] 与界面
-/// 候选条数）。N 是**界面名次**；已在第 N 位、或那一格落不到（紧跟着变体等后插入项）时灰。
+/// 候选条数）。N 是**界面名次**；已在第 N 位、或那一格落不到（紧跟着变体等后插入项）时灰；
+/// 列表里有 emoji 扩展时整组灰（见 `PinAtSlots::has_emoji`）。
 ///
 /// ⚠️ 判据与写端 `candidate_op_in` 的 `PinAt` 分支逐字对应（同用 `pin_at_slots`）：失配的
 /// 表现是「点得动却毫无反应」。

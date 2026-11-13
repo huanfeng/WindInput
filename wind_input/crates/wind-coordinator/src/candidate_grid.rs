@@ -55,6 +55,9 @@ pub(crate) struct PinAtSlots {
     pub(crate) slots: Vec<Option<usize>>,
     /// 界面候选总条数（完整列表，含后插入项），菜单子项不超过它。
     pub(crate) ui_len: usize,
+    /// 列表里有 emoji 扩展候选：此时 `slots` 全为 `None`。emoji 挂在前 `max_hosts` 条之后（或
+    /// 常用候选之后的末尾档），词一挪 emoji 就改挂别处，界面名次没法稳定折算，干脆不给。
+    pub(crate) has_emoji: bool,
 }
 
 impl PinAtSlots {
@@ -764,10 +767,11 @@ impl Coordinator {
         while end < full.len() && full[end].s2t_override.is_some() {
             end += 1;
         }
+        let has_emoji = full.iter().any(|c| c.is_emoji_suggestion);
         let rest: Vec<&Candidate> = full[..fi].iter().chain(&full[end..]).collect();
         let slots = (0..=rest.len())
             .map(|k| {
-                if k == fi || rest.get(k).is_some_and(|c| inserted_after_shadow(c)) {
+                if has_emoji || k == fi || rest.get(k).is_some_and(|c| inserted_after_shadow(c)) {
                     return None;
                 }
                 Some(
@@ -781,6 +785,7 @@ impl Coordinator {
         PinAtSlots {
             slots,
             ui_len: full.len(),
+            has_emoji,
         }
     }
 
@@ -1881,6 +1886,19 @@ mod tests {
         // 点变体按原字算：原字连同变体一起挪。
         let s = c.pin_at_slots(&st, 1);
         assert_eq!(s.slots, [None, Some(1), Some(2)]);
+    }
+
+    /// 有 emoji 扩展（`[H, 😀, A, B]`）：整组落不到。
+    #[test]
+    fn pin_slots_all_none_with_emoji() {
+        let (c, _rx) = coord(true);
+        let mut st = c.state.lock().unwrap();
+        let mut emoji = cand("😀");
+        emoji.is_emoji_suggestion = true;
+        st.candidates = vec![cand("H"), emoji, cand("A"), cand("B")];
+        let s = c.pin_at_slots(&st, 3);
+        assert!(s.has_emoji);
+        assert!(s.slots.iter().all(Option::is_none), "{:?}", s.slots);
     }
 
     /// 单字母重复项占首位：「第 1 位」落不到；钉到第 2 位写读端 0。

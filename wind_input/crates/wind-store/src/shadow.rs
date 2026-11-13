@@ -310,6 +310,43 @@ impl Store {
         })
     }
 
+    /// 前移 / 后移：把 `(word, cand_id)` 钉到 `to`；邻居 `(nb_word, nb_id)` 若有**自己的**固定
+    /// 规则，一并改写到 `here`（交换）。一次提交。
+    ///
+    /// 「邻居有规则」按读端口径判（`wind_candidate::ShadowPinRule` 的匹配）：规则带 id 只认 id，
+    /// 不回退文本——动态短语的规则记的是写入当天的求值文本，回退会把碰巧同文的邻居当成它，
+    /// 改写甚至清掉那条 id 规则。
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_shadow_swapping(
+        &self,
+        schema: &str,
+        code: &str,
+        word: &str,
+        cand_id: Option<&str>,
+        to: usize,
+        neighbor: Option<(&str, Option<&str>)>,
+        here: usize,
+    ) -> anyhow::Result<()> {
+        self.modify_shadow(schema, code, |rec| {
+            if let Some((nb_word, nb_id)) = neighbor {
+                let hit = rec
+                    .pinned
+                    .iter()
+                    .find(|p| match p.cand_id.as_deref() {
+                        Some(id) if !id.is_empty() => nb_id == Some(id),
+                        _ => p.word == nb_word,
+                    })
+                    .map(|p| (p.word.clone(), p.cand_id.clone()));
+                if let Some((w, id)) = hit
+                    && !ShadowRecord::same_target(&w, &id, word, cand_id)
+                {
+                    rec.apply_pin(&w, id, here);
+                }
+            }
+            rec.apply_pin(word, cand_id.map(String::from), to)
+        })
+    }
+
     /// 置顶/移动候选（cand_id 非空=动态短语按 id 匹配）。
     pub fn pin_shadow(
         &self,
@@ -725,6 +762,39 @@ mod tests {
         let p = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// 交换只认邻居自己的规则：带 id 的规则不按文本回退；邻居有规则时改写到 `here`。
+    #[test]
+    fn move_shadow_swapping_matches_like_reader() {
+        let path = tmp("wind_sh_swap.redb");
+        let s = Store::open(&path).unwrap();
+        s.pin_shadow("ct", "aa", "乙", Some("phrase:aa:x"), 7)
+            .unwrap();
+        s.move_shadow_swapping("ct", "aa", "甲", None, 1, Some(("乙", None)), 0)
+            .unwrap();
+        let rec = s.get_shadow_rules("ct", "aa").unwrap().unwrap();
+        let pos = |w: &str, id: Option<&str>| {
+            rec.pinned
+                .iter()
+                .find(|p| p.word == w && p.cand_id.as_deref() == id)
+                .map(|p| p.position)
+        };
+        assert_eq!(pos("乙", Some("phrase:aa:x")), Some(7), "id 规则原样");
+        assert_eq!(pos("甲", None), Some(1));
+        assert_eq!(rec.pinned.len(), 2);
+
+        s.pin_shadow("ct", "aa", "丙", None, 1).unwrap();
+        s.move_shadow_swapping("ct", "aa", "丁", None, 1, Some(("丙", None)), 2)
+            .unwrap();
+        let rec = s.get_shadow_rules("ct", "aa").unwrap().unwrap();
+        let at = |w: &str| rec.pinned.iter().find(|p| p.word == w).map(|p| p.position);
+        assert_eq!(
+            (at("丁"), at("丙")),
+            (Some(1), Some(2)),
+            "邻居规则改写到原位"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 只撤同 (码, 文) 的删除规则：同码别的词、同文别的码、置顶都不动；键经 `key_norm` 归一后比。
