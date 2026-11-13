@@ -30,7 +30,7 @@ use tracing::{debug, warn};
 ///
 /// | 动词 | 策略位 | why |
 /// |---|---|---|
-/// | `toggle_schema:` / `switch_schema:` / `toggle_mode` / `switch_engine` | 无 | 它们正是用来**离开/返回英文态**的；带上 `CHINESE_ONLY` 就成了单程票 |
+/// | `toggle_schema:` / `switch_schema:` / `toggle_mode` / `switch_engine` / `set_mode:` | 无 | 它们正是用来**离开/返回英文态**的；带上 `CHINESE_ONLY` 就成了单程票 |
 /// | `toggle_full_width` / `toggle_toolbar` / `open_settings` / `open_dictionary` / `take_screenshot` | 无 | 两模式下都该生效，与固定字段那段同档 |
 /// | `toggle_punct` / `toggle_s2t` / `toggle_t2s` / `single_char` | `CHINESE_ONLY` | 只在中文态有意义；**不带 `GLOBAL`**，避免不必要地抢占宿主快捷键 |
 /// | 进 overlay 的（`temp_pinyin` / `temp_english` / `aux_code` / `rare_char` / `reverse` / `mix:` / `special:`） | `CHINESE_ONLY \| GLOBAL` | 进 overlay 只在中文输入中途有意义；`GLOBAL` 让 TSF 用 `RegisterHotKey` 抢占，穿透 QQNT/Tabby 等 Chromium 宿主的同名加速键 |
@@ -155,20 +155,20 @@ pub fn is_bare_function_key(vk: u32, modifiers: u32) -> bool {
 ///
 /// 这类键没有字符产出，宿主自己常用它（F1 帮助、F5 刷新、F11 全屏）；英文模式下输入法不该
 /// 夺走。唯一的例外是「离开 / 返回英文态」那几类动词（`toggle_mode` / `switch_engine` /
-/// `toggle_schema:` / `switch_schema:`）：带上 `CHINESE_ONLY` 就成了英文态切不回来的单程票。
+/// `toggle_schema:` / `switch_schema:` / `set_mode:`）：带上 `CHINESE_ONLY` 就成了英文态切不回来的单程票。
 /// 编译端（策略位）与分派端（服务端守卫）共用本判据，两处不会分叉。
 pub fn bare_function_key_needs_chinese(vk: u32, modifiers: u32, action: &str) -> bool {
     use crate::config::BoundAction as BA;
     if !is_bare_function_key(vk, modifiers) {
         return false;
     }
-    !matches!(
-        BA::parse(action.trim()),
-        BA::ToggleSchema(_) | BA::SwitchSchema(_)
-    ) && !matches!(
-        BA::parse(action.trim()),
-        BA::Action(a) if matches!(a.as_str(), "toggle_mode" | "switch_engine")
-    )
+    // 「离开 / 返回英文态」的一族：带上 `CHINESE_ONLY` 就成了英文态切不回来的单程票。
+    let two_way = match BA::parse(action.trim()) {
+        BA::ToggleSchema(_) | BA::SwitchSchema(_) => true,
+        BA::Action(a) => a == "toggle_mode" || a == "switch_engine" || a.starts_with("set_mode:"),
+        _ => false,
+    };
+    !two_way
 }
 
 /// 修饰键常量（与 wind-ipc MOD_* / Go ipc.Mod* 对齐）
@@ -1627,6 +1627,18 @@ mod tests {
         assert!(compile("f5", "command:ime.reload()") & HOTKEY_POLICY_CHINESE_ONLY != 0);
         assert!(compile("f5", "comment_state:detail") & HOTKEY_POLICY_CHINESE_ONLY != 0);
         assert_eq!(compile("f6", "toggle_mode") & HOTKEY_POLICY_CHINESE_ONLY, 0);
+        // 定向中英切换与 toggle_mode 同档：若被打了 CHINESE_ONLY，英文态按 F 键到不了
+        // 协调器，`set_mode:chinese` 就成了一条单程票的哑键。
+        assert_eq!(
+            compile("f6", "set_mode:chinese") & HOTKEY_POLICY_CHINESE_ONLY,
+            0,
+            "set_mode:chinese 绑裸 F 键时不得带 CHINESE_ONLY"
+        );
+        assert_eq!(
+            compile("f7", "set_mode:english") & HOTKEY_POLICY_CHINESE_ONLY,
+            0,
+            "set_mode:english 绑裸 F 键时不得带 CHINESE_ONLY"
+        );
         assert_eq!(
             compile("f6", "toggle_schema:wubi86") & HOTKEY_POLICY_CHINESE_ONLY,
             0
@@ -2046,6 +2058,8 @@ mod tests {
         let cases: &[(&str, bool, bool)] = &[
             ("toggle_mode", false, false),
             ("switch_engine", false, false),
+            ("set_mode:english", false, false),
+            ("set_mode:chinese", false, false),
             ("toggle_schema:english", false, false),
             ("switch_schema:wubi", false, false),
             ("toggle_full_width", false, false),
