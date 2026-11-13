@@ -24,7 +24,18 @@ use wind_ipc::protocol::{MOD_SHIFT, MOD_SHORTCUT};
 use wind_keys::keymap;
 use wind_ui_types::{GRID_TAB_TAG_BASE, GridTab};
 
-/// 调位位置（见 [`Coordinator::reorder_positions`]），均为完整候选列表里的下标。
+/// 这条候选是不是 shadow **之后**才插进列表的：简繁变体（`expand_s2t_variants`）、emoji
+/// 扩展、单字母重复上屏项（`refill_candidates` 插在首位）。读端 `apply_shadow` 看不到它们，
+/// 调位写下标时不能把它们算进去。
+pub(crate) fn inserted_after_shadow(c: &Candidate) -> bool {
+    c.s2t_override.is_some()
+        || c.is_emoji_suggestion
+        || (c.natural_order == crate::handle_candidate::LEADING_REPEAT_ORDER
+            && c.source == wind_candidate::CandidateSource::None
+            && c.code.is_empty())
+}
+
+/// 调位位置（见 [`Coordinator::reorder_positions`]），均为读端（shadow 应用时）候选列表里的下标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReorderPositions {
     /// 本条。
@@ -641,32 +652,53 @@ impl Coordinator {
     ///
     /// 前移 / 后移的目标是子集里**前一个 / 后一个可见词**在完整列表里的位置：用户看到的是
     /// 子集，「往前挪一格」挪的是看得见的那一格。没在筛选时与 `idx ± 1` 逐字一致。
+    ///
+    /// 完整列表里还要**跳过 shadow 之后才插入的项**（[`inserted_after_shadow`]）：读端
+    /// `apply_shadow` 解释 position 用的是插入之前的列表，按 `candidates` 的下标写，开了简繁
+    /// 时单字之后的候选每过一条变体就偏大一格。这类项自身的位置取它前面最近的那一条（变体即
+    /// 它的原字）。
     pub(crate) fn reorder_positions(&self, state: &State, idx: usize) -> ReorderPositions {
-        if state.grid_tab == GridTab::All || state.grid_full.is_empty() {
-            let last = state.candidates.len().saturating_sub(1);
-            return ReorderPositions {
-                here: idx,
-                prev: idx.saturating_sub(1),
-                next: (idx + 1).min(last),
-                last,
-            };
-        }
-        let full = &state.grid_full;
+        let filtering = state.grid_tab != GridTab::All && !state.grid_full.is_empty();
+        let full = if filtering {
+            &state.grid_full
+        } else {
+            &state.candidates
+        };
+        // 可见下标 → 完整列表下标。
         let at = |i: usize| -> Option<usize> {
+            if !filtering {
+                return (i < full.len()).then_some(i);
+            }
             let c = state.candidates.get(i)?;
             full.iter().position(|f| {
                 f.text == c.text && f.code == c.code && f.id == c.id && f.source == c.source
             })
         };
-        let last = full.len().saturating_sub(1);
-        let here = at(idx).unwrap_or(idx);
+        // 完整列表下标 → 读端位置：`[..=fi]` 里读端看得见的条数减一。
+        let rank = |fi: usize| -> usize {
+            full[..=fi.min(full.len().saturating_sub(1))]
+                .iter()
+                .filter(|c| !inserted_after_shadow(c))
+                .count()
+                .saturating_sub(1)
+        };
+        let real = full.iter().filter(|c| !inserted_after_shadow(c)).count();
+        let last = real.saturating_sub(1);
+        let here = at(idx).map(rank).unwrap_or(idx.min(last));
+        // 前一个 / 后一个可见、且读端位置不同的那一条（跳过同一原字的变体）。
+        let prev = (0..idx)
+            .rev()
+            .filter_map(|i| at(i).map(rank))
+            .find(|&r| r < here)
+            .unwrap_or(here.saturating_sub(1));
+        let next = (idx + 1..state.candidates.len())
+            .filter_map(|i| at(i).map(rank))
+            .find(|&r| r > here)
+            .unwrap_or((here + 1).min(last));
         ReorderPositions {
             here,
-            prev: idx
-                .checked_sub(1)
-                .and_then(at)
-                .unwrap_or(here.saturating_sub(1)),
-            next: at(idx + 1).unwrap_or((here + 1).min(last)),
+            prev,
+            next,
             last,
         }
     }
@@ -1725,6 +1757,29 @@ mod tests {
         st.grid_full.clear();
         let p = c.reorder_positions(&st, 1);
         assert_eq!((p.here, p.prev, p.next, p.last), (1, 0, 1, 1));
+    }
+
+    /// shadow 之后插入的项（简繁变体、emoji、单字母重复项）不计位置：读端看到的是
+    /// [A, B, C]，界面是 [重复, A, A变体, B, 🙂, C]。
+    #[test]
+    fn reorder_positions_skip_items_inserted_after_shadow() {
+        let (c, _rx) = coord(true);
+        let mut st = c.state.lock().unwrap();
+        let mut repeat = cand("上次");
+        repeat.natural_order = crate::handle_candidate::LEADING_REPEAT_ORDER;
+        let mut variant = cand("A");
+        variant.s2t_override = Some("Ａ".into());
+        let mut emoji = cand("🙂");
+        emoji.is_emoji_suggestion = true;
+        st.candidates = vec![repeat, cand("A"), variant, cand("B"), emoji, cand("C")];
+        let p = |i| {
+            let r = c.reorder_positions(&st, i);
+            (r.here, r.prev, r.next, r.last)
+        };
+        assert_eq!(p(1), (0, 0, 1, 2), "A");
+        assert_eq!(p(2), (0, 0, 1, 2), "A 的变体 = A");
+        assert_eq!(p(3), (1, 0, 2, 2), "B：前移越过变体落到 A");
+        assert_eq!(p(5), (2, 1, 2, 2), "C：前移越过 emoji 落到 B");
     }
 
     /// 退回完整列表（辅助码等要拿原始候选做快照的入口用）。

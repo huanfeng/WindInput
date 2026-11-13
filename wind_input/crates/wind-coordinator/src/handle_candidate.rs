@@ -413,6 +413,10 @@ fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usi
     }
 }
 
+/// 单字母重复上屏项（`refill_candidates` 插在首位）的 `natural_order`，调位口径据它认出这一项
+/// （见 `candidate_grid::inserted_after_shadow`）。
+pub(crate) const LEADING_REPEAT_ORDER: i32 = -1;
+
 /// 候选列表里**唯一的非 emoji 扩展候选**；不足一条或多于一条都返回 `None`。
 ///
 /// # 为什么抽成纯函数
@@ -2967,7 +2971,7 @@ impl Coordinator {
                 0,
                 Candidate {
                     text: last,
-                    natural_order: -1,
+                    natural_order: LEADING_REPEAT_ORDER,
                     ..Default::default()
                 },
             );
