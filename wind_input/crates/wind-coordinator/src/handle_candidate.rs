@@ -5447,6 +5447,19 @@ impl Coordinator {
         if cand.is_emoji_suggestion {
             return;
         }
+        // 单字母引导的重复上屏项：不是这个码的候选，调位无意义（菜单侧 `can_pin` / `movable`
+        // 同判据灰掉）。
+        if crate::candidate_grid::is_leading_repeat(&cand)
+            && matches!(
+                op,
+                CandidateOp::MoveTop
+                    | CandidateOp::MoveUp
+                    | CandidateOp::MoveDown
+                    | CandidateOp::PinAt(_)
+            )
+        {
+            return;
+        }
         // 拼音普通候选**放行置顶与固定到第 N 位**，前移/后移仍禁；命令候选不受限。
         // 引擎类型取自 scope（特殊模式问的是它引用的方案，不是主方案）。
         //
@@ -5469,12 +5482,20 @@ impl Coordinator {
         if matches!(op, CandidateOp::MoveTop) && pos.here == 0 {
             return;
         }
-        // 固定到第 N 位：N 为 1 基名次；已在该位同样忽略。判据与菜单 `pin_at_submenu` 同源。
-        if let CandidateOp::PinAt(n) = op
-            && (n == 0 || pos.here == n as usize - 1)
-        {
-            return;
-        }
+        // 固定到第 N 位：N 是界面名次，折算成读端 position（见 `pin_at_slots`）；已在该位、
+        // 落不到的格子、英文数据方案一律忽略。判据与菜单 `pin_at_submenu` 同源。
+        let pin_at_pos = match op {
+            CandidateOp::PinAt(n) => {
+                if !self.pin_at_offered(&schema) {
+                    return;
+                }
+                match self.pin_at_slots(state, idx).position_for(n) {
+                    Some(p) => p,
+                    None => return,
+                }
+            }
+            _ => 0,
+        };
         if let Some(store) = &self.store {
             // 候选调整按 data_schema_id 归属（拼音族折叠）；Delete 分支仍传原始 schema，
             // 供 delete_candidate_by_source 对用户词/临时词按来源分流（混输）。
@@ -5497,11 +5518,19 @@ impl Coordinator {
             let cand_id = (!cand.id.is_empty()).then_some(cand.id.as_str());
             let r = match op {
                 CandidateOp::MoveTop => store.pin_shadow(&sh_schema, &code, &word, cand_id, 0),
-                CandidateOp::MoveUp => {
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pos.prev)
-                }
-                CandidateOp::MoveDown => {
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pos.next)
+                // 前移 / 后移是与邻居**交换**：邻居自己有固定规则时，把它的规则改写到本条原来的
+                // 位置。否则两条规则同位、后写的在前，本条会把邻居挤到更远处（a 后移后 b 再后移，
+                // 得到的是 `[c,b,a]` 而不是换回 `[a,b,c]`）。
+                CandidateOp::MoveUp | CandidateOp::MoveDown => {
+                    let to = if op == CandidateOp::MoveUp {
+                        pos.prev
+                    } else {
+                        pos.next
+                    };
+                    if to != pos.here {
+                        self.swap_pinned_neighbor(store, &sh_schema, &code, state, to, pos.here);
+                    }
+                    store.pin_shadow(&sh_schema, &code, &word, cand_id, to)
                 }
                 // ⚠️ Delete 的短语 / 用户词分支走 `raw_code`（击键）：两者的键空间都是击键域
                 // （短语按 `input_buffer` 召回），双拼下用归一码会写进 `hao`、读的是 `hc`。
@@ -5519,8 +5548,8 @@ impl Coordinator {
                     }
                     _ => Ok(()),
                 },
-                CandidateOp::PinAt(n) => {
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, n as usize - 1)
+                CandidateOp::PinAt(_) => {
+                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pin_at_pos)
                 }
                 CandidateOp::Reset => store.remove_shadow_rule(&sh_schema, &code, &word, cand_id),
                 // 不可达：它在上面就 early-return 了（落点是全局常用字覆盖表，不是 shadow）。
@@ -5564,6 +5593,43 @@ impl Coordinator {
             );
         }
         self.notify_ui_update(state);
+    }
+
+    /// 「固定到第 N 位」给不给：英文数据方案（英文方案、临英）不给——头部候选（原文、大小写
+    /// 变形、被挪进头部的词库词）在 shadow 之后才插入，名次会偏头部条数。菜单与写端同用。
+    pub(crate) fn pin_at_offered(&self, schema: &str) -> bool {
+        self.engine_mgr.data_schema_id(schema) != "english"
+    }
+
+    /// 前移 / 后移的交换：读端第 `to` 位的邻居若有自己的固定规则，改写到 `here`。
+    fn swap_pinned_neighbor(
+        &self,
+        store: &wind_store::Store,
+        sh_schema: &str,
+        code: &str,
+        state: &State,
+        to: usize,
+        here: usize,
+    ) {
+        let Some(nb) = self.candidate_at_read_rank(state, to) else {
+            return;
+        };
+        let nb_id = (!nb.id.is_empty()).then_some(nb.id.as_str());
+        let nb_word = nb.freq_text();
+        let has_pin = store
+            .get_shadow_rules(sh_schema, code)
+            .ok()
+            .flatten()
+            .is_some_and(|rec| {
+                rec.pinned.iter().any(|p| {
+                    wind_store::shadow::ShadowRecord::same_target(
+                        &p.word, &p.cand_id, nb_word, nb_id,
+                    )
+                })
+            });
+        if has_pin && let Err(e) = store.pin_shadow(sh_schema, code, nb_word, nb_id, here) {
+            warn!("candidate op swap failed: {}", e);
+        }
     }
 
     /// 右键「删除」按候选来源分流：

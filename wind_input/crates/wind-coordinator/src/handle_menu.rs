@@ -2423,6 +2423,7 @@ impl Coordinator {
         let word = cand.text.clone();
         let pos = self.reorder_positions(&state, idx);
         let per_page = self.per_page(state.active);
+        let pin_slots = self.pin_at_slots(&state, idx);
         let scope = self.candidate_op_scope(&state);
         // 快捷输入的格式候选：判据独立于 candidate_op_scope（后者问「有没有词库落点」，
         // 混输没有，返回 None 是对的）。与写端 `candidate_or_quick_format_op` 同源。
@@ -2527,8 +2528,10 @@ impl Coordinator {
             // 落地时**两端一起放开**（这里与写端 `candidate_op` 的同名守卫）。
             let emoji = cand.is_emoji_suggestion;
             let pinyin_locked = is_pinyin && !cand.is_command;
-            let can_pin = !group_member && !emoji;
-            let movable = !pinyin_locked && !group_member && !emoji;
+            // 单字母引导的重复上屏项：不是这个码的候选，调位一律灰（写端同守卫）。
+            let repeat = crate::candidate_grid::is_leading_repeat(&cand);
+            let can_pin = !group_member && !emoji && !repeat;
+            let movable = !pinyin_locked && !group_member && !emoji && !repeat;
             let (delete_label, delete_enabled) = match &delete_target {
                 Some(t) => candidate_delete_menu(t, blocks_word),
                 None => (candidate_delete_menu(&cand, blocks_word).0, false),
@@ -2543,7 +2546,6 @@ impl Coordinator {
                     can_pin && pos.here > 0,
                     false,
                 ),
-                pin_at_submenu(per_page, pos, can_pin),
                 M::leaf(
                     "前移",
                     op(CandidateOp::MoveUp),
@@ -2558,6 +2560,10 @@ impl Coordinator {
                 ),
                 M::leaf(delete_label, op(CandidateOp::Delete), delete_enabled, false),
             ];
+            // 英文数据方案（英文方案、临英）不给，见 `pin_at_offered`。
+            if self.pin_at_offered(&scope.schema) {
+                items.insert(1, pin_at_submenu(per_page, &pin_slots, can_pin));
+            }
             // 按文字屏蔽的词另给「只在这个码下不出」：写端 `candidate_op_in` 同判据、同目标词，
             // 不可删时一起灰。不绑热键（删除热键仍是上一项）。
             if blocks_word {
@@ -3240,24 +3246,24 @@ impl Coordinator {
     }
 }
 
-/// 「固定到第 N 位 ▸ 第 1 位…第 K 位」子菜单，K = 每页条数（不超过 [`PIN_AT_MAX`] 与读端
-/// 候选条数）。已在第 j 位时「第 j 位」灰。
+/// 「固定到第 N 位 ▸ 第 1 位…第 K 位」子菜单，K = 每页条数（不超过 [`PIN_AT_MAX`] 与界面
+/// 候选条数）。N 是**界面名次**；已在第 N 位、或那一格落不到（紧跟着变体等后插入项）时灰。
 ///
-/// ⚠️ 判据与写端 `candidate_op_in` 的 `PinAt` 分支逐字对应（同用 `reorder_positions` 的
-/// `here`）：失配的表现是「点得动却毫无反应」。
+/// ⚠️ 判据与写端 `candidate_op_in` 的 `PinAt` 分支逐字对应（同用 `pin_at_slots`）：失配的
+/// 表现是「点得动却毫无反应」。
 fn pin_at_submenu(
     per_page: usize,
-    pos: crate::candidate_grid::ReorderPositions,
+    slots: &crate::candidate_grid::PinAtSlots,
     can_pin: bool,
 ) -> wind_ui_types::MenuItemSpec {
     use wind_ui_types::MenuItemSpec as M;
-    let k = per_page.min(PIN_AT_MAX as usize).min(pos.last + 1);
-    let children: Vec<M> = (1..=k)
+    let k = per_page.min(PIN_AT_MAX as usize).min(slots.ui_len);
+    let children: Vec<M> = (1..=k as u8)
         .map(|n| {
             M::leaf(
                 format!("第 {n} 位"),
-                MenuKind::Op(CandidateOp::PinAt(n as u8)),
-                can_pin && pos.here != n - 1,
+                MenuKind::Op(CandidateOp::PinAt(n)),
+                can_pin && slots.position_for(n).is_some(),
                 false,
             )
         })

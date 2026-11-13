@@ -274,6 +274,12 @@ fn shuangpin_pin_at_keys_on_normalized_code() {
     assert!(store.get_shadow_rules("pinyin", "nihc").unwrap().is_none());
     assert_eq!(pos_of(&texts(&sp, &store, "nihc"), &word), Some(2));
     assert_eq!(pos_of(&texts(&full, &store, "nihao"), &word), Some(2));
+    assert_eq!(
+        coord_at(&sp, &fresh_store("sp3_plain"), "nihc").debug_preedit(),
+        SP_PREEDIT,
+        "前提：未固定时的编码栏"
+    );
+    assert_eq!(coord_at(&sp, &store, "nihc").debug_preedit(), SP_PREEDIT);
 }
 
 /// 混输拼音段：固定到第 3 位，重开仍在第 3 位。
@@ -290,7 +296,9 @@ fn mixed_pinyin_segment_pin_at() {
     );
     let (idx, word) = distinct_at(&all, 4);
     coord.candidate_or_quick_format_op_at(CandidateOp::PinAt(3), idx);
-    assert_eq!(pos_of(&texts(&cfg, &store, "nihao"), &word), Some(2));
+    let again = coord_at(&cfg, &store, "nihao");
+    assert_eq!(pos_of(&again.debug_all_candidate_texts(), &word), Some(2));
+    assert_eq!(again.debug_preedit(), "ni'hao", "编码栏仍是拼音切分");
 }
 
 /// 码表共用：五笔 `aa` 固定到第 3 位。
@@ -412,4 +420,173 @@ fn temp_pinyin_applies_pin_on_its_own_list() {
     store.pin_shadow("pinyin", "nihao", &word, None, 2).unwrap();
     let now = enter(&store);
     assert_eq!(pos_of(&now, &word), Some(2), "{now:?}");
+}
+
+/// 双拼 `nihc` 的编码栏形态（按击键切分；固定位置不改它）。
+const SP_PREEDIT: &str = "ni'hc";
+
+// ── 前移 / 后移与已有固定规则的邻居交换 ────────────────────────────────────
+
+fn ct_top(cfg: &Config, store: &Arc<Store>, n: usize) -> Vec<String> {
+    texts(cfg, store, "aa")[..n].to_vec()
+}
+
+fn ct_op(cfg: &Config, store: &Arc<Store>, op: CandidateOp, idx: usize) {
+    coord_at(cfg, store, "aa").candidate_or_quick_format_op_at(op, idx);
+}
+
+/// `[a,b,c,d]` 后移 a 得 `[b,a,c,d]`，再后移 b 应换回 `[a,b,c,d]`。
+#[test]
+fn move_down_onto_pinned_neighbor_swaps_back() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let store = fresh_store("ct_swap");
+    let base = ct_top(&cfg, &store, 4);
+    ct_op(&cfg, &store, CandidateOp::MoveDown, 0);
+    assert_eq!(
+        ct_top(&cfg, &store, 4),
+        [
+            base[1].clone(),
+            base[0].clone(),
+            base[2].clone(),
+            base[3].clone()
+        ]
+    );
+    ct_op(&cfg, &store, CandidateOp::MoveDown, 0);
+    assert_eq!(ct_top(&cfg, &store, 4), base);
+}
+
+/// 置顶 b 得 `[b,a,c]`，再后移 b 回到 `[a,b,c]`。
+#[test]
+fn move_top_then_move_down_restores() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let store = fresh_store("ct_top_down");
+    let base = ct_top(&cfg, &store, 3);
+    ct_op(&cfg, &store, CandidateOp::MoveTop, 1);
+    ct_op(&cfg, &store, CandidateOp::MoveDown, 0);
+    assert_eq!(ct_top(&cfg, &store, 3), base);
+}
+
+/// 对照（前移）：置顶 c 得 `[c,a,b,d]`，前移 a 与 c 交换得 `[a,c,b,d]`。
+#[test]
+fn move_up_onto_pinned_neighbor_swaps() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let store = fresh_store("ct_up");
+    let base = ct_top(&cfg, &store, 4);
+    ct_op(&cfg, &store, CandidateOp::MoveTop, 2);
+    ct_op(&cfg, &store, CandidateOp::MoveUp, 1);
+    assert_eq!(
+        ct_top(&cfg, &store, 4),
+        [
+            base[0].clone(),
+            base[2].clone(),
+            base[1].clone(),
+            base[3].clone()
+        ]
+    );
+}
+
+// ── 英文数据方案不给「固定到第 N 位」──────────────────────────────────────
+
+fn config_with_english(active: &str) -> Config {
+    let mut c = config(active);
+    c.schema.available.push("english".into());
+    c.input.temp_english.enabled = true;
+    c
+}
+
+/// 英文方案与临英：菜单没有这一项，写端也不写规则；置顶照旧可用。
+#[test]
+fn english_has_no_pin_at() {
+    skip_without_data!();
+    for (active, input) in [("english", "hel"), ("wubi86", "Hel")] {
+        let cfg = config_with_english(active);
+        let store = fresh_store(&format!("en_{active}"));
+        let coord = open(&cfg, &store, false).unwrap();
+        for ch in input.chars() {
+            coord.handle_key_event_policed(&KeyEventData {
+                key_code: (ch.to_ascii_uppercase() as u32) & 0xFF,
+                scan_code: 0,
+                modifiers: if ch.is_ascii_uppercase() {
+                    wind_ipc::protocol::MOD_SHIFT
+                } else {
+                    0
+                },
+                event_type: EVENT_KEY_DOWN,
+                toggles: 0,
+                event_seq: 0,
+                prev_char: 0,
+                seq_char: 0,
+            });
+        }
+        let all = coord.debug_all_candidate_texts();
+        let idx = 3.min(all.len() - 1);
+        assert!(
+            pin_menu(&coord, idx).is_none(),
+            "{active}: 不给「固定到第 N 位」"
+        );
+        let items = coord.candidate_menu_items(idx).unwrap();
+        assert!(
+            items
+                .iter()
+                .any(|m| m.kind == wind_ui_types::MenuKind::Op(CandidateOp::MoveTop) && m.enabled),
+            "{active}: 置顶照旧"
+        );
+        coord.candidate_or_quick_format_op_at(CandidateOp::PinAt(1), idx);
+        assert!(
+            store.list_shadow_rules("english").unwrap().is_empty(),
+            "{active}: 写端同判据不写"
+        );
+    }
+}
+
+// ── 「第 N 位」是界面名次（开简繁时含变体）────────────────────────────────
+
+/// 五笔 `bm` 开简繁：`[…, 出, 齣, X, Y, …]`。把 Y 固定到界面第 N 位，重开（开简繁）后它就在
+/// 界面第 N 位；紧跟「出」的那一格（变体占着）灰、写端不写。
+#[test]
+fn pin_at_counts_ui_slots_with_s2t_variants() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let probe = fresh_store("s2t_probe");
+    let Some(coord) = open(&cfg, &probe, true) else {
+        return;
+    };
+    type_keys(&coord, "bm");
+    let all = coord.debug_all_candidate_texts();
+    let chu = pos_of(&all, "出").unwrap_or_else(|| panic!("前提：`bm` 有「出」：{all:?}"));
+    assert_eq!(
+        all.get(chu + 1).map(String::as_str),
+        Some("出"),
+        "前提：变体：{all:?}"
+    );
+    let (y, word) = distinct_at(&all, chu + 3);
+    // 变体那一格（界面第 chu+2 位）落不到。
+    let (_, kids) = pin_menu(&coord, y).unwrap();
+    if let Some(k) = kids.get(chu + 1) {
+        assert!(!k.2, "变体那一格应灰：{kids:?}");
+    }
+    coord.candidate_or_quick_format_op_at(CandidateOp::PinAt((chu + 2) as u8), y);
+    assert!(
+        probe.get_shadow_rules("wubi86", "bm").unwrap().is_none(),
+        "落不到的格子不写"
+    );
+
+    let mut targets = vec![chu + 2];
+    if chu > 0 {
+        targets.push(0);
+    }
+    for t in targets {
+        let store = fresh_store(&format!("s2t_{t}"));
+        let c = open(&cfg, &store, true).unwrap();
+        type_keys(&c, "bm");
+        let idx = pos_of(&c.debug_all_candidate_texts(), &word).unwrap();
+        c.candidate_or_quick_format_op_at(CandidateOp::PinAt((t + 1) as u8), idx);
+        let again = open(&cfg, &store, true).unwrap();
+        type_keys(&again, "bm");
+        let now = again.debug_all_candidate_texts();
+        assert_eq!(pos_of(&now, &word), Some(t), "界面第 {} 位：{now:?}", t + 1);
+    }
 }

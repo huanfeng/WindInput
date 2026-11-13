@@ -335,6 +335,9 @@ const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 7] = [
     ("toggle_common", CandidateOp::ToggleCommon),
 ];
 
+/// 移动端「固定到第 N 位」的 N 上限（扁平化时截掉其余子项）。
+const MOBILE_PIN_AT_MAX: u8 = 9;
+
 /// 词条操作 → 动作名。
 fn candidate_menu_action(op: CandidateOp) -> Option<String> {
     if let CandidateOp::PinAt(n) = op {
@@ -361,6 +364,8 @@ fn candidate_menu_op(action: &str) -> Option<CandidateOp> {
 fn flatten_candidate_menu(items: &[MenuItemSpec], out: &mut Vec<CandidateMenuItem>) {
     for item in items {
         let action = match item.kind {
+            // 长按菜单是扁平列表，「第 N 位」只列到 9，免得一屏全是它（桌面子菜单仍到 20）。
+            MenuKind::Op(CandidateOp::PinAt(n)) if n > MOBILE_PIN_AT_MAX => None,
             MenuKind::Op(op) => candidate_menu_action(op),
             MenuKind::Copy => Some("copy".to_string()),
             MenuKind::Submenu => {
@@ -2184,6 +2189,28 @@ mod candidate_menu_tests {
             );
         }
         assert_eq!(candidate_menu_op("pin_at_x"), None);
+    }
+
+    /// 移动端只摊平前 9 个「第 N 位」。
+    #[test]
+    fn pin_at_capped_to_nine_on_mobile() {
+        let kids = (1..=12)
+            .map(|n| {
+                MenuItemSpec::leaf(
+                    format!("第 {n} 位"),
+                    MenuKind::Op(CandidateOp::PinAt(n)),
+                    true,
+                    false,
+                )
+            })
+            .collect();
+        let mut out = Vec::new();
+        flatten_candidate_menu(&[MenuItemSpec::submenu("固定到第 N 位", kids)], &mut out);
+        let got: Vec<&str> = out.iter().map(|i| i.action.as_str()).collect();
+        assert_eq!(
+            got,
+            (1..=9).map(|n| format!("pin_at_{n}")).collect::<Vec<_>>()
+        );
     }
 
     /// 真词库下走一遍门面：第二页候选取得到菜单、置顶生效；copy / 未知 action / 灰显项 /

@@ -28,11 +28,43 @@ use wind_ui_types::{GRID_TAB_TAG_BASE, GridTab};
 /// 扩展、单字母重复上屏项（`refill_candidates` 插在首位）。读端 `apply_shadow` 看不到它们，
 /// 调位写下标时不能把它们算进去。
 pub(crate) fn inserted_after_shadow(c: &Candidate) -> bool {
-    c.s2t_override.is_some()
-        || c.is_emoji_suggestion
-        || (c.natural_order == crate::handle_candidate::LEADING_REPEAT_ORDER
-            && c.source == wind_candidate::CandidateSource::None
-            && c.code.is_empty())
+    c.s2t_override.is_some() || c.is_emoji_suggestion || is_leading_repeat(c)
+}
+
+/// 单字母引导的重复上屏项（`refill_candidates` 插在首位）。它不是这个码的候选，不给调位。
+pub(crate) fn is_leading_repeat(c: &Candidate) -> bool {
+    c.natural_order == crate::handle_candidate::LEADING_REPEAT_ORDER
+        && c.source == wind_candidate::CandidateSource::None
+        && c.code.is_empty()
+}
+
+/// 完整列表下标 → 读端位置：`[..=fi]` 里读端看得见的条数减一（后插入项取它前面最近那条）。
+fn read_rank(full: &[Candidate], fi: usize) -> usize {
+    full[..=fi.min(full.len().saturating_sub(1))]
+        .iter()
+        .filter(|c| !inserted_after_shadow(c))
+        .count()
+        .saturating_sub(1)
+}
+
+/// 「固定到第 N 位」的落点（见 [`Coordinator::pin_at_slots`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PinAtSlots {
+    /// `slots[k]` = 落到**界面**第 k+1 位要写的读端 position；`None` = 已在该位，或那一格
+    /// 落不到（它后面紧跟的是变体 / emoji 等后插入项，被钉的词插不进它与宿主之间）。
+    pub(crate) slots: Vec<Option<usize>>,
+    /// 界面候选总条数（完整列表，含后插入项），菜单子项不超过它。
+    pub(crate) ui_len: usize,
+}
+
+impl PinAtSlots {
+    /// 界面第 `n` 位（1 起）要写的读端 position。
+    pub(crate) fn position_for(&self, n: u8) -> Option<usize> {
+        self.slots
+            .get((n as usize).checked_sub(1)?)
+            .copied()
+            .flatten()
+    }
 }
 
 /// 调位位置（见 [`Coordinator::reorder_positions`]），均为读端（shadow 应用时）候选列表里的下标。
@@ -658,41 +690,24 @@ impl Coordinator {
     /// 时单字之后的候选每过一条变体就偏大一格。这类项自身的位置取它前面最近的那一条（变体即
     /// 它的原字）。
     pub(crate) fn reorder_positions(&self, state: &State, idx: usize) -> ReorderPositions {
-        let filtering = state.grid_tab != GridTab::All && !state.grid_full.is_empty();
-        let full = if filtering {
-            &state.grid_full
-        } else {
-            &state.candidates
-        };
-        // 可见下标 → 完整列表下标。
-        let at = |i: usize| -> Option<usize> {
-            if !filtering {
-                return (i < full.len()).then_some(i);
-            }
-            let c = state.candidates.get(i)?;
-            full.iter().position(|f| {
-                f.text == c.text && f.code == c.code && f.id == c.id && f.source == c.source
-            })
-        };
-        // 完整列表下标 → 读端位置：`[..=fi]` 里读端看得见的条数减一。
-        let rank = |fi: usize| -> usize {
-            full[..=fi.min(full.len().saturating_sub(1))]
-                .iter()
-                .filter(|c| !inserted_after_shadow(c))
-                .count()
-                .saturating_sub(1)
-        };
-        let real = full.iter().filter(|c| !inserted_after_shadow(c)).count();
-        let last = real.saturating_sub(1);
-        let here = at(idx).map(rank).unwrap_or(idx.min(last));
+        let full = Self::reorder_full_list(state);
+        let at = |i| Self::full_index_of(state, i);
+        let last = full
+            .iter()
+            .filter(|c| !inserted_after_shadow(c))
+            .count()
+            .saturating_sub(1);
+        let here = at(idx)
+            .map(|fi| read_rank(full, fi))
+            .unwrap_or(idx.min(last));
         // 前一个 / 后一个可见、且读端位置不同的那一条（跳过同一原字的变体）。
         let prev = (0..idx)
             .rev()
-            .filter_map(|i| at(i).map(rank))
+            .filter_map(|i| at(i).map(|fi| read_rank(full, fi)))
             .find(|&r| r < here)
             .unwrap_or(here.saturating_sub(1));
         let next = (idx + 1..state.candidates.len())
-            .filter_map(|i| at(i).map(rank))
+            .filter_map(|i| at(i).map(|fi| read_rank(full, fi)))
             .find(|&r| r > here)
             .unwrap_or((here + 1).min(last));
         ReorderPositions {
@@ -700,6 +715,72 @@ impl Coordinator {
             prev,
             next,
             last,
+        }
+    }
+
+    /// 调位口径下的完整列表：分类筛选中是 `grid_full`，否则就是 `candidates`。
+    fn reorder_full_list(state: &State) -> &[Candidate] {
+        if state.grid_tab != GridTab::All && !state.grid_full.is_empty() {
+            &state.grid_full
+        } else {
+            &state.candidates
+        }
+    }
+
+    /// 可见下标 → [`Self::reorder_full_list`] 里的下标。
+    fn full_index_of(state: &State, i: usize) -> Option<usize> {
+        let full = Self::reorder_full_list(state);
+        if std::ptr::eq(full, state.candidates.as_slice()) {
+            return (i < full.len()).then_some(i);
+        }
+        let c = state.candidates.get(i)?;
+        full.iter().position(|f| {
+            f.text == c.text && f.code == c.code && f.id == c.id && f.source == c.source
+        })
+    }
+
+    /// 读端第 `rank` 位的那条候选（前移 / 后移查邻居有没有自己的固定规则用）。
+    pub(crate) fn candidate_at_read_rank(&self, state: &State, rank: usize) -> Option<Candidate> {
+        Self::reorder_full_list(state)
+            .iter()
+            .filter(|c| !inserted_after_shadow(c))
+            .nth(rank)
+            .cloned()
+    }
+
+    /// 「固定到第 N 位」的 N 指**界面名次**（完整列表里的第 N 格，含简繁变体等后插入项），
+    /// 写下去的是读端 position。折算：把被钉的词（连同紧随其后的简繁变体）从完整列表摘掉得
+    /// `L`，落到界面第 k+1 格 = 在 `L[k]` 之前，读端 position = `L[..k]` 里读端看得见的条数。
+    /// `L[k]` 是后插入项时落不到（它们紧跟宿主），该格给 `None`；当前所在那格也给 `None`。
+    ///
+    /// 点的是变体时按它的原字算（写端规则键本就是原字）。菜单与写端同用本函数。
+    pub(crate) fn pin_at_slots(&self, state: &State, idx: usize) -> PinAtSlots {
+        let full = Self::reorder_full_list(state);
+        let mut fi = Self::full_index_of(state, idx).unwrap_or(idx.min(full.len()));
+        while fi > 0 && fi < full.len() && full[fi].s2t_override.is_some() {
+            fi -= 1;
+        }
+        let mut end = (fi + 1).min(full.len());
+        while end < full.len() && full[end].s2t_override.is_some() {
+            end += 1;
+        }
+        let rest: Vec<&Candidate> = full[..fi].iter().chain(&full[end..]).collect();
+        let slots = (0..=rest.len())
+            .map(|k| {
+                if k == fi || rest.get(k).is_some_and(|c| inserted_after_shadow(c)) {
+                    return None;
+                }
+                Some(
+                    rest[..k]
+                        .iter()
+                        .filter(|c| !inserted_after_shadow(c))
+                        .count(),
+                )
+            })
+            .collect();
+        PinAtSlots {
+            slots,
+            ui_len: full.len(),
         }
     }
 
@@ -1780,6 +1861,42 @@ mod tests {
         assert_eq!(p(2), (0, 0, 1, 2), "A 的变体 = A");
         assert_eq!(p(3), (1, 0, 2, 2), "B：前移越过变体落到 A");
         assert_eq!(p(5), (2, 1, 2, 2), "C：前移越过 emoji 落到 B");
+    }
+
+    /// 分类筛选 + 简繁变体：完整列表 [出, 出(齣), 好, 和平]，「单字」子集 [出, 出(齣), 好]。
+    #[test]
+    fn reorder_and_pin_slots_under_filter_with_variants() {
+        let (c, _rx) = coord(true);
+        let mut st = c.state.lock().unwrap();
+        let mut variant = cand("出");
+        variant.s2t_override = Some("齣".into());
+        st.grid_full = vec![cand("出"), variant.clone(), cand("好"), cand("和平")];
+        st.candidates = vec![cand("出"), variant, cand("好")];
+        st.grid_tab = GridTab::Single;
+        let p = c.reorder_positions(&st, 2);
+        assert_eq!((p.here, p.prev, p.next, p.last), (1, 0, 2, 2), "好");
+        let s = c.pin_at_slots(&st, 2);
+        assert_eq!(s.slots, [Some(0), None, None, Some(2)]);
+        assert_eq!(s.ui_len, 4);
+        // 点变体按原字算：原字连同变体一起挪。
+        let s = c.pin_at_slots(&st, 1);
+        assert_eq!(s.slots, [None, Some(1), Some(2)]);
+    }
+
+    /// 单字母重复项占首位：「第 1 位」落不到；钉到第 2 位写读端 0。
+    #[test]
+    fn pin_slots_skip_leading_repeat() {
+        let (c, _rx) = coord(true);
+        let mut st = c.state.lock().unwrap();
+        let mut repeat = cand("上次");
+        repeat.natural_order = crate::handle_candidate::LEADING_REPEAT_ORDER;
+        assert!(is_leading_repeat(&repeat));
+        st.candidates = vec![repeat, cand("A"), cand("B")];
+        let s = c.pin_at_slots(&st, 2);
+        assert_eq!(s.slots, [None, Some(0), None]);
+        assert_eq!(s.position_for(2), Some(0));
+        assert_eq!(s.position_for(1), None);
+        assert_eq!(s.position_for(0), None);
     }
 
     /// 退回完整列表（辅助码等要拿原始候选做快照的入口用）。

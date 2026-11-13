@@ -47,7 +47,9 @@ impl ShadowPinRule {
 ///      - 先摘出全部命中项，再按 `position` 升序插回（`position` 是最终列表的下标，互不挤位）；
 ///      - 同一 `position` 内按"最新在前"排列——`pinned` 契约为最新在前（index 0 最近），
 ///        排序键 `(position 升序, 原始索引降序)` 使较老项先 insert、最新项最后 insert 停在最前；
-///      - 位置越界时钳到末尾。
+///      - 位置越界时钳到末尾；
+///      - 同一候选命中多条规则时取 position 最小的那条（先处理的规则已把它摘走，后面的规则
+///        找不到它），返回值只计一次。
 ///
 /// `deleted` 是纯文本匹配，认候选的显示文本与词库原文（[`Candidate::freq_text`]）两种形态：
 /// 写端记词库原文，模板系统词（`$` / `{}` 词条）在读端可能已展开成当天的文本。短语删除走
@@ -310,6 +312,15 @@ mod tests {
             &[by_word("A", 2), by_id("旧文本", "phrase:b", 3)],
         );
         assert_eq!(texts(&c), ["x", "y", "A", "B", "z"]);
+    }
+
+    /// 同一候选命中多条规则（按词一条、按 id 一条）：取 position 最小的那条，只计一次。
+    #[test]
+    fn one_candidate_many_rules_takes_smallest_position() {
+        let mut c = cands_with_id(&[("a", ""), ("b", ""), ("X", "phrase:x"), ("d", "")]);
+        let hits = apply_shadow(&mut c, &[], &[by_word("X", 3), by_id("旧", "phrase:x", 1)]);
+        assert_eq!(texts(&c), ["a", "X", "b", "d"]);
+        assert_eq!(hits, 1);
     }
 
     /// 核心回归：规则的 `word` 是**写入当天**的求值文本，今天候选文本已全变。
