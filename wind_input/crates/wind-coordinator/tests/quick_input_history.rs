@@ -337,16 +337,51 @@ fn open_with(tag: &str, edit: impl FnOnce(&mut Config)) -> (Arc<Coordinator>, Ar
     (coord, store)
 }
 
-/// 文本透镜（纯小写字母）回车上屏的原文不记：它本身就是拼音 / 英文的合法编码，记进来
-/// 下次打前缀时会顶掉拼音首选。
+/// 文本透镜（纯小写字母）回车上屏的原文也记：开了历史成员就是要「打过的下次能补出来」，
+/// 位置由成员顺序定（排前则前部补出）。历史在末位时，记录它不改变拼音 / 英文前部的候选顺序。
 #[test]
-fn text_lens_raw_commit_is_not_remembered() {
+fn text_lens_raw_commit_is_remembered_without_moving_pinyin() {
     skip_without_data!();
-    let (coord, store) = open("textraw", true);
+    let (head, _s) = open("textraw_head", true);
+    enter_quick(&head);
+    type_str(&head, "kubectl");
+    head.handle_key_event(&key(VK_RETURN, 0));
+    enter_quick(&head);
+    type_str(&head, "kube");
+    let texts = head.debug_page_texts();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("kubectl"),
+        "历史排前应首位：{texts:?}"
+    );
+    head.handle_key_event(&key(0x1B, 0));
+
+    let tail = |c: &mut Config| {
+        let m = &mut c.schema.mix_modes[0].members;
+        m.retain(|x| x != wind_quick_input::MEMBER_HISTORY);
+        m.push(wind_quick_input::MEMBER_HISTORY.to_string());
+    };
+    let (coord, store) = open_with("textraw", tail);
+    enter_quick(&coord);
+    type_str(&coord, "ni");
+    let before = coord.debug_page_texts();
+    coord.handle_key_event(&key(0x1B, 0));
+
+    enter_quick(&coord);
+    type_str(&coord, "kubectl");
+    let act = coord.handle_key_event(&key(VK_RETURN, 0));
+    assert_eq!(committed(&act).as_deref(), Some("kubectl"), "前提");
+    assert_eq!(count_of(&store, "kubectl"), 1, "纯小写原文应进历史");
+
+    // 记过 nihao 之后，`ni` 的首页与记录前逐条一致（nihao 不进前部）。
     enter_quick(&coord);
     type_str(&coord, "nihao");
     coord.handle_key_event(&key(VK_RETURN, 0));
-    assert_eq!(history_len(&store), 0, "纯小写原文不该进历史");
+    enter_quick(&coord);
+    type_str(&coord, "ni");
+    let after = coord.debug_page_texts();
+    let head = before.len().min(after.len()).min(6);
+    assert_eq!(before[..head], after[..head], "拼音前部不应被历史挤动");
 }
 
 /// 标点顶屏高亮的历史候选：次数 +1，且**不**往任何方案写词频（它没有编码）。
