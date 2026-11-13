@@ -2409,7 +2409,8 @@ impl Coordinator {
     ///
     /// 词条操作的启用态/删除文案按候选来源动态化（对齐 Go window_mouse 菜单状态规则）：
     /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁全部调位（无稳定位置语义）。
-    /// - 删除：短语→「禁用短语」（软删可恢复）；用户词/临时词→真删；系统词→「隐藏候选」（shadow）。
+    /// - 删除：拼音 / 英文 ≥2 字的词→「屏蔽该词」并另给「在此编码下隐藏」；短语→「禁用短语」
+    ///   （软删可恢复）；码表用户词/临时词→真删；其余系统词→「在此编码下隐藏」（shadow）。
     /// - 特殊模式（快符等）：词条操作**照常提供**，编码取其独立缓冲、归属取其引用方案。
     /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
     pub fn candidate_menu_items(&self, idx: usize) -> Option<Vec<wind_ui_types::MenuItemSpec>> {
@@ -2428,6 +2429,12 @@ impl Coordinator {
         let delete_target = scope
             .as_ref()
             .and_then(|sc| self.delete_target(&state, &sc.schema, &cand));
+        // 删除是否按文字屏蔽：决定文案「屏蔽该词」与有无第二项「在此编码下隐藏」。删除目标取不到
+        // （只有英文数据方案的头部原文条）时按原文条自身判——多字母的照样两项、都灰。
+        let blocks_word = scope.as_ref().is_some_and(|sc| match &delete_target {
+            Some(t) => self.delete_blocks_word(&sc.schema, t),
+            None => wind_store::shadow::is_blockable_word(cand.freq_text()),
+        });
         drop(state);
 
         let op = |o: CandidateOp| MenuKind::Op(o);
@@ -2516,12 +2523,12 @@ impl Coordinator {
             let can_pin = !group_member && !emoji;
             let movable = !pinyin_locked && !group_member && !emoji;
             let (delete_label, delete_enabled) = match &delete_target {
-                Some(t) => candidate_delete_menu(t),
-                None => (candidate_delete_menu(&cand).0, false),
+                Some(t) => candidate_delete_menu(t, blocks_word),
+                None => (candidate_delete_menu(&cand, blocks_word).0, false),
             };
             let has_rule = has_rule && !emoji;
 
-            vec![
+            let mut items = vec![
                 // 位置按完整列表计（分类筛选中 `idx` 只是子集下标），与写端同源。
                 M::leaf(
                     "置顶",
@@ -2542,9 +2549,20 @@ impl Coordinator {
                     false,
                 ),
                 M::leaf(delete_label, op(CandidateOp::Delete), delete_enabled, false),
-                M::leaf("恢复默认", op(CandidateOp::Reset), has_rule, false),
-                M::separator(),
-            ]
+            ];
+            // 按文字屏蔽的词另给「只在这个码下不出」：写端 `candidate_op_in` 同判据、同目标词，
+            // 不可删时一起灰。不绑热键（删除热键仍是上一项）。
+            if blocks_word {
+                items.push(M::leaf(
+                    "在此编码下隐藏",
+                    op(CandidateOp::HideHere),
+                    delete_enabled,
+                    false,
+                ));
+            }
+            items.push(M::leaf("恢复默认", op(CandidateOp::Reset), has_rule, false));
+            items.push(M::separator());
+            items
         } else {
             Vec::new()
         };
@@ -3225,17 +3243,22 @@ pub(crate) fn candidate_is_group_member(cand: &wind_candidate::Candidate) -> boo
             || cand.phrase_template.starts_with("$AA"))
 }
 
-/// 右键「删除」菜单项的动态文案与可用性（按候选来源，对齐 Go computeDeleteMenuLabel）：
-/// 短语→禁用短语（软删可恢复）；用户词/临时词→真删；系统词→shadow 隐藏。
-/// 单字同样允许隐藏（旧版的单字保护已取消：shadow 按 code+word 键控，只隐藏该编码下的
-/// 该字，其它编码仍可打出，且设置页可恢复，不存在"某字彻底打不出"）。
-/// Windows 菜单构建与 macOS 禁用位推送共用，避免两处规则漂移。
-pub(crate) fn candidate_delete_menu(cand: &wind_candidate::Candidate) -> (&'static str, bool) {
+/// 右键「删除」菜单项（[`CandidateOp::Delete`]）的动态文案与可用性（按候选来源）：
+/// 拼音 / 英文按文字屏蔽的词（`blocks_word`，判据见 `Coordinator::delete_blocks_word`）→
+/// 「屏蔽该词」；短语→禁用短语（软删可恢复）；用户词/临时词→真删；系统词→「在此编码下隐藏」
+/// （shadow）。单字同样允许隐藏（shadow 按 code+word 键控，只隐藏该编码下的该字，其它编码仍可
+/// 打出，且设置页可恢复，不存在"某字彻底打不出"）。
+pub(crate) fn candidate_delete_menu(
+    cand: &wind_candidate::Candidate,
+    blocks_word: bool,
+) -> (&'static str, bool) {
     if candidate_is_group_member(cand) {
         ("删除词条", false)
     } else if cand.is_emoji_suggestion {
         // emoji 扩展候选没有词库落点，删无可删；灰显而非隐藏，理由见菜单装配处。
-        ("隐藏候选", false)
+        ("在此编码下隐藏", false)
+    } else if blocks_word {
+        ("屏蔽该词", true)
     } else if cand.is_phrase {
         // 静态短语前缀命中（is_prefix 且无完整码）定位不到 store 记录 → 暂禁。
         ("禁用短语", !cand.is_prefix || !cand.group_code.is_empty())
@@ -3244,8 +3267,8 @@ pub(crate) fn candidate_delete_menu(cand: &wind_candidate::Candidate) -> (&'stat
     } else if cand.meta.is_temp_dict {
         ("删除临时词", true)
     } else {
-        // 系统词（码表/拼音）：shadow 软隐藏。
-        ("隐藏候选", true)
+        // 系统词（码表 / 拼音单字 / 混输码表段 / 合成候选）：shadow 软隐藏。
+        ("在此编码下隐藏", true)
     }
 }
 
@@ -3549,9 +3572,44 @@ mod tests {
             is_emoji_suggestion: true,
             ..Default::default()
         };
-        let (label, enabled) = super::candidate_delete_menu(&cand);
-        assert_eq!(label, "隐藏候选");
+        let (label, enabled) = super::candidate_delete_menu(&cand, false);
+        assert_eq!(label, "在此编码下隐藏");
         assert!(!enabled, "emoji 扩展候选不可删除 / 隐藏");
+    }
+
+    /// 删除项文案按来源：按文字屏蔽的词「屏蔽该词」（含拼音用户词 / 临时词），短语、码表用户词 /
+    /// 临时词、group 成员不变，其余「在此编码下隐藏」。
+    #[test]
+    fn candidate_delete_menu_labels() {
+        use wind_candidate::Candidate;
+        let sys = Candidate {
+            text: "你好".into(),
+            ..Default::default()
+        };
+        let mut user = sys.clone();
+        user.meta.is_user_dict = true;
+        let mut temp = sys.clone();
+        temp.meta.is_temp_dict = true;
+        let phrase = Candidate {
+            text: "电话".into(),
+            is_phrase: true,
+            ..Default::default()
+        };
+        let member = Candidate {
+            text: "甲".into(),
+            is_phrase: true,
+            is_group_member: true,
+            ..Default::default()
+        };
+        let label = |c: &Candidate, b| super::candidate_delete_menu(c, b);
+        assert_eq!(label(&sys, true), ("屏蔽该词", true));
+        assert_eq!(label(&user, true), ("屏蔽该词", true));
+        assert_eq!(label(&temp, true), ("屏蔽该词", true));
+        assert_eq!(label(&sys, false), ("在此编码下隐藏", true));
+        assert_eq!(label(&user, false), ("删除用户词", true));
+        assert_eq!(label(&temp, false), ("删除临时词", true));
+        assert_eq!(label(&phrase, false), ("禁用短语", true));
+        assert_eq!(label(&member, false), ("删除词条", false));
     }
 
     /// ★★★ 锚点落盘查屏必须退 1px，否则贴右/下边缘时存到**邻屏**的 key 下。

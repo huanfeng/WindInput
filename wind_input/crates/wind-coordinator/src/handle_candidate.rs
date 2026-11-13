@@ -5501,6 +5501,14 @@ impl Coordinator {
                     Some(t) => self.delete_candidate_by_source(&schema, &raw_code, &code, &t),
                     None => Ok(()),
                 },
+                // 只写当前输入码的删除行（键取归一码，与读端同形）；只接按文字屏蔽的那类词，
+                // 与菜单同判据——其余候选的 Delete 本就按编码隐藏，不另给这一项。
+                CandidateOp::HideHere => match self.delete_target(state, &schema, &cand) {
+                    Some(t) if self.delete_blocks_word(&schema, &t) => {
+                        store.delete_shadow(&sh_schema, &code, t.freq_text())
+                    }
+                    _ => Ok(()),
+                },
                 CandidateOp::Reset => store.remove_shadow_rule(&sh_schema, &code, &word, cand_id),
                 // 不可达：它在上面就 early-return 了（落点是全局常用字覆盖表，不是 shadow）。
                 // 保持不 panic —— 菜单 id 由 IPC 回传，让一个越界值把输入法打崩不值当。
@@ -5535,9 +5543,9 @@ impl Coordinator {
         // 用户看到的那一半判据。「记录删掉了、但同文的系统词条目还在」与「根本没删到」
         // 在屏幕上完全同形（都是点了没反应），只有把这一行和上面的「删前命中」并排看
         // 才分得开——单看任何一条都会误诊。
-        if matches!(op, CandidateOp::Delete) {
+        if matches!(op, CandidateOp::Delete | CandidateOp::HideHere) {
             debug!(
-                "candidate_op(Delete): 重建后候选仍在={} text={}",
+                "candidate_op({op:?}): 重建后候选仍在={} text={}",
                 state.candidates.iter().any(|c| c.text == word),
                 word
             );
@@ -5585,26 +5593,12 @@ impl Coordinator {
             self.rebuild_phrases();
             return Ok(());
         }
-        // 拼音的多字词按**文字**删（设计 §4a）：用户删的是「这个词」，不是「这个码下的它」。
-        // 只认拼音来源、且写进 `pinyin` 桶的（拼音方案，混输的拼音段——§8 第 12 条）：拼音方案里
-        // 混入的英文词归英文桶，混输的码表段仍按编码，都走下面的老路。
-        if cand.source == CandidateSource::Pinyin
-            && self
-                .engine_mgr
-                .write_data_schema_id(schema, CandidateSource::Pinyin)
-                .as_deref()
-                == Some(wind_engine::manager::PINYIN_DATA_SCHEMA)
-            && wind_store::shadow::is_blockable_word(cand.freq_text())
-        {
-            return self.delete_pinyin_word(store, cand);
-        }
-        // 英文同理（§8 第 11 条）：只在英文数据方案（英文方案、临英）里按文字屏蔽；混在拼音 /
-        // 码表 / 混输里的英文仍按各自方案、各自编码隐藏。
-        if cand.source == CandidateSource::English
-            && self.engine_mgr.data_schema_id(schema) == ENGLISH_SCHEMA
-            && wind_store::shadow::is_blockable_word(cand.freq_text())
-        {
-            return self.delete_english_word(store, cand);
+        if self.delete_blocks_word(schema, cand) {
+            return if cand.source == CandidateSource::Pinyin {
+                self.delete_pinyin_word(store, cand)
+            } else {
+                self.delete_english_word(store, cand)
+            };
         }
         if cand.meta.is_user_dict || cand.meta.is_temp_dict {
             // 混在拼音 / 码表 / 混输里的英文出自共享英文引擎，用户词与临时词在 `english` 桶；
@@ -5729,6 +5723,32 @@ impl Coordinator {
             sh, shadow_code, cand.text
         );
         store.delete_shadow(&sh, shadow_code, cand.freq_text())
+    }
+
+    /// 删除是否按文字屏蔽（菜单文案「屏蔽该词」、并给第二项「在此编码下隐藏」）。
+    ///
+    /// 拼音的多字词按**文字**删（设计 §4a）：用户删的是「这个词」，不是「这个码下的它」。
+    /// 只认拼音来源、且写进 `pinyin` 桶的（拼音方案，混输的拼音段——§8 第 12 条）：拼音方案里
+    /// 混入的英文词归英文桶，混输的码表段仍按编码。英文同理（§8 第 11 条）：只在英文数据方案
+    /// （英文方案、临英）里按文字屏蔽；混在拼音 / 码表 / 混输里的英文仍按各自方案、各自编码隐藏。
+    /// 短语（走禁用短语）与 emoji 扩展候选（无词库落点）不算。写端分流与菜单装配共用这一个判据。
+    pub(crate) fn delete_blocks_word(&self, schema: &str, cand: &Candidate) -> bool {
+        if cand.is_phrase
+            || cand.is_emoji_suggestion
+            || !wind_store::shadow::is_blockable_word(cand.freq_text())
+        {
+            return false;
+        }
+        match cand.source {
+            CandidateSource::Pinyin => {
+                self.engine_mgr
+                    .write_data_schema_id(schema, CandidateSource::Pinyin)
+                    .as_deref()
+                    == Some(wind_engine::manager::PINYIN_DATA_SCHEMA)
+            }
+            CandidateSource::English => self.engine_mgr.data_schema_id(schema) == ENGLISH_SCHEMA,
+            _ => false,
+        }
     }
 
     /// 右键删除实际作用的候选。英文头部候选（所打原文 / 它的大小写变形，无来源）没有词库落点：

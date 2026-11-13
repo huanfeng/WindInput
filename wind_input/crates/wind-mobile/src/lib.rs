@@ -300,9 +300,9 @@ pub struct SchemaDictInfo {
 /// 子菜单（目前候选菜单没有）会被摊平成同级项。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateMenuItem {
-    /// 文案，与桌面同一候选的右键菜单逐字一致（如「隐藏候选」「设为生僻字」）
+    /// 文案，与桌面同一候选的右键菜单逐字一致（如「屏蔽该词」「设为生僻字」）
     pub label: String,
-    /// `"move_top"` | `"move_up"` | `"move_down"` | `"delete"` | `"reset"` |
+    /// `"move_top"` | `"move_up"` | `"move_down"` | `"delete"` | `"hide_here"` | `"reset"` |
     /// `"toggle_common"` | `"copy"`。原样回传给 [`MobileCore::candidate_menu_run`]。
     pub action: String,
     /// 灰显项照样列出：用户要看得出「这条不能调」，而不是以为菜单少了一项
@@ -323,11 +323,12 @@ pub struct InstalledSchema {
 pub use wind_coordinator::handle_tooltip::CandidateTooltipSection;
 
 /// [`CandidateMenuItem::action`] 与词条操作的对照。`copy` 不在此表——复制由宿主自己写剪贴板。
-const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 6] = [
+const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 7] = [
     ("move_top", CandidateOp::MoveTop),
     ("move_up", CandidateOp::MoveUp),
     ("move_down", CandidateOp::MoveDown),
     ("delete", CandidateOp::Delete),
+    ("hide_here", CandidateOp::HideHere),
     ("reset", CandidateOp::Reset),
     ("toggle_common", CandidateOp::ToggleCommon),
 ];
@@ -2079,6 +2080,12 @@ mod candidate_menu_tests {
     fn flatten_keeps_op_and_copy_leaves_and_inlines_submenus() {
         let items = vec![
             MenuItemSpec::leaf("置顶", MenuKind::Op(CandidateOp::MoveTop), false, false),
+            MenuItemSpec::leaf(
+                "在此编码下隐藏",
+                MenuKind::Op(CandidateOp::HideHere),
+                true,
+                false,
+            ),
             MenuItemSpec::separator(),
             MenuItemSpec::label("标题"),
             MenuItemSpec::leaf(
@@ -2111,6 +2118,7 @@ mod candidate_menu_tests {
             got,
             [
                 ("置顶", "move_top", false),
+                ("在此编码下隐藏", "hide_here", true),
                 ("设为生僻字", "toggle_common", true),
                 ("复制", "copy", true),
             ]

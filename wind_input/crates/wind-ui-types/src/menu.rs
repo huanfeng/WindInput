@@ -46,8 +46,12 @@ pub enum CandidateOp {
     MoveUp,
     /// 后移
     MoveDown,
-    /// 删除（屏蔽）
+    /// 删除。拼音 / 英文数据方案下 ≥2 字的词是「屏蔽该词」（按文字屏蔽），其余按来源分流
+    /// （按编码隐藏 / 删用户词 / 禁用短语）；删除热键触发的也是它。
     Delete,
+    /// 在此编码下隐藏：只写 `(数据方案, 当前输入码, 文字)` 的删除行，不删用户词、不按文字屏蔽。
+    /// 只给拼音 / 英文 ≥2 字的词作 [`CandidateOp::Delete`] 之外的第二项，不绑热键。
+    HideHere,
     /// 恢复默认
     Reset,
     /// 常用/生僻互切（**全局字级**，不限本方案本码）。
@@ -251,6 +255,7 @@ impl MenuKind {
                 CandidateOp::Delete => 13,
                 CandidateOp::Reset => 14,
                 CandidateOp::ToggleCommon => 15,
+                CandidateOp::HideHere => 16,
             },
             MenuKind::Command(cmd) => match cmd {
                 MenuCmd::SchemaEnglish => 100,
@@ -321,6 +326,7 @@ impl MenuKind {
             13 => return Some(MenuKind::Op(CandidateOp::Delete)),
             14 => return Some(MenuKind::Op(CandidateOp::Reset)),
             15 => return Some(MenuKind::Op(CandidateOp::ToggleCommon)),
+            16 => return Some(MenuKind::Op(CandidateOp::HideHere)),
             100 => MenuCmd::SchemaEnglish,
             101 => MenuCmd::TogglePunct,
             102 => MenuCmd::ToggleWidth,
@@ -515,6 +521,29 @@ impl MenuItemSpec {
             enabled: true,
             checked: false,
             children,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 词条操作的菜单 id 双向一致：macOS / Linux 前端按 id 回传，漏了 `from_menu_id` 那侧就是
+    /// 「点了没反应」。
+    #[test]
+    fn candidate_op_id_roundtrip() {
+        for op in [
+            CandidateOp::MoveTop,
+            CandidateOp::MoveUp,
+            CandidateOp::MoveDown,
+            CandidateOp::Delete,
+            CandidateOp::HideHere,
+            CandidateOp::Reset,
+            CandidateOp::ToggleCommon,
+        ] {
+            let kind = MenuKind::Op(op);
+            assert_eq!(MenuKind::from_menu_id(kind.to_menu_id()), Some(kind));
         }
     }
 }
