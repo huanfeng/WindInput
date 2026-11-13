@@ -11,7 +11,7 @@ use std::sync::Arc;
 use wind_bridge::handler::{KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
-use wind_ipc::protocol::EVENT_KEY_DOWN;
+use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_CTRL, MOD_SHIFT};
 use wind_store::Store;
 use wind_ui_types::{CandidateOp, MenuKind};
 
@@ -21,7 +21,7 @@ fn data_dir() -> PathBuf {
 
 fn has_data() -> bool {
     let d = data_dir();
-    ["wubi86", "pinyin", "english", "wubi86_pinyin"]
+    ["wubi86", "pinyin", "english", "wubi86_pinyin", "shuangpin"]
         .iter()
         .all(|s| d.join(format!("schemas/{s}.schema.toml")).exists())
         && d.join("schemas/pinyin/rime_frost.dict.yaml").exists()
@@ -37,11 +37,11 @@ macro_rules! skip_without_data {
     };
 }
 
-fn key(k: u32) -> KeyEventData {
+fn key(k: u32, modifiers: u32) -> KeyEventData {
     KeyEventData {
         key_code: k,
         scan_code: 0,
-        modifiers: 0,
+        modifiers,
         event_type: EVENT_KEY_DOWN,
         toggles: 0,
         event_seq: 0,
@@ -50,9 +50,15 @@ fn key(k: u32) -> KeyEventData {
     }
 }
 
+/// 逐键敲入；大写字母带 Shift（五笔下首字母大写即进临时英文）。
 fn type_keys(coord: &Coordinator, input: &str) {
     for ch in input.chars() {
-        coord.handle_key_event_policed(&key((ch.to_ascii_uppercase() as u32) & 0xFF));
+        let m = if ch.is_ascii_uppercase() {
+            MOD_SHIFT
+        } else {
+            0
+        };
+        coord.handle_key_event_policed(&key((ch.to_ascii_uppercase() as u32) & 0xFF, m));
     }
 }
 
@@ -63,15 +69,19 @@ fn config(active: &str) -> Config {
         "pinyin".into(),
         "english".into(),
         "wubi86_pinyin".into(),
+        "shuangpin".into(),
     ];
     c.schema.active = active.into();
     c.input.default.chinese_mode = true;
+    c.input.temp_english.enabled = true;
     c.keys.select_key_groups.clear();
     c
 }
 
 fn fresh_store(name: &str) -> Arc<Store> {
-    let path = std::env::temp_dir().join(format!("wind_delmenu_{name}.redb"));
+    // 带 pid：并发跑两份测试（两个 worktree 共用 TMPDIR）时不互删库文件。
+    let path =
+        std::env::temp_dir().join(format!("wind_delmenu_{name}_{}.redb", std::process::id()));
     let _ = std::fs::remove_file(&path);
     Arc::new(Store::open(&path).unwrap())
 }
@@ -363,4 +373,101 @@ fn mixed_segments() {
     assert_eq!(delete_items(&coord, idx), two_items(true, false));
     let (coord, idx) = locate(&cfg, &store, "wqvb", "你好");
     assert_eq!(delete_items(&coord, idx), one_item("在此编码下隐藏", true));
+}
+
+/// 双拼（小鹤 `nihc`）点「在此编码下隐藏」：规则落在归一后的全拼码 `nihao` 下（与读端同形），
+/// 不落击键码；双拼与全拼的 `nihao` 都不出，`nh` 照出。
+#[test]
+fn shuangpin_hide_here_keys_on_normalized_code() {
+    skip_without_data!();
+    let sp = config("shuangpin");
+    let full = config("pinyin");
+    let store = fresh_store("sp_hide");
+    let (coord, idx) = locate(&sp, &store, "nihc", "你好");
+    assert_eq!(delete_items(&coord, idx), two_items(true, false));
+    coord.candidate_or_quick_format_op_at(CandidateOp::HideHere, idx);
+    assert!(blocked(&store, "pinyin").is_empty(), "不写屏蔽行");
+    assert_eq!(
+        deleted_at(&store, "pinyin", "nihao"),
+        Some(vec!["你好".to_string()])
+    );
+    assert!(
+        deleted_at(&store, "pinyin", "nihc").is_none(),
+        "不按击键码落键"
+    );
+    assert!(!has(&sp, &store, "nihc", "你好"), "双拼当前码下不出");
+    assert!(!has(&full, &store, "nihao", "你好"), "全拼同码共用");
+    assert!(has(&full, &store, "nh", "你好"), "别的编码照出");
+}
+
+/// 混输拼音段点「在此编码下隐藏」：`nihao` 下不出，五笔码 `wqvb` 下照出，不写屏蔽行。
+#[test]
+fn mixed_pinyin_hide_here_is_per_code() {
+    skip_without_data!();
+    let cfg = config("wubi86_pinyin");
+    let store = fresh_store("mix_hide");
+    let (coord, idx) = locate(&cfg, &store, "nihao", "你好");
+    coord.candidate_or_quick_format_op_at(CandidateOp::HideHere, idx);
+    assert!(blocked(&store, "pinyin").is_empty(), "不写屏蔽行");
+    assert!(!has(&cfg, &store, "nihao", "你好"), "当前码下不出");
+    assert!(has(&cfg, &store, "wqvb", "你好"), "别的编码照出");
+}
+
+/// 临英 `Hel`（大小写跟随，`help` 显示成 `Help`）：置顶与「在此编码下隐藏」都按词库原文 `help`
+/// 落在 `hel` 下；置顶后菜单「恢复默认」可用（读写同一把键）；隐藏后当场重建不再出，`He` 下照出。
+#[test]
+fn temp_english_hide_here_keys_on_dict_text() {
+    skip_without_data!();
+    let cfg = config("wubi86");
+    let store = fresh_store("te_hide");
+    let (coord, idx) = locate(&cfg, &store, "Hel", "Help");
+    assert!(idx > 1, "前提：Help 不在原文之后的第一格");
+    assert_eq!(delete_items(&coord, idx), two_items(true, false));
+    coord.candidate_or_quick_format_op_at(CandidateOp::MoveTop, idx);
+    let (coord, idx) = locate(&cfg, &store, "Hel", "Help");
+    let rec = store.get_shadow_rules("english", "hel").unwrap().unwrap();
+    assert_eq!(rec.pinned[0].word, "help", "置顶规则键是词库原文");
+    assert_eq!(
+        delete_items(&coord, idx),
+        two_items(true, true),
+        "恢复默认可用"
+    );
+    coord.candidate_or_quick_format_op_at(CandidateOp::HideHere, idx);
+    assert_eq!(
+        deleted_at(&store, "english", "hel"),
+        Some(vec!["help".to_string()]),
+        "隐藏规则键是词库原文"
+    );
+    assert!(blocked(&store, "english").is_empty(), "不写屏蔽行");
+    let now = coord.debug_all_candidate_texts();
+    assert_eq!(
+        now.first().map(String::as_str),
+        Some("Hel"),
+        "原文条仍在：{now:?}"
+    );
+    assert!(!now.iter().any(|t| t == "Help"), "当场不再出：{now:?}");
+    assert!(!has(&cfg, &store, "Hel", "Help"));
+    assert!(has(&cfg, &store, "He", "Help"), "别的编码照出");
+}
+
+/// 删除热键（Ctrl+Shift+数字）触发的是「屏蔽该词」：写 `*` 行，不写按编码的行。
+#[test]
+fn delete_hotkey_still_blocks_word() {
+    skip_without_data!();
+    let mut cfg = config("pinyin");
+    cfg.keys.delete_candidate = "ctrl+shift+number".into();
+    let store = fresh_store("hotkey");
+    let coord = open(&cfg, &store);
+    type_keys(&coord, "nihao");
+    let page = coord.debug_page_texts();
+    let p = page
+        .iter()
+        .position(|t| t == "你好")
+        .unwrap_or_else(|| panic!("前提：首页有「你好」，实际 {page:?}"));
+    coord.handle_key_event_policed(&key(0x31 + p as u32, MOD_CTRL | MOD_SHIFT));
+    assert_eq!(blocked(&store, "pinyin"), vec!["你好".to_string()]);
+    assert!(
+        deleted_at(&store, "pinyin", "nihao").is_none(),
+        "不写按编码的行"
+    );
 }

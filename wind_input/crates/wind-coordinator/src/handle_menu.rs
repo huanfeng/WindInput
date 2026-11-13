@@ -2431,6 +2431,9 @@ impl Coordinator {
             .and_then(|sc| self.delete_target(&state, &sc.schema, &cand));
         // 删除是否按文字屏蔽：决定文案「屏蔽该词」与有无第二项「在此编码下隐藏」。删除目标取不到
         // （只有英文数据方案的头部原文条）时按原文条自身判——多字母的照样两项、都灰。
+        // 这一支不能套 `delete_blocks_word`：头部原文条没有来源（不是 English），套进去恒为假，
+        // 菜单就只剩一项「在此编码下隐藏」，与它在英文方案里「本该是屏蔽、只是此刻删不了」的
+        // 身份对不上；写端在目标为 None 时两项都不执行，故这里只影响文案与项数。
         let blocks_word = scope.as_ref().is_some_and(|sc| match &delete_target {
             Some(t) => self.delete_blocks_word(&sc.schema, t),
             None => wind_store::shadow::is_blockable_word(cand.freq_text()),
