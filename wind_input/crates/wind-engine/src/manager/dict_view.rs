@@ -27,11 +27,14 @@
 //! # 搜索与排序
 //!
 //! 搜索（编码前缀 / 词文本子串，默认两者取并）与排序（编码 / 词 / 权重）都没有现成索引，要整扫：
-//! 一次扫完把命中行按排序键排好，存成「表下标 + 行首偏移」打包的 `u64` 序列（每行 8 字节），
-//! 同一组条件翻页直接按偏移读行，降序就倒着取。不搜索只排序 = 全库命中，60 万条的主库约 5 MB。
+//! 一次扫完把命中行按排序键稳定排好（升降序都是同键按文件顺序），存成「表下标 + 行首偏移」
+//! 打包的 `u64` 序列（每行 8 字节），同一组条件翻页直接按偏移读行。不搜索只排序 = 全库命中，
+//! 60 万条的主库约 5 MB。排序时的键不逐行分配：权重直接带 `i32`，编码 / 词拼进一个大字符串、
+//! 每行只记（偏移, 长度）。
 //!
-//! 结果进一个小 LRU（[`HITS_CACHE_SLOTS`] 组，合计不超过 [`HITS_CACHE_ROWS`] 行），键含各表的
-//! 文件戳，文件一变即失效。新查询是缓存里某个查询的延长（打字往后加字）时，只在那组命中里
+//! 结果进一个小 LRU（[`HITS_CACHE_SLOTS`] 组，合计不超过 [`HITS_CACHE_ROWS`] 行，单组超了就
+//! 不缓存），键含各表的文件戳，文件一变即失效；闲置 [`HITS_CACHE_IDLE`] 没人查就整个清空（下次
+//! 取放时惰性检查，不起线程）。新查询是缓存里某个查询的延长（打字往后加字）时，只在那组命中里
 //! 复核，不再整扫：编码前缀与词子串都满足「查询变长、命中只少不多」，排好的先后也原样保留。
 
 use std::borrow::Cow;
@@ -39,7 +42,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
 use wind_config::schema::{DictSpec, Schema};
@@ -59,8 +62,12 @@ const NOTE_LINES_MAX: usize = 40;
 /// 缓存几组命中（见模块文档）。
 const HITS_CACHE_SLOTS: usize = 4;
 
-/// 缓存的命中合计最多多少行（每行 8 字节）：装得下主库整库排序一份，再多就淘汰最久没用的。
+/// 缓存的命中合计最多多少行（每行 8 字节）：装得下主库整库排序一份，再多就淘汰最久没用的；
+/// 单组就超过它的不缓存。
 const HITS_CACHE_ROWS: usize = 1_000_000;
+
+/// 命中缓存闲置多久整个清空（词库窗关着时不常驻那几 MB）。
+const HITS_CACHE_IDLE: Duration = Duration::from_secs(5 * 60);
 
 /// 词条搜索的方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -167,20 +174,90 @@ struct FileIndex {
 type FileIndexCache = HashMap<(PathBuf, bool), Arc<FileIndex>>;
 static FILE_INDEX: OnceLock<Mutex<FileIndexCache>> = OnceLock::new();
 
-/// 命中缓存的键：（各表路径与戳, 查询, 方式, 排序列）。降序与升序共用一份。
+/// 命中缓存的键：（各表路径与戳, 编码是否小写化, 查询, 方式, 排序列, 是否降序）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HitsKey {
     tables: Vec<(PathBuf, Stamp)>,
+    /// 同 [`FileIndexCache`] 的键：英文库编码小写化，排序结果与码表口径不同。
+    lowercase: bool,
     query: String,
     mode: EntryMatch,
     sort: Option<EntrySort>,
+    desc: bool,
 }
 
 /// 排好序的命中行，每项 = [`pack`]（表下标, 行首偏移）。
 type Hits = Arc<Vec<u64>>;
 
-/// 命中 LRU，最近用的在末尾。
-static HITS_CACHE: OnceLock<Mutex<Vec<(HitsKey, Hits)>>> = OnceLock::new();
+/// 命中 LRU（最近用的在末尾）与最近一次取放的时刻。
+#[derive(Default)]
+struct HitsCache {
+    entries: Vec<(HitsKey, Hits)>,
+    last: Option<Instant>,
+}
+
+impl HitsCache {
+    /// 每次取放先调：闲置超过 [`HITS_CACHE_IDLE`] 就清空，再记下这次的时刻。
+    fn touch(&mut self, now: Instant) {
+        if self
+            .last
+            .is_some_and(|t| now.saturating_duration_since(t) > HITS_CACHE_IDLE)
+        {
+            self.entries.clear();
+        }
+        self.last = Some(now);
+    }
+
+    /// 取缓存；命中就挪到末尾（最近用）。
+    fn get(&mut self, key: &HitsKey, now: Instant) -> Option<Hits> {
+        self.touch(now);
+        let i = self.entries.iter().position(|(k, _)| k == key)?;
+        let e = self.entries.remove(i);
+        let h = e.1.clone();
+        self.entries.push(e);
+        Some(h)
+    }
+
+    /// 新查询能在哪组缓存命中里复核：除查询外键都相同，旧查询非空且是新查询的前缀；
+    /// 有多组取最长的（命中最少）。
+    fn base(&mut self, key: &HitsKey, now: Instant) -> Option<Hits> {
+        self.touch(now);
+        self.entries
+            .iter()
+            .filter(|(k, _)| {
+                k.tables == key.tables
+                    && k.lowercase == key.lowercase
+                    && k.mode == key.mode
+                    && k.sort == key.sort
+                    && k.desc == key.desc
+                    && !k.query.is_empty()
+                    && key.query.starts_with(&k.query)
+            })
+            .max_by_key(|(k, _)| k.query.len())
+            .map(|(_, h)| h.clone())
+    }
+
+    /// 放入并按组数 / 总行数淘汰最久没用的；单组超过 [`HITS_CACHE_ROWS`] 不放（也不挤掉别的）。
+    fn put(&mut self, key: HitsKey, hits: Hits, now: Instant) {
+        self.touch(now);
+        if hits.len() > HITS_CACHE_ROWS {
+            return;
+        }
+        self.entries.retain(|(k, _)| *k != key);
+        self.entries.push((key, hits));
+        let mut rows: usize = self.entries.iter().map(|(_, h)| h.len()).sum();
+        while self.entries.len() > HITS_CACHE_SLOTS || rows > HITS_CACHE_ROWS {
+            rows -= self.entries.remove(0).1.len();
+        }
+    }
+
+    #[cfg(test)]
+    fn rows(&self) -> usize {
+        self.entries.iter().map(|(_, h)| h.len()).sum()
+    }
+}
+
+static HITS_CACHE: OnceLock<Mutex<HitsCache>> = OnceLock::new();
 
 /// 偏移占低 48 位（256 TB），表下标占高 16 位。
 const POS_BITS: u32 = 48;
@@ -193,7 +270,7 @@ fn unpack(v: u64) -> (usize, u64) {
     ((v >> POS_BITS) as usize, v & ((1 << POS_BITS) - 1))
 }
 
-fn hits_cache() -> std::sync::MutexGuard<'static, Vec<(HitsKey, Hits)>> {
+fn hits_cache() -> std::sync::MutexGuard<'static, HitsCache> {
     HITS_CACHE
         .get_or_init(Default::default)
         .lock()
@@ -203,43 +280,7 @@ fn hits_cache() -> std::sync::MutexGuard<'static, Vec<(HitsKey, Hits)>> {
 /// 命中缓存的当前行数（耗时记录用）。
 #[cfg(test)]
 fn cached_hit_rows() -> usize {
-    hits_cache().iter().map(|(_, h)| h.len()).sum()
-}
-
-/// 取缓存；命中就挪到末尾（最近用）。
-fn cache_get(key: &HitsKey) -> Option<Hits> {
-    let mut c = hits_cache();
-    let i = c.iter().position(|(k, _)| k == key)?;
-    let e = c.remove(i);
-    let h = e.1.clone();
-    c.push(e);
-    Some(h)
-}
-
-/// 新查询能在哪组缓存命中里复核：同表同戳、同方式同排序，旧查询非空且是新查询的前缀；
-/// 有多组取最长的（命中最少）。
-fn cache_base(key: &HitsKey) -> Option<Hits> {
-    hits_cache()
-        .iter()
-        .filter(|(k, _)| {
-            k.tables == key.tables
-                && k.mode == key.mode
-                && k.sort == key.sort
-                && !k.query.is_empty()
-                && key.query.starts_with(&k.query)
-        })
-        .max_by_key(|(k, _)| k.query.len())
-        .map(|(_, h)| h.clone())
-}
-
-fn cache_put(key: HitsKey, hits: Hits) {
-    let mut c = hits_cache();
-    c.retain(|(k, _)| *k != key);
-    c.push((key, hits));
-    let mut rows: usize = c.iter().map(|(_, h)| h.len()).sum();
-    while c.len() > 1 && (c.len() > HITS_CACHE_SLOTS || rows > HITS_CACHE_ROWS) {
-        rows -= c.remove(0).1.len();
-    }
+    hits_cache().rows()
 }
 
 /// 一次查询的归一形态：编码按小写、去空格比前缀，词按原文比子串。
@@ -264,23 +305,6 @@ impl<'a> Needle<'a> {
 
     fn by_text(&self) -> bool {
         self.mode != EntryMatch::Code
-    }
-}
-
-/// 排序键（整扫时随行收集，排完即丢）。
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum SortKey {
-    Num(i32),
-    Str(Box<str>),
-}
-
-impl SortKey {
-    fn of(r: &RimeRow, sort: EntrySort) -> Self {
-        match sort {
-            EntrySort::Code => SortKey::Str(r.code.as_str().into()),
-            EntrySort::Text => SortKey::Str(r.text.as_str().into()),
-            EntrySort::Weight => SortKey::Num(r.weight),
-        }
     }
 }
 
@@ -770,22 +794,25 @@ impl EngineManager {
         for _ in 0..2 {
             let key = HitsKey {
                 tables: idx.iter().map(|(_, p, i)| (p.clone(), i.stamp)).collect(),
+                lowercase: dict_type == "english",
                 query: query.to_string(),
                 mode: q.mode,
                 sort: q.sort,
+                desc: q.desc,
             };
-            if let Some(h) = cache_get(&key) {
+            if let Some(h) = hits_cache().get(&key, Instant::now()) {
                 hits = Some(h);
                 break;
             }
-            let found = match cache_base(&key) {
+            let base = hits_cache().base(&key, Instant::now());
+            let found = match base {
                 Some(base) => refine_hits(&idx, &base, needle.as_ref()),
-                None => scan_hits(&idx, needle.as_ref(), q.sort),
+                None => scan_hits(&idx, needle.as_ref(), q.sort, q.desc),
             };
             match found {
                 Some(h) => {
                     let h = Arc::new(h);
-                    cache_put(key, h.clone());
+                    hits_cache().put(key, h.clone(), Instant::now());
                     hits = Some(h);
                     break;
                 }
@@ -798,7 +825,7 @@ impl EngineManager {
         let mut readers: Vec<Option<TableReader>> = idx.iter().map(|_| None).collect();
         let mut rows = Vec::with_capacity(picked.len());
         for i in picked {
-            let (ti, pos) = unpack(hits[if q.desc { n - 1 - i } else { i }]);
+            let (ti, pos) = unpack(hits[i]);
             let Some((name, path, fi)) = idx.get(ti) else {
                 continue;
             };
@@ -863,11 +890,30 @@ fn table_text(path: &Path, fi: &FileIndex) -> Option<Option<String>> {
     Some(Some(text))
 }
 
-/// 整扫各表，收集命中 `q`（`None` = 全部）的行，按 `sort` 稳定排序（`None` = 文件顺序）。
-/// 读完某张表发现它的戳与索引不符 → `None`，调用方重建索引重扫。
-fn scan_hits(idx: &Tables, q: Option<&Needle>, sort: Option<EntrySort>) -> Option<Vec<u64>> {
+/// 整扫各表，收集命中 `q`（`None` = 全部）的行，按 `sort` 稳定排序（`None` = 文件顺序）；
+/// `desc` 降序，同键仍按文件顺序。读完某张表发现它的戳与索引不符 → `None`，调用方重建索引重扫。
+fn scan_hits(
+    idx: &Tables,
+    q: Option<&Needle>,
+    sort: Option<EntrySort>,
+    desc: bool,
+) -> Option<Vec<u64>> {
     let mut hits = Vec::new();
-    let mut keyed: Vec<(SortKey, u64)> = Vec::new();
+    // 排序键不逐行分配：权重带 i32；编码 / 词拼进 `keys`，行上只记（偏移, 长度）。不过滤时
+    // 行数已知，一次留够，免得倍增扩容的峰值。
+    let all = if q.is_none() {
+        idx.iter().map(|(_, _, fi)| fi.count as usize).sum()
+    } else {
+        0
+    };
+    let mut by_num: Vec<(i32, u64)> = Vec::new();
+    let mut keys = String::new();
+    let mut by_str: Vec<(u32, u32, u64)> = Vec::new();
+    match sort {
+        None => hits.reserve_exact(all),
+        Some(EntrySort::Weight) => by_num.reserve_exact(all),
+        Some(_) => by_str.reserve_exact(all),
+    }
     for (ti, (_, path, fi)) in idx.iter().enumerate() {
         let Some(p) = fi.parser else {
             continue;
@@ -882,16 +928,42 @@ fn scan_hits(idx: &Tables, q: Option<&Needle>, sort: Option<EntrySort>) -> Optio
             let Some(r) = FileIndex::match_row(&p, line, on, q) else {
                 continue;
             };
-            match sort {
-                Some(s) => keyed.push((SortKey::of(&r, s), pack(ti, start))),
-                None => hits.push(pack(ti, start)),
-            }
+            let h = pack(ti, start);
+            let key = match sort {
+                None => {
+                    hits.push(h);
+                    continue;
+                }
+                Some(EntrySort::Weight) => {
+                    by_num.push((r.weight, h));
+                    continue;
+                }
+                Some(EntrySort::Code) => &r.code,
+                Some(EntrySort::Text) => &r.text,
+            };
+            by_str.push((keys.len() as u32, key.len() as u32, h));
+            keys.push_str(key);
         }
     }
-    if sort.is_some() {
-        keyed.sort_by(|a, b| a.0.cmp(&b.0));
-        hits = keyed.into_iter().map(|(_, h)| h).collect();
+    // 稳定排序：降序只反比较、不倒序列，同键留在文件顺序
+    let ord = |o: std::cmp::Ordering| if desc { o.reverse() } else { o };
+    match sort {
+        None if desc => hits.reverse(),
+        None => {}
+        // 结果另起一份恰好大小的（`collect` 会就地复用排序用的大缓冲，进缓存后白占两三倍）
+        Some(EntrySort::Weight) => {
+            by_num.sort_by(|a, b| ord(a.0.cmp(&b.0)));
+            hits = Vec::with_capacity(by_num.len());
+            hits.extend(by_num.iter().map(|&(_, h)| h));
+        }
+        Some(_) => {
+            let key = |&(o, l, _): &(u32, u32, u64)| &keys[o as usize..(o + l) as usize];
+            by_str.sort_by(|a, b| ord(key(a).cmp(key(b))));
+            hits = Vec::with_capacity(by_str.len());
+            hits.extend(by_str.iter().map(|&(_, _, h)| h));
+        }
     }
+    hits.shrink_to_fit();
     Some(hits)
 }
 
@@ -923,6 +995,7 @@ fn refine_hits(idx: &Tables, base: &[u64], q: Option<&Needle>) -> Option<Vec<u64
             out.push(h);
         }
     }
+    out.shrink_to_fit();
     Some(out)
 }
 
@@ -1206,8 +1279,10 @@ mod tests {
             ("d", "da x", Some(EntrySort::Text)),
             ("大", "大小", Some(EntrySort::Weight)),
         ] {
-            let base = scan_hits(&idx, Some(&Needle::new(old, EntryMatch::Any)), sort).unwrap();
-            let want = scan_hits(&idx, Some(&Needle::new(new, EntryMatch::Any)), sort).unwrap();
+            let base =
+                scan_hits(&idx, Some(&Needle::new(old, EntryMatch::Any)), sort, false).unwrap();
+            let want =
+                scan_hits(&idx, Some(&Needle::new(new, EntryMatch::Any)), sort, false).unwrap();
             let got = refine_hits(&idx, &base, Some(&Needle::new(new, EntryMatch::Any))).unwrap();
             assert!(!want.is_empty() && got == want, "{old} → {new}");
         }
@@ -1229,6 +1304,11 @@ mod tests {
         assert_eq!(
             texts(&get(sorted("", EntrySort::Weight, true), 0, 3)),
             ["你好", "大", "小"]
+        );
+        assert_eq!(
+            texts(&get(sorted("", EntrySort::Weight, true), 5, 100)),
+            ["你会", "字"],
+            "降序时同键也按文件顺序"
         );
         assert_eq!(
             texts(&get(sorted("", EntrySort::Weight, false), 2, 3)),
@@ -1271,6 +1351,66 @@ mod tests {
             "---\nname: ct\n...\naa\t工\t1\nbb\t子\t5\ncc\t又\t9\n",
         );
         assert_eq!(texts(&get()), ["又", "子", "工"]);
+    }
+
+    fn hk(query: &str) -> HitsKey {
+        HitsKey {
+            tables: vec![(PathBuf::from("t"), (1, None))],
+            lowercase: false,
+            query: query.into(),
+            mode: EntryMatch::Any,
+            sort: None,
+            desc: false,
+        }
+    }
+
+    /// 单组超过行数上限：不缓存，也不挤掉已有的组。
+    #[test]
+    fn oversized_hits_are_not_cached() {
+        let mut c = HitsCache::default();
+        let now = Instant::now();
+        c.put(hk("a"), Arc::new(vec![0; 10]), now);
+        c.put(hk("b"), Arc::new(vec![0; HITS_CACHE_ROWS + 1]), now);
+        assert!(c.get(&hk("b"), now).is_none());
+        assert!(c.get(&hk("a"), now).is_some(), "已有的组还在");
+        for q in ["c", "d", "e", "f"] {
+            c.put(hk(q), Arc::new(vec![0; 10]), now);
+        }
+        assert_eq!(c.entries.len(), HITS_CACHE_SLOTS);
+        assert!(c.get(&hk("a"), now).is_none(), "组数超了淘汰最久没用的");
+    }
+
+    /// 闲置超过时限，下次取放时整个清空；期间有访问就续期。
+    #[test]
+    fn hits_cache_clears_after_idle() {
+        let mut c = HitsCache::default();
+        let t0 = Instant::now();
+        c.put(hk("a"), Arc::new(vec![1]), t0);
+        let t1 = t0 + HITS_CACHE_IDLE - Duration::from_secs(1);
+        assert!(c.get(&hk("a"), t1).is_some());
+        let t2 = t1 + HITS_CACHE_IDLE - Duration::from_secs(1);
+        assert!(c.get(&hk("a"), t2).is_some(), "访问续期");
+        let t3 = t2 + HITS_CACHE_IDLE + Duration::from_secs(1);
+        assert!(c.base(&hk("ab"), t3).is_none(), "闲置过期清空");
+        assert_eq!(c.rows(), 0);
+    }
+
+    /// 英文库编码按小写读、码表按原样读：同一文件两种口径的排序结果各缓存一份，不串。
+    #[test]
+    fn sort_cache_keeps_lowercase_apart() {
+        let f = fixture("sortcase");
+        let rel = "ct/case.dict.yaml";
+        write(
+            &f.base.join("schemas").join(rel),
+            "---\nname: case\n...\n乙\tB\t1\n甲\ta\t1\n",
+        );
+        let get = |ty: &str| {
+            f.m.dict_entries(rel, ty, &sorted("", EntrySort::Code, false), 0, 10)
+                .unwrap()
+        };
+        assert_eq!(texts(&get(CT)), ["乙", "甲"], "B < a");
+        assert_eq!(texts(&get("english")), ["甲", "乙"], "a < b");
+        assert_eq!(texts(&get(CT)), ["乙", "甲"]);
     }
 
     #[test]
@@ -1466,7 +1606,11 @@ mod tests {
                 .unwrap();
             eprintln!("搜索 {q:?} 翻到中间: {:?}", t.elapsed());
         }
-        for (sort, name) in [(EntrySort::Weight, "权重"), (EntrySort::Code, "编码")] {
+        for (sort, name) in [
+            (EntrySort::Weight, "权重"),
+            (EntrySort::Code, "编码"),
+            (EntrySort::Text, "词条"),
+        ] {
             let t = std::time::Instant::now();
             let p = m
                 .dict_entries(rel, PY, &sorted("", sort, true), 0, 100)
@@ -1478,7 +1622,7 @@ mod tests {
             );
             let t = std::time::Instant::now();
             let _ = m
-                .dict_entries(rel, PY, &sorted("", sort, false), p.total / 2, 100)
+                .dict_entries(rel, PY, &sorted("", sort, true), p.total / 2, 100)
                 .unwrap();
             eprintln!("整库按{name}排序翻到中间（缓存）: {:?}", t.elapsed());
         }
