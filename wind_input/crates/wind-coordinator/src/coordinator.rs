@@ -9312,8 +9312,10 @@ impl Coordinator {
     /// **定向**模式切换（`set_mode:english` / `set_mode:chinese`）：把中英态置为目标值。
     ///
     /// 与 toggle 的差别只在终态：`target.unwrap_or(取反)`（见 `handle_switch_mode_cased`）。
-    /// 已在目标态时同样走一遍完整切换流程——状态位不变、编码照常上屏，对外表现为幂等
-    /// 无操作（状态泡会刷新一次，无感知差异）。
+    /// 已在目标态时同样走一遍完整切换流程——状态位不变，对外表现为幂等无操作；上屏内容
+    /// 仍按通用规则走（`take_input_on_mode_switch_raw`：目标英文且开 `commit_on_switch`
+    /// 时把余码上屏，目标中文时余码直接丢弃），不是「编码照常上屏」。
+    /// 状态泡文案相同即不刷新（`show_status` 内的短路），故反复触发不会有视觉抖动。
     pub(crate) fn set_mode_with_commit(
         &self,
         chinese: bool,
@@ -17643,6 +17645,22 @@ mod initial_mode_tests {
         assert!(!s.chinese_mode, "配置关保持原翻转语义");
     }
 
+    /// 定向切换同样受 `input.capslock.cancel_on_mode_switch` 管：开关关着时 CapsLock 原样
+    /// 保留，只把中英态置到目标值（意图记下，等用户自己解锁大写后生效）。
+    #[test]
+    fn set_mode_keeps_caps_when_cancel_disabled() {
+        let c = coord_with(|_| {});
+        {
+            let mut s = c.state.lock().unwrap();
+            s.caps_lock = true;
+            s.chinese_mode = false;
+        }
+        let _ = c.set_mode_with_commit(true);
+        let s = c.state.lock().unwrap();
+        assert!(s.caps_lock, "配置关不得动 CapsLock");
+        assert!(s.chinese_mode, "定向切换应把中英态置为中文");
+    }
+
     /// 论坛 t283：取消大写之后落到哪个模式（`input.capslock.mode_after_cancel`）。
     ///
     /// 注入 CapsLock 走真实 SendInput，单测里取消恒失败，故判定收成纯函数单独钉。
@@ -17684,6 +17702,7 @@ mod initial_mode_tests {
                 );
             }
             assert!(!f("english", Toggle, cur), "english/Shift 应进英文");
+            assert!(f("chinese", Toggle, cur), "chinese/Shift 应归位中文");
             assert_eq!(f("toggle", Toggle, cur), !cur, "toggle/Shift 应照常翻转");
             // 认不出的值回落出厂语义（设置端 options 与 core 值域脱节时不至于乱跳）。
             assert!(f("bogus", Toggle, cur));

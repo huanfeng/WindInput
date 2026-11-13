@@ -5090,7 +5090,6 @@ impl Coordinator {
             }
         );
         // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，出厂语义是"回到可输入中文
-        // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，出厂语义是"回到可输入中文
         // 的状态"（对齐搜狗）——取消锁定并归位中文，而非翻转 chinese_mode；否则
         // chinese_mode 原本为 true（被 CapsLock 压制）时翻转反而落到英文，切换仍然无效。
         // 落点可配（`input.capslock.mode_after_cancel`，论坛 t283 要「取消大写并进英文」），
