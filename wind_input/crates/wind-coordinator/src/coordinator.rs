@@ -10150,11 +10150,16 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                // 不经按键出口，中英切换处补空格在这里补（同鼠标点选，见 `crate::auto_spacing`）。
+                // 不经按键出口，收尾在这里做（同鼠标点选，见 `crate::session_exit`）。
                 let (act, chinese_mode, main_path) = {
-                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    let act = self.apply_auto_spacing(&mut st, act);
-                    (act, st.chinese_mode, st.active.is_none())
+                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let (chinese_mode, main_path) = (st.chinese_mode, st.active.is_none());
+                    let act = self.finish_session_action(
+                        st,
+                        crate::session_exit::ActionOrigin::CapsLockHook,
+                        act,
+                    );
+                    (act, chinese_mode, main_path)
                 };
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
                 self.push_no_key_ctx_action(&act, chinese_mode, main_path);

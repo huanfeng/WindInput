@@ -83,6 +83,7 @@ pub mod schema_dicts_api;
 pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
 mod schema_ui;
+pub(crate) mod session_exit;
 pub mod session_output;
 pub(crate) mod short_code_yield;
 #[cfg(test)]

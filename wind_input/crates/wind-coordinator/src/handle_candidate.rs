@@ -6188,9 +6188,9 @@ impl Coordinator {
             } else {
                 self.commit_selected(&mut state, &cand, page_local as i32)
             };
-            // 点选不经按键出口，中英切换处补空格要在推送之前补（见 `crate::auto_spacing`）。
-            let act = self.apply_auto_spacing(&mut state, act);
-            drop(state);
+            // 点选不经按键出口，收尾（补空格等）在推送之前做，见 `crate::session_exit`。
+            let act =
+                self.finish_session_action(state, crate::session_exit::ActionOrigin::Pointer, act);
             // commit_selected 已按分支自行 notify_ui_update / notify_ui_hide，此处不再重复。
             self.push_no_key_ctx_action(&act, chinese_mode, true);
             return Some(act);
@@ -6247,9 +6247,9 @@ impl Coordinator {
                 return None;
             }
         };
-        let act = self.apply_auto_spacing(&mut state, act);
         let chinese_mode = state.chinese_mode;
-        drop(state);
+        let act =
+            self.finish_session_action(state, crate::session_exit::ActionOrigin::Pointer, act);
         match &act {
             // 空文本上屏：只需让宿主结束 composition（同 $CC 命令分支）。
             KeyAction::ClearComposition => {

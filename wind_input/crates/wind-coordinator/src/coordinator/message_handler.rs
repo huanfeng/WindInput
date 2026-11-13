@@ -935,19 +935,18 @@ impl MessageHandler for Coordinator {
         }
         let action = self.handle_key_event(data);
         let action = self.redispatch_commit_code(data, action);
-        // 中英切换处补空格：在换行改写之前，空格是上屏文本的前缀、与换行形式无关。
+        // 平台中立的收尾：补空格、换行改写、输入统计、自提交打点与造词投喂、检索放宽复原、
+        // 配对保活。收口在这里而不是各上屏点，理由相同：上屏路径 40+ 个返回点，约 10 处绕过
+        // `commit_action` 直接构造 InsertText，散点接线必漏；换行形式是平台/宿主的表达约定，
+        // 属服务端职责（A3-3）。各步的取舍与其余来源对照见 `session_exit::exit_steps`。
+        //
+        // 检索放宽复原与配对保活原先排在下面两段智能符号收尾之后；它们只动 state / 配对栈，
+        // 智能符号那两段只动 `smart_symbol`，互不读写，先后无关。配对保活须在
+        // `handle_key_event` **之后**刷新，否则本次按键的陈旧判定会先被自己刷新掉。
         let action = {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            self.apply_auto_spacing(&mut st, action)
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.finish_session_action(st, crate::session_exit::ActionOrigin::Key, action)
         };
-        // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
-        // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
-        // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
-        let action = self.apply_commit_newline(action);
-        self.record_input_stats(&action);
-        // 自提交打点 + 码表自动造词投喂。与 record_input_stats 同一收口理由：上屏路径有
-        // 40+ 个返回点，且约 10 处绕过 commit_action 直接构造 InsertText，散点接线必漏。
-        self.note_commit_action(&action);
         // PassThrough / UpdateComposition 时 C++ 侧会调 FlushHoldCompositionIfActive 提交旧符号；
         // coordinator 需同步清除 held_text，防止后续标点的 pre_held_text 捡到已提交的旧值
         // 而造成二次提交（"。。="）。仅在 held_text 非空时操作，避免干扰无 Hold 状态的武装态。
@@ -1015,15 +1014,6 @@ impl MessageHandler for Coordinator {
                 }
             }
         }
-        // 检索范围临时放宽的失效：本次组合结束（缓冲已空）即恢复配置档位。
-        // 与 record_input_stats / note_commit_action 同一收口理由——`input_buffer.clear()`
-        // 有十几个调用点（上屏/取消/切焦点/模式切换），散点接线必漏。放在按键处理的唯一出口，
-        // 天然覆盖全部结束路径。用户选字上屏后下一次输入即回到智能档；而放宽期间继续敲字母、
-        // 退格改码、翻页都不会丢状态（缓冲非空），符合「找生僻字常要改几次编码」的实际。
-        self.expire_scope_override();
-        // 配对状态保活：须在 handle_key_event **之后**刷新，否则本次按键的陈旧判定
-        // 会先被自己刷新掉，TTL 永不触发。栈空时是空操作。
-        self.touch_pair_state();
         // 联想占位组合的两道收口，都挂在这个唯一出口上（透传这一格是它们共同的病灶）：
         //
         // ① `assoc_release_on_passthrough` —— 联想**还活着**，而这一键在既有分支里落到了

@@ -47,7 +47,7 @@
 | **P3 候选生成** | 产生候选：引擎查询、短语注入、基础排序、去重 | `Engine::convert`（wind-engine）；`build_candidates` 前半段；各模式的 `refill_*` / `update_*_candidates` | 新增候选来源，或改召回与切分 | 排序落到 weight；音节切分留在引擎内；去重要并码位（`absorb_codes_from`） |
 | **P4 候选后处理** | 对已有候选删、移、插 | `build_candidates` 后半段及 §4.2 的平行路径 | 不产生新来源，只改已有列表 | 调频不改 weight；shadow 是用户的最终话语权；所有池子走同一条链（§4.2） |
 | **P5 上屏** | 候选变成文本：记账、简繁、英文词后空格、清会话 | `commit_candidate`；文本变换唯一出口 `maybe_convert`（handle_mode.rs） | 变换依赖候选身份（来源、码、词频文本） | 记账用 `freq_text` 不用显示文本；简繁只经 `maybe_convert` |
-| **P6 出口收尾** | 凡上屏或凡组合结束都要做的事 | `handle_key_event_policed` 后置段；§4.3 的非按键出口 | 与具体候选无关，或依赖本键最终的 `KeyAction` | 只挂出口，不散到 40 多个返回点；会话层判定先于显示层加工 |
+| **P6 出口收尾** | 凡上屏或凡组合结束都要做的事 | 平台中立的进 `session_exit.rs::finish_session_action`；键位相关的进 `handle_key_event_policed` 后置段 | 与具体候选无关，或依赖本键最终的 `KeyAction` | 只挂出口，不散到 40 多个返回点；会话层判定先于显示层加工 |
 
 不算流程段、但各段都要用的三个横切面：配置快照（`self.rt()` / `ConfigBundle`、
 `key_resolver.rs`）、输出通道（`session_output.rs` 的 `emit_*`）、平台能力（`host_services.rs`）。
@@ -76,8 +76,9 @@
    **每一条**路径回答「接」或「不接及理由」。自己另解码一份候选池的，同样要走这条链。
 6. **它在上屏时改文本吗？** 依赖候选身份 → P5（`commit_candidate` / `maybe_convert`）；
    不依赖 → P6。
-7. **它在上屏后或组合结束后有副作用吗？** → P6。挂按键出口，并对 §4.3 的非按键出口逐条
-   回答「接」或「不接及理由」。
+7. **它在上屏后或组合结束后有副作用吗？** → P6。平台中立的加进 `finish_session_action`，
+   在 `ExitSteps` 加一个字段，`exit_steps` 里逐个来源填「接」或「不接」并写理由；只与按键
+   相关的才挂 `handle_key_event_policed`。
 8. **它涉及平台差异吗？** 平台能力走 `host_services.rs`，输出走 `session_output.rs`；
    跑 `cargo check-headless` / `check-android` 与 `tests/output_seam.rs`。
 9. **它引入新状态吗？** 按 coordinator-state-inventory.md §5 判归属，并写明「谁在什么时候清它」。
@@ -94,7 +95,7 @@
 |---|---|---|
 | 短语注入 | 问 4 | P3，`build_candidates` 内注入，按自身 weight 与码表竞争 |
 | 直接辅助码 | 问 5 | P4，钉在全部重排之后、shadow 之前；`decode_direct_prefix` 另解码前缀池，正是问 5「自己另解码一份也要走链」那一条 |
-| 中英补空格 | 问 6 否 → 问 7 | P6：入口锁存光标前一字、出口追加空格；§4.3 的四处非按键出口各补了一份 |
+| 中英补空格 | 问 6 否 → 问 7 | P6：入口锁存光标前一字、`finish_session_action` 追加空格，四个来源共用 |
 | 智能符号 | 问 1、2、7 | P0（透传位 `TOGGLE_PASSTHROUGH_KEY`）+ P2 默认臂的标点处理 + P6 出口的武装失效；移动端不经出口，另有判据兜底 |
 
 ## 4. 各阶段挂载点
@@ -181,21 +182,45 @@ emoji 不在步骤表内，「emoji 各路都接」仍是独立扫描。
 
 ### 4.3 上屏出口（现状）
 
-按键路径的出口是 `handle_key_event_policed` 的后置段，顺序：上屏码重新分派 → 中英补空格 →
-换行改写 → 自提交打点与码表造词投喂 → hold 清理 → 智能符号武装失效 → 检索放宽复原 → 配对保活 →
-联想占位收口。
+产出 `KeyAction` 的四个来源，平台中立收尾统一经 `session_exit.rs::finish_session_action`，接哪几步看同文件的
+`exit_steps` 表（按来源穷尽 `match`，新来源必须填一行；源码扫描守卫禁止绕过它直接调各步）。
+各步都在这里只调一次；补空格与产出动作同在一把状态锁内，其余各步放锁后各自取锁。
 
-不经这个出口的上屏路径：
+| 步骤 | 按键 | 鼠标点选 | CapsLock 钩子 | 悬停提示上屏 |
+|---|---|---|---|---|
+| 中英补空格 | ✓ | ✓ | ✓ | ✓ |
+| 换行改写 | ✓ | 推送编码时（`push_no_key_ctx_action`） | 同左 | 同左 |
+| 输入统计兜底 `record_input_stats` | ✓ | ✗ | ✗ | ✗ |
+| 自提交打点 + 码表造词投喂 `note_commit_action` | ✓ | ✗ | ✗ | ✗ |
+| 检索放宽复原 `expire_scope_override` | ✓ | ✗ | ✗ | ✗ |
+| 配对保活 `touch_pair_state` | ✓ | ✗ | ✗ | ✗ |
 
-| 路径 | 位置 | 现在做了什么 |
+键位相关、只属于按键路径的（不进表）：入口处的透传位解除智能符号武装与补空格锁存；出口处的
+上屏码重新分派（CapsLock 钩子也做）、hold 清理、非同键解除武装（鼠标点选在选词前另行解除）、联想占位两道收口、交还宿主重放的标记、
+无占位联想会话位对账、组合区占位 / 音节分隔符（推送路径在 `push_no_key_ctx_action` 里换分隔符）。
+
+移动端按键直调内层 `handle_key_event`，不经上述任何出口，不补中英交界空格（`wind-mobile` 只补
+英文词后空格）；移动端候选栏选词走 `select_candidate_at`，属鼠标点选来源。
+
+不产出 `KeyAction`、直接经 push 通道上屏的通路，未纳入来源表：
+
+| 通路 | 位置 | 现在做了什么 |
 |---|---|---|
-| CapsLock 钩子上屏 | `coordinator.rs::handle_capslock_hook_press` | 上屏码重新分派、补空格 |
-| 鼠标点选（主路 / 模式路） | `handle_candidate.rs::select_candidate_at` 一带 | 补空格、解除智能符号武装 |
-| 提示框上屏 | `handle_tooltip.rs` | 只补空格 |
-| 移动端 | `wind-mobile/src/lib.rs` 直调内层 `handle_key_event` | 全部绕过 |
+| DLL 排水 / 顶码延迟提交 | `message_handler.rs::handle_commit_request` | 记词频，文本级补空格 `space_committed_text` |
+| 切方案时上屏 | `coordinator.rs::push_switch_commit` | 经 `push_commit_text`：换行改写 |
+| 命令栏 / 软键盘上屏 | `handle_cmdbar.rs`、`handle_softkeyboard.rs` 的 `push_commit_text` | 同上 |
+| 配对符号上屏 | `handle_punct.rs` 配对分支 | 换行改写 |
 
-这几条都缺换行改写、造词投喂、检索放宽复原、配对保活、联想占位收口中的大部分，哪些是有意、
-哪些是漏接尚未逐项定案（§5.2）。
+这几条要不要纳入（它们没有 `KeyAction`，纳入要先给出口一个文本级的形态），与下面的待定项一起定。
+
+**待定项**（✗ 处是有意还是漏接，逐项定案后改 `exit_steps`、登记候选行为变更清单）：
+
+| 步骤 | 非按键来源不接的后果 |
+|---|---|
+| 自提交打点 + 造词投喂 | 鼠标 / 钩子上屏后撤销计数不更新为本次长度，光标回声又被当成用户挪光标 ⇒ 鼠标上屏后撤销只删 1 个字而不是整词；草稿滑窗同样误复位；码表自动造词收不到鼠标选的字词 |
+| 检索放宽复原 | 鼠标上屏结束组合后放宽不复原，下一次组合开头仍是放宽档（要到那次组合结束才复原） |
+| 配对保活 | 鼠标 / 钩子上屏不刷新配对栈的 TTL，影响仅限 TTL 提前到期 |
+| 输入统计兜底 | 选词出口自己会 `record_commit`，兜底只补没记账的 InsertText；接入前须在入口复位 `stat_recorded`（现由按键入口复位） |
 
 ## 5. 组件化方向
 
@@ -230,16 +255,18 @@ pub(crate) mod profile {
 - `PassCtx` 必须显式传码域与归属方案（各模式的 `apply_*_in` 口径不同），不能回落到活跃方案。
 - 主链独有、只有一个消费者的步骤（英文定位、整句块、纠错护顶、直接辅助码、出简让全）留在原地。
 
-### 5.2 统一出口收尾（P6）——要做
+### 5.2 统一出口收尾（P6）——已落地，见 `session_exit.rs`
 
 ```rust
-pub(crate) enum ActionOrigin<'a> { Key(&'a KeyEventData), Pointer, Hook, Tooltip, Mobile }
-fn finish_session_action(&self, origin: ActionOrigin, action: KeyAction) -> KeyAction; // 平台中立
-fn finish_desktop_key(&self, data: &KeyEventData, action: KeyAction) -> KeyAction;     // TSF 协议
+pub(crate) enum ActionOrigin { Key, Pointer, CapsLockHook, Tooltip }
+pub(crate) const fn exit_steps(origin: ActionOrigin) -> ExitSteps; // 每来源一行
+fn finish_session_action(&self, st: MutexGuard<State>, origin: ActionOrigin, action: KeyAction)
+    -> KeyAction; // 平台中立；TSF 协议相关的仍在 handle_key_event_policed
 ```
 
-用具名函数而不是钩子列表：出口各步的先后理由是逐对的，列表表达不了。第一步只按来源逐字复现
-现状；§4.3 的缺口逐项另行提交，每项登记 changelog。
+用具名函数而不是钩子列表：出口各步的先后理由是逐对的，列表表达不了。第一步按来源逐字复现
+现状（已完成）；§4.3 的待定项逐项另行提交，每项登记 changelog。移动端走内层入口，不建来源，
+要统一时另议。
 
 ### 5.3 不做
 
@@ -257,7 +284,7 @@ fn finish_desktop_key(&self, data: &KeyEventData, action: KeyAction) -> KeyActio
 | 1 | 本文、按键链槽位编号、§8 现状修正 | 无行为变化 | 完成 |
 | 2 | 引入 `Pass` / `run_passes`，替换主链、整句池、补全池、直接辅助码 | 全量测试 `--no-fail-fast`；8 组配置逐键候选导出前后 md5 一致 | 完成 |
 | 3 | 临拼、临英、mix 自由英文段、特殊、反查改用 profile | 同上 + 临拼/临英/快捷输入/生僻字/反查 6 组导出前后 md5 一致 | 完成 |
-| 4 | 抽 `finish_session_action`，逐字复现现状；缺口逐项定案 | smart_symbol / auto_spacing / freq_learn 测试 | 未开始 |
+| 4 | 抽 `finish_session_action`，逐字复现现状；缺口逐项定案 | 全量测试；绕过守卫 | 抽取完成，缺口待定（§4.3） |
 | 5 | 以模式为键的 `match` 去掉 `_ =>`（18 处），守卫 `source_scan::mode_keyed_matches_have_no_wildcard_arm` | 编译通过；替换时按 `unreachable_patterns` 警告删去已覆盖项，保证与原兜底范围相同；全量测试 | 完成 |
 | 6 | 清掉 §6.3 的读盘点 | 计数测试（见 §6.2） | 完成 |
 
