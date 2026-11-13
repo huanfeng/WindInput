@@ -209,12 +209,16 @@ impl Coordinator {
     // 状态机在 `crate::auto_phrase`（纯逻辑）；此处只做接线与 IO。
     // ──────────────────────────────────────────────────────────────────────
 
-    /// 上屏后处理：**自提交打点** + 喂码表造词缓冲。
-    ///
-    /// 收口在 `handle_key_event_policed`（而非 `commit_action`）——后者不是唯一出口，
-    /// 另有约 10 处直接构造 `InsertText` 的路径（顶码/智能符号/临拼等），散点打点必漏。
-    /// 与 `record_input_stats` 同一收口思路。
+    /// 按键来源的上屏后处理（自提交打点 + 喂草稿滑窗）的测试合成口。生产路径经
+    /// `finish_session_action` 按来源分别调两步，见 `session_exit::exit_steps`。
+    #[cfg(test)]
     pub(crate) fn note_commit_action(&self, action: &KeyAction) {
+        self.note_self_commit(action);
+        self.note_draft_commit(action);
+    }
+
+    /// 自提交打点：撤销上屏计数 + SelectionChanged 回声判别的时间戳。
+    pub(crate) fn note_self_commit(&self, action: &KeyAction) {
         // 撤销上屏窗口（`ime.undo_commit`）：记录本次按键「同步落到光标前」的字符数（UTF-16
         // 单元，对齐 ReplaceBackward 删除量纲）。覆盖一切确定落屏的返回变体——每次上屏都顶掉
         // 上一次计数，故 undo 只精准删「刚输入完那次」；英文/标点逐键上屏自然把计数刷回 1，
@@ -256,14 +260,6 @@ impl Coordinator {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         }
-
-        // 造词只喂「整段新插入的文本」，刻意仍限这两种变体：`ReplaceBackward` 是回改已上屏
-        // 的内容、`Commit*` 系的 commit_text 是上一段的收尾，都不是新起的一段输入。
-        // 与上面的打点判据不同源是**有意**的，别顺手合并。
-        // 码表造词走滑窗草稿层，吃的是**一切真落屏的文字**（五种变体），与上面的自提交
-        // 打点同源。旧的 `feed_auto_phrase` 只取 `InsertText`/`InsertTextWithCursor` 两种
-        // ——那是「只关心新起的一段输入」的判据，随连续单字模型一起退役了。
-        self.note_draft_commit(action);
     }
 
     /// 造词是否启用（码表/混输方案 + 开关开启）。拼音方案走 `[pinyin.auto_learn]` 的

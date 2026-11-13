@@ -6090,6 +6090,15 @@ impl Coordinator {
     ///
     /// @return 实际产生的 KeyAction（主输入路与各 overlay 均带出；仅 `$CC` 命令、组折叠、越界返回 None）
     pub(crate) fn select_candidate_at(&self, idx: usize) -> Option<KeyAction> {
+        self.select_candidate_from(idx, crate::session_exit::ActionOrigin::Pointer)
+    }
+
+    /// 同 [`Self::select_candidate_at`]，按 `origin` 收尾（移动端候选栏是 `MobilePick`）。
+    pub(crate) fn select_candidate_from(
+        &self,
+        idx: usize,
+        origin: crate::session_exit::ActionOrigin,
+    ) -> Option<KeyAction> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // 联想候选就住在 `candidates` 里，故本函数**原样适用**——鼠标点选联想词与点选
         // 普通候选走的是同一条 `commit_selected`，无需分支。移动端的候选栏全靠这条通路。
@@ -6189,8 +6198,7 @@ impl Coordinator {
                 self.commit_selected(&mut state, &cand, page_local as i32)
             };
             // 点选不经按键出口，收尾（补空格等）在推送之前做，见 `crate::session_exit`。
-            let act =
-                self.finish_session_action(state, crate::session_exit::ActionOrigin::Pointer, act);
+            let act = self.finish_session_action(state, origin, act);
             // commit_selected 已按分支自行 notify_ui_update / notify_ui_hide，此处不再重复。
             self.push_no_key_ctx_action(&act, chinese_mode, true);
             return Some(act);
@@ -6248,8 +6256,7 @@ impl Coordinator {
             }
         };
         let chinese_mode = state.chinese_mode;
-        let act =
-            self.finish_session_action(state, crate::session_exit::ActionOrigin::Pointer, act);
+        let act = self.finish_session_action(state, origin, act);
         match &act {
             // 空文本上屏：只需让宿主结束 composition（同 $CC 命令分支）。
             KeyAction::ClearComposition => {

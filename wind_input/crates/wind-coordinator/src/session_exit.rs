@@ -20,12 +20,26 @@ use crate::coordinator::{Coordinator, State};
 pub(crate) enum ActionOrigin {
     /// 桌面按键（bridge 的按键出口）。
     Key,
-    /// 鼠标点选候选（含移动端按下标选词）。
+    /// 桌面鼠标点选候选（含无障碍 UIElement 的「选高亮」）。
     Pointer,
+    /// 移动端候选栏按下标选词（`candidate_pull::select_candidate`）。
+    MobilePick,
     /// CapsLock 全局钩子（事件不经 TSF）。
     CapsLockHook,
     /// 悬停提示菜单的「上屏」。
     Tooltip,
+}
+
+/// 草稿滑窗（码表自动造词）对一次上屏的处理。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DraftStep {
+    /// 喂入：上屏文字是用户的输入，可与前后上屏连成词。
+    Feed,
+    /// 打断：上屏的不是输入（提示文本），滑窗就此断开，同时标记词边界。
+    Break,
+    /// 不碰：该来源所在平台的按键上屏不经本出口、不喂滑窗，只在选词这一侧喂会把不相邻的
+    /// 两次上屏拼成假词。
+    Skip,
 }
 
 /// 某来源接哪几步收尾。中英补空格各来源都接，不在表内。
@@ -36,31 +50,60 @@ pub(crate) struct ExitSteps {
     pub commit_newline: bool,
     /// 顶层输入统计兜底（`record_input_stats`）。
     pub input_stats: bool,
-    /// 自提交打点 + 码表造词投喂（`note_commit_action`）。
-    pub note_commit: bool,
+    /// 自提交打点（`note_self_commit`）：撤销上屏计数 + 光标回声判别。
+    pub self_commit: bool,
+    /// 草稿滑窗（`note_draft_commit` / `terminate_auto_phrase`）。
+    pub draft: DraftStep,
     /// 检索范围临时放宽在组合结束时复原（`expire_scope_override`）。
     pub expire_scope: bool,
     /// 配对状态保活（`touch_pair_state`）。
     pub touch_pair: bool,
 }
 
-/// 各来源的收尾表。**逐字复现现状**：非按键来源的 `false` 是否属漏接，见落点指引 §4.3 待定项，
-/// 定案一项改一项，并登记候选行为变更清单。
+/// 各来源的收尾表（落点指引 §4.3）。
+///
+/// 非按键来源不接的两步：
+/// - 换行改写：推送编码时改写（见 [`ExitSteps::commit_newline`]）。
+/// - 输入统计兜底：这些来源的上屏出口自己 `record_commit`，兜底只补漏记的 InsertText；去重
+///   标志 `stat_recorded` 由按键入口复位，接入还得在各入口复位它，收益小（2026-11-13 定）。
 pub(crate) const fn exit_steps(origin: ActionOrigin) -> ExitSteps {
     match origin {
         ActionOrigin::Key => ExitSteps {
             commit_newline: true,
             input_stats: true,
-            note_commit: true,
+            self_commit: true,
+            draft: DraftStep::Feed,
             expire_scope: true,
             touch_pair: true,
         },
-        ActionOrigin::Pointer | ActionOrigin::CapsLockHook | ActionOrigin::Tooltip => ExitSteps {
+        // 选的是候选，与键盘选词同为用户输入。
+        ActionOrigin::Pointer | ActionOrigin::CapsLockHook => ExitSteps {
             commit_newline: false,
             input_stats: false,
-            note_commit: false,
-            expire_scope: false,
-            touch_pair: false,
+            self_commit: true,
+            draft: DraftStep::Feed,
+            expire_scope: true,
+            touch_pair: true,
+        },
+        // 移动端按键直调内层 `handle_key_event`，按键上屏不经本出口、不喂滑窗；选词这一侧
+        // 再喂，滑窗会把「点选的你 / 按键上屏的好 / 点选的吗」看成相邻的「你吗」。
+        ActionOrigin::MobilePick => ExitSteps {
+            commit_newline: false,
+            input_stats: false,
+            self_commit: true,
+            draft: DraftStep::Skip,
+            expire_scope: true,
+            touch_pair: true,
+        },
+        // 上屏的是提示里的一段文本，不是输入：打点（撤销删的是它、光标回声不误判），
+        // 但不进造词滑窗。
+        ActionOrigin::Tooltip => ExitSteps {
+            commit_newline: false,
+            input_stats: false,
+            self_commit: true,
+            draft: DraftStep::Break,
+            expire_scope: true,
+            touch_pair: true,
         },
     }
 }
@@ -88,8 +131,29 @@ impl Coordinator {
         if steps.input_stats {
             self.record_input_stats(&action);
         }
-        if steps.note_commit {
-            self.note_commit_action(&action);
+        if steps.self_commit {
+            self.note_self_commit(&action);
+        }
+        // 滑窗吃一切真落屏的文字（与自提交打点同源的五种变体）。
+        match steps.draft {
+            DraftStep::Feed => self.note_draft_commit(&action),
+            DraftStep::Break => {
+                self.terminate_auto_phrase("非输入文本上屏");
+                self.note_word_boundary();
+                // 补空格置的「前缀是补的」标记原由 `note_draft_commit` 消费；这里不喂滑窗，
+                // 不清的话会留给下一笔，把它开头真实的空格当成补的剥掉。
+                self.auto_space_prefixed
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            DraftStep::Skip => {
+                self.auto_space_prefixed
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                // 选词出口登记的上屏码同理作废，不留给以后的字。
+                self.draft_window
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear_code_hint();
+            }
         }
         if steps.expire_scope {
             self.expire_scope_override();
@@ -103,6 +167,69 @@ impl Coordinator {
 
 #[cfg(test)]
 mod tests {
+    use super::{ActionOrigin, Coordinator};
+    use std::sync::atomic::Ordering;
+    use wind_bridge::handler::KeyAction;
+    use wind_config::Config;
+
+    fn finish(c: &Coordinator, origin: ActionOrigin, text: &str) -> KeyAction {
+        let st = c.state.lock().unwrap();
+        c.finish_session_action(st, origin, Coordinator::commit_action(text.into(), true))
+    }
+
+    /// 非按键来源上屏后：撤销计数是本次长度（随后的光标回声被认作自提交，不把它刷回 1）、
+    /// 打了自提交点、检索放宽随组合结束复原（不带进下一次组合）。
+    #[test]
+    fn non_key_origins_mark_self_commit_and_restore_scope() {
+        use wind_bridge::handler::MessageHandler;
+        for origin in [
+            ActionOrigin::Pointer,
+            ActionOrigin::MobilePick,
+            ActionOrigin::CapsLockHook,
+            ActionOrigin::Tooltip,
+        ] {
+            let c = Coordinator::new_headless(Config::default(), None);
+            c.state.lock().unwrap().scope_relaxed = true;
+            finish(&c, origin, "你好");
+            assert!(
+                c.last_self_commit.lock().unwrap().is_some(),
+                "{origin:?}: 未打点"
+            );
+            c.handle_selection_changed(0);
+            assert_eq!(c.last_commit_len.load(Ordering::Relaxed), 2, "{origin:?}");
+            assert!(
+                !c.state.lock().unwrap().scope_relaxed,
+                "{origin:?}: 放宽未复原"
+            );
+        }
+    }
+
+    /// 滑窗：候选上屏（鼠标 / 钩子）喂入；悬停提示上屏的不是输入，打断；移动端选词不碰
+    /// （移动端按键上屏不喂，只喂选词一侧会把不相邻的两次上屏拼成假词）。
+    #[test]
+    fn draft_window_per_origin() {
+        let mut cfg = Config::default();
+        cfg.schema.codetable.auto_phrase.enabled = true;
+        let window_empty = |c: &Coordinator| c.draft_window.lock().unwrap().is_empty();
+        for (origin, kept) in [
+            (ActionOrigin::Pointer, true),
+            (ActionOrigin::CapsLockHook, true),
+            (ActionOrigin::Tooltip, false),
+        ] {
+            let c = Coordinator::new_headless(cfg.clone(), None);
+            assert!(c.draft_enabled(), "前提：默认方案应启用码表造词");
+            finish(&c, ActionOrigin::Key, "你");
+            assert!(!window_empty(&c), "前提：按键上屏进滑窗");
+            finish(&c, origin, "好");
+            assert_eq!(!window_empty(&c), kept, "{origin:?}");
+        }
+        let c = Coordinator::new_headless(cfg, None);
+        finish(&c, ActionOrigin::MobilePick, "好");
+        assert!(window_empty(&c), "MobilePick 不应喂滑窗");
+        finish(&c, ActionOrigin::Pointer, "好");
+        assert!(!window_empty(&c), "对照：同一实例上 Pointer 会喂");
+    }
+
     /// 收尾各步只经 [`super::Coordinator::finish_session_action`] 调用：新上屏入口若绕过它直接调
     /// 其中一步，就又回到「各入口凭记忆抄几步」的老路，§4.3 那张表也不再反映实情。
     #[test]
@@ -111,7 +238,8 @@ mod tests {
             "apply_auto_spacing(",
             "apply_commit_newline(",
             "record_input_stats(",
-            "note_commit_action(",
+            "note_self_commit(",
+            "note_draft_commit(",
             "expire_scope_override(",
             "touch_pair_state(",
         ];
