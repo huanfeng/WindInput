@@ -10,7 +10,9 @@ use wind_bridge::handler::MessageHandler;
 use wind_config::Config;
 use wind_keys::keymap;
 use wind_ui_types::ToolbarState;
-use wind_ui_types::{CandidateOp, MenuAnchor, MenuCmd, MenuKind, ToolbarAction, UiCommand};
+use wind_ui_types::{
+    CandidateOp, MenuAnchor, MenuCmd, MenuKind, PIN_AT_MAX, ToolbarAction, UiCommand,
+};
 
 /// 候选窗定位方式与坐标：菜单一起写，写回目标也按这一组判（见 `menu_writeback_target`）。
 const CANDIDATE_POS_FIELDS: [&str; 3] = ["candidate_position_mode", "candidate_x", "candidate_y"];
@@ -2408,7 +2410,8 @@ impl Coordinator {
     /// 而分叉的表现是「同一个词桌面能置顶、手机上是灰的」，没有任何报错。
     ///
     /// 词条操作的启用态/删除文案按候选来源动态化（对齐 Go window_mouse 菜单状态规则）：
-    /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁全部调位（无稳定位置语义）。
+    /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁前移/后移（相对邻居，无稳定语义），
+    ///   置顶与「固定到第 N 位」照给。
     /// - 删除：拼音 / 英文 ≥2 字的词→「屏蔽该词」并另给「在此编码下隐藏」；短语→「禁用短语」
     ///   （软删可恢复）；码表用户词/临时词→真删；其余系统词→「在此编码下隐藏」（shadow）。
     /// - 特殊模式（快符等）：词条操作**照常提供**，编码取其独立缓冲、归属取其引用方案。
@@ -2419,6 +2422,7 @@ impl Coordinator {
         let cand = state.candidates.get(idx)?.clone();
         let word = cand.text.clone();
         let pos = self.reorder_positions(&state, idx);
+        let per_page = self.per_page(state.active);
         let scope = self.candidate_op_scope(&state);
         // 快捷输入的格式候选：判据独立于 candidate_op_scope（后者问「有没有词库落点」，
         // 混输没有，返回 None 是对的）。与写端 `candidate_or_quick_format_op` 同源。
@@ -2507,8 +2511,8 @@ impl Coordinator {
             // 规则键是词库原文，与写端同取 `freq_text`（英文大小写投影后 `text` 对不上）。
             let has_rule =
                 self.shadow_has_rule(&scope.schema, &scope.code, cand.freq_text(), cand_id);
-            // 拼音普通候选**只放行置顶**，前移/后移仍禁（`position=0` 位置语义稳定，
-            // `position=N` 在候选集变动后失去意义）；命令候选不受限。
+            // 拼音普通候选**放行置顶与固定到第 N 位**，前移/后移仍禁：那两项是相对邻居的操作，
+            // 邻居随词频、学词、整句每天在变；绝对名次则是用户明确的主张。命令候选不受限。
             // 引擎类型来自 scope：特殊模式问的是它引用的方案，照抄主方案会在「主方案拼音 +
             // 快符码表」时整体误禁调位。
             //
@@ -2539,6 +2543,7 @@ impl Coordinator {
                     can_pin && pos.here > 0,
                     false,
                 ),
+                pin_at_submenu(per_page, pos, can_pin),
                 M::leaf(
                     "前移",
                     op(CandidateOp::MoveUp),
@@ -3233,6 +3238,33 @@ impl Coordinator {
         // 故多调无副作用；漏调则是「状态变了图标不跟」。
         self.publish_langbar_icon_now();
     }
+}
+
+/// 「固定到第 N 位 ▸ 第 1 位…第 K 位」子菜单，K = 每页条数（不超过 [`PIN_AT_MAX`] 与读端
+/// 候选条数）。已在第 j 位时「第 j 位」灰。
+///
+/// ⚠️ 判据与写端 `candidate_op_in` 的 `PinAt` 分支逐字对应（同用 `reorder_positions` 的
+/// `here`）：失配的表现是「点得动却毫无反应」。
+fn pin_at_submenu(
+    per_page: usize,
+    pos: crate::candidate_grid::ReorderPositions,
+    can_pin: bool,
+) -> wind_ui_types::MenuItemSpec {
+    use wind_ui_types::MenuItemSpec as M;
+    let k = per_page.min(PIN_AT_MAX as usize).min(pos.last + 1);
+    let children: Vec<M> = (1..=k)
+        .map(|n| {
+            M::leaf(
+                format!("第 {n} 位"),
+                MenuKind::Op(CandidateOp::PinAt(n as u8)),
+                can_pin && pos.here != n - 1,
+                false,
+            )
+        })
+        .collect();
+    let mut item = M::submenu("固定到第 N 位", children);
+    item.enabled = item.children.iter().any(|c| c.enabled);
+    item
 }
 
 /// 是否 $SS/$AA 展开后的组成员候选：顺序/成员由短语定义决定，禁一切调整

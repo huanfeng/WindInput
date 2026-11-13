@@ -37,6 +37,14 @@ pub enum ToolbarAction {
     Custom(u8),
 }
 
+/// [`CandidateOp::PinAt`] 的 N 上限（菜单子项「第 1 位」…「第 20 位」）。
+pub const PIN_AT_MAX: u8 = 20;
+
+/// [`CandidateOp::PinAt`] 的菜单 id：`PIN_AT_ID_BASE + N`，即 20..=39 对应 N=1..=20。
+/// 独占 20–39 一段（10–19 已被其余词条操作占满大半，再挤会撞号）；区间外的 id 前端照旧
+/// 「未知 id 只记 debug」。
+const PIN_AT_ID_BASE: i32 = 19;
+
 /// 候选词条操作（右键菜单）；复制由 UI 侧直接处理，不在此列。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateOp {
@@ -54,6 +62,9 @@ pub enum CandidateOp {
     HideHere,
     /// 恢复默认
     Reset,
+    /// 固定到第 N 位：N 为 1 基界面名次（1..=[`PIN_AT_MAX`]），写下的规则位置是 N-1。
+    /// 拼音也给（前移/后移拼音不给）；菜单只列到每页条数。
+    PinAt(u8),
     /// 常用/生僻互切（**全局字级**，不限本方案本码）。
     ///
     /// 与上面五项不是一类：那些落在 shadow（键 = 方案 + 输入码），这个落在常用字覆盖表
@@ -239,7 +250,7 @@ impl MenuKind {
     /// 稳定菜单 id：macOS `.app` 把它写进 `NSMenuItem.tag`，选中后经 `CmdMenuAction`
     /// 原样回传，Rust 据此还原动作。构建菜单树（下发）与处理回传（还原）共用此映射，
     /// 二者必须一致。`Submenu`/`Separator`/`Label` 不回传，恒为 0。
-    /// id 区间：1 复制｜10-19 词条操作｜100-199 固定命令｜1000+ 方案｜2000+ 主题｜3000+ 过滤｜
+    /// id 区间：1 复制｜10-19 词条操作｜20-39 固定到第 N 位｜100-199 固定命令｜1000+ 方案｜2000+ 主题｜3000+ 过滤｜
     /// 4000+ 明暗｜5000+ 候选窗首显｜6000+ 初始中英｜7000+ 初始标点｜8000+ 诊断 HUD 分区｜
     /// 9000+ 自动配对｜10000+ 语言栏图标角标形状｜11000+ 软键盘面｜12000+ 候选窗定位｜
     /// 13000+ 软件切换中英｜14000+ 密码框强制英文｜15000+ 按应用方案｜
@@ -256,6 +267,8 @@ impl MenuKind {
                 CandidateOp::Reset => 14,
                 CandidateOp::ToggleCommon => 15,
                 CandidateOp::HideHere => 16,
+                // N 越界（0 或 > PIN_AT_MAX）得到的 id 反解析不回来，菜单从不产出这种值。
+                CandidateOp::PinAt(n) => PIN_AT_ID_BASE + n as i32,
             },
             MenuKind::Command(cmd) => match cmd {
                 MenuCmd::SchemaEnglish => 100,
@@ -327,6 +340,11 @@ impl MenuKind {
             14 => return Some(MenuKind::Op(CandidateOp::Reset)),
             15 => return Some(MenuKind::Op(CandidateOp::ToggleCommon)),
             16 => return Some(MenuKind::Op(CandidateOp::HideHere)),
+            20..=39 => {
+                return Some(MenuKind::Op(CandidateOp::PinAt(
+                    (id - PIN_AT_ID_BASE) as u8,
+                )));
+            }
             100 => MenuCmd::SchemaEnglish,
             101 => MenuCmd::TogglePunct,
             102 => MenuCmd::ToggleWidth,
@@ -541,9 +559,29 @@ mod tests {
             CandidateOp::HideHere,
             CandidateOp::Reset,
             CandidateOp::ToggleCommon,
-        ] {
+        ]
+        .into_iter()
+        .chain((1..=PIN_AT_MAX).map(CandidateOp::PinAt))
+        {
             let kind = MenuKind::Op(op);
             assert_eq!(MenuKind::from_menu_id(kind.to_menu_id()), Some(kind));
         }
+    }
+
+    /// 「固定到第 N 位」独占 20..=39，区间两端外的 id 不被认成它。
+    #[test]
+    fn pin_at_id_range() {
+        assert_eq!(MenuKind::Op(CandidateOp::PinAt(1)).to_menu_id(), 20);
+        assert_eq!(
+            MenuKind::Op(CandidateOp::PinAt(PIN_AT_MAX)).to_menu_id(),
+            39
+        );
+        assert_eq!(MenuKind::from_menu_id(19), None);
+        assert_eq!(MenuKind::from_menu_id(40), None);
+        assert_eq!(
+            MenuKind::Op(CandidateOp::PinAt(0)).to_menu_id(),
+            19,
+            "N=0 不可反解析"
+        );
     }
 }

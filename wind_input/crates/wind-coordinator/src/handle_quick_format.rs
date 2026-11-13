@@ -63,6 +63,8 @@ impl QuickFormatOp {
             C::ToggleCommon => None,
             // 格式没有编码可言，菜单侧 quick 分支也不给这一项。
             C::HideHere => None,
+            // 格式排序只有置顶 / 上移 / 下移，菜单侧 quick 分支不给这一项。
+            C::PinAt(_) => None,
         }
     }
 }

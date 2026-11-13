@@ -5447,12 +5447,12 @@ impl Coordinator {
         if cand.is_emoji_suggestion {
             return;
         }
-        // 拼音普通候选**只放行置顶**，前移/后移仍禁；命令候选不受限。
+        // 拼音普通候选**放行置顶与固定到第 N 位**，前移/后移仍禁；命令候选不受限。
         // 引擎类型取自 scope（特殊模式问的是它引用的方案，不是主方案）。
         //
-        // 分野在于位置语义是否稳定：`position=0` 恒等于「第一个」，这个承诺与候选集怎么变
-        // 无关；而 `position=3` 一旦词频衰减、模糊音开关或词库变动改了候选集，指的就是另一
-        // 条候选了——那正是当初对拼音整体禁调位的理由，它对置顶从来不成立。
+        // 分野在于操作是否相对邻居：前移/后移挪到「前一个/后一个」的位置，而拼音的邻居随
+        // 词频、学词、整句每天在变，写下的绝对下标转天就指向别处；置顶与「固定到第 N 位」是
+        // 用户明确说出的名次，候选集怎么变，规则的意思都不变。
         //
         // ⚠️ shadow 排在装配流水线**最后**（sort → dedup → filter → freq_rerank → shadow），
         // 因此它能翻过拼音 `cmp_match_layers` 的硬层级闸门——置顶的效力比调频强，是硬规则。
@@ -5467,6 +5467,12 @@ impl Coordinator {
         let pos = self.reorder_positions(state, idx);
         // 已在首位：置顶是冗余规则，直接忽略（菜单已灰显，热键路径 defensive）。
         if matches!(op, CandidateOp::MoveTop) && pos.here == 0 {
+            return;
+        }
+        // 固定到第 N 位：N 为 1 基名次；已在该位同样忽略。判据与菜单 `pin_at_submenu` 同源。
+        if let CandidateOp::PinAt(n) = op
+            && (n == 0 || pos.here == n as usize - 1)
+        {
             return;
         }
         if let Some(store) = &self.store {
@@ -5513,6 +5519,9 @@ impl Coordinator {
                     }
                     _ => Ok(()),
                 },
+                CandidateOp::PinAt(n) => {
+                    store.pin_shadow(&sh_schema, &code, &word, cand_id, n as usize - 1)
+                }
                 CandidateOp::Reset => store.remove_shadow_rule(&sh_schema, &code, &word, cand_id),
                 // 不可达：它在上面就 early-return 了（落点是全局常用字覆盖表，不是 shadow）。
                 // 保持不 panic —— 菜单 id 由 IPC 回传，让一个越界值把输入法打崩不值当。
