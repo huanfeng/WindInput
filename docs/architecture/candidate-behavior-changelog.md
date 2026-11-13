@@ -31,12 +31,14 @@
 
 - 合入：（待填）；范围：全部方案的候选右键菜单与移动端长按菜单；shadow 读端（码表、拼音、混输、特殊模式、临拼、临英）
 - 变化：
-  - 拼音（全拼、双拼、混输拼音段）前：只能置顶，前移 / 后移灰 → 后：「置顶」之后多一项「固定到第 N 位 ▸ 第 1 位…第 K 位」（K = 每页条数，上限 20，不超过候选条数；当前所在名次那一项灰），前移 / 后移仍灰；码表同样有这一项。移动端摊平成「固定到第 1 位」…，动作名 `pin_at_N`
+  - 拼音（全拼、双拼、混输拼音段）前：只能置顶，前移 / 后移灰 → 后：「置顶」之后多一项「固定到第 N 位 ▸ 第 1 位…第 K 位」（K = 每页条数，上限 20，不超过候选条数），前移 / 后移仍灰；码表同样有这一项。N 是**界面名次**：开简入繁出时变体占的格子也算，紧跟原字的变体格（被钉的词插不进去）与当前所在那格灰。移动端摊平成「固定到第 1 位」…「固定到第 9 位」，动作名 `pin_at_N`
+  - 英文方案与临时英文**不给**「固定到第 N 位」（头部原文 / 大小写变形条在调位之后才插入，名次会偏），置顶照旧
   - 同一编码钉了多条位置、且后钉的词原本排在先钉的词之前 前：先钉的被往前挤一格（`[x,B,y,A,z,w,v]` 钉 A→第 4 位、B→第 6 位，A 实落第 3 位）→ 后：每条都落在自己的位置上；只钉第 1 位时不受影响
-  - 开简入繁出时对单字之后的候选前移 / 后移 前：规则位置按含简繁变体（「出」后的「齣」）的列表写，读端不含变体，落点偏后 → 后：按读端列表写，落点正确；emoji 扩展、单字母重复上屏项同理
+  - 码表前移 / 后移到**自己也有固定规则**的邻居上 前：`[a,b,c,d]` 后移 a 得 `[b,a,c,d]`，再后移 b 碰巧换回（逐条插入的副作用；改两阶段后会变成 `[c,b,a,d]`）→ 后：显式与邻居交换，邻居的规则改写到本条原位，换回 `[a,b,c,d]`；前移对称
+  - 开简入繁出时对单字之后的候选前移 / 后移 前：规则位置按含简繁变体（「出」后的「齣」）的列表写，读端不含变体，落点偏后 → 后：按读端列表写，落点正确；emoji 扩展同理；单字母引导的重复上屏项不再给调位（置顶 / 前移 / 后移 / 固定到第 N 位都灰）
 - 触发条件：出厂即生效
 - 回退旧行为：无（设计变更 / 缺陷修复）
-- 钉住的测试：`wind-coordinator/tests/candidate_pin_at.rs`；`wind-candidate/src/shadow.rs::tests::multiple_pins_do_not_shift_each_other` 等；`candidate_grid.rs::tests::reorder_positions_skip_items_inserted_after_shadow`
+- 钉住的测试：`wind-coordinator/tests/candidate_pin_at.rs`；`wind-candidate/src/shadow.rs::tests::multiple_pins_do_not_shift_each_other` 等；`candidate_grid.rs::tests::reorder_positions_skip_items_inserted_after_shadow`、`reorder_and_pin_slots_under_filter_with_variants`、`pin_slots_skip_leading_repeat`；`wind-mobile` 的 `pin_at_capped_to_nine_on_mobile`
 - 来源：GH#236 与跟帖（维护者定稿，设计稿 §5）
 
 ## 2026-11-13 · 右键删除类菜单改名，拼音 / 英文多字词加「在此编码下隐藏」（0.132）
