@@ -177,29 +177,30 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 
 ## 6 词库窗（设置端）
 
-### 6.1 系统词库：中栏一个节点，右栏两级（维护者 2026-11-13 改定）
+### 6.1 系统词库：中栏一个分组，右栏两级（维护者 2026-11-13 改定）
 
-真机看过第一版（中栏「分类词库 n/m」+ 其下列已启用项）后改定：中栏下挂各库只是快捷开关、没有实际意义，库多时把中栏撑长；系统词库本身又看不了。层级应是 **方案 → 系统词库 → 某本词库 → 查看**，中栏只管到第一层。
+真机看过第一版（中栏「分类词库 n/m」+ 其下列已启用项）后改定：中栏下挂各库只是快捷开关、没有实际意义，库多时把中栏撑长；系统词库本身又看不了。层级应是 **方案 → 系统词库 → 某本词库 → 查看**，中栏只管到第一层。第二版（中栏顶部单节点、右栏自绘表格与翻页、点行进二级、二级带头部卡片）真机看后再改：位置、交互与表格都并入词库窗现有那一套。
 
 ```
 中栏（每个方案域）              右栏
-系统词库              ──→   一级：词库表（主词库 + 全部分类 / 附加 / 我放入的库）
-                              启用 | 名称 | 分组 | 条数 | 优先级 | 来源   ← 按生效先后排
-                              点某行 ──→ 二级：这本词库
-                                         「系统词库 / 成语」+ 返回
-                                         头部信息卡片（name、version、作者、说明、排序、import_tables；
-                                                       来源、路径、条数、修改时间、打开所在目录）
-                                         词条表：编码 | 词 | 权重（分页 + 搜索：编码前缀 / 词文本）
-                                         行操作：加进用户词库（复用加词对话框）
-用户词库（现状）
-临时词库 / 词频 / 候选调整（现状）
+用户词库                      （现状）
+  主词库 / 各分库
+系统词库（可点的分组标题）──→   一级：词库表（主词库 + 全部分类 / 附加 / 我放入的库）
+其他                            启用 | 名称 | 分组 | 条数 | 优先级 | 操作 [查看] [信息]
+  临时词库 / 词频 / 候选调整       默认按生效先后，表头可排序（客户端）
+                                 [查看] ──→ 二级：「‹ 返回」+「系统词库 / 成语」
+                                         词条表：编码 | 词条 | 权重 [| 子表] | 操作 [加进用户词库]
+                                         分页 + 跳页、表头排序（服务端）、单框搜索
+                                 [信息] ──→ 对话框：简介、name、version、sort、columns、importTables、
+                                         条数、来源、修改时间、子表、说明、路径、打开所在目录
 ```
 
-- **一级词库表**：主词库在首行、开关禁用（不可关）。其余每行可拨开关，拨动即生效（同用户分库）；拼音族折叠域只对**有这张库**的成员调 `schema.setDictEnabled`，任一失败改回各成员原值；core 广播 `schema.configChanged` 时重取（分库开关的广播与本端刚写的回声除外）。按读开关的那个成员取（拼音族取活动方案），活动方案换了即重取。
-- **优先级**只显示、不可调：即实际叠层先后，表按它排序并显示序号。拼音方案按方案文件顺序（`load_dictionary` 把启用的库依次叠成 `CachedDict::Layered`，`base_order` 不起作用）；码表 / 英文按 `base_order` 升序，主库也按自己的 `base_order` 排、不一定在首，`base_order` 相同的库之间没有库级先后（同权时按词条行序），表里按方案文件顺序列出。分组作为一列（§8 第 14 条的五组；未写 `group` 的随包库「其他」、`dir:` 登记的「我放入的」），不再按组分段。是否允许用户调先后以后再议。
+- **同一套表格**：两级都是词库窗的类别（`WordCategory::SysDicts` / `SysEntries`，各有 `CategorySpec`），走同一个 `reload` / 分页 / 搜索 / 排序管线与 `table_sortable_server`，行高、样式、翻页栏（含跳页）、右键菜单与其他表格一致。不占子标签、不进导出。
+- **一级词库表**：「启用」是表格的启用列（勾选即生效），主词库与写了 `default` 的库禁用。拼音族折叠域只对**有这张库**的成员调 `schema.setDictEnabled`，任一失败改回各成员原值；core 广播 `schema.configChanged` 时重取（分库开关的广播与本端刚写的回声除外）。按读开关的那个成员取（拼音族取活动方案），活动方案换了即重取。行操作 [查看]（双击同）进二级，[信息] 弹头部信息；右键另有「启用」。没有「来源」列：随包库的分组、`dir:` 的「我放入的」、主库的「主词库」已说清来源，来源与路径在 [信息] 里。
+- **优先级**只显示、不可调：即实际叠层先后，表默认按它排并显示序号。拼音方案按方案文件顺序（`load_dictionary` 把启用的库依次叠成 `CachedDict::Layered`，`base_order` 不起作用）；码表 / 英文按 `base_order` 升序，主库也按自己的 `base_order` 排、不一定在首，`base_order` 相同的库之间没有库级先后（同权时按词条行序），表里按方案文件顺序列出。分组作为一列（§8 第 14 条的五组；未写 `group` 的随包库「其他」、`dir:` 登记的「我放入的」、主库「主词库」）。是否允许用户调先后以后再议。
 - **条数**：口径同加载器，按大小与 mtime 缓存，停用的库也有。只算加载器会收的行（逐行走同一个解析函数：列数不足、编码或词为空的行不算）；`columns:` 声明残缺的文件加载器整库跳过，条数为空、显示「—」。只有拼音（`rime_pinyin`）库按「本文件 + `import_tables` 子表一层」求和（相对主表目录，不进子表自己的 `import_tables`，缺的子表跳过，同 `rime_source_paths`）；码表 / 英文库加载器不展开 `import_tables`，只算本文件。
-- **二级查看**复用右栏表格（`table_sortable_server` / 分页 / 搜索），不新开窗口；以后若需要独立窗口再从这里抽。词条按文件顺序分页，拼音库依次展开加载的子表（行上标子表名）；搜索按编码前缀或词文本子串。只读：本期**不做**屏蔽 / 改权重（补丁层 §3 做完再接到同一张表）。
-- **中栏**只有「系统词库」一个节点，不显示计数、不挂子项。方案没有任何系统词库可列（不应出现）时不出该节点。
+- **二级词条表**：只读。默认按文件顺序，拼音库依次展开加载的子表（多一列「子表」）。表头排序走服务端（编码 / 词条 / 权重升降序，子表列不排）。搜索与用户词库同一个搜索框、同样输入即搜，不分编码与词（编码前缀或词子串取并）；但每次搜索 core 要整扫词库，故停手 300 ms 才发（回车立即发），core 侧新查询是旧查询延长时只在旧命中里复核。整库被加载器跳过时空态显示 core 的说明。行操作「加进用户词库」（右键、双击同）预填加词对话框，落本域用户词库的主词库，右栏停在原页。本期**不做**屏蔽 / 改权重（补丁层 §3 做完再接到同一张表）。
+- **中栏**：「系统词库」是与「用户词库」同级的分组，放在用户词库分组（主词库 / 分库）之下、「其他」之上；标题本身可点（打开一级表，选中时同普通行变强调色），不显示计数、不挂子项。方案没有用户词库时在最前；没有任何系统词库可列（不应出现）时不出。
 - 「方案管理 → 扩展词库」一节**过渡期保留**开关与一句说明（「也可在『词库管理 → 系统词库』里开关」），过几版再删（§8 第 14 条）。方案对话框够不着开词库窗的入口（要 `AppState`），故只给文字。
 
 ### 6.2 候选调整页
@@ -209,7 +210,7 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 
 ### 6.3 RPC（新增）
 
-`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（返回数组，每项 `{id, label, description, group, enabled, source: "main"|"bundled"|"dir", count, order, togglable}`，含主词库、不含 `user:` 分库，按生效先后排；`group`/`count` 缺时为 null）、`sysDict.header {schema, dictId}`（头部字段 `name / version / sort / columns / importTables`、`---` 前的说明注释 `notes`，外加 `path`、`mtimeMs`、`count` 与真正加载的子表清单 `tables: [{name, path, count}]`（只拼音库有；`importTables` 原样列声明）；另带 `id / label / source`）、`sysDict.entries {schema, dictId, query?, mode: code|text, offset, limit}`（`{total, rows: [{code, text, weight, table}], note}`，`note` 说明被加载器整个跳过的表，只读；`query` 空即按文件顺序浏览，`code` 为编码前缀且忽略大小写与音节空格，`text` 为词文本子串；`limit` 上限 500）。`dictId` 须是 `categories` 列出的某项，主库没写 id 时用其 `path`。开关继续用 `schema.setDictEnabled`。
+`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（返回数组，每项 `{id, label, description, group, enabled, source: "main"|"bundled"|"dir", count, order, togglable}`，含主词库、不含 `user:` 分库，按生效先后排；`group`/`count` 缺时为 null）、`sysDict.header {schema, dictId}`（头部字段 `name / version / sort / columns / importTables`、`---` 前的说明注释 `notes`，外加 `path`、`mtimeMs`、`count` 与真正加载的子表清单 `tables: [{name, path, count}]`（只拼音库有；`importTables` 原样列声明）；另带 `id / label / source`）、`sysDict.entries {schema, dictId, query?, mode?: code|text, sort?: code|text|weight, order?: asc|desc, offset, limit}`（`{total, rows: [{code, text, weight, table}], note}`，`note` 说明被加载器整个跳过的表，只读；`query` 空即不过滤，`mode` 缺省为编码前缀或词文本子串取并，`code` 只看编码前缀（忽略大小写与音节空格），`text` 只看词文本子串；`sort` 缺省按文件顺序，给了按该列稳定排序（同键按文件顺序，编码按拼平后比），`order` 缺省升序；`limit` 上限 500）。过滤与排序要整扫：结果按「表下标 + 行首偏移」打包成每行 8 字节的序列缓存（小 LRU，最多 4 组、合计 100 万行，键含各表文件戳，文件一变即失效），翻页按偏移读行、降序倒着取；新查询是缓存里某查询的延长时只在那组命中里复核。拼音主库（约 65 万条）实测（release，本机）：整库按权重排序首次约 0.47 s、按编码约 0.65 s，之后翻页约 1–2 ms，缓存一份约 5.2 MB；搜索首键约 0.1–0.25 s，往后加字约 35–80 ms。`dictId` 须是 `categories` 列出的某项，主库没写 id 时用其 `path`。开关继续用 `schema.setDictEnabled`。
 
 ## 7 分阶段
 

@@ -501,7 +501,9 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
             str_param(params, "schema")?,
             str_param(params, "dictId")?,
             params.get("query").and_then(Value::as_str).unwrap_or(""),
-            params.get("mode").and_then(Value::as_str).unwrap_or("code"),
+            params.get("mode").and_then(Value::as_str),
+            params.get("sort").and_then(Value::as_str),
+            params.get("order").and_then(Value::as_str),
             usize_param(params, "offset", 0) as u64,
             usize_param(params, "limit", 100),
         ),
@@ -11356,9 +11358,37 @@ mod sys_dict_categories_tests {
             (&json!(2), &json!([])),
             "越界给空页"
         );
+        // 不给 mode：编码前缀或词子串
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "b"}));
+        assert_eq!(v["rows"][0]["text"], "编译");
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "算"}));
+        assert_eq!(v["rows"][0]["text"], "算法");
+        // sort / order：排序后分页
+        let texts_of = |v: &Value| -> Vec<String> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["text"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let v = get(json!({"schema": "zm2", "dictId": "main", "sort": "weight"}));
+        assert_eq!(texts_of(&v), ["乙", "甲"]);
+        let v = get(json!({
+            "schema": "zm2", "dictId": "main", "sort": "weight", "order": "desc",
+            "offset": 1, "limit": 1
+        }));
+        assert_eq!(
+            (v["total"].as_u64(), texts_of(&v)),
+            (Some(2), vec!["乙".into()])
+        );
+        let v = get(json!({"schema": "zm2", "dictId": "term", "sort": "code", "order": "desc"}));
+        assert_eq!(texts_of(&v), ["编译", "算法"]);
         for p in [
             json!({"schema": "zm2", "dictId": "nope"}),
             json!({"schema": "zm2", "dictId": "main", "mode": "pinyin"}),
+            json!({"schema": "zm2", "dictId": "main", "sort": "count"}),
+            json!({"schema": "zm2", "dictId": "main", "sort": "code", "order": "up"}),
             json!({"schema": "zm2", "dictId": "ghost"}),
         ] {
             assert!(c.web_data_rpc("sysDict.entries", &p).is_err(), "{p}");

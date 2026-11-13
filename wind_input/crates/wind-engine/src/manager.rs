@@ -17,6 +17,7 @@ use crate::pinyin::{Config as PinyinConfig, PinyinEngine};
 pub use dict_stats::{DictStatsLayer, SystemDictStats};
 pub use dict_view::{
     DictEntriesPage, DictEntryRow, DictHeader, DictTableInfo, ENTRIES_PAGE_MAX, EntryMatch,
+    EntryQuery, EntrySort,
 };
 use std::collections::HashMap;
 use std::path::Path;

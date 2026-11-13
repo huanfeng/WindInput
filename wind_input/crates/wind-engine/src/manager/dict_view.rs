@@ -24,9 +24,15 @@
 //! 翻页只 seek 到最近的检查点、往后读不到 `STRIDE + limit` 行，与文件大小无关。检查点每张表
 //! 几千个 `u64`（拼音全套约 20 KB），随条数缓存常驻，文件一变即按新戳重建。
 //!
-//! 搜索必须整扫（编码前缀 / 词文本子串都没有现成索引）：一次扫完把命中行的（表, 行首偏移）
-//! 存进**单槽**缓存，同一查询翻页直接按偏移读行。换查询、换库或回到不搜索的浏览即替换 / 清空
-//! 这一槽，内存上限是「命中行数 × 16 字节」。
+//! # 搜索与排序
+//!
+//! 搜索（编码前缀 / 词文本子串，默认两者取并）与排序（编码 / 词 / 权重）都没有现成索引，要整扫：
+//! 一次扫完把命中行按排序键排好，存成「表下标 + 行首偏移」打包的 `u64` 序列（每行 8 字节），
+//! 同一组条件翻页直接按偏移读行，降序就倒着取。不搜索只排序 = 全库命中，60 万条的主库约 5 MB。
+//!
+//! 结果进一个小 LRU（[`HITS_CACHE_SLOTS`] 组，合计不超过 [`HITS_CACHE_ROWS`] 行），键含各表的
+//! 文件戳，文件一变即失效。新查询是缓存里某个查询的延长（打字往后加字）时，只在那组命中里
+//! 复核，不再整扫：编码前缀与词子串都满足「查询变长、命中只少不多」，排好的先后也原样保留。
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -50,13 +56,43 @@ pub const ENTRIES_PAGE_MAX: usize = 500;
 /// 头部前置注释最多取多少行（说明 / 作者 / 来源一类；长篇更新日志截断）。
 const NOTE_LINES_MAX: usize = 40;
 
+/// 缓存几组命中（见模块文档）。
+const HITS_CACHE_SLOTS: usize = 4;
+
+/// 缓存的命中合计最多多少行（每行 8 字节）：装得下主库整库排序一份，再多就淘汰最久没用的。
+const HITS_CACHE_ROWS: usize = 1_000_000;
+
 /// 词条搜索的方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum EntryMatch {
     /// 编码前缀（忽略大小写与音节间空格：`nihao` 命中 `ni hao`）。
     Code,
     /// 词文本子串。
     Text,
+    /// 编码前缀或词文本子串，命中其一即可。
+    #[default]
+    Any,
+}
+
+/// 词条按哪一列排序。同键按文件顺序（稳定排序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntrySort {
+    /// 编码（拼平后的字节序，`ni hao` 按 `nihao` 比）。
+    Code,
+    /// 词（Unicode 码位序）。
+    Text,
+    Weight,
+}
+
+/// `sysDict.entries` 的过滤与排序条件。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntryQuery {
+    /// 空（或全是空白）= 不过滤。
+    pub query: String,
+    pub mode: EntryMatch,
+    /// `None` = 文件顺序。
+    pub sort: Option<EntrySort>,
+    pub desc: bool,
 }
 
 /// 一张子表（`rime_pinyin` 库 `import_tables` 里真正被加载的那些）。
@@ -131,10 +167,122 @@ struct FileIndex {
 type FileIndexCache = HashMap<(PathBuf, bool), Arc<FileIndex>>;
 static FILE_INDEX: OnceLock<Mutex<FileIndexCache>> = OnceLock::new();
 
-/// 搜索单槽：键 =（各表路径与戳, 查询, 方式），值 = 命中行（表下标, 行首偏移）。
-type SearchKey = (Vec<(PathBuf, Stamp)>, String, EntryMatch);
-type SearchHits = Arc<Vec<(u32, u64)>>;
-static SEARCH_SLOT: OnceLock<Mutex<Option<(SearchKey, SearchHits)>>> = OnceLock::new();
+/// 命中缓存的键：（各表路径与戳, 查询, 方式, 排序列）。降序与升序共用一份。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HitsKey {
+    tables: Vec<(PathBuf, Stamp)>,
+    query: String,
+    mode: EntryMatch,
+    sort: Option<EntrySort>,
+}
+
+/// 排好序的命中行，每项 = [`pack`]（表下标, 行首偏移）。
+type Hits = Arc<Vec<u64>>;
+
+/// 命中 LRU，最近用的在末尾。
+static HITS_CACHE: OnceLock<Mutex<Vec<(HitsKey, Hits)>>> = OnceLock::new();
+
+/// 偏移占低 48 位（256 TB），表下标占高 16 位。
+const POS_BITS: u32 = 48;
+
+fn pack(table: usize, pos: usize) -> u64 {
+    ((table as u64) << POS_BITS) | pos as u64
+}
+
+fn unpack(v: u64) -> (usize, u64) {
+    ((v >> POS_BITS) as usize, v & ((1 << POS_BITS) - 1))
+}
+
+fn hits_cache() -> std::sync::MutexGuard<'static, Vec<(HitsKey, Hits)>> {
+    HITS_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// 命中缓存的当前行数（耗时记录用）。
+#[cfg(test)]
+fn cached_hit_rows() -> usize {
+    hits_cache().iter().map(|(_, h)| h.len()).sum()
+}
+
+/// 取缓存；命中就挪到末尾（最近用）。
+fn cache_get(key: &HitsKey) -> Option<Hits> {
+    let mut c = hits_cache();
+    let i = c.iter().position(|(k, _)| k == key)?;
+    let e = c.remove(i);
+    let h = e.1.clone();
+    c.push(e);
+    Some(h)
+}
+
+/// 新查询能在哪组缓存命中里复核：同表同戳、同方式同排序，旧查询非空且是新查询的前缀；
+/// 有多组取最长的（命中最少）。
+fn cache_base(key: &HitsKey) -> Option<Hits> {
+    hits_cache()
+        .iter()
+        .filter(|(k, _)| {
+            k.tables == key.tables
+                && k.mode == key.mode
+                && k.sort == key.sort
+                && !k.query.is_empty()
+                && key.query.starts_with(&k.query)
+        })
+        .max_by_key(|(k, _)| k.query.len())
+        .map(|(_, h)| h.clone())
+}
+
+fn cache_put(key: HitsKey, hits: Hits) {
+    let mut c = hits_cache();
+    c.retain(|(k, _)| *k != key);
+    c.push((key, hits));
+    let mut rows: usize = c.iter().map(|(_, h)| h.len()).sum();
+    while c.len() > 1 && (c.len() > HITS_CACHE_SLOTS || rows > HITS_CACHE_ROWS) {
+        rows -= c.remove(0).1.len();
+    }
+}
+
+/// 一次查询的归一形态：编码按小写、去空格比前缀，词按原文比子串。
+struct Needle<'a> {
+    code: String,
+    text: &'a str,
+    mode: EntryMatch,
+}
+
+impl<'a> Needle<'a> {
+    fn new(query: &'a str, mode: EntryMatch) -> Self {
+        Self {
+            code: query.replace(' ', "").to_ascii_lowercase(),
+            text: query,
+            mode,
+        }
+    }
+
+    fn by_code(&self) -> bool {
+        self.mode != EntryMatch::Text && !self.code.is_empty()
+    }
+
+    fn by_text(&self) -> bool {
+        self.mode != EntryMatch::Code
+    }
+}
+
+/// 排序键（整扫时随行收集，排完即丢）。
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum SortKey {
+    Num(i32),
+    Str(Box<str>),
+}
+
+impl SortKey {
+    fn of(r: &RimeRow, sort: EntrySort) -> Self {
+        match sort {
+            EntrySort::Code => SortKey::Str(r.code.as_str().into()),
+            EntrySort::Text => SortKey::Str(r.text.as_str().into()),
+            EntrySort::Weight => SortKey::Num(r.weight),
+        }
+    }
+}
 
 fn stamp_of(path: &Path) -> Option<Stamp> {
     let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
@@ -250,42 +398,32 @@ impl FileIndex {
         }
     }
 
-    /// 本行是否命中（搜索整扫的热路径）。`query` 已按方式归一（编码：小写、去空格）。
-    fn row_matches(
-        &self,
-        p: &RimeRowParser,
-        line: &str,
-        on: bool,
-        query: &str,
-        mode: EntryMatch,
-    ) -> bool {
+    /// 本行（加载器收它的话）且命中 `q` 时给出解析好的行；`q` 为 `None` 不过滤。整扫的热路径。
+    fn match_row(p: &RimeRowParser, line: &str, on: bool, q: Option<&Needle>) -> Option<RimeRow> {
+        let Some(q) = q else {
+            return p.parse(line, on);
+        };
         // 粗筛（必要条件，多数行到此为止）：文本——不带转义时整行不含就一定不中；编码——
         // 编码列跳过空格后不以查询开头就不中（`$` 行列序可能被纠正，交给完整解析）
-        let pass = match mode {
-            EntryMatch::Text => line.contains('\\') || line.contains(query),
-            EntryMatch::Code => {
-                line.contains('$')
-                    || line.split('\t').nth(p.code_col()).is_some_and(|f| {
-                        let mut raw = f.bytes().filter(|&b| b != b' ');
-                        query
-                            .bytes()
-                            .all(|q| raw.next().is_some_and(|b| b.eq_ignore_ascii_case(&q)))
-                    })
-            }
-        };
-        if !pass {
-            return false;
+        let text_pass = q.by_text() && (line.contains('\\') || line.contains(q.text));
+        let code_pass = !text_pass
+            && q.by_code()
+            && (line.contains('$')
+                || line.split('\t').nth(p.code_col()).is_some_and(|f| {
+                    let mut raw = f.bytes().filter(|&b| b != b' ');
+                    q.code
+                        .bytes()
+                        .all(|c| raw.next().is_some_and(|b| b.eq_ignore_ascii_case(&c)))
+                }));
+        if !text_pass && !code_pass {
+            return None;
         }
-        let Some(r) = p.parse(line, on) else {
-            return false;
-        };
-        match mode {
-            EntryMatch::Text => r.text.contains(query),
-            EntryMatch::Code => {
-                r.code.len() >= query.len()
-                    && r.code.as_bytes()[..query.len()].eq_ignore_ascii_case(query.as_bytes())
-            }
-        }
+        let r = p.parse(line, on)?;
+        let hit = (q.by_text() && r.text.contains(q.text))
+            || (q.by_code()
+                && r.code.len() >= q.code.len()
+                && r.code.as_bytes()[..q.code.len()].eq_ignore_ascii_case(q.code.as_bytes()));
+        hit.then_some(r)
     }
 }
 
@@ -597,14 +735,13 @@ impl EngineManager {
         })
     }
 
-    /// `sysDict.entries` 的引擎侧：按文件顺序分页（`rime_pinyin` 库依次展开子表），`query`
-    /// 非空时按 `mode` 过滤。`limit` 夹到 `1..=ENTRIES_PAGE_MAX`。主文件不在 → Err。
+    /// `sysDict.entries` 的引擎侧：按 `q` 过滤、排序后分页（不过滤不排序时按文件顺序，
+    /// `rime_pinyin` 库依次展开子表）。`limit` 夹到 `1..=ENTRIES_PAGE_MAX`。主文件不在 → Err。
     pub fn dict_entries(
         &self,
         rel: &str,
         dict_type: &str,
-        query: &str,
-        mode: EntryMatch,
+        q: &EntryQuery,
         offset: u64,
         limit: usize,
     ) -> anyhow::Result<DictEntriesPage> {
@@ -621,58 +758,54 @@ impl EngineManager {
                 skipped.join("、")
             )
         });
-        let query = match mode {
-            EntryMatch::Code => query.replace(' ', "").to_ascii_lowercase(),
-            EntryMatch::Text => query.to_string(),
-        };
-        let slot = SEARCH_SLOT.get_or_init(Default::default);
-        if query.is_empty() {
-            // 回到浏览：搜索结果用不上了，释放
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let query = q.query.trim();
+        if query.is_empty() && q.sort.is_none() {
             let mut page = browse_page(&idx, offset, limit);
             page.note = note;
             return Ok(page);
         }
-        let mut cached = None;
-        let mut key = None;
+        let needle = (!query.is_empty()).then(|| Needle::new(query, q.mode));
+        let mut hits = None;
         // 扫描时发现文件在索引之后变过：重建索引再扫一次
         for _ in 0..2 {
-            let k: SearchKey = (
-                idx.iter().map(|(_, p, i)| (p.clone(), i.stamp)).collect(),
-                query.clone(),
-                mode,
-            );
-            if let Some(h) = slot
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .filter(|(sk, _)| *sk == k)
-                .map(|(_, h)| h.clone())
-            {
-                cached = Some(h);
+            let key = HitsKey {
+                tables: idx.iter().map(|(_, p, i)| (p.clone(), i.stamp)).collect(),
+                query: query.to_string(),
+                mode: q.mode,
+                sort: q.sort,
+            };
+            if let Some(h) = cache_get(&key) {
+                hits = Some(h);
                 break;
             }
-            match scan_hits(&idx, &query, mode) {
+            let found = match cache_base(&key) {
+                Some(base) => refine_hits(&idx, &base, needle.as_ref()),
+                None => scan_hits(&idx, needle.as_ref(), q.sort),
+            };
+            match found {
                 Some(h) => {
-                    cached = Some(Arc::new(h));
-                    key = Some(k);
+                    let h = Arc::new(h);
+                    cache_put(key, h.clone());
+                    hits = Some(h);
                     break;
                 }
                 None => idx = self.dict_tables(rel, dict_type)?,
             }
         }
-        let hits = cached.ok_or_else(|| anyhow::anyhow!("词库文件正在变化，请稍后再试"))?;
-        if let Some(k) = key {
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((k, hits.clone()));
-        }
-        let mut rows = Vec::new();
-        let mut open: Option<(u32, TableReader)> = None;
-        for &(ti, pos) in hits.iter().skip(offset as usize).take(limit) {
-            let (name, path, fi) = &idx[ti as usize];
-            if open.as_ref().is_none_or(|(t, _)| *t != ti) {
-                open = TableReader::open(path, fi).map(|r| (ti, r));
+        let hits = hits.ok_or_else(|| anyhow::anyhow!("词库文件正在变化，请稍后再试"))?;
+        let n = hits.len();
+        let picked = (offset as usize).min(n)..(offset as usize).saturating_add(limit).min(n);
+        let mut readers: Vec<Option<TableReader>> = idx.iter().map(|_| None).collect();
+        let mut rows = Vec::with_capacity(picked.len());
+        for i in picked {
+            let (ti, pos) = unpack(hits[if q.desc { n - 1 - i } else { i }]);
+            let Some((name, path, fi)) = idx.get(ti) else {
+                continue;
+            };
+            if readers[ti].is_none() {
+                readers[ti] = TableReader::open(path, fi);
             }
-            let Some((_, rd)) = open.as_mut() else {
+            let Some(rd) = readers[ti].as_mut() else {
                 continue;
             };
             if let Some(r) = read_row_at(rd, fi, pos) {
@@ -680,7 +813,7 @@ impl EngineManager {
             }
         }
         Ok(DictEntriesPage {
-            total: hits.len() as u64,
+            total: n as u64,
             rows,
             note,
         })
@@ -719,30 +852,78 @@ fn browse_page(idx: &Tables, offset: u64, limit: usize) -> DictEntriesPage {
     }
 }
 
-/// 整扫各表，收集命中行的（表下标, 行首偏移）。读完某张表发现它的戳与索引不符（索引之后
-/// 文件变过，偏移已对不上）→ `None`，调用方重建索引重扫。
-fn scan_hits(idx: &Tables, query: &str, mode: EntryMatch) -> Option<Vec<(u32, u64)>> {
+/// 读一张表的规范化全文，并确认它仍是索引时的那一份（戳变了 → `None`，偏移已对不上）。
+fn table_text(path: &Path, fi: &FileIndex) -> Option<Option<String>> {
+    let Some((text, _, _)) = read_normalized(path) else {
+        return Some(None);
+    };
+    if stamp_of(path) != Some(fi.stamp) {
+        return None;
+    }
+    Some(Some(text))
+}
+
+/// 整扫各表，收集命中 `q`（`None` = 全部）的行，按 `sort` 稳定排序（`None` = 文件顺序）。
+/// 读完某张表发现它的戳与索引不符 → `None`，调用方重建索引重扫。
+fn scan_hits(idx: &Tables, q: Option<&Needle>, sort: Option<EntrySort>) -> Option<Vec<u64>> {
     let mut hits = Vec::new();
+    let mut keyed: Vec<(SortKey, u64)> = Vec::new();
     for (ti, (_, path, fi)) in idx.iter().enumerate() {
         let Some(p) = fi.parser else {
             continue;
         };
-        let Some((text, _, _)) = read_normalized(path) else {
+        let Some(text) = table_text(path, fi)? else {
             continue;
         };
-        if stamp_of(path) != Some(fi.stamp) {
-            return None;
-        }
         let Some((body, cutoff)) = wind_dict::rime_body_layout(&text) else {
             continue;
         };
         for (start, line, on) in body_lines(&text, body, cutoff) {
-            if fi.row_matches(&p, line, on, query, mode) {
-                hits.push((ti as u32, start as u64));
+            let Some(r) = FileIndex::match_row(&p, line, on, q) else {
+                continue;
+            };
+            match sort {
+                Some(s) => keyed.push((SortKey::of(&r, s), pack(ti, start))),
+                None => hits.push(pack(ti, start)),
             }
         }
     }
+    if sort.is_some() {
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        hits = keyed.into_iter().map(|(_, h)| h).collect();
+    }
     Some(hits)
+}
+
+/// 在一组已排好的命中里复核新查询（新查询是旧查询的延长，命中只少不多），先后不变。
+/// 戳不符同 [`scan_hits`]。
+fn refine_hits(idx: &Tables, base: &[u64], q: Option<&Needle>) -> Option<Vec<u64>> {
+    let mut texts: Vec<Option<Option<String>>> = idx.iter().map(|_| None).collect();
+    let mut out = Vec::new();
+    for &h in base {
+        let (ti, pos) = unpack(h);
+        let Some((_, path, fi)) = idx.get(ti) else {
+            continue;
+        };
+        let Some(p) = fi.parser else {
+            continue;
+        };
+        if texts[ti].is_none() {
+            texts[ti] = Some(table_text(path, fi)?);
+        }
+        let Some(Some(text)) = &texts[ti] else {
+            continue;
+        };
+        let Some(raw) = text.get(pos as usize..) else {
+            continue;
+        };
+        let line = strip_eol(raw.split_inclusive('\n').next().unwrap_or(""));
+        let on = fi.cutoff.is_none_or(|c| pos as usize <= c);
+        if FileIndex::match_row(&p, line, on, q).is_some() {
+            out.push(h);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -817,6 +998,23 @@ mod tests {
         p.rows.iter().map(|r| r.text.as_str()).collect()
     }
 
+    fn eq(q: &str, mode: EntryMatch) -> EntryQuery {
+        EntryQuery {
+            query: q.into(),
+            mode,
+            ..Default::default()
+        }
+    }
+
+    fn sorted(q: &str, sort: EntrySort, desc: bool) -> EntryQuery {
+        EntryQuery {
+            query: q.into(),
+            sort: Some(sort),
+            desc,
+            ..Default::default()
+        }
+    }
+
     const MAIN: &str = "py/main.dict.yaml";
 
     /// 与加载器同口径：拼音库展开子表一层（不进子表自己的 import_tables、缺的跳过），码表库
@@ -876,7 +1074,7 @@ mod tests {
     fn browse_walks_tables_in_order_with_columns_and_unescape() {
         let f = fixture("browse");
         let all =
-            f.m.dict_entries(MAIN, PY, "", EntryMatch::Code, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("", EntryMatch::Code), 0, 100)
                 .unwrap();
         assert_eq!(all.total, 7);
         assert_eq!(
@@ -904,23 +1102,23 @@ mod tests {
         );
         assert_eq!(all.note, None);
         let p =
-            f.m.dict_entries(MAIN, PY, "", EntryMatch::Code, 2, 3)
+            f.m.dict_entries(MAIN, PY, &eq("", EntryMatch::Code), 2, 3)
                 .unwrap();
         assert_eq!(texts(&p), ["大小", "你好", "换\n行"], "跨表的页");
         let p =
-            f.m.dict_entries(MAIN, PY, "", EntryMatch::Code, 6, 10)
+            f.m.dict_entries(MAIN, PY, &eq("", EntryMatch::Code), 6, 10)
                 .unwrap();
         assert_eq!((p.total, texts(&p)), (7, vec!["字"]));
         let p =
-            f.m.dict_entries(MAIN, PY, "", EntryMatch::Code, 99, 10)
+            f.m.dict_entries(MAIN, PY, &eq("", EntryMatch::Code), 99, 10)
                 .unwrap();
         assert!(p.rows.is_empty());
         let p =
-            f.m.dict_entries(MAIN, PY, "", EntryMatch::Code, 0, 0)
+            f.m.dict_entries(MAIN, PY, &eq("", EntryMatch::Code), 0, 0)
                 .unwrap();
         assert_eq!(p.rows.len(), 1, "limit 0 夹成 1");
         let c =
-            f.m.dict_entries("ct/main.dict.yaml", CT, "", EntryMatch::Code, 0, 9)
+            f.m.dict_entries("ct/main.dict.yaml", CT, &eq("", EntryMatch::Code), 0, 9)
                 .unwrap();
         assert_eq!(texts(&c), ["工", "子"], "码表库不混入 import_tables 的子表");
     }
@@ -929,37 +1127,150 @@ mod tests {
     fn search_by_code_prefix_and_text_substring() {
         let f = fixture("search");
         let p =
-            f.m.dict_entries(MAIN, PY, "DA", EntryMatch::Code, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("DA", EntryMatch::Code), 0, 100)
                 .unwrap();
         assert_eq!(texts(&p), ["大", "大小"], "前缀、忽略大小写");
         let p =
-            f.m.dict_entries(MAIN, PY, "da x", EntryMatch::Code, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("da x", EntryMatch::Code), 0, 100)
                 .unwrap();
         assert_eq!(texts(&p), ["大小"], "跨音节空格");
         let p =
-            f.m.dict_entries(MAIN, PY, "n", EntryMatch::Code, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("n", EntryMatch::Code), 0, 100)
                 .unwrap();
         assert_eq!(texts(&p), ["你好", "你会"], "跨表");
         let p =
-            f.m.dict_entries(MAIN, PY, "n", EntryMatch::Code, 1, 100)
+            f.m.dict_entries(MAIN, PY, &eq("n", EntryMatch::Code), 1, 100)
                 .unwrap();
         assert_eq!((p.total, texts(&p)), (2, vec!["你会"]), "命中结果分页");
         let p =
-            f.m.dict_entries(MAIN, PY, "大", EntryMatch::Text, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("大", EntryMatch::Text), 0, 100)
                 .unwrap();
         assert_eq!(texts(&p), ["大", "大小"]);
         let p =
-            f.m.dict_entries(MAIN, PY, "换\n", EntryMatch::Text, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("换\n", EntryMatch::Text), 0, 100)
                 .unwrap();
         assert_eq!(texts(&p), ["换\n行"], "按反转义后的文本匹配");
         let p =
-            f.m.dict_entries(MAIN, PY, "da", EntryMatch::Text, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("da", EntryMatch::Text), 0, 100)
                 .unwrap();
         assert_eq!(p.total, 0, "文本模式不看编码列");
         let p =
-            f.m.dict_entries(MAIN, PY, "qian", EntryMatch::Code, 0, 100)
+            f.m.dict_entries(MAIN, PY, &eq("qian", EntryMatch::Code), 0, 100)
                 .unwrap();
         assert_eq!(p.total, 0, "子表自己的 import_tables 不展开");
+    }
+
+    /// 不指定方式时编码前缀与词子串取并。
+    #[test]
+    fn default_mode_matches_code_prefix_or_text_substring() {
+        let f = fixture("any");
+        assert_eq!(EntryQuery::default().mode, EntryMatch::Any);
+        let get = |q: &str| {
+            f.m.dict_entries(MAIN, PY, &eq(q, EntryMatch::Any), 0, 100)
+                .unwrap()
+        };
+        assert_eq!(texts(&get("大")), ["大", "大小"], "词子串");
+        assert_eq!(
+            texts(&get("X")),
+            ["小"],
+            "编码前缀、忽略大小写：大小 的 da xiao 不以 x 打头"
+        );
+        assert_eq!(texts(&get("da")), ["大", "大小"], "编码前缀");
+        assert_eq!(texts(&get("你")), ["你好", "你会"], "跨表");
+        assert_eq!(texts(&get("  ")), texts(&get("")), "只有空白 = 不过滤");
+    }
+
+    /// 打字往后加字：在上一组命中里复核，结果与整扫一致。
+    #[test]
+    fn extending_a_query_narrows_the_previous_hits() {
+        let f = fixture("narrow");
+        let get = |q: &str| {
+            f.m.dict_entries(MAIN, PY, &eq(q, EntryMatch::Any), 0, 100)
+                .unwrap()
+        };
+        assert_eq!(texts(&get("n")), ["你好", "你会"]);
+        assert_eq!(texts(&get("ni")), ["你好"]);
+        assert_eq!(texts(&get("nih")), ["你好"]);
+        assert_eq!(get("nix").total, 0);
+        assert_eq!(texts(&get("n")), ["你好", "你会"], "退格回到缓存");
+        let s = |q: &str| {
+            f.m.dict_entries(MAIN, PY, &sorted(q, EntrySort::Weight, true), 0, 100)
+                .unwrap()
+        };
+        assert_eq!(texts(&s("d")), ["大", "大小"]);
+        assert_eq!(texts(&s("da")), ["大", "大小"], "复核保留排好的先后");
+        // 缓存是进程级的，并行用例可能把上一组挤掉：直接比对复核与整扫
+        let idx = f.m.dict_tables(MAIN, PY).unwrap();
+        for (old, new, sort) in [
+            ("n", "ni", None),
+            ("d", "da x", Some(EntrySort::Text)),
+            ("大", "大小", Some(EntrySort::Weight)),
+        ] {
+            let base = scan_hits(&idx, Some(&Needle::new(old, EntryMatch::Any)), sort).unwrap();
+            let want = scan_hits(&idx, Some(&Needle::new(new, EntryMatch::Any)), sort).unwrap();
+            let got = refine_hits(&idx, &base, Some(&Needle::new(new, EntryMatch::Any))).unwrap();
+            assert!(!want.is_empty() && got == want, "{old} → {new}");
+        }
+    }
+
+    /// 三列各自升降序、分页，以及搜索结果内排序。同键按文件顺序。
+    #[test]
+    fn sorts_by_each_column_and_pages() {
+        let f = fixture("sort");
+        let get =
+            |q: EntryQuery, off: u64, lim: usize| f.m.dict_entries(MAIN, PY, &q, off, lim).unwrap();
+        let w = get(sorted("", EntrySort::Weight, false), 0, 100);
+        assert_eq!(w.total, 7);
+        assert_eq!(
+            texts(&w),
+            ["你会", "字", "换\n行", "大小", "小", "大", "你好"],
+            "权重升序，你会 / 字 同为 0 按文件顺序"
+        );
+        assert_eq!(
+            texts(&get(sorted("", EntrySort::Weight, true), 0, 3)),
+            ["你好", "大", "小"]
+        );
+        assert_eq!(
+            texts(&get(sorted("", EntrySort::Weight, false), 2, 3)),
+            ["换\n行", "大小", "小"],
+            "排序后分页"
+        );
+        assert_eq!(
+            texts(&get(sorted("", EntrySort::Code, false), 0, 100)),
+            ["大", "大小", "换\n行", "你会", "你好", "小", "字"],
+            "编码按拼平后比：da < daxiao < huanhang < nh < nihao"
+        );
+        assert_eq!(
+            texts(&get(sorted("", EntrySort::Text, false), 0, 100)),
+            ["你会", "你好", "大", "大小", "字", "小", "换\n行"]
+        );
+        assert_eq!(
+            texts(&get(sorted("", EntrySort::Text, true), 5, 100)),
+            ["你好", "你会"],
+            "降序的末页"
+        );
+        let s = get(sorted("da", EntrySort::Weight, false), 0, 100);
+        assert_eq!((s.total, texts(&s)), (2, vec!["大小", "大"]), "命中内排序");
+        let p = get(sorted("", EntrySort::Weight, false), 99, 10);
+        assert!(p.rows.is_empty() && p.total == 7, "越界");
+    }
+
+    /// 排序结果按文件戳缓存：文件一变就重排。
+    #[test]
+    fn sort_cache_follows_file_changes() {
+        let f = fixture("sortchange");
+        let rel = "ct/main.dict.yaml";
+        let get = || {
+            f.m.dict_entries(rel, CT, &sorted("", EntrySort::Weight, true), 0, 10)
+                .unwrap()
+        };
+        assert_eq!(texts(&get()), ["工", "子"]);
+        assert_eq!(texts(&get()), ["工", "子"], "第二次走缓存");
+        write(
+            &f.base.join("schemas").join(rel),
+            "---\nname: ct\n...\naa\t工\t1\nbb\t子\t5\ncc\t又\t9\n",
+        );
+        assert_eq!(texts(&get()), ["又", "子", "工"]);
     }
 
     #[test]
@@ -967,7 +1278,7 @@ mod tests {
         let f = fixture("change");
         let rel = "py/sub/b.dict.yaml";
         assert_eq!(
-            f.m.dict_entries(rel, PY, "z", EntryMatch::Code, 0, 10)
+            f.m.dict_entries(rel, PY, &eq("z", EntryMatch::Code), 0, 10)
                 .unwrap()
                 .total,
             1
@@ -977,7 +1288,7 @@ mod tests {
             "---\nname: b\ncolumns: [code, text]\n...\nzz\t字\nzy\t自\nzx\t在\n",
         );
         assert_eq!(
-            f.m.dict_entries(rel, PY, "z", EntryMatch::Code, 0, 10)
+            f.m.dict_entries(rel, PY, &eq("z", EntryMatch::Code), 0, 10)
                 .unwrap()
                 .total,
             3
@@ -997,12 +1308,12 @@ mod tests {
         );
         assert_eq!(f.m.dict_file_entries(rel, CT), Some(3));
         let p =
-            f.m.dict_entries(rel, CT, "", EntryMatch::Code, 0, 10)
+            f.m.dict_entries(rel, CT, &eq("", EntryMatch::Code), 0, 10)
                 .unwrap();
         assert_eq!(texts(&p), ["甲", "$SS(gogo)", "丙"]);
         assert_eq!(p.rows[1].code, "zzgo", "列序按行纠正");
         let q =
-            f.m.dict_entries(rel, CT, "zzg", EntryMatch::Code, 0, 10)
+            f.m.dict_entries(rel, CT, &eq("zzg", EntryMatch::Code), 0, 10)
                 .unwrap();
         assert_eq!(texts(&q), ["$SS(gogo)"], "纠正列序的行按纠正后的编码搜得到");
     }
@@ -1018,7 +1329,7 @@ mod tests {
         );
         assert_eq!(f.m.dict_file_entries(rel, CT), None);
         let p =
-            f.m.dict_entries(rel, CT, "", EntryMatch::Code, 0, 10)
+            f.m.dict_entries(rel, CT, &eq("", EntryMatch::Code), 0, 10)
                 .unwrap();
         assert_eq!(p.total, 0);
         assert!(
@@ -1043,12 +1354,12 @@ mod tests {
         write(&f.base.join("schemas/py/big.dict.yaml"), &body);
         let rel = "py/big.dict.yaml";
         let all =
-            f.m.dict_entries(rel, PY, "", EntryMatch::Code, 0, 500)
+            f.m.dict_entries(rel, PY, &eq("", EntryMatch::Code), 0, 500)
                 .unwrap();
         assert_eq!(all.total, 1000);
         for off in [0u64, 255, 256, 257, 511, 700, 999] {
             let p =
-                f.m.dict_entries(rel, PY, "", EntryMatch::Code, off, 7)
+                f.m.dict_entries(rel, PY, &eq("", EntryMatch::Code), off, 7)
                     .unwrap();
             let want: Vec<String> = (off..(off + 7).min(1000))
                 .map(|i| format!("词{i}"))
@@ -1067,7 +1378,7 @@ mod tests {
             "---\rname: cr\r...\r甲\ta\r乙\tb\r丙\tc\r",
         );
         let p =
-            f.m.dict_entries("py/cr.dict.yaml", PY, "", EntryMatch::Code, 1, 5)
+            f.m.dict_entries("py/cr.dict.yaml", PY, &eq("", EntryMatch::Code), 1, 5)
                 .unwrap();
         assert_eq!((p.total, texts(&p)), (3, vec!["乙", "丙"]));
     }
@@ -1135,23 +1446,53 @@ mod tests {
         eprintln!("再次计数（命中缓存）{n2} 条: {:?}", t.elapsed());
         let t = std::time::Instant::now();
         let p = m
-            .dict_entries(rel, PY, "", EntryMatch::Code, 0, 100)
+            .dict_entries(rel, PY, &eq("", EntryMatch::Code), 0, 100)
             .unwrap();
         eprintln!("首页: {:?} ({} 行)", t.elapsed(), p.rows.len());
         for off in [n / 2, n - 100] {
             let t = std::time::Instant::now();
             let p = m
-                .dict_entries(rel, PY, "", EntryMatch::Code, off, 100)
+                .dict_entries(rel, PY, &eq("", EntryMatch::Code), off, 100)
                 .unwrap();
             eprintln!("第 {off} 条起一页: {:?} ({} 行)", t.elapsed(), p.rows.len());
         }
         for (q, mode) in [("ni", EntryMatch::Code), ("中国", EntryMatch::Text)] {
             let t = std::time::Instant::now();
-            let p = m.dict_entries(rel, PY, q, mode, 0, 100).unwrap();
+            let p = m.dict_entries(rel, PY, &eq(q, mode), 0, 100).unwrap();
             eprintln!("搜索 {q:?} 首页: {:?}，命中 {}", t.elapsed(), p.total);
             let t = std::time::Instant::now();
-            let _ = m.dict_entries(rel, PY, q, mode, p.total / 2, 100).unwrap();
+            let _ = m
+                .dict_entries(rel, PY, &eq(q, mode), p.total / 2, 100)
+                .unwrap();
             eprintln!("搜索 {q:?} 翻到中间: {:?}", t.elapsed());
+        }
+        for (sort, name) in [(EntrySort::Weight, "权重"), (EntrySort::Code, "编码")] {
+            let t = std::time::Instant::now();
+            let p = m
+                .dict_entries(rel, PY, &sorted("", sort, true), 0, 100)
+                .unwrap();
+            eprintln!(
+                "整库按{name}排序首页（首次）: {:?}，{} 条",
+                t.elapsed(),
+                p.total
+            );
+            let t = std::time::Instant::now();
+            let _ = m
+                .dict_entries(rel, PY, &sorted("", sort, false), p.total / 2, 100)
+                .unwrap();
+            eprintln!("整库按{name}排序翻到中间（缓存）: {:?}", t.elapsed());
+        }
+        eprintln!(
+            "命中缓存 {} 行（{} 字节）",
+            cached_hit_rows(),
+            cached_hit_rows() * 8
+        );
+        for q in ["z", "zh", "zho", "zhon", "zhong", "中"] {
+            let t = std::time::Instant::now();
+            let p = m
+                .dict_entries(rel, PY, &eq(q, EntryMatch::Any), 0, 100)
+                .unwrap();
+            eprintln!("逐键搜索 {q:?}: {:?}，命中 {}", t.elapsed(), p.total);
         }
         let cps: usize = m
             .dict_tables(rel, PY)

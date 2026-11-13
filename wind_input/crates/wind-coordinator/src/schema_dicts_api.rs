@@ -24,7 +24,7 @@
 
 use serde_json::{Value, json};
 use wind_config::schema::DictSpec;
-use wind_engine::manager::{EngineManager, EntryMatch};
+use wind_engine::manager::{EngineManager, EntryMatch, EntryQuery, EntrySort};
 use wind_store::user_dicts::ID_PREFIX;
 
 use crate::web_host::WebDataHost;
@@ -182,26 +182,49 @@ pub fn header<H: WebDataHost + ?Sized>(
 }
 
 /// `sysDict.entries`：只读词条分页，`{total, rows: [{code, text, weight, table}]}`。
-/// `query` 空 = 按文件顺序浏览；非空按 `mode`（`"code"` 编码前缀 / `"text"` 词文本子串）过滤。
-/// 读文本不持引擎锁，见 `wind_engine::manager::dict_view`。
+/// `query` 空 = 不过滤；`mode` 缺省（`None`）= 编码前缀或词文本子串，`"code"` / `"text"` 只看
+/// 一边。`sort` 为 `"code"` / `"text"` / `"weight"` 时按该列排（`order` 为 `"desc"` 降序，
+/// 否则升序），缺省按文件顺序。读文本不持引擎锁，见 `wind_engine::manager::dict_view`。
+#[allow(clippy::too_many_arguments)]
 pub fn entries<H: WebDataHost + ?Sized>(
     h: &H,
     schema_id: &str,
     dict_id: &str,
     query: &str,
-    mode: &str,
+    mode: Option<&str>,
+    sort: Option<&str>,
+    order: Option<&str>,
     offset: u64,
     limit: usize,
 ) -> anyhow::Result<Value> {
     let mode = match mode {
-        "code" => EntryMatch::Code,
-        "text" => EntryMatch::Text,
-        other => anyhow::bail!("未知搜索方式: {other}"),
+        None => EntryMatch::Any,
+        Some("code") => EntryMatch::Code,
+        Some("text") => EntryMatch::Text,
+        Some(other) => anyhow::bail!("未知搜索方式: {other}"),
+    };
+    let sort = match sort {
+        None => None,
+        Some("code") => Some(EntrySort::Code),
+        Some("text") => Some(EntrySort::Text),
+        Some("weight") => Some(EntrySort::Weight),
+        Some(other) => anyhow::bail!("未知排序列: {other}"),
+    };
+    let desc = match order {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(other) => anyhow::bail!("未知排序方向: {other}"),
+    };
+    let q = EntryQuery {
+        query: query.to_string(),
+        mode,
+        sort,
+        desc,
     };
     let (d, _) = find_system_dict(h, schema_id, dict_id)?;
-    let page =
-        h.engine_mgr()
-            .dict_entries(&d.path, d.effective_type(), query, mode, offset, limit)?;
+    let page = h
+        .engine_mgr()
+        .dict_entries(&d.path, d.effective_type(), &q, offset, limit)?;
     Ok(serde_json::to_value(page)?)
 }
 
