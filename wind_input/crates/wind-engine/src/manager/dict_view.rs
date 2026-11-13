@@ -392,16 +392,25 @@ fn read_row_at(rd: &mut TableReader, idx: &FileIndex, pos: u64) -> Option<RimeRo
 
 /// 头部 YAML 段（`---` 与 `...` 之间）与 `---` 之前的注释行。读到 `...` 即停。
 fn read_head_parts(path: &Path) -> (String, Vec<String>) {
+    use std::io::Read;
     let Ok(f) = std::fs::File::open(path) else {
         return (String::new(), Vec::new());
     };
+    // 只读头部一段（注释 + YAML 段远小于两倍上限），先统一换行再逐行看：孤立 `\r` 不归一的话
+    // 整个头部会算成一行。
+    let mut buf = Vec::new();
+    let limit = (super::DICT_HEAD_SCAN_LIMIT * 2) as u64;
+    if f.take(limit).read_to_end(&mut buf).is_err() {
+        return (String::new(), Vec::new());
+    }
+    let raw = String::from_utf8_lossy(&buf);
+    let text = wind_utils::text::normalize_input(&raw);
     let mut yaml = String::new();
     let mut notes = Vec::new();
     let mut in_yaml = false;
-    for (i, line) in std::io::BufReader::new(f).lines().enumerate() {
-        let Ok(line) = line else { break };
+    for (i, line) in text.lines().enumerate() {
         let line = if i == 0 {
-            line.trim_start_matches('\u{feff}').to_string()
+            line.trim_start_matches('\u{feff}')
         } else {
             line
         };
