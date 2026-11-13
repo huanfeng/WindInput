@@ -482,14 +482,28 @@ mod tests {
     fn file_entries_count_disabled_dicts_and_follow_changes() {
         let base = fixture("entries");
         let m = mgr(&base);
-        assert_eq!(m.dict_file_entries("ct/main.dict.yaml"), Some(6));
-        assert_eq!(m.dict_file_entries("ct/off.dict.yaml"), Some(1), "停用库");
+        assert_eq!(
+            m.dict_file_entries("ct/main.dict.yaml", "rime_codetable"),
+            Some(6)
+        );
+        assert_eq!(
+            m.dict_file_entries("ct/off.dict.yaml", "rime_codetable"),
+            Some(1),
+            "停用库"
+        );
         write(
             &base.join("schemas/ct/off.dict.yaml"),
             "---\nname: x\n...\nzz\t乙\t1\nzy\t丙\t1\n",
         );
-        assert_eq!(m.dict_file_entries("ct/off.dict.yaml"), Some(2), "改了重数");
-        assert_eq!(m.dict_file_entries("ct/none.dict.yaml"), None);
+        assert_eq!(
+            m.dict_file_entries("ct/off.dict.yaml", "rime_codetable"),
+            Some(2),
+            "改了重数"
+        );
+        assert_eq!(
+            m.dict_file_entries("ct/none.dict.yaml", "rime_codetable"),
+            None
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -510,16 +524,19 @@ mod tests {
         );
     }
 
-    /// 只有 import_tables 的包装库：条数是各子表之和（子表相对包装库所在目录）。
+    /// 码表库写了 import_tables：加载器不展开（只 rime_pinyin 展开），条数只算本文件。
     #[test]
-    fn wrapper_with_only_imports_sums_its_tables() {
+    fn codetable_wrapper_imports_are_not_counted() {
         let base = fixture("wrapper");
         write(
             &base.join("schemas/ct/wrap.dict.yaml"),
             "---\nname: wrap\nimport_tables:\n  - off\n  - ext\n...\n",
         );
         let m = mgr(&base);
-        assert_eq!(m.dict_file_entries("ct/wrap.dict.yaml"), Some(3));
+        assert_eq!(
+            m.dict_file_entries("ct/wrap.dict.yaml", "rime_codetable"),
+            Some(0)
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

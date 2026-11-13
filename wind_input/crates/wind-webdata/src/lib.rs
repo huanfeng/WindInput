@@ -11234,9 +11234,9 @@ mod sys_dict_categories_tests {
             item(&v, "main"),
             &json!({
                 "id": "main", "label": "zm2", "description": "", "group": null,
-                "enabled": true, "source": "main", "count": 5, "order": 1, "togglable": false,
+                "enabled": true, "source": "main", "count": 2, "order": 1, "togglable": false,
             }),
-            "主库：没写 label 取文件名，条数含 import_tables 子表，关不掉"
+            "主库：没写 label 取文件名，关不掉；码表库的 import_tables 加载器不读、不计"
         );
         assert_eq!(
             item(&v, "term"),
@@ -11266,13 +11266,13 @@ mod sys_dict_categories_tests {
     }
 
     #[test]
-    fn missing_sub_table_voids_main_count() {
+    fn codetable_imports_do_not_affect_main_count() {
         let f = coord("subgone");
         std::fs::remove_file(f.base.join("schemas/zm2/sub/more.dict.yaml")).unwrap();
         let v =
             f.c.web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
                 .unwrap();
-        assert_eq!(item(&v, "main")["count"], Value::Null);
+        assert_eq!(item(&v, "main")["count"], 2, "子表在不在都只算本文件");
     }
 
     #[test]
@@ -11301,10 +11301,9 @@ mod sys_dict_categories_tests {
                 &json!("1")
             )
         );
-        assert_eq!(h["importTables"], json!(["sub/more"]));
-        assert_eq!(h["count"], 5);
-        assert_eq!(h["tables"][0]["name"], "sub/more");
-        assert_eq!(h["tables"][0]["count"], 3);
+        assert_eq!(h["importTables"], json!(["sub/more"]), "声明原样列");
+        assert_eq!(h["count"], 2);
+        assert_eq!(h["tables"], json!([]), "码表库不加载子表");
         assert!(h["path"].as_str().unwrap().ends_with("zm2.dict.yaml"));
         assert!(h["mtimeMs"].as_u64().is_some());
         let t = c
@@ -11334,15 +11333,13 @@ mod sys_dict_categories_tests {
         let c = &f.c;
         let get = |p: Value| c.web_data_rpc("sysDict.entries", &p).unwrap();
         let v = get(json!({"schema": "zm2", "dictId": "main", "offset": 1, "limit": 2}));
-        assert_eq!(v["total"], 5);
+        assert_eq!(v["total"], 2);
         assert_eq!(
             v["rows"],
-            json!([
-                {"code": "b", "text": "乙", "weight": 5, "table": "zm2"},
-                {"code": "aa", "text": "丁", "weight": 3, "table": "sub/more"},
-            ]),
-            "依次展开子表，行上标子表名"
+            json!([{"code": "b", "text": "乙", "weight": 5, "table": "zm2"}]),
+            "码表库不混入 import_tables 子表"
         );
+        assert_eq!(v["note"], Value::Null);
         let v = get(json!({"schema": "zm2", "dictId": "main", "query": "a", "mode": "code"}));
         let texts: Vec<&str> = v["rows"]
             .as_array()
@@ -11350,11 +11347,8 @@ mod sys_dict_categories_tests {
             .iter()
             .map(|r| r["text"].as_str().unwrap())
             .collect();
-        assert_eq!(
-            (v["total"].as_u64(), texts),
-            (Some(3), vec!["甲", "丁", "戊"])
-        );
-        let v = get(json!({"schema": "zm2", "dictId": "main", "query": "丁", "mode": "text"}));
+        assert_eq!((v["total"].as_u64(), texts), (Some(1), vec!["甲"]));
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "编", "mode": "text"}));
         assert_eq!(v["total"], 1);
         let v = get(json!({"schema": "zm2", "dictId": "term", "offset": 9}));
         assert_eq!(

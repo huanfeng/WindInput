@@ -79,12 +79,14 @@ pub fn list<H: WebDataHost + ?Sized>(
 const DIR_PREFIX: &str = "dir:";
 
 /// `sysDict.categories`：设置端词库窗「系统词库」一级表。含主词库、不含用户分库，按实际
-/// 叠层先后排（`EngineManager::ordered_system_dicts`），每项带 `order`（1 起）。
+/// 叠层先后排（`EngineManager::ordered_system_dicts`：拼音按方案文件顺序，码表 / 英文按
+/// `base_order`），每项带 `order`（1 起）。
 ///
 /// - `source`：`"main"` 主词库 / `"bundled"` 方案文件登记 / `"dir"` 发现目录登记。
 /// - `togglable`：主库与写了 `default = true` 的库关不掉（`is_enabled` 恒真）。
-/// - `count` 读词库文件计数（`EngineManager::dict_file_entries`，带 `import_tables` 的按本文件
-///   + 各子表求和），停用的库也有；文件或子表不在给 null。
+/// - `count` 读词库文件计数（`EngineManager::dict_file_entries`，与加载器同口径：`rime_pinyin`
+///   库加上一层 `import_tables` 子表，码表 / 英文只算本文件），停用的库也有；主文件不在或
+///   `columns:` 声明残缺给 null。
 /// - `label` 没写时取文件名（去 `.dict.yaml`）。
 ///
 /// 非主库没有 id 的项不列（开关按 id 落盘，查看也按 id 寻址）。
@@ -105,7 +107,7 @@ pub fn categories<H: WebDataHost + ?Sized>(h: &H, schema_id: &str) -> anyhow::Re
                 "group": d.group,
                 "enabled": d.is_enabled(),
                 "source": if main { "main" } else if d.id.starts_with(DIR_PREFIX) { "dir" } else { "bundled" },
-                "count": mgr.dict_file_entries(&d.path),
+                "count": mgr.dict_file_entries(&d.path, d.effective_type()),
                 "order": i + 1,
                 "togglable": !main && !d.default,
             })
@@ -162,7 +164,7 @@ pub fn header<H: WebDataHost + ?Sized>(
     dict_id: &str,
 ) -> anyhow::Result<Value> {
     let (d, main) = find_system_dict(h, schema_id, dict_id)?;
-    let head = h.engine_mgr().dict_header(&d.path)?;
+    let head = h.engine_mgr().dict_header(&d.path, d.effective_type())?;
     let mut v = serde_json::to_value(head)?;
     if let Value::Object(o) = &mut v {
         o.insert("id".into(), json!(view_id(&d)));
@@ -197,9 +199,9 @@ pub fn entries<H: WebDataHost + ?Sized>(
         other => anyhow::bail!("未知搜索方式: {other}"),
     };
     let (d, _) = find_system_dict(h, schema_id, dict_id)?;
-    let page = h
-        .engine_mgr()
-        .dict_entries(&d.path, query, mode, offset, limit)?;
+    let page =
+        h.engine_mgr()
+            .dict_entries(&d.path, d.effective_type(), query, mode, offset, limit)?;
     Ok(serde_json::to_value(page)?)
 }
 

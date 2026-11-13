@@ -196,9 +196,9 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 ```
 
 - **一级词库表**：主词库在首行、开关禁用（不可关）。其余每行可拨开关，拨动即生效（同用户分库）；拼音族折叠域只对**有这张库**的成员调 `schema.setDictEnabled`，任一失败改回各成员原值；core 广播 `schema.configChanged` 时重取（分库开关的广播与本端刚写的回声除外）。按读开关的那个成员取（拼音族取活动方案），活动方案换了即重取。
-- **优先级**只显示、不可调：即实际叠层先后（主库最先；扩展层按 `base_order`，同值按方案文件块序——`CachedDict::Layered` 同权时靠前的层在先），表按它排序并显示序号。分组作为一列（§8 第 14 条的五组；未写 `group` 的随包库「其他」、`dir:` 登记的「我放入的」），不再按组分段。是否允许用户调先后以后再议。
-- **条数**：口径同加载器（`rime_body_layout`），按大小与 mtime 缓存，停用的库也有。主词库等带 `import_tables` 的库按「本文件 + 各子表」求和（子表同样走缓存），子表缺失时整项为空、显示「—」。
-- **二级查看**复用右栏表格（`table_sortable_server` / 分页 / 搜索），不新开窗口；以后若需要独立窗口再从这里抽。词条按文件顺序分页，带 `import_tables` 的库依次展开各子表（行上标子表名）；搜索按编码前缀或词文本子串。只读：本期**不做**屏蔽 / 改权重（补丁层 §3 做完再接到同一张表）。
+- **优先级**只显示、不可调：即实际叠层先后，表按它排序并显示序号。拼音方案按方案文件顺序（`load_dictionary` 把启用的库依次叠成 `CachedDict::Layered`，`base_order` 不起作用）；码表 / 英文按 `base_order` 升序，主库也按自己的 `base_order` 排、不一定在首，`base_order` 相同的库之间没有库级先后（同权时按词条行序），表里按方案文件顺序列出。分组作为一列（§8 第 14 条的五组；未写 `group` 的随包库「其他」、`dir:` 登记的「我放入的」），不再按组分段。是否允许用户调先后以后再议。
+- **条数**：口径同加载器，按大小与 mtime 缓存，停用的库也有。只算加载器会收的行（逐行走同一个解析函数：列数不足、编码或词为空的行不算）；`columns:` 声明残缺的文件加载器整库跳过，条数为空、显示「—」。只有拼音（`rime_pinyin`）库按「本文件 + `import_tables` 子表一层」求和（相对主表目录，不进子表自己的 `import_tables`，缺的子表跳过，同 `rime_source_paths`）；码表 / 英文库加载器不展开 `import_tables`，只算本文件。
+- **二级查看**复用右栏表格（`table_sortable_server` / 分页 / 搜索），不新开窗口；以后若需要独立窗口再从这里抽。词条按文件顺序分页，拼音库依次展开加载的子表（行上标子表名）；搜索按编码前缀或词文本子串。只读：本期**不做**屏蔽 / 改权重（补丁层 §3 做完再接到同一张表）。
 - **中栏**只有「系统词库」一个节点，不显示计数、不挂子项。方案没有任何系统词库可列（不应出现）时不出该节点。
 - 「方案管理 → 扩展词库」一节**过渡期保留**开关与一句说明（「也可在『词库管理 → 系统词库』里开关」），过几版再删（§8 第 14 条）。方案对话框够不着开词库窗的入口（要 `AppState`），故只给文字。
 
@@ -209,7 +209,7 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 
 ### 6.3 RPC（新增）
 
-`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（返回数组，每项 `{id, label, description, group, enabled, source: "main"|"bundled"|"dir", count, order, togglable}`，含主词库、不含 `user:` 分库，按生效先后排；`group`/`count` 缺时为 null）、`sysDict.header {schema, dictId}`（头部字段 `name / version / sort / columns / importTables`、`---` 前的说明注释 `notes`，外加 `path`、`mtimeMs`、`count` 与子表清单 `tables: [{name, path, count}]`；另带 `id / label / source`）、`sysDict.entries {schema, dictId, query?, mode: code|text, offset, limit}`（`{total, rows: [{code, text, weight, table}]}`，只读；`query` 空即按文件顺序浏览，`code` 为编码前缀且忽略大小写与音节空格，`text` 为词文本子串；`limit` 上限 500）。`dictId` 须是 `categories` 列出的某项，主库没写 id 时用其 `path`。开关继续用 `schema.setDictEnabled`。
+`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（返回数组，每项 `{id, label, description, group, enabled, source: "main"|"bundled"|"dir", count, order, togglable}`，含主词库、不含 `user:` 分库，按生效先后排；`group`/`count` 缺时为 null）、`sysDict.header {schema, dictId}`（头部字段 `name / version / sort / columns / importTables`、`---` 前的说明注释 `notes`，外加 `path`、`mtimeMs`、`count` 与真正加载的子表清单 `tables: [{name, path, count}]`（只拼音库有；`importTables` 原样列声明）；另带 `id / label / source`）、`sysDict.entries {schema, dictId, query?, mode: code|text, offset, limit}`（`{total, rows: [{code, text, weight, table}], note}`，`note` 说明被加载器整个跳过的表，只读；`query` 空即按文件顺序浏览，`code` 为编码前缀且忽略大小写与音节空格，`text` 为词文本子串；`limit` 上限 500）。`dictId` 须是 `categories` 列出的某项，主库没写 id 时用其 `path`。开关继续用 `schema.setDictEnabled`。
 
 ## 7 分阶段
 
