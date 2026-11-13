@@ -73,6 +73,7 @@ pub mod layout;
 pub mod leading_reading;
 pub mod mode_completion;
 pub mod pipeline;
+pub(crate) mod postprocess;
 pub(crate) mod preedit_cursor;
 pub mod process_memory;
 mod quick_eval;

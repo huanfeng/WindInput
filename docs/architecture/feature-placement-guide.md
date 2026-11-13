@@ -138,12 +138,19 @@ K8 那五个 `if let Some` 已经是一张有序表，不再抽成函数指针�
 `apply_shadow*`**。主链在调频与 shadow 之间另有英文定位、整句块、纠错护顶、直接辅助码，之后有
 空码补全收口、出简让全、emoji 扩展、自动上屏复核（细节见 engine-candidate-pipeline.md §8）。
 
+已收进步骤表（`wind-coordinator/src/postprocess.rs`，接哪几步以 profile 常量为准）：
+
+| 路径 | 函数 | profile |
+|---|---|---|
+| 主链 | `build_candidates` | `MAIN_PRE`（过滤、单字、调频）+ 收尾 `MAIN_SHADOW` |
+| 整句池 | 同上，`sentence_pool` | `SENTENCE_POOL`（过滤、单字、shadow） |
+| 空码补全池 | 同上，`completion_pool` | `COMPLETION_POOL`（过滤、单字、shadow） |
+| 直接辅助码前缀池 | `handle_direct_aux.rs::decode_direct_prefix` / `merge_direct_hits_into` | `DIRECT_AUX_PREFIX`（过滤、单字、调频）+ 合并前 `DIRECT_AUX_MERGE` |
+
+尚未收进（§5.4 第 3 步）：
+
 | 路径 | 函数 | 接了哪几步 |
 |---|---|---|
-| 主链 | `build_candidates` | 全部 |
-| 整句池 | 同上，`sentence_pool` | 过滤、单字、shadow |
-| 空码补全池 | 同上，`completion_pool` | 过滤、单字、shadow |
-| 直接辅助码前缀池 | `handle_direct_aux.rs::decode_direct_prefix` / `merge_direct_hits_into` | 过滤、单字、调频；合并后 shadow |
 | 临时拼音 | `handle_temp.rs::refill_temp_pinyin_candidates` | 过滤、调频、shadow |
 | 临时英文 | `handle_temp.rs::refill_temp_english_candidates` | 调频、shadow |
 | mix 融合 | `handle_mode.rs::refill_mix_candidates` / `mix_free_english_segment` | 调频、shadow（刻意不接过滤，理由见源码注释） |
@@ -151,8 +158,9 @@ K8 那五个 `if let Some` 已经是一张有序表，不再抽成函数指针�
 | 候选反查 | `handle_reverse.rs::build_reverse_candidates` | 过滤 |
 
 翻页扩容（`expand_candidates`）经 `build_candidates_at_cursor` 回到主链整链重建，不是独立路径。
-已有两条源码扫描测试兜这张表的一部分（`handle_candidate.rs` 里断言「emoji 三条路都接」与
-「shadow 取码同源」的那两条）；§5.1 落地后由 profile 常量取代。
+「shadow 取码同源」那条源码扫描测试（`every_shadow_read_goes_through_normalized_code`）同时扫
+`apply_shadow*` 的实参与 `PassCtx { shadow_code: … }` 字段；「emoji 三条路都接」那条仍是独立扫描
+（emoji 不在步骤表内）。
 
 ### 4.3 上屏出口（现状）
 
@@ -177,7 +185,7 @@ K8 那五个 `if let Some` 已经是一张有序表，不再抽成函数指针�
 原则：**至少两三个真实消费者才抽象**；能用 enum + 常量表达的不用 trait 对象；顺序理由是
 「逐对」的地方用直排代码，不用注册表。
 
-### 5.1 后处理步骤表（P4）——要做
+### 5.1 后处理步骤表（P4）——主链与三个池已落地，见 `postprocess.rs`
 
 ```rust
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -222,7 +230,7 @@ fn finish_desktop_key(&self, data: &KeyEventData, action: KeyAction) -> KeyActio
 | 步 | 内容 | 验证 | 状态 |
 |---|---|---|---|
 | 1 | 本文、按键链槽位编号、§8 现状修正 | 无行为变化 | 完成 |
-| 2 | 引入 `Pass` / `run_passes`，替换主链、整句池、补全池、直接辅助码 | 全量测试 `--no-fail-fast`；`pinyin_eval` 前后对拍 | 未开始 |
+| 2 | 引入 `Pass` / `run_passes`，替换主链、整句池、补全池、直接辅助码 | 全量测试 `--no-fail-fast`；8 组配置逐键候选导出前后 md5 一致 | 完成 |
 | 3 | 临拼、临英、mix、特殊、反查改用 profile | 同上 + 各模式测试 | 未开始 |
 | 4 | 抽 `finish_session_action`，逐字复现现状；缺口逐项定案 | smart_symbol / auto_spacing / freq_learn 测试 | 未开始 |
 | 5 | 以模式为键的 `match` 去掉 `_ =>` | 编译通过 | 未开始 |

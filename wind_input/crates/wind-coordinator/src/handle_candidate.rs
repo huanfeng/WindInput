@@ -919,11 +919,9 @@ impl Coordinator {
     /// 主开关 `learning.freq.enabled` 关闭则完全不重排（修"配置说关、代码却排"的潜在 bug）。
     /// 引擎类型分流：码表/混输走永久 used-first（§3），纯拼音走衰减软置前（§4）。
     /// 注：每候选一次 redb 点查（mmap 微秒级）；后续可下沉到引擎排序层。
-    pub(crate) fn apply_freq_rerank(&self, candidates: &mut [Candidate], code: &str) {
-        self.apply_freq_rerank_in(None, candidates, code);
-    }
-
-    /// 同 [`Self::apply_freq_rerank`]，但可指定**生效方案**（特殊模式用）。
+    ///
+    /// `schema_override` 指定**生效方案**（特殊模式用；`None` = 活跃方案）。生产路径经
+    /// `postprocess::run_passes` 调用。
     ///
     /// ★ 读端的方案必须与写端 [`Self::record_selection_in`] 取自同一处
     /// （[`Self::effective_data_schema`]），否则「写进 qsym、读的是 wubi86」——
@@ -2017,23 +2015,23 @@ impl Coordinator {
             deduped.push(c);
         }
         candidates = deduped;
-        // 检索范围过滤（按模式裁剪；is_common 已由上面的 mark_common 填好）
-        self.apply_filter(state, &mut candidates);
-        // 单字输入过滤（只出单字）。与上一行正交，见 `apply_single_char`。
-        // ⚠️ 位置钉在 `apply_shadow` **之前**：shadow 的位次记的是用户所见的列表。
-        self.apply_single_char(state, &mut candidates);
-        // 用户词频重排（独立维度，used-first，绝不改 weight；frequency.md §3）
-        //
-        // ⚠️ 自动补充的候选（`is_scope_filtered`，恒在末尾）**排除在重排之外**：沉底是硬约束。
-        // 否则用户误选一次补充来的生僻字，used-first 就会把它顶到常用字前面——码表侧
-        // **不衰减**，误选一次即永久翻转（见 codetable-freq-short-code-protection.md），
-        // 与「自动补充不影响原有排序」的承诺直接相悖。
-        // 用 take_while 而非 partition_point：不预设列表整体有序，只截断到首个补充候选为止。
-        let rerank_len = candidates
-            .iter()
-            .take_while(|c| !c.is_scope_filtered)
-            .count();
-        self.apply_freq_rerank(&mut candidates[..rerank_len], &state.input_buffer);
+        // 检索范围过滤 → 单字输入 → 用户词频重排（`postprocess::profile::MAIN_PRE`）。
+        // - 过滤按模式裁剪；is_common 已由上面的 mark_common 填好。
+        // - 单字与过滤正交；位置钉在 shadow **之前**：shadow 的位次记的是用户所见的列表。
+        // - 调频是独立维度（used-first，绝不改 weight；frequency.md §3）。自动补充的候选
+        //   （`is_scope_filtered`，恒在末尾）**排除在重排之外**：沉底是硬约束。否则用户误选一次
+        //   补充来的生僻字，used-first 就会把它顶到常用字前面——码表侧**不衰减**，误选一次即
+        //   永久翻转（见 codetable-freq-short-code-protection.md）。
+        self.run_passes(
+            state,
+            &mut candidates,
+            crate::postprocess::profile::MAIN_PRE,
+            &crate::postprocess::PassCtx {
+                owner: None,
+                freq_code: &state.input_buffer,
+                shadow_code: "",
+            },
+        );
         // 英文候选定位：排在「中文常用精确解」之后、其余候选之前。
         // **必须在词频重排之后**——那是最后一道整体排序，放它之前会被位置提升搅乱
         // （真机现象：打 `hen` 英文第一、打 `shi` 英文不在第一，差别只是用户对哪个音节
@@ -2083,15 +2081,34 @@ impl Coordinator {
         // ⚠️ 「优先级最高」这句现在由**返回值**兑现，而不再靠「排在最后」：出简让全排在它
         // 之后（那是 `apply_freq_rerank` 强加的次序，见下），若不额外让路就会反过来覆盖
         // 用户的调整。`user_pinned` 就是那条让路判据，取值只此一处。
-        let mut user_pinned = self.apply_shadow(&mut candidates, &shadow_code);
+        let mut user_pinned = self
+            .run_passes(
+                state,
+                &mut candidates,
+                crate::postprocess::profile::MAIN_SHADOW,
+                &crate::postprocess::PassCtx {
+                    owner: None,
+                    freq_code: "",
+                    shadow_code: &shadow_code,
+                },
+            )
+            .user_pinned;
+        let pool_ctx = crate::postprocess::PassCtx {
+            owner: None,
+            freq_code: "",
+            shadow_code: &shadow_code,
+        };
         // 整句池走**同一条过滤链**（同补全池的理由）：它直接拷自引擎结果，不过滤的话切换键能
         // 把用户隐藏掉的整句、被检索范围滤掉的生僻字整句换回来（审查查出）。shadow 的置顶会
         // 挪动次序，过完按名次排回——池子的顺序就是名次。
         if !state.sentence_pool.is_empty() {
             let mut pool = std::mem::take(&mut state.sentence_pool);
-            self.apply_filter(state, &mut pool);
-            self.apply_single_char(state, &mut pool);
-            self.apply_shadow(&mut pool, &shadow_code);
+            self.run_passes(
+                state,
+                &mut pool,
+                crate::postprocess::profile::SENTENCE_POOL,
+                &pool_ctx,
+            );
             pool.sort_by_key(|c| c.sentence_rank);
             state.sentence_pool = pool;
         }
@@ -2120,15 +2137,19 @@ impl Coordinator {
                 // 与最终列表同一套排序 ⇒ 同样先补 is_common（否则混输档位键在此退化为空操作，
                 // 上面「本会显示在最前的那一条」这句承诺就不成立了）。
                 self.mark_common(&mut completion_pool);
-                self.apply_filter(state, &mut completion_pool);
-                // 补全池走**同一条**过滤链：开了单字若不滤，主列表被滤空之后会从补全池
-                // 补一条词回来——用户看到的是「开了单字模式还是冒出词」。
-                self.apply_single_char(state, &mut completion_pool);
-                // 补全池必须走同一条过滤链、**同一个码**：主列表隐藏掉的词若在这里被原码
-                // 补回来，用户看到的就是「删了又冒出来」。
-                // 返回值并进 `user_pinned`：补全收口只在主列表为空时走，那时上面那次
-                // `apply_shadow` 因空列表直接返回 false，判据全在这一次里。
-                user_pinned |= self.apply_shadow(&mut completion_pool, &shadow_code);
+                // 补全池走**同一条**过滤链（`COMPLETION_POOL`）、**同一个码**：开了单字若不滤，
+                // 主列表被滤空之后会从补全池补一条词回来；主列表隐藏掉的词若在这里被原码补回来，
+                // 用户看到的就是「删了又冒出来」。
+                // 返回值并进 `user_pinned`：补全收口只在主列表为空时走，那时主列表那次 shadow
+                // 因空列表直接返回 false，判据全在这一次里。
+                user_pinned |= self
+                    .run_passes(
+                        state,
+                        &mut completion_pool,
+                        crate::postprocess::profile::COMPLETION_POOL,
+                        &pool_ctx,
+                    )
+                    .user_pinned;
                 completion_pool.sort_by(|a, b| {
                     candidate_display_order(a, b, ignore_weight, mixed, &input_str)
                         .then_with(|| a.text.cmp(&b.text))
@@ -2644,11 +2665,9 @@ impl Coordinator {
     }
 
     /// 应用 Shadow 规则：先按 deleted 过滤，再把 pinned 按目标位置重排。
-    pub(crate) fn apply_shadow(&self, candidates: &mut Vec<Candidate>, code: &str) -> bool {
-        self.apply_shadow_in(None, candidates, code)
-    }
-
-    /// 同 [`Self::apply_shadow`]，但可指定**生效方案**（特殊模式用）。
+    ///
+    /// `schema_override` 指定**生效方案**（特殊模式用；`None` = 活跃方案）。生产路径经
+    /// `postprocess::run_passes` 调用。
     ///
     /// ⚠️ 守卫是 `candidates.is_empty()` 而**不是** `code.is_empty()`：空码是合法键位
     /// （shadow key = `"{schema}\0{code}"`，空 code 与任何非空码互不冲突），特殊模式的
@@ -7028,10 +7047,13 @@ mod finalize_candidates_tests {
             "shadow_code",
             "state.special_buffer",
             "\"\"",
-            // 转发层：`apply_shadow` 是 `apply_shadow_in` 的薄包装，原样传自己的参数。
+            // overlay（临拼、mix 成员段）的中转变量：取的是该段引擎的归一码，见各自调用点。
             "code",
             // 菜单灰显走 `candidate_op_scope` 的产物，其 `code` 已在那里归一（同写端一处取值）。
             "scope.code",
+            // 后处理步骤表的转发层：`run_passes` 原样传 `PassCtx` 里的码，码在构造 `PassCtx`
+            // 处受本测试检查（见下方对 `PassCtx {` 字段的扫描）。
+            "ctx.shadow_code",
         ];
         const CALLS: &[&str] = &[
             ".apply_shadow(",
@@ -7050,6 +7072,8 @@ mod finalize_candidates_tests {
             ("handle_temp.rs", include_str!("handle_temp.rs")),
             // mix 的读取点在成员段内，码同样取引擎归一码。
             ("handle_mode.rs", include_str!("handle_mode.rs")),
+            // 后处理步骤表：shadow 的唯一读取点在这里，码来自 `PassCtx`。
+            ("postprocess.rs", include_str!("postprocess.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
@@ -7093,6 +7117,24 @@ mod finalize_candidates_tests {
                         // 收齐再报：逐个 assert 只暴露第一处，改完重跑才发现还有下一处。
                         bad.push(format!("{name}: {call}…) 的码实参 `{arg}`"));
                     }
+                }
+            }
+            // 经后处理步骤表读 shadow 的路径，码写在 `PassCtx { .., shadow_code: <码>, .. }` 里。
+            for (off, _) in prod.match_indices("PassCtx {") {
+                let body = &prod[off..];
+                let body = &body[..body.find('}').unwrap_or(body.len())];
+                let Some(f) = body.find("shadow_code:") else {
+                    bad.push(format!("{name}: PassCtx 字面量缺 shadow_code 字段"));
+                    continue;
+                };
+                let val = &body[f + "shadow_code:".len()..];
+                let val = val[..val.find(',').unwrap_or(val.len())]
+                    .trim()
+                    .trim_start_matches('&')
+                    .trim();
+                checked += 1;
+                if !ALLOWED.contains(&val) {
+                    bad.push(format!("{name}: PassCtx 的 shadow_code `{val}`"));
                 }
             }
         }
@@ -7845,7 +7887,7 @@ mod dynamic_candidate_shadow_tests {
             date_cand("2026-07-29", tpl),
             date_cand("2026.07.29", "$Y.$MM.$DD"),
         ];
-        c.apply_shadow(&mut cands, "date");
+        c.apply_shadow_in(None, &mut cands, "date");
 
         assert_eq!(
             cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
@@ -7874,7 +7916,7 @@ mod dynamic_candidate_shadow_tests {
                 ..Default::default()
             },
         ];
-        c.apply_shadow(&mut cands, "aaaa");
+        c.apply_shadow_in(None, &mut cands, "aaaa");
         assert_eq!(
             cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             ["敬", "工"]
@@ -7910,7 +7952,7 @@ mod dynamic_candidate_shadow_tests {
         assert_eq!(code, "hao", "归一码非空时必须优先于击键缓冲");
 
         let mut cands = vec![plain("耗"), plain("好"), plain("号")];
-        c.apply_shadow(&mut cands, &code);
+        c.apply_shadow_in(None, &mut cands, &code);
         assert_eq!(
             cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             ["好", "耗", "号"],
@@ -7919,7 +7961,7 @@ mod dynamic_candidate_shadow_tests {
 
         // 反向对照：拿击键码去读，规则不该命中——证明上面的绿来自归一，而非别的原因。
         let mut raw = vec![plain("耗"), plain("好"), plain("号")];
-        c.apply_shadow(&mut raw, "hc");
+        c.apply_shadow_in(None, &mut raw, "hc");
         assert_eq!(
             raw.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             ["耗", "好", "号"],
