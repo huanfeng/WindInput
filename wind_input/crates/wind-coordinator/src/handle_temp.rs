@@ -297,7 +297,14 @@ impl Coordinator {
             }
             // 反查模式不自动上屏（通配查询没有「全码唯一」一说）。
             Some(ModeKind::Reverse) => self.update_reverse_candidates(state),
-            _ => {}
+            None
+            | Some(
+                ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::AuxCode,
+            ) => {}
         }
         let display = state.preedit.clone();
         self.notify_ui_update(state);

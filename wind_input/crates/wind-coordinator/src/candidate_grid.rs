@@ -89,7 +89,15 @@ impl Coordinator {
             Some(ModeKind::Mix(_)) => {
                 matches!(self.mix_lens(state), MixLens::Text | MixLens::Phrase)
             }
-            _ => false,
+            Some(
+                ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::AuxCode,
+            ) => false,
         };
         if !mode_ok {
             return false;

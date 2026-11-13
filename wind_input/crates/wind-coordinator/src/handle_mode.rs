@@ -238,7 +238,14 @@ impl Coordinator {
                 .temp_english
                 .show_candidates
                 .then(|| "english".to_string()),
-            _ => None,
+            None
+            | Some(
+                ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => None,
         }
     }
 

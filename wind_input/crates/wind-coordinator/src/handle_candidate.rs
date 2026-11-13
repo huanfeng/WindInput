@@ -3801,7 +3801,17 @@ impl Coordinator {
         let (prefix, buffer) = match state.active {
             Some(ModeKind::TempPinyin) => (&state.temp_pinyin_prefix, &state.temp_pinyin_buffer),
             Some(ModeKind::Mix(_)) => (&state.mix_prefix, &state.mix_buffer),
-            _ => return,
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::AuxCode,
+            ) => return,
         };
         // 空缓冲时组合区只剩前缀，由各自的刷新函数写好，不在这里动。
         if buffer.is_empty() {
@@ -3827,7 +3837,15 @@ impl Coordinator {
                 self.sync_overlay_preedit_to_highlight(state);
                 return;
             }
-            Some(_) => return,
+            Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse,
+            ) => return,
         }
         let body = self.effective_preedit_body(state).to_string();
         // 用户按 Shift+字母打出的大写只在影子串里，此处投影回显示串（拼音拆分形态含引擎插入
@@ -3884,7 +3902,10 @@ impl Coordinator {
                 punct_char(data.key_code, shift)
                     .is_none_or(|ch| !self.temp_english_char_allowed(ch))
             }
-            _ => false,
+            None
+            | Some(ModeKind::Url | ModeKind::Email | ModeKind::Unicode | ModeKind::AuxCode) => {
+                false
+            }
         };
         self.apply_session_action(state, data, include_printable)
     }
@@ -3978,7 +3999,17 @@ impl Coordinator {
         match state.active {
             Some(ModeKind::Special(idx)) => self.special_schema(idx),
             Some(ModeKind::TempEnglish) => Some(ENGLISH_SCHEMA.to_string()),
-            _ => None,
+            None
+            | Some(
+                ModeKind::TempPinyin
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => None,
         }
     }
 
@@ -4059,7 +4090,14 @@ impl Coordinator {
             // 其余 overlay（临拼 / 混输 / 网址）没有独立词库落点：`effective_data_schema`
             // 对它们返回 None（2026-08-04 用户拍板，见其文档），放行会静默落回主方案。
             // 新增模式时**先补落点、再放行**，顺序不能反。
-            _ => return None,
+            Some(
+                ModeKind::TempPinyin
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => return None,
         };
         // 空码只在特殊模式（浏览态）合法；主输入路空码无候选。
         if code.is_empty() && !special {
@@ -6037,7 +6075,7 @@ impl Coordinator {
                 &state.special_buffer
             }
             Some(ModeKind::AuxCode) => self.aux_code_source_buffer(state),
-            _ => &state.input_buffer,
+            None | Some(ModeKind::Url | ModeKind::Email | ModeKind::Unicode) => &state.input_buffer,
         }
     }
 

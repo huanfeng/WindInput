@@ -303,7 +303,18 @@ impl Coordinator {
     pub(crate) fn aux_code_source_buffer<'a>(&self, state: &'a State) -> &'a str {
         match state.aux_code.as_ref().and_then(|o| o.origin) {
             Some(ModeKind::TempPinyin) => &state.temp_pinyin_buffer,
-            _ => &state.input_buffer,
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => &state.input_buffer,
         }
     }
 
@@ -524,7 +535,18 @@ impl Coordinator {
                 state.active = Some(ModeKind::TempPinyin);
                 self.commit_temp_pinyin_selected(state, &cand, offset)
             }
-            _ => self.commit_selected(state, &cand, offset),
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => self.commit_selected(state, &cand, offset),
         };
         // 部分消费 → 缓冲还有剩余编码，处于逐步转换态 → 重建会话、留在辅助码模式。
         // 判据取**来源缓冲**（见 `aux_code_source_buffer`）：临拼的剩余码不在 `input_buffer` 里。

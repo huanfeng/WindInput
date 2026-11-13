@@ -6327,7 +6327,16 @@ impl Coordinator {
                         .any(|c| c.meta.preedit_split.is_some())
             }
             Some(ModeKind::TempPinyin | ModeKind::Mix(_)) => true,
-            Some(_) => false,
+            Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::AuxCode,
+            ) => false,
         };
         if follows {
             let before = state.preedit.clone();
@@ -6449,7 +6458,18 @@ impl Coordinator {
                 // 走 `_` 臂 `reset_pinyin_composition`，与改动前逐字等价。
                 match state.active {
                     Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
-                    _ => self.reset_pinyin_composition(state),
+                    None
+                    | Some(
+                        ModeKind::TempEnglish
+                        | ModeKind::Url
+                        | ModeKind::Email
+                        | ModeKind::Unicode
+                        | ModeKind::Special(_)
+                        | ModeKind::RareChar
+                        | ModeKind::Reverse
+                        | ModeKind::Mix(_)
+                        | ModeKind::AuxCode,
+                    ) => self.reset_pinyin_composition(state),
                 }
             }
             // 普通输入：取消整个组合，含已转换前缀（拼音分步上屏的那部分）一并丢弃。
@@ -10380,7 +10400,18 @@ impl Coordinator {
                             state.temp_pinyin_buffer.clone(),
                             state.temp_pinyin_prefix.clone(),
                         ),
-                        _ => (
+                        None
+                        | Some(
+                            ModeKind::TempEnglish
+                            | ModeKind::Url
+                            | ModeKind::Email
+                            | ModeKind::Unicode
+                            | ModeKind::Special(_)
+                            | ModeKind::RareChar
+                            | ModeKind::Reverse
+                            | ModeKind::Mix(_)
+                            | ModeKind::AuxCode,
+                        ) => (
                             preedit_cursor::cased_or_buffer(
                                 &state.input_buffer,
                                 &state.input_buffer_cased,
@@ -10390,7 +10421,16 @@ impl Coordinator {
                         ),
                     })
                 }
-                _ => None,
+                None
+                | Some(
+                    ModeKind::TempEnglish
+                    | ModeKind::Url
+                    | ModeKind::Email
+                    | ModeKind::Unicode
+                    | ModeKind::Special(_)
+                    | ModeKind::RareChar
+                    | ModeKind::Reverse,
+                ) => None,
             } {
                 // 临拼 / mix：镜像普通组合的 commit_on_switch，且对齐各自的回车上屏语义。
                 let has_pending = !buf.is_empty() || !state.committed_text.is_empty();

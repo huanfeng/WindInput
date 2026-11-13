@@ -134,6 +134,134 @@ mod tests {
         }
     }
 
+    fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                rs_files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    /// 兜底臂的模式部分：`_`、绑定名、`Some(<它们>)`，可再并一个 `None`。
+    fn is_catch_all(head: &str) -> bool {
+        let binding = |t: &str| {
+            t == "_"
+                || t.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                    && t.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        };
+        head.split('|').map(str::trim).any(|alt| {
+            let inner = alt
+                .strip_prefix("Some(")
+                .and_then(|r| r.strip_suffix(')'))
+                .map(|r| r.trim().trim_end_matches(',').trim());
+            binding(alt) || inner.is_some_and(binding)
+        })
+    }
+
+    /// 以模式为键的 `match` 不得有兜底臂（`_` / `Some(_)` / 绑定名）：新增 `ModeKind` 变体时要由
+    /// 编译器逐处列出接入点，兜底臂会让新模式静默落进「其余」分支（辅助码来源曾因此把临拼当成
+    /// 主输入路）。按 rustfmt 排版识别：`match … {` 之后缩进深一级的行是各臂头；臂头（`=>` 之前，
+    /// 含折行的 `Some(\n ModeKind::A | …\n)`）里出现 `ModeKind::` 即算以模式为键。
+    #[test]
+    fn mode_keyed_matches_have_no_wildcard_arm() {
+        let mut files = Vec::new();
+        rs_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let indent = |t: &str| t.len() - t.trim_start().len();
+        let mut bad = Vec::new();
+        let mut keyed_matches = 0usize;
+        for f in &files {
+            let prod = production_code(&std::fs::read_to_string(f).unwrap());
+            let lines: Vec<&str> = prod.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                if !(line.contains("match ") && line.trim_end().ends_with('{')) {
+                    continue;
+                }
+                let outer = indent(line);
+                let Some(arm_ind) = lines[n + 1..]
+                    .iter()
+                    .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
+                    .map(|l| indent(l))
+                    .filter(|&i| i > outer)
+                else {
+                    continue;
+                };
+                // 收集各臂头：从臂缩进的行起，到含 `=>` 的行为止（折行模式跨多行）。
+                let mut heads: Vec<String> = Vec::new();
+                let mut cur: Option<String> = None;
+                for l in &lines[n + 1..] {
+                    let li = indent(l);
+                    if !l.trim().is_empty() && li <= outer {
+                        break;
+                    }
+                    let t = l.trim_start();
+                    if li == arm_ind && cur.is_none() && !t.starts_with("//") && !t.starts_with('}')
+                    {
+                        cur = Some(String::new());
+                    }
+                    if let Some(h) = cur.as_mut() {
+                        let part = l.split("=>").next().unwrap_or("");
+                        h.push_str(part.trim());
+                        h.push(' ');
+                        if l.contains("=>") {
+                            heads.push(cur.take().unwrap());
+                        }
+                    }
+                }
+                if !heads.iter().any(|h| h.contains("ModeKind::")) {
+                    continue;
+                }
+                keyed_matches += 1;
+                for h in &heads {
+                    let pat = h.split(" if ").next().unwrap_or("").trim();
+                    if is_catch_all(pat) {
+                        bad.push(format!("{}:{}: `{pat} =>`", f.display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "以下以模式为键的 match 有兜底臂，改成显式列出其余 ModeKind 变体：\n  {}",
+            bad.join("\n  ")
+        );
+        // 2026-11-13 实扫 29 个（含 origin 与 `state.active?`）；扫描失效时会掉到个位数。
+        assert!(
+            keyed_matches >= 29,
+            "只扫到 {keyed_matches} 个以模式为键的 match，扫描方式失效了"
+        );
+    }
+
+    #[test]
+    fn catch_all_heads() {
+        for yes in [
+            "_",
+            "Some(_)",
+            "None | Some(_)",
+            "other",
+            "m2",
+            "Some(m)",
+            "Some( _, )",
+        ] {
+            assert!(is_catch_all(yes), "{yes}");
+        }
+        for no in [
+            "None",
+            "Some(ModeKind::Url)",
+            "None | Some(ModeKind::Mix(_))",
+        ] {
+            assert!(!is_catch_all(no), "{no}");
+        }
+    }
+
     #[test]
     fn reads_pass_ctx_fields() {
         let prod = "run(&PassCtx { owner: None, freq_code: Some(&a), shadow_code: None, });\n\

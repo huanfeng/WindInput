@@ -62,6 +62,8 @@
 2. **它有自己的缓冲、或自己解释按键序列吗？** → P2。加 `ModeKind` 变体 + K16 一条分支 +
    `handle_*_key`；然后逐个过所有以 `state.active` 为键的 `match`（分派、翻页扩容
    `expand_candidates`、鼠标点选 `select_candidate_at`、数据归属 `effective_data_schema`…）。
+   这些 `match` 不许有兜底臂（守卫见 §5.4 第 5 步），加了变体后编译器会逐处报出来；
+   `matches!` 与 `if let` 不在其内，要另行 grep `ModeKind::`。
    前缀触发、需要能退回来的，复用 `try_prefix_hijack` + `Rewind`，不另写回退。
 3. **只是某态下某键多一个含义？** → P1。写成 `try_*(&self, data) -> Option<KeyAction>`，
    按「它必须先于谁」选槽位（§4.1）。若这个键值只对某个动词有意义，按
@@ -256,7 +258,7 @@ fn finish_desktop_key(&self, data: &KeyEventData, action: KeyAction) -> KeyActio
 | 2 | 引入 `Pass` / `run_passes`，替换主链、整句池、补全池、直接辅助码 | 全量测试 `--no-fail-fast`；8 组配置逐键候选导出前后 md5 一致 | 完成 |
 | 3 | 临拼、临英、mix 自由英文段、特殊、反查改用 profile | 同上 + 临拼/临英/快捷输入/生僻字/反查 6 组导出前后 md5 一致 | 完成 |
 | 4 | 抽 `finish_session_action`，逐字复现现状；缺口逐项定案 | smart_symbol / auto_spacing / freq_learn 测试 | 未开始 |
-| 5 | 以模式为键的 `match` 去掉 `_ =>` | 编译通过 | 未开始 |
+| 5 | 以模式为键的 `match` 去掉 `_ =>`（18 处），守卫 `source_scan::mode_keyed_matches_have_no_wildcard_arm` | 编译通过；替换时按 `unreachable_patterns` 警告删去已覆盖项，保证与原兜底范围相同；全量测试 | 完成 |
 | 6 | 清掉 §6.3 的读盘点 | 计数测试（见 §6.2） | 完成 |
 
 ## 6. 输入流程零读盘
