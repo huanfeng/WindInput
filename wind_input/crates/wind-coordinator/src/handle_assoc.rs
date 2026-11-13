@@ -604,26 +604,45 @@ impl Coordinator {
         true
     }
 
-    /// 「下一词」表：首次用到时读文件，之后复用；没有数据文件或读失败是 None。
+    /// 「下一词」表：已加载就返回；还没加载就派后台加载、本次按暂缺处理（返回 None）。
+    /// 按键路径上调，不读盘。没有数据文件或读失败也是 None。
     pub(crate) fn assoc_bigram(&self) -> Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>> {
-        self.assoc_bigram
-            .get_or_init(|| {
-                let path = self.assoc_bigram_path.as_ref()?;
-                let loaded = std::fs::read_to_string(path)
-                    .map_err(|e| e.to_string())
-                    .and_then(wind_assoc::bigram::AssocBigram::parse);
-                match loaded {
-                    Ok(t) => {
-                        tracing::info!(n = t.len(), path = %path.display(), "联想下一词表已加载");
-                        Some(std::sync::Arc::new(t))
-                    }
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), "联想下一词表读不了，本次运行不出: {e}");
+        if let Some(table) = self.assoc_bigram.get() {
+            return table.clone();
+        }
+        self.ensure_assoc_bigram_async();
+        None
+    }
+
+    /// 后台加载下一词表（只派一次）。智能联想档生效时由 `apply_data_needs` / `prewarm_indexes`
+    /// 提前调，按键路径上的 [`Self::assoc_bigram`] 只是兜底。
+    pub(crate) fn ensure_assoc_bigram_async(&self) {
+        if self.assoc_bigram.get().is_some()
+            || self
+                .assoc_bigram_loading
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let Some(path) = self.assoc_bigram_path.clone() else {
+            let _ = self.assoc_bigram.set(None);
+            return;
+        };
+        let slot = std::sync::Arc::clone(&self.assoc_bigram);
+        let spawned = std::thread::Builder::new()
+            .name("assoc-bigram-load".into())
+            .spawn(move || {
+                slot.get_or_init(|| {
+                    std::panic::catch_unwind(|| load_assoc_bigram(&path)).unwrap_or_else(|_| {
+                        tracing::warn!("联想下一词表解析崩溃，本次运行不出");
                         None
-                    }
-                }
-            })
-            .clone()
+                    })
+                });
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("联想下一词表后台加载线程起不来，本次运行不出: {e}");
+            let _ = self.assoc_bigram.set(None);
+        }
     }
 
     /// `[input.association]`（移动端再叠 `[mobile.association]`）的运行时视图（热重载快照）。
@@ -1217,6 +1236,25 @@ impl Coordinator {
     }
 }
 
+/// 读入并解析下一词表（后台线程上调，见 `Coordinator::ensure_assoc_bigram_async`）。
+fn load_assoc_bigram(
+    path: &std::path::Path,
+) -> Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>> {
+    let loaded = std::fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(wind_assoc::bigram::AssocBigram::parse);
+    match loaded {
+        Ok(t) => {
+            tracing::info!(n = t.len(), path = %path.display(), "联想下一词表已加载");
+            Some(std::sync::Arc::new(t))
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), "联想下一词表读不了，本次运行不出: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! 只测**端到端测不到的那几件**：配置默认、编码栏标识、自动隐藏计时、UI 下发。
@@ -1281,6 +1319,28 @@ mod tests {
         let smart = coord_smart();
         smart.assoc_hits(&smart.assoc_config(), "", "中", false);
         assert!(smart.assoc_bigram.get().is_some());
+    }
+
+    /// 下一词表不在按键线程上读：没预热时第一次取一定是暂缺（同时派出后台加载），
+    /// 之后由后台线程装好。
+    #[test]
+    fn bigram_table_loads_off_key_thread() {
+        let dir = std::env::temp_dir().join(format!("wind_assoc_bigram_bg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assoc")).unwrap();
+        std::fs::write(dir.join("assoc/assoc_bigram.txt"), "中\t国 文\n").unwrap();
+        let mut cfg = Config::default();
+        cfg.input.association.kind = "smart".to_string();
+        let c = Coordinator::new_headless(cfg, Some(&dir));
+        assert!(c.assoc_bigram_path.is_some(), "夹具的下一词表没被解析到");
+
+        assert!(c.assoc_bigram().is_none(), "按键路径同步读了下一词表");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while c.assoc_bigram.get().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(c.assoc_bigram().is_some(), "后台加载没有装好下一词表");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

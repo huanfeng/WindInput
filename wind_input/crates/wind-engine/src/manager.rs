@@ -440,6 +440,18 @@ struct LoadedEngine {
     last_used: std::sync::atomic::AtomicU64,
 }
 
+thread_local! {
+    /// 本线程调用 `read_schema_in`（读方案文件）的次数，见 [`schema_reads_on_current_thread`]。
+    static SCHEMA_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 当前线程累计读了几次方案文件。测试用它钉「输入流程零读盘」：预热后在同一线程上打字，
+/// 计数不应再变（按线程计，并行测试互不干扰）。
+#[doc(hidden)]
+pub fn schema_reads_on_current_thread() -> u64 {
+    SCHEMA_READS.with(|n| n.get())
+}
+
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）+ 最后使用时刻
     engines: Mutex<HashMap<String, LoadedEngine>>,
@@ -524,7 +536,7 @@ pub struct EngineManager {
     /// （[`EngineManager::aux_code_settings_cached`]，直接辅助码每个双拼按键都要问）。与
     /// `freq_cache` 同生命周期：`invalidate_schema`（方案覆盖层写入 / 删除 / 重建都走它）与
     /// `reload_from_config` 时清。任一方案失效都**整表清**——`schema:` 来源会引用别的方案，
-    /// 按 id 局部清会漏掉引用方。进入引导键辅助码仍走不带缓存的 `aux_code_settings_of`。
+    /// 按 id 局部清会漏掉引用方。进入辅助码（`aux_code_settings_cached_of`）也走它。
     aux_settings_cache: Mutex<HashMap<String, AuxCodeSettings>>,
     /// `aux_settings_cache` 的失效代次：每次清表（持锁）+1。未命中时先记代次再算，回填前
     /// （同一把锁下）代次变了就不回填——否则「算到一半被清」的旧值会被插回去，一直留到下次失效。
@@ -546,6 +558,15 @@ pub struct EngineManager {
     /// redb 查询叠加，造成可感知卡顿。缓存 `None` 同样有意义：方案文件不存在时反复尝试
     /// 读盘，还会刷出成片的 `Schema file not found` 警告。
     schema_type_cache: Mutex<HashMap<String, Option<String>>>,
+    /// 方案定义缓存（schema_id → 合并 override 后的 `Schema`），供按键路径取**方案级标量字段**
+    /// （混输成员、拼音分隔符策略）。`read_schema` 每次都要读方案与 override 两个文件、解析
+    /// TOML、列发现目录并读各词库文件头，按键路径上一次也不能有。
+    ///
+    /// ⚠️ 词库清单这类随词库目录变化的字段**不要**从这里取：缓存只随方案失效与配置重载清，
+    /// 不随词库目录变化清。失效同 `aux_settings_cache`（整表清 + 代次）。
+    schema_def_cache: Mutex<HashMap<String, Option<Arc<Schema>>>>,
+    /// `schema_def_cache` 的失效代次（同 `aux_settings_gen`）。
+    schema_def_gen: std::sync::atomic::AtomicU64,
     /// 词库统计结果（方案 id → (缓存键, 结果)），见 [`Self::dict_stats`]。键含各库摘要，
     /// 词库一变自然失效，故不接 `invalidate_schema`；只存结果（KB 级），不存中间集合。
     dict_stats_cache: Mutex<HashMap<String, (String, Arc<dict_stats::SystemDictStats>)>>,
@@ -1017,6 +1038,8 @@ impl EngineManager {
             codetable_settings_cache: Mutex::new(HashMap::new()),
             codetable_settings_gen: std::sync::atomic::AtomicU64::new(0),
             schema_type_cache: Mutex::new(HashMap::new()),
+            schema_def_cache: Mutex::new(HashMap::new()),
+            schema_def_gen: std::sync::atomic::AtomicU64::new(0),
             dict_stats_cache: Mutex::new(HashMap::new()),
             dict_stats_gates: Mutex::new(HashMap::new()),
             user_dicts_seen: Mutex::new(HashMap::new()),
@@ -1107,14 +1130,10 @@ impl EngineManager {
         if schema_id.is_empty() {
             return global;
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .and_then(|s| s.engine.pinyin.separator)
-        .filter(|v| !v.is_empty())
-        .unwrap_or(global)
+        self.schema_def_cached(schema_id)
+            .and_then(|s| s.engine.pinyin.separator.clone())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(global)
     }
 
     /// 当前活跃拼音方案是否为双拼（`engine.pinyin.scheme == "shuangpin"`）。
@@ -3850,28 +3869,20 @@ impl EngineManager {
         if self.schema_engine_type(schema_id).as_deref() != Some("mixed") {
             return None;
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| s.engine.mixed.primary_schema)
-        .filter(|p| !p.is_empty())
+        self.schema_def_cached(schema_id)
+            .map(|s| s.engine.mixed.primary_schema.clone())
+            .filter(|p| !p.is_empty())
     }
 
     /// 混输方案的拼音子方案 id（`[engine.mixed].secondary_schema`）；非混输/未知/未配置返回 None。
-    /// 按键路径上用：引擎类型走缓存，不登记用户分库（不列目录、不读分库头与开关文件）。
+    /// 按键路径上用：引擎类型与方案定义都走缓存。
     pub fn mixed_secondary_schema(&self, schema_id: &str) -> Option<String> {
         if self.schema_engine_type(schema_id).as_deref() != Some("mixed") {
             return None;
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| s.engine.mixed.secondary_schema)
-        .filter(|p| !p.is_empty())
+        self.schema_def_cached(schema_id)
+            .map(|s| s.engine.mixed.secondary_schema.clone())
+            .filter(|p| !p.is_empty())
     }
 
     /// 写入/词频归属 id：非混输 = `data_schema_id(自身)`（source 无关，零回归）；
@@ -4383,6 +4394,7 @@ impl EngineManager {
             .remove(schema_id);
         self.invalidate_aux_settings_cache();
         self.invalidate_codetable_settings_cache();
+        self.invalidate_schema_def_cache();
         self.invalidate_data_facts();
         self.schema_type_cache
             .lock()
@@ -4624,6 +4636,7 @@ impl EngineManager {
             .clear();
         self.invalidate_aux_settings_cache();
         self.invalidate_codetable_settings_cache();
+        self.invalidate_schema_def_cache();
         self.invalidate_data_facts();
         self.schema_type_cache
             .lock()
@@ -5900,10 +5913,28 @@ impl EngineManager {
         if id.is_empty() {
             return None;
         }
-        let schema =
-            Self::read_schema(&id, self.data_dir.as_deref(), self.override_dir.as_deref())?;
-        let c = schema.engine.chaizi;
+        let c = self.schema_def_cached(&id)?.engine.chaizi.clone();
         c.is_configured().then_some(c)
+    }
+
+    /// 预填按键路径要用的方案级缓存（活跃方案及其混输成员的定义、辅助码设置）。
+    /// 在方案失效 / 配置重载 / 切方案之后、非按键线程上调，让失效后的第一键也不读盘。
+    pub fn warm_hot_schema_fields(&self) {
+        let active = self.active_schema_id();
+        if active.is_empty() {
+            return;
+        }
+        let _ = self.schema_def_cached(&active);
+        for member in [
+            self.mixed_primary_schema(&active),
+            self.mixed_secondary_schema(&active),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = self.schema_def_cached(&member);
+        }
+        let _ = self.aux_code_settings_cached();
     }
 
     /// 活跃方案的辅助码生效设置：全局基线 `[schema.pinyin.aux_code]` 折叠方案段
@@ -5928,21 +5959,70 @@ impl EngineManager {
     /// 失效点见 `aux_settings_cache`：设置页写方案覆盖层、重载配置都会清；**绕过这些入口直接改
     /// 磁盘文件**（手改 `schema_overrides`）要等下一次重载才生效，与 `freq_settings_for` 同口径。
     pub fn aux_code_settings_cached(&self) -> AuxCodeSettings {
-        let id = self.active_schema_id();
+        self.aux_code_settings_cached_of(&self.active_schema_id())
+    }
+
+    /// 同 [`Self::aux_code_settings_of`]，但走缓存（失效点同 [`Self::aux_code_settings_cached`]）。
+    /// 按辅助码触发键进入时用：那是按键路径，按来源方案取（临拼在五笔方案下引用拼音方案）。
+    pub fn aux_code_settings_cached_of(&self, schema_id: &str) -> AuxCodeSettings {
         if let Some(s) = self
             .aux_settings_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&id)
+            .get(schema_id)
         {
             return s.clone();
         }
         let generation = self
             .aux_settings_gen
             .load(std::sync::atomic::Ordering::Acquire);
-        let s = self.aux_code_settings_of(&id);
-        self.cache_aux_settings(id, s.clone(), generation);
+        let s = self.aux_code_settings_of(schema_id);
+        self.cache_aux_settings(schema_id.to_string(), s.clone(), generation);
         s
+    }
+
+    /// 方案定义（合并 override 后），走 `schema_def_cache`。只取方案级标量字段，见该字段文档。
+    fn schema_def_cached(&self, schema_id: &str) -> Option<Arc<Schema>> {
+        if let Some(v) = self
+            .schema_def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(schema_id)
+        {
+            return v.clone();
+        }
+        let generation = self
+            .schema_def_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+        let def = Self::read_schema(
+            schema_id,
+            self.data_dir.as_deref(),
+            self.override_dir.as_deref(),
+        )
+        .map(Arc::new);
+        let mut cache = self
+            .schema_def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self
+            .schema_def_gen
+            .load(std::sync::atomic::Ordering::Acquire)
+            == generation
+        {
+            cache.insert(schema_id.to_string(), def.clone());
+        }
+        def
+    }
+
+    /// 清 `schema_def_cache` 并推进失效代次（持锁完成）。
+    fn invalidate_schema_def_cache(&self) {
+        let mut cache = self
+            .schema_def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.clear();
+        self.schema_def_gen
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// 回填 `aux_settings_cache`：`generation` 是算之前记下的失效代次，期间被清过就丢弃。
@@ -6648,6 +6728,7 @@ impl EngineManager {
         override_dir: Option<&Path>,
         user_text_dir: Option<&Path>,
     ) -> Option<Schema> {
+        SCHEMA_READS.with(|n| n.set(n.get() + 1));
         if Config::custom_hides_schema(schema_id) {
             Self::warn_hidden_schema_once(schema_id);
             return None;
@@ -11766,6 +11847,76 @@ input_chars = \"a-z;\"
             "nonexistent",
             "未知方案 data_schema_id 应返回自身 id"
         );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+    }
+
+    /// 按键路径取的方案级字段（混输成员、分隔符策略、辅助码设置）只在首次读盘，之后走缓存；
+    /// 方案失效后重读并取到新值。计数按线程，故并行测试互不干扰。
+    #[test]
+    fn hot_path_schema_fields_read_disk_once() {
+        let base_dir = std::env::temp_dir().join("wind_eng_hot_path_schema_reads");
+        let schemas = base_dir.join("schemas");
+        let ov_dir = std::env::temp_dir().join("wind_eng_hot_path_schema_reads_ov");
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::create_dir_all(&ov_dir).unwrap();
+        let write = |name: &str, body: &str| {
+            std::fs::write(schemas.join(format!("{name}.schema.toml")), body).unwrap()
+        };
+        write(
+            "py_hp",
+            "[schema]\nid = \"py_hp\"\n[engine]\ntype = \"pinyin\"\n",
+        );
+        write(
+            "ct_hp",
+            "[schema]\nid = \"ct_hp\"\n[engine]\ntype = \"codetable\"\n",
+        );
+        write(
+            "mx_hp",
+            "[schema]\nid = \"mx_hp\"\n[engine]\ntype = \"mixed\"\n[engine.mixed]\n\
+             primary_schema = \"ct_hp\"\nsecondary_schema = \"py_hp\"\n",
+        );
+        let mut cfg = Config::default();
+        cfg.schema.active = "mx_hp".into();
+        cfg.schema.available = vec!["mx_hp".into(), "ct_hp".into(), "py_hp".into()];
+        let mgr =
+            EngineManager::with_store_override(&cfg, Some(&base_dir), None, Some(ov_dir.clone()));
+
+        let touch = || {
+            assert_eq!(
+                mgr.write_data_schema_id("mx_hp", CandidateSource::CodeTable),
+                Some("ct_hp".to_string())
+            );
+            let _ = mgr.pinyin_separator_mode_of("mx_hp");
+            let _ = mgr.aux_code_settings_cached_of("mx_hp");
+            mgr.mixed_secondary_schema("mx_hp")
+        };
+        assert_eq!(touch(), Some("py_hp".to_string()));
+        let warmed = schema_reads_on_current_thread();
+        for _ in 0..3 {
+            touch();
+        }
+        assert_eq!(
+            schema_reads_on_current_thread(),
+            warmed,
+            "预热后不应再读方案文件"
+        );
+
+        std::fs::write(
+            ov_dir.join("mx_hp.toml"),
+            "[engine.mixed]\nsecondary_schema = \"py_hp2\"\n",
+        )
+        .unwrap();
+        mgr.invalidate_schema("mx_hp");
+        assert_eq!(
+            touch(),
+            Some("py_hp2".to_string()),
+            "失效后应取到 override 新值"
+        );
+        assert!(schema_reads_on_current_thread() > warmed);
 
         let _ = std::fs::remove_dir_all(&base_dir);
         let _ = std::fs::remove_dir_all(&ov_dir);

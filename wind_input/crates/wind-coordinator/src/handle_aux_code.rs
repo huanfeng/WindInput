@@ -150,7 +150,7 @@ impl Coordinator {
         // 候选面与生命周期，而上面那条重入路径对它们依然成立。
         //
         // ★ 临拼放行的依据是「它产出的正是拼音候选」，与辅助码筛的对象同类；判据不是
-        // 「哪些模式允许」的第二份清单，而是下面 `aux_code_settings_of(来源方案)` 是否
+        // 「哪些模式允许」的第二份清单，而是下面 `aux_code_settings_cached_of(来源方案)` 是否
         // 真的给出了码表——落点存在 ⇔ 操作可行（同 `candidate_op_scope` 的收敛方式）。
         if !matches!(state.active, None | Some(ModeKind::TempPinyin)) {
             return None;
@@ -159,8 +159,8 @@ impl Coordinator {
         // 设置按**来源方案**取：临拼在五笔方案下引用的是拼音方案，而辅助码码表配在
         // `[engine.aux_code].files` 里——拿五笔的取，`paths.is_empty()` 恒成立、静默不进。
         let settings = match self.overlay_engine_schema(state) {
-            Some(s) => self.engine_mgr.aux_code_settings_of(&s),
-            None => self.engine_mgr.aux_code_settings(),
+            Some(s) => self.engine_mgr.aux_code_settings_cached_of(&s),
+            None => self.engine_mgr.aux_code_settings_cached(),
         };
         if !settings.enabled {
             return None;
@@ -2040,11 +2040,13 @@ mod tests {
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         assert_eq!(kept(&st), vec!["李", "樱"]);
         let _ = c.handle_aux_code_key(&mut st, &key(keymap::VK_ESCAPE, 0));
-        std::fs::write(
-            ov.join("pinyin.toml"),
-            "[engine.aux_code]\nfiles = [\"aux_code/other.txt\"]\n",
-        )
-        .unwrap();
+        // 走设置页保存方案设置的真实入口：它负责让进入辅助码用的缓存失效。
+        let ov_value: toml::Value = "[engine.aux_code]\nfiles = [\"aux_code/other.txt\"]\n"
+            .parse()
+            .unwrap();
+        c.engine_mgr
+            .write_schema_override("pinyin", &ov_value)
+            .unwrap();
         assert!(c.enter_aux_code(&mut st, keymap::VK_BACKTICK).is_some());
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('Q'), 0));
         assert_eq!(kept(&st), vec!["李", "樱", "河"], "新来源 other.txt 生效");

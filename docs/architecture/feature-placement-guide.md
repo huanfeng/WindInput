@@ -226,7 +226,7 @@ fn finish_desktop_key(&self, data: &KeyEventData, action: KeyAction) -> KeyActio
 | 3 | 临拼、临英、mix、特殊、反查改用 profile | 同上 + 各模式测试 | 未开始 |
 | 4 | 抽 `finish_session_action`，逐字复现现状；缺口逐项定案 | smart_symbol / auto_spacing / freq_learn 测试 | 未开始 |
 | 5 | 以模式为键的 `match` 去掉 `_ =>` | 编译通过 | 未开始 |
-| 6 | 清掉 §6.3 的读盘点 | 计数测试（见 §6.2） | 未开始 |
+| 6 | 清掉 §6.3 的读盘点 | 计数测试（见 §6.2） | 完成 |
 
 ## 6. 输入流程零读盘
 
@@ -251,22 +251,32 @@ fn finish_desktop_key(&self, data: &KeyEventData, action: KeyAction) -> KeyActio
 
 ### 6.2 怎么守
 
-计划在 `EngineManager` 的 `read_schema_in` 与数据文件加载入口加调用计数（仅测试构建），
-在 `tests/input_flow` 一类集成测试里断言「预热后连续打一段字，计数不变」。规则先靠本文与审查，
-计数断言随 §5.4 第 6 步落地。
+`wind_engine::manager::schema_reads_on_current_thread()` 统计本线程读方案文件的次数（按线程计，
+后台预热线程不计入，并行测试互不干扰）。`wind-coordinator/tests/input_flow_no_disk_reads.rs`
+在码表、拼音、混输三类方案下把同一段输入（打码、整句、分段上屏、分隔符、Esc）打两遍，断言第二遍
+计数不变。新增按键路径功能时，把它的典型按键序列加进这个测试。
 
-### 6.3 现存违规（2026-11-13 排查）
+计数只覆盖方案文件。数据文件（词库、表）的读入目前靠 §6.1 的约定与审查守。
+
+### 6.3 已修复的违规（2026-11-13 排查）
 
 `EngineManager::read_schema` 每次调用都要：查文件存在 → 读方案 TOML → 解析 → 列发现目录并读
-每个词库文件头 → 读合并 override 文件。以下调用点在按键路径上且没有缓存：
+每个词库文件头 → 读合并 override 文件。排查时以下调用点在按键路径上且没有缓存，现已修复：
 
-| 调用 | 触发条件 | 位置 |
+| 调用 | 原触发条件 | 修法 |
 |---|---|---|
-| `mixed_primary_schema` | 混输方案**每次按键**：`apply_freq_rerank` 取码表归属 id（`write_data_schema_id`）；每次候选推送：`code_source_schema`（其注释写「不读盘」，混输下不成立）；联想取词方案 `assoc_word_schema` | wind-engine `manager.rs` |
-| `mixed_secondary_schema` | 混输分段上屏后，剩余编码每次重建候选（`build_candidates` 开头）；注释写「按键路径上用」，但无缓存 | 同上 |
-| `pinyin_separator_mode_of` | 每次判断手动分隔符键（`manual_separator_key`：按 `'` / `` ` `` 时、符号缓冲闸门、整句切换键冲突检查） | 同上，经 `handle_candidate.rs::manual_separator_vk_of` |
-| `aux_code_settings_of` / `aux_code_settings` | 按辅助码触发键进入辅助码模式时（`handle_aux_code.rs::enter_aux_code`）；逐键筛选已改用 `aux_code_settings_cached` | 同上 |
-| 联想下一词表 | 智能联想档**第一次**出联想时在按键线程同步读入并解析约 2 MB 文本 | `handle_assoc.rs::assoc_bigram` |
+| `mixed_primary_schema` | 混输方案每次按键（调频取码表归属 id、候选推送取 `code_source_schema`、联想取词方案） | 走 `schema_def_cache` |
+| `mixed_secondary_schema` | 混输分段上屏后，剩余编码每次重建候选 | 走 `schema_def_cache` |
+| `pinyin_separator_mode_of` | 每次判断手动分隔符键 | 走 `schema_def_cache` |
+| `aux_code_settings_of` / `aux_code_settings` | 按辅助码触发键进入辅助码模式时 | `enter_aux_code` 改用 `aux_code_settings_cached_of` / `aux_code_settings_cached` |
+| `chaizi_spec` + 拆字库路径解析 | 运行期格式串第一次要拆字时（`ensure_chaizi_async`），在调用线程上读方案、查库文件存在 | 方案字段走 `schema_def_cache`，路径解析挪进加载线程 |
+| 联想下一词表 | 智能联想档第一次出联想时在按键线程同步读入约 2 MB 文本 | `DataNeeds::assoc_bigram` 驱动后台加载（`ensure_assoc_bigram_async`）；按键路径只取已加载的表，没加载好按暂缺处理 |
 
-修法统一：前四项并入 `EngineManager` 现有的按方案缓存（与 `schema_type_cache` 同批失效）；
-联想表改为构造 / 重载时加载，或参照 `ensure_chaizi_async` 后台加载。
+`schema_def_cache` 缓存合并 override 后的方案定义，随 `invalidate_schema` / `reload_from_config`
+整表清，只供取方案级标量字段；词库清单等随词库目录变化的字段不要从这里取（见字段文档）。
+清表后由 `EngineManager::warm_hot_schema_fields` 在非按键线程预填（启动预热、`apply_data_needs`、
+切方案），失效后的第一键也不读盘。
+
+缓存的代价：绕过保存入口**手改**用户目录下的方案或 override 文件，要等下一次配置重载才生效——
+与既有的 `schema_type_cache` / `aux_settings_cache` 同一口径。设置页、移动端、CLI、方案包导入、
+备份还原的写入都经 `invalidate_schema` 或 `reload_from_config`，不受影响。

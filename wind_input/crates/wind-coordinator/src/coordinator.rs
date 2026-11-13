@@ -1555,10 +1555,14 @@ pub struct Coordinator {
     /// 智能联想「下一词」表的路径（`assoc/assoc_bigram.txt`，用户目录同名文件整体替代）；
     /// None = 数据缺失，Bigram 源不出、配额顺延。
     pub(crate) assoc_bigram_path: Option<std::path::PathBuf>,
-    /// 「下一词」表本体：**首次用到时才读**（桌面联想默认关，不该为它多占内存）。
-    /// 读失败记一条警告、之后一直是 None，不反复重试。
-    pub(crate) assoc_bigram:
+    /// 「下一词」表本体：**用得上才读**（桌面联想默认关，不该为它多占内存），且只在后台线程读
+    /// （约 2 MB 文本，见 `ensure_assoc_bigram_async`）。读失败记一条警告、之后一直是 None，
+    /// 不反复重试。`Arc` 是为了让加载线程不必持有协调器。
+    pub(crate) assoc_bigram: std::sync::Arc<
         std::sync::OnceLock<Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>>>,
+    >,
+    /// 下一词表的后台加载已派出（只派一次）。
+    pub(crate) assoc_bigram_loading: std::sync::atomic::AtomicBool,
     /// system.phrases.toml 路径（None=无 data_dir，如 headless 测试）。
     /// "恢复默认"据此重读文件，使手工编辑无需重启服务即可生效。
     pub(crate) system_phrase_path: Option<std::path::PathBuf>,
@@ -3249,7 +3253,8 @@ impl Coordinator {
             system_phrase_entries: std::sync::RwLock::new(system_phrase_entries),
             system_phrase_path,
             assoc_bigram_path,
-            assoc_bigram: std::sync::OnceLock::new(),
+            assoc_bigram: std::sync::Arc::new(std::sync::OnceLock::new()),
+            assoc_bigram_loading: std::sync::atomic::AtomicBool::new(false),
             system_comments,
             comment_lib: std::sync::RwLock::new(Arc::new(comment_lib)),
             s2t: Mutex::new(s2t),
@@ -4671,9 +4676,9 @@ impl Coordinator {
     /// 本次照旧返回空、下次就有（与 `ensure_reverse_index_async` 同一模式）。配置里的消费者
     /// 不走这里——它们由 [`Self::sync_chaizi_assets`] 按 `DataNeeds` 装好。
     ///
-    /// 可能每键都被调（短语求值），故先过闸再解析：解析要读方案文件，找不到库还要告警。
-    /// 本代次（两次 sync 之间）只解析一次，找不到也记「试过」。读盘在锁外做，只在换入那一刻
-    /// 取反查表写锁：候选渲染持着它的读锁。
+    /// 可能每键都被调（短语求值），故先过闸：本代次（两次 sync 之间）只派一次，找不到库也记
+    /// 「试过」。方案字段走缓存；库路径解析（查文件存在）与加载都在后台线程，按键线程不碰盘。
+    /// 只在换入那一刻取反查表写锁：候选渲染持着它的读锁。
     pub(crate) fn ensure_chaizi_async(&self) {
         let generation = {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
@@ -4687,12 +4692,10 @@ impl Coordinator {
             }
             a.generation
         };
-        let Some(path) = Self::resolve_chaizi_db(
-            self.data_dir().as_deref(),
-            self.engine_mgr.chaizi_spec().as_ref(),
-        ) else {
+        let Some(spec) = self.engine_mgr.chaizi_spec() else {
             return;
         };
+        let data_dir = self.data_dir();
         {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
             if a.generation != generation || a.db.is_some() || a.loading {
@@ -4712,6 +4715,9 @@ impl Coordinator {
             .name("chaizi-load".into())
             .spawn(move || {
                 let _guard = guard;
+                let Some(path) = Self::resolve_chaizi_db(data_dir.as_deref(), Some(&spec)) else {
+                    return;
+                };
                 let fresh = wind_reverse::ReverseLookup::load(None, Some(&path));
                 if let Some(c) = weak.upgrade() {
                     c.install_runtime_chaizi(generation, path, fresh);
@@ -5550,6 +5556,8 @@ impl Coordinator {
     ///
     /// ⚠️ 会阻塞秒级，**只可在后台线程/测试里调用**，绝不能进按键链路。
     pub fn prewarm_indexes(&self) {
+        // 按键路径要用的方案级字段先填缓存（输入流程零读盘）。
+        self.engine_mgr.warm_hot_schema_fields();
         // 悬停 [编码] / 编码提示取 code_source_schema，词语联想取 assoc_word_schema。
         // 混输下两者通常都解析到同一个主码表成员，故去重后一般只建一份。
         // 两者相同时不必去重：prewarm_reverse_index 幂等，第二次直接返回。
@@ -5578,6 +5586,13 @@ impl Coordinator {
             if self.engine_mgr.prewarm_reverse_index(&id) {
                 debug!("预热辅助码来源反查索引 {} 用时 {:?}", id, t0.elapsed());
             }
+        }
+        // 智能联想档的下一词表：派后台加载，不在这里等（约 2 MB 文本）。
+        if self
+            .assoc_config()
+            .source_enabled(wind_assoc::AssocSource::Bigram)
+        {
+            self.ensure_assoc_bigram_async();
         }
         // 词语联想的用户词 / 临时词文本索引（t185）：联想开着才建——它要扫整张用户词表，
         // 关着联想的用户不该付这笔。没预热也不致命：首次联想会起后台重建，那一次只出系统词。
@@ -8569,6 +8584,10 @@ impl Coordinator {
         if needs.t2s {
             self.ensure_converter(false);
         }
+        if needs.assoc_bigram {
+            self.ensure_assoc_bigram_async();
+        }
+        self.engine_mgr.warm_hot_schema_fields();
     }
 
     /// 切换简繁转换的**一个方向**，返回切换后该方向是否开着。
