@@ -883,16 +883,20 @@ step 2c（尾部残码参与整句解码）此前在混输下**整体关闭**（
 
 ---
 
-## 8. 候选后处理管线（协调器层，所有模式统一）
+## 8. 候选后处理管线（协调器层）
 
-`build_candidates()`（`wind-coordinator/src/handle_candidate.rs:177-340`），引擎返回后依次：
+本节写主链 `build_candidates()`（`wind-coordinator/src/handle_candidate.rs`）。临拼、临英、mix、特殊、
+反查等模式各有平行实现，只接其中几步，清单见 [feature-placement-guide.md](feature-placement-guide.md) §4.2。
+
+引擎返回后依次：
 
 ```
-① engine convert（初始 limit 按引擎类型/码长阶梯，:160-171：码表 100/300/1000，拼音/混输 300）
+① engine convert（初始 limit 按引擎类型/码长阶梯：码表 100/300/1000，拼音/混输 300）
 ② 短语注入（wind-phrase lookup + lookup_prefix）：
      静态/模板短语、$CC 命令（is_command）、$SS/$AA 组（is_group 二级展开）
      weight = hit.weight（精确码/前缀枚举同口径；曾有的 PHRASE_WEIGHT_BASE=40M 类别硬顶已删除，
      短语按自身权重与码表精确候选竞争，见 candidate-sorting-rules.md §5.1）
+②' english_freq_recall：用过的英文词从池尾召回（只召回，位次在 ⑥a 定）
 ③ 层级排序：is_fuzzy asc → **is_partial asc** → is_prefix asc → weight desc → natural_order asc
      （Fuzzy＜子短语＜前缀补全＜完整匹配：与 PinyinEngine 内部排序一致。缺 `is_partial` 时，
      高权重子串单字会靠 weight 反超低权重精确词组——如 `pingtan` 下
@@ -908,9 +912,16 @@ step 2c（尾部残码参与整句解码）此前在混输下**整体关闭**（
      这个按候选长度裁剪。豁免判据是 `is_user_authored`（短语/命令/分组），⛔ **不是**
      `is_common_like`（那个连常用词一起豁免 ⇒ 功能失效）。见 design/single-char-mode.md
 ⑥ apply_freq_rerank：用户词频重排（独立维度，绝不改 weight）
-⑥' apply_direct_aux：直接辅助码（仅双拼，出厂关，§9.1）——末 1～2 位当辅码，命中项并入。
-     钉在全部重排之后、shadow 之前；翻页扩容只重跑本函数，故不能挪到 update_candidates
-⑦ apply_shadow：shadow 规则删除过滤 + 置顶/移动重排（优先级最高，排序后应用）
+⑥a place_english_after_common_exact：英文候选定位（§6.1.2），须在词频重排之后
+⑥b place_sentence_block：整句 N-best 块（仅 sentence_count > 1）
+⑥c protect_top_from_corrected：纠错候选不占首选
+⑥d apply_direct_aux：直接辅助码（仅双拼，出厂关，§9.1）——末 1～2 位当辅码，命中项并入。
+     钉在全部重排之后、shadow 之前；翻页扩容会经 build_candidates 整链重建，挪到 update_candidates 会在翻页时丢失命中项
+⑦ apply_shadow：shadow 规则删除过滤 + 置顶/移动重排；用户调整的最终话语权由返回值 user_pinned
+     兑现（之后的出简让全据此让路），不靠「排在最后」
+⑦' 整句池重跑 ⑤ ⑤' ⑦ 后按名次排回
+⑦'' 空码补全收口（判据落在最终列表上）→ 出简让全（short_code_yield）→ 英文方案头部候选
+     → emoji 扩展（钉在所有加工之后）
 ⑧ 自动上屏复评与守护：
      引擎意向 or recheck_auto_commit（显示态复评，惰性）
      → 目标须在最终候选中存活（未被 shadow 删除）
@@ -1191,7 +1202,8 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 | 词频重排 | used-first 永久档位 | 衰减软置前 | 衰减软置前 | 按候选 source 分流两策略 | 归入档位 3 |
 | preedit | 原始码 | 音节 `'` 分隔 | 原始按键按音节分隔 | `preedit_display`：≥2 音节用拼音拆分串，否则原始码。`preedit_pinyin`（高亮跟随用）判据更宽：**拆分串 ≠ 原串**即给出，覆盖单音节 + 残码（`nun'l`） | 原始输入 |
 
-后处理管线（短语/过滤/词频/shadow/复评，§8）对所有模式统一，由协调器执行。
+后处理管线（短语/过滤/词频/shadow/复评，§8）由协调器执行；主链之外各模式的平行实现接了哪几步，
+见 feature-placement-guide.md §4.2。
 辅助码（§9）不在此表——它不是引擎，是协调器 overlay 模式，对已跑完管线的拼音候选做字形二次筛选。
 
 ---

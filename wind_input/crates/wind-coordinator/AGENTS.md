@@ -59,7 +59,7 @@
 
 ### Working In This Directory
 - **Coordinator 字段（81 个）的锁形态/访问分布/合并禁区**清点在 `docs/design/coordinator-state-inventory.md`——**改动或新增字段前先读**，其 §3「勿动清单」每条都是修过 bug 的结论，§5 是新增字段的归属判据。
-- **按键唯一主入口 `handle_key_event`（coordinator/message_handler.rs）**，优先级链顺序即正确性契约，改动前务必理解：key_up toggle 键切换 → 菜单转发 → key_down 热键 → 候选操作热键（Ctrl+数字）→ 加词模式 → 英文透传 → **夺取回退**（`VK_BACK` + `can_rewind`）→ **`state.active` 单点 match 分派** → 空缓冲模式激活 `try_activate_mode` → Ctrl/Alt 组合清空 → URL 夺取激活 → 以词定字 → `apply_nav_key` 统一导航 → 小键盘 → Esc/Back/Space/Enter/字母数字标点（engine_default）。新增逻辑须想清插在链的哪一环。
+- **按键唯一主入口 `handle_key_event`（coordinator/message_handler.rs）**，优先级链顺序即正确性契约，改动前务必理解：key_up toggle 键切换 → 菜单转发 → key_down 热键 → 候选操作热键（Ctrl+数字）→ 加词模式 → 英文透传 → **夺取回退**（`VK_BACK` + `can_rewind`）→ **`state.active` 单点 match 分派** → 空缓冲模式激活 `try_activate_mode` → Ctrl/Alt 组合清空 → URL 夺取激活 → 以词定字 → `apply_nav_key` 统一导航 → 小键盘 → Esc/Back/Space/Enter/字母数字标点（engine_default）。新增逻辑须想清插在链的哪一环。代码里以 `// 〔Kn …〕` 标注槽位，编号表与落点清单见 `docs/architecture/feature-placement-guide.md` §4.1。
 - **独占模式单点真相源**：临时拼音/临英/URL/特殊/mix 收敛为单字段 `State.active: Option<ModeKind>`（pipeline.rs），结构上保证「同一时刻至多一个独占模式」。新增模式 = 加一个 `ModeKind` 变体 + 一条 match 臂 + 一个 `handle_*_key`，**不要**再引入并行 bool。
 - **不移植 Go 决策器**：Rust 各模式按 schema id 独立查引擎（`EngineManager::convert_with`），无被多模式改写的共享引擎，故 pipeline.rs 刻意不引入 Capability/Processor trait 抽象。读 Go 同名模块时勿照搬其 `decider`/`applyEngineDiff` 机制——此处不存在。
 - **导航键走统一入口 `apply_nav_key`**（配置驱动 `keymap::NavKeys`，来自 wind-keys）：普通模式与所有候选模式共用；`include_printable` 区分码表型（`-`/`=` 作翻页）与文本/表达式型（临英/快捷，`-`/`=` 作输入）。禁止在各模式里各写一套翻页/高亮。

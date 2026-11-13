@@ -49,6 +49,9 @@
 
 `—` = 暂无独立 `AGENTS.md`（多为纯逻辑/工具 crate，职责单一，看 `src/lib.rs` 顶部模块注释即可）。
 
+**新功能动手前**先按 [docs/architecture/feature-placement-guide.md](docs/architecture/feature-placement-guide.md)
+判定落点（属于哪些流程阶段、挂哪个槽位、要同步哪些平行路径），并遵守其中的「输入流程零读盘」规则（§6）。
+
 核心输入链路（词库 → 五类引擎 → 候选后处理）的**现状架构文档**见
 [docs/architecture/engine-candidate-pipeline.md](docs/architecture/engine-candidate-pipeline.md)
 （含混输拼音否决、顶码/满码一致性、各模式流程对比）；改引擎/候选逻辑时同步更新该文档。
