@@ -15,6 +15,9 @@ use crate::engine::{BoundaryResolution, ConvertOptions, ConvertResult, Engine, E
 use crate::freq_rerank::ProtectPolicy;
 use crate::pinyin::{Config as PinyinConfig, PinyinEngine};
 pub use dict_stats::{DictStatsLayer, SystemDictStats};
+pub use dict_view::{
+    DictEntriesPage, DictEntryRow, DictHeader, DictTableInfo, ENTRIES_PAGE_MAX, EntryMatch,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -9016,6 +9019,7 @@ fn misplaced_dict_font_keys(schema: &toml::Value) -> Vec<String> {
 }
 
 mod dict_stats;
+mod dict_view;
 
 /// 全局模糊音配置 → 引擎 `FuzzyConfig`：`enabled` 作总开关，未启用时所有模糊标志归零。
 /// 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。`hint` 是管理器的共享开关

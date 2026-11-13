@@ -6,7 +6,7 @@
 //! 接入进度：契约全部数据域方法均接通真实 store/engine/theme：
 //! - schema.*（含三层合并 getConfig/saveConfig/resetConfig/setDictEnabled/delete）
 //! - dict.*（含 encode/genPinyin 反查出码）、temp.*、freq.*、shadow.*、phrase.*、stats.*、theme.*
-//! - sysDict.categories（词库窗的分类词库清单）
+//! - sysDict.categories / header / entries（词库窗的系统词库表、单库头部与只读词条）
 //! - `schema.references` 暂返 `{}`（删除安全检查未用，前端宽松消费）；
 //!   无 store/themes 时各方法返回合法空集（降级，不报错）。
 //!
@@ -485,11 +485,26 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         ),
-        // 词库窗「系统词库 → 分类词库」清单（带分组、来源、条数）：本体在
-        // `wind_coordinator::schema_dicts_api::categories`；开关仍走 `schema.setDictEnabled`。
+        // 词库窗「系统词库」：一级词库表（含主库、按生效先后）、二级头部卡片与只读词条分页。
+        // 本体在 `wind_coordinator::schema_dicts_api`；开关仍走 `schema.setDictEnabled`。
+        // 读的是词库文本不是 redb，不进 `FULL_SCAN_METHODS`。
         "sysDict.categories" => {
             wind_coordinator::schema_dicts_api::categories(h, str_param(params, "schema")?)
         }
+        "sysDict.header" => wind_coordinator::schema_dicts_api::header(
+            h,
+            str_param(params, "schema")?,
+            str_param(params, "dictId")?,
+        ),
+        "sysDict.entries" => wind_coordinator::schema_dicts_api::entries(
+            h,
+            str_param(params, "schema")?,
+            str_param(params, "dictId")?,
+            params.get("query").and_then(Value::as_str).unwrap_or(""),
+            params.get("mode").and_then(Value::as_str).unwrap_or("code"),
+            usize_param(params, "offset", 0) as u64,
+            usize_param(params, "limit", 100),
+        ),
         // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
         // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
         // 深链带了参数就不会调它——那时用户的意图已经明确。
@@ -11103,8 +11118,9 @@ mod system_stats_tests {
 
 #[cfg(test)]
 mod sys_dict_categories_tests {
-    //! `sysDict.categories`：分类词库清单的形状（group / source / count），停用库也有条数，
-    //! 发现目录登记的库 source 为 dir，开关后再取即反映新状态。
+    //! `sysDict.categories / header / entries`：一级表的形状与先后（主库最先、按 base_order），
+    //! 停用库也有条数，发现目录登记的库 source 为 dir，开关后再取即反映新状态；二级头部卡片与
+    //! 词条分页 / 搜索。
     use super::*;
     use std::sync::Arc;
     use wind_config::Config;
@@ -11136,7 +11152,7 @@ mod sys_dict_categories_tests {
              [engine.codetable]\nmax_code_length = 4\n\
              [[dictionaries]]\nid = \"main\"\npath = \"zm2/zm2.dict.yaml\"\ndefault = true\n\
              [[dictionaries]]\nid = \"term\"\nlabel = \"术语\"\ndescription = \"专业词\"\n\
-             group = \"专业术语\"\npath = \"zm2/term.dict.yaml\"\ndefault_enabled = false\n\
+             group = \"专业术语\"\npath = \"zm2/term.dict.yaml\"\ndefault_enabled = false\nbase_order = 1\n\
              [[dictionaries]]\nid = \"ghost\"\nlabel = \"缺文件\"\npath = \"zm2/ghost.dict.yaml\"\n\
              default_enabled = true\n",
         )
@@ -11144,7 +11160,13 @@ mod sys_dict_categories_tests {
         let head = "---\nname: x\nversion: \"1\"\n...\n";
         std::fs::write(
             schemas.join("zm2/zm2.dict.yaml"),
-            format!("{head}甲\ta\t9\n乙\tb\t5\n"),
+            "---\nname: x\nversion: \"1\"\nimport_tables:\n  - sub/more\n...\n甲\ta\t9\n乙\tb\t5\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(schemas.join("zm2/sub")).unwrap();
+        std::fs::write(
+            schemas.join("zm2/sub/more.dict.yaml"),
+            format!("{head}丁\taa\t3\n戊\tab\t2\n己\tc\t1\n"),
         )
         .unwrap();
         std::fs::write(
@@ -11186,28 +11208,42 @@ mod sys_dict_categories_tests {
     }
 
     #[test]
-    fn lists_groups_sources_and_counts_without_main() {
+    fn lists_main_first_with_order_sources_and_counts() {
         let f = coord("shape");
         let c = &f.c;
         let v = c
             .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
             .unwrap();
-        let ids: Vec<&str> = v
+        let ids: Vec<(&str, u64)> = v
             .as_array()
             .unwrap()
             .iter()
-            .map(|d| d["id"].as_str().unwrap())
+            .map(|d| (d["id"].as_str().unwrap(), d["order"].as_u64().unwrap()))
             .collect();
         assert_eq!(
             ids,
-            ["term", "ghost", "dir:zm2/ext/mine"],
-            "不含主库，按方案顺序"
+            [
+                ("main", 1),
+                ("ghost", 2),
+                ("term", 3),
+                ("dir:zm2/ext/mine", 4)
+            ],
+            "主库最先，其余按 base_order（ghost 0 < term 1 < 发现目录），同值按方案块序"
+        );
+        assert_eq!(
+            item(&v, "main"),
+            &json!({
+                "id": "main", "label": "zm2", "description": "", "group": null,
+                "enabled": true, "source": "main", "count": 5, "order": 1, "togglable": false,
+            }),
+            "主库：没写 label 取文件名，条数含 import_tables 子表，关不掉"
         );
         assert_eq!(
             item(&v, "term"),
             &json!({
                 "id": "term", "label": "术语", "description": "专业词",
                 "group": "专业术语", "enabled": false, "source": "bundled", "count": 2,
+                "order": 3, "togglable": true,
             }),
             "停用的库也有条数"
         );
@@ -11227,6 +11263,112 @@ mod sys_dict_categories_tests {
             ),
             (&json!("dir"), &json!("我的词"), &json!(1), &Value::Null)
         );
+    }
+
+    #[test]
+    fn missing_sub_table_voids_main_count() {
+        let f = coord("subgone");
+        std::fs::remove_file(f.base.join("schemas/zm2/sub/more.dict.yaml")).unwrap();
+        let v =
+            f.c.web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+                .unwrap();
+        assert_eq!(item(&v, "main")["count"], Value::Null);
+    }
+
+    #[test]
+    fn header_card_and_errors() {
+        let f = coord("header");
+        let c = &f.c;
+        let h = c
+            .web_data_rpc(
+                "sysDict.header",
+                &json!({"schema": "zm2", "dictId": "main"}),
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                &h["id"],
+                &h["label"],
+                &h["source"],
+                &h["name"],
+                &h["version"]
+            ),
+            (
+                &json!("main"),
+                &json!("zm2"),
+                &json!("main"),
+                &json!("x"),
+                &json!("1")
+            )
+        );
+        assert_eq!(h["importTables"], json!(["sub/more"]));
+        assert_eq!(h["count"], 5);
+        assert_eq!(h["tables"][0]["name"], "sub/more");
+        assert_eq!(h["tables"][0]["count"], 3);
+        assert!(h["path"].as_str().unwrap().ends_with("zm2.dict.yaml"));
+        assert!(h["mtimeMs"].as_u64().is_some());
+        let t = c
+            .web_data_rpc(
+                "sysDict.header",
+                &json!({"schema": "zm2", "dictId": "term"}),
+            )
+            .unwrap();
+        assert_eq!(
+            (&t["source"], &t["tables"]),
+            (&json!("bundled"), &json!([]))
+        );
+        // 未知 id / 文件缺失 / 缺参
+        for p in [
+            json!({"schema": "zm2", "dictId": "nope"}),
+            json!({"schema": "zm2", "dictId": "ghost"}),
+            json!({"schema": "nope", "dictId": "main"}),
+            json!({"schema": "zm2"}),
+        ] {
+            assert!(c.web_data_rpc("sysDict.header", &p).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn entries_pages_and_searches() {
+        let f = coord("entries");
+        let c = &f.c;
+        let get = |p: Value| c.web_data_rpc("sysDict.entries", &p).unwrap();
+        let v = get(json!({"schema": "zm2", "dictId": "main", "offset": 1, "limit": 2}));
+        assert_eq!(v["total"], 5);
+        assert_eq!(
+            v["rows"],
+            json!([
+                {"code": "b", "text": "乙", "weight": 5, "table": "zm2"},
+                {"code": "aa", "text": "丁", "weight": 3, "table": "sub/more"},
+            ]),
+            "依次展开子表，行上标子表名"
+        );
+        let v = get(json!({"schema": "zm2", "dictId": "main", "query": "a", "mode": "code"}));
+        let texts: Vec<&str> = v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            (v["total"].as_u64(), texts),
+            (Some(3), vec!["甲", "丁", "戊"])
+        );
+        let v = get(json!({"schema": "zm2", "dictId": "main", "query": "丁", "mode": "text"}));
+        assert_eq!(v["total"], 1);
+        let v = get(json!({"schema": "zm2", "dictId": "term", "offset": 9}));
+        assert_eq!(
+            (&v["total"], &v["rows"]),
+            (&json!(2), &json!([])),
+            "越界给空页"
+        );
+        for p in [
+            json!({"schema": "zm2", "dictId": "nope"}),
+            json!({"schema": "zm2", "dictId": "main", "mode": "pinyin"}),
+            json!({"schema": "zm2", "dictId": "ghost"}),
+        ] {
+            assert!(c.web_data_rpc("sysDict.entries", &p).is_err(), "{p}");
+        }
     }
 
     #[test]

@@ -209,7 +209,7 @@ Rime 风格表格，列 `text, code, weight, op, dict`：
 
 ### 6.3 RPC（新增）
 
-`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（返回数组，每项 `{id, label, description, group, enabled, source: "main"|"bundled"|"dir", count, order, togglable}`，含主词库、不含 `user:` 分库，按生效先后排；`group`/`count` 缺时为 null）、`sysDict.header {schema, dictId}`（头部字段 + 路径、mtime、子表清单）、`sysDict.entries {schema, dictId, query?, mode: code|text, offset, limit}`（`{total, rows: [{code, text, weight, table}]}`，只读）。开关继续用 `schema.setDictEnabled`。
+`sysDict.search {schema, query, mode: code|text, offset, limit}`、`sysDict.patch.list / setWeight / hide / remove / clearStale`、`sysDict.categories {schema}`（返回数组，每项 `{id, label, description, group, enabled, source: "main"|"bundled"|"dir", count, order, togglable}`，含主词库、不含 `user:` 分库，按生效先后排；`group`/`count` 缺时为 null）、`sysDict.header {schema, dictId}`（头部字段 `name / version / sort / columns / importTables`、`---` 前的说明注释 `notes`，外加 `path`、`mtimeMs`、`count` 与子表清单 `tables: [{name, path, count}]`；另带 `id / label / source`）、`sysDict.entries {schema, dictId, query?, mode: code|text, offset, limit}`（`{total, rows: [{code, text, weight, table}]}`，只读；`query` 空即按文件顺序浏览，`code` 为编码前缀且忽略大小写与音节空格，`text` 为词文本子串；`limit` 上限 500）。`dictId` 须是 `categories` 列出的某项，主库没写 id 时用其 `path`。开关继续用 `schema.setDictEnabled`。
 
 ## 7 分阶段
 

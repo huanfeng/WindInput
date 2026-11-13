@@ -343,66 +343,6 @@ impl EngineManager {
     }
 }
 
-/// [`EngineManager::dict_file_entries`] 的缓存：文件绝对路径 → (大小, mtime, 条数)。
-type EntryCountCache =
-    HashMap<std::path::PathBuf, (u64, Option<std::time::SystemTime>, Option<u64>)>;
-static ENTRY_COUNTS: std::sync::OnceLock<std::sync::Mutex<EntryCountCache>> =
-    std::sync::OnceLock::new();
-
-impl EngineManager {
-    /// 一张词库文件的条目数（设置端「分类词库」清单用）：按方案里的 `path` 经覆盖解析定位
-    /// `.dict.yaml`，按加载器的口径数正文行（[`count_dict_entries`]）。停用的库也数得出——只读
-    /// 文本，不加载、不建 wdat（同上面「停用的库只列不计」的顾虑）。按（大小, mtime）缓存，
-    /// 文件没变不重扫。
-    ///
-    /// 写了 `import_tables` 的库返回 `None`：词条有一部分（包装库是全部）在子表里，只数本文件
-    /// 会少算。文件不在（含只投放了 wdat 的库）或读不出也是 `None`。
-    pub fn dict_file_entries(&self, rel: &str) -> Option<u64> {
-        let schemas_dir = self.data_dir.as_deref()?.join("schemas");
-        let path = Self::resolve_dict_file(rel, &schemas_dir);
-        let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
-        let stamp = (meta.len(), meta.modified().ok());
-        let cache = ENTRY_COUNTS.get_or_init(Default::default);
-        if let Some(&(len, mtime, n)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&path)
-            && (len, mtime) == stamp
-        {
-            return n;
-        }
-        let n = if Self::read_dict_head(&path).1.is_empty() {
-            Some(count_dict_entries(&std::fs::read_to_string(&path).ok()?))
-        } else {
-            None
-        };
-        cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(path, (stamp.0, stamp.1, n));
-        n
-    }
-}
-
-/// 数 rime 词库正文的词条行，口径同加载器（`wind_dict::rime_body_layout`）：去 BOM，正文从
-/// 独占一行的 `...` 之后算起（没有就没有正文），跳过空行与 `#` 注释——`# no comment` 指令
-/// 之后的 `#` 行是数据。
-fn count_dict_entries(raw: &str) -> u64 {
-    let text = wind_utils::text::normalize_input(raw);
-    let Some((body, cutoff)) = wind_dict::rime_body_layout(&text) else {
-        return 0;
-    };
-    let mut off = body;
-    let mut n = 0u64;
-    for line in text[body..].split_inclusive('\n') {
-        let start = off;
-        off += line.len();
-        let t = line.trim_end();
-        if t.is_empty() || (t.starts_with('#') && cutoff.is_none_or(|c| start <= c)) {
-            continue;
-        }
-        n += 1;
-    }
-    n
-}
-
 /// 通规三级 → 三个累进字集（一级 / 一二级 / 全表）。分节读不出三级时不出字集统计。
 fn common_han_charsets(text: &str) -> Vec<Charset> {
     let levels = wind_dict::stats::parse_common_han_levels(text);
@@ -430,6 +370,7 @@ fn common_han_charsets(text: &str) -> Vec<Charset> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::dict_view::count_dict_entries;
     use super::*;
 
     fn write(p: &Path, s: &str) {
@@ -569,16 +510,16 @@ mod tests {
         );
     }
 
-    /// 只有 import_tables 的包装库：本文件没有词条，计数给 None 而不是 0。
+    /// 只有 import_tables 的包装库：条数是各子表之和（子表相对包装库所在目录）。
     #[test]
-    fn wrapper_with_only_imports_has_no_count() {
+    fn wrapper_with_only_imports_sums_its_tables() {
         let base = fixture("wrapper");
         write(
             &base.join("schemas/ct/wrap.dict.yaml"),
-            "---\nname: wrap\nimport_tables:\n  - off\n...\n",
+            "---\nname: wrap\nimport_tables:\n  - off\n  - ext\n...\n",
         );
         let m = mgr(&base);
-        assert_eq!(m.dict_file_entries("ct/wrap.dict.yaml"), None);
+        assert_eq!(m.dict_file_entries("ct/wrap.dict.yaml"), Some(3));
         let _ = std::fs::remove_dir_all(&base);
     }
 
