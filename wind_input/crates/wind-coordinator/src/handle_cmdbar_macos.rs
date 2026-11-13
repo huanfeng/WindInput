@@ -53,7 +53,7 @@ pub(crate) fn paste_via_ime(weak: &Weak<Coordinator>) {
     if text.is_empty() {
         return;
     }
-    c.push_commit_text(&text);
+    c.push_commit_text_from(crate::session_exit::ActionOrigin::Command, &text);
 }
 
 /// 构造 macOS 的按键注入服务（[`CoordKeys`]）。

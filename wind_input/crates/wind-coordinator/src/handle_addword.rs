@@ -232,7 +232,22 @@ impl Coordinator {
             | KeyAction::CommitThenDeferComposition { commit_text, .. } => commit_text.as_str(),
             _ => "",
         };
-        let n = committed.encode_utf16().count();
+        // 撤销删的是**光标前**的字：带光标定位的插入（配对「（|）」）只计光标前那段。整段计入的
+        // 话，「你（|）」撤销会删掉「你（」、留下「）」——此前真机上只删 1 个，是延迟左移的透传位
+        // / 迟到的光标回声碰巧把计数刷成了 1，换个时序就会误删。
+        // `cursor_offset` 是从末尾往回退的**格数**（DLL 合成同样次数的 VK_LEFT），按字符取右段。
+        let n = match action {
+            KeyAction::InsertTextWithCursor { cursor_offset, .. } => {
+                let right: usize = committed
+                    .chars()
+                    .rev()
+                    .take(*cursor_offset as usize)
+                    .map(char::len_utf16)
+                    .sum();
+                committed.encode_utf16().count() - right
+            }
+            _ => committed.encode_utf16().count(),
+        };
         if n > 0 {
             self.last_commit_len
                 .store(n, std::sync::atomic::Ordering::Relaxed);

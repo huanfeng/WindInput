@@ -1447,6 +1447,43 @@ mod tests {
 
     /// 无占位联想下用户挪动光标（点单元格）⇒ 立刻退出联想；自提交回声不算；有占位时不走此路。
     /// 变异检验：去掉 `handle_selection_changed` 里的退出分支 ⇒ 第一段红。
+    /// 命令输出 / 软键盘点击 / 悬停提示插进来的不是联想的下文：收掉无占位联想（打了自提交点，
+    /// 光标回声不会再顺带收）。鼠标选词是联想自己的出口，不在此列。
+    #[test]
+    fn non_input_commits_exit_bare_assoc() {
+        use crate::session_exit::ActionOrigin;
+        use wind_config::app_compat::{AppCompat, AppCompatRule, AssocPlaceholder};
+        for (origin, expect_exit) in [
+            (ActionOrigin::Command, true),
+            (ActionOrigin::SoftKeyboardClick, true),
+            (ActionOrigin::Tooltip, true),
+            (ActionOrigin::Pointer, false),
+        ] {
+            let c = coord_smart();
+            c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+                process: "x.exe".into(),
+                assoc_placeholder: Some(AssocPlaceholder::None),
+                ..Default::default()
+            }]));
+            c.pid_names.lock().unwrap().insert(7, "x.exe".into());
+            c.active_compat.lock().unwrap().pid = 7;
+            c.refresh_active_compat_lookups();
+            {
+                let mut st = c.state.lock().unwrap();
+                c.auto_commit_then_assoc(&mut st, "你好".into(), "你好");
+                assert!(st.assoc_active(), "前提：进了联想态");
+            }
+            let st = c.state.lock().unwrap();
+            let _ =
+                c.finish_session_action(st, origin, Coordinator::commit_action("★".into(), true));
+            assert_eq!(
+                !c.state.lock().unwrap().assoc_active(),
+                expect_exit,
+                "{origin:?}"
+            );
+        }
+    }
+
     #[test]
     fn bare_assoc_exits_when_user_moves_the_caret() {
         use wind_bridge::handler::MessageHandler;

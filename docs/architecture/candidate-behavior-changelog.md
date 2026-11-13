@@ -27,6 +27,22 @@
 
 ---
 
+## 2026-11-13 · 命令输出、软键盘点击、配对插入的上屏收尾（0.132）
+
+- 合入：（待填）；范围：全部方案；命令栏 `type()` / 工具栏按钮 / `command:` 绑定 / mac·Linux 粘贴短语 / `ime.pair`、软键盘鼠标点击、自动配对
+- 变化：
+  - 自动配对「你（|）」后撤销上屏 前：计数按整段 2，靠延迟左移的透传位或迟到的光标回声碰巧刷成 1，时序没碰上就删掉「你（」→ 后：恒删光标前的「（」
+  - 自定义成多字符左段的自动配对 前：光标按左段长度回退、落错位置 → 后：恒回退右符号 1 格
+  - 命令输出 / 粘贴短语上屏后撤销 前：mac / Linux 按上一笔的长度删，Windows 删 1 个 → 后：删这次输出的整段（连续多段 `type()` 合为一笔；中间有 `key.tap` 等副作用时只删 1 个）
+  - 码表自动造词 前：mac / Linux 上命令文本前后两字可能连成假词 → 后：命令输出打断滑窗
+  - 软键盘鼠标点击 前：不补中英空格、不记统计、Windows 上断滑窗 → 后：补空格、记统计、喂滑窗，与物理键敲软键盘一致
+  - 无占位联想（Excel / WPS 表格）中命令输出 / 软键盘点击 / 悬停提示上屏 前：Windows 靠光标回声收掉联想 → 后：出口显式收，不再依赖回声
+  - 托盘 / 热键 / 按应用切方案时有未上屏编码 前：检索范围临时放宽带进新方案的下一次组码 → 后：随切换复原
+- 触发条件：出厂即生效；滑窗相关需开码表自动造词（出厂关）；撤销需绑 `ime.undo_commit`（出厂未绑）
+- 回退旧行为：无（设计变更）
+- 钉住的测试：`wind-coordinator/src/session_exit.rs::tests::cursor_insert_counts_only_text_before_the_cursor`、`command_output_breaks_the_draft_while_softkeyboard_click_feeds_it`、`command_multi_segment_output_counts_as_one_undo`、`mode_switch_take_restores_relaxed_scope`；`handle_assoc.rs::tests::non_input_commits_exit_bare_assoc`
+- 来源：内部（落点指引 §4.3；配对撤销由维护者真机复测发现时序依赖）
+
 ## 2026-11-13 · 鼠标点选 / CapsLock / 悬停提示上屏补齐收尾（0.132）
 
 - 合入：12fd121d；范围：全部方案，非按键上屏来源（鼠标点选候选、CapsLock 钩子选词、悬停提示菜单上屏、移动端候选栏选词）

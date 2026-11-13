@@ -10506,6 +10506,9 @@ impl Coordinator {
         state.committed_segs.clear();
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
+        // 组合随切换结束，检索放宽一并复原（独占分支经 `reset_exclusive_modes` 复原）。托盘 / 热键 /
+        // 按应用切方案走推送上屏、不经出口的 `expire_scope_override`，不在这里复原就会带进新方案。
+        state.scope_relaxed = false;
         state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.candidates.clear();
         state.preedit.clear();
