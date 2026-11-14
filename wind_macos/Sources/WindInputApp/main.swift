@@ -143,4 +143,7 @@ app.setActivationPolicy(.accessory)
 // 失败不致命 — Go 服务可能晚启动, host 内部 lazy retry。
 CandidatePanelHost.shared.start()
 
+// 监听输入源切换：只在真正切入本输入法时补发 IME_ACTIVATED（见 InputSourceMonitor）。
+InputSourceMonitor.shared.start()
+
 app.run()
