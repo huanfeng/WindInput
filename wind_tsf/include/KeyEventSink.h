@@ -5,6 +5,7 @@
 #include "SkipKeyTable.h"
 #include "PassthroughNote.h"
 #include "InputSequenceChar.h"
+#include "ObservedKeyGate.h"
 #include "ToggleTapPolicy.h"
 #include "CtrlRawPolicy.h"
 #include "CtrlSpacePolicy.h"
@@ -495,6 +496,9 @@ private:
         CKeyEventSink* sink;
         WPARAM vk;
         BOOL* eaten;
+        LPARAM lParam;
+        // 挂在 OnTestKeyDown（true）还是 OnKeyDown（false）上：扩展旁路上报按此去重。
+        bool fromTest;
         // skip 表命中（我们自己注入的键）时置位，见 `PassthroughNote.h` 的排除项论证。
         bool suppressed = false;
         void Suppress() { suppressed = true; }
@@ -504,9 +508,20 @@ private:
             {
                 sink->_passthrough.NoteKeyDown((uint32_t)vk, *eaten != FALSE, suppressed);
                 sink->_NoteInputSequenceAtExit(vk, *eaten != FALSE, suppressed);
+                sink->_ReportObservedKeyAtExit(vk, lParam, fromTest, *eaten != FALSE, suppressed);
             }
         }
     };
+
+    // ── 扩展旁路上报（CMD_KEY_OBSERVED）──────────────────────────────────────────
+    //
+    // 放行给宿主的用户按键核心看不见；有扩展订阅按键时（core 推开 CONFIG_KEY_EXTENSION_KEY_OBSERVE）
+    // 在上面那个守卫的出口异步报一份，供按键音这类扩展用。去重规则在 `ObservedKeyGate.h`；
+    // 密码框与键盘禁用时一个都不报。只读通知，核心不拿它做任何按键处理。
+    void _ReportObservedKeyAtExit(WPARAM vk, LPARAM lParam, bool fromTest, bool eaten, bool suppressed);
+    WindObserve::ObservedKeyGate _observeGate;
+    // config 回调在 IPC 读线程写、TSF 线程读。
+    std::atomic<bool> _observeKeys{false};
 
     // ⚠️⚠️ **skip 表放行的键一律不上报**，哪怕它们确实 `pfEaten = FALSE` 走进了宿主。
     //

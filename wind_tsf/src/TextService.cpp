@@ -5576,6 +5576,11 @@ bool CTextService::_IsFocusKeyboardDisabled(ITfDocumentMgr* pDocMgr)
 //
 // context 级的密码信号已在 OnSetFocus 折进 mask 的 IS_PASSWORD 位（见 _focusIsPassword
 // 赋值处），因此这里只判 mask 就已覆盖两种来源，无需再单独看 _focusIsPassword。
+BOOL CTextService::IsPasswordScope() const
+{
+    return (_focusInputScopeMask & kPasswordScopeBits) != 0;
+}
+
 BOOL CTextService::IsPasswordSuppressActive() const
 {
     if (!_passwordSuppressEnabled)

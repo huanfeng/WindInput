@@ -44,6 +44,11 @@ constexpr uint32_t HOST_RENDER_FAIL_WINDOW_CREATE = 1; // CreateWindowInBand fai
 // on the same control, such as clicking a password field inside the same web page).
 // Payload: InputStateReportPayload (14 bytes). Rust side: InputStateReportPayload (Task 2).
 constexpr uint16_t CMD_INPUT_STATE_REPORT    = 0x0213;
+// Observed key (C++ -> core, async): a user keydown that this DLL passed straight to the host
+// (English-mode letters, idle Backspace/Enter, ...). Read-only notice for extensions, never fed
+// into key handling. Only sent while core has pushed CONFIG_KEY_EXTENSION_KEY_OBSERVE on, and
+// never in password fields / keyboard-disabled contexts. Payload: KeyObservedPayload (8 bytes).
+constexpr uint16_t CMD_KEY_OBSERVED          = 0x021D;
 // Diagnostics snapshot (C++ -> core, async): focus window chain + foreground window + TSF
 // context instance ids. Payload: DiagSnapshotHeader (64 bytes) followed by three
 // length-prefixed UTF-8 class names (focus / root / foreground), each `len u16 LE + bytes`.
@@ -844,6 +849,14 @@ struct InputStateReportPayload
 };
 static_assert(sizeof(InputStateReportPayload) == 14, "InputStateReportPayload must be 14 bytes");
 
+// CMD_KEY_OBSERVED payload (8 bytes). Mirrors Rust KeyObservedPayload.
+struct KeyObservedPayload
+{
+    uint32_t keyCode;   // 4 bytes LE, offset 0..4: virtual key code
+    uint32_t modifiers; // 4 bytes LE, offset 4..8: KEYMOD_* (same bits as KeyPayload)
+};
+static_assert(sizeof(KeyObservedPayload) == 8, "KeyObservedPayload must be 8 bytes");
+
 // UIElement state (C++ -> core, async). flags 位定义同 Rust UIELEMENT_FLAG_*。
 constexpr uint32_t UIELEMENT_FLAG_HOST_DRAWS     = 0x0001; // 宿主接管绘制（pbShow=FALSE / Show(FALSE)）
 constexpr uint32_t UIELEMENT_FLAG_UI_LESS_THREAD = 0x0002; // 线程以 TF_TMAE_UIELEMENTENABLEDONLY 激活
@@ -962,6 +975,9 @@ constexpr const char* CONFIG_KEY_MULTILINE_COMMIT = "multiline_commit";
 // 「本进程可能命中 compat 标题规则」开关（采不采窗口标题）。格式：enabled(u8)。**默认关**，重连从关起步，
 // core 握手必推、compat 重载后广播。关着时 OnSetFocus 一次标题都不取（标题是用户数据）。
 constexpr const char* CONFIG_KEY_COMPAT_TITLE_MATCH = "compat_title_match";
+// 「有扩展订阅按键」开关：开着时本 DLL 把放行给宿主的用户按键经 CMD_KEY_OBSERVED 旁路报给 core。
+// 格式：enabled(u8)。**默认关**，重连从关起步，core 握手必推、扩展授权变化时广播。
+constexpr const char* CONFIG_KEY_EXTENSION_KEY_OBSERVE = "extension_key_observe";
 // 「英文半角列有自定义标点映射」的源字符集合。英文模式（非全角）下本 DLL 默认直接透传标点键、
 // core 收不到，用户配的「英半」列因此永远不生效；据此集合精确吃下这些键转发给 core。
 // 集合为空（默认）= 行为与历史完全一致。格式：count(u8) + [ch:u16(LE)]...

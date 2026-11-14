@@ -227,6 +227,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME passthrough_note COMMAND passthrough_note_test)
 
+    add_executable(observed_key_gate_test tests/observed_key_gate_test.cpp)
+    target_include_directories(observed_key_gate_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(observed_key_gate_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME observed_key_gate COMMAND observed_key_gate_test)
+
     add_executable(number_key_policy_test tests/number_key_policy_test.cpp)
     target_include_directories(number_key_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)
