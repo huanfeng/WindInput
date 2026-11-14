@@ -10,7 +10,9 @@ use wind_bridge::handler::MessageHandler;
 use wind_config::Config;
 use wind_keys::keymap;
 use wind_ui_types::ToolbarState;
-use wind_ui_types::{CandidateOp, MenuAnchor, MenuCmd, MenuKind, ToolbarAction, UiCommand};
+use wind_ui_types::{
+    CandidateOp, MenuAnchor, MenuCmd, MenuKind, PIN_AT_MAX, ToolbarAction, UiCommand,
+};
 
 /// 候选窗定位方式与坐标：菜单一起写，写回目标也按这一组判（见 `menu_writeback_target`）。
 const CANDIDATE_POS_FIELDS: [&str; 3] = ["candidate_position_mode", "candidate_x", "candidate_y"];
@@ -215,7 +217,7 @@ impl Coordinator {
     pub(crate) fn run_menu_cmd(&self, cmd: MenuCmd) {
         match cmd {
             MenuCmd::SchemaEnglish => {
-                // ctrl_held=false：菜单点的，与按键无关。它只被 `ignore_host_ime_close`
+                // ctrl_held=false：菜单点的，与按键无关。它只被 `ignore_host_ime_switch`
                 // 消费，而那条规则只拦 compartment 来源，菜单永远照办。
                 self.handle_system_mode_switch(
                     false,
@@ -297,7 +299,7 @@ impl Coordinator {
             MenuCmd::AutoPairRule(m) => self.set_auto_pair_rule(m),
             MenuCmd::CompatRuleEnabled(m) => self.set_compat_rule_enabled(m == 1),
             MenuCmd::CandidatePositionRule(m) => self.set_candidate_position_rule(m),
-            MenuCmd::IgnoreHostImeCloseRule(m) => self.set_ignore_host_ime_close_rule(m),
+            MenuCmd::IgnoreHostImeSwitchRule(m) => self.set_ignore_host_ime_switch_rule(m),
             MenuCmd::PasswordForceEnglishRule(m) => self.set_password_force_english_rule(m),
             MenuCmd::AppSchemaRule(m) => self.set_app_schema_rule(m),
             MenuCmd::StatusPositionRule(m) => self.set_status_position_rule(m),
@@ -617,13 +619,13 @@ impl Coordinator {
         self.show_status();
     }
 
-    /// 为当前焦点应用设置「忽略宿主关闭输入法」，并写入用户层 compat.toml。
-    /// `mode_id`：0=跟随默认（清除规则，照常采纳）1=忽略 2=显式不忽略。
+    /// 为当前焦点应用设置「软件切换中英」（忽略 / 采纳宿主写 compartment 引起的中英切换），
+    /// 并写入用户层 compat.toml。`mode_id`：0=跟随全局（清除）1=忽略 2=显式采纳。
     ///
     /// 三步与 [`Self::set_first_show_mode`] 同构。**没有第四步**：判定发生在服务端的
     /// `handle_system_mode_switch`，DLL 侧不需要知道这条规则（它照发不误，被拒后由既有的
     /// 仲裁回路把 compartment 拉回），所以不必给 DLL 推任何东西。
-    pub(crate) fn set_ignore_host_ime_close_rule(&self, mode_id: u8) {
+    pub(crate) fn set_ignore_host_ime_switch_rule(&self, mode_id: u8) {
         let enabled = match mode_id {
             1 => Some(true),
             2 => Some(false),
@@ -631,28 +633,28 @@ impl Coordinator {
         };
         let name = self.active_process_name();
         if name.is_empty() {
-            tracing::warn!("set_ignore_host_ime_close_rule: 当前焦点进程未知，忽略本次设置");
+            tracing::warn!("set_ignore_host_ime_switch_rule: 当前焦点进程未知，忽略本次设置");
             return;
         }
         let Some(user_dir) = self.compat_dirs.1.clone() else {
-            tracing::warn!("set_ignore_host_ime_close_rule: 无用户配置目录，无法持久化");
+            tracing::warn!("set_ignore_host_ime_switch_rule: 无用户配置目录，无法持久化");
             return;
         };
-        if let Err(e) = wind_config::app_compat::set_user_ignore_host_ime_close(
+        if let Err(e) = wind_config::app_compat::set_user_ignore_host_ime_switch(
             &user_dir,
-            self.menu_writeback_target(&name, &["ignore_host_ime_close"]),
+            self.menu_writeback_target(&name, &["ignore_host_ime_switch"]),
             enabled,
         ) {
-            tracing::error!("set_ignore_host_ime_close_rule: 写用户 compat.toml 失败: {e}");
+            tracing::error!("set_ignore_host_ime_switch_rule: 写用户 compat.toml 失败: {e}");
             return;
         }
         self.reload_app_compat();
         tracing::info!(
-            "忽略宿主关闭输入法 for process={name}: {}",
+            "软件切换中英 for process={name}: {}",
             match enabled {
                 Some(true) => "忽略",
-                Some(false) => "不忽略",
-                None => "(follow-default)",
+                Some(false) => "采纳",
+                None => "(follow-global)",
             }
         );
         self.show_status();
@@ -971,6 +973,7 @@ impl Coordinator {
         self.push_password_suppress_config(0);
         self.push_english_pair_config(0);
         self.push_composition_placeholder_config(0);
+        self.push_space_before_digit_config(0);
         self.push_multiline_commit_config(0);
         self.push_compat_title_match_config(0);
     }
@@ -1762,11 +1765,11 @@ impl Coordinator {
             // 勾选显示的是**焦点窗口**生效中的值（与 auto_pair 读 active_compat 同口径）；菜单写回
             // 仍只写纯进程键（带窗口条件的规则 P4 之前只能手写），见 app_compat 的写回接口。
             let proc_win = self.active_focus_window();
-            let (cur_cand_pos, cur_ignore_close, cur_pfe, cur_schema, cur_status, cur_status_fb) =
+            let (cur_cand_pos, cur_ignore_switch, cur_pfe, cur_schema, cur_status, cur_status_fb) =
                 self.with_compat_rule(&proc, &proc_win, |rule| {
                     (
                         rule.and_then(|r| r.candidate_position_mode),
-                        rule.and_then(|r| r.ignore_host_ime_close),
+                        rule.and_then(|r| r.ignore_host_ime_switch),
                         rule.and_then(|r| r.password_force_english),
                         rule.and_then(|r| r.schema.clone()),
                         rule.and_then(|r| r.status_position_mode),
@@ -1992,36 +1995,33 @@ impl Coordinator {
                         ),
                     ],
                 ),
-                // 给 WinForms/WPF 那类「焦点落到按钮就关掉全局 IME」的宿主。
+                // 给自作主张写 compartment 切中英的宿主：WinForms/WPF 那类「焦点落到按钮就关掉
+                // 全局 IME」，以及内部焦点切换时把 IME 打开的（SSMS，GH#312）。开和关两个方向都管。
                 //
-                // 第一档写「跟随内置规则」而不是「跟随全局」：这一项**没有**全局设置项，
-                // 它的低层是出厂 compat.toml：第一档 = 还原（不留任何用户层痕迹，继承出厂值），
-                // 写盘时对应 `FieldEdit::Inherit` 而不是「清除」。
-                // 写「跟随全局」会让用户去设置页找一个并不存在的开关。
-                //
-                // 第三档「采纳」与第一档在**当前**行为上可能相同，但语义不同：第一档是
-                // 「听内置的」，第三档是「不管内置说什么，这个应用就是要采纳」。出厂给某个
-                // 宿主开了忽略、而用户不认同时，只有第三档能盖住它。
+                // 第一档「跟随全局」= 清除（下层设了就写 `unset`），全局开关是
+                // `input.ignore_host_ime_switch`。第三档「采纳」与第一档在**当前**行为上可能
+                // 相同，但语义不同：第一档听全局的，第三档是「不管全局怎么设，这个应用就是要
+                // 采纳」——全局开了忽略、而某个应用（gvim）依赖这个状态时，只有第三档能盖住它。
                 M::submenu(
-                    "宿主关闭输入法",
+                    "软件切换中英",
                     vec![
                         M::leaf(
-                            "跟随内置规则",
-                            cmd(MenuCmd::IgnoreHostImeCloseRule(0)),
+                            "跟随全局",
+                            cmd(MenuCmd::IgnoreHostImeSwitchRule(0)),
                             enabled,
-                            cur_ignore_close.is_none(),
+                            cur_ignore_switch.is_none(),
                         ),
                         M::leaf(
                             "忽略",
-                            cmd(MenuCmd::IgnoreHostImeCloseRule(1)),
+                            cmd(MenuCmd::IgnoreHostImeSwitchRule(1)),
                             enabled,
-                            cur_ignore_close == Some(true),
+                            cur_ignore_switch == Some(true),
                         ),
                         M::leaf(
                             "采纳",
-                            cmd(MenuCmd::IgnoreHostImeCloseRule(2)),
+                            cmd(MenuCmd::IgnoreHostImeSwitchRule(2)),
                             enabled,
-                            cur_ignore_close == Some(false),
+                            cur_ignore_switch == Some(false),
                         ),
                     ],
                 ),
@@ -2410,8 +2410,10 @@ impl Coordinator {
     /// 而分叉的表现是「同一个词桌面能置顶、手机上是灰的」，没有任何报错。
     ///
     /// 词条操作的启用态/删除文案按候选来源动态化（对齐 Go window_mouse 菜单状态规则）：
-    /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁全部调位（无稳定位置语义）。
-    /// - 删除：短语→「禁用短语」（软删可恢复）；用户词/临时词→真删；系统词→「隐藏候选」（shadow）。
+    /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁前移/后移（相对邻居，无稳定语义），
+    ///   置顶与「固定到第 N 位」照给。
+    /// - 删除：拼音 / 英文 ≥2 字的词→「屏蔽该词」并另给「在此编码下隐藏」；短语→「禁用短语」
+    ///   （软删可恢复）；码表用户词/临时词→真删；其余系统词→「在此编码下隐藏」（shadow）。
     /// - 特殊模式（快符等）：词条操作**照常提供**，编码取其独立缓冲、归属取其引用方案。
     /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
     pub fn candidate_menu_items(&self, idx: usize) -> Option<Vec<wind_ui_types::MenuItemSpec>> {
@@ -2420,11 +2422,27 @@ impl Coordinator {
         let cand = state.candidates.get(idx)?.clone();
         let word = cand.text.clone();
         let pos = self.reorder_positions(&state, idx);
+        let per_page = self.per_page(state.active);
+        let pin_slots = self.pin_at_slots(&state, idx);
         let scope = self.candidate_op_scope(&state);
         // 快捷输入的格式候选：判据独立于 candidate_op_scope（后者问「有没有词库落点」，
         // 混输没有，返回 None 是对的）。与写端 `candidate_or_quick_format_op` 同源。
         let quick = self.quick_format_scope_at(&state, idx);
         let history = self.quick_history_of(&state, idx).is_some();
+        // 删除作用的候选（英文头部原文候选换成对应词库词，找不到 = 删除不可用），与写端
+        // `candidate_op_in` 同一判据。
+        let delete_target = scope
+            .as_ref()
+            .and_then(|sc| self.delete_target(&state, &sc.schema, &cand));
+        // 删除是否按文字屏蔽：决定文案「屏蔽该词」与有无第二项「在此编码下隐藏」。删除目标取不到
+        // （只有英文数据方案的头部原文条）时按原文条自身判——多字母的照样两项、都灰。
+        // 这一支不能套 `delete_blocks_word`：头部原文条没有来源（不是 English），套进去恒为假，
+        // 菜单就只剩一项「在此编码下隐藏」，与它在英文方案里「本该是屏蔽、只是此刻删不了」的
+        // 身份对不上；写端在目标为 None 时两项都不执行，故这里只影响文案与项数。
+        let blocks_word = scope.as_ref().is_some_and(|sc| match &delete_target {
+            Some(t) => self.delete_blocks_word(&sc.schema, t),
+            None => wind_store::shadow::is_blockable_word(cand.freq_text()),
+        });
         drop(state);
 
         let op = |o: CandidateOp| MenuKind::Op(o);
@@ -2491,9 +2509,11 @@ impl Coordinator {
         // 判据与写端 `candidate_op` 同源，见 `candidate_op_scope`。
         let mut items = if let Some(scope) = scope {
             let cand_id = (!cand.id.is_empty()).then_some(cand.id.as_str());
-            let has_rule = self.shadow_has_rule(&scope.schema, &scope.code, &word, cand_id);
-            // 拼音普通候选**只放行置顶**，前移/后移仍禁（`position=0` 位置语义稳定，
-            // `position=N` 在候选集变动后失去意义）；命令候选不受限。
+            // 规则键是词库原文，与写端同取 `freq_text`（英文大小写投影后 `text` 对不上）。
+            let has_rule =
+                self.shadow_has_rule(&scope.schema, &scope.code, cand.freq_text(), cand_id);
+            // 拼音普通候选**放行置顶与固定到第 N 位**，前移/后移仍禁：那两项是相对邻居的操作，
+            // 邻居随词频、学词、整句每天在变；绝对名次则是用户明确的主张。命令候选不受限。
             // 引擎类型来自 scope：特殊模式问的是它引用的方案，照抄主方案会在「主方案拼音 +
             // 快符码表」时整体误禁调位。
             //
@@ -2508,12 +2528,17 @@ impl Coordinator {
             // 落地时**两端一起放开**（这里与写端 `candidate_op` 的同名守卫）。
             let emoji = cand.is_emoji_suggestion;
             let pinyin_locked = is_pinyin && !cand.is_command;
-            let can_pin = !group_member && !emoji;
-            let movable = !pinyin_locked && !group_member && !emoji;
-            let (delete_label, delete_enabled) = candidate_delete_menu(&cand);
+            // 单字母引导的重复上屏项：不是这个码的候选，调位一律灰（写端同守卫）。
+            let repeat = crate::candidate_grid::is_leading_repeat(&cand);
+            let can_pin = !group_member && !emoji && !repeat;
+            let movable = !pinyin_locked && !group_member && !emoji && !repeat;
+            let (delete_label, delete_enabled) = match &delete_target {
+                Some(t) => candidate_delete_menu(t, blocks_word),
+                None => (candidate_delete_menu(&cand, blocks_word).0, false),
+            };
             let has_rule = has_rule && !emoji;
 
-            vec![
+            let mut items = vec![
                 // 位置按完整列表计（分类筛选中 `idx` 只是子集下标），与写端同源。
                 M::leaf(
                     "置顶",
@@ -2534,9 +2559,24 @@ impl Coordinator {
                     false,
                 ),
                 M::leaf(delete_label, op(CandidateOp::Delete), delete_enabled, false),
-                M::leaf("恢复默认", op(CandidateOp::Reset), has_rule, false),
-                M::separator(),
-            ]
+            ];
+            // 英文引擎（英文方案、临英）不给，见 `pin_at_offered`。
+            if crate::handle_candidate::pin_at_offered(scope.engine_type) {
+                items.insert(1, pin_at_submenu(per_page, &pin_slots, can_pin));
+            }
+            // 按文字屏蔽的词另给「只在这个码下不出」：写端 `candidate_op_in` 同判据、同目标词，
+            // 不可删时一起灰。不绑热键（删除热键仍是上一项）。
+            if blocks_word {
+                items.push(M::leaf(
+                    "在此编码下隐藏",
+                    op(CandidateOp::HideHere),
+                    delete_enabled,
+                    false,
+                ));
+            }
+            items.push(M::leaf("恢复默认", op(CandidateOp::Reset), has_rule, false));
+            items.push(M::separator());
+            items
         } else {
             Vec::new()
         };
@@ -3206,6 +3246,34 @@ impl Coordinator {
     }
 }
 
+/// 「固定到第 N 位 ▸ 第 1 位…第 K 位」子菜单，K = 每页条数（不超过 [`PIN_AT_MAX`] 与界面
+/// 候选条数）。N 是**界面名次**；已在第 N 位、或那一格落不到（紧跟着变体等后插入项）时灰；
+/// 列表里有 emoji 扩展时整组灰（见 `PinAtSlots::has_emoji`）。
+///
+/// ⚠️ 判据与写端 `candidate_op_in` 的 `PinAt` 分支逐字对应（同用 `pin_at_slots`）：失配的
+/// 表现是「点得动却毫无反应」。
+fn pin_at_submenu(
+    per_page: usize,
+    slots: &crate::candidate_grid::PinAtSlots,
+    can_pin: bool,
+) -> wind_ui_types::MenuItemSpec {
+    use wind_ui_types::MenuItemSpec as M;
+    let k = per_page.min(PIN_AT_MAX as usize).min(slots.ui_len);
+    let children: Vec<M> = (1..=k as u8)
+        .map(|n| {
+            M::leaf(
+                format!("第 {n} 位"),
+                MenuKind::Op(CandidateOp::PinAt(n)),
+                can_pin && slots.position_for(n).is_some(),
+                false,
+            )
+        })
+        .collect();
+    let mut item = M::submenu("固定到第 N 位", children);
+    item.enabled = item.children.iter().any(|c| c.enabled);
+    item
+}
+
 /// 是否 $SS/$AA 展开后的组成员候选：顺序/成员由短语定义决定，禁一切调整
 /// （改动走编辑短语路径，不允许 shadow 双轨漂移；对齐 Go isGroupMember 规则）。
 /// 组导航候选本身（is_group，text 是组名）不算成员：可禁用整组。
@@ -3217,17 +3285,22 @@ pub(crate) fn candidate_is_group_member(cand: &wind_candidate::Candidate) -> boo
             || cand.phrase_template.starts_with("$AA"))
 }
 
-/// 右键「删除」菜单项的动态文案与可用性（按候选来源，对齐 Go computeDeleteMenuLabel）：
-/// 短语→禁用短语（软删可恢复）；用户词/临时词→真删；系统词→shadow 隐藏。
-/// 单字同样允许隐藏（旧版的单字保护已取消：shadow 按 code+word 键控，只隐藏该编码下的
-/// 该字，其它编码仍可打出，且设置页可恢复，不存在"某字彻底打不出"）。
-/// Windows 菜单构建与 macOS 禁用位推送共用，避免两处规则漂移。
-pub(crate) fn candidate_delete_menu(cand: &wind_candidate::Candidate) -> (&'static str, bool) {
+/// 右键「删除」菜单项（[`CandidateOp::Delete`]）的动态文案与可用性（按候选来源）：
+/// 拼音 / 英文按文字屏蔽的词（`blocks_word`，判据见 `Coordinator::delete_blocks_word`）→
+/// 「屏蔽该词」；短语→禁用短语（软删可恢复）；用户词/临时词→真删；系统词→「在此编码下隐藏」
+/// （shadow）。单字同样允许隐藏（shadow 按 code+word 键控，只隐藏该编码下的该字，其它编码仍可
+/// 打出，且设置页可恢复，不存在"某字彻底打不出"）。
+pub(crate) fn candidate_delete_menu(
+    cand: &wind_candidate::Candidate,
+    blocks_word: bool,
+) -> (&'static str, bool) {
     if candidate_is_group_member(cand) {
         ("删除词条", false)
     } else if cand.is_emoji_suggestion {
         // emoji 扩展候选没有词库落点，删无可删；灰显而非隐藏，理由见菜单装配处。
-        ("隐藏候选", false)
+        ("在此编码下隐藏", false)
+    } else if blocks_word {
+        ("屏蔽该词", true)
     } else if cand.is_phrase {
         // 静态短语前缀命中（is_prefix 且无完整码）定位不到 store 记录 → 暂禁。
         ("禁用短语", !cand.is_prefix || !cand.group_code.is_empty())
@@ -3236,8 +3309,8 @@ pub(crate) fn candidate_delete_menu(cand: &wind_candidate::Candidate) -> (&'stat
     } else if cand.meta.is_temp_dict {
         ("删除临时词", true)
     } else {
-        // 系统词（码表/拼音）：shadow 软隐藏。
-        ("隐藏候选", true)
+        // 系统词（码表 / 拼音单字 / 混输码表段 / 合成候选）：shadow 软隐藏。
+        ("在此编码下隐藏", true)
     }
 }
 
@@ -3541,9 +3614,44 @@ mod tests {
             is_emoji_suggestion: true,
             ..Default::default()
         };
-        let (label, enabled) = super::candidate_delete_menu(&cand);
-        assert_eq!(label, "隐藏候选");
+        let (label, enabled) = super::candidate_delete_menu(&cand, false);
+        assert_eq!(label, "在此编码下隐藏");
         assert!(!enabled, "emoji 扩展候选不可删除 / 隐藏");
+    }
+
+    /// 删除项文案按来源：按文字屏蔽的词「屏蔽该词」（含拼音用户词 / 临时词），短语、码表用户词 /
+    /// 临时词、group 成员不变，其余「在此编码下隐藏」。
+    #[test]
+    fn candidate_delete_menu_labels() {
+        use wind_candidate::Candidate;
+        let sys = Candidate {
+            text: "你好".into(),
+            ..Default::default()
+        };
+        let mut user = sys.clone();
+        user.meta.is_user_dict = true;
+        let mut temp = sys.clone();
+        temp.meta.is_temp_dict = true;
+        let phrase = Candidate {
+            text: "电话".into(),
+            is_phrase: true,
+            ..Default::default()
+        };
+        let member = Candidate {
+            text: "甲".into(),
+            is_phrase: true,
+            is_group_member: true,
+            ..Default::default()
+        };
+        let label = |c: &Candidate, b| super::candidate_delete_menu(c, b);
+        assert_eq!(label(&sys, true), ("屏蔽该词", true));
+        assert_eq!(label(&user, true), ("屏蔽该词", true));
+        assert_eq!(label(&temp, true), ("屏蔽该词", true));
+        assert_eq!(label(&sys, false), ("在此编码下隐藏", true));
+        assert_eq!(label(&user, false), ("删除用户词", true));
+        assert_eq!(label(&temp, false), ("删除临时词", true));
+        assert_eq!(label(&phrase, false), ("禁用短语", true));
+        assert_eq!(label(&member, false), ("删除词条", false));
     }
 
     /// ★★★ 锚点落盘查屏必须退 1px，否则贴右/下边缘时存到**邻屏**的 key 下。
@@ -4569,7 +4677,7 @@ mod compat_reload_tests {
             ("status_position_mode", "状态提示位置"),
             ("status_fallback_position", "坐标不可用时"),
             ("auto_pair", "符号自动配对"),
-            ("ignore_host_ime_close", "宿主关闭输入法"),
+            ("ignore_host_ime_switch", "软件切换中英"),
             ("password_force_english", "密码框强制英文"),
         ] {
             let label = COMPAT_FIELDS
@@ -4924,6 +5032,30 @@ mod linux_menu_tests {
         );
     }
 
+    /// 宿主报来的皮肤装饰点击原样交给渲染端；载荷坏了就丢。
+    #[test]
+    fn host_decor_click_reaches_the_ui() {
+        let (c, rx) = coord();
+        c.handle_ext(
+            wind_ipc::protocol::ext_kind::SKIN_DECOR_CLICK,
+            br#"{"index":2}"#,
+        );
+        assert!(
+            drain(&rx)
+                .iter()
+                .any(|m| matches!(m, UiCommand::SkinDecorClick(2)))
+        );
+        c.handle_ext(
+            wind_ipc::protocol::ext_kind::SKIN_DECOR_CLICK,
+            br#"{"index":"x"}"#,
+        );
+        assert!(
+            !drain(&rx)
+                .iter()
+                .any(|m| matches!(m, UiCommand::SkinDecorClick(_)))
+        );
+    }
+
     #[test]
     fn host_dismiss_and_disconnect_reset_menu_open() {
         let (c, rx) = coord();
@@ -5122,6 +5254,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let refused = |c: &Coordinator| {
             assert!(matches!(c.open_softkeyboard(None), KeyAction::PassThrough));
@@ -5503,6 +5636,7 @@ mod linux_panel_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         let vk_k = 0x4B;
         assert!(!c.softkeyboard_is_open());

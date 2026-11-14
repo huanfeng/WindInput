@@ -9,6 +9,8 @@ edition.workspace = true
 wind-coordinator = { path = "../wind-coordinator", default-features = false }
 wind-config = { path = "../wind-config" }
 wind-engine = { path = "../wind-engine" }
+# 内存诊断读词库缓存策略的累计字节（wind_dict::mapping）。
+wind-dict = { path = "../wind-dict" }
 wind-aux-code = { path = "../wind-aux-code" }
 wind-store = { path = "../wind-store" }
 # 短语分发导入的能力分级（`phrase.previewImportText`）读 cmdbar 的函数 registry。
@@ -24,6 +26,12 @@ toml = { workspace = true }
 tracing = { workspace = true }
 chrono = "0.4"
 fontdb = "0.22"
+# 主题预览：出图请求 / 回执类型与渲染器版本常量（纯数据）。
+wind-ui-types = { path = "../wind-ui-types" }
+# 预览缓存键：稳定的 128 位 SipHash（固定密钥，跨进程 / 版本一致；std 的 DefaultHasher 不保证）。
+siphasher = "1"
+# 预览图内联回传（`inline` / 取不到缓存目录时）。
+base64 = "0.22"
 
 [dev-dependencies]
 # 只供测试对照内置格式表条数（quick.list 不该漏条目）。

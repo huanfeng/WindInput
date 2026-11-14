@@ -102,6 +102,7 @@ impl Coordinator {
         self.push_jump_out_keys_config(client_token); // 配对跳出键（英文模式跳出 + 中文转发放行）
         self.push_password_suppress_config(client_token); // 密码框抑制策略（DLL 本地吃键门控）
         self.push_composition_placeholder_config(client_token); // 空文本兜底占位字符（GH#175）
+        self.push_space_before_digit_config(client_token); // 汉字后的数字吃不吃（中数间补空格）
         self.push_multiline_commit_config(client_token); // 多行上屏是否走粘贴：DLL 重连从 commit 起步
         self.push_compat_title_match_config(client_token); // 采不采窗口标题：DLL 重连从「关」起步
         self.push_custom_en_punct_config(client_token); // 英半列自定义标点：DLL 据此吃键转发
@@ -266,6 +267,38 @@ impl Coordinator {
             .as_str()
     }
 
+    /// 联想态挂在宿主里的占位字符：`assoc_placeholder`，没配跟随 [`Self::composition_placeholder`]。
+    pub(crate) fn assoc_placeholder(&self) -> &'static str {
+        self.active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookups
+            .assoc_placeholder
+            .as_str()
+    }
+
+    /// 联想态不挂占位组合（`assoc_placeholder = "none"`）。此时宿主里没有组合，
+    /// 按键转发资格靠上屏应答的 `COMMIT_FLAG_ASSOC_SESSION` 与 `STATUS_HOTKEY_SESSION` 告知 DLL。
+    pub(crate) fn assoc_placeholder_is_none(&self) -> bool {
+        self.active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookups
+            .assoc_placeholder
+            == wind_config::app_compat::AssocPlaceholder::None
+    }
+
+    /// 此刻是「无占位的联想会话」：联想候选活着、且当前应用配了 `none`。
+    pub(crate) fn assoc_bare_session_now(&self) -> bool {
+        if !self.assoc_placeholder_is_none() {
+            return false;
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .assoc_active()
+    }
+
     /// 测试用：把焦点设成 `pid`/`process`，并让该进程的 compat 规则配 `composition_placeholder = "zwsp"`
     /// （模拟出厂的 Edge 规则）。各路径「在浏览器焦点下出 ZWSP」的测试共用。
     #[cfg(test)]
@@ -303,6 +336,29 @@ impl Coordinator {
             wind_ipc::codec::encode_sync_config(
                 wind_ipc::protocol::CONFIG_KEY_COMPOSITION_PLACEHOLDER,
                 &value,
+            )
+        };
+        if client_token != 0 {
+            self.push_server
+                .push_to_token(client_token, &make(client_token));
+        } else {
+            self.push_server.push_per_client(make);
+        }
+    }
+
+    /// 下发「汉字后的数字要不要吃下来补空格」给 DLL（CONFIG_KEY_SPACE_BEFORE_DIGIT）。
+    ///
+    /// 全局 `input.spacing.cjk_digit` 且本客户端所在应用的 compat `auto_spacing` 没关。按各客户端
+    /// 现算，口径与时机同 [`Self::push_composition_placeholder_config`]，配置重载时也推。
+    /// 这里推慢一拍不会丢键：服务端对 DLL 交来的那种数字恒出字（见 message_handler 那条臂）。
+    pub fn push_space_before_digit_config(&self, client_token: u64) {
+        let make = |token: u64| {
+            let on = self.rt().config.input.spacing.cjk_digit
+                && self.with_token_compat_rule(token, |r| r.and_then(|r| r.auto_spacing))
+                    != Some(false);
+            wind_ipc::codec::encode_sync_config(
+                wind_ipc::protocol::CONFIG_KEY_SPACE_BEFORE_DIGIT,
+                &[on as u8],
             )
         };
         if client_token != 0 {

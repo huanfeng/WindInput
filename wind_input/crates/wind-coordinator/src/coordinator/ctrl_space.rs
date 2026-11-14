@@ -6,7 +6,7 @@
 //! 2. **仲裁**：Windows 系统输入法开关热键在 msctf 层直接翻 OPENCLOSE compartment，DLL
 //!    拦不住（见 KeyEventSink.cpp `ctrl_space_intercept` 处的注释），只能事后拒绝——回包带
 //!    当前模式，DLL 的 `_ApplyModeSwitch` 见「回包 ≠ 请求」就把 compartment 拉回。与 per-app
-//!    `ignore_host_ime_close` 同一条回路。⚠ 系统热键吃掉的键宿主仍收不到，那只能引导用户
+//!    `ignore_host_ime_switch` 同一条回路。⚠ 系统热键吃掉的键宿主仍收不到，那只能引导用户
 //!    去系统设置里关（设置项 hint / 文档里写了）。
 //!
 //! 「这次切换是不是用户按出来的」与 t283 的 `CapsCancelSwitch::from_system` **同一判据**，

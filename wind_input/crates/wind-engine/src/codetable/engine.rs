@@ -201,6 +201,10 @@ pub struct CommitOptions {
     /// 行为 tri-state：一张码表能不能整句取决于它的编码结构（定长？简码体系多深？），
     /// 是方案属性而非用户偏好。出厂关闭。
     pub sentence_input: bool,
+    /// 整句 N-best：候选里**露**几条（`schema.codetable.sentence_count`）。0 按 1 处理。
+    pub sentence_count: u8,
+    /// 整句 N-best：解码时**算**几条（`schema.codetable.sentence_max_count`）。不足露的条数时按后者抬。
+    pub sentence_max_count: u8,
     /// 逆切分（切分模式）：**恰好**满码长的串若空码，切成 2+2 两段各查词典再拼接。
     ///
     /// 语义、为什么是方案属性、与 `sentence_input` 的关系，**权威表述在**
@@ -223,6 +227,17 @@ pub struct CommitOptions {
     /// 反查模式内的通配键（`reverse_wildcard_char`，恒有值；不看 `wildcard` 主开关）。
     /// 只有码表方案的 `build_engine` 注入；`None` 表示该引擎不支持反查。见 reverse-mode spec §3.2。
     pub reverse_key: Option<char>,
+}
+
+/// 整句解码的产出，见 `CodeTableEngine::decode_sentence`。
+#[derive(Default)]
+struct SentenceOutput {
+    /// 露在候选里的整句，按名次（≤ `sentence_count` 条）。
+    shown: Vec<Candidate>,
+    /// 切换键的池子（≤ `sentence_max_count` 条）。只在算的条数 > 1 时非空，同拼音。
+    pool: Vec<Candidate>,
+    /// 名次 1 的编码单元切分串（`ConvertResult::preedit_codetable`）。无整句时为空。
+    split: String,
 }
 
 /// 码表引擎
@@ -370,6 +385,24 @@ impl CodeTableEngine {
         self
     }
 
+    /// 整句挂语法模型（`schema.codetable.sentence_grammar_weight`）。`weight <= 0` 等于不挂。
+    /// 模型文件在预热线程里打开；整句未开启时是 no-op。
+    pub fn with_sentence_grammar(mut self, path: std::path::PathBuf, weight: f64) -> Self {
+        if let Some(d) = self.sentence.take() {
+            self.sentence = Some(d.with_grammar_file(path, weight));
+        }
+        self
+    }
+
+    /// 整句 `(露几条, 算几条)`，同拼音的 `Config::sentence_counts`：都夹到 `1..=上限`，
+    /// 算的条数不少于露的条数。
+    fn sentence_counts(&self) -> (usize, usize) {
+        let limit = crate::pinyin::SENTENCE_COUNT_LIMIT;
+        let show = self.opts.sentence_count.clamp(1, limit) as usize;
+        let pool = (self.opts.sentence_max_count.clamp(1, limit) as usize).max(show);
+        (show, pool)
+    }
+
     /// 注入**已加载的**拼音词库作为整句词频来源。测试与探针走这个。
     pub fn with_sentence_pinyin_dict(
         mut self,
@@ -389,7 +422,7 @@ impl CodeTableEngine {
         &self.dm
     }
 
-    /// 后台预热整句的两张懒表（简码索引 + 拼音词频）。整句未开启时是 no-op。
+    /// 后台预热整句的懒表（简码索引、拼音词频与组词表、语法模型）。整句未开启时是 no-op。
     ///
     /// 由构建方在引擎组装完毕、**所有 `with_*` 都已调用之后**调用一次——预热线程读的是
     /// 那时的 `freq_source`，早于 `with_sentence_schemas_dir` 就白跑一趟没词频的预热。
@@ -400,7 +433,7 @@ impl CodeTableEngine {
         }
     }
 
-    /// 整句解码：产出一条覆盖整串的整句候选，或 `None`。
+    /// 整句解码：产出覆盖整串的整句候选（N-best，按 `sentence_count` / `sentence_max_count`）。
     ///
     /// # 三道门槛
     ///
@@ -415,34 +448,38 @@ impl CodeTableEngine {
     ///
     /// # 返回
     ///
-    /// `(整句候选, 编码单元切分串)`。切分串给组合区显示用
-    /// （见 `ConvertResult::preedit_codetable`），无整句解时为空串。
-    fn decode_sentence(
-        &self,
-        input: &str,
-        candidates: &[Candidate],
-    ) -> (Option<Candidate>, String) {
-        let none = (None, String::new());
+    /// [`SentenceOutput`]：露在候选里的整句（按名次）、切换键用的池子、名次 1 的切分串。
+    fn decode_sentence(&self, input: &str, candidates: &[Candidate]) -> SentenceOutput {
+        let mut out = SentenceOutput::default();
         let Some(decoder) = self.sentence.as_ref() else {
-            return none;
+            return out;
         };
         if input.chars().count() <= self.max_code_length {
-            return none;
+            return out;
         }
         if candidates.iter().any(|c| c.is_exact_code) {
-            return none;
+            return out;
         }
-        let Some(r) = decoder.decode(input, &self.dm) else {
-            return none;
-        };
-        let split = r.split_code(input);
-        (
-            Some(Candidate {
+        let (show_n, pool_k) = self.sentence_counts();
+        let nbest = show_n > 1 || pool_k > 1;
+        for (i, r) in decoder
+            .decode_nbest(input, &self.dm, pool_k)
+            .into_iter()
+            .enumerate()
+        {
+            let rank = i + 1;
+            let split = r.split_code(input);
+            if rank == 1 {
+                out.split = split.clone();
+            }
+            let cand = Candidate {
                 text: r.text,
                 code: input.to_string(),
-                weight: super::sentence::SENTENCE_WEIGHT_BASE,
+                // 名次靠后的权重略低：引擎内部排序与名次同向（协调器另按名次摆整句块）。
+                weight: super::sentence::SENTENCE_WEIGHT_BASE - i as i32,
                 source: CandidateSource::CodeTable,
                 is_sentence: true,
+                sentence_rank: rank as u8,
                 // 词库里没有以它为整体的词条 —— 自动造词据此判「值不值得学」
                 // （见 `Candidate::is_synthesized` 文档：不能用 `is_sentence` 代替）。
                 is_synthesized: true,
@@ -453,12 +490,25 @@ impl CodeTableEngine {
                 // ⚠️ `boundary` 也留 0：该字段是**音节**边界，域是拼音；码表码没有音节
                 // 语义（`BoundaryResolution::NoInfo` 的既定含义就是「非拼音方案」）。
                 // 填编码单元的切分位会让它在入库契约里被当成音节真值 —— 整句若被自动造词
-                // 学进用户词库，那份假边界会一路传下去。切分显示另找出口。
+                // 学进用户词库，那份假边界会一路传下去。切分显示走 `meta.preedit_split`。
                 boundary: 0,
+                meta: wind_candidate::CandidateMeta {
+                    // 每条整句各带自己的切法：备选与名次 1 的切分往往不同，高亮到谁就显示谁的。
+                    // ⚠️ 只在 N-best 开着时带：带了它协调器就会在高亮移动时重算组合区，出厂 1/1
+                    // 下那会让组合区随方向键在切分形态与原始码之间来回变——不是这次要改的行为。
+                    preedit_split: (nbest && !split.is_empty()).then(|| split.into()),
+                    ..Default::default()
+                },
                 ..Default::default()
-            }),
-            split,
-        )
+            };
+            if pool_k > 1 {
+                out.pool.push(cand.clone());
+            }
+            if rank <= show_n {
+                out.shown.push(cand);
+            }
+        }
+        out
     }
 
     /// 逆切分：恰好满码长的空码串切成两段，各查一次词典后拼接成组合候选。
@@ -976,10 +1026,9 @@ impl Engine for CodeTableEngine {
         //
         // **排序之后 insert(0)，而不是混进排序**：`base_sort=natural` 的方案忽略权重，
         // 整句再高的 weight 也排不到前面去（同拼音侧 step ② 的 `insert(0)` 做法）。
-        let (sentence, sentence_split) = self.decode_sentence(input, &candidates);
-        if let Some(c) = sentence {
-            candidates.insert(0, c);
-        }
+        let sentence = self.decode_sentence(input, &candidates);
+        let sentence_split = sentence.split;
+        candidates.splice(0..0, sentence.shown);
 
         // 逆切分：**恰好**满码长且空码时，把这串码切成两段、各查词典后拼接成组合候选。
         //
@@ -1047,6 +1096,7 @@ impl Engine for CodeTableEngine {
             } else {
                 sentence_split
             },
+            sentence_pool: sentence.pool,
             ..Default::default()
         })
     }
@@ -1933,6 +1983,50 @@ mod tests {
             "码长内不得产出整句候选，实得: {:?}",
             r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn sentence_nbest_shows_count_and_fills_pool() {
+        // 露 2 算 3：候选最前是名次 1、2 两条整句，池子 3 条（够的话），各带自己的切法。
+        let opts = CommitOptions {
+            sentence_count: 2,
+            sentence_max_count: 3,
+            ..sentence_opts()
+        };
+        let r = sentence_engine(&[], opts).convert("aawtaawt", 50).unwrap();
+        let ranks: Vec<u8> = r
+            .candidates
+            .iter()
+            .filter(|c| c.is_sentence)
+            .map(|c| c.sentence_rank)
+            .collect();
+        assert_eq!(ranks, vec![1, 2], "露两条，按名次");
+        assert!(
+            r.candidates[0].is_sentence && r.candidates[1].is_sentence,
+            "整句块在最前"
+        );
+        assert!(r.sentence_pool.len() >= 2, "池子按算的条数填");
+        assert!(r.sentence_pool.len() <= 3);
+        let splits: Vec<_> = r.candidates[..2]
+            .iter()
+            .map(|c| c.meta.preedit_split.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(splits[0], "aawt'aawt");
+        assert_eq!(r.preedit_codetable, splits[0], "组合区默认取名次 1 的切法");
+        assert!(splits.iter().all(|s| !s.is_empty()), "每条整句都带切分");
+    }
+
+    #[test]
+    fn sentence_single_by_default_with_empty_pool() {
+        // 出厂 1/1：只出一条、池子恒空——切换键据此不吃键（改动前的行为）。
+        let r = sentence_engine(&[], sentence_opts())
+            .convert("aawtaawt", 50)
+            .unwrap();
+        assert_eq!(r.candidates.iter().filter(|c| c.is_sentence).count(), 1);
+        assert!(r.sentence_pool.is_empty());
+        // 不带逐条切分：带了协调器就会随高亮移动重算组合区，1/1 下那是行为变化。
+        assert!(r.candidates[0].meta.preedit_split.is_none());
+        assert_eq!(r.preedit_codetable, "aawt'aawt", "组合区切分照旧由引擎给");
     }
 
     #[test]

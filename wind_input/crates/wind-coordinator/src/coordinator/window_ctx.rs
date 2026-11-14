@@ -450,6 +450,7 @@ impl Coordinator {
         self.push_password_suppress_config(token);
         self.push_english_pair_config(token);
         self.push_composition_placeholder_config(token);
+        self.push_space_before_digit_config(token);
         self.push_multiline_commit_config(token);
     }
 }

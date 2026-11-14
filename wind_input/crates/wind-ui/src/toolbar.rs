@@ -26,7 +26,7 @@ use wind_theme::schema::Dim;
 pub use wind_ui_types::{ToolbarItem, ToolbarState};
 
 /// 一个单元格：文本 + 高亮(激活态，如中文/简繁开) + 淡显(次要状态，如半角/简) + 点击动作
-struct Cell {
+pub(crate) struct Cell {
     text: String,
     highlight: bool,
     dim: bool,
@@ -59,32 +59,18 @@ pub struct Toolbar {
     visible: bool,
     /// 鼠标处理器（与 window 共享，wnd_proc 经注册表回调）；位置存于其中以便拖动同步
     mouse: Rc<RefCell<ToolbarMouse>>,
-    // 主题色（默认浅色，set_theme 加载主题后覆盖）
-    bg: [u8; 4],
-    fg: [u8; 4],
-    hl_bg: [u8; 4],
-    hl_fg: [u8; 4],
-    sep: [u8; 4],
-    grip: [u8; 4],
-    settings_icon: [u8; 4],
-    hover_bg: [u8; 4],
+    // 外观与几何说明（set_theme 加载主题后覆盖；见 ToolbarSkin / ToolbarDims）
+    skin: ToolbarSkin,
+    dims: ToolbarDims,
     /// 最近一次状态（供 hover 变化时本地重绘，无需协调器往返）
     last_state: Option<ToolbarState>,
     /// 已渲染的悬停格下标（-1=无）；tick 检测光标位置变化后据此决定是否重绘
     rendered_hover: i32,
     /// 自动隐藏状态机（默认关闭；SetToolbarAutoHide 命令配置）
     auto_hide: AutoHide,
-    // 工具栏几何（主题 [toolbar] 描述；None→render 内置默认，见常量 HEIGHT/GRIP_W 等）。
-    tb_height: Option<Dim>,
-    tb_grip_width: Option<Dim>,
-    tb_button_width: Option<Dim>,
-    tb_button_padding: Option<Dim>,
-    tb_button_radius: Option<Dim>,
-    /// 整条外框圆角 / 线宽（[toolbar] border.radius / .width）。None→内置派生值。
-    tb_border_radius: Option<Dim>,
-    tb_border_width: Option<Dim>,
     /// 纵向排列（ui.toolbar.vertical，非主题——见 `bar_layout`）。
     vertical: bool,
+
     /// 显示哪些格、按什么顺序（`ui.toolbar.items`，经 `SetToolbarLayout` 下发）。
     ///
     /// 初值取全集而非空：`SetToolbarLayout` 在 `apply_ui_config` 里下发，而工具栏可能在
@@ -108,7 +94,7 @@ pub struct Toolbar {
 }
 
 /// 整条工具栏的几何：窗口尺寸 + 每格矩形（设备像素，相对窗口左上角）。
-struct BarLayout {
+pub(crate) struct BarLayout {
     w: f32,
     h: f32,
     /// 拖动柄占据的区域（横条=左端竖条，纵条=顶端横条）。
@@ -183,29 +169,186 @@ fn default_border_radius(w: f32, h: f32) -> f32 {
     w.min(h) * 0.30
 }
 
-impl Toolbar {
-    // 几何默认值（逻辑像素，随 DPI 缩放）。主题 [toolbar] 未描述时的兜底；
-    // 与 _base/theme.toml [toolbar] 保持一致，改这里也应同步 _base（反之亦然）。
+/// 工具栏配色（默认浅色；`set_theme` 加载主题后覆盖）。
+///
+/// 与几何（[`ToolbarDims`]）一道从窗口抽成纯值对象：设置端预览不构造窗口，也能按同一份
+/// 折算画出工具栏（见 [`paint_toolbar`]），不让配色逻辑长第二份。
+#[derive(Clone, Copy)]
+pub(crate) struct ToolbarSkin {
+    pub bg: [u8; 4],
+    pub fg: [u8; 4],
+    pub hl_bg: [u8; 4],
+    pub hl_fg: [u8; 4],
+    pub sep: [u8; 4],
+    pub grip: [u8; 4],
+    pub settings_icon: [u8; 4],
+    pub hover_bg: [u8; 4],
+}
+
+impl Default for ToolbarSkin {
+    // 无主题时的兜底值
+    fn default() -> Self {
+        Self {
+            bg: [255, 255, 255, 245],   // 白色半透明底
+            fg: [72, 72, 78, 255],      // 正常文字深灰
+            hl_bg: [66, 133, 244, 255], // 高亮蓝（中文模式 / 简繁启用）
+            hl_fg: [255, 255, 255, 255],
+            sep: [214, 214, 220, 255],           // 浅灰分隔线
+            grip: [186, 186, 194, 255],          // 拖动点
+            settings_icon: [140, 140, 148, 255], // 设置图标（比普通文字更淡）
+            hover_bg: [0, 0, 0, 13],             // 鼠标悬停高亮（极淡，~5% 黑）
+        }
+    }
+}
+
+impl ToolbarSkin {
+    /// 按已解析主题折算配色：token 出基础值，`[toolbar]` 节点色覆盖底色 / 边框色
+    /// （token 优先于默认、节点再覆盖 token——原 `set_theme` 的顺序）。
+    pub(crate) fn from_theme(theme: &wind_theme::Resolved) -> Self {
+        let mut s = Self::default();
+        s.bg = theme.color("toolbar_background", s.bg);
+        s.fg = theme.color("toolbar_full_width_off_text", s.fg);
+        s.hl_bg = theme.color("toolbar_mode_chinese_bg", s.hl_bg);
+        s.hl_fg = theme.color("toolbar_mode_text", s.hl_fg);
+        s.sep = theme.color("toolbar_border", s.sep);
+        s.grip = theme.color("toolbar_grip", s.grip);
+        s.settings_icon = theme.color("toolbar_settings_icon", s.settings_icon);
+        s.hover_bg = theme.color("toolbar_hover", s.hover_bg);
+        // [toolbar] 节点色覆盖上面的 token 兜底。
+        if let Some(c) = theme.views.toolbar_bg_color {
+            s.bg = c;
+        }
+        if let Some(c) = theme.views.toolbar_border_color {
+            s.sep = c;
+        }
+        s
+    }
+}
+
+/// 工具栏几何中的**主题可配部分**（`None` → [`Self::resolve`] 内置默认）；单位是
+/// 逻辑像素（Dim，渲染时按 DPI 缩放）。
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ToolbarDims {
+    pub height: Option<Dim>,
+    pub grip_width: Option<Dim>,
+    pub button_width: Option<Dim>,
+    pub button_padding: Option<Dim>,
+    pub button_radius: Option<Dim>,
+    /// 整条外框圆角 / 线宽（[toolbar] border.radius / .width）。
+    pub border_radius: Option<Dim>,
+    pub border_width: Option<Dim>,
+}
+
+impl ToolbarDims {
+    /// 几何默认值（逻辑像素，随 DPI 缩放）。主题 [toolbar] 未描述时的兜底；
+    /// 与 _base/theme.toml [toolbar] 保持一致，改这里也应同步 _base（反之亦然）。
     const HEIGHT: f32 = 30.0;
     const GRIP_W: f32 = 12.0;
     const BUTTON_W: f32 = 30.0; // 每格（按钮槽）宽度，字面值；配 button_width 覆盖
     const BUTTON_PAD: f32 = 4.0; // 激活/悬停格高亮内缩；配 button_padding 覆盖
-    const FONT_PX: f32 = 15.0;
 
-    // 默认浅色配色（主题加载后由 set_theme 覆盖，以下为无主题时的兜底值）
-    const BG: [u8; 4] = [255, 255, 255, 245]; // 白色半透明底
-    const FG: [u8; 4] = [72, 72, 78, 255]; // 正常文字深灰
-    const HL_BG: [u8; 4] = [66, 133, 244, 255]; // 高亮蓝（中文模式 / 简繁启用）
-    const HL_FG: [u8; 4] = [255, 255, 255, 255];
-    const SEP: [u8; 4] = [214, 214, 220, 255]; // 浅灰分隔线
-    const GRIP: [u8; 4] = [186, 186, 194, 255]; // 拖动点
-    const SETTINGS_ICON: [u8; 4] = [140, 140, 148, 255]; // 设置图标（比普通文字更淡）
-    const HOVER_BG: [u8; 4] = [0, 0, 0, 13]; // 鼠标悬停高亮（极淡，~5% 黑）
+    /// 按已解析主题取值（`None`→内置默认，行为不变）。
+    pub(crate) fn from_theme(theme: &wind_theme::Resolved) -> Self {
+        let v = &theme.views;
+        Self {
+            height: v.toolbar_height,
+            grip_width: v.toolbar_grip_width,
+            button_width: v.toolbar_button_width,
+            button_padding: v.toolbar_button_padding,
+            button_radius: v.toolbar_button_radius,
+            border_radius: v.toolbar_border_radius,
+            border_width: v.toolbar_border_width,
+        }
+    }
+}
+
+/// 一帧的排布结果（[`bar_layout`] 与缩放值），由 [`toolbar_frame`] 一次算出，画板与成品
+/// （窗口 / 预览缓冲区）由此知道尺寸；绘制本体在 [`paint_toolbar`]。
+pub(crate) struct ToolbarFrame {
+    pub layout: BarLayout,
+    pub w: u32,
+    pub h: u32,
+    pub scale: f32,
+    pub radius: u32,
+    pub border_w: f32,
+    pub inset: u32,
+    pub button_radius: u32,
+}
+
+/// 按主题几何 + 缩放 + 格数算出一帧的排布与各处圆角 / 线宽。抽出来是为了窗口路径与
+/// 预览共用：两边都必须「先排布、知道尺寸、再进画板」。
+pub(crate) fn toolbar_frame(
+    dims: &ToolbarDims,
+    scale: f32,
+    vertical: bool,
+    n: usize,
+) -> ToolbarFrame {
+    // Dim→设备像素（dp×scale）；None→def_logical×scale（同候选窗 dim 闭包）。
+    let dim = |o: Option<Dim>, def_logical: f32| {
+        o.map(|x| x.resolve(scale, 0.0))
+            .unwrap_or(def_logical * scale)
+    };
+    // 纵向下这两个值转 90°：thickness 成条宽、grip_len 成顶端拖动区高度。
+    let thickness = dim(dims.height, ToolbarDims::HEIGHT).ceil();
+    let grip_len = dim(dims.grip_width, ToolbarDims::GRIP_W).ceil();
+    // 每格等长（默认 30dp≈方形）：标点/简繁等图标与文字均居中于等长格，
+    // 状态切换不改变格尺寸，工具栏整体长度稳定不抖动。主题可配 button_width 覆盖。
+    let cell_len = dim(dims.button_width, ToolbarDims::BUTTON_W);
+    let layout = bar_layout(vertical, thickness, grip_len, cell_len, n);
+    let w = layout.w.ceil() as u32;
+    let h = layout.h.ceil() as u32;
+    // 整条圆角：主题 [toolbar] border.radius 优先，未配则 = 条**短边**×0.30
+    // （见 `default_border_radius`）。配 0 即直角——硬边缘风格靠这条实现。
+    let radius = dims
+        .border_radius
+        .map(|d| d.resolve(scale, 0.0))
+        .unwrap_or_else(|| default_border_radius(w as f32, h as f32)) as u32;
+    // 细边框线宽：主题 border.width 优先，未配落 1dp（原字面量）。
+    let border_w = dims
+        .border_width
+        .map(|d| d.resolve(scale, 0.0))
+        .unwrap_or(1.0 * scale)
+        .max(1.0);
+    let inset = dim(dims.button_padding, ToolbarDims::BUTTON_PAD) as u32;
+    // 高亮格圆角：主题 button_radius 优先，否则 = 高亮块内**短边**×0.3。高亮块沿长轴内缩
+    // inset/2、厚度方向内缩 inset——即下式两支，纵条是横条的转置。u32 截断与取 min 的
+    // 顺序照旧（先截后缩），与 `paint_toolbar` 里真正的内缩矩形同源。
+    let (rw, rh) = match layout.cells.first() {
+        Some(r) => (r.w as u32, r.h as u32),
+        None => (w, h),
+    };
+    let (hw, hh) = if vertical {
+        (rw.saturating_sub(inset * 2), rh.saturating_sub(inset))
+    } else {
+        (rw.saturating_sub(inset), rh.saturating_sub(inset * 2))
+    };
+    let button_radius = dims.button_radius.map_or_else(
+        || (hw.min(hh) as f32 * 0.3) as u32,
+        |d| (d.resolve(scale, 0.0)) as u32,
+    );
+    ToolbarFrame {
+        layout,
+        w,
+        h,
+        scale,
+        radius,
+        border_w,
+        inset,
+        button_radius,
+    }
+}
+
+/// 工具栏格内字族：实时窗口与预览共用同一份（工具栏不随用户字体配置走，见 `Toolbar::new`）。
+pub(crate) const FONT_FAMILY: &str = "Microsoft YaHei UI";
+
+impl Toolbar {
+    /// 工具栏格内字号（逻辑像素，随 DPI 缩放）。预览用同一份（见 `candidate_window::preview`）。
+    pub(crate) const FONT_PX: f32 = 15.0;
 
     pub fn new(events: Sender<UiEvent>) -> Result<Self, String> {
         let scale = Self::dpi_scale();
         let window = LayeredWindow::create(None, 160, 40, "WindInputToolbar")?;
-        let renderer = TextRenderer::new("Microsoft YaHei UI", Self::FONT_PX * scale)?;
+        let renderer = TextRenderer::new(FONT_FAMILY, Self::FONT_PX * scale)?;
         let hwnd = window.hwnd();
         let mouse = Rc::new(RefCell::new(ToolbarMouse {
             hits: Vec::new(),
@@ -214,6 +357,7 @@ impl Toolbar {
             pos: None,
             anchor_br: None,
             dragging: false,
+            press_cell: false,
             anchor: (0, 0),
             origin: (0, 0),
             hover_idx: -1,
@@ -229,24 +373,11 @@ impl Toolbar {
             scale,
             visible: false,
             mouse,
-            bg: Self::BG,
-            fg: Self::FG,
-            hl_bg: Self::HL_BG,
-            hl_fg: Self::HL_FG,
-            sep: Self::SEP,
-            grip: Self::GRIP,
-            settings_icon: Self::SETTINGS_ICON,
-            hover_bg: Self::HOVER_BG,
+            skin: ToolbarSkin::default(),
+            dims: ToolbarDims::default(),
             last_state: None,
             rendered_hover: -1,
             auto_hide: AutoHide::new(),
-            tb_height: None,
-            tb_grip_width: None,
-            tb_button_width: None,
-            tb_button_padding: None,
-            tb_button_radius: None,
-            tb_border_radius: None,
-            tb_border_width: None,
             vertical: false,
             layout: wind_ui_types::DEFAULT_TOOLBAR_ITEMS.to_vec(),
             pending_corner: None,
@@ -257,31 +388,10 @@ impl Toolbar {
     /// 应用主题（工具栏各色，跟随语义）。
     pub fn set_theme(&mut self, theme: &wind_theme::Resolved) {
         // 背景色/边框色：[toolbar] 节点值优先（resolve 已合成 palette 默认），
-        // 未配才落回 token —— 与其它窗口一致。
-        self.bg = theme.color("toolbar_background", self.bg);
-        self.fg = theme.color("toolbar_full_width_off_text", self.fg);
-        self.hl_bg = theme.color("toolbar_mode_chinese_bg", self.hl_bg);
-        self.hl_fg = theme.color("toolbar_mode_text", self.hl_fg);
-        self.sep = theme.color("toolbar_border", self.sep);
-        self.grip = theme.color("toolbar_grip", self.grip);
-        self.settings_icon = theme.color("toolbar_settings_icon", self.settings_icon);
-        self.hover_bg = theme.color("toolbar_hover", self.hover_bg);
-        // 几何：从解析后的 [toolbar] 读取（None→render 用内置默认，行为不变）。
-        let v = &theme.views;
-        self.tb_height = v.toolbar_height;
-        self.tb_grip_width = v.toolbar_grip_width;
-        self.tb_button_width = v.toolbar_button_width;
-        self.tb_button_padding = v.toolbar_button_padding;
-        self.tb_button_radius = v.toolbar_button_radius;
-        self.tb_border_radius = v.toolbar_border_radius;
-        self.tb_border_width = v.toolbar_border_width;
-        // [toolbar] 节点色覆盖上面的 token 兜底。
-        if let Some(c) = v.toolbar_bg_color {
-            self.bg = c;
-        }
-        if let Some(c) = v.toolbar_border_color {
-            self.sep = c;
-        }
+        // 未配才落回 token —— 与其它窗口一致。折算在 [`ToolbarSkin::from_theme`]，
+        // 预览用同一份（不复制第二处）。
+        self.skin = ToolbarSkin::from_theme(theme);
+        self.dims = ToolbarDims::from_theme(theme);
     }
 
     /// 配置纵向排列（`ui.toolbar.vertical`，经 SetToolbarVertical 下发）。
@@ -423,7 +533,9 @@ impl Toolbar {
 /// 不 panic 也不返回空：`bar_layout` 在 n=0 下数学上安全（无除法），但「安全」不等于
 /// 「可接受」——回落全量条至少是个能用的工具栏，且与 `visible=false` 那条真正的
 /// 「不要工具栏」路径不冲突。
-fn expand_cells(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
+///
+/// `pub(crate)`：设置端工具栏预览（`candidate_window::preview`）用同一份展开逻辑。
+pub(crate) fn expand_cells(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
     let cells = expand_cells_raw(layout, state);
     if !cells.is_empty() {
         return cells;
@@ -535,6 +647,163 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
     }
 }
 
+/// 把整条工具栏画进 `buf`（尺寸 `w`×`h`，预乘 BGRA）。**窗口路径与预览共用的唯一绘制实现**：
+/// 实时窗口（[`Toolbar::render`]）与设置端工具栏预览（`candidate_window::preview`）各出各的
+/// 缓冲区，配色 / 几何 / 图标 / 命中矩形全部出自同一份——本仓在同构双实现漂移上反复吃亏，
+/// 绘制代码禁止再抄第二份。
+///
+/// `state` 只提供**像素状态**（标点全半角图、英文态固定半角、软键盘开着用什么 tint）；
+/// 排布已由 `frame`（[`toolbar_frame`]）定好，格数必须与 `cells` 一致。返回命中矩形
+/// `[(动作, 矩形)]`（窗口路径给鼠标处理器，预览够不着鼠标就丢弃）。
+// 参数都是同一帧的独立事实（缓冲区 / 排布 / 格子 / 状态 / 皮肤），强行聚成结构体只是搬家。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_toolbar(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    frame: &ToolbarFrame,
+    cells: &[Cell],
+    vertical: bool,
+    hover_idx: i32,
+    skin: &ToolbarSkin,
+    state: &ToolbarState,
+    renderer: &TextRenderer,
+) -> Vec<(ToolbarAction, Rect)> {
+    debug_assert_eq!(frame.layout.cells.len(), cells.len());
+    let s = frame.scale;
+    // 清底（透明）后铺：实时窗口的缓冲区是复用的，不清会留残影；预览缓冲区是新的，无害。
+    let buf_size = (w as usize) * (h as usize) * 4;
+    let clear_len = buf_size.min(buf.len());
+    buf[..clear_len].fill(0);
+    // 背景 + 细边框（与背景同弧度），增强浅色背景下的轮廓（对齐设计稿胶囊外框）。
+    // 线宽：主题 border.width 优先，未配落 1dp（原字面量），取值在 [`toolbar_frame`]。
+    let layout = &frame.layout;
+    fill_rounded(buf, w, h, 0, 0, w, h, skin.bg, frame.radius);
+    crate::view::fill_ring(
+        buf,
+        w,
+        h,
+        0.0,
+        0.0,
+        w as f32,
+        h as f32,
+        skin.sep,
+        frame.radius as f32,
+        frame.border_w,
+    );
+    // 拖动柄点阵
+    draw_grip(buf, w, h, &layout.grip, vertical, skin.grip, s);
+
+    // 英文模式下标点固定显示半角，无需看 chinese_punct。
+    let effective_chinese = state.chinese_mode && !state.caps_lock;
+    // 逐格绘制
+    let font_h = renderer.measure_text("中").height;
+    let mut hits: Vec<(ToolbarAction, Rect)> = Vec::with_capacity(cells.len());
+    for (i, c) in cells.iter().enumerate() {
+        let r = layout.cells[i];
+        hits.push((c.action, r));
+        // 分隔线：仅「拖动柄之后」(首格前) 与「齿轮的边界」绘制（对齐设计稿，状态格之间不画）。
+        //
+        // 齿轮的边界是**哪一边**取决于它在哪：默认排末尾时画它的起始边；`ui.toolbar.items`
+        // 允许把它排到首位后，那条线与首格前的线重合成同一条，齿轮反而没了边界——
+        // 于是这种情况改画**下一格**的起始边（= 齿轮的结束边），齿轮自成一区的意图两种
+        // 排列下都成立。齿轮既在首位又是唯一一格时不画（没有"下一格"，也无需分区）。
+        let is_settings = matches!(c.action, ToolbarAction::OpenSettings);
+        let sep_at = if i == 0 && is_settings {
+            layout
+                .cells
+                .get(1)
+                .map(|n| if vertical { n.y } else { n.x })
+        } else if i == 0 || is_settings {
+            // 画在格的**起始边**上：横条取左缘 x、纵条取上缘 y。
+            Some(if vertical { r.y } else { r.x })
+        } else {
+            None
+        };
+        if let Some(pos) = sep_at {
+            draw_sep(buf, w, h, pos as u32, vertical, skin.sep, s);
+        }
+        // 激活格（中文模式）画主题色底 + 高亮文字；悬停格画极淡底。
+        // hl_bg 成对配合 hl_fg（如 msime 白字蓝底），缺底色时白字在亮色工具栏上不可见。
+        let cell_bg = if c.highlight {
+            Some(skin.hl_bg)
+        } else if (i as i32) == hover_idx {
+            Some(skin.hover_bg)
+        } else {
+            None
+        };
+        if let Some(bgc) = cell_bg {
+            let inset = frame.inset;
+            // 长轴方向两端各缩 inset/2、厚度方向两端各缩 inset（横条既有比例，纵条转置
+            // 施加）——高亮块因此在两个朝向下都是"沿条身更瘦"的胶囊，而非贴边方块。
+            let (hx, hy, hw, hh) = if vertical {
+                (
+                    r.x as u32 + inset,
+                    r.y as u32 + inset / 2,
+                    (r.w as u32).saturating_sub(inset * 2),
+                    (r.h as u32).saturating_sub(inset),
+                )
+            } else {
+                (
+                    r.x as u32 + inset / 2,
+                    r.y as u32 + inset,
+                    (r.w as u32).saturating_sub(inset),
+                    (r.h as u32).saturating_sub(inset * 2),
+                )
+            };
+            let hr = frame.button_radius;
+            fill_rounded(buf, w, h, hx, hy, hw, hh, bgc, hr);
+        }
+        if is_settings {
+            let size = font_h * 0.80;
+            let dx = r.x + (r.w - size) * 0.5;
+            let dy = r.y + (r.h - size) * 0.5;
+            crate::view::draw_svg_icon(buf, w, h, SETTING_SVG, dx, dy, size, skin.settings_icon);
+        } else if matches!(
+            c.action,
+            ToolbarAction::TogglePunct
+                | ToolbarAction::ToggleWidth
+                | ToolbarAction::ToggleSoftKeyboard
+        ) {
+            // 标点 / 全半角 / 软键盘：渲染内联 SVG 图标，主题色 tint，居中于方格。
+            // 前两者按状态换图，软键盘只有一张（开合由格底高亮表达）。
+            // 英文模式下标点固定半角（不可切换），无论 chinese_punct 状态如何。
+            let svg = match (
+                c.action,
+                effective_chinese && state.chinese_punct,
+                state.full_width,
+            ) {
+                (ToolbarAction::TogglePunct, true, _) => PUNCT_FULL_SVG,
+                (ToolbarAction::TogglePunct, false, _) => PUNCT_HALF_SVG,
+                (ToolbarAction::ToggleSoftKeyboard, _, _) => SOFT_KEYBOARD_SVG,
+                (ToolbarAction::ToggleWidth, _, true) => WIDTH_FULL_SVG,
+                _ => WIDTH_HALF_SVG,
+            };
+            let size = font_h * 0.80;
+            let dx = r.x + (r.w - size) * 0.5;
+            let dy = r.y + (r.h - size) * 0.5;
+            // 高亮格（软键盘开着）要用 hl_fg：hl_bg 是主题色实底，用常态 fg 画图标
+            // 会与底色撞成一团。文字分支下面本来就按 highlight 选色，这里补齐同一条。
+            let tint = if c.highlight { skin.hl_fg } else { skin.fg };
+            crate::view::draw_svg_icon(buf, w, h, svg, dx, dy, size, tint);
+        } else {
+            // 居中文字
+            let m = renderer.measure_text(&c.text);
+            let tx = r.x + (r.w - m.width) * 0.5;
+            let ty = r.y + (r.h - font_h) * 0.5;
+            let fg = if c.highlight {
+                skin.hl_fg
+            } else if c.dim {
+                dim_color(skin.fg)
+            } else {
+                skin.fg
+            };
+            let _ = renderer.draw_text(buf, w, h, tx.max(r.x), ty.max(r.y), &c.text, fg);
+        }
+    }
+    hits
+}
+
 impl Toolbar {
     /// DPI 动态化：按工具栏当前位置所在显示器实时取缩放（拖到别的显示器后自动适配）。
     /// 工具栏仅颜色随主题、几何随 scale 现算，故只需更新 scale 与字号。
@@ -578,200 +847,28 @@ impl Toolbar {
         let at = self.placement();
         self.ensure_scale(at);
         let s = self.scale;
-        // Dim→设备像素（dp×scale）；None→def_logical×scale（同候选窗 dim 闭包）。
-        let dim = |o: Option<Dim>, def_logical: f32| {
-            o.map(|x| x.resolve(s, 0.0)).unwrap_or(def_logical * s)
-        };
-        // 纵向下这两个值转 90°：thickness 成条宽、grip_len 成顶端拖动区高度。
-        let thickness = dim(self.tb_height, Self::HEIGHT).ceil();
-        let grip_len = dim(self.tb_grip_width, Self::GRIP_W).ceil();
-
         let cells = self.cells(state);
-        // 英文模式下标点固定显示半角，无需看 chinese_punct。
-        let effective_chinese = state.chinese_mode && !state.caps_lock;
-
-        // 每格等长（默认 30dp≈方形）：标点/简繁等图标与文字均居中于等长格，
-        // 状态切换不改变格尺寸，工具栏整体长度稳定不抖动。主题可配 button_width 覆盖。
-        let cell_len = dim(self.tb_button_width, Self::BUTTON_W);
-        let layout = bar_layout(self.vertical, thickness, grip_len, cell_len, cells.len());
-        let w = layout.w.ceil() as u32;
-        let h = layout.h.ceil() as u32;
-
+        let frame = toolbar_frame(&self.dims, s, self.vertical, cells.len());
+        let w = frame.w;
+        let h = frame.h;
         self.window.resize(w, h);
-        self.drag_rect = layout.grip;
+        self.drag_rect = frame.layout.grip;
         // 拖动由 addon 本地做：拖动柄随帧下发。
         #[cfg(all(target_os = "linux", ext_presenter))]
         self.window.set_drag_regions(self.drag_regions());
-        let buf_size = (w * h * 4) as usize;
-        {
-            let buf = self.window.buffer_mut();
-            buf[..buf_size].fill(0);
-            // 整条圆角：主题 [toolbar] border.radius 优先，未配则 = 条**短边**×0.30
-            // （见 `default_border_radius`）。配 0 即直角——硬边缘风格靠这条实现。
-            let radius = self
-                .tb_border_radius
-                .map(|d| d.resolve(s, 0.0))
-                .unwrap_or_else(|| default_border_radius(w as f32, h as f32))
-                as u32;
-            fill_rounded(buf, w, h, 0, 0, w, h, self.bg, radius);
-            // 细边框（与背景同弧度），增强浅色背景下的轮廓（对齐设计稿胶囊外框）。
-            // 线宽：主题 border.width 优先，未配落 1dp（原字面量）。
-            let border_w = self
-                .tb_border_width
-                .map(|d| d.resolve(s, 0.0))
-                .unwrap_or(1.0 * s)
-                .max(1.0);
-            crate::view::fill_ring(
-                buf,
-                w,
-                h,
-                0.0,
-                0.0,
-                w as f32,
-                h as f32,
-                self.sep,
-                radius as f32,
-                border_w,
-            );
-            // 拖动柄点阵
-            draw_grip(buf, w, h, &layout.grip, self.vertical, self.grip, s);
-        }
-
-        // 逐格绘制 + 记录命中矩形
-        let font_h = self.renderer.measure_text("中").height;
-        let mut hits: Vec<(ToolbarAction, Rect)> = Vec::with_capacity(cells.len());
-        for (i, c) in cells.iter().enumerate() {
-            let r = layout.cells[i];
-            hits.push((c.action, r));
-            // 分隔线：仅「拖动柄之后」(首格前) 与「齿轮的边界」绘制（对齐设计稿，状态格之间不画）。
-            //
-            // 齿轮的边界是**哪一边**取决于它在哪：默认排末尾时画它的起始边；`ui.toolbar.items`
-            // 允许把它排到首位后，那条线与首格前的线重合成同一条，齿轮反而没了边界——
-            // 于是这种情况改画**下一格**的起始边（= 齿轮的结束边），齿轮自成一区的意图两种
-            // 排列下都成立。齿轮既在首位又是唯一一格时不画（没有"下一格"，也无需分区）。
-            let is_settings = matches!(c.action, ToolbarAction::OpenSettings);
-            let sep_at = if i == 0 && is_settings {
-                layout
-                    .cells
-                    .get(1)
-                    .map(|n| if self.vertical { n.y } else { n.x })
-            } else if i == 0 || is_settings {
-                // 画在格的**起始边**上：横条取左缘 x、纵条取上缘 y。
-                Some(if self.vertical { r.y } else { r.x })
-            } else {
-                None
-            };
-            if let Some(pos) = sep_at {
-                draw_sep(
-                    self.window.buffer_mut(),
-                    w,
-                    h,
-                    pos as u32,
-                    self.vertical,
-                    self.sep,
-                    s,
-                );
-            }
-            // 激活格（中文模式）画主题色底 + 高亮文字；悬停格画极淡底。
-            // hl_bg 成对配合 hl_fg（如 msime 白字蓝底），缺底色时白字在亮色工具栏上不可见。
-            let cell_bg = if c.highlight {
-                Some(self.hl_bg)
-            } else if (i as i32) == hover_idx {
-                Some(self.hover_bg)
-            } else {
-                None
-            };
-            if let Some(bgc) = cell_bg {
-                let inset = dim(self.tb_button_padding, Self::BUTTON_PAD) as u32;
-                // 长轴方向两端各缩 inset/2、厚度方向两端各缩 inset（横条既有比例，纵条转置
-                // 施加）——高亮块因此在两个朝向下都是"沿条身更瘦"的胶囊，而非贴边方块。
-                let (hx, hy, hw, hh) = if self.vertical {
-                    (
-                        r.x as u32 + inset,
-                        r.y as u32 + inset / 2,
-                        (r.w as u32).saturating_sub(inset * 2),
-                        (r.h as u32).saturating_sub(inset),
-                    )
-                } else {
-                    (
-                        r.x as u32 + inset / 2,
-                        r.y as u32 + inset,
-                        (r.w as u32).saturating_sub(inset),
-                        (r.h as u32).saturating_sub(inset * 2),
-                    )
-                };
-                // 高亮格圆角：主题 button_radius 优先，否则 = 内**短边**×0.3。横条下短边
-                // 恒是内高（厚度方向缩得更多），故与原「内高×0.3」等值，纵条则自动转置。
-                let hr = self
-                    .tb_button_radius
-                    .map(|d| d.resolve(s, 0.0))
-                    .unwrap_or(hw.min(hh) as f32 * 0.3) as u32;
-                fill_rounded(self.window.buffer_mut(), w, h, hx, hy, hw, hh, bgc, hr);
-            }
-            if is_settings {
-                let size = font_h * 0.80;
-                let dx = r.x + (r.w - size) * 0.5;
-                let dy = r.y + (r.h - size) * 0.5;
-                crate::view::draw_svg_icon(
-                    self.window.buffer_mut(),
-                    w,
-                    h,
-                    SETTING_SVG,
-                    dx,
-                    dy,
-                    size,
-                    self.settings_icon,
-                );
-            } else if matches!(
-                c.action,
-                ToolbarAction::TogglePunct
-                    | ToolbarAction::ToggleWidth
-                    | ToolbarAction::ToggleSoftKeyboard
-            ) {
-                // 标点 / 全半角 / 软键盘：渲染内联 SVG 图标，主题色 tint，居中于方格。
-                // 前两者按状态换图，软键盘只有一张（开合由格底高亮表达）。
-                // 英文模式下标点固定半角（不可切换），无论 chinese_punct 状态如何。
-                let svg = match (
-                    c.action,
-                    effective_chinese && state.chinese_punct,
-                    state.full_width,
-                ) {
-                    (ToolbarAction::TogglePunct, true, _) => PUNCT_FULL_SVG,
-                    (ToolbarAction::TogglePunct, false, _) => PUNCT_HALF_SVG,
-                    (ToolbarAction::ToggleSoftKeyboard, _, _) => SOFT_KEYBOARD_SVG,
-                    (ToolbarAction::ToggleWidth, _, true) => WIDTH_FULL_SVG,
-                    _ => WIDTH_HALF_SVG,
-                };
-                let size = font_h * 0.80;
-                let dx = r.x + (r.w - size) * 0.5;
-                let dy = r.y + (r.h - size) * 0.5;
-                // 高亮格（软键盘开着）要用 hl_fg：hl_bg 是主题色实底，用常态 fg 画图标
-                // 会与底色撞成一团。文字分支下面本来就按 highlight 选色，这里补齐同一条。
-                let tint = if c.highlight { self.hl_fg } else { self.fg };
-                crate::view::draw_svg_icon(self.window.buffer_mut(), w, h, svg, dx, dy, size, tint);
-            } else {
-                // 居中文字
-                let m = self.renderer.measure_text(&c.text);
-                let tx = r.x + (r.w - m.width) * 0.5;
-                let ty = r.y + (r.h - font_h) * 0.5;
-                let fg = if c.highlight {
-                    self.hl_fg
-                } else if c.dim {
-                    dim_color(self.fg)
-                } else {
-                    self.fg
-                };
-                let _ = self.renderer.draw_text(
-                    self.window.buffer_mut(),
-                    w,
-                    h,
-                    tx.max(r.x),
-                    ty.max(r.y),
-                    &c.text,
-                    fg,
-                );
-            }
-        }
+        // 背景整幅由 paint_toolbar 重画（含透明底），无需先清。
+        let hits = paint_toolbar(
+            self.window.buffer_mut(),
+            w,
+            h,
+            &frame,
+            &cells,
+            self.vertical,
+            hover_idx,
+            &self.skin,
+            state,
+            &self.renderer,
+        );
         if let Err(e) = self.window.update() {
             tracing::warn!("Toolbar update failed: {}", e);
         }
@@ -1047,6 +1144,8 @@ pub struct ToolbarMouse {
     /// 永久顶掉用户原本摆的位置——回到大屏也回不来了。让意图留在原处，每帧重算即可。
     anchor_br: Option<(i32, i32)>,
     dragging: bool,
+    /// 在格上按下、尚未移过拖动阈值：再移过阈值就转成拖动，原地抬起仍是点击。
+    press_cell: bool,
     /// 拖动起点：光标屏幕坐标
     anchor: (i32, i32),
     /// 拖动起点：窗口屏幕坐标
@@ -1215,6 +1314,42 @@ impl ToolbarMouse {
     }
 }
 
+/// 在格上按下也能拖动（移过阈值才算拖，原地抬起仍是点击）。仅 Windows：Linux 宿主由
+/// addon 按拖动柄区域本地拖，这里再起一次拖动会和它打架。
+const CELL_DRAG: bool = cfg!(windows);
+
+/// `WM_MOUSEMOVE` 的 wParam：左键按住。
+const MK_LBUTTON: usize = 0x0001;
+
+/// 系统拖动阈值（全宽，跟随用户设置）。
+fn drag_threshold() -> (i32, i32) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
+        (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG))
+    }
+    #[cfg(not(windows))]
+    {
+        (4, 4)
+    }
+}
+
+/// 光标从按下点移出以按下点为中心、`thr` 为全宽的矩形即算开始拖动（同 `DragDetect`）。
+fn drag_started(anchor: (i32, i32), p: (i32, i32), thr: (i32, i32)) -> bool {
+    (p.0 - anchor.0).abs() > thr.0 / 2 || (p.1 - anchor.1).abs() > thr.1 / 2
+}
+
+impl ToolbarMouse {
+    /// 进入拖动态：拖动中不显示悬停。
+    fn start_drag(&mut self) {
+        self.dragging = true;
+        if self.hover_idx != -1 {
+            self.hover_idx = -1;
+            self.dirty = true;
+        }
+    }
+}
+
 impl WindowMouse for ToolbarMouse {
     fn on_message(
         &mut self,
@@ -1228,18 +1363,20 @@ impl WindowMouse for ToolbarMouse {
         let cy = ((v >> 16) & 0xFFFF) as i16 as f32;
         match msg {
             WM_LBUTTONDOWN => {
-                if self.cell_at(cx, cy).is_none() {
-                    // 非单元格（拖动柄区）→ 开始拖动
+                let on_cell = self.cell_at(cx, cy).is_some();
+                if !on_cell || CELL_DRAG {
                     let mut p = POINT::default();
                     unsafe {
                         let _ = GetCursorPos(&mut p);
                     }
                     self.anchor = (p.x, p.y);
                     self.origin = self.pos.unwrap_or((p.x, p.y));
-                    self.dragging = true;
-                    if self.hover_idx != -1 {
-                        self.hover_idx = -1; // 拖动中不显示悬停
-                        self.dirty = true;
+                    if on_cell {
+                        // 格上按下：先不拖，移过阈值再转拖动（见 WM_MOUSEMOVE）。
+                        self.press_cell = true;
+                    } else {
+                        // 拖动柄区 → 直接开始拖动
+                        self.start_drag();
                     }
                     unsafe {
                         SetCapture(self.hwnd);
@@ -1249,6 +1386,24 @@ impl WindowMouse for ToolbarMouse {
             }
             WM_MOUSEMOVE => {
                 self.cursor_inside = true;
+                if self.press_cell {
+                    if _wparam.0 & MK_LBUTTON == 0 {
+                        // 抬起没送到（捕获被抢走）：放弃这次按下，别让悬停移动变成拖动。
+                        self.press_cell = false;
+                        unsafe {
+                            let _ = ReleaseCapture();
+                        }
+                    } else {
+                        let mut p = POINT::default();
+                        unsafe {
+                            let _ = GetCursorPos(&mut p);
+                        }
+                        if drag_started(self.anchor, (p.x, p.y), drag_threshold()) {
+                            self.press_cell = false;
+                            self.start_drag();
+                        }
+                    }
+                }
                 if self.dragging {
                     let mut p = POINT::default();
                     unsafe {
@@ -1300,6 +1455,12 @@ impl WindowMouse for ToolbarMouse {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
+                if self.press_cell {
+                    self.press_cell = false;
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                }
                 if self.dragging {
                     self.dragging = false;
                     unsafe {
@@ -1954,6 +2115,7 @@ mod cell_anchor_tests {
             pos: Some((1000, 500)),
             anchor_br: None,
             dragging: false,
+            press_cell: false,
             anchor: (0, 0),
             origin: (0, 0),
             hover_idx: -1,
@@ -1966,6 +2128,34 @@ mod cell_anchor_tests {
 
     fn cell(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    /// 拖动阈值是以按下点为中心的全宽矩形：阈值内的手抖仍算点击，出界才转拖动。
+    #[test]
+    fn drag_starts_only_past_the_threshold() {
+        let a = (100, 100);
+        assert!(!drag_started(a, (102, 98), (4, 4)), "2px 内是手抖");
+        assert!(drag_started(a, (103, 100), (4, 4)), "横向出界");
+        assert!(drag_started(a, (100, 97), (4, 4)), "纵向出界");
+    }
+
+    /// 格上原地按下抬起：照常触发格动作，且不进入拖动。
+    #[test]
+    fn click_on_cell_without_moving_still_fires() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut m = mouse(
+            false,
+            vec![(ToolbarAction::TogglePunct, cell(12.0, 0.0, 30.0, 40.0))],
+        );
+        m.events = tx;
+        let at = LPARAM(20 | (20 << 16));
+        m.on_message(HWND::default(), WM_LBUTTONDOWN, WPARAM(MK_LBUTTON), at);
+        m.on_message(HWND::default(), WM_LBUTTONUP, WPARAM(0), at);
+        assert!(!m.dragging && !m.press_cell);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiEvent::Toolbar(ToolbarAction::TogglePunct))
+        ));
     }
 
     /// 横条：菜单横向贴到**格的左缘**，纵向仍取整条顶边（向上展开）。

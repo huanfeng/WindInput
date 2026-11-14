@@ -51,7 +51,7 @@ pub struct SnapshotEntry {
 pub struct Snapshot {
     /// 零条目快照没有 wdat。
     reader: Option<Arc<WdatReader>>,
-    meta: memmap2::Mmap,
+    meta: wind_dict::mapping::Mapped,
     pub max_seq: u64,
     pub entry_count: u32,
 }

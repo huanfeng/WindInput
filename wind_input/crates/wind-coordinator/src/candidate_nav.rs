@@ -214,7 +214,17 @@ impl Coordinator {
         let ended = match s.active {
             Some(ModeKind::TempPinyin) => s.temp_pinyin_buffer.is_empty(),
             Some(ModeKind::Reverse) => s.special_buffer.is_empty(),
-            _ => s.input_buffer.is_empty(),
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => s.input_buffer.is_empty(),
         };
         if ended {
             s.scope_relaxed = false;

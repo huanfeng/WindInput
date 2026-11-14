@@ -36,6 +36,7 @@ use generate::CharPinyinIndex;
 use lattice::LatticeBuilder;
 use scorer::AbbrevMatcher;
 use shuangpin::ShuangpinConverter;
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use syllable::SyllableTrie;
 use tracing::debug;
@@ -1202,6 +1203,16 @@ pub struct PinyinEngine {
     /// 明明返回 `ning`，故障只在分派层）。全拼与「布局全是字母」时为 `None`，
     /// 协调器回落内置 `a-z`，与历史逐键等价。
     input_chars: Option<wind_config::CodeCharSet>,
+    /// 「屏蔽这个词」的文字（≥2 字），由 EngineManager 推入。空 = 无屏蔽，各处零额外开销。
+    blocked_words: std::sync::RwLock<Arc<HashSet<String>>>,
+}
+
+/// 整句恰为被屏蔽的文字时，N-best 在原有条数上多取几条找替补。
+const BLOCKED_SENTENCE_EXTRA: usize = 3;
+
+/// 整句文字是否被屏蔽（解码失败的空路径不算）。
+fn sentence_blocked(blocked: &HashSet<String>, words: &[String]) -> bool {
+    !blocked.is_empty() && !words.is_empty() && blocked.contains(&words.concat())
 }
 
 impl PinyinEngine {
@@ -1222,7 +1233,50 @@ impl PinyinEngine {
             char_pinyin_idx: OnceLock::new(),
             shuangpin: None,
             input_chars: None,
+            blocked_words: Default::default(),
         }
+    }
+
+    /// 当前屏蔽集合的快照。
+    fn blocked_words(&self) -> Arc<HashSet<String>> {
+        self.blocked_words
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 被屏蔽的文字不作为词节点进整句图——系统、用户、临时、简拼各来源节点都在这之前进图，
+    /// 一处挡全。由更小的块拼出同文的情形由 [`Self::decode_unblocked`] 兜。
+    fn drop_blocked_nodes(&self, nodes: &mut [Vec<lattice::LatticeNode>]) {
+        let blocked = self.blocked_words();
+        if blocked.is_empty() {
+            return;
+        }
+        for at in nodes.iter_mut() {
+            at.retain(|n| !blocked.contains(&n.word));
+        }
+    }
+
+    /// 单路解码；整句文字恰为被屏蔽的文字（由更小的块拼成）时用 N-best 多取几条、取第一条
+    /// 不是的，全被屏蔽则按解码失败返回。无屏蔽或没撞上时就是 `decode`，不多解一次。
+    /// 替补不看语法模型（挂了模型时 `decode_nbest` 只回 1 条）。
+    fn decode_unblocked(&self, lattice: &[Vec<WordNode>], len: usize) -> viterbi::ViterbiResult {
+        let result = self.viterbi.decode(lattice, len);
+        let blocked = self.blocked_words();
+        if !sentence_blocked(&blocked, &result.words) {
+            return result;
+        }
+        self.viterbi
+            .decode_nbest_lexical(lattice, len, 1 + BLOCKED_SENTENCE_EXTRA)
+            .into_iter()
+            .find(|r| !sentence_blocked(&blocked, &r.words))
+            .unwrap_or(viterbi::ViterbiResult {
+                words: Vec::new(),
+                log_prob: f64::NEG_INFINITY,
+                lexical_log_prob: f64::NEG_INFINITY,
+                boundary: 0,
+                pieces: None,
+            })
     }
 
     /// 注入用户/临时造词层（L 造词显现）。链式 builder：构造后由 EngineManager 按 schema 挂上。
@@ -2205,9 +2259,10 @@ impl PinyinEngine {
             let trie = &self.trie;
             let seg_graph = SegGraph::from_dag(&Dag::build(&completed, trie));
             // 模糊音同 ①②：与主路径 step 2 一致地把 fuzzy_config 传进词图。
-            let lattice_nodes =
+            let mut lattice_nodes =
                 self.lattice_builder
                     .build(&completed, &seg_graph, dict, Some(&fz), true);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let input_len = completed.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -2225,7 +2280,7 @@ impl PinyinEngine {
                     });
                 }
             }
-            let result = self.viterbi.decode(&lattice, input_len);
+            let result = self.decode_unblocked(&lattice, input_len);
             let sentence: String = result.words.join("");
             // 按词频标定的阈值只看节点分，见 `ViterbiResult::lexical_log_prob`
             let logp_per_char = result.lexical_log_prob / sentence.chars().count().max(1) as f64;
@@ -3116,6 +3171,17 @@ fn build_raw_preedit(raw_input: &str, sp: &shuangpin::SpConvertResult) -> String
 }
 
 impl Engine for PinyinEngine {
+    fn set_blocked_words(&self, words: Arc<HashSet<String>>) {
+        // 按键路径上每次都会推：同一份只读锁比一次指针。
+        if Arc::ptr_eq(&self.blocked_words(), &words) {
+            return;
+        }
+        *self
+            .blocked_words
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = words;
+    }
+
     fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
         self.char_pinyin_idx
             .get()
@@ -3495,6 +3561,7 @@ impl Engine for PinyinEngine {
                 true,
             );
             self.maybe_add_store_nodes(completed, &seg_graph, true, &mut lattice_nodes);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let input_len = completed.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -3517,14 +3584,30 @@ impl Engine for PinyinEngine {
             // 与改动前逐位相同。
             let (show_n, pool_k) = self.config.sentence_counts();
             let mut seen: Vec<String> = Vec::new();
-            for result in self.viterbi.decode_nbest(&lattice, input_len, pool_k) {
+            let mut results = self.viterbi.decode_nbest(&lattice, input_len, pool_k);
+            // 整句恰为被屏蔽的文字（由更小的块拼成）：多取几条，剔掉它，首选仍覆盖整串。
+            // 没撞上屏蔽词时不多解一次，循环与原来逐条相同。
+            let blocked = self.blocked_words();
+            if results.iter().any(|r| sentence_blocked(&blocked, &r.words)) {
+                // 不看语法模型：挂了模型时 `decode_nbest` 只回 1 条，没有替补可取。
+                results = self.viterbi.decode_nbest_lexical(
+                    &lattice,
+                    input_len,
+                    pool_k + BLOCKED_SENTENCE_EXTRA,
+                );
+                results.retain(|r| !sentence_blocked(&blocked, &r.words));
+            }
+            for result in results {
+                if seen.len() >= pool_k {
+                    break;
+                }
                 // 仅接受有限概率的完整路径：解码失败时 log_prob 为 NEG_INFINITY，
                 // 不能把这种空/错误路径强插到首选位置。
                 if result.words.is_empty() || !result.log_prob.is_finite() {
                     continue;
                 }
                 let sentence: String = result.words.join("");
-                // 不同切分可能拼出同一串字（`decode_nbest` 不去重），按文本去重后才计名次。
+                // `decode_nbest` 已按文本去重；这里再挡一次（beam 路径、或哈希碰撞）。
                 if sentence.is_empty() || seen.contains(&sentence) {
                     continue;
                 }
@@ -3682,6 +3765,7 @@ impl Engine for PinyinEngine {
             // （`yougailunm` = 有 + 盖伦 + 残码 m）。残码那一段由上面的 partial_final
             // 节点负责，两者在同一张图上各管各的跨度。
             self.maybe_add_store_nodes(query, &seg_graph, true, &mut lattice_nodes);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let full_len = query.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); full_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -3699,7 +3783,7 @@ impl Engine for PinyinEngine {
                     });
                 }
             }
-            let result = self.viterbi.decode(&lattice, full_len);
+            let result = self.decode_unblocked(&lattice, full_len);
             if !result.words.is_empty() && result.log_prob.is_finite() {
                 let sentence: String = result.words.join("");
                 if !sentence.is_empty() {
@@ -3807,6 +3891,7 @@ impl Engine for PinyinEngine {
             // 简拼段抢走前一全拼音节韵尾的读法扣分（`ningbr` ≠ 你 + 能够 + 比如），见
             // `CODA_STEAL_PENALTY`。
             lattice::penalize_coda_steals(abbr_query, trie, &mut lattice_nodes);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let input_len = abbr_query.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, at_end) in lattice_nodes.iter().enumerate() {
@@ -3824,7 +3909,7 @@ impl Engine for PinyinEngine {
                     });
                 }
             }
-            let result = self.viterbi.decode(&lattice, input_len);
+            let result = self.decode_unblocked(&lattice, input_len);
             if !result.words.is_empty() && result.log_prob.is_finite() {
                 let sentence: String = result.words.join("");
                 // 质量闸门：低置信整句宁可不出，也不该顶掉可用的部分候选
@@ -4749,6 +4834,8 @@ impl Engine for PinyinEngine {
         for sent in demote_targets {
             // 「精确整词」判据：码恰好等于已消费输入 `completed`，且非模糊命中、
             // 不在前缀补全/子短语层。含系统词库与 step 6 并入的用户/临时层。
+            // 排除引擎合成的其它整句（N-best 备选）：它不是词条，算进来会让第 1 名降到
+            // 第 2 名之下、名次倒挂。并入了用户/临时词的那条是词条，照算。
             let exact_max = candidates
                 .iter()
                 .filter(|c| {
@@ -4757,6 +4844,7 @@ impl Engine for PinyinEngine {
                         && !c.is_prefix
                         && !c.is_partial
                         && c.code == completed
+                        && !(c.is_synthesized && !c.meta.is_user_dict && !c.meta.is_temp_dict)
                 })
                 .map(|c| c.weight)
                 .max();
@@ -5103,6 +5191,13 @@ impl Engine for PinyinEngine {
         // 曾因此把双拼的整串候选全部当成半截丢光。全拼下 `raw_input == input`，行为不变。
         if require_full_match {
             candidates.retain(|c| c.consumed_length == 0 || c.consumed_length >= raw_input.len());
+        }
+
+        // 「屏蔽这个词」：任何来源（系统 / 用户 / 临时 / 模糊 / 简拼 / 纠错 / 误读召回）的同文候选
+        // 一律不出。放在截断之前，空出的名额由后面的候选补上。
+        let blocked = self.blocked_words();
+        if !blocked.is_empty() {
+            candidates.retain(|c| !blocked.contains(&c.text));
         }
 
         // ⚠️ **引擎侧刻意不用「消费长度优先」排序**（协调器 `candidate_display_order` 用）。
@@ -6417,6 +6512,106 @@ i = ["i"]
         let mut eng = engine_with_user_words_fuzzy(tag, words, fz);
         eng.config.sentence_uses_user_words = on;
         eng
+    }
+
+    // ── 「屏蔽这个词」（拼音按文字删除）──
+
+    fn weighted_engine(words: &[(&str, &str, i32)]) -> PinyinEngine {
+        let mut raw = CodetableDict::empty();
+        for (i, (code, text, w)) in words.iter().enumerate() {
+            raw.merge_single(code.to_string(), text.to_string(), *w, i as i32);
+        }
+        PinyinEngine::new(Config::default(), CachedDict::Memory(raw))
+    }
+
+    fn block(eng: &PinyinEngine, words: &[&str]) {
+        eng.set_blocked_words(Arc::new(words.iter().map(|w| w.to_string()).collect()));
+    }
+
+    const SHIJIAN_WORDS: &[(&str, &str, i32)] = &[
+        ("shi", "时", 9000),
+        ("shi", "识", 10),
+        ("jian", "间", 9000),
+        ("jian", "见", 10),
+        ("dao", "到", 5000),
+        ("le", "了", 5000),
+        ("daole", "到了", 5000),
+    ];
+
+    /// 被屏蔽的词典整词不进候选、不进整句图；整句换成另一条覆盖整串的解读，不是半截。
+    #[test]
+    fn blocked_word_leaves_candidates_and_lattice() {
+        let mut words = SHIJIAN_WORDS.to_vec();
+        words.push(("shijian", "时间", 90000));
+        words.push(("shijian", "实践", 1000));
+        let eng = weighted_engine(&words);
+        assert_eq!(sentence_of(&eng, "shijian").unwrap().text, "时间", "前提");
+        block(&eng, &["时间"]);
+        let r = eng.convert("shijian", 50).unwrap();
+        assert!(r.candidates.iter().all(|c| c.text != "时间"));
+        let s = sentence_of(&eng, "shijian").expect("整句仍在");
+        assert_ne!(s.text, "时间");
+        assert_eq!(s.code, "shijian", "整句覆盖整串");
+        assert_eq!(r.candidates[0].text, s.text, "首选是覆盖整串的整句");
+    }
+
+    /// 由单字拼出的整句恰为被屏蔽的文字：N-best 取下一条（出厂只算 1 条时也要换）。
+    #[test]
+    fn sentence_equal_to_blocked_word_takes_next_best() {
+        let eng = weighted_engine(SHIJIAN_WORDS);
+        assert_eq!(
+            sentence_of(&eng, "shijian").unwrap().text,
+            "时间",
+            "前提：单字拼出「时间」"
+        );
+        block(&eng, &["时间"]);
+        let s = sentence_of(&eng, "shijian").expect("换下一条整句");
+        assert_ne!(s.text, "时间");
+        assert_eq!(s.code, "shijian");
+        assert_eq!(s.text.chars().count(), 2);
+    }
+
+    /// 挂了语法模型时 `decode_nbest` 只回 1 条：撞上屏蔽词也要有替补整句，不能整条丢掉、首选退成半截。
+    #[test]
+    fn blocked_sentence_with_grammar_still_has_replacement() {
+        let eng = weighted_engine(SHIJIAN_WORDS).with_grammar(Arc::new(grammar::NullGrammar));
+        assert_eq!(sentence_of(&eng, "shijian").unwrap().text, "时间", "前提");
+        block(&eng, &["时间"]);
+        let s = sentence_of(&eng, "shijian").expect("挂语法模型时同样换下一条整句");
+        assert_ne!(s.text, "时间");
+        assert_eq!(s.code, "shijian");
+    }
+
+    /// 被屏蔽的文字作为更长整句的一段、由更小的块拼出，不拦。
+    #[test]
+    fn blocked_word_inside_longer_sentence_kept() {
+        let mut words = SHIJIAN_WORDS.to_vec();
+        words.push(("shijian", "时间", 90000));
+        let eng = weighted_engine(&words);
+        block(&eng, &["时间"]);
+        assert_eq!(sentence_of(&eng, "shijiandaole").unwrap().text, "时间到了");
+    }
+
+    /// 空集合 = 无屏蔽：结果与不推一样。
+    #[test]
+    fn empty_blocked_set_changes_nothing() {
+        let eng = weighted_engine(SHIJIAN_WORDS);
+        let before: Vec<String> = eng
+            .convert("shijian", 50)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        block(&eng, &[]);
+        let after: Vec<String> = eng
+            .convert("shijian", 50)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(before, after);
     }
 
     fn sentence_of(eng: &PinyinEngine, input: &str) -> Option<Candidate> {
@@ -8832,6 +9027,109 @@ s = ["ao"]
     }
 
     // ── 整句让位于精确整词（step 6.5 降级）─────────────────────────────────────
+
+    fn nbest_engine(raw: CodetableDict) -> PinyinEngine {
+        let mut e = PinyinEngine::new(Config::default(), CachedDict::Memory(raw));
+        e.config.sentence_count = 2;
+        e.config.sentence_max_count = 2;
+        e
+    }
+
+    fn nihao_nbest_dict() -> CodetableDict {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("ni".to_string(), "你".to_string(), 492_791, 0);
+        raw.merge_single("ni".to_string(), "泥".to_string(), 30_000, 1);
+        raw.merge_single("hao".to_string(), "好".to_string(), 124_546, 2);
+        raw
+    }
+
+    /// N-best 下合成的第 2 名整句不算「精确整词」：第 1 名不得因它降级而名次倒挂。
+    #[test]
+    fn nbest_alternate_sentence_does_not_demote_top_sentence() {
+        let e = nbest_engine(nihao_nbest_dict());
+        let r = e.convert("nihao", 50).unwrap();
+        let get = |rank: u8| {
+            r.candidates
+                .iter()
+                .find(|c| c.is_sentence && c.sentence_rank == rank)
+                .unwrap_or_else(|| panic!("缺第 {rank} 名整句: {:?}", r.candidates))
+        };
+        let (top, alt) = (get(1), get(2));
+        assert_eq!((top.text.as_str(), alt.text.as_str()), ("你好", "泥好"));
+        assert!(
+            top.is_synthesized && alt.is_synthesized,
+            "两条都应是合成整句"
+        );
+        assert!(
+            !top.is_sentence_demoted,
+            "第 2 名整句不是词条，不得让第 1 名降级"
+        );
+        assert!(
+            top.weight > alt.weight,
+            "第 1 名权重须高于第 2 名: {} vs {}",
+            top.weight,
+            alt.weight
+        );
+    }
+
+    /// 学过的整句成了整串单节点后，第 2 名路径常是它的拆分版（同文）；
+    /// 备选名额不得被同文路径占掉。
+    #[test]
+    fn nbest_alternate_survives_after_top_sentence_is_learned() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("xian".to_string(), "先".to_string(), 300_000, 0);
+        raw.merge_single("xian".to_string(), "西安".to_string(), 60_000, 1);
+        raw.merge_single("chuan".to_string(), "穿".to_string(), 30_000, 2);
+        raw.merge_single("wazi".to_string(), "袜子".to_string(), 5_000, 3);
+        raw.merge_single("chuanwazi".to_string(), "穿袜子".to_string(), 50, 4);
+        let store = tmp_store("nbest_learned_top");
+        // xi|an|chuan|wa|zi → 0/2/4/9/11
+        store
+            .learn_temp_word(
+                "pinyin",
+                "xianchuanwazi",
+                "西安穿袜子",
+                800,
+                0b1010_0001_0101,
+            )
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreTempLayer::new(store, "pinyin")));
+        let e = nbest_engine(raw).with_store_layers(Arc::new(dm));
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 1).as_deref(),
+            Some("西安穿袜子")
+        );
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 2).as_deref(),
+            Some("先穿袜子"),
+            "第 2 名不得被「西安穿袜子」的拆分路径占掉"
+        );
+    }
+
+    /// 对照：第 2 名与用户词同文时它是词条，第 1 名照旧让位（同只出 1 条时）。
+    /// 关掉整句用用户词：开着时用户词自己进图拿第 1，走不到这条例外。
+    #[test]
+    fn nbest_alternate_merged_with_user_word_still_demotes_top_sentence() {
+        let store = tmp_store("nbest_alt_user");
+        store
+            .add_user_word("pinyin", "nihao", "泥好", 500, 0b101) // ni|hao → 0/2
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreUserLayer::new(store, "pinyin")));
+        let mut e = nbest_engine(nihao_nbest_dict()).with_store_layers(Arc::new(dm));
+        e.config.sentence_uses_user_words = false;
+        let r = e.convert("nihao", 50).unwrap();
+        let top = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "你好")
+            .unwrap_or_else(|| panic!("缺「你好」: {:?}", r.candidates));
+        let user = r.candidates.iter().find(|c| c.text == "泥好").unwrap();
+        assert!(user.meta.is_user_dict, "「泥好」应带用户词标记");
+        assert!(top.is_sentence_demoted, "存在精确用户词时第 1 名整句须让位");
+        assert!(top.weight < user.weight);
+    }
 
     /// 用户要求的那条保证：**多个精确整词并列于最大权重时，整句排在它们全部之后**。
     ///

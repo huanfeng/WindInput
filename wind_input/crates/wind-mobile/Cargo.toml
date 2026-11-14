@@ -21,6 +21,8 @@ wind-ui-types = { path = "../wind-ui-types" }
 wind-store = { path = "../wind-store" }
 # 设置页「命令短语」的预览：按候选同一条求值路径展开模板（日期、符号组名）。两者 coordinator 本就依赖
 wind-phrase = { path = "../wind-phrase" }
+# 方案包导入 / 预览 / 删除（设置页「导入方案」），与桌面共用一份实现
+wind-transfer = { path = "../wind-transfer" }
 chrono = "0.4"
 tracing = { workspace = true }
 # 配置快照的序列化与写入值的构造（见 config_api）。配置文件本身就是 TOML，

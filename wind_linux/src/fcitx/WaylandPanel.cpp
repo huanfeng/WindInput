@@ -96,7 +96,7 @@ struct WaylandListeners {
                          wl_fixed_t y)
     {
         auto* self = static_cast<WaylandCandidatePanel*>(data);
-        self->retired_.pointerEnter(reinterpret_cast<uintptr_t>(surface));
+        self->retired_.pointerEnter(self->retiredKey(surface));
         if (int32_t ox, oy; self->screenMenu_ && self->screenMenuOffset(surface, ox, oy)) {
             self->menuPtrSurface_ = surface;
             self->menuPtrOffX_ = ox;
@@ -130,19 +130,25 @@ struct WaylandListeners {
             self->layers_[ls->kind].hideTimer.reset();
             return;
         }
-        if (surface != self->surface_) {
+        if (!self->isPopupSurface(surface)) {
             return;
         }
+        // 子 surface 的原点就是位图原点；主 surface 的原点是位图里的 mainOrigin（裁切时非 0）。
+        const double sc = self->reportedScale_;
+        self->ptrOffX_ = surface == self->child_ ? 0 : self->mainOriginX_ / sc;
+        self->ptrOffY_ = surface == self->child_ ? 0 : self->mainOriginY_ / sc;
         self->pointerInside_ = true;
-        self->pointerX_ = wl_fixed_to_double(x);
-        self->pointerY_ = wl_fixed_to_double(y);
+        self->pointerX_ = wl_fixed_to_double(x) + self->ptrOffX_;
+        self->pointerY_ = wl_fixed_to_double(y) + self->ptrOffY_;
+        WIND_DEBUG() << "指针进入候选窗（" << (surface == self->child_ ? "子" : "主") << " surface），位图逻辑坐标 ("
+                     << self->pointerX_ << "," << self->pointerY_ << ")";
         self->updateHover();
         self->updatePopupStatusHover();
     }
     static void ptrLeave(void* data, wl_pointer*, uint32_t, wl_surface* surface)
     {
         auto* self = static_cast<WaylandCandidatePanel*>(data);
-        self->retired_.pointerLeave(reinterpret_cast<uintptr_t>(surface));
+        self->retired_.pointerLeave(self->retiredKey(surface));
         self->reapRetired(false); // 指针停在退役 surface 上时拖着没销毁的，此刻可以了
         if (surface && surface == self->menuPtrSurface_) {
             self->menuPtrSurface_ = nullptr;
@@ -165,11 +171,12 @@ struct WaylandListeners {
             }
             return;
         }
-        if (surface != self->surface_) {
+        if (!self->isPopupSurface(surface)) {
             return;
         }
         self->pointerInside_ = false;
         self->click_.cancel();
+        self->decorClick_.cancel();
         self->setHover(-1);
         self->updatePopupStatusHover();
     }
@@ -208,8 +215,8 @@ struct WaylandListeners {
         if (!self->pointerInside_) {
             return;
         }
-        self->pointerX_ = wl_fixed_to_double(x);
-        self->pointerY_ = wl_fixed_to_double(y);
+        self->pointerX_ = wl_fixed_to_double(x) + self->ptrOffX_;
+        self->pointerY_ = wl_fixed_to_double(y) + self->ptrOffY_;
         if (self->menuOpen()) {
             self->reportMenuPointer(MENU_POINTER_MOTION, 0);
             return;
@@ -289,9 +296,15 @@ struct WaylandListeners {
         if (!pressed) {
             // 左键点选在松开时生效（ClickGate）：按下时的隐式抓取让松开仍落在本 surface 上
             if (button == kBtnLeft) {
+                const auto [px, py] = self->pointerPx();
+                const int32_t decor = self->decorClick_.release(self->decorAtPointer(), px, py);
                 const int32_t idx = self->click_.release(self->hitAtPointer());
                 if (idx != kNoHit && self->cb_.select) {
+                    WIND_DEBUG() << "Wayland 候选窗点选 " << idx << " @(" << px << "," << py << ")";
                     self->cb_.select(idx);
+                }
+                if (decor >= 0 && self->cb_.decorClick) {
+                    self->cb_.decorClick(uint32_t(decor));
                 }
             }
             return;
@@ -312,6 +325,8 @@ struct WaylandListeners {
         }
         if (button == kBtnLeft) {
             self->click_.press(self->hitAtPointer());
+            const auto [px, py] = self->pointerPx();
+            self->decorClick_.press(self->decorAtPointer(), px, py);
         } else if (button == kBtnRight && self->cb_.contextMenu) {
             // 命中候选 → 候选菜单，空白 / 翻页按钮 → 主菜单（同 X11 与 Windows）。
             // 悬停先清掉：菜单开着时候选窗收不到悬停，残留的高亮会一直挂着。
@@ -568,6 +583,10 @@ WaylandCandidatePanel::WaylandCandidatePanel(fcitx::Instance* instance) : instan
     }
     menuIdleMs_ = menuIdleTimeoutMs(std::getenv("WIND_MENU_IDLE_TIMEOUT_MS"));
     menuMaxMs_ = menuMaxGrabMs(std::getenv("WIND_MENU_MAX_GRAB_MS"));
+    forceClip_ = waylandSkinClipForced(std::getenv("WINDINPUT_WAYLAND_SKIN_CLIP"));
+    if (forceClip_) {
+        WIND_INFO() << "WINDINPUT_WAYLAND_SKIN_CLIP=1：皮肤候选窗只显示窗体左上起的部分（不拆层）";
+    }
     // wayland 模块：Fcitx5 自己开的 Wayland 连接。回调对已存在的连接也会补调一次。
     auto* wayland = instance_->addonManager().addon("wayland", true);
     if (!wayland) {
@@ -782,6 +801,15 @@ void WaylandCandidatePanel::teardown(bool alive)
         if (panelSurf_) {
             zwp_input_panel_surface_v1_destroy(panelSurf_);
         }
+        if (childSub_) {
+            wl_subsurface_destroy(childSub_);
+        }
+        if (childViewport_) {
+            wp_viewport_destroy(childViewport_);
+        }
+        if (child_) {
+            wl_surface_destroy(child_);
+        }
         if (surface_) {
             wl_surface_destroy(surface_);
         }
@@ -862,6 +890,12 @@ void WaylandCandidatePanel::teardown(bool alive)
     reapRetired(true, false); // 连接已死时到这里才丢（只释放本端结构）
     buffer_ = nullptr;
     surface_ = nullptr;
+    child_ = nullptr;
+    childSub_ = nullptr;
+    childViewport_ = nullptr;
+    childMapped_ = false;
+    mainOriginX_ = mainOriginY_ = 0;
+    lastMode_ = WaylandSkinMode::Whole;
     surfaceRole_ = Role::None;
     panelSurf_ = nullptr;
     inputPanel_ = nullptr;
@@ -1228,6 +1262,15 @@ bool WaylandCandidatePanel::present(fcitx::InputContext* ic)
     if (!ready() || !ensurePopup(ic)) {
         return false;
     }
+    // 合成器按主 surface 摆位：皮肤带外扩时按窗体拆层 / 裁切（没皮肤时锚块是整张，照旧整张贴）。
+    Rect anchor{0, 0, int32_t(canvasW), int32_t(canvasH)};
+    if (candW > 0) {
+        const Rect box = candidateAnchorBox(skin_, candW, candH);
+        if (box.x != 0 || box.y != 0 || uint32_t(box.w) != candW || uint32_t(box.h) != candH) {
+            anchor = box;
+        }
+    }
+    const WaylandSkinPlan plan = planWaylandSkin(anchor, canvasW, canvasH, subcomp_ != nullptr, forceClip_);
     // 菜单开着时整张位图都收鼠标（菜单项的命中在服务端按位图坐标做）。
     if (menuOn) {
         candW = canvasW;
@@ -1235,7 +1278,7 @@ bool WaylandCandidatePanel::present(fcitx::InputContext* ic)
     }
     if (n == 1 && placed[0].x == 0 && placed[0].y == 0) {
         const SharedFrame& f = *placed[0].f;
-        return attachPixels(f.bgra.data(), f.width, f.height, f.stride, candW, candH);
+        return attachPixels(f.bgra.data(), f.width, f.height, f.stride, candW, candH, !menuOn, plan);
     }
     const uint32_t stride = canvasW * 4;
     std::vector<uint8_t> canvas(size_t(stride) * canvasH, 0);
@@ -1257,7 +1300,7 @@ bool WaylandCandidatePanel::present(fcitx::InputContext* ic)
             }
         }
     }
-    return attachPixels(canvas.data(), canvasW, canvasH, stride, candW, candH);
+    return attachPixels(canvas.data(), canvasW, canvasH, stride, candW, candH, !menuOn, plan);
 }
 
 wl_buffer* WaylandCandidatePanel::makeBuffer(const uint8_t* data, uint32_t w, uint32_t h,
@@ -1316,42 +1359,165 @@ void WaylandCandidatePanel::applyScale(wl_surface* s, wp_viewport*& vp, uint32_t
     }
 }
 
-bool WaylandCandidatePanel::attachPixels(const uint8_t* data, uint32_t w, uint32_t h,
-                                         uint32_t stride, uint32_t inputW, uint32_t inputH)
+void WaylandCandidatePanel::setSkin(CandidateSkin skin)
 {
-    wl_buffer* buf = makeBuffer(data, w, h, stride);
-    if (!buf) {
-        return false;
-    }
-    applyScale(surface_, viewport_, w, h);
+    // 服务端先推皮肤区域、再推这一帧（设计 §17.2）：只记下，贴这一帧时设输入区。
+    skin_ = std::move(skin);
+}
+
+bool WaylandCandidatePanel::attachPixels(const uint8_t* data, uint32_t w, uint32_t h,
+                                         uint32_t stride, uint32_t inputW, uint32_t inputH,
+                                         bool skinMask, const WaylandSkinPlan& plan)
+{
     const double sc = reportedScale_;
     // 只有候选那一块接收鼠标：旁边的 tooltip、状态气泡、Toast 以及透明留白不拦指针
     // （否则指针滑进 tooltip 会触发离开 / 悬停抖动，Toast 还会挡住下面的应用）。
-    {
+    // 坐标是位图像素，(ox, oy) 是该 surface 原点在位图里的位置。
+    auto inputRegion = [&](int32_t ox, int32_t oy) {
         wl_region* region = wl_compositor_create_region(compositor_);
+        auto add = [&](const Rect& px) {
+            const Rect r = toLogicalCover(Rect{px.x - ox, px.y - oy, px.w, px.h}, sc);
+            wl_region_add(region, r.x, r.y, r.w, r.h);
+        };
         if (inputW > 0 && inputH > 0) {
-            wl_region_add(region, 0, 0, std::max(1, int(std::lround(inputW / sc))),
-                          std::max(1, int(std::lround(inputH / sc))));
+            // 皮肤带输入区表：候选那一块只按表收（穿透装饰、透明外扩区不收，设计 §17.3）。
+            auto skin = skinMask ? candidateInputRegion(skin_, inputW, inputH) : std::nullopt;
+            if (skin) {
+                for (const Rect& px : *skin) {
+                    add(px);
+                }
+            } else {
+                add(Rect{0, 0, int32_t(inputW), int32_t(inputH)});
+            }
         }
         if (popupStatusRect_) {
-            // 状态气泡也收鼠标：悬停保持、右键菜单
-            const Rect& r = *popupStatusRect_;
-            wl_region_add(region, int(std::lround(r.x / sc)), int(std::lround(r.y / sc)),
-                          std::max(1, int(std::lround(r.w / sc))), std::max(1, int(std::lround(r.h / sc))));
+            add(*popupStatusRect_); // 状态气泡也收鼠标：悬停保持、右键菜单
         }
+        return region;
+    };
+    auto commitTo = [&](wl_surface* s, wl_buffer* b, uint32_t bw, uint32_t bh) {
+        wl_surface_attach(s, b, 0, 0);
+        if (compositorVersion_ >= 4) {
+            wl_surface_damage_buffer(s, 0, 0, int32_t(bw), int32_t(bh));
+        } else {
+            wl_surface_damage(s, 0, 0, int32_t(bw), int32_t(bh));
+        }
+    };
+
+    WaylandSkinPlan p = plan;
+    if (p.mode == WaylandSkinMode::Split && !ensureChild()) {
+        p = planWaylandSkin(Rect{p.originX, p.originY, int32_t(p.mainW), int32_t(p.mainH)}, w, h,
+                            false, true); // 子 surface 建不起来：退回裁切
+    }
+    wl_buffer* buf = nullptr;
+    if (p.mode == WaylandSkinMode::Split) {
+        // 子 surface：整张位图，原点 = 位图原点，位置 = −窗体左上（逻辑坐标）。
+        wl_buffer* full = makeBuffer(data, w, h, stride);
+        // 主 surface：只占窗体、全透明、不收鼠标——合成器按它摆位与翻转。
+        std::vector<uint8_t> clear(size_t(p.mainW) * 4 * p.mainH, 0);
+        buf = makeBuffer(clear.data(), p.mainW, p.mainH, p.mainW * 4);
+        if (!full || !buf) {
+            if (full) {
+                wl_buffer_destroy(full);
+            }
+            if (buf) {
+                wl_buffer_destroy(buf);
+            }
+            return false;
+        }
+        applyScale(child_, childViewport_, w, h);
+        wl_subsurface_set_position(childSub_, -int32_t(std::lround(p.originX / sc)),
+                                   -int32_t(std::lround(p.originY / sc)));
+        wl_region* childRegion = inputRegion(0, 0);
+        wl_surface_set_input_region(child_, childRegion);
+        wl_region_destroy(childRegion);
+        commitTo(child_, full, w, h);
+        wl_surface_commit(child_); // 同步模式：随下面主 surface 的提交一起生效
+        childMapped_ = true;
+        wl_region* none = wl_compositor_create_region(compositor_);
+        wl_surface_set_input_region(surface_, none);
+        wl_region_destroy(none);
+    } else {
+        if (p.mode == WaylandSkinMode::Clip) {
+            // 只贴窗体左上起的部分：逐行拷出来（不能按原 stride 直接给 makeBuffer，末行会越界读）。
+            std::vector<uint8_t> part(size_t(p.mainW) * 4 * p.mainH);
+            for (uint32_t r = 0; r < p.mainH; ++r) {
+                std::memcpy(part.data() + size_t(r) * p.mainW * 4,
+                            data + size_t(p.originY + r) * stride + size_t(p.originX) * 4,
+                            size_t(p.mainW) * 4);
+            }
+            buf = makeBuffer(part.data(), p.mainW, p.mainH, p.mainW * 4);
+        } else {
+            buf = makeBuffer(data, w, h, stride);
+        }
+        if (!buf) {
+            return false;
+        }
+        unmapChild();
+        wl_region* region = inputRegion(p.originX, p.originY);
         wl_surface_set_input_region(surface_, region);
         wl_region_destroy(region);
     }
-    wl_surface_attach(surface_, buf, 0, 0);
-    if (compositorVersion_ >= 4) {
-        wl_surface_damage_buffer(surface_, 0, 0, int32_t(w), int32_t(h));
-    } else {
-        wl_surface_damage(surface_, 0, 0, int32_t(w), int32_t(h));
+    if (p.mode != lastMode_ || p.originX != mainOriginX_ || p.originY != mainOriginY_) {
+        static const char* const kNames[] = {"整张", "拆层", "裁切"};
+        WIND_DEBUG() << "Wayland 候选窗贴法：" << kNames[int(p.mode)] << " 主 surface " << p.mainW << "x"
+                     << p.mainH << " 原点 (" << p.originX << "," << p.originY << ")";
+        lastMode_ = p.mode;
     }
+    mainOriginX_ = p.originX;
+    mainOriginY_ = p.originY;
+    applyScale(surface_, viewport_, p.mainW, p.mainH);
+    commitTo(surface_, buf, p.mainW, p.mainH);
     wl_surface_commit(surface_);
     wl_display_flush(display_);
     buffer_ = buf;
     return true;
+}
+
+bool WaylandCandidatePanel::ensureChild()
+{
+    if (child_) {
+        return true;
+    }
+    if (!subcomp_ || !surface_) {
+        return false;
+    }
+    child_ = wl_compositor_create_surface(compositor_);
+    if (!child_) {
+        return false;
+    }
+    // 与主 surface 同一块占位 user_data（classicui 会读本连接上每个 surface 的 user_data，见 ensureSurface）
+    void* fake = wl_surface_get_user_data(surface_);
+    wl_surface_add_listener(child_, &kSurfaceListener, fake);
+    wl_surface_set_user_data(child_, fake);
+    childSub_ = wl_subcompositor_get_subsurface(subcomp_, child_, surface_);
+    wl_subsurface_place_below(childSub_, surface_);
+    childMapped_ = false;
+    WIND_DEBUG() << "Wayland 候选窗：建子 surface（皮肤拆层）";
+    return true;
+}
+
+void WaylandCandidatePanel::unmapChild()
+{
+    if (!child_ || !childMapped_) {
+        return;
+    }
+    wl_surface_attach(child_, nullptr, 0, 0);
+    wl_surface_commit(child_);
+    childMapped_ = false;
+}
+
+uintptr_t WaylandCandidatePanel::retiredKey(wl_surface* s) const
+{
+    if (s && s == child_) {
+        return reinterpret_cast<uintptr_t>(surface_);
+    }
+    for (const auto& r : retiredRes_) {
+        if (s && s == r->child) {
+            return reinterpret_cast<uintptr_t>(r->surface);
+        }
+    }
+    return reinterpret_cast<uintptr_t>(s);
 }
 
 void WaylandCandidatePanel::reportMenuPointer(uint32_t event, uint32_t button)
@@ -1485,9 +1651,24 @@ void WaylandCandidatePanel::updatePopupStatusHover()
 
 int32_t WaylandCandidatePanel::hitAtPointer() const
 {
+    const auto [px, py] = pointerPx();
+    return hitTest(rects_, px, py);
+}
+
+std::pair<int32_t, int32_t> WaylandCandidatePanel::pointerPx() const
+{
     // 命中表是位图像素坐标，指针是 surface 逻辑坐标，差的就是服务端的光栅化缩放。
-    return hitTest(rects_, int32_t(std::lround(pointerX_ * reportedScale_)),
-                   int32_t(std::lround(pointerY_ * reportedScale_)));
+    return {int32_t(std::lround(pointerX_ * reportedScale_)),
+            int32_t(std::lround(pointerY_ * reportedScale_))};
+}
+
+int32_t WaylandCandidatePanel::decorAtPointer() const
+{
+    if (hitAtPointer() != kNoHit) {
+        return -1;
+    }
+    const auto [px, py] = pointerPx();
+    return decorAt(skin_, px, py);
 }
 
 void WaylandCandidatePanel::updateHover()
@@ -1514,6 +1695,7 @@ void WaylandCandidatePanel::hidePopup()
         return;
     }
     click_.cancel(); // 收起后的松开不再选
+    decorClick_.cancel();
     // 销毁 popup 角色（合成器据此摘窗，下一次显示重建时按当时的文本光标矩形重新摆位——只摘 buffer
     // 不销毁角色，treeland 会让候选窗一直钉在第一次出现的地方），但 **wl_surface 本身留着**：
     // 它一旦销毁，鼠标恰好正进入它时迟到的 `wl_pointer.enter` 带的是已销毁对象（libwayland 交给
@@ -1521,6 +1703,7 @@ void WaylandCandidatePanel::hidePopup()
     // 候选窗就崩）。surface 活着，那些事件的 user_data（见 ensurePopup 里的占位）才有效。
     // 先摘 buffer 提交（surface 取消映射），再销毁角色：反过来会让合成器有一瞬把无角色的
     // surface 当普通内容画（实测 Toast 收起时闪出整块纯黑）。
+    unmapChild();
     wl_surface_attach(surface_, nullptr, 0, 0);
     wl_surface_commit(surface_);
     if (surfaceRole_ == Role::PanelV1) {
@@ -1539,7 +1722,9 @@ void WaylandCandidatePanel::retireSurface()
     if (!surface_) {
         return;
     }
-    // 先取消映射（hidePopup 已做过的话重复一次无害）；sync 回来时合成器已处理完它（见 RetiredSurfaces.h）
+    // 先取消映射（hidePopup 已做过的话重复一次无害）；sync 回来时合成器已处理完它（见 RetiredSurfaces.h）。
+    // 子 surface 跟着主 surface 一起退役。
+    unmapChild();
     wl_surface_attach(surface_, nullptr, 0, 0);
     wl_surface_commit(surface_);
     auto r = std::make_unique<Retired>();
@@ -1547,6 +1732,9 @@ void WaylandCandidatePanel::retireSurface()
     r->surface = surface_;
     r->viewport = viewport_;
     r->role = panelSurf_;
+    r->child = child_;
+    r->childSub = childSub_;
+    r->childViewport = childViewport_;
     r->sync = wl_display_sync(display_);
     wl_callback_add_listener(r->sync, &kRetiredSyncListener, r.get());
     retired_.retire(reinterpret_cast<uintptr_t>(surface_));
@@ -1555,6 +1743,10 @@ void WaylandCandidatePanel::retireSurface()
     surface_ = nullptr;
     viewport_ = nullptr;
     panelSurf_ = nullptr;
+    child_ = nullptr;
+    childSub_ = nullptr;
+    childViewport_ = nullptr;
+    childMapped_ = false;
     surfaceRole_ = Role::None;
     dropPopup();
     // 新 surface 上还没有指针：悬停状态归零（退役 surface 的离开事件不再走候选窗那条路）。
@@ -1585,6 +1777,15 @@ void WaylandCandidatePanel::reapRetired(bool all, bool alive)
             zwp_input_panel_surface_v1_destroy(r.role);
         }
         if (alive) {
+            if (r.childSub) {
+                wl_subsurface_destroy(r.childSub);
+            }
+            if (r.childViewport) {
+                wp_viewport_destroy(r.childViewport);
+            }
+            if (r.child) {
+                wl_surface_destroy(r.child);
+            }
             if (r.viewport) {
                 wp_viewport_destroy(r.viewport);
             }

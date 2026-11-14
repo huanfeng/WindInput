@@ -84,6 +84,7 @@ fn rank_of(store: Arc<Store>, input: &str, want: &str) -> Option<usize> {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     }
     coord
@@ -110,6 +111,7 @@ fn top_of_schema(store: Arc<Store>, schema: &str, input: &str) -> Option<String>
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     }
     coord.debug_all_candidate_texts().first().cloned()

@@ -15,8 +15,9 @@
 | `src/manager.rs` | `UiManager` + UI 线程主循环。协议类型（`UiCommand`/`UiEvent`/菜单族）**定义已下沉 wind-ui-types**，此处 `pub use` 再导出保持原路径；加变体时两边同步（见 wind-ui-types/AGENTS.md） |
 | `src/wake.rs` | UI 线程唤醒原语：Windows＝auto-reset 事件 + `MsgWaitForMultipleObjectsEx`，非 Windows＝条件变量。消息循环据此「睡到有事发生」，取代早先的固定 8ms 轮询 |
 | `src/window.rs` | `LayeredWindow`：Win32 `UpdateLayeredWindow` 封装 + `WindowMouse` 鼠标 trait + 非 Windows mock；wnd_proc 鼠标分发 |
-| `src/view.rs` | **实际盒模型引擎**：measure→arrange→paint + 命中矩形提取；圆角/边框/阴影/渐变/九宫格背景图/z 层。各窗口共用 |
-| `src/candidate_window.rs` | 候选窗：从候选构建 View 树、布局、绘制、鼠标命中/悬停防抖、翻页；含 `CandidateWindowConfig`（`CandidateItem` 已下沉 wind-ui-types，原路径再导出） |
+| `src/view.rs` | 原路径再导出 `wind_scene::view`（**实际盒模型引擎**：measure→arrange→paint + 命中矩形提取；圆角/边框/阴影/渐变/九宫格背景图/z 层，各窗口共用，`layout`/`paint` 收 `&dyn TextBackend`）；本地只留 `recv_evicting_idle*` 等 mpsc 辅助 |
+| `wind_scene::skin` / `skin_anim` + `src/candidate_window/skin_frame.rs` | 异形皮肤：多段切片轴映射、面积平均缩放、窗体合成（纯函数，在 wind-scene）+ 候选窗的窗口侧接线（动画时钟、装饰事件、动画开关）；本机出图用 `examples/skin_preview.rs` |
+| `src/candidate_window.rs` | 候选窗：收集输入、DPI / 显示器查询、定位、鼠标命中/悬停防抖、上屏；搭树 / 排版 / 绘制交给 `wind_scene::candidate::CandidateScene`（本模块里以 `scene` 为名引用）。含 `CandidateWindowConfig`（`CandidateItem` 已下沉 wind-ui-types，原路径再导出） |
 | `src/toolbar.rs` | 常驻工具栏窗口（中英/方案/标点/全半角），可拖动，命中回送 `ToolbarAction`；横/纵朝向见 `bar_layout` |
 | `src/popup_menu.rs` | 级联弹出菜单（右键候选菜单 + 功能主菜单）；多级子菜单、勾选态、键盘导航经协调器 `MenuKey` 转发 |
 | `src/status_tip.rs` | 状态提示气泡（切换中英/标点/全半角/方案时短暂或常驻显示） |
@@ -28,9 +29,9 @@
 | `src/overlay_host.rs` | Linux 外部宿主（仅 `linux-host`）：状态气泡 / Toast / tooltip 在服务进程光栅化，各层一段 SHM + `CMD_OVERLAY_FRAME`，落位规则（首选/备选点、锚点）交 addon 按工作区定。鼠标交互（悬停保持、拖动、点击关闭、自动隐藏暂停）全在 addon；服务端只管要它判据的两件：悬停提示右键的命中（`UiCommand::TooltipMenuAt` → 按最近画的一帧回 `RequestTooltipMenu`）与「截图此窗口」（从该层 SHM 读回）。macOS 不走这里（`.app` 原生渲染，收文本帧） |
 | `src/menu_host.rs` | Linux 外部宿主（仅 `linux-host`）的自绘菜单：**复用 `popup_menu` 整套**，各级像素 → 各自 SHM + `CMD_OVERLAY_FRAME`（`EXACT`），addon 报来的指针事件经 `UiCommand::MenuPointer` 喂回 `PopupMenu::on_pointer`，工作区经 `SetWorkArea` 进 `work_area_of`。收掉可见菜单时回送 `MenuClose`（协调器有几处持 state 锁发 `HideMenu`，靠它复位 `menu_open`） |
 | `src/linux_host.rs` | Linux 外部宿主形态的系统能力（剪贴板 wl-clipboard/xclip、`xdg-open`），全走外部命令 |
-| `src/text/backend.rs` | `TextBackend` trait（measure/draw 抽象） |
-| `src/theme_assets.rs` | 把 wind-theme 的 `RvImage` ref 解析为绝对路径并转 `ViewImage`/`ViewLayer` |
-| `src/image_cache.rs` | 背景图解码/合成缓存（BGRA 预乘，线程局部，跨帧复用） |
+| `wind_scene::text` | 文字公共类型 + `TextBackend` trait（base_size/measure/draw/draw_runs）；四个后端在 `src/text/dwrite.rs` 一处转发实现；`script`（按脚本切字体段）也在那边 |
+| `wind_scene::theme_assets` | 把 wind-theme 的 `RvImage` ref 解析为绝对路径并转 `ViewImage`/`ViewLayer` |
+| `wind_scene::image_cache` | 背景图解码/合成缓存（BGRA 预乘，线程局部，跨帧复用） |
 | `src/dpi.rs` | 按目标点所在显示器实时取有效 DPI 缩放（多显示器不同缩放动态适配） |
 | `src/sys.rs` | 平台基础类型/常量/光标函数 shim（Windows 复用 `windows` crate，其它平台 mock） |
 | `src/debounce.rs` | 通用尾沿防抖（悬停高亮/Tooltip/状态泡合并抖动） |

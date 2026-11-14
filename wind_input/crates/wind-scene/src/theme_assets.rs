@@ -4,17 +4,21 @@
 use crate::view::{ImagePlace, ViewGradient, ViewImage, ViewLayer};
 use wind_theme::{Resolved, RvGradient, RvImage};
 
-/// 把 image ref 解析为可读绝对路径：resources 注册表 → data:/绝对 → 在 asset_dirs（base 链目录）
-/// 搜字面文件（如 _base 的 chevron.svg）。
+/// 把 image ref 解析为可读绝对路径：resources 注册表 → data:/绝对 → 内存资源表（[`crate::assets`]）
+/// → 在 asset_dirs（base 链目录）搜字面文件（如 _base 的 chevron.svg）。resources 解析出的相对
+/// 路径同样先查内存资源表。
 pub fn asset_path(theme: &Resolved, reference: &str) -> Option<String> {
     if reference.is_empty() {
         return None;
     }
     if let Some(p) = theme.resources.get(reference) {
-        return Some(p.clone());
+        return Some(crate::assets::source_key(p).unwrap_or_else(|| p.clone()));
     }
     if reference.starts_with("data:") || std::path::Path::new(reference).is_absolute() {
         return Some(reference.to_string());
+    }
+    if let Some(k) = crate::assets::source_key(reference) {
+        return Some(k);
     }
     for d in &theme.asset_dirs {
         let p = d.join(reference);
@@ -23,6 +27,13 @@ pub fn asset_path(theme: &Resolved, reference: &str) -> Option<String> {
         }
     }
     Some(reference.to_string())
+}
+
+/// 暗色求值时，资源键亮暗两侧不是同一张图：返回亮色那张的源串（同 [`asset_path`] 的形态）；
+/// 亮色求值、不是资源键、两侧同图时 None。
+pub fn light_asset_path(theme: &Resolved, reference: &str) -> Option<String> {
+    let p = theme.light_resources.get(reference)?;
+    Some(crate::assets::source_key(p).unwrap_or_else(|| p.clone()))
 }
 
 /// RvImage → 渲染用 ViewImage（reference 解析为绝对路径）。
@@ -40,6 +51,7 @@ pub fn rv_image(theme: &Resolved, im: Option<&RvImage>, scale: f32) -> Option<Vi
         tint: im.tint,
         place: positioned(im).then(|| image_place(im, scale)),
         scale,
+        flip: im.flip,
     })
 }
 
@@ -56,6 +68,7 @@ pub fn rv_layers(theme: &Resolved, layers: &[RvImage], scale: f32) -> Vec<ViewLa
                 opacity: im.opacity,
                 // 口径同 rv_image：未配 / transparent 都落成 alpha=0 = 不染色。
                 tint: im.tint.unwrap_or([0, 0, 0, 0]),
+                flip: im.flip,
             })
         })
         .collect()
@@ -114,8 +127,8 @@ fn positioned(im: &RvImage) -> bool {
 
 /// 弹窗类（status / tooltip / toast / menu.root）渐变接线测试的共用夹具：蓝底 + 纯红线性渐变。
 /// 渐变叠在底色之上，接上了取样点就是红，没接上就是蓝。
-#[cfg(test)]
-pub(crate) mod gradient_fixture {
+#[cfg(any(test, feature = "test-util"))]
+pub mod gradient_fixture {
     pub const BG: [u8; 4] = [0, 0, 255, 255];
     pub const RED: [u8; 3] = [255, 0, 0];
     pub const BLUE: [u8; 3] = [0, 0, 255];
@@ -250,6 +263,62 @@ mod tests {
         // 与背景图同口径。
         let bg = rv_image(&theme, Some(&tinted), 1.0).unwrap();
         assert_eq!(bg.tint, Some(out[0].tint));
+    }
+
+    /// flip 透传到背景图与图层（同 tint：一环漏掉就是「配了不生效」）。
+    #[test]
+    fn rv_image_and_layers_carry_flip() {
+        let theme = Resolved::default();
+        let flip = wind_theme::Flip { x: true, y: false };
+        let im = RvImage {
+            reference: "mark.png".to_string(),
+            flip,
+            ..Default::default()
+        };
+        assert_eq!(rv_image(&theme, Some(&im), 1.0).unwrap().flip, flip);
+        assert_eq!(rv_layers(&theme, &[im], 1.0)[0].flip, flip);
+    }
+
+    /// 内存资源表：登记过的相对引用（字面 ref 与 resources 解析出的相对路径）改写成内存源串，
+    /// 图片缓存能按它解码；没登记的、data: 与绝对路径照旧。
+    #[test]
+    fn memory_assets_take_relative_refs_first() {
+        let png = {
+            let mut out = Vec::new();
+            image::RgbaImage::from_pixel(3, 2, image::Rgba([255, 0, 0, 255]))
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap();
+            out
+        };
+        let mut mem = crate::assets::MemoryAssets::new();
+        mem.insert("assets/panel.png", png);
+        crate::assets::install(crate::assets::next_generation(), &std::sync::Arc::new(mem));
+        let mut theme = Resolved::default();
+        theme
+            .resources
+            .insert("panel".into(), "./assets/panel.png".into());
+
+        let lit = asset_path(&theme, "assets/panel.png").unwrap();
+        let res = asset_path(&theme, "panel").unwrap();
+        assert!(lit.starts_with("mem:"), "{lit}");
+        assert_eq!(lit, res, "两种写法指向同一个源");
+        let mut cache = crate::image_cache::ImageCache::new();
+        assert_eq!(cache.src_size(&lit), Some((3, 2)), "图片缓存能读内存源");
+
+        assert_eq!(
+            asset_path(&theme, "other.png").as_deref(),
+            Some("other.png")
+        );
+        assert_eq!(
+            asset_path(&theme, "data:image/png;base64,AA==").as_deref(),
+            Some("data:image/png;base64,AA==")
+        );
+        crate::assets::uninstall();
+        assert_eq!(
+            asset_path(&theme, "panel").as_deref(),
+            Some("./assets/panel.png"),
+            "撤表后回到原有解析"
+        );
     }
 
     /// 空 ref = 没有图，不能凭空造一个（调用方据此跳过整层绘制）。

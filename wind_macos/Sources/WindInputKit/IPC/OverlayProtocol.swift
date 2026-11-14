@@ -19,6 +19,8 @@ public enum OverlayKind {
     /// 自绘菜单第 0 级；第 k 级子菜单是 `menu + k`。
     public static let menu: UInt32 = 4
     public static let menuLevels: UInt32 = 6
+    /// 皮肤里拆出的穿透装饰层：不归 `OverlayHost`，挂在候选窗的子 panel 上 (§17.3)。
+    public static let decor: UInt32 = 12
 
     public static func isMenu(_ kind: UInt32) -> Bool {
         kind >= menu && kind < menu + menuLevels

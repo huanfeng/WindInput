@@ -54,8 +54,8 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
 ## 已知限制
 
 - **GNOME（Wayland）**：没有 input-method-v2，Wayland 原生应用的光标要靠 Shell 扩展
-  `windinput-caret@windinput` 补窗口原点。扩展声明 Shell 47–50；42 与 46（含 Ubuntu 22.04 / 24.04
-  的桌面）装不上。安装、启用，以及「哪一次观察不能算实测」见
+  `windinput-caret@windinput`（Shell 45–51）或 `windinput-caret-legacy@windinput`（Shell 42–44）补窗口
+  原点，两份随包安装、默认不启用。安装、启用与实测范围见
   [gnome-shell-extension/README.md](gnome-shell-extension/README.md)。KDE / treeland 不走这条折算。
 - **KDE Plasma（Wayland）**：要在「系统设置 → 键盘 → 虚拟键盘」里选「Fcitx 5」并重新登录——KWin
   只把输入法协议（input-method-v1）交给它自己拉起的 Fcitx5，否则 Wayland 原生应用里没有候选窗。

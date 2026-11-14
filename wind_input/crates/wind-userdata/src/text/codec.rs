@@ -31,8 +31,8 @@ pub struct TableSpec {
 pub static TEMP: TableSpec = TableSpec {
     kind: "temp",
     columns: &[
-        ("text", Field::Text),
         ("code", Field::Code),
+        ("text", Field::Text),
         ("weight", Field::Weight),
         ("count", Field::Count),
         ("created_at", Field::CreatedAt),
@@ -42,8 +42,8 @@ pub static TEMP: TableSpec = TableSpec {
 pub static DRAFT: TableSpec = TableSpec {
     kind: "draft",
     columns: &[
-        ("text", Field::Text),
         ("code", Field::Code),
+        ("text", Field::Text),
         ("last_used", Field::LastUsed),
     ],
 };
@@ -87,7 +87,7 @@ fn header(spec: &TableSpec, syllable: bool) -> String {
     if syllable {
         h.push_str("  code_spacing: syllable\n");
     }
-    // 首列可能是以 `#` 开头的词：正文一开头就关掉注释
+    // 码表方案的码、联想的上文都可能以 `#` 开头：正文一开头就关掉注释
     h.push_str("  escape: true\n...\n# no comment\n");
     h
 }
@@ -445,7 +445,7 @@ mod tests {
     fn temp_round_trips_through_render_and_decode() {
         let v = vec![e("nihao", "你好", 3, 2, 1700000000, 1700000000, 0b101)];
         let s = render(&TEMP, true, &v);
-        assert!(s.contains("你好\tni hao\t3\t2\t1700000000\n"), "{s}");
+        assert!(s.contains("ni hao\t你好\t3\t2\t1700000000\n"), "{s}");
         let d = decode(
             s.as_bytes(),
             Path::new("temp.dict.yaml"),

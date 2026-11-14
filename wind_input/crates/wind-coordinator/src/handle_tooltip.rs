@@ -216,7 +216,18 @@ impl Coordinator {
         match cmd {
             MenuCmd::TooltipCommitSection | MenuCmd::TooltipCommitLine => {
                 match self.tooltip_commit_action(&target, &value) {
-                    Some(act) => self.push_no_key_ctx_action(&act, true, false),
+                    Some(act) => {
+                        // 不经按键出口，收尾在这里做（同鼠标点选，见 `crate::session_exit`）。
+                        let act = {
+                            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            self.finish_session_action(
+                                st,
+                                crate::session_exit::ActionOrigin::Tooltip,
+                                act,
+                            )
+                        };
+                        self.push_no_key_ctx_action(&act, true, false)
+                    }
                     None => self.tooltip_abandoned(),
                 }
             }
@@ -478,6 +489,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 

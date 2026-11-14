@@ -446,7 +446,18 @@ impl Coordinator {
                 // `auto_commit_at_full` 的快符方案敲一码就上屏，没有非空码的候选态。
                 // 不接这一句的话，右键改了顺序、重进模式照旧——规则写进了 store 却没人读。
                 let owner = self.effective_data_schema(state);
-                self.apply_shadow_in(owner.as_deref(), &mut state.candidates, "");
+                let mut list = std::mem::take(&mut state.candidates);
+                self.run_passes(
+                    state,
+                    &mut list,
+                    crate::postprocess::profile::SPECIAL_SHADOW,
+                    &crate::postprocess::PassCtx {
+                        owner: owner.as_deref(),
+                        freq_code: None,
+                        shadow_code: Some(""),
+                    },
+                );
+                state.candidates = list;
                 // 呈现上限（精确匹配模式只展示一条）**必须在 shadow 之后**施加。
                 // 反过来（引擎取数时就截到 1 条）的后果：用户隐藏掉那一条，池子里明明还有
                 // 下一条，屏幕却整个空白——「截断 → 过滤」把候选调整变成了删掉整个列表。
@@ -488,25 +499,33 @@ impl Coordinator {
         // 生僻字模式**完全不参与词频**（用户拍板）：不只是不记账，重排也跳过。
         // 只跳写端的话，这里读到的仍是正常输入时积累的词频，模式内的顺序会被它牵着走，
         // 而用户以为自己关掉了这件事。两端一起跳，语义才是「这个模式不碰词频」。
-        if !matches!(state.active, Some(ModeKind::RareChar)) {
-            self.apply_freq_rerank_in(
-                owner.as_deref(),
-                &mut state.candidates,
-                &state.special_buffer,
-            );
-        }
+        let mut list = std::mem::take(&mut state.candidates);
+        let ctx = crate::postprocess::PassCtx {
+            owner: owner.as_deref(),
+            freq_code: Some(&state.special_buffer),
+            shadow_code: Some(&state.special_buffer),
+        };
+        self.run_passes(
+            state,
+            &mut list,
+            if matches!(state.active, Some(ModeKind::RareChar)) {
+                crate::postprocess::profile::RARE_CHAR_PRE
+            } else {
+                crate::postprocess::profile::SPECIAL_PRE
+            },
+            &ctx,
+        );
         // 纠错候选不占首选（D6）：本路不重排，与主路 / 临拼同一个 helper、同一位置
         // （全部重排之后、shadow 之前——用户置顶仍有最终话语权）。
-        wind_candidate::drop_corrected_duplicates(&mut state.candidates);
-        wind_candidate::protect_top_from_corrected(
-            &mut state.candidates,
-            state.special_buffer.len(),
+        wind_candidate::drop_corrected_duplicates(&mut list);
+        wind_candidate::protect_top_from_corrected(&mut list, state.special_buffer.len());
+        self.run_passes(
+            state,
+            &mut list,
+            crate::postprocess::profile::SPECIAL_SHADOW,
+            &ctx,
         );
-        self.apply_shadow_in(
-            owner.as_deref(),
-            &mut state.candidates,
-            &state.special_buffer,
-        );
+        state.candidates = list;
         // ⚠️ 补全收口在过滤**之后**（与主路径 `update_candidates` 同次序）：判空要落在真正的
         // 最终列表上，否则「该码下的候选被用户全部隐藏」时看到的是「还有候选」⇒ 不补 ⇒ 空屏。
         // ⚠️ 补全候选**必须同样过 `finalize_candidates`**：它是 `$CC`/`$AA`/`{..}` 的统一展开
@@ -522,7 +541,16 @@ impl Coordinator {
             // `retain_rare_admitted`：生僻准入只对生僻字模式成立，对快符这类 overlay
             // 模式施加等于把补全候选整批滤空。见 `apply_rare_admission` 的说明。
             self.apply_rare_admission(state.active, &mut hint);
-            self.apply_shadow_in(owner.as_deref(), &mut hint, &state.special_buffer);
+            self.run_passes(
+                state,
+                &mut hint,
+                crate::postprocess::profile::SPECIAL_SHADOW,
+                &crate::postprocess::PassCtx {
+                    owner: owner.as_deref(),
+                    freq_code: None,
+                    shadow_code: Some(&state.special_buffer),
+                },
+            );
             // 仍只采纳一条（`$AA`/`$SS` 在前缀情形折叠为单个组名候选，正常也只有一条）。
             state.candidates.extend(hint.into_iter().next());
         }

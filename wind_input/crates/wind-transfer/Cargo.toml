@@ -21,6 +21,8 @@ zip = { version = "2", default-features = false, features = ["deflate", "time"] 
 
 [dev-dependencies]
 tempfile = "3"
+# 测试里程序生成 PNG / APNG。
+png = "0.18"
 
 [lints]
 workspace = true

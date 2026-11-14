@@ -187,6 +187,21 @@ impl Runtime {
         });
     }
 
+    pub fn delete_assoc(&self, schema: &str, context: &str, word: &str) -> anyhow::Result<()> {
+        if self.ud.get(Target::Assoc, schema, context, word).is_some() {
+            self.ud.apply(
+                Target::Assoc,
+                schema,
+                OpKind::Delete,
+                context,
+                word,
+                Payload::None,
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn clear_assoc(&self, schema: &str) -> anyhow::Result<usize> {
         self.clear_target(Target::Assoc, schema)
     }

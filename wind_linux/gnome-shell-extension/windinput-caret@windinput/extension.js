@@ -1,6 +1,7 @@
 // GNOME Shell 扩展：焦点窗口坐标系下的相对光标 → stage 绝对坐标，经 D-Bus 交给 WindInput。
-// gi://Mtk 从 Shell 45 起就有；protocol_to_stage_rect 从 mutter 47 起才有。shell-version 因此从 47 起。
-// 版本范围与「尚未在真实会话里对过光标」的说明见同目录上一级的 README.md。
+// ESM 与 gi://Mtk 从 Shell 45 起就有；protocol_to_stage_rect 从 mutter 47 起才有，45/46 退回
+// 「窗口 actor 位置 + 相对坐标」（kimpanel 在 47 之前的做法）。42–44 用旧格式的
+// windinput-caret-legacy@windinput。版本范围见上一级的 README.md。
 import Gio from 'gi://Gio';
 import Mtk from 'gi://Mtk';
 import St from 'gi://St';
@@ -74,14 +75,22 @@ export default class WindInputCaretExtension extends Extension {
             return [x, y, w, h, shellScale];
         }
         const spotScale = scale > 0.01 ? scale : 1;
+        const k = shellScale / spotScale;
+        const actor = win.get_compositor_private();
+        if (typeof win.protocol_to_stage_rect !== 'function') {
+            // mutter 45/46：没有 protocol_to_stage_rect，相对矩形以窗口 buffer（= actor）左上为原点。
+            const ox = actor ? actor.x : 0;
+            const oy = actor ? actor.y : 0;
+            return [Math.round(ox + x * k), Math.round(oy + y * k),
+                Math.round(w * k), Math.round(h * k), shellScale];
+        }
         let rect = new Mtk.Rectangle({
-            x: Math.round(x * (shellScale / spotScale)),
-            y: Math.round(y * (shellScale / spotScale)),
-            width: Math.round(w * (shellScale / spotScale)),
-            height: Math.round(h * (shellScale / spotScale)),
+            x: Math.round(x * k),
+            y: Math.round(y * k),
+            width: Math.round(w * k),
+            height: Math.round(h * k),
         });
         rect = win.protocol_to_stage_rect(rect);
-        const actor = win.get_compositor_private();
         if (actor) {
             rect.x += actor.x;
             rect.y += actor.y;

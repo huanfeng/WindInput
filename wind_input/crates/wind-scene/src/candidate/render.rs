@@ -1,0 +1,582 @@
+//! 候选窗一次出图：不定位、不接鼠标，只要像素（设置端预览、主题编辑器用）。
+
+use super::{AnimClock, CandidateScene, CandidateSceneInput, NodeKey};
+use crate::text::SizedText;
+use crate::view::Rect;
+
+/// 一帧候选窗位图。
+pub struct CandidateFrame {
+    pub width: u32,
+    pub height: u32,
+    /// 预乘 alpha 的 BGRA（`width × height × 4`），画软件阴影时含其扩边。
+    pub bgra: Vec<u8>,
+    /// 各节点的矩形（设备像素，同 `bgra` 的坐标），供编辑器预览点选（见 [`CandidateScene::nodes`]）。
+    pub nodes: Vec<(NodeKey, Rect)>,
+    /// 屏幕安全宽把窗口钳窄了（[`super::SceneFrame::safety_clamped`]）。
+    pub safety_clamped: bool,
+    /// 本帧皮肤几何（同 `bgra` 坐标）：只有 [`render_candidate_within`]（主题编辑器）取；
+    /// None = 没取，或没启用皮肤（含回退普通窗口）。
+    pub skin: Option<super::SkinSnapshot>,
+}
+
+/// 预乘 BGRA 绘制缓冲 → 直通 RGBA（PNG、`<canvas>` 等通用格式）。
+///
+/// 窗口绘制缓冲按 `UpdateLayeredWindow`（`AC_SRC_ALPHA`）的约定维护为**预乘 BGRA**；
+/// 直接当 RGBA 编码会把 R/B 交换、把预乘值当直通值，半透明像素被系统性压暗偏色
+/// （见 `screenshot::unpremultiply` 的文档）。候选窗预览（[`CandidateFrame::to_rgba`]）
+/// 与工具栏预览（wind-ui `render_toolbar_preview`）出图共用这一份，格式转换不抄第二处。
+pub fn premultiplied_bgra_to_rgba(mut buf: Vec<u8>) -> Vec<u8> {
+    for px in buf.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+        let a = px[3] as u32;
+        match a {
+            255 => {}
+            // 全透明像素的 RGB 无意义，归零。
+            0 => px[..3].fill(0),
+            // 预乘值理应 ≤ a，个别路径写出过 c > a 的像素，钳到 255。
+            _ => {
+                for c in &mut px[..3] {
+                    *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+                }
+            }
+        }
+    }
+    buf
+}
+
+impl CandidateFrame {
+    /// 转成直通 alpha 的 RGBA（PNG、`<canvas>` 等要的格式）。
+    pub fn to_rgba(&self) -> Vec<u8> {
+        premultiplied_bgra_to_rgba(self.bgra.clone())
+    }
+}
+
+/// 按输入画一帧候选窗，走与实时窗口同一条排版与绘制（不拆穿透装饰）。
+///
+/// `soft_shadow` = 画不画软件阴影，与实机对齐：Windows 本地窗口与宿主渲染画（传 true）；
+/// macOS / Linux 外部宿主（ext_presenter）由宿主出系统阴影、服务端不画（传 false，扩边随之为 0）。
+///
+/// 文字取 `inp.text_renderer`，基准字号钉成 `base_font_logical × scale`（见 [`SizedText`]）。
+/// `inp.above` 为真时按上方专属布局重排（实时窗口由定位决定，这里由调用方指定）。
+///
+/// `scene` 由调用方持有、跨次复用：皮肤告警按它去重（每次新建则同一条每张图都报一遍）。
+/// 装饰状态机也留在里面——`clock.allowed` 为假时各装饰取初始状态首帧，与状态机无关；
+/// 要播动画的调用方换皮肤时须像实时窗口的 `set_theme` 那样复位 `decor_anims_key`。
+pub fn render_candidate(
+    scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
+    clock: AnimClock,
+    soft_shadow: bool,
+) -> CandidateFrame {
+    let text = SizedText {
+        inner: inp.text_renderer,
+        base_size: inp.base_font_logical * inp.scale,
+    };
+    let frame = layout_frame(scene, inp, clock, soft_shadow, &text);
+    paint_frame(scene, inp, &frame, &text, false)
+}
+
+/// 同 [`render_candidate`]，但排版出来的缓冲宽或高超过 `max_side`、或像素总数超过
+/// `max_pixels` 时不画、返回错误（含尺寸）。给参数与主题都不可信的调用方用（主题编辑器）：
+/// 超大字号、海量候选在分配缓冲与逐像素绘制之前就挡住。另带皮肤几何快照（`skin`，编辑器叠加层用；
+/// [`render_candidate`] 不取）。
+pub fn render_candidate_within(
+    scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
+    clock: AnimClock,
+    soft_shadow: bool,
+    max_side: u32,
+    max_pixels: u64,
+) -> Result<CandidateFrame, String> {
+    let text = SizedText {
+        inner: inp.text_renderer,
+        base_size: inp.base_font_logical * inp.scale,
+    };
+    let frame = layout_frame(scene, inp, clock, soft_shadow, &text);
+    let (w, h) = frame.size();
+    if w > max_side || h > max_side || u64::from(w) * u64::from(h) > max_pixels {
+        return Err(format!(
+            "候选窗尺寸 {w}×{h} 超出上限（单边 {max_side}、共 {max_pixels} 像素）"
+        ));
+    }
+    Ok(paint_frame(scene, inp, &frame, &text, true))
+}
+
+/// 排版（含上方专属布局的重排）。`text` 是钉好基准字号的文字后端。
+fn layout_frame(
+    scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
+    clock: AnimClock,
+    soft_shadow: bool,
+    text: &SizedText,
+) -> super::SceneFrame {
+    let below = CandidateSceneInput {
+        above: false,
+        text_renderer: text,
+        ..*inp
+    };
+    let mut frame = scene.layout(&below, clock, soft_shadow);
+    if inp.above {
+        let above = CandidateSceneInput {
+            above: true,
+            ..below
+        };
+        scene.relayout_above(&above, &mut frame);
+    }
+    frame
+}
+
+fn paint_frame(
+    scene: &mut CandidateScene,
+    inp: &CandidateSceneInput,
+    frame: &super::SceneFrame,
+    text: &SizedText,
+    with_skin: bool,
+) -> CandidateFrame {
+    let (width, height) = frame.size();
+    let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
+    scene.paint(frame, &mut bgra, text, false);
+    CandidateFrame {
+        width,
+        height,
+        bgra,
+        nodes: scene.nodes(frame),
+        safety_clamped: frame.safety_clamped.is_some(),
+        skin: with_skin
+            .then(|| {
+                let (g, s) = scene.skin_geom.as_ref().zip(inp.theme.skin.as_ref())?;
+                g.snapshot(s)
+            })
+            .flatten(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::candidate::CandidateSceneOptions;
+    use crate::text::MockText;
+    use wind_ui_types::CandidateItem;
+
+    fn cand(text: &str) -> CandidateItem {
+        CandidateItem {
+            text: text.to_string(),
+            text_styled: Default::default(),
+            code: String::new(),
+            label: String::new(),
+            tooltip: Default::default(),
+            comment: Default::default(),
+            comment_above: Default::default(),
+            no_index: false,
+        }
+    }
+
+    #[test]
+    fn renders_default_theme_frame_with_mock_text() {
+        let mut theme = wind_theme::Resolved::default();
+        theme.views.shadow_blur = Some(wind_theme::schema::Dim::Dp(8.0));
+        theme.views.shadow_color = Some([0, 0, 0, 64]);
+        let text = MockText::new("", 99.0).unwrap();
+        let opts = CandidateSceneOptions::default();
+        let cands = [cand("你好"), cand("世界")];
+        let inp = CandidateSceneInput {
+            candidates: &cands,
+            preedit: "nihao",
+            preedit_caret: 5,
+            mode_label: "",
+            selected: 0,
+            hover: -1,
+            page: 1,
+            total_pages: 1,
+            grid: None,
+            vertical: false,
+            rotated: false,
+            upright: false,
+            preedit_embedded: false,
+            above: false,
+            theme: &theme,
+            base_font_logical: 16.0,
+            scale: 1.0,
+            screen_extent_px: Some((1920, 1080)),
+            text_renderer: &text,
+            opts: &opts,
+        };
+        let clock = AnimClock {
+            t: std::time::Duration::ZERO,
+            showing: true,
+            allowed: false,
+        };
+        let mut scene = CandidateScene::default();
+        let f = render_candidate(&mut scene, &inp, clock, true);
+        assert!(f.width >= 40 && f.height >= 24, "{}x{}", f.width, f.height);
+        assert_eq!(f.bgra.len(), (f.width * f.height * 4) as usize);
+        assert!(
+            f.bgra.as_chunks::<4>().0.iter().any(|p| p[3] == 255),
+            "窗口底色应画出"
+        );
+        // 候选文字按场景字号（16 × 1.0）画，而不是后端自带的 99。
+        let log = text.take_draw_log();
+        assert!(log.iter().any(|l| l.contains("\"你好\"")), "{log:?}");
+        assert!(!log.iter().any(|l| l.contains("size=99.0")), "{log:?}");
+        // 同输入出同一帧。
+        assert_eq!(render_candidate(&mut scene, &inp, clock, true).bgra, f.bgra);
+        assert_eq!(f.to_rgba().len(), f.bgra.len());
+        // 不画软件阴影（ext_presenter 形态）：没有扩边，缓冲恰为内容盒，严格更小。
+        let bare = render_candidate(&mut scene, &inp, clock, false);
+        assert!(bare.width < f.width && bare.height < f.height);
+    }
+
+    /// 节点矩形：键名齐、先序、子节点落在父节点里，坐标与缓冲同一套（含阴影扩边）。
+    #[test]
+    fn frame_lists_node_rects_in_buffer_coords() {
+        let theme = wind_theme::Resolved::default();
+        let text = MockText::new("", 16.0).unwrap();
+        let opts = CandidateSceneOptions::default();
+        let cands = [cand("你好"), cand("世界")];
+        let inp = CandidateSceneInput {
+            candidates: &cands,
+            preedit: "nihao",
+            preedit_caret: 5,
+            mode_label: "",
+            selected: 0,
+            hover: -1,
+            page: 1,
+            total_pages: 2,
+            grid: None,
+            vertical: false,
+            rotated: false,
+            upright: false,
+            preedit_embedded: false,
+            above: false,
+            theme: &theme,
+            base_font_logical: 16.0,
+            scale: 2.0,
+            screen_extent_px: Some((1920, 1080)),
+            text_renderer: &text,
+            opts: &opts,
+        };
+        let clock = AnimClock {
+            t: std::time::Duration::ZERO,
+            showing: true,
+            allowed: false,
+        };
+        let mut scene = CandidateScene::default();
+        let f = render_candidate(&mut scene, &inp, clock, false);
+        let names: Vec<&str> = f.nodes.iter().map(|(k, _)| k.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "window",
+                "preedit_bar",
+                "candidate_list",
+                "item",
+                "index",
+                "item",
+                "index",
+                "footer_bar"
+            ]
+        );
+        let rect = |name: &str| f.nodes.iter().find(|(k, _)| k.name() == name).unwrap().1;
+        let inside = |a: Rect, b: Rect| {
+            a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
+        };
+        let win = rect("window");
+        assert_eq!((win.x, win.y), (0.0, 0.0), "无阴影时窗口贴缓冲左上");
+        assert!(win.w <= f.width as f32 && win.h <= f.height as f32);
+        assert!(inside(rect("item"), rect("candidate_list")));
+        assert!(inside(rect("index"), rect("item")));
+        assert!(inside(rect("candidate_list"), win));
+        // 软件阴影把内容平移到扩边之内，节点矩形跟着平移。
+        let shadowed = {
+            let mut t = theme.clone();
+            t.views.shadow_blur = Some(wind_theme::schema::Dim::Dp(8.0));
+            t.views.shadow_color = Some([0, 0, 0, 64]);
+            render_candidate(
+                &mut scene,
+                &CandidateSceneInput { theme: &t, ..inp },
+                clock,
+                true,
+            )
+        };
+        let w2 = shadowed.nodes[0].1;
+        assert!(w2.x > 0.0 && w2.y > 0.0, "{w2:?}");
+        // 屏幕安全宽把窗口钳窄：报 safety_clamped，节点矩形都钳在缓冲里。
+        let many: Vec<CandidateItem> = (0..9).map(|_| cand("候选候选")).collect();
+        let narrow = render_candidate(
+            &mut scene,
+            &CandidateSceneInput {
+                candidates: &many,
+                screen_extent_px: Some((200, 1080)),
+                ..inp
+            },
+            clock,
+            false,
+        );
+        assert!(narrow.safety_clamped);
+        assert!(!f.safety_clamped);
+        for (k, r) in &narrow.nodes {
+            assert!(
+                r.x >= 0.0 && r.x + r.w <= narrow.width as f32 && r.y + r.h <= narrow.height as f32,
+                "{k:?} {r:?} 出了 {}x{}",
+                narrow.width,
+                narrow.height
+            );
+        }
+        for id in 0..=9 {
+            if let Some(k) = NodeKey::from_id(id) {
+                assert_eq!(k as u8, id);
+            }
+        }
+        assert_eq!(NodeKey::from_id(0), None);
+    }
+
+    /// 带皮肤的临时主题：16×16 窗体 + 一块装饰（`decor` 是装饰表的额外字段）。
+    fn skin_theme(tag: &str, decor: &str) -> (std::path::PathBuf, wind_theme::Resolved) {
+        let dir = std::env::temp_dir().join(format!(
+            "wind_scene_render_limits_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = dir.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        let px = |w, h| image::RgbaImage::from_pixel(w, h, image::Rgba([200, 200, 200, 255]));
+        px(16, 16).save(t.join("frame.png")).unwrap();
+        px(4, 4).save(t.join("dot.png")).unwrap();
+        std::fs::write(
+            t.join("theme.toml"),
+            format!(
+                "[meta]\nname = \"t\"\n[skin]\ndensity = 1\n\
+                 [skin.horizontal.frame]\nimage = \"frame.png\"\n\
+                 stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+                 [[skin.horizontal.decor]]\nimage = \"dot.png\"\nanchor = \"frame.top_left\"\n{decor}\n"
+            ),
+        )
+        .unwrap();
+        let theme = wind_theme::load_resolved(&dir, "t", false).unwrap();
+        assert!(theme.skin.is_some());
+        (dir, theme)
+    }
+
+    fn render_with(theme: &wind_theme::Resolved) -> (CandidateFrame, bool) {
+        let (f, scene) = render_scene(theme);
+        (f, scene.skin_geom.is_some())
+    }
+
+    fn render_scene(theme: &wind_theme::Resolved) -> (CandidateFrame, CandidateScene) {
+        let text = MockText::new("", 16.0).unwrap();
+        let opts = CandidateSceneOptions::default();
+        let cands = [cand("你好")];
+        let inp = CandidateSceneInput {
+            candidates: &cands,
+            preedit: "nihao",
+            preedit_caret: 5,
+            mode_label: "",
+            selected: 0,
+            hover: -1,
+            page: 1,
+            total_pages: 1,
+            grid: None,
+            vertical: false,
+            rotated: false,
+            upright: false,
+            preedit_embedded: false,
+            above: false,
+            theme,
+            base_font_logical: 16.0,
+            scale: 1.0,
+            screen_extent_px: Some((1920, 1080)),
+            text_renderer: &text,
+            opts: &opts,
+        };
+        let clock = AnimClock {
+            t: std::time::Duration::ZERO,
+            showing: true,
+            allowed: false,
+        };
+        let mut scene = CandidateScene::default();
+        let f = render_candidate(&mut scene, &inp, clock, false);
+        (f, scene)
+    }
+
+    #[test]
+    fn hostile_skin_geometry_stays_within_image_limits() {
+        // 正常的装饰：皮肤照常启用。
+        let (d0, ok) = skin_theme("ok", "offset = [2, 2]");
+        assert!(render_with(&ok).1, "正常皮肤应启用");
+        // 偏移大到外扩撑破上限：整套回退普通窗口，缓冲是普通尺寸。
+        let (d1, far) = skin_theme("far", "offset = [100000000, 0]");
+        let (f, skinned) = render_with(&far);
+        assert!(!skinned, "外扩超限应回退");
+        assert!(
+            crate::skin::fits_image_limits(f.width, f.height),
+            "{}x{}",
+            f.width,
+            f.height
+        );
+        // 声明巨大尺寸的装饰：按比例钳进上限，不去分配那么大的位图。
+        let (d2, huge) = skin_theme("huge", "size = [1000000, 1000000]");
+        let (f, _) = render_with(&huge);
+        assert!(
+            crate::skin::fits_image_limits(f.width, f.height),
+            "{}x{}",
+            f.width,
+            f.height
+        );
+        for d in [d0, d1, d2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// 超限的帧在绘制前挡住；不超限时与 `render_candidate` 同一帧。
+    #[test]
+    fn within_rejects_oversized_frames() {
+        let theme = wind_theme::Resolved::default();
+        let text = MockText::new("", 16.0).unwrap();
+        let opts = CandidateSceneOptions::default();
+        let cands = [cand("你好")];
+        let inp = CandidateSceneInput {
+            candidates: &cands,
+            preedit: "nihao",
+            preedit_caret: 5,
+            mode_label: "",
+            selected: 0,
+            hover: -1,
+            page: 1,
+            total_pages: 1,
+            grid: None,
+            vertical: false,
+            rotated: false,
+            upright: false,
+            preedit_embedded: false,
+            above: false,
+            theme: &theme,
+            base_font_logical: 16.0,
+            scale: 1.0,
+            screen_extent_px: Some((1920, 1080)),
+            text_renderer: &text,
+            opts: &opts,
+        };
+        let clock = AnimClock {
+            t: std::time::Duration::ZERO,
+            showing: true,
+            allowed: false,
+        };
+        let mut scene = CandidateScene::default();
+        let full = render_candidate(&mut scene, &inp, clock, false);
+        let ok = render_candidate_within(&mut scene, &inp, clock, false, 4096, 1 << 24).unwrap();
+        assert_eq!(ok.bgra, full.bgra);
+        let e = render_candidate_within(&mut scene, &inp, clock, false, full.width - 1, 1 << 24)
+            .err()
+            .expect("单边超限");
+        assert!(
+            e.contains(&format!("{}×{}", full.width, full.height)),
+            "{e}"
+        );
+        let px = u64::from(full.width) * u64::from(full.height);
+        assert!(render_candidate_within(&mut scene, &inp, clock, false, 4096, px - 1).is_err());
+    }
+
+    #[test]
+    fn to_rgba_swaps_channels_and_unpremultiplies() {
+        let f = CandidateFrame {
+            width: 3,
+            height: 1,
+            bgra: vec![10, 20, 30, 255, 64, 32, 16, 128, 9, 9, 9, 0],
+            nodes: Vec::new(),
+            safety_clamped: false,
+            skin: None,
+        };
+        assert_eq!(
+            f.to_rgba(),
+            vec![30, 20, 10, 255, 32, 64, 128, 128, 0, 0, 0, 0]
+        );
+    }
+
+    /// 装饰 flip 只翻像素：外接框、命中 / 穿透矩形与不翻时一致，框内像素左右互换；
+    /// `states` 引用的附加文件同样翻。
+    #[test]
+    fn decor_flip_mirrors_pixels_but_keeps_rects() {
+        let dir =
+            std::env::temp_dir().join(format!("wind_scene_decor_flip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = dir.join("t");
+        std::fs::create_dir_all(&t).unwrap();
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([200, 200, 200, 255]))
+            .save(t.join("frame.png"))
+            .unwrap();
+        // 非对称：首列一色、其余另一色。
+        let two = |a: [u8; 4], b: [u8; 4]| {
+            image::RgbaImage::from_fn(4, 4, |x, _| image::Rgba(if x == 0 { a } else { b }))
+        };
+        two([255, 0, 0, 255], [0, 0, 255, 255])
+            .save(t.join("dot.png"))
+            .unwrap();
+        two([0, 255, 0, 255], [255, 255, 255, 255])
+            .save(t.join("alt.png"))
+            .unwrap();
+        let load = |decor: &str| {
+            std::fs::write(
+                t.join("theme.toml"),
+                format!(
+                    "[meta]\nname = \"t\"\n[skin]\ndensity = 1\n\
+                     [skin.horizontal.frame]\nimage = \"frame.png\"\n\
+                     stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+                     [[skin.horizontal.decor]]\nimage = \"dot.png\"\nanchor = \"frame.top_left\"\n\
+                     pivot = \"bottom_right\"\nz = -1\nhit = \"pass\"\n{decor}\n"
+                ),
+            )
+            .unwrap();
+            wind_theme::load_resolved(&dir, "t", false).unwrap()
+        };
+        // 左上像素 RGB（BGRA 预乘，全不透明）。
+        let rgb = |f: &CandidateFrame, x: i32, y: i32| {
+            let i = ((y as u32 * f.width + x as u32) * 4) as usize;
+            [f.bgra[i + 2], f.bgra[i + 1], f.bgra[i]]
+        };
+        // 外接框、宿主区域、粗输入区、可点矩形、窗体框，逐字段对拍（Rect 没有 PartialEq）。
+        let rects = |s: &CandidateScene| {
+            let g = s.skin_geom.as_ref().expect("皮肤启用");
+            format!(
+                "{:?}",
+                (
+                    g.decor_rects_for_test(),
+                    g.host_decor(),
+                    g.coarse_input_rects(),
+                    g.click_rects(),
+                    g.frame_for_test(),
+                    g.no_drag_rects(),
+                )
+            )
+        };
+        for (extra, left, right) in [
+            ("", [255, 0, 0], [0, 0, 255]),
+            (
+                "states = { idle = { image = \"alt.png\" } }",
+                [0, 255, 0],
+                [255, 255, 255],
+            ),
+        ] {
+            let (plain, ps) = render_scene(&load(extra));
+            let ft = load(&format!("flip = \"x\"\n{extra}"));
+            let (flipped, fs) = render_scene(&ft);
+            assert_eq!(rects(&ps), rects(&fs), "{extra:?}：几何随 flip 变了");
+            assert_eq!((plain.width, plain.height), (flipped.width, flipped.height));
+            let (x, y, w, _) = ps.skin_geom.as_ref().unwrap().decor_rects_for_test()[0];
+            let last = x + w as i32 - 1;
+            assert_eq!(
+                (rgb(&plain, x, y), rgb(&plain, last, y)),
+                (left, right),
+                "{extra:?}"
+            );
+            assert_eq!(
+                (rgb(&flipped, x, y), rgb(&flipped, last, y)),
+                (right, left),
+                "{extra:?}"
+            );
+            let skin = ft.skin.as_deref().unwrap();
+            let snap = fs.skin_geom.as_ref().unwrap().snapshot(skin).unwrap();
+            assert_eq!(snap.decor[0].flip, wind_theme::Flip { x: true, y: false });
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

@@ -40,6 +40,7 @@ namespace windlinux {
 
 class X11CandidatePanel;
 class WaylandCandidatePanel;
+class DesktopMotion;
 
 /// 输入法 / addon 的「配置」：只有一项外部工具（设置程序）。Fcitx5 的配置工具（fcitx5-configtool
 /// 5.1.6 起）遇到「整页只有一个 External 项」就直接启动它，不再弹一张空白配置页；更早的版本
@@ -98,6 +99,7 @@ private:
     HostOutput hostOutput(fcitx::InputContext* ic);
     void sendCaretUpdate(fcitx::InputContext* ic);
     uint16_t prevCharFor(fcitx::InputContext* ic);
+    void noteHostCursor(fcitx::InputContext* ic);
     /// 修饰键单击 / CapsLock 状态通知：发一帧 eventType=UP 的 KeyEvent 并应用其响应。
     /// `toggles` 必须是真实锁定态——服务端拿**每一帧**的 toggles 校准大写锁定镜像，
     /// 发 0 等于告诉它「大写锁定关了」。
@@ -188,6 +190,8 @@ private:
     ShmFrameReader panelShm_[2];
     FullscreenReporter fullscreen_;
     std::unique_ptr<X11CandidatePanel> panel_;
+    /// 系统「减少动态效果」（门户 + kdeglobals），变了经 `host.reduce_motion` 报服务。
+    std::unique_ptr<DesktopMotion> motion_;
     /// Wayland 原生应用（frontend wayland_v2）的候选窗：popup surface，由合成器摆位。没有 Wayland
     /// 支持（编译时缺 libwayland）或不在 Wayland 会话时为空。
 #ifdef WIND_HAVE_WAYLAND

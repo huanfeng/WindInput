@@ -29,6 +29,12 @@ fn main() {
         return;
     }
 
+    // 主线程栈 8 MiB（只是保留地址，按需提交）。默认 1 MiB 在 dev 档（工作区 opt-level=1）下
+    // 不够：主题加载链上 serde 访问器每层都是数百 KiB 的帧，曾因此栈溢出、服务循环崩溃。
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+    }
+
     // 图标资源（仅 Windows）。
     let icon = product_root.join("wind_tsf/res/wind_input.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
@@ -107,6 +113,9 @@ fn emit_build_stamp() {
 }
 
 /// git 短哈希；工作树有未提交改动时追加 `-dirty`。git 不可用时返回 `unknown`。
+///
+/// 判脏忽略未跟踪文件（与 `git describe --dirty` 的口径一致，编辑器按它比对预览引擎版本）。
+/// 会影响预览缓存键：只是没那么容易判脏，缓存更少失效。
 fn git_describe() -> String {
     use std::process::Command;
     let hash = Command::new("git")
@@ -118,7 +127,7 @@ fn git_describe() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
     let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .output()
         .ok()
         .filter(|o| o.status.success())

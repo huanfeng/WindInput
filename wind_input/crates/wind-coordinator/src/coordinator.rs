@@ -463,6 +463,12 @@ pub(crate) struct State {
     pub(crate) chinese_mode: bool,
     pub(crate) full_width: bool,
     pub(crate) chinese_punct: bool,
+    /// 插入点前一字符的类别——中英/中数间补空格与英文后智能标点的「上一笔」。
+    ///
+    /// 两个写入点（见 `crate::auto_spacing`）：无输入会话时的 keydown 按客户端 `seq_char`
+    /// 重新锁存；服务端每发出一笔上屏就改成那笔的末字符。组合中的后续按键不改它——组字键
+    /// 没写进文档，真正的「前一字符」是组合开始时那个。
+    pub(crate) spacing_prev: wind_punct::spacing::CharClass,
     /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
     ///
     /// 见 `docs/design/schema-scoped-behavior.md` §4。初值是哨兵 `u64::MAX`，保证首次
@@ -951,6 +957,7 @@ thread_local! {
 ///   不重建），结果在 `reload_user_config` 里并进 `schema_dirty`。
 /// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
 ///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
+/// - `schema.dict_cache_policy`：只在服务启动时读一次（改了要重启才生效），重建引擎也换不了策略。
 pub(crate) fn engine_reload_needed(
     old: &Config,
     new: &Config,
@@ -959,6 +966,7 @@ pub(crate) fn engine_reload_needed(
     let schema_changed = {
         let mut old_schema = old.schema.clone();
         old_schema.keep_all_loaded = new.schema.keep_all_loaded;
+        old_schema.dict_cache_policy = new.schema.dict_cache_policy.clone();
         old_schema != new.schema
     };
     schema_changed
@@ -1073,6 +1081,9 @@ pub(crate) struct ActiveCompat {
     pub(crate) auto_pair: Option<bool>,
     /// 本进程的智能符号替换方案；`None` = 跟随全局 `input.symbol.smart_method`。
     pub(crate) smart_method: Option<wind_config::config::SmartMethod>,
+    /// 本进程的中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`，`Some(false)` 关闭。
+    /// 读取见 `Coordinator::auto_spacing_allowed_here`。
+    pub(crate) auto_spacing: Option<bool>,
     /// 光标坐标校正偏移（dp，96dpi 基准逻辑像素，正=右/下）。宿主报告的 caret 系统性偏移时用，
     /// 与 `caret_use_top` 在同两处消费（`apply_focus_caret` / `handle_caret_update`）。
     /// 应用时按目标点所在显示器的 DPI 换算成物理像素，见 [`Coordinator::apply_caret_compat`]。
@@ -1100,6 +1111,8 @@ pub(crate) struct ActiveCompat {
 pub(crate) struct ActiveLookups {
     /// 协调器自己发占位时用的字符（`composition_placeholder`，没配 = 空格）。
     pub(crate) composition_placeholder: wind_config::app_compat::PlaceholderChar,
+    /// 联想态的占位字符（`assoc_placeholder`，没配 = 跟随 `composition_placeholder`，已在此合并）。
+    pub(crate) assoc_placeholder: wind_config::app_compat::AssocPlaceholder,
     /// 拼音音节分隔符的应用级覆盖（`syllable_separator`）；`None` = 跟随全局。
     pub(crate) syllable_separator: Option<wind_config::app_compat::SyllableSeparator>,
     /// per-app 候选窗定位 `(fixed, x, y)`；`None` = 规则没配定位方式，跟随全局。
@@ -1438,7 +1451,7 @@ pub(crate) enum CapsCancelSwitch {
 
 impl CapsCancelSwitch {
     /// 按 `CMD_SYSTEM_MODE_SWITCH` 的来源分派。「是不是用户按的」判据与
-    /// [`Coordinator::host_ime_close_ignored`] 同源：系统热键（Ctrl+空格）翻 compartment 时
+    /// [`Coordinator::host_ime_switch_ignored`] 同源：系统热键（Ctrl+空格）翻 compartment 时
     /// Ctrl 尚未释放，宿主自己写则没有伴随按键；按键侧兜底（`CtrlSpaceKey`）恒算用户发起。
     /// 菜单是用户**明确点了目标**，没有「切一下」的歧义，按请求。
     pub(crate) fn from_system(
@@ -1502,13 +1515,15 @@ pub struct Coordinator {
     /// 是否已有草稿 flush 线程在跑。没有这道闸，队列每满一次就会 spawn 一个新线程去
     /// 抢同一把 redb 写锁（同 `is_building_reverse_index` 那道闸的理由）。
     pub(crate) draft_flushing: std::sync::atomic::AtomicBool,
-    /// 最近一次**本输入法自己**向宿主吐字的时刻（由 `commit_action` 统一打点）。
+    /// 最近一次**本输入法自己**向宿主吐字的时刻（`note_self_commit` 打点，经
+    /// `finish_session_action` 按来源调用）。
     ///
     /// 用途只有一个：宿主插入我们提交的文字后会回送 `SelectionChanged`，它和「用户真的
     /// 移动了光标」在协议层**长得一模一样**，只能靠时间区分。若不区分，每上屏一个字就会
     /// 被自己的回声判成「用户移动光标」→ flush → 缓冲永远只有 1 个字 → 造词恒不触发。
     ///
-    /// **打点必须收口在 `commit_action` 一处**：漏掉任一吐字路径，该路径的回声就会切碎序列。
+    /// **打点必须收口在 `finish_session_action` 一处**：漏掉任一吐字路径，该路径的回声就会
+    /// 切碎序列。不经它的推送通路（落点指引 §4.3 末表）目前不打点。
     pub(crate) last_self_commit: Mutex<Option<std::time::Instant>>,
     /// 自动造词写入计数，供临时词库淘汰按次节流（见 `maybe_evict_temp`）。
     pub(crate) auto_phrase_writes: std::sync::atomic::AtomicUsize,
@@ -1542,10 +1557,14 @@ pub struct Coordinator {
     /// 智能联想「下一词」表的路径（`assoc/assoc_bigram.txt`，用户目录同名文件整体替代）；
     /// None = 数据缺失，Bigram 源不出、配额顺延。
     pub(crate) assoc_bigram_path: Option<std::path::PathBuf>,
-    /// 「下一词」表本体：**首次用到时才读**（桌面联想默认关，不该为它多占内存）。
-    /// 读失败记一条警告、之后一直是 None，不反复重试。
-    pub(crate) assoc_bigram:
+    /// 「下一词」表本体：**用得上才读**（桌面联想默认关，不该为它多占内存），且只在后台线程读
+    /// （约 2 MB 文本，见 `ensure_assoc_bigram_async`）。读失败记一条警告、之后一直是 None，
+    /// 不反复重试。`Arc` 是为了让加载线程不必持有协调器。
+    pub(crate) assoc_bigram: std::sync::Arc<
         std::sync::OnceLock<Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>>>,
+    >,
+    /// 下一词表的后台加载已派出（只派一次）。
+    pub(crate) assoc_bigram_loading: std::sync::atomic::AtomicBool,
     /// system.phrases.toml 路径（None=无 data_dir，如 headless 测试）。
     /// "恢复默认"据此重读文件，使手工编辑无需重启服务即可生效。
     pub(crate) system_phrase_path: Option<std::path::PathBuf>,
@@ -1728,6 +1747,9 @@ pub struct Coordinator {
     host_no_inline_preedit: std::sync::atomic::AtomicBool,
     /// 热重载成功后**不弹**「设置已更新」（移动端）。见 [`Coordinator::set_quiet_reload_toast`]。
     quiet_reload_toast: std::sync::atomic::AtomicBool,
+    /// 被压制的引导键 VK（0=无）。命中时 `bound_action_for` 按「未绑定」处理。
+    /// 见 [`Coordinator::set_trigger_suppressed`]。
+    pub(crate) trigger_suppressed: std::sync::atomic::AtomicU32,
     /// 启动时预热全部已装方案（桌面默认开；移动端关，见构造里的说明）
     pub(crate) eager_prewarm: std::sync::atomic::AtomicBool,
     /// 0=Idle 1=Preparing 2=Ready 3=Failed（见 [`Coordinator::readiness`]）
@@ -1829,7 +1851,7 @@ pub struct Coordinator {
     /// ⚠ 不与 [`Self::caret_cache_verified`] 合并：那个答「手里的值可不可信」，本字段答
     /// 「手里的值是不是组合前刚测的」。微信这个场景里前者为真、后者也为真，但正是靠后者
     /// 才能判定 probe 陈旧——合成一个就再也分不出「缓存可信」与「probe 可信」了。
-    caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
+    pub(crate) caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
     /// 本次焦点到达后，**还没有**经历过一次组合期间的权威坐标。
     ///
     /// 专门用来把 `idle_anchor` 逃生口挡在「焦点后的第一个组合」之外。空闲上报在**组合之间**
@@ -2163,6 +2185,9 @@ pub struct Coordinator {
     /// 那次」精准删多个；撤销一次即复位 1、焦点变化亦复位 → 之后回落删 1（宁可少删多按几次，
     /// 也不按陈旧计数误删多个）。
     pub(crate) last_commit_len: std::sync::atomic::AtomicUsize,
+    /// 最近一次上屏的文本开头是不是 `crate::auto_spacing` 补的空格。造词草稿流要把它剥掉：
+    /// 草稿窗口遇到非汉字就断流并丢掉整笔，不剥的话交界后的第一个字永远进不了草稿。
+    pub(crate) auto_space_prefixed: std::sync::atomic::AtomicBool,
     /// 编码显示方式运行时态（命令栏 ime.toggle("preedit") 循环切换；初值随配置）。
     /// 统一权威：决定候选窗是否显示 preedit（in_app→不显示）及是否内联首单元（embedded）。
     pub(crate) preedit_display: Mutex<PreeditDisplay>,
@@ -2563,6 +2588,7 @@ impl Coordinator {
                     toggles: 0,
                     event_seq: 0,
                     prev_char: 0,
+                    seq_char: 0,
                 };
                 use wind_bridge::handler::MessageHandler;
                 this.handle_key_event(&key(0x41));
@@ -2639,6 +2665,15 @@ impl Coordinator {
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 临时压制某个键的「引导键」身份（`vk` 为 0 = 清除）：压制期间该键在
+    /// `bound_action_for` 里按「未绑定」处理，空码时走普通标点管线。
+    /// 只影响引导键绑定，不影响选词键等会话态按键。默认不压制，桌面路径从不调用。
+    /// 宿主应在 `key_down` 前设置、之后立即清除（单线程串行调用）。
+    pub fn set_trigger_suppressed(&self, vk: u32) {
+        self.trigger_suppressed
+            .store(vk, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 声明宿主报的光标坐标可直接当权威（见字段 `host_caret_trusted`）。
     pub fn set_host_caret_trusted(&self, value: bool) {
         self.host_caret_trusted
@@ -2701,11 +2736,12 @@ impl Coordinator {
         }
     }
 
-    /// Linux addon 的 push 连接每（重）建立一次，就让渲染端补推可见的工具栏 / 软键盘：addon 收到
-    /// SERVICE_READY 会丢掉手里的面板，而同一服务换了连接时面板状态并没有变，不会自己再推。
-    /// 服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
+    /// 外部宿主（Linux addon / macOS `.app`）的 push 连接每（重）建立一次，就让渲染端复位它记着的
+    /// 宿主状态：Linux 补推可见的工具栏 / 软键盘（addon 收到 SERVICE_READY 会丢掉手里的面板，而同一
+    /// 服务换了连接时面板状态并没有变，不会自己再推）；macOS 作废皮肤换帧的分层去重（新 `.app` 手里
+    /// 什么都没有）。服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
     pub fn install_host_reconnect_hook(&self) {
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         {
             let tx = self.ui_tx.clone();
             self.push_server
@@ -3096,6 +3132,7 @@ impl Coordinator {
                 chinese_mode: init_chinese,
                 full_width: init_full,
                 chinese_punct: init_punct,
+                spacing_prev: wind_punct::spacing::CharClass::Other,
                 // 哨兵：与任何真实代际都不相等，保证首次 sync_schema_scope 必执行。
                 schema_scope_gen: u64::MAX,
                 punct_before_schema: None,
@@ -3218,7 +3255,8 @@ impl Coordinator {
             system_phrase_entries: std::sync::RwLock::new(system_phrase_entries),
             system_phrase_path,
             assoc_bigram_path,
-            assoc_bigram: std::sync::OnceLock::new(),
+            assoc_bigram: std::sync::Arc::new(std::sync::OnceLock::new()),
+            assoc_bigram_loading: std::sync::atomic::AtomicBool::new(false),
             system_comments,
             comment_lib: std::sync::RwLock::new(Arc::new(comment_lib)),
             s2t: Mutex::new(s2t),
@@ -3279,6 +3317,7 @@ impl Coordinator {
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
             host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
             quiet_reload_toast: std::sync::atomic::AtomicBool::new(false),
+            trigger_suppressed: std::sync::atomic::AtomicU32::new(0),
             eager_prewarm: std::sync::atomic::AtomicBool::new(true),
             readiness_state: std::sync::atomic::AtomicU8::new(0),
             pending_first_show: Mutex::new(false),
@@ -3340,6 +3379,7 @@ impl Coordinator {
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
+            auto_space_prefixed: std::sync::atomic::AtomicBool::new(false),
             preedit_display: Mutex::new(preedit_display_init),
             eff_candidate_cache: Mutex::new(None),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),
@@ -3445,6 +3485,7 @@ impl Coordinator {
         // 档位循环触发键的撞车体检（只告警）。出厂不配 ⇒ 默认直接返回。
         coordinator.warn_english_case_cycle_conflict();
         coordinator.warn_sentence_cycle_conflict();
+        coordinator.warn_schema_sentence_cycle_conflict(&coordinator.engine_mgr.active_schema_id());
         coordinator.warn_comment_switch_conflict();
         coordinator
     }
@@ -3594,6 +3635,7 @@ impl Coordinator {
                         has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                         auto_pair: rule.and_then(|r| r.auto_pair),
                         smart_method: rule.and_then(|r| r.smart_method),
+                        auto_spacing: rule.and_then(|r| r.auto_spacing),
                         caret_offset_x: rule.map(|r| r.caret_offset_x).unwrap_or(0),
                         caret_offset_y: rule.map(|r| r.caret_offset_y).unwrap_or(0),
                         window_hash,
@@ -3721,6 +3763,7 @@ impl Coordinator {
                 self.push_password_suppress_config(token);
                 self.push_english_pair_config(token);
                 self.push_composition_placeholder_config(token);
+                self.push_space_before_digit_config(token);
                 self.push_multiline_commit_config(token);
                 // 标题采集开关按进程名算（本进程可能命中标题规则），名字纠正后同样要重推。
                 self.push_compat_title_match_config(token);
@@ -3862,19 +3905,28 @@ impl Coordinator {
 
     /// 按 (进程名, 窗口) 现算 [`ActiveLookups`]。
     pub(crate) fn compute_active_lookups(&self, name: &str, win: &FocusWindow) -> ActiveLookups {
-        let (composition_placeholder, candidate_pos, host_drawn_candidates, syllable_separator) =
-            self.with_compat_rule(name, win, |rule| {
-                (
-                    rule.and_then(|r| r.composition_placeholder)
-                        .unwrap_or_default(),
-                    rule.and_then(|r| {
-                        let mode = r.candidate_position_mode?;
-                        Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
-                    }),
-                    rule.and_then(|r| r.host_drawn_candidates),
-                    rule.and_then(|r| r.syllable_separator),
-                )
-            });
+        let (
+            composition_placeholder,
+            assoc_placeholder,
+            candidate_pos,
+            host_drawn_candidates,
+            syllable_separator,
+        ) = self.with_compat_rule(name, win, |rule| {
+            let comp = rule
+                .and_then(|r| r.composition_placeholder)
+                .unwrap_or_default();
+            (
+                comp,
+                rule.and_then(|r| r.assoc_placeholder)
+                    .unwrap_or_else(|| comp.into()),
+                rule.and_then(|r| {
+                    let mode = r.candidate_position_mode?;
+                    Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
+                }),
+                rule.and_then(|r| r.host_drawn_candidates),
+                rule.and_then(|r| r.syllable_separator),
+            )
+        });
         // 收窗推断对无名进程也认 `"*"`（`get_rule("")` 不吃通配），口径见
         // `uielement_host_draws_by_inference`。
         let host_drawn_candidates = if name.is_empty() {
@@ -3886,6 +3938,7 @@ impl Coordinator {
         };
         ActiveLookups {
             composition_placeholder,
+            assoc_placeholder,
             syllable_separator,
             candidate_pos,
             host_drawn_candidates,
@@ -4191,22 +4244,23 @@ impl Coordinator {
         self.with_compat_rule(proc_name, win, |r| r.and_then(|r| r.initial_mode))
     }
 
-    /// 这次系统模式切换是不是「宿主自作主张关 IME」，且当前应用配了忽略。
+    /// 这次系统模式切换是不是「宿主自作主张切中英」，且当前应用（或全局）配了忽略。
     ///
-    /// 四个条件缺一不可（顺序即成本，先便宜的）：
-    /// 1. **是关不是开**——开 IME 从不拦，宿主想给中文是好事；
-    /// 2. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
+    /// 不看方向：开和关一样拦（宿主关 IME 让用户点一下按钮就变英文；SSMS 内部焦点切换把
+    /// OPENCLOSE 写成开，英文态被切成中文、第一键被吃，GH#312）。三个条件缺一不可
+    /// （顺序即成本，先便宜的）：
+    /// 1. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
     ///    否则该应用里中英切换彻底失灵（判据由 DLL 现场采样，见 `MODE_SWITCH_CTRL_HELD`）；
-    /// 3. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
-    /// 4. 该应用显式配了 `ignore_host_ime_close = true`。
-    pub(crate) fn host_ime_close_ignored(
+    /// 2. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
+    /// 3. 生效值为真：该应用规则写了 `ignore_host_ime_switch` 就以它为准，没写取全局
+    ///    `input.ignore_host_ime_switch`（出厂关）。
+    pub(crate) fn host_ime_switch_ignored(
         &self,
-        chinese_mode: bool,
         source: wind_ipc::protocol::ModeSwitchSource,
         ctrl_held: bool,
     ) -> bool {
         use wind_ipc::protocol::ModeSwitchSource as Src;
-        if chinese_mode || ctrl_held {
+        if ctrl_held {
             return false;
         }
         if !matches!(
@@ -4215,8 +4269,8 @@ impl Coordinator {
         ) {
             return false;
         }
-        self.with_active_compat_rule(|r| r.and_then(|r| r.ignore_host_ime_close))
-            .unwrap_or(false)
+        self.with_active_compat_rule(|r| r.and_then(|r| r.ignore_host_ime_switch))
+            .unwrap_or_else(|| self.rt().config.input.ignore_host_ime_switch)
     }
 
     /// 查 `compat.toml` 中该进程（该窗口）的初始中英标点规则；`None` = 未配置（不干预）。
@@ -4448,6 +4502,16 @@ impl Coordinator {
         let d = &bundle.config.input.default;
         let proc = self.cached_proc_name(client_token);
         let chinese = self.initial_chinese_mode_for(&proc, win);
+        // per-app：首次进入就把这个进程的中英态记进表。只在手动切换时记的话，没切过的进程
+        // 表里没有它，下次回来会退回全局「前次状态」——在别的应用里切的那一下就把它带走了。
+        // 有应用规则的进程不记：规则每次都压过记忆表。
+        if d.per_app_scope() && !proc.is_empty() && self.rule_initial_mode(&proc, win).is_none() {
+            self.mode_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(proc.clone())
+                .or_insert(chinese);
+        }
         let rule_punct = self.rule_initial_punct(&proc, win);
         let follow = bundle.config.input.punct.follow_mode;
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -4614,9 +4678,9 @@ impl Coordinator {
     /// 本次照旧返回空、下次就有（与 `ensure_reverse_index_async` 同一模式）。配置里的消费者
     /// 不走这里——它们由 [`Self::sync_chaizi_assets`] 按 `DataNeeds` 装好。
     ///
-    /// 可能每键都被调（短语求值），故先过闸再解析：解析要读方案文件，找不到库还要告警。
-    /// 本代次（两次 sync 之间）只解析一次，找不到也记「试过」。读盘在锁外做，只在换入那一刻
-    /// 取反查表写锁：候选渲染持着它的读锁。
+    /// 可能每键都被调（短语求值），故先过闸：本代次（两次 sync 之间）只派一次，找不到库也记
+    /// 「试过」。方案字段走缓存；库路径解析（查文件存在）与加载都在后台线程，按键线程不碰盘。
+    /// 只在换入那一刻取反查表写锁：候选渲染持着它的读锁。
     pub(crate) fn ensure_chaizi_async(&self) {
         let generation = {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
@@ -4630,12 +4694,10 @@ impl Coordinator {
             }
             a.generation
         };
-        let Some(path) = Self::resolve_chaizi_db(
-            self.data_dir().as_deref(),
-            self.engine_mgr.chaizi_spec().as_ref(),
-        ) else {
+        let Some(spec) = self.engine_mgr.chaizi_spec() else {
             return;
         };
+        let data_dir = self.data_dir();
         {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
             if a.generation != generation || a.db.is_some() || a.loading {
@@ -4655,6 +4717,9 @@ impl Coordinator {
             .name("chaizi-load".into())
             .spawn(move || {
                 let _guard = guard;
+                let Some(path) = Self::resolve_chaizi_db(data_dir.as_deref(), Some(&spec)) else {
+                    return;
+                };
                 let fresh = wind_reverse::ReverseLookup::load(None, Some(&path));
                 if let Some(c) = weak.upgrade() {
                     c.install_runtime_chaizi(generation, path, fresh);
@@ -5341,6 +5406,7 @@ impl Coordinator {
                 self.push_cn_passthrough_punct_config(0); // 中文模式该透传的标点：DLL 据此**不**吃
                 self.push_en_passthrough_punct_config(0); // 同上，英文标点态那份（超集）
                 self.push_space_custom_cols_config(0); // 空格行自定义列：DLL 据此吃空缓冲空格
+                self.push_space_before_digit_config(0); // 中数间补空格：DLL 据此吃汉字后的数字
                 self.push_pair_state_ttl_config(0); // 配对状态时效（DLL 侧闸门据此判陈旧）
                 self.push_ctrl_space_toggle_config(0); // Ctrl+空格 切换开关：DLL 据此吃不吃该键（GH#172）
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——
@@ -5492,6 +5558,8 @@ impl Coordinator {
     ///
     /// ⚠️ 会阻塞秒级，**只可在后台线程/测试里调用**，绝不能进按键链路。
     pub fn prewarm_indexes(&self) {
+        // 按键路径要用的方案级字段先填缓存（输入流程零读盘）。
+        self.engine_mgr.warm_hot_schema_fields();
         // 悬停 [编码] / 编码提示取 code_source_schema，词语联想取 assoc_word_schema。
         // 混输下两者通常都解析到同一个主码表成员，故去重后一般只建一份。
         // 两者相同时不必去重：prewarm_reverse_index 幂等，第二次直接返回。
@@ -5520,6 +5588,13 @@ impl Coordinator {
             if self.engine_mgr.prewarm_reverse_index(&id) {
                 debug!("预热辅助码来源反查索引 {} 用时 {:?}", id, t0.elapsed());
             }
+        }
+        // 智能联想档的下一词表：派后台加载，不在这里等（约 2 MB 文本）。
+        if self
+            .assoc_config()
+            .source_enabled(wind_assoc::AssocSource::Bigram)
+        {
+            self.ensure_assoc_bigram_async();
         }
         // 词语联想的用户词 / 临时词文本索引（t185）：联想开着才建——它要扫整张用户词表，
         // 关着联想的用户不该付这笔。没预热也不致命：首次联想会起后台重建，那一次只出系统词。
@@ -5822,6 +5897,10 @@ impl Coordinator {
         let _ = self
             .ui_tx
             .send(UiCommand::SetCandidateShadow(cand.shadow != "off"));
+        // 主题动画开关（ui.theme.animation）
+        let _ = self.ui_tx.send(UiCommand::SetThemeAnimation(
+            bundle.config.ui.theme.animation,
+        ));
         // 候选窗尺寸下限（ui.candidate.min_window_width_* / min_window_height_* / min_rows，抗抖动）
         self.send_candidate_min_size();
         // 悬停提示延迟（ui.tooltip.delay）
@@ -5956,13 +6035,15 @@ impl Coordinator {
             return None;
         }
         // 只认纯翻页动词：`AuxCode(PageNext)` 共键降级的那一下不归 `keys.overflow.page_key`。
-        let is_page_action = matches!(
-            action,
-            wind_config::SessionAction::PagePrev
-                | wind_config::SessionAction::PageNext
-                | wind_config::SessionAction::PageScreenPrev
-                | wind_config::SessionAction::PageScreenNext
-        );
+        // 值是该键翻不动时的策略：翻页动作的后缀，翻屏动词跟随全局档。
+        let page_overflow = match action {
+            wind_config::SessionAction::PagePrev(o) | wind_config::SessionAction::PageNext(o) => {
+                Some(o)
+            }
+            wind_config::SessionAction::PageScreenPrev
+            | wind_config::SessionAction::PageScreenNext => Some(wind_config::PageOverflow::Global),
+            _ => None,
+        };
         // 「翻屏」动词：展开态翻整屏，未展开时与翻页完全一致（下面落到同一条 nav 执行）。
         let screen_verb = matches!(
             action,
@@ -5971,12 +6052,10 @@ impl Coordinator {
         let nav = match action {
             wind_config::SessionAction::HighlightUp => keymap::NavAction::HighlightUp,
             wind_config::SessionAction::HighlightDown => keymap::NavAction::HighlightDown,
-            wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageScreenPrev => {
-                keymap::NavAction::PagePrev
-            }
-            wind_config::SessionAction::PageNext | wind_config::SessionAction::PageScreenNext => {
-                keymap::NavAction::PageNext
-            }
+            wind_config::SessionAction::PagePrev(_)
+            | wind_config::SessionAction::PageScreenPrev => keymap::NavAction::PagePrev,
+            wind_config::SessionAction::PageNext(_)
+            | wind_config::SessionAction::PageScreenNext => keymap::NavAction::PageNext,
             wind_config::SessionAction::Cancel => {
                 // 无会话时放行：空闲按 Tab 该是宿主的制表符，不是「取消一个不存在的输入」。
                 // 判据与 `cancel_session` 的适用范围一致，见那里。
@@ -6218,7 +6297,7 @@ impl Coordinator {
             if let Some(act) = self.after_nav_changed(state) {
                 return Some(act);
             }
-        } else if is_page_action && self.page_key_overflow_to_punct(state, data) {
+        } else if page_overflow.is_some_and(|o| self.page_key_overflow_to_punct(state, data, o)) {
             // 翻不动（`page_next` 的检索范围放宽已在上面先行裁决，放宽了就是 `changed`）：
             // 不消费，让键落到兜底标点臂，由它统一顶高亮候选并出符号（中文标点、全角、
             // 智能符号、自动配对、`punct_commit` 都在那一处）。
@@ -6250,7 +6329,16 @@ impl Coordinator {
                         .any(|c| c.meta.preedit_split.is_some())
             }
             Some(ModeKind::TempPinyin | ModeKind::Mix(_)) => true,
-            Some(_) => false,
+            Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::AuxCode,
+            ) => false,
         };
         if follows {
             let before = state.preedit.clone();
@@ -6286,27 +6374,29 @@ impl Coordinator {
     /// 数字另有选词臂）、且本批候选**从未翻过页**时成立——判据取 `state.paged` 而非
     /// `current_page == 0`，理由同 [`Self::symbol_buffer_key_free`]：翻回首页的用户仍在
     /// 翻页，此刻按键突然出字会让人当场打错。
-    fn page_key_overflow_to_punct(&self, state: &State, data: &KeyEventData) -> bool {
+    fn page_key_overflow_to_punct(
+        &self,
+        state: &State,
+        data: &KeyEventData,
+        overflow: wind_config::PageOverflow,
+    ) -> bool {
         state.active.is_none()
             && !state.paged
-            && self.page_key_overflow_commits(data.key_code)
+            && self.page_key_overflow_commits(overflow)
             && punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
                 .is_some_and(|c| !c.is_ascii_digit())
     }
 
-    /// 该翻页键「翻不动时是否顶屏出符号」：按键级覆盖（`keys.overflow.page_key_overrides`）
-    /// 优先，未列出的键回落全局档 `page_key`。键名经 KEY_TABLE 反查 VK 比对；只有翻不动的
-    /// 那一下走到这里，覆盖表至多六条、`key_name_to_vk` 是常量表扫描，开销可忽略。
-    /// 键名写错 / 值非法在加载期已 WARN（`config_bundle::warn_unknown_page_key_overrides`）。
-    fn page_key_overflow_commits(&self, key_code: u32) -> bool {
-        let ov = &self.rt().config.keys.overflow;
-        let behavior = ov
-            .page_key_overrides
-            .iter()
-            .find(|(name, _)| keymap::key_name_to_vk(name) == Some(key_code))
-            .map(|(_, b)| b.as_str())
-            .unwrap_or(&ov.page_key);
-        behavior == "commit_and_input"
+    /// 该翻页键「翻不动时是否顶屏出符号」：绑定动作的后缀（自定义按键里的
+    /// `page_prev:commit_and_input` / `page_prev:ignore`）优先，无后缀回落全局档 `page_key`。
+    fn page_key_overflow_commits(&self, overflow: wind_config::PageOverflow) -> bool {
+        match overflow {
+            wind_config::PageOverflow::CommitAndInput => true,
+            wind_config::PageOverflow::Ignore => false,
+            wind_config::PageOverflow::Global => {
+                self.rt().config.keys.overflow.page_key == "commit_and_input"
+            }
+        }
     }
 
     /// 当前是否有输入会话：正在 overlay 模式里，或普通输入有编码 / 候选 / 已上屏段。
@@ -6370,7 +6460,18 @@ impl Coordinator {
                 // 走 `_` 臂 `reset_pinyin_composition`，与改动前逐字等价。
                 match state.active {
                     Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
-                    _ => self.reset_pinyin_composition(state),
+                    None
+                    | Some(
+                        ModeKind::TempEnglish
+                        | ModeKind::Url
+                        | ModeKind::Email
+                        | ModeKind::Unicode
+                        | ModeKind::Special(_)
+                        | ModeKind::RareChar
+                        | ModeKind::Reverse
+                        | ModeKind::Mix(_)
+                        | ModeKind::AuxCode,
+                    ) => self.reset_pinyin_composition(state),
                 }
             }
             // 普通输入：取消整个组合，含已转换前缀（拼音分步上屏的那部分）一并丢弃。
@@ -6871,7 +6972,7 @@ impl Coordinator {
     /// `!shift` 守卫，shift 形态本就不归它们。
     fn symbol_buffer_key_free(&self, state: &State, key_code: u32, shift: bool) -> bool {
         match self.session_action_for(key_code, shift, true) {
-            Some(wind_config::SessionAction::PagePrev) if !state.paged => {}
+            Some(wind_config::SessionAction::PagePrev(_)) if !state.paged => {}
             Some(_) => return false,
             None => {}
         }
@@ -7349,26 +7450,51 @@ impl Coordinator {
     /// `cn-en` 读的是 `chinese_mode`（用户选的中英），不含 CapsLock 临时英文：`set` 回答的是
     /// 「切到中文」，CapsLock 松开后自然回到中文。
     pub(crate) fn cmd_set_state(&self, target: &str, on: bool) -> anyhow::Result<()> {
-        let cur = {
-            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            match target {
-                "cn-en" => s.chinese_mode,
-                "fullshape" => s.full_width,
-                "s2t" => s.s2t_enabled,
-                "t2s" => s.t2s_enabled,
-                "toolbar" => s.toolbar_visible,
-                _ => anyhow::bail!(
-                    "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
-                ),
+        self.ime_state_set(target, on, true).map(|_| ())
+    }
+
+    /// 输入状态开关的当前值（`cn-en` 为 true = 中文）。目标只认 cn-en / fullshape / s2t / t2s / toolbar。
+    pub fn ime_state_get(&self, target: &str) -> anyhow::Result<bool> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match target {
+            "cn-en" => Ok(s.chinese_mode),
+            "fullshape" => Ok(s.full_width),
+            "s2t" => Ok(s.s2t_enabled),
+            "t2s" => Ok(s.t2s_enabled),
+            "toolbar" => Ok(s.toolbar_visible),
+            _ => anyhow::bail!(
+                "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
+            ),
+        }
+    }
+
+    /// 把输入状态开关设为 `on`；返回是否真的改动。
+    ///
+    /// 已是目标状态时不动作，`notify_unchanged` 决定要不要弹「已是…」——命令栏要（短语没有
+    /// 别的反馈渠道），CLI 脚本不要（反复调用会天天弹）。改动时走 `ime.toggle` 同一条路径，
+    /// 自带状态气泡与工具栏刷新，不另弹提示。
+    pub fn ime_state_set(
+        &self,
+        target: &str,
+        on: bool,
+        notify_unchanged: bool,
+    ) -> anyhow::Result<bool> {
+        if self.ime_state_get(target)? == on {
+            if notify_unchanged {
+                let text = crate::handle_cmdbar::state_unchanged_text(target, on);
+                self.notify_set_unchanged(target, &text);
             }
-        };
-        if cur == on {
-            let text = crate::handle_cmdbar::state_unchanged_text(target, on);
-            self.notify_set_unchanged(target, &text);
-            return Ok(());
+            return Ok(false);
         }
         self.cmd_ime_toggle(target);
-        Ok(())
+        Ok(true)
+    }
+
+    /// 取反输入状态开关，返回切换后的值（RPC `ime.toggle`）。目标须是上述五个之一。
+    pub fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool> {
+        let cur = self.ime_state_get(target)?;
+        self.cmd_ime_toggle(target);
+        Ok(!cur)
     }
 
     pub(crate) fn cmd_ime_toggle(&self, target: &str) {
@@ -7600,22 +7726,14 @@ impl Coordinator {
         cand_cfg: &wind_config::config::UiCandidateConfig,
         i: usize,
     ) -> String {
-        if let Some(s) = cand_cfg.user_index_label(i) {
-            return s;
-        }
-        if let Some(s) = self
-            .theme_index_labels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(i)
-            .filter(|s| !s.is_empty())
-        {
-            return s.clone();
-        }
-        if i == 9 {
-            return "0".to_string();
-        }
-        (i + 1).to_string()
+        pick_index_label(
+            cand_cfg,
+            &self
+                .theme_index_labels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            i,
+        )
     }
 
     /// 展开态带序号的格子（平铺下标区间 `(起点, 个数)`）：从高亮行行首起，按
@@ -8083,6 +8201,7 @@ impl Coordinator {
             preedit,
             preedit_caret,
             preedit_host_owned: in_app,
+            composing: crate::session_output::composing_of(state),
             mode_label,
             candidates: items,
             selected,
@@ -8487,6 +8606,10 @@ impl Coordinator {
         if needs.t2s {
             self.ensure_converter(false);
         }
+        if needs.assoc_bigram {
+            self.ensure_assoc_bigram_async();
+        }
+        self.engine_mgr.warm_hot_schema_fields();
     }
 
     /// 切换简繁转换的**一个方向**，返回切换后该方向是否开着。
@@ -8726,6 +8849,11 @@ impl Coordinator {
     /// composition」，与 DLL 的 `HasActiveComposition()` 成为两个真相源 —— 那正是前一版
     /// （边沿驱动）出问题的形态。宁可多置一位。
     pub(crate) fn hotkey_session_now(&self) -> bool {
+        // 无占位的联想会话也算：宿主里没有组合，DLL 只能靠这一位知道该转发按键。
+        // 先于取 state 锁（`assoc_bare_session_now` 自己会取），避免重入。
+        if self.assoc_bare_session_now() {
+            return true;
+        }
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.add_word_active
             || matches!(
@@ -9686,7 +9814,35 @@ impl Coordinator {
         );
     }
 
-    /// 整句切换键（`schema.pinyin.sentence_cycle_key`）：在整句池里滚动显示窗口。
+    /// 当前方案该用哪把整句切换键：码表方案取 `schema.codetable.sentence_cycle_key`（按方案折叠），
+    /// 其余取 `schema.pinyin.sentence_cycle_key`。两边各管各的，见 `CodetableGlobal::sentence_count`。
+    pub(crate) fn active_sentence_cycle_key(&self) -> Option<keymap::SessionKey> {
+        if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
+        {
+            // 写错的键名在建配置 / 切方案时已告警过，这里静默按关闭处理，免得每次按键刷日志。
+            return self.engine_mgr.with_codetable_settings(|c| {
+                let raw = c.sentence_cycle_key.trim();
+                (!raw.is_empty())
+                    .then(|| keymap::session_key_name_to_vk(raw))
+                    .flatten()
+            });
+        }
+        self.rt().sentence_cycle_key
+    }
+
+    /// 当前方案的整句块露几条（`place_sentence_block` 用）。规则同 [`Self::active_sentence_cycle_key`]。
+    pub(crate) fn active_sentence_count(&self) -> usize {
+        if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
+        {
+            return usize::from(
+                self.engine_mgr
+                    .with_codetable_settings(|c| c.sentence_count),
+            );
+        }
+        usize::from(self.rt().config.schema.pinyin.sentence_count)
+    }
+
+    /// 整句切换键（拼音 / 码表各一把，见 [`Self::active_sentence_cycle_key`]）：在整句池里滚动显示窗口。
     ///
     /// 与英文大小写档位循环同处「候选显示期间生效的快捷键」这一层、同为**临时夺取**：
     /// 守卫任一不成立即返回 `None`，按键原样落回它本来的语义（Tab 出厂是高亮下移键）。
@@ -9709,7 +9865,7 @@ impl Coordinator {
         if data.modifiers & MOD_SHORTCUT != 0 {
             return None;
         }
-        let key = self.rt().sentence_cycle_key?;
+        let key = self.active_sentence_cycle_key()?;
         if data.key_code != key.vk || (data.modifiers & MOD_SHIFT != 0) != key.shift {
             return None;
         }
@@ -9766,20 +9922,76 @@ impl Coordinator {
     ///
     /// 这不是配置冲突（各自都合法），而是**运行期的优先级夺取**：整句池 ≥ 2 条时那些绑定
     /// 按不出来。不告警的话用户只会看到「Tab 翻页有时好用有时不好用」，无从知道是谁夺走的。
+    ///
+    /// 拼音与码表两把键各体检一次（码表取全局值；方案里另写的见
+    /// [`Self::warn_schema_sentence_cycle_conflict`]）。
     pub(crate) fn warn_sentence_cycle_conflict(&self) {
         let rt = self.rt();
-        let Some(key) = rt.sentence_cycle_key else {
+        let p = &rt.config.schema.pinyin;
+        let c = &rt.config.schema.codetable;
+        let codetable_key = keymap::session_key_name_to_vk(c.sentence_cycle_key.trim());
+        for (path, raw, key, counts) in [
+            (
+                "schema.pinyin.sentence_cycle_key",
+                p.sentence_cycle_key.as_str(),
+                rt.sentence_cycle_key,
+                (p.sentence_count, p.sentence_max_count),
+            ),
+            (
+                "schema.codetable.sentence_cycle_key",
+                c.sentence_cycle_key.as_str(),
+                codetable_key,
+                (c.sentence_count, c.sentence_max_count),
+            ),
+        ] {
+            if let Some(key) = key {
+                self.warn_one_sentence_cycle_conflict(path, raw, key, counts);
+            }
+        }
+    }
+
+    /// 码表方案自己写了整句切换键 / 条数（与全局不同）时补一次体检：启动时查活跃方案，
+    /// 切方案后查切到的方案。与全局相同的已由 [`Self::warn_sentence_cycle_conflict`] 查过，跳过。
+    /// 键名写错也在这里告警（逐键路径静默按关闭处理）。
+    pub(crate) fn warn_schema_sentence_cycle_conflict(&self, schema_id: &str) {
+        if self.engine_mgr.loaded_engine_type(schema_id)
+            != Some(wind_engine::engine::EngineType::CodeTable)
+        {
             return;
+        }
+        let pick = |c: &wind_config::CodetableGlobal| {
+            (
+                c.sentence_cycle_key.clone(),
+                c.sentence_count,
+                c.sentence_max_count,
+            )
         };
+        let own = self.engine_mgr.with_codetable_settings_of(schema_id, pick);
+        if own == pick(&self.rt().config.schema.codetable) {
+            return;
+        }
+        let (raw, count, max_count) = own;
+        let path = format!("方案 {schema_id} 的 schema.codetable.sentence_cycle_key");
+        if let Some(key) = crate::config_bundle::parse_sentence_cycle_key(&path, &raw) {
+            self.warn_one_sentence_cycle_conflict(&path, &raw, key, (count, max_count));
+        }
+    }
+
+    fn warn_one_sentence_cycle_conflict(
+        &self,
+        path: &str,
+        raw: &str,
+        key: keymap::SessionKey,
+        (count, max_count): (u8, u8),
+    ) {
+        let rt = self.rt();
         let vk = key.vk;
         // 键配好了、池子却恒空 ⇒ 用户以为开了、实际永远不生效。「键即开关」的初衷就是不要
         // 第二道闸，而算几条整句事实上成了第二道——至少把它说出来（审查查出）。
-        let p = &rt.config.schema.pinyin;
-        if p.sentence_count.max(p.sentence_max_count) < 2 {
+        if count.max(max_count) < 2 {
             warn!(
-                "整句切换键（schema.pinyin.sentence_cycle_key = {:?}）已配置，但 sentence_count 与 \
-                 sentence_max_count 都小于 2，整句池恒空、切换键永远不会生效；要用它请把备选条数调到 ≥2",
-                p.sentence_cycle_key
+                "整句切换键（{path} = {raw:?}）已配置，但同段的 sentence_count 与 \
+                 sentence_max_count 都小于 2，整句池恒空、切换键永远不会生效；要用它请把备选条数调到 ≥2"
             );
         }
         let mut owners: Vec<&str> = Vec::new();
@@ -9812,10 +10024,9 @@ impl Coordinator {
             return;
         }
         warn!(
-            "整句切换键（schema.pinyin.sentence_cycle_key = {:?}）同时配作 {}；\
-             打拼音且整句算出 ≥2 条时本键归整句切换，那些功能在此期间按不出来。\
+            "整句切换键（{path} = {raw:?}）同时配作 {}；\
+             整句算出 ≥2 条时本键归整句切换，那些功能在此期间按不出来。\
              要保留它们：把 sentence_cycle_key 换成别的键或留空；要保留整句切换：把那些功能改绑到别的键",
-            rt.config.schema.pinyin.sentence_cycle_key,
             owners.join(" / ")
         );
     }
@@ -9907,6 +10118,7 @@ impl Coordinator {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         // ★ **最先**试大小写档位循环：它是「英文输入态下临时夺取本键」，优先级按定义高于
         // 用户给 CapsLock 配的任何会话动作。守卫（开关 / 英文语境 / 有候选）都在函数内部，
@@ -9940,9 +10152,16 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                let (chinese_mode, main_path) = {
+                // 不经按键出口，收尾在这里做（同鼠标点选，见 `crate::session_exit`）。
+                let (act, chinese_mode, main_path) = {
                     let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    (st.chinese_mode, st.active.is_none())
+                    let (chinese_mode, main_path) = (st.chinese_mode, st.active.is_none());
+                    let act = self.finish_session_action(
+                        st,
+                        crate::session_exit::ActionOrigin::CapsLockHook,
+                        act,
+                    );
+                    (act, chinese_mode, main_path)
                 };
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
                 self.push_no_key_ctx_action(&act, chinese_mode, main_path);
@@ -10188,7 +10407,18 @@ impl Coordinator {
                             state.temp_pinyin_buffer.clone(),
                             state.temp_pinyin_prefix.clone(),
                         ),
-                        _ => (
+                        None
+                        | Some(
+                            ModeKind::TempEnglish
+                            | ModeKind::Url
+                            | ModeKind::Email
+                            | ModeKind::Unicode
+                            | ModeKind::Special(_)
+                            | ModeKind::RareChar
+                            | ModeKind::Reverse
+                            | ModeKind::Mix(_)
+                            | ModeKind::AuxCode,
+                        ) => (
                             preedit_cursor::cased_or_buffer(
                                 &state.input_buffer,
                                 &state.input_buffer_cased,
@@ -10198,7 +10428,16 @@ impl Coordinator {
                         ),
                     })
                 }
-                _ => None,
+                None
+                | Some(
+                    ModeKind::TempEnglish
+                    | ModeKind::Url
+                    | ModeKind::Email
+                    | ModeKind::Unicode
+                    | ModeKind::Special(_)
+                    | ModeKind::RareChar
+                    | ModeKind::Reverse,
+                ) => None,
             } {
                 // 临拼 / mix：镜像普通组合的 commit_on_switch，且对齐各自的回车上屏语义。
                 let has_pending = !buf.is_empty() || !state.committed_text.is_empty();
@@ -10267,6 +10506,9 @@ impl Coordinator {
         state.committed_segs.clear();
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
+        // 组合随切换结束，检索放宽一并复原（独占分支经 `reset_exclusive_modes` 复原）。托盘 / 热键 /
+        // 按应用切方案走推送上屏、不经出口的 `expire_scope_override`，不在这里复原就会带进新方案。
+        state.scope_relaxed = false;
         state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.candidates.clear();
         state.preedit.clear();
@@ -10785,7 +11027,9 @@ impl Coordinator {
     /// 光看候选文本分不清「用户词赢了」和「系统词本来就长这样」。
     fn debug_source_label(&self, c: &Candidate, ctx: &DebugSchemaCtx) -> String {
         let base = self.debug_source_base(c, ctx);
-        match sentence_debug_tag(c) {
+        // 逆切分候选的 `code` 是整串、来源是码表，不标出来就和词库词条长得一模一样。
+        let tag = sentence_debug_tag(c).or_else(|| c.is_split_composed.then(|| "逆切分".into()));
+        match tag {
             Some(tag) => format!("{base} · {tag}"),
             None => base,
         }
@@ -12156,6 +12400,20 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.schema.keep_all_loaded = !old.schema.keep_all_loaded;
+        assert!(!engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
+    }
+
+    /// 反向对照：词库缓存策略只在启动时读，改它重建引擎也不生效，不该触发重建。
+    #[test]
+    fn dict_cache_policy_change_does_not_require_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.schema.dict_cache_policy = "off".to_string();
+        assert_ne!(old.schema.dict_cache_policy, new.schema.dict_cache_policy);
         assert!(!engine_reload_needed(
             &old,
             &new,
@@ -16400,13 +16658,13 @@ mod caret_compat_tests {
         );
     }
 
-    /// `ignore_host_ime_close` 的四条判据逐一钉死。
+    /// `ignore_host_ime_switch` 的判据逐一钉死，开和关两个方向各走一遍。
     ///
-    /// ★ 第二条（Ctrl 按住放行）是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主关 IME
-    /// 走**同一条** compartment 通路、载荷完全相同，若不放行，开了这条规则的应用里
-    /// Ctrl+Space 会彻底失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
+    /// ★ Ctrl 按住放行是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主写 compartment
+    /// 走**同一条**通路、载荷完全相同，若不放行，开了这条规则的应用里 Ctrl+Space 会彻底
+    /// 失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
     #[test]
-    fn ignore_host_ime_close_gates() {
+    fn ignore_host_ime_switch_gates() {
         use wind_ipc::protocol::ModeSwitchSource as Src;
         let c = coord();
         let pid = 96032u32;
@@ -16417,28 +16675,108 @@ mod caret_compat_tests {
         c.active_compat.lock().unwrap().pid = pid;
         let rules = vec![wind_config::app_compat::AppCompatRule {
             process: "x60_toolbox.exe".into(),
-            ignore_host_ime_close: Some(true),
+            ignore_host_ime_switch: Some(true),
             ..Default::default()
         }];
         *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
 
-        // 宿主写 compartment 关 IME、无伴随按键 ⇒ 拦。这就是「点一下按钮就变英文」那条。
-        assert!(c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
-        assert!(c.host_ime_close_ignored(false, Src::CompartmentConversion, false));
+        // 宿主写 compartment、无伴随按键 ⇒ 拦。判据不看方向：开和关两个方向都拦
+        // （关：点按钮变英文；开：SSMS 焦点切换把英文态切成中文，GH#312），方向由
+        // tests/ignore_host_ime_switch.rs 经 handle_system_mode_switch 各走一遍。
+        assert!(c.host_ime_switch_ignored(Src::CompartmentOpenClose, false));
+        assert!(c.host_ime_switch_ignored(Src::CompartmentConversion, false));
         // Ctrl 按住 ⇒ 用户在按 Ctrl+Space，必须放行。
-        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, true));
-        // 开 IME 从不拦——宿主想给中文是好事。
-        assert!(!c.host_ime_close_ignored(true, Src::CompartmentOpenClose, false));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentOpenClose, true));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentConversion, true));
         // 我们自己发起的两条路径永远照办，否则按键兜底与菜单会失灵。
-        assert!(!c.host_ime_close_ignored(false, Src::CtrlSpaceKey, false));
-        assert!(!c.host_ime_close_ignored(false, Src::Menu, false));
+        assert!(!c.host_ime_switch_ignored(Src::CtrlSpaceKey, false));
+        assert!(!c.host_ime_switch_ignored(Src::Menu, false));
 
-        // 换成没配规则的应用 ⇒ 一律照办（这条规则必须是显式声明才生效）。
+        // 换成没配规则的应用、全局出厂关 ⇒ 一律照办。
         c.pid_names
             .lock()
             .unwrap()
             .insert(pid, "notepad.exe".to_string());
-        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentOpenClose, false));
+    }
+
+    /// 生效值 = 按应用 `Some(v)` 优先，`None`（含没有规则）取全局 `input.ignore_host_ime_switch`。
+    #[test]
+    fn ignore_host_ime_switch_per_app_overrides_global() {
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        let mut cfg = Config::default();
+        assert!(!cfg.input.ignore_host_ime_switch, "出厂关");
+        cfg.input.ignore_host_ime_switch = true;
+        let c = Coordinator::new_headless(cfg, None);
+        let pid = 4242u32;
+        c.active_compat.lock().unwrap().pid = pid;
+        let rules = vec![
+            wind_config::app_compat::AppCompatRule {
+                process: "adopt.exe".into(),
+                ignore_host_ime_switch: Some(false),
+                ..Default::default()
+            },
+            wind_config::app_compat::AppCompatRule {
+                process: "follow.exe".into(),
+                auto_pair: Some(false),
+                ..Default::default()
+            },
+        ];
+        *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
+        let at = |name: &str| {
+            c.pid_names.lock().unwrap().insert(pid, name.to_string());
+        };
+
+        at("follow.exe");
+        assert!(
+            c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "规则没写这一项 ⇒ 跟随全局（开）"
+        );
+        assert!(
+            !c.host_ime_switch_ignored(Src::CompartmentOpenClose, true),
+            "全局开着也照样放行 Ctrl+Space"
+        );
+        assert!(!c.host_ime_switch_ignored(Src::Menu, false));
+        at("notepad.exe");
+        assert!(
+            c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "没有规则 ⇒ 跟随全局（开）"
+        );
+        at("adopt.exe");
+        assert!(
+            !c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "按应用显式采纳压过全局"
+        );
+    }
+
+    /// 拒绝之后必须**再异步推一次状态**（`CMD_STATE_PUSH`），不能只靠同步回包——理由见
+    /// `handle_system_mode_switch` 那段 ★★★：只回包时 compartment 会停在宿主写的值上，
+    /// Ctrl+Space 变哑。两个方向各验一次。
+    #[test]
+    fn ignore_host_ime_switch_rejection_pushes_state() {
+        use wind_bridge::handler::MessageHandler;
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        let pushed_state = |frames: &[Vec<u8>]| {
+            frames.iter().any(|f| {
+                wind_ipc::codec::decode_header(f)
+                    .is_ok_and(|h| h.command == wind_ipc::protocol::CMD_STATE_PUSH)
+            })
+        };
+        for start_chinese in [true, false] {
+            let mut cfg = Config::default();
+            cfg.input.default.chinese_mode = start_chinese;
+            cfg.input.ignore_host_ime_switch = true;
+            let c = Coordinator::new_headless(cfg, None);
+            assert_eq!(c.is_chinese_mode(), start_chinese, "前提：起步模式");
+            let cap = c.push_server.attach_capture_client(7);
+            c.handle_system_mode_switch(!start_chinese, Src::CompartmentOpenClose, false);
+            assert_eq!(c.is_chinese_mode(), start_chinese, "被拒，模式不变");
+            let frames: Vec<Vec<u8>> = cap.try_iter().collect();
+            assert!(
+                pushed_state(&frames),
+                "start_chinese={start_chinese}：拒绝后必须推一次状态"
+            );
+        }
     }
 
     /// per-app 定位规则**整条**压过全局，坐标必须与定位方式同层取。
@@ -16714,6 +17052,33 @@ mod initial_mode_tests {
         set_focus_proc(&c, 100, "game.exe");
         c.apply_initial_mode(token(100), false);
         assert!(!c.state.lock().unwrap().chinese_mode);
+    }
+
+    /// scope=app + 记忆前次状态：没手动切过的进程也要记住进入时的状态。在 B 里切英文，
+    /// 不得把从没切过的 A 一起带成英文。
+    #[test]
+    fn per_app_scope_records_untoggled_process_on_entry() {
+        let c = coord_with(|cfg| {
+            cfg.input.default.state_scope = "app".into();
+            cfg.input.default.remember_last_state = true;
+            cfg.input.default.chinese_mode = true;
+        });
+        *c.runtime_last.lock().unwrap() = (true, false, true);
+        set_focus_proc(&c, 100, "notepad.exe");
+        c.apply_initial_mode(token(100), false);
+        assert!(c.state.lock().unwrap().chinese_mode);
+        set_focus_proc(&c, 200, "wt.exe");
+        c.apply_initial_mode(token(200), false);
+        // 在 wt 里切英文：手动切换会同时改「前次状态」镜像与本进程的表项。
+        c.state.lock().unwrap().chinese_mode = false;
+        c.record_app_mode(false);
+        *c.runtime_last.lock().unwrap() = (false, false, true);
+        set_focus_proc(&c, 100, "notepad.exe");
+        c.apply_initial_mode(token(100), false);
+        assert!(
+            c.state.lock().unwrap().chinese_mode,
+            "记事本进入时是中文、从没切过，回来仍应是中文"
+        );
     }
 
     /// scope=app：FOCUS_GAINED 同步路径（get_current_mode）命中记忆表时先切换再回传；
@@ -17584,6 +17949,7 @@ mod capslock_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -18711,6 +19077,7 @@ mod input_diag_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -19168,8 +19535,8 @@ mod input_diag_tests {
             ("set_candidate_position_rule", &|c| {
                 c.set_candidate_position_rule(1)
             }),
-            ("set_ignore_host_ime_close_rule", &|c| {
-                c.set_ignore_host_ime_close_rule(1)
+            ("set_ignore_host_ime_switch_rule", &|c| {
+                c.set_ignore_host_ime_switch_rule(1)
             }),
             ("set_auto_pair_rule", &|c| c.set_auto_pair_rule(2)),
             ("set_status_fallback_rule", &|c| {
@@ -20365,6 +20732,7 @@ mod syllable_separator_app_tests {
                 toggles: 0,
                 event_seq: 0,
                 prev_char: 0,
+                seq_char: 0,
             });
         }
         match last {
@@ -20411,6 +20779,7 @@ mod syllable_separator_app_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
         focus(&c, 8, "other.exe");
         assert!(
@@ -20418,4 +20787,17 @@ mod syllable_separator_app_tests {
             "未配规则的应用跟随全局默认 '"
         );
     }
+}
+
+/// [`Coordinator::resolve_index_label`] 的裁决本体（主题槽位由调用方给）：设置端预览按
+/// 被预览主题的槽位取，与实时候选窗同一条规则。
+pub(crate) fn pick_index_label(
+    cand_cfg: &wind_config::config::UiCandidateConfig,
+    theme_labels: &[String],
+    i: usize,
+) -> String {
+    if let Some(s) = cand_cfg.user_index_label(i) {
+        return s;
+    }
+    wind_ui_types::theme_index_label(theme_labels, i)
 }

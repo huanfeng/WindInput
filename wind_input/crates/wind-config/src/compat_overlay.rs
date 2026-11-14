@@ -322,6 +322,50 @@ fn coalesce(section: &str, rows: Vec<Obj>) -> Vec<Obj> {
     out
 }
 
+/// `[[apps]]` 的改名字段：`(旧键, 新键)`。旧键只作读取别名，写回一律用新键。
+///
+/// 叠加是在原始键值上逐字段做的（不是结构体层），只靠 serde alias 不够：系统层写新键、用户层
+/// 写旧键时两者会同时出现在叠加结果里。所以在每一层解析出原始表之后、清理与叠加之前就规范化
+/// （[`normalize_legacy_keys`]）。
+pub(crate) const LEGACY_APP_KEYS: &[(&str, &str)] =
+    &[("ignore_host_ime_close", "ignore_host_ime_switch")];
+
+/// 把一行里的旧键换成新键：同一行新旧都写了以新键为准（旧键丢掉）——除非新键的值无效而旧键的
+/// 值有效，那时按「错值 = 没写」取旧键的值。`unset` 清单里的旧键名同样换成新键名（去重）。
+/// 别的键原样不动。
+fn normalize_legacy_keys(row: &mut Obj) {
+    let valid = |key: &str, v: &Value| {
+        field_value_problem::<crate::app_compat::AppCompatRule>("apps", key, v).is_none()
+    };
+    for &(old, new) in LEGACY_APP_KEYS {
+        if let Some(v) = row.remove(old) {
+            let new_valid = row.get(new).is_some_and(|nv| valid(new, nv));
+            if !row.contains_key(new) || (!new_valid && valid(new, &v)) {
+                row.insert(new.to_string(), v);
+            }
+        }
+        match row.get_mut("unset") {
+            Some(Value::String(s)) if s == old => *s = new.to_string(),
+            Some(Value::Array(items)) if items.iter().any(|v| v.as_str() == Some(old)) => {
+                let mut seen_new = false;
+                items.retain_mut(|v| {
+                    if v.as_str() == Some(old) {
+                        *v = Value::String(new.to_string());
+                    }
+                    if v.as_str() == Some(new) {
+                        if seen_new {
+                            return false;
+                        }
+                        seen_new = true;
+                    }
+                    true
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 解析 compat.toml 全文成原始键值。语法错 ⇒ `Err`（带行列号）。
 pub(crate) fn parse_raw(text: &str) -> Result<Raw, String> {
     let root: toml::Value = text.parse::<toml::Value>().map_err(|e| e.to_string())?;
@@ -360,6 +404,7 @@ pub(crate) fn parse_raw(text: &str) -> Result<Raw, String> {
             }
         }
     }
+    raw.apps.iter_mut().for_each(normalize_legacy_keys);
     raw.apps = coalesce("apps", std::mem::take(&mut raw.apps));
     raw.initial_mode_scope = coalesce(
         "initial_mode_scope",

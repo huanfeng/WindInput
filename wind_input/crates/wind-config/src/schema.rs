@@ -505,6 +505,18 @@ pub struct CodeTableSpec {
     /// 见 `docs/design/codetable-reverse-mode.md` §2。
     #[serde(default)]
     pub wildcard_single_only: Option<bool>,
+    /// 整句露几条（`None` = 跟随全局 `schema.codetable.sentence_count`）。
+    #[serde(default)]
+    pub sentence_count: Option<u8>,
+    /// 整句算几条（`None` = 跟随全局 `schema.codetable.sentence_max_count`）。
+    #[serde(default)]
+    pub sentence_max_count: Option<u8>,
+    /// 整句切换键（`None` = 跟随全局 `schema.codetable.sentence_cycle_key`）。
+    #[serde(default)]
+    pub sentence_cycle_key: Option<String>,
+    /// 整句语法模型权重（`None` = 跟随全局 `schema.codetable.sentence_grammar_weight`）。
+    #[serde(default)]
+    pub sentence_grammar_weight: Option<f64>,
     /// 方案级调频覆盖（`[engine.codetable.frequency]`）。
     ///
     /// 缺省 = 整段跟随基线。特殊方案的基线是内置默认（不继承全局 `schema.codetable`，
@@ -627,6 +639,10 @@ pub struct DictSpec {
     pub label: String,
     #[serde(default)]
     pub description: String,
+    /// 设置端「分类词库」清单里的分组名（如「人名地名」）。只影响展示，不影响加载；
+    /// 不写 = 未分组（设置端归「其他」，发现目录登记的库归「我放入的」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default)]
     pub path: String,
     /// "rime_codetable" / "rime_pinyin" / "codetable"（空=回退 rime_codetable）

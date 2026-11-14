@@ -256,7 +256,9 @@ mod tests {
         );
         assert_eq!(
             schema_session_lookup(&t, k.vk, false, true),
-            Some(wind_config::SessionAction::PagePrev)
+            Some(wind_config::SessionAction::PagePrev(
+                wind_config::PageOverflow::Global
+            ))
         );
         assert_eq!(
             schema_session_lookup(&t, k.vk, false, false),
@@ -273,7 +275,9 @@ mod tests {
         assert!(k.shift, "前置条件：shift+ 前缀须被解析出来");
         assert_eq!(
             schema_session_lookup(&t, k.vk, true, true),
-            Some(wind_config::SessionAction::PagePrev)
+            Some(wind_config::SessionAction::PagePrev(
+                wind_config::PageOverflow::Global
+            ))
         );
         assert_eq!(
             schema_session_lookup(&t, k.vk, false, true),

@@ -91,6 +91,7 @@ fn pin_icon(pinned: bool, tint: [u8; 4], size: f32) -> crate::view::ViewImage {
             ..Default::default()
         }),
         scale: 1.0,
+        flip: wind_theme::Flip::NONE,
     }
 }
 
@@ -1630,7 +1631,6 @@ impl SoftKeyboard {
     }
 
     /// 面板控制键（翻页 / 关闭）：不合成按键，语义各自不同。
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn ctrl_key(
         &self,

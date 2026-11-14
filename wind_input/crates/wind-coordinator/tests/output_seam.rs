@@ -3,7 +3,7 @@
 //! 生产代码（`src/` 下去掉 `#[cfg(test)]` 模块、跳过 `*_tests.rs`、`session_output.rs`、
 //! `ui_sender.rs`）里，`UiCommand::HideCandidates` / `ShowToast` / `ShowStatusTip` /
 //! `UpdateToolbar` 这四个 token 一个都不许出现：它们有中立事件对应物，直接构造/发送会让
-//! 移动端（`new_session`）漏掉。查的是 token 而不是 `.send(` 调用，所以限定路径
+//! 移动端（`new_session`）漏掉。桌面专用的 `SkinSignal` 同理：判通道的分支只在 emit_* 里。查的是 token 而不是 `.send(` 调用，所以限定路径
 //! （`wind_ui_types::UiCommand::…`）和先存变量再发的写法也逃不掉。
 //! `UpdateCandidates` 只允许 `coordinator.rs`、`handle_addword.rs` 各一处，且都在
 //! 所属函数的 `session_tx` 分支之后。
@@ -106,11 +106,13 @@ fn production_sources() -> Vec<(String, String)> {
         .collect()
 }
 
-const NEUTRAL: [&str; 4] = [
+const NEUTRAL: [&str; 5] = [
     "HideCandidates",
     "ShowToast",
     "ShowStatusTip",
     "UpdateToolbar",
+    // 桌面专用（中立通道不发），同样得经 emit_* 判过通道。
+    "SkinSignal",
 ];
 
 #[test]

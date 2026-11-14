@@ -55,8 +55,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod config_api;
+mod schema_settings;
 mod touch;
 
+pub use schema_settings::{SchemaSetting, SchemaSettingGroup, SchemaSettingKind, SchemaSettings};
 pub use touch::{KeySource, PressKey};
 
 use wind_bridge::handler::KeyAction as BridgeKeyAction;
@@ -82,6 +84,8 @@ pub use wind_coordinator::candidate_pull::{CandidateWindow, MAX_WINDOW, TextSegm
 /// 展开页「首单元读法」的数据类型，见 [`MobileCore::leading_readings`]。
 pub use wind_coordinator::leading_reading::LeadingReading;
 pub use wind_store::stats_report::StatsSummary;
+/// 方案包导入 / 预览 / 删除的实现（与桌面同一份）。绑定层经此引用，不另开一条通往核心的依赖。
+pub use wind_transfer;
 
 /// 候选帧：编码栏与候选栏一次渲染所需的全部数据。
 ///
@@ -293,13 +297,14 @@ pub struct SchemaDictInfo {
 /// 候选长按菜单的一项（桌面候选右键菜单在手机上的对应物）。
 ///
 /// 只出可点的叶子：桌面菜单里的分隔线 / 标题行是绘制用的，命令项不会出现在候选菜单里；
-/// 子菜单（目前候选菜单没有）会被摊平成同级项。
+/// 子菜单（「固定到第 N 位」）会被摊平成同级项。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateMenuItem {
-    /// 文案，与桌面同一候选的右键菜单逐字一致（如「隐藏候选」「设为生僻字」）
+    /// 文案，与桌面同一候选的右键菜单逐字一致（如「屏蔽该词」「设为生僻字」）
     pub label: String,
-    /// `"move_top"` | `"move_up"` | `"move_down"` | `"delete"` | `"reset"` |
-    /// `"toggle_common"` | `"copy"`。原样回传给 [`MobileCore::candidate_menu_run`]。
+    /// `"move_top"` | `"move_up"` | `"move_down"` | `"pin_at_N"`（N 为 1 起的名次）| `"delete"` |
+    /// `"hide_here"` | `"reset"` | `"toggle_common"` | `"copy"`。原样回传给
+    /// [`MobileCore::candidate_menu_run`]。
     pub action: String,
     /// 灰显项照样列出：用户要看得出「这条不能调」，而不是以为菜单少了一项
     pub enabled: bool,
@@ -319,24 +324,50 @@ pub struct InstalledSchema {
 pub use wind_coordinator::handle_tooltip::CandidateTooltipSection;
 
 /// [`CandidateMenuItem::action`] 与词条操作的对照。`copy` 不在此表——复制由宿主自己写剪贴板。
-const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 6] = [
+/// 「固定到第 N 位」不在表里，动作名是 `pin_at_N`（见 [`candidate_menu_action`]）。
+const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 7] = [
     ("move_top", CandidateOp::MoveTop),
     ("move_up", CandidateOp::MoveUp),
     ("move_down", CandidateOp::MoveDown),
     ("delete", CandidateOp::Delete),
+    ("hide_here", CandidateOp::HideHere),
     ("reset", CandidateOp::Reset),
     ("toggle_common", CandidateOp::ToggleCommon),
 ];
+
+/// 移动端「固定到第 N 位」的 N 上限（扁平化时截掉其余子项）。
+const MOBILE_PIN_AT_MAX: u8 = 9;
+
+/// 词条操作 → 动作名。
+fn candidate_menu_action(op: CandidateOp) -> Option<String> {
+    if let CandidateOp::PinAt(n) = op {
+        return Some(format!("pin_at_{n}"));
+    }
+    CANDIDATE_MENU_ACTIONS
+        .iter()
+        .find(|(_, o)| *o == op)
+        .map(|(a, _)| (*a).to_string())
+}
+
+/// 动作名 → 词条操作（`copy` 与未知名 → None）。
+fn candidate_menu_op(action: &str) -> Option<CandidateOp> {
+    if let Some(n) = action.strip_prefix("pin_at_") {
+        return n.parse().ok().map(CandidateOp::PinAt);
+    }
+    CANDIDATE_MENU_ACTIONS
+        .iter()
+        .find(|(a, _)| *a == action)
+        .map(|&(_, op)| op)
+}
 
 /// 把桌面菜单树压成移动端的扁平列表：只留 Op 与 Copy 叶子，子菜单摊平。
 fn flatten_candidate_menu(items: &[MenuItemSpec], out: &mut Vec<CandidateMenuItem>) {
     for item in items {
         let action = match item.kind {
-            MenuKind::Op(op) => CANDIDATE_MENU_ACTIONS
-                .iter()
-                .find(|(_, o)| *o == op)
-                .map(|(a, _)| *a),
-            MenuKind::Copy => Some("copy"),
+            // 长按菜单是扁平列表，「第 N 位」只列到 9，免得一屏全是它（桌面子菜单仍到 20）。
+            MenuKind::Op(CandidateOp::PinAt(n)) if n > MOBILE_PIN_AT_MAX => None,
+            MenuKind::Op(op) => candidate_menu_action(op),
+            MenuKind::Copy => Some("copy".to_string()),
             MenuKind::Submenu => {
                 flatten_candidate_menu(&item.children, out);
                 None
@@ -344,9 +375,14 @@ fn flatten_candidate_menu(items: &[MenuItemSpec], out: &mut Vec<CandidateMenuIte
             MenuKind::Command(_) | MenuKind::Separator | MenuKind::Label => None,
         };
         if let Some(action) = action {
+            // 桌面子项「第 3 位」挂在「固定到第 N 位」下；摊平后没有父项，文案补全。
+            let label = match item.kind {
+                MenuKind::Op(CandidateOp::PinAt(n)) => format!("固定到第 {n} 位"),
+                _ => item.label.clone(),
+            };
             out.push(CandidateMenuItem {
-                label: item.label.clone(),
-                action: action.to_string(),
+                label,
+                action,
                 enabled: item.enabled,
             });
         }
@@ -405,6 +441,8 @@ pub struct MobileCore {
     auto_spaced: AtomicBool,
     /// 英文词后是否补空格（宿主设置项，默认开），见 [`Self::set_auto_space`]
     auto_space: AtomicBool,
+    /// 触摸键盘的 `;` 是否进快捷输入（宿主设置项，默认关），见 [`Self::set_touch_quick_trigger`]
+    touch_quick_trigger: AtomicBool,
 }
 
 impl MobileCore {
@@ -441,6 +479,7 @@ impl MobileCore {
         if !installed.iter().any(|s| s == fallback_schema) {
             installed.push(fallback_schema.to_string());
         }
+        config_api::set_fallback_schema(fallback_schema);
         config_api::set_installed_schemas(installed.clone());
         // 启用的 = 装了的 ∩ 用户在设置里选的（没选过 = 全部），见 `config_api::apply_enabled_schemas`；
         // 重载时覆盖钩子按同一规则重算
@@ -504,6 +543,7 @@ impl MobileCore {
             data_dir: data_dir.to_path_buf(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         })
     }
 
@@ -748,7 +788,7 @@ impl MobileCore {
     /// 暂停学习（[`Self::set_learning_suspended`]）不拦这里：那是「别从输入里偷偷学」，
     /// 而这些是用户点名的显式编辑。
     pub fn candidate_menu_run(&self, index: usize, action: &str) -> bool {
-        let Some(&(_, op)) = CANDIDATE_MENU_ACTIONS.iter().find(|(a, _)| *a == action) else {
+        let Some(op) = candidate_menu_op(action) else {
             return false;
         };
         let offered = self
@@ -902,6 +942,49 @@ impl MobileCore {
             .collect()
     }
 
+    /// 方案包导入 / 删除 / 恢复落盘后调（与桌面 `web_scheme_import_package` 同一套收尾）：
+    /// 1. 对 `changed_ids` 逐个使引擎与解析缓存失效——覆盖同 id 方案、恢复自带版本都不改
+    ///    `config.schema`，随后的重载不会重建引擎，不失效就一直用旧定义；失效会扇出到把它当成员的混输；
+    /// 2. 重扫各层 `schemas/` 刷新已装方案列表（规则同构造期：扫描结果 + 首装兜底方案）；
+    /// 3. 重建跨方案派生配置（吃键集等）。
+    ///
+    /// 之后另发 [`MobileCommand::ReloadConfig`] 让可选方案跟上。导入 / 删除**中途失败**也要调
+    /// （`changed_ids` 可空）：落盘是逐文件的，失败时磁盘可能已经变了一部分。
+    pub fn on_schemes_changed(&self, changed_ids: &[String]) {
+        use wind_coordinator::web_host::WebDataHost;
+        for id in changed_ids {
+            self.coord.engine_mgr().invalidate_schema(id);
+        }
+        self.refresh_installed_schemas();
+        self.coord.refresh_schema_derived_config();
+    }
+
+    /// 重扫已装方案列表，规则同构造期：各层扫描结果，再补上首装兜底方案。
+    pub fn refresh_installed_schemas(&self) {
+        let mut ids = scan_installed_schemas(&self.data_dir);
+        let fallback = config_api::fallback_schema();
+        if !fallback.is_empty() && !ids.contains(&fallback) {
+            ids.push(fallback);
+        }
+        config_api::set_installed_schemas(ids);
+    }
+
+    /// 方案包的目标目录：`(用户层 schemas, 只读层 schemas 列表)`。
+    /// 只读层 = 出厂数据层（Android 即随 APK 解出的 `data/schemas`）与定制层，永不写、永不删。
+    pub fn scheme_dirs(&self) -> (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+        let mut user = None;
+        let mut system = Vec::new();
+        for layer in Config::resource_layers_named_with(Some(&self.data_dir)) {
+            let dir = layer.path.join("schemas");
+            if layer.name == "user" {
+                user = Some(dir);
+            } else {
+                system.push(dir);
+            }
+        }
+        (user, system)
+    }
+
     /// 启用 / 停用一个已装方案。英文与最后一个中文方案关不掉（Err 里写原因）。
     /// 只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
     pub fn set_schema_enabled(&self, id: &str, on: bool) -> Result<(), String> {
@@ -911,6 +994,16 @@ impl MobileCore {
     /// 打开 / 关闭一段候选提示（如「拆字」）。只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
     pub fn set_tooltip_section_enabled(&self, label: &str, on: bool) -> Result<(), String> {
         config_api::set_tooltip_section_enabled(&self.data_dir, label, on)
+    }
+
+    /// 快捷输入的候选来源：当前与出厂成员序（见 [`config_api::quick_mix_members`]）。
+    pub fn quick_mix_members(&self) -> config_api::QuickMixMembers {
+        config_api::quick_mix_members(&self.data_dir)
+    }
+
+    /// 整列写回快捷输入的候选来源。只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
+    pub fn set_quick_mix_members(&self, members: Vec<String>) -> Result<(), String> {
+        config_api::set_quick_mix_members(&self.data_dir, members)
     }
 
     // ── 输入统计（设置页「统计」）────────────────────────────────────
@@ -1132,6 +1225,13 @@ impl MobileCore {
             );
         }
         Ok(n as u64)
+    }
+
+    /// 用户正在操作联想候选（手指按在候选条上、展开面板开着、长按菜单弹着）：
+    /// `true` 暂停联想的自动隐藏，`false` 结束操作、重新计满 `hide_after_ms`。
+    /// 不在联想态时无操作。见 `Coordinator::assoc_hold`。
+    pub fn assoc_hold(&self, hold: bool) {
+        self.coord.assoc_hold(hold);
     }
 
     /// 联想学习数据的条数（联想里选过的词 + 学到的「下一词」），所有方案合计。
@@ -1512,6 +1612,7 @@ fn dispatch_key(coord: &Coordinator, vk: u32, modifiers: u32) -> BridgeKeyAction
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     })
 }
 
@@ -1539,6 +1640,7 @@ mod user_words_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         (core, user)
     }
@@ -1693,6 +1795,7 @@ mod dict_transfer_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         (core, user)
     }
@@ -1830,6 +1933,7 @@ mod dict_transfer_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         let err = m.dict_import("pinyin", "aa\t工\n", false).unwrap_err();
         assert!(err.contains("99"), "要把只读原因交给用户: {err}");
@@ -1865,6 +1969,7 @@ mod schema_dicts_tests {
             data_dir: data_dir(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         }
     }
 
@@ -1986,6 +2091,7 @@ mod schema_dicts_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         let err = m
             .set_schema_dict_enabled("pinyin", "cell_idiom", true)
@@ -2005,6 +2111,12 @@ mod candidate_menu_tests {
     fn flatten_keeps_op_and_copy_leaves_and_inlines_submenus() {
         let items = vec![
             MenuItemSpec::leaf("置顶", MenuKind::Op(CandidateOp::MoveTop), false, false),
+            MenuItemSpec::leaf(
+                "在此编码下隐藏",
+                MenuKind::Op(CandidateOp::HideHere),
+                true,
+                false,
+            ),
             MenuItemSpec::separator(),
             MenuItemSpec::label("标题"),
             MenuItemSpec::leaf(
@@ -2037,9 +2149,67 @@ mod candidate_menu_tests {
             got,
             [
                 ("置顶", "move_top", false),
+                ("在此编码下隐藏", "hide_here", true),
                 ("设为生僻字", "toggle_common", true),
                 ("复制", "copy", true),
             ]
+        );
+    }
+
+    /// 「固定到第 N 位」子菜单摊平成 `pin_at_N`，文案补全；动作名能解析回原操作。
+    #[test]
+    fn pin_at_submenu_flattens_to_pin_at_n() {
+        let items = vec![MenuItemSpec::submenu(
+            "固定到第 N 位",
+            vec![
+                MenuItemSpec::leaf("第 1 位", MenuKind::Op(CandidateOp::PinAt(1)), true, false),
+                MenuItemSpec::leaf("第 2 位", MenuKind::Op(CandidateOp::PinAt(2)), false, false),
+            ],
+        )];
+        let mut out = Vec::new();
+        flatten_candidate_menu(&items, &mut out);
+        let got: Vec<(&str, &str, bool)> = out
+            .iter()
+            .map(|i| (i.label.as_str(), i.action.as_str(), i.enabled))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("固定到第 1 位", "pin_at_1", true),
+                ("固定到第 2 位", "pin_at_2", false),
+            ]
+        );
+        for n in 1..=wind_ui_types::PIN_AT_MAX {
+            let op = CandidateOp::PinAt(n);
+            assert_eq!(
+                candidate_menu_action(op)
+                    .as_deref()
+                    .and_then(candidate_menu_op),
+                Some(op)
+            );
+        }
+        assert_eq!(candidate_menu_op("pin_at_x"), None);
+    }
+
+    /// 移动端只摊平前 9 个「第 N 位」。
+    #[test]
+    fn pin_at_capped_to_nine_on_mobile() {
+        let kids = (1..=12)
+            .map(|n| {
+                MenuItemSpec::leaf(
+                    format!("第 {n} 位"),
+                    MenuKind::Op(CandidateOp::PinAt(n)),
+                    true,
+                    false,
+                )
+            })
+            .collect();
+        let mut out = Vec::new();
+        flatten_candidate_menu(&[MenuItemSpec::submenu("固定到第 N 位", kids)], &mut out);
+        let got: Vec<&str> = out.iter().map(|i| i.action.as_str()).collect();
+        assert_eq!(
+            got,
+            (1..=9).map(|n| format!("pin_at_{n}")).collect::<Vec<_>>()
         );
     }
 
@@ -2069,6 +2239,7 @@ mod candidate_menu_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         assert!(m.candidate_menu(0).is_empty(), "无候选时菜单为空");
         for ch in ['A', 'A'] {
@@ -2131,6 +2302,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         assert!(m.candidate_tooltip(0).is_empty(), "无候选时为空");
         for ch in ['W', 'Q', 'V', 'B'] {
@@ -2189,6 +2361,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         dispatch_key(&m.coord, 'A' as u32, 0);
         let plain = m.candidates(0, 20);
@@ -2230,6 +2403,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         dispatch_key(&m.coord, 'A' as u32, 0);
         let first = m.candidates(0, 24);
@@ -2274,6 +2448,7 @@ mod candidate_tooltip_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         m.coord.prewarm_single_initials();
         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -2339,6 +2514,7 @@ mod pinyin_hint_tests {
             data_dir: dir.join("user"),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         (core, dir)
     }
@@ -2449,6 +2625,7 @@ mod session_pump_tests {
             data_dir: user.clone(),
             auto_spaced: AtomicBool::new(false),
             auto_space: AtomicBool::new(true),
+            touch_quick_trigger: AtomicBool::new(false),
         };
         core.key_down('A' as u32, 0);
         let deadline = Instant::now() + Duration::from_secs(10);

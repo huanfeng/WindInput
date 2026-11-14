@@ -330,6 +330,7 @@ fn toggle_schema_survives_auto_switch_round_trip() {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     };
     focus(&c, PLAIN.0, 1, PLAIN.1);

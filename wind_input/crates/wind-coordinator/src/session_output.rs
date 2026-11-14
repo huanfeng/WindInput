@@ -7,7 +7,7 @@
 //!
 //! ★ 所有「根据 `session_tx` 选通道」的分支都集中在本文件的 `emit_*` 里，调用点只传参。
 //! `tests/output_seam.rs` 守着这条缝：别处直接发 `HideCandidates` / `ShowToast` /
-//! `ShowStatusTip` / `UpdateToolbar` 会让该测试失败。
+//! `ShowStatusTip` / `UpdateToolbar` / `SkinSignal` 会让该测试失败。
 //!
 //! ⚠ 事件是在持有 state 锁时发出的（mpsc 通道，不是同步回调）。state 锁不可重入：
 //! 持锁路径只能用接受 `&State` 或已算好的值的内部形式，不能调公开的
@@ -15,7 +15,9 @@
 
 use std::sync::mpsc;
 
-use wind_ui_types::{StatusTipPlacement, ToastKind, ToastPosition, ToolbarState, UiCommand};
+use wind_ui_types::{
+    SkinSignal, StatusTipPlacement, ToastKind, ToastPosition, ToolbarState, UiCommand,
+};
 
 use crate::coordinator::{Coordinator, State};
 
@@ -147,6 +149,13 @@ impl Coordinator {
             None => {
                 let _ = self.ui_tx.send(UiCommand::UpdateToolbar(tb));
             }
+        }
+    }
+
+    /// 真有文本上屏：喂皮肤装饰的 `commit` 事件。只有桌面画皮肤，中立通道不发。
+    pub(crate) fn emit_skin_commit(&self) {
+        if self.session_tx.is_none() {
+            let _ = self.ui_tx.send(UiCommand::SkinSignal(SkinSignal::Commit));
         }
     }
 

@@ -2,9 +2,11 @@
 //!
 //! 与 Go 版本 `wind_input/internal/coordinator/` 对齐。
 
+pub(crate) mod auto_spacing;
 pub(crate) mod aux_code_source;
 pub(crate) mod candidate_grid;
 pub(crate) mod candidate_nav;
+pub mod candidate_preview;
 pub mod candidate_pull;
 #[cfg(test)]
 pub(crate) mod charset_test_support;
@@ -71,6 +73,7 @@ pub mod layout;
 pub mod leading_reading;
 pub mod mode_completion;
 pub mod pipeline;
+pub(crate) mod postprocess;
 pub(crate) mod preedit_cursor;
 pub mod process_memory;
 mod quick_eval;
@@ -80,8 +83,11 @@ pub mod schema_dicts_api;
 pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
 mod schema_ui;
+pub(crate) mod session_exit;
 pub mod session_output;
 pub(crate) mod short_code_yield;
+#[cfg(test)]
+pub(crate) mod source_scan;
 pub mod stats;
 pub mod theme_query;
 pub mod theme_style;

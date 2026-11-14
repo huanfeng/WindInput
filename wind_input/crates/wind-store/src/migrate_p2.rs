@@ -160,11 +160,11 @@ mod tests {
         assert_eq!(
             body,
             vec![
-                "西安宁\txianning\t5",
-                "你好\tni hao\t9",
-                "你\tni\t1",
-                "泥\tni\t1",
-                "#话题\ttag\t5",
+                "xianning\t西安宁\t5",
+                "ni hao\t你好\t9",
+                "ni\t你\t1",
+                "ni\t泥\t1",
+                "tag\t#话题\t5",
             ],
             "order 0 的旧记录在前（同旧导出口径）"
         );
@@ -218,7 +218,7 @@ mod tests {
             .fold(wind_userdata::record::Target::User, "wb")
             .unwrap();
         let f = std::fs::read_to_string(s.user_text_path("wb")).unwrap();
-        assert_eq!(f.matches("工\ta\t").count(), 1, "不重复成行");
+        assert_eq!(f.matches("a\t工\t").count(), 1, "不重复成行");
     }
 
     /// 没有旧用户词：只写标记，不建空文件。

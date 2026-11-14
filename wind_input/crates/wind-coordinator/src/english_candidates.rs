@@ -93,13 +93,38 @@ pub(crate) fn raw_mode_under_phrase_seg(
     }
 }
 
-pub(crate) fn wants_raw_candidate(mode: RawCandidateMode, raw: &str, dict: &[Candidate]) -> bool {
+/// 这一次输入要不要产出原文条（档位语义见上方 [`raw_mode_under_phrase_seg`] 前的说明）。
+///
+/// # 被「屏蔽这个词」的原文仍算词库词
+///
+/// 屏蔽滤掉的是词库那条候选，不是用户打原文的权利（§8 第 11 条：输入原文那一条不受屏蔽）。
+/// 只看 `dict` 的话，打全一个被屏蔽的词时 `InDict` 判据恒假、原文条跟着消失，空格上屏的
+/// 就成了别的词。故 `blocked`（该英文数据方案的屏蔽集，键是词库原文）里的词按它**本来会显示
+/// 的样子**再比一次：字面相同，或开着大小写跟随（`follow_case`）时投影后与原文相同
+/// （屏蔽 `help` 后打 `Help`）——与没屏蔽时 `dict` 那条投影后的判据同口径。
+pub(crate) fn wants_raw_candidate(
+    mode: RawCandidateMode,
+    raw: &str,
+    dict: &[Candidate],
+    blocked: Option<&std::collections::HashSet<String>>,
+    follow_case: bool,
+) -> bool {
     match mode {
         RawCandidateMode::Always => true,
         RawCandidateMode::Off => false,
-        RawCandidateMode::InDict => dict
-            .iter()
-            .any(|c| c.source == CandidateSource::English && c.text == raw),
+        RawCandidateMode::InDict => {
+            dict.iter()
+                .any(|c| c.source == CandidateSource::English && c.text == raw)
+                || blocked.is_some_and(|b| {
+                    b.contains(raw)
+                        || (follow_case
+                            && b.iter().any(|w| {
+                                // 先按忽略大小写预筛：投影要分配，屏蔽集里绝大多数词与原文无关。
+                                w.eq_ignore_ascii_case(raw)
+                                    && project_to_input_case(raw, w).as_deref() == Some(raw)
+                            }))
+                })
+        }
     }
 }
 
@@ -398,6 +423,24 @@ impl crate::coordinator::Coordinator {
         if !self.engine_mgr.freq_settings_for(engine_schema).records() {
             return None;
         }
+        let mut word = self.english_exact_dict_word(engine_schema, buf, head_text)?;
+        if word.text != cand.text {
+            word.case_source = Some(std::mem::replace(&mut word.text, cand.text.clone()));
+        }
+        Some(word)
+    }
+
+    /// 按英文词库的键规则找 `head_text` 对应的词库词：码 = 小写化的缓冲，在**精确码**命中里先找
+    /// 字面相同的，再找仅大小写不同的。返回词库原样的那条候选（`text` 即词库原文）。
+    /// 记词频（[`Self::english_head_dict_word`]）与右键删除头部原文候选（`delete_target`，它只收
+    /// 字面相同的那支）共用。
+    /// 被「屏蔽这个词」的词查不到（引擎管理器已滤掉）。
+    pub(crate) fn english_exact_dict_word(
+        &self,
+        engine_schema: &str,
+        buf: &str,
+        head_text: &str,
+    ) -> Option<Candidate> {
         let code = buf.to_lowercase();
         let hits: Vec<Candidate> = self
             .engine_mgr
@@ -406,15 +449,10 @@ impl crate::coordinator::Coordinator {
             .into_iter()
             .filter(|c| c.source == CandidateSource::English && c.code == code)
             .collect();
-        let mut word = hits
-            .iter()
+        hits.iter()
             .find(|c| c.text == head_text)
-            .or_else(|| hits.iter().find(|c| c.text.eq_ignore_ascii_case(head_text)))?
-            .clone();
-        if word.text != cand.text {
-            word.case_source = Some(std::mem::replace(&mut word.text, cand.text.clone()));
-        }
-        Some(word)
+            .or_else(|| hits.iter().find(|c| c.text.eq_ignore_ascii_case(head_text)))
+            .cloned()
     }
 }
 
@@ -446,11 +484,23 @@ mod tests {
     fn in_dict_ignores_non_dictionary_sources() {
         let raw = "zzq";
         assert!(
-            !wants_raw_candidate(RawCandidateMode::InDict, raw, &[phrase_cand("zzq")]),
+            !wants_raw_candidate(
+                RawCandidateMode::InDict,
+                raw,
+                &[phrase_cand("zzq")],
+                None,
+                false
+            ),
             "短语文本恰好等于所打原文，不代表这个词在英文词库里"
         );
         assert!(
-            wants_raw_candidate(RawCandidateMode::InDict, raw, &[dict_cand("zzq")]),
+            wants_raw_candidate(
+                RawCandidateMode::InDict,
+                raw,
+                &[dict_cand("zzq")],
+                None,
+                false
+            ),
             "同样的文本、来源是英文词库时，判据必须成立"
         );
         // 混表：短语在前、词库在后，仍应以词库那条为准。
@@ -458,7 +508,9 @@ mod tests {
             wants_raw_candidate(
                 RawCandidateMode::InDict,
                 raw,
-                &[phrase_cand("zzq"), dict_cand("zzq")]
+                &[phrase_cand("zzq"), dict_cand("zzq")],
+                None,
+                false
             ),
             "混表下只要存在词库同名候选，判据就该成立"
         );
@@ -467,11 +519,40 @@ mod tests {
     /// 另外两档不看 `dict`，恒定返回。
     #[test]
     fn always_and_off_ignore_the_dictionary() {
-        assert!(wants_raw_candidate(RawCandidateMode::Always, "zzq", &[]));
+        assert!(wants_raw_candidate(
+            RawCandidateMode::Always,
+            "zzq",
+            &[],
+            None,
+            false
+        ));
         assert!(!wants_raw_candidate(
             RawCandidateMode::Off,
             "zzq",
-            &[dict_cand("zzq")]
+            &[dict_cand("zzq")],
+            None,
+            false
+        ));
+    }
+
+    /// 被屏蔽的词仍算词库词：`InDict` 下原文条不因屏蔽消失。按它本来会显示的样子比：字面，或大小写
+    /// 跟随开着时投影后的形态；`OK` 不因屏蔽了 `ok` 而算。
+    #[test]
+    fn in_dict_counts_blocked_word() {
+        let blocked: std::collections::HashSet<String> = ["help".to_string()].into();
+        let in_dict = |raw: &str, follow: bool| {
+            wants_raw_candidate(RawCandidateMode::InDict, raw, &[], Some(&blocked), follow)
+        };
+        assert!(in_dict("help", false));
+        assert!(in_dict("Help", true), "投影后 help → Help");
+        assert!(!in_dict("Help", false), "不跟随大小写时 help 不显示成 Help");
+        assert!(!in_dict("Hel", true), "前缀不算");
+        assert!(!wants_raw_candidate(
+            RawCandidateMode::InDict,
+            "help",
+            &[],
+            None,
+            false
         ));
     }
 

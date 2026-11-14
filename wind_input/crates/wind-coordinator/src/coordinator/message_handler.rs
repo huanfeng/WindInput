@@ -349,6 +349,14 @@ fn host_render_placed_log(body: &[u8]) -> Option<(bool, String)> {
         show(num("actual")),
         flag("owner").map_or("?", |b| if b { "true" } else { "false" }),
     );
+    // 候选窗的皮肤穿透装饰窗口建没建出来（旧 DLL 不报这一项）。
+    if let Some(pass) = flag("pass") {
+        line.push_str(if pass {
+            " pass=true"
+        } else {
+            " pass=false（穿透装饰合回主层、不能点穿）"
+        });
+    }
     if trigger != "recheck" {
         return Some((false, line));
     }
@@ -663,6 +671,35 @@ impl MessageHandler for Coordinator {
                 }
                 None => tracing::warn!("host.fullscreen 载荷无法解析，忽略"),
             },
+            // macOS `.app` / Linux addon：系统「减少动态效果」，连上时与系统设置变化时报。
+            ext_kind::HOST_REDUCE_MOTION => {
+                let reduce = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v.get("reduce")?.as_bool());
+                match reduce {
+                    #[cfg(all(feature = "desktop-ui", ext_presenter))]
+                    Some(r) => {
+                        tracing::debug!("host.reduce_motion: {r}");
+                        wind_ui::candidate_window::set_host_reduce_motion(r);
+                    }
+                    #[cfg(not(all(feature = "desktop-ui", ext_presenter)))]
+                    Some(_) => {}
+                    None => tracing::warn!("host.reduce_motion 载荷无法解析，忽略"),
+                }
+            }
+            // Linux addon / macOS `.app`：候选窗皮肤装饰上点了一下（判定在宿主，同 Windows）。
+            #[cfg(ext_presenter)]
+            ext_kind::SKIN_DECOR_CLICK => match serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v.get("index")?.as_u64())
+            {
+                Some(i) => {
+                    let _ = self
+                        .ui_tx
+                        .send(wind_ui_types::UiCommand::SkinDecorClick(i as usize));
+                }
+                None => tracing::warn!("skin.decor_click 载荷无法解析，忽略"),
+            },
             // Windows TSF：host render 候选窗落位诊断（SearchHost 写不了 tsf_log，只能看这条）。
             ext_kind::DIAG_HOST_RENDER_PLACED => match host_render_placed_log(body) {
                 Some((true, line)) => tracing::warn!("{line}"),
@@ -805,6 +842,10 @@ impl MessageHandler for Coordinator {
         });
     }
 
+    fn assoc_session_hint(&self) -> bool {
+        self.assoc_bare_session_now()
+    }
+
     fn composition_placeholder(&self) -> &'static str {
         // GH#175：按焦点应用的 compat 规则取（空格 / ZWSP / U+2800），唯一实现在 push_config.rs。
         Coordinator::composition_placeholder(self)
@@ -883,16 +924,29 @@ impl MessageHandler for Coordinator {
             }
             self.note_host_wrote_text("宿主自行出字");
         }
+        // 中英 / 中数间补空格的「插入点前一字符」：只在组合开始前锁存（见 `crate::auto_spacing`）。
+        // 联想态**不**重新锁存：联想是紧接着上一笔上屏的，服务端已把 `spacing_prev` 推进到那一笔
+        // 的末字；客户端那份在某些上屏路径上会慢一拍（上屏后立刻起组合的那几条），拿来覆盖反而错。
+        if data.event_type == EVENT_KEY_DOWN {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !Self::has_input_session(&st) {
+                self.latch_spacing_boundary(&mut st, data);
+            }
+        }
         let action = self.handle_key_event(data);
         let action = self.redispatch_commit_code(data, action);
-        // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
-        // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
-        // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
-        let action = self.apply_commit_newline(action);
-        self.record_input_stats(&action);
-        // 自提交打点 + 码表自动造词投喂。与 record_input_stats 同一收口理由：上屏路径有
-        // 40+ 个返回点，且约 10 处绕过 commit_action 直接构造 InsertText，散点接线必漏。
-        self.note_commit_action(&action);
+        // 平台中立的收尾：补空格、换行改写、输入统计、自提交打点与造词投喂、检索放宽复原、
+        // 配对保活。收口在这里而不是各上屏点，理由相同：上屏路径 40+ 个返回点，约 10 处绕过
+        // `commit_action` 直接构造 InsertText，散点接线必漏；换行形式是平台/宿主的表达约定，
+        // 属服务端职责（A3-3）。各步的取舍与其余来源对照见 `session_exit::exit_steps`。
+        //
+        // 检索放宽复原与配对保活原先排在下面两段智能符号收尾之后；它们只动 state / 配对栈，
+        // 智能符号那两段只动 `smart_symbol`，互不读写，先后无关。配对保活须在
+        // `handle_key_event` **之后**刷新，否则本次按键的陈旧判定会先被自己刷新掉。
+        let action = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.finish_session_action(st, crate::session_exit::ActionOrigin::Key, action)
+        };
         // PassThrough / UpdateComposition 时 C++ 侧会调 FlushHoldCompositionIfActive 提交旧符号；
         // coordinator 需同步清除 held_text，防止后续标点的 pre_held_text 捡到已提交的旧值
         // 而造成二次提交（"。。="）。仅在 held_text 非空时操作，避免干扰无 Hold 状态的武装态。
@@ -960,15 +1014,6 @@ impl MessageHandler for Coordinator {
                 }
             }
         }
-        // 检索范围临时放宽的失效：本次组合结束（缓冲已空）即恢复配置档位。
-        // 与 record_input_stats / note_commit_action 同一收口理由——`input_buffer.clear()`
-        // 有十几个调用点（上屏/取消/切焦点/模式切换），散点接线必漏。放在按键处理的唯一出口，
-        // 天然覆盖全部结束路径。用户选字上屏后下一次输入即回到智能档；而放宽期间继续敲字母、
-        // 退格改码、翻页都不会丢状态（缓冲非空），符合「找生僻字常要改几次编码」的实际。
-        self.expire_scope_override();
-        // 配对状态保活：须在 handle_key_event **之后**刷新，否则本次按键的陈旧判定
-        // 会先被自己刷新掉，TTL 永不触发。栈空时是空操作。
-        self.touch_pair_state();
         // 联想占位组合的两道收口，都挂在这个唯一出口上（透传这一格是它们共同的病灶）：
         //
         // ① `assoc_release_on_passthrough` —— 联想**还活着**，而这一键在既有分支里落到了
@@ -1006,6 +1051,17 @@ impl MessageHandler for Coordinator {
         if matches!(action, KeyAction::ClearCompositionThenPassThrough) {
             self.note_host_wrote_text("交还宿主重放");
         }
+        // 无占位联想（`none`）的会话位对账。内层 `handle_key_event` 返回时的推送早于上面两道改判，
+        // 看不到改判里退出联想（Del / 方向键 / Ctrl+C 落透传）的结果，缓存会停在 TRUE。
+        // 联想活着的每个 keydown 还强推一次：DLL 对「迟到的 FALSE」只置待收，后到的 TRUE
+        // 把它撤销，服务端的真实状态才收敛得回来。只对配了 `none` 的应用，别处零开销。
+        if data.event_type == EVENT_KEY_DOWN && self.assoc_placeholder_is_none() {
+            if self.assoc_bare_session_now() {
+                self.hotkey_session_force_push
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.push_hotkey_session_if_changed();
+        }
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
         } else if let Some(sep) = self.syllable_separator() {
@@ -1016,6 +1072,7 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_key_event(&self, data: &KeyEventData) -> KeyAction {
+        // 〔K1 修饰键原始上报〕
         // 候选显示时如实上报的 Ctrl 按下 / 松开：服务端判单击，判出来再以原样的松开重进本函数
         // （所以排在一切之前，也不经下面的统计 / 打字节奏 / 软键盘推送）。
         if matches!(data.event_type, EVENT_MOD_DOWN | EVENT_MOD_UP) {
@@ -1024,6 +1081,7 @@ impl MessageHandler for Coordinator {
         // 软键盘状态若在本次按键中变了，返回前推给 C++（吃键判定要用）。**声明在最开头**
         // 是必需的：局部变量逆序析构 ⇒ 它最后走 ⇒ 那时 `state` 的 MutexGuard 已经还了。
         let _sk_push = crate::handle_softkeyboard::SoftKeyboardPushOnDrop(self);
+        // 〔K2 组字中 Alt：注释态〕
         // 组字中的 Alt 按下 / 松开（平台只在组字中转发）：只管注释态，吃不吃都在这里定。
         if keymap::is_alt_vk(data.key_code)
             && matches!(data.event_type, EVENT_KEY_DOWN | EVENT_KEY_UP)
@@ -1034,6 +1092,7 @@ impl MessageHandler for Coordinator {
             }
             return self.handle_comment_alt(data);
         }
+        // 〔K3 注释功能键按住〕
         // 按住档的功能键切换键：按下（含连发）与松开都在这里接走，排在下面「按住期间的别的键」之前。
         if let Some(act) = self.handle_comment_fn_hold(data) {
             return act;
@@ -1049,6 +1108,7 @@ impl MessageHandler for Coordinator {
         } else {
             None
         };
+        // 〔K4 每键复位与观测：统计/会话标志复位、方案行为同步、小键盘归一、打字节奏、CapsLock 校准（不返回）〕
         // 每次按键开始重置统计标志：具体上屏路径调 record_commit 置位，
         // 顶层 record_input_stats 仅在未置位时兜底（对齐 Go handle_key_event 开头 reset）。
         self.stat_recorded
@@ -1141,6 +1201,7 @@ impl MessageHandler for Coordinator {
             }
         }
 
+        // 〔K5 key_up：切换键与修饰键选词〕
         // ── key_up：toggle 模式键（Shift/Ctrl/CapsLock）直接切换 ──
         // 关键：TSF 对 toggle 键会"吃掉 keydown 不转发"，仅在 C++ 侧判定为干净单击后
         // 于 keyUp 转发该键事件（_SendKeyToService(..., KEY_EVENT_UP)）。因此服务端
@@ -1308,6 +1369,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K6 右键菜单接键〕
         // ── 右键菜单打开时：方向键/回车/ESC 由菜单消费（优先于一切）──
         // 菜单由服务自绘的两种形态：Windows 进程内窗口、光栅帧交宿主（macOS `.app` / Linux
         // addon）贴图（同一份 `popup_menu`）。宿主形态下 menu_open 一旦被置真而窗口没了，输入会被
@@ -1321,6 +1383,7 @@ impl MessageHandler for Coordinator {
         // 通用位（ctrl/shift/alt/win）注册，故先掩掉具体位再比对 match_hash。
         let norm_mods = data.modifiers & hotkey::MOD_GENERIC_MASK;
         let norm_hash = calc_key_hash(norm_mods, data.key_code);
+        // 〔K7 key_down 全局热键〕
         if let Some(action) = self.rt().compiled_hotkeys.match_key_down(norm_hash)
             && !action.is_empty()
             // 裸 F 键在英文模式归宿主（TSF 靠策略位不吃；mac / Linux 整体转发，在这里挡）。
@@ -1379,6 +1442,7 @@ impl MessageHandler for Coordinator {
             }
         }
 
+        // 〔K8 候选期快捷键组（守卫不成立返回 None）〕
         // ── 候选词操作热键（Ctrl+数字 置顶/删除）──
         // 这两组在编译期仅注册转发（action 为空，上方匹配不触发），实际语义在此分派。
         // 须先于下方 Ctrl/Alt 组合「清空隐藏候选」分支，否则 Ctrl+数字 会被当作普通组合吞掉。
@@ -1416,11 +1480,13 @@ impl MessageHandler for Coordinator {
         // 表现为「先按一下小键盘、再按主键盘同一个键也出半角」。见 `State::numpad_origin`。
         state.numpad_origin = numpad_origin;
 
+        // 〔K9 快捷加词模式〕
         // 快捷加词模式：消费全部按键（↑↓调词长/Enter确认/Esc退出），先于英文透传与单点分派。
         if state.add_word_active {
             return self.handle_add_word_key(&mut state, data);
         }
 
+        // 〔K10 密码框透传〕
         // 密码框强制英文抑制：透传（不改 chinese_mode 持久值）。图标另有呈现（显 "英"），
         // 走 ToolbarState/语言栏的独立字段，与本判据无耦合——详见 password_suppress 字段注释。
         // 须先于下方全角分支——密码框里不该出全角字符，一律半角透传。
@@ -1432,6 +1498,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K11 软键盘〕
         // 软键盘：接管主键区的符号键位（查表直接上屏）。特殊键与布局外的键在那里返回
         // None，自然落回下面的常规链路 → 透传给宿主，于是「退格还能删、回车还换行」不需
         // 要单独写一条规则。
@@ -1441,6 +1508,7 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // 〔K12 配对跳出〕
         // 配对跳出键：**全模式统一前置判定**，必须早于下面的英文模式分支——英文模式对普通键
         // 直接 PassThrough，判定放在中文路径里就永远跑不到（旧实现即如此，是「英文模式跳不出
         // 中文里打的配对」的根因之一）。守卫与失效方向见 try_jump_out。
@@ -1448,6 +1516,7 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // 〔K13 英文模式分水岭〕
         // 英文模式
         if !state.chinese_mode {
             // 全角：键已被 TSF 的 `english_fullwidth` 分支吃下等 Rust 出字，此处必须转换，
@@ -1471,6 +1540,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K14 CapsLock 大写〕
         // CapsLock 开：大写语义，不进中文输入流。
         // 全角开：将按键转为正确大小写的英文字符再做全角转换后上屏。
         // 全角关：TSF 层在无 session 时已透传；有 session（切换前残留）时由此兜底 PassThrough。
@@ -1507,6 +1577,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K15 夺取回退〕
         // 统一夺取回退：夺取式模式（URL/后续 z 临拼）中，退到夺取边界再按退格 →
         // 撤销夺取、把快照回放回正常码表输入流（而非停在无候选的独占模式）。
         // 须先于下方单点分派，否则退格会被模式处理器按普通删字符消费。
@@ -1514,6 +1585,7 @@ impl MessageHandler for Coordinator {
             return self.rewind_hijack(&mut state);
         }
 
+        // 〔K16 独占模式分派〕
         // 已激活独占模式：单点分派到专用处理器（唯一入口，见 pipeline.rs）。
         match state.active {
             Some(ModeKind::TempPinyin) => return self.handle_temp_pinyin_key(&mut state, data),
@@ -1535,6 +1607,7 @@ impl MessageHandler for Coordinator {
             None => {}
         }
 
+        // 〔K17 方案级锁外状态切换〕
         // 方案级表的 A 类状态切换（`backslash = "toggle_punct"` 这类）。
         //
         // 与紧随其后的 `try_activate_mode` 分属两半：B 类建 overlay、要 `&mut State`，
@@ -1553,6 +1626,7 @@ impl MessageHandler for Coordinator {
             state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         }
 
+        // 〔K18 空缓冲模式激活〕
         // 空缓冲模式激活：单一入口，优先级链见 try_activate_mode（对齐 key-pipeline.md §2.1）。
         if let Some(act) = self.try_activate_mode(&mut state, data) {
             return act;
@@ -1571,6 +1645,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K19 前缀夺取〕
         // ── 前缀夺取式模式激活 ──
         // 普通输入累积时，若 input_buffer + 当前键字符 恰好等于某前缀，则夺取进入对应模式。
         // 置于主分派前，确保「补全前缀的那一键」先被截获，不落入普通码表/标点处理。
@@ -1592,6 +1667,7 @@ impl MessageHandler for Coordinator {
             state.input_buffer
         );
 
+        // 〔K20 编码字符闸门 / 符号缓冲闸门〕
         // 非字母码元闸门：本方案把某个数字/符号配成了码元（如 `a-z0-9` 要打 `Win10`、
         // `a-x/` 要打含 `/` 的词条）→ 进缓冲，抢在以词定字/翻页/数字选词/标点流水线之前。
         //
@@ -1620,6 +1696,7 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // 〔K21 以词定字〕
         // 以词定字（select_char）：配置的成对标点键从当前高亮候选词逐字上屏（对齐 Go
         // handleEngineDefault——select_char 优先于翻页键，故置于 apply_session_action 之前）。默认
         // `select_char_keys` 为空 → select_char_index 恒 None → 跳过（零回归）。仅在缓冲非空或
@@ -1662,12 +1739,14 @@ impl MessageHandler for Coordinator {
             );
         }
 
+        // 〔K22 会话动作（导航/翻页/取消…）〕
         // 候选翻页/高亮：配置驱动统一处理（普通模式为码表型，`-`/`=` 可作翻页）。
         // 仅有候选时生效；无候选时下方 match 的回退臂负责透传方向/翻页键。
         if let Some(act) = self.apply_session_action(&mut state, data, true) {
             return act;
         }
 
+        // 〔K23 小键盘 direct〕
         // 数字小键盘 —— direct（默认）：IME 不把该键解释为选词，但**已打的码不丢**：先顶屏当前
         // 高亮候选（含逐步转换的已转换前缀），再接着输出该小键盘字符。
         // follow_main 时键已在 handle_key_event 入口归一化为主键盘等价键，永不到达此处。
@@ -1689,6 +1768,10 @@ impl MessageHandler for Coordinator {
             // 只看全角，不看这个开关），出的半角字由下方 `commit_highlight_then_char` 负责。
             if !has_comp && !state.full_width {
                 self.record_commit(&npc.to_string(), 0, -1, CommitSource::Punctuation);
+                // 汉字后的小键盘数字、开了中数间空格：同主键盘那条臂，出字补空格。
+                if npc.is_ascii_digit() && self.digit_after_cjk_outputs(&state, data) {
+                    return Self::commit_action(npc.to_string(), true);
+                }
                 return KeyAction::PassThrough;
             }
             // 命令候选顶屏 → 执行命令（与按空格一致），不上屏 display 标签、不追加该字符。
@@ -1714,9 +1797,14 @@ impl MessageHandler for Coordinator {
             && let Some(ch) = punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
         {
             self.record_commit(&ch.to_string(), 0, -1, CommitSource::Punctuation);
+            // 汉字后的小键盘数字、开了中数间空格：同主键盘数字那条臂出字补空格（DLL 已吃下）。
+            if ch.is_ascii_digit() && self.digit_after_cjk_outputs(&state, data) {
+                return Self::commit_action(ch.to_string(), true);
+            }
             return KeyAction::PassThrough;
         }
 
+        // 〔K24 z-fallback 夺取〕
         // ── z-fallback 夺取：**必须早于下面的按键分派** ──
         //
         // 缓冲以 z 开头、加上这一键后 `z…` 破活码前缀 ⇒ 首 z 实为引导键，抛弃它、
@@ -1745,6 +1833,7 @@ impl MessageHandler for Coordinator {
             }
         }
 
+        // 〔K25 默认按键臂〕
         match data.key_code {
             // Escape：取消整个组合（含已转换前缀），不上屏。实现收口在 `cancel_session`
             // ——`keys.session_actions` 里绑 `cancel` 的键走的是同一个函数，两条通路
@@ -1963,6 +2052,14 @@ impl MessageHandler for Coordinator {
             {
                 let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
                 self.accumulate_code_char(&mut state, digit, digit)
+            }
+            // 汉字后打数字、开了中数间空格：出字，前缀空格由统一出口补（判据见
+            // `digit_after_cjk_outputs`；小键盘 direct 那条臂共用）。
+            keymap::VK_0..=keymap::VK_9 if self.digit_after_cjk_outputs(&state, data) => {
+                let digit = (b'0' + (data.key_code - keymap::VK_0) as u8) as char;
+                let text = digit.to_string();
+                self.record_commit(&text, 0, -1, CommitSource::Punctuation);
+                Self::commit_action(text, true)
             }
             keymap::VK_1..=keymap::VK_9 if data.modifiers & MOD_SHIFT == 0 => {
                 // 数字键 1-9 选当前页第 N 个候选；越界按 input.overflow.number_key 处理
@@ -2620,8 +2717,19 @@ impl MessageHandler for Coordinator {
                     }
                     // 引号交替态钉左：开了配对后一次按键即产出完整一对，交替开关不参与决策。
                     let quote_paired = self.pin_quote_left_if_paired(&state, ch);
-                    let piece = self.convert_punct(&state, ch, data.prev_char);
+                    // 「英文后」看紧挨着标点的那段：被顶出的候选 / 原码，没有则是光标前（锁存值）。
+                    let piece = self.convert_punct_after(&state, ch, data.prev_char, &out);
                     state.chinese_punct = saved_chinese_punct;
+                    // 智能符号 press1 在上面（顶屏之前）就按当时能看到的上下文武装了；英文后智能
+                    // 标点看的是被顶出的那段，可能让实际上屏的是另一形态（`_` 而非 `——`）。武装串与
+                    // 光标前的实际内容对不上时 press2 会按武装串的长度删字——删到用户打的字母，
+                    // 故不一致即解除。只在英文后智能标点开着时检查：关着时两者同源，旧行为一分不动。
+                    if self.rt().config.input.punct.smart_after_latin {
+                        let mut arm = self.smart_symbol.lock().unwrap_or_else(|e| e.into_inner());
+                        if arm.armed && arm.key == ch && arm.str != piece {
+                            arm.armed = false;
+                        }
+                    }
                     out.push_str(&piece);
                     // 标点字符（候选部分已在标点前顶屏候选处记 Candidate；标点候选已 set
                     // stat_recorded，故此处必须显式记标点，否则顶层 fallback 会跳过它）。
@@ -3347,7 +3455,7 @@ impl MessageHandler for Coordinator {
     ) -> (Option<StatusUpdateData>, String) {
         // GH#172：用户关掉了 Ctrl+空格 切换（`keys.ctrl_space_toggle` 或自定义按键里绑 none），
         // 而这次翻转是用户按出来的（系统输入法开关热键 / 按键侧兜底）⇒ 拒绝，回包仍是当前
-        // 模式，DLL 据此把 compartment 拉回。与下面 ignore_host_ime_close 同一条仲裁回路，
+        // 模式，DLL 据此把 compartment 拉回。与下面 ignore_host_ime_switch 同一条仲裁回路，
         // 「必须再异步推一次状态」的理由也相同（见那里的 ★★★）。判据见 `ctrl_space` 模块。
         if self.ctrl_space_switch_rejected(chinese_mode, source, ctrl_held) {
             tracing::debug!(
@@ -3359,27 +3467,31 @@ impl MessageHandler for Coordinator {
             self.push_state_update();
             return (Some(self.build_status()), String::new());
         }
-        // per-app「忽略宿主关闭输入法」：拒绝后**不改模式**，回包仍是当前模式。DLL 侧
-        // `_ApplyModeSwitch` 见到 `newChineseMode != requestedMode` 会把 compartment 拉回
-        // 真实模式——这条仲裁回路早就存在（密码框强制英文用的就是它），不必新开通道。
-        if self.host_ime_close_ignored(chinese_mode, source, ctrl_held) {
+        // 「忽略软件切换中英」（per-app 优先，未配跟随全局）：拒绝后**不改模式**，回包仍是
+        // 当前模式。DLL 侧 `_ApplyModeSwitch` 见到 `newChineseMode != requestedMode` 会把
+        // compartment 拉回真实模式——这条仲裁回路早就存在（密码框强制英文用的就是它），
+        // 不必新开通道。开和关两个方向同一处理。
+        if self.host_ime_switch_ignored(source, ctrl_held) {
             let cur = self.is_chinese_mode();
             tracing::debug!(
-                "system_mode_switch: source={} 请求 英，已按 ignore_host_ime_close 拒绝（保持{}）",
+                "system_mode_switch: source={} 请求 {}，已按 ignore_host_ime_switch 拒绝（保持{}）",
                 source.as_str(),
+                if chinese_mode { "中" } else { "英" },
                 if cur { "中" } else { "英" }
             );
             // ★★★ 必须再异步推一次状态，**不能只靠同步回包**。
             //
-            // 宿主刚把 OPENCLOSE 写成 0，而我们保持中文 ⇒ compartment 与真实模式脱节。
-            // DLL 收到同步回包后确实会 `_SetOpenCloseCompartment`，但那一次发生在 `OnChange`
-            // 调用栈里——内部「值相同就不写」的守卫会读到尚未落定的旧值而跳过（实测回读
-            // 8/8 为 0，见 project_tsf_openclose_compartment_semantics）。
+            // 宿主刚把 OPENCLOSE 写成与真实模式相反的值（关时写 0、开时写 1），而我们保持原
+            // 模式 ⇒ compartment 与真实模式脱节。DLL 收到同步回包后确实会
+            // `_SetOpenCloseCompartment`，但那一次发生在 `OnChange` 调用栈里——内部「值相同
+            // 就不写」的守卫会读到尚未落定的旧值而跳过（关的方向实测回读 8/8 为 0，见
+            // project_tsf_openclose_compartment_semantics）。
             //
-            // 脱节的后果不是「图标不同步」这种小事，而是**Ctrl+Space 变哑**：compartment
-            // 停在 0、模式是中文，用户按 Ctrl+Space 把它翻成 1，`_ApplyModeSwitch` 一看
-            // 「1 == 当前中文」直接 no-op 早退，按了没反应；要按第二次（此时 0 又等于关，
-            // 且 Ctrl 按住会放行）才切得动——正是当年「按三次才切一次」那个病的形状。
+            // 脱节的后果不是「图标不同步」这种小事，而是**Ctrl+Space 变哑**：以关为例，
+            // compartment 停在 0、模式是中文，用户按 Ctrl+Space 把它翻成 1，`_ApplyModeSwitch`
+            // 一看「1 == 当前中文」直接 no-op 早退，按了没反应；要按第二次（此时 0 又等于关，
+            // 且 Ctrl 按住会放行）才切得动——正是当年「按三次才切一次」那个病的形状。开的方向
+            // 镜像对称（compartment 停在 1、模式是英文）。
             //
             // 状态推送走 `UpdateFullStatus`，那里的 `_SetOpenCloseCompartment` 是无条件的，
             // 且在 WM_UPDATE_STATUS 消息上下文里执行（已脱离 OnChange），守卫读到的是落定值。
@@ -3406,7 +3518,7 @@ impl MessageHandler for Coordinator {
         //
         // ⚠ 改写了目标时回包的模式就与请求不同——DLL 的 `_ApplyModeSwitch` 见到
         // `newChineseMode != requestedMode` 会把 compartment 拉回真实模式，与 per-app
-        // 「忽略宿主关闭输入法」拒绝请求走的是同一条仲裁回路。
+        // 「忽略软件切换中英」拒绝请求走的是同一条仲裁回路。
         let chinese_mode = if self.cancel_caps_on_switch() {
             Self::mode_after_caps_cancel(
                 &self.rt().config.input.capslock.mode_after_cancel,
@@ -3559,7 +3671,14 @@ impl MessageHandler for Coordinator {
             self.show_tip(&self.status_indicator_text());
             state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         }
-        let composing = !state.candidates.is_empty() || !state.input_buffer.is_empty();
+        // 无占位的联想（`assoc_placeholder = "none"`）：宿主里没有组合，WPS 等会在上屏后
+        // 上报一个与联想窗无关的远处光标（实测 (1643,756) 一类），照常当「组合中」处理会把
+        // 窗口重新锚过去而飘走。此时只更新缓存，窗口留在联想出现的位置。
+        let bare_assoc = state.input_buffer.is_empty()
+            && state.assoc_active()
+            && self.assoc_placeholder_is_none();
+        let composing =
+            (!state.candidates.is_empty() && !bare_assoc) || !state.input_buffer.is_empty();
         if !composing {
             // 常态、非异常：上屏后到下一键之间宿主仍会上报 caret。注意坐标**已在上面写入
             // state.caret_x/y**，只是不做显示决策——这一条解释了「按键前明明收到过正确坐标，
@@ -4569,6 +4688,18 @@ impl MessageHandler for Coordinator {
         self.caret_cache_verified
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.note_host_wrote_text("selection_changed");
+        // 无占位联想：光标被用户挪走，联想不再有意义，立刻收窗（否则要等自动隐藏计时）。
+        // 宿主只在「光标移动且当前无组合」时回报本事件，恰是无占位联想的形状。
+        if self.assoc_placeholder_is_none() {
+            let exited = {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                self.exit_assoc(&mut st, crate::handle_assoc::AssocExit::CaretMoved)
+            };
+            if exited {
+                self.push_hotkey_session_if_changed();
+                self.notify_ui_hide();
+            }
+        }
     }
 
     fn handle_commit_request(&self, data: &CommitRequestData) -> Option<CommitResultData> {
@@ -4668,11 +4799,16 @@ impl MessageHandler for Coordinator {
         self.record_selection(&freq_code, &text, source);
         // 补空格**必须在记账之后**：`record_selection` 记的是词本身，带上尾空格会写出
         // 「hello 」这种与读取端（`apply_freq_rerank` 按候选文本查）永远对不上的词频键。
-        let text = if append_space {
+        let mut text = if append_space {
             format!("{text} ")
         } else {
             text
         };
+        // 中英交界空格同按键出口一样补在本笔前面（`crate::auto_spacing`）；这条通路不产
+        // `KeyAction`，故直接调文本级判据。
+        let mut prev = state.spacing_prev;
+        self.space_committed_text(&mut prev, &mut text);
+        state.spacing_prev = prev;
         // 上屏即组合结束：复位首显延迟状态，使下一组合首帧重新延迟到 reflow 后的权威坐标，
         // 避免其锁定到本组合旧坐标（"上屏后立即输入候选窗错位"主场景）。
         self.reset_first_show();
@@ -4738,6 +4874,22 @@ mod ext_envelope_tests {
         assert!(!warn);
         assert!(line.contains("pid=7 trigger=setup probed=1 requested=1 actual=1 owner=false"));
         assert!(!line.contains("prev_"));
+        assert!(!line.contains("pass="), "旧 DLL 不报穿透窗口，不编");
+
+        // 新 DLL 报穿透装饰窗口建没建出来。
+        let (_, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"setup","probed":1,"requested":1,"actual":1,"owner":true,"pass":false}"#,
+        )
+        .unwrap();
+        assert!(line.contains("owner=true pass=false"), "{line}");
+        let (_, line) = host_render_placed_log(
+            br#"{"pid":7,"trigger":"setup","probed":1,"requested":1,"actual":1,"owner":true,"pass":true}"#,
+        )
+        .unwrap();
+        assert!(
+            line.contains("pass=true") && !line.contains("合回"),
+            "{line}"
+        );
 
         // recheck 且 band 变了（开机预启动那条）：WARN。
         let (warn, line) = host_render_placed_log(
@@ -5467,6 +5619,7 @@ mod shortcut_ownership_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 

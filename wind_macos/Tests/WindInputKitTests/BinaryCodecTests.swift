@@ -4,11 +4,11 @@ import XCTest
 final class BinaryCodecTests: XCTestCase {
 
     func testHeaderRoundtrip_KeyEvent() throws {
-        let h = BinaryCodec.encodeHeader(cmd: UpstreamCmd.keyEvent, payloadLen: 18)
+        let h = BinaryCodec.encodeHeader(cmd: UpstreamCmd.keyEvent, payloadLen: 20)
         XCTAssertEqual(h.count, WireProtocol.headerSize)
         let (cmd, len, isAsync) = try BinaryCodec.decodeHeader(h)
         XCTAssertEqual(cmd, UpstreamCmd.keyEvent)
-        XCTAssertEqual(len, 18)
+        XCTAssertEqual(len, 20)
         XCTAssertFalse(isAsync)
     }
 
@@ -58,16 +58,17 @@ final class BinaryCodecTests: XCTestCase {
             eventType: .down,
             toggles: 0x01,
             eventSeq: 42,
-            prevChar: 0x4E2D  // '中'
+            prevChar: 0x4E2D,  // '中'
+            seqChar: 0x0061
         )
         let frame = BinaryCodec.encodeKeyEventFrame(original)
-        XCTAssertEqual(frame.count, WireProtocol.headerSize + 18)
+        XCTAssertEqual(frame.count, WireProtocol.headerSize + 20)
 
         // 验帧头
         let header = frame.prefix(WireProtocol.headerSize)
         let (cmd, len, _) = try BinaryCodec.decodeHeader(header)
         XCTAssertEqual(cmd, UpstreamCmd.keyEvent)
-        XCTAssertEqual(len, 18)
+        XCTAssertEqual(len, 20)
 
         // 验 payload
         let payload = frame.subdata(in: WireProtocol.headerSize..<frame.count)

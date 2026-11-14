@@ -88,7 +88,16 @@ public:
                                                  BOOL* pUsedCompStartAsCaret = nullptr,
                                                  RECT* pCompRect = nullptr,
                                                  BOOL* pHasCompRect = nullptr,
-                                                 BOOL* pUsedImmCandidateForm = nullptr);
+                                                 BOOL* pUsedImmCandidateForm = nullptr,
+                                                 BOOL* pRejectedOutsideView = nullptr);
+
+    /// Chromium 系宿主里，矩形锚点（左上）是否落在本 context 自报的显示区之外。其它宿主、显示区取不到
+    /// 或退化时答 FALSE（放行）。组合进行中 Chromium 可能报上一个输入框那次组合的旧坐标，靠它识别。
+    static BOOL IsOutsideViewExt(ITfContextView* pView, const RECT& rc);
+
+    /// 宿主是否 Chromium 系（Chrome / Edge / Electron，窗口类 Chrome_WidgetWin_*）。
+    static BOOL IsChromiumView(ITfContextView* pView);
+    static BOOL IsChromiumContext(ITfContext* pContext);
 
     // 异步取坐标：用 TF_ES_ASYNCDONTCARE 请求锁，结果经 pOwner->OnAsyncCaretRectReady 回调返回。
     //
@@ -126,6 +135,7 @@ public:
     BOOL UsedCompStartAsCaret() const { return _usedCompStartAsCaret; }
     // 本次是否走了「caret 无效 → 用宿主 IMM32 CANDIDATEFORM 顶替」的三级降级
     BOOL UsedImmCandidateForm() const { return _usedImmCandidateForm; }
+    BOOL RejectedOutsideView() const { return _rejectedOutsideView; }
     // 设为异步模式并持有 owner 强引用；见 RequestCaretRectAsync
     void SetAsyncOwner(CTextService* pOwner);
     // 异步回调的用途与归属标记，见 CaretProbeKind / AsyncCaretResult
@@ -148,6 +158,7 @@ private:
     BOOL _usedCompStartAsCaret;
     // 本次是否走了三级降级（IMM32 CANDIDATEFORM）。见 DoEditSession 里那一级的注释。
     BOOL _usedImmCandidateForm;
+    BOOL _rejectedOutsideView = FALSE; // 取到的坐标落在显示区外被弃用（旧坐标），调用方别再找别的光标顶替
     // 非空 = 异步模式：DoEditSession 完成后直接回调它，因为异步执行时静态入口早已返回、
     // 调用方拿不到结果。持有强引用（AddRef/Release），避免回调到达前 owner 被销毁。
     CTextService* _pAsyncOwner;

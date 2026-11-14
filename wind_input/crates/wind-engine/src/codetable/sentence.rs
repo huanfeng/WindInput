@@ -25,8 +25,11 @@
 //! 都被切成一串简码字。[`ShortCodeIndex`] 同时解决两件事：判定「这条是不是简码」，
 //! 以及给简码条目换上**它自己全码位置的权重**（那才是真实词频量纲）。
 
+use crate::pinyin::grammar::Grammar;
 use crate::pinyin::viterbi::{ViterbiDecoder, ViterbiResult, WordNode};
 use std::collections::HashMap;
+use std::sync::Arc;
+use wind_candidate::Candidate;
 use wind_dict::DictManager;
 use wind_dict::cached::CachedDict;
 
@@ -141,6 +144,39 @@ const SHORT_CODE_TAIL_PENALTY: f64 = std::f64::consts::LN_2;
 /// 量纲上时，筛选口必须放宽**。8 是「够覆盖一个 4 码位上的常见词条」的经验值。
 const MAX_HOMOGRAPHS: usize = 8;
 
+/// 词典组词表收几个词：拼音词库里按词频取前 N 个多字词。
+///
+/// 组词解决的是「这个词码表里没有」——五笔词库只收了约 8 万条，句子里大量的词只能逐字打，
+/// 各字按单字词频各算各的，切分就很容易出错（逐字最短码打法首选仅 7.7%）。
+///
+/// 规模是实测扫出来的（3000 句 Tatoeba，「组词 + 语法」首选，词组最短码 / 逐字最短码）：
+///
+/// | 规模 | 首选 | 内存（紧凑表） |
+/// |---|---|---|
+/// | 3 万 | 84.0% / 77.2% | ~0.6 MB |
+/// | 10 万 | 88.1% / 86.4% | ~2 MB |
+/// | **20 万** | **89.9% / 89.2%** | ~4 MB |
+/// | 全量 60 万 | 90.9% / 89.9% | ~12 MB |
+///
+/// 20 万之后边际收益不到 1 个点，内存却要翻三倍。
+const COMPOSE_LEXICON_SIZE: usize = 200_000;
+
+/// 组词最多跨几个编码单元。
+const COMPOSE_MAX_UNITS: usize = 4;
+
+/// 组词词表只收这么长以内的词：更长的词拼音库里多是成语俗语，跨 4 个单元也凑不出来。
+const COMPOSE_MAX_CHARS: usize = 6;
+
+/// 组词时每个跨度只拿分最高的几条参与拼接——同一跨度上排在后面的同码字几乎不可能
+/// 组出正解，全拿会让组合数按 `MAX_HOMOGRAPHS^单元数` 膨胀。
+const COMPOSE_PER_SPAN: usize = 3;
+
+/// 码表整句用的语法模型文件（`<schemas>/pinyin/grammar/` 下，随安装包分发）。
+///
+/// 与拼音的 `schema.pinyin.grammar.model` **不共用配置**：拼音桌面端出厂不挂模型，码表整句
+/// 实测挂上收益大得多（词组最短码首选 56.8% → 79.5%）——两边的取舍不同，不能互相牵连。
+pub const GRAMMAR_MODEL: &str = "wanxiang-mini.gram";
+
 /// 整句候选的权重基数。
 ///
 /// 取值只需满足「高于码表任何词条权重」——本仓词库上限是简码带的 9999。
@@ -179,6 +215,69 @@ pub const SENTENCE_WEIGHT_BASE: i32 = 1_000_000;
 #[derive(Debug, Default)]
 pub struct SentenceFreq {
     freq: HashMap<String, i32>,
+    /// 词典组词表，见 [`COMPOSE_LEXICON_SIZE`]。
+    compose: ComposeLexicon,
+    /// 用户词 / 临时词查不到词频时的下限，见 [`Self::user_floor`]。
+    user_floor: i32,
+}
+
+/// 紧凑的 `text → 词频` 表：所有文本拼进一个 `String`，索引按文本排序后二分查找。
+///
+/// 不用 `HashMap<String, i32>`：20 万条下那要 20 万次堆分配、约 10 MB；这里两次分配、约 4 MB。
+/// 表建好后只读，用不上哈希表的增删。
+#[derive(Debug, Default)]
+pub struct ComposeLexicon {
+    blob: String,
+    /// `(起点, 长度, 词频)`，按 `blob[起点..起点+长度]` 的字节序升序。
+    index: Vec<(u32, u32, i32)>,
+}
+
+impl ComposeLexicon {
+    /// `words` 可含重复文本（同词多读音），取词频最大的一条。
+    fn from_words(mut words: Vec<(String, i32)>) -> Self {
+        words.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        words.dedup_by(|later, kept| later.0 == kept.0);
+        let mut blob = String::with_capacity(words.iter().map(|w| w.0.len()).sum());
+        let mut index = Vec::with_capacity(words.len());
+        for (t, w) in words {
+            index.push((blob.len() as u32, t.len() as u32, w));
+            blob.push_str(&t);
+        }
+        Self { blob, index }
+    }
+
+    fn text(&self, e: &(u32, u32, i32)) -> &str {
+        &self.blob[e.0 as usize..(e.0 + e.1) as usize]
+    }
+
+    pub fn get(&self, text: &str) -> Option<i32> {
+        self.index
+            .binary_search_by(|e| self.text(e).cmp(text))
+            .ok()
+            .map(|i| self.index[i].2)
+    }
+
+    /// 有没有词以 `prefix` 开头（含等于）。组词 DFS 据此剪枝：拼到一半已不是任何词的前缀，
+    /// 再往下拼也组不出词。按字节序排好的表里，以 `prefix` 开头的词恰好落在
+    /// `prefix` 的插入点上。
+    fn has_prefix(&self, prefix: &str) -> bool {
+        let i = self.index.partition_point(|e| self.text(e) < prefix);
+        self.index
+            .get(i)
+            .is_some_and(|e| self.text(e).starts_with(prefix))
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.blob.capacity() + self.index.capacity() * size_of::<(u32, u32, i32)>()
+    }
 }
 
 /// 拼音库查不到的 text 的兜底词频。
@@ -209,17 +308,80 @@ impl SentenceFreq {
                 *slot = w;
             }
         });
+        let (compose, user_floor) = Self::build_compose(pinyin_dict, &freq);
         tracing::debug!(
             codetable_texts = wanted.len(),
             matched = freq.len(),
+            compose = compose.len(),
+            user_floor,
             "码表整句：词频表构建完成"
         );
-        Self { freq }
+        Self {
+            freq,
+            compose,
+            user_floor,
+        }
+    }
+
+    /// 组词表：拼音库里词频前 [`COMPOSE_LEXICON_SIZE`] 的多字词。返回 `(表, 入表门槛词频)`。
+    ///
+    /// 两遍扫描：先只收词频找出门槛，再收门槛以上的文本。一遍做完得先把 60 万条文本全部
+    /// 装进内存再排序，峰值多出二三十 MB（虽然在后台线程上，也是实打实的高水位）。
+    ///
+    /// 码表收了的多字词（`codetable_freq` 里那份）无论排第几都一并收进来：逐字打出来也该认得，
+    /// 且组词表要能回答「是不是某个词的前缀」（剪枝用），词就不能分散在两张表里。
+    fn build_compose(
+        pinyin_dict: &CachedDict,
+        codetable_freq: &HashMap<String, i32>,
+    ) -> (ComposeLexicon, i32) {
+        let eligible =
+            |text: &str, w: i32| w > 0 && (2..=COMPOSE_MAX_CHARS).contains(&text.chars().count());
+        let mut freqs: Vec<i32> = Vec::new();
+        pinyin_dict.for_each_entry(&mut |_code, text, w| {
+            if eligible(text, w) {
+                freqs.push(w);
+            }
+        });
+        if freqs.is_empty() {
+            return (ComposeLexicon::default(), OOV_FREQ);
+        }
+        // 同词多读音会重复计数，门槛因此略偏高、实收略少于 N——无伤大雅，不值得为它去重。
+        let nth = COMPOSE_LEXICON_SIZE.min(freqs.len()) - 1;
+        let threshold = *freqs.select_nth_unstable_by(nth, |a, b| b.cmp(a)).1;
+        drop(freqs);
+        let mut words: Vec<(String, i32)> = Vec::new();
+        pinyin_dict.for_each_entry(&mut |_code, text, w| {
+            if eligible(text, w) && w >= threshold {
+                words.push((text.to_string(), w));
+            }
+        });
+        words.extend(
+            codetable_freq
+                .iter()
+                .filter(|(t, w)| eligible(t, **w))
+                .map(|(t, w)| (t.clone(), *w)),
+        );
+        (ComposeLexicon::from_words(words), threshold)
     }
 
     /// 该文本的整句词频；查不到给 [`OOV_FREQ`]。
     pub fn get(&self, text: &str) -> i32 {
         self.freq.get(text).copied().unwrap_or(OOV_FREQ)
+    }
+
+    /// 词典组词用：`text` 是不是词、词频多少。组词表里没有时再查码表词的那份词频
+    /// （码表收了、但不在拼音前 20 万里的词，逐字打出来也该认得）。
+    fn compose_freq(&self, text: &str) -> Option<i32> {
+        self.compose.get(text)
+    }
+
+    /// 用户词 / 临时词在拼音库查不到时的词频下限：取组词表的入表门槛。
+    ///
+    /// 查不到词频的用户词多是人名、新词——正是用户特意造的。按 [`OOV_FREQ`] 计价会让它
+    /// 在整句里几乎永远输给逐字拆开（t134 拼音侧同一个病）。门槛的含义是「至少和组词表里
+    /// 最冷的那个词一样常用」：用户造过它，这个待遇不算高估；再往上就是在替用户猜词频了。
+    pub fn user_floor(&self) -> i32 {
+        self.user_floor
     }
 
     pub fn len(&self) -> usize {
@@ -440,6 +602,10 @@ pub struct CodeSentenceDecoder {
 /// 但那是与「不预热」持平的最坏情况，不会更差。
 struct LazyTables {
     index: std::sync::OnceLock<ShortCodeIndex>,
+    /// 语法模型来源。`None` = 不挂（权重为 0 或未配）。
+    grammar_source: Option<GrammarSource>,
+    /// 挂了语法模型的解码器。**内层 `None` 表示「试过了但没成」**（模型文件缺失等），同 `freq`。
+    grammar: std::sync::OnceLock<Option<ViterbiDecoder>>,
     /// 整句词频的来源。`None` = 没配 ⇒ 退回码表自身权重那套
     /// （见 [`CodeSentenceDecoder::weight_of`]），功能仍可用、只是没那么准。
     freq_source: Option<FreqSource>,
@@ -449,12 +615,41 @@ struct LazyTables {
 }
 
 impl LazyTables {
-    fn new(freq_source: Option<FreqSource>) -> Self {
+    fn new() -> Self {
         Self {
             index: std::sync::OnceLock::new(),
-            freq_source,
+            grammar_source: None,
+            grammar: std::sync::OnceLock::new(),
+            freq_source: None,
             freq: std::sync::OnceLock::new(),
         }
+    }
+
+    /// 取（必要时打开）挂语法模型的解码器。没配、或模型打不开时返回 `None`。
+    fn grammar_viterbi(&self) -> Option<&ViterbiDecoder> {
+        let src = self.grammar_source.as_ref()?;
+        self.grammar
+            .get_or_init(|| match src {
+                GrammarSource::Ready(g) => Some(ViterbiDecoder::with_grammar(Arc::clone(g))),
+                GrammarSource::File { path, weight } => {
+                    let cfg = crate::pinyin::octagram::OctagramConfig {
+                        weight: *weight,
+                        ..Default::default()
+                    };
+                    match crate::pinyin::octagram::OctagramGrammar::open(path, cfg) {
+                        Ok(g) => Some(ViterbiDecoder::with_grammar(Arc::new(g))),
+                        Err(e) => {
+                            // 模型不随所有发行形态分发（定制版可能删掉），缺了就退回无模型。
+                            tracing::warn!(
+                                "码表整句：语法模型不可用（{}），按无模型解码：{e:#}",
+                                path.display()
+                            );
+                            None
+                        }
+                    }
+                }
+            })
+            .as_ref()
     }
 
     /// 取（必要时构建）整句词频表。没有来源、或来源加载失败时返回 `None`。
@@ -492,6 +687,15 @@ enum FreqSource {
     Dict(std::sync::Arc<CachedDict>),
 }
 
+/// 语法模型的来源：生产路径给文件（预热线程里打开），测试直接给实例。
+enum GrammarSource {
+    File {
+        path: std::path::PathBuf,
+        weight: f64,
+    },
+    Ready(Arc<dyn Grammar>),
+}
+
 impl CodeSentenceDecoder {
     /// 诊断：两张懒表里已建好的那几张的自报大小。不触发构建。
     pub(crate) fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
@@ -517,6 +721,11 @@ impl CodeSentenceDecoder {
                 bytes,
                 allocs: 1 + f.freq.len(),
             });
+            v.push(crate::engine::MemPart {
+                name: "sentence/ComposeLexicon".into(),
+                bytes: f.compose.heap_bytes(),
+                allocs: 2,
+            });
         }
         v
     }
@@ -524,20 +733,39 @@ impl CodeSentenceDecoder {
     pub fn new(max_code_length: usize) -> Self {
         Self {
             max_code_length: max_code_length.max(1),
-            tables: std::sync::Arc::new(LazyTables::new(None)),
+            tables: std::sync::Arc::new(LazyTables::new()),
             viterbi: ViterbiDecoder::new(),
         }
     }
 
+    /// 配置数据来源用。只能在 [`Self::prewarm`] 之前调——预热线程拿走一份 `Arc` 后
+    /// 这里就拿不到独占引用了，那是构建顺序写错了，直接 panic 比静默丢配置好查。
+    fn tables_mut(&mut self) -> &mut LazyTables {
+        Arc::get_mut(&mut self.tables).expect("整句解码器的数据来源须在 prewarm 之前配置")
+    }
+
     /// 注入**数据目录**作为词频来源：词库到预热线程（或首次整句解码）时才读。生产路径走这个。
     pub fn with_schemas_dir(mut self, dir: std::path::PathBuf) -> Self {
-        self.tables = std::sync::Arc::new(LazyTables::new(Some(FreqSource::SchemasDir(dir))));
+        self.tables_mut().freq_source = Some(FreqSource::SchemasDir(dir));
         self
     }
 
     /// 注入**已加载的**拼音词库作为词频来源。测试与探针走这个。
     pub fn with_pinyin_dict(mut self, dict: std::sync::Arc<CachedDict>) -> Self {
-        self.tables = std::sync::Arc::new(LazyTables::new(Some(FreqSource::Dict(dict))));
+        self.tables_mut().freq_source = Some(FreqSource::Dict(dict));
+        self
+    }
+
+    /// 挂语法模型文件（预热线程里打开）。`weight <= 0` 等于不挂。生产路径走这个。
+    pub fn with_grammar_file(mut self, path: std::path::PathBuf, weight: f64) -> Self {
+        self.tables_mut().grammar_source =
+            (weight > 0.0).then_some(GrammarSource::File { path, weight });
+        self
+    }
+
+    /// 挂已就绪的语法模型。测试与探针走这个。
+    pub fn with_grammar(mut self, grammar: Arc<dyn Grammar>) -> Self {
+        self.tables_mut().grammar_source = Some(GrammarSource::Ready(grammar));
         self
     }
 
@@ -553,9 +781,11 @@ impl CodeSentenceDecoder {
                 let t0 = std::time::Instant::now();
                 tables.index(&dm);
                 let with_freq = tables.freq_table(&dm).is_some();
+                let with_grammar = tables.grammar_viterbi().is_some();
                 tracing::info!(
                     ms = t0.elapsed().as_millis(),
                     with_freq,
+                    with_grammar,
                     "码表整句：后台预热完成"
                 );
             });
@@ -579,11 +809,21 @@ impl CodeSentenceDecoder {
     /// 2. 没有 ⇒ 退回原方案：简码换成全码位置的权重（[`ShortCodeIndex`]），
     ///    再用 [`trusted_weight`] 把「带」落回中性值。功能可用，但 §11.4 记的那些
     ///    错例会回来。
-    fn weight_of(&self, dm: &DictManager, code: &str, text: &str, raw: i32) -> (i32, f64, bool) {
+    ///
+    /// 用户词 / 临时词在拼音库查不到时不按 [`OOV_FREQ`] 计价，而是给
+    /// [`SentenceFreq::user_floor`]，理由见那里。
+    fn weight_of(&self, dm: &DictManager, code: &str, hit: &Candidate) -> (i32, f64, bool) {
+        let (text, raw) = (hit.text.as_str(), hit.weight);
         // 「是不是简码」两条路都要问：惩罚与词频是两件事。
         let is_short = self.index(dm).resolve(code, text, raw).1;
         match self.freq_table(dm) {
-            Some(f) => (f.get(text), PINYIN_DICT_TOTAL, is_short),
+            Some(f) => {
+                let mut w = f.get(text);
+                if w == OOV_FREQ && (hit.meta.is_user_dict || hit.meta.is_temp_dict) {
+                    w = f.user_floor();
+                }
+                (w, PINYIN_DICT_TOTAL, is_short)
+            }
             None => {
                 let (w, _) = self.index(dm).resolve(code, text, raw);
                 (trusted_weight(w), CODE_DICT_TOTAL, is_short)
@@ -608,21 +848,31 @@ impl CodeSentenceDecoder {
     fn build_nodes(&self, input: &str, dm: &DictManager) -> Vec<Vec<WordNode>> {
         let bytes = input.len();
         let mut nodes: Vec<Vec<WordNode>> = vec![Vec::new(); bytes + 1];
+        let compose = self.freq_table(dm).filter(|f| !f.compose.is_empty());
+        // 组词的原料：每条编码单元边连同它的简码罚（组出的词要继承这份罚，见 `add_composed_nodes`）。
+        let mut units: Vec<Unit> = Vec::new();
 
         // 码恒为 ASCII，故字节位置即字符位置，可直接切片。
         for p in 0..bytes {
             for q in (p + 1)..=(p + self.max_code_length).min(bytes) {
                 let code = &input[p..q];
                 for hit in dm.search(code, MAX_HOMOGRAPHS) {
-                    let (weight, total, is_short) = self.weight_of(dm, code, &hit.text, hit.weight);
-                    let mut log_prob = score_code_node(weight, total);
-                    if is_short {
-                        // 串尾轻罚、串中重罚——见两个常量的文档。
-                        log_prob -= if q == bytes {
-                            SHORT_CODE_TAIL_PENALTY
-                        } else {
-                            SHORT_CODE_PENALTY
-                        };
+                    let (weight, total, is_short) = self.weight_of(dm, code, &hit);
+                    // 串尾轻罚、串中重罚——见两个常量的文档。
+                    let penalty = match (is_short, q == bytes) {
+                        (false, _) => 0.0,
+                        (true, true) => SHORT_CODE_TAIL_PENALTY,
+                        (true, false) => SHORT_CODE_PENALTY,
+                    };
+                    let log_prob = score_code_node(weight, total) - penalty;
+                    if compose.is_some() {
+                        units.push(Unit {
+                            start: p,
+                            end: q,
+                            text: hit.text.clone(),
+                            log_prob,
+                            penalty,
+                        });
                     }
                     nodes[q].push(WordNode {
                         start: p,
@@ -636,6 +886,9 @@ impl CodeSentenceDecoder {
                     });
                 }
             }
+        }
+        if let Some(f) = compose {
+            add_composed_nodes(&mut nodes, &units, f);
         }
         nodes
     }
@@ -657,19 +910,107 @@ impl CodeSentenceDecoder {
     /// 对齐 librime `Poet::MakeSentenceWithStrategy` 的
     /// `if (start_pos == 0 && end_pos == total_length) continue;`——整串本身若在码表里
     /// 有词，那条候选由精确/前缀路径产出，整句不重复产，否则同一个词会以两种身份
-    /// 进候选列表再被去重逻辑合并。
+    /// 进候选列表再被去重逻辑合并。**例外**是词典组词出的单词解，见 [`Self::accepts`]。
     pub fn decode(&self, input: &str, dm: &DictManager) -> Option<SentenceResult> {
+        self.decode_nbest(input, dm, 1).into_iter().next()
+    }
+
+    /// 至多 `k` 条整句解，按名次排好、已按文本去重。`k <= 1` 等价于 [`Self::decode`]。
+    ///
+    /// # 挂了语法模型时怎么出备选
+    ///
+    /// [`ViterbiDecoder::decode_nbest`] 在有语法模型时只给一条（理由见那里：beam 按末词分组，
+    /// 前几条往往只差最后一个词）。故名次 1 取**挂模型**的解，名次 2 起取**不挂模型**的
+    /// N-best 补位、与名次 1 同文的跳过。实测这样拼出来的前 3 / 前 5 与纯无模型 N-best
+    /// 几乎一样高，首选却是挂模型的那个（词组最短码：前 3 86.1% vs 76.1%）。
+    ///
+    /// # 手动分隔符
+    ///
+    /// 输入含分隔符时只出一条：各段独立解码，段间的 N-best 组合是乘积级的，而用户敲分隔符
+    /// 本就是在消歧——此时再给备选意义不大。
+    pub fn decode_nbest(&self, input: &str, dm: &DictManager, k: usize) -> Vec<SentenceResult> {
         if input.is_empty() || !input.is_ascii() {
-            return None;
+            return Vec::new();
         }
+        if input.contains(SPLIT_SEPARATOR) {
+            return self.decode_with_separators(input, dm).into_iter().collect();
+        }
+        let k = k.max(1);
+        let len = input.len();
+        let nodes = self.build_nodes(input, dm);
+        let mut out: Vec<SentenceResult> = Vec::new();
+        let take = |r: ViterbiResult, out: &mut Vec<SentenceResult>| {
+            if !self.accepts(&r, len) {
+                return;
+            }
+            let text = r.words.concat();
+            if out.iter().any(|o| o.text == text) {
+                return;
+            }
+            out.push(SentenceResult {
+                text,
+                words: r.words,
+                log_prob: r.log_prob,
+                boundary: if len <= 64 { r.boundary | 1 } else { 0 },
+            });
+        };
+        // 最优解若是「一个码表词条覆盖整串」，整串就是个词，不该再拿次优解冒充整句。
+        let whole_word = |r: &ViterbiResult| {
+            r.log_prob.is_finite() && r.words.len() == 1 && len <= self.max_code_length
+        };
+        if let Some(g) = self.tables.grammar_viterbi() {
+            let r = g.decode(&nodes, len);
+            if whole_word(&r) {
+                return Vec::new();
+            }
+            take(r, &mut out);
+        }
+        if out.len() < k {
+            // 语法解已占了名次 1 时多要一条：它可能与无模型的某条同文（解码器已按文本去重，
+            // 但管不到语法解）。没有语法解时恰好要 k 条——k = 1 就走 Viterbi 的单路径 DP，
+            // 与改动前逐位相同的那条零回归路径。
+            let want = if out.is_empty() { k } else { k + 1 };
+            for (i, r) in self
+                .viterbi
+                .decode_nbest(&nodes, len, want)
+                .into_iter()
+                .enumerate()
+            {
+                if i == 0 && out.is_empty() && whole_word(&r) {
+                    return Vec::new();
+                }
+                take(r, &mut out);
+                if out.len() >= k {
+                    break;
+                }
+            }
+        }
+        out.truncate(k);
+        out
+    }
+
+    /// 这条解能不能当整句：覆盖整串，且不是「一个码表词条就覆盖了整串」。
+    ///
+    /// 单词解只在**超码长**时放行——码表词条的码不超过满码长，超码长还能一个词覆盖整串的，
+    /// 必是词典组词边（`hcigaawt` → 「皮衣工作」之外，逐字打出的「喃喃自语」）。它在精确路径
+    /// 上产不出来，排除它就是把这条候选整个弄丢。
+    fn accepts(&self, r: &ViterbiResult, len: usize) -> bool {
+        r.log_prob.is_finite()
+            && !r.words.is_empty()
+            && (r.words.len() >= 2 || len > self.max_code_length)
+    }
+
+    /// 含手动分隔符的输入：各段独立解码后拼接。
+    fn decode_with_separators(&self, input: &str, dm: &DictManager) -> Option<SentenceResult> {
         let mut words: Vec<String> = Vec::new();
         let mut log_prob = 0.0f64;
         let mut boundary = 0u64;
         let expressible = input.len() <= 64;
 
         // 手动分隔符把输入切成若干**硬边界**段，各段独立解码后拼起来。
-        // 无分隔符时这个循环只跑一趟，与改造前逐字节同构。
         let mut offset = 0usize;
+        // 最长一段的码长：只有一个词时据此套 `accepts` 的超码长放行（组词出的单词解）。
+        let mut longest_seg = 0usize;
         for seg in input.split(SPLIT_SEPARATOR) {
             if seg.is_empty() {
                 // 连续分隔符 / 首尾分隔符：跳过。用户多敲一下不该让整句失败。
@@ -677,6 +1018,7 @@ impl CodeSentenceDecoder {
                 continue;
             }
             let r = self.decode_segment(seg, dm)?;
+            longest_seg = longest_seg.max(seg.len());
             if expressible {
                 // 段内 boundary 相对段起点，左移到全串空间；段起点本身也是一个切分点。
                 boundary |= r.boundary << offset;
@@ -689,8 +1031,9 @@ impl CodeSentenceDecoder {
 
         // ★ **「至少两个词」是整体判据，不是段级判据**：`aawt'aawt` 每段恰好一个词，
         //   正是用户敲分隔符时最典型的形态。段级判会把它整个否掉。
-        //   （无分隔符时两者等价，所以改造前放在段级也没露馅。）
-        if words.len() < 2 {
+        //   单词解与无分隔符时同一条规矩（见 `accepts`）：`hcigaawt'` 多敲的尾部分隔符
+        //   不该让组词出的单词整句消失。
+        if words.is_empty() || (words.len() < 2 && longest_seg <= self.max_code_length) {
             return None;
         }
         Some(SentenceResult {
@@ -710,8 +1053,125 @@ impl CodeSentenceDecoder {
     /// 会把部分解误判为有解。
     fn decode_segment(&self, seg: &str, dm: &DictManager) -> Option<ViterbiResult> {
         let nodes = self.build_nodes(seg, dm);
-        let r = self.viterbi.decode(&nodes, seg.len());
+        let viterbi = self.tables.grammar_viterbi().unwrap_or(&self.viterbi);
+        let r = viterbi.decode(&nodes, seg.len());
         r.log_prob.is_finite().then_some(r)
+    }
+}
+
+/// 一条编码单元边（组词的原料）。
+struct Unit {
+    start: usize,
+    end: usize,
+    text: String,
+    log_prob: f64,
+    /// 这条边吃的简码罚（0 = 全码）。
+    penalty: f64,
+}
+
+/// 词典组词：2~[`COMPOSE_MAX_UNITS`] 个相邻编码单元拼出的文本若是词，补一条跨这些单元的词边。
+///
+/// # 为什么需要
+///
+/// 码表整句的边只来自码表词条，码表没收的词只能逐字成边，各字按**单字**词频各算各的——
+/// 解码器看不出「这几个字连起来是个词」，于是常被别的切法压过。实测（3000 句）：
+///
+/// | 打法 | 无组词 | 有组词 |
+/// |---|---|---|
+/// | 逐字最短码 | 7.7% | 70.4% |
+/// | 逐字全码 | 83.5% | 98.6% |
+/// | 词组最短码 | 56.8% | 75.2% |
+///
+/// # 怎么打分
+///
+/// 组出的词按它**自己的**词频打分（同一个 `score_code_node`，同一份每边罚），再扣掉各组成
+/// 单元的简码罚之和：简码罚表达的是「这个字母可能本该属于别的码」，它不会因为拼出了词就消失。
+///
+/// 组成单元的边原样保留：组词是多给解码器一个选项，不替它做决定。
+fn add_composed_nodes(nodes: &mut [Vec<WordNode>], units: &[Unit], freq: &SentenceFreq) {
+    let bytes = nodes.len() - 1;
+    // 每个跨度只留分最高的 COMPOSE_PER_SPAN 条，按起点分桶。
+    let mut order: Vec<usize> = (0..units.len()).collect();
+    order.sort_by(|&a, &b| units[b].log_prob.total_cmp(&units[a].log_prob));
+    let mut span_taken: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut by_start: Vec<Vec<usize>> = vec![Vec::new(); bytes + 1];
+    for i in order {
+        let n = span_taken
+            .entry((units[i].start, units[i].end))
+            .or_insert(0);
+        if *n < COMPOSE_PER_SPAN {
+            *n += 1;
+            by_start[units[i].start].push(i);
+        }
+    }
+
+    struct Partial {
+        end: usize,
+        text: String,
+        penalty: f64,
+        units: usize,
+        /// 各单元起点相对组词起点的 bitmask（组合区按单元切分显示用）。
+        mask: u64,
+    }
+    let mut stack: Vec<Partial> = Vec::new();
+    for start in 0..bytes {
+        stack.extend(by_start[start].iter().map(|&i| Partial {
+            end: units[i].end,
+            text: units[i].text.clone(),
+            penalty: units[i].penalty,
+            units: 1,
+            mask: 1,
+        }));
+        while let Some(p) = stack.pop() {
+            if p.units >= 2
+                && let Some(f) = freq.compose_freq(&p.text)
+            {
+                let log_prob = score_code_node(f, PINYIN_DICT_TOTAL) - p.penalty;
+                let node = WordNode {
+                    start,
+                    end: p.end,
+                    word: p.text.clone(),
+                    syl_mask: p.mask,
+                    log_prob,
+                    canon: None,
+                };
+                // 同跨度同文可由不同单元组合拼出（`甲|乙丙` 与 `甲乙|丙`），简码罚与切法都可能
+                // 不同：留分最高的那条。码表词条本身的边同样参与比较。
+                match nodes[p.end]
+                    .iter_mut()
+                    .find(|w| w.start == start && w.word == p.text)
+                {
+                    Some(w) if w.log_prob < log_prob => *w = node,
+                    Some(_) => {}
+                    None => nodes[p.end].push(node),
+                }
+            }
+            if p.units >= COMPOSE_MAX_UNITS
+                || p.text.chars().count() >= COMPOSE_MAX_CHARS
+                || p.end >= bytes
+            {
+                continue;
+            }
+            let rel = p.end - start;
+            for &i in &by_start[p.end] {
+                let u = &units[i];
+                let text = format!("{}{}", p.text, u.text);
+                if !freq.compose.has_prefix(&text) {
+                    continue;
+                }
+                stack.push(Partial {
+                    end: u.end,
+                    text,
+                    penalty: p.penalty + u.penalty,
+                    units: p.units + 1,
+                    mask: if rel < 64 {
+                        p.mask | (1 << rel)
+                    } else {
+                        p.mask
+                    },
+                });
+            }
+        }
     }
 }
 
@@ -1044,6 +1504,201 @@ mod tests {
         let dm = dm();
         let input = format!("aa{SEP}zz");
         assert!(decoder().decode(&input, &dm).is_none());
+    }
+
+    /// 拼音词库替身：`(text, 词频)`，码无所谓（`SentenceFreq` 按 text 查）。
+    fn pinyin_dict(entries: &[(&str, i32)]) -> std::sync::Arc<CachedDict> {
+        let mut d = wind_dict::codetable::CodetableDict::empty();
+        for (i, (t, w)) in entries.iter().enumerate() {
+            d.merge_single(format!("py{i}"), t.to_string(), *w, i as _);
+        }
+        std::sync::Arc::new(CachedDict::Memory(d))
+    }
+
+    /// 组词夹具：五个单字，全是全码（都没有更长的码）。
+    ///
+    /// `aabbcc` 有两种切法：`甲|乙|丙`（3 条边）与 `丁|戊`（2 条边）。单字词频相同，
+    /// 每边罚让 2 条边的那种赢——除非解码器知道「甲乙」是个词。
+    fn compose_dm() -> DictManager {
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(MemLayer::new(&[
+            ("aa", "甲", 500),
+            ("bb", "乙", 500),
+            ("cc", "丙", 500),
+            ("aab", "丁", 500),
+            ("bcc", "戊", 500),
+        ])));
+        dm
+    }
+
+    const CHARS: [(&str, i32); 5] = [
+        ("甲", 10_000),
+        ("乙", 10_000),
+        ("丙", 10_000),
+        ("丁", 10_000),
+        ("戊", 10_000),
+    ];
+
+    #[test]
+    fn composes_lexicon_word_across_char_units() {
+        // ★ 词典组词的核心行为：码表里没有「甲乙」，逐字打出来也要认得它是个词。
+        let dm = compose_dm();
+        let with_word = [&CHARS[..], &[("甲乙", 500_000)]].concat();
+        let r = decoder()
+            .with_pinyin_dict(pinyin_dict(&with_word))
+            .decode("aabbcc", &dm)
+            .expect("应有整串解");
+        assert_eq!(r.words, vec!["甲乙", "丙"]);
+        // 组出的词在组合区仍按**编码单元**切分：用户打的是三个码，不是两个。
+        assert_eq!(r.split_code("aabbcc"), "aa@bb@cc".replace('@', SEP));
+
+        // 对照：拼音库里没有这个词 ⇒ 不组词，每边罚让 2 条边的切法赢。
+        // 没有这条，「无条件把相邻单字拼起来」的实现同样能让上面变绿。
+        let r = decoder()
+            .with_pinyin_dict(pinyin_dict(&CHARS))
+            .decode("aabbcc", &dm)
+            .expect("应有整串解");
+        assert_eq!(r.words, vec!["丁", "戊"]);
+    }
+
+    #[test]
+    fn composed_word_may_cover_whole_input() {
+        // 超码长时一个词覆盖整串也要放行：它只能是组词边，精确路径产不出来，
+        // 照「排除单词解」的老规矩就是把这条候选整个弄丢（逐字打「喃喃自语」的实测现场）。
+        let dm = compose_dm();
+        let with_word = [&CHARS[..], &[("甲乙丙", 500_000)]].concat();
+        let r = decoder()
+            .with_pinyin_dict(pinyin_dict(&with_word))
+            .decode("aabbcc", &dm)
+            .expect("应有整串解");
+        assert_eq!(r.words, vec!["甲乙丙"]);
+    }
+
+    #[test]
+    fn trailing_separator_keeps_composed_single_word() {
+        // 无分隔符能出的组词单词解，多敲一个尾部分隔符（冗余，本该被容忍）不能让它消失。
+        let dm = compose_dm();
+        let with_word = [&CHARS[..], &[("甲乙丙", 500_000)]].concat();
+        let dec = decoder().with_pinyin_dict(pinyin_dict(&with_word));
+        let input = format!("aabbcc{SEP}");
+        let r = dec.decode(&input, &dm).expect("尾部分隔符不应让整句消失");
+        assert_eq!(r.words, vec!["甲乙丙"]);
+        // 对照：码长内的单词解仍按老规矩排除（那是码表词条，精确路径会出）。
+        assert!(dec.decode(&format!("aawt{SEP}"), &self::dm()).is_none());
+    }
+
+    #[test]
+    fn missing_grammar_file_falls_back_to_plain_decoding() {
+        // 定制版可能删掉模型文件：打不开就按无模型解码，结果与不挂模型逐条相同。
+        let dm = dm();
+        let plain = decoder().decode_nbest("aawtaawt", &dm, 3);
+        let missing = decoder()
+            .with_grammar_file("/nonexistent/wanxiang-mini.gram".into(), 0.5)
+            .decode_nbest("aawtaawt", &dm, 3);
+        let texts = |v: &[SentenceResult]| v.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&missing), texts(&plain));
+    }
+
+    /// 只出用户词的层：candidate 带 `is_user_dict`，与生产 `StoreUserLayer` 经 composite 后的形态一致。
+    struct UserLayer(MemLayer);
+
+    impl DictLayer for UserLayer {
+        fn name(&self) -> &str {
+            "user"
+        }
+        fn layer_type(&self) -> LayerType {
+            LayerType::User
+        }
+        fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
+            let mut v = self.0.search(code, limit);
+            for c in &mut v {
+                c.meta.is_user_dict = true;
+            }
+            v
+        }
+        fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<Candidate> {
+            self.0.search_prefix(prefix, limit)
+        }
+        fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {
+            self.0.for_each_entry(f)
+        }
+    }
+
+    #[test]
+    fn user_word_missing_from_lexicon_gets_floor_frequency() {
+        // 用户造的词（人名、新词）多半不在拼音库里。按「罕见」计价，它在整句里永远输给
+        // 逐字拆开；给它组词表的入表门槛作下限，才能赢回来。
+        //
+        // 竞争者：`xxyy` 也能切成两个高频字「子」+「丑」。
+        let entries: &[(&str, &str, i32)] =
+            &[("xx", "子", 500), ("yy", "丑", 500), ("zz", "寅", 500)];
+        let py = pinyin_dict(&[
+            ("子", 100_000),
+            ("丑", 100_000),
+            ("寅", 100_000),
+            // 组词表里唯一的词 ⇒ 入表门槛 = 它的词频。
+            ("别的词", 50_000),
+        ]);
+        let run = |user: bool| {
+            let dm = DictManager::new();
+            dm.register_layer(Box::new(MemLayer::new(entries)));
+            let word = MemLayer::new(&[("xxyy", "盖伦", 100)]);
+            if user {
+                dm.register_layer(Box::new(UserLayer(word)));
+            } else {
+                dm.register_layer(Box::new(word));
+            }
+            decoder()
+                .with_pinyin_dict(py.clone())
+                .decode("xxyyzz", &dm)
+                .expect("应有整串解")
+                .words
+        };
+        assert_eq!(run(true), vec!["盖伦", "寅"], "用户词应拿到词频下限");
+        // 对照：同一条词条不是用户词 ⇒ 仍按罕见计价，输给逐字拆开。
+        assert_eq!(run(false), vec!["子", "丑", "寅"]);
+    }
+
+    #[test]
+    fn nbest_returns_distinct_ranked_alternatives() {
+        let dm = dm();
+        let rs = decoder().decode_nbest("aawtaawt", &dm, 3);
+        assert!(rs.len() >= 2, "应有备选，实得 {}", rs.len());
+        assert_eq!(rs[0].text, "工作工作", "名次 1 与单条解码一致");
+        let mut texts: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
+        texts.dedup();
+        assert_eq!(texts.len(), rs.len(), "按文本去重");
+        assert!(
+            rs.windows(2).all(|w| w[0].log_prob >= w[1].log_prob),
+            "按分数降序"
+        );
+        assert!(decoder().decode_nbest("aawtaawt", &dm, 1).len() == 1);
+    }
+
+    /// 把「工作」罚到出局的语法模型。
+    struct HateGongzuo;
+
+    impl Grammar for HateGongzuo {
+        fn query(&self, _context: &str, word: &str, _is_rear: bool) -> f64 {
+            if word == "工作" { -100.0 } else { 0.0 }
+        }
+    }
+
+    #[test]
+    fn grammar_picks_rank_one_and_plain_nbest_fills_the_rest() {
+        // 挂模型时 Viterbi 的 N-best 只给一条，备选由无模型解码补位。
+        let dm = dm();
+        let plain = decoder().decode("aawtaawt", &dm).expect("应有解").text;
+        assert_eq!(plain, "工作工作");
+        let rs = decoder()
+            .with_grammar(std::sync::Arc::new(HateGongzuo))
+            .decode_nbest("aawtaawt", &dm, 3);
+        assert_ne!(rs[0].text, plain, "名次 1 应来自挂模型的解码");
+        assert_eq!(
+            rs.get(1).map(|r| r.text.as_str()),
+            Some(plain.as_str()),
+            "名次 2 起是无模型的最优解"
+        );
     }
 
     #[test]

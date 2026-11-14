@@ -238,7 +238,14 @@ impl Coordinator {
                 .temp_english
                 .show_candidates
                 .then(|| "english".to_string()),
-            _ => None,
+            None
+            | Some(
+                ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => None,
         }
     }
 
@@ -1614,7 +1621,11 @@ impl Coordinator {
                 let Ok(id) = e.file_name().into_string() else {
                     continue;
                 };
-                if id.starts_with('_') || !dir.join(&id).join("theme.toml").exists() {
+                // 非普通 slug 的目录（旧版在 Linux/mac 上建出的尾随空格/点之类）列出来也选不了。
+                if id.starts_with('_')
+                    || !wind_theme::is_plain_slug(&id)
+                    || !dir.join(&id).join("theme.toml").exists()
+                {
                     continue;
                 }
                 // 定制版 `[themes] hide` 删掉的主题：在本定制版里**不存在**（见
@@ -1654,7 +1665,10 @@ impl Coordinator {
                     let Ok(id) = e.file_name().into_string() else {
                         continue;
                     };
-                    if id.starts_with('_') || !udir.join(&id).join("theme.toml").exists() {
+                    if id.starts_with('_')
+                        || !wind_theme::is_plain_slug(&id)
+                        || !udir.join(&id).join("theme.toml").exists()
+                    {
                         continue;
                     }
                     // hide 是**绝对**的：用户层放一个同名主题也不会让它复活（见
@@ -1886,6 +1900,7 @@ impl Coordinator {
             // 切过来的方案有段被降级 ⇒ 现在说，别等用户自己发现「这个方案某项设置没反应」。
             // 落在切换成功之后：加载失败已由上面的 `show_tip` 交代，两条提示不会撞。
             self.notify_schema_degradation(schema_id);
+            self.warn_schema_sentence_cycle_conflict(schema_id);
         } else {
             // 走到这里说明 `ensure_schema` 之后 `switch_schema` 仍返回 false ——
             // 它只剩「已是当前方案」这一个理由，而那已被上面的幂等分支接走。
@@ -2093,6 +2108,7 @@ impl Coordinator {
         // `comment_of` 的查询期求值），切方案不改变该挂载什么。见 `sync_comment_dicts`。
         self.invalidate_aux_code_table(); // 辅助码表各方案不同，切方案必须重挂（见函数注释）
         self.warm_aux_code_sources(); // 新方案的辅助码来源方案后台预热（门卫要求索引已就绪）
+        self.engine_mgr.warm_hot_schema_fields(); // 新方案的按键路径字段先填缓存
         // ── 归位到「能用新方案打字」的状态：无条件，不受任何配置门控 ──────────────
         //
         // 切方案的语义前提就是「我要用这个方案打字」，而英文半角与 CapsLock 开启这两种
@@ -2803,10 +2819,14 @@ impl Coordinator {
                         phrase_only,
                     );
                     let want_variants = te.case_variants && !phrase_only;
+                    // mix 文本缓冲恒小写：大小写跟随在这里无事可做（见上）。
+                    let blocked = self.blocked_words_in(&self.engine_mgr.data_schema_id(member));
                     let want_raw = crate::english_candidates::wants_raw_candidate(
                         raw_mode,
                         &state.mix_buffer,
                         &member_cands,
+                        blocked.as_deref(),
+                        false,
                     );
                     let heads = crate::english_candidates::english_head_candidates(
                         &state.mix_buffer,
@@ -2932,8 +2952,16 @@ impl Coordinator {
             let mix_member_owner = Some(EN.to_string());
             let recalled = self.english_freq_recall(mix_member_owner.as_deref(), &dict, &code);
             dict.extend(recalled);
-            self.apply_freq_rerank_in(mix_member_owner.as_deref(), &mut dict, &code);
-            self.apply_shadow_in(mix_member_owner.as_deref(), &mut dict, &code);
+            self.run_passes(
+                state,
+                &mut dict,
+                crate::postprocess::profile::MIX_ENGLISH_SEGMENT,
+                &crate::postprocess::PassCtx {
+                    owner: mix_member_owner.as_deref(),
+                    freq_code: Some(&code),
+                    shadow_code: Some(&code),
+                },
+            );
             if te.case_follow_input {
                 cased = crate::english_candidates::apply_english_case(
                     &mut dict,
@@ -2948,7 +2976,14 @@ impl Coordinator {
             RawCandidateMode::InDict if !queried => RawCandidateMode::Always,
             m => m,
         };
-        let raw_pinned = crate::english_candidates::wants_raw_candidate(raw_mode, raw, &dict);
+        let blocked = self.blocked_words_in(&self.engine_mgr.data_schema_id(EN));
+        let raw_pinned = crate::english_candidates::wants_raw_candidate(
+            raw_mode,
+            raw,
+            &dict,
+            blocked.as_deref(),
+            te.case_follow_input,
+        );
         // 变形还要求词库真的查过，同临英 `want_variants`：候选关着时变形冒出来，原文又不出，
         // 首格就成了变形、空格上屏一个用户没打的形态。此时段为空，落到下方的补位原文。
         let head = crate::english_candidates::english_head_candidates(
@@ -3636,7 +3671,8 @@ impl Coordinator {
                         // 小键盘（direct）无高亮候选：维持既有口径（同主路 `commit_highlight_then_char`）。
                         self.maybe_convert(state, &state.committed_text.clone())
                     };
-                    let punct = self.convert_punct_char(state, ch);
+                    // 标点紧跟在被顶出的那段后面：「英文后」看它（快捷输入里的英文词）。
+                    let punct = self.convert_punct_after(state, ch, 0, &head);
                     // 标点恒在此按 `Punctuation` 单独记（同临英 ⑥）。有高亮候选时上方已记候选段、
                     // 顶层兜底随之跳过，不记就漏；无候选时（只剩已转换前缀 / 空缓冲）也显式记——
                     // 前缀在分步选中时已记过，交给兜底会把「前缀+标点」整串再按「候选」记一遍。

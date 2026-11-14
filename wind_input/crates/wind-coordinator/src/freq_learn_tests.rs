@@ -502,7 +502,7 @@ fn freq_lookup_uses_candidate_code_not_input_buffer() {
 
     // ② 再次按击键缓冲取候选时，词频须读得到 → 「思源」软置前。
     let mut cands = vec![mk("寺院"), mk("思源")];
-    c.apply_freq_rerank(&mut cands, "siyr");
+    c.apply_freq_rerank_in(None, &mut cands, "siyr");
     assert_eq!(
         cands[0].text,
         "思源",
@@ -534,7 +534,7 @@ fn mixed_freq_rerank_reads_sub_schema() {
         mk("他", "aaaa", CandidateSource::CodeTable),
         mk("工", "aaaa", CandidateSource::CodeTable),
     ];
-    c.apply_freq_rerank(&mut ct_cands, "aaaa");
+    c.apply_freq_rerank_in(None, &mut ct_cands, "aaaa");
     assert_eq!(
         ct_cands[0].text, "工",
         "码表候选应按 primary(ct_test) 词频提权"
@@ -545,7 +545,7 @@ fn mixed_freq_rerank_reads_sub_schema() {
         mk("你", "nihao", CandidateSource::Pinyin),
         mk("好", "nihao", CandidateSource::Pinyin),
     ];
-    c.apply_freq_rerank(&mut py_cands, "nihao");
+    c.apply_freq_rerank_in(None, &mut py_cands, "nihao");
     assert_eq!(py_cands[0].text, "好", "拼音候选应按 pinyin 词频提权");
 }
 

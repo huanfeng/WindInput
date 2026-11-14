@@ -8,7 +8,7 @@
 
 use crate::palette::{Rgba, parse_hex, resolve_palette};
 use crate::rvnode::{
-    DEFAULT_ACCENT_BAR_HEIGHT_RATIO, RvEdges, RvGradient, RvImage, RvNode, RvViews,
+    DEFAULT_ACCENT_BAR_HEIGHT_RATIO, Flip, RvEdges, RvGradient, RvImage, RvNode, RvViews,
 };
 use crate::schema::{Ld, Theme, ViewGradient, ViewImage, ViewNode, Views};
 use std::collections::HashMap;
@@ -60,11 +60,16 @@ pub struct Resolved {
     pub behavior: ResolvedBehavior,
     /// 图片资源：名→绝对路径 / data: URI（相对路径已按 theme 目录解析，按 is_dark 选变体）。
     pub resources: HashMap<String, String>,
+    /// 暗色求值时，亮暗两侧路径不同的资源 → 亮色那侧的路径（同 [`Self::resources`] 已解析）。
+    /// 亮色求值时为空。皮肤据此校验亮暗两图尺寸一致，不一致改用亮色图。
+    pub light_resources: HashMap<String, String>,
     /// 资产搜索目录（self + base 链）：用于视图节点里**字面** image ref（如 _base 的 chevron.svg，
     /// 不在 resources 注册表）解析为绝对路径——派生主题继承 base 的图标需到 base 目录查找。
     pub asset_dirs: Vec<std::path::PathBuf>,
     /// 任务栏语言栏图标主字色（token `langbar_text_cn` / `langbar_text_en`）。
     pub langbar_text: LangbarTextColors,
+    /// 异形皮肤；None = 未配（或没有可用变体）。
+    pub skin: Option<Box<crate::skin::RvSkin>>,
 }
 
 /// 任务栏语言栏图标主字色，四格独立。
@@ -144,6 +149,13 @@ fn to_rv_image(im: &ViewImage, palette: &HashMap<String, Rgba>, is_dark: bool) -
         h: im.size.h,
         tint: resolve_color(im.tint.as_ref(), palette, is_dark),
         disabled_tint: resolve_color(im.disabled_tint.as_ref(), palette, is_dark),
+        flip: match im.flip.as_deref() {
+            None => Flip::NONE,
+            Some(s) => Flip::parse(s).unwrap_or_else(|| {
+                tracing::warn!("主题图片 flip 取值非法 {s:?}（只认 x / y / xy），按不翻");
+                Flip::NONE
+            }),
+        },
     }
 }
 
@@ -397,6 +409,16 @@ pub fn resolve(theme: &Theme, is_dark: bool, asset_dirs: &[std::path::PathBuf]) 
                 .map(|p| (name.clone(), resolve_image_path(p, theme_dir)))
         })
         .collect();
+    let light_resources = theme
+        .resources
+        .iter()
+        .filter(|_| is_dark)
+        .filter_map(|(name, ref_ld)| {
+            let light = ref_ld.select(false)?;
+            (Some(light) != ref_ld.select(true))
+                .then(|| (name.clone(), resolve_image_path(light, theme_dir)))
+        })
+        .collect();
 
     Resolved {
         is_dark,
@@ -405,8 +427,14 @@ pub fn resolve(theme: &Theme, is_dark: bool, asset_dirs: &[std::path::PathBuf]) 
         views_vertical,
         behavior,
         resources,
+        light_resources,
         asset_dirs: asset_dirs.to_vec(),
         langbar_text: resolve_langbar_text(theme.colors.as_ref()),
+        skin: theme
+            .skin
+            .as_deref()
+            .and_then(crate::skin::resolve_skin)
+            .map(Box::new),
     }
 }
 
@@ -1042,6 +1070,53 @@ background = { image = { ref = \"q.png\", mode = \"nine_slice\" } }
         assert_eq!(item.slice_repeat, [false, false]);
     }
 
+    /// `flip` 走到背景图、图层与翻页箭头；非法值按不翻，不连累整份主题。
+    #[test]
+    fn flip_reaches_bg_image_layers_and_arrows() {
+        let text = "\
+[window]
+background = { image = { ref = \"p.png\", flip = \"x\" } }
+layers = [{ ref = \"a.png\", flip = \"y\" }, { ref = \"b.png\", flip = \"xy\" }, { ref = \"c.png\" }]
+
+[item]
+background = { image = { ref = \"q.png\", flip = \"z\" } }
+
+[footer_bar]
+prev_image = { ref = \"prev.svg\", flip = \"x\" }
+";
+        let value: toml::Value = toml::from_str(text).unwrap();
+        let theme: Theme = crate::normalize::normalize_theme(value).try_into().unwrap();
+        let v = resolve(&theme, false, &[data_dir()]).views;
+        let x = Flip { x: true, y: false };
+        assert_eq!(v.window.bg_image.expect("窗口背景图").flip, x);
+        let layers: Vec<Flip> = v.window.layers.iter().map(|l| l.flip).collect();
+        assert_eq!(
+            layers,
+            [
+                Flip { x: false, y: true },
+                Flip { x: true, y: true },
+                Flip::NONE
+            ]
+        );
+        assert_eq!(
+            v.item.bg_image.expect("item 背景图").flip,
+            Flip::NONE,
+            "非法值按不翻"
+        );
+        assert_eq!(v.footer_bar.prev_image.expect("翻页箭头").flip, x);
+    }
+
+    #[test]
+    fn flip_names_round_trip() {
+        for s in ["x", "y", "xy"] {
+            assert_eq!(Flip::parse(s).and_then(Flip::name), Some(s));
+        }
+        assert_eq!(Flip::NONE.name(), None);
+        for bad in ["", "X", "yx", "both", "none"] {
+            assert_eq!(Flip::parse(bad), None, "{bad:?}");
+        }
+    }
+
     /// 分隔线节点：颜色缺省取调色板 `separator`，`[divider]` 可覆盖颜色 / 线粗 / 开关。
     #[test]
     fn divider_defaults_to_separator_and_can_be_overridden() {
@@ -1225,6 +1300,10 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                 .unwrap()
                 .ends_with("panel-dark.png")
         );
+        // 暗色另记亮色那侧（皮肤校验亮暗尺寸用）；亮色求值不记，亮暗同图的键也不记。
+        assert!(d.light_resources["panel"].ends_with("panel.png"));
+        assert!(!d.light_resources.contains_key("mark"));
+        assert!(r.light_resources.is_empty());
         // 其它窗口也吃九宫格
         let status = r.views.status.as_ref().expect("status rvnode");
         assert!(status.bg_image.is_some());

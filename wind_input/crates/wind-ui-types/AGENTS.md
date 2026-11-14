@@ -11,6 +11,7 @@
 |------|-------------|
 | `src/command.rs` | `UiCommand`（44 变体）+ `GlobalHotkeyEntry` + `HOVER_PAGE_*`；`#[cfg(windows)] HostRenderArc` 是唯一平台载荷 |
 | `src/event.rs` | `UiEvent`（渲染端反向事件） |
+| `src/preview.rs` | 设置端主题预览的请求 / 回执（`RenderCandidatePreview` 载荷，回执走请求自带的 `SyncSender`，请求方放弃时置位 `cancel`）+ 渲染器版本常量 `CANDIDATE_PREVIEW_RENDER_VERSION`（进预览缓存键） |
 | `src/menu.rs` | 菜单族：`MenuItemSpec`/`MenuKind`（含稳定 id 双向映射 `to_menu_id`/`from_menu_id`）/`MenuAnchor`/`CandidateOp`/`ToolbarAction` |
 | `src/candidate.rs` / `src/toast.rs` / `src/toolbar.rs` | `CandidateItem` / `ToastKind`·`ToastPosition` / `ToolbarState` |
 | `src/diag.rs` | 诊断视图族 + 纯格式化 `format_diag_lines`（含全部纯测试） |
