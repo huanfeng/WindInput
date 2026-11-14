@@ -1447,6 +1447,10 @@ pub(crate) enum CapsCancelSwitch {
     /// **恒按请求落地**、不吃 `mode_after_cancel` 的改写——宿主请求「中文」时 CapsLock
     /// 恰好开着被取消，不能因为用户选了 `english` 就落成英文。
     Host(bool),
+    /// 定向切换（`set_mode:english` / `set_mode:chinese`）：用户**明确点了目标**，
+    /// 取消锁定只是附带动作，模式必须直达目标——出厂 `mode_after_cancel` 只该管
+    /// 「切一下」这种没有方向的翻转（Shift / 切换键）。
+    Directed(bool),
 }
 
 impl CapsCancelSwitch {
@@ -4429,6 +4433,8 @@ impl Coordinator {
         current: bool,
     ) -> bool {
         match (setting, switch) {
+            // 定向切换直达目标，排最前（与 Host/System 同级，不吃 setting 的改写）。
+            (_, CapsCancelSwitch::Directed(requested)) => requested,
             (_, CapsCancelSwitch::Host(requested)) => requested,
             ("english", _) => false,
             ("toggle", CapsCancelSwitch::Toggle) => !current,
@@ -9361,13 +9367,29 @@ impl Coordinator {
         self.toggle_mode_with_commit_cased(false)
     }
 
-    /// 同 [`Self::toggle_mode_with_commit`]，`upper` 见 `handle_toggle_mode_cased`。
+    /// 同 [`Self::toggle_mode_with_commit`]，`upper` 见 `handle_switch_mode_cased`。
     pub(crate) fn toggle_mode_with_commit_cased(
         &self,
         upper: bool,
     ) -> (Option<StatusUpdateData>, SwitchCommit) {
         let had_pending = self.has_pending_composition();
-        let (status, text) = self.handle_toggle_mode_cased(upper);
+        let (status, text) = self.handle_switch_mode_cased(None, upper);
+        (status, SwitchCommit { text, had_pending })
+    }
+
+    /// **定向**模式切换（`set_mode:english` / `set_mode:chinese`）：把中英态置为目标值。
+    ///
+    /// 与 toggle 的差别只在终态：`target.unwrap_or(取反)`（见 `handle_switch_mode_cased`）。
+    /// 已在目标态时同样走一遍完整切换流程——状态位不变，对外表现为幂等无操作；上屏内容
+    /// 仍按通用规则走（`take_input_on_mode_switch_raw`：目标英文且开 `commit_on_switch`
+    /// 时把余码上屏，目标中文时余码直接丢弃），不是「编码照常上屏」。
+    /// 状态泡文案相同即不刷新（`show_status` 内的短路），故反复触发不会有视觉抖动。
+    pub(crate) fn set_mode_with_commit(
+        &self,
+        chinese: bool,
+    ) -> (Option<StatusUpdateData>, SwitchCommit) {
+        let had_pending = self.has_pending_composition();
+        let (status, text) = self.handle_switch_mode_cased(Some(chinese), false);
         (status, SwitchCommit { text, had_pending })
     }
 
@@ -9380,6 +9402,12 @@ impl Coordinator {
         match action {
             "toggle_mode" => {
                 let (status, commit) = self.toggle_mode_with_commit();
+                status
+                    .is_some()
+                    .then(|| self.schema_switch_key_action(commit))
+            }
+            "set_mode:english" | "set_mode:chinese" => {
+                let (status, commit) = self.set_mode_with_commit(action.ends_with("chinese"));
                 status
                     .is_some()
                     .then(|| self.schema_switch_key_action(commit))
@@ -9400,6 +9428,11 @@ impl Coordinator {
         match action {
             "toggle_mode" => {
                 let (status, commit) = self.toggle_mode_with_commit();
+                self.push_switch_commit(&commit);
+                status.is_some()
+            }
+            "set_mode:english" | "set_mode:chinese" => {
+                let (status, commit) = self.set_mode_with_commit(action.ends_with("chinese"));
                 self.push_switch_commit(&commit);
                 status.is_some()
             }
@@ -17788,6 +17821,22 @@ mod initial_mode_tests {
         assert!(!s.chinese_mode, "配置关保持原翻转语义");
     }
 
+    /// 定向切换同样受 `input.capslock.cancel_on_mode_switch` 管：开关关着时 CapsLock 原样
+    /// 保留，只把中英态置到目标值（意图记下，等用户自己解锁大写后生效）。
+    #[test]
+    fn set_mode_keeps_caps_when_cancel_disabled() {
+        let c = coord_with(|_| {});
+        {
+            let mut s = c.state.lock().unwrap();
+            s.caps_lock = true;
+            s.chinese_mode = false;
+        }
+        let _ = c.set_mode_with_commit(true);
+        let s = c.state.lock().unwrap();
+        assert!(s.caps_lock, "配置关不得动 CapsLock");
+        assert!(s.chinese_mode, "定向切换应把中英态置为中文");
+    }
+
     /// 论坛 t283：取消大写之后落到哪个模式（`input.capslock.mode_after_cancel`）。
     ///
     /// 注入 CapsLock 走真实 SendInput，单测里取消恒失败，故判定收成纯函数单独钉。
@@ -17795,11 +17844,23 @@ mod initial_mode_tests {
     /// Ctrl+空格 按它自己请求的方向；`english` 两条路都进英文（楼主要的就是这个）。
     #[test]
     fn mode_after_caps_cancel_matrix() {
-        use super::CapsCancelSwitch::{System, Toggle};
+        use super::CapsCancelSwitch::{Directed, System, Toggle};
         let f = Coordinator::mode_after_caps_cancel;
         for cur in [true, false] {
+            // 定向切换（set_mode:*）：用户点了目标，任何 setting 都直达目标——
+            // 归位配置只该管「切一下」这种没有方向的翻转。回归案例：CapsLock 开着按
+            // set_mode:english，出厂 `chinese` 曾把它按回中文，用户看来就是「没反应」。
+            for setting in ["chinese", "toggle", "english", "bogus", ""] {
+                assert!(
+                    f(setting, Directed(true), cur),
+                    "{setting}/Directed(中文) 应直达中文"
+                );
+                assert!(
+                    !f(setting, Directed(false), cur),
+                    "{setting}/Directed(英文) 应直达英文"
+                );
+            }
             // 出厂：Shift 归位中文（不看当前模式），Ctrl+空格 按请求。
-            assert!(f("chinese", Toggle, cur), "chinese/Shift 应归位中文");
             for req in [true, false] {
                 assert_eq!(
                     f("chinese", System(req), cur),
@@ -17817,6 +17878,7 @@ mod initial_mode_tests {
                 );
             }
             assert!(!f("english", Toggle, cur), "english/Shift 应进英文");
+            assert!(f("chinese", Toggle, cur), "chinese/Shift 应归位中文");
             assert_eq!(f("toggle", Toggle, cur), !cur, "toggle/Shift 应照常翻转");
             // 认不出的值回落出厂语义（设置端 options 与 core 值域脱节时不至于乱跳）。
             assert!(f("bogus", Toggle, cur));

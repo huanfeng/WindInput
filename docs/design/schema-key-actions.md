@@ -39,7 +39,7 @@
 
 | 类 | 动词 | 生命周期 | 方案级绑定的价值 |
 |---|---|---|---|
-| **A 状态切换** | `toggle_mode` `toggle_punct` `toggle_full_width` `toggle_s2t` `toggle_t2s` `toggle_toolbar` `open_settings` `take_screenshot` `add_word` `open_add_word_dialog` | 瞬时 | **低——仅作功能补全**（已拍板）。切标点在哪个方案里都一样；真实用途只有「在本方案禁用某键的全局绑定」，而那是 D 类。排在最后一期，见 §7 |
+| **A 状态切换** | `toggle_mode` `set_mode:english` `set_mode:chinese` `toggle_punct` `toggle_full_width` `toggle_s2t` `toggle_t2s` `toggle_toolbar` `open_settings` `take_screenshot` `add_word` `open_add_word_dialog` | 瞬时 | **低——仅作功能补全**（已拍板）。切标点在哪个方案里都一样；真实用途只有「在本方案禁用某键的全局绑定」，而那是 D 类。排在最后一期，见 §7 |
 | **B 模式进入** | `temp_pinyin` `temp_english` `mix:<id>` `special:<id>` | overlay，打完退回 | **最高**——快符按方案分流即此类 |
 | **C 方案切换** | `toggle_schema:<id>` | 持久，带回程 | 高，但**有锁死风险**，见 §5 |
 | **D 禁用** | `none` | — | 屏蔽全局绑定的第三态 |
