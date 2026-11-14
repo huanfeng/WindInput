@@ -146,11 +146,10 @@ fn key(name: &str) -> Msg {
 fn read_lines(path: &Path, timeout: Duration, done: impl Fn(&[String]) -> bool) -> Vec<String> {
     let deadline = Instant::now() + timeout;
     loop {
-        let lines: Vec<String> = std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
-            .map(String::from)
-            .collect();
+        // 只认以换行结尾的整行：假扩展边写边读，末尾可能是写了一半的行，解析 JSON 会偶发 panic。
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let complete = text.rfind('\n').map_or("", |i| &text[..i]);
+        let lines: Vec<String> = complete.lines().map(String::from).collect();
         if done(&lines) || Instant::now() > deadline {
             return lines;
         }
@@ -175,8 +174,13 @@ fn pid_of(lines: &[String]) -> u32 {
         .unwrap()
 }
 
+/// 进程还在不在。`/proc` 只有 Linux 有，macOS 上永远判「不在」，故统一用 `kill -0`。
 fn alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[test]
