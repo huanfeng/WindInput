@@ -1,3 +1,4 @@
+// 在 TSF 编辑会话内查询选区与组合的屏幕矩形，向同步或异步调用方报告结果。
 #include "CaretEditSession.h"
 #include "TextService.h"
 #include "Globals.h"
@@ -692,7 +693,36 @@ BOOL CCaretEditSession::IsOutsideViewExt(ITfContextView* pView, const RECT& rc)
     {
         return FALSE;
     }
-    return rc.left < ext.left || rc.left > ext.right || rc.top < ext.top || rc.top > ext.bottom;
+    if (rc.left < ext.left || rc.top < ext.top || rc.top > ext.bottom)
+        return TRUE;
+    if (rc.left <= ext.right)
+        return FALSE;
+
+    // Typora 0.9.98 的 GetScreenExt 会把右边界报到正文光标左侧。只对右侧越界且
+    // 有高度的矩形再查一次 HWND 客户区；坐标仍须落在同一个宿主窗口内。
+    static const bool isTypora = [] {
+        WCHAR exe[MAX_PATH] = {};
+        const DWORD len = GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+        if (len == 0 || len >= ARRAYSIZE(exe))
+            return false;
+        const WCHAR* basename = wcsrchr(exe, L'\\');
+        return _wcsicmp(basename ? basename + 1 : exe, L"typora.exe") == 0;
+    }();
+    if (isTypora && rc.bottom > rc.top)
+    {
+        HWND hwnd = nullptr;
+        RECT client = {};
+        POINT anchor = { rc.left, rc.top };
+        if (SUCCEEDED(pView->GetWnd(&hwnd)) && hwnd != nullptr
+            && GetClientRect(hwnd, &client) && ScreenToClient(hwnd, &anchor)
+            && PtInRect(&client, anchor))
+        {
+            WIND_LOG_DEBUG_FMT(L"CaretEditSession: Typora caret (%ld, %ld) inside client area\n",
+                               rc.left, rc.top);
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 // Static method to get both caret rect and composition start rect
@@ -763,14 +793,16 @@ BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, Tf
         {
             *pHasCompRect = pEditSession->GetCompositionRectResult(pCompRect);
         }
-        if (pRejectedOutsideView)
-        {
-            *pRejectedOutsideView = pEditSession->RejectedOutsideView();
-        }
     }
     else
     {
         WIND_LOG_ERROR_FMT(L"RequestEditSession failed hr=0x%08X, hrSession=0x%08X\n", hr, hrSession);
+    }
+
+    // DoEditSession 拒绝越界坐标后会返回 E_FAIL，成功分支读不到拒绝原因。
+    if (pRejectedOutsideView)
+    {
+        *pRejectedOutsideView = pEditSession->RejectedOutsideView();
     }
 
     pEditSession->Release();
