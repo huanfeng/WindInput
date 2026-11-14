@@ -45,5 +45,21 @@ inline bool ShouldRecover(uint64_t msSinceUpdate, bool holdActive, size_t prefix
            msSinceUpdate <= kWindowMs;
 }
 
+/// 进入恢复后多久之内宿主又把 DocMgr 置空（焦点空档），就放弃恢复、按旧语义清缓冲。
+///
+/// AutoCAD 在绘图区收到首键后立即终止组合，4~8ms 后把焦点切到命令行窗口，并**重投一次同一个键**
+/// （扫描码为 0）。此时保留缓冲，重投的键就叠在首键上，编码栏成了 gg。受控输入框的回写没有
+/// 焦点空档，不受影响。
+constexpr uint64_t kFocusGapAbortMs = 100;
+
+/// 焦点空档开始时，已进入的恢复是否应放弃。
+///
+/// - `armed`：当前处于恢复中（有残留记录）；
+/// - `msSinceArm`：距进入恢复多久。
+inline bool ShouldAbortOnFocusGap(bool armed, uint64_t msSinceArm)
+{
+    return armed && msSinceArm <= kFocusGapAbortMs;
+}
+
 } // namespace recover
 } // namespace wind

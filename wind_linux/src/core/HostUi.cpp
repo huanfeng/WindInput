@@ -1,6 +1,7 @@
 #include "HostUi.h"
 
 #include "Bridge.h"
+#include "GnomeCaretGeom.h"
 
 #include "KeyMap.h"
 #include "Protocol.h"
@@ -8,6 +9,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <locale>
+#include <sstream>
 #include <utility>
 
 #include <sys/stat.h>
@@ -256,6 +259,106 @@ std::optional<bool> CapsLockTracker::onKey(uint32_t keysym, uint32_t states, boo
 std::string clientPreeditText(const std::string& composition)
 {
     return composition == kCompositionPlaceholder ? std::string() : composition;
+}
+
+namespace {
+
+std::string trimmed(const std::string& s)
+{
+    const auto b = s.find_first_not_of(" \t\r");
+    if (b == std::string::npos) {
+        return std::string();
+    }
+    const auto e = s.find_last_not_of(" \t\r");
+    return s.substr(b, e - b + 1);
+}
+
+/// 去掉组名 / 键名尾部的 KConfig 修饰（`[$i]` 锁定、`[$e]` 展开等，可以叠几个）。
+std::string stripKConfigMarkers(std::string s)
+{
+    while (s.size() >= 4 && s.back() == ']') {
+        const auto open = s.rfind("[$");
+        if (open == std::string::npos || open == 0) {
+            break;
+        }
+        s = trimmed(s.substr(0, open));
+    }
+    return s;
+}
+
+} // namespace
+
+std::optional<double> parseDecimal(const std::string& s)
+{
+    std::istringstream in(s);
+    in.imbue(std::locale::classic());
+    double v = 0;
+    if (!(in >> v)) {
+        return std::nullopt;
+    }
+    in >> std::ws;
+    return in.eof() ? std::optional<double>(v) : std::nullopt;
+}
+
+std::optional<double> kdeAnimationFactor(const std::string& kdeglobals)
+{
+    // 编辑器存出来的文件可能带 UTF-8 BOM：留着的话第一行的组名比不上。
+    const bool bom = kdeglobals.compare(0, 3, "\xEF\xBB\xBF") == 0;
+    std::istringstream in(bom ? kdeglobals.substr(3) : kdeglobals);
+    std::string line;
+    bool inKde = false;
+    std::optional<double> out;
+    while (std::getline(in, line)) {
+        const std::string t = trimmed(line);
+        if (t.empty() || t[0] == '#') {
+            continue;
+        }
+        if (t[0] == '[') {
+            inKde = stripKConfigMarkers(t) == "[KDE]"; // `[KDE][$i]`：整组锁定，仍是 KDE 组
+            continue;
+        }
+        const auto eq = t.find('=');
+        if (!inKde || eq == std::string::npos) {
+            continue;
+        }
+        // 键可能带 KConfig 的修饰（`AnimationDurationFactor[$i]`），去掉再比。
+        std::string key = trimmed(t.substr(0, eq));
+        if (const auto br = key.find('['); br != std::string::npos) {
+            key = trimmed(key.substr(0, br));
+        }
+        if (key == "AnimationDurationFactor") {
+            out = parseDecimal(trimmed(t.substr(eq + 1))); // 同一键写了多次取最后一条（KConfig 同）
+        }
+    }
+    return out;
+}
+
+std::string kdeglobalsPath()
+{
+    if (const char* x = std::getenv("XDG_CONFIG_HOME"); x && x[0] == '/') {
+        return std::string(x) + "/kdeglobals";
+    }
+    if (const char* h = std::getenv("HOME"); h && h[0]) {
+        return std::string(h) + "/.config/kdeglobals";
+    }
+    return std::string();
+}
+
+std::optional<bool> pickReduceMotion(const MotionSources& s, const std::string& xdgCurrentDesktop)
+{
+    if (s.reducedMotion) {
+        return *s.reducedMotion != 0;
+    }
+    std::optional<bool> kde;
+    if (const auto f = s.kdePortalFactor ? s.kdePortalFactor : s.kdeFileFactor) {
+        kde = *f <= 0;
+    }
+    std::optional<bool> gnome;
+    if (s.gnomeAnimations) {
+        gnome = *s.gnomeAnimations == 0;
+    }
+    const bool onKde = xdgCurrentDesktopHas(xdgCurrentDesktop.c_str(), "KDE");
+    return onKde ? (kde ? kde : gnome) : (gnome ? gnome : kde);
 }
 
 } // namespace windlinux

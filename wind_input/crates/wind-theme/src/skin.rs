@@ -8,6 +8,8 @@
 use serde::Deserialize;
 use toml::Value;
 
+use crate::rvnode::Flip;
+
 /// 皮肤变体键。顺序无意义；嵌入变体缺省回退对应的非嵌入变体。
 pub const SKIN_VARIANTS: [&str; 4] = [
     "horizontal",
@@ -79,6 +81,9 @@ pub struct SkinFrame {
     pub fill: Option<String>,
     #[serde(default)]
     pub srcset: Vec<SrcSetEntry>,
+    /// 窗体**不支持** `flip`：拉伸带与 content 按源图写，翻了像素就和它们对不上。只为认出这个
+    /// 写错的键、告警后忽略（serde 对未知键静默，作者会以为生效了）。
+    pub flip: Option<Value>,
 }
 
 /// 拉伸带：`[from, to]` 或 `{ from, to, fill }`。
@@ -132,6 +137,9 @@ pub struct SkinDecor {
     pub opacity: Option<f32>,
     /// 动画装饰的帧率，覆盖文件自带帧时长；非正数忽略。
     pub fps: Option<f32>,
+    /// 镜像：x（左右）| y（上下）| xy；缺省不翻。只翻像素：anchor / pivot / offset / size /
+    /// 命中矩形按源图写、不变。作用于本装饰的全部帧，含 `states` / `on` 引用的附加文件。
+    pub flip: Option<String>,
     /// 状态片段：名 → `{ frames = "a-b" }` 或 `{ image = "x" }`（设计 §16）。逐条宽松解析：
     /// 写错的条目求值时 warn 并丢弃，不连累整份皮肤。
     #[serde(default)]
@@ -324,6 +332,9 @@ pub struct RvSkinFrame {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RvSkinDecor {
+    /// 在 TOML `[[skin.<变体>.decor]]` 里的原始下标（从 0 起，含被丢弃的项）；求值后按 z 排序，
+    /// 本表下标不再等于它。指定义这张变体表的那份 TOML（变体继承自 base 时是 base 的）。
+    pub src_index: usize,
     pub image: String,
     pub density: f32,
     pub anchor: Anchor,
@@ -335,6 +346,8 @@ pub struct RvSkinDecor {
     pub opacity: f32,
     /// 覆盖动画文件自带帧时长的帧率；None = 用文件自带的。
     pub fps: Option<f32>,
+    /// 镜像（各源合成到目标尺寸后再翻）。
+    pub flip: Flip,
     /// 事件状态机；没写 `states` / `on` 时为空（整个文件循环，同 P4）。
     pub anim: RvDecorAnim,
 }
@@ -700,6 +713,9 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
         .map(|e| (e.image.clone(), e.density))
         .collect();
     srcset.sort_by(|a, b| a.1.total_cmp(&b.1));
+    if f.flip.is_some() {
+        tracing::warn!("skin: frame 不支持 flip（拉伸带与 content 按源图写），忽略");
+    }
     let frame_density = positive(f.density).unwrap_or(density);
     let frame = RvSkinFrame {
         image: f.image.clone(),
@@ -711,8 +727,9 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
     let mut decor: Vec<RvSkinDecor> = v
         .decor
         .iter()
-        .filter(|d| !d.image.is_empty())
-        .filter_map(|d| {
+        .enumerate()
+        .filter(|(_, d)| !d.image.is_empty())
+        .filter_map(|(src_index, d)| {
             let anchor = Anchor::parse(if d.anchor.is_empty() {
                 "frame.top_left"
             } else {
@@ -731,7 +748,15 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                     DecorHit::Drag
                 }
             };
+            let flip = match d.flip.as_deref() {
+                None => Flip::NONE,
+                Some(s) => Flip::parse(s).unwrap_or_else(|| {
+                    tracing::warn!("skin: 未知 decor.flip {s:?}（只认 x / y / xy），按不翻");
+                    Flip::NONE
+                }),
+            };
             Some(RvSkinDecor {
+                src_index,
                 image: d.image.clone(),
                 density: positive(d.density).unwrap_or(density),
                 anchor,
@@ -742,6 +767,7 @@ fn resolve_variant(v: &SkinVariant, density: f32) -> Option<RvSkinVariant> {
                 hit,
                 opacity: d.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
                 fps: positive(d.fps),
+                flip,
                 anim: resolve_decor_anim(&d.states, &d.on),
             })
         })
@@ -832,6 +858,30 @@ pub(crate) fn replace_inherited_variants(base: &mut Value, over: &Value) {
             base_skin.remove(key);
         }
     }
+}
+
+/// 图片文件头是否动画格式（读文件头前 64 KiB 足够）：GIF 一律算（帧数另判）；APNG 看 IDAT 之前有无 acTL；WebP 看 VP8X 的动画位。
+pub fn sniff_animated(b: &[u8]) -> bool {
+    if b.starts_with(b"GIF8") {
+        return true;
+    }
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut at = 8;
+        while let Some(head) = b.get(at..at + 8) {
+            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            match &head[4..8] {
+                b"acTL" => return true,
+                b"IDAT" => return false,
+                _ => at = at.saturating_add(len).saturating_add(12),
+            }
+        }
+        return false;
+    }
+    b.len() > 20
+        && &b[0..4] == b"RIFF"
+        && &b[8..12] == b"WEBP"
+        && &b[12..16] == b"VP8X"
+        && b[20] & 0x02 != 0
 }
 
 #[cfg(test)]
@@ -946,6 +996,21 @@ hit = "pass"
         assert_eq!(d[1].image, "pet");
         assert_eq!(d[1].pivot, Pos9 { h: 2, v: 2 });
         assert_eq!(d[1].hit, DecorHit::Drag, "缺省 drag");
+        assert_eq!(
+            (d[0].src_index, d[1].src_index),
+            (1, 0),
+            "排序后仍记着 TOML 里的原始下标"
+        );
+        let src = "[skin.horizontal.frame]\nimage = \"f\"\n\
+                   [[skin.horizontal.decor]]\nimage = \"\"\n\
+                   [[skin.horizontal.decor]]\nimage = \"a\"\nanchor = \"nope\"\n\
+                   [[skin.horizontal.decor]]\nimage = \"b\"\n";
+        let d = &parse(src).unwrap().horizontal.unwrap().decor;
+        assert_eq!(
+            d.iter().map(|x| x.src_index).collect::<Vec<_>>(),
+            [2],
+            "被丢弃的项也占原始下标"
+        );
     }
 
     #[test]
@@ -961,6 +1026,41 @@ hit = "pass"
         assert_eq!(fps(""), None, "缺省用文件自带帧时长");
         assert_eq!(fps("fps = 0"), None);
         assert_eq!(fps("fps = -3"), None);
+    }
+
+    #[test]
+    fn decor_flip_accepts_x_y_xy_and_defaults_to_none() {
+        let flip = |v: &str| {
+            let src = format!(
+                "[skin.horizontal.frame]\nimage = \"f\"\n[[skin.horizontal.decor]]\nimage = \"d\"\nanchor = \"frame.top_right\"\noffset = [-5, 3]\n{v}"
+            );
+            parse(&src).unwrap().horizontal.unwrap().decor[0].clone()
+        };
+        assert_eq!(flip("").flip, Flip::NONE);
+        assert_eq!(flip("flip = \"x\"").flip, Flip { x: true, y: false });
+        assert_eq!(flip("flip = \"y\"").flip, Flip { x: false, y: true });
+        assert_eq!(flip("flip = \"xy\"").flip, Flip { x: true, y: true });
+        assert_eq!(flip("flip = \"left\"").flip, Flip::NONE, "非法值按不翻");
+        // 只翻像素：定位字段照源图写的原样。
+        let (a, b) = (flip(""), flip("flip = \"x\""));
+        assert_eq!((a.anchor, a.pivot, a.offset), (b.anchor, b.pivot, b.offset));
+        // 非字符串是类型错误，与 hit / anchor 同一口径。
+        let v: Value = "[skin.horizontal.frame]\nimage = \"f\"\n[[skin.horizontal.decor]]\nimage = \"d\"\nflip = true"
+            .parse()
+            .unwrap();
+        assert!(v["skin"].clone().try_into::<Skin>().is_err());
+    }
+
+    /// 窗体不开放 flip：写了只告警，窗体照常求值。
+    #[test]
+    fn frame_flip_is_not_supported() {
+        let src = "[skin.horizontal.frame]\nimage = \"f\"\nflip = \"x\"\nstretch_x = [[1, 2]]";
+        let v: Value = src.parse().unwrap();
+        let s: Skin = v["skin"].clone().try_into().unwrap();
+        let frame = s.horizontal.as_ref().and_then(|v| v.frame.as_ref());
+        assert!(frame.unwrap().flip.is_some(), "认得出这个键才能告警");
+        let h = resolve_skin(&s).unwrap().horizontal.unwrap();
+        assert_eq!(h.frame.image, "f");
     }
 
     fn decor_anim(body: &str) -> RvDecorAnim {

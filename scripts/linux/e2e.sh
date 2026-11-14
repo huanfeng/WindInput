@@ -4,6 +4,7 @@
 #   scripts/linux/e2e.sh              # 构建 addon 与服务后跑全部用例
 #   SKIP_BUILD=1 scripts/linux/e2e.sh # 直接用现成产物
 #   KEEP=1 scripts/linux/e2e.sh       # 跑完保留临时目录（看日志）
+#   WIND_E2E_ONLY=skin scripts/linux/e2e.sh  # 只跑异形皮肤那组（不需要设置程序）
 #
 # 前置：scripts/linux/bootstrap-sdk.sh 搭好的用户前缀 SDK（fcitx5 / cmake / dbus-next）。
 # 输出每条用例的 PASS/FAIL，末行「E2E PASS」或「E2E FAIL」，退出码随之。
@@ -41,14 +42,14 @@ if [[ -z "${SKIP_BUILD:-}" ]]; then
     log "构建服务（linux-host）…"
     (cd "$REPO/wind_input" && CARGO_TARGET_DIR="$TARGET_DIR" \
         cargo build -q -p wind_service --features linux-host)
-    if [[ -z "${WIND_E2E_SETTING:-}" && -d "$SETTING_REPO" ]]; then
+    if [[ -z "${WIND_E2E_ONLY:-}" && -z "${WIND_E2E_SETTING:-}" && -d "$SETTING_REPO" ]]; then
         log "构建设置程序（$SETTING_REPO）…"
         (cd "$SETTING_REPO" && CARGO_TARGET_DIR="$SETTING_TARGET_DIR" cargo build -q)
     fi
 fi
 [[ -f "$ADDON_BUILD/libwindinput.so" ]] || { echo "E2E FAIL: 缺 $ADDON_BUILD/libwindinput.so"; exit 1; }
 [[ -x "$SERVICE_BIN" ]] || { echo "E2E FAIL: 缺 $SERVICE_BIN"; exit 1; }
-[[ -x "$SETTING_BIN" ]] || { echo "E2E FAIL: 缺设置程序 $SETTING_BIN（需要兄弟仓库 ../wind-setting，或用 WIND_E2E_SETTING 指定）"; exit 1; }
+[[ -n "${WIND_E2E_ONLY:-}" || -x "$SETTING_BIN" ]] || { echo "E2E FAIL: 缺设置程序 $SETTING_BIN（需要兄弟仓库 ../wind-setting，或用 WIND_E2E_SETTING 指定）"; exit 1; }
 [[ -d "$DATA_DIR/schemas" ]] || { echo "E2E FAIL: 词库目录 $DATA_DIR 不完整（需要 build_dev/data）"; exit 1; }
 
 # ── 准备隔离目录 ─────────────────────────────────────────────────────

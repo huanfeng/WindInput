@@ -36,6 +36,13 @@ int main()
     Expect(ShouldRecover(13, false, 0, kMaxLeftoverLen), "长度上限内恢复");
     Expect(!ShouldRecover(13, false, 0, kMaxLeftoverLen + 1), "残留过长：不恢复");
 
+    using wind::recover::kFocusGapAbortMs;
+    using wind::recover::ShouldAbortOnFocusGap;
+    Expect(ShouldAbortOnFocusGap(true, 6), "AutoCAD：终止后 6ms 焦点空档，放弃恢复");
+    Expect(ShouldAbortOnFocusGap(true, kFocusGapAbortMs), "空档窗口边界上仍放弃");
+    Expect(!ShouldAbortOnFocusGap(true, kFocusGapAbortMs + 1), "超过窗口的焦点空档：与恢复无关，不动");
+    Expect(!ShouldAbortOnFocusGap(false, 6), "不在恢复中：无事可做");
+
     if (g_failures == 0)
         std::printf("composition_recover_policy_test: all passed\n");
     return g_failures == 0 ? 0 : 1;

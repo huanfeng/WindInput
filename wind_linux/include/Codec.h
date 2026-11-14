@@ -22,6 +22,11 @@ struct Rect {
     int32_t w = 0;
     int32_t h = 0;
 };
+inline bool operator==(const Rect& a, const Rect& b)
+{
+    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+inline bool operator!=(const Rect& a, const Rect& b) { return !(a == b); }
 
 struct Frame {
     uint16_t cmd = 0;
@@ -126,6 +131,10 @@ Bytes encodePosFrame(const std::string& kind, int32_t x, int32_t y);
 /// 上行扩展信封 `pos.toolbar` / `pos.softkeyboard`：body = `{"x":X,"y":Y,"output":"…"}`，内容盒
 /// 左上的屏幕坐标；`output` 为空时不带该字段（与 host.display 同源，两处要么都报要么都不报）。
 Bytes encodePosFrame(const std::string& kind, int32_t x, int32_t y, const std::string& output);
+/// 上行扩展信封 `host.reduce_motion`：body = `{"reduce":true|false}`。
+Bytes encodeReduceMotionFrame(bool reduce);
+/// 上行扩展信封 `skin.decor_click`：body = `{"index":N}`。
+Bytes encodeDecorClickFrame(uint32_t index);
 /// 上行扩展信封 `host.fullscreen`：body = `{"fullscreen":true|false}`。
 Bytes encodeHostFullscreenFrame(bool fullscreen);
 /// CMD_PANEL_POINTER：kind u32 + event u32 + button u32 + x i32 + y i32（20 字节，**位图内**坐标，
@@ -204,9 +213,14 @@ struct HostRenderFramePayload {
     uint32_t height = 0;
     uint32_t flags = 0;
     uint32_t scale = 1;
+    /// 窗口左上 → 内容左上（`ui.candidate.custom_x/y` 同义）的偏移，单位同 x/y。拖完按它换回内容
+    /// 左上报 `pos.candidate`。36 字节版的扩展字段，旧服务的短帧按 0。
+    int32_t contentX = 0;
+    int32_t contentY = 0;
     bool visible() const { return (flags & 0x1) != 0; }
 };
-/// CMD_HOST_RENDER_FRAME（push）：seq,x,y,w,h,flags 各 u32/i32（24 字节）[+ scale u32]。
+/// CMD_HOST_RENDER_FRAME（push）：seq,x,y,w,h,flags 各 u32/i32（24 字节）[+ scale u32]
+/// [+ contentX contentY i32]。长度只认 24、28 与 ≥ 36，其余（截断 / 错位）拒收。
 std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p);
 
 /// CMD_OVERLAY_FRAME（push）：一层浮层（状态气泡 / Toast / tooltip）有新帧或该隐藏。
@@ -255,6 +269,23 @@ struct CandidateHitRect {
 };
 /// CMD_CANDIDATE_RECTS（push）：count u32 + count × (index,x,y,w,h 各 i32)。
 std::optional<std::vector<CandidateHitRect>> decodeCandidateRects(const Bytes& p);
+
+/// CMD_CANDIDATE_SKIN 里的一块装饰。坐标同 CandidateHitRect（位图内设备像素）。
+struct SkinDecor {
+    uint32_t index = 0; // 变体 decor 下标（服务端装饰状态机同号）
+    uint32_t hit = 0;   // SKIN_HIT_*
+    uint32_t flags = 0; // SKIN_DECOR_*
+    Rect rect;
+};
+/// CMD_CANDIDATE_SKIN（push）：flags u32 + frame 4×i32 + decorN u32 + decorN × (index hit flags u32 +
+/// x y w h i32，28 字节) + maskN u32 + maskN × (x y w h i32)。没启用皮肤时 flags = 0、两表为空。
+struct CandidateSkin {
+    uint32_t flags = 0; // SKIN_FLAG_*
+    Rect frame;
+    std::vector<SkinDecor> decor;
+    std::vector<Rect> mask; // 输入区（flags 带 SKIN_FLAG_MASK 时有效）
+};
+std::optional<CandidateSkin> decodeCandidateSkin(const Bytes& p);
 
 struct ExtEnvelope {
     std::string kind;

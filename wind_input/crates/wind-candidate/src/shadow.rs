@@ -44,14 +44,17 @@ impl ShadowPinRule {
 /// 对 `candidates` 应用 shadow 规则：
 ///   1. 删除 `deleted` 中出现的词（按 text 匹配）；
 ///   2. 把 `pinned` 各条按其匹配目标重新就位：
-///      - 按 `position` 升序处理，保证后续插入考虑前面已就位的项；
+///      - 先摘出全部命中项，再按 `position` 升序插回（`position` 是最终列表的下标，互不挤位）；
 ///      - 同一 `position` 内按"最新在前"排列——`pinned` 契约为最新在前（index 0 最近），
 ///        排序键 `(position 升序, 原始索引降序)` 使较老项先 insert、最新项最后 insert 停在最前；
-///      - 位置越界时钳到末尾。
+///      - 位置越界时钳到末尾；
+///      - 同一候选命中多条规则时取 position 最小的那条（先处理的规则已把它摘走，后面的规则
+///        找不到它），返回值只计一次。
 ///
-/// `deleted` 仍是纯文本匹配：走 shadow 删除的只有系统码表/拼音候选（静态文本），
-/// 短语删除走 `set_phrase_enabled`（按 `(code, phrase_template)` 定位，本就是稳定键，
-/// 见 `delete_candidate_by_source`），故删除侧没有动态候选可失配。
+/// `deleted` 是纯文本匹配，认候选的显示文本与词库原文（[`Candidate::freq_text`]）两种形态：
+/// 写端记词库原文，模板系统词（`$` / `{}` 词条）在读端可能已展开成当天的文本。短语删除走
+/// `set_phrase_enabled`（按 `(code, phrase_template)` 定位，本就是稳定键，见
+/// `delete_candidate_by_source`），不经这里。
 ///
 /// # 返回值：实际**就位**的置顶规则条数
 ///
@@ -71,22 +74,28 @@ pub fn apply_shadow(
     pinned: &[ShadowPinRule],
 ) -> usize {
     if !deleted.is_empty() {
-        candidates.retain(|c| !deleted.iter().any(|d| d == &c.text));
+        // 写端记的是词库原文（`freq_text`：模板展开前、大小写投影前）；读端此时候选可能已展开
+        // （模板系统词在主路先展开再过 shadow），故两种形态都认。存量规则记的是显示文本，也认。
+        candidates.retain(|c| !deleted.iter().any(|d| d == &c.text || d == c.freq_text()));
     }
-    // 按 position 升序应用；同一 position 内按"最新在前"（入参 index 小者更近）就位。
     // 契约：pinned 为最新在前（store apply_pin insert(0) + coordinator 原序传入）。
     // 排序键 (position 升序, 原始索引降序)：同 position 内让较老项先 insert，
     // 最新项最后 insert 停在最前，得到"后添加者靠前"。
     let mut idx: Vec<(usize, &ShadowPinRule)> = pinned.iter().enumerate().collect();
     idx.sort_by(|a, b| a.1.position.cmp(&b.1.position).then(b.0.cmp(&a.0)));
-    let mut hits = 0usize;
+    // 两阶段：先把全部命中项摘出，再按上面的次序插回。逐条「摘出再插入」时，后处理的规则
+    // 摘自己若原位置在先就位者之前，会把先就位的往前挤一格（A→3、B→5 而 B 原本在 A 前，
+    // A 实落第 2 位）。
+    let mut taken: Vec<(&ShadowPinRule, Candidate)> = Vec::new();
     for (_, rule) in idx {
         if let Some(cur) = candidates.iter().position(|c| rule.matches(c)) {
-            let cand = candidates.remove(cur);
-            let at = rule.position.min(candidates.len());
-            candidates.insert(at, cand);
-            hits += 1;
+            taken.push((rule, candidates.remove(cur)));
         }
+    }
+    let hits = taken.len();
+    for (rule, cand) in taken {
+        let at = rule.position.min(candidates.len());
+        candidates.insert(at, cand);
     }
     hits
 }
@@ -131,6 +140,15 @@ mod tests {
             cand_id: Some(id.to_string()),
             position,
         }
+    }
+
+    /// 删除规则记的是模板源文本（`freq_text`），候选已展开成当天文本时同样命中。
+    #[test]
+    fn deletes_by_template_source() {
+        let mut c = cands(&["甲", "2026年11月12日"]);
+        c[1].template_source = Some("$Y年$M月$D日".to_string());
+        apply_shadow(&mut c, &["$Y年$M月$D日".to_string()], &[]);
+        assert_eq!(texts(&c), ["甲"]);
     }
 
     #[test]
@@ -199,6 +217,110 @@ mod tests {
         );
         // 期望最近的排最前：[丙, 乙, 甲, 丁]
         assert_eq!(texts(&c), ["丙", "乙", "甲", "丁"]);
+    }
+
+    /// 多条规则互不挤位：A→3、B→5，B 原本排在 A 前面。逐条「摘出再插入」时 B 摘自己会把
+    /// 已就位的 A 往前挤一格（A 实落第 2 位）。
+    #[test]
+    fn multiple_pins_do_not_shift_each_other() {
+        let mut c = cands(&["x", "B", "y", "A", "z", "w", "v"]);
+        let hits = apply_shadow(&mut c, &[], &[by_word("A", 3), by_word("B", 5)]);
+        assert_eq!(texts(&c), ["x", "y", "z", "A", "w", "B", "v"]);
+        assert_eq!(hits, 2);
+    }
+
+    /// 多条乱序（规则写入顺序与位置无关）：每条都落在自己的位置上。
+    #[test]
+    fn many_pins_in_any_order_land_exactly() {
+        let base = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let rules = [
+            by_word("h", 1),
+            by_word("b", 6),
+            by_word("e", 0),
+            by_word("a", 4),
+        ];
+        let mut c = cands(&base);
+        apply_shadow(&mut c, &[], &rules);
+        for r in &rules {
+            assert_eq!(
+                c.iter().position(|x| x.text == r.word),
+                Some(r.position),
+                "{} 应在第 {} 位：{:?}",
+                r.word,
+                r.position,
+                texts(&c)
+            );
+        }
+        let mut rev = rules.clone();
+        rev.reverse();
+        let mut c2 = cands(&base);
+        apply_shadow(&mut c2, &[], &rev);
+        assert_eq!(texts(&c), texts(&c2), "位置互不相同时与规则顺序无关");
+    }
+
+    /// 同位置后写在前、先写的顺延，且不挤动其它位置上的规则。
+    #[test]
+    fn same_position_latest_first_keeps_other_pins() {
+        // 最新在前：乙(最近) 与 甲 都 → 1；丁 → 3。
+        let mut c = cands(&["丁", "甲", "乙", "丙", "戊", "己"]);
+        apply_shadow(
+            &mut c,
+            &[],
+            &[by_word("乙", 1), by_word("丁", 3), by_word("甲", 1)],
+        );
+        assert_eq!(texts(&c), ["丙", "乙", "甲", "丁", "戊", "己"]);
+    }
+
+    /// 越界规则钳到末尾，不影响界内规则的落点；未命中的规则不计数。
+    #[test]
+    fn out_of_range_pins_go_to_end_and_misses_not_counted() {
+        let mut c = cands(&["甲", "乙", "丙", "丁"]);
+        let hits = apply_shadow(
+            &mut c,
+            &[],
+            &[by_word("甲", 99), by_word("丁", 1), by_word("无", 0)],
+        );
+        assert_eq!(texts(&c), ["乙", "丁", "丙", "甲"]);
+        assert_eq!(hits, 2);
+    }
+
+    /// 删除与多条置顶同时存在：位置按删除之后的列表计。
+    #[test]
+    fn pins_count_positions_after_deletion() {
+        let mut c = cands(&["甲", "乙", "丙", "丁", "戊"]);
+        apply_shadow(
+            &mut c,
+            &["甲".to_string()],
+            &[by_word("戊", 1), by_word("乙", 3)],
+        );
+        assert_eq!(texts(&c), ["丙", "戊", "丁", "乙"]);
+    }
+
+    /// `cand_id` 规则与按词规则混排，同样两阶段就位。
+    #[test]
+    fn id_and_word_pins_mixed() {
+        let mut c = cands_with_id(&[
+            ("x", ""),
+            ("B", "phrase:b"),
+            ("y", ""),
+            ("A", ""),
+            ("z", ""),
+        ]);
+        apply_shadow(
+            &mut c,
+            &[],
+            &[by_word("A", 2), by_id("旧文本", "phrase:b", 3)],
+        );
+        assert_eq!(texts(&c), ["x", "y", "A", "B", "z"]);
+    }
+
+    /// 同一候选命中多条规则（按词一条、按 id 一条）：取 position 最小的那条，只计一次。
+    #[test]
+    fn one_candidate_many_rules_takes_smallest_position() {
+        let mut c = cands_with_id(&[("a", ""), ("b", ""), ("X", "phrase:x"), ("d", "")]);
+        let hits = apply_shadow(&mut c, &[], &[by_word("X", 3), by_id("旧", "phrase:x", 1)]);
+        assert_eq!(texts(&c), ["a", "X", "b", "d"]);
+        assert_eq!(hits, 1);
     }
 
     /// 核心回归：规则的 `word` 是**写入当天**的求值文本，今天候选文本已全变。

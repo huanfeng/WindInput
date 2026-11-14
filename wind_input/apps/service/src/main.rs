@@ -24,6 +24,7 @@ mod backup_cli;
 mod cli_util;
 mod config_cli;
 mod dict_cli;
+mod ime_cli;
 mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
@@ -52,6 +53,7 @@ fn print_root_usage() {
          backup    整机备份创建/查看/还原（需 core 在线）\n  \
          restart   重启输入法服务（未运行则直接启动）\n  \
          ui        桌面提示：ui toast <文案>（需 core 在线）\n  \
+         ime       输入状态：中英/全半角/简繁/工具栏的查看与切换（需 core 在线）\n  \
          system    系统集成：Dota 2 兼容等（写 HKLM，需管理员权限）\n  \
          help      显示本帮助；--version 显示版本\n\
          \n\
@@ -134,6 +136,7 @@ fn main() {
                 | "backup"
                 | "restart"
                 | "ui"
+                | "ime"
                 | "help"
                 | "--help"
                 | "-h"
@@ -160,6 +163,7 @@ fn main() {
             Some("backup") => backup_cli::run(&cli_args[2..]),
             Some("restart") => restart_cli::run(&cli_args[2..]),
             Some("ui") => ui_cli::run(&cli_args[2..]),
+            Some("ime") => ime_cli::run(&cli_args[2..]),
             #[cfg(windows)]
             Some("system") => system_cli::run(&cli_args[2..]),
             Some("help" | "--help" | "-h") => {
@@ -428,7 +432,7 @@ fn main() {
     coordinator.set_host_render(host_render.clone());
     #[cfg(windows)]
     let coord_for_push_hook = coordinator.clone();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let coord_for_reconnect_hook = coordinator.clone();
     let coord_for_web = coordinator.clone();
     let coord_for_restart_toast = coordinator.clone();
@@ -449,9 +453,9 @@ fn main() {
     push_server.set_client_connected_hook(Box::new(move |token| {
         coord_for_push_hook.on_push_client_connected(token);
     }));
-    // Linux addon：push 连接（重）建立后渲染端补推可见的工具栏 / 软键盘（addon 收到 SERVICE_READY
-    // 会丢掉手里的面板）。
-    #[cfg(target_os = "linux")]
+    // 外部宿主：push 连接（重）建立后渲染端复位宿主状态（Linux 补推可见的工具栏 / 软键盘，addon
+    // 收到 SERVICE_READY 会丢掉手里的面板；macOS 作废皮肤换帧的分层去重）。
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     coord_for_reconnect_hook.install_host_reconnect_hook();
 
     // 9.5 启动本地控制 / 配置 JSON-RPC 服务（命名管道：..._ctrl + ..._events）。
@@ -460,6 +464,7 @@ fn main() {
     // 主题预览缓存键带上构建标识：换一次构建旧图就不再命中。dirty 构建的短哈希不随改动变，
     // 再带上构建时刻。
     let git = env!("WIND_GIT_HASH");
+    wind_rpc::set_build_id(git);
     wind_webdata::set_preview_build_id(if git.ends_with("-dirty") {
         format!("{git}@{}", env!("WIND_BUILD_TIME"))
     } else {

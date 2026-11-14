@@ -8,7 +8,7 @@ use super::{CandidateScene, CandidateSceneInput};
 use crate::text::TextBackend;
 use crate::view::{Edges, Rect, View};
 use wind_theme::skin::{
-    Anchor, AnchorBox, BandFill, Clamp, DecorAction, DecorClip, DecorEvent, DecorHit, Pos9,
+    Anchor, AnchorBox, BandFill, Clamp, DecorAction, DecorClip, DecorEvent, DecorHit, Pos9, RvSkin,
     RvSkinVariant, RvSlot, RvSlots, Stretch,
 };
 
@@ -158,6 +158,8 @@ pub struct DecorGeom {
     z: i32,
     hit: DecorHit,
     opacity: f32,
+    /// 镜像：各源合成到 `w×h` 后再翻；外接框与命中矩形不变。
+    flip: wind_theme::Flip,
     /// 动画：fps 覆盖与帧预算份额（各源同一份额）。
     fps: Option<f32>,
     budget: usize,
@@ -170,6 +172,8 @@ pub struct DecorGeom {
     /// 此刻画哪个源的第几帧（保留帧下标）；`still` 是初始状态首帧（关动画、避让遮罩用）。
     cur: (usize, usize),
     still: (usize, usize),
+    /// 此刻的片段与片段内帧号（预览回执用）。
+    pose: (crate::skin_anim::ClipId, usize),
 }
 
 /// 装饰用到的一个文件。
@@ -180,6 +184,8 @@ struct DecorSource {
     k: f32,
     /// 已按动画解出帧；否则按静态图画（首帧）。
     animated: bool,
+    /// 保留帧下标 × 它 = 原始帧号；None = 有帧解码失败、映射不可靠。只给预览回执用。
+    raw_stride: Option<usize>,
 }
 
 /// 一段片段：哪个源、从第几个保留帧起、各帧时长。
@@ -249,6 +255,7 @@ impl DecorGeom {
                 src.k,
                 self.fps,
                 self.budget,
+                self.flip,
                 frame,
                 self.opacity,
             );
@@ -263,6 +270,7 @@ impl DecorGeom {
                 src.k,
                 &whole,
                 &whole,
+                self.flip,
                 self.opacity,
             );
         }
@@ -273,6 +281,13 @@ impl DecorGeom {
 pub struct SkinGeom {
     /// 求它时的变体（竖排, 嵌入）。
     variant_key: (bool, bool),
+    /// 实际所用的变体键（嵌入回退后）。
+    variant: &'static str,
+    /// 所选窗体源图在主题里的引用，及它与 `frame.image` 的像素比（拉伸带换算用）。
+    frame_ref: String,
+    band_f: f32,
+    /// 渲染缩放：设备像素 / dp。
+    render_scale: f32,
     frame_path: String,
     /// 窗体图集倍率：设备像素 / 所选窗体图源像素。
     frame_k: f32,
@@ -386,6 +401,35 @@ impl SkinGeom {
             })
             .collect()
     }
+
+    /// 各装饰的矩形与鼠标策略，按 z 升序（与绘制同序）。
+    pub fn host_decor(&self) -> Vec<super::host_regions::HostDecor> {
+        self.decor
+            .iter()
+            .zip(&self.decor_rects)
+            .map(|(d, &(x, y, w, h))| super::host_regions::HostDecor {
+                index: d.index,
+                hit: d.hit,
+                under: d.z < 0,
+                rect: [x, y, w as i32, h as i32],
+            })
+            .collect()
+    }
+
+    /// 输入区的退化形：窗体矩形 + 非穿透装饰矩形（可能互相重叠，宿主按并集用）。
+    pub fn coarse_input_rects(&self) -> Vec<[i32; 4]> {
+        let (x, y, w, h) = self.frame;
+        std::iter::once([x, y, w as i32, h as i32])
+            .chain(
+                self.host_decor()
+                    .into_iter()
+                    .filter(|d| d.hit != DecorHit::Pass)
+                    .map(|d| d.rect),
+            )
+            .filter(|r| r[2] > 0 && r[3] > 0)
+            .collect()
+    }
+
     /// 能点的装饰（`drag` / `block`）：(变体下标, 矩形, 在窗体下面)，按 z 升序（后者在上）。
     pub fn click_rects(&self) -> Vec<(usize, Rect, bool)> {
         self.decor
@@ -469,6 +513,13 @@ impl SkinGeom {
         }
     }
 
+    /// 同 [`Self::collect_part_hits`]，收的是节点身份（[`View::node`]）。
+    pub fn collect_part_nodes(&self, out: &mut Vec<(u8, Rect)>) {
+        for p in &self.parts {
+            p.view.collect_nodes(out);
+        }
+    }
+
     /// 有没有 `hit = "pass"` 的装饰。
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn has_pass(&self) -> bool {
@@ -534,9 +585,228 @@ impl SkinGeom {
             self.frame_k,
             &self.sx,
             &self.sy,
+            wind_theme::Flip::NONE,
             1.0,
         );
         paint_decor(buf, &|z| (0..Z_OVER_CONTENT).contains(&z));
+    }
+}
+
+/// 实际所用的变体键：嵌入没配回退非嵌入（同 [`RvSkin::variant`]）。
+fn variant_name(skin: &RvSkin, vertical: bool, embedded: bool) -> &'static str {
+    let own = if vertical {
+        &skin.vertical_embedded
+    } else {
+        &skin.horizontal_embedded
+    };
+    match (vertical, embedded && own.is_some()) {
+        (false, false) => "horizontal",
+        (true, false) => "vertical",
+        (false, true) => "horizontal_embedded",
+        (true, true) => "vertical_embedded",
+    }
+}
+
+/// 动画时间轴 → 保留帧换回原始帧号的步长；静态图（没解帧）为 1。
+fn raw_stride(layout: Option<&crate::image_cache::AnimLayout>) -> Option<usize> {
+    match layout {
+        None => Some(1),
+        Some(l) => l.aligned.then_some(l.stride.max(1)),
+    }
+}
+
+/// 皮肤几何的只读快照，给编辑器叠加层（[`super::render_candidate`] 出图时才取，实时窗口不取）。
+/// 矩形与点一律是**设备像素、窗口缓冲坐标**（与出图同一坐标系，含装饰外扩）。
+#[derive(Clone, Debug)]
+pub struct SkinSnapshot {
+    /// 实际所用的变体键（嵌入变体没配时是回退到的非嵌入变体）。
+    pub variant: &'static str,
+    /// 主坐标（`skin.density` 源像素）→ 设备像素。
+    pub k: f32,
+    /// 渲染缩放：设备像素 / dp（= `k × skin.density`）。
+    pub render_scale: f32,
+    /// 所选的窗体源图（主题里的引用：`frame.image` 或 srcset 的某一份）。
+    pub frame_source: String,
+    /// 窗体最小尺寸（固定段之和）。
+    pub min_size: (f32, f32),
+    pub frame: Rect,
+    pub content: Rect,
+    /// 两轴的切片映射：`src` 是 `frame.image` 的源像素（与 `stretch_x/y` 同坐标；选了 srcset 的
+    /// 另一份时已按 density 换回），`dst` 是缓冲坐标。
+    pub axis_x: Vec<SkinAxisSeg>,
+    pub axis_y: Vec<SkinAxisSeg>,
+    /// 分槽位布局各块（stack 布局为空）。
+    pub slots: Vec<SkinSlotRect>,
+    pub decor: Vec<SkinDecorRect>,
+    /// 下方 / 上方时对齐光标的点。
+    pub caret_below: (f32, f32),
+    pub caret_above: (f32, f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkinAxisSeg {
+    pub src: (f32, f32),
+    pub dst: (f32, f32),
+    /// None = 固定段。
+    pub fill: Option<BandFill>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SkinSlotRect {
+    pub kind: SlotKind,
+    /// 锚在内容框上（否则窗体）。
+    pub on_content: bool,
+    pub rect: Rect,
+}
+
+#[derive(Clone, Debug)]
+pub struct SkinDecorRect {
+    /// 在求值后变体 `decor`（已按 z 稳定排序）里的下标，即 `click:<N>` 事件用的那个；
+    /// 渲染时求值失败的装饰不在，下标可能不连续。
+    pub index: usize,
+    /// 在 TOML `[[skin.<变体>.decor]]` 里的原始下标（编辑器按它对回模型）；指定义这张变体表的
+    /// 那份 TOML（变体继承自 base 时是 base 的）。
+    pub src_index: usize,
+    pub rect: Rect,
+    pub z: i32,
+    pub hit: DecorHit,
+    /// 镜像（只翻像素，`rect` 不变）。
+    pub flip: wind_theme::Flip,
+    /// 此刻的片段：`states` 的名字、`on.<事件>`（一次性片段），None = 整个装饰文件。
+    pub clip: Option<String>,
+    /// 片段内第几帧。
+    pub frame: usize,
+    /// 此刻画的是所在文件的第几个原始帧；None = 有帧解码失败、对不上。
+    pub raw: Option<usize>,
+}
+
+/// 事件名（与主题 `on` 表的键同一写法）。
+fn event_name(ev: DecorEvent) -> String {
+    match ev {
+        DecorEvent::Show => "show".into(),
+        DecorEvent::Hide => "hide".into(),
+        DecorEvent::Typing => "typing".into(),
+        DecorEvent::Backspace => "backspace".into(),
+        DecorEvent::Page => "page".into(),
+        DecorEvent::Empty => "empty".into(),
+        DecorEvent::Commit => "commit".into(),
+        DecorEvent::ModeCn => "mode_cn".into(),
+        DecorEvent::ModeEn => "mode_en".into(),
+        DecorEvent::Idle(n) => format!("idle_{n}s"),
+        DecorEvent::Click => "click".into(),
+    }
+}
+
+fn rect_of((x, y, w, h): (i32, i32, u32, u32)) -> Rect {
+    Rect {
+        x: x as f32,
+        y: y as f32,
+        w: w as f32,
+        h: h as f32,
+    }
+}
+
+impl SkinGeom {
+    /// 本帧几何的只读拷贝。`skin` 须是求这份几何时的皮肤（取变体名、源图 density 与片段名）。
+    pub fn snapshot(&self, skin: &RvSkin) -> Option<SkinSnapshot> {
+        let (vertical, embedded) = self.variant_key;
+        let v = skin.variant(vertical, embedded)?;
+        let band_f = self.band_f;
+        let frame = rect_of(self.frame);
+        let content = self.content_rect(frame);
+        // 与 `skin_metrics` / 图集同一套倍率取整，切片边界才与画出来的一致。
+        let axes = crate::view::image_src_size(&self.frame_path).map(|(sw, sh)| {
+            let k_micro = ((self.frame_k * 1_000_000.0).round() as u32).max(1);
+            let fk = k_micro as f32 / 1_000_000.0;
+            let axis = |s: &Stretch, src_len: u32, dst_len: u32, origin: f32| {
+                let atlas = crate::skin::atlas_len(src_len, fk);
+                let segs = crate::skin::src_segments(s, src_len as f32);
+                let to_src = |a: u32| a as f32 * src_len as f32 / atlas as f32 / band_f;
+                crate::skin::map_axis(&segs, src_len as f32, atlas, dst_len)
+                    .into_iter()
+                    .map(|m| SkinAxisSeg {
+                        src: (to_src(m.a0), to_src(m.a1)),
+                        dst: (origin + m.d0 as f32, origin + m.d1 as f32),
+                        fill: m.fill,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            (
+                axis(&self.sx, sw, self.frame.2, frame.x),
+                axis(&self.sy, sh, self.frame.3, frame.y),
+            )
+        });
+        let (axis_x, axis_y) = axes.unwrap_or_default();
+        let slots = self
+            .parts
+            .iter()
+            .zip(self.part_positions(frame.w, frame.h))
+            .map(|(p, (x, y))| SkinSlotRect {
+                kind: p.kind,
+                on_content: self
+                    .slot_of(p.kind)
+                    .is_some_and(|s| s.anchor.on == AnchorBox::Content),
+                rect: Rect {
+                    x: frame.x + x,
+                    y: frame.y + y,
+                    w: p.w,
+                    h: p.h,
+                },
+            })
+            .collect();
+        let decor = self
+            .decor
+            .iter()
+            .zip(&self.decor_rects)
+            .map(|(d, &r)| {
+                let anim = v.decor.get(d.index).map(|x| &x.anim);
+                let (clip, frame) = d.pose;
+                let clip = match clip {
+                    crate::skin_anim::ClipId::Base => None,
+                    crate::skin_anim::ClipId::State(i) => {
+                        anim.and_then(|a| a.states.get(i)).map(|(n, _)| n.clone())
+                    }
+                    crate::skin_anim::ClipId::On(i) => anim
+                        .and_then(|a| a.on.get(i))
+                        .map(|(ev, _)| format!("on.{}", event_name(*ev))),
+                };
+                let (si, kept) = d.cur;
+                SkinDecorRect {
+                    index: d.index,
+                    src_index: v.decor.get(d.index).map_or(d.index, |x| x.src_index),
+                    rect: rect_of(r),
+                    z: d.z,
+                    hit: d.hit,
+                    flip: d.flip,
+                    clip,
+                    frame,
+                    raw: d
+                        .sources
+                        .get(si)
+                        .and_then(|s| s.raw_stride)
+                        .map(|st| kept * st),
+                }
+            })
+            .collect();
+        let point = |c: wind_theme::skin::CaretPoint| {
+            let (x, y) = anchor_point(c.anchor, frame, content);
+            (x + c.offset[0] * self.k, y + c.offset[1] * self.k)
+        };
+        Some(SkinSnapshot {
+            variant: self.variant,
+            k: self.k,
+            render_scale: self.render_scale,
+            frame_source: self.frame_ref.clone(),
+            min_size: (self.min_w, self.min_h),
+            frame,
+            content,
+            axis_x,
+            axis_y,
+            slots,
+            decor,
+            caret_below: point(self.placement.caret),
+            caret_above: point(self.placement.caret_above),
+        })
     }
 }
 
@@ -595,11 +865,12 @@ impl SkinGeom {
                 .collect();
             let _ = writeln!(
                 out,
-                "  decor[{}] rect={rect:?} z={} hit={:?} opacity={:?} fps={:?} cur={:?} still={:?} 摘要 {:016x}\n    sources={}",
+                "  decor[{}] rect={rect:?} z={} hit={:?} opacity={:?} flip={} fps={:?} cur={:?} still={:?} 摘要 {:016x}\n    sources={}",
                 d.index,
                 d.z,
                 d.hit,
                 d.opacity,
+                d.flip.name().unwrap_or("-"),
                 d.fps,
                 d.cur,
                 d.still,
@@ -708,6 +979,7 @@ impl CandidateScene {
                     _ => Machine::still(spec, &*d),
                 };
                 d.cur = d.locate(pose);
+                d.pose = (pose.clip, pose.frame);
                 next = [next, pose.next].into_iter().flatten().min();
             }
         }
@@ -717,6 +989,51 @@ impl CandidateScene {
     /// 下一次换帧时刻（距动画时间轴起点）；None = 本帧没有在播的动画。
     pub fn next_anim_at(&self) -> Option<std::time::Duration> {
         self.anim_next
+    }
+
+    /// 不早于 `after` 的第一个**画面会变**的时刻：逐个边界试推各装饰的状态机副本，帧号与本帧
+    /// 画上去的相同的边界跳过。限帧推送时用——只在闸门处取样的话，周期恰为
+    /// 闸门整数倍的快循环每次都采到同一帧（设计 §17.1）。None = 之后不会再变。
+    pub fn next_anim_change(
+        &self,
+        inp: &CandidateSceneInput,
+        after: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        /// 一块装饰最多试推的边界数；超了就在那儿醒一次再算，不让这里成为热点。
+        const MAX_STEPS: usize = 256;
+        self.anim_next?;
+        let g = self.skin_geom.as_ref()?;
+        let v = inp
+            .theme
+            .skin
+            .as_ref()?
+            .variant(inp.vertical, inp.preedit_embedded)?;
+        let mut best: Option<std::time::Duration> = None;
+        for d in &g.decor {
+            let (Some(spec), Some(m)) = (
+                v.decor.get(d.index).map(|x| &x.anim),
+                self.decor_anims.get(d.index),
+            ) else {
+                continue;
+            };
+            let mut m = m.clone();
+            let mut t = after;
+            for step in 0.. {
+                if best.is_some_and(|b| b <= t) {
+                    break;
+                }
+                let pose = m.seek(spec, t, d);
+                if d.locate(pose) != d.cur || step == MAX_STEPS {
+                    best = Some(t);
+                    break;
+                }
+                match pose.next {
+                    Some(n) if n > t => t = n,
+                    _ => break,
+                }
+            }
+        }
+        best
     }
 
     /// 同一条皮肤告警只报一次（几何每帧重求）。
@@ -798,6 +1115,36 @@ impl CandidateScene {
         changed
     }
 
+    /// 皮肤图（窗体、装饰主图）的源：按明暗取 `[resources]` 的变体。几何按图的像素尺寸求，
+    /// 暗色那张与亮色尺寸不同、或读不出而亮色读得出时，告警、改用亮色那张——拉伸带、`content`
+    /// 只写一份，换个尺寸就对不上；整套退回普通窗口又不值。只读文件头比尺寸（结果缓存）。
+    /// 任一侧是 SVG 照旧返回暗色那张，交给调用方的 SVG 告警。
+    fn skin_image_path(&self, theme: &wind_theme::Resolved, reference: &str) -> Option<String> {
+        let path = crate::theme_assets::asset_path(theme, reference)?;
+        let Some(light) = crate::theme_assets::light_asset_path(theme, reference) else {
+            return Some(path);
+        };
+        if crate::image_cache::is_svg_source(&path) || crate::image_cache::is_svg_source(&light) {
+            return Some(path);
+        }
+        let Some((lw, lh)) = crate::view::image_header_size(&light) else {
+            return Some(path);
+        };
+        match crate::view::image_header_size(&path) {
+            Some((dw, dh)) if (dw, dh) == (lw, lh) => Some(path),
+            Some((dw, dh)) => {
+                self.warn_skin_once(format!(
+                    "skin: {reference} 的暗色图 {dw}x{dh} 与亮色图 {lw}x{lh} 尺寸不同，改用亮色图"
+                ));
+                Some(light)
+            }
+            None => {
+                self.warn_skin_once(format!("skin: {reference} 的暗色图读不出，改用亮色图"));
+                Some(light)
+            }
+        }
+    }
+
     fn compute_skin_geom(&self, inp: &CandidateSceneInput, anim_allowed: bool) -> Option<SkinGeom> {
         let skin = inp.theme.skin.as_ref()?;
         let v = skin.variant(inp.vertical, inp.preedit_embedded)?;
@@ -806,7 +1153,7 @@ impl CandidateScene {
         // 渲染缩放：设备像素 / dp。
         let render_scale = k * skin.density;
         let (src_ref, src_density) = pick_source(v, render_scale);
-        let frame_path = crate::theme_assets::asset_path(inp.theme, src_ref)?;
+        let frame_path = self.skin_image_path(inp.theme, src_ref)?;
         if crate::image_cache::is_svg_source(&frame_path) {
             tracing::warn!("skin: 窗体图须为位图（SVG 不支持多段切片），回退普通窗口");
             return None;
@@ -816,6 +1163,7 @@ impl CandidateScene {
         let sx = scale_stretch(&v.frame.stretch_x, band_f);
         let sy = scale_stretch(&v.frame.stretch_y, band_f);
         let frame_k = render_scale / src_density;
+        let frame_ref = src_ref.to_string();
         // 倍率来自主题（density）：窗体图集超出位图上限就整套回退，不去分配它。
         if let Some((sw, sh)) = crate::view::image_src_size(&frame_path)
             && !crate::skin::fits_image_limits(
@@ -847,7 +1195,18 @@ impl CandidateScene {
             .iter()
             .enumerate()
             .filter_map(|(i, d)| {
-                let main = crate::theme_assets::asset_path(inp.theme, &d.image)?;
+                let main = self.skin_image_path(inp.theme, &d.image)?;
+                // 装饰走位图图集（`skin_fill` 对 SVG 不出图）：明说，别静默不画。同窗体。
+                let svg = |path: &str, name: &str| {
+                    let is = crate::image_cache::is_svg_source(path);
+                    if is {
+                        self.warn_skin_once(format!("skin: decor 不支持 SVG（{name}），不画"));
+                    }
+                    is
+                };
+                if svg(&main, &d.image) {
+                    return None;
+                }
                 let mut names: Vec<&str> = Vec::new();
                 let clips =
                     d.anim
@@ -867,7 +1226,10 @@ impl CandidateScene {
                 }
                 let extra: Vec<(&str, Option<String>)> = names
                     .into_iter()
-                    .map(|n| (n, crate::theme_assets::asset_path(inp.theme, n)))
+                    .map(|n| {
+                        let p = crate::theme_assets::asset_path(inp.theme, n);
+                        (n, p.filter(|p| !svg(p, n)))
+                    })
                     .collect();
                 // 关着动画也要解帧的唯一情形：初始状态从装饰文件的非 0 帧起。
                 let still_needs_frames = d.anim.initial.is_some_and(
@@ -908,7 +1270,7 @@ impl CandidateScene {
                     let sw = crate::view::image_src_size(path).map_or(sw, |(w, _)| w);
                     let k = w as f32 / sw.max(1) as f32;
                     let layout = decode
-                        .then(|| crate::view::anim_layout(path, k, w, h, d.fps, budget))
+                        .then(|| crate::view::anim_layout(path, k, w, h, d.fps, budget, d.flip))
                         .flatten();
                     (k, layout)
                 };
@@ -923,6 +1285,7 @@ impl CandidateScene {
                     path: main.clone(),
                     k: main_k,
                     animated: main_layout.is_some(),
+                    raw_stride: raw_stride(main_layout.as_ref()),
                 }];
                 let mut layouts = vec![main_layout];
                 let mut extra_idx: Vec<(&str, Option<usize>)> = Vec::new();
@@ -938,6 +1301,7 @@ impl CandidateScene {
                         path,
                         k,
                         animated: layout.is_some(),
+                        raw_stride: raw_stride(layout.as_ref()),
                     });
                     layouts.push(layout);
                     extra_idx.push((name, Some(sources.len() - 1)));
@@ -993,6 +1357,7 @@ impl CandidateScene {
                     z: d.z,
                     hit: d.hit,
                     opacity: d.opacity,
+                    flip: d.flip,
                     fps: d.fps,
                     budget,
                     sources,
@@ -1001,14 +1366,21 @@ impl CandidateScene {
                     on,
                     cur: (0, 0),
                     still: (0, 0),
+                    pose: (crate::skin_anim::ClipId::Base, 0),
                 };
-                g.still = g.locate(crate::skin_anim::Machine::still(&d.anim, &g));
+                let still = crate::skin_anim::Machine::still(&d.anim, &g);
+                g.still = g.locate(still);
                 g.cur = g.still;
+                g.pose = (still.clip, still.frame);
                 Some(g)
             })
             .collect();
         Some(SkinGeom {
             variant_key: (inp.vertical, inp.preedit_embedded),
+            variant: variant_name(skin, inp.vertical, inp.preedit_embedded),
+            frame_ref,
+            band_f,
+            render_scale,
             frame_path,
             frame_k,
             sx,
@@ -1264,18 +1636,21 @@ mod tests {
             z: 1,
             hit: DecorHit::Block,
             opacity: 1.0,
+            flip: wind_theme::Flip::NONE,
             fps: None,
             budget: 0,
             sources: vec![DecorSource {
                 path: String::new(),
                 k: 1.0,
                 animated: false,
+                raw_stride: Some(1),
             }],
             base: ClipTl::whole(0, None),
             states: Vec::new(),
             on: Vec::new(),
             cur: (0, 0),
             still: (0, 0),
+            pose: (crate::skin_anim::ClipId::Base, 0),
         }
     }
 
@@ -1299,6 +1674,71 @@ mod tests {
         // 内容框左下角。
         let d = decor("content.bottom_left", Pos9::TOP_LEFT, (0.0, 0.0), 5, 5);
         assert_eq!(decor_rect(&d, frame, content), (10, 60, 5, 5));
+    }
+
+    /// 输入区退化形（§17.2）：窗体 + block / drag 装饰，穿透装饰与零面积的不进。
+    #[test]
+    fn coarse_input_rects_leave_out_pass_decor() {
+        let with = |hit, index| DecorGeom {
+            hit,
+            index,
+            ..decor("frame.top_left", Pos9::TOP_LEFT, (0.0, 0.0), 8, 8)
+        };
+        let g = SkinGeom {
+            variant_key: (false, false),
+            variant: "horizontal",
+            frame_ref: String::new(),
+            band_f: 1.0,
+            render_scale: 1.0,
+            frame_path: String::new(),
+            frame_k: 1.0,
+            sx: Stretch::Fixed,
+            sy: Stretch::Fixed,
+            min_w: 0.0,
+            min_h: 0.0,
+            insets: Edges::default(),
+            placement: Default::default(),
+            slots: None,
+            parts: Vec::new(),
+            decor: vec![
+                with(DecorHit::Block, 0),
+                with(DecorHit::Pass, 1),
+                with(DecorHit::Drag, 2),
+                with(DecorHit::Block, 3),
+            ],
+            frame: (24, 24, 60, 40),
+            decor_rects: vec![
+                (0, 0, 24, 24),
+                (84, 0, 24, 24),
+                (84, 64, 8, 8),
+                (0, 64, 0, 8),
+            ],
+            margins: (24, 24, 24, 24),
+            k: 1.0,
+        };
+        assert_eq!(
+            g.coarse_input_rects(),
+            vec![[24, 24, 60, 40], [0, 0, 24, 24], [84, 64, 8, 8]]
+        );
+    }
+
+    #[test]
+    fn raw_stride_maps_kept_frames_back_unless_misaligned() {
+        use crate::image_cache::AnimLayout;
+        let l = |stride, aligned| AnimLayout {
+            durations: vec![100; 3],
+            stride,
+            raw_frames: 6,
+            aligned,
+        };
+        assert_eq!(raw_stride(None), Some(1), "静态图");
+        assert_eq!(
+            raw_stride(Some(&l(2, true))),
+            Some(2),
+            "隔帧丢弃后保留帧 × 2"
+        );
+        assert_eq!(raw_stride(Some(&l(0, true))), Some(1));
+        assert_eq!(raw_stride(Some(&l(2, false))), None, "有帧生成失败：对不上");
     }
 
     #[test]

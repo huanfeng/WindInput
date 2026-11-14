@@ -12,7 +12,9 @@
 #include "Codec.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace windlinux {
@@ -77,7 +79,18 @@ private:
 /// `absolute`（FLAG_ABSOLUTE_POS，用户固定位置）只做边界钳制、不翻转——固定点不跟光标走，
 /// 翻转只会让靠近屏幕底边的固定点被莫名弹到顶上。
 /// 坐标系：屏幕左上为原点、y 向下（X11 根窗口坐标 = wire 坐标）。
-Rect placePanel(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& workArea, bool absolute);
+/// `box`：窗口里该按它判越界与翻转的那块（皮肤的窗体，见 `candidateAnchorBox`），缺省整个窗口。
+/// 皮肤的透明外扩撞到屏幕边不算越界，否则内容会被推离光标。
+Rect placePanel(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& workArea, bool absolute,
+                const std::optional<Rect>& box = std::nullopt);
+
+/// 候选窗落位多一级：本次组合里拖过（`pin` = 拖到的**内容**左上）就按它摆，窗口 = 锚 − 本帧内容偏移，
+/// 只夹进工作区、不翻转；否则同 `placePanel`。优先级 锚 > 固定位置（absolute）> 跟随光标。锚记内容
+/// 左上而不是窗口左上：组合中途装饰外扩变了（换皮肤 / 换方向），内容仍停在拖到的地方。对位 Windows
+/// `drag_pin` + `drag_pin_margin`。
+Rect placeCandidate(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& workArea, bool absolute,
+                    const std::optional<std::pair<int32_t, int32_t>>& pin, int32_t contentX,
+                    int32_t contentY, const std::optional<Rect>& box = std::nullopt);
 
 /// 光栅浮层（CMD_OVERLAY_FRAME）的落位：返回**窗口**矩形（尺寸 = 位图尺寸）。服务端拿不到
 /// 屏幕几何，只给「首选点 + 备选点」或「锚点 + 留白」，这里按工作区选定，公式逐条对位
@@ -94,5 +107,57 @@ Rect placeOverlay(const OverlayFramePayload& p, const Rect& workArea, int32_t sh
 /// 命中测试：返回命中的候选下标（翻页按钮为 -1 上页 / -2 下页）；没命中返回 `kNoHit`。
 constexpr int32_t kNoHit = INT32_MIN;
 int32_t hitTest(const std::vector<CandidateHitRect>& rects, int32_t px, int32_t py);
+
+// ── 皮肤输入区（CMD_CANDIDATE_SKIN，设计 theme-skin-animation.md §17.3）──
+
+/// 候选窗该只在哪些矩形里接鼠标（位图像素，已裁进 `w × h`、去掉空矩形）。皮肤没带输入区表
+/// （普通主题、旧服务）返回空 optional：X11 复位成缺省输入区，Wayland 用整块候选窗。
+/// 带了表但裁完为空，返回空表——整窗都不接鼠标。
+std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin, uint32_t w,
+                                                      uint32_t h);
+
+/// 位图像素点 `(x, y)` 落在哪块可点的皮肤装饰上（`drag` / `block`；`pass` 不接鼠标），返回其
+/// `index`（服务端装饰状态机同号），没有返回 -1。重叠时取最上层（表按 z 升序，倒着找）；窗体内
+/// 的 under 装饰被窗体盖住，不算。对位 Windows `CandidateMouse::decor_at`。皮肤没启用返回 -1。
+/// 调用方先判候选命中：点在候选 / 翻页按钮上的不算装饰点击。
+int32_t decorAt(const CandidateSkin& skin, int32_t x, int32_t y);
+
+/// 位图像素点 `(x, y)` 是不是「不拖动的装饰区」：落在 `block` / `pass` 装饰的矩形里、且不在窗体内
+/// （窗体内的部分照样拖，同 Windows `on_decor_only` 与设计 §4）。皮肤没启用返回 false。`drag` 装饰不算。
+bool onNoDragDecor(const CandidateSkin& skin, int32_t x, int32_t y);
+
+/// 候选窗里该贴着光标摆的那块（位图像素）：皮肤启用且窗体在位图内时取窗体，否则整个位图。
+/// 皮肤的装饰可以外扩到窗体之外，落位要按窗体判（设计 §17.3「内容偏移」）。
+Rect candidateAnchorBox(const CandidateSkin& skin, uint32_t w, uint32_t h);
+
+/// Wayland 候选窗的贴法（设计 §17.3「内容偏移」）。合成器只按主 surface 摆位：
+/// - Whole：整张位图贴在主 surface 上（没有外扩，或锚块就是整张）；
+/// - Split：主 surface 只占锚块（透明、不收鼠标），整张位图放子 surface，位置 = −锚块左上；
+/// - Clip：没有 wl_subcompositor 或强制裁切时，只贴锚块左上起的部分（左 / 上外扩丢掉）。
+enum class WaylandSkinMode { Whole, Split, Clip };
+struct WaylandSkinPlan {
+    WaylandSkinMode mode = WaylandSkinMode::Whole;
+    /// 主 surface 原点在位图里的位置（位图像素）：Split / Clip 是锚块左上，Whole 是 (0,0)。
+    int32_t originX = 0, originY = 0;
+    /// 主 surface 的尺寸（位图像素）：Whole 整张，Split 锚块，Clip 位图扣掉左 / 上外扩。
+    uint32_t mainW = 0, mainH = 0;
+};
+WaylandSkinPlan planWaylandSkin(const Rect& anchor, uint32_t canvasW, uint32_t canvasH,
+                                bool haveSubcompositor, bool forceClip);
+/// `WINDINPUT_WAYLAND_SKIN_CLIP` 的值是否要求强制裁切（排障用；只认 "1"）。
+bool waylandSkinClipForced(const char* env);
+
+/// 位图像素矩形折成逻辑坐标（÷ scale）：向外取整，宽高至少 1。Wayland 输入区用。
+Rect toLogicalCover(const Rect& r, double scale);
+
+/// 这一帧能不能照原位贴（皮肤动画换帧）：帧带 `FRAME_FLAG_ANIM_FRAME`，且 SHM 里读到的就是通知的那一帧
+/// （`shmSeq == notifySeq`）。通知与 SHM 之间没有锁，读到更新的一帧时内容、尺寸可能都变了，按普通帧贴。
+bool animInPlace(uint32_t flags, uint32_t notifySeq, uint32_t shmSeq);
+
+/// 这一帧的内容偏移（候选帧尾的 `contentX/Y`）能不能用：偏移在通知里，像素与窗口坐标在 SHM 里，两者
+/// 之间没有锁。SHM 读到的就是通知的那一帧（`shmSeq == p.seq`）才返回，否则空——调用方沿用上一次的偏移
+/// （偏移只随皮肤 / 方向变，比按错帧的尺寸去拼更接近真值）。
+std::optional<std::pair<int32_t, int32_t>> frameContentOffset(const HostRenderFramePayload& p,
+                                                              uint32_t shmSeq);
 
 } // namespace windlinux

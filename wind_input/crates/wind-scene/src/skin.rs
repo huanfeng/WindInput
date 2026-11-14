@@ -273,26 +273,21 @@ fn weights(src_len: u32, dst_len: u32) -> Vec<(u32, Vec<f32>)> {
 /// 源图（未预乘 RGBA8）→ `dw×dh` 预乘 RGBA8。先预乘再滤波，半透明边缘不出黑边。
 pub fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let (dw, dh) = (dw.max(1), dh.max(1));
-    // 预乘成 f32。
-    let pre: Vec<[f32; 4]> = src
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|p| {
+    // 横向：逐行预乘成 f32 再滤波（不物化整张 f32 源图：大图上它是源图字节的 4 倍）。
+    let wx = weights(sw, dw);
+    let mut mid = vec![[0f32; 4]; (dw * sh) as usize];
+    let mut row = vec![[0f32; 4]; sw as usize];
+    for y in 0..sh as usize {
+        let src_row = &src[y * sw as usize * 4..(y + 1) * sw as usize * 4];
+        for (d, p) in row.iter_mut().zip(src_row.as_chunks::<4>().0) {
             let a = p[3] as f32 / 255.0;
-            [
+            *d = [
                 p[0] as f32 * a,
                 p[1] as f32 * a,
                 p[2] as f32 * a,
                 p[3] as f32,
-            ]
-        })
-        .collect();
-    // 横向。
-    let wx = weights(sw, dw);
-    let mut mid = vec![[0f32; 4]; (dw * sh) as usize];
-    for y in 0..sh as usize {
-        let row = &pre[y * sw as usize..(y + 1) * sw as usize];
+            ];
+        }
         for (x, (start, w)) in wx.iter().enumerate() {
             let mut acc = [0f32; 4];
             for (i, wi) in w.iter().enumerate() {

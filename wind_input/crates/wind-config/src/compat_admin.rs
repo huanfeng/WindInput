@@ -2393,6 +2393,120 @@ composition_start_pair_guard = true
         cleanup(&d, &u);
     }
 
+    // ───────────── 旧键 ignore_host_ime_close（读取别名）经设置端全链路 ─────────────
+
+    const LEGACY_SYS: &str = "[[apps]]\nprocess = \"X60.exe\"\nignore_host_ime_switch = true\n";
+    const LEGACY_USER: &str = "[[apps]]\nprocess = \"X60.exe\"\nignore_host_ime_close = false\nfuture_key = 3\n\n\
+                               [[apps]]\nprocess = \"Old.exe\"\nignore_host_ime_close = true\n";
+
+    fn legacy_dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let (d, u) = (tmp(&format!("{tag}_d")), tmp(&format!("{tag}_u")));
+        for (dir, text) in [(&d, LEGACY_SYS), (&u, LEGACY_USER)] {
+            let _ = std::fs::remove_dir_all(dir);
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(COMPAT_FILE_NAME), text).unwrap();
+        }
+        (d, u)
+    }
+
+    fn listed_rule(d: &Path, u: &Path, process: &str) -> Value {
+        let r = call("compat.list", json!({"section": "apps"}), d, u).unwrap();
+        r.value["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["process"] == json!(process))
+            .unwrap_or_else(|| panic!("列表里没有 {process}"))
+            .clone()
+    }
+
+    /// 用户文件写旧键：列表在新键下看到用户值，也不把旧键报成不认识的键。
+    #[test]
+    fn rpc_list_shows_legacy_key_under_the_new_key() {
+        let (d, u) = legacy_dirs("lg_list");
+        let x60 = listed_rule(&d, &u, "X60.exe");
+        let f = &x60["fields"]["ignore_host_ime_switch"];
+        assert_eq!(f["userValue"], json!(false), "{x60}");
+        assert_eq!(f["systemValue"], json!(true), "{x60}");
+        assert_eq!(x60["unknownKeys"], json!(["future_key"]), "{x60}");
+        assert!(x60["fields"].get("ignore_host_ime_close").is_none());
+        let old = listed_rule(&d, &u, "Old.exe");
+        assert_eq!(
+            old["fields"]["ignore_host_ime_switch"]["userValue"],
+            json!(true),
+            "{old}"
+        );
+        cleanup(&d, &u);
+    }
+
+    /// 对写了旧键的规则清除（patch null）/ 还原（resetField）：结果按新键算，文件里不残留旧键，
+    /// 不认识的键原样保留。
+    #[test]
+    fn rpc_clear_and_reset_field_on_a_legacy_key_leave_only_the_new_key() {
+        let (d, u) = legacy_dirs("lg_clear");
+        let r = call(
+            "compat.upsert",
+            json!({"section": "apps", "process": "X60.exe", "patch": {"ignore_host_ime_switch": null}}),
+            &d,
+            &u,
+        )
+        .unwrap();
+        assert!(r.wrote);
+        assert_eq!(
+            r.value["rule"]["fields"]["ignore_host_ime_switch"]["source"],
+            json!("cleared"),
+            "{}",
+            r.value
+        );
+        let text = std::fs::read_to_string(u.join(COMPAT_FILE_NAME)).unwrap();
+        assert!(!text.contains("ignore_host_ime_close"), "{text}");
+        assert!(
+            text.contains("unset = [\"ignore_host_ime_switch\"]"),
+            "{text}"
+        );
+        assert!(text.contains("future_key = 3"), "{text}");
+        cleanup(&d, &u);
+
+        let (d, u) = legacy_dirs("lg_reset");
+        let r = call(
+            "compat.resetField",
+            json!({"section": "apps", "process": "X60.exe", "key": "ignore_host_ime_switch"}),
+            &d,
+            &u,
+        )
+        .unwrap();
+        assert!(r.wrote);
+        let f = &r.value["rule"]["fields"]["ignore_host_ime_switch"];
+        assert_eq!(f["source"], json!("system"), "{}", r.value);
+        assert_eq!(f["value"], json!(true), "还原 = 继承出厂");
+        let text = std::fs::read_to_string(u.join(COMPAT_FILE_NAME)).unwrap();
+        assert!(!text.contains("ignore_host_ime_close"), "{text}");
+        assert!(text.contains("future_key = 3"), "{text}");
+        assert!(
+            text.contains("ignore_host_ime_switch = true"),
+            "别的规则里的旧键换成新键、值不变: {text}"
+        );
+        cleanup(&d, &u);
+    }
+
+    /// 导入含旧键的片段：不报不认识的键，落盘用新键。
+    #[test]
+    fn import_of_a_legacy_key_is_understood_and_persisted_as_the_new_key() {
+        let text = "[[apps]]\nprocess = \"New.exe\"\nignore_host_ime_close = true\n";
+        let mut l = layers(LEGACY_SYS, "");
+        let p = l.import_preview(text, ImportMode::Merge).unwrap();
+        assert!(p.ignored_keys.is_empty(), "{:?}", p.ignored_keys);
+        assert!(p.fallbacks.is_empty(), "{:?}", p.fallbacks);
+        l.import_apply(text, ImportMode::Merge).unwrap();
+        let row = user_row(&l, Section::Apps, "New.exe").expect("导入后应有用户条目");
+        assert_eq!(row.get("ignore_host_ime_switch"), Some(&json!(true)));
+        assert!(!row.contains_key("ignore_host_ime_close"));
+        assert!(
+            !l.render_user().unwrap().contains("ignore_host_ime_close"),
+            "落盘文本不残留旧键"
+        );
+    }
+
     #[test]
     fn rpc_import_dry_run_does_not_write() {
         let (d, u) = rpc_dirs("dry");

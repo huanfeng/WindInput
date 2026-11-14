@@ -15,7 +15,7 @@ import sys
 import time
 
 from dbus_next.aio import MessageBus
-from dbus_next import Variant  # noqa: F401  (保留：调试时常用)
+from dbus_next import Variant
 
 SERVICE = "org.fcitx.Fcitx5"
 IM_PATH = "/org/freedesktop/portal/inputmethod"
@@ -149,24 +149,25 @@ def candidate_window(classname="wind-candidate"):
 
 
 def xwd_to_png(xwd_bytes, png_path):
-    """把 `xwd -root` 的输出转成 PNG（只支持每像素 4 字节的 ZPixmap，Xvfb 24 位深就是它）。
+    """把 `xwd` 的输出转成 PNG（只支持每像素 3 或 4 字节的 ZPixmap）。
     返回 (宽, 高, 取像素函数)。不引第三方库：e2e 环境里没有 PIL。"""
     import struct
     import zlib
     hdr = struct.unpack(">25I", xwd_bytes[:100])
     header_size, width, height = hdr[0], hdr[4], hdr[5]
     byte_order, bpp, bytes_per_line, ncolors = hdr[7], hdr[11], hdr[12], hdr[19]
-    # 有合成器时 xwd 会在头里写 bits_per_pixel=24，实际每行仍按 4 字节/像素排（bytes_per_line
-    # = 宽×4）——以行宽为准。
-    assert bytes_per_line >= width * 4, f"只支持每像素 4 字节，头 {hdr[:20]}（bpp={bpp}）"
+    # 有 ARGB 窗口（合成器在）时 xwd 走多视觉路径：头里 bits_per_pixel=24，像素按 3 字节紧排，
+    # bytes_per_line 却仍是 宽×4（行尾空着）。按 bits_per_pixel 取，别按行宽推。
+    step = bpp // 8
+    assert step in (3, 4) and bytes_per_line >= width * step, f"不支持的像素格式，头 {hdr[:20]}"
     off = header_size + ncolors * 12
     data = xwd_bytes[off:off + bytes_per_line * height]
 
     def px(x, y):
-        i = y * bytes_per_line + x * 4
-        b = data[i:i + 4]
-        # LSBFirst(0)：内存里依次 B G R x
-        return (b[2], b[1], b[0]) if byte_order == 0 else (b[1], b[2], b[3])
+        i = y * bytes_per_line + x * step
+        b = data[i:i + step]
+        # LSBFirst(0)：内存里依次 B G R (x)；MSBFirst：(x) R G B
+        return (b[2], b[1], b[0]) if byte_order == 0 else tuple(b[step - 3:step])
 
     raw = bytearray()
     for y in range(height):
@@ -2023,6 +2024,472 @@ async def mode_icon_cases(bus, im):
     await c.ic.call_focus_out()
     await asyncio.sleep(0.2)
 
+# ── 异形皮肤（设计 theme-skin-animation.md §17）──────────────────────
+
+def png_bytes(w, h, rgba, frames=None):
+    """程序生成 PNG（RGBA8）；`frames` = [(rgba, 毫秒), …] 时生成 APNG（循环播放）。"""
+    import struct
+    import zlib
+
+    def chunk(tag, body):
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    def idat(px):
+        raw = bytearray()
+        for y in range(h):
+            raw.append(0)
+            raw.extend(px * w)
+        return zlib.compress(bytes(raw), 6)
+
+    out = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+    if not frames:
+        return out + chunk(b"IDAT", idat(rgba)) + chunk(b"IEND", b"")
+    out += chunk(b"acTL", struct.pack(">II", len(frames), 0))
+    seq = 0
+    for i, (px, ms) in enumerate(frames):
+        out += chunk(b"fcTL", struct.pack(">IIIIIHHBB", seq, w, h, 0, 0, ms, 1000, 0, 0))
+        seq += 1
+        if i == 0:
+            out += chunk(b"IDAT", idat(px))
+        else:
+            out += chunk(b"fdAT", struct.pack(">I", seq) + idat(px))
+            seq += 1
+    return out + chunk(b"IEND", b"")
+
+
+BLOCK_IDLE = bytes([0, 0, 0, 255])
+BLOCK_HIT = bytes([255, 0, 255, 255])
+SKIN_COLORS = [bytes([255, 0, 0, 255]), bytes([0, 255, 0, 255]), bytes([0, 0, 255, 255]),
+               bytes([255, 255, 0, 255])]
+
+
+def write_skin_theme(name):
+    """60×40 白窗体；右上外侧 24×24 穿透装饰（四色 APNG，每帧 100ms，z = 1）；左上外侧 24×24
+    block 装饰（两帧：常驻黑，点中切品红）。主题放用户层 themes/<name>/。"""
+    d = os.path.join(os.environ["W"], "xdg", "config", "WindInput", "themes", name)
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "frame.png"), "wb").write(png_bytes(60, 40, bytes([255, 255, 255, 255])))
+    open(os.path.join(d, "block.png"), "wb").write(
+        png_bytes(24, 24, None, [(BLOCK_IDLE, 100), (BLOCK_HIT, 100)]))
+    open(os.path.join(d, "pass.png"), "wb").write(
+        png_bytes(24, 24, None, [(c, 100) for c in SKIN_COLORS]))
+    open(os.path.join(d, "theme.toml"), "w").write(f"""[meta]
+name = "{name}"
+[skin]
+density = 1
+[skin.horizontal.frame]
+image = "frame.png"
+stretch_x = [[20, 40]]
+stretch_y = [[15, 25]]
+fill = "stretch"
+[skin.horizontal.content]
+left = 6
+top = 6
+right = 6
+bottom = 6
+[[skin.horizontal.decor]]
+image = "pass.png"
+anchor = "frame.top_right"
+pivot = "bottom_left"
+z = 1
+hit = "pass"
+[[skin.horizontal.decor]]
+image = "block.png"
+anchor = "frame.top_left"
+pivot = "bottom_right"
+hit = "block"
+[skin.horizontal.decor.states]
+idle = {{ frames = "0-0" }}
+hit = {{ frames = "1-1" }}
+[skin.horizontal.decor.on]
+click = {{ state = "hit" }}
+""")
+
+
+def pointer_window(x, y):
+    """指针挪到 (x, y)，返回指针下的顶层窗口 id（十进制串；根窗口为空串）。输入区（XShape
+    SK_INPUT）外的点会落到下面的窗口。"""
+    out = sh("xdotool", "mousemove", str(x), str(y), "getmouselocation", "--shell")
+    for line in out.splitlines():
+        if line.startswith("WINDOW="):
+            return line.split("=", 1)[1]
+    return ""
+
+
+async def skin_cases(bus, im):
+    """异形皮肤：穿透装饰不接鼠标、block 装饰与窗体接；透明外扩区不接；动图装饰按帧推。"""
+    write_skin_theme("e2e-skin")
+    await set_config("ui.theme.name", "e2e-skin")
+    c = await new_ctx(bus, im, "e2e-skin")
+    await c.ic.call_set_cursor_rect(300, 300, 2, 20)
+    await c.type("nihao")
+    win = await wait_window("wind-candidate", True)
+    check("皮肤：候选窗出现", win is not None and win[5], f"window={win}")
+    if not win or not win[5]:
+        return
+    wid, x, y, w, h, _ = win
+    print(f"  皮肤候选窗：{w}x{h} @ ({x},{y})", flush=True)
+    await asyncio.sleep(0.3)  # 等首帧贴完、输入区设好（CMD_CANDIDATE_SKIN 先于 CMD_HOST_RENDER_FRAME）
+    # 两块装饰都伸出窗体左上 / 右上 24px：窗口上缘 24px 是外扩区。
+    on_pass = pointer_window(x + w - 12, y + 12)
+    on_block = pointer_window(x + 12, y + 12)
+    on_gap = pointer_window(x + w // 2, y + 6)
+    on_frame = pointer_window(x + w // 2, y + 24 + (h - 24) // 2)
+    check("皮肤：穿透装饰上指针落到下面（不是候选窗）", on_pass != wid, f"pass={on_pass} cand={wid}")
+    check("皮肤：block 装饰接鼠标", on_block == wid, f"block={on_block} cand={wid}")
+    check("皮肤：外扩区的透明处不接鼠标", on_gap != wid, f"gap={on_gap} cand={wid}")
+    check("皮肤：窗体接鼠标", on_frame == wid, f"frame={on_frame} cand={wid}")
+    # 动图装饰：显示期间按帧换色（服务端推 FLAG_ANIM_FRAME 帧）。
+    seen = set()
+    for _ in range(12):
+        _, px = screenshot("skin_anim", wid)
+        seen.add(px(w - 12, 12))
+        await asyncio.sleep(0.1)
+    screenshot("skin_candidate", wid)
+    check("皮肤：穿透装饰画在候选窗里且按帧换色", len(seen) >= 2, f"采到 {seen}")
+    # 点 block 装饰：宿主报 skin.decor_click，服务端触发它的 click 事件（切到「hit」状态，品红）；
+    # 不选词、候选窗不收。
+    block_before = px(12, 12)
+    sh("xdotool", "mousemove", str(x + 12), str(y + 12), "click", "1")
+    await asyncio.sleep(0.4)
+    _, px2 = screenshot("skin_decor_click", wid)
+    check("皮肤：点 block 装饰触发它的 click 事件", px2(12, 12) != block_before,
+          f"点前 {block_before} 点后 {px2(12, 12)}")
+    shown = candidate_window()
+    check("皮肤：点装饰不上屏、候选窗不收", c.take() == "" and bool(shown and shown[5]),
+          f"window={shown}")
+    # 打字续帧时窗口不动、穿透照旧（输入区随新帧重设）。
+    await c.type("n")
+    await asyncio.sleep(0.4)
+    win2 = candidate_window()
+    on_pass2 = pointer_window(win2[1] + win2[3] - 12, win2[2] + 12) if win2 else ""
+    check("皮肤：换内容后穿透装饰仍不接鼠标", win2 is not None and on_pass2 != win2[0],
+          f"window={win2} pass={on_pass2}")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    c.take()
+    # 换回普通主题：输入区复位（整窗接鼠标，窗口右上角那一点又是候选窗）。
+    await set_config("ui.theme.name", "default")
+    await c.type("nihao")
+    win3 = await wait_window("wind-candidate", True)
+    await asyncio.sleep(0.3)
+    if win3:
+        inside = pointer_window(win3[1] + win3[3] // 2, win3[2] + win3[4] // 2)
+        check("皮肤：换回普通主题后候选窗照常接鼠标", inside == win3[0],
+              f"inside={inside} cand={win3[0]}")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    c.take()
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+
+def write_drag_skin_theme(name):
+    """60×40 白窗体；左上外侧 24×24 block 装饰（黑），右上外侧 24×24 drag 装饰（绿）。"""
+    d = os.path.join(os.environ["W"], "xdg", "config", "WindInput", "themes", name)
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "frame.png"), "wb").write(png_bytes(60, 40, bytes([255, 255, 255, 255])))
+    open(os.path.join(d, "block.png"), "wb").write(png_bytes(24, 24, BLOCK_IDLE))
+    open(os.path.join(d, "drag.png"), "wb").write(png_bytes(24, 24, bytes([0, 255, 0, 255])))
+    open(os.path.join(d, "theme.toml"), "w").write(f"""[meta]
+name = "{name}"
+[skin]
+density = 1
+[skin.horizontal.frame]
+image = "frame.png"
+stretch_x = [[20, 40]]
+stretch_y = [[15, 25]]
+fill = "stretch"
+[skin.horizontal.content]
+left = 6
+top = 6
+right = 6
+bottom = 6
+[[skin.horizontal.decor]]
+image = "block.png"
+anchor = "frame.top_left"
+pivot = "bottom_right"
+hit = "block"
+[[skin.horizontal.decor]]
+image = "drag.png"
+anchor = "frame.top_right"
+pivot = "bottom_left"
+hit = "drag"
+""")
+
+
+def candidate_config_int(key):
+    """用户 config.toml 里 `[ui.candidate]` 段的整数键（状态气泡段有同名键，不能按行首直接搜）。"""
+    import re
+    m = re.search(r"^\[ui\.candidate\]\s*$(.*?)(?=^\[|\Z)", user_config(), re.M | re.S)
+    return config_int(m.group(1), key) if m else None
+
+
+def candidate_drag_reports():
+    return sum("候选窗拖动松手" in l for l in fcitx_log_lines())
+
+
+async def candidate_drag_cases(bus, im):
+    """候选窗本端拖动（X11，设计 §17.7）：空白处与 drag 装饰起拖、block 装饰不拖；本次组合内续帧
+    按拖动锚摆，收起后回到光标旁；固定位置模式下 pos.candidate.query 应答与松手上报都是内容左上，
+    重显不漂。"""
+    write_drag_skin_theme("e2e-skin-drag")
+    await set_config("ui.theme.name", "e2e-skin-drag")
+    c = await new_ctx(bus, im, "e2e-cand-drag")
+    await c.ic.call_set_cursor_rect(300, 300, 2, 20)
+    sh("xdotool", "mousemove", "5", "5")
+    await c.type("nihao")
+    w0 = await wait_window("wind-candidate", True)
+    check("拖动：候选窗出现", w0 is not None and w0[5], f"window={w0}")
+    if not w0 or not w0[5]:
+        return
+    await asyncio.sleep(0.3)
+    wid, x0, y0, _, _, _ = w0
+    # 窗体左上内边距里（两块装饰都伸出窗体上方 24px、左侧 24px）：空白处。
+    bx, by = 24 + 2, 24 + 2
+
+    async def moved_by(px, py, dx, dy):
+        before = candidate_window()
+        await drag(before[1] + px, before[2] + py, dx, dy)
+        after = candidate_window()
+        return before, after, (after[1] - before[1], after[2] - before[2])
+
+    n0 = candidate_drag_reports()
+    _, w1, d = await moved_by(bx, by, 80, 50)
+    check("拖动：按住空白处拖动，窗口跟手", d == (80, 50), f"位移={d}")
+    check("拖动：松手上报 pos.candidate", candidate_drag_reports() == n0 + 1,
+          f"上报 {candidate_drag_reports() - n0} 次")
+    check("拖动：没选词", c.take() == "")
+    await c.type("n")
+    await asyncio.sleep(0.4)
+    w2 = candidate_window()
+    check("拖动：组合内续帧按拖动锚摆（不弹回光标旁）", (w2[1], w2[2]) == (w1[1], w1[2]),
+          f"拖后={w1} 续帧={w2}")
+    _, _, d = await moved_by(12, 12, 60, 40)
+    check("拖动：block 装饰上按住拖不动", d == (0, 0), f"位移={d}")
+    _, _, d = await moved_by(w2[3] - 12, 12, -40, 30)
+    check("拖动：drag 装饰上能拖", d == (-40, 30), f"位移={d}")
+    # 没过阈值的松开是点击，不是拖动：窗口不动、不报。
+    n1 = candidate_drag_reports()
+    _, _, d = await moved_by(bx, by, 3, 3)
+    check("拖动：阈值内松开不算拖", d == (0, 0) and candidate_drag_reports() == n1,
+          f"位移={d} 上报 {candidate_drag_reports() - n1} 次")
+    cfg = candidate_config_int("custom_x")
+    check("拖动：跟随光标模式下不落盘", cfg in (None, 0), f"custom_x={cfg}")
+    await c.key("Escape")
+    c.take()
+    await c.type("nihao")
+    await asyncio.sleep(0.4)
+    w3 = await wait_window("wind-candidate", True)
+    check("拖动：收起后再输入回到光标旁", w3 is not None and (w3[1], w3[2]) == (x0, y0),
+          f"首显={w0} 再显={w3}")
+
+    # 固定位置：显示中切过去 → 服务端问 pos.candidate.query → 以当前位置落盘（内容左上）。
+    await set_config("ui.candidate.position_mode", "fixed")
+    pinned = await wait_until(lambda: candidate_config_int("custom_x") is not None, 3)
+    fx, fy = candidate_config_int("custom_x"), candidate_config_int("custom_y")
+    off = (fx - w3[1], fy - w3[2]) if pinned else None
+    check("拖动：切固定位置时应答 pos.candidate.query，落盘内容左上", pinned and off[0] >= 24
+          and off[1] >= 24, f"custom=({fx},{fy}) 窗口=({w3[1]},{w3[2]})")
+    if not pinned:
+        return
+    _, w4, d = await moved_by(bx, by, -70, 40)
+    ok = await wait_until(lambda: (candidate_config_int("custom_x"),
+                                   candidate_config_int("custom_y")) == (fx - 70, fy + 40), 3)
+    check("拖动：固定位置模式下松手落盘（custom_x/y 随落点更新）", d == (-70, 40) and ok,
+          f"位移={d} custom=({candidate_config_int('custom_x')},{candidate_config_int('custom_y')})")
+    await c.key("Escape")
+    c.take()
+    await c.type("nihao")
+    await asyncio.sleep(0.4)
+    w5 = await wait_window("wind-candidate", True)
+    check("拖动：固定位置重显停在拖到的地方（不漂一截装饰外扩）",
+          w5 is not None and (w5[1], w5[2]) == (w4[1], w4[2]), f"拖后={w4} 重显={w5}")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    c.take()
+    await set_config("ui.candidate.position_mode", "follow_caret")
+    await set_config("ui.theme.name", "default")
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+
+NS_GNOME = "org.gnome.desktop.interface"
+NS_APPEARANCE = "org.freedesktop.appearance"
+NS_KDE = "org.kde.kdeglobals.KDE"
+
+
+class FakePortal:
+    """扮演设置门户（`org.freedesktop.portal.Settings`）。fcitx5 早于它起来：addon 首读落空，之后靠
+    门户上线时的重读、SettingChanged 信号或服务重启时的重读拿到值。
+
+    几处故意不规矩，验 addon 的容错（`DesktopMotion`）：
+    - `enable-animations`：第一次 `Read` 不回（addon 等到 NoReply 再重试），之后每次晚 3 秒才回（读超时
+      若还是 2 秒，重试也全落空）；
+    - KDE 的 `AnimationDurationFactor`：回包是裸 `d`，不是约定的 `v`（addon 不能去 peek，否则 fcitx5 abort）；
+    - 其余键答 NotFound。"""
+
+    def __init__(self, bus):
+        from dbus_next.service import ServiceInterface, signal
+
+        class Iface(ServiceInterface):
+            def __init__(self):
+                super().__init__("org.freedesktop.portal.Settings")
+
+            @signal()
+            def SettingChanged(self, namespace, key, value) -> "ssv":  # noqa: N802,F821
+                return [namespace, key, value]
+
+        self.animations = True
+        self.reads = 0  # 收到的 enable-animations 读取次数
+        self.iface = Iface()
+        self.bus = bus
+        bus.add_message_handler(self._on_message)
+
+    def _on_message(self, msg):
+        from dbus_next import Message, MessageType
+
+        if (msg.message_type != MessageType.METHOD_CALL or msg.member != "Read"
+                or msg.interface != "org.freedesktop.portal.Settings"):
+            return None
+        ns, key = msg.body
+        if (ns, key) == (NS_GNOME, "enable-animations"):
+            self.reads += 1
+            if self.reads == 1:
+                return True  # 不回：addon 那头等到 NoReply
+            # 旧接口 Read 的回包套两层 variant（ReadOne 才是一层）；值取回包那一刻的
+            asyncio.get_running_loop().call_later(3.0, lambda: self.bus.send(Message.new_method_return(
+                msg, "v", [Variant("v", Variant("b", self.animations))])))
+            return True
+        if (ns, key) == (NS_KDE, "AnimationDurationFactor"):
+            return Message.new_method_return(msg, "d", [0.0])
+        return Message.new_error(msg, "org.freedesktop.portal.Error.NotFound", "没有这个键")
+
+    async def start(self):
+        """接过 `org.freedesktop.portal.Desktop`。私有会话总线照样按本机的 .service 文件激活了真门户
+        （addon 首读时；它在这条总线上没有后端，一律答 UnknownMethod）：杀掉这个私有总线的子进程，
+        排队的名字随之落到本端。返回是否拿到。"""
+        from dbus_next.constants import RequestNameReply
+
+        name = "org.freedesktop.portal.Desktop"
+        self.bus.export("/org/freedesktop/portal/desktop", self.iface)
+        if await self.bus.request_name(name) == RequestNameReply.PRIMARY_OWNER:
+            return True
+        daemon = await self._daemon()
+        owner = await daemon.call_get_name_owner(name)
+        pid = await daemon.call_get_connection_unix_process_id(owner)
+        print(f"  私有总线上已有门户（pid {pid}），结束它", flush=True)
+        os.kill(pid, 15)
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if await daemon.call_get_name_owner(name) == self.bus.unique_name:
+                return True
+        return False
+
+    async def _daemon(self):
+        intro = await self.bus.introspect("org.freedesktop.DBus", "/org/freedesktop/DBus")
+        return self.bus.get_proxy_object("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                         intro).get_interface("org.freedesktop.DBus")
+
+    async def fcitx_alive(self):
+        return await (await self._daemon()).call_name_has_owner("org.fcitx.Fcitx5")
+
+    def changed(self, ns, key, value):
+        self.iface.SettingChanged(ns, key, value)
+
+    def changed_raw(self, ns, key, sig, value):
+        """发一条签名不合约定的 SettingChanged（第三个参数不是 variant）。"""
+        from dbus_next import Message, MessageType
+
+        self.bus.send(Message(message_type=MessageType.SIGNAL, path="/org/freedesktop/portal/desktop",
+                              interface="org.freedesktop.portal.Settings", member="SettingChanged",
+                              signature="ss" + sig, body=[ns, key, value]))
+
+    def set(self, animations):
+        self.animations = animations
+        self.changed(NS_GNOME, "enable-animations", Variant("b", animations))
+
+
+async def skin_anim_colors(c):
+    """打字显示皮肤候选窗，1 秒内采右上穿透装饰（四色动图）的像素，返回采到的颜色集合，再收起。"""
+    await c.type("nihao")
+    win = await wait_window("wind-candidate", True)
+    seen = set()
+    if win and win[5]:
+        await asyncio.sleep(0.3)
+        for _ in range(10):
+            _, px = screenshot("skin_motion", win[0])
+            seen.add(px(win[3] - 12, 12))
+            await asyncio.sleep(0.1)
+    await c.key("Escape")
+    c.take()
+    await asyncio.sleep(0.2)
+    return seen
+
+
+async def skin_motion_settled(c, frozen, tries=8):
+    """多显示几次，直到动图装饰冻结（`frozen`）或还在动；返回最后一次采到的颜色集合。"""
+    seen = set()
+    for _ in range(tries):
+        seen = await skin_anim_colors(c)
+        if (len(seen) == 1) == frozen:
+            break
+    return seen
+
+
+async def skin_motion_cases(bus, im):
+    """系统「减少动态效果」（§17.1）：addon 读设置门户报 host.reduce_motion，服务端冻结皮肤动画。"""
+    await set_config("ui.theme.name", "e2e-skin")
+    portal = FakePortal(bus)
+    portal.animations = False
+    check("减少动态效果：扮演设置门户", await portal.start())
+    c = await new_ctx(bus, im, "e2e-skin-motion")
+    await c.ic.call_set_cursor_rect(300, 300, 2, 20)
+    # 门户上线 → addon 重读一轮：KDE 键回裸 d（不能 abort）；签名不对的信号也不能 abort。
+    portal.changed_raw(NS_KDE, "AnimationDurationFactor", "d", 0.0)
+    await asyncio.sleep(1.0)
+    check("减少动态效果：门户回包 / 信号不是 variant 时 fcitx5 不退出", await portal.fcitx_alive())
+    # enable-animations 首读不回、重试晚 3 秒才回：5 秒超时 + 重试才拿得到「关动画」。
+    frozen = await skin_motion_settled(c, True, tries=10)
+    check("减少动态效果：门户上线后重读，首读没回音时重试拿到值", len(frozen) == 1
+          and portal.reads >= 2, f"采到 {frozen}，读了 {portal.reads} 次")
+    portal.set(True)
+    await asyncio.sleep(0.3)
+    moving = await skin_anim_colors(c)
+    check("减少动态效果：门户报开动画后皮肤动画恢复", len(moving) >= 2, f"采到 {moving}")
+    portal.set(False)
+    await asyncio.sleep(0.3)
+    frozen = await skin_anim_colors(c)
+    check("减少动态效果：门户报 GNOME 关动画后皮肤动画冻结", len(frozen) == 1, f"采到 {frozen}")
+    # reduced-motion 优先于 GNOME 的键：u = 0 → 不减少（压过上面的关动画），s "1" → 减少。
+    portal.changed(NS_APPEARANCE, "reduced-motion", Variant("u", 0))
+    await asyncio.sleep(0.3)
+    moving = await skin_anim_colors(c)
+    check("减少动态效果：reduced-motion（u）= 0 压过 GNOME 关动画", len(moving) >= 2, f"采到 {moving}")
+    portal.changed(NS_APPEARANCE, "reduced-motion", Variant("s", "1"))
+    await asyncio.sleep(0.3)
+    frozen = await skin_anim_colors(c)
+    check("减少动态效果：reduced-motion（s）= \"1\" 冻结", len(frozen) == 1, f"采到 {frozen}")
+    portal.changed(NS_APPEARANCE, "reduced-motion", Variant("s", "0"))
+    await asyncio.sleep(0.3)
+    restart = os.environ.get("WIND_E2E_RESTART")
+    if restart:
+        # 不发信号：新服务没有这个值，只能靠 addon 在 SERVICE_READY 时向门户重读（Read）再报。门户不认
+        # reduced-motion（NotFound）：addon 得丢掉上面信号给的 0，否则它压过 GNOME 的关动画、仍在动。
+        portal.animations = False
+        rc = await asyncio.to_thread(subprocess.run, [restart])
+        await c.ic.call_focus_in()
+        ready = await wait_ready(c)
+        # 新服务的 SERVICE_READY 晚于首次按键连上（约 1 秒），重读的回包晚 3 秒；值在下一次显示时生效。
+        again = await skin_motion_settled(c, True)
+        check("减少动态效果：服务重启后 addon 重读门户再报，读失败的键不留旧值", rc.returncode == 0
+              and ready and len(again) == 1, f"rc={rc.returncode} ready={ready} 采到 {again}")
+        portal.set(True)
+    await set_config("ui.theme.name", "default")
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+
 async def get_config(key):
     """经 `wind_input config get` 读在线服务的配置值（读不到返回空串）。"""
     svc = os.path.join(os.environ["W"], "svc", "wind_input")
@@ -2467,6 +2934,15 @@ async def main():
     if not await wait_ready(a):
         check("服务引擎就绪（120s 内开始组字）", False, "一直透传")
         return 1
+
+    if os.environ.get("WIND_E2E_ONLY") == "skin":
+        await a.ic.call_focus_out()
+        await skin_cases(bus, im)
+        await candidate_drag_cases(bus, im)
+        await skin_motion_cases(bus, im)
+        ok = all(results)
+        print(f"{'PASS' if ok else 'FAIL'} 总计 {sum(results)}/{len(results)}", flush=True)
+        return 0 if ok else 1
 
     # 1. 全拼 nihao + 空格 → 你好；组字期间有预编辑、上屏后预编辑清空
     eaten = await a.type("nihao")

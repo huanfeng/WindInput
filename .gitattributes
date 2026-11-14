@@ -12,3 +12,8 @@
 # 行尾规则牵一发动全身（见 memory 里那一串 CRLF 教训）。要给别的路径加规则时，先确认
 # 那批文件在仓库里存的就是 LF，否则会给所有人制造一次全文件 diff。
 .githooks/** text eol=lf
+
+# wind_cli.bat 由 dev.sh / 发布流程原样拷到 Windows 机器上跑：行尾是 LF 时 cmd 解析不了
+# （带标签的 bat 尤甚），任何参数都报 9009。Linux 侧 checkout 不会像 autocrlf 那样自动转，
+# 故显式钉死 CRLF。
+wind_input/scripts/wind_cli.bat text eol=crlf

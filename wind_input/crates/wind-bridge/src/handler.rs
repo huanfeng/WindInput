@@ -516,8 +516,8 @@ pub trait MessageHandler: Send + Sync {
     /// `source` 是发起方（宿主写 compartment / 按键兜底 / 功能菜单）；`ctrl_held` 是这次
     /// compartment 变化发生时 Ctrl 是否被按住，由 DLL 现场采样。
     ///
-    /// 两者一起构成 per-app `ignore_host_ime_close` 的判据：只有「compartment 来源 + 关
-    /// + Ctrl 未按住」才是宿主自作主张，其余（Ctrl+Space、按键兜底、菜单）一律照办。
+    /// 两者一起构成 `ignore_host_ime_switch` 的判据：只有「compartment 来源 + Ctrl 未按住」
+    /// 才是宿主自作主张（开和关两个方向），其余（Ctrl+Space、按键兜底、菜单）一律照办。
     ///
     /// ⚠ 除这一条规则外不要按 source 分支——语义上各来源一视同仁。
     fn handle_system_mode_switch(

@@ -2,6 +2,7 @@
 
 #include "Globals.h"
 #include "BinaryProtocol.h"
+#include "HostFrameSnapshot.h"
 #include <string>
 #include <vector>
 
@@ -64,17 +65,31 @@ public:
     DWORD GetProbedHostBand() const { return _probedHostBand; }
     DWORD GetRequestedBand() const { return _requestedBand; }
     BOOL HasOwner() const { return _hasOwner; }
+    // 候选窗的穿透装饰窗口建没建出来（落位上报用）。
+    BOOL HasPassWindow() const { return _hwndPass != NULL; }
 
 private:
     // Render thread entry point
     static DWORD WINAPI _RenderThread(LPVOID param);
     void _RenderLoop();
 
-    // Render one frame from shared memory
-    void _RenderFrame(const SharedRenderHeader* header, const void* pixelData);
+    // 一帧从 SHM 拷出来之后的样子（帧头只读一次、拷完复核过 sequence，见 HostFrameSnapshot.h）。
+    using FrameSnapshot = wind::hostframe::FrameSnapshot<SharedRenderHeader, HostRenderHitRect>;
+
+    // Render one frame (already copied out of shared memory)
+    void _RenderFrame(const FrameSnapshot& frame);
 
     // Hide the window
     void _HideWindow();
+
+    // UpdateLayeredWindow one BGRA frame (header geometry) into hwnd. pass (may be null) is a
+    // pass-through decor layer composited into the copy first (fallback when _hwndPass is missing).
+    BOOL _BlitLayered(HWND hwnd, const SharedRenderHeader* header, const void* pixels,
+                      const void* pass, bool passBelow);
+    // 本帧的 z 序：withPass 时主窗与穿透窗一次提交（DeferWindowPos），在上的那个 TOPMOST、另一个紧贴
+    // 其下；否则只摆主窗、收起穿透窗。
+    void _PlaceWindows(bool withPass, bool passBelow);
+    void _HidePassWindow();
 
     // Try to resolve CreateWindowInBand and GetWindowBand from user32.dll
     BOOL _ResolveAPIs();
@@ -96,10 +111,13 @@ private:
     // Send a hover notification (index + screen anchor) to Go; index<0 = left area.
     void _SendHover(int index);
     // Snapshot the embedded rect table for a freshly rendered frame (render thread).
-    void _UpdateHitRects(const SharedRenderHeader* header);
+    void _UpdateHitRects(const FrameSnapshot& frame);
 
     // Window state
     HWND _hwnd;
+    // 皮肤穿透装饰窗口（只候选窗有）：WS_EX_TRANSPARENT，与 _hwnd 同 band、同 owner、同位置同尺寸，
+    // 点击直达宿主（设计 theme-skin-animation.md §17.8）。建不出来为 NULL，穿透层合回主层。
+    HWND _hwndPass;
     ATOM _wndClassAtom;
     BOOL _active;
     DWORD _currentBand; // Band of the current window (0 if no window)
@@ -121,6 +139,8 @@ private:
 
     // Last rendered sequence (to skip stale frames)
     UINT32 _lastSequence;
+    // 渲染线程拷帧用的缓冲（只渲染线程碰；留作成员，显示期间免得每帧重新分配，收起时放掉）
+    FrameSnapshot _frame;
 
     // Function pointers for undocumented APIs
     typedef HWND (WINAPI* CreateWindowInBand_t)(

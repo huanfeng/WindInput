@@ -34,10 +34,11 @@ impl Coordinator {
         self.auto_phrase_enabled()
     }
 
-    /// 上屏后把文字喂进滑窗流。由 `note_commit_action` 统一调用。
+    /// 上屏后把文字喂进滑窗流。由 `finish_session_action` 按来源调用（见
+    /// `session_exit::exit_steps` 的 `draft`）。
     ///
     /// ⚠️ 判据取的是**一切真落屏的文字**（五种 `KeyAction` 变体），与
-    /// `note_commit_action` 的自提交打点同源，而**不是** `feed_auto_phrase` 那两种。
+    /// `note_self_commit` 的自提交打点同源，而**不是** `feed_auto_phrase` 那两种。
     /// 滑窗的对象是「最近落屏的文本流」，凡是落到屏幕上的字都该进流——
     /// 这正是「词组上屏不再中断造词」得以成立的地方。
     pub(crate) fn note_draft_commit(&self, action: &KeyAction) {

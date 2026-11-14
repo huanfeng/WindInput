@@ -61,6 +61,7 @@ struct Placement
     uint32_t requestedBand; // 据此决定往哪建
     uint32_t actualBand;    // GetWindowBand 复核的实际 band
     bool hasOwner;
+    bool hasPassWindow; // 候选窗的穿透装饰窗口建出来了（没建出来时穿透装饰合回主层、不能点穿）
 };
 
 // 落位上报的 JSON body。prev 非空 = 复核重建（trigger=recheck），带上被换掉那个窗口的
@@ -70,9 +71,10 @@ inline std::string PlacedBody(uint32_t pid, const Placement& now, const Placemen
 {
     char buf[320];
     int n = std::snprintf(buf, sizeof(buf),
-        "{\"pid\":%u,\"trigger\":\"%s\",\"probed\":%u,\"requested\":%u,\"actual\":%u,\"owner\":%s",
+        "{\"pid\":%u,\"trigger\":\"%s\",\"probed\":%u,\"requested\":%u,\"actual\":%u,\"owner\":%s,"
+        "\"pass\":%s",
         pid, prev ? "recheck" : "setup", now.probedBand, now.requestedBand, now.actualBand,
-        now.hasOwner ? "true" : "false");
+        now.hasOwner ? "true" : "false", now.hasPassWindow ? "true" : "false");
     std::string s(buf, (n > 0 && n < (int)sizeof(buf)) ? (size_t)n : 0);
     if (prev)
     {

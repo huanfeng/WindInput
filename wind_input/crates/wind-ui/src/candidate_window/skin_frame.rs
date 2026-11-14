@@ -68,6 +68,24 @@ impl CandidateWindow {
         self.skin_event_at(ev, only, std::time::Instant::now());
     }
 
+    /// 外部宿主报来的装饰点击（扩展信封 `skin.decor_click`）：给这块装饰触发 `click`。候选窗不在屏上
+    /// （点击晚于收起到达）时丢掉；当前这一帧没有这块可点的装饰（下标越界、`pass`、宿主还按换皮肤
+    /// 之前的那一帧报的）也丢掉——宿主的话只是线索，核对过才算数。
+    pub fn skin_decor_click(&mut self, index: usize) {
+        let known = self.scene.skin_geom.as_ref().is_some_and(|g| {
+            g.host_decor()
+                .iter()
+                .any(|d| d.index == index && d.hit != wind_theme::skin::DecorHit::Pass)
+        });
+        if !known {
+            tracing::debug!("skin.decor_click index={index} 不是当前帧可点的装饰，丢弃");
+            return;
+        }
+        if self.visible {
+            self.skin_event(DecorEvent::Click, Some(index));
+        }
+    }
+
     /// 同 [`Self::skin_event`]，时刻由调用方给（金样注入时间用）。
     pub(super) fn skin_event_at(
         &mut self,
@@ -288,6 +306,67 @@ mod tests {
         assert_eq!(px(0, 0)[3], 0);
     }
 
+    /// 切明暗走的是 `push_theme` → `SetTheme`：同一主题按新明暗重新求值后下发。窗体与装饰经
+    /// `[resources]` 的 `{ light, dark }` 引用时，窗口换上对应那张图，来回切不串。
+    #[test]
+    fn set_theme_with_other_dark_swaps_skin_images() {
+        let root = fixture_dir("light-dark");
+        let dir = root.join("ld");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        let px = |name: &str, w: u32, rgba: [u8; 4]| {
+            image::RgbaImage::from_pixel(w, w, image::Rgba(rgba))
+                .save(dir.join("assets").join(name))
+                .unwrap();
+        };
+        px("frame-light.png", 16, [200, 0, 0, 255]);
+        px("frame-dark.png", 16, [0, 200, 0, 255]);
+        px("dot-light.png", 6, [0, 0, 200, 255]);
+        px("dot-dark.png", 6, [200, 200, 0, 255]);
+        std::fs::write(
+            dir.join("theme.toml"),
+            "[meta]\nname = \"ld\"\n\
+             [resources]\n\
+             frame = { light = \"assets/frame-light.png\", dark = \"assets/frame-dark.png\" }\n\
+             dot = { light = \"assets/dot-light.png\", dark = \"assets/dot-dark.png\" }\n\
+             [skin.horizontal.frame]\nimage = \"frame\"\n\
+             stretch_x = [[4, 12]]\nstretch_y = [[4, 12]]\n\
+             [[skin.horizontal.decor]]\nimage = \"dot\"\nanchor = \"frame.top_right\"\n\
+             pivot = \"bottom_right\"\n",
+        )
+        .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut w =
+            CandidateWindow::new(super::super::CandidateWindowConfig::default(), tx).unwrap();
+        w.scale = 1.0;
+        w.set_orientation(false, false, false);
+        // 返回 (窗体左上, 装饰) 两点的 BGRA。
+        let mut paint = |dark: bool| {
+            let theme =
+                wind_theme::load_resolved_dirs(std::slice::from_ref(&root), "ld", dark).unwrap();
+            w.set_theme(theme);
+            w.update("", 0, "中", Vec::new(), 0, -1, 1, 1);
+            w.refresh_skin_geom();
+            let mut tree = w.scene.build_tree(&w.scene_input(false));
+            let (ml, mt, mr, mb) = w.scene.skin_layout(&mut tree, &w.text_renderer).unwrap();
+            let g = w.scene.skin_geom.as_ref().unwrap();
+            let (_, _, fw, fh) = g.frame_for_test();
+            let (bw, bh) = (fw + ml + mr, fh + mt + mb);
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            g.paint(&mut buf, bw, bh, false, false);
+            let at = |x: u32, y: u32| {
+                let o = ((y * bw + x) * 4) as usize;
+                [buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]
+            };
+            [at(ml, mt), at(bw - 1, 0)]
+        };
+        let light = [[0, 0, 200, 255], [200, 0, 0, 255]];
+        let dark = [[0, 200, 0, 255], [0, 200, 200, 255]];
+        for _ in 0..2 {
+            assert_eq!(paint(false), light);
+            assert_eq!(paint(true), dark);
+        }
+    }
+
     /// 按 `hit` 配一个挂在窗体右上外侧的装饰，返回「窗体外装饰上的一点是否不起拖」等三个判定。
     fn decor_no_drag(tag: &str, hit: Option<&str>) -> [bool; 3] {
         let mut w = fixture_window_hit(tag, hit);
@@ -493,6 +572,90 @@ mod tests {
         // 窗体只在主缓冲。
         assert_eq!(at(&main, ml, mt), 255);
         assert_eq!(at(&pass, ml, mt), 0);
+    }
+
+    /// DLL host-render（§17.8）：DLL 声明了穿透层能力时穿透装饰拆到 `pass_layer`，主层那里透明；
+    /// 没声明（旧 DLL）时合在主层里，不带 `pass_layer`。
+    #[cfg(windows)]
+    #[test]
+    fn host_frame_splits_pass_decor_only_when_asked() {
+        let mut w = fixture_window_hit("host-pass", Some("pass"));
+        w.update("", 0, "中", vec![cand("中")], 0, -1, 1, 1);
+        let alpha = |b: &[u8], bw: u32| b[((bw - 1) * 4 + 3) as usize];
+        let split = w.render_host_frame(true).expect("有内容应出帧");
+        let (pass, below) = split.pass_layer.as_ref().expect("要求拆层就有穿透层");
+        assert!(!below, "z = 1 在窗体上面");
+        assert_eq!(pass.len(), split.buf.len());
+        assert_eq!(
+            alpha(&split.buf, split.width),
+            0,
+            "主层右上角（穿透装饰处）透明"
+        );
+        assert_eq!(alpha(pass, split.width), 255);
+        let merged = w.render_host_frame(false).expect("有内容应出帧");
+        assert!(merged.pass_layer.is_none());
+        assert_eq!(
+            alpha(&merged.buf, merged.width),
+            255,
+            "旧 DLL：穿透装饰合在主层"
+        );
+        assert!(
+            w.render_frame().unwrap().pass_layer.is_none(),
+            "其余出帧口不拆"
+        );
+    }
+
+    /// 外部宿主拖完报的是「窗口左上 + content_offset」：固定位置下它必须正好回到配置的点，
+    /// 否则每次「拖动 → 落盘 → 重显」窗口都漂一截装饰外扩（§17.7）。
+    #[cfg(ext_presenter)]
+    #[test]
+    fn content_offset_maps_window_back_to_fixed_point() {
+        let mut w = fixture_window("content-offset");
+        w.update("", 0, "中", vec![cand("中")], 0, -1, 1, 1);
+        w.set_fixed_position(Some((300, 200)));
+        let f = w.render_frame().expect("有内容应出帧");
+        assert!(f.content_offset.1 > 0, "装饰伸出窗体上方：窗口比内容高");
+        assert_eq!(
+            (
+                f.screen_x + f.content_offset.0,
+                f.screen_y + f.content_offset.1
+            ),
+            (300, 200)
+        );
+    }
+
+    /// 外部宿主自己判上下：帧带上翻的窗口左上与内容框。上方点按 Windows 上翻规则——`caret_above`
+    /// 对齐点落在光标顶端 − 2，而不是由宿主拿下方点估一个行高去翻。
+    #[cfg(ext_presenter)]
+    #[test]
+    fn follow_caret_frame_carries_above_point_and_content_box() {
+        use wind_theme::skin::{Anchor, CaretPoint};
+        let mut w = fixture_window("above-point");
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            // 对齐点在窗体左下再上移 4：窗体下沿比光标顶端 − 2 低 4。关掉避让，免得它把偏差推平。
+            v.placement.caret_above = CaretPoint {
+                anchor: Anchor::parse("frame.bottom_left").unwrap(),
+                offset: [0.0, -4.0],
+            };
+            v.placement.avoid_caret = None;
+            w.set_theme(theme);
+        }
+        w.update("", 0, "中", vec![cand("中")], 0, -1, 1, 1);
+        w.set_position(100, 180, 20, true);
+        let f = w.render_frame().expect("有内容应出帧");
+        let (ox, oy) = f.content_offset;
+        assert!(oy > 0, "装饰伸出窗体上方");
+        let (bx, by, bw, bh) = f.place_box;
+        assert_eq!((bx, by), (ox, oy), "clamp 缺省只按窗体：框 = 内容框");
+        assert_eq!(bh, f.height as i32 - oy, "装饰只向上外扩");
+        assert!(bw > 0);
+        // 下方：内容框上沿 = 光标底端 200 + 2。
+        assert_eq!(f.screen_y + oy, 202);
+        // 上方：对齐点 = 光标顶端 180 − 2，窗体下沿再低 4。
+        assert_eq!(f.above_pos.1 + by + bh, 182);
+        assert_eq!(f.above_pos.0, f.screen_x, "上下对齐点横向都在窗体左缘");
     }
 
     fn cand(text: &str) -> wind_ui_types::CandidateItem {
@@ -816,6 +979,20 @@ mod tests {
         }
     }
 
+    /// 外部宿主的限帧闸门（§17.1）：事件切了画面也等到闸门才醒，不在闸门前空转。
+    #[test]
+    fn event_repaint_waits_for_anim_gate() {
+        let mut w = state_window("sm-gate", vec![(DecorEvent::Typing, DecorAction::State(1))]);
+        w.show();
+        let gate = Instant::now() + Duration::from_secs(5);
+        w.set_anim_gate(gate);
+        w.note_skin_input("a", true, 1, false);
+        assert!(
+            w.next_deadline().is_some_and(|d| d >= gate),
+            "闸门没到就登记了唤醒"
+        );
+    }
+
     #[test]
     fn typing_switches_state_and_repaints() {
         let mut w = state_window(
@@ -958,6 +1135,62 @@ mod tests {
         let d = w.next_deadline().expect("登记了 idle");
         let left = d.saturating_duration_since(Instant::now());
         assert!(left > Duration::from_millis(900) && left <= Duration::from_secs(1));
+    }
+
+    /// 外部宿主报来的装饰点击（`skin.decor_click`）与本地判出的点击同样触发 `click`；收起后到的
+    /// （宿主那头的点击晚于收起）丢掉，不改下次显示的状态。
+    #[test]
+    fn host_reported_decor_click_fires_click() {
+        let on = vec![(DecorEvent::Click, DecorAction::State(1))];
+        let mut w = state_window("sm-host-click", on.clone());
+        w.show();
+        w.skin_decor_click(0);
+        assert!(
+            w.next_deadline().is_some_and(|d| d <= Instant::now()),
+            "切了状态要立即醒来重绘"
+        );
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_BLUE, "click 切到状态 b");
+
+        let mut w = state_window("sm-host-click-hidden", on);
+        w.show();
+        w.hide();
+        w.skin_decor_click(0);
+        w.show();
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_RED, "收起后到的点击不切状态");
+    }
+
+    /// 宿主报的下标不在当前帧的装饰表里（越界 / 穿透装饰）：丢掉，不切状态。
+    #[test]
+    fn host_reported_decor_click_checks_index_and_hit() {
+        let on = vec![(DecorEvent::Click, DecorAction::State(1))];
+        let mut w = state_window("sm-host-click-oob", on.clone());
+        w.show();
+        w.skin_decor_click(5);
+        pump(&mut w);
+        assert_eq!(decor_px(&w), PX_RED, "越界下标不切状态");
+
+        // 0 号是穿透装饰；另挂一块可点的 1 号在左上角（不遮 0 号）：核对要落在报来的那一块上。
+        let mut w = state_window("sm-host-click-pass", on);
+        {
+            let mut theme = w.theme_source.clone();
+            let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
+            let mut other = v.decor[0].clone();
+            other.anchor = Anchor::parse("frame.top_left").unwrap();
+            other.pivot = Pos9::parse("bottom_right").unwrap();
+            v.decor[0].hit = DecorHit::Pass;
+            v.decor.push(other);
+            w.set_theme(theme);
+        }
+        w.show();
+        w.skin_decor_click(0);
+        pump(&mut w);
+        assert_eq!(
+            decor_px(&w),
+            PX_RED,
+            "穿透装饰不接点击（有别的可点装饰也一样）"
+        );
     }
 
     #[test]

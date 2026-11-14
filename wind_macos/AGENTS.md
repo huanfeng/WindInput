@@ -164,6 +164,19 @@ macOS 侧的通例是「服务进程只光栅化，窗口一律归 `.app`」—�
 已知限制：Toast 的渲染缩放取主屏（`dpi::scale_for_point(0, 0)`），多屏且缩放不同时落在非主屏上会按主屏
 密度渲染（尺寸仍正确，只是清晰度随主屏）；CoreText 后端暂未实现主题字重（`font_styled` 忽略 weight）。
 
+### 异形皮肤（设计 `docs/design/theme-skin-animation.md` §17）
+
+- 每个候选帧之前先到一条 `CMD_CANDIDATE_SKIN`（`CandidateSkin`）：`ACTIVE` 时关系统窗口阴影（皮肤阴影由图
+  自带）；`mouseDown` 落在不拖动区（`blocksDrag`：block 装饰内、窗体外）不起拖。
+- 装饰点击：候选 / 翻页键之外按在 drag / block 装饰上（`decorAt`），松开时仍在同一块上、没挪过拖动阈值，
+  经 `skin.decor_click` 报 index，服务端触发它的 `click` 事件。
+- 穿透装饰不画进候选窗位图，另走浮层 `OVERLAY_KIND_DECOR`（SHM `_DEC`），由 `CandidatePanelHost` 交给候选窗的
+  子 panel（`ignoresMouseEvents`、不投影，全在窗体下时排在候选窗下面），不经 `OverlayHost`。
+- 帧带 `isAnimFrame`（皮肤动画换帧，≤ 15 帧/秒）时照原位贴、不重算阴影。
+- 系统「减少动态效果」由本端读（`accessibilityDisplayShouldReduceMotion`），连上服务、`serviceReady` 与
+  `accessibilityDisplayOptionsDidChangeNotification` 时经 `host.reduce_motion` 报给服务。
+- 本机编不了 Swift：解码与不拖动判定的单测在 `CandidateSelectCodecTests`，只在 CI 的 macOS job 跑。
+
 ### 候选窗截图 / 提示复制
 
 macOS 的候选窗**像素本来就在服务进程里**（我们光栅化后经 SHM 推给 `.app`），故截图不需要

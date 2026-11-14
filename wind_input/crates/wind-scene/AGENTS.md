@@ -10,7 +10,7 @@
 ## Key Files
 | File | Description |
 |------|-------------|
-| `src/candidate/mod.rs` | 候选窗场景：`CandidateSceneInput`（每帧纯数据）→ `CandidateScene::layout` / `relayout_above` / `hits` / `paint` |
+| `src/candidate/mod.rs` | 候选窗场景：`CandidateSceneInput`（每帧纯数据）→ `CandidateScene::layout` / `relayout_above` / `hits` / `paint`；`nodes` 按 `NodeKey`（`View::node` 标签）出节点矩形，只给预览出图用 |
 | `src/candidate/skin_geom.rs` | 候选窗的皮肤几何：求值、外扩布局、分槽位、绘制、避让与对齐点；动画时钟 `AnimClock` 由调用方注入 |
 | `src/candidate/render.rs` | 一次出图 `render_candidate`（调用方持有的场景 + 输入 + 时钟 + 画不画软件阴影 → 预乘 BGRA 帧，`to_rgba` 转直通 RGBA），设置端预览 / 编辑器用 |
 | `src/candidate/theme.rs` | 生效主题 `effective_theme`（原始主题 + 外观覆盖 `ThemeOverrides`；字体名解析由调用方闭包注入），实时窗口与设置端共用 |
@@ -20,11 +20,12 @@
 | `src/view.rs` | View 盒模型引擎 + 线程局部的图片 / 阴影缓存（闲置回收由 wind-ui 的 UI 循环登记） |
 | `src/image_cache.rs` | 背景图 / 皮肤 / 动画帧解码与合成缓存 |
 | `src/skin.rs` / `src/skin_anim.rs` | 异形皮肤轴映射与合成、装饰动画状态机 |
-| `src/theme_assets.rs` | `RvImage` → `ViewImage` / `ViewLayer` |
-| `src/clock.rs` | 取时间垫片 `now()` |
+| `src/theme_assets.rs` | `RvImage` → `ViewImage` / `ViewLayer`；图片引用解析（resources → data:/绝对 → 内存资源 → 目录链） |
+| `src/assets.rs` | 内存资源源 `MemoryAssets`（线程局部登记，相对引用先查它；wasm 预览用） |
+| `src/clock.rs` | 取时间垫片 `now()` / `Instant`（wasm32 上是 `web-time`） |
 
 ## For AI Agents
 - **不准依赖 wind-config**（uuid / dirs 挡 wasm）；平台 API、`cfg(windows)` / `cfg(target_os)` 一律不进本 crate。
-- `image` 单独声明、不开 rayon；取时间走 `clock::now()`，别直接 `Instant::now()`。
+- `image` 单独声明、不开 rayon；取时间走 `clock::now()`、存时刻用 `clock::Instant`，别直接用 `std::time::Instant`（wasm32 上 panic）。
 - 测试专用 API 用 `#[cfg(any(test, feature = "test-util"))] pub`；wind-ui 的 dev-dependencies 开 `test-util`。
 - 本 crate 的测试文字后端是 `MockText`（与 wind-ui mock 同公式：字符数 × 字号 × 0.6，高 1.2 × 字号）。

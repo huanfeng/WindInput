@@ -597,6 +597,8 @@ static REGISTRY: &[ConfigField] = &[
     f("input.top_commit_learn", Bool),
     // 密码框强制英文（内部配置，入口是高级菜单）
     f("input.password_force_english", Bool),
+    // 忽略软件写 compartment 引起的中英切换（按应用覆盖见 compat.toml 同名字段）
+    f("input.ignore_host_ime_switch", Bool),
     // 联想。kind 兼任开关与类型（"off" 即关）。本段是**桌面基线**，移动端的差异走
     // [mobile.association]——值域里不留平台哨兵。
     f("input.association.kind", Enum(&["off", "word", "smart"])),

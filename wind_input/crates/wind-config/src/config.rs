@@ -4563,6 +4563,16 @@ pub struct InputConfig {
     /// 那正是判断「是不是误报」的依据。
     #[serde(default = "default_true")]
     pub password_force_english: bool,
+    /// 忽略软件（宿主）自己写 compartment 引起的中英切换，开和关两个方向都忽略。出厂关。
+    ///
+    /// 按应用的 compat.toml `ignore_host_ime_switch` 写了值就以它为准，没写才取本项。判据
+    /// （只认 compartment 来源、Ctrl 按住放行）见协调器 `host_ime_switch_ignored`。
+    ///
+    /// ⚠ 全局打开有代价：gvim 一类宿主依赖 OPENCLOSE 来保存/恢复中英，忽略后它们会失灵；
+    /// 按应用锁定中英的外部工具（KBLSwitch、AutoHotkey 脚本）写的也是 compartment，会被一并忽略。
+    /// 所以出厂关，只给用户自选；更推荐在「应用兼容性」里对出问题的软件单独开。
+    #[serde(default)]
+    pub ignore_host_ime_switch: bool,
     /// 联想（上屏后按上文推荐下一个词/标点）。默认关。
     #[serde(default)]
     pub association: AssociationConfig,
@@ -4635,6 +4645,7 @@ impl Default for InputConfig {
             top_commit_mode: TopCommitMode::default(),
             top_commit_learn: true,
             password_force_english: true,
+            ignore_host_ime_switch: false,
             association: AssociationConfig::default(),
             caret: CaretPlacementConfig::default(),
         }

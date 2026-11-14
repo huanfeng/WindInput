@@ -61,17 +61,29 @@ public:
         /// 活动窗口的全屏状态（`_NET_ACTIVE_WINDOW` 的 `_NET_WM_STATE_FULLSCREEN`）。每次重查都调，
         /// 去重在引擎（`FullscreenReporter`）。
         std::function<void(bool fullscreen)> fullscreenChanged;
+        /// 点了候选窗上的一块皮肤装饰（`decorAt` 的下标）→ `skin.decor_click`。
+        std::function<void(uint32_t index)> decorClick;
+        /// 候选窗拖动松手：内容左上的屏幕坐标 → `pos.candidate`（落不落盘由服务端按定位方式定）。
+        std::function<void(int32_t x, int32_t y)> candidateMoved;
     };
 
     X11CandidatePanel(fcitx::EventLoop& loop, Callbacks cb);
     ~X11CandidatePanel();
 
     /// 贴一帧并显示。`x/y` 为服务端建议的左上角（wire 坐标 = 根窗口坐标）。
+    /// `anim`（FRAME_FLAG_ANIM_FRAME）：皮肤换帧，已显示时照原位贴图、不 raise（否则每帧压住
+    /// tooltip / 菜单）。`content`：窗口左上 → 内容左上的偏移（候选帧尾的字段），拖动锚与
+    /// 上报位置按它换算；空 = 这一帧的偏移不可信（见 `frameContentOffset`），沿用上一次的。
+    /// 本次组合里拖过就按拖动锚摆（`placeCandidate`）。
     /// 没有 X 连接（无 DISPLAY / 连不上）时返回 false、什么都不做。
-    bool show(const SharedFrame& frame, int32_t x, int32_t y, bool absolute);
+    bool show(const SharedFrame& frame, int32_t x, int32_t y, bool absolute, bool anim,
+              std::optional<std::pair<int32_t, int32_t>> content);
     void hide();
     /// 命中矩形（CMD_CANDIDATE_RECTS，晚于帧到达）。坐标是位图内的像素。
     void setRects(std::vector<CandidateHitRect> rects) { rects_ = std::move(rects); }
+    /// 皮肤区域（CMD_CANDIDATE_SKIN，先于对应的帧到达，`show` 时生效）：带输入区表时候选窗
+    /// `SK_INPUT` 设成它，否则复位成缺省（整窗）。设计 theme-skin-animation.md §17.3。
+    void setSkin(CandidateSkin skin);
 
     /// 光栅浮层（CMD_OVERLAY_FRAME：tooltip / 状态气泡 / Toast）：各占一个窗口，落位见
     /// `placeOverlay`。`durationMs > 0` 时到点自己藏（计时归宿主，同 macOS `.app`）。
@@ -83,6 +95,8 @@ public:
     void hideAllOverlays();
     /// 状态气泡此刻内容左上的屏幕坐标（应 `pos.status_tip.query`）；不在屏上返回空。
     std::optional<std::pair<int32_t, int32_t>> statusContentOrigin() const;
+    /// 候选窗此刻内容左上的屏幕坐标（应 `pos.candidate.query`）；不在屏上返回空。
+    std::optional<std::pair<int32_t, int32_t>> candidateContentOrigin() const;
 
     /// 自绘菜单第 `level` 级（CMD_OVERLAY_FRAME kind = OVERLAY_KIND_MENU + level）：按 EXACT
     /// 原样摆放。第一级出现时抓住指针（点菜单外能看见、并且不漏给下面的应用）、起空闲计时。
@@ -224,6 +238,14 @@ private:
     void moveDrag(int32_t rootX, int32_t rootY);
     void endDrag(bool report);
     void setDragCursor(bool on);
+    /// `s` 的窗口光标设成 fleur（拖动中）或复位。
+    void setMoveCursor(Surface& s, bool on);
+    /// 候选窗拖到窗口左上 `(wx, wy)`（夹进工作区），拖动锚随之更新。
+    void moveCandidate(int32_t wx, int32_t wy);
+    /// 候选窗拖动收尾：`moved`（拖过）时复位光标、报落点。闸门由调用方先放掉。
+    void endCandidateDrag(bool moved);
+    /// 候选窗拖动作废（不报）：复位光标、放掉闸门。拖到一半的窗口留在原处。
+    void cancelCandidateDrag();
     /// 菜单收起后按指针的真实位置重定：悬停提示去留、候选悬停、气泡 / Toast 的悬停。
     void resyncAfterMenu();
     bool pointerOn(const Surface& s, const std::optional<std::pair<int32_t, int32_t>>& p) const;
@@ -257,8 +279,23 @@ private:
     int32_t candShiftY_ = 0;
 
     std::vector<CandidateHitRect> rects_;
+    /// 最近一条皮肤区域，以及已设到哪个窗口上的输入区（窗口重建后要补设；相同就不重发）。
+    CandidateSkin skin_;
+    xcb_window_t candInputWindow_ = 0;
+    std::optional<std::vector<Rect>> candInputApplied_;
+    bool warnedNoShapeInput_ = false;
+    /// 按 `skin_` 设候选窗输入区（见 `setSkin`）。
+    void applyCandidateInput();
     int32_t hover_ = -1; // 最近报给服务端的悬停
     ClickGate click_;    // 左键点选：按下记命中，松开同一项才选
+    DecorClickGate decorClick_; // 皮肤装饰点击：候选命中之外、按下松开同一块装饰
+    CandidateDragGate candDrag_; // 候选窗本端拖动（空白处 / drag 装饰）
+    /// 本次组合的拖动锚（拖到的内容左上），候选窗收起时清。见 `placeCandidate`。
+    std::optional<std::pair<int32_t, int32_t>> candPin_;
+    int32_t candContentX_ = 0; // 最近一帧的内容偏移（窗口左上 → 内容左上）
+    int32_t candContentY_ = 0;
+    int32_t candSuggestX_ = 0; // 最近一帧服务端建议的左上：拖动中按它重算 candShift
+    int32_t candSuggestY_ = 0;
     int32_t pendingHover_ = -1;
     std::unique_ptr<fcitx::EventSourceTime> hoverDefer_; // 延后报的悬停变化
     uint64_t hoverDue_ = 0;                              // hoverDefer_ 的到期时刻（微秒）

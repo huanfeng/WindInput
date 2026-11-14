@@ -3425,6 +3425,15 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
 
         _BeginFocusGap(L"null_docmgr");
 
+        // 刚进入恢复就遇到焦点空档：宿主是在把输入转给别的窗口并会重投首键（AutoCAD 绘图区→命令行）。
+        // 保留缓冲会让重投的键叠在首键上（gg），按旧语义清掉残留与服务端缓冲。
+        if (wind::recover::ShouldAbortOnFocusGap(!_recoverLeftover.empty(), GetTickCount64() - _recoverArmTick))
+        {
+            _DisarmRecover(L"focus gap");
+            if (_pKeyEventSink != nullptr)
+                _pKeyEventSink->OnCompositionUnexpectedlyTerminated();
+        }
+
         // 离开文本框：清门卫状态，下方 reeval 会注销加词热键，把 Ctrl+= 还给宿主。
         _hasTextInputContext = FALSE;
         _focusIsPassword = false;
@@ -3715,6 +3724,7 @@ void CTextService::_ReportHostRenderPlaced(const wind::hostband::Placement* prev
     now.requestedBand = candidate->GetRequestedBand();
     now.actualBand = candidate->GetCurrentBand();
     now.hasOwner = candidate->HasOwner() != FALSE;
+    now.hasPassWindow = candidate->HasPassWindow() != FALSE;
     std::vector<uint8_t> payload = wind::hostband::EncodeExt(
         wind::hostband::kPlacedKind, wind::hostband::PlacedBody(GetCurrentProcessId(), now, prev));
     _pIPCClient->SendAsync(CMD_EXT, payload.data(), (uint32_t)payload.size());
@@ -3901,7 +3911,7 @@ BOOL CTextService::_SetOpenCloseCompartment(BOOL bOpen)
 }
 
 // Ctrl 当前是否按住。**两条 compartment 路径都要在写 IPC 的那一刻取**，它是服务端
-// per-app「忽略宿主关闭输入法」放行系统热键的唯一判据（Ctrl+Space 与宿主关 IME 走同一
+// 「忽略软件切换中英」放行系统热键的唯一判据（Ctrl+Space 与宿主切中英走同一
 // 条通路、载荷相同，不交代就分不出）。
 // 两个 API 都问一遍：`GetAsyncKeyState` 读硬件当下状态，`GetKeyState` 读本线程消息
 // 队列的同步状态，而 compartment 回调不保证排在按键消息之后。同款判据已在本文件的
@@ -4227,7 +4237,7 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
 {
     BOOL newChineseMode = requestedMode;
     const WCHAR* sourceName = _ModeSwitchSourceName(source);
-    // 服务端的 per-app「忽略宿主关闭输入法」靠这一位放行系统热键，必须在**这一刻**取：
+    // 服务端的「忽略软件切换中英」靠这一位放行系统热键，必须在**这一刻**取：
     // 系统热键（Ctrl+Space）翻 compartment 时 Ctrl 尚未释放，宿主自己写则没有伴随按键。
     // 同款判据已在本文件 CapsLock 联动抑制窗用过。
     const bool ctrlHeld = _CtrlHeldNow();
@@ -4250,7 +4260,7 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
 
     // ⚠ 已知限制（2026-09-08 code review #5，未修）：下面三行在**同步 IPC 之前**执行，
     // 而「服务端要不要采纳这次切换」的答案在 IPC 之后才知道。于是被 per-app
-    // `ignore_host_ime_close` 拒绝的那次，用户正在打的组合照样已经被终止、英文统计段也
+    // `ignore_host_ime_switch` 拒绝的那次，用户正在打的组合照样已经被终止、英文统计段也
     // 已经被切开——「我们忽略了这个请求」与「你的组合被扔了」自相矛盾。
     //
     // 没有立刻修，是因为触发场景里组合基本已经没了：宿主关 IME 几乎总发生在焦点离开
@@ -8170,6 +8180,7 @@ void CTextService::_ArmRecover(ITfContext* pContext, ITfRange* pRange, const std
     _recoverContext = pContext;
     _recoverContext->AddRef();
     _recoverRange = pRange; // 接管调用方的引用
+    _recoverArmTick = GetTickCount64();
 }
 
 void CTextService::_ClearRecoverRecord()

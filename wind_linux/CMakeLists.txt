@@ -92,6 +92,7 @@ if(WIND_BUILD_ADDON)
     set(WIND_GNOME_CARET_EXT OFF)
 
     add_library(windinput MODULE
+        src/fcitx/DesktopMotion.cpp
         src/fcitx/WindEngine.cpp
         src/fcitx/X11Panel.cpp
     )

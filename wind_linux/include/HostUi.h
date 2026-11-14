@@ -131,4 +131,37 @@ private:
 /// 往右推一格。本端照常把它记成「有组合」（失焦 / 宿主重置要据此收尾、报服务端），只是不显示。
 std::string clientPreeditText(const std::string& composition);
 
+// ── 系统「减少动态效果」（皮肤动画跟随，设计 theme-skin-animation.md §17.1）──
+
+/// 各路来源此刻的值（没读到为空）。设置门户（`org.freedesktop.portal.Settings`）的值统一折成数：
+/// 布尔 0 / 1，字符串按十进制解析。
+struct MotionSources {
+    /// 门户 `org.freedesktop.appearance` `reduced-motion`：0 无偏好，1 减少（跨桌面的新键）。
+    std::optional<double> reducedMotion;
+    /// 门户 `org.gnome.desktop.interface` `enable-animations`：0 = 关动画。
+    std::optional<double> gnomeAnimations;
+    /// 门户 `org.kde.kdeglobals.KDE` `AnimationDurationFactor`：0 = 关动画。
+    std::optional<double> kdePortalFactor;
+    /// 同一个键，读 `kdeglobals` 文件（没有门户的 KDE 会话也能读到）。
+    std::optional<double> kdeFileFactor;
+};
+
+/// 按 C 区域解析十进制数（不受进程 locale 的小数点影响），首尾可有空白，其余整串都得是数。
+std::optional<double> parseDecimal(const std::string& s);
+
+/// `kdeglobals` 文本里 `[KDE]` 组的 `AnimationDurationFactor`；没有该组 / 该键、值不是数返回空。
+/// 组名与键名尾部的 KConfig 修饰（`[KDE][$i]`、`AnimationDurationFactor[$i]`）先剥掉再比；开头的
+/// UTF-8 BOM 忽略。`[KDE][Other]` 是子组，不算。
+std::optional<double> kdeAnimationFactor(const std::string& kdeglobals);
+
+/// 用户配置目录下 `kdeglobals` 的路径：`$XDG_CONFIG_HOME/kdeglobals`（未设或非绝对路径时
+/// `$HOME/.config/kdeglobals`）；拿不到时为空串。
+std::string kdeglobalsPath();
+
+/// 要不要减少动态效果；哪一路都没读到返回空（不报，服务端按允许）。`reduced-motion` 有值就以它为准；
+/// 否则按桌面取：`XDG_CURRENT_DESKTOP`（冒号分隔，`xdgCurrentDesktopHas`）含 `KDE` 时先 KDE（门户优先于文件）后 GNOME，
+/// 别的桌面先 GNOME 后 KDE——GNOME 会话里留着 KDE 应用写的 kdeglobals 很常见，反之 KDE 会话里
+/// GNOME 的键是 gsettings 的出厂值，都不能代表用户在本桌面的设置。
+std::optional<bool> pickReduceMotion(const MotionSources& s, const std::string& xdgCurrentDesktop);
+
 } // namespace windlinux

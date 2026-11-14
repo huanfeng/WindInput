@@ -181,7 +181,16 @@ impl Coordinator {
         } else {
             &shadow_code
         };
-        self.apply_shadow(&mut pool, prefix_shadow);
+        self.run_passes(
+            state,
+            &mut pool,
+            crate::postprocess::profile::DIRECT_AUX_MERGE,
+            &crate::postprocess::PassCtx {
+                owner: None,
+                freq_code: None,
+                shadow_code: Some(prefix_shadow),
+            },
+        );
 
         let input_len = state.input_buffer.len();
         let hits: Vec<Candidate> = pool
@@ -284,10 +293,16 @@ impl Coordinator {
             deduped.push(c);
         }
         let mut pool = deduped;
-        self.apply_filter(state, &mut pool);
-        self.apply_single_char(state, &mut pool);
-        let rerank_len = pool.iter().take_while(|c| !c.is_scope_filtered).count();
-        self.apply_freq_rerank(&mut pool[..rerank_len], prefix);
+        self.run_passes(
+            state,
+            &mut pool,
+            crate::postprocess::profile::DIRECT_AUX_PREFIX,
+            &crate::postprocess::PassCtx {
+                owner: None,
+                freq_code: Some(prefix),
+                shadow_code: None,
+            },
+        );
         (pool, r.preedit_pinyin, r.shadow_code)
     }
 }

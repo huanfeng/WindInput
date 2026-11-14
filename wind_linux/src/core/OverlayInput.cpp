@@ -202,6 +202,12 @@ int panelOutputIndex(const std::vector<Rect>& outputs, const Rect& window, int f
     return fallback >= 0 && size_t(fallback) < outputs.size() ? fallback : 0;
 }
 
+PanelDragPlacement placePanelDrag(const std::vector<Rect>& outputs, const Rect& desired, int fallback)
+{
+    const int index = panelOutputIndex(outputs, desired, fallback);
+    return {index, index >= 0 ? clampToWorkArea(desired, outputs[size_t(index)]) : desired};
+}
+
 namespace {
 double validScale(double scale)
 {

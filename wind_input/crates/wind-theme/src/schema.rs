@@ -202,6 +202,8 @@ pub struct ViewImage {
     pub tint: Option<Ld>,
     /// 禁用态染色（仅 footer 翻页箭头消费）。
     pub disabled_tint: Option<Ld>,
+    /// 镜像：x（左右）| y（上下）| xy；缺省不翻。只翻像素，定位与切片按源图写。
+    pub flip: Option<String>,
 }
 
 /// 渐变色停。

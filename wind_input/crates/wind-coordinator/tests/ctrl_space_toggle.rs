@@ -1,7 +1,7 @@
 //! GH#172：关掉 Ctrl+空格 切换（`keys.ctrl_space_toggle = false`）后，**用户按出来的**
 //! 系统中英切换（Windows 输入法开关热键翻 OPENCLOSE compartment，此刻 Ctrl 还按着）必须
 //! 被拒绝，模式保持不变；回包携带当前模式，DLL 的 `_ApplyModeSwitch` 据此把 compartment
-//! 拉回（与 per-app `ignore_host_ime_close` 同一条仲裁回路）。
+//! 拉回（与 `ignore_host_ime_switch` 同一条仲裁回路）。
 //!
 //! 宿主自己写 compartment（无 Ctrl）与功能菜单不受影响——它们不是 Ctrl+空格。
 //! 不依赖词库（`new_headless(.., None)`）。

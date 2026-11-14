@@ -368,6 +368,8 @@ fn assoc_next_eval() {
     cfg.input.association.max_count = 9;
     let c = Coordinator::new_headless(cfg, Some(&data_dir()));
     c.prewarm_indexes();
+    // 智能档的下一词表由预热派后台加载、不等；等它装好再开始，对应生产里「启动后早已就绪」。
+    assert!(c.debug_wait_assoc_bigram(std::time::Duration::from_secs(10)));
 
     println!("文件\t前文\t事件\tTop1\tTop3\tTop9\tMRR\t有联想\t标点 Top3\t字词 Top3");
     for file in files.split(',').filter(|f| !f.is_empty()) {

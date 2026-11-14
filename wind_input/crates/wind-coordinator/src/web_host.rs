@@ -69,14 +69,27 @@ pub trait WebDataHost {
 
     /// 主题对外观可覆盖键给出的值（设置端「跟随主题（值）」），见 `theme_query.rs`。
     fn theme_follow_values(&self) -> Option<crate::theme_query::ThemeFollowValues>;
-    /// 设置端主题预览（见 [`crate::candidate_preview`]）：当前候选排列是否竖排、外观指纹、投递出图请求。
+    /// 设置端主题预览（见 [`crate::candidate_preview`]）：当前候选排列是否竖排、当前工具栏是否
+    /// 纵向、外观指纹、投递出图请求。
     fn candidate_preview_vertical(&self) -> bool;
+    /// `kind = toolbar` 预览（不带 `layout` 参数时）的缺省朝向：当前生效 `ui.toolbar.vertical`。
+    fn toolbar_preview_vertical(&self) -> bool;
     fn candidate_preview_fingerprint(&self) -> String;
+    /// 草稿 `ui` 子树叠到当前配置上（见 `Coordinator::candidate_preview_draft`）。
+    fn candidate_preview_draft(
+        &self,
+        ui: &toml::Value,
+    ) -> anyhow::Result<crate::candidate_preview::PreviewDraft>;
+    #[allow(clippy::too_many_arguments)] // fit 两维是 RPC 契约的直排参数，打包反而遮住「可只给一维」
     fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        kind: wind_ui_types::PreviewKind,
+        draft: Option<&crate::candidate_preview::PreviewDraft>,
+        fit_w: Option<u32>,
+        fit_h: Option<u32>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply;
     /// 主题强调色两档（设置窗「主题色跟随输入法」），`name` 缺省取当前主题。
@@ -105,6 +118,13 @@ pub trait WebDataHost {
         pos: &str,
         duration_ms: u64,
     ) -> Result<(), String>;
+
+    /// 输入状态开关（RPC `ime.get/set/toggle`，CLI `wind_input ime`）：`cn-en`（true = 中文）/
+    /// `fullshape` / `s2t` / `t2s` / `toolbar`。与命令栏 `ime.set` / `ime.toggle` 同一落点，
+    /// 状态气泡、工具栏刷新都在里面。`set` 返回是否真的改动；CLI 不要「已是…」提示（`notify`=false）。
+    fn ime_state_get(&self, target: &str) -> anyhow::Result<bool>;
+    fn ime_state_set(&self, target: &str, on: bool, notify: bool) -> anyhow::Result<bool>;
+    fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool>;
 
     /// 字符类：设置页列表（全部类，按 `order` 升序＝仲裁顺序）。
     fn charset_rows(&self) -> Vec<crate::handle_charset::CharsetClassRow>;
@@ -339,17 +359,32 @@ impl WebDataHost for Coordinator {
     fn candidate_preview_vertical(&self) -> bool {
         Coordinator::candidate_preview_vertical(self)
     }
+    fn toolbar_preview_vertical(&self) -> bool {
+        self.rt().config.ui.toolbar.vertical
+    }
     fn candidate_preview_fingerprint(&self) -> String {
         Coordinator::candidate_preview_fingerprint(self)
+    }
+    fn candidate_preview_draft(
+        &self,
+        ui: &toml::Value,
+    ) -> anyhow::Result<crate::candidate_preview::PreviewDraft> {
+        Coordinator::candidate_preview_draft(self, ui)
     }
     fn request_candidate_preview(
         &self,
         theme: wind_theme::Resolved,
         vertical: bool,
         scale: f32,
+        kind: wind_ui_types::PreviewKind,
+        draft: Option<&crate::candidate_preview::PreviewDraft>,
+        fit_w: Option<u32>,
+        fit_h: Option<u32>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> crate::candidate_preview::PreviewReply {
-        Coordinator::request_candidate_preview(self, theme, vertical, scale, cancel)
+        Coordinator::request_candidate_preview(
+            self, theme, vertical, scale, kind, draft, fit_w, fit_h, cancel,
+        )
     }
     fn theme_accent(&self, name: Option<&str>) -> Option<crate::theme_query::ThemeAccent> {
         Coordinator::theme_accent(self, name)
@@ -480,6 +515,15 @@ impl WebDataHost for Coordinator {
         replace: bool,
     ) -> anyhow::Result<crate::handle_quick_format::QuickImportOutcome> {
         Coordinator::import_quick_format(self, content, replace)
+    }
+    fn ime_state_get(&self, target: &str) -> anyhow::Result<bool> {
+        Coordinator::ime_state_get(self, target)
+    }
+    fn ime_state_set(&self, target: &str, on: bool, notify: bool) -> anyhow::Result<bool> {
+        Coordinator::ime_state_set(self, target, on, notify)
+    }
+    fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool> {
+        Coordinator::ime_state_toggle(self, target)
     }
     fn ui_toast(
         &self,

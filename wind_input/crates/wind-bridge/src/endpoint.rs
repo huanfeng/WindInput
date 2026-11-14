@@ -223,7 +223,7 @@ pub fn overlay_shm_name(suffix: &str, kind: u32) -> Option<String> {
     Some(format!("{}{}", shm_name(suffix), overlay_tail(kind)?))
 }
 
-/// 层后缀：`_TIP` / `_STS` / `_TST` / `_MN<k>` / `_TB` / `_SKB`。
+/// 层后缀：`_TIP` / `_STS` / `_TST` / `_MN<k>` / `_TB` / `_SKB` / `_DEC`。
 fn overlay_tail(kind: u32) -> Option<String> {
     use wind_ipc::protocol::overlay::*;
     let tail = match kind {
@@ -232,6 +232,7 @@ fn overlay_tail(kind: u32) -> Option<String> {
         OVERLAY_KIND_TOAST => "_TST".to_string(),
         OVERLAY_KIND_TOOLBAR => "_TB".to_string(),
         OVERLAY_KIND_SOFTKEYBOARD => "_SKB".to_string(),
+        OVERLAY_KIND_DECOR => "_DEC".to_string(),
         // 菜单每级一段：`_MN0`、`_MN1`…
         k if (OVERLAY_KIND_MENU..OVERLAY_KIND_MENU + OVERLAY_MENU_LEVELS).contains(&k) => {
             format!("_MN{}", k - OVERLAY_KIND_MENU)
@@ -541,6 +542,10 @@ mod tests {
         assert_eq!(
             overlay_shm_name("_dev", OVERLAY_KIND_SOFTKEYBOARD).as_deref(),
             Some("/WindInput_SHMDev_SKB")
+        );
+        assert_eq!(
+            overlay_shm_name("_dev", OVERLAY_KIND_DECOR).as_deref(),
+            Some("/WindInput_SHMDev_DEC")
         );
     }
 
