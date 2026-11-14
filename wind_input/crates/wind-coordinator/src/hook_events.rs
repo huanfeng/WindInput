@@ -418,14 +418,16 @@ mod tests {
         let rx = connect(&c, &["commit"]);
         c.push_commit_text_from(ActionOrigin::SoftKeyboardClick, "软");
         c.push_commit_text_from(ActionOrigin::Command, "命");
-        let texts: Vec<String> = drain(&rx)
+        let got: Vec<(String, String)> = drain(&rx)
             .into_iter()
             .filter_map(|m| match m {
-                Msg::Commit(e) => Some(e.text),
+                Msg::Commit(e) => Some((e.text, e.source)),
                 _ => None,
             })
             .collect();
-        assert_eq!(texts, ["软", "命"]);
+        let want = [("软", "softkeyboard"), ("命", "command")]
+            .map(|(t, s)| (t.to_string(), s.to_string()));
+        assert_eq!(got, want);
     }
 
     #[test]

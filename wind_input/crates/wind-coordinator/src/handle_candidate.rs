@@ -5378,6 +5378,11 @@ impl Coordinator {
 
     /// 把命令产生的文本经 push 管道提交给活动客户端（命令在独立线程执行，走 push 而非 KeyAction）。
     pub(crate) fn push_commit_text(&self, text: &str) {
+        self.push_commit_text_as(text, "command");
+    }
+
+    /// 同 [`Self::push_commit_text`]，另指定给扩展事件的 `source`。
+    pub(crate) fn push_commit_text_as(&self, text: &str, source: &str) {
         if text.is_empty() {
             return;
         }
@@ -5385,7 +5390,7 @@ impl Coordinator {
         let text = self.convert_commit_newline(text.to_string());
         let encoded = wind_ipc::codec::encode_commit_text(&text, None, false, true, false);
         self.push_server.push_commit_to_active(&encoded);
-        self.hook_commit(&text, "command");
+        self.hook_commit(&text, source);
     }
 
     /// 候选词条操作（右键菜单）：调整 Shadow 规则并即时重排重绘。

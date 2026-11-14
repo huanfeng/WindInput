@@ -141,7 +141,7 @@ pub struct CommitEvent {
     #[serde(default)]
     pub app: String,
     pub text: String,
-    /// 来源：`candidate` / `raw` / `punct` 等。
+    /// 来源：`candidate` / `command` / `punct` / `softkeyboard`。
     #[serde(default)]
     pub source: String,
     /// 组合矩形 `[x, y, w, h]`，屏幕物理像素；应用不报时省略。
