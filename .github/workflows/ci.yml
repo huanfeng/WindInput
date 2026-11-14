@@ -21,10 +21,11 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       # runner 预装的 .NET / Android SDK / GHC 用不到（Android 只做 cargo check，不要 NDK），腾出十几 GB。
-      - name: 腾出磁盘
+      # 删除要一分多钟，丢到后台与 apt / toolchain 安装并行；dev.sh ci 前会等它收尾。
+      - name: 腾出磁盘（后台）
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
+          rm -f /tmp/disk-cleaned
+          setsid nohup bash -c 'sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; touch /tmp/disk-cleaned' >/dev/null 2>&1 &
 
       - uses: actions/checkout@v7
 
@@ -56,7 +57,10 @@ jobs:
 
       # fmt --check + clippy(msvc target) + test(本机)
       - name: dev.sh ci
-        run: ./scripts/dev.sh ci
+        run: |
+          until [ -e /tmp/disk-cleaned ]; do sleep 1; done
+          df -h /
+          ./scripts/dev.sh ci
 
       # headless/Android 防走样三道闸:
       # ① check 对象是 **wind-mobile 全包**(移动端门面,闭包含 coordinator headless):
@@ -168,6 +172,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.macos == 'true'
     runs-on: macos-26
+    # 与 check job 同理：CI 不需要完整调试信息，只留行号表，省编译/链接时间和缓存体积。
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v7
 
