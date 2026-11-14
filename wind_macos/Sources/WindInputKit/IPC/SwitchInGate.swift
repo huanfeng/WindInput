@@ -11,12 +11,22 @@ import Foundation
 /// 已有活动控制器，由调用方当场消费（见 `InputController.inputSourceSwitchedIn`）。
 public struct SwitchInGate {
     public private(set) var pending = false
+    /// 上一次通知里选中的是不是本输入法；`nil` = 还没收到过通知。
+    private var selectedIsSelf: Bool?
 
     public init() {}
 
     /// 输入源切换通知：当前选中的是不是本输入法。切到别家 = 作废之前的标记。
+    ///
+    /// 只有「从别家（或首次）切到本输入法」这个跳变才置标记：系统一次切换会连发多条通知，
+    /// 都选中本输入法时，后几条不能再次置位，否则一次切入会补发多次 `IME_ACTIVATED`。
     public mutating func selected(isSelf: Bool) {
-        pending = isSelf
+        if isSelf {
+            if selectedIsSelf != true { pending = true }
+        } else {
+            pending = false
+        }
+        selectedIsSelf = isSelf
     }
 
     /// 取走标记；返回是否该补发 `IME_ACTIVATED`。一次切入只消费一次。

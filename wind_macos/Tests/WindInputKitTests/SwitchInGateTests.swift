@@ -32,4 +32,14 @@ final class SwitchInGateTests: XCTestCase {
         g.selected(isSelf: true)
         XCTAssertTrue(g.consume())
     }
+
+    func testRepeatedNotificationForSameSelectionFiresOnce() {
+        // 系统一次切换连发两条通知（实测间隔 7ms）：只补发一次。
+        var g = SwitchInGate()
+        g.selected(isSelf: false)
+        g.selected(isSelf: true)
+        XCTAssertTrue(g.consume())
+        g.selected(isSelf: true)
+        XCTAssertFalse(g.consume())
+    }
 }

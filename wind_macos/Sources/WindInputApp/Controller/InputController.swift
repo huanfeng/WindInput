@@ -135,7 +135,7 @@ public class InputController: IMKInputController {
         // 只在「刚切入本输入法」时补发 IME_ACTIVATED（Windows 同口径）。activateServer 切应用 /
         // 切文本框也会触发，那些情形补发会把用户手切的中英等状态拉回 input.default。
         let switchedIn = InputSourceMonitor.shared.consumeSwitchIn()
-        NSLog("WindInput[InputController] activateServer switchedIn=\(switchedIn)")
+        switchInLog.info("activateServer switchedIn=\(switchedIn, privacy: .public)")
         if switchedIn { sendImeActivated() }
         sendFrontContext()
     }
@@ -144,7 +144,7 @@ public class InputController: IMKInputController {
     /// 没有活动控制器（通知先到）则什么都不做，标记留给随后的 `activateServer` 消费。
     static func inputSourceSwitchedIn() {
         guard let active = lastActivated, InputSourceMonitor.shared.consumeSwitchIn() else { return }
-        NSLog("WindInput[InputController] 切入通知晚于 activateServer，当场补发 IME_ACTIVATED")
+        switchInLog.info("notification after activateServer, send IME_ACTIVATED now")
         active.sendImeActivated()
     }
 

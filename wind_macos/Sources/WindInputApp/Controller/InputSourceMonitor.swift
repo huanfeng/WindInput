@@ -1,6 +1,10 @@
 import Carbon
 import Cocoa
+import os
 import WindInputKit
+
+/// 切入判定的诊断日志。NSLog 的内容在统一日志里会被显示成 <private>，这里用 public 才查得了问题。
+let switchInLog = Logger(subsystem: "to.feng.inputmethod.WindInput", category: "switch-in")
 
 /// 监听系统输入源切换，维护「刚切入本输入法」标记（`SwitchInGate`）。
 ///
@@ -24,7 +28,7 @@ final class InputSourceMonitor {
         ) { [weak self] _ in
             self?.selectedSourceChanged()
         }
-        NSLog("WindInput[InputSourceMonitor] started prefix=\(selfPrefix)")
+        switchInLog.info("monitor started prefix=\(self.selfPrefix, privacy: .public)")
     }
 
     /// 取走「刚切入」标记（`activateServer` 调）。
@@ -35,7 +39,7 @@ final class InputSourceMonitor {
     private func selectedSourceChanged() {
         let id = Self.currentSourceID()
         let isSelf = id.hasPrefix(selfPrefix)
-        NSLog("WindInput[InputSourceMonitor] selected=\(id) isSelf=\(isSelf)")
+        switchInLog.info("selected=\(id, privacy: .public) isSelf=\(isSelf, privacy: .public)")
         gate.selected(isSelf: isSelf)
         // 通知晚于 activateServer 到的情形：已有活动控制器，当场消费并补发。
         if isSelf { InputController.inputSourceSwitchedIn() }
