@@ -426,6 +426,26 @@ int main()
         CHECK(px.x == 0 && px.y == 0 && px.w == 1920 && px.h == 1020);
     }
 
+    CASE("跨屏拖动：先选屏再钳制，不能在源屏边缘截断累计位移");
+    {
+        const std::vector<Rect> outs{{-1920, 200, 1920, 1080}, {0, 0, 2560, 1440}};
+        auto p = placePanelDrag(outs, Rect{-210, 400, 200, 40}, 0);
+        CHECK_EQ(p.output, 0);
+        CHECK_EQ(p.rect.x, -210); // 原始位置仍在源屏内
+        p = placePanelDrag(outs, Rect{-90, 400, 200, 40}, 0);
+        CHECK_EQ(p.output, 1);
+        CHECK_EQ(p.rect.x, 0); // 中心越界，落到目标屏左边
+        p = placePanelDrag(outs, Rect{-300, 400, 200, 40}, 1);
+        CHECK_EQ(p.output, 0); // 可以拖回负坐标的屏
+        CHECK_EQ(p.rect.x, -300);
+        p = placePanelDrag(outs, Rect{-500, 0, 200, 40}, 0);
+        CHECK_EQ(p.output, 0); // 布局空洞保持原屏，夹到该屏顶边
+        CHECK_EQ(p.rect.y, 200);
+        p = placePanelDrag({}, Rect{20, 30, 200, 40}, 0);
+        CHECK_EQ(p.output, -1);
+        CHECK_EQ(p.rect.x, 20);
+    }
+
     CASE("panelOutputIndex：窗口中心落在哪块输出；都不在时用回退下标");
     {
         const std::vector<Rect> outs{{0, 0, 1920, 1080}, {1920, 0, 2560, 1440}};

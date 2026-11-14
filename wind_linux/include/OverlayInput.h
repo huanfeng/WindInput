@@ -306,6 +306,14 @@ int outputIndexAt(const std::vector<Rect>& outputs, int32_t x, int32_t y);
 /// 工具栏 / 软键盘按它决定摆在哪块屏、夹进哪块工作区。
 int panelOutputIndex(const std::vector<Rect>& outputs, const Rect& window, int fallback);
 
+/// 跨屏拖动：按未钳制的全局逻辑矩形选输出，再夹进目标工作区。
+/// 调用方继续累计原始位置，不能把返回的钳制位置作为下一次移动的起点。
+struct PanelDragPlacement {
+    int output;
+    Rect rect;
+};
+PanelDragPlacement placePanelDrag(const std::vector<Rect>& outputs, const Rect& desired, int fallback);
+
 // ── Wayland 面板坐标 ──
 // 工具栏 / 软键盘在 Wayland 下的「屏幕坐标」= 合成器全局逻辑坐标（xdg-output 的 logical_position
 // 起算）× 服务端此刻的光栅化缩放，单位与位图像素一致——同状态气泡固定位置的约定，服务端拿位图

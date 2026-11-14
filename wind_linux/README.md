@@ -61,6 +61,8 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
   只把输入法协议（input-method-v1）交给它自己拉起的 Fcitx5，否则 Wayland 原生应用里没有候选窗。
   并按 Fcitx5 的建议**不要**设 `QT_IM_MODULE` / `GTK_IM_MODULE`：设了的 Wayland 原生应用走 D-Bus、
   报的是窗口内坐标，候选窗会落到屏幕左上角。
+- Wayland 工具栏 / 软键盘可跨屏拖动：拖动源保留隐式指针抓取，透明显示，预览落在目标输出；
+  松手后才重建原窗口的输出绑定并上报位置。位移按全局逻辑坐标累计，不能先夹在源屏内。
 - **COSMIC（Wayland）与 Ghostty**：Ghostty 用 `GTK_IM_MODULE=fcitx` 走 D-Bus 时，窗口内坐标在部分环境下
   落入 X11 回退路径，候选框会远离插入点；改用原生通路（`GTK_IM_MODULE=wayland`）则在 COSMIC 上可能
   右键和顶部菜单闪退（[cosmic-comp#3032](https://github.com/pop-os/cosmic-comp/issues/3032)，该 issue
