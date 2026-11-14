@@ -13,6 +13,7 @@
 | `wind_macos/` | macOS IMKit `.app`（与 `wind_tsf/` 对位，开发中） | [AGENTS.md](wind_macos/AGENTS.md) |
 | `flake.nix` + `wind_linux/nix/` | Linux 端 Nix 打包（服务 + Fcitx5 addon + 设置程序 + 词库数据；addon 由 `wind_linux/` 构建） | [AGENTS.md](wind_linux/nix/AGENTS.md) |
 | `../wind-setting` | 设置 UI（**独立仓库**，经 JSON-RPC 与核心通信）；改设置界面去那边 | — |
+| `../WindInputExtensions` | 官方扩展程序（按键音等，**独立仓库**）与扩展协议说明；依赖本仓的 `wind-hook` | — |
 | `../wind-portable` | 绿色版启动器（独立仓库，不存在时构建脚本自动跳过） | — |
 | `../WindInput-Go` | Go 旧版源码（只读参考；docs 旧文档里的 `../WindInput` 指的是它） | — |
 
@@ -38,6 +39,7 @@
 | `wind-theme` | 加载并求值 v3 主题，输出调色板 + 盒模型树供 wind-ui 渲染 | [AGENTS.md](wind_input/crates/wind-theme/AGENTS.md) |
 | `wind-bridge` | Named Pipe 服务器 + Push 管道，桥接 Rust 服务与 C++ TSF DLL | [AGENTS.md](wind_input/crates/wind-bridge/AGENTS.md) |
 | `wind-ipc` | IPC 协议定义与编解码（TSF 二进制协议 + JSON-RPC） | — |
+| `wind-hook` | 扩展程序通道（纯逻辑）：协议消息与帧、授权档位、扩展清单与选项校验；宿主进程在 `apps/extension_host`（产物 `wind_input_ext`），设计见 docs/design/extension-hook-channel.md | — |
 | `wind-keys` | 键名/VK 映射、导航键分类（纯逻辑）+ 按键注入（平台层）；**VK 常量 SSOT** | — |
 | `wind-candidate` | 候选词数据类型、排序与过滤 | — |
 | `wind-phrase` | 短语系统：静态/动态模板展开 + cmdbar 双路径 | — |

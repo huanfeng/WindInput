@@ -36,6 +36,10 @@ pub const CMD_COMPOSITION_TERMINATED: u16 = 0x0209;
 pub const CMD_SHOW_CONTEXT_MENU: u16 = 0x020A;
 pub const CMD_SYSTEM_MODE_SWITCH: u16 = 0x020B;
 pub const CMD_INPUT_STATE_REPORT: u16 = 0x0213;
+/// 旁路按键（上行，异步，仅 Windows DLL）：DLL 放行给宿主、核心本看不见的用户按键（英文模式的
+/// 字母数字、无会话时的退格回车……），只为扩展程序上报，**不进按键处理**。只在服务端推开
+/// [`CONFIG_KEY_EXTENSION_KEY_OBSERVE`] 时发，密码框与键盘禁用时不发。载荷见 [`KeyObservedPayload`]。
+pub const CMD_KEY_OBSERVED: u16 = 0x021D;
 /// 诊断快照（上行，异步）：焦点窗口链 + 前台窗口 + TSF 上下文实例 id。载荷见
 /// [`DiagSnapshotPayload`]。
 ///
@@ -620,6 +624,10 @@ pub const CONFIG_KEY_MULTILINE_COMMIT: &str = "multiline_commit";
 /// 发出的 FocusGained 没带标题，会补发一次。
 /// DLL 每次重连从默认值（关）起步，故**握手必推**（`diag_snapshot` 同型）。
 pub const CONFIG_KEY_COMPAT_TITLE_MATCH: &str = "compat_title_match";
+/// 「有扩展订阅按键」开关同步键名（仅 Windows DLL）。格式：`enabled(u8)`。开着时 DLL 把放行给
+/// 宿主的用户按键经 [`CMD_KEY_OBSERVED`] 旁路上报。DLL 每次重连从关起步，故**握手必推**；
+/// 扩展授权变化时广播。
+pub const CONFIG_KEY_EXTENSION_KEY_OBSERVE: &str = "extension_key_observe";
 /// `CONFIG_KEY_COMPOSITION_PLACEHOLDER` 的取值：空格 U+0020（默认）。
 pub const COMPOSITION_PLACEHOLDER_SPACE: u8 = 0;
 /// `CONFIG_KEY_COMPOSITION_PLACEHOLDER` 的取值：ZWSP U+200B。
@@ -1104,6 +1112,38 @@ impl FocusGainedPayload {
             disabled,
             reason,
             caret_source,
+        })
+    }
+}
+
+// ──────────────────────────────────────────────
+// Key Observed Payload (8 bytes)
+// ──────────────────────────────────────────────
+
+/// `CMD_KEY_OBSERVED` 载荷：`key_code u32` + `modifiers u32`（`MOD_*`，与按键帧同一套位）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyObservedPayload {
+    pub key_code: u32,
+    pub modifiers: u32,
+}
+
+impl KeyObservedPayload {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut b = [0u8; Self::SIZE];
+        b[0..4].copy_from_slice(&self.key_code.to_le_bytes());
+        b[4..8].copy_from_slice(&self.modifiers.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            key_code: u32::from_le_bytes(buf[0..4].try_into().ok()?),
+            modifiers: u32::from_le_bytes(buf[4..8].try_into().ok()?),
         })
     }
 }
@@ -1967,6 +2007,18 @@ mod input_diag_wire_tests {
         let p = FocusGainedPayload::from_bytes(&buf).unwrap();
         assert_eq!(p.disabled, 1);
         assert_eq!(p.reason, 2);
+    }
+
+    #[test]
+    fn key_observed_roundtrip() {
+        let p = KeyObservedPayload {
+            key_code: 0x41,
+            modifiers: MOD_SHIFT,
+        };
+        let bytes = p.to_bytes();
+        assert_eq!(bytes.len(), KeyObservedPayload::SIZE);
+        assert_eq!(KeyObservedPayload::from_bytes(&bytes), Some(p));
+        assert_eq!(KeyObservedPayload::from_bytes(&bytes[..7]), None);
     }
 
     #[test]

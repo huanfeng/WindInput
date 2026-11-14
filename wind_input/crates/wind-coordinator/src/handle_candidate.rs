@@ -5385,6 +5385,7 @@ impl Coordinator {
         let text = self.convert_commit_newline(text.to_string());
         let encoded = wind_ipc::codec::encode_commit_text(&text, None, false, true, false);
         self.push_server.push_commit_to_active(&encoded);
+        self.hook_commit(&text, "command");
     }
 
     /// 候选词条操作（右键菜单）：调整 Shadow 规则并即时重排重绘。
@@ -6398,6 +6399,7 @@ impl Coordinator {
                 let encoded =
                     wind_ipc::codec::encode_commit_text(&text, None, false, chinese_mode, false);
                 self.push_server.push_commit_to_active(&encoded);
+                self.hook_commit(&text, "candidate");
                 debug!("push_no_key_ctx: committed '{}'", text);
             }
             other => {

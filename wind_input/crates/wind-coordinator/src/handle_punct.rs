@@ -1089,6 +1089,7 @@ impl Coordinator {
         // 换行已在出口改写（`Command` 的 `commit_newline`）。
         let encoded = wind_ipc::codec::encode_commit_text_with_cursor(&text, jump_steps);
         self.push_server.push_commit_to_active(&encoded);
+        self.hook_commit(&text, "punct");
         self.push_pair_text(left.to_string(), right.to_string(), jump_steps);
     }
 

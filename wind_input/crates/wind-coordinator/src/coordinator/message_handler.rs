@@ -1062,6 +1062,8 @@ impl MessageHandler for Coordinator {
             }
             self.push_hotkey_session_if_changed();
         }
+        // 扩展事件：取最终结果（上面两道改判之后），占位替换只是显示层加工，不影响它。
+        self.hook_after_key(data, &action);
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
         } else if let Some(sep) = self.syllable_separator() {
@@ -4828,6 +4830,10 @@ impl MessageHandler for Coordinator {
 
     fn handle_input_state_report(&self, pid: u32, disabled: bool, reason: u8, mask: u64) {
         self.apply_input_diag(pid, disabled, reason, mask);
+    }
+
+    fn handle_key_observed(&self, key_code: u32, modifiers: u32) {
+        self.hook_observed_key(key_code, modifiers);
     }
 
     fn handle_diag_snapshot(&self, snap: &wind_ipc::protocol::DiagSnapshotPayload) {

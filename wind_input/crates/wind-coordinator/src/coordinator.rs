@@ -2273,6 +2273,11 @@ pub struct Coordinator {
     /// 而键已被全放行，用户无从知道自己打不出中文。
     /// ⚠ 呈现与输入闸是两条独立的路：改这里的展示**不会**改变是否抑制，反之亦然。
     pub(crate) password_suppress: std::sync::atomic::AtomicBool,
+    /// 扩展程序事件出口与会话状态，见 `hook_events`。
+    pub(crate) hook: Arc<wind_hook::tap::Tap>,
+    pub(crate) hook_session: std::sync::Mutex<crate::hook_events::HookSession>,
+    pub(crate) extensions_config_hook:
+        std::sync::OnceLock<crate::hook_events::ExtensionsConfigHook>,
     /// 「不可输入」**呈现**的迟滞闸门（判定本身见 [`Coordinator::input_block`]）。
     ///
     /// 两个方向不对称，取值与理由继承自已删除的 C++ 版：
@@ -3410,6 +3415,9 @@ impl Coordinator {
             candidate_menu_open: std::sync::atomic::AtomicBool::new(false),
             last_window_diag: Mutex::new(Default::default()),
             password_suppress: std::sync::atomic::AtomicBool::new(false),
+            hook: Arc::new(wind_hook::tap::Tap::new()),
+            hook_session: std::sync::Mutex::new(Default::default()),
+            extensions_config_hook: std::sync::OnceLock::new(),
             password_suppress_enabled: std::sync::atomic::AtomicBool::new(
                 password_suppress_enabled_init,
             ),
@@ -5270,6 +5278,8 @@ impl Coordinator {
                 // 文本查表、与编码域无关，本就不是某个方案的属性。自带变更检测（只看
                 // enabled/categories），未变即空操作。
                 self.sync_emoji_dict();
+                // 扩展段跟随全局配置；订阅方自己做变更检测。
+                self.notify_extensions_config();
                 // 用户词文本手改后，保存配置 / 设置页触发热重载时一并生效（设计 §5）。
                 if let Some(store) = &self.store {
                     let changed = store.sync_user_texts();
@@ -8896,6 +8906,7 @@ impl Coordinator {
         // Linux：托盘图标按主字运行时渲染，文件必须先于带这个标签的状态帧落盘（见子模块头）。
         #[cfg(all(target_os = "linux", ext_presenter, not(test)))]
         self.ensure_tray_icons((chinese_mode && !caps_lock).then_some(icon_label.as_str()));
+        self.hook_mode(chinese_mode, full_width);
         StatusUpdateData {
             chinese_mode,
             full_width,

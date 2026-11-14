@@ -239,6 +239,11 @@ impl MessageHandler for DeferredHandler {
         })
     }
 
+    /// 旁路按键上报。同上：不转发则英文模式下扩展永远收不到按键，且毫无报错。
+    fn handle_key_observed(&self, key_code: u32, modifiers: u32) {
+        self.with_handler((), |h| h.handle_key_observed(key_code, modifiers))
+    }
+
     /// 诊断快照上报。同上：不转发则 HUD 的窗口/上下文分区永远是空的，且毫无报错。
     fn handle_diag_snapshot(&self, snap: &DiagSnapshotPayload) {
         self.with_handler((), |h| h.handle_diag_snapshot(snap))
@@ -299,6 +304,9 @@ mod tests {
         }
         fn handle_diag_snapshot(&self, _s: &DiagSnapshotPayload) {
             self.calls.lock().unwrap().push("diag_snapshot".to_string());
+        }
+        fn handle_key_observed(&self, _k: u32, _m: u32) {
+            self.calls.lock().unwrap().push("key_observed".to_string());
         }
         fn handle_client_connected(&self, _pid: u32) {
             self.calls
@@ -418,6 +426,7 @@ mod tests {
         deferred.set_ready(rec.clone());
         deferred.handle_english_stats(5, 0, 0, 0);
         deferred.handle_input_state_report(42, true, 1, 0xFF);
+        deferred.handle_key_observed(0x41, 0);
         deferred.handle_diag_snapshot(&DiagSnapshotPayload {
             pid: 42,
             ..Default::default()
@@ -429,6 +438,10 @@ mod tests {
             "英文统计未转发 → DLL 发了也白发，今日英文恒为 0"
         );
         assert!(rec.got("input_state_report"), "输入诊断上报未转发");
+        assert!(
+            rec.got("key_observed"),
+            "旁路按键未转发 → 英文模式下扩展收不到按键"
+        );
         assert!(
             rec.got("diag_snapshot"),
             "诊断快照未转发 → HUD 的窗口/上下文分区恒为空"

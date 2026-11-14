@@ -698,6 +698,8 @@ pub struct Config {
     #[serde(default)]
     pub stats: StatsConfig,
     #[serde(default)]
+    pub extensions: ExtensionsConfig,
+    #[serde(default)]
     pub debug: DebugConfig,
     #[serde(default)]
     pub system: SystemConfig,
@@ -7931,6 +7933,34 @@ impl Default for StatsConfig {
             speed_factor: default_speed_factor(),
         }
     }
+}
+
+// ───────────────────────── extensions（扩展程序）─────────────────────────
+
+/// 扩展程序（设计见 `docs/design/extension-hook-channel.md`）。扩展装在
+/// `<userdata>/extensions/<id>/`；这里只记总开关与每个扩展的启用状态、授予的档位。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtensionsConfig {
+    /// 总开关。关闭时核心不拉起扩展宿主，也不产出任何事件。
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub list: Vec<ExtensionEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionEntry {
+    /// 扩展目录名。
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 授予的档位（`key.class` / `key.detail` / `mode` / `composition` / `candidates` /
+    /// `commit`）。扩展清单里申请的只是申请，以这里为准。
+    #[serde(default)]
+    pub granted: Vec<String>,
+    /// 扩展选项里用户改过的值（声明在扩展清单里，宿主按声明校验）。没存的取清单默认值。
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub options: serde_json::Map<String, serde_json::Value>,
 }
 
 // ───────────────────────── debug ─────────────────────────
