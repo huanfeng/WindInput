@@ -132,7 +132,20 @@ public class InputController: IMKInputController {
         if let prev = Self.lastActivated, prev !== self { sendEmpty(UpstreamCmd.focusLost) }
         Self.lastActivated = self
         sendFocusGained()
+        // 只在「刚切入本输入法」时补发 IME_ACTIVATED（Windows 同口径）。activateServer 切应用 /
+        // 切文本框也会触发，那些情形补发会把用户手切的中英等状态拉回 input.default。
+        let switchedIn = InputSourceMonitor.shared.consumeSwitchIn()
+        switchInLog.info("activateServer switchedIn=\(switchedIn, privacy: .public)")
+        if switchedIn { sendImeActivated() }
         sendFrontContext()
+    }
+
+    /// 输入源切换通知晚于 `activateServer` 到达时的补救：已有活动控制器就当场补发。
+    /// 没有活动控制器（通知先到）则什么都不做，标记留给随后的 `activateServer` 消费。
+    static func inputSourceSwitchedIn() {
+        guard let active = lastActivated, InputSourceMonitor.shared.consumeSwitchIn() else { return }
+        switchInLog.info("notification after activateServer, send IME_ACTIVATED now")
+        active.sendImeActivated()
     }
 
     /// IME 失去焦点 (切到别的输入法/应用) 时由系统调用。发 FocusLost 让 Go 端
@@ -176,12 +189,33 @@ public class InputController: IMKInputController {
         let bundleID = currentClient?.bundleIdentifier() ?? ""
         do {
             try bridge.send(BinaryCodec.encodeFocusGainedFrame(
-                clientToken: Self.clientToken(pid: hostPid(for: bundleID), client: currentClient),
+                clientToken: currentClientToken(),
                 inputScopeMask: mask,
                 bundleID: bundleID))
             _ = try bridge.readFrame()
         } catch {
             NSLog("WindInput[sendFocusGained] io error: \(error)")
+            reconnect()
+        }
+    }
+
+    /// 当前焦点 client 的 token；FocusGained 与 IME_ACTIVATED 必须使用同一个。
+    private func currentClientToken() -> UInt64 {
+        let bundleID = currentClient?.bundleIdentifier() ?? ""
+        return Self.clientToken(pid: hostPid(for: bundleID), client: currentClient)
+    }
+
+    /// 发 IME_ACTIVATED。服务端把它当异步命令（不写 ack），故这里只 send、不 readFrame，
+    /// 否则会把后续按键的响应读错位。
+    private func sendImeActivated() {
+        guard let bridge = bridge, bridge.isConnected else { return }
+        do {
+            try bridge.send(BinaryCodec.encodeTokenFrame(
+                cmd: UpstreamCmd.imeActivated,
+                clientToken: currentClientToken(),
+                async: true))
+        } catch {
+            NSLog("WindInput[sendImeActivated] io error: \(error)")
             reconnect()
         }
     }
