@@ -11,3 +11,4 @@ pub mod capslock_hook;
 pub mod foreground;
 pub mod key_inject;
 pub mod keymap;
+pub mod names;

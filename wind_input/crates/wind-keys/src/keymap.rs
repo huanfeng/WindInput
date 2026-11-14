@@ -35,6 +35,17 @@ pub const VK_UP: u32 = 0x26;
 pub const VK_RIGHT: u32 = 0x27;
 pub const VK_DOWN: u32 = 0x28;
 pub const VK_DELETE: u32 = 0x2E; // 前删（光标后一字符）
+pub const VK_INSERT: u32 = 0x2D;
+// 功能键 F1..=F24 与小键盘，连号。目前只有按键事件的键名表（`names`）用到。
+pub const VK_F1: u32 = 0x70;
+pub const VK_F24: u32 = 0x87;
+pub const VK_NUMPAD0: u32 = 0x60;
+pub const VK_NUMPAD9: u32 = 0x69;
+pub const VK_MULTIPLY: u32 = 0x6A;
+pub const VK_ADD: u32 = 0x6B;
+pub const VK_SUBTRACT: u32 = 0x6D;
+pub const VK_DECIMAL: u32 = 0x6E;
+pub const VK_DIVIDE: u32 = 0x6F;
 // 字母 / 数字区间端点（区间用 VK_A..=VK_Z / VK_0..=VK_9 表达，VK 与 ASCII 大写/数字一致）。
 pub const VK_A: u32 = 0x41;
 pub const VK_Z: u32 = 0x5A;
@@ -415,6 +426,14 @@ pub fn is_pure_modifier_vk(vk: u32) -> bool {
 /// 该 VK 是否为 Alt（左 / 右 / 不分左右）。不并进 [`is_pure_modifier_vk`]：Alt 不走修饰键轻敲那条路。
 pub fn is_alt_vk(vk: u32) -> bool {
     matches!(vk, 0xA4 | 0xA5 | 0x12)
+}
+
+/// VK → 符号键的规范名（`semicolon`、`comma`…，即 [`key_name_to_vk`] 认的第一个名字）。
+pub fn vk_to_symbol_key_name(vk: u32) -> Option<&'static str> {
+    KEY_TABLE
+        .iter()
+        .find(|d| d.vk == vk)
+        .and_then(|d| d.names.first().copied())
 }
 
 /// VK → 组合区前缀字符。无映射时返回 None（调用方自定默认）。
