@@ -470,9 +470,9 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
   （含 z↔zh/c↔ch/s↔sh 对偶兜底 `fuzzy_initial_partners()`）→ 重复键单音节（aa→a，
   **受 `[zero_initials]` 约束**，见下）。
 - **零声母有三个流派，不可互抄**：微软 / 搜狗 / 智能ABC / 紫光用 `O` 引导（`oj`=an、`oh`=ang），
-  国标双拼（`gb2017`）按 GB/T 34947-2017 4.1.1 用 `a` 引导（`af`=an、`ac`=ao；`ao`=o）。
   自然码 / 小鹤用首字母引导（单韵母重复 `aa`/`ee`/`oo`、双字母韵母打字面 `ai`/`an`、
-  三字母韵母 `ah`/`eg`）。微软/搜狗曾整段抄自首字母引导的模板，官方 10 个击键全部打不出而
+  三字母韵母 `ah`/`eg`）。国标双拼（`gb2017`）按 GB/T 34947-2017 4.1.1 用 `a` 引导（`af`=an、`ac`=ao；`ao`=o）。
+  微软/搜狗曾整段抄自首字母引导的模板，官方 10 个击键全部打不出而
   覆盖率门禁照绿 —— 门禁只问「打不打得出」，问不到「**官方**击键打不打得出」，
   该层由 `tests/shuangpin_coverage.rs::official_zero_initial_strokes_work` 正向击键表把守。
 - 奇数尾键作 partial 声母前缀（has_partial）。
