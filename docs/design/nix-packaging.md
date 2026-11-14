@@ -167,6 +167,10 @@ Fcitx5 的 `FCITX_ADDON_DIRS` / `FCITX_DATA_DIRS`，或自行包一层 `fcitx5-w
   （`FROST_CELLS` / `FROST_OTHERS_EXCLUDE`）由 `scripts/dev.sh` 与 `wind_linux/nix/data.nix`
   **共用同一份**，改一处两边同时生效（`dev.ps1` 的 PowerShell 版与 `mac/dev.sh` 仍是各自实现，
   改规则要同步）。
+- **CI 只做求值检查**：`.github/workflows/nix-check.yml` 在上述打包文件变动时跑
+  `nix flake check --no-build --all-systems`（x86_64 / aarch64 两套求值），挡语法、引用与漏传参数；
+  不构建（wind-setting 的 GUI 栈太重），也不进 Release。构建与运行仍须手动
+  `nix build .#windinput` 验。Nix 包由社区维护，不在官方发布范围内。
 - 改动打包文件前先读 `wind_linux/nix/AGENTS.md`：文件职责、立约级不变量、需要同步的位置都在那里。
 - **fcitx5 ABI**：addon 用 nixpkgs 的 fcitx5 头文件构建，`CMakeLists.txt` 会自动探测 C++20
   （新头文件需要），无需人工干预。
