@@ -378,6 +378,11 @@ pub trait Engine: Send + Sync {
         false
     }
 
+    /// 拼音「屏蔽这个词」的文字集合（候选调整里 `code = *` 的删除行）。只有拼音引擎认：
+    /// 被屏蔽的文字不进整句图、整句恰为它时换下一条（见 `PinyinEngine`）。由调用方在规则
+    /// 变化后推入，同一份集合（指针相同）重复推入是空操作。
+    fn set_blocked_words(&self, _words: std::sync::Arc<std::collections::HashSet<String>>) {}
+
     /// 最大编码长度（码表引擎返回其码长；拼音等无意义返回 0）。
     /// 供混输引擎的超长分支（pinyin_only_overflow）与顶码裁决判断输入是否溢出。
     /// 本引擎是否开启了**整句输入**（当前只有码表引擎会返回 true）。

@@ -60,6 +60,7 @@ base_order = 2
 id = "wubi86_xzqy"
 label = "行政区域"
 description = "省市县区等地名词条"
+group = "人名地名"
 path = "wubi86/wubi86_jidian_extra_district.dict.yaml"
 type = "rime_codetable"
 default_enabled = false

@@ -935,19 +935,18 @@ impl MessageHandler for Coordinator {
         }
         let action = self.handle_key_event(data);
         let action = self.redispatch_commit_code(data, action);
-        // 中英切换处补空格：在换行改写之前，空格是上屏文本的前缀、与换行形式无关。
+        // 平台中立的收尾：补空格、换行改写、输入统计、自提交打点与造词投喂、检索放宽复原、
+        // 配对保活。收口在这里而不是各上屏点，理由相同：上屏路径 40+ 个返回点，约 10 处绕过
+        // `commit_action` 直接构造 InsertText，散点接线必漏；换行形式是平台/宿主的表达约定，
+        // 属服务端职责（A3-3）。各步的取舍与其余来源对照见 `session_exit::exit_steps`。
+        //
+        // 检索放宽复原与配对保活原先排在下面两段智能符号收尾之后；它们只动 state / 配对栈，
+        // 智能符号那两段只动 `smart_symbol`，互不读写，先后无关。配对保活须在
+        // `handle_key_event` **之后**刷新，否则本次按键的陈旧判定会先被自己刷新掉。
         let action = {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            self.apply_auto_spacing(&mut st, action)
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.finish_session_action(st, crate::session_exit::ActionOrigin::Key, action)
         };
-        // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
-        // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
-        // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
-        let action = self.apply_commit_newline(action);
-        self.record_input_stats(&action);
-        // 自提交打点 + 码表自动造词投喂。与 record_input_stats 同一收口理由：上屏路径有
-        // 40+ 个返回点，且约 10 处绕过 commit_action 直接构造 InsertText，散点接线必漏。
-        self.note_commit_action(&action);
         // PassThrough / UpdateComposition 时 C++ 侧会调 FlushHoldCompositionIfActive 提交旧符号；
         // coordinator 需同步清除 held_text，防止后续标点的 pre_held_text 捡到已提交的旧值
         // 而造成二次提交（"。。="）。仅在 held_text 非空时操作，避免干扰无 Hold 状态的武装态。
@@ -1015,15 +1014,6 @@ impl MessageHandler for Coordinator {
                 }
             }
         }
-        // 检索范围临时放宽的失效：本次组合结束（缓冲已空）即恢复配置档位。
-        // 与 record_input_stats / note_commit_action 同一收口理由——`input_buffer.clear()`
-        // 有十几个调用点（上屏/取消/切焦点/模式切换），散点接线必漏。放在按键处理的唯一出口，
-        // 天然覆盖全部结束路径。用户选字上屏后下一次输入即回到智能档；而放宽期间继续敲字母、
-        // 退格改码、翻页都不会丢状态（缓冲非空），符合「找生僻字常要改几次编码」的实际。
-        self.expire_scope_override();
-        // 配对状态保活：须在 handle_key_event **之后**刷新，否则本次按键的陈旧判定
-        // 会先被自己刷新掉，TTL 永不触发。栈空时是空操作。
-        self.touch_pair_state();
         // 联想占位组合的两道收口，都挂在这个唯一出口上（透传这一格是它们共同的病灶）：
         //
         // ① `assoc_release_on_passthrough` —— 联想**还活着**，而这一键在既有分支里落到了
@@ -1072,6 +1062,8 @@ impl MessageHandler for Coordinator {
             }
             self.push_hotkey_session_if_changed();
         }
+        // 扩展事件：取最终结果（上面两道改判之后），占位替换只是显示层加工，不影响它。
+        self.hook_after_key(data, &action);
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
         } else if let Some(sep) = self.syllable_separator() {
@@ -1082,6 +1074,7 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_key_event(&self, data: &KeyEventData) -> KeyAction {
+        // 〔K1 修饰键原始上报〕
         // 候选显示时如实上报的 Ctrl 按下 / 松开：服务端判单击，判出来再以原样的松开重进本函数
         // （所以排在一切之前，也不经下面的统计 / 打字节奏 / 软键盘推送）。
         if matches!(data.event_type, EVENT_MOD_DOWN | EVENT_MOD_UP) {
@@ -1090,6 +1083,7 @@ impl MessageHandler for Coordinator {
         // 软键盘状态若在本次按键中变了，返回前推给 C++（吃键判定要用）。**声明在最开头**
         // 是必需的：局部变量逆序析构 ⇒ 它最后走 ⇒ 那时 `state` 的 MutexGuard 已经还了。
         let _sk_push = crate::handle_softkeyboard::SoftKeyboardPushOnDrop(self);
+        // 〔K2 组字中 Alt：注释态〕
         // 组字中的 Alt 按下 / 松开（平台只在组字中转发）：只管注释态，吃不吃都在这里定。
         if keymap::is_alt_vk(data.key_code)
             && matches!(data.event_type, EVENT_KEY_DOWN | EVENT_KEY_UP)
@@ -1100,6 +1094,7 @@ impl MessageHandler for Coordinator {
             }
             return self.handle_comment_alt(data);
         }
+        // 〔K3 注释功能键按住〕
         // 按住档的功能键切换键：按下（含连发）与松开都在这里接走，排在下面「按住期间的别的键」之前。
         if let Some(act) = self.handle_comment_fn_hold(data) {
             return act;
@@ -1115,6 +1110,7 @@ impl MessageHandler for Coordinator {
         } else {
             None
         };
+        // 〔K4 每键复位与观测：统计/会话标志复位、方案行为同步、小键盘归一、打字节奏、CapsLock 校准（不返回）〕
         // 每次按键开始重置统计标志：具体上屏路径调 record_commit 置位，
         // 顶层 record_input_stats 仅在未置位时兜底（对齐 Go handle_key_event 开头 reset）。
         self.stat_recorded
@@ -1207,6 +1203,7 @@ impl MessageHandler for Coordinator {
             }
         }
 
+        // 〔K5 key_up：切换键与修饰键选词〕
         // ── key_up：toggle 模式键（Shift/Ctrl/CapsLock）直接切换 ──
         // 关键：TSF 对 toggle 键会"吃掉 keydown 不转发"，仅在 C++ 侧判定为干净单击后
         // 于 keyUp 转发该键事件（_SendKeyToService(..., KEY_EVENT_UP)）。因此服务端
@@ -1374,6 +1371,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K6 右键菜单接键〕
         // ── 右键菜单打开时：方向键/回车/ESC 由菜单消费（优先于一切）──
         // 菜单由服务自绘的两种形态：Windows 进程内窗口、光栅帧交宿主（macOS `.app` / Linux
         // addon）贴图（同一份 `popup_menu`）。宿主形态下 menu_open 一旦被置真而窗口没了，输入会被
@@ -1387,6 +1385,7 @@ impl MessageHandler for Coordinator {
         // 通用位（ctrl/shift/alt/win）注册，故先掩掉具体位再比对 match_hash。
         let norm_mods = data.modifiers & hotkey::MOD_GENERIC_MASK;
         let norm_hash = calc_key_hash(norm_mods, data.key_code);
+        // 〔K7 key_down 全局热键〕
         if let Some(action) = self.rt().compiled_hotkeys.match_key_down(norm_hash)
             && !action.is_empty()
             // 裸 F 键在英文模式归宿主（TSF 靠策略位不吃；mac / Linux 整体转发，在这里挡）。
@@ -1445,6 +1444,7 @@ impl MessageHandler for Coordinator {
             }
         }
 
+        // 〔K8 候选期快捷键组（守卫不成立返回 None）〕
         // ── 候选词操作热键（Ctrl+数字 置顶/删除）──
         // 这两组在编译期仅注册转发（action 为空，上方匹配不触发），实际语义在此分派。
         // 须先于下方 Ctrl/Alt 组合「清空隐藏候选」分支，否则 Ctrl+数字 会被当作普通组合吞掉。
@@ -1482,11 +1482,13 @@ impl MessageHandler for Coordinator {
         // 表现为「先按一下小键盘、再按主键盘同一个键也出半角」。见 `State::numpad_origin`。
         state.numpad_origin = numpad_origin;
 
+        // 〔K9 快捷加词模式〕
         // 快捷加词模式：消费全部按键（↑↓调词长/Enter确认/Esc退出），先于英文透传与单点分派。
         if state.add_word_active {
             return self.handle_add_word_key(&mut state, data);
         }
 
+        // 〔K10 密码框透传〕
         // 密码框强制英文抑制：透传（不改 chinese_mode 持久值）。图标另有呈现（显 "英"），
         // 走 ToolbarState/语言栏的独立字段，与本判据无耦合——详见 password_suppress 字段注释。
         // 须先于下方全角分支——密码框里不该出全角字符，一律半角透传。
@@ -1498,6 +1500,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K11 软键盘〕
         // 软键盘：接管主键区的符号键位（查表直接上屏）。特殊键与布局外的键在那里返回
         // None，自然落回下面的常规链路 → 透传给宿主，于是「退格还能删、回车还换行」不需
         // 要单独写一条规则。
@@ -1507,6 +1510,7 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // 〔K12 配对跳出〕
         // 配对跳出键：**全模式统一前置判定**，必须早于下面的英文模式分支——英文模式对普通键
         // 直接 PassThrough，判定放在中文路径里就永远跑不到（旧实现即如此，是「英文模式跳不出
         // 中文里打的配对」的根因之一）。守卫与失效方向见 try_jump_out。
@@ -1514,6 +1518,7 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // 〔K13 英文模式分水岭〕
         // 英文模式
         if !state.chinese_mode {
             // 全角：键已被 TSF 的 `english_fullwidth` 分支吃下等 Rust 出字，此处必须转换，
@@ -1537,6 +1542,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K14 CapsLock 大写〕
         // CapsLock 开：大写语义，不进中文输入流。
         // 全角开：将按键转为正确大小写的英文字符再做全角转换后上屏。
         // 全角关：TSF 层在无 session 时已透传；有 session（切换前残留）时由此兜底 PassThrough。
@@ -1573,6 +1579,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K15 夺取回退〕
         // 统一夺取回退：夺取式模式（URL/后续 z 临拼）中，退到夺取边界再按退格 →
         // 撤销夺取、把快照回放回正常码表输入流（而非停在无候选的独占模式）。
         // 须先于下方单点分派，否则退格会被模式处理器按普通删字符消费。
@@ -1580,6 +1587,7 @@ impl MessageHandler for Coordinator {
             return self.rewind_hijack(&mut state);
         }
 
+        // 〔K16 独占模式分派〕
         // 已激活独占模式：单点分派到专用处理器（唯一入口，见 pipeline.rs）。
         match state.active {
             Some(ModeKind::TempPinyin) => return self.handle_temp_pinyin_key(&mut state, data),
@@ -1601,6 +1609,7 @@ impl MessageHandler for Coordinator {
             None => {}
         }
 
+        // 〔K17 方案级锁外状态切换〕
         // 方案级表的 A 类状态切换（`backslash = "toggle_punct"` 这类）。
         //
         // 与紧随其后的 `try_activate_mode` 分属两半：B 类建 overlay、要 `&mut State`，
@@ -1619,6 +1628,7 @@ impl MessageHandler for Coordinator {
             state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         }
 
+        // 〔K18 空缓冲模式激活〕
         // 空缓冲模式激活：单一入口，优先级链见 try_activate_mode（对齐 key-pipeline.md §2.1）。
         if let Some(act) = self.try_activate_mode(&mut state, data) {
             return act;
@@ -1637,6 +1647,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K19 前缀夺取〕
         // ── 前缀夺取式模式激活 ──
         // 普通输入累积时，若 input_buffer + 当前键字符 恰好等于某前缀，则夺取进入对应模式。
         // 置于主分派前，确保「补全前缀的那一键」先被截获，不落入普通码表/标点处理。
@@ -1658,6 +1669,7 @@ impl MessageHandler for Coordinator {
             state.input_buffer
         );
 
+        // 〔K20 编码字符闸门 / 符号缓冲闸门〕
         // 非字母码元闸门：本方案把某个数字/符号配成了码元（如 `a-z0-9` 要打 `Win10`、
         // `a-x/` 要打含 `/` 的词条）→ 进缓冲，抢在以词定字/翻页/数字选词/标点流水线之前。
         //
@@ -1686,6 +1698,7 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // 〔K21 以词定字〕
         // 以词定字（select_char）：配置的成对标点键从当前高亮候选词逐字上屏（对齐 Go
         // handleEngineDefault——select_char 优先于翻页键，故置于 apply_session_action 之前）。默认
         // `select_char_keys` 为空 → select_char_index 恒 None → 跳过（零回归）。仅在缓冲非空或
@@ -1728,12 +1741,14 @@ impl MessageHandler for Coordinator {
             );
         }
 
+        // 〔K22 会话动作（导航/翻页/取消…）〕
         // 候选翻页/高亮：配置驱动统一处理（普通模式为码表型，`-`/`=` 可作翻页）。
         // 仅有候选时生效；无候选时下方 match 的回退臂负责透传方向/翻页键。
         if let Some(act) = self.apply_session_action(&mut state, data, true) {
             return act;
         }
 
+        // 〔K23 小键盘 direct〕
         // 数字小键盘 —— direct（默认）：IME 不把该键解释为选词，但**已打的码不丢**：先顶屏当前
         // 高亮候选（含逐步转换的已转换前缀），再接着输出该小键盘字符。
         // follow_main 时键已在 handle_key_event 入口归一化为主键盘等价键，永不到达此处。
@@ -1791,6 +1806,7 @@ impl MessageHandler for Coordinator {
             return KeyAction::PassThrough;
         }
 
+        // 〔K24 z-fallback 夺取〕
         // ── z-fallback 夺取：**必须早于下面的按键分派** ──
         //
         // 缓冲以 z 开头、加上这一键后 `z…` 破活码前缀 ⇒ 首 z 实为引导键，抛弃它、
@@ -1819,6 +1835,7 @@ impl MessageHandler for Coordinator {
             }
         }
 
+        // 〔K25 默认按键臂〕
         match data.key_code {
             // Escape：取消整个组合（含已转换前缀），不上屏。实现收口在 `cancel_session`
             // ——`keys.session_actions` 里绑 `cancel` 的键走的是同一个函数，两条通路
@@ -4813,6 +4830,10 @@ impl MessageHandler for Coordinator {
 
     fn handle_input_state_report(&self, pid: u32, disabled: bool, reason: u8, mask: u64) {
         self.apply_input_diag(pid, disabled, reason, mask);
+    }
+
+    fn handle_key_observed(&self, key_code: u32, modifiers: u32) {
+        self.hook_observed_key(key_code, modifiers);
     }
 
     fn handle_diag_snapshot(&self, snap: &wind_ipc::protocol::DiagSnapshotPayload) {

@@ -517,7 +517,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     // 透传上报：本函数有 40+ 个 return，逐个接线必漏；守卫在**出口**统一按最终的
     // `*pfEaten` 判。没吃下 = 这次输入服务端看不见，智能符号的 press2 判定要知道。
     // 详见 KeyEventSink.h 的 _NotePassthroughKeyDown。
-    PassthroughNoter _ptNote{this, wParam, pfEaten};
+    PassthroughNoter _ptNote{this, wParam, pfEaten, lParam, true};
 
     // 合成提交触发键：无条件吃下，不流入下面任何按键逻辑（大小写/会话/热键判据……）。
     // 真正的提交在 OnKeyDown 里执行——那才是 TSF 认可的"按键处理期间"。放在最前面，
@@ -1148,6 +1148,28 @@ void CKeyEventSink::_NoteInputSequenceAtExit(WPARAM vk, bool eaten, bool suppres
     _pTextService->InvalidateCachedPrevChar();
 }
 
+void CKeyEventSink::_ReportObservedKeyAtExit(WPARAM vk, LPARAM lParam, bool fromTest, bool eaten,
+                                             bool suppressed)
+{
+    // 未推开时只这一次原子读。密码框、键盘禁用时一个都不报：那是用户数据，与扩展授权无关。
+    const bool enabled = _observeKeys.load(std::memory_order_relaxed) && !_pTextService->IsKeyboardDisabled()
+                         && !_pTextService->IsPasswordScope();
+    const bool repeat = ((lParam >> 30) & 1) != 0;
+    const bool report =
+        fromTest ? _observeGate.OnTestExit((uint32_t)vk, eaten, suppressed, repeat, enabled)
+                 : _observeGate.OnDownExit((uint32_t)vk, eaten, suppressed, repeat, enabled);
+    if (!report)
+        return;
+    // 修饰键取法同 _NoteInputSequenceAtExit：GetKeyState 与正在处理的这条按键消息同步。
+    uint32_t mods = 0;
+    if (GetKeyState(VK_SHIFT) & 0x8000) mods |= KEYMOD_SHIFT;
+    if (GetKeyState(VK_CONTROL) & 0x8000) mods |= KEYMOD_CTRL;
+    if (GetKeyState(VK_MENU) & 0x8000) mods |= KEYMOD_ALT;
+    if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000)) mods |= KEYMOD_WIN;
+    if (CIPCClient* ipc = _pTextService->GetIPCClient())
+        ipc->SendKeyObserved((uint32_t)vk, mods);
+}
+
 STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
@@ -1162,7 +1184,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 已被它消费掉，本守卫这边**无从 Suppress()** —— 自生成键在那批宿主上的兜底因此不能
     // 依赖 skip 表，改由 `IsSelfInjectedVk` 按 VK 值挡（0xE7/0xE8），见 PassthroughNote.h。
     // 同一个键两处都记也无妨——记的是个幂等的布尔。
-    PassthroughNoter _ptNote{this, wParam, pfEaten};
+    PassthroughNoter _ptNote{this, wParam, pfEaten, lParam, false};
 
     // 合成提交触发键：这里才是真正的提交点——TSF 认可的"按键处理期间"，
     // CommitText 内部据此走 TF_ES_SYNC 而非 nonKeyContext 的异步会话。
@@ -1892,6 +1914,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+    _observeGate.OnKeyUp((uint32_t)wParam); // 扩展旁路上报的去重记忆，见 ObservedKeyGate.h
 
     // 屏蔽键一律放行（见 OnTestKeyDown）。
     if (wParam == WindPassthrough::kVkMenuMask)
@@ -1985,6 +2008,7 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
 STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+    _observeGate.OnKeyUp((uint32_t)wParam); // 同 OnTestKeyUp：宿主可能只调其一
 
     // 屏蔽键一律放行（见 OnTestKeyDown）。
     if (wParam == WindPassthrough::kVkMenuMask)
@@ -2585,6 +2609,8 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
 
     BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar,
                                            _seqChar);
+    if (result && isKeyDown)
+        _observeGate.OnSentToCore(keyCode); // 核心会自己给扩展报这一键，旁路不再报
     // ★ 发送失败 ⇒ 事实从未送达，必须放回去。位已在上面清掉，不放回就是**漏报**——而漏报
     // 正是本机制唯一不可接受的方向（服务端会把下一按判成 press2，删掉用户刚打的字）。
     // SendKeyEvent 返回 FALSE 是本文件显式承认的场景（下游各 ipc_failed_* 分支）。
@@ -3384,6 +3410,13 @@ void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8
             value.data(), value.size(), _pTextService->IsTitleMatchEnabled() != FALSE);
         _pTextService->SetTitleMatchEnabled(enabled ? TRUE : FALSE);
         WIND_LOG_INFO_FMT(L"Compat title match updated: enabled=%d\n", enabled ? 1 : 0);
+    }
+    else if (key == CONFIG_KEY_EXTENSION_KEY_OBSERVE)
+    {
+        // 格式：enabled(u8)（对齐 Rust encode_extension_key_observe_value）。空值保持现状。
+        if (value.empty()) return;
+        _observeKeys.store(value[0] != 0, std::memory_order_relaxed);
+        WIND_LOG_INFO_FMT(L"Extension key observe updated: enabled=%d\n", value[0] != 0 ? 1 : 0);
     }
     else if (key == CONFIG_KEY_DIAG_SNAPSHOT)
     {

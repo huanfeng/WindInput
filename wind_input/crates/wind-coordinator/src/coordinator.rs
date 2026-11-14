@@ -1515,13 +1515,15 @@ pub struct Coordinator {
     /// 是否已有草稿 flush 线程在跑。没有这道闸，队列每满一次就会 spawn 一个新线程去
     /// 抢同一把 redb 写锁（同 `is_building_reverse_index` 那道闸的理由）。
     pub(crate) draft_flushing: std::sync::atomic::AtomicBool,
-    /// 最近一次**本输入法自己**向宿主吐字的时刻（由 `commit_action` 统一打点）。
+    /// 最近一次**本输入法自己**向宿主吐字的时刻（`note_self_commit` 打点，经
+    /// `finish_session_action` 按来源调用）。
     ///
     /// 用途只有一个：宿主插入我们提交的文字后会回送 `SelectionChanged`，它和「用户真的
     /// 移动了光标」在协议层**长得一模一样**，只能靠时间区分。若不区分，每上屏一个字就会
     /// 被自己的回声判成「用户移动光标」→ flush → 缓冲永远只有 1 个字 → 造词恒不触发。
     ///
-    /// **打点必须收口在 `commit_action` 一处**：漏掉任一吐字路径，该路径的回声就会切碎序列。
+    /// **打点必须收口在 `finish_session_action` 一处**：漏掉任一吐字路径，该路径的回声就会
+    /// 切碎序列。不经它的推送通路（落点指引 §4.3 末表）目前不打点。
     pub(crate) last_self_commit: Mutex<Option<std::time::Instant>>,
     /// 自动造词写入计数，供临时词库淘汰按次节流（见 `maybe_evict_temp`）。
     pub(crate) auto_phrase_writes: std::sync::atomic::AtomicUsize,
@@ -1555,10 +1557,14 @@ pub struct Coordinator {
     /// 智能联想「下一词」表的路径（`assoc/assoc_bigram.txt`，用户目录同名文件整体替代）；
     /// None = 数据缺失，Bigram 源不出、配额顺延。
     pub(crate) assoc_bigram_path: Option<std::path::PathBuf>,
-    /// 「下一词」表本体：**首次用到时才读**（桌面联想默认关，不该为它多占内存）。
-    /// 读失败记一条警告、之后一直是 None，不反复重试。
-    pub(crate) assoc_bigram:
+    /// 「下一词」表本体：**用得上才读**（桌面联想默认关，不该为它多占内存），且只在后台线程读
+    /// （约 2 MB 文本，见 `ensure_assoc_bigram_async`）。读失败记一条警告、之后一直是 None，
+    /// 不反复重试。`Arc` 是为了让加载线程不必持有协调器。
+    pub(crate) assoc_bigram: std::sync::Arc<
         std::sync::OnceLock<Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>>>,
+    >,
+    /// 下一词表的后台加载已派出（只派一次）。
+    pub(crate) assoc_bigram_loading: std::sync::atomic::AtomicBool,
     /// system.phrases.toml 路径（None=无 data_dir，如 headless 测试）。
     /// "恢复默认"据此重读文件，使手工编辑无需重启服务即可生效。
     pub(crate) system_phrase_path: Option<std::path::PathBuf>,
@@ -2267,6 +2273,11 @@ pub struct Coordinator {
     /// 而键已被全放行，用户无从知道自己打不出中文。
     /// ⚠ 呈现与输入闸是两条独立的路：改这里的展示**不会**改变是否抑制，反之亦然。
     pub(crate) password_suppress: std::sync::atomic::AtomicBool,
+    /// 扩展程序事件出口与会话状态，见 `hook_events`。
+    pub(crate) hook: Arc<wind_hook::tap::Tap>,
+    pub(crate) hook_session: std::sync::Mutex<crate::hook_events::HookSession>,
+    pub(crate) extensions_config_hook:
+        std::sync::OnceLock<crate::hook_events::ExtensionsConfigHook>,
     /// 「不可输入」**呈现**的迟滞闸门（判定本身见 [`Coordinator::input_block`]）。
     ///
     /// 两个方向不对称，取值与理由继承自已删除的 C++ 版：
@@ -3249,7 +3260,8 @@ impl Coordinator {
             system_phrase_entries: std::sync::RwLock::new(system_phrase_entries),
             system_phrase_path,
             assoc_bigram_path,
-            assoc_bigram: std::sync::OnceLock::new(),
+            assoc_bigram: std::sync::Arc::new(std::sync::OnceLock::new()),
+            assoc_bigram_loading: std::sync::atomic::AtomicBool::new(false),
             system_comments,
             comment_lib: std::sync::RwLock::new(Arc::new(comment_lib)),
             s2t: Mutex::new(s2t),
@@ -3403,6 +3415,9 @@ impl Coordinator {
             candidate_menu_open: std::sync::atomic::AtomicBool::new(false),
             last_window_diag: Mutex::new(Default::default()),
             password_suppress: std::sync::atomic::AtomicBool::new(false),
+            hook: Arc::new(wind_hook::tap::Tap::new()),
+            hook_session: std::sync::Mutex::new(Default::default()),
+            extensions_config_hook: std::sync::OnceLock::new(),
             password_suppress_enabled: std::sync::atomic::AtomicBool::new(
                 password_suppress_enabled_init,
             ),
@@ -4671,9 +4686,9 @@ impl Coordinator {
     /// 本次照旧返回空、下次就有（与 `ensure_reverse_index_async` 同一模式）。配置里的消费者
     /// 不走这里——它们由 [`Self::sync_chaizi_assets`] 按 `DataNeeds` 装好。
     ///
-    /// 可能每键都被调（短语求值），故先过闸再解析：解析要读方案文件，找不到库还要告警。
-    /// 本代次（两次 sync 之间）只解析一次，找不到也记「试过」。读盘在锁外做，只在换入那一刻
-    /// 取反查表写锁：候选渲染持着它的读锁。
+    /// 可能每键都被调（短语求值），故先过闸：本代次（两次 sync 之间）只派一次，找不到库也记
+    /// 「试过」。方案字段走缓存；库路径解析（查文件存在）与加载都在后台线程，按键线程不碰盘。
+    /// 只在换入那一刻取反查表写锁：候选渲染持着它的读锁。
     pub(crate) fn ensure_chaizi_async(&self) {
         let generation = {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
@@ -4687,12 +4702,10 @@ impl Coordinator {
             }
             a.generation
         };
-        let Some(path) = Self::resolve_chaizi_db(
-            self.data_dir().as_deref(),
-            self.engine_mgr.chaizi_spec().as_ref(),
-        ) else {
+        let Some(spec) = self.engine_mgr.chaizi_spec() else {
             return;
         };
+        let data_dir = self.data_dir();
         {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
             if a.generation != generation || a.db.is_some() || a.loading {
@@ -4712,6 +4725,9 @@ impl Coordinator {
             .name("chaizi-load".into())
             .spawn(move || {
                 let _guard = guard;
+                let Some(path) = Self::resolve_chaizi_db(data_dir.as_deref(), Some(&spec)) else {
+                    return;
+                };
                 let fresh = wind_reverse::ReverseLookup::load(None, Some(&path));
                 if let Some(c) = weak.upgrade() {
                     c.install_runtime_chaizi(generation, path, fresh);
@@ -5262,6 +5278,8 @@ impl Coordinator {
                 // 文本查表、与编码域无关，本就不是某个方案的属性。自带变更检测（只看
                 // enabled/categories），未变即空操作。
                 self.sync_emoji_dict();
+                // 扩展段跟随全局配置；订阅方自己做变更检测。
+                self.notify_extensions_config();
                 // 用户词文本手改后，保存配置 / 设置页触发热重载时一并生效（设计 §5）。
                 if let Some(store) = &self.store {
                     let changed = store.sync_user_texts();
@@ -5550,6 +5568,8 @@ impl Coordinator {
     ///
     /// ⚠️ 会阻塞秒级，**只可在后台线程/测试里调用**，绝不能进按键链路。
     pub fn prewarm_indexes(&self) {
+        // 按键路径要用的方案级字段先填缓存（输入流程零读盘）。
+        self.engine_mgr.warm_hot_schema_fields();
         // 悬停 [编码] / 编码提示取 code_source_schema，词语联想取 assoc_word_schema。
         // 混输下两者通常都解析到同一个主码表成员，故去重后一般只建一份。
         // 两者相同时不必去重：prewarm_reverse_index 幂等，第二次直接返回。
@@ -5578,6 +5598,13 @@ impl Coordinator {
             if self.engine_mgr.prewarm_reverse_index(&id) {
                 debug!("预热辅助码来源反查索引 {} 用时 {:?}", id, t0.elapsed());
             }
+        }
+        // 智能联想档的下一词表：派后台加载，不在这里等（约 2 MB 文本）。
+        if self
+            .assoc_config()
+            .source_enabled(wind_assoc::AssocSource::Bigram)
+        {
+            self.ensure_assoc_bigram_async();
         }
         // 词语联想的用户词 / 临时词文本索引（t185）：联想开着才建——它要扫整张用户词表，
         // 关着联想的用户不该付这笔。没预热也不致命：首次联想会起后台重建，那一次只出系统词。
@@ -6312,7 +6339,16 @@ impl Coordinator {
                         .any(|c| c.meta.preedit_split.is_some())
             }
             Some(ModeKind::TempPinyin | ModeKind::Mix(_)) => true,
-            Some(_) => false,
+            Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::AuxCode,
+            ) => false,
         };
         if follows {
             let before = state.preedit.clone();
@@ -6434,7 +6470,18 @@ impl Coordinator {
                 // 走 `_` 臂 `reset_pinyin_composition`，与改动前逐字等价。
                 match state.active {
                     Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
-                    _ => self.reset_pinyin_composition(state),
+                    None
+                    | Some(
+                        ModeKind::TempEnglish
+                        | ModeKind::Url
+                        | ModeKind::Email
+                        | ModeKind::Unicode
+                        | ModeKind::Special(_)
+                        | ModeKind::RareChar
+                        | ModeKind::Reverse
+                        | ModeKind::Mix(_)
+                        | ModeKind::AuxCode,
+                    ) => self.reset_pinyin_composition(state),
                 }
             }
             // 普通输入：取消整个组合，含已转换前缀（拼音分步上屏的那部分）一并丢弃。
@@ -7413,26 +7460,51 @@ impl Coordinator {
     /// `cn-en` 读的是 `chinese_mode`（用户选的中英），不含 CapsLock 临时英文：`set` 回答的是
     /// 「切到中文」，CapsLock 松开后自然回到中文。
     pub(crate) fn cmd_set_state(&self, target: &str, on: bool) -> anyhow::Result<()> {
-        let cur = {
-            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            match target {
-                "cn-en" => s.chinese_mode,
-                "fullshape" => s.full_width,
-                "s2t" => s.s2t_enabled,
-                "t2s" => s.t2s_enabled,
-                "toolbar" => s.toolbar_visible,
-                _ => anyhow::bail!(
-                    "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
-                ),
+        self.ime_state_set(target, on, true).map(|_| ())
+    }
+
+    /// 输入状态开关的当前值（`cn-en` 为 true = 中文）。目标只认 cn-en / fullshape / s2t / t2s / toolbar。
+    pub fn ime_state_get(&self, target: &str) -> anyhow::Result<bool> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match target {
+            "cn-en" => Ok(s.chinese_mode),
+            "fullshape" => Ok(s.full_width),
+            "s2t" => Ok(s.s2t_enabled),
+            "t2s" => Ok(s.t2s_enabled),
+            "toolbar" => Ok(s.toolbar_visible),
+            _ => anyhow::bail!(
+                "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
+            ),
+        }
+    }
+
+    /// 把输入状态开关设为 `on`；返回是否真的改动。
+    ///
+    /// 已是目标状态时不动作，`notify_unchanged` 决定要不要弹「已是…」——命令栏要（短语没有
+    /// 别的反馈渠道），CLI 脚本不要（反复调用会天天弹）。改动时走 `ime.toggle` 同一条路径，
+    /// 自带状态气泡与工具栏刷新，不另弹提示。
+    pub fn ime_state_set(
+        &self,
+        target: &str,
+        on: bool,
+        notify_unchanged: bool,
+    ) -> anyhow::Result<bool> {
+        if self.ime_state_get(target)? == on {
+            if notify_unchanged {
+                let text = crate::handle_cmdbar::state_unchanged_text(target, on);
+                self.notify_set_unchanged(target, &text);
             }
-        };
-        if cur == on {
-            let text = crate::handle_cmdbar::state_unchanged_text(target, on);
-            self.notify_set_unchanged(target, &text);
-            return Ok(());
+            return Ok(false);
         }
         self.cmd_ime_toggle(target);
-        Ok(())
+        Ok(true)
+    }
+
+    /// 取反输入状态开关，返回切换后的值（RPC `ime.toggle`）。目标须是上述五个之一。
+    pub fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool> {
+        let cur = self.ime_state_get(target)?;
+        self.cmd_ime_toggle(target);
+        Ok(!cur)
     }
 
     pub(crate) fn cmd_ime_toggle(&self, target: &str) {
@@ -8544,6 +8616,10 @@ impl Coordinator {
         if needs.t2s {
             self.ensure_converter(false);
         }
+        if needs.assoc_bigram {
+            self.ensure_assoc_bigram_async();
+        }
+        self.engine_mgr.warm_hot_schema_fields();
     }
 
     /// 切换简繁转换的**一个方向**，返回切换后该方向是否开着。
@@ -8830,6 +8906,7 @@ impl Coordinator {
         // Linux：托盘图标按主字运行时渲染，文件必须先于带这个标签的状态帧落盘（见子模块头）。
         #[cfg(all(target_os = "linux", ext_presenter, not(test)))]
         self.ensure_tray_icons((chinese_mode && !caps_lock).then_some(icon_label.as_str()));
+        self.hook_mode(chinese_mode, full_width);
         StatusUpdateData {
             chinese_mode,
             full_width,
@@ -10086,11 +10163,16 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                // 不经按键出口，中英切换处补空格在这里补（同鼠标点选，见 `crate::auto_spacing`）。
+                // 不经按键出口，收尾在这里做（同鼠标点选，见 `crate::session_exit`）。
                 let (act, chinese_mode, main_path) = {
-                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    let act = self.apply_auto_spacing(&mut st, act);
-                    (act, st.chinese_mode, st.active.is_none())
+                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let (chinese_mode, main_path) = (st.chinese_mode, st.active.is_none());
+                    let act = self.finish_session_action(
+                        st,
+                        crate::session_exit::ActionOrigin::CapsLockHook,
+                        act,
+                    );
+                    (act, chinese_mode, main_path)
                 };
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
                 self.push_no_key_ctx_action(&act, chinese_mode, main_path);
@@ -10336,7 +10418,18 @@ impl Coordinator {
                             state.temp_pinyin_buffer.clone(),
                             state.temp_pinyin_prefix.clone(),
                         ),
-                        _ => (
+                        None
+                        | Some(
+                            ModeKind::TempEnglish
+                            | ModeKind::Url
+                            | ModeKind::Email
+                            | ModeKind::Unicode
+                            | ModeKind::Special(_)
+                            | ModeKind::RareChar
+                            | ModeKind::Reverse
+                            | ModeKind::Mix(_)
+                            | ModeKind::AuxCode,
+                        ) => (
                             preedit_cursor::cased_or_buffer(
                                 &state.input_buffer,
                                 &state.input_buffer_cased,
@@ -10346,7 +10439,16 @@ impl Coordinator {
                         ),
                     })
                 }
-                _ => None,
+                None
+                | Some(
+                    ModeKind::TempEnglish
+                    | ModeKind::Url
+                    | ModeKind::Email
+                    | ModeKind::Unicode
+                    | ModeKind::Special(_)
+                    | ModeKind::RareChar
+                    | ModeKind::Reverse,
+                ) => None,
             } {
                 // 临拼 / mix：镜像普通组合的 commit_on_switch，且对齐各自的回车上屏语义。
                 let has_pending = !buf.is_empty() || !state.committed_text.is_empty();
@@ -10415,6 +10517,9 @@ impl Coordinator {
         state.committed_segs.clear();
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
+        // 组合随切换结束，检索放宽一并复原（独占分支经 `reset_exclusive_modes` 复原）。托盘 / 热键 /
+        // 按应用切方案走推送上屏、不经出口的 `expire_scope_override`，不在这里复原就会带进新方案。
+        state.scope_relaxed = false;
         state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.candidates.clear();
         state.preedit.clear();

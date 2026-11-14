@@ -209,12 +209,16 @@ impl Coordinator {
     // 状态机在 `crate::auto_phrase`（纯逻辑）；此处只做接线与 IO。
     // ──────────────────────────────────────────────────────────────────────
 
-    /// 上屏后处理：**自提交打点** + 喂码表造词缓冲。
-    ///
-    /// 收口在 `handle_key_event_policed`（而非 `commit_action`）——后者不是唯一出口，
-    /// 另有约 10 处直接构造 `InsertText` 的路径（顶码/智能符号/临拼等），散点打点必漏。
-    /// 与 `record_input_stats` 同一收口思路。
+    /// 按键来源的上屏后处理（自提交打点 + 喂草稿滑窗）的测试合成口。生产路径经
+    /// `finish_session_action` 按来源分别调两步，见 `session_exit::exit_steps`。
+    #[cfg(test)]
     pub(crate) fn note_commit_action(&self, action: &KeyAction) {
+        self.note_self_commit(action);
+        self.note_draft_commit(action);
+    }
+
+    /// 自提交打点：撤销上屏计数 + SelectionChanged 回声判别的时间戳。
+    pub(crate) fn note_self_commit(&self, action: &KeyAction) {
         // 撤销上屏窗口（`ime.undo_commit`）：记录本次按键「同步落到光标前」的字符数（UTF-16
         // 单元，对齐 ReplaceBackward 删除量纲）。覆盖一切确定落屏的返回变体——每次上屏都顶掉
         // 上一次计数，故 undo 只精准删「刚输入完那次」；英文/标点逐键上屏自然把计数刷回 1，
@@ -228,7 +232,22 @@ impl Coordinator {
             | KeyAction::CommitThenDeferComposition { commit_text, .. } => commit_text.as_str(),
             _ => "",
         };
-        let n = committed.encode_utf16().count();
+        // 撤销删的是**光标前**的字：带光标定位的插入（配对「（|）」）只计光标前那段。整段计入的
+        // 话，「你（|）」撤销会删掉「你（」、留下「）」——此前真机上只删 1 个，是延迟左移的透传位
+        // / 迟到的光标回声碰巧把计数刷成了 1，换个时序就会误删。
+        // `cursor_offset` 是从末尾往回退的**格数**（DLL 合成同样次数的 VK_LEFT），按字符取右段。
+        let n = match action {
+            KeyAction::InsertTextWithCursor { cursor_offset, .. } => {
+                let right: usize = committed
+                    .chars()
+                    .rev()
+                    .take(*cursor_offset as usize)
+                    .map(char::len_utf16)
+                    .sum();
+                committed.encode_utf16().count() - right
+            }
+            _ => committed.encode_utf16().count(),
+        };
         if n > 0 {
             self.last_commit_len
                 .store(n, std::sync::atomic::Ordering::Relaxed);
@@ -256,14 +275,6 @@ impl Coordinator {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         }
-
-        // 造词只喂「整段新插入的文本」，刻意仍限这两种变体：`ReplaceBackward` 是回改已上屏
-        // 的内容、`Commit*` 系的 commit_text 是上一段的收尾，都不是新起的一段输入。
-        // 与上面的打点判据不同源是**有意**的，别顺手合并。
-        // 码表造词走滑窗草稿层，吃的是**一切真落屏的文字**（五种变体），与上面的自提交
-        // 打点同源。旧的 `feed_auto_phrase` 只取 `InsertText`/`InsertTextWithCursor` 两种
-        // ——那是「只关心新起的一段输入」的判据，随连续单字模型一起退役了。
-        self.note_draft_commit(action);
     }
 
     /// 造词是否启用（码表/混输方案 + 开关开启）。拼音方案走 `[pinyin.auto_learn]` 的
@@ -496,6 +507,7 @@ impl Coordinator {
             anyhow::bail!("混输方案主码表缺失，无法归属加词");
         };
         store.add_user_word(&schema, &code, word, ADD_WORD_WEIGHT, boundary)?;
+        crate::user_words_api::clear_deleted_for_added(self, &schema, &[(&code, word)]);
         debug!("dict.add: 已加词 {} -> {}", code, word);
         Ok(word.to_string())
     }
@@ -708,6 +720,16 @@ impl Coordinator {
             }
             self.engine_mgr.data_schema_id(owner) // 拼音族折叠到 "pinyin"，与 record_freq 写读一致
         };
+        // 拼音「屏蔽这个词」优先于自动学词（设计 §4a）：分段上屏拼出被屏蔽的词照常上屏、不学，
+        // 否则手滑造出的错词下次又原样出现。落 `pinyin` 桶的都管：拼音方案、临拼 / 快捷输入的
+        // 拼音段、混输的拼音段（§8 第 12 条，与拼音方案共用屏蔽）。
+        if self
+            .blocked_words_in(&schema)
+            .is_some_and(|b| b.contains(&text))
+        {
+            debug!("auto-learn: {} 已被屏蔽，跳过", text);
+            return None;
+        }
         // 查重用户词库：同「码+词」已在用户层则不再写临时层（对齐码表侧 `flush_auto_phrase`
         // 的查重②）。已经是用户词的，再进临时层既无晋升意义、又让候选面多一条同文项。
         //
@@ -1191,6 +1213,11 @@ impl Coordinator {
             };
             match store.add_user_word(&schema, &code, &word, ADD_WORD_WEIGHT, boundary) {
                 Ok(_) => {
+                    crate::user_words_api::clear_deleted_for_added(
+                        self,
+                        &schema,
+                        &[(&code, &word)],
+                    );
                     // 注：dict.changed 广播在 RPC dispatch 层（EventSink），协调器不持有该 sink，
                     // 故此处不发事件——与现有 web_dict_add 一致；设置端用户词库视图重开时刷新。
                     debug!("addword: 已加词 {} -> {}", code, word);

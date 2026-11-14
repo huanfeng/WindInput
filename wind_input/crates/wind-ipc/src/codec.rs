@@ -171,6 +171,14 @@ pub fn decode_input_state_report(payload: &[u8]) -> Result<InputStateReportPaylo
     })
 }
 
+/// 解码 `CMD_KEY_OBSERVED`（0x021D）载荷。
+pub fn decode_key_observed(payload: &[u8]) -> Result<KeyObservedPayload, CodecError> {
+    KeyObservedPayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
+        need: KeyObservedPayload::SIZE,
+        got: payload.len(),
+    })
+}
+
 /// 解码 `CMD_UIELEMENT_STATE`（0x0217）载荷。
 pub fn decode_uielement_state(payload: &[u8]) -> Result<UiElementStatePayload, CodecError> {
     UiElementStatePayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
@@ -1923,6 +1931,12 @@ pub fn encode_multiline_commit_value(paste: bool) -> Vec<u8> {
 /// 编码「本进程可能命中 compat 标题规则」开关的值部分（对齐 TSF `OnSyncConfig` 的
 /// CONFIG_KEY_COMPAT_TITLE_MATCH）。格式：enabled(u8)。默认关，关闭时 DLL 不采集窗口标题。
 pub fn encode_compat_title_match_value(enabled: bool) -> Vec<u8> {
+    vec![enabled as u8]
+}
+
+/// 编码「有扩展订阅按键」开关的值部分（对齐 TSF `OnSyncConfig` 的
+/// CONFIG_KEY_EXTENSION_KEY_OBSERVE）。格式：enabled(u8)。默认关。
+pub fn encode_extension_key_observe_value(enabled: bool) -> Vec<u8> {
     vec![enabled as u8]
 }
 

@@ -32,7 +32,9 @@ members = [
     "crates/wind-userdata",
     "crates/wind-wdict",
     "crates/wind-rpc",
+    "crates/wind-hook",
     "apps/service",
+    "apps/extension_host",
     "apps/rpc",
     "apps/repl",
     "apps/wind-tools",
@@ -124,6 +126,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Ole",
     "Win32_System_DataExchange",
     "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
 ]}
 # Random
 rand = "0.8"

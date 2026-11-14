@@ -679,7 +679,7 @@ impl Coordinator {
             "softkeyboard: 点击 {slot}{} -> {out:?}",
             if shift { "+shift" } else { "" }
         );
-        self.push_commit_text(&out);
+        self.push_commit_text_from(crate::session_exit::ActionOrigin::SoftKeyboardClick, &out);
     }
 
     /// 面板上点了标签行 / 面名键。

@@ -3,8 +3,10 @@
 //! - 出厂 `data/config.toml` 的 `[input.emoji.modules]`：键与默认值。少一个键，设置页那个开关
 //!   读不到值；默认值不一致，出厂行为取决于哪层先被读到。
 //! - `config_schema` 的登记：漏登记的键 `config set` 认不出来，设置端也写不进去。
-//! - 三套构建脚本的 `others.txt` 剔除清单（`著名表演艺术家` 等）：漏一处，那个平台的安装包
-//!   就带上了本不该分发的内容，且没有任何运行期症状。
+//! - 构建脚本的 `others.txt` 剔除清单（`著名表演艺术家` 等）：真相源是
+//!   `scripts/lib/frost-cells.sh` 的 `FROST_OTHERS_EXCLUDE`（`scripts/dev.sh` 与
+//!   `wind_linux/nix/data.nix` 都 source 它），`scripts/mac/dev.sh` 与 `scripts/dev.ps1`
+//!   仍各有一份；漏一处，那个平台的安装包就带上了本不该分发的内容，且没有任何运行期症状。
 //!
 //! ⚠️ 读仓库里的真实出厂文件，不是夹具。
 
@@ -87,6 +89,9 @@ fn user_files_in_emoji_dir_become_modules() {
     assert_eq!(user[0].file, "emoji/a_mine.txt");
 }
 
+/// 剔除清单真相源：`scripts/dev.sh` 与 `wind_linux/nix/data.nix` 都 source 这一份。
+const FROST_CELLS_SH: &str = "scripts/lib/frost-cells.sh";
+
 /// `FROST_OTHERS_EXCLUDE="a b"`（bash）
 fn bash_list(rel: &str) -> Vec<String> {
     let src = read(rel);
@@ -103,12 +108,12 @@ fn bash_list(rel: &str) -> Vec<String> {
 
 #[test]
 fn build_scripts_exclude_the_same_others_sections() {
-    let sh = bash_list("scripts/dev.sh");
+    let sh = bash_list(FROST_CELLS_SH);
     assert!(sh.iter().any(|s| s == "著名表演艺术家"));
     assert_eq!(
         bash_list("scripts/mac/dev.sh"),
         sh,
-        "mac/dev.sh 与 dev.sh 不一致"
+        "mac/dev.sh 与 frost-cells.sh 不一致"
     );
     let ps = read("scripts/dev.ps1");
     let start = ps
@@ -121,7 +126,7 @@ fn build_scripts_exclude_the_same_others_sections() {
         .map(|s| s.trim().trim_matches('\'').to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    assert_eq!(ps_list, sh, "dev.ps1 与 dev.sh 不一致");
+    assert_eq!(ps_list, sh, "dev.ps1 与 frost-cells.sh 不一致");
     // 被剔除的分组不能同时被某个模块引用：那个模块会永远是空的
     for m in EMOJI_MODULES {
         for s in m.sections {

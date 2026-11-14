@@ -9,6 +9,23 @@ use crate::coordinator::Coordinator;
 use crate::pipeline::ModeKind;
 
 impl Coordinator {
+    /// 等后台加载的联想下一词表装好（测试用）：生产里它在启动预热时派出、按键前早已就绪，
+    /// headless 测试要自己等。没有派出加载（非智能档）时立即返回 `false`。
+    pub fn debug_wait_assoc_bigram(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.assoc_bigram.get().is_none() {
+            if !self
+                .assoc_bigram_loading
+                .load(std::sync::atomic::Ordering::Acquire)
+                || std::time::Instant::now() >= deadline
+            {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        true
+    }
+
     /// 当前生效的每页候选数（测试/诊断用）。`overlay = true` 时按 overlay 模式（临拼）取档。
     pub fn debug_per_page(&self, overlay: bool) -> usize {
         self.per_page(overlay.then_some(ModeKind::TempPinyin))

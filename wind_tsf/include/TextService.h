@@ -337,6 +337,9 @@ public:
     // InputScope 位 + compartment 未禁用 + 策略开关开）。DLL 必须能自行判定：吃键决策在
     // OnTestKeyDown 完成，早于 IPC，仅靠 core 回 PassThrough 会「吃了再吐」丢键。
     BOOL IsPasswordSuppressActive() const;
+    // 焦点是不是密码框（IS_PASSWORD / IS_NUMERIC_PASSWORD），**与强制英文开关无关**：
+    // 扩展旁路上报据此一个键都不报（隐私），而上面那个是吃键闸门，管的是输入行为。
+    BOOL IsPasswordScope() const;
     void SetPasswordSuppressEnabled(BOOL bEnabled) { _passwordSuppressEnabled = bEnabled; }
     // 诊断快照采集开关（core 经 CONFIG_KEY_DIAG_SNAPSHOT 推；默认关）。
     void SetDiagSnapshotEnabled(BOOL bEnabled) { _diagSnapshotEnabled = bEnabled; }
@@ -764,6 +767,7 @@ private:
     ITfContext* _recoverContext = nullptr;   // 残留所在的 context（持有引用）；核对与清除只认它
     ITfRange* _recoverRange = nullptr;       // 残留区间（终止时组合区间的副本，持有引用），解除时据此清
     LONG _recoverAcpStart = 0;               // 残留在文档里的起点（ACP 偏移）；核对靠位置，不只靠文字
+    ULONGLONG _recoverArmTick = 0;           // 进入恢复的时刻，焦点空档判「宿主在转移输入」用
     ULONGLONG _lastCompositionWriteTick = 0; // 上次写组合文字的时刻，判「过早终止」用
     BOOL _caretRejectedOutsideView = FALSE; // 最近一次同步取坐标因越出显示区被弃用，见 GetCaretPosition
     // 在编辑会话里删掉光标前的残留（光标前恰好是残留才删），并清掉记录。无残留时什么也不做。

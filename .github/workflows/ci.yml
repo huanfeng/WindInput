@@ -15,7 +15,17 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # 整个工作区的测试二进制很多，带完整调试信息会把 runner 磁盘写满（链接时 ld 被 Bus error）；
+    # CI 里不需要调试符号，只留行号表。
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
+      # runner 预装的 .NET / Android SDK / GHC 用不到（Android 只做 cargo check，不要 NDK），腾出十几 GB。
+      - name: 腾出磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: actions/checkout@v7
 
       # 统一 MSVC 工具链:clang-19(C++ TSF 需 clang≥19)+ lld-19 + llvm-19;

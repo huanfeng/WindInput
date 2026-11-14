@@ -1882,6 +1882,16 @@ track_english = true
 # 方向恒为正偏差，故出厂取 < 1 做经验折价。填 >= 1 只会让显示值重新偏离真实手速。
 speed_factor = 0.85
 
+[extensions]
+# 扩展程序总开关。扩展装在用户目录的 extensions/<id>/ 下，开启后由输入法拉起扩展宿主，
+# 把按键、上屏等事件异步投递给已启用的扩展；扩展不能影响上屏结果。
+# 扩展列表 list 是数组表，按扩展增减，格式：
+#   [[extensions.list]]
+#   id = "keysound"
+#   enabled = true
+#   granted = ["key.detail"]
+enabled = false
+
 [debug]
 # trace / debug / info / warn / error。注意 info 及以下级别不得含用户输入内容与候选词。
 log_level = "info"

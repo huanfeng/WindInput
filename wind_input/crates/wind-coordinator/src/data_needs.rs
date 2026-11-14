@@ -48,6 +48,8 @@ pub(crate) struct DataNeeds {
     /// 任一被分配的注释模板或启用的悬停段引用 `${correct_pinyin}`：`hint` 关着也要让拼音引擎算模糊音
     /// 提示（`EngineManager::set_correct_pinyin_in_templates`）。
     pub(crate) correct_pinyin: bool,
+    /// 联想「下一词」表：联想档位与开关让 Bigram 源出场（智能联想档）。
+    pub(crate) assoc_bigram: bool,
 }
 
 /// 判定材料里要问 `EngineManager` 的那部分。
@@ -158,8 +160,8 @@ impl DataNeeds {
         let tip_code = tip_any(&["word_code", "code_source"]) || tip_any(CODE_REV_VARS);
         let mobile =
             (overlay == wind_config::ConfigOverlay::Mobile).then_some(&cfg.mobile.association);
-        let assoc_on = wind_assoc::AssocConfig::from_config(&cfg.input.association, mobile).kind
-            != wind_assoc::AssocKind::Off;
+        let assoc = wind_assoc::AssocConfig::from_config(&cfg.input.association, mobile);
+        let assoc_on = assoc.kind != wind_assoc::AssocKind::Off;
         let (s2t, t2s) = cfg.input.conversion_directions();
 
         Self {
@@ -173,6 +175,7 @@ impl DataNeeds {
             s2t,
             t2s,
             correct_pinyin,
+            assoc_bigram: assoc.source_enabled(wind_assoc::AssocSource::Bigram),
         }
     }
 }
@@ -325,11 +328,22 @@ mod tests {
                 s2t: false,
                 t2s: false,
                 correct_pinyin: false,
+                assoc_bigram: false,
             },
             "出厂：悬停[编码]开着 ⇒ 反查与用户层要；详细态模板引用拆字 ⇒ 启动即装；\
-             简繁两向都关；模板不含 ${{correct_pinyin}}"
+             简繁两向都关；模板不含 ${{correct_pinyin}}；桌面联想不是智能档 ⇒ 不读下一词表"
         );
         assert_eq!(derive(&Config::default()), n, "L1 与 L2 在这几项上应一致");
+    }
+
+    /// 智能联想档才要下一词表（它是唯一的 Bigram 源消费者）。
+    #[test]
+    fn smart_association_needs_bigram() {
+        let mut c = factory();
+        c.input.association.kind = "smart".to_string();
+        assert!(derive(&c).assoc_bigram);
+        c.input.association.kind = "word".to_string();
+        assert!(!derive(&c).assoc_bigram);
     }
 
     /// 关掉悬停[编码]后反查仍然要：临拼 / 快捷输入出厂分到的模板含 `${code_rev}`。
@@ -1174,6 +1188,15 @@ mod tests {
             1,
             "找不到库也只解析一次"
         );
+        // 库路径在后台线程上解析：等这一轮线程退出（`loading` 复位），再看 sync 后的重试。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while c.chaizi_assets.lock().unwrap().loading {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "拆字加载线程 5 秒没退出"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         c.sync_chaizi_assets();
         assert_eq!(c.reverse_render("好", "${chaizi}"), "");
         assert_eq!(

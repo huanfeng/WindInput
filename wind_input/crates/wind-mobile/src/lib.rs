@@ -297,13 +297,14 @@ pub struct SchemaDictInfo {
 /// 候选长按菜单的一项（桌面候选右键菜单在手机上的对应物）。
 ///
 /// 只出可点的叶子：桌面菜单里的分隔线 / 标题行是绘制用的，命令项不会出现在候选菜单里；
-/// 子菜单（目前候选菜单没有）会被摊平成同级项。
+/// 子菜单（「固定到第 N 位」）会被摊平成同级项。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateMenuItem {
-    /// 文案，与桌面同一候选的右键菜单逐字一致（如「隐藏候选」「设为生僻字」）
+    /// 文案，与桌面同一候选的右键菜单逐字一致（如「屏蔽该词」「设为生僻字」）
     pub label: String,
-    /// `"move_top"` | `"move_up"` | `"move_down"` | `"delete"` | `"reset"` |
-    /// `"toggle_common"` | `"copy"`。原样回传给 [`MobileCore::candidate_menu_run`]。
+    /// `"move_top"` | `"move_up"` | `"move_down"` | `"pin_at_N"`（N 为 1 起的名次）| `"delete"` |
+    /// `"hide_here"` | `"reset"` | `"toggle_common"` | `"copy"`。原样回传给
+    /// [`MobileCore::candidate_menu_run`]。
     pub action: String,
     /// 灰显项照样列出：用户要看得出「这条不能调」，而不是以为菜单少了一项
     pub enabled: bool,
@@ -323,24 +324,50 @@ pub struct InstalledSchema {
 pub use wind_coordinator::handle_tooltip::CandidateTooltipSection;
 
 /// [`CandidateMenuItem::action`] 与词条操作的对照。`copy` 不在此表——复制由宿主自己写剪贴板。
-const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 6] = [
+/// 「固定到第 N 位」不在表里，动作名是 `pin_at_N`（见 [`candidate_menu_action`]）。
+const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 7] = [
     ("move_top", CandidateOp::MoveTop),
     ("move_up", CandidateOp::MoveUp),
     ("move_down", CandidateOp::MoveDown),
     ("delete", CandidateOp::Delete),
+    ("hide_here", CandidateOp::HideHere),
     ("reset", CandidateOp::Reset),
     ("toggle_common", CandidateOp::ToggleCommon),
 ];
+
+/// 移动端「固定到第 N 位」的 N 上限（扁平化时截掉其余子项）。
+const MOBILE_PIN_AT_MAX: u8 = 9;
+
+/// 词条操作 → 动作名。
+fn candidate_menu_action(op: CandidateOp) -> Option<String> {
+    if let CandidateOp::PinAt(n) = op {
+        return Some(format!("pin_at_{n}"));
+    }
+    CANDIDATE_MENU_ACTIONS
+        .iter()
+        .find(|(_, o)| *o == op)
+        .map(|(a, _)| (*a).to_string())
+}
+
+/// 动作名 → 词条操作（`copy` 与未知名 → None）。
+fn candidate_menu_op(action: &str) -> Option<CandidateOp> {
+    if let Some(n) = action.strip_prefix("pin_at_") {
+        return n.parse().ok().map(CandidateOp::PinAt);
+    }
+    CANDIDATE_MENU_ACTIONS
+        .iter()
+        .find(|(a, _)| *a == action)
+        .map(|&(_, op)| op)
+}
 
 /// 把桌面菜单树压成移动端的扁平列表：只留 Op 与 Copy 叶子，子菜单摊平。
 fn flatten_candidate_menu(items: &[MenuItemSpec], out: &mut Vec<CandidateMenuItem>) {
     for item in items {
         let action = match item.kind {
-            MenuKind::Op(op) => CANDIDATE_MENU_ACTIONS
-                .iter()
-                .find(|(_, o)| *o == op)
-                .map(|(a, _)| *a),
-            MenuKind::Copy => Some("copy"),
+            // 长按菜单是扁平列表，「第 N 位」只列到 9，免得一屏全是它（桌面子菜单仍到 20）。
+            MenuKind::Op(CandidateOp::PinAt(n)) if n > MOBILE_PIN_AT_MAX => None,
+            MenuKind::Op(op) => candidate_menu_action(op),
+            MenuKind::Copy => Some("copy".to_string()),
             MenuKind::Submenu => {
                 flatten_candidate_menu(&item.children, out);
                 None
@@ -348,9 +375,14 @@ fn flatten_candidate_menu(items: &[MenuItemSpec], out: &mut Vec<CandidateMenuIte
             MenuKind::Command(_) | MenuKind::Separator | MenuKind::Label => None,
         };
         if let Some(action) = action {
+            // 桌面子项「第 3 位」挂在「固定到第 N 位」下；摊平后没有父项，文案补全。
+            let label = match item.kind {
+                MenuKind::Op(CandidateOp::PinAt(n)) => format!("固定到第 {n} 位"),
+                _ => item.label.clone(),
+            };
             out.push(CandidateMenuItem {
-                label: item.label.clone(),
-                action: action.to_string(),
+                label,
+                action,
                 enabled: item.enabled,
             });
         }
@@ -756,7 +788,7 @@ impl MobileCore {
     /// 暂停学习（[`Self::set_learning_suspended`]）不拦这里：那是「别从输入里偷偷学」，
     /// 而这些是用户点名的显式编辑。
     pub fn candidate_menu_run(&self, index: usize, action: &str) -> bool {
-        let Some(&(_, op)) = CANDIDATE_MENU_ACTIONS.iter().find(|(a, _)| *a == action) else {
+        let Some(op) = candidate_menu_op(action) else {
             return false;
         };
         let offered = self
@@ -2079,6 +2111,12 @@ mod candidate_menu_tests {
     fn flatten_keeps_op_and_copy_leaves_and_inlines_submenus() {
         let items = vec![
             MenuItemSpec::leaf("置顶", MenuKind::Op(CandidateOp::MoveTop), false, false),
+            MenuItemSpec::leaf(
+                "在此编码下隐藏",
+                MenuKind::Op(CandidateOp::HideHere),
+                true,
+                false,
+            ),
             MenuItemSpec::separator(),
             MenuItemSpec::label("标题"),
             MenuItemSpec::leaf(
@@ -2111,9 +2149,67 @@ mod candidate_menu_tests {
             got,
             [
                 ("置顶", "move_top", false),
+                ("在此编码下隐藏", "hide_here", true),
                 ("设为生僻字", "toggle_common", true),
                 ("复制", "copy", true),
             ]
+        );
+    }
+
+    /// 「固定到第 N 位」子菜单摊平成 `pin_at_N`，文案补全；动作名能解析回原操作。
+    #[test]
+    fn pin_at_submenu_flattens_to_pin_at_n() {
+        let items = vec![MenuItemSpec::submenu(
+            "固定到第 N 位",
+            vec![
+                MenuItemSpec::leaf("第 1 位", MenuKind::Op(CandidateOp::PinAt(1)), true, false),
+                MenuItemSpec::leaf("第 2 位", MenuKind::Op(CandidateOp::PinAt(2)), false, false),
+            ],
+        )];
+        let mut out = Vec::new();
+        flatten_candidate_menu(&items, &mut out);
+        let got: Vec<(&str, &str, bool)> = out
+            .iter()
+            .map(|i| (i.label.as_str(), i.action.as_str(), i.enabled))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("固定到第 1 位", "pin_at_1", true),
+                ("固定到第 2 位", "pin_at_2", false),
+            ]
+        );
+        for n in 1..=wind_ui_types::PIN_AT_MAX {
+            let op = CandidateOp::PinAt(n);
+            assert_eq!(
+                candidate_menu_action(op)
+                    .as_deref()
+                    .and_then(candidate_menu_op),
+                Some(op)
+            );
+        }
+        assert_eq!(candidate_menu_op("pin_at_x"), None);
+    }
+
+    /// 移动端只摊平前 9 个「第 N 位」。
+    #[test]
+    fn pin_at_capped_to_nine_on_mobile() {
+        let kids = (1..=12)
+            .map(|n| {
+                MenuItemSpec::leaf(
+                    format!("第 {n} 位"),
+                    MenuKind::Op(CandidateOp::PinAt(n)),
+                    true,
+                    false,
+                )
+            })
+            .collect();
+        let mut out = Vec::new();
+        flatten_candidate_menu(&[MenuItemSpec::submenu("固定到第 N 位", kids)], &mut out);
+        let got: Vec<&str> = out.iter().map(|i| i.action.as_str()).collect();
+        assert_eq!(
+            got,
+            (1..=9).map(|n| format!("pin_at_{n}")).collect::<Vec<_>>()
         );
     }
 

@@ -245,7 +245,7 @@ impl Coordinator {
     /// 只有越界、`$CC` 命令候选（已异步执行）、组折叠候选（已就地展开）返回 `passthrough`
     /// （`consumed=false`、无 ops）。
     pub fn select_candidate(&self, index: usize) -> KeyOutcome {
-        match self.select_candidate_at(index) {
+        match self.select_candidate_from(index, crate::session_exit::ActionOrigin::MobilePick) {
             Some(action) => edit_ops::to_outcome(action),
             None => KeyOutcome::passthrough(),
         }

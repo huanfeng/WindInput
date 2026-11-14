@@ -134,6 +134,11 @@ const ALLOWED: &[(&str, &str)] = &[
         "crates/wind-dict/src/datformat.rs",
         "rss_mb 解析内核给的 /proc/self/status（同 process_memory.rs），只用于构建日志。",
     ),
+    (
+        "crates/wind-coordinator/src/source_scan.rs",
+        "仅测试：源码扫描守卫读本 crate 自己的 .rs（rustfmt 排版、include_str!/read_to_string），\
+         不碰用户文件；`lines()` 已处理 CRLF，孤立 CR 在源码里不出现。",
+    ),
     // ---- 另案：修法与其余几处不同 ----
     (
         "crates/wind-dict/src/codetable.rs",

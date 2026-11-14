@@ -952,7 +952,7 @@ k = ["ao"]
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../data/schemas/shuangpin");
         for id in [
-            "xiaohe", "ziranma", "mspy", "sogou", "abc", "ziguang", "shoudao",
+            "xiaohe", "ziranma", "mspy", "sogou", "abc", "ziguang", "shoudao", "gb2017",
         ] {
             let p = dir.join(format!("{id}.toml"));
             let lay = Layout::from_toml(&p).unwrap_or_else(|e| panic!("加载 {id} 失败: {e}"));
@@ -1332,6 +1332,41 @@ mod converter_tests {
             ("gz", "gou"),
             ("nn", "nve"),
             ("ln", "lve"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(c.convert(input).full_pinyin(), want, "convert({input:?})");
+        }
+    }
+
+    // --- TestGb2017Scheme ---
+    /// GB/T 34947-2017 的 ü 与同键双韵母。
+    ///
+    /// ü 在布局里一律写 `v`（j/q/x/y 后由 `normalize_pinyin` 折回 u）；写成字面
+    /// `ü`/`üe`/`ün` 时一个音节也认不出，jue/que/xue/yue、lve/nve、lv/nv 整片打不出。
+    /// `o` 键的顺序同理：一键双韵母只取第一个合法者，`["o", "uo"]` 会让 `lo`（咯）
+    /// 抢走 `luo`（罗/落/络…）。零声母按标准 4.1.1 以 `a` 引导——`ac`=ao、`ao`=o，
+    /// 不是首字母直接重复。
+    #[test]
+    fn gb2017_scheme() {
+        let c = conv("gb2017");
+        let cases = [
+            ("jx", "jue"),
+            ("qx", "que"),
+            ("xx", "xue"),
+            ("yx", "yue"),
+            ("lx", "lve"),
+            ("nx", "nve"),
+            ("jv", "ju"),
+            ("lv", "lv"),
+            ("nv", "nv"),
+            ("lo", "luo"),
+            ("jw", "juan"),
+            ("jz", "jun"),
+            ("aa", "a"),
+            ("af", "an"),
+            ("al", "er"),
+            ("ao", "o"),
+            ("ac", "ao"),
         ];
         for (input, want) in cases {
             assert_eq!(c.convert(input).full_pinyin(), want, "convert({input:?})");

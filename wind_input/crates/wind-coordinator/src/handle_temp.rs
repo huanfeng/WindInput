@@ -297,7 +297,14 @@ impl Coordinator {
             }
             // 反查模式不自动上屏（通配查询没有「全码唯一」一说）。
             Some(ModeKind::Reverse) => self.update_reverse_candidates(state),
-            _ => {}
+            None
+            | Some(
+                ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::AuxCode,
+            ) => {}
         }
         let display = state.preedit.clone();
         self.notify_ui_update(state);
@@ -451,7 +458,6 @@ impl Coordinator {
         // 临拼此前完全不接过滤——「检索范围」设置对它从来无效，且默认 smart 下临拼比主路径
         // 多出数百个生僻字候选（实测 `ying`：临拼 299 条 vs 主路径 76 条）。
         self.mark_common(&mut candidates);
-        self.apply_filter(state, &mut candidates);
         // ── 用户数据（词频 / 候选调整）：归属一律取**临拼目标方案** ────────────────
         //
         // ★★ 临拼操作的是**拼音/双拼**那一份用户数据，不是主方案（五笔）的：两者的编码域
@@ -476,14 +482,16 @@ impl Coordinator {
         // 同一条纪律：末页翻页放宽补进来的生僻字若参与 used-first，用户误选一次就会被顶到
         // 常用字前面，与「自动补充不影响原有排序」的承诺相悖。临拼**有**放宽通路
         // （`try_relax_scope_on_page_end` 已按模式分流），故这条排除在这里同样必要。
-        let rerank_len = candidates
-            .iter()
-            .take_while(|c| !c.is_scope_filtered)
-            .count();
-        self.apply_freq_rerank_in(
-            temp_pinyin_owner.as_deref(),
-            &mut candidates[..rerank_len],
-            &state.temp_pinyin_buffer,
+        let ctx = crate::postprocess::PassCtx {
+            owner: temp_pinyin_owner.as_deref(),
+            freq_code: Some(&state.temp_pinyin_buffer),
+            shadow_code: Some(&shadow_code),
+        };
+        self.run_passes(
+            state,
+            &mut candidates,
+            crate::postprocess::profile::TEMP_PINYIN_PRE,
+            &ctx,
         );
         // 纠错候选不占首选（D6），与主路径同位：重排之后、候选调整之前。
         wind_candidate::protect_top_from_corrected(&mut candidates, input_str.len());
@@ -495,7 +503,12 @@ impl Coordinator {
         //
         // 返回值（本码是否有置顶规则就位）在此丢弃：它只服务于出简让全，那是码表方案的
         // 特性，临拼是纯拼音 overlay，没有让位环节。
-        self.apply_shadow_in(temp_pinyin_owner.as_deref(), &mut candidates, &shadow_code);
+        self.run_passes(
+            state,
+            &mut candidates,
+            crate::postprocess::profile::TEMP_PINYIN_SHADOW,
+            &ctx,
+        );
         // Emoji 扩展：与主路径同一位置——**钉在所有加工之后**（理由见
         // `apply_emoji_suggestions`：放进过滤链里它会被静默滤光）。
         //
@@ -1381,8 +1394,16 @@ impl Coordinator {
             // 重排前先把「用过、但原序在取数上限之外」的词补进池尾（A2-39③，调频关时空操作）。
             let recalled = self.english_freq_recall(Some(ENGLISH_SCHEMA), &dict_part, &code);
             dict_part.extend(recalled);
-            self.apply_freq_rerank_in(Some(ENGLISH_SCHEMA), &mut dict_part, &code);
-            self.apply_shadow_in(Some(ENGLISH_SCHEMA), &mut dict_part, &code);
+            self.run_passes(
+                state,
+                &mut dict_part,
+                crate::postprocess::profile::TEMP_ENGLISH,
+                &crate::postprocess::PassCtx {
+                    owner: Some(ENGLISH_SCHEMA),
+                    freq_code: Some(&code),
+                    shadow_code: Some(&code),
+                },
+            );
             // ★ 大小写投影排在重排与置顶**之后**：那两者都以候选 `text` 为键，先改写文本
             // 会让读端（按词库原文查）与写端（存投影后文本）用上不同的键，英文词频与
             // 候选调整**静默失效**。被改写的候选把原文留在 `case_source` 里，记账走
@@ -1412,7 +1433,14 @@ impl Coordinator {
             && buf.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
         let raw_mode =
             crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
-        let want_raw = crate::english_candidates::wants_raw_candidate(raw_mode, &buf, &dict_part);
+        let blocked = self.blocked_words_in(ENGLISH_SCHEMA);
+        let want_raw = crate::english_candidates::wants_raw_candidate(
+            raw_mode,
+            &buf,
+            &dict_part,
+            blocked.as_deref(),
+            self.rt().config.input.temp_english.case_follow_input,
+        );
         // 变形跟着原文走（同主输入路）。临英出厂 `case_variants = true`，不管的话
         // `ip'pro` 会先出 `Ip'pro` / `ip'pro` / `IP'PRO` 三条才轮到词组。
         let want_variants = want_variants && (!phrase_active || want_raw);

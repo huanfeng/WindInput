@@ -104,6 +104,83 @@ impl ShadowRecord {
 /// Shadow 文件的列。
 pub const SHADOW_COLS: &[&str] = &["code", "text", "action", "position", "cand_id"];
 
+/// 「屏蔽这个词」的规则键：拼音 / 英文数据方案里 `code = *` 的 `delete` 行表示**所有编码**都不出这段
+/// 文字（按文字删除，见设计 system-dict-patch-and-candidate-adjust §4a、§8 第 11 条）。它在这两个桶里
+/// 不是输入码，[`Store::get_shadow_rules`] 不按它返回规则。其它方案里 `*` 是普通编码（码表通配键
+/// 浏览态）。英文桶的输入码是小写化的英文缓冲：英文方案码元只有字母，临英缓冲以字母开头，只有
+/// 「触发键进临英 + `allow_symbols` 放行 `*`」才可能打出恰为 `*` 的缓冲——那时英文词库无候选，
+/// 能调的只有原文条，协调器对这个码不写规则（`candidate_op_in`）。
+pub const BLOCK_ALL_CODES: &str = "*";
+
+/// 按文字屏蔽只在这些数据方案里有：拼音族折叠后的 `pinyin`，与英文方案 / 临时英文共用的 `english`。
+pub const BLOCK_SCHEMAS: &[&str] = &["pinyin", "english"];
+
+/// `schema` 是否支持按文字屏蔽。
+pub fn supports_block(schema: &str) -> bool {
+    BLOCK_SCHEMAS.contains(&schema)
+}
+
+/// `schema` 里的 `code` 是不是屏蔽组。
+fn is_block_group(schema: &str, code: &str) -> bool {
+    supports_block(schema) && code == BLOCK_ALL_CODES
+}
+
+/// 能否按文字屏蔽：至少两个字。单字全局屏蔽等于这个字打不出，只按编码隐藏。
+///
+/// 「字」按用户看到的算：变体选择符、肤色修饰、组合附加符、标签字符、零宽（不）连接符不单独成字，
+/// 零宽连接符后面那个字并进前一个（`👨‍👩‍👧`），一对区域指示符是一面旗。
+pub fn is_blockable_word(text: &str) -> bool {
+    let mut n = 0;
+    let mut after_zwj = false;
+    let mut half_flag = false;
+    for c in text.chars() {
+        if c == '\u{200D}' {
+            after_zwj = true;
+            continue;
+        }
+        if is_attached_mark(c) {
+            continue;
+        }
+        if std::mem::take(&mut after_zwj) {
+            continue;
+        }
+        if ('\u{1F1E6}'..='\u{1F1FF}').contains(&c) {
+            half_flag = !half_flag;
+            if !half_flag {
+                continue; // 旗的后一半
+            }
+        } else {
+            half_flag = false;
+        }
+        n += 1;
+        if n >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 附在前一个字上、自己不成字的码位。
+fn is_attached_mark(c: char) -> bool {
+    matches!(c,
+        '\u{0300}'..='\u{036F}'      // 组合附加符
+        | '\u{1AB0}'..='\u{1AFF}'
+        | '\u{1DC0}'..='\u{1DFF}'
+        | '\u{20D0}'..='\u{20FF}'    // 含组合键帽 U+20E3
+        | '\u{FE00}'..='\u{FE0F}'    // 变体选择符
+        | '\u{FE20}'..='\u{FE2F}'
+        | '\u{200C}'                 // 零宽不连接符
+        | '\u{1F3FB}'..='\u{1F3FF}'  // 肤色修饰
+        | '\u{E0000}'..='\u{E007F}'  // 标签字符
+        | '\u{E0100}'..='\u{E01EF}') // 变体选择符补充
+}
+
+/// 屏蔽集合缓存：算它时的表内容（只比指针）+ 结果。
+pub(crate) type BlockedCache = (
+    std::sync::Arc<wind_userdata::text::table::TableDoc>,
+    std::sync::Arc<std::collections::HashSet<String>>,
+);
+
 fn record_of_rows<'a>(
     doc: &wind_userdata::text::table::TableDoc,
     rows: impl Iterator<Item = &'a wind_userdata::text::table::TableRow>,
@@ -233,6 +310,43 @@ impl Store {
         })
     }
 
+    /// 前移 / 后移：把 `(word, cand_id)` 钉到 `to`；邻居 `(nb_word, nb_id)` 若有**自己的**固定
+    /// 规则，一并改写到 `here`（交换）。一次提交。
+    ///
+    /// 「邻居有规则」按读端口径判（`wind_candidate::ShadowPinRule` 的匹配）：规则带 id 只认 id，
+    /// 不回退文本——动态短语的规则记的是写入当天的求值文本，回退会把碰巧同文的邻居当成它，
+    /// 改写甚至清掉那条 id 规则。
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_shadow_swapping(
+        &self,
+        schema: &str,
+        code: &str,
+        word: &str,
+        cand_id: Option<&str>,
+        to: usize,
+        neighbor: Option<(&str, Option<&str>)>,
+        here: usize,
+    ) -> anyhow::Result<()> {
+        self.modify_shadow(schema, code, |rec| {
+            if let Some((nb_word, nb_id)) = neighbor {
+                let hit = rec
+                    .pinned
+                    .iter()
+                    .find(|p| match p.cand_id.as_deref() {
+                        Some(id) if !id.is_empty() => nb_id == Some(id),
+                        _ => p.word == nb_word,
+                    })
+                    .map(|p| (p.word.clone(), p.cand_id.clone()));
+                if let Some((w, id)) = hit
+                    && !ShadowRecord::same_target(&w, &id, word, cand_id)
+                {
+                    rec.apply_pin(&w, id, here);
+                }
+            }
+            rec.apply_pin(word, cand_id.map(String::from), to)
+        })
+    }
+
     /// 置顶/移动候选（cand_id 非空=动态短语按 id 匹配）。
     pub fn pin_shadow(
         &self,
@@ -264,15 +378,141 @@ impl Store {
         self.modify_shadow(schema, code, |rec| rec.apply_remove(word, cand_id))
     }
 
+    /// `words`（存储域的 `(扁平码, 文本)`）命中的删除规则，每条为 `(规则键, 文本, 命中的词条码)`。
+    ///
+    /// 规则键是**输入码**，与词条码不一定同形（全拼保留手动分隔符 `'`、ü 可能敲成 `v`），由
+    /// `key_forms` 给出键在词条码域里的候选形态，任一形态命中即算。只看 `delete`，置顶不算。
+    /// 按文件现状判（先 sync，手改优先）。
+    fn deleted_hits(
+        &self,
+        schema: &str,
+        words: &[(&str, &str)],
+        key_forms: &dyn Fn(&str) -> Vec<String>,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let want: std::collections::HashSet<(&str, &str)> = words.iter().copied().collect();
+        let t = self.shadow_table(schema)?;
+        t.sync();
+        let doc = t.doc();
+        let mut out = Vec::new();
+        for r in doc.rows.iter().filter(|r| doc.get(r, "action") == "delete") {
+            let (code, text) = (doc.get(r, "code"), doc.get(r, "text"));
+            // 屏蔽行不看编码：同文的词条一律算命中（单字不按文字屏蔽，同 `blocked_words`）。
+            if is_block_group(schema, code) {
+                if is_blockable_word(text) {
+                    out.extend(
+                        words
+                            .iter()
+                            .filter(|(_, t)| *t == text)
+                            .map(|(c, t)| (code.to_string(), t.to_string(), c.to_string())),
+                    );
+                }
+                continue;
+            }
+            if let Some(k) = key_forms(code)
+                .into_iter()
+                .find(|k| want.contains(&(k.as_str(), text)))
+            {
+                out.push((code.to_string(), text.to_string(), k));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 撤销 `words` 命中的删除规则（判据见 [`Self::deleted_hits`]），返回撤掉的条数。单条显式加词后
+    /// 调用：读端按文本过滤、不看来源，规则留着会把加回来的同文用户词一并滤掉。无命中时不写文件。
+    pub fn clear_deleted_for_words(
+        &self,
+        schema: &str,
+        words: &[(&str, &str)],
+        key_forms: &dyn Fn(&str) -> Vec<String>,
+    ) -> anyhow::Result<usize> {
+        let hits: std::collections::HashSet<(String, String)> = self
+            .deleted_hits(schema, words, key_forms)?
+            .into_iter()
+            .map(|(code, text, _)| (code, text))
+            .collect();
+        if hits.is_empty() {
+            return Ok(0);
+        }
+        let mut codes: Vec<&str> = hits.iter().map(|(c, _)| c.as_str()).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        self.modify_shadows(schema, &codes, &mut |code, rec| {
+            rec.deleted
+                .retain(|d| !hits.contains(&(code.to_string(), d.clone())));
+        })?;
+        Ok(hits.len())
+    }
+
+    /// `words` 里被删除规则隐藏的那些（返回 `(词条码, 文本)`），只读。批量导入 / 全部转正不撤规则，
+    /// 用它在结果里报数。
+    pub fn words_hidden_by_shadow(
+        &self,
+        schema: &str,
+        words: &[(&str, &str)],
+        key_forms: &dyn Fn(&str) -> Vec<String>,
+    ) -> anyhow::Result<std::collections::HashSet<(String, String)>> {
+        Ok(self
+            .deleted_hits(schema, words, key_forms)?
+            .into_iter()
+            .map(|(_, text, word_code)| (word_code, text))
+            .collect())
+    }
+
     /// 取某 code 的 Shadow 规则（无则 None）。按键路径：只读内存，不碰文件、不碰 redb。
+    /// 拼音桶的屏蔽组（[`BLOCK_ALL_CODES`]）不是输入码，不按它返回，见 [`Self::blocked_words`]。
     pub fn get_shadow_rules(
         &self,
         schema: &str,
         code: &str,
     ) -> anyhow::Result<Option<ShadowRecord>> {
+        if is_block_group(schema, code) {
+            return Ok(None);
+        }
         let doc = self.shadow_table(schema)?.doc();
         let rec = record_of_rows(&doc, doc.rows.iter().filter(|r| doc.get(r, "code") == code));
         Ok((!rec.is_empty()).then_some(rec))
+    }
+
+    /// 屏蔽这个词：写一条 `code = *` 的删除规则（该数据方案下所有编码都不出这段文字）。
+    /// 单字拒绝——见 [`is_blockable_word`]。
+    pub fn block_word(&self, schema: &str, text: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(supports_block(schema), "只有拼音与英文能按文字屏蔽");
+        anyhow::ensure!(is_blockable_word(text), "单字不能按文字屏蔽");
+        self.delete_shadow(schema, BLOCK_ALL_CODES, text)
+    }
+
+    /// 拼音 / 英文数据方案被屏蔽的文字（`code = *` 的删除行，单字 / 单字母不算；其它方案恒空）。按键路径：
+    /// 只读内存，表内容不变时直接返回上次的结果（比一次指针）；写入或 [`Self::sync_shadows`]
+    /// 换了表内容后重算。
+    pub fn blocked_words(
+        &self,
+        schema: &str,
+    ) -> anyhow::Result<std::sync::Arc<std::collections::HashSet<String>>> {
+        if !supports_block(schema) {
+            return Ok(Default::default());
+        }
+        let doc = self.shadow_table(schema)?.doc();
+        let mut cache = self.blocked_words.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((d, set)) = cache.get(schema)
+            && std::sync::Arc::ptr_eq(d, &doc)
+        {
+            return Ok(set.clone());
+        }
+        let set: std::collections::HashSet<String> = doc
+            .rows
+            .iter()
+            .filter(|r| doc.get(r, "code") == BLOCK_ALL_CODES && doc.get(r, "action") == "delete")
+            .map(|r| doc.get(r, "text"))
+            .filter(|t| is_blockable_word(t))
+            .map(str::to_string)
+            .collect();
+        let set = std::sync::Arc::new(set);
+        cache.insert(schema.to_string(), (doc, set.clone()));
+        Ok(set)
     }
 
     /// 单个方案的 Shadow 文件重新载入；变了返回 true。
@@ -522,6 +762,280 @@ mod tests {
         let p = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// 交换只认邻居自己的规则：带 id 的规则不按文本回退；邻居有规则时改写到 `here`。
+    #[test]
+    fn move_shadow_swapping_matches_like_reader() {
+        let path = tmp("wind_sh_swap.redb");
+        let s = Store::open(&path).unwrap();
+        s.pin_shadow("ct", "aa", "乙", Some("phrase:aa:x"), 7)
+            .unwrap();
+        s.move_shadow_swapping("ct", "aa", "甲", None, 1, Some(("乙", None)), 0)
+            .unwrap();
+        let rec = s.get_shadow_rules("ct", "aa").unwrap().unwrap();
+        let pos = |w: &str, id: Option<&str>| {
+            rec.pinned
+                .iter()
+                .find(|p| p.word == w && p.cand_id.as_deref() == id)
+                .map(|p| p.position)
+        };
+        assert_eq!(pos("乙", Some("phrase:aa:x")), Some(7), "id 规则原样");
+        assert_eq!(pos("甲", None), Some(1));
+        assert_eq!(rec.pinned.len(), 2);
+
+        s.pin_shadow("ct", "aa", "丙", None, 1).unwrap();
+        s.move_shadow_swapping("ct", "aa", "丁", None, 1, Some(("丙", None)), 2)
+            .unwrap();
+        let rec = s.get_shadow_rules("ct", "aa").unwrap().unwrap();
+        let at = |w: &str| rec.pinned.iter().find(|p| p.word == w).map(|p| p.position);
+        assert_eq!(
+            (at("丁"), at("丙")),
+            (Some(1), Some(2)),
+            "邻居规则改写到原位"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 只撤同 (码, 文) 的删除规则：同码别的词、同文别的码、置顶都不动；键经 `key_norm` 归一后比。
+    #[test]
+    fn clear_deleted_for_words_only_touches_matching_deletes() {
+        let path = tmp("wind_sh_clear_del.redb");
+        let s = Store::open(&path).unwrap();
+        s.delete_shadow("py", "nihao", "你好").unwrap();
+        s.delete_shadow("py", "nihao", "拟好").unwrap();
+        s.delete_shadow("py", "ni'hao", "你好").unwrap();
+        s.delete_shadow("py", "nh", "你好").unwrap();
+        s.pin_shadow("py", "nihao", "你号", None, 0).unwrap();
+        let strip = |k: &str| vec![k.replace('\'', "")];
+
+        assert_eq!(
+            s.clear_deleted_for_words("py", &[("nihao", "你好")], &strip)
+                .unwrap(),
+            2,
+            "`nihao` 与 `ni'hao` 两条同文删除都该撤"
+        );
+        let nihao = s.get_shadow_rules("py", "nihao").unwrap().unwrap();
+        assert_eq!(nihao.deleted, vec!["拟好".to_string()]);
+        assert_eq!(nihao.pinned.len(), 1, "置顶不动");
+        assert!(s.get_shadow_rules("py", "ni'hao").unwrap().is_none());
+        assert_eq!(
+            s.get_shadow_rules("py", "nh").unwrap().unwrap().deleted,
+            vec!["你好".to_string()],
+            "别的编码（简拼）上的删除不动"
+        );
+
+        // 只读计数：按词条去重（`nh` 上的规则不算 `nihao` 的），不改文件
+        s.delete_shadow("py", "nihao", "你好").unwrap();
+        s.delete_shadow("py", "ni'hao", "你好").unwrap();
+        let hidden = s
+            .words_hidden_by_shadow(
+                "py",
+                &[("nihao", "你好"), ("nihao", "拟好"), ("hao", "好")],
+                &strip,
+            )
+            .unwrap();
+        assert_eq!(
+            hidden.len(),
+            2,
+            "「你好」两条规则只算一个词，加「拟好」，实际 {hidden:?}"
+        );
+        assert!(
+            s.get_shadow_rules("py", "ni'hao").unwrap().is_some(),
+            "计数不撤规则"
+        );
+
+        // 恒等归一：`ni'hao` 不再等于 `nihao`
+        s.delete_shadow("wb", "a'b", "工").unwrap();
+        assert_eq!(
+            s.clear_deleted_for_words("wb", &[("ab", "工")], &|k: &str| vec![k.to_string()])
+                .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 命中按文件现状判：表已载入后文件被外部改过（这里拿另一份库生成的规则文件覆盖），
+    /// 不先 sync 就看不见新写进去的删除规则。
+    /// 屏蔽行（`code = *`）：进屏蔽集合、不当输入码匹配；单字不收；加词按文字撤、批量计数按文字算。
+    #[test]
+    fn block_word_rows() {
+        let path = tmp("wind_sh_block.redb");
+        let s = Store::open(&path).unwrap();
+        s.block_word("pinyin", "时间").unwrap();
+        assert!(s.block_word("pinyin", "是").is_err(), "单字不能按文字屏蔽");
+        s.delete_shadow("pinyin", "shijian", "实践").unwrap();
+        let set = s.blocked_words("pinyin").unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("时间"));
+        assert!(
+            std::sync::Arc::ptr_eq(&set, &s.blocked_words("pinyin").unwrap()),
+            "表没变时复用缓存"
+        );
+        assert!(
+            s.get_shadow_rules("pinyin", BLOCK_ALL_CODES)
+                .unwrap()
+                .is_none(),
+            "屏蔽组不是输入码"
+        );
+        assert!(
+            s.list_shadow_rules("pinyin")
+                .unwrap()
+                .iter()
+                .any(|(c, r)| c == BLOCK_ALL_CODES && r.deleted == vec!["时间".to_string()]),
+            "规则列表照常列出屏蔽组"
+        );
+
+        let same = |k: &str| vec![k.to_string()];
+        let hidden = s
+            .words_hidden_by_shadow("pinyin", &[("sj", "时间"), ("shijian", "时间")], &same)
+            .unwrap();
+        assert_eq!(hidden.len(), 2, "按文字算，任何编码都命中：{hidden:?}");
+        assert_eq!(
+            s.clear_deleted_for_words("pinyin", &[("shijian", "时间")], &same)
+                .unwrap(),
+            1
+        );
+        assert!(
+            s.blocked_words("pinyin").unwrap().is_empty(),
+            "加词撤销屏蔽"
+        );
+        assert_eq!(
+            s.get_shadow_rules("pinyin", "shijian")
+                .unwrap()
+                .unwrap()
+                .deleted,
+            vec!["实践".to_string()],
+            "按编码的删除不动"
+        );
+
+        // 手改出的单字屏蔽行不生效
+        s.delete_shadow("pinyin", BLOCK_ALL_CODES, "是").unwrap();
+        assert!(s.blocked_words("pinyin").unwrap().is_empty());
+        s.block_word("pinyin", "时间").unwrap();
+        assert!(
+            s.remove_shadow_rule("pinyin", BLOCK_ALL_CODES, "时间", None)
+                .is_ok()
+        );
+        assert!(
+            s.blocked_words("pinyin").unwrap().is_empty(),
+            "规则列表能删屏蔽行"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 字数按用户看到的字算：带变体选择符 / 肤色 / 组合附加符 / 零宽连接的单个符号、国旗都是一个字。
+    #[test]
+    fn blockable_word_counts_visible_chars() {
+        for one in [
+            "好",
+            "❤\u{FE0F}",
+            "👍\u{1F3FD}",
+            "👨\u{200D}👩\u{200D}👧",
+            "🇨🇳",
+            "e\u{301}",
+            "1\u{FE0F}\u{20E3}",
+            "",
+        ] {
+            assert!(!is_blockable_word(one), "{one:?} 是一个字");
+        }
+        for two in ["你好", "❤\u{FE0F}❤\u{FE0F}", "🇨🇳🇯🇵", "e\u{301}好"] {
+            assert!(is_blockable_word(two), "{two:?} 至少两个字");
+        }
+        assert!(!is_blockable_word("好\u{200D}"), "尾随连接符不成字");
+    }
+
+    /// 英文桶同样认屏蔽行：键是词库原文、不归一大小写（`ok` 与 `OK` 是两个词），单字母不收。
+    #[test]
+    fn english_block_rows_are_case_sensitive() {
+        let path = tmp("wind_sh_block_en.redb");
+        let s = Store::open(&path).unwrap();
+        s.block_word("english", "OK").unwrap();
+        assert!(
+            s.block_word("english", "x").is_err(),
+            "单字母不能按文字屏蔽"
+        );
+        let set = s.blocked_words("english").unwrap();
+        assert!(set.contains("OK") && !set.contains("ok"));
+        assert!(
+            s.get_shadow_rules("english", BLOCK_ALL_CODES)
+                .unwrap()
+                .is_none()
+        );
+        let same = |k: &str| vec![k.to_string()];
+        assert!(
+            s.words_hidden_by_shadow("english", &[("ok", "ok")], &same)
+                .unwrap()
+                .is_empty(),
+            "小写的 ok 不算被屏蔽"
+        );
+        assert_eq!(
+            s.clear_deleted_for_words("english", &[("ok", "OK")], &same)
+                .unwrap(),
+            1
+        );
+        assert!(s.blocked_words("english").unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `*` 的「屏蔽这个词」语义只在拼音 / 英文数据方案：码表（通配键 `*` 浏览态）里它就是普通编码。
+    #[test]
+    fn star_is_plain_code_outside_pinyin() {
+        let path = tmp("wind_sh_star_ct.redb");
+        let s = Store::open(&path).unwrap();
+        s.delete_shadow("wb", BLOCK_ALL_CODES, "工作").unwrap();
+        assert_eq!(
+            s.get_shadow_rules("wb", BLOCK_ALL_CODES)
+                .unwrap()
+                .map(|r| r.deleted),
+            Some(vec!["工作".to_string()]),
+            "码表的 `*` 是输入码，规则照常读出"
+        );
+        assert!(s.blocked_words("wb").unwrap().is_empty());
+        assert!(
+            s.block_word("wb", "工作").is_err(),
+            "只有拼音与英文能按文字屏蔽"
+        );
+        let same = |k: &str| vec![k.to_string()];
+        assert!(
+            s.words_hidden_by_shadow("wb", &[("aaaa", "工作")], &same)
+                .unwrap()
+                .is_empty(),
+            "别的编码不按文字命中"
+        );
+        assert_eq!(
+            s.clear_deleted_for_words("wb", &[("aaaa", "工作")], &same)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.clear_deleted_for_words("wb", &[(BLOCK_ALL_CODES, "工作")], &same)
+                .unwrap(),
+            1,
+            "同码（`*`）照常按编码撤"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clear_deleted_for_words_sees_hand_edited_file() {
+        let path = tmp("wind_sh_clear_sync.redb");
+        let s = Store::open(&path).unwrap();
+        assert!(s.get_shadow_rules("py", "nihao").unwrap().is_none()); // 表载入内存
+        let path2 = tmp("wind_sh_clear_sync2.redb");
+        let s2 = Store::open(&path2).unwrap();
+        s2.delete_shadow("py", "nihao", "你好").unwrap();
+        let dst = s.shadow_path("py");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(s2.shadow_path("py"), &dst).unwrap();
+
+        let n = s
+            .clear_deleted_for_words("py", &[("nihao", "你好")], &|k: &str| vec![k.to_string()])
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(s.get_shadow_rules("py", "nihao").unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]

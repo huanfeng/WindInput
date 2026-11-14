@@ -417,53 +417,8 @@ fn switching_schema_clears_the_runtime_override() {
 
 // ─────────────────────── 位置约束（源码级守门）───────────────────────
 
-/// ★ 本项的过滤必须排在 `apply_shadow` **之前**。
-///
-/// # 为什么用源码顺序断言，而不是行为断言
-///
-/// 这条约束的失效表现是「用户右键置顶/隐藏的位次对不上」，而端到端造一条 shadow 规则要
-/// 真实的 `store`（`new_headless` 给的是 `None`）。行为断言写不出来，就只剩两种选择：
-/// 不测，或者把「位置」本身断言掉。选后者——`ShadowPin.position` 是**绝对下标**，记的是
-/// 用户右键当时所见的那个列表；滤在 shadow 之后，位次就对不上了。
-/// 出简让全踩过一模一样的坑（「置顶写得进去、下次打同一个码毫无变化」）。
-///
-/// ⚠️ 本条对重构**不友好是刻意的**：改了函数名或调用写法它就红，那时请顺着这段注释
-/// 判断新写法有没有破坏次序，而不是顺手把字符串改一改让它变绿。
-///
-/// ⚠️ 已知弱点：它钉的是**文本位置**而非执行顺序。把调用挪进一个「定义在文件更靠前、
-/// 却在 shadow 之后被调用」的辅助函数，本条会假绿。今天可靠是因为两个锚点都落在
-/// `build_candidates` 同一个函数体内，文本序 = 执行序。
-#[test]
-fn single_char_filter_runs_before_shadow() {
-    const SRC: &str = include_str!("../src/handle_candidate.rs");
-    let scope = SRC
-        .find("self.apply_single_char(state, &mut candidates);")
-        .expect("主候选链里应有单字输入过滤（改了写法请一并更新本测试）");
-    let shadow = SRC
-        .find("let mut user_pinned = self.apply_shadow(&mut candidates, &shadow_code);")
-        .expect("主候选链里应有 shadow（改了写法请一并更新本测试）");
-    assert!(
-        scope < shadow,
-        "单字输入过滤必须排在 apply_shadow 之前：shadow 的位次记的是用户所见的列表"
-    );
-}
-
-/// 补全池必须走**同一条**过滤链。
-///
-/// 主列表被滤空之后才会从补全池取一条；那一条若不过本项过滤，用户看到的就是
-/// 「开了单字模式还是冒出一个词」。同款教训在补全池收口那段注释里已经写过一次
-/// （shadow 不过滤 ⇒「隐藏完当场又被补回来」）。
-#[test]
-fn completion_pool_goes_through_the_same_filter() {
-    const SRC: &str = include_str!("../src/handle_candidate.rs");
-    let filter = SRC
-        .find("self.apply_filter(state, &mut completion_pool);")
-        .expect("补全池应走检索范围过滤");
-    let scope = SRC
-        .find("self.apply_single_char(state, &mut completion_pool);")
-        .expect("补全池也必须走单字输入过滤，否则会从补全池冒出词");
-    assert!(filter < scope, "两道过滤的相对次序应与主链一致");
-}
+// 「单字过滤排在 shadow 之前」「补全池也走过滤与单字」两条次序约束已由后处理步骤表保证，
+// 守卫在 `src/postprocess.rs` 的单测里（profile 内容与规范顺序）。
 
 // ─────────────────────── 两侧独立 ───────────────────────
 

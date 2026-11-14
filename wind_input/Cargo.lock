@@ -2286,6 +2286,7 @@ dependencies = [
  "wind-config",
  "wind-dict",
  "wind-engine",
+ "wind-hook",
  "wind-host",
  "wind-ipc",
  "wind-keys",
@@ -2340,6 +2341,16 @@ dependencies = [
  "wind-store",
  "wind-utils",
  "windows",
+]
+
+[[package]]
+name = "wind-hook"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -2669,6 +2680,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind_extension_host"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tempfile",
+ "wind-hook",
+ "windows",
+ "winresource",
+]
+
+[[package]]
 name = "wind_rpc"
 version = "0.1.0"
 dependencies = [
@@ -2703,6 +2726,7 @@ dependencies = [
  "wind-coordinator",
  "wind-dict",
  "wind-engine",
+ "wind-hook",
  "wind-ipc",
  "wind-rpc",
  "wind-store",

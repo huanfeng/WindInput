@@ -136,7 +136,7 @@ jobs:
       #
       # 为什么不能让本机只对上面那两个成品补签:签名夹在打包中间 —— PE 要在封进压缩块
       # 之前签,Setup.exe 要在 pack 之后、New-UpdateManifest 之前签。对成品补签只签得到
-      # 外壳,包内 5 个 PE 仍是全裸的,而 signtool verify 验 Setup.exe 照样通过 ——
+      # 外壳,包内 6 个 PE 仍是全裸的,而 signtool verify 验 Setup.exe 照样通过 ——
       # 从外面完全看不出来(实测踩过,见 dev.ps1 Do-Installer 第 2.5 步)。
       #
       # 带上安装器三件套是为了本机【一行代码都不编译】:Do-Installer 见它们已在就给
@@ -387,7 +387,7 @@ jobs:
             echo "> 发布前请在开发机上执行(需先建立签名会话):"
             echo "> \`.\\scripts\\release.ps1 sign-draft\`"
             echo "> 它会拉本次 CI 的中转产物, 在本机签名并【重新打包】(签名夹在打包中间,"
-            echo "> 对成品补签只签得到外壳, 包内 5 个 PE 仍是全裸的), 覆盖本页 4 个资产,"
+            echo "> 对成品补签只签得到外壳, 包内 6 个 PE 仍是全裸的), 覆盖本页 4 个资产,"
             echo "> 最后自动删掉这段提示。"
             echo ">"
             echo "> 为什么 CI 签不了:docs/design/code-signing.md 第 3 节。"

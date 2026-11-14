@@ -26,10 +26,10 @@
 //! - [`store_without_rule_keeps_dictionary_order`]：**反向对照**，同样带 store、只是不写
 //!   规则 ⇒ 顺序回到词库原序。缺了它，「凡是带 store 就变序」之类的实现会让主用例假绿；
 //! - [`rule_in_active_schema_bucket_does_not_leak`]：**变异防线**，规则写进 active 方案
-//!   （`wubi86`）桶 ⇒ 临拼不得生效。归属若写成 `apply_shadow`（`None` ⇒ active），
+//!   （`wubi86`）桶 ⇒ 临拼不得生效。归属若写成 `owner: None`（`None` ⇒ active），
 //!   主用例红、本用例也红，两个方向各被锁住一次；
 //! - [`hidden_in_pinyin_bucket_is_hidden_in_temp_pinyin`]：隐藏走同一条读端，与置顶
-//!   是 `apply_shadow` 的两个维度（`deleted` / `pinned`），只测一边测不出另一边；
+//!   是 shadow 读端的两个维度（`deleted` / `pinned`），只测一边测不出另一边；
 //! - [`shuangpin_target_reads_rule_under_normalized_full_pinyin_code`]：**码域轴**。
 //!   前四条的临拼目标都是全拼，而全拼下 `ConvertResult::shadow_code` 恒为空串 ⇒ 归一
 //!   那一支在它们眼里是死代码，删掉照样全绿。这条把临拼目标指向双拼才测得到。
@@ -223,7 +223,7 @@ fn store_without_rule_keeps_dictionary_order() {
 
 /// **变异防线**：把同一条规则写进 **active 方案**（`wubi86`）桶 ⇒ 临拼不得生效。
 ///
-/// 归属若图省事写成 `self.apply_shadow(...)`（`schema_override = None` ⇒ 落 active），
+/// 归属若图省事写成 `PassCtx { owner: None, .. }`（`None` ⇒ 落 active），
 /// 主用例会红、本用例也会红——两个失效方向各被锁住一次。只写主用例的话，一个「按
 /// active 归属」的实现在主方案也是拼音时照样能通过，等于什么都没锁住。
 #[test]
@@ -250,7 +250,7 @@ fn rule_in_active_schema_bucket_does_not_leak() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 隐藏（`deleted`）与置顶（`pinned`）是 `apply_shadow` 的两个维度，走同一个读端。
+/// 隐藏（`deleted`）与置顶（`pinned`）是 shadow 读端的两个维度，走同一个读端。
 /// 只测置顶的话，一个只搬运 `pinned` 的实现会让隐藏静默失效。
 #[test]
 fn hidden_in_pinyin_bucket_is_hidden_in_temp_pinyin() {

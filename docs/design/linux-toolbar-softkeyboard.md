@@ -139,6 +139,11 @@ Linux 上显式关掉这两样的地方：
 - 存储：`runtime_state` 的 `toolbar_anchors` / `softkeyboard_anchors` 目前按显示器键存右下角。Linux 用
   输出名（X11 RandR output name / Wayland `wl_output.name`）当键。拿不到输出名时用一个固定键，只记
   一个位置。
+- Wayland 跨屏拖动：原面板保留映射与鼠标隐式抓取（仅将像素置透明），额外的无输入预览
+  随未钳制的全局逻辑位置移动；按预览中心选输出，再夹进该输出工作区。换屏只重建预览的
+  layer 角色，松手才重绑原面板并上报 `pos.*`，避免销毁拖动源后丢失松开事件。
+  覆盖负坐标输出、不同尺寸 / 上下错位布局与布局空洞的纯几何测试在
+  `wind_linux/tests/overlay_input_test.cpp`；实际隐式抓取行为仍需合成器真机验证。
 - 记下的位置落在当前工作区之外（换了显示器布局）时，回落到默认锚点。
 
 ### 5.5 设置端（wind-setting）

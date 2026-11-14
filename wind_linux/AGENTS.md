@@ -36,6 +36,17 @@ Fcitx5 的 `InputContext`。引擎/词库/候选逻辑全在服务里，这里**
 
 `src/core` 与 `include` 不依赖 Fcitx5，能单独编、单独测——这条边界别破。
 
+打包用的两个 CMake cache 选项：`WIND_SERVICE_PATH` / `WIND_SETTING_PATH`（空 = 源码内置的
+`/usr/lib/windinput/...`），打非 `/usr` 前缀的包（Nix 等）时注入 store 路径。编译定义是
+`PUBLIC`。`settings_launcher_test` 不跟宏逐字比（`argv[0]` 与宏同源，比宏即恒真），断的是
+「绝对路径 + 末段 `wind_setting`」；宏未定义（deb / 源码构建）时才钉住
+`/usr/lib/windinput/wind_setting` 字面量——改源码里的默认值要同步改那条断言。
+
+addon 的版本写进 `share/fcitx5/addon/windinput.conf` 的 `Version=`，来源是第三个 cache 选项
+`WIND_ADDON_VERSION`（空 = 工程版本 `project(... VERSION ...)`；两条打包链都注入
+`docs/VERSION`：`wind_linux/nix/addon.nix` 与 `scripts/linux/build-deb.sh` 各传一次）。改它不用动源码里
+的默认值——不传就落回 `0.1.0`，fcitx5 输入法列表里显示的版本与产品版本脱钩。
+
 ## 构建 / 测试
 
 本机无 root 时先搭用户前缀 SDK（幂等，只写 `~/.local/opt/fcitx5-sdk`，不碰 `/usr`）：
@@ -54,6 +65,21 @@ scripts/linux/e2e.sh                            # 端到端：真服务 + 真 fc
 
 两条单测入口**都要跑**：`make` 用 `-O1 -Werror`（与 CI 同），CMake 不带优化、不 `-Werror`——`maybe-uninitialized`
 这类只在优化后出现的告警只有 `make` 那条看得见，只跑 CMake 会把编不过的测试当成全过。
+
+addon 目标的依赖（`WIND_BUILD_ADDON=ON`，默认）：Fcitx5Core / Fcitx5Utils 头文件、
+`xcb` / `xcb-shape` / `xcb-randr`；有 `wayland-client` + `wayland-scanner` 时再编 Wayland
+候选窗，有 `gio-2.0` 时编 GNOME 光标扩展客户端。只编纯逻辑库与单测用
+`-DWIND_BUILD_ADDON=OFF`，不需要任何 Fcitx5 头文件。
+
+单测只读源码树（`WIND_REPO_DIR` / `WIND_PROTOCOL_RS` 编译定义），写入一律落在 `TMPDIR` 下的
+临时目录，不读 `build_dev/`——因此能在只读源码树（Nix sandbox）里直接跑（`nix build` 的
+`checkPhase` 就是这么用的）。
+
+设置程序（独立仓 `../wind-setting`）同样能原生 Linux 构建：它依赖的 `windui` 支持
+Windows / macOS / Linux 三个平台（`windui` 的 `platform/mod.rs` 只对其它目标
+`compile_error!`；Linux 后端默认 X11，Wayland 桌面经 XWayland，原生 Wayland 后端要
+`WINDUI_BACKEND=wayland` 显式启用），`wind_linux/nix/setting.nix` 已实测把它编成 Nix 包
+（`packages.wind-setting`，见 `wind_linux/nix/AGENTS.md`）。
 
 `e2e.sh` 的做法（改它之前先读脚本头注释）：`dbus-run-session` 起私有会话总线；服务二进制拷进
 临时目录、`data` 下逐项软链到 `build_dev/data`（`system.phrases.toml` 例外：取仓库 `data/` 那份再追加
@@ -358,7 +384,7 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 | 模式指示 | 托盘 / 面板图标（`subModeIcon`）按模式主字运行时渲染，同 Windows 语言栏：中文为方案标签、英文「英」、大写锁定「A」，自定义方案标签 / `[ui.labels]` 同样上图 | 见设计文档 §5d（含 Windows 状态对照表、宿主图标缓存）。e2e 经 kimpanel 验了图标名与标签随 Shift / CapsLock / 切方案 / 菜单切换、换焦点不回退，并验文件在用户图标目录、是合法 PNG；notificationitem（SNI）取的是同一个值但未单独验，真机托盘（GNOME AppIndicator、KDE、Deepin dde-dock）的实际显示与图标缓存时序未验。缺：角标（全角 / 标点）；密码框里不换「英」；首次安装时若用户图标目录此前不存在，托盘要重启 Fcitx5 后才看得见运行时图标（之前显示种子） |
 | 系统输入法配置里的「配置」按钮 | ExternalOption → 设置程序 | e2e 验了 `Controller1.GetConfig` 的描述与命令可启动；fcitx5-configtool 5.1.6+ 直接启动，22.04（5.0.x）显示一页一个按钮；真机点按钮与 Deepin 配置界面未验 |
 | 非嵌入模式的占位组合 | 不写进应用（addon 过滤） | 见设计文档 §5d |
-| 工具栏 / 软键盘 | 已接（0.127，X11 与 Wayland） | addon 自绘、服务端出像素，见 [linux-toolbar-softkeyboard.md](../docs/design/linux-toolbar-softkeyboard.md)；已知限制见 linux-port.md |
+| 工具栏 / 软键盘 | 已接（0.127，X11 与 Wayland） | Wayland 跨屏拖动保留源 surface 抓取、无输入预览换输出，松手才重绑并报位置（勿在拖动中销毁源角色）；addon 自绘、服务端出像素，见 [linux-toolbar-softkeyboard.md](../docs/design/linux-toolbar-softkeyboard.md)；已知限制见 linux-port.md |
 | 输入诊断 HUD | 不做 | 同 macOS；主菜单里按平台摘掉 |
 | 截图所有窗口到文件（主菜单「高级」） | 已接 | 候选窗与各浮层的像素都在服务进程，就地编码存盘（`manager_macos.rs` 的 `TakeScreenshot`，macOS 同一份）；不含菜单。此前因流程按「像素在宿主」写（`shot.panel`）而摘掉，现已不需要宿主回应 |
 | 按应用独立配置（compat） | 机制可用，真机验过（2026-10-09：两个应用分别默认中文 / 英文，切换焦点时正确切换）；**打包时不带 Windows 内置规则**（`scripts/lib/gen-compat.sh linux` 生成「字段说明 + 零规则」的 Linux 版系统层，各平台兼容策略不共用） | 服务按 `FOCUS_GAINED` 的 bundleId（= `InputContext::program()`）匹配规则，同 macOS；设置端的应用兼容性窗口保留 |

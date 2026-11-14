@@ -1896,6 +1896,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_anim_frames_push_only_the_changed_layer() {
+        // 显式声明宿主允许动画：不然会去读本机「减少动态效果」，CI 的 macOS runner 上它是开的，
+        // 动画被冻结就一帧都不推。
+        crate::candidate_window::set_host_reduce_motion(false);
         let cap = Arc::new(Mutex::new(Vec::new()));
         let (ev_tx, _ev) = std::sync::mpsc::channel();
         let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk5".into());
@@ -1953,6 +1956,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_reconnect_pushes_main_layer_again() {
+        // 显式声明宿主允许动画：不然会去读本机「减少动态效果」，CI 的 macOS runner 上它是开的，
+        // 动画被冻结就一帧都不推。
+        crate::candidate_window::set_host_reduce_motion(false);
         let cap = Arc::new(Mutex::new(Vec::new()));
         let (ev_tx, _ev) = std::sync::mpsc::channel();
         let mut f = Forwarder::new(ev_tx, Arc::new(TimedSink(cap.clone())), "_sk7".into());

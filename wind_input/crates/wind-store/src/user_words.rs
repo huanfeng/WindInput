@@ -314,6 +314,53 @@ impl Store {
         Ok(())
     }
 
+    /// 把一段文字从某数据方案的用户数据里抹掉：所有编码下的用户词与临时词、词频，以及以它为
+    /// 上文或选中词的联想记录。返回删掉的用户词 + 临时词条数。拼音右键删多字用户词 / 临时词用
+    /// （「当作没输入过」，不留屏蔽记录）。
+    pub fn purge_word(&self, schema: &str, text: &str) -> anyhow::Result<usize> {
+        let mut user = Vec::new();
+        self.for_each_user_word(schema, "", &mut |w| {
+            if w.text == text {
+                user.push(w.code.to_string());
+            }
+            true
+        })?;
+        let mut temp = Vec::new();
+        self.for_each_temp_word(schema, "", &mut |w| {
+            if w.text == text {
+                temp.push(w.code.to_string());
+            }
+            true
+        })?;
+        let mut freq = Vec::new();
+        self.for_each_freq(schema, "", &mut |c, t, _| {
+            if t == text {
+                freq.push(c.to_string());
+            }
+            true
+        })?;
+        let mut assoc = Vec::new();
+        self.runtime().for_each_assoc(schema, &mut |ctx, w, _| {
+            if ctx == text || w == text {
+                assoc.push((ctx.to_string(), w.to_string()));
+            }
+            true
+        });
+        for c in &user {
+            self.remove_user_word(schema, c, text)?;
+        }
+        for c in &temp {
+            self.remove_temp_word(schema, c, text)?;
+        }
+        for c in &freq {
+            self.delete_freq(schema, c, text)?;
+        }
+        for (ctx, w) in &assoc {
+            self.runtime().delete_assoc(schema, ctx, w)?;
+        }
+        Ok(user.len() + temp.len())
+    }
+
     /// 更新用户词权重（不存在返回 false，不创建）
     pub fn update_user_word_weight(
         &self,
@@ -676,6 +723,37 @@ mod tests {
         let p = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// `purge_word`：所有编码下的用户词 / 临时词、词频、联想（上文或选中词）都清掉，别的词不动。
+    #[test]
+    fn purge_word_removes_every_code() {
+        let path = tmp("wind_uw_purge.redb");
+        let s = Store::open(&path).unwrap();
+        s.add_user_word("py", "shijian", "时间", 0, 0).unwrap();
+        s.add_user_word("py", "sj", "时间", 0, 0).unwrap();
+        s.add_user_word("py", "shijian", "实践", 0, 0).unwrap();
+        s.learn_temp_word("py", "shijan", "时间", 1, 0).unwrap();
+        s.record_freq("py", "shijian", "时间").unwrap();
+        s.record_freq("py", "shijian", "实践").unwrap();
+        s.record_assoc_pick("py", "时间", "到了").unwrap();
+        s.record_assoc_pick("py", "没有", "时间").unwrap();
+        s.record_assoc_pick("py", "没有", "办法").unwrap();
+        assert_eq!(s.purge_word("py", "时间").unwrap(), 3);
+        assert!(s.get_user_words("py", "sj").unwrap().is_empty());
+        assert_eq!(
+            s.get_user_words("py", "shijian").unwrap()[0].text,
+            "实践",
+            "同码别的词不动"
+        );
+        assert!(s.get_temp_words("py", "shijan").unwrap().is_empty());
+        assert!(s.get_freq("py", "shijian", "时间").unwrap().is_none());
+        assert!(s.get_freq("py", "shijian", "实践").unwrap().is_some());
+        assert!(s.assoc_history("py", "时间", 0).unwrap().is_empty());
+        let rest = s.assoc_history("py", "没有", 0).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].0, "办法");
+        let _ = std::fs::remove_file(&path);
     }
 
     fn row(code: &str, text: &str) -> wdict::WordIo {

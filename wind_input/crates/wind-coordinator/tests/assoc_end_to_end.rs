@@ -69,8 +69,11 @@ fn coord_tweak(
 /// 索引改成「没就绪就返回空、绝不在按键线程上现建」之后（避免大词库把整机卡住），
 /// 测试若不自己预热，`assoc_prefix_words` 会如实给出「无联想」——那测的是夹具缺陷，
 /// 不是产品行为。生产/测试/移动端共用同一个 `prewarm_indexes`，三处不会漂移。
+///
+/// 智能档的下一词表也由它派后台加载、不等；这里等它装好，对应生产里「启动后早已就绪」。
 fn prewarm(c: &Coordinator) {
     c.prewarm_indexes();
+    c.debug_wait_assoc_bigram(std::time::Duration::from_secs(10));
 }
 
 fn coord_mode(kind: &str, schema: &str, mode: &str) -> std::sync::Arc<Coordinator> {

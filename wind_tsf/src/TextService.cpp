@@ -3425,6 +3425,15 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
 
         _BeginFocusGap(L"null_docmgr");
 
+        // 刚进入恢复就遇到焦点空档：宿主是在把输入转给别的窗口并会重投首键（AutoCAD 绘图区→命令行）。
+        // 保留缓冲会让重投的键叠在首键上（gg），按旧语义清掉残留与服务端缓冲。
+        if (wind::recover::ShouldAbortOnFocusGap(!_recoverLeftover.empty(), GetTickCount64() - _recoverArmTick))
+        {
+            _DisarmRecover(L"focus gap");
+            if (_pKeyEventSink != nullptr)
+                _pKeyEventSink->OnCompositionUnexpectedlyTerminated();
+        }
+
         // 离开文本框：清门卫状态，下方 reeval 会注销加词热键，把 Ctrl+= 还给宿主。
         _hasTextInputContext = FALSE;
         _focusIsPassword = false;
@@ -5567,6 +5576,11 @@ bool CTextService::_IsFocusKeyboardDisabled(ITfDocumentMgr* pDocMgr)
 //
 // context 级的密码信号已在 OnSetFocus 折进 mask 的 IS_PASSWORD 位（见 _focusIsPassword
 // 赋值处），因此这里只判 mask 就已覆盖两种来源，无需再单独看 _focusIsPassword。
+BOOL CTextService::IsPasswordScope() const
+{
+    return (_focusInputScopeMask & kPasswordScopeBits) != 0;
+}
+
 BOOL CTextService::IsPasswordSuppressActive() const
 {
     if (!_passwordSuppressEnabled)
@@ -8171,6 +8185,7 @@ void CTextService::_ArmRecover(ITfContext* pContext, ITfRange* pRange, const std
     _recoverContext = pContext;
     _recoverContext->AddRef();
     _recoverRange = pRange; // 接管调用方的引用
+    _recoverArmTick = GetTickCount64();
 }
 
 void CTextService::_ClearRecoverRecord()

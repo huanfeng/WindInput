@@ -78,6 +78,8 @@ fn setup(tag: &str) -> (Arc<Coordinator>, Arc<Store>, PathBuf) {
     cfg.stats.enabled = true;
     let c = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store.clone());
     c.prewarm_indexes();
+    // 智能档的下一词表由预热派后台加载、不等；等它装好再开始，对应生产里「启动后早已就绪」。
+    assert!(c.debug_wait_assoc_bigram(std::time::Duration::from_secs(10)));
     (c, store, db)
 }
 

@@ -1,0 +1,61 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1793110635,
+        "narHash": "sha256-dhoW6VgFWlaodSY5jrBn+CF2FLmaUvDVgM7+C7T2+NM=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "31ecbaca1bdefa45dffc409f0250bd8039ea0010",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "wind-setting": "wind-setting",
+        "wind-ui-rust": "wind-ui-rust"
+      }
+    },
+    "wind-setting": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792927632,
+        "narHash": "sha256-fYeNs3libF7d8uXZim0kXb0Tg55TSzp+i0raLWuw6vU=",
+        "owner": "huanfeng",
+        "repo": "wind-setting",
+        "rev": "8b9740c73528c50caa91b16b0442322794623f42",
+        "type": "github"
+      },
+      "original": {
+        "owner": "huanfeng",
+        "repo": "wind-setting",
+        "type": "github"
+      }
+    },
+    "wind-ui-rust": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793092150,
+        "narHash": "sha256-bz5lspPJEKBTcHt6DLe3QWFn/LdgjGXzEqb9O0+DCwc=",
+        "owner": "huanfeng",
+        "repo": "wind-ui-rust",
+        "rev": "57391b6446eb027d1129d3c47519a159d937c7cb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "huanfeng",
+        "repo": "wind-ui-rust",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

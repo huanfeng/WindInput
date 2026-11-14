@@ -105,6 +105,9 @@ impl Coordinator {
         };
         let mut text_pending = false;
         let mut first_text = true;
+        // 撤销上屏计数：连续多段 `type()` 累加成一笔；执行过副作用动作（`key.tap` 挪光标等）后
+        // 光标前已不一定是刚输出的文字，计数复位为 1（宁可少删）。
+        let mut typed_len = 0usize;
         // 只留第一个错误：链上后续动作常因同一根因连环失败，逐个弹 toast 会刷屏。
         let mut first_err: Option<String> = None;
         for a in &actions {
@@ -117,7 +120,10 @@ impl Coordinator {
                             std::thread::sleep(std::time::Duration::from_millis(30));
                             first_text = false;
                         }
-                        self.push_commit_text(&t);
+                        typed_len += self
+                            .push_commit_text_from(crate::session_exit::ActionOrigin::Command, &t);
+                        self.last_commit_len
+                            .store(typed_len.max(1), std::sync::atomic::Ordering::Relaxed);
                         text_pending = true;
                     }
                     Ok(_) => {}
@@ -135,6 +141,9 @@ impl Coordinator {
                         warn!("cmdbar 动作失败: {}", e);
                         first_err.get_or_insert_with(|| e.to_string());
                     }
+                    typed_len = 0;
+                    self.last_commit_len
+                        .store(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             // `{on_error: "stop"}`：首个错误即停。默认仍是继续跑——见 OnError 的文档，

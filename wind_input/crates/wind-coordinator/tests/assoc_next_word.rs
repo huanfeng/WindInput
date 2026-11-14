@@ -88,6 +88,8 @@ fn coord_with(
     let c = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store.clone());
     // 生产由启动后的预热线程建索引（系统反查索引 + 用户词文本索引），headless 不跑那个线程。
     c.prewarm_indexes();
+    // 智能档的下一词表也由预热派后台加载、不等；等它装好（非智能档没派加载，立即返回）。
+    c.debug_wait_assoc_bigram(std::time::Duration::from_secs(10));
     (c, store)
 }
 

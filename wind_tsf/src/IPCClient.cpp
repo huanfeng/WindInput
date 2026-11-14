@@ -1159,6 +1159,19 @@ BOOL CIPCClient::SendInputStateReport(uint32_t pid, bool disabled, uint8_t reaso
     return _SendBinaryMessage(CMD_INPUT_STATE_REPORT, &payload, sizeof(payload), true /* async */);
 }
 
+BOOL CIPCClient::SendKeyObserved(uint32_t keyCode, uint32_t modifiers)
+{
+    if (!IsConnected())
+    {
+        return FALSE;
+    }
+    // 不记日志：按键内容是用户数据，且这条在每个放行键上都会发。
+    KeyObservedPayload payload = {};
+    payload.keyCode = keyCode;
+    payload.modifiers = modifiers;
+    return _SendBinaryMessage(CMD_KEY_OBSERVED, &payload, sizeof(payload), true /* async */);
+}
+
 // UTF-16 → UTF-8，用于诊断快照的变长类名段。失败/空串一律产出空段（诊断数据缺一格
 // 也要能发出去，见 Rust 侧 DiagSnapshotPayload::from_bytes 对截断的容忍）。
 static std::string _Utf16ToUtf8(const std::wstring& w)

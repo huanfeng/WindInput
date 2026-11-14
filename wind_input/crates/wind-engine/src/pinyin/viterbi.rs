@@ -396,6 +396,21 @@ impl ViterbiDecoder {
         Self::decode_dp_nbest(nodes, input_len, k)
     }
 
+    /// 不看语法模型的 N-best（单状态 DP 的前 k 条，文本互不相同）。给「首选整句被屏蔽、要找替补」
+    /// 用：[`Self::decode_nbest`] 挂了语法模型时只回 1 条，没有替补可取。无语法模型且 `k > 1` 时
+    /// 与 `decode_nbest` 相同。
+    pub fn decode_nbest_lexical(
+        &self,
+        nodes: &[Vec<WordNode>],
+        input_len: usize,
+        k: usize,
+    ) -> Vec<ViterbiResult> {
+        if input_len == 0 {
+            return Vec::new();
+        }
+        Self::decode_dp_nbest(nodes, input_len, k)
+    }
+
     /// 记一次解码的性能。**只记数量与耗时，绝不记输入串或候选文本**
     /// （日志隐私：INFO 及以下不得出现用户输入内容）。
     ///

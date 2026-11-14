@@ -6,6 +6,7 @@
 //! 接入进度：契约全部数据域方法均接通真实 store/engine/theme：
 //! - schema.*（含三层合并 getConfig/saveConfig/resetConfig/setDictEnabled/delete）
 //! - dict.*（含 encode/genPinyin 反查出码）、temp.*、freq.*、shadow.*、phrase.*、stats.*、theme.*
+//! - sysDict.categories / header / entries（词库窗的系统词库表、单库头部与只读词条）
 //! - `schema.references` 暂返 `{}`（删除安全检查未用，前端宽松消费）；
 //!   无 store/themes 时各方法返回合法空集（降级，不报错）。
 //!
@@ -144,6 +145,8 @@ fn dict_report_json(out: &dict_transfer_api::DictImportOutcome) -> Value {
                 o.insert("added".into(), json!(w.added));
                 o.insert("updated".into(), json!(w.updated));
                 o.insert("unchanged".into(), json!(w.unchanged));
+                // 导入不撤删除规则：入了库但被候选调整隐藏、打不出来的条数。
+                o.insert("hiddenByShadow".into(), json!(s.hidden_by_shadow));
             } else {
                 o.insert("imported".into(), json!(s.imported));
             }
@@ -407,6 +410,40 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(json!({ "ok": true }))
         }
+        // 输入状态开关（CLI `wind_input ime`、外部脚本）。目标 / 值域校验在宿主侧，错误原样回传。
+        // `get` 不带 target = 取全部。`set` 默认不弹「已是…」提示（脚本会反复调用），要提示传 notify。
+        "ime.get" => {
+            const ALL: [&str; 5] = ["cn-en", "fullshape", "s2t", "t2s", "toolbar"];
+            let target = params.get("target").and_then(Value::as_str);
+            match target {
+                Some(t) => Ok(json!({ "target": t, "on": h.ime_state_get(t)? })),
+                None => {
+                    let mut m = serde_json::Map::new();
+                    for t in ALL {
+                        m.insert(t.to_string(), json!(h.ime_state_get(t)?));
+                    }
+                    Ok(Value::Object(m))
+                }
+            }
+        }
+        "ime.set" => {
+            let target = str_param(params, "target")?;
+            let on = params
+                .get("on")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow::anyhow!("缺少布尔参数 on"))?;
+            let notify = params
+                .get("notify")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let changed = h.ime_state_set(target, on, notify)?;
+            Ok(json!({ "target": target, "on": on, "changed": changed }))
+        }
+        "ime.toggle" => {
+            let target = str_param(params, "target")?;
+            let on = h.ime_state_toggle(target)?;
+            Ok(json!({ "target": target, "on": on }))
+        }
         "schema.delete" => h.web_schema_delete(params),
         "schema.references" => Ok(json!({})), // 引用关系（删除安全检查）：暂返空，前端宽松消费
         "scheme.exportPackage" => h.web_scheme_export_package(params),
@@ -447,6 +484,28 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .get("refresh")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+        ),
+        // 词库窗「系统词库」：一级词库表（含主库、按生效先后）、二级头部卡片与只读词条分页。
+        // 本体在 `wind_coordinator::schema_dicts_api`；开关仍走 `schema.setDictEnabled`。
+        // 读的是词库文本不是 redb，不进 `FULL_SCAN_METHODS`。
+        "sysDict.categories" => {
+            wind_coordinator::schema_dicts_api::categories(h, str_param(params, "schema")?)
+        }
+        "sysDict.header" => wind_coordinator::schema_dicts_api::header(
+            h,
+            str_param(params, "schema")?,
+            str_param(params, "dictId")?,
+        ),
+        "sysDict.entries" => wind_coordinator::schema_dicts_api::entries(
+            h,
+            str_param(params, "schema")?,
+            str_param(params, "dictId")?,
+            params.get("query").and_then(Value::as_str).unwrap_or(""),
+            params.get("mode").and_then(Value::as_str),
+            params.get("sort").and_then(Value::as_str),
+            params.get("order").and_then(Value::as_str),
+            usize_param(params, "offset", 0) as u64,
+            usize_param(params, "limit", 100),
         ),
         // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
         // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
@@ -1048,6 +1107,7 @@ pub trait WebDataRpc: WebDataHost {
         if !store.update_user_word_weight(&schema, &code, text, weight)? {
             store.add_user_word(&schema, &code, text, weight, boundary)?;
         }
+        user_words_api::clear_deleted_for_added(self, &schema, &[(&code, text)]);
         Ok(json!({ "ok": true }))
     }
 
@@ -2820,7 +2880,11 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         // 列表项的 code 带音节空格（见 web_temp_list），key 是扁平的。
         let (code, _) = wind_store::wdict::split_spaced_code(code);
-        store.promote_temp_word(&schema, &code, &store_text(text))?;
+        let text = store_text(text);
+        // 手动转正是显式动作（自动晋升走 `maybe_promote_temp`，不清）。
+        if store.promote_temp_word(&schema, &code, &text)? {
+            user_words_api::clear_deleted_for_added(self, &schema, &[(&code, &text)]);
+        }
         Ok(json!({ "ok": true }))
     }
 
@@ -2843,13 +2907,19 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        let mut n = 0u64;
+        let mut promoted = Vec::new();
         for r in store.search_temp_words_prefix(&schema, "", 0)? {
             if store.promote_temp_word(&schema, &r.code, &r.text)? {
-                n += 1;
+                promoted.push((r.code, r.text));
             }
         }
-        Ok(json!(n))
+        // 批量转正不撤删除规则，只报其中被隐藏的条数。
+        let words: Vec<(&str, &str)> = promoted
+            .iter()
+            .map(|(c, t)| (c.as_str(), t.as_str()))
+            .collect();
+        let hidden = user_words_api::count_hidden_by_shadow(self, &schema, &words);
+        Ok(json!({ "promoted": promoted.len() as u64, "hiddenByShadow": hidden }))
     }
 
     fn web_temp_clear(&self, params: &Value) -> anyhow::Result<Value> {
@@ -5135,6 +5205,102 @@ outside: rare
         );
     }
 
+    /// 设置页改词（`dict.update` 的 upsert）与单条手动转正（`temp.promote`）是显式加词：撤掉同码
+    /// 同文的删除规则，别的词的删除规则不动。全部转正（`temp.promoteAll`）是批量操作：不撤，报数。
+    #[test]
+    fn single_update_and_promote_clear_but_promote_all_only_counts() {
+        let c = coord("readd_clear");
+        let store = c.user_store().expect("有 store");
+        for (code, text) in [("nihao", "你好"), ("haoya", "好呀"), ("shijie", "世界")] {
+            store.delete_shadow("pinyin", code, text).unwrap();
+        }
+        store.delete_shadow("pinyin", "nihao", "拟好").unwrap();
+        store
+            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0b1001)
+            .unwrap();
+        store
+            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
+            .unwrap();
+        let deleted = |code: &str| {
+            store
+                .get_shadow_rules("pinyin", code)
+                .unwrap()
+                .map(|r| r.deleted)
+                .unwrap_or_default()
+        };
+
+        c.web_data_rpc(
+            "dict.update",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "ni hao", "text": "你好", "weight": 5 }),
+        )
+        .unwrap();
+        assert_eq!(deleted("nihao"), vec!["拟好".to_string()], "只撤「你好」");
+
+        c.web_data_rpc(
+            "temp.promote",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "hao ya", "text": "好呀" }),
+        )
+        .unwrap();
+        assert!(deleted("haoya").is_empty(), "手动转正应撤删除规则");
+
+        // 全部转正是批量操作：不撤，只报数
+        let r = c
+            .web_data_rpc(
+                "temp.promoteAll",
+                &serde_json::json!({ "schemaId": "pinyin" }),
+            )
+            .unwrap();
+        assert_eq!(
+            r,
+            serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }),
+            "转正 1 条、其中 1 条被隐藏"
+        );
+        assert_eq!(
+            deleted("shijie"),
+            vec!["世界".to_string()],
+            "全部转正不撤删除规则"
+        );
+    }
+
+    /// 拼音「屏蔽这个词」行（`code = *`）在候选调整列表里照常列出、能按 `shadow.removeRule` 删；
+    /// 全部转正的计数按文字算上它。
+    #[test]
+    fn block_row_listed_removable_and_counted() {
+        let c = coord("block_row");
+        let store = c.user_store().expect("有 store");
+        store.block_word("pinyin", "世界").unwrap();
+        let list = c
+            .web_data_rpc("shadow.list", &serde_json::json!({ "schemaId": "pinyin" }))
+            .unwrap();
+        let arr = list.as_array().expect("数组");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["code"], "*");
+        assert_eq!(arr[0]["word"], "世界");
+        assert_eq!(arr[0]["type"], "delete");
+
+        store
+            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
+            .unwrap();
+        let r = c
+            .web_data_rpc(
+                "temp.promoteAll",
+                &serde_json::json!({ "schemaId": "pinyin" }),
+            )
+            .unwrap();
+        assert_eq!(r, serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }));
+        assert!(
+            store.blocked_words("pinyin").unwrap().contains("世界"),
+            "全部转正不撤屏蔽"
+        );
+
+        c.web_data_rpc(
+            "shadow.removeRule",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "*", "word": "世界" }),
+        )
+        .unwrap();
+        assert!(store.blocked_words("pinyin").unwrap().is_empty());
+    }
+
     /// 临时词库与用户词库同款：列表显示带空格，remove / promote 收到后各自拆回扁平码。
     /// **三处必须同改**——只改列表就成了「显示得了、删不掉、也晋升不了」。
     #[test]
@@ -5207,6 +5373,42 @@ outside: rare
                 );
             }
         }
+    }
+
+    /// ime.get / set / toggle：中英切换幂等、取反回新值、未知目标报错，且 get 不带目标回全部。
+    #[test]
+    fn ime_state_rpcs_set_toggle_get() {
+        let c = coord("ime_state_rpcs");
+        let call = |m: &str, p: Value| c.web_data_rpc(m, &p);
+
+        let all = call("ime.get", json!({})).unwrap();
+        for t in ["cn-en", "fullshape", "s2t", "t2s", "toolbar"] {
+            assert!(all.get(t).is_some_and(Value::is_boolean), "{t}: {all}");
+        }
+
+        let cur = call("ime.get", json!({"target": "cn-en"})).unwrap()["on"]
+            .as_bool()
+            .unwrap();
+        // 设成当前值：不改动
+        let r = call("ime.set", json!({"target": "cn-en", "on": cur})).unwrap();
+        assert_eq!(r["changed"], json!(false), "{r}");
+        // 设成另一值：改动，且 get 读到新值
+        let r = call("ime.set", json!({"target": "cn-en", "on": !cur})).unwrap();
+        assert_eq!(r["changed"], json!(true), "{r}");
+        assert_eq!(
+            call("ime.get", json!({"target": "cn-en"})).unwrap()["on"],
+            json!(!cur)
+        );
+        // toggle 回到原值，并回报切换后的值
+        let r = call("ime.toggle", json!({"target": "cn-en"})).unwrap();
+        assert_eq!(r["on"], json!(cur), "{r}");
+
+        assert!(call("ime.get", json!({"target": "layout"})).is_err());
+        assert!(call("ime.toggle", json!({"target": "layout"})).is_err());
+        assert!(
+            call("ime.set", json!({"target": "cn-en"})).is_err(),
+            "缺 on"
+        );
     }
 
     /// dict.reload / dict.flush：分派在表里；reload 越界路径报错。
@@ -10913,6 +11115,308 @@ mod system_stats_tests {
                 .is_err()
         );
         assert!(c.web_data_rpc("dict.systemStats", &json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sys_dict_categories_tests {
+    //! `sysDict.categories / header / entries`：一级表的形状与先后（主库最先、按 base_order），
+    //! 停用库也有条数，发现目录登记的库 source 为 dir，开关后再取即反映新状态；二级头部卡片与
+    //! 词条分页 / 搜索。
+    use super::*;
+    use std::sync::Arc;
+    use wind_config::Config;
+    use wind_coordinator::Coordinator;
+    use wind_store::Store;
+
+    /// 夹具：协调器 + 临时数据根；离开作用域（含断言失败）即删临时目录。
+    struct Fixture {
+        c: Arc<Coordinator>,
+        base: std::path::PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// 码表 `zm2`：主库 + 停用的分组库 + 文件缺失的库 + `zm2/ext/` 下一张未登记的库；
+    /// 混输 `mx2` 没有自己的附加库。
+    fn coord(tag: &str) -> Fixture {
+        let base = std::env::temp_dir().join(format!("wind_syscats-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let schemas = base.join("schemas");
+        std::fs::create_dir_all(schemas.join("zm2/ext")).unwrap();
+        std::fs::write(
+            schemas.join("zm2.schema.toml"),
+            "[schema]\nid = \"zm2\"\nname = \"码二\"\n[engine]\ntype = \"codetable\"\n\
+             [engine.codetable]\nmax_code_length = 4\n\
+             [[dictionaries]]\nid = \"main\"\npath = \"zm2/zm2.dict.yaml\"\ndefault = true\n\
+             [[dictionaries]]\nid = \"term\"\nlabel = \"术语\"\ndescription = \"专业词\"\n\
+             group = \"专业术语\"\npath = \"zm2/term.dict.yaml\"\ndefault_enabled = false\nbase_order = 1\n\
+             [[dictionaries]]\nid = \"ghost\"\nlabel = \"缺文件\"\npath = \"zm2/ghost.dict.yaml\"\n\
+             default_enabled = true\n",
+        )
+        .unwrap();
+        let head = "---\nname: x\nversion: \"1\"\n...\n";
+        std::fs::write(
+            schemas.join("zm2/zm2.dict.yaml"),
+            "---\nname: x\nversion: \"1\"\nimport_tables:\n  - sub/more\n...\n甲\ta\t9\n乙\tb\t5\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(schemas.join("zm2/sub")).unwrap();
+        std::fs::write(
+            schemas.join("zm2/sub/more.dict.yaml"),
+            format!("{head}丁\taa\t3\n戊\tab\t2\n己\tc\t1\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zm2/term.dict.yaml"),
+            format!("{head}算法\taaaa\t1\n# 注释\n\n编译\tbbbb\t1\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zm2/ext/mine.dict.yaml"),
+            "---\nname: 我的词\n...\n丙\tc\t1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("mx2.schema.toml"),
+            "[schema]\nid = \"mx2\"\nname = \"混\"\n[engine]\ntype = \"mixed\"\n\
+             [engine.mixed]\nprimary_schema = \"zm2\"\n",
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
+        let mut cfg = Config::default();
+        cfg.schema.active = "zm2".into();
+        cfg.schema.available = vec!["zm2".into(), "mx2".into()];
+        // override 落临时目录：开关测试会写它，不能碰本机配置。
+        let c = Coordinator::new_headless_with_store_override(
+            cfg,
+            Some(&base),
+            store,
+            Some(base.join("overrides")),
+        );
+        Fixture { c, base }
+    }
+
+    fn item<'a>(v: &'a Value, id: &str) -> &'a Value {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap_or_else(|| panic!("清单里没有 {id}: {v}"))
+    }
+
+    #[test]
+    fn lists_main_first_with_order_sources_and_counts() {
+        let f = coord("shape");
+        let c = &f.c;
+        let v = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+            .unwrap();
+        let ids: Vec<(&str, u64)> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| (d["id"].as_str().unwrap(), d["order"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("main", 1),
+                ("ghost", 2),
+                ("term", 3),
+                ("dir:zm2/ext/mine", 4)
+            ],
+            "主库最先，其余按 base_order（ghost 0 < term 1 < 发现目录），同值按方案块序"
+        );
+        assert_eq!(
+            item(&v, "main"),
+            &json!({
+                "id": "main", "label": "zm2", "description": "", "group": null,
+                "enabled": true, "source": "main", "count": 2, "order": 1, "togglable": false,
+            }),
+            "主库：没写 label 取文件名，关不掉；码表库的 import_tables 加载器不读、不计"
+        );
+        assert_eq!(
+            item(&v, "term"),
+            &json!({
+                "id": "term", "label": "术语", "description": "专业词",
+                "group": "专业术语", "enabled": false, "source": "bundled", "count": 2,
+                "order": 3, "togglable": true,
+            }),
+            "停用的库也有条数"
+        );
+        let ghost = item(&v, "ghost");
+        assert_eq!(
+            (&ghost["enabled"], &ghost["count"]),
+            (&json!(true), &Value::Null)
+        );
+        assert_eq!(ghost["group"], Value::Null, "没写 group 给 null");
+        let mine = item(&v, "dir:zm2/ext/mine");
+        assert_eq!(
+            (
+                &mine["source"],
+                &mine["label"],
+                &mine["count"],
+                &mine["group"]
+            ),
+            (&json!("dir"), &json!("我的词"), &json!(1), &Value::Null)
+        );
+    }
+
+    #[test]
+    fn codetable_imports_do_not_affect_main_count() {
+        let f = coord("subgone");
+        std::fs::remove_file(f.base.join("schemas/zm2/sub/more.dict.yaml")).unwrap();
+        let v =
+            f.c.web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+                .unwrap();
+        assert_eq!(item(&v, "main")["count"], 2, "子表在不在都只算本文件");
+    }
+
+    #[test]
+    fn header_card_and_errors() {
+        let f = coord("header");
+        let c = &f.c;
+        let h = c
+            .web_data_rpc(
+                "sysDict.header",
+                &json!({"schema": "zm2", "dictId": "main"}),
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                &h["id"],
+                &h["label"],
+                &h["source"],
+                &h["name"],
+                &h["version"]
+            ),
+            (
+                &json!("main"),
+                &json!("zm2"),
+                &json!("main"),
+                &json!("x"),
+                &json!("1")
+            )
+        );
+        assert_eq!(h["importTables"], json!(["sub/more"]), "声明原样列");
+        assert_eq!(h["count"], 2);
+        assert_eq!(h["tables"], json!([]), "码表库不加载子表");
+        assert!(h["path"].as_str().unwrap().ends_with("zm2.dict.yaml"));
+        assert!(h["mtimeMs"].as_u64().is_some());
+        let t = c
+            .web_data_rpc(
+                "sysDict.header",
+                &json!({"schema": "zm2", "dictId": "term"}),
+            )
+            .unwrap();
+        assert_eq!(
+            (&t["source"], &t["tables"]),
+            (&json!("bundled"), &json!([]))
+        );
+        // 未知 id / 文件缺失 / 缺参
+        for p in [
+            json!({"schema": "zm2", "dictId": "nope"}),
+            json!({"schema": "zm2", "dictId": "ghost"}),
+            json!({"schema": "nope", "dictId": "main"}),
+            json!({"schema": "zm2"}),
+        ] {
+            assert!(c.web_data_rpc("sysDict.header", &p).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn entries_pages_and_searches() {
+        let f = coord("entries");
+        let c = &f.c;
+        let get = |p: Value| c.web_data_rpc("sysDict.entries", &p).unwrap();
+        let v = get(json!({"schema": "zm2", "dictId": "main", "offset": 1, "limit": 2}));
+        assert_eq!(v["total"], 2);
+        assert_eq!(
+            v["rows"],
+            json!([{"code": "b", "text": "乙", "weight": 5, "table": "zm2"}]),
+            "码表库不混入 import_tables 子表"
+        );
+        assert_eq!(v["note"], Value::Null);
+        let v = get(json!({"schema": "zm2", "dictId": "main", "query": "a", "mode": "code"}));
+        let texts: Vec<&str> = v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["text"].as_str().unwrap())
+            .collect();
+        assert_eq!((v["total"].as_u64(), texts), (Some(1), vec!["甲"]));
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "编", "mode": "text"}));
+        assert_eq!(v["total"], 1);
+        let v = get(json!({"schema": "zm2", "dictId": "term", "offset": 9}));
+        assert_eq!(
+            (&v["total"], &v["rows"]),
+            (&json!(2), &json!([])),
+            "越界给空页"
+        );
+        // 不给 mode：编码前缀或词子串
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "b"}));
+        assert_eq!(v["rows"][0]["text"], "编译");
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "算"}));
+        assert_eq!(v["rows"][0]["text"], "算法");
+        // sort / order：排序后分页
+        let texts_of = |v: &Value| -> Vec<String> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["text"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let v = get(json!({"schema": "zm2", "dictId": "main", "sort": "weight"}));
+        assert_eq!(texts_of(&v), ["乙", "甲"]);
+        let v = get(json!({
+            "schema": "zm2", "dictId": "main", "sort": "weight", "order": "desc",
+            "offset": 1, "limit": 1
+        }));
+        assert_eq!(
+            (v["total"].as_u64(), texts_of(&v)),
+            (Some(2), vec!["乙".into()])
+        );
+        let v = get(json!({"schema": "zm2", "dictId": "term", "sort": "code", "order": "desc"}));
+        assert_eq!(texts_of(&v), ["编译", "算法"]);
+        for p in [
+            json!({"schema": "zm2", "dictId": "nope"}),
+            json!({"schema": "zm2", "dictId": "main", "mode": "pinyin"}),
+            json!({"schema": "zm2", "dictId": "main", "sort": "count"}),
+            json!({"schema": "zm2", "dictId": "main", "sort": "code", "order": "up"}),
+            json!({"schema": "zm2", "dictId": "ghost"}),
+        ] {
+            assert!(c.web_data_rpc("sysDict.entries", &p).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn reflects_toggle_and_rejects_bad_input() {
+        let f = coord("toggle");
+        let c = &f.c;
+        c.web_data_rpc(
+            "schema.setDictEnabled",
+            &json!({"id": "zm2", "dictId": "term", "enabled": true}),
+        )
+        .unwrap();
+        let v = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+            .unwrap();
+        assert_eq!(item(&v, "term")["enabled"], true);
+        let mx = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "mx2"}))
+            .unwrap();
+        assert_eq!(mx, json!([]), "混输没有自己的附加库");
+        assert!(
+            c.web_data_rpc("sysDict.categories", &json!({"schema": "nope"}))
+                .is_err()
+        );
+        assert!(c.web_data_rpc("sysDict.categories", &json!({})).is_err());
     }
 }
 

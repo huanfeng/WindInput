@@ -2912,6 +2912,47 @@ async def stall_cases(bus, im):
     await asyncio.sleep(0.2)
 
 
+async def extension_cases(a):
+    """扩展程序通道：假扩展（e2e.sh 装进 extensions/echo）应收到按键与上屏。
+
+    握手完成前的事件按设计丢弃，所以先等扩展握手，再自己打一遍字。"""
+    import json
+
+    out = os.environ.get("WIND_E2E_EXTENSION_OUT", "")
+    if not out:
+        check("扩展用例：e2e.sh 应设置 WIND_E2E_EXTENSION_OUT", False)
+        return
+
+    def msgs():
+        return [json.loads(l)["msg"] for l in read_lines(out) if l.startswith("{")]
+
+    def got_commit():
+        return any(m.get("t") == "commit" and m.get("text") == "你好" for m in msgs())
+
+    def welcomed():
+        return any(m.get("t") == "welcome" for m in msgs())
+
+    await wait_until(welcomed, 10)
+    await a.type("nihao")
+    await a.key(" ")
+    a.take()
+    await wait_until(got_commit, 5)
+    ms = msgs()
+    welcome = next((m for m in ms if m.get("t") == "welcome"), None)
+    check("扩展握手：授予 key.detail / commit / mode",
+          welcome is not None
+          and {"key.detail", "commit", "mode"} <= set(welcome.get("granted", [])),
+          f"welcome={welcome}")
+    check("扩展收到模式事件", any(m.get("t") == "mode" for m in ms), f"共 {len(ms)} 条")
+    commits = [m for m in ms if m.get("t") == "commit" and m.get("text") == "你好"]
+    check("扩展收到上屏「你好」", bool(commits), f"commits={[m for m in ms if m.get('t') == 'commit']}")
+    if commits:
+        sid = commits[-1].get("sid")
+        keys = [m.get("key") for m in ms if m.get("t") == "key" and m.get("sid") == sid]
+        check("同一组合会话的按键依次是 n i h a o space（带具体键名）",
+              sid and keys == ["n", "i", "h", "a", "o", "space"], f"sid={sid} keys={keys}")
+
+
 async def wait_ready(c):
     """服务的 socket 起得比引擎早：词库（首次还要建 .wdat 缓存）加载完成前，按键一律透传。
     用真实通路探活——按 a 直到被吃（= 引擎开始组字），再 Esc 撤掉。"""
@@ -2953,6 +2994,7 @@ async def main():
     check("组字期间按键全部被吃、有预编辑", all(eaten) and had_preedit,
           f"eaten={eaten} preedit_seen={had_preedit}")
     check("上屏后预编辑清空", a.preedit == "", f"preedit={a.preedit!r}")
+    await extension_cases(a)
 
     # 2. 退格：nihaoo ← → nihao
     await a.type("nihaoo")

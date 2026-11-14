@@ -464,14 +464,15 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 `PinyinEngine::with_shuangpin(converter)` 注入，`convert()` 入口先把双拼键串转全拼，后续管线与全拼完全一致。
 
 - **布局是数据不是代码**：`data/schemas/shuangpin/<id>.toml`（内置 xiaohe / ziranma / mspy / sogou /
-  ziguang / abc / shoudao / jiajia），三表：`[initials]` 键→声母、`[finals]` 键→韵母列表、
+  ziguang / abc / shoudao / jiajia / gb2017），三表：`[initials]` 键→声母、`[finals]` 键→韵母列表、
   `[zero_initials]` 键→零声母音节表（首道用 `[zero_pairs]` 显式键对，键位不规则）。
 - 键对转换 `convert_pair()` 三层：零声母（韵母交集/字面/matchesFinal）→ 常规声母+韵母
   （含 z↔zh/c↔ch/s↔sh 对偶兜底 `fuzzy_initial_partners()`）→ 重复键单音节（aa→a，
   **受 `[zero_initials]` 约束**，见下）。
-- **零声母有两个流派，不可互抄**：微软 / 搜狗 / 智能ABC / 紫光用 `O` 引导（`oj`=an、`oh`=ang），
+- **零声母有三个流派，不可互抄**：微软 / 搜狗 / 智能ABC / 紫光用 `O` 引导（`oj`=an、`oh`=ang），
   自然码 / 小鹤用首字母引导（单韵母重复 `aa`/`ee`/`oo`、双字母韵母打字面 `ai`/`an`、
-  三字母韵母 `ah`/`eg`）。微软/搜狗曾整段抄自首字母引导的模板，官方 10 个击键全部打不出而
+  三字母韵母 `ah`/`eg`）。国标双拼（`gb2017`）按 GB/T 34947-2017 4.1.1 用 `a` 引导（`af`=an、`ac`=ao；`ao`=o）。
+  微软/搜狗曾整段抄自首字母引导的模板，官方 10 个击键全部打不出而
   覆盖率门禁照绿 —— 门禁只问「打不打得出」，问不到「**官方**击键打不打得出」，
   该层由 `tests/shuangpin_coverage.rs::official_zero_initial_strokes_work` 正向击键表把守。
 - 奇数尾键作 partial 声母前缀（has_partial）。
@@ -883,16 +884,20 @@ step 2c（尾部残码参与整句解码）此前在混输下**整体关闭**（
 
 ---
 
-## 8. 候选后处理管线（协调器层，所有模式统一）
+## 8. 候选后处理管线（协调器层）
 
-`build_candidates()`（`wind-coordinator/src/handle_candidate.rs:177-340`），引擎返回后依次：
+本节写主链 `build_candidates()`（`wind-coordinator/src/handle_candidate.rs`）。临拼、临英、mix、特殊、
+反查等模式各有平行实现，只接其中几步，清单见 [feature-placement-guide.md](feature-placement-guide.md) §4.2。
+
+引擎返回后依次：
 
 ```
-① engine convert（初始 limit 按引擎类型/码长阶梯，:160-171：码表 100/300/1000，拼音/混输 300）
+① engine convert（初始 limit 按引擎类型/码长阶梯：码表 100/300/1000，拼音/混输 300）
 ② 短语注入（wind-phrase lookup + lookup_prefix）：
      静态/模板短语、$CC 命令（is_command）、$SS/$AA 组（is_group 二级展开）
      weight = hit.weight（精确码/前缀枚举同口径；曾有的 PHRASE_WEIGHT_BASE=40M 类别硬顶已删除，
      短语按自身权重与码表精确候选竞争，见 candidate-sorting-rules.md §5.1）
+②' english_freq_recall：用过的英文词从池尾召回（只召回，位次在 ⑥a 定）
 ③ 层级排序：is_fuzzy asc → **is_partial asc** → is_prefix asc → weight desc → natural_order asc
      （Fuzzy＜子短语＜前缀补全＜完整匹配：与 PinyinEngine 内部排序一致。缺 `is_partial` 时，
      高权重子串单字会靠 weight 反超低权重精确词组——如 `pingtan` 下
@@ -908,9 +913,16 @@ step 2c（尾部残码参与整句解码）此前在混输下**整体关闭**（
      这个按候选长度裁剪。豁免判据是 `is_user_authored`（短语/命令/分组），⛔ **不是**
      `is_common_like`（那个连常用词一起豁免 ⇒ 功能失效）。见 design/single-char-mode.md
 ⑥ apply_freq_rerank：用户词频重排（独立维度，绝不改 weight）
-⑥' apply_direct_aux：直接辅助码（仅双拼，出厂关，§9.1）——末 1～2 位当辅码，命中项并入。
-     钉在全部重排之后、shadow 之前；翻页扩容只重跑本函数，故不能挪到 update_candidates
-⑦ apply_shadow：shadow 规则删除过滤 + 置顶/移动重排（优先级最高，排序后应用）
+⑥a place_english_after_common_exact：英文候选定位（§6.1.2），须在词频重排之后
+⑥b place_sentence_block：整句 N-best 块（仅 sentence_count > 1）
+⑥c protect_top_from_corrected：纠错候选不占首选
+⑥d apply_direct_aux：直接辅助码（仅双拼，出厂关，§9.1）——末 1～2 位当辅码，命中项并入。
+     钉在全部重排之后、shadow 之前；翻页扩容会经 build_candidates 整链重建，挪到 update_candidates 会在翻页时丢失命中项
+⑦ apply_shadow：shadow 规则删除过滤 + 置顶/移动重排；用户调整的最终话语权由返回值 user_pinned
+     兑现（之后的出简让全据此让路），不靠「排在最后」
+⑦' 整句池重跑 ⑤ ⑤' ⑦ 后按名次排回
+⑦'' 空码补全收口（判据落在最终列表上）→ 出简让全（short_code_yield）→ 英文方案头部候选
+     → emoji 扩展（钉在所有加工之后）
 ⑧ 自动上屏复评与守护：
      引擎意向 or recheck_auto_commit（显示态复评，惰性）
      → 目标须在最终候选中存活（未被 shadow 删除）
@@ -1191,7 +1203,8 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 | 词频重排 | used-first 永久档位 | 衰减软置前 | 衰减软置前 | 按候选 source 分流两策略 | 归入档位 3 |
 | preedit | 原始码 | 音节 `'` 分隔 | 原始按键按音节分隔 | `preedit_display`：≥2 音节用拼音拆分串，否则原始码。`preedit_pinyin`（高亮跟随用）判据更宽：**拆分串 ≠ 原串**即给出，覆盖单音节 + 残码（`nun'l`） | 原始输入 |
 
-后处理管线（短语/过滤/词频/shadow/复评，§8）对所有模式统一，由协调器执行。
+后处理管线（短语/过滤/词频/shadow/复评，§8）由协调器执行；主链之外各模式的平行实现接了哪几步，
+见 feature-placement-guide.md §4.2。
 辅助码（§9）不在此表——它不是引擎，是协调器 overlay 模式，对已跑完管线的拼音候选做字形二次筛选。
 
 ---

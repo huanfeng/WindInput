@@ -163,7 +163,116 @@ pub fn add<H: WebDataHost + ?Sized>(
         .user_store()
         .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
     let (code, boundary) = normalize_add_code(h, &schema, code, text);
-    store.add_user_word(&schema, &code, text, weight, boundary)
+    store.add_user_word(&schema, &code, text, weight, boundary)?;
+    clear_deleted_for_added(h, &schema, &[(&code, text)]);
+    Ok(())
+}
+
+/// **单条显式**加词（加词对话框 / 快捷加词 / 命令栏 `dict.add`、设置页加词改词、单条手动转正）
+/// 成功后的收口：撤掉同 (数据方案, 编码, 文本) 的候选调整删除规则。
+///
+/// 读端 `apply_shadow` 按文本过滤、不看来源：用户删过某个系统词后再手动加回同码同文的词，
+/// 规则不撤就永远打不出来。**自动**学词 / 自动晋升不走这里——删过的词不该因为又打到一次就复活。
+/// **批量**操作（导入词库、全部转正）也不撤：一批词里混着用户删过的，不该悄悄全复活；它们改用
+/// [`count_hidden_by_shadow`] 在结果里报数。
+///
+/// 规则的匹配范围见 [`delete_rule_buckets`] 与 [`delete_rule_key_forms`]。
+///
+/// 清理失败只记日志：词已经加进去了，不能因为规则文件被外部编辑占着就报加词失败。
+pub fn clear_deleted_for_added<H: WebDataHost + ?Sized>(
+    h: &H,
+    data_schema: &str,
+    words: &[(&str, &str)],
+) {
+    let Some(store) = h.user_store() else {
+        return;
+    };
+    if words.is_empty() {
+        return;
+    }
+    let key_forms = delete_rule_key_forms(data_schema);
+    for b in delete_rule_buckets(h, data_schema) {
+        match store.clear_deleted_for_words(&b, words, &key_forms) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!("加词：撤销 {n} 条删除规则 schema={b}"),
+            Err(e) => tracing::warn!("加词：撤销删除规则失败 schema={b}: {e}"),
+        }
+    }
+}
+
+/// `words` 里有几条被候选调整的删除规则隐藏（只读，不撤）。批量导入 / 全部转正在结果里报这个数。
+/// 匹配范围与 [`clear_deleted_for_added`] 相同；同一个词在几个桶、几个编码形态上都有规则只算一次。
+/// 读规则失败按 0 计并记日志——计数是提示，不该让已完成的导入报错。
+pub fn count_hidden_by_shadow<H: WebDataHost + ?Sized>(
+    h: &H,
+    data_schema: &str,
+    words: &[(&str, &str)],
+) -> usize {
+    let Some(store) = h.user_store() else {
+        return 0;
+    };
+    if words.is_empty() {
+        return 0;
+    }
+    let key_forms = delete_rule_key_forms(data_schema);
+    let mut hidden = std::collections::HashSet::new();
+    for b in delete_rule_buckets(h, data_schema) {
+        match store.words_hidden_by_shadow(&b, words, &key_forms) {
+            Ok(set) => hidden.extend(set),
+            Err(e) => tracing::warn!("统计被删除规则隐藏的词失败 schema={b}: {e}"),
+        }
+    }
+    hidden.len()
+}
+
+/// 词条落到 `data_schema`（已折叠）时，可能隐藏它的删除规则所在的桶：它自己，加上已启用（及当前）
+/// 的混输方案里以它为成员的——混输方案的规则记在混输自己的桶里、词却落主码表 / 拼音，用户可能在
+/// 混输下删、切到纯码表后再加。
+fn delete_rule_buckets<H: WebDataHost + ?Sized>(h: &H, data_schema: &str) -> Vec<String> {
+    let em = h.engine_mgr();
+    let mut buckets = vec![data_schema.to_string()];
+    let mut schemas = em.available_schemas();
+    schemas.push(em.active_schema_id());
+    for s in &schemas {
+        if em.schema_engine_type(s).as_deref() != Some("mixed") {
+            continue;
+        }
+        let member = [
+            wind_candidate::CandidateSource::CodeTable,
+            wind_candidate::CandidateSource::Pinyin,
+        ]
+        .into_iter()
+        .any(|src| em.write_data_schema_id(s, src).as_deref() == Some(data_schema));
+        let b = em.data_schema_id(s);
+        if member && !buckets.contains(&b) {
+            buckets.push(b);
+        }
+    }
+    buckets
+}
+
+/// 规则键（输入码，`Coordinator::shadow_code_of`）在词条码域里的候选形态，任一与词条码相同即命中。
+///
+/// 码表与词条码同形，原样比；双拼完整转换时键已是连写全拼。拼音桶的键先去掉手动分隔符 `'`，
+/// 再补一个 ü 归一形态（全拼敲 `xv` / `lue` 删的词，词条码归一成 `xu` / `lve`）。ü 形态只在归一后
+/// 能整段切成全拼音节时才补：双拼未完整转换时键是原始击键（`v` 是布局键），那类串归一后多半切不成
+/// 全拼，不该据此命中。简拼、前缀等别的编码上的规则不算。
+fn delete_rule_key_forms(data_schema: &str) -> impl Fn(&str) -> Vec<String> {
+    let pinyin = data_schema == wind_engine::manager::PINYIN_DATA_SCHEMA;
+    move |k: &str| {
+        if !pinyin {
+            return vec![k.to_string()];
+        }
+        let flat = k.replace('\'', "");
+        let mut forms = Vec::with_capacity(2);
+        if let std::borrow::Cow::Owned(u) = wind_engine::pinyin::spelling::normalize_u_umlaut(&flat)
+            && wind_engine::pinyin::syllable::is_full_pinyin_code(&u, 0)
+        {
+            forms.push(u);
+        }
+        forms.push(flat);
+        forms
+    }
 }
 
 /// 删词。`code` 接受带音节空格的显示码，`text` 是存储域真实文本。不存在静默成功。

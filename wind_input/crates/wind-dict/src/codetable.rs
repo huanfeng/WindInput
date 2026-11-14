@@ -1125,6 +1125,58 @@ pub fn rime_layout(content: &str, path: &Path) -> Option<RimeLayout> {
     })
 }
 
+/// 逐行解析器（设置端只读查看词库用）：列规格按整文件判定一次（同加载器的 [`resolve_columns`]），
+/// 逐行走加载器同一个 [`parse_rime_line`]——列数不足、编码或词为空的行跳过，`$CC(` 一类行
+/// 纠正列序，都与加载器一致，不另写一份。
+#[derive(Clone, Copy, Debug)]
+pub struct RimeRowParser {
+    spec: ColumnSpec,
+    lowercase_code: bool,
+}
+
+/// [`RimeRowParser::parse`] 的一行。`code` 已拼平（音节库去掉了空格），音节边界在 `boundary`
+/// （同 [`syllable_boundary_mask`]，非音节库为 0）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RimeRow {
+    pub code: String,
+    pub text: String,
+    pub weight: i32,
+    pub boundary: u64,
+}
+
+impl RimeRowParser {
+    /// `content` 是整篇文本。没有 `...` 正文分隔行，或 `columns:` 声明残缺（加载器整库跳过）
+    /// 时为 `None`；前者先用 [`rime_body_layout`] 区分。`lowercase_code` 同加载器（英文库为真）。
+    pub fn new(content: &str, path: &Path, lowercase_code: bool) -> Option<Self> {
+        let body_offset = rime_body_offset(content)?;
+        let body = &content[body_offset..];
+        let cutoff = find_no_comment_directive(body);
+        let spec = resolve_columns(content, body, path, cutoff)?;
+        Some(Self {
+            spec,
+            lowercase_code,
+        })
+    }
+
+    /// 解析一行（不含换行）；`comments_on` = 本行在 `# no comment` 之前。加载器不收的行为 `None`。
+    pub fn parse(&self, line: &str, comments_on: bool) -> Option<RimeRow> {
+        let mut st = ParseStats::default();
+        parse_rime_line(line, comments_on, self.lowercase_code, self.spec, &mut st).map(|r| {
+            RimeRow {
+                code: r.code,
+                text: r.text,
+                weight: r.weight,
+                boundary: r.boundary,
+            }
+        })
+    }
+
+    /// 编码列下标（搜索粗筛用；`$CC(` 一类行的列序以 [`Self::parse`] 为准）。
+    pub fn code_col(&self) -> usize {
+        self.spec.code_col
+    }
+}
+
 /// 正文起点：首个（按 `str::lines()` 语义，即剥除 `\r` 后）等于 `...` 的行之后的字节偏移。
 /// 无该分隔行 → None（与 load_impl 一致：无正文标记则零条目）。
 fn rime_body_offset(content: &str) -> Option<usize> {

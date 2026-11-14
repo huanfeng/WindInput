@@ -83,7 +83,7 @@ fn sweep_two_key_and_single_syllable_top1() {
     let mut keys: Vec<char> = ('a'..='z').collect();
     keys.push(';');
     for layout in [
-        "xiaohe", "sogou", "mspy", "ziranma", "abc", "ziguang", "shoudao", "jiajia",
+        "xiaohe", "sogou", "mspy", "ziranma", "abc", "ziguang", "shoudao", "jiajia", "gb2017",
     ] {
         let mgr = shuangpin_manager(&dir, layout, &tmp);
         assert_eq!(mgr.shuangpin_layout_of("shuangpin"), layout);

@@ -85,6 +85,15 @@ impl Coordinator {
             Existing::SameTemp | Existing::None => text.to_string(),
             Existing::TempOtherCase(stored) => stored,
         };
+        // 「屏蔽这个词」优先于自动造词（§8 第 11 条）：用户删过的词再上屏原文不学回来。
+        // 按字面比，不归一大小写（屏蔽 `OK` 不挡 `ok`）。
+        if self
+            .blocked_words_in(schema)
+            .is_some_and(|b| b.contains(text) || b.contains(&target))
+        {
+            debug!("english auto-learn: 已被屏蔽，跳过");
+            return;
+        }
         match store.learn_temp_word(schema, &code, &target, LEARN_ADD_WEIGHT, 0) {
             Ok(count) => {
                 // 日志规范：不带词文本。

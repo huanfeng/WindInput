@@ -1024,6 +1024,14 @@ pub(crate) fn dispatch_command(
             }
         }
 
+        // ── 旁路按键（异步，只为扩展程序，不进按键处理）──
+        CMD_KEY_OBSERVED => {
+            if let Ok(k) = decode_key_observed(payload) {
+                handler.handle_key_observed(k.key_code, k.modifiers);
+            }
+            None
+        }
+
         // ── 输入统计（异步，TSF 侧英文模式上报）──
         // InputStatsPayload: englishChars(4) + englishDigits(4) + englishPuncts(4)
         //                  + englishSpaces(4) + elapsedMs(4) = 20 字节
@@ -1272,10 +1280,10 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use wind_ipc::codec::decode_uielement_page;
     use wind_ipc::protocol::{
-        CMD_ACK, CMD_CANDIDATE_SELECT, CMD_HOST_RENDER_FAILED, CMD_UIELEMENT_ACTION,
-        CMD_UIELEMENT_PAGE, CMD_UIELEMENT_QUERY, CMD_UIELEMENT_STATE, IpcHeader,
-        UIELEMENT_ACTION_SET_SELECTION, UIELEMENT_FLAG_UI_LESS_THREAD, UiElementActionPayload,
-        UiElementStatePayload,
+        CMD_ACK, CMD_CANDIDATE_SELECT, CMD_HOST_RENDER_FAILED, CMD_KEY_OBSERVED,
+        CMD_UIELEMENT_ACTION, CMD_UIELEMENT_PAGE, CMD_UIELEMENT_QUERY, CMD_UIELEMENT_STATE,
+        IpcHeader, KeyObservedPayload, MOD_SHIFT, UIELEMENT_ACTION_SET_SELECTION,
+        UIELEMENT_FLAG_UI_LESS_THREAD, UiElementActionPayload, UiElementStatePayload,
     };
     // host-render 与按键投递是 Windows 专属通路，相应用例也只在 Windows 编译。
     #[cfg(windows)]
@@ -1384,6 +1392,31 @@ mod tests {
                 .unwrap()
                 .push(format!("action:{action}:{arg}"));
         }
+        fn handle_key_observed(&self, key_code: u32, modifiers: u32) {
+            self.last_uielement
+                .lock()
+                .unwrap()
+                .push(format!("observed:{key_code}:{modifiers}"));
+        }
+    }
+
+    /// 旁路按键是分发表里的已知命令：交给处理器、不回响应（漏登记会每键刷一条 Unknown command）。
+    #[test]
+    fn key_observed_dispatches_without_response() {
+        let handler = Arc::new(RecordingHandler::default());
+        let dyn_handler: Arc<dyn MessageHandler> = handler.clone();
+        let ctx = ClientCtx { conn_id: 0, pid: 0 };
+        let p = KeyObservedPayload {
+            key_code: 0x08,
+            modifiers: MOD_SHIFT,
+        };
+        assert!(
+            dispatch_for_test(&dyn_handler, CMD_KEY_OBSERVED, true, &p.to_bytes(), ctx).is_none()
+        );
+        assert_eq!(
+            *handler.last_uielement.lock().unwrap(),
+            vec![format!("observed:8:{MOD_SHIFT}")]
+        );
     }
 
     /// UIElement 三件套的分发：状态/操作异步不回响应（防管道污染），查询同步回快照帧。

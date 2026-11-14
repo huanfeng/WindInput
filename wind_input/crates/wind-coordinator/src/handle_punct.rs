@@ -723,7 +723,10 @@ impl Coordinator {
             // 插入配对：左符号 → 补右符号，光标置于其间。
             if let Some((_, right)) = pairs.iter().find(|(l, _)| *l == pch).copied() {
                 self.push_pair(pch, right);
-                let cursor_offset = piece.encode_utf16().count() as u32;
+                // 回退格数 = 右符号所占的格数（从末尾往回退，DLL 按格合成 VK_LEFT）：右符号是单个
+                // 字符，恒为 1。曾取 `piece` 的长度：对出厂单字符映射恰好相等，自定义成多字符左段时
+                // 光标会落错。
+                let cursor_offset = 1;
                 return Some(KeyAction::InsertTextWithCursor {
                     text: format!("{}{}", piece, right),
                     cursor_offset,
@@ -875,7 +878,10 @@ impl Coordinator {
             }
             if let Some((_, right)) = pairs.iter().find(|(l, _)| *l == pch).copied() {
                 self.push_pair(pch, right);
-                let cursor_offset = piece.encode_utf16().count() as u32;
+                // 回退格数 = 右符号所占的格数（从末尾往回退，DLL 按格合成 VK_LEFT）：右符号是单个
+                // 字符，恒为 1。曾取 `piece` 的长度：对出厂单字符映射恰好相等，自定义成多字符左段时
+                // 光标会落错。
+                let cursor_offset = 1;
                 return Some(KeyAction::InsertTextWithCursor {
                     text: format!("{}{}", piece, right),
                     cursor_offset,
@@ -1052,7 +1058,7 @@ impl Coordinator {
                 pair_on,
                 right.is_empty()
             );
-            self.push_commit_text(&text);
+            self.push_commit_text_from(crate::session_exit::ActionOrigin::Command, &text);
             return;
         }
         // `cursor_offset` 的语义是「插入全部文本后向左移几格」（DLL 侧 `KeyEventSink` 按它
@@ -1062,9 +1068,28 @@ impl Coordinator {
         //
         // 换行改写在此接一次（push 路不经按键收口，A3-3）。不影响 `jump_steps`：它是用户
         // 配的**格数**，不是从文本长度算出来的，改写行尾不会让它失配。
-        let text = self.convert_commit_newline(text);
+        //
+        // 收尾按命令输出走（`Command` 不补空格，文本原样返回）；撤销计数只计光标前的左段。
+        let act = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.finish_session_action(
+                st,
+                crate::session_exit::ActionOrigin::Command,
+                KeyAction::InsertTextWithCursor {
+                    text,
+                    cursor_offset: jump_steps,
+                },
+            )
+        };
+        let KeyAction::InsertTextWithCursor { text, .. } = act else {
+            debug_assert!(false, "收尾不应改变配对上屏的动作变体");
+            tracing::warn!("ime.pair: 收尾改变了动作变体，放弃上屏");
+            return;
+        };
+        // 换行已在出口改写（`Command` 的 `commit_newline`）。
         let encoded = wind_ipc::codec::encode_commit_text_with_cursor(&text, jump_steps);
         self.push_server.push_commit_to_active(&encoded);
+        self.hook_commit(&text, "punct");
         self.push_pair_text(left.to_string(), right.to_string(), jump_steps);
     }
 

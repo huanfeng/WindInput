@@ -1,7 +1,7 @@
 # Windows 代码签名设计与接线
 
 > 状态：**已接线，真证书全链路验证通过**（2026-09-07）。`dev.ps1 sign d1 d8s` 实跑：
-> 远程编译 → 回传 → 本机用真证书签 5 个 PE → 本机打包 → 签安装包 → manifest 按签名后的
+> 远程编译 → 回传 → 本机用真证书签 6 个 PE → 本机打包 → 签安装包 → manifest 按签名后的
 > 文件算 hash。6 个产物 `signtool verify /pa` 全部通过、Status=Valid、带 RFC3161 时间戳；
 > 签名后的安装包可正确解包（85 个条目）；`latest-dev.json` 的 sha256/size 与实际文件逐位一致。
 > **`signtool` 未要求交互输入 PIN**，非交互会话下直接签成，无需在客户端勾「记住 PIN」。
@@ -15,8 +15,13 @@
 
 ## 0. 目标与非目标
 
-**目标**：发布的 Windows 产物（5 个 PE + 安装包）带有效 Authenticode 签名，消除
+**目标**：发布的 Windows 产物（6 个 PE + 安装包）带有效 Authenticode 签名，消除
 SmartScreen 的「未知发布者」，并让 TSF DLL 在加固宿主里少一条被拒的理由。
+
+6 个 PE：`wind_input`、`wind_input_ext`（扩展宿主）、`wind_setting`、`wind_portable` 四个 exe 与
+x64 / x86 两个 TSF DLL。签名按目录扫 `build[_dev]\` 根层的 exe / dll，新增产物放进去就会被签，
+不用改名单。扩展宿主尤其要签：它接收按键与上屏事件、再转给别的进程，未签名时这种行为容易被
+杀毒软件按键盘记录器查杀。
 
 **非目标**：不做 CI 无人值守签名 —— 第 3 节说明这在云签名下不成立，不是没做，是做不了。
 也不做 EV 证书 / SmartScreen 信誉加速那一套。
@@ -86,19 +91,19 @@ Card Crypto Provider 访问远端密钥 —— 是软件模拟，不是硬件）
 
 ## 4. 签名默认关闭：`sign` 开关与配额
 
-签名次数按月计费且有限。一次全构建要签 5 个 PE，加打包是 7 次 —— 若做成「配了证书就
+签名次数按月计费且有限。一次全构建要签 6 个 PE，加打包是 8 次 —— 若做成「配了证书就
 自动签」，日常 `d1` 几天就能把一个月的额度烧光。所以**默认一次也不签**，必须在命令里
 显式写 `sign`：
 
 ```
 dev.ps1 1          全构建, 不签            0 次
-dev.ps1 sign 1     全构建并签 5 个 PE      5 次
+dev.ps1 sign 1     全构建并签 6 个 PE      6 次
 dev.ps1 8          出安装包, 不签          0 次
-dev.ps1 sign 8     出安装包, 签 PE + 卸载器 + 外壳  7 次
+dev.ps1 sign 8     出安装包, 签 PE + 卸载器 + 外壳  8 次
 dev.ps1 sign 9s    紧接着出便携包          0 次（PE 上一步已签，按指纹识别后跳过）
 ```
 
-⚠️ **打包类是 7 次不是 6 次**：5 个 PE ＋ `uninstall.exe` ＋ Setup 外壳。卸载器自 4.2
+⚠️ **打包类是 8 次不是 7 次**：6 个 PE ＋ `uninstall.exe` ＋ Setup 外壳。卸载器自 4.2
 起已经能签了，但这里的计数一度还停在「5 + 外壳」的旧账上。2026-09-13 实跑 `sign 8s`
 的三段签名输出（5 个 / 1 个 / 1 个）才把它暴露出来 —— 估配额时按 7 算。
 
@@ -130,7 +135,7 @@ hash 算好），再去签 `build\`」—— 签了个寂寞，而 manifest 里�
 | 接线点 | 位置 | 早了 / 晚了会怎样 |
 |---|---|---|
 | `build[_dev]\` 下的 PE | `Do-Full` 末尾，`Verify-DistData` 之后 | **晚了**就被封进 Setup 的压缩块 / zip，再也签不到 |
-| 同上（skip 模式补签） | `Do-Installer` 里，`pack.ps1` **之前** | 漏了则 `8s`/`d8s` 会打出「外壳签了、里面 5 个 PE 全裸」的包，且验签 Setup.exe 照样通过 —— 从外面完全看不出来。**实测踩过** |
+| 同上（skip 模式补签） | `Do-Installer` 里，`pack.ps1` **之前** | 漏了则 `8s`/`d8s` 会打出「外壳签了、里面 6 个 PE 全裸」的包，且验签 Setup.exe 照样通过 —— 从外面完全看不出来。**实测踩过** |
 | `uninstall.exe` | `Do-Installer` 里，`pack.ps1 -PrepOnly` 之后、`pack.ps1 -SkipPrep` **之前** | **早了**签的是随后会被 prep 改写的裸 stub；**晚了**它已在压缩块里。窗口只有这一格，见 4.2 |
 | `Setup.exe` | `Do-Installer` 里，`pack.ps1` 之后、`New-UpdateManifest` **之前** | **晚了**则 `latest.json` 的 `sha256`/`size` 是签名前的旧值，在线升级校验全体失败 |
 | 便携 zip 内容 | `Do-PortableZip` 里，`Compress-Archive` 之前 | zip 本身签不了，包内 PE 必须先签好 |
@@ -145,7 +150,7 @@ hash 算好），再去签 `build\`」—— 签了个寂寞，而 manifest 里�
 这条路是**通的**，签名不必把编译拉回本机：
 
 ```
-dev.ps1 sign 1     远程全构建 → 回传 build\ → 本机签 5 个 PE
+dev.ps1 sign 1     远程全构建 → 回传 build\ → 本机签 6 个 PE
 dev.ps1 sign 8s    本机打包 + 签外壳（PE 已签，跳过）
 ```
 
@@ -305,7 +310,7 @@ pack                       封进压缩块
 ```
 拉 stage-windows artifact（build\ 散件 + 安装器三件套）
   → dev.ps1 unstage        还原；硬校验中转产物版本 == docs\VERSION
-  → dev.ps1 sign 8s        签 5 个 PE → 签卸载器 → 打包 → 签外壳 → 出 manifest   消耗 7 次
+  → dev.ps1 sign 8s        签 6 个 PE → 签卸载器 → 打包 → 签外壳 → 出 manifest   消耗 8 次
   → dev.ps1 sign 9s        打便携包（包内 PE 已签，按指纹跳过）        消耗 0 次
   → dev.ps1 verify-sign    硬校验通过才上传
   → gh release upload --clobber，再摘掉正文的未签名横幅
@@ -316,7 +321,7 @@ pack                       封进压缩块
 CI 已经产出了 Setup.exe 和 Portable.zip，看起来本机只要对它们补签就行 —— **不行**。
 
 签名夹在打包**中间**（第 4.1 节的五个接线点）：PE 必须在被封进压缩块之前签。对成品补签
-只签得到外壳，包内 5 个 PE 仍是全裸的，而 `signtool verify` 验 Setup.exe **照样通过** ——
+只签得到外壳，包内 6 个 PE 仍是全裸的，而 `signtool verify` 验 Setup.exe **照样通过** ——
 从外面完全看不出来。这正是第 5 节记的那个实测缺陷。
 
 所以 CI 额外产出一个**中转产物** `WindInput-Stage-<版本>.zip`（`dev.ps1 stage`），装的是

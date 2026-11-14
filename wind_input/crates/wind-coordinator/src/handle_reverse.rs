@@ -134,7 +134,16 @@ impl Coordinator {
         let mut cands = self.finalize_candidates(result.candidates, &buffer);
         self.mark_common(&mut cands);
         // 通配结果带 `is_wildcard`，§11 的整组常用字过滤在 `filter_candidates` 里自动成立。
-        self.apply_filter(state, &mut cands);
+        self.run_passes(
+            state,
+            &mut cands,
+            crate::postprocess::profile::REVERSE,
+            &crate::postprocess::PassCtx {
+                owner: None,
+                freq_code: None,
+                shadow_code: None,
+            },
+        );
         state.candidates = cands;
         state.has_more = engine_count >= limit;
         engine_count

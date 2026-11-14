@@ -46,6 +46,7 @@
 | `src/web_host.rs` | `WebDataHost` trait（16 方法）+ 转发 impl：设置页数据 RPC（**独立 crate `wind-webdata`**）消费宿主能力的窄面。依赖方向 webdata→coordinator，本 crate 因此不依赖 wind-transfer/fontdb（Android 闭包免 C 依赖、check-android 免 NDK 的关键，Cargo.toml 有⚠注释）。★新增 RPC 需要新宿主能力时**必须加在本 trait 上** |
 | `src/user_words_api.rs` | 用户词管理（分页列表三条分流 / 加词 ü 归一与边界求解 / 删词 / 清空）的**存储域**本体，泛型于 `WebDataHost`。桌面 `dict.*` RPC（wind-webdata）与移动端门面（wind-mobile）共用——从 webdata 下沉是因为 Android 闭包不含 webdata。转义与 JSON 形状仍留 webdata |
 | `src/dict_stats_api.rs` | 系统词库统计 `dict.systemStats` 本体：调 `EngineManager::dict_stats`（选库/缓存/single-flight），混输按主码表与拼音两个成员并排，补实时的用户词/临时词条数。泛型于 `WebDataHost`，webdata 只转发；扫 mmap 不扫 redb，不进 `FULL_SCAN_METHODS` |
+| `src/schema_dicts_api.rs` | 方案附加词库（扩展 / 细胞 / 发现目录 / 用户分库）的列表与开关本体，桌面 `schema.setDictEnabled` 与移动端共用；`categories` / `header` / `entries` 是词库窗「系统词库」的 `sysDict.*`：一级表含主库、按叠层先后带 `order` 与 `togglable`、按加载器同口径计条数（拼音库加一层 `import_tables` 子表，停用库也有）；二级头部卡片与只读词条分页 / 搜索，本体在 wind-engine `manager/dict_view.rs`（读词库文本、逐行走加载器的 `RimeRowParser`、稀疏行偏移索引，不持引擎锁） |
 | `src/dict_transfer_api.rs` | 词库导出 / 导入（多段 .wdict 与 Rime/TSV）本体：引擎类型写头与跨类型拒收、段交集、拼音准入契约（`EntryContractStats` / 边界补齐）。泛型于 `WebDataHost`，桌面 `dict.export` / `dict.import`（wind-webdata）与移动端 `dict_export` / `dict_import` 共用，保证两端文件互通。读写盘与 JSON 形状仍留 webdata |
 | `src/freq_learn_tests.rs` | 词频路由/选词记账/自动造词/加词的 crate 内行为测试（白盒零 RPC；原住 webdata 契约测试，按「是否用 web_data_rpc」分拣回归） |
 | `src/host_services.rs` | `HostServices` trait（剪贴板等平台能力注入面）+ 桌面/headless 实现；收录判据见模块文档 |
@@ -58,7 +59,7 @@
 
 ### Working In This Directory
 - **Coordinator 字段（81 个）的锁形态/访问分布/合并禁区**清点在 `docs/design/coordinator-state-inventory.md`——**改动或新增字段前先读**，其 §3「勿动清单」每条都是修过 bug 的结论，§5 是新增字段的归属判据。
-- **按键唯一主入口 `handle_key_event`（coordinator/message_handler.rs）**，优先级链顺序即正确性契约，改动前务必理解：key_up toggle 键切换 → 菜单转发 → key_down 热键 → 候选操作热键（Ctrl+数字）→ 加词模式 → 英文透传 → **夺取回退**（`VK_BACK` + `can_rewind`）→ **`state.active` 单点 match 分派** → 空缓冲模式激活 `try_activate_mode` → Ctrl/Alt 组合清空 → URL 夺取激活 → 以词定字 → `apply_nav_key` 统一导航 → 小键盘 → Esc/Back/Space/Enter/字母数字标点（engine_default）。新增逻辑须想清插在链的哪一环。
+- **按键唯一主入口 `handle_key_event`（coordinator/message_handler.rs）**，优先级链顺序即正确性契约，改动前务必理解：key_up toggle 键切换 → 菜单转发 → key_down 热键 → 候选操作热键（Ctrl+数字）→ 加词模式 → 英文透传 → **夺取回退**（`VK_BACK` + `can_rewind`）→ **`state.active` 单点 match 分派** → 空缓冲模式激活 `try_activate_mode` → Ctrl/Alt 组合清空 → URL 夺取激活 → 以词定字 → `apply_nav_key` 统一导航 → 小键盘 → Esc/Back/Space/Enter/字母数字标点（engine_default）。新增逻辑须想清插在链的哪一环。代码里以 `// 〔Kn …〕` 标注槽位，编号表与落点清单见 `docs/architecture/feature-placement-guide.md` §4.1。
 - **独占模式单点真相源**：临时拼音/临英/URL/特殊/mix 收敛为单字段 `State.active: Option<ModeKind>`（pipeline.rs），结构上保证「同一时刻至多一个独占模式」。新增模式 = 加一个 `ModeKind` 变体 + 一条 match 臂 + 一个 `handle_*_key`，**不要**再引入并行 bool。
 - **不移植 Go 决策器**：Rust 各模式按 schema id 独立查引擎（`EngineManager::convert_with`），无被多模式改写的共享引擎，故 pipeline.rs 刻意不引入 Capability/Processor trait 抽象。读 Go 同名模块时勿照搬其 `decider`/`applyEngineDiff` 机制——此处不存在。
 - **导航键走统一入口 `apply_nav_key`**（配置驱动 `keymap::NavKeys`，来自 wind-keys）：普通模式与所有候选模式共用；`include_printable` 区分码表型（`-`/`=` 作翻页）与文本/表达式型（临英/快捷，`-`/`=` 作输入）。禁止在各模式里各写一套翻页/高亮。

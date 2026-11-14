@@ -40,12 +40,13 @@ pub use config::{
     CaretEnd, CodetableEnglishMerge, CodetableGlobal, CommentDictSpec, CommentStateAction, Config,
     ConfigOverlay, CorrectionConfig, CorrectionRuleToggles, CustomHideList, CustomIdentity,
     CustomManifest, DEFAULT_DOTA2_ALIAS, DEFAULT_LABEL_CAPS, DEFAULT_LABEL_ENGLISH,
-    DOTA2_ALIAS_MAX_LEN, EMOJI_MODULES, EMOJI_USER_DIR, EmojiModule, EmojiModuleEntry, HintScope,
-    KeyOrigin, LabelsConfig, LangBarConfig, LayerOrigin, LayoutIntent, MixGlobal,
-    MobileAssociationConfig, MobileConfig, ModeIndicatorStyle, Orientation, PageOverflow,
-    PinyinEnglishMerge, PinyinFuzzy, PinyinGlobalConfig, PinyinHintConfig, PreeditDisplay,
-    ResourceLayer, SessionAction, SingleCharAction, TOOLBAR_ITEM_KEYS, TOOLBAR_LABEL_MAX_WIDTH,
-    TextOrientation, ToolbarButtonSpec, TopCommitMode, sanitize_dota2_alias, toolbar_label_trunc,
+    DOTA2_ALIAS_MAX_LEN, EMOJI_MODULES, EMOJI_USER_DIR, EmojiModule, EmojiModuleEntry,
+    ExtensionEntry, ExtensionsConfig, HintScope, KeyOrigin, LabelsConfig, LangBarConfig,
+    LayerOrigin, LayoutIntent, MixGlobal, MobileAssociationConfig, MobileConfig,
+    ModeIndicatorStyle, Orientation, PageOverflow, PinyinEnglishMerge, PinyinFuzzy,
+    PinyinGlobalConfig, PinyinHintConfig, PreeditDisplay, ResourceLayer, SessionAction,
+    SingleCharAction, TOOLBAR_ITEM_KEYS, TOOLBAR_LABEL_MAX_WIDTH, TextOrientation,
+    ToolbarButtonSpec, TopCommitMode, sanitize_dota2_alias, toolbar_label_trunc,
 };
 pub use custom_settings::{SETTINGS_FEATURES, SettingsHide, SettingsSelector};
 pub use dir_var::{dir_var, dir_var_help, dir_var_names, dir_var_str, is_dir_var};

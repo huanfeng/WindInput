@@ -808,6 +808,9 @@ static REGISTRY: &[ConfigField] = &[
     f("stats.enabled", Bool),
     f("stats.track_english", Bool),
     f("stats.speed_factor", Float),
+    // -- extensions（扩展程序）--
+    f("extensions.enabled", Bool),
+    f("extensions.list", StructList),
     // -- debug（调试）--
     // `off` = 整个日志功能关闭：主日志文件不创建，连 `startup_stage.log` 也不写
     // （见 startup_trace::disabled）。它排在最前是因为值域按"由关到详"排。
@@ -1955,6 +1958,8 @@ mod tests {
         "ui.comment.assign.type",
         "ui.comment.assign.schema",
         "ui.comment.assign.mode",
+        // 扩展列表：同上，**出厂为空数组**，条目随用户安装的扩展增减。
+        "extensions.list",
     ];
 
     /// `data/config.toml` 必须显式列出注册表里的每一个键（豁免名单除外）。

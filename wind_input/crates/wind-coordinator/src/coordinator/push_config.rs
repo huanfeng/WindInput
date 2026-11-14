@@ -105,6 +105,7 @@ impl Coordinator {
         self.push_space_before_digit_config(client_token); // 汉字后的数字吃不吃（中数间补空格）
         self.push_multiline_commit_config(client_token); // 多行上屏是否走粘贴：DLL 重连从 commit 起步
         self.push_compat_title_match_config(client_token); // 采不采窗口标题：DLL 重连从「关」起步
+        self.push_extension_key_observe_config(client_token); // 扩展旁路按键：DLL 重连从「关」起步
         self.push_custom_en_punct_config(client_token); // 英半列自定义标点：DLL 据此吃键转发
         self.push_cn_passthrough_punct_config(client_token); // 中文模式该透传的标点：DLL 据此**不**吃
         self.push_en_passthrough_punct_config(client_token); // 同上，英文标点态那份（超集）
@@ -386,6 +387,21 @@ impl Coordinator {
                 .push_to_token(client_token, &make(client_token));
         } else {
             self.push_server.push_per_client(make);
+        }
+    }
+
+    /// 下发「有扩展订阅按键」开关给 DLL（`CONFIG_KEY_EXTENSION_KEY_OBSERVE`）：开着时 DLL 把放行给
+    /// 宿主的用户按键旁路上报（见 `hook_events`）。所有客户端同一个值；`client_token = 0` 时广播。
+    /// DLL 每次重连从关起步，故握手必推；扩展授权变化时由 `hook_changed` 广播。
+    pub fn push_extension_key_observe_config(&self, client_token: u64) {
+        let encoded = wind_ipc::codec::encode_sync_config(
+            wind_ipc::protocol::CONFIG_KEY_EXTENSION_KEY_OBSERVE,
+            &wind_ipc::codec::encode_extension_key_observe_value(self.hook.wants_key()),
+        );
+        if client_token != 0 {
+            self.push_server.push_to_token(client_token, &encoded);
+        } else {
+            self.push_server.push_per_client(|_| encoded.clone());
         }
     }
 

@@ -238,7 +238,14 @@ impl Coordinator {
                 .temp_english
                 .show_candidates
                 .then(|| "english".to_string()),
-            _ => None,
+            None
+            | Some(
+                ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => None,
         }
     }
 
@@ -2101,6 +2108,7 @@ impl Coordinator {
         // `comment_of` 的查询期求值），切方案不改变该挂载什么。见 `sync_comment_dicts`。
         self.invalidate_aux_code_table(); // 辅助码表各方案不同，切方案必须重挂（见函数注释）
         self.warm_aux_code_sources(); // 新方案的辅助码来源方案后台预热（门卫要求索引已就绪）
+        self.engine_mgr.warm_hot_schema_fields(); // 新方案的按键路径字段先填缓存
         // ── 归位到「能用新方案打字」的状态：无条件，不受任何配置门控 ──────────────
         //
         // 切方案的语义前提就是「我要用这个方案打字」，而英文半角与 CapsLock 开启这两种
@@ -2811,10 +2819,14 @@ impl Coordinator {
                         phrase_only,
                     );
                     let want_variants = te.case_variants && !phrase_only;
+                    // mix 文本缓冲恒小写：大小写跟随在这里无事可做（见上）。
+                    let blocked = self.blocked_words_in(&self.engine_mgr.data_schema_id(member));
                     let want_raw = crate::english_candidates::wants_raw_candidate(
                         raw_mode,
                         &state.mix_buffer,
                         &member_cands,
+                        blocked.as_deref(),
+                        false,
                     );
                     let heads = crate::english_candidates::english_head_candidates(
                         &state.mix_buffer,
@@ -2940,8 +2952,16 @@ impl Coordinator {
             let mix_member_owner = Some(EN.to_string());
             let recalled = self.english_freq_recall(mix_member_owner.as_deref(), &dict, &code);
             dict.extend(recalled);
-            self.apply_freq_rerank_in(mix_member_owner.as_deref(), &mut dict, &code);
-            self.apply_shadow_in(mix_member_owner.as_deref(), &mut dict, &code);
+            self.run_passes(
+                state,
+                &mut dict,
+                crate::postprocess::profile::MIX_ENGLISH_SEGMENT,
+                &crate::postprocess::PassCtx {
+                    owner: mix_member_owner.as_deref(),
+                    freq_code: Some(&code),
+                    shadow_code: Some(&code),
+                },
+            );
             if te.case_follow_input {
                 cased = crate::english_candidates::apply_english_case(
                     &mut dict,
@@ -2956,7 +2976,14 @@ impl Coordinator {
             RawCandidateMode::InDict if !queried => RawCandidateMode::Always,
             m => m,
         };
-        let raw_pinned = crate::english_candidates::wants_raw_candidate(raw_mode, raw, &dict);
+        let blocked = self.blocked_words_in(&self.engine_mgr.data_schema_id(EN));
+        let raw_pinned = crate::english_candidates::wants_raw_candidate(
+            raw_mode,
+            raw,
+            &dict,
+            blocked.as_deref(),
+            te.case_follow_input,
+        );
         // 变形还要求词库真的查过，同临英 `want_variants`：候选关着时变形冒出来，原文又不出，
         // 首格就成了变形、空格上屏一个用户没打的形态。此时段为空，落到下方的补位原文。
         let head = crate::english_candidates::english_head_candidates(

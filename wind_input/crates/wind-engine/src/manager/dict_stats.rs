@@ -370,6 +370,7 @@ fn common_han_charsets(text: &str) -> Vec<Charset> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::dict_view::count_dict_entries;
     use super::*;
 
     fn write(p: &Path, s: &str) {
@@ -474,6 +475,76 @@ mod tests {
         assert_eq!(s.charsets[2].missing_chars, ["丢", "乙"]);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 停用的库也数得出；文件变了重数；文件不在给 None。
+    #[test]
+    fn file_entries_count_disabled_dicts_and_follow_changes() {
+        let base = fixture("entries");
+        let m = mgr(&base);
+        assert_eq!(
+            m.dict_file_entries("ct/main.dict.yaml", "rime_codetable"),
+            Some(6)
+        );
+        assert_eq!(
+            m.dict_file_entries("ct/off.dict.yaml", "rime_codetable"),
+            Some(1),
+            "停用库"
+        );
+        write(
+            &base.join("schemas/ct/off.dict.yaml"),
+            "---\nname: x\n...\nzz\t乙\t1\nzy\t丙\t1\n",
+        );
+        assert_eq!(
+            m.dict_file_entries("ct/off.dict.yaml", "rime_codetable"),
+            Some(2),
+            "改了重数"
+        );
+        assert_eq!(
+            m.dict_file_entries("ct/none.dict.yaml", "rime_codetable"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 计数口径与加载器一致：BOM 不影响找 `...`，没有 `...` 就没有正文，`# no comment` 之后
+    /// 的 `#` 行是数据。
+    #[test]
+    fn count_follows_the_loader_layout() {
+        assert_eq!(
+            count_dict_entries("\u{feff}---\nname: x\n...\n甲\ta\n"),
+            1,
+            "BOM"
+        );
+        assert_eq!(count_dict_entries("甲\ta\n乙\tb\n"), 0, "没有 ... 即零条");
+        assert_eq!(
+            count_dict_entries("---\n...\n# 注释\n甲\ta\n# no comment\n#\tjing\n"),
+            2,
+            "# no comment 之后的 # 行算数据，指令行本身不算"
+        );
+    }
+
+    /// 码表库写了 import_tables：加载器不展开（只 rime_pinyin 展开），条数只算本文件。
+    #[test]
+    fn codetable_wrapper_imports_are_not_counted() {
+        let base = fixture("wrapper");
+        write(
+            &base.join("schemas/ct/wrap.dict.yaml"),
+            "---\nname: wrap\nimport_tables:\n  - off\n  - ext\n...\n",
+        );
+        let m = mgr(&base);
+        assert_eq!(
+            m.dict_file_entries("ct/wrap.dict.yaml", "rime_codetable"),
+            Some(0)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn count_skips_head_comments_and_blank_lines() {
+        let text =
+            "# Rime dictionary\n\n---\nname: x\n# 头里的注释\n...\n甲\ta\n\n# 注释\n乙\tb\t1\n";
+        assert_eq!(count_dict_entries(text), 2);
     }
 
     #[test]

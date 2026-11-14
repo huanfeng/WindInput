@@ -745,7 +745,7 @@ function Sync-LocalVersionFile ([string]$newVersion) {
 #   6. 删掉正文的未签名横幅
 #
 # ⚠️ 第 3 步为什么必须重新打包、不能对 CI 的成品补签外壳:签名夹在打包中间 ——
-#    PE 要在封进压缩块之前签。补签只签得到外壳,包内 5 个 PE 仍是全裸的,而
+#    PE 要在封进压缩块之前签。补签只签得到外壳,包内 6 个 PE 仍是全裸的,而
 #    signtool verify 验 Setup.exe 照样通过(见 dev.ps1 Do-Installer 第 2.5 步)。
 #
 # latest.json 不在上传之列 —— 它由 release-published.yml 在 Release 发布后按实际
@@ -1299,7 +1299,7 @@ function Invoke-SignDraft ([string]$tagName) {
 
         # ---------- 5. 签名 + 重新打包 ----------
         Write-Host ""
-        Say "==> dev.ps1 sign 8s   (签 5 个 PE → 打包 → 签外壳 → 出 manifest)"
+        Say "==> dev.ps1 sign 8s   (签 6 个 PE → 打包 → 签外壳 → 出 manifest)"
         & $devPs1 sign 8s | Out-Host
         if ($LASTEXITCODE -ne 0) { ErrMsg "出安装包失败"; return 1 }
 

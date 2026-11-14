@@ -412,7 +412,7 @@ function Sync-Tree ([string]$src, [string]$remoteDir, [string]$label) {
 # 全构建 (1/d1/8/9) 才整目录打包回传。
 $ArtifactMap = @{
     'm1'  = @('wind_tsf.dll', 'wind_tsf_x86.dll');       'dm1' = @('wind_tsf_dev.dll', 'wind_tsf_x86_dev.dll')
-    'm2'  = @('wind_input.exe', 'wind_cli.bat');         'dm2' = @('wind_input_dev.exe', 'wind_cli.bat')
+    'm2'  = @('wind_input.exe', 'wind_cli.bat', 'wind_input_ext.exe'); 'dm2' = @('wind_input_dev.exe', 'wind_cli.bat', 'wind_input_ext_dev.exe')
     'm3'  = @('wind_setting.exe');                       'dm3' = @('wind_setting_dev.exe')
     'm4'  = @('wind_portable.exe');                      'dm4' = @('wind_portable.exe')
 }

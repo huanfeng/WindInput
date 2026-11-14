@@ -90,6 +90,77 @@ fn lists_extra_dicts_in_file_order_without_main() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 随包分类库都有 `group`（全拼、双拼两份方案文件一致），五笔只有行政区域有；
+/// `categories` 回包的条数来自真实文件。
+#[test]
+fn bundled_dicts_carry_groups() {
+    if !dict_ready() {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let root = tmp_root("group");
+    let c = coord_at(&root, &data_dir(), "pinyin");
+    let group_of = |schema: &str, id: &str| {
+        find(&api::list(&*c, schema).unwrap(), id)
+            .unwrap()
+            .group
+            .clone()
+    };
+    // 全拼、双拼两份方案文件的 (id, group) 逐项一致，分组恰是规格的五个。
+    let pairs = |schema: &str| -> Vec<(String, Option<String>)> {
+        api::list(&*c, schema)
+            .unwrap()
+            .into_iter()
+            .filter(|d| !d.from_dir)
+            .map(|d| (d.id, d.group))
+            .collect()
+    };
+    assert_eq!(pairs("pinyin"), pairs("shuangpin"));
+    let mut groups: Vec<String> = pairs("pinyin").into_iter().filter_map(|(_, g)| g).collect();
+    groups.sort();
+    groups.dedup();
+    let mut want = ["人名地名", "文史", "网络", "专业术语", "体育棋类"].map(String::from);
+    want.sort();
+    assert_eq!(groups, want);
+    for schema in ["pinyin", "shuangpin"] {
+        let groups: Vec<(String, Option<String>)> = api::list(&*c, schema)
+            .unwrap()
+            .into_iter()
+            .filter(|d| !d.from_dir)
+            .map(|d| (d.id, d.group))
+            .collect();
+        assert_eq!(groups.len(), 16, "{schema}: 随包 16 张");
+        assert!(
+            groups.iter().all(|(_, g)| g.is_some()),
+            "{schema}: 每张都有分组 {groups:?}"
+        );
+    }
+    assert_eq!(group_of("pinyin", "cell_idiom").as_deref(), Some("文史"));
+    assert_eq!(
+        group_of("shuangpin", "cell_chess2").as_deref(),
+        Some("体育棋类")
+    );
+    assert_eq!(
+        group_of("wubi86", "wubi86_xzqy").as_deref(),
+        Some("人名地名")
+    );
+    assert_eq!(group_of("wubi86", "wubi86_extra"), None);
+
+    let v = api::categories(&*c, "pinyin").unwrap();
+    let idiom = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "cell_idiom")
+        .unwrap();
+    assert_eq!(idiom["source"], "bundled");
+    assert!(
+        idiom["count"].as_u64().unwrap() > 10_000,
+        "成语库是停用的，也要有条数: {idiom}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// 开 / 关后再列状态翻转；override 只落稀疏项；「重启」（同目录重建协调器）后仍是新值。
 #[test]
 fn toggle_flips_listing_and_persists_across_rebuild() {

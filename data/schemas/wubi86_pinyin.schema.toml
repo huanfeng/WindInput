@@ -14,7 +14,8 @@ type = "mixed"
 primary_schema = "wubi86"
 secondary_schema = "pinyin"
 
-# 用户数据从引用方案继承：
-#   shadow/userdict → 主方案 (wubi86)
-#   userfreq → 拼音方案 (pinyin)
+# 用户数据按候选来源归属：
+#   用户词 / 临时词 / 词频 → 码表候选归主方案 (wubi86)，拼音候选归拼音 (pinyin)，英文归 english
+#   候选调整（置顶 / 按编码隐藏）→ 本方案自己 (wubi86_pinyin)；
+#   拼音候选的多字词删除按文字屏蔽，与拼音方案共用 (pinyin)
 # 调频/造词走子方案的全局 [schema.codetable] / [schema.pinyin] 配置。
