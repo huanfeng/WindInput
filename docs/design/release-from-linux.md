@@ -266,7 +266,7 @@ scp "$BUILD_HOST":"$BUILD_ROOT/dist/WindInput-Portable-$V.zip*" dist/
 1. `unstage` 打印 **两行** `→ ...`：`build\` 和 `target\release (安装器三件套)`。只有第一行
    说明三件套没还原，`pack.ps1` 会现编。
 2. `sign 8s` 应出现 **三段签名**：`5 个文件` → `1 个文件`(uninstall.exe) → `1 个文件`(Setup.exe)。
-   **共 7 次配额**，不是 6 次。
+   **共 8 次配额**，不是 7 次。
 3. `sign 9s` 应报 `0 个已签, 5 个跳过` —— 按签名者指纹识别为已签，不重复扣配额。跳过数
    不是 5 就要查。
 4. `verify-sign` exit 0。⚠️ 它**扫 `dist\` 顶层且不递归**，历史遗留的未签名旧包会把退出码
@@ -295,7 +295,7 @@ scp /tmp/verify-portable.ps1 "$BUILD_HOST":"$BUILD_ROOT/../verify-portable.ps1"
 ssh "$BUILD_HOST" "pwsh -NoProfile -File '$BUILD_ROOT/../verify-portable.ps1'"
 ```
 
-**检查点**：5 个 PE 每个都要有 `The signature is timestamped: ...`。
+**检查点**：6 个 PE 每个都要有 `The signature is timestamped: ...`。
 ★ **时间戳不可省略** —— 没有它，签名会在证书到期当天集体失效，连早已发出去、用户机器上
 装着的包也会一起变成「未知发布者」。
 
@@ -390,7 +390,7 @@ Windows 侧 `signtool verify /pa /v`（见第 7 节）。两者互补，别拿�
 
 | 情况 | 处理 |
 |---|---|
-| 签名产物已出、上传失败 | **别重跑签名段**（会重新拉产物、重签一遍，白扣 7 次配额）。产物就在 VM 的 `dist\`，回传后直接 `gh release upload --clobber` 补传 |
+| 签名产物已出、上传失败 | **别重跑签名段**（会重新拉产物、重签一遍，白扣 8 次配额）。产物就在 VM 的 `dist\`，回传后直接 `gh release upload --clobber` 补传 |
 | 会话在 CI 跑完前过期 | 重新登录会话，从第 7 节开始即可，前面的 tag/CI 不用重来 |
 | artifact 过期（>14 天） | 只能重跑 CI：`gh run rerun <runId>` |
 | 附属仓 tag 顺序推错了 | 删远端 tag 重推代价高；更稳的是**换一个新版本号重发**，tag 是廉价的 |
@@ -430,7 +430,7 @@ Windows 侧 `signtool verify /pa /v`（见第 7 节）。两者互补，别拿�
 
 ### `sign-draft` 无条件重签，不复用 `dist/` 里的现成产物
 
-走到签名段就是要出一版能发的包，7 次云签名配额是它应付的成本。**不要**为省配额加
+走到签名段就是要出一版能发的包，8 次云签名配额是它应付的成本。**不要**为省配额加
 「`dist/` 里已有该版本产物就跳过」——踩过两次，两次的错法不同：
 
 | 现成产物是什么 | 后果 | 验签能不能拦住 |
