@@ -34,14 +34,14 @@
 #   9s / d9s     生成便携包 (跳过重建, 直接打包现有 build[_dev]/)
 #   stage        打包发布中转产物: build/ + 安装器三件套 → dist\*-Stage-<版本>.zip
 #                【在 CI 上跑】。CI 建不了签名会话 (docs\design\code-signing.md 第 3 节),
-#                但签名夹在打包中间, 本机只补签成品外壳会漏掉包内 5 个 PE, 故中转的是
+#                但签名夹在打包中间, 本机只补签成品外壳会漏掉包内 6 个 PE, 故中转的是
 #                打包【之前】的散件。
 #   unstage <zip>  还原中转产物到 build/ 与安装器 target/, 供本机 sign 8s / sign 9s。
 #                【在本机跑】。会硬校验版本号与 docs\VERSION 一致, 并整体替换 build/。
 #                典型: release.ps1 sign-draft 会自动完成「拉取 → 还原 → 签名 → 回传」。
 #   sign         代码签名【开关】, 位置无关, 与构建/打包命令连用:
-#                  dev.ps1 sign 1  ≡  dev.ps1 1 sign     全构建并签名 (5 个 PE)
-#                  dev.ps1 sign 8  ≡  dev.ps1 8 sign     出安装包并签名 (5 个 PE + 安装包)
+#                  dev.ps1 sign 1  ≡  dev.ps1 1 sign     全构建并签名 (6 个 PE)
+#                  dev.ps1 sign 8  ≡  dev.ps1 8 sign     出安装包并签名 (6 个 PE + 安装包)
 #                ⚠️【默认不签】: 签名次数按月计费且有限, 不写 sign 就一次也不消耗。
 #                   连着跑 sign 8 再 sign 9s 时, 便携包里的 PE 已签过会自动跳过,
 #                   不会重复扣次数。
@@ -229,7 +229,7 @@ function Build-Core ([string]$profile = "release", [string]$outdir = $null) {
     Say "`n[core] 构建 wind_input ($prof)..."
     Push-Location $ProjectRoot
     try {
-        cargo build --profile $prof -p wind_service
+        cargo build --profile $prof -p wind_service -p wind_extension_host
         if ($LASTEXITCODE -ne 0) { ErrMsg "wind_input 构建失败!"; return $false }
     } finally { Pop-Location }
     $src = Join-Path (Get-CargoTargetDir $ProjectRoot) "$prof\wind_input.exe"
@@ -237,6 +237,11 @@ function Build-Core ([string]$profile = "release", [string]$outdir = $null) {
     Copy-Item $src "$outdir\wind_input$suffix.exe" -Force
     $sz = [math]::Round((Get-Item "$outdir\wind_input$suffix.exe").Length / 1MB, 1)
     Gray "已构建: wind_input$suffix.exe (${sz}MB)"
+    # 扩展宿主：核心按 exe 同目录找它，名字随变体带后缀（同名会被另一变体的部署按进程名停掉）。
+    $hostExe = Join-Path (Get-CargoTargetDir $ProjectRoot) "$prof\wind_input_ext.exe"
+    if (-not (Test-Path $hostExe)) { ErrMsg "未找到产物: $hostExe"; return $false }
+    Copy-Item $hostExe "$outdir\wind_input_ext$suffix.exe" -Force
+    Gray "已构建: wind_input_ext$suffix.exe"
     # CLI 包装器 (wind_input config ...; 运行时自辨 dev/release exe, 两变体共用一份)
     $cli = "$ProjectRoot\scripts\wind_cli.bat"
     if (Test-Path $cli) { Copy-Item $cli "$outdir\wind_cli.bat" -Force; Gray "已复制: wind_cli.bat" }
@@ -968,7 +973,7 @@ function Invoke-BuildStagesParallel ([string]$profile, [string]$outdir) {
 # ---------- 代码签名 (默认关闭; 需在命令里显式写 sign) ----------
 # 实现在 scripts\sign.ps1, 配置在 scripts\sign.local.ps1 (gitignore, 模板见 .example)。
 #
-# 【默认不签】—— 签名次数按月计费且有限, 一次全构建 5 个 PE、加打包 7 次。
+# 【默认不签】—— 签名次数按月计费且有限, 一次全构建 6 个 PE、加打包 8 次。
 # 开关是位置无关的命令关键字 sign (定义见文件末尾"入口"段):
 #     dev.ps1 1        只构建, 不签         dev.ps1 sign 1   构建并签名
 #     dev.ps1 8        出包, 不签           dev.ps1 sign 8   出包并签名
@@ -1422,6 +1427,7 @@ function Deploy-Full ([string]$profile = "release") {
         Say "[4/7] 复制文件..."
         Copy-Replace $targetDir "wind_input$suffix.exe" "$outdir\wind_input$suffix.exe"
         if (Test-Path "$outdir\wind_cli.bat")      { Copy-Replace $targetDir "wind_cli.bat"      "$outdir\wind_cli.bat" }
+        if (Test-Path "$outdir\wind_input_ext$suffix.exe") { Copy-Replace $targetDir "wind_input_ext$suffix.exe" "$outdir\wind_input_ext$suffix.exe" }
         foreach ($dll in (Get-ChildItem "$outdir\wind_tsf*.dll" -ErrorAction SilentlyContinue)) {
             Copy-Replace $targetDir $dll.Name $dll.FullName
         }
@@ -1458,7 +1464,7 @@ function Get-ModuleFiles ([string]$mod, [string]$suffix) {
     switch ($mod) {
         "tsf"     { @{ Required = @("wind_tsf$suffix.dll", "wind_tsf_x86${suffix}.dll"); Optional = @() } }
         # wind_cli.bat 两变体共用一份、且 Build-Core 里是"存在才复制", 故列为可选
-        "core"    { @{ Required = @("wind_input$suffix.exe"); Optional = @("wind_cli.bat") } }
+        "core"    { @{ Required = @("wind_input$suffix.exe"); Optional = @("wind_cli.bat", "wind_input_ext$suffix.exe") } }
         "setting" { @{ Required = @("wind_setting$suffix.exe"); Optional = @() } }
         # 便携启动器是单一二进制, 不带变体后缀 (运行时按同级有无 _dev exe 自辨变体)
         "portable" { @{ Required = @("wind_portable.exe"); Optional = @() } }
@@ -1610,6 +1616,7 @@ function Deploy-Portable ([string]$profile = "release") {
     Say "[3/5] 复制程序文件..."
     Copy-Replace $root "wind_input$suffix.exe" "$outdir\wind_input$suffix.exe"
     if (Test-Path "$outdir\wind_cli.bat") { Copy-Replace $root "wind_cli.bat" "$outdir\wind_cli.bat" }
+    if (Test-Path "$outdir\wind_input_ext$suffix.exe") { Copy-Replace $root "wind_input_ext$suffix.exe" "$outdir\wind_input_ext$suffix.exe" }
     foreach ($dll in (Get-ChildItem "$outdir\wind_tsf*.dll" -ErrorAction SilentlyContinue)) {
         Copy-Replace $root $dll.Name $dll.FullName
     }
@@ -1843,7 +1850,7 @@ function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPat
         $id = "WindInputDev"; $disp = "清风输入法 (开发版)"; $mainExe = "wind_input_dev.exe"
         $menu = "清风输入法 (开发版)"; $title = "清风输入法 (开发版) 安装向导"; $proto = "windinputdev"
         $settingExe = "wind_setting_dev.exe"
-        $procs = '["wind_setting_dev", "wind_portable", "wind_input_dev"]'
+        $procs = '["wind_setting_dev", "wind_portable", "wind_input_dev", "wind_input_ext_dev"]'
         $acl   = '["wind_tsf_dev.dll", "wind_tsf_x86_dev.dll"]'
         $clsid = "{99C2DEB0-5C57-45A2-9C63-FB54B34FD90A}"; $prof = "{99C2DEB1-5C57-45A2-9C63-FB54B34FD90A}"
         $dllX64 = "wind_tsf_dev.dll"; $dllX86 = "wind_tsf_x86_dev.dll"; $outName = "WindInputDev-Setup"
@@ -1851,7 +1858,7 @@ function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPat
         $id = "WindInput"; $disp = "清风输入法"; $mainExe = "wind_input.exe"
         $menu = "清风输入法"; $title = "清风输入法 安装向导"; $proto = "windinput"
         $settingExe = "wind_setting.exe"
-        $procs = '["wind_setting", "wind_portable", "wind_input"]'
+        $procs = '["wind_setting", "wind_portable", "wind_input", "wind_input_ext"]'
         $acl   = '["wind_tsf.dll", "wind_tsf_x86.dll"]'
         $clsid = "{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}"; $prof = "{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}"
         $dllX64 = "wind_tsf.dll"; $dllX86 = "wind_tsf_x86.dll"; $outName = "WindInput-Setup"
@@ -2065,7 +2072,7 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
     # 2.5 签 build\ 下的 PE —— 必须在 pack 之前, 因为 pack 就是把它们封进压缩块。
     #
     # ⚠️ 这一步【不能】只依赖 Do-Full 里那次: skip 模式 (8s/d8s) 根本不走 Do-Full,
-    #    于是会打出一个「外壳签了、里面 5 个 PE 全裸」的安装包 —— 而且从外面完全看不
+    #    于是会打出一个「外壳签了、里面 6 个 PE 全裸」的安装包 —— 而且从外面完全看不
     #    出来 (验签 Setup.exe 是通过的)。实测踩过。
     #    非 skip 模式下 Do-Full 已经签过, 这里按签名者指纹识别后整体跳过, 不重复消耗配额。
     if (-not (Invoke-SignArtifacts @($outdir) "$profile 产物")) { return $false }
@@ -2153,7 +2160,7 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
 #
 # ⚠️ 为什么不能让 CI 直接出包、本机只补签外壳:
 #    签名【夹在打包中间】—— PE 签在封进压缩块之前, Setup.exe 签在 pack 之后、
-#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 5 个 PE 仍是全裸的, 而
+#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 6 个 PE 仍是全裸的, 而
 #    signtool verify 验 Setup.exe 照样通过 —— 从外面完全看不出来 (实测踩过, 见
 #    Do-Installer 第 2.5 步)。所以中转的必须是打包【之前】的散件。
 #
@@ -2276,7 +2283,7 @@ function Do-Unstage ([string]$zipPath) {
 
     Remove-Item $tmp -Recurse -Force
     Say "`n还原完成。下一步 (需先建立签名会话):"
-    Gray "  .\scripts\dev.ps1 sign 8s      出签名安装包 (5 个 PE + 卸载器 + 外壳, 7 次配额)"
+    Gray "  .\scripts\dev.ps1 sign 8s      出签名安装包 (6 个 PE + 卸载器 + 外壳, 8 次配额)"
     Gray "  .\scripts\dev.ps1 sign 9s      出签名便携包 (PE 已签, 0 次配额)"
     Gray "  .\scripts\dev.ps1 verify-sign  验签 dist\"
     return $true
@@ -2665,7 +2672,7 @@ $allCmds = @($Commands | Where-Object { $_ -ne "" })
 
 # ---------- 签名开关: sign ----------
 # 签名【默认关闭】, 必须显式写 sign 才签。理由是签名次数按月计费且有限 ——
-# 一次全构建就是 5 个 PE, 加打包是 7 次; 若"配了证书就自动签", 日常 d1 几天就能把
+# 一次全构建就是 6 个 PE, 加打包是 8 次; 若"配了证书就自动签", 日常 d1 几天就能把
 # 一个月的额度烧光。宁可发版时多打一个词, 也不要每次构建都在扣费。
 #
 # ⚠️ 为什么是命令关键字而不是 -Sign 参数: 本脚本的 $Commands 用了

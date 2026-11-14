@@ -217,12 +217,17 @@ build_core() {
     local suffix="" prof="release"
     [ "$profile" = dev ] && { prof="dev-variant"; suffix="_dev"; }
     say "\n[core] 交叉编译 wind_input ($prof, $TARGET)..."
-    cargo_xwin build --profile "$prof" --target "$TARGET" -p wind_service \
+    cargo_xwin build --profile "$prof" --target "$TARGET" -p wind_service -p wind_extension_host \
         || { err "wind_input 构建失败!"; return 1; }
     local src="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_input${suffix}.exe"
     gray "已构建: wind_input${suffix}.exe ($(fsize "$outdir/wind_input${suffix}.exe"))"
+    # 扩展宿主：核心按 exe 同目录找它，名字随变体带后缀（同名会被另一变体的部署按进程名停掉）。
+    local host="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input_ext.exe"
+    [ -f "$host" ] || { err "未找到产物: $host"; return 1; }
+    cp -f "$host" "$outdir/wind_input_ext${suffix}.exe"
+    gray "已构建: wind_input_ext${suffix}.exe"
     # CLI 包装器 (wind_input config ...; 运行时自辨 dev/release exe, 两变体共用一份)
     [ -f "$PROJECT_ROOT/scripts/wind_cli.bat" ] && cp -f "$PROJECT_ROOT/scripts/wind_cli.bat" "$outdir/wind_cli.bat" && gray "已复制: wind_cli.bat"
 }
@@ -1142,7 +1147,8 @@ do_push_module() {
         tsf)     local b; mapfile -t b < <(bins_for "$profile")
                  files=("${b[1]}" "${b[2]}") ;;                    # [0]=exe [1]=x64 dll [2]=x86 dll
         core)    files=("wind_input${sfx}.exe")
-                 [ -f "$outdir/wind_cli.bat" ] && files+=("wind_cli.bat") ;;  # CLI 包装器随核心
+                 [ -f "$outdir/wind_cli.bat" ] && files+=("wind_cli.bat")   # CLI 包装器随核心
+                 [ -f "$outdir/wind_input_ext${sfx}.exe" ] && files+=("wind_input_ext${sfx}.exe") ;;
         *)       err "未知模块: $mod（tsf|core）"; return 1 ;;
     esac
     local f
@@ -1476,7 +1482,7 @@ do_portable_zip() {
 #
 # ⚠️ 为什么不能在这边直接出包、本机只补签外壳:
 #    签名【夹在打包中间】—— PE 签在封进压缩块之前, Setup.exe 签在 pack 之后、
-#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 5 个 PE 仍是全裸的, 而
+#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 6 个 PE 仍是全裸的, 而
 #    signtool verify 验 Setup.exe 照样通过 —— 从外面完全看不出来。所以中转的必须是
 #    打包【之前】的散件。
 #
