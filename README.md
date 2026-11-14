@@ -144,6 +144,9 @@ v0.127.0 之前发布的版本仍适用其发布时的 MIT 许可证。
 
 基于本项目修改并分发的作品须同样以 GPL-3.0 发布并提供完整源代码。
 
+例外：扩展程序协议的 Rust 实现 `wind_input/crates/wind-hook` 采用 [MPL-2.0](wind_input/crates/wind-hook/LICENSE)，
+方便第三方据此开发扩展；只有修改该库本身时，改动部分需要公开。
+
 词库数据来源于
 [白霜拼音](https://github.com/gaboolic/rime-frost)、[极点五笔](https://github.com/KyleBing/rime-wubi86-jidian)、
 [pinyin-data](https://github.com/mozillazg/pinyin-data)、[OpenCC](https://github.com/BYVoid/OpenCC)

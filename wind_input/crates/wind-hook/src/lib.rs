@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! wind-hook：扩展程序通道的协议与纯逻辑（设计见 `docs/design/extension-hook-channel.md`）。
 //!
 //! 三层进程：核心 → 扩展宿主（`wind_input_ext`）→ 扩展，全程走继承的匿名管道（子进程

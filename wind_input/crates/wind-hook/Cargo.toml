@@ -2,6 +2,7 @@
 name = "wind-hook"
 version.workspace = true
 edition.workspace = true
+license = "MPL-2.0"
 
 [dependencies]
 serde = { workspace = true }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! 扩展清单 `<extensions>/<id>/extension.toml`。
 //!
 //! ```toml

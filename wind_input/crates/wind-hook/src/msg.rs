@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! 线上消息。核心 ↔ 宿主、宿主 ↔ 扩展用同一套；宿主转发时只裁剪，不改结构。
 //!
 //! JSON 形如 `{"t":"key","v":1,"seq":3,...}`：`t` 是类型，`v`/`seq`/`dropped` 由 [`crate::frame`]

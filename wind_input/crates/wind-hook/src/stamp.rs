@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! 日志行时间戳（UTC）。宿主与扩展的日志是 stderr 直写文件，不走 tracing；不带时间就分不清
 //! 「扩展重启了五次」还是「历次部署攒下五行」。
 

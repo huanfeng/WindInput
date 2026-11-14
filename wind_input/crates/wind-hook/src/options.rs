@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! 扩展选项（设计见 `docs/design/extension-hook-channel.md` §6.4）：扩展在清单里声明，设置端照声明
 //! 渲染表单，值存核心配置，宿主按声明校验、补齐默认值后发给扩展。
 //!
