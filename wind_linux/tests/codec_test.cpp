@@ -61,7 +61,7 @@ void TestHeader()
 
 void TestKeyEvent()
 {
-    CASE("KeyEvent：18 字节 payload，字段偏移与 KeyPayload 一致");
+    CASE("KeyEvent：20 字节 payload，字段偏移与 KeyPayload 一致");
     KeyEvent e;
     e.keyCode = 0x4E;
     e.modifiers = KEYMOD_SHIFT;
@@ -69,9 +69,10 @@ void TestKeyEvent()
     e.toggles = TOGGLE_CAPSLOCK;
     e.eventSeq = 0x1234;
     e.prevChar = 0x33;
+    e.seqChar = 0x4F60;
     Bytes f = encodeKeyEventFrame(e);
-    CHECK_EQ(f.size(), size_t(8 + 18));
-    CHECK_EQ(u32At(f, 4), 18u);
+    CHECK_EQ(f.size(), size_t(8 + 20));
+    CHECK_EQ(u32At(f, 4), 20u);
     CHECK_EQ(u32At(f, 8), 0x4Eu);
     CHECK_EQ(u32At(f, 12), 0u);
     CHECK_EQ(u32At(f, 16), uint32_t(KEYMOD_SHIFT));
@@ -79,6 +80,7 @@ void TestKeyEvent()
     CHECK_EQ(f[21], uint8_t(TOGGLE_CAPSLOCK));
     CHECK_EQ(u16At(f, 22), uint16_t(0x1234));
     CHECK_EQ(u16At(f, 24), uint16_t(0x33));
+    CHECK_EQ(u16At(f, 26), uint16_t(0x4F60));
 }
 
 void TestFocusGained()
@@ -216,7 +218,7 @@ void TestDecodeMisc()
 
 void TestDecodeRender()
 {
-    CASE("HostRenderFrame 24/28 字节；OverlayFrame 68 字节；CandidateRects；Ext 信封");
+    CASE("HostRenderFrame 24/28/36 字节；OverlayFrame 68 字节；CandidateRects；Ext 信封");
     Bytes f;
     for (uint32_t v : {7u, uint32_t(-10), 20u, 100u, 50u, 0x9u}) {
         append(f, le32(v));
@@ -229,6 +231,19 @@ void TestDecodeRender()
     CHECK((fr->flags & FRAME_FLAG_ABSOLUTE_POS) != 0);
     append(f, le32(2));
     CHECK_EQ(decodeHostRenderFrame(f)->scale, 2u);
+    CHECK_EQ(decodeHostRenderFrame(f)->contentX, 0); // 旧服务的 28 字节帧：内容偏移按 0
+    CHECK_EQ(decodeHostRenderFrame(f)->contentY, 0);
+    append(f, le32(12));
+    append(f, le32(uint32_t(-5)));
+    CHECK_EQ(decodeHostRenderFrame(f)->contentX, 12);
+    CHECK_EQ(decodeHostRenderFrame(f)->contentY, -5);
+    append(f, le32(99)); // 以后再追加字段：照旧按前缀读
+    CHECK(decodeHostRenderFrame(f).has_value());
+    for (size_t n : {25u, 26u, 27u, 29u, 32u, 35u}) {
+        CHECK(!decodeHostRenderFrame(Bytes(f.begin(), f.begin() + n)).has_value()); // 截断 / 错位
+    }
+    CHECK(decodeHostRenderFrame(Bytes(f.begin(), f.begin() + 24)).has_value());
+    CHECK(decodeHostRenderFrame(Bytes(f.begin(), f.begin() + 36)).has_value());
     CHECK(!decodeHostRenderFrame(Bytes(20, 0)).has_value());
 
     // CMD_OVERLAY_FRAME：偏移按 Rust `encode_overlay_frame` 写死（布局改了两边一起改）。
@@ -285,6 +300,48 @@ void TestDecodeRender()
     CHECK(ed && ed->kind == "shot" && ed->body.size() == 2);
     e.pop_back();
     CHECK(!decodeExt(e).has_value());
+}
+
+void TestCandidateSkin()
+{
+    CASE("CandidateSkin：偏移按 Rust `encode_candidate_skin` 写死（同一组样例）；截断返回空");
+    Bytes p;
+    for (uint32_t v : {3u, 10u, 20u, 300u, 120u, 2u,                           // flags frame decorN
+                       2u, 2u, 3u, uint32_t(-5), uint32_t(-6), 40u, 50u,       // 穿透装饰
+                       0u, 1u, 0u, 1u, 2u, 3u, 4u,                             // block 装饰
+                       2u, 10u, 20u, 300u, 1u, 0u, 0u, 7u, 8u}) {              // maskN mask
+        append(p, le32(v));
+    }
+    CHECK_EQ(p.size(), size_t(4 + 16 + 4 + 2 * 28 + 4 + 2 * 16));
+    auto s = decodeCandidateSkin(p);
+    CHECK(s.has_value());
+    CHECK_EQ(s->flags, SKIN_FLAG_ACTIVE | SKIN_FLAG_MASK);
+    CHECK_EQ(s->frame.x, 10);
+    CHECK_EQ(s->frame.h, 120);
+    CHECK_EQ(s->decor.size(), size_t(2));
+    CHECK_EQ(s->decor[0].index, 2u);
+    CHECK_EQ(s->decor[0].hit, SKIN_HIT_PASS);
+    CHECK_EQ(s->decor[0].flags, SKIN_DECOR_UNDER | SKIN_DECOR_SPLIT);
+    CHECK_EQ(s->decor[0].rect.x, -5);
+    CHECK_EQ(s->decor[0].rect.y, -6);
+    CHECK_EQ(s->decor[0].rect.h, 50);
+    CHECK_EQ(s->decor[1].hit, SKIN_HIT_BLOCK);
+    CHECK_EQ(s->decor[1].rect.w, 3);
+    CHECK_EQ(s->mask.size(), size_t(2));
+    CHECK_EQ(s->mask[0].w, 300);
+    CHECK_EQ(s->mask[1].h, 8);
+    // 没启用皮肤：28 字节全零。
+    auto none = decodeCandidateSkin(Bytes(28, 0));
+    CHECK(none && none->flags == 0 && none->decor.empty() && none->mask.empty());
+    // 任何一处截断都拒收。
+    for (size_t cut : {size_t(1), size_t(4 * 2 + 16 * 2), size_t(20)}) {
+        Bytes t(p.begin(), p.end() - cut);
+        CHECK(!decodeCandidateSkin(t).has_value());
+    }
+    // 计数大得离谱：拒收，不去分配。
+    Bytes huge = Bytes(20, 0);
+    append(huge, le32(0xFFFFFFFFu));
+    CHECK(!decodeCandidateSkin(huge).has_value());
 }
 
 void TestStableHash()
@@ -376,6 +433,7 @@ int main()
     TestDecodeMisc();
     TestDecodeRender();
     TestOverlayDragTail();
+    TestCandidateSkin();
     TestStableHash();
     TEST_MAIN_END();
 }

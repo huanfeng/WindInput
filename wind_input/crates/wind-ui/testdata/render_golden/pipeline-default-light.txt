@@ -1,0 +1,498 @@
+== 管线 横排 ×1 ==
+-- 窗口 392x147 像素摘要 1ef8b16cf1c07f5f 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((29, 29, 29, 33))
+-- 命中 0 Rect { x: 34.0, y: 72.6, w: 64.8, h: 35.6 }
+-- 命中 1 Rect { x: 98.8, y: 72.6, w: 64.8, h: 35.6 }
+-- 命中 2 Rect { x: 163.6, y: 72.6, w: 42.0, h: 35.6 }
+-- 命中 3 Rect { x: 205.6, y: 72.6, w: 92.40001, h: 35.6 }
+-- 命中 100001 Rect { x: 332.0, y: 72.6, w: 26.0, h: 35.6 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(42.0,40.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(339.2,40.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(44.0,83.2) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(55.2,79.6) size=18.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(72.0,82.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(108.8,83.2) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(120.0,79.6) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(136.8,82.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(173.6,83.2) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(184.8,79.6) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(215.6,83.2) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(226.8,79.6) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(254.40001,82.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(314.8,82.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(332.0,82.0) size=14.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(340.8,82.0) size=14.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 竖排 ×1 ==
+-- 窗口 161x285 像素摘要 33c9a5600931fb73 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((29, 29, 29, 33))
+-- 命中 0 Rect { x: 34.0, y: 72.6, w: 92.8, h: 35.6 }
+-- 命中 1 Rect { x: 34.0, y: 108.2, w: 92.8, h: 35.6 }
+-- 命中 2 Rect { x: 34.0, y: 143.79999, w: 92.8, h: 35.6 }
+-- 命中 3 Rect { x: 34.0, y: 179.4, w: 92.8, h: 35.6 }
+-- 命中 100001 Rect { x: 84.4, y: 215.0, w: 26.0, h: 32.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(42.0,40.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(108.0,40.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(44.0,83.2) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(55.2,79.6) size=18.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(72.0,82.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(44.0,118.799995) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(55.2,115.2) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(72.0,117.6) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(44.0,154.4) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(55.2,150.79999) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(44.0,190.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(55.2,186.4) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(82.8,188.79999) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(67.2,222.6) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(84.4,222.6) size=14.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(93.2,222.6) size=14.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 旋转 ×1 ==
+-- 窗口 211x235 像素摘要 056f5b29d22317b3 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((29, 29, 29, 33))
+-- 命中 3 Rect { x: 140.79999, y: 72.6, w: 35.6, h: 92.40001 }
+-- 命中 2 Rect { x: 105.19999, y: 72.6, w: 35.6, h: 92.40001 }
+-- 命中 1 Rect { x: 69.6, y: 72.6, w: 35.6, h: 92.40001 }
+-- 命中 0 Rect { x: 34.0, y: 72.6, w: 35.6, h: 92.40001 }
+-- 命中 100001 Rect { x: 109.2, y: 165.0, w: 26.0, h: 32.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(42.0,40.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(157.59999,40.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(10.0,10.599998) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(21.2,6.999999) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(48.800003,9.399999) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(10.0,46.199997) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(21.2,42.6) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(10.0,81.799995) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(21.2,78.2) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(38.0,80.6) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(10.0,117.399994) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(21.2,113.799995) size=18.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(38.0,116.2) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(92.0,172.6) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(109.2,172.6) size=14.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(118.0,172.6) size=14.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 直立 ×1 ==
+-- 窗口 168x297 像素摘要 134577bb166dcb15 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((29, 29, 29, 33))
+-- 命中 3 Rect { x: 108.399994, y: 72.6, w: 24.8, h: 153.8 }
+-- 命中 2 Rect { x: 83.59999, y: 72.6, w: 24.8, h: 153.8 }
+-- 命中 1 Rect { x: 58.8, y: 72.6, w: 24.8, h: 153.8 }
+-- 命中 0 Rect { x: 34.000004, y: 72.6, w: 24.8, h: 153.8 }
+-- 命中 100001 Rect { x: 87.6, y: 226.4, w: 26.0, h: 32.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(42.0,40.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(114.399994,40.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=18.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(70.399994,234.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(87.6,234.0) size=14.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(96.399994,234.0) size=14.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 横排·内联编码 ×1 ==
+-- 窗口 493x108 像素摘要 8a67f6ff77191b03 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((29, 29, 29, 33))
+-- 命中 0 Rect { x: 134.8, y: 34.0, w: 64.8, h: 35.6 }
+-- 命中 1 Rect { x: 199.6, y: 34.0, w: 64.8, h: 35.6 }
+-- 命中 2 Rect { x: 264.40002, y: 34.0, w: 42.0, h: 35.6 }
+-- 命中 3 Rect { x: 306.40002, y: 34.0, w: 92.40001, h: 35.6 }
+-- 命中 100001 Rect { x: 432.80005, y: 34.0, w: 26.0, h: 35.6 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(42.0,41.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(112.0,41.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(144.8,44.6) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(156.0,41.0) size=18.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(172.8,43.399998) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(209.6,44.6) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(220.8,41.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(237.6,43.399998) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(274.40002,44.6) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(285.60004,41.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(316.40002,44.6) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(327.60004,41.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(355.20004,43.399998) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(415.60004,43.399998) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(432.80005,43.399998) size=14.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(441.60004,43.399998) size=14.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 直立·内联编码 ×1 ==
+-- 窗口 201x258 像素摘要 19ad09c615c84b9b 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((29, 29, 29, 33))
+-- 命中 3 Rect { x: 108.40001, y: 34.0, w: 24.8, h: 153.8 }
+-- 命中 2 Rect { x: 83.600006, y: 34.0, w: 24.8, h: 153.8 }
+-- 命中 1 Rect { x: 58.800007, y: 34.0, w: 24.8, h: 153.8 }
+-- 命中 0 Rect { x: 34.000004, y: 34.0, w: 24.8, h: 153.8 }
+-- 命中 100001 Rect { x: 104.4, y: 187.8, w: 26.0, h: 32.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="n" at=(0.0,0.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="i" at=(0.0,0.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="h" at=(0.0,0.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="a" at=(0.0,0.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="o" at=(0.0,0.0) size=18.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=18.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=12.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=18.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(87.2,195.40001) size=14.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(104.4,195.40001) size=14.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(113.2,195.40001) size=14.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 横排 ×1.5 ==
+-- 窗口 583x215 像素摘要 fd08b6273311ffe9 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((41, 41, 41, 47))
+-- 命中 0 Rect { x: 48.5, y: 106.9, w: 97.2, h: 53.4 }
+-- 命中 1 Rect { x: 145.7, y: 106.9, w: 97.2, h: 53.4 }
+-- 命中 2 Rect { x: 242.9, y: 106.9, w: 63.0, h: 53.4 }
+-- 命中 3 Rect { x: 305.9, y: 106.9, w: 138.6, h: 53.4 }
+-- 命中 100001 Rect { x: 495.5, y: 106.9, w: 39.0, h: 53.4 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(60.5,57.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(506.3,57.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(63.5,122.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(80.3,117.4) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(105.5,121.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(160.7,122.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(177.5,117.4) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(202.7,121.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(257.9,122.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(274.69998,117.4) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(320.9,122.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(337.69998,117.4) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(379.09998,121.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(469.7,121.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(495.5,121.0) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(508.7,121.0) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 竖排 ×1.5 ==
+-- 窗口 237x423 像素摘要 591de4d0ec7eea58 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((41, 41, 41, 47))
+-- 命中 0 Rect { x: 48.5, y: 106.9, w: 139.2, h: 53.4 }
+-- 命中 1 Rect { x: 48.5, y: 160.3, w: 139.2, h: 53.4 }
+-- 命中 2 Rect { x: 48.5, y: 213.70001, w: 139.2, h: 53.4 }
+-- 命中 3 Rect { x: 48.5, y: 267.1, w: 139.2, h: 53.4 }
+-- 命中 100001 Rect { x: 124.1, y: 320.5, w: 39.0, h: 48.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(60.5,57.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(159.5,57.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(63.5,122.8) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(80.3,117.4) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(105.5,121.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(63.5,176.2) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(80.3,170.8) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(105.5,174.40001) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(63.5,229.6) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(80.3,224.20001) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(63.5,283.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(80.3,277.6) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(121.700005,281.2) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(98.299995,331.9) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(124.1,331.9) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(137.3,331.9) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 旋转 ×1.5 ==
+-- 窗口 311x348 像素摘要 4f4d0a0d1ac2fc0b 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((41, 41, 41, 47))
+-- 命中 3 Rect { x: 208.70001, y: 106.9, w: 53.4, h: 138.6 }
+-- 命中 2 Rect { x: 155.30002, y: 106.9, w: 53.4, h: 138.6 }
+-- 命中 1 Rect { x: 101.9, y: 106.9, w: 53.4, h: 138.6 }
+-- 命中 0 Rect { x: 48.499992, y: 106.9, w: 53.4, h: 138.6 }
+-- 命中 100001 Rect { x: 161.3, y: 245.5, w: 39.0, h: 48.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(60.5,57.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(233.90001,57.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(15.0,15.900001) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(31.8,10.5) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(73.2,14.1) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(15.0,69.3) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(31.8,63.9) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(15.0,122.700005) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(31.8,117.3) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(57.0,120.9) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(15.0,176.1) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(31.8,170.70001) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(57.0,174.30002) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(135.5,256.9) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(161.3,256.9) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(174.5,256.9) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 直立 ×1.5 ==
+-- 窗口 246x441 像素摘要 affdf75812cd40fd 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((41, 41, 41, 47))
+-- 命中 3 Rect { x: 160.1, y: 106.9, w: 37.2, h: 230.70001 }
+-- 命中 2 Rect { x: 122.90001, y: 106.9, w: 37.2, h: 230.70001 }
+-- 命中 1 Rect { x: 85.7, y: 106.9, w: 37.2, h: 230.70001 }
+-- 命中 0 Rect { x: 48.499996, y: 106.9, w: 37.2, h: 230.70001 }
+-- 命中 100001 Rect { x: 128.9, y: 337.6, w: 39.0, h: 48.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(60.5,57.5) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(169.1,57.5) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(103.1,349.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(128.9,349.0) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(142.09999,349.0) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 横排·内联编码 ×1.5 ==
+-- 窗口 735x157 像素摘要 140ecc4a1ff76619 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((41, 41, 41, 47))
+-- 命中 0 Rect { x: 199.7, y: 48.5, w: 97.2, h: 53.4 }
+-- 命中 1 Rect { x: 296.9, y: 48.5, w: 97.2, h: 53.4 }
+-- 命中 2 Rect { x: 394.09998, y: 48.5, w: 63.0, h: 53.4 }
+-- 命中 3 Rect { x: 457.09998, y: 48.5, w: 138.6, h: 53.4 }
+-- 命中 100001 Rect { x: 646.69995, y: 48.5, w: 39.0, h: 53.4 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(60.5,59.0) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(165.5,59.0) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(214.7,64.4) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(231.5,59.0) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(256.7,62.6) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(311.9,64.4) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(328.69998,59.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(353.9,62.6) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(409.09998,64.4) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(425.89996,59.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(472.09998,64.4) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(488.89996,59.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(530.3,62.6) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(620.89996,62.6) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(646.69995,62.6) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(659.89996,62.6) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 直立·内联编码 ×1.5 ==
+-- 窗口 297x382 像素摘要 e7c5e1921f5a93e5 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((41, 41, 41, 47))
+-- 命中 3 Rect { x: 160.09999, y: 48.5, w: 37.2, h: 230.70001 }
+-- 命中 2 Rect { x: 122.899994, y: 48.5, w: 37.2, h: 230.70001 }
+-- 命中 1 Rect { x: 85.7, y: 48.5, w: 37.2, h: 230.70001 }
+-- 命中 0 Rect { x: 48.499996, y: 48.5, w: 37.2, h: 230.70001 }
+-- 命中 100001 Rect { x: 154.1, y: 279.2, w: 39.0, h: 48.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="n" at=(0.0,0.0) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="i" at=(0.0,0.0) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="h" at=(0.0,0.0) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="a" at=(0.0,0.0) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="o" at=(0.0,0.0) size=27.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(0.0,0.0) size=27.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=27.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=18.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=27.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(128.3,290.6) size=21.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(154.1,290.6) size=21.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(167.3,290.6) size=21.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 横排 ×2 ==
+-- 窗口 774x283 像素摘要 e489d4118f1b09e7 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((53, 53, 53, 61))
+-- 命中 0 Rect { x: 63.0, y: 140.2, w: 129.6, h: 71.2 }
+-- 命中 1 Rect { x: 192.6, y: 140.2, w: 129.6, h: 71.2 }
+-- 命中 2 Rect { x: 322.2, y: 140.2, w: 84.0, h: 71.2 }
+-- 命中 3 Rect { x: 406.2, y: 140.2, w: 184.80002, h: 71.2 }
+-- 命中 100001 Rect { x: 659.0, y: 140.2, w: 52.0, h: 71.2 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(79.0,75.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(673.4,75.0) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(83.0,161.4) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(105.4,154.2) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(139.0,159.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(212.6,161.4) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(235.0,154.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(268.6,159.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(342.2,161.4) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(364.6,154.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(426.2,161.4) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(448.6,154.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(503.80002,159.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(624.6,159.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(659.0,159.0) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(676.6,159.0) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 竖排 ×2 ==
+-- 窗口 312x560 像素摘要 dc967af9e8febfe6 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((53, 53, 53, 61))
+-- 命中 0 Rect { x: 63.0, y: 140.2, w: 185.6, h: 71.2 }
+-- 命中 1 Rect { x: 63.0, y: 211.4, w: 185.6, h: 71.2 }
+-- 命中 2 Rect { x: 63.0, y: 282.59998, w: 185.6, h: 71.2 }
+-- 命中 3 Rect { x: 63.0, y: 353.8, w: 185.6, h: 71.2 }
+-- 命中 100001 Rect { x: 163.8, y: 425.0, w: 52.0, h: 64.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(79.0,75.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(211.0,75.0) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(83.0,161.4) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(105.4,154.2) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(139.0,159.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(83.0,232.59999) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(105.4,225.4) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(139.0,230.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(83.0,303.8) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(105.4,296.59998) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(83.0,375.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(105.4,367.8) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(160.6,372.59998) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(129.4,440.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(163.8,440.2) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(181.4,440.2) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 旋转 ×2 ==
+-- 窗口 411x460 像素摘要 37eaa68530689e05 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((53, 53, 53, 61))
+-- 命中 3 Rect { x: 276.59998, y: 140.2, w: 71.2, h: 184.80002 }
+-- 命中 2 Rect { x: 205.39998, y: 140.2, w: 71.2, h: 184.80002 }
+-- 命中 1 Rect { x: 134.2, y: 140.2, w: 71.2, h: 184.80002 }
+-- 命中 0 Rect { x: 63.0, y: 140.2, w: 71.2, h: 184.80002 }
+-- 命中 100001 Rect { x: 213.4, y: 325.0, w: 52.0, h: 64.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(79.0,75.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(310.19998,75.0) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(20.0,21.199997) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(42.4,13.999998) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(97.600006,18.799997) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(20.0,92.399994) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(42.4,85.2) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(20.0,163.59999) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(42.4,156.4) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(76.0,161.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(20.0,234.79999) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(42.4,227.59999) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(76.0,232.4) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(179.0,340.2) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(213.4,340.2) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(231.0,340.2) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 直立 ×2 ==
+-- 窗口 325x583 像素摘要 d40c86fc51863997 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((53, 53, 53, 61))
+-- 命中 3 Rect { x: 211.79999, y: 140.2, w: 49.6, h: 307.6 }
+-- 命中 2 Rect { x: 162.19998, y: 140.2, w: 49.6, h: 307.6 }
+-- 命中 1 Rect { x: 112.6, y: 140.2, w: 49.6, h: 307.6 }
+-- 命中 0 Rect { x: 63.000008, y: 140.2, w: 49.6, h: 307.6 }
+-- 命中 100001 Rect { x: 170.2, y: 447.8, w: 52.0, h: 64.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(79.0,75.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(223.79999,75.0) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(135.79999,463.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(170.2,463.0) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(187.79999,463.0) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 横排·内联编码 ×2 ==
+-- 窗口 976x206 像素摘要 6123570ed504b20d 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((53, 53, 53, 61))
+-- 命中 0 Rect { x: 264.6, y: 63.0, w: 129.6, h: 71.2 }
+-- 命中 1 Rect { x: 394.2, y: 63.0, w: 129.6, h: 71.2 }
+-- 命中 2 Rect { x: 523.80005, y: 63.0, w: 84.0, h: 71.2 }
+-- 命中 3 Rect { x: 607.80005, y: 63.0, w: 184.80002, h: 71.2 }
+-- 命中 100001 Rect { x: 860.6001, y: 63.0, w: 52.0, h: 71.2 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="nihao" at=(79.0,77.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(219.0,77.0) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(284.6,84.2) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(307.0,77.0) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="vb" at=(340.6,81.799995) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="2" at=(414.2,84.2) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(436.6,77.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="kg" at=(470.2,81.799995) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(543.80005,84.2) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(566.2001,77.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="4" at=(627.80005,84.2) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你好" at=(650.2001,77.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="wqvb" at=(705.4001,81.799995) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(826.2001,81.799995) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(860.6001,81.799995) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(878.2001,81.799995) size=28.0 weight=0 family=None color=[59, 130, 246, 255]
+== 管线 直立·内联编码 ×2 ==
+-- 窗口 392x506 像素摘要 827b4f77058f1e06 内容锚点 Some((120, 302)) 上翻 false 可见 true
+-- 阴影外扩 Some((53, 53, 53, 61))
+-- 命中 3 Rect { x: 211.80002, y: 63.0, w: 49.6, h: 307.6 }
+-- 命中 2 Rect { x: 162.20001, y: 63.0, w: 49.6, h: 307.6 }
+-- 命中 1 Rect { x: 112.60001, y: 63.0, w: 49.6, h: 307.6 }
+-- 命中 0 Rect { x: 63.000008, y: 63.0, w: 49.6, h: 307.6 }
+-- 命中 100001 Rect { x: 203.8, y: 370.6, w: 52.0, h: 64.0 }
+-- 鼠标 窗体=None 不拖动=[] 可点击=[]
+draw text="n" at=(0.0,0.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="i" at=(0.0,0.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="h" at=(0.0,0.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="a" at=(0.0,0.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="o" at=(0.0,0.0) size=36.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="拼" at=(0.0,0.0) size=36.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="4" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="你" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="好" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="w" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="q" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="v" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="3" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="浩" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="2" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="号" at=(0.0,0.0) size=36.0 weight=0 family=None color=[74, 74, 74, 255]
+draw text="k" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="g" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="1" at=(0.0,0.0) size=24.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="好" at=(0.0,0.0) size=36.0 weight=0 family=None color=[37, 99, 235, 255]
+draw text="v" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="b" at=(0.0,0.0) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="‹" at=(169.4,385.80002) size=28.0 weight=0 family=None color=[154, 160, 174, 255]
+draw text="" at=(203.8,385.80002) size=28.0 weight=0 family=None color=[90, 96, 114, 255]
+draw text="›" at=(221.4,385.80002) size=28.0 weight=0 family=None color=[59, 130, 246, 255]

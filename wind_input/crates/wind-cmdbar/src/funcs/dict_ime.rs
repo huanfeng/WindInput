@@ -11,14 +11,15 @@ use crate::registry::FuncSpec;
 pub fn specs() -> Vec<FuncSpec> {
     func_specs! {
         "dict.add"        : Dict    (1, 2) effect => fn_dict_add,    "把文本加入用户词库; code 可选, 不传时按当前方案规则推导", "dict.add(clip())";
-        "dict.rev"        : Dict    (1, 2) pure   => fn_dict_rev,    "反查文本中某个字的编码与读音; n 为第几个字 (1 起, 默认 1), 超出字数返回空串", "dict.rev(clip())"
+        "dict.rev"        : Dict    (1, 2) pure   => fn_dict_rev,    "反查文本的编码与读音; 省略 n 时整串查 (词/字皆可), 给了 n 则取第 n 个字 (1 起), 越界返回空串", "dict.rev(clip())"
             named(fn_dict_rev_named, "format" = "版式模板, 同候选注释段语法; 变量 ${char}/${code_rev_all}(全部码位)/${code_rev}(仅全码)/${code_schema}(本方案击键)/${pinyin}/${chaizi}/${chaizi_code}/${dict}; 省略='${char}: ${code_rev_all} ${pinyin}'");
-        "ime.toggle"      : Ime     (1, 1) effect => fn_ime_toggle,  "切换 IME 状态 (cn-en / fullshape / layout / candwin / s2t / t2s / preedit / toolbar)；数据开关 emoji / emoji:<模块id> / dict:<注释库id>", "ime.toggle(\"cn-en\")";
-        "ime.set"         : Ime     (2, 2) effect => fn_ime_set,     "把开关设为指定状态, 已是该状态则只提示不动作; target 为输入状态 (cn-en / fullshape / s2t / t2s / toolbar; cn-en 的 on=中文) 或数据开关 (emoji / emoji:<模块id> / dict:<注释库id>), 状态 on/off (也认 true/false、1/0、开/关)", "ime.set(\"emoji:frost_greek\", \"on\")";
+        "ime.toggle"      : Ime     (1, 1) effect => fn_ime_toggle,  "切换 IME 状态 (cn-en / fullshape / layout / candwin / s2t / t2s / preedit / toolbar / comment[注释默认↔详细])；数据开关 emoji / emoji:<模块id> / dict:<注释库id>", "ime.toggle(\"cn-en\")";
+        "ime.set"         : Ime     (2, 2) effect => fn_ime_set,     "把开关设为指定状态, 已是该状态则只提示不动作; target 为输入状态 (cn-en / fullshape / s2t / t2s / toolbar; cn-en 的 on=中文) 或数据开关 (emoji / emoji:<模块id> / dict:<注释库id>), 状态 on/off (也认 true/false、1/0、开/关); target 为 comment 时状态是 default / detail (候选注释的默认 / 详细态)", "ime.set(\"emoji:frost_greek\", \"on\")";
         "ime.schema"      : Ime     (1, 1) effect => fn_ime_schema,  "切换输入方案并持久化", "ime.schema(\"pinyin\")";
         "ime.theme"       : Ime     (1, 1) effect => fn_ime_theme,   "切换主题并持久化 (= config.set ui.theme.name)", "ime.theme(\"msime\")";
         "ime.theme_cycle" : Ime     (0, 1) effect => fn_theme_cycle, "循环切换主题并持久化; dir 可选 next(默认)/prev", "ime.theme_cycle()";
         "ime.undo_commit" : Ime     (0, 0) effect => fn_undo_commit,"撤销最近一次上屏 (删刚上屏的字符数; 焦点变化或又输入其它内容后退化删 1 个)", "ime.undo_commit()";
+        "ime.reload"      : Ime     (0, 0) effect => fn_ime_reload,"重新读取用户配置并应用 (等同设置端保存后的热重载; 手改 config.toml 后用)", "ime.reload()";
         "ime.pair"        : Ime     (2, 2) effect => fn_ime_pair,   "上屏配对文本并激活配对状态, 光标落两段之间, 可用跳出键 (Tab/Enter) 越过右段", "ime.pair(\"《\", \"》\")"
             named(fn_ime_pair_named, "jump" = "跳出时光标右移的格数; 省略=按右段字符数");
         "setting.open"    : Setting (1, 2) effect => fn_setting_open,"打开设置窗口的指定页面 (schema/input/keys/ui/dict/advanced/about/import; 空串=默认页); args 可选, 原样直通给设置程序", "setting.open(\"dict\", \"--schema=wubi86 --type=shadow\")";
@@ -53,10 +54,20 @@ fn fn_dict_rev(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
     fn_dict_rev_named(ctx, args, &[])
 }
 
-/// `dict.rev(text, n, format="…")`：取 `text` 的第 n 个字（1 起，默认 1）交宿主反查。
+/// `dict.rev(text, n, format="…")`：反查 `text` 的编码与读音。
 ///
-/// 本层**只负责挑字与填默认模板**，渲染在宿主侧（见
-/// [`EvalContext::reverse_lookup`](crate::context::EvalContext::reverse_lookup)）。
+/// 两种用法，**按给没给 `n`** 分工：
+///
+/// - **省略 `n`** —— 整串原样交宿主（出厂 `cofc` 写的就是 `dict.rev(clip())`）。复制
+///   「好吧」查的是「好吧」**这个词**在码表里的码，复制单字自然落回单字。剪贴板反查的
+///   主场就是这个：用户从别处复制来的可能是一个字，也可能是一个词。
+/// - **给了 `n`** —— 取第 n 个字（1 起）：`dict.rev(clip(), 1..N)` 是 `$SS` 逐字展开的
+///   原子操作（写法见 `data/system.phrases.toml` 里 `cofc` 的注释块）。
+///
+/// 本层**只负责挑不挑字与填默认模板**，渲染在宿主侧（见
+/// [`EvalContext::reverse_lookup`](crate::context::EvalContext::reverse_lookup)）。那边收的
+/// 本就是任意文本、并按**词条**查主码表反向索引（`word_codes_display` / `codetable_reverse_hint`），
+/// 故整串这条路不需要宿主做任何改动。
 ///
 /// # 越界与非法 n 一律返回空串而不报错
 ///
@@ -66,22 +77,14 @@ fn fn_dict_rev(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
 /// 落空，由短语层的空串守卫丢掉它。
 ///
 /// `n` 本身写错（非数字）仍然报错——那是词条作者的笔误，不是运行时的正常输入。
+///
+/// 整串模式下「查不到」（文本不是码表词条、纯空白、反查索引尚未建好）同样返回空串，
+/// 由词条的 `default(…, "提示语")` 接住，见 `docs/design/clipboard-reverse-lookup.md`。
 fn fn_dict_rev_named(
     ctx: &dyn EvalContext,
     args: &[String],
     named: &[(String, String)],
 ) -> Result<String> {
-    let n = match args.get(1) {
-        Some(s) => parse_arg_int("dict.rev", s)?,
-        None => 1,
-    };
-    if n < 1 {
-        return Ok(String::new());
-    }
-    // 按 rune 取字：扩展区汉字走代理对，按字节索引会切在半个字上。
-    let Some(ch) = args[0].chars().nth((n - 1) as usize) else {
-        return Ok(String::new());
-    };
     // 空 format 视同省略：`format=""` 多半是词条拼错，退回默认版式比产出空串好查。
     let format = named
         .iter()
@@ -89,11 +92,47 @@ fn fn_dict_rev_named(
         .map(|(_, v)| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_REV_FORMAT);
+    // ★ 省略 n ⇒ 整串反查。宿主按词条查码表反向索引，故「好吧」拿到的是这个词的码，
+    // 单字文本自然落回单字。查不到返回空串（`reverse_render` 的 found 判据），
+    // 由词条的 `default(...)` 回落成提示语。
+    let Some(n) = args.get(1) else {
+        // 纯空白（只复制了个换行）：反查必然空，提前挡掉，免得 `${char}` 把空白
+        // 回显成一条「有内容」的候选。
+        // 前后空白去掉（从终端/编辑器复制一行常带尾换行，不去就查不到词条）；
+        // 去完仍含换行的是多行文本，不是一个词。长度上限由宿主侧把关。
+        let text = args[0].trim();
+        if text.is_empty() || text.contains(['\n', '\r']) {
+            return Ok(String::new());
+        }
+        return Ok(ctx.reverse_lookup(text, format));
+    };
+    let n = parse_arg_int("dict.rev", n)?;
+    if n < 1 {
+        return Ok(String::new());
+    }
+    // 按 rune 取字：扩展区汉字走代理对，按字节索引会切在半个字上。
+    let Some(ch) = args[0].chars().nth((n - 1) as usize) else {
+        return Ok(String::new());
+    };
     let mut buf = [0u8; 4];
     Ok(ctx.reverse_lookup(ch.encode_utf8(&mut buf), format))
 }
 
 fn fn_ime_set(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
+    // `comment` 的状态是 default / detail，不是开关，绕过 on/off 解析。
+    if args[0] == "comment" {
+        let value = args[1].trim().to_ascii_lowercase();
+        if value != "default" && value != "detail" {
+            return Err(runtime_err(
+                "ime.set",
+                anyhow::anyhow!("comment 的状态需要 default / detail，收到 {:?}", args[1]),
+            ));
+        }
+        let ime = ime(ctx, "ime.set")?;
+        ime.set_value(&args[0], &value)
+            .map_err(|e| runtime_err("ime.set", e))?;
+        return Ok(String::new());
+    }
     let on = parse_switch(&args[1]).ok_or_else(|| {
         runtime_err(
             "ime.set",
@@ -184,6 +223,13 @@ fn fn_undo_commit(ctx: &dyn EvalContext, _args: &[String]) -> Result<String> {
     Ok(String::new())
 }
 
+fn fn_ime_reload(ctx: &dyn EvalContext, _args: &[String]) -> Result<String> {
+    let ime = ime(ctx, "ime.reload")?;
+    ime.reload_config()
+        .map_err(|e| runtime_err("ime.reload", e))?;
+    Ok(String::new())
+}
+
 fn fn_setting_open(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
     let ime = ime(ctx, "setting.open")?;
     let extra = args.get(1).map(String::as_str).unwrap_or("");
@@ -259,6 +305,17 @@ mod tests {
             self.0.lock().unwrap().push(format!("set {target}={on}"));
             Ok(())
         }
+        fn set_value(&self, target: &str, value: &str) -> anyhow::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("set_value {target}={value}"));
+            Ok(())
+        }
+        fn reload_config(&self) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push("reload".into());
+            Ok(())
+        }
     }
 
     fn ctx_with(rec: Arc<RecIme>) -> MemoryContext {
@@ -302,12 +359,76 @@ mod tests {
         assert!(rec.0.lock().unwrap().is_empty(), "认不出的状态不该调用宿主");
     }
 
-    /// 省略 n 取第 1 个字；省略 format 填默认版式。
+    /// `ime.reload()` 交宿主重载配置；宿主没实现时报错而不是静默成功。
     #[test]
-    fn rev_defaults_to_first_char_and_default_format() {
+    fn ime_reload_calls_host() {
+        let rec = Arc::new(RecIme(Mutex::new(Vec::new())));
+        let ctx = ctx_with(rec.clone());
+        fn_ime_reload(&ctx, &[]).unwrap();
+        assert_eq!(rec.0.lock().unwrap().pop().unwrap(), "reload");
+    }
+
+    /// `ime.set("comment", ...)` 的状态是 default / detail：走 `set_value`，on/off 报错且不调用宿主；
+    /// 其它 target 仍走原来的开关解析。
+    #[test]
+    fn ime_set_comment_accepts_state_values() {
+        let rec = Arc::new(RecIme(Mutex::new(Vec::new())));
+        let ctx = ctx_with(rec.clone());
+        fn_ime_set(&ctx, &["comment".into(), " Detail ".into()]).unwrap();
+        assert_eq!(
+            rec.0.lock().unwrap().pop().unwrap(),
+            "set_value comment=detail"
+        );
+        assert!(fn_ime_set(&ctx, &["comment".into(), "on".into()]).is_err());
+        assert!(rec.0.lock().unwrap().is_empty(), "非法状态不该调用宿主");
+        fn_ime_set(&ctx, &["dict:x".into(), "on".into()]).unwrap();
+        assert_eq!(rec.0.lock().unwrap().pop().unwrap(), "set dict:x=true");
+    }
+
+    /// ★ 省略 n ⇒ **整串**反查：复制「好吧」查的是「好吧」这个词，不是它的第一个字。
+    ///
+    /// 这是剪贴板反查的主行为（出厂 `cofc` 就写 `dict.rev(clip())`）。宿主拿整串按词条查
+    /// 主码表反向索引，故命中词条时拿到的是词码；单字文本自然落回单字。
+    #[test]
+    fn rev_defaults_to_whole_text_with_default_format() {
         let ctx = rev_echo_ctx();
-        let out = fn_dict_rev(&ctx, &["好人".to_string()]).unwrap();
+        let out = fn_dict_rev(&ctx, &["好吧".to_string()]).unwrap();
+        assert_eq!(out, format!("好吧|{DEFAULT_REV_FORMAT}"));
+        // 单字也一样走整串，只是整串恰好一个字。
+        assert_eq!(
+            fn_dict_rev(&ctx, &["好".to_string()]).unwrap(),
+            format!("好|{DEFAULT_REV_FORMAT}")
+        );
+    }
+
+    /// 给了 n 就回到「取第 n 个字」：`$SS` 逐字展开依赖它，不能被整串语义吃掉。
+    #[test]
+    fn explicit_n_still_picks_that_char() {
+        let ctx = rev_echo_ctx();
+        let out = fn_dict_rev(&ctx, &["好吧".to_string(), "1".to_string()]).unwrap();
         assert_eq!(out, format!("好|{DEFAULT_REV_FORMAT}"));
+        let out = fn_dict_rev(&ctx, &["好吧".to_string(), "2".to_string()]).unwrap();
+        assert_eq!(out, format!("吧|{DEFAULT_REV_FORMAT}"));
+    }
+
+    /// 整串模式：前后空白（尾换行）去掉再查；内部含换行是多行文本，不查。
+    #[test]
+    fn whole_text_trims_and_rejects_multiline() {
+        let ctx = rev_echo_ctx();
+        assert_eq!(
+            fn_dict_rev(&ctx, &[" 好吧\r\n".to_string()]).unwrap(),
+            format!("好吧|{DEFAULT_REV_FORMAT}")
+        );
+        assert_eq!(fn_dict_rev(&ctx, &["好\n吧".to_string()]).unwrap(), "");
+    }
+
+    /// 纯空白文本（只复制了个换行）在整串模式下直接空串，不回显出一条只有 `: ` 的候选。
+    #[test]
+    fn whole_text_blank_yields_empty() {
+        let ctx = rev_echo_ctx();
+        for t in ["", "   ", "\n", "\t "] {
+            assert_eq!(fn_dict_rev(&ctx, &[t.to_string()]).unwrap(), "", "{t:?}");
+        }
     }
 
     /// n 按 **rune** 定位，不是字节：扩展区汉字走代理对，按字节索引会切在半个字上。

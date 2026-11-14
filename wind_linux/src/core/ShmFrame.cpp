@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -100,28 +101,42 @@ bool ShmFrameReader::snapshot(SharedFrame& out) const
     return true;
 }
 
-Rect placePanel(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& wa, bool absolute)
+Rect placePanel(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& wa, bool absolute,
+                const std::optional<Rect>& box)
 {
     constexpr int32_t kCaretHeight = 18; // 同 macOS：拿不到真实光标高时的估值
-    Rect r{x, y, w, h};
-    int32_t right = wa.x + wa.w;
-    int32_t bottom = wa.y + wa.h;
-    if (r.x + w > right) {
-        r.x = right - w;
+    // 越界与翻转都按 box（窗口里的那块）判，算完再换回窗口左上。
+    const Rect b = box && box->w > 0 && box->h > 0 ? *box : Rect{0, 0, w, h};
+    const int32_t top = y + b.y;
+    int32_t bx = x + b.x, by = top;
+    const int32_t right = wa.x + wa.w;
+    const int32_t bottom = wa.y + wa.h;
+    if (bx + b.w > right) {
+        bx = right - b.w;
     }
-    if (r.x < wa.x) {
-        r.x = wa.x;
+    if (bx < wa.x) {
+        bx = wa.x;
     }
-    if (!absolute && r.y + h > bottom) {
-        r.y = y - kCaretHeight - h; // 翻到光标上方
+    if (!absolute && by + b.h > bottom) {
+        by = top - kCaretHeight - b.h; // 翻到光标上方
     }
-    if (r.y + h > bottom) {
-        r.y = bottom - h;
+    if (by + b.h > bottom) {
+        by = bottom - b.h;
     }
-    if (r.y < wa.y) {
-        r.y = wa.y;
+    if (by < wa.y) {
+        by = wa.y;
     }
-    return r;
+    return Rect{bx - b.x, by - b.y, w, h};
+}
+
+Rect placeCandidate(int32_t x, int32_t y, int32_t w, int32_t h, const Rect& wa, bool absolute,
+                    const std::optional<std::pair<int32_t, int32_t>>& pin, int32_t contentX,
+                    int32_t contentY, const std::optional<Rect>& box)
+{
+    if (pin) {
+        return placePanel(pin->first - contentX, pin->second - contentY, w, h, wa, true, box);
+    }
+    return placePanel(x, y, w, h, wa, absolute, box);
 }
 
 Rect placeOverlay(const OverlayFramePayload& p, const Rect& wa, int32_t shiftX, int32_t shiftY)
@@ -203,6 +218,134 @@ int32_t hitTest(const std::vector<CandidateHitRect>& rects, int32_t px, int32_t 
         }
     }
     return kNoHit;
+}
+
+std::optional<std::vector<Rect>> candidateInputRegion(const CandidateSkin& skin, uint32_t w,
+                                                      uint32_t h)
+{
+    if ((skin.flags & SKIN_FLAG_ACTIVE) == 0 || (skin.flags & SKIN_FLAG_MASK) == 0) {
+        return std::nullopt;
+    }
+    std::vector<Rect> out;
+    out.reserve(skin.mask.size());
+    for (const Rect& r : skin.mask) {
+        const int64_t x0 = std::max<int64_t>(0, r.x), y0 = std::max<int64_t>(0, r.y);
+        const int64_t x1 = std::min<int64_t>(w, int64_t(r.x) + r.w);
+        const int64_t y1 = std::min<int64_t>(h, int64_t(r.y) + r.h);
+        if (x1 > x0 && y1 > y0) {
+            out.push_back(Rect{int32_t(x0), int32_t(y0), int32_t(x1 - x0), int32_t(y1 - y0)});
+        }
+    }
+    return out;
+}
+
+int32_t decorAt(const CandidateSkin& skin, int32_t x, int32_t y)
+{
+    if ((skin.flags & SKIN_FLAG_ACTIVE) == 0) {
+        return -1;
+    }
+    auto in = [x, y](const Rect& r) {
+        return x >= r.x && y >= r.y && int64_t(x) < int64_t(r.x) + r.w
+               && int64_t(y) < int64_t(r.y) + r.h;
+    };
+    const bool inFrame = in(skin.frame);
+    for (auto it = skin.decor.rbegin(); it != skin.decor.rend(); ++it) {
+        if (it->hit == SKIN_HIT_PASS || !in(it->rect)) {
+            continue;
+        }
+        if ((it->flags & SKIN_DECOR_UNDER) != 0 && inFrame) {
+            continue;
+        }
+        return int32_t(it->index);
+    }
+    return -1;
+}
+
+bool onNoDragDecor(const CandidateSkin& skin, int32_t x, int32_t y)
+{
+    if ((skin.flags & SKIN_FLAG_ACTIVE) == 0) {
+        return false;
+    }
+    auto in = [x, y](const Rect& r) {
+        return x >= r.x && y >= r.y && int64_t(x) < int64_t(r.x) + r.w
+               && int64_t(y) < int64_t(r.y) + r.h;
+    };
+    if (in(skin.frame)) {
+        return false;
+    }
+    for (const SkinDecor& d : skin.decor) {
+        if (d.hit != SKIN_HIT_DRAG && in(d.rect)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Rect candidateAnchorBox(const CandidateSkin& skin, uint32_t w, uint32_t h)
+{
+    const Rect& f = skin.frame;
+    if ((skin.flags & SKIN_FLAG_ACTIVE) == 0 || f.w <= 0 || f.h <= 0 || f.x < 0 || f.y < 0
+        || int64_t(f.x) + f.w > int64_t(w) || int64_t(f.y) + f.h > int64_t(h)) {
+        return Rect{0, 0, int32_t(w), int32_t(h)};
+    }
+    return f;
+}
+
+WaylandSkinPlan planWaylandSkin(const Rect& anchor, uint32_t canvasW, uint32_t canvasH,
+                                bool haveSubcompositor, bool forceClip)
+{
+    WaylandSkinPlan p;
+    p.mainW = canvasW;
+    p.mainH = canvasH;
+    const bool inside = anchor.w > 0 && anchor.h > 0 && anchor.x >= 0 && anchor.y >= 0
+                        && int64_t(anchor.x) + anchor.w <= int64_t(canvasW)
+                        && int64_t(anchor.y) + anchor.h <= int64_t(canvasH);
+    if (!inside || (anchor.x == 0 && anchor.y == 0 && uint32_t(anchor.w) == canvasW
+                    && uint32_t(anchor.h) == canvasH)) {
+        return p;
+    }
+    p.originX = anchor.x;
+    p.originY = anchor.y;
+    if (haveSubcompositor && !forceClip) {
+        p.mode = WaylandSkinMode::Split;
+        p.mainW = uint32_t(anchor.w);
+        p.mainH = uint32_t(anchor.h);
+    } else {
+        p.mode = WaylandSkinMode::Clip;
+        p.mainW = canvasW - uint32_t(anchor.x);
+        p.mainH = canvasH - uint32_t(anchor.y);
+    }
+    return p;
+}
+
+bool waylandSkinClipForced(const char* env)
+{
+    return env && std::strcmp(env, "1") == 0;
+}
+
+Rect toLogicalCover(const Rect& r, double scale)
+{
+    if (!(scale > 0)) {
+        scale = 1;
+    }
+    const auto x0 = int32_t(std::floor(r.x / scale)), y0 = int32_t(std::floor(r.y / scale));
+    const auto x1 = int32_t(std::ceil((double(r.x) + r.w) / scale));
+    const auto y1 = int32_t(std::ceil((double(r.y) + r.h) / scale));
+    return Rect{x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0)};
+}
+
+bool animInPlace(uint32_t flags, uint32_t notifySeq, uint32_t shmSeq)
+{
+    return (flags & FRAME_FLAG_ANIM_FRAME) != 0 && notifySeq == shmSeq;
+}
+
+std::optional<std::pair<int32_t, int32_t>> frameContentOffset(const HostRenderFramePayload& p,
+                                                              uint32_t shmSeq)
+{
+    if (shmSeq != p.seq) {
+        return std::nullopt;
+    }
+    return std::make_pair(p.contentX, p.contentY);
 }
 
 } // namespace windlinux

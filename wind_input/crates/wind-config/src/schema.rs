@@ -169,12 +169,11 @@ pub struct OverlaySpec {
     /// 生僻字表可横排，互不影响。
     #[serde(default)]
     pub candidate_layout: crate::config::LayoutIntent,
-    /// 本模式期间的注释模板覆盖（竖排）。三态见 [`crate::config::CommentTemplateOverride`]。
+    /// 已作废的注释模板键，只为给出降级提示而捕获，不生效（见 [`Schema::behavior`]）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: crate::config::CommentTemplateOverride,
-    /// 本模式期间的注释模板覆盖（横排）。
+    pub comment_template_vertical: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: crate::config::CommentTemplateOverride,
+    pub comment_template_horizontal: Option<String>,
 }
 
 /// 方案元信息（[schema]）
@@ -196,6 +195,13 @@ pub struct SchemaInfo {
     /// 用于内部 / 被引用的词库配置方案（如 english——仅供临时英文 / 融合英文候选懒加载）。
     #[serde(default)]
     pub hidden: bool,
+    /// 方案角色。空 = 普通输入方案；`"aux"` = 主要充当辅助码来源的码表方案（如笔画）。
+    ///
+    /// aux 方案**仍是可启用的输入方案**（与 `hidden` 不同：hidden 是没有启用概念的
+    /// 特殊方案），只是设置页默认不把它列进方案管理，勾上「显示特殊方案」或已启用时才出现。
+    /// 辅助码来源选择器不看此字段，照旧可选。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
 }
 
 /// 图标主字的**显示宽度**上限（CJK 记 2、其余记 1）——即「一个汉字」或「两个拉丁字符」。
@@ -499,6 +505,18 @@ pub struct CodeTableSpec {
     /// 见 `docs/design/codetable-reverse-mode.md` §2。
     #[serde(default)]
     pub wildcard_single_only: Option<bool>,
+    /// 整句露几条（`None` = 跟随全局 `schema.codetable.sentence_count`）。
+    #[serde(default)]
+    pub sentence_count: Option<u8>,
+    /// 整句算几条（`None` = 跟随全局 `schema.codetable.sentence_max_count`）。
+    #[serde(default)]
+    pub sentence_max_count: Option<u8>,
+    /// 整句切换键（`None` = 跟随全局 `schema.codetable.sentence_cycle_key`）。
+    #[serde(default)]
+    pub sentence_cycle_key: Option<String>,
+    /// 整句语法模型权重（`None` = 跟随全局 `schema.codetable.sentence_grammar_weight`）。
+    #[serde(default)]
+    pub sentence_grammar_weight: Option<f64>,
     /// 方案级调频覆盖（`[engine.codetable.frequency]`）。
     ///
     /// 缺省 = 整段跟随基线。特殊方案的基线是内置默认（不继承全局 `schema.codetable`，
@@ -621,6 +639,10 @@ pub struct DictSpec {
     pub label: String,
     #[serde(default)]
     pub description: String,
+    /// 设置端「分类词库」清单里的分组名（如「人名地名」）。只影响展示，不影响加载；
+    /// 不写 = 未分组（设置端归「其他」，发现目录登记的库归「我放入的」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default)]
     pub path: String,
     /// "rime_codetable" / "rime_pinyin" / "codetable"（空=回退 rime_codetable）
@@ -852,31 +874,15 @@ impl PunctIntent {
 ///
 /// 字段叫 `layout` 而不是 `candidate_layout`：段名已含 `candidate`，再写就是
 /// `candidate.candidate_layout`（违反 `config-design-rules` §R3 的路径冗余）。
-///
-/// ## 注释模板：与 `[overlay]` 那两份**并存且语义不同**
-///
-/// 本段这两份是「本方案作为**常驻 active 方案**期间」的注释模板，
-/// [`OverlaySpec::comment_template_vertical`] 那两份是「本方案**被叠加激活期间**」的。
-/// 与 `layout` / `candidate_layout` 的并存关系完全同构——一个方案可以两段都写，
-/// 取值互不干扰。见 `docs/design/candidate-comment-layering.md` §1.2。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CandidateSpec {
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub layout: crate::config::LayoutIntent,
-    /// 本方案的注释模板覆盖（竖排）。三态见 [`crate::config::CommentTemplateOverride`]：
-    /// 键缺失 = 跟随全局、非空 = 覆盖、空串 = 本方案不显示注释。
-    ///
-    /// 字段名与全局 `ui.candidate.comment_template_vertical`、与 `[overlay]` 同名字段
-    /// **逐字一致**：让「全局 / 方案 / 模式」在用户眼里是同一件事的三个层级，
-    /// 而不是三套发明出来的键名。
+    /// 已作废的注释模板键，只为给出降级提示而捕获，不生效（见 [`Schema::behavior`]）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_vertical: crate::config::CommentTemplateOverride,
-    /// 本方案的注释模板覆盖（横排）。见 [`Self::comment_template_vertical`]。
-    ///
-    /// 横竖**各自独立三态**：只覆盖竖排、横排仍跟随全局是合法且常见的配置
-    /// （竖排每行独占，横排全部候选共享一行宽度，能放什么本就不是同一个答案）。
+    pub comment_template_vertical: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment_template_horizontal: crate::config::CommentTemplateOverride,
+    pub comment_template_horizontal: Option<String>,
     /// 本方案候选**文字节点**的字族覆盖。空 = 不覆盖（走主题 / 全局 `ui.font`）。
     ///
     /// 起因是蒙古文方案需要专用字体，而字体是全局的、主题也是全局的——
@@ -890,7 +896,7 @@ pub struct CandidateSpec {
     ///
     /// # 归属取 `effective_data_schema`，不是活跃方案
     ///
-    /// 与 [`Self::comment_template_vertical`]（呈现、跟活跃方案）刻意不同：
+    /// 与 [`Self::layout`]（呈现、跟活跃方案）刻意不同：
     /// 字体回答的是「**这些字**用什么渲染」＝数据属性，与 `[phrases]`、
     /// `[punct] custom_mappings` 同源。临英期间候选归 `english` 桶，字体也该跟着归它。
     /// ⇒ 它随输入语境**逐次按键**变化，不能走「切方案推一次」的下发通路，
@@ -914,7 +920,28 @@ pub struct CandidateSpec {
     /// `behavior_for` 结果——`[punct]` 段的 `mode` 与 `custom_mappings` 已经是同一个形状。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub text_orientation: crate::config::TextOrientation,
+    /// **通用方案级覆盖**：本段里不属于上面强类型字段的键，原样收下，键名与全局
+    /// `ui.candidate.*` 相同（如 `per_page = 9`）。
+    ///
+    /// 是否生效由 [`crate::config_schema::SCHEMA_OVERRIDES`] 里 `fold = true` 的登记决定，
+    /// 值由 `Schema::behavior` 逐项过注册表校验；未登记 / 值不合法的项只进降级清单。
+    /// 新增一个可被方案覆盖的 `ui.candidate.*` 键**只需登记那一行**，不必再来这里加字段。
+    ///
+    /// 强类型字段（`layout` 等）有各自的语义（三态 / 数据归属 / 代际手动覆盖），不走这条路。
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub ui: toml::Table,
 }
+
+/// [`CandidateSpec`] 里有强类型字段的键——它们不进通用补丁。
+/// 与结构体字段同步；`candidate_typed_keys_are_not_foldable` 守着它们不被登记成通用键。
+#[cfg(test)]
+pub(crate) const CANDIDATE_TYPED_KEYS: [&str; 5] = [
+    "layout",
+    "comment_template_vertical",
+    "comment_template_horizontal",
+    "font_family",
+    "text_orientation",
+];
 
 /// 方案级短语加载（`[phrases]` 段）。
 ///
@@ -961,7 +988,7 @@ fn default_true() -> bool {
 /// 三段合成一个缓存条目而不是各存各的：它们同源（一次 `read_schema`）、同批失效，
 /// 分三个缓存等于同一个方案读三次盘、加三个失效点——`key_actions` / `session_actions`
 /// 那两个缓存已经因为「同批失效要接两处」在注释里互相提醒过一次。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SchemaBehavior {
     pub punct: PunctIntent,
     /// 方案级自定义标点表（整表替换，`None` = 跟随全局）。见 [`PunctSpec::custom_mappings`]。
@@ -971,10 +998,10 @@ pub struct SchemaBehavior {
     /// 会让下一个人理所当然地用同一个 `behavior_for(id)` 结果去喂两条路——而那正是错的。
     pub punct_custom_mappings: Option<std::collections::HashMap<String, Vec<String>>>,
     pub candidate_layout: crate::config::LayoutIntent,
-    /// 方案级注释模板（竖排）。三态，见 [`CandidateSpec::comment_template_vertical`]。
-    pub comment_template_vertical: crate::config::CommentTemplateOverride,
-    /// 方案级注释模板（横排）。
-    pub comment_template_horizontal: crate::config::CommentTemplateOverride,
+    /// 方案级通用 UI 覆盖（`[candidate]` 里已登记且值合法的键，键名同全局 `ui.candidate.*`）。
+    /// 空 = 本方案不覆盖任何项。见 [`CandidateSpec::ui`]；折叠方法是
+    /// [`crate::config::UiCandidateConfig::folded_with`]。
+    pub candidate_ui: toml::Table,
     /// 方案级候选文字字族。见 [`CandidateSpec::font_family`]——⚠️ 它的归属判据与同段的
     /// `candidate_layout` **不同**（数据方案 vs 活跃方案），取值时不要复用同一个 behavior。
     pub candidate_font_family: String,
@@ -994,17 +1021,46 @@ pub struct SchemaBehavior {
 impl Schema {
     /// 抽出方案级行为覆盖三段。
     pub fn behavior(&self) -> SchemaBehavior {
+        let (candidate_ui, ui_problems) =
+            crate::config_schema::split_candidate_patch(&self.candidate.ui);
+        let mut degraded_items = self.degraded_items_with_retired();
+        degraded_items.extend(ui_problems);
         SchemaBehavior {
             punct: self.punct.mode,
             punct_custom_mappings: self.punct.custom_mappings.clone(),
             candidate_layout: self.candidate.layout,
-            comment_template_vertical: self.candidate.comment_template_vertical.clone(),
-            comment_template_horizontal: self.candidate.comment_template_horizontal.clone(),
+            candidate_ui,
             candidate_font_family: self.candidate.font_family.clone(),
             candidate_text_orientation: self.candidate.text_orientation,
             phrases: self.phrases.clone(),
-            degraded_items: self.degraded_items.clone(),
+            degraded_items,
         }
+    }
+
+    /// [`Self::degraded_items`] 加上方案文件里残留的注释模板键：方案文件不再配置注释。
+    fn degraded_items_with_retired(&self) -> Vec<String> {
+        let mut items = self.degraded_items.clone();
+        let mut retired = |section: &str, v: &Option<String>, h: &Option<String>| {
+            if v.is_some() || h.is_some() {
+                items.push(format!(
+                    "[{section}] comment_template_*（方案文件不再配置注释，请到「设置 → 候选注释」配置）"
+                ));
+            }
+        };
+        let c = &self.candidate;
+        retired(
+            "candidate",
+            &c.comment_template_vertical,
+            &c.comment_template_horizontal,
+        );
+        if let Some(o) = &self.overlay {
+            retired(
+                "overlay",
+                &o.comment_template_vertical,
+                &o.comment_template_horizontal,
+            );
+        }
+        items
     }
 }
 
@@ -1083,6 +1139,67 @@ fn merge_dict_overrides(base: &mut toml::Value, over: &toml::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 方案文件里残留的注释模板键不生效，只进降级提示；方案其余部分照常解析。
+    #[test]
+    fn schema_file_template_degrades() {
+        let s: Schema = toml::from_str(
+            "[candidate]\nlayout = \"vertical\"\ncomment_template_vertical = \"x\"\n",
+        )
+        .expect("方案应解析成功");
+        let b = s.behavior();
+        assert_eq!(b.candidate_layout, crate::config::LayoutIntent::Vertical);
+        assert_eq!(b.degraded_items.len(), 1, "{:?}", b.degraded_items);
+        assert!(b.degraded_items[0].contains("候选注释"));
+
+        let s: Schema = toml::from_str("[overlay]\ncomment_template_horizontal = \"\"\n").unwrap();
+        assert_eq!(s.behavior().degraded_items.len(), 1);
+
+        assert!(Schema::default().behavior().degraded_items.is_empty());
+    }
+
+    /// 通用方案级 UI 覆盖：`[candidate]` 里不属于强类型字段的键被收为补丁，
+    /// 登记在册且值合法的进 `SchemaBehavior`，其余进降级清单；强类型字段不被截走。
+    #[test]
+    fn candidate_generic_keys_become_patch() {
+        let s: Schema = toml::from_str(
+            "[candidate]\nlayout = \"vertical\"\nper_page = 9\nno_such_key = 1\nmin_rows = 3\n",
+        )
+        .expect("方案应解析成功");
+        let b = s.behavior();
+        assert_eq!(b.candidate_layout, crate::config::LayoutIntent::Vertical);
+        assert_eq!(
+            b.candidate_ui.len(),
+            1,
+            "只有 per_page 在白名单内：{:?}",
+            b.candidate_ui
+        );
+        assert_eq!(b.candidate_ui["per_page"].as_integer(), Some(9));
+        // 未登记（no_such_key）与未开放（min_rows 首期不在白名单）都要报给用户，不能静默。
+        assert_eq!(b.degraded_items.len(), 2, "{:?}", b.degraded_items);
+        assert!(b.degraded_items.iter().any(|i| i.contains("no_such_key")));
+        assert!(b.degraded_items.iter().any(|i| i.contains("min_rows")));
+    }
+
+    /// 值类型或值域不对的补丁项整条丢弃（不能让错值盖掉好的全局值），并进降级清单。
+    #[test]
+    fn candidate_generic_bad_value_is_dropped() {
+        for bad in ["\"nine\"", "0", "-3", "1.5"] {
+            let s: Schema = toml::from_str(&format!("[candidate]\nper_page = {bad}\n")).unwrap();
+            let b = s.behavior();
+            assert!(b.candidate_ui.is_empty(), "{bad} 不该生效");
+            assert_eq!(b.degraded_items.len(), 1, "{bad}: {:?}", b.degraded_items);
+            assert!(b.degraded_items[0].contains("per_page"));
+        }
+    }
+
+    /// 没写补丁的方案：补丁为空、降级清单为空。
+    #[test]
+    fn candidate_generic_absent_is_empty() {
+        let b = Schema::default().behavior();
+        assert!(b.candidate_ui.is_empty());
+        assert!(b.degraded_items.is_empty());
+    }
 
     #[test]
     fn shuangpin_is_supported() {

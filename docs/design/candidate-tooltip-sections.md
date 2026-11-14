@@ -166,15 +166,14 @@ template = "${char}：{${chaizi}{ [${chaizi_code}]}\t}${readings}"
 
 两者问的不是一个问题：
 
-- `${code_rev_all}`（注释段）：**拼音来源候选**在主码表里怎么打，受 `code_hint_source`
-  门控；码表方案下恒空（候选的码就是用户自己打的）。
+- `${code_rev_all}`（注释段）：**拼音来源候选**在主码表里怎么打，只对拼音来源候选有值
+  （显示与否由注释分配决定）；码表方案下恒空（候选的码就是用户自己打的）。
 - `${word_code}`（气泡）：**任何候选**在编码来源方案里怎么打，码表方案下取自身全部编码，
   不受注释门控。
 
 ★ **逐字段里的 `${code_rev_all}` 与候选级口径不同**：逐字求值走按裸文本求值的路径
 （`eval_text_var`，cmdbar `dict.rev` 同一条），取的是 `code_source_schema`（与 `${word_code}`
-同一个方案），且**不受** `code_hint_source` 门控。候选级的 `${code_rev_all}` 仍受门控、只对拼音
-来源候选有值。文档站配方「逐字看编码」依赖的正是前者。
+同一个方案），不限候选来源。候选级的 `${code_rev_all}` 只对拼音来源候选有值。文档站配方「逐字看编码」依赖的正是前者。
 
 `${code}` 已是 `${code_rev}` 的永久兼容别名（见 `comment.rs` `eval_var` 文档），不能挪作他用，
 故新名叫 `word_code`。求值直接搬现行代码：`engine_mgr.code_source_schema()` 取方案、

@@ -131,6 +131,8 @@ impl UiManager {
         // 上一轮气泡是否处于交互中，用于识别「交互刚结束」这一沿——理由同
         // `auto_hide` 的 `was_engaged` 字段，见下方使用处。
         let mut tip_was_interacting = false;
+        // 上次告诉提示泡的候选窗矩形：变了才同步。
+        let mut synced_cand_rect: Option<crate::status_tip::Rect4> = None;
 
         // 输入诊断 HUD（惰性创建：首次 ShowInputDiag 时构造，best-effort）
         let mut input_diag_hud: Option<crate::input_diag_hud::InputDiagHud> = None;
@@ -204,6 +206,8 @@ impl UiManager {
         // 待处理命令队列：每轮排空通道并合并连续候选更新（只渲染最新一帧），
         // 避免长按翻页/连按方向键时 UpdateCandidates 堆积、松键后仍继续刷新。
         let mut pending: std::collections::VecDeque<UiCommand> = std::collections::VecDeque::new();
+        // 设置端预览的待画队列：只在命令通道排空的那一轮画一张，打字永远优先。
+        let mut previews = crate::candidate_window::PreviewQueue::default();
         'main: loop {
             // 状态提示气泡到期自动隐藏。
             // 用户正在与气泡交互（拖动 / 悬停其上 / 右键菜单打开）时**顺延**而非隐藏：
@@ -231,6 +235,15 @@ impl UiManager {
                         hr.hide_kind(HOST_WINDOW_STATUS);
                     }
                     tip_hide_at = None;
+                }
+            }
+            // 候选窗出现、挪动或收起：只记下矩形，供下次弹提示泡时避让。显示中的提示泡不再被动换位：
+            // 候选窗后出现本就盖在提示泡上，无碍；反复换位反而会在快速输入时来回跳。
+            let cand_rect = candidate_window.screen_rect();
+            if cand_rect != synced_cand_rect {
+                synced_cand_rect = cand_rect;
+                if let Some(t) = &mut status_tip {
+                    t.set_candidate_rect(cand_rect);
                 }
             }
             // toast 到期自动隐藏
@@ -303,6 +316,22 @@ impl UiManager {
 
             // 推进鼠标悬停防抖（稳定后才发出 Hover）
             candidate_window.tick();
+            // 皮肤装饰换帧：按当前路径重绘一帧（host-render 有目标走 SHM，否则本地窗口）。
+            if candidate_window.take_anim_due() {
+                candidate_window.repaint_anim_frame(|w| {
+                    #[cfg(windows)]
+                    if let Some(hr) = &host_render
+                        && try_host_render_candidates(hr, w)
+                    {
+                        return;
+                    }
+                    if blocked_by_exclusive_fullscreen("candidate") {
+                        w.hide();
+                    } else {
+                        w.show();
+                    }
+                });
+            }
             // 推进工具栏悬停高亮（按光标位置本地重绘）
             if let Some(t) = &mut toolbar {
                 t.tick();
@@ -327,49 +356,18 @@ impl UiManager {
             if let Some((text, x, y, ch, dur, placement)) = tip_debounce.poll()
                 && let Some(t) = &mut status_tip
             {
-                // host-render 分流：有活跃目标且写帧成功 → SHM + 本地隐藏；否则本地显示。
-                #[cfg_attr(not(windows), allow(unused_mut))] // 仅 Windows 分支会改写它
-                let mut host_ok = false;
-                #[cfg(windows)]
-                if let Some(hr) = &host_render
-                    && let Some(target) = hr.active_target()
-                {
-                    use wind_bridge::shared_render_frame::FrameParams;
-                    use wind_ipc::protocol::HOST_WINDOW_STATUS;
-                    let fo = t.render_frame_placed(&text, x, y, ch, placement);
-                    if let Some((bgra, w, h, sx, sy, sw)) = fo {
-                        let p = FrameParams {
-                            sequence: 0,
-                            x: sx,
-                            y: sy,
-                            width: w,
-                            height: h,
-                            bgra: &bgra,
-                            rects: &[],
-                            rendered_hover_index: -1,
-                            target_instance_id: 0,
-                            software_shadow: sw,
-                        };
-                        match hr.write_frame_for_kind(HOST_WINDOW_STATUS, &target, &p) {
-                            Ok(()) => {
-                                t.hide();
-                                host_ok = true;
-                            }
-                            Err(e) => {
-                                // `{e:#}`:写帧失败的真正原因（Windows 错误码）在
-                                // `write_frame_for_kind` 的 context 之下,见 server.rs 同款注释。
-                                tracing::warn!("host render 写 status 帧失败，回退本地: {e:#}");
-                            }
-                        }
-                    }
-                }
-                if !host_ok {
-                    if blocked_by_exclusive_fullscreen("status_tip") {
-                        t.hide();
-                    } else {
-                        t.show_placed(&text, x, y, ch, placement);
-                    }
-                }
+                t.set_candidate_rect(candidate_window.screen_rect());
+                synced_cand_rect = candidate_window.screen_rect();
+                present_status_tip(
+                    t,
+                    #[cfg(windows)]
+                    host_render.as_ref(),
+                    &text,
+                    x,
+                    y,
+                    ch,
+                    placement,
+                );
                 // dur==0 → 常驻(always):不设隐藏时刻;否则按配置时长自动隐藏。
                 tip_duration_ms = dur;
                 tip_hide_at = if dur == 0 {
@@ -407,6 +405,7 @@ impl UiManager {
                         preedit,
                         preedit_caret,
                         preedit_host_owned,
+                        composing,
                         mode_label,
                         candidates,
                         selected,
@@ -431,6 +430,13 @@ impl UiManager {
                             total_pages,
                             caret_x,
                             caret_y
+                        );
+                        // 皮肤装饰事件按原编码串比（宿主自绘编码时也照样打字）。
+                        candidate_window.note_skin_input(
+                            &preedit,
+                            composing,
+                            page,
+                            candidates.is_empty(),
                         );
                         // 编码区归宿主画时，候选窗拿到数据也不显示——数据恒下发，
                         // 显示与否由这个标志决定（数据/渲染解耦，见 UiCommand 注释）。
@@ -506,7 +512,8 @@ impl UiManager {
                     | UiCommand::PanelPointer { .. }
                     | UiCommand::PanelMoved { .. }
                     | UiCommand::SetHostFullscreen(_)
-                    | UiCommand::HostReconnected => {}
+                    | UiCommand::HostReconnected
+                    | UiCommand::SkinDecorClick(_) => {}
                     UiCommand::CopyToClipboard(text) => {
                         crate::popup_menu::set_clipboard_text(&text);
                     }
@@ -864,6 +871,7 @@ impl UiManager {
                     }
                     UiCommand::UpdateToolbar(tb_state) => {
                         debug!("UI: UpdateToolbar {:?}", tb_state);
+                        candidate_window.note_skin_mode(tb_state.chinese_mode);
                         // 传当前可见性：**内容更新与可见性提升是两件事**。本命令同时承担
                         // 「更新中英·标点·全半角」与「让工具栏出现」，整条延迟会让已显示
                         // 时按 Shift 切中英也慢一档，手感明显退化。
@@ -1047,9 +1055,16 @@ impl UiManager {
                     UiCommand::SetCandidateOffset { x, y } => {
                         candidate_window.set_user_offset(x, y);
                     }
+                    UiCommand::SetThemeAnimation(on) => {
+                        candidate_window.set_theme_animation(on);
+                    }
+                    UiCommand::SkinSignal(sig) => {
+                        candidate_window.skin_signal(sig);
+                    }
                     UiCommand::SetCandidateShadow(on) => {
                         candidate_window.set_theme_shadow(on);
                     }
+                    UiCommand::RenderCandidatePreview(req) => previews.push(req),
                     UiCommand::SetPagerInPreedit(on) => {
                         candidate_window.set_pager_in_preedit(on);
                     }
@@ -1140,6 +1155,11 @@ impl UiManager {
                             k.set_layer(shift);
                         }
                     }
+                    UiCommand::SoftKeyboardPinned(pinned) => {
+                        if let Some(k) = &mut soft_keyboard {
+                            k.set_pinned(pinned);
+                        }
+                    }
                     UiCommand::Shutdown => {
                         info!("UI: Shutdown");
                         // host-render 全部隐藏（Shutdown 必达）
@@ -1165,7 +1185,9 @@ impl UiManager {
                 info!("UI: Channel disconnected, shutting down");
                 break 'main;
             }
-            if !had_cmd {
+            // 预览：本轮没有别的命令才画一张；画了就不睡，下一轮先看有没有新命令。
+            let drew_preview = previews.render_one(had_cmd, &mut candidate_window);
+            if !had_cmd && !drew_preview {
                 // 本循环唯一的休眠点：睡到「最近的计时器到期」，或被唤醒（新命令 /
                 // Win32 消息）提前叫醒。
                 //
@@ -1233,6 +1255,57 @@ fn hide_popup_menu(
     }
 }
 
+/// 按给定参数画出状态提示泡：host-render 有活跃目标且写帧成功 → SHM，本地隐藏；否则本地显示
+/// （独占全屏时不显示）。首次显示与候选窗变化后的重新落位共用。
+fn present_status_tip(
+    t: &mut crate::status_tip::StatusTip,
+    #[cfg(windows)] host_render: Option<
+        &std::sync::Arc<wind_bridge::host_render_windows::HostRenderManager>,
+    >,
+    text: &str,
+    x: i32,
+    y: i32,
+    ch: i32,
+    placement: wind_ui_types::StatusTipPlacement,
+) {
+    #[cfg(windows)]
+    if let Some(hr) = host_render
+        && let Some(target) = hr.active_target()
+    {
+        use wind_bridge::shared_render_frame::FrameParams;
+        use wind_ipc::protocol::HOST_WINDOW_STATUS;
+        if let Some((bgra, w, h, sx, sy, sw)) = t.render_frame_placed(text, x, y, ch, placement) {
+            let p = FrameParams {
+                sequence: 0,
+                x: sx,
+                y: sy,
+                width: w,
+                height: h,
+                bgra: &bgra,
+                rects: &[],
+                rendered_hover_index: -1,
+                target_instance_id: 0,
+                software_shadow: sw,
+                pass: None,
+            };
+            match hr.write_frame_for_kind(HOST_WINDOW_STATUS, &target, &p) {
+                Ok(()) => {
+                    t.hide();
+                    return;
+                }
+                // `{e:#}`:写帧失败的真正原因（Windows 错误码）在
+                // `write_frame_for_kind` 的 context 之下,见 server.rs 同款注释。
+                Err(e) => tracing::warn!("host render 写 status 帧失败，回退本地: {e:#}"),
+            }
+        }
+    }
+    if blocked_by_exclusive_fullscreen("status_tip") {
+        t.hide();
+    } else {
+        t.show_placed(text, x, y, ch, placement);
+    }
+}
+
 /// host-render 候选分流：有活跃目标时渲染候选帧（含悬停 tooltip 帧联动）写 SHM，
 /// 本地窗口互斥隐藏（hide_local_window_only，保留跨帧防抖/粘滞状态）。
 /// 返回 true = 已由 host 路径处理（调用方跳过本地 show）；false = 无目标/写帧失败 → 走本地路径。
@@ -1246,8 +1319,8 @@ fn try_host_render_candidates(
     let Some(target) = hr.active_target() else {
         return false;
     };
-    match candidate_window.render_frame() {
-        Some(frame) => {
+    match candidate_window.render_host_frame(target.pass_layer) {
+        Some(mut frame) => {
             let rects: Vec<HostRenderHitRect> = frame
                 .hit_rects
                 .iter()
@@ -1267,27 +1340,55 @@ fn try_host_render_candidates(
                     h: r.h as i32,
                 })
                 .collect();
-            let params = FrameParams {
-                sequence: 0,
-                x: frame.screen_x,
-                y: frame.screen_y,
-                width: frame.width,
-                height: frame.height,
-                bgra: &frame.buf,
-                rects: &rects,
-                // C++ 以此为 hover 去重基线（_UpdateHitRects → _lastHoverIndex），值域是
-                // C++ hover 约定（-1 无 / -2 上页 / -3 下页）——内部 tag 须同步重映射。
-                rendered_hover_index: match candidate_window.hover() {
-                    i if i == HOVER_PAGE_PREV => -2,
-                    i if i == HOVER_PAGE_NEXT => -3,
-                    i => i,
-                },
-                target_instance_id: 0,
-                software_shadow: frame.software_shadow,
+            // C++ 以此为 hover 去重基线（_UpdateHitRects → _lastHoverIndex），值域是
+            // C++ hover 约定（-1 无 / -2 上页 / -3 下页）——内部 tag 须同步重映射。
+            let rendered_hover_index = match candidate_window.hover() {
+                i if i == HOVER_PAGE_PREV => -2,
+                i if i == HOVER_PAGE_NEXT => -3,
+                i => i,
             };
-            match hr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &params) {
+            let (x, y, width, height) = (frame.screen_x, frame.screen_y, frame.width, frame.height);
+            let software_shadow = frame.software_shadow;
+            let write = |bgra: &[u8], pass: Option<(&[u8], bool)>| {
+                let params = FrameParams {
+                    sequence: 0,
+                    x,
+                    y,
+                    width,
+                    height,
+                    bgra,
+                    rects: &rects,
+                    rendered_hover_index,
+                    target_instance_id: 0,
+                    software_shadow,
+                    pass,
+                };
+                hr.write_frame_for_kind(HOST_WINDOW_CANDIDATE, &target, &params)
+            };
+            let pass_layer = frame.pass_layer.take();
+            let mut written = write(
+                &frame.buf,
+                pass_layer.as_ref().map(|(p, below)| (p.as_slice(), *below)),
+            );
+            // 带穿透层放不下（SHM 4 MiB，两层各一份像素）：合回主层按单层再写（穿透装饰按 block）。
+            if written.is_err()
+                && let Some((pass, below)) = pass_layer
+            {
+                tracing::debug!("host render: 带穿透层的候选帧放不下，合成单层再写");
+                if below {
+                    wind_scene::candidate::composite_under(&mut frame.buf, &pass);
+                } else {
+                    wind_scene::candidate::composite_over(&mut frame.buf, &pass);
+                }
+                written = write(&frame.buf, None);
+            }
+            match written {
                 Ok(()) => {
                     candidate_window.hide_local_window_only();
+                    // 换帧重绘时悬停与落位都没变，气泡帧不必重写。
+                    if candidate_window.is_anim_repaint() {
+                        return true;
+                    }
                     // 悬停 tooltip 帧联动：有悬停写帧，无悬停隐藏（幂等）。
                     match candidate_window.render_tooltip_frame(frame.screen_x, frame.screen_y) {
                         Some((tt_buf, tt_w, tt_h, tt_x, tt_y, tt_shadow)) => {
@@ -1302,6 +1403,7 @@ fn try_host_render_candidates(
                                 rendered_hover_index: -1,
                                 target_instance_id: 0,
                                 software_shadow: tt_shadow,
+                                pass: None,
                             };
                             if let Err(e) =
                                 hr.write_frame_for_kind(HOST_WINDOW_TOOLTIP, &target, &tt_params)

@@ -38,6 +38,7 @@
 #   pm1/pm2      push 单模块 (tsf/核心, release)
 #   pdm1/pdm2    push 单模块 (dev)
 #   k=check  l=clippy  t=test  f=fmt  fmt-check  ci(=fmt+clippy+test)  hooks(=激活pre-commit)  clean
+#   wk           wasm32 检查 (wind-scene / wind-scene-wasm；k 也会跑)
 #   sk=setting-check  st=setting-test  sg=setting-regen   邻仓 ../wind-setting
 #     (交叉到 Windows 目标; st/sg 经 wine 执行。sg = 重生成检入的 capability 快照与 mockdata)
 #     ↑ 只改了 core 配置注册表的话, 先跑 cargo test -p wind-rpc --test wind_setting_assets
@@ -216,12 +217,17 @@ build_core() {
     local suffix="" prof="release"
     [ "$profile" = dev ] && { prof="dev-variant"; suffix="_dev"; }
     say "\n[core] 交叉编译 wind_input ($prof, $TARGET)..."
-    cargo_xwin build --profile "$prof" --target "$TARGET" -p wind_service \
+    cargo_xwin build --profile "$prof" --target "$TARGET" -p wind_service -p wind_extension_host \
         || { err "wind_input 构建失败!"; return 1; }
     local src="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
     cp -f "$src" "$outdir/wind_input${suffix}.exe"
     gray "已构建: wind_input${suffix}.exe ($(fsize "$outdir/wind_input${suffix}.exe"))"
+    # 扩展宿主：核心按 exe 同目录找它，名字随变体带后缀（同名会被另一变体的部署按进程名停掉）。
+    local host="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input_ext.exe"
+    [ -f "$host" ] || { err "未找到产物: $host"; return 1; }
+    cp -f "$host" "$outdir/wind_input_ext${suffix}.exe"
+    gray "已构建: wind_input_ext${suffix}.exe"
     # CLI 包装器 (wind_input config ...; 运行时自辨 dev/release exe, 两变体共用一份)
     [ -f "$PROJECT_ROOT/scripts/wind_cli.bat" ] && cp -f "$PROJECT_ROOT/scripts/wind_cli.bat" "$outdir/wind_cli.bat" && gray "已复制: wind_cli.bat"
 }
@@ -277,7 +283,19 @@ build_portable() {
 
 do_check() {
     say "\n正在运行 cargo check ($TARGET, 全工作区)..."
-    cd "$PROJECT_ROOT" && cargo_xwin check --target "$TARGET" --workspace
+    cd "$PROJECT_ROOT" && cargo_xwin check --target "$TARGET" --workspace || return 1
+    do_wasm_check
+}
+
+# 主题编辑器的 wasm 预览（wind-scene-wasm）及其依赖要能编到 wasm32：wind-scene 不准引入
+# 平台 API / wind-config，漏了只在编辑器构建时才发现。没装 wasm32 目标时跳过（不挡 check）。
+do_wasm_check() {
+    if ! rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
+        warn "未装 wasm32-unknown-unknown 目标，跳过 wasm 检查（rustup target add wasm32-unknown-unknown）"
+        return 0
+    fi
+    say "\n正在运行 cargo check (wasm32-unknown-unknown, wind-scene / wind-scene-wasm)..."
+    cd "$PROJECT_ROOT" && cargo check --target wasm32-unknown-unknown -p wind-scene -p wind-scene-wasm
 }
 
 do_clippy() {
@@ -488,6 +506,8 @@ download_dicts() {
     download_file "$OPENCC_BASE/TWPhrases.txt"    "$opencc/TWPhrases.txt"    "台湾词汇"
     download_file "$OPENCC_BASE/HKVariants.txt"   "$opencc/HKVariants.txt"   "香港字形"
 
+    # 中英释义不再下载上游：ECDICT / CC-CEDICT 用到的部分已冻结进 data/comments-src/*_raw.tsv（见 assemble_data）。
+
     # 五笔词库：下载上游原始档，主库与 extra 由 gen_dict 重排/拆分后写入 build 目录；
     # district 不经 gen_dict，原样复制（见 assemble_data）
     local rime_wubi="$CACHE_DIR/rime-wubi"
@@ -550,30 +570,16 @@ download_dicts() {
     download_file "$EMOJI_BASE/LICENSE"                   "$rime_emoji/LICENSE"                   "LGPL-3.0"
 }
 
-# 随包附带的 rime-frost 细胞词库（上游 cn_dicts_cell/ 下的文件名，组装到 schemas/pinyin/ext/）。
-# 只挑体积小、开了对主库排序几乎无影响的（共约 3.6MB，见 docs/design/schema-dict-discovery.md §8）。
-# ⚠ 与 dev.ps1 的 $FrostCells、mac/dev.sh 的 FROST_CELLS、data/schemas/{pinyin,shuangpin}.schema.toml
-#   里的 cell_* 词库声明同步。
-FROST_CELLS="exthot idiom place history name name2 sport geography animal computer music media industry_product inputmethod chess chess2"
+# 随包附带的 rime-frost 细胞词库与不随包分组（FROST_CELLS / FROST_OTHERS_EXCLUDE）。
+# 定义抽到 scripts/lib/frost-cells.sh：Nix 打包（wind_linux/nix/data.nix）source 同一份，
+# 免得 Nix 包与 deb/Windows 包的词库构成各写一份、长期漂移。文件头列了仍各有一份的位置。
+# shellcheck source=lib/frost-cells.sh
+. "$SCRIPT_DIR/lib/frost-cells.sh"
 
-# rime-frost others.txt 里不随包的分组（按分组标题整组剔除）。「著名表演艺术家」是成人影星的
-# 中日文名对照，即便模块默认关也不该进安装包。
-# ⚠ 与 dev.ps1 的 $FrostOthersExclude、mac/dev.sh 的同名变量同步。
-FROST_OTHERS_EXCLUDE="著名表演艺术家"
-
-# 按分组标题过滤 rime-frost 的 OpenCC 杂项表：$1 源，$2 目标。标题行形如
-# `----------偏旁部首<Tab>----------`（OpenCC 无注释语法，rime-frost 借假词条写标题），
-# 被剔除的组从其标题到下一个标题整段去掉；其余行原样保留（运行时按分组取，见 emojidict::select_sections）。
+# 按分组标题过滤 rime-frost 的 OpenCC 杂项表：$1 源，$2 目标。
+# 规则与标题行的形态见 scripts/lib/strip-frost-sections.awk（Nix 打包共用同一份）。
 strip_frost_sections() {
-    awk -v excl="$FROST_OTHERS_EXCLUDE" '
-        BEGIN { n = split(excl, ex, " ") }
-        /^----------[^\t]*\t-+[ \t]*$/ {
-            name = $0; sub(/^-+/, "", name); sub(/\t.*$/, "", name)
-            skip = 0
-            for (i = 1; i <= n; i++) if (name == ex[i]) skip = 1
-        }
-        !skip { print }
-    ' "$1" > "$2"
+    awk -v excl="$FROST_OTHERS_EXCLUDE" -f "$SCRIPT_DIR/lib/strip-frost-sections.awk" "$1" > "$2"
 }
 
 # 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
@@ -584,25 +590,13 @@ strip_frost_sections() {
 #   主库的一部分、关不掉。随包的组装在 ext/ 而非 cn_dicts_cell/，按下面的存在判据本也会裁，
 #   这里单列是为了标对来源（[扩展词库] 而非 [未随包]）。
 # 其余子表的判据是「输出目录里有没有这个文件」而不是写死名单：以后多发几张不用回来改这里。
-# ⚠ dev.ps1 的 Remove-UnshippedImports、mac/dev.sh 的 strip_unshipped_imports 是同一件事，改一边要同步另外两边。
+# 实现在 scripts/lib/strip-unshipped-imports.awk（Nix 打包共用同一份）；dev.ps1 的
+# Remove-UnshippedImports 与 mac/dev.sh 的 strip_unshipped_imports 仍是各自实现，改规则要同步。
 strip_unshipped_imports() {
     local main="$1" dir
     dir="$(dirname "$main")"
-    awk -v dir="$dir" '
-        /^\.\.\.[[:space:]]*$/ { done = 1 }
-        !done && /^import_tables:/ { inblk = 1; print; next }
-        !done && inblk && /^[^[:space:]#-]/ { inblk = 0 }
-        !done && inblk && match($0, /^[[:space:]]*-[[:space:]]*[^[:space:]#]+/) {
-            entry = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*-[[:space:]]*/, "", entry)
-            if (entry ~ /^cn_dicts_cell\//) {
-                print "  # [扩展词库] " substr($0, RSTART + RLENGTH - length(entry)); next
-            }
-            if (system("test -f \"" dir "/" entry ".dict.yaml\"") != 0) {
-                print "  # [未随包] " substr($0, RSTART + RLENGTH - length(entry)); next
-            }
-        }
-        { print }
-    ' "$main" > "$main.tmp" && mv -f "$main.tmp" "$main"
+    awk -v dir="$dir" -f "$SCRIPT_DIR/lib/strip-unshipped-imports.awk" \
+        "$main" > "$main.tmp" && mv -f "$main.tmp" "$main"
 }
 
 # 从 data/（源）+ .cache/（下载/生成）组装完整运行时数据到 $outdir/data/
@@ -749,6 +743,36 @@ assemble_data() {
     else
         warn "缺 .cache/rime-frost/opencc/，白霜 emoji 模块不可用（运行 gen-data 下载）"
     fi
+
+    # 9. 内置中英释义注释词库（Python 脚本 scripts/comment_dicts/build.py）：en_zh 按英文词表、
+    # zh_en 按拼音/五笔词表裁剪，产物只进 build 目录、不入版本库。源数据全部入库在 data/comments-src/：
+    # 重整版、AI 补齐，以及重整版没覆盖的原始释义快照（*_raw.tsv，ECDICT MIT / CC-CEDICT CC BY-SA 4.0，
+    # 许可见 NOTICE.md）。CC-CEDICT 是每日滚动快照、无法固定版本，冻结进仓后构建可复现、不依赖外网；
+    # 更新上游时手工跑 build.py snapshot 再提交。随第 1 步一并复制进来，用完剥掉不随包分发。
+    # 缺 python3 或生成失败在这里只 warn，发版由 verify_dist_data 拦下。
+    # ⚠ dev.ps1 的 Assemble-Data、mac/dev.sh 的 assemble_data 是同一件事，改一边要同步另外两边。
+    local cdict="$PRODUCT_ROOT/scripts/comment_dicts/build.py" src="$data/comments-src"
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "缺 python3，中英释义词库不可用"
+    else
+        gray "生成中英释义注释词库 (comment_dicts) ..."
+        mkdir -p "$schemas/comments"
+        # 拼音表用于丢掉 AI 释义里拼音化的专名；缺了只是不过滤
+        local pmap_arg=""
+        [ -f "$data/pinyin_map.txt" ] && pmap_arg="$data/pinyin_map.txt"
+        python3 -I "$cdict" en-zh --raw "$src/en_zh_ecdict_raw.tsv" \
+            --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
+            --refined "$src/en_zh_refined.tsv" \
+            --out "$schemas/comments/en_zh.txt" \
+          || warn "英→中释义词库生成失败"
+        python3 -I "$cdict" zh-en --raw "$src/zh_en_cedict_raw.tsv" --ai "$src/zh_en_ai.tsv" \
+            --refined "$src/zh_en_cedict_refined.tsv" ${pmap_arg:+--pinyin "$pmap_arg"} \
+            --words "$pinyin_cn/base.dict.yaml" "$pinyin_cn/ext.dict.yaml" \
+                    "$pinyin/ext/idiom.dict.yaml" "$schemas/wubi86/wubi86_jidian.dict.yaml" \
+            --out "$schemas/comments/zh_en.txt" \
+          || warn "中→英释义词库生成失败"
+    fi
+    rm -rf "$data/comments-src"
 
     gray "data/ 组装完成 ($(find "$data" -type f | wc -l) 文件)"
 }
@@ -968,6 +992,9 @@ Register-ScheduledTask -TaskName 'WindInputDeployBoot' -Action \$a -Force | Out-
 Start-ScheduledTask -TaskName 'WindInputDeployBoot'; Start-Sleep -Seconds 2; \
 Unregister-ScheduledTask -TaskName 'WindInputDeployBoot' -Confirm:\$false" >/dev/null 2>&1 || true
         sleep 2
+        # 计划任务拉起的进程默认 BelowNormal —— WorkBuddy 等前台任务一跑就被排队,
+        # 用户手感是打字卡 50-110ms。每次启动后把优先级抬回 Normal(正式版自启就是 Normal)。
+        remote_ps "Get-Process -Name '$name' -EA SilentlyContinue | ForEach-Object { try { \$_.PriorityClass='Normal' } catch {} }" >/dev/null 2>&1 || true
         # 每行: pid|映像MD5|映像路径。映像已被改名让路的旧进程，Path 指向 .old_*，MD5 对不上。
         out="$(remote_ps "Get-Process -Name '$name' -EA SilentlyContinue | ForEach-Object { \
 \$h=''; try { \$h=(Get-FileHash -Algorithm MD5 -LiteralPath \$_.Path -EA Stop).Hash } catch {}; \
@@ -1120,7 +1147,8 @@ do_push_module() {
         tsf)     local b; mapfile -t b < <(bins_for "$profile")
                  files=("${b[1]}" "${b[2]}") ;;                    # [0]=exe [1]=x64 dll [2]=x86 dll
         core)    files=("wind_input${sfx}.exe")
-                 [ -f "$outdir/wind_cli.bat" ] && files+=("wind_cli.bat") ;;  # CLI 包装器随核心
+                 [ -f "$outdir/wind_cli.bat" ] && files+=("wind_cli.bat")   # CLI 包装器随核心
+                 [ -f "$outdir/wind_input_ext${sfx}.exe" ] && files+=("wind_input_ext${sfx}.exe") ;;
         *)       err "未知模块: $mod（tsf|core）"; return 1 ;;
     esac
     local f
@@ -1298,6 +1326,10 @@ verify_dist_data() {
         # 笔画方案词库同为 gen_aux_code 生成物（实测约 1MB）；全拼默认辅助码经 schema:stroke
         # 引用它，缺了则笔画方案与全拼辅助码都用不了，且用户只看得到「没反应」
         "schemas/stroke/stroke.dict.yaml|500000"
+        # 内置中英释义注释词库（comment_dicts/build.py 生成物）：生成失败在组装时只 warn，
+        # 缺了出厂详细态没有英文 / 中文释义且无任何报错。实测 en_zh 约 527KB、zh_en 约 4.3MB
+        "schemas/comments/en_zh.txt|300000"
+        "schemas/comments/zh_en.txt|3000000"
     )
     say "\n校验发布数据完整性 → $data"
     local entry path min sz
@@ -1450,7 +1482,7 @@ do_portable_zip() {
 #
 # ⚠️ 为什么不能在这边直接出包、本机只补签外壳:
 #    签名【夹在打包中间】—— PE 签在封进压缩块之前, Setup.exe 签在 pack 之后、
-#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 5 个 PE 仍是全裸的, 而
+#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 6 个 PE 仍是全裸的, 而
 #    signtool verify 验 Setup.exe 照样通过 —— 从外面完全看不出来。所以中转的必须是
 #    打包【之前】的散件。
 #
@@ -1911,7 +1943,7 @@ show_menu() {
     echo  "    p1   push 全部 (release)        pd1   push 全部 (dev)"
     echo  "    pm1/pm2  push 模块(tsf/核心)    pdm1/pdm2 (dev)"
     printf '\n%b  代码质量:%b\n' "$C_YELLOW" "$C_RESET"
-    echo  "    k=check  l=clippy  t=test  f=fmt  ci=fmt+clippy+test"
+    echo  "    k=check(含 wk)  wk=wasm32 检查  l=clippy  t=test  f=fmt  ci=fmt+clippy+test"
     printf '\n%b  远程数据 / 实测:%b\n' "$C_YELLOW" "$C_RESET"
     echo  "    r=repl(本机)  dl=pull-data  pc=pull-config  pl=pull-log(pla=全部)"
     printf '\n%b  远程诊断 (靶机现场; 路径直接给 Windows 路径, 含空格不用加引号):%b\n' "$C_YELLOW" "$C_RESET"
@@ -1963,6 +1995,7 @@ dispatch() {
         pdm1)             do_push_module dev tsf ;;
         pdm2)             do_push_module dev core ;;
         k|check)          do_check ;;
+        wk|wasm-check)    do_wasm_check ;;
         l|clippy)         do_clippy ;;
         t|test)           do_test ;;
         sk|setting-check) do_setting_check ;;

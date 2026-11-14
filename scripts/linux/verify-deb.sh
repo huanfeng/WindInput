@@ -77,6 +77,9 @@ check_min opencc/STPhrases.octrie 100000
 check_min opencc/STCharacters.octrie 10000
 check_min pinyin_map.txt 10000
 check_min schemas/stroke/stroke.dict.yaml 500000
+# 随包中英释义注释词库：生成步骤失败时 dev.sh 只告警，缺了详细态没有释义且无报错（阈值同 Windows / mac 门禁）
+check_min schemas/comments/en_zh.txt 300000
+check_min schemas/comments/zh_en.txt 3000000
 # 平台专属策略不得带 Windows 规则：Linux 版 compat.toml 必须是零规则（gen-compat.sh 的产物）
 # （字段说明注释里会提到 Weixin.exe 之类的例子，只看非注释行：出现任何表头 / 键值就是带了规则）
 noncomment="$(grep -vE '^[[:space:]]*(#|$)' "$D/compat.toml" || true)"

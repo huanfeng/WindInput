@@ -4,6 +4,8 @@ name = "笔画"
 icon_label = "笔"
 version = "1.0"
 author = "内置"
+# 主要充当辅助码来源：设置页默认不列出，勾「显示特殊方案」或已启用时才出现。
+role = "aux"
 description = "五笔画输入方案：h/s/p/n/z 依次为横、竖、撇、捺、折，按笔顺输入"
 
 [engine]

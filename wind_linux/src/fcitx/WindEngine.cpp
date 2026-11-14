@@ -1,5 +1,6 @@
 #include "WindEngine.h"
 
+#include "DesktopMotion.h"
 #include "ExtProtocol.h"
 #include "GnomeCaret.h"
 #include "GnomeCaretGeom.h"
@@ -79,6 +80,12 @@ bool isGnomeX11PanelFrontend(const fcitx::InputContext* ic, const WaylandCandida
         return false;
     }
     return isX11PanelFallbackFrontend(ic->frontend());
+}
+
+/// GNOME 折光标用的 X11 坐标缩放：`Xft.dpi` 里掺着字体缩放，要除掉，只留显示器缩放。
+double gnomeX11CoordScale(X11CandidatePanel& panel)
+{
+    return panel.hostScale(panel.textScaling());
 }
 
 bool needsWindowRelCaretFix(const fcitx::InputContext* ic, const WaylandCandidatePanel* wl)
@@ -350,7 +357,17 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
 #endif
         reportFullscreen(effectiveFullscreen(on, waylandPanels));
     };
+    cb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
+    cb.candidateMoved = [this](int32_t x, int32_t y) {
+        sendAndDrain(encodePosFrame(EXT_KIND_POS_CANDIDATE, x, y));
+    };
     panel_ = std::make_unique<X11CandidatePanel>(instance_->eventLoop(), std::move(cb));
+    // 没连着就不报（不为这一条去拉起服务）：连上时 reconnect 按现值补报。
+    motion_ = std::make_unique<DesktopMotion>(instance_->eventLoop(), [this](bool reduce) {
+        if (bridge_.isConnected()) {
+            sendAndDrain(encodeReduceMotionFrame(reduce));
+        }
+    });
 #ifdef WIND_HAVE_WAYLAND
     wlPanel_ = std::make_unique<WaylandCandidatePanel>(instance_);
     {
@@ -387,6 +404,7 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
         wcb.panelMoved = [this](uint32_t kind, int32_t x, int32_t y, const std::string& output) {
             reportPanelPos(kind, x, y, output);
         };
+        wcb.decorClick = [this](uint32_t i) { sendAndDrain(encodeDecorClickFrame(i)); };
         wlPanel_->setCallbacks(std::move(wcb));
     }
     // layer-shell 绑上了：工具栏 / 软键盘改摆在 Wayland 坐标系里。输出 / 工作区按这套重报；
@@ -531,6 +549,10 @@ bool WindEngine::reconnect()
                 reportFocus(ic);
             }
             focusUnreported_ = false;
+        }
+        // 「减少动态效果」：断开期间变了的没报出去（见 motion_ 的回调），每次连上都按现值补一次。
+        if (const auto reduce = motion_ ? motion_->current() : std::nullopt) {
+            sendAndDrain(encodeReduceMotionFrame(*reduce));
         }
         return true;
     }
@@ -708,10 +730,10 @@ HostOutput WindEngine::hostOutput(fcitx::InputContext* ic)
         const double outScale = wlPanel_ ? wlPanel_->scale() : panel_->hostScale();
         if (needsWindowRelCaretFix(ic, wlPanel_.get())) {
             // 与 sendCaretUpdate 共用扩展成功结果：后调用的一方不再同步问总线。
-            const ResolvedCaret got = resolveWindowRelCaret(ic, panel_->hostScale(), outScale);
+            const ResolvedCaret got = resolveWindowRelCaret(ic, gnomeX11CoordScale(*panel_), outScale);
             at = std::make_pair(got.x, got.y);
         } else if (isGnomeX11PanelFrontend(ic, wlPanel_.get())) {
-            auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, panel_->hostScale());
+            auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, gnomeX11CoordScale(*panel_));
             (void)h;
             at = std::make_pair(x, y);
         } else
@@ -758,12 +780,12 @@ void WindEngine::sendCaretUpdate(fcitx::InputContext* ic)
     // GNOME Wayland：相对 → 扩展加窗口原点；绝对 → 只缩放。见 §7.10。
     const double outScale = wlPanel_ ? wlPanel_->scale() : panel_->hostScale();
     if (needsWindowRelCaretFix(ic, wlPanel_.get())) {
-        const ResolvedCaret got = resolveWindowRelCaret(ic, panel_->hostScale(), outScale);
+        const ResolvedCaret got = resolveWindowRelCaret(ic, gnomeX11CoordScale(*panel_), outScale);
         sendAndDrain(encodeCaretUpdateFrame(got.x, got.y, got.h));
         return;
     }
     if (isGnomeX11PanelFrontend(ic, wlPanel_.get())) {
-        auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, panel_->hostScale());
+        auto [x, y, h] = resolveAbsoluteWaylandCaret(ic, gnomeX11CoordScale(*panel_));
         sendAndDrain(encodeCaretUpdateFrame(x, y, h));
         return;
     }
@@ -772,6 +794,38 @@ void WindEngine::sendCaretUpdate(fcitx::InputContext* ic)
     // y 取行顶、height 取行高（对位 Swift `CaretCoords.caretRectToWire`）。
     int h = r.height() > 0 ? r.height() : 16;
     sendAndDrain(encodeCaretUpdateFrame(r.left(), r.top(), h));
+}
+
+void WindEngine::noteHostCursor(fcitx::InputContext* ic)
+{
+    // Qt 系鼠标点击只报光标位置、不发 reset：按键前拿宿主报的光标比预期（SeqTracker::noteCursor）。
+    // 放在按键时而不是周边文本更新时判：上屏那一刻宿主会先报中间态，到下一键时最终位置早已到了。
+    // 有选区、无效或不支持周边文本：按「宿主给不出」处理。
+    // 光标位置碰巧对得上（点到别的行同一列、点回上屏前的位置）时，再看光标两侧的字。
+    int cursor = -1;
+    int32_t hostPrev = -1;
+    int32_t hostNext = -1;
+    if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+        const auto& st = ic->surroundingText();
+        if (st.isValid() && st.anchor() == st.cursor()) {
+            cursor = int(st.cursor());
+            const std::string& text = st.text();
+            const size_t len = fcitx::utf8::length(text);
+            auto charAt = [&](size_t i) -> int32_t {
+                uint32_t cp = fcitx::utf8::getChar(fcitx::utf8::nextNChar(text.begin(), i), text.end());
+                return cp == fcitx::utf8::INVALID_CHAR ? -1 : int32_t(cp);
+            };
+            if (st.cursor() <= len) {
+                hostPrev = st.cursor() == 0 ? 0 : charAt(st.cursor() - 1);
+                hostNext = st.cursor() == len ? 0 : charAt(st.cursor());
+            }
+        }
+    }
+    const uint16_t before = router_.seqTracker().seqChar();
+    router_.seqTracker().noteCursor(cursor, hostPrev, hostNext);
+    if (before != router_.seqTracker().seqChar()) {
+        WIND_DEBUG() << "光标与预期不符（被挪过）：输入序列记账作废 cursor=" << cursor;
+    }
 }
 
 uint16_t WindEngine::prevCharFor(fcitx::InputContext* ic)
@@ -844,10 +898,60 @@ void WindEngine::sendKeyUp(fcitx::InputContext* ic, uint32_t vk, uint32_t mods, 
     e.toggles = toggles;
     e.eventSeq = ++keySeq_;
     e.prevChar = prevCharFor(ic);
+    e.seqChar = router_.seqTracker().seqChar();
     Frame resp;
     if (requestWithRetry(encodeKeyEventFrame(e), resp)) {
         applyResponse(ic, resp, false);
     }
+}
+
+bool WindEngine::sendAltEvent(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods,
+                              uint8_t toggles)
+{
+    if (!ensureConnected()) {
+        return false;
+    }
+    KeyEvent e;
+    e.keyCode = vk;
+    e.modifiers = mods;
+    e.eventType = eventType;
+    e.toggles = toggles;
+    e.eventSeq = ++keySeq_;
+    e.prevChar = prevCharFor(ic);
+    e.seqChar = router_.seqTracker().seqChar();
+    Frame resp;
+    if (!requestWithRetry(encodeKeyEventFrame(e), resp)) {
+        return false;
+    }
+    bool consumed = applyResponse(ic, resp, false);
+    WIND_DEBUG() << "comment_alt vk=" << hex(vk) << (eventType == KEY_EVENT_DOWN ? " down" : " up")
+                 << " mods=" << hex(mods) << (consumed ? " 吃" : " 透传");
+    return consumed;
+}
+
+void WindEngine::sendCtrlRaw(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods,
+                             uint8_t toggles)
+{
+    if (!ensureConnected()) {
+        return;
+    }
+    if (eventType == KEY_EVENT_MOD_UP) {
+        sendCaretUpdate(ic); // 判出单击可能切中英：状态气泡锚到当前插入点，同 sendKeyUp
+    }
+    KeyEvent e;
+    e.keyCode = vk;
+    e.modifiers = mods;
+    e.eventType = eventType;
+    e.toggles = toggles;
+    e.eventSeq = ++keySeq_;
+    e.prevChar = prevCharFor(ic);
+    e.seqChar = router_.seqTracker().seqChar();
+    Frame resp;
+    if (requestWithRetry(encodeKeyEventFrame(e), resp)) {
+        applyResponse(ic, resp, false);
+    }
+    WIND_DEBUG() << "ctrl_raw vk=" << hex(vk) << (eventType == KEY_EVENT_MOD_DOWN ? " down" : " up")
+                 << " mods=" << hex(mods) << " toggles=" << hex(toggles);
 }
 
 void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEvent& event)
@@ -871,6 +975,8 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     // 光标前字符的记账只对「这一个文本框里我们自己打出去的东西」有效，换焦点即作废。
     router_.reset();
     tap_.reset();
+    altHold_.reset();
+    ctrlRaw_.reset();
     caps_.reset();
     eatenKeys_.clear();
     if (!ensureConnected()) {
@@ -902,6 +1008,13 @@ void WindEngine::deactivate(const fcitx::InputMethodEntry&, fcitx::InputContextE
     focusUnreported_ = false; // 焦点都走了，不再补报（下次 activate 自会再报）
     // 按住的键先抬起，发给当初按下的那个 IC（通常就是正在失焦的这个）。
     releaseHeldKeys("focus_out");
+    // 按住中的 Ctrl 松开多半送不到本引擎：补报 NOT_TAP 的 MOD_UP，修饰键记账一并复位
+    // （activate 才复位的话，失焦到下次激活之间残留的记账会把同侧 Ctrl 当成连发吞掉）。
+    if (uint32_t rvk = ctrlRaw_.takeHeld(); rvk != 0 && bridge_.isConnected()) {
+        sendCtrlRaw(ic, rvk, KEY_EVENT_MOD_UP, KEYMOD_CTRL, TOGGLE_MOD_NOT_TAP);
+    }
+    tap_.reset();
+    altHold_.reset();
     // 失焦 / 切走输入法：菜单随之收起（服务端也会在 FocusLost 上关，但它有 250ms 的「刚打开」
     // 守卫；本端这条无条件，且先于 FocusLost 报，服务端据此复位）。
     panel_->closeMenu("focus_out");
@@ -934,6 +1047,10 @@ void WindEngine::reset(const fcitx::InputMethodEntry&, fcitx::InputContextEvent&
     // 宿主要求重置（鼠标点击挪了光标、宿主主动 reset）：对位 Windows 的「组合被意外终止」。
     fcitx::InputContext* ic = event.inputContext();
     releaseHeldKeys("reset");
+    // 光标被宿主挪过（鼠标点击等）：补空格 / 英文后标点的「上一笔」作废。不论有没有组合都做——
+    // 空闲时点到别处同样会让记账失真（对位 Windows 的 `CursorMovedByMouse`）。
+    WIND_DEBUG() << "reset：输入序列记账作废 composing=" << router_.hasComposition();
+    router_.seqTracker().reset();
     if (!router_.hasComposition()) {
         return;
     }
@@ -966,6 +1083,7 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
         // （带 STATUS_CAPS_LOCK 与「A」标签）。键本身两个方向都交还宿主。
         if (!event.isRelease()) {
             tap_.onPress(sym, nowMs()); // Shift 按住时按 CapsLock：那次 Shift 不再是单击
+            ctrlRaw_.onPress(sym, false);
         } else if (caps && ensureConnected()) {
             uint8_t toggles = statesToToggles(states) & ~TOGGLE_CAPSLOCK;
             sendKeyUp(ic, keysymToVK(sym), statesToModifiers(states),
@@ -975,6 +1093,25 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     }
 
     if (event.isRelease()) {
+        // 组字中的 Alt 松开：转发给服务，回包 Consumed 才吃（否则宿主照常看到，如激活菜单栏）。
+        if (uint32_t avk = altVK(sym); avk != 0) {
+            const bool forward =
+                altHold_.shouldForwardUp(altInputSession(router_.hasComposition(), candidatesVisible_));
+            const uint32_t mods = statesToModifiers(states) | altHold_.stickyMods();
+            altHold_.reset();
+            if (forward && sendAltEvent(ic, avk, KEY_EVENT_UP, mods, statesToToggles(states))) {
+                event.filterAndAccept();
+            }
+            return;
+        }
+        // 候选显示时如实上报的那次 Ctrl 按住：报松开，不再按旧路的单击上报（一次按住只走一条路）。
+        bool notTap = false;
+        if (uint32_t rvk = ctrlRaw_.onRelease(sym, &notTap); rvk != 0) {
+            tap_.onRelease(sym, nowMs());
+            const uint8_t toggles = statesToToggles(states) | (notTap ? TOGGLE_MOD_NOT_TAP : 0);
+            sendCtrlRaw(ic, rvk, KEY_EVENT_MOD_UP, statesToModifiers(states) | KEYMOD_CTRL, toggles);
+            return;
+        }
         if (uint32_t vk = tap_.onRelease(sym, nowMs()); vk != 0) {
             // 干净的修饰键单击：切中英等。松开事件本身照常交给宿主（宿主要看得见修饰键）。
             if (ensureConnected()) {
@@ -983,6 +1120,10 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
             return;
         }
         if (eatenKeys_.erase(code) > 0) {
+            // 吃掉过按下的功能键（F1–F12）：松开也报给服务端，按住档的注释切换键靠它收起详细态。
+            if (uint32_t fvk = keysymToVK(sym); fvk >= 0x70 && fvk <= 0x7B && ensureConnected()) {
+                sendKeyUp(ic, fvk, statesToModifiers(states), statesToToggles(states));
+            }
             event.filterAndAccept();
         }
         return;
@@ -992,6 +1133,24 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     // 菜单开着时按键由服务端转给菜单（方向键 / 回车 / Esc / 其它键关菜单并吞掉）：
     // 键盘操作同样算菜单上的活动，空闲计时重新起算。
     panel_->noteMenuActivity();
+    // 组字中的 Alt 按下：转发给服务切换注释态，回包 Consumed 才吃。按住期间按过的
+    // Shift / Ctrl / Super 粘到 Alt 事件的修饰位上（见 AltHold）。
+    altHold_.noteKey(sym, states);
+    // 候选显示时 Ctrl 的按下如实上报（单击由服务端判，见 CtrlRaw）；键本身照常交还宿主。
+    if (uint32_t rvk = ctrlRaw_.onPress(sym, altInputSession(router_.hasComposition(), candidatesVisible_));
+        rvk != 0) {
+        sendCtrlRaw(ic, rvk, KEY_EVENT_MOD_DOWN, statesToModifiers(states) | KEYMOD_CTRL, statesToToggles(states));
+        return;
+    }
+    if (uint32_t avk = altVK(sym); avk != 0) {
+        const bool forward = altInputSession(router_.hasComposition(), candidatesVisible_);
+        altHold_.onAltDown(forward);
+        if (forward && sendAltEvent(ic, avk, KEY_EVENT_DOWN, statesToModifiers(states) | altHold_.stickyMods(),
+                                    statesToToggles(states))) {
+            event.filterAndAccept();
+        }
+        return;
+    }
     // 修饰键本身的按下不上报（Windows 吃掉切换键的 keydown、macOS 走 flagsChanged 不发）：
     // 单击判定在上面，组合键的修饰状态随下一个键的 states 一起到。
     if (key.isModifier()) {
@@ -1000,11 +1159,11 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     uint32_t vk = keysymToVK(sym);
     uint32_t mods = statesToModifiers(states);
     if (vk == 0) {
-        router_.digitTracker().noteKeyPassthrough(0, mods);
+        router_.noteKeyPassthrough(0, mods);
         return; // 未覆盖的键：交还宿主
     }
     if (!ensureConnected()) {
-        router_.digitTracker().noteKeyPassthrough(vk, mods);
+        router_.noteKeyPassthrough(vk, mods);
         return; // 服务不在：直通，下一键再试
     }
 
@@ -1017,6 +1176,7 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     // 无组合时本端 caret 可能是上一次组字的旧位置，先刷新，让状态气泡/首帧候选锚对地方。
     if (!router_.hasComposition()) {
         sendCaretUpdate(ic);
+        noteHostCursor(ic);
     }
 
     KeyEvent e;
@@ -1026,9 +1186,10 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
     e.toggles = statesToToggles(states);
     e.eventSeq = ++keySeq_;
     e.prevChar = prevCharFor(ic); // 必须在处理本键之前取
+    e.seqChar = router_.seqTracker().seqChar();
     Frame resp;
     if (!requestWithRetry(encodeKeyEventFrame(e), resp)) {
-        router_.digitTracker().noteKeyPassthrough(vk, mods);
+        router_.noteKeyPassthrough(vk, mods);
         return;
     }
     bool consumed = applyResponse(ic, resp, isHostShortcut(states));
@@ -1041,7 +1202,7 @@ void WindEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event
         eatenKeys_.insert(code);
         event.filterAndAccept();
     } else {
-        router_.digitTracker().noteKeyPassthrough(vk, mods);
+        router_.noteKeyPassthrough(vk, mods);
     }
 }
 
@@ -1073,6 +1234,13 @@ void WindEngine::onPushFrame(Frame frame)
         hideCandidate();
         panel_->hideAllOverlays();
         hideAllWayland();
+        // 皮肤区域也是旧服务的：复位成「没皮肤」，新服务的第一帧之前自会再推。
+        panel_->setSkin(CandidateSkin{});
+#ifdef WIND_HAVE_WAYLAND
+        if (wlPanel_) {
+            wlPanel_->setSkin(CandidateSkin{});
+        }
+#endif
         // 工具栏 / 软键盘是旧连接上推来的：丢掉。服务端在 push 连接（重）建立时按自己的状态
         // 重推可见的那几层（新服务没有可见面板，同一服务换了连接则原样补回）。
         hidePanels();
@@ -1094,6 +1262,10 @@ void WindEngine::onPushFrame(Frame frame)
             // 免得工具栏盖在全屏应用上。首次连上也补——早于复位报的那次会被冲掉。
             if (fullscreen_.resyncAfterRestart()) {
                 sendAndDrain(encodeHostFullscreenFrame(true));
+            }
+            // 「减少动态效果」：服务端记的是进程级的值，新服务没有；读不到就不报（服务端按允许）。
+            if (const auto reduce = motion_->refresh()) {
+                sendAndDrain(encodeReduceMotionFrame(*reduce));
             }
             if (hadMenu) {
                 sendAndDrain(encodeMenuDismissFrame("service_ready"));
@@ -1139,6 +1311,16 @@ void WindEngine::onPushFrame(Frame frame)
             panel_->setRects(std::move(*rects));
         }
         break;
+    case CMD_CANDIDATE_SKIN:
+        if (auto skin = decodeCandidateSkin(frame.payload)) {
+#ifdef WIND_HAVE_WAYLAND
+            if (wlPanel_) {
+                wlPanel_->setSkin(*skin);
+            }
+#endif
+            panel_->setSkin(std::move(*skin));
+        }
+        break;
     case CMD_OVERLAY_FRAME:
         if (auto p = decodeOverlayFrame(frame.payload)) {
             onOverlayFrame(*p);
@@ -1161,6 +1343,7 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
         hideCandidate();
         return;
     }
+    candidatesVisible_ = true;
     if (!shm_.isOpen() && !shm_.open(shmName())) {
         WIND_WARN() << "打不开候选窗共享内存 " << shmName() << "：" << shm_.lastError();
         return;
@@ -1184,7 +1367,8 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     }
     wlPanel_->hide();
 #endif
-    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0);
+    panel_->show(f, f.screenX, f.screenY, (p.flags & FRAME_FLAG_ABSOLUTE_POS) != 0,
+                 animInPlace(p.flags, p.seq, f.sequence), frameContentOffset(p, f.sequence));
 }
 
 void WindEngine::hideAllWayland()
@@ -1199,6 +1383,7 @@ void WindEngine::hideAllWayland()
 
 void WindEngine::hideCandidate()
 {
+    candidatesVisible_ = false;
     panel_->hide();
 #ifdef WIND_HAVE_WAYLAND
     if (wlPanel_) {
@@ -1222,6 +1407,14 @@ void WindEngine::onExt(const ExtEnvelope& ext)
         }
         if (at) {
             sendAndDrain(encodePosFrame(EXT_KIND_POS_STATUS_TIP, at->first, at->second));
+        }
+        return;
+    }
+    if (ext.kind == EXT_KIND_POS_CANDIDATE_QUERY) {
+        // 同上，问的是候选窗。Wayland 原生应用的候选窗由合成器摆位、本端不知道它在哪，不答
+        // （此时 X11 候选窗已收起，candidateContentOrigin 为空）。
+        if (auto at = panel_->candidateContentOrigin()) {
+            sendAndDrain(encodePosFrame(EXT_KIND_POS_CANDIDATE, at->first, at->second));
         }
         return;
     }

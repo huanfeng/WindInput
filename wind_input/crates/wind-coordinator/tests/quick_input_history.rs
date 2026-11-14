@@ -49,6 +49,7 @@ fn key(k: u32, modifiers: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -336,16 +337,51 @@ fn open_with(tag: &str, edit: impl FnOnce(&mut Config)) -> (Arc<Coordinator>, Ar
     (coord, store)
 }
 
-/// 文本透镜（纯小写字母）回车上屏的原文不记：它本身就是拼音 / 英文的合法编码，记进来
-/// 下次打前缀时会顶掉拼音首选。
+/// 文本透镜（纯小写字母）回车上屏的原文也记：开了历史成员就是要「打过的下次能补出来」，
+/// 位置由成员顺序定（排前则前部补出）。历史在末位时，记录它不改变拼音 / 英文前部的候选顺序。
 #[test]
-fn text_lens_raw_commit_is_not_remembered() {
+fn text_lens_raw_commit_is_remembered_without_moving_pinyin() {
     skip_without_data!();
-    let (coord, store) = open("textraw", true);
+    let (head, _s) = open("textraw_head", true);
+    enter_quick(&head);
+    type_str(&head, "kubectl");
+    head.handle_key_event(&key(VK_RETURN, 0));
+    enter_quick(&head);
+    type_str(&head, "kube");
+    let texts = head.debug_page_texts();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("kubectl"),
+        "历史排前应首位：{texts:?}"
+    );
+    head.handle_key_event(&key(0x1B, 0));
+
+    let tail = |c: &mut Config| {
+        let m = &mut c.schema.mix_modes[0].members;
+        m.retain(|x| x != wind_quick_input::MEMBER_HISTORY);
+        m.push(wind_quick_input::MEMBER_HISTORY.to_string());
+    };
+    let (coord, store) = open_with("textraw", tail);
+    enter_quick(&coord);
+    type_str(&coord, "ni");
+    let before = coord.debug_page_texts();
+    coord.handle_key_event(&key(0x1B, 0));
+
+    enter_quick(&coord);
+    type_str(&coord, "kubectl");
+    let act = coord.handle_key_event(&key(VK_RETURN, 0));
+    assert_eq!(committed(&act).as_deref(), Some("kubectl"), "前提");
+    assert_eq!(count_of(&store, "kubectl"), 1, "纯小写原文应进历史");
+
+    // 记过 nihao 之后，`ni` 的首页与记录前逐条一致（nihao 不进前部）。
     enter_quick(&coord);
     type_str(&coord, "nihao");
     coord.handle_key_event(&key(VK_RETURN, 0));
-    assert_eq!(history_len(&store), 0, "纯小写原文不该进历史");
+    enter_quick(&coord);
+    type_str(&coord, "ni");
+    let after = coord.debug_page_texts();
+    let head = before.len().min(after.len()).min(6);
+    assert_eq!(before[..head], after[..head], "拼音前部不应被历史挤动");
 }
 
 /// 标点顶屏高亮的历史候选：次数 +1，且**不**往任何方案写词频（它没有编码）。
@@ -715,4 +751,132 @@ fn numeric_lens_letters_still_select_with_history_alongside() {
     assert_eq!(coord.debug_preedit(), ";1+2", "缓冲不该被 z 污染");
     let act = coord.handle_key_event(&key(u32::from(b'A'), 0));
     assert_eq!(committed(&act).as_deref(), Some("3"), "a 应选走首选");
+}
+
+/// t253：历史排在英文之后时，用过几次的 `font-size` 与英文词一起按热度重排——打前缀即上首位。
+#[test]
+fn hot_history_joins_english_segment_and_reaches_top() {
+    skip_without_data!();
+    let (coord, store) = open_with("hot_hist", |c| {
+        // 同 GH#253 楼主的配置：只留英文、历史，历史在后；原文与变形候选不显示。
+        c.schema.english.frequency.enabled = true;
+        c.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
+        c.input.temp_english.case_variants = false;
+        c.schema.mix_modes[0].members = vec![
+            "english".to_string(),
+            wind_quick_input::MEMBER_HISTORY.to_string(),
+        ];
+    });
+    for _ in 0..4 {
+        store
+            .record_completion(CompletionKind::QuickHistory, "font-size")
+            .unwrap();
+    }
+    enter_quick(&coord);
+    type_str(&coord, "fo");
+    let texts = coord.debug_page_texts();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("font-size"),
+        "用过 4 次的历史应与英文词按热度比、上到首位，实际 {texts:?}"
+    );
+}
+
+/// t253 反向：英文词 `font` 用得更多时仍在 `font-size` 之前（热度翻转，不是历史一律置顶）。
+#[test]
+fn hotter_english_word_stays_above_history() {
+    skip_without_data!();
+    let (coord, store) = open_with("hot_en", |c| {
+        c.schema.english.frequency.enabled = true;
+        c.schema.mix_modes[0].members = vec![
+            "english".to_string(),
+            wind_quick_input::MEMBER_HISTORY.to_string(),
+        ];
+    });
+    for _ in 0..2 {
+        store
+            .record_completion(CompletionKind::QuickHistory, "font-size")
+            .unwrap();
+    }
+    for _ in 0..8 {
+        enter_quick(&coord);
+        type_str(&coord, "font");
+        let texts = coord.debug_page_texts();
+        let k = texts
+            .iter()
+            .position(|t| t == "font")
+            .expect("前提：英文段里有 font")
+            + 1;
+        coord.handle_key_event(&key(0x30 + k as u32, 0));
+    }
+    enter_quick(&coord);
+    type_str(&coord, "fo");
+    let texts = coord.debug_page_texts();
+    let pos = |w: &str| texts.iter().position(|t| t == w);
+    assert!(
+        pos("font").is_some() && pos("font") < pos("font-size"),
+        "用得更多的 font 应在历史 font-size 之前，实际 {texts:?}"
+    );
+}
+
+/// 英文调频选「一次到顶」时，Free / 大写英文透镜里的历史也按它排：最近用过的在前，
+/// 不再只看累计次数（反馈：`${ResetTime}` 输了几次仍排在老条目 `${reset_time}` 后面）。
+#[test]
+fn free_lens_history_follows_english_top_strategy() {
+    skip_without_data!();
+    for (tag, old, new, typed) in [
+        ("top_sym", "${reset_time}", "${ResetTime}", "${R"),
+        ("top_cap", "Reset_time", "ResetTime", "Res"),
+    ] {
+        let (coord, store) = open_with(tag, |c| {
+            c.schema.english.frequency.enabled = true;
+            c.schema.english.frequency.strategy = "top".into();
+            c.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
+            c.input.temp_english.case_variants = false;
+        });
+        for _ in 0..3 {
+            store
+                .record_completion(CompletionKind::QuickHistory, old)
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store
+            .record_completion(CompletionKind::QuickHistory, new)
+            .unwrap();
+        enter_quick(&coord);
+        type_str(&coord, typed);
+        let texts = coord.debug_page_texts();
+        assert_eq!(
+            texts.first().map(String::as_str),
+            Some(new),
+            "{tag}: 一次到顶下最近用过的历史应居首，实际 {texts:?}"
+        );
+    }
+}
+
+/// 英文调频「一次到顶」下，与缓冲逐字相同的历史仍恒首位，不被更近用过的别条顶下去。
+#[test]
+fn free_lens_exact_history_stays_first_under_top_strategy() {
+    skip_without_data!();
+    let (coord, store) = open_with("top_exact", |c| {
+        c.schema.english.frequency.enabled = true;
+        c.schema.english.frequency.strategy = "top".into();
+        c.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
+        c.input.temp_english.case_variants = false;
+    });
+    store
+        .record_completion(CompletionKind::QuickHistory, "${ResetTime}")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store
+        .record_completion(CompletionKind::QuickHistory, "${ResetTime}_x")
+        .unwrap();
+    enter_quick(&coord);
+    type_str(&coord, "${ResetTime}");
+    let texts = coord.debug_page_texts();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("${ResetTime}"),
+        "逐字相同的历史应恒首位，实际 {texts:?}"
+    );
 }

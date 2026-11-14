@@ -91,6 +91,25 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
   `FROST_OTHERS_EXCLUDE` 所列的组后分发）
 - **另用于**: 笔画输入方案词库的权重（取 `cn_dicts/8105`、`41448` 的单字字频，见 rime-stroke 条目）
 
+#### ECDICT
+
+- **用途**: 英→中释义（内置注释词库 `en_zh`），由 `scripts/comment_dicts/build.py`
+  按英文词表裁剪，每词只取第一个词性与前两个义项。重整版（`en_zh_refined.tsv`）没覆盖的部分
+  以摘录形式存放在 `data/comments-src/en_zh_ecdict_raw.tsv`，构建不再下载原始文件
+- **仓库**: https://github.com/skywind3000/ECDICT （摘录取自提交 `bc015ed2`）
+- **版权**: Copyright (c) 2025 Linwei
+- **许可证**: MIT
+
+#### CC-CEDICT
+
+- **用途**: 中→英释义（内置注释词库 `zh_en`），按系统词表裁剪，每词取前两个义项。重整版
+  （`zh_en_cedict_refined.tsv`）没覆盖的部分以摘录形式存放在 `data/comments-src/zh_en_cedict_raw.tsv`
+  （文件头保留原始快照的许可与日期行），构建不再下载原始文件
+- **来源**: https://www.mdbg.net/chinese/dictionary?page=cc-cedict （MDBG 导出，摘录取自 2026-10-21 的快照）
+- **许可证**: CC BY-SA 4.0；已裁剪与格式化（按系统词表筛选条目、取前两个义项、去掉
+  量词/变体/参见类条目、重排为每词一行），数据文件头保留原始快照的许可与日期行；衍生的 `zh_en` 数据同样适用该许可，AI 补齐的部分
+  （`data/comments-src/zh_en_ai.tsv`）另文件存放、不与 CC 数据混合
+
 #### pinyin-data
 
 - **用途**: 汉字现代普通话读音数据，用于生成拼音映射与悬停提示中的拼音显示
@@ -157,6 +176,15 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
 - **使用的文件**: `aux_code/flypy_full.txt`（小鹤音形）、`aux_code/ZRM-wanxiang.txt`（自然码）
 - **加工方式**: 上游已是 `字=码` 行格式，**逐行原样透传**，仅在文件首部补
   `# name/source/license` 元数据头（运行时据首行显示码表名）
+
+#### 首右形码（首右辅助码 2.0 / 首右 Plus）
+
+- **用途**: 辅助码功能的字形码表（双拼用户的形码筛选，出厂关闭）
+- **来源**: 首右输入法交流群，已获作者许可随本项目分发
+- **使用的文件**: `data/schemas/aux_code/shouyou.txt`（首右辅助码 2.0）、
+  `data/schemas/aux_code/shouyou_plus.txt`（首右 Plus 辅助码）
+- **加工方式**: 仅把上游 `字<TAB>码` 转成 `字=码`、补首行 `# name:`；丢弃 2 条码含非字母字符的行
+  （`尯`、`䓛`）。与上面几张不同，这两张**随仓库入库**（作者许可），不走 `gen_aux_code`
 
 #### hanzi-chars（汉字字表）
 

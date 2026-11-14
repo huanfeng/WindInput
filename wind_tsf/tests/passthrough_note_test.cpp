@@ -33,6 +33,7 @@ constexpr uint32_t VK_LWIN_ = 0x5B;
 constexpr uint32_t VK_CAPITAL_ = 0x14;
 constexpr uint32_t VK_PACKET_ = 0xE7;
 constexpr uint32_t VK_ASYNC_COMMIT_ = 0xE8;
+constexpr uint32_t VK_MENU_MASK_ = 0x9F;
 constexpr uint32_t VK_RIGHT_ = 0x27;
 
 int g_failures = 0;
@@ -115,7 +116,7 @@ void TestSelfInjectedVkIsNotNotedEvenWithoutSuppress()
     // 这条锁的是 Chrome/QQ 那批宿主：它们无视 pfEaten=FALSE 仍调 OnKeyDown，届时 skip
     // 条目已被 OnTestKeyDown 消费掉、`suppressed` 传不进来，只剩 VK 值这道兜底。
     // 漏了它 ⇒ CommitText 走 SendInput 兜底的宿主上 press1 每次上屏都自解武装 ⇒ 整条失效。
-    for (uint32_t vk : {VK_PACKET_, VK_ASYNC_COMMIT_})
+    for (uint32_t vk : {VK_PACKET_, VK_ASYNC_COMMIT_, VK_MENU_MASK_})
     {
         PassthroughState st;
         st.NoteKeyDown(vk, /*eaten=*/false, /*suppressed=*/false);

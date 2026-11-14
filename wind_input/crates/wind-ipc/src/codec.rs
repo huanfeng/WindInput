@@ -59,7 +59,7 @@ pub fn encode_header(header: &IpcHeader) -> [u8; 8] {
 /// 从载荷字节解码 KeyPayload
 pub fn decode_key_payload(payload: &[u8]) -> Result<KeyPayload, CodecError> {
     KeyPayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
-        need: KeyPayload::SIZE,
+        need: KeyPayload::LEGACY_SIZE,
         got: payload.len(),
     })
 }
@@ -167,6 +167,14 @@ pub fn decode_focus_gained_window_title(payload: &[u8]) -> &str {
 pub fn decode_input_state_report(payload: &[u8]) -> Result<InputStateReportPayload, CodecError> {
     InputStateReportPayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
         need: InputStateReportPayload::SIZE,
+        got: payload.len(),
+    })
+}
+
+/// 解码 `CMD_KEY_OBSERVED`（0x021D）载荷。
+pub fn decode_key_observed(payload: &[u8]) -> Result<KeyObservedPayload, CodecError> {
+    KeyObservedPayload::from_bytes(payload).ok_or(CodecError::BufferTooShort {
+        need: KeyObservedPayload::SIZE,
         got: payload.len(),
     })
 }
@@ -283,7 +291,17 @@ pub fn encode_commit_text(
         chinese_mode,
         has_new_composition,
         false,
+        false,
     )
+}
+
+/// 编码带「无占位联想会话」标志的 CommitText 响应（flags bit5，见 `COMMIT_FLAG_ASSOC_SESSION`）。
+pub fn encode_commit_text_assoc_session(
+    text: &str,
+    mode_changed: bool,
+    chinese_mode: bool,
+) -> Vec<u8> {
+    encode_commit_text_inner(text, None, mode_changed, chinese_mode, false, false, true)
 }
 
 /// 编码带 replacingHeld 标志的 CommitText 响应 (CMD_COMMIT_TEXT 0x0101, flags bit3)。
@@ -296,7 +314,24 @@ pub fn encode_commit_text(
 /// 一处（全角空格/数字、临时英文、各独占模式出字……），把安全的那一侧设为默认，新增路径
 /// 自动正确；只有这一个真正要覆盖的点显式声明。
 pub fn encode_commit_text_replacing_held(text: &str, chinese_mode: bool) -> Vec<u8> {
-    encode_commit_text_inner(text, None, false, chinese_mode, false, true)
+    encode_commit_text_inner(text, None, false, chinese_mode, false, true, false)
+}
+
+#[cfg(test)]
+mod assoc_session_flag_tests {
+    use super::*;
+
+    /// 无占位联想会话的标志位只在该编码器里置；普通上屏不带。
+    #[test]
+    fn assoc_session_flag_only_on_its_encoder() {
+        let flags = |b: &[u8]| u32::from_le_bytes(b[IpcHeader::SIZE..][..4].try_into().unwrap());
+        let off = encode_commit_text("好", None, false, true, false);
+        let on = encode_commit_text_assoc_session("好", false, true);
+        assert_eq!(flags(&off) & 0x20, 0);
+        assert_eq!(flags(&on) & 0x20, 0x20);
+        assert_eq!(0x20, crate::protocol::COMMIT_FLAG_ASSOC_SESSION as u32);
+        assert_eq!(flags(&on) & 0x02, 0, "不重启组合");
+    }
 }
 
 fn encode_commit_text_inner(
@@ -306,6 +341,7 @@ fn encode_commit_text_inner(
     chinese_mode: bool,
     has_new_composition: bool,
     replacing_held: bool,
+    assoc_session: bool,
 ) -> Vec<u8> {
     let text_bytes = text.as_bytes();
     let comp_bytes = new_composition.map(|s| s.as_bytes());
@@ -323,6 +359,9 @@ fn encode_commit_text_inner(
     }
     if replacing_held {
         flags |= 0x08;
+    }
+    if assoc_session {
+        flags |= 0x20;
     }
 
     let total = 12 + text_bytes.len() + comp_len;
@@ -1556,7 +1595,15 @@ fn frame(cmd: u16, payload: Vec<u8>) -> Vec<u8> {
     out
 }
 
-/// CmdHostRenderFrame (0x0502): seq:u32 + x:i32 + y:i32 + w:u32 + h:u32 + flags:u32 + scale:u32 (28B)
+/// CmdHostRenderFrame (0x0502): seq:u32 + x:i32 + y:i32 + w:u32 + h:u32 + flags:u32 + scale:u32
+/// + contentX:i32 + contentY:i32 (36B) + aboveX:i32 + aboveY:i32 + boxX boxY boxW boxH:i32 (60B)。
+///
+/// `contentX/Y` = 窗口左上到内容左上（`custom_x/y` 同义）的偏移，与 x/y 同单位；宿主本地拖动后用它
+/// 把窗口落点换回内容左上报 `pos.candidate`（theme-skin-animation.md §17.7）。
+/// `aboveX/Y` = 跟随光标时翻到光标上方的窗口左上；`box*` = 判翻转与夹边用的框（相对窗口左上，
+/// 内容框，皮肤 `clamp = "all"` 时连装饰外扩）。服务端不翻转，宿主按可见区在 x/y 与 aboveX/Y 间选
+/// （§17.3 macOS）。都是末尾追加：按长度只读前段的旧宿主不受影响。
+#[allow(clippy::too_many_arguments)]
 pub fn encode_host_render_frame(
     seq: u32,
     x: i32,
@@ -1565,8 +1612,11 @@ pub fn encode_host_render_frame(
     h: u32,
     flags: u32,
     scale: u32,
+    content: (i32, i32),
+    above: (i32, i32),
+    place_box: (i32, i32, i32, i32),
 ) -> Vec<u8> {
-    let mut p = Vec::with_capacity(28);
+    let mut p = Vec::with_capacity(60);
     p.extend_from_slice(&seq.to_le_bytes());
     p.extend_from_slice(&x.to_le_bytes());
     p.extend_from_slice(&y.to_le_bytes());
@@ -1574,6 +1624,12 @@ pub fn encode_host_render_frame(
     p.extend_from_slice(&h.to_le_bytes());
     p.extend_from_slice(&flags.to_le_bytes());
     p.extend_from_slice(&scale.to_le_bytes());
+    p.extend_from_slice(&content.0.to_le_bytes());
+    p.extend_from_slice(&content.1.to_le_bytes());
+    let (bx, by, bw, bh) = place_box;
+    for v in [above.0, above.1, bx, by, bw, bh] {
+        p.extend_from_slice(&v.to_le_bytes());
+    }
     frame(CMD_HOST_RENDER_FRAME, p)
 }
 
@@ -1588,6 +1644,57 @@ pub fn encode_candidate_rects(rects: &[(i32, i32, i32, i32, i32)]) -> Vec<u8> {
         }
     }
     frame(CMD_CANDIDATE_RECTS, p)
+}
+
+/// [`CMD_CANDIDATE_SKIN`] 里的一块装饰。枚举值见 [`crate::protocol::skin`]。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkinDecorWire {
+    /// 变体 `decor` 里的下标（与装饰状态机同号）。
+    pub index: u32,
+    /// `SKIN_HIT_*`。
+    pub hit: u32,
+    /// `SKIN_DECOR_*`。
+    pub flags: u32,
+    /// 缓冲内的设备像素 `x, y, w, h`。
+    pub rect: [i32; 4],
+}
+
+/// [`CMD_CANDIDATE_SKIN`] 的载荷。没启用皮肤时取 `Default`（`flags = 0`、两表为空）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateSkinWire {
+    /// `SKIN_FLAG_*`。
+    pub flags: u32,
+    /// 窗体矩形（缓冲内设备像素）。
+    pub frame: [i32; 4],
+    pub decor: Vec<SkinDecorWire>,
+    /// 输入区矩形（`SKIN_FLAG_MASK` 置位时有效）。
+    pub mask: Vec<[i32; 4]>,
+}
+
+/// CmdCandidateSkin (0x0514)，均小端：flags u32 + frame 4×i32 + decorN u32 +
+/// decorN × (index hit flags u32 + x y w h i32，28B) + maskN u32 + maskN × (x y w h i32)。
+pub fn encode_candidate_skin(s: &CandidateSkinWire) -> Vec<u8> {
+    let mut p = Vec::with_capacity(28 + s.decor.len() * 28 + s.mask.len() * 16);
+    p.extend_from_slice(&s.flags.to_le_bytes());
+    for v in s.frame {
+        p.extend_from_slice(&v.to_le_bytes());
+    }
+    p.extend_from_slice(&(s.decor.len() as u32).to_le_bytes());
+    for d in &s.decor {
+        for v in [d.index, d.hit, d.flags] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in d.rect {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    p.extend_from_slice(&(s.mask.len() as u32).to_le_bytes());
+    for r in &s.mask {
+        for v in r {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    frame(CMD_CANDIDATE_SKIN, p)
 }
 
 /// CmdModeStatus (0x0504): flags:u32 + effective_mode:u32 + labelLen:u32 + label(UTF-8)
@@ -1827,6 +1934,12 @@ pub fn encode_compat_title_match_value(enabled: bool) -> Vec<u8> {
     vec![enabled as u8]
 }
 
+/// 编码「有扩展订阅按键」开关的值部分（对齐 TSF `OnSyncConfig` 的
+/// CONFIG_KEY_EXTENSION_KEY_OBSERVE）。格式：enabled(u8)。默认关。
+pub fn encode_extension_key_observe_value(enabled: bool) -> Vec<u8> {
+    vec![enabled as u8]
+}
+
 /// 编码诊断快照采集开关的值部分（对齐 TSF `OnSyncConfig` 的 CONFIG_KEY_DIAG_SNAPSHOT）。
 /// 格式：enabled(u8)。默认关，随输入诊断 HUD 显隐推送；关闭时 DLL 完全不采集。
 pub fn encode_diag_snapshot_value(enabled: bool) -> Vec<u8> {
@@ -1908,9 +2021,20 @@ mod darwin_push_tests {
     }
 
     #[test]
-    fn host_render_frame_layout_is_28_bytes_le() {
-        let f = encode_host_render_frame(7, -3, 20, 100, 40, 0x3, 2);
-        assert_eq!(f.len(), 8 + 28);
+    fn host_render_frame_layout_is_60_bytes_le() {
+        let f = encode_host_render_frame(
+            7,
+            -3,
+            20,
+            100,
+            40,
+            0x3,
+            2,
+            (12, -5),
+            (-3, -70),
+            (12, 6, 76, 30),
+        );
+        assert_eq!(f.len(), 8 + 60);
         assert_eq!(cmd_of(&f), CMD_HOST_RENDER_FRAME);
         let p = &f[8..];
         assert_eq!(u32::from_le_bytes(p[0..4].try_into().unwrap()), 7);
@@ -1920,6 +2044,11 @@ mod darwin_push_tests {
         assert_eq!(u32::from_le_bytes(p[16..20].try_into().unwrap()), 40);
         assert_eq!(u32::from_le_bytes(p[20..24].try_into().unwrap()), 0x3);
         assert_eq!(u32::from_le_bytes(p[24..28].try_into().unwrap()), 2);
+        assert_eq!(i32::from_le_bytes(p[28..32].try_into().unwrap()), 12);
+        assert_eq!(i32::from_le_bytes(p[32..36].try_into().unwrap()), -5);
+        let i = |o: usize| i32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        assert_eq!((i(36), i(40)), (-3, -70));
+        assert_eq!((i(44), i(48), i(52), i(56)), (12, 6, 76, 30));
     }
 
     #[test]
@@ -1960,6 +2089,48 @@ mod darwin_push_tests {
         assert_eq!((u(56), u(60)), (110, 30));
         assert_eq!(i(64), 1500);
         assert_eq!(f32::from_le_bytes(p[68..72].try_into().unwrap()), 2.0);
+    }
+
+    #[test]
+    fn candidate_skin_layout_matches_documented_offsets() {
+        use crate::protocol::skin::*;
+        let f = encode_candidate_skin(&CandidateSkinWire {
+            flags: SKIN_FLAG_ACTIVE | SKIN_FLAG_MASK,
+            frame: [10, 20, 300, 120],
+            decor: vec![
+                SkinDecorWire {
+                    index: 2,
+                    hit: SKIN_HIT_PASS,
+                    flags: SKIN_DECOR_UNDER | SKIN_DECOR_SPLIT,
+                    rect: [-5, -6, 40, 50],
+                },
+                SkinDecorWire {
+                    index: 0,
+                    hit: SKIN_HIT_BLOCK,
+                    flags: 0,
+                    rect: [1, 2, 3, 4],
+                },
+            ],
+            mask: vec![[10, 20, 300, 1], [0, 0, 7, 8]],
+        });
+        assert_eq!(cmd_of(&f), CMD_CANDIDATE_SKIN);
+        let p = &f[IpcHeader::SIZE..];
+        assert_eq!(p.len(), 4 + 16 + 4 + 2 * 28 + 4 + 2 * 16);
+        let u = |o: usize| u32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        let i = |o: usize| i32::from_le_bytes(p[o..o + 4].try_into().unwrap());
+        assert_eq!(u(0), 3);
+        assert_eq!((i(4), i(8), i(12), i(16)), (10, 20, 300, 120));
+        assert_eq!(u(20), 2);
+        assert_eq!((u(24), u(28), u(32)), (2, 2, 3));
+        assert_eq!((i(36), i(40), i(44), i(48)), (-5, -6, 40, 50));
+        assert_eq!((u(52), u(56), u(60)), (0, 1, 0));
+        assert_eq!((i(64), i(68), i(72), i(76)), (1, 2, 3, 4));
+        assert_eq!(u(80), 2);
+        assert_eq!((i(84), i(88), i(92), i(96)), (10, 20, 300, 1));
+        assert_eq!((i(100), i(104), i(108), i(112)), (0, 0, 7, 8));
+        // 没启用皮肤：28 字节全零。
+        let none = encode_candidate_skin(&CandidateSkinWire::default());
+        assert_eq!(&none[IpcHeader::SIZE..], &[0u8; 28][..]);
     }
 
     #[test]

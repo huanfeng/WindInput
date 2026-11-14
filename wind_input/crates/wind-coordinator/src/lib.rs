@@ -2,13 +2,16 @@
 //!
 //! 与 Go 版本 `wind_input/internal/coordinator/` 对齐。
 
+pub(crate) mod auto_spacing;
 pub(crate) mod aux_code_source;
 pub(crate) mod candidate_grid;
 pub(crate) mod candidate_nav;
+pub mod candidate_preview;
 pub mod candidate_pull;
 #[cfg(test)]
 pub(crate) mod charset_test_support;
 pub(crate) mod comment;
+pub(crate) mod comment_switch;
 #[cfg(all(unix, not(target_os = "android")))]
 pub mod exit_signal;
 /// 设置页预览行的模板样例求值（`comment` 本身不对外，只开放这一块）。
@@ -59,15 +62,19 @@ pub mod handle_unicode;
 mod handle_url;
 pub(crate) mod heap_trim;
 pub(crate) mod hint_text;
+pub(crate) mod hook_events;
 pub mod host_services;
 pub mod hotkey_match;
 pub mod input_diag;
+pub mod input_profile;
 pub mod key_convert;
 pub mod key_gate;
 pub(crate) mod key_resolver;
 pub mod layout;
+pub mod leading_reading;
 pub mod mode_completion;
 pub mod pipeline;
+pub(crate) mod postprocess;
 pub(crate) mod preedit_cursor;
 pub mod process_memory;
 mod quick_eval;
@@ -76,7 +83,12 @@ pub(crate) mod quick_history;
 pub mod schema_dicts_api;
 pub(crate) mod schema_residency;
 pub(crate) mod schema_scope;
+mod schema_ui;
+pub(crate) mod session_exit;
+pub mod session_output;
 pub(crate) mod short_code_yield;
+#[cfg(test)]
+pub(crate) mod source_scan;
 pub mod stats;
 pub mod theme_query;
 pub mod theme_style;
@@ -92,6 +104,8 @@ pub mod web_host;
 pub(crate) mod wildcard;
 
 pub use coordinator::{Coordinator, request_restart, restart_signal, set_settings_url_provider};
+pub use input_profile::InputProfile;
+pub use session_output::{CompositionView, SessionEvent, SessionStatus};
 pub use ui_sender::UiSender;
 
 /// 窗口所属进程 ID（0 = 查询失败）。

@@ -64,6 +64,85 @@ private:
     uint16_t prevChar_ = 0;
 };
 
+/// KeyPayload.seqChar 记账：输入序列里最近进文档的字符代表值（0 = 不可知）。对位 Windows
+/// `wind_tsf/include/InputSequenceChar.h` 与 Swift `InputSequenceTracker`，取值规则三端一致：
+/// 透传键报类别代表值（字母 'a'、数字本身、空格、其余可见符号 '?'），上屏文本取末尾码点的
+/// 首个 UTF-16 单元。
+/// 与 DigitTracker 分开：组合串（预编辑）没写进文档，不动它——否则「打 nihao → Esc」会留下
+/// 编码末位 'o'，下一笔中文被误补空格。
+///
+/// **光标被挪过**（鼠标点到别处）看不见，靠两条补：宿主发 reset（GTK 点击会发）时调 `reset()`；
+/// 宿主支持周边文本时（Qt 系点击只报光标位置、不发 reset），每次按键前用 `noteCursor` 比对预期光标——每次
+/// 写进文档都把预期光标往前推，宿主报来的位置对不上、或光标前的字与记账对不上，就是被挪过。
+/// 不支持周边文本的宿主两条都没有。
+class SeqTracker {
+public:
+    /// 「在记账、但不知道」。0 只来自不带这个字段的旧客户端（Rust `SEQ_CHAR_UNKNOWN`）。
+    static constexpr uint16_t kUnknown = 0xFFFF;
+    uint16_t seqChar() const { return seqChar_; }
+    void reset()
+    {
+        seqChar_ = kUnknown;
+        expectedCursor_ = -1;
+        beforeWrite_ = -1;
+    }
+    static uint16_t charFromVk(uint32_t vk, uint32_t modifiers);
+    /// 可见字符透传：宿主写进一个字符，光标前进 1；其余键（导航、编辑、快捷键）光标去向不明。
+    void noteKeyPassthrough(uint32_t vk, uint32_t modifiers)
+    {
+        seqChar_ = charFromVk(vk, modifiers);
+        advanceCursor(seqChar_ == kUnknown ? -1 : 1, false);
+    }
+    /// 空串不动：没有东西写进文档。
+    void noteCommittedText(const std::string& utf8);
+    /// 光标跨过了一个已知是符号的字符（智能跳过右标点）。
+    void noteCursorCrossedSymbol()
+    {
+        seqChar_ = '?';
+        advanceCursor(1, false);
+    }
+    /// 写进文档的同时还删过字、挪过光标（智能符号替换、带光标位置的上屏）：预期光标作废，
+    /// 下一次宿主报的位置重新当基准。记账本身不动。
+    void forgetCursor() { expectedCursor_ = beforeWrite_ = -1; }
+    /// 宿主报来光标位置（字符计）与光标前 / 后的字符（码点；0 = 那一侧没有字符，-1 = 给不出）。
+    /// 位置与预期不符，或光标前的字符与记账对不上 = 被挪过：记账作废。`cursor < 0` = 宿主没给有效值。
+    void noteCursor(int cursor, int32_t hostPrev = -1, int32_t hostNext = -1)
+    {
+        if (cursor < 0) {
+            expectedCursor_ = beforeWrite_ = -1;
+            return;
+        }
+        if (expectedCursor_ >= 0 && cursor != expectedCursor_) {
+            // 上屏前那一刻的位置：宿主晚到的中间态回声（Qt 上屏时先报「编码已清、新字未插」），
+            // 不是被挪过，也不当新基准。点回同一位置时光标后紧跟着刚上屏的字，据此区分。
+            if (cursor == beforeWrite_ && (hostNext < 0 || hostNext != writtenFirst_)) {
+                return;
+            }
+            seqChar_ = kUnknown;
+        } else if (hostPrev >= 0 && !matchesHostChar(uint32_t(hostPrev))) {
+            // 位置碰巧对得上（点到别的行 / 段的同一列）：光标前的字不是记账那个。
+            seqChar_ = kUnknown;
+        }
+        expectedCursor_ = cursor;
+        beforeWrite_ = -1;
+    }
+
+private:
+    /// `chars < 0` = 光标去向不明。`commit` = 经输入法上屏（只有它有中间态回声）。
+    void advanceCursor(int chars, bool commit)
+    {
+        beforeWrite_ = commit ? expectedCursor_ : -1;
+        expectedCursor_ = (chars < 0 || expectedCursor_ < 0) ? -1 : expectedCursor_ + chars;
+    }
+    /// 宿主光标前的字符 `cp`（0 = 没有）与记账是否一致。透传键只记了类别代表值，按类别比。
+    bool matchesHostChar(uint32_t cp) const;
+
+    uint16_t seqChar_ = kUnknown;
+    int expectedCursor_ = -1;
+    int beforeWrite_ = -1;
+    int32_t writtenFirst_ = -1; ///< 最近一次上屏文本的首个码点
+};
+
 /// 服务端给的删除 / 光标移动计数是 u32，转 int 取负前先钳住：大于 INT_MAX 时取负是未定义行为；
 /// 真实值只有个位数（智能标点、撤销上屏的一段词），上限远高于正常用量。
 constexpr uint32_t kMaxDeleteUnits = 1024;
@@ -97,6 +176,13 @@ public:
     bool hasComposition() const { return !compositionText_.empty(); }
     const std::string& compositionText() const { return compositionText_; }
     DigitTracker& digitTracker() { return digits_; }
+    SeqTracker& seqTracker() { return seq_; }
+    /// 按键透传回宿主：两份记账一起喂（漏喂一份的症状是那一份的功能在某条透传路上失灵）。
+    void noteKeyPassthrough(uint32_t vk, uint32_t modifiers)
+    {
+        digits_.noteKeyPassthrough(vk, modifiers);
+        seq_.noteKeyPassthrough(vk, modifiers);
+    }
 
 private:
     void applyCommitText(const CommitTextPayload& p, TextSink* sink);
@@ -118,6 +204,7 @@ private:
     std::string pendingCommitPrefix_; // 已定格、尚未真上屏的前缀
     uint64_t holdGeneration_ = 0;
     DigitTracker digits_;
+    SeqTracker seq_;
     TimerScheduler scheduler_;
     SinkProvider sinkProvider_;
 };

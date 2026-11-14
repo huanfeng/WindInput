@@ -105,6 +105,9 @@ impl Coordinator {
         };
         let mut text_pending = false;
         let mut first_text = true;
+        // 撤销上屏计数：连续多段 `type()` 累加成一笔；执行过副作用动作（`key.tap` 挪光标等）后
+        // 光标前已不一定是刚输出的文字，计数复位为 1（宁可少删）。
+        let mut typed_len = 0usize;
         // 只留第一个错误：链上后续动作常因同一根因连环失败，逐个弹 toast 会刷屏。
         let mut first_err: Option<String> = None;
         for a in &actions {
@@ -117,7 +120,10 @@ impl Coordinator {
                             std::thread::sleep(std::time::Duration::from_millis(30));
                             first_text = false;
                         }
-                        self.push_commit_text(&t);
+                        typed_len += self
+                            .push_commit_text_from(crate::session_exit::ActionOrigin::Command, &t);
+                        self.last_commit_len
+                            .store(typed_len.max(1), std::sync::atomic::Ordering::Relaxed);
                         text_pending = true;
                     }
                     Ok(_) => {}
@@ -135,6 +141,9 @@ impl Coordinator {
                         warn!("cmdbar 动作失败: {}", e);
                         first_err.get_or_insert_with(|| e.to_string());
                     }
+                    typed_len = 0;
+                    self.last_commit_len
+                        .store(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             // `{on_error: "stop"}`：首个错误即停。默认仍是继续跑——见 OnError 的文档，
@@ -281,6 +290,10 @@ impl EvalContext for CmdbarCtx<'_> {
         self.host.clipboard_get_text().unwrap_or_default()
     }
     fn reverse_lookup(&self, text: &str, format: &str) -> String {
+        let max = self.coord.rt().config.input.reverse.clip_max_chars;
+        if exceeds_chars(text, max) {
+            return String::new();
+        }
         self.coord.reverse_render(text, format)
     }
     fn sel(&self) -> String {
@@ -314,6 +327,10 @@ impl ImeController for CoordIme {
             if is_feature_target(target) {
                 return c.cmd_set_feature(target, None);
             }
+            // 写盘失败要报给命令栏。
+            if target == "comment" {
+                return c.cmd_comment_state(None);
+            }
             c.cmd_ime_toggle(target);
         }
         Ok(())
@@ -326,6 +343,21 @@ impl ImeController for CoordIme {
             c.cmd_set_feature(target, Some(on))
         } else {
             c.cmd_set_state(target, on)
+        }
+    }
+    fn set_value(&self, target: &str, value: &str) -> anyhow::Result<()> {
+        let Some(c) = self.0.upgrade() else {
+            return Ok(());
+        };
+        match (target, value) {
+            ("comment", "default") => {
+                c.cmd_comment_state(Some(wind_config::comment_lib::CommentState::Default))
+            }
+            ("comment", "detail") => {
+                c.cmd_comment_state(Some(wind_config::comment_lib::CommentState::Detail))
+            }
+            ("comment", _) => anyhow::bail!("comment 的状态需要 default / detail，收到 {value:?}"),
+            _ => anyhow::bail!("ime.set 不支持 target {target:?}"),
         }
     }
     fn open_setting(&self, page: &str, args: &str) -> anyhow::Result<()> {
@@ -356,6 +388,14 @@ impl ImeController for CoordIme {
     fn undo_commit(&self) -> anyhow::Result<()> {
         if let Some(c) = self.0.upgrade() {
             c.cmd_undo_commit();
+        }
+        Ok(())
+    }
+    fn reload_config(&self) -> anyhow::Result<()> {
+        if let Some(c) = self.0.upgrade()
+            && !c.reload_user_config()
+        {
+            anyhow::bail!("配置读取失败，沿用当前配置（详见日志）");
         }
         Ok(())
     }
@@ -643,6 +683,7 @@ pub(crate) fn state_unchanged_text(target: &str, on: bool) -> String {
 pub(crate) fn set_comment_dict(
     configured: &[wind_config::CommentDictSpec],
     auto_ids: &[String],
+    builtin_ids: &[String],
     id: &str,
     want: Option<bool>,
 ) -> anyhow::Result<Option<(Vec<wind_config::CommentDictSpec>, bool)>> {
@@ -664,6 +705,20 @@ pub(crate) fn set_comment_dict(
         out.push(wind_config::CommentDictSpec {
             id: id.to_string(),
             auto: true,
+            enabled: false,
+            ..Default::default()
+        });
+        return Ok(Some((out, false)));
+    }
+    if builtin_ids.iter().any(|b| b == id) {
+        // 未登记的内置库恒为开（见 `merge_comment_dicts`）
+        let on = want.unwrap_or(false);
+        if on {
+            return Ok(None);
+        }
+        out.push(wind_config::CommentDictSpec {
+            id: id.to_string(),
+            builtin: true,
             enabled: false,
             ..Default::default()
         });
@@ -698,8 +753,8 @@ impl CoordConfig {
     /// 把用户真实的设置改成「出厂值的反面」——单键版的整表抹除，同样静默、同样不可逆。
     /// 纯读（`get`）不设这道闸：显示一个出厂值不造成任何损失。
     fn load_value(key: &str, require_trustworthy: bool) -> anyhow::Result<String> {
-        use wind_config::config_schema::is_known_key;
-        if !is_known_key(key) {
+        use wind_config::config_schema::is_addressable_key;
+        if !is_addressable_key(key) {
             anyhow::bail!("未登记的配置键: {key}");
         }
         let cfg = wind_config::Config::load(wind_config::Config::data_dir().as_deref())?;
@@ -710,14 +765,10 @@ impl CoordConfig {
             );
         }
         let full = cfg.to_json_value()?;
-        let mut cur = &full;
-        for part in key.split('.') {
-            cur = cur
-                .get(part)
-                .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))?;
-        }
+        let cur = wind_config::config_schema::lookup_json_value(&full, key)
+            .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))?;
         Ok(match cur {
-            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::String(s) => s,
             other => other.to_string(),
         })
     }
@@ -737,8 +788,8 @@ impl ConfigService for CoordConfig {
     }
 
     fn toggle(&self, key: &str) -> anyhow::Result<String> {
-        use wind_config::config_schema::{FieldType, field};
-        let fld = field(key).ok_or_else(|| anyhow::anyhow!("未登记的配置键: {key}"))?;
+        use wind_config::config_schema::{FieldType, addressable_field};
+        let fld = addressable_field(key).ok_or_else(|| anyhow::anyhow!("未登记的配置键: {key}"))?;
         // 取当前值即取写回的种子，故必须过降级闸。
         let cur = Self::load_value(key, true)?;
         let next: String = match fld.ty {
@@ -1250,13 +1301,15 @@ mod feature_toggle_tests {
     #[test]
     fn flips_existing_entry_in_place() {
         let cfg = [manual("en", true), manual("chaifen", false)];
-        let (list, on) = set_comment_dict(&cfg, &[], "chaifen", None)
+        let (list, on) = set_comment_dict(&cfg, &[], &[], "chaifen", None)
             .unwrap()
             .unwrap();
         assert!(on);
         assert_eq!(list.len(), 2);
         assert!(list[0].enabled && list[1].enabled);
-        let (list, on) = set_comment_dict(&list, &[], "en", None).unwrap().unwrap();
+        let (list, on) = set_comment_dict(&list, &[], &[], "en", None)
+            .unwrap()
+            .unwrap();
         assert!(!on && !list[0].enabled);
     }
 
@@ -1265,11 +1318,11 @@ mod feature_toggle_tests {
     fn set_is_noop_when_already_in_state() {
         let cfg = [manual("en", true)];
         assert!(
-            set_comment_dict(&cfg, &[], "en", Some(true))
+            set_comment_dict(&cfg, &[], &[], "en", Some(true))
                 .unwrap()
                 .is_none()
         );
-        let (list, on) = set_comment_dict(&cfg, &[], "en", Some(false))
+        let (list, on) = set_comment_dict(&cfg, &[], &[], "en", Some(false))
             .unwrap()
             .unwrap();
         assert!(!on && !list[0].enabled);
@@ -1281,12 +1334,12 @@ mod feature_toggle_tests {
         let cfg = [manual("en", true)];
         let auto = vec!["auto:pinyin/cn_dicts/corrections.dict.yaml".to_string()];
         assert!(
-            set_comment_dict(&cfg, &auto, &auto[0], Some(true))
+            set_comment_dict(&cfg, &auto, &[], &auto[0], Some(true))
                 .unwrap()
                 .is_none()
         );
         for want in [None, Some(false)] {
-            let (list, on) = set_comment_dict(&cfg, &auto, &auto[0], want)
+            let (list, on) = set_comment_dict(&cfg, &auto, &[], &auto[0], want)
                 .unwrap()
                 .unwrap();
             assert!(!on);
@@ -1295,9 +1348,29 @@ mod feature_toggle_tests {
         }
     }
 
+    /// 内置库（未登记时是开的）：要开不动作；要关 / 取反就追加一条关着的 builtin 空壳。
+    #[test]
+    fn builtin_dict_gets_a_disabled_shell() {
+        let cfg = [manual("en", true)];
+        let builtin = vec!["zh_en".to_string()];
+        assert!(
+            set_comment_dict(&cfg, &[], &builtin, "zh_en", Some(true))
+                .unwrap()
+                .is_none()
+        );
+        for want in [None, Some(false)] {
+            let (list, on) = set_comment_dict(&cfg, &[], &builtin, "zh_en", want)
+                .unwrap()
+                .unwrap();
+            assert!(!on);
+            let shell = &list[1];
+            assert!(shell.id == "zh_en" && shell.builtin && !shell.enabled && !shell.auto);
+        }
+    }
+
     #[test]
     fn unknown_id_is_an_error() {
-        assert!(set_comment_dict(&[manual("en", true)], &[], "nope", Some(true)).is_err());
+        assert!(set_comment_dict(&[manual("en", true)], &[], &[], "nope", Some(true)).is_err());
     }
 }
 
@@ -1337,5 +1410,24 @@ mod set_state_tests {
         for t in ["layout", "preedit", "candwin", "nope"] {
             assert!(c.cmd_set_state(t, true).is_err(), "{t}");
         }
+    }
+}
+
+/// `text` 的字符数是否超过 `max`。只数到 `max + 1` 就停，剪贴板再大也不全量遍历。
+fn exceeds_chars(text: &str, max: usize) -> bool {
+    text.chars().take(max.saturating_add(1)).count() > max
+}
+
+#[cfg(test)]
+mod reverse_cap_tests {
+    use super::exceeds_chars;
+
+    #[test]
+    fn cap_counts_chars_not_bytes() {
+        assert!(!exceeds_chars("好吧", 2));
+        assert!(exceeds_chars("好吧么", 2));
+        assert!(!exceeds_chars("", 0));
+        assert!(!exceeds_chars(&"好".repeat(16), 16));
+        assert!(exceeds_chars(&"好".repeat(17), 16));
     }
 }

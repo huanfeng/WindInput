@@ -29,7 +29,7 @@
 //! 宿主就能在加载清单时当场比对：清单里有而注册表没有的键，直接报出来。
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, RwLock};
 
 use wind_config::Config;
 use wind_config::config_schema::{self, FieldType};
@@ -198,21 +198,38 @@ fn to_toml(cfg: &Config) -> String {
 // （装了的里头他要的那些）。英文方案恒在其中——它是中英键切换的目标，关掉中英键就失灵；
 // 也因此用户写下的列表恒含 `english`，不会与出厂列表相等而被「等于默认不落盘」剪掉。
 
-/// 已装方案（构造时扫 assets 得到，见 [`set_installed_schemas`]）。覆盖钩子是函数指针、
-/// 捕获不了变量，故放进程级。
-static INSTALLED: OnceLock<Vec<String>> = OnceLock::new();
+/// 已装方案（构造时扫 assets 得到，见 [`set_installed_schemas`]；导入 / 删除方案后重扫刷新）。
+/// 覆盖钩子是函数指针、捕获不了变量，故放进程级。
+static INSTALLED: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
 /// 英文方案 id：中英键切换的目标，恒启用。
 pub const ENGLISH_SCHEMA: &str = "english";
 
-/// 记下已装方案（构造时调一次；同进程再调无效，装了什么在进程生命期内不变）。
+/// 构造时的首装兜底方案 id（磁盘上没有它也算已装）。重扫已装方案时要按同一规则补回，
+/// 否则导入 / 删除之后列表会和构造时不一致。
+static FALLBACK_SCHEMA: RwLock<String> = RwLock::new(String::new());
+
+/// 记下首装兜底方案（构造时调一次）。
+pub fn set_fallback_schema(id: &str) {
+    *FALLBACK_SCHEMA.write().unwrap_or_else(|e| e.into_inner()) = id.to_string();
+}
+
+/// 首装兜底方案；构造前为空。
+pub fn fallback_schema() -> String {
+    FALLBACK_SCHEMA
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 记下已装方案（构造时调；方案包导入 / 删除后再调一次覆盖）。
 pub fn set_installed_schemas(ids: Vec<String>) {
-    let _ = INSTALLED.set(ids);
+    *INSTALLED.write().unwrap_or_else(|e| e.into_inner()) = ids;
 }
 
 /// 已装方案；构造前为空。
-pub fn installed_schemas() -> &'static [String] {
-    INSTALLED.get().map(Vec::as_slice).unwrap_or(&[])
+pub fn installed_schemas() -> Vec<String> {
+    INSTALLED.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// 用户层里显式写下的 `schema.available`（没写过 = `None`）。
@@ -233,7 +250,7 @@ fn user_chosen_schemas() -> Option<Vec<String>> {
 
 /// 当前启用的方案：装了的 ∩ 用户选的（没选过 = 全部），英文恒在。
 pub fn enabled_schemas() -> Vec<String> {
-    enabled_from(installed_schemas(), user_chosen_schemas().as_deref())
+    enabled_from(&installed_schemas(), user_chosen_schemas().as_deref())
 }
 
 /// 把可选方案设成 [`enabled_schemas`]；当前方案不在其中时换成第一个仍启用的中文方案。
@@ -282,7 +299,7 @@ pub fn set_schema_enabled(id: &str, on: bool) -> Result<(), String> {
         return Err("英文方案是中英键切换的目标，不能关闭".to_string());
     }
     let _w = write_guard();
-    let mut list = enabled_from(installed, user_chosen_schemas().as_deref());
+    let mut list = enabled_from(&installed, user_chosen_schemas().as_deref());
     if on {
         if !list.iter().any(|s| s == id) {
             list.push(id.to_string());
@@ -440,6 +457,104 @@ pub fn set_tooltip_section_enabled(data_dir: &Path, label: &str, on: bool) -> Re
     Config::set_user_value(&["ui", "tooltip", "sections"], value).map_err(|e| e.to_string())
 }
 
+// ── 快捷输入的候选来源（quick_mix 的 members）──────────────────────────
+//
+// `schema.mix_modes` 是结构体数组，[`ConfigValue`] 表达不了「改第几项的某个字段」，
+// 照 [`set_tooltip_section_enabled`] 的先例单独开口。members 是候选来源的单一真相源：
+// 有无即开关、顺序即优先级（见 `MixModeConfig::members`）。界面行序、保留界面不认识的
+// 成员这些规则在宿主侧（与电脑版设置的 `mix_members.rs` 同一套），这里只管读与整列写回。
+
+/// 内置「快捷」融合实例 id（同 `wind_config::config::QUICK_MIX_ID`）。
+const QUICK_MIX_ID: &str = wind_config::config::QUICK_MIX_ID;
+
+/// 快捷输入候选来源：当前生效的成员序与出厂成员序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickMixMembers {
+    /// 当前生效（加载期迁移之后）的成员；配置里没有 quick_mix 实例时为 `None`
+    pub current: Option<Vec<String>>,
+    /// 出厂（L1⊕L2⊕L2.5）的成员，「恢复默认」用它
+    pub defaults: Vec<String>,
+}
+
+/// 读快捷输入候选来源（当前与出厂）。
+pub fn quick_mix_members(data_dir: &Path) -> QuickMixMembers {
+    let cfg = Config::load(Some(data_dir)).unwrap_or_default();
+    let defaults = Config::system_preset_value(Some(data_dir))
+        .ok()
+        .and_then(|v| v.try_into::<Config>().ok())
+        .unwrap_or_default();
+    let members_of = |c: &Config| {
+        c.schema
+            .mix_modes
+            .iter()
+            .find(|m| m.id == QUICK_MIX_ID)
+            .map(|m| m.members.clone())
+    };
+    QuickMixMembers {
+        current: members_of(&cfg),
+        defaults: members_of(&defaults).unwrap_or_default(),
+    }
+}
+
+/// 整列写回快捷输入的候选来源（写用户层 `schema.mix_modes`）。只写盘，生效要另发重载。
+///
+/// ⚠ 不能拿 `Config::load` 的结果整份写回：加载期 `normalize` 会把各实例的 `trigger_keys`
+/// 折算进 `keys.key_actions` 并清空，写回的是 `trigger_keys = []`——那等于「用户清空了触发键」，
+/// 下次加载 `;` 就进不了快捷输入了。所以在**原始值**上改：用户层写过 `schema.mix_modes` 就改那份，
+/// 没写过就改出厂那份（与出厂一致时由 `set_user_value` 剪掉，不留残余），其余字段原样保留。
+pub fn set_quick_mix_members(data_dir: &Path, members: Vec<String>) -> Result<(), String> {
+    let _w = write_guard();
+    let cfg = Config::load(Some(data_dir)).map_err(|e| e.to_string())?;
+    // 整个数组写回：降级时读到的不可信，写回会抹掉用户原有的融合实例设置
+    if cfg
+        .degradation
+        .blocks_write_back("schema.mix_modes", "移动端快捷候选来源")
+    {
+        return Err("配置文件有问题，本次未写入；修好配置文件后再试".to_string());
+    }
+    let preset = Config::system_preset_value(Some(data_dir)).map_err(|e| e.to_string())?;
+    let base = user_mix_modes()
+        .or_else(|| mix_modes_of(&preset))
+        .unwrap_or_default();
+    let patched = patch_quick_mix_members(base, &members)?;
+    Config::set_user_value(&["schema", "mix_modes"], toml::Value::Array(patched))
+        .map_err(|e| e.to_string())
+}
+
+/// 用户层里显式写下的 `schema.mix_modes`（没写过 = `None`）。语法坏的情形已被调用方的降级闸挡掉。
+fn user_mix_modes() -> Option<Vec<toml::Value>> {
+    let path = Config::user_config_dir()?.join("config.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    mix_modes_of(&value)
+}
+
+fn mix_modes_of(root: &toml::Value) -> Option<Vec<toml::Value>> {
+    root.get("schema")?.get("mix_modes")?.as_array().cloned()
+}
+
+/// 纯函数：把 `mix_modes` 原始数组里 quick_mix 那一项的 members 换成 `members`，其余原样。
+/// 没有 quick_mix 实例 → Err（不静默新建实例）；成员去重、去空白项。
+fn patch_quick_mix_members(
+    mut mix_modes: Vec<toml::Value>,
+    members: &[String],
+) -> Result<Vec<toml::Value>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let list: Vec<toml::Value> = members
+        .iter()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty() && seen.insert(m.to_string()))
+        .map(|m| toml::Value::String(m.to_string()))
+        .collect();
+    let entry = mix_modes
+        .iter_mut()
+        .filter_map(toml::Value::as_table_mut)
+        .find(|t| t.get("id").and_then(toml::Value::as_str) == Some(QUICK_MIX_ID))
+        .ok_or_else(|| "配置里没有快捷输入（quick_mix）实例".to_string())?;
+    entry.insert("members".to_string(), toml::Value::Array(list));
+    Ok(mix_modes)
+}
+
 /// 写一个配置键到用户层。
 ///
 /// **只写盘，不重载引擎**——重载走 [`crate::MobileCommand::ReloadConfig`]。分开是为了
@@ -540,6 +655,71 @@ mod tests {
             assert!(!got.user);
             assert_eq!(got.label, m.label);
         }
+    }
+
+    fn quick_mix_raw(extra: &str) -> Vec<toml::Value> {
+        let text = format!(
+            "[[schema.mix_modes]]\nid = \"quick_mix\"\ntrigger_keys = [\"semicolon\"]\n\
+             members = [\"quick_input.calc\", \"english\"]\ncandidate_layout = \"vertical\"\n{extra}"
+        );
+        let v: toml::Value = toml::from_str(&text).unwrap();
+        mix_modes_of(&v).unwrap()
+    }
+
+    /// 只换 quick_mix 的 members：触发键、布局等字段与别的实例原样保留
+    #[test]
+    fn patch_quick_mix_members_keeps_other_fields() {
+        let base = quick_mix_raw("[[schema.mix_modes]]\nid = \"other\"\nmembers = [\"pinyin\"]\n");
+        let out = patch_quick_mix_members(base, &ids(&["english", "$rare_char"])).unwrap();
+        let q = out[0].as_table().unwrap();
+        assert_eq!(
+            q["members"].as_array().unwrap(),
+            &vec![
+                toml::Value::String("english".into()),
+                toml::Value::String("$rare_char".into())
+            ]
+        );
+        assert_eq!(
+            q["trigger_keys"].as_array().unwrap(),
+            &vec![toml::Value::String("semicolon".into())],
+            "触发键不能被写成空（那会关掉快捷输入）"
+        );
+        assert_eq!(q["candidate_layout"].as_str(), Some("vertical"));
+        assert_eq!(
+            out[1].as_table().unwrap()["members"].as_array().unwrap(),
+            &vec![toml::Value::String("pinyin".into())],
+            "别的实例不动"
+        );
+    }
+
+    /// 重复与空白成员丢掉；全关（空列表）照写
+    #[test]
+    fn patch_quick_mix_members_dedups_and_allows_empty() {
+        let out =
+            patch_quick_mix_members(quick_mix_raw(""), &ids(&["english", " ", "english"])).unwrap();
+        assert_eq!(out[0]["members"].as_array().unwrap().len(), 1);
+        let out = patch_quick_mix_members(quick_mix_raw(""), &[]).unwrap();
+        assert!(out[0]["members"].as_array().unwrap().is_empty());
+    }
+
+    /// 没有 quick_mix 实例 → 拒绝，不新建
+    #[test]
+    fn patch_quick_mix_members_requires_instance() {
+        let v: toml::Value = toml::from_str("[[schema.mix_modes]]\nid = \"other\"\n").unwrap();
+        assert!(patch_quick_mix_members(mix_modes_of(&v).unwrap(), &ids(&["english"])).is_err());
+        assert!(patch_quick_mix_members(Vec::new(), &ids(&["english"])).is_err());
+    }
+
+    /// 出厂原始值里 quick_mix 带着触发键：用户层没写过 mix_modes 时以它为底，写回后 `;` 仍能进
+    #[test]
+    fn preset_mix_modes_carry_trigger_keys() {
+        let preset = toml::Value::try_from(Config::default()).unwrap();
+        let modes = mix_modes_of(&preset).expect("出厂应有 mix_modes");
+        let q = modes
+            .iter()
+            .find(|m| m.get("id").and_then(toml::Value::as_str) == Some(QUICK_MIX_ID))
+            .expect("出厂应有 quick_mix");
+        assert!(!q["trigger_keys"].as_array().unwrap().is_empty());
     }
 
     /// 注册表里报成 enum 的键都要带值域：设置页拿空选项画不出选择器（LayoutEnum 曾漏填）。

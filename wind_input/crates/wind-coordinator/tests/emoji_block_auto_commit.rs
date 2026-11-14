@@ -87,6 +87,7 @@ fn type_code(c: &Coordinator, code: &str) -> (KeyAction, Vec<String>) {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }));
     }
     (last.unwrap(), c.debug_all_candidate_texts())

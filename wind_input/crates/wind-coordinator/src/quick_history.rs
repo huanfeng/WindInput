@@ -42,17 +42,17 @@
 //!
 //! # 记什么（写端）：按「上屏的是哪个候选」判，不按文本长什么样判
 //!
-//! - 记：Free / 大写英文 / 词组透镜下的原文上屏（回车、空格兜底、选中原文候选、标点顶屏）
+//! - 记：Free / 大写英文 / 词组 / 文本透镜下的原文上屏（回车、空格兜底、选中原文候选、标点顶屏）
 //!   与历史候选本身（次数 +1）；
-//! - 不记：文本透镜的原文（纯小写字母本身就是拼音 / 英文编码，见 `learn_mix_literal`）、
-//!   成员给出的候选（英文词只记英文词频，t46 楼主说英文不需要；拼音走拼音造词）、
+//! - 不记：成员给出的候选（英文词只记英文词频，t46 楼主说英文不需要；拼音走拼音造词）、
 //!   数字透镜产出（日期 / 计算 / 数字 / 金额）、重复上屏候选、已有分步上屏段时的上屏；
 //! - 门槛见 [`worth_remembering`]。
 
 use crate::coordinator::{Coordinator, State};
 use crate::handle_mode::MixLens;
-use wind_candidate::Candidate;
+use wind_candidate::{Candidate, CandidateSource};
 use wind_store::completion::CompletionKind;
+use wind_store::freq::FreqRecord;
 
 /// 历史候选的 `Candidate::id` 标记。上屏出口凭它认出「这是一条历史」。
 pub(crate) const QUICK_HISTORY_ID: &str = "quick_input.history";
@@ -62,6 +62,10 @@ pub(crate) const QUICK_HISTORY_ID: &str = "quick_input.history";
 /// Free 透镜里历史排在原文前面，给多了原文会被挤到第二页；文本 / 数字透镜里它与其它成员
 /// 并列，同生僻字成员「最多一页」的理由：别把其余成员整个挤到翻页之外。
 pub(crate) const QUICK_HISTORY_QUOTA: usize = 5;
+
+/// 历史候选并进英文段时的起算位次（0 起）。位置提升按「位次 / 2^有效次数」前移，标定同
+/// 拼音（10→5→2→1）：用 1 次到第 4 位、3 次到首位。
+pub(crate) const HISTORY_BASE_POS: usize = 8;
 
 /// 值不值得记进历史：至少 2 个字符、含字母（纯数字、纯标点不记），且不含空白。
 ///
@@ -97,6 +101,19 @@ impl Coordinator {
         state: &State,
         skip_exact: bool,
     ) -> Vec<Candidate> {
+        self.quick_history_candidates_with_recs(state, skip_exact).0
+    }
+
+    /// 同 [`Self::quick_history_candidates`]，另返回各候选文本的热度记录（供词频重排）。
+    pub(crate) fn quick_history_candidates_with_recs(
+        &self,
+        state: &State,
+        skip_exact: bool,
+    ) -> (
+        Vec<Candidate>,
+        std::collections::HashMap<String, FreqRecord>,
+    ) {
+        let none = (Vec::new(), std::collections::HashMap::new());
         let buffer = &state.mix_buffer;
         // 已有分步上屏段时不出：记录端同样不记这种状态（见 `learn_mix_literal`），
         // 出了也只会把「中文段 + 历史」拼成一次上屏，分段里的造词就丢了。
@@ -104,10 +121,10 @@ impl Coordinator {
             || !state.committed_text.is_empty()
             || !self.mix_has_history(state.mix_id)
         {
-            return Vec::new();
+            return none;
         }
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return none;
         };
         // 全量取出再按小写前缀过滤：store 只提供区分大小写的前缀扫描，而条数有
         // `history_max` 封顶（出厂 1000），逐键一次读事务可以接受。
@@ -115,7 +132,7 @@ impl Coordinator {
             Ok((rows, _)) => rows,
             Err(e) => {
                 tracing::debug!("快捷输入历史读取失败: {e}");
-                return Vec::new();
+                return none;
             }
         };
         let want = buffer.to_lowercase();
@@ -131,14 +148,65 @@ impl Coordinator {
         if exact {
             out.push(cand(buffer.clone()));
         }
-        out.extend(
-            rows.into_iter()
-                .filter(|(text, _)| text != buffer)
-                .filter(|(text, _)| text.to_lowercase().starts_with(&want))
-                .take(QUICK_HISTORY_QUOTA)
-                .map(|(text, _)| cand(text)),
-        );
-        out
+        let mut recs = std::collections::HashMap::new();
+        for (text, rec) in rows
+            .into_iter()
+            .filter(|(text, _)| text != buffer)
+            .filter(|(text, _)| text.to_lowercase().starts_with(&want))
+            .take(QUICK_HISTORY_QUOTA)
+        {
+            recs.insert(
+                text.clone(),
+                FreqRecord {
+                    count: rec.count,
+                    last_used: rec.last_used,
+                },
+            );
+            out.push(cand(text));
+        }
+        (out, recs)
+    }
+
+    /// 文本透镜下并进**英文段**的历史候选，连同各自的热度记录（次数 / 最近一次）。
+    ///
+    /// 历史成员按成员顺序排在英文之后时，`;f` 下 `font-size` 这类带符号的历史永远落在英文段
+    /// 之后；而整体提前又会压住用户常打的 `font`。所以把命中的历史并进英文段、与英文词
+    /// 一起过同一道词频重排：谁用得多谁在前，成员顺序这条原则不动（t253）。
+    ///
+    /// 历史候选从英文段的 [`HISTORY_BASE_POS`] 位起算，由重排按 `位次 / 2^有效次数` 前移；
+    /// 与词库同名的不并入（词库词有自己的词频记录）。
+    pub(crate) fn quick_history_english_pool(&self, state: &State) -> Vec<(Candidate, FreqRecord)> {
+        let buffer = &state.mix_buffer;
+        if buffer.is_empty()
+            || !state.committed_text.is_empty()
+            || !self.mix_has_history(state.mix_id)
+        {
+            return Vec::new();
+        }
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let Ok((rows, _)) = store.list_completions(CompletionKind::QuickHistory, "", 0, 0) else {
+            return Vec::new();
+        };
+        let want = buffer.to_lowercase();
+        rows.into_iter()
+            .filter(|(text, _)| text != buffer && text.to_lowercase().starts_with(&want))
+            .take(QUICK_HISTORY_QUOTA)
+            .map(|(text, rec)| {
+                let cand = Candidate {
+                    text,
+                    id: QUICK_HISTORY_ID.to_string(),
+                    source: CandidateSource::English,
+                    ..Default::default()
+                };
+                let rec = FreqRecord {
+                    count: rec.count,
+                    last_used: rec.last_used,
+                };
+                (cand, rec)
+            })
+            .collect()
     }
 
     /// Free / 大写英文透镜的候选（`seg` = 原文 + 英文段）并上历史。没有历史命中时原样返回。
@@ -159,11 +227,15 @@ impl Coordinator {
         raw_pinned: bool,
     ) -> Vec<Candidate> {
         use wind_candidate::CandidateSource;
-        let hist = self.quick_history_candidates(state, false);
+        let (mut hist, recs) = self.quick_history_candidates_with_recs(state, false);
         if hist.is_empty() {
             return seg;
         }
         let raw = state.mix_buffer.as_str();
+        // 历史段与文本透镜同一把尺：按英文调频（一次到顶 / 位置提升…）重排。
+        // 逐字相同的那条是原文本身，恒首位不参与。
+        let skip = usize::from(hist.first().is_some_and(|h| h.text == raw));
+        self.apply_freq_rerank_with_extra(Some("english"), &mut hist[skip..], raw, recs);
         // 原文格**按位置认**：钉了原文时 `seg` 首格就是它——`mix_free_english_segment` 先放
         // 头部、去重保留首次出现。按文本认会在两处失手：头部格被同名词库词占据
         // （`merge_head_with_dict`），以及大小写档位把它改写成 `HEL` / `hel`。
@@ -274,19 +346,17 @@ impl Coordinator {
 
     /// 原文上屏（回车、空格兜底、选中原文候选）时记历史。
     ///
-    /// 只记**整段都是字面输入**的那次，且只在 Free / 大写英文 / 词组透镜下记：
+    /// 只记**整段都是字面输入**的那次，数字透镜外都记：
     /// - 已有分步上屏段（`committed_text` 非空）时上屏的是「中文段 + 剩余码」，剩余码不是
     ///   用户想留的那串；
     /// - 数字透镜的缓冲是算式或数字；
-    /// - **文本透镜不记**：缓冲是纯小写字母，本身就是拼音 / 英文的合法编码。回车上屏的
-    ///   `nihao`、`test` 记进来，下次打 `;te` 首选就成了 `test` 而不是「特」。t46 要的是
-    ///   带符号、带大写的标识符，它们都落在 Free / 大写英文透镜。
+    /// - 文本透镜（纯小写）也记：回车 / 选原文是用户明确要字面，开了历史成员就是要这个效果。
+    ///   词库词由 `mix_cand_is_literal` 挡掉；是否压住拼音由成员顺序决定（出厂历史排末位、
+    ///   并进英文段，不动拼音），不为小写另设特例。
     ///
     /// 必须在 `exit_mix_mode` 清缓冲之前调用。
     pub(crate) fn learn_mix_literal(&self, state: &State) {
-        if !state.committed_text.is_empty()
-            || matches!(self.mix_lens(state), MixLens::Numeric | MixLens::Text)
-        {
+        if !state.committed_text.is_empty() || self.mix_lens(state) == MixLens::Numeric {
             return;
         }
         let text = state.mix_buffer.clone();

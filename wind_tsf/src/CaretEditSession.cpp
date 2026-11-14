@@ -119,6 +119,16 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
 
             WIND_LOG_DEBUG_FMT(L"CaretEditSession: Got caret rect (%ld, %ld, %ld, %ld) clipped=%d\n",
                       _caretRect.left, _caretRect.top, _caretRect.right, _caretRect.bottom, clipped);
+
+            // 组合进行中（含刚开、尚未重排时的试探），Chromium 报的可能是上一个输入框里那次组合的
+            // 旧坐标。落在本 context 显示区之外就当无效，交给下方降级；仍取不到时调用方沿用上次坐标。
+            if ((_pComposition != nullptr || _probeKind == CaretProbeKind::FirstShowProbe)
+                && IsOutsideViewExt(pContextView, _caretRect))
+            {
+                WIND_LOG_DEBUG(L"CaretEditSession: 坐标落在本 context 显示区之外，不采信\n");
+                _succeeded = FALSE;
+                _rejectedOutsideView = TRUE;
+            }
         }
         else
         {
@@ -222,6 +232,7 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
         // ⚠ 它自身可能退化：shell context 上实测返回 (0,1368,0,1368)。退化时**不校验**（放行），
         //   否则会把正常宿主一并误杀。
         // ⚠ 只在确实要降级时才取：GetScreenExt 有跨宿主成本，且每帧打日志会淹掉其它行。
+        //   （例外：Chromium 系组合期每帧都要查一次，见 IsOutsideViewExt。）
         //
         // ★ 与 `IsScreenPointOutsideAllMonitors`（TextService.cpp）**并存而非取代**。本注释
         // 前身写的是「若实测可靠，将来可取代『所有显示器』做越界校验」——2026-09-12 实测证明
@@ -651,6 +662,39 @@ BOOL CCaretEditSession::GetCompositionRectResult(RECT* prc)
     return FALSE;
 }
 
+BOOL CCaretEditSession::IsChromiumView(ITfContextView* pView)
+{
+    HWND hwnd = nullptr;
+    WCHAR cls[64] = {};
+    return pView != nullptr && SUCCEEDED(pView->GetWnd(&hwnd)) && hwnd != nullptr &&
+           GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) != 0 &&
+           (wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0 || wcscmp(cls, L"Chrome_RenderWidgetHostHWND") == 0);
+}
+
+BOOL CCaretEditSession::IsChromiumContext(ITfContext* pContext)
+{
+    ITfContextView* pView = nullptr;
+    if (pContext == nullptr || FAILED(pContext->GetActiveView(&pView)) || pView == nullptr)
+        return FALSE;
+    const BOOL yes = IsChromiumView(pView);
+    pView->Release();
+    return yes;
+}
+
+BOOL CCaretEditSession::IsOutsideViewExt(ITfContextView* pView, const RECT& rc)
+{
+    // 只认 Chromium 系：旧坐标是它组合字符框缓存的问题，别的宿主的显示区未必覆盖插入点
+    // （隐藏 IME 窗、单元格编辑框外扩等），不拿它去否决。
+    if (!IsChromiumView(pView))
+        return FALSE;
+    RECT ext = {};
+    if (FAILED(pView->GetScreenExt(&ext)) || ext.right <= ext.left || ext.bottom <= ext.top)
+    {
+        return FALSE;
+    }
+    return rc.left < ext.left || rc.left > ext.right || rc.top < ext.top || rc.top > ext.bottom;
+}
+
 // Static method to get both caret rect and composition start rect
 BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, TfClientId tfClientId,
                                                          ITfComposition* pComposition,
@@ -658,8 +702,13 @@ BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, Tf
                                                          LONG compStartOffset,
                                                          BOOL* pUsedCompStartAsCaret,
                                                          RECT* pCompRect, BOOL* pHasCompRect,
-                                                         BOOL* pUsedImmCandidateForm)
+                                                         BOOL* pUsedImmCandidateForm,
+                                                         BOOL* pRejectedOutsideView)
 {
+    if (pRejectedOutsideView)
+    {
+        *pRejectedOutsideView = FALSE;
+    }
     if (pUsedCompStartAsCaret)
     {
         *pUsedCompStartAsCaret = FALSE;
@@ -713,6 +762,10 @@ BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, Tf
         if (pCompRect && pHasCompRect)
         {
             *pHasCompRect = pEditSession->GetCompositionRectResult(pCompRect);
+        }
+        if (pRejectedOutsideView)
+        {
+            *pRejectedOutsideView = pEditSession->RejectedOutsideView();
         }
     }
     else

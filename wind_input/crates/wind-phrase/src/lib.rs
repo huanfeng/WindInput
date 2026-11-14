@@ -105,6 +105,9 @@ pub struct PhraseHit {
     pub source_text: String,
     /// 是否系统短语（`is_system=true`）；false=用户短语。调试提示区分来源用。
     pub is_system: bool,
+    /// `Some(组名)` = 这是 `$SS`/`$AA` 在**精确码**下炸开的成员（含嵌入 `$CC` 的命令成员）。
+    /// 宿主据此判「同码是否还有别的候选」，有重码时把整组折回一条组名候选，而不是自动展开。
+    pub group: Option<String>,
 }
 
 impl PhraseHit {
@@ -117,7 +120,14 @@ impl PhraseHit {
             comment: String::new(),
             source_text: String::new(),
             is_system: false,
+            group: None,
         }
+    }
+
+    /// 标为 `$SS`/`$AA` 精确码展开出的组成员（见 [`PhraseHit::group`]）。
+    fn with_group(mut self, name: &str) -> Self {
+        self.group = Some(name.to_string());
+        self
     }
 
     /// 附上原始记录文本（构造点统一经此填充，测试用 `plain` 直构不填）。
@@ -147,6 +157,7 @@ impl PhraseHit {
             comment,
             source_text: String::new(),
             is_system: false,
+            group: None,
         }
     }
 
@@ -161,6 +172,7 @@ impl PhraseHit {
             comment,
             source_text: String::new(),
             is_system: false,
+            group: None,
         }
     }
 }
@@ -431,16 +443,33 @@ impl PhraseLayer {
                         comment: String::new(),
                         source_text: e.text.clone(),
                         is_system: false,
+                        group: None,
                     }),
                     Ok(PhraseEval::Array(arr)) => {
                         for el in arr.elements {
-                            // 仅显现无动作的字面元素（符号等）；带动作的嵌入 $CC 需元素级源，后续补。
-                            // 空元素同样丢弃：`$SS` 的元素是**运行时**求值的，词条固定写 N 个
+                            // 空元素丢弃：`$SS` 的元素是**运行时**求值的，词条固定写 N 个
                             // 元素、各查第 1..N 个字时，剪贴板不足 N 字必然让尾部几条落空。
-                            if el.actions.is_empty() && !el.display.is_empty() {
-                                out.push(
-                                    PhraseHit::plain(el.display, e.weight).with_source(&e.text),
-                                );
+                            if el.display.is_empty() {
+                                continue;
+                            }
+                            match (el.actions.is_empty(), el.src) {
+                                // 带动作的嵌入 `$CC`：每个成员是独立的命令候选，携**元素级**
+                                // 命令源（不是整组的源），选中时只执行这一个成员的动作链。
+                                (false, Some(src)) => out.push(PhraseHit {
+                                    text: el.display,
+                                    weight: e.weight,
+                                    command_src: Some(src),
+                                    nav_code: None,
+                                    comment: String::new(),
+                                    source_text: e.text.clone(),
+                                    is_system: false,
+                                    group: Some(arr.name.clone()),
+                                }),
+                                _ => out.push(
+                                    PhraseHit::plain(el.display, e.weight)
+                                        .with_source(&e.text)
+                                        .with_group(&arr.name),
+                                ),
                             }
                         }
                     }
@@ -746,16 +775,19 @@ pub fn expand_dict_value(
                 display,
                 command_src: Some(text.to_string()),
             },
-            // $AA/$SS 组：炸开为多个候选（仅显现无动作的字面元素，与短语 lookup_at 一致；
-            // 带动作的嵌入 $CC 需元素级源，后续补）。
+            // $AA/$SS 组：炸开为多个候选。字面元素 → 上屏文本；带动作的嵌入 `$CC` →
+            // 携元素级命令源（`items` 第二槽），选中时只执行该成员的动作链。
             Ok(PhraseEval::Array(arr)) => {
                 let name = arr.name.clone();
                 // 空元素同样丢弃，与 `lookup_at` 的数组分支同处置。
                 let items: Vec<(String, Option<String>)> = arr
                     .elements
                     .into_iter()
-                    .filter(|el| el.actions.is_empty() && !el.display.is_empty())
-                    .map(|el| (el.display, None))
+                    .filter(|el| !el.display.is_empty())
+                    .map(|el| {
+                        let src = if el.actions.is_empty() { None } else { el.src };
+                        (el.display, src)
+                    })
                     .collect();
                 if items.is_empty() {
                     // 同上：`$SS(...)` 是货真价实的特殊语法，一个成员都没剩时该整条丢弃，
@@ -1177,11 +1209,11 @@ mod tests {
             is_system: true,
             category: String::new(),
         }]);
-        let clip = |_n: i64| "好人".to_string();
-        // 只认「好」，借此模拟「这个字查不到」。
+        let clip = |_n: i64| "好吧".to_string();
+        // 整串反查：只认「好吧」，借此模拟「这个词查不到」。
         let reverse = |text: &str, _fmt: &str| {
-            if text == "好" {
-                "好: vbg hǎo".to_string()
+            if text == "好吧" {
+                "好吧: hbba hǎo ba".to_string()
             } else {
                 String::new()
             }
@@ -1192,7 +1224,7 @@ mod tests {
         };
         let hits = layer.lookup_at("cofc", fixed(), &[], &host, &PhraseScope::ALL);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].text, "好: vbg hǎo");
+        assert_eq!(hits[0].text, "好吧: hbba hǎo ba");
         assert!(
             hits[0].command_src.is_none(),
             "无动作短语：display 即上屏文本，不该被当成命令候选"
@@ -1626,9 +1658,76 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PhraseHit::plain("（）".into(), 500).with_source(src),
-                PhraseHit::plain("【】".into(), 500).with_source(src),
+                PhraseHit::plain("（）".into(), 500)
+                    .with_source(src)
+                    .with_group("符号"),
+                PhraseHit::plain("【】".into(), 500)
+                    .with_source(src)
+                    .with_group("符号"),
             ]
+        );
+    }
+
+    /// `$SS` 内嵌 `$CC`：每个命令成员是独立的命令候选，携**元素级**命令源（不是整组源）。
+    #[test]
+    fn test_cmdbar_array_embedded_command_members() {
+        let src = r#"$SS("站点", "纯文本", $CC("百度", open("https://baidu.com")), $CC("上屏", type("x")))"#;
+        let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
+        map.insert(
+            "zzgo".into(),
+            vec![PhraseEntry {
+                text: src.into(),
+                weight: 500,
+                position: 0,
+                is_system: false,
+                category: String::new(),
+            }],
+        );
+        let layer = PhraseLayer { map };
+        let got = layer.lookup_at("zzgo", fixed(), &[], &no_clip(), &PhraseScope::ALL);
+        assert_eq!(got.len(), 3, "字面 + 两个命令成员都应出现: {got:?}");
+        assert_eq!(got[0].text, "纯文本");
+        assert!(got[0].command_src.is_none());
+        assert_eq!(got[1].text, "百度");
+        let cmd = got[1].command_src.as_deref().expect("命令成员带命令源");
+        assert!(
+            cmd.starts_with("$CC(") && cmd.contains("baidu.com"),
+            "{cmd}"
+        );
+        assert!(!cmd.contains("$SS"), "命令源只含该成员，不含整组: {cmd}");
+        assert_eq!(got[2].text, "上屏");
+        assert!(got[2].command_src.as_deref().unwrap().contains("type("));
+        // 前缀导航里组仍是一条组名候选，不因含命令成员而变化。
+        let nav = layer.lookup_prefix_at("zz", fixed(), &[], 2, &PhraseScope::ALL);
+        assert_eq!(nav.len(), 1);
+        assert_eq!(nav[0].nav_code.as_deref(), Some("zzgo"));
+        assert!(nav[0].command_src.is_none());
+    }
+
+    /// 词库文件里的 `$SS` 同样带出命令成员（`items` 第二槽 = 元素级命令源）。
+    #[test]
+    fn dict_value_group_carries_command_members() {
+        let now = fixed();
+        let clip = no_clip();
+        let got = expand_dict_value(
+            r#"$SS("站点", "纯文本", $CC("百度", open("https://baidu.com")))"#,
+            "zzgo",
+            now,
+            &[],
+            &clip,
+        );
+        let DictExpansion::Group { name, items } = got else {
+            panic!("应为 Group: {got:?}")
+        };
+        assert_eq!(name, "站点");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], ("纯文本".to_string(), None));
+        assert_eq!(items[1].0, "百度");
+        assert!(
+            items[1]
+                .1
+                .as_deref()
+                .is_some_and(|c| c.contains("baidu.com"))
         );
     }
 
@@ -1652,9 +1751,15 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PhraseHit::plain("①".into(), 500).with_source(src),
-                PhraseHit::plain("②".into(), 500).with_source(src),
-                PhraseHit::plain("③".into(), 500).with_source(src),
+                PhraseHit::plain("①".into(), 500)
+                    .with_source(src)
+                    .with_group("数字"),
+                PhraseHit::plain("②".into(), 500)
+                    .with_source(src)
+                    .with_group("数字"),
+                PhraseHit::plain("③".into(), 500)
+                    .with_source(src)
+                    .with_group("数字"),
             ]
         );
     }
@@ -1964,6 +2069,56 @@ mod tests {
         let got = layer.lookup_prefix_at("dat", fixed(), &[], 2, &PhraseScope::ALL);
         assert_eq!(got.len(), 1, "前缀枚举也不应丢弃 ${{YC}} 模板短语");
         assert_eq!(got[0].text, "二〇二六年六月十四日");
+    }
+
+    /// `date()` 的记号与同名 `$变量` 必须逐日期给出同一个答案（文档推荐用 `date()`，
+    /// 两边若各改各的，用户换个写法就换个结果）。
+    ///
+    /// 日期挑了会分叉的几类：普通日、节日（`$LF` 非空）、闰月、元旦（农历年≠公历年）、
+    /// 年底。两边都经 `lookup_at`，覆盖 `is_cmdbar_grammar` 分发。`$LF` 非节日时两边都
+    /// 应当整条丢弃，故直接比较结果列表而不是逐个 unwrap。
+    #[test]
+    fn date_tokens_match_template_vars() {
+        const VARS: &[&str] = &[
+            "YC", "MC", "DC", "WC", "LY", "LYN", "LZ", "LM", "LD", "LMD", "LF", "ts", "tsms",
+        ];
+        let days = [
+            (2026, 6, 14),
+            (2026, 6, 19),
+            (2020, 6, 1),
+            (2026, 1, 1),
+            (2026, 12, 31),
+        ];
+        for (y, m, d) in days {
+            let now = Local.with_ymd_and_hms(y, m, d, 9, 5, 7).unwrap();
+            for v in VARS {
+                let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
+                for (code, text) in [
+                    ("a", format!("${{{v}}}")),
+                    ("b", format!("{{date(\"{v}\")}}")),
+                ] {
+                    map.insert(
+                        code.into(),
+                        vec![PhraseEntry {
+                            text,
+                            weight: 1,
+                            position: 0,
+                            is_system: true,
+                            category: String::new(),
+                        }],
+                    );
+                }
+                let layer = PhraseLayer { map };
+                let texts = |code: &str| -> Vec<String> {
+                    layer
+                        .lookup_at(code, now, &[], &no_clip(), &PhraseScope::ALL)
+                        .into_iter()
+                        .map(|h| h.text)
+                        .collect()
+                };
+                assert_eq!(texts("a"), texts("b"), "{v} @ {y}-{m}-{d}");
+            }
+        }
     }
 
     /// 回归：系统短语 `uuid = '$uuid'` 曾因 `expand_var` 没有 `uuid` 分支而整条被丢弃

@@ -9,6 +9,33 @@ use crate::coordinator::Coordinator;
 use crate::pipeline::ModeKind;
 
 impl Coordinator {
+    /// 等后台加载的联想下一词表装好（测试用）：生产里它在启动预热时派出、按键前早已就绪，
+    /// headless 测试要自己等。没有派出加载（非智能档）时立即返回 `false`。
+    pub fn debug_wait_assoc_bigram(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.assoc_bigram.get().is_none() {
+            if !self
+                .assoc_bigram_loading
+                .load(std::sync::atomic::Ordering::Acquire)
+                || std::time::Instant::now() >= deadline
+            {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        true
+    }
+
+    /// 当前生效的每页候选数（测试/诊断用）。`overlay = true` 时按 overlay 模式（临拼）取档。
+    pub fn debug_per_page(&self, overlay: bool) -> usize {
+        self.per_page(overlay.then_some(ModeKind::TempPinyin))
+    }
+
+    /// 当前下发给 UI 的竖排补位行数（测试/诊断用）：按生效每页数封顶后的 `min_rows`。
+    pub fn debug_candidate_min_rows(&self) -> u32 {
+        self.eff_candidate().effective_min_rows()
+    }
+
     /// 当前**已启用**的方案列表（`schema.available`，测试/诊断用）。
     ///
     /// 与 [`Self::active_schema_id`] 不同，这里回答的是「哪些方案会被启动预热覆盖」。
@@ -23,6 +50,20 @@ impl Coordinator {
     /// 目标下标」那段接线都在这条路上。
     pub fn debug_menu_action(&self, kind: wind_ui_types::MenuKind) {
         self.handle_ui_event(UiEvent::MenuAction(kind));
+    }
+
+    /// 弹一条 toast（测试/诊断用）：直通生产入口 [`Self::show_toast`]。
+    pub fn debug_show_toast(&self, text: &str) {
+        self.show_toast(
+            text,
+            wind_ui_types::ToastPosition::BottomCenter,
+            wind_ui_types::ToastKind::Info,
+        );
+    }
+
+    /// 弹一条状态气泡（测试/诊断用）：直通生产入口 [`Self::show_tip`]。
+    pub fn debug_show_tip(&self, text: &str) {
+        self.show_tip(text);
     }
 
     /// 弹出候选右键菜单（测试/诊断用）：直通生产入口 [`Self::show_candidate_menu`]，菜单项经
@@ -86,6 +127,16 @@ impl Coordinator {
                 }
             })
             .collect()
+    }
+
+    /// 当前生效的联想类型（`off` / `smart` / ...，取 Debug 名小写；测试/诊断用）。
+    pub fn debug_assoc_kind(&self) -> String {
+        format!("{:?}", self.assoc_config().kind).to_lowercase()
+    }
+
+    /// 当前生效的拼音语法模型权重（已套 `[mobile.grammar]` 覆盖；测试/诊断用）。
+    pub fn debug_pinyin_grammar_weight(&self) -> f64 {
+        self.engine_mgr.pinyin_global().grammar.weight
     }
 
     /// 当前 `state.preedit`（测试/诊断用）。联想态在非嵌入模式下往这里写「联想输入」
@@ -300,6 +351,27 @@ impl Coordinator {
         &self.softkeyboard
     }
 
+    /// 翻转「仅本次候选窗」的注释态（测试/诊断用）：直通 [`Self::toggle_comment_session`]。
+    pub fn debug_toggle_comment_session(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.toggle_comment_session(&mut s);
+    }
+
+    /// 改注释持久态并写回（测试/诊断用）：直通 [`Self::set_comment_state`]。
+    pub fn debug_set_comment_state(
+        &self,
+        to: wind_config::comment_lib::CommentState,
+    ) -> anyhow::Result<()> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.set_comment_state(&mut s, to)
+    }
+
+    /// 当前生效的注释态（测试/诊断用）：直通 [`Self::effective_comment_state`]。
+    pub fn debug_effective_comment_state(&self) -> wind_config::comment_lib::CommentState {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::effective_comment_state(&self.rt().config, &s)
+    }
+
     /// 走一次菜单命令分派（测试用），与右键菜单点选是同一个入口。
     ///
     /// 存在理由：会写盘的菜单项（如「密码框强制英文」）要在重定向了用户目录的独立测试
@@ -347,6 +419,25 @@ impl Coordinator {
             .candidates
             .iter()
             .map(|c| (c.text.clone(), c.code.clone(), c.comment.clone()))
+            .collect()
+    }
+
+    /// 全部候选的 `(text, is_command, is_group, phrase_template)`（测试/诊断用）。
+    /// `$SS`/`$AA` 展开态与命令成员的断言要看这几位，`debug_all_candidate_texts` 看不到。
+    pub fn debug_candidate_shapes(&self) -> Vec<(String, bool, bool, String)> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.text.clone(),
+                    c.is_command,
+                    c.is_group,
+                    c.phrase_template.clone(),
+                )
+            })
             .collect()
     }
 

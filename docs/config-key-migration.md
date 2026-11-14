@@ -23,7 +23,10 @@
 | 旧 | 现行 |
 |---|---|
 | `schema.active` / `available` / `primary_codetable` / `primary_pinyin` | 不变 |
-| `pinyin.show_code_hint` | `schema.pinyin.code_hint_source`（0.122 起由布尔改为四档枚举，值迁移见 `Config::migrate_show_code_hint_value`） |
+| `pinyin.show_code_hint` | 已退役（先成 `schema.pinyin.code_hint_source`，后并入注释分配）；**不迁移**，旧键登记 `RETIRED_KEYS` |
+| `schema.pinyin.code_hint_source` | 已退役，**不迁移**：改在注释分配 `ui.comment.assign.type.{pinyin,shuangpin}` 里重设 |
+| `input.temp_pinyin.code_hint_source` | 已退役，**不迁移**：改在 `ui.comment.assign.mode.{temp_pinyin,mix}` 里重设 |
+| `schema.mix.pinyin_code_hint` | 已退役，**不迁移**：改在 `ui.comment.assign.type.mixed` 里重设 |
 | `pinyin.use_smart_compose` | `schema.pinyin.use_smart_compose` |
 | `pinyin.candidate_order` | `schema.pinyin.candidate_order` |
 | `input.pinyin_separator` | `schema.pinyin.separator` |
@@ -94,12 +97,15 @@
 | `input.overflow.number_key` | `keys.overflow.number_key` |
 | `input.overflow.select_key` | `keys.overflow.select_key` |
 | `input.overflow.select_char_key` | `keys.overflow.select_char_key` |
+| `keys.overflow.page_key_overrides` | 已退役，**不迁移**（0.131，破坏性变更）：改在 `keys.session_actions` 里给单键写翻页动作后缀，如 `minus = "page_prev:ignore"`；旧键登记 `RETIRED_KEYS` |
 
 ## ui（36；仅 tooltip 拍平，顶层名保留 ui）
 
 | 旧 | 现行 |
 |---|---|
 | `ui.candidate.*`（12） | 不变 |
+| `ui.candidate.comment_enabled` | 已退役，**不迁移**（0.129 候选注释重构，破坏性变更）：改用 `ui.comment.enabled` |
+| `ui.candidate.comment_template_{vertical,horizontal}`、`input.<模式>.comment_template_*`、`schema.mix_modes[].comment_template_*` | 已退役，**不迁移**：改用命名模板 `[[ui.comment.templates]]` 与分配 `[ui.comment.assign.*]` 重设；方案文件 `[candidate]` / 特殊模式 `[overlay]` 里的同名键只启动告警 |
 | `ui.candidate.font_size_follow_theme` | 并入 `ui.candidate.font_size`（0.123 起，0 = 跟随主题；值迁移见 `Config::migrate_font_size_follow_theme_value`，旧键登记 `RETIRED_KEYS`） |
 | `ui.font.*`（3） | 不变 |
 | `ui.theme.{name,style}` | 不变 |

@@ -129,6 +129,7 @@ CKeyEventSink::CKeyEventSink(CTextService* pTextService)
     , _resyncDeadline(0)
     , _resyncFailStreak(0)
     , _lastPassthroughDigit(0)
+    , _seqChar(WindInputSeq::kUnknown)
     , _pendingKeyUpKey(0)
     , _ctrlSpaceEatenInTest(FALSE)
     , _pendingKeyUpModifiers(0)
@@ -212,17 +213,30 @@ static MouseAsyncState ReadMouseAsyncState()
     return st;
 }
 
+BOOL CKeyEventSink::BareAssocMouseClicked()
+{
+    if (!_assocBareSession)
+        return FALSE;
+    const MouseAsyncState mouse = ReadMouseAsyncState();
+    return (mouse.down || mouse.pressedSinceLastCall) ? TRUE : FALSE;
+}
+
 void CKeyEventSink::NoteSelectionChangedDuringToggle()
 {
-    if (_pendingKeyUpKey == 0)
+    if (_pendingKeyUpKey == 0 && _ctrlRaw.vk == 0)
         return;
     // OnEndEdit 是异步通知，快速单击时鼠标键可能已经抬起，故除「此刻按着」外还要看
     // 「按下过」位；读位会清它，命中就并入 mousePressedSincePress，keyup 时不丢。
+    // 待判单击与 Ctrl 如实上报各记一份（两者可能同时在按住中，如 Ctrl 按着再按 Shift）。
     const MouseAsyncState mouse = ReadMouseAsyncState();
-    if (mouse.pressedSinceLastCall)
-        _pendingTapSignals.mousePressedSincePress = true;
-    if (mouse.down || mouse.pressedSinceLastCall)
-        _pendingTapSignals.selectionChanged = true;
+    wind::toggletap::TapSignals* const sigs[] = {&_pendingTapSignals, &_ctrlRawTapSignals};
+    for (wind::toggletap::TapSignals* sig : sigs)
+    {
+        if (mouse.pressedSinceLastCall)
+            sig->mousePressedSincePress = true;
+        if (mouse.down || mouse.pressedSinceLastCall)
+            sig->selectionChanged = true;
+    }
 }
 
 // 记录「这个切换键正等着 keyup 触发切换」。
@@ -305,6 +319,113 @@ void CKeyEventSink::_CancelPendingToggle(WPARAM wParam, const wchar_t* reason)
     _pendingKeyUpModifiers = 0;
 }
 
+// Ctrl 的左右：优先 modifiers（双源），降级 GetAsyncKeyState；同 _MarkPendingToggleKey。认不出给 0。
+uint32_t CKeyEventSink::_ResolveCtrlVk(WPARAM wParam, uint32_t modifiers)
+{
+    if (wParam == VK_LCONTROL || wParam == VK_RCONTROL)
+        return (uint32_t)wParam;
+    if (wParam != VK_CONTROL)
+        return 0;
+    if (modifiers & KEYMOD_LCTRL)
+        return VK_LCONTROL;
+    if (modifiers & KEYMOD_RCTRL)
+        return VK_RCONTROL;
+    if (GetAsyncKeyState(VK_LCONTROL) & 0x8000)
+        return VK_LCONTROL;
+    if (GetAsyncKeyState(VK_RCONTROL) & 0x8000)
+        return VK_RCONTROL;
+    return 0;
+}
+
+void CKeyEventSink::_NoteKeyDownForCtrlRaw(WPARAM wParam)
+{
+    if (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL)
+        return; // Ctrl 自己归 _TryCtrlRawDown
+    wind::ctrlraw::OnOtherKey(_ctrlRaw);
+}
+
+// 候选显示时 Ctrl 如实上报的按下（规则见 CtrlRawPolicy.h）。放在一切白名单判定之前：这条路
+// 与切换键、切换方式无关，服务端替中英切换 / 选词 / 会话绑定 / 注释切换判单击。
+BOOL CKeyEventSink::_TryCtrlRawDown(WPARAM wParam, LPARAM lParam, uint32_t modifiers)
+{
+    if (!(wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL))
+        return FALSE;
+    const uint32_t vk = _ResolveCtrlVk(wParam, modifiers);
+    const bool autoRepeat = (lParam & 0x40000000) != 0;
+    switch (wind::ctrlraw::OnCtrlDown(_ctrlRaw, vk, _HasInputSession() != FALSE, autoRepeat, _pendingKeyUpKey))
+    {
+    case wind::ctrlraw::Down::Legacy:
+        return FALSE;
+    case wind::ctrlraw::Down::Repeat:
+        return TRUE;
+    case wind::ctrlraw::Down::Start:
+        break;
+    }
+    // 别的键的待判单击（如 Shift 按着再按 Ctrl）就此作废，与旧路「别的键取消待判」一致。
+    _pendingKeyUpKey = 0;
+    _pendingKeyUpModifiers = 0;
+    _ctrlRawTapSignals = {};
+    _ctrlRawTapSignals.mouseDownAtPress = ReadMouseAsyncState().down;
+    WIND_LOG_DEBUG_FMT(L"Ctrl 如实上报 按下: vk=0x%02X mods=0x%04X\n", vk, modifiers);
+    if (_SendKeyToService(vk, modifiers, KEY_EVENT_MOD_DOWN))
+        _HandleServiceResponse();
+    else
+        WIND_LOG_ERROR(L"IPC failed for Ctrl raw down\n");
+    return TRUE;
+}
+
+// 候选显示时 Ctrl 如实上报的松开：是那次按住就发 MOD_UP（按住翻转靠它收起，故不看此刻有没有会话）。
+void CKeyEventSink::_DispatchCtrlRawUp(WPARAM wParam)
+{
+    if (_ctrlRaw.vk == 0)
+        return;
+    if (!(wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL))
+        return;
+    if (!_IsMatchingKeyUp(wParam, _ctrlRaw.vk))
+        return;
+    wind::toggletap::TapSignals signals = _ctrlRawTapSignals;
+    const MouseAsyncState mouse = ReadMouseAsyncState();
+    signals.mouseDownAtRelease = mouse.down;
+    signals.mousePressedSincePress = signals.mousePressedSincePress || mouse.pressedSinceLastCall;
+    _ctrlRawTapSignals = {};
+    const wind::ctrlraw::Up up =
+        wind::ctrlraw::OnCtrlUp(_ctrlRaw, true, wind::toggletap::IsTapCancelledByMouse(signals));
+    if (!up.report)
+        return;
+    const uint32_t mods = KEYMOD_CTRL | (up.vk == VK_LCONTROL ? KEYMOD_LCTRL : KEYMOD_RCTRL);
+    WIND_LOG_DEBUG_FMT(L"Ctrl 如实上报 松开: vk=0x%02X notTap=%d\n", up.vk, (int)up.notTap);
+    // 判出单击可能切中英（状态气泡要锚到当前插入点），同旧路。
+    _pTextService->SendCaretPositionUpdate();
+    if (_SendKeyToService(up.vk, mods, KEY_EVENT_MOD_UP, up.notTap ? TOGGLE_MOD_NOT_TAP : 0))
+        _HandleServiceResponse();
+    else
+        WIND_LOG_ERROR(L"IPC failed for Ctrl raw up\n");
+}
+
+// 服务端吃掉过按下的功能键：把松开也送过去（按住档的注释切换键靠它收起详细态）。按下吃了，
+// 松开同样吃掉，宿主两边都看不到这个键。OnTestKeyUp 先到就由它发、OnKeyUp 只收尾
+// （finalize）；只调 OnTestKeyUp 的宿主（mintty）留下的记账在下一次按下时覆盖。
+// 返回 TRUE = 这次松开属于那个键，调用方吃掉。
+BOOL CKeyEventSink::_DispatchEatenFnKeyUp(WPARAM wParam, BOOL finalize)
+{
+    if (_eatenFnKeyVk == 0 || (UINT)wParam != _eatenFnKeyVk)
+        return FALSE;
+    if (!_eatenFnKeyUpSent)
+    {
+        _eatenFnKeyUpSent = TRUE;
+        if (_SendKeyToService((uint32_t)wParam, 0, KEY_EVENT_UP))
+            _HandleServiceResponse();
+        else
+            WIND_LOG_ERROR(L"IPC failed for function key up\n");
+    }
+    if (finalize)
+    {
+        _eatenFnKeyVk = 0;
+        _eatenFnKeyUpSent = FALSE;
+    }
+    return TRUE;
+}
+
 // ITfKeyEventSink::OnSetFocus —— 名字像是焦点主回调，实际**很不可靠**，不要往这里挂
 // 任何独占职责：AutoCAD 实测整场只触发 2 次，且全是 fForeground=1，从来没有过 0。
 // （曾把 focus_lost 挂在它的 else 分支上，结果 focus_lost 完全断供。）
@@ -378,12 +499,25 @@ bool CKeyEventSink::_IsLogDumpHotkey(WPARAM vk)
 
 STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
+    // 服务端在异步线程宣布无占位联想会话结束（超时隐藏等）：候选收起欠在 TSF 线程补。
+    // 期间若又起了组合/候选就不收。
+    if (_assocBareEndPending)
+    {
+        _assocBareEndPending = FALSE;
+        _EndAssocBareSession();
+        if (!_pTextService->HasActiveComposition() && !_hasCandidates)
+            _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
+    }
     *pfEaten = FALSE;
+
+    // 服务进程 Alt 钩子注入的屏蔽键：宿主要看到它才不激活菜单栏，一律放行、不转发、不记账。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
 
     // 透传上报：本函数有 40+ 个 return，逐个接线必漏；守卫在**出口**统一按最终的
     // `*pfEaten` 判。没吃下 = 这次输入服务端看不见，智能符号的 press2 判定要知道。
     // 详见 KeyEventSink.h 的 _NotePassthroughKeyDown。
-    PassthroughNoter _ptNote{this, wParam, pfEaten};
+    PassthroughNoter _ptNote{this, wParam, pfEaten, lParam, true};
 
     // 合成提交触发键：无条件吃下，不流入下面任何按键逻辑（大小写/会话/热键判据……）。
     // 真正的提交在 OnKeyDown 里执行——那才是 TSF 认可的"按键处理期间"。放在最前面，
@@ -405,6 +539,9 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
         _ptNote.Suppress();
         return S_OK;
     }
+
+    // Ctrl 如实上报按住期间的别的键（含此后各分支放行给宿主、服务端看不见的那些）。
+    _NoteKeyDownForCtrlRaw(wParam);
 
     // Ctrl+Shift+F12: Dump TSF ring buffer logs to clipboard (works in AppContainer)
     // 默认关，且判据与 OnKeyDown 共用同一个函数——见 _IsLogDumpHotkey。
@@ -463,6 +600,16 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     uint32_t normalizedKeyHash = CHotkeyManager::CalcKeyHash(normalizedMods, (uint32_t)wParam);
 
     CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+
+    // 候选显示时 Ctrl 如实上报：放行给宿主，单击由服务端判（见 CtrlRawPolicy.h）。
+    if (_TryCtrlRawDown(wParam, lParam, modifiers))
+    {
+        *pfEaten = FALSE;
+        _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::ToggleMode,
+                        _pTextService->IsChineseMode(), _pTextService->HasActiveComposition(), _hasCandidates,
+                        TRUE, FALSE, L"ctrl_raw_report");
+        return S_OK;
+    }
 
     // Check if this is a KeyDown hotkey from the whitelist
     // Use normalized hash for function hotkeys (Ctrl+`, Shift+Space, etc.)
@@ -849,7 +996,8 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
             // 判据与 OnKeyDown 的 numberPassthrough 同一个函数（NumberKeyPolicy.h）。
             if (keyType == HotkeyType::Number &&
                 wind::numberkey::ShouldEatNumberKey(hasInputSession != FALSE, isChineseMode != FALSE,
-                                                    _pTextService->IsFullWidth() != FALSE))
+                                                    _pTextService->IsFullWidth() != FALSE,
+                                                    _SpaceBeforeDigitFor(wParam, modifiers)))
             {
                 *pfEaten = TRUE;
                 _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
@@ -965,12 +1113,21 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     return S_OK;
 }
 
+bool CKeyEventSink::_SpaceBeforeDigitFor(WPARAM vk, uint32_t modifiers) const
+{
+    return wind::numberkey::SpaceBeforeDigit(
+        _spaceBeforeDigit, WindInputSeq::IsCjk(_seqChar), (unsigned)vk,
+        (modifiers & (KEYMOD_SHIFT | KEYMOD_CTRL | KEYMOD_ALT | KEYMOD_WIN)) != 0,
+        (GetKeyState(VK_CAPITAL) & 0x0001) != 0);
+}
+
 void CKeyEventSink::_TrackCommittedTextForSmartPunct(const std::wstring& text)
 {
     if (text.empty())
         return;
     WCHAR last = text.back();
     _lastPassthroughDigit = (last >= L'0' && last <= L'9') ? last : 0;
+    _seqChar = WindInputSeq::FromCommittedText(text.c_str(), text.size());
 }
 
 void CKeyEventSink::_NoteInputSequenceAtExit(WPARAM vk, bool eaten, bool suppressed)
@@ -986,12 +1143,40 @@ void CKeyEventSink::_NoteInputSequenceAtExit(WPARAM vk, bool eaten, bool suppres
     if (GetKeyState(VK_CONTROL) & 0x8000) mods |= KEYMOD_CTRL;
     if (GetKeyState(VK_MENU) & 0x8000) mods |= KEYMOD_ALT;
     _lastPassthroughDigit = _DigitCharFromVk(vk, mods);
+    _seqChar = WindInputSeq::FromVk((uint32_t)vk, (mods & KEYMOD_SHIFT) != 0,
+                                    (mods & (KEYMOD_CTRL | KEYMOD_ALT)) != 0);
     _pTextService->InvalidateCachedPrevChar();
+}
+
+void CKeyEventSink::_ReportObservedKeyAtExit(WPARAM vk, LPARAM lParam, bool fromTest, bool eaten,
+                                             bool suppressed)
+{
+    // 未推开时只这一次原子读。密码框、键盘禁用时一个都不报：那是用户数据，与扩展授权无关。
+    const bool enabled = _observeKeys.load(std::memory_order_relaxed) && !_pTextService->IsKeyboardDisabled()
+                         && !_pTextService->IsPasswordScope();
+    const bool repeat = ((lParam >> 30) & 1) != 0;
+    const bool report =
+        fromTest ? _observeGate.OnTestExit((uint32_t)vk, eaten, suppressed, repeat, enabled)
+                 : _observeGate.OnDownExit((uint32_t)vk, eaten, suppressed, repeat, enabled);
+    if (!report)
+        return;
+    // 修饰键取法同 _NoteInputSequenceAtExit：GetKeyState 与正在处理的这条按键消息同步。
+    uint32_t mods = 0;
+    if (GetKeyState(VK_SHIFT) & 0x8000) mods |= KEYMOD_SHIFT;
+    if (GetKeyState(VK_CONTROL) & 0x8000) mods |= KEYMOD_CTRL;
+    if (GetKeyState(VK_MENU) & 0x8000) mods |= KEYMOD_ALT;
+    if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000)) mods |= KEYMOD_WIN;
+    if (CIPCClient* ipc = _pTextService->GetIPCClient())
+        ipc->SendKeyObserved((uint32_t)vk, mods);
 }
 
 STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+
+    // 屏蔽键一律放行（见 OnTestKeyDown）。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
 
     // 同 OnTestKeyDown 的守卫，两处都要 —— 但成因不是「宿主跳过 test」，而是**反过来**：
     // Chrome / QQ 等宿主会无视 OnTestKeyDown 的 pfEaten=FALSE **仍调用本函数**（见下方
@@ -999,7 +1184,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 已被它消费掉，本守卫这边**无从 Suppress()** —— 自生成键在那批宿主上的兜底因此不能
     // 依赖 skip 表，改由 `IsSelfInjectedVk` 按 VK 值挡（0xE7/0xE8），见 PassthroughNote.h。
     // 同一个键两处都记也无妨——记的是个幂等的布尔。
-    PassthroughNoter _ptNote{this, wParam, pfEaten};
+    PassthroughNoter _ptNote{this, wParam, pfEaten, lParam, false};
 
     // 合成提交触发键：这里才是真正的提交点——TSF 认可的"按键处理期间"，
     // CommitText 内部据此走 TF_ES_SYNC 而非 nonKeyContext 的异步会话。
@@ -1055,6 +1240,9 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             return S_OK;
         }
     }
+
+    // 同 OnTestKeyDown：不调 OnTestKeyDown 只调本函数的宿主（QQ 那类）也要记。重复记无妨。
+    _NoteKeyDownForCtrlRaw(wParam);
 
     // Ctrl+Shift+F12: Dump TSF ring buffer logs to clipboard (debug aid for AppContainer)
     // 默认关，判据与 OnTestKeyDown 共用——见 _IsLogDumpHotkey。
@@ -1126,6 +1314,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     uint32_t normalizedKeyHash = CHotkeyManager::CalcKeyHash(normalizedMods, (uint32_t)wParam);
 
     CHotkeyManager* pHotkeyMgr = _pTextService->GetHotkeyManager();
+
+    // 候选显示时 Ctrl 如实上报（OnTestKeyDown 已起头的这里是 Repeat，什么都不发）。
+    if (_TryCtrlRawDown(wParam, lParam, modifiers))
+        return S_OK;
 
     // Check if this is a KeyUp triggered key (toggle mode keys like Shift, Ctrl, CapsLock)
     // Use hash-based lookup first, then fallback to VK-based detection
@@ -1381,7 +1573,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     BOOL numberPassthrough =
         isChineseMode && CHotkeyManager::ClassifyInputKey(wParam, modifiers) == HotkeyType::Number &&
         !wind::numberkey::ShouldEatNumberKey(hasInputSession != FALSE, true,
-                                             _pTextService->IsFullWidth() != FALSE);
+                                             _pTextService->IsFullWidth() != FALSE,
+                                             _SpaceBeforeDigitFor(wParam, modifiers));
 
     // Track whether this is a Ctrl/Alt combo that needs cleanup-then-passthrough
     BOOL isCtrlAltCleanup = FALSE;
@@ -1417,7 +1610,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     if (hasInputSession || isChineseMode)
     {
         // Ctrl/Alt combos during active input session: mark as input key so we can
-        // send to Go for state cleanup. After response, we'll override pfEaten=FALSE.
+        // send to the service; only an explicit pass-through response returns it to the host.
         // Note: registered hotkeys are already caught by isKeyDownHotkey above.
         // IMPORTANT: Exclude modifier keys themselves — pressing Ctrl/Alt alone should
         // not trigger cleanup, to preserve Ctrl+number and Ctrl+Shift+number shortcuts.
@@ -1603,11 +1796,16 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // This is simpler and matches Weasel's architecture
     // 先清零重放标志：只有本次响应置的位才算数（见其声明处说明）。
     _pendingReplayToHost = FALSE;
-    _responseCommitted = FALSE;
     // 记下本次应答对应的按键：CommitThenDefer 据此只让**这个键**的 keyup 开延迟组合。
     _responseKeyVk = (UINT)wParam;
-    *pfEaten = _HandleServiceResponse();
+    ResponseType keyResponse = ResponseType::Error;
+    *pfEaten = _HandleServiceResponse(&keyResponse);
     _responseKeyVk = 0;
+    if (*pfEaten && wParam >= VK_F1 && wParam <= VK_F12 && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)))
+    {
+        _eatenFnKeyVk = (UINT)wParam;
+        _eatenFnKeyUpSent = FALSE;
+    }
 
     // ── 联想态透传：组合已收口，把这一键还给宿主 ────────────────────────────────
     // 覆盖联想态下**全部**落到透传的键（回车/退格各有开关，Del/Home/End/←→/Insert 等
@@ -1620,7 +1818,14 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 且那条的门是 `!(*pfEaten)`。于是「联想态 + _pairPendingDepth>0 时按 Tab/Enter」会
     // 从这里 return，depth 不归零 ⇒ 下一次同键仍被吃下转发、再走一轮才自愈。
     // **不丢键**（键照样重放给宿主），只是多一次 IPC 往返，且 TTL 兜底仍在，故不特殊处理。
-    if (_pendingReplayToHost)
+    // Ctrl/Alt 组合（isCtrlAltCleanup）例外：不重放，交给下方按原生透传还给宿主（v0.130.1 起的
+    // 行为）。重放只补主键、修饰键靠物理按键还按着，按键处理稍慢而 Ctrl 先松开时宿主会收到
+    // 一个普通字母（Ctrl+C 打出 c）。hold 期间的 Ctrl 组合另有重放理由，见下方 hold 分支。
+    if (_pendingReplayToHost && isCtrlAltCleanup)
+    {
+        _pendingReplayToHost = FALSE;
+    }
+    else if (_pendingReplayToHost)
     {
         _pendingReplayToHost = FALSE;
         _ReplayKeyToHost((WORD)wParam);
@@ -1693,27 +1898,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 数字键"吃了又吐"（有候选时被吃、coordinator 回 PassThrough）：OnKeyDown 返 FALSE，
     // 输入序列由出口守卫记下（_NoteInputSequenceAtExit），无须在此补设。
 
-    // Ctrl/Alt combo during active session: decide pass-through based on Go's response.
-    // If Go handled the key as a candidate operation (pin/delete) and the composition
-    // is still active, respect Go's decision and eat the key. Only override to FALSE
-    // when Go actually cleared the composition (e.g., Ctrl+S cleanup).
-    // 上屏了候选（快捷输入选词键）同样算服务端用掉了这一键，判据见 CtrlAltCleanupPolicy.h。
-    if (isCtrlAltCleanup && *pfEaten)
-    {
-        if (!wind::ctrlalt::ShouldReturnToHost(_hasCandidates != FALSE, _isComposing != FALSE,
-                                               _responseCommitted != FALSE))
-        {
-            // Go handled it as a candidate action (e.g., Ctrl+number pin/delete),
-            // composition still active — keep pfEaten=TRUE to prevent app from seeing the key.
-            WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt key handled by Go (session still active), eating key\n");
-        }
-        else
-        {
-            // Go cleared composition (cleanup) — pass key through to the host application.
-            WIND_LOG_DEBUG(L"OnKeyDown: Ctrl/Alt cleanup done, overriding to pass-through\n");
-            *pfEaten = FALSE;
-        }
-    }
+    // 服务端显式声明按键归属。加词编辑等动作也会关闭组合，不能据此改判为透传。
+    // PassThrough / ClearCompositionThenPassThrough 在这里原生交还；其余消费响应均保留吃键决定。
+    if (isCtrlAltCleanup && wind::ctrlalt::ShouldReturnToHost(keyResponse))
+        *pfEaten = FALSE;
 
     _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers,
                     isKeyDownHotkey ? HotkeyType::Hotkey : CHotkeyManager::ClassifyInputKey(wParam, modifiers),
@@ -1726,6 +1914,11 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
 STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+    _observeGate.OnKeyUp((uint32_t)wParam); // 扩展旁路上报的去重记忆，见 ObservedKeyGate.h
+
+    // 屏蔽键一律放行（见 OnTestKeyDown）。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
 
     // 合成提交触发键的 keyup 半程：down 已经在 OnTestKeyDown/OnKeyDown 里处理完毕，
     // 这里只需干净吃掉，不流入下面任何 keyup 逻辑（toggle/CapsLock 判据……）。
@@ -1743,6 +1936,15 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
     if (_TryConsumeSkipKey(wParam, TRUE))
     {
         *pfEaten = FALSE;
+        return S_OK;
+    }
+
+    // Ctrl 如实上报的松开：先于禁用 / 配对拦截等一切闸门（按住翻转靠它收起）。不吃、不返回。
+    _DispatchCtrlRawUp(wParam);
+
+    if (_DispatchEatenFnKeyUp(wParam, FALSE))
+    {
+        *pfEaten = TRUE;
         return S_OK;
     }
 
@@ -1806,11 +2008,25 @@ STDAPI CKeyEventSink::OnTestKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lP
 STDAPI CKeyEventSink::OnKeyUp(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     *pfEaten = FALSE;
+    _observeGate.OnKeyUp((uint32_t)wParam); // 同 OnTestKeyUp：宿主可能只调其一
+
+    // 屏蔽键一律放行（见 OnTestKeyDown）。
+    if (wParam == WindPassthrough::kVkMenuMask)
+        return S_OK;
 
     // 合成提交键（VK_ASYNC_COMMIT_TRIGGER）的 keyup 半程：已在 OnTestKeyUp 里吃过，这里
     // 直接放行返回，避免它被下面 direct_commit / auto-pair / 修饰键状态机等逻辑误当成
     // 真实按键处理——注意与下一行注释里的「顶码触发键」不是同一个概念，只是恰好同名字。
     if (wParam == VK_ASYNC_COMMIT_TRIGGER)
+    {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
+    // 同 OnTestKeyUp（那边先到就已清掉记账，这里不再发）。
+    _DispatchCtrlRawUp(wParam);
+
+    if (_DispatchEatenFnKeyUp(wParam, TRUE))
     {
         *pfEaten = TRUE;
         return S_OK;
@@ -2230,6 +2446,8 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     // 返回值是「这个键要不要交还宿主」：服务端没收到，或响应是交还类（GivesBackToHost）。
     // 系统热键已把原键吃下，交还只能由调用方注入（见 TextService WndProc 与
     // CandidateHotkeyPolicy.h 的 OnHotkeyDispatched）。
+    //
+    // 待判单击的作废在 WM_HOTKEY 入口（NoteHotkeyMessage），不在这里：前台竞态丢弃的那次也要作废。
     if (!_SendKeyToService(vk, mods, KEY_EVENT_DOWN))
     {
         WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);
@@ -2249,7 +2467,37 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     return wind::candhotkey::GivesBackToHost(responseType) ? TRUE : FALSE;
 }
 
-BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType)
+// 这一键不经按键回调，够不着那里「别的键取消待判单击」：在这里作废，否则 Ctrl+数字
+// 500ms 内松开 Ctrl 会被当成 Ctrl 单击（lctrl 作中英切换键时顺带切英文）。
+void CKeyEventSink::NoteHotkeyMessage()
+{
+    if (_pendingKeyUpKey != 0)
+        WIND_LOG_DEBUG_FMT(L"Cancel pending toggle (wm_hotkey): pending=0x%02X\n", _pendingKeyUpKey);
+    wind::ctrlraw::OnHotkeyDispatched(_ctrlRaw, _pendingKeyUpKey);
+    _pendingKeyUpModifiers = 0;
+}
+
+void CKeyEventSink::ResetCtrlRaw()
+{
+    wind::ctrlraw::OnFocusLost(_ctrlRaw);
+    _ctrlRawTapSignals = {};
+}
+
+// 失焦时吃掉过按下的功能键的松开多半送不到：补报一次松开（按住档的注释切换键靠它收起详细态），
+// 再丢掉记账——不丢的话，之后宿主正常处理的同一个键，松开会被误吃。
+void CKeyEventSink::ResetEatenFnKey()
+{
+    if (_eatenFnKeyVk != 0 && !_eatenFnKeyUpSent)
+    {
+        _eatenFnKeyUpSent = TRUE;
+        if (_SendKeyToService((uint32_t)_eatenFnKeyVk, 0, KEY_EVENT_UP))
+            _HandleServiceResponse();
+    }
+    _eatenFnKeyVk = 0;
+    _eatenFnKeyUpSent = FALSE;
+}
+
+BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType, uint8_t extraToggles)
 {
     DWORD startTime = GetTickCount();
 
@@ -2271,7 +2519,7 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
             return FALSE;
         }
 
-        if (_pTextService->HasActiveComposition())
+        if (_pTextService->HasCompositionOrRecover())
         {
             // Composition is active — do NOT send CMD_IME_ACTIVATED here.
             // HandleIMEActivated on the Go side clears inputBuffer if non-empty,
@@ -2297,7 +2545,7 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
     uint32_t scanCode = MapVirtualKeyW(keyCode, MAPVK_VK_TO_VSC);
 
     // Get toggles and event sequence
-    uint8_t toggles = _GetTogglesSnapshot();
+    uint8_t toggles = _GetTogglesSnapshot() | extraToggles;
     uint16_t eventSeq = _GetNextEventSeq();
 
     // IMPORTANT: Always use the passed-in modifiers from CHotkeyManager::GetCurrentModifiers()
@@ -2359,7 +2607,10 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
         WIND_LOG_DEBUG(L"passthrough_before_key: 上一次按键送达后有键进了宿主，随本事件上报\n");
     }
 
-    BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar);
+    BOOL result = pIPCClient->SendKeyEvent(keyCode, scanCode, modifiers, eventType, toggles, eventSeq, prevChar,
+                                           _seqChar);
+    if (result && isKeyDown)
+        _observeGate.OnSentToCore(keyCode); // 核心会自己给扩展报这一键，旁路不再报
     // ★ 发送失败 ⇒ 事实从未送达，必须放回去。位已在上面清掉，不放回就是**漏报**——而漏报
     // 正是本机制唯一不可接受的方向（服务端会把下一按判成 press2，删掉用户刚打的字）。
     // SendKeyEvent 返回 FALSE 是本文件显式承认的场景（下游各 ipc_failed_* 分支）。
@@ -2433,8 +2684,6 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
     _needsCompositionResync = FALSE;
     _resyncDeadline = 0;
     _resyncFailStreak = 0;
-    // 上屏类响应记一笔，供 OnKeyDown 的 Ctrl/Alt cleanup 判定（见 CtrlAltCleanupPolicy.h）。
-    _responseCommitted = wind::ctrlalt::ResponseCommitsText(response.type) ? TRUE : FALSE;
 
     QueryPerformanceCounter(&midTime);
     int ipcMs = (int)((midTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);
@@ -2450,6 +2699,8 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
     case ResponseType::PassThrough:
         // PassThrough means key was NOT handled, pass to system
         WIND_LOG_DEBUG(L"PassThrough: key not handled, passing to system\n");
+        // 服务端在无占位联想期间不会回 PassThrough（已被改判成收口），收到它就说明服务端已不在联想态。
+        _EndAssocBareSession();
         _pTextService->FlushHoldCompositionIfActive(_inHotkeyDispatch);
         if (_pTextService->HasDeferredComposition())
             _pTextService->StartDeferredCompositionIfPending();
@@ -2469,7 +2720,11 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
                 WIND_LOG_TRACE_FMT(L"CommitText with restart composition: textLen=%zu, newCompLen=%zu\n",
                              response.text.length(), response.newComposition.length());
 
+                _EndAssocBareSession();
                 _pTextService->InsertTextAndStartComposition(response.text, response.newComposition);
+                // seqChar 照记（数字记账不记，理由见下方分支）：新组合不论最终上屏还是取消，
+                // 已写进文档的末字都是 response.text 的末位。联想态就走这条。
+                NoteCommittedSeqChar(response.text);
                 _isComposing = TRUE;
                 _hasCandidates = TRUE;
                 _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
@@ -2493,7 +2748,22 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
 
                 _isComposing = FALSE;
                 _hasCandidates = FALSE;
-                _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
+                _EndAssocBareSession();
+                if (response.assocSession)
+                {
+                    // 无占位的联想会话：宿主里没有组合，转发资格只能在这里**同步**记下
+                    // （服务端的 STATUS_HOTKEY_SESSION 推送是异步的，赢不了下一键）。
+                    // 候选窗仍开着，故不走下面的收起。
+                    _assocBareSession = TRUE;
+                    _hotkeyModeSession = TRUE;
+                    // 丢弃此前残留的「鼠标按下过」位（选单元格的那一下点击），之后只认会话期间的点击。
+                    (void)ReadMouseAsyncState();
+                    _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
+                }
+                else
+                {
+                    _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
+                }
 
                 int commitMs = (int)((ctMid1.QuadPart - ctStart.QuadPart) * 1000 / freq.QuadPart);
                 WIND_LOG_TRACE_FMT(L"CommitText: atomic commit=%dms\n", commitMs);
@@ -2517,6 +2787,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             QueryPerformanceCounter(&ucStart);
 
             WIND_LOG_TRACE(L"Received UpdateComposition from service\n");
+            _EndAssocBareSession(); // 组合已存在，会话判据改由 HasActiveComposition() 承担
             // 若 HoldComposition 计时器活跃（中文符号待提交），把符号定格并入 prefix，
             // 与新组合内容在同一次 UpdateComposition 内显示（符号无下划线、新内容有，
             // 复用顶码聚合分段）。曾用 Flush（CommitText+立即开新组合）——WPS/微信下
@@ -2545,6 +2816,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
 
     case ResponseType::ClearComposition:
         WIND_LOG_DEBUG(L"Received ClearComposition from service\n");
+        _EndAssocBareSession();
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
@@ -2562,6 +2834,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         // 看到收口后的文档，再看到一个与组合无关的普通按键。OnKeyDown 读下面这一位；
         // DispatchHotkey（WM_HOTKEY 已被系统吃下）按响应类型判，由 WndProc 注入。
         WIND_LOG_DEBUG(L"Received ClearCompositionThenPassThrough from service\n");
+        _EndAssocBareSession();
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
@@ -2596,13 +2869,14 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         // 本机用 UI-less 测试宿主实测：不补这一句，`=`/`↓` 之后宿主停在旧页，
         // 空格上屏的却是新页的词。宿主不自绘时这只是多一次无害的 UpdateUIElement。
         WIND_LOG_DEBUG(L"Key consumed by hotkey\n");
-        if (_hasCandidates)
+        if (_hasCandidates || _assocBareSession)
         {
             _pTextService->NotifyCandidatesVisibilityChanged(TRUE);
         }
         return TRUE;
 
     case ResponseType::InsertTextWithCursor:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             WIND_LOG_DEBUG(L"Processing InsertTextWithCursor response\n");
             _pTextService->CommitText(response.text, _inHotkeyDispatch);
@@ -2612,8 +2886,8 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             _TrackCommittedTextForSmartPunct(response.text);
             _isComposing = FALSE;
             _hasCandidates = FALSE;
-            for (int i = 0; i < response.cursorOffset; i++)
-                _SimulatePairKey(VK_LEFT);
+            // 一次传入完整格数：修饰键按住时待执行动作会覆盖，逐格调用会只留下最后一格。
+            _SimulatePairKey(VK_LEFT, response.cursorOffset);
             // 配对插入：记一层待跳出深度。它是 core 侧 pair_tracker 的镜像计数，也是本文件
             // 唯一的吃键闸门——Enter 等被会话门控的键靠它放行转发（Tab 本就无条件转发）。
             // 四条配对建立路径（中文标点 / 英文全角 / 英半自定义 / 英半普通）都经此响应。
@@ -2633,6 +2907,8 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             // 深度只减 1：格数是「这一层有多宽」，与「弹掉几层」无关。
             for (uint32_t i = 0; i < response.moveCount; i++)
                 _SimulatePairKey(VK_RIGHT);
+            // 光标跨过了右符号：光标前必是符号。
+            _seqChar = '?';
             if (_pairPendingDepth > 0)
                 _pairPendingDepth--;
         }
@@ -2647,6 +2923,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         return TRUE;
 
     case ResponseType::ReplaceBackward:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             // 智能符号：删除光标前 N 个字符并插入替换文本。默认走 TSF 同步范围替换
             // （见 TextService::ReplacePrecedingChars），不发合成按键——不依赖修饰键
@@ -2660,12 +2937,18 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             // 也没有组合会残留（与 CommitText 的 Word 泄漏不同形）。
             WIND_LOG_DEBUG(L"Processing ReplaceBackward response (smart symbol)\n");
             _pTextService->ReplacePrecedingChars(response.replaceCount, response.text);
+            // 纯删除（`ime.undo_commit`）：光标前换成了什么看不见，清零；有替换文本则记它的末位。
+            if (response.text.empty())
+                _seqChar = WindInputSeq::kUnknown;
+            else
+                NoteCommittedSeqChar(response.text);
             _isComposing = FALSE;
             _hasCandidates = FALSE;
         }
         return TRUE;
 
     case ResponseType::HoldComposition:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             // 智能符号 HoldComposition 方案：press1 将中文符号放入 TSF 组合态，
             // 由 TextService 启动 500ms 计时器自动提交；press2 将直接发 CommitText。
@@ -2678,6 +2961,7 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         return TRUE;
 
     case ResponseType::CommitAndHold:
+        _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             // 标点顶屏 + 智能符号 HoldComposition：**聚合式**——候选文本并入 _pendingCommitPrefix
             // （不真提交、留组合内），中文符号作为 held 放入同一组合，最终一次 CommitText 收口
@@ -2706,9 +2990,11 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
             WIND_LOG_DEBUG_FMT(L"Processing CommitThenDefer: commit=%ls defer=%ls timeoutMs=%u\n",
                                response.text.c_str(), response.newComposition.c_str(),
                                response.holdTimeoutMs);
+            _EndAssocBareSession();
             _pTextService->CommitText(response.text, _inHotkeyDispatch);
-            // 不记输入序列：余码组合随后就开，光标前是组合内容而非 response.text 末位
-            // （同 restartComposition 分支的理由）。
+            // 数字记账不记：余码组合随后就开，光标前是组合内容而非 response.text 末位
+            // （同 restartComposition 分支的理由）。seqChar 照记，理由同那个分支。
+            NoteCommittedSeqChar(response.text);
             _isComposing = FALSE;
             _hasCandidates = FALSE;
             _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
@@ -3093,6 +3379,13 @@ void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8
         _pTextService->SetLangBarTooltip(text);
         WIND_LOG_DEBUG_FMT(L"LangBar tooltip updated: %ls\n", text.c_str());
     }
+    else if (key == CONFIG_KEY_SPACE_BEFORE_DIGIT)
+    {
+        // 格式：enabled(u8)（对齐 Rust push_space_before_digit_config）。
+        if (value.empty()) return;
+        _spaceBeforeDigit = value[0] != 0;
+        WIND_LOG_INFO_FMT(L"Space before digit updated: %d\n", (int)_spaceBeforeDigit);
+    }
     else if (key == CONFIG_KEY_COMPOSITION_PLACEHOLDER)
     {
         // 格式：kind(u8)（对齐 Rust encode_composition_placeholder_value）。0 = 空格、1 = ZWSP、
@@ -3117,6 +3410,13 @@ void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8
             value.data(), value.size(), _pTextService->IsTitleMatchEnabled() != FALSE);
         _pTextService->SetTitleMatchEnabled(enabled ? TRUE : FALSE);
         WIND_LOG_INFO_FMT(L"Compat title match updated: enabled=%d\n", enabled ? 1 : 0);
+    }
+    else if (key == CONFIG_KEY_EXTENSION_KEY_OBSERVE)
+    {
+        // 格式：enabled(u8)（对齐 Rust encode_extension_key_observe_value）。空值保持现状。
+        if (value.empty()) return;
+        _observeKeys.store(value[0] != 0, std::memory_order_relaxed);
+        WIND_LOG_INFO_FMT(L"Extension key observe updated: enabled=%d\n", value[0] != 0 ? 1 : 0);
     }
     else if (key == CONFIG_KEY_DIAG_SNAPSHOT)
     {
@@ -3249,7 +3549,8 @@ BOOL CKeyEventSink::_IsResyncActive()
 //     插入字面空格、退格删掉刚上屏的字（真机复现：skce 顶码后快打 h + 空格）。
 BOOL CKeyEventSink::_HasInputSession()
 {
-    return _pTextService->HasActiveComposition()
+    // 恢复中（宿主收走了组合、缓冲仍在）同样算会话。
+    return _pTextService->HasCompositionOrRecover()
         || _hasCandidates
         // 热键激活的模式（加词 / 临拼 / 特殊 / 生僻字）：它们在
         // `input.caret.*_via_composition = false` 时根本不建 composition，上面两个来源全

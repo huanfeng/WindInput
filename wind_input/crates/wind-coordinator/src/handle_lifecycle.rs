@@ -515,6 +515,15 @@ impl Coordinator {
         key_code: u32,
         use_schema_layer: bool,
     ) -> Option<(BoundAction, bool)> {
+        // 宿主临时压制的引导键（移动端触摸 `;`）：按未绑定处理，三层都不查
+        if key_code != 0
+            && self
+                .trigger_suppressed
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == key_code
+        {
+            return None;
+        }
         // 键名→VK 走与全局层**同一个**解析口（`key_action_name_to_vk`）：两层各留一份解析
         // 规则，就是「同一张表按维度分裂」。这类分裂曾有过一个样本：`hotkey_action_entry`
         // 的动词白名单只认几个，而单键那条路的 `BoundAction` 值域大得多 ⇒
@@ -600,8 +609,8 @@ impl Coordinator {
     /// - **z 的 repeat 身份**：`z_key_repeat` 开且有上屏历史时 z 归重复输入。这条**仍是 z 专有**
     ///   ——repeat 功能本身就绑死在 z 上，不是通用概念。
     ///
-    /// 字母键额外限定码表引擎：拼音/混输里字母全是有效输入，借作功能键会丢首字母
-    /// （与 `try_z_fallback` 的门禁同源）。符号键不限引擎——拼音方案里用 `\` 进快符同样合理。
+    /// 码表引擎的字母键还要过上面两条；非码表引擎（拼音/混输）不做判断，绑了就生效——
+    /// 引导键只在空缓冲触发，不影响组码中间的同一个字母。符号键不限引擎。
     /// 同上，但返回**让位原因**（`None` = 不让位）供日志说明。
     ///
     /// 「配了不生效」是这套机制最常见的求助形态，而它有五个成因（没绑上 / 显式 none /
@@ -618,7 +627,7 @@ impl Coordinator {
         let ch = keymap::vk_to_prefix_char_with_letters(key_code)?;
         // 反查模式只在码表 / 五笔拼音混输方案里有意义（活跃引擎给得出反查通配键）。
         // 放在字母 / 符号分流之前：符号键在拼音方案里也让位，照常产出标点（spec §3.1）；
-        // 字母键在码表里仍走下面的活码前缀判据，在混输里仍走「字母键仅码表引擎」判据。
+        // 字母键在码表里仍走下面的活码前缀判据，拼音 / 混输里不判（见下方）。
         //
         // ⚠️ 必须在上一行（无字符的修饰键早退）**之后**：修饰键的 keyup 通路把 Yield 当
         // 「显式 none」吞键，排在前面会让拼音方案里绑了反查的 RShift 连中英切换都失效；
@@ -630,11 +639,13 @@ impl Coordinator {
         if !ch.is_ascii_alphabetic() {
             return None; // 符号键：不让位，也不限引擎
         }
+        // 非码表引擎（拼音 / 混输）不替用户判断：绑了字母就当引导键，只在空缓冲生效，
+        // 组码中间的 `lv` / `nv` 不受影响。哪些字母适合借用由用户自己定，设置端只做提示。
         if !matches!(
             self.engine_mgr.current_engine_type(),
             Some(wind_engine::EngineType::CodeTable)
         ) {
-            return Some("字母键仅码表引擎生效（拼音/混输里字母全是有效输入）");
+            return None;
         }
         // z 的 repeat 身份**只压得住有夺取回路的目标**。
         //
@@ -691,6 +702,14 @@ impl Coordinator {
             BoundAction::SingleChar(a) => {
                 if let Some(label) = self.apply_single_char_action(state, *a) {
                     self.show_tip_locked(state, label);
+                }
+                Some(KeyAction::Consumed)
+            }
+            // 注释态：持久设置，恒吞键；状态泡是空闲时唯一的反馈。
+            BoundAction::CommentState(a) => {
+                match self.apply_comment_state_action(state, *a) {
+                    Ok(label) => self.show_tip_locked(state, label),
+                    Err(e) => warn!("comment_state: {e}"),
                 }
                 Some(KeyAction::Consumed)
             }
@@ -904,6 +923,7 @@ impl Coordinator {
             | BoundAction::Mix(_)
             | BoundAction::Special(_)
             | BoundAction::SingleChar(_)
+            | BoundAction::CommentState(_)
             | BoundAction::SoftKeyboard(_) => false,
         }
     }
@@ -1042,6 +1062,7 @@ impl Coordinator {
             // `toggle_softkeyboard` 自己处理（它的语义就是「再按一次关掉」）。
             BoundAction::None
             | BoundAction::SingleChar(_)
+            | BoundAction::CommentState(_)
             | BoundAction::SoftKeyboard(_)
             | BoundAction::ToggleSchema(_)
             | BoundAction::SwitchSchema(_)

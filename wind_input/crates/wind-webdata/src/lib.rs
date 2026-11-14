@@ -6,6 +6,7 @@
 //! 接入进度：契约全部数据域方法均接通真实 store/engine/theme：
 //! - schema.*（含三层合并 getConfig/saveConfig/resetConfig/setDictEnabled/delete）
 //! - dict.*（含 encode/genPinyin 反查出码）、temp.*、freq.*、shadow.*、phrase.*、stats.*、theme.*
+//! - sysDict.categories / header / entries（词库窗的系统词库表、单库头部与只读词条）
 //! - `schema.references` 暂返 `{}`（删除安全检查未用，前端宽松消费）；
 //!   无 store/themes 时各方法返回合法空集（降级，不报错）。
 //!
@@ -13,6 +14,8 @@
 //! [`WebDataHost`] 窄面（定义在 wind-coordinator::web_host）触宿主，
 //! 把 wind-transfer/fontdb 等重依赖挡在 Android 闭包之外。
 
+mod theme_render;
+pub use theme_render::set_preview_build_id;
 mod user_dicts;
 
 use serde_json::{Value, json};
@@ -142,6 +145,8 @@ fn dict_report_json(out: &dict_transfer_api::DictImportOutcome) -> Value {
                 o.insert("added".into(), json!(w.added));
                 o.insert("updated".into(), json!(w.updated));
                 o.insert("unchanged".into(), json!(w.unchanged));
+                // 导入不撤删除规则：入了库但被候选调整隐藏、打不出来的条数。
+                o.insert("hiddenByShadow".into(), json!(s.hidden_by_shadow));
             } else {
                 o.insert("imported".into(), json!(s.imported));
             }
@@ -283,6 +288,17 @@ fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
             "cacheLimitBytes": wind_store::store::DEFAULT_CACHE_SIZE_BYTES,
             "pageCacheDrops": s.page_cache_drops(),
         })),
+        // 词库缓存策略（`schema.dict_cache_policy`）的实际效果：生效的策略、预算，以及当前仍活着
+        // 的映射里：锁定策略下已锁 / 锁页失败的字节数，预加载策略下已载入的字节数，超出预算
+        // 而没处理的字节数；不适用的一项恒为 0。预算 u64::MAX（未设限）报 null。
+        "dictCache": {
+            "policy": wind_dict::mapping::policy().as_config(),
+            "budgetBytes": Some(wind_dict::mapping::budget_bytes()).filter(|b| *b != u64::MAX),
+            "lockedBytes": wind_dict::mapping::locked_bytes(),
+            "lockFailedBytes": wind_dict::mapping::lock_failed_bytes(),
+            "preloadedBytes": wind_dict::mapping::preloaded_bytes(),
+            "overBudgetBytes": wind_dict::mapping::over_budget_bytes(),
+        },
     })
 }
 
@@ -394,6 +410,40 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(json!({ "ok": true }))
         }
+        // 输入状态开关（CLI `wind_input ime`、外部脚本）。目标 / 值域校验在宿主侧，错误原样回传。
+        // `get` 不带 target = 取全部。`set` 默认不弹「已是…」提示（脚本会反复调用），要提示传 notify。
+        "ime.get" => {
+            const ALL: [&str; 5] = ["cn-en", "fullshape", "s2t", "t2s", "toolbar"];
+            let target = params.get("target").and_then(Value::as_str);
+            match target {
+                Some(t) => Ok(json!({ "target": t, "on": h.ime_state_get(t)? })),
+                None => {
+                    let mut m = serde_json::Map::new();
+                    for t in ALL {
+                        m.insert(t.to_string(), json!(h.ime_state_get(t)?));
+                    }
+                    Ok(Value::Object(m))
+                }
+            }
+        }
+        "ime.set" => {
+            let target = str_param(params, "target")?;
+            let on = params
+                .get("on")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow::anyhow!("缺少布尔参数 on"))?;
+            let notify = params
+                .get("notify")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let changed = h.ime_state_set(target, on, notify)?;
+            Ok(json!({ "target": target, "on": on, "changed": changed }))
+        }
+        "ime.toggle" => {
+            let target = str_param(params, "target")?;
+            let on = h.ime_state_toggle(target)?;
+            Ok(json!({ "target": target, "on": on }))
+        }
         "schema.delete" => h.web_schema_delete(params),
         "schema.references" => Ok(json!({})), // 引用关系（删除安全检查）：暂返空，前端宽松消费
         "scheme.exportPackage" => h.web_scheme_export_package(params),
@@ -412,6 +462,9 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
 
         // ── dict.*（用户词库）────────────────────
         "comment.sources" => h.web_comment_sources(),
+        // 设置端注释总表：模板表（带来源）、出厂分配、每格实际生效的模板与所在层。
+        // 带 `comment`（未保存的 `[ui.comment]` 草稿）时按草稿算。
+        "comment.library" => h.web_comment_library(params),
         "emoji.modules" => h.web_emoji_modules(),
         "dict.listPaged" => h.web_dict_list_paged(params),
         "dict.search" => h.web_dict_search(params),
@@ -431,6 +484,28 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .get("refresh")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+        ),
+        // 词库窗「系统词库」：一级词库表（含主库、按生效先后）、二级头部卡片与只读词条分页。
+        // 本体在 `wind_coordinator::schema_dicts_api`；开关仍走 `schema.setDictEnabled`。
+        // 读的是词库文本不是 redb，不进 `FULL_SCAN_METHODS`。
+        "sysDict.categories" => {
+            wind_coordinator::schema_dicts_api::categories(h, str_param(params, "schema")?)
+        }
+        "sysDict.header" => wind_coordinator::schema_dicts_api::header(
+            h,
+            str_param(params, "schema")?,
+            str_param(params, "dictId")?,
+        ),
+        "sysDict.entries" => wind_coordinator::schema_dicts_api::entries(
+            h,
+            str_param(params, "schema")?,
+            str_param(params, "dictId")?,
+            params.get("query").and_then(Value::as_str).unwrap_or(""),
+            params.get("mode").and_then(Value::as_str),
+            params.get("sort").and_then(Value::as_str),
+            params.get("order").and_then(Value::as_str),
+            usize_param(params, "offset", 0) as u64,
+            usize_param(params, "limit", 100),
         ),
         // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
         // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
@@ -595,6 +670,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
             Ok(serde_json::to_value(h.theme_accent(name))?)
         }
         "theme.preview" => h.web_theme_preview(params),
+        "theme.renderPreview" => theme_render::render_one(h, params),
+        "theme.renderPreviews" => theme_render::render_many(h, params),
         "theme.getText" => h.web_theme_get_text(params),
         "theme.delete" => h.web_theme_delete(params),
         "theme.importFromText" => h.web_theme_import_text(params),
@@ -790,6 +867,8 @@ pub trait WebDataRpc: WebDataHost {
                     "builtin": !self.engine_mgr().is_user_schema(id),
                     // 隐藏方案（英文/快符）：设置页据此决定该行显示什么、能配什么。
                     "hidden": self.engine_mgr().schema_is_hidden(id),
+                    // 方案角色（空 / "aux"）：aux = 辅助码专用码表方案，默认不进方案管理常规区。
+                    "role": info.map(|i| i.role.clone()).unwrap_or_default(),
                     // 是否为 **overlay 方案**（方案文件带 `[overlay]` 段）：可由引导键/直达
                     // 热键临时叠加进入（快符/生僻字那类）。设置页据此枚举 `special:<id>`
                     // 动词的可选项，并决定要不要显示 overlay 那一节配置。
@@ -885,7 +964,52 @@ pub trait WebDataRpc: WebDataHost {
                 }),
         )
         .collect();
-        Ok(json!({ "auto": auto, "files": files }))
+        let builtin: Vec<Value> = self
+            .system_comment_dicts()
+            .iter()
+            .map(|b| json!({ "id": b.id, "label": b.label, "rel": b.path, "origin": "builtin" }))
+            .collect();
+        Ok(json!({ "auto": auto, "builtin": builtin, "files": files }))
+    }
+
+    fn web_comment_library(&self, params: &Value) -> anyhow::Result<Value> {
+        use wind_config::comment_lib::{CommentLibrary, TemplateOrigin, UiCommentConfig};
+        let system = self.system_comments();
+        let lib = match params.get("comment").filter(|v| !v.is_null()) {
+            Some(draft) => {
+                let user: UiCommentConfig = serde_json::from_value(draft.clone())
+                    .map_err(|e| anyhow::anyhow!("comment 草稿形态不对: {e}"))?;
+                std::sync::Arc::new(CommentLibrary::build(system, &user).0)
+            }
+            None => self.comment_library(),
+        };
+        let templates: Vec<Value> = lib
+            .templates()
+            .map(|(t, o)| {
+                let origin = match o {
+                    TemplateOrigin::Builtin => "builtin",
+                    TemplateOrigin::User => "user",
+                    TemplateOrigin::UserOverridesBuiltin => "user_overrides_builtin",
+                };
+                let mut v = json!({
+                    "id": t.id, "name": t.name, "text": t.text, "desc": t.desc, "origin": origin,
+                });
+                // 被用户覆盖的内置模板带上原版，供设置端「恢复内置」前对照。
+                if o == TemplateOrigin::UserOverridesBuiltin
+                    && let Some(b) = system.templates.iter().find(|b| b.id == t.id)
+                {
+                    v["builtin"] = json!({ "name": b.name, "text": b.text });
+                }
+                v
+            })
+            .collect();
+        let active = self.engine_mgr().active_schema_id();
+        let effective = lib.effective_table(&active, |s| self.comment_schema_type(s));
+        Ok(json!({
+            "templates": templates,
+            "system_assign": system.assign,
+            "effective": effective,
+        }))
     }
 
     /// emoji 附加模块清单（内置 + 用户放进 `emoji/` 的 OpenCC 表），供设置页对话框列出。
@@ -983,6 +1107,7 @@ pub trait WebDataRpc: WebDataHost {
         if !store.update_user_word_weight(&schema, &code, text, weight)? {
             store.add_user_word(&schema, &code, text, weight, boundary)?;
         }
+        user_words_api::clear_deleted_for_added(self, &schema, &[(&code, text)]);
         Ok(json!({ "ok": true }))
     }
 
@@ -1611,7 +1736,15 @@ pub trait WebDataRpc: WebDataHost {
         let schemas: Vec<Value> = o
             .schemas
             .iter()
-            .map(|(id, name)| json!({ "id": id, "name": name }))
+            .map(|(id, name)| {
+                // role（空 / "aux"）：设置页据此把辅助码专用方案排到普通方案前面。
+                let role = self
+                    .engine_mgr()
+                    .schema_merged(id)
+                    .map(|s| s.schema.role.clone())
+                    .unwrap_or_default();
+                json!({ "id": id, "name": name, "role": role })
+            })
             .collect();
         let files: Vec<Value> = o
             .files
@@ -2747,7 +2880,11 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         // 列表项的 code 带音节空格（见 web_temp_list），key 是扁平的。
         let (code, _) = wind_store::wdict::split_spaced_code(code);
-        store.promote_temp_word(&schema, &code, &store_text(text))?;
+        let text = store_text(text);
+        // 手动转正是显式动作（自动晋升走 `maybe_promote_temp`，不清）。
+        if store.promote_temp_word(&schema, &code, &text)? {
+            user_words_api::clear_deleted_for_added(self, &schema, &[(&code, &text)]);
+        }
         Ok(json!({ "ok": true }))
     }
 
@@ -2770,13 +2907,19 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        let mut n = 0u64;
+        let mut promoted = Vec::new();
         for r in store.search_temp_words_prefix(&schema, "", 0)? {
             if store.promote_temp_word(&schema, &r.code, &r.text)? {
-                n += 1;
+                promoted.push((r.code, r.text));
             }
         }
-        Ok(json!(n))
+        // 批量转正不撤删除规则，只报其中被隐藏的条数。
+        let words: Vec<(&str, &str)> = promoted
+            .iter()
+            .map(|(c, t)| (c.as_str(), t.as_str()))
+            .collect();
+        let hidden = user_words_api::count_hidden_by_shadow(self, &schema, &words);
+        Ok(json!({ "promoted": promoted.len() as u64, "hiddenByShadow": hidden }))
     }
 
     fn web_temp_clear(&self, params: &Value) -> anyhow::Result<Value> {
@@ -3710,7 +3853,7 @@ pub trait WebDataRpc: WebDataHost {
     /// 和导入（`theme_target_dir` 当场拒）一致：`custom_hides_theme` 的绝对性是写死在
     /// 那边的文档里的，读取侧放行就意味着「列表里看不见、却导得出一个装不回去的包」。
     fn theme_dir_of(&self, slug: &str) -> anyhow::Result<std::path::PathBuf> {
-        if slug.is_empty() || slug.contains('/') || slug.contains('\\') || slug.contains("..") {
+        if !wind_theme::is_plain_slug(slug) {
             anyhow::bail!("非法主题 slug");
         }
         if wind_config::Config::custom_hides_theme(slug) {
@@ -3735,6 +3878,10 @@ pub trait WebDataRpc: WebDataHost {
 
     fn web_theme_delete(&self, params: &Value) -> anyhow::Result<Value> {
         let name = str_param(params, "name")?;
+        // 拼进用户主题目录再 remove_dir_all：`..` / 绝对路径能删到目录外去。
+        if !wind_theme::is_plain_slug(name) {
+            anyhow::bail!("非法主题 slug");
+        }
         let user_dir = self
             .user_themes_dir()
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
@@ -3743,6 +3890,7 @@ pub trait WebDataRpc: WebDataHost {
             anyhow::bail!("内置主题不可删除或主题不存在: {}", name);
         }
         std::fs::remove_dir_all(&target)?;
+        theme_render::forget_theme(name);
         Ok(json!({ "ok": true }))
     }
 
@@ -3752,7 +3900,9 @@ pub trait WebDataRpc: WebDataHost {
     /// 只有在用户那边表现为「导入成功却哪儿都找不到」。
     ///
     /// - 传了 `slug`（主题唯一 id）：目录已存在则就地写回（不新建），否则以 slug 建目录；
-    /// - 未传（兼容旧客户端）：退回按 `meta.name` 建目录。
+    ///   slug 不合法直接报错；
+    /// - 未传（设置端的粘贴 / 文件 / 链接 / 包导入都不传）：从显示名（`meta.name` / 包名）
+    ///   派生合法 id（[`wind_theme::slug_from_name`]），「Nord: Dark」「黑/白」也导得进来。
     ///
     /// 定制版 `[themes] hide` 掉的 id **当场拒掉，不给成功回执**：hide 是绝对的（用户层
     /// 同名主题也不复活，见 `Config::custom_hides_theme` 的取舍说明），而导入是用户唯一
@@ -3766,18 +3916,32 @@ pub trait WebDataRpc: WebDataHost {
         let user_dir = self
             .user_themes_dir()
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
-        let slug = params
+        // ⚠️ id 来自调用方（slug）或主题文本自身（meta.name / package 的 name），都不可信，
+        // 落盘前必须是普通名字：不然 `../../x`、绝对路径、`C:x` 会让目标跳出用户主题目录，
+        // 而导入失败的回滚会对目标做 remove_dir_all。显示名只是名字，派生成合法 id；
+        // 给了不合法的 slug 则报错，不再静默退回用显示名。
+        let theme_id = match params
             .get("slug")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|s| {
-                !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
-            });
-        let theme_id = slug.unwrap_or(fallback_name).to_string();
+            .filter(|s| !s.is_empty())
+        {
+            Some(slug) => slug.to_string(),
+            None => wind_theme::slug_from_name(fallback_name),
+        };
+        if !wind_theme::is_plain_slug(&theme_id) {
+            anyhow::bail!(
+                "主题 id「{theme_id}」不合法：不能含路径分隔符、盘符、「..」或 8.3 短名「~数字」，\
+                 不能以点或空格结尾，也不能是 Windows 保留名（CON、AUX、NUL、COM1 等）"
+            );
+        }
         if wind_config::Config::custom_hides_theme(&theme_id) {
             anyhow::bail!("本定制版已移除主题 id「{theme_id}」，该 id 不可用；请换一个 id 再导入");
         }
         let target = user_dir.join(&theme_id);
+        if target.parent() != Some(user_dir.as_path()) {
+            anyhow::bail!("主题 id「{theme_id}」不合法");
+        }
         Ok((theme_id, target))
     }
 
@@ -3787,13 +3951,28 @@ pub trait WebDataRpc: WebDataHost {
     /// result 字段而非 error 通道——error 通道只有一个 String，客户端只能靠匹配文案来认
     /// 冲突，改一次文案，设置端的覆盖确认就会静默退化成一条普通报错（没有任何测试或编译
     /// 期检查看得见这种耦合）。
-    fn theme_conflict_json(theme_id: &str, display_name: &str) -> Value {
+    /// 撞目录的回执。文案用**已有**主题的显示名：id 从显示名派生后，不同名字可能落到
+    /// 同一目录（`a/b` 与 `a-b`），只报新名字会让用户不知道覆盖的是谁。
+    fn theme_conflict_json(theme_id: &str, display_name: &str, target: &std::path::Path) -> Value {
+        let existing = std::fs::read_to_string(target.join("theme.toml"))
+            .ok()
+            .and_then(|t| wind_theme::meta_from_text(&t))
+            .map(|m| m.name)
+            .filter(|n| !n.trim().is_empty());
+        let error = match &existing {
+            Some(old) if old != display_name => {
+                format!("已有主题「{old}」占用同一目录，导入「{display_name}」会覆盖它")
+            }
+            Some(old) => format!("主题「{old}」已存在"),
+            None => format!("主题目录「{theme_id}」已存在"),
+        };
         json!({
             "ok": false,
             "conflict": true,
             "slug": theme_id,
             "display_name": display_name,
-            "error": format!("主题「{display_name}」已存在"),
+            "existing_name": existing,
+            "error": error,
         })
     }
 
@@ -3833,7 +4012,7 @@ pub trait WebDataRpc: WebDataHost {
         let file = target.join("theme.toml");
         let existed_before = file.exists();
         if existed_before && !force {
-            return Ok(Self::theme_conflict_json(&theme_id, &meta.name));
+            return Ok(Self::theme_conflict_json(&theme_id, &meta.name, &target));
         }
         // 覆盖已存在主题前备份原文本，供依赖链校验失败时回滚。
         let backup = if existed_before {
@@ -3841,6 +4020,8 @@ pub trait WebDataRpc: WebDataHost {
         } else {
             None
         };
+        // 回滚只删本次新建的目录：目录原本就在（哪怕里面没有 theme.toml）时只撤掉写入的文件。
+        let created_dir = !target.exists();
         std::fs::create_dir_all(&target)?;
         let tmp = file.with_extension("toml.tmp");
         std::fs::write(&tmp, text.as_bytes())?;
@@ -3855,8 +4036,11 @@ pub trait WebDataRpc: WebDataHost {
                 Some(bytes) => {
                     let _ = std::fs::write(&file, bytes);
                 }
-                None => {
+                None if created_dir => {
                     let _ = std::fs::remove_dir_all(&target);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&file);
                 }
             }
             anyhow::bail!(
@@ -3906,7 +4090,11 @@ pub trait WebDataRpc: WebDataHost {
         let preview = wind_transfer::theme::preview_package(package)?;
         let (theme_id, target) = self.theme_target_dir(params, &preview.display_name)?;
         if target.exists() && !force {
-            return Ok(Self::theme_conflict_json(&theme_id, &preview.display_name));
+            return Ok(Self::theme_conflict_json(
+                &theme_id,
+                &preview.display_name,
+                &target,
+            ));
         }
 
         // 依赖链校验交给 transfer 的校验回调：它要在新目录**已就位、旧目录还没删**的
@@ -3941,10 +4129,11 @@ pub trait WebDataRpc: WebDataHost {
     /// 落点由调用方给全路径（与 `scheme.exportPackage` 同形）：core 不猜「导到哪」，
     /// 那是设置端的文件对话框与 CLI 的参数各自该管的事。
     ///
-    /// ⚠️ `path` **不做任何校验**，这条成立的前提是这条 RPC 只经本机 ctrl 通道由设置端
-    /// 与 CLI 调用、不对外暴露。哪天这条链上多一个远程或网页入口，它连同下面的
-    /// `create_dir_all(parent)` 就是一个任意写——**那时必须先加落点白名单再接入**，
-    /// 而不是指望「现在没人远程调」。
+    /// ⚠️ `path` **不做任何校验**，这条成立的前提是 `path` 永远不由网页或远端决定：
+    /// 这条 RPC 只经本机 ctrl 通道调用——设置端「导出…」的路径来自原生保存框，CLI 来自
+    /// 命令行参数。设置端的主题编辑器连接（本机网页路由）若要出包，`path` 必须是设置端
+    /// 在自己的私有临时目录里以独占方式（O_EXCL）新建的文件，网页只能给 slug。
+    /// 哪天要让网页或远端影响 `path`，它就是一个任意写——**那时必须先加落点白名单**。
     fn web_theme_export_package(&self, params: &Value) -> anyhow::Result<Value> {
         let slug = str_param(params, "slug")?;
         let out = str_param(params, "path")?;
@@ -4023,9 +4212,12 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `appearance.previewTemplate`：模板在当前主题下的渲染效果（设置页输入框下方的预览行）。
     ///
-    /// 入参 `{ template, scene: "comment" | "label" | "content", each?, swatches?: [名字] }`。回包：
+    /// 入参 `{ template, scene: "comment" | "label" | "content", each?, swatches?: [名字], sample? }`。
+    /// `sample` 是样例 id（缺省 = 「你好」），未知 id 报错。回包：
     /// ```text
-    /// { text, fg, bg, runs: [{start, end, rgba}],
+    /// { candidate, sample,                     // 本次用的样例词与它的 id
+    ///   samples: [{id, text, lang: "zh"|"en"}], // 全部可用样例，设置端据此按语种取
+    ///   text, fg, bg, runs: [{start, end, rgba}],
     ///   selected: { fg, bg, runs } | null,      // 仅 comment：高亮候选里的样子
     ///   problems: [{start, end, message}],
     ///   swatches: { 名字: rgba } }              // 入参 swatches 里每个名字写成 `$[名字]` 的实际颜色
@@ -4073,7 +4265,14 @@ pub trait WebDataRpc: WebDataHost {
             other => anyhow::bail!("未知 scene：{other}"),
         };
         let is_tooltip = scene != TemplateScene::Comment;
-        let sample = self.template_sample(template, &scene);
+        let sample_id = match params.get("sample") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s.as_str()),
+            Some(v) => anyhow::bail!("sample 须为字符串：{v}"),
+        };
+        let preset = wind_coordinator::template_preview::find_sample(sample_id)
+            .ok_or_else(|| anyhow::anyhow!("未知样例：{}", sample_id.unwrap_or_default()))?;
+        let sample = self.template_sample(template, &scene, preset);
         // 主题现取：与候选窗同一条搜索链、同一个当前主题与明暗。每次预览都从磁盘解析一次
         // （设计 §11 已知局限：低频的设置页操作，不值得为它挂一份缓存）。取不到（主题文件坏了）
         // 时退化为兜底色的预览，并给一条总的提示——不逐个把颜色名误报成「当前主题没有」。
@@ -4221,7 +4420,14 @@ pub trait WebDataRpc: WebDataHost {
             })
             .collect();
 
+        let samples: Vec<Value> = wind_coordinator::template_preview::SAMPLES
+            .iter()
+            .map(|s| json!({"id": s.id, "text": s.text, "lang": s.lang.as_str()}))
+            .collect();
         Ok(json!({
+            "candidate": preset.text,
+            "sample": preset.id,
+            "samples": samples,
             "text": sample.text.as_str(),
             "fg": fg,
             "bg": bg,
@@ -4240,17 +4446,92 @@ pub trait WebDataRpc: WebDataHost {
             .into_iter()
             .map(|(id, display, builtin)| {
                 let meta = wind_theme::read_meta(&dirs, &id);
+                let dir = wind_theme::theme::find_theme_dir(&dirs, &id);
+                let base = dir
+                    .as_ref()
+                    .and_then(|d| {
+                        std::fs::read_to_string(d.join(wind_transfer::theme::THEME_ENTRY_NAME)).ok()
+                    })
+                    .and_then(|t| t.parse::<toml::Value>().ok())
+                    .and_then(|v| v.get("base")?.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let (skin, animated) = wind_theme::load_resolved_dirs(&dirs, &id, false)
+                    .map(|t| theme_skin_summary(&t))
+                    .unwrap_or_default();
                 json!({
                     "name": id,
                     "display_name": display,
                     "author": meta.as_ref().map(|m| m.author.clone()).unwrap_or_default(),
                     "version": meta.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
                     "builtin": builtin,
+                    // 内置主题的目录是安装目录里的实现细节，只给用户主题。
+                    "dir": dir
+                        .filter(|_| !builtin)
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default(),
+                    "base": base,
+                    "skin": skin,
+                    "animated": animated,
                 })
             })
             .collect();
         Ok(json!(out))
     }
+}
+
+/// 主题是否带异形皮肤、皮肤是否会动：装饰写了事件状态机，或框图 / 装饰图（含 srcset 的各档）
+/// 文件头是动画格式（[`wind_theme::skin::sniff_animated`]，只读头部不解码；GIF 一律按动图算，
+/// 单帧 GIF 会误报）。给设置端「主题信息」看的概要。
+fn theme_skin_summary(t: &wind_theme::Resolved) -> (bool, bool) {
+    let Some(skin) = t.skin.as_deref() else {
+        return (false, false);
+    };
+    let variants = [
+        &skin.horizontal,
+        &skin.vertical,
+        &skin.horizontal_embedded,
+        &skin.vertical_embedded,
+    ];
+    let variants = variants.into_iter().flatten();
+    if variants
+        .clone()
+        .flat_map(|v| &v.decor)
+        .any(|d| !d.anim.states.is_empty() || !d.anim.on.is_empty())
+    {
+        return (true, true);
+    }
+    let animated = variants
+        .flat_map(|v| {
+            let frame = std::iter::once(v.frame.image.as_str())
+                .chain(v.frame.srcset.iter().map(|(p, _)| p.as_str()));
+            let decor = v.decor.iter().map(|d| d.image.as_str());
+            frame.chain(decor).collect::<Vec<_>>()
+        })
+        .any(|r| image_file_animated(t, r));
+    (true, animated)
+}
+
+/// 读图片文件头（至多 64 KiB）判是不是动图；读不到（含 data: 内联图）算不是。图片引用的
+/// 解析顺序同渲染端 `wind_scene::theme_assets::asset_path`：资源表 → 绝对路径 → base 链目录。
+fn image_file_animated(t: &wind_theme::Resolved, reference: &str) -> bool {
+    use std::io::Read as _;
+    let path = match t.resources.get(reference) {
+        Some(p) => std::path::PathBuf::from(p),
+        None if std::path::Path::new(reference).is_absolute() => reference.into(),
+        None => match t
+            .asset_dirs
+            .iter()
+            .map(|d| d.join(reference))
+            .find(|p| p.is_file())
+        {
+            Some(p) => p,
+            None => return false,
+        },
+    };
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(64 * 1024).read_to_end(&mut head))
+        .is_ok_and(|_| wind_theme::skin::sniff_animated(&head))
 }
 
 // 不用 blanket impl：`Arc<Coordinator>` 的方法解析会先命中 T=Arc 的 blanket 候选、
@@ -4385,6 +4666,7 @@ fn followed_behavior_of(cfg: &wind_config::Config, theme_font: Option<String>) -
     json!({
         "layout": wind_config::Orientation::from_layout_str(&cfg.ui.candidate.layout).layout_str(),
         "fontFamily": font,
+        "perPage": cfg.ui.candidate.per_page, // fold-gate:allow 显示「跟随」的全局值
         "auxEnabled": aux.enabled,
         "auxMaxPhraseLen": aux.max_phrase_len,
         "auxDirect": aux.direct,
@@ -4923,6 +5205,102 @@ outside: rare
         );
     }
 
+    /// 设置页改词（`dict.update` 的 upsert）与单条手动转正（`temp.promote`）是显式加词：撤掉同码
+    /// 同文的删除规则，别的词的删除规则不动。全部转正（`temp.promoteAll`）是批量操作：不撤，报数。
+    #[test]
+    fn single_update_and_promote_clear_but_promote_all_only_counts() {
+        let c = coord("readd_clear");
+        let store = c.user_store().expect("有 store");
+        for (code, text) in [("nihao", "你好"), ("haoya", "好呀"), ("shijie", "世界")] {
+            store.delete_shadow("pinyin", code, text).unwrap();
+        }
+        store.delete_shadow("pinyin", "nihao", "拟好").unwrap();
+        store
+            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0b1001)
+            .unwrap();
+        store
+            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
+            .unwrap();
+        let deleted = |code: &str| {
+            store
+                .get_shadow_rules("pinyin", code)
+                .unwrap()
+                .map(|r| r.deleted)
+                .unwrap_or_default()
+        };
+
+        c.web_data_rpc(
+            "dict.update",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "ni hao", "text": "你好", "weight": 5 }),
+        )
+        .unwrap();
+        assert_eq!(deleted("nihao"), vec!["拟好".to_string()], "只撤「你好」");
+
+        c.web_data_rpc(
+            "temp.promote",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "hao ya", "text": "好呀" }),
+        )
+        .unwrap();
+        assert!(deleted("haoya").is_empty(), "手动转正应撤删除规则");
+
+        // 全部转正是批量操作：不撤，只报数
+        let r = c
+            .web_data_rpc(
+                "temp.promoteAll",
+                &serde_json::json!({ "schemaId": "pinyin" }),
+            )
+            .unwrap();
+        assert_eq!(
+            r,
+            serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }),
+            "转正 1 条、其中 1 条被隐藏"
+        );
+        assert_eq!(
+            deleted("shijie"),
+            vec!["世界".to_string()],
+            "全部转正不撤删除规则"
+        );
+    }
+
+    /// 拼音「屏蔽这个词」行（`code = *`）在候选调整列表里照常列出、能按 `shadow.removeRule` 删；
+    /// 全部转正的计数按文字算上它。
+    #[test]
+    fn block_row_listed_removable_and_counted() {
+        let c = coord("block_row");
+        let store = c.user_store().expect("有 store");
+        store.block_word("pinyin", "世界").unwrap();
+        let list = c
+            .web_data_rpc("shadow.list", &serde_json::json!({ "schemaId": "pinyin" }))
+            .unwrap();
+        let arr = list.as_array().expect("数组");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["code"], "*");
+        assert_eq!(arr[0]["word"], "世界");
+        assert_eq!(arr[0]["type"], "delete");
+
+        store
+            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
+            .unwrap();
+        let r = c
+            .web_data_rpc(
+                "temp.promoteAll",
+                &serde_json::json!({ "schemaId": "pinyin" }),
+            )
+            .unwrap();
+        assert_eq!(r, serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }));
+        assert!(
+            store.blocked_words("pinyin").unwrap().contains("世界"),
+            "全部转正不撤屏蔽"
+        );
+
+        c.web_data_rpc(
+            "shadow.removeRule",
+            &serde_json::json!({ "schemaId": "pinyin", "code": "*", "word": "世界" }),
+        )
+        .unwrap();
+        assert!(store.blocked_words("pinyin").unwrap().is_empty());
+    }
+
     /// 临时词库与用户词库同款：列表显示带空格，remove / promote 收到后各自拆回扁平码。
     /// **三处必须同改**——只改列表就成了「显示得了、删不掉、也晋升不了」。
     #[test]
@@ -4995,6 +5373,42 @@ outside: rare
                 );
             }
         }
+    }
+
+    /// ime.get / set / toggle：中英切换幂等、取反回新值、未知目标报错，且 get 不带目标回全部。
+    #[test]
+    fn ime_state_rpcs_set_toggle_get() {
+        let c = coord("ime_state_rpcs");
+        let call = |m: &str, p: Value| c.web_data_rpc(m, &p);
+
+        let all = call("ime.get", json!({})).unwrap();
+        for t in ["cn-en", "fullshape", "s2t", "t2s", "toolbar"] {
+            assert!(all.get(t).is_some_and(Value::is_boolean), "{t}: {all}");
+        }
+
+        let cur = call("ime.get", json!({"target": "cn-en"})).unwrap()["on"]
+            .as_bool()
+            .unwrap();
+        // 设成当前值：不改动
+        let r = call("ime.set", json!({"target": "cn-en", "on": cur})).unwrap();
+        assert_eq!(r["changed"], json!(false), "{r}");
+        // 设成另一值：改动，且 get 读到新值
+        let r = call("ime.set", json!({"target": "cn-en", "on": !cur})).unwrap();
+        assert_eq!(r["changed"], json!(true), "{r}");
+        assert_eq!(
+            call("ime.get", json!({"target": "cn-en"})).unwrap()["on"],
+            json!(!cur)
+        );
+        // toggle 回到原值，并回报切换后的值
+        let r = call("ime.toggle", json!({"target": "cn-en"})).unwrap();
+        assert_eq!(r["on"], json!(cur), "{r}");
+
+        assert!(call("ime.get", json!({"target": "layout"})).is_err());
+        assert!(call("ime.toggle", json!({"target": "layout"})).is_err());
+        assert!(
+            call("ime.set", json!({"target": "cn-en"})).is_err(),
+            "缺 on"
+        );
     }
 
     /// dict.reload / dict.flush：分派在表里；reload 越界路径报错。
@@ -9574,8 +9988,8 @@ short_code_yield_level = 2
         // 断文案:否则哪天这个夹具因为别的原因(比如主题本身没通过 validate)提前失败,
         // 下面那两条「旧包还在」就会在一个根本没走到打包的路径上假绿。
         assert!(
-            e.contains("条目过多"),
-            "应因条目数越过上限而失败，实际: {e}"
+            e.contains("主题资源过多"),
+            "应因条目数越过上限而失败（导出前就按导入口径拦下），实际: {e}"
         );
         assert!(
             e.contains("导出主题"),
@@ -10405,6 +10819,7 @@ mod followed_behavior_tests {
         let mut cfg = wind_config::Config::default();
         cfg.ui.candidate.layout = "vertical".into();
         cfg.ui.font.family = "霞鹜文楷".into();
+        cfg.ui.candidate.per_page = 9;
         cfg.schema.pinyin.aux_code.enabled = true;
         cfg.schema.pinyin.aux_code.max_phrase_len = 3;
         cfg.schema.pinyin.aux_code.direct = true;
@@ -10414,6 +10829,7 @@ mod followed_behavior_tests {
             json!({
                 "layout": "vertical",
                 "fontFamily": "霞鹜文楷",
+                "perPage": 9,
                 "auxEnabled": true,
                 "auxMaxPhraseLen": 3,
                 "auxDirect": true,
@@ -10597,6 +11013,18 @@ mod memory_stats_tests {
             v["redb"].is_null(),
             "全新用户目录不打开旧库，不该报它的缓存上限：{v}"
         );
+        assert!(
+            v["dictCache"]["policy"].is_string(),
+            "dictCache.policy：{v}"
+        );
+        for k in [
+            "lockedBytes",
+            "lockFailedBytes",
+            "preloadedBytes",
+            "overBudgetBytes",
+        ] {
+            assert!(v["dictCache"][k].is_u64(), "dictCache.{k}：{v}");
+        }
     }
 }
 
@@ -10687,5 +11115,478 @@ mod system_stats_tests {
                 .is_err()
         );
         assert!(c.web_data_rpc("dict.systemStats", &json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sys_dict_categories_tests {
+    //! `sysDict.categories / header / entries`：一级表的形状与先后（主库最先、按 base_order），
+    //! 停用库也有条数，发现目录登记的库 source 为 dir，开关后再取即反映新状态；二级头部卡片与
+    //! 词条分页 / 搜索。
+    use super::*;
+    use std::sync::Arc;
+    use wind_config::Config;
+    use wind_coordinator::Coordinator;
+    use wind_store::Store;
+
+    /// 夹具：协调器 + 临时数据根；离开作用域（含断言失败）即删临时目录。
+    struct Fixture {
+        c: Arc<Coordinator>,
+        base: std::path::PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// 码表 `zm2`：主库 + 停用的分组库 + 文件缺失的库 + `zm2/ext/` 下一张未登记的库；
+    /// 混输 `mx2` 没有自己的附加库。
+    fn coord(tag: &str) -> Fixture {
+        let base = std::env::temp_dir().join(format!("wind_syscats-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let schemas = base.join("schemas");
+        std::fs::create_dir_all(schemas.join("zm2/ext")).unwrap();
+        std::fs::write(
+            schemas.join("zm2.schema.toml"),
+            "[schema]\nid = \"zm2\"\nname = \"码二\"\n[engine]\ntype = \"codetable\"\n\
+             [engine.codetable]\nmax_code_length = 4\n\
+             [[dictionaries]]\nid = \"main\"\npath = \"zm2/zm2.dict.yaml\"\ndefault = true\n\
+             [[dictionaries]]\nid = \"term\"\nlabel = \"术语\"\ndescription = \"专业词\"\n\
+             group = \"专业术语\"\npath = \"zm2/term.dict.yaml\"\ndefault_enabled = false\nbase_order = 1\n\
+             [[dictionaries]]\nid = \"ghost\"\nlabel = \"缺文件\"\npath = \"zm2/ghost.dict.yaml\"\n\
+             default_enabled = true\n",
+        )
+        .unwrap();
+        let head = "---\nname: x\nversion: \"1\"\n...\n";
+        std::fs::write(
+            schemas.join("zm2/zm2.dict.yaml"),
+            "---\nname: x\nversion: \"1\"\nimport_tables:\n  - sub/more\n...\n甲\ta\t9\n乙\tb\t5\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(schemas.join("zm2/sub")).unwrap();
+        std::fs::write(
+            schemas.join("zm2/sub/more.dict.yaml"),
+            format!("{head}丁\taa\t3\n戊\tab\t2\n己\tc\t1\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zm2/term.dict.yaml"),
+            format!("{head}算法\taaaa\t1\n# 注释\n\n编译\tbbbb\t1\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("zm2/ext/mine.dict.yaml"),
+            "---\nname: 我的词\n...\n丙\tc\t1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("mx2.schema.toml"),
+            "[schema]\nid = \"mx2\"\nname = \"混\"\n[engine]\ntype = \"mixed\"\n\
+             [engine.mixed]\nprimary_schema = \"zm2\"\n",
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
+        let mut cfg = Config::default();
+        cfg.schema.active = "zm2".into();
+        cfg.schema.available = vec!["zm2".into(), "mx2".into()];
+        // override 落临时目录：开关测试会写它，不能碰本机配置。
+        let c = Coordinator::new_headless_with_store_override(
+            cfg,
+            Some(&base),
+            store,
+            Some(base.join("overrides")),
+        );
+        Fixture { c, base }
+    }
+
+    fn item<'a>(v: &'a Value, id: &str) -> &'a Value {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap_or_else(|| panic!("清单里没有 {id}: {v}"))
+    }
+
+    #[test]
+    fn lists_main_first_with_order_sources_and_counts() {
+        let f = coord("shape");
+        let c = &f.c;
+        let v = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+            .unwrap();
+        let ids: Vec<(&str, u64)> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| (d["id"].as_str().unwrap(), d["order"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("main", 1),
+                ("ghost", 2),
+                ("term", 3),
+                ("dir:zm2/ext/mine", 4)
+            ],
+            "主库最先，其余按 base_order（ghost 0 < term 1 < 发现目录），同值按方案块序"
+        );
+        assert_eq!(
+            item(&v, "main"),
+            &json!({
+                "id": "main", "label": "zm2", "description": "", "group": null,
+                "enabled": true, "source": "main", "count": 2, "order": 1, "togglable": false,
+            }),
+            "主库：没写 label 取文件名，关不掉；码表库的 import_tables 加载器不读、不计"
+        );
+        assert_eq!(
+            item(&v, "term"),
+            &json!({
+                "id": "term", "label": "术语", "description": "专业词",
+                "group": "专业术语", "enabled": false, "source": "bundled", "count": 2,
+                "order": 3, "togglable": true,
+            }),
+            "停用的库也有条数"
+        );
+        let ghost = item(&v, "ghost");
+        assert_eq!(
+            (&ghost["enabled"], &ghost["count"]),
+            (&json!(true), &Value::Null)
+        );
+        assert_eq!(ghost["group"], Value::Null, "没写 group 给 null");
+        let mine = item(&v, "dir:zm2/ext/mine");
+        assert_eq!(
+            (
+                &mine["source"],
+                &mine["label"],
+                &mine["count"],
+                &mine["group"]
+            ),
+            (&json!("dir"), &json!("我的词"), &json!(1), &Value::Null)
+        );
+    }
+
+    #[test]
+    fn codetable_imports_do_not_affect_main_count() {
+        let f = coord("subgone");
+        std::fs::remove_file(f.base.join("schemas/zm2/sub/more.dict.yaml")).unwrap();
+        let v =
+            f.c.web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+                .unwrap();
+        assert_eq!(item(&v, "main")["count"], 2, "子表在不在都只算本文件");
+    }
+
+    #[test]
+    fn header_card_and_errors() {
+        let f = coord("header");
+        let c = &f.c;
+        let h = c
+            .web_data_rpc(
+                "sysDict.header",
+                &json!({"schema": "zm2", "dictId": "main"}),
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                &h["id"],
+                &h["label"],
+                &h["source"],
+                &h["name"],
+                &h["version"]
+            ),
+            (
+                &json!("main"),
+                &json!("zm2"),
+                &json!("main"),
+                &json!("x"),
+                &json!("1")
+            )
+        );
+        assert_eq!(h["importTables"], json!(["sub/more"]), "声明原样列");
+        assert_eq!(h["count"], 2);
+        assert_eq!(h["tables"], json!([]), "码表库不加载子表");
+        assert!(h["path"].as_str().unwrap().ends_with("zm2.dict.yaml"));
+        assert!(h["mtimeMs"].as_u64().is_some());
+        let t = c
+            .web_data_rpc(
+                "sysDict.header",
+                &json!({"schema": "zm2", "dictId": "term"}),
+            )
+            .unwrap();
+        assert_eq!(
+            (&t["source"], &t["tables"]),
+            (&json!("bundled"), &json!([]))
+        );
+        // 未知 id / 文件缺失 / 缺参
+        for p in [
+            json!({"schema": "zm2", "dictId": "nope"}),
+            json!({"schema": "zm2", "dictId": "ghost"}),
+            json!({"schema": "nope", "dictId": "main"}),
+            json!({"schema": "zm2"}),
+        ] {
+            assert!(c.web_data_rpc("sysDict.header", &p).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn entries_pages_and_searches() {
+        let f = coord("entries");
+        let c = &f.c;
+        let get = |p: Value| c.web_data_rpc("sysDict.entries", &p).unwrap();
+        let v = get(json!({"schema": "zm2", "dictId": "main", "offset": 1, "limit": 2}));
+        assert_eq!(v["total"], 2);
+        assert_eq!(
+            v["rows"],
+            json!([{"code": "b", "text": "乙", "weight": 5, "table": "zm2"}]),
+            "码表库不混入 import_tables 子表"
+        );
+        assert_eq!(v["note"], Value::Null);
+        let v = get(json!({"schema": "zm2", "dictId": "main", "query": "a", "mode": "code"}));
+        let texts: Vec<&str> = v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["text"].as_str().unwrap())
+            .collect();
+        assert_eq!((v["total"].as_u64(), texts), (Some(1), vec!["甲"]));
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "编", "mode": "text"}));
+        assert_eq!(v["total"], 1);
+        let v = get(json!({"schema": "zm2", "dictId": "term", "offset": 9}));
+        assert_eq!(
+            (&v["total"], &v["rows"]),
+            (&json!(2), &json!([])),
+            "越界给空页"
+        );
+        // 不给 mode：编码前缀或词子串
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "b"}));
+        assert_eq!(v["rows"][0]["text"], "编译");
+        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "算"}));
+        assert_eq!(v["rows"][0]["text"], "算法");
+        // sort / order：排序后分页
+        let texts_of = |v: &Value| -> Vec<String> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["text"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let v = get(json!({"schema": "zm2", "dictId": "main", "sort": "weight"}));
+        assert_eq!(texts_of(&v), ["乙", "甲"]);
+        let v = get(json!({
+            "schema": "zm2", "dictId": "main", "sort": "weight", "order": "desc",
+            "offset": 1, "limit": 1
+        }));
+        assert_eq!(
+            (v["total"].as_u64(), texts_of(&v)),
+            (Some(2), vec!["乙".into()])
+        );
+        let v = get(json!({"schema": "zm2", "dictId": "term", "sort": "code", "order": "desc"}));
+        assert_eq!(texts_of(&v), ["编译", "算法"]);
+        for p in [
+            json!({"schema": "zm2", "dictId": "nope"}),
+            json!({"schema": "zm2", "dictId": "main", "mode": "pinyin"}),
+            json!({"schema": "zm2", "dictId": "main", "sort": "count"}),
+            json!({"schema": "zm2", "dictId": "main", "sort": "code", "order": "up"}),
+            json!({"schema": "zm2", "dictId": "ghost"}),
+        ] {
+            assert!(c.web_data_rpc("sysDict.entries", &p).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn reflects_toggle_and_rejects_bad_input() {
+        let f = coord("toggle");
+        let c = &f.c;
+        c.web_data_rpc(
+            "schema.setDictEnabled",
+            &json!({"id": "zm2", "dictId": "term", "enabled": true}),
+        )
+        .unwrap();
+        let v = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
+            .unwrap();
+        assert_eq!(item(&v, "term")["enabled"], true);
+        let mx = c
+            .web_data_rpc("sysDict.categories", &json!({"schema": "mx2"}))
+            .unwrap();
+        assert_eq!(mx, json!([]), "混输没有自己的附加库");
+        assert!(
+            c.web_data_rpc("sysDict.categories", &json!({"schema": "nope"}))
+                .is_err()
+        );
+        assert!(c.web_data_rpc("sysDict.categories", &json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod comment_library_tests {
+    //! `comment.library`：模板表带来源，总表每格给出实际生效的模板与所在层。
+    use super::*;
+    use std::sync::Arc;
+    use wind_config::Config;
+    use wind_coordinator::Coordinator;
+    use wind_store::Store;
+
+    fn coord(tag: &str) -> Arc<Coordinator> {
+        let base = std::env::temp_dir().join(format!("wind_cmtlib-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("schemas")).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../data/system.comments.toml"
+            ),
+            base.join("system.comments.toml"),
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
+        Coordinator::new_headless_with_store(Config::default(), Some(&base), store)
+    }
+
+    fn cell<'a>(v: &'a Value, scope: &str, state: &str, vertical: bool) -> &'a Value {
+        v["effective"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["scope"] == scope && e["state"] == state && e["vertical"] == vertical)
+            .unwrap_or_else(|| panic!("effective 缺 {scope}/{state}/{vertical}: {v}"))
+    }
+
+    #[test]
+    fn builtin_templates_and_global_effective() {
+        let v = coord("base")
+            .web_data_rpc("comment.library", &json!({}))
+            .unwrap();
+        let code = v["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == "code")
+            .expect("templates 应含 code");
+        assert_eq!(code["origin"], "builtin");
+        assert_eq!(code["name"], "编码（自动）");
+        assert!(code["desc"].as_str().is_some_and(|d| !d.is_empty()));
+        let g = cell(&v, "global", "default", true);
+        assert_eq!(g["template_id"], "code");
+        assert_eq!(g["from_scope"], "global");
+        assert_eq!(
+            v["system_assign"]["type"]["codetable"]["detail_horizontal"],
+            "chaizi_pinyin"
+        );
+        for vertical in [false, true] {
+            let e = cell(&v, "mode:temp_english", "default", vertical);
+            assert_eq!(e["template_id"], "none");
+            assert_eq!(e["from_scope"], "mode:temp_english");
+        }
+        let t = cell(&v, "type:codetable", "default", false);
+        assert_eq!(t["template_id"], "code");
+        assert_eq!(t["from_scope"], "global");
+    }
+
+    #[test]
+    fn draft_comment_param_drives_rows_and_origins() {
+        let v = coord("draft")
+            .web_data_rpc(
+                "comment.library",
+                &json!({"comment": {
+                    "templates": [
+                        {"id": "code", "name": "改", "text": "X"},
+                        {"id": "mine", "name": "我的", "text": "Y"}
+                    ],
+                    "assign": {"schema": {"wubi86": {"detail_horizontal": "mine"}}}
+                }}),
+            )
+            .unwrap();
+        let origin = |id: &str| {
+            v["templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == id)
+                .map(|t| t["origin"].clone())
+        };
+        assert_eq!(origin("code"), Some(json!("user_overrides_builtin")));
+        let ch = v["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == "code")
+            .unwrap();
+        assert_eq!(ch["builtin"]["name"], "编码（自动）");
+        assert_eq!(origin("mine"), Some(json!("user")));
+        for vertical in [false, true] {
+            let s = cell(&v, "schema:wubi86", "detail", vertical);
+            assert_eq!(s["template_id"], "mine", "竖排没写同本行横排");
+            assert_eq!(s["from_scope"], "schema:wubi86");
+        }
+        let s = cell(&v, "schema:wubi86", "default", true);
+        assert_eq!(s["from_scope"], "global");
+    }
+}
+
+#[cfg(test)]
+mod theme_list_tests {
+    use super::*;
+
+    fn data_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data")
+    }
+
+    /// 内置主题不给目录，`base` 取主题文件自己写的那一级。
+    #[test]
+    fn list_reports_base_and_hides_builtin_dir() {
+        let c = wind_coordinator::Coordinator::new_headless(
+            wind_config::Config::default(),
+            Some(&data_dir()),
+        );
+        let list = c.web_theme_list().unwrap();
+        let def = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "default")
+            .expect("列出 default");
+        assert_eq!(def["builtin"], true);
+        assert_eq!(def["dir"], "");
+        assert_eq!(def["base"], "_qingfeng");
+        assert_eq!(def["skin"], false);
+        assert_eq!(def["animated"], false);
+    }
+
+    #[test]
+    fn skin_summary_flags_animated_decor() {
+        let root = std::env::temp_dir().join(format!("wind_skin_summary_{}", std::process::id()));
+        let write = |slug: &str, decor: &str| {
+            let d = root.join(slug);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join(wind_transfer::theme::THEME_ENTRY_NAME),
+                format!(
+                    "[skin.horizontal.frame]\nimage = \"f.png\"\n[[skin.horizontal.decor]]\nimage = \"{decor}\"\n"
+                ),
+            )
+            .unwrap();
+        };
+        write("still", "d.png");
+        write("moving", "d.gif");
+        // 扩展名不算数，看文件头：静态的 .webp 不是动图，GIF 签名才是。
+        std::fs::write(root.join("still/d.png"), b"\x89PNG\r\n\x1a\n\0\0\0\0IDAT").unwrap();
+        std::fs::write(root.join("moving/d.gif"), b"GIF89a").unwrap();
+        write("webp", "d.webp");
+        std::fs::write(root.join("webp/d.webp"), b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0").unwrap();
+        let dirs = vec![root.clone()];
+        let sum = |slug: &str| {
+            theme_skin_summary(&wind_theme::load_resolved_dirs(&dirs, slug, false).unwrap())
+        };
+        assert_eq!(sum("still"), (true, false));
+        assert_eq!(sum("moving"), (true, true));
+        assert_eq!(sum("webp"), (true, false));
+        assert_eq!(
+            theme_skin_summary(&wind_theme::Resolved::default()),
+            (false, false)
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -16,6 +16,8 @@ members = [
     "crates/wind-host",
     "crates/wind-mobile",
     "crates/wind-ui",
+    "crates/wind-scene",
+    "crates/wind-scene-wasm",
     "crates/wind-cmdbar",
     "crates/wind-phrase",
     "crates/wind-keys",
@@ -30,7 +32,9 @@ members = [
     "crates/wind-userdata",
     "crates/wind-wdict",
     "crates/wind-rpc",
+    "crates/wind-hook",
     "apps/service",
+    "apps/extension_host",
     "apps/rpc",
     "apps/repl",
     "apps/wind-tools",
@@ -122,6 +126,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Ole",
     "Win32_System_DataExchange",
     "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
 ]}
 # Random
 rand = "0.8"
@@ -135,6 +140,12 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# 主题编辑器的 wasm 预览（`scripts/build-scene-wasm.sh`）：在 release 上改按体积优化，
+# 产物检入编辑器仓、随页面下载。
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
 
 # dev 构建优化：让逐像素渲染等热路径接近 release 速度。
 # 注意 package."*" 只作用于依赖，不含本工作区代码；故本工作区代码另加 opt-level=1。

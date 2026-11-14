@@ -446,6 +446,12 @@ impl OverlayPreeditForms {
     }
 }
 
+/// Alt 键自按下起的追踪：按下时刻与「期间是否按过别的键」。
+pub(crate) struct AltTrack {
+    pub down_at: std::time::Instant,
+    pub dirty: bool,
+}
+
 /// ⚠️ `Default` **只在测试构建下存在**（`cfg_attr(test, ...)`）。
 ///
 /// 生产侧一律走 `Coordinator::new` 里的显式构造：那里每个字段的初值都有来历
@@ -457,6 +463,12 @@ pub(crate) struct State {
     pub(crate) chinese_mode: bool,
     pub(crate) full_width: bool,
     pub(crate) chinese_punct: bool,
+    /// 插入点前一字符的类别——中英/中数间补空格与英文后智能标点的「上一笔」。
+    ///
+    /// 两个写入点（见 `crate::auto_spacing`）：无输入会话时的 keydown 按客户端 `seq_char`
+    /// 重新锁存；服务端每发出一笔上屏就改成那笔的末字符。组合中的后续按键不改它——组字键
+    /// 没写进文档，真正的「前一字符」是组合开始时那个。
+    pub(crate) spacing_prev: wind_punct::spacing::CharClass,
     /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
     ///
     /// 见 `docs/design/schema-scoped-behavior.md` §4。初值是哨兵 `u64::MAX`，保证首次
@@ -603,6 +615,9 @@ pub(crate) struct State {
     /// 剩余编码开头）。光标**不参与引擎查询**：`update_candidates` 恒查整串，移动光标不重算
     /// 候选（对齐 Go `inputCursorPos`）。所有读写走 `preedit_cursor::BufEdit`，勿裸改。
     pub(crate) input_cursor_pos: usize,
+    /// 手机端展开页「首单元读法」的当前选择（见 [`crate::leading_reading`]）：只对**记录它时的那份
+    /// 缓冲**有效——缓冲一变（打字、退格、选词吃掉前缀）就自动失效，不用在十几处清缓冲的地方逐个复位。
+    pub(crate) leading: Option<crate::leading_reading::Applied>,
     /// 组合区显示文本（拼音含音节分隔 "ni'hao"；码表为原始编码）。
     /// 仅显示输入码/拼音，绝不包含候选列表。
     pub(crate) preedit: String,
@@ -667,6 +682,13 @@ pub(crate) struct State {
     /// 改由 `build_candidates` 开头按前缀关系统一淘汰——缓冲清空、光标编辑、方案切换
     /// 全被同一条规则覆盖。
     pub(crate) shortcode_tops: [Option<(String, String)>; 3],
+    /// 用户**显式选中**的 `$SS`/`$AA` 组：`(完整码, 组源文本)`。
+    ///
+    /// 精确码下有重码时组默认折叠成一条组名候选（见 `resolve_group_expansion`），用户选中它
+    /// 才展开成员；选中动作把输入补全到完整码并重查，重查时靠这条记录知道「这次要展开」，
+    /// 否则会又折叠回去、永远进不了二级选择。失效与 `shortcode_tops` 同理——`build_candidates`
+    /// 开头按「输入码已不是记录里的码」统一淘汰，不逐个接线。
+    pub(crate) expanded_group: Option<(String, String)>,
     pub(crate) candidates: Vec<Candidate>,
     /// 当前页内高亮候选下标（0-based，相对当前页）——键盘选中项，空格上屏的目标
     pub(crate) selected_index: usize,
@@ -699,6 +721,15 @@ pub(crate) struct State {
     /// 组合结束的出口有几十处，不逐个清：每次按键开头若已没有候选，就说明是一次新组合，在
     /// `handle_key_event` 开头清掉。
     pub(crate) grid_keep: bool,
+    /// 注释态的「仅本次候选窗」翻转：与持久态（`ui.comment.state`）异或得当前态。
+    /// 候选窗关闭或被新组合替换即清：`cancel_session`、进出联想、顶码余码、顶屏进模式、`handle_key_event` 开头无会话时。
+    pub(crate) comment_session_flip: bool,
+    /// 注释态的「按住切换键」翻转：按住期间为真，与上面那份各自独立地异或。
+    pub(crate) comment_hold_flip: bool,
+    /// Alt 单击 / 按住的判定中间态：`Some` = Alt 已按下、尚未松开。
+    pub(crate) alt_track: Option<AltTrack>,
+    /// 如实上报的 Ctrl（`EVENT_MOD_DOWN`）单击判定中间态：`Some` = 已按下、尚未松开。
+    pub(crate) ctrl_track: Option<crate::comment_switch::CtrlTrack>,
     /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
     /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
     /// 右键、置顶删除就都不用知道筛选的存在。重建候选的几处（扩容、末页放宽）之后要重新套一次
@@ -797,10 +828,9 @@ pub(crate) struct State {
     pub(crate) special_id: u8,
     /// 当前特殊模式的 `[overlay]` 段**快照**（进入时填、退出时清）。
     ///
-    /// 快照而非每次查注册表，三个理由：
-    /// 1. `comment::template_for` 返回借用 `cfg` 的 `&str`（刻意不分配），临时 Vec 借不出来；
-    /// 2. 布局/注释取值在候选更新路径上，省掉每次的整表 clone；
-    /// 3. ★ 注册表按 id 排序，装一个新 overlay 方案会让其后方案的下标平移——快照让
+    /// 快照而非每次查注册表，两个理由：
+    /// 1. 布局取值在候选更新路径上，省掉每次的整表 clone；
+    /// 2. ★ 注册表按 id 排序，装一个新 overlay 方案会让其后方案的下标平移——快照让
     ///    「模式进行中装了方案」不至于把当前模式的行为换成隔壁那个的。
     ///
     /// 这不是 `layout.rs` 反对的那种「进入时保存、退出时回放」：快照的是**只读配置**，
@@ -927,16 +957,26 @@ thread_local! {
 ///   不重建），结果在 `reload_user_config` 里并进 `schema_dirty`。
 /// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
 ///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
-pub(crate) fn engine_reload_needed(old: &Config, new: &Config) -> bool {
+/// - `schema.dict_cache_policy`：只在服务启动时读一次（改了要重启才生效），重建引擎也换不了策略。
+pub(crate) fn engine_reload_needed(
+    old: &Config,
+    new: &Config,
+    overlay: wind_config::ConfigOverlay,
+) -> bool {
     let schema_changed = {
         let mut old_schema = old.schema.clone();
         old_schema.keep_all_loaded = new.schema.keep_all_loaded;
+        old_schema.dict_cache_policy = new.schema.dict_cache_policy.clone();
         old_schema != new.schema
     };
     schema_changed
         || old.input.temp_pinyin != new.input.temp_pinyin
         || old.input.temp_english != new.input.temp_english
         || old.input.reverse.lookup_disabled_dicts != new.input.reverse.lookup_disabled_dicts
+        // 引擎的拼音全局配置是 `pinyin_effective(overlay)` 的快照，只在重建时重算。
+        // 移动档下语法取 `[mobile.grammar]`，它不在 `schema` 里——只改它时上面几项都不变，
+        // 引擎就停在旧值。Base 档的有效值就是 `schema.pinyin`，已被 schema_changed 覆盖。
+        || old.pinyin_effective(overlay) != new.pinyin_effective(overlay)
 }
 
 /// 空码时按标点/符号键怎么处置这串废码（`input.punct_on_empty_behavior` 的解释结果）。
@@ -1041,6 +1081,9 @@ pub(crate) struct ActiveCompat {
     pub(crate) auto_pair: Option<bool>,
     /// 本进程的智能符号替换方案；`None` = 跟随全局 `input.symbol.smart_method`。
     pub(crate) smart_method: Option<wind_config::config::SmartMethod>,
+    /// 本进程的中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`，`Some(false)` 关闭。
+    /// 读取见 `Coordinator::auto_spacing_allowed_here`。
+    pub(crate) auto_spacing: Option<bool>,
     /// 光标坐标校正偏移（dp，96dpi 基准逻辑像素，正=右/下）。宿主报告的 caret 系统性偏移时用，
     /// 与 `caret_use_top` 在同两处消费（`apply_focus_caret` / `handle_caret_update`）。
     /// 应用时按目标点所在显示器的 DPI 换算成物理像素，见 [`Coordinator::apply_caret_compat`]。
@@ -1068,6 +1111,10 @@ pub(crate) struct ActiveCompat {
 pub(crate) struct ActiveLookups {
     /// 协调器自己发占位时用的字符（`composition_placeholder`，没配 = 空格）。
     pub(crate) composition_placeholder: wind_config::app_compat::PlaceholderChar,
+    /// 联想态的占位字符（`assoc_placeholder`，没配 = 跟随 `composition_placeholder`，已在此合并）。
+    pub(crate) assoc_placeholder: wind_config::app_compat::AssocPlaceholder,
+    /// 拼音音节分隔符的应用级覆盖（`syllable_separator`）；`None` = 跟随全局。
+    pub(crate) syllable_separator: Option<wind_config::app_compat::SyllableSeparator>,
     /// per-app 候选窗定位 `(fixed, x, y)`；`None` = 规则没配定位方式，跟随全局。
     pub(crate) candidate_pos: Option<(bool, i32, i32)>,
     /// `host_drawn_candidates`（UIElement 推断收窗的 opt-in）。进程名未知时取 `"*"` 那条，
@@ -1404,7 +1451,7 @@ pub(crate) enum CapsCancelSwitch {
 
 impl CapsCancelSwitch {
     /// 按 `CMD_SYSTEM_MODE_SWITCH` 的来源分派。「是不是用户按的」判据与
-    /// [`Coordinator::host_ime_close_ignored`] 同源：系统热键（Ctrl+空格）翻 compartment 时
+    /// [`Coordinator::host_ime_switch_ignored`] 同源：系统热键（Ctrl+空格）翻 compartment 时
     /// Ctrl 尚未释放，宿主自己写则没有伴随按键；按键侧兜底（`CtrlSpaceKey`）恒算用户发起。
     /// 菜单是用户**明确点了目标**，没有「切一下」的歧义，按请求。
     pub(crate) fn from_system(
@@ -1439,6 +1486,12 @@ pub struct Coordinator {
     /// 发送点——[`crate::UiSender`] 把这两步绑成一次 `send`，漏不掉。详见其模块文档。
     pub(crate) ui_tx: crate::UiSender,
     pub(crate) engine_mgr: EngineManager,
+    /// 输入行为的平台档位，构造时定下，之后不变。见 [`crate::input_profile`]。
+    pub(crate) profile: crate::input_profile::InputProfile,
+    /// 中立输出通道（`new_session` 构造时给）。有它就只发 [`crate::SessionEvent`]，并跳过
+    /// 桌面专属的首显闸门、注释渲染与候选窗布局；`None` = 桌面路径，行为不变。
+    /// 发送点集中在 `session_output.rs`。
+    pub(crate) session_tx: Option<crate::session_output::SessionSender>,
     /// redb 持久化存储（用户词/临时词/词频/影子规则）；None=无持久化（headless 测试）。
     pub(crate) store: Option<Arc<Store>>,
     /// 只读模式的原因（用户数据设计 §7.1 降级保护：meta.toml 版本高于本版本 / 读不出）；
@@ -1462,20 +1515,23 @@ pub struct Coordinator {
     /// 是否已有草稿 flush 线程在跑。没有这道闸，队列每满一次就会 spawn 一个新线程去
     /// 抢同一把 redb 写锁（同 `is_building_reverse_index` 那道闸的理由）。
     pub(crate) draft_flushing: std::sync::atomic::AtomicBool,
-    /// 最近一次**本输入法自己**向宿主吐字的时刻（由 `commit_action` 统一打点）。
+    /// 最近一次**本输入法自己**向宿主吐字的时刻（`note_self_commit` 打点，经
+    /// `finish_session_action` 按来源调用）。
     ///
     /// 用途只有一个：宿主插入我们提交的文字后会回送 `SelectionChanged`，它和「用户真的
     /// 移动了光标」在协议层**长得一模一样**，只能靠时间区分。若不区分，每上屏一个字就会
     /// 被自己的回声判成「用户移动光标」→ flush → 缓冲永远只有 1 个字 → 造词恒不触发。
     ///
-    /// **打点必须收口在 `commit_action` 一处**：漏掉任一吐字路径，该路径的回声就会切碎序列。
+    /// **打点必须收口在 `finish_session_action` 一处**：漏掉任一吐字路径，该路径的回声就会
+    /// 切碎序列。不经它的推送通路（落点指引 §4.3 末表）目前不打点。
     pub(crate) last_self_commit: Mutex<Option<std::time::Instant>>,
     /// 自动造词写入计数，供临时词库淘汰按次节流（见 `maybe_evict_temp`）。
     pub(crate) auto_phrase_writes: std::sync::atomic::AtomicUsize,
-    /// CapsLock 全局低级键盘钩子。
+    /// 全局低级键盘钩子（CapsLock，兼管 Windows 上的注释切换键 Alt）。
     ///
-    /// ★ **只有用户在 `keys.session_actions` 里真的配了 `capslock` 时才是 `Some`**。没配的
-    /// 用户进程里根本不存在全局键盘钩子——这是本功能唯一的风险控制手段（用户明确要求）。
+    /// ★ **只有用户在 `keys.session_actions` 里真的配了 `capslock`、或注释切换键选了 Alt
+    /// 时才是 `Some`**。没配的用户进程里根本不存在全局键盘钩子——这是本功能唯一的风险
+    /// 控制手段（用户明确要求）。
     ///
     /// 为什么非钩子不可：CapsLock 的锁定态由系统在 TSF **之前**维护，`pfEaten` 压不住；
     /// 而「让它翻转再回敲复原」在快速连按下有竞态（大写会卡住），还会被厂商 OSD 工具
@@ -1485,7 +1541,11 @@ pub struct Coordinator {
     ///
     /// 在 `new` 里就建好并起好消费线程（那里才有 `Arc<Self>`），钩子装卸只是复用它。
     /// 消费线程空闲时阻塞在 channel 上，未装钩子时零开销。
-    capslock_press_tx: std::sync::mpsc::Sender<wind_keys::capslock_hook::CapsEvent>,
+    capslock_press_tx: std::sync::mpsc::Sender<wind_keys::capslock_hook::HookEvent>,
+    /// 钩子装着且 CapsLock 那份要它（只为 Alt 装时为假：CapsLock 照旧归系统）。
+    hook_caps: std::sync::atomic::AtomicBool,
+    /// 钩子装着时要接管的 Alt 侧（`wind_keys::alt_tap::GATE_*`），0 = 不接管。有候选时才下发。
+    hook_alt_mask: std::sync::atomic::AtomicU32,
     /// 这次被钩子接管的 CapsLock 按下已被会话动作（翻页、选词、大小写档位等）用掉：
     /// 松开时就不再当中英切换键处理。只在 CapsLock 动作消费线程里读写。
     caps_press_claimed: std::sync::atomic::AtomicBool,
@@ -1497,13 +1557,21 @@ pub struct Coordinator {
     /// 智能联想「下一词」表的路径（`assoc/assoc_bigram.txt`，用户目录同名文件整体替代）；
     /// None = 数据缺失，Bigram 源不出、配额顺延。
     pub(crate) assoc_bigram_path: Option<std::path::PathBuf>,
-    /// 「下一词」表本体：**首次用到时才读**（桌面联想默认关，不该为它多占内存）。
-    /// 读失败记一条警告、之后一直是 None，不反复重试。
-    pub(crate) assoc_bigram:
+    /// 「下一词」表本体：**用得上才读**（桌面联想默认关，不该为它多占内存），且只在后台线程读
+    /// （约 2 MB 文本，见 `ensure_assoc_bigram_async`）。读失败记一条警告、之后一直是 None，
+    /// 不反复重试。`Arc` 是为了让加载线程不必持有协调器。
+    pub(crate) assoc_bigram: std::sync::Arc<
         std::sync::OnceLock<Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>>>,
+    >,
+    /// 下一词表的后台加载已派出（只派一次）。
+    pub(crate) assoc_bigram_loading: std::sync::atomic::AtomicBool,
     /// system.phrases.toml 路径（None=无 data_dir，如 headless 测试）。
     /// "恢复默认"据此重读文件，使手工编辑无需重启服务即可生效。
     pub(crate) system_phrase_path: Option<std::path::PathBuf>,
+    /// `system.comments.toml`（内置注释模板与出厂分配），启动时读一次。
+    pub(crate) system_comments: wind_config::comment_lib::SystemComments,
+    /// 合并后的注释模板库，配置生效时重建，见 [`Self::rebuild_comment_lib`]。
+    pub(crate) comment_lib: std::sync::RwLock<Arc<wind_config::comment_lib::CommentLibrary>>,
     /// 简繁转换器（OpenCC；None=数据缺失不可用）。变体由配置 features.s2t.variant 决定，
     /// 启动时加载；菜单仅提供开/关。置于 Mutex 兼容 reload 时整体替换。
     pub(crate) s2t: Mutex<Option<wind_transform::s2t::Converter>>,
@@ -1618,6 +1686,15 @@ pub struct Coordinator {
     /// `State::menu_opened_at`：漏写会让守卫读到上一次的时间戳，于是刚弹出的面板
     /// 被一条迟到的焦点事件当场关掉。
     pub(crate) softkeyboard_opened_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// 软键盘开着时「它在服务哪个宿主进程」，0 = 未知（开启时尚无活动宿主）。
+    ///
+    /// 关闭判据按**宿主进程**粒度而不是按焦点事件粒度：同宿主内的 DocMgr 抖动、退出编辑、
+    /// 换文档都不算「用户离开」（Excel 退出单元格再切到下一格就是这样），只有换了宿主才算。
+    /// 与开启成对写入，见 `open_softkeyboard`。
+    pub(crate) softkeyboard_host_pid: std::sync::atomic::AtomicU32,
+    /// 钉住：面板不随焦点变化自动关闭（跨应用也留着）。**只对本次打开有效**，任何一条
+    /// 关闭路径都复位（见 `close_softkeyboard`），不持久化——忘了钉的面板会一直挡在屏上。
+    pub(crate) softkeyboard_pinned: std::sync::atomic::AtomicBool,
     /// 快捷输入格式表的**用户调整**（右键调序 / 停用）运行时镜像，键为格式类别。
     ///
     /// 真相在用户数据目录的 `quick_format.toml`，这里是读缓存：候选生成在热路径上
@@ -1670,6 +1747,9 @@ pub struct Coordinator {
     host_no_inline_preedit: std::sync::atomic::AtomicBool,
     /// 热重载成功后**不弹**「设置已更新」（移动端）。见 [`Coordinator::set_quiet_reload_toast`]。
     quiet_reload_toast: std::sync::atomic::AtomicBool,
+    /// 被压制的引导键 VK（0=无）。命中时 `bound_action_for` 按「未绑定」处理。
+    /// 见 [`Coordinator::set_trigger_suppressed`]。
+    pub(crate) trigger_suppressed: std::sync::atomic::AtomicU32,
     /// 启动时预热全部已装方案（桌面默认开；移动端关，见构造里的说明）
     pub(crate) eager_prewarm: std::sync::atomic::AtomicBool,
     /// 0=Idle 1=Preparing 2=Ready 3=Failed（见 [`Coordinator::readiness`]）
@@ -1771,7 +1851,7 @@ pub struct Coordinator {
     /// ⚠ 不与 [`Self::caret_cache_verified`] 合并：那个答「手里的值可不可信」，本字段答
     /// 「手里的值是不是组合前刚测的」。微信这个场景里前者为真、后者也为真，但正是靠后者
     /// 才能判定 probe 陈旧——合成一个就再也分不出「缓存可信」与「probe 可信」了。
-    caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
+    pub(crate) caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
     /// 本次焦点到达后，**还没有**经历过一次组合期间的权威坐标。
     ///
     /// 专门用来把 `idle_anchor` 逃生口挡在「焦点后的第一个组合」之外。空闲上报在**组合之间**
@@ -2105,9 +2185,14 @@ pub struct Coordinator {
     /// 那次」精准删多个；撤销一次即复位 1、焦点变化亦复位 → 之后回落删 1（宁可少删多按几次，
     /// 也不按陈旧计数误删多个）。
     pub(crate) last_commit_len: std::sync::atomic::AtomicUsize,
+    /// 最近一次上屏的文本开头是不是 `crate::auto_spacing` 补的空格。造词草稿流要把它剥掉：
+    /// 草稿窗口遇到非汉字就断流并丢掉整笔，不剥的话交界后的第一个字永远进不了草稿。
+    pub(crate) auto_space_prefixed: std::sync::atomic::AtomicBool,
     /// 编码显示方式运行时态（命令栏 ime.toggle("preedit") 循环切换；初值随配置）。
     /// 统一权威：决定候选窗是否显示 preedit（in_app→不显示）及是否内联首单元（embedded）。
     pub(crate) preedit_display: Mutex<PreeditDisplay>,
+    /// 方案级通用 UI 覆盖的折叠缓存，见 `schema_ui.rs`。
+    pub(crate) eff_candidate_cache: Mutex<Option<crate::schema_ui::EffCandidateCache>>,
     /// 候选窗隐藏开关（命令栏 ime.toggle("candwin") 切换；隐藏时 notify_ui_update 不显示候选）。
     hide_candidate_window: Mutex<bool>,
     /// 候选布局方向运行时态（命令栏 ime.toggle("layout") 切换；true=竖排，初值随配置，持久化）。
@@ -2188,6 +2273,11 @@ pub struct Coordinator {
     /// 而键已被全放行，用户无从知道自己打不出中文。
     /// ⚠ 呈现与输入闸是两条独立的路：改这里的展示**不会**改变是否抑制，反之亦然。
     pub(crate) password_suppress: std::sync::atomic::AtomicBool,
+    /// 扩展程序事件出口与会话状态，见 `hook_events`。
+    pub(crate) hook: Arc<wind_hook::tap::Tap>,
+    pub(crate) hook_session: std::sync::Mutex<crate::hook_events::HookSession>,
+    pub(crate) extensions_config_hook:
+        std::sync::OnceLock<crate::hook_events::ExtensionsConfigHook>,
     /// 「不可输入」**呈现**的迟滞闸门（判定本身见 [`Coordinator::input_block`]）。
     ///
     /// 两个方向不对称，取值与理由继承自已删除的 C++ 版：
@@ -2265,6 +2355,31 @@ impl Drop for ChaiziLoadingGuard {
                 .loading = false;
         }
     }
+}
+
+/// 读 `system.comments.toml`；缺失或解析失败时用内置副本并告警。
+fn load_system_comments(data_dir: Option<&Path>) -> wind_config::comment_lib::SystemComments {
+    let path = Config::resolve_data_file(data_dir, "system.comments.toml");
+    let (sys, warning) =
+        wind_config::comment_lib::SystemComments::load_or_embedded(path.as_deref());
+    if let Some(w) = warning
+        && (data_dir.is_some() || path.is_some())
+    {
+        warn!("{w}");
+    }
+    sys
+}
+
+/// 合并出厂与用户注释配置，问题逐条告警。
+fn build_comment_lib(
+    system: &wind_config::comment_lib::SystemComments,
+    cfg: &Config,
+) -> wind_config::comment_lib::CommentLibrary {
+    let (lib, warnings) = wind_config::comment_lib::CommentLibrary::build(system, &cfg.ui.comment);
+    for w in warnings {
+        warn!("{w}");
+    }
+    lib
 }
 
 /// 读盘加载一个方向的简繁转换器（`to_traditional` = 简入繁出）。数据缺失返回 `None`。
@@ -2436,22 +2551,6 @@ impl Coordinator {
         return false;
     }
 
-    /// 当前是否有活跃组合（编码缓冲非空）。
-    ///
-    /// 供**无 TSF 前置过滤的宿主**（Android IME）做吃键判定：Windows 侧
-    /// `OnTestKeyDown` 在 IPC 往返前就决定吃不吃键，空缓冲的空格/回车/退格/数字
-    /// 根本不会送进协调器；Android 的 `onKeyDown` 没有这一层，宿主必须自己按
-    /// 「有组合才吃功能键」过滤，否则协调器对这些键返回的 `Consumed`（意为
-    /// 「已在输入法内处理」）会被当成消费，宿主既不上屏也不执行默认行为。
-    pub fn is_composing(&self) -> bool {
-        !self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .input_buffer
-            .is_empty()
-    }
-
     /// 就绪状态。见 [`wind_host::Readiness`]。
     pub fn readiness(&self) -> wind_host::Readiness {
         use std::sync::atomic::Ordering;
@@ -2494,6 +2593,7 @@ impl Coordinator {
                     toggles: 0,
                     event_seq: 0,
                     prev_char: 0,
+                    seq_char: 0,
                 };
                 use wind_bridge::handler::MessageHandler;
                 this.handle_key_event(&key(0x41));
@@ -2570,6 +2670,15 @@ impl Coordinator {
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 临时压制某个键的「引导键」身份（`vk` 为 0 = 清除）：压制期间该键在
+    /// `bound_action_for` 里按「未绑定」处理，空码时走普通标点管线。
+    /// 只影响引导键绑定，不影响选词键等会话态按键。默认不压制，桌面路径从不调用。
+    /// 宿主应在 `key_down` 前设置、之后立即清除（单线程串行调用）。
+    pub fn set_trigger_suppressed(&self, vk: u32) {
+        self.trigger_suppressed
+            .store(vk, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 声明宿主报的光标坐标可直接当权威（见字段 `host_caret_trusted`）。
     pub fn set_host_caret_trusted(&self, value: bool) {
         self.host_caret_trusted
@@ -2632,11 +2741,12 @@ impl Coordinator {
         }
     }
 
-    /// Linux addon 的 push 连接每（重）建立一次，就让渲染端补推可见的工具栏 / 软键盘：addon 收到
-    /// SERVICE_READY 会丢掉手里的面板，而同一服务换了连接时面板状态并没有变，不会自己再推。
-    /// 服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
+    /// 外部宿主（Linux addon / macOS `.app`）的 push 连接每（重）建立一次，就让渲染端复位它记着的
+    /// 宿主状态：Linux 补推可见的工具栏 / 软键盘（addon 收到 SERVICE_READY 会丢掉手里的面板，而同一
+    /// 服务换了连接时面板状态并没有变，不会自己再推）；macOS 作废皮肤换帧的分层去重（新 `.app` 手里
+    /// 什么都没有）。服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
     pub fn install_host_reconnect_hook(&self) {
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         {
             let tx = self.ui_tx.clone();
             self.push_server
@@ -2644,6 +2754,11 @@ impl Coordinator {
                     let _ = tx.send(wind_ui_types::UiCommand::HostReconnected);
                 }));
         }
+    }
+
+    /// 构造时选定的输入档位。
+    pub fn profile(&self) -> crate::input_profile::InputProfile {
+        self.profile
     }
 
     /// 只读模式的原因（用户数据设计 §7.1 降级保护）；`None` = 正常读写。
@@ -2669,6 +2784,7 @@ impl Coordinator {
             store,
             override_dir,
             None,
+            crate::input_profile::InputProfile::desktop(),
         )
     }
 
@@ -2682,15 +2798,46 @@ impl Coordinator {
         store: Option<Arc<Store>>,
         override_dir: Option<std::path::PathBuf>,
         storage_readonly: Option<String>,
+        profile: crate::input_profile::InputProfile,
+    ) -> Arc<Self> {
+        Self::build_with_session(
+            config,
+            data_dir,
+            push_server,
+            ui_tx,
+            user_dir,
+            store,
+            override_dir,
+            storage_readonly,
+            profile,
+            None,
+        )
+    }
+
+    /// 同 [`Self::build_with_readonly`]，另给中立输出通道（`new_session` 用）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_with_session(
+        config: Config,
+        data_dir: Option<&Path>,
+        push_server: Arc<PushServer>,
+        ui_tx: crate::UiSender,
+        user_dir: Option<std::path::PathBuf>,
+        store: Option<Arc<Store>>,
+        override_dir: Option<std::path::PathBuf>,
+        storage_readonly: Option<String>,
+        profile: crate::input_profile::InputProfile,
+        session_tx: Option<crate::session_output::SessionSender>,
     ) -> Arc<Self> {
         // 注入 redb Store：码表引擎注册用户词/临时词层，用户词进候选合并。
         // override_dir 为 None 时由 EngineManager 取默认（用户配置目录下的 schema_overrides）。
-        let engine_mgr = match override_dir {
-            Some(od) => {
-                EngineManager::with_store_override(&config, data_dir, store.clone(), Some(od))
-            }
-            None => EngineManager::with_store(&config, data_dir, store.clone()),
-        };
+        // 覆盖层在构造时传入（引擎一次建成）；override_dir 为 None 取默认目录。
+        let engine_mgr = EngineManager::with_store_override_overlay(
+            &config,
+            data_dir,
+            store.clone(),
+            override_dir.or_else(EngineManager::default_override_dir),
+            profile.config_overlay,
+        );
         // 应用兼容规则：系统层(data/compat.toml) + 用户层覆盖。供焦点进程按名查规则
         // （如微信 caret_use_top）。
         let app_compat = wind_config::app_compat::AppCompat::load(data_dir, user_dir.as_deref());
@@ -2702,10 +2849,14 @@ impl Coordinator {
             bundle.compiled_hotkeys.key_down.len(),
             bundle.compiled_hotkeys.key_up.len()
         );
+        let system_comments = load_system_comments(data_dir);
+        let comment_lib = build_comment_lib(&system_comments, &bundle.config);
         // 按需数据（拆字表、简繁表）只装有消费者的，见 `crate::data_needs`。
         let needs = crate::data_needs::DataNeeds::derive(
             &bundle.config,
+            &comment_lib,
             &crate::data_needs::SchemaFacts::collect(&engine_mgr),
+            profile.config_overlay,
         );
         // 模板引用 `${correct_pinyin}` 时拼音引擎要算提示（只翻开关，不重建引擎）。
         engine_mgr.set_correct_pinyin_in_templates(needs.correct_pinyin);
@@ -2977,7 +3128,7 @@ impl Coordinator {
             (d.chinese_mode, d.full_width, d.chinese_punct)
         };
         let (capslock_press_tx, capslock_press_rx) =
-            std::sync::mpsc::channel::<wind_keys::capslock_hook::CapsEvent>();
+            std::sync::mpsc::channel::<wind_keys::capslock_hook::HookEvent>();
         // 简繁两方向的生效口径（互斥，冲突时 s2t 赢）收在 config 层的单一函数里，
         // 与 reload 那处同源——散着写迟早漏改一处。
         let (conv_s2t, conv_t2s) = config.input.conversion_directions();
@@ -2986,6 +3137,7 @@ impl Coordinator {
                 chinese_mode: init_chinese,
                 full_width: init_full,
                 chinese_punct: init_punct,
+                spacing_prev: wind_punct::spacing::CharClass::Other,
                 // 哨兵：与任何真实代际都不相等，保证首次 sync_schema_scope 必执行。
                 schema_scope_gen: u64::MAX,
                 punct_before_schema: None,
@@ -3006,6 +3158,7 @@ impl Coordinator {
                 input_buffer_cased: String::new(),
                 english_case_variant: crate::english_candidates::CaseVariant::default(),
                 input_cursor_pos: 0,
+                leading: None,
                 preedit: String::new(),
                 preedit_split_body: String::new(),
                 preedit_fp_body: String::new(),
@@ -3018,11 +3171,16 @@ impl Coordinator {
                 sentence_window: 0,
                 sentence_base: Vec::new(),
                 shortcode_tops: [const { None }; 3],
+                expanded_group: None,
                 candidates: Vec::new(),
                 selected_index: 0,
                 current_page: 0,
                 grid_top: None,
                 grid_keep: false,
+                comment_session_flip: false,
+                comment_hold_flip: false,
+                alt_track: None,
+                ctrl_track: None,
                 grid_tab: wind_ui_types::GridTab::All,
                 grid_full: Vec::new(),
                 grid_tab_anchor: None,
@@ -3082,11 +3240,15 @@ impl Coordinator {
             rt: std::sync::RwLock::new(std::sync::Arc::new(bundle)),
             ui_tx,
             engine_mgr,
+            profile,
+            session_tx,
             store,
             storage_readonly,
             punct: Mutex::new(punct_conv),
             capslock_hook: Mutex::new(None),
             capslock_press_tx,
+            hook_caps: std::sync::atomic::AtomicBool::new(false),
+            hook_alt_mask: std::sync::atomic::AtomicU32::new(0),
             caps_press_claimed: std::sync::atomic::AtomicBool::new(false),
             smart_symbol: Mutex::new(SmartSymbolArm::default()),
             draft_window: Mutex::new(crate::draft_window::DraftWindowBuf::new()),
@@ -3098,7 +3260,10 @@ impl Coordinator {
             system_phrase_entries: std::sync::RwLock::new(system_phrase_entries),
             system_phrase_path,
             assoc_bigram_path,
-            assoc_bigram: std::sync::OnceLock::new(),
+            assoc_bigram: std::sync::Arc::new(std::sync::OnceLock::new()),
+            assoc_bigram_loading: std::sync::atomic::AtomicBool::new(false),
+            system_comments,
+            comment_lib: std::sync::RwLock::new(Arc::new(comment_lib)),
             s2t: Mutex::new(s2t),
             t2s: Mutex::new(t2s),
             // 只含出厂基表：用户覆盖住在 store 里，而 store 在本结构体构造之后才可用，
@@ -3136,6 +3301,8 @@ impl Coordinator {
             last_pushed_hotkey_session: std::sync::atomic::AtomicBool::new(false),
             hotkey_session_force_push: std::sync::atomic::AtomicBool::new(false),
             softkeyboard_opened_at: std::sync::Mutex::new(None),
+            softkeyboard_host_pid: std::sync::atomic::AtomicU32::new(0),
+            softkeyboard_pinned: std::sync::atomic::AtomicBool::new(false),
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
             // 而 store 在本结构体构造之后才可用）。headless 无 store 时保持空 = 出厂顺序。
             quick_adjust: std::sync::RwLock::new(std::collections::HashMap::new()),
@@ -3155,6 +3322,7 @@ impl Coordinator {
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
             host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
             quiet_reload_toast: std::sync::atomic::AtomicBool::new(false),
+            trigger_suppressed: std::sync::atomic::AtomicU32::new(0),
             eager_prewarm: std::sync::atomic::AtomicBool::new(true),
             readiness_state: std::sync::atomic::AtomicU8::new(0),
             pending_first_show: Mutex::new(false),
@@ -3216,7 +3384,9 @@ impl Coordinator {
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
+            auto_space_prefixed: std::sync::atomic::AtomicBool::new(false),
             preedit_display: Mutex::new(preedit_display_init),
+            eff_candidate_cache: Mutex::new(None),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),
             candidate_orientation: Mutex::new(candidate_orientation_init),
             candidate_layout_sent: Mutex::new(candidate_orientation_init),
@@ -3245,6 +3415,9 @@ impl Coordinator {
             candidate_menu_open: std::sync::atomic::AtomicBool::new(false),
             last_window_diag: Mutex::new(Default::default()),
             password_suppress: std::sync::atomic::AtomicBool::new(false),
+            hook: Arc::new(wind_hook::tap::Tap::new()),
+            hook_session: std::sync::Mutex::new(Default::default()),
+            extensions_config_hook: std::sync::OnceLock::new(),
             password_suppress_enabled: std::sync::atomic::AtomicBool::new(
                 password_suppress_enabled_init,
             ),
@@ -3263,7 +3436,14 @@ impl Coordinator {
                 .name("capslock-action".into())
                 .spawn(move || {
                     for ev in capslock_press_rx {
-                        c.handle_capslock_hook_event(ev);
+                        match ev {
+                            wind_keys::capslock_hook::HookEvent::Caps(ev) => {
+                                c.handle_capslock_hook_event(ev)
+                            }
+                            wind_keys::capslock_hook::HookEvent::Alt(ev) => {
+                                c.handle_comment_alt_hook(ev)
+                            }
+                        }
                     }
                     debug!("CapsLock 钩子事件通道已关闭");
                 })
@@ -3313,6 +3493,8 @@ impl Coordinator {
         // 档位循环触发键的撞车体检（只告警）。出厂不配 ⇒ 默认直接返回。
         coordinator.warn_english_case_cycle_conflict();
         coordinator.warn_sentence_cycle_conflict();
+        coordinator.warn_schema_sentence_cycle_conflict(&coordinator.engine_mgr.active_schema_id());
+        coordinator.warn_comment_switch_conflict();
         coordinator
     }
 
@@ -3461,6 +3643,7 @@ impl Coordinator {
                         has_initial_rule: initial_mode.is_some() || initial_punct.is_some(),
                         auto_pair: rule.and_then(|r| r.auto_pair),
                         smart_method: rule.and_then(|r| r.smart_method),
+                        auto_spacing: rule.and_then(|r| r.auto_spacing),
                         caret_offset_x: rule.map(|r| r.caret_offset_x).unwrap_or(0),
                         caret_offset_y: rule.map(|r| r.caret_offset_y).unwrap_or(0),
                         window_hash,
@@ -3588,6 +3771,7 @@ impl Coordinator {
                 self.push_password_suppress_config(token);
                 self.push_english_pair_config(token);
                 self.push_composition_placeholder_config(token);
+                self.push_space_before_digit_config(token);
                 self.push_multiline_commit_config(token);
                 // 标题采集开关按进程名算（本进程可能命中标题规则），名字纠正后同样要重推。
                 self.push_compat_title_match_config(token);
@@ -3729,18 +3913,28 @@ impl Coordinator {
 
     /// 按 (进程名, 窗口) 现算 [`ActiveLookups`]。
     pub(crate) fn compute_active_lookups(&self, name: &str, win: &FocusWindow) -> ActiveLookups {
-        let (composition_placeholder, candidate_pos, host_drawn_candidates) = self
-            .with_compat_rule(name, win, |rule| {
-                (
-                    rule.and_then(|r| r.composition_placeholder)
-                        .unwrap_or_default(),
-                    rule.and_then(|r| {
-                        let mode = r.candidate_position_mode?;
-                        Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
-                    }),
-                    rule.and_then(|r| r.host_drawn_candidates),
-                )
-            });
+        let (
+            composition_placeholder,
+            assoc_placeholder,
+            candidate_pos,
+            host_drawn_candidates,
+            syllable_separator,
+        ) = self.with_compat_rule(name, win, |rule| {
+            let comp = rule
+                .and_then(|r| r.composition_placeholder)
+                .unwrap_or_default();
+            (
+                comp,
+                rule.and_then(|r| r.assoc_placeholder)
+                    .unwrap_or_else(|| comp.into()),
+                rule.and_then(|r| {
+                    let mode = r.candidate_position_mode?;
+                    Some((mode.is_fixed(), r.candidate_x, r.candidate_y))
+                }),
+                rule.and_then(|r| r.host_drawn_candidates),
+                rule.and_then(|r| r.syllable_separator),
+            )
+        });
         // 收窗推断对无名进程也认 `"*"`（`get_rule("")` 不吃通配），口径见
         // `uielement_host_draws_by_inference`。
         let host_drawn_candidates = if name.is_empty() {
@@ -3752,6 +3946,8 @@ impl Coordinator {
         };
         ActiveLookups {
             composition_placeholder,
+            assoc_placeholder,
+            syllable_separator,
             candidate_pos,
             host_drawn_candidates,
         }
@@ -4056,22 +4252,23 @@ impl Coordinator {
         self.with_compat_rule(proc_name, win, |r| r.and_then(|r| r.initial_mode))
     }
 
-    /// 这次系统模式切换是不是「宿主自作主张关 IME」，且当前应用配了忽略。
+    /// 这次系统模式切换是不是「宿主自作主张切中英」，且当前应用（或全局）配了忽略。
     ///
-    /// 四个条件缺一不可（顺序即成本，先便宜的）：
-    /// 1. **是关不是开**——开 IME 从不拦，宿主想给中文是好事；
-    /// 2. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
+    /// 不看方向：开和关一样拦（宿主关 IME 让用户点一下按钮就变英文；SSMS 内部焦点切换把
+    /// OPENCLOSE 写成开，英文态被切成中文、第一键被吃，GH#312）。三个条件缺一不可
+    /// （顺序即成本，先便宜的）：
+    /// 1. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
     ///    否则该应用里中英切换彻底失灵（判据由 DLL 现场采样，见 `MODE_SWITCH_CTRL_HELD`）；
-    /// 3. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
-    /// 4. 该应用显式配了 `ignore_host_ime_close = true`。
-    pub(crate) fn host_ime_close_ignored(
+    /// 2. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
+    /// 3. 生效值为真：该应用规则写了 `ignore_host_ime_switch` 就以它为准，没写取全局
+    ///    `input.ignore_host_ime_switch`（出厂关）。
+    pub(crate) fn host_ime_switch_ignored(
         &self,
-        chinese_mode: bool,
         source: wind_ipc::protocol::ModeSwitchSource,
         ctrl_held: bool,
     ) -> bool {
         use wind_ipc::protocol::ModeSwitchSource as Src;
-        if chinese_mode || ctrl_held {
+        if ctrl_held {
             return false;
         }
         if !matches!(
@@ -4080,8 +4277,8 @@ impl Coordinator {
         ) {
             return false;
         }
-        self.with_active_compat_rule(|r| r.and_then(|r| r.ignore_host_ime_close))
-            .unwrap_or(false)
+        self.with_active_compat_rule(|r| r.and_then(|r| r.ignore_host_ime_switch))
+            .unwrap_or_else(|| self.rt().config.input.ignore_host_ime_switch)
     }
 
     /// 查 `compat.toml` 中该进程（该窗口）的初始中英标点规则；`None` = 未配置（不干预）。
@@ -4313,6 +4510,16 @@ impl Coordinator {
         let d = &bundle.config.input.default;
         let proc = self.cached_proc_name(client_token);
         let chinese = self.initial_chinese_mode_for(&proc, win);
+        // per-app：首次进入就把这个进程的中英态记进表。只在手动切换时记的话，没切过的进程
+        // 表里没有它，下次回来会退回全局「前次状态」——在别的应用里切的那一下就把它带走了。
+        // 有应用规则的进程不记：规则每次都压过记忆表。
+        if d.per_app_scope() && !proc.is_empty() && self.rule_initial_mode(&proc, win).is_none() {
+            self.mode_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(proc.clone())
+                .or_insert(chinese);
+        }
         let rule_punct = self.rule_initial_punct(&proc, win);
         let follow = bundle.config.input.punct.follow_mode;
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -4479,9 +4686,9 @@ impl Coordinator {
     /// 本次照旧返回空、下次就有（与 `ensure_reverse_index_async` 同一模式）。配置里的消费者
     /// 不走这里——它们由 [`Self::sync_chaizi_assets`] 按 `DataNeeds` 装好。
     ///
-    /// 可能每键都被调（短语求值），故先过闸再解析：解析要读方案文件，找不到库还要告警。
-    /// 本代次（两次 sync 之间）只解析一次，找不到也记「试过」。读盘在锁外做，只在换入那一刻
-    /// 取反查表写锁：候选渲染持着它的读锁。
+    /// 可能每键都被调（短语求值），故先过闸：本代次（两次 sync 之间）只派一次，找不到库也记
+    /// 「试过」。方案字段走缓存；库路径解析（查文件存在）与加载都在后台线程，按键线程不碰盘。
+    /// 只在换入那一刻取反查表写锁：候选渲染持着它的读锁。
     pub(crate) fn ensure_chaizi_async(&self) {
         let generation = {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
@@ -4495,12 +4702,10 @@ impl Coordinator {
             }
             a.generation
         };
-        let Some(path) = Self::resolve_chaizi_db(
-            self.data_dir().as_deref(),
-            self.engine_mgr.chaizi_spec().as_ref(),
-        ) else {
+        let Some(spec) = self.engine_mgr.chaizi_spec() else {
             return;
         };
+        let data_dir = self.data_dir();
         {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
             if a.generation != generation || a.db.is_some() || a.loading {
@@ -4520,6 +4725,9 @@ impl Coordinator {
             .name("chaizi-load".into())
             .spawn(move || {
                 let _guard = guard;
+                let Some(path) = Self::resolve_chaizi_db(data_dir.as_deref(), Some(&spec)) else {
+                    return;
+                };
                 let fresh = wind_reverse::ReverseLookup::load(None, Some(&path));
                 if let Some(c) = weak.upgrade() {
                     c.install_runtime_chaizi(generation, path, fresh);
@@ -4689,55 +4897,23 @@ impl Coordinator {
         let auto = self.auto_comment_sources();
         let specs = {
             let rt = self.rt();
-            merge_comment_dicts(&rt.config.ui.comment_dicts, &auto)
+            merge_comment_dicts(
+                &rt.config.ui.comment_dicts,
+                &self.system_comments.dicts,
+                &auto,
+            )
         };
-        let mut paths: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
-        // `${dict:id}` 用：每个库被哪些 id 指到（去重合并的那条的 id 也算它的）。
-        let mut ids: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
-        for eff in specs.iter().filter(|e| e.enabled) {
-            // 自动项的路径已经是解析好的绝对路径（检测时就得打开文件），手工项才需要按
-            // `schemas/` 逐层解析。两者到这里汇成同一条流水线。
-            let resolved = match &eff.kind {
-                EffectiveCommentKind::Auto { path } => Some(path.clone()),
-                EffectiveCommentKind::Manual { path } if path.is_empty() => continue,
-                EffectiveCommentKind::Manual { path } => {
-                    Config::resolve_schema_resource(data_dir.as_deref(), path)
-                }
-            };
-            let s = eff;
-            match resolved {
-                // 按**解析后路径**去重：两条 spec 写不同的相对路径却指向同一个文件时
-                // （`a.dict.yaml` 与 `./a.dict.yaml`，或用户目录与安装目录同名文件都被
-                // 解析到同一处），只加载一次。重复加载除了浪费解析时间，还会让优先级
-                // 判定变得依赖「第几次出现」——去重后靠前那条恒胜出。
-                Some(p) if paths.iter().any(|(q, _)| *q == p) => {
-                    info!("注释词库重复挂载，已跳过: {} (id={})", p.display(), s.id);
-                    if let Some((_, v)) = ids.iter_mut().find(|(q, _)| *q == p) {
-                        v.push(s.id.clone());
-                    }
-                }
-                Some(p) => {
-                    ids.push((p.clone(), vec![s.id.clone()]));
-                    paths.push((p, s.schemas.clone()));
-                }
-                // 只 warn 不中断：一个库路径写错不该让其余库一起不加载。
-                None => warn!(
-                    "注释词库不存在（用户/安装目录均未找到）: {} (id={})",
-                    s.display_path(),
-                    s.id
-                ),
-            }
-        }
+        let (paths, ids) = resolve_comment_mounts(&specs, data_dir.as_deref());
+        let named_only = named_only_mounts(&specs, &ids);
         let mut cur = self
             .comment_dict_paths
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if *cur == paths {
             // 挂载集合没变，id 仍可能改了（只改 id 不改路径）：只刷新 id，不重挂
-            self.reverse
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .set_comment_ids(&ids);
+            let mut rl = self.reverse.write().unwrap_or_else(|e| e.into_inner());
+            rl.set_comment_ids(&ids);
+            rl.set_named_only(&named_only);
             return;
         }
         // 注释库缓存与词库 .wdat **同根**：`comment_cache_path` 自己按 schemas 下的目录链分
@@ -4749,6 +4925,7 @@ impl Coordinator {
             let mut rl = self.reverse.write().unwrap_or_else(|e| e.into_inner());
             rl.reload_comments(&paths, cache_dir.as_deref());
             rl.set_comment_ids(&ids);
+            rl.set_named_only(&named_only);
         }
         *cur = paths;
     }
@@ -5018,6 +5195,20 @@ impl Coordinator {
         })
     }
 
+    /// 当前注释模板库快照。
+    pub(crate) fn comment_lib(&self) -> Arc<wind_config::comment_lib::CommentLibrary> {
+        self.comment_lib
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 按新配置重建注释模板库。须在新配置快照换上之前调，使两者同时可见。
+    fn rebuild_comment_lib(&self, cfg: &Config) {
+        let lib = build_comment_lib(&self.system_comments, cfg);
+        *self.comment_lib.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(lib);
+    }
+
     pub(crate) fn refresh_config_in_memory(&self, mutate: impl FnOnce(&mut Config)) {
         let mut cfg = self.rt().config.clone();
         mutate(&mut cfg);
@@ -5027,6 +5218,7 @@ impl Coordinator {
         // `input.rare_char.include_blocks` 在 input 段，改它不会把 schema 标脏，
         // 放进那个分支等于「改了没反应，切一次方案才生效」。见 `rebuild_charsets`。
         self.engine_mgr.rebuild_charsets(&bundle.config);
+        self.rebuild_comment_lib(&bundle.config);
         *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
         // 状态气泡去重缓存只在"内容配置不变"的前提下有效：改了 ui.status.items 之类后，
         // 同一状态该合成出不同文本，留着旧缓存会把改动后的第一次显示误判成"内容没变"而吞掉。
@@ -5054,7 +5246,8 @@ impl Coordinator {
                 // `[input.correction]` 由引擎侧同步：只改提示开关的就地生效，改纠错规则 /
                 // 「误读」勾选的并入重建。`|` 不短路：同步必须跑。
                 let schema_dirty =
-                    engine_reload_needed(&old.config, &cfg) | self.engine_mgr.sync_correction(&cfg);
+                    engine_reload_needed(&old.config, &cfg, self.profile().config_overlay)
+                        | self.engine_mgr.sync_correction(&cfg);
                 // 候选窗定位方式切换的边沿检测（见下方 ReportCandidatePos）。
                 let cand_was_fixed = old.config.ui.candidate.is_fixed_position();
                 let was_keep_all = old.config.schema.keep_all_loaded;
@@ -5065,6 +5258,7 @@ impl Coordinator {
                 let new_cfg = bundle.config.clone();
                 // 同 `refresh_config_in_memory`：字符类 registry 不受 schema_dirty 门控。
                 self.engine_mgr.rebuild_charsets(&new_cfg);
+                self.rebuild_comment_lib(&new_cfg);
                 *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
                 info!("User config hot-reloaded (schema_dirty={})", schema_dirty);
                 // 同 refresh_config_in_memory：设置页改了 ui.status.items 后，旧的去重缓存
@@ -5084,6 +5278,8 @@ impl Coordinator {
                 // 文本查表、与编码域无关，本就不是某个方案的属性。自带变更检测（只看
                 // enabled/categories），未变即空操作。
                 self.sync_emoji_dict();
+                // 扩展段跟随全局配置；订阅方自己做变更检测。
+                self.notify_extensions_config();
                 // 用户词文本手改后，保存配置 / 设置页触发热重载时一并生效（设计 §5）。
                 if let Some(store) = &self.store {
                     let changed = store.sync_user_texts();
@@ -5220,6 +5416,7 @@ impl Coordinator {
                 self.push_cn_passthrough_punct_config(0); // 中文模式该透传的标点：DLL 据此**不**吃
                 self.push_en_passthrough_punct_config(0); // 同上，英文标点态那份（超集）
                 self.push_space_custom_cols_config(0); // 空格行自定义列：DLL 据此吃空缓冲空格
+                self.push_space_before_digit_config(0); // 中数间补空格：DLL 据此吃汉字后的数字
                 self.push_pair_state_ttl_config(0); // 配对状态时效（DLL 侧闸门据此判陈旧）
                 self.push_ctrl_space_toggle_config(0); // Ctrl+空格 切换开关：DLL 据此吃不吃该键（GH#172）
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——
@@ -5337,17 +5534,17 @@ impl Coordinator {
         duration_ms: u64,
         accent: Option<[u8; 4]>,
     ) {
-        let _ = self.ui_tx.send(UiCommand::ShowToast {
-            text: text.to_string(),
+        self.emit_toast(
+            text.to_string(),
             position,
             kind,
-            duration_ms: if duration_ms == 0 {
+            if duration_ms == 0 {
                 DEFAULT_TOAST_MS
             } else {
                 duration_ms
             },
             accent,
-        });
+        );
     }
 
     /// 确保 `schema_id` 的反查索引在**后台**建好；已就绪、或已有线程在建，则什么都不做。
@@ -5371,6 +5568,8 @@ impl Coordinator {
     ///
     /// ⚠️ 会阻塞秒级，**只可在后台线程/测试里调用**，绝不能进按键链路。
     pub fn prewarm_indexes(&self) {
+        // 按键路径要用的方案级字段先填缓存（输入流程零读盘）。
+        self.engine_mgr.warm_hot_schema_fields();
         // 悬停 [编码] / 编码提示取 code_source_schema，词语联想取 assoc_word_schema。
         // 混输下两者通常都解析到同一个主码表成员，故去重后一般只建一份。
         // 两者相同时不必去重：prewarm_reverse_index 幂等，第二次直接返回。
@@ -5399,6 +5598,13 @@ impl Coordinator {
             if self.engine_mgr.prewarm_reverse_index(&id) {
                 debug!("预热辅助码来源反查索引 {} 用时 {:?}", id, t0.elapsed());
             }
+        }
+        // 智能联想档的下一词表：派后台加载，不在这里等（约 2 MB 文本）。
+        if self
+            .assoc_config()
+            .source_enabled(wind_assoc::AssocSource::Bigram)
+        {
+            self.ensure_assoc_bigram_async();
         }
         // 词语联想的用户词 / 临时词文本索引（t185）：联想开着才建——它要扫整张用户词表，
         // 关着联想的用户不该付这笔。没预热也不致命：首次联想会起后台重建，那一次只出系统词。
@@ -5586,13 +5792,13 @@ impl Coordinator {
             )
         };
         drop(rt);
-        let _ = self.ui_tx.send(UiCommand::ShowToast {
+        self.emit_toast(
             text,
-            position: ToastPosition::BottomCenter,
-            kind: ToastKind::Error,
-            duration_ms: 8000,
-            accent: None,
-        });
+            ToastPosition::BottomCenter,
+            ToastKind::Error,
+            8000,
+            None,
+        );
         true
     }
 
@@ -5669,7 +5875,7 @@ impl Coordinator {
             // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
             self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
         }
         self.send_candidate_font(&bundle.config);
         // 翻页栏 / 页码显示覆盖（ui.candidate.pager_bar_display / page_number_display）
@@ -5701,14 +5907,12 @@ impl Coordinator {
         let _ = self
             .ui_tx
             .send(UiCommand::SetCandidateShadow(cand.shadow != "off"));
+        // 主题动画开关（ui.theme.animation）
+        let _ = self.ui_tx.send(UiCommand::SetThemeAnimation(
+            bundle.config.ui.theme.animation,
+        ));
         // 候选窗尺寸下限（ui.candidate.min_window_width_* / min_window_height_* / min_rows，抗抖动）
-        let _ = self.ui_tx.send(UiCommand::SetCandidateMinSize {
-            width_horizontal: cand.min_window_width_horizontal,
-            width_vertical: cand.min_window_width_vertical,
-            height_horizontal: cand.min_window_height_horizontal,
-            height_vertical: cand.min_window_height_vertical,
-            rows: cand.effective_min_rows(),
-        });
+        self.send_candidate_min_size();
         // 悬停提示延迟（ui.tooltip.delay）
         let _ = self
             .ui_tx
@@ -5783,6 +5987,34 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
+    /// 编码区光标移动后的返回：刷新候选窗，并带上组合区新插入符位置（与默认 ←/→ 臂同形）。
+    /// 只回 `Consumed` 的话宿主里的插入符不会跟着动。
+    fn caret_moved_action(&self, state: &mut State) -> KeyAction {
+        let text = state.preedit.clone();
+        let caret_pos = self.composition_caret(state);
+        self.notify_ui_update(state);
+        KeyAction::UpdateComposition { caret_pos, text }
+    }
+
+    /// 开 / 关高亮项的悬停提示：悬停目标设为高亮项，已是则清掉。
+    /// 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
+    fn toggle_hover_tip(&self, state: &mut State) -> KeyAction {
+        let per_page = self.per_page(state.active);
+        let flat = match state.grid_top {
+            Some(top) => state.current_page.saturating_sub(top) * per_page,
+            None => 0,
+        } + state.selected_index;
+        let target = if self.hover_target() == flat as i32 {
+            -1
+        } else {
+            flat as i32
+        };
+        self.hover_index
+            .store(target, std::sync::atomic::Ordering::Relaxed);
+        self.notify_ui_update(state);
+        KeyAction::Consumed
+    }
+
     /// 会话态按键绑定的统一执行（配置驱动，见 `keys.session_actions`）：翻页 / 移高亮 /
     /// 取消。普通模式与所有 overlay 模式共用；`include_printable` 区分码表型（`-`/`=` 作
     /// 翻页）与文本/表达式型（临英/快捷输入，`-`/`=` 作输入字符，不夺为动作）。
@@ -5813,15 +6045,27 @@ impl Coordinator {
             return None;
         }
         // 只认纯翻页动词：`AuxCode(PageNext)` 共键降级的那一下不归 `keys.overflow.page_key`。
-        let is_page_action = matches!(
+        // 值是该键翻不动时的策略：翻页动作的后缀，翻屏动词跟随全局档。
+        let page_overflow = match action {
+            wind_config::SessionAction::PagePrev(o) | wind_config::SessionAction::PageNext(o) => {
+                Some(o)
+            }
+            wind_config::SessionAction::PageScreenPrev
+            | wind_config::SessionAction::PageScreenNext => Some(wind_config::PageOverflow::Global),
+            _ => None,
+        };
+        // 「翻屏」动词：展开态翻整屏，未展开时与翻页完全一致（下面落到同一条 nav 执行）。
+        let screen_verb = matches!(
             action,
-            wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageNext
+            wind_config::SessionAction::PageScreenPrev | wind_config::SessionAction::PageScreenNext
         );
         let nav = match action {
             wind_config::SessionAction::HighlightUp => keymap::NavAction::HighlightUp,
             wind_config::SessionAction::HighlightDown => keymap::NavAction::HighlightDown,
-            wind_config::SessionAction::PagePrev => keymap::NavAction::PagePrev,
-            wind_config::SessionAction::PageNext => keymap::NavAction::PageNext,
+            wind_config::SessionAction::PagePrev(_)
+            | wind_config::SessionAction::PageScreenPrev => keymap::NavAction::PagePrev,
+            wind_config::SessionAction::PageNext(_)
+            | wind_config::SessionAction::PageScreenNext => keymap::NavAction::PageNext,
             wind_config::SessionAction::Cancel => {
                 // 无会话时放行：空闲按 Tab 该是宿主的制表符，不是「取消一个不存在的输入」。
                 // 判据与 `cancel_session` 的适用范围一致，见那里。
@@ -5899,12 +6143,46 @@ impl Coordinator {
                 // 内容，用户正在打的那串码要原样留着。
                 return Some(KeyAction::Consumed);
             }
+            // 注释态：判据与 `SingleChar` 同侧——无会话放行（Tab 等键空闲时要还给宿主），
+            // 有会话即吞键；`session` 档另由 `requires_candidates` 在上游按有候选放行。
+            wind_config::SessionAction::CommentState(a) => {
+                if !Self::has_input_session(state) {
+                    return None;
+                }
+                match self.apply_comment_state_action(state, a) {
+                    Ok(label) => self.show_tip_locked(state, label),
+                    Err(e) => warn!("comment_state: {e}"),
+                }
+                return Some(KeyAction::Consumed);
+            }
             // 上屏高亮：与各模式空格臂**同一个函数**，副作用逐字一致（见 `commit_highlighted`）。
             // 不走空格臂本身——那里有 `space_as_input` 这类**空格键**的变体，本动词不跟；
             // 联想 `space_commits = false` 则跟（判据在 `commit_highlighted` 里）。
             // 无候选已被上面的 `requires_candidates` 放行。
             wind_config::SessionAction::CommitHighlighted => {
                 return self.commit_highlighted(state);
+            }
+            // 悬停提示开关：把悬停目标设为高亮项（再按一次清掉），其余全走鼠标悬停那条通路。
+            // 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
+            //
+            // 绑在 → 上时（t372）：编码区光标不在末尾，→ 照旧右移光标；到了末尾才开关提示。
+            // 只在主路判（overlay 各有自己的光标与 → 臂，同 `CaretRight`）。
+            wind_config::SessionAction::ToggleTip => {
+                if data.key_code == keymap::VK_RIGHT
+                    && state.active.is_none()
+                    && Self::has_input_session(state)
+                {
+                    let moved = preedit_cursor::BufEdit::new_cased(
+                        &mut state.input_buffer,
+                        &mut state.input_cursor_pos,
+                        &mut state.input_buffer_cased,
+                    )
+                    .move_right();
+                    if moved {
+                        return Some(self.caret_moved_action(state));
+                    }
+                }
+                return Some(self.toggle_hover_tip(state));
             }
             // 编码区光标移动（macOS 式方向键，见 design/macos-style-arrow-keys.md）。
             //
@@ -5916,11 +6194,15 @@ impl Coordinator {
             // `caret_right` 在**末尾**改为上屏高亮候选（macOS「→ 进选词」）；无候选时没有
             // 可上屏的东西，纯吞键——组合进行中把 → 交给宿主会移动宿主光标，与组合区错位。
             // 移动成功只刷新组合区（caret 位置变了，缓冲与候选都没变，无需重查）。
-            wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight => {
+            wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight(_) => {
                 if state.active.is_some() || !Self::has_input_session(state) {
                     return None;
                 }
-                let right = matches!(action, wind_config::SessionAction::CaretRight);
+                let end = match action {
+                    wind_config::SessionAction::CaretRight(e) => Some(e),
+                    _ => None,
+                };
+                let right = end.is_some();
                 let moved = {
                     let mut ed = preedit_cursor::BufEdit::new_cased(
                         &mut state.input_buffer,
@@ -5933,11 +6215,22 @@ impl Coordinator {
                         ed.move_left()
                     }
                 };
-                if right && !moved && !state.candidates.is_empty() {
-                    return self.commit_highlighted(state);
+                // 末尾那一下按 `caret_right[:end]` 的末尾动作办：上屏 / 高亮下移 / 开关提示。
+                if let Some(end) = end
+                    && !moved
+                    && !state.candidates.is_empty()
+                {
+                    match end {
+                        wind_config::CaretEnd::Commit => return self.commit_highlighted(state),
+                        wind_config::CaretEnd::Tip => return Some(self.toggle_hover_tip(state)),
+                        // 落到下面统一的 nav 执行，与 `highlight_down` 同一条路。
+                        wind_config::CaretEnd::Next => keymap::NavAction::HighlightDown,
+                    }
+                } else if moved {
+                    return Some(self.caret_moved_action(state));
+                } else {
+                    return Some(KeyAction::Consumed);
                 }
-                self.notify_ui_update(state);
-                return Some(KeyAction::Consumed);
             }
             // 上屏编码：这里只登记、吞键，持锁的这一层没法重入分派；由出口
             // `redispatch_commit_code` 把这个键当回车再走一遍。
@@ -5993,8 +6286,12 @@ impl Coordinator {
             match nav {
                 keymap::NavAction::HighlightUp => self.grid_move_row(state, false),
                 keymap::NavAction::HighlightDown => self.grid_move_row(state, true),
-                keymap::NavAction::PagePrev => self.grid_page_key(state, false, data.key_code),
-                keymap::NavAction::PageNext => self.grid_page_key(state, true, data.key_code),
+                keymap::NavAction::PagePrev => {
+                    self.grid_page_key(state, false, data.key_code, screen_verb)
+                }
+                keymap::NavAction::PageNext => {
+                    self.grid_page_key(state, true, data.key_code, screen_verb)
+                }
             }
         } else {
             match nav {
@@ -6010,7 +6307,7 @@ impl Coordinator {
             if let Some(act) = self.after_nav_changed(state) {
                 return Some(act);
             }
-        } else if is_page_action && self.page_key_overflow_to_punct(state, data) {
+        } else if page_overflow.is_some_and(|o| self.page_key_overflow_to_punct(state, data, o)) {
             // 翻不动（`page_next` 的检索范围放宽已在上面先行裁决，放宽了就是 `changed`）：
             // 不消费，让键落到兜底标点臂，由它统一顶高亮候选并出符号（中文标点、全角、
             // 智能符号、自动配对、`punct_commit` 都在那一处）。
@@ -6042,7 +6339,16 @@ impl Coordinator {
                         .any(|c| c.meta.preedit_split.is_some())
             }
             Some(ModeKind::TempPinyin | ModeKind::Mix(_)) => true,
-            Some(_) => false,
+            Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::AuxCode,
+            ) => false,
         };
         if follows {
             let before = state.preedit.clone();
@@ -6078,27 +6384,29 @@ impl Coordinator {
     /// 数字另有选词臂）、且本批候选**从未翻过页**时成立——判据取 `state.paged` 而非
     /// `current_page == 0`，理由同 [`Self::symbol_buffer_key_free`]：翻回首页的用户仍在
     /// 翻页，此刻按键突然出字会让人当场打错。
-    fn page_key_overflow_to_punct(&self, state: &State, data: &KeyEventData) -> bool {
+    fn page_key_overflow_to_punct(
+        &self,
+        state: &State,
+        data: &KeyEventData,
+        overflow: wind_config::PageOverflow,
+    ) -> bool {
         state.active.is_none()
             && !state.paged
-            && self.page_key_overflow_commits(data.key_code)
+            && self.page_key_overflow_commits(overflow)
             && punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
                 .is_some_and(|c| !c.is_ascii_digit())
     }
 
-    /// 该翻页键「翻不动时是否顶屏出符号」：按键级覆盖（`keys.overflow.page_key_overrides`）
-    /// 优先，未列出的键回落全局档 `page_key`。键名经 KEY_TABLE 反查 VK 比对；只有翻不动的
-    /// 那一下走到这里，覆盖表至多六条、`key_name_to_vk` 是常量表扫描，开销可忽略。
-    /// 键名写错 / 值非法在加载期已 WARN（`config_bundle::warn_unknown_page_key_overrides`）。
-    fn page_key_overflow_commits(&self, key_code: u32) -> bool {
-        let ov = &self.rt().config.keys.overflow;
-        let behavior = ov
-            .page_key_overrides
-            .iter()
-            .find(|(name, _)| keymap::key_name_to_vk(name) == Some(key_code))
-            .map(|(_, b)| b.as_str())
-            .unwrap_or(&ov.page_key);
-        behavior == "commit_and_input"
+    /// 该翻页键「翻不动时是否顶屏出符号」：绑定动作的后缀（自定义按键里的
+    /// `page_prev:commit_and_input` / `page_prev:ignore`）优先，无后缀回落全局档 `page_key`。
+    fn page_key_overflow_commits(&self, overflow: wind_config::PageOverflow) -> bool {
+        match overflow {
+            wind_config::PageOverflow::CommitAndInput => true,
+            wind_config::PageOverflow::Ignore => false,
+            wind_config::PageOverflow::Global => {
+                self.rt().config.keys.overflow.page_key == "commit_and_input"
+            }
+        }
     }
 
     /// 当前是否有输入会话：正在 overlay 模式里，或普通输入有编码 / 候选 / 已上屏段。
@@ -6131,6 +6439,7 @@ impl Coordinator {
     /// 键解释器，是另一层的事。
     pub(crate) fn cancel_session(&self, state: &mut State) -> KeyAction {
         self.note_word_boundary();
+        state.clear_comment_flips();
         match state.active {
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),
@@ -6161,7 +6470,18 @@ impl Coordinator {
                 // 走 `_` 臂 `reset_pinyin_composition`，与改动前逐字等价。
                 match state.active {
                     Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
-                    _ => self.reset_pinyin_composition(state),
+                    None
+                    | Some(
+                        ModeKind::TempEnglish
+                        | ModeKind::Url
+                        | ModeKind::Email
+                        | ModeKind::Unicode
+                        | ModeKind::Special(_)
+                        | ModeKind::RareChar
+                        | ModeKind::Reverse
+                        | ModeKind::Mix(_)
+                        | ModeKind::AuxCode,
+                    ) => self.reset_pinyin_composition(state),
                 }
             }
             // 普通输入：取消整个组合，含已转换前缀（拼音分步上屏的那部分）一并丢弃。
@@ -6662,7 +6982,7 @@ impl Coordinator {
     /// `!shift` 守卫，shift 形态本就不归它们。
     fn symbol_buffer_key_free(&self, state: &State, key_code: u32, shift: bool) -> bool {
         match self.session_action_for(key_code, shift, true) {
-            Some(wind_config::SessionAction::PagePrev) if !state.paged => {}
+            Some(wind_config::SessionAction::PagePrev(_)) if !state.paged => {}
             Some(_) => return false,
             None => {}
         }
@@ -7092,9 +7412,15 @@ impl Coordinator {
                 .into_iter()
                 .map(|a| a.id)
                 .collect();
+            let builtin: Vec<String> = self
+                .system_comments
+                .dicts
+                .iter()
+                .map(|b| b.id.clone())
+                .collect();
             let name = format!("注释词库「{id}」");
             let Some((list, on)) =
-                crate::handle_cmdbar::set_comment_dict(&configured, &auto, id, want)?
+                crate::handle_cmdbar::set_comment_dict(&configured, &auto, &builtin, id, want)?
             else {
                 // 只有指定了状态才可能「已一致」（取反恒有变化），故 want 必为 Some
                 return self.notify_feature_unchanged(target, &name, want.unwrap_or(true));
@@ -7134,26 +7460,51 @@ impl Coordinator {
     /// `cn-en` 读的是 `chinese_mode`（用户选的中英），不含 CapsLock 临时英文：`set` 回答的是
     /// 「切到中文」，CapsLock 松开后自然回到中文。
     pub(crate) fn cmd_set_state(&self, target: &str, on: bool) -> anyhow::Result<()> {
-        let cur = {
-            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            match target {
-                "cn-en" => s.chinese_mode,
-                "fullshape" => s.full_width,
-                "s2t" => s.s2t_enabled,
-                "t2s" => s.t2s_enabled,
-                "toolbar" => s.toolbar_visible,
-                _ => anyhow::bail!(
-                    "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
-                ),
+        self.ime_state_set(target, on, true).map(|_| ())
+    }
+
+    /// 输入状态开关的当前值（`cn-en` 为 true = 中文）。目标只认 cn-en / fullshape / s2t / t2s / toolbar。
+    pub fn ime_state_get(&self, target: &str) -> anyhow::Result<bool> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match target {
+            "cn-en" => Ok(s.chinese_mode),
+            "fullshape" => Ok(s.full_width),
+            "s2t" => Ok(s.s2t_enabled),
+            "t2s" => Ok(s.t2s_enabled),
+            "toolbar" => Ok(s.toolbar_visible),
+            _ => anyhow::bail!(
+                "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
+            ),
+        }
+    }
+
+    /// 把输入状态开关设为 `on`；返回是否真的改动。
+    ///
+    /// 已是目标状态时不动作，`notify_unchanged` 决定要不要弹「已是…」——命令栏要（短语没有
+    /// 别的反馈渠道），CLI 脚本不要（反复调用会天天弹）。改动时走 `ime.toggle` 同一条路径，
+    /// 自带状态气泡与工具栏刷新，不另弹提示。
+    pub fn ime_state_set(
+        &self,
+        target: &str,
+        on: bool,
+        notify_unchanged: bool,
+    ) -> anyhow::Result<bool> {
+        if self.ime_state_get(target)? == on {
+            if notify_unchanged {
+                let text = crate::handle_cmdbar::state_unchanged_text(target, on);
+                self.notify_set_unchanged(target, &text);
             }
-        };
-        if cur == on {
-            let text = crate::handle_cmdbar::state_unchanged_text(target, on);
-            self.notify_set_unchanged(target, &text);
-            return Ok(());
+            return Ok(false);
         }
         self.cmd_ime_toggle(target);
-        Ok(())
+        Ok(true)
+    }
+
+    /// 取反输入状态开关，返回切换后的值（RPC `ime.toggle`）。目标须是上述五个之一。
+    pub fn ime_state_toggle(&self, target: &str) -> anyhow::Result<bool> {
+        let cur = self.ime_state_get(target)?;
+        self.cmd_ime_toggle(target);
+        Ok(!cur)
     }
 
     pub(crate) fn cmd_ime_toggle(&self, target: &str) {
@@ -7181,6 +7532,12 @@ impl Coordinator {
             "preedit" => self.cmd_toggle_preedit(),
             "candwin" => self.cmd_toggle_candwin(),
             "layout" => self.cmd_toggle_layout(),
+            // 命令栏入口走 `CoordIme::toggle` 直接返回错误；这里是菜单等无处报错的路径。
+            "comment" => {
+                if let Err(e) = self.cmd_comment_state(None) {
+                    warn!("ime.toggle comment: {e}");
+                }
+            }
             other => {
                 warn!(
                     "ime.toggle: 暂不支持 target {:?}（Rust 平台能力待补）",
@@ -7278,13 +7635,18 @@ impl Coordinator {
             // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
             self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
         }
         self.show_tip(if hidden {
             "候选窗:隐藏"
         } else {
             "候选窗:显示"
         });
+    }
+
+    /// 当前悬停目标（测试/诊断用）：鼠标悬停与 `toggle_tip` 共用，`-1` = 无。
+    pub fn debug_hover_target(&self) -> i32 {
+        self.hover_target()
     }
 
     /// 候选窗是否被 `ime.toggle("candwin")` 隐藏（测试/诊断用）。
@@ -7374,22 +7736,28 @@ impl Coordinator {
         cand_cfg: &wind_config::config::UiCandidateConfig,
         i: usize,
     ) -> String {
-        if let Some(s) = cand_cfg.user_index_label(i) {
-            return s;
-        }
-        if let Some(s) = self
-            .theme_index_labels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(i)
-            .filter(|s| !s.is_empty())
-        {
-            return s.clone();
-        }
-        if i == 9 {
-            return "0".to_string();
-        }
-        (i + 1).to_string()
+        pick_index_label(
+            cand_cfg,
+            &self
+                .theme_index_labels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            i,
+        )
+    }
+
+    /// 展开态带序号的格子（平铺下标区间 `(起点, 个数)`）：从高亮行行首起，按
+    /// `grid_index_fill` 往下顺延，与数字键的选择范围 `select_range` 同源。
+    /// 桌面 `UpdateCandidates` 与中立通道的帧共用。
+    pub(crate) fn grid_index_of(
+        &self,
+        state: &State,
+        grid_range: Option<(usize, usize)>,
+    ) -> Option<(usize, usize)> {
+        grid_range.map(|(vis_start, _)| {
+            let (sel_start, sel_end) = self.select_range(state);
+            (sel_start.saturating_sub(vis_start), sel_end - sel_start)
+        })
     }
 
     pub(crate) fn notify_ui_update(&self, state: &State) {
@@ -7410,7 +7778,7 @@ impl Coordinator {
         };
         if state.candidates.is_empty() && state.input_buffer.is_empty() && mode_label.is_empty() {
             self.clear_hover(); // 组合结束的最常见隐藏出口（不经 notify_ui_hide），须自行归零
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
             self.reset_first_show();
             return;
         }
@@ -7421,7 +7789,7 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner())
         {
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
             self.reset_first_show();
             return;
         }
@@ -7430,8 +7798,24 @@ impl Coordinator {
         if let Some(reason) = self.ui_suppressed_by_host() {
             debug!("候选窗被压住: {reason}");
             self.clear_hover();
-            let _ = self.ui_tx.send(UiCommand::HideCandidates);
+            self.emit_hide();
             self.reset_first_show();
+            return;
+        }
+        // 中立通道（移动端）：到这里三道隐藏判断都过了，只发一帧快照。
+        // 下面的候选窗布局 / 字体、首显闸门、注释与悬停提示渲染、锚点与 overlay 帧都是桌面
+        // 候选窗专属，移动端没有对应物（见 session_output 模块文档）。
+        if self.session_tx.is_some() {
+            // 提示卡（长按取 `candidate_tooltip`）要用的两样懒建结构——反查索引、按词查编码的
+            // 用户层——都在首次使用时后台构建，建好后各补刷一帧。若等到长按才触发，补刷帧会
+            // 把刚弹出的提示卡收掉（宿主在任意候选帧上收卡），用户的下一次点击落到键盘上。
+            // 所以在首个候选帧就触发，让补刷帧落在打字这段里。桌面路径每帧组装候选页时
+            // 经 `tooltip_eval_ctx` 触发反查索引；这里不组装候选页，结果丢弃，只要副作用。
+            let ctx = self.tooltip_eval_ctx(state, &self.rt().tooltip);
+            if let Some(sid) = ctx.code_schema.as_deref() {
+                let _ = self.engine_mgr.text_codes(sid);
+            }
+            self.emit_view(state, mode_label);
             return;
         }
         // 模式级候选布局：按当前模式意图叠加全局基线重算方向，与上次下发不同才下发。
@@ -7560,10 +7944,7 @@ impl Coordinator {
         let hover_now = self.hover_target();
         // 展开态带序号的格子（平铺下标区间）：从高亮行行首起，按 `grid_index_fill` 往下顺延，
         // 与数字键的选择范围 `select_range` 同源。
-        let grid_index = grid_range.map(|(vis_start, _)| {
-            let (sel_start, sel_end) = self.select_range(state);
-            (sel_start.saturating_sub(vis_start), sel_end - sel_start)
-        });
+        let grid_index = self.grid_index_of(state, grid_range);
         // 候选序号标签：
         //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c（实例关了字母选词除外）
         //  - 其余（含自由输入）：正常序号
@@ -7586,35 +7967,25 @@ impl Coordinator {
         let scope_prefix = rt.config.input.scope_relax.prefix.as_str();
         // 换位纠错候选的标记（`input.correction.marker`，留空不加）。
         let corrected_prefix = rt.config.input.correction.marker.as_str();
-        // 编码提示(反查):对拼音来源候选,用主码表真实反查索引填 comment(实际填充见下方候选构造,
-        // 受 source==Pinyin 守卫)。门控两类:
-        //  - 普通拼音方案:跟随全局 schema.pinyin.code_hint_source(四档,见 CodeHintSource,出厂 off);
-        //  - 混输方案:跟随 schema.mix.pinyin_code_hint(开关,出厂开);
-        //  - overlay 反查模式(临时拼音 / 快捷输入(mix)内拼音):跟随独立的
-        //    input.temp_pinyin.code_hint_source(出厂 auto,可关),见 comment_hint_source。
-        // 码表类方案/候选的剩余编码由码表引擎在 convert 内填,不在此处理。
+        // 编码提示(反查):拼音来源候选的 `${code_rev}` / `${shuangpin}` 只看候选来源,显不显示
+        // 由分到的注释模板决定(设计 §13.6)。码表类候选的剩余编码由码表引擎在 convert 内填。
         // 悬停提示与注释段共用的整页上下文（编码来源方案、调试归属、注释库作用域…），
         // 见 `TooltipEvalCtx`；移动端按下标取提示走同一份。
         let tip_ctx = self.tooltip_eval_ctx(state, tip);
-        let hint_source = tip_ctx.hint_source;
         // 反查表读锁在候选循环外取一次（写方只有拆字段的装卸：sync_chaizi_assets /
         // ensure_chaizi_async）。
         let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
         // 注释段（候选右侧灰字）模板，见 `crate::comment`。横竖各持一份、互不影响：
         // 两种排布的可用横向空间差一个数量级，能放什么本就不是同一个答案。
-        // 模式级覆盖优先于全局（临英可只显示 ${dict}、临拼可整个关掉），见 `comment::template_for`。
-        // 方案级那一层住在方案文件里，只能取到临时 `Arc`——在候选循环外取一次存局部变量，
-        // 模板借用它（`comment_template_for` 的文档说明了为什么不快照进 State）。
-        let schema_behavior = self.engine_mgr.active_behavior();
+        // 按 模式 → 方案 → 方案类型 → 全局 取当前态那一格，见 `comment_template_for`。
         // ⚠️ 注释模板按 `vertical` 位取，旋转态因此走**横排**那一份模板。
         // 这是「旋转态的 vertical 恒为 false ⇒ 所有按方向分叉的配置走横排支」这条总规则的
-        // 一个实例，不是遗漏；要给旋转态单独的模板，用方案级 `[candidate]` 那两个键。
+        // 一个实例，不是遗漏。
         let comment_vertical = self.desired_orientation(state).vertical;
         // 解析一次、循环里逐候选只渲染（模板串对整页相同）。
-        let comment_tpl = crate::comment::Template::parse(self.comment_template_for(
+        let comment_tpl = crate::comment::Template::parse(&self.comment_template_for(
             &rt.config,
             state,
-            &schema_behavior,
             comment_vertical,
         ));
         // 注释段长度预算横竖各一份：横排全部候选共享一行宽度，竖排每行独占。
@@ -7689,23 +8060,10 @@ impl Coordinator {
                 // 上方注释条开关开：模板字面 `\n` 拆出上段（`comment_above`）。开关关走原路径，
                 // 不拆分、字面 `\n` 原样留在 `comment`，`comment_above` 恒空。
                 let (comment_above, comment) = if cand_cfg.comment_above {
-                    self.comment_parts_for(
-                        c,
-                        &comment_tpl,
-                        comment_max,
-                        &reverse,
-                        hint_source,
-                        &dict_schema,
-                    )
+                    self.comment_parts_for(c, &comment_tpl, comment_max, &reverse, &dict_schema)
                 } else {
-                    let comment = self.comment_for(
-                        c,
-                        &comment_tpl,
-                        comment_max,
-                        &reverse,
-                        hint_source,
-                        &dict_schema,
-                    );
+                    let comment =
+                        self.comment_for(c, &comment_tpl, comment_max, &reverse, &dict_schema);
                     (wind_ui_types::StyledText::new(), comment)
                 };
                 let prefix = prefix_of(c);
@@ -7753,12 +8111,13 @@ impl Coordinator {
                 active_tab: state.grid_tab as u8,
             }
         });
-        // 展开态的选中项是平铺下标：高亮行之前的整行都算进去。
-        let selected_flat = match grid {
-            Some(g) => g.highlight_row as usize * per_page + state.selected_index,
-            None => state.selected_index,
-        };
-        let selected = selected_flat.min(items.len().saturating_sub(1));
+        // 展开态的选中项是平铺下标：高亮行之前的整行都算进去（与中立通道共用）。
+        let selected = crate::session_output::frame_selected(
+            state,
+            per_page,
+            grid.map(|g| g.highlight_row as usize),
+            items.len(),
+        );
         // 悬停目标独立于选中项：候选越界视为无悬停，翻页器 tag 原样透传
         let hover =
             match self.hover_target() {
@@ -7845,14 +8204,14 @@ impl Coordinator {
         // 编码区**恒下发**：谁来画由 `preedit_host_owned` 表达。
         // 曾经是「in_app 就发空串」——那等于把渲染策略焊进数据通道，自绘编码栏的宿主
         // 拿不到数据（Android 侧一度只能靠改显示模式配置绕开）。
-        let preedit = state.preedit.clone();
-        let preedit_caret = self.ui_caret_bytes(state).min(preedit.len());
+        let (preedit, preedit_caret) = self.display_preedit(state);
         let (cand_fixed, cand_fixed_x, cand_fixed_y) = self.candidate_fixed_pos();
         // mode_label 已在顶部计算（纳入空则隐藏守卫）：作为候选窗内联标记随候选窗一并显示。
         let _ = self.ui_tx.send(UiCommand::UpdateCandidates {
             preedit,
             preedit_caret,
             preedit_host_owned: in_app,
+            composing: crate::session_output::composing_of(state),
             mode_label,
             candidates: items,
             selected,
@@ -7912,11 +8271,13 @@ impl Coordinator {
         // 「CapsLock 绑定这一次没生效」，多吃却是「用户在别的应用里 CapsLock 按不动」。
         // 凡拿不准就归零。
         wind_keys::capslock_hook::set_should_eat(false);
+        wind_keys::capslock_hook::set_alt_gate(0);
+        wind_keys::capslock_hook::set_alt_pid(0);
         // 悬停归零同理：窗口没了，悬停目标不可能还有意义。UI 侧 `CandidateMouse::reset_hover`
         // 清的只是防抖闸门（决定何时**发**事件），高亮与 tooltip 读的是本值——不清这一句，
         // 特殊模式下窗口再次弹出时会带着上次的悬停高亮，鼠标却从未移动过。
         self.clear_hover();
-        let _ = self.ui_tx.send(UiCommand::HideCandidates);
+        self.emit_hide();
         self.reset_first_show();
         // Linux：候选收起 ⇒ 候选右键菜单失去操作对象，一并收掉（主菜单不受影响：它可以在没有
         // 候选时打开，一条无关的 HideCandidates 不该把它收掉——与 Windows 连带收掉任何菜单不同）。
@@ -7987,6 +8348,9 @@ impl Coordinator {
             }
             UiEvent::SoftKeyboardPage(i) => self.ui_softkeyboard_page(i),
             UiEvent::SoftKeyboardClose => self.ui_softkeyboard_close(),
+            UiEvent::SoftKeyboardPin => {
+                self.toggle_softkeyboard_pin();
+            }
             UiEvent::SoftKeyboardFunctionKey(name) => self.ui_softkeyboard_fn_key(&name),
             UiEvent::StatusTipMoved { x, y } => self.save_status_tip_pos(x, y),
             UiEvent::CandidateWindowMoved { x, y } => self.save_candidate_pos(x, y),
@@ -8252,6 +8616,10 @@ impl Coordinator {
         if needs.t2s {
             self.ensure_converter(false);
         }
+        if needs.assoc_bigram {
+            self.ensure_assoc_bigram_async();
+        }
+        self.engine_mgr.warm_hot_schema_fields();
     }
 
     /// 切换简繁转换的**一个方向**，返回切换后该方向是否开着。
@@ -8452,6 +8820,33 @@ impl Coordinator {
         }
     }
 
+    /// 拼音音节分隔符的显示替换：配置不是默认 `'`、当前是主路（无独占模式）且活跃引擎是
+    /// 拼音 / 混输时返回新分隔符，否则 `None`。临时英文等模式里的 `'` 是正文，不能换。
+    pub(crate) fn syllable_separator_for(&self, main_path: bool) -> Option<String> {
+        if !main_path {
+            return None;
+        }
+        // 应用级覆盖（compat `syllable_separator`）优先，没配跟随全局。
+        let app = self
+            .active_compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookups
+            .syllable_separator;
+        let sep = match app {
+            Some(s) => s.as_str().to_string(),
+            None => self.rt().config.ui.candidate.syllable_separator.clone(),
+        };
+        if sep == "'" {
+            return None;
+        }
+        matches!(
+            self.engine_mgr.current_engine_type(),
+            Some(wind_engine::EngineType::Pinyin | wind_engine::EngineType::Mixed)
+        )
+        .then_some(sep)
+    }
+
     /// 「热键激活的模式活着吗」—— `STATUS_HOTKEY_SESSION` 的判据，**单一真相源**。
     ///
     /// 抽出来是因为它落在**每一次按键**的返回路径上（`push_hotkey_session_if_changed`），
@@ -8464,6 +8859,11 @@ impl Coordinator {
     /// composition」，与 DLL 的 `HasActiveComposition()` 成为两个真相源 —— 那正是前一版
     /// （边沿驱动）出问题的形态。宁可多置一位。
     pub(crate) fn hotkey_session_now(&self) -> bool {
+        // 无占位的联想会话也算：宿主里没有组合，DLL 只能靠这一位知道该转发按键。
+        // 先于取 state 锁（`assoc_bare_session_now` 自己会取），避免重入。
+        if self.assoc_bare_session_now() {
+            return true;
+        }
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.add_word_active
             || matches!(
@@ -8506,6 +8906,7 @@ impl Coordinator {
         // Linux：托盘图标按主字运行时渲染，文件必须先于带这个标签的状态帧落盘（见子模块头）。
         #[cfg(all(target_os = "linux", ext_presenter, not(test)))]
         self.ensure_tray_icons((chinese_mode && !caps_lock).then_some(icon_label.as_str()));
+        self.hook_mode(chinese_mode, full_width);
         StatusUpdateData {
             chinese_mode,
             full_width,
@@ -8726,7 +9127,13 @@ impl Coordinator {
         };
         // 定位：固定坐标 / 锚点 / 跟随光标（坐标不可信时按兜底）。规则优先回落全局。
         let placement = match forced.or_else(|| {
-            Self::placement_for(self.status_position(), raw_valid, si.offset_x, si.offset_y)
+            Self::placement_for(
+                self.status_position(),
+                raw_valid,
+                si.offset_x,
+                si.offset_y,
+                si.caret_above(),
+            )
         }) {
             Some(p) => p,
             None => {
@@ -8734,14 +9141,7 @@ impl Coordinator {
                 return;
             }
         };
-        let _ = self.ui_tx.send(UiCommand::ShowStatusTip {
-            text: text.to_string(),
-            x,
-            y,
-            caret_height,
-            duration_ms,
-            placement,
-        });
+        self.emit_status_tip(text.to_string(), x, y, caret_height, duration_ms, placement);
         // 记录实际显示出去的文本，供 show_status 去重。临时提示（模式标记/主题名等）
         // 也记在这里：它们会覆盖掉旧的状态文本，从而使随后的同名状态气泡照常显示，
         // 不会被误判成"内容没变"。
@@ -9200,59 +9600,67 @@ impl Coordinator {
     /// 有没有」。安装可能失败（非 Windows、`SetWindowsHookExW` 被拒），也可能事后被系统静默
     /// 移除。凡是要判「这个键归谁管」的地方都必须问本函数——问 `capslock_bound()` 会在钩子
     /// 装不上时把键判给一个不存在的处理者，那正是「按了完全没反应」。
+    ///
+    /// 只为注释切换键 Alt 装的钩子不算：那时 CapsLock 不归它管。
     pub(crate) fn capslock_hook_installed(&self) -> bool {
-        self.capslock_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+        self.hook_caps.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 按配置装/卸 CapsLock 全局钩子（启动与配置热重载时调用）。
+    /// 按配置装/卸全局键盘钩子（启动与配置热重载时调用）：CapsLock 要 ∪ 注释切换键 Alt 要。
     ///
     /// ★ 幂等：已装且仍该装 → 不动（重复 `SetWindowsHookExW` 会留下卸不掉的旧钩子）。
     pub(crate) fn sync_capslock_hook(&self) {
-        let want = self.capslock_bound() || self.capslock_is_toggle_key();
+        use std::sync::atomic::Ordering::Relaxed;
+        let caps = self.capslock_bound() || self.capslock_is_toggle_key();
+        let alt = self.comment_alt_gate_mask();
+        let want = caps || alt != 0;
         let mut slot = self.capslock_hook.lock().unwrap_or_else(|e| e.into_inner());
-        if want == slot.is_some() {
-            // 配置热重载可能只改了「切换按键」：钩子不动，空闲闸门要跟着重算。
-            if want {
-                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                self.sync_capslock_idle_gate(&s);
-            }
+        let installed = if want == slot.is_some() {
             // ★ 「没配所以没装」此前是**完全静默**的：装成功打 INFO、卸载打 INFO，唯独这条
             // 最常见的路径一行都没有。排障时日志里搜不到任何 CapsLock 字样，无从区分
             // 「用户没配」「配了但动词/键名写错被剔除」「装失败」——三者的处置完全不同。
-            if !want {
-                debug!("CapsLock 未配置会话态绑定，不装全局钩子（该键完全交由系统处理）");
+            if want {
+                debug!("全局键盘钩子保留（CapsLock 要: {caps}，注释切换键 Alt 闸门: {alt:#x}）");
+            } else {
+                debug!(
+                    "CapsLock 未配置会话态绑定、注释切换键未选 Alt（或非 Windows），不装全局钩子"
+                );
             }
-            return;
-        }
-        if !want {
+            want
+        } else if !want {
             // Drop 即卸载（内部会先停拦截再停消息泵）。
             *slot = None;
-            wind_keys::capslock_hook::set_should_eat(false);
-            info!("CapsLock 未配置会话态绑定 → 全局钩子已卸载");
-            return;
-        }
-        // 钩子回调在钩子线程执行，**必须只做非阻塞投递**：它超时会被系统静默移除且无从察觉。
-        // 故这里只 send，真正的动作在 new 起的消费线程里做（可安全加锁）。
-        let tx = self.capslock_press_tx.clone();
-        match wind_keys::capslock_hook::CapsLockHook::install(Box::new(move |ev| {
-            let _ = tx.send(ev);
-        })) {
-            Ok(h) => {
-                *slot = Some(h);
-                // 立刻按当前会话状态校准一次，避免装好后到下一次按键之间状态为默认值。
-                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                wind_keys::capslock_hook::set_should_eat(Self::has_input_session(&s));
-                self.sync_capslock_idle_gate(&s);
+            info!("CapsLock 未配置会话态绑定、注释切换键未选 Alt → 全局钩子已卸载");
+            false
+        } else {
+            // 钩子回调在钩子线程执行，**必须只做非阻塞投递**：它超时会被系统静默移除且无从察觉。
+            // 故这里只 send，真正的动作在 new 起的消费线程里做（可安全加锁）。
+            let tx = self.capslock_press_tx.clone();
+            match wind_keys::capslock_hook::CapsLockHook::install(Box::new(move |ev| {
+                let _ = tx.send(ev);
+            })) {
+                Ok(h) => {
+                    *slot = Some(h);
+                    info!("全局键盘钩子：CapsLock 要: {caps}，注释切换键 Alt 闸门: {alt:#x}");
+                    true
+                }
+                Err(e) => {
+                    // 装不上就退化为「CapsLock 绑定 / Alt 切换注释不生效」，不影响其余功能。绝不回退到
+                    // 「翻转再回敲」——那条路已被真机否掉（竞态 + 厂商 OSD 弹窗）。
+                    tracing::error!(
+                        "全局键盘钩子安装失败，CapsLock 绑定 / Alt 切换注释将不生效: {e}"
+                    );
+                    false
+                }
             }
-            Err(e) => {
-                // 装不上就退化为「CapsLock 绑定不生效」，不影响其余功能。绝不回退到
-                // 「翻转再回敲」——那条路已被真机否掉（竞态 + 厂商 OSD 弹窗）。
-                tracing::error!("CapsLock 全局钩子安装失败，该绑定将不生效: {e}");
-            }
-        }
+        };
+        self.hook_caps.store(installed && caps, Relaxed);
+        self.hook_alt_mask
+            .store(if installed { alt } else { 0 }, Relaxed);
+        // 立刻按当前会话状态校准一次（配置热重载可能只改了「切换按键」或切换键）。
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.sync_capslock_gate(&s);
+        self.sync_capslock_idle_gate(&s);
     }
 
     /// 「切换按键」勾了 CapsLock（`keys.toggle_mode_keys` 含 `capslock`）。
@@ -9283,9 +9691,26 @@ impl Coordinator {
     /// ★★ 这个标志为 true 的时间窗必须尽量短。钩子是**全局**的：标志滞留意味着用户在
     /// **别的应用**里按 CapsLock 也切不动大小写——比功能不生效糟糕得多。故凡是会改变
     /// 「有没有输入会话」的出口都要调它，宁可多调（幂等的原子写，开销可忽略）。
+    ///
+    /// Alt 闸门同在这里：有候选时下发切换键那几侧，否则 0。
     pub(crate) fn sync_capslock_gate(&self, state: &State) {
+        use std::sync::atomic::Ordering::Relaxed;
         // 未装钩子时也照常写：装钩子那一刻会重新校准，这里写了不会有副作用。
-        wind_keys::capslock_hook::set_should_eat(Self::has_input_session(state));
+        wind_keys::capslock_hook::set_should_eat(
+            self.hook_caps.load(Relaxed) && Self::has_input_session(state),
+        );
+        let alt = if state.candidates.is_empty() {
+            0
+        } else {
+            self.hook_alt_mask.load(Relaxed)
+        };
+        wind_keys::capslock_hook::set_alt_gate(alt);
+        let pid = if alt == 0 {
+            0
+        } else {
+            (self.push_server.active_token() >> 32) as u32
+        };
+        wind_keys::capslock_hook::set_alt_pid(pid);
     }
 
     /// 钩子报告「CapsLock 被按下」（在专用消费线程执行，可安全加锁）。
@@ -9400,7 +9825,35 @@ impl Coordinator {
         );
     }
 
-    /// 整句切换键（`schema.pinyin.sentence_cycle_key`）：在整句池里滚动显示窗口。
+    /// 当前方案该用哪把整句切换键：码表方案取 `schema.codetable.sentence_cycle_key`（按方案折叠），
+    /// 其余取 `schema.pinyin.sentence_cycle_key`。两边各管各的，见 `CodetableGlobal::sentence_count`。
+    pub(crate) fn active_sentence_cycle_key(&self) -> Option<keymap::SessionKey> {
+        if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
+        {
+            // 写错的键名在建配置 / 切方案时已告警过，这里静默按关闭处理，免得每次按键刷日志。
+            return self.engine_mgr.with_codetable_settings(|c| {
+                let raw = c.sentence_cycle_key.trim();
+                (!raw.is_empty())
+                    .then(|| keymap::session_key_name_to_vk(raw))
+                    .flatten()
+            });
+        }
+        self.rt().sentence_cycle_key
+    }
+
+    /// 当前方案的整句块露几条（`place_sentence_block` 用）。规则同 [`Self::active_sentence_cycle_key`]。
+    pub(crate) fn active_sentence_count(&self) -> usize {
+        if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
+        {
+            return usize::from(
+                self.engine_mgr
+                    .with_codetable_settings(|c| c.sentence_count),
+            );
+        }
+        usize::from(self.rt().config.schema.pinyin.sentence_count)
+    }
+
+    /// 整句切换键（拼音 / 码表各一把，见 [`Self::active_sentence_cycle_key`]）：在整句池里滚动显示窗口。
     ///
     /// 与英文大小写档位循环同处「候选显示期间生效的快捷键」这一层、同为**临时夺取**：
     /// 守卫任一不成立即返回 `None`，按键原样落回它本来的语义（Tab 出厂是高亮下移键）。
@@ -9423,7 +9876,7 @@ impl Coordinator {
         if data.modifiers & MOD_SHORTCUT != 0 {
             return None;
         }
-        let key = self.rt().sentence_cycle_key?;
+        let key = self.active_sentence_cycle_key()?;
         if data.key_code != key.vk || (data.modifiers & MOD_SHIFT != 0) != key.shift {
             return None;
         }
@@ -9480,20 +9933,76 @@ impl Coordinator {
     ///
     /// 这不是配置冲突（各自都合法），而是**运行期的优先级夺取**：整句池 ≥ 2 条时那些绑定
     /// 按不出来。不告警的话用户只会看到「Tab 翻页有时好用有时不好用」，无从知道是谁夺走的。
+    ///
+    /// 拼音与码表两把键各体检一次（码表取全局值；方案里另写的见
+    /// [`Self::warn_schema_sentence_cycle_conflict`]）。
     pub(crate) fn warn_sentence_cycle_conflict(&self) {
         let rt = self.rt();
-        let Some(key) = rt.sentence_cycle_key else {
+        let p = &rt.config.schema.pinyin;
+        let c = &rt.config.schema.codetable;
+        let codetable_key = keymap::session_key_name_to_vk(c.sentence_cycle_key.trim());
+        for (path, raw, key, counts) in [
+            (
+                "schema.pinyin.sentence_cycle_key",
+                p.sentence_cycle_key.as_str(),
+                rt.sentence_cycle_key,
+                (p.sentence_count, p.sentence_max_count),
+            ),
+            (
+                "schema.codetable.sentence_cycle_key",
+                c.sentence_cycle_key.as_str(),
+                codetable_key,
+                (c.sentence_count, c.sentence_max_count),
+            ),
+        ] {
+            if let Some(key) = key {
+                self.warn_one_sentence_cycle_conflict(path, raw, key, counts);
+            }
+        }
+    }
+
+    /// 码表方案自己写了整句切换键 / 条数（与全局不同）时补一次体检：启动时查活跃方案，
+    /// 切方案后查切到的方案。与全局相同的已由 [`Self::warn_sentence_cycle_conflict`] 查过，跳过。
+    /// 键名写错也在这里告警（逐键路径静默按关闭处理）。
+    pub(crate) fn warn_schema_sentence_cycle_conflict(&self, schema_id: &str) {
+        if self.engine_mgr.loaded_engine_type(schema_id)
+            != Some(wind_engine::engine::EngineType::CodeTable)
+        {
             return;
+        }
+        let pick = |c: &wind_config::CodetableGlobal| {
+            (
+                c.sentence_cycle_key.clone(),
+                c.sentence_count,
+                c.sentence_max_count,
+            )
         };
+        let own = self.engine_mgr.with_codetable_settings_of(schema_id, pick);
+        if own == pick(&self.rt().config.schema.codetable) {
+            return;
+        }
+        let (raw, count, max_count) = own;
+        let path = format!("方案 {schema_id} 的 schema.codetable.sentence_cycle_key");
+        if let Some(key) = crate::config_bundle::parse_sentence_cycle_key(&path, &raw) {
+            self.warn_one_sentence_cycle_conflict(&path, &raw, key, (count, max_count));
+        }
+    }
+
+    fn warn_one_sentence_cycle_conflict(
+        &self,
+        path: &str,
+        raw: &str,
+        key: keymap::SessionKey,
+        (count, max_count): (u8, u8),
+    ) {
+        let rt = self.rt();
         let vk = key.vk;
         // 键配好了、池子却恒空 ⇒ 用户以为开了、实际永远不生效。「键即开关」的初衷就是不要
         // 第二道闸，而算几条整句事实上成了第二道——至少把它说出来（审查查出）。
-        let p = &rt.config.schema.pinyin;
-        if p.sentence_count.max(p.sentence_max_count) < 2 {
+        if count.max(max_count) < 2 {
             warn!(
-                "整句切换键（schema.pinyin.sentence_cycle_key = {:?}）已配置，但 sentence_count 与 \
-                 sentence_max_count 都小于 2，整句池恒空、切换键永远不会生效；要用它请把备选条数调到 ≥2",
-                p.sentence_cycle_key
+                "整句切换键（{path} = {raw:?}）已配置，但同段的 sentence_count 与 \
+                 sentence_max_count 都小于 2，整句池恒空、切换键永远不会生效；要用它请把备选条数调到 ≥2"
             );
         }
         let mut owners: Vec<&str> = Vec::new();
@@ -9526,10 +10035,9 @@ impl Coordinator {
             return;
         }
         warn!(
-            "整句切换键（schema.pinyin.sentence_cycle_key = {:?}）同时配作 {}；\
-             打拼音且整句算出 ≥2 条时本键归整句切换，那些功能在此期间按不出来。\
+            "整句切换键（{path} = {raw:?}）同时配作 {}；\
+             整句算出 ≥2 条时本键归整句切换，那些功能在此期间按不出来。\
              要保留它们：把 sentence_cycle_key 换成别的键或留空；要保留整句切换：把那些功能改绑到别的键",
-            rt.config.schema.pinyin.sentence_cycle_key,
             owners.join(" / ")
         );
     }
@@ -9621,6 +10129,7 @@ impl Coordinator {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         // ★ **最先**试大小写档位循环：它是「英文输入态下临时夺取本键」，优先级按定义高于
         // 用户给 CapsLock 配的任何会话动作。守卫（开关 / 英文语境 / 有候选）都在函数内部，
@@ -9654,13 +10163,19 @@ impl Coordinator {
                 //
                 // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
                 // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                let chinese_mode = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .chinese_mode;
+                // 不经按键出口，收尾在这里做（同鼠标点选，见 `crate::session_exit`）。
+                let (act, chinese_mode, main_path) = {
+                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let (chinese_mode, main_path) = (st.chinese_mode, st.active.is_none());
+                    let act = self.finish_session_action(
+                        st,
+                        crate::session_exit::ActionOrigin::CapsLockHook,
+                        act,
+                    );
+                    (act, chinese_mode, main_path)
+                };
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
-                self.push_no_key_ctx_action(&act, chinese_mode);
+                self.push_no_key_ctx_action(&act, chinese_mode, main_path);
                 true
             }
         }
@@ -9847,6 +10362,12 @@ impl Coordinator {
         upper: bool,
     ) -> String {
         let cased = |code: String| if upper { code.to_uppercase() } else { code };
+        // 快捷加词预览还开着：切中英等于放弃它。不退的话 `add_word_active` 留着，
+        // `hotkey_session` 恒为真，DLL 把所有 Ctrl 组合键（Ctrl+-）乃至单键 `-` 都当作
+        // 加词会话里的键吞掉，英文模式下宿主快捷键整片失效（GH#254）。
+        if state.add_word_active {
+            self.exit_add_word_mode(state);
+        }
         // 切中英 / CapsLock / 系统切换三条路径全部经此。语境变了，上一句中文后面的联想
         // 已无意义。三个调用方随后都会 `notify_ui_hide`，故此处只清状态不动 UI。
         self.exit_assoc(state, crate::handle_assoc::AssocExit::ModeSwitch);
@@ -9897,7 +10418,18 @@ impl Coordinator {
                             state.temp_pinyin_buffer.clone(),
                             state.temp_pinyin_prefix.clone(),
                         ),
-                        _ => (
+                        None
+                        | Some(
+                            ModeKind::TempEnglish
+                            | ModeKind::Url
+                            | ModeKind::Email
+                            | ModeKind::Unicode
+                            | ModeKind::Special(_)
+                            | ModeKind::RareChar
+                            | ModeKind::Reverse
+                            | ModeKind::Mix(_)
+                            | ModeKind::AuxCode,
+                        ) => (
                             preedit_cursor::cased_or_buffer(
                                 &state.input_buffer,
                                 &state.input_buffer_cased,
@@ -9907,7 +10439,16 @@ impl Coordinator {
                         ),
                     })
                 }
-                _ => None,
+                None
+                | Some(
+                    ModeKind::TempEnglish
+                    | ModeKind::Url
+                    | ModeKind::Email
+                    | ModeKind::Unicode
+                    | ModeKind::Special(_)
+                    | ModeKind::RareChar
+                    | ModeKind::Reverse,
+                ) => None,
             } {
                 // 临拼 / mix：镜像普通组合的 commit_on_switch，且对齐各自的回车上屏语义。
                 let has_pending = !buf.is_empty() || !state.committed_text.is_empty();
@@ -9976,6 +10517,9 @@ impl Coordinator {
         state.committed_segs.clear();
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
+        // 组合随切换结束，检索放宽一并复原（独占分支经 `reset_exclusive_modes` 复原）。托盘 / 热键 /
+        // 按应用切方案走推送上屏、不经出口的 `expire_scope_override`，不在这里复原就会带进新方案。
+        state.scope_relaxed = false;
         state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.candidates.clear();
         state.preedit.clear();
@@ -10284,7 +10828,6 @@ fn phrase_entries_hash(entries: &[wind_phrase::SystemPhraseEntry]) -> String {
 /// 桌面候选页组装与移动端按绝对下标取提示（[`Coordinator::candidate_tooltip_at`]）共用这一份——
 /// 两边各解析一遍就是两个真相源，漂移后的表现是「同一个候选，电脑上气泡有编码段、手机上没有」。
 pub(crate) struct TooltipEvalCtx {
-    pub(crate) hint_source: wind_config::config::CodeHintSource,
     /// 调试提示上下文：仅有段引用 `${debug}` 时解析（mixed 归属 / 方案 id）。
     dbg_ctx: Option<DebugSchemaCtx>,
     /// `${word_code}` / `${code_source}` 的来源方案；没有段引用它们就是 `None`。
@@ -10303,7 +10846,6 @@ impl Coordinator {
         tip: &crate::tooltip::CompiledTooltip,
     ) -> TooltipEvalCtx {
         let force_hint = Self::forces_code_hint(state);
-        let hint_source = self.comment_hint_source(state);
         let dbg_ctx = if tip.references("debug") {
             // 归属与读写两端同源（`effective_data_schema`）：特殊模式下若这里仍按 active 解析，
             // 调试段显示的计数与排序实际用的不是同一个 key——排查时会被它带偏，
@@ -10354,7 +10896,6 @@ impl Coordinator {
             })
         });
         TooltipEvalCtx {
-            hint_source,
             dbg_ctx,
             code_schema,
             code_source_name,
@@ -10415,7 +10956,7 @@ impl Coordinator {
                     })
                     .unwrap_or_default(),
                 _ => {
-                    return self.eval_var(name, arg, c, reverse, ctx.hint_source, &dict_schema);
+                    return self.eval_var(name, arg, c, reverse, &dict_schema);
                 }
             }))
         };
@@ -10497,7 +11038,9 @@ impl Coordinator {
     /// 光看候选文本分不清「用户词赢了」和「系统词本来就长这样」。
     fn debug_source_label(&self, c: &Candidate, ctx: &DebugSchemaCtx) -> String {
         let base = self.debug_source_base(c, ctx);
-        match sentence_debug_tag(c) {
+        // 逆切分候选的 `code` 是整串、来源是码表，不标出来就和词库词条长得一模一样。
+        let tag = sentence_debug_tag(c).or_else(|| c.is_split_composed.then(|| "逆切分".into()));
+        match tag {
             Some(tag) => format!("{base} · {tag}"),
             None => base,
         }
@@ -10702,7 +11245,7 @@ mod sentence_debug_tag_tests {
 
 #[cfg(test)]
 mod mode_comment_e2e_tests {
-    //! 模式级注释模板走到**发往 UI 的候选**上——决策函数 `comment::template_for` 的单元测试
+    //! 各作用范围的注释分配走到**发往 UI 的候选**上——`comment_template_for` 的单元测试
     //! 证明不了消费端接上了它（本仓反复出现的「半接线」欠账）。
     //!
     //! 注释段在发送路径上算、不回写 `state.candidates`，故这里收 UI 通道断言。放在 crate 内
@@ -11257,11 +11800,9 @@ mod mode_comment_e2e_tests {
         );
     }
 
-    /// 写一个只声明注释模板的方案文件，返回它的 data_dir。
-    ///
-    /// ⚠️ **内置方案一项都不声明**（见 `short_code_yield` 那轮的结论），所以方案级路径
-    /// 出厂状态下走不到，夹具必须自造方案——拿 wubi86 当现成的只会得到一条恒绿的测试。
-    fn data_dir_with_schema(tag: &str, id: &str, candidate_section: &str) -> std::path::PathBuf {
+    /// 写一个码表方案文件（只有方案头），返回它的 data_dir。方案层的注释分配在用户配置里，
+    /// 夹具方案只是给 `assign.schema.<id>` 一个可激活的方案。
+    fn data_dir_with_schema(tag: &str, id: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("wind_cmt_schema_{}_{tag}", std::process::id()));
         let schemas = dir.join("schemas");
@@ -11270,12 +11811,49 @@ mod mode_comment_e2e_tests {
         std::fs::write(
             schemas.join(format!("{id}.schema.toml")),
             format!(
-                "[schema]\nid = \"{id}\"\nname = \"注释测试\"\n[engine]\ntype = \"codetable\"\n\
-                 [candidate]\n{candidate_section}\n"
+                "[schema]\nid = \"{id}\"\nname = \"注释测试\"\n[engine]\ntype = \"codetable\"\n"
             ),
         )
         .unwrap();
         dir
+    }
+
+    /// 四格都指向 `id`。
+    fn all_cells(id: &str) -> wind_config::comment_lib::CommentCells {
+        wind_config::comment_lib::CommentCells {
+            default_vertical: Some(id.into()),
+            default_horizontal: Some(id.into()),
+            detail_vertical: Some(id.into()),
+            detail_horizontal: Some(id.into()),
+        }
+    }
+
+    /// 登记用户模板，返回四格都指向它的分配。
+    fn add_template(
+        cfg: &mut Config,
+        id: &str,
+        text: &str,
+    ) -> wind_config::comment_lib::CommentCells {
+        cfg.ui
+            .comment
+            .templates
+            .push(wind_config::comment_lib::CommentTemplateDef {
+                id: id.into(),
+                name: id.into(),
+                text: text.into(),
+                ..Default::default()
+            });
+        all_cells(id)
+    }
+
+    /// 临英四格指向模板「临英${code_hint}」。
+    fn with_temp_english(cfg: &mut Config) {
+        let cells = add_template(cfg, "te", "临英${code_hint}");
+        cfg.ui
+            .comment
+            .assign
+            .mode
+            .insert("temp_english".into(), cells);
     }
 
     /// 直接驱动候选下发：造一条候选、进指定模式，然后走真实的 `notify_ui_update`。
@@ -11313,8 +11891,7 @@ mod mode_comment_e2e_tests {
     fn cfg_with_templates() -> Config {
         let mut c = Config::default();
         // 用字面量而非变量，断言才不依赖词库内容
-        c.ui.candidate.comment_template_vertical = "全局${code_hint}".into();
-        c.ui.candidate.comment_template_horizontal = "全局${code_hint}".into();
+        c.ui.comment.assign.global = add_template(&mut c, "g", "全局${code_hint}");
         c
     }
 
@@ -11324,8 +11901,8 @@ mod mode_comment_e2e_tests {
     fn comment_above_switch_reaches_ui() {
         let run = |on: bool| {
             let mut cfg = Config::default();
-            cfg.ui.candidate.comment_template_vertical = "上${code_hint}\n下${code_hint}".into();
-            cfg.ui.candidate.comment_template_horizontal = "上${code_hint}\n下${code_hint}".into();
+            cfg.ui.comment.assign.global =
+                add_template(&mut cfg, "g", "上${code_hint}\n下${code_hint}");
             cfg.ui.candidate.comment_above = on;
             let (c, rx) = coord_with_ui(cfg);
             emit(&c, None);
@@ -11357,8 +11934,7 @@ mod mode_comment_e2e_tests {
     #[test]
     fn mode_override_reaches_ui() {
         let mut cfg = cfg_with_templates();
-        cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-        cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
+        with_temp_english(&mut cfg);
         let (c, rx) = coord_with_ui(cfg);
 
         emit(&c, None);
@@ -11410,8 +11986,8 @@ mod mode_comment_e2e_tests {
             .collect();
         let tooltip_of = |comment_tpl: &str, whole_tpl: &str| {
             let mut cfg = Config::default();
-            cfg.ui.candidate.comment_template_vertical = format!("${{code_hint}}{comment_tpl}");
-            cfg.ui.candidate.comment_template_horizontal = format!("${{code_hint}}{comment_tpl}");
+            cfg.ui.comment.assign.global =
+                add_template(&mut cfg, "g", &format!("${{code_hint}}{comment_tpl}"));
             let sec = |each: &str, template: &str| wind_config::config::TooltipSection {
                 enabled: true,
                 label: "段".into(),
@@ -11449,19 +12025,22 @@ mod mode_comment_e2e_tests {
         assert!(comment.contains("${no_such_var}") && tooltip.contains("${no_such_var}"));
     }
 
-    /// ★ 空串 = 本模式不显示注释（与「跟随全局」是两回事），且这条语义要一路走到 UI。
+    /// ★ `none` = 本模式不显示注释（与「跟随全局」是两回事），且这条语义要一路走到 UI。
     #[test]
     fn empty_override_hides_comment_at_ui() {
         let mut cfg = cfg_with_templates();
-        cfg.input.temp_pinyin.comment_template_vertical = Some(String::new());
-        cfg.input.temp_pinyin.comment_template_horizontal = Some(String::new());
+        cfg.ui
+            .comment
+            .assign
+            .mode
+            .insert("temp_pinyin".into(), all_cells("none"));
         let (c, rx) = coord_with_ui(cfg);
 
         emit(&c, Some(ModeKind::TempPinyin));
         assert_eq!(
             last_comment(&rx),
             Some(String::new()),
-            "空串必须让本模式不显示注释，而不是回落全局"
+            "none 必须让本模式不显示注释，而不是回落全局"
         );
     }
 
@@ -11469,8 +12048,7 @@ mod mode_comment_e2e_tests {
     #[test]
     fn leaving_mode_restores_global_template() {
         let mut cfg = cfg_with_templates();
-        cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-        cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
+        with_temp_english(&mut cfg);
         let (c, rx) = coord_with_ui(cfg);
 
         emit(&c, Some(ModeKind::TempEnglish));
@@ -11483,32 +12061,27 @@ mod mode_comment_e2e_tests {
         );
     }
 
-    /// ★★★ 三层裁决的**唯一**判别格：模式无意见 + 方案有意图 + 全局有值。
+    /// ★★★ 模式无意见 + 方案有意图 + 类型与全局都有值 ⇒ 方案层胜出；类型层排在全局之上。
     ///
-    /// 两层实现（模式 → 全局）在这一格给「全局码」，三层实现给「方案码」。其余任何格子
-    /// 两种实现都同解——只测别的格子，把方案层整个删掉测试照样全绿。
-    ///
-    /// 同一个用例顺带钉住优先级方向：进模式后必须变回模式级那份，否则就是把方案层
-    /// 错插在了模式层之上。
+    /// 只测别的格子，把方案层或类型层整个删掉测试照样全绿。同一个用例顺带钉住优先级方向：
+    /// 进模式后必须变回模式级那份，否则就是把方案层错插在了模式层之上。
     #[test]
     fn schema_layer_reaches_ui_and_mode_wins_over_it() {
-        let dir = data_dir_with_schema(
-            "wins",
-            "zz_cmt",
-            "comment_template_vertical = \"方案${code_hint}\"\n\
-             comment_template_horizontal = \"方案${code_hint}\"",
-        );
+        let dir = data_dir_with_schema("wins", "zz_cmt");
         let mut cfg = cfg_with_templates();
         cfg.schema.active = "zz_cmt".into();
-        cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-        cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
-        let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
+        let schema = add_template(&mut cfg, "s", "方案${code_hint}");
+        cfg.ui.comment.assign.schema.insert("zz_cmt".into(), schema);
+        let ty = add_template(&mut cfg, "t", "类型${code_hint}");
+        cfg.ui.comment.assign.by_type.insert("codetable".into(), ty);
+        with_temp_english(&mut cfg);
+        let (c, rx) = coord_with_ui_at(cfg.clone(), Some(&dir));
 
         emit(&c, None);
         assert_eq!(
             last_comment(&rx),
             Some("方案码".to_string()),
-            "模式没意见时必须落到方案层，而不是直接跳到全局"
+            "模式没意见时必须落到方案层，而不是直接跳到类型或全局"
         );
 
         emit(&c, Some(ModeKind::TempEnglish));
@@ -11518,46 +12091,58 @@ mod mode_comment_e2e_tests {
             "模式层排在方案层之上"
         );
 
+        cfg.ui.comment.assign.schema.clear();
+        let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
+        emit(&c, None);
+        assert_eq!(
+            last_comment(&rx),
+            Some("类型码".to_string()),
+            "方案层没意见时落到类型层"
+        );
+
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ★ 三态的第三态在**方案层**同样成立：空串 = 本方案不显示注释，不是「跟随全局」。
+    /// ★ `none` 在**方案层**同样成立：本方案不显示注释，不是「跟随全局」。
     #[test]
     fn schema_empty_template_hides_comment() {
-        let dir = data_dir_with_schema(
-            "empty",
-            "zz_cmt2",
-            "comment_template_vertical = \"\"\ncomment_template_horizontal = \"\"",
-        );
+        let dir = data_dir_with_schema("empty", "zz_cmt2");
         let mut cfg = cfg_with_templates();
         cfg.schema.active = "zz_cmt2".into();
+        cfg.ui
+            .comment
+            .assign
+            .schema
+            .insert("zz_cmt2".into(), all_cells("none"));
         let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
 
         emit(&c, None);
         assert_eq!(
             last_comment(&rx),
             Some(String::new()),
-            "方案层空串必须让本方案不显示注释，而不是回落全局"
+            "方案层 none 必须让本方案不显示注释，而不是回落全局"
         );
 
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 方案没声明注释模板（**绝大多数方案的常态**，内置方案一项都不声明）时回落全局。
+    /// 方案没有分配（**绝大多数方案的常态**）时回落全局。
     #[test]
     fn schema_without_templates_follows_global() {
-        let dir = data_dir_with_schema("silent", "zz_cmt3", "layout = \"vertical\"");
+        let dir = data_dir_with_schema("silent", "zz_cmt3");
         let mut cfg = cfg_with_templates();
         cfg.schema.active = "zz_cmt3".into();
+        let other = add_template(&mut cfg, "o", "别的${code_hint}");
+        cfg.ui.comment.assign.schema.insert("wubi86".into(), other);
         let (c, rx) = coord_with_ui_at(cfg, Some(&dir));
 
         emit(&c, None);
         assert_eq!(
             last_comment(&rx),
             Some("全局码".to_string()),
-            "方案没意见就该跟随下一层（全局），不能被空 Option 渲染成空注释"
+            "方案没意见就该跟随下一层（全局），别的方案的分配不串过来"
         );
 
         drop(c);
@@ -11582,32 +12167,31 @@ mod mode_comment_e2e_tests {
         found
     }
 
-    /// 注释总开关在三层裁决之上：全局 / 方案级 / 模式级各一例，开着时各自出注释，
+    /// 注释总开关在逐层裁决之上：全局 / 方案级 / 模式级各一例，开着时各自出注释，
     /// 关掉后全都不出——含 `${code_hint}`（码表引擎产的编码提示）与上方注释条。
     #[test]
     fn comment_switch_off_overrides_all_three_layers() {
-        let dir = data_dir_with_schema(
-            "switch",
-            "zz_cmt_sw",
-            "comment_template_vertical = \"方案${code_hint}\"\n\
-             comment_template_horizontal = \"方案${code_hint}\"",
-        );
+        let dir = data_dir_with_schema("switch", "zz_cmt_sw");
         let run = |enabled: bool| {
-            let mut cfg = cfg_with_templates();
-            cfg.ui.candidate.comment_enabled = enabled;
+            let mut cfg = Config::default();
+            cfg.ui.comment.enabled = enabled;
             // 上方注释条一并开着，全局模板带字面 `\n`：开着时上段进上方条，关掉总开关后
             // 上方条也必须为空——不然它可能是因为模板没拆出上段才空的，断言就是恒绿。
             cfg.ui.candidate.comment_above = true;
-            cfg.ui.candidate.comment_template_vertical = "上${code_hint}\n全局${code_hint}".into();
-            cfg.ui.candidate.comment_template_horizontal =
-                "上${code_hint}\n全局${code_hint}".into();
-            cfg.input.temp_english.comment_template_vertical = Some("临英${code_hint}".into());
-            cfg.input.temp_english.comment_template_horizontal = Some("临英${code_hint}".into());
+            cfg.ui.comment.assign.global =
+                add_template(&mut cfg, "g", "上${code_hint}\n全局${code_hint}");
+            let schema = add_template(&mut cfg, "s", "方案${code_hint}");
+            cfg.ui
+                .comment
+                .assign
+                .schema
+                .insert("zz_cmt_sw".into(), schema);
+            with_temp_english(&mut cfg);
             // 全局层：无方案目录（方案层没意见）、无模式。
             let (g, grx) = coord_with_ui(cfg.clone());
             emit(&g, None);
             let global = last_comment_parts(&grx).expect("应下发候选");
-            // 方案层：方案文件声明了模板、无模式。
+            // 方案层：用户给本方案分配了模板、无模式。
             cfg.schema.active = "zz_cmt_sw".into();
             let (s, srx) = coord_with_ui_at(cfg, Some(&dir));
             emit(&s, None);
@@ -11750,9 +12334,20 @@ mod engine_reload_needed_tests {
         let mut new = old.clone();
         new.input.temp_english.phrase_seg = !old.input.temp_english.phrase_seg;
         assert!(
-            engine_reload_needed(&old, &new),
+            engine_reload_needed(&old, &new, wind_config::ConfigOverlay::Base),
             "临英段变更必须让引擎重建，否则引擎侧镜像会停在旧值"
         );
+    }
+
+    /// 移动档下只改 `[mobile.grammar]` 也必须重建；桌面档不看该段，不得重建。
+    #[test]
+    fn mobile_grammar_change_follows_overlay() {
+        use wind_config::ConfigOverlay::{Base, Mobile};
+        let old = Config::default();
+        let mut new = old.clone();
+        new.mobile.grammar.weight = old.mobile.grammar.weight + 0.1;
+        assert!(engine_reload_needed(&old, &new, Mobile));
+        assert!(!engine_reload_needed(&old, &new, Base));
     }
 
     /// 临拼段同理（既有行为，一并钉住）。
@@ -11761,7 +12356,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.input.temp_pinyin.enabled = !old.input.temp_pinyin.enabled;
-        assert!(engine_reload_needed(&old, &new));
+        assert!(engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// schema 段（含 `schema.english.phrase_seg`）同理。
@@ -11770,7 +12369,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.schema.english.phrase_seg = !old.schema.english.phrase_seg;
-        assert!(engine_reload_needed(&old, &new));
+        assert!(engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// ★ 反向对照：与引擎无关的段变更**不该**触发重建。
@@ -11783,7 +12386,7 @@ mod engine_reload_needed_tests {
         let mut new = old.clone();
         new.ui.toolbar.visible = !old.ui.toolbar.visible;
         assert!(
-            !engine_reload_needed(&old, &new),
+            !engine_reload_needed(&old, &new, wind_config::ConfigOverlay::Base),
             "工具栏可见性与引擎无关，不该触发重建"
         );
     }
@@ -11794,7 +12397,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.input.reverse.lookup_disabled_dicts = !old.input.reverse.lookup_disabled_dicts;
-        assert!(engine_reload_needed(&old, &new));
+        assert!(engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// 反向对照：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 / 后台预热），
@@ -11804,7 +12411,25 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.schema.keep_all_loaded = !old.schema.keep_all_loaded;
-        assert!(!engine_reload_needed(&old, &new));
+        assert!(!engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
+    }
+
+    /// 反向对照：词库缓存策略只在启动时读，改它重建引擎也不生效，不该触发重建。
+    #[test]
+    fn dict_cache_policy_change_does_not_require_engine_reload() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.schema.dict_cache_policy = "off".to_string();
+        assert_ne!(old.schema.dict_cache_policy, new.schema.dict_cache_policy);
+        assert!(!engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 
     /// 反向对照：反查模式的候选布局只给协调器读，不该丢词典缓存。
@@ -11813,7 +12438,11 @@ mod engine_reload_needed_tests {
         let old = Config::default();
         let mut new = old.clone();
         new.input.reverse.candidate_layout = wind_config::LayoutIntent::Vertical;
-        assert!(!engine_reload_needed(&old, &new));
+        assert!(!engine_reload_needed(
+            &old,
+            &new,
+            wind_config::ConfigOverlay::Base
+        ));
     }
 }
 
@@ -16040,13 +16669,13 @@ mod caret_compat_tests {
         );
     }
 
-    /// `ignore_host_ime_close` 的四条判据逐一钉死。
+    /// `ignore_host_ime_switch` 的判据逐一钉死，开和关两个方向各走一遍。
     ///
-    /// ★ 第二条（Ctrl 按住放行）是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主关 IME
-    /// 走**同一条** compartment 通路、载荷完全相同，若不放行，开了这条规则的应用里
-    /// Ctrl+Space 会彻底失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
+    /// ★ Ctrl 按住放行是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主写 compartment
+    /// 走**同一条**通路、载荷完全相同，若不放行，开了这条规则的应用里 Ctrl+Space 会彻底
+    /// 失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
     #[test]
-    fn ignore_host_ime_close_gates() {
+    fn ignore_host_ime_switch_gates() {
         use wind_ipc::protocol::ModeSwitchSource as Src;
         let c = coord();
         let pid = 96032u32;
@@ -16057,28 +16686,108 @@ mod caret_compat_tests {
         c.active_compat.lock().unwrap().pid = pid;
         let rules = vec![wind_config::app_compat::AppCompatRule {
             process: "x60_toolbox.exe".into(),
-            ignore_host_ime_close: Some(true),
+            ignore_host_ime_switch: Some(true),
             ..Default::default()
         }];
         *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
 
-        // 宿主写 compartment 关 IME、无伴随按键 ⇒ 拦。这就是「点一下按钮就变英文」那条。
-        assert!(c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
-        assert!(c.host_ime_close_ignored(false, Src::CompartmentConversion, false));
+        // 宿主写 compartment、无伴随按键 ⇒ 拦。判据不看方向：开和关两个方向都拦
+        // （关：点按钮变英文；开：SSMS 焦点切换把英文态切成中文，GH#312），方向由
+        // tests/ignore_host_ime_switch.rs 经 handle_system_mode_switch 各走一遍。
+        assert!(c.host_ime_switch_ignored(Src::CompartmentOpenClose, false));
+        assert!(c.host_ime_switch_ignored(Src::CompartmentConversion, false));
         // Ctrl 按住 ⇒ 用户在按 Ctrl+Space，必须放行。
-        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, true));
-        // 开 IME 从不拦——宿主想给中文是好事。
-        assert!(!c.host_ime_close_ignored(true, Src::CompartmentOpenClose, false));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentOpenClose, true));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentConversion, true));
         // 我们自己发起的两条路径永远照办，否则按键兜底与菜单会失灵。
-        assert!(!c.host_ime_close_ignored(false, Src::CtrlSpaceKey, false));
-        assert!(!c.host_ime_close_ignored(false, Src::Menu, false));
+        assert!(!c.host_ime_switch_ignored(Src::CtrlSpaceKey, false));
+        assert!(!c.host_ime_switch_ignored(Src::Menu, false));
 
-        // 换成没配规则的应用 ⇒ 一律照办（这条规则必须是显式声明才生效）。
+        // 换成没配规则的应用、全局出厂关 ⇒ 一律照办。
         c.pid_names
             .lock()
             .unwrap()
             .insert(pid, "notepad.exe".to_string());
-        assert!(!c.host_ime_close_ignored(false, Src::CompartmentOpenClose, false));
+        assert!(!c.host_ime_switch_ignored(Src::CompartmentOpenClose, false));
+    }
+
+    /// 生效值 = 按应用 `Some(v)` 优先，`None`（含没有规则）取全局 `input.ignore_host_ime_switch`。
+    #[test]
+    fn ignore_host_ime_switch_per_app_overrides_global() {
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        let mut cfg = Config::default();
+        assert!(!cfg.input.ignore_host_ime_switch, "出厂关");
+        cfg.input.ignore_host_ime_switch = true;
+        let c = Coordinator::new_headless(cfg, None);
+        let pid = 4242u32;
+        c.active_compat.lock().unwrap().pid = pid;
+        let rules = vec![
+            wind_config::app_compat::AppCompatRule {
+                process: "adopt.exe".into(),
+                ignore_host_ime_switch: Some(false),
+                ..Default::default()
+            },
+            wind_config::app_compat::AppCompatRule {
+                process: "follow.exe".into(),
+                auto_pair: Some(false),
+                ..Default::default()
+            },
+        ];
+        *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
+        let at = |name: &str| {
+            c.pid_names.lock().unwrap().insert(pid, name.to_string());
+        };
+
+        at("follow.exe");
+        assert!(
+            c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "规则没写这一项 ⇒ 跟随全局（开）"
+        );
+        assert!(
+            !c.host_ime_switch_ignored(Src::CompartmentOpenClose, true),
+            "全局开着也照样放行 Ctrl+Space"
+        );
+        assert!(!c.host_ime_switch_ignored(Src::Menu, false));
+        at("notepad.exe");
+        assert!(
+            c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "没有规则 ⇒ 跟随全局（开）"
+        );
+        at("adopt.exe");
+        assert!(
+            !c.host_ime_switch_ignored(Src::CompartmentOpenClose, false),
+            "按应用显式采纳压过全局"
+        );
+    }
+
+    /// 拒绝之后必须**再异步推一次状态**（`CMD_STATE_PUSH`），不能只靠同步回包——理由见
+    /// `handle_system_mode_switch` 那段 ★★★：只回包时 compartment 会停在宿主写的值上，
+    /// Ctrl+Space 变哑。两个方向各验一次。
+    #[test]
+    fn ignore_host_ime_switch_rejection_pushes_state() {
+        use wind_bridge::handler::MessageHandler;
+        use wind_ipc::protocol::ModeSwitchSource as Src;
+        let pushed_state = |frames: &[Vec<u8>]| {
+            frames.iter().any(|f| {
+                wind_ipc::codec::decode_header(f)
+                    .is_ok_and(|h| h.command == wind_ipc::protocol::CMD_STATE_PUSH)
+            })
+        };
+        for start_chinese in [true, false] {
+            let mut cfg = Config::default();
+            cfg.input.default.chinese_mode = start_chinese;
+            cfg.input.ignore_host_ime_switch = true;
+            let c = Coordinator::new_headless(cfg, None);
+            assert_eq!(c.is_chinese_mode(), start_chinese, "前提：起步模式");
+            let cap = c.push_server.attach_capture_client(7);
+            c.handle_system_mode_switch(!start_chinese, Src::CompartmentOpenClose, false);
+            assert_eq!(c.is_chinese_mode(), start_chinese, "被拒，模式不变");
+            let frames: Vec<Vec<u8>> = cap.try_iter().collect();
+            assert!(
+                pushed_state(&frames),
+                "start_chinese={start_chinese}：拒绝后必须推一次状态"
+            );
+        }
     }
 
     /// per-app 定位规则**整条**压过全局，坐标必须与定位方式同层取。
@@ -16354,6 +17063,33 @@ mod initial_mode_tests {
         set_focus_proc(&c, 100, "game.exe");
         c.apply_initial_mode(token(100), false);
         assert!(!c.state.lock().unwrap().chinese_mode);
+    }
+
+    /// scope=app + 记忆前次状态：没手动切过的进程也要记住进入时的状态。在 B 里切英文，
+    /// 不得把从没切过的 A 一起带成英文。
+    #[test]
+    fn per_app_scope_records_untoggled_process_on_entry() {
+        let c = coord_with(|cfg| {
+            cfg.input.default.state_scope = "app".into();
+            cfg.input.default.remember_last_state = true;
+            cfg.input.default.chinese_mode = true;
+        });
+        *c.runtime_last.lock().unwrap() = (true, false, true);
+        set_focus_proc(&c, 100, "notepad.exe");
+        c.apply_initial_mode(token(100), false);
+        assert!(c.state.lock().unwrap().chinese_mode);
+        set_focus_proc(&c, 200, "wt.exe");
+        c.apply_initial_mode(token(200), false);
+        // 在 wt 里切英文：手动切换会同时改「前次状态」镜像与本进程的表项。
+        c.state.lock().unwrap().chinese_mode = false;
+        c.record_app_mode(false);
+        *c.runtime_last.lock().unwrap() = (false, false, true);
+        set_focus_proc(&c, 100, "notepad.exe");
+        c.apply_initial_mode(token(100), false);
+        assert!(
+            c.state.lock().unwrap().chinese_mode,
+            "记事本进入时是中文、从没切过，回来仍应是中文"
+        );
     }
 
     /// scope=app：FOCUS_GAINED 同步路径（get_current_mode）命中记忆表时先切换再回传；
@@ -17224,6 +17960,7 @@ mod capslock_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -18351,6 +19088,7 @@ mod input_diag_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -18808,8 +19546,8 @@ mod input_diag_tests {
             ("set_candidate_position_rule", &|c| {
                 c.set_candidate_position_rule(1)
             }),
-            ("set_ignore_host_ime_close_rule", &|c| {
-                c.set_ignore_host_ime_close_rule(1)
+            ("set_ignore_host_ime_switch_rule", &|c| {
+                c.set_ignore_host_ime_switch_rule(1)
             }),
             ("set_auto_pair_rule", &|c| c.set_auto_pair_rule(2)),
             ("set_status_fallback_rule", &|c| {
@@ -18908,15 +19646,116 @@ pub(crate) enum EffectiveCommentKind {
     Manual { path: String },
     /// 自动派生项，`path` 已是绝对路径。
     Auto { path: std::path::PathBuf },
+    /// 随包内置项，`path` 相对 `schemas/`，缺文件时只告警一次。
+    Builtin { path: String },
 }
 
 impl EffectiveCommentDict {
     /// 供日志用的路径串（两种形态各自的原样）。
     pub fn display_path(&self) -> String {
         match &self.kind {
-            EffectiveCommentKind::Manual { path } => path.clone(),
+            EffectiveCommentKind::Manual { path } | EffectiveCommentKind::Builtin { path } => {
+                path.clone()
+            }
             EffectiveCommentKind::Auto { path } => path.display().to_string(),
         }
+    }
+}
+
+/// 把最终挂载序列解析成 `(路径, 方案白名单)` 与 `${dict:id}` 用的 id 表；顺序即优先级。
+/// 只被内置项指到的库：裸 `${dict}` / `${dict_all}` 不查它们，只能 `${dict:id}` 取。
+/// 用户另挂了同一个文件（id 不同）时，那个库就归用户，照常参与裸查。
+pub(crate) fn named_only_mounts(
+    specs: &[EffectiveCommentDict],
+    ids: &[(std::path::PathBuf, Vec<String>)],
+) -> Vec<std::path::PathBuf> {
+    let is_builtin = |id: &str| {
+        specs
+            .iter()
+            .any(|e| e.id == id && matches!(e.kind, EffectiveCommentKind::Builtin { .. }))
+    };
+    ids.iter()
+        .filter(|(_, v)| !v.is_empty() && v.iter().all(|i| is_builtin(i)))
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
+/// 词库路径 → 指到它的 id 列表。
+type PathIds = Vec<(std::path::PathBuf, Vec<String>)>;
+
+pub(crate) fn resolve_comment_mounts(
+    specs: &[EffectiveCommentDict],
+    data_dir: Option<&Path>,
+) -> (PathIds, PathIds) {
+    let mut paths: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
+    // `${dict:id}` 用：每个库被哪些 id 指到（去重合并的那条的 id 也算它的）。
+    let mut ids: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
+    for eff in specs.iter().filter(|e| e.enabled) {
+        // 自动项的路径已经是解析好的绝对路径（检测时就得打开文件），手工项才需要按
+        // `schemas/` 逐层解析。两者到这里汇成同一条流水线。
+        let resolved = match &eff.kind {
+            EffectiveCommentKind::Auto { path } => Some(path.clone()),
+            EffectiveCommentKind::Manual { path } if path.is_empty() => continue,
+            EffectiveCommentKind::Manual { path } => {
+                Config::resolve_schema_resource(data_dir, path)
+            }
+            EffectiveCommentKind::Builtin { path } => {
+                let r = Config::resolve_schema_resource(data_dir, path);
+                if r.is_none() {
+                    warn_builtin_comment_missing(&eff.id, path);
+                }
+                r
+            }
+        };
+        let s = eff;
+        match resolved {
+            // 按**解析后路径**去重：两条 spec 写不同的相对路径却指向同一个文件时
+            // （`a.dict.yaml` 与 `./a.dict.yaml`，或用户目录与安装目录同名文件都被
+            // 解析到同一处），只加载一次。重复加载除了浪费解析时间，还会让优先级
+            // 判定变得依赖「第几次出现」——去重后靠前那条恒胜出。
+            Some(p) if paths.iter().any(|(q, _)| *q == p) => {
+                info!("注释词库重复挂载，已跳过: {} (id={})", p.display(), s.id);
+                if let Some((_, v)) = ids.iter_mut().find(|(q, _)| *q == p) {
+                    v.push(s.id.clone());
+                }
+            }
+            Some(p) => {
+                ids.push((p.clone(), vec![s.id.clone()]));
+                paths.push((p, s.schemas.clone()));
+            }
+            // 只 warn 不中断：一个库路径写错不该让其余库一起不加载。
+            None if matches!(s.kind, EffectiveCommentKind::Builtin { .. }) => {}
+            None => warn!(
+                "注释词库不存在（用户/安装目录均未找到）: {} (id={})",
+                s.display_path(),
+                s.id
+            ),
+        }
+    }
+    (paths, ids)
+}
+
+/// 内置注释词库缺文件：每个 id 进程内只告警一次（sync 在每次配置重载都会跑）。
+fn warn_builtin_comment_missing(id: &str, path: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut w = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if !w.iter().any(|x| x == id) {
+        w.push(id.to_string());
+        warn!("内置注释词库缺失，已跳过: {path} (id={id})");
+    }
+}
+
+fn builtin_effective(
+    b: &wind_config::comment_lib::BuiltinCommentDict,
+    enabled: bool,
+) -> EffectiveCommentDict {
+    EffectiveCommentDict {
+        id: b.id.clone(),
+        enabled,
+        schemas: Vec::new(),
+        kind: EffectiveCommentKind::Builtin {
+            path: b.path.clone(),
+        },
     }
 }
 
@@ -18925,8 +19764,9 @@ impl EffectiveCommentDict {
 /// - 配置里 `auto = true` 的条目是**引用空壳**：按 id 去 `auto` 里认领，认领到就用检测出
 ///   的 `path`/`schemas`，只保留用户的 `enabled` 与位置；认领不到则**静默丢弃**（词库被删、
 ///   被停用、或总开关关了——都是常态，不是配置错误）。
+/// - `builtin = true` 的条目同理，按 id 认领随包内置库（`builtin`），认领不到静默丢弃。
 /// - 其余条目原样保留为手工项。
-/// - `auto` 里没被任何空壳认领的，追加到**末尾**并默认启用。
+/// - 没被认领的内置项默认启用，追加在用户项之后；再其后是没被认领的 `auto` 项（同样默认启用）。
 ///
 /// # 为什么新自动项默认排末尾
 ///
@@ -18935,11 +19775,20 @@ impl EffectiveCommentDict {
 /// 之后它就有了空壳，位置从此归用户所有。
 pub(crate) fn merge_comment_dicts(
     configured: &[wind_config::CommentDictSpec],
+    builtin: &[wind_config::comment_lib::BuiltinCommentDict],
     auto: &[AutoCommentSource],
 ) -> Vec<EffectiveCommentDict> {
     let mut out: Vec<EffectiveCommentDict> = Vec::new();
     let mut claimed: Vec<&str> = Vec::new();
     for spec in configured {
+        if spec.builtin {
+            let Some(b) = builtin.iter().find(|b| b.id == spec.id) else {
+                continue;
+            };
+            claimed.push(b.id.as_str());
+            out.push(builtin_effective(b, spec.enabled));
+            continue;
+        }
         if spec.auto {
             let Some(a) = auto.iter().find(|a| a.id == spec.id) else {
                 continue;
@@ -18955,6 +19804,8 @@ pub(crate) fn merge_comment_dicts(
             });
             continue;
         }
+        // 用户自己写的同 id 条目胜出，内置项不再重复出现。
+        claimed.push(spec.id.as_str());
         out.push(EffectiveCommentDict {
             id: spec.id.clone(),
             enabled: spec.enabled,
@@ -18963,6 +19814,9 @@ pub(crate) fn merge_comment_dicts(
                 path: spec.path.clone(),
             },
         });
+    }
+    for b in builtin.iter().filter(|b| !claimed.contains(&b.id.as_str())) {
+        out.push(builtin_effective(b, true));
     }
     for a in auto.iter().filter(|a| !claimed.contains(&a.id.as_str())) {
         out.push(EffectiveCommentDict {
@@ -19016,12 +19870,99 @@ mod comment_dict_merge_tests {
         v.iter().map(|e| e.id.as_str()).collect()
     }
 
+    fn builtin_dicts() -> Vec<wind_config::comment_lib::BuiltinCommentDict> {
+        ["en_zh", "zh_en"]
+            .iter()
+            .map(|id| wind_config::comment_lib::BuiltinCommentDict {
+                id: id.to_string(),
+                label: id.to_string(),
+                path: format!("comments/{id}.txt"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn builtin_dicts_enabled_by_default() {
+        let out = merge_comment_dicts(&[], &builtin_dicts(), &[]);
+        assert_eq!(ids(&out), ["en_zh", "zh_en"]);
+        assert!(out.iter().all(|e| e.enabled));
+    }
+
+    #[test]
+    fn builtin_sits_between_manual_and_auto() {
+        let cfg = [manual("mine", "comments/mine.txt", true)];
+        let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
+        let out = merge_comment_dicts(&cfg, &builtin_dicts(), &a);
+        assert_eq!(
+            ids(&out),
+            ["mine", "en_zh", "zh_en", "auto:pinyin/frost.dict.yaml"]
+        );
+    }
+
+    #[test]
+    fn user_can_disable_builtin() {
+        let cfg = [
+            CommentDictSpec {
+                id: "zh_en".into(),
+                builtin: true,
+                enabled: false,
+                ..Default::default()
+            },
+            manual("mine", "comments/mine.txt", true),
+        ];
+        let out = merge_comment_dicts(&cfg, &builtin_dicts(), &[]);
+        assert_eq!(ids(&out), ["zh_en", "mine", "en_zh"]);
+        assert!(!out[0].enabled);
+        assert!(out[2].enabled);
+    }
+
+    #[test]
+    fn manual_entry_with_builtin_id_wins() {
+        let cfg = [manual("en_zh", "comments/mine.txt", true)];
+        let out = merge_comment_dicts(&cfg, &builtin_dicts(), &[]);
+        assert_eq!(ids(&out), ["en_zh", "zh_en"]);
+        assert!(matches!(out[0].kind, EffectiveCommentKind::Manual { .. }));
+    }
+
+    #[test]
+    fn unknown_builtin_shell_is_dropped() {
+        let cfg = [CommentDictSpec {
+            id: "gone".into(),
+            builtin: true,
+            ..Default::default()
+        }];
+        assert!(merge_comment_dicts(&cfg, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn missing_builtin_dict_is_skipped() {
+        //! 缺文件的内置库跳过，其余库照常挂载。
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/comment_data");
+        let mut dicts = builtin_dicts();
+        dicts.insert(
+            0,
+            wind_config::comment_lib::BuiltinCommentDict {
+                id: "absent".into(),
+                label: String::new(),
+                path: "comments/absent.txt".into(),
+            },
+        );
+        let specs = merge_comment_dicts(&[], &dicts, &[]);
+        for _ in 0..2 {
+            let (paths, ids) = resolve_comment_mounts(&specs, Some(&fixture));
+            assert_eq!(paths.len(), 2);
+            assert_eq!(ids.len(), 2);
+            assert!(ids.iter().all(|(_, v)| v[0] != "absent"));
+        }
+    }
+
     #[test]
     fn new_auto_sources_append_after_manual_entries() {
         //! 没被引用过的自动项排在**末尾** —— 装个新方案不该把用户排好的第一优先级挤下去。
         let cfg = [manual("en", "comments/en.dict.yaml", true)];
         let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
-        let out = merge_comment_dicts(&cfg, &a);
+        let out = merge_comment_dicts(&cfg, &[], &a);
         assert_eq!(ids(&out), ["en", "auto:pinyin/frost.dict.yaml"]);
         assert!(out[1].enabled, "新自动项默认启用");
         assert_eq!(out[1].schemas, ["pinyin"], "白名单取声明它的方案");
@@ -19036,7 +19977,7 @@ mod comment_dict_merge_tests {
             manual("en", "comments/en.dict.yaml", true),
         ];
         let a = [auto("pinyin/frost.dict.yaml", &["pinyin"])];
-        let out = merge_comment_dicts(&cfg, &a);
+        let out = merge_comment_dicts(&cfg, &[], &a);
         assert_eq!(
             ids(&out),
             ["auto:pinyin/frost.dict.yaml", "en"],
@@ -19059,7 +20000,7 @@ mod comment_dict_merge_tests {
             ..Default::default()
         }];
         let a = [auto("pinyin/frost.dict.yaml", &["pinyin", "wubi_pinyin"])];
-        let out = merge_comment_dicts(&cfg, &a);
+        let out = merge_comment_dicts(&cfg, &[], &a);
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].kind,
@@ -19083,7 +20024,7 @@ mod comment_dict_merge_tests {
             shell("auto:gone.dict.yaml", true),
             manual("en", "comments/en.dict.yaml", true),
         ];
-        let out = merge_comment_dicts(&cfg, &[]);
+        let out = merge_comment_dicts(&cfg, &[], &[]);
         assert_eq!(ids(&out), ["en"]);
     }
 
@@ -19095,7 +20036,7 @@ mod comment_dict_merge_tests {
             manual("a", "comments/a.dict.yaml", true),
             manual("b", "comments/b.dict.yaml", false),
         ];
-        let out = merge_comment_dicts(&cfg, &[]);
+        let out = merge_comment_dicts(&cfg, &[], &[]);
         assert_eq!(ids(&out), ["a", "b"]);
         assert!(out[0].enabled && !out[1].enabled);
         assert_eq!(
@@ -19779,4 +20720,95 @@ mod exit_flush_tests {
         drop(c);
         let _ = std::fs::remove_dir_all(&user);
     }
+}
+
+#[cfg(test)]
+mod syllable_separator_app_tests {
+    //! 应用级 `syllable_separator`：断言落在按键出口（组合串），不是判据返回值。
+    use super::*;
+    use wind_config::app_compat::{AppCompat, AppCompatRule, SyllableSeparator};
+
+    fn data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
+    }
+
+    fn composition_after_typing(c: &Coordinator) -> String {
+        let mut last = KeyAction::Consumed;
+        for ch in "xiaopeng".chars() {
+            last = c.handle_key_event_policed(&KeyEventData {
+                key_code: (ch.to_ascii_uppercase() as u32) & 0xFF,
+                scan_code: 0,
+                modifiers: 0,
+                event_type: EVENT_KEY_DOWN,
+                toggles: 0,
+                event_seq: 0,
+                prev_char: 0,
+                seq_char: 0,
+            });
+        }
+        match last {
+            KeyAction::UpdateComposition { text, .. } => text,
+            other => panic!("期望组合区更新，实得 {other:?}"),
+        }
+    }
+
+    fn focus(c: &Coordinator, pid: u32, name: &str) {
+        c.pid_names.lock().unwrap().insert(pid, name.into());
+        c.active_compat.lock().unwrap().pid = pid;
+        c.refresh_active_compat_lookups();
+    }
+
+    #[test]
+    fn app_rule_overrides_global_separator() {
+        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
+            eprintln!("skip: 无 build_dev/data");
+            return;
+        }
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
+        cfg.schema.active = "pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        let c = Coordinator::new_headless(cfg, Some(&data_dir()));
+        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
+            process: "ue.exe".into(),
+            syllable_separator: Some(SyllableSeparator::None),
+            ..Default::default()
+        }]));
+
+        focus(&c, 7, "ue.exe");
+        assert_eq!(
+            composition_after_typing(&c),
+            "xiaopeng",
+            "配了 none 的应用无分隔符"
+        );
+
+        c.handle_key_event_policed(&KeyEventData {
+            key_code: 0x1B,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
+            seq_char: 0,
+        });
+        focus(&c, 8, "other.exe");
+        assert!(
+            composition_after_typing(&c).contains('\''),
+            "未配规则的应用跟随全局默认 '"
+        );
+    }
+}
+
+/// [`Coordinator::resolve_index_label`] 的裁决本体（主题槽位由调用方给）：设置端预览按
+/// 被预览主题的槽位取，与实时候选窗同一条规则。
+pub(crate) fn pick_index_label(
+    cand_cfg: &wind_config::config::UiCandidateConfig,
+    theme_labels: &[String],
+    i: usize,
+) -> String {
+    if let Some(s) = cand_cfg.user_index_label(i) {
+        return s;
+    }
+    wind_ui_types::theme_index_label(theme_labels, i)
 }

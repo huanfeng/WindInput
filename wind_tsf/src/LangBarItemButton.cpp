@@ -867,7 +867,7 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
             KillTimer(hwnd, wParam);
             CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
             const BOOL hasComp = (pThis != nullptr && pThis->_pTextService != nullptr
-                                  && pThis->_pTextService->HasActiveComposition());
+                                  && pThis->_pTextService->HasCompositionOrRecover());
             // ⚠ 这行日志不可省。`WM_TIMER` 是消息队列里**优先级最低的合成消息**，只在队列
             // 空闲时才生成，宿主忙时会被无限期饿死。2026-08-03 排查 Excel「点单元格后首字
             // 错位」时，本 timer 在 680ms 的重排窗口里一次都没触发，而当时成功路径**没有
@@ -1327,7 +1327,7 @@ void CLangBarItemButton::_RunServiceReadySync(HWND hwnd)
     CIPCClient* pIPC = _pTextService->GetIPCClient();
     const Action action = wind::svcready::Decide(
         isRetry != FALSE, _pTextService->HasFocus() != FALSE, _pTextService->HasThreadFocus() != FALSE,
-        _pTextService->HasActiveComposition() != FALSE, pIPC != nullptr && pIPC->IsConnected(),
+        _pTextService->HasCompositionOrRecover() != FALSE, pIPC != nullptr && pIPC->IsConnected(),
         pIPC != nullptr && pIPC->StateEstablished());
 
     switch (action)

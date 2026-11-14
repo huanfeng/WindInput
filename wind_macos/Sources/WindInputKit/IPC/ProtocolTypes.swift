@@ -83,6 +83,8 @@ public enum DownstreamCmd {
     /// 光栅浮层帧 (状态气泡 / Toast / 悬停提示 / 自绘菜单)：像素在各层自己的 SHM 段，本帧带落位规则。
     /// 布局见 `OverlayFrame`。
     public static let overlayFrame: UInt16     = 0x0513
+    /// 皮肤区域 (窗体矩形、装饰矩形与鼠标策略)，先于同一帧的 `hostRenderFrame` 到。布局见 `CandidateSkin`。
+    public static let candidateSkin: UInt16    = 0x0514
     public static let modeStatus: UInt16       = 0x0504   // 输入模式状态 (中英/全半角/标点/方案), 供菜单栏指示器
     public static let menuShow: UInt16         = 0x0506   // 统一菜单树 (CmdShowContextMenu 请求的响应)
     /// 扩展信封 (下行)。与上行同码位、按方向区分，见 Rust protocol.rs 的 CMD_EXT。
@@ -121,6 +123,11 @@ public enum ExtKind {
     /// 上行：`.app` 自己把菜单收掉了（空闲超时 / 服务重启 / 断线…），服务端据此复位。
     /// body = `{"reason":"…"}`，只进日志。
     public static let menuDismiss = "menu.dismiss"
+    /// 上行：系统「减少动态效果」。body = `{"reduce":bool}`。连上服务时、服务重启后与系统设置变化时报。
+    public static let hostReduceMotion = "host.reduce_motion"
+    /// 上行：点了候选窗上的一块皮肤装饰 (drag / block)。body = `{"index":N}`，N 为
+    /// `CMD_CANDIDATE_SKIN` 里该装饰的 index；服务端触发它的 click 事件，旧服务安静忽略。
+    public static let skinDecorClick = "skin.decor_click"
 }
 
 /// 按键组合 (CmdKeyTap/Hold/Release 解码结果, 及 KeySeq 内单项)。
@@ -205,8 +212,8 @@ public struct CandidateHitRect: Equatable {
     }
 }
 
-// HostRenderFramePayload — CmdHostRenderFrame (0x0502) 24 字节 payload.
-// 与 Go internal/ipc/binary_protocol.go HostRenderFramePayload 镜像。
+// HostRenderFramePayload — CmdHostRenderFrame (0x0502) payload，24 / 28 / 36 / 60 字节逐版追加。
+// 布局对照 Rust wind-ipc `encode_host_render_frame`。
 public struct HostRenderFramePayload: Equatable {
     public let seq: UInt32
     public let x: Int32           // logical 点 (top-left)
@@ -215,12 +222,22 @@ public struct HostRenderFramePayload: Equatable {
     public let height: UInt32
     public let flags: UInt32
     public let scale: UInt32      // HiDPI 渲染倍率; logical 尺寸 = 像素/scale (1=非 Retina, 2=Retina)
+    /// 窗口左上 → 内容左上的偏移 (logical 点)。36 字节版起有，短帧为 0。
+    public let contentX: Int32
+    public let contentY: Int32
+    /// 跟随光标时翻到光标上方的窗口左上 (wire logical 点)；60 字节版起有，短帧为 nil。
+    public let above: CGPoint?
+    /// 判翻转与夹边用的框：相对窗口左上的 wire 矩形 (logical 点, y 向下)；60 字节版起有。
+    public let placeBox: CGRect?
 
     public init(seq: UInt32, x: Int32, y: Int32, width: UInt32, height: UInt32,
-                flags: UInt32, scale: UInt32 = 1) {
+                flags: UInt32, scale: UInt32 = 1, contentX: Int32 = 0, contentY: Int32 = 0,
+                above: CGPoint? = nil, placeBox: CGRect? = nil) {
         self.seq = seq; self.x = x; self.y = y
         self.width = width; self.height = height; self.flags = flags
         self.scale = max(1, scale)
+        self.contentX = contentX; self.contentY = contentY
+        self.above = above; self.placeBox = placeBox
     }
 
     /// 帧可见 (SharedRenderHeader::FLAG_VISIBLE)。
@@ -233,6 +250,110 @@ public struct HostRenderFramePayload: Equatable {
     /// 置位时 panel 只做屏幕边界钳制, 不套用「下方放不下就翻到光标上方」的兜底——窗口
     /// 本来就不跟光标走, 固定点一旦靠近屏幕底边就会被那套逻辑莫名弹到顶上。
     public var isAbsolutePos: Bool { flags & 0x8 != 0 }
+    /// 皮肤动画换帧 (SharedRenderHeader::FLAG_ANIM_FRAME)：内容与落位都没变，照原位贴图。
+    public var isAnimFrame: Bool { flags & 0x10 != 0 }
+    /// 这一帧能不能照原位贴：是换帧，且 SHM 里读到的就是通知的那一帧 (`shmSeq == seq`)。通知与 SHM
+    /// 之间没有锁，读到更新的一帧时内容、尺寸可能都变了，按普通帧贴。与 Linux addon 的 `animInPlace` 同义。
+    public func animInPlace(shmSeq: UInt32) -> Bool {
+        isAnimFrame && seq == shmSeq
+    }
+}
+
+/// 缓冲内的矩形 (x, y, w, h)，单位同所在消息。
+public struct SkinRect: Equatable {
+    public let x: Int32
+    public let y: Int32
+    public let w: Int32
+    public let h: Int32
+    public init(x: Int32, y: Int32, w: Int32, h: Int32) {
+        self.x = x; self.y = y; self.w = w; self.h = h
+    }
+    public func contains(px: CGFloat, py: CGFloat) -> Bool {
+        // 在 CGFloat 里加：Int32 相加溢出会直接 trap。
+        px >= CGFloat(x) && px < CGFloat(x) + CGFloat(w)
+            && py >= CGFloat(y) && py < CGFloat(y) + CGFloat(h)
+    }
+    /// 设备像素 → 逻辑点：浮点除、向外取整 (左上取 floor、右下取 ceil)，不让装饰边缘缩进去。
+    func scaled(by s: CGFloat) -> SkinRect {
+        let x0 = (CGFloat(x) / s).rounded(.down), y0 = (CGFloat(y) / s).rounded(.down)
+        let x1 = ((CGFloat(x) + CGFloat(w)) / s).rounded(.up)
+        let y1 = ((CGFloat(y) + CGFloat(h)) / s).rounded(.up)
+        return SkinRect(x: Self.clamp(x0), y: Self.clamp(y0),
+                        w: Self.clamp(x1 - x0), h: Self.clamp(y1 - y0))
+    }
+    private static func clamp(_ v: CGFloat) -> Int32 {
+        Int32(max(CGFloat(Int32.min), min(CGFloat(Int32.max), v)))
+    }
+}
+
+/// `CMD_CANDIDATE_SKIN` (0x0514) 载荷。布局见 Rust `wind_ipc::codec::encode_candidate_skin`、
+/// 设计 theme-skin-animation.md §17.2。输入区表只给 Linux，这里不解。
+public struct CandidateSkin: Equatable {
+    public static let flagActive: UInt32 = 1
+    public static let hitDrag: UInt32 = 0
+    public static let hitBlock: UInt32 = 1
+    public static let hitPass: UInt32 = 2
+    public static let decorUnder: UInt32 = 1
+    public static let decorSplit: UInt32 = 2
+
+    public struct Decor: Equatable {
+        public let index: UInt32
+        public let hit: UInt32
+        public let flags: UInt32
+        public let rect: SkinRect
+        public init(index: UInt32, hit: UInt32, flags: UInt32, rect: SkinRect) {
+            self.index = index; self.hit = hit; self.flags = flags; self.rect = rect
+        }
+        var isSplit: Bool { flags & CandidateSkin.decorSplit != 0 }
+    }
+
+    public var flags: UInt32 = 0
+    public var frame = SkinRect(x: 0, y: 0, w: 0, h: 0)
+    public var decor: [Decor] = []
+
+    public init(flags: UInt32 = 0, frame: SkinRect = SkinRect(x: 0, y: 0, w: 0, h: 0),
+                decor: [Decor] = []) {
+        self.flags = flags; self.frame = frame; self.decor = decor
+    }
+
+    /// 本帧启用了皮肤：皮肤阴影由图自带，系统窗口阴影要关。
+    public var isActive: Bool { flags & Self.flagActive != 0 }
+
+    /// 拆到独立层的穿透装饰是否全在窗体下 (子 panel 排在候选窗下面)。没有拆层装饰时 false。
+    public var splitDecorBelow: Bool {
+        let split = decor.filter { $0.isSplit }
+        return !split.isEmpty && split.allSatisfy { $0.flags & Self.decorUnder != 0 }
+    }
+
+    /// 按下点在不拖动区：`block` 装饰 (及没拆出去的 `pass`) 内、窗体矩形外 (§17.2)。
+    public func blocksDrag(px: CGFloat, py: CGFloat) -> Bool {
+        guard isActive, !frame.contains(px: px, py: py) else { return false }
+        return decor.contains { d in
+            (d.hit == Self.hitBlock || (d.hit == Self.hitPass && !d.isSplit))
+                && d.rect.contains(px: px, py: py)
+        }
+    }
+
+    /// 点落在哪块可点的装饰上 (`drag` / `block`；`pass` 不接鼠标)，返回其 index。重叠取最上层
+    /// (表按 z 升序)；窗体内的 under 装饰被窗体盖住，不算。对位 Windows `CandidateMouse::decor_at`。
+    /// 调用方先判候选命中：点在候选 / 翻页按钮上的不算装饰点击。
+    public func decorAt(px: CGFloat, py: CGFloat) -> UInt32? {
+        guard isActive else { return nil }
+        let inFrame = frame.contains(px: px, py: py)
+        return decor.last { d in
+            d.hit != Self.hitPass && d.rect.contains(px: px, py: py)
+                && !(d.flags & Self.decorUnder != 0 && inFrame)
+        }?.index
+    }
+
+    /// 设备像素 → 逻辑点 (向外取整，见 `SkinRect.scaled`)。
+    public func scaled(by scale: CGFloat) -> CandidateSkin {
+        guard scale.isFinite, scale > 1 else { return self }
+        let s = scale
+        return CandidateSkin(flags: flags, frame: frame.scaled(by: s), decor: decor.map {
+            Decor(index: $0.index, hit: $0.hit, flags: $0.flags, rect: $0.rect.scaled(by: s))
+        })
+    }
 }
 
 // MARK: - KeyEvent
@@ -240,6 +361,9 @@ public struct HostRenderFramePayload: Equatable {
 public enum KeyEventType: UInt8 {
     case down = 0
     case up   = 1
+    /// 候选显示时 Ctrl 的如实上报 (单击由服务端判), 见 CtrlRawReport 与 protocol.rs 的 EVENT_MOD_DOWN。
+    case modDown = 2
+    case modUp   = 3
 }
 
 public struct KeyEventPayload: Equatable {
@@ -250,6 +374,7 @@ public struct KeyEventPayload: Equatable {
     public var toggles: UInt8
     public var eventSeq: UInt16
     public var prevChar: UInt16  // 0 = unavailable
+    public var seqChar: UInt16   // 0 = unknown，见 InputSequenceTracker
 
     public init(keyCode: UInt32,
                 scanCode: UInt32 = 0,
@@ -257,7 +382,8 @@ public struct KeyEventPayload: Equatable {
                 eventType: KeyEventType = .down,
                 toggles: UInt8 = 0,
                 eventSeq: UInt16 = 0,
-                prevChar: UInt16 = 0) {
+                prevChar: UInt16 = 0,
+                seqChar: UInt16 = 0) {
         self.keyCode = keyCode
         self.scanCode = scanCode
         self.modifiers = modifiers
@@ -265,6 +391,7 @@ public struct KeyEventPayload: Equatable {
         self.toggles = toggles
         self.eventSeq = eventSeq
         self.prevChar = prevChar
+        self.seqChar = seqChar
     }
 }
 

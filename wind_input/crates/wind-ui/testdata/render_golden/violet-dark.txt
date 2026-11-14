@@ -21,10 +21,10 @@ Column padding=Edges { l: 5.0, t: 5.0, r: 5.0, b: 5.0 } bg=Some([18, 24, 38, 255
       Row margin=Edges { l: 0.0, t: 0.0, r: 1.0, b: 0.0 } text=Some("4") color=[92, 99, 118, 255] size=Some(12.0) m=(7.2000003,14.400001) rect=Rect { x: 186.6, y: 54.199997, w: 7.2000003, h: 14.400001 }
       Row margin=Edges { l: 3.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[196, 200, 208, 255] size=Some(18.0) m=(21.6,21.6) rect=Rect { x: 197.8, y: 50.6, w: 21.6, h: 21.6 }
       Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[92, 99, 118, 255] size=Some(14.0) m=(33.600002,16.800001) rect=Rect { x: 225.40001, y: 52.999996, w: 33.600002, h: 16.800001 }
-    Row margin=Edges { l: 8.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(52.0,32.0) rect=Rect { x: 277.0, y: 45.399998, w: 52.0, h: 32.0 }
-      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(32.0) radius=8.0 text=Some("‹") color=[92, 99, 118, 255] size=Some(14.0) align=Center m=(26.0,32.0) rect=Rect { x: 277.0, y: 45.399998, w: 26.0, h: 32.0 }
+    Row margin=Edges { l: 8.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(52.0,35.6) rect=Rect { x: 277.0, y: 43.6, w: 52.0, h: 35.6 }
+      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(35.6) radius=8.0 text=Some("‹") color=[92, 99, 118, 255] size=Some(14.0) align=Center m=(26.0,35.6) rect=Rect { x: 277.0, y: 43.6, w: 26.0, h: 35.6 }
       Row text=Some("") color=[154, 163, 180, 255] size=Some(14.0) m=(0.0,16.800001) rect=Rect { x: 303.0, y: 52.999996, w: 0.0, h: 16.800001 }
-      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(32.0) radius=8.0 text=Some("›") color=[139, 92, 246, 255] size=Some(14.0) align=Center tag=100001 m=(26.0,32.0) rect=Rect { x: 303.0, y: 45.399998, w: 26.0, h: 32.0 }
+      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(35.6) radius=8.0 text=Some("›") color=[139, 92, 246, 255] size=Some(14.0) align=Center tag=100001 m=(26.0,35.6) rect=Rect { x: 303.0, y: 43.6, w: 26.0, h: 35.6 }
 -- 绘制 334x85 像素摘要 06555d855e8c7e2c
 draw text="nihao" at=(13.0,10.999999) size=18.0 weight=0 family=None color=[154, 163, 180, 255]
 draw text="拼" at=(310.2,10.999999) size=18.0 weight=0 family=None color=[92, 99, 118, 255]
@@ -241,10 +241,10 @@ Column padding=Edges { l: 5.0, t: 5.0, r: 5.0, b: 5.0 } bg=Some([18, 24, 38, 255
       Row margin=Edges { l: 0.0, t: 0.0, r: 1.0, b: 0.0 } text=Some("4") color=[92, 99, 118, 255] size=Some(12.0) m=(7.2000003,14.400001) rect=Rect { x: 287.40002, y: 15.599998, w: 7.2000003, h: 14.400001 }
       Row margin=Edges { l: 3.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("你好") color=[196, 200, 208, 255] size=Some(18.0) m=(21.6,21.6) rect=Rect { x: 298.60004, y: 11.999999, w: 21.6, h: 21.6 }
       Row margin=Edges { l: 6.0, t: 0.0, r: 0.0, b: 0.0 } text=Some("wqvb") color=[92, 99, 118, 255] size=Some(14.0) m=(33.600002,16.800001) rect=Rect { x: 326.20004, y: 14.399999, w: 33.600002, h: 16.800001 }
-    Row margin=Edges { l: 8.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(52.0,32.0) rect=Rect { x: 377.80005, y: 6.799999, w: 52.0, h: 32.0 }
-      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(32.0) radius=8.0 text=Some("‹") color=[92, 99, 118, 255] size=Some(14.0) align=Center m=(26.0,32.0) rect=Rect { x: 377.80005, y: 6.799999, w: 26.0, h: 32.0 }
+    Row margin=Edges { l: 8.0, t: 0.0, r: 0.0, b: 0.0 } cross=Center m=(52.0,35.6) rect=Rect { x: 377.80005, y: 5.0, w: 52.0, h: 35.6 }
+      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(35.6) radius=8.0 text=Some("‹") color=[92, 99, 118, 255] size=Some(14.0) align=Center m=(26.0,35.6) rect=Rect { x: 377.80005, y: 5.0, w: 26.0, h: 35.6 }
       Row text=Some("") color=[154, 163, 180, 255] size=Some(14.0) m=(0.0,16.800001) rect=Rect { x: 403.80005, y: 14.399999, w: 0.0, h: 16.800001 }
-      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(32.0) radius=8.0 text=Some("›") color=[139, 92, 246, 255] size=Some(14.0) align=Center tag=100001 m=(26.0,32.0) rect=Rect { x: 403.80005, y: 6.799999, w: 26.0, h: 32.0 }
+      Row cross=Center fixed_w=Some(26.0) fixed_h=Some(35.6) radius=8.0 text=Some("›") color=[139, 92, 246, 255] size=Some(14.0) align=Center tag=100001 m=(26.0,35.6) rect=Rect { x: 403.80005, y: 5.0, w: 26.0, h: 35.6 }
 -- 绘制 435x46 像素摘要 9973a1ec2de72e51
 draw text="nihao" at=(13.0,11.999999) size=18.0 weight=0 family=None color=[154, 163, 180, 255]
 draw text="拼" at=(83.0,11.999999) size=18.0 weight=0 family=None color=[92, 99, 118, 255]

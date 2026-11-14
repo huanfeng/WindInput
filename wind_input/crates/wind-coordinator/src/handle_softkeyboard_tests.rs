@@ -6,7 +6,7 @@
 use super::*;
 use std::sync::Arc;
 use wind_config::Config;
-use wind_ipc::protocol::EVENT_KEY_DOWN;
+use wind_ipc::protocol::{EVENT_KEY_DOWN, FocusLostReason};
 
 /// `data_dir = None` ⇒ 软键盘表回落内置兜底（一面「标点」）。
 fn coord() -> Arc<Coordinator> {
@@ -33,6 +33,7 @@ fn kev(vk: u32, modifiers: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -216,7 +217,7 @@ fn direct_page_binding_does_not_toggle_off() {
 fn focus_guard_keeps_a_just_opened_panel() {
     let c = coord();
     c.open_softkeyboard(None);
-    c.close_softkeyboard_on_focus_change("focus_lost");
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Lost(FocusLostReason::Thread));
     assert!(c.softkeyboard_is_open(), "守卫期内的焦点事件应被忽略");
 }
 
@@ -228,8 +229,191 @@ fn focus_change_closes_after_the_guard() {
         .lock()
         .unwrap_or_else(|e| e.into_inner()) =
         Some(std::time::Instant::now() - crate::handle_menu::MENU_FOCUS_GUARD * 2);
-    c.close_softkeyboard_on_focus_change("focus_lost");
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Lost(FocusLostReason::Thread));
     assert!(!c.softkeyboard_is_open(), "守卫期外应关闭");
+}
+
+/// 把守卫期拨过去，让后面的焦点事件按真实路径判。
+fn expire_focus_guard(c: &Coordinator) {
+    *c.softkeyboard_opened_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) =
+        Some(std::time::Instant::now() - crate::handle_menu::MENU_FOCUS_GUARD * 2);
+}
+
+/// Excel 里退出单元格是 CtxLost / NoEditCtx、换文档是 DocChanged：都是同宿主内的噪声，
+/// 连续录入不能被它们打断。
+#[test]
+fn same_host_focus_noise_keeps_the_panel() {
+    for reason in [
+        FocusLostReason::CtxLost,
+        FocusLostReason::NoEditCtx,
+        FocusLostReason::DocChanged,
+    ] {
+        let c = coord();
+        c.open_softkeyboard(None);
+        expire_focus_guard(&c);
+        c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Lost(reason));
+        assert!(c.softkeyboard_is_open(), "{reason:?} 不该关面板");
+    }
+}
+
+/// 点进下一个单元格 = 同进程的 focus_gained，同样不算离开。
+#[test]
+fn same_host_focus_gained_keeps_the_panel() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(1234, Ordering::Relaxed);
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 1234 });
+    assert!(c.softkeyboard_is_open());
+}
+
+#[test]
+fn other_host_focus_gained_closes_the_panel() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(1234, Ordering::Relaxed);
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 5678 });
+    assert!(!c.softkeyboard_is_open(), "换了宿主进程应关闭");
+}
+
+#[test]
+fn thread_lost_and_ime_deactivated_close_the_panel() {
+    for sig in [
+        SoftKbFocusSignal::Lost(FocusLostReason::Thread),
+        SoftKbFocusSignal::ImeDeactivated,
+    ] {
+        let c = coord();
+        c.open_softkeyboard(None);
+        expire_focus_guard(&c);
+        c.close_softkeyboard_on_focus_change(sig);
+        assert!(!c.softkeyboard_is_open(), "{sig:?} 应关闭");
+    }
+}
+
+/// 宿主未知（开启时没有活动宿主）或事件取不到 pid：保守不关，用户可手动收掉。
+#[test]
+fn unknown_pid_never_closes_on_gained() {
+    for (host, pid) in [(0, 5678), (1234, 0)] {
+        assert!(
+            !Coordinator::softkeyboard_should_close_on(SoftKbFocusSignal::Gained { pid }, host),
+            "host={host} pid={pid}"
+        );
+    }
+}
+
+/// 钉住后连整应用失焦、换宿主都不关；这是它存在的全部意义。
+#[test]
+fn pinned_panel_survives_every_focus_signal() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(1234, Ordering::Relaxed);
+    assert!(c.toggle_softkeyboard_pin());
+    expire_focus_guard(&c);
+    for sig in [
+        SoftKbFocusSignal::Lost(FocusLostReason::Thread),
+        SoftKbFocusSignal::Gained { pid: 5678 },
+        SoftKbFocusSignal::ImeDeactivated,
+    ] {
+        c.close_softkeyboard_on_focus_change(sig);
+        assert!(c.softkeyboard_is_open(), "钉住后 {sig:?} 不该关");
+    }
+}
+
+#[test]
+fn toggling_pin_twice_unpins() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    assert!(c.toggle_softkeyboard_pin());
+    assert!(!c.toggle_softkeyboard_pin());
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Lost(FocusLostReason::Thread));
+    assert!(!c.softkeyboard_is_open(), "取消钉住后恢复自动关闭");
+}
+
+/// 钉住只对本次打开有效：手动关掉再开，不能还钉着。
+#[test]
+fn pin_does_not_survive_a_close() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.toggle_softkeyboard_pin();
+    c.close_softkeyboard();
+    c.open_softkeyboard(None);
+    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
+}
+
+/// 钉住期间跟着用户去了别的应用，取消钉住后那个应用就是宿主：
+/// 在它里面换焦点不能关（否则「同宿主噪声不关」在新应用里又失效）。
+#[test]
+fn unpinning_in_another_app_adopts_it_as_host() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(1234, Ordering::Relaxed);
+    c.toggle_softkeyboard_pin();
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 5678 });
+    c.toggle_softkeyboard_pin(); // 取消钉住
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 5678 });
+    assert!(c.softkeyboard_is_open(), "新应用内的换焦点不该关");
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 1234 });
+    assert!(!c.softkeyboard_is_open(), "再换回旧应用才算离开");
+}
+
+/// 开启时没有活动宿主（pid 0）：第一次获焦补记，之后同宿主不关、换宿主才关。
+#[test]
+fn unknown_host_is_adopted_on_first_gained() {
+    let c = coord();
+    c.open_softkeyboard(None);
+    c.softkeyboard_host_pid.store(0, Ordering::Relaxed);
+    expire_focus_guard(&c);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 42 });
+    assert!(c.softkeyboard_is_open());
+    assert_eq!(c.softkeyboard_host_pid.load(Ordering::Relaxed), 42);
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 42 });
+    assert!(c.softkeyboard_is_open());
+    c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Gained { pid: 43 });
+    assert!(!c.softkeyboard_is_open());
+}
+
+/// 竞态兜底：关闭后残留的钉住标志，在下次打开时必须清掉。
+#[test]
+fn open_always_starts_unpinned() {
+    let c = coord();
+    c.softkeyboard_pinned.store(true, Ordering::Relaxed);
+    c.open_softkeyboard(None);
+    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
+}
+
+/// 开启时按活动 token 高 32 位记宿主 pid——接线本身，不是手工 store。
+#[test]
+fn open_records_host_pid_from_active_token() {
+    let c = coord();
+    c.push_server.set_active_token((777u64 << 32) | 5);
+    c.open_softkeyboard(None);
+    assert_eq!(c.softkeyboard_host_pid.load(Ordering::Relaxed), 777);
+}
+
+#[test]
+fn pin_toggle_tells_the_ui() {
+    let (c, rx) = coord_with_ui();
+    c.open_softkeyboard(None);
+    while rx.try_recv().is_ok() {}
+    c.toggle_softkeyboard_pin();
+    let cmds: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        cmds.iter()
+            .any(|m| matches!(m, UiCommand::SoftKeyboardPinned(true))),
+        "应通知 UI 钉住: {cmds:?}"
+    );
+}
+
+#[test]
+fn pin_is_ignored_while_closed() {
+    let c = coord();
+    assert!(!c.toggle_softkeyboard_pin());
+    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
 }
 
 #[test]
@@ -323,7 +507,9 @@ fn every_close_path_clears_the_toolbar_icon() {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) =
                     Some(std::time::Instant::now() - crate::handle_menu::MENU_FOCUS_GUARD * 2);
-                c.close_softkeyboard_on_focus_change("focus_lost");
+                c.close_softkeyboard_on_focus_change(SoftKbFocusSignal::Lost(
+                    FocusLostReason::Thread,
+                ));
             }),
         ),
         (

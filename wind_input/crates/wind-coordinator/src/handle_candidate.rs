@@ -413,6 +413,17 @@ fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usi
     }
 }
 
+/// 「固定到第 N 位」给不给：英文引擎（英文方案、临英）不给——头部候选（原文、大小写变形、
+/// 被挪进头部的词库词）在 shadow 之后才插入，名次会偏头部条数。菜单与写端同用，引擎类型取自
+/// `CandidateOpScope`（按引擎类型判，自建的英文类方案 id 不叫 `english` 也认得）。
+pub(crate) fn pin_at_offered(engine_type: Option<wind_engine::EngineType>) -> bool {
+    engine_type != Some(wind_engine::EngineType::English)
+}
+
+/// 单字母重复上屏项（`refill_candidates` 插在首位）的 `natural_order`，调位口径据它认出这一项
+/// （见 `candidate_grid::inserted_after_shadow`）。
+pub(crate) const LEADING_REPEAT_ORDER: i32 = -1;
+
 /// 候选列表里**唯一的非 emoji 扩展候选**；不足一条或多于一条都返回 `None`。
 ///
 /// # 为什么抽成纯函数
@@ -919,11 +930,9 @@ impl Coordinator {
     /// 主开关 `learning.freq.enabled` 关闭则完全不重排（修"配置说关、代码却排"的潜在 bug）。
     /// 引擎类型分流：码表/混输走永久 used-first（§3），纯拼音走衰减软置前（§4）。
     /// 注：每候选一次 redb 点查（mmap 微秒级）；后续可下沉到引擎排序层。
-    pub(crate) fn apply_freq_rerank(&self, candidates: &mut [Candidate], code: &str) {
-        self.apply_freq_rerank_in(None, candidates, code);
-    }
-
-    /// 同 [`Self::apply_freq_rerank`]，但可指定**生效方案**（特殊模式用）。
+    ///
+    /// `schema_override` 指定**生效方案**（特殊模式用；`None` = 活跃方案）。生产路径经
+    /// `postprocess::run_passes` 调用。
     ///
     /// ★ 读端的方案必须与写端 [`Self::record_selection_in`] 取自同一处
     /// （[`Self::effective_data_schema`]），否则「写进 qsym、读的是 wubi86」——
@@ -933,6 +942,26 @@ impl Coordinator {
         schema_override: Option<&str>,
         candidates: &mut [Candidate],
         code: &str,
+    ) {
+        self.apply_freq_rerank_with_extra(
+            schema_override,
+            candidates,
+            code,
+            std::collections::HashMap::new(),
+        );
+    }
+
+    /// 同 [`Self::apply_freq_rerank_in`]，另并入调用方给的**外部热度记录**（按候选文本）。
+    ///
+    /// 给不在词频表里、却有自己使用次数的候选用——快捷输入历史并进英文段时借这里与英文词
+    /// 同一把尺比热度（见 `quick_history::quick_history_english_pool`）。外部记录与词频表
+    /// 记录同键时以外部为准（历史候选不会同时是词库词，调用方已去重）。
+    pub(crate) fn apply_freq_rerank_with_extra(
+        &self,
+        schema_override: Option<&str>,
+        candidates: &mut [Candidate],
+        code: &str,
+        extra: std::collections::HashMap<String, FreqRecord>,
     ) {
         let Some(store) = &self.store else {
             return;
@@ -1033,7 +1062,7 @@ impl Coordinator {
         let found = store.get_freq_batch(&probe).unwrap_or_default();
         // 只为**命中**的候选 clone 文本：五笔单字母下 78 个候选往往只有个位数有词频记录，
         // 先收一份全量文本副本再筛是白 clone 七十多次。
-        let recs: std::collections::HashMap<String, FreqRecord> = rec_keys
+        let mut recs: std::collections::HashMap<String, FreqRecord> = rec_keys
             .into_iter()
             .zip(found)
             .filter_map(|(t, r)| match r {
@@ -1041,6 +1070,7 @@ impl Coordinator {
                 _ => None,
             })
             .collect();
+        recs.extend(extra);
         if recs.is_empty() {
             return;
         }
@@ -1303,7 +1333,7 @@ impl Coordinator {
         Self::main_path_candidate_limit(
             self.engine_mgr.current_engine_type(),
             input,
-            crate::handle_assoc::use_mobile_overrides(),
+            self.profile.pinyin_single_letter_limit,
         )
     }
 
@@ -1323,16 +1353,17 @@ impl Coordinator {
     pub(crate) fn main_path_candidate_limit(
         engine_type: Option<wind_engine::engine::EngineType>,
         input: &str,
-        mobile: bool,
+        single_letter_limit: Option<usize>,
     ) -> usize {
         let base = Self::initial_candidate_limit_of(engine_type, input);
-        if mobile
-            && engine_type == Some(wind_engine::engine::EngineType::Pinyin)
-            && input.chars().count() == 1
-        {
-            base.min(MOBILE_PINYIN_SINGLE_LIMIT)
-        } else {
-            base
+        match single_letter_limit {
+            Some(limit)
+                if engine_type == Some(wind_engine::engine::EngineType::Pinyin)
+                    && input.chars().count() == 1 =>
+            {
+                base.min(limit)
+            }
+            _ => base,
         }
     }
 
@@ -1437,6 +1468,9 @@ impl Coordinator {
                         for (display, command_src) in items {
                             let mut c = cand.clone();
                             c.text = display;
+                            // 组成员标记：主路汇总全部来源后据此判重码、必要时折回组名候选。
+                            c.group_name = name.clone();
+                            c.group_template = cand.text.clone();
                             if let Some(src) = command_src {
                                 c.phrase_template = src;
                                 c.is_command = true;
@@ -1458,6 +1492,104 @@ impl Coordinator {
         expanded
     }
 
+    /// `$SS`/`$AA` 在**精确码**下的展开态判定。
+    ///
+    /// 规则（前缀匹配恒折叠、不在此处理——那是 `lookup_prefix` / `finalize_candidates` 的前缀臂）：
+    /// - 全码匹配且**无重码**（同码无别的候选、也只有这一组）→ 自动展开成员；
+    /// - 全码匹配但**有重码** → 不自动展开，每组折回一条组名候选（`is_group`），用户选中后
+    ///   才展开；展开靠 `expanded_group` 记录，且只列该组成员（二级选择）。
+    ///
+    /// 为什么重码时不展开：成员动辄十几条，整组涌进候选页会把同码的常规候选挤出首页
+    /// （`zzbd` 既是标点组又有码表词时，词被淹没）。折叠后组名占一个位置，选了才进组。
+    ///
+    /// 「重码」= 另有一条**同码精确候选**（见 `competes_with_group`）：码表精确词 / 精确码
+    /// 短语 / 同码的其他精确命令。前缀补全、部分消费候选、以及拼音域的**普通拼音候选**
+    /// （整句、简拼词、简拼回退补条——组码在拼音型方案下天然是简拼形态，泛在重码是无
+    /// 信息量的常态）都不算。组码是用户精心设计的缩写，拼音型方案下恒让位，优先保证
+    /// 短语全码自动展开；码表域的具体同码词冲突（如 `zzbd` 既有标点组又有码表词）仍折叠。
+    pub(crate) fn resolve_group_expansion(
+        expanded: Option<&(String, String)>,
+        input: &str,
+        codetable_mode: bool,
+        candidates: Vec<Candidate>,
+    ) -> Vec<Candidate> {
+        let is_member = |c: &Candidate| !c.is_group && !c.group_template.is_empty();
+        if !candidates.iter().any(is_member) {
+            return candidates;
+        }
+        // 用户已选中某组：只列该组成员。组源对不上（词库被改、组被禁用）则走常规判定。
+        if let Some((code, key)) = expanded
+            && code == input
+            && candidates
+                .iter()
+                .any(|c| is_member(c) && c.group_template == *key)
+        {
+            return candidates
+                .into_iter()
+                .filter(|c| is_member(c) && c.group_template == *key)
+                .collect();
+        }
+        let mut keys: Vec<&str> = Vec::new();
+        for c in candidates.iter().filter(|c| is_member(c)) {
+            if !keys.contains(&c.group_template.as_str()) {
+                keys.push(&c.group_template);
+            }
+        }
+        let competitors = candidates
+            .iter()
+            .filter(|c| !is_member(c) && Self::competes_with_group(c, input, codetable_mode))
+            .count();
+        if keys.len() == 1 && competitors == 0 {
+            return candidates;
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(candidates.len());
+        for c in candidates {
+            if !is_member(&c) {
+                out.push(c);
+                continue;
+            }
+            if !seen.insert(c.group_template.clone()) {
+                continue;
+            }
+            // 以首个成员为底折回组名候选：保留来源/权重/精确档标志，抹掉成员自带的命令与文本。
+            let mut g = c;
+            g.text = g.group_name.clone();
+            g.is_group = true;
+            g.is_group_member = false;
+            g.is_command = false;
+            g.group_code = input.to_string();
+            g.phrase_template = if g.is_phrase {
+                g.group_template.clone()
+            } else {
+                String::new()
+            };
+            out.push(g);
+        }
+        out
+    }
+
+    /// 候选是否与「当前输入码的组」构成重码：只认**同码精确候选**。
+    /// 码表精确词与精确码短语都标 `is_exact_code`；前缀枚举出来的短语导航（组导航、
+    /// 命令导航、静态前缀命中）、前缀补全不算。
+    ///
+    /// 拼音域（全拼/双拼/混输的拼音侧，`codetable_mode=false`）的**普通拼音候选一律不算
+    /// 竞争**——曾按「非前缀补全 + 消费整串」判，但简拼形态的组码在那套判据下恒有同码
+    /// 简拼词/回退补条（任意声母组合都能组句），折叠变成常态，短语全码自动展开失效。
+    /// 组码是用户精心设计的缩写，恒让位泛化拼音预测，保证命令短语优先使用。
+    fn competes_with_group(c: &Candidate, input: &str, codetable_mode: bool) -> bool {
+        if c.is_group && c.group_code != input {
+            return false;
+        }
+        if c.is_command && !c.group_code.is_empty() && c.group_code != input {
+            return false;
+        }
+        if c.is_exact_code {
+            return true;
+        }
+        codetable_mode || c.is_prefix || c.is_phrase
+    }
+
     pub(crate) fn build_candidates(
         &self,
         state: &mut State,
@@ -1469,6 +1601,13 @@ impl Coordinator {
         // 这是**唯一**的失效点：`input_buffer.clear()` 有十余个散落调用点，逐个接线必漏一处；
         // 按前缀关系统一淘汰后，缓冲清空、光标中间编辑、方案切换全被这一条覆盖。
         short_code_yield::evict_stale(&mut state.shortcode_tops, &state.input_buffer);
+        if state
+            .expanded_group
+            .as_ref()
+            .is_some_and(|(code, _)| *code != state.input_buffer)
+        {
+            state.expanded_group = None;
+        }
         // 分段上屏进行中**且最后一段来自拼音选词**：剩余编码强制按混输方案的拼音子方案转换，
         // 避免混输让五笔抢首选（你↑选后 hao→虚）。拼音方案 id 取当前混输方案的
         // [engine.mixed].secondary_schema（如 wubi86_pinyin → "pinyin"）。注意不用全局
@@ -1617,7 +1756,15 @@ impl Coordinator {
                 let is_system = hit.is_system;
                 // 稳定 id 取**模板原文**：text 可能是求值结果（date/time/clip），逐日变化。
                 let cand_id = Self::phrase_cand_id(&state.input_buffer, &hit.source_text);
+                // `$SS`/`$AA` 精确码成员：带上组标记（见 `resolve_group_expansion`）。
+                let (group_name, group_template, is_group_member) = match &hit.group {
+                    Some(name) => (name.clone(), hit.source_text.clone(), true),
+                    None => Default::default(),
+                };
                 candidates.push(Candidate {
+                    group_name,
+                    group_template,
+                    is_group_member,
                     // text 存**完整原文，含真换行**——它就是上屏文本，不得在此改写。
                     //
                     // 这里曾调 `clamp_candidate_display` 做「一行化」（换行/制表→空格），
@@ -1707,7 +1854,10 @@ impl Coordinator {
             // 补全候选塞进来（见 `ConvertResult::completion_hint`），故这个「空」判得准。
             // 不设码长闸门（论坛 t302）：满码长乃至超码长空码也补，与引擎侧 `completion_hints` 同口径。
             let complete_fallback = exact_only && ct.single_code_complete && candidates.is_empty();
-            let prefix_hits = if !exact_only || complete_fallback {
+            // `input.phrase.prefix_match` 关闭前缀列举（GH#264）：只留上面的精确码短语。空码补全兜底
+            // （`complete_fallback`）是精确匹配自己的功能，不受它管。
+            let prefix_match = self.rt().config.input.phrase.prefix_match;
+            let prefix_hits = if (prefix_match && !exact_only) || complete_fallback {
                 phrases.lookup_prefix(&state.input_buffer, &recent, min_prefix, &phrase_scope)
             } else {
                 Vec::new()
@@ -1815,6 +1965,16 @@ impl Coordinator {
             candidates.retain(|c| !codetable_composed(c));
             state.preedit_codetable_body.clear();
         }
+        // `$SS`/`$AA` 精确码展开态：**所有来源都汇齐之后**才能判重码（词库文件里的组、
+        // 短语库里的组、同码码表词条分属三条通路，任何一条单独都看不全）。
+        if wildcard_pattern.is_none() {
+            candidates = Self::resolve_group_expansion(
+                state.expanded_group.as_ref(),
+                &state.input_buffer,
+                self.engine_mgr.is_codetable(),
+                candidates,
+            );
+        }
         let mixed =
             self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::Mixed);
         // 供跨来源档位判「消费整串」与「码 == 输入」。缓冲恒 ASCII，字节长度与 `consumed_length` 同域。
@@ -1849,7 +2009,11 @@ impl Coordinator {
         let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut deduped: Vec<Candidate> = Vec::with_capacity(candidates.len());
         for c in std::mem::take(&mut candidates) {
-            let key: std::borrow::Cow<str> = if dedup_by_code {
+            let key: std::borrow::Cow<str> = if c.is_command {
+                // 命令候选的身份是「显示名 + 动作」：`$SS` 内嵌的 `$CC` 成员常与别的候选
+                // 同名（显示名只是标签），仅按文本去重会让命令被同名候选吞掉、点不出来。
+                format!("{}\u{2}{}", c.text, c.phrase_template).into()
+            } else if dedup_by_code {
                 format!("{}\u{1}{}", c.text, c.code).into()
             } else {
                 c.text.as_str().into()
@@ -1862,23 +2026,23 @@ impl Coordinator {
             deduped.push(c);
         }
         candidates = deduped;
-        // 检索范围过滤（按模式裁剪；is_common 已由上面的 mark_common 填好）
-        self.apply_filter(state, &mut candidates);
-        // 单字输入过滤（只出单字）。与上一行正交，见 `apply_single_char`。
-        // ⚠️ 位置钉在 `apply_shadow` **之前**：shadow 的位次记的是用户所见的列表。
-        self.apply_single_char(state, &mut candidates);
-        // 用户词频重排（独立维度，used-first，绝不改 weight；frequency.md §3）
-        //
-        // ⚠️ 自动补充的候选（`is_scope_filtered`，恒在末尾）**排除在重排之外**：沉底是硬约束。
-        // 否则用户误选一次补充来的生僻字，used-first 就会把它顶到常用字前面——码表侧
-        // **不衰减**，误选一次即永久翻转（见 codetable-freq-short-code-protection.md），
-        // 与「自动补充不影响原有排序」的承诺直接相悖。
-        // 用 take_while 而非 partition_point：不预设列表整体有序，只截断到首个补充候选为止。
-        let rerank_len = candidates
-            .iter()
-            .take_while(|c| !c.is_scope_filtered)
-            .count();
-        self.apply_freq_rerank(&mut candidates[..rerank_len], &state.input_buffer);
+        // 检索范围过滤 → 单字输入 → 用户词频重排（`postprocess::profile::MAIN_PRE`）。
+        // - 过滤按模式裁剪；is_common 已由上面的 mark_common 填好。
+        // - 单字与过滤正交；位置钉在 shadow **之前**：shadow 的位次记的是用户所见的列表。
+        // - 调频是独立维度（used-first，绝不改 weight；frequency.md §3）。自动补充的候选
+        //   （`is_scope_filtered`，恒在末尾）**排除在重排之外**：沉底是硬约束。否则用户误选一次
+        //   补充来的生僻字，used-first 就会把它顶到常用字前面——码表侧**不衰减**，误选一次即
+        //   永久翻转（见 codetable-freq-short-code-protection.md）。
+        self.run_passes(
+            state,
+            &mut candidates,
+            crate::postprocess::profile::MAIN_PRE,
+            &crate::postprocess::PassCtx {
+                owner: None,
+                freq_code: Some(&state.input_buffer),
+                shadow_code: None,
+            },
+        );
         // 英文候选定位：排在「中文常用精确解」之后、其余候选之前。
         // **必须在词频重排之后**——那是最后一道整体排序，放它之前会被位置提升搅乱
         // （真机现象：打 `hen` 英文第一、打 `shi` 英文不在第一，差别只是用户对哪个音节
@@ -1910,7 +2074,7 @@ impl Coordinator {
             if via_mixed_pinyin {
                 1
             } else {
-                usize::from(self.rt().config.schema.pinyin.sentence_count)
+                self.active_sentence_count()
             },
         );
         // 纠错候选不占首选（D6）：放在全部重排之后、shadow 之前——用户置顶仍有最终话语权。
@@ -1928,15 +2092,34 @@ impl Coordinator {
         // ⚠️ 「优先级最高」这句现在由**返回值**兑现，而不再靠「排在最后」：出简让全排在它
         // 之后（那是 `apply_freq_rerank` 强加的次序，见下），若不额外让路就会反过来覆盖
         // 用户的调整。`user_pinned` 就是那条让路判据，取值只此一处。
-        let mut user_pinned = self.apply_shadow(&mut candidates, &shadow_code);
+        let mut user_pinned = self
+            .run_passes(
+                state,
+                &mut candidates,
+                crate::postprocess::profile::MAIN_SHADOW,
+                &crate::postprocess::PassCtx {
+                    owner: None,
+                    freq_code: None,
+                    shadow_code: Some(&shadow_code),
+                },
+            )
+            .user_pinned;
+        let pool_ctx = crate::postprocess::PassCtx {
+            owner: None,
+            freq_code: None,
+            shadow_code: Some(&shadow_code),
+        };
         // 整句池走**同一条过滤链**（同补全池的理由）：它直接拷自引擎结果，不过滤的话切换键能
         // 把用户隐藏掉的整句、被检索范围滤掉的生僻字整句换回来（审查查出）。shadow 的置顶会
         // 挪动次序，过完按名次排回——池子的顺序就是名次。
         if !state.sentence_pool.is_empty() {
             let mut pool = std::mem::take(&mut state.sentence_pool);
-            self.apply_filter(state, &mut pool);
-            self.apply_single_char(state, &mut pool);
-            self.apply_shadow(&mut pool, &shadow_code);
+            self.run_passes(
+                state,
+                &mut pool,
+                crate::postprocess::profile::SENTENCE_POOL,
+                &pool_ctx,
+            );
             pool.sort_by_key(|c| c.sentence_rank);
             state.sentence_pool = pool;
         }
@@ -1965,15 +2148,19 @@ impl Coordinator {
                 // 与最终列表同一套排序 ⇒ 同样先补 is_common（否则混输档位键在此退化为空操作，
                 // 上面「本会显示在最前的那一条」这句承诺就不成立了）。
                 self.mark_common(&mut completion_pool);
-                self.apply_filter(state, &mut completion_pool);
-                // 补全池走**同一条**过滤链：开了单字若不滤，主列表被滤空之后会从补全池
-                // 补一条词回来——用户看到的是「开了单字模式还是冒出词」。
-                self.apply_single_char(state, &mut completion_pool);
-                // 补全池必须走同一条过滤链、**同一个码**：主列表隐藏掉的词若在这里被原码
-                // 补回来，用户看到的就是「删了又冒出来」。
-                // 返回值并进 `user_pinned`：补全收口只在主列表为空时走，那时上面那次
-                // `apply_shadow` 因空列表直接返回 false，判据全在这一次里。
-                user_pinned |= self.apply_shadow(&mut completion_pool, &shadow_code);
+                // 补全池走**同一条**过滤链（`COMPLETION_POOL`）、**同一个码**：开了单字若不滤，
+                // 主列表被滤空之后会从补全池补一条词回来；主列表隐藏掉的词若在这里被原码补回来，
+                // 用户看到的就是「删了又冒出来」。
+                // 返回值并进 `user_pinned`：补全收口只在主列表为空时走，那时主列表那次 shadow
+                // 因空列表直接返回 false，判据全在这一次里。
+                user_pinned |= self
+                    .run_passes(
+                        state,
+                        &mut completion_pool,
+                        crate::postprocess::profile::COMPLETION_POOL,
+                        &pool_ctx,
+                    )
+                    .user_pinned;
                 completion_pool.sort_by(|a, b| {
                     candidate_display_order(a, b, ignore_weight, mixed, &input_str)
                         .then_with(|| a.text.cmp(&b.text))
@@ -2059,8 +2246,18 @@ impl Coordinator {
                 && raw.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
             let raw_mode =
                 crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
-            let want_raw =
-                crate::english_candidates::wants_raw_candidate(raw_mode, raw, &candidates);
+            let blocked = self.blocked_words_in(
+                &self
+                    .engine_mgr
+                    .data_schema_id(&self.engine_mgr.active_schema_id()),
+            );
+            let want_raw = crate::english_candidates::wants_raw_candidate(
+                raw_mode,
+                raw,
+                &candidates,
+                blocked.as_deref(),
+                follow_case,
+            );
             // 大小写变形跟着原文走：`ip'pro` 连原文都不产，`IP'PRO` 更没有意义；而
             // `o'clock` 保住了原文，它的变形照旧有用（想打全大写）。判据统一成
             // 「原文产不产」，不另立一套。
@@ -2479,11 +2676,9 @@ impl Coordinator {
     }
 
     /// 应用 Shadow 规则：先按 deleted 过滤，再把 pinned 按目标位置重排。
-    pub(crate) fn apply_shadow(&self, candidates: &mut Vec<Candidate>, code: &str) -> bool {
-        self.apply_shadow_in(None, candidates, code)
-    }
-
-    /// 同 [`Self::apply_shadow`]，但可指定**生效方案**（特殊模式用）。
+    ///
+    /// `schema_override` 指定**生效方案**（特殊模式用；`None` = 活跃方案）。生产路径经
+    /// `postprocess::run_passes` 调用。
     ///
     /// ⚠️ 守卫是 `candidates.is_empty()` 而**不是** `code.is_empty()`：空码是合法键位
     /// （shadow key = `"{schema}\0{code}"`，空 code 与任何非空码互不冲突），特殊模式的
@@ -2510,11 +2705,22 @@ impl Coordinator {
             return false;
         };
         // 候选调整按 data_schema_id 归属（拼音族折叠共享；码表/混输各自独立）。
-        let schema = self.engine_mgr.data_schema_id(
-            &schema_override
-                .map(str::to_string)
-                .unwrap_or_else(|| self.engine_mgr.active_schema_id()),
-        );
+        let schema_id = schema_override
+            .map(str::to_string)
+            .unwrap_or_else(|| self.engine_mgr.active_schema_id());
+        let schema = self.engine_mgr.data_schema_id(&schema_id);
+        // 「屏蔽这个词」：按词库原文、不论编码与来源（引擎 / 引擎管理器已在截断前滤过一遍，这里
+        // 兜住协调器自己并进来的候选，如短语、快捷输入历史、英文词频召回）。拼音 / 英文数据方案
+        // 管全部候选；混输只管拼音来源——拼音段与拼音方案共用屏蔽，码表段的同文词不受影响。
+        if let Some(blocked) = self.blocked_words_in(&schema) {
+            candidates.retain(|c| !blocked.contains(c.freq_text()));
+        } else if self.engine_mgr.schema_engine_type(&schema_id).as_deref() == Some("mixed")
+            && let Some(blocked) = self.blocked_words_in(wind_engine::manager::PINYIN_DATA_SCHEMA)
+        {
+            candidates.retain(|c| {
+                c.source != CandidateSource::Pinyin || !blocked.contains(c.freq_text())
+            });
+        }
         let rec = match store.get_shadow_rules(&schema, code) {
             Ok(Some(r)) => r,
             _ => return false,
@@ -2532,6 +2738,22 @@ impl Coordinator {
             })
             .collect();
         wind_candidate::apply_shadow(candidates, &rec.deleted, &pinned) > 0
+    }
+
+    /// 数据方案被「屏蔽这个词」的文字（候选调整里 `code = *` 的删除行，只有拼音与英文有）；
+    /// 其它方案、或没有屏蔽词时 `None`。按键路径：只读内存（store 按表内容缓存）。
+    pub(crate) fn blocked_words_in(
+        &self,
+        data_schema: &str,
+    ) -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
+        if !wind_store::shadow::supports_block(data_schema) {
+            return None;
+        }
+        self.store
+            .as_ref()?
+            .blocked_words(data_schema)
+            .ok()
+            .filter(|set| !set.is_empty())
     }
 
     /// 简繁 1对多变体展开：s2t 开启时，对最终候选列表中的**单字**候选，紧跟其后插入
@@ -2588,6 +2810,84 @@ impl Coordinator {
 
     /// 根据输入缓冲更新候选（动态分级加载：首次小批量，翻页到边界再扩展）。
     /// 返回输入结局（全码自动上屏 / 满码空码清空）；多数调用方忽略，仅正向输入字母时消费。
+    /// 光标限定查询的截断位（字节）：`Some(n)` = 本轮候选只按 `input_buffer[..n]` 去问引擎。
+    ///
+    /// 手机端的拼音「中间修正」：光标挪到某个音节后面，候选就只剩这个音节（及其前缀）的字，
+    /// 选中后上屏、后半截留在编码栏续打（复用分步上屏，见 `partial`）。
+    ///
+    /// ⚠️ **默认关**（[`cursor_by_syllable`]）：电脑端 ←/→ 移光标**不改候选**是既有行为
+    /// （`State::input_cursor_pos` 注释：光标不参与引擎查询）。这是给电脑端「移光标改拼音」准备的
+    /// 机制，打开它之前不会改变任何现有行为；手机端不走它，用 [`crate::leading_reading`]。
+    /// 电脑端接入时只需调 [`set_cursor_by_syllable`]（由配置项驱动），下游无需再动。
+    /// 仅限普通输入的拼音方案；overlay 模式（临时拼音等）与码表方案不进。
+    fn query_cut(&self, state: &State) -> Option<usize> {
+        cut_position(
+            cursor_by_syllable(),
+            &state.input_buffer,
+            state.input_cursor_pos,
+            Self::overlay_caret_parts(state).is_none() && self.engine_mgr.is_pinyin(),
+        )
+    }
+
+    /// [`Self::build_candidates`] 的光标感知入口：光标在编码中间时只查光标前那一段。
+    ///
+    /// 做法是**临时**把缓冲截到光标处喂给引擎，查完立刻还原——引擎、短语、词频这几十处读
+    /// `input_buffer` 的地方全都看到一致的「前缀」，一处不用改。还原后补两件事：
+    /// - 候选的 `consumed_length` 一律夹到截断位。引擎对「吃掉整个前缀」的候选常标 0（未标注）
+    ///   或等于前缀长，选词那头会把它们当成「整串匹配」整体上屏、连后半截一起吞掉；夹成截断位后
+    ///   必走分步上屏，后半截留下来。
+    /// - 组合区拆分串换成**整串**的切分（`fang'xiang`），否则编码栏只剩光标前半截。
+    pub(crate) fn build_candidates_at_cursor(
+        &self,
+        state: &mut State,
+        limit: usize,
+    ) -> (usize, InputOutcome) {
+        // 手机端「首单元读法」：选了非默认读法时，按改写后的查询串问引擎（见 `leading_reading`）。
+        if let Some(applied) = state
+            .leading
+            .clone()
+            .filter(|a| a.buffer == state.input_buffer)
+        {
+            return self.build_candidates_with_leading(state, limit, &applied);
+        }
+        let Some(cut) = self.query_cut(state) else {
+            return self.build_candidates(state, limit);
+        };
+        let full = state.input_buffer.clone();
+        let full_cased = state.input_buffer_cased.clone();
+        let cased_ok = preedit_cursor::cased_is_valid(&full, &full_cased);
+        state.input_buffer.truncate(cut);
+        if cased_ok {
+            state.input_buffer_cased.truncate(cut);
+        }
+        let result = self.build_candidates(state, limit);
+        state.input_buffer = full;
+        state.input_buffer_cased = full_cased;
+        for c in &mut state.candidates {
+            if c.consumed_length == 0 || c.consumed_length > cut {
+                c.consumed_length = cut;
+            }
+        }
+        let body = self
+            .engine_mgr
+            .convert(&state.input_buffer, 1)
+            .preedit_pinyin;
+        if !body.is_empty() {
+            // 候选自带的切分（`meta.preedit_split`）只覆盖被查询的前缀，且显示时优先于整串拆分：
+            // 不补后半截，编码栏就只剩光标前那几个字母（`fang` 吞掉 `xiang`）。
+            let tail = tail_after_letters(&body, cut);
+            if !tail.is_empty() {
+                for c in &mut state.candidates {
+                    if let Some(own) = c.meta.preedit_split.as_deref() {
+                        c.meta.preedit_split = Some(format!("{own}'{tail}").into());
+                    }
+                }
+            }
+            state.preedit_split_body = body;
+        }
+        result
+    }
+
     pub(crate) fn update_candidates(&self, state: &mut State) -> InputOutcome {
         let outcome = self.refill_candidates(state);
         self.grid_resume(state);
@@ -2595,6 +2895,10 @@ impl Coordinator {
     }
 
     fn refill_candidates(&self, state: &mut State) -> InputOutcome {
+        // 联想窗被新组合替换（联想态下打字母不经 `exit_assoc`）：注释翻转随旧窗作废。
+        if state.assoc_active() {
+            state.clear_comment_flips();
+        }
         state.candidates.clear();
         state.preedit = state.input_buffer.clone();
         state.preedit_split_body.clear();
@@ -2659,7 +2963,7 @@ impl Coordinator {
             self.initial_candidate_limit(&state.input_buffer)
         };
         let t0 = std::time::Instant::now();
-        let (engine_count, outcome) = self.build_candidates(state, limit);
+        let (engine_count, outcome) = self.build_candidates_at_cursor(state, limit);
         let t_build = t0.elapsed();
         // 引导字母的「重复上屏」：输入恰为单个引导字母时，把最近一次上屏内容注入候选顶部
         // （对齐 Go），供「引导键 + 选词」重复上一次输入。资格判定见
@@ -2674,7 +2978,7 @@ impl Coordinator {
                 0,
                 Candidate {
                     text: last,
-                    natural_order: -1,
+                    natural_order: LEADING_REPEAT_ORDER,
                     ..Default::default()
                 },
             );
@@ -2812,7 +3116,7 @@ impl Coordinator {
         }
         let prev_limit = state.candidate_limit;
         // 翻页扩展不消费全码自动上屏（仅正向输入字母时才上屏）。
-        let (engine_count, _) = self.build_candidates(state, new_limit);
+        let (engine_count, _) = self.build_candidates_at_cursor(state, new_limit);
         // 重建后立刻重新展开变体（列表整份重建，变体须随之重展）。
         self.expand_s2t_variants(state);
         // 展开态正在按分类筛选：重建出来的是完整列表，重新筛一遍（见 `grid_reapply_filter`）。
@@ -3086,49 +3390,78 @@ impl Coordinator {
     /// `separator` 本身也按方案取（见 `EngineManager::pinyin_separator_mode_of`）：
     /// 临拼引用哪个拼音方案，就用那个方案生效的分隔符策略。
     pub(crate) fn manual_separator_key_of(&self, key_code: u32, schema_id: &str) -> bool {
+        self.manual_separator_vk_of(schema_id) == Some(key_code)
+    }
+
+    /// 指定方案此刻的手动分隔符**是哪个键**；方案不支持 / 策略为 `none` / 没有键可用时 `None`。
+    ///
+    /// 「是不是分隔符」（[`Self::manual_separator_key_of`]）与「宿主界面该给哪个键」
+    /// （[`Self::manual_separator_char`]，手机的「分词」键用）都从这里取，**单一真相源**：
+    /// 键位判定有两份就会出现界面发 `'` 而引擎认反引号，且完全静默。
+    ///
+    /// 规则：
+    /// - 拼音族、码表**整句**放行，其余引擎 `None`（整句是分隔符的消歧手段：二简「旬 qj」
+    ///   与一简「我 q」+「是 j」击键串同形，打分无从区分）。
+    /// - `none` → `None`；`quote` → `'`；`backtick` → 反引号。显式模式尊重用户指定值。
+    /// - `auto`（默认 / 未知值）依次找：
+    ///   1. `'` 空闲（不是选词键、方案 `[key_actions]` 没绑）→ `'`；
+    ///   2. 反引号空闲（同样两项）→ 反引号；
+    ///   3. 都不空闲：桌面**不启用**；移动端夺取 `'`（见下）。
+    ///
+    /// ★ 第 3 步桌面与移动端分叉，是刻意的。桌面的 `auto` **不得动选词键**：用户的三选键
+    /// 是实打实的肌肉记忆，双拼（`'` 三选、反引号辅助码）与五笔整句（`'` 三选、反引号
+    /// 临时拼音）下 `auto` 因此不启用，要断词显式写 `separator = "quote"`（或 `backtick`）。
+    /// 手机是触屏，候选靠点、`;` `'` 这两个选词键在软键盘上没有人去按，而「分词」键
+    /// 却需要一个出路，否则双拼、五笔整句下 ⇧ 无事可做。所以移动端 `auto` 夺取 `'`，
+    /// 分隔符臂本就排在选词分派之前，「收进缓冲」与「不再作选词键」是同一个判断的两面。
+    /// 移动端不愿丢它的写 `separator = "none"`。
+    ///
+    /// ⚠️ 两端都不夺 `[key_actions]` 已绑的键：那条绑定被夺后只剩一条 warn，用户看到
+    /// 「配了没反应」。
+    ///
+    /// 每次实时求值（不缓存），`separator`、`select_key_groups` 热更新即时生效。
+    /// 缓冲是否为空由调用方判定（空缓冲维持标点路径）。
+    ///
+    /// ★★ overlay 必须走 `_of(&schema)` 版本。临拼在纯五笔方案下引用的是拼音方案，而
+    /// `engine_mgr.is_pinyin()` 问的是**活跃**引擎（= 码表）⇒ 恒 false ⇒ 临拼下分隔符
+    /// 永远不生效，且完全静默。凡「按当前引擎类型决定行为」的判据，在 overlay 里都需要
+    /// 一个 `_of(&schema)` 版本。`separator` 本身也按方案取（见
+    /// `EngineManager::pinyin_separator_mode_of`）。
+    pub(crate) fn manual_separator_vk_of(&self, schema_id: &str) -> Option<u32> {
         use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
-        // 码表整句与拼音共用下面那套键位判定；两者都不成立时该键维持原本语义。
-        //
-        // ★ 双拼同样放行（原先在此早退，理由「buffer 会与 preedit 发散」）。发散那件事
-        // 已在引擎侧解决：`ShuangpinConverter::convert` 把 `'` 当配对硬边界自行消化，
-        // preedit 逐字节重建使手动与自动的分隔符合流，`consumed_length` 也把那一键算进去。
-        // 见 `docs/design/shuangpin-separator.md`。
-        //
-        // ⚠️ 放行的是**键位判定**，不是默认开启：双拼出厂 `separator = "none"`
-        // （反引号在双拼里归辅助码，见 `shuangpin.schema.toml`），要用得显式配成 `quote`。
+        let may_claim_quote = self.profile.separator_may_claim_quote;
         let pinyin_ok = self.engine_mgr.is_pinyin_of(schema_id);
         if !pinyin_ok && !self.engine_mgr.sentence_input_enabled_of(schema_id) {
-            return false;
+            return None;
         }
         match self.engine_mgr.pinyin_separator_mode_of(schema_id).as_str() {
-            "none" => false,
-            "quote" => key_code == VK_QUOTE,
-            "backtick" => key_code == VK_BACKTICK,
-            // auto（及其它未知值兜底）：挑一个当前**空闲**的符号键作分隔符。
-            //
-            // 两类占用都要避让：
-            //  ① 选词键——出厂 `semicolon_quote` 含 `'`，夺走它等于让三选不可用；
-            //  ② 本方案 `[key_actions]` 已绑的功能键——分隔符臂在按键裁决里排在 key_actions
-            //     之前，夺走的话那条绑定**只剩一条 warn 日志**，用户看到的是「配了没反应」。
-            //
-            // ★ 两个键都不空闲时 auto 退化成「不启用」。双拼正是这种情况：`'` 是选词键、
-            // 反引号出厂给了辅助码（`shuangpin.schema.toml`），于是双拼虽然支持分隔符，
-            // auto 下却不会自动占用任何键——要用得显式写 `separator = "quote"`。
-            //
-            // ⚠️ 这条避让**不能改成「双拼一律不给分隔符」**：那会让用户显式配的 `quote`
-            // 也一并失效，而显式模式的含义就是「我知道我在做什么」。判据的维度是
-            // 「这个键空不空闲」，不是「这是什么引擎」。
+            "none" => None,
+            "quote" => Some(VK_QUOTE),
+            "backtick" => Some(VK_BACKTICK),
             _ => {
-                let free = |vk: u32| {
-                    self.select_key_offset(vk).is_none()
-                        && self.bound_action_in_schema(vk, schema_id).is_none()
-                };
+                let bound = |vk: u32| self.bound_action_in_schema(vk, schema_id).is_some();
+                let free = |vk: u32| self.select_key_offset(vk).is_none() && !bound(vk);
                 if free(VK_QUOTE) {
-                    key_code == VK_QUOTE
+                    Some(VK_QUOTE)
+                } else if free(VK_BACKTICK) {
+                    Some(VK_BACKTICK)
+                } else if may_claim_quote && !bound(VK_QUOTE) {
+                    Some(VK_QUOTE)
                 } else {
-                    key_code == VK_BACKTICK && free(VK_BACKTICK)
+                    None
                 }
             }
+        }
+    }
+
+    /// 活跃方案的手动分隔符字符（`'` 或 `` ` ``），宿主界面据此决定「分词」键发什么；
+    /// `None` = 此刻没有分隔符，宿主不该摆分词键。见 [`Self::manual_separator_vk_of`]。
+    pub fn manual_separator_char(&self) -> Option<char> {
+        use wind_keys::keymap::{VK_BACKTICK, VK_QUOTE};
+        match self.manual_separator_vk_of(&self.engine_mgr.active_schema_id())? {
+            VK_QUOTE => Some('\''),
+            VK_BACKTICK => Some('`'),
+            _ => None,
         }
     }
 
@@ -3174,11 +3507,13 @@ impl Coordinator {
         // ★ 必须排在 `preedit_split_body.is_empty()` 那道守卫**之前**：码表方案下拼音
         // 拆分形态恒空，守卫会直接 return 原始码，后面的分支一条都走不到。
         // （混输方案下两者可能同时非空 —— 那时正是靠下面各分支按高亮候选各选各的。）
-        if wants_codetable_split(
-            &state.preedit_codetable_body,
-            state.candidates.get(self.highlighted_global_index(state)),
-        ) {
-            return &state.preedit_codetable_body;
+        let highlighted = state.candidates.get(self.highlighted_global_index(state));
+        if wants_codetable_split(&state.preedit_codetable_body, highlighted) {
+            // 整句 N-best：备选的切法与名次 1 往往不同，各条自带切分（`meta.preedit_split`），
+            // 高亮到谁显示谁的；没带的（逆切分）用引擎给的那一份。
+            return highlighted
+                .and_then(|c| c.meta.preedit_split.as_deref())
+                .unwrap_or(&state.preedit_codetable_body);
         }
         // 直接辅助码命中项：`前缀音节 + 空格 + 辅码`，让人看出末尾被当成了辅码。排在
         // 「分段上屏中恒拆分」那条之前：分段后剩余缓冲同样可以带辅码。
@@ -3477,7 +3812,17 @@ impl Coordinator {
         let (prefix, buffer) = match state.active {
             Some(ModeKind::TempPinyin) => (&state.temp_pinyin_prefix, &state.temp_pinyin_buffer),
             Some(ModeKind::Mix(_)) => (&state.mix_prefix, &state.mix_buffer),
-            _ => return,
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::AuxCode,
+            ) => return,
         };
         // 空缓冲时组合区只剩前缀，由各自的刷新函数写好，不在这里动。
         if buffer.is_empty() {
@@ -3503,7 +3848,15 @@ impl Coordinator {
                 self.sync_overlay_preedit_to_highlight(state);
                 return;
             }
-            Some(_) => return,
+            Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse,
+            ) => return,
         }
         let body = self.effective_preedit_body(state).to_string();
         // 用户按 Shift+字母打出的大写只在影子串里，此处投影回显示串（拼音拆分形态含引擎插入
@@ -3560,7 +3913,10 @@ impl Coordinator {
                 punct_char(data.key_code, shift)
                     .is_none_or(|ch| !self.temp_english_char_allowed(ch))
             }
-            _ => false,
+            None
+            | Some(ModeKind::Url | ModeKind::Email | ModeKind::Unicode | ModeKind::AuxCode) => {
+                false
+            }
         };
         self.apply_session_action(state, data, include_printable)
     }
@@ -3654,7 +4010,17 @@ impl Coordinator {
         match state.active {
             Some(ModeKind::Special(idx)) => self.special_schema(idx),
             Some(ModeKind::TempEnglish) => Some(ENGLISH_SCHEMA.to_string()),
-            _ => None,
+            None
+            | Some(
+                ModeKind::TempPinyin
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => None,
         }
     }
 
@@ -3735,7 +4101,14 @@ impl Coordinator {
             // 其余 overlay（临拼 / 混输 / 网址）没有独立词库落点：`effective_data_schema`
             // 对它们返回 None（2026-08-04 用户拍板，见其文档），放行会静默落回主方案。
             // 新增模式时**先补落点、再放行**，顺序不能反。
-            _ => return None,
+            Some(
+                ModeKind::TempPinyin
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => return None,
         };
         // 空码只在特殊模式（浏览态）合法；主输入路空码无候选。
         if code.is_empty() && !special {
@@ -3863,6 +4236,12 @@ impl Coordinator {
     ///
     /// 判据本体在 [`english_text_counts_as_input`]（纯函数，便于单测钉住短语反例）。
     ///
+    /// # 中文方案里的英文候选
+    ///
+    /// 码表 / 拼音主路径里来自英文词库的候选（`source == English`）跟随
+    /// `input.temp_english.commit_space`——与临英、快捷输入同属「中文里插一个英文词」。
+    /// 原码与短语不在此列（下一段的「非英文语境不会误中」仍对它们成立）。
+    ///
     /// ⚠️ 非英文**语境**不会误中：`english_space_enabled_in` 要么要求 `active_is_english()`
     /// （英文方案），要么要求 `state.active == TempEnglish`（临英 overlay），中文语境下两条
     /// 都不成立。（原文写「`english_space_enabled` 已经要求 `active_is_english()`」——
@@ -3885,7 +4264,18 @@ impl Coordinator {
         // `commit_temp_english_selected`，不再经本函数（此前走这里时拿主路的 `input_buffer`
         // 判原码，临英下恒空 ⇒ 原文与变形永不补空格，全角态也不转）。`_in` 仍保留：
         // 别的通用上屏点若在临英语境下调到这里，读的必须是临英那一份开关。
-        english_text_counts_as_input(source, text, input) && self.english_space_enabled_in(state)
+        if english_text_counts_as_input(source, text, input) && self.english_space_enabled_in(state)
+        {
+            return true;
+        }
+        // 中文方案主路径里混进来的英文词库候选（码表 / 拼音的英文候选）：同是「中文里插一个
+        // 英文词」，跟随临英那份开关，与临英、快捷输入一致。只认 `source == English`——原码、
+        // 短语不算；只在主路径（无 overlay）——快捷输入有自己的出口（`mix_english_space`），
+        // 走到这里会补两遍。
+        source == CandidateSource::English
+            && state.active.is_none()
+            && !self.engine_mgr.active_is_english()
+            && self.rt().config.input.temp_english.commit_space
     }
 
     /// 词频记账用的码——**码表与拼音/英文口径不同**，这是两类方案的语义差异。
@@ -3963,12 +4353,47 @@ impl Coordinator {
 
     /// 前缀导航候选选中：把输入缓冲补全到该组完整码并重查候选（展开成员/精确命令），
     /// 实现"敲 zz → 选标点 → 展开标点字符"的二级选择。返回新 preedit 显示文本。
-    pub(crate) fn complete_to_group_code(&self, state: &mut State, group_code: &str) -> String {
+    ///
+    /// `group_key` 是组的源文本（`$SS(...)`/`$AA(...)`），登记为「用户已选中展开」——
+    /// 重码折叠下重查时靠它展开该组（见 `State::expanded_group`）。
+    pub(crate) fn complete_to_group_code(
+        &self,
+        state: &mut State,
+        group_code: &str,
+        group_key: &str,
+    ) -> String {
         state.input_buffer = group_code.to_string();
+        state.expanded_group = Some((group_code.to_string(), group_key.to_string()));
         state.input_cursor_pos = state.input_buffer.len();
         let _ = self.update_candidates(state);
         self.notify_ui_update(state);
         state.preedit.clone()
+    }
+
+    /// 展开态退一级：用户选中折叠组后（`expanded_group`）按 Backspace，先回到折叠视图而不删码。
+    ///
+    /// 清掉展开登记并重查；重查后同码确实出现该组的折叠项才算退了一级（返回动作，吞掉按键）。
+    /// 否则（无重码，重查仍自动展开）返回 `None`，调用方按普通退格删字符，避免「死键」。
+    pub(crate) fn collapse_expanded_group(&self, state: &mut State) -> Option<KeyAction> {
+        if !self.rt().config.input.cmdbar.backspace_collapse_group {
+            return None;
+        }
+        let (code, _) = state.expanded_group.take()?;
+        if code != state.input_buffer {
+            return None;
+        }
+        let _ = self.update_candidates(state);
+        if !state
+            .candidates
+            .iter()
+            .any(|c| c.is_group && c.group_code == code)
+        {
+            return None;
+        }
+        let text = state.preedit.clone();
+        let caret_pos = self.composition_caret(state);
+        self.notify_ui_update(state);
+        Some(KeyAction::UpdateComposition { caret_pos, text })
     }
 
     pub(crate) fn commit_selected(
@@ -3993,7 +4418,13 @@ impl Coordinator {
         // 前缀导航候选：补全输入到该组完整码并重查展开（二级选择，不上屏组名）。
         if cand.is_group {
             let code = cand.group_code.clone();
-            let display = self.complete_to_group_code(state, &code);
+            // 组源文本：折叠的词库组记在 `group_template`，短语库的组导航记在 `phrase_template`。
+            let key = if cand.group_template.is_empty() {
+                cand.phrase_template.clone()
+            } else {
+                cand.group_template.clone()
+            };
+            let display = self.complete_to_group_code(state, &code, &key);
             return KeyAction::UpdateComposition {
                 caret_pos: display.chars().count() as u32,
                 text: display,
@@ -4304,8 +4735,8 @@ impl Coordinator {
             }
             "commit_and_input" => {
                 // 触发键字符按标点流水线转换（在提交前取，chinese_punct 等状态不受提交影响）。
-                let piece = self.convert_punct(state, key_char, prev_char);
                 let cand = state.candidates[hi].clone();
+                let piece = self.convert_punct_after(state, key_char, prev_char, &cand.text);
                 // 顶屏类出口：造词 / 6b 跟随 `input.top_commit_learn`。
                 let act = self.commit_selected_learn(
                     state,
@@ -4452,10 +4883,10 @@ impl Coordinator {
                 self.commit_selected(state, &cand, state.selected_index as i32)
             }
             "commit_and_input" => {
-                let piece = key_char
-                    .map(|c| self.convert_punct(state, c, prev_char))
-                    .unwrap_or_default();
                 let cand = state.candidates[hi].clone();
+                let piece = key_char
+                    .map(|c| self.convert_punct_after(state, c, prev_char, &cand.text))
+                    .unwrap_or_default();
                 let act = self.commit_selected(state, &cand, state.selected_index as i32);
                 Self::append_to_insert_text(act, &piece)
             }
@@ -4683,8 +5114,9 @@ impl Coordinator {
         preedit_cursor::keep_cased_tail(&state.input_buffer, &mut state.input_buffer_cased);
         state.input_cursor_pos = state.input_buffer.len(); // 顶码后余码续打，光标在余码末尾
         // 首选已上屏，余码是新的一次组合：不继承上一次的展开（按键入口那道「没有输入会话」
-        // 判不到——这一键按下时候选还在）。
+        // 判不到——这一键按下时候选还在）。注释翻转同理。
         state.grid_keep = false;
+        state.clear_comment_flips();
         let _ = self.update_candidates(state); // 余码候选（不再消费其结局）
         let preedit = state.preedit.clone();
         // 顶码 = 部分上屏 + 余码续组合：宿主光标因 top_text 插入而前移，余码组合起点已变。
@@ -4739,6 +5171,8 @@ impl Coordinator {
     /// 这类不是模式的动作不清，联想候选就会挂着；清候选也清不掉编码栏标识与自动隐藏计时。
     pub(crate) fn take_committed_with_highlight(&self, state: &mut State) -> Option<String> {
         self.exit_assoc(state, crate::handle_assoc::AssocExit::TopCommitKey);
+        // 顶屏进模式 = 旧候选窗关了，注释翻转不带进新模式。
+        state.clear_comment_flips();
         // 顶屏的高亮候选并进已转换段后造词 / 推 6b（见 `learn_on_top_commit`）。须在
         // `take_committed` 清段之前；主输入路归属活跃方案。
         let highlight = self.highlight_for_top_commit(state);
@@ -4911,6 +5345,8 @@ impl Coordinator {
             return self.spawn_command_action(cand, input);
         }
         let src = cand.phrase_template.clone();
+        // 余码是新的一次组合，不继承注释翻转（同 `commit_top_text`）。
+        state.clear_comment_flips();
         state.input_buffer = remainder.to_string();
         preedit_cursor::keep_cased_tail(&state.input_buffer, &mut state.input_buffer_cased);
         state.input_cursor_pos = state.input_buffer.len(); // 顶码后余码续打，光标在余码末尾
@@ -4942,6 +5378,11 @@ impl Coordinator {
 
     /// 把命令产生的文本经 push 管道提交给活动客户端（命令在独立线程执行，走 push 而非 KeyAction）。
     pub(crate) fn push_commit_text(&self, text: &str) {
+        self.push_commit_text_as(text, "command");
+    }
+
+    /// 同 [`Self::push_commit_text`]，另指定给扩展事件的 `source`。
+    pub(crate) fn push_commit_text_as(&self, text: &str, source: &str) {
         if text.is_empty() {
             return;
         }
@@ -4949,6 +5390,7 @@ impl Coordinator {
         let text = self.convert_commit_newline(text.to_string());
         let encoded = wind_ipc::codec::encode_commit_text(&text, None, false, true, false);
         self.push_server.push_commit_to_active(&encoded);
+        self.hook_commit(&text, source);
     }
 
     /// 候选词条操作（右键菜单）：调整 Shadow 规则并即时重排重绘。
@@ -5018,12 +5460,25 @@ impl Coordinator {
         if cand.is_emoji_suggestion {
             return;
         }
-        // 拼音普通候选**只放行置顶**，前移/后移仍禁；命令候选不受限。
+        // 单字母引导的重复上屏项：不是这个码的候选，调位无意义（菜单侧 `can_pin` / `movable`
+        // 同判据灰掉）。
+        if crate::candidate_grid::is_leading_repeat(&cand)
+            && matches!(
+                op,
+                CandidateOp::MoveTop
+                    | CandidateOp::MoveUp
+                    | CandidateOp::MoveDown
+                    | CandidateOp::PinAt(_)
+            )
+        {
+            return;
+        }
+        // 拼音普通候选**放行置顶与固定到第 N 位**，前移/后移仍禁；命令候选不受限。
         // 引擎类型取自 scope（特殊模式问的是它引用的方案，不是主方案）。
         //
-        // 分野在于位置语义是否稳定：`position=0` 恒等于「第一个」，这个承诺与候选集怎么变
-        // 无关；而 `position=3` 一旦词频衰减、模糊音开关或词库变动改了候选集，指的就是另一
-        // 条候选了——那正是当初对拼音整体禁调位的理由，它对置顶从来不成立。
+        // 分野在于操作是否相对邻居：前移/后移挪到「前一个/后一个」的位置，而拼音的邻居随
+        // 词频、学词、整句每天在变，写下的绝对下标转天就指向别处；置顶与「固定到第 N 位」是
+        // 用户明确说出的名次，候选集怎么变，规则的意思都不变。
         //
         // ⚠️ shadow 排在装配流水线**最后**（sort → dedup → filter → freq_rerank → shadow），
         // 因此它能翻过拼音 `cmp_match_layers` 的硬层级闸门——置顶的效力比调频强，是硬规则。
@@ -5040,10 +5495,36 @@ impl Coordinator {
         if matches!(op, CandidateOp::MoveTop) && pos.here == 0 {
             return;
         }
+        // 固定到第 N 位：N 是界面名次，折算成读端 position（见 `pin_at_slots`）；已在该位、
+        // 落不到的格子（含列表里有 emoji 扩展时的整组）、英文引擎一律忽略。判据与菜单
+        // `pin_at_submenu` 同源。
+        let pin_at_pos = match op {
+            CandidateOp::PinAt(n) => {
+                if !pin_at_offered(engine_type) {
+                    return;
+                }
+                match self.pin_at_slots(state, idx).position_for(n) {
+                    Some(p) => p,
+                    None => return,
+                }
+            }
+            _ => 0,
+        };
         if let Some(store) = &self.store {
             // 候选调整按 data_schema_id 归属（拼音族折叠）；Delete 分支仍传原始 schema，
             // 供 delete_candidate_by_source 对用户词/临时词按来源分流（混输）。
             let sh_schema = self.engine_mgr.data_schema_id(&schema);
+            // 拼音 / 英文桶里 `*` 是「屏蔽这个词」的组键，不是输入码：缓冲恰为 `*`（临英由触发键
+            // 进入、`allow_symbols` 放行 `*` 才打得出）时不写规则，免得混进屏蔽组。
+            if wind_store::shadow::supports_block(&sh_schema)
+                && code == wind_store::shadow::BLOCK_ALL_CODES
+            {
+                return;
+            }
+            // 规则键取词库原文（`freq_text`）：读端 `apply_shadow_in` 在大小写投影、模板展开之前
+            // 比对，取 `text` 的话英文大小写跟随（`hel` 显示成 `Hel`）与 CapsLock 档下的置顶 /
+            // 删除写进去也命中不了。短语与模板词另按 `cand_id` 定位，不受影响。
+            let word = cand.freq_text().to_string();
             // 稳定 id：短语候选有（`phrase:{code}:{模板原文}`），码表/拼音静态候选无（空串 →
             // None → 落回 word 匹配）。**必须在此传下去**——`word` 记的是当次求值结果，
             // `date`/`time` 类短语次日即失配，规则表现为「昨天调好、今天被还原」。
@@ -5051,16 +5532,44 @@ impl Coordinator {
             let cand_id = (!cand.id.is_empty()).then_some(cand.id.as_str());
             let r = match op {
                 CandidateOp::MoveTop => store.pin_shadow(&sh_schema, &code, &word, cand_id, 0),
-                CandidateOp::MoveUp => {
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pos.prev)
+                // 前移 / 后移是与邻居**交换**：邻居自己有固定规则时，把它的规则改写到本条原来的
+                // 位置。否则两条规则同位、后写的在前，本条会把邻居挤到更远处（a 后移后 b 再后移，
+                // 得到的是 `[c,b,a]` 而不是换回 `[a,b,c]`）。
+                CandidateOp::MoveUp | CandidateOp::MoveDown => {
+                    let to = if op == CandidateOp::MoveUp {
+                        pos.prev
+                    } else {
+                        pos.next
+                    };
+                    let nb = (to != pos.here)
+                        .then(|| self.candidate_at_read_rank(state, to))
+                        .flatten();
+                    let neighbor = nb
+                        .as_ref()
+                        .map(|c| (c.freq_text(), (!c.id.is_empty()).then_some(c.id.as_str())));
+                    store.move_shadow_swapping(
+                        &sh_schema, &code, &word, cand_id, to, neighbor, pos.here,
+                    )
                 }
-                CandidateOp::MoveDown => {
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pos.next)
+                // ⚠️ Delete 的短语 / 用户词分支走 `raw_code`（击键）：两者的键空间都是击键域
+                // （短语按 `input_buffer` 召回），双拼下用归一码会写进 `hao`、读的是 `hc`。
+                // 系统词落 shadow，与读端同取归一码 `code`，否则双拼下删了不生效。
+                // 英文头部原文候选按对应的词库词删，找不到就不删（菜单同判据灰掉）。
+                CandidateOp::Delete => match self.delete_target(state, &schema, &cand) {
+                    Some(t) => self.delete_candidate_by_source(&schema, &raw_code, &code, &t),
+                    None => Ok(()),
+                },
+                // 只写当前输入码的删除行（键取归一码，与读端同形）；只接按文字屏蔽的那类词，
+                // 与菜单同判据——其余候选的 Delete 本就按编码隐藏，不另给这一项。
+                CandidateOp::HideHere => match self.delete_target(state, &schema, &cand) {
+                    Some(t) if self.delete_blocks_word(&schema, &t) => {
+                        store.delete_shadow(&sh_schema, &code, t.freq_text())
+                    }
+                    _ => Ok(()),
+                },
+                CandidateOp::PinAt(_) => {
+                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pin_at_pos)
                 }
-                // ⚠️ Delete 走 `raw_code`（击键）而非归一码：它落的是短语表 / 用户词库，
-                // 两者的键空间都是击键域（短语按 `input_buffer` 召回），与 shadow 不同。
-                // 双拼下混用会让短语删除静默失效——写进 `hao`、读的是 `hc`。
-                CandidateOp::Delete => self.delete_candidate_by_source(&schema, &raw_code, &cand),
                 CandidateOp::Reset => store.remove_shadow_rule(&sh_schema, &code, &word, cand_id),
                 // 不可达：它在上面就 early-return 了（落点是全局常用字覆盖表，不是 shadow）。
                 // 保持不 panic —— 菜单 id 由 IPC 回传，让一个越界值把输入法打崩不值当。
@@ -5082,6 +5591,9 @@ impl Coordinator {
             // 返回值是「全码策略请求自动上屏」的意向，此处**刻意丢弃**：编码一个字没变，
             // 用户只是在调整候选顺序，凭空上屏是错的。
             let _ = self.update_special_candidates(state);
+        } else if state.active == Some(ModeKind::TempEnglish) {
+            // 临英的码在 `temp_english_buffer`，主路径读空的 `input_buffer` 会把候选窗当场清空。
+            self.update_temp_english_candidates(state);
         } else {
             self.update_candidates(state);
         }
@@ -5092,9 +5604,9 @@ impl Coordinator {
         // 用户看到的那一半判据。「记录删掉了、但同文的系统词条目还在」与「根本没删到」
         // 在屏幕上完全同形（都是点了没反应），只有把这一行和上面的「删前命中」并排看
         // 才分得开——单看任何一条都会误诊。
-        if matches!(op, CandidateOp::Delete) {
+        if matches!(op, CandidateOp::Delete | CandidateOp::HideHere) {
             debug!(
-                "candidate_op(Delete): 重建后候选仍在={} text={}",
+                "candidate_op({op:?}): 重建后候选仍在={} text={}",
                 state.candidates.iter().any(|c| c.text == word),
                 word
             );
@@ -5111,11 +5623,13 @@ impl Coordinator {
     ///   **两个标记各删各的表**：同文双记录（先自动学过、后来又手动加词——`add_user_word`
     ///   不清临时表）时只删一张，剩下那张继续供出同一条候选，表现与没删一模一样。
     /// - 其它（系统码表/拼音）→ shadow 软隐藏；单字同样允许（旧版单字保护已取消：
-    ///   shadow 按 code+word 键控，仅该编码下隐藏，设置页可恢复）。
+    ///   shadow 按 code+word 键控，仅该编码下隐藏，设置页可恢复）。键取 `shadow_code`
+    ///   （读端同款归一码，见 `shadow_code_of`），不是击键 `code`。
     fn delete_candidate_by_source(
         &self,
         schema: &str,
         code: &str,
+        shadow_code: &str,
         cand: &Candidate,
     ) -> anyhow::Result<()> {
         let Some(store) = &self.store else {
@@ -5140,8 +5654,24 @@ impl Coordinator {
             self.rebuild_phrases();
             return Ok(());
         }
+        if self.delete_blocks_word(schema, cand) {
+            return if cand.source == CandidateSource::Pinyin {
+                self.delete_pinyin_word(store, cand)
+            } else {
+                self.delete_english_word(store, cand)
+            };
+        }
         if cand.meta.is_user_dict || cand.meta.is_temp_dict {
-            let Some(sid) = self.engine_mgr.write_data_schema_id(schema, cand.source) else {
+            // 混在拼音 / 码表 / 混输里的英文出自共享英文引擎，用户词与临时词在 `english` 桶；
+            // 按宿主方案取桶的话拼音 / 码表落到宿主桶、混输归因不了，一律删不到。
+            let sid = if cand.source == CandidateSource::English
+                && self.engine_mgr.schema_engine_type(schema).as_deref() != Some("english")
+            {
+                Some(ENGLISH_SCHEMA.to_string())
+            } else {
+                self.engine_mgr.write_data_schema_id(schema, cand.source)
+            };
+            let Some(sid) = sid else {
                 debug!("delete_candidate: 无法归因存储方案，跳过 '{}'", cand.text);
                 return Ok(());
             };
@@ -5246,13 +5776,120 @@ impl Coordinator {
             }
             return err.map_or(Ok(()), Err);
         }
-        // 候选调整（系统词软隐藏）按 data_schema_id 归属（拼音族折叠）。
+        // 候选调整（系统词软隐藏）按 data_schema_id 归属（拼音族折叠）。键取词库原文，
+        // 与读端同形（英文大小写投影之前）。
         let sh = self.engine_mgr.data_schema_id(schema);
         debug!(
             "delete_candidate: 分支=shadow 隐藏 schema={} code={} text={}（该候选未被判为用户词/临时词）",
-            sh, code, cand.text
+            sh, shadow_code, cand.text
         );
-        store.delete_shadow(&sh, code, &cand.text)
+        store.delete_shadow(&sh, shadow_code, cand.freq_text())
+    }
+
+    /// 删除是否按文字屏蔽（菜单文案「屏蔽该词」、并给第二项「在此编码下隐藏」）。
+    ///
+    /// 拼音的多字词按**文字**删（设计 §4a）：用户删的是「这个词」，不是「这个码下的它」。
+    /// 只认拼音来源、且写进 `pinyin` 桶的（拼音方案，混输的拼音段——§8 第 12 条）：拼音方案里
+    /// 混入的英文词归英文桶，混输的码表段仍按编码。英文同理（§8 第 11 条）：只在英文数据方案
+    /// （英文方案、临英）里按文字屏蔽；混在拼音 / 码表 / 混输里的英文仍按各自方案、各自编码隐藏。
+    /// 短语（走禁用短语）与 emoji 扩展候选（无词库落点）不算。写端分流与菜单装配共用这一个判据。
+    pub(crate) fn delete_blocks_word(&self, schema: &str, cand: &Candidate) -> bool {
+        if cand.is_phrase
+            || cand.is_emoji_suggestion
+            || !wind_store::shadow::is_blockable_word(cand.freq_text())
+        {
+            return false;
+        }
+        match cand.source {
+            CandidateSource::Pinyin => {
+                self.engine_mgr
+                    .write_data_schema_id(schema, CandidateSource::Pinyin)
+                    .as_deref()
+                    == Some(wind_engine::manager::PINYIN_DATA_SCHEMA)
+            }
+            CandidateSource::English => self.engine_mgr.data_schema_id(schema) == ENGLISH_SCHEMA,
+            _ => false,
+        }
+    }
+
+    /// 右键删除实际作用的候选。英文头部候选（所打原文 / 它的大小写变形，无来源）没有词库落点：
+    /// 在英文数据方案里只认**字面就是所打原文**、且词库里有**字面相同**的词那一种，按那个词删；
+    /// 其余一律 `None`，删除不可用（菜单灰掉、热键不执行）。
+    ///
+    /// 不放宽到忽略大小写：原文条单独出现时，字面相同的词库词本该已占据那一格
+    /// （`merge_head_with_dict`），剩下的同码异形词是列表里另一行——打 `Help` 删原文条会屏蔽下面那行
+    /// `help`，`ok` 删过后再删原文条 `ok` 会屏蔽 `OK`。变形条（`Us`）更对应不到唯一一个词。
+    /// 写成规则也是读端永远命中不了的孤儿键。其余候选原样返回。
+    pub(crate) fn delete_target(
+        &self,
+        state: &State,
+        schema: &str,
+        cand: &Candidate,
+    ) -> Option<Candidate> {
+        if self.engine_mgr.data_schema_id(schema) != ENGLISH_SCHEMA {
+            return Some(cand.clone());
+        }
+        let buf = if state.active == Some(ModeKind::TempEnglish) {
+            state.temp_english_buffer.as_str()
+        } else {
+            crate::preedit_cursor::cased_or_buffer(&state.input_buffer, &state.input_buffer_cased)
+        };
+        if !crate::english_candidates::is_english_head_candidate(cand, buf) {
+            return Some(cand.clone());
+        }
+        if cand.text != buf {
+            return None;
+        }
+        self.english_exact_dict_word(schema, buf, buf)
+            .filter(|w| w.text == buf)
+    }
+
+    /// 拼音右键删多字词（设计 §4a）：一律**屏蔽这个词**（写 `code = *` 的删除行，所有输入串、
+    /// 所有来源都不再出现它）。是用户词 / 临时词（含与系统词同文的合并候选）时，先真删这段文字
+    /// 在拼音数据方案下**所有编码**的用户 / 临时条目，连同词频与联想记录——只删不屏蔽的话，
+    /// 分段上屏会把它再学回临时词库、学过的整句也会被组句原样拼出来（GH#269 的错词正是这么来的）。
+    /// 拼音的用户分库编进系统词典，候选上分不出来，按系统词处理（只屏蔽）。
+    fn delete_pinyin_word(
+        &self,
+        store: &wind_store::Store,
+        cand: &Candidate,
+    ) -> anyhow::Result<()> {
+        let ds = wind_engine::manager::PINYIN_DATA_SCHEMA;
+        if cand.meta.is_user_dict || cand.meta.is_temp_dict {
+            let n = store.purge_word(ds, cand.freq_text())?;
+            debug!(
+                "delete_candidate: 分支=拼音按文字真删 text={} 删掉 {} 条",
+                cand.text, n
+            );
+            if n == 0 {
+                warn!("delete_candidate: 拼音用户词 / 临时词一条都没删到");
+            }
+        }
+        debug!("delete_candidate: 分支=拼音屏蔽这个词 text={}", cand.text);
+        store.block_word(ds, cand.freq_text())
+    }
+
+    /// 英文右键删 ≥2 字母的词（§8 第 11 条）：屏蔽这个词（`english` 桶 `code = *` 的删除行，键是
+    /// 词库原文、不归一大小写）。用户词 / 临时词先真删这段文字在所有编码下的条目、词频与联想，
+    /// 理由同 [`Self::delete_pinyin_word`]：只删不屏蔽，自动造词会把它再学回来。
+    fn delete_english_word(
+        &self,
+        store: &wind_store::Store,
+        cand: &Candidate,
+    ) -> anyhow::Result<()> {
+        let text = cand.freq_text();
+        if cand.meta.is_user_dict || cand.meta.is_temp_dict {
+            let n = store.purge_word(ENGLISH_SCHEMA, text)?;
+            debug!(
+                "delete_candidate: 分支=英文按文字真删 text={} 删掉 {} 条",
+                text, n
+            );
+            if n == 0 {
+                warn!("delete_candidate: 英文用户词 / 临时词一条都没删到");
+            }
+        }
+        debug!("delete_candidate: 分支=英文屏蔽这个词 text={}", text);
+        store.block_word(ENGLISH_SCHEMA, text)
     }
 
     /// 候选词操作热键匹配（对齐 Go matchCandidateActionKey，但 `0` 扩展为第 10 候选）。
@@ -5519,7 +6156,7 @@ impl Coordinator {
                 &state.special_buffer
             }
             Some(ModeKind::AuxCode) => self.aux_code_source_buffer(state),
-            _ => &state.input_buffer,
+            None | Some(ModeKind::Url | ModeKind::Email | ModeKind::Unicode) => &state.input_buffer,
         }
     }
 
@@ -5534,6 +6171,15 @@ impl Coordinator {
     ///
     /// @return 实际产生的 KeyAction（主输入路与各 overlay 均带出；仅 `$CC` 命令、组折叠、越界返回 None）
     pub(crate) fn select_candidate_at(&self, idx: usize) -> Option<KeyAction> {
+        self.select_candidate_from(idx, crate::session_exit::ActionOrigin::Pointer)
+    }
+
+    /// 同 [`Self::select_candidate_at`]，按 `origin` 收尾（移动端候选栏是 `MobilePick`）。
+    pub(crate) fn select_candidate_from(
+        &self,
+        idx: usize,
+        origin: crate::session_exit::ActionOrigin,
+    ) -> Option<KeyAction> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // 联想候选就住在 `candidates` 里，故本函数**原样适用**——鼠标点选联想词与点选
         // 普通候选走的是同一条 `commit_selected`，无需分支。移动端的候选栏全靠这条通路。
@@ -5632,9 +6278,10 @@ impl Coordinator {
             } else {
                 self.commit_selected(&mut state, &cand, page_local as i32)
             };
-            drop(state);
+            // 点选不经按键出口，收尾（补空格等）在推送之前做，见 `crate::session_exit`。
+            let act = self.finish_session_action(state, origin, act);
             // commit_selected 已按分支自行 notify_ui_update / notify_ui_hide，此处不再重复。
-            self.push_no_key_ctx_action(&act, chinese_mode);
+            self.push_no_key_ctx_action(&act, chinese_mode, true);
             return Some(act);
         }
         // ── 以下为 overlay 模式（active != None）路径 ──
@@ -5690,14 +6337,14 @@ impl Coordinator {
             }
         };
         let chinese_mode = state.chinese_mode;
-        drop(state);
+        let act = self.finish_session_action(state, origin, act);
         match &act {
             // 空文本上屏：只需让宿主结束 composition（同 $CC 命令分支）。
             KeyAction::ClearComposition => {
                 self.push_server
                     .push_commit_to_active(&wind_ipc::codec::encode_clear_composition());
             }
-            _ => self.push_no_key_ctx_action(&act, chinese_mode),
+            _ => self.push_no_key_ctx_action(&act, chinese_mode, false),
         }
         Some(act)
     }
@@ -5730,8 +6377,21 @@ impl Coordinator {
     /// 也就是说这里的缺口仍在：`handle_addword.rs` 里有七处返回 `ClearComposition`，
     /// 加词面板的鼠标点选哪天接进本函数就会再踩一次。届时应当**在此补一臂**，而不是
     /// 在调用点做第三次特判 —— 修现象不修机制，每次修复都正确，每次都不减少下次的概率。
-    pub(crate) fn push_no_key_ctx_action(&self, act: &KeyAction, chinese_mode: bool) {
-        match act {
+    ///
+    /// `main_path`：来自主输入路（非临英 / 快捷输入等 overlay）。组合区里的音节分隔符要照
+    /// `ui.candidate.syllable_separator` 换掉（键盘路径在 `handle_key_event_policed` 收口里换，
+    /// 这条通路不经过它，漏换的现象是鼠标点选首词后应用里又冒出 `'`）。
+    pub(crate) fn push_no_key_ctx_action(
+        &self,
+        act: &KeyAction,
+        chinese_mode: bool,
+        main_path: bool,
+    ) {
+        let act = match self.syllable_separator_for(main_path) {
+            Some(sep) => act.clone().with_syllable_separator(&sep),
+            None => act.clone(),
+        };
+        match &act {
             KeyAction::UpdateComposition { text, caret_pos } => {
                 let encoded = wind_ipc::codec::encode_update_composition(text, *caret_pos);
                 self.push_server.push_commit_to_active(&encoded);
@@ -5744,6 +6404,7 @@ impl Coordinator {
                 let encoded =
                     wind_ipc::codec::encode_commit_text(&text, None, false, chinese_mode, false);
                 self.push_server.push_commit_to_active(&encoded);
+                self.hook_commit(&text, "candidate");
                 debug!("push_no_key_ctx: committed '{}'", text);
             }
             other => {
@@ -6234,7 +6895,8 @@ mod finalize_candidates_tests {
         let mut bad: Vec<String> = Vec::new();
         for (name, src) in sources {
             // 只看 `#[cfg(test)]` 之前的部分：测试自己用字面量直接构造键是合法的。
-            let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let prod = crate::source_scan::production_code(src);
+            let prod = prod.as_str();
             // 三个名字都扫：
             // - `record_selection_cand` 是从候选本身分流 emoji 的薄包装，记账码的口径约束
             //   对它同样成立，漏扫它就等于给新调用点开了后门；
@@ -6318,8 +6980,10 @@ mod finalize_candidates_tests {
         // 大小写投影拆出 `record_selection_cased_in` 后 = 15：`record_selection_in` 内部新增一处
         // 转调（净增 1），而 `record_selection_cand_in` 是把原有的 `_in` 调用**改成** `_cased_in`
         // （改调不是新增）。⚠️ 一开始按「两处各加一个」写成 16，被本断言当场逮住。
+        // 改用 `production_code` 剔测试条目后，`coordinator.rs` 九百多行之后的生产代码不再被
+        // 截掉，实扫 21。
         assert!(
-            checked >= 15,
+            checked >= 21,
             "只扫到 {checked} 个 record_selection 调用点，远少于预期——\
              调用点被改名或本测试的扫描方式失效了，先修测试再说"
         );
@@ -6340,9 +7004,12 @@ mod finalize_candidates_tests {
             "None",
             "owner.as_deref()",
             "self.effective_data_schema(state).as_deref()",
-            // 转发层：`record_selection` / `apply_freq_rerank` / `apply_shadow` 三个薄包装
-            // 把自己的参数原样传下去。
+            // 转发层：`record_selection` 薄包装与 `apply_freq_rerank_with_extra` 把自己的参数
+            // 原样传下去。
             "schema_override",
+            // 后处理步骤表的转发层：`run_passes` 原样传 `PassCtx.owner`；归属在构造 `PassCtx`
+            // 处受本测试检查（见下方对 `PassCtx` 字面量 owner 字段的扫描）。
+            "ctx.owner",
             // 临英：归属恒是内置英文方案，与 `effective_data_schema` 对 `TempEnglish` 的
             // 返回值是同一个常量（那边写成 `Some(ENGLISH_SCHEMA.to_string())`）。三处读写
             // 端直接用常量而不绕 state，取值同源，故等同于走了那个函数。
@@ -6387,11 +7054,16 @@ mod finalize_candidates_tests {
             ("handle_temp.rs", include_str!("handle_temp.rs")),
             // mix（快捷输入）同理。
             ("handle_mode.rs", include_str!("handle_mode.rs")),
+            // 后处理步骤表（转发）与经它读写的两条路径。
+            ("postprocess.rs", include_str!("postprocess.rs")),
+            ("handle_direct_aux.rs", include_str!("handle_direct_aux.rs")),
+            ("handle_reverse.rs", include_str!("handle_reverse.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
         for (name, src) in sources {
-            let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let prod = crate::source_scan::production_code(src);
+            let prod = prod.as_str();
             for call in CALLS {
                 for (off, _) in prod.match_indices(call) {
                     let args = &prod[off + call.len()..];
@@ -6421,6 +7093,17 @@ mod finalize_candidates_tests {
                 }
             }
         }
+        // 经后处理步骤表读写的路径，归属写在 `PassCtx { owner: <方案>, .. }` 里。
+        for (name, src) in sources {
+            let prod = crate::source_scan::production_code(src);
+            for val in crate::source_scan::pass_ctx_field_values(&prod, "owner") {
+                let val = val.unwrap_or_else(|| "<缺 owner 字段>".to_string());
+                checked += 1;
+                if !ALLOWED.contains(&val.as_str()) {
+                    bad.push(format!("{name}: PassCtx 的 owner `{val}`"));
+                }
+            }
+        }
         assert!(
             bad.is_empty(),
             "以下调用点的方案归属不是取自 effective_data_schema：\n  {}\n\
@@ -6433,9 +7116,11 @@ mod finalize_candidates_tests {
         // ⚠️ 下限须**随 sources 扩容一起上调**，否则余量翻倍等于容忍悄悄丢掉调用点：
         // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）；
         // 临拼词频改走 `record_selection_in` 后 +2 = 15；mix 读写接入 + handle_mode.rs 进表 = 20；`_cand_in` 进 CALLS = 21。
+        // 改用 `production_code`（不再截断于首个 `#[cfg(test)]`）+ 步骤表三文件进表 + 扫
+        // `PassCtx { owner }` 后实扫 33。
         // 与下调时同一条纪律——变动前先确认是「合并/删除」还是「漏调」。
         assert!(
-            checked >= 21,
+            checked >= 33,
             "只扫到 {checked} 个方案归属调用点，少于预期——扫描方式失效了，先修测试"
         );
     }
@@ -6473,7 +7158,8 @@ mod finalize_candidates_tests {
         let mut bad: Vec<String> = Vec::new();
         for (file, sig, label) in TARGETS {
             let full = src(file);
-            let prod = full.split("#[cfg(test)]").next().unwrap_or(full);
+            let prod = crate::source_scan::production_code(full);
+            let prod = prod.as_str();
             let Some(off) = prod.find(sig) else {
                 panic!("{label}: 找不到 `{sig}` —— 函数被改名了，先修测试再说");
             };
@@ -6513,10 +7199,13 @@ mod finalize_candidates_tests {
             "shadow_code",
             "state.special_buffer",
             "\"\"",
-            // 转发层：`apply_shadow` 是 `apply_shadow_in` 的薄包装，原样传自己的参数。
+            // overlay（临拼、mix 成员段）的中转变量：取的是该段引擎的归一码，见各自调用点。
             "code",
             // 菜单灰显走 `candidate_op_scope` 的产物，其 `code` 已在那里归一（同写端一处取值）。
             "scope.code",
+            // 直接辅助码的前缀池：前缀下的归一码为空时回落到前缀击键本身（与 `shadow_code_of`
+            // 同一条回落规则，只是作用在前缀而非整串缓冲上）。
+            "prefix_shadow",
         ];
         const CALLS: &[&str] = &[
             ".apply_shadow(",
@@ -6535,11 +7224,16 @@ mod finalize_candidates_tests {
             ("handle_temp.rs", include_str!("handle_temp.rs")),
             // mix 的读取点在成员段内，码同样取引擎归一码。
             ("handle_mode.rs", include_str!("handle_mode.rs")),
+            // 后处理步骤表：`run_passes` 里的那次读取，码从 `PassCtx` 原样解包成 `shadow_code`。
+            ("postprocess.rs", include_str!("postprocess.rs")),
+            // 直接辅助码的前缀池（经 `PassCtx`）。
+            ("handle_direct_aux.rs", include_str!("handle_direct_aux.rs")),
         ];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
         for (name, src) in sources {
-            let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let prod = crate::source_scan::production_code(src);
+            let prod = prod.as_str();
             for call in CALLS {
                 // `apply_shadow_in` 多一个前置的 schema 实参，码是第 3 个；`apply_shadow` 是第 2 个。
                 let code_pos = if *call == ".apply_shadow_in(" { 2 } else { 1 };
@@ -6580,6 +7274,25 @@ mod finalize_candidates_tests {
                     }
                 }
             }
+            // 经后处理步骤表读 shadow 的路径，码写在 `PassCtx { .., shadow_code: Some(<码>), .. }`
+            // 里；`None` = 该 profile 不读 shadow，不计数。
+            for val in crate::source_scan::pass_ctx_field_values(prod, "shadow_code") {
+                let Some(val) = val else {
+                    bad.push(format!("{name}: PassCtx 字面量缺 shadow_code 字段"));
+                    continue;
+                };
+                if val == "None" {
+                    continue;
+                }
+                let inner = val
+                    .strip_prefix("Some(")
+                    .and_then(|v| v.strip_suffix(')'))
+                    .map(|v| v.trim().trim_start_matches('&').trim());
+                checked += 1;
+                if !inner.is_some_and(|v| ALLOWED.contains(&v)) {
+                    bad.push(format!("{name}: PassCtx 的 shadow_code `{val}`"));
+                }
+            }
         }
         assert!(
             bad.is_empty(),
@@ -6590,8 +7303,9 @@ mod finalize_candidates_tests {
             bad.join("\n  ")
         );
         // ⚠️ 同上：`handle_temp.rs` 进 sources 后实扫 9（原 7、下限留在 5）；mix 接入后 10。
+        // 步骤表改造后 shadow 码写在 `PassCtx { shadow_code }`，扫字面量 + direct_aux 进表后 12。
         assert!(
-            checked >= 10,
+            checked >= 12,
             "只扫到 {checked} 个 shadow 读取点，少于预期——调用点被改名或扫描失效了，先修测试"
         );
     }
@@ -7330,7 +8044,7 @@ mod dynamic_candidate_shadow_tests {
             date_cand("2026-07-29", tpl),
             date_cand("2026.07.29", "$Y.$MM.$DD"),
         ];
-        c.apply_shadow(&mut cands, "date");
+        c.apply_shadow_in(None, &mut cands, "date");
 
         assert_eq!(
             cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
@@ -7359,7 +8073,7 @@ mod dynamic_candidate_shadow_tests {
                 ..Default::default()
             },
         ];
-        c.apply_shadow(&mut cands, "aaaa");
+        c.apply_shadow_in(None, &mut cands, "aaaa");
         assert_eq!(
             cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             ["敬", "工"]
@@ -7395,7 +8109,7 @@ mod dynamic_candidate_shadow_tests {
         assert_eq!(code, "hao", "归一码非空时必须优先于击键缓冲");
 
         let mut cands = vec![plain("耗"), plain("好"), plain("号")];
-        c.apply_shadow(&mut cands, &code);
+        c.apply_shadow_in(None, &mut cands, &code);
         assert_eq!(
             cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             ["好", "耗", "号"],
@@ -7404,7 +8118,7 @@ mod dynamic_candidate_shadow_tests {
 
         // 反向对照：拿击键码去读，规则不该命中——证明上面的绿来自归一，而非别的原因。
         let mut raw = vec![plain("耗"), plain("好"), plain("号")];
-        c.apply_shadow(&mut raw, "hc");
+        c.apply_shadow_in(None, &mut raw, "hc");
         assert_eq!(
             raw.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             ["耗", "好", "号"],
@@ -8569,6 +9283,7 @@ mod expand_stop_tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         });
     }
 
@@ -8663,6 +9378,49 @@ mod expand_stop_tests {
 }
 
 /// 移动端拼音单字母收紧首批上限；桌面、多字母、其它引擎一律不动。
+/// 拼音拆分串（`fang'xiang`）里，跳过前 `letters` 个字母（及随后的隔音符）之后剩下的部分。
+/// `tail_after_letters("fang'xiang", 4)` = `xiang`；字母数用尽 → 空串。
+pub(crate) fn tail_after_letters(body: &str, letters: usize) -> String {
+    let mut seen = 0usize;
+    for (i, ch) in body.char_indices() {
+        if seen >= letters {
+            return body[i..].trim_start_matches('\'').to_string();
+        }
+        if ch != '\'' {
+            seen += 1;
+        }
+    }
+    String::new()
+}
+
+static CURSOR_BY_SYLLABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 打开 / 关闭「拼音按音节移光标、候选只查光标前一段」。默认关；电脑端的配置项接入时调用。
+pub fn set_cursor_by_syllable(on: bool) {
+    CURSOR_BY_SYLLABLE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn cursor_by_syllable() -> bool {
+    CURSOR_BY_SYLLABLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// [`Coordinator::query_cut`] 的判据（纯函数，便于测试）：只有手机端、光标严格落在编码中间
+/// 且在字符边界、普通拼音输入时才截断。
+pub(crate) fn cut_position(
+    mobile: bool,
+    buffer: &str,
+    cursor: usize,
+    plain_pinyin: bool,
+) -> Option<usize> {
+    (mobile
+        && plain_pinyin
+        && cursor > 0
+        && cursor < buffer.len()
+        && buffer.is_char_boundary(cursor))
+    .then_some(cursor)
+}
+
 #[cfg(test)]
 mod mobile_limit_tests {
     use crate::coordinator::Coordinator;
@@ -8672,14 +9430,15 @@ mod mobile_limit_tests {
     fn mobile_pinyin_single_letter_is_capped_only_there() {
         let lim = Coordinator::main_path_candidate_limit;
         let py = Some(EngineType::Pinyin);
-        assert_eq!(lim(py, "b", true), super::MOBILE_PINYIN_SINGLE_LIMIT);
+        let mobile = Some(super::MOBILE_PINYIN_SINGLE_LIMIT);
+        assert_eq!(lim(py, "b", mobile), super::MOBILE_PINYIN_SINGLE_LIMIT);
         assert_eq!(
-            lim(py, "b", false),
+            lim(py, "b", None),
             Coordinator::initial_candidate_limit_of(py, "b"),
             "桌面不收紧"
         );
         assert_eq!(
-            lim(py, "bz", true),
+            lim(py, "bz", mobile),
             Coordinator::initial_candidate_limit_of(py, "bz"),
             "两字母起不收紧"
         );
@@ -8689,10 +9448,72 @@ mod mobile_limit_tests {
             EngineType::Mixed,
         ] {
             assert_eq!(
-                lim(Some(other), "t", true),
+                lim(Some(other), "t", mobile),
                 Coordinator::initial_candidate_limit_of(Some(other), "t"),
                 "{other:?} 不受影响（英文 t 曾因上限太小打不出 then）"
             );
         }
+    }
+
+    #[test]
+    fn cut_position_only_for_mobile_pinyin_with_cursor_inside() {
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 4, true),
+            Some(4)
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 9, true),
+            None,
+            "光标在末尾 = 整串"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 0, true),
+            None,
+            "光标在开头无前缀可查"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(false, "fangxiang", 4, true),
+            None,
+            "电脑端不改既有行为"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "fangxiang", 4, false),
+            None,
+            "码表 / overlay 不进"
+        );
+        assert_eq!(
+            crate::handle_candidate::cut_position(true, "你好", 1, true),
+            None,
+            "非字符边界"
+        );
+    }
+
+    #[test]
+    fn tail_after_letters_skips_separators() {
+        use crate::handle_candidate::tail_after_letters;
+        assert_eq!(tail_after_letters("fang'xiang", 4), "xiang");
+        assert_eq!(
+            tail_after_letters("fang'xiang", 6),
+            "ang",
+            "光标在音节中间：余下半个音节"
+        );
+        assert_eq!(tail_after_letters("fang'xiang", 9), "");
+        assert_eq!(tail_after_letters("ni'hao'a", 2), "hao'a");
+    }
+}
+
+#[cfg(test)]
+mod pin_at_offered_tests {
+    use super::pin_at_offered;
+    use wind_engine::EngineType;
+
+    /// 按引擎类型判：英文类方案无论 id 叫什么都不给，其余都给。
+    #[test]
+    fn only_english_engine_is_excluded() {
+        assert!(!pin_at_offered(Some(EngineType::English)));
+        for t in [EngineType::Pinyin, EngineType::CodeTable, EngineType::Mixed] {
+            assert!(pin_at_offered(Some(t)), "{t:?}");
+        }
+        assert!(pin_at_offered(None));
     }
 }

@@ -54,6 +54,9 @@ constexpr uint32_t kVkRMenu = 0xA5;
 constexpr uint32_t kVkPacket = 0xE7;
 // 本 IME 自注入的「异步提交触发键」（KeyEventSink.h 的 VK_ASYNC_COMMIT_TRIGGER）。
 constexpr uint32_t kVkAsyncCommitTrigger = 0xE8;
+// 服务进程的 Alt 钩子在补发的 Alt 松开前注入的屏蔽键（压住宿主菜单栏），见 wind-keys 的
+// `key_inject::VK_MENU_MASK`。宿主必须看得到它，KeyEventSink 一律放行、不转发。
+constexpr uint32_t kVkMenuMask = 0x9F;
 
 /// 纯修饰键：按下它本身不往文档里写东西，故不记账——否则「按住 Shift 连按两次 `？`」
 /// 这类正常 press2 会被自己中间的 Shift 解除掉。
@@ -83,7 +86,7 @@ inline bool IsBareModifier(uint32_t vk)
 /// 里那两处点名注释）。那时 skip 条目已被 test 消费掉，`OnKeyDown` 的守卫无从抑制 ⇒
 /// 注入的 `VK_PACKET` 照样置位 ⇒ 上面说的系统性失效在那批宿主上并没有被堵住。
 ///
-/// 故这里再加一道**与消费点无关**的兜底。只列 0xE7 / 0xE8：两者都没有物理键能产生，
+/// 故这里再加一道**与消费点无关**的兜底。只列 0xE7 / 0xE8 / 0x9F：都没有物理键能产生，
 /// 误抑制真实用户输入的风险为零。
 ///
 /// ⚠️ 为什么不做「记住刚抑制过的 vk + 时间窗」那种更通用的备忘：那会把
@@ -93,7 +96,7 @@ inline bool IsBareModifier(uint32_t vk)
 /// 造成的多报都只是一次性的（配对跳出、press2 的删改都发生在动作之后），本就在可接受侧。
 inline bool IsSelfInjectedVk(uint32_t vk)
 {
-    return vk == kVkPacket || vk == kVkAsyncCommitTrigger;
+    return vk == kVkPacket || vk == kVkAsyncCommitTrigger || vk == kVkMenuMask;
 }
 
 /// 这一 keydown 是否算「用户的键进了宿主」（排除项见文件头）。数字后智能标点的输入序列

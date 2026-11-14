@@ -14,6 +14,18 @@ use wind_ipc::rpc::{Request, Response};
 // 而非 workspace 的 CARGO_PKG_VERSION（兜底 0.x）。上报进 system_info.version / engine / appVersion。
 pub(crate) const APP_VERSION: &str = env!("WIND_APP_VERSION");
 
+/// 构建标识（git 短哈希[-dirty]），由宿主启动时注入一次，`system.info.build` 上报。
+///
+/// 选注入而非 build.rs 自取：本 crate 是 lib，增量构建时 build.rs 不会随 HEAD 变化重跑，
+/// 哈希会滞后；service 的 build.rs 每次构建强制重跑，且预览缓存键用的就是同一份
+/// `WIND_GIT_HASH`，由它注入可与主题预览的构建标识严格同源。
+static BUILD_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 注入构建标识（仅首次生效）。未注入时 `system.info.build` 为 `null`。
+pub fn set_build_id(id: impl Into<String>) {
+    let _ = BUILD_ID.set(id.into());
+}
+
 /// 由宿主（service）注入的运行时状态来源（传输无关）。
 ///
 /// 取代原 wind-webapi 的 `CoreStatus`：去掉浏览器授权相关（token/open_url），
@@ -98,6 +110,8 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
             "dataDir": Config::data_dir().map(|p| p.display().to_string()).unwrap_or_default(),
             "running": true,
             "engine": APP_VERSION,
+            // 构建标识（git 短哈希[-dirty]），与主题预览构建标识同源；未注入为 null。
+            "build": BUILD_ID.get(),
             "variant": state.variant,
             "activeSchema": state.core.active_schema_id(),
             // 定制版身份（`data_custom/custom.toml` 的 `[custom]`），非定制版为 `null`。
@@ -679,6 +693,7 @@ mod tests {
 
     #[test]
     fn system_info_shape() {
+        set_build_id("abc1234-dirty");
         let resp = dispatch(&state(), req("system.info", json!({})));
         assert_eq!(resp.id, 7);
         assert!(resp.error.is_none());
@@ -686,6 +701,7 @@ mod tests {
         for k in ["version", "platform", "dataDir", "running"] {
             assert!(r.get(k).is_some(), "system.info 缺字段 {k}");
         }
+        assert_eq!(r["build"], json!("abc1234-dirty"));
         assert_eq!(r["variant"], json!("dev"));
         assert_eq!(r["activeSchema"], json!("wubi86"));
     }

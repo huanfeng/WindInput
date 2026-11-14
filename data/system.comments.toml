@@ -1,0 +1,135 @@
+# WindInput 候选注释内置模板与出厂分配
+#
+# 自定义：不要改本文件。用户的模板与分配写在 config.toml 的 [ui.comment]
+# （[[ui.comment.templates]] 与 [ui.comment.assign.*]），同 id 的用户模板覆盖内置，
+# 用户分配优先于本文件；想让某条出厂分配失效，在用户分配里写 "inherit"。
+#
+# 模板串语法见 https://windinput.com/docs/settings/appearance/candidate-comment
+#
+# 格值：模板 id / "none"（不显示）/ "inherit"（跟随下一层同排布）。
+# 键名：default_horizontal / default_vertical / detail_horizontal / detail_vertical。
+# 横排为主：竖排格不写时，本层横排格有值就同横排，否则跟随下一层竖排；
+# 横排格不写即跟随下一层横排。出厂分配只写横排格。
+
+[[templates]]
+id = "code"
+name = "编码（自动）"
+text = "${code_hint|code_rev|shuangpin}"
+desc = "码表候选显示剩余编码，拼音候选显示码表编码，没有码表时显示双拼"
+
+[[templates]]
+id = "code_hint"
+name = "剩余编码"
+text = "${code_hint}"
+desc = "只有码表候选显示还差的编码，拼音候选不显示"
+
+[[templates]]
+id = "code_rev"
+name = "码表编码"
+text = "${code_hint|code_rev}"
+desc = "码表候选显示剩余编码，拼音候选显示它在码表里的编码"
+
+[[templates]]
+id = "shuangpin"
+name = "双拼编码"
+text = "${code_hint|shuangpin}"
+desc = "码表候选显示剩余编码，拼音候选显示双拼编码"
+
+[[templates]]
+id = "pinyin"
+name = "拼音"
+text = "${pinyin}"
+desc = "带调拼音，如「你好」显示 nǐ hǎo"
+
+[[templates]]
+id = "chaizi"
+name = "拆字"
+text = "${chaizi}"
+desc = "单字的拆分字根，词组不显示"
+
+[[templates]]
+id = "chaizi_code"
+name = "拆字 · 编码"
+text = "${chaizi}{ · ${code_rev|chaizi_code}}"
+desc = "单字字根，后面接码表编码（码表里没有时用拆字表的编码）"
+
+[[templates]]
+id = "chaizi_pinyin"
+name = "拆字 · 拼音"
+text = "${chaizi}{ · ${pinyin}}"
+desc = "单字字根，后面接带调拼音"
+
+[[templates]]
+id = "zh_en"
+name = "英文释义"
+text = "${dict:zh_en}"
+desc = "中文候选的英文释义（汉英释义库）"
+
+[[templates]]
+id = "en_zh"
+name = "中文释义"
+text = "${dict:en_zh}"
+desc = "英文候选的中文释义（英汉释义库）"
+
+[[templates]]
+id = "pinyin_en"
+name = "拼音 · 英文"
+text = "${pinyin}{ · ${dict:zh_en}}"
+desc = "带调拼音，后面接英文释义"
+
+[[templates]]
+id = "full"
+name = "拆字 · 拼音 · 英文"
+text = "${chaizi}{ · ${pinyin}}{ · ${dict:zh_en}}"
+desc = "拆字、拼音、英文释义，取得到的依次显示"
+
+# 出厂分配。编码类变量（code_rev / shuangpin）不再有档位开关，显不显示全看这里分到的模板：
+# 拼音 / 双拼默认不显示，混输给码表编码，临时拼音给完整的编码回退链，快捷输入不显示。
+# 拆字只给码表用户：码表、混输、临时拼音的详细态带拆字，全局（拼音用户落到这里）不带。
+[assign.global]
+default_horizontal = "code"
+detail_horizontal = "pinyin_en"
+
+# 码表默认态跟随全局：主路上没有拼音来源候选，code 与 code_hint 效果相同。
+[assign.type.codetable]
+detail_horizontal = "chaizi_pinyin"
+
+[assign.type.pinyin]
+default_horizontal = "none"
+
+[assign.type.shuangpin]
+default_horizontal = "none"
+
+[assign.type.mixed]
+default_horizontal = "code_rev"
+detail_horizontal = "chaizi_pinyin"
+
+[assign.type.english]
+default_horizontal = "none"
+detail_horizontal = "en_zh"
+
+[assign.mode.temp_english]
+default_horizontal = "none"
+detail_horizontal = "en_zh"
+
+# 临时拼音的上级是当前方案（拼音方案下会落到 none），默认态显式写上编码。
+[assign.mode.temp_pinyin]
+default_horizontal = "code"
+detail_horizontal = "chaizi_code"
+
+# mode.mix 是快捷输入的默认（界面上叫「快捷输入（默认）」）；单个快捷输入另写 mode."mix:<id>" 覆盖。
+# 日期、计算这类候选带注释只是干扰，两态都不显示。
+[assign.mode.mix]
+default_horizontal = "none"
+detail_horizontal = "none"
+
+# 内置注释词库（路径相对数据目录）
+[[dicts]]
+id = "en_zh"
+label = "英汉释义"
+path = "comments/en_zh.txt"
+
+[[dicts]]
+id = "zh_en"
+label = "汉英释义"
+path = "comments/zh_en.txt"

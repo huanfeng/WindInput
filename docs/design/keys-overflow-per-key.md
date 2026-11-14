@@ -5,6 +5,11 @@
 > 行为策略应做成**按键相关**的选项，而不是按键类别一把抓。
 > 关联：[keys-overflow.md 的运行时闸门](#) `page_key_overflow_to_punct`、C3-9（t256，`keys.overflow.page_key` 的由来）。
 
+> **2026-11-07 改版**：覆盖表 `page_key_overrides` 已移除，按键级策略改为翻页动作的后缀
+> `page_prev:commit_and_input` / `page_prev:ignore`（`page_next` 同），绑在 `keys.session_actions`
+> 里——翻页键分组本就折算进这张表，设置端「全局自定义输入中按键」直接可配，外面的全局档不变。
+> 下文「方案」一节是 0.129 的覆盖表做法，留作沿革；消费点见 `Coordinator::page_key_overflow_commits`。
+
 ## 现状
 
 `[keys.overflow]` 四项（`number_key` / `select_key` / `select_char_key` / `page_key`）都是**按键类别级**的全局档位。以翻页键为例：

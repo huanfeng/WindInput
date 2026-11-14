@@ -10,6 +10,7 @@
 - **依赖方向：本 crate → wind-coordinator**，绝不能反向。coordinator 不依赖本 crate 的 wind-transfer/fontdb，移动端闭包（wind-mobile 不依赖本 crate）因此无任何 C 依赖，`cargo check-android` 本机免 NDK 可跑。
 - 新增 RPC 需要新宿主能力时**加在 WebDataHost 上**（coordinator/src/web_host.rs），勿在默认方法里绕道。
 - 调用方须 `use wind_webdata::WebDataRpc`（service 的 RpcCore、coordinator 的集成测试经 dev-dependencies 环）。
+- `theme.renderPreview(s)`（主题预览图 + 磁盘缓存）在 `src/theme_render.rs`：出图经窄面 `request_candidate_preview` 投给 UI 线程，本 crate 只管参数、主题来源、缓存键与清理（协议与阈值见 `docs/design/wind-scene-extraction.md` §7）。测试缓存一律传临时目录，别走 `Config::cache_dir()`。
 - ⛔ 不用 blanket impl（`impl<T: WebDataHost> WebDataRpc for T`）：`Arc<Coordinator>` 的方法解析会先命中 T=Arc 的 blanket 候选、bound 不满足即报错而不再 deref——具体 impl 才让 Arc 自动 deref。
 
 ## Testing

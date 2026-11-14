@@ -15,9 +15,12 @@ permissions:
 jobs:
   cla:
     runs-on: ubuntu-latest
+    # 签署语句本身也要触发：只放行 `recheck` 时，按提示签署的贡献者会被卡在「已签却不生效」。
     if: |
       (github.event_name == 'pull_request_target') ||
-      (github.event_name == 'issue_comment' && github.event.comment.body == 'recheck')
+      (github.event_name == 'issue_comment' && (
+        github.event.comment.body == 'recheck' ||
+        contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')))
     steps:
       - name: CLA Assistant
         # 上游仓库已归档，浮动 tag v2 随之删除，只能钉死具体版本
@@ -38,5 +41,7 @@ jobs:
             请阅读 [CLA 文档](https://github.com/${{ github.repository }}/blob/main/CLA.md)，然后在此评论区回复以下内容以完成签署：
 
             > I have read the CLA Document and I hereby sign the CLA
+
+            签署后检查状态仍未更新时，再评论 `recheck`（须与此完全一致）重新检查。
 
           custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"

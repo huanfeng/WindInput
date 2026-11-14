@@ -1,4 +1,5 @@
-//! CapsLock 全局低级键盘钩子（`WH_KEYBOARD_LL`）。
+//! CapsLock 全局低级键盘钩子（`WH_KEYBOARD_LL`）。注释切换键选了 Alt 时同一个钩子兼管 Alt
+//! （判定见 [`crate::alt_tap`]）：**一个进程只装一个 LL 钩子**。
 //!
 //! # 为什么非它不可
 //!
@@ -20,7 +21,8 @@
 //!
 //! 1. **回调必须极快返回**。超时后 Win7+ 会把钩子**静默移除**，且「there is no way for the
 //!    application to know whether the hook is removed」。故回调里只读一个原子量 + 一次
-//!    非阻塞 `send`，**不加锁、不分配、不做 IPC**。
+//!    非阻塞 `send`，**不加锁、不分配、不做 IPC**。唯一例外是 Alt 松开时补发屏蔽键的那一次
+//!    `SendInput`（栈上数组、不阻塞）：屏蔽键必须排在 Alt 松开之前，只能在回调里补。
 //! 2. **安装线程必须有消息循环**（钩子是靠给该线程发消息来调用的）。故本模块自带专用线程。
 //! 3. ★ **专用线程，不能搭 UI 线程的便车**。UI 线程要渲染候选窗（LayeredWindow 位图合成），
 //!    某次渲染慢过 `LowLevelHooksTimeout`（Win10 1709+ 上限 1000ms）钩子就永久掉了，而且
@@ -34,10 +36,21 @@
 //!
 //! 勾成切换键时空闲也要吃（[`IDLE_PID`]），那道闸门另有两重保护：只在前台窗口属于
 //! 本输入法所在的那个进程时接管；按着 Shift / Ctrl / Alt / Win 时不接管。
+//!
+//! Alt 那一份另算：`ui.comment.switch_mode != off` 且 `switch_key` 是 Alt 系才要。钩子 =
+//! CapsLock 要 ∪ Alt 要，协调器两边都不要时卸载。闸门 [`set_alt_gate`] 只在有候选时非 0；
+//! 认领时还要前台窗口属于活动客户端的进程（[`set_alt_pid`]），候选窗残留时别的程序里的 Alt 不接管。
+//!
+//! Alt 的已知边角：
+//! - Alt+鼠标点击不算打断（钩子只看键盘），松开照样补屏蔽键、照样算单击；
+//! - 比我们晚装的 LL 钩子先吃掉的组合键我们看不到，那次会被当成单击；
+//! - 前台是管理员窗口时 UIPI 拦下 SendInput，补发失败走「不吃」分支：放行物理松开，那次菜单栏照常激活。
 
 #[cfg(windows)]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+pub use crate::alt_tap::AltEvent;
 
 /// 钩子此刻是否应当吃掉 CapsLock。
 ///
@@ -63,8 +76,21 @@ pub enum CapsEvent {
     Up { held_ms: u32, interrupted: bool },
 }
 
-/// CapsLock 事件的通知回调。在钩子线程里执行，实现方必须只做非阻塞投递。
-type PressCallback = Box<dyn Fn(CapsEvent) + Send + Sync + 'static>;
+/// 钩子投递给协调器的事件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    Caps(CapsEvent),
+    Alt(AltEvent),
+}
+
+/// Alt 闸门：`alt_tap::GATE_*` 位，0 = 不接管 Alt。由协调器随候选窗显隐更新。
+static ALT_GATE: AtomicU32 = AtomicU32::new(0);
+
+/// Alt 认领要求的前台进程 pid（活动客户端所在进程），0 = 不认领。随 [`ALT_GATE`] 一起同步。
+static ALT_PID: AtomicU32 = AtomicU32::new(0);
+
+/// 钩子事件的通知回调。在钩子线程里执行，实现方必须只做非阻塞投递。
+type PressCallback = Box<dyn Fn(HookEvent) + Send + Sync + 'static>;
 #[cfg(windows)]
 static CALLBACK: OnceLock<PressCallback> = OnceLock::new();
 
@@ -76,6 +102,16 @@ pub fn set_should_eat(eat: bool) {
 /// 设置「空闲时在哪个进程里也拦截 CapsLock」（0 = 不拦），见 [`IDLE_PID`]。钩子未安装时也可安全调用。
 pub fn set_idle_pid(pid: u32) {
     IDLE_PID.store(pid, Ordering::Relaxed);
+}
+
+/// 设置 Alt 闸门（`alt_tap::GATE_*` 位，0 = 不接管）。钩子未安装时也可安全调用。
+pub fn set_alt_gate(mask: u32) {
+    ALT_GATE.store(mask, Ordering::Relaxed);
+}
+
+/// 设置 Alt 认领要求的前台进程 pid（0 = 不认领）。钩子未安装时也可安全调用。
+pub fn set_alt_pid(pid: u32) {
+    ALT_PID.store(pid, Ordering::Relaxed);
 }
 
 /// 当前拦截状态（供日志/诊断）。
@@ -129,7 +165,10 @@ pub(crate) fn decide_eat(is_down: bool, should_eat: bool, eaten_down: bool) -> (
 
 #[cfg(windows)]
 mod imp {
-    use super::{CALLBACK, CapsEvent, IDLE_PID, SHOULD_EAT};
+    use super::{ALT_GATE, ALT_PID, CALLBACK, CapsEvent, HookEvent, IDLE_PID, SHOULD_EAT};
+    use crate::alt_tap::{AltPress, Origin, decide_alt};
+    use crate::key_inject::{INJECT_MARK, send_alt_release_masked};
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc;
     use tracing::{debug, error, info};
@@ -139,8 +178,8 @@ mod imp {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-        KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostThreadMessageW, SetWindowsHookExW,
-        UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
+        KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PostThreadMessageW,
+        SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
     };
 
     const VK_CAPITAL: u32 = 0x14;
@@ -174,6 +213,65 @@ mod imp {
     /// 这次被接管的按下期间是否按过别的键。首个 down 清零，其它键的 down 置位。
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+    /// 有一次被认领的 Alt 按下还没松开（闸门关了也要接着看它的松开）。
+    static ALT_OWED: AtomicBool = AtomicBool::new(false);
+
+    thread_local! {
+        /// 被认领的 Alt 按下。回调只在钩子线程上串行执行；每次安装是新线程，状态自然清空。
+        static ALT_PRESS: Cell<Option<AltPress>> = const { Cell::new(None) };
+    }
+
+    /// 按着 Shift / Ctrl / Win（只在认领 Alt 时查）。AltGr 布局下右 Alt 带一个系统合成的左 Ctrl，
+    /// 因而不认领——那里右 Alt 本就是字符修饰键。
+    fn other_modifiers_held() -> bool {
+        let held = |vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe {
+            GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0
+        };
+        held(VK_SHIFT) || held(VK_CONTROL) || held(VK_LWIN) || held(VK_RWIN)
+    }
+
+    /// Alt 侧：裁决、投递，返回是否吃掉。要补发时补发失败就不吃——宁可这次激活菜单栏，
+    /// 也不能让 Alt 卡在按下态。
+    fn handle_alt(info: &KBDLLHOOKSTRUCT, msg: u32) -> bool {
+        let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+        let origin = if (info.flags & LLKHF_INJECTED).0 != 0 {
+            Origin::Injected
+        } else {
+            Origin::Physical
+        };
+        let gate = ALT_GATE.load(Ordering::Relaxed);
+        let v = ALT_PRESS.with(|c| {
+            let mut press = c.get();
+            let v = decide_alt(
+                &mut press,
+                info.vkCode,
+                is_down,
+                origin,
+                info.time,
+                gate,
+                other_modifiers_held,
+                || foreground_is(ALT_PID.load(Ordering::Relaxed)),
+            );
+            c.set(press);
+            ALT_OWED.store(press.is_some(), Ordering::Relaxed);
+            v
+        });
+        if let Some(e) = v.event
+            && let Some(cb) = CALLBACK.get()
+        {
+            cb(HookEvent::Alt(e));
+        }
+        if !v.eat {
+            return false;
+        }
+        !v.mask
+            || send_alt_release_masked(
+                info.vkCode,
+                info.scanCode,
+                (info.flags & LLKHF_EXTENDED).0 != 0,
+            )
+    }
+
     /// 空闲闸门此刻对这次按下成不成立：前台窗口属于 `pid`，且没按着组合修饰键。
     ///
     /// 只在 CapsLock 的首个 down 上调（一次物理按下一次），两个都是不阻塞的系统调用。
@@ -187,6 +285,14 @@ mod imp {
             GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0
         };
         if held(VK_SHIFT) || held(VK_CONTROL) || held(VK_MENU) || held(VK_LWIN) || held(VK_RWIN) {
+            return false;
+        }
+        foreground_is(pid)
+    }
+
+    /// 前台窗口属于进程 `pid`（0 恒为假）。两个都是不阻塞的系统调用。
+    fn foreground_is(pid: u32) -> bool {
+        if pid == 0 {
             return false;
         }
         let mut fg_pid = 0u32;
@@ -208,16 +314,25 @@ mod imp {
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         // 文档：nCode < 0 必须直接下传；这里连 HC_ACTION 之外的一律下传。
-        // 三个标志都为假时立刻下传——绝大多数按键走的是这条路径，必须最短（三次
-        // relaxed 原子读，不解引用 lParam、不进任何分支）。空闲闸门开着时每个键都要进来
-        // 看一眼键码，那也只是一次解引用加比较。
-        if code == HC_ACTION
-            && (SHOULD_EAT.load(Ordering::Relaxed)
-                || IDLE_PID.load(Ordering::Relaxed) != 0
-                || EATEN_DOWN.load(Ordering::Relaxed))
+        // 五个标志都为假时立刻下传——绝大多数按键走的是这条路径，必须最短（五次
+        // relaxed 原子读：CapsLock 三个、Alt 两个；不解引用 lParam）。闸门开着时每个键都要
+        // 进来看一眼键码，那也只是一次解引用加比较。
+        let caps_active = SHOULD_EAT.load(Ordering::Relaxed)
+            || IDLE_PID.load(Ordering::Relaxed) != 0
+            || EATEN_DOWN.load(Ordering::Relaxed);
+        let alt_active = ALT_GATE.load(Ordering::Relaxed) != 0 || ALT_OWED.load(Ordering::Relaxed);
+        // SAFETY: 文档保证 nCode == HC_ACTION 时 lParam 指向有效的 KBDLLHOOKSTRUCT。
+        let info = (code == HC_ACTION && (caps_active || alt_active))
+            .then(|| unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) })
+            // 我们自己补发的事件一律放行，两侧状态都不碰。
+            .filter(|info| info.dwExtraInfo != INJECT_MARK);
+        if let Some(info) = info
+            && alt_active
+            && handle_alt(info, wparam.0 as u32)
         {
-            // SAFETY: 文档保证 nCode == HC_ACTION 时 lParam 指向有效的 KBDLLHOOKSTRUCT。
-            let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            return LRESULT(1);
+        }
+        if let Some(info) = info.filter(|_| caps_active) {
             if info.vkCode != VK_CAPITAL {
                 // 按住 CapsLock 期间按了别的键：松开时不算单按。
                 let msg = wparam.0 as u32;
@@ -254,7 +369,7 @@ mod imp {
                             }
                         };
                         if let Some(cb) = CALLBACK.get() {
-                            cb(ev);
+                            cb(HookEvent::Caps(ev));
                         }
                         return LRESULT(1);
                     }
@@ -274,6 +389,7 @@ mod imp {
             // 装卸之间若卡着一次未配对的 down（卸载恰好发生在用户按住 CapsLock 时），
             // 重装后第一个 keyup 会被误吃 ⇒ 用户在别的应用里 CapsLock 按不动。清零。
             EATEN_DOWN.store(false, Ordering::Relaxed);
+            ALT_OWED.store(false, Ordering::Relaxed);
 
             let (tx, rx) = mpsc::channel::<Result<u32, String>>();
             let join = std::thread::Builder::new()
@@ -295,15 +411,15 @@ mod imp {
                     while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
 
                     if let Err(e) = UnhookWindowsHookEx(hook) {
-                        error!("CapsLock 钩子卸载失败: {e}");
+                        error!("全局键盘钩子卸载失败: {e}");
                     } else {
-                        debug!("CapsLock 钩子已卸载");
+                        debug!("全局键盘钩子已卸载");
                     }
                 })?;
 
             match rx.recv() {
                 Ok(Ok(thread_id)) => {
-                    info!("CapsLock 全局钩子已安装 (tid={thread_id})");
+                    info!("全局键盘钩子已安装 (tid={thread_id})");
                     Ok(Self {
                         thread_id,
                         join: Some(join),
@@ -322,6 +438,8 @@ mod imp {
             IDLE_PID.store(0, Ordering::Relaxed);
             // 配对状态一并清零：钩子都要没了，「还欠一个 up」的账不能留给下一次安装。
             EATEN_DOWN.store(false, Ordering::Relaxed);
+            ALT_GATE.store(0, Ordering::Relaxed);
+            ALT_OWED.store(false, Ordering::Relaxed);
             unsafe {
                 let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
             }

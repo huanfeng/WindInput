@@ -61,6 +61,10 @@ impl QuickFormatOp {
             // 这里返回 None 是第二道闸——返回类型逼着「新加一个 op」时必须来这儿表态，
             // 而不是默默落进某个语义不搭的分支。
             C::ToggleCommon => None,
+            // 格式没有编码可言，菜单侧 quick 分支也不给这一项。
+            C::HideHere => None,
+            // 格式排序只有置顶 / 上移 / 下移，菜单侧 quick 分支不给这一项。
+            C::PinAt(_) => None,
         }
     }
 }

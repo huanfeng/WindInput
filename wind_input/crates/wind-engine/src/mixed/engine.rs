@@ -996,10 +996,19 @@ impl Engine for MixedEngine {
         a || b || c
     }
 
+    /// 拼音「屏蔽这个词」转给拼音子引擎：混输拼音段与拼音方案共用 `pinyin` 桶的屏蔽集（建图排除、
+    /// 整句换替补都在子引擎里）。码表段不受影响——码表不按文字屏蔽。
+    fn set_blocked_words(&self, words: std::sync::Arc<std::collections::HashSet<String>>) {
+        if let Some(s) = &self.secondary {
+            s.set_blocked_words(words);
+        }
+    }
+
     fn convert(&self, input: &str, max_candidates: usize) -> anyhow::Result<ConvertResult> {
         if input.is_empty() {
             return Ok(ConvertResult::default());
         }
+        let mut timer = crate::pinyin::ConvertStageTimer::new();
         let input_len = input.chars().count();
 
         // 超长分支（对齐 Go ConvertEx）：输入超过码表最大码长时，按 pinyin_only_overflow 分流，
@@ -1013,7 +1022,9 @@ impl Engine for MixedEngine {
         }
 
         // 1. 码表候选 + 加权
+        timer.mark("mx");
         let ct = self.primary.convert(input, max_candidates)?;
+        timer.mark("mxct");
         // 主码表的全码自动上屏意向（下方按拼音守护 + 合并存活性复核后才放行）。
         let ct_should_commit = ct.should_commit;
         let ct_commit_text = ct.commit_text.clone();
@@ -1047,6 +1058,7 @@ impl Engine for MixedEngine {
             // 吃掉的最直接后果。
             pinyin = py.candidates;
         }
+        timer.mark("mxpy");
 
         // 3. 合并 → 按截断档位稳定排序 → 按文本去重
         //
@@ -1066,6 +1078,8 @@ impl Engine for MixedEngine {
             english_exact: &input.to_lowercase(),
         };
         Self::sort_dedup_truncate(&mut merged, max_candidates, ctx);
+        timer.mark("mxmerge");
+
         if self.show_source_hint {
             Self::add_source_hints(&mut merged);
         }

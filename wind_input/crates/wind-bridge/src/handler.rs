@@ -24,6 +24,10 @@ pub struct KeyEventData {
     pub toggles: u8,
     pub event_seq: u16,
     pub prev_char: u16,
+    /// 输入序列里最近进文档的字符代表值（0 = 不可知）。客户端记账，取值规则见 C++
+    /// `InputSequenceChar.h`；服务端只用它的**类别**（`wind_punct::CharClass`）。
+    /// 与 `prev_char` 是两个事实：后者仍是数字后智能标点 / 智能符号 press2 守卫的输入。
+    pub seq_char: u16,
 }
 
 impl From<&KeyPayload> for KeyEventData {
@@ -36,6 +40,7 @@ impl From<&KeyPayload> for KeyEventData {
             toggles: p.toggles,
             event_seq: p.event_seq,
             prev_char: p.prev_char,
+            seq_char: p.seq_char,
         }
     }
 }
@@ -194,6 +199,42 @@ pub enum KeyAction {
 }
 
 impl KeyAction {
+    /// 把应用侧组合串里的拼音音节分隔符换成 `sep`（GH#267）。只改**组合串**：已承诺上屏的
+    /// 正文不动；`UpdateComposition` 的光标位置（字符数）按替换后的长度换算。
+    pub fn with_syllable_separator(self, sep: &str) -> KeyAction {
+        match self {
+            KeyAction::UpdateComposition { text, caret_pos } if text.contains('\'') => {
+                KeyAction::UpdateComposition {
+                    caret_pos: map_caret_utf16(&text, caret_pos as usize, sep) as _,
+                    text: apply_syllable_separator(&text, sep),
+                }
+            }
+            KeyAction::InsertText {
+                text,
+                new_composition: Some(c),
+                mode_changed,
+                chinese_mode,
+                has_new_composition,
+            } if c.contains('\'') => KeyAction::InsertText {
+                text,
+                new_composition: Some(apply_syllable_separator(&c, sep)),
+                mode_changed,
+                chinese_mode,
+                has_new_composition,
+            },
+            KeyAction::CommitThenDeferComposition {
+                commit_text,
+                deferred_composition,
+                timeout_ms,
+            } if deferred_composition.contains('\'') => KeyAction::CommitThenDeferComposition {
+                commit_text,
+                deferred_composition: apply_syllable_separator(&deferred_composition, sep),
+                timeout_ms,
+            },
+            other => other,
+        }
+    }
+
     /// 非 app_inline（候选窗自行显示 preedit）时，应用侧组合串替换为单个占位字符、光标置前。
     /// 目的：保留一段组合串供应用上报 caret 坐标（候选窗定位），但不在应用内显示真实编码
     /// （避免与候选窗 preedit 重复）。对齐 Go 版"模拟空格 + 光标移前"。
@@ -334,6 +375,30 @@ pub struct CaretData {
     pub composition_rect: Option<(i32, i32, i32, i32)>,
 }
 
+/// 把拼音编码显示串里的音节分隔符 `'` 换成 `sep`（`ui.candidate.syllable_separator`，可为空串）。
+/// 只用于**显示**：引擎内部缓冲与切分不动。
+pub fn apply_syllable_separator(text: &str, sep: &str) -> String {
+    text.replace('\'', sep)
+}
+
+/// [`apply_syllable_separator`] 之后，原串光标位置换算到新串。
+///
+/// 单位是 **UTF-16 码元**（与 `KeyAction::UpdateComposition::caret_pos` 一致）：前缀里有
+/// 扩展 B 区汉字（2 码元）、分隔符是非 BMP 字符（如 emoji）时，按字符数算会偏。
+pub fn map_caret_utf16(text: &str, caret: usize, sep: &str) -> usize {
+    let (mut units, mut quotes) = (0usize, 0usize);
+    for c in text.chars() {
+        if units >= caret {
+            break;
+        }
+        units += c.len_utf16();
+        if c == '\'' {
+            quotes += 1;
+        }
+    }
+    caret - quotes + quotes * sep.encode_utf16().count()
+}
+
 /// MessageHandler trait：协调器实现此接口处理各种事件
 pub trait MessageHandler: Send + Sync {
     /// 处理按键事件
@@ -350,14 +415,29 @@ pub trait MessageHandler: Send + Sync {
         COMPOSITION_PLACEHOLDER
     }
 
+    /// 刚处理完的这次按键之后，是否处于「无占位的联想会话」（`assoc_placeholder = "none"`）。
+    /// 为真时 bridge 在上屏应答里置 `COMMIT_FLAG_ASSOC_SESSION`，让 DLL **同步**获知
+    /// 该继续转发按键（宿主里没有组合可供 `HasActiveComposition()` 判断）。默认否。
+    fn assoc_session_hint(&self) -> bool {
+        false
+    }
+
     /// 处理按键并按 preedit 显示策略后处理组合串（bridge 入口应调用此方法）。
     fn handle_key_event_policed(&self, data: &KeyEventData) -> KeyAction {
         let action = self.handle_key_event(data);
         if self.preedit_uses_placeholder() {
             action.with_composition_placeholder(self.composition_placeholder())
+        } else if let Some(sep) = self.syllable_separator() {
+            action.with_syllable_separator(&sep)
         } else {
             action
         }
+    }
+
+    /// 当前该用什么字符显示拼音音节分隔符；`None` = 保持默认 `'`（含非拼音场合）。
+    /// 占位模式下组合串已换成占位符，无需再换。
+    fn syllable_separator(&self) -> Option<String> {
+        None
     }
 
     /// 新客户端连接建立时调用（仅桥接主通道，`pid` 取自 `GetNamedPipeClientProcessId`
@@ -436,8 +516,8 @@ pub trait MessageHandler: Send + Sync {
     /// `source` 是发起方（宿主写 compartment / 按键兜底 / 功能菜单）；`ctrl_held` 是这次
     /// compartment 变化发生时 Ctrl 是否被按住，由 DLL 现场采样。
     ///
-    /// 两者一起构成 per-app `ignore_host_ime_close` 的判据：只有「compartment 来源 + 关
-    /// + Ctrl 未按住」才是宿主自作主张，其余（Ctrl+Space、按键兜底、菜单）一律照办。
+    /// 两者一起构成 `ignore_host_ime_switch` 的判据：只有「compartment 来源 + Ctrl 未按住」
+    /// 才是宿主自作主张（开和关两个方向），其余（Ctrl+Space、按键兜底、菜单）一律照办。
     ///
     /// ⚠ 除这一条规则外不要按 source 分支——语义上各来源一视同仁。
     fn handle_system_mode_switch(
@@ -567,6 +647,10 @@ pub trait MessageHandler: Send + Sync {
 
     /// compartment 禁用态变更（不换焦点）上报。默认空实现。
     fn handle_input_state_report(&self, _pid: u32, _disabled: bool, _reason: u8, _mask: u64) {}
+
+    /// DLL 放行给宿主的用户按键（`CMD_KEY_OBSERVED`），只为扩展程序上报。**不得**参与任何
+    /// 输入决策——它只在有扩展订阅时才到达。默认空实现。
+    fn handle_key_observed(&self, _key_code: u32, _modifiers: u32) {}
 
     /// 诊断快照上报（焦点窗口链 / 前台窗口 / TSF 上下文实例 id）。
     ///
@@ -740,5 +824,43 @@ mod focus_data_debug_tests {
         assert!(!s.contains("机密"), "{s}");
         assert!(s.contains("window_title_len: 9"), "{s}");
         assert!(s.contains("Chrome_WidgetWin_1"), "类名照常输出");
+    }
+}
+
+#[cfg(test)]
+mod syllable_separator_tests {
+    use super::*;
+
+    /// 光标是 UTF-16 码元：分隔符换成更长 / 更短 / 非 BMP，光标都要落在同一个音节边界上。
+    #[test]
+    fn caret_follows_separator_in_utf16_units() {
+        let t = "xiao'peng";
+        // 光标在第一个 ' 之后（5 个码元）
+        assert_eq!(map_caret_utf16(t, 5, ""), 4, "去掉分隔符少 1");
+        assert_eq!(map_caret_utf16(t, 5, "'"), 5);
+        assert_eq!(map_caret_utf16(t, 5, "·"), 5, "BMP 单字符与 ' 同长");
+        assert_eq!(map_caret_utf16(t, 5, " "), 5);
+        assert_eq!(map_caret_utf16(t, 5, "😀"), 6, "非 BMP 分隔符占 2 个码元");
+        // 光标在分隔符之前：不受影响
+        assert_eq!(map_caret_utf16(t, 4, "😀"), 4);
+        // 前缀里有扩展 B 区字（2 码元）：按码元数而不是字符数
+        let t = "𠀀xiao'peng";
+        assert_eq!(map_caret_utf16(t, 7, ""), 6);
+        assert_eq!(map_caret_utf16(t, 7, "😀"), 8);
+    }
+
+    #[test]
+    fn with_syllable_separator_maps_caret_and_text() {
+        let act = KeyAction::UpdateComposition {
+            text: "xiao'peng".into(),
+            caret_pos: 9,
+        };
+        match act.with_syllable_separator("") {
+            KeyAction::UpdateComposition { text, caret_pos } => {
+                assert_eq!(text, "xiaopeng");
+                assert_eq!(caret_pos, 8, "光标在末尾仍在末尾");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

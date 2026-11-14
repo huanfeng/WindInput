@@ -169,6 +169,74 @@ int main()
         g.press(kNoHit);
         CHECK_EQ(g.release(kNoHit), kNoHit);
     }
+    CASE("DecorClickGate：同一块装饰、没挪过阈值才算点击，且只交一次");
+    {
+        DecorClickGate g;
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(3, 104, 96), 3);
+        CHECK_EQ(g.release(3, 104, 96), -1);
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(3, 105, 100), -1); // 挪过阈值：是在拖
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(3, 100, 95), -1);
+        g.press(3, 100, 100);
+        CHECK_EQ(g.release(4, 100, 100), -1); // 松开在别的装饰上
+        g.press(-1, 0, 0);
+        CHECK_EQ(g.release(-1, 0, 0), -1); // 没按在装饰上
+        g.press(0, 0, 0);
+        g.cancel();
+        CHECK_EQ(g.release(0, 0, 0), -1); // 收起后的松开
+        g.press(0, 0, 0);
+        CHECK_EQ(g.release(0, 0, 0), 0); // 下标 0 是合法装饰
+    }
+    CASE("CandidateDragGate：挪过阈值才跟随，过了就一直跟；没过阈值的松开不算拖");
+    {
+        CandidateDragGate g;
+        CHECK(!g.move(10, 10).has_value()); // 没按下
+        g.press(100, 100, 50, 60);
+        CHECK(!g.move(104, 96).has_value()); // 阈值内
+        CHECK(!g.moving());
+        using P = std::optional<std::pair<int32_t, int32_t>>;
+        CHECK(g.move(105, 100) == P(std::make_pair(55, 60)));
+        CHECK(g.move(100, 101) == P(std::make_pair(50, 61))); // 回到阈值内也接着跟
+        CHECK(g.release());
+        CHECK(!g.release()); // 只交一次
+        CHECK(!g.move(200, 200).has_value());
+        g.press(100, 100, 50, 60);
+        g.move(103, 103);
+        CHECK(!g.release()); // 阈值内松开：是点击
+        g.press(100, 100, 50, 60);
+        g.move(100, 120);
+        g.cancel();
+        CHECK(!g.moving());
+        CHECK(!g.release()); // 收起后的松开
+        // 松开事件丢了：之后来的移动里左键已没按着，按松开收尾，闸门放掉、不再跟随。
+        CHECK(!g.releaseIfUp(false).has_value()); // 没按下
+        g.press(100, 100, 50, 60);
+        g.move(120, 100);
+        CHECK(!g.releaseIfUp(true).has_value()); // 左键还按着：照常
+        CHECK(g.moving());
+        CHECK(g.releaseIfUp(false) == std::optional<bool>(true)); // 拖过：要报落点
+        CHECK(!g.moving());
+        CHECK(!g.move(130, 130).has_value()); // 之后的悬停不带着窗口走
+        g.press(100, 100, 50, 60);
+        CHECK(g.releaseIfUp(false) == std::optional<bool>(false)); // 没拖过：不报
+        CHECK(!g.move(130, 130).has_value());
+    }
+    CASE("host.reduce_motion：{reduce}");
+    {
+        std::string kind;
+        CHECK_EQ(extBody(encodeReduceMotionFrame(true), kind), std::string(R"({"reduce":true})"));
+        CHECK_EQ(kind, std::string("host.reduce_motion"));
+        CHECK_EQ(extBody(encodeReduceMotionFrame(false), kind), std::string(R"({"reduce":false})"));
+    }
+    CASE("skin.decor_click：{index}");
+    {
+        std::string kind;
+        const std::string body = extBody(encodeDecorClickFrame(12), kind);
+        CHECK_EQ(kind, std::string("skin.decor_click"));
+        CHECK_EQ(body, std::string(R"({"index":12})"));
+    }
     CASE("ClickGate：候选窗收起后的松开不选");
     {
         ClickGate g;
@@ -356,6 +424,26 @@ int main()
         // 折成面板坐标后的默认右下角落在任务栏上方
         const Rect px = scaleRect(layerUsableArea(Rect{0, 0, 1536, 864}, 1536, 816), 1.25);
         CHECK(px.x == 0 && px.y == 0 && px.w == 1920 && px.h == 1020);
+    }
+
+    CASE("跨屏拖动：先选屏再钳制，不能在源屏边缘截断累计位移");
+    {
+        const std::vector<Rect> outs{{-1920, 200, 1920, 1080}, {0, 0, 2560, 1440}};
+        auto p = placePanelDrag(outs, Rect{-210, 400, 200, 40}, 0);
+        CHECK_EQ(p.output, 0);
+        CHECK_EQ(p.rect.x, -210); // 原始位置仍在源屏内
+        p = placePanelDrag(outs, Rect{-90, 400, 200, 40}, 0);
+        CHECK_EQ(p.output, 1);
+        CHECK_EQ(p.rect.x, 0); // 中心越界，落到目标屏左边
+        p = placePanelDrag(outs, Rect{-300, 400, 200, 40}, 1);
+        CHECK_EQ(p.output, 0); // 可以拖回负坐标的屏
+        CHECK_EQ(p.rect.x, -300);
+        p = placePanelDrag(outs, Rect{-500, 0, 200, 40}, 0);
+        CHECK_EQ(p.output, 0); // 布局空洞保持原屏，夹到该屏顶边
+        CHECK_EQ(p.rect.y, 200);
+        p = placePanelDrag({}, Rect{20, 30, 200, 40}, 0);
+        CHECK_EQ(p.output, -1);
+        CHECK_EQ(p.rect.x, 20);
     }
 
     CASE("panelOutputIndex：窗口中心落在哪块输出；都不在时用回退下标");

@@ -34,14 +34,14 @@
 #   9s / d9s     生成便携包 (跳过重建, 直接打包现有 build[_dev]/)
 #   stage        打包发布中转产物: build/ + 安装器三件套 → dist\*-Stage-<版本>.zip
 #                【在 CI 上跑】。CI 建不了签名会话 (docs\design\code-signing.md 第 3 节),
-#                但签名夹在打包中间, 本机只补签成品外壳会漏掉包内 5 个 PE, 故中转的是
+#                但签名夹在打包中间, 本机只补签成品外壳会漏掉包内 6 个 PE, 故中转的是
 #                打包【之前】的散件。
 #   unstage <zip>  还原中转产物到 build/ 与安装器 target/, 供本机 sign 8s / sign 9s。
 #                【在本机跑】。会硬校验版本号与 docs\VERSION 一致, 并整体替换 build/。
 #                典型: release.ps1 sign-draft 会自动完成「拉取 → 还原 → 签名 → 回传」。
 #   sign         代码签名【开关】, 位置无关, 与构建/打包命令连用:
-#                  dev.ps1 sign 1  ≡  dev.ps1 1 sign     全构建并签名 (5 个 PE)
-#                  dev.ps1 sign 8  ≡  dev.ps1 8 sign     出安装包并签名 (5 个 PE + 安装包)
+#                  dev.ps1 sign 1  ≡  dev.ps1 1 sign     全构建并签名 (6 个 PE)
+#                  dev.ps1 sign 8  ≡  dev.ps1 8 sign     出安装包并签名 (6 个 PE + 安装包)
 #                ⚠️【默认不签】: 签名次数按月计费且有限, 不写 sign 就一次也不消耗。
 #                   连着跑 sign 8 再 sign 9s 时, 便携包里的 PE 已签过会自动跳过,
 #                   不会重复扣次数。
@@ -229,7 +229,7 @@ function Build-Core ([string]$profile = "release", [string]$outdir = $null) {
     Say "`n[core] 构建 wind_input ($prof)..."
     Push-Location $ProjectRoot
     try {
-        cargo build --profile $prof -p wind_service
+        cargo build --profile $prof -p wind_service -p wind_extension_host
         if ($LASTEXITCODE -ne 0) { ErrMsg "wind_input 构建失败!"; return $false }
     } finally { Pop-Location }
     $src = Join-Path (Get-CargoTargetDir $ProjectRoot) "$prof\wind_input.exe"
@@ -237,6 +237,11 @@ function Build-Core ([string]$profile = "release", [string]$outdir = $null) {
     Copy-Item $src "$outdir\wind_input$suffix.exe" -Force
     $sz = [math]::Round((Get-Item "$outdir\wind_input$suffix.exe").Length / 1MB, 1)
     Gray "已构建: wind_input$suffix.exe (${sz}MB)"
+    # 扩展宿主：核心按 exe 同目录找它，名字随变体带后缀（同名会被另一变体的部署按进程名停掉）。
+    $hostExe = Join-Path (Get-CargoTargetDir $ProjectRoot) "$prof\wind_input_ext.exe"
+    if (-not (Test-Path $hostExe)) { ErrMsg "未找到产物: $hostExe"; return $false }
+    Copy-Item $hostExe "$outdir\wind_input_ext$suffix.exe" -Force
+    Gray "已构建: wind_input_ext$suffix.exe"
     # CLI 包装器 (wind_input config ...; 运行时自辨 dev/release exe, 两变体共用一份)
     $cli = "$ProjectRoot\scripts\wind_cli.bat"
     if (Test-Path $cli) { Copy-Item $cli "$outdir\wind_cli.bat" -Force; Gray "已复制: wind_cli.bat" }
@@ -482,6 +487,8 @@ function Download-Dicts {
     Get-Dict "$wubiBase/wubi86_jidian_extra.dict.yaml"          "$rimeWubi\wubi86_jidian_extra.dict.yaml"          "扩展词库"   | Out-Null
     Get-Dict "$wubiBase/wubi86_jidian_extra_district.dict.yaml" "$rimeWubi\wubi86_jidian_extra_district.dict.yaml" "行政区域"   | Out-Null
 
+    # 中英释义不再下载上游: ECDICT / CC-CEDICT 用到的部分已冻结进 data\comments-src\*_raw.tsv (见 Assemble-Data)。
+
     # Unicode CLDR emoji 中文注解 + emoji 白名单。不参与常规构建 —— emoji 命名表
     # (custom_emoji_named.txt) 已入库, 这些原始档只在需要重新生成它时用到:
     #   cargo run -p wind-tools --bin gen_emoji_names -- --cldr .cache\cldr `
@@ -591,6 +598,20 @@ function Remove-UnshippedImports ([string]$main) {
         }
     }
     [IO.File]::WriteAllText($main, ($lines -join "`n"), [Text.UTF8Encoding]::new($false))
+}
+
+# 找可用的 Python 3: 输出命令的各段 (如 python / py -3), 没有则无输出; 调用方必须用 @(Find-Python3) 收，
+# 单段命令会被展开成字符串。
+# 用 --version 验证而不是只看 Get-Command: 未装 Python 的 Windows 上 python 是指向应用商店的占位 stub。
+function Find-Python3 {
+    foreach ($c in @(@('python'), @('py', '-3'), @('python3'))) {
+        if (-not (Get-Command $c[0] -ErrorAction SilentlyContinue)) { continue }
+        $rest = @(); if ($c.Count -gt 1) { $rest = $c[1..($c.Count - 1)] }
+        $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try { $v = & $c[0] @rest --version 2>&1 | Out-String } catch { $v = "" } finally { $ErrorActionPreference = $old }
+        if ($v -match '^Python 3') { return $c }
+    }
+    return
 }
 
 # 从 data/(源) + .cache/(下载/生成) 组装完整运行时数据到 $outdir\data\
@@ -726,6 +747,36 @@ function Assemble-Data ([string]$outdir = $BuildDevDir) {
         }
     } else { Warn "缺 .cache\rime-frost\opencc\, 白霜 emoji 模块不可用 (运行 gen-data 下载)" }
 
+    # 9. 内置中英释义注释词库 (Python 脚本 scripts\comment_dicts\build.py): en_zh 按英文词表、
+    #    zh_en 按拼音/五笔词表裁剪, 产物只进 build 目录、不入版本库。源数据全部入库在 data\comments-src\:
+    #    重整版、AI 补齐, 以及重整版没覆盖的原始释义快照 (*_raw.tsv, ECDICT MIT / CC-CEDICT CC BY-SA 4.0,
+    #    许可见 NOTICE.md)。冻结进仓后构建可复现、不依赖外网; 更新上游时手工跑 build.py snapshot 再提交。
+    #    随第 1 步一并复制进来, 用完剥掉不随包分发。缺 Python 或生成失败这里只 Warn, 发版由 Verify-DistData 拦下。
+    #    ⚠ dev.sh 与 mac/dev.sh 的同名步骤是同一件事, 改一边要同步另外两边。
+    $cdict = "$ProductRoot\scripts\comment_dicts\build.py"
+    $src   = "$data\comments-src"
+    $py    = @(Find-Python3)
+    if ($py.Count -lt 1 -or -not $py[0] -or "$($py[0])".Length -le 1) {
+        Warn "缺 Python 3 (python / py -3), 中英释义词库不可用"
+    } else {
+        Gray "生成中英释义注释词库 (comment_dicts) ..."
+        $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try {
+            New-Item -ItemType Directory -Path "$schemas\comments" -Force | Out-Null
+            $pyRest = @(); if ($py.Count -gt 1) { $pyRest = $py[1..($py.Count - 1)] }
+            # 拼音表用于丢掉 AI 释义里拼音化的专名; 缺了只是不过滤
+            $pmArgs = @(); if (Test-Path "$data\pinyin_map.txt") { $pmArgs = @("--pinyin", "$data\pinyin_map.txt") }
+            # build.py 把进度写到 stderr; 全局 $ErrorActionPreference=Stop 下 PS5.1 会把它当错误, 此处临时放宽。
+            & $py[0] @pyRest -I $cdict en-zh --raw "$src\en_zh_ecdict_raw.tsv" --words "$english\en.dict.yaml" "$english\en_ext.dict.yaml" --refined "$src\en_zh_refined.tsv" --out "$schemas\comments\en_zh.txt"
+            if ($LASTEXITCODE -ne 0) { Warn "英→中释义词库生成失败" }
+            & $py[0] @pyRest -I $cdict zh-en --raw "$src\zh_en_cedict_raw.tsv" --ai "$src\zh_en_ai.tsv" --refined "$src\zh_en_cedict_refined.tsv" @pmArgs --words "$pinyinCn\base.dict.yaml" "$pinyinCn\ext.dict.yaml" "$pinyin\ext\idiom.dict.yaml" "$schemas\wubi86\wubi86_jidian.dict.yaml" --out "$schemas\comments\zh_en.txt"
+            if ($LASTEXITCODE -ne 0) { Warn "中→英释义词库生成失败" }
+        } catch {
+            Warn "中英释义词库生成出错, 已跳过: $($_.Exception.Message)"
+        } finally { $ErrorActionPreference = $old }
+    }
+    if (Test-Path "$data\comments-src") { Remove-Item -Recurse -Force "$data\comments-src" }
+
     $cnt = (Get-ChildItem $data -Recurse -File).Count
     Gray "data/ 组装完成 ($cnt 文件)"
     return $true
@@ -784,7 +835,11 @@ function Verify-DistData ([string]$outdir = $BuildDir) {
         @{ Path = "schemas\aux_code\stroke.txt";     Min = 500000 },
         @{ Path = "schemas\aux_code\flypy_full.txt"; Min = 50000 },
         # 笔画方案词库同为 gen_aux_code 生成物; 全拼默认辅助码经 schema:stroke 引用它
-        @{ Path = "schemas\stroke\stroke.dict.yaml"; Min = 500000 }
+        @{ Path = "schemas\stroke\stroke.dict.yaml"; Min = 500000 },
+        # 内置中英释义注释词库 (comment_dicts\build.py 生成物): 生成失败在组装时只 Warn,
+        # 缺了出厂详细态没有英文 / 中文释义且无任何报错。实测 en_zh 约 527KB、zh_en 约 4.3MB
+        @{ Path = "schemas\comments\en_zh.txt"; Min = 300000 },
+        @{ Path = "schemas\comments\zh_en.txt"; Min = 3000000 }
     )
     Say "`n校验发布数据完整性 → $data"
     foreach ($c in $checks) {
@@ -918,7 +973,7 @@ function Invoke-BuildStagesParallel ([string]$profile, [string]$outdir) {
 # ---------- 代码签名 (默认关闭; 需在命令里显式写 sign) ----------
 # 实现在 scripts\sign.ps1, 配置在 scripts\sign.local.ps1 (gitignore, 模板见 .example)。
 #
-# 【默认不签】—— 签名次数按月计费且有限, 一次全构建 5 个 PE、加打包 7 次。
+# 【默认不签】—— 签名次数按月计费且有限, 一次全构建 6 个 PE、加打包 8 次。
 # 开关是位置无关的命令关键字 sign (定义见文件末尾"入口"段):
 #     dev.ps1 1        只构建, 不签         dev.ps1 sign 1   构建并签名
 #     dev.ps1 8        出包, 不签           dev.ps1 sign 8   出包并签名
@@ -1372,6 +1427,7 @@ function Deploy-Full ([string]$profile = "release") {
         Say "[4/7] 复制文件..."
         Copy-Replace $targetDir "wind_input$suffix.exe" "$outdir\wind_input$suffix.exe"
         if (Test-Path "$outdir\wind_cli.bat")      { Copy-Replace $targetDir "wind_cli.bat"      "$outdir\wind_cli.bat" }
+        if (Test-Path "$outdir\wind_input_ext$suffix.exe") { Copy-Replace $targetDir "wind_input_ext$suffix.exe" "$outdir\wind_input_ext$suffix.exe" }
         foreach ($dll in (Get-ChildItem "$outdir\wind_tsf*.dll" -ErrorAction SilentlyContinue)) {
             Copy-Replace $targetDir $dll.Name $dll.FullName
         }
@@ -1408,7 +1464,7 @@ function Get-ModuleFiles ([string]$mod, [string]$suffix) {
     switch ($mod) {
         "tsf"     { @{ Required = @("wind_tsf$suffix.dll", "wind_tsf_x86${suffix}.dll"); Optional = @() } }
         # wind_cli.bat 两变体共用一份、且 Build-Core 里是"存在才复制", 故列为可选
-        "core"    { @{ Required = @("wind_input$suffix.exe"); Optional = @("wind_cli.bat") } }
+        "core"    { @{ Required = @("wind_input$suffix.exe"); Optional = @("wind_cli.bat", "wind_input_ext$suffix.exe") } }
         "setting" { @{ Required = @("wind_setting$suffix.exe"); Optional = @() } }
         # 便携启动器是单一二进制, 不带变体后缀 (运行时按同级有无 _dev exe 自辨变体)
         "portable" { @{ Required = @("wind_portable.exe"); Optional = @() } }
@@ -1560,6 +1616,7 @@ function Deploy-Portable ([string]$profile = "release") {
     Say "[3/5] 复制程序文件..."
     Copy-Replace $root "wind_input$suffix.exe" "$outdir\wind_input$suffix.exe"
     if (Test-Path "$outdir\wind_cli.bat") { Copy-Replace $root "wind_cli.bat" "$outdir\wind_cli.bat" }
+    if (Test-Path "$outdir\wind_input_ext$suffix.exe") { Copy-Replace $root "wind_input_ext$suffix.exe" "$outdir\wind_input_ext$suffix.exe" }
     foreach ($dll in (Get-ChildItem "$outdir\wind_tsf*.dll" -ErrorAction SilentlyContinue)) {
         Copy-Replace $root $dll.Name $dll.FullName
     }
@@ -1793,7 +1850,7 @@ function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPat
         $id = "WindInputDev"; $disp = "清风输入法 (开发版)"; $mainExe = "wind_input_dev.exe"
         $menu = "清风输入法 (开发版)"; $title = "清风输入法 (开发版) 安装向导"; $proto = "windinputdev"
         $settingExe = "wind_setting_dev.exe"
-        $procs = '["wind_setting_dev", "wind_portable", "wind_input_dev"]'
+        $procs = '["wind_setting_dev", "wind_portable", "wind_input_dev", "wind_input_ext_dev"]'
         $acl   = '["wind_tsf_dev.dll", "wind_tsf_x86_dev.dll"]'
         $clsid = "{99C2DEB0-5C57-45A2-9C63-FB54B34FD90A}"; $prof = "{99C2DEB1-5C57-45A2-9C63-FB54B34FD90A}"
         $dllX64 = "wind_tsf_dev.dll"; $dllX86 = "wind_tsf_x86_dev.dll"; $outName = "WindInputDev-Setup"
@@ -1801,7 +1858,7 @@ function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPat
         $id = "WindInput"; $disp = "清风输入法"; $mainExe = "wind_input.exe"
         $menu = "清风输入法"; $title = "清风输入法 安装向导"; $proto = "windinput"
         $settingExe = "wind_setting.exe"
-        $procs = '["wind_setting", "wind_portable", "wind_input"]'
+        $procs = '["wind_setting", "wind_portable", "wind_input", "wind_input_ext"]'
         $acl   = '["wind_tsf.dll", "wind_tsf_x86.dll"]'
         $clsid = "{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}"; $prof = "{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}"
         $dllX64 = "wind_tsf.dll"; $dllX86 = "wind_tsf_x86.dll"; $outName = "WindInput-Setup"
@@ -2015,7 +2072,7 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
     # 2.5 签 build\ 下的 PE —— 必须在 pack 之前, 因为 pack 就是把它们封进压缩块。
     #
     # ⚠️ 这一步【不能】只依赖 Do-Full 里那次: skip 模式 (8s/d8s) 根本不走 Do-Full,
-    #    于是会打出一个「外壳签了、里面 5 个 PE 全裸」的安装包 —— 而且从外面完全看不
+    #    于是会打出一个「外壳签了、里面 6 个 PE 全裸」的安装包 —— 而且从外面完全看不
     #    出来 (验签 Setup.exe 是通过的)。实测踩过。
     #    非 skip 模式下 Do-Full 已经签过, 这里按签名者指纹识别后整体跳过, 不重复消耗配额。
     if (-not (Invoke-SignArtifacts @($outdir) "$profile 产物")) { return $false }
@@ -2103,7 +2160,7 @@ function Do-Installer ([string]$profile = "release", [bool]$skipBuild = $false) 
 #
 # ⚠️ 为什么不能让 CI 直接出包、本机只补签外壳:
 #    签名【夹在打包中间】—— PE 签在封进压缩块之前, Setup.exe 签在 pack 之后、
-#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 5 个 PE 仍是全裸的, 而
+#    New-UpdateManifest 之前。对成品补签只能签到外壳, 包内 6 个 PE 仍是全裸的, 而
 #    signtool verify 验 Setup.exe 照样通过 —— 从外面完全看不出来 (实测踩过, 见
 #    Do-Installer 第 2.5 步)。所以中转的必须是打包【之前】的散件。
 #
@@ -2226,7 +2283,7 @@ function Do-Unstage ([string]$zipPath) {
 
     Remove-Item $tmp -Recurse -Force
     Say "`n还原完成。下一步 (需先建立签名会话):"
-    Gray "  .\scripts\dev.ps1 sign 8s      出签名安装包 (5 个 PE + 卸载器 + 外壳, 7 次配额)"
+    Gray "  .\scripts\dev.ps1 sign 8s      出签名安装包 (6 个 PE + 卸载器 + 外壳, 8 次配额)"
     Gray "  .\scripts\dev.ps1 sign 9s      出签名便携包 (PE 已签, 0 次配额)"
     Gray "  .\scripts\dev.ps1 verify-sign  验签 dist\"
     return $true
@@ -2615,7 +2672,7 @@ $allCmds = @($Commands | Where-Object { $_ -ne "" })
 
 # ---------- 签名开关: sign ----------
 # 签名【默认关闭】, 必须显式写 sign 才签。理由是签名次数按月计费且有限 ——
-# 一次全构建就是 5 个 PE, 加打包是 7 次; 若"配了证书就自动签", 日常 d1 几天就能把
+# 一次全构建就是 6 个 PE, 加打包是 8 次; 若"配了证书就自动签", 日常 d1 几天就能把
 # 一个月的额度烧光。宁可发版时多打一个词, 也不要每次构建都在扣费。
 #
 # ⚠️ 为什么是命令关键字而不是 -Sign 参数: 本脚本的 $Commands 用了

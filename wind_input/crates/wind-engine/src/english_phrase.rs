@@ -103,7 +103,7 @@ const PHRASE_INDEX_CACHE_KEEP: usize = 4;
 /// 算不算进程私有内存（同 `wind_dict::reverseidx` 的 `IndexData`）。
 enum ImageData {
     Owned(Vec<u8>),
-    Mapped(memmap2::Mmap),
+    Mapped(wind_dict::mapping::Mapped),
 }
 
 impl ImageData {

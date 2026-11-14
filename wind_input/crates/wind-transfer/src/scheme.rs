@@ -538,6 +538,14 @@ pub(crate) struct PayloadEntry {
 /// 它还要求 `format_version ≥ 2`:legacy 语义下旧客户端会把它当死文件落盘,生成端
 /// 必须显式声明版本——硬拒绝比「装了但配置没生效」更早暴露问题。
 fn scan_package(package: &Path) -> anyhow::Result<(Vec<PayloadEntry>, Option<String>)> {
+    scan_package_with_limit(package, MAX_PACKAGE_UNCOMPRESSED_BYTES)
+}
+
+/// [`scan_package`] 的可调上限版：声明总大小超过 `max_uncompressed` 即拒绝。
+fn scan_package_with_limit(
+    package: &Path,
+    max_uncompressed: u64,
+) -> anyhow::Result<(Vec<PayloadEntry>, Option<String>)> {
     // 版本门禁在 read_package_meta 内(先于说明校验),此处不再重复。
     let meta = read_package_meta(package)?;
     let file = std::fs::File::open(package)?;
@@ -557,10 +565,8 @@ fn scan_package(package: &Path) -> anyhow::Result<(Vec<PayloadEntry>, Option<Str
     for i in 0..archive.len() {
         declared = declared.saturating_add(archive.by_index_raw(i)?.size());
     }
-    if declared > MAX_PACKAGE_UNCOMPRESSED_BYTES {
-        anyhow::bail!(
-            "方案包解压后过大(声明 {declared} 字节,上限 {MAX_PACKAGE_UNCOMPRESSED_BYTES})"
-        );
+    if declared > max_uncompressed {
+        anyhow::bail!("方案包解压后过大(声明 {declared} 字节,上限 {max_uncompressed})");
     }
     let mut entries: Vec<PayloadEntry> = Vec::new();
     let mut has_root_schema = false;
@@ -737,13 +743,25 @@ pub fn import_package(
     user_dir: &Path,
     strategy: crate::merge::Strategy,
 ) -> anyhow::Result<SchemeImportResult> {
-    let (entries, _) = scan_package(package)?;
+    import_package_with_limit(package, user_dir, strategy, MAX_PACKAGE_UNCOMPRESSED_BYTES)
+}
+
+/// [`import_package`] 的可调上限版（内存吃紧的平台用更低的解压后总量上限）。
+/// 上限同时约束归档声明的总大小与逐条有界读取的实际余额，撒谎的归档也越不过去。
+/// `import_package` 恒用 [`MAX_PACKAGE_UNCOMPRESSED_BYTES`]，行为不变。
+pub fn import_package_with_limit(
+    package: &Path,
+    user_dir: &Path,
+    strategy: crate::merge::Strategy,
+    max_uncompressed: u64,
+) -> anyhow::Result<SchemeImportResult> {
+    let (entries, _) = scan_package_with_limit(package, max_uncompressed)?;
     // 读取阶段:全部载荷入内存,任何缺条目/坏条目在写盘前失败。
     // 取字节按 zip 原名,落盘按归一化 rel——见 [`PayloadEntry`]。
     let mut staged: Vec<(String, Vec<u8>)> = Vec::new();
     // 逐条**有界**读取，且预算是整包共享的余额——这才是真正的界：`scan_package` 那道
     // 前筛读的是归档自己声明的大小，撒谎的包骗得过它（声明 1 KB、解压 10 GB）。
-    let mut remaining = MAX_PACKAGE_UNCOMPRESSED_BYTES;
+    let mut remaining = max_uncompressed;
     for e in &entries {
         let bytes = crate::bundle::extract_entry_limited(package, &e.name, remaining)?;
         remaining -= bytes.len() as u64;
@@ -2163,6 +2181,30 @@ layout = "old"
         w.finish().unwrap();
         let err = preview_import(&pkg, &dest).unwrap_err().to_string();
         assert!(err.contains("条目过多"), "{err}");
+    }
+
+    /// 可调上限版：低于包的实际大小即拒绝，且零落盘；默认版（256 MiB）对同一个包照常导入。
+    #[test]
+    fn import_with_limit_enforces_lower_cap_and_default_is_unchanged() {
+        let t = tempfile::tempdir().unwrap();
+        let dest = t.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let pkg = t.path().join("p.zip");
+        let mut w = zip::ZipWriter::new(fs::File::create(&pkg).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+        w.start_file("a.schema.toml", o).unwrap();
+        w.write_all(b"[schema]\nid = \"a\"\n").unwrap();
+        w.start_file("a/big.dict.yaml", o).unwrap();
+        w.write_all(&vec![b'x'; 4096]).unwrap();
+        w.finish().unwrap();
+        let err = import_package_with_limit(&pkg, &dest, crate::merge::Strategy::Merge, 1024)
+            .err()
+            .expect("低于实际大小的上限必须拒绝")
+            .to_string();
+        assert!(err.contains("过大"), "{err}");
+        assert!(!dest.join("a.schema.toml").exists());
+        let ok = import_package(&pkg, &dest, crate::merge::Strategy::Merge).expect("默认上限放行");
+        assert_eq!(ok.schema_ids, ["a"]);
     }
 
     /// 高压缩比条目（zip 炸弹）超上限即报错。

@@ -5,10 +5,10 @@
 //!
 //! # 为什么不放进 `ConfigBundle`
 //!
-//! 判定材料有一半要问 `EngineManager`：方案级 / overlay 的注释模板住在方案文件里，辅助码与
-//! 自动造词随**活跃方案**变（切方案不重建 bundle）。快照进 bundle 就会在切方案、或
-//! `reload_user_config` 先建 bundle 后 `reload_from_config` 的那个窗口里过期。故判定是一个
-//! 纯函数 [`DataNeeds::derive`]（配置 + [`SchemaFacts`]），由 `Coordinator::data_needs`
+//! 判定材料有一部分要问 `EngineManager`：辅助码与自动造词随**活跃方案**变（切方案不重建
+//! bundle）。快照进 bundle 就会在切方案、或 `reload_user_config` 先建 bundle 后
+//! `reload_from_config` 的那个窗口里过期。故判定是一个
+//! 纯函数 [`DataNeeds::derive`]（配置 + 注释模板库 + [`SchemaFacts`]），由 `Coordinator::data_needs`
 //! 在用到的时刻现算——**判据只此一处**，调用点只是取值的时机不同。
 //!
 //! # 不在这里的
@@ -20,7 +20,7 @@
 
 use crate::comment::Template;
 use wind_config::Config;
-use wind_config::config::CodeHintSource;
+use wind_config::comment_lib::{CommentLibrary, SchemaType};
 use wind_engine::EngineManager;
 
 /// 编码反查（主码表反查索引 + 用户层编码索引）的变量名，含永久兼容别名。
@@ -39,54 +39,82 @@ pub(crate) struct DataNeeds {
     pub(crate) reverse_index: bool,
     /// 用户层「词 → 编码」索引（`UserTextIndex`）：悬停[编码]、注释 `${code_rev*}`、辅助码。
     pub(crate) user_text: bool,
-    /// 拆字表：任一层注释模板或启用的悬停段引用 `${chaizi*}`。
+    /// 拆字表：任一被分配的注释模板或启用的悬停段引用 `${chaizi*}`。
     pub(crate) chaizi: bool,
     /// 简入繁出转换器（`input.s2t.enabled`）。
     pub(crate) s2t: bool,
     /// 繁入简出转换器（`input.t2s.enabled`，与 s2t 互斥时让位）。
     pub(crate) t2s: bool,
-    /// 任一层注释模板或启用的悬停段引用 `${correct_pinyin}`：`hint` 关着也要让拼音引擎算正确拼音
+    /// 任一被分配的注释模板或启用的悬停段引用 `${correct_pinyin}`：`hint` 关着也要让拼音引擎算模糊音
     /// 提示（`EngineManager::set_correct_pinyin_in_templates`）。
     pub(crate) correct_pinyin: bool,
+    /// 联想「下一词」表：联想档位与开关让 Bigram 源出场（智能联想档）。
+    pub(crate) assoc_bigram: bool,
 }
 
 /// 判定材料里要问 `EngineManager` 的那部分。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SchemaFacts {
-    /// **全部已安装方案**的方案级注释模板（`[candidate].comment_template_*`，含覆盖层）。
-    ///
-    /// 取并集而不只是活跃方案：方案级模板随切方案生效，而切方案不重算本结构
-    /// （`sync_chaizi_assets` 那条除外，它在切方案时也会重算）。并集是保守侧——多装一份拆字表，
-    /// 不会出现「切过去拆字段是空的」。
-    pub(crate) schema_templates: Vec<String>,
-    /// overlay 方案（特殊模式）`[overlay]` 段的注释模板。在主方案编码来源下渲染。
-    pub(crate) overlay_templates: Vec<String>,
     /// 辅助码当下引用了码表方案（`aux_code_schemas_in_use` 非空）。
     pub(crate) aux_code_in_use: bool,
     /// 自动造词开着（码表 / 混输方案 + 开关）。造词的查重要主码表反查索引。
     pub(crate) auto_phrase: bool,
-    /// 可用方案里有混输方案（`engine.type = "mixed"`）。`schema.mix.pinyin_code_hint` 只在
-    /// 这时才有消费者。
-    pub(crate) mixed_available: bool,
+    /// 可用方案及其注释方案类型：编码反查要不要预载，按它们各自落到的模板判（见
+    /// [`DataNeeds::derive`]）。为空时（测试构造）退回「任一引用到的模板」的保守判法。
+    pub(crate) schemas: Vec<(String, SchemaType)>,
 }
 
 impl SchemaFacts {
-    /// 取自 `EngineManager` 的两份缓存（方案文件那份按失效代次、活跃方案那份按方案 id），
-    /// 按应用自动切方案这类高频路径上调也不重读方案文件。
+    /// 取自 `EngineManager` 的缓存（按活跃方案 id），按应用自动切方案这类高频路径上调也不重算。
     pub(crate) fn collect(mgr: &EngineManager) -> Self {
-        let templates = mgr.schema_data_facts();
         let active = mgr.active_data_facts();
         Self {
-            schema_templates: templates.schema_templates.clone(),
-            overlay_templates: templates.overlay_templates.clone(),
             aux_code_in_use: active.aux_code_in_use,
             auto_phrase: active.auto_phrase,
-            mixed_available: mgr
+            schemas: mgr
                 .available_schemas()
                 .iter()
-                .any(|id| mgr.schema_engine_type(id).as_deref() == Some("mixed")),
+                .map(|id| (id.clone(), crate::comment::schema_type_of(mgr, id)))
+                .collect(),
         }
     }
+}
+
+/// 可达上下文里有没有落到引用编码反查变量的模板，见 [`DataNeeds::derive`]。
+fn rev_reachable(cfg: &Config, lib: &CommentLibrary, facts: &SchemaFacts) -> bool {
+    use wind_config::comment_lib::{CommentScope, CommentState};
+    if facts.schemas.is_empty() {
+        return lib
+            .referenced_texts()
+            .iter()
+            .any(|t| refs_any(t, CODE_REV_VARS));
+    }
+    let mut modes: Vec<String> = cfg
+        .schema
+        .mix_modes
+        .iter()
+        .map(|m| format!("mix:{}", m.id))
+        .collect();
+    if cfg.input.temp_pinyin.enabled {
+        modes.push("temp_pinyin".into());
+    }
+    facts.schemas.iter().any(|(id, ty)| {
+        // 码表、英文方案的主路不出拼音来源候选，`${code_rev}` 在那里恒空，不算消费者。
+        let main = (!matches!(ty, SchemaType::CodeTable | SchemaType::English)).then_some(None);
+        main.into_iter()
+            .chain(modes.iter().map(|m| Some(m.as_str())))
+            .any(|mode| {
+                let scope = CommentScope {
+                    mode,
+                    schema: id,
+                    schema_type: *ty,
+                };
+                [CommentState::Default, CommentState::Detail]
+                    .into_iter()
+                    .flat_map(|st| [(st, false), (st, true)])
+                    .any(|(st, v)| refs_any(lib.template_text(&scope, st, v), CODE_REV_VARS))
+            })
+    })
 }
 
 fn refs_any(tpl: &str, names: &[&str]) -> bool {
@@ -97,88 +125,43 @@ fn refs_any(tpl: &str, names: &[&str]) -> bool {
 impl DataNeeds {
     /// 唯一判定处。规则逐条对应求值端的门控（`Coordinator::eval_var` / 悬停候选循环）：
     ///
-    /// - 注释段的 `${code_rev*}` 只在编码来源档 `allows_reverse()` 时求值。档分三份：临拼 / 快捷
-    ///   输入期间读 `input.temp_pinyin.code_hint_source`，混输方案读 `schema.mix.pinyin_code_hint`，
-    ///   其余读 `schema.pinyin.code_hint_source`（`Coordinator::comment_hint_source`）。后两份
-    ///   同属「主档」。全局 / 方案级模板两种期间都可能渲染（模式层没意见
-    ///   时落到它们），故两档任一放行即算；临拼 / 快捷输入自己的模式级模板只看临拼那档。
-    /// - 悬停段**不看**编码来源档：逐字段走 `eval_text_var`，那里的 `${code_rev}` 不带门控；
+    /// - 注释模板取 `lib.referenced_texts()`：任一格引用到的模板都算，不论态、排布与作用范围
+    ///   （态随 Alt 即时切换，第一次切过去不能是空的）。
+    /// - 注释段的 `${code_rev*}` 按**可达上下文实际落到的模板**判（设计 §13.6）：每个可用方案的
+    ///   主路（码表、英文方案的主路不出拼音来源候选，跳过），以及进得去的临时拼音、各快捷输入，
+    ///   两态两排布逐一解析，任一引用即要。纯拼音方案主路默认态是 `none`，但临拼、快捷输入出厂
+    ///   分到「编码」，所以出厂仍要（与退役前一致）。
+    /// - 悬停段：逐字段走 `eval_text_var`，那里的 `${code_rev}` 不带门控；
     ///   `${word_code}` / `${code_source}` 任一被引用，候选循环就按词查码（含用户层）。
     /// - 拆字不受任何档门控，模板里写了就要。
-    /// - 两个总开关在上面这些之上：`ui.candidate.comment_enabled` 关 ⇒ 三层注释模板都不算；
+    /// - 两个总开关在上面这些之上：`ui.comment.enabled` 关 ⇒ 注释模板都不算；
     ///   `ui.tooltip.enabled` 关 ⇒ 悬停段都不算（设计 §4.3）。
-    pub(crate) fn derive(cfg: &Config, facts: &SchemaFacts) -> Self {
+    pub(crate) fn derive(
+        cfg: &Config,
+        lib: &CommentLibrary,
+        facts: &SchemaFacts,
+        overlay: wind_config::ConfigOverlay,
+    ) -> Self {
         let tip = crate::tooltip::CompiledTooltip::compile(&cfg.ui.tooltip);
         let tip_any = |names: &[&str]| names.iter().any(|n| tip.references(n));
 
-        // 主档：拼音方案那份，或混输方案那份（装了混输方案才有消费者）。
-        let main_rev =
-            CodeHintSource::from_config(&cfg.schema.pinyin.code_hint_source, CodeHintSource::Off)
-                .allows_reverse()
-                || (facts.mixed_available && cfg.schema.mix.pinyin_code_hint);
-        // 临拼档只在临拼 / 快捷输入进得去时才有消费者。
-        let temp_reachable = cfg.input.temp_pinyin.enabled || !cfg.schema.mix_modes.is_empty();
-        let temp_rev = temp_reachable
-            && CodeHintSource::from_config(
-                &cfg.input.temp_pinyin.code_hint_source,
-                CodeHintSource::Auto,
-            )
-            .allows_reverse();
-
-        // (模板, 是否会以临拼档渲染, 是否会以主档渲染)
-        let both = |t: &str| (t.to_string(), true, true);
-        let mut layers: Vec<(String, bool, bool)> = Vec::new();
-        for v in [true, false] {
-            layers.push(both(cfg.ui.candidate.comment_template(v)));
-        }
-        layers.extend(facts.schema_templates.iter().map(|t| both(t)));
-        // 模式级：临拼 / 快捷输入只以临拼档渲染，其余模式只以主档渲染。
-        let temp_modes = cfg
-            .schema
-            .mix_modes
-            .iter()
-            .flat_map(|m| [&m.comment_template_vertical, &m.comment_template_horizontal])
-            .chain([
-                &cfg.input.temp_pinyin.comment_template_vertical,
-                &cfg.input.temp_pinyin.comment_template_horizontal,
-            ]);
-        layers.extend(temp_modes.flatten().map(|t| (t.clone(), true, false)));
-        let main_modes = [
-            &cfg.input.temp_english.comment_template_vertical,
-            &cfg.input.temp_english.comment_template_horizontal,
-            &cfg.input.url.comment_template_vertical,
-            &cfg.input.url.comment_template_horizontal,
-            &cfg.input.email.comment_template_vertical,
-            &cfg.input.email.comment_template_horizontal,
-            &cfg.input.unicode.comment_template_vertical,
-            &cfg.input.unicode.comment_template_horizontal,
-        ];
-        layers.extend(
-            main_modes
-                .into_iter()
-                .flatten()
-                .chain(&facts.overlay_templates)
-                .map(|t| (t.clone(), false, true)),
-        );
-
-        // 注释总开关关着：三层模板一律不渲染（`comment_template_for` 给空模板），都不算需求。
+        // 注释总开关关着：模板一律不渲染（`comment_template_for` 给空模板），都不算需求。
         // 悬停总开关不必在这里判：关着时 `CompiledTooltip::compile` 已编出空段列表。
-        let comment_on = cfg.ui.candidate.comment_enabled;
-        let comment_rev = comment_on
-            && layers.iter().any(|(t, in_temp, in_main)| {
-                ((*in_temp && temp_rev) || (*in_main && main_rev)) && refs_any(t, CODE_REV_VARS)
-            });
-        let comment_chaizi = comment_on && layers.iter().any(|(t, _, _)| refs_any(t, CHAIZI_VARS));
-        let correct_pinyin = (comment_on
-            && layers
-                .iter()
-                .any(|(t, _, _)| refs_any(t, &[CORRECT_PINYIN_VAR])))
-            || tip_any(&[CORRECT_PINYIN_VAR]);
+        let templates = if cfg.ui.comment.enabled {
+            lib.referenced_texts()
+        } else {
+            Vec::new()
+        };
+        let comment_any = |names: &[&str]| templates.iter().any(|t| refs_any(t, names));
+        let comment_rev = cfg.ui.comment.enabled && rev_reachable(cfg, lib, facts);
+        let comment_chaizi = comment_any(CHAIZI_VARS);
+        let correct_pinyin = comment_any(&[CORRECT_PINYIN_VAR]) || tip_any(&[CORRECT_PINYIN_VAR]);
 
         let tip_code = tip_any(&["word_code", "code_source"]) || tip_any(CODE_REV_VARS);
-        let mobile = crate::handle_assoc::use_mobile_overrides().then_some(&cfg.mobile.association);
-        let assoc_on = wind_assoc::AssocConfig::from_config(&cfg.input.association, mobile).kind
-            != wind_assoc::AssocKind::Off;
+        let mobile =
+            (overlay == wind_config::ConfigOverlay::Mobile).then_some(&cfg.mobile.association);
+        let assoc = wind_assoc::AssocConfig::from_config(&cfg.input.association, mobile);
+        let assoc_on = assoc.kind != wind_assoc::AssocKind::Off;
         let (s2t, t2s) = cfg.input.conversion_directions();
 
         Self {
@@ -192,6 +175,7 @@ impl DataNeeds {
             s2t,
             t2s,
             correct_pinyin,
+            assoc_bigram: assoc.source_enabled(wind_assoc::AssocSource::Bigram),
         }
     }
 }
@@ -200,7 +184,12 @@ impl crate::coordinator::Coordinator {
     /// 当前配置 + 当前活跃方案下的 [`DataNeeds`]。现算（读方案文件有缓存），只在配置生效、
     /// 切方案、预热时调，不进按键链路。
     pub(crate) fn data_needs(&self) -> DataNeeds {
-        DataNeeds::derive(&self.rt().config, &SchemaFacts::collect(&self.engine_mgr))
+        DataNeeds::derive(
+            &self.rt().config,
+            &self.comment_lib(),
+            &SchemaFacts::collect(&self.engine_mgr),
+            self.profile.config_overlay,
+        )
     }
 }
 
@@ -213,6 +202,8 @@ mod tests {
 
     // ───────────────────────── 纯判定 ─────────────────────────
 
+    use wind_config::comment_lib::{CommentCells, CommentTemplateDef, SystemComments};
+
     /// 出厂配置 = L1 ⊕ L2：直接拿仓库里的 `data/config.toml` 反序列化（缺的键走 serde 默认即 L1）。
     /// 不用 `Config::load`：它会叠上本机用户层。
     fn factory() -> Config {
@@ -223,8 +214,90 @@ mod tests {
         c
     }
 
+    /// 出厂 `data/system.comments.toml`。
+    fn shipped() -> SystemComments {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/system.comments.toml");
+        SystemComments::parse(&std::fs::read_to_string(&p).unwrap()).unwrap()
+    }
+
+    /// 只有全局默认态 `code_hint` 的出厂表：出厂详细态模板都引用拆字，测「某格引用了才装」
+    /// 得先把它们拿掉。
+    fn plain() -> SystemComments {
+        let full = shipped();
+        let mut sys = SystemComments {
+            templates: full
+                .templates
+                .into_iter()
+                .filter(|t| t.id == "code")
+                .collect(),
+            ..Default::default()
+        };
+        sys.assign.global.default_vertical = Some("code".into());
+        sys
+    }
+
+    fn derive_in(sys: &SystemComments, c: &Config, facts: &SchemaFacts) -> DataNeeds {
+        let (lib, warnings) = CommentLibrary::build(sys, &c.ui.comment);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        DataNeeds::derive(c, &lib, facts, wind_config::ConfigOverlay::Base)
+    }
+
+    /// 默认的方案事实：只装了五笔（码表）。
+    fn facts() -> SchemaFacts {
+        SchemaFacts {
+            schemas: vec![("wubi86".into(), SchemaType::CodeTable)],
+            ..Default::default()
+        }
+    }
+
+    /// 临时拼音与快捷输入两态都不显示：编码反查在注释里再无消费者（取代退役的临拼编码来源 `off`）。
+    fn without_overlay_codes(c: &mut Config) {
+        for m in ["temp_pinyin", wind_config::comment_lib::MIX_ALL_MODE] {
+            c.ui.comment.assign.mode.insert(
+                m.into(),
+                CommentCells {
+                    default_horizontal: Some("none".into()),
+                    detail_horizontal: Some("none".into()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     fn derive(c: &Config) -> DataNeeds {
-        DataNeeds::derive(c, &SchemaFacts::default())
+        derive_in(&shipped(), c, &facts())
+    }
+
+    fn derive_with(c: &Config, facts: &SchemaFacts) -> DataNeeds {
+        derive_in(&shipped(), c, facts)
+    }
+
+    fn derive_plain(c: &Config) -> DataNeeds {
+        derive_in(&plain(), c, &facts())
+    }
+
+    /// 登记用户模板 `id`。
+    fn add_template(c: &mut Config, id: &str, text: &str) {
+        c.ui.comment.templates.push(CommentTemplateDef {
+            id: id.into(),
+            name: id.into(),
+            text: text.into(),
+            ..Default::default()
+        });
+    }
+
+    /// 只有一格指向 `id` 的分配。
+    fn one_cell(slot: &str, id: &str) -> CommentCells {
+        let mut cells = CommentCells::default();
+        let v = Some(id.to_string());
+        match slot {
+            "default_vertical" => cells.default_vertical = v,
+            "default_horizontal" => cells.default_horizontal = v,
+            "detail_vertical" => cells.detail_vertical = v,
+            "detail_horizontal" => cells.detail_horizontal = v,
+            _ => unreachable!("{slot}"),
+        }
+        cells
     }
 
     /// 关掉悬停「编码」段（出厂唯一引用 `${word_code}` 的段）。
@@ -251,40 +324,69 @@ mod tests {
             DataNeeds {
                 reverse_index: true,
                 user_text: true,
-                chaizi: false,
+                chaizi: true,
                 s2t: false,
                 t2s: false,
                 correct_pinyin: false,
+                assoc_bigram: false,
             },
-            "出厂：悬停[编码]开着 ⇒ 反查与用户层要；拆字段关着、注释不含拆字；简繁两向都关；\
-             模板不含 ${{correct_pinyin}}"
+            "出厂：悬停[编码]开着 ⇒ 反查与用户层要；详细态模板引用拆字 ⇒ 启动即装；\
+             简繁两向都关；模板不含 ${{correct_pinyin}}；桌面联想不是智能档 ⇒ 不读下一词表"
         );
         assert_eq!(derive(&Config::default()), n, "L1 与 L2 在这几项上应一致");
     }
 
-    /// 关掉悬停[编码]后反查仍然要：出厂全局注释模板含 `${code_rev}`，临拼 / 快捷输入的
-    /// 编码来源出厂 `auto`。把那一档也关了才真正不要。
+    /// 智能联想档才要下一词表（它是唯一的 Bigram 源消费者）。
+    #[test]
+    fn smart_association_needs_bigram() {
+        let mut c = factory();
+        c.input.association.kind = "smart".to_string();
+        assert!(derive(&c).assoc_bigram);
+        c.input.association.kind = "word".to_string();
+        assert!(!derive(&c).assoc_bigram);
+    }
+
+    /// 关掉悬停[编码]后反查仍然要：临拼 / 快捷输入出厂分到的模板含 `${code_rev}`。
+    /// 把它们也改成不显示才真正不要。
     #[test]
     fn code_section_off_leaves_temp_pinyin_code_rev_as_consumer() {
         let c = without_code_section(factory());
         let n = derive(&c);
         assert!(
             n.reverse_index && n.user_text,
-            "临拼档 auto + 全局模板 code_rev 仍是消费者"
+            "临拼 / 快捷输入的出厂模板仍是消费者"
         );
 
         let mut off = c.clone();
-        off.input.temp_pinyin.code_hint_source = "off".into();
+        without_overlay_codes(&mut off);
         let n = derive(&off);
         assert!(
             !n.reverse_index && !n.user_text,
-            "两档都不放行反查、悬停又没编码段 ⇒ 都不要"
+            "可达的模板都不含反查变量、悬停又没编码段 ⇒ 都不要"
         );
 
-        // 主方案那档放行同样算。
+        // 主路分到含反查的模板同样算。
+        // 拼音方案主路分到含反查的模板同样算；码表主路不出拼音来源候选，分了也不算。
+        let with_pinyin = SchemaFacts {
+            schemas: vec![
+                ("wubi86".into(), SchemaType::CodeTable),
+                ("pinyin".into(), SchemaType::Pinyin),
+            ],
+            ..Default::default()
+        };
         let mut main = off.clone();
-        main.schema.pinyin.code_hint_source = "codetable".into();
-        assert!(derive(&main).reverse_index && derive(&main).user_text);
+        for ty in ["codetable", "pinyin"] {
+            main.ui.comment.assign.by_type.insert(
+                ty.into(),
+                CommentCells {
+                    default_horizontal: Some("code_rev".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(!derive(&main).reverse_index, "只装五笔：码表主路不算");
+        let n = derive_with(&main, &with_pinyin);
+        assert!(n.reverse_index && n.user_text);
 
         // 临拼与快捷输入都进不去时，临拼档再放行也没有消费者。
         let mut unreachable = c.clone();
@@ -293,32 +395,46 @@ mod tests {
         assert!(!derive(&unreachable).reverse_index);
     }
 
-    /// 混输方案的编码提示开关（`schema.mix.pinyin_code_hint`，出厂开）只在**装了混输方案**
-    /// 时算消费者：纯拼音用户不该为一个用不上的开关常驻反查索引。
+    /// 混输类型出厂给码表编码：只在**装了混输方案**时算消费者，纯拼音用户不为它常驻反查索引；
+    /// 混输改成只要剩余编码后也不要。
     #[test]
-    fn mix_pinyin_code_hint_counts_only_with_mixed_schema() {
+    fn mixed_type_counts_only_with_mixed_schema() {
         let mut off = without_code_section(factory());
-        off.input.temp_pinyin.code_hint_source = "off".into();
-        assert!(off.schema.mix.pinyin_code_hint, "前置条件：出厂开");
-        let with_mixed = SchemaFacts {
-            mixed_available: true,
+        without_overlay_codes(&mut off);
+        let pinyin_only = SchemaFacts {
+            schemas: vec![("pinyin".into(), SchemaType::Pinyin)],
             ..Default::default()
         };
-
-        assert!(!derive(&off).reverse_index, "没装混输方案 ⇒ 不要");
-        let n = DataNeeds::derive(&off, &with_mixed);
+        let with_mixed = SchemaFacts {
+            schemas: vec![
+                ("pinyin".into(), SchemaType::Pinyin),
+                ("wubi86_pinyin".into(), SchemaType::Mixed),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            !derive_with(&off, &pinyin_only).reverse_index,
+            "纯拼音 ⇒ 不要"
+        );
+        let n = derive_with(&off, &with_mixed);
         assert!(n.reverse_index && n.user_text, "装了混输方案 ⇒ 要");
 
-        let mut switched_off = off.clone();
-        switched_off.schema.mix.pinyin_code_hint = false;
-        assert!(!DataNeeds::derive(&switched_off, &with_mixed).reverse_index);
+        let mut hint_only = off.clone();
+        hint_only.ui.comment.assign.by_type.insert(
+            "mixed".into(),
+            CommentCells {
+                default_horizontal: Some("code_hint".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!derive_with(&hint_only, &with_mixed).reverse_index);
     }
 
     /// 其余反查来源：联想、辅助码、自动造词。用户层只跟悬停 / 注释 / 辅助码。
     #[test]
     fn other_reverse_index_consumers() {
         let mut base = without_code_section(factory());
-        base.input.temp_pinyin.code_hint_source = "off".into();
+        without_overlay_codes(&mut base);
         assert!(!derive(&base).reverse_index, "前置条件：基线什么都不要");
 
         let mut assoc = base.clone();
@@ -326,20 +442,20 @@ mod tests {
         let n = derive(&assoc);
         assert!(n.reverse_index && !n.user_text, "联想只要系统层反查");
 
-        let aux = DataNeeds::derive(
+        let aux = derive_with(
             &base,
             &SchemaFacts {
                 aux_code_in_use: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(aux.reverse_index && aux.user_text, "辅助码两层都查");
 
-        let auto = DataNeeds::derive(
+        let auto = derive_with(
             &base,
             &SchemaFacts {
                 auto_phrase: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(
@@ -352,7 +468,7 @@ mod tests {
     #[test]
     fn tooltip_code_rev_counts_regardless_of_hint_source() {
         let mut c = without_code_section(factory());
-        c.input.temp_pinyin.code_hint_source = "off".into();
+        without_overlay_codes(&mut c);
         let mut sec = c.ui.tooltip.sections[0].clone();
         sec.label = "码".into();
         sec.each = "han".into();
@@ -365,42 +481,91 @@ mod tests {
 
     fn chaizi_base() -> Config {
         let c = factory();
-        assert!(!derive(&c).chaizi, "前置条件：出厂不要拆字");
+        assert!(!derive_plain(&c).chaizi, "前置条件：只有编码提示时不要拆字");
         c
     }
 
-    #[test]
-    fn chaizi_in_global_template() {
-        let mut c = chaizi_base();
-        c.ui.candidate.comment_template_vertical = "${chaizi_all:／}".into();
-        assert!(derive(&c).chaizi);
+    /// 每个作用范围的每一格引用 `tpl` 都算需求。返回 (说明, 配置)。
+    fn every_cell_referencing(tpl: &str) -> Vec<(String, Config)> {
+        let mut out = Vec::new();
+        let slots = [
+            "default_vertical",
+            "default_horizontal",
+            "detail_vertical",
+            "detail_horizontal",
+        ];
+        type Put = fn(&mut Config, CommentCells);
+        let scopes: [(&str, Put); 10] = [
+            ("全局", |c, x| c.ui.comment.assign.global = x),
+            ("码表类型", |c, x| {
+                c.ui.comment.assign.by_type.insert("codetable".into(), x);
+            }),
+            ("方案", |c, x| {
+                c.ui.comment.assign.schema.insert("wubi86".into(), x);
+            }),
+            ("临拼", |c, x| {
+                c.ui.comment.assign.mode.insert("temp_pinyin".into(), x);
+            }),
+            ("临英", |c, x| {
+                c.ui.comment.assign.mode.insert("temp_english".into(), x);
+            }),
+            ("网址", |c, x| {
+                c.ui.comment.assign.mode.insert("url".into(), x);
+            }),
+            ("邮箱", |c, x| {
+                c.ui.comment.assign.mode.insert("email".into(), x);
+            }),
+            ("Unicode", |c, x| {
+                c.ui.comment.assign.mode.insert("unicode".into(), x);
+            }),
+            ("快捷输入", |c, x| {
+                c.ui.comment.assign.mode.insert("mix:quick_mix".into(), x);
+            }),
+            ("特殊模式", |c, x| {
+                c.ui.comment.assign.mode.insert("special:zz".into(), x);
+            }),
+        ];
+        for (name, put) in scopes {
+            for slot in slots {
+                let mut c = factory();
+                add_template(&mut c, "probe", tpl);
+                put(&mut c, one_cell(slot, "probe"));
+                out.push((format!("{name}·{slot}"), c));
+            }
+        }
+        out
     }
 
     #[test]
-    fn chaizi_in_schema_template() {
-        let facts = SchemaFacts {
-            schema_templates: vec!["{(${chaizi})}".into()],
-            ..Default::default()
-        };
-        assert!(DataNeeds::derive(&chaizi_base(), &facts).chaizi);
+    fn chaizi_in_any_assigned_cell() {
+        chaizi_base();
+        for tpl in [
+            "${chaizi_all:／}",
+            "{(${chaizi})}",
+            "${chaizi_code}",
+            "${chaizi_code_all}",
+        ] {
+            for (name, c) in every_cell_referencing(tpl) {
+                assert!(derive_plain(&c).chaizi, "{tpl} @ {name}");
+            }
+        }
     }
 
+    /// 只有详细态引用 `${chaizi}`：默认态看不到拆字，也要预载——切到详细态的第一下不能是空的。
     #[test]
-    fn chaizi_in_mode_template() {
+    fn data_needs_loads_chaizi_for_detail_only_template() {
         let mut c = chaizi_base();
-        c.input.temp_english.comment_template_horizontal = Some("${chaizi_code}".into());
-        assert!(derive(&c).chaizi, "模式级（临英）");
+        add_template(&mut c, "detail_cz", "${chaizi}");
+        c.ui.comment.assign.global.detail_vertical = Some("detail_cz".into());
+        assert!(derive_plain(&c).chaizi);
+    }
+
+    /// 登记了却没被任何格引用的模板不算需求。
+    #[test]
+    fn unassigned_template_is_not_a_need() {
         let mut c = chaizi_base();
-        c.schema.mix_modes[0].comment_template_vertical = Some("${chaizi}".into());
-        assert!(derive(&c).chaizi, "模式级（快捷输入）");
-        let facts = SchemaFacts {
-            overlay_templates: vec!["${chaizi_code_all}".into()],
-            ..Default::default()
-        };
-        assert!(
-            DataNeeds::derive(&chaizi_base(), &facts).chaizi,
-            "模式级（特殊模式 overlay）"
-        );
+        add_template(&mut c, "unused", "${chaizi}");
+        assert!(!derive_plain(&c).chaizi);
     }
 
     #[test]
@@ -411,91 +576,34 @@ mod tests {
                 s.enabled = true;
             }
         }
-        assert!(derive(&c).chaizi, "出厂拆字段打开 ⇒ 要");
+        assert!(derive_plain(&c).chaizi, "出厂拆字段打开 ⇒ 要");
     }
 
-    /// `${correct_pinyin}`：注释模板的每一个模板位（全局横竖、方案级、模式级各家、overlay）与
-    /// 悬停段（候选上下文回落 `eval_var`）都算；注释总开关关着时注释那些位不算。
+    /// `${correct_pinyin}`：每个作用范围的每一格与悬停段（候选上下文回落 `eval_var`）都算；
+    /// 注释总开关关着时注释那些格不算。
     #[test]
     fn correct_pinyin_in_every_template_slot() {
         const V: &str = "{(${correct_pinyin})}";
-        let base = factory();
-        assert!(!derive(&base).correct_pinyin, "前置条件：出厂不引用");
-        type Edit = fn(&mut Config);
-        let slots: [(&str, Edit); 16] = [
-            ("全局竖", |c| {
-                c.ui.candidate.comment_template_vertical = V.into()
-            }),
-            ("全局横", |c| {
-                c.ui.candidate.comment_template_horizontal = V.into()
-            }),
-            ("快捷输入竖", |c| {
-                c.schema.mix_modes[0].comment_template_vertical = Some(V.into())
-            }),
-            ("快捷输入横", |c| {
-                c.schema.mix_modes[0].comment_template_horizontal = Some(V.into())
-            }),
-            ("临拼竖", |c| {
-                c.input.temp_pinyin.comment_template_vertical = Some(V.into())
-            }),
-            ("临拼横", |c| {
-                c.input.temp_pinyin.comment_template_horizontal = Some(V.into())
-            }),
-            ("临英竖", |c| {
-                c.input.temp_english.comment_template_vertical = Some(V.into())
-            }),
-            ("临英横", |c| {
-                c.input.temp_english.comment_template_horizontal = Some(V.into())
-            }),
-            ("网址竖", |c| {
-                c.input.url.comment_template_vertical = Some(V.into())
-            }),
-            ("网址横", |c| {
-                c.input.url.comment_template_horizontal = Some(V.into())
-            }),
-            ("邮箱竖", |c| {
-                c.input.email.comment_template_vertical = Some(V.into())
-            }),
-            ("邮箱横", |c| {
-                c.input.email.comment_template_horizontal = Some(V.into())
-            }),
-            ("Unicode竖", |c| {
-                c.input.unicode.comment_template_vertical = Some(V.into())
-            }),
-            ("Unicode横", |c| {
-                c.input.unicode.comment_template_horizontal = Some(V.into())
-            }),
-            ("悬停段", |c| {
-                c.ui.tooltip.sections[0].template = V.into();
-                c.ui.tooltip.sections[0].enabled = true;
-            }),
-            ("回退链里", |c| {
-                c.ui.candidate.comment_template_vertical = "${code_hint|correct_pinyin}".into()
-            }),
-        ];
-        for (name, edit) in slots {
-            let mut c = base.clone();
-            edit(&mut c);
-            assert!(derive(&c).correct_pinyin, "{name}");
+        assert!(
+            !derive_plain(&factory()).correct_pinyin,
+            "前置条件：出厂不引用"
+        );
+        let mut cases = every_cell_referencing(V);
+        cases.extend(
+            every_cell_referencing("${code_hint|correct_pinyin}")
+                .into_iter()
+                .take(1),
+        );
+        for (name, c) in cases {
+            assert!(derive_plain(&c).correct_pinyin, "{name}");
+            let mut off = c.clone();
+            off.ui.comment.enabled = false;
+            assert!(!derive_plain(&off).correct_pinyin, "注释总开关关：{name}");
         }
-        for facts in [
-            SchemaFacts {
-                schema_templates: vec![V.into()],
-                ..Default::default()
-            },
-            SchemaFacts {
-                overlay_templates: vec![V.into()],
-                ..Default::default()
-            },
-        ] {
-            assert!(DataNeeds::derive(&base, &facts).correct_pinyin, "{facts:?}");
-            let mut off = base.clone();
-            off.ui.candidate.comment_enabled = false;
-            assert!(
-                !DataNeeds::derive(&off, &facts).correct_pinyin,
-                "注释总开关关：{facts:?}"
-            );
-        }
+        let mut tip = factory();
+        tip.ui.tooltip.sections[0].template = V.into();
+        tip.ui.tooltip.sections[0].enabled = true;
+        assert!(derive_plain(&tip).correct_pinyin, "悬停段");
     }
 
     // ───────────────────── 两个总开关（设计 §4.3，S2） ─────────────────────
@@ -513,17 +621,23 @@ mod tests {
         c
     }
 
-    /// 三层注释模板都引用拆字与编码反查：全局、模式级（临英）、方案级与 overlay（经 facts）。
-    fn all_layers_reference_chaizi(mut c: Config) -> (Config, SchemaFacts) {
-        c.ui.candidate.comment_template_vertical = "${code_rev}${chaizi}".into();
-        c.ui.candidate.comment_template_horizontal = "${code_rev}${chaizi}".into();
-        c.input.temp_english.comment_template_vertical = Some("${chaizi}".into());
-        let facts = SchemaFacts {
-            schema_templates: vec!["${chaizi}".into()],
-            overlay_templates: vec!["${chaizi_code}".into()],
-            ..Default::default()
-        };
-        (c, facts)
+    /// 各作用范围的注释模板都引用拆字与编码反查：全局、类型、方案、模式。
+    fn all_layers_reference_chaizi(mut c: Config) -> Config {
+        add_template(&mut c, "rev_cz", "${code_rev}${chaizi}");
+        add_template(&mut c, "cz", "${chaizi}");
+        add_template(&mut c, "cz_code", "${chaizi_code}");
+        c.ui.comment.assign.global.default_vertical = Some("rev_cz".into());
+        c.ui.comment.assign.global.default_horizontal = Some("rev_cz".into());
+        let a = &mut c.ui.comment.assign;
+        a.by_type
+            .insert("codetable".into(), one_cell("default_vertical", "cz"));
+        a.schema
+            .insert("wubi86".into(), one_cell("default_vertical", "cz"));
+        a.mode.insert(
+            "temp_english".into(),
+            one_cell("default_vertical", "cz_code"),
+        );
+        c
     }
 
     /// 两个开关都关：出厂里会让反查 / 用户层 / 拆字为真的贡献全部归零。
@@ -532,8 +646,8 @@ mod tests {
     /// 不属注释也不属悬停，仍能让 `reverse_index` 为真，另见下一条。
     #[test]
     fn both_toggles_off_zero_reverse_user_text_and_chaizi() {
-        let (c, facts) = all_layers_reference_chaizi(with_chaizi_tip_section(factory()));
-        let on = DataNeeds::derive(&c, &facts);
+        let c = all_layers_reference_chaizi(with_chaizi_tip_section(factory()));
+        let on = derive(&c);
         assert!(
             on.reverse_index && on.user_text && on.chaizi,
             "前置条件：开关都开时三项都要：{on:?}"
@@ -541,12 +655,12 @@ mod tests {
 
         let mut off = c.clone();
         off.ui.tooltip.enabled = false;
-        off.ui.candidate.comment_enabled = false;
-        let n = DataNeeds::derive(&off, &facts);
+        off.ui.comment.enabled = false;
+        let n = derive(&off);
         assert_eq!(
             (n.reverse_index, n.user_text, n.chaizi),
             (false, false, false),
-            "两开关都关 ⇒ 注释三层与悬停段的贡献都归零：{n:?}"
+            "两开关都关 ⇒ 注释各层与悬停段的贡献都归零：{n:?}"
         );
     }
 
@@ -555,7 +669,7 @@ mod tests {
     fn both_toggles_off_leave_other_reverse_consumers() {
         let mut c = factory();
         c.ui.tooltip.enabled = false;
-        c.ui.candidate.comment_enabled = false;
+        c.ui.comment.enabled = false;
         assert!(!derive(&c).reverse_index, "前置条件：基线什么都不要");
 
         let mut assoc = c.clone();
@@ -563,20 +677,20 @@ mod tests {
         let n = derive(&assoc);
         assert!(n.reverse_index && !n.user_text, "联想仍要系统层反查");
 
-        let aux = DataNeeds::derive(
+        let aux = derive_with(
             &c,
             &SchemaFacts {
                 aux_code_in_use: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(aux.reverse_index && aux.user_text, "辅助码仍两层都查");
 
-        let auto = DataNeeds::derive(
+        let auto = derive_with(
             &c,
             &SchemaFacts {
                 auto_phrase: true,
-                ..Default::default()
+                ..facts()
             },
         );
         assert!(auto.reverse_index && !auto.user_text, "自动造词仍查重");
@@ -585,14 +699,11 @@ mod tests {
     /// 只关注释：注释的贡献没了（拆字只有注释在要 ⇒ 不要），悬停「编码」段的贡献还在。
     #[test]
     fn comment_off_keeps_tooltip_contribution() {
-        let (mut c, facts) = all_layers_reference_chaizi(factory());
-        assert!(
-            DataNeeds::derive(&c, &facts).chaizi,
-            "前置条件：拆字只由注释三层要"
-        );
-        c.ui.candidate.comment_enabled = false;
-        let n = DataNeeds::derive(&c, &facts);
-        assert!(!n.chaizi, "注释关掉 ⇒ 三层模板里的拆字都不算：{n:?}");
+        let mut c = all_layers_reference_chaizi(factory());
+        assert!(derive(&c).chaizi, "前置条件：拆字只由注释要");
+        c.ui.comment.enabled = false;
+        let n = derive(&c);
+        assert!(!n.chaizi, "注释关掉 ⇒ 模板里的拆字都不算：{n:?}");
         assert!(
             n.reverse_index && n.user_text,
             "悬停「编码」段仍开着 ⇒ 反查与用户层照要：{n:?}"
@@ -603,17 +714,17 @@ mod tests {
     #[test]
     fn tooltip_off_keeps_comment_contribution() {
         let mut c = with_chaizi_tip_section(factory());
-        assert!(derive(&c).chaizi, "前置条件：拆字只由悬停段要");
+        assert!(derive_plain(&c).chaizi, "前置条件：拆字只由悬停段要");
         c.ui.tooltip.enabled = false;
-        let n = derive(&c);
+        let n = derive_plain(&c);
         assert!(!n.chaizi, "悬停关掉 ⇒ 拆字段不算：{n:?}");
         assert!(
             n.reverse_index && n.user_text,
-            "出厂全局注释 ${{code_rev}} + 临拼档 auto 仍是消费者：{n:?}"
+            "临拼落到全局注释 ${{code_rev}} 仍是消费者：{n:?}"
         );
         // 反证上一句确实来自注释：再关注释就都不要了。
-        c.ui.candidate.comment_enabled = false;
-        let n = derive(&c);
+        c.ui.comment.enabled = false;
+        let n = derive_plain(&c);
         assert!(!n.reverse_index && !n.user_text, "{n:?}");
     }
 
@@ -628,24 +739,20 @@ mod tests {
         assert_eq!((n.s2t, n.t2s), (true, false), "两向互斥时 s2t 赢，只预载它");
     }
 
-    /// 方案级模板经 `SchemaFacts::collect` 从方案文件读到（含未激活的已安装方案）。
+    /// 方案文件里残留的 `[candidate].comment_template_*` 不再算需求、只进降级提示：方案文件不参与注释配置。
     #[test]
-    fn facts_collect_schema_level_templates() {
+    fn schema_file_templates_are_ignored() {
         let dir = schema_fixture("facts", "zz_dn", false);
-        let mut cfg = Config::default();
+        let mut cfg = factory();
         cfg.schema.active = "zz_dn".into();
         cfg.schema.available = vec!["zz_dn".into()];
         let mgr = EngineManager::new(&cfg, Some(&dir));
         let facts = SchemaFacts::collect(&mgr);
+        assert!(!derive_in(&plain(), &cfg, &facts).chaizi);
         assert!(
-            facts
-                .schema_templates
-                .iter()
-                .any(|t| t.contains("${chaizi}")),
-            "方案级模板应被收集到：{:?}",
-            facts.schema_templates
+            !mgr.behavior_for("zz_dn").degraded_items.is_empty(),
+            "残留键要进降级提示"
         );
-        assert!(DataNeeds::derive(&cfg, &facts).chaizi);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -667,12 +774,15 @@ mod tests {
         c
     }
 
-    /// 自造码表方案：一个字「好」、拆字库一行、方案级注释模板引用 `${chaizi}`（或不引用）。
+    /// 自造码表方案：一个字「好」、拆字库一行、方案文件里残留旧的注释模板键（引用 `${chaizi}`
+    /// 或不引用）——它们不再生效，夹具留着正是为了证明这一点。
     fn schema_fixture(tag: &str, id: &str, plain: bool) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("wind_dn_{}_{tag}", std::process::id()));
         let schemas = dir.join("schemas");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(schemas.join(id)).unwrap();
+        // 空的出厂表：不让内置副本的分配混进来。
+        std::fs::write(dir.join("system.comments.toml"), "").unwrap();
         let tpl = if plain { "${code_hint}" } else { "${chaizi}" };
         std::fs::write(
             schemas.join(format!("{id}.schema.toml")),
@@ -700,17 +810,27 @@ mod tests {
         c.reverse.read().unwrap().has_chaizi()
     }
 
-    /// 方案级模板引用拆字 ⇒ 构造期就装上；不引用 ⇒ 不装。
+    /// 用户给方案分配了引用拆字的模板 ⇒ 构造期就装上；方案文件里的旧模板键不算 ⇒ 不装。
+    ///
+    /// 夹具的 `system.comments.toml` 是空表，出厂分配为空，拆字的消费者只可能来自这两处。
     #[test]
     fn schema_level_chaizi_loads_at_construction() {
-        for (plain, want) in [(false, true), (true, false)] {
+        for (assigned, want) in [(true, true), (false, false)] {
             let id = "zz_dn_cz";
-            let dir = schema_fixture(if plain { "plain" } else { "cz" }, id, plain);
+            let dir = schema_fixture(if assigned { "cz" } else { "legacy" }, id, false);
             let mut cfg = Config::default();
             cfg.schema.active = id.into();
             cfg.schema.available = vec![id.into()];
+            if assigned {
+                add_template(&mut cfg, "cz", "${chaizi}");
+                cfg.ui
+                    .comment
+                    .assign
+                    .schema
+                    .insert(id.into(), one_cell("default_vertical", "cz"));
+            }
             let c = Coordinator::new_headless(cfg, Some(&dir));
-            assert_eq!(has_chaizi(&c), want, "plain={plain}");
+            assert_eq!(has_chaizi(&c), want, "assigned={assigned}");
             if want {
                 assert_eq!(c.reverse.read().unwrap().radicals_of("好", ""), "女子");
             }
@@ -729,35 +849,38 @@ mod tests {
         c.alt_commit_text(&st, &cand, wind_config::config::AltCommit::Comment)
     }
 
-    /// 拆字：出厂不装；全局模板加上 `${chaizi}` 并生效配置后装上、注释出字根；改回后卸载。
+    fn has_comments_data() -> bool {
+        has_data() && data_dir().join("system.comments.toml").exists()
+    }
+
+    /// 拆字：出厂详细态模板引用拆字 ⇒ 启动即装，切到详细态注释出字根；关掉注释总开关并生效
+    /// 配置后卸载，再打开又装上。
     #[test]
     fn chaizi_follows_config_load_and_unload() {
-        if !has_data() {
+        if !has_comments_data() {
             eprintln!("跳过：缺 build_dev 词库");
             return;
         }
-        let c = Coordinator::new_headless(wubi(|_| {}), Some(&data_dir()));
-        assert!(!has_chaizi(&c), "出厂没有拆字消费者，不该装拆字表");
-
-        c.refresh_config_in_memory(|cfg| {
-            cfg.ui.candidate.comment_template_vertical = "${chaizi}".into();
-            cfg.ui.candidate.comment_template_horizontal = "${chaizi}".into();
-        });
-        c.apply_data_needs();
-        assert!(has_chaizi(&c), "模板引用拆字后应装上");
+        let c = Coordinator::new_headless(
+            wubi(|c| c.ui.comment.state = wind_config::comment_lib::CommentState::Detail),
+            Some(&data_dir()),
+        );
+        assert!(has_chaizi(&c), "出厂详细态引用拆字，启动即装");
         let want = c.reverse.read().unwrap().radicals_of("好", "");
         assert!(!want.is_empty(), "前置条件：wubi86 拆字库收了「好」");
-        assert_eq!(comment_of_hao(&c), want, "注释应出拆字");
+        assert!(
+            comment_of_hao(&c).starts_with(&want),
+            "详细态注释应以拆字开头：{}",
+            comment_of_hao(&c)
+        );
 
-        let factory_cfg = wubi(|_| {});
-        c.refresh_config_in_memory(|cfg| {
-            cfg.ui.candidate.comment_template_vertical =
-                factory_cfg.ui.candidate.comment_template_vertical.clone();
-            cfg.ui.candidate.comment_template_horizontal =
-                factory_cfg.ui.candidate.comment_template_horizontal.clone();
-        });
+        c.refresh_config_in_memory(|cfg| cfg.ui.comment.enabled = false);
         c.apply_data_needs();
         assert!(!has_chaizi(&c), "不再引用后应卸载");
+
+        c.refresh_config_in_memory(|cfg| cfg.ui.comment.enabled = true);
+        c.apply_data_needs();
+        assert!(has_chaizi(&c), "重新引用后应装上");
     }
 
     /// 运行期格式串（cmdbar `dict.rev`）要拆字而表没装：本次空、后台装好后下次就有。
@@ -767,8 +890,9 @@ mod tests {
             eprintln!("跳过：缺 build_dev 词库");
             return;
         }
-        let c = Coordinator::new_headless(wubi(|_| {}), Some(&data_dir()));
-        assert!(!has_chaizi(&c), "前置条件：出厂不装");
+        let c =
+            Coordinator::new_headless(wubi(|c| c.ui.comment.enabled = false), Some(&data_dir()));
+        assert!(!has_chaizi(&c), "前置条件：注释关着、悬停拆字段关着 ⇒ 不装");
         assert_eq!(
             c.reverse_render("好", "${chaizi}"),
             "",
@@ -791,7 +915,7 @@ mod tests {
         }
         let none = wubi(|c| {
             *c = without_code_section(c.clone());
-            c.input.temp_pinyin.code_hint_source = "off".into();
+            without_overlay_codes(c);
         });
         let c = Coordinator::new_headless(none, Some(&data_dir()));
         assert!(!c.data_needs().reverse_index, "前置条件");
@@ -828,7 +952,7 @@ mod tests {
 
         c.refresh_config_in_memory(|cfg| {
             *cfg = without_code_section(cfg.clone());
-            cfg.input.temp_pinyin.code_hint_source = "off".into();
+            without_overlay_codes(cfg);
         });
         c.apply_data_needs();
         assert_eq!(c.engine_mgr.user_text_loaded(), 0, "没有消费者 ⇒ 清空");
@@ -896,8 +1020,8 @@ mod tests {
         let store = Arc::new(wind_store::Store::open(&path).unwrap());
         let cfg = wubi(|c| {
             *c = with_chaizi_tip_section(c.clone());
-            c.ui.candidate.comment_template_vertical = "${chaizi}".into();
-            c.ui.candidate.comment_template_horizontal = "${chaizi}".into();
+            add_template(c, "cz", "${chaizi}");
+            c.ui.comment.assign.global.default_vertical = Some("cz".into());
         });
         let c = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
         c.engine_mgr.prewarm_text_codes("wubi86");
@@ -909,7 +1033,7 @@ mod tests {
 
         c.refresh_config_in_memory(|cfg| {
             cfg.ui.tooltip.enabled = false;
-            cfg.ui.candidate.comment_enabled = false;
+            cfg.ui.comment.enabled = false;
         });
         c.apply_data_needs();
         assert_eq!(
@@ -965,7 +1089,7 @@ mod tests {
     fn no_consumers() -> Config {
         wubi(|c| {
             *c = without_code_section(c.clone());
-            c.input.temp_pinyin.code_hint_source = "off".into();
+            without_overlay_codes(c);
         })
     }
 
@@ -1064,6 +1188,15 @@ mod tests {
             1,
             "找不到库也只解析一次"
         );
+        // 库路径在后台线程上解析：等这一轮线程退出（`loading` 复位），再看 sync 后的重试。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while c.chaizi_assets.lock().unwrap().loading {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "拆字加载线程 5 秒没退出"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         c.sync_chaizi_assets();
         assert_eq!(c.reverse_render("好", "${chaizi}"), "");
         assert_eq!(
@@ -1179,6 +1312,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         };
         c.handle_key_event(&key(0x1B));
         for ch in "ZONGGUO".chars() {
@@ -1204,8 +1338,19 @@ mod tests {
 
         let set_tpl = |tpl: &str| {
             c.refresh_config_in_memory(|cfg| {
-                cfg.ui.candidate.comment_template_vertical = tpl.into();
-                cfg.ui.candidate.comment_template_horizontal = tpl.into();
+                cfg.ui.comment.templates.clear();
+                cfg.ui.comment.assign.by_type.remove("pinyin");
+                if !tpl.is_empty() {
+                    add_template(cfg, "t", tpl);
+                    // 夹具是拼音方案：拼音类型出厂默认态是 none，模板分到类型上。
+                    cfg.ui.comment.assign.by_type.insert(
+                        "pinyin".into(),
+                        CommentCells {
+                            default_horizontal: Some("t".into()),
+                            ..Default::default()
+                        },
+                    );
+                }
             });
             c.apply_data_needs();
         };

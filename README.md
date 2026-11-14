@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-brightgreen" alt="Platform">
   <img src="https://img.shields.io/badge/macOS-12%2B-blue" alt="macOS">
-  <img src="https://img.shields.io/badge/Linux-Fcitx5%20%28preview%29-orange" alt="Linux">
+  <img src="https://img.shields.io/badge/Linux-Fcitx5-orange" alt="Linux">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 </p>
 
@@ -34,7 +34,7 @@
 - **图形设置** — 配套设置工具，配置可视化调整，修改即时生效
 - **亮暗主题** — 支持亮色和暗色主题，可随系统自动切换
 - **轻量运行** — Rust 实现，资源占用低，启动迅速
-- **跨平台** — 同一套核心引擎，支持 Windows 10/11、macOS 12+ 与 Linux（Fcitx5，预览版）
+- **跨平台** — 同一套核心引擎，支持 Windows 10/11、macOS 12+ 与 Linux（Fcitx5）
 
 ## 安装
 
@@ -43,10 +43,16 @@
 - **Windows 10/11（64 位）** — 安装版或便携版，安装后按 `Win + Space` 切换到清风输入法
 - **macOS 12+** — `.pkg` 通用安装包（Apple Silicon / Intel），安装后在
   「系统设置 → 键盘 → 文本输入 → 编辑」中添加清风输入法，再从输入法菜单切换
-- **Linux（预览版）** — `.deb` 安装包（amd64 / arm64，Ubuntu 22.04+、Debian 系发行版），以
+- **Linux** — `.deb` 安装包（amd64 / arm64，Ubuntu 22.04+、Debian 系发行版），以
   Fcitx5 输入法引擎的形式工作；`sudo apt install ./WindInput-*.deb` 安装后，在「Fcitx5 配置」中
   把清风输入法加入输入法列表。系统输入法框架需为 Fcitx5，KDE Plasma 等桌面的额外设置与已知限制见
-  [wind_linux/README.md](wind_linux/README.md)
+  [wind_linux/README.md](wind_linux/README.md)。Arch 系发行版可用社区维护的 AUR 包
+  [`fcitx5-windinput-bin`](https://aur.archlinux.org/packages/fcitx5-windinput-bin)
+  （**第三方维护，非官方发布**，问题请先向包维护者反馈）
+- **Linux（Nix / NixOS）** — 仓库自带 flake：NixOS 把 `windinput` 包加进
+  `i18n.inputMethod.fcitx5.addons`，其它发行版 `nix profile install github:huanfeng/WindInput#windinput`
+  后把该包加进 Fcitx5 的 addon 目录。构建产物、用法与限制见
+  [docs/design/nix-packaging.md](docs/design/nix-packaging.md)
 
 Windows 版的程序文件与安装包已做数字签名；SmartScreen 需要下载量积累信誉，新版本发布初期
 仍可能拦截，按提示「更多信息 → 仍要运行」继续即可。macOS 版尚未做苹果签名与公证，被
@@ -65,7 +71,8 @@ Gatekeeper 拦下时到「系统设置 → 隐私与安全性」放行。
 | `wind_input` | Rust | 核心服务：输入引擎、词库、候选管理、UI 渲染、IPC（跨平台） |
 | `wind_tsf` | C++ | Windows TSF 输入法框架接口，键盘事件捕获 |
 | `wind_macos` | Swift | macOS IMKit 输入法客户端 |
-| `wind_linux` | C++ | Linux Fcitx5 addon（预览版，见 [wind_linux/README.md](wind_linux/README.md)） |
+| `wind_linux` | C++ | Linux Fcitx5 addon（见 [wind_linux/README.md](wind_linux/README.md)） |
+| `flake.nix` + `wind_linux/nix/` | Nix | Linux 端的 Nix 打包（服务 + addon + 设置程序 + 词库数据，见 [docs/design/nix-packaging.md](docs/design/nix-packaging.md)） |
 
 发布版安装包还需要以下配套项目，它们在各自的独立仓库中维护：
 
@@ -91,7 +98,10 @@ wind-ui-rust；只有 wind-setting 是 path 依赖（`windui = { path = "../wind
 - **Windows**：Rust stable + Visual Studio 2022（C++ 桌面开发）+ CMake，运行 `.\scripts\dev.ps1`
 - **macOS**：Rust stable + Xcode（Swift 5.9+），运行 `scripts/mac/dev.sh`
 - **Linux（交叉编译 Windows 产物）**：`scripts/dev.sh`
-- **Linux（Fcitx5 前端，预览版）**：构建、安装与已知限制见 [wind_linux/README.md](wind_linux/README.md)
+- **Linux（Fcitx5 前端）**：构建、安装与已知限制见 [wind_linux/README.md](wind_linux/README.md)
+- **Linux（Nix，任意发行版 / NixOS）**：`nix build .#windinput`；开发环境 `nix develop`。
+  词库数据同样在 Nix 内构建（等价于 gen-data），细节见
+  [docs/design/nix-packaging.md](docs/design/nix-packaging.md)
 
 构建脚本会自动下载第三方词库数据并生成完整的数据目录。详细说明见
 [贡献指南](CONTRIBUTING.md)。
@@ -148,6 +158,16 @@ GPL 许可证授予您使用、修改与分发源代码的权利，但不包括�
 
 本项目未注册商标，上述为约定与请求而非法律条款，
 详见 [项目名称与标识使用约定](BRANDING.md)。
+
+## Star 趋势
+
+<a href="https://star-history.com/#huanfeng/WindInput&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=huanfeng/WindInput&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=huanfeng/WindInput&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=huanfeng/WindInput&type=Date" />
+  </picture>
+</a>
 
 ## 交流与反馈
 

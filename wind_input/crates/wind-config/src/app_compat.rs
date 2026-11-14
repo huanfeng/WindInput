@@ -352,11 +352,130 @@ impl PlaceholderChar {
     }
 }
 
+/// 联想态的占位：在 [`PlaceholderChar`] 三档之外多一档 `none`（不挂占位组合）。
+///
+/// 联想态没有编码，占位组合只是为了让宿主继续把按键转发给输入法。`none` 时宿主里什么都不放，
+/// 转发资格改由上屏应答里的 `COMMIT_FLAG_ASSOC_SESSION` 同步告知 DLL（见 `KeyEventSink`）。
+/// 代价：没有组合就没有 range，候选窗位置沿用上屏前最后一次的光标坐标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssocPlaceholder {
+    Space,
+    Zwsp,
+    Blank,
+    /// 不挂占位组合。
+    None,
+}
+
+impl AssocPlaceholder {
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            other => PlaceholderChar::from_config(other).map(Self::from),
+        }
+    }
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Space => "space",
+            Self::Zwsp => "zwsp",
+            Self::Blank => "blank",
+            Self::None => "none",
+        }
+    }
+    /// 写进宿主组合区的字符串；`none` 为空串（调用方据此不开组合）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Space => PlaceholderChar::Space.as_str(),
+            Self::Zwsp => PlaceholderChar::Zwsp.as_str(),
+            Self::Blank => PlaceholderChar::Blank.as_str(),
+            Self::None => "",
+        }
+    }
+}
+
+impl From<PlaceholderChar> for AssocPlaceholder {
+    fn from(p: PlaceholderChar) -> Self {
+        match p {
+            PlaceholderChar::Space => Self::Space,
+            PlaceholderChar::Zwsp => Self::Zwsp,
+            PlaceholderChar::Blank => Self::Blank,
+        }
+    }
+}
+
+impl Default for AssocPlaceholder {
+    fn default() -> Self {
+        PlaceholderChar::default().into()
+    }
+}
+
+fn de_assoc_placeholder<'de, D>(d: D) -> Result<Option<AssocPlaceholder>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    de_opt_str_enum(d, "assoc_placeholder", AssocPlaceholder::from_config)
+}
+
 fn de_composition_placeholder<'de, D>(d: D) -> Result<Option<PlaceholderChar>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     de_opt_str_enum(d, "composition_placeholder", PlaceholderChar::from_config)
+}
+
+/// 拼音音节分隔符的应用级覆盖（`ui.candidate.syllable_separator` 的 per-app 版）。
+///
+/// 只改显示；没写 = 跟随全局设置（所以没有 `Default`）。常用档位而非任意字符：
+/// 要任意字符走全局项。典型用途：Unreal Engine 等对资产名校验严格的程序不接受 `'`，选 `none`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyllableSeparator {
+    /// `'`（引擎原样，即全局默认）。
+    Apostrophe,
+    /// 不显示分隔符。
+    None,
+    /// 空格。
+    Space,
+    /// `·`。
+    Dot,
+}
+
+impl SyllableSeparator {
+    /// 配置串 → 枚举。无法识别返回 `None`（＝未配置，跟随全局）。
+    pub fn from_config(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "apostrophe" => Some(Self::Apostrophe),
+            "none" => Some(Self::None),
+            "space" => Some(Self::Space),
+            "dot" => Some(Self::Dot),
+            _ => None,
+        }
+    }
+    /// 枚举 → 配置串（写回 compat.toml 用）。
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Apostrophe => "apostrophe",
+            Self::None => "none",
+            Self::Space => "space",
+            Self::Dot => "dot",
+        }
+    }
+    /// 实际显示的分隔符字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Apostrophe => "'",
+            Self::None => "",
+            Self::Space => " ",
+            Self::Dot => "\u{00B7}",
+        }
+    }
+}
+
+fn de_syllable_separator<'de, D>(d: D) -> Result<Option<SyllableSeparator>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    de_opt_str_enum(d, "syllable_separator", SyllableSeparator::from_config)
 }
 
 /// 含换行的上屏文本怎么交给宿主。
@@ -939,6 +1058,20 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_pair: Option<bool>,
+    /// 该应用是否启用中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`。
+    ///
+    /// 只能关不能「开」出全局没开的那一档：`Some(true)` 等于跟随全局（取哪几种交界仍由全局
+    /// 两个开关定），存在的意义是在用户层压掉系统规则里的 `false`。必须是 `Option`，理由同
+    /// `auto_pair`。
+    ///
+    /// 典型用途是自带空格处理的 Markdown 编辑器（pangu 类插件）、终端与代码编辑器。
+    /// 拉丁字母之间的词间空格（`commit_space`）属英文输入本身，不受本项影响。
+    #[serde(
+        default,
+        deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_spacing: Option<bool>,
     /// 该应用的密码框是否强制英文；`None` = 跟随全局 `input.password_force_english`（A2-37 / t197）。
     ///
     /// 典型用途是「宿主把普通输入框误报成密码框」：全局开着保护真密码框，只对误报的那个
@@ -1083,29 +1216,33 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub status_fallback_position: Option<StatusFallback>,
-    /// 忽略该宿主「关闭输入法」的请求（写 OPENCLOSE / CONVERSION compartment 关 IME）。
+    /// 忽略该宿主自己写 compartment（OPENCLOSE / CONVERSION）引起的中英切换，**开和关两个方向**。
+    /// `None` = 跟随全局 `input.ignore_host_ime_switch`，`Some(v)` 覆盖全局。
+    ///
+    /// 旧键 `ignore_host_ime_close`（0.121 起，只拦「关」）作读取别名：每层原始表解析后即
+    /// 规范化成本键（`compat_overlay::LEGACY_APP_KEYS`），语义随之变成双向。
     ///
     /// 背景：WinForms 的 `ImeMode.Disable`、WPF 的 `InputMethod.IsInputMethodEnabled=False`
     /// 内部都是 `ImmSetOpenStatus(false)`，经 IMM→TSF 兼容层落到 OPENCLOSE=0。它关的是
     /// **全局中英状态**而非「本控件不接受输入」，于是用户点一次按钮就被切成英文，回到
     /// 文本框还未必能恢复（宿主的恢复链只在相邻控件都由它托管时才闭合）。实测宿主：
-    /// X60_Toolbox（WinForms）、beanfun（WPF）。
+    /// X60_Toolbox（WinForms）、beanfun（WPF）。反方向同样存在：SSMS 在内部焦点切换时把
+    /// OPENCLOSE 写成「开」，用户在英文态下被切成中文、第一键被吃（GH#312）。
     ///
-    /// ⚠ **不能做成全局默认**：OPENCLOSE 的值语义是我们对宿主说的唯一真话，gvim 一类
-    /// 宿主正确依赖它保存/恢复状态（见 project_tsf_openclose_compartment_semantics 的
-    /// 四个衍生缺陷）。全局忽略等于回到「钉死为 1」那个已被推翻的年代。
+    /// ⚠ **开启有代价**：OPENCLOSE 的值语义是我们对宿主说的唯一真话，gvim 一类宿主正确
+    /// 依赖它保存/恢复状态（见 project_tsf_openclose_compartment_semantics 的四个衍生缺陷）。
+    /// 全局开启等于回到「钉死为 1」那个已被推翻的年代，故全局出厂关、由用户自选。
     ///
-    /// ⚠ **只拦「关」，且 Ctrl 按住时放行**：系统热键 Ctrl+Space 与宿主关 IME 走的是
-    /// **同一条** compartment 通路，无来源可分。唯一可用的区分是伴随按键——系统热键触发
-    /// 时 Ctrl 正被按住，宿主自己写则没有任何按键（同款判据已在 C++ 的 CapsLock 联动
-    /// 抑制窗用过并实测过）。判据由 DLL 在发消息时一并交代（`MODE_SWITCH_CTRL_HELD`），
-    /// 服务端不去猜。
+    /// ⚠ **Ctrl 按住时放行**：系统热键 Ctrl+Space 与宿主写 compartment 走的是**同一条**
+    /// 通路，无来源可分。唯一可用的区分是伴随按键——系统热键触发时 Ctrl 正被按住，宿主
+    /// 自己写则没有任何按键（同款判据已在 C++ 的 CapsLock 联动抑制窗用过并实测过）。判据由
+    /// DLL 在发消息时一并交代（`MODE_SWITCH_CTRL_HELD`），服务端不去猜。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
         skip_serializing_if = "Option::is_none"
     )]
-    pub ignore_host_ime_close: Option<bool>,
+    pub ignore_host_ime_switch: Option<bool>,
     /// 这个宿主读走候选串时，是否当它在自绘、从而收起我们的候选窗。
     /// `None` = 否（默认），`Some(true)` = 是，`Some(false)` = **显式关闭**。
     ///
@@ -1161,6 +1298,23 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub composition_placeholder: Option<PlaceholderChar>,
+    /// 联想态挂在宿主里的占位字符；`None` = 跟随 `composition_placeholder`。
+    ///
+    /// 联想态没有编码，占位组合只为让宿主继续转发按键；有的软件会拿这个字符做特殊处理，
+    /// 可以只给联想态换一个，不动打字时的占位。
+    #[serde(
+        default,
+        deserialize_with = "de_assoc_placeholder",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub assoc_placeholder: Option<AssocPlaceholder>,
+    /// 拼音音节分隔符的显示；`None` = 跟随全局 `ui.candidate.syllable_separator`。见 [`SyllableSeparator`]。
+    #[serde(
+        default,
+        deserialize_with = "de_syllable_separator",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub syllable_separator: Option<SyllableSeparator>,
     /// 含换行的上屏走 TSF 还是剪贴板粘贴；`None` = commit（历史行为）。见 [`MultilineCommit`]。
     #[serde(
         default,
@@ -1511,21 +1665,20 @@ pub fn set_user_candidate_fixed_pos(
     )
 }
 
-/// 设置用户层 compat.toml 中指定进程的「忽略宿主关闭输入法」。
+/// 设置用户层 compat.toml 中指定进程的「忽略软件切换中英」（`None` = 清除，即跟随全局
+/// `input.ignore_host_ime_switch`：下层设了它就写 `unset`）。
 ///
-/// **`None` = 还原（继承内置规则），不是「清除」**：这一项没有全局设置项，菜单第一档写的是
-/// 「跟随内置规则」，它的下层就是出厂 compat.toml。写成清除会给出厂打开的宿主写一条 `unset`，
-/// 把内置规则整个去掉——与菜单文案相反。显式 `Some(false)` / `Some(true)` 才是用户的覆盖。
-pub fn set_user_ignore_host_ime_close(
+/// 写新键；该条里的旧键 `ignore_host_ime_close` 在读入时已规范化成新键，写回自然只剩新键。
+pub fn set_user_ignore_host_ime_switch(
     user_dir: &Path,
     target: impl Into<RuleKey>,
     enabled: Option<bool>,
 ) -> Result<(), std::io::Error> {
-    let edit = match enabled {
-        Some(v) => set_value("ignore_host_ime_close", v),
-        None => FieldEdit::Inherit("ignore_host_ime_close".to_string()),
-    };
-    edit_user_apps(user_dir, target, &[edit])
+    edit_user_apps(
+        user_dir,
+        target,
+        &[set_or_clear("ignore_host_ime_switch", enabled)],
+    )
 }
 
 /// 设置用户层 compat.toml 中指定进程的智能符号替换方案（`None` = 清除）。
@@ -2199,6 +2352,22 @@ impl AppCompat {
             .unwrap_or_default()
     }
 
+    /// 该进程联想态的占位字符：`assoc_placeholder` 优先，没配跟随 [`Self::composition_placeholder_for`]。
+    pub fn assoc_placeholder_for(&self, process_name: &str) -> AssocPlaceholder {
+        if process_name.is_empty() {
+            return AssocPlaceholder::default();
+        }
+        let rule = self.get_rule(process_name);
+        rule.as_ref()
+            .and_then(|r| r.assoc_placeholder)
+            .or_else(|| {
+                rule.as_ref()
+                    .and_then(|r| r.composition_placeholder)
+                    .map(AssocPlaceholder::from)
+            })
+            .unwrap_or_default()
+    }
+
     /// 现算 HostRender 白名单：`host_render = true` 的进程名（原始大小写）。
     ///
     /// 只收**具体进程、无窗口条件**的规则，看的是那条规则自己的值（不与 `"*"` 合成）：白名单是
@@ -2606,6 +2775,43 @@ mod newline_style_tests {
 mod tests {
     use super::*;
 
+    /// `assoc_placeholder` 优先于 `composition_placeholder`，都没配 = 空格；认不出的值退化为未配置。
+    #[test]
+    fn assoc_placeholder_overrides_then_follows_composition() {
+        let c = AppCompat::from_single_layer_text(
+            r#"
+            [[apps]]
+            process = "*"
+            composition_placeholder = "zwsp"
+
+            [[apps]]
+            process = "a.exe"
+            assoc_placeholder = "Blank"
+
+            [[apps]]
+            process = "b.exe"
+            assoc_placeholder = "bogus"
+            "#,
+        );
+        assert_eq!(c.assoc_placeholder_for("a.exe"), AssocPlaceholder::Blank);
+        assert_eq!(
+            c.composition_placeholder_for("a.exe"),
+            PlaceholderChar::Zwsp
+        );
+        assert_eq!(c.assoc_placeholder_for("b.exe"), AssocPlaceholder::Zwsp);
+        assert_eq!(c.assoc_placeholder_for("other.exe"), AssocPlaceholder::Zwsp);
+        assert_eq!(c.assoc_placeholder_for(""), AssocPlaceholder::Space);
+        let n = AppCompat::from_single_layer_text(
+            "[[apps]]\nprocess = \"n.exe\"\nassoc_placeholder = \"None\"\n",
+        );
+        assert_eq!(n.assoc_placeholder_for("n.exe"), AssocPlaceholder::None);
+        assert_eq!(AssocPlaceholder::None.as_str(), "");
+        assert_eq!(
+            AssocPlaceholder::from_config("none"),
+            Some(AssocPlaceholder::None)
+        );
+    }
+
     /// GH#175：`composition_placeholder` 解析 + 查表（含 `process = "*"` 通配与具体进程压过通配）。
     #[test]
     fn composition_placeholder_parses_and_falls_back_to_wildcard() {
@@ -2687,6 +2893,32 @@ mod tests {
             PlaceholderChar::Space,
             "进程未知 ⇒ 不吃通配"
         );
+    }
+
+    /// `syllable_separator` 解析：认不出的值退化为未配置（跟随全局）；`none` 是真值而非「没配」。
+    #[test]
+    fn syllable_separator_parses() {
+        let compat = AppCompat::from_single_layer_text(
+            r#"
+            [[apps]]
+            process = "ue.exe"
+            syllable_separator = "None"
+            [[apps]]
+            process = "bad.exe"
+            syllable_separator = "tab"
+            "#,
+        );
+        let get = |p: &str| compat.get_rule(p).and_then(|r| r.syllable_separator);
+        assert_eq!(get("ue.exe"), Some(SyllableSeparator::None));
+        assert_eq!(get("bad.exe"), None);
+        for v in [
+            SyllableSeparator::Apostrophe,
+            SyllableSeparator::None,
+            SyllableSeparator::Space,
+            SyllableSeparator::Dot,
+        ] {
+            assert_eq!(SyllableSeparator::from_config(v.as_config()), Some(v));
+        }
     }
 
     /// `multiline_commit` 解析：认不出的值退化为未配置；`process = "*"` 通配与窗口条件照常生效。
@@ -3283,7 +3515,7 @@ mod tests {
         let compat = AppCompat::from_rules(file.apps);
         let rule = compat.get_rule("foo.exe").unwrap();
         assert_eq!(rule.candidate_position_mode, None);
-        assert_eq!(rule.ignore_host_ime_close, None);
+        assert_eq!(rule.ignore_host_ime_switch, None);
         assert_eq!((rule.candidate_x, rule.candidate_y), (0, 0));
     }
 
@@ -3854,13 +4086,13 @@ mod layering_tests {
         );
 
         let c = load(
-            "[[apps]]\nprocess = \"X60_Toolbox.exe\"\nignore_host_ime_close = true\nfirst_show_mode = \"wait\"\n",
-            "[[apps]]\nprocess = \"x60_toolbox.exe\"\nignore_host_ime_close = \"yes\"\nfirst_show_mode = \"instnat\"\n",
+            "[[apps]]\nprocess = \"X60_Toolbox.exe\"\nignore_host_ime_switch = true\nfirst_show_mode = \"wait\"\n",
+            "[[apps]]\nprocess = \"x60_toolbox.exe\"\nignore_host_ime_switch = \"yes\"\nfirst_show_mode = \"instnat\"\n",
             "badvals",
         );
         let r = c.get_rule("X60_Toolbox.exe").unwrap();
         assert_eq!(
-            r.ignore_host_ime_close,
+            r.ignore_host_ime_switch,
             Some(true),
             "布尔写成字符串 = 没写，继承出厂"
         );
@@ -4385,7 +4617,7 @@ mod layering_tests {
             set_user_auto_pair(&u, "a.exe", Some(false)).unwrap();
             set_user_password_force_english(&u, "a.exe", Some(true)).unwrap();
             set_user_schema(&u, "a.exe", Some("@remember".into())).unwrap();
-            set_user_ignore_host_ime_close(&u, "a.exe", Some(true)).unwrap();
+            set_user_ignore_host_ime_switch(&u, "a.exe", Some(true)).unwrap();
             set_user_smart_method(&u, "a.exe", Some(SmartMethod::HoldComposition)).unwrap();
             set_user_caret_offset(&u, "a.exe", 3, -4).unwrap();
             set_user_status_fallback(&u, "a.exe", Some(StatusFallback::Hide)).unwrap();
@@ -4397,7 +4629,7 @@ mod layering_tests {
         assert_eq!(r.auto_pair, Some(false), "显式 false 必须落盘");
         assert_eq!(r.password_force_english, Some(true));
         assert_eq!(r.app_schema(), Some(AppSchema::Remember));
-        assert_eq!(r.ignore_host_ime_close, Some(true));
+        assert_eq!(r.ignore_host_ime_switch, Some(true));
         assert_eq!(r.smart_method, Some(SmartMethod::HoldComposition));
         assert_eq!((r.caret_offset_x, r.caret_offset_y), (3, -4));
         assert_eq!(r.status_fallback_position, Some(StatusFallback::Hide));
@@ -4405,54 +4637,201 @@ mod layering_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 菜单「宿主关闭输入法」第一档是「跟随内置规则」：`None` 必须是还原（继承出厂），
-    /// 而不是清除——清除会给出厂打开的宿主写 unset，把内置规则整个去掉。
+    /// 菜单「软件切换中英」第一档是「跟随全局」：`None` 必须是清除（系统层设了就写 `unset`），
+    /// 而不是还原——还原会让出厂 / 定制层打开的规则继续生效，与「跟随全局」的文案相反。
     #[test]
-    fn menu_ignore_host_ime_close_none_inherits_the_builtin_rule() {
-        let (d, u) = (tmp("m_ihc_d"), tmp("m_ihc_u"));
-        let sys = "[[apps]]\nprocess = \"X60_Toolbox.exe\"\nignore_host_ime_close = true\n";
+    fn menu_ignore_host_ime_switch_none_follows_global() {
+        let (d, u) = (tmp("m_ihs_d"), tmp("m_ihs_u"));
+        let sys = "[[apps]]\nprocess = \"X60_Toolbox.exe\"\nignore_host_ime_switch = true\n";
         write(&d, sys);
         with_system(sys, || {
-            set_user_ignore_host_ime_close(&u, "x60_toolbox.exe", Some(false)).unwrap();
+            set_user_ignore_host_ime_switch(&u, "x60_toolbox.exe", Some(false)).unwrap();
         });
         let off = AppCompat::load_layered(Some(&d), None, Some(&u));
         assert_eq!(
             off.get_rule("X60_Toolbox.exe")
                 .unwrap()
-                .ignore_host_ime_close,
+                .ignore_host_ime_switch,
             Some(false),
-            "用户显式不采纳"
+            "用户显式采纳"
         );
         with_system(sys, || {
-            set_user_ignore_host_ime_close(&u, "x60_toolbox.exe", None).unwrap()
+            set_user_ignore_host_ime_switch(&u, "x60_toolbox.exe", None).unwrap()
         });
-        assert!(
-            parse_raw(&read(&u))
-                .unwrap()
-                .apps
-                .iter()
-                .all(|r| !r.contains_key("unset")),
-            "还原不该留 unset: {}",
-            read(&u)
-        );
         let back = AppCompat::load_layered(Some(&d), None, Some(&u));
         assert_eq!(
             back.get_rule("X60_Toolbox.exe")
-                .unwrap()
-                .ignore_host_ime_close,
-            Some(true),
-            "继承回内置规则"
+                .and_then(|r| r.ignore_host_ime_switch),
+            None,
+            "跟随全局 = 取消下层设定: {}",
+            read(&u)
         );
         with_system(sys, || {
-            set_user_ignore_host_ime_close(&u, "x60_toolbox.exe", Some(true)).unwrap()
+            set_user_ignore_host_ime_switch(&u, "x60_toolbox.exe", Some(true)).unwrap()
         });
         assert!(
             !read(&u).contains("[[apps]]"),
-            "显式写成与内置相同属冗余: {}",
+            "显式写成与出厂相同属冗余: {}",
             read(&u)
         );
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&u);
+    }
+
+    // ───────────── 旧键 ignore_host_ime_close（读取别名）─────────────
+
+    fn ihs(c: &AppCompat, process: &str) -> Option<bool> {
+        c.get_rule(process).and_then(|r| r.ignore_host_ime_switch)
+    }
+
+    /// 旧键写在任何一层都照常生效（语义按新的双向）。
+    #[test]
+    fn legacy_ignore_host_ime_close_applies_in_any_layer() {
+        let old = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = true\n";
+        assert_eq!(ihs(&load(old, "", "lg_sys"), "a.exe"), Some(true), "系统层");
+        assert_eq!(ihs(&load("", old, "lg_usr"), "a.exe"), Some(true), "用户层");
+        assert_eq!(
+            ihs(&AppCompat::from_single_layer_text(old), "a.exe"),
+            Some(true),
+            "单层"
+        );
+    }
+
+    /// 新旧键分处不同层：仍按层序叠加（高层赢），而不是两个键并存、谁赢看反序列化的运气。
+    #[test]
+    fn legacy_and_new_key_in_different_layers_overlay_by_layer_order() {
+        let new_t = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = true\n";
+        let old_f = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = false\n";
+        let new_f = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = false\n";
+        let old_t = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = true\n";
+        assert_eq!(ihs(&load(new_t, old_f, "lg_mix1"), "a.exe"), Some(false));
+        assert_eq!(ihs(&load(old_t, new_f, "lg_mix2"), "a.exe"), Some(false));
+        assert_eq!(ihs(&load(old_f, new_t, "lg_mix3"), "a.exe"), Some(true));
+        // 同一文件里同身份的两行：后写的赢，不论各自用哪个键名。
+        let c = AppCompat::from_single_layer_text(&format!("{new_t}\n{old_f}"));
+        assert_eq!(ihs(&c, "a.exe"), Some(false));
+    }
+
+    /// 同一条里新旧都写：以新键为准，与两者在文件里的先后无关。
+    #[test]
+    fn legacy_and_new_key_in_one_row_new_key_wins() {
+        for text in [
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = true\nignore_host_ime_switch = false\n",
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = false\nignore_host_ime_close = true\n",
+        ] {
+            assert_eq!(
+                ihs(&AppCompat::from_single_layer_text(text), "a.exe"),
+                Some(false),
+                "{text}"
+            );
+            assert_eq!(
+                ihs(&load("", text, "lg_both"), "a.exe"),
+                Some(false),
+                "{text}"
+            );
+        }
+    }
+
+    /// 同一条里新键写错值、旧键是合法布尔：错值 = 没写，采用旧键的合法值（不论先后）。
+    /// 新键合法时仍以新键为准（见上一条）；两个都错则都当没写。
+    #[test]
+    fn invalid_new_key_falls_back_to_a_valid_legacy_key_in_the_same_row() {
+        for text in [
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = \"yes\"\nignore_host_ime_close = true\n",
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = true\nignore_host_ime_switch = \"yes\"\n",
+        ] {
+            assert_eq!(
+                ihs(&AppCompat::from_single_layer_text(text), "a.exe"),
+                Some(true),
+                "{text}"
+            );
+            let sys = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = false\n";
+            assert_eq!(
+                ihs(&load(sys, text, "lg_badnew"), "a.exe"),
+                Some(true),
+                "{text}"
+            );
+        }
+        let both_bad = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = \"yes\"\nignore_host_ime_close = 1\n";
+        let sys = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = false\n";
+        assert_eq!(
+            ihs(&load(sys, both_bad, "lg_bothbad"), "a.exe"),
+            Some(false),
+            "两个都写错 = 都没写，继承下层"
+        );
+    }
+
+    /// `unset` 里写旧键名，照样取消下层（无论下层用新键还是旧键）。
+    #[test]
+    fn unset_with_legacy_key_name_cancels_the_lower_layer() {
+        let user = "[[apps]]\nprocess = \"a.exe\"\nunset = [\"ignore_host_ime_close\"]\n";
+        for sys in [
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = true\n",
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = true\n",
+        ] {
+            assert_eq!(ihs(&load(sys, user, "lg_unset"), "a.exe"), None, "{sys}");
+        }
+        // 单个字符串形态的 unset 同样认。
+        let user = "[[apps]]\nprocess = \"a.exe\"\nunset = \"ignore_host_ime_close\"\n";
+        let sys = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = true\n";
+        assert_eq!(ihs(&load(sys, user, "lg_unset1"), "a.exe"), None);
+    }
+
+    /// 旧键写错值同样 = 没写，不盖掉下层的好值（规范化在清理之前，清理照常起作用）。
+    #[test]
+    fn invalid_legacy_value_never_hides_a_valid_lower_one() {
+        let sys = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_switch = true\n";
+        let user = "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = \"yes\"\n";
+        assert_eq!(ihs(&load(sys, user, "lg_bad"), "a.exe"), Some(true));
+    }
+
+    /// 写回（菜单）统一用新键：被编辑的那条旧键换成新键，同文件其它条里的旧键也一并
+    /// 换掉（值不变），不认识的键与别的段原样保留。
+    #[test]
+    fn menu_write_migrates_legacy_key_and_keeps_unknown_keys() {
+        let dir = tmp("lg_wb");
+        write(
+            &dir,
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = true\nfuture_field = 7\n\n\
+             [[apps]]\nprocess = \"b.exe\"\nignore_host_ime_close = true\nunset = [\"ignore_host_ime_close\", \"auto_pair\"]\n\n\
+             [[commit_newline]]\nprocess = \"w.exe\"\nstyle = \"cr\"\n",
+        );
+        with_system("[[apps]]\nprocess = \"b.exe\"\nauto_pair = true\n", || {
+            set_user_ignore_host_ime_switch(&dir, "a.exe", Some(false)).unwrap()
+        });
+        let t = read(&dir);
+        assert!(
+            !t.contains("ignore_host_ime_close"),
+            "写回后不该再有旧键: {t}"
+        );
+        for needle in ["future_field = 7", "[[commit_newline]]", "style = \"cr\""] {
+            assert!(t.contains(needle), "写回后丢了 {needle}: {t}");
+        }
+        let c = AppCompat::from_single_layer_text(&t);
+        assert_eq!(ihs(&c, "a.exe"), Some(false), "被编辑那条: {t}");
+        assert_eq!(
+            ihs(&c, "b.exe"),
+            Some(true),
+            "别的条旧键换成新键、值不变: {t}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 编辑同一条的**别的**字段，也顺手把这条的旧键换成新键（值不变）。
+    #[test]
+    fn menu_write_of_another_field_also_migrates_legacy_key() {
+        let dir = tmp("lg_wb2");
+        write(
+            &dir,
+            "[[apps]]\nprocess = \"a.exe\"\nignore_host_ime_close = true\n",
+        );
+        with_system("", || {
+            set_user_first_show_mode(&dir, "a.exe", Some(FirstShowMode::Fast)).unwrap()
+        });
+        let t = read(&dir);
+        assert!(!t.contains("ignore_host_ime_close"), "{t}");
+        assert!(t.contains("ignore_host_ime_switch = true"), "{t}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 菜单写入不经 RPC：写成功后必须通过钩子通知（设置端据此刷新），失败的写入不通知。

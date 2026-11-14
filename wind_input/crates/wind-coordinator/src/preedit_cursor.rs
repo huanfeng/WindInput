@@ -128,6 +128,34 @@ pub(crate) struct BufEdit<'a> {
     cased: Option<&'a mut String>,
 }
 
+/// 把拼音拆分串（`fang'xiang`）对回缓冲（`fangxiang`），得到每个音节在**缓冲内**的字节区间。
+///
+/// 对不上（双拼的拆分串是展开后的全拼、字母与击键不同；缓冲里混了非字母）返回 `None`
+/// ——调用方据此退回按字母移动，宁可不跳也不跳错。
+pub(crate) fn syllable_spans(buffer: &str, split: &str) -> Option<Vec<(usize, usize)>> {
+    let mut spans = Vec::new();
+    let mut at = 0usize;
+    for syl in split.split('\'').filter(|s| !s.is_empty()) {
+        let end = at + syl.len();
+        if !buffer.is_char_boundary(end) || !buffer[at..end].eq_ignore_ascii_case(syl) {
+            return None;
+        }
+        spans.push((at, end));
+        at = end;
+    }
+    (at == buffer.len() && !spans.is_empty()).then_some(spans)
+}
+
+/// 左移到「上一个音节的起点」：光标在音节中间 → 该音节起点；恰在起点 → 前一个音节起点；
+/// 已在最左 → 0。`fang'xiang` 光标在末尾，按一下落到 `xiang` 前，再按落到 `fang` 前。
+pub(crate) fn syllable_left(spans: &[(usize, usize)], cursor: usize) -> usize {
+    spans
+        .iter()
+        .map(|&(start, _)| start)
+        .rfind(|&start| start < cursor)
+        .unwrap_or(0)
+}
+
 impl<'a> BufEdit<'a> {
     pub(crate) fn new(buf: &'a mut String, cursor: &'a mut usize) -> Self {
         *cursor = floor_boundary(buf, *cursor);
@@ -443,5 +471,31 @@ mod tests {
         assert_eq!(e.pos(), 3); // 「中」占 3 字节
         assert!(e.backspace());
         assert_eq!((b.as_str(), c), ("a", 0));
+    }
+
+    #[test]
+    fn syllable_spans_map_split_back_to_buffer() {
+        assert_eq!(
+            syllable_spans("fangxiang", "fang'xiang"),
+            Some(vec![(0, 4), (4, 9)])
+        );
+        assert_eq!(
+            syllable_spans("nihao", "ni'hao"),
+            Some(vec![(0, 2), (2, 5)])
+        );
+        // 字母对不上（双拼展开成全拼）/ 没盖满缓冲 → None，调用方退回按字母移
+        assert_eq!(syllable_spans("vs", "zhong"), None);
+        assert_eq!(syllable_spans("fangxiangx", "fang'xiang"), None);
+        assert_eq!(syllable_spans("", ""), None);
+    }
+
+    #[test]
+    fn syllable_left_jumps_to_previous_syllable_start() {
+        let spans = [(0, 4), (4, 9), (9, 12)]; // fang xiang yao
+        assert_eq!(syllable_left(&spans, 12), 9);
+        assert_eq!(syllable_left(&spans, 9), 4, "恰在起点 → 前一个音节");
+        assert_eq!(syllable_left(&spans, 7), 4, "在音节中间 → 该音节起点");
+        assert_eq!(syllable_left(&spans, 4), 0);
+        assert_eq!(syllable_left(&spans, 0), 0);
     }
 }

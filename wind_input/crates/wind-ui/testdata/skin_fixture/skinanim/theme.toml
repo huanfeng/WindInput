@@ -1,0 +1,42 @@
+# 渲染金样的皮肤夹具：动画装饰（anim.png 为测试现场生成的 6 帧 APNG，每帧 100 ms 纯色块）。
+# idle = 0-1、typing = 2-3；上屏播 4-5 后落回 idle。
+base = "skinfix"
+
+[meta]
+name = "皮肤夹具·动画"
+version = "1.0"
+
+[skin.horizontal.frame]
+image = "frame_h.png"
+stretch_x = [[16, 48]]
+stretch_y = [[16, 32]]
+
+[skin.horizontal.content]
+left = 12
+top = 10
+right = 14
+bottom = 8
+
+[[skin.horizontal.decor]]
+image = "anim.png"
+anchor = "frame.top_right"
+pivot = "bottom_right"
+offset = [-4, 4]
+z = 150
+
+[skin.horizontal.decor.states]
+idle = { frames = "0-1" }
+typing = { frames = "2-3" }
+
+[skin.horizontal.decor.on]
+typing = { state = "typing" }
+commit = { play = "4-5", then = "idle" }
+
+[[skin.horizontal.decor]]
+image = "disc.png"
+anchor = "frame.bottom_right"
+pivot = "center"
+z = -1
+
+[skin.horizontal.placement]
+avoid_caret = false

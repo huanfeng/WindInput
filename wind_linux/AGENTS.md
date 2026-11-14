@@ -32,9 +32,20 @@ Fcitx5 的 `InputContext`。引擎/词库/候选逻辑全在服务里，这里**
 | `data/icons/hicolor` | 图标成品，CMake 装到 `share/icons`。`windinput`（应用图标）由 `scripts/linux/gen-icons.py` 拆自 wind-setting 的 ico；托盘图标的种子 `windinput-zh` / `-en` / `-caps`（运行时图标还没写出时的降级）由 `wind_input/crates/wind-ui/examples/gen_tray_icons.rs` 生成，与运行时图标同一个 `tray_icon::render`（`host_ui_test` 核对文件齐全）。运行时图标不在这里，在用户的 `$XDG_DATA_HOME/icons/hicolor` |
 | `tests/*_test.cpp` | 纯 C++17 单测（不需要 Fcitx5），与 `wind_tsf/tests` 同风格 |
 | `include/GnomeCaretGeom.h` + `src/core/GnomeCaretGeom.cpp` | GNOME 光标折算的纯函数（桌面名 / 前端名 / scale）。D-Bus 客户端在 `src/fcitx/GnomeCaret.cpp`，只在 Wayland 且有 gio 时编进 addon |
-| `gnome-shell-extension/` | Shell 扩展 `windinput-caret@windinput`（Shell 47–50）。安装说明见该目录 README |
+| `gnome-shell-extension/` | Shell 扩展 `windinput-caret@windinput`（ESM，Shell 45–51）与 `windinput-caret-legacy@windinput`（旧格式，42–44），同一 D-Bus 接口。安装说明见该目录 README |
 
 `src/core` 与 `include` 不依赖 Fcitx5，能单独编、单独测——这条边界别破。
+
+打包用的两个 CMake cache 选项：`WIND_SERVICE_PATH` / `WIND_SETTING_PATH`（空 = 源码内置的
+`/usr/lib/windinput/...`），打非 `/usr` 前缀的包（Nix 等）时注入 store 路径。编译定义是
+`PUBLIC`。`settings_launcher_test` 不跟宏逐字比（`argv[0]` 与宏同源，比宏即恒真），断的是
+「绝对路径 + 末段 `wind_setting`」；宏未定义（deb / 源码构建）时才钉住
+`/usr/lib/windinput/wind_setting` 字面量——改源码里的默认值要同步改那条断言。
+
+addon 的版本写进 `share/fcitx5/addon/windinput.conf` 的 `Version=`，来源是第三个 cache 选项
+`WIND_ADDON_VERSION`（空 = 工程版本 `project(... VERSION ...)`；两条打包链都注入
+`docs/VERSION`：`wind_linux/nix/addon.nix` 与 `scripts/linux/build-deb.sh` 各传一次）。改它不用动源码里
+的默认值——不传就落回 `0.1.0`，fcitx5 输入法列表里显示的版本与产品版本脱钩。
 
 ## 构建 / 测试
 
@@ -51,6 +62,24 @@ cmake -S wind_linux -B wind_linux/build/cmake -G Ninja && cmake --build wind_lin
 ctest --test-dir wind_linux/build/cmake         # 同一批单测经 CMake 跑
 scripts/linux/e2e.sh                            # 端到端：真服务 + 真 fcitx5 + DBus 客户端打字
 ```
+
+两条单测入口**都要跑**：`make` 用 `-O1 -Werror`（与 CI 同），CMake 不带优化、不 `-Werror`——`maybe-uninitialized`
+这类只在优化后出现的告警只有 `make` 那条看得见，只跑 CMake 会把编不过的测试当成全过。
+
+addon 目标的依赖（`WIND_BUILD_ADDON=ON`，默认）：Fcitx5Core / Fcitx5Utils 头文件、
+`xcb` / `xcb-shape` / `xcb-randr`；有 `wayland-client` + `wayland-scanner` 时再编 Wayland
+候选窗，有 `gio-2.0` 时编 GNOME 光标扩展客户端。只编纯逻辑库与单测用
+`-DWIND_BUILD_ADDON=OFF`，不需要任何 Fcitx5 头文件。
+
+单测只读源码树（`WIND_REPO_DIR` / `WIND_PROTOCOL_RS` 编译定义），写入一律落在 `TMPDIR` 下的
+临时目录，不读 `build_dev/`——因此能在只读源码树（Nix sandbox）里直接跑（`nix build` 的
+`checkPhase` 就是这么用的）。
+
+设置程序（独立仓 `../wind-setting`）同样能原生 Linux 构建：它依赖的 `windui` 支持
+Windows / macOS / Linux 三个平台（`windui` 的 `platform/mod.rs` 只对其它目标
+`compile_error!`；Linux 后端默认 X11，Wayland 桌面经 XWayland，原生 Wayland 后端要
+`WINDUI_BACKEND=wayland` 显式启用），`wind_linux/nix/setting.nix` 已实测把它编成 Nix 包
+（`packages.wind-setting`，见 `wind_linux/nix/AGENTS.md`）。
 
 `e2e.sh` 的做法（改它之前先读脚本头注释）：`dbus-run-session` 起私有会话总线；服务二进制拷进
 临时目录、`data` 下逐项软链到 `build_dev/data`（`system.phrases.toml` 例外：取仓库 `data/` 那份再追加
@@ -182,6 +211,24 @@ addon 在主线程（经 EventDispatcher）按名只读打开 SHM、拷出一帧
   别的用户抢先建了我们的名字，服务端建不了段（候选窗不显示），但拿不到也伪造不了内容。
 - 悬停只报候选下标（≥0）：命中表里 -1/-2 是翻页按钮，而悬停协议里 -1 表示「无」。点击翻页
   按钮直接发负下标的 `CMD_CANDIDATE_SELECT`（服务端按 -1 上页 / -2 下页处理）。滚轮 ±120。
+- **异形皮肤**（设计 `docs/design/theme-skin-animation.md` §17）：每帧在帧本身之前先到一条
+  `CMD_CANDIDATE_SKIN`（`Codec.h` 的 `CandidateSkin`）。带输入区表（`SKIN_FLAG_MASK`）时候选窗
+  `SK_INPUT` 设成表里的矩形（穿透装饰、透明外扩区不接鼠标，ARGB 与无合成器两条路都设），没带就复位成
+  缺省；换算是纯函数 `candidateInputRegion`。帧带 `FRAME_FLAG_ANIM_FRAME`（皮肤动画换帧）时照原位贴图、
+  不 raise。没有 SHAPE 扩展时整窗接鼠标（记一条 warn）。
+  Wayland 同一张表折成逻辑坐标进 `wl_surface` 输入区。候选 / 翻页按钮之外按在 drag / block 装饰上
+  （`decorAt`）、松开仍在同一块上且没挪过阈值（`DecorClickGate`），经 `skin.decor_click` 报 index，服务端
+  触发它的 `click` 事件。系统「减少动态效果」由 `DesktopMotion` 读设置门户（Fcitx5 自带的 DBus 封装，
+  异步）与 kdeglobals，经 `host.reduce_motion` 报服务，挑选规则是纯函数 `pickReduceMotion`（§17.1）。
+  e2e：`WIND_E2E_ONLY=skin scripts/linux/e2e.sh`
+  （程序生成的皮肤主题，`xdotool getmouselocation` 判指针下的窗口）。
+- **候选窗拖动**（X11 / XWayland，设计 §17.7）：空白处与 `drag` 装饰左键起拖，窗体外的 `block` / `pass`
+  装饰（`onNoDragDecor`）与候选 / 翻页按钮不拖。本端拖，同状态气泡：按下的隐式抓取收移动，挪过 4 px
+  （`CandidateDragGate`）才跟随，没过就松开按点击处理（装饰点击照判）。本次组合记拖动锚（拖到的内容
+  左上），后续帧按锚摆（`placeCandidate`：锚 > 固定位置 > 跟随光标），候选窗收起时清。松手报
+  `pos.candidate`（内容左上 = 窗口左上 + 候选帧尾的 `contentX/Y`），应 `pos.candidate.query` 报当前
+  内容左上；落不落盘由服务端按定位方式定。松开事件丢了（移动里左键已没按着）按松开收尾，右键 / 菜单打开
+  时拖动作废。原生 Wayland 应用的候选窗是合成器摆位的 popup，**不能拖**，也不答查询。
 
 ## 光栅浮层：状态气泡 / Toast / 悬停提示（X11）
 
@@ -328,7 +375,7 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 | 候选窗显示（Wayland 原生） | 已接（`WaylandPanel`），treeland 真机验过 | 跟着光标走的（候选、tooltip、跟随光标的状态气泡）走 `zwp_input_method_v2` 的 popup surface（KWin 只有 input-method-v1，走 `zwp_input_panel_v1` 的 overlay 面板：KWin 全局只认一个面板、角色拆不掉，故每个显示周期换新 surface，旧的经 `RetiredSurfaces` 延迟销毁，见 `docs/design/linux-kde-input-method-v1.md`），**由合成器按文本光标摆位**（客户端报的 `cursorRect()` 是窗口相对坐标，没法自己摆），合成进同一张位图（tooltip 按服务端落位相对候选窗摆）；按屏幕摆的（Toast、屏幕锚点 / 固定位置的状态气泡）在合成器有 wlr-layer-shell 时各开一个 OVERLAY 层 surface，按锚点 + 边距摆，在任务栏之上，且不论焦点在哪种应用都走这条（XWayland 窗口会被 treeland 压在任务栏下）。气泡右键菜单开在一张铺满输出的透明 layer 底板上（各级菜单是子 surface），坐标即输出坐标，菜单外的点击也由底板接住（代替抓指针；请求 2s 无菜单 / 60s 无点击 / 120s 上限三道兜底收起）。layer surface 收起时连角色对象一起销毁、下次重建（只摘 buffer 时 treeland 不再发 configure）；所有我们的 wl_surface 只建不毁并挂全零 user_data 占位（classicui 的指针回调会读它）。鼠标：点选、翻页、滚轮、悬停、右键菜单；layer 上的气泡可拖（relative-pointer 取位移，surface 自己在动，按 surface 坐标算会乱跳）、Toast 可点击关闭；popup 里只有候选与气泡收鼠标。跟随光标的气泡不能拖；菜单靠近屏幕下 / 右缘可能被合成器裁掉；锚在底 / 右边的 layer 气泡开始拖时可能跳一个任务栏厚度（合成器不告诉独占区）；候选窗落在任务栏处会被盖住（popup 层级归合成器）；GNOME 不支持 input-method-v2，应用走 X11 / XWayland 那条路（仅当 `XDG_CURRENT_DESKTOP` 分段含 `GNOME` 时按 §7.10 折光标，Shell 扩展见 `gnome-shell-extension/README.md`；非 GNOME 保持直通）；KDE Plasma（input-method v1）Kubuntu 26.04 / KWin 6.6.6 真机验过；多显示器 / 混合缩放只近似；arm64 上未实机验 |
 | 多显示器 | 未做 | 工作区取整个根窗口，不按 RandR 显示器切分：跨屏边缘的翻转/钳制按整块虚拟屏算 |
 | HiDPI（帧 `scale>1`） | 按物理像素原样贴 | X11 没有逻辑坐标，服务端在 Linux 上目前恒发 scale=1 |
-| 候选窗拖动 / 固定位置回报（`pos.candidate` / `pos.candidate.query`） | 未接 | 服务端问位置时不答 = 保留旧值（macOS 不可见时也不答，语义安全） |
+| 候选窗拖动 / 固定位置回报（`pos.candidate` / `pos.candidate.query`） | 已接（X11 / XWayland），e2e 覆盖 | 见上「候选窗拖动」。缺：原生 Wayland 应用（popup 由合成器摆位，协议里没有移动请求）——同一会话里 XWayland 应用能拖、原生应用不能；拖动夹回按整块根窗口工作区（不分显示器）；不跟 Windows 的「空白处双击截图」 |
 | 候选右键菜单 / 功能主菜单 | 已接（X11） | 见上「自绘菜单」。缺：Wayland；多显示器（工作区取整块根窗口）；点菜单外那一下被菜单吃掉（同 X11 原生菜单，Windows 会透传）；菜单开着时在候选上再右键只关菜单、不接着弹新菜单（Windows 会） |
 | tooltip / 状态气泡 / toast | 已接（X11），含鼠标交互 | 见上「光栅浮层」：悬停保持、气泡拖动与右键菜单、提示右键菜单（复制 / 上屏 / 截图）、Toast 点击关闭，e2e 逐项覆盖。缺：Wayland；多显示器（拖动夹回按整块根窗口）；「截图所有窗口到文件」（`TakeScreenshot` 的 `shot.panel`）仍只截候选窗（气泡 / 提示菜单里的「截图此窗口」已可用）；提示菜单开着时点在提示上只关菜单、不接着弹新菜单（Windows 会重新请求） |
 | 多显示器下的浮层锚点 | 未做 | 工作区取整个根窗口（同候选窗）：Toast / 锚点气泡落在整块虚拟屏的角上，而不是光标所在显示器 |
@@ -337,7 +384,7 @@ forwardKey 对某类应用确实无效时才值得做，目前没有这样的证
 | 模式指示 | 托盘 / 面板图标（`subModeIcon`）按模式主字运行时渲染，同 Windows 语言栏：中文为方案标签、英文「英」、大写锁定「A」，自定义方案标签 / `[ui.labels]` 同样上图 | 见设计文档 §5d（含 Windows 状态对照表、宿主图标缓存）。e2e 经 kimpanel 验了图标名与标签随 Shift / CapsLock / 切方案 / 菜单切换、换焦点不回退，并验文件在用户图标目录、是合法 PNG；notificationitem（SNI）取的是同一个值但未单独验，真机托盘（GNOME AppIndicator、KDE、Deepin dde-dock）的实际显示与图标缓存时序未验。缺：角标（全角 / 标点）；密码框里不换「英」；首次安装时若用户图标目录此前不存在，托盘要重启 Fcitx5 后才看得见运行时图标（之前显示种子） |
 | 系统输入法配置里的「配置」按钮 | ExternalOption → 设置程序 | e2e 验了 `Controller1.GetConfig` 的描述与命令可启动；fcitx5-configtool 5.1.6+ 直接启动，22.04（5.0.x）显示一页一个按钮；真机点按钮与 Deepin 配置界面未验 |
 | 非嵌入模式的占位组合 | 不写进应用（addon 过滤） | 见设计文档 §5d |
-| 工具栏 / 软键盘 | 已接（0.127，X11 与 Wayland） | addon 自绘、服务端出像素，见 [linux-toolbar-softkeyboard.md](../docs/design/linux-toolbar-softkeyboard.md)；已知限制见 linux-port.md |
+| 工具栏 / 软键盘 | 已接（0.127，X11 与 Wayland） | Wayland 跨屏拖动保留源 surface 抓取、无输入预览换输出，松手才重绑并报位置（勿在拖动中销毁源角色）；addon 自绘、服务端出像素，见 [linux-toolbar-softkeyboard.md](../docs/design/linux-toolbar-softkeyboard.md)；已知限制见 linux-port.md |
 | 输入诊断 HUD | 不做 | 同 macOS；主菜单里按平台摘掉 |
 | 截图所有窗口到文件（主菜单「高级」） | 已接 | 候选窗与各浮层的像素都在服务进程，就地编码存盘（`manager_macos.rs` 的 `TakeScreenshot`，macOS 同一份）；不含菜单。此前因流程按「像素在宿主」写（`shot.panel`）而摘掉，现已不需要宿主回应 |
 | 按应用独立配置（compat） | 机制可用，真机验过（2026-10-09：两个应用分别默认中文 / 英文，切换焦点时正确切换）；**打包时不带 Windows 内置规则**（`scripts/lib/gen-compat.sh linux` 生成「字段说明 + 零规则」的 Linux 版系统层，各平台兼容策略不共用） | 服务按 `FOCUS_GAINED` 的 bundleId（= `InputContext::program()`）匹配规则，同 macOS；设置端的应用兼容性窗口保留 |

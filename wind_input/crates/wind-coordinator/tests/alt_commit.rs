@@ -28,6 +28,7 @@ fn key(key_code: u32, modifiers: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -88,8 +89,23 @@ fn comment_mode_commits_rendered_comment_untruncated() {
         return;
     }
     let mut cfg = cfg("comment");
-    cfg.ui.candidate.comment_template_vertical = "[${pinyin}]".into();
-    cfg.ui.candidate.comment_template_horizontal = "[${pinyin}]".into();
+    cfg.ui
+        .comment
+        .templates
+        .push(wind_config::comment_lib::CommentTemplateDef {
+            id: "py".into(),
+            name: "py".into(),
+            text: "[${pinyin}]".into(),
+            ..Default::default()
+        });
+    // 夹具是拼音方案：拼音类型出厂默认态 none，模板分到类型上。
+    cfg.ui.comment.assign.by_type.insert(
+        "pinyin".into(),
+        wind_config::comment_lib::CommentCells {
+            default_horizontal: Some("py".into()),
+            ..Default::default()
+        },
+    );
     cfg.ui.candidate.comment_max_chars_vertical = 2;
     cfg.ui.candidate.comment_max_chars_horizontal = 2;
     let c = typed(cfg);
@@ -105,8 +121,7 @@ fn empty_annotation_keeps_session() {
         return;
     }
     let mut cfg = cfg("comment");
-    cfg.ui.candidate.comment_template_vertical = String::new();
-    cfg.ui.candidate.comment_template_horizontal = String::new();
+    cfg.ui.comment.assign.global.default_horizontal = Some("none".into());
     let c = typed(cfg);
     let before = c.debug_candidate_count();
     let act = c.handle_key_event(&key(0x31, MOD_ALT));
@@ -125,7 +140,7 @@ fn off_by_default_does_not_claim_alt_digit() {
     assert!(inserted(&act).is_none(), "关着时不该上屏任何东西: {act:?}");
 }
 
-/// 候选注释总开关关着（`ui.candidate.comment_enabled = false`）时，`comment` 档按 `off` 处理：
+/// 候选注释总开关关着（`ui.comment.enabled = false`）时，`comment` 档按 `off` 处理：
 /// Alt+1 不被认领、落到 Ctrl/Alt 兜底臂（清组合、键归宿主），而不是吞键保留会话。
 /// `pinyin` 档不看注释开关。
 #[test]
@@ -137,7 +152,7 @@ fn comment_mode_with_comments_off_behaves_like_off() {
     let off_act = off.handle_key_event(&key(0x31, MOD_ALT));
 
     let mut cfg_cm = cfg("comment");
-    cfg_cm.ui.candidate.comment_enabled = false;
+    cfg_cm.ui.comment.enabled = false;
     let cm = typed(cfg_cm);
     let cm_act = cm.handle_key_event(&key(0x31, MOD_ALT));
     assert_eq!(
@@ -152,7 +167,7 @@ fn comment_mode_with_comments_off_behaves_like_off() {
     );
 
     let mut cfg_py = cfg("pinyin");
-    cfg_py.ui.candidate.comment_enabled = false;
+    cfg_py.ui.comment.enabled = false;
     let py = typed(cfg_py);
     let act = py.handle_key_event(&key(0x31, MOD_ALT));
     assert_eq!(inserted(&act), Some("nǐ hǎo"), "pinyin 档不受影响: {act:?}");

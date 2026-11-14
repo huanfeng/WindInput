@@ -103,14 +103,18 @@
 #   candidate_x:          fixed 时本应用的候选框位置（屏幕坐标，物理像素，默认 0）。
 #   candidate_y:          同上。每个应用各记一份，互不影响；(0,0) = 尚未设定，首次显示
 #                         落在屏幕默认位置，拖动一次即记住。
-#   ignore_host_ime_close:
-#                         忽略本应用「关闭输入法」的请求：true | false｜不写=按出厂规则
-#                         （出厂未配即采纳）。
+#   ignore_host_ime_switch:
+#                         忽略本应用自己切换中英的请求（开和关两个方向都算）：
+#                         true | false｜不写=跟随全局 config.toml 的 [input] ignore_host_ime_switch
+#                         （出厂 false，即照常采纳）。
 #                         部分 .NET 应用（WinForms 的 ImeMode.Disable、WPF 的
 #                         IsInputMethodEnabled=False）在焦点落到按钮等控件时会关掉**全局**
-#                         中英状态，表现为「点一下按钮就变成英文，回到输入框也不恢复」。
-#                         开启后这类请求不再采纳，中文状态保持不变。
+#                         中英状态，表现为「点一下按钮就变成英文，回到输入框也不恢复」；
+#                         也有应用在内部切换焦点时把输入法打开，英文状态下被切成中文。
+#                         开启后这类请求不再采纳，中英状态保持不变。
 #                         Ctrl+Space 不受影响（按住 Ctrl 时一律放行），仍可正常切中英。
+#                         旧键名 ignore_host_ime_close 仍可读（按本字段的双向语义生效），
+#                         经右键菜单或设置页改写时会换成新键名。
 #   host_drawn_candidates:
 #                         这个宿主把候选串读走时，是否当它在自己画候选、从而收起我们的框：
 #                         不写=否（默认）｜true=是｜false=显式关闭。
@@ -152,9 +156,16 @@
 #                         出厂按窗口类名给 Chromium（含所有 Electron 应用）与 Firefox 开（见下方
 #                         两条 class 规则）。不要给 WPS 等软件改：它们靠那个空格才能给出有效的
 #                         光标位置。支持 process = "*" 通配与 class / title 窗口条件。
+#   assoc_placeholder:    联想态的占位字符："space" | "zwsp" | "blank" | "none"｜不写=跟随 composition_placeholder。
+#                         联想没有编码，输入法仍要挂一个占位组合来接收按键；软件对该字符有特殊处理时，
+#                         可只给联想换一个，不影响打字时的占位。
+#                         "none" = 联想时宿主里不挂任何占位（兼容性最好；候选窗位置沿用上次光标）。
 #   multiline_commit:     含换行的上屏文本怎么交给软件："commit" | "paste"｜不写=commit（直接上屏）。
 #                         "paste" 先结束组合，再把文本写入剪贴板并模拟 Ctrl+V 粘贴；只影响含换行的上屏。
 #                         ⚠ 会覆盖剪贴板原有内容且不恢复（不进剪贴板历史）；终端等 Ctrl+V 不是粘贴的软件不要开。
+#   syllable_separator:   拼音编码里音节之间显示的符号："apostrophe"(') | "space" | "dot"(·) | "none"｜不写=跟随全局
+#                         ui.candidate.syllable_separator。只改显示，不影响输入与切分；对拼音/混输生效。
+#                         例：Unreal Engine 的资产命名框不接受 '，对它设 "none"。
 #   caret_offset_x:       光标坐标水平校正（dp，96dpi 基准逻辑像素，正=右，默认 0）。
 #   caret_offset_y:       光标坐标垂直校正（dp，96dpi 基准逻辑像素，正=下，默认 0）。
 #                         用于宿主报告的光标坐标**系统性偏移**的场景（如 Windows Terminal，
@@ -169,7 +180,7 @@
 # 逐字段的功能与解决的问题以 wind-config 的 compat_schema 为准，帮助页读的也是它。
 #
 # first_show_mode / initial_mode / initial_punct / auto_pair / candidate_position_mode /
-# ignore_host_ime_close 对应右键菜单：「应用独立配置（<进程名>）」子菜单，各自单选。
+# ignore_host_ime_switch 对应右键菜单：「应用独立配置（<进程名>）」子菜单，各自单选。
 # （菜单切换会写入用户层 compat.toml，不改本文件）
 # smart_method、caret_offset_*、host_drawn_candidates 与 candidate_x/y 不进菜单：
 # 前三者按需手工编辑用户层 compat.toml，候选框位置由拖动候选框设定。
@@ -236,14 +247,23 @@ comment = "Win10 开始菜单：同上"
 host_render = true
 
 [[apps]]
+process = "textinputhost.exe"
+comment = "Win11 表情/剪贴板面板（Win+.）：面板在 Band 3，候选框盖不过，同上"
+host_render = true
+
+[[apps]]
 process = "EXCEL.EXE"
 comment = "Excel：进单元格前先在编辑栏报坐标，fast 首显会落在编辑栏，改用 wait"
 first_show_mode = "wait"
+# 联想窗出现时占位空格会干扰单元格自己的提示；联想不挂占位，转发靠上屏应答里的会话标志。
+assoc_placeholder = "none"
 
 [[apps]]
 process = "et.exe"
 comment = "WPS 表格：同 Excel，fast 首显落在上一个单元格，改用 wait"
 first_show_mode = "wait"
+# 联想窗出现时占位空格会干扰单元格自己的提示；联想不挂占位，转发靠上屏应答里的会话标志。
+assoc_placeholder = "none"
 
 # 按顶层窗口类名认浏览器内核，而不是逐个列进程名（Edge / Chrome / 各家套壳浏览器的
 # 进程名数不完）。⚠ Chrome_WidgetWin_* 是整个 Chromium 家族的窗口类，**所有 Electron / CEF 应用

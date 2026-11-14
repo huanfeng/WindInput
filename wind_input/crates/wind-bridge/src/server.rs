@@ -245,6 +245,18 @@ fn handle_client(
     use windows::Win32::Foundation::*;
     use windows::Win32::Storage::FileSystem::*;
 
+    // 打字线程提速：hybrid CPU（P 核 + E 核）下服务线程常被放 E 核化解负载，同核还有
+    // 其它常驻线程（WorkBuddy 等后台任务），实测 convert 慢键的 PageFaultCount 差值
+    // 只有正常键的 1/60 —— 大部分时间片在被抢占，直观感受就是出候选顿挫 50–200ms。
+    // 键处理线程提到 HIGHEST（进程保持 Normal），同核排队快得多。失败静默：提不上去
+    // 只影响延迟上限，不破坏功能。
+    unsafe {
+        let _ = windows::Win32::System::Threading::SetThreadPriority(
+            windows::Win32::System::Threading::GetCurrentThread(),
+            windows::Win32::System::Threading::THREAD_PRIORITY_HIGHEST,
+        );
+    }
+
     // 连接建立即通知：`ctx.pid` 是本次唯一能免费拿到、还没被任何消息处理耽搁的对端 pid。
     // 放在读循环之前——命名管道有内核缓冲（见上方 CreateNamedPipeA 的 64KB 收发缓冲区），
     // 对端此刻发消息不会因为我们还没开始 ReadFile 而丢失或阻塞；本调用只影响*本连接*
@@ -483,7 +495,8 @@ pub(crate) fn dispatch_command(
                     data.key_code
                 );
             }
-            Some(encode_key_action(&action))
+            let assoc_session = handler.assoc_session_hint();
+            Some(encode_key_action(&action, assoc_session))
         }
 
         // ── 提交请求（同步，barrier 机制） ──
@@ -697,7 +710,11 @@ pub(crate) fn dispatch_command(
             #[cfg(windows)]
             {
                 if let Some(mgr) = host_render {
-                    match mgr.setup(ctx.conn_id, ctx.pid) {
+                    // 载荷：新 DLL 带 4 字节能力位，旧 DLL 为空（= 0，穿透装饰合成成单层发）。
+                    let caps = payload
+                        .get(..4)
+                        .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+                    match mgr.setup(ctx.conn_id, ctx.pid, caps) {
                         Ok((instance_id, entries)) => {
                             return Some(encode_host_render_setup(instance_id, &entries));
                         }
@@ -1007,6 +1024,14 @@ pub(crate) fn dispatch_command(
             }
         }
 
+        // ── 旁路按键（异步，只为扩展程序，不进按键处理）──
+        CMD_KEY_OBSERVED => {
+            if let Ok(k) = decode_key_observed(payload) {
+                handler.handle_key_observed(k.key_code, k.modifiers);
+            }
+            None
+        }
+
         // ── 输入统计（异步，TSF 侧英文模式上报）──
         // InputStatsPayload: englishChars(4) + englishDigits(4) + englishPuncts(4)
         //                  + englishSpaces(4) + elapsedMs(4) = 20 字节
@@ -1021,6 +1046,9 @@ pub(crate) fn dispatch_command(
             }
             None
         }
+
+        // 纯异步上报，由 handle_client 在响应写出后处理，这里只需认领，免得落进下面报未知命令。
+        CMD_INPUT_STATE_REPORT | CMD_DIAG_SNAPSHOT => None,
 
         _ => {
             warn!("Unknown command: 0x{:04X}", command);
@@ -1127,10 +1155,21 @@ fn decode_focus_lost_reason(payload: &[u8]) -> wind_ipc::protocol::FocusLostReas
 /// 将 KeyAction 编码为响应字节
 ///
 /// 与 Go 版 handleKeyEvent 的 switch 分支对齐
-fn encode_key_action(action: &KeyAction) -> Vec<u8> {
+fn encode_key_action(action: &KeyAction, assoc_session: bool) -> Vec<u8> {
+    // 标志位只属于「不带新组合的普通上屏」：带新组合的上屏、其它动作一律不置位。
+    // （见 tests::assoc_session_flag_only_on_plain_commit）
     use wind_ipc::codec::*;
 
     match action {
+        KeyAction::InsertText {
+            text,
+            new_composition,
+            mode_changed,
+            chinese_mode,
+            has_new_composition,
+        } if assoc_session && new_composition.is_none() && !*has_new_composition => {
+            encode_commit_text_assoc_session(text, *mode_changed, *chinese_mode)
+        }
         KeyAction::InsertText {
             text,
             new_composition,
@@ -1200,13 +1239,51 @@ fn encode_status_update_from_data(status: &StatusUpdateData) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ASSOC_SESSION 标志（0x20）只加在不带新组合的 InsertText 上，其它一律不加。
+    #[test]
+    fn assoc_session_flag_only_on_plain_commit() {
+        let flags = |b: &[u8]| {
+            u32::from_le_bytes(
+                b[wind_ipc::protocol::IpcHeader::SIZE..][..4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let plain = KeyAction::InsertText {
+            text: "好".into(),
+            new_composition: None,
+            mode_changed: false,
+            chinese_mode: true,
+            has_new_composition: false,
+        };
+        let with_comp = KeyAction::InsertText {
+            text: "好".into(),
+            new_composition: Some(" ".into()),
+            mode_changed: false,
+            chinese_mode: true,
+            has_new_composition: true,
+        };
+        assert_eq!(flags(&encode_key_action(&plain, true)) & 0x20, 0x20);
+        assert_eq!(flags(&encode_key_action(&plain, false)) & 0x20, 0);
+        assert_eq!(
+            flags(&encode_key_action(&with_comp, true)) & 0x20,
+            0,
+            "带新组合的上屏不置位"
+        );
+        assert_ne!(
+            encode_key_action(&KeyAction::Consumed, true),
+            Vec::<u8>::new()
+        );
+    }
+
     use std::sync::atomic::{AtomicU32, Ordering};
     use wind_ipc::codec::decode_uielement_page;
     use wind_ipc::protocol::{
-        CMD_ACK, CMD_CANDIDATE_SELECT, CMD_HOST_RENDER_FAILED, CMD_UIELEMENT_ACTION,
-        CMD_UIELEMENT_PAGE, CMD_UIELEMENT_QUERY, CMD_UIELEMENT_STATE, IpcHeader,
-        UIELEMENT_ACTION_SET_SELECTION, UIELEMENT_FLAG_UI_LESS_THREAD, UiElementActionPayload,
-        UiElementStatePayload,
+        CMD_ACK, CMD_CANDIDATE_SELECT, CMD_HOST_RENDER_FAILED, CMD_KEY_OBSERVED,
+        CMD_UIELEMENT_ACTION, CMD_UIELEMENT_PAGE, CMD_UIELEMENT_QUERY, CMD_UIELEMENT_STATE,
+        IpcHeader, KeyObservedPayload, MOD_SHIFT, UIELEMENT_ACTION_SET_SELECTION,
+        UIELEMENT_FLAG_UI_LESS_THREAD, UiElementActionPayload, UiElementStatePayload,
     };
     // host-render 与按键投递是 Windows 专属通路，相应用例也只在 Windows 编译。
     #[cfg(windows)]
@@ -1315,6 +1392,31 @@ mod tests {
                 .unwrap()
                 .push(format!("action:{action}:{arg}"));
         }
+        fn handle_key_observed(&self, key_code: u32, modifiers: u32) {
+            self.last_uielement
+                .lock()
+                .unwrap()
+                .push(format!("observed:{key_code}:{modifiers}"));
+        }
+    }
+
+    /// 旁路按键是分发表里的已知命令：交给处理器、不回响应（漏登记会每键刷一条 Unknown command）。
+    #[test]
+    fn key_observed_dispatches_without_response() {
+        let handler = Arc::new(RecordingHandler::default());
+        let dyn_handler: Arc<dyn MessageHandler> = handler.clone();
+        let ctx = ClientCtx { conn_id: 0, pid: 0 };
+        let p = KeyObservedPayload {
+            key_code: 0x08,
+            modifiers: MOD_SHIFT,
+        };
+        assert!(
+            dispatch_for_test(&dyn_handler, CMD_KEY_OBSERVED, true, &p.to_bytes(), ctx).is_none()
+        );
+        assert_eq!(
+            *handler.last_uielement.lock().unwrap(),
+            vec![format!("observed:8:{MOD_SHIFT}")]
+        );
     }
 
     /// UIElement 三件套的分发：状态/操作异步不回响应（防管道污染），查询同步回快照帧。
@@ -1523,7 +1625,7 @@ mod tests {
         let _ = dispatch_command(&handler, CMD_KEY_EVENT, false, &[], ctx, Some(&mgr));
 
         // setup 后 active_target 应指向键事件来源的 conn 7
-        mgr.setup(7, pid).expect("setup 应成功");
+        mgr.setup(7, pid, 0).expect("setup 应成功");
         let target = mgr.active_target().expect("键事件应已刷新 active");
         assert_eq!(target.instance_id, 7, "active 实例应为键事件来源连接");
     }
@@ -1563,6 +1665,32 @@ mod tests {
             3,
             "应含三 kind 条目"
         );
+    }
+
+    /// 请求载荷里的能力位记到该实例上：带穿透层能力的 DLL 才拿到拆层帧，空载荷（旧 DLL）不拆。
+    #[cfg(windows)]
+    #[test]
+    fn host_render_request_records_capabilities() {
+        let pid = std::process::id();
+        let mgr = HostRenderManager::new(&format!("_srv_caps_{pid}"), vec!["*".to_string()]);
+        let handler: Arc<dyn MessageHandler> = Arc::new(RecordingHandler::default());
+        let caps = wind_ipc::protocol::HOST_RENDER_CAP_PASS_LAYER.to_le_bytes();
+        for (conn_id, payload) in [(1u32, &[][..]), (2, &caps[..])] {
+            let ctx = ClientCtx { conn_id, pid };
+            dispatch_command(
+                &handler,
+                CMD_HOST_RENDER_REQUEST,
+                false,
+                payload,
+                ctx,
+                Some(&mgr),
+            )
+            .expect("同步命令应有响应");
+        }
+        mgr.note_focus(1, pid);
+        assert!(!mgr.active_target().unwrap().pass_layer, "空载荷 = 旧 DLL");
+        mgr.note_focus(2, pid);
+        assert!(mgr.active_target().unwrap().pass_layer);
     }
 
     /// 未命中白名单的连接请求应回 ACK（DLL 退回进程内渲染）。

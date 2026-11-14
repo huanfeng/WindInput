@@ -9,7 +9,7 @@ name: Release
 #   prep           → 定版本号。各平台的产物文件名都带版本,必须同源一次算出;各自算会在
 #                    手动触发时因 sha 截取口径漂移而产出对不上号的几套文件名。
 #   build-windows  → windows-2022 原生 MSVC,产 Setup.exe + Portable.zip
-#   build-macos    → macos-14,产通用二进制(arm64+x86_64) .pkg
+#   build-macos    → macos-26,产通用二进制(arm64+x86_64) .pkg
 #   build-linux    → 调 linux-build.yml:ubuntu-22.04 / 22.04-arm 原生 runner 各产一个 .deb。
 #                    与 Windows / macOS 同等对待:**任一平台失败都不建草稿**,三平台同版同发。
 #                    想先单独发 Linux 包 / 补包:release-linux.yml(手动触发,填本 tag)。
@@ -136,7 +136,7 @@ jobs:
       #
       # 为什么不能让本机只对上面那两个成品补签:签名夹在打包中间 —— PE 要在封进压缩块
       # 之前签,Setup.exe 要在 pack 之后、New-UpdateManifest 之前签。对成品补签只签得到
-      # 外壳,包内 5 个 PE 仍是全裸的,而 signtool verify 验 Setup.exe 照样通过 ——
+      # 外壳,包内 6 个 PE 仍是全裸的,而 signtool verify 验 Setup.exe 照样通过 ——
       # 从外面完全看不出来(实测踩过,见 dev.ps1 Do-Installer 第 2.5 步)。
       #
       # 带上安装器三件套是为了本机【一行代码都不编译】:Do-Installer 见它们已在就给
@@ -172,9 +172,9 @@ jobs:
   build-macos:
     name: macOS 安装包
     needs: prep
-    # macos-14 是 Apple Silicon runner。x86_64 那半靠 rustup 的交叉 target + Swift 的
+    # macos-26 是 Apple Silicon runner。x86_64 那半靠 rustup 的交叉 target + Swift 的
     # --arch 双架构编译,不需要 Intel runner。
-    runs-on: macos-14
+    runs-on: macos-26
     # 兜底闸: 双架构 Rust + 双架构 Swift + 下载组装词库, 正常一小时内完事。
     # 不设的话默认是 6 小时, 而 macOS runner 按 10 倍分钟计费, 卡住一次就很难看。
     timeout-minutes: 90
@@ -387,7 +387,7 @@ jobs:
             echo "> 发布前请在开发机上执行(需先建立签名会话):"
             echo "> \`.\\scripts\\release.ps1 sign-draft\`"
             echo "> 它会拉本次 CI 的中转产物, 在本机签名并【重新打包】(签名夹在打包中间,"
-            echo "> 对成品补签只签得到外壳, 包内 5 个 PE 仍是全裸的), 覆盖本页 4 个资产,"
+            echo "> 对成品补签只签得到外壳, 包内 6 个 PE 仍是全裸的), 覆盖本页 4 个资产,"
             echo "> 最后自动删掉这段提示。"
             echo ">"
             echo "> 为什么 CI 签不了:docs/design/code-signing.md 第 3 节。"

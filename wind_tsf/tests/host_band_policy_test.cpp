@@ -66,13 +66,17 @@ void TestStableAfterRebuild()
 void TestPlacedBody()
 {
     CASE("落位 body：setup 不带 prev，recheck 带上旧窗依据");
-    Placement now = { 13, 13, 13, true };
+    Placement now = { 13, 13, 13, true, true };
     CHECK(PlacedBody(42, now, nullptr) ==
-          "{\"pid\":42,\"trigger\":\"setup\",\"probed\":13,\"requested\":13,\"actual\":13,\"owner\":true}");
-    Placement prev = { 0, 1, 1, false };
+          "{\"pid\":42,\"trigger\":\"setup\",\"probed\":13,\"requested\":13,\"actual\":13,\"owner\":true,"
+          "\"pass\":true}");
+    Placement prev = { 0, 1, 1, false, false };
     CHECK(PlacedBody(42, now, &prev) ==
           "{\"pid\":42,\"trigger\":\"recheck\",\"probed\":13,\"requested\":13,\"actual\":13,\"owner\":true,"
-          "\"prev_probed\":0,\"prev_requested\":1,\"prev_actual\":1,\"prev_owner\":false}");
+          "\"pass\":true,\"prev_probed\":0,\"prev_requested\":1,\"prev_actual\":1,\"prev_owner\":false}");
+    CASE("落位 body：穿透装饰窗口没建出来 ⇒ pass=false");
+    Placement noPass = { 13, 13, 13, true, false };
+    CHECK(PlacedBody(42, noPass, nullptr).find("\"pass\":false}") != std::string::npos);
 }
 
 void TestEncodeExt()
@@ -87,6 +91,29 @@ void TestEncodeExt()
 
 } // namespace
 
+void TestCountsForHostBand()
+{
+    CASE("枚举计入：不可见或零面积的辅助窗口不算");
+    CHECK(CountsForHostBand(true, 1920, 1080));
+    CHECK(!CountsForHostBand(true, 0, 0));
+    CHECK(!CountsForHostBand(false, 300, 200));
+    CHECK(!CountsForHostBand(true, 0, 40));
+}
+
+void TestPickHostBand()
+{
+    CASE("表情面板：前台是别的进程，焦点根窗口 band 3，枚举猜到 15 → 取 3");
+    CHECK(PickHostBand(0, 3, 15) == 3);
+    CASE("开始菜单：前台是本进程 band 13 → 取前台");
+    CHECK(PickHostBand(13, 3, 15) == 13);
+    CASE("焦点根窗口取不到 → 枚举兜底");
+    CHECK(PickHostBand(0, 0, 6) == 6);
+    CASE("焦点根窗口是普通 band 1 → 不当依据，枚举兜底");
+    CHECK(PickHostBand(0, 1, 6) == 6);
+    CASE("全无依据 → 0（调用方落到 band 1）");
+    CHECK(PickHostBand(0, 0, 0) == 0);
+}
+
 int main()
 {
     std::printf("HostBandPolicy tests\n");
@@ -96,6 +123,8 @@ int main()
     TestStableAfterRebuild();
     TestPlacedBody();
     TestEncodeExt();
+    TestCountsForHostBand();
+    TestPickHostBand();
 
     if (g_failures == 0)
     {

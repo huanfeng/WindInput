@@ -30,13 +30,22 @@ const VIEW_NODE_KEYS: &[&str] = &[
     "accent_bar",
     "footer_bar",
     "mode_label",
+    "divider",
     "status",
     "tooltip",
     "toast",
 ];
 
 /// 顶层保留块（非视图节点）。
-const RESERVED_TOP: &[&str] = &["meta", "colors", "behavior", "resources", "base", "views"];
+const RESERVED_TOP: &[&str] = &[
+    "meta",
+    "colors",
+    "behavior",
+    "resources",
+    "base",
+    "views",
+    "skin",
+];
 
 /// 把扁平 TOML 根表归一化为规范嵌套形态。非 Table 顶层原样返回。
 ///
@@ -123,7 +132,7 @@ fn normalize_view_nodes(t: Table, fills: bool) -> Table {
         .collect()
 }
 
-/// 单个视图节点归一化（递归 selected/hover/disabled）。
+/// 单个视图节点归一化（递归 selected/hover/disabled，以及竖排覆盖 vertical）。
 fn normalize_node(v: Value, fills: bool) -> Value {
     let Value::Table(mut t) = v else { return v };
 
@@ -166,7 +175,7 @@ fn normalize_node(v: Value, fills: bool) -> Value {
             t.insert(k.to_string(), normalize_image(im));
         }
     }
-    for k in ["selected", "hover", "disabled"] {
+    for k in ["selected", "hover", "disabled", "vertical"] {
         if let Some(s) = t.remove(k) {
             t.insert(k.to_string(), normalize_node(s, fills));
         }

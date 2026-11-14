@@ -11,7 +11,9 @@
 | `wind_input/` | Rust 核心服务（cargo workspace：19 个 crate + `apps/service`） | 本文档 + crate 级 AGENTS.md |
 | `wind_tsf/` | C++17 TSF DLL：Windows 输入法接口层，经 Named Pipe 与 Rust 服务通信 | [AGENTS.md](wind_tsf/AGENTS.md) |
 | `wind_macos/` | macOS IMKit `.app`（与 `wind_tsf/` 对位，开发中） | [AGENTS.md](wind_macos/AGENTS.md) |
+| `flake.nix` + `wind_linux/nix/` | Linux 端 Nix 打包（服务 + Fcitx5 addon + 设置程序 + 词库数据；addon 由 `wind_linux/` 构建） | [AGENTS.md](wind_linux/nix/AGENTS.md) |
 | `../wind-setting` | 设置 UI（**独立仓库**，经 JSON-RPC 与核心通信）；改设置界面去那边 | — |
+| `../WindInputExtensions` | 官方扩展程序（按键音等，**独立仓库**）与扩展协议说明；依赖本仓的 `wind-hook` | — |
 | `../wind-portable` | 绿色版启动器（独立仓库，不存在时构建脚本自动跳过） | — |
 | `../WindInput-Go` | Go 旧版源码（只读参考；docs 旧文档里的 `../WindInput` 指的是它） | — |
 
@@ -25,6 +27,8 @@
 | `wind-engine` | Schema 驱动的引擎工厂：拼音/码表/混输/英文四类引擎的构建、切换与候选分发 | [AGENTS.md](wind_input/crates/wind-engine/AGENTS.md) |
 | `wind-ui` | 所有浮层窗口（候选窗/工具栏/菜单/状态泡/Toast/Tooltip）的渲染与鼠标交互 | [AGENTS.md](wind_input/crates/wind-ui/AGENTS.md) |
 | `wind-ui-types` | 表现层协议（纯数据）：`UiCommand`/`UiEvent` 及载荷，协调器 ↔ 任意前端（桌面/macOS/Android）共用 | [AGENTS.md](wind_input/crates/wind-ui-types/AGENTS.md) |
+| `wind-scene` | 浮层渲染的平台无关部分（View 盒模型、图片缓存、异形皮肤、文字公共类型与 `TextBackend`），自 wind-ui 抽出、原路径 `pub use`；不依赖 wind-config，为设置端预览 / 主题编辑器（wasm）共用铺路 | [AGENTS.md](wind_input/crates/wind-scene/AGENTS.md) |
+| `wind-scene-wasm` | 主题编辑器的候选窗预览：wind-scene 编成 wasm（wasm-bindgen），文字回调浏览器 Canvas、内置主题编进产物；只准依赖 wind-scene / wind-theme / wind-ui-types；构建 `scripts/build-scene-wasm.sh`，检查 `dev.sh wk` | [AGENTS.md](wind_input/crates/wind-scene-wasm/AGENTS.md) |
 | `wind-cmdbar` | 命令直通车：短语解析 → AST 求值 → 动作执行（纯逻辑） | [AGENTS.md](wind_input/crates/wind-cmdbar/AGENTS.md) |
 | `wind-dict` | 多层复合词典引擎：DictLayer/CompositeDict 查询 + wdat mmap 二进制词库 | [AGENTS.md](wind_input/crates/wind-dict/AGENTS.md) |
 | `wind-store` | 用户数据门面：用户词与学到的数据（临时词 / 草稿 / 词频 / 联想历史）委托 `wind-userdata`，真源都是 `<userdata>/data/<schema>/` 下的文本；短语 / Shadow / 覆盖表 / 补全 / 统计也在 `data/`（P5：复制用户目录即带走全部数据）；redb 只供迁移读；三个 Store 层也在这里 | [AGENTS.md](wind_input/crates/wind-store/AGENTS.md) |
@@ -35,6 +39,7 @@
 | `wind-theme` | 加载并求值 v3 主题，输出调色板 + 盒模型树供 wind-ui 渲染 | [AGENTS.md](wind_input/crates/wind-theme/AGENTS.md) |
 | `wind-bridge` | Named Pipe 服务器 + Push 管道，桥接 Rust 服务与 C++ TSF DLL | [AGENTS.md](wind_input/crates/wind-bridge/AGENTS.md) |
 | `wind-ipc` | IPC 协议定义与编解码（TSF 二进制协议 + JSON-RPC） | — |
+| `wind-hook` | 扩展程序通道（纯逻辑）：协议消息与帧、授权档位、扩展清单与选项校验；宿主进程在 `apps/extension_host`（产物 `wind_input_ext`），设计见 docs/design/extension-hook-channel.md | — |
 | `wind-keys` | 键名/VK 映射、导航键分类（纯逻辑）+ 按键注入（平台层）；**VK 常量 SSOT** | — |
 | `wind-candidate` | 候选词数据类型、排序与过滤 | — |
 | `wind-phrase` | 短语系统：静态/动态模板展开 + cmdbar 双路径 | — |
@@ -46,6 +51,9 @@
 | `wind-transform` | 文本变换：标点、全角、自动配对、简繁 | — |
 
 `—` = 暂无独立 `AGENTS.md`（多为纯逻辑/工具 crate，职责单一，看 `src/lib.rs` 顶部模块注释即可）。
+
+**新功能动手前**先按 [docs/architecture/feature-placement-guide.md](docs/architecture/feature-placement-guide.md)
+判定落点（属于哪些流程阶段、挂哪个槽位、要同步哪些平行路径），并遵守其中的「输入流程零读盘」规则（§6）。
 
 核心输入链路（词库 → 五类引擎 → 候选后处理）的**现状架构文档**见
 [docs/architecture/engine-candidate-pipeline.md](docs/architecture/engine-candidate-pipeline.md)
@@ -346,9 +354,9 @@ $env:WIND_REMOTE_SLOT = "off"    # 关掉槽位，与主树共用目录（串台
 
 #### 邻仓 wind-setting：交叉 + wine（`sk` / `st` / `sg`）
 
-`wind-setting` 编不出**原生 Linux** 产物：它依赖 `windui`，而 `windui` 对非 Windows/macOS 目标
-直接 `compile_error!`（rfd 的后端 feature 只是最先爆的那个，修好它照样过不去）。但**交叉到
-Windows 目标一切正常**，测试二进制交给 wine 执行即可：
+`wind-setting` 依赖的 `windui` 已有原生 Linux 后端（默认 X11，Wayland 桌面经 XWayland；Nix 包见
+[wind_linux/AGENTS.md](wind_linux/AGENTS.md)），可直接 `cargo build`；下面这套 cargo-xwin + wine
+用于在 Linux 上**构建、测试 Windows 产物**：
 
 | 命令 | 做什么 | 要 wine |
 |---|---|---|

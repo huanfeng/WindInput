@@ -853,7 +853,7 @@ mod tests {
             ]
         );
         let p = lib_path(s.user_text_dir(), "wb", "a");
-        assert!(std::fs::read_to_string(&p).unwrap().ends_with("戈\tab\n"));
+        assert!(std::fs::read_to_string(&p).unwrap().ends_with("ab\t戈\n"));
         for (code, text) in [
             ("", "x"),
             ("a", ""),
@@ -885,7 +885,7 @@ mod tests {
         assert!(
             std::fs::read_to_string(&p)
                 .unwrap()
-                .contains("你好\tni hao\t2\n")
+                .contains("ni hao\t你好\t2\n")
         );
     }
 

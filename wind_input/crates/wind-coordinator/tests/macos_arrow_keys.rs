@@ -37,6 +37,7 @@ fn key_event(key_code: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -92,7 +93,10 @@ fn left_enters_code_and_mid_insert_requeries() {
     let caret_end = c.debug_ui_caret_bytes();
 
     let act = press_vk(&c, VK_LEFT);
-    assert!(matches!(act, KeyAction::Consumed), "实际: {act:?}");
+    assert!(
+        matches!(act, KeyAction::UpdateComposition { .. }),
+        "实际: {act:?}"
+    );
     assert_eq!(c.debug_input_buffer(), "hi", "移动不改缓冲");
     let caret_left = c.debug_ui_caret_bytes();
     assert_eq!(caret_end - caret_left, 1, "左移一个字符");
@@ -138,7 +142,7 @@ fn right_inside_code_only_moves() {
     let before = c.debug_ui_caret_bytes();
     let act = press_vk(&c, VK_RIGHT);
     assert!(
-        matches!(act, KeyAction::Consumed),
+        matches!(act, KeyAction::UpdateComposition { .. }),
         "中间的 → 只右移，实际: {act:?}"
     );
     assert_eq!(c.debug_ui_caret_bytes() - before, 1);

@@ -83,7 +83,18 @@ fn abbrev_candidate_carries_full_code_and_boundary() {
 #[test]
 fn abbrev_rejects_same_code_with_wrong_syllable_count() {
     let e = engine(fixture("filter"));
-    let t = texts(&e, "xa");
+    // 只看整串命中的候选：「先」会作为首声母单字（`is_partial`，只消费 `x`）排在后面，
+    // 那是简拼逐级补全的单字档，不算“同码错音节数”混入。
+    let t: Vec<String> = e
+        .convert("xa", 30)
+        .map(|r| {
+            r.candidates
+                .into_iter()
+                .filter(|c| !c.is_partial)
+                .map(|c| c.text)
+                .collect()
+        })
+        .unwrap_or_default();
 
     assert!(
         t.contains(&"西安".to_string()),

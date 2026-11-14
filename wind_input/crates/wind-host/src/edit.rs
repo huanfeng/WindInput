@@ -60,7 +60,8 @@ pub enum TimingHint {
 /// 一次按键的完整结果。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyOutcome {
-    /// 是否被输入法消费。`false` 时 [`ops`](Self::ops) 必为空，宿主执行默认行为。
+    /// 是否被输入法消费。`false` 时宿主对这一键执行默认行为；[`ops`](Self::ops) 通常为空，
+    /// 唯一例外是「清组合再交还」（联想态退格、回车透传）：宿主**先按序执行 ops、再走默认行为**。
     pub consumed: bool,
 
     /// 按序执行的编辑指令。空 = 无文本变更（如纯模式切换）。

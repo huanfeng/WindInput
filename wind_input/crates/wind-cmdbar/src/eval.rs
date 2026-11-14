@@ -28,6 +28,12 @@ pub struct ArrayElement {
     pub actions: Vec<ResolvedAction>,
     /// 嵌入 `$CC` 的元素级修饰符（组级 prefix 已在解析期禁用）。
     pub modifiers: Modifiers,
+    /// 嵌入 `$CC` 元素的**独立命令源**（`$CC(显示名, 动作...)` 完整文本，可单独交给
+    /// [`evaluate_phrase`](crate::evaluate_phrase) 重新求值执行）；字面字符串元素为 `None`。
+    ///
+    /// 宿主把每个成员做成独立候选，选中时按这份源执行——整条 `$SS` 的源不能用，
+    /// 那会是一组而不是这一个成员。由 AST 的 `Display` 渲染，往返等价由测试钉住。
+    pub src: Option<String>,
 }
 
 /// `$SS` 整体展开结果。
@@ -124,6 +130,7 @@ pub fn expand_array(
                     display,
                     actions: Vec::new(),
                     modifiers: Modifiers::new(),
+                    src: None,
                 });
             }
             Expr::Command(cp) => {
@@ -132,6 +139,7 @@ pub fn expand_array(
                     display: ev.display,
                     actions: ev.actions,
                     modifiers: cp.modifiers.clone(),
+                    src: Some(cp.to_string()),
                 });
             }
             other => {
@@ -567,6 +575,51 @@ mod tests {
         assert!(arr.elements[0].actions.is_empty());
         assert_eq!(arr.elements[1].display, "动作");
         assert_eq!(arr.elements[1].actions.len(), 1);
+    }
+
+    /// 元素级命令源必须能独立重新解析、求值出同样的显示与动作个数——宿主靠它执行单个成员。
+    /// 覆盖转义敏感的写法：路径反斜杠、字符串内插花括号、引号、具名参数、`on_error` 修饰符。
+    #[test]
+    fn embedded_command_src_round_trips() {
+        let reg = Registry::full();
+        let ctx = MemoryContext::new().with_input("abc");
+        let srcs = [
+            r#"$CC("打开", open("D:\\notes\\temp"))"#,
+            r#"$CC("长度 {len(code)}", type("{upper(code)}"))"#,
+            r#"$CC("引号\"内", type("a\"b"))"#,
+            r#"$CC("链", type("x"), type("y"), {on_error: "stop"})"#,
+            r#"$CC("具名", open("https://a", cwd="D:/d"))"#,
+        ];
+        for one in srcs {
+            let p = parse(&format!(r#"$SS("组", {one})"#)).unwrap();
+            let Phrase::Array(a) = p else { panic!() };
+            let arr = expand_array(&a, &ctx, &reg).unwrap();
+            let src = arr.elements[0].src.clone().expect("命令元素必须带源");
+            let direct = match parse(one).unwrap() {
+                p @ Phrase::Command(_) => evaluate(&p, &ctx, &reg).unwrap(),
+                _ => panic!(),
+            };
+            let again = match parse(&src).unwrap() {
+                p @ Phrase::Command(_) => evaluate(&p, &ctx, &reg).unwrap(),
+                _ => panic!("元素源必须解析回命令短语: {src}"),
+            };
+            assert_eq!(again.display, direct.display, "{src}");
+            assert_eq!(again.actions.len(), direct.actions.len(), "{src}");
+            assert_eq!(again.on_error, direct.on_error, "{src}");
+        }
+    }
+
+    #[test]
+    fn literal_elements_have_no_command_src() {
+        let reg = Registry::full();
+        let ctx = MemoryContext::new();
+        let Phrase::Array(a) = parse(r#"$SS("组", "字面", $CC("动作", type("x")))"#).unwrap()
+        else {
+            panic!()
+        };
+        let arr = expand_array(&a, &ctx, &reg).unwrap();
+        assert!(arr.elements[0].src.is_none());
+        assert!(arr.elements[1].src.is_some());
     }
 
     #[test]

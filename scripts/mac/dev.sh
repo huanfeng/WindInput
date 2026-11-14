@@ -141,8 +141,8 @@ app_name_for_variant() { [[ "$VARIANT" == dev ]] && echo "WindInputDev" || echo 
 # 背景: 服务重启会断开 app 侧的请求 socket; app 不会自动重连该通道 (仅 push 通道靠
 # SERVICE_READY 重连), 不重拉则表现为「装完/重启服务后按键无响应」。Windows 侧 TSF DLL
 # 由各宿主进程自动重连, macOS 的 IMKit .app 常驻进程需显式踢一下。
-# 只杀控制器实例, 保留 --register-input-source 守护 (维持 TIS 注册); IME 非当前输入源时
-# 无控制器进程在跑, pgrep 落空即静默跳过。
+# 只杀控制器实例 (--register-input-source 注册完即退出, 这里不应再见到它; 万一碰上正在注册的
+# 那一刻也别杀); IME 非当前输入源时无控制器进程在跑, pgrep 落空即静默跳过。
 kick_ime_app() {
     local appname pids pid args killed=0
     appname="$(app_name_for_variant)"
@@ -150,7 +150,7 @@ kick_ime_app() {
     for pid in $pids; do
         args=$(ps -o args= -p "$pid" 2>/dev/null || true)
         case "$args" in
-            *--register-input-source*) ;;                # 保留注册守护
+            *--register-input-source*) ;;                # 正在注册, 别打断
             *) kill "$pid" 2>/dev/null && killed=1 ;;     # 只杀控制器实例
         esac
     done
@@ -812,6 +812,8 @@ download_dicts() {
         get_dict "$wubibase/$f.dict.yaml" "$wubi/$f.dict.yaml"
     done
 
+    # 中英释义不再下载上游: ECDICT / CC-CEDICT 用到的部分已冻结进 data/comments-src/*_raw.tsv (见 assemble_data)。
+
     # 辅助码表: 拼音候选的字形二次筛选 (默认关闭, 见 schema.pinyin.aux_code)。
     # 小鹤/自然码零转换; 笔画表由 gen_aux_code 从 rime-stroke 的 .dict.yaml 转换 + 字集裁剪。
     # ⚠️ rime-stroke 是 LGPL-3.0 —— 同 rime-frost 处理: 只下载不入库, 见 NOTICE.md。
@@ -998,6 +1000,35 @@ assemble_data() {
         warn "缺 .cache/aux-code/, 辅助码不可用 (先跑 gd 下载)"
     fi
 
+    # 9. 内置中英释义注释词库 (Python 脚本 scripts/comment_dicts/build.py): en_zh 按英文词表、
+    # zh_en 按拼音/五笔词表裁剪, 产物只进 build 目录、不入版本库。源数据全部入库在 data/comments-src/:
+    # 重整版、AI 补齐, 以及重整版没覆盖的原始释义快照 (*_raw.tsv, ECDICT MIT / CC-CEDICT CC BY-SA 4.0,
+    # 许可见 NOTICE.md)。冻结进仓后构建可复现、不依赖外网; 更新上游时手工跑 build.py snapshot 再提交。
+    # 随第 1 步一并复制进来, 用完剥掉不随包分发。缺 python3 或生成失败这里只 warn, 发版由 verify_dist_data 拦下。
+    # ⚠ scripts/dev.sh 与 dev.ps1 的同名步骤是同一件事, 改一边要同步另外两边。
+    local cdict="$REPO_DIR/scripts/comment_dicts/build.py" src="$data/comments-src"
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "缺 python3, 中英释义词库不可用"
+    else
+        info "生成中英释义注释词库 (comment_dicts) ..."
+        mkdir -p "$data/schemas/comments"
+        # 拼音表用于丢掉 AI 释义里拼音化的专名; 缺了只是不过滤
+        local pm_args=()
+        [[ -f "$data/pinyin_map.txt" ]] && pm_args=(--pinyin "$data/pinyin_map.txt")
+        python3 -I "$cdict" en-zh --raw "$src/en_zh_ecdict_raw.tsv" \
+            --words "$english/en.dict.yaml" "$english/en_ext.dict.yaml" \
+            --refined "$src/en_zh_refined.tsv" \
+            --out "$data/schemas/comments/en_zh.txt" \
+            || warn "英→中释义词库生成失败"
+        python3 -I "$cdict" zh-en --raw "$src/zh_en_cedict_raw.tsv" --ai "$src/zh_en_ai.tsv" \
+            --refined "$src/zh_en_cedict_refined.tsv" ${pm_args[@]+"${pm_args[@]}"} \
+            --words "$pinyin_cn/base.dict.yaml" "$pinyin_cn/ext.dict.yaml" \
+                    "$pinyin/ext/idiom.dict.yaml" "$data/schemas/wubi86/wubi86_jidian.dict.yaml" \
+            --out "$data/schemas/comments/zh_en.txt" \
+            || warn "中→英释义词库生成失败"
+    fi
+    rm -rf "$data/comments-src"
+
     info "data/ 组装完成 ($(find "$data" -type f | wc -l | tr -d ' ') 文件)"
     return 0
 }
@@ -1056,6 +1087,10 @@ verify_dist_data() {
     _check_min "schemas/wubi86/wubi86_jidian_extra_district.dict.yaml" 10000
     # 笔画方案词库同为 gen_aux_code 生成物; 全拼默认辅助码经 schema:stroke 引用它
     _check_min "schemas/stroke/stroke.dict.yaml"                       500000
+    # 内置中英释义注释词库 (comment_dicts/build.py 生成物): 生成失败在组装时只 warn,
+    # 缺了出厂详细态没有英文 / 中文释义且无任何报错。实测 en_zh 约 527KB、zh_en 约 4.3MB
+    _check_min "schemas/comments/en_zh.txt"                            300000
+    _check_min "schemas/comments/zh_en.txt"                            3000000
     local oc; oc=$(ls "$data/opencc"/*.octrie 2>/dev/null | wc -l | tr -d ' ')
     if (( oc < 1 )); then err "  ✗ 缺失: opencc/*.octrie (简繁转换编译失败)"; ok=0
     else info "  ✓ opencc/*.octrie ($oc 个)"; fi
@@ -1136,7 +1171,7 @@ app_install() {
     if [[ $DO_UNINSTALL -eq 1 ]]; then
         bold "==> Uninstall $APP_NAME (full purge)"
 
-        # 1. 杀本变体的 IME 进程 (含 --register-input-source 后台守护)。按 .app 路径定位,
+        # 1. 杀本变体的 IME 进程 (含旧版残留的 --register-input-source 守护)。按 .app 路径定位,
         #    两变体进程同名 WindInput, 不能用进程名匹配 (会误杀另一变体)。
         info "kill $APP_NAME processes"
         pkill -9 -f "$APP_NAME.app/Contents/MacOS/$EXE_NAME" 2>/dev/null || true
@@ -1309,29 +1344,23 @@ PY
 
     # 4c'. 踢掉第 1 步之后又被 IMK 拉起的控制器: pkill 后到 cp 完成前, 清风正被选中的宿主
     #     会让 IMK 立刻重拉一个 (可能还是旧二进制)。第 1 步杀过了不等于干净, 别删这一步。
-    #     **必须在起注册守护之前做, 之后绝不能再踢**:
+    #     **必须在注册之前做, 之后绝不能再踢**:
     #     注册一发生, 当前选中清风的宿主会让 imklaunchagent 立即拉起一个**新**控制器
-    #     (launchd: "spawned … because launch job demand"), 它是唯一持有 IMK 端点的进程。
-    #     旧版在注册后 sleep 1 再 kick, 恰好把这个新控制器杀掉 (实测 macOS 27: 19:00:54 与
-    #     20:35:20 两次都是"拉起 <1s 即被杀")。此后同 bundle 只剩不建 IMKServer 的注册守护,
-    #     imklaunchagent 每次要端点都是 NO Endpoint —— 切走切回、重开宿主都无效, 只有
-    #     重启 (守护消失) 才恢复, 即 GH#186。是否中招取决于安装那一刻清风是否正被选中且
-    #     有聚焦的文本框 (如授权对话框), 所以时有时无。
+    #     (launchd: "spawned … because launch job demand"), 它是唯一持有 IMK 端点的进程,
+    #     踢掉它就要等下一个宿主来要端点 (实测 macOS 27: 旧版在注册后 sleep 1 再 kick,
+    #     恰好把这个新控制器杀掉)。
     kick_ime_app
 
     # 4d. 调本 .app 自身 binary 的 --register-input-source 立即注册 (免重启即可在 picker 出现).
     #     macOS Tahoe (26) 起 TIS 仅接受来自 IME 自身进程的 TISRegisterInputSource 调用
     #     (校验 codesign identity 匹配 bundleID), 外部 swift CLI 调 silently no-op.
     local APP_EXEC="$INSTALL_APP/Contents/MacOS/WindInput"
-    local REGISTER_PID
     if [[ -x "$APP_EXEC" ]]; then
-        # 重要: register 进程保持运行以维持 TIS 注册 (踩过的坑: register 完立刻 exit 后
-        # mode 可能被系统在几秒内清掉). 后台 fork, 主流程不阻塞.
-        info "$APP_EXEC --register-input-source (后台常驻维持注册)"
-        "$APP_EXEC" --register-input-source > /tmp/wind_register.log 2>&1 &
-        REGISTER_PID=$!
-        sleep 1  # 等 TIS DB 写完
-        info "    PID=$REGISTER_PID (要停止后台 register: kill $REGISTER_PID)"
+        # 前台跑, 注册完即退出。**别改回常驻**: 同 bundle 有进程在跑时 imklaunchagent 不再拉起
+        # 控制器, 而它不建 IMKServer → NO Endpoint, 控制器一退出就再也打不了字 (GH#186)。
+        info "$APP_EXEC --register-input-source"
+        "$APP_EXEC" --register-input-source > /tmp/wind_register.log 2>&1 \
+            || warn "注册失败 (退出码 $?), 见 /tmp/wind_register.log"
         head -2 /tmp/wind_register.log 2>/dev/null | sed 's/^/    /'
     fi
 

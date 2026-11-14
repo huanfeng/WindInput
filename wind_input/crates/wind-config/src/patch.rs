@@ -43,23 +43,13 @@ use crate::config_schema;
 /// 「三态键（`Option<T>`，默认 `None`）刻意不登记」一节。片段校验若只认登记键，
 /// 用户合法手写的这些键就会被误报「未知配置键」，故在此显式列出。
 ///
-/// 目前唯一的家族是模式级注释模板覆盖（[`crate::config::CommentTemplateOverride`]）。
-/// `mix_modes` 条目内的同名字段不在此列：它们在 `schema.mix_modes`（StructList）子树内，
-/// 展平时随整棵子树作一个值，不会以点分键形态出现。宁缺勿滥——拿不准的键不进名单，
+/// 目前为空。`StructList` 子树（如 `schema.mix_modes`）内的字段不必进名单：展平时随整棵
+/// 子树作一个值，不会以点分键形态出现。宁缺勿滥——拿不准的键不进名单，
 /// 误报「未知」可改，误放行则绕过了 REGISTRY 这道门。
 ///
 /// 守门测试（本文件 tests）保证名单不腐烂：每个键必须 (a) 不在 REGISTRY
 /// （日后登记了就该从名单删除）、(b) 真实存在于 `Config` 结构（写入后能反序列化并原值读回）。
-pub const ALLOWED_UNREGISTERED_KEYS: &[&str] = &[
-    "input.temp_english.comment_template_vertical",
-    "input.temp_english.comment_template_horizontal",
-    "input.temp_pinyin.comment_template_vertical",
-    "input.temp_pinyin.comment_template_horizontal",
-    "input.url.comment_template_vertical",
-    "input.url.comment_template_horizontal",
-    "input.email.comment_template_vertical",
-    "input.email.comment_template_horizontal",
-];
+pub const ALLOWED_UNREGISTERED_KEYS: &[&str] = &[];
 
 /// 预览条目：片段里的一个配置键及其应用效果。
 ///
@@ -824,26 +814,13 @@ mod tests {
         assert!(entries[0].current.is_none(), "未知键无当前值");
     }
 
+    /// 旧的模式级注释模板键已迁入 `[ui.comment]`，片段里再写按未知键报。
     #[test]
-    fn allowlist_key_passes_and_has_no_default_current() {
+    fn retired_mode_comment_template_is_unknown() {
         let entries =
             preview_text("[input.temp_english]\ncomment_template_vertical = \"${dict}\"\n");
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].key,
-            "input.temp_english.comment_template_vertical"
-        );
-        assert!(entries[0].error.is_none(), "{:?}", entries[0].error);
-        // 出厂值恰是「键不存在」，默认树里取不到当前值。
-        assert!(entries[0].current.is_none());
-    }
-
-    #[test]
-    fn allowlist_key_rejects_wrong_type() {
-        let entries = preview_text("[input.temp_pinyin]\ncomment_template_vertical = 5\n");
-        assert_eq!(entries.len(), 1);
-        let err = entries[0].error.as_deref().expect("整数值应被拒绝");
-        assert!(err.contains("类型或取值不合法"), "{err}");
+        assert_eq!(entries[0].error.as_deref(), Some("未知配置键"));
     }
 
     #[test]

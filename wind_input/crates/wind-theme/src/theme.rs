@@ -22,6 +22,12 @@ pub const THEME_FILE: &str = "theme.toml";
 /// `theme_chain_dirs`）都经过这里，故打点放此处不会漏。措辞与 `Config::log_user_override`
 /// 一致，便于按 `用户覆盖生效` 一次 grep 出全部生效的覆盖。
 pub fn find_theme_dir(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    // 名字来自 `base = "…"`（不可信主题文本）与 RPC 参数：只认普通 slug，别让 `..` /
+    // 绝对路径把查找带出主题目录群。主题定位全都经过这里，一处挡住全部入口。
+    if !is_plain_slug(name) {
+        tracing::warn!("主题名不是普通 slug，忽略: {name:?}");
+        return None;
+    }
     let mut hit: Option<PathBuf> = None;
     for d in dirs {
         let p = d.join(name);
@@ -82,11 +88,110 @@ pub fn meta_from_text(text: &str) -> Option<Meta> {
     v.get("meta")?.clone().try_into().ok()
 }
 
+/// 主题 id / `base` 引用是否普通 slug：非空，不是 `.` / `..`，不含 `/`、`\\`、`:`、`..`
+/// 与控制字符（于是也不可能是绝对路径或盘符路径）；也不是 Windows 保留设备名（`CON`、
+/// `NUL.txt` 之类），不以点或空格结尾（Windows 会悄悄去掉，两个 id 落到同一目录），
+/// 不含 8.3 短名形态（`~` 后跟数字，`VERYLO~1` 可能指向另一个长名目录），不以
+/// `.wtheme-tmp` / `.wtheme-old` 结尾（包导入拿它们作兄弟临时目录）。
+/// 主题目录名即 id，合法 id 都满足。
+pub fn is_plain_slug(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    !s.is_empty()
+        && s != "."
+        && !s.contains("..")
+        && !s.ends_with(['.', ' '])
+        && !lower.ends_with(".wtheme-tmp")
+        && !lower.ends_with(".wtheme-old")
+        && !looks_like_8dot3(s)
+        && !is_windows_reserved_name(s)
+        && !s
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+}
+
+/// 是否 Windows 8.3 短名形态（`VERYLO~1`、`AB~12.TOM`）：主名 ≤ 8、扩展名 ≤ 3，
+/// 全 ASCII，主名以 `~数字` 结尾且前面非空。只拦这种形态——它可能是另一个长名目录的别名；
+/// `Theme~2 Dark` 这类长名不受影响，免得已有主题变成列不出、删不掉的孤儿。
+fn looks_like_8dot3(s: &str) -> bool {
+    let (stem, ext) = s.split_once('.').unwrap_or((s, ""));
+    s.is_ascii()
+        && stem.len() <= 8
+        && ext.len() <= 3
+        && !ext.contains('.')
+        && stem.rsplit_once('~').is_some_and(|(head, digits)| {
+            !head.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// 从显示名派生主题 id（调用方没给 slug 时用）：路径分隔符、`:`、控制字符与 8.3 短名
+/// 里的 `~` 换成 `-`，`..` 折成 `-`，去掉首尾空白与末尾的点、空格；仍不合法（保留名之类）
+/// 加 `theme-` 前缀，再不行或为空就用 `theme`。本就合法的名字原样返回。
+pub fn slug_from_name(name: &str) -> String {
+    if is_plain_slug(name.trim()) {
+        return name.trim().to_string();
+    }
+    let mut chars = name.trim().chars().peekable();
+    let mut s = String::new();
+    while let Some(c) = chars.next() {
+        let bad = matches!(c, '/' | '\\' | ':')
+            || c.is_control()
+            || (c == '~' && chars.peek().is_some_and(char::is_ascii_digit));
+        s.push(if bad { '-' } else { c });
+    }
+    while s.contains("..") {
+        s = s.replace("..", "-");
+    }
+    let s = s.trim_end_matches(['.', ' ']);
+    if s.is_empty() {
+        return "theme".to_string();
+    }
+    if is_plain_slug(s) {
+        return s.to_string();
+    }
+    let prefixed = format!("theme-{s}");
+    if is_plain_slug(&prefixed) {
+        prefixed
+    } else {
+        "theme".to_string()
+    }
+}
+
+/// Windows 保留设备名（不分大小写，按首个 `.` 前的部分比较，带不带扩展名都算）：
+/// `CON` `PRN` `AUX` `NUL` `CONIN$` `CONOUT$`、`COM1`–`COM9` / `LPT1`–`LPT9` 及上标
+/// `COM¹²³` / `LPT¹²³`。
+pub fn is_windows_reserved_name(s: &str) -> bool {
+    let stem = s
+        .split('.')
+        .next()
+        .unwrap_or(s)
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let rest = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
+    matches!(
+        rest,
+        Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+    )
+}
+
 /// 校验主题 toml 文本可解析为合法 Theme（导入前校验）。Err 含原因。
 pub fn validate_text(text: &str) -> anyhow::Result<()> {
     let v: Value = text
         .parse::<Value>()
         .map_err(|e| anyhow::anyhow!("TOML 解析失败: {}", e))?;
+    if let Some(b) = v.get("base").and_then(|b| b.as_str())
+        && !b.is_empty()
+        && !is_plain_slug(b)
+    {
+        anyhow::bail!("base 只能写主题 id（不能含路径）：{b:?}");
+    }
     let n = normalize_theme(v);
     let _theme: Theme = n
         .try_into()
@@ -105,6 +210,8 @@ pub fn list_theme_ids(dir: &Path) -> Vec<String> {
         .flatten()
         .filter(|e| e.path().join("theme.toml").is_file())
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        // 旧版在 Linux/mac 上可能建出尾随空格/点之类的目录：列出来也选不了（定位只认普通 slug）。
+        .filter(|id| is_plain_slug(id))
         .collect();
     ids.sort();
     ids
@@ -118,12 +225,114 @@ pub fn load_typed(themes_dir: &Path, name: &str) -> anyhow::Result<Theme> {
 
 /// 多目录版：base 可在任一目录（如用户主题 `base = "_base"` 继承内置 _base）。
 pub fn load_typed_dirs(dirs: &[PathBuf], name: &str) -> anyhow::Result<Theme> {
-    let merged = load_merged_dirs(dirs, name, 0)?;
+    type_merged(load_merged_dirs(dirs, name, 0)?, name)
+}
+
+/// 不走文件系统的版本：主题文本 + 它自己的 id（可空）+ 按 id 取 base 主题文本。给没有文件系统的
+/// 调用方用（主题编辑器的 wasm 预览把内置主题编进产物）；取不到 base 时由 `base_text` 给出错误
+/// （调用方最清楚该怎么说明）。合并、归一化与类型化同 [`load_typed_dirs`]：base 引用只认普通 slug
+/// （[`is_plain_slug`]），`base` 写成自己的 id 视同没写。错误信息含 TOML 的行列，可原样给用户看。
+pub fn load_typed_text(
+    text: &str,
+    name: &str,
+    base_text: &dyn Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<Theme> {
+    let label = if name.is_empty() { "(text)" } else { name };
+    type_merged(load_merged_text_at(text, name, 0, base_text)?, label)
+}
+
+fn load_merged_text_at(
+    text: &str,
+    name: &str,
+    depth: usize,
+    base_text: &dyn Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<Value> {
+    if depth > 8 {
+        anyhow::bail!("theme base chain too deep (cycle?) at {}", name);
+    }
+    let value: Value = text.parse::<Value>().map_err(|e| {
+        if name.is_empty() {
+            anyhow::anyhow!("parse theme: {e}")
+        } else {
+            anyhow::anyhow!("parse theme {name}: {e}")
+        }
+    })?;
+    merge_layer(value, name, depth, &mut |base, d| {
+        if !is_plain_slug(base) {
+            anyhow::bail!("base 只能写主题 id（不能含路径）：{base:?}");
+        }
+        load_merged_text_at(&base_text(base)?, base, d, base_text)
+    })
+}
+
+/// 合并完的 Value → 类型化 `Theme`（完整归一化 + 竖排变体）。
+fn type_merged(merged: Value, name: &str) -> anyhow::Result<Theme> {
     let normalized = normalize_theme(merged);
-    let theme: Theme = normalized
+    let vertical = vertical_variant(&normalized);
+    let mut theme: Theme = normalized
         .try_into()
         .map_err(|e| anyhow::anyhow!("type theme {}: {}", name, e))?;
+    if let Some(v) = vertical {
+        theme.vertical =
+            Some(Box::new(v.try_into().map_err(|e| {
+                anyhow::anyhow!("type theme {} (vertical): {}", name, e)
+            })?));
+    }
     Ok(theme)
+}
+
+/// 能写 `vertical` 的视图节点：候选窗自己的那一套。tooltip / status / toast / toolbar / menu
+/// 是别的窗口，不随候选窗方向换样式；写在它们下面的 `vertical` 被忽略。
+///
+/// ⚠ 主题编辑器 `merge.ts` 的 `VERTICAL_NODES` 是同一份清单，改一边必须改另一边。
+pub const VERTICAL_NODES: [&str; 12] = [
+    "window",
+    "preedit_bar",
+    "candidate_list",
+    "item",
+    "index",
+    "text",
+    "comment",
+    "comment_above",
+    "accent_bar",
+    "footer_bar",
+    "mode_label",
+    "divider",
+];
+
+/// 竖排变体：把 `views.<节点>.vertical` 子表深合并进该节点，其余原样。没有任何节点写
+/// `vertical` 返回 `None`（绝大多数主题，零开销）。
+///
+/// 只认 [`VERTICAL_NODES`] 下的 `vertical`；节点里的状态补丁（selected / hover）写在
+/// `vertical` 里一并合并。合并语义同 base 链：表逐字段深合并，标量覆盖；翻页箭头同样
+/// 遵守「本层写了字符就让位继承来的图」（见 [`drop_inherited_arrow_images`]）——竖排里写
+/// `prev_char`，横排的 `prev_image` 不能把它挡死。
+fn vertical_variant(normalized: &Value) -> Option<Value> {
+    let views = table_at(normalized, &["views"])?;
+    if !VERTICAL_NODES.iter().any(|k| {
+        views
+            .get(*k)
+            .and_then(|n| n.get("vertical"))
+            .is_some_and(Value::is_table)
+    }) {
+        return None;
+    }
+    let mut out = normalized.clone();
+    let views = table_at_mut(&mut out, &["views"])?;
+    for key in VERTICAL_NODES {
+        let Some(node) = views.get_mut(key) else {
+            continue;
+        };
+        let patch = node.as_table_mut().and_then(|t| t.remove("vertical"));
+        if let Some(patch @ Value::Table(_)) = patch {
+            let mut base = std::mem::replace(node, Value::Table(Default::default()));
+            if key == "footer_bar" {
+                drop_stale_arrow_images(&mut base, &patch);
+            }
+            *node = merge(base, patch);
+        }
+    }
+    Some(out)
 }
 
 /// 读取 themes_dir/<name>/theme.toml 并按 base 链深合并（单目录；兼容旧调用）。
@@ -153,6 +362,19 @@ fn load_merged_dirs_at(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Re
     let value: Value = text
         .parse::<Value>()
         .map_err(|e| anyhow::anyhow!("parse theme {}: {}", path.display(), e))?;
+    merge_layer(value, name, depth, &mut |base, d| {
+        load_merged_dirs_at(dirs, base, d)
+    })
+}
+
+/// 一层主题（已解析未归一化）→ 归一化后叠到它的 base 链上。`load_base(base 名, 深度)` 取 base
+/// 链合并结果；目录加载与文本加载只在这一步不同。
+fn merge_layer(
+    value: Value,
+    name: &str,
+    depth: usize,
+    load_base: &mut dyn FnMut(&str, usize) -> anyhow::Result<Value>,
+) -> anyhow::Result<Value> {
     // **归一化在合并之前，逐层各做一次**（`normalize_theme` 对已归一化的输入幂等）。
     //
     // 顺序反过来（先合并整条链、最后归一化一次）会坏两处，两处都静默：
@@ -167,14 +389,15 @@ fn load_merged_dirs_at(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Re
     // 归一化提前之后, 进 merge 的两边形态一致、简写都已展开, 深合并才是逐字段的。
     let value = normalize_theme_for_merge(value);
 
-    // base 链继承：先加载 base（跨目录查找），再用本主题覆盖（merge）。
+    // base 链继承：先加载 base，再用本主题覆盖（merge）。
     if let Some(base_name) = value
         .get("base")
         .and_then(|b| b.as_str())
         .filter(|b| !b.is_empty() && *b != name)
     {
-        let mut base = load_merged_dirs_at(dirs, base_name, depth + 1)?;
+        let mut base = load_base(base_name, depth + 1)?;
         drop_inherited_arrow_images(&mut base, &value);
+        crate::skin::replace_inherited_variants(&mut base, &value);
         return Ok(merge(base, value));
     }
     Ok(value)
@@ -201,22 +424,24 @@ const ARROW_PAIRS: [(&str, &str); 2] = [("prev_char", "prev_image"), ("next_char
 /// 形态的 `[footer_bar]` 早已被收进 `views` 了。
 fn drop_inherited_arrow_images(base: &mut Value, over: &Value) {
     const PATH: [&str; 2] = ["views", "footer_bar"];
-    let Some(o) = table_at(over, &PATH) else {
+    let (Some(o), Some(b)) = (table_at(over, &PATH), table_at_mut(base, &PATH)) else {
         return;
     };
-    let stale: Vec<&str> = ARROW_PAIRS
-        .iter()
-        .filter(|(c, i)| o.contains_key(*c) && !o.contains_key(*i))
-        .map(|(_, i)| *i)
-        .collect();
-    if stale.is_empty() {
-        return;
+    drop_stale_arrow_images_in(b, o);
+}
+
+/// [`drop_inherited_arrow_images`] 作用在单个 footer_bar 节点上的版本（竖排覆盖用）。
+fn drop_stale_arrow_images(base: &mut Value, over: &Value) {
+    if let (Some(b), Some(o)) = (base.as_table_mut(), over.as_table()) {
+        drop_stale_arrow_images_in(b, o);
     }
-    let Some(b) = table_at_mut(base, &PATH) else {
-        return;
-    };
-    for key in stale {
-        b.remove(key);
+}
+
+fn drop_stale_arrow_images_in(base: &mut toml::value::Table, over: &toml::value::Table) {
+    for (c, i) in ARROW_PAIRS {
+        if over.contains_key(c) && !over.contains_key(i) {
+            base.remove(i);
+        }
     }
 }
 
@@ -257,6 +482,55 @@ mod tests {
     use super::*;
     use crate::schema::Dim;
 
+    /// 解析 → 归一化 → 类型化主文与竖排变体（同 `load_typed_dirs` 的后半段）。
+    fn typed_with_vertical(s: &str) -> Theme {
+        let n = crate::normalize::normalize_theme(s.parse::<Value>().unwrap());
+        let v = vertical_variant(&n);
+        let mut t: Theme = n.try_into().unwrap();
+        t.vertical = v.map(|v| Box::new(v.try_into().unwrap()));
+        t
+    }
+
+    /// `[节点.vertical]` 深合并进节点：写了的字段竖排覆盖，没写的沿用横排；横排主文不变。
+    #[test]
+    fn vertical_patch_overlays_only_written_fields() {
+        let t = typed_with_vertical(
+            "[window]\nradius = 20\npadding = [6, 8]\n[window.vertical]\nradius = 6\n[item]\nradius = 4\n",
+        );
+        let h = t.views.as_ref().unwrap();
+        assert_eq!(h.window.border.radius, Some(Dim::Dp(20.0)));
+        let v = t.vertical.as_ref().unwrap().views.as_ref().unwrap();
+        assert_eq!(v.window.border.radius, Some(Dim::Dp(6.0)));
+        assert_eq!(v.window.padding.top, h.window.padding.top, "没写的字段沿用");
+        assert_eq!(v.item.border.radius, Some(Dim::Dp(4.0)));
+    }
+
+    #[test]
+    fn no_vertical_patch_means_no_variant() {
+        let t = typed_with_vertical("[window]\nradius = 20\n");
+        assert!(t.vertical.is_none());
+    }
+
+    /// 只有候选窗自己的节点认 `vertical`；别的窗口（tooltip / status / toast）写了也不产生变体。
+    #[test]
+    fn vertical_on_other_windows_is_ignored() {
+        let t = typed_with_vertical("[tooltip]\nradius = 4\n[tooltip.vertical]\nradius = 9\n");
+        assert!(t.vertical.is_none());
+    }
+
+    /// 竖排里写翻页字符，横排的翻页图不能把它挡死（同 base 链「本层写了字符就让位」）。
+    #[test]
+    fn vertical_arrow_char_drops_horizontal_image() {
+        let t = typed_with_vertical(
+            "[footer_bar]\nprev_image = { ref = \"chevron.svg\" }\n[footer_bar.vertical]\nprev_char = \"^\"\n",
+        );
+        let h = t.views.as_ref().unwrap().footer_bar.prev_image.clone();
+        let v = t.vertical.as_ref().unwrap().views.as_ref().unwrap();
+        assert!(h.is_some(), "横排仍用图");
+        assert!(v.footer_bar.prev_image.is_none(), "竖排的图应让位给字符");
+        assert_eq!(v.footer_bar.prev_char.as_deref(), Some("^"));
+    }
+
     #[test]
     fn meta_from_text_extracts_name() {
         let s = "[meta]\nname = \"测试主题\"\nauthor = \"me\"\n";
@@ -272,6 +546,86 @@ mod tests {
         assert!(validate_text("[meta]\nname = \"ok\"\n").is_ok());
         // 非法 TOML
         assert!(validate_text("  : : :\n\t- bad").is_err());
+    }
+
+    #[test]
+    fn plain_slug_rejects_paths() {
+        for ok in [
+            "default",
+            "_base",
+            "my-theme.v2",
+            "主题",
+            "清风·浅",
+            "console",
+            "com0",
+            "lpt",
+            "a~b",
+            "~",
+            "conin",
+            "x.wtheme",
+            "a~12b",
+            "Theme~2 Dark",
+            "longname~1",
+            "清风~1",
+        ] {
+            assert!(is_plain_slug(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "C:x",
+            "/etc",
+            "a..b",
+            "a\nb",
+            "x.",
+            "x ",
+            "CON",
+            "nul",
+            "Aux.txt",
+            "com1",
+            "LPT9.toml",
+            "CONIN$",
+            "conout$.txt",
+            "COM¹",
+            "lpt³",
+            "VERYLO~1",
+            "AB~12.TOM",
+            "theme~1",
+            "x.wtheme-tmp",
+            "x.WTHEME-OLD",
+        ] {
+            assert!(!is_plain_slug(bad), "{bad:?}");
+        }
+        assert!(validate_text("base = \"../../x\"\n").is_err());
+        assert!(find_theme_dir(&[PathBuf::from("/")], "..").is_none());
+    }
+
+    #[test]
+    fn slug_from_name_derives_plain_ids() {
+        for (name, want) in [
+            ("我的主题", "我的主题"),
+            ("  mine  ", "mine"),
+            ("Nord: Dark", "Nord- Dark"),
+            ("黑/白", "黑-白"),
+            ("a\\b", "a-b"),
+            ("../../victim", "----victim"),
+            ("v1.0...", "v1.0-"),
+            ("尾巴. . ", "尾巴"),
+            ("Aux", "theme-Aux"),
+            ("com1.v2", "theme-com1.v2"),
+            ("VERYLO~1", "VERYLO-1"),
+            ("x.wtheme-tmp", "theme"),
+            ("", "theme"),
+            (" . ", "theme"),
+        ] {
+            let got = slug_from_name(name);
+            assert_eq!(got, want, "{name:?}");
+            assert!(is_plain_slug(&got), "{name:?} → {got:?}");
+        }
     }
 
     #[test]
@@ -659,5 +1013,56 @@ mod tests {
         );
         assert!(footer(&m, "prev_image").is_none(), "嵌套形态也应让位");
         assert_eq!(footer(&m, "prev_char").and_then(|v| v.as_str()), Some("$"));
+    }
+
+    /// 文本加载与目录加载同一条合并链：内置主题逐个比对合并结果（类型化那步两边共用
+    /// `type_merged`；`Theme` 里有 HashMap，Debug 串不能直接比）。
+    #[test]
+    fn text_loading_matches_directory_loading_for_builtins() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/themes");
+        let dirs = vec![root.clone()];
+        let read = |id: &str| Ok(std::fs::read_to_string(root.join(id).join(THEME_FILE))?);
+        let ids = list_theme_ids(&root);
+        assert!(ids.iter().any(|i| i == "default"), "{ids:?}");
+        for id in ids {
+            let from_dir = load_merged_dirs(&dirs, &id, 0).unwrap();
+            let text = read(&id).unwrap();
+            let from_text = load_merged_text_at(&text, &id, 0, &read).unwrap();
+            assert_eq!(from_dir, from_text, "{id}");
+            load_typed_text(&text, &id, &read).unwrap();
+        }
+    }
+
+    #[test]
+    fn text_loading_reports_errors() {
+        let none = |b: &str| -> anyhow::Result<String> { anyhow::bail!("没有 {b}") };
+        let e = load_typed_text("[meta\nname = 1", "", &none).unwrap_err();
+        assert!(e.to_string().starts_with("parse theme:"), "{e}");
+        let e = load_typed_text("base = \"missing\"\n", "", &none).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "没有 missing",
+            "取不到 base 的说明由调用方给"
+        );
+        // base 只认普通 slug：路径形态连查都不查。
+        let asked = std::cell::Cell::new(false);
+        let spy = |_: &str| {
+            asked.set(true);
+            Ok(String::new())
+        };
+        assert!(load_typed_text("base = \"../x\"\n", "", &spy).is_err());
+        assert!(!asked.get(), "非 slug 的 base 不该去取");
+        // base 写成自己的 id 视同没写（同目录加载）。
+        load_typed_text("base = \"mine\"\n", "mine", &spy).unwrap();
+        assert!(!asked.get(), "指向自己的 base 不该去取");
+        // 循环继承止于深度上限。
+        let cyc = |id: &str| {
+            Ok(format!(
+                "base = \"{}\"\n",
+                if id == "a" { "b" } else { "a" }
+            ))
+        };
+        let e = load_typed_text("base = \"a\"\n", "", &cyc).unwrap_err();
+        assert!(e.to_string().contains("too deep"), "{e}");
     }
 }

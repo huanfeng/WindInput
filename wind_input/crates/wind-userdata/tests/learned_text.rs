@@ -75,7 +75,7 @@ fn bind_adopts_existing_view_when_text_missing() {
     ud.bind_text(Target::Temp, "s", binding(&f, &codec::TEMP))
         .unwrap();
     let s = std::fs::read_to_string(&f).unwrap();
-    assert!(s.contains("阿布\tab\t5\t2\t"), "{s}");
+    assert!(s.contains("ab\t阿布\t5\t2\t"), "{s}");
     let e = ud.get(Target::Temp, "s", "ab", "阿布").unwrap();
     assert_eq!(
         (e.weight, e.count),
@@ -207,7 +207,7 @@ fn fold_with_on_table_target_rewrites_text() {
     })
     .unwrap();
     let s = std::fs::read_to_string(&f).unwrap();
-    assert!(!s.contains("啊") && s.contains("不\tb\t1\t"), "{s}");
+    assert!(!s.contains("啊") && s.contains("b\t不\t1\t"), "{s}");
     assert!(ud.get(Target::Temp, "s", "a", "啊").is_none());
     let _ = std::fs::remove_dir_all(&d);
 }

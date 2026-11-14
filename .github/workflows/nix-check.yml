@@ -1,0 +1,45 @@
+name: Nix Check
+
+# Nix 打包的防腐化门禁：只求值、不构建（构建 wind-setting 的 GUI 栈太重）。
+# 它能挡住 flake 语法/引用错误、漏传参数、`flake.lock` 与输入不符等；
+# 真正的构建与运行仍需 `nix build .#windinput` 手动验，见 docs/design/nix-packaging.md。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'wind_linux/nix/**'
+      - 'wind_linux/CMakeLists.txt'
+      - 'scripts/lib/frost-cells.sh'
+      - 'scripts/lib/strip-*.awk'
+      - 'docs/VERSION'
+      - '.github/workflows/nix-check.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'wind_linux/nix/**'
+      - 'wind_linux/CMakeLists.txt'
+      - 'scripts/lib/frost-cells.sh'
+      - 'scripts/lib/strip-*.awk'
+      - 'docs/VERSION'
+      - '.github/workflows/nix-check.yml'
+
+concurrency:
+  group: nix-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      # --all-systems：x86_64-linux 与 aarch64-linux 两套都求值。
+      - run: nix flake check --no-build --all-systems

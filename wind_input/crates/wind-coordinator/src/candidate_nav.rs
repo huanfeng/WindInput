@@ -9,8 +9,9 @@ use crate::pipeline::ModeKind;
 impl Coordinator {
     /// 每页候选数（来自配置，至少 1）
     pub(crate) fn per_page(&self, active: Option<ModeKind>) -> usize {
-        let bundle = self.rt();
-        let cand = &bundle.config.ui.candidate;
+        // 走 `eff_candidate`（全局 ⊕ 方案 `[candidate]` 补丁）而不是直接读全局配置：
+        // `per_page` 是通用折叠键，绕过它方案里配了就不生效。扩展档不在方案级形态内。
+        let cand = self.eff_candidate();
         // overlay 模式(临拼/快捷/短语/临英等,state.active 非空)用扩展档(配置>0 时)。
         //
         // **辅助码除外**：它的候选就是主路径候选被筛过一轮，呈现形态应与主路径一致
@@ -213,7 +214,17 @@ impl Coordinator {
         let ended = match s.active {
             Some(ModeKind::TempPinyin) => s.temp_pinyin_buffer.is_empty(),
             Some(ModeKind::Reverse) => s.special_buffer.is_empty(),
-            _ => s.input_buffer.is_empty(),
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => s.input_buffer.is_empty(),
         };
         if ended {
             s.scope_relaxed = false;
@@ -298,7 +309,7 @@ impl Coordinator {
             state.selected_index = selected_before;
         } else {
             let limit = state.candidate_limit;
-            self.build_candidates(state, limit);
+            self.build_candidates_at_cursor(state, limit);
         }
         // 判据取「列表里有没有真的出现被滤候选」，而非「总数是否变多」——候选受 limit 截断时
         // 总数可能不变，那样会误判成「没放出东西」而撤销。

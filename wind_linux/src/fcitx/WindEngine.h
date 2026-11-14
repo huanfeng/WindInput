@@ -40,6 +40,7 @@ namespace windlinux {
 
 class X11CandidatePanel;
 class WaylandCandidatePanel;
+class DesktopMotion;
 
 /// 输入法 / addon 的「配置」：只有一项外部工具（设置程序）。Fcitx5 的配置工具（fcitx5-configtool
 /// 5.1.6 起）遇到「整页只有一个 External 项」就直接启动它，不再弹一张空白配置页；更早的版本
@@ -98,10 +99,15 @@ private:
     HostOutput hostOutput(fcitx::InputContext* ic);
     void sendCaretUpdate(fcitx::InputContext* ic);
     uint16_t prevCharFor(fcitx::InputContext* ic);
+    void noteHostCursor(fcitx::InputContext* ic);
     /// 修饰键单击 / CapsLock 状态通知：发一帧 eventType=UP 的 KeyEvent 并应用其响应。
     /// `toggles` 必须是真实锁定态——服务端拿**每一帧**的 toggles 校准大写锁定镜像，
     /// 发 0 等于告诉它「大写锁定关了」。
     void sendKeyUp(fcitx::InputContext* ic, uint32_t vk, uint32_t mods, uint8_t toggles);
+    /// 组字中 Alt 的按下 / 松开转发给服务（注释态切换）；返回服务是否吃掉。
+    bool sendAltEvent(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods, uint8_t toggles);
+    /// 候选显示时 Ctrl 的如实上报（MOD_DOWN / MOD_UP，见 CtrlRaw）。应用回包，但不看吃不吃：Ctrl 永远交还宿主。
+    void sendCtrlRaw(fcitx::InputContext* ic, uint32_t vk, uint8_t eventType, uint32_t mods, uint8_t toggles);
     bool applyResponse(fcitx::InputContext* ic, const Frame& resp, bool hostShortcut);
     /// 帧里带中英模式就记下；变了则让 Fcitx5 的 UI 模块重取图标。
     void noteMode(const Frame& frame);
@@ -154,6 +160,10 @@ private:
     BridgeClient bridge_;
     ResponseRouter router_;
     ToggleTapDetector tap_;
+    AltHold altHold_;
+    CtrlRaw ctrlRaw_;
+    /// 候选窗是否开着（服务端推来可见帧时置位，hideCandidate 清）。Alt 转发判据要它：联想窗组合为空。
+    bool candidatesVisible_ = false;
     CapsLockTracker caps_;
     uint16_t keySeq_ = 0;
     bool lastReportedSecure_ = false;
@@ -180,6 +190,8 @@ private:
     ShmFrameReader panelShm_[2];
     FullscreenReporter fullscreen_;
     std::unique_ptr<X11CandidatePanel> panel_;
+    /// 系统「减少动态效果」（门户 + kdeglobals），变了经 `host.reduce_motion` 报服务。
+    std::unique_ptr<DesktopMotion> motion_;
     /// Wayland 原生应用（frontend wayland_v2）的候选窗：popup surface，由合成器摆位。没有 Wayland
     /// 支持（编译时缺 libwayland）或不在 Wayland 会话时为空。
 #ifdef WIND_HAVE_WAYLAND

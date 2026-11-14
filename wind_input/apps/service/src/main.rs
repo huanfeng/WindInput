@@ -24,6 +24,8 @@ mod backup_cli;
 mod cli_util;
 mod config_cli;
 mod dict_cli;
+mod extensions;
+mod ime_cli;
 mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
@@ -52,6 +54,7 @@ fn print_root_usage() {
          backup    整机备份创建/查看/还原（需 core 在线）\n  \
          restart   重启输入法服务（未运行则直接启动）\n  \
          ui        桌面提示：ui toast <文案>（需 core 在线）\n  \
+         ime       输入状态：中英/全半角/简繁/工具栏的查看与切换（需 core 在线）\n  \
          system    系统集成：Dota 2 兼容等（写 HKLM，需管理员权限）\n  \
          help      显示本帮助；--version 显示版本\n\
          \n\
@@ -112,9 +115,6 @@ fn attach_parent_console() {
     }
 }
 
-/// 性能测试模式的标记文件名（放在本地数据目录，即 `logs\` 的上一级）。
-const PERF_PRELOAD_MARKER: &str = "perf_preload";
-
 fn main() {
     // CLI 子命令（config/schema/...）：在服务启动前拦截，处理完即退出。
     // 注意保持在单例检查之前——CLI 进程不该被「另一实例已运行」挡掉。
@@ -137,6 +137,7 @@ fn main() {
                 | "backup"
                 | "restart"
                 | "ui"
+                | "ime"
                 | "help"
                 | "--help"
                 | "-h"
@@ -163,6 +164,7 @@ fn main() {
             Some("backup") => backup_cli::run(&cli_args[2..]),
             Some("restart") => restart_cli::run(&cli_args[2..]),
             Some("ui") => ui_cli::run(&cli_args[2..]),
+            Some("ime") => ime_cli::run(&cli_args[2..]),
             #[cfg(windows)]
             Some("system") => system_cli::run(&cli_args[2..]),
             Some("help" | "--help" | "-h") => {
@@ -259,15 +261,35 @@ fn main() {
     startup_trace::stage("singleton-ok");
 
     // 2. 初始化日志（含启动滚动：至此才确定本实例会真正运行）
-    init_logger();
+    // 配置在此读一次，日志级别与下面的词库缓存策略共用，不再各读各的。
+    let startup_cfg = wind_config::Config::load(wind_config::Config::data_dir().as_deref()).ok();
+    init_logger(
+        startup_cfg
+            .as_ref()
+            .map(|c| c.debug.clone())
+            .unwrap_or_default(),
+    );
     startup_trace::stage("logger-ready");
 
-    // 性能测试模式：本地数据目录下有 `perf_preload` 标记文件时，词库整份拷进内存，
-    // 排除 mmap 读盘对按键延迟的影响。须在加载任何词库之前打开。
-    if wind_config::Config::local_dir().is_some_and(|d| d.join(PERF_PRELOAD_MARKER).exists()) {
-        wind_dict::mapping::set_preload(true);
-        info!("性能测试模式：词库将整份载入内存（{PERF_PRELOAD_MARKER} 标记文件）");
-    }
+    // 词库缓存策略（`schema.dict_cache_policy`）：锁定 / 预加载 / 关闭。须在加载任何词库之前
+    // 设定；运行期改键不生效（已映射的文件不会回头处理），设置页提示需重启。
+    // 读不到配置时取出厂值，与 `Config::default()` 同源。
+    let policy_name = startup_cfg.as_ref().map_or_else(
+        || wind_config::Config::default().schema.dict_cache_policy,
+        |c| c.schema.dict_cache_policy.clone(),
+    );
+    drop(startup_cfg);
+    let cache_policy = wind_dict::mapping::CachePolicy::from_config(&policy_name);
+    wind_dict::mapping::set_policy(cache_policy);
+    // 预算：锁定与预加载都占物理内存，按机器内存封顶（算法见 `default_budget`），超出的文件
+    // 按普通映射使用，避免超大词库 / 大语法模型把内存吃光。
+    let cache_budget = wind_dict::mapping::default_budget();
+    wind_dict::mapping::set_budget(cache_budget);
+    info!(
+        "词库缓存策略：{}（schema.dict_cache_policy），预算 {} MB",
+        cache_policy.as_config(),
+        cache_budget / (1024 * 1024)
+    );
 
     let pipe_suffix = wind_config::variant::pipe_suffix();
     let variant = if wind_config::variant::is_dev() {
@@ -411,12 +433,19 @@ fn main() {
     coordinator.set_host_render(host_render.clone());
     #[cfg(windows)]
     let coord_for_push_hook = coordinator.clone();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let coord_for_reconnect_hook = coordinator.clone();
     let coord_for_web = coordinator.clone();
     let coord_for_restart_toast = coordinator.clone();
     let coord_for_exit = coordinator.clone();
     coordinator.install_exit_flush();
+    // 扩展程序：按 `[extensions]` 配置拉起扩展宿主，配置热重载时增量调整（注册即按当前值生效）。
+    let extensions = extensions::Extensions::start(coordinator.hook_tap(), {
+        let c = coordinator.clone();
+        Box::new(move || c.hook_changed())
+    });
+    let extensions_for_rpc = extensions.clone();
+    coordinator.set_extensions_config_hook(Box::new(move |c| extensions.apply_config(c)));
     deferred.set_ready(coordinator);
 
     // 三步顺序不能动（见 `PushServer::mark_ready`）：
@@ -432,15 +461,27 @@ fn main() {
     push_server.set_client_connected_hook(Box::new(move |token| {
         coord_for_push_hook.on_push_client_connected(token);
     }));
-    // Linux addon：push 连接（重）建立后渲染端补推可见的工具栏 / 软键盘（addon 收到 SERVICE_READY
-    // 会丢掉手里的面板）。
-    #[cfg(target_os = "linux")]
+    // 外部宿主：push 连接（重）建立后渲染端复位宿主状态（Linux 补推可见的工具栏 / 软键盘，addon
+    // 收到 SERVICE_READY 会丢掉手里的面板；macOS 作废皮肤换帧的分层去重）。
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     coord_for_reconnect_hook.install_host_reconnect_hook();
 
     // 9.5 启动本地控制 / 配置 JSON-RPC 服务（命名管道：..._ctrl + ..._events）。
     // 本地授权靠 OS ACL（SDDL），不再需要 token/Origin/CORS/端口发现。
     // 同步线程模型（与 bridge/push 一致），不引入 tokio 到控制路径。
-    let core_rpc: Arc<dyn wind_rpc::CoreRpc> = Arc::new(RpcCore(coord_for_web));
+    // 主题预览缓存键带上构建标识：换一次构建旧图就不再命中。dirty 构建的短哈希不随改动变，
+    // 再带上构建时刻。
+    let git = env!("WIND_GIT_HASH");
+    wind_rpc::set_build_id(git);
+    wind_webdata::set_preview_build_id(if git.ends_with("-dirty") {
+        format!("{git}@{}", env!("WIND_BUILD_TIME"))
+    } else {
+        git.to_string()
+    });
+    let core_rpc: Arc<dyn wind_rpc::CoreRpc> = Arc::new(RpcCore {
+        coord: coord_for_web,
+        extensions: extensions_for_rpc,
+    });
     match wind_rpc::RpcServer::new(core_rpc, variant, pipe_suffix) {
         Ok(rpc_server) => {
             // 活跃方案变更 → RPC 事件广播。EngineManager 位于 wind-rpc 之下，无法直接
@@ -575,27 +616,34 @@ fn main() {
 }
 
 /// 适配 Coordinator 为 RPC 服务的运行时状态来源（解耦 wind-rpc 与 wind-coordinator）。
-struct RpcCore(Arc<wind_coordinator::Coordinator>);
+/// 扩展子系统在服务进程里、不在协调器里，`extensions.*` 在这里截下。
+struct RpcCore {
+    coord: Arc<wind_coordinator::Coordinator>,
+    extensions: Arc<extensions::Extensions>,
+}
 
 impl wind_rpc::CoreRpc for RpcCore {
     fn is_chinese_mode(&self) -> bool {
-        self.0.is_chinese_mode()
+        self.coord.is_chinese_mode()
     }
     fn active_schema_id(&self) -> String {
-        self.0.active_schema_id()
+        self.coord.active_schema_id()
     }
     fn apply_config(&self) -> bool {
-        self.0.reload_user_config()
+        self.coord.reload_user_config()
     }
     fn data_rpc(
         &self,
         method: &str,
         params: &serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        self.0.web_data_rpc(method, params)
+        match method {
+            "extensions.inventory" => Ok(self.extensions.inventory()),
+            _ => self.coord.web_data_rpc(method, params),
+        }
     }
     fn fonts(&self) -> Vec<(String, String)> {
-        self.0.list_font_families()
+        self.coord.list_font_families()
     }
 }
 
@@ -659,12 +707,7 @@ fn spawn_detached_self(restarted: bool) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
-fn init_logger() {
-    // 读取配置（失败时用默认值，不阻断日志初始化）
-    let cfg_debug = wind_config::Config::load(wind_config::Config::data_dir().as_deref())
-        .map(|c| c.debug)
-        .unwrap_or_default();
-
+fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
     // RUST_LOG 最优先，其次 debug.log_level，默认 info。
     // info 级别日志不得包含用户输入内容、词库词条等隐私数据。
     //
@@ -672,7 +715,7 @@ fn init_logger() {
     // 门控读的是同一个函数。两边各算一遍必然漂移成「主日志写着、轨迹停了」，而这两份
     // 日志恰恰是用来互相印证的（轨迹存在的全部意义就是主日志失效时仍留痕）。
     //
-    // 用 `_from` 变体而不是自己加载的那个：配置上面刚 load 过，`Config::load` 是一次
+    // 用 `_from` 变体而不是自己加载的那个：配置在 main 里刚 load 过，`Config::load` 是一次
     // 多层合并 + 多个文件读取，为一个字段再走一遍白占启动时间。
     let level = startup_trace::effective_log_level_from(&cfg_debug.log_level);
 

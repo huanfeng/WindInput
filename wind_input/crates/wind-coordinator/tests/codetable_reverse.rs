@@ -39,6 +39,7 @@ fn key_act(c: &Coordinator, vk: u32, shift: bool) -> wind_bridge::handler::KeyAc
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     })
 }
 fn letters(c: &Coordinator, s: &str) {
@@ -402,6 +403,7 @@ fn reverse_modifier_binding_in_pinyin_still_toggles_mode() {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     });
     assert!(!c.is_chinese_mode(), "门卫没过不吞键：RShift 照常切中英");
 }
@@ -565,12 +567,14 @@ fn reverse_only_lookup_zuia_vs_inline_uuiz() {
         "前置：行内通配确实生效：{inline:?}"
     );
     assert!(
-        inline.iter().all(|(t, _, _)| t != "门头沟区"),
-        "行内通配不查未启用库"
+        inline
+            .iter()
+            .any(|(t, _, c)| t == "门头沟区" && c == "*uuia"),
+        "行内通配也查未启用库，注释带 *：{inline:?}"
     );
 }
 
-/// 混输：反查只查主码表且含未启用库；行内通配（码长内）不含。
+/// 混输：反查与行内通配（码长内）都查主码表的未启用库。
 /// 同时钉住 `build_engine` 对混输 primary 递归透传全局开关（透传丢了，反查这侧就查不到）。
 #[test]
 fn mixed_reverse_sees_xzqy_inline_does_not() {
@@ -599,8 +603,8 @@ fn mixed_reverse_sees_xzqy_inline_does_not() {
     assert!(
         c.debug_all_candidate_texts()
             .iter()
-            .all(|t| t != "门头沟区"),
-        "混输行内通配不查未启用库"
+            .any(|t| t == "门头沟区"),
+        "混输行内通配也查未启用库"
     );
 }
 

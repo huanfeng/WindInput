@@ -242,6 +242,25 @@ mod tests {
         );
     }
 
+    /// 随仓库分发的首右形码表：能读出名字，且常用字有码。
+    #[test]
+    fn bundled_shouyou_tables_load() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas/aux_code");
+        for (file, name, ch, code) in [
+            ("shouyou.txt", "首右 2.0", '啊', "kv"),
+            ("shouyou_plus.txt", "首右 Plus", '的', "pb"),
+        ] {
+            let t = load_from_file(&dir.join(file));
+            assert_eq!(t.name, name, "{file}");
+            assert!(
+                t.any_code_starts_with(ch, code),
+                "{file}: {ch} 应有码 {code}"
+            );
+            assert!(t.char_count() > 5000, "{file} 字数");
+        }
+    }
+
     /// load_from_file：读取 txt 文件（`=` 格式，注释行跳过）
     #[test]
     fn load_from_file_reads_txt() {

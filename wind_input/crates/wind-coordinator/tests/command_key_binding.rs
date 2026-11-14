@@ -24,6 +24,8 @@ use wind_ipc::protocol::{EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, MOD_CTRL, MOD_SH
 
 const PROBE: &str = r#"command:ime.toggle("candwin")"#;
 
+const VK_BACK: u32 = 0x08;
+const VK_F1: u32 = 0x70;
 const VK_TAB: u32 = 0x09;
 const VK_J: u32 = 0x4A;
 const VK_RSHIFT: u32 = 0xA1;
@@ -59,6 +61,7 @@ fn key(vk: u32, modifiers: u32) -> KeyEventData {
         toggles: 0,
         event_seq: 0,
         prev_char: 0,
+        seq_char: 0,
     }
 }
 
@@ -157,6 +160,74 @@ fn combo_key_runs_command_in_english_mode() {
     assert_probe_ran(&coord);
 }
 
+/// ★ `shift+backspace` 绑命令（t372：一键撤销刚上屏的长词组，绑 `ime.undo_commit()`）：
+/// 空闲态（刚上屏完、没有组合）与组合中途都命中即执行并吞键，不落到退格的原语义。
+#[test]
+fn shift_backspace_runs_command_when_idle() {
+    skip_without_data!();
+    let coord = open_with(bind_key("shift+backspace", PROBE));
+    let act = coord.handle_key_event(&key(VK_BACK, MOD_SHIFT));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "空闲态 Shift+Backspace 命中命令应吞键，实际 {act:?}"
+    );
+    assert_probe_ran(&coord);
+}
+
+/// 裸 F1 进热键表（`route_of_key_action`），空闲态也命中并吞键。
+#[test]
+fn bare_function_key_runs_command_when_idle() {
+    skip_without_data!();
+    let coord = open_with(bind_key("f1", PROBE));
+    let act = coord.handle_key_event(&key(VK_F1, 0));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "空闲态裸 F1 命中命令应吞键，实际 {act:?}"
+    );
+    assert_probe_ran(&coord);
+}
+
+/// 裸 F 键在英文模式归宿主：不执行命令、不吞键（F1 帮助、F5 刷新照常到应用）。
+#[test]
+fn bare_function_key_passes_through_in_english_mode() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        bind_key("f1", PROBE)(c);
+        c.input.default.chinese_mode = false;
+    });
+    let act = coord.handle_key_event(&key(VK_F1, 0));
+    assert!(
+        matches!(act, KeyAction::PassThrough),
+        "英文模式裸 F1 应透传，实际 {act:?}"
+    );
+    assert_probe_not_ran(&coord);
+}
+
+/// 全局 `key_actions` 与会话表绑了同一个裸 F 键：空闲跑命令，组字中归会话表。
+#[test]
+fn bare_function_key_session_binding_wins_mid_composition() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        bind_key("f1", PROBE)(c);
+        bind_session("f1", "page_next")(c);
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(VK_F1, 0));
+    assert_probe_not_ran(&coord);
+    coord.handle_key_event(&key(0x1B, 0)); // Esc 清空，回到空闲
+    coord.handle_key_event(&key(VK_F1, 0));
+    assert_probe_ran(&coord);
+}
+
+#[test]
+fn shift_backspace_runs_command_mid_composition() {
+    skip_without_data!();
+    let coord = open_with(bind_key("shift+backspace", PROBE));
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(VK_BACK, MOD_SHIFT));
+    assert_probe_ran(&coord);
+}
+
 /// 已写成 `$CC(...)` 的也照收（从短语那边抄过来的写法），不被包成嵌套。
 #[test]
 fn combo_key_accepts_cc_wrapped_expression() {
@@ -248,6 +319,100 @@ fn session_key_runs_command_and_keeps_composition() {
     assert_eq!(coord.debug_page_texts(), texts, "候选不应变");
 }
 
+/// ★ 功能键 F1 能绑会话态动作（候选中按 F1 触发命令），组合区原样不动。
+#[test]
+fn session_function_key_runs_command() {
+    skip_without_data!();
+    let coord = open_with(bind_session("f1", PROBE));
+    type_str(&coord, "a");
+    let preedit = coord.debug_preedit();
+    let act = coord.handle_key_event(&key(VK_F1, 0));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "会话态 F1 应吞键，实际 {act:?}"
+    );
+    assert_probe_ran(&coord);
+    assert_eq!(coord.debug_preedit(), preedit, "组合区不应变");
+}
+
+/// ★ `toggle_tip`：把悬停目标设到高亮项，再按一次收起；移动高亮同鼠标离开一样收起（t372）。
+#[test]
+fn session_toggle_tip_follows_highlight() {
+    skip_without_data!();
+    let coord = open_with(bind_session("f2", "toggle_tip"));
+    type_str(&coord, "a");
+    assert_eq!(coord.debug_hover_target(), -1, "前提：无悬停");
+
+    let act = coord.handle_key_event(&key(0x71, 0));
+    assert!(matches!(act, KeyAction::Consumed), "应吞键，实际 {act:?}");
+    assert_eq!(
+        coord.debug_hover_target(),
+        0,
+        "悬停目标 = 高亮项（页内第 0 项）"
+    );
+
+    coord.handle_key_event(&key(0x71, 0));
+    assert_eq!(coord.debug_hover_target(), -1, "再按一次收起");
+}
+
+/// 绑在 → 上：编码区光标不在末尾时照旧右移光标，到末尾才开关提示（t372）。
+#[test]
+fn toggle_tip_on_right_moves_caret_before_end() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        for (k, v) in [("left", "caret_left"), ("right", "toggle_tip")] {
+            c.keys.session_actions.insert(k.into(), v.into());
+        }
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(0x25, 0)); // ← 光标退到 a|b
+    assert_eq!(coord.debug_hover_target(), -1, "前提：无悬停");
+
+    let act = coord.handle_key_event(&key(0x27, 0)); // → 光标回到末尾，不开提示
+    // 宿主里的组合区插入符要跟着动：回 UpdateComposition（带新位置），不是裸 Consumed。
+    assert!(
+        matches!(act, KeyAction::UpdateComposition { caret_pos: 2, .. }),
+        "应更新组合区插入符到末尾，实际 {act:?}"
+    );
+    assert_eq!(coord.debug_hover_target(), -1, "光标没到末尾前 → 只移光标");
+
+    coord.handle_key_event(&key(0x27, 0)); // 已在末尾 → 开提示
+    assert_eq!(coord.debug_hover_target(), 0, "末尾的 → 开提示");
+}
+
+/// `caret_right:tip`：光标没到末尾右移，到末尾开关提示（macOS 式 → 与悬停提示合并写法）。
+#[test]
+fn caret_right_tip_moves_then_toggles_tip() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        for (k, v) in [("left", "caret_left"), ("right", "caret_right:tip")] {
+            c.keys.session_actions.insert(k.into(), v.into());
+        }
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(0x25, 0)); // ← a|b
+    coord.handle_key_event(&key(0x27, 0)); // → 回到末尾
+    assert_eq!(coord.debug_hover_target(), -1, "未到末尾前不开提示");
+    coord.handle_key_event(&key(0x27, 0)); // 末尾 → 开提示
+    assert_eq!(coord.debug_hover_target(), 0);
+}
+
+/// `caret_right:next`：到末尾后 → 把高亮移到下一个候选（macOS「→ 切到下一个候选词」）。
+#[test]
+fn caret_right_next_moves_highlight_at_end() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        c.keys
+            .session_actions
+            .insert("right".into(), "caret_right:next".into());
+    });
+    type_str(&coord, "a");
+    assert!(coord.debug_page_texts().len() > 1, "前提：至少两个候选");
+    let before = coord.debug_page_info().1;
+    coord.handle_key_event(&key(0x27, 0));
+    assert_eq!(coord.debug_page_info().1, before + 1, "高亮应下移一位");
+}
+
 /// 会话态命令**不要候选**：打了码没候选时也能按（网址模式是「有会话、无候选」的天然样本）。
 #[test]
 fn session_key_runs_command_without_candidates() {
@@ -290,4 +455,143 @@ fn empty_expression_is_not_a_binding() {
         "空表达式不应吞键，实际 {act:?}"
     );
     assert_probe_not_ran(&coord);
+}
+
+/// GH#254：Ctrl+= 开了快捷加词预览后切到英文，加词会话必须随之结束——
+/// 否则 `hotkey_session` 留着，英文模式下 Ctrl+- 乃至单键 `-` 都被吞。
+#[test]
+fn mode_switch_ends_add_word_session() {
+    skip_without_data!();
+    let coord = open_with(|_| {});
+    let minus = |m| coord.handle_key_event(&key(0xBD, m));
+    assert!(
+        matches!(minus(MOD_CTRL), KeyAction::PassThrough),
+        "前提：中文态 Ctrl+- 透传"
+    );
+    assert!(
+        matches!(
+            coord.handle_key_event(&key(0xBB, MOD_CTRL)),
+            KeyAction::Consumed
+        ),
+        "Ctrl+= 默认是加词热键"
+    );
+    // 轻敲左 Shift 切英文
+    coord.handle_key_event(&key(0xA0, 0));
+    coord.handle_key_event(&key_up(0xA0));
+    assert!(
+        matches!(minus(MOD_CTRL), KeyAction::PassThrough),
+        "切英文后 Ctrl+- 应透传给宿主"
+    );
+    assert!(
+        matches!(minus(0), KeyAction::PassThrough),
+        "切英文后单键 - 应透传"
+    );
+}
+
+/// GH#267：`ui.candidate.syllable_separator` 只换显示——应用里的组合串不再带 `'`，引擎缓冲与切分不变。
+#[test]
+fn syllable_separator_is_display_only() {
+    skip_without_data!();
+    let run = |sep: &str| {
+        let sep = sep.to_string();
+        let mut c = Config::default();
+        c.schema.available = vec!["wubi86".into(), "pinyin".into()];
+        c.schema.active = "pinyin".into();
+        c.input.default.chinese_mode = true;
+        c.ui.candidate.syllable_separator = sep;
+        let coord = Coordinator::new_headless(c, Some(&data_dir()));
+        let mut last = None;
+        for ch in "xiaopeng".chars() {
+            last = Some(coord.handle_key_event_policed(&key(ch.to_ascii_uppercase() as u32, 0)));
+        }
+        (last.unwrap(), coord.debug_preedit())
+    };
+    let text_of = |a: &KeyAction| match a {
+        KeyAction::UpdateComposition { text, .. } => text.clone(),
+        other => panic!("应是组合更新，实际 {other:?}"),
+    };
+    let (act, _) = run("'");
+    assert!(
+        text_of(&act).contains('\''),
+        "默认仍带 '：{}",
+        text_of(&act)
+    );
+    let (act, internal) = run("");
+    assert_eq!(text_of(&act), "xiaopeng", "留空后应用里没有分隔符");
+    assert!(internal.contains('\''), "引擎内部仍分词：{internal}");
+    let (act, _) = run("·");
+    assert!(text_of(&act).contains('·') && !text_of(&act).contains('\''));
+    let (act, _) = run(" ");
+    assert!(
+        text_of(&act).contains("xiao peng") && !text_of(&act).contains('\''),
+        "空格分隔：{}",
+        text_of(&act)
+    );
+}
+
+/// 只把 → 绑成 `toggle_tip`（← 不绑，走默认移光标）：← 退一格后 → 能回到末尾，且回 UpdateComposition。
+#[test]
+fn toggle_tip_alone_on_right_keeps_caret_movable() {
+    skip_without_data!();
+    let coord = open_with(|c| {
+        c.keys
+            .session_actions
+            .insert("right".into(), "toggle_tip".into());
+    });
+    type_str(&coord, "ab");
+    coord.handle_key_event(&key(0x25, 0)); // 默认 ← 退一格
+    let act = coord.handle_key_event(&key(0x27, 0));
+    assert!(
+        matches!(act, KeyAction::UpdateComposition { caret_pos: 2, .. }),
+        "实际 {act:?}"
+    );
+    assert_eq!(coord.debug_hover_target(), -1);
+}
+
+/// 候选窗编码栏（`UiCommand::UpdateCandidates.preedit`）同样换音节分隔符，光标按字节落在换算后的位置。
+#[test]
+fn syllable_separator_applies_to_candidate_window_preedit() {
+    skip_without_data!();
+    let run = |sep: &str| {
+        let mut c = Config::default();
+        c.schema.available = vec!["wubi86".into(), "pinyin".into()];
+        c.schema.active = "pinyin".into();
+        c.input.default.chinese_mode = true;
+        c.ui.candidate.syllable_separator = sep.to_string();
+        let (coord, rx) = Coordinator::new_headless_with_ui(c, Some(&data_dir()));
+        for ch in "xiaopeng".chars() {
+            coord.handle_key_event(&key(ch.to_ascii_uppercase() as u32, 0));
+        }
+        // 新组合首帧要等权威 caret 才下发 UpdateCandidates（首显闸门），headless 下手动喂一次。
+        coord.handle_caret_update(&wind_bridge::handler::CaretData {
+            x: 100,
+            y: 200,
+            height: 20,
+            composition_start_x: 100,
+            composition_start_y: 200,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: None,
+        });
+        let mut last = None;
+        for cmd in rx.try_iter() {
+            if let wind_ui_types::UiCommand::UpdateCandidates {
+                preedit,
+                preedit_caret,
+                ..
+            } = cmd
+            {
+                last = Some((preedit, preedit_caret));
+            }
+        }
+        last.expect("应收到候选更新")
+    };
+    let (p, caret) = run("'");
+    assert!(p.contains('\''), "默认保留 '：{p}");
+    assert_eq!(caret, p.len(), "光标在末尾");
+    let (p, caret) = run("");
+    assert!(!p.contains('\''), "留空后编码栏没有分隔符：{p}");
+    assert_eq!(caret, p.len(), "光标仍在末尾");
+    let (p, caret) = run("·");
+    assert!(p.contains('·') && !p.contains('\''), "{p}");
+    assert_eq!(caret, p.len(), "多字节分隔符：光标按字节算到末尾");
 }

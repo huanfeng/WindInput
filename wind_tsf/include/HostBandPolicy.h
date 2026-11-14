@@ -30,6 +30,28 @@ inline bool NeedsRebuild(uint32_t fgBand, uint32_t requestedBand, bool hasOwner,
     return !windowAlive || fgBand != requestedBand || !hasOwner;
 }
 
+// 枚举本进程窗口猜宿主 band 时，哪些窗口计入。必须可见且有面积：
+// textinputhost（Win11 表情面板）里有两个 band 15、可见但 0x0 的 "Internet Explorer_Hidden"
+// 辅助窗口，真正显示的面板在 band 3；按最大值取会取到 15，候选窗建在面板之下，完全看不见。
+inline bool CountsForHostBand(bool visible, int width, int height)
+{
+    return visible && width > 0 && height > 0;
+}
+
+// 决定往哪个 band 建窗，按可信度依次取第一个 >1 的：
+//   fgBand         前台窗口 band（前台不是本进程时为 0）
+//   focusRootBand  本线程焦点/活动窗口的根窗口 band。表情面板出现时前台仍是别的进程
+//                  （记事本），但本线程的活动窗口就是面板，这是最直接的依据
+//   enumBand       枚举本进程可见窗口得到的最大 band（只是猜，兜底）
+inline uint32_t PickHostBand(uint32_t fgBand, uint32_t focusRootBand, uint32_t enumBand)
+{
+    if (fgBand > 1)
+        return fgBand;
+    if (focusRootBand > 1)
+        return focusRootBand;
+    return enumBand;
+}
+
 // 落位诊断上报所用的扩展信封 kind，与 wind-ipc protocol.rs 的 ext_kind::DIAG_HOST_RENDER_PLACED 对齐。
 constexpr const char* kPlacedKind = "diag.host_render_placed";
 
@@ -39,6 +61,7 @@ struct Placement
     uint32_t requestedBand; // 据此决定往哪建
     uint32_t actualBand;    // GetWindowBand 复核的实际 band
     bool hasOwner;
+    bool hasPassWindow; // 候选窗的穿透装饰窗口建出来了（没建出来时穿透装饰合回主层、不能点穿）
 };
 
 // 落位上报的 JSON body。prev 非空 = 复核重建（trigger=recheck），带上被换掉那个窗口的
@@ -48,9 +71,10 @@ inline std::string PlacedBody(uint32_t pid, const Placement& now, const Placemen
 {
     char buf[320];
     int n = std::snprintf(buf, sizeof(buf),
-        "{\"pid\":%u,\"trigger\":\"%s\",\"probed\":%u,\"requested\":%u,\"actual\":%u,\"owner\":%s",
+        "{\"pid\":%u,\"trigger\":\"%s\",\"probed\":%u,\"requested\":%u,\"actual\":%u,\"owner\":%s,"
+        "\"pass\":%s",
         pid, prev ? "recheck" : "setup", now.probedBand, now.requestedBand, now.actualBand,
-        now.hasOwner ? "true" : "false");
+        now.hasOwner ? "true" : "false", now.hasPassWindow ? "true" : "false");
     std::string s(buf, (n > 0 && n < (int)sizeof(buf)) ? (size_t)n : 0);
     if (prev)
     {

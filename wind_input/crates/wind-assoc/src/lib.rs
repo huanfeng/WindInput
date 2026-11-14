@@ -1120,5 +1120,10 @@ mod tests {
         assert_eq!(d.mode, "continuous");
         assert_eq!(AssocKind::parse(&d.kind), AssocKind::Smart);
         assert_eq!(AssocMode::parse(&d.mode), AssocMode::Continuous);
+        // 手机上选联想只靠点候选；退格、回车、二三候选键都不被联想截走
+        assert!(!d.space_commits);
+        assert!(!d.select_keys_commit);
+        assert!(!d.enter_cancels_only);
+        assert!(!d.backspace_cancels_only);
     }
 }

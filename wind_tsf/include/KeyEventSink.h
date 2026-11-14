@@ -4,7 +4,10 @@
 #include "IPCClient.h"
 #include "SkipKeyTable.h"
 #include "PassthroughNote.h"
+#include "InputSequenceChar.h"
+#include "ObservedKeyGate.h"
 #include "ToggleTapPolicy.h"
+#include "CtrlRawPolicy.h"
 #include "CtrlSpacePolicy.h"
 #include <string>
 #include <cstdint>
@@ -94,9 +97,12 @@ public:
     // 也不消除那个右符号，前提仍成立，清掉只会让 Tab/Enter 跳不出去（切走再切回、或
     // 配对里打完字再跳出）。真正让前提失效的是焦点/文档切换与组合被清，那些路径按默认值全清。
     void ResetComposingState(BOOL keepPairState = FALSE) {
+        _EndAssocBareSession();
         _isComposing = FALSE; _hasCandidates = FALSE; _needsCompositionResync = FALSE; _resyncDeadline = 0; _resyncFailStreak = 0; _skipKeys.Clear(); _pendingPairAction = {};
         _passthrough.Reset();  // 与 skip 表同处清：跨文档带一个陈旧的透传事实过去没有意义
-        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; }
+        // seqChar 同配对状态：中英切换不清（用户定：切换后紧接着打的仍算「英文后」），
+        // 焦点/文档切换清——换了文档，上一个文档末尾是什么与这里无关。
+        if (!keepPairState) { _pairPendingDepth = 0; _pairLastActivityTick = 0; _seqChar = WindInputSeq::kUnknown; }
     }
 
     // 配对状态保活：所有按键都应调用（含英文模式的普通字母——协调器在英文模式下收不到
@@ -145,6 +151,13 @@ public:
     // vk: 虚拟键码（Win32 VK_*）；mods: 内部 KEYMOD_* 修饰位（不是 TSF MOD_*）。
     // 返回 TRUE ＝ 服务端要这个键交还宿主（由调用方注入，见实现处）。
     BOOL DispatchHotkey(uint32_t vk, uint32_t mods);
+    /// 收到 WM_HOTKEY（不论后面是否分发：前台竞态丢弃、vk 解不出也算）：作废待判单击与
+    /// Ctrl 如实上报的单击——这一键不经按键回调，那里的「别的键取消待判」够不着。
+    void NoteHotkeyMessage();
+    /// 线程失焦：Ctrl 如实上报的记账作废（松开多半送不到了）。
+    void ResetCtrlRaw();
+    // 失焦：吃掉过按下的功能键补报松开并清记账（见实现）。
+    void ResetEatenFnKey();
 
     // 把一个已被吃掉的键重放给宿主（_ReplayKeyToHost 的公开入口，给 WM_HOTKEY 派发用）。
     void ReplayKeyToHost(WORD vk) { _ReplayKeyToHost(vk); }
@@ -178,7 +191,41 @@ public:
     ///
     /// 根因是拿边沿去表达一个**持续状态**：漏一个事件就永久错。改成服务端权威 +
     /// level-triggered 之后，DLL 侧再加任何本地清位都是第二个真相源，会把这个毛病请回来。
-    void SetCandidateSessionActive(BOOL active) { _hotkeyModeSession = active; }
+    ///
+    /// 服务端说「没有会话了」时，若那个会话是「无占位的联想会话」（`_assocBareSession`），
+    /// 还要在 TSF 线程上补一次候选收起（`_assocBareEndPending`）：本函数会在 AsyncReader
+    /// 线程被调，UIElement / 热键注销不能在这里做。
+    /// 无占位联想会话中，文档焦点反弹（WPS 点单元格）时问一句：鼠标刚按过吗？是 ⇒ 用户点了别处，
+    /// 调用方应让服务端收联想（宿主没有组合，也不一定发选区变化，没有别的信号）。
+    /// 只在会话期间读鼠标状态；会话开始时已丢弃一次旧的「按下过」位。TSF 线程调用。
+    BOOL BareAssocMouseClicked();
+    void SetCandidateSessionActive(BOOL active)
+    {
+        if (active)
+        {
+            // 后到的 TRUE 撤销前面迟到的 FALSE（服务端联想活着时每个 keydown 都会重推 TRUE）。
+            _hotkeyModeSession = TRUE;
+            _assocBareEndPending = FALSE;
+            return;
+        }
+        if (_assocBareSession)
+        {
+            // 无占位联想会话的 FALSE 只记下「待收」，由 TSF 线程在下一次 OnTestKeyDown 入口落位：
+            // 本函数在 AsyncReader 线程，直接清位会让同一键的 Test / Key 两阶段判定翻转，
+            // 也可能把刚被上屏应答同步置起的新一轮会话清掉。
+            _assocBareEndPending = TRUE;
+            return;
+        }
+        _hotkeyModeSession = FALSE;
+    }
+
+    /// 服务端接管了会话（加词等热键会话在 WM_HOTKEY 上乐观置位）：无占位联想的归属标记交还，
+    /// 之后 `ResetComposingState` 不会再把这一位清掉（那是加词会话的位，只能由服务端推送清）。
+    void ReleaseAssocBareOwnership()
+    {
+        _assocBareSession = FALSE;
+        _assocBareEndPending = FALSE;
+    }
 
     /// 宿主报了选区变化（`OnEndEdit`）：若此刻有 Shift/Ctrl 正等着 keyup 触发切换，
     /// 且鼠标键此刻按着或按住期间按下过，说明是鼠标点选，这次不算单击（论坛 t257）。
@@ -237,10 +284,6 @@ private:
     // 另有三个非按键调用点（同步握手等），它们拿不到 wParam，标志若残留会在下一次按键上
     // 误重放。故两个入口都在调用响应处理**之前**先清零。
     BOOL _pendingReplayToHost = FALSE;
-    // 本次 OnKeyDown 的响应上屏了文字（CommitText 等，见 ResponseCommitsText）。会话中
-    // Ctrl/Alt 组合的 cleanup 判定要用（见 CtrlAltCleanupPolicy.h），与上一项同样只在
-    // OnKeyDown 里、调用响应处理之前清零。
-    BOOL _responseCommitted = FALSE;
     // 正在 DispatchHotkey（WM_HOTKEY 回调）里处理响应：不在按键上下文，上屏要按
     // nonKeyContext 走异步会话。只在 DispatchHotkey 里置位、处理完恢复原值。
     BOOL _inHotkeyDispatch = FALSE;
@@ -262,6 +305,24 @@ private:
     /// （对照：`IPCClient.h` 要求 ModePush 回调必须用 `InterlockedExchange` 写
     ///   `_bChineseMode`，那是因为它参与更细的时序判定。）
     BOOL _hotkeyModeSession = FALSE;
+    /// 「无占位的联想会话」由本地同步置位的那一份（`COMMIT_FLAG_ASSOC_SESSION`）：
+    /// 宿主里没有组合，转发资格只能靠 `_hotkeyModeSession`，而它的权威是服务端的异步推送，
+    /// 赢不了下一次 OnTestKeyDown——所以上屏应答里同步先置一次，并记下「这一位是我置的」。
+    /// 有了这个记号，ClearComposition / UpdateComposition 等本地已知的结束点才能立刻清位，
+    /// 又不会误清加词等真正由服务端驱动的会话。只在 TSF 线程置位；
+    /// 服务端推 FALSE 时在 AsyncReader 线程清（见 SetCandidateSessionActive）。
+    BOOL _assocBareSession = FALSE;
+    /// 服务端推 FALSE 清掉了无占位联想会话，TSF 线程还欠一次候选收起。
+    BOOL _assocBareEndPending = FALSE;
+    /// 本地结束点：清位（不动加词等服务端会话）。TSF 线程调用。
+    void _EndAssocBareSession()
+    {
+        if (_assocBareSession)
+        {
+            _assocBareSession = FALSE;
+            _hotkeyModeSession = FALSE;
+        }
+    }
     // 配对跳出键（VK 码集合，由 core 经 CONFIG_KEY_JUMP_OUT_KEYS 推送）。英文模式配对直接
     // 据此跳出；中文模式仅用于「有待跳出配对」时放行 Enter 等被会话门控的键转发给协调器。
     std::set<UINT> _jumpOutKeys;
@@ -416,6 +477,16 @@ private:
     static_assert(WindPassthrough::kVkLMenu == VK_LMENU, "VK 漂移");
     static_assert(WindPassthrough::kVkRMenu == VK_RMENU, "VK 漂移");
     static_assert(WindPassthrough::kVkPacket == VK_PACKET, "VK 漂移");
+    static_assert(WindInputSeq::kVkSpace == VK_SPACE, "VK 漂移");
+    static_assert(WindInputSeq::kVkNumpad0 == VK_NUMPAD0, "VK 漂移");
+    static_assert(WindInputSeq::kVkNumpad9 == VK_NUMPAD9, "VK 漂移");
+    static_assert(WindInputSeq::kVkMultiply == VK_MULTIPLY, "VK 漂移");
+    static_assert(WindInputSeq::kVkDivide == VK_DIVIDE, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem1 == VK_OEM_1, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem3 == VK_OEM_3, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem4 == VK_OEM_4, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem7 == VK_OEM_7, "VK 漂移");
+    static_assert(WindInputSeq::kVkOem102 == VK_OEM_102, "VK 漂移");
 
     // `OnTestKeyDown` / `OnKeyDown` 有 40+ 个 return，逐个接线必漏一处（本仓反复吃过的
     // "散点接线"）。用作用域守卫在**函数出口**统一判：析构时 `*pfEaten` 已是最终结论。
@@ -425,6 +496,9 @@ private:
         CKeyEventSink* sink;
         WPARAM vk;
         BOOL* eaten;
+        LPARAM lParam;
+        // 挂在 OnTestKeyDown（true）还是 OnKeyDown（false）上：扩展旁路上报按此去重。
+        bool fromTest;
         // skip 表命中（我们自己注入的键）时置位，见 `PassthroughNote.h` 的排除项论证。
         bool suppressed = false;
         void Suppress() { suppressed = true; }
@@ -434,9 +508,20 @@ private:
             {
                 sink->_passthrough.NoteKeyDown((uint32_t)vk, *eaten != FALSE, suppressed);
                 sink->_NoteInputSequenceAtExit(vk, *eaten != FALSE, suppressed);
+                sink->_ReportObservedKeyAtExit(vk, lParam, fromTest, *eaten != FALSE, suppressed);
             }
         }
     };
+
+    // ── 扩展旁路上报（CMD_KEY_OBSERVED）──────────────────────────────────────────
+    //
+    // 放行给宿主的用户按键核心看不见；有扩展订阅按键时（core 推开 CONFIG_KEY_EXTENSION_KEY_OBSERVE）
+    // 在上面那个守卫的出口异步报一份，供按键音这类扩展用。去重规则在 `ObservedKeyGate.h`；
+    // 密码框与键盘禁用时一个都不报。只读通知，核心不拿它做任何按键处理。
+    void _ReportObservedKeyAtExit(WPARAM vk, LPARAM lParam, bool fromTest, bool eaten, bool suppressed);
+    WindObserve::ObservedKeyGate _observeGate;
+    // config 回调在 IPC 读线程写、TSF 线程读。
+    std::atomic<bool> _observeKeys{false};
 
     // ⚠️⚠️ **skip 表放行的键一律不上报**，哪怕它们确实 `pfEaten = FALSE` 走进了宿主。
     //
@@ -485,7 +570,7 @@ private:
         return 0;
     }
 
-    // 按键侧记录点：挂在 PassthroughNoter 的出口（OnTestKeyDown / OnKeyDown 两处），按最终
+    // 按键侧记录点（同时更新 _seqChar，见 InputSequenceChar.h）：挂在 PassthroughNoter 的出口（OnTestKeyDown / OnKeyDown 两处），按最终
     // `*pfEaten` 判。键进了宿主（判据同透传上报，`WindPassthrough::IsUserKeyIntoHost`：纯修饰键、
     // 自注入键不算）就记「是不是数字」，非数字即清零——CapsLock 字母、翻页热键、Backspace、
     // 方向键、Ctrl+V 都在此清。此前是在几个透传分支里手工接线，散点漏了好几处提前 return。
@@ -502,7 +587,22 @@ private:
     // 数字则记，否则清零（上屏汉字/标点后不该再继承数字状态）。全角数字（U+FF10-FF19）
     // 刻意不记——服务端只认 ASCII 0x30-0x39，记了也不会命中，徒增误判面。
     // 空文本不动状态：没有东西写进文档，光标前是什么并没有改变。
+    // 同时更新 _seqChar（末尾码点，见 InputSequenceChar.h），两者共用这几个上屏记录点。
     void _TrackCommittedTextForSmartPunct(const std::wstring& text);
+
+public:
+    /// 只更新 seqChar（数字记账不动）：「上屏后紧接着开组合」与 HoldComposition 落定这类
+    /// 数字记账刻意不记、但文档里确实多了一段的上屏点用。空文本不动。
+    void NoteCommittedSeqChar(const std::wstring& text)
+    {
+        if (!text.empty())
+            _seqChar = WindInputSeq::FromCommittedText(text.c_str(), text.size());
+    }
+
+    /// 鼠标挪过光标（判据见 `WindInputSeq::CursorMovedByMouse`）：输入序列记账作废。
+    void NoteCursorMovedByMouse() { _seqChar = WindInputSeq::kUnknown; }
+
+private:
 
     // ⛔ 这里曾有 CapsLock 的「回敲复原」机制（_RestoreCapsLockToggle / _capsSessionEaten /
     // 自注入放行窗口），2026-08-11 全部移除——TSF 压不住 CapsLock 的锁定态翻转，而事后
@@ -511,6 +611,14 @@ private:
     // **不要在 TSF 侧重新实现它。**
 
     WCHAR _lastPassthroughDigit; // 最近一笔输入若是 ASCII 数字则记之，否则 0——数字后智能标点的唯一依据
+    // 输入序列里最近进文档的字符代表值（KeyPayload.seqChar，取值规则见 InputSequenceChar.h）。
+    // 与 _lastPassthroughDigit 同两个记录点，但**发送时不清零**：服务端只在组合开始那一键锁存它，
+    // 组合期间被吃下的键没有写进文档，光标前是什么并没有变。
+    uint16_t _seqChar;
+    // 中数间补空格开着、且本应用未关（core 经 CONFIG_KEY_SPACE_BEFORE_DIGIT 按客户端现算推来）。
+    // 只决定「汉字后的数字吃不吃」，见 NumberKeyPolicy.h 的 SpaceBeforeDigit。
+    bool _spaceBeforeDigit = false;
+    bool _SpaceBeforeDigitFor(WPARAM vk, uint32_t modifiers) const;
     // 「自上一个 keydown 送达服务端以来有键进了宿主」的记账。规则与理由见 PassthroughNote.h；
     // 消费点在 _SendKeyToService（仅 keydown 那一发），清理点在 ResetComposingState。
     WindPassthrough::PassthroughState _passthrough;
@@ -521,6 +629,14 @@ private:
     // 首次记 pending 时置 mouseDownAtPress 并清 GetAsyncKeyState 的「按下过」位；
     // selectionChanged 由 TextService::OnEndEdit 经 NoteSelectionChangedDuringToggle 置位。
     wind::toggletap::TapSignals _pendingTapSignals;
+    // 候选显示时 Ctrl 如实上报的这次按住（判据见 CtrlRawPolicy.h）。与上面的待判单击互斥：
+    // 一次按住在按下那一刻定走哪条路。鼠标记账与待判单击同一套判据，各记各的。
+    wind::ctrlraw::Press _ctrlRaw;
+    wind::toggletap::TapSignals _ctrlRawTapSignals;
+    // 服务端吃掉过按下的那个功能键（F1–F12，不带 Ctrl / Alt），0 = 没有。它的松开也要送给
+    // 服务端（注释切换键选功能键 + 按住档时靠松开收起详细态），见 _DispatchEatenFnKeyUp。
+    UINT _eatenFnKeyVk = 0;
+    BOOL _eatenFnKeyUpSent = FALSE;
     // OnTestKeyDown 是否刚吃下一个 Ctrl+Space。它是「我们独占了这个键」的凭据：
     // TSF 只在 pfEaten=TRUE 后才调 OnKeyDown，吃下就意味着 msctf 不会再拿它当 IME
     // 热键、OPENCLOSE compartment 不会被翻，因此按键侧兜底切换与 compartment 路径
@@ -584,6 +700,16 @@ private:
     // Returns TRUE if a toggle was matched (caller should set pfEaten=TRUE).
     BOOL _DispatchPendingToggleKeyUp(WPARAM wParam);
 
+    // 候选显示时 Ctrl 的如实上报（CtrlRawPolicy.h）。
+    // _NoteKeyDownForCtrlRaw：任意非 Ctrl 的 keydown 记「按住期间按过别的键」。
+    // _TryCtrlRawDown：Ctrl 的 keydown；返回 TRUE = 这次按住走如实上报（已发或重复），调用方放行并返回。
+    // _DispatchCtrlRawUp：Ctrl 的 keyup；是如实上报那次按住就发 MOD_UP。不吃键，调用方照常往下走。
+    void _NoteKeyDownForCtrlRaw(WPARAM wParam);
+    BOOL _TryCtrlRawDown(WPARAM wParam, LPARAM lParam, uint32_t modifiers);
+    void _DispatchCtrlRawUp(WPARAM wParam);
+    BOOL _DispatchEatenFnKeyUp(WPARAM wParam, BOOL finalize);
+    static uint32_t _ResolveCtrlVk(WPARAM wParam, uint32_t modifiers);
+
     // 记录「该切换键正等 keyup 触发切换」。OnTestKeyDown 与 OnKeyDown 都会调用：
     // 纯修饰键放行后 TSF 未必再调 OnKeyDown，只在后者记录会让切换失灵。幂等。
     void _MarkPendingToggleKey(WPARAM wParam, uint32_t modifiers);
@@ -591,7 +717,7 @@ private:
     // 取消待切换。给命中热键白名单的组合键用：那些分支都是就地 return，够不着
     // OnTestKeyDown 下方那段统一取消，不显式调用就会「按了热键还顺带切了中英文」。
     void _CancelPendingToggle(WPARAM wParam, const wchar_t* reason);
-    BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType);
+    BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType, uint8_t extraToggles = 0);
     // Returns TRUE if key was handled, FALSE to pass through.
     // outType：收包成功时写入响应类型，失败时不动（热键派发据此判是否交还宿主）。
     BOOL _HandleServiceResponse(ResponseType* outType = nullptr);

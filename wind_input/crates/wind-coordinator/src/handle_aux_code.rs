@@ -150,7 +150,7 @@ impl Coordinator {
         // 候选面与生命周期，而上面那条重入路径对它们依然成立。
         //
         // ★ 临拼放行的依据是「它产出的正是拼音候选」，与辅助码筛的对象同类；判据不是
-        // 「哪些模式允许」的第二份清单，而是下面 `aux_code_settings_of(来源方案)` 是否
+        // 「哪些模式允许」的第二份清单，而是下面 `aux_code_settings_cached_of(来源方案)` 是否
         // 真的给出了码表——落点存在 ⇔ 操作可行（同 `candidate_op_scope` 的收敛方式）。
         if !matches!(state.active, None | Some(ModeKind::TempPinyin)) {
             return None;
@@ -159,8 +159,8 @@ impl Coordinator {
         // 设置按**来源方案**取：临拼在五笔方案下引用的是拼音方案，而辅助码码表配在
         // `[engine.aux_code].files` 里——拿五笔的取，`paths.is_empty()` 恒成立、静默不进。
         let settings = match self.overlay_engine_schema(state) {
-            Some(s) => self.engine_mgr.aux_code_settings_of(&s),
-            None => self.engine_mgr.aux_code_settings(),
+            Some(s) => self.engine_mgr.aux_code_settings_cached_of(&s),
+            None => self.engine_mgr.aux_code_settings_cached(),
         };
         if !settings.enabled {
             return None;
@@ -303,7 +303,18 @@ impl Coordinator {
     pub(crate) fn aux_code_source_buffer<'a>(&self, state: &'a State) -> &'a str {
         match state.aux_code.as_ref().and_then(|o| o.origin) {
             Some(ModeKind::TempPinyin) => &state.temp_pinyin_buffer,
-            _ => &state.input_buffer,
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => &state.input_buffer,
         }
     }
 
@@ -524,7 +535,18 @@ impl Coordinator {
                 state.active = Some(ModeKind::TempPinyin);
                 self.commit_temp_pinyin_selected(state, &cand, offset)
             }
-            _ => self.commit_selected(state, &cand, offset),
+            None
+            | Some(
+                ModeKind::TempEnglish
+                | ModeKind::Url
+                | ModeKind::Email
+                | ModeKind::Unicode
+                | ModeKind::Special(_)
+                | ModeKind::RareChar
+                | ModeKind::Reverse
+                | ModeKind::Mix(_)
+                | ModeKind::AuxCode,
+            ) => self.commit_selected(state, &cand, offset),
         };
         // 部分消费 → 缓冲还有剩余编码，处于逐步转换态 → 重建会话、留在辅助码模式。
         // 判据取**来源缓冲**（见 `aux_code_source_buffer`）：临拼的剩余码不在 `input_buffer` 里。
@@ -667,6 +689,7 @@ mod tests {
             toggles: 0,
             event_seq: 0,
             prev_char: 0,
+            seq_char: 0,
         }
     }
 
@@ -899,10 +922,10 @@ mod tests {
         {
             let mut st = seed_composition(&c);
             let _ = c.enter_aux_code(&mut st, keymap::VK_BACKTICK);
-            // Ctrl+M 不被当辅助码字符：有输入态 → ClearComposition 退出。
+            // Ctrl+M 不被当辅助码字符：有输入态 → 清掉组合并把键交还宿主（宿主快捷键）。
             let act = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), MOD_CTRL));
             assert_eq!(st.active, None);
-            assert!(matches!(act, KeyAction::ClearComposition));
+            assert!(matches!(act, KeyAction::ClearCompositionThenPassThrough));
         }
         // 无输入态 → PassThrough。
         let mut st2 = seed_composition(&c);
@@ -1181,8 +1204,8 @@ mod tests {
     /// 少了这一排的后果：配了 `z = "aux_code"` 的用户在辅助码里再也打不出 `z`——
     /// 而 `z` 是笔画码的「折」、也是形码方案的常用码元。
     ///
-    /// ⚠️ 这条绑定对**进入**本就无效（`bound_action_yield_reason`：字母键仅码表引擎
-    /// 生效，而辅助码只服务拼音）。退出侧比进入侧更宽松，正是不对称的形态。
+    /// ⚠️ 进入侧：码表引擎里 z 绑 `aux_code` 本就无意义（辅助码只服务拼音）；拼音里绑了则
+    /// 空缓冲按 z 即进辅助码，那是用户自己的配置。退出侧不论如何都让字母回到编码。
     #[test]
     fn letter_stays_code_input_even_when_bound_as_trigger() {
         let c = coord_with_data_cfg("sess_zletter", data_dir_with_aux("sess_zletter"), |cfg| {
@@ -2039,11 +2062,13 @@ mod tests {
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0));
         assert_eq!(kept(&st), vec!["李", "樱"]);
         let _ = c.handle_aux_code_key(&mut st, &key(keymap::VK_ESCAPE, 0));
-        std::fs::write(
-            ov.join("pinyin.toml"),
-            "[engine.aux_code]\nfiles = [\"aux_code/other.txt\"]\n",
-        )
-        .unwrap();
+        // 走设置页保存方案设置的真实入口：它负责让进入辅助码用的缓存失效。
+        let ov_value: toml::Value = "[engine.aux_code]\nfiles = [\"aux_code/other.txt\"]\n"
+            .parse()
+            .unwrap();
+        c.engine_mgr
+            .write_schema_override("pinyin", &ov_value)
+            .unwrap();
         assert!(c.enter_aux_code(&mut st, keymap::VK_BACKTICK).is_some());
         let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('Q'), 0));
         assert_eq!(kept(&st), vec!["李", "樱", "河"], "新来源 other.txt 生效");

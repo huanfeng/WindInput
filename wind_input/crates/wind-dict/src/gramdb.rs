@@ -12,8 +12,8 @@
 //! 而转格式要**遍历整棵 trie 提取全部键值对**，比查询复杂得多。直接读还顺带保住了
 //! 「换个数据文件即可切换模型」——rime 生态的 `.gram` 都能用。
 
+use crate::mapping::Mapped;
 use anyhow::{Context, Result, bail};
-use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
 
@@ -127,7 +127,7 @@ pub fn encoded_char_len(b: u8) -> usize {
 
 /// 只读打开的 `.gram`。
 pub struct GramDb {
-    mmap: Mmap,
+    mmap: Mapped,
     da_offset: usize,
     n_units: usize,
 }

@@ -378,6 +378,11 @@ pub trait Engine: Send + Sync {
         false
     }
 
+    /// 拼音「屏蔽这个词」的文字集合（候选调整里 `code = *` 的删除行）。只有拼音引擎认：
+    /// 被屏蔽的文字不进整句图、整句恰为它时换下一条（见 `PinyinEngine`）。由调用方在规则
+    /// 变化后推入，同一份集合（指针相同）重复推入是空操作。
+    fn set_blocked_words(&self, _words: std::sync::Arc<std::collections::HashSet<String>>) {}
+
     /// 最大编码长度（码表引擎返回其码长；拼音等无意义返回 0）。
     /// 供混输引擎的超长分支（pinyin_only_overflow）与顶码裁决判断输入是否溢出。
     /// 本引擎是否开启了**整句输入**（当前只有码表引擎会返回 true）。
@@ -528,6 +533,20 @@ pub trait Engine: Send + Sync {
     /// 双拼拼音引擎实现；其余（含混输）默认 `None`。
     fn shuangpin_full_syllable_count(&self, _keys: &str) -> Option<usize> {
         None
+    }
+
+    /// 把一个标准拼音音节按当前**模糊音配置**展开成等价读音（`fang` → `fan`、`zi` → `zhi`）。
+    /// 没开模糊音 / 非拼音引擎 → 空。只返回标准音节表里真实存在的读音（纠错用的错误拼写不算）。
+    /// 手机端展开页「首单元读法」列模糊兄弟用。
+    fn fuzzy_siblings(&self, _syllable: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// 双拼下把击键串按**击键对**拆成音节：`(全拼音节, 击键起, 击键止)`（击键域字节位，含 `'`）。
+    /// 非双拼 / 拆不出 → 空。手机端展开页「首单元读法」在双拼下用它定首单元，
+    /// 全拼的拆分串在双拼下是击键切分，不是拼音。
+    fn shuangpin_units(&self, _keys: &str) -> Vec<(String, usize, usize)> {
+        Vec::new()
     }
 
     /// 满码自动上屏「显示态」复评（对齐 Go recheckAutoCommit）：给定已过滤/重排/shadow 的

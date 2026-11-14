@@ -25,7 +25,7 @@ pub use engine::{
 pub use english::EnglishEngine;
 pub use manager::{
     ActiveDataFacts, AuxCodeSettings, AuxCodeSourceOptions, AuxSource, EngineManager, FreqSettings,
-    FreqStrategy, MemoryReport, SchemaDataFacts, SchemaDictFile,
+    FreqStrategy, MemoryReport, SchemaDictFile,
 };
 pub use pinyin::PinyinEngine;
 pub use text_codes::TextCodeView;

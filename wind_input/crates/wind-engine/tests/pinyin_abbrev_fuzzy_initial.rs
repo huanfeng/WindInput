@@ -436,7 +436,17 @@ fn initial_seg_check_rejects_unrelated_word() {
             ..Default::default()
         },
     );
-    let t = texts(&e, "nhao");
+    // 只看整串消费的候选：前缀回退的部分候选（只消费 `nha`）是另一回事。
+    let t: Vec<String> = e
+        .convert("nhao", 50)
+        .map(|r| {
+            r.candidates
+                .into_iter()
+                .filter(|c| !c.is_partial)
+                .map(|c| c.text)
+                .collect()
+        })
+        .unwrap_or_default();
     assert!(
         !t.contains(&"你发啊".to_string()),
         "Initial 段校验须挡住被变体键捞回的无关词: {t:?}"

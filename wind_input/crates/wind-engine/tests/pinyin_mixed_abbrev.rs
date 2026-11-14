@@ -96,6 +96,19 @@ fn texts(e: &PinyinEngine, input: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 只取**整串消费**的候选（排除前缀回退的部分候选）。
+fn full_texts(e: &PinyinEngine, input: &str) -> Vec<String> {
+    e.convert(input, 30)
+        .map(|r| {
+            r.candidates
+                .into_iter()
+                .filter(|c| !c.is_partial)
+                .map(|c| c.text)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// **声母在前**：`nhao` = n(声母) + hao(全音节) → 你好。
 ///
 /// 这是立项时的真机反馈本身。此前 `is_abbreviation` 对 `nhao` 判**真**、顺利进了简拼
@@ -147,7 +160,10 @@ fn trailing_initial_form_is_already_covered_by_prefix_completion() {
     assert!(c.is_prefix, "证据：这条候选是前缀补全层，不是简拼层: {c:?}");
 }
 
-/// **混合比纯简拼多出的信息量必须真的用上**：`nhao` 只留你好，不带出南海。
+/// **混合比纯简拼多出的信息量必须真的用上**：`nhao` 的**整串**候选只留你好，不带出南海。
+///
+/// 前缀回退会让「南海」以部分候选（`is_partial`，只消费 `nh`）排在整串候选之后，那是
+/// 微软式逐级补全，不算混入；这里只查整串消费的候选。
 ///
 /// 对照组是同一夹具下的 `nh`——它必须两个都出。少了这个对照，上面那条断言就可能是
 /// 「夹具里压根没有南海」的假绿，而不是「过滤器真的挡住了它」。
@@ -161,7 +177,7 @@ fn mixed_abbrev_filters_by_syllable_not_just_initial() {
         "对照组：纯简拼 nh 两个词都该出（否则下面的断言是假绿）: {plain:?}"
     );
 
-    let mixed = texts(&e, "nhao");
+    let mixed = full_texts(&e, "nhao");
     assert!(mixed.contains(&"你好".to_string()), "{mixed:?}");
     assert!(
         !mixed.contains(&"南海".to_string()),

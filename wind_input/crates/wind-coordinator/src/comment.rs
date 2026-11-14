@@ -1,4 +1,4 @@
-//! 候选**注释段**（候选右侧的小字）的模板渲染——`ui.candidate.comment_template_*` 的唯一消费点。
+//! 候选**注释段**（候选右侧的小字）的模板渲染——`[ui.comment]` 模板的唯一消费点。
 //!
 //! # 模板语法
 //!
@@ -49,19 +49,12 @@
 //! 出现 tooltip 自己的逐字 `[拼音]` 段和追加的那份，等于把重复做实了。悬停提示现回归由
 //! `ui.tooltip.*` 独家负责。
 //!
-//! # 三层：模式级 → 方案级 → 全局
+//! # 模板从哪来：模式 → 方案 → 方案类型 → 全局
 //!
-//! | 层 | 落点 |
-//! |---|---|
-//! | 模式级 | `input.{temp_english,temp_pinyin,url}` / `schema.mix_modes[]` / 方案文件 `[overlay]` |
-//! | 方案级 | 方案文件 `[candidate].comment_template_*` |
-//! | 全局 | `ui.candidate.comment_template_*` |
-//!
-//! 上两层是三态（键缺失=跟随下一层／非空=覆盖／空串=本层不显示注释），最底层必有值。
-//! 决策点 [`resolve_template`]，与 `layout::vertical_for` 同构。
-//!
-//! ★ **「没意见」的语义是「跟随下一层」而不是「跟随全局」**——加了方案层之后这两者
-//! 不再等价。设计与判据见 `docs/design/candidate-comment-layering.md`。
+//! 模板是命名的（内置在 `system.comments.toml`，用户的在 `[ui.comment]`），分配按
+//! 作用范围 × 默认/详细 × 竖/横 逐层找，裁决在 `wind_config::comment_lib::CommentLibrary`。
+//! 本模块只给出作用范围（[`mode_key_of`] / [`schema_type_of`]）。设计见
+//! `docs/design/candidate-comment-templates.md`。
 //!
 //! # 为什么装配收在协调器
 //!
@@ -72,11 +65,12 @@
 //! 解析/渲染（纯函数 [`parse`] / [`render`]）与变量求值（[`Coordinator::comment_for`]）
 //! 刻意分开，与 `layout.rs` 同构：前者可用任意求值闭包测出完整语法矩阵，不必构造协调器。
 
+use crate::comment_switch::{SwitchEffect, SwitchOutcome};
 use crate::coordinator::State;
 use crate::pipeline::ModeKind;
 use wind_candidate::{Candidate, CandidateSource};
-use wind_config::config::{CodeHintSource, CommentTemplateOverride};
-use wind_config::{Config, OverlaySpec};
+use wind_config::Config;
+use wind_config::comment_lib::SwitchMode;
 use wind_ui_types::{InlineColor, SpanStyle, StyledText};
 
 use std::sync::Arc;
@@ -287,6 +281,12 @@ fn parse_range(tpl: &str, pairs: &Pairs, start: usize, end: usize, depth: usize)
                 depth + 1,
             )));
             i = close + 1;
+            continue;
+        }
+        // 字面 `\n`（反斜杠加 n）按换行：兼容旧版单行框里手写的 `\n`，与真换行等价。
+        if b[i] == b'\\' && i + 1 < end && b[i + 1] == b'n' {
+            text.push('\n');
+            i += 2;
             continue;
         }
         // 按字符推进，保证切片落在 UTF-8 边界上（模板含中文标签文字）。
@@ -907,95 +907,58 @@ fn strip_tones(s: &str) -> String {
         .collect()
 }
 
-/// 「模式 → 注释模板覆盖」映射。**唯一一处**把这层对应关系写死的地方——新增模式只加一行。
+/// 当前模式在 `[ui.comment.assign.mode]` 里的键。**唯一一处**写死这层对应关系——新增模式只加一行。
 ///
-/// 返回 `None` = 该模式没有覆盖，跟随全局；`Some(s)` = 用 `s`（`s` 可能是空串，
-/// 语义是「本模式不显示注释」——这正是三态里「缺失」与「空」必须分开的原因）。
+/// `None` = 该模式没有模式层，直接从方案层找起。`special_schema` 把特殊模式下标换成其方案 id。
 ///
-/// 与 [`crate::layout::intent_for`] 同构（声明式重算，不做「进入时保存、退出时回放」），
-/// 但**刻意不含 `add_word`**：加词面板走 `show_add_word_preview` 独立绘制路径，
-/// 根本不经过 `comment_for`，给它加键只会是永远不生效的死配置。
-/// 这两个函数的模式集合不同不是遗漏——布局要管所有会显示候选窗的路径，注释只管渲染注释的那条。
-///
-/// `overlay` = 当前特殊模式的 `[overlay]` 段快照（`State::overlay_spec`）。它与 `cfg`
-/// 共用生命周期 `'a`，因为返回值可能借用其中任一方——快照存在 `State` 里正是为了让
-/// 这个借用有处可依：特殊模式的配置已下沉到方案文件，每次现查注册表拿到的是临时值。
-pub(crate) fn template_for<'a>(
-    cfg: &'a Config,
-    overlay: Option<&'a OverlaySpec>,
+/// 与 [`crate::layout::intent_for`] 同构（声明式重算），但**刻意不含 `add_word`**：加词面板走
+/// `show_add_word_preview` 独立绘制路径，根本不经过注释渲染。生僻字、反查、辅助码没有模式层：
+/// 前两者没有宿主方案，辅助码只是筛选，注释来源仍是主流程。
+pub(crate) fn mode_key_of(
+    cfg: &Config,
     active: Option<ModeKind>,
-    vertical: bool,
-) -> Option<&'a str> {
-    let pick = |v: &'a CommentTemplateOverride,
-                h: &'a CommentTemplateOverride|
-     -> Option<&'a str> { if vertical { v.as_deref() } else { h.as_deref() } };
-    match active {
-        Some(ModeKind::Mix(i)) => cfg
+    special_schema: impl FnOnce(u8) -> Option<String>,
+) -> Option<String> {
+    match active? {
+        ModeKind::Mix(i) => cfg
             .schema
             .mix_modes
             .get(i as usize)
-            .and_then(|m| pick(&m.comment_template_vertical, &m.comment_template_horizontal)),
-        // 生僻字模式并入本支：它的 `overlay` 恒为 None（没有宿主方案、没有 [overlay] 段），
-        // 于是 `and_then` 直接给出 None ＝ 跟随全局模板。这正是想要的默认档。
-        // 反查模式同理（overlay 恒 None ⇒ 跟随全局），注释仍是引擎给的完整编码。
-        Some(ModeKind::Special(_)) | Some(ModeKind::RareChar) | Some(ModeKind::Reverse) => {
-            overlay.and_then(|o| pick(&o.comment_template_vertical, &o.comment_template_horizontal))
+            .filter(|m| !m.id.is_empty())
+            .map(|m| format!("mix:{}", m.id)),
+        ModeKind::Special(i) => special_schema(i).map(|id| format!("special:{id}")),
+        ModeKind::TempPinyin => Some("temp_pinyin".into()),
+        ModeKind::TempEnglish => Some("temp_english".into()),
+        ModeKind::Url => Some("url".into()),
+        ModeKind::Email => Some("email".into()),
+        ModeKind::Unicode => Some("unicode".into()),
+        ModeKind::RareChar | ModeKind::Reverse | ModeKind::AuxCode => None,
+    }
+}
+
+/// 方案类型（`[ui.comment.assign.type]` 的键）：引擎类型，拼音配了双拼布局单独成类。
+/// 读不到或不认识的类型按码表处理，每个方案告警一次。
+pub(crate) fn schema_type_of(
+    mgr: &wind_engine::EngineManager,
+    schema_id: &str,
+) -> wind_config::comment_lib::SchemaType {
+    use wind_config::comment_lib::SchemaType;
+    match mgr.schema_engine_type(schema_id).as_deref() {
+        Some("codetable") => SchemaType::CodeTable,
+        Some("pinyin") if mgr.pinyin_is_shuangpin_of(schema_id) => SchemaType::Shuangpin,
+        Some("pinyin") => SchemaType::Pinyin,
+        Some("mixed") => SchemaType::Mixed,
+        Some("english") => SchemaType::English,
+        other => {
+            static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+            if !warned.iter().any(|w| w == schema_id) {
+                warned.push(schema_id.to_string());
+                tracing::warn!("方案 {schema_id} 的引擎类型 {other:?} 不认识，注释按码表类型解析");
+            }
+            SchemaType::CodeTable
         }
-        Some(ModeKind::TempPinyin) => pick(
-            &cfg.input.temp_pinyin.comment_template_vertical,
-            &cfg.input.temp_pinyin.comment_template_horizontal,
-        ),
-        Some(ModeKind::TempEnglish) => pick(
-            &cfg.input.temp_english.comment_template_vertical,
-            &cfg.input.temp_english.comment_template_horizontal,
-        ),
-        Some(ModeKind::Url) => pick(
-            &cfg.input.url.comment_template_vertical,
-            &cfg.input.url.comment_template_horizontal,
-        ),
-        Some(ModeKind::Email) => pick(
-            &cfg.input.email.comment_template_vertical,
-            &cfg.input.email.comment_template_horizontal,
-        ),
-        Some(ModeKind::Unicode) => pick(
-            &cfg.input.unicode.comment_template_vertical,
-            &cfg.input.unicode.comment_template_horizontal,
-        ),
-        // 辅助码沿用主路径注释模板（辅助码只是筛选，注释来源仍是拼音主流程）。
-        Some(ModeKind::AuxCode) => None,
-        None => None,
     }
-}
-
-/// 方案级注释模板（`[candidate].comment_template_*`）。`None` = 本方案没意见。
-pub(crate) fn schema_template_of(
-    behavior: &wind_config::SchemaBehavior,
-    vertical: bool,
-) -> Option<&str> {
-    if vertical {
-        behavior.comment_template_vertical.as_deref()
-    } else {
-        behavior.comment_template_horizontal.as_deref()
-    }
-}
-
-/// 三层裁决：**模式级 → 方案级 → 全局**。
-///
-/// # ★ 「没意见」的语义是「跟随**下一层**」，不是「跟随全局」
-///
-/// 加了方案层之后这两者不再等价。唯一能区分本实现与旧的两层实现的格子是
-/// **「模式无意见 + 方案有意图 + 全局有值」**——旧实现给全局值，本实现给方案值。
-/// 测试 `schema_layer_wins_when_mode_absent` 钉住它。
-///
-/// 三态里的第三态（空串 = 不显示）**在每一层都成立**：`Some("")` 是一个有意见的层，
-/// 它压过下面所有层并渲染成空注释。故这里只能用 `Option::or`，不能顺手写成
-/// 「非空才算数」——那会让「本模式/本方案不要注释」变得无法表达。
-pub(crate) fn resolve_template<'a>(
-    mode: Option<&'a str>,
-    schema: Option<&'a str>,
-    global: &'a str,
-) -> &'a str {
-    mode.or(schema).unwrap_or(global)
 }
 
 // ── 各求值入口认得的变量名 ──────────────────────────────────────────────────────
@@ -1023,7 +986,7 @@ pub(crate) const EVAL_VAR_NAMES: &[&str] = &[
     "dict_all",
 ];
 
-/// [`Coordinator::eval_text_var`] 自己的分支（其余交给 [`reverse_text_var`]）。
+/// [`Coordinator::eval_text_var_ex`]（`eval_text_var` 是它的薄包装）自己的分支（其余交给 [`reverse_text_var`]）。
 pub(crate) const EVAL_TEXT_VAR_NAMES: &[&str] = &[
     "code_rev",
     "code",
@@ -1090,51 +1053,465 @@ fn joined_codes(codes: &str, sep: Option<&str>) -> VarValue {
     VarValue::joined(codes.split('/'), sep.unwrap_or("/"))
 }
 
+/// 按住 Alt 期间的别的键：这一键照常处理完再收起详细态，于是 Alt+数字上屏的是详细注释。
+///
+/// ⚠️ 声明在 `handle_key_event` 开头，理由同 `SoftKeyboardPushOnDrop`：析构时 `state` 锁已还。
+pub(crate) struct HoldOffOnDrop<'a>(pub(crate) &'a crate::coordinator::Coordinator);
+
+impl Drop for HoldOffOnDrop<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.set_comment_hold(&mut state, false);
+    }
+}
+
+impl State {
+    /// 候选窗关闭 / 被新组合替换：两份翻转一并复位（按住那份防 Alt 松开没送到时卡住）。
+    pub(crate) fn clear_comment_flips(&mut self) {
+        self.comment_session_flip = false;
+        self.comment_hold_flip = false;
+    }
+}
+
 impl crate::coordinator::Coordinator {
-    /// 当前生效的注释模板：模式级 → 方案级 → 全局，见 [`resolve_template`]。
+    /// 当前生效的注释模板串（`""` = 不显示）：按 模式 → 方案 → 方案类型 → 全局 解析当前态与排布那一格。
     ///
-    /// 借用而非返回 String——它每次按键、每页候选前调一次，没必要为此分配。
+    /// 方案层取 active，不取 `effective_data_schema`：注释模板是呈现类配置，临英 / 临拼 / mix
+    /// 的需求已由模式层表达。（注释**库**的过滤是数据类，另见 `ReverseLookup::comment_of`。）
     ///
-    /// # ★ 方案层由调用方传入，而不是在这里取
-    ///
-    /// 方案级模板住在方案文件里，只能经 `EngineManager::active_behavior()` 拿到一个临时
-    /// `Arc<SchemaBehavior>`——借用它的 `&str` 活不过本函数。调用方（`notify_ui_update`）
-    /// 在候选循环外取一次存局部变量，模板借用它。
-    ///
-    /// ⛔ **不要改成把方案段快照进 `State`**（`[overlay]` 那份是那么做的）：快照要有失效点，
-    /// 而 `schema_generation` **不随 `invalidate_schema` 递增**（设置页改 `schema_overrides`
-    /// 不 bump 代际）⇒ 用户在设置页改完方案级模板，代际没变、快照不刷新，表现正是本仓
-    /// 反复栽的「设置了不生效、重启后生效」。`behavior_cache` 则已在 `invalidate_schema`
-    /// 里被清，每次现取才是对的。
-    ///
-    /// # ★ 方案层归属取 active，不取 `effective_data_schema`
-    ///
-    /// 注释模板是**呈现类**配置，与 `[candidate].layout` 同源取 active。临英/临拼/mix 的
-    /// 注释需求**已经由模式层表达**，方案层再按 effective 解析一次就是两层说同一件事，
-    /// 且两者可以互相矛盾。（注释**库**的过滤是数据类，另见 `ReverseLookup::comment_of`。）
-    pub(crate) fn comment_template_for<'a>(
+    /// 返回 `String`：模板库在锁后，借用活不过本函数。每页候选调一次，分配可忽略。
+    pub(crate) fn comment_template_for(
         &self,
-        cfg: &'a Config,
-        state: &'a State,
-        behavior: &'a wind_config::SchemaBehavior,
+        cfg: &Config,
+        state: &State,
         vertical: bool,
-    ) -> &'a str {
-        // 注释总开关在三层之上：关就是关（空模板 ⇒ 注释、上方注释条、上屏注释都为空）。
-        if !cfg.ui.candidate.comment_enabled {
-            return "";
+    ) -> String {
+        // 注释总开关在各层之上：关就是关（注释、上方注释条、上屏注释都为空）。
+        if !cfg.ui.comment.enabled {
+            return String::new();
         }
-        resolve_template(
-            template_for(cfg, state.overlay_spec.as_ref(), state.active, vertical),
-            schema_template_of(behavior, vertical),
-            cfg.ui.candidate.comment_template(vertical),
-        )
+        let schema = self.engine_mgr.active_schema_id();
+        let mode = mode_key_of(cfg, state.active, |i| self.special_schema(i));
+        let scope = wind_config::comment_lib::CommentScope {
+            mode: mode.as_deref(),
+            schema: &schema,
+            schema_type: schema_type_of(&self.engine_mgr, &schema),
+        };
+        self.comment_lib()
+            .template_text(&scope, Self::effective_comment_state(cfg, state), vertical)
+            .to_string()
+    }
+
+    /// 注释当前态：持久态 ⊕ 本次候选窗翻转 ⊕ 按住 Alt 翻转。
+    pub(crate) fn effective_comment_state(
+        cfg: &Config,
+        state: &State,
+    ) -> wind_config::comment_lib::CommentState {
+        use wind_config::comment_lib::CommentState;
+        let persist = cfg.ui.comment.state;
+        if state.comment_session_flip == state.comment_hold_flip {
+            return persist;
+        }
+        match persist {
+            CommentState::Default => CommentState::Detail,
+            CommentState::Detail => CommentState::Default,
+        }
+    }
+
+    /// 改持久态并写回用户层 `ui.comment.state`（清掉本次翻转）；只换内存配置、不重载，随后重绘。
+    pub(crate) fn set_comment_state(
+        &self,
+        state: &mut State,
+        to: wind_config::comment_lib::CommentState,
+    ) -> anyhow::Result<()> {
+        use wind_config::comment_lib::CommentState;
+        let value = match to {
+            CommentState::Default => "default",
+            CommentState::Detail => "detail",
+        };
+        Config::set_user_string(&["ui", "comment", "state"], value)?;
+        self.refresh_config_in_memory(|c| c.ui.comment.state = to);
+        // 设了什么就看到什么：本次窗口的翻转一并作废。
+        state.comment_session_flip = false;
+        self.notify_ui_update(state);
+        Ok(())
+    }
+
+    /// 翻转「仅本次候选窗」的注释态。只重绘、不重新查询。
+    pub(crate) fn toggle_comment_session(&self, state: &mut State) {
+        state.comment_session_flip = !state.comment_session_flip;
+        if !state.candidates.is_empty() {
+            self.notify_ui_update(state);
+        }
+    }
+
+    /// 执行一个 `comment_state` 按键动词，返回要弹的状态泡文案（反映执行后的生效态）。
+    ///
+    /// 写盘失败时内存不变，错误交给调用方（按键路径 warn，命令栏返回给用户）。
+    /// 三个消费点（空闲 / 会话表 / 命令栏）共用这一处。
+    pub(crate) fn apply_comment_state_action(
+        &self,
+        state: &mut State,
+        action: wind_config::CommentStateAction,
+    ) -> anyhow::Result<&'static str> {
+        use wind_config::CommentStateAction as A;
+        match action {
+            A::Toggle => {
+                use wind_config::comment_lib::CommentState;
+                let to = match self.rt().config.ui.comment.state {
+                    CommentState::Default => CommentState::Detail,
+                    CommentState::Detail => CommentState::Default,
+                };
+                self.set_comment_state(state, to)?;
+            }
+            A::Set(to) => self.set_comment_state(state, to)?,
+            A::Session => self.toggle_comment_session(state),
+        }
+        Ok(Self::comment_state_label(Self::effective_comment_state(
+            &self.rt().config,
+            state,
+        )))
+    }
+
+    fn comment_state_label(s: wind_config::comment_lib::CommentState) -> &'static str {
+        match s {
+            wind_config::comment_lib::CommentState::Default => "注释:默认",
+            wind_config::comment_lib::CommentState::Detail => "注释:详细",
+        }
+    }
+
+    /// 命令栏 `ime.toggle("comment")` / `ime.set("comment", ...)`：`want` 为 `None` 即取反。
+    pub(crate) fn cmd_comment_state(
+        &self,
+        want: Option<wind_config::comment_lib::CommentState>,
+    ) -> anyhow::Result<()> {
+        use wind_config::CommentStateAction as A;
+        let action = want.map_or(A::Toggle, A::Set);
+        let label = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.apply_comment_state_action(&mut state, action)?
+        };
+        self.show_tip(label);
+        Ok(())
+    }
+
+    /// 失焦 / 切走输入法：Alt / Ctrl 的松开多半送不到了，判定中间态与按住翻转一并复位。
+    pub(crate) fn reset_comment_alt(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.alt_track = None;
+        state.ctrl_track = None;
+        self.set_comment_hold(&mut state, false);
+    }
+
+    /// 设「按住切换键」翻转；变了且有候选才重绘。
+    pub(crate) fn set_comment_hold(&self, state: &mut State, on: bool) {
+        if state.comment_hold_flip == on {
+            return;
+        }
+        state.comment_hold_flip = on;
+        if !state.candidates.is_empty() {
+            self.notify_ui_update(state);
+        }
+    }
+
+    /// 当前生效的切换方式：注释关了、或切换键是「无」即 `Off`。
+    fn comment_switch_mode(c: &wind_config::comment_lib::UiCommentConfig) -> SwitchMode {
+        if c.enabled && c.switch_key != wind_config::comment_lib::SwitchKey::None {
+            c.switch_mode
+        } else {
+            SwitchMode::Off
+        }
+    }
+
+    /// 执行一次切换判定出的动作。
+    fn apply_switch_effect(&self, state: &mut State, effect: SwitchEffect) {
+        use wind_config::comment_lib::CommentState;
+        match effect {
+            SwitchEffect::None => {}
+            SwitchEffect::ToggleSession => self.toggle_comment_session(state),
+            SwitchEffect::TogglePersist => {
+                let to = match self.rt().config.ui.comment.state {
+                    CommentState::Default => CommentState::Detail,
+                    CommentState::Detail => CommentState::Default,
+                };
+                if let Err(e) = self.set_comment_state(state, to) {
+                    tracing::warn!("切换键切换注释持久态写回失败: {e:#}");
+                }
+            }
+            SwitchEffect::HoldOn => self.set_comment_hold(state, true),
+            SwitchEffect::HoldOff => self.set_comment_hold(state, false),
+        }
+    }
+
+    /// 按住档下的功能键切换键：有候选时按下（含自动连发）显示另一态并吃掉，松开收起。
+    ///
+    /// 只管 `hold` 档；其余档位走会话按键表（[`wind_config::Config::effective_session_actions`]）。
+    /// 松开要平台送来：TSF / Linux 送它们吃掉过按下的那个功能键的松开，macOS 只送 F1。
+    /// 带 Ctrl / Alt / Win 的组合不认（那是宿主的快捷键）。
+    pub(crate) fn handle_comment_fn_hold(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> Option<wind_bridge::handler::KeyAction> {
+        use wind_bridge::handler::KeyAction;
+        use wind_ipc::protocol::{EVENT_KEY_DOWN, EVENT_KEY_UP, MOD_ALT, MOD_CTRL, MOD_WIN};
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        if Self::comment_switch_mode(c) != SwitchMode::Hold
+            || c.switch_key.function_vk() != Some(data.key_code)
+            || data.modifiers & (MOD_CTRL | MOD_ALT | MOD_WIN) != 0
+        {
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match data.event_type {
+            EVENT_KEY_DOWN if !state.candidates.is_empty() => {
+                self.set_comment_hold(&mut state, true);
+                Some(KeyAction::Consumed)
+            }
+            EVENT_KEY_UP => {
+                let held = state.comment_hold_flip;
+                self.set_comment_hold(&mut state, false);
+                Some(if held {
+                    KeyAction::Consumed
+                } else {
+                    KeyAction::PassThrough
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// 组字中 Alt 的按下 / 松开：按 `ui.comment.switch_mode` 切换注释态，判定见 [`crate::comment_switch`]。
+    ///
+    /// 平台协议（mac / Linux；Windows 的 TSF 不转发 Alt，走 [`Self::handle_comment_alt_hook`]）：
+    /// 只在组字中转发 Alt（`key_code` 0xA4 / 0xA5）的按下与松开，不做单击计时；
+    /// `modifiers` 带上这次按住期间按过的 Shift / Ctrl / Win 位（粘滞，按过就一直带到松开）。
+    /// 返回 `Consumed` 则平台吃掉这次事件，`PassThrough` 则放行。
+    ///
+    /// 切换键不是这一侧的 Alt（选了 Ctrl 系、或左右不符）：放行、不建 track，只把正在追踪的
+    /// 那次按住记为被打断。
+    ///
+    /// 裸 `lalt` / `ralt` 在 `key_actions` / `session_actions` 里都绑不上（两张键名表都不收），
+    /// 故这里不必给用户绑定让位。
+    pub(crate) fn handle_comment_alt(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> wind_bridge::handler::KeyAction {
+        use crate::comment_switch::{carries_other_modifier, on_alt_down, on_alt_up, on_other_key};
+        use wind_bridge::handler::KeyAction;
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        let is_down = data.event_type == wind_ipc::protocol::EVENT_KEY_DOWN;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !c.switch_key.matches_vk(data.key_code) {
+            if is_down {
+                on_other_key(&mut state.alt_track);
+            }
+            return KeyAction::PassThrough;
+        }
+        let mode = Self::comment_switch_mode(c);
+        let has_candidates = !state.candidates.is_empty();
+        let now = std::time::Instant::now();
+        let combo = carries_other_modifier(data.key_code, data.modifiers);
+        let (outcome, effect) = if is_down {
+            let r = on_alt_down(mode, has_candidates, &mut state.alt_track, now);
+            if combo {
+                on_other_key(&mut state.alt_track);
+            }
+            r
+        } else {
+            if combo {
+                on_other_key(&mut state.alt_track);
+            }
+            on_alt_up(mode, has_candidates, &mut state.alt_track, now)
+        };
+        self.apply_switch_effect(&mut state, effect);
+        // 松开就不再按住：别让按住翻转卡住（如按住期间改了档位）。
+        if !is_down {
+            self.set_comment_hold(&mut state, false);
+        }
+        match outcome {
+            SwitchOutcome::Consumed => KeyAction::Consumed,
+            SwitchOutcome::PassThrough => KeyAction::PassThrough,
+        }
+    }
+
+    /// Windows Alt 钩子投来的事件（在钩子动作消费线程执行），折算见 [`crate::comment_switch::on_hook_alt`]。
+    /// 重绘走 `notify_ui_update`，不需要按键上下文。
+    pub(crate) fn handle_comment_alt_hook(&self, ev: wind_keys::alt_tap::AltEvent) {
+        let mode = Self::comment_switch_mode(&self.rt().config.ui.comment);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let effect = crate::comment_switch::on_hook_alt(mode, !state.candidates.is_empty(), ev);
+        tracing::debug!("注释切换键（Alt 钩子）：{ev:?} → {effect:?}");
+        self.apply_switch_effect(&mut state, effect);
+    }
+
+    /// 钩子要接管的 Alt 侧（`wind_keys::alt_tap::GATE_*`），0 = 不要。只有 Windows 走钩子：
+    /// mac / Linux 的 Alt 由平台转发，走 [`Self::handle_comment_alt`]。
+    pub(crate) fn comment_alt_gate_mask(&self) -> u32 {
+        if !cfg!(windows) {
+            return 0;
+        }
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        crate::comment_switch::alt_gate_mask(c.switch_key, Self::comment_switch_mode(c))
+    }
+
+    /// 启动体检：注释切换键与中英切换键、选词键组、会话绑定撞键 → 告警（形制同
+    /// `warn_english_case_cycle_conflict`）。撞键时那些功能优先，切换键只在它们不接时生效。
+    pub(crate) fn warn_comment_switch_conflict(&self) {
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        if Self::comment_switch_mode(c) == SwitchMode::Off {
+            return;
+        }
+        let mut owners: Vec<&str> = Vec::new();
+        // 功能键走会话按键表：用户在 session_actions 里自己绑了这个键，那条优先。
+        if c.switch_key
+            .function_key_name()
+            .is_some_and(|k| rt.config.keys.session_actions.contains_key(k))
+        {
+            owners.push("会话绑定（keys.session_actions）");
+        }
+        for vk in 0xA2..=0xA5u32 {
+            if !c.switch_key.matches_vk(vk) {
+                continue;
+            }
+            for e in &rt.compiled_hotkeys.key_up {
+                if e.match_hash & 0xFFFF != vk {
+                    continue;
+                }
+                let owner = match e.action.as_str() {
+                    "toggle_mode" => "中英切换键（keys.toggle_mode_keys）",
+                    wind_config::hotkey::SESSION_ACTION => {
+                        "选词键组 / 会话绑定（keys.select_key_groups / session_actions）"
+                    }
+                    "schema_bound" => "修饰键绑定（keys.key_actions / 方案 [key_actions]）",
+                    _ => continue,
+                };
+                if !owners.contains(&owner) {
+                    owners.push(owner);
+                }
+            }
+        }
+        if owners.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            "注释切换键（ui.comment.switch_key = {:?}）同时配作 {}；那些功能优先，它们接手时本键不切换注释。\
+             要用本键切换注释：把切换键换成别的键，或把那些功能改绑到别的键",
+            c.switch_key,
+            owners.join(" / ")
+        );
+    }
+
+    /// Ctrl 单击的松开（`key_code` 0xA2 / 0xA3）：切换键是这一侧的 Ctrl 且有候选 → 切换并吃掉；
+    /// 否则 `None`，落回原语义。
+    ///
+    /// 来源两条：平台判过单击送来的松开（没有输入会话时；TSF 按 keyup 白名单转发、修饰位自带 Ctrl，
+    /// mac / Linux 无条件送、修饰位为 0），或 [`Self::handle_ctrl_raw`] 判出单击后转成的松开。
+    /// keyup 分支里排在选词 / 会话绑定 / CapsLock / 方案修饰键绑定 / 中英切换**之后**，撞键时那些功能优先。
+    pub(crate) fn handle_comment_ctrl_up(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> Option<wind_bridge::handler::KeyAction> {
+        use crate::comment_switch::{carries_other_modifier, is_ctrl_vk, on_ctrl_up};
+        if !is_ctrl_vk(data.key_code) {
+            return None;
+        }
+        let rt = self.rt();
+        let c = &rt.config.ui.comment;
+        if !c.switch_key.matches_vk(data.key_code) {
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let effect = on_ctrl_up(
+            Self::comment_switch_mode(c),
+            !state.candidates.is_empty(),
+            carries_other_modifier(data.key_code, data.modifiers),
+        );
+        if effect == SwitchEffect::None {
+            return None;
+        }
+        self.apply_switch_effect(&mut state, effect);
+        Some(wind_bridge::handler::KeyAction::Consumed)
+    }
+
+    /// 如实上报的 Ctrl 按下 / 松开（`EVENT_MOD_DOWN` / `EVENT_MOD_UP`，`key_code` 0xA2 / 0xA3）。
+    ///
+    /// 平台协议（三端一致）：按下那一刻有输入会话（组字中或候选窗开着），就把这次按下与松开原样
+    /// 送来、不吃 Ctrl，松开带上 `TOGGLE_MOD_NOT_TAP` 表示平台看见过服务端看不见的输入；否则走原
+    /// 「平台判单击、只送确认过的松开」。一次按住只走一条路。回包吃不吃平台不看。
+    ///
+    /// - 按下：建 track（[`crate::comment_switch::on_ctrl_raw_down`]）；按住档且切换键是这一侧 → 立即翻转。
+    /// - 松开：按住翻转一律收起；判出单击就构造一个原样的 `EVENT_KEY_UP` 走 keyup 分支，中英切换 /
+    ///   会话绑定 / 选词 / 方案修饰键绑定 / 注释单击的优先级与原来一字不差。
+    ///
+    /// 没人接手的一律回 `Consumed`：`PassThrough` 会让 TSF 冲掉 hold 预览、开挂起的组合，而原来
+    /// 这次按键根本不会送到服务端。
+    pub(crate) fn handle_ctrl_raw(
+        &self,
+        data: &wind_bridge::handler::KeyEventData,
+    ) -> wind_bridge::handler::KeyAction {
+        use crate::comment_switch::{
+            carries_other_modifier, ctrl_hold_effect, is_ctrl_vk, on_ctrl_raw_down, on_ctrl_raw_up,
+            on_other_key,
+        };
+        use wind_bridge::handler::KeyAction;
+        use wind_ipc::protocol::{EVENT_KEY_UP, EVENT_MOD_DOWN, TOGGLE_MOD_NOT_TAP};
+        if !is_ctrl_vk(data.key_code) {
+            return KeyAction::Consumed;
+        }
+        let is_down = data.event_type == EVENT_MOD_DOWN;
+        let now = std::time::Instant::now();
+        let combo = carries_other_modifier(data.key_code, data.modifiers);
+        let tap = {
+            let rt = self.rt();
+            let c = &rt.config.ui.comment;
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let tap = if is_down {
+                // Alt 按住期间按 Ctrl：那次 Alt 不再是单击。
+                on_other_key(&mut state.alt_track);
+                on_ctrl_raw_down(&mut state.ctrl_track, data.key_code, combo, now);
+                false
+            } else {
+                let not_tap = combo || data.toggles & TOGGLE_MOD_NOT_TAP != 0;
+                on_ctrl_raw_up(&mut state.ctrl_track, data.key_code, not_tap, now)
+            };
+            let effect = ctrl_hold_effect(
+                Self::comment_switch_mode(c),
+                c.switch_key.matches_vk(data.key_code),
+                !state.candidates.is_empty(),
+                is_down,
+            );
+            self.apply_switch_effect(&mut state, effect);
+            tap
+        };
+        tracing::debug!(
+            "Ctrl 如实上报：vk=0x{:02X} {} mods=0x{:04X} toggles=0x{:02X} → 单击={tap}",
+            data.key_code,
+            if is_down { "按下" } else { "松开" },
+            data.modifiers,
+            data.toggles
+        );
+        if !tap {
+            return KeyAction::Consumed;
+        }
+        let legacy = wind_bridge::handler::KeyEventData {
+            event_type: EVENT_KEY_UP,
+            toggles: data.toggles & !TOGGLE_MOD_NOT_TAP,
+            ..data.clone()
+        };
+        match wind_bridge::handler::MessageHandler::handle_key_event(self, &legacy) {
+            KeyAction::PassThrough => KeyAction::Consumed,
+            act => act,
+        }
     }
 
     /// overlay 反查模式（临时拼音 / 快捷输入）：码表用户借拼音反查编码的场景。
     ///
-    /// 编码来源读 `input.temp_pinyin.code_hint_source`（见 [`Self::comment_hint_source`]），
-    /// `${code_source}` 也据此视作「间接输入」。名字是旧「强制出码」时代的遗留——现在它
-    /// 只判模式，不再无视配置强制放行。
+    /// `${code_source}` 据此视作「间接输入」。名字是旧「强制出码」时代的遗留——现在它
+    /// 只判模式。
     pub(crate) fn forces_code_hint(state: &State) -> bool {
         matches!(
             state.active,
@@ -1142,38 +1519,10 @@ impl crate::coordinator::Coordinator {
         )
     }
 
-    /// 注释段求值用的编码来源档。候选窗渲染与「上屏注释」（`input.alt_commit`）共用，
-    /// 两处各算一份的话，同一条候选显示的注释与上屏的注释会不一样。
-    ///
-    /// 三份开关，模式层优先于方案层：
-    /// - 临拼 / 快捷输入读 `input.temp_pinyin.code_hint_source`（出厂 `auto`，码表用户借
-    ///   拼音反查编码的场景）——哪怕主方案是混输；
-    /// - 混输方案读 `schema.mix.pinyin_code_hint`（出厂开，开 ⇒ 只放行码表反查：混输里的
-    ///   拼音是全拼，双拼编码没意义）；
-    /// - 其余（拼音 / 双拼主方案）读 `schema.pinyin.code_hint_source`（出厂 `off`）。
-    ///
-    /// 码表用户与纯拼音用户习惯相反，所以拆开。混输曾落在最后一档，拼音出厂改 `off` 后
-    /// 混输跟着没了编码提示。
-    /// ★ 临拼那份原样生效、**可以关掉**——旧实现在这里无视配置并集式强制放行反查。
-    pub(crate) fn comment_hint_source(&self, state: &State) -> CodeHintSource {
-        if Self::forces_code_hint(state) {
-            return self.engine_mgr.temp_pinyin_code_hint_source();
-        }
-        let active = self.engine_mgr.active_schema_id();
-        if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("mixed") {
-            return if self.rt().config.schema.mix.pinyin_code_hint {
-                CodeHintSource::CodeTable
-            } else {
-                CodeHintSource::Off
-            };
-        }
-        self.engine_mgr.code_hint_source()
-    }
-
     /// 「上屏注释 / 拼音」（`input.alt_commit`，t138）要上屏的文本；空串＝这条候选没有可上屏的。
     ///
     /// - `Pinyin` / `PinyinPlain`：与注释变量 `${pinyin}` 同一算法（[`pinyin_text`]），后者再去调。
-    /// - `Comment`：当前生效的注释模板（与候选窗同一裁决：模式级 → 方案级 → 全局，排布方向
+    /// - `Comment`：当前生效的注释模板（与候选窗同一裁决与当前态，排布方向
     ///   同 `notify_ui_update`）渲染出的原文，**不做显示截断**——截断是候选窗的空间预算，
     ///   上屏半截注释没有意义。
     ///
@@ -1199,23 +1548,15 @@ impl crate::coordinator::Coordinator {
             AltCommit::PinyinPlain => strip_tones(&toned()),
             AltCommit::Comment => {
                 let rt = self.rt();
-                let behavior = self.engine_mgr.active_behavior();
                 let vertical = self.desired_orientation(state).vertical;
-                let tpl = self.comment_template_for(&rt.config, state, &behavior, vertical);
+                let tpl = self.comment_template_for(&rt.config, state, vertical);
                 let fallback = self
                     .effective_data_schema(state)
                     .unwrap_or_else(|| self.engine_mgr.active_schema_id());
                 let is_mix = matches!(state.active, Some(ModeKind::Mix(_)));
                 let dict_schema = self.comment_dict_scope(state, c, is_mix, &fallback);
-                render(tpl, 0, |name, arg| {
-                    self.eval_var(
-                        name,
-                        arg,
-                        c,
-                        &reverse,
-                        self.comment_hint_source(state),
-                        &dict_schema,
-                    )
+                render(&tpl, 0, |name, arg| {
+                    self.eval_var(name, arg, c, &reverse, &dict_schema)
                 })
             }
         }
@@ -1233,11 +1574,10 @@ impl crate::coordinator::Coordinator {
         tpl: &Template,
         max_chars: usize,
         reverse: &wind_reverse::ReverseLookup,
-        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> StyledText {
         tpl.render_whole(max_chars, &|name, arg| {
-            self.eval_var(name, arg, c, reverse, hint_source, dict_schema)
+            self.eval_var(name, arg, c, reverse, dict_schema)
         })
     }
 
@@ -1249,11 +1589,10 @@ impl crate::coordinator::Coordinator {
         tpl: &Template,
         max_chars: usize,
         reverse: &wind_reverse::ReverseLookup,
-        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> (StyledText, StyledText) {
         tpl.render_split(max_chars, &|name, arg| {
-            self.eval_var(name, arg, c, reverse, hint_source, dict_schema)
+            self.eval_var(name, arg, c, reverse, dict_schema)
         })
     }
 
@@ -1300,7 +1639,7 @@ impl crate::coordinator::Coordinator {
         // `A:` 并当作一条正常候选出现 —— 而正确行为是这条候选压根不该存在。
         let found = std::cell::Cell::new(false);
         let out = render(tpl, 0, |name, arg| {
-            let v = self.eval_text_var(name, arg, text, &reverse);
+            let v = self.eval_text_var_ex(name, arg, text, &reverse, true);
             if name != "char" && v.as_deref().is_some_and(|s| !s.is_empty()) {
                 found.set(true);
             }
@@ -1325,6 +1664,19 @@ impl crate::coordinator::Coordinator {
         text: &str,
         reverse: &wind_reverse::ReverseLookup,
     ) -> Option<VarValue> {
+        self.eval_text_var_ex(name, arg, text, reverse, false)
+    }
+
+    /// [`Self::eval_text_var`]；`include_disabled` 让 `code_rev` / `code_rev_all` 补上未启用扩展库的码
+    /// （`*` 开头）。只有命令栏的剪贴板反查（`dict.rev`）传 `true`，悬停提示等其余入口一律不带。
+    pub(crate) fn eval_text_var_ex(
+        &self,
+        name: &str,
+        arg: Option<&str>,
+        text: &str,
+        reverse: &wind_reverse::ReverseLookup,
+        include_disabled: bool,
+    ) -> Option<VarValue> {
         Some(VarValue::from(match name {
             // 索引未就绪给空串（而不是 `None`）：`None` 在渲染层专表**未知变量名**，
             // 会原样输出 `${code_rev}` 让用户看见拼写错误。空串则不计入
@@ -1335,6 +1687,12 @@ impl crate::coordinator::Coordinator {
             // ★ 没就绪时顺手派后台构建（单飞、已就绪即返回，不阻塞）：运行期格式串不在配置里，
             // `DataNeeds` 看不见它，没有别人会替它建——不派的话这条反查永远是空的。
             "code_rev" | "code" => match self.engine_mgr.codetable_reverse_hint(text) {
+                // 已启用词库里没有时，补未启用扩展库的码（`*` 开头，取最长）。
+                Some(code) if code.is_empty() && include_disabled => self
+                    .engine_mgr
+                    .disabled_dict_codes(text)
+                    .pop()
+                    .unwrap_or_default(),
                 Some(code) => code,
                 None => {
                     self.spawn_index_warm(&self.engine_mgr.primary_codetable_id(), false);
@@ -1353,12 +1711,24 @@ impl crate::coordinator::Coordinator {
             "code_rev_all" | "code_all" => {
                 let sid = self.engine_mgr.code_source_schema();
                 // 空串的理由同上面的 `code_rev`。
-                let codes = match self.engine_mgr.word_codes_display(&sid, text) {
-                    Some(codes) => codes,
+                let (codes, ready) = match self.engine_mgr.word_codes_display(&sid, text) {
+                    Some(codes) => (codes, true),
                     None => {
                         self.spawn_index_warm(&sid, false); // 理由同上
-                        String::new()
+                        (String::new(), false)
                     }
+                };
+                // 已启用词库的码之后，追加未启用扩展库的码（`*` 开头）。主索引没就绪时不追加：
+                // 只剩 `*` 码会让人误以为这个词只有未启用库里的码；与 `code_rev` 同口径。
+                let extra = if include_disabled && ready {
+                    self.engine_mgr.disabled_dict_codes(text)
+                } else {
+                    Vec::new()
+                };
+                let codes = match (codes.is_empty(), extra.is_empty()) {
+                    (_, true) => codes,
+                    (true, false) => extra.join("/"),
+                    (false, false) => format!("{codes}/{}", extra.join("/")),
                 };
                 // `word_codes_display` 固定用 `/` 连接，换分隔符只能在这里替。
                 return Some(joined_codes(&codes, arg));
@@ -1482,7 +1852,6 @@ impl crate::coordinator::Coordinator {
         arg: Option<&str>,
         c: &Candidate,
         reverse: &wind_reverse::ReverseLookup,
-        hint_source: CodeHintSource,
         dict_schema: &str,
     ) -> Option<VarValue> {
         // 判据是 `chars().count()` 而非 `len()`：扩展区汉字走代理对，按字节数会被当成词组。
@@ -1508,7 +1877,7 @@ impl crate::coordinator::Coordinator {
             // 用 `?` 的话，切到大词库方案后的头几秒里，候选右边会挂着字面的
             // `${code_rev}` 四个字符。
             "code_rev" | "code" => {
-                if hint_source.allows_reverse() && c.source == CandidateSource::Pinyin {
+                if c.source == CandidateSource::Pinyin {
                     self.engine_mgr
                         .codetable_reverse_hint(&c.text)
                         .unwrap_or_default()
@@ -1527,7 +1896,7 @@ impl crate::coordinator::Coordinator {
             // 出厂注释模板不含它 —— 三个码位会把候选行推得很宽，横排尤甚。它是给愿意
             // 用竖排、想一眼看全简码的用户的选项，不是默认。
             "code_rev_all" | "code_all" => {
-                if hint_source.allows_reverse() && c.source == CandidateSource::Pinyin {
+                if c.source == CandidateSource::Pinyin {
                     let sid = self.engine_mgr.code_source_schema();
                     let codes = self
                         .engine_mgr
@@ -1552,7 +1921,7 @@ impl crate::coordinator::Coordinator {
             // 装了双拼方案就能用。会问「这个字双拼怎么敲」的，多半正是用全拼打字、
             // 想往双拼迁移的人。
             "shuangpin" => {
-                if hint_source.allows_shuangpin() && c.source == CandidateSource::Pinyin {
+                if c.source == CandidateSource::Pinyin {
                     self.engine_mgr
                         .shuangpin_code_of(&c.code, c.boundary)
                         .unwrap_or_default()
@@ -1645,197 +2014,280 @@ fn dict_query_key(c: &Candidate) -> (&str, wind_reverse::CaseFallback) {
 #[cfg(test)]
 mod mode_template_tests {
     use super::*;
-    use wind_config::config::MixModeConfig;
 
-    /// 全局两份模板设成可辨认的值，模式级一律留空（跟随）。
-    fn base_cfg() -> Config {
-        let mut c = Config::default();
-        c.ui.candidate.comment_template_vertical = "全局竖".into();
-        c.ui.candidate.comment_template_horizontal = "全局横".into();
-        c
+    fn key(c: &Config, active: Option<ModeKind>) -> Option<String> {
+        mode_key_of(c, active, |i| Some(format!("ov{i}")))
     }
 
-    /// 未配模式级覆盖时，各模式都取全局同方向那份——含「无模式」。
     #[test]
-    fn absent_override_follows_global() {
-        let c = base_cfg();
-        for active in [
-            None,
-            Some(ModeKind::TempEnglish),
-            Some(ModeKind::TempPinyin),
-            Some(ModeKind::Url),
+    fn fixed_modes_map_to_their_keys() {
+        let c = Config::default();
+        for (active, want) in [
+            (ModeKind::TempPinyin, "temp_pinyin"),
+            (ModeKind::TempEnglish, "temp_english"),
+            (ModeKind::Url, "url"),
+            (ModeKind::Email, "email"),
+            (ModeKind::Unicode, "unicode"),
         ] {
-            assert_eq!(template_for(&c, None, active, true), None, "{active:?} 竖");
-            assert_eq!(template_for(&c, None, active, false), None, "{active:?} 横");
+            assert_eq!(key(&c, Some(active)).as_deref(), Some(want), "{active:?}");
         }
     }
 
-    /// ★★ 三态的第三态：空串 = 本模式不显示注释，**不等于**跟随全局。
-    ///
-    /// 这是 `Option<String>` 相对 `String` 的全部增量——用空串表达「跟随」的话，
-    /// 「本模式不要注释」就没法表达了，而那正是本功能最主要的用途。
+    /// 生僻字、反查、辅助码与「无模式」都没有模式层。
     #[test]
-    fn empty_override_means_no_comment_not_follow() {
-        let mut c = base_cfg();
-        c.input.temp_pinyin.comment_template_vertical = Some(String::new());
-        assert_eq!(
-            template_for(&c, None, Some(ModeKind::TempPinyin), true),
-            Some(""),
-            "空串必须原样返回（= 本模式不显示），不能退化成 None（= 跟随全局）"
-        );
-        // 同模式的另一方向未配 → 仍跟随
-        assert_eq!(
-            template_for(&c, None, Some(ModeKind::TempPinyin), false),
-            None
-        );
-    }
-
-    /// ★ 横竖两个方向各自独立三态：只覆盖竖排时，横排仍跟随全局。
-    #[test]
-    fn directions_are_independent() {
-        let mut c = base_cfg();
-        c.input.temp_english.comment_template_vertical = Some("${dict}".into());
-        assert_eq!(
-            template_for(&c, None, Some(ModeKind::TempEnglish), true),
-            Some("${dict}")
-        );
-        assert_eq!(
-            template_for(&c, None, Some(ModeKind::TempEnglish), false),
+    fn modes_without_layer() {
+        let c = Config::default();
+        for active in [
             None,
-            "只配了竖排，横排必须仍跟随全局"
-        );
+            Some(ModeKind::RareChar),
+            Some(ModeKind::Reverse),
+            Some(ModeKind::AuxCode),
+        ] {
+            assert_eq!(key(&c, active), None, "{active:?}");
+        }
     }
 
-    /// 覆盖只作用于本模式，别的模式与「无模式」不受影响。
+    /// mix 实例按 id 取键，不按下标；越界（热重载删掉了该实例）没有模式层。
     #[test]
-    fn override_is_scoped_to_its_mode() {
-        let mut c = base_cfg();
-        c.input.temp_english.comment_template_vertical = Some("${dict}".into());
-        assert_eq!(template_for(&c, None, None, true), None, "无模式不受影响");
+    fn mix_mode_key_uses_instance_id() {
+        let c = Config::default();
+        assert_eq!(c.schema.mix_modes[0].id, "quick_mix", "前置条件");
         assert_eq!(
-            template_for(&c, None, Some(ModeKind::TempPinyin), true),
-            None,
-            "别的模式不受影响"
+            key(&c, Some(ModeKind::Mix(0))).as_deref(),
+            Some("mix:quick_mix")
         );
+        assert_eq!(key(&c, Some(ModeKind::Mix(7))), None);
     }
 
-    /// mix 实例按下标各自独立（其配置仍在 `Config` 里）。
+    /// 特殊模式的键是其方案 id；查不到方案时没有模式层，不 panic。
     #[test]
-    fn instance_modes_are_per_index() {
-        let mut c = base_cfg();
-        c.schema.mix_modes = vec![
-            MixModeConfig {
-                comment_template_vertical: Some("快捷用".into()),
-                ..Default::default()
-            },
-            MixModeConfig::default(),
-        ];
+    fn special_mode_key_uses_schema_id() {
+        let c = Config::default();
         assert_eq!(
-            template_for(&c, None, Some(ModeKind::Mix(0)), true),
-            Some("快捷用")
+            key(&c, Some(ModeKind::Special(3))).as_deref(),
+            Some("special:ov3")
         );
-        assert_eq!(template_for(&c, None, Some(ModeKind::Mix(1)), true), None);
-    }
-
-    /// 特殊模式的模板来自**方案文件的 `[overlay]` 段**（经 `State::overlay_spec` 快照传入），
-    /// 不再来自 `Config`。下标只用于判「是不是 Special」，取值一律走 overlay 参数。
-    #[test]
-    fn special_mode_template_comes_from_overlay_spec() {
-        let c = base_cfg();
-        let ov = OverlaySpec {
-            comment_template_horizontal: Some("快符用".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            template_for(&c, Some(&ov), Some(ModeKind::Special(0)), false),
-            Some("快符用")
-        );
-        assert_eq!(
-            template_for(&c, Some(&ov), Some(ModeKind::Special(0)), true),
-            None,
-            "只配了横排，竖排仍跟随全局"
-        );
-        // 下标不参与取值：换个下标、同一份快照，结果不变。
-        assert_eq!(
-            template_for(&c, Some(&ov), Some(ModeKind::Special(9)), false),
-            Some("快符用")
-        );
-    }
-
-    /// 没有快照（未进入特殊模式 / 该方案无 `[overlay]` 段）回落跟随全局，不 panic。
-    /// mix 侧的下标越界（热重载删掉了该实例）同样回落。
-    #[test]
-    fn out_of_range_index_falls_back_to_follow() {
-        let c = base_cfg();
-        assert_eq!(template_for(&c, None, Some(ModeKind::Mix(7)), true), None);
-        assert_eq!(
-            template_for(&c, None, Some(ModeKind::Special(7)), true),
-            None,
-            "快照为 None 时不该 panic，跟随全局"
-        );
-    }
-
-    /// ★ 方案层**不得**影响 `template_for` 本身——它只回答「模式怎么想」。
-    ///
-    /// 与 `layout::intent_for_answers_mode_layer_only` 同一条：分层的意义在于每层各答各的。
-    /// 若图省事把方案意图折进 `template_for`，「模式没意见」与「模式没意见但方案有意见」
-    /// 就再也分不开，将来想在两者之间插一层（如运行时手动值）便无处可插。
-    #[test]
-    fn template_for_answers_mode_layer_only() {
-        let c = base_cfg();
-        // 参数表里压根没有方案层，签名本身就是这条约束的载体；这里钉住「无模式 = None」，
-        // 使「顺手在 None 分支里读方案」的改动当场变红。
-        assert_eq!(template_for(&c, None, None, true), None);
-        assert_eq!(template_for(&c, None, None, false), None);
+        assert_eq!(mode_key_of(&c, Some(ModeKind::Special(3)), |_| None), None);
     }
 }
 
 #[cfg(test)]
-mod schema_layer_tests {
-    //! 三层裁决（模式 → 方案 → 全局）的纯函数矩阵。端到端接线另见
+mod comment_scope_tests {
+    //! 协调器按作用范围解析模板：出厂 `system.comments.toml` + 用户 `[ui.comment]`。
+    //! 要真实方案文件判方案类型，用 `build_dev/data`。端到端（到 UI）另见
     //! `coordinator::mode_comment_e2e_tests`。
     use super::*;
+    use crate::coordinator::Coordinator;
+    use std::path::PathBuf;
+    use wind_config::comment_lib::{CommentCells, CommentState, SystemComments};
 
-    fn behavior(v: Option<&str>, h: Option<&str>) -> wind_config::SchemaBehavior {
-        wind_config::SchemaBehavior {
-            comment_template_vertical: v.map(str::to_string),
-            comment_template_horizontal: h.map(str::to_string),
+    fn data_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
+    }
+
+    fn has_data() -> bool {
+        let d = data_dir();
+        d.join("schemas/wubi86.schema.toml").exists() && d.join("system.comments.toml").exists()
+    }
+
+    /// 出厂模板串，按 id 取（断言不抄模板原文）。
+    fn shipped(id: &str) -> String {
+        let p =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/system.comments.toml");
+        let sys = SystemComments::parse(&std::fs::read_to_string(p).unwrap()).unwrap();
+        sys.templates
+            .into_iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("出厂无模板 {id}"))
+            .text
+    }
+
+    fn coord(active: &str, edit: impl FnOnce(&mut Config)) -> std::sync::Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.schema.active = active.into();
+        cfg.schema.available = vec!["wubi86".into(), "pinyin".into(), "shuangpin".into()];
+        edit(&mut cfg);
+        Coordinator::new_headless(cfg, Some(&data_dir()))
+    }
+
+    /// 在 `active` 模式、`st` 态下的竖排模板。
+    fn tpl(c: &Coordinator, active: Option<ModeKind>, st: CommentState) -> String {
+        c.refresh_config_in_memory(|cfg| cfg.ui.comment.state = st);
+        let mut state = c.state.lock().unwrap();
+        state.active = active;
+        c.comment_template_for(&c.rt().config, &state, true)
+    }
+
+    #[test]
+    fn temp_english_uses_mode_cell() {
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 数据");
+            return;
+        }
+        let c = coord("wubi86", |_| {});
+        let mode = Some(ModeKind::TempEnglish);
+        assert_eq!(
+            tpl(&c, mode, CommentState::Default),
+            "",
+            "出厂临英默认态 none"
+        );
+        assert_eq!(tpl(&c, mode, CommentState::Detail), shipped("en_zh"));
+    }
+
+    #[test]
+    fn wubi_detail_falls_to_codetable_type() {
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 数据");
+            return;
+        }
+        let c = coord("wubi86", |_| {});
+        assert_eq!(
+            tpl(&c, None, CommentState::Detail),
+            shipped("chaizi_pinyin")
+        );
+        assert_eq!(
+            tpl(&c, None, CommentState::Default),
+            shipped("code"),
+            "码表类型默认态跟随全局"
+        );
+    }
+
+    #[test]
+    fn shuangpin_is_own_type() {
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 数据");
+            return;
+        }
+        let only_shuangpin = |cfg: &mut Config| {
+            cfg.ui.comment.assign.by_type.insert(
+                "shuangpin".into(),
+                CommentCells {
+                    detail_vertical: Some("chaizi".into()),
+                    ..Default::default()
+                },
+            );
+        };
+        let sp = coord("shuangpin", |_| {});
+        assert_eq!(tpl(&sp, None, CommentState::Detail), shipped("pinyin_en"));
+        let sp = coord("shuangpin", only_shuangpin);
+        assert_eq!(tpl(&sp, None, CommentState::Detail), shipped("chaizi"));
+        let py = coord("pinyin", only_shuangpin);
+        assert_eq!(
+            tpl(&py, None, CommentState::Detail),
+            shipped("pinyin_en"),
+            "全拼不受 type.shuangpin 影响"
+        );
+    }
+
+    #[test]
+    fn mix_mode_cell_is_read_by_instance_id() {
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 数据");
+            return;
+        }
+        let c = coord("wubi86", |cfg| {
+            cfg.ui.comment.assign.mode.insert(
+                "mix:quick_mix".into(),
+                CommentCells {
+                    default_vertical: Some("pinyin".into()),
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(
+            tpl(&c, Some(ModeKind::Mix(0)), CommentState::Default),
+            shipped("pinyin")
+        );
+        assert_eq!(
+            tpl(&c, None, CommentState::Default),
+            shipped("code"),
+            "模式格只作用于本模式"
+        );
+    }
+
+    fn cells(v: &str) -> CommentCells {
+        CommentCells {
+            default_vertical: Some(v.into()),
+            detail_vertical: Some(v.into()),
             ..Default::default()
         }
     }
 
-    /// ★★★ 唯一能区分三层与两层实现的格子。
+    /// ★ 模式无意见时落到方案层，而不是跳过它；进模式后模式层压过方案层。
     #[test]
     fn schema_layer_wins_when_mode_absent() {
-        assert_eq!(resolve_template(None, Some("方案"), "全局"), "方案");
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 数据");
+            return;
+        }
+        let c = coord("wubi86", |cfg| {
+            cfg.ui
+                .comment
+                .assign
+                .schema
+                .insert("wubi86".into(), cells("pinyin"));
+            cfg.ui
+                .comment
+                .assign
+                .mode
+                .insert("url".into(), cells("chaizi"));
+        });
+        for st in [CommentState::Default, CommentState::Detail] {
+            assert_eq!(tpl(&c, None, st), shipped("pinyin"), "{st:?}");
+            assert_eq!(
+                tpl(&c, Some(ModeKind::Url), st),
+                shipped("chaizi"),
+                "模式层排在方案层之上：{st:?}"
+            );
+        }
+        let other = coord("pinyin", |cfg| {
+            cfg.ui
+                .comment
+                .assign
+                .schema
+                .insert("wubi86".into(), cells("pinyin"));
+        });
+        assert_eq!(
+            tpl(&other, None, CommentState::Default),
+            "",
+            "方案格只作用于本方案（拼音方案出厂默认态不显示）"
+        );
+    }
+
+    /// ★ `none` 在方案层同样是有意见的值：压过下层，渲染成空。
+    #[test]
+    fn schema_none_hides_comment() {
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 数据");
+            return;
+        }
+        let c = coord("wubi86", |cfg| {
+            cfg.ui
+                .comment
+                .assign
+                .schema
+                .insert("wubi86".into(), cells("none"));
+        });
+        assert_eq!(tpl(&c, None, CommentState::Default), "");
+        assert_eq!(tpl(&c, None, CommentState::Detail), "");
     }
 
     #[test]
-    fn mode_layer_wins_over_schema() {
-        assert_eq!(resolve_template(Some("模式"), Some("方案"), "全局"), "模式");
-    }
-
-    #[test]
-    fn global_applies_only_when_no_layer_has_opinion() {
-        assert_eq!(resolve_template(None, None, "全局"), "全局");
-    }
-
-    /// ★★ 空串在**每一层**都是「有意见」，压过下面所有层。
-    ///
-    /// 写成「非空才算数」的话，「本方案/本模式不要注释」就再也无法表达——
-    /// 而那正是这套三态最主要的用途。
-    #[test]
-    fn empty_string_is_an_opinion_at_every_layer() {
-        assert_eq!(resolve_template(None, Some(""), "全局"), "");
-        assert_eq!(resolve_template(Some(""), Some("方案"), "全局"), "");
-    }
-
-    /// 横竖各自独立三态：只覆盖竖排、横排跟随，是合法且常见的配置。
-    #[test]
-    fn schema_directions_are_independent() {
-        let b = behavior(Some("方案竖"), None);
-        assert_eq!(schema_template_of(&b, true), Some("方案竖"));
-        assert_eq!(schema_template_of(&b, false), None);
+    fn disabled_master_switch_blanks_everything() {
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 数据");
+            return;
+        }
+        let c = coord("wubi86", |cfg| cfg.ui.comment.enabled = false);
+        for active in [
+            None,
+            Some(ModeKind::TempEnglish),
+            Some(ModeKind::TempPinyin),
+        ] {
+            for st in [CommentState::Default, CommentState::Detail] {
+                assert_eq!(tpl(&c, active, st), "", "{active:?} {st:?}");
+            }
+        }
     }
 }
 
@@ -2314,6 +2766,22 @@ mod split_tests {
         );
     }
 
+    /// 字面 `\n`（旧版单行框手写的写法）与真换行等价。
+    #[test]
+    fn literal_backslash_n_is_newline() {
+        assert_eq!(
+            split(
+                "${pinyin}\\n${chaizi}",
+                &[("pinyin", "ni"), ("chaizi", "亻尔")]
+            ),
+            split(
+                "${pinyin}\n${chaizi}",
+                &[("pinyin", "ni"), ("chaizi", "亻尔")]
+            ),
+        );
+        assert_eq!(split("${a}\\nb", &[("a", "a")]), pair("a", "b"));
+    }
+
     /// ★ 先拆后 trim：下段变量为空时拼音仍在上方，而不是 `\n` 被尾部 trim 吃掉后掉到右侧。
     #[test]
     fn split_keeps_pinyin_above_when_lower_part_empty() {
@@ -2533,10 +3001,30 @@ mod eval_var_tests {
         }
     }
 
-    fn eval(co: &Coordinator, name: &str, c: &Candidate, hint: CodeHintSource) -> Option<String> {
+    fn eval(co: &Coordinator, name: &str, c: &Candidate) -> Option<String> {
         let rev = wind_reverse::ReverseLookup::default();
-        co.eval_var(name, None, c, &rev, hint, "shuangpin")
+        co.eval_var(name, None, c, &rev, "shuangpin")
             .map(|v| v.to_string())
+    }
+
+    /// 随包内置库经 merge + 解析挂上后，`${dict:en_zh}` 读到夹具里的释义。
+    #[test]
+    fn dict_var_reads_builtin() {
+        let co = coord("pinyin");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/comment_data");
+        let specs = crate::coordinator::merge_comment_dicts(&[], &co.system_comments.dicts, &[]);
+        let (paths, ids) = crate::coordinator::resolve_comment_mounts(&specs, Some(&fixture));
+        let mut rl = wind_reverse::ReverseLookup::default();
+        rl.reload_comments(&paths, None);
+        rl.set_comment_ids(&ids);
+        rl.set_named_only(&crate::coordinator::named_only_mounts(&specs, &ids));
+        let mut c = word("apple");
+        c.comment.clear();
+        assert_eq!(comment(&co, &rl, "${dict:en_zh}", &c), "n. 苹果");
+        assert_eq!(comment(&co, &rl, "${dict:zh_en}", &word("猫")), "cat");
+        // 老模板的裸 `${dict}` 不因内置库出现而变样
+        assert_eq!(comment(&co, &rl, "${dict}", &c), "");
+        assert_eq!(comment(&co, &rl, "${dict_all}", &word("猫")), "");
     }
 
     // ───────────── `${dict_all}`（论坛 t282） ─────────────
@@ -2587,7 +3075,7 @@ mod eval_var_tests {
         c: &Candidate,
         max: usize,
     ) -> String {
-        co.comment_for(c, &Template::parse(tpl), max, rl, CodeHintSource::Off, "")
+        co.comment_for(c, &Template::parse(tpl), max, rl, "")
             .as_str()
             .to_string()
     }
@@ -2626,14 +3114,7 @@ mod eval_var_tests {
         let co = coord("pinyin");
         let (dir, rl) = two_comment_libs("seprole");
         let c = word("configure");
-        let t = co.comment_for(
-            &c,
-            &Template::parse("${dict_all}"),
-            0,
-            &rl,
-            CodeHintSource::Off,
-            "",
-        );
+        let t = co.comment_for(&c, &Template::parse("${dict_all}"), 0, &rl, "");
         let sep: Vec<(u32, u32)> = t
             .spans()
             .iter()
@@ -2774,10 +3255,7 @@ mod eval_var_tests {
     #[test]
     fn shuangpin_code_under_shuangpin_schema() {
         let co = coord("shuangpin");
-        assert_eq!(
-            eval(&co, "shuangpin", &nihao(), CodeHintSource::Auto).as_deref(),
-            Some("nihc")
-        );
+        assert_eq!(eval(&co, "shuangpin", &nihao()).as_deref(), Some("nihc"));
     }
 
     /// ★★ **全拼方案下照样出双拼编码** —— 本轮放宽范围的核心。
@@ -2793,7 +3271,7 @@ mod eval_var_tests {
     fn full_pinyin_schema_still_gets_shuangpin_code() {
         let co = coord("pinyin");
         assert_eq!(
-            eval(&co, "shuangpin", &nihao(), CodeHintSource::Auto).as_deref(),
+            eval(&co, "shuangpin", &nihao()).as_deref(),
             Some("nihc"),
             "全拼方案应回退到已装的双拼方案取布局"
         );
@@ -2807,7 +3285,7 @@ mod eval_var_tests {
         cfg.schema.active = "pinyin".to_string();
         let co = Coordinator::new_headless(cfg, Some(&data_dir()));
         assert_eq!(
-            eval(&co, "shuangpin", &nihao(), CodeHintSource::Auto).as_deref(),
+            eval(&co, "shuangpin", &nihao()).as_deref(),
             Some(""),
             "没装双拼方案时应是「已知变量但为空」，不是未知变量"
         );
@@ -2823,84 +3301,42 @@ mod eval_var_tests {
         let c = nihao();
         for (old, new) in [("code", "code_rev"), ("code_all", "code_rev_all")] {
             assert_eq!(
-                eval(&co, old, &c, CodeHintSource::Auto),
-                eval(&co, new, &c, CodeHintSource::Auto),
+                eval(&co, old, &c),
+                eval(&co, new, &c),
                 "{old} 应与 {new} 等价"
             );
             assert!(
-                eval(&co, old, &c, CodeHintSource::Auto).is_some(),
+                eval(&co, old, &c).is_some(),
                 "{old} 必须是已知变量名（None 会让候选旁显示字面 ${{{old}}}）"
             );
         }
     }
 
-    /// 门控：开关关掉、或候选不是拼音来源时，三个编码变量一律为**空串**而非 None。
+    /// 门控：候选不是拼音来源时，三个编码变量一律为**空串**而非 None。
     ///
     /// 空串才会让 `${code_hint|code_rev}` 这样的回退链继续往下试；None 会中断回退并
     /// 回显变量名。
     #[test]
     fn gate_yields_empty_not_unknown() {
         let co = coord("shuangpin");
-        let c = nihao();
-        for name in ["code_rev", "code_rev_all", "shuangpin"] {
-            assert_eq!(
-                eval(&co, name, &c, CodeHintSource::Off).as_deref(),
-                Some(""),
-                "{name}：开关关掉应为空串"
-            );
-        }
-
         let codetable_cand = Candidate {
             source: CandidateSource::CodeTable,
             ..nihao()
         };
         for name in ["code_rev", "code_rev_all", "shuangpin"] {
             assert_eq!(
-                eval(&co, name, &codetable_cand, CodeHintSource::Auto).as_deref(),
+                eval(&co, name, &codetable_cand).as_deref(),
                 Some(""),
                 "{name}：非拼音来源候选应为空串"
             );
         }
     }
 
-    /// ★ 四档开关各自放行哪个变量——`code_schema` 这一列。
-    ///
-    /// 要害是 **CodeTable 档下 `code_schema` 必须为空**：用户把来源设成「只看码表反查」，
-    /// 哪怕模板里写着 `${code_schema}` 也不该冒出来。这正是「开关管允许哪些来源求值、
-    /// 模板管按什么顺序和格式摆」那句分工的可验证形态。
-    ///
-    /// （`code_rev` 那一列在这里验不了：测试环境没有码表词库，它恒空，分不清是门控关掉
-    /// 还是查不到。纯判据由 `wind-config` 侧的 `code_hint_source_gates` 钉。）
+    /// 编码来源开关已退役（设计 §13.6）：拼音来源候选的双拼编码不再受档位门控。
     #[test]
-    fn hint_source_gates_shuangpin() {
+    fn shuangpin_var_has_no_gate() {
         let co = coord("shuangpin");
-        let c = nihao();
-        for (src, expect) in [
-            (CodeHintSource::Off, ""),
-            (CodeHintSource::CodeTable, ""),
-            (CodeHintSource::Shuangpin, "nihc"),
-            (CodeHintSource::Auto, "nihc"),
-        ] {
-            assert_eq!(
-                eval(&co, "shuangpin", &c, src).as_deref(),
-                Some(expect),
-                "{src:?} 档下 code_schema"
-            );
-        }
-    }
-
-    /// `boundary == 0` 的候选不出击键码——切分不可信，猜错了显示的就是错的编码。
-    #[test]
-    fn zero_boundary_candidate_has_no_keystroke_code() {
-        let co = coord("shuangpin");
-        let c = Candidate {
-            boundary: 0,
-            ..nihao()
-        };
-        assert_eq!(
-            eval(&co, "shuangpin", &c, CodeHintSource::Auto).as_deref(),
-            Some("")
-        );
+        assert_eq!(eval(&co, "shuangpin", &nihao()).as_deref(), Some("nihc"));
     }
 
     /// ★ 两个入口的**词汇表必须一致**：注释段认得的变量名，cmdbar 反查
@@ -2945,7 +3381,7 @@ mod eval_var_tests {
             ..nihao()
         };
         assert_eq!(
-            eval(&co, "chaizi_code_all", &word, CodeHintSource::Auto).as_deref(),
+            eval(&co, "chaizi_code_all", &word).as_deref(),
             Some(""),
             "无拆字数据时应为空串（已知变量），而非 None（未知变量名）"
         );
@@ -2988,152 +3424,73 @@ mod eval_var_tests {
     #[test]
     fn unknown_name_is_none() {
         let co = coord("shuangpin");
-        assert_eq!(
-            eval(&co, "code_rev_typo", &nihao(), CodeHintSource::Auto),
-            None
-        );
+        assert_eq!(eval(&co, "code_rev_typo", &nihao()), None);
     }
 
-    /// 拼音方案 / 临时拼音两份编码来源各配一值，建一个码表常驻的协调器。
-    fn hint_coord(schema_src: &str, temp_src: &str) -> Arc<Coordinator> {
+    /// 出厂分配下当前态、横排落到的模板串。
+    fn factory_tpl(available: &[&str], active: &str, mode: Option<ModeKind>) -> String {
+        factory_tpl_with(available, active, mode, |_| {})
+    }
+
+    fn factory_tpl_with(
+        available: &[&str],
+        active: &str,
+        mode: Option<ModeKind>,
+        tweak: impl FnOnce(&mut Config),
+    ) -> String {
         let mut cfg = Config::default();
-        cfg.schema.available = vec!["pinyin".to_string(), "wubi86".to_string()];
-        cfg.schema.active = "wubi86".to_string();
-        cfg.schema.pinyin.code_hint_source = schema_src.to_string();
-        cfg.input.temp_pinyin.code_hint_source = temp_src.to_string();
-        Coordinator::new_headless(cfg, Some(&data_dir()))
-    }
-
-    fn hint_in(co: &Coordinator, active: Option<ModeKind>) -> CodeHintSource {
+        tweak(&mut cfg);
+        cfg.schema.available = available.iter().map(|s| s.to_string()).collect();
+        cfg.schema.active = active.to_string();
+        let co = Coordinator::new_headless(cfg.clone(), Some(&data_dir()));
         let st = State {
-            active,
+            active: mode,
             ..Default::default()
         };
-        co.comment_hint_source(&st)
+        co.comment_template_for(&cfg, &st, false)
     }
 
-    const ALL_SOURCES: [(&str, CodeHintSource); 4] = [
-        ("off", CodeHintSource::Off),
-        ("codetable", CodeHintSource::CodeTable),
-        ("shuangpin", CodeHintSource::Shuangpin),
-        ("auto", CodeHintSource::Auto),
-    ];
-
-    /// 临拼 / 快捷输入读 `input.temp_pinyin.code_hint_source`，原样取值、不做并集。
-    ///
-    /// 拼音方案那份刻意配成与之不同的值：两份若还串着读，这里会拿到对方的档位。
+    /// 出厂分配（设计 §13.6）：拼音方案默认不显示编码，码表跟随全局，混输给码表编码，
+    /// 临时拼音给完整回退链——哪怕当前方案是拼音；快捷输入不显示。
     #[test]
-    fn overlay_modes_follow_temp_pinyin_source() {
-        for (temp, want) in ALL_SOURCES {
-            for schema in ["off", "auto"] {
-                let co = hint_coord(schema, temp);
-                for active in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
-                    assert_eq!(
-                        hint_in(&co, active),
-                        want,
-                        "{active:?}：temp_pinyin={temp}, schema.pinyin={schema}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// 主方案（含双拼）读 `schema.pinyin.code_hint_source`，不受临拼那份影响。
-    #[test]
-    fn main_schema_follows_schema_pinyin_source() {
-        for (schema, want) in ALL_SOURCES {
-            for temp in ["off", "auto"] {
-                let co = hint_coord(schema, temp);
-                assert_eq!(
-                    hint_in(&co, None),
-                    want,
-                    "主方案：schema.pinyin={schema}, temp_pinyin={temp}"
-                );
-            }
-        }
-    }
-
-    /// ★ 行为变化：临拼配成 `off` 时反查提示**真的关掉**。
-    ///
-    /// 旧实现对临拼 / 快捷输入无视配置、并集式强制放行反查（`forcing_reverse`），
-    /// 用户关不掉；拆成独立开关后 off 必须生效，哪怕拼音方案那份开着。
-    #[test]
-    fn temp_pinyin_off_really_disables_reverse_hint() {
-        let co = hint_coord("auto", "off");
-        for active in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
-            let src = hint_in(&co, active);
-            assert!(!src.allows_reverse(), "{active:?}：临拼 off 仍放行了反查");
-            assert!(!src.allows_shuangpin(), "{active:?}：临拼 off 仍放行了双拼");
-        }
-    }
-
-    /// 出厂：拼音方案不显示编码，临拼 / 快捷输入两种都放行。
-    #[test]
-    fn factory_defaults_split_by_mode() {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["pinyin".to_string(), "wubi86".to_string()];
-        cfg.schema.active = "wubi86".to_string();
-        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
-        assert_eq!(hint_in(&co, None), CodeHintSource::Off);
+    fn factory_assignment_reproduces_retired_code_hint_defaults() {
+        assert_eq!(factory_tpl(&["pinyin", "wubi86"], "pinyin", None), "");
         assert_eq!(
-            hint_in(&co, Some(ModeKind::TempPinyin)),
-            CodeHintSource::Auto
+            factory_tpl(&["pinyin", "wubi86"], "wubi86", None),
+            "${code_hint|code_rev|shuangpin}"
         );
-        assert_eq!(hint_in(&co, Some(ModeKind::Mix(0))), CodeHintSource::Auto);
+        assert_eq!(
+            factory_tpl(&["wubi86_pinyin", "pinyin"], "wubi86_pinyin", None),
+            "${code_hint|code_rev}"
+        );
+        assert_eq!(
+            factory_tpl(&["pinyin", "wubi86"], "pinyin", Some(ModeKind::TempPinyin)),
+            "${code_hint|code_rev|shuangpin}"
+        );
+        assert_eq!(
+            factory_tpl(&["pinyin", "wubi86"], "wubi86", Some(ModeKind::Mix(0))),
+            ""
+        );
     }
 
-    /// 混输方案为活跃方案、拼音那份与混输那份各配一值的协调器。
-    fn mixed_coord(schema_src: &str, mix_hint: bool) -> Arc<Coordinator> {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
-        cfg.schema.active = "wubi86_pinyin".to_string();
-        cfg.schema.pinyin.code_hint_source = schema_src.to_string();
-        cfg.schema.mix.pinyin_code_hint = mix_hint;
-        Coordinator::new_headless(cfg, Some(&data_dir()))
-    }
-
-    /// 混输方案读 `schema.mix.pinyin_code_hint`，不受拼音方案那份影响。
-    ///
-    /// 拼音那份刻意配成与之相反的值：混输若还读拼音那份（本开关引入前的行为），这里会拿到
-    /// 对方的档位。
+    /// 用户自建的快捷输入没有自己的格，落到通配的 `mode.mix`：码表方案下也不显示。
     #[test]
-    fn mixed_schema_follows_mix_switch() {
-        for schema in ["off", "auto"] {
-            assert_eq!(
-                hint_in(&mixed_coord(schema, true), None),
-                CodeHintSource::CodeTable,
-                "混输开：schema.pinyin={schema}"
-            );
-            assert_eq!(
-                hint_in(&mixed_coord(schema, false), None),
-                CodeHintSource::Off,
-                "混输关：schema.pinyin={schema}"
-            );
-        }
-    }
-
-    /// 混输方案下进临拼 / 快捷输入，仍按临拼那份——模式层优先于方案层。
-    #[test]
-    fn overlay_modes_in_mixed_schema_follow_temp_pinyin_source() {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
-        cfg.schema.active = "wubi86_pinyin".to_string();
-        cfg.schema.mix.pinyin_code_hint = true;
-        cfg.input.temp_pinyin.code_hint_source = "off".to_string();
-        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
-        for active in [Some(ModeKind::TempPinyin), Some(ModeKind::Mix(0))] {
-            assert_eq!(hint_in(&co, active), CodeHintSource::Off, "{active:?}");
-        }
-    }
-
-    /// 出厂：拼音方案不显示编码，混输方案显示主码表反查编码。
-    #[test]
-    fn factory_mixed_schema_shows_reverse_code() {
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86_pinyin".to_string(), "pinyin".to_string()];
-        cfg.schema.active = "wubi86_pinyin".to_string();
-        let co = Coordinator::new_headless(cfg, Some(&data_dir()));
-        assert_eq!(hint_in(&co, None), CodeHintSource::CodeTable);
+    fn user_mix_mode_falls_back_to_mix_all_cell() {
+        let add_mine = |c: &mut Config| {
+            let mut m = c.schema.mix_modes[0].clone();
+            m.id = "mine".into();
+            c.schema.mix_modes.push(m);
+        };
+        let idx = Config::default().schema.mix_modes.len() as u8;
+        assert_eq!(
+            factory_tpl_with(
+                &["pinyin", "wubi86"],
+                "wubi86",
+                Some(ModeKind::Mix(idx)),
+                add_mine
+            ),
+            ""
+        );
     }
 }
 
@@ -3897,9 +4254,7 @@ mod separator_tests {
                 for (name, old) in old {
                     let bare = reverse_text_var(name, arg, text, &rl).unwrap();
                     assert_eq!(&*bare, old, "{name} {text:?} {arg:?}");
-                    let via = co
-                        .eval_var(name, arg, &cand, &rl, CodeHintSource::Off, "")
-                        .unwrap();
+                    let via = co.eval_var(name, arg, &cand, &rl, "").unwrap();
                     assert_eq!(via, bare, "{name} {text:?} {arg:?}");
                 }
             }
@@ -3909,7 +4264,7 @@ mod separator_tests {
             text: "好人".into(),
             ..Default::default()
         };
-        let t = co.comment_for(&cand, &tpl, 0, &rl, CodeHintSource::Off, "");
+        let t = co.comment_for(&cand, &tpl, 0, &rl, "");
         assert_eq!(t.as_str(), "女子／人 vbg+w");
         let seps: Vec<(&str, Option<&str>)> = pieces(&t)
             .into_iter()
@@ -4126,7 +4481,7 @@ mod role_contract_tests {
         let coordinator = include_str!("coordinator.rs");
         let mut bodies = vec![
             body_after(comment, "pub(crate) fn eval_var("),
-            body_after(comment, "pub(crate) fn eval_text_var("),
+            body_after(comment, "pub(crate) fn eval_text_var_ex("),
             body_after(comment, "pub(crate) fn reverse_text_var("),
             body_after(comment, "pub(crate) fn role_of("),
             body_after(tooltip, "pub(crate) fn char_var("),
@@ -4163,7 +4518,7 @@ mod role_contract_tests {
             (comment, "pub(crate) fn eval_var(", super::EVAL_VAR_NAMES),
             (
                 comment,
-                "pub(crate) fn eval_text_var(",
+                "pub(crate) fn eval_text_var_ex(",
                 super::EVAL_TEXT_VAR_NAMES,
             ),
             (
@@ -4254,7 +4609,10 @@ mod comment_reverse_regular_tests {
     }
 
     fn coord() -> (std::sync::Arc<Coordinator>, Cleanup) {
-        let id = format!("zz_crs_on_{}", std::process::id());
+        // 同进程里多个用例并行，夹具目录 / 缓存目录必须各用各的，否则一个用例的 Drop 会删掉另一个的。
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("zz_crs_on_{}_{n}", std::process::id());
         let dir = std::env::temp_dir().join(format!("wind_crs_{id}"));
         let _ = std::fs::remove_dir_all(&dir);
         let s = dir.join("schemas");
@@ -4303,6 +4661,34 @@ mod comment_reverse_regular_tests {
             c.engine_mgr.codetable_reverse_hint("门头沟区").as_deref(),
             Some(""),
             "未启用库不进注释反查"
+        );
+    }
+
+    /// 未启用库的 `*` 码只给剪贴板反查（`include_disabled = true`）；悬停提示等其余入口
+    /// 走 `eval_text_var`，不带。
+    #[test]
+    fn disabled_codes_only_reach_clipboard_reverse() {
+        let (c, _g) = coord();
+        c.prewarm_indexes();
+        let rl = wind_reverse::ReverseLookup::default();
+        let val = |name: &str, include: bool| {
+            c.eval_text_var_ex(name, None, "门头沟区", &rl, include)
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_default()
+        };
+        for name in ["code_rev", "code_rev_all"] {
+            assert!(
+                val(name, true).contains("*uuia"),
+                "{name} 剪贴板反查应带 * 码"
+            );
+            assert!(!val(name, false).contains("uuia"), "{name} 悬停等入口不带");
+        }
+        assert!(
+            !format!(
+                "{:?}",
+                c.eval_text_var("code_rev_all", None, "门头沟区", &rl)
+            )
+            .contains("uuia")
         );
     }
 }

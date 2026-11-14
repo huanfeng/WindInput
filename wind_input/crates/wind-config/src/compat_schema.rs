@@ -82,6 +82,8 @@ const SMART_METHODS: &[&str] = &["delete_replace", "hold_composition"];
 const CANDIDATE_POSITION_MODES: &[&str] = &["follow_caret", "fixed"];
 const NEWLINE_STYLES: &[&str] = &["keep", "cr", "lf", "crlf"];
 const PLACEHOLDER_CHARS: &[&str] = &["space", "zwsp", "blank"];
+const ASSOC_PLACEHOLDERS: &[&str] = &["space", "zwsp", "blank", "none"];
+const SYLLABLE_SEPARATORS: &[&str] = &["apostrophe", "space", "dot", "none"];
 const MULTILINE_COMMITS: &[&str] = &["commit", "paste"];
 
 /// 全部字段。顺序即界面内的展示顺序（同组内）。
@@ -310,6 +312,21 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
     // ── 输入行为 ──────────────────────────────────────────────────
     FieldMeta {
         section: "apps",
+        key: "syllable_separator",
+        kind: Kind::Enum,
+        group: "behavior",
+        label: "拼音音节分隔符",
+        summary: "拼音编码里音节之间显示的符号：单引号 '、空格、间隔号 · 或不显示。",
+        problem: "有的软件（如 Unreal Engine 的资产命名框）不接受单引号，编码里带 ' 会被拒绝或弹错。\
+                  选「不显示」即可，只改显示，不影响输入和切分。不设置则跟随全局设置。",
+        hosts: &[],
+        options: SYLLABLE_SEPARATORS,
+        depends_on: None,
+        protocol: false,
+        advanced: false,
+    },
+    FieldMeta {
+        section: "apps",
         key: "auto_pair",
         kind: Kind::TriBool,
         group: "behavior",
@@ -318,6 +335,21 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
         problem: "表格类软件（Excel、WPS 表格）在输入状态下把方向键当作「确认单元格并移动」，配对后无法把光标退回两个符号之间，\
                   目前只能对它们关掉自动配对。不设置则沿用全局设置。",
         hosts: &["EXCEL.EXE", "et.exe"],
+        options: &[],
+        depends_on: None,
+        protocol: false,
+        advanced: false,
+    },
+    FieldMeta {
+        section: "apps",
+        key: "auto_spacing",
+        kind: Kind::TriBool,
+        group: "behavior",
+        label: "中英间自动空格",
+        summary: "汉字与英文（以及开启后的数字）之间是否自动补空格。",
+        problem: "Markdown 编辑器的排版插件、终端或代码编辑器自己会处理空格，或者根本不需要空格，\
+                  叠加后会出现双空格：只对这个软件关掉即可。不设置则跟随全局设置。",
+        hosts: &[],
         options: &[],
         depends_on: None,
         protocol: false,
@@ -408,12 +440,13 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
         group: "host",
         label: "宿主渲染模式",
         summary: "候选窗由输入法服务绘制，再交给软件内的组件显示。",
-        problem: "Win11 开始菜单、任务栏搜索这类受限进程，普通候选窗盖不住它们的窗口层级。改由服务渲染后经共享内存转交，\
+        problem: "Win11 开始菜单、任务栏搜索、表情面板这类受限进程，普通候选窗盖不住它们的窗口层级。改由服务渲染后经共享内存转交，\
                   才能正常显示。",
         hosts: &[
             "SearchHost.exe",
             "searchapp.exe",
             "startmenuexperiencehost.exe",
+            "textinputhost.exe",
         ],
         options: &[],
         depends_on: None,
@@ -422,17 +455,20 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
     },
     FieldMeta {
         section: "apps",
-        key: "ignore_host_ime_close",
+        key: "ignore_host_ime_switch",
         kind: Kind::TriBool,
         group: "host",
-        label: "宿主关闭输入法",
-        summary: "软件自己要求关闭输入法时忽略它（按住 Ctrl 的系统热键仍然放行）。",
-        problem: "部分 WinForms / WPF 编写的软件（如某些工具箱、游戏平台客户端）在你点一下按钮后会把输入法整体关掉，你就被切成了英文，回到文本框还不一定恢复。\
-                  开启后忽略这类关闭请求。⚠ 不能全局启用：有的软件（如 gvim）依赖这个状态来保存和恢复。",
+        label: "软件切换中英",
+        summary: "软件自己要求切到中文或英文时是否忽略它，开和关两个方向都算（按住 Ctrl 的系统热键 Ctrl+空格 仍然放行）。",
+        problem: "有的软件会自作主张切换中英：部分 WinForms / WPF 编写的软件（如某些工具箱、游戏平台客户端）在你点一下按钮后把输入法切成英文，\
+                  回到文本框还不一定恢复；也有软件在内部切换焦点时把你切成中文，英文状态下打的第一个键被吃掉。\
+                  选「忽略」后这类请求不再采纳，中英状态保持不变；不设置则跟随全局设置（出厂不忽略）。\
+                  ⚠ 不建议全局开启：有的软件（如 gvim）依赖这个状态来保存和恢复中英，全局忽略会让它们失灵；\
+                  按应用锁定中英的外部工具（如 KBLSwitch、AutoHotkey 脚本）也会被一并忽略。最好只对出问题的软件开启。",
         hosts: &[],
         options: &[],
         depends_on: None,
-        protocol: true,
+        protocol: false,
         advanced: true,
     },
     FieldMeta {
@@ -466,6 +502,23 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
         options: PLACEHOLDER_CHARS,
         depends_on: None,
         protocol: true,
+        advanced: true,
+    },
+    FieldMeta {
+        section: "apps",
+        key: "assoc_placeholder",
+        kind: Kind::Enum,
+        group: "host",
+        label: "联想占位字符",
+        summary: "联想候选出现时，输入区里临时放的那个字符：空格、零宽空格或盲文空白。",
+        problem: "联想时没有编码，输入法仍要在软件里挂一个占位字符来接收按键。\
+                  有的软件会对这个字符做特殊处理（如把空格当成输入或触发动作），可以只给联想改用别的字符。\
+                  选「不显示」则宿主里什么都不放，兼容性最好，\
+                  但候选窗位置会沿用上一次的光标位置，部分软件可能偏位。不设置则跟随「占位字符」。",
+        hosts: &[],
+        options: ASSOC_PLACEHOLDERS,
+        depends_on: None,
+        protocol: false,
         advanced: true,
     },
     FieldMeta {
@@ -559,6 +612,9 @@ pub const OPTION_LABELS: &[(&str, &str)] = &[
     ("space", "空格"),
     ("zwsp", "零宽空格"),
     ("blank", "盲文空白（有宽度、不算空格）"),
+    ("apostrophe", "单引号 ( ' )"),
+    ("dot", "间隔号 ( · )"),
+    ("none", "不显示"),
     ("commit", "直接上屏"),
     ("paste", "粘贴上屏"),
 ];
@@ -570,10 +626,11 @@ const FIELD_OPTION_LABELS: &[(&str, &str, &str)] =
     &[("status_position_mode", "fixed", "固定（取当前位置）")];
 
 /// 三态开关三档（跟随 / 真 / 假）的显示名，默认「跟随全局 / 开 / 关」；个别字段的菜单用词不同
-/// （例如「宿主关闭输入法」是「忽略 / 采纳」，与字段的 true/false 语义方向一致但说法不同）。
+/// （例如「软件切换中英」是「忽略 / 采纳」，与字段的 true/false 语义方向一致但说法不同）。
 const TRI_LABELS: &[(&str, [&str; 3])] = &[
     ("auto_pair", ["跟随全局", "启用", "禁用"]),
-    ("ignore_host_ime_close", ["跟随内置规则", "忽略", "采纳"]),
+    ("auto_spacing", ["跟随全局", "启用", "禁用"]),
+    ("ignore_host_ime_switch", ["跟随全局", "忽略", "采纳"]),
 ];
 
 /// 三态开关的三档显示名（下标 0 = 跟随，1 = true，2 = false）。

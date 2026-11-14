@@ -290,4 +290,89 @@ uint32_t ToggleTapDetector::onRelease(uint32_t keysym, uint64_t nowMs)
     return v;
 }
 
+uint32_t CtrlRaw::onPress(uint32_t keysym, bool composing)
+{
+    uint32_t v = 0;
+    if (keysym == ks::Control_L) {
+        v = vk::LCONTROL;
+    } else if (keysym == ks::Control_R) {
+        v = vk::RCONTROL;
+    }
+    if (v != 0 && (v == vk_ || v == legacyVK_)) {
+        return 0; // 同一次按住的自动重复
+    }
+    if (vk_ != 0) {
+        dirty_ = true; // 别的键（含另一侧 Ctrl）：这次不再是单击
+    }
+    if (v == 0) {
+        return 0;
+    }
+    if (!composing) {
+        legacyVK_ = v;
+        return 0;
+    }
+    vk_ = v;
+    dirty_ = false;
+    return v;
+}
+
+uint32_t CtrlRaw::onRelease(uint32_t keysym, bool* notTap)
+{
+    uint32_t v = 0;
+    if (keysym == ks::Control_L) {
+        v = vk::LCONTROL;
+    } else if (keysym == ks::Control_R) {
+        v = vk::RCONTROL;
+    }
+    if (v == 0) {
+        return 0;
+    }
+    if (v == legacyVK_) {
+        legacyVK_ = 0;
+    }
+    if (v != vk_) {
+        return 0;
+    }
+    *notTap = dirty_;
+    vk_ = 0;
+    dirty_ = false;
+    return v;
+}
+
+uint32_t altVK(uint32_t keysym)
+{
+    switch (keysym) {
+    case ks::Alt_L: return vk::LMENU;
+    case ks::Alt_R: return vk::RMENU;
+    default: return 0;
+    }
+}
+
+void AltHold::onAltDown(bool forwarded)
+{
+    if (!active_) {
+        active_ = true;
+        sticky_ = 0;
+        forwarded_ = false;
+    }
+    forwarded_ = forwarded_ || forwarded;
+}
+
+void AltHold::noteKey(uint32_t keysym, uint32_t states)
+{
+    if (!active_) {
+        return;
+    }
+    sticky_ |= statesToModifiers(states) & ~KEYMOD_ALT;
+    switch (keysym) {
+    case ks::Shift_L:
+    case ks::Shift_R: sticky_ |= KEYMOD_SHIFT; break;
+    case ks::Control_L:
+    case ks::Control_R: sticky_ |= KEYMOD_CTRL; break;
+    case ks::Super_L:
+    case ks::Super_R: sticky_ |= KEYMOD_WIN; break;
+    default: break;
+    }
+}
+
 } // namespace windlinux

@@ -48,6 +48,10 @@ fn toggle_bits_agree_with_cpp_header() {
             "TOGGLE_PASSTHROUGH_KEY",
             wind_ipc::protocol::TOGGLE_PASSTHROUGH_KEY,
         ),
+        ("TOGGLE_MOD_NOT_TAP", wind_ipc::protocol::TOGGLE_MOD_NOT_TAP),
+        // 事件类型同理：新类型对不上 = Ctrl 如实上报整条静默失效。
+        ("KEY_EVENT_MOD_DOWN", wind_ipc::protocol::EVENT_MOD_DOWN),
+        ("KEY_EVENT_MOD_UP", wind_ipc::protocol::EVENT_MOD_UP),
     ];
     for (name, rust_val) in cases {
         let cpp_val = constexpr_u8(&src, name)
@@ -73,4 +77,49 @@ fn passthrough_bit_does_not_collide_with_lock_bits() {
         let v = constexpr_u8(&src, lock).unwrap_or_else(|| panic!("缺 {lock}"));
         assert_eq!(pass & v, 0, "TOGGLE_PASSTHROUGH_KEY 与 {lock} 位重叠");
     }
+}
+
+/// 「不算单击」位同样不得撞锁定态位与透传位。
+#[test]
+fn mod_not_tap_bit_does_not_collide() {
+    let Some(src) = header() else {
+        eprintln!("跳过 toggles 位互斥检查：找不到 BinaryProtocol.h");
+        return;
+    };
+    let bit = constexpr_u8(&src, "TOGGLE_MOD_NOT_TAP").expect("缺 TOGGLE_MOD_NOT_TAP");
+    for other in [
+        "TOGGLE_CAPSLOCK",
+        "TOGGLE_NUMLOCK",
+        "TOGGLE_SCROLLLOCK",
+        "TOGGLE_PASSTHROUGH_KEY",
+    ] {
+        let v = constexpr_u8(&src, other).unwrap_or_else(|| panic!("缺 {other}"));
+        assert_eq!(bit & v, 0, "TOGGLE_MOD_NOT_TAP 与 {other} 位重叠");
+    }
+}
+
+/// `KeyPayload` 的大小两端一致（C++ `static_assert(sizeof(KeyPayload) == N)`）。
+///
+/// 服务端对短包宽容（18 字节旧包读出 `seq_char = 0`），所以 C++ 少发两字节**不会报错**，
+/// 只会让中英间补空格、英文后智能标点在 Windows 上静默不触发。
+#[test]
+fn key_payload_size_agrees_with_cpp_header() {
+    let Some(src) = header() else {
+        eprintln!("跳过 KeyPayload 大小对账：找不到 BinaryProtocol.h");
+        return;
+    };
+    let line = src
+        .lines()
+        .find(|l| l.contains("static_assert(sizeof(KeyPayload)"))
+        .expect("BinaryProtocol.h 里找不到 KeyPayload 的 static_assert");
+    let n: usize = line
+        .split("==")
+        .nth(1)
+        .and_then(|r| {
+            r.split(|c: char| !c.is_ascii_digit())
+                .find(|t| !t.is_empty())
+        })
+        .and_then(|t| t.parse().ok())
+        .expect("static_assert 里抠不到字节数");
+    assert_eq!(n, wind_ipc::protocol::KeyPayload::SIZE);
 }

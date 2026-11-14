@@ -112,6 +112,16 @@ int main()
     SYNC("OVERLAY_ANCHOR_BOTTOM_CENTER", windlinux::OVERLAY_ANCHOR_BOTTOM_CENTER);
     SYNC("FLAG_SOFTWARE_SHADOW", windlinux::FRAME_FLAG_SOFTWARE_SHADOW);
     SYNC("FLAG_ABSOLUTE_POS", windlinux::FRAME_FLAG_ABSOLUTE_POS);
+    SYNC("FLAG_ANIM_FRAME", windlinux::FRAME_FLAG_ANIM_FRAME);
+    SYNC("CMD_CANDIDATE_SKIN", windlinux::CMD_CANDIDATE_SKIN);
+    SYNC("SKIN_FLAG_ACTIVE", windlinux::SKIN_FLAG_ACTIVE);
+    SYNC("SKIN_FLAG_MASK", windlinux::SKIN_FLAG_MASK);
+    SYNC("SKIN_HIT_DRAG", windlinux::SKIN_HIT_DRAG);
+    SYNC("SKIN_HIT_BLOCK", windlinux::SKIN_HIT_BLOCK);
+    SYNC("SKIN_HIT_PASS", windlinux::SKIN_HIT_PASS);
+    SYNC("SKIN_DECOR_UNDER", windlinux::SKIN_DECOR_UNDER);
+    SYNC("SKIN_DECOR_SPLIT", windlinux::SKIN_DECOR_SPLIT);
+    SYNC("OVERLAY_KIND_DECOR", windlinux::OVERLAY_KIND_DECOR);
 
     CASE("addon 用到的 BinaryProtocol.h 常量也与 protocol.rs 一致（那份头同样是手抄镜像）");
     SYNC("CMD_KEY_EVENT", CMD_KEY_EVENT);
@@ -152,8 +162,13 @@ int main()
     CHECK_EQ(rustStr("POS_SOFTKEYBOARD"), std::string(windlinux::EXT_KIND_POS_SOFTKEYBOARD));
     CHECK_EQ(rustStr("HOST_FULLSCREEN"), std::string(windlinux::EXT_KIND_HOST_FULLSCREEN));
     CHECK_EQ(rustStr("HOST_DISPLAY"), std::string(windlinux::EXT_KIND_HOST_DISPLAY));
+    CHECK_EQ(rustStr("HOST_REDUCE_MOTION"), std::string(windlinux::EXT_KIND_HOST_REDUCE_MOTION));
+    CHECK_EQ(rustStr("SKIN_DECOR_CLICK"), std::string(windlinux::EXT_KIND_SKIN_DECOR_CLICK));
     CHECK_EQ(rustStr("POS_STATUS_TIP_QUERY"),
              std::string(windlinux::EXT_KIND_POS_STATUS_TIP_QUERY));
+    CHECK_EQ(rustStr("POS_CANDIDATE"), std::string(windlinux::EXT_KIND_POS_CANDIDATE));
+    CHECK_EQ(rustStr("POS_CANDIDATE_QUERY"),
+             std::string(windlinux::EXT_KIND_POS_CANDIDATE_QUERY));
 
     CASE("menu.open 的非候选 target（有符号）与 protocol.rs `menu_target` 一致");
     SYNC("MENU_TARGET_MAIN", windlinux::MENU_TARGET_MAIN);

@@ -60,6 +60,8 @@ struct ServiceResponse
     bool restartComposition = false; // 提交后需重启编排（嵌入/非嵌入模式统一，非嵌入时 newComposition 为空走占位符路径）
     // 本次提交要替换掉 hold 预览态里待定的中文符号（智能符号 press2），而非追加在它后面。
     bool replacingHeld = false;
+    // 上屏后处于无占位的联想会话（COMMIT_FLAG_ASSOC_SESSION）：不重启组合，但要同步记会话。
+    bool assocSession = false;
 
     // For InsertTextWithCursor
     int cursorOffset = 0;
@@ -151,8 +153,10 @@ public:
     // Send key event to Go Service (binary protocol)
     // Uses state machine snapshot for modifiers/toggles
     // prevChar: character before caret from ITfTextEditSink cache (0 if unavailable)
+    // seqChar: last char of the IME's own input sequence (InputSequenceChar.h, 0 if unknown)
     BOOL SendKeyEvent(uint32_t keyCode, uint32_t scanCode, uint32_t modifiers, uint8_t eventType,
-                      uint8_t toggles = 0, uint16_t eventSeq = 0, uint16_t prevChar = 0);
+                      uint8_t toggles = 0, uint16_t eventSeq = 0, uint16_t prevChar = 0,
+                      uint16_t seqChar = 0);
 
     // Send commit request (barrier mechanism for Space/Enter/number selection)
     // Returns TRUE if request was sent successfully
@@ -222,6 +226,10 @@ public:
     // happens without a new OnSetFocus (SPA navigating into a password field in-place).
     BOOL SendInputStateReport(uint32_t pid, bool disabled, uint8_t reason, uint64_t inputScopeMask);
 
+    // Send observed key (async, fire-and-forget): a user keydown passed straight to the host,
+    // reported for extensions only (CONFIG_KEY_EXTENSION_KEY_OBSERVE). Key content is never logged.
+    BOOL SendKeyObserved(uint32_t keyCode, uint32_t modifiers);
+
     // Send diagnostics snapshot (async, fire-and-forget): focus window chain + foreground
     // window + TSF context instance ids. Header 后接三段 `len u16 LE + UTF-8` 类名。
     // 仅在 core 经 CONFIG_KEY_DIAG_SNAPSHOT 推开采集后才会被调用（调用方门控）。
@@ -255,8 +263,8 @@ public:
     // System mode switch (Ctrl+Space): sync request to Go with target mode
     // Go will check CommitOnSwitch and return commitText if needed
     // source 只进服务端日志：让「宿主写 compartment」与「按键兜底」在服务端日志里可分辨。
-    // ctrlHeld 是判据不是日志：服务端的 ignore_host_ime_close 靠它放行 Ctrl+Space
-    // （系统热键与宿主关 IME 走同一条 compartment 通路，不交代就分不出）。
+    // ctrlHeld 是判据不是日志：服务端的 ignore_host_ime_switch 靠它放行 Ctrl+Space
+    // （系统热键与宿主切中英走同一条 compartment 通路，不交代就分不出）。
     BOOL SendSystemModeSwitch(bool chineseMode, ModeSwitchSource source, bool ctrlHeld,
                               ServiceResponse& response);
 

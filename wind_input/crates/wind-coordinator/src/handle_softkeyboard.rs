@@ -46,7 +46,7 @@ use std::sync::atomic::Ordering;
 
 use tracing::{debug, warn};
 use wind_bridge::handler::{KeyAction, KeyEventData};
-use wind_ipc::protocol::{MOD_SHIFT, MOD_SHORTCUT};
+use wind_ipc::protocol::{FocusLostReason, MOD_SHIFT, MOD_SHORTCUT};
 use wind_keys::keymap;
 
 use wind_ui_types::{SoftKeyCap, UiCommand, slot_layer};
@@ -81,6 +81,17 @@ fn vk_to_slot() -> &'static HashMap<u32, &'static str> {
         }
         m
     })
+}
+
+/// 送进软键盘关闭判据的焦点信号，见 [`Coordinator::softkeyboard_should_close_on`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SoftKbFocusSignal {
+    /// 某宿主获得焦点；`pid` 取自 `client_token >> 32`，0 = 取不到。
+    Gained { pid: u32 },
+    /// 失焦，按 reason 分档（同 [`FocusLostReason`]）。
+    Lost(FocusLostReason),
+    /// 切走了本输入法。
+    ImeDeactivated,
 }
 
 impl Coordinator {
@@ -293,12 +304,20 @@ impl Coordinator {
         if let Some(id) = page {
             self.softkeyboard_goto(id);
         }
+        // 与关闭处的复位成对：UI 事件线程的钉住切换可能夹在「判开着」与关闭之间，
+        // 把已关闭的面板翻成钉住，这里兜底保证每次打开都从未钉住开始。
+        self.softkeyboard_pinned.store(false, Ordering::Relaxed);
         self.softkeyboard_active.store(true, Ordering::Relaxed);
         self.softkeyboard_dirty.store(true, Ordering::Relaxed);
         *self
             .softkeyboard_opened_at
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        // 记下它服务的宿主进程（活动 token 高 32 位即 pid，同 `is_background_sender`）。
+        self.softkeyboard_host_pid.store(
+            (self.push_server.active_token() >> 32) as u32,
+            Ordering::Relaxed,
+        );
         debug!(
             "softkeyboard: opened at page {} ({})",
             self.softkeyboard_page_idx(),
@@ -313,11 +332,49 @@ impl Coordinator {
     /// 保留当前面下标：再开时停在同一面，符合「面板是把工具，放下再拿起来还是刚才那把」。
     pub(crate) fn close_softkeyboard(&self) -> KeyAction {
         if self.softkeyboard_active.swap(false, Ordering::Relaxed) {
+            // 钉住只对本次打开有效：UI 侧 `hide` 自己复位按钮，这里只复位真相。
+            self.softkeyboard_pinned.store(false, Ordering::Relaxed);
             self.softkeyboard_dirty.store(true, Ordering::Relaxed);
             debug!("softkeyboard: closed");
             let _ = self.ui_tx.send(UiCommand::HideSoftKeyboard);
         }
         KeyAction::Consumed
+    }
+
+    /// 开关「钉住」，返回切换后的状态；面板没开时不动、返回 `false`。
+    ///
+    /// 钉住 = 焦点怎么变都不自动关闭（Esc / 关闭按钮 / 工具栏仍可关）。
+    ///
+    /// ★ **这是钉住的唯一入口**：面板按钮（`UiEvent::SoftKeyboardPin`）经此处，将来要给
+    /// 钉住绑快捷键（热键 / 面板内按键）也应只调它，不要再各写一份翻转逻辑。
+    pub(crate) fn toggle_softkeyboard_pin(&self) -> bool {
+        if !self.softkeyboard_is_open() {
+            return false;
+        }
+        let pinned = !self.softkeyboard_pinned.fetch_xor(true, Ordering::Relaxed);
+        debug!("softkeyboard: pinned={pinned}");
+        let _ = self.ui_tx.send(UiCommand::SoftKeyboardPinned(pinned));
+        pinned
+    }
+
+    /// 焦点事件到达时，面板是否该关。**纯判据**，不碰状态，便于单测。
+    ///
+    /// 「焦点变化」里绝大多数是同宿主内的噪声：Excel 退出单元格是 `CtxLost` /
+    /// `NoEditCtx`，点到下一格是同进程的 `focus_gained`，Excel 同一 DocMgr 6ms 抖动
+    /// 一次也各发一条。这些都不代表用户不再需要面板——连续录入正是它的用途。
+    /// 只有两类才算离开：
+    ///
+    /// - 整个应用失去前台（`Thread`）或切走本输入法（`ImeDeactivated`）；
+    /// - 焦点落到**另一个宿主进程**（`Gained` 的 pid 与开启时记的不同）。
+    ///
+    /// `host_pid == 0`（开启时无活动宿主）或事件 pid 为 0（取不到）时保守地**不关**：
+    /// 误关会打断录入，误留只是多一个面板，用户可 Esc / 点关闭按钮收掉。
+    pub(crate) fn softkeyboard_should_close_on(signal: SoftKbFocusSignal, host_pid: u32) -> bool {
+        match signal {
+            SoftKbFocusSignal::Lost(reason) => reason.clears_ime_active(),
+            SoftKbFocusSignal::ImeDeactivated => true,
+            SoftKbFocusSignal::Gained { pid } => host_pid != 0 && pid != 0 && pid != host_pid,
+        }
     }
 
     /// 焦点切换时关闭。
@@ -326,10 +383,34 @@ impl Coordinator {
     /// 「什么算失焦」那套判定，不是「失焦后做什么」的动作——两者分不清就会写成
     /// 「切回应用软键盘自己弹出来」。
     ///
+    /// 「什么算离开」见 [`Self::softkeyboard_should_close_on`]：同宿主内的焦点抖动不关。
+    ///
     /// ★ 这条行为完全依赖面板不抢焦点（`WS_EX_NOACTIVATE`）：面板一旦可激活，
     /// 用户点它上面任何一个键都是在改变焦点，它会把自己关掉。
-    pub(crate) fn close_softkeyboard_on_focus_change(&self, why: &str) {
+    pub(crate) fn close_softkeyboard_on_focus_change(&self, signal: SoftKbFocusSignal) {
         if !self.softkeyboard_is_open() {
+            return;
+        }
+        let host_pid = self.softkeyboard_host_pid.load(Ordering::Relaxed);
+        // 宿主跟着最近一次获焦的进程走：钉住期间用户在别的应用里继续用，之后取消钉住时，
+        // 判据要拿「现在这个应用」当宿主，否则在新应用里第一次换焦点就把面板关了。
+        // 宿主未知（0）时同理补记，否则同宿主判据此后永不起作用。
+        if let SoftKbFocusSignal::Gained { pid } = signal
+            && pid != 0
+            && (host_pid == 0 || self.softkeyboard_pinned.load(Ordering::Relaxed))
+        {
+            self.softkeyboard_host_pid.store(pid, Ordering::Relaxed);
+            if host_pid == 0 {
+                return;
+            }
+        }
+        if self.softkeyboard_pinned.load(Ordering::Relaxed) {
+            debug!("softkeyboard: 已钉住，忽略焦点事件 {signal:?}");
+            return;
+        }
+        let host_pid = self.softkeyboard_host_pid.load(Ordering::Relaxed);
+        if !Self::softkeyboard_should_close_on(signal, host_pid) {
+            debug!("softkeyboard: 焦点事件 {signal:?}（宿主 pid={host_pid}）不算离开，保留");
             return;
         }
         // 守卫期：跨宿主切换时旧宿主的 focus_lost 实测晚约 100ms 到达，而「从工具栏图标
@@ -342,12 +423,12 @@ impl Coordinator {
             && at.elapsed() < crate::handle_menu::MENU_FOCUS_GUARD
         {
             debug!(
-                "softkeyboard: 焦点事件({why})距打开 {:?} < 守卫期，忽略",
+                "softkeyboard: 焦点事件({signal:?})距打开 {:?} < 守卫期，忽略",
                 at.elapsed()
             );
             return;
         }
-        debug!("softkeyboard: closed by focus change ({why})");
+        debug!("softkeyboard: closed by focus change ({signal:?})");
         self.close_softkeyboard();
         self.after_softkeyboard_change();
     }
@@ -598,7 +679,7 @@ impl Coordinator {
             "softkeyboard: 点击 {slot}{} -> {out:?}",
             if shift { "+shift" } else { "" }
         );
-        self.push_commit_text(&out);
+        self.push_commit_text_from(crate::session_exit::ActionOrigin::SoftKeyboardClick, &out);
     }
 
     /// 面板上点了标签行 / 面名键。

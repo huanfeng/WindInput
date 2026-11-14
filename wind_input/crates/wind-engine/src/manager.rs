@@ -15,6 +15,10 @@ use crate::engine::{BoundaryResolution, ConvertOptions, ConvertResult, Engine, E
 use crate::freq_rerank::ProtectPolicy;
 use crate::pinyin::{Config as PinyinConfig, PinyinEngine};
 pub use dict_stats::{DictStatsLayer, SystemDictStats};
+pub use dict_view::{
+    DictEntriesPage, DictEntryRow, DictHeader, DictTableInfo, ENTRIES_PAGE_MAX, EntryMatch,
+    EntryQuery, EntrySort,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -43,6 +47,10 @@ pub const PINYIN_DATA_SCHEMA: &str = "pinyin";
 /// 分词索引随用户词库规模增长，那台机器 18 万条）。
 pub const ENGLISH_SCHEMA: &str = "english";
 
+/// 英文方案按屏蔽词多取候选的上限（见 `EngineManager::convert_unblocked`）：屏蔽集是用户一条条
+/// 右键删出来的，同一前缀下几十条已是极端，再多就不值得为补满一页而放大查询。
+const ENGLISH_BLOCK_EXTRA_CAP: usize = 64;
+
 /// 英文词频名次表（相对 `schemas/`）：给英文词库里没写权重的词条按名次赋权，
 /// 见 `wind_dict::freq_rank` 与 [`EngineManager::load_table_dict`]。
 const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
@@ -52,10 +60,6 @@ const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
 /// 独立成常量而非各处写字面量：设置页要显示「当前选的是哪个」，那个判断与引擎实际
 /// 加载哪份布局必须同源，否则会出现「设置页显示自然码、打起来是小鹤」。
 pub const DEFAULT_SHUANGPIN_LAYOUT: &str = "xiaohe";
-
-/// 取拼音配置时是否套 `[mobile.*]` 覆盖（当前只有语法模型，见 `Config::pinyin_effective`）。
-/// 与协调器 `use_mobile_overrides` 同一判据：Android 构建即移动端。
-const MOBILE: bool = cfg!(target_os = "android");
 
 /// 码表词频应用策略（见 docs/redesign/frequency.md §3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +444,18 @@ struct LoadedEngine {
     last_used: std::sync::atomic::AtomicU64,
 }
 
+thread_local! {
+    /// 本线程调用 `read_schema_in`（读方案文件）的次数，见 [`schema_reads_on_current_thread`]。
+    static SCHEMA_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 当前线程累计读了几次方案文件。测试用它钉「输入流程零读盘」：预热后在同一线程上打字，
+/// 计数不应再变（按线程计，并行测试互不干扰）。
+#[doc(hidden)]
+pub fn schema_reads_on_current_thread() -> u64 {
+    SCHEMA_READS.with(|n| n.get())
+}
+
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）+ 最后使用时刻
     engines: Mutex<HashMap<String, LoadedEngine>>,
@@ -524,7 +540,7 @@ pub struct EngineManager {
     /// （[`EngineManager::aux_code_settings_cached`]，直接辅助码每个双拼按键都要问）。与
     /// `freq_cache` 同生命周期：`invalidate_schema`（方案覆盖层写入 / 删除 / 重建都走它）与
     /// `reload_from_config` 时清。任一方案失效都**整表清**——`schema:` 来源会引用别的方案，
-    /// 按 id 局部清会漏掉引用方。进入引导键辅助码仍走不带缓存的 `aux_code_settings_of`。
+    /// 按 id 局部清会漏掉引用方。进入辅助码（`aux_code_settings_cached_of`）也走它。
     aux_settings_cache: Mutex<HashMap<String, AuxCodeSettings>>,
     /// `aux_settings_cache` 的失效代次：每次清表（持锁）+1。未命中时先记代次再算，回填前
     /// （同一把锁下）代次变了就不回填——否则「算到一半被清」的旧值会被插回去，一直留到下次失效。
@@ -546,6 +562,15 @@ pub struct EngineManager {
     /// redb 查询叠加，造成可感知卡顿。缓存 `None` 同样有意义：方案文件不存在时反复尝试
     /// 读盘，还会刷出成片的 `Schema file not found` 警告。
     schema_type_cache: Mutex<HashMap<String, Option<String>>>,
+    /// 方案定义缓存（schema_id → 合并 override 后的 `Schema`），供按键路径取**方案级标量字段**
+    /// （混输成员、拼音分隔符策略）。`read_schema` 每次都要读方案与 override 两个文件、解析
+    /// TOML、列发现目录并读各词库文件头，按键路径上一次也不能有。
+    ///
+    /// ⚠️ 词库清单这类随词库目录变化的字段**不要**从这里取：缓存只随方案失效与配置重载清，
+    /// 不随词库目录变化清。失效同 `aux_settings_cache`（整表清 + 代次）。
+    schema_def_cache: Mutex<HashMap<String, Option<Arc<Schema>>>>,
+    /// `schema_def_cache` 的失效代次（同 `aux_settings_gen`）。
+    schema_def_gen: std::sync::atomic::AtomicU64,
     /// 词库统计结果（方案 id → (缓存键, 结果)），见 [`Self::dict_stats`]。键含各库摘要，
     /// 词库一变自然失效，故不接 `invalidate_schema`；只存结果（KB 级），不存中间集合。
     dict_stats_cache: Mutex<HashMap<String, (String, Arc<dict_stats::SystemDictStats>)>>,
@@ -622,8 +647,11 @@ pub struct EngineManager {
     single_char_codes: Mutex<Option<SingleCharCodeCache>>,
     /// 单字全码表的最后使用（[`Self::use_clock`] 读数），供闲置清扫（[`Self::evict_idle_caches`]）。
     single_char_used: std::sync::atomic::AtomicU64,
-    /// 全局拼音配置（fuzzy/code_hint_source/...）。Mutex 以支持热重载。
+    /// 全局拼音配置（fuzzy/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
+    /// 取配置时套哪层覆盖（`[mobile.*]`）。构造时定下（见
+    /// [`Self::with_store_override_overlay`]），重载时继续读它。
+    overlay: Mutex<wind_config::ConfigOverlay>,
     /// 纠错与提示配置（`[input.correction]`），与 `pinyin` 一同决定 [`pinyin_hint_on`]。
     correction_cfg: Mutex<wind_config::CorrectionConfig>,
     /// 换位纠错规则（`[input.correction]` 生成），注入全拼引擎的 `FuzzyConfig::correction`；
@@ -686,16 +714,13 @@ pub struct EngineManager {
     /// 测试钩子：[`Self::build_reverse_index_for`] 被调用的次数（证明短路生效）。
     #[cfg(test)]
     reverse_index_build_calls: std::sync::atomic::AtomicUsize,
-    /// [`Self::schema_data_facts`] 的缓存（全部已安装方案的注释模板）。要扫方案目录、读 N 个
-    /// 方案文件，而协调器在按应用自动切方案（焦点驱动、高频）时也会问它。与 `overlay_cache`
-    /// 同批失效：`invalidate_schema` / `reload_from_config`。
-    data_facts_cache: Mutex<Option<Arc<SchemaDataFacts>>>,
     /// [`Self::active_data_facts`] 的缓存，按活跃方案 id 分键（随活跃方案变，切方案不必失效）。
-    /// 失效点同上。
+    /// 协调器在按应用自动切方案（焦点驱动、高频）时也会问它。与 `overlay_cache` 同批失效：
+    /// `invalidate_schema` / `reload_from_config`。
     active_facts_cache: Mutex<HashMap<String, ActiveDataFacts>>,
-    /// 上面两份缓存的失效代次（同 `aux_settings_gen` 的做法）。
+    /// 上面那份缓存的失效代次（同 `aux_settings_gen` 的做法）。
     data_facts_gen: std::sync::atomic::AtomicU64,
-    /// 测试钩子：上面两份事实被真正重算的次数。
+    /// 测试钩子：上面那份事实被真正重算的次数。
     #[cfg(test)]
     data_facts_builds: std::sync::atomic::AtomicUsize,
 }
@@ -719,17 +744,7 @@ pub struct MemoryReport {
     pub char_pinyin_builds: crate::text_codes::BuildStatsSnapshot,
 }
 
-/// 方案文件里「按需加载」要看的事实（协调器 `DataNeeds` 的材料），见
-/// [`EngineManager::schema_data_facts`]。
-#[derive(Debug, Default, Clone)]
-pub struct SchemaDataFacts {
-    /// 全部已安装方案的方案级注释模板（`[candidate].comment_template_*`，含覆盖层）。
-    pub schema_templates: Vec<String>,
-    /// overlay 方案 `[overlay]` 段的注释模板。
-    pub overlay_templates: Vec<String>,
-}
-
-/// 随活跃方案变的那部分事实，见 [`EngineManager::active_data_facts`]。
+/// 协调器 `DataNeeds` 要看的、随活跃方案变的事实，见 [`EngineManager::active_data_facts`]。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveDataFacts {
     /// 辅助码当下引用了码表方案（[`EngineManager::aux_code_schemas_in_use`] 非空）。
@@ -934,8 +949,12 @@ impl EngineManager {
         data_dir: Option<&Path>,
         store: Option<Arc<wind_store::Store>>,
     ) -> Self {
-        let override_dir = Config::user_config_dir().map(|d| d.join("schema_overrides"));
-        Self::with_store_override(config, data_dir, store, override_dir)
+        Self::with_store_override(config, data_dir, store, Self::default_override_dir())
+    }
+
+    /// 默认的方案 override 目录：用户配置目录下的 `schema_overrides`。
+    pub fn default_override_dir() -> Option<std::path::PathBuf> {
+        Config::user_config_dir().map(|d| d.join("schema_overrides"))
     }
 
     /// 同 [`with_store`]，但显式指定 override 目录（测试用，避免污染真实用户目录）。
@@ -944,6 +963,23 @@ impl EngineManager {
         data_dir: Option<&Path>,
         store: Option<Arc<wind_store::Store>>,
         override_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self::with_store_override_overlay(
+            config,
+            data_dir,
+            store,
+            override_dir,
+            wind_config::ConfigOverlay::Base,
+        )
+    }
+
+    /// 真实构造入口：覆盖层（`[mobile.*]`）在构造时定下，引擎一次建成，不经重载。
+    pub fn with_store_override_overlay(
+        config: &Config,
+        data_dir: Option<&Path>,
+        store: Option<Arc<wind_store::Store>>,
+        override_dir: Option<std::path::PathBuf>,
+        overlay: wind_config::ConfigOverlay,
     ) -> Self {
         // 初始化缓存根（一次）：%LOCALAPPDATA%\WindInput\cache，提前建好目录
         CACHE_DIR.get_or_init(|| {
@@ -1006,6 +1042,8 @@ impl EngineManager {
             codetable_settings_cache: Mutex::new(HashMap::new()),
             codetable_settings_gen: std::sync::atomic::AtomicU64::new(0),
             schema_type_cache: Mutex::new(HashMap::new()),
+            schema_def_cache: Mutex::new(HashMap::new()),
+            schema_def_gen: std::sync::atomic::AtomicU64::new(0),
             dict_stats_cache: Mutex::new(HashMap::new()),
             dict_stats_gates: Mutex::new(HashMap::new()),
             user_dicts_seen: Mutex::new(HashMap::new()),
@@ -1023,7 +1061,8 @@ impl EngineManager {
             user_text_built: std::sync::OnceLock::new(),
             single_char_codes: Mutex::new(None),
             single_char_used: std::sync::atomic::AtomicU64::new(0),
-            pinyin: Mutex::new(config.pinyin_effective(MOBILE)),
+            pinyin: Mutex::new(config.pinyin_effective(overlay)),
+            overlay: Mutex::new(overlay),
             correction_cfg: Mutex::new(config.input.correction.clone()),
             correction: Mutex::new(Arc::new(
                 crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
@@ -1045,7 +1084,6 @@ impl EngineManager {
             reverse_index_skipped: Mutex::new(std::collections::HashSet::new()),
             #[cfg(test)]
             reverse_index_build_calls: std::sync::atomic::AtomicUsize::new(0),
-            data_facts_cache: Mutex::new(None),
             active_facts_cache: Mutex::new(HashMap::new()),
             data_facts_gen: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -1055,39 +1093,6 @@ impl EngineManager {
         // 避免首次切换时同步重熔大词库卡顿。单飞构建锁保证预热与切换不重复构建。
         mgr.ensure_loaded(&active_id);
         mgr
-    }
-
-    /// 拼音方案（含双拼）下，候选注释里的编码从哪来（`schema.pinyin.code_hint_source`）。
-    ///
-    /// 直接读全局 `[schema.pinyin]`，没有方案级 override。临拼 / 快捷输入不读这份，
-    /// 见 [`Self::temp_pinyin_code_hint_source`]。
-    /// （码表类方案的「剩余编码」由码表引擎在 convert 内处理，走的是
-    /// `schema.codetable.show_code_hint`，与本键同名过一阵子，现已各归各名。）
-    pub fn code_hint_source(&self) -> wind_config::config::CodeHintSource {
-        wind_config::config::CodeHintSource::from_config(
-            &self
-                .pinyin
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .code_hint_source,
-            // 认不出的值回落本字段出厂档 `off`（`default_code_hint_source`）。
-            wind_config::config::CodeHintSource::Off,
-        )
-    }
-
-    /// 临拼 / 快捷输入期间，候选注释里的编码从哪来（`input.temp_pinyin.code_hint_source`）。
-    ///
-    /// 与 [`Self::code_hint_source`] 各管一摊、出厂值不同（这份 `auto`、那份 `off`）。
-    pub fn temp_pinyin_code_hint_source(&self) -> wind_config::config::CodeHintSource {
-        wind_config::config::CodeHintSource::from_config(
-            &self
-                .temp_pinyin
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .code_hint_source,
-            // 认不出的值回落本字段出厂档 `auto`（`default_temp_pinyin_code_hint_source`）。
-            wind_config::config::CodeHintSource::Auto,
-        )
     }
 
     /// 当前活跃引擎是否开启整句输入（当前只有码表引擎会返回 true）。
@@ -1129,14 +1134,10 @@ impl EngineManager {
         if schema_id.is_empty() {
             return global;
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .and_then(|s| s.engine.pinyin.separator)
-        .filter(|v| !v.is_empty())
-        .unwrap_or(global)
+        self.schema_def_cached(schema_id)
+            .and_then(|s| s.engine.pinyin.separator.clone())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(global)
     }
 
     /// 当前活跃拼音方案是否为双拼（`engine.pinyin.scheme == "shuangpin"`）。
@@ -1988,6 +1989,22 @@ impl EngineManager {
             .get(schema_id)
             .filter(|l| l.engine.disabled_dict_layers().is_some())
             .map(|l| Arc::clone(&l.engine))
+    }
+
+    /// 主码表未启用扩展库里 `text` 的编码（码长升序，已带 `*` 前缀标明未启用）；
+    /// 仅剪贴板反查用——注释 / 悬停 / 查重仍只认已启用词库。开关关或无影子层时为空。
+    pub fn disabled_dict_codes(&self, text: &str) -> Vec<String> {
+        let primary = self
+            .primary_codetable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.loaded_disabled_dict_engine(&primary)
+            .and_then(|e| e.disabled_dict_layers().map(|d| d.codes_of(text)))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| format!("*{c}"))
+            .collect()
     }
 
     /// 阻塞地把 `schema_id` 已加载引擎的影子层建好（预热线程 / 测试用，**不可进按键链路**）。
@@ -3354,6 +3371,27 @@ impl EngineManager {
         self.active_engine()?.shuangpin_full_syllable_count(keys)
     }
 
+    /// 活跃双拼引擎把击键串按击键对拆成的音节：`(全拼音节, 击键起, 击键止)`；非双拼 → 空。
+    pub fn shuangpin_units(&self, keys: &str) -> Vec<(String, usize, usize)> {
+        self.active_engine()
+            .map(|e| e.shuangpin_units(keys))
+            .unwrap_or_default()
+    }
+
+    /// 活跃方案是不是双拼（有布局）。
+    pub fn is_shuangpin(&self) -> bool {
+        !self
+            .shuangpin_layout_of(&self.active_schema_id())
+            .is_empty()
+    }
+
+    /// 活跃拼音引擎下，音节 `syllable` 按模糊音配置展开的等价读音（没开模糊音 / 非拼音 → 空）。
+    pub fn fuzzy_siblings(&self, syllable: &str) -> Vec<String> {
+        self.active_engine()
+            .map(|e| e.fuzzy_siblings(syllable))
+            .unwrap_or_default()
+    }
+
     /// 当前活跃引擎是否为**纯码表**类型（混输 `Mixed` 不算——其拼音半边恒前缀匹配，
     /// 精确匹配语义只对纯码表方案自洽；供协调器判定短语是否随「精确匹配模式」抑制前缀枚举）。
     pub fn is_codetable(&self) -> bool {
@@ -3835,28 +3873,20 @@ impl EngineManager {
         if self.schema_engine_type(schema_id).as_deref() != Some("mixed") {
             return None;
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| s.engine.mixed.primary_schema)
-        .filter(|p| !p.is_empty())
+        self.schema_def_cached(schema_id)
+            .map(|s| s.engine.mixed.primary_schema.clone())
+            .filter(|p| !p.is_empty())
     }
 
     /// 混输方案的拼音子方案 id（`[engine.mixed].secondary_schema`）；非混输/未知/未配置返回 None。
-    /// 按键路径上用：引擎类型走缓存，不登记用户分库（不列目录、不读分库头与开关文件）。
+    /// 按键路径上用：引擎类型与方案定义都走缓存。
     pub fn mixed_secondary_schema(&self, schema_id: &str) -> Option<String> {
         if self.schema_engine_type(schema_id).as_deref() != Some("mixed") {
             return None;
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| s.engine.mixed.secondary_schema)
-        .filter(|p| !p.is_empty())
+        self.schema_def_cached(schema_id)
+            .map(|s| s.engine.mixed.secondary_schema.clone())
+            .filter(|p| !p.is_empty())
     }
 
     /// 写入/词频归属 id：非混输 = `data_schema_id(自身)`（source 无关，零回归）；
@@ -3899,6 +3929,17 @@ impl EngineManager {
     pub fn get_schema_override(&self, schema_id: &str) -> Option<toml::Value> {
         let dir = self.override_dir.as_deref()?;
         Self::read_override_value(schema_id, dir)
+    }
+
+    /// 某方案 override 文件的路径（目录未配置时 `None`；文件不一定存在）。
+    /// 供读改写方区分「文件不存在」与「文件存在但解析失败」——[`Self::get_schema_override`]
+    /// 两者都返回 `None`，拿空表起步写回会把坏文件里的其它内容整份冲掉。
+    pub fn schema_override_path(&self, schema_id: &str) -> Option<std::path::PathBuf> {
+        Some(
+            self.override_dir
+                .as_deref()?
+                .join(format!("{schema_id}.toml")),
+        )
     }
 
     /// 仅写入某方案 override 层（原子 tmp+rename），**不**使引擎缓存失效。
@@ -4078,7 +4119,6 @@ impl EngineManager {
             }
         }
         // 反查索引依赖「启用词库合并」，启用集变了须失效（懒重建）。
-        // 注：编码提示开关已改读全局 schema.pinyin.code_hint_source，无方案级缓存需失效。
         self.reverse_index
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -4358,6 +4398,7 @@ impl EngineManager {
             .remove(schema_id);
         self.invalidate_aux_settings_cache();
         self.invalidate_codetable_settings_cache();
+        self.invalidate_schema_def_cache();
         self.invalidate_data_facts();
         self.schema_type_cache
             .lock()
@@ -4457,6 +4498,19 @@ impl EngineManager {
         true
     }
 
+    /// 当前生效的全局拼音配置（已套覆盖层）。测试 / 诊断用。
+    pub fn pinyin_global(&self) -> wind_config::config::PinyinGlobalConfig {
+        self.pinyin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 当前取配置时套用的覆盖层。
+    pub fn config_overlay(&self) -> wind_config::ConfigOverlay {
+        *self.overlay.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// 按新配置热重载方案集（无需重建 EngineManager）：重算可用方案、更新上屏策略、
     /// 清空引擎/词频/名称缓存使其按新配置/词典重建，并切到新的活跃方案。
     /// 返回活跃方案是否发生变化（供上层决定是否清输入缓冲、刷新 UI）。
@@ -4550,7 +4604,8 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = config.schema.primary_pinyin.clone();
         // 全局拼音配置变更：更新缓存，引擎缓存随下方 clear() 一起失效，下次按新配置重建。
-        *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.pinyin_effective(MOBILE);
+        *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) =
+            config.pinyin_effective(self.config_overlay());
         *self
             .correction_cfg
             .lock()
@@ -4585,6 +4640,7 @@ impl EngineManager {
             .clear();
         self.invalidate_aux_settings_cache();
         self.invalidate_codetable_settings_cache();
+        self.invalidate_schema_def_cache();
         self.invalidate_data_facts();
         self.schema_type_cache
             .lock()
@@ -4656,19 +4712,84 @@ impl EngineManager {
         None
     }
 
+    /// 把拼音「屏蔽这个词」集合（拼音数据方案候选调整里 `code = *` 的删除行）推给拼音引擎。
+    /// 每次转换前调：集合由 store 按表内容缓存，规则写入 / 文件同步后自然换新，引擎侧同一份
+    /// 只比一次指针。拼音型引擎与混输（转给它的拼音子引擎，混输拼音段与拼音方案共用屏蔽）。
+    fn push_blocked_words(&self, engine: &dyn Engine) {
+        if !matches!(engine.engine_type(), EngineType::Pinyin | EngineType::Mixed) {
+            return;
+        }
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.blocked_words(PINYIN_DATA_SCHEMA) {
+            Ok(set) => engine.set_blocked_words(set),
+            Err(e) => debug!("读取拼音屏蔽词失败: {e}"),
+        }
+    }
+
+    /// `engine.convert`，英文方案（`english`）再滤掉「屏蔽这个词」的词库词。
+    ///
+    /// 英文引擎是**共享**实例：拼音 / 码表 / 混输里混入的英文也用它（`shared_english_engine`
+    /// 直调，不经这里），而那些混入的英文按宿主方案各自隐藏、不读英文屏蔽集（设计 §8 第 11 条），
+    /// 故屏蔽集不推进引擎，只在按英文方案取候选（英文方案主路、临英、快捷输入英文成员）时在这里滤。
+    /// 多取「可能出现在这次结果里」的屏蔽词条数再滤、截回 `max_candidates`，空出的名额由后面的词
+    /// 补上。估数按文字以输入为前缀（忽略大小写）计、封顶 [`ENGLISH_BLOCK_EXTRA_CAP`]：英文词库
+    /// 按码前缀查，码是小写化的词文；词组（码与文字不同形）漏估时只少补一格，不会多出屏蔽词。
+    fn convert_unblocked(
+        &self,
+        engine: &dyn Engine,
+        schema_id: &str,
+        input: &str,
+        max_candidates: usize,
+    ) -> anyhow::Result<ConvertResult> {
+        let blocked = (engine.engine_type() == EngineType::English && schema_id == ENGLISH_SCHEMA)
+            .then(|| self.store.as_ref()?.blocked_words(ENGLISH_SCHEMA).ok())
+            .flatten()
+            .filter(|set| !set.is_empty());
+        let Some(blocked) = blocked else {
+            return engine.convert(input, max_candidates);
+        };
+        let lower = input.to_lowercase();
+        let extra = blocked
+            .iter()
+            .filter(|w| {
+                w.len() >= lower.len()
+                    && w.is_char_boundary(lower.len())
+                    && w[..lower.len()].eq_ignore_ascii_case(&lower)
+            })
+            .take(ENGLISH_BLOCK_EXTRA_CAP)
+            .count();
+        let mut r = engine.convert(input, max_candidates.saturating_add(extra))?;
+        r.candidates.retain(|c| !blocked.contains(&c.text));
+        r.candidates.truncate(max_candidates);
+        r.is_empty = r.candidates.is_empty();
+        Ok(r)
+    }
+
     /// 转换输入为候选（分发到当前引擎），必要时混入英文候选。
     ///
     /// 英文混入接在**这一层**而不是各引擎内部：本管理器同时是 `convert` /
     /// `recheck_auto_commit` / `handle_top_code` 三条通路的收口点，一处接线即覆盖拼音、
     /// 码表及以后任何新引擎。详见 [`crate::english_merge`] 模块文档。
     pub fn convert(&self, input: &str, max_candidates: usize) -> ConvertResult {
+        let mut timer = crate::pinyin::ConvertStageTimer::new();
         let Some(engine) = self.active_engine() else {
             return ConvertResult::default();
         };
-        let mut r = engine.convert(input, max_candidates).unwrap_or_else(|e| {
-            warn!("convert error: {}", e);
-            ConvertResult::default()
-        });
+        self.push_blocked_words(engine.as_ref());
+        let mut r = self
+            .convert_unblocked(
+                engine.as_ref(),
+                &self.active_schema_id(),
+                input,
+                max_candidates,
+            )
+            .unwrap_or_else(|e| {
+                warn!("convert error: {}", e);
+                ConvertResult::default()
+            });
+        timer.mark("engine");
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
             // ★ 判据**只有一个**：中文侧有没有候选。它本身就完整表达了「用户在打中文
             // 还是在打英文」，不必再叠「有没有精确命中」——叠了会在「无精确→有精确」
@@ -4707,6 +4828,7 @@ impl EngineManager {
                 r.is_empty = r.candidates.is_empty();
             }
         }
+        timer.mark("english");
         r
     }
 
@@ -5446,12 +5568,30 @@ impl EngineManager {
         self.codetable_settings_of(&self.active_schema_id())
     }
 
+    /// 借用版的 [`Self::codetable_settings`]：缓存命中时不克隆整份设置。逐键路径只取一两个
+    /// 字段时用它。
+    pub fn with_codetable_settings<R>(
+        &self,
+        f: impl FnOnce(&wind_config::CodetableGlobal) -> R,
+    ) -> R {
+        self.with_codetable_settings_of(&self.active_schema_id(), f)
+    }
+
     /// [`Self::codetable_settings`] 的按方案版本：供 overlay/特殊模式取**指定方案**的码表
     /// 全局设置，而不是当前活跃方案的——`codetable_settings()` 内部固定读
     /// `active_schema_id()`，特殊模式引用的方案往往不是活跃方案，同类坑见 `engine_for`
     /// 的注释。用 `loaded_engine_type(schema_id)` 而非 `current_engine_type()` 判混输，
     /// 理由同上：后者也是问活跃方案。
     fn codetable_settings_of(&self, schema_id: &str) -> wind_config::CodetableGlobal {
+        self.with_codetable_settings_of(schema_id, Clone::clone)
+    }
+
+    /// 借用版的 [`Self::codetable_settings_of`]。`f` 在缓存锁内执行，别在里面回调本管理器。
+    pub fn with_codetable_settings_of<R>(
+        &self,
+        schema_id: &str,
+        f: impl FnOnce(&wind_config::CodetableGlobal) -> R,
+    ) -> R {
         let mixed = matches!(self.loaded_engine_type(schema_id), Some(EngineType::Mixed));
         let key = (schema_id.to_string(), mixed);
         if let Some(s) = self
@@ -5460,14 +5600,15 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
         {
-            return s.clone();
+            return f(s);
         }
         let generation = self
             .codetable_settings_gen
             .load(std::sync::atomic::Ordering::Acquire);
         let s = self.resolve_codetable_settings(schema_id, mixed);
-        self.cache_codetable_settings(key, s.clone(), generation);
-        s
+        let out = f(&s);
+        self.cache_codetable_settings(key, s, generation);
+        out
     }
 
     /// 清 `codetable_settings_cache` 并推进失效代次（持锁完成）。
@@ -5776,10 +5917,28 @@ impl EngineManager {
         if id.is_empty() {
             return None;
         }
-        let schema =
-            Self::read_schema(&id, self.data_dir.as_deref(), self.override_dir.as_deref())?;
-        let c = schema.engine.chaizi;
+        let c = self.schema_def_cached(&id)?.engine.chaizi.clone();
         c.is_configured().then_some(c)
+    }
+
+    /// 预填按键路径要用的方案级缓存（活跃方案及其混输成员的定义、辅助码设置）。
+    /// 在方案失效 / 配置重载 / 切方案之后、非按键线程上调，让失效后的第一键也不读盘。
+    pub fn warm_hot_schema_fields(&self) {
+        let active = self.active_schema_id();
+        if active.is_empty() {
+            return;
+        }
+        let _ = self.schema_def_cached(&active);
+        for member in [
+            self.mixed_primary_schema(&active),
+            self.mixed_secondary_schema(&active),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = self.schema_def_cached(&member);
+        }
+        let _ = self.aux_code_settings_cached();
     }
 
     /// 活跃方案的辅助码生效设置：全局基线 `[schema.pinyin.aux_code]` 折叠方案段
@@ -5804,21 +5963,70 @@ impl EngineManager {
     /// 失效点见 `aux_settings_cache`：设置页写方案覆盖层、重载配置都会清；**绕过这些入口直接改
     /// 磁盘文件**（手改 `schema_overrides`）要等下一次重载才生效，与 `freq_settings_for` 同口径。
     pub fn aux_code_settings_cached(&self) -> AuxCodeSettings {
-        let id = self.active_schema_id();
+        self.aux_code_settings_cached_of(&self.active_schema_id())
+    }
+
+    /// 同 [`Self::aux_code_settings_of`]，但走缓存（失效点同 [`Self::aux_code_settings_cached`]）。
+    /// 按辅助码触发键进入时用：那是按键路径，按来源方案取（临拼在五笔方案下引用拼音方案）。
+    pub fn aux_code_settings_cached_of(&self, schema_id: &str) -> AuxCodeSettings {
         if let Some(s) = self
             .aux_settings_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&id)
+            .get(schema_id)
         {
             return s.clone();
         }
         let generation = self
             .aux_settings_gen
             .load(std::sync::atomic::Ordering::Acquire);
-        let s = self.aux_code_settings_of(&id);
-        self.cache_aux_settings(id, s.clone(), generation);
+        let s = self.aux_code_settings_of(schema_id);
+        self.cache_aux_settings(schema_id.to_string(), s.clone(), generation);
         s
+    }
+
+    /// 方案定义（合并 override 后），走 `schema_def_cache`。只取方案级标量字段，见该字段文档。
+    fn schema_def_cached(&self, schema_id: &str) -> Option<Arc<Schema>> {
+        if let Some(v) = self
+            .schema_def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(schema_id)
+        {
+            return v.clone();
+        }
+        let generation = self
+            .schema_def_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+        let def = Self::read_schema(
+            schema_id,
+            self.data_dir.as_deref(),
+            self.override_dir.as_deref(),
+        )
+        .map(Arc::new);
+        let mut cache = self
+            .schema_def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self
+            .schema_def_gen
+            .load(std::sync::atomic::Ordering::Acquire)
+            == generation
+        {
+            cache.insert(schema_id.to_string(), def.clone());
+        }
+        def
+    }
+
+    /// 清 `schema_def_cache` 并推进失效代次（持锁完成）。
+    fn invalidate_schema_def_cache(&self) {
+        let mut cache = self
+            .schema_def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.clear();
+        self.schema_def_gen
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// 回填 `aux_settings_cache`：`generation` 是算之前记下的失效代次，期间被清过就丢弃。
@@ -5843,57 +6051,6 @@ impl EngineManager {
     /// 选词即学路线，不进造词。
     pub fn auto_phrase_enabled(&self) -> bool {
         !self.is_pinyin() && self.codetable_settings().auto_phrase.enabled
-    }
-
-    /// 全部已安装方案的注释模板（方案级 + overlay）。有缓存，见 `data_facts_cache`。
-    ///
-    /// 计算在锁外（要读盘），回填前比对失效代次：期间失效过就只用不存，旧结果盖不回去。
-    pub fn schema_data_facts(&self) -> Arc<SchemaDataFacts> {
-        if let Some(f) = self
-            .data_facts_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            return Arc::clone(f);
-        }
-        let generation = self
-            .data_facts_gen
-            .load(std::sync::atomic::Ordering::Acquire);
-        #[cfg(test)]
-        self.data_facts_builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut facts = SchemaDataFacts::default();
-        for id in self.installed_schemas() {
-            let b = self.behavior_for(&id);
-            facts
-                .schema_templates
-                .extend(b.comment_template_vertical.iter().cloned());
-            facts
-                .schema_templates
-                .extend(b.comment_template_horizontal.iter().cloned());
-        }
-        for o in self.overlay_modes() {
-            facts
-                .overlay_templates
-                .extend(o.spec.comment_template_vertical.iter().cloned());
-            facts
-                .overlay_templates
-                .extend(o.spec.comment_template_horizontal.iter().cloned());
-        }
-        let facts = Arc::new(facts);
-        let mut cache = self
-            .data_facts_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if self
-            .data_facts_gen
-            .load(std::sync::atomic::Ordering::Acquire)
-            == generation
-        {
-            *cache = Some(Arc::clone(&facts));
-        }
-        facts
     }
 
     /// 当前活跃方案下的辅助码 / 自动造词态。有缓存（按活跃方案 id），见 `active_facts_cache`。
@@ -5932,17 +6089,12 @@ impl EngineManager {
         facts
     }
 
-    /// 清上面两份事实缓存并推进失效代次（持两把锁完成，与回填互斥）。
+    /// 清事实缓存并推进失效代次（持锁完成，与回填互斥）。
     fn invalidate_data_facts(&self) {
-        let mut templates = self
-            .data_facts_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let mut active = self
             .active_facts_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *templates = None;
         active.clear();
         self.data_facts_gen
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -6318,6 +6470,9 @@ impl EngineManager {
             return ConvertResult::default();
         }
         let engine = self.loaded_engine(schema_id);
+        if let Some(e) = &engine {
+            self.push_blocked_words(e.as_ref());
+        }
         match engine {
             Some(e) => e
                 .convert_with_opts(input, max_candidates, opts)
@@ -6335,15 +6490,22 @@ impl EngineManager {
         input: &str,
         max_candidates: usize,
     ) -> ConvertResult {
+        let mut timer = crate::pinyin::ConvertStageTimer::new();
         if !self.ensure_loaded(schema_id) {
             return ConvertResult::default();
         }
+        timer.mark(format!("cvwith:{schema_id}"));
         let engine = self.loaded_engine(schema_id);
+        if let Some(e) = &engine {
+            self.push_blocked_words(e.as_ref());
+        }
         match engine {
-            Some(e) => e.convert(input, max_candidates).unwrap_or_else(|err| {
-                warn!("convert_with error: {}", err);
-                ConvertResult::default()
-            }),
+            Some(e) => self
+                .convert_unblocked(e.as_ref(), schema_id, input, max_candidates)
+                .unwrap_or_else(|err| {
+                    warn!("convert_with error: {}", err);
+                    ConvertResult::default()
+                }),
             None => ConvertResult::default(),
         }
     }
@@ -6570,6 +6732,7 @@ impl EngineManager {
         override_dir: Option<&Path>,
         user_text_dir: Option<&Path>,
     ) -> Option<Schema> {
+        SCHEMA_READS.with(|n| n.set(n.get() + 1));
         if Config::custom_hides_schema(schema_id) {
             Self::warn_hidden_schema_once(schema_id);
             return None;
@@ -7091,6 +7254,7 @@ impl EngineManager {
                 } else {
                     pg.sentence_max_count
                 },
+                abbrev_fallback: Default::default(),
                 // ⚠️ 补全这两项**不按 `mix_pinyin` 分流**，与上面三项刻意不同：它们约束的是
                 // 「引擎敢预测多少你没打的音节」，这个偏好与「当前是不是混输」无关，是用户
                 // 对候选面的统一取舍。分流会让同一个设置在两种方案下表现不一致。
@@ -7212,6 +7376,10 @@ impl EngineManager {
                     mixed_role,
                     schema.engine.codetable.sentence_input,
                 ),
+                // 整句 N-best 是用户偏好（走 `eff` 折叠）。混输下整句不触发（见
+                // `MixedRole::Primary`），读到什么都不会被用到。
+                sentence_count: eff.sentence_count,
+                sentence_max_count: eff.sentence_max_count,
                 // 逆切分：同为方案级引擎固定参数。切点有效性与「与整句同开」的告警在
                 // `CodeTableEngine::new` 里（那里才同时握着 max_code_length 与两个开关）。
                 //
@@ -7324,6 +7492,7 @@ impl EngineManager {
             Some(Box::new(Self::attach_sentence_freq(
                 engine,
                 commit_opts.sentence_input,
+                eff.sentence_grammar_weight,
                 &schemas,
             )))
         }
@@ -8397,15 +8566,28 @@ impl EngineManager {
     /// 但**懒到按键线程上同样不行**：实测首次解码要 ~660 ms（见 `sentence::LazyTables`），
     /// 恰好落在用户敲下第 5 个码那一刻。故这里在交完路径后立刻 `prewarm_sentence()`，
     /// 把两张表推给后台线程——开了整句才付、且不占按键线程。
+    ///
+    /// 语法模型同理：只交路径与权重，模型文件在预热线程里打开（权重 0 时根本不打开）。
     fn attach_sentence_freq(
         engine: CodeTableEngine,
         sentence_on: bool,
+        grammar_weight: f64,
         schemas_dir: &Path,
     ) -> CodeTableEngine {
         if !sentence_on {
             return engine;
         }
-        let engine = engine.with_sentence_schemas_dir(schemas_dir.to_path_buf());
+        // 走 resolve_dict_file：同整句词频，模型同样可能被 custom / user 层替换。
+        let gram = Self::resolve_dict_file(
+            &format!(
+                "pinyin/grammar/{}",
+                crate::codetable::sentence::GRAMMAR_MODEL
+            ),
+            schemas_dir,
+        );
+        let engine = engine
+            .with_sentence_schemas_dir(schemas_dir.to_path_buf())
+            .with_sentence_grammar(gram, grammar_weight);
         engine.prewarm_sentence();
         engine
     }
@@ -8838,6 +9020,7 @@ fn misplaced_dict_font_keys(schema: &toml::Value) -> Vec<String> {
 }
 
 mod dict_stats;
+mod dict_view;
 
 /// 全局模糊音配置 → 引擎 `FuzzyConfig`：`enabled` 作总开关，未启用时所有模糊标志归零。
 /// 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。`hint` 是管理器的共享开关
@@ -8899,6 +9082,30 @@ fn pinyin_hint_on(
 
 #[cfg(test)]
 mod tests {
+    /// 覆盖层在构造时就位：不走重载路径（`engines_gen` 仍为 0），生效配置已是 `[mobile.grammar]`。
+    #[test]
+    fn overlay_applied_at_construction_without_rebuild() {
+        let mut cfg = Config::default();
+        cfg.schema.pinyin.grammar.weight = 0.0;
+        cfg.mobile.grammar.weight = 0.7;
+        let m = EngineManager::with_store_override_overlay(
+            &cfg,
+            None,
+            None,
+            None,
+            wind_config::ConfigOverlay::Mobile,
+        );
+        assert_eq!(m.config_overlay(), wind_config::ConfigOverlay::Mobile);
+        assert_eq!(m.pinyin_global().grammar.weight, 0.7);
+        assert_eq!(
+            m.engines_gen.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "构造期不得走重载路径"
+        );
+        let base = EngineManager::new(&cfg, None);
+        assert_eq!(base.pinyin_global().grammar.weight, 0.0);
+    }
+
     use super::*;
 
     #[test]
@@ -9151,16 +9358,12 @@ mod tests {
         use std::sync::atomic::Ordering::Relaxed;
         let mgr = EngineManager::new(&Config::default(), None);
         let builds = || mgr.data_facts_builds.load(Relaxed);
-        mgr.schema_data_facts();
-        mgr.schema_data_facts();
-        assert_eq!(builds(), 1, "连续两次只扫一遍方案文件");
         mgr.active_data_facts();
         mgr.active_data_facts();
-        assert_eq!(builds(), 2, "活跃方案没变就不重算");
+        assert_eq!(builds(), 1, "活跃方案没变就不重算");
         mgr.invalidate_schema("pinyin");
-        mgr.schema_data_facts();
         mgr.active_data_facts();
-        assert_eq!(builds(), 4, "方案失效后重算");
+        assert_eq!(builds(), 2, "方案失效后重算");
     }
 
     /// 单字全码表与反查索引同键同目录、只差扩展名。
@@ -9680,31 +9883,6 @@ mod tests {
         cfg.schema.english.frequency.code_scope = "candidate".to_string();
         let mgr2 = EngineManager::new(&cfg, None);
         assert!(!mgr2.freq_settings().english_code_by_input);
-    }
-
-    /// ★ 两份编码来源开关写错时各自回落**自己的**出厂档，互不串：拼音方案 → `off`、
-    /// 临拼 → `auto`。共用一个写死的兜底时，拼音方案写错值会意外显示编码。
-    #[test]
-    fn code_hint_source_unknown_value_falls_back_per_field() {
-        use wind_config::config::CodeHintSource;
-        // 前提：兜底档与各自的出厂值字面一致。改了出厂值却忘了改兜底，这里先红。
-        let def = Config::default();
-        assert_eq!(def.schema.pinyin.code_hint_source, "off");
-        assert_eq!(def.input.temp_pinyin.code_hint_source, "auto");
-
-        let mut cfg = Config::default();
-        cfg.schema.pinyin.code_hint_source = "shuangping".to_string();
-        cfg.input.temp_pinyin.code_hint_source = "shuangping".to_string();
-        let mgr = EngineManager::new(&cfg, None);
-        assert_eq!(mgr.code_hint_source(), CodeHintSource::Off);
-        assert_eq!(mgr.temp_pinyin_code_hint_source(), CodeHintSource::Auto);
-
-        // 反向对照：合法值照认，证明上面落的是兜底而非两个方法碰巧固定返回这两档。
-        cfg.schema.pinyin.code_hint_source = "auto".to_string();
-        cfg.input.temp_pinyin.code_hint_source = "off".to_string();
-        let mgr = EngineManager::new(&cfg, None);
-        assert_eq!(mgr.code_hint_source(), CodeHintSource::Auto);
-        assert_eq!(mgr.temp_pinyin_code_hint_source(), CodeHintSource::Off);
     }
 
     #[test]
@@ -11674,6 +11852,76 @@ input_chars = \"a-z;\"
             "nonexistent",
             "未知方案 data_schema_id 应返回自身 id"
         );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+    }
+
+    /// 按键路径取的方案级字段（混输成员、分隔符策略、辅助码设置）只在首次读盘，之后走缓存；
+    /// 方案失效后重读并取到新值。计数按线程，故并行测试互不干扰。
+    #[test]
+    fn hot_path_schema_fields_read_disk_once() {
+        let base_dir = std::env::temp_dir().join("wind_eng_hot_path_schema_reads");
+        let schemas = base_dir.join("schemas");
+        let ov_dir = std::env::temp_dir().join("wind_eng_hot_path_schema_reads_ov");
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let _ = std::fs::remove_dir_all(&ov_dir);
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::create_dir_all(&ov_dir).unwrap();
+        let write = |name: &str, body: &str| {
+            std::fs::write(schemas.join(format!("{name}.schema.toml")), body).unwrap()
+        };
+        write(
+            "py_hp",
+            "[schema]\nid = \"py_hp\"\n[engine]\ntype = \"pinyin\"\n",
+        );
+        write(
+            "ct_hp",
+            "[schema]\nid = \"ct_hp\"\n[engine]\ntype = \"codetable\"\n",
+        );
+        write(
+            "mx_hp",
+            "[schema]\nid = \"mx_hp\"\n[engine]\ntype = \"mixed\"\n[engine.mixed]\n\
+             primary_schema = \"ct_hp\"\nsecondary_schema = \"py_hp\"\n",
+        );
+        let mut cfg = Config::default();
+        cfg.schema.active = "mx_hp".into();
+        cfg.schema.available = vec!["mx_hp".into(), "ct_hp".into(), "py_hp".into()];
+        let mgr =
+            EngineManager::with_store_override(&cfg, Some(&base_dir), None, Some(ov_dir.clone()));
+
+        let touch = || {
+            assert_eq!(
+                mgr.write_data_schema_id("mx_hp", CandidateSource::CodeTable),
+                Some("ct_hp".to_string())
+            );
+            let _ = mgr.pinyin_separator_mode_of("mx_hp");
+            let _ = mgr.aux_code_settings_cached_of("mx_hp");
+            mgr.mixed_secondary_schema("mx_hp")
+        };
+        assert_eq!(touch(), Some("py_hp".to_string()));
+        let warmed = schema_reads_on_current_thread();
+        for _ in 0..3 {
+            touch();
+        }
+        assert_eq!(
+            schema_reads_on_current_thread(),
+            warmed,
+            "预热后不应再读方案文件"
+        );
+
+        std::fs::write(
+            ov_dir.join("mx_hp.toml"),
+            "[engine.mixed]\nsecondary_schema = \"py_hp2\"\n",
+        )
+        .unwrap();
+        mgr.invalidate_schema("mx_hp");
+        assert_eq!(
+            touch(),
+            Some("py_hp2".to_string()),
+            "失效后应取到 override 新值"
+        );
+        assert!(schema_reads_on_current_thread() > warmed);
 
         let _ = std::fs::remove_dir_all(&base_dir);
         let _ = std::fs::remove_dir_all(&ov_dir);

@@ -1,0 +1,7 @@
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <!-- 软键盘「未钉住」：描边图钉斜放（像是还没按下去）。颜色仅作 alpha 蒙版，由面板按主题 tint。
+       图形取自 Material Symbols push_pin（outlined，Apache-2.0），外加 45° 倾斜以与 pin_on 拉开区别。 -->
+  <g transform="rotate(45 12 12)">
+    <path d="M14 4v5c0 1.12.37 2.16 1 3H9c.65-.86 1-1.9 1-3V4h4m3-2H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3V4h1c.55 0 1-.45 1-1s-.45-1-1-1z"/>
+  </g>
+</svg>

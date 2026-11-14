@@ -72,6 +72,15 @@ issue 的前提「运行时已具备 SVG 能力，只是编辑器没跟上」**�
 - 生效范围：背景图 ✔、`footer_bar.prev_image/next_image` ✔（含 `disabled_tint`）。
 - **图层 ✘**：`ViewLayer` 无 tint 字段（`view.rs:288-293`），`rv_layers` 不传，`paint_layer` 固定 `[0,0,0,0]`（`view.rs:1652`）。schema 有字段、resolve 有透传、渲染不消费——与 `theme-capability-extension.md` §0 是同型病。
 
+### 1.4b flip（镜像）
+
+- `flip = "x" | "y" | "xy"`：背景图（铺满 / 定位）、图层、`footer_bar.prev_image/next_image` 都认，status /
+  tooltip / toast / menu.root 的背景图与图层同一结构、一并支持；缺省不翻，非法值告警后按不翻。
+- **只翻像素**：按 `mode` / `slice` / `size` 合成到目标尺寸、染完色后整块翻（`ImageCache::fill`，
+  `FillSpec.flip` 进缓存键）。`anchor` / `offset` / `size` / 九宫 `slice` 都按源图写、不翻。
+- 推论：九宫格翻转后右缘显示的是源图左切片；`tile` 的起铺相位落在翻转后的那一侧（`x` 从右缘起铺）。
+- 皮肤装饰同名字段见 `theme-skin-animation.md` §3.4；窗体 `frame` 不开放。
+
 ### 1.5 各区域支持矩阵
 
 | 区域 | 背景图 | 图层 | 渐变 |

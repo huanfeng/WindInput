@@ -56,6 +56,9 @@ struct CommentSource {
     /// 解析到同一文件时挂载去重成一个库，两个 id 都认它。由 [`ReverseLookup::set_comment_ids`]
     /// 在挂载后写入。
     ids: Vec<String>,
+    /// 只能按 id 取（`${dict:id}`），裸 `${dict}` / `${dict_all}` 不查它。随包内置的释义库
+    /// 用：老模板里的 `${dict}` 不该因为升级就冒出英文释义。由 [`ReverseLookup::set_named_only`] 写入。
+    named_only: bool,
     body: CommentBody,
 }
 
@@ -617,6 +620,7 @@ fn load_comment_source(
             src: src.to_path_buf(),
             schemas: schemas.to_vec(),
             ids: Vec::new(),
+            named_only: false,
             body,
         })
     };
@@ -949,6 +953,13 @@ impl ReverseLookup {
         }
     }
 
+    /// 标记哪些库只能按 id 取（见 [`CommentSource::named_only`]），路径同 `reload_comments`。
+    pub fn set_named_only(&mut self, paths: &[std::path::PathBuf]) {
+        for s in &mut self.comments {
+            s.named_only = paths.contains(&s.src);
+        }
+    }
+
     /// 查词在**全部适用库**里的注释（`${dict_all}`）：每库最多一条（先同码、无则该库首条），
     /// 按挂载顺序，按字符串去重，空串跳过。所有库都没有精确命中时，再按大小写变形各库
     /// 取一条（同 [`Self::comment_of`] 的回退那遍，且同受白名单约束）。
@@ -1008,7 +1019,11 @@ impl ReverseLookup {
         schema: &'a str,
     ) -> impl Iterator<Item = &'a CommentSource> + 'a {
         self.comments.iter().filter(move |s| {
-            s.applies_to(schema) && id.is_none_or(|id| s.ids.iter().any(|i| i == id))
+            s.applies_to(schema)
+                && match id {
+                    Some(id) => s.ids.iter().any(|i| i == id),
+                    None => !s.named_only,
+                }
         })
     }
 
@@ -1786,6 +1801,23 @@ mod tests {
             "不跨库回落"
         );
         assert_eq!(rl.comment_of_id("nope", "好", None, "pinyin"), "");
+
+        rl.set_named_only(&[paths[0].0.clone()]);
+        assert_eq!(
+            rl.comment_of("好", None, "pinyin"),
+            "女子",
+            "裸查跳过只按 id 的库"
+        );
+        assert_eq!(
+            rl.comments_of("好", None, "pinyin"),
+            vec!["女子".to_string()]
+        );
+        assert_eq!(
+            rl.comment_of_id("en", "好", None, "pinyin"),
+            "good well",
+            "按 id 照取"
+        );
+        rl.set_named_only(&[]);
         assert_eq!(
             rl.comment_of_id("chaifen", "好", None, "wubi86"),
             "",

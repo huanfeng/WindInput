@@ -37,6 +37,14 @@ pub enum ToolbarAction {
     Custom(u8),
 }
 
+/// [`CandidateOp::PinAt`] 的 N 上限（菜单子项「第 1 位」…「第 20 位」）。
+pub const PIN_AT_MAX: u8 = 20;
+
+/// [`CandidateOp::PinAt`] 的菜单 id：`PIN_AT_ID_BASE + N`，即 20..=39 对应 N=1..=20。
+/// 独占 20–39 一段（10–19 已被其余词条操作占满大半，再挤会撞号）；区间外的 id 前端照旧
+/// 「未知 id 只记 debug」。
+const PIN_AT_ID_BASE: i32 = 19;
+
 /// 候选词条操作（右键菜单）；复制由 UI 侧直接处理，不在此列。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateOp {
@@ -46,10 +54,17 @@ pub enum CandidateOp {
     MoveUp,
     /// 后移
     MoveDown,
-    /// 删除（屏蔽）
+    /// 删除。拼音 / 英文数据方案下 ≥2 字的词是「屏蔽该词」（按文字屏蔽），其余按来源分流
+    /// （按编码隐藏 / 删用户词 / 禁用短语）；删除热键触发的也是它。
     Delete,
+    /// 在此编码下隐藏：只写 `(数据方案, 当前输入码, 文字)` 的删除行，不删用户词、不按文字屏蔽。
+    /// 只给拼音 / 英文 ≥2 字的词作 [`CandidateOp::Delete`] 之外的第二项，不绑热键。
+    HideHere,
     /// 恢复默认
     Reset,
+    /// 固定到第 N 位：N 为 1 基界面名次（1..=[`PIN_AT_MAX`]），写下的规则位置是 N-1。
+    /// 拼音也给（前移/后移拼音不给）；菜单只列到每页条数。
+    PinAt(u8),
     /// 常用/生僻互切（**全局字级**，不限本方案本码）。
     ///
     /// 与上面五项不是一类：那些落在 shadow（键 = 方案 + 输入码），这个落在常用字覆盖表
@@ -169,12 +184,13 @@ pub enum MenuCmd {
     /// 「固定位置」给那些 caret 坐标本就报不准的宿主（自绘控件、坐标系错、多进程窗口
     /// 偏移）：位置由用户拖一次定下，存在该应用**自己**的规则里，不与别的应用共用。
     CandidatePositionRule(u8),
-    /// 为当前焦点应用设置「忽略宿主关闭输入法」（compat.toml 的 ignore_host_ime_close）。
-    /// 参数：0=跟随默认（清除规则）1=忽略 2=不忽略。
+    /// 为当前焦点应用设置「软件切换中英」（compat.toml 的 ignore_host_ime_switch）。
+    /// 参数：0=跟随全局（清除规则）1=忽略 2=采纳。
     ///
-    /// 给 WinForms `ImeMode.Disable` / WPF `IsInputMethodEnabled=False` 这类宿主：它们在
-    /// 焦点落到按钮等控件时关掉的是**全局**中英状态，于是「点一下按钮就变成英文」。
-    IgnoreHostImeCloseRule(u8),
+    /// 给自作主张写 compartment 的宿主：WinForms `ImeMode.Disable` / WPF
+    /// `IsInputMethodEnabled=False` 在焦点落到按钮时关掉**全局**中英状态（「点一下按钮就变成
+    /// 英文」），也有宿主在内部焦点切换时把它打开（英文态被切成中文）。开和关两个方向都管。
+    IgnoreHostImeSwitchRule(u8),
     /// 为当前焦点应用设置「密码框强制英文」（compat.toml 的 password_force_english）。
     /// 参数：0=跟随全局（清除规则）1=开 2=关。
     ///
@@ -234,10 +250,10 @@ impl MenuKind {
     /// 稳定菜单 id：macOS `.app` 把它写进 `NSMenuItem.tag`，选中后经 `CmdMenuAction`
     /// 原样回传，Rust 据此还原动作。构建菜单树（下发）与处理回传（还原）共用此映射，
     /// 二者必须一致。`Submenu`/`Separator`/`Label` 不回传，恒为 0。
-    /// id 区间：1 复制｜10-19 词条操作｜100-199 固定命令｜1000+ 方案｜2000+ 主题｜3000+ 过滤｜
+    /// id 区间：1 复制｜10-19 词条操作｜20-39 固定到第 N 位｜100-199 固定命令｜1000+ 方案｜2000+ 主题｜3000+ 过滤｜
     /// 4000+ 明暗｜5000+ 候选窗首显｜6000+ 初始中英｜7000+ 初始标点｜8000+ 诊断 HUD 分区｜
     /// 9000+ 自动配对｜10000+ 语言栏图标角标形状｜11000+ 软键盘面｜12000+ 候选窗定位｜
-    /// 13000+ 忽略宿主关闭输入法｜14000+ 密码框强制英文｜15000+ 按应用方案｜
+    /// 13000+ 软件切换中英｜14000+ 密码框强制英文｜15000+ 按应用方案｜
     /// 16000+ 按应用状态气泡定位｜17000+ 按应用状态气泡兜底位置｜18000+ 按应用整条规则启用 / 禁用。
     pub fn to_menu_id(self) -> i32 {
         match self {
@@ -250,6 +266,9 @@ impl MenuKind {
                 CandidateOp::Delete => 13,
                 CandidateOp::Reset => 14,
                 CandidateOp::ToggleCommon => 15,
+                CandidateOp::HideHere => 16,
+                // N 越界（0 或 > PIN_AT_MAX）得到的 id 反解析不回来，菜单从不产出这种值。
+                CandidateOp::PinAt(n) => PIN_AT_ID_BASE + n as i32,
             },
             MenuKind::Command(cmd) => match cmd {
                 MenuCmd::SchemaEnglish => 100,
@@ -296,7 +315,7 @@ impl MenuKind {
                 MenuCmd::InitialPunct(m) => 7000 + m as i32,
                 MenuCmd::AutoPairRule(m) => 9000 + m as i32,
                 MenuCmd::CandidatePositionRule(m) => 12000 + m as i32,
-                MenuCmd::IgnoreHostImeCloseRule(m) => 13000 + m as i32,
+                MenuCmd::IgnoreHostImeSwitchRule(m) => 13000 + m as i32,
                 MenuCmd::PasswordForceEnglishRule(m) => 14000 + m as i32,
                 MenuCmd::AppSchemaRule(m) => 15000 + m as i32,
                 MenuCmd::StatusPositionRule(m) => 16000 + m as i32,
@@ -320,6 +339,12 @@ impl MenuKind {
             13 => return Some(MenuKind::Op(CandidateOp::Delete)),
             14 => return Some(MenuKind::Op(CandidateOp::Reset)),
             15 => return Some(MenuKind::Op(CandidateOp::ToggleCommon)),
+            16 => return Some(MenuKind::Op(CandidateOp::HideHere)),
+            20..=39 => {
+                return Some(MenuKind::Op(CandidateOp::PinAt(
+                    (id - PIN_AT_ID_BASE) as u8,
+                )));
+            }
             100 => MenuCmd::SchemaEnglish,
             101 => MenuCmd::TogglePunct,
             102 => MenuCmd::ToggleWidth,
@@ -369,7 +394,7 @@ impl MenuKind {
             7000..=7999 => MenuCmd::InitialPunct((id - 7000) as u8),
             9000..=9999 => MenuCmd::AutoPairRule((id - 9000) as u8),
             12000..=12999 => MenuCmd::CandidatePositionRule((id - 12000) as u8),
-            13000..=13999 => MenuCmd::IgnoreHostImeCloseRule((id - 13000) as u8),
+            13000..=13999 => MenuCmd::IgnoreHostImeSwitchRule((id - 13000) as u8),
             14000..=14255 => MenuCmd::PasswordForceEnglishRule((id - 14000) as u8),
             15000..=15999 => MenuCmd::AppSchemaRule((id - 15000) as u16),
             16000..=16255 => MenuCmd::StatusPositionRule((id - 16000) as u8),
@@ -515,5 +540,48 @@ impl MenuItemSpec {
             checked: false,
             children,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 词条操作的菜单 id 双向一致：macOS / Linux 前端按 id 回传，漏了 `from_menu_id` 那侧就是
+    /// 「点了没反应」。
+    #[test]
+    fn candidate_op_id_roundtrip() {
+        for op in [
+            CandidateOp::MoveTop,
+            CandidateOp::MoveUp,
+            CandidateOp::MoveDown,
+            CandidateOp::Delete,
+            CandidateOp::HideHere,
+            CandidateOp::Reset,
+            CandidateOp::ToggleCommon,
+        ]
+        .into_iter()
+        .chain((1..=PIN_AT_MAX).map(CandidateOp::PinAt))
+        {
+            let kind = MenuKind::Op(op);
+            assert_eq!(MenuKind::from_menu_id(kind.to_menu_id()), Some(kind));
+        }
+    }
+
+    /// 「固定到第 N 位」独占 20..=39，区间两端外的 id 不被认成它。
+    #[test]
+    fn pin_at_id_range() {
+        assert_eq!(MenuKind::Op(CandidateOp::PinAt(1)).to_menu_id(), 20);
+        assert_eq!(
+            MenuKind::Op(CandidateOp::PinAt(PIN_AT_MAX)).to_menu_id(),
+            39
+        );
+        assert_eq!(MenuKind::from_menu_id(19), None);
+        assert_eq!(MenuKind::from_menu_id(40), None);
+        assert_eq!(
+            MenuKind::Op(CandidateOp::PinAt(0)).to_menu_id(),
+            19,
+            "N=0 不可反解析"
+        );
     }
 }

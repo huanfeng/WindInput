@@ -1,5 +1,5 @@
-//! 未启用扩展词库只给反查模式（开关 `input.reverse.lookup_disabled_dicts`）：
-//! 行内通配与普通打字不看它，注释反查只认已启用词库。自造夹具，不依赖 build_dev/data。
+//! 未启用扩展词库（开关 `input.reverse.lookup_disabled_dicts`）：反查模式、行内通配、剪贴板反查会查，
+//! 注释反查与普通打字不看它。自造夹具，不依赖 build_dev/data。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
@@ -119,11 +119,13 @@ fn reverse_sees_disabled_extra_only_when_switch_on() {
     assert_eq!(rev_texts(&off, "uuiz", "uui?"), ["立法"]);
 }
 
-/// 接线层：开关开着，行内通配照旧看不到未启用库。
+/// 接线层：开关开着，行内通配也查未启用库；关着则看不到。
 #[test]
-fn inline_wildcard_never_sees_disabled_extra() {
+fn inline_wildcard_sees_disabled_extra_only_when_switch_on() {
     let (m, _id, _g) = setup("inline", true, true, true);
-    assert_eq!(wc_texts(&m, "uuiz", "uui?"), ["立法"]);
+    assert_eq!(wc_texts(&m, "uuiz", "uui?"), ["立法", "门头沟区"]);
+    let (off, _id2, _g2) = setup("inline_off", false, true, true);
+    assert_eq!(wc_texts(&off, "uuiz", "uui?"), ["立法"]);
 }
 
 /// 全局开关经 reload_from_config 切换后，影子层随引擎重建挂上 / 摘掉。
@@ -143,8 +145,9 @@ fn global_switch_reload_attaches_and_detaches_layers() {
     m.reload_from_config(&cfg_with(true));
     assert_eq!(wait_disabled_loaded(&m, &id), Some(1), "开：挂上并后台预热");
     assert_eq!(rev_texts(&m, "uuiz", "uui?"), ["立法", "门头沟区"]);
-    assert_eq!(wc_texts(&m, "uuiz", "uui?"), ["立法"]);
+    assert_eq!(wc_texts(&m, "uuiz", "uui?"), ["立法", "门头沟区"]);
     m.reload_from_config(&cfg_with(false));
+    assert_eq!(wc_texts(&m, "uuiz", "uui?"), ["立法"]);
     assert_eq!(m.disabled_dicts_load_count(&id), None, "关：摘掉");
     assert_eq!(rev_texts(&m, "uuiz", "uui?"), ["立法"]);
     drop(g);
@@ -177,7 +180,7 @@ fn plain_convert_ignores_disabled_extra_with_switch_on() {
     }
 }
 
-/// 热禁用已启用扩展库 ⇒ 普通候选消失、反查经影子层仍可见；行内通配看不到。
+/// 热禁用已启用扩展库 ⇒ 普通候选消失，反查与行内通配经影子层仍可见。
 #[test]
 fn live_disable_moves_extra_into_lookup() {
     let (m, id, _g) = setup("live", true, true, true);
@@ -195,7 +198,7 @@ fn live_disable_moves_extra_into_lookup() {
             .all(|c| c.text != "甘蓝菜")
     );
     assert!(rev_texts(&m, "aaaz", "aaa?").contains(&"甘蓝菜".to_string()));
-    assert!(!wc_texts(&m, "aaaz", "aaa?").contains(&"甘蓝菜".to_string()));
+    assert!(wc_texts(&m, "aaaz", "aaa?").contains(&"甘蓝菜".to_string()));
 }
 
 /// spec §4.3：未启用库文件缺失 ⇒ 跳过（warn），反查照常出主库结果。
@@ -299,4 +302,21 @@ fn no_variant_index_file_is_written() {
             .all(|n| *n == regular),
         "{names:?}"
     );
+}
+
+/// 剪贴板反查专用入口 `disabled_dict_codes`：开关开才有，码带 `*`；注释反查仍不认。
+#[test]
+fn clipboard_reverse_sees_disabled_extra_only_when_switch_on() {
+    let (m, id, _g) = setup("clip", true, true, true);
+    assert!(m.prewarm_reverse_index(&id));
+    m.prewarm_disabled_dicts(&id);
+    assert_eq!(m.disabled_dict_codes("门头沟区"), ["*uuia"]);
+    assert!(
+        m.disabled_dict_codes("立法").is_empty(),
+        "已启用库的词不重复列"
+    );
+    assert_eq!(m.codetable_reverse_hint("门头沟区").as_deref(), Some(""));
+    let (off, id2, _g2) = setup("clip_off", false, true, true);
+    assert!(off.prewarm_reverse_index(&id2));
+    assert!(off.disabled_dict_codes("门头沟区").is_empty());
 }

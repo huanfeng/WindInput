@@ -54,7 +54,7 @@ pub struct CandidateWindow {
     /// 而这里要的是"整条列表里的第几个"。
     pub selected: usize,
     /// 与 [`Self::items`] 一一对应的候选注释（候选右侧灰字：码表的剩余编码、拼音候选的
-    /// 反查码…，模板即 `ui.candidate.comment_template_*` 横排那一份）。只有
+    /// 反查码…，按横排那一格的注释模板渲染）。只有
     /// [`Coordinator::candidate_window_with_comments`] 填它，[`Coordinator::candidate_window`]
     /// 恒空——注释要逐条求值（反查、注释库），不要的宿主不该为它付钱。
     pub comments: Vec<String>,
@@ -211,10 +211,8 @@ impl Coordinator {
         end: usize,
     ) -> Vec<String> {
         let rt = self.rt();
-        let behavior = self.engine_mgr.active_behavior();
-        let tpl = crate::comment::Template::parse(
-            self.comment_template_for(&rt.config, state, &behavior, false),
-        );
+        let tpl =
+            crate::comment::Template::parse(&self.comment_template_for(&rt.config, state, false));
         let max = rt.config.ui.candidate.comment_max_chars(false);
         let ctx = self.tooltip_eval_ctx(state, &rt.tooltip);
         let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
@@ -227,7 +225,7 @@ impl Coordinator {
                     ctx.mix_comment_scope,
                     &ctx.comment_dict_schema,
                 );
-                self.comment_for(c, &tpl, max, &reverse, ctx.hint_source, &dict_schema)
+                self.comment_for(c, &tpl, max, &reverse, &dict_schema)
                     .as_str()
                     .to_string()
             })
@@ -247,7 +245,7 @@ impl Coordinator {
     /// 只有越界、`$CC` 命令候选（已异步执行）、组折叠候选（已就地展开）返回 `passthrough`
     /// （`consumed=false`、无 ops）。
     pub fn select_candidate(&self, index: usize) -> KeyOutcome {
-        match self.select_candidate_at(index) {
+        match self.select_candidate_from(index, crate::session_exit::ActionOrigin::MobilePick) {
             Some(action) => edit_ops::to_outcome(action),
             None => KeyOutcome::passthrough(),
         }

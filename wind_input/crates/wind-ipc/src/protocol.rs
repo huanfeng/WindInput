@@ -36,6 +36,10 @@ pub const CMD_COMPOSITION_TERMINATED: u16 = 0x0209;
 pub const CMD_SHOW_CONTEXT_MENU: u16 = 0x020A;
 pub const CMD_SYSTEM_MODE_SWITCH: u16 = 0x020B;
 pub const CMD_INPUT_STATE_REPORT: u16 = 0x0213;
+/// 旁路按键（上行，异步，仅 Windows DLL）：DLL 放行给宿主、核心本看不见的用户按键（英文模式的
+/// 字母数字、无会话时的退格回车……），只为扩展程序上报，**不进按键处理**。只在服务端推开
+/// [`CONFIG_KEY_EXTENSION_KEY_OBSERVE`] 时发，密码框与键盘禁用时不发。载荷见 [`KeyObservedPayload`]。
+pub const CMD_KEY_OBSERVED: u16 = 0x021D;
 /// 诊断快照（上行，异步）：焦点窗口链 + 前台窗口 + TSF 上下文实例 id。载荷见
 /// [`DiagSnapshotPayload`]。
 ///
@@ -240,11 +244,14 @@ pub const CMD_CARET_PENDING: u16 = 0x0303;
 pub const CMD_CARET_PROBE: u16 = 0x0304;
 
 // Host Render
+/// DLL 请求 host-render。载荷可缺省（旧 DLL）；新 DLL 带 4 字节能力位（u32 LE，`HOST_RENDER_CAP_*`）。
 pub const CMD_HOST_RENDER_REQUEST: u16 = 0x0501;
+/// 能力位：DLL 能把穿透装饰层（`SharedRenderHeader::FLAG_PASS_LAYER`）画进单独的穿透窗口。
+pub const HOST_RENDER_CAP_PASS_LAYER: u32 = 0x0001;
 
 // darwin 专用 host-render push 帧（方向与上行 0x05xx 由 push 通道语义区分）。
 // 字节布局须与 Swift wind_macos/.../BinaryCodec.swift decoder 及 Go binary_codec.go 一致。
-pub const CMD_HOST_RENDER_FRAME: u16 = 0x0502; // SHM 新帧就绪通知 (seq+几何+flags+scale, 28B)
+pub const CMD_HOST_RENDER_FRAME: u16 = 0x0502; // SHM 新帧就绪通知 (seq+几何+flags+scale+内容偏移+上方点与落位框, 60B)
 pub const CMD_CANDIDATE_RECTS: u16 = 0x0503; // 候选命中矩形 (panel-local)
 pub const CMD_MODE_STATUS: u16 = 0x0504; // 输入模式状态 (菜单栏指示器)
 pub const CMD_MENU_SHOW: u16 = 0x0506; // 统一菜单树 (响应 CmdShowContextMenu)
@@ -263,6 +270,26 @@ pub const CMD_KEY_TYPE: u16 = 0x0512; // 整段 UTF-8 文本（无长度前缀�
 /// 有新帧 / 该隐藏」并带上落位规则。
 /// 布局见 [`crate::codec::encode_overlay_frame`]，常量见 [`overlay`]。
 pub const CMD_OVERLAY_FRAME: u16 = 0x0513;
+/// 候选窗异形皮肤的区域（外部宿主）：窗体矩形、各装饰矩形与鼠标策略、输入区。每个候选帧在
+/// [`CMD_HOST_RENDER_FRAME`] 之前推一条（前端贴这一帧时就用上它），没启用皮肤时 `flags = 0`。布局见
+/// [`crate::codec::encode_candidate_skin`]，常量见 [`skin`]，设计见 theme-skin-animation.md §17.2。
+pub const CMD_CANDIDATE_SKIN: u16 = 0x0514;
+
+/// [`CMD_CANDIDATE_SKIN`] 的枚举值。全部 `u32` 且名字全局唯一（`protocol_sync_test` 逐个比对）。
+pub mod skin {
+    /// `flags`：本帧启用了皮肤。
+    pub const SKIN_FLAG_ACTIVE: u32 = 0x0001;
+    /// `flags`：带输入区表（只 Linux 发；macOS 按 alpha 自动穿透）。
+    pub const SKIN_FLAG_MASK: u32 = 0x0002;
+    /// 装饰的 `hit`。
+    pub const SKIN_HIT_DRAG: u32 = 0;
+    pub const SKIN_HIT_BLOCK: u32 = 1;
+    pub const SKIN_HIT_PASS: u32 = 2;
+    /// 装饰的 `flags`：在窗体下面（z < 0）。
+    pub const SKIN_DECOR_UNDER: u32 = 0x0001;
+    /// 装饰的 `flags`：穿透装饰画在独立层（macOS 子 panel），不在主缓冲。
+    pub const SKIN_DECOR_SPLIT: u32 = 0x0002;
+}
 
 /// [`CMD_OVERLAY_FRAME`] 的枚举值。全部 `u32` 且名字全局唯一：`wind_linux/tests/protocol_sync_test.cpp`
 /// 按 `pub const NAME: u32 = …` 逐个比对 `wind_linux/include/ExtProtocol.h`。
@@ -281,6 +308,9 @@ pub mod overlay {
     /// 指针事件走 [`super::CMD_PANEL_POINTER`]。
     pub const OVERLAY_KIND_TOOLBAR: u32 = 10;
     pub const OVERLAY_KIND_SOFTKEYBOARD: u32 = 11;
+    /// 候选窗的穿透装饰层（macOS）：与候选窗同原点同尺寸，`.app` 挂成候选窗的子 panel、不收鼠标。
+    /// 落位恒为 `OVERLAY_PLACE_EXACT`，坐标即候选窗建议落点（`.app` 跟着候选窗走，不读它）。
+    pub const OVERLAY_KIND_DECOR: u32 = 12;
 
     /// 落位方式（place）。坐标一律指**内容盒**左上（不含软阴影扩边），宿主减去
     /// `content_x/y` 得窗口左上。
@@ -363,6 +393,16 @@ pub mod ext_kind {
     pub const POS_SOFTKEYBOARD: &str = "pos.softkeyboard";
     /// 上行（Linux addon）：焦点宿主进入 / 退出全屏。body = `{"fullscreen":bool}`。
     pub const HOST_FULLSCREEN: &str = "host.fullscreen";
+    /// 上行（macOS `.app` / Linux addon）：系统「减少动态效果」。body = `{"reduce":bool}`。连上服务时报一次、
+    /// 系统设置变化时再报（macOS `NSWorkspace.accessibilityDisplayShouldReduceMotion`；Linux 读设置门户与
+    /// kdeglobals，读不到就不报）；服务端以它为准，没收到时 macOS 退回读偏好、Linux 按允许（见
+    /// `wind_ui::candidate_window::set_host_reduce_motion`）。
+    pub const HOST_REDUCE_MOTION: &str = "host.reduce_motion";
+    /// 上行（Linux addon / macOS `.app`）：在候选窗的皮肤装饰（`drag` / `block`）上点了一下。body =
+    /// `{"index":N}`，`N` 是 `CMD_CANDIDATE_SKIN` 装饰表里的 `index`（变体 `decor` 下标）。判定同 Windows：
+    /// 按下与松开在同一块最上层的装饰上、没挪过拖动阈值；窗体下面的装饰被窗体盖住处不算。服务端给这块
+    /// 装饰触发 `click` 事件（设计 theme-skin-animation.md §16 / §17.2）。
+    pub const SKIN_DECOR_CLICK: &str = "skin.decor_click";
     /// 下行：问 `.app` 候选窗此刻在哪，答案走上行 [`POS_CANDIDATE`]。body 空。
     pub const POS_CANDIDATE_QUERY: &str = "pos.candidate.query";
     /// 下行：问宿主（`.app` / Linux addon）状态气泡此刻在哪，答案走上行 [`POS_STATUS_TIP`]。
@@ -566,6 +606,9 @@ pub const CONFIG_KEY_DIAG_SNAPSHOT: &str = "diag_snapshot";
 /// 向后兼容：DLL 的 `PlaceholderForKind` 对**认不出的值一律回落空格**，所以只认 0/1 的旧 DLL
 /// 收到 2 时兜底占位是空格（历史行为），不会出错；新加档位照此只追加、不复用旧值。
 pub const CONFIG_KEY_COMPOSITION_PLACEHOLDER: &str = "composition_placeholder";
+/// 中数间补空格（`input.spacing.cjk_digit` 且本应用 compat 未关）：DLL 据此把汉字后的数字吃下
+/// 交给 core。值 enabled(u8)，按客户端现算，推送时机同 [`CONFIG_KEY_COMPOSITION_PLACEHOLDER`]。
+pub const CONFIG_KEY_SPACE_BEFORE_DIGIT: &str = "space_before_digit";
 /// 含换行的上屏是否改走剪贴板粘贴同步键名。格式：`mode(u8)`，0 = commit（TSF 上屏，默认）、
 /// 1 = paste（结束组合后写剪贴板 + 注入 Ctrl+V）。
 ///
@@ -581,6 +624,10 @@ pub const CONFIG_KEY_MULTILINE_COMMIT: &str = "multiline_commit";
 /// 发出的 FocusGained 没带标题，会补发一次。
 /// DLL 每次重连从默认值（关）起步，故**握手必推**（`diag_snapshot` 同型）。
 pub const CONFIG_KEY_COMPAT_TITLE_MATCH: &str = "compat_title_match";
+/// 「有扩展订阅按键」开关同步键名（仅 Windows DLL）。格式：`enabled(u8)`。开着时 DLL 把放行给
+/// 宿主的用户按键经 [`CMD_KEY_OBSERVED`] 旁路上报。DLL 每次重连从关起步，故**握手必推**；
+/// 扩展授权变化时广播。
+pub const CONFIG_KEY_EXTENSION_KEY_OBSERVE: &str = "extension_key_observe";
 /// `CONFIG_KEY_COMPOSITION_PLACEHOLDER` 的取值：空格 U+0020（默认）。
 pub const COMPOSITION_PLACEHOLDER_SPACE: u8 = 0;
 /// `CONFIG_KEY_COMPOSITION_PLACEHOLDER` 的取值：ZWSP U+200B。
@@ -733,10 +780,16 @@ impl fmt::Debug for IpcHeader {
 }
 
 // ──────────────────────────────────────────────
-// Key Payload (18 bytes)
+// Key Payload (20 bytes)
 // ──────────────────────────────────────────────
 
-/// 按键事件载荷 (18 bytes)
+/// 按键事件载荷 (20 bytes)。
+///
+/// `seq_char`（偏移 18）是后加的：18 字节的旧包照收，该字段读成 0。
+///
+/// 两个「不知道」要分开：`0` = 客户端根本不报（旧版），[`SEQ_CHAR_UNKNOWN`] = 客户端在记账、
+/// 但这一刻不知道光标前是什么（导航键、焦点刚切过来）。前者服务端会退回自己的记录保住旧行为，
+/// 后者不会——否则回车换行后行首也会被补上一个空格。
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
 pub struct KeyPayload {
@@ -747,10 +800,17 @@ pub struct KeyPayload {
     pub toggles: u8,    // 锁定态 CapsLock/NumLock/ScrollLock + 搭车位，见 `TOGGLE_*` 常量
     pub event_seq: u16,
     pub prev_char: u16,
+    /// 输入序列里最近进文档的字符代表值，0 = 不可知（C++ `InputSequenceChar.h`）。
+    pub seq_char: u16,
 }
 
+/// [`KeyPayload::seq_char`] 的「在记账、但不知道」（U+FFFF 是非字符，不会是任何上屏文本的末字）。
+pub const SEQ_CHAR_UNKNOWN: u16 = 0xFFFF;
+
 impl KeyPayload {
-    pub const SIZE: usize = 18;
+    pub const SIZE: usize = 20;
+    /// 不带 `seq_char` 的旧布局长度。
+    pub const LEGACY_SIZE: usize = 18;
 
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
@@ -761,11 +821,12 @@ impl KeyPayload {
         buf[13] = self.toggles;
         buf[14..16].copy_from_slice(&self.event_seq.to_le_bytes());
         buf[16..18].copy_from_slice(&self.prev_char.to_le_bytes());
+        buf[18..20].copy_from_slice(&self.seq_char.to_le_bytes());
         buf
     }
 
     pub fn from_bytes(buf: &[u8]) -> Option<Self> {
-        if buf.len() < Self::SIZE {
+        if buf.len() < Self::LEGACY_SIZE {
             return None;
         }
         Some(Self {
@@ -776,6 +837,11 @@ impl KeyPayload {
             toggles: buf[13],
             event_seq: u16::from_le_bytes([buf[14], buf[15]]),
             prev_char: u16::from_le_bytes([buf[16], buf[17]]),
+            seq_char: if buf.len() >= Self::SIZE {
+                u16::from_le_bytes([buf[18], buf[19]])
+            } else {
+                0
+            },
         })
     }
 }
@@ -1046,6 +1112,38 @@ impl FocusGainedPayload {
             disabled,
             reason,
             caret_source,
+        })
+    }
+}
+
+// ──────────────────────────────────────────────
+// Key Observed Payload (8 bytes)
+// ──────────────────────────────────────────────
+
+/// `CMD_KEY_OBSERVED` 载荷：`key_code u32` + `modifiers u32`（`MOD_*`，与按键帧同一套位）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyObservedPayload {
+    pub key_code: u32,
+    pub modifiers: u32,
+}
+
+impl KeyObservedPayload {
+    pub const SIZE: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut b = [0u8; Self::SIZE];
+        b[0..4].copy_from_slice(&self.key_code.to_le_bytes());
+        b[4..8].copy_from_slice(&self.modifiers.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            key_code: u32::from_le_bytes(buf[0..4].try_into().ok()?),
+            modifiers: u32::from_le_bytes(buf[4..8].try_into().ok()?),
         })
     }
 }
@@ -1416,7 +1514,10 @@ pub struct SharedRenderHeader {
     pub rects_offset: u32,         // @44 hit 矩形表相对 SHM 基址偏移
     pub rendered_hover_index: i32, // @48 高亮候选索引（-1 无 / -2,-3 翻页）
     pub target_instance_id: u32,   // @52 darwin 忽略
-    pub reserved: [u32; 2],        // @56..64
+    /// @56 穿透装饰层（[`Self::FLAG_PASS_LAYER`]）像素相对 SHM 基址的偏移，与主层同尺寸同 stride；
+    /// 0 = 本帧没有。只 Windows DLL host-render 用。
+    pub pass_offset: u32,
+    pub reserved: u32, // @60..64
 }
 
 impl SharedRenderHeader {
@@ -1432,6 +1533,15 @@ impl SharedRenderHeader {
     /// 固定点靠近屏幕底边就会被莫名弹到顶上。置本位即告诉 `.app`：照搬坐标，只做屏幕
     /// 边界钳制，不要翻转。
     pub const FLAG_ABSOLUTE_POS: u32 = 0x0008;
+    /// 换帧：内容没变，只换了皮肤装饰的动画帧。外部宿主照原位贴图，不重新落位、不重排 z 序
+    /// （X11 每帧 raise 会压住 tooltip 与菜单）。旧宿主不认这一位，按普通帧处理。
+    pub const FLAG_ANIM_FRAME: u32 = 0x0010;
+    /// 帧带一层穿透装饰（`hit = "pass"`，在 [`Self::pass_offset`]）：主层不含它们，DLL 画进第二个
+    /// `WS_EX_TRANSPARENT` 窗口，点击直达宿主（设计 theme-skin-animation.md §17.8）。只在 DLL
+    /// 声明了 [`HOST_RENDER_CAP_PASS_LAYER`] 时发，旧 DLL 收到的仍是合成好的单层。
+    pub const FLAG_PASS_LAYER: u32 = 0x0020;
+    /// 穿透装饰全在窗体下（z < 0）：穿透窗口排在候选窗下面，否则在上面。
+    pub const FLAG_PASS_BELOW: u32 = 0x0040;
 
     pub fn new(x: i32, y: i32, width: u32, height: u32, stride: u32, data_size: u32) -> Self {
         Self {
@@ -1449,7 +1559,8 @@ impl SharedRenderHeader {
             rects_offset: 0,
             rendered_hover_index: -1,
             target_instance_id: 0,
-            reserved: [0; 2],
+            pass_offset: 0,
+            reserved: 0,
         }
     }
 
@@ -1679,14 +1790,19 @@ pub const TOGGLE_CAPSLOCK: u8 = 0x01;
 /// （`ipc_failed_*`、只读上下文、Ctrl/Alt 清理透传……）同样置位。那些置位都是对的——键确实
 /// 进了宿主、文档可能变了——而宽的这一侧恰好是安全方向（多报 = 用户重按一次 press1）。
 ///
-/// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的 18 字节布局（两端各有
-/// static_assert，加字段即协议破坏，而真机上 DLL 与 core 会混搭版本）。两个方向都安全：
+/// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的布局（两端各有
+/// static_assert，而真机上 DLL 与 core 会混搭版本；后来的 `seq_char` 只敢追加在末尾）。两个方向都安全：
 /// 旧 core 只读 bit0，旧 DLL 不置位 = 「没透传过」= 原行为。
 ///
 /// 唯一消费者是智能符号的武装态：英文半角下 TSF 只吃标点键，中间打的字母全透传，服务端
 /// 既收不到按键事件、又没有编码缓冲，两道既有判据都够不着，只能靠 DLL 报这个事实。
 /// 失效方向是安全的——多报一次只是让用户重按一次 press1，漏报则会删掉用户刚打的字。
 pub const TOGGLE_PASSTHROUGH_KEY: u8 = 0x08;
+
+/// `EVENT_MOD_UP` 上的「平台看见过别的输入」：这次按住期间有服务端看不见的键（透传给宿主的
+/// Ctrl+C、`WM_HOTKEY` 之外的组合键……）或鼠标操作（Ctrl+点击），松开不算单击。
+/// 服务端自己也记按住期间送到的键，两者取并。
+pub const TOGGLE_MOD_NOT_TAP: u8 = 0x10;
 
 /// 计算热键哈希值：(modifiers << 16) | (keyCode & 0xFFFF)
 pub fn calc_key_hash(modifiers: u32, key_code: u32) -> u32 {
@@ -1754,8 +1870,8 @@ pub const MODE_SWITCH_SOURCE_MASK: u32 = 0xF000_0000;
 
 /// 这次 compartment 变化发生时 **Ctrl 正被按住**（由 DLL 现场取 `GetAsyncKeyState`）。
 ///
-/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 关 IME」。两者走
-/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_close` 必须放过
+/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 切中英」。两者走
+/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_switch` 必须放过
 /// 前者（否则该应用里系统热键彻底失灵）。判据由**发起方交代**，服务端不去猜——同款
 /// 判据已在 C++ 的 CapsLock 联动抑制窗用过并经真机验证。
 pub const MODE_SWITCH_CTRL_HELD: u32 = 0x0800_0000;
@@ -1812,6 +1928,10 @@ pub const COMMIT_FLAG_CHINESE_MODE: u16 = 0x0004;
 // bit3 已被 CommitText 的 replacingHeld 占用（见 encode_commit_text_replacing_held），
 // barrier 的 CommitResult 路径不用它——此处登记以免同一位被挪作他用。
 pub const COMMIT_FLAG_REPLACING_HELD: u16 = 0x0008;
+// bit4 曾用于「上屏后候选窗仍有内容」，已废弃勿复用（见 BinaryProtocol.h）。
+/// 本次上屏之后处于「无占位的联想会话」（compat `assoc_placeholder = "none"`）：宿主里没有
+/// 组合，DLL 须**同步**把它记成有输入会话，才能赢得下一次 `OnTestKeyDown` 的竞速。
+pub const COMMIT_FLAG_ASSOC_SESSION: u16 = 0x0020;
 
 // ──────────────────────────────────────────────
 // Event type
@@ -1820,9 +1940,51 @@ pub const COMMIT_FLAG_REPLACING_HELD: u16 = 0x0008;
 pub const EVENT_KEY_DOWN: u8 = 0;
 pub const EVENT_KEY_UP: u8 = 1;
 
+/// 候选窗显示时 Ctrl（0xA2 / 0xA3）的**如实上报**：按下与松开原样送来，单击由服务端判
+/// （`wind-coordinator` 的 `handle_ctrl_raw`）。平台不吃 Ctrl；回包只为同步状态，吃不吃不看它。
+///
+/// 配对规则：平台在**按下那一刻**定这次按住走哪条路——有输入会话就发 `EVENT_MOD_DOWN`、松开发
+/// `EVENT_MOD_UP`（哪怕那时候选已关），否则走原「平台判单击、只送确认过的 `EVENT_KEY_UP`」，
+/// 一次按住只走一条路，不会两边各报一次。
+///
+/// 另起事件类型而不搭 `EVENT_KEY_*`：旧 core 对未知类型一律放行（`handle_key_event` 只认 0 / 1），
+/// 新 DLL 配旧 core 时不会把长按、组合键误当单击；旧 DLL 不发，新 core 照旧。
+pub const EVENT_MOD_DOWN: u8 = 2;
+pub const EVENT_MOD_UP: u8 = 3;
+
 #[cfg(test)]
 mod input_diag_wire_tests {
     use super::*;
+
+    #[test]
+    fn key_payload_round_trips_seq_char() {
+        let p = KeyPayload {
+            key_code: 0x41,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: 0,
+            toggles: 0,
+            event_seq: 3,
+            prev_char: 0x31,
+            seq_char: 0x4F60,
+        };
+        let back = KeyPayload::from_bytes(&p.to_bytes()).expect("20 字节可解");
+        assert_eq!({ back.prev_char }, 0x31);
+        assert_eq!({ back.seq_char }, 0x4F60);
+    }
+
+    #[test]
+    fn key_payload_legacy_18_bytes_reads_seq_char_as_unknown() {
+        // 旧 DLL / 旧 macOS 客户端的 18 字节包：照收，seq_char = 0（不可知）。
+        let mut buf = [0u8; 18];
+        buf[0..4].copy_from_slice(&0x41u32.to_le_bytes());
+        buf[16..18].copy_from_slice(&0x35u16.to_le_bytes());
+        let p = KeyPayload::from_bytes(&buf).expect("18 字节旧包仍可解");
+        assert_eq!({ p.key_code }, 0x41);
+        assert_eq!({ p.prev_char }, 0x35);
+        assert_eq!({ p.seq_char }, 0);
+        assert!(KeyPayload::from_bytes(&buf[..17]).is_none());
+    }
 
     #[test]
     fn focus_gained_backward_compat_36_bytes() {
@@ -1845,6 +2007,18 @@ mod input_diag_wire_tests {
         let p = FocusGainedPayload::from_bytes(&buf).unwrap();
         assert_eq!(p.disabled, 1);
         assert_eq!(p.reason, 2);
+    }
+
+    #[test]
+    fn key_observed_roundtrip() {
+        let p = KeyObservedPayload {
+            key_code: 0x41,
+            modifiers: MOD_SHIFT,
+        };
+        let bytes = p.to_bytes();
+        assert_eq!(bytes.len(), KeyObservedPayload::SIZE);
+        assert_eq!(KeyObservedPayload::from_bytes(&bytes), Some(p));
+        assert_eq!(KeyObservedPayload::from_bytes(&bytes[..7]), None);
     }
 
     #[test]

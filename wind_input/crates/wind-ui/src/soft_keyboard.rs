@@ -52,10 +52,48 @@ use crate::mac_panel::MacPanel as PanelWindow;
 use crate::window::LayeredWindow as PanelWindow;
 use wind_ui_types::{
     SOFT_FN_CAPS_INDEX, SOFT_FN_KEYS, SOFT_TAG_CLOSE, SOFT_TAG_CTRL, SOFT_TAG_ESC,
-    SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE, SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_SHIFT,
-    SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT, SoftKeyCap, UiEvent,
-    fn_key_repeats, slot_layer,
+    SOFT_TAG_FN_BASE, SOFT_TAG_PAGE_BASE, SOFT_TAG_PAGE_NEXT, SOFT_TAG_PAGE_PREV, SOFT_TAG_PIN,
+    SOFT_TAG_SHIFT, SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT, SoftKeyCap,
+    UiEvent, fn_key_repeats, slot_layer,
 };
+
+/// 钉住图标边长（dp）。
+const PIN_ICON_DP: f32 = 13.0;
+
+/// 钉住按钮的两张图标，转成 `data:` URI 一次（`ViewImage` 的源是字符串，且填充缓存以它为键）。
+fn pin_icon(pinned: bool, tint: [u8; 4], size: f32) -> crate::view::ViewImage {
+    use base64::Engine as _;
+    use std::sync::OnceLock;
+    static URIS: OnceLock<[String; 2]> = OnceLock::new();
+    let uris = URIS.get_or_init(|| {
+        let enc = |svg: &str| {
+            format!(
+                "data:image/svg+xml;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(svg)
+            )
+        };
+        [
+            enc(include_str!("../res/icons/pin_off.svg")),
+            enc(include_str!("../res/icons/pin_on.svg")),
+        ]
+    });
+    crate::view::ViewImage {
+        path: uris[usize::from(pinned)].clone(),
+        mode: String::new(),
+        slice: [0.0; 4],
+        slice_repeat: [false; 2],
+        opacity: 1.0,
+        tint: Some(tint),
+        place: Some(crate::view::ImagePlace {
+            anchor: "center".into(),
+            w: size.round(),
+            h: size.round(),
+            ..Default::default()
+        }),
+        scale: 1.0,
+        flip: wind_theme::Flip::NONE,
+    }
+}
 
 /// 每行的键位个数，与 `wind_softkeyboard::KEY_ROWS` 同构（数字行 / QWERTY / ASDF / ZXCV）。
 ///
@@ -381,6 +419,8 @@ pub struct SoftKeyboard {
     caps_on: bool,
     /// 当前面是键盘面：CapsLock 参与字母键的档位显示（见 [`Self::cap_layer`]）。
     send_keys: bool,
+    /// 钉住：只管按钮高亮，真相在协调器（经 `SoftKeyboardPinned` 下发）。隐藏时复位。
+    pinned: bool,
     /// 面板上的 Ctrl 处于粘滞状态：下一次点键位合成 `ctrl+键`，然后自动熄灭。
     ///
     /// ★ 与 Shift 的锁定不同，它**不是层选择器**——Ctrl 不改变键帽上画什么，
@@ -453,6 +493,7 @@ impl SoftKeyboard {
             shift_locked: false,
             caps_on: false,
             send_keys: false,
+            pinned: false,
             ctrl_latched: false,
             tab_scroll: 0.0,
             last_shown_page: usize::MAX,
@@ -578,7 +619,18 @@ impl SoftKeyboard {
         self.render();
     }
 
+    /// 钉住状态变了：只重画按钮。
+    pub fn set_pinned(&mut self, pinned: bool) {
+        if self.pinned != pinned {
+            self.pinned = pinned;
+            if self.visible {
+                self.render();
+            }
+        }
+    }
+
     pub fn hide(&mut self) {
+        self.pinned = false;
         if self.visible {
             self.visible = false;
             self.reset_mouse();
@@ -757,6 +809,10 @@ impl SoftKeyboard {
         }
         if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
             let _ = self.events.send(UiEvent::SoftKeyboardClose);
+            return;
+        }
+        if tag == SOFT_TAG_PIN {
+            let _ = self.events.send(UiEvent::SoftKeyboardPin);
             return;
         }
         if tag == SOFT_TAG_PAGE_PREV || tag == SOFT_TAG_PAGE_NEXT {
@@ -1012,12 +1068,46 @@ impl SoftKeyboard {
         } else {
             ([0, 0, 0, 0], c.hint)
         };
+        // 钉住态用强调色底，未钉住与关闭按钮同一套悬停/按下配色。
+        let pin_down = pressed == SOFT_TAG_PIN;
+        let (pin_bg, pin_fg) = if pin_down || self.pinned {
+            (c.accent_soft, c.accent)
+        } else if hover == SOFT_TAG_PIN {
+            (c.hover, c.ink)
+        } else {
+            ([0, 0, 0, 0], c.hint)
+        };
         root = root.child(
             View::container(Layout::Row)
                 .fill_cross()
                 .fixed_h(GRIP_ROW_H_DP * s)
                 .cross(Align::Center)
-                .child(View::container(Layout::Row).fixed_w(close_w))
+                .child(
+                    // 钉住按钮：与关闭按钮左右对称，同样向左上溢出吃回内边距（原理见下面
+                    // 关闭按钮的注释），margin_box 仍等于 close_w × 行高，拖动条保持精确居中。
+                    View::container(Layout::Row)
+                        .fixed_w(close_w + close_inset)
+                        .fixed_h(close_h)
+                        .margin(Edges {
+                            t: -close_rise,
+                            l: -close_inset,
+                            ..Default::default()
+                        })
+                        .radius(close_h * 0.5)
+                        .bg(pin_bg)
+                        .border(
+                            if pin_down { c.accent } else { [0, 0, 0, 0] },
+                            (1.0 * s).max(1.0),
+                        )
+                        .tag(SOFT_TAG_PIN)
+                        // 图标两态各一张 SVG（未钉住=描边斜放，已钉住=实心竖直），按文字色 tint；
+                        // 不用字符：emoji 在各平台字体里形状、彩色与否都不一致，且看不出开关。
+                        //
+                        // ★ 图直接挂在这个**有固定宽高**的按钮节点上，不要套一层无内容的子容器：
+                        // 定位图按 host 节点盒居中并裁到节点盒内，空容器的高度会塌成 0，
+                        // 结果只剩顶上一条线（实测）。
+                        .bg_image(pin_icon(self.pinned, pin_fg, PIN_ICON_DP * s)),
+                )
                 .child(View::spacer().grow())
                 .child(
                     View::container(Layout::Row)
@@ -1541,7 +1631,6 @@ impl SoftKeyboard {
     }
 
     /// 面板控制键（翻页 / 关闭）：不合成按键，语义各自不同。
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn ctrl_key(
         &self,
@@ -2846,6 +2935,58 @@ mod tests {
         assert!(!drags_panel(SOFT_TAG_PAGE_BASE), "标签");
         assert!(!drags_panel(SOFT_TAG_TAB_LEFT), "左箭头");
         assert!(!drags_panel(SOFT_TAG_CLOSE), "关闭");
+        assert!(!drags_panel(SOFT_TAG_PIN), "钉住");
+        assert!(!is_page_tag(SOFT_TAG_PIN), "钉住不是面");
+    }
+
+    /// 两张钉住图标必须能解析且有墨：`rasterize_svg_str_tinted` 解析失败返回 `None`，
+    /// 绘制侧见 `None` 就静默不画——SVG 写错的表现是按钮上什么都没有，其余测试照样绿。
+    #[test]
+    fn pin_icons_rasterize_with_ink() {
+        for (name, svg) in [
+            ("pin_off", include_str!("../res/icons/pin_off.svg")),
+            ("pin_on", include_str!("../res/icons/pin_on.svg")),
+        ] {
+            let pm = crate::image_cache::rasterize_svg_str_tinted(svg, 13, 13, [0, 0, 0, 255])
+                .unwrap_or_else(|| panic!("{name}.svg 解析失败"));
+            let inked = pm.pixels().iter().filter(|p| p.alpha() > 0).count();
+            assert!(inked >= 15, "{name} 在 13px 下只有 {inked} 个像素有墨");
+        }
+    }
+
+    /// 钉住按钮真正画出图：按 `build` 里同样的节点形状（定宽定高 + 圆角 + 负 margin）绘制，
+    /// 中心一带必须有墨。图曾挂在一个空子容器上，高度塌成 0，被裁得只剩顶上一条线——
+    /// 而上一条测试只验 SVG 能栅格化，验不出这个。
+    #[test]
+    fn pin_button_paints_its_icon() {
+        use crate::text::dwrite::TextRenderer;
+        use crate::view::{Align, Edges, Layout, View};
+        let tr = TextRenderer::new("test", 20.0).unwrap();
+        for pinned in [false, true] {
+            let mut v = View::container(Layout::Row)
+                .fixed_w(60.0)
+                .fixed_h(40.0)
+                .cross(Align::Center)
+                .child(
+                    View::container(Layout::Row)
+                        .fixed_w(32.0)
+                        .fixed_h(24.0)
+                        .margin(Edges {
+                            t: -4.0,
+                            l: -4.0,
+                            ..Default::default()
+                        })
+                        .radius(12.0)
+                        .bg_image(pin_icon(pinned, [0, 0, 0, 255], 13.0)),
+                );
+            v.layout(0.0, 0.0, &tr);
+            let (w, h) = (60usize, 40usize);
+            let mut buf = vec![0u8; w * h * 4];
+            v.paint(&mut buf, w as u32, h as u32, &tr);
+            let inked = buf.chunks(4).filter(|p| p[3] > 0).count();
+            // 13×13 的图钉至少几十个像素；塌成一条线只有十几个。
+            assert!(inked >= 30, "pinned={pinned}: 只画出 {inked} 个像素");
+        }
     }
 
     #[test]

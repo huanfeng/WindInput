@@ -202,6 +202,8 @@ pub struct ViewImage {
     pub tint: Option<Ld>,
     /// 禁用态染色（仅 footer 翻页箭头消费）。
     pub disabled_tint: Option<Ld>,
+    /// 镜像：x（左右）| y（上下）| xy；缺省不翻。只翻像素，定位与切片按源图写。
+    pub flip: Option<String>,
 }
 
 /// 渐变色停。
@@ -297,6 +299,8 @@ pub struct ViewNode {
     pub offset: Option<Dim>,
     /// 仅 accent_bar：条高 = ItemHeight × 此比例。
     pub height_ratio: Option<f32>,
+    /// 仅 divider：线粗（dp）。None=1。
+    pub height: Option<Dim>,
     /// 仅 footer_bar：上/下翻页箭头图（可 SVG + tint 随主题变色）。
     pub prev_image: Option<ViewImage>,
     pub next_image: Option<ViewImage>,
@@ -322,6 +326,10 @@ pub struct ViewNode {
     pub selected: Option<Box<ViewNode>>,
     pub hover: Option<Box<ViewNode>>,
     pub disabled: Option<Box<ViewNode>>,
+    /// 竖排覆盖（`[节点.vertical]`）。在 Value 层由 `theme::vertical_variant` 深合并进节点、
+    /// 另成一份 `Theme.vertical`，所以类型化后的这个字段本身不被读取——声明它是为了让 schema
+    /// 与主题编辑器的字段清单对得上（`pnpm check:engine`）。
+    pub vertical: Option<Box<ViewNode>>,
 }
 
 impl ViewNode {
@@ -451,6 +459,10 @@ pub struct Views {
     pub footer_bar: ViewNode,
     #[serde(default)]
     pub mode_label: ViewNode,
+    /// 编码栏与候选区之间的分隔线：颜色 = `background`（缺省取调色板 `separator`，都没有则不画）、
+    /// 线粗 = `height`、`margin` 控制间距与左右缩进、`enabled = false` 强制不画。
+    #[serde(default)]
+    pub divider: ViewNode,
     pub status: Option<ViewNode>,
     pub tooltip: Option<ViewNode>,
     pub toast: Option<ViewNode>,
@@ -503,6 +515,15 @@ pub struct Theme {
     pub behavior: Option<Behavior>,
     #[serde(default)]
     pub resources: HashMap<String, Ld>,
+    /// 异形皮肤（见 `crate::skin`）。
+    #[serde(default)]
+    /// 装箱：多数主题不配皮肤，且 `Theme` 在 serde 访问器里按值搬运，内联会抬高加载链的栈帧。
+    pub skin: Option<Box<crate::skin::Skin>>,
+    /// 竖排覆盖后的完整主题：任一视图节点写了 `[节点.vertical]` 才有，否则为 `None`。
+    /// 由 [`crate::theme::load_typed_dirs`] 在 Value 层把各节点的 `vertical` 子表深合并进
+    /// 节点后另行类型化得到（不来自 TOML 反序列化）。
+    #[serde(skip)]
+    pub vertical: Option<Box<Theme>>,
 }
 
 #[cfg(test)]

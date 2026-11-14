@@ -22,7 +22,9 @@
 //! - **用户分库的列表**：它有自己的条目数 / 文件 / 损坏状态等字段，见 `userDicts.list`，
 //!   [`list`] 只列方案文件（含发现目录）登记的附加库。
 
+use serde_json::{Value, json};
 use wind_config::schema::DictSpec;
+use wind_engine::manager::{EngineManager, EntryMatch, EntryQuery, EntrySort};
 use wind_store::user_dicts::ID_PREFIX;
 
 use crate::web_host::WebDataHost;
@@ -35,6 +37,13 @@ pub struct SchemaDictEntry {
     pub description: String,
     /// 当前生效的开关：用户覆盖 ?? 方案 `default_enabled` ?? 关。
     pub enabled: bool,
+    /// 方案文件写的分组（`group`）；发现目录登记的库没有。
+    pub group: Option<String>,
+    /// 由 `[[dictionary_dirs]]` 自动登记（`dir:` 前缀，见 `EngineManager::inject_dir_dicts`），
+    /// 不是方案文件手写的。
+    pub from_dir: bool,
+    /// 词库文件，相对 `schemas/`。
+    pub path: String,
 }
 
 /// 列出 `schema_id` 的附加词库，按方案文件顺序（发现目录登记的排在声明的之后）。
@@ -59,8 +68,164 @@ pub fn list<H: WebDataHost + ?Sized>(
             description: d.description.clone(),
             // `is_enabled` 对非主库即「enabled ?? default_enabled ?? false」，与引擎加载判据同一份
             enabled: d.is_enabled(),
+            group: d.group.clone(),
+            from_dir: d.id.starts_with(DIR_PREFIX),
+            path: d.path.clone(),
         })
         .collect())
+}
+
+/// 发现目录登记的库的 id 前缀（`EngineManager::inject_dir_dicts` 生成）。
+const DIR_PREFIX: &str = "dir:";
+
+/// `sysDict.categories`：设置端词库窗「系统词库」一级表。含主词库、不含用户分库，按实际
+/// 叠层先后排（`EngineManager::ordered_system_dicts`：拼音按方案文件顺序，码表 / 英文按
+/// `base_order`），每项带 `order`（1 起）。
+///
+/// - `source`：`"main"` 主词库 / `"bundled"` 方案文件登记 / `"dir"` 发现目录登记。
+/// - `togglable`：主库与写了 `default = true` 的库关不掉（`is_enabled` 恒真）。
+/// - `count` 读词库文件计数（`EngineManager::dict_file_entries`，与加载器同口径：`rime_pinyin`
+///   库加上一层 `import_tables` 子表，码表 / 英文只算本文件），停用的库也有；主文件不在或
+///   `columns:` 声明残缺给 null。
+/// - `label` 没写时取文件名（去 `.dict.yaml`）。
+///
+/// 非主库没有 id 的项不列（开关按 id 落盘，查看也按 id 寻址）。
+pub fn categories<H: WebDataHost + ?Sized>(h: &H, schema_id: &str) -> anyhow::Result<Value> {
+    let mgr = h.engine_mgr();
+    let merged = mgr
+        .schema_merged(schema_id)
+        .ok_or_else(|| anyhow::anyhow!("方案不存在: {schema_id}"))?;
+    let rows = EngineManager::ordered_system_dicts(&merged)
+        .into_iter()
+        .filter(|(d, main)| *main || !d.id.is_empty())
+        .enumerate()
+        .map(|(i, (d, main))| {
+            json!({
+                "id": view_id(d),
+                "label": display_label(d),
+                "description": d.description,
+                "group": d.group,
+                "enabled": d.is_enabled(),
+                "source": if main { "main" } else if d.id.starts_with(DIR_PREFIX) { "dir" } else { "bundled" },
+                "count": mgr.dict_file_entries(&d.path, d.effective_type()),
+                "order": i + 1,
+                "togglable": !main && !d.default,
+            })
+        })
+        .collect();
+    Ok(Value::Array(rows))
+}
+
+/// 查看用的库 id：方案写了 id 用 id；主库没写 id 时退到它的 `path`。
+fn view_id(d: &DictSpec) -> String {
+    if d.id.is_empty() {
+        d.path.clone()
+    } else {
+        d.id.clone()
+    }
+}
+
+/// 显示名：`label` → 文件名（去 `.dict.yaml`）→ id。
+fn display_label(d: &DictSpec) -> String {
+    if !d.label.is_empty() {
+        return d.label.clone();
+    }
+    let file = d.path.rsplit(['/', '\\']).next().unwrap_or("");
+    let stem = file.strip_suffix(".dict.yaml").unwrap_or(file);
+    if stem.is_empty() {
+        d.id.clone()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// `sysDict.header` / `sysDict.entries` 的寻址：`dict_id` 须是 [`categories`] 列出的某一项。
+fn find_system_dict<H: WebDataHost + ?Sized>(
+    h: &H,
+    schema_id: &str,
+    dict_id: &str,
+) -> anyhow::Result<(DictSpec, bool)> {
+    let merged = h
+        .engine_mgr()
+        .schema_merged(schema_id)
+        .ok_or_else(|| anyhow::anyhow!("方案不存在: {schema_id}"))?;
+    EngineManager::ordered_system_dicts(&merged)
+        .into_iter()
+        .find(|(d, main)| (*main || !d.id.is_empty()) && view_id(d) == dict_id)
+        .map(|(d, main)| (d.clone(), main))
+        .ok_or_else(|| anyhow::anyhow!("方案 {schema_id} 无系统词库 {dict_id}"))
+}
+
+/// `sysDict.header`：一本系统词库的头部信息卡片。字段见 `wind_engine::manager::DictHeader`，
+/// 另带 `id` / `label` / `source`（同 [`categories`]）。
+pub fn header<H: WebDataHost + ?Sized>(
+    h: &H,
+    schema_id: &str,
+    dict_id: &str,
+) -> anyhow::Result<Value> {
+    let (d, main) = find_system_dict(h, schema_id, dict_id)?;
+    let head = h.engine_mgr().dict_header(&d.path, d.effective_type())?;
+    let mut v = serde_json::to_value(head)?;
+    if let Value::Object(o) = &mut v {
+        o.insert("id".into(), json!(view_id(&d)));
+        o.insert("label".into(), json!(display_label(&d)));
+        let source = if main {
+            "main"
+        } else if d.id.starts_with(DIR_PREFIX) {
+            "dir"
+        } else {
+            "bundled"
+        };
+        o.insert("source".into(), json!(source));
+    }
+    Ok(v)
+}
+
+/// `sysDict.entries`：只读词条分页，`{total, rows: [{code, text, weight, table}]}`。
+/// `query` 空 = 不过滤；`mode` 缺省（`None`）= 编码前缀或词文本子串，`"code"` / `"text"` 只看
+/// 一边。`sort` 为 `"code"` / `"text"` / `"weight"` 时按该列排（`order` 为 `"desc"` 降序，
+/// 否则升序），缺省按文件顺序。读文本不持引擎锁，见 `wind_engine::manager::dict_view`。
+#[allow(clippy::too_many_arguments)]
+pub fn entries<H: WebDataHost + ?Sized>(
+    h: &H,
+    schema_id: &str,
+    dict_id: &str,
+    query: &str,
+    mode: Option<&str>,
+    sort: Option<&str>,
+    order: Option<&str>,
+    offset: u64,
+    limit: usize,
+) -> anyhow::Result<Value> {
+    let mode = match mode {
+        None => EntryMatch::Any,
+        Some("code") => EntryMatch::Code,
+        Some("text") => EntryMatch::Text,
+        Some(other) => anyhow::bail!("未知搜索方式: {other}"),
+    };
+    let sort = match sort {
+        None => None,
+        Some("code") => Some(EntrySort::Code),
+        Some("text") => Some(EntrySort::Text),
+        Some("weight") => Some(EntrySort::Weight),
+        Some(other) => anyhow::bail!("未知排序列: {other}"),
+    };
+    let desc = match order {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(other) => anyhow::bail!("未知排序方向: {other}"),
+    };
+    let q = EntryQuery {
+        query: query.to_string(),
+        mode,
+        sort,
+        desc,
+    };
+    let (d, _) = find_system_dict(h, schema_id, dict_id)?;
+    let page = h
+        .engine_mgr()
+        .dict_entries(&d.path, d.effective_type(), &q, offset, limit)?;
+    Ok(serde_json::to_value(page)?)
 }
 
 /// 设 `schema_id` 的附加词库 `dict_id` 启用与否：持久化后对已加载引擎即时生效。

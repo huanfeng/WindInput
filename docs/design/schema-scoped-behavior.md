@@ -270,6 +270,34 @@ mode_intent(...)                    // Option<LayoutIntent>，None = 本模式�
 
 ---
 
+### 3.4 通用折叠：任意静态 `ui.candidate.*` 偏好的方案级覆盖
+
+`layout` 有三态与手动覆盖，是手写的特例。其余「跟随活跃方案的静态偏好」（首个是
+`per_page`）不该再逐键建字段，走**一套**通用机制：
+
+| 环节 | 落点 |
+|---|---|
+| 声明 | 方案文件 / `schema_overrides/{id}.toml` 的 `[candidate]` 下写**同名叶子键**，如 `per_page = 9` |
+| 白名单 | `config_schema::SCHEMA_OVERRIDES` 里 `fold = true` 的登记；一行即开放一个键，默认不开放 |
+| 收集 | `CandidateSpec::ui`（`#[serde(flatten)]`，只反序列化方向；强类型字段不会被它截走） |
+| 校验 | `split_candidate_patch`：登记 → 注册表类型/枚举 → `value_in_domain` 补数值下限；不合格整条丢弃并进 `degraded_items` |
+| 折叠 | `UiCandidateConfig::folded_with`（序列化 → 覆盖叶子 → 反序列化），结果按配置包+方案行为的 `Arc` 身份缓存 |
+| 消费 | `Coordinator::eff_candidate()`，`Deref` 到 `UiCandidateConfig`；无补丁时零分配 |
+| 下发 | 依赖它的 UI 项在 `sync_schema_scope`（切方案）、`apply_ui_config`（热重载）、启动三处重发，目前是 `SetCandidateMinSize` |
+| 护栏 | `scheme_fold_read_gates` 拦绕过 `eff_candidate()` 的直接读取；`overridden_keys_covers_every_schema_override_entry` 自动覆盖新登记；`candidate_typed_keys_are_not_foldable` 防与强类型字段撞名 |
+
+**新增一个可被方案覆盖的键**：① 登记 `fold: true` 一行；② 把它的读取点改走 `eff_candidate()`
+（门禁会指出漏的）；③ 若有注册表表达不了的值域，在 `value_in_domain` 补一行。设置页的
+「可被方案覆盖」提示与「已被 N 个方案覆盖」由登记表自动派生，不用另改。
+
+**归属**：活跃方案（与 `layout` 同源），不是 `effective_data_schema`。按数据归属、随输入语境
+逐键变化的项（`font_family` 一类）不属于这套机制。
+
+**`per_page` 的取档**：方案只覆盖主档。`per_page_extended > 0` 时 overlay 模式（临拼 / 快捷等）
+仍用全局扩展档；`= 0`（「与主档相同」）时跟随**生效的**主档。竖排 `min_rows` 的封顶也按生效值算。
+
+---
+
 ## 四、冲突规则：代际感知的手动覆盖
 
 标点与布局共用这一套。这是本设计的核心，**两者必须同一心智模型**，否则用户要记两套规则。

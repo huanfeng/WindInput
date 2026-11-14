@@ -194,6 +194,21 @@ void TestPlacement()
     CASE("翻转后仍越界 → 夹进工作区");
     r = placePanel(100, 100, 300, 1000, Rect{0, 0, 1920, 1080}, false);
     CHECK(r.y >= 0 && r.y + 1000 <= 1080);
+
+    CASE("候选窗拖动锚：锚 > 固定位置 > 跟随光标；窗口 = 锚 − 内容偏移，只钳制不翻转");
+    const std::optional<std::pair<int32_t, int32_t>> none;
+    r = placeCandidate(100, 200, 300, 150, wa, false, none, 8, 12);
+    CHECK(r.x == 100 && r.y == 200); // 没锚：同 placePanel，不套内容偏移
+    r = placeCandidate(100, 1000, 300, 150, wa, false, none, 8, 12);
+    CHECK_EQ(r.y, 1000 - 18 - 150); // 没锚的跟随照旧翻转
+    const auto pin = std::make_optional(std::make_pair(int32_t(500), int32_t(400)));
+    r = placeCandidate(100, 200, 300, 150, wa, false, pin, 8, 12);
+    CHECK(r.x == 492 && r.y == 388); // 锚压过跟随光标
+    r = placeCandidate(640, 480, 300, 150, wa, true, pin, 8, 12);
+    CHECK(r.x == 492 && r.y == 388); // 锚压过固定位置
+    r = placeCandidate(100, 200, 300, 150, wa, false,
+                       std::make_optional(std::make_pair(int32_t(500), int32_t(1000))), 0, 0);
+    CHECK_EQ(r.y, 1080 - 150); // 锚贴底：钳制而不是翻到光标上方
 }
 
 OverlayFramePayload overlay(uint32_t place, int32_t x, int32_t y, int32_t altX, int32_t altY)
@@ -274,16 +289,215 @@ void TestHitTest()
     CHECK_EQ(hitTest(rects, 0, 0), kNoHit);
 }
 
+void TestSkinInputRegion()
+{
+    CASE("皮肤输入区：没带表 → 空 optional（缺省输入区）；带表 → 裁进位图、去掉空矩形");
+    CandidateSkin skin;
+    CHECK(!candidateInputRegion(skin, 100, 50).has_value()); // 普通主题
+    skin.flags = SKIN_FLAG_ACTIVE;
+    skin.mask = {{0, 0, 10, 10}};
+    CHECK(!candidateInputRegion(skin, 100, 50).has_value()); // 皮肤但没带表（macOS 形态）
+    skin.flags |= SKIN_FLAG_MASK;
+    skin.mask = {{-4, 2, 10, 5}, {95, 45, 20, 20}, {200, 0, 5, 5}, {3, 3, 0, 4}};
+    auto r = candidateInputRegion(skin, 100, 50);
+    CHECK(r.has_value());
+    CHECK_EQ(r->size(), size_t(2));
+    CHECK((*r)[0].x == 0 && (*r)[0].y == 2 && (*r)[0].w == 6 && (*r)[0].h == 5);
+    CHECK((*r)[1].x == 95 && (*r)[1].y == 45 && (*r)[1].w == 5 && (*r)[1].h == 5);
+    skin.mask.clear();
+    auto empty = candidateInputRegion(skin, 100, 50);
+    CHECK(empty.has_value() && empty->empty()); // 带了表但为空：整窗都不接鼠标
+
+    CASE("位图像素 → 逻辑坐标：向外取整，宽高至少 1");
+    Rect a = toLogicalCover(Rect{3, 4, 5, 1}, 2.0);
+    CHECK(a.x == 1 && a.y == 2 && a.w == 3 && a.h == 1);
+    Rect b = toLogicalCover(Rect{10, 10, 30, 15}, 1.5);
+    CHECK(b.x == 6 && b.y == 6 && b.w == 21 && b.h == 11);
+    Rect c = toLogicalCover(Rect{7, 8, 9, 10}, 1.0);
+    CHECK(c.x == 7 && c.y == 8 && c.w == 9 && c.h == 10);
+    Rect d = toLogicalCover(Rect{7, 8, 9, 10}, 0.0); // 坏缩放按 1
+    CHECK(d.w == 9);
+}
+
 } // namespace
+
+void TestDecorAt()
+{
+    CASE("装饰点击命中：最上层的 drag / block，pass 不算，窗体内的 under 不算");
+    CandidateSkin skin;
+    skin.frame = {20, 20, 100, 60};
+    skin.decor = {
+        {7, SKIN_HIT_BLOCK, SKIN_DECOR_UNDER, {0, 0, 40, 40}}, // 底层，伸进窗体左上角
+        {3, SKIN_HIT_DRAG, 0, {100, 0, 40, 40}},
+        {5, SKIN_HIT_BLOCK, 0, {120, 0, 30, 30}}, // 压在 3 上面
+        {9, SKIN_HIT_PASS, 0, {0, 70, 30, 30}},
+    };
+    CHECK_EQ(decorAt(skin, 5, 5), -1); // 皮肤没启用
+    skin.flags = SKIN_FLAG_ACTIVE;
+    CHECK_EQ(decorAt(skin, 5, 5), 7);    // 窗体外的 under 装饰
+    CHECK_EQ(decorAt(skin, 30, 30), -1); // 同一块落在窗体内：被窗体盖住
+    CHECK_EQ(decorAt(skin, 105, 5), 3);
+    CHECK_EQ(decorAt(skin, 125, 5), 5); // 重叠取上层
+    CHECK_EQ(decorAt(skin, 130, 35), 3); // 上层下方露出的一截
+    CHECK_EQ(decorAt(skin, 150, 5), -1); // 右边界开区间
+    CHECK_EQ(decorAt(skin, 5, 75), -1);  // pass 不接鼠标
+    CHECK_EQ(decorAt(skin, 60, 50), -1); // 窗体内空白
+}
+
+void TestNoDragDecor()
+{
+    CASE("不拖动区：窗体外的 block / pass 装饰；drag 装饰与窗体内照拖");
+    CandidateSkin skin;
+    skin.frame = {20, 20, 100, 60};
+    skin.decor = {
+        {7, SKIN_HIT_BLOCK, 0, {0, 0, 40, 40}}, // 伸进窗体左上角
+        {3, SKIN_HIT_DRAG, 0, {100, 0, 40, 40}},
+        {9, SKIN_HIT_PASS, 0, {0, 70, 30, 30}},
+    };
+    CHECK(!onNoDragDecor(skin, 5, 5)); // 皮肤没启用
+    skin.flags = SKIN_FLAG_ACTIVE;
+    CHECK(onNoDragDecor(skin, 5, 5));
+    CHECK(!onNoDragDecor(skin, 30, 30)); // block 伸进窗体的那截：按窗体拖
+    CHECK(!onNoDragDecor(skin, 105, 5)); // drag 装饰
+    CHECK(onNoDragDecor(skin, 5, 85));   // pass（回落成 block 时也接得到鼠标）
+    CHECK(!onNoDragDecor(skin, 60, 50)); // 窗体内空白
+    CHECK(!onNoDragDecor(skin, 40, 5));  // 右边界开区间
+}
+
+void TestContentBoxPlacement()
+{
+    // 644×197 的皮肤窗口，窗体在 (8,100) 140×68：装饰往上外扩 100、往右外扩一大截。
+    const Rect wa{0, 0, 1600, 1150};
+    const Rect box{8, 100, 470, 68};
+    CASE("放得下：窗口照服务端给的点，不因外扩挪动");
+    Rect r = placePanel(400, 300, 644, 197, wa, false, box);
+    CHECK(r.x == 400 && r.y == 300);
+
+    CASE("贴顶：只有透明外扩出了屏幕，窗体还在屏内 → 不推");
+    r = placePanel(400, -60, 644, 197, wa, false, box);
+    CHECK(r.x == 400 && r.y == -60);
+    CASE("贴顶：窗体出了屏幕 → 按窗体夹回（窗体顶 = 工作区顶）");
+    r = placePanel(400, -120, 644, 197, wa, false, box);
+    CHECK_EQ(r.y + box.y, 0);
+
+    CASE("贴右：装饰外扩出右边不推；窗体出右边才按窗体回拉");
+    r = placePanel(1050, 300, 644, 197, wa, false, box);
+    CHECK_EQ(r.x, 1050);
+    r = placePanel(1200, 300, 644, 197, wa, false, box);
+    CHECK_EQ(r.x + box.x + box.w, 1600);
+
+    CASE("贴左：窗体左溢按窗体推回");
+    r = placePanel(-20, 300, 644, 197, wa, false, box);
+    CHECK_EQ(r.x + box.x, 0);
+
+    CASE("贴底翻转按窗体高判：窗体放得下就不翻（整窗下沿虽出界）");
+    r = placePanel(400, 1150 - 197 + 10, 644, 197, wa, false, box);
+    CHECK_EQ(r.y, 1150 - 197 + 10);
+    CASE("贴底翻转：窗体放不下 → 窗体翻到光标上方（让出 18px），窗口跟着换算");
+    const int32_t y = 1100 - box.y; // 窗体顶 1100，下沿 1168 出界
+    r = placePanel(400, y, 644, 197, wa, false, box);
+    CHECK_EQ(r.y + box.y, 1100 - 18 - box.h);
+
+    CASE("固定位置：只按窗体钳制");
+    r = placePanel(400, 1200, 644, 197, wa, true, box);
+    CHECK_EQ(r.y + box.y + box.h, 1150);
+
+    CASE("拖动锚也按窗体钳制");
+    r = placeCandidate(400, 300, 644, 197, wa, false,
+                       std::make_optional(std::make_pair(int32_t(1580), int32_t(500))), 8, 100, box);
+    CHECK_EQ(r.x + box.x + box.w, 1600);
+
+    CASE("box 为空 / 退化：按整窗（旧行为）");
+    r = placePanel(1800, 200, 300, 150, Rect{0, 0, 1920, 1080}, false, Rect{0, 0, 0, 0});
+    CHECK_EQ(r.x, 1620);
+}
+
+void TestAnchorBox()
+{
+    CandidateSkin skin;
+    CASE("没启用皮肤：整个位图");
+    skin.frame = Rect{8, 100, 470, 68};
+    Rect b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.x == 0 && b.y == 0 && b.w == 644 && b.h == 197);
+    CASE("启用皮肤：窗体");
+    skin.flags = SKIN_FLAG_ACTIVE;
+    b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.x == 8 && b.y == 100 && b.w == 470 && b.h == 68);
+    CASE("窗体出了位图（皮肤与帧不同步）：退回整个位图");
+    b = candidateAnchorBox(skin, 400, 197);
+    CHECK(b.x == 0 && b.w == 400);
+    b = candidateAnchorBox(skin, 644, 160);
+    CHECK(b.y == 0 && b.h == 160);
+    skin.frame = Rect{-1, 100, 470, 68};
+    b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.x == 0 && b.w == 644);
+    skin.frame = Rect{8, 100, 0, 68};
+    b = candidateAnchorBox(skin, 644, 197);
+    CHECK(b.w == 644);
+}
+
+void TestWaylandSkinPlan()
+{
+    const Rect anchor{8, 100, 470, 68};
+    CASE("有子 surface：拆层，主 surface 只占窗体、原点在窗体左上");
+    WaylandSkinPlan p = planWaylandSkin(anchor, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Split);
+    CHECK(p.originX == 8 && p.originY == 100 && p.mainW == 470 && p.mainH == 68);
+    CASE("没有 wl_subcompositor：裁掉左 / 上外扩，右 / 下保留");
+    p = planWaylandSkin(anchor, 644, 197, false, false);
+    CHECK(p.mode == WaylandSkinMode::Clip);
+    CHECK(p.originX == 8 && p.originY == 100 && p.mainW == 636 && p.mainH == 97);
+    CASE("强制裁切压过子 surface");
+    p = planWaylandSkin(anchor, 644, 197, true, true);
+    CHECK(p.mode == WaylandSkinMode::Clip);
+    CASE("锚块就是整张：整张贴");
+    p = planWaylandSkin(Rect{0, 0, 644, 197}, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Whole && p.originX == 0 && p.mainW == 644 && p.mainH == 197);
+    CASE("只往右 / 下外扩也拆：摆位按窗体");
+    p = planWaylandSkin(Rect{0, 0, 470, 68}, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Split && p.originX == 0 && p.mainW == 470 && p.mainH == 68);
+    CASE("锚块出界：整张贴");
+    p = planWaylandSkin(Rect{200, 150, 470, 68}, 644, 197, true, false);
+    CHECK(p.mode == WaylandSkinMode::Whole && p.mainW == 644);
+    CASE("环境变量只认 1");
+    CHECK(waylandSkinClipForced("1"));
+    CHECK(!waylandSkinClipForced(nullptr));
+    CHECK(!waylandSkinClipForced("0"));
+    CHECK(!waylandSkinClipForced(""));
+    CHECK(!waylandSkinClipForced("true"));
+}
+
+void TestAnimInPlace()
+{
+    CASE("换帧照原位贴：带 ANIM 位且 SHM 就是通知的那一帧");
+    CHECK(animInPlace(FRAME_FLAG_ANIM_FRAME | 1, 7, 7));
+    CHECK(!animInPlace(FRAME_FLAG_ANIM_FRAME, 7, 8)); // SHM 已是更新的一帧：按普通帧
+    CHECK(!animInPlace(1, 7, 7));                     // 普通帧
+
+    CASE("内容偏移只取通知与 SHM 同帧时的那份");
+    HostRenderFramePayload p;
+    p.seq = 7;
+    p.contentX = 24;
+    p.contentY = -3;
+    CHECK(frameContentOffset(p, 7) == std::make_optional(std::make_pair(int32_t(24), int32_t(-3))));
+    CHECK(!frameContentOffset(p, 8).has_value()); // SHM 已是更新的一帧：沿用上一次的
+}
 
 int main()
 {
     TestReadFrame();
     TestRejectBad();
+    TestDecorAt();
+    TestNoDragDecor();
     TestOpenMissing();
     TestOpenGuards();
     TestPlacement();
     TestOverlayPlacement();
     TestHitTest();
+    TestSkinInputRegion();
+    TestAnimInPlace();
+    TestContentBoxPlacement();
+    TestAnchorBox();
+    TestWaylandSkinPlan();
     TEST_MAIN_END();
 }

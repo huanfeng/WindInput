@@ -6,3 +6,6 @@ contact_links:
   - name: 使用问题
     url: https://github.com/huanfeng/WindInput/discussions
     about: 文档未覆盖的使用问题或疑问请到 Discussions 讨论
+  - name: 反馈问题时如何提交日志
+    url: https://windinput.com/docs/reference/report-logs
+    about: 输入相关的问题请附日志：怎么开、怎么清理、怎么一键打包、要提供什么

@@ -10,7 +10,8 @@ mod custom_check;
 use serde_json::{Value, json};
 use wind_config::Config;
 use wind_config::config_schema::{
-    FieldType, field, is_known_key, leaf_entries, parse_str_value, registry, validate,
+    FieldType, addressable_field, is_addressable_key, leaf_entries, parse_str_value, registry,
+    validate,
 };
 
 // 变体后缀经 wind_config::variant::pipe_suffix() 运行时取得：CLI 与 core 同一 exe，自辨一致。
@@ -88,7 +89,7 @@ fn cmd_list(prefix: Option<&str>) -> i32 {
 }
 
 fn cmd_describe(key: &str) -> i32 {
-    let Some(fld) = field(key) else {
+    let Some(fld) = addressable_field(key) else {
         eprintln!("未登记的配置键: {key}");
         return 1;
     };
@@ -253,7 +254,7 @@ fn layer_label(layer: &str) -> String {
 }
 
 fn cmd_get(key: &str) -> i32 {
-    if !is_known_key(key) {
+    if !is_addressable_key(key) {
         eprintln!("未登记的配置键: {key}");
         return 1;
     }
@@ -534,13 +535,8 @@ fn apply_items(items: Vec<(String, toml::Value)>) -> i32 {
 fn load_value(key: &str) -> anyhow::Result<Value> {
     let cfg = Config::load(Config::data_dir().as_deref())?;
     let full = cfg.to_json_value()?;
-    let mut cur = &full;
-    for part in key.split('.') {
-        cur = cur
-            .get(part)
-            .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))?;
-    }
-    Ok(cur.clone())
+    wind_config::config_schema::lookup_json_value(&full, key)
+        .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))
 }
 
 /// 按注册表类型把命令行原始字符串解析为 TOML 值（下沉共享实现，cmdbar 同用）。

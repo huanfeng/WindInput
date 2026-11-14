@@ -99,4 +99,60 @@ final class WireGeometryTests: XCTestCase {
                                                  screenHeight: H, visibleFrame: vf, aboveGap: 2)
         XCTAssertEqual(out.y, WireGeometry.flipY(1060, screenHeight: H) + 2)
     }
+
+    // MARK: - 皮肤：按内容框翻转 / 落位 / 夹边
+
+    /// 皮肤窗口 300×100，内容框在窗内 (20, 30, 260, 50)：装饰向上外扩 30、向下 20、左右各 20。
+    private let skinSize = CGSize(width: 300, height: 100)
+    private let skinBox = CGRect(x: 20, y: 30, width: 260, height: 50)
+
+    /// 窗口 wire 左上 → 内容框的 wire 上沿 / 下沿（由 Cocoa 左下角反算）。
+    private func contentWireTopBottom(_ o: CGPoint) -> (top: CGFloat, bottom: CGFloat) {
+        let windowTop = WireGeometry.flipY(o.y + skinSize.height, screenHeight: H)
+        return (windowTop + skinBox.minY, windowTop + skinBox.maxY)
+    }
+
+    /// 下方放得下：照服务端的点摆，内容框上沿 = 光标底端 + 2，与无皮肤时一致。
+    func testSkinBelowKeepsContentUnderCaret() {
+        // 光标底端 600 → 内容框上沿 602 → 窗口左上 572。
+        let out = WireGeometry.followCaretOrigin(wireX: 480, wireY: 572, size: skinSize,
+                                                 screenHeight: H, visibleFrame: vf,
+                                                 above: CGPoint(x: 480, y: 498), box: skinBox)
+        XCTAssertEqual(out.x, 480)
+        XCTAssertEqual(contentWireTopBottom(out).top, 602)
+    }
+
+    /// 翻不翻按内容框判：整窗下沿 (1090) 出了屏底，内容框下沿 (1070) 没出——不翻，只是外扩伸出屏外。
+    func testSkinFlipDecidedByContentBox() {
+        let out = WireGeometry.followCaretOrigin(wireX: 480, wireY: 990, size: skinSize,
+                                                 screenHeight: H, visibleFrame: vf,
+                                                 above: CGPoint(x: 480, y: 916), box: skinBox)
+        XCTAssertEqual(contentWireTopBottom(out).top, 1020, "仍在光标下方")
+        XCTAssertEqual(out.y, WireGeometry.flipY(990, screenHeight: H) - skinSize.height)
+    }
+
+    /// 翻到上方：用服务端给的上方点，内容框下沿 = 光标顶端 − 2（与无皮肤、与 Windows 同规则）。
+    /// 旧写法把窗口底边放在 wire 点上方 18pt，内容框会离光标「外扩 + 18」那么远。
+    func testSkinFlipAboveUsesServerAbovePoint() {
+        // 光标底端 1058、高 20（顶端 1038）；内容框上沿 1060 → 窗口左上 1030，内容框下沿 1110 出屏 → 翻。
+        // 上方：内容框下沿 1036 → 上沿 986 → 窗口左上 956。
+        let out = WireGeometry.followCaretOrigin(wireX: 480, wireY: 1030, size: skinSize,
+                                                 screenHeight: H, visibleFrame: vf,
+                                                 above: CGPoint(x: 470, y: 956), box: skinBox)
+        XCTAssertEqual(out.x, 470, "上方对齐点的横坐标可以不同于下方")
+        XCTAssertEqual(contentWireTopBottom(out).bottom, 1036)
+    }
+
+    /// 夹边按内容框：透明外扩可以伸出屏外，内容框贴边。
+    func testSkinClampUsesContentBox() {
+        let out = WireGeometry.followCaretOrigin(wireX: 1650, wireY: 572, size: skinSize,
+                                                 screenHeight: H, visibleFrame: vf,
+                                                 above: CGPoint(x: 1650, y: 498), box: skinBox)
+        XCTAssertEqual(out.x + skinBox.maxX, vf.maxX)
+        // 屏顶：内容框上沿贴可见区上沿（菜单栏下），上方的外扩伸进菜单栏。
+        let top = WireGeometry.followCaretOrigin(wireX: 480, wireY: -20, size: skinSize,
+                                                 screenHeight: H, visibleFrame: vf,
+                                                 above: CGPoint(x: 480, y: -100), box: skinBox)
+        XCTAssertEqual(contentWireTopBottom(top).top, H - vf.maxY)
+    }
 }

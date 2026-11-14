@@ -52,20 +52,21 @@ pub fn to_outcome(action: KeyAction) -> KeyOutcome {
             caret: 0,
         }]),
 
-        // 薄宿主上**降级为吃键**（与 `ClearComposition` 同）：本变体要的是「清组合 + 把键
-        // 交还宿主」，而 [`KeyOutcome`] 的契约是 `consumed == false` 时 `ops` 必为空
-        // ——「不消费但要改文本」在这个类型里表达不出来。
+        // 清组合 + 把键交还宿主：`consumed == false` 但 `ops` 非空（清掉联想的占位组合）。
+        // 宿主按序执行 ops、再对这一键走系统默认行为（退格删字、回车换行/发送）。
         //
-        // 不擅自放宽那条契约：真正的消费方是 Android Kotlin 侧（不在本仓），它若按
-        // 「不消费 ⇒ 忽略 ops」实现，联想的占位组合就会悬在输入框里——那正是本变体要修的
-        // 病，降级到吃键只是少一次透传，放错了却是组合残留。
-        //
-        // 要在移动端也拿到透传：先给 `KeyOutcome` 一个显式的「清理后不消费」表达
-        // （新构造函数 + 契约改写），同步 Kotlin 侧，再回来改这一臂。
-        KeyAction::ClearCompositionThenPassThrough => consumed(vec![EditOp::SetComposition {
-            text: String::new(),
-            caret: 0,
-        }]),
+        // 此前这里降级成吃键，于是移动端的联想态退格、回车要按两下才生效，
+        // `[mobile.association]` 里放行它们的开关形同虚设。Android 的 `RustSession.dispatch`
+        // 不看 `consumed`、有 ops 就执行，故这一形状可表达。
+        KeyAction::ClearCompositionThenPassThrough => KeyOutcome {
+            consumed: false,
+            ops: vec![EditOp::SetComposition {
+                text: String::new(),
+                caret: 0,
+            }],
+            hint: None,
+            mode_changed: false,
+        },
 
         // ── 上屏（可带新组合）──
         KeyAction::InsertText {
@@ -312,6 +313,20 @@ mod tests {
                     caret: 1
                 },
             ],
+        );
+    }
+
+    /// 清组合后把键交还宿主：不消费，但必须带清组合的指令，否则联想的占位组合会悬在宿主里
+    #[test]
+    fn clear_then_pass_through_clears_but_does_not_consume() {
+        let o = to_outcome(KeyAction::ClearCompositionThenPassThrough);
+        assert!(!o.consumed, "键要交还宿主");
+        assert_eq!(
+            o.ops,
+            vec![EditOp::SetComposition {
+                text: String::new(),
+                caret: 0
+            }]
         );
     }
 }

@@ -1,0 +1,3 @@
+apple	n. 苹果
+banana	n. 香蕉
+cat	n. 猫

@@ -72,4 +72,65 @@ private:
     uint64_t pressedAtMs_ = 0;
 };
 
+/// 候选显示时 Ctrl 如实上报（`KEY_EVENT_MOD_DOWN` / `KEY_EVENT_MOD_UP`）的一次按住记账，对位 TSF
+/// `CtrlRawPolicy.h`。协议权威在协调器 `handle_ctrl_raw`：
+///
+/// - **按下那一刻**组字中（`altInputSession`）才走这条：按下报 MOD_DOWN、松开报 MOD_UP（哪怕那时
+///   已不在组字），调用方不再按 ToggleTapDetector 的单击上报；否则这次按住整个走旧路。一次按住
+///   只走一条路，服务端不会两边各收到一次。
+/// - 按住期间按过别的键（服务端未必看得见，如透传的 Ctrl+C）→ 松开带 `TOGGLE_MOD_NOT_TAP`。
+///   时长由服务端判。键本身两向都交还宿主。
+class CtrlRaw {
+public:
+    /// 任意按键按下。返回 VK_LCONTROL / VK_RCONTROL = 要报 MOD_DOWN；0 = 不报（别的键、自动重复、旧路）。
+    uint32_t onPress(uint32_t keysym, bool composing);
+    /// 任意按键抬起。返回 VK = 要报 MOD_UP（`*notTap` 给出是否带 NOT_TAP）；0 = 不是如实上报的那次按住。
+    uint32_t onRelease(uint32_t keysym, bool* notTap);
+    /// 焦点切换：作废（松开多半送不到，服务端失焦时也会收起按住翻转）。
+    void reset() { *this = CtrlRaw{}; }
+    /// 失焦：取走如实上报中的 Ctrl 并复位。返回 VK = 要补报的 MOD_UP（松开送不到了，按 NOT_TAP 报，
+    /// 不让它被当成单击切中英）；0 = 没有按住中的。
+    uint32_t takeHeld()
+    {
+        const uint32_t v = vk_;
+        reset();
+        return v;
+    }
+
+private:
+    uint32_t vk_ = 0;       // 如实上报中的 Ctrl
+    bool dirty_ = false;
+    uint32_t legacyVK_ = 0; // 走旧路按住中的 Ctrl：松开前的自动重复不改路
+};
+
+/// Alt_L / Alt_R → VK_LMENU / VK_RMENU；其它键返回 0。
+uint32_t altVK(uint32_t keysym);
+
+/// Alt 转发判据里的「组字中」：有组合，或候选窗开着（联想窗组合为空、候选仍在，也能切注释）。
+inline bool altInputSession(bool hasComposition, bool candidatesVisible)
+{
+    return hasComposition || candidatesVisible;
+}
+
+/// 组字中 Alt 转发给服务（切换注释态）的一次按住记账。协议权威在协调器 `handle_comment_alt`：
+/// 只在组字中转发 Alt 的按下与松开（0xA4 / 0xA5），修饰位带上这次按住期间按过的
+/// Shift / Ctrl / Super（粘滞，按过就一直带到松开）；吃不吃看回包。
+class AltHold {
+public:
+    /// Alt 按下。已在按住中（自动重复）则保留粘滞位。
+    void onAltDown(bool forwarded);
+    /// 任意按键按下（含修饰键本身）：按住期间记粘滞位。
+    void noteKey(uint32_t keysym, uint32_t states);
+    uint32_t stickyMods() const { return sticky_; }
+    /// 松开是否转发：组字中，或按下转发过（按住翻转要靠松开复原，哪怕期间已上屏）。
+    bool shouldForwardUp(bool composing) const { return composing || (active_ && forwarded_); }
+    /// Alt 松开 / 焦点切换：复位。
+    void reset() { *this = AltHold{}; }
+
+private:
+    bool active_ = false;
+    bool forwarded_ = false;
+    uint32_t sticky_ = 0;
+};
+
 } // namespace windlinux

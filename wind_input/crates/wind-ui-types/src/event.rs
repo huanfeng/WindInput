@@ -68,6 +68,8 @@ pub enum UiEvent {
     SoftKeyboardPage(usize),
     /// 点击软键盘的关闭按钮。
     SoftKeyboardClose,
+    /// 点击软键盘左上角的钉住按钮（切换钉住状态，真相在协调器）。
+    SoftKeyboardPin,
     /// 点击软键盘上的**特殊键**（退格 / Tab / 回车 / 空格 / Ins / Del）。
     ///
     /// 键名取 `wind_keys::key_inject` 认得的那套（`backspace` / `tab` / `enter` …），

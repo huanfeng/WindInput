@@ -92,6 +92,7 @@ fn hotkey_policy_for(action: &crate::config::BoundAction) -> Option<u32> {
         // `Command` 同档：跑的是用户自己的命令，被宿主加速键抢走时换个组合键即可。
         BA::None
         | BA::SingleChar(_)
+        | BA::CommentState(_)
         | BA::ToggleSchema(_)
         | BA::SwitchSchema(_)
         | BA::Action(_)
@@ -112,6 +113,7 @@ fn hotkey_policy_for(action: &crate::config::BoundAction) -> Option<u32> {
 /// | 组合键（带 Ctrl/Alt/Shift/Win） | key_down 热键 → `dispatch_hotkey` | 不与输入争键，可全局拦截 |
 /// | 纯修饰键（`rshift`） | key_up 轻敲 | keydown 不能吃（宿主要看到修饰键），只能在干净单击的 keyup 上判 |
 /// | 单个有字符的键（`backtick`） | keydown 引导键链 | 英文模式下必须让它出字，故排在分水岭之后 |
+/// | 裸 F1–F12 | key_down 热键 | 不产出字符，空闲时 TSF 只有靠热键表才会转发 |
 ///
 /// ⚠ 单键**绝不能**编译进 key_down 热键表：`parse_hotkey("backtick")` 返回的是无修饰位的
 /// 裸 VK，进表后 TSF 会把它当热键转发并吞掉，该符号就再也打不出来了。
@@ -136,7 +138,37 @@ pub fn route_of_key_action(key: &str) -> Option<KeyActionRoute> {
     if (VK_LSHIFT..=VK_RCONTROL).contains(&vk) {
         return Some(KeyActionRoute::ModifierKeyUp);
     }
+    // 裸 F1–F12 不产出字符，进热键表的代价只是「中文模式下该键归输入法」（策略位
+    // `CHINESE_ONLY`），不会像字符键那样打不出字；不进表的话 TSF 在空闲时根本不转发它。
+    if (VK_F1..=VK_F12).contains(&vk) {
+        return Some(KeyActionRoute::Hotkey);
+    }
     Some(KeyActionRoute::LeadingKey)
+}
+
+/// 不带修饰键的 F1–F12。
+pub fn is_bare_function_key(vk: u32, modifiers: u32) -> bool {
+    modifiers & MOD_GENERIC_MASK == 0 && (VK_F1..=VK_F12).contains(&vk)
+}
+
+/// 裸 F1–F12（不带修饰键）绑的动作是否只在中文模式吃键。
+///
+/// 这类键没有字符产出，宿主自己常用它（F1 帮助、F5 刷新、F11 全屏）；英文模式下输入法不该
+/// 夺走。唯一的例外是「离开 / 返回英文态」那几类动词（`toggle_mode` / `switch_engine` /
+/// `toggle_schema:` / `switch_schema:`）：带上 `CHINESE_ONLY` 就成了英文态切不回来的单程票。
+/// 编译端（策略位）与分派端（服务端守卫）共用本判据，两处不会分叉。
+pub fn bare_function_key_needs_chinese(vk: u32, modifiers: u32, action: &str) -> bool {
+    use crate::config::BoundAction as BA;
+    if !is_bare_function_key(vk, modifiers) {
+        return false;
+    }
+    !matches!(
+        BA::parse(action.trim()),
+        BA::ToggleSchema(_) | BA::SwitchSchema(_)
+    ) && !matches!(
+        BA::parse(action.trim()),
+        BA::Action(a) if matches!(a.as_str(), "toggle_mode" | "switch_engine")
+    )
 }
 
 /// 修饰键常量（与 wind-ipc MOD_* / Go ipc.Mod* 对齐）
@@ -172,6 +204,8 @@ const HOTKEY_POLICY_GLOBAL: u32 = 0x20000000;
 const HOTKEY_POLICY_FORWARD_ONLY: u32 = 0x10000000;
 
 /// Windows 虚拟键码（toggle / select / page 用）
+const VK_F1: u32 = 0x70;
+const VK_F12: u32 = 0x7B;
 const VK_LSHIFT: u32 = 0xA0;
 const VK_RSHIFT: u32 = 0xA1;
 const VK_LCONTROL: u32 = 0xA2;
@@ -207,6 +241,31 @@ const VK_OEM_5: u32 = 0xDC; // \
 /// 第二次，本项是第三次；每次往 `key_up` 加东西都要重查这条。
 pub const SESSION_ACTION: &str = "session_action";
 
+/// `f1`..`f12`（小写、无前导零）。
+fn is_function_key_name(name: &str) -> bool {
+    name.strip_prefix('f')
+        .and_then(|n| n.parse::<u32>().ok())
+        .is_some_and(|n| (1..=12).contains(&n) && name.len() == 1 + n.to_string().len())
+}
+
+/// 注释切换键（Ctrl 系）在 `key_up` 表里的 action 名。不得复用 `toggle_mode`，理由同
+/// [`SESSION_ACTION`]。
+pub const COMMENT_SWITCH_ACTION: &str = "comment_switch";
+
+/// 注释切换键要登记的 keyup hash：注释开着、切换方式不是 `off`、切换键是 Ctrl 系时才有。
+/// Alt 系不走 TSF 白名单（mac / Linux 组字中本就转发 Alt）；F1 走会话按键表（keydown）。
+fn comment_switch_key_up_hashes(c: &crate::comment_lib::UiCommentConfig) -> Vec<u32> {
+    use crate::comment_lib::SwitchMode;
+    if !c.enabled || c.switch_mode == SwitchMode::Off || !c.switch_key.is_ctrl() {
+        return Vec::new();
+    }
+    [VK_LCONTROL, VK_RCONTROL]
+        .into_iter()
+        .filter(|&vk| c.switch_key.matches_vk(vk))
+        .filter_map(compile_modifier_key_up_hash)
+        .collect()
+}
+
 /// 会话态键名 → (VK, 是否需 Shift)。支持单个 `shift+` 前缀。
 ///
 /// ⚠️ **这是 `wind_keys::keymap::session_key_name_to_vk` 的第二份实现**，因为
@@ -237,6 +296,9 @@ pub fn session_key_to_vk(name: &str) -> Option<(u32, bool)> {
         "rshift" => VK_RSHIFT,
         "lctrl" | "lcontrol" => VK_LCONTROL,
         "rctrl" | "rcontrol" => VK_RCONTROL,
+        // F1–F12：宿主另有原义（帮助 / 重命名…）但组合进行中几乎不会用到，且不产出字符。
+        // 键名表另一半在 `wind_keys::keymap::SESSION_FUNCTION_KEYS`，两处同步。
+        f if is_function_key_name(f) => 0x70 + f[1..].parse::<u32>().ok()? - 1,
         "semicolon" | ";" => VK_OEM_1,
         "quote" | "'" => VK_OEM_7,
         "comma" | "," => VK_OEM_COMMA,
@@ -563,6 +625,16 @@ impl Compiler {
                         );
                         continue;
                     };
+                    // 裸 F 键：英文模式归宿主（见 `bare_function_key_needs_chinese`）。
+                    let policy = if bare_function_key_needs_chinese(
+                        raw & 0xFFFF,
+                        (raw >> 16) & MOD_GENERIC_MASK,
+                        action,
+                    ) {
+                        policy | HOTKEY_POLICY_CHINESE_ONLY
+                    } else {
+                        policy
+                    };
                     result.key_down.push(HotkeyEntry {
                         // match_hash 恒不含策略位——策略位是给 TSF 看的转发/抢占指示，
                         // 服务端匹配只认裸 hash（与 enter_special / add_word 同构）。
@@ -637,7 +709,7 @@ impl Compiler {
         //    转发，登记与否都能工作。这里**仍照旧全部登记**：旧的 `compile_page_key_group`
         //    就是这么做的，收编时顺手改可达性会把一次配置重构变成一次跨进程行为变更，
         //    而后者只有真机才验得了。
-        for (name, verb) in &self.config.keys.effective_session_actions() {
+        for (name, verb) in &self.config.effective_session_actions() {
             if !crate::config::SessionAction::parse(verb).is_enabled() {
                 continue;
             }
@@ -662,6 +734,23 @@ impl Compiler {
                     action: "toggle_mode".to_string(),
                 });
             }
+        }
+
+        // ── KeyUp：注释切换键（`ui.comment.switch_key` 选 Ctrl 系）──
+        //
+        // 候选显示时 TSF 无条件如实上报 Ctrl（`EVENT_MOD_*`），用不着这条；它是 TSF 判无会话、
+        // 服务端却有候选时的退路：TSF 判过单击才转发 Ctrl 的松开，不登记就收不到。TSF 对修饰键
+        // keyup 不看 SESSION 位：有文本上下文就记待判、两向都不吃，无候选时服务端回 PassThrough。
+        // 已被上面登记过的键不再追加——那些功能优先，键本来就会送到。
+        for hash in comment_switch_key_up_hashes(&self.config.ui.comment) {
+            if result.key_up.iter().any(|e| e.match_hash == hash) {
+                continue;
+            }
+            result.key_up.push(HotkeyEntry {
+                tsf_hash: hash | HOTKEY_POLICY_SESSION,
+                match_hash: hash,
+                action: COMMENT_SWITCH_ACTION.to_string(),
+            });
         }
 
         // 二三候选键（含修饰键组 lrshift / lrctrl）的登记已并入上面的 `session_actions` 段
@@ -948,6 +1037,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn comment_switch_ctrl_registers_key_up_with_session_bit() {
+        use crate::comment_lib::{SwitchKey, SwitchMode};
+        let up_of = |key: SwitchKey, mode: SwitchMode, toggle: &[&str]| {
+            let mut cfg = Config::default();
+            cfg.ui.comment.switch_key = key;
+            cfg.ui.comment.switch_mode = mode;
+            cfg.keys.toggle_mode_keys = toggle.iter().map(|s| s.to_string()).collect();
+            cfg.keys.session_actions.clear();
+            cfg.keys.select_key_groups.clear();
+            Compiler::new(cfg)
+                .compile()
+                .key_up
+                .into_iter()
+                .filter(|e| e.action == COMMENT_SWITCH_ACTION)
+                .map(|e| e.tsf_hash)
+                .collect::<Vec<_>>()
+        };
+        let l = key_hash(MOD_CTRL | MOD_LCTRL, VK_LCONTROL);
+        let r = key_hash(MOD_CTRL | MOD_RCTRL, VK_RCONTROL);
+        let s = HOTKEY_POLICY_SESSION;
+        assert_eq!(
+            up_of(SwitchKey::Ctrl, SwitchMode::Session, &[]),
+            [l | s, r | s]
+        );
+        assert_eq!(up_of(SwitchKey::LCtrl, SwitchMode::Persist, &[]), [l | s]);
+        assert_eq!(up_of(SwitchKey::RCtrl, SwitchMode::Hold, &[]), [r | s]);
+        assert!(up_of(SwitchKey::Ctrl, SwitchMode::Off, &[]).is_empty());
+        assert!(up_of(SwitchKey::Alt, SwitchMode::Session, &[]).is_empty());
+        // 已是中英切换键的那一侧不再登记，切换键条目不改它的吃键条件。
+        assert_eq!(
+            up_of(SwitchKey::Ctrl, SwitchMode::Session, &["lctrl"]),
+            [r | s]
+        );
+    }
+
+    #[test]
     fn test_parse_simple_key() {
         let hash = parse_hotkey("lshift").unwrap();
         assert_eq!(hash, 0xA0); // no modifiers, key=0xA0
@@ -1066,7 +1191,15 @@ mod tests {
             compiled.match_key_down(key_hash(MOD_CTRL | MOD_SHIFT, 0x45)),
             Some("switch_engine")
         );
-        assert_eq!(compiled.key_up.len(), 2);
+        // 出厂的注释切换键（Ctrl）另有两条，不计。
+        assert_eq!(
+            compiled
+                .key_up
+                .iter()
+                .filter(|e| e.action == "toggle_mode")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1162,8 +1295,14 @@ mod tests {
             key_hash(0, VK_TAB),
             key_hash(0, VK_OEM_1),
             key_hash(0, VK_OEM_7),
+            // 出厂注释切换键 F1 补进会话按键表，同样只是转发登记。
+            key_hash(0, 0x70),
         ];
-        assert_eq!(forward_only_raw.len(), 6, "样例绑定应展开出 6 个键");
+        assert_eq!(
+            forward_only_raw.len(),
+            7,
+            "样例绑定应展开出 6 个键，另加 F1"
+        );
 
         for e in &compiled.key_down {
             let expected = forward_only_raw.contains(&e.match_hash);
@@ -1468,6 +1607,37 @@ mod tests {
         assert!(tp.tsf_hash & HOTKEY_POLICY_CHINESE_ONLY != 0);
     }
 
+    /// 裸 F1–F12 绑的动作只在中文模式吃键（宿主的 F1 帮助 / F5 刷新英文态归宿主）；
+    /// 「离开 / 返回英文态」的动词例外；带修饰键的 F 组合键不受影响。
+    #[test]
+    fn bare_function_key_is_chinese_only_except_mode_switch_verbs() {
+        let compile = |key: &str, verb: &str| {
+            let mut cfg = Config::default();
+            cfg.keys
+                .key_actions
+                .insert(key.to_string(), verb.to_string());
+            Compiler::new(cfg)
+                .compile()
+                .key_down
+                .into_iter()
+                .find(|e| e.match_hash == parse_hotkey(key).expect("键名合法"))
+                .expect("应进表")
+                .tsf_hash
+        };
+        assert!(compile("f5", "command:ime.reload()") & HOTKEY_POLICY_CHINESE_ONLY != 0);
+        assert!(compile("f5", "comment_state:detail") & HOTKEY_POLICY_CHINESE_ONLY != 0);
+        assert_eq!(compile("f6", "toggle_mode") & HOTKEY_POLICY_CHINESE_ONLY, 0);
+        assert_eq!(
+            compile("f6", "toggle_schema:wubi86") & HOTKEY_POLICY_CHINESE_ONLY,
+            0
+        );
+        assert_eq!(
+            compile("ctrl+f5", "command:ime.reload()") & HOTKEY_POLICY_CHINESE_ONLY,
+            0,
+            "带修饰键的 F 组合键仍按动词的老规矩"
+        );
+    }
+
     /// 特殊模式直达热键写在 `keys.key_actions` 里（`special:<方案id>`），动词**原样**
     /// 进表（分派端用 `BoundAction::parse` 认串），并带 CHINESE_ONLY | GLOBAL。
     #[test]
@@ -1690,6 +1860,8 @@ mod tests {
         assert_eq!(route_of_key_action("backtick"), Some(LeadingKey));
         assert_eq!(route_of_key_action("semicolon"), Some(LeadingKey));
         assert_eq!(route_of_key_action("z"), Some(LeadingKey));
+        assert_eq!(route_of_key_action("f1"), Some(Hotkey));
+        assert_eq!(route_of_key_action("F12"), Some(Hotkey));
         assert_eq!(route_of_key_action("不存在的键"), None);
     }
 
@@ -1835,6 +2007,8 @@ mod tests {
             "special:fuhao",
             "single_char",
             "single_char:on",
+            "comment_state",
+            "comment_state:detail",
             "softkeyboard",
             "softkeyboard:num",
             // C 类切方案
@@ -1883,6 +2057,8 @@ mod tests {
             ("toggle_s2t", true, false),
             ("toggle_t2s", true, false),
             ("single_char", true, false),
+            ("comment_state", false, false),
+            ("comment_state:detail", false, false),
             ("temp_pinyin", true, true),
             ("temp_english", true, true),
             ("aux_code", true, true),
@@ -1976,7 +2152,7 @@ mod tests {
     fn alt_commit_comment_with_comments_off_registers_nothing() {
         let mut cfg = Config::default();
         cfg.input.alt_commit = "comment".into();
-        cfg.ui.candidate.comment_enabled = false;
+        cfg.ui.comment.enabled = false;
         assert!(
             alt_entries(&Compiler::new(cfg.clone()).compile()).is_empty(),
             "注释关着时 comment 档等同 off，不该登记 Alt 组合"

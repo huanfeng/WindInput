@@ -1,5 +1,8 @@
 # 按键管线 / 模式融合 / 符号流水线 / 全码策略 / redb 接线 —— 系统性重设计
 
+> ⚠️ 本文的 Processor / Capability 目标架构已按 `wind-coordinator/src/pipeline.rs` 裁剪，未照此实现。
+> 现行的阶段划分与功能落点见 [architecture/feature-placement-guide.md](../architecture/feature-placement-guide.md)。
+
 > 权威设计差分。证据取自 Go 版（仓库 `../WindInput`，引用 `file:line`）与 Rust 现状
 > （`wind_input/crates/wind-coordinator`）。配套已有：[engine.md] [dict.md] [store.md]
 > [coordinator.md] [config-schema.md] [frequency.md]。本篇聚焦**交互管线的架构统一**，

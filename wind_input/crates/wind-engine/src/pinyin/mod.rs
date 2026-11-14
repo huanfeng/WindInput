@@ -36,12 +36,70 @@ use generate::CharPinyinIndex;
 use lattice::LatticeBuilder;
 use scorer::AbbrevMatcher;
 use shuangpin::ShuangpinConverter;
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use syllable::SyllableTrie;
+use tracing::debug;
 use viterbi::{ViterbiDecoder, WordNode};
 use wind_candidate::{Candidate, CandidateSource};
 use wind_dict::DictManager;
 use wind_dict::cached::CachedDict;
+
+/// convert 分段计时器：Drop 时若总耗时 ≥15ms，把各段与未命名剩余（`rest`）一次性打进日志。
+/// 仅诊断用——2026-11-04 真机偶发 convert ≥500ms 但本地/靶机探针均不复现，
+/// 需要分段定位瓶颈落点；定位完毕可整块移除。
+pub(crate) struct ConvertStageTimer {
+    tag: &'static str,
+    t: std::time::Instant,
+    stages: Vec<(std::string::String, std::time::Duration)>,
+}
+
+impl ConvertStageTimer {
+    pub(crate) fn new() -> Self {
+        Self::with_tag("")
+    }
+
+    pub(crate) fn with_tag(tag: &'static str) -> Self {
+        Self {
+            tag,
+            t: std::time::Instant::now(),
+            stages: Vec::new(),
+        }
+    }
+
+    pub(crate) fn mark(&mut self, name: impl Into<String>) {
+        let now = std::time::Instant::now();
+        let name = name.into();
+        self.stages.push((name, now - self.t));
+        self.t = now;
+    }
+}
+
+impl Drop for ConvertStageTimer {
+    fn drop(&mut self) {
+        const MIN: std::time::Duration = std::time::Duration::from_millis(15);
+        let tail = self.t.elapsed();
+        let named: std::time::Duration = self
+            .stages
+            .iter()
+            .map(|(_, d)| *d)
+            .sum::<std::time::Duration>();
+        let total = named + tail;
+        if total < MIN {
+            return;
+        }
+        let parts: Vec<String> = self
+            .stages
+            .iter()
+            .map(|(n, d)| format!("{n}={d:?}"))
+            .collect();
+        debug!(
+            "convert 分段[{}]: total={total:?} {} rest={tail:?}",
+            self.tag,
+            parts.join(" ")
+        );
+    }
+}
 
 /// 整句解的**等效词频**：把 Viterbi 路径分换算回词频域，与其余候选同量纲。
 ///
@@ -616,6 +674,21 @@ fn completion_penalized(weight: i32, extra: u32) -> i32 {
 /// 取 1000 是 `push_unique` 的 O(n²) 查重与「单字母可持续翻页」之间的平衡点：
 /// 实测 1000 条约 3.5ms，5000 条则达 54ms。1000 条按每页 9 项可翻 110 页，
 /// 远超实用范围；该上限只约束**补全**，精确匹配候选不受影响。
+/// 剥除手动分隔符 `'` 后的前 `n` 个字节，对应原始输入里的字节长度（不含紧随的分隔符）。
+fn raw_len_for_stripped(input: &str, n: usize) -> usize {
+    let mut seen = 0usize;
+    for (i, ch) in input.char_indices() {
+        if ch == '\'' {
+            continue;
+        }
+        seen += ch.len_utf8();
+        if seen >= n {
+            return i + ch.len_utf8();
+        }
+    }
+    input.len()
+}
+
 const MAX_COMPLETION_CANDIDATES: usize = 1000;
 
 /// 查 `AbbrevSection` 时的取码上限。纯简拼（step 5 / 回退①）与混合简拼（step 5b / 回退②）
@@ -709,34 +782,42 @@ const MIN_MIXED_SENTENCE_LEN: usize = 4;
 /// 单字母不构成简拼，退到 1 只会拖出一堆高频单字。
 const MIN_ABBREV_STROKE: usize = 2;
 
-/// 前缀回退单个切点、**单个来源层**的产出上限。
+/// 简拼前缀回退（step 6.2）的**内部**限额，不进用户配置（`wind-config` 不认它）。
 ///
-/// 逐切点限流而非只设总额，是为了保证**短切点也挤得进来**：`bzdhaobuhao` 的
-/// `bzdh` 切点若把配额占满，`bzd`（→「不知道」，词频高 672 倍）就一条都进不来。
-///
-/// ⚠️ **系统层与 store 层各记各的**（`recall_abbrev_prefix` 的 `start` / `store_base`），
-/// 故单切点的实际上限是 **2×** 本值、两个切点合计 4×。共用一份时 ③④ 排在 ①② 之后，
-/// 系统的高频词占满席位 ⇒ 用户自己造的词在长输入下静默出局。调这个值时记得乘 2 再
-/// 对照候选规模（`mixed_partial_pinyin_filter.rs` 记着「219 条残码单字把简拼词压到
-/// 第 221 位」的教训）。
-const MAX_FALLBACK_PER_CUT: usize = 6;
+/// 集中成一个结构，是为了以后调值 / 对不同来源（移动端、混输）分档时只改这一处。
+/// 默认值参考主流输入法实测（2026-11）：微软拼音中间级不限条数，豆包 3 字不限、2 字 8 条。
+#[derive(Debug, Clone)]
+pub struct AbbrevFallbackConfig {
+    /// 前缀回退**参与竞争的切点数**（有产出的才计数）。
+    ///
+    /// 默认 2 = 「最长 + 次长」。相邻切点的竞争才是真实场景（`bzdhaobuhao` 里 `bzdh`→「表彰大会」
+    /// 与 `bzd`→「不知道」），再往下只会引入越来越短、越来越不相关的解释。
+    ///
+    /// ★ **整串无命中时放宽它已被评测否决。** D 类（简拼+全拼混合整句）实测：
+    /// 取 2 → 首词召回 40.30% / 首词命中 2.30%；取 8 → **14.60% / 0.00%**，大幅恶化。
+    /// 原因是短切点的高频词会占据首选并把长切点的正确候选挤出 top-10。整串命中时补进来的
+    /// 候选都沉在整长匹配之后，没有这个风险，但同一个值两种场景共用，改它先重跑 pinyin_eval。
+    pub cuts: usize,
+    /// 切点长度 ≥ 3 个字母（三字词组及以上）时，单切点、**单个来源层**的产出上限。
+    ///
+    /// ⚠️ **系统层与 store 层各记各的**（`recall_abbrev_prefix` 的 `start` / `store_base`），
+    /// 故单切点实际上限是 **2×** 本值。共用一份时用户自己造的词会被系统高频词挤出。
+    /// 调值时对照候选规模（`mixed_partial_pinyin_filter.rs` 记着「219 条残码单字把简拼词压到
+    /// 第 221 位」的教训）。受 `ABBREV_INDEX_LIMIT`（每个简拼键最多 64 个码）约束。
+    pub per_cut_long: usize,
+    /// 切点长度 = 2 个字母（两字词组）时的同类上限。两字词数量大、噪音多，取得比长切点小。
+    pub per_cut_short: usize,
+}
 
-/// 前缀回退**参与竞争的切点数**（有产出的才计数）。
-///
-/// 取 2 = 「最长 + 次长」。相邻切点的竞争才是真实场景（`bzdhaobuhao` 里 `bzdh`→「表彰大会」
-/// 与 `bzd`→「不知道」），再往下只会引入越来越短、越来越不相关的解释：试到 `bz` 时
-/// 「标准/帮助/保证」会凭着高词频（~5 万）挤进前几位，而它们只解释了 11 键里的 2 键。
-///
-/// 这是**软偏好**的落点——不给短切点打折扣（那要按未解释字母数调一个乘性系数，量纲难定
-/// 且依赖本轮最大消费长度、不稳定），而是限制它们**是否入场**。入场后一律同层按词频竞争。
-///
-/// ★ **放宽它已被评测否决，勿再尝试。** D 类（简拼+全拼混合整句）实测：
-/// 取 2 → 首词召回 40.30% / 首词命中 2.30%；取 8 → **14.60% / 0.00%**，大幅恶化。
-/// 原因是短切点的高频词会占据首选并把长切点的正确候选挤出 top-10
-/// （`dltqbandaoer` 首选变成 `dl`→「到了」、`dqsmayou` 变成 `dq`→「地球」）。
-/// 召回率要越过 40% 这个天花板，得让所有切点同时参与、由语言模型仲裁 —— 即简拼段入
-/// lattice（文档 §4.8），不是调这个常量能做到的。
-const MAX_FALLBACK_CUTS: usize = 2;
+impl Default for AbbrevFallbackConfig {
+    fn default() -> Self {
+        Self {
+            cuts: 2,
+            per_cut_long: 50,
+            per_cut_short: 20,
+        }
+    }
+}
 
 /// 全拼降级支路（双拼下按全拼解释击键）的召回条数上限，精确 + 子短语 + 前缀补全合计。
 ///
@@ -861,7 +942,7 @@ fn should_promote_user_completion(
 pub struct Config {
     // 注：曾有 `show_code_hint: bool`。**已删** —— 引擎侧从未读过它，编码提示的门控
     // 早在 387ffa60「移除死状态 code_hint_cache」那次就改成协调器直接读全局配置了
-    // （见 `EngineManager::code_hint_source`），这个字段是那次重构漏下的残留：
+    // （后来编码来源整个并入注释分配，见设计 candidate-comment-templates §13.6），这个字段是那次重构漏下的残留：
     // manager 每次建引擎都老实赋值，而引擎内部一个消费点都没有。
     pub use_smart_compose: bool,
     /// 是否产出简拼候选（声母缩写，nh→你好）。默认 true = 历史行为（简拼此前恒开、无开关）。
@@ -933,6 +1014,8 @@ pub struct Config {
     /// 算得多、露得少：候选列表里露 `sentence_count` 条，切换键在这 `sentence_max_count`
     /// 条里滚动窗口，切换时不必重新解码。
     pub sentence_max_count: u8,
+    /// 简拼前缀回退的内部限额，见 [`AbbrevFallbackConfig`]。
+    pub abbrev_fallback: AbbrevFallbackConfig,
     /// **双拼方案下**是否额外把击键串当全拼解释一遍（`nihao` → 「你好」）。
     ///
     /// 服务「多人共用一台机器」：主力用户打双拼，偶尔来的人只会全拼。产出的候选整体沉在
@@ -1075,6 +1158,7 @@ impl Default for Config {
             // ⚠️ 与 `wind_config::PinyinGlobalConfig` 那两项**保持同值**。
             sentence_count: 1,
             sentence_max_count: 1,
+            abbrev_fallback: AbbrevFallbackConfig::default(),
         }
     }
 }
@@ -1119,6 +1203,16 @@ pub struct PinyinEngine {
     /// 明明返回 `ning`，故障只在分派层）。全拼与「布局全是字母」时为 `None`，
     /// 协调器回落内置 `a-z`，与历史逐键等价。
     input_chars: Option<wind_config::CodeCharSet>,
+    /// 「屏蔽这个词」的文字（≥2 字），由 EngineManager 推入。空 = 无屏蔽，各处零额外开销。
+    blocked_words: std::sync::RwLock<Arc<HashSet<String>>>,
+}
+
+/// 整句恰为被屏蔽的文字时，N-best 在原有条数上多取几条找替补。
+const BLOCKED_SENTENCE_EXTRA: usize = 3;
+
+/// 整句文字是否被屏蔽（解码失败的空路径不算）。
+fn sentence_blocked(blocked: &HashSet<String>, words: &[String]) -> bool {
+    !blocked.is_empty() && !words.is_empty() && blocked.contains(&words.concat())
 }
 
 impl PinyinEngine {
@@ -1139,7 +1233,50 @@ impl PinyinEngine {
             char_pinyin_idx: OnceLock::new(),
             shuangpin: None,
             input_chars: None,
+            blocked_words: Default::default(),
         }
+    }
+
+    /// 当前屏蔽集合的快照。
+    fn blocked_words(&self) -> Arc<HashSet<String>> {
+        self.blocked_words
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 被屏蔽的文字不作为词节点进整句图——系统、用户、临时、简拼各来源节点都在这之前进图，
+    /// 一处挡全。由更小的块拼出同文的情形由 [`Self::decode_unblocked`] 兜。
+    fn drop_blocked_nodes(&self, nodes: &mut [Vec<lattice::LatticeNode>]) {
+        let blocked = self.blocked_words();
+        if blocked.is_empty() {
+            return;
+        }
+        for at in nodes.iter_mut() {
+            at.retain(|n| !blocked.contains(&n.word));
+        }
+    }
+
+    /// 单路解码；整句文字恰为被屏蔽的文字（由更小的块拼成）时用 N-best 多取几条、取第一条
+    /// 不是的，全被屏蔽则按解码失败返回。无屏蔽或没撞上时就是 `decode`，不多解一次。
+    /// 替补不看语法模型（挂了模型时 `decode_nbest` 只回 1 条）。
+    fn decode_unblocked(&self, lattice: &[Vec<WordNode>], len: usize) -> viterbi::ViterbiResult {
+        let result = self.viterbi.decode(lattice, len);
+        let blocked = self.blocked_words();
+        if !sentence_blocked(&blocked, &result.words) {
+            return result;
+        }
+        self.viterbi
+            .decode_nbest_lexical(lattice, len, 1 + BLOCKED_SENTENCE_EXTRA)
+            .into_iter()
+            .find(|r| !sentence_blocked(&blocked, &r.words))
+            .unwrap_or(viterbi::ViterbiResult {
+                words: Vec::new(),
+                log_prob: f64::NEG_INFINITY,
+                lexical_log_prob: f64::NEG_INFINITY,
+                boundary: 0,
+                pieces: None,
+            })
     }
 
     /// 注入用户/临时造词层（L 造词显现）。链式 builder：构造后由 EngineManager 按 schema 挂上。
@@ -1508,10 +1645,53 @@ impl PinyinEngine {
         }
     }
 
+    /// 串的开头已经是完整音节（`baxzd` 的 `ba`、`buxzd` 的 `bu`），或两字母就是声母
+    /// （`sh`/`zh`/`ch`）：此时首字母不是用户要的单字声母，不补首声母单字。
+    fn first_letters_start_a_syllable(&self, abbr_query: &str) -> bool {
+        let max = abbr_query.len().min(6);
+        (2..=max).any(|n| abbr_query.is_char_boundary(n) && self.trie.is_syllable(&abbr_query[..n]))
+            || (abbr_query.len() == 2 && self.is_possible_pinyin_sequence(abbr_query))
+    }
+
+    /// 前缀回退的末一档：只消费首个声母，召回以它开头的高频单字（沉在词组之后）。
+    ///
+    /// 与 `recall_abbrev_prefix` 的 `MIN_ABBREV_STROKE` 下限分开：单字母本不构成简拼，
+    /// 这里不是在解释「简拼」，而是把首字母当作单字的声母；产出一律 `is_partial`，
+    /// 排在所有整长匹配与词组前缀之后。条数**不套** `AbbrevFallbackConfig::per_cut_*`：用户期望
+    /// 和直接打首字母一样能挑任意单字，取数量与主路径 step 4 同口径（`limit` 由调用方给）。
+    fn recall_first_initial_chars(&self, initial: &str, limit: usize, cands: &mut Vec<Candidate>) {
+        // 音节数上限 1 ⇒ 只取单音节词条（单字），边界对齐位 0 ⇒ 退化为字符前缀匹配。
+        for (idx, h) in self
+            .dict
+            .search_prefix_with_boundary_syllable_capped(initial, limit, 1, 0)
+            .into_iter()
+            .enumerate()
+        {
+            if h.text.chars().count() != 1 || cands.iter().any(|c| c.text == h.text) {
+                continue;
+            }
+            cands.push(Candidate {
+                text: h.text,
+                code: h.code,
+                // 单字权重（字频，量级远高于词组）若原样带入，引擎序里会压过词组，候选上限一收紧
+                // 词组先被截掉。权重置 0、用词库返回序（已按权重降序）当 natural_order 保持单字间先后；
+                // 界面序仍由消费长度决定。也不吃下方裸声母单字提权（同理）。
+                weight: 0,
+                natural_order: idx as i32,
+                source: CandidateSource::Pinyin,
+                is_abbrev: true,
+                is_partial: true,
+                boundary: h.boundary,
+                consumed_length: initial.len(),
+                ..Default::default()
+            });
+        }
+    }
+
     fn recall_abbrev_prefix(&self, stroke: &str, consumed: usize, cands: &mut Vec<Candidate>) {
         let trie = &self.trie;
         let dict = &self.dict;
-        // 本切点的产出配额（见 MAX_FALLBACK_PER_CUT：不逐切点限流，长切点会把额度占满，
+        // 本切点的产出配额（见 `AbbrevFallbackConfig::per_cut_long`：不逐切点限流，长切点会把额度占满，
         // 词频高得多的短切点一条都进不来）。
         //
         // ★ **系统层与 store 层各记各的基准**：配额按 `base` 分段计，系统层 ①② 用 `start`，
@@ -1526,6 +1706,11 @@ impl PinyinEngine {
         // 部分候选统一形态：`is_abbrev` 归入简拼层、`is_partial` 表示只覆盖了输入前缀
         // （沉在完整匹配之后），`consumed_length` **自带击键域的消费数**——下方那个按
         // code/query 关系统一计算 consumed 的循环会跳过它们（见其注释）。
+        let per_cut = if consumed >= 3 {
+            self.config.abbrev_fallback.per_cut_long
+        } else {
+            self.config.abbrev_fallback.per_cut_short
+        };
         let push = |cands: &mut Vec<Candidate>,
                     base: usize,
                     text: String,
@@ -1533,7 +1718,7 @@ impl PinyinEngine {
                     w: i32,
                     boundary: u64,
                     is_fuzzy: bool| {
-            if cands.len() - base >= MAX_FALLBACK_PER_CUT {
+            if cands.len() - base >= per_cut {
                 return;
             }
             if text.is_empty() || cands.iter().any(|c| c.text == text) {
@@ -2074,9 +2259,10 @@ impl PinyinEngine {
             let trie = &self.trie;
             let seg_graph = SegGraph::from_dag(&Dag::build(&completed, trie));
             // 模糊音同 ①②：与主路径 step 2 一致地把 fuzzy_config 传进词图。
-            let lattice_nodes =
+            let mut lattice_nodes =
                 self.lattice_builder
                     .build(&completed, &seg_graph, dict, Some(&fz), true);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let input_len = completed.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -2094,7 +2280,7 @@ impl PinyinEngine {
                     });
                 }
             }
-            let result = self.viterbi.decode(&lattice, input_len);
+            let result = self.decode_unblocked(&lattice, input_len);
             let sentence: String = result.words.join("");
             // 按词频标定的阈值只看节点分，见 `ViterbiResult::lexical_log_prob`
             let logp_per_char = result.lexical_log_prob / sentence.chars().count().max(1) as f64;
@@ -2985,6 +3171,17 @@ fn build_raw_preedit(raw_input: &str, sp: &shuangpin::SpConvertResult) -> String
 }
 
 impl Engine for PinyinEngine {
+    fn set_blocked_words(&self, words: Arc<HashSet<String>>) {
+        // 按键路径上每次都会推：同一份只读锁比一次指针。
+        if Arc::ptr_eq(&self.blocked_words(), &words) {
+            return;
+        }
+        *self
+            .blocked_words
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = words;
+    }
+
     fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
         self.char_pinyin_idx
             .get()
@@ -3029,6 +3226,7 @@ impl Engine for PinyinEngine {
         let allow_partial_final = opts
             .allow_partial_final
             .unwrap_or(self.config.enable_partial_final);
+        let mut timer = ConvertStageTimer::new();
         if input.is_empty() {
             return Ok(ConvertResult::default());
         }
@@ -3237,6 +3435,7 @@ impl Engine for PinyinEngine {
         } else {
             Dag::build(input, trie).maximum_match()
         };
+        timer.mark("seg");
 
         // 完成音节覆盖的连续前缀（从起点算）。
         //
@@ -3289,6 +3488,7 @@ impl Engine for PinyinEngine {
                 candidates[before].meta.fuzzy_typed_boundary = typed;
             }
         }
+        timer.mark("exact");
 
         // （step 1.5「超长词典整词兜底」已删除。它把音节数超过 `max_word_len` 的词典精确
         //  整词按 `score_node` 折算成「单节点等价整句分」并抬到整句量纲，同时标 `is_sentence`
@@ -3361,6 +3561,7 @@ impl Engine for PinyinEngine {
                 true,
             );
             self.maybe_add_store_nodes(completed, &seg_graph, true, &mut lattice_nodes);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let input_len = completed.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -3383,14 +3584,30 @@ impl Engine for PinyinEngine {
             // 与改动前逐位相同。
             let (show_n, pool_k) = self.config.sentence_counts();
             let mut seen: Vec<String> = Vec::new();
-            for result in self.viterbi.decode_nbest(&lattice, input_len, pool_k) {
+            let mut results = self.viterbi.decode_nbest(&lattice, input_len, pool_k);
+            // 整句恰为被屏蔽的文字（由更小的块拼成）：多取几条，剔掉它，首选仍覆盖整串。
+            // 没撞上屏蔽词时不多解一次，循环与原来逐条相同。
+            let blocked = self.blocked_words();
+            if results.iter().any(|r| sentence_blocked(&blocked, &r.words)) {
+                // 不看语法模型：挂了模型时 `decode_nbest` 只回 1 条，没有替补可取。
+                results = self.viterbi.decode_nbest_lexical(
+                    &lattice,
+                    input_len,
+                    pool_k + BLOCKED_SENTENCE_EXTRA,
+                );
+                results.retain(|r| !sentence_blocked(&blocked, &r.words));
+            }
+            for result in results {
+                if seen.len() >= pool_k {
+                    break;
+                }
                 // 仅接受有限概率的完整路径：解码失败时 log_prob 为 NEG_INFINITY，
                 // 不能把这种空/错误路径强插到首选位置。
                 if result.words.is_empty() || !result.log_prob.is_finite() {
                     continue;
                 }
                 let sentence: String = result.words.join("");
-                // 不同切分可能拼出同一串字（`decode_nbest` 不去重），按文本去重后才计名次。
+                // `decode_nbest` 已按文本去重；这里再挡一次（beam 路径、或哈希碰撞）。
                 if sentence.is_empty() || seen.contains(&sentence) {
                     continue;
                 }
@@ -3470,6 +3687,8 @@ impl Engine for PinyinEngine {
             }
         }
 
+        timer.mark("sent");
+
         // 2c. **残码补全整句解码**：尾部残码作为「待定音节」入图，由 LM 选出最优单字
         //     （`buzhidaok` → 「不知道」+ `k` 补成「看」→ 整句「不知道看」）。
         //
@@ -3546,6 +3765,7 @@ impl Engine for PinyinEngine {
             // （`yougailunm` = 有 + 盖伦 + 残码 m）。残码那一段由上面的 partial_final
             // 节点负责，两者在同一张图上各管各的跨度。
             self.maybe_add_store_nodes(query, &seg_graph, true, &mut lattice_nodes);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let full_len = query.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); full_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -3563,7 +3783,7 @@ impl Engine for PinyinEngine {
                     });
                 }
             }
-            let result = self.viterbi.decode(&lattice, full_len);
+            let result = self.decode_unblocked(&lattice, full_len);
             if !result.words.is_empty() && result.log_prob.is_finite() {
                 let sentence: String = result.words.join("");
                 if !sentence.is_empty() {
@@ -3607,6 +3827,8 @@ impl Engine for PinyinEngine {
                 }
             }
         }
+
+        timer.mark("sentp");
 
         // 2b. **混合整句解码**：简拼段与全拼段在同一张词图里由 Viterbi 选路径
         //     （`bzdhaobuhao` → 「不知道」+「好不好」→ 整句「不知道好不好」）。
@@ -3669,6 +3891,7 @@ impl Engine for PinyinEngine {
             // 简拼段抢走前一全拼音节韵尾的读法扣分（`ningbr` ≠ 你 + 能够 + 比如），见
             // `CODA_STEAL_PENALTY`。
             lattice::penalize_coda_steals(abbr_query, trie, &mut lattice_nodes);
+            self.drop_blocked_nodes(&mut lattice_nodes);
             let input_len = abbr_query.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, at_end) in lattice_nodes.iter().enumerate() {
@@ -3686,7 +3909,7 @@ impl Engine for PinyinEngine {
                     });
                 }
             }
-            let result = self.viterbi.decode(&lattice, input_len);
+            let result = self.decode_unblocked(&lattice, input_len);
             if !result.words.is_empty() && result.log_prob.is_finite() {
                 let sentence: String = result.words.join("");
                 // 质量闸门：低置信整句宁可不出，也不该顶掉可用的部分候选
@@ -3783,6 +4006,8 @@ impl Engine for PinyinEngine {
                 }
             }
         }
+
+        timer.mark("mixed");
 
         // 4. 前缀查找（补全词，code 比输入长，如 si→思考）→ 前缀层级，降到精确之后。
         //
@@ -3958,13 +4183,10 @@ impl Engine for PinyinEngine {
             }
         }
 
-        // 简拼族（纯简拼 step5 / 混合 step5b / 用户词 step6）是否命中了**整串**击键。
-        // step 6.2 的前缀回退只在这三处全都落空时才启动——整串能打出词就不该降级。
-        let mut abbrev_full_hit = false;
-
         // 整串是否**纯简拼形态**（每字母均为某音节首字母、且非完整音节序列）。
         // 提成变量供 step5 / step6 / step6.2 共用，`enable_abbrev` 仍在短路前（关闭时
         // 连 is_abbreviation 的 Dag 构建都省掉）。
+        timer.mark("prefix");
         let stroke_is_plain_abbrev =
             self.config.enable_abbrev && AbbrevMatcher::is_abbreviation(abbr_query, trie);
 
@@ -4027,7 +4249,6 @@ impl Engine for PinyinEngine {
                         // 「夺不了冠」之后。同层之后两者才能按权重/词频正常竞争。
                         if candidates.len() > before {
                             candidates[before].is_abbrev = true;
-                            abbrev_full_hit = true;
                         }
                     }
                 }
@@ -4059,6 +4280,9 @@ impl Engine for PinyinEngine {
         } else {
             Vec::new()
         };
+        timer.mark("abbrevs5");
+
+        // 5b. 混合简拼：同一串里混用声母与完整音节（`nhao` = n + hao、`nih` = ni + h）。
         if !mixed_pats.is_empty() {
             // 同一串的多条解释常投影到同一个键（`nhao` 的 [n][hao] 与 `nih` 的 [ni][h] 都是
             // `nh`），按键去重后每个键只点查一次索引。
@@ -4069,6 +4293,7 @@ impl Engine for PinyinEngine {
                 .collect();
             keys.sort_unstable();
             keys.dedup();
+            timer.mark("a5keys");
             for key in &keys {
                 // 与 step5 共用 `ABBREV_INDEX_LIMIT`（两条路径查的是同一张表、同一个键）。
                 // 这里拿到的码还要过一道逐段校验，**绝大多数会被滤掉**，窗口小了几乎一条不剩。
@@ -4113,12 +4338,14 @@ impl Engine for PinyinEngine {
                         // ——它的 code 是词的全拼码，与当次击键根本不同域。
                         if candidates.len() > before {
                             candidates[before].is_abbrev = true;
-                            abbrev_full_hit = true;
                         }
                     }
                 }
             }
+            timer.mark("a5search");
         }
+
+        timer.mark("abbrevs");
 
         // 6. 用户/临时造词层（L：让拼音造的词显现）。查询与主词典相同的码——整串精确 +
         //    各前缀子码（你好 coded「nihao」当输入「nihaoma」时部分消费）+ 前缀补全——
@@ -4285,7 +4512,6 @@ impl Engine for PinyinEngine {
                     && !self.is_possible_pinyin_sequence(abbr_query)
                 {
                     c.is_abbrev = true;
-                    abbrev_full_hit = true;
                 }
                 // 用户/临时词的前缀补全（is_prefix=true，码更长）：打到词尾附近就提升进完整
                 // 匹配层，否则被首音节同音子短语整层淹没（长词打到第 3-4 音节才给的根因）。
@@ -4397,13 +4623,17 @@ impl Engine for PinyinEngine {
                         c.is_fuzzy = true;
                     }
                     candidates.push(c);
-                    abbrev_full_hit = true;
                 }
             }
         }
 
-        // 6.2 简拼族**前缀回退**：整串一无所获时，退到最长的能命中的前缀，
-        //     余下字母作残码留给下一次输入（分步上屏）。
+        // 6.2 简拼族**前缀回退**：退到更短的前缀，余下字母作残码留给下一次输入（分步上屏）。
+        //
+        //     ★ **整串命中时也照样补**（对齐微软拼音：整长匹配 → 词组前缀 → 首声母单字）。
+        //     补进来的都是 `is_partial`，沉在整长匹配之后，不改变首选；此前整串一命中就
+        //     不再降级，`tymh` 这类只有一个整长词的输入候选只剩 1 条（t371）。
+        //     下面各段「整串一无所获才降级」的论证是**旧设计**，保留作历史背景：它们
+        //     论证的风险（短切点高频词抢首选）在整串命中时由层级键挡住。
         //
         //     真机现场（连打 `bzdnihaobuhao`）：输到 `bzdha` **整串空码**。`bzd` 明明能出
         //     「不知道」，但简拼族的召回一直是「全串或无」——索引按完整简拼串点查、混合
@@ -4420,7 +4650,7 @@ impl Engine for PinyinEngine {
         //     `aobuhao` 成了垃圾。一个结构性偏好压过了三个数量级的词频差异。
         //     切点长短是**来源差异**、不是结构质量差异，只配走 weight，不配做布尔层级键
         //     （同款教训见模糊拼音 `is_fuzzy` 从层级键改惩罚的那一轮）。
-        //     代价是候选变多，用 `MAX_FALLBACK_PER_CUT` / `MAX_FALLBACK_TOTAL` 两道限流兜住。
+        //     代价是候选变多，用 `AbbrevFallbackConfig` 的限额兜住。
         //
         //     ⚠️ 这仍是**启发式**，不是智能组句：简拼段不进 lattice/Viterbi，`bzd|haobuhao`
         //     与 `bzdh|aobuhao` 之间没有语言模型仲裁，只靠词频。真正的解法是把简拼段作为
@@ -4442,11 +4672,7 @@ impl Engine for PinyinEngine {
         //     凡含成不了音节的字母（`bzdha`、`bzdnihaobuh`）⇒ 允许降级，且**逐前缀的严格
         //     判定在 `recall_abbrev_prefix` 内部**（每个 stroke 各自过 is_abbreviation /
         //     mixed_patterns），门槛只负责挡掉纯全拼、不负责替前缀把关。
-        if self.config.enable_abbrev
-            && !abbrev_full_hit
-            && !mixed_covered
-            && abbr_query.len() > MIN_ABBREV_STROKE
-        {
+        if self.config.enable_abbrev && !mixed_covered && abbr_query.len() >= MIN_ABBREV_STROKE {
             let mut cuts_with_hits = 0usize;
             for take in (MIN_ABBREV_STROKE..abbr_query.len()).rev() {
                 if !abbr_query.is_char_boundary(take) {
@@ -4456,10 +4682,19 @@ impl Engine for PinyinEngine {
                 self.recall_abbrev_prefix(&abbr_query[..take], take, &mut candidates);
                 if candidates.len() > before {
                     cuts_with_hits += 1;
-                    if cuts_with_hits >= MAX_FALLBACK_CUTS {
+                    if cuts_with_hits >= self.config.abbrev_fallback.cuts {
                         break;
                     }
                 }
+            }
+            // 最末一档：首声母对应的单字（微软拼音的「整串 → 词组 → 单字」）。
+            // 只对纯简拼形态做：`buxzd` 这类首个音节已打全的串，首字母不是用户的意图。
+            if stroke_is_plain_abbrev && !self.first_letters_start_a_syllable(abbr_query) {
+                self.recall_first_initial_chars(
+                    &abbr_query[..1],
+                    max_candidates.clamp(30, MAX_COMPLETION_CANDIDATES),
+                    &mut candidates,
+                );
             }
         }
 
@@ -4523,7 +4758,8 @@ impl Engine for PinyinEngine {
         // 仅此情形——完整音节输入的单字已靠精确层级(is_prefix=false)就位，无需提权。
         if syllables.is_empty() {
             for c in candidates.iter_mut() {
-                if c.text.chars().count() == 1 {
+                // 简拼前缀回退补的首声母单字（6.2 末档）不提权：要排在词组之后。
+                if c.text.chars().count() == 1 && !(c.is_abbrev && c.is_partial) {
                     c.weight = c.weight.saturating_add(BARE_INITIAL_SINGLE_CHAR_BOOST);
                 }
             }
@@ -4598,6 +4834,8 @@ impl Engine for PinyinEngine {
         for sent in demote_targets {
             // 「精确整词」判据：码恰好等于已消费输入 `completed`，且非模糊命中、
             // 不在前缀补全/子短语层。含系统词库与 step 6 并入的用户/临时层。
+            // 排除引擎合成的其它整句（N-best 备选）：它不是词条，算进来会让第 1 名降到
+            // 第 2 名之下、名次倒挂。并入了用户/临时词的那条是词条，照算。
             let exact_max = candidates
                 .iter()
                 .filter(|c| {
@@ -4606,6 +4844,7 @@ impl Engine for PinyinEngine {
                         && !c.is_prefix
                         && !c.is_partial
                         && c.code == completed
+                        && !(c.is_synthesized && !c.meta.is_user_dict && !c.meta.is_temp_dict)
                 })
                 .map(|c| c.weight)
                 .max();
@@ -4900,6 +5139,11 @@ impl Engine for PinyinEngine {
             // 双拼下同样跳过：简拼的判据本就走 raw_input（击键域），consumed_length 的语义
             // 就是「消费多少击键」，无须再过 map_consumed_length 换算。
             if c.is_abbrev && c.consumed_length != 0 {
+                // 含手动分隔符时，回退给的是剥除 `'` 之后的字节数，换算回原始输入空间，
+                // 否则选中词组后协调器按含 `'` 的缓冲切片会残留错位（`b'z'd` 选 `bz` 的词组）。
+                if has_sep {
+                    c.consumed_length = raw_len_for_stripped(input, c.consumed_length);
+                }
                 continue;
             }
             // 全拼降级候选（step 6.7）同样自带击键域的消费数。**不可再过
@@ -4947,6 +5191,13 @@ impl Engine for PinyinEngine {
         // 曾因此把双拼的整串候选全部当成半截丢光。全拼下 `raw_input == input`，行为不变。
         if require_full_match {
             candidates.retain(|c| c.consumed_length == 0 || c.consumed_length >= raw_input.len());
+        }
+
+        // 「屏蔽这个词」：任何来源（系统 / 用户 / 临时 / 模糊 / 简拼 / 纠错 / 误读召回）的同文候选
+        // 一律不出。放在截断之前，空出的名额由后面的候选补上。
+        let blocked = self.blocked_words();
+        if !blocked.is_empty() {
+            candidates.retain(|c| !blocked.contains(&c.text));
         }
 
         // ⚠️ **引擎侧刻意不用「消费长度优先」排序**（协调器 `candidate_display_order` 用）。
@@ -5128,6 +5379,7 @@ impl Engine for PinyinEngine {
             }
         }
 
+        timer.mark("tail");
         let has_partial = !partial_syllable.is_empty();
         let is_empty = candidates.is_empty();
 
@@ -5331,6 +5583,29 @@ impl Engine for PinyinEngine {
         self.contiguous_completed_from_start(&self.normalize_gate_input(prefix))
             .0
             .len()
+    }
+
+    fn shuangpin_units(&self, keys: &str) -> Vec<(String, usize, usize)> {
+        self.shuangpin
+            .as_ref()
+            .map(|c| {
+                c.convert(keys)
+                    .syllables
+                    .into_iter()
+                    .map(|s| (s.pinyin, s.raw_start, s.raw_end))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn fuzzy_siblings(&self, syllable: &str) -> Vec<String> {
+        if !self.fuzzy_config.any_enabled() {
+            return Vec::new();
+        }
+        fuzzy::FuzzyMatcher::fuzzy_variants(syllable, &self.fuzzy_config)
+            .into_iter()
+            .filter(|v| v != syllable && syllable::STANDARD_SYLLABLES.contains(&v.as_str()))
+            .collect()
     }
 
     fn shuangpin_full_syllable_count(&self, keys: &str) -> Option<usize> {
@@ -6237,6 +6512,106 @@ i = ["i"]
         let mut eng = engine_with_user_words_fuzzy(tag, words, fz);
         eng.config.sentence_uses_user_words = on;
         eng
+    }
+
+    // ── 「屏蔽这个词」（拼音按文字删除）──
+
+    fn weighted_engine(words: &[(&str, &str, i32)]) -> PinyinEngine {
+        let mut raw = CodetableDict::empty();
+        for (i, (code, text, w)) in words.iter().enumerate() {
+            raw.merge_single(code.to_string(), text.to_string(), *w, i as i32);
+        }
+        PinyinEngine::new(Config::default(), CachedDict::Memory(raw))
+    }
+
+    fn block(eng: &PinyinEngine, words: &[&str]) {
+        eng.set_blocked_words(Arc::new(words.iter().map(|w| w.to_string()).collect()));
+    }
+
+    const SHIJIAN_WORDS: &[(&str, &str, i32)] = &[
+        ("shi", "时", 9000),
+        ("shi", "识", 10),
+        ("jian", "间", 9000),
+        ("jian", "见", 10),
+        ("dao", "到", 5000),
+        ("le", "了", 5000),
+        ("daole", "到了", 5000),
+    ];
+
+    /// 被屏蔽的词典整词不进候选、不进整句图；整句换成另一条覆盖整串的解读，不是半截。
+    #[test]
+    fn blocked_word_leaves_candidates_and_lattice() {
+        let mut words = SHIJIAN_WORDS.to_vec();
+        words.push(("shijian", "时间", 90000));
+        words.push(("shijian", "实践", 1000));
+        let eng = weighted_engine(&words);
+        assert_eq!(sentence_of(&eng, "shijian").unwrap().text, "时间", "前提");
+        block(&eng, &["时间"]);
+        let r = eng.convert("shijian", 50).unwrap();
+        assert!(r.candidates.iter().all(|c| c.text != "时间"));
+        let s = sentence_of(&eng, "shijian").expect("整句仍在");
+        assert_ne!(s.text, "时间");
+        assert_eq!(s.code, "shijian", "整句覆盖整串");
+        assert_eq!(r.candidates[0].text, s.text, "首选是覆盖整串的整句");
+    }
+
+    /// 由单字拼出的整句恰为被屏蔽的文字：N-best 取下一条（出厂只算 1 条时也要换）。
+    #[test]
+    fn sentence_equal_to_blocked_word_takes_next_best() {
+        let eng = weighted_engine(SHIJIAN_WORDS);
+        assert_eq!(
+            sentence_of(&eng, "shijian").unwrap().text,
+            "时间",
+            "前提：单字拼出「时间」"
+        );
+        block(&eng, &["时间"]);
+        let s = sentence_of(&eng, "shijian").expect("换下一条整句");
+        assert_ne!(s.text, "时间");
+        assert_eq!(s.code, "shijian");
+        assert_eq!(s.text.chars().count(), 2);
+    }
+
+    /// 挂了语法模型时 `decode_nbest` 只回 1 条：撞上屏蔽词也要有替补整句，不能整条丢掉、首选退成半截。
+    #[test]
+    fn blocked_sentence_with_grammar_still_has_replacement() {
+        let eng = weighted_engine(SHIJIAN_WORDS).with_grammar(Arc::new(grammar::NullGrammar));
+        assert_eq!(sentence_of(&eng, "shijian").unwrap().text, "时间", "前提");
+        block(&eng, &["时间"]);
+        let s = sentence_of(&eng, "shijian").expect("挂语法模型时同样换下一条整句");
+        assert_ne!(s.text, "时间");
+        assert_eq!(s.code, "shijian");
+    }
+
+    /// 被屏蔽的文字作为更长整句的一段、由更小的块拼出，不拦。
+    #[test]
+    fn blocked_word_inside_longer_sentence_kept() {
+        let mut words = SHIJIAN_WORDS.to_vec();
+        words.push(("shijian", "时间", 90000));
+        let eng = weighted_engine(&words);
+        block(&eng, &["时间"]);
+        assert_eq!(sentence_of(&eng, "shijiandaole").unwrap().text, "时间到了");
+    }
+
+    /// 空集合 = 无屏蔽：结果与不推一样。
+    #[test]
+    fn empty_blocked_set_changes_nothing() {
+        let eng = weighted_engine(SHIJIAN_WORDS);
+        let before: Vec<String> = eng
+            .convert("shijian", 50)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        block(&eng, &[]);
+        let after: Vec<String> = eng
+            .convert("shijian", 50)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(before, after);
     }
 
     fn sentence_of(eng: &PinyinEngine, input: &str) -> Option<Candidate> {
@@ -8652,6 +9027,109 @@ s = ["ao"]
     }
 
     // ── 整句让位于精确整词（step 6.5 降级）─────────────────────────────────────
+
+    fn nbest_engine(raw: CodetableDict) -> PinyinEngine {
+        let mut e = PinyinEngine::new(Config::default(), CachedDict::Memory(raw));
+        e.config.sentence_count = 2;
+        e.config.sentence_max_count = 2;
+        e
+    }
+
+    fn nihao_nbest_dict() -> CodetableDict {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("ni".to_string(), "你".to_string(), 492_791, 0);
+        raw.merge_single("ni".to_string(), "泥".to_string(), 30_000, 1);
+        raw.merge_single("hao".to_string(), "好".to_string(), 124_546, 2);
+        raw
+    }
+
+    /// N-best 下合成的第 2 名整句不算「精确整词」：第 1 名不得因它降级而名次倒挂。
+    #[test]
+    fn nbest_alternate_sentence_does_not_demote_top_sentence() {
+        let e = nbest_engine(nihao_nbest_dict());
+        let r = e.convert("nihao", 50).unwrap();
+        let get = |rank: u8| {
+            r.candidates
+                .iter()
+                .find(|c| c.is_sentence && c.sentence_rank == rank)
+                .unwrap_or_else(|| panic!("缺第 {rank} 名整句: {:?}", r.candidates))
+        };
+        let (top, alt) = (get(1), get(2));
+        assert_eq!((top.text.as_str(), alt.text.as_str()), ("你好", "泥好"));
+        assert!(
+            top.is_synthesized && alt.is_synthesized,
+            "两条都应是合成整句"
+        );
+        assert!(
+            !top.is_sentence_demoted,
+            "第 2 名整句不是词条，不得让第 1 名降级"
+        );
+        assert!(
+            top.weight > alt.weight,
+            "第 1 名权重须高于第 2 名: {} vs {}",
+            top.weight,
+            alt.weight
+        );
+    }
+
+    /// 学过的整句成了整串单节点后，第 2 名路径常是它的拆分版（同文）；
+    /// 备选名额不得被同文路径占掉。
+    #[test]
+    fn nbest_alternate_survives_after_top_sentence_is_learned() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("xian".to_string(), "先".to_string(), 300_000, 0);
+        raw.merge_single("xian".to_string(), "西安".to_string(), 60_000, 1);
+        raw.merge_single("chuan".to_string(), "穿".to_string(), 30_000, 2);
+        raw.merge_single("wazi".to_string(), "袜子".to_string(), 5_000, 3);
+        raw.merge_single("chuanwazi".to_string(), "穿袜子".to_string(), 50, 4);
+        let store = tmp_store("nbest_learned_top");
+        // xi|an|chuan|wa|zi → 0/2/4/9/11
+        store
+            .learn_temp_word(
+                "pinyin",
+                "xianchuanwazi",
+                "西安穿袜子",
+                800,
+                0b1010_0001_0101,
+            )
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreTempLayer::new(store, "pinyin")));
+        let e = nbest_engine(raw).with_store_layers(Arc::new(dm));
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 1).as_deref(),
+            Some("西安穿袜子")
+        );
+        assert_eq!(
+            sentence_ranked(&e, "xianchuanwazi", 2).as_deref(),
+            Some("先穿袜子"),
+            "第 2 名不得被「西安穿袜子」的拆分路径占掉"
+        );
+    }
+
+    /// 对照：第 2 名与用户词同文时它是词条，第 1 名照旧让位（同只出 1 条时）。
+    /// 关掉整句用用户词：开着时用户词自己进图拿第 1，走不到这条例外。
+    #[test]
+    fn nbest_alternate_merged_with_user_word_still_demotes_top_sentence() {
+        let store = tmp_store("nbest_alt_user");
+        store
+            .add_user_word("pinyin", "nihao", "泥好", 500, 0b101) // ni|hao → 0/2
+            .unwrap();
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(wind_store::StoreUserLayer::new(store, "pinyin")));
+        let mut e = nbest_engine(nihao_nbest_dict()).with_store_layers(Arc::new(dm));
+        e.config.sentence_uses_user_words = false;
+        let r = e.convert("nihao", 50).unwrap();
+        let top = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "你好")
+            .unwrap_or_else(|| panic!("缺「你好」: {:?}", r.candidates));
+        let user = r.candidates.iter().find(|c| c.text == "泥好").unwrap();
+        assert!(user.meta.is_user_dict, "「泥好」应带用户词标记");
+        assert!(top.is_sentence_demoted, "存在精确用户词时第 1 名整句须让位");
+        assert!(top.weight < user.weight);
+    }
 
     /// 用户要求的那条保证：**多个精确整词并列于最大权重时，整句排在它们全部之后**。
     ///

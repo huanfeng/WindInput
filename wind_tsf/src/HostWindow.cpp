@@ -1,6 +1,8 @@
 #include "HostWindow.h"
 #include "FileLogger.h"
+#include "HostBandPolicy.h"
 #include "HostClickPolicy.h"
+#include "HostPassLayerPolicy.h"
 #include "IPCClient.h"
 #include <climits>
 #ifndef WHEEL_DELTA
@@ -20,6 +22,9 @@
 #ifndef WS_EX_NOACTIVATE
 #define WS_EX_NOACTIVATE  0x08000000
 #endif
+#ifndef WS_EX_TRANSPARENT
+#define WS_EX_TRANSPARENT 0x00000020
+#endif
 
 static const wchar_t* HOST_WND_CLASS = L"WindInputHostCandidateWnd";
 // Accessed only on the UI thread (STA). No synchronization needed.
@@ -27,6 +32,7 @@ static ATOM s_hostWndClassAtom = 0;
 
 CHostWindow::CHostWindow()
     : _hwnd(NULL)
+    , _hwndPass(NULL)
     , _wndClassAtom(0)
     , _active(FALSE)
     , _currentBand(0)
@@ -110,7 +116,10 @@ BOOL CALLBACK BandEnumProc(HWND hwnd, LPARAM lParam)
     auto* data = reinterpret_cast<BandEnumData*>(lParam);
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == data->targetPID)
+    RECT rc = {};
+    GetWindowRect(hwnd, &rc);
+    if (pid == data->targetPID &&
+        wind::hostband::CountsForHostBand(IsWindowVisible(hwnd) != FALSE, rc.right - rc.left, rc.bottom - rc.top))
     {
         DWORD b = 0;
         if (data->pfnGetWindowBand(hwnd, &b) && b > data->bestBand)
@@ -137,12 +146,30 @@ DWORD CHostWindow::GetForegroundHostBand()
 
 DWORD CHostWindow::GetHostBand()
 {
-    // Try the foreground window first
-    DWORD band = GetForegroundHostBand();
-    if (band > 1)
-        return band;
+    DWORD fgBand = GetForegroundHostBand();
+    if (fgBand > 1)
+        return fgBand;
 
-    // Enumerate top-level windows owned by this process.
+    // 本线程焦点/活动窗口的根窗口：前台不是本进程时（Win11 表情面板，前台仍是记事本）
+    // 它是比枚举更直接的依据。取不到就是 0，交给枚举兜底。
+    DWORD focusRootBand = 0;
+    if (_pfnGetWindowBand)
+    {
+        GUITHREADINFO gti = {};
+        gti.cbSize = sizeof(gti);
+        if (GetGUIThreadInfo(GetCurrentThreadId(), &gti))
+        {
+            HWND h = gti.hwndFocus ? gti.hwndFocus : gti.hwndActive;
+            HWND root = h ? GetAncestor(h, GA_ROOT) : nullptr;
+            DWORD b = 0;
+            if (root && _pfnGetWindowBand(root, &b))
+                focusRootBand = b;
+        }
+    }
+    if (focusRootBand > 1)
+        return wind::hostband::PickHostBand(fgBand, focusRootBand, 0);
+
+    // Enumerate visible, non-empty top-level windows owned by this process.
     //
     // ⚠ 前台不是本进程时这里只是猜：SearchHost 开机预启动、界面还没显示时它的窗口不在
     // 开始菜单那一层，据此建的窗口会被开始菜单盖住（2026-10-09 靶机开机首次）。所以建窗
@@ -150,7 +177,7 @@ DWORD CHostWindow::GetHostBand()
     BandEnumData enumData = { GetCurrentProcessId(), _pfnGetWindowBand, 0 };
     EnumWindows(BandEnumProc, (LPARAM)&enumData);
 
-    return enumData.bestBand;
+    return wind::hostband::PickHostBand(fgBand, focusRootBand, enumData.bestBand);
 }
 
 LRESULT CALLBACK CHostWindow::_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -200,28 +227,17 @@ LRESULT CALLBACK CHostWindow::_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 // _UpdateHitRects snapshots the embedded rect table of a freshly rendered frame.
 // Called on the render thread; guarded by _rectLock against UI-thread hit-testing.
-void CHostWindow::_UpdateHitRects(const SharedRenderHeader* header)
+void CHostWindow::_UpdateHitRects(const FrameSnapshot& frame)
 {
     if (!_rectLockInit)
         return;
 
+    const SharedRenderHeader* header = &frame.header;
     EnterCriticalSection(&_rectLock);
     _frameX = header->x;
     _frameY = header->y;
-    _hitRects.clear();
-
-    uint32_t count = header->rectCount;
-    if (count > MAX_HOST_RENDER_RECTS)
-        count = MAX_HOST_RENDER_RECTS;
-
-    // Validate the table lies fully within the mapped buffer before reading it.
-    uint64_t tableEnd = (uint64_t)header->rectsOffset + (uint64_t)count * sizeof(HostRenderHitRect);
-    if (count > 0 && header->rectsOffset >= sizeof(SharedRenderHeader) && tableEnd <= _maxBufferSize)
-    {
-        const HostRenderHitRect* table =
-            reinterpret_cast<const HostRenderHitRect*>((const char*)_pSharedMem + header->rectsOffset);
-        _hitRects.assign(table, table + count);
-    }
+    // 表已在拷帧时按帧头拷贝校验、截到上限（HostFrameSnapshot.h）。
+    _hitRects = frame.rects;
     // Sync the hover-dedup baseline to what Go actually highlighted in THIS frame. When a
     // content change (typing) clears the highlight without any mouse event, Go renders with
     // renderedHoverIndex = -1; adopting it here means a later real move back onto the same
@@ -510,6 +526,20 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
     WIND_LOG_INFO_FMT(L"HostWindow: Created Band window, hwnd=0x%p, band=%u, actual=%u\n",
         _hwnd, band, actualBand);
 
+    // 皮肤穿透装饰窗口：同 owner、同（回退后的）band，鼠标穿透。不设 GWLP_USERDATA，窗口过程按
+    // 无实例处理（只回 DefWindowProc）。建不出来不算失败：穿透层合回主层（按 block）。
+    if (_windowKind == HOST_WINDOW_CANDIDATE)
+    {
+        _hwndPass = _pfnCreateWindowInBand(
+            exStyle | WS_EX_TRANSPARENT, _wndClassAtom, L"", style, 0, 0, 1, 1,
+            owner, NULL, g_hInstance, NULL, band);
+        if (!_hwndPass)
+        {
+            WIND_LOG_WARN_FMT(L"HostWindow: pass-through decor window failed at band=%u err=%u; "
+                              L"pass decor drawn into the candidate\n", band, GetLastError());
+        }
+    }
+
     // Show the window (non-activating)
     ShowWindow(_hwnd, SW_SHOWNA);
 
@@ -638,6 +668,11 @@ void CHostWindow::Uninitialize()
         DestroyWindow(_hwnd);
         _hwnd = NULL;
     }
+    if (_hwndPass)
+    {
+        DestroyWindow(_hwndPass);
+        _hwndPass = NULL;
+    }
 
     // Unmap shared memory
     if (_pSharedMem)
@@ -682,6 +717,11 @@ BOOL CHostWindow::UpdateBand(DWORD newBand)
         DestroyWindow(_hwnd);
         _hwnd = NULL;
     }
+    if (_hwndPass)
+    {
+        DestroyWindow(_hwndPass);
+        _hwndPass = NULL;
+    }
 
     _requestedBand = newBand;
     if (!_CreateBandWindow(newBand))
@@ -721,16 +761,21 @@ void CHostWindow::_RenderLoop()
             if (!_pSharedMem || !_hwnd)
                 continue;
 
-            const SharedRenderHeader* header = (const SharedRenderHeader*)_pSharedMem;
+            // 帧头只读这一次：服务端随时会改写 SHM，下面的校验与拷贝全按这份拷贝。
+            const uint8_t* shm = static_cast<const uint8_t*>(_pSharedMem);
+            const SharedRenderHeader hdr = wind::hostframe::CopyHeader<SharedRenderHeader>(shm);
+            const SharedRenderHeader* header = &hdr;
 
             // Validate magic
             if (header->magic != SHARED_RENDER_MAGIC)
                 continue;
 
             // Check if this is a new frame
+            // _lastSequence 只在这一帧真正处理完（隐藏或画出）时才记：帧头可能读到写了一半的
+            // （新 sequence 配旧尺寸），校验或拷帧失败时若已记下，服务端写完再发的事件会因
+            // sequence 相同被当成旧帧跳过，候选窗停在旧内容上。
             if (header->sequence == _lastSequence)
                 continue;
-            _lastSequence = header->sequence;
 
             // Frame targeting: multiple TextService instances in this process share the one
             // global SHM and each was signaled. Render only if the frame is visible AND aimed
@@ -741,6 +786,7 @@ void CHostWindow::_RenderLoop()
             BOOL forMe = (header->targetInstanceId == _instanceId);
             if (!visible || !forMe)
             {
+                _lastSequence = header->sequence;
                 _HideWindow();
                 continue;
             }
@@ -756,9 +802,16 @@ void CHostWindow::_RenderLoop()
             if (header->width == 0 || header->height == 0)
                 continue;
 
-            // Get pointer to pixel data (right after header)
-            const void* pixelData = (const char*)_pSharedMem + sizeof(SharedRenderHeader);
-            _RenderFrame(header, pixelData);
+            // 像素 / 命中矩形 / 穿透层拷出来；拷的途中被改写过（sequence 变了）就丢掉这一帧——
+            // 服务端写完那一帧会再发一次事件，下一轮按它画。
+            if (!wind::hostframe::CopyPayload(shm, _maxBufferSize, hdr, MAX_HOST_RENDER_RECTS, _frame))
+            {
+                WIND_LOG_DEBUG_FMT(L"HostWindow: frame %u rewritten while copying, dropped\n",
+                                   header->sequence);
+                continue;
+            }
+            _lastSequence = header->sequence;
+            _RenderFrame(_frame);
         }
         else
         {
@@ -770,24 +823,73 @@ void CHostWindow::_RenderLoop()
     WIND_LOG_INFO(L"HostWindow: Render thread stopped\n");
 }
 
-void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pixelData)
+void CHostWindow::_RenderFrame(const FrameSnapshot& frame)
 {
     // Capture this frame's hit geometry + screen origin for mouse routing before we
     // paint, so a click landing right after the repaint hit-tests against fresh rects.
-    _UpdateHitRects(header);
+    _UpdateHitRects(frame);
 
+    // 皮肤穿透装饰层（只发给声明了能力的 DLL）：先贴穿透窗口，贴不上（或没有穿透窗口）就合回主层，
+    // 不让装饰凭空消失一帧。
+    const SharedRenderHeader* header = &frame.header;
+    const bool hasPass = !frame.pass.empty();
+    const bool passBelow = wind::hostpass::PassLayerBelow(header->flags);
+    const bool passOk = hasPass && _hwndPass &&
+                        _BlitLayered(_hwndPass, header, frame.pass.data(), nullptr, false);
+    const auto plan = wind::hostpass::PlanPassPresent(hasPass, _hwndPass != NULL, passOk);
+    const void* merge = plan == wind::hostpass::PassPresent::Merge ? frame.pass.data() : nullptr;
+
+    if (!_BlitLayered(_hwnd, header, frame.pixels.data(), merge, passBelow))
+    {
+        _HidePassWindow(); // 主层没贴上：别留下一块孤零零的装饰
+        return;
+    }
+    // Bring to topmost z-order within the band on every frame.
+    // Without this, the host process's own windows (e.g., taskbar search popup)
+    // can cover the candidate window when both share the same or adjacent bands.
+    _PlaceWindows(plan == wind::hostpass::PassPresent::Window, passBelow);
+}
+
+void CHostWindow::_PlaceWindows(bool withPass, bool passBelow)
+{
+    const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+    if (!withPass)
+    {
+        _HidePassWindow();
+        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        return;
+    }
+    // 与服务端本地窗口路径同一规则：装饰全在窗体下 → 穿透窗紧贴候选窗下面，否则在上面。在上的那个
+    // TOPMOST、另一个插在它后面，一次提交：分两次 SetWindowPos 的话，两窗会先后各跳一下。
+    HWND top = passBelow ? _hwnd : _hwndPass;
+    HWND under = passBelow ? _hwndPass : _hwnd;
+    HDWP batch = BeginDeferWindowPos(2);
+    if (batch)
+        batch = DeferWindowPos(batch, top, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (batch)
+        batch = DeferWindowPos(batch, under, top, 0, 0, 0, 0, flags);
+    if (!batch || !EndDeferWindowPos(batch))
+    {
+        SetWindowPos(top, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(under, top, 0, 0, 0, 0, flags);
+    }
+}
+
+BOOL CHostWindow::_BlitLayered(HWND hwnd, const SharedRenderHeader* header, const void* pixels,
+                               const void* pass, bool passBelow)
+{
     int width = (int)header->width;
     int height = (int)header->height;
 
     // Get screen DC
     HDC hdcScreen = GetDC(NULL);
-    if (!hdcScreen) return;
+    if (!hdcScreen) return FALSE;
 
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
     if (!hdcMem)
     {
         ReleaseDC(NULL, hdcScreen);
-        return;
+        return FALSE;
     }
 
     // Create DIB section
@@ -805,13 +907,19 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
     {
         DeleteDC(hdcMem);
         ReleaseDC(NULL, hdcScreen);
-        return;
+        return FALSE;
     }
 
     HGDIOBJ oldBmp = SelectObject(hdcMem, hBitmap);
 
     // Copy BGRA pixels from shared memory (already in correct format for Windows)
-    memcpy(bits, pixelData, header->dataSize);
+    memcpy(bits, pixels, header->dataSize);
+    if (pass)
+    {
+        wind::hostpass::CompositePass(static_cast<uint8_t*>(bits),
+                                      static_cast<const uint8_t*>(pass), header->dataSize,
+                                      passBelow);
+    }
 
     // UpdateLayeredWindow with position + content
     POINT ptSrc = { 0, 0 };
@@ -824,7 +932,7 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
     blend.AlphaFormat = AC_SRC_ALPHA;
 
     BOOL ok = UpdateLayeredWindow(
-        _hwnd,
+        hwnd,
         hdcScreen,
         &ptDst,
         &size,
@@ -840,20 +948,20 @@ void CHostWindow::_RenderFrame(const SharedRenderHeader* header, const void* pix
         WIND_LOG_WARN_FMT(L"HostWindow: UpdateLayeredWindow failed, err=%u\n", GetLastError());
     }
 
-    if (ok)
-    {
-        // Bring to topmost z-order within the band on every frame.
-        // Without this, the host process's own windows (e.g., taskbar search popup)
-        // can cover the candidate window when both share the same or adjacent bands.
-        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    }
-
     // Cleanup
     SelectObject(hdcMem, oldBmp);
     DeleteObject(hBitmap);
     DeleteDC(hdcMem);
     ReleaseDC(NULL, hdcScreen);
+    return ok;
+}
+
+void CHostWindow::_HidePassWindow()
+{
+    if (_hwndPass && IsWindowVisible(_hwndPass))
+    {
+        ShowWindow(_hwndPass, SW_HIDE);
+    }
 }
 
 void CHostWindow::_HideWindow()
@@ -876,4 +984,6 @@ void CHostWindow::_HideWindow()
     {
         ShowWindow(_hwnd, SW_HIDE);
     }
+    _HidePassWindow();
+    wind::hostframe::ReleaseBuffers(_frame); // 只在渲染线程调，与拷帧同线程
 }

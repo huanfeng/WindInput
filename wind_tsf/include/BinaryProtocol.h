@@ -44,6 +44,11 @@ constexpr uint32_t HOST_RENDER_FAIL_WINDOW_CREATE = 1; // CreateWindowInBand fai
 // on the same control, such as clicking a password field inside the same web page).
 // Payload: InputStateReportPayload (14 bytes). Rust side: InputStateReportPayload (Task 2).
 constexpr uint16_t CMD_INPUT_STATE_REPORT    = 0x0213;
+// Observed key (C++ -> core, async): a user keydown that this DLL passed straight to the host
+// (English-mode letters, idle Backspace/Enter, ...). Read-only notice for extensions, never fed
+// into key handling. Only sent while core has pushed CONFIG_KEY_EXTENSION_KEY_OBSERVE on, and
+// never in password fields / keyboard-disabled contexts. Payload: KeyObservedPayload (8 bytes).
+constexpr uint16_t CMD_KEY_OBSERVED          = 0x021D;
 // Diagnostics snapshot (C++ -> core, async): focus window chain + foreground window + TSF
 // context instance ids. Payload: DiagSnapshotHeader (64 bytes) followed by three
 // length-prefixed UTF-8 class names (focus / root / foreground), each `len u16 LE + bytes`.
@@ -158,13 +163,19 @@ constexpr uint16_t CMD_BATCH_RESPONSE     = 0x0F02; // Batch response container
 // ============================================================================
 // Host render commands (C++ -> Go)
 // ============================================================================
-constexpr uint16_t CMD_HOST_RENDER_REQUEST = 0x0501; // DLL requests host render setup
+constexpr uint16_t CMD_HOST_RENDER_REQUEST = 0x0501; // DLL requests host render setup (payload: caps u32)
+// Capability bits sent in CMD_HOST_RENDER_REQUEST (old services ignore the payload).
+constexpr uint32_t HOST_RENDER_CAP_PASS_LAYER = 0x0001; // can show the pass-through decor layer
 
 // ============================================================================
 // Key event types
 // ============================================================================
 constexpr uint8_t KEY_EVENT_DOWN = 0;
 constexpr uint8_t KEY_EVENT_UP   = 1;
+// 候选窗显示时 Ctrl 的如实上报（按下 / 松开），单击由服务端判。按下那一刻有输入会话才走这条，
+// 一次按住只走一条路（见 protocol.rs 的 EVENT_MOD_DOWN）。旧 core 对未知类型放行，混搭安全。
+constexpr uint8_t KEY_EVENT_MOD_DOWN = 0x02;
+constexpr uint8_t KEY_EVENT_MOD_UP   = 0x03;
 
 // ============================================================================
 // Toggle key state flags (for KeyPayload.toggles)
@@ -186,6 +197,9 @@ constexpr uint8_t TOGGLE_SCROLLLOCK = 0x04; // ScrollLock is on
 // 标点键、字母数字全透传，服务端既无按键事件也无编码缓冲，只能靠 DLL 如实上报这个事实。
 // 与 _lastPassthroughDigit 同一分工：**DLL 报事实，服务端持策略**。
 constexpr uint8_t TOGGLE_PASSTHROUGH_KEY = 0x08;
+
+// KEY_EVENT_MOD_UP 上：这次按住期间平台看见过服务端看不见的输入（透传的组合键、鼠标），不算单击。
+constexpr uint8_t TOGGLE_MOD_NOT_TAP = 0x10;
 
 // ============================================================================
 // Modifier flags for KeyHash encoding (high 16 bits)
@@ -278,7 +292,7 @@ struct BatchHeader
 };
 static_assert(sizeof(BatchHeader) == 4, "BatchHeader must be 4 bytes");
 
-// Key event payload (18 bytes)
+// Key event payload (20 bytes)
 struct KeyPayload
 {
     uint32_t keyCode;     // Virtual key code
@@ -289,8 +303,10 @@ struct KeyPayload
     uint16_t eventSeq;    // Monotonic event sequence number
     uint16_t prevChar;    // Character before caret, 0 if unavailable. ASCII digits come only from
                           // the IME's own input sequence, never from the document (SmartPunctPrevChar.h)
+    uint16_t seqChar;     // Last char the IME saw go into the document (commit tail / passthrough key
+                          // class representative), 0 = unknown. See InputSequenceChar.h
 };
-static_assert(sizeof(KeyPayload) == 18, "KeyPayload must be 18 bytes");
+static_assert(sizeof(KeyPayload) == 20, "KeyPayload must be 20 bytes");
 
 // Caret position payload (20 bytes)
 struct CaretPayload
@@ -500,6 +516,11 @@ constexpr uint32_t COMMIT_FLAG_CHINESE_MODE       = 0x0004;
 // 本次提交要**替换**掉 HoldComposition 里待定的中文符号（智能符号 press2：「。」→「.」），
 // 而非追加在它后面。只有 press2 会置位；其余提交路径一律追加（见 CTextService::CommitText）。
 constexpr uint32_t COMMIT_FLAG_REPLACING_HELD     = 0x0008;
+// 本次上屏之后处于「无占位的联想会话」（compat assoc_placeholder = "none"）：宿主里没有
+// 组合，所以要在**处理这条应答时同步**把它记成有输入会话，才赢得下一次 OnTestKeyDown 的竞速。
+// 与已废弃的 bit4 不同，这一位随上屏应答本身到达，不靠异步回填。清位见 KeyEventSink 的
+// _EndAssocBareSession / SetCandidateSessionActive。位值与 wind-ipc protocol.rs 一致。
+constexpr uint32_t COMMIT_FLAG_ASSOC_SESSION      = 0x0020;
 // bit4 曾用于「上屏后候选窗仍有内容」（联想态保住 _hasCandidates），**已废弃勿复用**：
 // 那条路要靠服务端应答异步回填标志，赢不了下一次 OnTestKeyDown 的同步判定
 // （真机日志同一行里 composing=0 candidates=1 inputSession=0）。联想改为挂一个占位组合，
@@ -546,9 +567,14 @@ constexpr uint32_t SHARED_RENDER_VERSION = 1;
 // Shared memory flags
 constexpr uint32_t SHARED_FLAG_VISIBLE       = 0x0001; // Window should be visible
 constexpr uint32_t SHARED_FLAG_CONTENT_READY = 0x0002; // New content is ready to render
-// 0x0004 = SOFTWARE_SHADOW, 0x0008 = ABSOLUTE_POS: both are consumed only by the macOS
-// `.app` host, which renders panels itself. Listed here so the bit space stays visible
-// when adding a flag on the Windows side (see wind-ipc/src/protocol.rs SharedRenderHeader).
+// 0x0004 = SOFTWARE_SHADOW, 0x0008 = ABSOLUTE_POS, 0x0010 = ANIM_FRAME: consumed only by the
+// macOS / Linux hosts. Listed here so the bit space stays visible when adding a flag on the
+// Windows side (see wind-ipc/src/protocol.rs SharedRenderHeader).
+// 穿透装饰层（皮肤 `hit = "pass"`，设计 theme-skin-animation.md §17.8）：帧带第二层像素（在
+// passOffset，与主层同尺寸），画进 WS_EX_TRANSPARENT 的第二个窗口，点击直达宿主；BELOW = 全在窗体下，
+// 排在候选窗下面。判读见 HostPassLayerPolicy.h。只发给声明了 HOST_RENDER_CAP_PASS_LAYER 的 DLL。
+constexpr uint32_t SHARED_FLAG_PASS_LAYER = 0x0020;
+constexpr uint32_t SHARED_FLAG_PASS_BELOW = 0x0040;
 
 // Max shared memory size (4MB, covers up to ~1024x1024 BGRA)
 constexpr uint32_t MAX_SHARED_RENDER_SIZE = 4 * 1024 * 1024;
@@ -584,7 +610,10 @@ struct SharedRenderHeader
     // stamps the active instance here. A render thread renders only when this matches its
     // own _instanceId, otherwise it hides — so exactly one band window shows the frame.
     uint32_t targetInstanceId;
-    uint32_t reserved[2];// Padding to 64 bytes
+    // Byte offset from SHM base to the pass-through decor layer (SHARED_FLAG_PASS_LAYER);
+    // 0 = none. Same width/height/stride as the main pixels.
+    uint32_t passOffset;
+    uint32_t reserved;   // Padding to 64 bytes
 };
 static_assert(sizeof(SharedRenderHeader) == 64, "SharedRenderHeader must be 64 bytes");
 
@@ -820,6 +849,14 @@ struct InputStateReportPayload
 };
 static_assert(sizeof(InputStateReportPayload) == 14, "InputStateReportPayload must be 14 bytes");
 
+// CMD_KEY_OBSERVED payload (8 bytes). Mirrors Rust KeyObservedPayload.
+struct KeyObservedPayload
+{
+    uint32_t keyCode;   // 4 bytes LE, offset 0..4: virtual key code
+    uint32_t modifiers; // 4 bytes LE, offset 4..8: KEYMOD_* (same bits as KeyPayload)
+};
+static_assert(sizeof(KeyObservedPayload) == 8, "KeyObservedPayload must be 8 bytes");
+
 // UIElement state (C++ -> core, async). flags 位定义同 Rust UIELEMENT_FLAG_*。
 constexpr uint32_t UIELEMENT_FLAG_HOST_DRAWS     = 0x0001; // 宿主接管绘制（pbShow=FALSE / Show(FALSE)）
 constexpr uint32_t UIELEMENT_FLAG_UI_LESS_THREAD = 0x0002; // 线程以 TF_TMAE_UIELEMENTENABLEDONLY 激活
@@ -929,12 +966,18 @@ constexpr const char* CONFIG_KEY_DIAG_SNAPSHOT = "diag_snapshot";
 // 服务端按本客户端 pid 的 compat 规则 composition_placeholder 现算后逐客户端推送；默认空格。
 // 决策在服务端，DLL 只照做（以及把三种字符都认作占位，见 CompositionPlaceholder.h）。
 constexpr const char* CONFIG_KEY_COMPOSITION_PLACEHOLDER = "composition_placeholder";
+// 中数间补空格（input.spacing.cjk_digit 且本应用 compat 未关）：DLL 据此把汉字后的数字吃下交给
+// core 出「空格 + 数字」。值 enabled(u8)，按客户端现算，推送时机同 composition_placeholder。
+constexpr const char* CONFIG_KEY_SPACE_BEFORE_DIGIT = "space_before_digit";
 // 含换行的上屏是否改走剪贴板粘贴。格式：mode(u8)，0 = commit（默认）、1 = paste；认不出的值按 commit。
 // 服务端按本客户端 pid 的 compat 规则 multiline_commit 现算后逐客户端推送，见 MultilineCommit.h。
 constexpr const char* CONFIG_KEY_MULTILINE_COMMIT = "multiline_commit";
 // 「本进程可能命中 compat 标题规则」开关（采不采窗口标题）。格式：enabled(u8)。**默认关**，重连从关起步，
 // core 握手必推、compat 重载后广播。关着时 OnSetFocus 一次标题都不取（标题是用户数据）。
 constexpr const char* CONFIG_KEY_COMPAT_TITLE_MATCH = "compat_title_match";
+// 「有扩展订阅按键」开关：开着时本 DLL 把放行给宿主的用户按键经 CMD_KEY_OBSERVED 旁路报给 core。
+// 格式：enabled(u8)。**默认关**，重连从关起步，core 握手必推、扩展授权变化时广播。
+constexpr const char* CONFIG_KEY_EXTENSION_KEY_OBSERVE = "extension_key_observe";
 // 「英文半角列有自定义标点映射」的源字符集合。英文模式（非全角）下本 DLL 默认直接透传标点键、
 // core 收不到，用户配的「英半」列因此永远不生效；据此集合精确吃下这些键转发给 core。
 // 集合为空（默认）= 行为与历史完全一致。格式：count(u8) + [ch:u16(LE)]...
