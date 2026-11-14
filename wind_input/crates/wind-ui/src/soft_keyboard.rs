@@ -1632,7 +1632,6 @@ impl SoftKeyboard {
 
     /// 面板控制键（翻页 / 关闭）：不合成按键，语义各自不同。
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn ctrl_key(
         &self,
         tag: i32,
