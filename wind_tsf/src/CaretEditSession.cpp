@@ -743,6 +743,11 @@ BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, Tf
         &hrSession
     );
 
+    if (pRejectedOutsideView)
+    {
+        *pRejectedOutsideView = pEditSession->RejectedOutsideView();
+    }
+
     BOOL result = FALSE;
     if (SUCCEEDED(hr) && SUCCEEDED(hrSession))
     {
@@ -762,10 +767,6 @@ BOOL CCaretEditSession::GetCaretAndCompositionStartRect(ITfContext* pContext, Tf
         if (pCompRect && pHasCompRect)
         {
             *pHasCompRect = pEditSession->GetCompositionRectResult(pCompRect);
-        }
-        if (pRejectedOutsideView)
-        {
-            *pRejectedOutsideView = pEditSession->RejectedOutsideView();
         }
     }
     else

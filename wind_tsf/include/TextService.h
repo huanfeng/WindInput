@@ -275,8 +275,10 @@ public:
     // Get and send caret position to Go Service
     // pSource: 非空时输出命中的是回退链的哪一级（CARET_SRC_*）。**这条链的每一级语义都不同**，
     //          TSF 坐标与 GUI 光标分属两个域，混为一谈正是候选窗错位的历史根因。
+    // pRejectedOutsideView: 候选窗更新用。TSF 坐标被判越界时输出原因并停止回退。
     BOOL GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSource = nullptr,
-                          RECT* pCompRect = nullptr, BOOL* pHasCompRect = nullptr);
+                          RECT* pCompRect = nullptr, BOOL* pHasCompRect = nullptr,
+                          BOOL* pRejectedOutsideView = nullptr);
     void SendCaretPositionUpdate();
 
     // 非按键上下文（WM_TIMER 等）专用：用异步 edit session 取坐标，结果经
@@ -310,7 +312,8 @@ public:
     //                （CARET_SRC_IMM_CANDIDATE_FORM）。为真时 pUsedCompStart 恒为假。
     BOOL GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart = nullptr,
                                  RECT* pCompRect = nullptr, BOOL* pHasCompRect = nullptr,
-                                 BOOL* pIsDefaultPos = nullptr, BOOL* pUsedImmCandidateForm = nullptr);
+                                 BOOL* pIsDefaultPos = nullptr, BOOL* pUsedImmCandidateForm = nullptr,
+                                 BOOL* pRejectedOutsideView = nullptr);
     BOOL GetCompositionStartPosition(LONG* px, LONG* py);
 
     // Input mode control
@@ -766,7 +769,6 @@ private:
     LONG _recoverAcpStart = 0;               // 残留在文档里的起点（ACP 偏移）；核对靠位置，不只靠文字
     ULONGLONG _recoverArmTick = 0;           // 进入恢复的时刻，焦点空档判「宿主在转移输入」用
     ULONGLONG _lastCompositionWriteTick = 0; // 上次写组合文字的时刻，判「过早终止」用
-    BOOL _caretRejectedOutsideView = FALSE; // 最近一次同步取坐标因越出显示区被弃用，见 GetCaretPosition
     // 在编辑会话里删掉光标前的残留（光标前恰好是残留才删），并清掉记录。无残留时什么也不做。
     void _DropRecoverLeftover(TfEditCookie ec, ITfContext* pContext);
     void _ArmRecover(ITfContext* pContext, ITfRange* pRange, const std::wstring& leftover, LONG acpStart);
