@@ -490,7 +490,9 @@ Windows/macOS 同口径）。包内 `Version` 把预发布后缀的 `-` 换成 `
 
 **设置程序是私有仓**：没配 `WIND_REPOS_TOKEN`（fork）时整个 Linux 构建跳过并告警，不出缺设置入口的残缺包。
 
-**未做**：rpm（Fedora/openSUSE）与 Arch（PKGBUILD）需各自发行版实测；apt 仓库（签名密钥与托管）；Wayland。
+**rpm**：试验性，Fedora / openSUSE Leap，复用 deb 同一棵安装树，见 [linux-rpm.md](linux-rpm.md)。
+
+**未做**：Arch（PKGBUILD）；apt / yum 仓库（签名密钥与托管）；Wayland。
 
 **在线升级**：设置程序读 `latest-linux.json`，下载到 `~/.cache/windinput/update/`（0700，避免 `/tmp` 里被别的用户换包）并校验 sha256，
 安装时 `pkexec env DEBIAN_FRONTEND=noninteractive apt-get install -y <deb>`（polkit 授权，apt 解依赖）；无 pkexec 退到
@@ -507,7 +509,7 @@ Windows/macOS 同口径）。包内 `Version` 把预发布后缀的 `-` 换成 `
 
 ### 打包规范审查（对照通行的 Fcitx5 插件打包建议）
 
-目前只发 Debian 系（Ubuntu 22.04+、Deepin 25），rpm / Arch 暂不做。逐项对照：
+主目标是 Debian 系（Ubuntu 22.04+、Deepin 25）；rpm 见 [linux-rpm.md](linux-rpm.md)；Arch 暂不做。逐项对照：
 
 - **发布基线**三条同时写明：glibc ≥ 2.34（`dpkg-shlibdeps` 实算，构建机 22.04）、libstdc++ ≥ 11、Fcitx5 ≥ 5.0.14
   （addon 按 5.0.14 头文件编；5.1.x 的 Deepin 25 上实测可加载）。基线只能随构建机变高不能变低。
@@ -522,5 +524,5 @@ Windows/macOS 同口径）。包内 `Version` 把预发布后缀的 `-` 换成 `
   fcitx5 本身留给用户重启（`fcitx5 -rd` 或重新登录）。
 - **包名保持 `windinput`**：不改 `fcitx5-<名>` 形式——这个包不只是 addon，还带服务、设置程序与词库；已部署的测试机以此名升级。
   日后若拆包，再按 `fcitx5-windinput`（addon）+ `windinput`（服务 / 数据）拆。
-- **不用 AppImage / Flatpak / Snap**，也不用 `alien` 转格式；将来做 rpm 要在 Fedora 容器里独立构建、独立实测。
+- **不用 AppImage / Flatpak / Snap**，也不用 `alien` 转格式。rpm 用 rpm 自己的 spec（依赖 / scriptlet / 文件清单按 rpm 规则写），复用 deb 的安装树，并在 Fedora、openSUSE 容器里独立实测安装。
 

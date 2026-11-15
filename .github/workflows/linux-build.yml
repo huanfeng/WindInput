@@ -13,11 +13,14 @@ name: Linux Build (reusable)
 #   所以 runner 镜像钉死 22.04,不用 -latest。
 #
 # 为什么是 .deb 而不是别的格式:addon 要进 fcitx5 进程、与发行版的 fcitx5 版本绑定,不是自带运行时的
-# 独立应用——Flatpak/AppImage 在这里都不成立。Debian/Ubuntu/Deepin 是当前验证过的目标;
-# rpm(Fedora/openSUSE)与 Arch(PKGBUILD)需要各自发行版上的实测,尚未做。
+# 独立应用——Flatpak/AppImage 在这里都不成立。Debian/Ubuntu/Deepin 是主目标;
+# rpm(Fedora / openSUSE Leap)复用 deb 同一棵安装树(二进制就是 22.04 基线上编的、glibc 最低),
+# 只在 rpm 系容器里加元数据并实测安装,设计见 docs/design/linux-rpm.md。Arch(PKGBUILD)尚未做。
 #
 # 产物 artifact:
-# dist-linux-amd64 / dist-linux-arm64(内含 WindInput-<版本>-linux-<架构>.deb + .sha256)。
+# dist-linux-amd64 / dist-linux-arm64(内含 WindInput-<版本>-linux-<架构>.deb + .sha256);
+# dist-linux-rpm-x86_64 / dist-linux-rpm-aarch64(内含 WindInput-<版本>-linux-<架构>.rpm + .sha256,
+# 试验性:rpm 任一环节失败不拖垮整条流水线,发布时缺包只告警)。
 on:
   workflow_call:
     inputs:
@@ -167,6 +170,18 @@ jobs:
           SETTING_TARGET: ${{ github.workspace }}/wind-setting/target
         run: bash WindInput/scripts/linux/build-deb.sh
 
+      # rpm 复用这棵安装树(二进制不重编):去掉 deb 元数据后打成 tar 交给 rpm 任务。
+      - name: 导出安装树(给 rpm)
+        run: |
+          tar -C "$RUNNER_TEMP/deb-work/stage/pkg" --exclude=./DEBIAN -czf "$RUNNER_TEMP/stage-${{ matrix.arch }}.tar.gz" .
+          ls -lh "$RUNNER_TEMP/stage-${{ matrix.arch }}.tar.gz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-stage-${{ matrix.arch }}
+          path: ${{ runner.temp }}/stage-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
       - name: 核对 .deb(架构 / ELF / glibc / 文件齐全 / 权限)
         run: |
           shopt -s failglob
@@ -209,3 +224,108 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # ───────────────────────── 构建 .rpm ─────────────────────────
+  # 试验性:continue-on-error,rpm 失败不影响 deb 与整条发布(release.yml 的 publish 对缺 rpm 只告警)。
+  # 在 Fedora 容器里跑 rpmbuild(runner 仍是原生 amd64 / arm64),同一容器里核对 + 真装冒烟;
+  # openSUSE Leap 的冒烟在下一个 job。
+  rpm:
+    name: Linux .rpm (${{ matrix.rpm_arch }})
+    needs: [prep, build]
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    timeout-minutes: 30
+    container: quay.io/fedora/fedora:41
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            rpm_arch: x86_64
+            runner: ubuntu-22.04
+          - arch: arm64
+            rpm_arch: aarch64
+            runner: ubuntu-22.04-arm
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: 安装工具
+        run: dnf -y install rpm-build cpio binutils tar gzip git >/dev/null
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # cone 模式:根目录文件(LICENSE / NOTICE.md)总是检出,只需点名目录
+          sparse-checkout: scripts/linux
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-stage-${{ matrix.arch }}
+          path: ${{ runner.temp }}/stage-in
+      - name: 打 .rpm
+        run: |
+          mkdir -p "$RUNNER_TEMP/stage" "$RUNNER_TEMP/rpm-out"
+          tar -C "$RUNNER_TEMP/stage" -xzf "$RUNNER_TEMP/stage-in/stage-${{ matrix.arch }}.tar.gz"
+          APP_VERSION="$VERSION" STAGE_DIR="$RUNNER_TEMP/stage" SRC_DIR="$GITHUB_WORKSPACE" \
+            OUT_DIR="$RUNNER_TEMP/rpm-out" bash scripts/linux/build-rpm.sh
+      - name: 核对 .rpm
+        run: bash scripts/linux/verify-rpm.sh "$(ls "$RUNNER_TEMP"/rpm-out/windinput-*.rpm)" "${{ matrix.rpm_arch }}"
+      - name: 安装冒烟(Fedora)
+        run: bash scripts/linux/smoke-rpm.sh "$(ls "$RUNNER_TEMP"/rpm-out/windinput-*.rpm)"
+      - name: 重命名为发布资产名并生成 sha256
+        run: |
+          mkdir -p dist
+          F="WindInput-${VERSION}-linux-${{ matrix.rpm_arch }}.rpm"
+          cp "$RUNNER_TEMP"/rpm-out/windinput-*.rpm "dist/$F"
+          (cd dist && sha256sum "$F" > "$F.sha256" && cat "$F.sha256")
+      # 先传给 Leap 冒烟 job 用,通过后才作为发布产物(见下一个 job)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rpm-candidate-${{ matrix.rpm_arch }}
+          path: |
+            dist/*.rpm
+            dist/*.rpm.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  # openSUSE Leap 15.6:glibc 2.38 / fcitx5 5.1.1,rpm 4.14 + zypper——与 Fedora 的 dnf / rpm 4.20 是两套实现,
+  # 同一个 rpm 两边都要能装。通过后才把包作为 dist-linux-rpm-* 发布产物。
+  rpm-leap:
+    name: rpm 冒烟 openSUSE Leap (${{ matrix.rpm_arch }})
+    needs: [prep, rpm]
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    timeout-minutes: 30
+    container: registry.opensuse.org/opensuse/leap:15.6
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rpm_arch: x86_64
+            runner: ubuntu-22.04
+          - rpm_arch: aarch64
+            runner: ubuntu-22.04-arm
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: 安装工具
+        run: zypper -n --gpg-auto-import-keys install cpio binutils tar gzip git
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          sparse-checkout: scripts/linux
+      - uses: actions/download-artifact@v8
+        with:
+          name: rpm-candidate-${{ matrix.rpm_arch }}
+          path: dist
+      - name: 核对 + 安装冒烟(Leap)
+        run: |
+          F="dist/WindInput-${VERSION}-linux-${{ matrix.rpm_arch }}.rpm"
+          bash scripts/linux/verify-rpm.sh "$F" "${{ matrix.rpm_arch }}"
+          bash scripts/linux/smoke-rpm.sh "$F"
+      # 名字走 dist-linux-* 口径:release.yml / release-linux.yml 按 `dist-linux-*` 汇总。
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-linux-rpm-${{ matrix.rpm_arch }}
+          path: |
+            dist/*.rpm
+            dist/*.rpm.sha256
+          if-no-files-found: error
+          retention-days: 14

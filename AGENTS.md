@@ -428,9 +428,9 @@ cargo test -p wind-rpc --test wind_setting_assets
   （`wind_input.exe` / `wind_tsf.dll` / `wind_setting.exe` / `wind_portable.exe` / 安装包），
   跨仓经环境变量 `WIND_APP_VERSION` 注入（不经脚本独立构建时各仓自行回退）。
   发版只改 `docs/VERSION` 一处，**不要**手改各仓 `Cargo.toml` 的 `version`。
-- Linux 包（`.deb`，amd64 + arm64）由 `release.yml` 并行调 `linux-build.yml` 构建，与 Windows/macOS **同为硬依赖**（任一平台失败都不建草稿）；
+- Linux 包（`.deb`，amd64 + arm64；另有试验性 `.rpm`，x86_64 + aarch64，设计见 [docs/design/linux-rpm.md](docs/design/linux-rpm.md)）由 `release.yml` 并行调 `linux-build.yml` 构建，与 Windows/macOS **同为硬依赖**（任一平台失败都不建草稿；rpm 不在其内，缺了只告警）；
   想先单独发 Linux：手动触发 `release-linux.yml`（可填 tag 挂到该 tag 的 Release）。设计与取舍见
-  [docs/design/linux-port.md](docs/design/linux-port.md) §9；本机出包 `scripts/linux/package-deb.sh`，核对 `scripts/linux/verify-deb.sh`。
+  [docs/design/linux-port.md](docs/design/linux-port.md) §9；本机出包 `scripts/linux/package-deb.sh`（rpm：随后 `package-rpm.sh`），核对 `scripts/linux/verify-deb.sh` / `verify-rpm.sh`。
 - 包管理器（winget `WindInput.WindInput` / Scoop `windinput-np`，在自有桶 huanfeng/scoop-bucket，Nonportable 待收录）只是调用标准安装包，
   清单开关绑定 wind-installer 的提权、退出码与 ARP 键名；契约与上架步骤见
   [docs/design/package-managers.md](docs/design/package-managers.md)。
