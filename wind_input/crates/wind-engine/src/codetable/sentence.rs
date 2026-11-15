@@ -857,6 +857,14 @@ impl CodeSentenceDecoder {
             for q in (p + 1)..=(p + self.max_code_length).min(bytes) {
                 let code = &input[p..q];
                 for hit in dm.search(code, MAX_HOMOGRAPHS) {
+                    // 特殊语法词条（`$CC` 命令 / `$SS` 组 / `{..}` 求值模板）不进整句：
+                    // 它们要到协调器 `finalize_candidates` 才展开，且只认「整条候选即命令」
+                    // 的锚定，拼进整句就是把源码当文本显示/上屏（AtomGit#1「整句模式中
+                    // 出现直通内容」）。判据与逆切分 `split_segment` 同一个（含 `$` 或
+                    // `{`），代价是字面含 `$`、`{` 的符号条目同样让路；剔光的段视同无码。
+                    if hit.text.contains('$') || hit.text.contains('{') {
+                        continue;
+                    }
                     let (weight, total, is_short) = self.weight_of(dm, code, &hit);
                     // 串尾轻罚、串中重罚——见两个常量的文档。
                     let penalty = match (is_short, q == bytes) {
@@ -1338,6 +1346,46 @@ mod tests {
         // 整串恰是一个词 ⇒ 不产整句（对齐 librime 排除「单个词覆盖全串」）。
         let dm = dm();
         assert!(decoder().decode("aawt", &dm).is_none());
+    }
+
+    /// 特殊语法词条（`$CC` 命令 / `{..}` 模板）不进整句 lattice。
+    ///
+    /// 它们要到协调器 `finalize_candidates` 才展开，且只认「整条候选即命令」的锚定，
+    /// 拼进整句就是把源码当文本显示/上屏（AtomGit#1「整句模式中出现直通内容」：
+    /// `niys'oix` → 「你用$CC(\"[查]：{last(1)}\",…」）。与逆切分 `split_segment` 同判据
+    /// 同命运：剔光的段视同无码 ⇒ 含该段的整句解不存在。
+    #[test]
+    fn direct_command_entry_never_enters_sentence_lattice() {
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(MemLayer::new(&[
+            ("niys", "你用", 900),
+            // 同码放一正一「直通」两条：修复后正常词条上位，修复前直通源码抢进整句。
+            ("oix", "偶", 600),
+            (
+                "oix",
+                r#"$CC("[查]：{last(1)}", open("https://flypy.cc/ix/?q={url(last(1))}"))"#,
+                700,
+            ),
+        ])));
+        let r = decoder().decode("niysoix", &dm).expect("应有整句解");
+        assert_eq!(r.text, "你用偶", "直通源码须让位给正常词条");
+        assert_eq!(r.words, vec!["你用", "偶"]);
+
+        // 对照组：段码**只有**直通词条时，整段视同无码 ⇒ 覆盖整串的解不存在 ⇒ 不产整句
+        // （不再是「显示源码」，也轮不到「把动作拼进文本上屏」——动作不在整句文本域）。
+        let dm2 = DictManager::new();
+        dm2.register_layer(Box::new(MemLayer::new(&[
+            ("niys", "你用", 900),
+            (
+                "oix",
+                r#"$CC("[查]：{world}", open("https://x/?q={url(last(1))}"))"#,
+                700,
+            ),
+        ])));
+        assert!(
+            decoder().decode("niysoix", &dm2).is_none(),
+            "直通段视同无码，含该段的整句须无解"
+        );
     }
 
     #[test]
