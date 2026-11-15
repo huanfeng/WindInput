@@ -5289,9 +5289,12 @@ static thread_local CTextService* g_holdTimerInstance = nullptr;
 // Get caret position using TSF APIs (for browsers and modern apps)
 BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BOOL* pUsedCompStart,
                                            RECT* pCompRect, BOOL* pHasCompRect, BOOL* pIsDefaultPos,
-                                           BOOL* pUsedImmCandidateForm)
+                                           BOOL* pUsedImmCandidateForm, BOOL* pRejectedOutsideView)
 {
-    _caretRejectedOutsideView = FALSE;
+    if (pRejectedOutsideView)
+    {
+        *pRejectedOutsideView = FALSE;
+    }
     if (pUsedCompStart)
     {
         *pUsedCompStart = FALSE;
@@ -5340,7 +5343,7 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
     BOOL result = CCaretEditSession::GetCaretAndCompositionStartRect(
         pContext, _tfClientId, _pComposition, &rc, &rcCompStart, &hasCompStart,
         (LONG)GetPendingCommitPrefixLength(), &usedCompStart, pCompRect, pHasCompRect, &usedImm,
-        &_caretRejectedOutsideView);
+        pRejectedOutsideView);
     pContext->Release();
 
     if (pUsedCompStart)
@@ -5916,7 +5919,7 @@ static BOOL GetConsoleCaretPosition(HWND hwndConsole, LONG* px, LONG* py, LONG* 
 }
 
 BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSource,
-                                    RECT* pCompRect, BOOL* pHasCompRect)
+                                    RECT* pCompRect, BOOL* pHasCompRect, BOOL* pRejectedOutsideView)
 {
     if (pSource)
     {
@@ -5937,8 +5940,12 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
     BOOL usedCompStart = FALSE;
     BOOL isDefaultPos = FALSE;
     BOOL usedImm = FALSE;
+    // 调用方没要越界原因也得自己留一份：下面「别拿 Win32 光标顶替」的守卫对所有调用方生效
+    // （OnSetFocus / _ResendFocusGained 都靠它沿用上次坐标），不能只对传了出参的调用方生效。
+    BOOL rejectedLocal = FALSE;
+    BOOL* pRejected = pRejectedOutsideView ? pRejectedOutsideView : &rejectedLocal;
     if (GetCaretPositionFromTSF(px, py, pHeight, &usedCompStart, pCompRect, pHasCompRect, &isDefaultPos,
-                                &usedImm))
+                                &usedImm, pRejected))
     {
         if (pSource)
         {
@@ -5954,7 +5961,7 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
 
     // 宿主给的是落在本输入框外的旧坐标：别拿 Win32 光标顶替（Chromium 的系统光标同样是旧值），
     // 交调用方沿用上次坐标。
-    if (_caretRejectedOutsideView)
+    if (*pRejected)
     {
         WIND_LOG_DEBUG(L"GetCaretPosition: TSF 坐标越出显示区，交由 last known\n");
         return FALSE;
@@ -6621,8 +6628,14 @@ void CTextService::SendCaretPositionUpdate()
     // Priority 2: Normal method (separate edit session + fallbacks)
     if (!hasPosition)
     {
-        if (!GetCaretPosition(&x, &y, &height, &source, &compRect, &hasCompRect))
+        BOOL rejectedOutsideView = FALSE;
+        if (!GetCaretPosition(&x, &y, &height, &source, &compRect, &hasCompRect, &rejectedOutsideView))
         {
+            if (rejectedOutsideView)
+            {
+                WIND_LOG_DEBUG(L"SendCaretPositionUpdate: 坐标越出编辑区，跳过本次位置更新\n");
+                return;
+            }
             if (_hasLastKnownCaretPos)
             {
                 x = _lastKnownCaretX;
