@@ -5940,8 +5940,12 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
     BOOL usedCompStart = FALSE;
     BOOL isDefaultPos = FALSE;
     BOOL usedImm = FALSE;
+    // 调用方没要越界原因也得自己留一份：下面「别拿 Win32 光标顶替」的守卫对所有调用方生效
+    // （OnSetFocus / _ResendFocusGained 都靠它沿用上次坐标），不能只对传了出参的调用方生效。
+    BOOL rejectedLocal = FALSE;
+    BOOL* pRejected = pRejectedOutsideView ? pRejectedOutsideView : &rejectedLocal;
     if (GetCaretPositionFromTSF(px, py, pHeight, &usedCompStart, pCompRect, pHasCompRect, &isDefaultPos,
-                                &usedImm, pRejectedOutsideView))
+                                &usedImm, pRejected))
     {
         if (pSource)
         {
@@ -5955,8 +5959,11 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
         return TRUE;
     }
 
-    if (pRejectedOutsideView && *pRejectedOutsideView)
+    // 宿主给的是落在本输入框外的旧坐标：别拿 Win32 光标顶替（Chromium 的系统光标同样是旧值），
+    // 交调用方沿用上次坐标。
+    if (*pRejected)
     {
+        WIND_LOG_DEBUG(L"GetCaretPosition: TSF 坐标越出显示区，交由 last known\n");
         return FALSE;
     }
 
