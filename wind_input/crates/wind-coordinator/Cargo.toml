@@ -31,6 +31,8 @@ wind-softkeyboard = { path = "../wind-softkeyboard" }
 wind-reverse = { path = "../wind-reverse" }
 wind-aux-code = { path = "../wind-aux-code" }
 wind-punct = { path = "../wind-punct" }
+# 扩展程序事件（纯数据 + 无锁出口，零平台依赖）。
+wind-hook = { path = "../wind-hook" }
 unicode-segmentation = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

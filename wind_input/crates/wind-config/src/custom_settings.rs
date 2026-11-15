@@ -41,6 +41,7 @@
 /// - `backup`：高级 → 「备份与还原」卡。
 /// - `compat`：高级 → 「应用兼容性」入口卡。
 /// - `memory`：高级 → 性能与诊断卡里的「内存占用 / 诊断信息」行。
+/// - `extensions`：高级 → 「扩展程序」卡。
 /// - `update_check`：关于页的「检查更新」按钮，连同打开设置时的自动检查。
 /// - `dark_mode`：底栏的浅色 / 深色切换。
 /// - `accent`：底栏的主题色下拉。
@@ -55,6 +56,7 @@ pub const SETTINGS_FEATURES: &[&str] = &[
     "backup",
     "compat",
     "memory",
+    "extensions",
     "update_check",
     "dark_mode",
     "accent",

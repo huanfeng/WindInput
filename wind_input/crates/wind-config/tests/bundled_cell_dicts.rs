@@ -1,7 +1,9 @@
 //! 随包附带的 rime-frost 细胞词库：构建脚本的文件清单与出厂方案里的 `cell_*` 声明必须一致。
 //!
-//! 清单写在四处——`scripts/dev.sh` / `scripts/mac/dev.sh` 的 `FROST_CELLS`、`scripts/dev.ps1` 的
-//! `$FrostCells`、全拼 / 双拼方案的 `[[dictionaries]]`。漏一处的后果都是静默的：
+//! 清单的真相源是 `scripts/lib/frost-cells.sh` 的 `FROST_CELLS`（`scripts/dev.sh` 与
+//! `wind_linux/nix/data.nix` 都 source 它）；`scripts/mac/dev.sh` 的 `FROST_CELLS`、
+//! `scripts/dev.ps1` 的 `$FrostCells` 仍各有一份，外加全拼 / 双拼方案的 `[[dictionaries]]`。
+//! 漏一处的后果都是静默的：
 //! - 脚本多发、方案没声明：靠发现目录照样出现，但名称是英文文件名；
 //! - 方案声明了、脚本没发：设置里列着一张勾上也没词的库。
 //!
@@ -15,6 +17,9 @@ use std::path::{Path, PathBuf};
 use wind_config::schema::Schema;
 
 const CELL_DIR: &str = "pinyin/ext";
+
+/// 清单真相源：`scripts/dev.sh` 与 `wind_linux/nix/data.nix` 都 source 这一份。
+const FROST_CELLS_SH: &str = "scripts/lib/frost-cells.sh";
 
 fn repo_root() -> PathBuf {
     // CARGO_MANIFEST_DIR = <repo>/wind_input/crates/wind-config
@@ -63,19 +68,23 @@ fn schema(rel: &str) -> Schema {
 
 #[test]
 fn build_scripts_ship_the_same_cells() {
-    let sh = bash_cells("scripts/dev.sh");
+    let sh = bash_cells(FROST_CELLS_SH);
     assert!(!sh.is_empty());
     assert_eq!(
         bash_cells("scripts/mac/dev.sh"),
         sh,
-        "mac/dev.sh 与 dev.sh 不一致"
+        "mac/dev.sh 与 frost-cells.sh 不一致"
     );
-    assert_eq!(ps_cells("scripts/dev.ps1"), sh, "dev.ps1 与 dev.sh 不一致");
+    assert_eq!(
+        ps_cells("scripts/dev.ps1"),
+        sh,
+        "dev.ps1 与 frost-cells.sh 不一致"
+    );
 }
 
 #[test]
 fn pinyin_schemas_declare_every_shipped_cell_disabled_with_a_label() {
-    let shipped = bash_cells("scripts/dev.sh");
+    let shipped = bash_cells(FROST_CELLS_SH);
     for rel in [
         "data/schemas/pinyin.schema.toml",
         "data/schemas/shuangpin.schema.toml",

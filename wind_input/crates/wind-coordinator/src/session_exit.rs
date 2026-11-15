@@ -227,6 +227,14 @@ impl Coordinator {
     }
 }
 
+/// 扩展事件 `commit.source` 的取值：软键盘点击单列，其余非按键来源归 `command`。
+fn hook_source(origin: ActionOrigin) -> &'static str {
+    match origin {
+        ActionOrigin::SoftKeyboardClick => "softkeyboard",
+        _ => "command",
+    }
+}
+
 impl Coordinator {
     /// 直接推文本上屏（命令栏、软键盘点击、配对退化为纯上屏）：先按 `origin` 收尾，再经 push
     /// 通道投递。调用方不得持有状态锁。返回实际上屏的 UTF-16 长度（命令栏多段输出要累加撤销计数）。
@@ -245,7 +253,7 @@ impl Coordinator {
         };
         match act {
             KeyAction::InsertText { text, .. } => {
-                self.push_commit_text(&text);
+                self.push_commit_text_as(&text, hook_source(origin));
                 text.encode_utf16().count()
             }
             other => {

@@ -648,6 +648,10 @@ pub trait MessageHandler: Send + Sync {
     /// compartment 禁用态变更（不换焦点）上报。默认空实现。
     fn handle_input_state_report(&self, _pid: u32, _disabled: bool, _reason: u8, _mask: u64) {}
 
+    /// DLL 放行给宿主的用户按键（`CMD_KEY_OBSERVED`），只为扩展程序上报。**不得**参与任何
+    /// 输入决策——它只在有扩展订阅时才到达。默认空实现。
+    fn handle_key_observed(&self, _key_code: u32, _modifiers: u32) {}
+
     /// 诊断快照上报（焦点窗口链 / 前台窗口 / TSF 上下文实例 id）。
     ///
     /// 仅在服务端经 `CONFIG_KEY_DIAG_SNAPSHOT` 推开采集后才会到达；HUD 关闭时 DLL 一条不发。

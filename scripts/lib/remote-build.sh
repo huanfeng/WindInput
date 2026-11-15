@@ -156,8 +156,8 @@ rbuild_artifacts_for() {
     case "$1" in
         m1)     echo "wind_tsf.dll wind_tsf_x86.dll" ;;
         dm1)    echo "wind_tsf_dev.dll wind_tsf_x86_dev.dll" ;;
-        m2)     echo "wind_input.exe wind_cli.bat" ;;
-        dm2)    echo "wind_input_dev.exe wind_cli.bat" ;;
+        m2)     echo "wind_input.exe wind_cli.bat wind_input_ext.exe" ;;
+        dm2)    echo "wind_input_dev.exe wind_cli.bat wind_input_ext_dev.exe" ;;
         m3)     echo "wind_setting.exe" ;;
         dm3)    echo "wind_setting_dev.exe" ;;
         m4|dm4) echo "wind_portable.exe" ;;

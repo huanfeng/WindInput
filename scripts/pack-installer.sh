@@ -122,6 +122,8 @@ cp -rf "$BUILD_DIR/data"             "$STAGE/"
 # CLI 包装器随核心分发(与 dev.sh Build-Core / dev.ps1 整目录打包口径一致)。
 # Build-Core 里是"存在才复制", 故此处也守卫存在性。
 [[ -f "$BUILD_DIR/wind_cli.bat" ]] && cp -f "$BUILD_DIR/wind_cli.bat" "$STAGE/"
+# 扩展宿主随核心分发（核心按同目录找它；缺了只是扩展不可用，不影响输入）。
+[[ -f "$BUILD_DIR/wind_input_ext.exe" ]] && cp -f "$BUILD_DIR/wind_input_ext.exe" "$STAGE/"
 for f in "${companions[@]}"; do
   [[ -f "$BUILD_DIR/$f" ]] && cp -f "$BUILD_DIR/$f" "$STAGE/"
 done

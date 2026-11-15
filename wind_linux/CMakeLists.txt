@@ -8,6 +8,9 @@
 # 选项：
 #   WIND_BUILD_ADDON   构建 Fcitx5 addon（需 Fcitx5Core 开发包）；关掉则只编纯逻辑库与单测
 #   WIND_VARIANT_DEV   编出 dev 变体（运行时目录 WindInputDev、SHM 名 /WindInputDev.<uid>）
+#   WIND_SERVICE_PATH  wind_input 服务的默认查找路径（空 = 源码内置 /usr/lib/windinput/wind_input）
+#   WIND_SETTING_PATH  设置程序的默认查找路径（空 = 源码内置 /usr/lib/windinput/wind_setting）
+#   WIND_ADDON_VERSION addon 版本（空 = 工程版本；打包注入 docs/VERSION）
 cmake_minimum_required(VERSION 3.16)
 project(wind_linux VERSION 0.1.0 LANGUAGES C CXX)   # C：wayland-scanner 生成的协议接口表是 C 代码
 
@@ -21,6 +24,18 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(WIND_BUILD_ADDON "Build the Fcitx5 addon" ON)
 option(WIND_VARIANT_DEV "Build the dev variant" OFF)
+
+# 发行打包可覆盖的运行时默认路径（空 = 用源码里的 #ifndef 默认值）。
+# 打非 /usr 前缀的包（Nix、/opt 等）时由构建系统注入；PUBLIC 让单测读同一个值。
+set(WIND_SERVICE_PATH "" CACHE STRING "wind_input 服务的默认查找路径")
+set(WIND_SETTING_PATH "" CACHE STRING "设置程序的默认查找路径")
+
+# addon 的版本号（写进 fcitx5 addon 描述，输入法列表可见）。空 = 工程版本；
+# 发行打包注入 docs/VERSION（Nix 走 -DWIND_ADDON_VERSION）。
+set(WIND_ADDON_VERSION "" CACHE STRING "addon 版本（空 = 工程版本）")
+if(NOT WIND_ADDON_VERSION)
+    set(WIND_ADDON_VERSION ${PROJECT_VERSION})
+endif()
 
 # ── 纯逻辑库（不依赖 Fcitx5，单测直接链接）──
 add_library(windcore STATIC
@@ -42,6 +57,12 @@ add_library(windcore STATIC
 target_include_directories(windcore PUBLIC include)
 target_compile_options(windcore PRIVATE -Wall -Wextra)
 target_compile_definitions(windcore PRIVATE WIND_VARIANT_DEV=$<BOOL:${WIND_VARIANT_DEV}>)
+if(WIND_SERVICE_PATH)
+    target_compile_definitions(windcore PUBLIC WIND_SERVICE_PATH="${WIND_SERVICE_PATH}")
+endif()
+if(WIND_SETTING_PATH)
+    target_compile_definitions(windcore PUBLIC WIND_SETTING_PATH="${WIND_SETTING_PATH}")
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(windcore PUBLIC Threads::Threads)
 

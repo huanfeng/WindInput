@@ -226,6 +226,10 @@ public:
     // happens without a new OnSetFocus (SPA navigating into a password field in-place).
     BOOL SendInputStateReport(uint32_t pid, bool disabled, uint8_t reason, uint64_t inputScopeMask);
 
+    // Send observed key (async, fire-and-forget): a user keydown passed straight to the host,
+    // reported for extensions only (CONFIG_KEY_EXTENSION_KEY_OBSERVE). Key content is never logged.
+    BOOL SendKeyObserved(uint32_t keyCode, uint32_t modifiers);
+
     // Send diagnostics snapshot (async, fire-and-forget): focus window chain + foreground
     // window + TSF context instance ids. Header 后接三段 `len u16 LE + UTF-8` 类名。
     // 仅在 core 经 CONFIG_KEY_DIAG_SNAPSHOT 推开采集后才会被调用（调用方门控）。

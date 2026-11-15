@@ -42,6 +42,9 @@ if [[ -z "${SKIP_BUILD:-}" ]]; then
     log "构建服务（linux-host）…"
     (cd "$REPO/wind_input" && CARGO_TARGET_DIR="$TARGET_DIR" \
         cargo build -q -p wind_service --features linux-host)
+    log "构建扩展宿主与假扩展…"
+    (cd "$REPO/wind_input" && CARGO_TARGET_DIR="$TARGET_DIR" \
+        cargo build -q -p wind_extension_host --bins --examples)
     if [[ -z "${WIND_E2E_ONLY:-}" && -z "${WIND_E2E_SETTING:-}" && -d "$SETTING_REPO" ]]; then
         log "构建设置程序（$SETTING_REPO）…"
         (cd "$SETTING_REPO" && CARGO_TARGET_DIR="$SETTING_TARGET_DIR" cargo build -q)
@@ -49,6 +52,9 @@ if [[ -z "${SKIP_BUILD:-}" ]]; then
 fi
 [[ -f "$ADDON_BUILD/libwindinput.so" ]] || { echo "E2E FAIL: 缺 $ADDON_BUILD/libwindinput.so"; exit 1; }
 [[ -x "$SERVICE_BIN" ]] || { echo "E2E FAIL: 缺 $SERVICE_BIN"; exit 1; }
+EXTENSION_HOST_BIN="$TARGET_DIR/debug/wind_input_ext"
+FAKE_EXTENSION_BIN="$TARGET_DIR/debug/examples/fake_extension"
+[[ -x "$EXTENSION_HOST_BIN" && -x "$FAKE_EXTENSION_BIN" ]] || { echo "E2E FAIL: 缺扩展宿主或假扩展（$EXTENSION_HOST_BIN / $FAKE_EXTENSION_BIN）"; exit 1; }
 [[ -n "${WIND_E2E_ONLY:-}" || -x "$SETTING_BIN" ]] || { echo "E2E FAIL: 缺设置程序 $SETTING_BIN（需要兄弟仓库 ../wind-setting，或用 WIND_E2E_SETTING 指定）"; exit 1; }
 [[ -d "$DATA_DIR/schemas" ]] || { echo "E2E FAIL: 词库目录 $DATA_DIR 不完整（需要 build_dev/data）"; exit 1; }
 
@@ -68,6 +74,8 @@ trap cleanup EXIT
 # 取仓库 data/ 里的那份（build_dev/data 是构建时的拷贝，可能早于最近的短语改动，比如 Linux 的
 # codl），再追加 e2e 专用的按键合成短语（keysynth_cases 用，platform 限 linux）。
 cp "$SERVICE_BIN" "$W/svc/wind_input"
+# 扩展宿主与服务同目录（服务按 exe 同目录找它）。
+cp "$EXTENSION_HOST_BIN" "$W/svc/wind_input_ext"
 mkdir -p "$W/svc/data"
 for f in "$DATA_DIR"/*; do
     [[ "$(basename "$f")" == system.phrases.toml ]] || ln -s "$f" "$W/svc/data/"
@@ -135,7 +143,23 @@ available = ["pinyin", "wubi86"]
 # 出厂 800ms：浮层交互用例（悬停保持 / 拖动 / 右键菜单）要在气泡消失前把指针挪上去。
 [ui.status]
 duration = 2000
+
+# 扩展用例：假扩展把收到的事件逐行记下，客户端据此断言。
+[extensions]
+enabled = true
+
+[[extensions.list]]
+id = "echo"
+granted = ["key.detail", "commit", "mode"]
 EOF
+# 假扩展装进用户目录的 extensions/echo/，记录写到 $W/extension-echo.out。
+mkdir -p "$W/xdg/config/WindInput/extensions/echo"
+cp "$FAKE_EXTENSION_BIN" "$W/xdg/config/WindInput/extensions/echo/fake"
+cat >"$W/xdg/config/WindInput/extensions/echo/extension.toml" <<EOF
+exe = "fake"
+args = ["echo", "$W/extension-echo.out", "key.detail", "commit", "mode"]
+EOF
+export WIND_E2E_EXTENSION_OUT="$W/extension-echo.out"
 # 假剪贴板：服务写剪贴板走外部命令（X11 下 xclip），e2e 环境没有、也不该碰本机剪贴板。
 # 记下每次写入（参数 + 内容），`-o` 读回最近一次文本。服务与 fcitx5（自动拉起模式下由它
 # 拉服务）都继承下面导出的 PATH。

@@ -24,6 +24,7 @@ mod backup_cli;
 mod cli_util;
 mod config_cli;
 mod dict_cli;
+mod extensions;
 mod ime_cli;
 mod log_rotate;
 mod phrase_cli;
@@ -438,6 +439,13 @@ fn main() {
     let coord_for_restart_toast = coordinator.clone();
     let coord_for_exit = coordinator.clone();
     coordinator.install_exit_flush();
+    // 扩展程序：按 `[extensions]` 配置拉起扩展宿主，配置热重载时增量调整（注册即按当前值生效）。
+    let extensions = extensions::Extensions::start(coordinator.hook_tap(), {
+        let c = coordinator.clone();
+        Box::new(move || c.hook_changed())
+    });
+    let extensions_for_rpc = extensions.clone();
+    coordinator.set_extensions_config_hook(Box::new(move |c| extensions.apply_config(c)));
     deferred.set_ready(coordinator);
 
     // 三步顺序不能动（见 `PushServer::mark_ready`）：
@@ -470,7 +478,10 @@ fn main() {
     } else {
         git.to_string()
     });
-    let core_rpc: Arc<dyn wind_rpc::CoreRpc> = Arc::new(RpcCore(coord_for_web));
+    let core_rpc: Arc<dyn wind_rpc::CoreRpc> = Arc::new(RpcCore {
+        coord: coord_for_web,
+        extensions: extensions_for_rpc,
+    });
     match wind_rpc::RpcServer::new(core_rpc, variant, pipe_suffix) {
         Ok(rpc_server) => {
             // 活跃方案变更 → RPC 事件广播。EngineManager 位于 wind-rpc 之下，无法直接
@@ -605,27 +616,34 @@ fn main() {
 }
 
 /// 适配 Coordinator 为 RPC 服务的运行时状态来源（解耦 wind-rpc 与 wind-coordinator）。
-struct RpcCore(Arc<wind_coordinator::Coordinator>);
+/// 扩展子系统在服务进程里、不在协调器里，`extensions.*` 在这里截下。
+struct RpcCore {
+    coord: Arc<wind_coordinator::Coordinator>,
+    extensions: Arc<extensions::Extensions>,
+}
 
 impl wind_rpc::CoreRpc for RpcCore {
     fn is_chinese_mode(&self) -> bool {
-        self.0.is_chinese_mode()
+        self.coord.is_chinese_mode()
     }
     fn active_schema_id(&self) -> String {
-        self.0.active_schema_id()
+        self.coord.active_schema_id()
     }
     fn apply_config(&self) -> bool {
-        self.0.reload_user_config()
+        self.coord.reload_user_config()
     }
     fn data_rpc(
         &self,
         method: &str,
         params: &serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        self.0.web_data_rpc(method, params)
+        match method {
+            "extensions.inventory" => Ok(self.extensions.inventory()),
+            _ => self.coord.web_data_rpc(method, params),
+        }
     }
     fn fonts(&self) -> Vec<(String, String)> {
-        self.0.list_font_families()
+        self.coord.list_font_families()
     }
 }
 
