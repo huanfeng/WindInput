@@ -64,6 +64,25 @@ const CASCADE_FALLBACK: &[&str] = &[
     "Apple Color Emoji", // emoji 彩色字形（sbix）
 ];
 
+/// 内置回退链里**本机确实装着**的族名（保持原顺序）。
+///
+/// 为什么不直接逐个 `CTFontCreateWithName` 探测：Hiragino Sans GB / STHeiti 这类在新系统上
+/// 是「按需下载」字体，本机没装时 CoreText 不是立刻返回失败，而是去请求下载并**同步等**
+/// FontRegistryUI 应答；没有 GUI 会话（CI runner、登录前）时没人应答，一次调用能阻塞十几分钟。
+/// 先查家族名表（只读名表，不触发下载），没装的直接跳过。
+/// 只用于内置常量链——用户配置的字体名可能是 PostScript 名，不在家族名表里，不能这样筛。
+fn installed_among(cands: &[&'static str]) -> Vec<&'static str> {
+    let names: Vec<String> = font_collection::get_family_names()
+        .iter()
+        .map(|n| n.to_string().to_lowercase())
+        .collect();
+    cands
+        .iter()
+        .copied()
+        .filter(|c| names.iter().any(|n| *n == c.to_lowercase()))
+        .collect()
+}
+
 /// 文本渲染器（CoreText）。
 pub struct TextRenderer {
     /// 字体族名
@@ -215,7 +234,7 @@ impl TextRenderer {
             // 这里直接返回；CJK 级联由系统 cascade 处理，PingFang 优先仅为求稳。
             return f;
         }
-        for cand in CJK_FALLBACK {
+        for cand in installed_among(CJK_FALLBACK) {
             if let Ok(f) = core_text::font::new_from_name(cand, pt) {
                 return f;
             }
@@ -244,7 +263,7 @@ impl TextRenderer {
             }
         }
         // 符号 / CJK / 彩色 emoji 回退族。
-        for fam in CASCADE_FALLBACK {
+        for fam in installed_among(CASCADE_FALLBACK) {
             if let Ok(f) = core_text::font::new_from_name(fam, pt) {
                 descs.push(f.copy_descriptor());
             }
@@ -765,6 +784,15 @@ mod tests {
         r.draw_text(&mut buf, w, h, 2.0, 2.0, "中", [0, 0, 0, 255])
             .unwrap();
         assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    /// 内置回退链只留本机装着的族：没装的不能留（留了就会触发按需下载并阻塞），
+    /// 装着的不能丢（丢了级联里缺符号/emoji 回退）。
+    #[test]
+    fn installed_among_drops_absent_keeps_present_in_order() {
+        let got = installed_among(&["这个字族并不存在 ZZZ", FALLBACK_FAMILY, "另一个不存在 YYY"]);
+        assert_eq!(got, vec![FALLBACK_FAMILY], "只留装着的，且不改名");
+        assert!(installed_among(&[]).is_empty());
     }
 
     /// [`TextRenderer::family_exists`] 的三态各自落对。
