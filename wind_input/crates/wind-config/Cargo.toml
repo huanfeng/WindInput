@@ -17,7 +17,6 @@ serde_yaml = { workspace = true }
 # charset_def：列表体按「空白分词 → 字素簇」两级切分，口径须与判定层的
 # `wind_candidate::split_markable_clusters` 一致（那边也是 `graphemes(true)`）。
 unicode-segmentation = { workspace = true }
-thiserror = { workspace = true }
 dirs = { workspace = true }
 # user_meta：数据目录 id
 uuid = { workspace = true }

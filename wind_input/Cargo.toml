@@ -43,7 +43,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+# 许可证以仓库根 LICENSE 为准（wind-hook 例外，自带 MPL-2.0）；不在此处声明，免得无成员继承而被 cargo 报未使用。
 
 # 全工作区 lint 策略。各成员 crate 以 `[lints] workspace = true` 接入（新建 crate 别忘了加，
 # 否则它不受这里约束）。
@@ -128,11 +128,6 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
 ]}
-# Random
-rand = "0.8"
-# HTTP server (core 内嵌 web API)
-axum = "0.7"
-tower-http = { version = "0.6", features = ["cors"] }
 
 [profile.release]
 opt-level = 3

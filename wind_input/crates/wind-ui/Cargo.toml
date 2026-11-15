@@ -8,7 +8,7 @@ edition.workspace = true
 # 关闭时 Linux 仍是 mock 文本（开发机 `cargo test` 行为不变），见 build.rs 的 `ext_presenter` / `mock_text`。
 # 连带打开 wind-bridge 的同名 feature：两个 crate 的 `ext_presenter` 必须一致，否则单独
 # `-p wind-ui --features linux-host` 时 wind-bridge 那边缺 Linux 外部宿主的那部分。
-linux-host = ["dep:ttf-parser", "dep:ab_glyph_rasterizer", "dep:rustybuzz", "wind-bridge/linux-host"]
+linux-host = ["dep:ttf-parser", "dep:ab_glyph_rasterizer", "dep:rustybuzz", "dep:wind-bridge", "wind-bridge/linux-host"]
 
 [dependencies]
 # 表现层协议类型（UiCommand/UiEvent 等）的定义处；本 crate 原路径 pub use 再导出。
@@ -16,8 +16,6 @@ wind-ui-types = { path = "../wind-ui-types" }
 wind-theme = { path = "../wind-theme" }
 # 候选窗渲染的平台无关部分（View / 图片缓存 / 皮肤 / 文字公共类型），原路径在 lib.rs 再导出。
 wind-scene = { path = "../wind-scene" }
-wind-candidate = { path = "../wind-candidate" }
-wind-bridge = { path = "../wind-bridge" }
 # 协议常量与结构：语言栏图标 SHM 的尺寸档与变体表（langbar_icon）、host-render 常量
 # （HOST_WINDOW_CANDIDATE / HostRenderHitRect）、macOS forwarder 的帧编码。
 #
@@ -49,6 +47,11 @@ chrono = "0.4"
 # 引号或反斜杠，转义漏一处就是对端解不出的坏包。
 serde_json = { workspace = true }
 
+# wind-bridge 只在有外部呈现层 / host-render 的配置里用到：Linux 默认构建（mock 文本）不用，
+# 须开 linux-host 才引入，免得默认构建被报未使用依赖。
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+wind-bridge = { path = "../wind-bridge" }
+
 [target.'cfg(windows)'.dependencies]
 # 局部追加 StationsAndDesktops：诊断浮层归属的桌面/窗口站（见 window.rs 的
 # current_desktop_name）。在此声明而非改 workspace 定义，避免影响其它 crate 的配置。
@@ -60,6 +63,7 @@ windows-core = "0.58"
 # dlopen 系统 libfontconfig，编译期不链接任何系统库、不要 -dev 包。默认构建不编它们。
 # ttf-parser 取 0.24：与 rustybuzz 0.18 配套，不多编一份。
 [target.'cfg(target_os = "linux")'.dependencies]
+wind-bridge = { path = "../wind-bridge", optional = true }
 ttf-parser = { version = "0.24", optional = true }
 ab_glyph_rasterizer = { version = "0.1", optional = true }
 # 只给 emoji 簇整形（ZWJ 组合 / 国旗 / 键帽 / 肤色的 GSUB 连字），普通文字仍逐字排。

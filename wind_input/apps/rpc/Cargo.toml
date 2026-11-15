@@ -8,17 +8,6 @@ name = "wind_rpc"
 path = "src/main.rs"
 
 [dependencies]
-wind-ipc = { path = "../../crates/wind-ipc" }
-wind-store = { path = "../../crates/wind-store" }
-wind-dict = { path = "../../crates/wind-dict" }
-wind-config = { path = "../../crates/wind-config" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-anyhow = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
 
 [lints]
 workspace = true

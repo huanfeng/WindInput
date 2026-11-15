@@ -213,12 +213,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
-name = "bytes"
-version = "1.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
-
-[[package]]
 name = "cc"
 version = "1.2.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2214,7 +2208,6 @@ name = "wind-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "libc",
  "thiserror",
  "tracing",
@@ -2256,7 +2249,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "thiserror",
  "toml 0.8.23",
  "tracing",
  "unicode-segmentation",
@@ -2361,11 +2353,9 @@ version = "0.1.0"
 name = "wind-ipc"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "serde",
  "serde_json",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -2532,7 +2522,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
- "thiserror",
  "toml 0.8.23",
  "tracing",
 ]
@@ -2599,7 +2588,6 @@ dependencies = [
  "tracing",
  "ttf-parser",
  "wind-bridge",
- "wind-candidate",
  "wind-config",
  "wind-ipc",
  "wind-keys",
@@ -2694,17 +2682,6 @@ dependencies = [
 [[package]]
 name = "wind_rpc"
 version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tracing",
- "wind-config",
- "wind-dict",
- "wind-ipc",
- "wind-store",
- "windows",
-]
 
 [[package]]
 name = "wind_service"

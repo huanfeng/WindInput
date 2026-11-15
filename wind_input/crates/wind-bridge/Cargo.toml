@@ -8,7 +8,6 @@ wind-ipc = { path = "../wind-ipc" }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-bytes = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }

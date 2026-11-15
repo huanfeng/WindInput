@@ -5,10 +5,8 @@ edition.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
-tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-bytes = "1"
 
 [lints]
 workspace = true
