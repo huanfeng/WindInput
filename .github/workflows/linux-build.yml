@@ -70,6 +70,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: wind_input
       # dev.sh 的 gd 在 Linux 上默认转发到 Windows 编译机(build.local);CI 没有那台机器,
       # WIND_BUILD_LOCAL=1 就地跑——词库数据与架构/平台无关,不受「本机产物不可发版」的限制
@@ -134,6 +135,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # 与 build-deb.sh 的 SERVICE_TARGET / SETTING_TARGET 对应(默认 target/ 位置),缓存才命中
           workspaces: |
             WindInput/wind_input

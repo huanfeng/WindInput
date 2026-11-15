@@ -31,7 +31,10 @@ name: Release
 on:
   push:
     tags: ['v*']
-  workflow_dispatch: {}     # 手动触发:走完整打包,只产出可测 artifact,不发 Release
+  # 手动触发:走完整打包,只产出可测 artifact,不发 Release。
+  # 发版前在 main 上先跑一次,可预热 rust-cache(缓存按 ref 隔离,tag 只读得到 main 的缓存,
+  # 否则发版冷编译,Windows 多约 8 分钟、macOS 多约 4 分钟)。
+  workflow_dispatch: {}
 
 permissions:
   contents: read            # 默认只读;仅 publish job 提权到 write
@@ -106,6 +109,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # 只在 main 上保存:tag 运行存的缓存别人读不到,白花约 40 秒(见文件头 workflow_dispatch 注释)
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             WindInput/wind_input
             wind-installer
@@ -206,6 +211,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # 只在 main 上保存:tag 运行存的缓存别人读不到,白花约 40 秒(见文件头 workflow_dispatch 注释)
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             WindInput/wind_input
             wind-ui-rust
