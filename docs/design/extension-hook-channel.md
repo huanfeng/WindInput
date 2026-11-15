@@ -216,7 +216,7 @@ key 事件带具体按键，敏感度等同键盘记录器。以下全部是**�
 - 扩展宿主 `wind_input_ext` 与核心一起签名（见 [code-signing.md](code-signing.md)）。第三方扩展由作者
   自行签名，输入法不校验。
 - 设置端经 ctrl RPC 读写 `features.extensions` 配置、读取宿主上报的状态。
-- 按键音示例扩展和协议说明放独立仓 WindInputExtensions，同为 GPL-3.0。
+- 按键音示例扩展和协议说明放独立仓 WindInputExtensions，协议文档与官方扩展 MPL-2.0，模板 MIT（`wind-hook` 同为 MPL-2.0）。
 
 ### 6.4 扩展选项
 
