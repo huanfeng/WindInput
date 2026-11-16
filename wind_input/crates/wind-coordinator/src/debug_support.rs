@@ -31,6 +31,10 @@ impl Coordinator {
         self.per_page(overlay.then_some(ModeKind::TempPinyin))
     }
 
+    /// 切换前是否有未上屏的编码/候选/独占模式缓冲（测试/诊断用，包一层 `has_pending_composition`）。
+    pub fn debug_pending_composition(&self) -> bool {
+        self.has_pending_composition()
+    }
     /// 当前下发给 UI 的竖排补位行数（测试/诊断用）：按生效每页数封顶后的 `min_rows`。
     pub fn debug_candidate_min_rows(&self) -> u32 {
         self.eff_candidate().effective_min_rows()
