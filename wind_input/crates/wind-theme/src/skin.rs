@@ -409,6 +409,8 @@ pub enum DecorAction {
     Play {
         clip: DecorClip,
         then: Option<usize>,
+        /// 播放期间不被其它事件打断：`state` 事件只记下、播完才生效，别的一次性片段丢弃。
+        lock: bool,
     },
 }
 
@@ -423,7 +425,7 @@ pub struct RvDecorAnim {
 }
 
 impl RvDecorAnim {
-    /// 事件对应的动作（同一事件写了多条时取第一条）。
+    /// 事件对应的动作（同一事件有多条时取第一条，即主条；`alt` 展开的备选排在它后面）。
     pub fn action(&self, ev: DecorEvent) -> Option<&DecorAction> {
         self.on.iter().find(|(e, _)| *e == ev).map(|(_, a)| a)
     }
@@ -471,33 +473,54 @@ fn resolve_decor_anim(states: &toml::Table, on: &toml::Table) -> RvDecorAnim {
         })
         .collect();
     let find = |name: &str| states.iter().position(|(n, _)| n == name);
-    let action = |v: &Value| -> Option<DecorAction> {
+    // `parent` 是 `alt` 备选所属的主条：备选没写 `then` / `lock` 时沿用主条的。
+    let action = |v: &Value, parent: Option<&toml::Table>| -> Option<DecorAction> {
         let t = v.as_table()?;
         if let Some(s) = t.get("state") {
             return Some(DecorAction::State(s.as_str().and_then(find)?));
         }
         let clip = parse_clip(t.get("play")?)?;
-        let then = match t.get("then") {
+        let then = match t.get("then").or_else(|| parent?.get("then")) {
             None => None,
             Some(Value::String(s)) if s == "@prev" => None,
             Some(s) => Some(s.as_str().and_then(find)?),
         };
-        Some(DecorAction::Play { clip, then })
+        let lock = t
+            .get("lock")
+            .or_else(|| parent?.get("lock"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Some(DecorAction::Play { clip, then, lock })
     };
-    let on: Vec<(DecorEvent, DecorAction)> = on
-        .iter()
-        .filter_map(|(name, v)| {
-            let Some(ev) = DecorEvent::parse(name) else {
-                tracing::warn!("skin: 未知装饰事件 {name:?}，忽略");
-                return None;
+    let mut out: Vec<(DecorEvent, DecorAction)> = Vec::new();
+    for (name, v) in on {
+        let Some(ev) = DecorEvent::parse(name) else {
+            tracing::warn!("skin: 未知装饰事件 {name:?}，忽略");
+            continue;
+        };
+        let Some(a) = action(v, None) else {
+            tracing::warn!("skin: decor.on.{name} 写法不对或引用了不存在的状态，忽略");
+            continue;
+        };
+        out.push((ev, a));
+        // `alt = [ { play = .. }, .. ]`：同一事件的备选动作，触发时与主条等概率随机挑一条。
+        // 旧版本不认 `alt`，只会按主条播，所以主条必须是一份自足的写法。
+        if let Some(alts) = v.as_table().and_then(|t| t.get("alt")) {
+            let Some(alts) = alts.as_array() else {
+                tracing::warn!("skin: decor.on.{name}.alt 不是数组，忽略");
+                continue;
             };
-            let a = action(v);
-            if a.is_none() {
-                tracing::warn!("skin: decor.on.{name} 写法不对或引用了不存在的状态，忽略");
+            for (i, alt) in alts.iter().enumerate() {
+                match action(alt, v.as_table()) {
+                    Some(a) => out.push((ev, a)),
+                    None => tracing::warn!(
+                        "skin: decor.on.{name}.alt[{i}] 写法不对或引用了不存在的状态，忽略"
+                    ),
+                }
             }
-            Some((ev, a?))
-        })
-        .collect();
+        }
+    }
+    let on = out;
     RvDecorAnim {
         initial: find("idle").or((!states.is_empty()).then_some(0)),
         states,
@@ -1098,14 +1121,16 @@ mode_en = { play = "10", then = "@prev" }
             a.action(DecorEvent::Commit),
             Some(&DecorAction::Play {
                 clip: DecorClip::Frames { first: 8, last: 9 },
-                then: Some(2)
+                then: Some(2),
+                lock: false
             })
         );
         assert_eq!(
             a.action(DecorEvent::Page),
             Some(&DecorAction::Play {
                 clip: DecorClip::Image("burst".into()),
-                then: None
+                then: None,
+                lock: false
             }),
             "then 缺省 @prev"
         );
@@ -1116,11 +1141,66 @@ mode_en = { play = "10", then = "@prev" }
                     first: 10,
                     last: 10
                 },
-                then: None
+                then: None,
+                lock: false
             })
         );
         assert_eq!(a.action(DecorEvent::Idle(5)), Some(&DecorAction::State(2)));
         assert_eq!(a.action(DecorEvent::Click), None);
+    }
+
+    #[test]
+    fn decor_alt_expands_to_extra_actions_and_inherits_then_lock() {
+        let a = decor_anim(
+            r#"
+[skin.horizontal.decor.states]
+idle = { frames = "0-3" }
+[skin.horizontal.decor.on]
+click = { play = "4-5", then = "idle", lock = true, alt = [{ play = "6-7" }, { play = "8-9", lock = false }, { play = "x" }, { state = "nope" }] }
+"#,
+        );
+        let clicks: Vec<_> =
+            a.on.iter()
+                .filter(|(e, _)| *e == DecorEvent::Click)
+                .map(|(_, act)| act.clone())
+                .collect();
+        let play = |first, last, lock| DecorAction::Play {
+            clip: DecorClip::Frames { first, last },
+            then: Some(0),
+            lock,
+        };
+        assert_eq!(
+            clicks,
+            [play(4, 5, true), play(6, 7, true), play(8, 9, false)],
+            "主条在前；备选沿用主条的 then / lock，可逐条覆盖；写错的备选丢弃"
+        );
+        assert_eq!(
+            a.action(DecorEvent::Click),
+            Some(&clicks[0]),
+            "action() 取主条"
+        );
+    }
+
+    /// 向下兼容：旧版只认主条、不认 `alt` / `lock`，这份主题在旧版上仍能解析出主条动作。
+    #[test]
+    fn decor_without_alt_or_lock_is_unchanged() {
+        let a = decor_anim(
+            r#"
+[skin.horizontal.decor.on]
+click = { play = "4-5" }
+"#,
+        );
+        assert_eq!(
+            a.on,
+            [(
+                DecorEvent::Click,
+                DecorAction::Play {
+                    clip: DecorClip::Frames { first: 4, last: 5 },
+                    then: None,
+                    lock: false
+                }
+            )]
+        );
     }
 
     #[test]

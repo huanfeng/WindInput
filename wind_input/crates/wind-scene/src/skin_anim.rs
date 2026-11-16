@@ -53,6 +53,8 @@ struct Play {
     on: usize,
     /// None = `@prev`。
     then: Option<usize>,
+    /// 播放期间不接受别的事件（`state` 事件只记下，播完生效）。
+    lock: bool,
     since: Duration,
 }
 
@@ -68,6 +70,22 @@ pub struct Machine {
     last_event: Duration,
     /// 本轮静默里已触发到的最大 idle 秒数。
     idle_done: u32,
+    /// 同一事件有 `alt` 备选时随机挑一条用的状态（splitmix64；不读系统时钟，wasm 也能跑）。
+    rng: u64,
+}
+
+/// 每台状态机一个不同的起始种子；真正的「随机」来自挑选时混进去的事件时刻。
+fn next_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEED: AtomicU64 = AtomicU64::new(0x853c_49e6_748f_ea9b);
+    SEED.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
+}
+
+fn splitmix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 fn total(d: &[u32]) -> Duration {
@@ -88,7 +106,22 @@ impl Machine {
             visible,
             last_event: t,
             idle_done: 0,
+            rng: next_seed(),
         }
+    }
+
+    /// 事件对应的动作下标；`alt` 展开后同一事件有多条，等概率随机挑一条（只有一条时不动随机状态）。
+    fn pick(&mut self, spec: &RvDecorAnim, ev: DecorEvent, t: Duration) -> Option<usize> {
+        let mut it = spec.on.iter().enumerate().filter(|(_, (e, _))| *e == ev);
+        let first = it.next()?.0;
+        let rest: Vec<usize> = it.map(|(i, _)| i).collect();
+        if rest.is_empty() {
+            return Some(first);
+        }
+        self.rng = splitmix(self.rng ^ (t.as_nanos() as u64));
+        let n = rest.len() + 1;
+        let k = (self.rng % n as u64) as usize;
+        Some(if k == 0 { first } else { rest[k - 1] })
     }
 
     /// 不播放时（关了动画）的画面：初始状态首帧。
@@ -140,7 +173,7 @@ impl Machine {
         self.settle(spec, t, tl);
         self.last_event = t;
         self.idle_done = 0;
-        match spec.on.iter().position(|(e, _)| *e == ev) {
+        match self.pick(spec, ev, t) {
             Some(i) => self.apply(spec, i, t, tl),
             None => false,
         }
@@ -212,7 +245,7 @@ impl Machine {
                 }
                 (_, Some((n, at))) if at <= t => {
                     self.idle_done = n;
-                    if let Some(i) = spec.on.iter().position(|(e, _)| *e == DecorEvent::Idle(n)) {
+                    if let Some(i) = self.pick(spec, DecorEvent::Idle(n), at) {
                         self.apply(spec, i, at, tl);
                     }
                 }
@@ -222,6 +255,15 @@ impl Machine {
     }
 
     fn apply(&mut self, spec: &RvDecorAnim, i: usize, t: Duration, tl: &dyn Timelines) -> bool {
+        // 锁定中的片段播放时：切常驻状态的事件只记下（播完才轮到它），别的一次性片段丢弃。
+        if self.visible && self.play.is_some_and(|p| p.lock) {
+            if let DecorAction::State(s) = &spec.on[i].1
+                && valid_state(tl, *s)
+            {
+                self.resident = Some(*s);
+            }
+            return false;
+        }
         match &spec.on[i].1 {
             &DecorAction::State(s) => {
                 if !valid_state(tl, s) {
@@ -241,7 +283,8 @@ impl Machine {
                 self.since = t;
                 true
             }
-            DecorAction::Play { then, .. } => {
+            DecorAction::Play { then, lock, .. } => {
+                let (then, lock) = (*then, *lock);
                 if tl.clip(ClipId::On(i)).is_none() {
                     return false;
                 }
@@ -259,6 +302,7 @@ impl Machine {
                 self.play = Some(Play {
                     on: i,
                     then,
+                    lock,
                     since: t,
                 });
                 true
@@ -325,6 +369,7 @@ mod tests {
         DecorAction::Play {
             clip: frames(4, 5),
             then,
+            lock: false,
         }
     }
 
@@ -420,6 +465,103 @@ mod tests {
             (ClipId::State(BUSY), 0),
             "state 事件打断片段，从头播"
         );
+    }
+
+    fn locked(then: Option<usize>) -> DecorAction {
+        DecorAction::Play {
+            clip: frames(4, 5),
+            then,
+            lock: true,
+        }
+    }
+
+    #[test]
+    fn locked_clip_ignores_other_clips_and_defers_state() {
+        let (spec, tl) = fixture(vec![
+            (DecorEvent::Click, locked(None)),
+            (DecorEvent::Page, play(None)),
+            (DecorEvent::Typing, DecorAction::State(BUSY)),
+        ]);
+        let mut m = shown(&spec, &tl);
+        m.fire(&spec, DecorEvent::Click, ms(0), &tl);
+        assert!(
+            !m.fire(&spec, DecorEvent::Page, ms(50), &tl),
+            "别的片段丢弃"
+        );
+        assert!(
+            !m.fire(&spec, DecorEvent::Click, ms(60), &tl),
+            "自己再点也不重播"
+        );
+        m.fire(&spec, DecorEvent::Typing, ms(70), &tl);
+        let p = m.seek(&spec, ms(150), &tl);
+        assert_eq!(
+            (p.clip, p.frame),
+            (ClipId::On(0), 1),
+            "仍在播 click，没被打断"
+        );
+        let p = m.seek(&spec, ms(210), &tl);
+        assert_eq!(
+            (p.clip, p.frame),
+            (ClipId::State(BUSY), 0),
+            "播完（200）后落到期间记下的 typing 状态"
+        );
+    }
+
+    #[test]
+    fn locked_clip_then_state_wins_over_deferred_state() {
+        let (spec, tl) = fixture(vec![
+            (DecorEvent::Click, locked(Some(IDLE))),
+            (DecorEvent::Typing, DecorAction::State(BUSY)),
+        ]);
+        let mut m = shown(&spec, &tl);
+        m.fire(&spec, DecorEvent::Click, ms(0), &tl);
+        m.fire(&spec, DecorEvent::Typing, ms(50), &tl);
+        assert_eq!(m.seek(&spec, ms(250), &tl).clip, ClipId::State(IDLE));
+    }
+
+    #[test]
+    fn locked_clip_is_dropped_when_hidden() {
+        let (spec, tl) = fixture(vec![(DecorEvent::Click, locked(Some(IDLE)))]);
+        let mut m = shown(&spec, &tl);
+        m.fire(&spec, DecorEvent::Click, ms(0), &tl);
+        m.hide(&spec, ms(50), &tl);
+        m.show(&spec, ms(1000), &tl);
+        assert_eq!(m.seek(&spec, ms(1010), &tl).clip, ClipId::State(IDLE));
+        assert!(
+            m.fire(&spec, DecorEvent::Click, ms(1020), &tl),
+            "显示后可再触发"
+        );
+    }
+
+    #[test]
+    fn alt_actions_are_picked_at_random() {
+        let (spec, tl) = fixture(vec![
+            (DecorEvent::Click, play(None)),
+            (DecorEvent::Click, play(None)),
+            (DecorEvent::Click, play(None)),
+        ]);
+        let mut seen = [0usize; 3];
+        let mut m = shown(&spec, &tl);
+        for k in 0..300u64 {
+            m.fire(&spec, DecorEvent::Click, ms(1000 * k + 7 * k * k), &tl);
+            match m.seek(&spec, ms(1000 * k + 7 * k * k), &tl).clip {
+                ClipId::On(i) => seen[i] += 1,
+                other => panic!("该在播 click 片段：{other:?}"),
+            }
+        }
+        assert!(
+            seen.iter().all(|&n| n > 50),
+            "三条都该被挑到且大致均匀：{seen:?}"
+        );
+    }
+
+    #[test]
+    fn single_action_does_not_touch_random_state() {
+        let (spec, tl) = fixture(vec![(DecorEvent::Click, play(None))]);
+        let mut m = shown(&spec, &tl);
+        let r = m.rng;
+        m.fire(&spec, DecorEvent::Click, ms(10), &tl);
+        assert_eq!(m.rng, r);
     }
 
     #[test]

@@ -976,6 +976,7 @@ mod tests {
         DecorAction::Play {
             clip: DecorClip::Frames { first, last },
             then,
+            lock: false,
         }
     }
 
@@ -1294,8 +1295,14 @@ mod tests {
                 let mut theme = w.theme_source.clone();
                 let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
                 let clip = DecorClip::Image(name.clone());
-                v.decor[0].anim.on =
-                    vec![(DecorEvent::Commit, DecorAction::Play { clip, then: None })];
+                v.decor[0].anim.on = vec![(
+                    DecorEvent::Commit,
+                    DecorAction::Play {
+                        clip,
+                        then: None,
+                        lock: false,
+                    },
+                )];
                 w.set_theme(theme);
             }
             w.show();
@@ -1352,7 +1359,14 @@ mod tests {
             let mut theme = w.theme_source.clone();
             let v = theme.skin.as_mut().unwrap().horizontal.as_mut().unwrap();
             let clip = DecorClip::Image(other.to_string_lossy().into_owned());
-            v.decor[0].anim.on = vec![(DecorEvent::Commit, DecorAction::Play { clip, then: None })];
+            v.decor[0].anim.on = vec![(
+                DecorEvent::Commit,
+                DecorAction::Play {
+                    clip,
+                    then: None,
+                    lock: false,
+                },
+            )];
             w.set_theme(theme);
         }
         w.show();
