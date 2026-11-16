@@ -1450,6 +1450,14 @@ impl Coordinator {
         self.open_settings_with(page, "");
     }
 
+    /// 当前宿主是否要求由服务进程自己拉起外部程序（compat `launch_by_service`，GH#339）。
+    /// 开始菜单、便笺等宿主不执行转发来的启动请求，默认的「交给宿主」对它们等于没按。
+    #[cfg(not(ext_presenter))]
+    fn launch_by_service(&self) -> bool {
+        self.with_active_compat_rule(|r| r.and_then(|r| r.launch_by_service))
+            .unwrap_or(false)
+    }
+
     /// 带附加参数的「打开设置」。`extra` 是**原样直通**给设置程序的命令行参数串
     /// （如 `--schema=wubi86 --type=shadow`），空串=无附加参数。
     ///
@@ -1479,7 +1487,7 @@ impl Coordinator {
         }
         #[cfg(not(ext_presenter))]
         if let Some(app) = crate::coordinator::settings_app_path() {
-            if self.push_server.has_clients() {
+            if self.push_server.has_clients() && !self.launch_by_service() {
                 // 设置程序落到它自己所在目录（app 目录），不继承宿主应用的当前目录。
                 let dir = crate::handle_cmdbar::resolve_workdir("setting.open", &app, "");
                 self.push_shell_exec(&app, &args, &dir, "", "");
@@ -1492,7 +1500,7 @@ impl Coordinator {
                 Some(p) => format!("{url}#{p}"),
                 None => url,
             };
-            if self.push_server.has_clients() {
+            if self.push_server.has_clients() && !self.launch_by_service() {
                 let dir = crate::handle_cmdbar::resolve_workdir("setting.open", &url, "");
                 self.push_shell_exec(&url, "", &dir, "", "");
             } else {

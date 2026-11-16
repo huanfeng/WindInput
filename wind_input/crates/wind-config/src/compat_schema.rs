@@ -489,6 +489,28 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
     },
     FieldMeta {
         section: "apps",
+        key: "launch_by_service",
+        kind: Kind::TriBool,
+        group: "host",
+        label: "由服务拉起程序",
+        summary: "打开设置、加词编辑这类要启动外部程序的操作，改由输入法服务直接执行，不再交给当前软件。",
+        problem: "默认让当前软件去启动设置程序，这样窗口能稳稳地出现在最前面。但 Win11 开始菜单、便笺这类软件出于安全限制不会执行这个请求，\
+                  表现为按了 Ctrl+Enter 加词窗口就消失、在开始菜单里打不开设置。改由服务直接启动即可。\
+                  代价：服务不是前台进程，启动出来的窗口偶尔会停在后台，所以只对有问题的软件开启。",
+        hosts: &[
+            "SearchHost.exe",
+            "searchapp.exe",
+            "startmenuexperiencehost.exe",
+            "textinputhost.exe",
+            "Microsoft.Notes.exe",
+        ],
+        options: &[],
+        depends_on: None,
+        protocol: false,
+        advanced: true,
+    },
+    FieldMeta {
+        section: "apps",
         key: "composition_placeholder",
         kind: Kind::Enum,
         group: "host",
@@ -631,6 +653,7 @@ const TRI_LABELS: &[(&str, [&str; 3])] = &[
     ("auto_pair", ["跟随全局", "启用", "禁用"]),
     ("auto_spacing", ["跟随全局", "启用", "禁用"]),
     ("ignore_host_ime_switch", ["跟随全局", "忽略", "采纳"]),
+    ("launch_by_service", ["默认", "服务拉起", "宿主拉起"]),
 ];
 
 /// 三态开关的三档显示名（下标 0 = 跟随，1 = true，2 = false）。

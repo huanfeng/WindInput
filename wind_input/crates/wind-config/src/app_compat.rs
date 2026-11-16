@@ -1288,6 +1288,19 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub host_drawn_candidates: Option<bool>,
+    /// 「打开设置 / 加词编辑」这类要拉起外部程序的操作，是否由**服务进程**直接执行。
+    /// `None` / `Some(false)` = 默认：经 IPC 让当前宿主进程执行（宿主有前台权限，窗口能到最前）；
+    /// `Some(true)` = 服务进程自己 `ShellExecuteW`。
+    ///
+    /// 背景：Win11 开始菜单、便笺（Microsoft.Notes.exe）等宿主由于安全限制，收到拉起请求后
+    /// 并不会真的执行，表现为「点了没反应」（GH#339，开始菜单里打不开设置同理）。
+    /// ⚠ 代价：服务进程没有前台权限，拉起的窗口可能停在后台，故只给确有需要的宿主开。
+    #[serde(
+        default,
+        deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launch_by_service: Option<bool>,
     /// 组合区占位字符；`None` = 空格（历史行为）。见 [`PlaceholderChar`]（GH#175）。
     ///
     /// 查表请走 [`AppCompat::composition_placeholder_for`]：它负责「进程名未知 ⇒ 空格」这条
@@ -3954,6 +3967,45 @@ mod layering_tests {
                 f.key
             );
         }
+    }
+
+    /// GH#339：开始菜单一族与便笺不执行宿主转发的启动请求，出厂必须由服务拉起；用户层显式写 false 能关掉。
+    #[test]
+    fn shipped_launch_by_service_covers_restricted_hosts() {
+        let data_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data"));
+        let c = AppCompat::load_layered(Some(data_dir), None, None);
+        for p in [
+            "SearchHost.exe",
+            "searchapp.exe",
+            "startmenuexperiencehost.exe",
+            "textinputhost.exe",
+            "Microsoft.Notes.exe",
+        ] {
+            assert_eq!(
+                c.get_rule(p).and_then(|r| r.launch_by_service),
+                Some(true),
+                "{p}"
+            );
+        }
+        assert_eq!(
+            c.get_rule("notepad.exe").and_then(|r| r.launch_by_service),
+            None,
+            "普通软件不改拉起方式"
+        );
+        let user = tmp("launch_by_service_user");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join(COMPAT_FILE_NAME),
+            "[[apps]]\nprocess = \"Microsoft.Notes.exe\"\nlaunch_by_service = false\n",
+        )
+        .unwrap();
+        let c = AppCompat::load_layered(Some(data_dir), None, Some(&user));
+        let _ = std::fs::remove_dir_all(&user);
+        assert_eq!(
+            c.get_rule("Microsoft.Notes.exe")
+                .and_then(|r| r.launch_by_service),
+            Some(false)
+        );
     }
 
     /// 守随发布的系统层 `data/compat.toml`：解析失败会**整份静默跳过**，所有应用的所有规则一起失效。

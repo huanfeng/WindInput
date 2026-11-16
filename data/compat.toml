@@ -115,6 +115,11 @@
 #                         Ctrl+Space 不受影响（按住 Ctrl 时一律放行），仍可正常切中英。
 #                         旧键名 ignore_host_ime_close 仍可读（按本字段的双向语义生效），
 #                         经右键菜单或设置页改写时会换成新键名。
+#   launch_by_service:    打开设置、加词编辑等要启动外部程序的操作由谁执行：true | false｜不写=false。
+#                         默认经 IPC 交给当前软件去启动（有前台权限，窗口能到最前）；
+#                         true = 由输入法服务直接启动。Win11 开始菜单、便笺等软件出于安全限制
+#                         不执行宿主转发的启动请求（表现为 Ctrl+Enter 加词窗口消失、开始菜单里
+#                         打不开设置），对它们开启。⚠ 服务没有前台权限，窗口偶尔停在后台。
 #   host_drawn_candidates:
 #                         这个宿主把候选串读走时，是否当它在自己画候选、从而收起我们的框：
 #                         不写=否（默认）｜true=是｜false=显式关闭。
@@ -235,21 +240,30 @@ stale_probe_guard = true
 process = "SearchHost.exe"
 comment = "Win11 开始菜单 / 任务栏搜索：候选框盖不过其层级，改由宿主代理渲染"
 host_render = true
+launch_by_service = true
 
 [[apps]]
 process = "searchapp.exe"
 comment = "Win10 任务栏搜索：同上"
 host_render = true
+launch_by_service = true
 
 [[apps]]
 process = "startmenuexperiencehost.exe"
 comment = "Win10 开始菜单：同上"
 host_render = true
+launch_by_service = true
 
 [[apps]]
 process = "textinputhost.exe"
 comment = "Win11 表情/剪贴板面板（Win+.）：面板在 Band 3，候选框盖不过，同上"
 host_render = true
+launch_by_service = true
+
+[[apps]]
+process = "Microsoft.Notes.exe"
+comment = "Win11 便笺：不执行宿主转发的启动请求，加词转设置（Ctrl+Enter）会失败，改由服务拉起"
+launch_by_service = true
 
 [[apps]]
 process = "EXCEL.EXE"
