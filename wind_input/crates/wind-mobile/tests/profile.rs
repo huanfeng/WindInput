@@ -1,6 +1,6 @@
 //! 门面必须显式声明移动 Profile，且重载配置后仍是移动 Profile。
 //!
-//! 只放这一个测试：`MobileCore::new` 会写进程环境变量（HOME / XDG_* / WIND_INSTALL_ROOT），
+//! 只放这一个测试：`MobileCore::new` 会写进程环境变量（HOME / WIND_INSTALL_ROOT / 目录注入），
 //! 同进程并行跑多个会互相干扰。
 
 use std::path::PathBuf;
@@ -39,7 +39,13 @@ fn reload_keeps_mobile_overlay() {
     let _ = std::fs::remove_dir_all(&user_root);
     std::fs::create_dir_all(&user_root).unwrap();
 
-    let core = MobileCore::new(&data_dir, &user_root, "pinyin", Arc::new(NullSink));
+    let core = MobileCore::new(
+        &data_dir,
+        &user_root,
+        &user_root.join(".local"),
+        "pinyin",
+        Arc::new(NullSink),
+    );
     assert_eq!(
         core.profile(),
         InputProfile::mobile(),
@@ -52,6 +58,20 @@ fn reload_keeps_mobile_overlay() {
     core.config_set("mobile.grammar.weight", ConfigValue::Float(0.42))
         .unwrap();
     core.run_command(MobileCommand::ReloadConfig);
+
+    // 目录经显式注入：配置落在宿主给的用户目录，缓存 / 日志在本地目录。
+    assert_eq!(
+        wind_config::Config::user_config_dir().as_deref(),
+        Some(user_root.as_path())
+    );
+    assert!(
+        user_root.join("config.toml").is_file(),
+        "用户层 config.toml 落在用户目录根"
+    );
+    assert_eq!(
+        wind_config::Config::local_dir().as_deref(),
+        Some(user_root.join(".local").as_path())
+    );
 
     assert_eq!(core.profile(), InputProfile::mobile(), "重载不改 Profile");
     let coord = core.debug_coordinator();

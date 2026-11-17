@@ -5291,6 +5291,9 @@ pub struct EmojiModuleEntry {
     pub default_on: bool,
 }
 
+/// 宿主显式注入的 `(用户配置目录, 本地目录)`，见 [`Config::set_dir_override`]。
+static DIR_OVERRIDE: std::sync::RwLock<Option<(PathBuf, PathBuf)>> = std::sync::RwLock::new(None);
+
 // 跨 crate 的序列化 / 反序列化一律走下面这几个入口，别在下游直接 `value.try_into::<Config>()`
 // 或 `serde_json::to_value(cfg)`：release 不共享泛型，每个调用的 crate 都会把整棵配置类型树的
 // serde 代码单态化一份（一份 ~0.2 MiB）。`inline(never)` 防 LTO 把它们又内联回各调用方。
@@ -10273,6 +10276,23 @@ impl Config {
         crate::variant::app_dir_name()
     }
 
+    /// 宿主显式注入的 `(用户配置目录, 本地目录)`；没注入为 `None`（桌面恒如此）。
+    ///
+    /// 给没有「漫游 / 本地」known folder 的平台用（Android 由宿主传入：用户目录放在用户文件
+    /// 管理器可达的位置，缓存与日志留在私有目录）。优先于便携、`datadir.conf` 与系统目录，
+    /// 取代此前靠改 `XDG_*` 环境变量骗 `dirs` crate 的做法。
+    fn dir_override() -> Option<(PathBuf, PathBuf)> {
+        DIR_OVERRIDE.read().ok().and_then(|g| g.clone())
+    }
+
+    /// 注入用户配置目录与本地目录（见 [`Self::dir_override`]）。进程启动早期、读任何配置之前调用；
+    /// 重复调用以最后一次为准（测试用）。
+    pub fn set_dir_override(user: PathBuf, local: PathBuf) {
+        if let Ok(mut g) = DIR_OVERRIDE.write() {
+            *g = Some((user, local));
+        }
+    }
+
     /// 用户配置目录（config.toml / meta.toml / `data/` 下的全部用户数据 / 旧库 userdata.redb(.legacy)）。
     /// - 便携模式：`<exe目录>/userdata/`
     /// - 自定义数据目录（安装向导选定，落 `datadir.conf`）：该目录本身
@@ -10281,6 +10301,9 @@ impl Config {
     /// 三者优先级即上述顺序。注意自定义目录**只影响本函数**——`local_dir()` 系
     /// （cache / logs / state.toml）不跟随，详见 `variant::custom_userdata_dir`。
     pub fn user_config_dir() -> Option<PathBuf> {
+        if let Some((user, _)) = Self::dir_override() {
+            return Some(user);
+        }
         if crate::variant::is_portable() {
             return crate::variant::portable_userdata_dir();
         }
@@ -10326,6 +10349,10 @@ impl Config {
                 Some(d) => UserConfigProbe::Portable(d),
                 None => UserConfigProbe::RoamingUnavailable,
             };
+        }
+        // 宿主显式指定的目录（移动端）同样不经漫游 known folder，恒就绪。
+        if let Some((user, _)) = Self::dir_override() {
+            return UserConfigProbe::CustomDir(user);
         }
         // 自定义目录同样绕开漫游 known folder，恒就绪——若漏了这一支，配置已指向
         // 自定义目录、探测却仍盯着漫游根，就会出现「等一个根本不用的目录」的错配。
@@ -10925,6 +10952,9 @@ impl Config {
     /// 两者曾经收敛到 `userdata/`，于是备份用户数据要连带拖走上百 MB 的缓存与日志
     /// （论坛 t120）。分家的完整理由见 [`crate::variant::portable_localdata_dir`]。
     pub fn local_dir() -> Option<PathBuf> {
+        if let Some((_, local)) = Self::dir_override() {
+            return Some(local);
+        }
         if crate::variant::is_portable() {
             crate::variant::portable_localdata_dir()
         } else {

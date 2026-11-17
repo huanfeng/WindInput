@@ -37,8 +37,6 @@
 //!   于是候选栏的滚动也没有意义（一帧才 6~9 条）。桌面鼠标点选走 push 通道上屏，
 //!   headless 没有消费端，所以这里改走「返回编辑指令流」，与 `key_down` 同一种形状。
 //!
-//! 骨架期已知妥协（均有 TODO 标注）：目录经 XDG 环境变量挂载。
-//!
 //! # 工具栏与功能菜单的呈现不属于这一层
 //!
 //! 桌面那棵功能菜单树（截图、打开日志目录、诊断 HUD、语言栏图标调试…）大半在手机上
@@ -449,15 +447,18 @@ impl MobileCore {
     /// 构造核心。
     ///
     /// - `data_dir`: 出厂数据目录（`schemas/` 所在，Android 上即 filesDir/data）
-    /// - `user_root`: 用户/缓存数据根（Android 上即 filesDir/rust，内部分 config/data/cache）
+    /// - `user_root`: 用户目录（核心的「用户配置目录」：config.toml、schemas/、用户词库…，
+    ///   布局同桌面；Android 上放 `Android/data/<包名>/files`，用户可经文件管理器直接编辑）
+    /// - `local_root`: 本地目录（词库编译缓存与日志，可再生，不进用户视野；Android 上在私有 filesDir 下）
     /// - `fallback_schema`: **首装兜底**方案 id；用户上次选过的优先，见下方说明
     pub fn new(
         data_dir: &Path,
         user_root: &Path,
+        local_root: &Path,
         fallback_schema: &str,
         sink: Arc<dyn MobileEventSink>,
     ) -> Arc<Self> {
-        mount_dirs(data_dir, user_root);
+        mount_dirs(data_dir, user_root, local_root);
 
         // 四层配置加载（代码默认 ⊕ data/config.toml ⊕ data_custom/config.toml ⊕ 用户层），
         // 与桌面同一条路径——移动端没有定制版包时 L2.5 自然缺席，不需要分支——
@@ -1441,10 +1442,11 @@ impl MobileCore {
 /// 移动端词库页不提供权重输入（手机上没人会去调它），故固定取这个值。
 pub const USER_WORD_ADD_WEIGHT: i32 = 1200;
 
-/// 把用户目录与**安装根**钉进 App 私有路径。
+/// 把用户目录、本地目录与**安装根**钉到宿主给的路径。
 ///
-/// TODO(上游): wind-config 支持显式目录注入后移除环境变量挂载。
-/// `dirs` crate 在 unix 系按 XDG 变量解析，移动端进程私有目录不在默认位置上。
+/// 用户目录（`user_root`）= 核心的「用户配置目录」，config.toml / schemas / 用户词库都在里面，
+/// 布局与桌面一致；本地目录（`local_root`）放缓存与日志。两者经
+/// `Config::set_dir_override` 显式注入，不再靠改 `XDG_*` 环境变量骗 `dirs` crate。
 ///
 /// # 为什么安装根也必须钉
 ///
@@ -1471,20 +1473,15 @@ pub const USER_WORD_ADD_WEIGHT: i32 = 1200;
 /// 安装根指到别处。移动端没有这个前提——`current_exe()` 是 `/system/bin/app_process64`，
 /// 与 App 私有目录毫无关系，不设它就没有任何正确答案。
 ///
-/// 这与上面那三个 XDG 变量属于同一件事，共用同一个上游 TODO：**wind-config 支持显式
-/// 目录注入后，这四行一起删掉**。在那之前，移动端进程只有本函数一个写入方，
-/// 也只有一个核心实例，不存在两处争抢的问题。
+/// 移动端进程只有本函数一个写入方，也只有一个核心实例，不存在两处争抢的问题。
 ///
 /// 顺带确认过的一个连带风险：`is_portable()` 也读这个根，判据是根目录下有
 /// `portable_mode` 标记文件。App 私有的 `filesDir` 下只有 `data`/`user`/`rust`
 /// 三个目录，不会有这个文件；真有的话用户配置会改落 `filesDir/userdata`。
-fn mount_dirs(data_dir: &Path, user_root: &Path) {
-    let root = user_root.display();
+fn mount_dirs(data_dir: &Path, user_root: &Path, local_root: &Path) {
+    Config::set_dir_override(user_root.to_path_buf(), local_root.to_path_buf());
     unsafe {
-        std::env::set_var("HOME", user_root);
-        std::env::set_var("XDG_CONFIG_HOME", format!("{root}/config"));
-        std::env::set_var("XDG_DATA_HOME", format!("{root}/data"));
-        std::env::set_var("XDG_CACHE_HOME", format!("{root}/cache"));
+        std::env::set_var("HOME", local_root);
     }
     match (data_dir.file_name(), data_dir.parent()) {
         (Some(name), Some(install_root)) if name == "data" => unsafe {

@@ -210,7 +210,13 @@ fn mobile_event_stream_matches_golden() {
     let _cleanup = RemoveOnDrop(user_root.clone());
 
     let rec = Arc::new(Recorder::default());
-    let core = MobileCore::new(&data_dir, &user_root, "wubi86", rec.clone());
+    let core = MobileCore::new(
+        &data_dir,
+        &user_root,
+        &user_root.join(".local"),
+        "wubi86",
+        rec.clone(),
+    );
 
     // 预热窗口：等 prepare 的后台线程完成，再等事件静默，之后才开始脚本
     let t0 = Instant::now();

@@ -70,7 +70,13 @@ fn tooltip_does_not_trigger_rerender() {
     std::fs::create_dir_all(&user_root).unwrap();
 
     let counter = Arc::new(Counter::default());
-    let core = MobileCore::new(&data_dir, &user_root, "wubi86", counter.clone());
+    let core = MobileCore::new(
+        &data_dir,
+        &user_root,
+        &user_root.join(".local"),
+        "wubi86",
+        counter.clone(),
+    );
     let t0 = Instant::now();
     while core.debug_coordinator().readiness() != wind_host::Readiness::Ready {
         assert!(t0.elapsed() < Duration::from_secs(60), "prepare 迟迟未就绪");
