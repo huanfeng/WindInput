@@ -905,6 +905,17 @@ fn dir_has_yaml(dir: &Path) -> bool {
 /// [`EngineManager::read_dict_head`] 只读这么多字节的头 —— 超出即认定正文早已开始。
 const DICT_HEAD_SCAN_LIMIT: usize = 64 * 1024;
 
+/// 词库 YAML 头里引擎要用的几项（见 [`EngineManager::read_dict_head_full`]）。
+#[derive(Debug, Default, Clone)]
+struct DictHead {
+    /// `name:`
+    name: String,
+    /// `group:`（rime 不认这个键；本项目约定：设置端词库列表的分组名，只给发现目录的库用）
+    group: String,
+    /// `import_tables:`
+    imports: Vec<String>,
+}
+
 /// rime 词库文件后缀（发现目录只认这一种）。
 const DICT_YAML_SUFFIX: &str = ".dict.yaml";
 
@@ -6757,7 +6768,10 @@ impl EngineManager {
             &mut base,
             &|sub| Config::list_schema_resource_dir(Some(data_dir), sub, DICT_YAML_SUFFIX),
             &|rel| {
-                Self::dict_head_resolved(&Self::resolve_dict_file(rel, &data_dir.join("schemas")))
+                Self::dict_head_resolved_full(&Self::resolve_dict_file(
+                    rel,
+                    &data_dir.join("schemas"),
+                ))
             },
         );
         // 合并 override 层（存在才读；不存在则零影响）。
@@ -7931,7 +7945,7 @@ impl EngineManager {
     fn inject_dir_dicts(
         base: &mut toml::Value,
         list_dir: &dyn Fn(&str) -> Vec<(String, std::path::PathBuf)>,
-        head: &dyn Fn(&str) -> (String, Vec<String>),
+        head: &dyn Fn(&str) -> DictHead,
     ) {
         let Some(table) = base.as_table_mut() else {
             return;
@@ -7975,7 +7989,7 @@ impl EngineManager {
             taken.insert(rel.to_string());
             // import_tables 子表相对主表所在目录（同 `rime_source_paths`）
             let parent = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-            for imp in head(rel).1 {
+            for imp in head(rel).imports {
                 let sub = format!("{imp}{DICT_YAML_SUFFIX}");
                 taken.insert(if parent.is_empty() {
                     sub
@@ -7992,7 +8006,7 @@ impl EngineManager {
                 }
                 let stem = rel.strip_suffix(DICT_YAML_SUFFIX).unwrap_or(&rel);
                 let file = stem.rsplit_once('/').map(|(_, f)| f).unwrap_or(stem);
-                let name = head(&rel).0;
+                let DictHead { name, group, .. } = head(&rel);
                 let mut t = toml::map::Map::new();
                 t.insert("id".into(), format!("dir:{stem}").into());
                 t.insert(
@@ -8004,6 +8018,9 @@ impl EngineManager {
                     }
                     .into(),
                 );
+                if !group.is_empty() {
+                    t.insert("group".into(), group.into());
+                }
                 t.insert("description".into(), format!("自动识别：{rel}").into());
                 t.insert("path".into(), rel.clone().into());
                 t.insert("type".into(), ty.clone().into());
@@ -8149,29 +8166,35 @@ impl EngineManager {
     /// 用户目录时，它其实**不会**被主表加载。只看清单就跳过，这张库就两头落空——主表没加载、
     /// 扩展词库列表里也不出现（未经 S1 裁剪的旧主表正是这样，评测时撞见）。
     fn dict_head_resolved(path: &Path) -> (String, Vec<String>) {
-        let (name, imports) = Self::read_dict_head(path);
-        let Some(dir) = path.parent() else {
-            return (name, Vec::new());
-        };
-        let imports = imports
-            .into_iter()
-            .filter(|imp| dir.join(format!("{imp}{DICT_YAML_SUFFIX}")).is_file())
-            .collect();
-        (name, imports)
+        let h = Self::dict_head_resolved_full(path);
+        (h.name, h.imports)
     }
 
-    /// 读一个 `.dict.yaml` 的 YAML 头 → `(name, import_tables)`。
+    /// [`Self::dict_head_resolved`] 带 `group`。
+    fn dict_head_resolved_full(path: &Path) -> DictHead {
+        let mut h = Self::read_dict_head_full(path);
+        let Some(dir) = path.parent() else {
+            h.imports.clear();
+            return h;
+        };
+        h.imports
+            .retain(|imp| dir.join(format!("{imp}{DICT_YAML_SUFFIX}")).is_file());
+        h
+    }
+
+    /// 读一个 `.dict.yaml` 的 YAML 头 → [`DictHead`]（`name` / `group` / `import_tables`）。
     ///
     /// 只读到独占一行的 `...`（正文起点）或 [`DICT_HEAD_SCAN_LIMIT`] 为止 —— 主词库正文
     /// 动辄几百 MB，而本函数是**每次启动对每张表都要跑一遍**的。
     ///
-    /// 两个字段一起取是因为**它们来自同一次读**：分成两个函数就要把同一个文件头读两遍。
-    fn read_dict_head(path: &Path) -> (String, Vec<String>) {
+    /// 几个字段一起取是因为**它们来自同一次读**：分成两个函数就要把同一个文件头读两遍。
+    fn read_dict_head_full(path: &Path) -> DictHead {
         use std::io::BufRead;
         let Ok(f) = std::fs::File::open(path) else {
-            return (String::new(), Vec::new());
+            return DictHead::default();
         };
         let mut name = String::new();
+        let mut group = String::new();
         let mut imports: Vec<String> = Vec::new();
         let mut in_imports = false;
         let mut read = 0usize;
@@ -8202,11 +8225,23 @@ impl EngineManager {
             }
             if let Some(v) = body.trim().strip_prefix("name:") {
                 name = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            } else if let Some(v) = body.trim().strip_prefix("group:") {
+                group = v.trim().trim_matches('"').trim_matches('\'').to_string();
             } else if body.trim() == "import_tables:" {
                 in_imports = true;
             }
         }
-        (name, imports)
+        DictHead {
+            name,
+            group,
+            imports,
+        }
+    }
+
+    /// [`Self::read_dict_head_full`] 的 `(name, import_tables)` 视图。
+    fn read_dict_head(path: &Path) -> (String, Vec<String>) {
+        let h = Self::read_dict_head_full(path);
+        (h.name, h.imports)
     }
 
     /// 清理本方案遗留的 `combined.wdat` —— 改用逐库构建之前那个中间产物
@@ -9959,6 +9994,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 头里的 `group:` 是给发现目录的库自定义设置端分组用的；只认头部顶格的键。
+    #[test]
+    fn read_dict_head_parses_group_and_injection_carries_it() {
+        let dir = std::env::temp_dir().join(format!("wind-dicthead-group-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("mine.dict.yaml");
+        std::fs::write(
+            &p,
+            "---\nname: 我的词库\ngroup: \"工作\"\n...\ngroup: 正文里的不算\n",
+        )
+        .unwrap();
+        let h = EngineManager::read_dict_head_full(&p);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((h.name.as_str(), h.group.as_str()), ("我的词库", "工作"));
+
+        let mut base: toml::Value = toml::from_str(
+            "[[dictionary_dirs]]\npath = \"pinyin/ext\"\n[[dictionaries]]\nid = \"main\"\npath = \"pinyin/m.dict.yaml\"\n",
+        )
+        .unwrap();
+        EngineManager::inject_dir_dicts(
+            &mut base,
+            &|_| vec![("pinyin/ext/mine.dict.yaml".into(), "x".into())],
+            &|_| DictHead {
+                name: "我的词库".into(),
+                group: "工作".into(),
+                ..Default::default()
+            },
+        );
+        let arr = base["dictionaries"].as_array().unwrap();
+        assert_eq!(arr[1]["group"].as_str(), Some("工作"));
+    }
+
     /// 词库路径解析的四级优先级。第三级（用户目录的 wdat 优先于安装目录）是关键：
     /// 用户投放的 wdat-only 词库通常在用户目录，而兜底恒指向安装目录——Go 版正是为此
     /// 才需要额外的 wdbOnlyHint 参数。
@@ -10650,7 +10718,11 @@ mod tests {
                 heads
                     .iter()
                     .find(|(r, _, _)| r == rel)
-                    .map(|(_, n, i)| (n.clone(), i.clone()))
+                    .map(|(_, n, i)| DictHead {
+                        name: n.clone(),
+                        imports: i.clone(),
+                        ..Default::default()
+                    })
                     .unwrap_or_default()
             },
         );

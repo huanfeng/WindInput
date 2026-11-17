@@ -640,7 +640,7 @@ pub struct DictSpec {
     #[serde(default)]
     pub description: String,
     /// 设置端「分类词库」清单里的分组名（如「人名地名」）。只影响展示，不影响加载；
-    /// 不写 = 未分组（设置端归「其他」，发现目录登记的库归「我放入的」）。
+    /// 不写 = 未分组（设置端归「其他」；发现目录登记的库取词库 yaml 头里的 `group:`，没写归「扩展词库」）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     #[serde(default)]
