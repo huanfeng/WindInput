@@ -103,7 +103,24 @@ const CODETABLE_KEYS: &[(&str, SchemaSettingKind)] = &[
     ("auto_commit_min_len", SchemaSettingKind::Int),
     ("short_code_yield_level", SchemaSettingKind::Int),
     ("frequency.strategy", SchemaSettingKind::Choice),
+    // 通配输入与 z 键：手机键盘没有物理引导键，这几项在设置里才能开
+    ("wildcard", SchemaSettingKind::Bool),
+    ("wildcard_key", SchemaSettingKind::Choice),
+    ("wildcard_single_only", SchemaSettingKind::Bool),
+    ("z_key_repeat", SchemaSettingKind::Bool),
+    ("z_key_action", SchemaSettingKind::Choice),
 ];
+
+/// [`CODETABLE_KEYS`] 里 Choice 项的值域（按键名；未列的走 [`FREQ_STRATEGIES`]）。
+fn codetable_choice_options(rel: &str) -> &'static [&'static str] {
+    match rel {
+        // 与 config.toml 注释一致：字母或 ASCII 符号单字符；这里给键盘上够得着的几个
+        "wildcard_key" => &["z", "?", "*", "`"],
+        // 空串 = 不启用；mix:/special: 要方案内的 id，手机不在此列
+        "z_key_action" => &["", "temp_pinyin", "temp_english"],
+        _ => &FREQ_STRATEGIES,
+    }
+}
 
 impl MobileCore {
     /// 方案信息与它的设置项（按方案类型筛过）。未知方案 → Err。
@@ -182,7 +199,10 @@ impl MobileCore {
                     value: get_path(&eff, rel).map(fmt).unwrap_or_default(),
                     default_value: get_path(&followed, rel).map(fmt).unwrap_or_default(),
                     options: if *kind == SchemaSettingKind::Choice {
-                        FREQ_STRATEGIES.iter().map(|s| s.to_string()).collect()
+                        codetable_choice_options(rel)
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
                     } else {
                         Vec::new()
                     },
