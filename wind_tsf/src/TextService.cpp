@@ -1242,6 +1242,7 @@ CTextService::CTextService()
     , _lastFocusCaretY(0)
     , _lastFocusCaretHeight(DEFAULT_CARET_HEIGHT)
     , _hasLastKnownCaretPos(FALSE)
+    , _hostGaveTsfCaret(FALSE)
     , _lastKnownCaretX(0)
     , _lastKnownCaretY(0)
     , _lastKnownCaretHeight(DEFAULT_CARET_HEIGHT)
@@ -6260,6 +6261,10 @@ void CTextService::_EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX
         ConvertPointToPhysical(rectR, rectB);
     }
 
+    if (source == CARET_SRC_TSF_SELECTION || source == CARET_SRC_TSF_COMPOSITION || source == CARET_SRC_TSF_CACHED)
+    {
+        _hostGaveTsfCaret = TRUE;
+    }
     _hasLastKnownCaretPos = TRUE;
     _lastKnownCaretX = x;
     _lastKnownCaretY = y;
@@ -6653,6 +6658,17 @@ void CTextService::SendCaretPositionUpdate()
         else
         {
             hasPosition = TRUE;
+        }
+
+        // 本线程的宿主给过 TSF 坐标，现在却落到了 Win32 光标：这是同步 edit session 被拒
+        // （Word 按键期实测 TS_E_SYNCHRONOUS）后的回退，而那个光标是跨窗口的陈旧位置——Word 实测
+        // 恒在别的行，发出去会把候选窗拽走约 270px。不发：异步探针 / UpdateComposition 缓存会
+        // 补上真坐标，服务端缓存里还留着上一帧 TSF 值。从未给过 TSF 坐标的宿主（纯 Win32 控件）
+        // 不受影响，GUI 光标仍是它们唯一的来源。
+        if (hasPosition && source == CARET_SRC_GUI_CARET && _hostGaveTsfCaret)
+        {
+            WIND_LOG_DEBUG_FMT(L"SendCaretPositionUpdate: 宿主有 TSF 坐标但本次回退到 GUI 光标 (%ld,%ld)，丢弃", x, y);
+            return;
         }
 
         if (_pComposition != nullptr)

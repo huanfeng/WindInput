@@ -833,6 +833,9 @@ private:
     // caret_update。**两者都发就会被服务端的 handle_focus_gained 覆写掉**，见回调注释。
     ULONGLONG _focusGainedSentForSession = 0;
     BOOL _hasLastKnownCaretPos;
+    // 本线程的宿主是否给过 TSF 域坐标（SELECTION / COMPOSITION / CACHED）。用于挡掉同步会话被拒后
+    // 回退出的跨窗口 GUI 光标，见 SendCaretPositionUpdate。
+    BOOL _hostGaveTsfCaret;
     LONG _lastKnownCaretX;
     LONG _lastKnownCaretY;
     LONG _lastKnownCaretHeight;

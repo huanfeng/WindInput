@@ -2906,6 +2906,8 @@ impl MessageHandler for Coordinator {
             .composition_start
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
+        self.tsf_frame_seen_in_composition
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         // 矩形锚点与 pre_reflow 基准同步作废（理由同上：换了 docMgr，两者答的都是旧文档的事）。
         // ⚠ 两个都要清：字段注释承诺的是「组合结束与焦点换 docMgr 各一处」，漏一个就与注释不符，
         // 而这类状态的清位点从来不是只有一处（见 144925d8「挡住一处不等于挡住了」）。
@@ -3622,6 +3624,18 @@ impl MessageHandler for Coordinator {
         let active_compat = self.apply_caret_compat(&mut data);
         let data = &data;
         let composition_start_pair_guard = active_compat.composition_start_pair_guard;
+        // 本组合已有 TSF 坐标时，GUI 回退帧是噪声（见字段注释），在写缓存之前就挡掉。
+        if data.source == wind_ipc::protocol::caret_source::GUI_CARET
+            && self
+                .tsf_frame_seen_in_composition
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            debug!(
+                "caret_update → 忽略: 本组合已有 TSF 坐标，gui_caret ({},{}) 是跨窗口的陈旧位置",
+                data.x, data.y
+            );
+            return;
+        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let (prev_x, prev_y, prev_height, prev_source) = (
             state.caret_x,
@@ -3717,6 +3731,10 @@ impl MessageHandler for Coordinator {
                 wind_ipc::protocol::caret_source::is_tsf(data.source)
             );
             return;
+        }
+        if wind_ipc::protocol::caret_source::is_tsf(data.source) {
+            self.tsf_frame_seen_in_composition
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         // 先记下「宿主上一帧如实上报的组合起点」，供后面的大偏移逃生阀判据使用。
         //

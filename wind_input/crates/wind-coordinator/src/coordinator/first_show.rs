@@ -112,6 +112,8 @@ impl Coordinator {
         *t = t.wrapping_add(1);
         drop(t);
         // 组合结束：复位组合起点锚定，下一组合重新锁定首个有效 compStart。
+        self.tsf_frame_seen_in_composition
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         *self
             .composition_start
             .lock()

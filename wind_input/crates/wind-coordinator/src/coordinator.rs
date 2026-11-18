@@ -2033,6 +2033,15 @@ pub struct Coordinator {
     ///
     /// 无需跨组合显式复位：换了组合，宿主报的起点自然与上一帧不同，判据随之不成立。
     last_reported_comp_start: Mutex<(i32, i32, bool)>,
+    /// 本组合内是否已收到过 TSF 域的 caret 帧。置位后，`GUI_CARET` 帧一律不再采信。
+    ///
+    /// 背景：Word 在按键期可拒绝同步 edit session（`TS_E_SYNCHRONOUS`），DLL 回退到 Win32
+    /// 光标上报——那是个跨窗口的陈旧位置（实测恒在别的行），不带组合起点与组合矩形。它若
+    /// 进入组合期的跟行 / 重锁，候选窗就在它与 TSF 真坐标之间来回跳。
+    ///
+    /// 只在「已有 TSF 坐标」后才屏蔽：纯 GUI 回退的宿主（无 TSF 坐标可言）行为不变。
+    /// 清位与 `composition_start` 同步：组合结束（`reset_first_show`）与焦点换 docMgr 各一处。
+    tsf_frame_seen_in_composition: std::sync::atomic::AtomicBool,
     /// 应用兼容规则表（compat.toml，系统层 + 用户层覆盖）。按焦点进程名查规则。
     ///
     /// 用 Mutex 而非不可变字段：右键菜单切换 per-app 开关后要写用户层并**立即重载**。
@@ -3341,6 +3350,7 @@ impl Coordinator {
             last_pre_reflow_probe: Mutex::new((0, 0, false)),
             pre_reflow_comp_start: Mutex::new((0, 0, false)),
             last_reported_comp_start: Mutex::new((0, 0, false)),
+            tsf_frame_seen_in_composition: std::sync::atomic::AtomicBool::new(false),
             last_authoritative_caret: Mutex::new((0, 0, false)),
             last_key_at: Mutex::new(None),
             last_key_interval_ms: Mutex::new(None),
@@ -14734,6 +14744,85 @@ mod caret_compat_tests {
             (442, BOTTOM),
             "新组合的矩形必须被采信——这正是路径 A 锁进陈旧 compStart 后唯一的修正机会"
         );
+    }
+
+    /// Word 按键期同步取坐标被 TS_E_SYNCHRONOUS 拒绝后，DLL 回退发出的 `gui_caret` 帧
+    /// 是一个固定的陈旧位置（论坛 t377 日志：真插入点 (1488,541)，GUI 光标恒为 (1434,272)）。
+    /// 本组合已收到过 TSF 域坐标后，这类帧只能是噪声：不得改写缓存、重锁组合起点、重显候选窗，
+    /// 否则候选窗在两者之间上下来回跳约 270px。
+    #[test]
+    fn a_gui_caret_frame_cannot_relocate_a_composition_that_has_tsf_coordinates() {
+        const TOP: i32 = 518;
+        const BOTTOM: i32 = 541;
+        const LINE_H: i32 = 23;
+
+        let (c, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
+        *c.last_valid_caret.lock().unwrap() = (1472, BOTTOM, LINE_H);
+        c.last_sane_caret_height
+            .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "xg".into();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "线".into(),
+                ..Default::default()
+            }];
+        }
+        c.handle_caret_update(&CaretData {
+            x: 1488,
+            y: BOTTOM,
+            height: LINE_H,
+            composition_start_x: 1472,
+            composition_start_y: BOTTOM,
+            source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+            composition_rect: Some((1472, TOP, 1488, BOTTOM)),
+        });
+        let before = *c.composition_start.lock().unwrap();
+        assert_eq!(
+            (before.0, before.1),
+            (1472, BOTTOM),
+            "前提：TSF 帧已锁定组合起点"
+        );
+
+        // 回退链交出的 Win32 光标：无组合起点、无组合矩形
+        c.handle_caret_update(&CaretData {
+            x: 1434,
+            y: 272,
+            height: 20,
+            composition_start_x: 0,
+            composition_start_y: 0,
+            source: wind_ipc::protocol::caret_source::GUI_CARET,
+            composition_rect: None,
+        });
+
+        let cs = *c.composition_start.lock().unwrap();
+        assert_eq!((cs.0, cs.1), (1472, BOTTOM), "GUI 帧不得重锁组合起点");
+        let (cy, src) = {
+            let st = c.state.lock().unwrap();
+            (st.caret_y, st.caret_source)
+        };
+        assert_eq!(cy, BOTTOM, "GUI 帧不得覆盖坐标缓存");
+        assert_eq!(src, wind_ipc::protocol::caret_source::TSF_SELECTION);
+
+        // 组合结束后，GUI 帧恢复原有语义（组合前空闲上报等），不能被永久屏蔽
+        c.reset_first_show();
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer.clear();
+            st.candidates.clear();
+        }
+        c.handle_caret_update(&CaretData {
+            x: 1434,
+            y: 272,
+            height: 20,
+            composition_start_x: 0,
+            composition_start_y: 0,
+            source: wind_ipc::protocol::caret_source::GUI_CARET,
+            composition_rect: None,
+        });
+        let cy = c.state.lock().unwrap().caret_y;
+        assert_eq!(cy, 272, "下一轮开始前 GUI 帧仍应照常写缓存");
     }
 
     /// 只返回首行的宿主：`caret.y` 会大于 `rect.bottom` ⇒ 判定不可信 ⇒ 回退既有逻辑。
