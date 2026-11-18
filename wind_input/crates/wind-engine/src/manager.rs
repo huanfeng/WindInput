@@ -8165,6 +8165,7 @@ impl EngineManager {
     /// （`rime_source_paths`），所以安装目录里的主表写着 `cn_dicts_cell/idiom`、而文件只在
     /// 用户目录时，它其实**不会**被主表加载。只看清单就跳过，这张库就两头落空——主表没加载、
     /// 扩展词库列表里也不出现（未经 S1 裁剪的旧主表正是这样，评测时撞见）。
+    #[cfg(test)]
     fn dict_head_resolved(path: &Path) -> (String, Vec<String>) {
         let h = Self::dict_head_resolved_full(path);
         (h.name, h.imports)
