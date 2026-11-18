@@ -59,10 +59,10 @@ let
   # 单一固定输出派生（递归哈希）：一次性下载所有需要的文件，避免把 rime-frost /
   # CLDR 等整仓拖进 store（CLDR 只用于重新生成 emoji 名表，本构建不需要）。
   # 版本钉在 commit 上，上游分支移动不会改变产物。
-  frostRev = "7ced7f8139d6fd11a1a15d6c1412f5c14ca0da3f";
-  pinyinRev = "9d05c9e29cb6a7e5c79f2f5279f5c1014246a19a";
-  openccRev = "a806b775d038f9fa7c061f50d270115e7ad7da5b";
-  wubiRev = "18a6016c3d08a20f713f8f8e1791a2e79e0be081";
+  frostRev = "b6d53988e31d55b70b6cc97e969b4bd0af1e9d2b";
+  pinyinRev = "fe29ad32bdf352b31a02b9936e537f575432e9a6";
+  openccRev = "fae2a0a911c30764e669a7d8b0591cd8e852934a";
+  wubiRev = "4d08110b8080f6577dad733ada7e5ae5c5e878fd";
   auxRev = "f9780033396f8998697c2a004d40bd543c46308b";
   strokeRev = "1e8fff9b9494ddec23b0cbc526bcfd8171a6fd48";
   emojiRev = "39d232996de79a95d7bf4b5e8533feed5326b075";
@@ -149,7 +149,7 @@ let
     '';
 
     outputHashMode = "recursive";
-    outputHash = "sha256-bP+7yUBmfjh8qz3hW+rSbD6xmfIMrH5+B3J4eKqMTzM=";
+    outputHash = "sha256-1bT6i5Q5AeqSbcDZDyqyILoqKey+PzMmsg3ze5paip0=";
   };
 
   # ── 生成工具 ────────────────────────────────────────────────────────────
