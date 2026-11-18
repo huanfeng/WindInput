@@ -209,7 +209,7 @@ impl MobileCore {
         }
         self.auto_spaced.store(false, Ordering::Relaxed);
 
-        let Some((vk, modifiers)) = to_vk(key, english) else {
+        let Some((vk, modifiers)) = to_vk(key) else {
             return KeyOutcome::passthrough();
         };
         // 触摸 `;` 默认不是引导键：压制期间核心按「该键未绑定」处理（空码出标点，
@@ -240,7 +240,7 @@ impl MobileCore {
 }
 
 /// 对应 Kotlin `RustSession.toVk`。`None` = 不进引擎（宿主走默认行为）
-fn to_vk(key: PressKey, english: bool) -> Option<(u32, u32)> {
+fn to_vk(key: PressKey) -> Option<(u32, u32)> {
     const SHIFT: u32 = wind_host::Modifiers::SHIFT;
     match key {
         PressKey::Space => Some((keymap::VK_SPACE, 0)),
@@ -248,10 +248,9 @@ fn to_vk(key: PressKey, english: bool) -> Option<(u32, u32)> {
         PressKey::Enter => Some((keymap::VK_RETURN, 0)),
         PressKey::Char { ch, shifted } => match ch {
             'a'..='z' if !shifted => Some((0x41 + (ch as u32 - 'a' as u32), 0)),
-            // 英文方案：大写字母也进组合（句首自动大写后补全不能断）
-            'a'..='z' if english => Some((0x41 + (ch as u32 - 'a' as u32), SHIFT)),
-            // 中文方案：Shift 态大写字母绕过引擎直输（引擎的 Shift+字母 是「临时英文」语义）
-            'a'..='z' => None,
+            // Shift 态字母一律进引擎：英文方案里进组合（句首自动大写后补全不能断）；
+            // 中文方案里由 `input.temp_english.shift_behavior` 定——进临时英文（出厂）或直接上屏大写
+            'a'..='z' => Some((0x41 + (ch as u32 - 'a' as u32), SHIFT)),
             _ => us_layout_vk(ch).map(|(vk, shift)| (vk, if shift { SHIFT } else { 0 })),
         },
     }
@@ -354,21 +353,38 @@ mod tests {
         assert!(m.coord.is_composing());
     }
 
+    fn shifted_a() -> PressKey {
+        PressKey::Char {
+            ch: 'a',
+            shifted: true,
+        }
+    }
+
+    /// 出厂：中文方案里 Shift+字母进临时英文（与电脑版一致）
     #[test]
-    fn shifted_letter_passes_through_in_chinese() {
+    fn shifted_letter_enters_temp_english_in_chinese() {
         let Some((m, _rx)) = core("shiftzh", "wubi86", |_| {}) else {
             return;
         };
-        let out = m.press(
-            PressKey::Char {
-                ch: 'a',
-                shifted: true,
-            },
-            KeySource::Touch,
+        let out = m.press(shifted_a(), KeySource::Touch);
+        assert!(out.consumed, "{out:?}");
+        assert!(m.coord.is_composing());
+    }
+
+    /// `shift_behavior = direct_commit`：不进临时英文，直接上屏大写字母
+    #[test]
+    fn shifted_letter_direct_commit_when_configured() {
+        let Some((m, _rx)) = core("shiftdc", "wubi86", |c| {
+            c.input.temp_english.shift_behavior = "direct_commit".into();
+        }) else {
+            return;
+        };
+        let out = m.press(shifted_a(), KeySource::Touch);
+        assert!(!m.coord.is_composing(), "{out:?}");
+        assert!(
+            out.ops.contains(&commit("A")) || !out.consumed,
+            "要么引擎上屏 A，要么交回宿主直输：{out:?}"
         );
-        assert!(!out.consumed);
-        assert!(out.ops.is_empty());
-        assert!(!m.coord.is_composing());
     }
 
     #[test]
