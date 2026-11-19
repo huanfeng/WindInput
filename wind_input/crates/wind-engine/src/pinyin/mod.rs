@@ -23,6 +23,7 @@ pub mod misread;
 pub mod mixed_abbrev;
 pub mod octagram;
 pub mod parser;
+mod raw_lattice;
 pub mod scorer;
 pub mod shuangpin;
 pub mod spelling;
@@ -36,6 +37,7 @@ use generate::CharPinyinIndex;
 use lattice::LatticeBuilder;
 use scorer::AbbrevMatcher;
 use shuangpin::ShuangpinConverter;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use syllable::SyllableTrie;
@@ -3222,6 +3224,11 @@ impl Engine for PinyinEngine {
     ) -> anyhow::Result<ConvertResult> {
         let require_full_match = opts.require_full_match;
         let abbrev_quota = !opts.no_abbrev_quota;
+        // 击键图开关：选项或环境变量任一为真即开。环境变量只读一次，按键路径不反复取。
+        static RAW_LATTICE_ENV: OnceLock<bool> = OnceLock::new();
+        let use_raw = opts.sp_raw_lattice
+            || *RAW_LATTICE_ENV
+                .get_or_init(|| std::env::var("WIND_SP_RAW_LATTICE").is_ok_and(|v| v == "1"));
         // 未覆写时用引擎自身配置（纯拼音方案即走这条）。
         let allow_partial_final = opts
             .allow_partial_final
@@ -3285,6 +3292,14 @@ impl Engine for PinyinEngine {
         // 双拼激活时保留 SpConvertResult，以便后续用 map_consumed_length 回算消费键数。
         let sp_result: Option<shuangpin::SpConvertResult> =
             self.shuangpin.as_ref().map(|conv| conv.convert(input));
+        // 击键图分支（开关开且双拼）：step 2 / 2c 改在击键坐标建图，整句自带击键域的消费数。
+        let raw_edges: Option<Vec<shuangpin::RawEdge>> = if use_raw {
+            self.shuangpin
+                .as_ref()
+                .map(|conv| conv.pair_edges(raw_input))
+        } else {
+            None
+        };
         let full_owned: String = match &sp_result {
             Some(r) if !r.full_pinyin.is_empty() => r.full_pinyin.clone(),
             Some(_) => input.to_string(),
@@ -3546,39 +3561,57 @@ impl Engine for PinyinEngine {
         };
 
         // 2. Viterbi 长句解码（>=2 音节，仅在完成音节前缀上跑；use_smart_compose=false 时跳过）
-        if self.config.use_smart_compose && syllables.len() >= 2 {
-            // 切分图：全拼取 DAG 的全部路径；双拼/手动分隔符取真值链（行为与改造前一致）。
-            let seg_graph = if fixed_segmentation {
-                SegGraph::from_syllables(&syllables)
+        // 击键图：`raw_step2` 是 (lattice, 终点击键数)；建不出（含终点没铺到末音节）时整句跳过，
+        // 不回落旧图。底图 step 2 与 2c 共用、用到时才建：外层 `None` = 未建，`Some(None)` = 建不出。
+        let mut raw_base: Option<Option<raw_lattice::RawBase>> = None;
+        let raw_step2 = match &raw_edges {
+            Some(edges) if self.config.use_smart_compose && syllables.len() >= 2 => Some(
+                raw_base
+                    .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges))
+                    .as_ref()
+                    .and_then(raw_lattice::RawBase::sentence),
+            ),
+            _ => None,
+        };
+        if self.config.use_smart_compose && syllables.len() >= 2 && !matches!(raw_step2, Some(None))
+        {
+            let (lattice, input_len, raw_consumed) = if let Some(Some((lattice, end))) = raw_step2 {
+                (Cow::Borrowed(lattice), end, end)
             } else {
-                SegGraph::from_dag(&Dag::build(completed, trie))
+                // 切分图：全拼取 DAG 的全部路径；双拼/手动分隔符取真值链（行为与改造前一致）。
+                let seg_graph = if fixed_segmentation {
+                    SegGraph::from_syllables(&syllables)
+                } else {
+                    SegGraph::from_dag(&Dag::build(completed, trie))
+                };
+                let mut lattice_nodes = self.lattice_builder.build(
+                    completed,
+                    &seg_graph,
+                    dict,
+                    Some(&self.fuzzy_config),
+                    true,
+                );
+                self.maybe_add_store_nodes(completed, &seg_graph, true, &mut lattice_nodes);
+                self.drop_blocked_nodes(&mut lattice_nodes);
+                let input_len = completed.len();
+                let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
+                for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
+                    if end_pos > input_len {
+                        continue;
+                    }
+                    for node in nodes_at_end {
+                        lattice[end_pos].push(WordNode {
+                            start: node.start,
+                            end: node.end,
+                            word: node.word.clone(),
+                            syl_mask: node.syl_mask,
+                            log_prob: node.log_prob,
+                            canon: node.canon.clone(),
+                        });
+                    }
+                }
+                (Cow::Owned(lattice), input_len, 0)
             };
-            let mut lattice_nodes = self.lattice_builder.build(
-                completed,
-                &seg_graph,
-                dict,
-                Some(&self.fuzzy_config),
-                true,
-            );
-            self.maybe_add_store_nodes(completed, &seg_graph, true, &mut lattice_nodes);
-            self.drop_blocked_nodes(&mut lattice_nodes);
-            let input_len = completed.len();
-            let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
-            for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
-                if end_pos > input_len {
-                    continue;
-                }
-                for node in nodes_at_end {
-                    lattice[end_pos].push(WordNode {
-                        start: node.start,
-                        end: node.end,
-                        word: node.word.clone(),
-                        syl_mask: node.syl_mask,
-                        log_prob: node.log_prob,
-                        canon: node.canon.clone(),
-                    });
-                }
-            }
             // 整句 N-best（见 `Config::sentence_counts`）。出厂 (1, 1) 时 `decode_nbest`
             // 走的就是原来的单路径 `decode`，下面的循环只转一圈、只进 `rank == 1` 分支，
             // 与改动前逐位相同。
@@ -3619,7 +3652,12 @@ impl Engine for PinyinEngine {
                 // 整句的边界 = 解码器**实际选中**的那条路径（多路径下同一串输入可有多种切法，
                 // 只有解码器知道走的是哪条）。回退到 maximum_match 仅用于解码器给不出边界的
                 // 极端情形（超 64 字节）。
-                let boundary = if result.boundary != 0 {
+                //
+                // 击键图的 `result.boundary` 是击键偏移与全拼掩码混拼的，不可用。整句走满真值键对，
+                // 所打全拼码 `completed` 上的边界就是真值切分。
+                let boundary = if raw_consumed != 0 {
+                    syllables_boundary_mask(&syllables, completed.len())
+                } else if result.boundary != 0 {
                     result.boundary
                 } else {
                     syllables_boundary_mask(&syllables, completed.len())
@@ -3660,9 +3698,15 @@ impl Engine for PinyinEngine {
                     sentence_rank: rank,
                     // 模糊整句的造词码（规范码），全精确时为 None。见 `ViterbiResult::learn_code`。
                     meta: wind_candidate::CandidateMeta {
-                        learn_code: result.learn_code(completed),
+                        learn_code: if raw_consumed != 0 {
+                            raw_lattice::raw_learn_code(&result, raw_input, completed, boundary)
+                        } else {
+                            result.learn_code(completed)
+                        },
                         ..Default::default()
                     },
+                    // 击键图整句自带击键数，出口不再换算（0 = 旧路径，照旧回映射）。
+                    consumed_length: raw_consumed,
                     ..Default::default()
                 };
                 if pool_k > 1 {
@@ -3711,8 +3755,9 @@ impl Engine for PinyinEngine {
         //     残码整句「你吗」只会挤掉它。同 fcitx5 `partialLongWordLimit` 的精神：短输入
         //     不做激进的部分匹配。
         //
-        //     双拼跳过（`sp_result.is_none()`）：`query` 是转换后的全拼、与击键不同域，
-        //     残码的字节位在两个域里对不上。分隔符跳过（`!has_sep`）：`completed` 由音节
+        //     双拼**并不跳过**：门条件不排除双拼（`query` 含残码声母），旧图在转换后的全拼上
+        //     用 DAG 重切，码与消费数再经 `map_consumed_length` 换回击键；开关打开时改走击键图。
+        //     分隔符跳过（`!has_sep`）：`completed` 由音节
         //     `join` 得出，`completed_len` 与 `query` 的字节位不同源。
         //
         //     **混输的码长内跳过**（`allow_partial_final`，见 [`ConvertOptions`]）：那里的击键串
@@ -3743,6 +3788,25 @@ impl Engine for PinyinEngine {
         // (整句文本, 权重, 所打码边界, 造词码)
         type PendingSentence = (String, i32, u64, Option<(String, u64)>);
         let mut short_sentence_pending: Option<PendingSentence> = None;
+        // 击键图：在真值键对后补残码节点。消费数（0 = 旧路径）在 6.5c 延迟插入时同样带上。
+        let mut raw_partial_consumed = 0usize;
+        let raw_step2c = match (&raw_edges, &sp_result) {
+            (Some(edges), Some(r))
+                if self.config.use_smart_compose
+                    && allow_partial_final
+                    && !syllables.is_empty()
+                    && completed_len < query.len()
+                    && !has_sep =>
+            {
+                Some(r.partial_initial.as_deref().and_then(|partial| {
+                    let base = raw_base
+                        .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges))
+                        .take()?;
+                    self.raw_partial_lattice(raw_input, base, partial)
+                }))
+            }
+            _ => None,
+        };
         if self.config.use_smart_compose
             && allow_partial_final
             // 原为 `syllables.len() >= 2`（至少两个完整音节才谈得上组句）。放开到 1 是为了
@@ -3750,49 +3814,71 @@ impl Engine for PinyinEngine {
             && !syllables.is_empty()
             && completed_len < query.len()
             && !has_sep
+            && !matches!(raw_step2c, Some(None))
         {
-            let seg_graph = SegGraph::from_dag(&Dag::build(query, trie));
-            let mut lattice_nodes =
-                self.lattice_builder
-                    .build(query, &seg_graph, dict, Some(&self.fuzzy_config), true);
-            self.lattice_builder.add_partial_final_nodes(
-                query,
-                completed_len,
-                dict,
-                &mut lattice_nodes,
-            );
-            // S2：残码整句同样认用户词 —— 前半句用自造词、末尾还没打完，是最常见的形态
-            // （`yougailunm` = 有 + 盖伦 + 残码 m）。残码那一段由上面的 partial_final
-            // 节点负责，两者在同一张图上各管各的跨度。
-            self.maybe_add_store_nodes(query, &seg_graph, true, &mut lattice_nodes);
-            self.drop_blocked_nodes(&mut lattice_nodes);
-            let full_len = query.len();
-            let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); full_len + 1];
-            for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
-                if end_pos > full_len {
-                    continue;
+            let (lattice, full_len) = if let Some(Some((lattice, end))) = raw_step2c {
+                raw_partial_consumed = end;
+                (lattice, end)
+            } else {
+                let seg_graph = SegGraph::from_dag(&Dag::build(query, trie));
+                let mut lattice_nodes = self.lattice_builder.build(
+                    query,
+                    &seg_graph,
+                    dict,
+                    Some(&self.fuzzy_config),
+                    true,
+                );
+                self.lattice_builder.add_partial_final_nodes(
+                    query,
+                    completed_len,
+                    dict,
+                    &mut lattice_nodes,
+                );
+                // S2：残码整句同样认用户词 —— 前半句用自造词、末尾还没打完，是最常见的形态
+                // （`yougailunm` = 有 + 盖伦 + 残码 m）。残码那一段由上面的 partial_final
+                // 节点负责，两者在同一张图上各管各的跨度。
+                self.maybe_add_store_nodes(query, &seg_graph, true, &mut lattice_nodes);
+                self.drop_blocked_nodes(&mut lattice_nodes);
+                let full_len = query.len();
+                let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); full_len + 1];
+                for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
+                    if end_pos > full_len {
+                        continue;
+                    }
+                    for node in nodes_at_end {
+                        lattice[end_pos].push(WordNode {
+                            start: node.start,
+                            end: node.end,
+                            word: node.word.clone(),
+                            syl_mask: node.syl_mask,
+                            log_prob: node.log_prob,
+                            canon: node.canon.clone(),
+                        });
+                    }
                 }
-                for node in nodes_at_end {
-                    lattice[end_pos].push(WordNode {
-                        start: node.start,
-                        end: node.end,
-                        word: node.word.clone(),
-                        syl_mask: node.syl_mask,
-                        log_prob: node.log_prob,
-                        canon: node.canon.clone(),
-                    });
-                }
-            }
+                (lattice, full_len)
+            };
             let result = self.decode_unblocked(&lattice, full_len);
             if !result.words.is_empty() && result.log_prob.is_finite() {
                 let sentence: String = result.words.join("");
                 if !sentence.is_empty() {
                     let weight = sentence_weight(result.log_prob, result.words.len());
+                    // 击键图：边界与造词码换回全拼域（真值切分 + 残码一位），不用 `result.boundary`。
+                    let (sent_boundary, sent_learn) = if raw_partial_consumed != 0 {
+                        let b = if completed_len < 64 {
+                            syllables_boundary_mask(&syllables, completed_len) | 1 << completed_len
+                        } else {
+                            0
+                        };
+                        (b, raw_lattice::raw_learn_code(&result, raw_input, query, b))
+                    } else {
+                        (result.boundary, result.learn_code(query))
+                    };
                     // 此处 `completed_syls`（step 4 才定义）尚不可见，用同源的 `syllables`
                     if syllables.len() as u32 <= SENTENCE_KEEP_MAX_COMPLETED_SYLS {
                         // 短上下文档：留到 6.5b 之后按 SENTENCE_KEEP_RATIO 定夺（见上方说明）
                         short_sentence_pending =
-                            Some((sentence, weight, result.boundary, result.learn_code(query)));
+                            Some((sentence, weight, sent_boundary, sent_learn));
                     } else if let Some(existing) =
                         candidates.iter_mut().find(|c| c.text == sentence)
                     {
@@ -3815,11 +3901,12 @@ impl Engine for PinyinEngine {
                                 is_sentence: true,
                                 // 新建整句 = 引擎合成的解读，词库无此词条（同文合并那三处刻意不设）。
                                 is_synthesized: true,
-                                boundary: result.boundary,
+                                boundary: sent_boundary,
                                 meta: wind_candidate::CandidateMeta {
-                                    learn_code: result.learn_code(query),
+                                    learn_code: sent_learn,
                                     ..Default::default()
                                 },
+                                consumed_length: raw_partial_consumed,
                                 ..Default::default()
                             },
                         );
@@ -4975,6 +5062,7 @@ impl Engine for PinyinEngine {
                                 learn_code,
                                 ..Default::default()
                             },
+                            consumed_length: raw_partial_consumed,
                             ..Default::default()
                         },
                     );
@@ -5151,6 +5239,10 @@ impl Engine for PinyinEngine {
             // 支路的码本身就是击键串的前缀（全拼域 ≡ 击键域），再换算一次即错位——
             // `nihao` 选「你好」会被回映射成 4（双拼 4 键的量），凭空吞掉一个键。
             if c.is_fullpinyin_fallback {
+                continue;
+            }
+            // 击键图整句（step 2 / 2c）同样自带击键数。
+            if raw_edges.is_some() && c.is_sentence && c.consumed_length != 0 {
                 continue;
             }
             // 以剥除分隔符后的 query 为基准计算消费长度（无分隔符时 query==input）。
@@ -7481,8 +7573,122 @@ i = ["i"]
         PinyinEngine::new(cfg, dict).with_shuangpin(ShuangpinConverter::new(layout))
     }
 
+    /// 击键图开关默认关：默认选项下结果与未引入开关时一致。
+    #[test]
+    fn sp_raw_lattice_off_by_default() {
+        assert!(!ConvertOptions::default().sp_raw_lattice);
+        let eng = sp_fp_engine("raw_lattice_off", &[("你好", "ni hao", 1000)], false);
+        let r = eng.convert("nihc", 5).unwrap();
+        let first = r.candidates.first().expect("应有候选");
+        assert_eq!(first.text, "你好");
+        assert_eq!(first.consumed_length, 4);
+        let r2 = eng
+            .convert_with_opts("nihc", 5, ConvertOptions::default())
+            .unwrap();
+        assert_eq!(texts(&r), texts(&r2));
+    }
+
     fn texts(r: &ConvertResult) -> Vec<&str> {
         r.candidates.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// 击键图整句终点没铺到末音节（`md` = mai 无词）时不出整句，同旧路径；否则整句的码、
+    /// 边界按全部音节写，消费数却只到 `nihc`，三者对不上。
+    #[test]
+    fn sp_raw_lattice_no_sentence_when_last_syllable_unreached() {
+        let eng = sp_fp_engine(
+            "raw_lattice_unreached",
+            &[("你", "ni", 900), ("好", "hao", 800)],
+            false,
+        );
+        let sentences = |raw: bool| -> Vec<(String, String, usize)> {
+            let opts = ConvertOptions {
+                sp_raw_lattice: raw,
+                ..Default::default()
+            };
+            let r = eng.convert_with_opts("nihcmd", 20, opts).unwrap();
+            r.candidates
+                .iter()
+                .filter(|c| c.is_sentence)
+                .map(|c| (c.text.clone(), c.code.clone(), c.consumed_length))
+                .collect()
+        };
+        assert!(sentences(false).is_empty(), "前提：旧路径不出整句");
+        let on = sentences(true);
+        assert!(on.is_empty(), "击键图同样不出整句：{on:?}");
+    }
+
+    /// 击键图开关开时的整句：返回 `(文本, 消费数, learn_code)`。
+    #[allow(clippy::type_complexity)]
+    fn raw_sentences(
+        eng: &PinyinEngine,
+        input: &str,
+    ) -> Vec<(String, usize, Option<(String, u64)>)> {
+        let opts = ConvertOptions {
+            sp_raw_lattice: true,
+            ..Default::default()
+        };
+        let r = eng.convert_with_opts(input, 20, opts).unwrap();
+        r.candidates
+            .iter()
+            .filter(|c| c.is_sentence)
+            .map(|c| (c.text.clone(), c.consumed_length, c.meta.learn_code.clone()))
+            .collect()
+    }
+
+    fn raw_small_engine(tag: &str) -> PinyinEngine {
+        sp_fp_engine(
+            tag,
+            &[("你", "ni", 900), ("好", "hao", 800), ("吗", "ma", 700)],
+            false,
+        )
+    }
+
+    /// 末尾 `'` 计入整句消费数（`nihc'` = 5）。
+    #[test]
+    fn sp_raw_lattice_trailing_apostrophe_consumed() {
+        let eng = raw_small_engine("raw_wire_trail_sep");
+        let s = raw_sentences(&eng, "nihc'");
+        let top = s.iter().find(|x| x.0 == "你好").expect("应出整句：{s:?}");
+        assert_eq!(top.1, 5, "{s:?}");
+    }
+
+    /// 音节中间的 `'` 同样计入（`ni'hc` = 5）。
+    #[test]
+    fn sp_raw_lattice_inner_apostrophe_consumed() {
+        let eng = raw_small_engine("raw_wire_inner_sep");
+        let s = raw_sentences(&eng, "ni'hc");
+        let top = s.iter().find(|x| x.0 == "你好").expect("应出整句：{s:?}");
+        assert_eq!(top.1, 5, "{s:?}");
+    }
+
+    /// 2c 残码整句：`nihcm` 的 `m` 作待定音节由词库补成「吗」，整句消费 5 键，
+    /// 全精确故 `learn_code` 为空。
+    #[test]
+    fn sp_raw_lattice_residual_code_sentence() {
+        let eng = raw_small_engine("raw_wire_residual");
+        let s = raw_sentences(&eng, "nihcm");
+        let top = s.iter().find(|x| x.0 == "你好吗").expect("应出整句：{s:?}");
+        assert_eq!(top.1, 5, "{s:?}");
+        assert_eq!(top.2, None, "{s:?}");
+    }
+
+    /// 开模糊音时整句的 `learn_code` 是规范码（词库读音），不是击键读出的模糊音。
+    #[test]
+    fn sp_raw_lattice_fuzzy_learn_code_is_canonical() {
+        let eng = sp_fp_engine(
+            "raw_wire_fuzzy",
+            &[("里", "li", 900), ("好", "hao", 800)],
+            false,
+        )
+        .with_fuzzy(FuzzyConfig {
+            n_l: true,
+            ..Default::default()
+        });
+        let s = raw_sentences(&eng, "nihc");
+        let top = s.iter().find(|x| x.0 == "里好").expect("应出整句：{s:?}");
+        assert_eq!(top.1, 4, "{s:?}");
+        assert_eq!(top.2.as_ref().map(|l| l.0.as_str()), Some("lihao"), "{s:?}");
     }
 
     /// 全拼降级支路不吃双拼同键音节：全拼打 `diushi` 只出「丢失」，双拼 `dqui` 照出「对视」。

@@ -227,6 +227,9 @@ pub struct ConvertOptions {
     /// 代价是 `zaiyebuj` 的尾字母 `j` 不参与组句、打不出「在也不就」（纯拼音方案一直打得出）。
     /// ⇒ 判据从「是不是混输」改为「这串还可能是码表码吗」。
     pub allow_partial_final: Option<bool>,
+    /// 双拼走击键坐标整句图（内部开关，默认关；环境变量 `WIND_SP_RAW_LATTICE=1` 亦可打开，
+    /// 仅内部调试与评测用）。
+    pub sp_raw_lattice: bool,
 }
 
 /// [`Engine::resolve_boundary`] 的结果。见

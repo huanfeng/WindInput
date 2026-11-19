@@ -1,0 +1,35 @@
+# corpus sentences=189 unique_prefixes=1687 hand=25
+# default: prefixes=1712 differ=15 top1_text_differs=14 top1_consumed_differs=13 engine_top1_differs=6 pool_text_differs=0 pool_consumed_only=0 (new pool consumed < buffer: 0) short_consumed=0
+# default: odd-length corpus prefixes=810 | top1 is residual-code full sentence: OFF 506 (src-prefix hit 81) ON 518 (src-prefix hit 81)
+# timing [all prefixes] run 1: OFF mean=993.6us p95=2678.9us max=3734.2us | ON mean=818.5us p95=2305.8us max=3600.9us | mean Δ=-17.63% (-175.2us) p95 Δ=-373.1us max Δ=-133.3us
+# timing [all prefixes] run 2: OFF mean=994.4us p95=2659.4us max=14580.4us | ON mean=817.4us p95=2248.4us max=3673.1us | mean Δ=-17.80% (-177.0us) p95 Δ=-411.0us max Δ=-10907.3us
+# timing [all prefixes] run 3: OFF mean=989.9us p95=2721.6us max=3637.8us | ON mean=823.8us p95=2321.6us max=3652.6us | mean Δ=-16.78% (-166.1us) p95 Δ=-400.0us max Δ=+14.8us
+# timing [all prefixes] avg of 3: OFF mean=992.6us p95=2686.6us max=7317.5us | ON mean=819.9us p95=2291.9us max=3642.2us | mean Δ=-17.40% (-172.8us) p95 Δ=-394.7us max Δ=-3675.3us | per-key best-of-3 max: OFF=3579.6us ON=3600.9us Δ=+21.3us (keys per run=1687)
+# timing [even length] run 1: OFF mean=547.8us p95=1154.3us max=2311.0us | ON mean=587.8us p95=1272.6us max=2482.0us | mean Δ=+7.30% (+40.0us) p95 Δ=+118.3us max Δ=+171.0us
+# timing [even length] run 2: OFF mean=547.4us p95=1176.7us max=2305.7us | ON mean=589.5us p95=1307.9us max=2480.8us | mean Δ=+7.68% (+42.1us) p95 Δ=+131.2us max Δ=+175.1us
+# timing [even length] run 3: OFF mean=543.8us p95=1212.1us max=2287.9us | ON mean=585.4us p95=1263.5us max=2425.0us | mean Δ=+7.65% (+41.6us) p95 Δ=+51.4us max Δ=+137.1us
+# timing [even length] avg of 3: OFF mean=546.4us p95=1181.0us max=2301.5us | ON mean=587.6us p95=1281.3us max=2462.6us | mean Δ=+7.54% (+41.2us) p95 Δ=+100.3us max Δ=+161.1us | per-key best-of-3 max: OFF=2287.9us ON=2425.0us Δ=+137.1us (keys per run=877)
+# timing [odd length] run 1: OFF mean=1420.3us p95=2872.5us max=3604.0us | ON mean=1024.5us p95=2364.8us max=3814.7us | mean Δ=-27.86% (-395.7us) p95 Δ=-507.7us max Δ=+210.6us
+# timing [odd length] run 2: OFF mean=1423.7us p95=2864.6us max=3682.7us | ON mean=1030.9us p95=2422.8us max=3328.7us | mean Δ=-27.59% (-392.8us) p95 Δ=-441.7us max Δ=-354.1us
+# timing [odd length] run 3: OFF mean=1421.6us p95=2872.0us max=3568.0us | ON mean=1037.6us p95=2446.4us max=3741.3us | mean Δ=-27.01% (-384.0us) p95 Δ=-425.6us max Δ=+173.2us
+# timing [odd length] avg of 3: OFF mean=1421.9us p95=2869.7us max=3618.3us | ON mean=1031.0us p95=2411.3us max=3628.2us | mean Δ=-27.49% (-390.8us) p95 Δ=-458.4us max Δ=+9.9us | per-key best-of-3 max: OFF=3539.3us ON=3328.7us Δ=-210.7us (keys per run=810)
+# timing [all, step 2c off] run 1: OFF mean=685.4us p95=2048.8us max=3118.7us | ON mean=732.5us p95=2111.1us max=13748.8us | mean Δ=+6.88% (+47.1us) p95 Δ=+62.3us max Δ=+10630.1us
+# timing [all, step 2c off] run 2: OFF mean=686.1us p95=2039.2us max=3155.9us | ON mean=732.9us p95=2114.2us max=3065.4us | mean Δ=+6.82% (+46.8us) p95 Δ=+74.9us max Δ=-90.6us
+# timing [all, step 2c off] run 3: OFF mean=685.3us p95=2002.3us max=3031.5us | ON mean=727.7us p95=2081.4us max=8257.1us | mean Δ=+6.19% (+42.4us) p95 Δ=+79.0us max Δ=+5225.7us
+# timing [all, step 2c off] avg of 3: OFF mean=685.6us p95=2030.1us max=3102.0us | ON mean=731.0us p95=2102.2us max=8357.1us | mean Δ=+6.63% (+45.4us) p95 Δ=+72.1us max Δ=+5255.0us | per-key best-of-3 max: OFF=3031.5us ON=3065.4us Δ=+33.9us (keys per run=1687)
+keys	src	old_top1	new_top1	old_top3	new_top3	old_consumed	new_consumed	old_engine_top1	new_engine_top1	fullpinyin_top1	old_pool	new_pool	hint
+qkwfxmz	~请问现在几点	请文献	请文献在	请文献/6 请问/4 晴雯/4	请文献在/7 请文献/6 请问/4	6	7	请文献	请文献在	请问西安在/12			new_full_sentence,engine_top1
+vshxrfmbg	~中华人民共和国	中华人民共和国	中华人民个	中华人民共和国/9 中华人民共和/9 中华人民共和国水法/9	中华人民个/9 中华人民共和国/9 中华人民共和/9	9	9	中华人民共和国	中华人民共和国	中华任命/15			new_full_sentence
+nizotmqun	~你昨天去哪里了	你昨天去	你昨天去年	你昨天去/8 你昨天/6 你做/4	你昨天去年/9 你昨天去/8 你昨天/6	8	9	你昨天去	你昨天去	你昨天群/12			new_full_sentence
+xxwulld	~下午两点开始	下午量	下午量的	下午量/6 下午/4 下无/4	下午量的/7 下午量/6 下午/4	6	7	下午量	下午量的	下午里昂的/11			new_full_sentence,engine_top1
+womfllg	~我们两个好朋友	我们两个	我们两个	我们两个/7 我们两个人/7 我们两个之间/7	我们两个/7 我们量个/7 我们两个人/7	7	7	我们两个	我们两个	我们两个/11			new_full_sentence
+qkniqtr	~请你确认一下	请你却	请你却人	请你却/6 请你/4 切克闹/3	请你却人/7 请你却/6 请你/4	6	7	请你却	请你却人	请你去而/10			new_full_sentence,engine_top1
+vegefjg	~这个方案不错	这个反	这个反个	这个反/6 这个/4 这歌/4	这个反个/7 这个反/6 这个/4	6	7	这个反	这个反	这各方/9			new_full_sentence
+vegefjgjb	~这个方案不错	这个反感	这个反感被	这个反感/8 这个/4 这歌/4	这个反感被/9 这个反感/8 这个/4	8	9	这个反感	这个反感	这个方案被/12			new_full_sentence
+vegefjgjbuc	~这个方案不错	这个反感不	这个反感不从	这个反感不/10 这个/4 这歌/4	这个反感不从/11 这个反感不/10 这个/4	10	11	这个反感不	这个反感不	这个方案不从/14			new_full_sentence
+womfxuycyigexbdefjg	~我们需要一个新的方案	我们需要一个新的反	我们需要一个新的反个	我们需要一个新的反/18 我们发现/5 我没发现/5	我们需要一个新的反个/19 我们需要一个新的反/18 我们发现/5	18	19	我们需要一个新的反	我们需要一个新的反	我们需要一个新的放/23			new_full_sentence
+womfzdgsyrjmm	~我们在公园见面	我们在公元间	我们在公元间吗	我们在公元间/12 我们在/6 我们再/6	我们在公元间吗/13 我们在公元间/12 我们在/6	12	13	我们在公元间	我们在公元间	我们在公寓案件吗/21			new_full_sentence
+hxfwllt	~花费两天时间	花费量	花费量他	花费量/6 花费/4 化肥/4	花费量他/7 花费量/6 花费/4	6	7	花费量	花费量他	花费里昂他/12			new_full_sentence,engine_top1
+womfzzbaxmz	~我们走吧现在	我们走吧先	我们走吧先在	我们走吧先/10 我们走吧/8 我们走/6	我们走吧先在/11 我们走吧先/10 我们走吧/8	10	11	我们走吧先	我们走吧先在	我们走吧西安在/15			new_full_sentence,engine_top1
+fjgjk	~	反感	反感看	反感/4 封建割据/4 放几个/3	反感看/5 反感/4 封建割据/4	4	5	反感	反感	方案看/7			new_full_sentence
+piajb	~	皮按	皮按被	皮按/4 皮/2 屁/2	皮按被/5 皮按/4 皮/2	4	5	皮按	皮按被	骗保/5			new_full_sentence,engine_top1

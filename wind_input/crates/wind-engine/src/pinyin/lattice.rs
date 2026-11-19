@@ -209,7 +209,7 @@ const ABBREV_NODE_LIMIT: usize = 8;
 ///
 /// 同一个 code 下的用户词通常只有一两条（用户不会给同一串拼音造十个词），8 是宽松上界；
 /// 它同时是成本闸门：整句建图要遍历全部 (p, q) 跨度，每个跨度一次 redb 点查。
-const USER_NODE_LIMIT: usize = 8;
+pub(crate) const USER_NODE_LIMIT: usize = 8;
 
 /// 用户层简拼节点每个跨度**取数**的上限（过判据、按权重取前 [`USER_NODE_LIMIT`] 之前）。
 ///
@@ -232,7 +232,7 @@ const USER_ABBREV_SCAN_LIMIT: usize = 64;
 /// 不再按切分截断之后，多切分的串（`fanganfangan…` 同音节数下有 8 条切分）要的是
 /// 「每条切分都至少保住少处模糊的那些组合」，按处数排序的同层预算正好表达这一点；
 /// 量级与旧上界持平，性能见 `pinyin_sentence_user_words_probe::fuzzy_store_node_cost_on_real_dict`。
-const FUZZY_LAYER_BUDGET: usize = 256;
+pub(crate) const FUZZY_LAYER_BUDGET: usize = 256;
 
 /// 各音节边 `(起, 止)` 的变体表（首项恒为原音节、0 处改动）：同一条边会被许多起点、
 /// 许多前缀组合反复展开，算一次即可。
@@ -281,12 +281,12 @@ pub(crate) const USER_NODE_BONUS: f64 = 2.0;
 ///
 /// 取 1e6（`ln = −5.49`，约 p99.99+）：够强 —— 几乎压过所有系统词，又仍在词频轴内侧，
 /// 不会跨到对数正值那一段去碾压一切。
-const USER_NODE_WEIGHT_CAP: i32 = 1_000_000;
+pub(crate) const USER_NODE_WEIGHT_CAP: i32 = 1_000_000;
 
 /// 用户层里**哪些词进整句词图**：用户词与临时词（都是用户上屏过的），不收草稿。
 ///
 /// 草稿在拼音侧目前根本不挂层（只码表造词挂），`is_draft` 这一条是防将来挂上时静默漏进来。
-fn is_sentence_store_word(c: &wind_candidate::Candidate) -> bool {
+pub(crate) fn is_sentence_store_word(c: &wind_candidate::Candidate) -> bool {
     (c.meta.is_user_dict || c.meta.is_temp_dict) && !c.is_draft
 }
 
@@ -310,7 +310,7 @@ pub(crate) const PARTIAL_FINAL_PENALTY: f64 = std::f64::consts::LN_2;
 ///
 /// 残码召回面比简拼更宽（`k` 覆盖 ka/kai/kan/kang/ke/ken/keng/kong/kou/ku/kua/… 全部单字），
 /// 但真正可能赢下整句路径的只有高频字，故比 `ABBREV_NODE_LIMIT`(8) 略放宽即可。
-const PARTIAL_FINAL_NODE_LIMIT: usize = 12;
+pub(crate) const PARTIAL_FINAL_NODE_LIMIT: usize = 12;
 
 /// 词频归一化基准 —— **标定系数，非精确的词库总权重**，理由见 [`score_node_inner`]。
 ///
@@ -574,6 +574,11 @@ impl LatticeBuilder {
         // 额外兜底：整句改用等效词频后，错误拼接整句的 W_eff 是一串低频字的乘积、趋近
         // clamp 下限，词典整词的真实词频天然压过它。守门测试见 `tests/pinyin_long_word.rs`。
         Self { max_word_len: 10 }
+    }
+
+    /// 最大词长（音节数）。
+    pub(crate) fn max_word_len(&self) -> usize {
+        self.max_word_len
     }
 
     /// 构建格子（**多路径切分**）

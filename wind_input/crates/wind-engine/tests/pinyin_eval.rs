@@ -30,6 +30,9 @@
 //! - `WIND_PINYIN_EVAL_MISREAD=1` 开正文提示与误读来源，另统计界面首页上的误读提示（打对的输入上
 //!   出现的都算误标候选，逐条列出供人工判）；`=0` 关掉「误读」来源（召回与提示都没有），与 `=1` 对比
 //!   即误读表对排序的影响
+//! - `WIND_PINYIN_EVAL_SHUANGPIN=1` 只对 `pinyin_eval_shuangpin` 生效：A/B/C 抽样按真值音节转成
+//!   小鹤击键，比较双拼击键坐标图开关关 / 开，写 `<out>.sp.json` 与 `<out>.sp.ranks.tsv`；
+//!   不设时该测试直接跳过，`pinyin_eval_report` 不受影响
 //!
 //! 除 JSON 外还写 `<out>.ranks.tsv`：每条样本的引擎序 / 界面序位次与界面首页。两档之间逐位比对
 //! 用它；与协调器对拍见 `wind-coordinator/tests/pinyin_eval_ui_parity.rs`（读同一份 TSV）。
@@ -83,9 +86,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use wind_config::Config;
-use wind_engine::EngineManager;
 use wind_engine::pinyin::dag::Dag;
+use wind_engine::pinyin::shuangpin::{Layout, ShuangpinConverter};
 use wind_engine::pinyin::syllable::SyllableTrie;
+use wind_engine::{ConvertOptions, EngineManager};
 
 // ---------------------------------------------------------------- 基础设施
 
@@ -1754,6 +1758,182 @@ fn pinyin_eval_report() {
             pct(&mut per_input, 0.5),
             pct(&mut per_input, 0.95),
         );
+    }
+}
+
+/// 双拼变体一档（开关关或开）的累计。
+#[derive(Default)]
+struct SpScore {
+    total: usize,
+    top1: usize,
+    ui_top1: usize,
+    ui_top5: usize,
+    ui_page: usize,
+    ui_mrr_sum: f64,
+}
+
+impl SpScore {
+    fn add(&mut self, engine: Option<usize>, ui: Option<usize>) {
+        self.total += 1;
+        self.top1 += usize::from(engine == Some(0));
+        if let Some(r) = ui {
+            self.ui_top1 += usize::from(r == 0);
+            self.ui_top5 += usize::from(r < 5);
+            self.ui_page += usize::from(r < PAGE);
+            self.ui_mrr_sum += 1.0 / (r as f64 + 1.0);
+        }
+    }
+
+    fn json(&self) -> String {
+        let r = |n: usize| Score::rate(n, self.total);
+        format!(
+            "{{\"total\": {}, \"top1\": {:.4}, \"ui_top1\": {:.4}, \"ui_top5\": {:.4}, \"ui_page\": {:.4}, \"ui_mrr\": {:.4}}}",
+            self.total,
+            r(self.top1),
+            r(self.ui_top1),
+            r(self.ui_top5),
+            r(self.ui_page),
+            if self.total == 0 {
+                0.0
+            } else {
+                self.ui_mrr_sum / self.total as f64
+            }
+        )
+    }
+}
+
+/// 双拼变体：A/B/C 抽样（同种子、同抽法）按真值音节转小鹤击键，同一进程里比较
+/// `ConvertOptions::sp_raw_lattice` 关 / 开。引擎序取 `UI_LIMIT` 条里的前 [`TOP_N`]，界面序同
+/// [`ui_candidates`] 的加工。
+#[test]
+#[ignore = "批量评测：慢，且依赖 build_dev 真实词库。用 --ignored 显式运行"]
+fn pinyin_eval_shuangpin() {
+    if !std::env::var("WIND_PINYIN_EVAL_SHUANGPIN").is_ok_and(|v| v == "1") {
+        eprintln!("跳过：未设 WIND_PINYIN_EVAL_SHUANGPIN=1");
+        return;
+    }
+    let Some(dir) = data_dir() else {
+        eprintln!("跳过：build_dev 拼音词库不存在");
+        return;
+    };
+    let n_per_class = env_usize("WIND_PINYIN_EVAL_N", 1000);
+    let seed = std::env::var("WIND_PINYIN_EVAL_SEED")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(20_260_721);
+    let out = match std::env::var("WIND_PINYIN_EVAL_OUT") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/pinyin_eval")
+            .join("latest.json"),
+    };
+
+    let raw = read_all_dicts(&dir);
+    let unigram = collect_word_freqs(&raw);
+    let trie = SyllableTrie::new();
+    let mut reject: HashMap<&'static str, usize> = HashMap::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut pools: HashMap<&'static str, Vec<Sample>> = HashMap::new();
+    for (text, code, weight) in &raw {
+        if let Some(mut s) = classify(text, code, *weight, &trie, &mut reject) {
+            if !seen.insert((s.text.clone(), s.input.clone())) {
+                continue;
+            }
+            s.unigram = unigram.get(&s.text).copied().unwrap_or(0);
+            pools.entry(s.class.key()).or_default().push(s);
+        }
+    }
+
+    let layout = Layout::from_toml(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../data/schemas/shuangpin/xiaohe.toml"),
+    )
+    .expect("加载小鹤布局");
+    let rev = ShuangpinConverter::new(layout).build_reverse();
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["shuangpin".to_string()];
+    cfg.schema.active = "shuangpin".to_string();
+    let mgr = EngineManager::new(&cfg, Some(&dir));
+    let ranks = |keys: &str, text: &str, raw: bool| {
+        let opts = ConvertOptions {
+            sp_raw_lattice: raw,
+            ..Default::default()
+        };
+        let mut c = mgr
+            .convert_with_opts("shuangpin", keys, UI_LIMIT, opts)
+            .candidates;
+        let engine = c.iter().take(TOP_N).position(|x| x.text == text);
+        wind_candidate::drop_corrected_duplicates(&mut c);
+        c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, keys));
+        let mut seen = std::collections::HashSet::new();
+        c.retain(|x| seen.insert(x.text.clone()));
+        wind_candidate::protect_top_from_corrected(&mut c, keys.len());
+        let ui = c.iter().position(|x| x.text == text);
+        (
+            engine,
+            ui,
+            c.first().map(|x| x.text.clone()).unwrap_or_default(),
+        )
+    };
+
+    let fmt_rank = |r: Option<usize>| r.map_or("-".to_string(), |r| r.to_string());
+    let mut tsv = String::from(
+        "class\tkeys\texpect\toff_engine_rank\toff_ui_rank\ton_engine_rank\ton_ui_rank\toff_ui_top1\ton_ui_top1\n",
+    );
+    let mut j = format!("{{\n  \"layout\": \"xiaohe\",\n  \"seed\": {seed},\n  \"classes\": {{\n");
+    let classes = [Class::A, Class::B, Class::C];
+    for (ci, c) in classes.iter().enumerate() {
+        let set = stratified_sample(pools.remove(c.key()).unwrap_or_default(), n_per_class, seed);
+        let (mut off, mut on) = (SpScore::default(), SpScore::default());
+        let mut unencodable = 0usize;
+        for s in &set {
+            let syls: Vec<&str> = s.true_syls.iter().map(String::as_str).collect();
+            let Some(keys) = rev.encode_all(&syls) else {
+                unencodable += 1;
+                continue;
+            };
+            let (oe, ou, ot) = ranks(&keys, &s.text, false);
+            let (ne, nu, nt) = ranks(&keys, &s.text, true);
+            off.add(oe, ou);
+            on.add(ne, nu);
+            let _ = writeln!(
+                tsv,
+                "{}\t{keys}\t{}\t{}\t{}\t{}\t{}\t{ot}\t{nt}",
+                c.key(),
+                s.text,
+                fmt_rank(oe),
+                fmt_rank(ou),
+                fmt_rank(ne),
+                fmt_rank(nu)
+            );
+        }
+        println!(
+            "{:<46} OFF {}  ON {}  (不可编码 {unencodable})",
+            c.label(),
+            off.json(),
+            on.json()
+        );
+        let _ = writeln!(
+            j,
+            "    \"{}\": {{\"unencodable\": {unencodable}, \"off\": {}, \"on\": {}}}{}",
+            c.key(),
+            off.json(),
+            on.json(),
+            if ci + 1 == classes.len() { "" } else { "," }
+        );
+    }
+    j.push_str("  }\n}\n");
+    if let Some(p) = out.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    for (path, body) in [
+        (out.with_extension("sp.json"), &j),
+        (out.with_extension("sp.ranks.tsv"), &tsv),
+    ] {
+        match std::fs::write(&path, body) {
+            Ok(()) => println!("已写入 {}", path.display()),
+            Err(e) => eprintln!("写入 {} 失败: {e}", path.display()),
+        }
     }
 }
 

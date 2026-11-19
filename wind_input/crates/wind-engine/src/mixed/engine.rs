@@ -433,6 +433,7 @@ impl MixedEngine {
             // 重排，补在尾部是安全的。（本函数与 `overflow_opts` 刻意列全字段、不用
             // `..Default::default()`，见下方那条「两套取值表摆在一起才看得出差异」。）
             no_abbrev_quota: false,
+            sp_raw_lattice: false,
         }
     }
 
@@ -449,6 +450,7 @@ impl MixedEngine {
             allow_partial_final: Some(true),
             admit: None,
             no_abbrev_quota: false,
+            sp_raw_lattice: false,
         }
     }
 

@@ -577,19 +577,8 @@ impl ShuangpinConverter {
         let mut preedit = String::new();
         let mut fp_pos = 0usize;
 
-        let mut i = 0usize;
-        while i < b.len() {
+        for (i, is_last_of_segment) in pairing_slots(b) {
             let key1 = b[i];
-
-            // 分隔符自身不产出任何东西，只是让下一轮从这里重新起段。
-            // 连续 `''` 与开头 `'` 都落在这里，各自空转一轮。
-            if key1 == SEPARATOR_B {
-                i += 1;
-                continue;
-            }
-
-            // 段尾 = 输入到头，或下一个键是分隔符。
-            let is_last_of_segment = i + 1 >= b.len() || b[i + 1] == SEPARATOR_B;
             if is_last_of_segment {
                 // 落单键一律解析成声母写进 full；两种落单的区别只在要不要置 partial。
                 let partial_str = match self.layout.initial_of(key1) {
@@ -612,7 +601,6 @@ impl ShuangpinConverter {
                     result.position_map.push(i);
                 }
                 fp_pos += partial_str.len();
-                i += 1;
                 continue;
             }
 
@@ -663,13 +651,39 @@ impl ShuangpinConverter {
                 result.position_map.push(i + 1);
                 fp_pos += 2;
             }
-
-            i += 2;
         }
 
         result.full_pinyin = full;
         result.preedit_display = preedit;
         result
+    }
+
+    /// 按 [`pairing_slots`] 的配对规则，列出所有拼得出音节的完整键对（含全部候选读音）。
+    /// 拼不出音节的键对与段尾落单键不产生边；`'` 不成边，偏移含它。
+    pub fn pair_edges(&self, keys: &str) -> Vec<RawEdge> {
+        let input = keys.to_ascii_lowercase();
+        let b = input.as_bytes();
+        let mut edges = Vec::new();
+        for (i, lone) in pairing_slots(b) {
+            if lone {
+                continue;
+            }
+            let syllables = self.convert_pair(b[i], b[i + 1]);
+            if syllables.is_empty() {
+                continue;
+            }
+            let literal = self.hint_literal.get()
+                && self
+                    .partner_literal(b[i], b[i + 1], &syllables[0])
+                    .is_some();
+            edges.push(RawEdge {
+                start: i,
+                end: i + 2,
+                syllables,
+                literal,
+            });
+        }
+        edges
     }
 
     /// `keys` 恰好切成完整双拼音节时返回音节数，否则 `None`。
@@ -810,6 +824,37 @@ impl ShuangpinReverse {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+}
+
+/// 击键对边：一个键对 `[start, end)` 及其全部候选音节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawEdge {
+    pub start: usize,
+    pub end: usize,
+    pub syllables: Vec<String>,
+    /// 首选读音来自模糊对偶声母（同 [`SylSpan::literal`]）。
+    pub literal: bool,
+}
+
+/// 双拼配对槽位 `(起始偏移, 是否段尾落单键)`：每 2 键一对，`'` 重置配对起点且自身不占槽。
+/// `convert` 与 `pair_edges` 共用，保证两者配对规则一致。
+fn pairing_slots(b: &[u8]) -> Vec<(usize, bool)> {
+    let mut slots = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == SEPARATOR_B {
+            i += 1;
+            continue;
+        }
+        if i + 1 >= b.len() || b[i + 1] == SEPARATOR_B {
+            slots.push((i, true));
+            i += 1;
+        } else {
+            slots.push((i, false));
+            i += 2;
+        }
+    }
+    slots
 }
 
 /// 提取拼音音节的韵母部分（对齐 Go extractFinal）。
@@ -1522,6 +1567,43 @@ o = ["o", "ou"]
         assert!(!m.contains_key("den"));
         // 转换器本身行为不变：仍只交出首个读音，其余靠引擎展开。
         assert_eq!(c.convert("dq").full_pinyin, "diu");
+    }
+
+    #[test]
+    fn pair_edges_agree_with_convert_first_syllable() {
+        let c = conv("xiaohe");
+        for keys in ["nihaoma", "ni'hao", "nihc"] {
+            let r = c.convert(keys);
+            let edges = c.pair_edges(keys);
+            assert_eq!(edges.len(), r.syllables.len(), "{keys}");
+            for (e, s) in edges.iter().zip(&r.syllables) {
+                assert_eq!(e.syllables[0], s.pinyin, "{keys}");
+                assert_eq!((e.start, e.end), (s.raw_start, s.raw_end), "{keys}");
+                assert_eq!(e.literal, s.literal.is_some(), "{keys}");
+            }
+        }
+    }
+
+    #[test]
+    fn pair_edges_keep_all_readings_for_shared_key() {
+        let c = ShuangpinConverter::new(Layout::from_toml_str(SHARED_KEY).unwrap());
+        let edges = c.pair_edges("dq");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            edges[0].syllables,
+            vec!["diu".to_string(), "dui".to_string()]
+        );
+    }
+
+    #[test]
+    fn pair_edges_skip_unpairable_and_tail_key() {
+        let c = conv("xiaohe");
+        assert!(c.pair_edges("pl").is_empty(), "pl 小鹤拼不出");
+        assert!(c.pair_edges("n").is_empty());
+        let e = c.pair_edges("nihcn");
+        assert_eq!(e.len(), 2, "尾键不成边");
+        let e = c.pair_edges("n'hc");
+        assert_eq!((e.len(), e[0].start, e[0].end), (1, 2, 4), "偏移含 '");
     }
 
     /// 每个韵母键只放一个韵母的布局不产生任何对（出厂布局的情形见下一个用例）。
