@@ -200,6 +200,11 @@ fn sentence_weight(log_prob: f64, word_count: usize) -> i32 {
     geometric_mean.exp().clamp(1.0, i32::MAX as f64) as i32
 }
 
+/// step 2 首位整句（同文合并后也带着这个身份）。
+fn is_step2_top(c: &Candidate) -> bool {
+    c.is_sentence && c.sentence_rank == 1
+}
+
 /// 简拼候选的**保底配额分母**：截断时至少给 `is_abbrev` 留 `max_candidates / 此值` 席
 /// （生产 `max_candidates = 300` ⇒ 30 席）。见 [`truncate_with_quotas`]。
 ///
@@ -3311,7 +3316,13 @@ impl Engine for PinyinEngine {
             .map(|conv| conv.pair_edges_all(raw_input));
         let raw_aux = aux_lookup
             .zip(raw_edges_all.as_deref())
-            .map(|(lookup, edges_all)| raw_lattice::AuxInput { edges_all, lookup });
+            .map(|(lookup, edges_all)| raw_lattice::AuxInput {
+                edges_all,
+                lookup,
+                tail_partial: sp_result
+                    .as_ref()
+                    .and_then(|r| r.partial_initial.as_deref()),
+            });
         let full_owned: String = match &sp_result {
             Some(r) if !r.full_pinyin.is_empty() => r.full_pinyin.clone(),
             Some(_) => input.to_string(),
@@ -3576,16 +3587,26 @@ impl Engine for PinyinEngine {
         // 击键图：`raw_step2` 是 (lattice, 终点击键数)；建不出（含终点没铺到末音节）时整句跳过，
         // 不回落旧图。底图 step 2 与 2c 共用、用到时才建：外层 `None` = 未建，`Some(None)` = 建不出。
         let mut raw_base: Option<Option<raw_lattice::RawBase>> = None;
+        // 辅码模式：过了闸门比分的辅码整句 `(文字, 消费数, 是否过闸)`；排位在 6.5c 之后定（见 6.5d）。
+        let mut aux_tail: Vec<(String, usize, bool)> = Vec::new();
+        // 辅码模式：辅码字母与下一键可能拼成非法键对，P1 的两键音节链在第 1 个音节后就断了。
+        // 这时整句改按击键图本身可达（`RawBase::sentence` / `tail_end`）来解，只出两字以上的。
+        // 候选码与边界仍取 P1 的 `completed` / `syllables`（双拼边界校验按它比），造词码取路径规范码。
+        let aux_entry = raw_aux.is_some() && syllables.len() == 1;
         let raw_step2 = match &raw_edges {
-            Some(edges) if self.config.use_smart_compose && syllables.len() >= 2 => Some(
-                raw_base
-                    .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges, raw_aux))
-                    .as_ref()
-                    .and_then(raw_lattice::RawBase::sentence),
-            ),
+            Some(edges) if self.config.use_smart_compose && (syllables.len() >= 2 || aux_entry) => {
+                Some(
+                    raw_base
+                        .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges, raw_aux))
+                        .as_ref()
+                        .and_then(raw_lattice::RawBase::sentence),
+                )
+            }
             _ => None,
         };
-        if self.config.use_smart_compose && syllables.len() >= 2 && !matches!(raw_step2, Some(None))
+        if self.config.use_smart_compose
+            && (syllables.len() >= 2 || (aux_entry && matches!(raw_step2, Some(Some(_)))))
+            && !matches!(raw_step2, Some(None))
         {
             let (lattice, input_len, raw_consumed) = if let Some(Some((lattice, end))) = raw_step2 {
                 (Cow::Borrowed(lattice), end, end)
@@ -3643,6 +3664,50 @@ impl Engine for PinyinEngine {
                 );
                 results.retain(|r| !sentence_blocked(&blocked, &r.words));
             }
+            let two_chars = |r: &viterbi::ViterbiResult| {
+                r.words.iter().map(|w| w.chars().count()).sum::<usize>() >= 2
+            };
+            // 辅码模式：末槽整句用了辅码时同样比分（对手 = 同终点不用辅码的最优路径）。不过闸时对手
+            // 排第 1（同关表），辅码整句另插在它之后（6.5d 压到末槽整句之下）。出厂不设闸：两份语料上
+            // 假读法分差到 11（我拍了 → 我 + 辅码 pd + 了），正当辅码低到 0.1，设闸的代价大于收益。
+            let mut aux_last_failed: Option<viterbi::ViterbiResult> = None;
+            if raw_aux.is_some()
+                && (cfg!(test) || raw_lattice::aux_se_gate_margin().is_some())
+                && raw_consumed != 0
+                && let Some(base) = raw_base.as_ref().and_then(Option::as_ref)
+                && let Some(i) = results.iter().position(|r| {
+                    !r.words.is_empty() && r.log_prob.is_finite() && (!aux_entry || two_chars(r))
+                })
+                && results[i].pieces.iter().flatten().any(|p| p.aux > 0)
+            {
+                let plain = self.decode_unblocked(&base.plain_lattice(), input_len);
+                let rival = !plain.words.is_empty() && plain.log_prob.is_finite();
+                #[cfg(test)]
+                raw_lattice::note_gate_gap(raw_lattice::GateGap {
+                    sentence: results[i].words.concat(),
+                    kind: 'e',
+                    dangling: false,
+                    score: Some(results[i].log_prob),
+                    rival: rival.then_some(plain.log_prob),
+                    chars: results[i].words.concat().chars().count(),
+                    aux_letters: results[i]
+                        .pieces
+                        .iter()
+                        .flatten()
+                        .map(|p| p.aux as usize)
+                        .sum(),
+                });
+                let plain_text = plain.words.concat();
+                if let Some(m) = raw_lattice::aux_se_gate_margin()
+                    && rival
+                    && results[i].log_prob <= plain.log_prob + m
+                    && plain_text != results[i].words.concat()
+                {
+                    aux_last_failed = Some(results.remove(i));
+                    results.retain(|r| r.words.concat() != plain_text);
+                    results.insert(0, plain);
+                }
+            }
             for result in results {
                 if seen.len() >= pool_k {
                     break;
@@ -3655,6 +3720,11 @@ impl Engine for PinyinEngine {
                 let sentence: String = result.words.join("");
                 // `decode_nbest` 已按文本去重；这里再挡一次（beam 路径、或哈希碰撞）。
                 if sentence.is_empty() || seen.contains(&sentence) {
+                    continue;
+                }
+                let uses_aux = result.pieces.iter().flatten().any(|p| p.aux > 0);
+                // 链断入口只为辅码开：没用辅码的整句（P1 本就解不出）不出。
+                if aux_entry && (!two_chars(&result) || !uses_aux) {
                     continue;
                 }
                 seen.push(sentence.clone());
@@ -3675,7 +3745,6 @@ impl Engine for PinyinEngine {
                 } else {
                     syllables_boundary_mask(&syllables, completed.len())
                 };
-                let uses_aux = result.pieces.iter().flatten().any(|p| p.aux > 0);
                 #[cfg(test)]
                 if uses_aux {
                     raw_lattice::note_aux_sentence(&sentence);
@@ -3758,6 +3827,138 @@ impl Engine for PinyinEngine {
                         .position(|c| c.sentence_rank == 0)
                         .unwrap_or(candidates.len());
                     candidates.insert(at, fresh);
+                }
+            }
+            // 辅码模式：末槽之后整串另可达（末尾是辅码或残码补全）时另解终点为整串的整句，排位同 2c。
+            // 只出用了辅码的：没用时首选不该变（2c 照 P1 只解残码整句，补全节点只当辅码读法的对手）。
+            // 比分闸门：末键在 P1 读法里落单、这里被当成 1 位辅码（可能是下一音节的声母）的不放行；
+            // 否则要比同终点不用辅码的最优路径高出 `aux_gate_margin` 才放行。放行的排到末槽整句
+            // 之前、同文合并时取整串消费数；不放行的排在末槽整句之后，不改写同文候选。
+            if let Some(base) = raw_base.as_ref().and_then(Option::as_ref)
+                && let Some(n) = base.tail_end()
+            {
+                let result = self.decode_unblocked(base.lattice(), n);
+                if !result.words.is_empty()
+                    && result.log_prob.is_finite()
+                    && let Some(pieces) = &result.pieces
+                    && pieces.iter().any(|p| p.aux > 0)
+                    && (!aux_entry || two_chars(&result))
+                {
+                    let sentence: String = result.words.join("");
+                    #[cfg(test)]
+                    raw_lattice::note_aux_sentence(&sentence);
+                    // 落单：P1 的读法里末槽之后只剩一个字母（可带 `'`），这里把它当末字的 1 位辅码。
+                    let dangling = base.sentence().is_some_and(|(_, e)| {
+                        raw_input[e..n].bytes().filter(|&b| b != b'\'').count() == 1
+                    }) && pieces
+                        .last()
+                        .zip(result.words.last())
+                        .is_some_and(|(p, w)| base.trailing_aux_len(p.start, w) == 1);
+                    let margin = if dangling {
+                        raw_lattice::aux_dangling_margin()
+                    } else {
+                        Some(raw_lattice::aux_gate_margin(self.viterbi.has_grammar()))
+                    };
+                    #[cfg(test)]
+                    let gap = |score: Option<f64>, rival: Option<f64>| raw_lattice::GateGap {
+                        sentence: sentence.clone(),
+                        kind: 'n',
+                        dangling,
+                        score,
+                        rival,
+                        chars: sentence.chars().count(),
+                        aux_letters: pieces.iter().map(|p| p.aux as usize).sum(),
+                    };
+                    #[cfg(test)]
+                    if margin.is_none() {
+                        raw_lattice::note_gate_gap(gap(None, None));
+                    }
+                    let pass = margin.is_some_and(|m| {
+                        let plain = self.decode_unblocked(&base.plain_lattice(), n);
+                        let rival = !plain.words.is_empty() && plain.log_prob.is_finite();
+                        #[cfg(test)]
+                        raw_lattice::note_gate_gap(gap(
+                            Some(result.log_prob),
+                            rival.then_some(plain.log_prob),
+                        ));
+                        !rival || result.log_prob > plain.log_prob + m
+                    });
+                    let weight = sentence_weight(result.log_prob, result.words.len());
+                    let boundary = syllables_boundary_mask(&syllables, completed.len());
+                    // 末槽整句（step 2 首位）在不在：被屏蔽词滤光时没有排位基准，不放行的就不出。
+                    let has_top = candidates.iter().any(is_step2_top);
+                    // 同文合并按文字找（与 step 2 合并同口径，Task 3 裁决：并入同文候选、取整串消费数）。
+                    if let Some(existing) = candidates.iter_mut().find(|c| c.text == sentence) {
+                        if pass {
+                            existing.weight = existing.weight.max(weight);
+                            existing.is_partial = false;
+                            existing.is_sentence = true;
+                            if raw_lattice::aux_whole_enabled() {
+                                existing.consumed_length = n;
+                                existing.meta.learn_code = raw_lattice::raw_learn_code(
+                                    &result,
+                                    raw_input,
+                                    &existing.code,
+                                    existing.boundary,
+                                );
+                            }
+                            aux_tail.push((sentence, n, true));
+                        }
+                    } else if pass || has_top {
+                        candidates.insert(
+                            0,
+                            Candidate {
+                                text: sentence.clone(),
+                                code: completed.to_string(),
+                                weight,
+                                natural_order: 0,
+                                source: CandidateSource::Pinyin,
+                                is_sentence: true,
+                                is_synthesized: true,
+                                boundary,
+                                meta: wind_candidate::CandidateMeta {
+                                    learn_code: raw_lattice::raw_learn_code(
+                                        &result, raw_input, completed, boundary,
+                                    ),
+                                    ..Default::default()
+                                },
+                                consumed_length: n,
+                                ..Default::default()
+                            },
+                        );
+                        aux_tail.push((sentence, n, pass));
+                    }
+                }
+            }
+            // 不过闸的末槽辅码整句：排在末槽整句之后，同文时不碰已有候选（同上面 S_n 不放行）。
+            if let Some(result) = aux_last_failed {
+                let sentence = result.words.concat();
+                if !candidates.iter().any(|c| c.text == sentence)
+                    && candidates.iter().any(is_step2_top)
+                {
+                    let boundary = syllables_boundary_mask(&syllables, completed.len());
+                    candidates.insert(
+                        0,
+                        Candidate {
+                            text: sentence.clone(),
+                            code: completed.to_string(),
+                            weight: sentence_weight(result.log_prob, result.words.len()),
+                            natural_order: 0,
+                            source: CandidateSource::Pinyin,
+                            is_sentence: true,
+                            is_synthesized: true,
+                            boundary,
+                            meta: wind_candidate::CandidateMeta {
+                                learn_code: raw_lattice::raw_learn_code(
+                                    &result, raw_input, completed, boundary,
+                                ),
+                                ..Default::default()
+                            },
+                            consumed_length: input_len,
+                            ..Default::default()
+                        },
+                    );
+                    aux_tail.push((sentence, input_len, false));
                 }
             }
         }
@@ -5103,6 +5304,34 @@ impl Engine for PinyinEngine {
                             ..Default::default()
                         },
                     );
+                }
+            }
+        }
+
+        // 6.5d 辅码整串整句的排位（step 2 比分闸门的结论）：放行的排到末槽整句与 2c 残码整句
+        // 之前，不放行的排在末槽整句之后。放在各轮让位之后，按它们最终的权重定。整句按身份找：
+        // 末槽整句是 `sentence_rank == 1` 的整句，辅码整句是同文且消费整串的整句。
+        // 不过闸的先压、过闸的后抬：抬的那条要高过压完后的全部其它整句。
+        aux_tail.sort_by_key(|t| t.2);
+        for (text, n, pass) in &aux_tail {
+            let is_tail =
+                |c: &Candidate| c.is_sentence && &c.text == text && c.consumed_length == *n;
+            let top_w = candidates
+                .iter()
+                .find(|c| is_step2_top(c))
+                .map(|c| c.weight);
+            let others_w = candidates
+                .iter()
+                .filter(|c| c.is_sentence && !is_tail(c))
+                .map(|c| c.weight)
+                .max();
+            if let Some(c) = candidates.iter_mut().find(|c| is_tail(c)) {
+                if *pass {
+                    if let Some(w) = others_w {
+                        c.weight = c.weight.max(w.saturating_add(1));
+                    }
+                } else if let Some(w) = top_w {
+                    c.weight = c.weight.min(w.saturating_sub(1));
                 }
             }
         }
@@ -7891,6 +8120,387 @@ i = ["i"]
         let eng = sp_fp_engine("aux_hit", NIHAO_AUX, false);
         let top = aux_top(&eng, "nihchn", Some(FakeAux(vec![('好', "hn")])));
         assert_eq!(top, ("你好".to_string(), 6, "nihao".to_string()));
+    }
+
+    const QIHOU_AUX: &[(&str, &str, i32)] = &[
+        ("启", "qi", 9000),
+        ("气", "qi", 9000),
+        ("气候", "qi hou", 50000),
+        ("和", "he", 8000),
+        ("我", "wo", 9000),
+    ];
+
+    /// 末键落单：「气候」（补全）压过「启 + 辅码 h」。
+    #[test]
+    fn tail_completion_beats_trailing_aux() {
+        let eng = sp_fp_engine("aux_tail_qih", QIHOU_AUX, false);
+        let table = || Some(FakeAux(vec![('启', "h")]));
+        assert_eq!(aux_top(&eng, "qih", table()).0, "气候");
+        // 两音节起整句：整串那条整句里补全节点压过辅码读法，没用辅码就不出，首选同不给表。
+        let top = aux_top(&eng, "woqih", table());
+        let off = aux_top(&eng, "woqih", None);
+        assert_eq!((top.0.as_str(), top.1), (off.0.as_str(), off.1), "{top:?}");
+        // 「我启 + 辅码 h」不出；末槽终点 4 的「我启」是 P1 那条整句，照出。
+        let s = aux_sentences(&eng, "woqih", table());
+        assert!(
+            s.iter().all(|x| (x.0.as_str(), x.1) != ("我启", 5)),
+            "{s:?}"
+        );
+    }
+
+    /// `nikeyig` 型：「课 + 辅码 y」把键数凑成偶数拼出「程」（小鹤 `ig` = cheng），
+    /// 补全节点给出「你可以 + 一个」的对手。
+    #[test]
+    fn tail_completion_blocks_shifted_pair_reading() {
+        let words: &[(&str, &str, i32)] = &[
+            ("你", "ni", 9000),
+            ("可以", "ke yi", 60000),
+            ("你可以", "ni ke yi", 30000),
+            ("课", "ke", 3000),
+            ("程", "cheng", 3000),
+            ("一个", "yi ge", 80000),
+            ("个", "ge", 9000),
+        ];
+        let eng = sp_fp_engine("aux_tail_nikeyig", words, false);
+        let table = || Some(FakeAux(vec![('课', "y")]));
+        let off = aux_top(&eng, "nikeyig", None);
+        let on = aux_top(&eng, "nikeyig", table());
+        assert!(!on.0.contains('程'), "on={on:?} off={off:?}");
+        let s = aux_sentences(&eng, "nikeyig", table());
+        assert!(s.iter().all(|x| !x.0.contains('程')), "{s:?}");
+    }
+
+    /// 「漆雕」压到与对手「期待 + 残码 n」分差 2～3（真实词库约 1.8），闸门裕度要挡住这一档。
+    const QIDAI_AUX: &[(&str, &str, i32)] = &[
+        ("期", "qi", 9000),
+        ("漆", "qi", 6000),
+        ("待", "dai", 9000),
+        ("期待", "qi dai", 50000),
+        ("漆雕", "qi diao", 3),
+        ("雕", "diao", 3000),
+        ("年", "nian", 9000),
+    ];
+
+    /// `qiddn`（小鹤 dd = dai、dn = diao）：首选与不给辅码表时相同，「漆 + 辅码 d + 雕」不上首位。
+    /// 补全节点救不了：对手「期待 + 残码 n」起的是新字，分数不敌「漆雕」，靠比分闸门挡。
+    #[test]
+    fn tail_completion_qiddn_keeps_plain_top() {
+        let eng = sp_fp_engine("aux_tail_qiddn", QIDAI_AUX, false);
+        let off = aux_top(&eng, "qiddn", None);
+        let on = aux_top(&eng, "qiddn", Some(FakeAux(vec![('漆', "d")])));
+        assert_eq!(on.0, off.0, "on={on:?} off={off:?}");
+    }
+
+    /// 辅码模式下 step 2 仍解末槽终点的整句：`qiddn` 首选 `(期待, 4)` 同不给表，
+    /// 「漆 + 辅码 d + 雕」作整串整句另出。
+    #[test]
+    fn aux_tail_keeps_last_slot_sentence() {
+        let eng = sp_fp_engine("aux_tail_last_slot", QIDAI_AUX, false);
+        let table = || Some(FakeAux(vec![('漆', "d")]));
+        let on = aux_top(&eng, "qiddn", table());
+        let off = aux_top(&eng, "qiddn", None);
+        assert_eq!((on.0.as_str(), on.1), ("期待", 4), "{on:?}");
+        assert_eq!((on.0, on.1), (off.0, off.1));
+        let s = aux_sentences(&eng, "qiddn", table());
+        assert!(
+            s.iter().any(|x| (x.0.as_str(), x.1) == ("期待", 4)),
+            "{s:?}"
+        );
+        assert!(
+            s.iter().any(|x| (x.0.as_str(), x.1) == ("漆雕", 5)),
+            "{s:?}"
+        );
+    }
+
+    const GATE_AUX: &[(&str, &str, i32)] = &[
+        ("你", "ni", 9000),
+        ("好", "hao", 9000),
+        ("你好", "ni hao", 50000),
+        ("行", "hang", 5000),
+        ("藏", "cang", 3000),
+        ("才", "cai", 3000),
+    ];
+
+    /// 末槽整句闸门（出厂不设）：`wopdle` 的 `pd` 既是「拍」也是「我」的 2 位辅码。不设闸时
+    /// 「我了」居首；设闸且分差不够时对手「我拍了」居首（同不给表），「我了」仍在候选里、排在其后。
+    #[test]
+    fn aux_last_slot_gate_keeps_plain_top() {
+        let words: &[(&str, &str, i32)] =
+            &[("我", "wo", 9000), ("拍", "pai", 50), ("了", "le", 9000)];
+        let eng = sp_fp_engine("aux_last_slot_gate", words, false);
+        let table = || Some(FakeAux(vec![('我', "pd")]));
+        let off = aux_top(&eng, "wopdle", None);
+        assert_eq!((off.0.as_str(), off.1), ("我拍了", 6), "前提");
+        assert_eq!(raw_lattice::AUX_SE_GATE_MARGIN, None);
+        let on = aux_top(&eng, "wopdle", table());
+        assert_eq!((on.0.as_str(), on.1), ("我了", 6), "前提：辅码读法分高");
+        let old = raw_lattice::set_aux_se_gate_margin(Some(1e9));
+        let gated = aux_top(&eng, "wopdle", table());
+        let s = aux_sentences(&eng, "wopdle", table());
+        raw_lattice::set_aux_se_gate_margin(old);
+        assert_eq!((gated.0.as_str(), gated.1), ("我拍了", 6));
+        let pos = |t: &str| s.iter().position(|x| x.0 == t && x.1 == 6);
+        let (Some(plain), Some(aux)) = (pos("我拍了"), pos("我了")) else {
+            panic!("两条整句都应在：{s:?}");
+        };
+        assert!(plain < aux, "{s:?}");
+    }
+
+    /// 闸门裕度分模型开 / 关两档：同一分差（约 7，对手是「你行藏」残码补全）模型关时放行，
+    /// 挂上语法模型（恒 0 分，不改分数）时按模型开那档不放行、首选同不给表。
+    #[test]
+    fn aux_gate_margin_follows_grammar() {
+        let mut words = GATE_AUX.to_vec();
+        words.push(("你行藏", "ni hang cang", 100));
+        let table = || Some(FakeAux(vec![('你', "h")]));
+        let eng = sp_fp_engine("aux_gate_gram_off", &words, false);
+        raw_lattice::take_gate_gaps();
+        let off = aux_top(&eng, "nihhc", table());
+        let gap = raw_lattice::take_gate_gaps()
+            .first()
+            .and_then(raw_lattice::GateGap::gap)
+            .expect("应比过分");
+        assert!(
+            gap > raw_lattice::AUX_GATE_MARGIN && gap < raw_lattice::AUX_GATE_MARGIN_GRAMMAR,
+            "前提：分差 {gap}"
+        );
+        assert_eq!(off, ("你好".to_string(), 5, "nihao".to_string()));
+        let eng = sp_fp_engine("aux_gate_gram_on", &words, false)
+            .with_grammar(Arc::new(grammar::NullGrammar));
+        let plain = aux_top(&eng, "nihhc", None);
+        let on = aux_top(&eng, "nihhc", table());
+        assert_eq!((on.0.as_str(), on.1), (plain.0.as_str(), plain.1), "{on:?}");
+    }
+
+    /// 比分闸门放行正当辅码：`nihhc`（你 + 辅码 h + 好）首选「你好」消费 5，压过末槽整句「你行」。
+    #[test]
+    fn aux_gate_passes_mid_aux() {
+        let eng = sp_fp_engine("aux_gate_mid", GATE_AUX, false);
+        let off = aux_top(&eng, "nihhc", None);
+        assert_eq!((off.0.as_str(), off.1), ("你行", 4), "前提：{off:?}");
+        let on = aux_top(&eng, "nihhc", Some(FakeAux(vec![('你', "h")])));
+        assert_eq!(on, ("你好".to_string(), 5, "nihao".to_string()));
+    }
+
+    /// `nikeyig` 的真实形态：「你 + 课程（课后夹辅码 y）」与「你可以 + 残码」分差只有几分，
+    /// 闸门挡住，首选同不给表；裕度置 0 则「你课程」上首位。
+    #[test]
+    fn aux_gate_blocks_shifted_pair_reading() {
+        let words: &[(&str, &str, i32)] = &[
+            ("你", "ni", 9000),
+            ("可以", "ke yi", 60000),
+            ("你可以", "ni ke yi", 30000),
+            ("课", "ke", 3000),
+            ("程", "cheng", 3000),
+            ("课程", "ke cheng", 3000),
+            ("个", "ge", 9000),
+        ];
+        let eng = sp_fp_engine("aux_gate_nikeyig", words, false);
+        let table = || Some(FakeAux(vec![('课', "y")]));
+        let off = aux_top(&eng, "nikeyig", None);
+        let on = aux_top(&eng, "nikeyig", table());
+        assert_eq!((on.0.as_str(), on.1), (off.0.as_str(), off.1), "{on:?}");
+        let old = raw_lattice::set_aux_gate_margin(Some(0.0));
+        let loose = aux_top(&eng, "nikeyig", table());
+        raw_lattice::set_aux_gate_margin(old);
+        assert_eq!(
+            (loose.0.as_str(), loose.1),
+            ("你课程", 7),
+            "前提：辅码读法本身分高"
+        );
+    }
+
+    /// 辅码字母与下一键拼成非法键对（小鹤 `oh`、`oy`）：P1 的两键音节链在第 1 个音节后断掉，
+    /// 整句仍按击键图可达出「你好」，消费整串，造词码不含辅码。奇数长走 S_n，偶数长走末槽整句。
+    #[test]
+    fn aux_sentence_when_aux_breaks_pair_chain() {
+        let eng = sp_fp_engine("aux_break_chain", NIHAO_AUX, false);
+        let table = || Some(FakeAux(vec![('你', "oy")]));
+        for (keys, n) in [("niohc", 5), ("nioyhc", 6)] {
+            let on = aux_top(&eng, keys, table());
+            assert_eq!(on, ("你好".to_string(), n, "nihao".to_string()), "{keys}");
+            let s = aux_sentences(&eng, keys, table());
+            let hit = s.iter().find(|x| x.0 == "你好").expect("应有整句");
+            assert_eq!(hit.2, Some(("nihao".to_string(), 0b101)), "{keys}: {s:?}");
+            // 同文只出一条（整句并入精确词，不另插）。
+            let opts = ConvertOptions {
+                sp_raw_lattice: true,
+                aux_continuous: table()
+                    .map(|a| Arc::new(a) as Arc<dyn crate::engine::AuxCharLookup>),
+                ..Default::default()
+            };
+            let r = eng.convert_with_opts(keys, 20, opts).unwrap();
+            let same: Vec<_> = r.candidates.iter().filter(|c| c.text == "你好").collect();
+            assert_eq!(same.len(), 1, "{keys}: {same:?}");
+        }
+    }
+
+    /// 链断后只剩 1 个音节的读法（`nio`、`nioy`：你 + 辅码）不当整句出，同 P1「至少两个音节」。
+    #[test]
+    fn aux_chain_break_single_char_not_sentence() {
+        let eng = sp_fp_engine("aux_break_single", NIHAO_AUX, false);
+        for keys in ["nio", "nioy"] {
+            let s = aux_sentences(&eng, keys, Some(FakeAux(vec![('你', "oy")])));
+            assert!(s.is_empty(), "{keys}: {s:?}");
+        }
+    }
+
+    /// 末键落单：`nihch` 的 `h` 在 P1 读法里是残码，当成「好」的 1 位辅码时不上首位、
+    /// 不改写同文「你好」的消费数（4）。
+    #[test]
+    fn aux_gate_dangling_key_keeps_plain_top() {
+        let eng = sp_fp_engine("aux_gate_dangling", NIHAO_AUX, false);
+        let table = || Some(FakeAux(vec![('好', "h")]));
+        let off = aux_top(&eng, "nihch", None);
+        let on = aux_top(&eng, "nihch", table());
+        assert_eq!((on.0.as_str(), on.1), ("你好", 4), "{on:?}");
+        assert_eq!((on.0.as_str(), on.1), (off.0.as_str(), off.1));
+        let opts = ConvertOptions {
+            sp_raw_lattice: true,
+            aux_continuous: table().map(|a| Arc::new(a) as Arc<dyn crate::engine::AuxCharLookup>),
+            ..Default::default()
+        };
+        let r = eng.convert_with_opts("nihch", 20, opts).unwrap();
+        assert!(
+            r.candidates
+                .iter()
+                .all(|c| !(c.text == "你好" && c.consumed_length == 5)),
+            "{:?}",
+            r.candidates
+        );
+    }
+
+    /// 句尾 2 位辅码打在已对的字后：首选文字同不带辅码的输入，消费整串。
+    /// `nihchc` 末槽即整串（`hc` 也读 hao）；`nihhchn` 末槽止于 6、整串那条要过闸门。
+    #[test]
+    fn aux_gate_tail_two_letter_aux_on_correct_char() {
+        let eng = sp_fp_engine("aux_gate_tail2", GATE_AUX, false);
+        let table = || Some(FakeAux(vec![('你', "h"), ('好', "hc"), ('好', "hn")]));
+        assert_eq!(aux_top(&eng, "nihc", table()).0, "你好");
+        for (keys, n) in [("nihchc", 6), ("nihchn", 6), ("nihhchn", 7)] {
+            let on = aux_top(&eng, keys, table());
+            assert_eq!((on.0.as_str(), on.1), ("你好", n), "{keys}");
+        }
+    }
+
+    /// 不放行的辅码整串整句即使自身分高，也排在末槽整句之后（裕度极大时恒不放行）。
+    #[test]
+    fn aux_gate_failed_sentence_stays_below_last_slot() {
+        let words: &[(&str, &str, i32)] = &[
+            ("你", "ni", 9000),
+            ("可以", "ke yi", 60000),
+            ("课", "ke", 3000),
+            ("程", "cheng", 3000),
+            ("课程", "ke cheng", 3000000),
+            ("个", "ge", 9000),
+        ];
+        let eng = sp_fp_engine("aux_gate_cap", words, false);
+        let table = || Some(FakeAux(vec![('课', "y")]));
+        let pass = aux_top(&eng, "nikeyig", table());
+        assert_eq!((pass.0.as_str(), pass.1), ("你课程", 7), "前提：放行时居首");
+        let old = raw_lattice::set_aux_gate_margin(Some(1e9));
+        let fail = aux_top(&eng, "nikeyig", table());
+        let s = aux_sentences(&eng, "nikeyig", table());
+        raw_lattice::set_aux_gate_margin(old);
+        assert_eq!((fail.0.as_str(), fail.1), ("你可以", 6), "{s:?}");
+        assert!(
+            s.iter().any(|x| (x.0.as_str(), x.1) == ("你课程", 7)),
+            "{s:?}"
+        );
+    }
+
+    /// 同文普通词与整句并存：「你好」既是 `nihang` 的低频词条（普通候选），又是 `nihhc` 的辅码整串
+    /// 整句；末槽整句是另一个词「你行」。放行时并入那条普通词（取整串消费数）并居首；
+    /// 不放行时普通词原样（消费 4）、首位仍是末槽整句。
+    #[test]
+    fn aux_gate_same_text_plain_word_beside_sentence() {
+        let mut words = GATE_AUX.to_vec();
+        words.push(("你好", "ni hang", 100));
+        words.push(("你行", "ni hang", 50000));
+        let eng = sp_fp_engine("aux_gate_same_text", &words, false);
+        let table = || Some(FakeAux(vec![('你', "h")]));
+        let run = || {
+            let opts = ConvertOptions {
+                sp_raw_lattice: true,
+                aux_continuous: table()
+                    .map(|a| Arc::new(a) as Arc<dyn crate::engine::AuxCharLookup>),
+                ..Default::default()
+            };
+            eng.convert_with_opts("nihhc", 20, opts).unwrap().candidates
+        };
+        let pass = run();
+        assert_eq!(
+            (pass[0].text.as_str(), pass[0].consumed_length),
+            ("你好", 5)
+        );
+        assert_eq!(pass.iter().filter(|c| c.text == "你好").count(), 1);
+        let old = raw_lattice::set_aux_gate_margin(Some(1e9));
+        let fail = run();
+        raw_lattice::set_aux_gate_margin(old);
+        assert_eq!(
+            (fail[0].text.as_str(), fail[0].consumed_length),
+            ("你行", 4)
+        );
+        let plain: Vec<_> = fail.iter().filter(|c| c.text == "你好").collect();
+        assert_eq!(plain.len(), 1, "{plain:?}");
+        assert_eq!(plain[0].consumed_length, 4);
+    }
+
+    /// 末槽整句被屏蔽词滤光（没有排位基准）时，不放行的辅码整串整句不出，更不居首。
+    #[test]
+    fn aux_gate_failed_without_last_slot_sentence_not_emitted() {
+        let words: &[(&str, &str, i32)] = &[
+            ("期", "qi", 9000),
+            ("待", "dai", 9000),
+            ("期待", "qi dai", 50000),
+            ("漆雕", "qi diao", 3_000_000),
+            ("年", "nian", 9000),
+        ];
+        let eng = sp_fp_engine("aux_gate_no_top", words, false);
+        eng.set_blocked_words(Arc::new(["期待".to_string()].into_iter().collect()));
+        let table = || Some(FakeAux(vec![('漆', "d")]));
+        let old = raw_lattice::set_aux_gate_margin(Some(1e9));
+        let on = aux_top(&eng, "qiddn", table());
+        let s = aux_sentences(&eng, "qiddn", table());
+        raw_lattice::set_aux_gate_margin(old);
+        let off = aux_top(&eng, "qiddn", None);
+        assert_eq!((on.0.as_str(), on.1), (off.0.as_str(), off.1), "{s:?}");
+        assert!(s.iter().all(|x| x.0 != "漆雕"), "{s:?}");
+        // 放行时照常居首（证明上面挡住的是闸门，不是读法本身没出）。
+        assert_eq!(aux_top(&eng, "qiddn", table()).0, "漆雕");
+    }
+
+    /// 句尾 2 位辅码、同终点有真实无辅码对手：`nihhchc` 末槽止于 6（你行藏），整串的无辅码路径是
+    /// 「你行藏 + 残码 c」，辅码读法「你（h）好（hc）」要比它高出裕度才居首。
+    #[test]
+    fn aux_gate_tail_two_letter_aux_with_plain_rival() {
+        let eng = sp_fp_engine("aux_gate_tail2_rival", GATE_AUX, false);
+        let table = || Some(FakeAux(vec![('你', "h"), ('好', "hc")]));
+        let off = aux_top(&eng, "nihhchc", None);
+        assert_eq!((off.0.as_str(), off.1), ("你行藏", 6), "前提：{off:?}");
+        let s = aux_sentences(&eng, "nihhchc", table());
+        assert!(
+            s.iter().any(|x| x.1 == 7 && x.0 != "你好"),
+            "前提：同终点有无辅码对手：{s:?}"
+        );
+        let on = aux_top(&eng, "nihhchc", table());
+        assert_eq!((on.0.as_str(), on.1), ("你好", 7), "{s:?}");
+    }
+
+    /// 手动分隔：`'` 计入末槽 / 落单判据。
+    /// - `ni'hch`、`nihch'`：末槽之后只剩一个字母（可带 `'`），当末字 1 位辅码即落单，首选同不给表；
+    /// - `nihhc'`：辅码在句中、末尾 `'` 并入末槽，放行，消费整串 6；
+    /// - `ni'hhc`：`'` 后的 `h` 不接在音节后，不是辅码，首选同不给表。
+    #[test]
+    fn aux_gate_with_manual_separator() {
+        let eng = sp_fp_engine("aux_gate_sep", GATE_AUX, false);
+        for (keys, ch) in [("ni'hch", '好'), ("nihch'", '好'), ("ni'hhc", '你')] {
+            let off = aux_top(&eng, keys, None);
+            let on = aux_top(&eng, keys, Some(FakeAux(vec![(ch, "h")])));
+            assert_eq!((on.0.as_str(), on.1), (off.0.as_str(), off.1), "{keys}");
+        }
+        let on = aux_top(&eng, "nihhc'", Some(FakeAux(vec![('你', "h")])));
+        assert_eq!((on.0.as_str(), on.1), ("你好", 6));
     }
 
     /// 全拼降级支路不吃双拼同键音节：全拼打 `diushi` 只出「丢失」，双拼 `dqui` 照出「对视」。

@@ -30,6 +30,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use wind_dict::DictManager;
 use wind_dict::cached::{CachedDict, DictHit};
@@ -68,6 +69,137 @@ fn aux_letter_penalty() -> f64 {
 #[cfg(test)]
 pub(crate) fn set_aux_letter_penalty(v: f64) -> f64 {
     AUX_PENALTY.with(|c| c.replace(v))
+}
+
+/// 一种读法的辅码罚分：辅码字母各扣 λ。
+fn aux_cost(s: &Shape) -> f64 {
+    aux_letter_penalty() * s.aux_len as f64
+}
+
+/// 比分闸门的裕度（对数概率轴）：终点为整串、用了辅码的整句要比同终点不用辅码的最优路径
+/// 高出这么多，才排到末槽整句之前。语法模型开时分数尺度整体放大，另用一档。
+///
+/// 两份语料（189 + 164 句）× 三布局：模型关时逐键前缀假读法分差多在 4.1 以下（另有 3 条 5.8～7.9），
+/// 整串正当辅码除 2 例外最小 4.98（有 2 条恰好被 5 挡住）；两侧有重叠，5 是折中。模型开时假读法 ≤ 9.0，正当辅码除 2 例外
+/// 都 ≥ 10.8（另 1 条 8.7）。
+pub(crate) const AUX_GATE_MARGIN: f64 = 5.0;
+/// 语法模型开时的 [`AUX_GATE_MARGIN`]。
+pub(crate) const AUX_GATE_MARGIN_GRAMMAR: f64 = 10.0;
+
+fn default_gate_margin(grammar: bool) -> f64 {
+    if grammar {
+        AUX_GATE_MARGIN_GRAMMAR
+    } else {
+        AUX_GATE_MARGIN
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(super) fn aux_gate_margin(grammar: bool) -> f64 {
+    default_gate_margin(grammar)
+}
+
+#[cfg(test)]
+thread_local! {
+    static GATE_MARGIN: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn aux_gate_margin(grammar: bool) -> f64 {
+    GATE_MARGIN
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(|| default_gate_margin(grammar))
+}
+
+/// 测试里覆写本线程的闸门裕度（模型开 / 关同值；`None` = 出厂两档），返回旧值（用完须还原）。
+#[cfg(test)]
+pub(crate) fn set_aux_gate_margin(v: Option<f64>) -> Option<f64> {
+    GATE_MARGIN.with(|c| c.replace(v))
+}
+
+/// 落单（末键在 P1 读法里落单、被当成末字的 1 位辅码）时的放行裕度：`None` = 一律不放行。
+#[cfg(not(test))]
+#[inline(always)]
+pub(super) fn aux_dangling_margin() -> Option<f64> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static DANGLING_MARGIN: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+    static GATE_GAPS: RefCell<Vec<GateGap>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn aux_dangling_margin() -> Option<f64> {
+    DANGLING_MARGIN.with(std::cell::Cell::get)
+}
+
+/// 测试里放宽落单裁决（落单时也按这个裕度比分），返回旧值。
+#[cfg(test)]
+pub(crate) fn set_aux_dangling_margin(v: Option<f64>) -> Option<f64> {
+    DANGLING_MARGIN.with(|c| c.replace(v))
+}
+
+/// 闸门比分记录。
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct GateGap {
+    pub sentence: String,
+    /// `'n'` = 终点整串的辅码整句 S_n，`'e'` = 用了辅码的末槽整句 S_e
+    pub kind: char,
+    pub dangling: bool,
+    /// 辅码整句的分；没比分（落单直接不放行）时为 `None`
+    pub score: Option<f64>,
+    /// 同终点不用辅码的最优路径的分；`None` = 没有对手
+    pub rival: Option<f64>,
+    pub chars: usize,
+    pub aux_letters: usize,
+}
+
+#[cfg(test)]
+impl GateGap {
+    /// 分差（有对手且比过分时）。
+    pub fn gap(&self) -> Option<f64> {
+        self.score.zip(self.rival).map(|(s, p)| s - p)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn note_gate_gap(g: GateGap) {
+    GATE_GAPS.with(|v| v.borrow_mut().push(g));
+}
+
+/// 取走并清空闸门比分记录。
+#[cfg(test)]
+pub(crate) fn take_gate_gaps() -> Vec<GateGap> {
+    GATE_GAPS.with(|v| std::mem::take(&mut *v.borrow_mut()))
+}
+
+/// 末槽整句（终点 e）用了辅码时的闸门裕度：`None` = 不设闸。
+pub(crate) const AUX_SE_GATE_MARGIN: Option<f64> = None;
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(super) fn aux_se_gate_margin() -> Option<f64> {
+    AUX_SE_GATE_MARGIN
+}
+
+#[cfg(test)]
+thread_local! {
+    static SE_GATE_MARGIN: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(AUX_SE_GATE_MARGIN) };
+}
+
+#[cfg(test)]
+pub(super) fn aux_se_gate_margin() -> Option<f64> {
+    SE_GATE_MARGIN.with(std::cell::Cell::get)
+}
+
+/// 测试里覆写本线程的末槽整句闸门裕度，返回旧值。
+#[cfg(test)]
+pub(crate) fn set_aux_se_gate_margin(v: Option<f64>) -> Option<f64> {
+    SE_GATE_MARGIN.with(|c| c.replace(v))
 }
 
 /// 同文合并时用了辅码的整句是否改写消费数（`mod.rs` 的 `aux_whole`）；测试可关掉以量它的贡献。
@@ -110,8 +242,33 @@ pub(crate) fn take_aux_sentences() -> Vec<String> {
 pub(crate) type AuxSpan = (usize, String);
 
 /// 带辅码节点的辅码位置：`(起点, 终点)` → `[(词, 辅码)]`。无辅码的节点不登记。
+///
+/// 转解码节点时每个节点都要查一次，键只是两个偏移，用 [`SpanHasher`] 而不走 SipHash。
 #[derive(Default)]
-pub(crate) struct AuxSpans(HashMap<(usize, usize), Vec<WordAux>>);
+pub(crate) struct AuxSpans(
+    HashMap<(usize, usize), Vec<WordAux>, std::hash::BuildHasherDefault<SpanHasher>>,
+);
+
+/// [`AuxSpans`] 键的哈希：逐个整数混入、乘奇数常量。
+#[derive(Default)]
+pub(crate) struct SpanHasher(u64);
+
+impl std::hash::Hasher for SpanHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(29) ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+}
 
 /// 一个节点的 `(词, 辅码)`。
 type WordAux = (String, Vec<AuxSpan>);
@@ -197,16 +354,16 @@ struct Slot {
     options: Vec<(String, usize)>,
 }
 
-/// 从某个槽出发拼出的一种读法。
+/// 从某个槽出发拼出的一种读法。音节与辅码与延伸中的组合共享（同一读法接 0/1/2 位辅码时不拷）。
 struct Shape {
     /// 全拼码自身的音节掩码
     mask: u64,
-    syllables: Vec<String>,
+    syllables: Rc<Vec<String>>,
     edits: usize,
     /// 每条边都取首读音（= 旧路径的所打码）
     exact: bool,
     /// 词内第几字后吸收了哪几位辅码
-    aux: Vec<AuxSpan>,
+    aux: Rc<Vec<AuxSpan>>,
     /// 辅码字母总数
     aux_len: usize,
 }
@@ -307,22 +464,22 @@ impl RawChain {
         struct Combo {
             code: String,
             mask: u64,
-            syls: Vec<String>,
+            syls: Rc<Vec<String>>,
             edits: usize,
             exact: bool,
             end: usize,
-            aux: Vec<AuxSpan>,
+            aux: Rc<Vec<AuxSpan>>,
             aux_len: usize,
         }
         let mut spans = Spans::new();
         let mut layer = vec![Combo {
             code: String::new(),
             mask: 0,
-            syls: Vec::new(),
+            syls: Rc::default(),
             edits: 0,
             exact: true,
             end: self.slots[i].start,
-            aux: Vec::new(),
+            aux: Rc::default(),
             aux_len: 0,
         }];
         for k in 0..max_syllables {
@@ -341,26 +498,28 @@ impl RawChain {
                 };
                 let aux_ends = self.aux_ends(j);
                 for (idx, (opt, opt_edits)) in self.slots[j].options.iter().enumerate() {
-                    let mut syls = c.syls.clone();
+                    let mut syls = Vec::with_capacity(c.syls.len() + 1);
+                    syls.extend_from_slice(&c.syls);
                     syls.push(opt.clone());
                     let base = Combo {
                         code: format!("{}{opt}", c.code),
                         mask: c.mask | bit,
-                        syls,
+                        syls: Rc::new(syls),
                         edits: c.edits + opt_edits,
                         exact: c.exact && idx == 0,
                         end: self.slots[j].end,
-                        aux: c.aux.clone(),
+                        aux: Rc::clone(&c.aux),
                         aux_len: c.aux_len,
                     };
                     for (prefix, end) in &aux_ends {
-                        let mut aux = base.aux.clone();
+                        let mut aux = Vec::with_capacity(base.aux.len() + 1);
+                        aux.extend_from_slice(&base.aux);
                         aux.push((k, prefix.clone()));
                         next.push(Combo {
                             code: base.code.clone(),
-                            syls: base.syls.clone(),
+                            syls: Rc::clone(&base.syls),
                             end: *end,
-                            aux,
+                            aux: Rc::new(aux),
                             aux_len: base.aux_len + prefix.len(),
                             ..base
                         });
@@ -372,8 +531,15 @@ impl RawChain {
                 break;
             }
             if next.len() > FUZZY_LAYER_BUDGET {
-                // 稳定排序：首读音、无辅码的组合（处数 0、先生成）恒在最前，不会被截。
-                next.sort_by_key(|c| c.edits + c.aux_len);
+                // 按罚分（同 `pick_shape`）稳定排序：首读音、无辅码的组合（罚分 0、先生成）恒在最前，
+                // 不会被截。无辅码时即按处数。
+                next.sort_by(|a, b| {
+                    let cost = |c: &Combo| {
+                        FUZZY_SYLLABLE_LOG_PENALTY * c.edits as f64
+                            + aux_letter_penalty() * c.aux_len as f64
+                    };
+                    cost(a).total_cmp(&cost(b))
+                });
                 next.truncate(FUZZY_LAYER_BUDGET);
             }
             for c in &next {
@@ -382,10 +548,10 @@ impl RawChain {
                     .or_default()
                     .push(Shape {
                         mask: c.mask,
-                        syllables: c.syls.clone(),
+                        syllables: Rc::clone(&c.syls),
                         edits: c.edits,
                         exact: c.exact,
-                        aux: c.aux.clone(),
+                        aux: Rc::clone(&c.aux),
                         aux_len: c.aux_len,
                     });
             }
@@ -435,9 +601,7 @@ fn pick_shape<'s>(
     aux: Option<&AuxCtx>,
 ) -> Option<&'s Shape> {
     let any_exact = shapes.iter().any(|s| s.exact);
-    let cost = |s: &Shape| {
-        FUZZY_SYLLABLE_LOG_PENALTY * s.edits as f64 + aux_letter_penalty() * s.aux_len as f64
-    };
+    let cost = |s: &Shape| FUZZY_SYLLABLE_LOG_PENALTY * s.edits as f64 + aux_cost(s);
     shapes
         .iter()
         .filter(|s| s.exact || !any_exact)
@@ -509,16 +673,30 @@ impl LatticeBuilder {
             }
             // 对精确组合也剪：只是省查询，与旧精确分支不剪枝的结果相同。
             let spans = chain.spans_from(i, self.max_word_len(), &|c| dict.has_longer_code(c));
+            let mut groups: Vec<_> = spans.iter().collect();
+            // 缓存时：同一码最后用到的那一组才能把命中文本移进节点（之前的组只能拷）。按终点降序走，
+            // 不带辅码的终点（最靠前、节点最多）就排在最后；终点内码序不变，`nodes[q]` 的次序同升序。
+            let mut uses: HashMap<&str, usize> = HashMap::new();
+            if hit_cache.is_some() {
+                groups.sort_by_key(|((q, _), _)| std::cmp::Reverse(*q));
+                for (_, code) in spans.keys() {
+                    *uses.entry(code.as_str()).or_default() += 1;
+                }
+            }
             // 槽起点互不相同，同一终点的跨度在 `spans` 里相邻：换终点时清表即可。
             let mut seen_q = None;
-            for ((q, code), shapes) in &spans {
+            for ((q, code), shapes) in groups {
                 let q = *q;
                 if seen_q != Some(q) {
                     seen.clear();
                     seen_q = Some(q);
                 }
                 let mut owned;
-                let cached = hit_cache.is_some();
+                // 还有别的组要用这份命中时只能拷文本。
+                let cached = uses.get_mut(code.as_str()).is_some_and(|n| {
+                    *n -= 1;
+                    *n > 0
+                });
                 let hits: &mut Vec<DictHit> = match &mut hit_cache {
                     Some(c) => c
                         .entry(code.clone())
@@ -536,7 +714,7 @@ impl LatticeBuilder {
                     };
                     let log_prob = score_node(&hit.text, code, hit.weight)
                         - FUZZY_SYLLABLE_LOG_PENALTY * shape.edits as f64
-                        - aux_letter_penalty() * shape.aux_len as f64;
+                        - aux_cost(shape);
                     let is_fuzzy = !shape.exact;
                     if let Some((at, existing_fuzzy, existing_aux)) =
                         seen.get_mut(hit.text.as_str())
@@ -638,7 +816,7 @@ impl LatticeBuilder {
                     let weight = cand.weight.min(USER_NODE_WEIGHT_CAP);
                     let log_prob = score_node(&cand.text, code, weight)
                         - FUZZY_SYLLABLE_LOG_PENALTY * shape.edits as f64
-                        - aux_letter_penalty() * shape.aux_len as f64
+                        - aux_cost(shape)
                         + USER_NODE_BONUS;
                     if let Some(existing) = nodes[q]
                         .iter_mut()
@@ -668,6 +846,7 @@ impl LatticeBuilder {
     /// 按全拼残码 `partial`（`SpConvertResult::partial_initial`，小鹤 `u` → `sh`）补出单字节点。
     ///
     /// 召回、打分同原方法；`canon` 填 `(partial, 1)`，造词码是全拼残码而非击键。
+    #[cfg(test)]
     pub(crate) fn add_partial_final_raw(
         &self,
         keys: &str,
@@ -675,6 +854,20 @@ impl LatticeBuilder {
         partial: &str,
         dict: &CachedDict,
         nodes: &mut [Vec<LatticeNode>],
+    ) {
+        self.add_partial_final_raw_cached(keys, completed_len, partial, dict, nodes, &mut None);
+    }
+
+    /// [`Self::add_partial_final_raw`]，残码的前缀查询结果存进 `cache`、再调时复用
+    /// （同一次 convert 里多字残码补全与 2c 查的是同一个残码）。
+    fn add_partial_final_raw_cached(
+        &self,
+        keys: &str,
+        completed_len: usize,
+        partial: &str,
+        dict: &CachedDict,
+        nodes: &mut [Vec<LatticeNode>],
+        cache: &mut Option<PartialHits>,
     ) {
         let end = keys.len();
         if completed_len >= end
@@ -684,12 +877,19 @@ impl LatticeBuilder {
         {
             return;
         }
-        for hit in dict.search_prefix_with_boundary_syllable_capped(
-            partial,
-            PARTIAL_FINAL_NODE_LIMIT,
-            1,
-            0,
-        ) {
+        if cache.as_ref().is_none_or(|(p, _)| p != partial) {
+            let hits = dict.search_prefix_with_boundary_syllable_capped(
+                partial,
+                PARTIAL_FINAL_NODE_LIMIT,
+                1,
+                0,
+            );
+            *cache = Some((partial.to_string(), hits));
+        }
+        let Some((_, hits)) = cache.as_ref() else {
+            return;
+        };
+        for hit in hits {
             if hit.text.chars().count() != 1 {
                 continue;
             }
@@ -703,7 +903,7 @@ impl LatticeBuilder {
             nodes[end].push(LatticeNode {
                 start: completed_len,
                 end,
-                word: hit.text,
+                word: hit.text.clone(),
                 syllables: vec![partial.to_string()],
                 syl_mask: 1,
                 log_prob,
@@ -711,7 +911,111 @@ impl LatticeBuilder {
             });
         }
     }
+
+    /// 末键落单时的多字残码补全：对每个从 0 可达（`reach`）的起点 `p`，`[p, n-1)` 全是键对音节
+    /// （各取首读音、不展开模糊）、末键按全拼残码 `partial` 补，前缀查出字数 = 音节数 + 1 的词，
+    /// 节点 `[p, n)`，`canon` 为 (词码, 边界)。`p = n-1` 即单字残码节点（同 [`Self::add_partial_final_raw`]）。
+    ///
+    /// 与「音节 + 辅码」节点同在 `nodes[n]`、由解码比分：末键既可能是辅码也可能是下一音节的开头。
+    /// 同起点同词已有节点时取分高者。`partial_hits` 见 [`Self::add_partial_final_raw_cached`]。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_tail_completion_raw(
+        &self,
+        keys: &str,
+        edges: &[RawEdge],
+        partial: &str,
+        reach: &[bool],
+        dict: &CachedDict,
+        nodes: &mut [Vec<LatticeNode>],
+        partial_hits: &mut Option<PartialHits>,
+    ) {
+        let n = keys.len();
+        if n == 0 || nodes.len() != n + 1 || reach.len() != n + 1 {
+            return;
+        }
+        if reach[n - 1] {
+            self.add_partial_final_raw_cached(keys, n - 1, partial, dict, nodes, partial_hits);
+        }
+        if partial.is_empty() || !partial.bytes().all(|b| b.is_ascii_lowercase()) {
+            return;
+        }
+        // 起点为 i 的键对 [i, i+2) 的首读音
+        let mut pair: Vec<Option<&str>> = vec![None; n];
+        for e in edges.iter().filter(|e| e.end == e.start + 2 && e.end <= n) {
+            if let Some(s) = e.syllables.first() {
+                pair[e.start] = Some(s.as_str());
+            }
+        }
+        // 从 n-1 往前逐对扩：syls 是 [p, n-1) 的音节（正序）
+        let mut syls: Vec<&str> = Vec::new();
+        let mut p = n - 1;
+        while p >= 2 && syls.len() + 1 < self.max_word_len() {
+            let Some(s) = pair[p - 2] else {
+                break;
+            };
+            p -= 2;
+            syls.insert(0, s);
+            if !reach[p] {
+                continue;
+            }
+            let done: String = syls.concat();
+            if done.len() >= 63 {
+                break;
+            }
+            let mut expect = 1u64 << done.len();
+            let mut off = 0;
+            for s in &syls {
+                expect |= 1 << off;
+                off += s.len();
+            }
+            let below = (1u64 << (done.len() + 1)) - 1;
+            let m = syls.len() + 1;
+            for hit in dict.search_prefix_with_boundary_syllable_capped(
+                &format!("{done}{partial}"),
+                TAIL_COMPLETION_LIMIT,
+                m as u32,
+                done.len(),
+            ) {
+                if hit.text.chars().count() != m
+                    || (hit.boundary != 0 && hit.boundary & below != expect)
+                {
+                    continue;
+                }
+                let log_prob = score_node(&hit.text, &hit.code, hit.weight) - PARTIAL_FINAL_PENALTY;
+                let mask = if hit.boundary != 0 {
+                    hit.boundary
+                } else {
+                    expect
+                };
+                let mut syllables: Vec<String> = syls.iter().map(|s| s.to_string()).collect();
+                syllables.push(partial.to_string());
+                let node = LatticeNode {
+                    start: p,
+                    end: n,
+                    word: hit.text,
+                    syllables,
+                    syl_mask: mask,
+                    log_prob,
+                    canon: Some((hit.code, mask)),
+                };
+                match nodes[n]
+                    .iter_mut()
+                    .find(|x| x.start == p && x.word == node.word)
+                {
+                    Some(x) if node.log_prob > x.log_prob => *x = node,
+                    Some(_) => {}
+                    None => nodes[n].push(node),
+                }
+            }
+        }
+    }
 }
+
+/// 多字残码补全每个起点取几条词。
+const TAIL_COMPLETION_LIMIT: usize = 20;
+
+/// 残码单字的前缀查询结果：`(全拼残码, 命中)`。
+type PartialHits = (String, Vec<DictHit>);
 
 /// step 2 与 2c 共用的击键图底图：系统词 + 用户词、已滤屏蔽词。
 pub(super) struct RawBase {
@@ -722,35 +1026,77 @@ pub(super) struct RawBase {
     last_slot_end: Option<usize>,
     /// 辅码模式：各击键位置经系统词节点从 0 可达（不看用户词）。单链时为 `None`，判据照旧用 `reach`。
     node_reach: Option<Vec<bool>>,
+    /// 终点为整串、末字带辅码的节点：`(起点, 词, 末字辅码字母数)`。
+    tail_aux: Vec<(usize, String, u8)>,
+    /// 多字残码补全查过的残码单字，2c 复用
+    partial_hits: Option<PartialHits>,
 }
 
-/// 辅码边的输入：全偏移键对与辅码表。
+/// 辅码边的输入：全偏移键对、辅码表与末键落单时的全拼残码（`SpConvertResult::partial_initial`）。
 #[derive(Clone, Copy)]
 pub(super) struct AuxInput<'a> {
     pub edges_all: &'a [RawEdge],
     pub lookup: &'a dyn AuxCharLookup,
+    pub tail_partial: Option<&'a str>,
 }
 
 impl RawBase {
     /// step 2 的整句图：底图本身，终点是 `reach`（击键数，可直接当 `consumed_length`）。
     /// `reach` 没到末槽时为 `None`（整句跳过，同旧路径末音节无词时解不出）。
     ///
-    /// 辅码模式下 DAG 上的位置不再与槽一一对应：整串可达（末尾可以是辅码）时终点为整串，
-    /// 否则退回末槽终点（须可达），与单链「残码留缓冲续输」同口径。
+    /// 辅码模式下 DAG 上的位置不再与槽一一对应：终点同 P1 取末槽终点（须可达）；末槽到不了
+    /// 而整串可达（末尾是辅码）时取整串。末槽之后整串另可达的那条整句见 [`Self::tail_end`]。
     pub(super) fn sentence(&self) -> Option<(&[Vec<WordNode>], usize)> {
         let end = match &self.node_reach {
             None => sentence_end(self.reach, self.last_slot_end)?,
             Some(r) => {
                 let n = r.len() - 1;
-                if r[n] {
-                    n
-                } else {
-                    self.last_slot_end.filter(|&e| r[e])?
-                }
+                self.last_slot_end
+                    .filter(|&e| r[e])
+                    .or_else(|| r[n].then_some(n))?
             }
         };
         Some((self.lattice.as_slice(), end))
     }
+
+    /// 辅码模式：[`Self::sentence`] 取的是末槽终点、而整串经辅码读法或残码补全也可达时，
+    /// 整串的终点。这条整句与 step 2 的整句并存，排位同 2c。
+    pub(super) fn tail_end(&self) -> Option<usize> {
+        let r = self.node_reach.as_ref()?;
+        let n = r.len() - 1;
+        let e = self.last_slot_end.filter(|&e| r[e])?;
+        (e < n && r[n]).then_some(n)
+    }
+
+    pub(super) fn lattice(&self) -> &[Vec<WordNode>] {
+        &self.lattice
+    }
+
+    /// 去掉带辅码节点的底图（比分闸门的对手：同终点不用辅码的最优路径）。
+    pub(super) fn plain_lattice(&self) -> Vec<Vec<WordNode>> {
+        self.lattice
+            .iter()
+            .map(|v| v.iter().filter(|w| w.aux == 0).cloned().collect())
+            .collect()
+    }
+
+    /// 终点为整串的节点 `(start, word)` 末字带几个辅码字母。
+    pub(super) fn trailing_aux_len(&self, start: usize, word: &str) -> u8 {
+        self.tail_aux
+            .iter()
+            .find(|(s, w, _)| *s == start && w == word)
+            .map_or(0, |t| t.2)
+    }
+}
+
+/// [`forward_reach`] 的解码节点版。
+fn word_reach(nodes: &[Vec<WordNode>]) -> Vec<bool> {
+    let mut r = vec![false; nodes.len()];
+    r[0] = true;
+    for e in 1..nodes.len() {
+        r[e] = nodes[e].iter().any(|n| n.start < e && r[n.start]);
+    }
+    r
 }
 
 /// 经节点从 0 前向可达的位置。
@@ -787,6 +1133,24 @@ impl PinyinEngine {
         );
         let reach = nodes.iter().rposition(|v| !v.is_empty())?;
         let node_reach = ctx.as_ref().map(|_| forward_reach(&nodes));
+        let mut partial_hits = None;
+        // 辅码模式：末键落单、而经辅码读法能到整串时，补多字残码补全节点与之在 `nodes[n]` 比分
+        // （到不了整串时底图同 P1）。可达表在补之前算，step 2 / 2c 的终点判据不变。
+        if let Some(a) = aux
+            && let Some(partial) = a.tail_partial
+            && let Some(r) = &node_reach
+            && r[keys.len()]
+        {
+            self.lattice_builder.add_tail_completion_raw(
+                keys,
+                a.edges_all,
+                partial,
+                r,
+                &self.dict,
+                &mut nodes,
+                &mut partial_hits,
+            );
+        }
         if self.config.sentence_uses_user_words
             && let Some(store) = &self.store_layers
         {
@@ -802,42 +1166,79 @@ impl PinyinEngine {
             );
         }
         self.drop_blocked_nodes(&mut nodes);
+        // 辅码模式才有：单链时 `aux_spans` 为空。
+        let tail_aux = nodes[keys.len()]
+            .iter()
+            .filter(|_| aux.is_some())
+            .filter_map(|n| {
+                let last = n.word.chars().count().checked_sub(1)?;
+                let len = aux_spans
+                    .get(n.start, n.end, &n.word)?
+                    .iter()
+                    .find(|(i, _)| *i == last)?
+                    .1
+                    .len() as u8;
+                Some((n.start, n.word.clone(), len))
+            })
+            .collect();
         Some(RawBase {
             lattice: to_word_nodes(nodes, &aux_spans),
             reach,
             last_slot_end: last_slot_end(keys, edges),
             node_reach,
+            tail_aux,
+            partial_hits,
         })
     }
 
     /// 2c 的整句图：只在键对恰好铺到末键之前时，在底图末端补残码节点，终点为整串；否则 `None`。
     ///
     /// 辅码模式下末端可能已有「音节 + 辅码」节点，判据改为末键前一位可达；残码节点与已有节点
-    /// 同词同起点时取分高者。
+    /// 同词同起点时取分高者。整串另可达（[`RawBase::tail_end`]）时那条整句由 step 2 出，这里
+    /// 去掉带辅码的节点与 `lattice[n]` 上的辅码读法、补全节点，只解 P1 的残码整句。
     pub(super) fn raw_partial_lattice(
         &self,
         keys: &str,
         base: RawBase,
         partial: &str,
     ) -> Option<(Vec<Vec<WordNode>>, usize)> {
+        let plain_tail = base.tail_end().is_some();
         let RawBase {
             mut lattice,
             reach,
+            last_slot_end,
             node_reach,
+            mut partial_hits,
             ..
         } = base;
         let end = keys.len();
         if end == 0 {
             return None;
         }
+        if plain_tail {
+            lattice[end].clear();
+            for v in &mut lattice {
+                v.retain(|w| w.aux == 0);
+            }
+        }
+        // 去掉辅码后的可达性要重算：末槽须恰在末键之前、且不经辅码可达（同 P1），否则白解一次。
         let start = match &node_reach {
             None if reach + 1 == end => reach,
+            Some(_) if plain_tail => (last_slot_end == Some(end - 1)
+                && word_reach(&lattice)[end - 1])
+                .then_some(end - 1)?,
             Some(r) if r[end - 1] => end - 1,
             _ => return None,
         };
         let mut tail: Vec<Vec<LatticeNode>> = vec![Vec::new(); end + 1];
-        self.lattice_builder
-            .add_partial_final_raw(keys, start, partial, &self.dict, &mut tail);
+        self.lattice_builder.add_partial_final_raw_cached(
+            keys,
+            start,
+            partial,
+            &self.dict,
+            &mut tail,
+            &mut partial_hits,
+        );
         self.drop_blocked_nodes(&mut tail);
         let extra = to_word_nodes(tail, &AuxSpans::default()).swap_remove(end);
         for n in extra {
@@ -887,7 +1288,7 @@ pub(super) fn raw_learn_code(
         .filter(|(c, b)| !(c == code && *b == boundary))
 }
 
-/// 缓存的命中还要给别的终点用，只能拷文本；不缓存时照旧移走。
+/// 缓存的命中还要给别的终点用，只能拷文本；不缓存或已是最后一次用时移走。
 fn take_text(hit: &mut DictHit, cached: bool) -> String {
     if cached {
         hit.text.clone()
@@ -908,7 +1309,7 @@ fn raw_node(
         start: p,
         end: q,
         word,
-        syllables: shape.syllables.clone(),
+        syllables: shape.syllables.to_vec(),
         syl_mask: shape.mask,
         log_prob,
         canon: Some((code.to_string(), shape.mask)),
@@ -1322,10 +1723,10 @@ mod tests {
     fn pick_shape_orders_by_penalty() {
         let shape = |edits, aux_len| super::Shape {
             mask: 0,
-            syllables: Vec::new(),
+            syllables: Default::default(),
             edits,
             exact: false,
-            aux: Vec::new(),
+            aux: Default::default(),
             aux_len,
         };
         let shapes = [shape(0, 2), shape(3, 0)];
@@ -1344,9 +1745,11 @@ mod tests {
         let conv = xiaohe();
         let edges = conv.pair_edges(keys);
         let all = conv.pair_edges_all(keys);
+        let partial = conv.convert(keys).partial_initial;
         let aux = super::AuxInput {
             edges_all: &all,
             lookup: table,
+            tail_partial: partial.as_deref(),
         };
         eng.raw_base_lattice(keys, &edges, Some(aux)).expect("底图")
     }
@@ -1358,24 +1761,28 @@ mod tests {
         ("he", "和", 8000),
     ];
 
-    /// 辅码模式 step 2 终点：整串可达取 n，否则退回末槽终点（须可达）。
+    /// 辅码模式 step 2 终点同 P1 取末槽终点；整串另经辅码可达时由 `tail_end` 给出整串。
     #[test]
-    fn aux_sentence_end_falls_back_to_last_slot() {
+    fn aux_sentence_end_is_last_slot_with_tail() {
         let eng = PinyinEngine::new(Default::default(), dict(NIHAO_H));
         let table = FakeAux(vec![('好', "hn")]);
-        let end = |keys: &str| aux_base(keys, &eng, &table).sentence().map(|(_, e)| e);
-        // m 不是「好」的辅码，5 不可达 → 退回末槽 `hc` 的终点 4。
-        assert_eq!(end("nihcm"), Some(4));
-        // 偶数长：`pl` 不成音节，6 不可达 → 退回 4。
-        assert_eq!(end("nihcpl"), Some(4));
-        // 整串经辅码可达时取 n（奇 / 偶）。
-        assert_eq!(end("nihch"), Some(5));
-        assert_eq!(end("nihchn"), Some(6));
+        let ends = |keys: &str| {
+            let b = aux_base(keys, &eng, &table);
+            (b.sentence().map(|(_, e)| e), b.tail_end())
+        };
+        // m 不是「好」的辅码，5 不可达：只有末槽 `hc` 的终点 4。
+        assert_eq!(ends("nihcm"), (Some(4), None));
+        // 偶数长：`pl` 不成音节，6 不可达。
+        assert_eq!(ends("nihcpl"), (Some(4), None));
+        // 整串经辅码可达：step 2 仍取末槽，整串另给（奇 / 偶）。
+        assert_eq!(ends("nihch"), (Some(4), Some(5)));
+        // `hn`（hiao）不成音节，末槽仍是 `hc`。
+        assert_eq!(ends("nihchn"), (Some(4), Some(6)));
     }
 
-    /// 奇数长 2c：`lattice[n]` 上「音节 + 辅码」节点与残码节点并存。
+    /// 奇数长 2c：整串另可达时那条整句归 step 2，2c 的图只剩无辅码节点与残码节点（同 P1）。
     #[test]
-    fn aux_partial_lattice_keeps_aux_and_residual_nodes() {
+    fn aux_partial_lattice_is_plain_beside_tail() {
         let eng = PinyinEngine::new(Default::default(), dict(NIHAO_H));
         let table = FakeAux(vec![('好', "hn")]);
         let keys = "nihch";
@@ -1390,9 +1797,122 @@ mod tests {
             .iter()
             .map(|n| (n.start, n.word.as_str(), n.aux))
             .collect();
-        assert!(at_end.contains(&(2, "好", 1)), "音节 + 辅码：{at_end:?}");
-        assert!(at_end.contains(&(0, "你好", 1)), "词末辅码：{at_end:?}");
-        assert!(at_end.contains(&(4, "和", 0)), "残码节点：{at_end:?}");
+        assert!(
+            !at_end.is_empty() && at_end.iter().all(|&(st, _, aux)| st == 4 && aux == 0),
+            "只剩残码节点：{at_end:?}"
+        );
+        assert!(lattice.iter().flatten().all(|n| n.aux == 0));
+    }
+
+    /// 同起点同终点同词只留一个节点，辅码分布随它登记：`nihhhx` 的「你行」可读作「你(h)行 + x」
+    /// 或「你 行(hx)」，图里只有一条，`trailing_aux_len` 与它登记的分布一致。
+    #[test]
+    fn trailing_aux_len_follows_kept_node() {
+        let words: &[(&str, &str, i32)] = &[
+            ("ni", "你", 9000),
+            ("hang", "行", 9000),
+            ("nihang", "你行", 50000),
+        ];
+        let eng = PinyinEngine::new(Default::default(), dict(words));
+        let table = FakeAux(vec![('你', "h"), ('行', "hx"), ('行', "x")]);
+        let keys = "nihhhx";
+        let base = aux_base(keys, &eng, &table);
+        let at_end: Vec<_> = base.lattice[6]
+            .iter()
+            .filter(|n| n.start == 0 && n.word == "你行")
+            .collect();
+        assert_eq!(at_end.len(), 1, "{at_end:?}");
+        assert_eq!(at_end[0].aux, 2);
+        let conv = xiaohe();
+        let ctx = super::AuxCtx::new(&table);
+        let (_, spans) = eng.lattice_builder.build_raw_aux(
+            keys,
+            &conv.pair_edges_all(keys),
+            &eng.dict,
+            None,
+            true,
+            Some(&ctx),
+        );
+        let dist = spans.get(0, 6, "你行").expect("登记了辅码").to_vec();
+        let last = dist
+            .iter()
+            .find(|(i, _)| *i == 1)
+            .map_or(0, |(_, p)| p.len());
+        assert!(
+            dist == vec![(0, "h".to_string()), (1, "x".to_string())]
+                || dist == vec![(1, "hx".to_string())],
+            "{dist:?}"
+        );
+        assert_eq!(base.trailing_aux_len(0, "你行") as usize, last, "{dist:?}");
+    }
+
+    const QIHOU: &[(&str, &str, i32)] = &[
+        ("qi", "启", 9000),
+        ("qi", "气", 9000),
+        ("qihou", "气候", 50000),
+        ("he", "和", 8000),
+        ("wo", "我", 9000),
+    ];
+
+    /// 末键落单：多字残码补全节点与「音节 + 1 位辅码」节点同在 `lattice[n]`。
+    #[test]
+    fn tail_completion_alongside_aux_nodes() {
+        let eng = PinyinEngine::new(Default::default(), dict(QIHOU)).with_shuangpin(xiaohe());
+        let table = FakeAux(vec![('启', "h")]);
+        let base = aux_base("qih", &eng, &table);
+        let at_end: Vec<(usize, &str, u8)> = base.lattice[3]
+            .iter()
+            .map(|n| (n.start, n.word.as_str(), n.aux))
+            .collect();
+        assert!(at_end.contains(&(0, "启", 1)), "音节 + 辅码：{at_end:?}");
+        assert!(at_end.contains(&(0, "气候", 0)), "补全节点：{at_end:?}");
+        let n = base.lattice[3].iter().find(|n| n.word == "气候").unwrap();
+        assert_eq!(n.canon, Some(("qihou".to_string(), 0b101)));
+        // 补全不改终点判据：step 2 取末槽 2，整串仍由辅码读法可达。
+        assert_eq!(base.sentence().map(|(_, e)| e), Some(2));
+        assert_eq!(base.tail_end(), Some(3));
+        // 起点逐个往前退：`woqih` 从 2 起补出「气候」，从 0 起要 3 字词（没有）。
+        let base = aux_base("woqih", &eng, &table);
+        let starts: Vec<(usize, &str)> = base.lattice[5]
+            .iter()
+            .filter(|n| n.aux == 0 && n.end - n.start > 1)
+            .map(|n| (n.start, n.word.as_str()))
+            .collect();
+        assert_eq!(starts, vec![(2, "气候")]);
+    }
+
+    /// 只在「经辅码读法到得了整串、且按键对真值切分末键落单」时补：到不了整串时不补；
+    /// 辅码把奇偶错开才落单的末键（真值切分是偶数长）不补。
+    #[test]
+    fn tail_completion_only_beside_trailing_aux() {
+        let eng = PinyinEngine::new(Default::default(), dict(QIHOU)).with_shuangpin(xiaohe());
+        let multi = |base: &super::RawBase, n: usize| -> Vec<String> {
+            base.lattice[n]
+                .iter()
+                .filter(|x| x.aux == 0 && x.word.chars().count() > 1)
+                .map(|x| x.word.clone())
+                .collect()
+        };
+        let base = aux_base("woqih", &eng, &FakeAux(vec![('我', "x")]));
+        assert!(multi(&base, 5).is_empty(), "整串不可达");
+        let table = FakeAux(vec![('我', "h"), ('启', "h")]);
+        let base = aux_base("wohqih", &eng, &table);
+        assert!(
+            base.lattice[6].iter().any(|x| x.word == "启" && x.aux == 1),
+            "前提：辅码读法到整串"
+        );
+        assert!(multi(&base, 6).is_empty(), "{:?}", multi(&base, 6));
+    }
+
+    /// 补全节点只在辅码模式下进图：不给表时底图与 P1 相同。
+    #[test]
+    fn tail_completion_absent_without_aux() {
+        let eng = PinyinEngine::new(Default::default(), dict(QIHOU)).with_shuangpin(xiaohe());
+        let conv = xiaohe();
+        let base = eng
+            .raw_base_lattice("woqih", &conv.pair_edges("woqih"), None)
+            .expect("底图");
+        assert!(base.lattice[5].is_empty(), "{:?}", base.lattice[5]);
     }
 
     /// 2c 补残码节点时与 `lattice[n]` 上已有的同起点同词节点去重：新节点分高才替换。
@@ -1414,8 +1934,11 @@ mod tests {
             super::RawBase {
                 lattice,
                 reach: 4,
-                last_slot_end: Some(4),
+                // 没有末槽 ⇒ 无 `tail_end`，`lattice[n]` 不清空，走去重这一支。
+                last_slot_end: None,
                 node_reach: Some(vec![true; 6]),
+                tail_aux: Vec::new(),
+                partial_hits: None,
             }
         };
         let ma = |lattice: &[Vec<crate::pinyin::viterbi::WordNode>]| -> Vec<f64> {
@@ -1822,11 +2345,31 @@ mod lambda_sweep {
 
     /// (击键, 汉字)：筛法同 `shuangpin_raw_parity` 的 `corpus`；另要求每音节两键。
     fn corpus(conv: &ShuangpinConverter) -> Vec<(Vec<String>, String)> {
+        corpus_of(conv, sentences())
+    }
+
+    /// 第二份语料 `tests/aux_continuous_corpus_b.txt`（`拼音<TAB>汉字`）。
+    fn sentences_b() -> Vec<(String, String)> {
+        let src = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/aux_continuous_corpus_b.txt"),
+        )
+        .expect("读语料 B");
+        src.lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(py, hz)| (py.trim().to_string(), hz.trim().to_string()))
+            .collect()
+    }
+
+    fn corpus_of(
+        conv: &ShuangpinConverter,
+        raw: Vec<(String, String)>,
+    ) -> Vec<(Vec<String>, String)> {
         let rev = conv.build_reverse();
         let trie = SyllableTrie::new();
         let mut seen = HashSet::new();
         let mut out = Vec::new();
-        for (py, hz) in sentences() {
+        for (py, hz) in raw {
             if !seen.insert(hz.clone()) {
                 continue;
             }
@@ -1882,6 +2425,17 @@ mod lambda_sweep {
         out
     }
 
+    /// `WIND_AUX_GATE_MARGIN=<裕度>` 时覆写本线程的闸门裕度（扫参用）。
+    fn gate_margin_from_env() {
+        if let Some(m) = std::env::var("WIND_AUX_GATE_MARGIN")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            super::set_aux_gate_margin(Some(m));
+            eprintln!("# gate margin={m}");
+        }
+    }
+
     /// 界面序首选（同 `pinyin_eval::ui_candidates`）。
     fn ui_top(mut c: Vec<wind_candidate::Candidate>, input: &str) -> Option<String> {
         wind_candidate::drop_corrected_duplicates(&mut c);
@@ -1908,6 +2462,7 @@ mod lambda_sweep {
         let conv = ShuangpinConverter::new(
             Layout::from_toml(&root().join("data/schemas/shuangpin/xiaohe.toml")).unwrap(),
         );
+        gate_margin_from_env();
         let corpus = corpus(&conv);
         let table: Arc<dyn AuxCharLookup> = Arc::new(table);
         let mut cfg = wind_config::Config::default();
@@ -2078,6 +2633,7 @@ mod lambda_sweep {
         let conv = ShuangpinConverter::new(
             Layout::from_toml(&root().join("data/schemas/shuangpin/xiaohe.toml")).unwrap(),
         );
+        gate_margin_from_env();
         let corpus = corpus(&conv);
         let samples = samples(&corpus, &table);
         let table: Arc<dyn AuxCharLookup> = Arc::new(table);
@@ -2146,6 +2702,264 @@ mod lambda_sweep {
             if let Some(o) = old {
                 super::set_aux_letter_penalty(o);
             }
+        }
+    }
+
+    fn env_list(name: &str, default: &str) -> Vec<String> {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_string())
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// 内置 `shuangpin` 方案经 override 换布局；`grammar` 时挂 mini 模型（权重 0.5）。
+    fn sweep_manager(dir: &Path, layout: &str, grammar: bool) -> EngineManager {
+        let ov = std::env::temp_dir().join(format!("wind_aux_sweep_ov_{layout}"));
+        let _ = std::fs::remove_dir_all(&ov);
+        std::fs::create_dir_all(&ov).unwrap();
+        std::fs::write(
+            ov.join("shuangpin.toml"),
+            format!("[engine.pinyin.shuangpin]\nlayout = \"{layout}\"\n"),
+        )
+        .unwrap();
+        let mut cfg = wind_config::Config::default();
+        cfg.schema.available = vec!["shuangpin".to_string()];
+        cfg.schema.active = "shuangpin".to_string();
+        if grammar {
+            cfg.schema.pinyin.grammar.enabled = true;
+            cfg.schema.pinyin.grammar.weight = 0.5;
+            cfg.schema.pinyin.grammar.model = "wanxiang-mini.gram".to_string();
+        }
+        let mgr = EngineManager::with_store_override(&cfg, Some(dir), None, Some(ov));
+        assert_eq!(mgr.shuangpin_layout_of("shuangpin"), layout);
+        mgr
+    }
+
+    /// P2 扫参：语料 × 布局 × 模型开 / 关 × λ × 裕度 × 落单放行裕度。每格报 k=0 逐键前缀差异
+    /// （按来源句归类）、k=1/2/3 引擎首选命中，与闸门分差：k=0 前缀上过了落单判据的辅码整句
+    /// （全是假读法）的最大分差，k≥1 整串上拼对目标句的辅码整句的最小分差。
+    ///
+    /// ```text
+    /// WIND_AUX_SWEEP_CORPUS=a|b WIND_AUX_SWEEP_LAYOUTS=xiaohe,ziranma,mspy WIND_AUX_SWEEP_GRAMMAR=off,on \
+    /// WIND_AUX_SWEEP_LAMBDAS=1,2,3 WIND_AUX_SWEEP_MARGINS=none,5 WIND_AUX_SWEEP_DANGLING=none,5 \
+    /// cargo test -p wind-engine --release --lib p2_sweep -- --ignored --nocapture --test-threads=1
+    /// ```
+    ///
+    /// `WIND_AUX_SWEEP_MARGINS`：`none` = 出厂两档（模型关 / 开各用各的，默认），数字 = 两档同取该值。
+    /// `WIND_AUX_SWEEP_DANGLING`：`none` = 落单一律不放行（出厂），数字 = 落单时也按该裕度比分。
+    /// `WIND_AUX_SWEEP_SE`：末槽辅码整句的闸门裕度（`none` = 不设闸）；
+    /// `WIND_AUX_SWEEP_GAPS=<文件>`：逐条写出闸门比分（两侧都写）。
+    #[test]
+    #[ignore = "P2 扫参：慢，依赖 build_dev 真实词库、辅码表与语法模型"]
+    fn p2_sweep() {
+        let dir = root().join("build_dev/data");
+        if !dir.join("schemas/pinyin/cn_dicts/base.dict.yaml").exists() {
+            eprintln!("跳过：拼音词库不存在");
+            return;
+        }
+        let Some(table) = load_table(&dir) else {
+            eprintln!("跳过：辅码表不存在");
+            return;
+        };
+        let nums = |name: &str, default: &str| -> Vec<f64> {
+            env_list(name, default)
+                .iter()
+                .map(|v| v.parse().expect("数字"))
+                .collect()
+        };
+        let lambdas = nums("WIND_AUX_SWEEP_LAMBDAS", "2");
+        let opt_list = |name: &str| -> Vec<Option<f64>> {
+            env_list(name, "none")
+                .iter()
+                .map(|v| (v != "none").then(|| v.parse().expect("数字")))
+                .collect()
+        };
+        let margins = opt_list("WIND_AUX_SWEEP_MARGINS");
+        let danglings = opt_list("WIND_AUX_SWEEP_DANGLING");
+        let ses = opt_list("WIND_AUX_SWEEP_SE");
+        let mut configs = Vec::new();
+        for &l in &lambdas {
+            for &m in &margins {
+                for &d in &danglings {
+                    for &se in &ses {
+                        configs.push((l, m, d, se));
+                    }
+                }
+            }
+        }
+        let gaps_out = std::env::var("WIND_AUX_SWEEP_GAPS").ok();
+        let mut gap_rows = String::new();
+        let corpus_id = std::env::var("WIND_AUX_SWEEP_CORPUS").unwrap_or_else(|_| "a".into());
+        let raw = match corpus_id.as_str() {
+            "a" => sentences(),
+            "b" => sentences_b(),
+            other => panic!("未知语料 {other}"),
+        };
+        let dump = std::env::var("WIND_AUX_SWEEP_DUMP").ok();
+        let mut dump_rows = String::new();
+        let table_arc: Arc<dyn AuxCharLookup> = Arc::new(Table(table.0.clone()));
+        for layout in env_list("WIND_AUX_SWEEP_LAYOUTS", "xiaohe") {
+            let conv = ShuangpinConverter::new(
+                Layout::from_toml(&root().join(format!("data/schemas/shuangpin/{layout}.toml")))
+                    .unwrap(),
+            );
+            let corpus = corpus_of(&conv, raw.clone());
+            assert!(corpus.len() > 100, "语料只有 {} 句", corpus.len());
+            let samples = samples(&corpus, &table);
+            let mut seen = HashSet::new();
+            let prefixes: Vec<(String, String, bool)> = corpus
+                .iter()
+                .flat_map(|(p, hz)| {
+                    let k = p.concat();
+                    (1..=k.len())
+                        .map(|n| (k[..n].to_string(), hz.clone(), n == k.len()))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|(p, _, _)| seen.insert(p.clone()))
+                .collect();
+            for gram in env_list("WIND_AUX_SWEEP_GRAMMAR", "off") {
+                let mgr = sweep_manager(&dir, &layout, gram == "on");
+                let top = |keys: &str, aux: bool| {
+                    let opts = ConvertOptions {
+                        sp_raw_lattice: true,
+                        aux_continuous: aux.then(|| table_arc.clone()),
+                        ..Default::default()
+                    };
+                    mgr.convert_with_opts("shuangpin", keys, 300, opts)
+                        .candidates
+                        .first()
+                        .map(|c| (c.text.clone(), c.consumed_length))
+                };
+                let base: Vec<_> = prefixes.iter().map(|p| top(&p.0, false)).collect();
+                let ok = |t: &Option<(String, usize)>, src: &str, full: bool| {
+                    t.as_ref().is_some_and(|(t, _)| {
+                        if full {
+                            t == src
+                        } else {
+                            !t.is_empty() && src.starts_with(t.as_str())
+                        }
+                    })
+                };
+                for &(lambda, margin, dangling, se) in &configs {
+                    let old_l = super::set_aux_letter_penalty(lambda);
+                    let old_m = super::set_aux_gate_margin(margin);
+                    let old_d = super::set_aux_dangling_margin(dangling);
+                    let old_s = super::set_aux_se_gate_margin(se);
+                    let cfg =
+                        format!("λ={lambda} margin={margin:?} dangling={dangling:?} se={se:?}");
+                    let gap_row = |side: &str, keys: &str, g: &super::GateGap, ok: bool| {
+                        format!(
+                            "{corpus_id}\t{layout}\t{gram}\t{cfg}\t{side}\t{keys}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                            g.kind,
+                            g.sentence,
+                            u8::from(g.dangling),
+                            g.score.map_or("-".into(), |v| format!("{v:.3}")),
+                            g.rival.map_or("-".into(), |v| format!("{v:.3}")),
+                            g.gap().map_or("-".into(), |v| format!("{v:.3}")),
+                            g.chars,
+                            g.aux_letters,
+                            u8::from(ok)
+                        )
+                    };
+                    let (mut differ, mut better, mut worse, mut neither) = (0, 0, 0, 0);
+                    // [kind 'n' / 'e'] → (有对手的条数, 最大分差)
+                    let mut k0_max = [(0usize, f64::NEG_INFINITY); 2];
+                    let kind_i = |c: char| usize::from(c == 'e');
+                    super::take_gate_gaps();
+                    for ((k, hz, full), b) in prefixes.iter().zip(&base) {
+                        let on = top(k, true);
+                        for g in super::take_gate_gaps() {
+                            if let Some(v) = g.gap() {
+                                let m = &mut k0_max[kind_i(g.kind)];
+                                m.0 += 1;
+                                m.1 = m.1.max(v);
+                            }
+                            if gaps_out.is_some() {
+                                gap_rows.push_str(&gap_row("k0", k, &g, false));
+                            }
+                        }
+                        if on == *b {
+                            continue;
+                        }
+                        differ += 1;
+                        let v = match (ok(b, hz, *full), ok(&on, hz, *full)) {
+                            (false, true) => {
+                                better += 1;
+                                "new_better"
+                            }
+                            (true, false) => {
+                                worse += 1;
+                                "new_worse"
+                            }
+                            _ => {
+                                neither += 1;
+                                "neither"
+                            }
+                        };
+                        if dump.is_some() {
+                            let f = |t: &Option<(String, usize)>| {
+                                t.as_ref()
+                                    .map_or("-\t0".to_string(), |t| format!("{}\t{}", t.0, t.1))
+                            };
+                            dump_rows.push_str(&format!(
+                                "{corpus_id}\t{layout}\t{gram}\t{cfg}\t{k}\t{hz}\t{}\t{}\t{v}\n",
+                                f(b),
+                                f(&on)
+                            ));
+                        }
+                    }
+                    let mut line = format!(
+                        "# corpus={corpus_id} layout={layout} gram={gram} {cfg} | k0 differ={differ}/{} better={better} worse={worse} neither={neither} | k0 false S_n rival={} max={:.2} S_e rival={} max={:.2}",
+                        prefixes.len(),
+                        k0_max[0].0,
+                        k0_max[0].1,
+                        k0_max[1].0,
+                        k0_max[1].1
+                    );
+                    // k≥1：拼对目标句的辅码整句的最小分差（按 S_n / S_e 分开）。
+                    let mut legit_min = [(0usize, f64::INFINITY); 2];
+                    for k in 1..=3 {
+                        let (mut hit, mut n) = (0, 0);
+                        for (raw, target, _) in samples.iter().filter(|s| s.2 == k) {
+                            n += 1;
+                            super::take_gate_gaps();
+                            hit += usize::from(top(raw, true).is_some_and(|t| &t.0 == target));
+                            for g in super::take_gate_gaps() {
+                                let legit = &g.sentence == target;
+                                if legit && let Some(v) = g.gap() {
+                                    let m = &mut legit_min[kind_i(g.kind)];
+                                    m.0 += 1;
+                                    m.1 = m.1.min(v);
+                                }
+                                if gaps_out.is_some() {
+                                    gap_rows.push_str(&gap_row(&format!("k{k}"), raw, &g, legit));
+                                }
+                            }
+                        }
+                        line.push_str(&format!(" | k={k} {hit}/{n}"));
+                    }
+                    line.push_str(&format!(
+                        " | legit S_n rival={} min={:.2} S_e rival={} min={:.2}",
+                        legit_min[0].0, legit_min[0].1, legit_min[1].0, legit_min[1].1
+                    ));
+                    eprintln!("{line}");
+                    super::set_aux_letter_penalty(old_l);
+                    super::set_aux_gate_margin(old_m);
+                    super::set_aux_dangling_margin(old_d);
+                    super::set_aux_se_gate_margin(old_s);
+                }
+            }
+        }
+        if let Some(p) = dump {
+            std::fs::write(&p, dump_rows).expect("写 TSV");
+            eprintln!("# dump → {p}");
+        }
+        if let Some(p) = gaps_out {
+            std::fs::write(&p, gap_rows).expect("写分差 TSV");
+            eprintln!("# gaps → {p}");
         }
     }
 }

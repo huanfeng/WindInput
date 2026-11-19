@@ -245,6 +245,11 @@ impl ViterbiDecoder {
         }
     }
 
+    /// 是否挂了上下文模型。
+    pub fn has_grammar(&self) -> bool {
+        self.grammar.is_some()
+    }
+
     /// 构造某条线的上下文串：**回看两个词**。
     ///
     /// 语义逐条对齐 librime `Line::context()`（`poet.cc:52-58`）：句首为空串，
