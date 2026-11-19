@@ -36,7 +36,7 @@ pub trait EvalContext {
     /// 没有「当前解析出的年月日」。而本方法漏接得到的空串是**错的**：调用方明明要查，
     /// 拿到空串却只表现为「候选出来了但内容是空的」，没有任何报错。给了默认实现，
     /// 这种漏接就再也没有编译期的抓手。
-    fn reverse_lookup(&self, text: &str, format: &str) -> String;
+    fn reverse_lookup(&self, text: &str, format: &str, min_len: usize) -> String;
     /// 当前时间（测试可注入固定时钟）。
     fn now(&self) -> DateTime<Local>;
     /// 副作用服务束；纯求值场景可为 None，动作函数须自行防御。
@@ -140,7 +140,7 @@ pub struct MemoryContext {
     /// 而映射表把它整个吃掉了——「format 有没有被正确透传下来」就测不出来，
     /// 那恰恰是本层唯一负责的事（本层不渲染，只挑字 + 填默认模板 + 转交）。
     #[allow(clippy::type_complexity)]
-    pub reverse: Option<Box<dyn Fn(&str, &str) -> String + Send + Sync>>,
+    pub reverse: Option<Box<dyn Fn(&str, &str, usize) -> String + Send + Sync>>,
 }
 
 impl MemoryContext {
@@ -195,9 +195,9 @@ impl EvalContext for MemoryContext {
     fn env(&self, name: &str) -> String {
         self.env.get(name).cloned().unwrap_or_default()
     }
-    fn reverse_lookup(&self, text: &str, format: &str) -> String {
+    fn reverse_lookup(&self, text: &str, format: &str, min_len: usize) -> String {
         match &self.reverse {
-            Some(f) => f(text, format),
+            Some(f) => f(text, format, min_len),
             None => String::new(),
         }
     }

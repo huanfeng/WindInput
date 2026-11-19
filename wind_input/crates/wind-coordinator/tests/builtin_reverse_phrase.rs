@@ -31,7 +31,7 @@ fn layer() -> wind_phrase::PhraseLayer {
 #[test]
 fn factory_cofc_parses_and_renders_clipboard_lookup() {
     let clip = |_n: i64| "好吧".to_string();
-    let reverse = |text: &str, fmt: &str| {
+    let reverse = |text: &str, fmt: &str, _m: usize| {
         assert_eq!(text, "好吧", "出厂词条应查剪贴板整串（省略 n 即整串）");
         // ★ 必须是 `code_rev_all`（全部码位）而不是 `code_rev`（仅最长的全码）——反查回答
         // 的是「这个字怎么打」，简码才是最有用的答案。写死这个断言是为了让人改回只给全码
@@ -92,7 +92,7 @@ fn factory_cofc_shows_meaningful_label_in_prefix_nav() {
 /// 提示语就会变成上屏文本被打进用户文档，这条会因 `command_src` 为 None 而变红。
 #[test]
 fn factory_cofc_hints_when_empty_and_never_commits_the_hint() {
-    let reverse = |_t: &str, _f: &str| String::new();
+    let reverse = |_t: &str, _f: &str, _m: usize| String::new();
 
     for (name, clip_text) in [("剪贴板为空", ""), ("查不到（英文标点）", "Abc")] {
         let clip = |_n: i64| clip_text.to_string();

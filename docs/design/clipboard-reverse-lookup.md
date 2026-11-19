@@ -49,6 +49,21 @@ dict.rev(text, n, format="${...}")          → 自定义版式
 
 默认版式 `${char}: ${code_rev_all} ${pinyin}` → `我: q/trn/trnt wǒ`。
 
+### `min_len`：只要长码
+
+```
+dict.rev(clip(), min_len=4, format="${char}: ${code_rev_all}")   → 只列码长 ≥ 4 的编码
+```
+
+场景：只想看全码、不要一堆简码（五笔单字全码 4 码 + 辅方案超四码的码）。`${code_rev}` 只给最长码、
+`${code_rev_all}` 给全部，都没有「按长度截」的口径，故加命名参数而不是新变量。
+
+- 作用于 `${code_rev_all}` 与 `${code_rev}`（及别名 `code_all` / `code`）；其余变量不受影响。
+- 码长按字符数，未启用扩展库的 `*` 前缀不计入。
+- 省略 / 空串 / `0` = 不过滤，与旧行为完全一致；写成非数字报错（词条笔误，不静默当 0）。
+- 过滤后一个码都不剩 ⇒ 同「查不到」，落到 `default(...)` 提示语。
+- 实现上只在宿主 `reverse_render_min` 里滤，`EvalContext::reverse_lookup` 多带一个 `min_len` 参数。
+
 ### 为什么省略 `n` 就是整串
 
 `n` 的两种状态对应两个真实需求，用途不重叠：

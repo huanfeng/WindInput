@@ -384,8 +384,8 @@ mod tests {
         fn env(&self, name: &str) -> String {
             self.inner.env(name)
         }
-        fn reverse_lookup(&self, text: &str, format: &str) -> String {
-            self.inner.reverse_lookup(text, format)
+        fn reverse_lookup(&self, text: &str, format: &str, min_len: usize) -> String {
+            self.inner.reverse_lookup(text, format, min_len)
         }
         fn now(&self) -> chrono::DateTime<chrono::Local> {
             self.inner.now()

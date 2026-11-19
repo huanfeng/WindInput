@@ -12,7 +12,7 @@ pub fn specs() -> Vec<FuncSpec> {
     func_specs! {
         "dict.add"        : Dict    (1, 2) effect => fn_dict_add,    "把文本加入用户词库; code 可选, 不传时按当前方案规则推导", "dict.add(clip())";
         "dict.rev"        : Dict    (1, 2) pure   => fn_dict_rev,    "反查文本的编码与读音; 省略 n 时整串查 (词/字皆可), 给了 n 则取第 n 个字 (1 起), 越界返回空串", "dict.rev(clip())"
-            named(fn_dict_rev_named, "format" = "版式模板, 同候选注释段语法; 变量 ${char}/${code_rev_all}(全部码位)/${code_rev}(仅全码)/${code_schema}(本方案击键)/${pinyin}/${chaizi}/${chaizi_code}/${dict}; 省略='${char}: ${code_rev_all} ${pinyin}'");
+            named(fn_dict_rev_named, "min_len" = "只保留码长 >= 该值的编码 (作用于 ${code_rev_all}/${code_rev}; 未启用扩展库的 * 前缀不计入码长); 省略或 0 = 不过滤, 如 min_len=4 只要四码及以上的全码", "format" = "版式模板, 同候选注释段语法; 变量 ${char}/${code_rev_all}(全部码位)/${code_rev}(仅全码)/${code_schema}(本方案击键)/${pinyin}/${chaizi}/${chaizi_code}/${dict}; 省略='${char}: ${code_rev_all} ${pinyin}'");
         "ime.toggle"      : Ime     (1, 1) effect => fn_ime_toggle,  "切换 IME 状态 (cn-en / fullshape / layout / candwin / s2t / t2s / preedit / toolbar / comment[注释默认↔详细])；数据开关 emoji / emoji:<模块id> / dict:<注释库id>", "ime.toggle(\"cn-en\")";
         "ime.set"         : Ime     (2, 2) effect => fn_ime_set,     "把开关设为指定状态, 已是该状态则只提示不动作; target 为输入状态 (cn-en / fullshape / s2t / t2s / toolbar; cn-en 的 on=中文) 或数据开关 (emoji / emoji:<模块id> / dict:<注释库id>), 状态 on/off (也认 true/false、1/0、开/关); target 为 comment 时状态是 default / detail (候选注释的默认 / 详细态)", "ime.set(\"emoji:frost_greek\", \"on\")";
         "ime.schema"      : Ime     (1, 1) effect => fn_ime_schema,  "切换输入方案并持久化", "ime.schema(\"pinyin\")";
@@ -95,6 +95,16 @@ fn fn_dict_rev_named(
     // ★ 省略 n ⇒ 整串反查。宿主按词条查码表反向索引，故「好吧」拿到的是这个词的码，
     // 单字文本自然落回单字。查不到返回空串（`reverse_render` 的 found 判据），
     // 由词条的 `default(...)` 回落成提示语。
+    // `min_len` 非数字报错（词条笔误）；省略/空串/0 = 不过滤，正常流程不受影响。
+    let min_len = match named
+        .iter()
+        .find(|(k, _)| k == "min_len")
+        .map(|(_, v)| v.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(v) => usize::try_from(parse_arg_int("dict.rev", v)?).unwrap_or(0),
+        None => 0,
+    };
     let Some(n) = args.get(1) else {
         // 纯空白（只复制了个换行）：反查必然空，提前挡掉，免得 `${char}` 把空白
         // 回显成一条「有内容」的候选。
@@ -104,7 +114,7 @@ fn fn_dict_rev_named(
         if text.is_empty() || text.contains(['\n', '\r']) {
             return Ok(String::new());
         }
-        return Ok(ctx.reverse_lookup(text, format));
+        return Ok(ctx.reverse_lookup(text, format, min_len));
     };
     let n = parse_arg_int("dict.rev", n)?;
     if n < 1 {
@@ -115,7 +125,7 @@ fn fn_dict_rev_named(
         return Ok(String::new());
     };
     let mut buf = [0u8; 4];
-    Ok(ctx.reverse_lookup(ch.encode_utf8(&mut buf), format))
+    Ok(ctx.reverse_lookup(ch.encode_utf8(&mut buf), format, min_len))
 }
 
 fn fn_ime_set(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
@@ -328,8 +338,12 @@ mod tests {
     /// 于是「挑了哪个字」与「透传了哪份模板」都能在返回值里直接断言。
     fn rev_echo_ctx() -> MemoryContext {
         let mut c = MemoryContext::new();
-        c.reverse = Some(Box::new(|text: &str, format: &str| {
-            format!("{text}|{format}")
+        c.reverse = Some(Box::new(|text: &str, format: &str, min_len: usize| {
+            if min_len == 0 {
+                format!("{text}|{format}")
+            } else {
+                format!("{text}|{format}|{min_len}")
+            }
         }));
         c
     }
@@ -450,6 +464,32 @@ mod tests {
         let named = vec![("format".to_string(), "${pinyin}".to_string())];
         let out = fn_dict_rev_named(&ctx, &["好".to_string()], &named).unwrap();
         assert_eq!(out, "好|${pinyin}");
+    }
+
+    /// `min_len` 透传给宿主；省略 / 空串 / 0 走原流程（宿主收到 0 = 不过滤）。
+    #[test]
+    fn rev_min_len_is_forwarded_and_defaults_to_no_filter() {
+        let ctx = rev_echo_ctx();
+        let f = |v: &str| {
+            let named = vec![("min_len".to_string(), v.to_string())];
+            fn_dict_rev_named(&ctx, &["好".to_string()], &named).unwrap()
+        };
+        assert_eq!(f("4"), format!("好|{DEFAULT_REV_FORMAT}|4"));
+        for v in ["", "0"] {
+            assert_eq!(f(v), format!("好|{DEFAULT_REV_FORMAT}"), "{v:?}");
+        }
+        // 按 n 取字的路径同样透传。
+        let named = vec![("min_len".to_string(), "4".to_string())];
+        let out = fn_dict_rev_named(&ctx, &["好吧".to_string(), "2".into()], &named).unwrap();
+        assert_eq!(out, format!("吧|{DEFAULT_REV_FORMAT}|4"));
+    }
+
+    /// `min_len` 写成非数字是词条笔误，报错而不是静默当 0。
+    #[test]
+    fn rev_min_len_rejects_non_number() {
+        let ctx = rev_echo_ctx();
+        let named = vec![("min_len".to_string(), "abc".to_string())];
+        assert!(fn_dict_rev_named(&ctx, &["好".to_string()], &named).is_err());
     }
 
     /// `format=""` 视同省略 —— 多半是词条拼错，退回默认版式比产出空串好查。

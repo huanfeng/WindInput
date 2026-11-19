@@ -1159,6 +1159,43 @@ mod tests {
         );
     }
 
+    /// `dict.rev(..., min_len=N)`：全部码位只留码长 ≥ N 的；0 与不传一致；全都不够长则整体为空。
+    #[test]
+    fn reverse_render_min_len_filters_codes() {
+        if !has_data() {
+            eprintln!("跳过：缺 build_dev 词库");
+            return;
+        }
+        let c = Coordinator::new_headless(no_consumers(), Some(&data_dir()));
+        c.prewarm_indexes();
+        let primary = c.engine_mgr.primary_codetable_id();
+        let _ = c.reverse_render("工", "${code_rev_all}"); // 触发后台建索引
+        assert!(wait_for(|| c
+            .engine_mgr
+            .reverse_index_if_ready(&primary)
+            .is_some()));
+        let all = c.reverse_render_min("工", "${code_rev_all}", 0);
+        assert_eq!(all, c.reverse_render("工", "${code_rev_all}"), "0 = 不过滤");
+        assert!(!all.is_empty());
+        let longest = all.split('/').map(|s| s.chars().count()).max().unwrap();
+        let at_longest = c.reverse_render_min("工", "${code_rev_all}", longest);
+        assert!(!at_longest.is_empty());
+        assert!(
+            at_longest.split('/').all(|s| s.chars().count() >= longest),
+            "{at_longest}"
+        );
+        assert_eq!(
+            c.reverse_render_min("工", "${code_rev_all}", longest + 1),
+            "",
+            "没有满足的码 ⇒ 同查不到"
+        );
+        assert_eq!(
+            c.reverse_render_min("工", "${code_rev}", longest + 1),
+            "",
+            "最长码不够长 ⇒ 空"
+        );
+    }
+
     /// 写一个配了拆字库、但库文件**不存在**的码表方案。
     fn missing_chaizi_fixture(tag: &str, id: &str) -> PathBuf {
         let dir = schema_fixture(tag, id, true);

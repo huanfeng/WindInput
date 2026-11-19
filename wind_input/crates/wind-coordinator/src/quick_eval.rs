@@ -42,7 +42,7 @@ impl EvalContext for QuickCtx<'_> {
     fn env(&self, _name: &str) -> String {
         String::new()
     }
-    fn reverse_lookup(&self, _text: &str, _format: &str) -> String {
+    fn reverse_lookup(&self, _text: &str, _format: &str, _min_len: usize) -> String {
         // 同 clip/sel/app：格式表只把「本次解析出的量」排成一句话，反查与它无关。
         // 放开只会让人写出依赖词库状态的格式（同一串数字在不同方案下出不同结果）。
         String::new()

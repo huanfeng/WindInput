@@ -1045,6 +1045,11 @@ pub(crate) fn reverse_text_var(
     }))
 }
 
+/// 码长（字符数，未启用扩展库的 `*` 前缀不计）是否 ≥ `min_len`；`min_len == 0` 恒真。
+fn code_len_at_least(code: &str, min_len: usize) -> bool {
+    code.strip_prefix('*').unwrap_or(code).chars().count() >= min_len
+}
+
 /// 码表反查的全部码位（`word_codes_display` 以 `/` 连接）按 `sep` 重新连接，`/` 即分隔符。
 fn joined_codes(codes: &str, sep: Option<&str>) -> VarValue {
     if codes.is_empty() {
@@ -1614,7 +1619,14 @@ impl crate::coordinator::Coordinator {
     /// `RwLock` 在有写者排队时同线程重入读会死锁（读锁不可重入）。当前唯一长期持有该
     /// 读锁的是 `notify_ui_update` 的候选渲染循环，它不经过短语求值，故无嵌套；
     /// 新增持锁路径时须回到这里核对。
+    #[allow(dead_code)] // 现仅 reverse_render_min 被调用，保留为 min_len=0 的语义入口
     pub(crate) fn reverse_render(&self, text: &str, tpl: &str) -> String {
+        self.reverse_render_min(text, tpl, 0)
+    }
+
+    /// [`Self::reverse_render`]；`min_len > 0` 时 `${code_rev_all}` / `${code_rev}` 只留码长 ≥ 该值的编码
+    /// （`dict.rev(..., min_len=N)`）。0 = 不过滤，与 `reverse_render` 完全一致。
+    pub(crate) fn reverse_render_min(&self, text: &str, tpl: &str, min_len: usize) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -1639,7 +1651,7 @@ impl crate::coordinator::Coordinator {
         // `A:` 并当作一条正常候选出现 —— 而正确行为是这条候选压根不该存在。
         let found = std::cell::Cell::new(false);
         let out = render(tpl, 0, |name, arg| {
-            let v = self.eval_text_var_ex(name, arg, text, &reverse, true);
+            let v = self.eval_text_var_ex(name, arg, text, &reverse, true, min_len);
             if name != "char" && v.as_deref().is_some_and(|s| !s.is_empty()) {
                 found.set(true);
             }
@@ -1664,11 +1676,12 @@ impl crate::coordinator::Coordinator {
         text: &str,
         reverse: &wind_reverse::ReverseLookup,
     ) -> Option<VarValue> {
-        self.eval_text_var_ex(name, arg, text, reverse, false)
+        self.eval_text_var_ex(name, arg, text, reverse, false, 0)
     }
 
     /// [`Self::eval_text_var`]；`include_disabled` 让 `code_rev` / `code_rev_all` 补上未启用扩展库的码
     /// （`*` 开头）。只有命令栏的剪贴板反查（`dict.rev`）传 `true`，悬停提示等其余入口一律不带。
+    /// `min_len > 0` 时两个码变量只留码长 ≥ 该值的编码（`*` 前缀不计码长），0 = 不过滤。
     pub(crate) fn eval_text_var_ex(
         &self,
         name: &str,
@@ -1676,6 +1689,7 @@ impl crate::coordinator::Coordinator {
         text: &str,
         reverse: &wind_reverse::ReverseLookup,
         include_disabled: bool,
+        min_len: usize,
     ) -> Option<VarValue> {
         Some(VarValue::from(match name {
             // 索引未就绪给空串（而不是 `None`）：`None` 在渲染层专表**未知变量名**，
@@ -1686,19 +1700,27 @@ impl crate::coordinator::Coordinator {
             //
             // ★ 没就绪时顺手派后台构建（单飞、已就绪即返回，不阻塞）：运行期格式串不在配置里，
             // `DataNeeds` 看不见它，没有别人会替它建——不派的话这条反查永远是空的。
-            "code_rev" | "code" => match self.engine_mgr.codetable_reverse_hint(text) {
-                // 已启用词库里没有时，补未启用扩展库的码（`*` 开头，取最长）。
-                Some(code) if code.is_empty() && include_disabled => self
-                    .engine_mgr
-                    .disabled_dict_codes(text)
-                    .pop()
-                    .unwrap_or_default(),
-                Some(code) => code,
-                None => {
-                    self.spawn_index_warm(&self.engine_mgr.primary_codetable_id(), false);
+            "code_rev" | "code" => {
+                let code = match self.engine_mgr.codetable_reverse_hint(text) {
+                    // 已启用词库里没有时，补未启用扩展库的码（`*` 开头，取最长）。
+                    Some(code) if code.is_empty() && include_disabled => self
+                        .engine_mgr
+                        .disabled_dict_codes(text)
+                        .pop()
+                        .unwrap_or_default(),
+                    Some(code) => code,
+                    None => {
+                        self.spawn_index_warm(&self.engine_mgr.primary_codetable_id(), false);
+                        String::new()
+                    }
+                };
+                // 最长码都不到 min_len ⇒ 没有满足的码，给空串（同「查不到」）。
+                if code_len_at_least(&code, min_len) {
+                    code
+                } else {
                     String::new()
                 }
-            },
+            }
             // `code_all` —— 该字在码表里的**全部**码位，默认 `/` 连接（`我` → `q/trn/trnt`）。
             //
             // 与 `code` 的分工照搬同文件 `chaizi` / `chaizi_all` 的既有惯例：不带后缀取单个，
@@ -1731,6 +1753,13 @@ impl crate::coordinator::Coordinator {
                     (false, false) => format!("{codes}/{}", extra.join("/")),
                 };
                 // `word_codes_display` 固定用 `/` 连接，换分隔符只能在这里替。
+                if min_len > 0 {
+                    let kept: Vec<&str> = codes
+                        .split('/')
+                        .filter(|c| code_len_at_least(c, min_len))
+                        .collect();
+                    return Some(joined_codes(&kept.join("/"), arg));
+                }
                 return Some(joined_codes(&codes, arg));
             }
             "pinyin" => {
@@ -4672,7 +4701,7 @@ mod comment_reverse_regular_tests {
         c.prewarm_indexes();
         let rl = wind_reverse::ReverseLookup::default();
         let val = |name: &str, include: bool| {
-            c.eval_text_var_ex(name, None, "门头沟区", &rl, include)
+            c.eval_text_var_ex(name, None, "门头沟区", &rl, include, 0)
                 .map(|v| format!("{v:?}"))
                 .unwrap_or_default()
         };

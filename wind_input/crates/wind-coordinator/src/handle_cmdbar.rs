@@ -289,12 +289,12 @@ impl EvalContext for CmdbarCtx<'_> {
         // 读取失败（含不支持平台）降级空串：clip() 是求值上下文，报错没有落点。
         self.host.clipboard_get_text().unwrap_or_default()
     }
-    fn reverse_lookup(&self, text: &str, format: &str) -> String {
+    fn reverse_lookup(&self, text: &str, format: &str, min_len: usize) -> String {
         let max = self.coord.rt().config.input.reverse.clip_max_chars;
         if exceeds_chars(text, max) {
             return String::new();
         }
-        self.coord.reverse_render(text, format)
+        self.coord.reverse_render_min(text, format, min_len)
     }
     fn sel(&self) -> String {
         self.front_sel.clone()

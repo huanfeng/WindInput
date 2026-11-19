@@ -326,7 +326,9 @@ impl Coordinator {
     /// 要验剪贴板相关短语得由调用方另行注入。
     pub fn debug_phrase_texts(&self, code: &str) -> Vec<String> {
         let clip = |_n: i64| String::new();
-        let reverse = |text: &str, fmt: &str| -> String { self.reverse_render(text, fmt) };
+        let reverse = |text: &str, fmt: &str, min_len: usize| -> String {
+            self.reverse_render_min(text, fmt, min_len)
+        };
         let host = wind_phrase::PhraseHost {
             clip: &clip,
             reverse: &reverse,

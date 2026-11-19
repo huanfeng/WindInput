@@ -841,14 +841,14 @@ pub struct PhraseHost<'a> {
     pub clip: &'a dyn Fn(i64) -> String,
     /// 反查渲染：`(待查文本, format 模板) -> 渲染结果`；查不到返回空串。
     /// 供 `dict.rev(...)` 使用。模板语法与候选注释段一致，渲染在宿主侧完成。
-    pub reverse: &'a dyn Fn(&str, &str) -> String,
+    pub reverse: &'a dyn Fn(&str, &str, usize) -> String,
 }
 
 impl PhraseHost<'static> {
     /// 全空宿主：剪贴板与反查都返回空串。供测试与无平台能力的 headless 路径。
     pub fn empty() -> Self {
         const CLIP: &dyn Fn(i64) -> String = &|_| String::new();
-        const REVERSE: &dyn Fn(&str, &str) -> String = &|_, _| String::new();
+        const REVERSE: &dyn Fn(&str, &str, usize) -> String = &|_, _, _| String::new();
         PhraseHost {
             clip: CLIP,
             reverse: REVERSE,
@@ -878,8 +878,8 @@ impl wind_cmdbar::EvalContext for PhraseCtx<'_> {
     fn clip(&self, n: i64) -> String {
         (self.host.clip)(n)
     }
-    fn reverse_lookup(&self, text: &str, format: &str) -> String {
-        (self.host.reverse)(text, format)
+    fn reverse_lookup(&self, text: &str, format: &str, min_len: usize) -> String {
+        (self.host.reverse)(text, format, min_len)
     }
     fn sel(&self) -> String {
         String::new()
@@ -924,7 +924,7 @@ impl wind_cmdbar::EvalContext for NavCtx<'_> {
     fn clip(&self, _n: i64) -> String {
         String::new() // 列举阶段不读剪贴板
     }
-    fn reverse_lookup(&self, _text: &str, _format: &str) -> String {
+    fn reverse_lookup(&self, _text: &str, _format: &str, _min_len: usize) -> String {
         // 同 clip：列举阶段不查词库。前缀导航要为**每条**候选命令跑一次 display 求值，
         // 在这里做整词反查等于把 N 次词库查询摊到按键线程上。
         //
@@ -1211,7 +1211,7 @@ mod tests {
         }]);
         let clip = |_n: i64| "好吧".to_string();
         // 整串反查：只认「好吧」，借此模拟「这个词查不到」。
-        let reverse = |text: &str, _fmt: &str| {
+        let reverse = |text: &str, _fmt: &str, _m: usize| {
             if text == "好吧" {
                 "好吧: hbba hǎo ba".to_string()
             } else {
@@ -1259,7 +1259,7 @@ mod tests {
             category: String::new(),
         }]);
         let clip = |_n: i64| "好人".to_string(); // 只有 2 个字，第 3 个元素必然落空
-        let reverse = |text: &str, _f: &str| format!("{text}=x");
+        let reverse = |text: &str, _f: &str, _m: usize| format!("{text}=x");
         let host = PhraseHost {
             clip: &clip,
             reverse: &reverse,
@@ -1514,7 +1514,7 @@ mod tests {
         let clip = |_n: i64| "好".to_string();
 
         // 查得到 → 展开为反查结果，无 command_src（选中即上屏该文本）。
-        let ok = |_t: &str, _f: &str| "好: vbg hǎo".to_string();
+        let ok = |_t: &str, _f: &str, _m: usize| "好: vbg hǎo".to_string();
         let host = PhraseHost {
             clip: &clip,
             reverse: &ok,
@@ -1530,7 +1530,7 @@ mod tests {
         // 查不到 → **绝不能**退回 `None`：词库路径的 `None` 语义是「这不是特殊语法，
         // 保留原文」，于是候选会显示成源码字面 `{dict.rev(clip())}` 并原样上屏，
         // 看起来就像「配了没生效」。必须是 Drop（该候选整条不出现）。
-        let miss = |_t: &str, _f: &str| String::new();
+        let miss = |_t: &str, _f: &str, _m: usize| String::new();
         let host = PhraseHost {
             clip: &clip,
             reverse: &miss,
