@@ -132,6 +132,18 @@ pub struct ConvertResult {
 /// 交给引擎和调用方的兜底过滤（见 `Coordinator::rare_admit_fn`），两侧共享同一份闭包。
 pub type AdmitFn = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// 辅码表的只读视图，供击键坐标整句图加辅码边。
+///
+/// 引擎只要「某字是否有以 `prefix` 开头的辅码」，因此在引擎侧定义最小接口，由协调器
+/// 用已加载的辅码表实现，引擎不依赖 `wind-aux-code`，输入路径上也不读盘。
+pub trait AuxCharLookup: Send + Sync {
+    /// `ch` 的任一辅码以 `prefix` 开头。
+    fn any_code_starts_with(&self, ch: char, prefix: &str) -> bool;
+
+    /// 一个字都没有（未挂载）；引擎据此视同关闭。
+    fn is_empty(&self) -> bool;
+}
+
 /// 调用方按**路径**给拼音引擎的取舍覆写（[`Engine::convert_with_opts`]）。
 ///
 /// ## ⚠️ 为什么是参数而不是引擎配置
@@ -230,6 +242,8 @@ pub struct ConvertOptions {
     /// 双拼走击键坐标整句图（内部开关，默认关；环境变量 `WIND_SP_RAW_LATTICE=1` 亦可打开，
     /// 仅内部调试与评测用）。
     pub sp_raw_lattice: bool,
+    /// 连续辅助码用的辅码表；`None` 或 `is_empty()` = 关闭（默认）。
+    pub aux_continuous: Option<std::sync::Arc<dyn AuxCharLookup>>,
 }
 
 /// [`Engine::resolve_boundary`] 的结果。见
@@ -571,4 +585,44 @@ pub trait ExtendedEngine: Engine {
 
     /// 处理空编码
     fn handle_empty_code(&self, input: &str) -> (bool, bool, String);
+}
+
+#[cfg(test)]
+mod aux_char_lookup_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct FakeAux(Vec<(char, &'static str)>);
+
+    impl AuxCharLookup for FakeAux {
+        fn any_code_starts_with(&self, ch: char, prefix: &str) -> bool {
+            self.0
+                .iter()
+                .any(|(c, code)| *c == ch && code.starts_with(prefix))
+        }
+        fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+    }
+
+    #[test]
+    fn default_opts_have_no_aux_continuous() {
+        assert!(ConvertOptions::default().aux_continuous.is_none());
+    }
+
+    #[test]
+    fn fake_aux_satisfies_trait_through_arc_dyn() {
+        let aux: Arc<dyn AuxCharLookup> = Arc::new(FakeAux(vec![('好', "hn"), ('是', "uu")]));
+        assert!(aux.any_code_starts_with('好', "h"));
+        assert!(aux.any_code_starts_with('好', "hn"));
+        assert!(!aux.any_code_starts_with('好', "u"));
+        assert!(!aux.any_code_starts_with('无', "h"));
+        assert!(!aux.is_empty());
+        assert!(FakeAux(vec![]).is_empty());
+        let opts = ConvertOptions {
+            aux_continuous: Some(aux),
+            ..Default::default()
+        };
+        assert!(opts.clone().aux_continuous.is_some());
+    }
 }

@@ -157,3 +157,69 @@ impl AuxCodeLookup for AuxLookupNow {
             })
     }
 }
+
+impl wind_engine::AuxCharLookup for AuxLookupNow {
+    fn any_code_starts_with(&self, ch: char, prefix: &str) -> bool {
+        AuxCodeLookup::any_code_starts_with(self, ch, prefix)
+    }
+
+    fn is_empty(&self) -> bool {
+        AuxCodeLookup::is_empty(self)
+    }
+}
+
+#[cfg(test)]
+mod aux_char_lookup_tests {
+    use super::*;
+    use wind_engine::AuxCharLookup;
+
+    fn now(table: AuxCodeTable) -> AuxLookupNow {
+        AuxLookupNow {
+            rt: Arc::new(AuxCodeRuntime {
+                key: Vec::new(),
+                name: String::new(),
+                layers: vec![Layer::Table(table)],
+            }),
+            views: vec![None],
+        }
+    }
+
+    fn check(table_rows: Vec<(char, &str)>) {
+        let reference = AuxCodeTable::from_rows(table_rows.clone());
+        let lk = now(AuxCodeTable::from_rows(table_rows));
+        for (ch, prefix) in [
+            ('好', "h"),
+            ('好', "hn"),
+            ('好', "x"),
+            ('无', "h"),
+            ('是', "u"),
+        ] {
+            assert_eq!(
+                AuxCharLookup::any_code_starts_with(&lk, ch, prefix),
+                AuxCodeLookup::any_code_starts_with(&reference, ch, prefix),
+                "{ch} {prefix}"
+            );
+        }
+        assert_eq!(
+            AuxCharLookup::is_empty(&lk),
+            AuxCodeLookup::is_empty(&reference)
+        );
+    }
+
+    #[test]
+    fn matches_aux_code_lookup_on_small_table() {
+        check(vec![('好', "hn"), ('是', "uu")]);
+    }
+
+    #[test]
+    fn matches_aux_code_lookup_on_empty_table() {
+        check(vec![]);
+    }
+
+    #[test]
+    fn is_send_sync_trait_object() {
+        let arc: Arc<dyn AuxCharLookup> =
+            Arc::new(now(AuxCodeTable::from_rows(vec![('好', "hn")])));
+        assert!(arc.any_code_starts_with('好', "h"));
+    }
+}

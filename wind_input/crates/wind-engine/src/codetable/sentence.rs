@@ -902,6 +902,7 @@ impl CodeSentenceDecoder {
                         syl_mask: 1,
                         log_prob,
                         canon: None,
+                        aux: 0,
                     });
                 }
             }
@@ -1153,6 +1154,7 @@ fn add_composed_nodes(nodes: &mut [Vec<WordNode>], units: &[Unit], freq: &Senten
                     syl_mask: p.mask,
                     log_prob,
                     canon: None,
+                    aux: 0,
                 };
                 // 同跨度同文可由不同单元组合拼出（`甲|乙丙` 与 `甲乙|丙`），简码罚与切法都可能
                 // 不同：留分最高的那条。码表词条本身的边同样参与比较。

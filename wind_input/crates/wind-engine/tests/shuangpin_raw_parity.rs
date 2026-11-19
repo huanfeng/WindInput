@@ -15,6 +15,9 @@
 //!
 //! 设 `WIND_RAW_PARITY_DUMP=<目录>` 时另把每条输入开 / 关两侧的引擎原始候选与整句池（`Debug`
 //! 全字段）写到 `<目录>/{default,nbest}.{off,on}.txt`，供纯性能改动逐字节对拍。
+//!
+//! `raw_aux_timing`（同样 `--ignored`，加 `--test shuangpin_raw_parity raw_aux_timing` 单跑）：开关开时
+//! 辅码表 `None` 与小鹤辅码表的逐键耗时对比，只打到 stderr、不写文件。
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -641,4 +644,123 @@ fn raw_vs_old_diff() {
     }
     std::fs::write(out_dir.join("p1_diff_nbest.tsv"), &body_n).expect("写 p1_diff_nbest.tsv");
     eprint!("{}", summary("nbest", &tally_n));
+}
+
+/// `build_dev` 里的小鹤辅码表（`字=码` 每行一条），只给耗时对比用。
+struct FlypyAux(std::collections::HashMap<char, Vec<String>>);
+
+impl wind_engine::AuxCharLookup for FlypyAux {
+    fn any_code_starts_with(&self, ch: char, prefix: &str) -> bool {
+        self.0
+            .get(&ch)
+            .is_some_and(|v| v.iter().any(|c| c.starts_with(prefix)))
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+fn flypy_aux(dir: &Path) -> Option<FlypyAux> {
+    let src = std::fs::read_to_string(dir.join("schemas/aux_code/flypy_full.txt")).ok()?;
+    let mut m: std::collections::HashMap<char, Vec<String>> = Default::default();
+    for line in src.lines().filter(|l| !l.starts_with('#')) {
+        let Some((ch, code)) = line.split_once('=') else {
+            continue;
+        };
+        let mut it = ch.chars();
+        if let (Some(c), None) = (it.next(), it.next()) {
+            m.entry(c).or_default().push(code.trim().to_string());
+        }
+    }
+    Some(FlypyAux(m))
+}
+
+/// 击键图开着时，辅码表 `None` 与小鹤辅码表的逐键耗时对比（不罚分，只看建图代价）。
+/// 另报两侧引擎首选不同的前缀数，仅供参考。
+#[test]
+#[ignore = "耗时对比：慢，依赖 build_dev 真实词库与辅码表"]
+fn raw_aux_timing() {
+    let Some(dir) = data_dir() else {
+        eprintln!("跳过：拼音词库不存在");
+        return;
+    };
+    let Some(table) = flypy_aux(&dir) else {
+        eprintln!("跳过：辅码表不存在");
+        return;
+    };
+    let table: std::sync::Arc<dyn wind_engine::AuxCharLookup> = std::sync::Arc::new(table);
+    let corpus = corpus(&xiaohe().build_reverse());
+    assert!(corpus.len() > 100, "语料只有 {} 句", corpus.len());
+    let mut seen = HashSet::new();
+    let keys: Vec<String> = corpus
+        .iter()
+        .flat_map(|(k, _)| (1..=k.len()).map(|n| k[..n].to_string()))
+        .filter(|p| seen.insert(p.clone()))
+        .collect();
+    let mgr = manager(&dir, false);
+    let o = |aux: bool| {
+        let t = table.clone();
+        move || ConvertOptions {
+            sp_raw_lattice: true,
+            aux_continuous: aux.then(|| t.clone()),
+            ..Default::default()
+        }
+    };
+    let top = |k: &str, aux: bool| {
+        mgr.convert_with_opts("shuangpin", k, LIMIT, o(aux)())
+            .candidates
+            .first()
+            .map(|c| (c.text.clone(), c.consumed_length))
+    };
+    let differ = keys
+        .iter()
+        .filter(|k| top(k, false) != top(k, true))
+        .count();
+    eprintln!(
+        "# prefixes={} engine top1 differs (aux None vs flypy)={differ}",
+        keys.len()
+    );
+    for (label, set) in [
+        ("all", keys.clone()),
+        (
+            "even",
+            keys.iter().filter(|k| k.len() % 2 == 0).cloned().collect(),
+        ),
+        (
+            "odd",
+            keys.iter().filter(|k| k.len() % 2 == 1).cloned().collect(),
+        ),
+    ] {
+        let _ = time_pass(&mgr, &set, o(false));
+        let _ = time_pass(&mgr, &set, o(true));
+        let (mut a, mut b, mut ak, mut bk) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for i in 0..TIMING_RUNS {
+            let (off, off_k) = time_pass(&mgr, &set, o(false));
+            let (on, on_k) = time_pass(&mgr, &set, o(true));
+            eprintln!(
+                "# [{label}] run {}: aux None mean={:.1}us p95={:.1}us | flypy mean={:.1}us p95={:.1}us | Δ={:+.1}% ({:+.1}us)",
+                i + 1,
+                off.0,
+                off.1,
+                on.0,
+                on.1,
+                (on.0 / off.0 - 1.0) * 100.0,
+                on.0 - off.0
+            );
+            a.push(off);
+            b.push(on);
+            ak.push(off_k);
+            bk.push(on_k);
+        }
+        let m = |v: &[Pass], f: fn(&Pass) -> f64| v.iter().map(f).sum::<f64>() / v.len() as f64;
+        eprintln!(
+            "# [{label}] avg: None mean={:.1}us p95={:.1}us | flypy mean={:.1}us p95={:.1}us | best-of max None={:.1}us flypy={:.1}us",
+            m(&a, |p| p.0),
+            m(&a, |p| p.1),
+            m(&b, |p| p.0),
+            m(&b, |p| p.1),
+            max_of_best(&ak),
+            max_of_best(&bk)
+        );
+    }
 }

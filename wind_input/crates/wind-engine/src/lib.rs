@@ -19,8 +19,8 @@ pub mod user_assoc;
 
 pub use codetable::CodeTableEngine;
 pub use engine::{
-    AdmitFn, BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType, ExtendedEngine,
-    MemPart,
+    AdmitFn, AuxCharLookup, BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType,
+    ExtendedEngine, MemPart,
 };
 pub use english::EnglishEngine;
 pub use manager::{

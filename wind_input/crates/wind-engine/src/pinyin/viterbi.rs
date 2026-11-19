@@ -49,6 +49,8 @@ pub struct SentencePiece {
     pub syl_mask: u64,
     /// 同 `WordNode::canon`
     pub canon: Option<(String, u64)>,
+    /// 同 `WordNode::aux`
+    pub aux: u8,
 }
 
 impl ViterbiResult {
@@ -100,6 +102,8 @@ pub struct WordNode {
     pub log_prob: f64,
     /// 造词用规范码，见 `LatticeNode::canon`。`None` = 所打码那段本身。
     pub canon: Option<(String, u64)>,
+    /// 节点吸收的辅码字母总数（击键图连续辅助码；其余路径恒 0）。
+    pub aux: u8,
 }
 
 /// 单状态 DP 的状态（**无 grammar 时**用）。
@@ -122,6 +126,7 @@ struct DpEntry {
     syl_mask: u64,
     /// 见 `WordNode::canon`（精确节点为 `None`，克隆不分配）。
     canon: Option<(String, u64)>,
+    aux: u8,
     /// 起点到此处已拼出文本的哈希（与切分无关），K=1 时恒 0。
     text_key: u64,
 }
@@ -180,6 +185,7 @@ struct BeamEntry {
     syl_mask: u64,
     /// 见 `WordNode::canon`（精确节点为 `None`，克隆不分配）。
     canon: Option<(String, u64)>,
+    aux: u8,
 }
 
 /// 每个位置最多保留几条线。对齐 librime `BeamSearch::kMaxLineCandidates`
@@ -290,6 +296,7 @@ impl ViterbiDecoder {
             slot.prev_word.push_str(prev_word);
             slot.syl_mask = node.syl_mask;
             slot.canon.clone_from(&node.canon);
+            slot.aux = node.aux;
         } else {
             // 已满且不严格优于最差的一条：直接丢弃，不付 clone 的代价。
             if states.len() >= BEAM_WIDTH
@@ -306,6 +313,7 @@ impl ViterbiDecoder {
                 word: node.word.clone(),
                 syl_mask: node.syl_mask,
                 canon: node.canon.clone(),
+                aux: node.aux,
             });
         }
         states.sort_by(|a, b| {
@@ -500,6 +508,7 @@ impl ViterbiDecoder {
             word: String::new(),
             syl_mask: 0,
             canon: None,
+            aux: 0,
             text_key: if k > 1 { TEXT_KEY_SEED } else { 0 },
         });
 
@@ -526,6 +535,7 @@ impl ViterbiDecoder {
                         word: node.word.clone(),
                         syl_mask: node.syl_mask,
                         canon: node.canon.clone(),
+                        aux: node.aux,
                         text_key: if k > 1 {
                             extend_text_key(prev.text_key, &node.word)
                         } else {
@@ -592,6 +602,7 @@ impl ViterbiDecoder {
                             end: pos,
                             syl_mask: entry.syl_mask,
                             canon: entry.canon.clone(),
+                            aux: entry.aux,
                         });
                         (pos, idx) = (entry.prev_pos, entry.prev_idx);
                     }
@@ -634,6 +645,7 @@ impl ViterbiDecoder {
             word: String::new(),
             syl_mask: 0,
             canon: None,
+            aux: 0,
         });
 
         // 前向 DP
@@ -730,6 +742,7 @@ impl ViterbiDecoder {
                 end: pos,
                 syl_mask: entry.syl_mask,
                 canon: entry.canon.clone(),
+                aux: entry.aux,
             });
             let prev_pos = entry.prev_pos;
             let prev_word = entry.prev_word.as_str();
@@ -776,6 +789,7 @@ mod tests {
             syl_mask: 0b101, // ni|hao
             log_prob: 10.0,
             canon: None,
+            aux: 0,
         });
         let decoder = ViterbiDecoder::new();
         let result = decoder.decode(&nodes, input_len);
@@ -795,6 +809,7 @@ mod tests {
             syl_mask: 0b1,
             log_prob: 3.0,
             canon: None,
+            aux: 0,
         });
         nodes[5].push(WordNode {
             start: 2,
@@ -803,6 +818,7 @@ mod tests {
             syl_mask: 0b1,
             log_prob: 3.0,
             canon: None,
+            aux: 0,
         });
         (nodes, input_len)
     }
@@ -826,6 +842,7 @@ mod tests {
             syl_mask: 0b1,
             log_prob,
             canon: None,
+            aux: 0,
         }
     }
 

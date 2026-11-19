@@ -434,6 +434,7 @@ impl MixedEngine {
             // `..Default::default()`，见下方那条「两套取值表摆在一起才看得出差异」。）
             no_abbrev_quota: false,
             sp_raw_lattice: false,
+            aux_continuous: None,
         }
     }
 
@@ -451,6 +452,7 @@ impl MixedEngine {
             admit: None,
             no_abbrev_quota: false,
             sp_raw_lattice: false,
+            aux_continuous: None,
         }
     }
 

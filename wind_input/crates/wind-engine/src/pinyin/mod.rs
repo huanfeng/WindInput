@@ -2279,6 +2279,7 @@ impl PinyinEngine {
                         syl_mask: node.syl_mask,
                         log_prob: node.log_prob,
                         canon: node.canon.clone(),
+                        aux: 0,
                     });
                 }
             }
@@ -3300,6 +3301,17 @@ impl Engine for PinyinEngine {
         } else {
             None
         };
+        // 连续辅助码：击键图开着且辅码表非空时另取全偏移键对，建图时接辅码边。
+        let aux_lookup = opts
+            .aux_continuous
+            .as_deref()
+            .filter(|a| raw_edges.is_some() && !a.is_empty());
+        let raw_edges_all: Option<Vec<shuangpin::RawEdge>> = aux_lookup
+            .and(self.shuangpin.as_ref())
+            .map(|conv| conv.pair_edges_all(raw_input));
+        let raw_aux = aux_lookup
+            .zip(raw_edges_all.as_deref())
+            .map(|(lookup, edges_all)| raw_lattice::AuxInput { edges_all, lookup });
         let full_owned: String = match &sp_result {
             Some(r) if !r.full_pinyin.is_empty() => r.full_pinyin.clone(),
             Some(_) => input.to_string(),
@@ -3567,7 +3579,7 @@ impl Engine for PinyinEngine {
         let raw_step2 = match &raw_edges {
             Some(edges) if self.config.use_smart_compose && syllables.len() >= 2 => Some(
                 raw_base
-                    .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges))
+                    .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges, raw_aux))
                     .as_ref()
                     .and_then(raw_lattice::RawBase::sentence),
             ),
@@ -3607,6 +3619,7 @@ impl Engine for PinyinEngine {
                             syl_mask: node.syl_mask,
                             log_prob: node.log_prob,
                             canon: node.canon.clone(),
+                            aux: 0,
                         });
                     }
                 }
@@ -3662,6 +3675,13 @@ impl Engine for PinyinEngine {
                 } else {
                     syllables_boundary_mask(&syllables, completed.len())
                 };
+                let uses_aux = result.pieces.iter().flatten().any(|p| p.aux > 0);
+                #[cfg(test)]
+                if uses_aux {
+                    raw_lattice::note_aux_sentence(&sentence);
+                }
+                let aux_whole =
+                    raw_consumed == raw_input.len() && uses_aux && raw_lattice::aux_whole_enabled();
                 let merged =
                     if let Some(existing) = candidates.iter_mut().find(|c| c.text == sentence) {
                         // 整句与已有候选（如精确匹配 你好）同文：提升其权重置顶，
@@ -3678,6 +3698,17 @@ impl Engine for PinyinEngine {
                             // 否则 freq_rerank 会把它当普通候选而让别的整句锚定到它之上。
                             existing.is_sentence = true;
                             existing.sentence_rank = rank;
+                            // 用了辅码且消费整串：辅码字母算进消费数，否则上屏后滞留缓冲；
+                            // 造词码按整句（去辅码）对合并后的码重算。
+                            if aux_whole {
+                                existing.consumed_length = raw_consumed;
+                                existing.meta.learn_code = raw_lattice::raw_learn_code(
+                                    &result,
+                                    raw_input,
+                                    &existing.code,
+                                    existing.boundary,
+                                );
+                            }
                         }
                         true
                     } else {
@@ -3800,7 +3831,7 @@ impl Engine for PinyinEngine {
             {
                 Some(r.partial_initial.as_deref().and_then(|partial| {
                     let base = raw_base
-                        .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges))
+                        .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges, raw_aux))
                         .take()?;
                     self.raw_partial_lattice(raw_input, base, partial)
                 }))
@@ -3853,6 +3884,7 @@ impl Engine for PinyinEngine {
                             syl_mask: node.syl_mask,
                             log_prob: node.log_prob,
                             canon: node.canon.clone(),
+                            aux: 0,
                         });
                     }
                 }
@@ -3861,6 +3893,10 @@ impl Engine for PinyinEngine {
             let result = self.decode_unblocked(&lattice, full_len);
             if !result.words.is_empty() && result.log_prob.is_finite() {
                 let sentence: String = result.words.join("");
+                #[cfg(test)]
+                if result.pieces.iter().flatten().any(|p| p.aux > 0) {
+                    raw_lattice::note_aux_sentence(&sentence);
+                }
                 if !sentence.is_empty() {
                     let weight = sentence_weight(result.log_prob, result.words.len());
                     // 击键图：边界与造词码换回全拼域（真值切分 + 残码一位），不用 `result.boundary`。
@@ -3993,6 +4029,7 @@ impl Engine for PinyinEngine {
                         syl_mask: node.syl_mask,
                         log_prob: node.log_prob,
                         canon: node.canon.clone(),
+                        aux: 0,
                     });
                 }
             }
@@ -7689,6 +7726,171 @@ i = ["i"]
         let top = s.iter().find(|x| x.0 == "里好").expect("应出整句：{s:?}");
         assert_eq!(top.1, 4, "{s:?}");
         assert_eq!(top.2.as_ref().map(|l| l.0.as_str()), Some("lihao"), "{s:?}");
+    }
+
+    struct FakeAux(Vec<(char, &'static str)>);
+
+    impl crate::engine::AuxCharLookup for FakeAux {
+        fn any_code_starts_with(&self, ch: char, prefix: &str) -> bool {
+            self.0
+                .iter()
+                .any(|(c, code)| *c == ch && code.starts_with(prefix))
+        }
+        fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+    }
+
+    type AuxSentence = (String, usize, Option<(String, u64)>);
+
+    /// 击键图 + 辅码表：`(文本, 消费数, learn_code)` 的整句。
+    fn aux_sentences(eng: &PinyinEngine, input: &str, aux: Option<FakeAux>) -> Vec<AuxSentence> {
+        let opts = ConvertOptions {
+            sp_raw_lattice: true,
+            aux_continuous: aux.map(|a| Arc::new(a) as Arc<dyn crate::engine::AuxCharLookup>),
+            ..Default::default()
+        };
+        let r = eng.convert_with_opts(input, 20, opts).unwrap();
+        r.candidates
+            .iter()
+            .filter(|c| c.is_sentence)
+            .map(|c| (c.text.clone(), c.consumed_length, c.meta.learn_code.clone()))
+            .collect()
+    }
+
+    /// 句中辅码：`uiuunihc` 的 `uu` 是「是」的辅码，整句消费全部 8 键，造词码不含辅码。
+    #[test]
+    fn sp_raw_lattice_aux_sentence_consumes_aux_keys() {
+        let eng = sp_fp_engine(
+            "raw_wire_aux",
+            &[("是", "shi", 900), ("你好", "ni hao", 1000)],
+            false,
+        );
+        let s = aux_sentences(&eng, "uiuunihc", Some(FakeAux(vec![('是', "uu")])));
+        let top = s
+            .iter()
+            .find(|x| x.0 == "是你好")
+            .unwrap_or_else(|| panic!("应出整句：{s:?}"));
+        assert_eq!(top.1, 8, "{s:?}");
+        assert_eq!(
+            top.2,
+            Some(("shinihao".to_string(), 0b101001)),
+            "造词码去掉辅码：{s:?}"
+        );
+        // 无辅码表 / 空表：`uu` 只能读 shu，词库没有，不出这条整句。
+        for aux in [None, Some(FakeAux(vec![]))] {
+            let s = aux_sentences(&eng, "uiuunihc", aux);
+            assert!(s.iter().all(|x| x.0 != "是你好"), "{s:?}");
+        }
+    }
+
+    /// 击键图首选 `(文本, 消费数, 造词码)`；造词码缺省时取候选码。
+    fn aux_top(eng: &PinyinEngine, input: &str, aux: Option<FakeAux>) -> (String, usize, String) {
+        let opts = ConvertOptions {
+            sp_raw_lattice: true,
+            aux_continuous: aux.map(|a| Arc::new(a) as Arc<dyn crate::engine::AuxCharLookup>),
+            ..Default::default()
+        };
+        let r = eng.convert_with_opts(input, 20, opts).unwrap();
+        let c = r.candidates.first().expect("应有候选");
+        let learn = c
+            .meta
+            .learn_code
+            .as_ref()
+            .map_or(c.code.clone(), |(code, _)| code.clone());
+        (c.text.clone(), c.consumed_length, learn)
+    }
+
+    const NIHAO_AUX: &[(&str, &str, i32)] = &[
+        ("你", "ni", 9000),
+        ("好", "hao", 9000),
+        ("你好", "ni hao", 50000),
+        ("和", "he", 8000),
+    ];
+
+    /// 辅码字母不参与的正常输入：辅码开 / 关首选相同。
+    #[test]
+    fn aux_penalty_keeps_plain_input_unchanged() {
+        let eng = sp_fp_engine("aux_plain", NIHAO_AUX, false);
+        let table = || Some(FakeAux(vec![('你', "hc"), ('好', "hn")]));
+        let on = aux_top(&eng, "nihc", table());
+        let off = aux_top(&eng, "nihc", None);
+        assert_eq!(on, off);
+        assert_eq!((on.0.as_str(), on.1), ("你好", 4));
+        // 整句也不变：「你 + hc」（2 位辅码）扣 4.0 后不敌「你好」。
+        assert_eq!(
+            aux_sentences(&eng, "nihc", table()),
+            aux_sentences(&eng, "nihc", None)
+        );
+    }
+
+    /// 同文合并：整句用了辅码且消费整串时，合并后的候选取整句的消费数与造词码，同文只剩一条。
+    #[test]
+    fn aux_sentence_merge_takes_sentence_consumed() {
+        let eng = sp_fp_engine("aux_merge", NIHAO_AUX, false);
+        let opts = ConvertOptions {
+            sp_raw_lattice: true,
+            aux_continuous: Some(Arc::new(FakeAux(vec![('好', "hn")]))),
+            ..Default::default()
+        };
+        let r = eng.convert_with_opts("nihchn", 20, opts).unwrap();
+        let same: Vec<_> = r.candidates.iter().filter(|c| c.text == "你好").collect();
+        assert_eq!(same.len(), 1, "{same:?}");
+        let c = same[0];
+        assert!(c.is_sentence);
+        assert_eq!(c.consumed_length, 6);
+        let learn = c.meta.learn_code.as_ref().map_or(c.code.as_str(), |l| &l.0);
+        assert_eq!(learn, "nihao");
+    }
+
+    /// 同文合并：整句未用辅码时合并结果与不给辅码表时逐字段相同，消费数仍是 step 1 的。
+    /// `nihc'` 的整句消费整串 5 键，合并后照旧是 4（`'` 留缓冲）。
+    #[test]
+    fn plain_sentence_merge_keeps_consumed() {
+        let eng = sp_fp_engine("aux_merge_plain", NIHAO_AUX, false);
+        let run = |keys: &str, aux: Option<FakeAux>| {
+            let opts = ConvertOptions {
+                sp_raw_lattice: true,
+                aux_continuous: aux.map(|a| Arc::new(a) as Arc<dyn crate::engine::AuxCharLookup>),
+                ..Default::default()
+            };
+            eng.convert_with_opts(keys, 20, opts).unwrap()
+        };
+        let dump = |r: &ConvertResult| format!("{:?}\n{:?}", r.candidates, r.sentence_pool);
+        for keys in ["nihc", "nihc'"] {
+            let plain = run(keys, None);
+            let table = run(keys, Some(FakeAux(vec![('好', "hn")])));
+            assert_eq!(dump(&table), dump(&plain), "{keys}");
+            let c = table.candidates.iter().find(|c| c.text == "你好").unwrap();
+            assert!(c.is_sentence, "前提：整句与 step 1 同文合并（{keys}）");
+            assert_eq!(c.consumed_length, 4, "{keys}");
+        }
+    }
+
+    /// 变异：罚分置 0 时 `nihc` 的整句翻成「你 + 辅码 hc」（单字分高于「你好」），证明罚分在起作用。
+    /// 只看整句：引擎首选两种情况下都是词库精确的「你好」。
+    #[test]
+    fn aux_penalty_zero_flips_plain_input() {
+        let eng = sp_fp_engine("aux_flip", NIHAO_AUX, false);
+        let table = || Some(FakeAux(vec![('你', "hc"), ('好', "hn")]));
+        let with = aux_sentences(&eng, "nihc", table());
+        let old = raw_lattice::set_aux_letter_penalty(0.0);
+        let without = aux_sentences(&eng, "nihc", table());
+        raw_lattice::set_aux_letter_penalty(old);
+        assert_eq!(with, vec![("你好".to_string(), 4, None)]);
+        assert_eq!(
+            without,
+            vec![("你".to_string(), 4, Some(("ni".to_string(), 1)))],
+            "λ=0 时辅码读法胜出"
+        );
+    }
+
+    /// 辅码命中：`nihchn` 首选「你好」消费 6 键，造词码不含辅码字母。
+    #[test]
+    fn aux_applied_beats_plain_when_hit() {
+        let eng = sp_fp_engine("aux_hit", NIHAO_AUX, false);
+        let top = aux_top(&eng, "nihchn", Some(FakeAux(vec![('好', "hn")])));
+        assert_eq!(top, ("你好".to_string(), 6, "nihao".to_string()));
     }
 
     /// 全拼降级支路不吃双拼同键音节：全拼打 `diushi` 只出「丢失」，双拼 `dqui` 照出「对视」。

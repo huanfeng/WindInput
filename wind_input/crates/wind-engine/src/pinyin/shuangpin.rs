@@ -686,6 +686,34 @@ impl ShuangpinConverter {
         edges
     }
 
+    /// 同 [`Self::pair_edges`]，但在**每个偏移**上都试 `[i, i+2)`（含重叠的键对），给辅码边
+    /// 改变奇偶后的切分用。键对不跨 `'`。
+    pub fn pair_edges_all(&self, keys: &str) -> Vec<RawEdge> {
+        let input = keys.to_ascii_lowercase();
+        let b = input.as_bytes();
+        let mut edges = Vec::new();
+        for i in 0..b.len().saturating_sub(1) {
+            if b[i] == SEPARATOR_B || b[i + 1] == SEPARATOR_B {
+                continue;
+            }
+            let syllables = self.convert_pair(b[i], b[i + 1]);
+            if syllables.is_empty() {
+                continue;
+            }
+            let literal = self.hint_literal.get()
+                && self
+                    .partner_literal(b[i], b[i + 1], &syllables[0])
+                    .is_some();
+            edges.push(RawEdge {
+                start: i,
+                end: i + 2,
+                syllables,
+                literal,
+            });
+        }
+        edges
+    }
+
     /// `keys` 恰好切成完整双拼音节时返回音节数，否则 `None`。
     ///
     /// 直接辅助码（`docs/design/aux-code-direct.md` §4）的前缀闸门：前缀含手动分隔符 `'`、
@@ -1604,6 +1632,31 @@ o = ["o", "ou"]
         assert_eq!(e.len(), 2, "尾键不成边");
         let e = c.pair_edges("n'hc");
         assert_eq!((e.len(), e[0].start, e[0].end), (1, 2, 4), "偏移含 '");
+    }
+
+    /// 每个偏移都试，含重叠；不跨 `'`；是 `pair_edges` 的超集。
+    #[test]
+    fn pair_edges_all_tries_every_offset() {
+        let c = conv("xiaohe");
+        let spans = |keys: &str| -> Vec<(usize, usize, String)> {
+            c.pair_edges_all(keys)
+                .into_iter()
+                .map(|e| (e.start, e.end, e.syllables[0].clone()))
+                .collect()
+        };
+        // 小鹤：ui = shi，iu = ?（拼不出），uu = shu
+        let all = spans("uiuu");
+        assert!(all.contains(&(0, 2, "shi".to_string())), "{all:?}");
+        assert!(all.contains(&(2, 4, "shu".to_string())), "{all:?}");
+        assert!(all.iter().any(|e| e.0 == 1) == !c.convert_pair(b'i', b'u').is_empty());
+        let sep = c.pair_edges_all("ni'hc");
+        assert!(sep.iter().all(|e| e.start != 1 && e.start != 2), "{sep:?}");
+        for keys in ["nihaoma", "ni'hao", "nihcn", "qiddn"] {
+            let all = c.pair_edges_all(keys);
+            for e in c.pair_edges(keys) {
+                assert!(all.contains(&e), "{keys}: {e:?}");
+            }
+        }
     }
 
     /// 每个韵母键只放一个韵母的布局不产生任何对（出厂布局的情形见下一个用例）。
