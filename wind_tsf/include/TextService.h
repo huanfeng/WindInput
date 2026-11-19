@@ -196,7 +196,8 @@ public:
     // （同 HandlePairCommitPush 的先例：消息窗只拿得到 TextService）。合成按键注入
     // 失败（KeyEventSink 未装配 / SendInput 出错）时退回旧的 `CommitText(text, TRUE, ...)`
     // 直接异步提交，保证至少不丢字。
-    BOOL CommitTextViaSyntheticKey(const std::wstring& text, BOOL replacingHeld = FALSE);
+    BOOL CommitTextViaSyntheticKey(const std::wstring& text, BOOL replacingHeld = FALSE,
+                                   const std::wstring& continuation = {}, UINT timeoutMs = 0);
 
     // 把光标前 count 个已上屏字符替换为 text（智能符号纠错替换）。
     // 优先走 TSF 同步 EditSession（原子、不受输入队列时序/修饰键影响）；

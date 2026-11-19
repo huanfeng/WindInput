@@ -673,7 +673,8 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
             // 会触发宿主自己的输入时处理链路（AutoCorrect/内嵌 `\n` 转真实分段……），
             // 这些在纯异步 EditSession 里不会发生，是 CommitTextViaSyntheticKey 存在
             // 的主要原因。注入失败时内部退回旧的 `CommitText(text, TRUE)`，不会丢字。
-            pThis->_pTextService->CommitTextViaSyntheticKey(pData->text);
+            pThis->_pTextService->CommitTextViaSyntheticKey(
+                pData->text, FALSE, pData->continuation, pData->timeoutMs);
             // Reset KeyEventSink state so shortcut keys work again.
             // 保留配对状态：上屏只是在光标处插入文本，已配对的右符号仍在光标右侧
             // （`（你好|）`）。此前一并清零 _pairPendingDepth，导致中文模式下
@@ -1145,8 +1146,9 @@ void CLangBarItemButton::PostUpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth
     }
 }
 
-void CLangBarItemButton::PostCommitText(const std::wstring& text)
+void CLangBarItemButton::PostCommitText(const ServiceResponse& response)
 {
+    const auto& text = response.text;
     // Thread-safe commit: post message to message window which runs on UI thread
     // This ensures EndComposition is called before InsertText on the correct thread
     if (_hMsgWnd == NULL)
@@ -1161,8 +1163,7 @@ void CLangBarItemButton::PostCommitText(const std::wstring& text)
     }
 
     // Allocate data on heap (will be freed by message handler)
-    CommitTextData* pData = new CommitTextData();
-    pData->text = text;
+    auto* pData = new CommitTextData{text, response.newComposition, response.holdTimeoutMs};
 
     // Post message to UI thread
     if (!PostMessageW(_hMsgWnd, WM_COMMIT_TEXT, 0, reinterpret_cast<LPARAM>(pData)))

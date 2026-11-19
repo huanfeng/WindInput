@@ -114,7 +114,7 @@ mod tests {
             (
                 "handle_candidate.rs",
                 include_str!("handle_candidate.rs"),
-                "pub(crate) fn tail_after_letters(",
+                "pub(crate) fn cut_position(",
             ),
             (
                 "handle_mode.rs",

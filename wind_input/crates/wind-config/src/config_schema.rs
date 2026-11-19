@@ -648,6 +648,8 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.select_key_groups", StrList),
     f("keys.page_keys", StrList),
     f("keys.highlight_keys", StrList),
+    f("keys.syllable_jump_keys", StrList),
+    f("keys.caret_scoped_candidates", Bool),
     f("keys.select_char_keys", StrList),
     f("keys.overflow.number_key", Enum(NUMBER_OVERFLOW_VALUES)),
     f("keys.overflow.select_key", Enum(OVERFLOW_VALUES)),

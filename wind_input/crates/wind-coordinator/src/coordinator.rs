@@ -612,8 +612,7 @@ pub(crate) struct State {
     pub(crate) english_case_variant: crate::english_candidates::CaseVariant,
     /// 编码区光标：`input_buffer` 内的字节偏移，定义域 `[0, input_buffer.len()]`。
     /// 恒指向剩余编码内部——已转换前缀（`committed_text`）是只读前缀，光标进不去（Home 只到
-    /// 剩余编码开头）。光标**不参与引擎查询**：`update_candidates` 恒查整串，移动光标不重算
-    /// 候选（对齐 Go `inputCursorPos`）。所有读写走 `preedit_cursor::BufEdit`，勿裸改。
+    /// 剩余编码开头）。支持分段选词的方案在光标位于编码中间时按前缀查询。
     pub(crate) input_cursor_pos: usize,
     /// 手机端展开页「首单元读法」的当前选择（见 [`crate::leading_reading`]）：只对**记录它时的那份
     /// 缓冲**有效——缓冲一变（打字、退格、选词吃掉前缀）就自动失效，不用在十几处清缓冲的地方逐个复位。
@@ -5251,6 +5250,8 @@ impl Coordinator {
                 // 候选窗定位方式切换的边沿检测（见下方 ReportCandidatePos）。
                 let cand_was_fixed = old.config.ui.candidate.is_fixed_position();
                 let was_keep_all = old.config.schema.keep_all_loaded;
+                let caret_query_changed =
+                    old.config.keys.caret_scoped_candidates != cfg.keys.caret_scoped_candidates;
                 drop(old);
 
                 let keys = schema_key_union(&self.engine_mgr);
@@ -5259,7 +5260,23 @@ impl Coordinator {
                 // 同 `refresh_config_in_memory`：字符类 registry 不受 schema_dirty 门控。
                 self.engine_mgr.rebuild_charsets(&new_cfg);
                 self.rebuild_comment_lib(&new_cfg);
+                // 切换查询范围时，候选和新配置须在同一把状态锁内更新。
+                let editing = (caret_query_changed && !schema_dirty)
+                    .then(|| self.state.lock().unwrap_or_else(|e| e.into_inner()));
                 *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
+                if let Some(mut state) = editing
+                    && self.supports_caret_query(&state)
+                    && 0 < state.input_cursor_pos
+                    && state.input_cursor_pos < state.input_buffer.len()
+                {
+                    self.update_candidates(&mut state);
+                    self.notify_ui_update(&state);
+                    let action = KeyAction::UpdateComposition {
+                        text: state.preedit.clone(),
+                        caret_pos: self.composition_caret(&state),
+                    };
+                    self.push_no_key_ctx_action(&action, state.chinese_mode, true);
+                }
                 info!("User config hot-reloaded (schema_dirty={})", schema_dirty);
                 // 同 refresh_config_in_memory：设置页改了 ui.status.items 后，旧的去重缓存
                 // 会把改动后的第一次状态显示误判成"内容没变"而吞掉。
@@ -5987,9 +6004,11 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
-    /// 编码区光标移动后的返回：刷新候选窗，并带上组合区新插入符位置（与默认 ←/→ 臂同形）。
-    /// 只回 `Consumed` 的话宿主里的插入符不会跟着动。
+    /// 移动编码区光标后刷新限域候选，并同步宿主组合区和插入符。
     fn caret_moved_action(&self, state: &mut State) -> KeyAction {
+        if self.uses_caret_query(state) {
+            self.update_candidates(state);
+        }
         let text = state.preedit.clone();
         let caret_pos = self.composition_caret(state);
         self.notify_ui_update(state);
@@ -6193,7 +6212,6 @@ impl Coordinator {
             //
             // `caret_right` 在**末尾**改为上屏高亮候选（macOS「→ 进选词」）；无候选时没有
             // 可上屏的东西，纯吞键——组合进行中把 → 交给宿主会移动宿主光标，与组合区错位。
-            // 移动成功只刷新组合区（caret 位置变了，缓冲与候选都没变，无需重查）。
             wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight(_) => {
                 if state.active.is_some() || !Self::has_input_session(state) {
                     return None;
@@ -6231,6 +6249,32 @@ impl Coordinator {
                 } else {
                     return Some(KeyAction::Consumed);
                 }
+            }
+            wind_config::SessionAction::SyllablePrev | wind_config::SessionAction::SyllableNext => {
+                if !self.supports_caret_query(state) || state.input_buffer.is_empty() {
+                    return None;
+                }
+                let next = matches!(action, wind_config::SessionAction::SyllableNext);
+                let moved = if let Some(pos) = self.syllable_caret_target(state, next) {
+                    let changed = pos != state.input_cursor_pos;
+                    state.input_cursor_pos = pos;
+                    changed
+                } else {
+                    let mut edit = preedit_cursor::BufEdit::new(
+                        &mut state.input_buffer,
+                        &mut state.input_cursor_pos,
+                    );
+                    if next {
+                        edit.move_right()
+                    } else {
+                        edit.move_left()
+                    }
+                };
+                return Some(if moved {
+                    self.caret_moved_action(state)
+                } else {
+                    KeyAction::Consumed
+                });
             }
             // 上屏编码：这里只登记、吞键，持锁的这一层没法重入分派；由出口
             // `redispatch_commit_code` 把这个键当回车再走一遍。
@@ -6610,8 +6654,7 @@ impl Coordinator {
             (c.source == CandidateSource::CodeTable && !c.is_wildcard)
                 || ((c.is_phrase || c.is_command) && self.phrase_has_exact_code(state, &pre_buf))
         });
-        // 在光标处插入（光标在末尾时等价于旧的 push）。后续顶码/候选刷新一律按整串
-        // 缓冲判定，与光标位置无关——光标只是编辑位置，不参与引擎查询。
+        // 在光标处插入。编辑光标中间的编码时先续组合，避免顶出光标后的内容。
         preedit_cursor::BufEdit::new_cased(
             &mut state.input_buffer,
             &mut state.input_cursor_pos,
@@ -6626,7 +6669,10 @@ impl Coordinator {
         //
         // 通配组码不顶字（spec §3.2）。引擎的 `handle_top_code` 是字面语义（`aaaza` 在它看来
         // 是「超码长 + 无匹配 + 无后继」的典型溢出），故短路必须落在这里。
-        let top_code = if self.wildcard_pattern_of(state).is_some() {
+        let top_code = if (state.input_cursor_pos < state.input_buffer.len()
+            && self.uses_caret_query(state))
+            || self.wildcard_pattern_of(state).is_some()
+        {
             None
         } else {
             self.engine_mgr

@@ -450,6 +450,13 @@ natural_order asc`，再截断。权威描述见 `candidate-sorting-rules.md`。
 code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否则消费整串。
 双拼激活时经 `sp_result.map_consumed_length()` 回算双拼键数；含 `'` 时经分隔符补偿（mod.rs:653-672）。
 
+「光标移动重算候选」（`keys.caret_scoped_candidates`）出厂关闭。开启后，普通全拼、双拼、码表和混输
+在光标位于编码中间时用光标前的编码查询候选，组合区显示整串。选中时提交已选文字，再用余码开启新组合。
+开关关闭或光标在首尾时查询整串，普通的前缀候选仍走原有的逐段确认。「按音节跳转」由 `keys.syllable_jump_keys` 保存，
+勾选后折算成 `syllable_prev` / `syllable_next`。向右跳到下一处分段，手敲分隔符时停在符号后；
+找不到下一处分段就到末尾。光标已在末尾时从开头查找。向左找不到切分时逐码移动。
+Tab 的出厂绑定仍是移动高亮。
+
 ### 4.6 造词反推读音
 
 `generate_word_pinyin()`（generate.rs）三级策略：整词读音笛卡尔积回查命中 → 子词 DP 切分继承读音

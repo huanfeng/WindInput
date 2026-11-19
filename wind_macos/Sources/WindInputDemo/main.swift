@@ -218,7 +218,8 @@ final class IMEHarness: NSObject {
                 let logical = Self.scaleRects(r, by: s)
                 DispatchQueue.main.async { [weak self] in self?.panel.updateRects(logical) }
             }
-        case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition:
+        case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition,
+             DownstreamCmd.commitThenDefer:
             // 鼠标选词 commit 走 push, 路由回 NSTextView
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }

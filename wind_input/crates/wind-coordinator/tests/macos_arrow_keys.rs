@@ -13,7 +13,9 @@ use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::EVENT_KEY_DOWN;
-use wind_keys::keymap::{VK_BACKTICK, VK_DOWN, VK_LEFT, VK_RIGHT};
+use wind_keys::keymap::{
+    VK_BACKTICK, VK_DOWN, VK_LEFT, VK_QUOTE, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+};
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
@@ -81,13 +83,15 @@ fn coord(cfg: Config) -> std::sync::Arc<Coordinator> {
     Coordinator::new_headless(cfg, Some(&data_dir()))
 }
 
-/// ← 从末尾进入编辑：光标进编码区，随后打的字符**插在光标处**，候选按整串重算。
+/// 左移后插入字母，只查光标前缀，回到末尾后重新查询整串。
 #[test]
 fn left_enters_code_and_mid_insert_requeries() {
     if !data_ready() {
         return;
     }
-    let c = coord(macos_config());
+    let mut cfg = macos_config();
+    cfg.keys.caret_scoped_candidates = true;
+    let c = coord(cfg);
     press(&c, "hi");
     assert_eq!(c.debug_input_buffer(), "hi");
     let caret_end = c.debug_ui_caret_bytes();
@@ -101,14 +105,150 @@ fn left_enters_code_and_mid_insert_requeries() {
     let caret_left = c.debug_ui_caret_bytes();
     assert_eq!(caret_end - caret_left, 1, "左移一个字符");
 
-    // 光标处插入：`hi` → `hai`，候选按整串重查（「海」进首页）。
+    // 光标处插入：`hi` → `ha|i`。
     press(&c, "a");
     assert_eq!(c.debug_input_buffer(), "hai");
+    press_vk(&c, VK_RIGHT);
     assert!(
         c.debug_page_texts().iter().any(|t| t == "海"),
         "hai 的候选应含「海」，实际: {:?}",
         c.debug_page_texts()
     );
+}
+
+/// 在全拼和双拼里，按音节跳转后可以直接提交前段，再选择余码。
+#[test]
+fn caret_scoped_selection_commits_and_refreshes_tail() {
+    if !data_ready() {
+        return;
+    }
+    for (schema, input, suffix) in [
+        ("pinyin", "nihaoma", "haoma"),
+        ("shuangpin", "nihcma", "hcma"),
+    ] {
+        let mut cfg = macos_config();
+        cfg.schema.available = vec![schema.into()];
+        cfg.schema.active = schema.into();
+        cfg.keys.syllable_jump_keys = vec!["tab".into()];
+        cfg.keys.caret_scoped_candidates = true;
+        let c = coord(cfg);
+        press(&c, input);
+        let end = c.debug_ui_caret_bytes();
+        press_vk(&c, VK_TAB);
+        let first = c.debug_ui_caret_bytes();
+        assert_eq!(first, 2);
+        press_vk(&c, VK_TAB);
+        assert!((first + 1..end).contains(&c.debug_ui_caret_bytes()));
+        press_vk(&c, VK_TAB);
+        assert_eq!(c.debug_ui_caret_bytes(), end);
+        press_vk(&c, VK_TAB);
+        assert_eq!(c.debug_ui_caret_bytes(), first);
+        assert_eq!(c.debug_page_texts().first().map(String::as_str), Some("你"));
+        let act = press_vk(&c, VK_SPACE);
+        assert!(
+            matches!(act, KeyAction::CommitThenDeferComposition { ref commit_text, .. }
+            if commit_text == "你"),
+            "{act:?}"
+        );
+        assert_eq!(c.debug_input_buffer(), suffix);
+        assert!(!c.debug_page_texts().is_empty());
+    }
+}
+
+/// 默认只移动光标，Tab 跳转后仍可按整串选词。
+#[test]
+fn caret_jump_keeps_full_candidates_by_default() {
+    if !data_ready() {
+        return;
+    }
+    let mut cfg = macos_config();
+    cfg.keys.syllable_jump_keys = vec!["tab".into()];
+    let c = coord(cfg);
+    press(&c, "nihao");
+    let full = c.debug_page_texts();
+    assert_eq!(full.first().map(String::as_str), Some("你好"));
+
+    press_vk(&c, VK_LEFT);
+    assert_eq!(c.debug_page_texts(), full);
+    press_vk(&c, VK_TAB);
+    press_vk(&c, VK_TAB);
+    assert_eq!(c.debug_ui_caret_bytes(), 2);
+    assert_eq!(c.debug_page_texts(), full);
+    assert_eq!(committed(&press_vk(&c, VK_SPACE)), Some("你好"));
+}
+
+/// Tab 在没有边界时跳到末尾，有手敲分隔符时停在符号后。
+#[test]
+fn tab_uses_manual_boundaries_and_end() {
+    if !data_ready() {
+        return;
+    }
+    let mut cfg = macos_config();
+    cfg.keys.syllable_jump_keys = vec!["tab".into()];
+    cfg.keys.select_key_groups.clear();
+    cfg.schema.pinyin.separator = "quote".into();
+    let c = coord(cfg);
+
+    press(&c, "ni");
+    assert!(matches!(press_vk(&c, VK_TAB), KeyAction::Consumed));
+    press_vk(&c, VK_LEFT);
+    press_vk(&c, VK_TAB);
+    assert_eq!(c.debug_ui_caret_bytes(), 2);
+
+    press_vk(&c, VK_QUOTE);
+    assert_eq!(c.debug_input_buffer(), "ni'");
+    assert!(matches!(press_vk(&c, VK_TAB), KeyAction::Consumed));
+
+    press(&c, "hao");
+    assert_eq!(c.debug_input_buffer(), "ni'hao");
+    press_vk(&c, VK_TAB);
+    assert_eq!(c.debug_ui_caret_bytes(), 3);
+    press_vk(&c, VK_TAB);
+    assert_eq!(c.debug_ui_caret_bytes(), 6);
+}
+
+/// 五笔无分段时向右到末尾，五笔拼音按音节跳，两者选词均保留余码。
+#[test]
+fn wubi_schemes_can_jump_and_commit_a_prefix() {
+    if !data_ready() {
+        return;
+    }
+    for (schema, input, suffix) in [("wubi86", "aa", "a"), ("wubi86_pinyin", "nihao", "hao")] {
+        let mut cfg = macos_config();
+        cfg.schema.available = vec![schema.into()];
+        cfg.schema.active = schema.into();
+        cfg.keys.highlight_keys.push("arrows".into());
+        cfg.keys.syllable_jump_keys = vec!["arrows".into()];
+        cfg.keys.caret_scoped_candidates = true;
+        let c = coord(cfg);
+        press(&c, input);
+        assert_eq!(c.debug_input_buffer(), input);
+        let forward = press_vk(&c, VK_DOWN);
+        if schema == "wubi86" {
+            assert!(matches!(forward, KeyAction::Consumed));
+        } else {
+            assert!(matches!(forward, KeyAction::UpdateComposition { .. }));
+            press_vk(&c, VK_DOWN);
+        }
+        assert!(matches!(
+            press_vk(&c, VK_UP),
+            KeyAction::UpdateComposition { .. }
+        ));
+        assert!(matches!(
+            press_vk(&c, VK_DOWN),
+            KeyAction::UpdateComposition { .. }
+        ));
+        press_vk(&c, VK_UP);
+        let first = c.debug_page_texts()[0].clone();
+        let act = press_vk(&c, VK_SPACE);
+        assert!(
+            matches!(act, KeyAction::CommitThenDeferComposition { ref commit_text, .. }
+            if commit_text == &first),
+            "{schema}: {act:?}"
+        );
+        assert_eq!(c.debug_input_buffer(), suffix, "{schema}");
+        assert!(!c.debug_page_texts().is_empty(), "{schema}");
+    }
 }
 
 /// `caret_right` 到末尾 = 上屏高亮候选（macOS「→ 进入选词」）。

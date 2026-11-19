@@ -6,8 +6,7 @@
 //!   `'` 分隔符），故字节 == 字符 == UTF-16 单元；但本模块不假设这点，一律走 char boundary，
 //!   避免将来缓冲混入非 ASCII 时 `String` 切片 panic（Go 切 `string` 越界只是运行时错，Rust
 //!   切非边界直接 panic，这是移植中唯一必须收紧的地方）。
-//! - 光标**不参与引擎查询**：`update_candidates` 恒以整串 buffer 查询，移动光标不重算候选。
-//!   中间插入字符后按新的完整 buffer 全量重算，与在末尾输入无差别。
+//! - 全拼、双拼、码表和混输的主输入在光标位于编码中间时按前缀查询。
 //! - 已转换前缀（`committed_text`）是只读前缀，光标进不去：Home 只到 buffer 开头。
 
 /// 向下取到最近的字符边界（`i` 已在边界或越界时原样/截断返回）。
@@ -128,7 +127,7 @@ pub(crate) struct BufEdit<'a> {
     cased: Option<&'a mut String>,
 }
 
-/// 把拼音拆分串（`fang'xiang`）对回缓冲（`fangxiang`），得到每个音节在**缓冲内**的字节区间。
+/// 将音节或码表拆分串对回缓冲，得到每段在缓冲内的字节区间。
 ///
 /// 对不上（双拼的拆分串是展开后的全拼、字母与击键不同；缓冲里混了非字母）返回 `None`
 /// ——调用方据此退回按字母移动，宁可不跳也不跳错。
@@ -136,6 +135,7 @@ pub(crate) fn syllable_spans(buffer: &str, split: &str) -> Option<Vec<(usize, us
     let mut spans = Vec::new();
     let mut at = 0usize;
     for syl in split.split('\'').filter(|s| !s.is_empty()) {
+        at = buffer.len() - buffer[at..].trim_start_matches('\'').len();
         let end = at + syl.len();
         if !buffer.is_char_boundary(end) || !buffer[at..end].eq_ignore_ascii_case(syl) {
             return None;
@@ -143,16 +143,15 @@ pub(crate) fn syllable_spans(buffer: &str, split: &str) -> Option<Vec<(usize, us
         spans.push((at, end));
         at = end;
     }
-    (at == buffer.len() && !spans.is_empty()).then_some(spans)
+    (buffer[at..].trim_matches('\'').is_empty() && !spans.is_empty()).then_some(spans)
 }
 
-/// 左移到「上一个音节的起点」：光标在音节中间 → 该音节起点；恰在起点 → 前一个音节起点；
-/// 已在最左 → 0。`fang'xiang` 光标在末尾，按一下落到 `xiang` 前，再按落到 `fang` 前。
+/// 向左跳到最近的音节边界，已在边界时继续跳到前一个边界。
 pub(crate) fn syllable_left(spans: &[(usize, usize)], cursor: usize) -> usize {
     spans
         .iter()
-        .map(|&(start, _)| start)
-        .rfind(|&start| start < cursor)
+        .map(|&(_, end)| end)
+        .rfind(|&end| end < cursor)
         .unwrap_or(0)
 }
 

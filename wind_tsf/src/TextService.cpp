@@ -4954,20 +4954,20 @@ BOOL CTextService::_InitIPCClient()
     });
 
     // Set up commit text callback for mouse click on candidate
-    _pIPCClient->SetCommitTextCallback([pThis](const std::wstring& text) {
+    _pIPCClient->SetCommitTextCallback([pThis](const ServiceResponse& response) {
         // This callback is called from the async reader thread
-        WIND_LOG_DEBUG_FMT(L"Commit text received from Go, textLen=%zu\n", text.length());
+        WIND_LOG_DEBUG_FMT(L"Commit text received from core, textLen=%zu\n", response.text.length());
 
         // Use PostCommitText to ensure EndComposition is called before InsertText on UI thread
         // This fixes the issue where text was inserted into composition range
         if (pThis->_pLangBarItemButton != nullptr)
         {
-            pThis->_pLangBarItemButton->PostCommitText(text);
+            pThis->_pLangBarItemButton->PostCommitText(response);
         }
         else
         {
             // Fallback: direct InsertText (composition won't be ended properly)
-            pThis->InsertText(text);
+            pThis->InsertText(response.text);
         }
     });
 
@@ -7450,17 +7450,22 @@ void CTextService::HandlePairCommitPush(const std::wstring& text, uint32_t moveL
     _pKeyEventSink->HandlePairCommitPush(text, moveLeft);
 }
 
-BOOL CTextService::CommitTextViaSyntheticKey(const std::wstring& text, BOOL replacingHeld)
+BOOL CTextService::CommitTextViaSyntheticKey(const std::wstring& text, BOOL replacingHeld,
+                                             const std::wstring& continuation, UINT timeoutMs)
 {
     if (_pKeyEventSink != nullptr &&
-        _pKeyEventSink->QueueAsyncCommitViaSyntheticKey(text, replacingHeld))
+        _pKeyEventSink->QueueAsyncCommitViaSyntheticKey(text, replacingHeld, FALSE, 0,
+                                                       continuation, timeoutMs))
     {
         return TRUE;
     }
     // KeyEventSink 未装配，或合成按键注入失败（SendInput 出错，极罕见）：退回旧的
     // 直接异步提交，保证至少不丢字（代价是回到 nonKeyContext 的已知问题面）。
     WIND_LOG_WARN(L"CommitTextViaSyntheticKey: falling back to direct async CommitText\n");
-    return CommitText(text, TRUE, replacingHeld);
+    const BOOL committed = CommitText(text, TRUE, replacingHeld);
+    if (committed && !continuation.empty())
+        StashDeferredComposition(continuation, timeoutMs, 0);
+    return committed;
 }
 
 BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
