@@ -28,7 +28,7 @@ pub use funcs::action::validate_toast_args;
 pub use funcs::value::generate_uuid;
 pub use lint::{Hint, lint_parsed, lint_phrase};
 pub use parser::{contains_marker_call, parse};
-pub use phrase::{PhraseEval, evaluate_phrase, is_cmdbar_grammar, run_actions};
+pub use phrase::{PhraseEval, evaluate_phrase, is_cmdbar_grammar, plain_type_text, run_actions};
 pub use registry::{Category, FuncSpec, Registry, default_registry};
 pub use services::{
     CliSpawn, ClipboardService, ConfigService, DEFAULT_CLI_WAIT_MS, DictService, ImeController,

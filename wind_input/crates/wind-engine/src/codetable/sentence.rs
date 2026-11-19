@@ -696,6 +696,15 @@ enum GrammarSource {
     Ready(Arc<dyn Grammar>),
 }
 
+/// 词库词条在整句 / 逆切分里的文本。`None` = 不进（特殊语法）；`Some(None)` = 原文；
+/// `Some(Some(t))` = 纯文本直通，用上屏文本 `t`。两处共用，判据不能漂移。
+pub(crate) fn sentence_text(text: &str) -> Option<Option<String>> {
+    if !text.contains('$') && !text.contains('{') {
+        return Some(None);
+    }
+    wind_cmdbar::plain_type_text(text).map(Some)
+}
+
 impl CodeSentenceDecoder {
     /// 诊断：两张懒表里已建好的那几张的自报大小。不触发构建。
     pub(crate) fn memory_parts(&self) -> Vec<crate::engine::MemPart> {
@@ -856,16 +865,18 @@ impl CodeSentenceDecoder {
         for p in 0..bytes {
             for q in (p + 1)..=(p + self.max_code_length).min(bytes) {
                 let code = &input[p..q];
-                for hit in dm.search(code, MAX_HOMOGRAPHS) {
-                    // 特殊语法词条（`$CC` 命令 / `$SS` 组 / `{..}` 求值模板）不进整句：
-                    // 它们要到协调器 `finalize_candidates` 才展开，且只认「整条候选即命令」
-                    // 的锚定，拼进整句就是把源码当文本显示/上屏（AtomGit#1「整句模式中
-                    // 出现直通内容」）。判据与逆切分 `split_segment` 同一个（含 `$` 或
-                    // `{`），代价是字面含 `$`、`{` 的符号条目同样让路；剔光的段视同无码。
-                    if hit.text.contains('$') || hit.text.contains('{') {
+                for mut hit in dm.search(code, MAX_HOMOGRAPHS) {
+                    // 特殊语法词条整句里不能求值也不能执行动作，拼进去就是把源码当文本显示/
+                    // 上屏（AtomGit#1）。例外：纯文本直通 `$CC("标签", type("字"))` 上屏什么在
+                    // 解析期就定了，按「字」当普通词条用；其余剔除，剔光的段视同无码。
+                    // 打分仍按词库原文（词频/简码索引都以原文为键），打完分再换文本。
+                    let Some(plain) = sentence_text(&hit.text) else {
                         continue;
-                    }
+                    };
                     let (weight, total, is_short) = self.weight_of(dm, code, &hit);
+                    if let Some(t) = plain {
+                        hit.text = t;
+                    }
                     // 串尾轻罚、串中重罚——见两个常量的文档。
                     let penalty = match (is_short, q == bytes) {
                         (false, _) => 0.0,
@@ -1386,6 +1397,35 @@ mod tests {
             decoder().decode("niysoix", &dm2).is_none(),
             "直通段视同无码，含该段的整句须无解"
         );
+    }
+
+    /// 纯文本直通 `$CC("标签", type("字"))` 进整句，用上屏文本「字」而非标签；
+    /// 带插值 / 多动作 / Effect 的仍不进（AtomGit#1 后续：文本词条不该被一并屏蔽）。
+    #[test]
+    fn plain_type_entry_joins_sentence_with_typed_text() {
+        let dm = DictManager::new();
+        dm.register_layer(Box::new(MemLayer::new(&[
+            ("niys", "你用", 900),
+            ("oba", r#"$CC("横_一", type("一"))"#, 700),
+        ])));
+        let r = decoder()
+            .decode("niysoba", &dm)
+            .expect("纯 type 词条应进整句");
+        assert_eq!(r.text, "你用一");
+        assert_eq!(r.words, vec!["你用", "一"]);
+
+        for src in [
+            r#"$CC("x", type("{last(1)}"))"#,
+            r#"$CC("x", type("a"), open("https://x/"))"#,
+            r#"$CC("x", open("https://x/"))"#,
+        ] {
+            let dm2 = DictManager::new();
+            dm2.register_layer(Box::new(MemLayer::new(&[
+                ("niys", "你用", 900),
+                ("oba", src, 700),
+            ])));
+            assert!(decoder().decode("niysoba", &dm2).is_none(), "{src}");
+        }
     }
 
     #[test]

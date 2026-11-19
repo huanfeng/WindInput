@@ -9,6 +9,8 @@ wind-candidate = { path = "../wind-candidate" }
 wind-dict = { path = "../wind-dict" }
 wind-store = { path = "../wind-store" }
 wind-config = { path = "../wind-config" }
+# 只用 parser（`plain_type_text`），判整句里哪些 `$CC` 词条是纯文本直通；不求值。
+wind-cmdbar = { path = "../wind-cmdbar" }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

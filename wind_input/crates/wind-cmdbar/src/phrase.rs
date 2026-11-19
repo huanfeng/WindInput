@@ -6,7 +6,7 @@
 //! 线程/求值：display 侧只用纯函数（[`Registry::with_builtins`]）即可；命令动作需要
 //! 宿主注入 [`Services`](crate::services::Services) 后用 [`Registry::full`]。
 
-use crate::ast::OnError;
+use crate::ast::{Expr, OnError, Phrase, StringPart};
 use crate::context::EvalContext;
 use crate::error::Result;
 use crate::eval::{ArrayExpansion, evaluate, expand_array};
@@ -99,10 +99,69 @@ pub fn run_actions(
     (insert, first_err)
 }
 
+/// 源是不是「纯文本直通」：`$CC("标签", type("字面量"))`——恰一个动作、动作是 `type`、
+/// 实参是不含插值的字符串字面量、无 modifiers（`$CC1` 带 `prefix`，故不算）。
+/// 返回上屏文本（即 `type` 的实参，不是标签）；其余一律 `None`。
+///
+/// 给不能求值、不能执行动作的场合用（码表整句词图）：这类词条上屏什么在解析期就定了，
+/// 没有副作用，可以当普通词条用；含插值 / 多动作 / Effect 动作的则不行。
+pub fn plain_type_text(src: &str) -> Option<String> {
+    let Ok(Phrase::Command(cmd)) = parse(src) else {
+        return None;
+    };
+    if !cmd.modifiers.is_empty() || cmd.actions.len() != 1 {
+        return None;
+    }
+    let Expr::Call { name, args, named } = &cmd.actions[0] else {
+        return None;
+    };
+    if name != "type" || args.len() != 1 || !named.is_empty() {
+        return None;
+    }
+    let Expr::StringLit(parts) = &args[0] else {
+        return None;
+    };
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            StringPart::Text(t) => out.push_str(t),
+            StringPart::Interp(_) => return None,
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::MemoryContext;
+
+    #[test]
+    fn plain_type_text_only_for_literal_type() {
+        assert_eq!(
+            plain_type_text(r#"$CC("横_一", type("一"))"#).as_deref(),
+            Some("一")
+        );
+        // 标签与上屏文本不同时取实参。
+        assert_eq!(
+            plain_type_text(r#"$CC("x", type("a\"b"))"#).as_deref(),
+            Some("a\"b")
+        );
+        for src in [
+            r#"$CC("x", type("{date()}"))"#,                // 插值
+            r#"$CC("x", type(clip()))"#,                    // 非字面量
+            r#"$CC("x", type("a"), type("b"))"#,            // 多动作
+            r#"$CC("x", open("https://a.b/"))"#,            // Effect
+            r#"$CC("x", type("a"), open("https://a.b/"))"#, // 夹带副作用
+            r#"$CC1("x", type("a"))"#,                      // prefix modifier
+            r#"$CC("x", type(""))"#,                        // 空上屏
+            r#"$SS("g", "a", "b")"#,                        // 组
+            "{date()}",                                     // 模板
+            "普通词",                                       // 字面
+        ] {
+            assert_eq!(plain_type_text(src), None, "{src}");
+        }
+    }
 
     #[test]
     fn grammar_detection() {

@@ -44,17 +44,20 @@
 - 来源：内部（2026-11-18 靶机日志定位，`wind_tsf.acad.8056.log`）
 - 分析与试过的写法：[`pair-commit-host-compat-notes.md`](pair-commit-host-compat-notes.md)
 
-## 2026-11-15 · 码表整句不再混入直通命令/模板源码（0.132）
+## 2026-11-15 · 码表整句不再混入直通命令/模板源码；纯文本直通除外（0.132）
 
 - 合入：待填（push 前回填）；范围：码表整句模式
 - 变化：句中切分出特殊语法词条的编码段（直通词条 `$CC("[查]：{last(1)}", open(...))` 编码
   `oix`，句中打 `niys'oix`）前：该词条以**源码原文**拼进整句候选，出「你用$CC(\"[查]：…」；
   后：`$CC`/`$SS`/`{..}` 词条不进整句词图，含该段的整句解不存在（该段视同无码），单独打
-  `oix` 仍正常出直通候选并执行动作。
+  `oix` 仍正常出直通候选并执行动作。**例外**：纯文本直通 `$CC("横_一", type("一"))`
+  （恰一个 `type` 动作、实参为无插值字面量、无 modifiers）按普通词条进整句与逆切分，
+  段文本取上屏文本「一」而非标签；整句里只显示上屏文本，不显示标签。
 - 触发条件：出厂即生效（凡码表收了特殊语法词条且整句开着；与逆切分对特殊语法的既有剔除
   同判据）。
 - 回退旧行为：无（设计变更）。
-- 钉住的测试：`codetable::sentence::tests::direct_command_entry_never_enters_sentence_lattice`
+- 钉住的测试：`codetable::sentence::tests::direct_command_entry_never_enters_sentence_lattice`、
+  `plain_type_entry_joins_sentence_with_typed_text`、`wind_cmdbar::phrase::tests::plain_type_text_only_for_literal_type`
 - 来源：AtomGit#1「整句模式中出现直通内容」
 
 ## 2026-11-13 · 拼音可固定到第 N 位；多条固定位置互不挤位（0.132）

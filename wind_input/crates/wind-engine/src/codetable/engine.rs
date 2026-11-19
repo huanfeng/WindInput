@@ -685,7 +685,17 @@ impl CodeTableEngine {
                 .collect();
             wind_candidate::apply_shadow(&mut v, &rec.deleted, &pinned);
         }
-        v.retain(|c| !c.text.contains('$') && !c.text.contains('{'));
+        // 特殊语法不进逆切分；纯文本直通 `$CC(.., type("字"))` 换成上屏文本（与整句同判据）。
+        let mut v: Vec<Candidate> = v
+            .into_iter()
+            .filter_map(|mut c| {
+                let plain = super::sentence::sentence_text(&c.text)?;
+                if let Some(t) = plain {
+                    c.text = t;
+                }
+                Some(c)
+            })
+            .collect();
         v.truncate(limit);
         v
     }
@@ -2474,6 +2484,24 @@ mod tests {
         assert_eq!(
             texts(&e.convert("hfkn", 50).unwrap()),
             vec!["很可难", "很可能"]
+        );
+    }
+
+    /// 逆切分与整句同判据：纯文本直通 `$CC(.., type("字"))` 取上屏文本参与切分，命令类仍剔除。
+    #[test]
+    fn split_segment_plain_type_entry_uses_typed_text() {
+        let e = split_engine(
+            &[
+                ("ob", r#"$CC("横_一", type("一"))"#, 700),
+                ("oc", r#"$CC("查", open("https://x/"))"#, 700),
+            ],
+            split_opts(),
+        );
+        assert!(texts(&e.convert("hfob", 50).unwrap()).contains(&"很可一"));
+        assert!(
+            !texts(&e.convert("hfoc", 50).unwrap())
+                .iter()
+                .any(|t| t.contains('$'))
         );
     }
 
