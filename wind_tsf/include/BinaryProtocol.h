@@ -1007,6 +1007,11 @@ constexpr const char* CONFIG_KEY_SPACE_CUSTOM_COLS = "space_custom_cols";
 // 吃键闸门（_pairPendingDepth）在本 DLL，故陈旧判据也必须在本地：若只有 core 过期而这边
 // 照吃跳出键，core 回 PassThrough 已太晚（「吃了再吐」，不补发 WM_KEYDOWN 的宿主会丢键）。
 constexpr const char* CONFIG_KEY_PAIR_STATE_TTL = "pair_state_ttl";
+// 配对插入提交方式（直写 vs 按键注入）。格式：enabled(u8)。
+// 开启后 InsertTextWithCursor 与空闲态 ASCII 提交走 InjectUnicodeText（VK_PACKET 按键注入），
+// 替代 TSF 直写——AutoCAD 表格在位编辑器丢弃直写的 ASCII 却谎报 S_OK（2026-11-18 靶机实测）。
+// 按客户端现算（compat pair_via_comp 覆盖全局 commit_via_composition），每次重连从默认（关）起步。
+constexpr const char* CONFIG_KEY_PAIR_VIA_COMP = "pair_via_comp";
 // 语言栏按钮的悬停提示文本。格式：[ch:u16(LE)]...（UTF-16LE，无长度前缀，value 即整段）。
 // 文案与选择逻辑全在服务端，本 DLL 只存一份原样返回——本地只有中英态与 CapsLock 两个量，
 // 判不出「密码框」「已禁用」这些成因，而图标只能表达「不可用」，说清是哪一种全靠 tooltip。

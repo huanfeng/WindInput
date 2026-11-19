@@ -972,6 +972,7 @@ impl Coordinator {
         self.relax_password_suppress_for_focus();
         self.push_password_suppress_config(0);
         self.push_english_pair_config(0);
+        self.push_pair_via_comp_config(0);
         self.push_composition_placeholder_config(0);
         self.push_space_before_digit_config(0);
         self.push_multiline_commit_config(0);

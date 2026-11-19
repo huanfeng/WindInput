@@ -8005,6 +8005,35 @@ fallback:
     return TRUE;
 }
 
+// 以 VK_PACKET（KEYEVENTF_UNICODE）把文本注入宿主，产生真实 WM_CHAR。
+//
+// AutoCAD 表格在位编辑器丢弃 TSF 直写的 ASCII 却谎报 S_OK（2026-11-18 靶机实测）。靶机上
+// 试过的 TSF 写法——直写两字符、开组合 SetText、同会话逐字符插入、每字符独立会话、直接复用
+// CommitText——宿主 store 读回都含字符，屏幕却全无；只有真实按键消息能上屏。
+// 配对插入后的光标回移由调用方走 _SimulatePairKey：修饰键按住时它会延后到松开再发，
+// 否则物理 Shift 会把注入的 VK_LEFT 变成 Shift+Left 选中右括号。
+BOOL CTextService::InjectUnicodeText(const std::wstring& text)
+{
+    std::vector<INPUT> inputs;
+    inputs.reserve(text.length() * 2);
+    for (wchar_t ch : text)
+    {
+        // 标记为自生成，避免被自己的 OnTestKeyDown 当成真实按键二次处理
+        if (_pKeyEventSink != nullptr) _pKeyEventSink->MarkSyntheticKey(VK_PACKET);
+        INPUT down = {};
+        down.type = INPUT_KEYBOARD;
+        down.ki.wScan = ch;
+        down.ki.dwFlags = KEYEVENTF_UNICODE;
+        inputs.push_back(down);
+        INPUT up = down;
+        up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        inputs.push_back(up);
+    }
+    const UINT sent = SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
+    WIND_LOG_DEBUG_FMT(L"InjectUnicodeText: sent=%u of %zu\n", sent, inputs.size());
+    return sent == inputs.size() ? TRUE : FALSE;
+}
+
 // FOCUS_LOST_REASON_* 的日志名。日志文案与协议值共用一处，避免两边各写一份而说反
 // （TextService.cpp 的 "notifying service" 就是这么错了一年）。
 static const wchar_t* FocusLostReasonName(uint8_t reason)

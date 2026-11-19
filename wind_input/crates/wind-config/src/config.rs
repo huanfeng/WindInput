@@ -4852,6 +4852,20 @@ pub struct AutoPairConfig {
     /// 跨焦点的陈旧不归它管——失焦一律清空配对状态（见 `handle_focus_lost`）。
     #[serde(default = "default_pair_state_ttl_secs")]
     pub state_ttl_secs: u32,
+    /// 配对插入改走 Unicode 按键注入提交（内部项，默认关 = 现状的 TSF 直写）。
+    ///
+    /// **为什么需要**：配对插入（`InsertTextWithCursor`）走 `ITfInsertAtSelection` 直写宿主
+    /// text store。AutoCAD 表格在位编辑器谎报 `S_OK` 却丢弃写入的 ASCII（2026-11-18 靶机
+    /// 实测：半角 `()` 丢、全角「（）」接受）；开组合 SetText、逐字符会话等 TSF 写法同样
+    /// 无效，只有 `VK_PACKET` 产生的真实 WM_CHAR 能上屏。
+    ///
+    /// 开启后 DLL 以按键注入上屏配对文本（空闲态被吃下的 ASCII 标点同理），光标回移仍走
+    /// `VK_LEFT`（修饰键按住时延后到松开，避免 Shift+Left 选中右符号）。
+    ///
+    /// 默认关：直写在多数宿主已工作多年；compat 层 `pair_via_comp` 按应用覆盖本值，
+    /// 目前只有 AutoCAD 需要。
+    #[serde(default)]
+    pub commit_via_composition: bool,
 }
 
 impl Default for AutoPairConfig {
@@ -4863,6 +4877,7 @@ impl Default for AutoPairConfig {
             english_pairs: default_english_pairs(),
             jump_out_keys: default_jump_out_keys(),
             state_ttl_secs: default_pair_state_ttl_secs(),
+            commit_via_composition: false,
         }
     }
 }

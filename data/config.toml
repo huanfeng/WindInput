@@ -1111,6 +1111,10 @@ jump_out_keys = ["right_symbol"]
 # 从最后一次按键算起，持续输入会不断刷新，在括号里打多久都不会误过期。
 # 跨焦点不归它管——失焦一律清空配对状态。
 state_ttl_secs = 120
+# 配对插入改用 Unicode 按键注入上屏（默认关 = TSF 直写）。AutoCAD 表格在位编辑器会丢弃
+# 直写的 ASCII 却谎报成功，半角括号静默丢失；按键注入产生真实字符消息。
+# 单个应用可在 compat.toml 的 pair_via_comp 里按应用覆盖。
+commit_via_composition = false
 
 # 生僻字模式：用**当前方案**的编码输入，候选只留生僻字。找一个平时打不出来的字时用。
 #

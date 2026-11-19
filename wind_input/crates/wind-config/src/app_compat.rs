@@ -1058,6 +1058,22 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_pair: Option<bool>,
+    /// 该应用的配对插入是否改走 Unicode 按键注入提交；`None` = 跟随全局
+    /// `input.auto_pair.commit_via_composition`（默认直写）。
+    ///
+    /// **必须是 `Option`**，理由同 `auto_pair`。三态消费在推送路径
+    /// `push_pair_via_comp_config`：直查目标 PID/窗口的规则表，未配回落全局，
+    /// 不走 `active_compat` 焦点槽（后台进程会收到错误值）。
+    ///
+    /// 典型用途：AutoCAD 表格在位编辑器、Chromium 系（WebView2/Tauri）宿主——
+    /// 它们丢弃 `ITfInsertAtSelection` 直写却谎报 S_OK，字符静默丢失
+    /// （2026-11-18 靶机实测，见 config.rs `commit_via_composition` 注释）。
+    #[serde(
+        default,
+        deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pair_via_comp: Option<bool>,
     /// 该应用是否启用中英 / 中数间自动补空格；`None` = 跟随全局 `input.spacing.*`。
     ///
     /// 只能关不能「开」出全局没开的那一档：`Some(true)` 等于跟随全局（取哪几种交界仍由全局
@@ -2787,6 +2803,38 @@ mod newline_style_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `pair_via_comp` 三态：未配 = None（跟随全局）；配 true/false 各自生效；
+    /// 容错值回落 None 而不是让整份 compat.toml 失效。
+    #[test]
+    fn pair_via_comp_three_states() {
+        let unset = AppCompat::from_single_layer_text("[[apps]]\nprocess = \"a.exe\"\n");
+        assert_eq!(unset.get_rule("a.exe").and_then(|r| r.pair_via_comp), None);
+
+        let on = AppCompat::from_single_layer_text(
+            "[[apps]]\nprocess = \"acad.exe\"\npair_via_comp = true\n",
+        );
+        assert_eq!(
+            on.get_rule("acad.exe").and_then(|r| r.pair_via_comp),
+            Some(true)
+        );
+        assert_eq!(on.get_rule("other.exe").and_then(|r| r.pair_via_comp), None);
+
+        let off = AppCompat::from_single_layer_text(
+            "[[apps]]\nprocess = \"notepad.exe\"\npair_via_comp = false\n",
+        );
+        assert_eq!(
+            off.get_rule("notepad.exe").and_then(|r| r.pair_via_comp),
+            Some(false)
+        );
+
+        // 类型写错（"yes" / 1）只让本字段回落 None，不让整份 compat.toml 失效
+        // （compat 没有段级降级，不容错就是整份文件静默失效）。
+        let bogus = AppCompat::from_single_layer_text(
+            "[[apps]]\nprocess = \"b.exe\"\npair_via_comp = \"yes\"\n",
+        );
+        assert_eq!(bogus.get_rule("b.exe").and_then(|r| r.pair_via_comp), None);
+    }
 
     /// `assoc_placeholder` 优先于 `composition_placeholder`，都没配 = 空格；认不出的值退化为未配置。
     #[test]

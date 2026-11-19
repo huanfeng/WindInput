@@ -4,6 +4,7 @@
 #include "CandidateHotkeyPolicy.h"
 #include "HoldReplayPolicy.h"
 #include "NumberKeyPolicy.h"
+#include "PairCommitPolicy.h"
 #include "SpaceKeyPolicy.h"
 #include "SmartPunctPrevChar.h"
 #include "TextService.h"
@@ -2737,8 +2738,15 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
                 // No new composition, commit text atomically (end composition + insert in one EditSession)
                 // replacingHeld：智能符号 press2 要覆盖 hold 预览态里的中文符号；其余提交
                 // 路径为 FALSE，held 符号并入前缀一起上屏（见 CTextService::CommitText）。
-                _pTextService->CommitText(response.text, _inHotkeyDispatch,
-                                          response.replacingHeld ? TRUE : FALSE);
+                // 按键注入开关（pair_via_comp）开着的宿主（AutoCAD 表格等）会丢弃 TSF 直写的 ASCII：空闲态的
+                // 纯 ASCII 标点（如被吃下的右括号）改以 Unicode 按键注入，否则既不上屏也不报错。
+                bool asciiInject = _pairViaComposition.load(std::memory_order_relaxed) && !_isComposing &&
+                                   !response.replacingHeld && !response.text.empty();
+                for (wchar_t c : response.text)
+                    if (c < 0x20 || c > 0x7E) { asciiInject = false; break; }
+                if (!(asciiInject && _pTextService->InjectUnicodeText(response.text)))
+                    _pTextService->CommitText(response.text, _inHotkeyDispatch,
+                                              response.replacingHeld ? TRUE : FALSE);
                 QueryPerformanceCounter(&ctMid1);
 
                 // 上屏文本末位即新的「光标前一字符」，据此维护输入序列记账（见 header 注释）。
@@ -2879,7 +2887,15 @@ BOOL CKeyEventSink::_HandleServiceResponse(ResponseType* outType)
         _EndAssocBareSession(); // 这类应答会写宿主/开组合，联想会话随之结束
         {
             WIND_LOG_DEBUG(L"Processing InsertTextWithCursor response\n");
-            _pTextService->CommitText(response.text, _inHotkeyDispatch);
+            // 提交方式二选一（服务端 pair_via_comp 下发，默认关走直写 = 长期现状）：
+            //  · 按键注入：以 VK_PACKET 产生真实 WM_CHAR 上屏。AutoCAD 表格在位编辑器丢弃
+            //    TSF 直写的 ASCII 却谎报 S_OK（2026-11-18 靶机实测，TSF 的各种写法都救不了）。
+            //    注入失败回退直写。
+            //  · 直写：CommitText 无组合时走 InsertTextAtSelection。
+            // 两者之后都靠 _SimulatePairKey(VK_LEFT) 回移光标。
+            bool injectEnabled = _pairViaComposition.load(std::memory_order_relaxed);
+            if (!(injectEnabled && _pTextService->InjectUnicodeText(response.text)))
+                _pTextService->CommitText(response.text, _inHotkeyDispatch);
             // 输入序列记账：cursorOffset==0 时末位就是光标前一字符；cursorOffset>0（配对
             // 插入后光标回退到中间）时光标前其实是左符号，末位取的是右符号——但两者都是
             // 配对符号、都不是数字，结论同为清零，故无须为配对单独分支。
@@ -3354,6 +3370,15 @@ void CKeyEventSink::OnSyncConfig(const std::string& key, const std::vector<uint8
         uint16_t secs = *reinterpret_cast<const uint16_t*>(value.data());
         _pairStateTtlMs = (ULONGLONG)secs * 1000ULL;
         WIND_LOG_INFO_FMT(L"Pair state TTL updated: %d s\n", (int)secs);
+    }
+    else if (key == CONFIG_KEY_PAIR_VIA_COMP)
+    {
+        // 格式：enabled(u8)（对齐 Rust encode_pair_via_comp_value）。
+        // 开启后 InsertTextWithCursor 走按键注入提交，替代 TSF 直写。
+        const bool enabled = wind::paircommit::DecodePairViaComp(
+            value.data(), value.size(), _pairViaComposition.load());
+        _pairViaComposition.store(enabled);
+        WIND_LOG_INFO_FMT(L"Pair via composition updated: enabled=%d\n", enabled ? 1 : 0);
     }
     else if (key == CONFIG_KEY_CTRL_SPACE_TOGGLE)
     {

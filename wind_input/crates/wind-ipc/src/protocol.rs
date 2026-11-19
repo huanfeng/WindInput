@@ -590,6 +590,17 @@ pub const CONFIG_KEY_SPACE_CUSTOM_COLS: &str = "space_custom_cols";
 /// **刻意不并入 `CONFIG_KEY_JUMP_OUT_KEYS` 的 payload**：那个格式已经改过一次
 /// （前置 `right_symbol` u8，两侧解析偏移 1→2），再叠字段容易出现偏移不同步。
 pub const CONFIG_KEY_PAIR_STATE_TTL: &str = "pair_state_ttl";
+/// 配对插入提交方式（直写 vs 按键注入）同步键名。格式：`enabled(u8)`。
+///
+/// 开启后 DLL 对 `InsertTextWithCursor`（及空闲态 ASCII 提交）以 `VK_PACKET`
+/// 按键注入文本，再注入 `VK_LEFT` 回移光标，替代 `ITfInsertAtSelection` 直写。背景：
+/// AutoCAD 表格在位编辑器丢弃直写的 ASCII 却谎报 `S_OK`，字符静默丢失；TSF 的各种写法
+/// （含组合语义）都救不了，只有真实字符消息能上屏。
+///
+/// 按客户端现算（compat `pair_via_comp` 可按应用覆盖全局
+/// `input.auto_pair.commit_via_composition`），不走焦点槽——同
+/// `CONFIG_KEY_ENGLISH_PAIRS` 的 per-client 纪律。
+pub const CONFIG_KEY_PAIR_VIA_COMP: &str = "pair_via_comp";
 /// 诊断快照采集开关（会话级，随输入诊断 HUD 显隐）同步键名。格式：`enabled(u8)`。
 ///
 /// 采集本身要查三次窗口类名 + band，属于「只有排查时才值得付」的开销，故默认关闭、

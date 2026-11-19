@@ -27,6 +27,23 @@
 
 ---
 
+## 2026-11-19 · 配对插入可改走 Unicode 按键注入（未发版）
+
+- 合入：待填（push 前回填）；范围：全部方案的配对插入（中文标点 / 英文配对四条路径共用）
+- 变化：AutoCAD 表格在位编辑器里打半角配对符号 前：TSF 直写宿主 text store，宿主丢弃 ASCII
+  却谎报成功——半角 `()` `[]` 及被吃下的右符号静默丢失（全角「（）」恰好被接受）；后：开关
+  开启后配对文本与空闲态被吃下的 ASCII 标点改以 `VK_PACKET` 按键注入上屏，光标回移仍走
+  `VK_LEFT`（修饰键按住时延后到松开，避免 Shift+Left 选中右符号）。靶机实测 TSF 的各种写法
+  （直写、开组合 SetText、逐字符会话）宿主读回都含字符但屏幕全无，只有真实字符消息有效。
+- 触发条件：需开 `input.auto_pair.commit_via_composition = true`（出厂关 = 直写现状，键名沿用），
+  compat 层 `pair_via_comp` 可按应用覆盖；目前只有 AutoCAD（`acad.exe`）需要。
+- 回退旧行为：`input.auto_pair.commit_via_composition = false`（即出厂默认）。
+- 钉住的测试：`pair_commit_policy_test.cpp`（解码与默认值）、
+  `pair_via_composition.rs`（默认值与 compat 三态）、
+  `app_compat.rs::pair_via_comp_three_states`。
+- 来源：内部（2026-11-18 靶机日志定位，`wind_tsf.acad.8056.log`）
+- 分析与试过的写法：[`pair-commit-host-compat-notes.md`](pair-commit-host-compat-notes.md)
+
 ## 2026-11-15 · 码表整句不再混入直通命令/模板源码（0.132）
 
 - 合入：待填（push 前回填）；范围：码表整句模式

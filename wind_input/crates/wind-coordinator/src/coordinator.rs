@@ -3780,6 +3780,7 @@ impl Coordinator {
             for token in self.push_server.tokens_of_pid(pid) {
                 self.push_password_suppress_config(token);
                 self.push_english_pair_config(token);
+                self.push_pair_via_comp_config(token);
                 self.push_composition_placeholder_config(token);
                 self.push_space_before_digit_config(token);
                 self.push_multiline_commit_config(token);
@@ -5419,6 +5420,7 @@ impl Coordinator {
                 self.sync_capslock_hook();
                 // 推送英文自动配对配置到 TSF 客户端（client_token=0 = 广播到所有活跃客户端）
                 self.push_english_pair_config(0);
+                self.push_pair_via_comp_config(0); // 配对插入提交方式（组合语义 vs 直写，compat 可覆盖）
                 self.push_jump_out_keys_config(0); // 配对跳出键同步（英文模式跳出 + 中文转发放行）
                 // 密码框抑制策略：内存开关随配置回灌（关掉即解除当前抑制）+ 推给 DLL 吃键门控。
                 self.set_password_suppress_enabled(new_cfg.input.password_force_english);

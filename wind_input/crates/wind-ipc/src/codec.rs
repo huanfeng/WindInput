@@ -1971,6 +1971,13 @@ pub fn encode_pair_state_ttl_value(secs: u32) -> Vec<u8> {
     (secs.min(u16::MAX as u32) as u16).to_le_bytes().to_vec()
 }
 
+/// 编码配对插入提交方式开关（对齐 TSF `OnSyncConfig` 的 CONFIG_KEY_PAIR_VIA_COMP）。
+///
+/// 格式：enabled(u8)。`1` = 组合语义提交，`0` = 直写（现状）。
+pub fn encode_pair_via_comp_value(enabled: bool) -> Vec<u8> {
+    vec![enabled as u8]
+}
+
 /// 编码 Ctrl+空格 切换开关的值部分（对齐 TSF `OnSyncConfig` 的 CONFIG_KEY_CTRL_SPACE_TOGGLE）。
 /// 格式：enabled(u8)。GH#172。
 pub fn encode_ctrl_space_toggle_value(enabled: bool) -> Vec<u8> {

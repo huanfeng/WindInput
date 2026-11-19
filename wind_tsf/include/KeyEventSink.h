@@ -9,6 +9,7 @@
 #include "ToggleTapPolicy.h"
 #include "CtrlRawPolicy.h"
 #include "CtrlSpacePolicy.h"
+#include "PairCommitPolicy.h"
 #include <string>
 #include <cstdint>
 #include <atomic>
@@ -649,6 +650,13 @@ private:
     // 每次重连从默认（开）起步，握手时服务端必推。判据见 CtrlSpacePolicy.h。
     // 写在 IPC 读线程（OnSyncConfig）、读在 TSF 线程（OnTestKeyDown）⇒ atomic。
     std::atomic<bool> _ctrlSpaceToggleEnabled{wind::ctrlspace::kDefaultEnabled};
+
+    // 配对插入走按键注入提交（服务端经 CONFIG_KEY_PAIR_VIA_COMP 下发，compat
+    // `pair_via_comp` 覆盖全局 `input.auto_pair.commit_via_composition`，默认关 = 直写）。
+    // 开启时 InsertTextWithCursor 响应与空闲态 ASCII 提交走 InjectUnicodeText——AutoCAD
+    // 表格在位编辑器丢弃 TSF 直写的 ASCII 却谎报 S_OK。写在 IPC 读线程（OnSyncConfig）、
+    // 读在 TSF 线程（OnKeyDown 响应处理）⇒ atomic。
+    std::atomic<bool> _pairViaComposition{wind::paircommit::kDefaultPairViaComp};
 
     // Maximum duration (ms) for a toggle key press to count as a "tap"
     // Long presses beyond this threshold will NOT trigger mode toggle

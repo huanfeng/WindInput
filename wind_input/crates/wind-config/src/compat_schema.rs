@@ -342,6 +342,21 @@ pub static COMPAT_FIELDS: &[FieldMeta] = &[
     },
     FieldMeta {
         section: "apps",
+        key: "pair_via_comp",
+        kind: Kind::TriBool,
+        group: "behavior",
+        label: "配对走按键提交",
+        summary: "配对插入（括号/引号成对上屏）改用 Unicode 按键注入上屏，替代 TSF 直写。",
+        problem: "AutoCAD 表格在位编辑器会丢弃直写的 ASCII 却\
+                  谎报成功，半角括号静默丢失；按键注入产生真实字符消息，宿主能收到。默认跟随全局（直写）。",
+        hosts: &["acad.exe"],
+        options: &[],
+        depends_on: None,
+        protocol: false,
+        advanced: true,
+    },
+    FieldMeta {
+        section: "apps",
         key: "auto_spacing",
         kind: Kind::TriBool,
         group: "behavior",
