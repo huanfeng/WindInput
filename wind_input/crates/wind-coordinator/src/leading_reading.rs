@@ -287,8 +287,9 @@ impl Coordinator {
                 applied.orig_len,
                 total,
             );
-            // 候选自带的切分是按改写后的查询算的（`fan'gxiang`），不能拿来显示
+            // 候选自带的切分与辅码位置是按改写后的查询算的（`fan'gxiang`），不能拿来显示
             c.meta.preedit_split = None;
+            c.meta.aux_keys = None;
         }
         let body = self
             .engine_mgr

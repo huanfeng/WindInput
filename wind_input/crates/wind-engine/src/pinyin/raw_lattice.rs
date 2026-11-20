@@ -1109,6 +1109,8 @@ pub(super) struct RawBase {
     tail_aux: Vec<(usize, String, u8)>,
     /// 多字残码补全查过的残码单字，2c 复用
     partial_hits: Option<PartialHits>,
+    /// 带辅码节点的辅码分布（单链时为空），辅码整句据此定击键位置（[`aux_path`]）
+    aux_spans: AuxSpans,
 }
 
 /// 辅码边的输入：全偏移键对、辅码表与末键落单时的全拼残码（`SpConvertResult::partial_initial`）。
@@ -1149,6 +1151,10 @@ impl RawBase {
 
     pub(super) fn lattice(&self) -> &[Vec<WordNode>] {
         &self.lattice
+    }
+
+    pub(super) fn aux_spans(&self) -> &AuxSpans {
+        &self.aux_spans
     }
 
     /// 去掉带辅码节点的底图（比分闸门的对手：同终点不用辅码的最优路径）。
@@ -1250,7 +1256,7 @@ impl PinyinEngine {
         let _t = prof::span(Stage::ToWordNodes);
         self.drop_blocked_nodes(&mut nodes);
         // 辅码模式才有：单链时 `aux_spans` 为空。
-        let tail_aux = nodes[keys.len()]
+        let tail_aux: Vec<(usize, String, u8)> = nodes[keys.len()]
             .iter()
             .filter(|_| aux.is_some())
             .filter_map(|n| {
@@ -1271,10 +1277,12 @@ impl PinyinEngine {
             node_reach,
             tail_aux,
             partial_hits,
+            aux_spans,
         })
     }
 
     /// 2c 的整句图：只在键对恰好铺到末键之前时，在底图末端补残码节点，终点为整串；否则 `None`。
+    /// 另返回底图的辅码分布（见 [`RawBase::aux_spans`]）。
     ///
     /// 辅码模式下末端可能已有「音节 + 辅码」节点，判据改为末键前一位可达；残码节点与已有节点
     /// 同词同起点时取分高者。整串另可达（[`RawBase::tail_end`]）时那条整句由 step 2 出，这里
@@ -1284,7 +1292,7 @@ impl PinyinEngine {
         keys: &str,
         base: RawBase,
         partial: &str,
-    ) -> Option<(Vec<Vec<WordNode>>, usize)> {
+    ) -> Option<(Vec<Vec<WordNode>>, usize, AuxSpans)> {
         let plain_tail = base.tail_end().is_some();
         let RawBase {
             mut lattice,
@@ -1292,6 +1300,7 @@ impl PinyinEngine {
             last_slot_end,
             node_reach,
             mut partial_hits,
+            aux_spans,
             ..
         } = base;
         let end = keys.len();
@@ -1334,7 +1343,7 @@ impl PinyinEngine {
                 None => lattice[end].push(n),
             }
         }
-        Some((lattice, end))
+        Some((lattice, end, aux_spans))
     }
 }
 
@@ -1369,6 +1378,170 @@ pub(super) fn raw_learn_code(
     result
         .learn_code(keys)
         .filter(|(c, b)| !(c == code && *b == boundary))
+}
+
+/// 击键图整句沿路径读出的形态（见 [`aux_path`]）。
+pub(super) struct AuxPath {
+    /// 路径实际经过的音节（去辅码）的所打全拼码：各键对取首读音，末键落单取全拼残码
+    pub code: String,
+    /// `code` 的音节边界；超 64 字节为 0
+    pub boundary: u64,
+    /// 造词码（各节点规范码）；与 `code` / `boundary` 相同时 `None`（同 [`raw_learn_code`]）
+    pub learn_code: Option<(String, u64)>,
+    /// 辅码 `(击键起点, 长度)`，按起点升序；空 = 路径没用辅码
+    pub aux_keys: Vec<(u16, u8)>,
+    /// 路径终点（击键偏移）
+    pub end: usize,
+    /// 各音节（含落单残码）的击键起点
+    syllable_starts: Vec<usize>,
+}
+
+/// 按解码路径逐节点走击键：音节两键（前导 `'` 跳过），其后按 [`AuxSpans`] 登记的字序吃辅码，
+/// 紧随的 `'` 并入；节点末尾只剩一键时是残码（2c 残码节点、多字残码补全）。
+///
+/// `edges_all` 是建图用的全偏移键对（取首读音），`tail_partial` 是末键的全拼残码。路径与登记
+/// 对不上（不应发生）时 `None`，调用方照旧写候选。
+pub(super) fn aux_path(
+    result: &ViterbiResult,
+    keys: &str,
+    edges_all: &[RawEdge],
+    spans: &AuxSpans,
+    tail_partial: Option<&str>,
+) -> Option<AuxPath> {
+    let Some(pieces) = result.pieces.as_ref() else {
+        debug_assert!(false, "击键图整句缺路径片段：{:?}", result.words);
+        return None;
+    };
+    if pieces.len() != result.words.len() {
+        debug_assert!(false, "路径片段与词数不符：{:?}", result.words);
+        return None;
+    }
+    if keys.len() > usize::from(u16::MAX) {
+        return None;
+    }
+    let b = keys.as_bytes();
+    let edge_at = |pos: usize| {
+        let i = edges_all.binary_search_by_key(&pos, |e| e.start).ok()?;
+        let e = &edges_all[i];
+        (e.end == pos + 2 && e.end <= b.len())
+            .then(|| e.syllables.first().map(String::as_str))
+            .flatten()
+    };
+    let mut out = AuxPath {
+        code: String::new(),
+        boundary: 0,
+        learn_code: None,
+        aux_keys: Vec::new(),
+        end: 0,
+        syllable_starts: Vec::new(),
+    };
+    let mut boundary_ok = true;
+    let mut mark = |out: &mut AuxPath, pos: usize| {
+        if out.code.len() >= 64 {
+            boundary_ok = false;
+        } else {
+            out.boundary |= 1 << out.code.len();
+        }
+        out.syllable_starts.push(pos);
+    };
+    for (piece, word) in pieces.iter().zip(&result.words) {
+        let aux = spans.get(piece.start, piece.end, word).unwrap_or(&[]);
+        let mut used = 0;
+        let mut pos = piece.start;
+        let mut k = 0;
+        loop {
+            while pos < piece.end && b[pos] == b'\'' {
+                pos += 1;
+            }
+            if pos >= piece.end {
+                break;
+            }
+            if pos + 2 <= piece.end
+                && let Some(syl) = edge_at(pos)
+            {
+                mark(&mut out, pos);
+                out.code.push_str(syl);
+                pos += 2;
+                if let Some((_, prefix)) = aux.iter().find(|(i, _)| *i == k) {
+                    out.aux_keys.push((pos as u16, prefix.len() as u8));
+                    pos += prefix.len();
+                    used += 1;
+                }
+                k += 1;
+            } else if pos + 1 == piece.end {
+                mark(&mut out, pos);
+                match tail_partial.filter(|_| pos + 1 == b.len()) {
+                    Some(p) => out.code.push_str(p),
+                    None => out.code.push(char::from(b[pos])),
+                }
+                pos += 1;
+            } else {
+                debug_assert!(
+                    false,
+                    "{keys} 的节点 {piece:?}（{word}）在 {pos} 处读不出音节"
+                );
+                return None;
+            }
+        }
+        if used != aux.len() || pos != piece.end {
+            debug_assert!(
+                false,
+                "{keys} 的节点 {piece:?}（{word}）与辅码登记 {aux:?} 对不上"
+            );
+            return None;
+        }
+        out.end = piece.end;
+    }
+    if !boundary_ok {
+        out.boundary = 0;
+    }
+    out.learn_code = raw_learn_code(result, keys, &out.code, out.boundary);
+    Some(out)
+}
+
+impl AuxPath {
+    /// 把路径的身份写到候选上：消费数、码与边界、造词码、辅码位置、编码栏，五者覆盖同一段击键。
+    /// 同文合并时整套替换（已有候选只留词库来源标记与权重），不留半截旧身份。
+    pub(super) fn stamp(&self, c: &mut wind_candidate::Candidate, keys: &str, sep: &str) {
+        c.consumed_length = self.end;
+        c.code.clone_from(&self.code);
+        c.boundary = self.boundary;
+        c.meta.learn_code.clone_from(&self.learn_code);
+        c.meta.aux_keys = Some(self.aux_keys.as_slice().into());
+        c.meta.preedit_split = Some(self.preedit(keys, sep).into());
+    }
+
+    /// 编码栏形态：缓冲按序插入分隔符——音节之间 `'`，辅码前 `sep`；路径之后的剩余缓冲按两键
+    /// 一段接着切。手打的 `'` 原样保留、旁边不再插（同 `build_raw_preedit`）。
+    pub(super) fn preedit(&self, keys: &str, sep: &str) -> String {
+        let b = keys.as_bytes();
+        let mut starts = self.syllable_starts.clone();
+        let mut letters = 0usize;
+        for (i, &c) in b.iter().enumerate().skip(self.end) {
+            if c == b'\'' {
+                letters = 0;
+                continue;
+            }
+            if letters.is_multiple_of(2) {
+                starts.push(i);
+            }
+            letters += 1;
+        }
+        let mut out = String::with_capacity(keys.len() + starts.len() + self.aux_keys.len());
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'\'' {
+                out.push('\'');
+                continue;
+            }
+            if self.aux_keys.iter().any(|&(s, _)| usize::from(s) == i) {
+                out.push_str(sep);
+            } else if starts.contains(&i) && !out.is_empty() && !out.ends_with('\'') {
+                out.push('\'');
+            }
+            out.push(char::from(c));
+        }
+        out
+    }
 }
 
 /// 缓存的命中还要给别的终点用，只能拷文本；不缓存或已是最后一次用时移走。
@@ -1872,7 +2045,7 @@ mod tests {
         let partial = xiaohe().convert(keys).partial_initial.expect("尾键残码");
         assert_eq!(partial, "h");
         let base = aux_base(keys, &eng, &table);
-        let (lattice, end) = eng
+        let (lattice, end, _) = eng
             .raw_partial_lattice(keys, base, &partial)
             .expect("2c 底图");
         assert_eq!(end, 5);
@@ -2022,6 +2195,7 @@ mod tests {
                 node_reach: Some(vec![true; 6]),
                 tail_aux: Vec::new(),
                 partial_hits: None,
+                aux_spans: Default::default(),
             }
         };
         let ma = |lattice: &[Vec<crate::pinyin::viterbi::WordNode>]| -> Vec<f64> {
@@ -2031,11 +2205,11 @@ mod tests {
                 .map(|n| n.log_prob)
                 .collect()
         };
-        let (low, _) = eng.raw_partial_lattice("nihcm", base(-1e9), "m").unwrap();
+        let (low, ..) = eng.raw_partial_lattice("nihcm", base(-1e9), "m").unwrap();
         let fresh = ma(&low);
         assert_eq!(fresh.len(), 1, "同起点同词只留一条");
         assert!(fresh[0] > -1e9, "分低的旧节点被替换：{fresh:?}");
-        let (high, _) = eng.raw_partial_lattice("nihcm", base(1e9), "m").unwrap();
+        let (high, ..) = eng.raw_partial_lattice("nihcm", base(1e9), "m").unwrap();
         assert_eq!(ma(&high), vec![1e9], "分高的旧节点保留");
     }
 

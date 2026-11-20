@@ -347,6 +347,11 @@ pub struct AuxCodeSpec {
     /// 的双拼走连续模式。连续模式稳定后删除。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuous: Option<bool>,
+    /// 内部项（不进设置页、无全局键）：编码栏里辅码前插的分隔符，连续辅助码的辅码候选
+    /// （`ni hn'hc`）与串尾直接辅助（`ui'du p`）共用。`None` = 空格；可设空串，或由空格、`·`、
+    /// `-`、`_`、`|` 组成的串，其余值不用（日志告警一次，退回空格）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preedit_separator: Option<String>,
 }
 
 impl AuxCodeSpec {

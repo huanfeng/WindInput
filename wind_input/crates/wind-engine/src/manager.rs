@@ -348,11 +348,21 @@ pub struct AuxCodeSettings {
     /// 直接辅助码走连续辅助码（击键图 + 辅码表）：`direct` 为真且方案没写内部逃生口
     /// `[engine.aux_code] continuous = false`。
     pub continuous: bool,
+    /// 编码栏辅码分隔符（方案内部项 `[engine.aux_code] preedit_separator`，已校验）；`None` =
+    /// [`crate::engine::AUX_PREEDIT_SEPARATOR`]。取值见 [`Self::preedit_separator`]。
+    pub preedit_separator: Option<Arc<str>>,
     /// 已解析的来源，顺序即优先级。**`enabled == false` 时恒空**（关闭即不解析）。
     pub sources: Vec<AuxSource>,
 }
 
 impl AuxCodeSettings {
+    /// 编码栏辅码前的分隔符：连续辅助码的辅码候选与串尾直接辅助共用这一处。
+    pub fn preedit_separator(&self) -> &str {
+        self.preedit_separator
+            .as_deref()
+            .unwrap_or(crate::engine::AUX_PREEDIT_SEPARATOR)
+    }
+
     /// 其中被引用的方案 id。
     pub fn schema_sources(&self) -> impl Iterator<Item = &str> {
         self.sources.iter().filter_map(|s| match s {
@@ -6197,6 +6207,20 @@ impl EngineManager {
         }
         let direct = direct && is_shuangpin;
         let continuous = direct && spec.as_ref().and_then(|s| s.continuous) != Some(false);
+        let preedit_separator = spec
+            .as_ref()
+            .and_then(|s| s.preedit_separator.as_deref())
+            .and_then(|sep| {
+                if crate::engine::aux_preedit_separator_valid(sep) {
+                    return Some(Arc::from(sep));
+                }
+                if self.first_aux_source_warn(schema_id, "\0preedit_separator") {
+                    tracing::warn!(
+                        "方案 {schema_id} 的 preedit_separator = {sep:?} 不在可选字符（空格 · - _ |）内，改用空格"
+                    );
+                }
+                None
+            });
         // 关闭时不解析路径：省掉 N 次目录探测，也避免为一个用不上的功能刷 warn。
         let sources = if resolved.enabled {
             spec.map(|c| {
@@ -6243,6 +6267,7 @@ impl EngineManager {
             max_phrase_len: resolved.max_phrase_len,
             direct,
             continuous,
+            preedit_separator,
             sources,
         }
     }

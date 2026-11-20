@@ -435,6 +435,7 @@ impl MixedEngine {
             no_abbrev_quota: false,
             sp_raw_lattice: false,
             aux_continuous: None,
+            aux_preedit_separator: None,
         }
     }
 
@@ -453,6 +454,7 @@ impl MixedEngine {
             no_abbrev_quota: false,
             sp_raw_lattice: false,
             aux_continuous: None,
+            aux_preedit_separator: None,
         }
     }
 

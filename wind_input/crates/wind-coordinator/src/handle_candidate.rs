@@ -1019,7 +1019,6 @@ impl Coordinator {
         // 认记录 ⇒ 结果表的键另收一份 `text`，与 probe 一一对应。两者只在模板展开 /
         // 大小写投影过的候选上不同（GH#177）。
         let mut rec_keys: Vec<&str> = Vec::new();
-        let continuous_aux = self.continuous_aux_on();
         for c in candidates.iter() {
             // 短语不参与词频维度（写入端 `record_selection` 对称跳过）：其次序由短语定义的
             // weight/position 决定，且求值型短语的文本逐日变化，点查恒 miss——白花一次
@@ -1055,10 +1054,7 @@ impl Coordinator {
             };
             probe.push((
                 sid.to_string(),
-                Self::continuous_aux_free_code(c, continuous_aux).map_or_else(
-                    || Self::freq_code_with(code, c, settings.english_code_by_input),
-                    str::to_string,
-                ),
+                Self::freq_code_with(code, c, settings.english_code_by_input),
                 c.freq_text().to_string(),
             ));
             rec_keys.push(&c.text);
@@ -1661,11 +1657,10 @@ impl Coordinator {
                     .engine_mgr
                     .convert_wildcard(&state.input_buffer, p, limit)
                     .unwrap_or_default(),
-                (None, Some(lookup)) => self.engine_mgr.convert_active_with_opts(
-                    &state.input_buffer,
-                    limit,
-                    crate::handle_direct_aux::continuous_opts(lookup),
-                ),
+                (None, Some(ca)) => {
+                    self.engine_mgr
+                        .convert_active_with_opts(&state.input_buffer, limit, ca.opts())
+                }
                 (None, None) => self.engine_mgr.convert(&state.input_buffer, limit),
             },
         };
@@ -2108,7 +2103,7 @@ impl Coordinator {
             &mut candidates,
             limit,
             engine_count >= limit,
-            continuous.as_ref(),
+            continuous.as_ref().map(|c| &c.lookup),
         );
         let shadow_code = Self::shadow_code_of(state).to_string();
         // Shadow 规则：删除过滤 + 置顶/移动重排（优先级最高，排序后应用）。
@@ -3550,7 +3545,8 @@ impl Coordinator {
             return &state.direct_aux_body;
         }
         // 拼音候选自带的切分：`pinan` 高亮「平安」是 `pin'an`、高亮「皮」是 `pi'nan`。引擎只在
-        // 全拼、无手动分隔符时给，双拼下只给全拼降级候选（见 `CandidateMeta::preedit_split`），
+        // 全拼、无手动分隔符时给，双拼下只给全拼降级候选与连续辅助码的辅码候选（`ni hn'hc`，
+        // 见 `CandidateMeta::preedit_split` / `aux_keys`），
         // 双拼击键分段 / 简拼 / 手动分隔符的形态因此不受影响，全拼降级没给时退回下面的
         // `preedit_fp_body`；分段上屏中它同样是拆分串，与下面「恒拆分」那条不冲突。
         // 排在「无拆分形态」守卫之前：混输下首选的切分与原始码同形时拆分串为空，别的拼音
@@ -4320,28 +4316,11 @@ impl Coordinator {
     /// ⚠️ **读写两侧必须同口径**：写入端 `record_selection` 与读取端 `apply_freq_rerank`
     /// 都要经本函数，否则记了查不到、或查到不该查的。
     pub(crate) fn freq_code(&self, buf: &str, cand: &Candidate) -> String {
-        if let Some(code) = Self::continuous_aux_free_code(cand, self.continuous_aux_on()) {
-            return code.to_string();
-        }
         Self::freq_code_with(
             buf,
             cand,
             self.engine_mgr.freq_settings().english_code_by_input,
         )
-    }
-
-    /// 临时防护（T2 收尾前）：连续辅助码下拼音候选的 `code` 含辅码读音（`nitwhc` → `niteihao`），
-    /// 不能进词频；取引擎给的造词码（无辅码，`nihao`）。非连续模式 / 无造词码时 `None`，照旧。
-    /// 读写两侧（`freq_code`、`apply_freq_rerank_in`）同口径。
-    fn continuous_aux_free_code(cand: &Candidate, continuous: bool) -> Option<&str> {
-        if !continuous || cand.source != CandidateSource::Pinyin {
-            return None;
-        }
-        cand.meta.learn_code.as_ref().map(|(c, _)| c.as_str())
-    }
-
-    fn continuous_aux_on(&self) -> bool {
-        self.engine_mgr.aux_code_settings_cached().continuous
     }
 
     /// [`Self::freq_code`] 的显式传参版本，供**热路径**使用。

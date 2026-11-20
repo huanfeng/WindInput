@@ -268,6 +268,37 @@ pub struct ConvertOptions {
     pub sp_raw_lattice: bool,
     /// 连续辅助码用的辅码表；`None` 或 `is_empty()` = 关闭（默认）。
     pub aux_continuous: Option<std::sync::Arc<dyn AuxCharLookup>>,
+    /// 编码栏里辅码前插的分隔符（带辅码候选的 `meta.preedit_split`）；`None` =
+    /// [`AUX_PREEDIT_SEPARATOR`]。只在 `aux_continuous` 生效时用。
+    pub aux_preedit_separator: Option<std::sync::Arc<str>>,
+}
+
+/// 编码栏辅码前的默认分隔符：`ni hn'hc`、串尾 `ni'hc hn`（同已发布的串尾直接辅助 `ui'du p`）。
+/// 方案可经内部配置 `[engine.aux_code] preedit_separator` 改成空串或别的符号。
+pub const AUX_PREEDIT_SEPARATOR: &str = " ";
+
+/// 编码栏辅码分隔符的可选字符（白名单）：空格、`·`、`-`、`_`、`|`。
+const AUX_PREEDIT_SEPARATOR_CHARS: &[char] = &[' ', '·', '-', '_', '|'];
+
+/// 编码栏辅码分隔符是否可用：空串，或只由 [`AUX_PREEDIT_SEPARATOR_CHARS`] 组成。编码栏须是
+/// 「缓冲按序插入分隔符」的形态，光标换算（逐字节贪心同步）才成立；字母数字、`;` 之类会与缓冲
+/// 里的键混淆，`'` 会与音节分隔混淆，故用白名单。
+pub fn aux_preedit_separator_valid(sep: &str) -> bool {
+    sep.chars()
+        .all(|c| AUX_PREEDIT_SEPARATOR_CHARS.contains(&c))
+}
+
+#[cfg(test)]
+mod aux_separator_tests {
+    #[test]
+    fn aux_preedit_separator_whitelist() {
+        for ok in ["", " ", "·", "-", "_", "|", " · "] {
+            assert!(super::aux_preedit_separator_valid(ok), "{ok:?}");
+        }
+        for bad in ["'", ";", "x", "1", "/", "\t", " '"] {
+            assert!(!super::aux_preedit_separator_valid(bad), "{bad:?}");
+        }
+    }
 }
 
 /// [`Engine::resolve_boundary`] 的结果。见

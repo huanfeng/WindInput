@@ -120,6 +120,14 @@ pub struct CandidateMeta {
     /// 只服务显示，排序/造词/边界核对一律不读。`Arc<str>`：同一切分的候选共用一份。
     #[serde(skip)]
     pub preedit_split: Option<std::sync::Arc<str>>,
+    /// 连续辅助码：本候选吃掉的辅码在**击键坐标**的位置 `(起点, 长度)`，按起点升序；`None` =
+    /// 没用辅码。带它的候选 `preedit_split` 是辅码形态（`ni hn'hc`），`code` / `boundary` 是路径
+    /// 实际经过的音节（去辅码）的全拼码与边界，与 `consumed_length` 覆盖同一段击键。
+    ///
+    /// 只服务显示与上屏后的辅码定位；排序 / 去重 / 造词一律不读。引擎内的双拼边界校验据它豁免
+    /// （码与双拼转换结果不同域，同简拼、全拼降级）。
+    #[serde(skip)]
+    pub aux_keys: Option<std::sync::Arc<[(u16, u8)]>>,
     /// 「英文前缀补全」（`english_merge.complete_min_length` 等）补出来的英文候选。
     ///
     /// 只由 `wind_engine::english_merge::lookup_prefix_complete` 置位；协调器

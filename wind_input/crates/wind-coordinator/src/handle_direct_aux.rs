@@ -59,12 +59,29 @@ pub(crate) struct DirectAuxPrev {
     shadow_code: String,
 }
 
-/// 连续辅助码交给引擎的选项：击键图 + 本键的辅码视图。
-pub(crate) fn continuous_opts(lookup: &Arc<AuxLookupNow>) -> wind_engine::engine::ConvertOptions {
+/// 连续辅助码交给引擎的选项：击键图 + 本键的辅码视图 + 编码栏辅码分隔符
+/// （[`wind_engine::AuxCodeSettings::preedit_separator`]，`None` = 引擎默认）。
+pub(crate) fn continuous_opts(
+    lookup: &Arc<AuxLookupNow>,
+    separator: Option<Arc<str>>,
+) -> wind_engine::engine::ConvertOptions {
     wind_engine::engine::ConvertOptions {
         sp_raw_lattice: true,
         aux_continuous: Some(lookup.clone() as Arc<dyn wind_engine::AuxCharLookup>),
+        aux_preedit_separator: separator,
         ..Default::default()
+    }
+}
+
+/// 连续辅助码对本键生效时的输入：本键的辅码视图与编码栏辅码分隔符（同一次设置快照取出）。
+pub(crate) struct ContinuousAux {
+    pub(crate) lookup: Arc<AuxLookupNow>,
+    pub(crate) separator: Option<Arc<str>>,
+}
+
+impl ContinuousAux {
+    pub(crate) fn opts(&self) -> wind_engine::engine::ConvertOptions {
+        continuous_opts(&self.lookup, self.separator.clone())
     }
 }
 
@@ -78,12 +95,12 @@ fn direct_rule(continuous: bool) -> DirectPhraseRule {
 }
 
 impl Coordinator {
-    /// 连续辅助码对本键是否生效，生效时给出本键的辅码视图（每键现取，不跨键缓存）。
+    /// 连续辅助码对本键是否生效，生效时给出本键的辅码视图与分隔符（每键现取，不跨键缓存）。
     ///
     /// 条件：主输入路（临拼 / 混输 / 引导键辅助码态都不做）、`direct` 生效（已折叠 `enabled` 与
     /// 「只认双拼」）、没写逃生口 `continuous = false`、有来源、方案来源的反查索引就绪。
     /// 未就绪派后台构建，本键 `None`——整条走旧路径，不是「击键图开、无辅码」。
-    pub(crate) fn continuous_aux_lookup(&self, state: &State) -> Option<Arc<AuxLookupNow>> {
+    pub(crate) fn continuous_aux_lookup(&self, state: &State) -> Option<ContinuousAux> {
         if state.active.is_some() {
             return None;
         }
@@ -105,7 +122,10 @@ impl Coordinator {
             tracing::debug!("continuous aux: 方案来源索引未就绪，本键走旧路径");
             return None;
         }
-        Some(Arc::new(lookup))
+        Some(ContinuousAux {
+            lookup: Arc::new(lookup),
+            separator: settings.preedit_separator.clone(),
+        })
     }
 
     /// [`Self::continuous_aux_lookup`] 的选项形态：`None` = 走 `engine_mgr.convert`。
@@ -114,8 +134,7 @@ impl Coordinator {
         &self,
         state: &State,
     ) -> Option<wind_engine::engine::ConvertOptions> {
-        self.continuous_aux_lookup(state)
-            .map(|l| continuous_opts(&l))
+        self.continuous_aux_lookup(state).map(|c| c.opts())
     }
 
     /// 把直接辅助码的命中项并入 `candidates`（主候选，已排序去重过滤、尚未 shadow）。
@@ -313,10 +332,10 @@ impl Coordinator {
             input_len,
             placement,
         );
-        // 组码区：前缀按双拼音节切（引擎给的击键分段，如 `ui'du`）+ 空格 + 辅码。与引导键模式
-        // 同口径地用空白隔开辅码；仍是「缓冲按序插入分隔符」的形态，光标换算照常成立。
+        // 组码区：前缀按双拼音节切（引擎给的击键分段，如 `ui'du`）+ 辅码分隔符（默认空格，与
+        // 引擎辅码整句同一项）+ 辅码；仍是「缓冲按序插入分隔符」的形态，光标换算照常成立。
         let body = if preedit.is_empty() { prefix } else { &preedit };
-        state.direct_aux_body = format!("{body} {}", split.aux);
+        state.direct_aux_body = format!("{body}{}{}", settings.preedit_separator(), split.aux);
     }
 
     /// 快照复用的前提：候选裁剪状态与取快照时相同（见 [`DirectAuxPrev::filters`]）。
@@ -373,7 +392,7 @@ impl Coordinator {
             })),
             // 连续模式下与主转换同一份选项（前缀里也可能有词中辅码），快照与兜底才一致。
             ..if continuous {
-                continuous_opts(lookup)
+                continuous_opts(lookup, settings.preedit_separator.clone())
             } else {
                 Default::default()
             }
@@ -491,6 +510,15 @@ mod tests {
     }
 
     fn coord(tag: &str, data_dir: &std::path::Path) -> (Arc<Coordinator>, Arc<Store>) {
+        coord_with(tag, data_dir, |_| {})
+    }
+
+    /// [`coord`]，另改一处配置。
+    fn coord_with(
+        tag: &str,
+        data_dir: &std::path::Path,
+        tweak: impl FnOnce(&mut Config),
+    ) -> (Arc<Coordinator>, Arc<Store>) {
         let path =
             std::env::temp_dir().join(format!("wind_direct_aux_{tag}_{}.redb", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -501,6 +529,7 @@ mod tests {
         cfg.input.default.chinese_mode = true;
         // 出厂 L2 开着拼音调频，`Config::default()` 是类型默认（关）——不开就验不到记账码。
         cfg.schema.pinyin.frequency.enabled = true;
+        tweak(&mut cfg);
         let c = Coordinator::new_headless_with_store(cfg, Some(data_dir), store.clone());
         (c, store)
     }
@@ -547,8 +576,7 @@ mod tests {
             .collect()
     }
 
-    /// 界面首选的（文字 / 消费数）。连续模式的候选 `code` 尚含辅码读音（`niteihao`），
-    /// 尚未与消费数对齐，这里不钉。
+    /// 界面首选的（文字 / 消费数）。
     fn top_tc(c: &Coordinator) -> Option<String> {
         c.state
             .lock()
@@ -719,8 +747,8 @@ mod tests {
         assert_ne!(top_tc(&c).as_deref(), Some("拟好/6"));
     }
 
-    /// 连续模式整句候选的 code 含辅码读音（`niteihao`），记频必须落在无辅码的 `nihao` 下
-    /// （临时防护，T2 收尾前不让带辅码的读音进词频）。
+    /// 连续模式整句候选的 code 去掉了辅码（`nitwhc` → `nihao`，不是双拼转换读出的 `niteihao`），
+    /// 词频随它记在 `nihao` 下。
     #[test]
     fn continuous_sentence_freq_goes_to_aux_free_code() {
         let (dir, _f) = fixture("co_freq", "shuangpin", ON);
@@ -742,6 +770,209 @@ mod tests {
                 .is_none(),
             "带辅码读音的码不能进词频"
         );
+    }
+
+    /// 连续模式辅码候选的编码栏：音节之间 `'`、辅码前空格（`ni tw'hc`、串尾 `ni'hc hn`），
+    /// 界面候选的 code 是去辅码的拼音码；高亮移到不带辅码的候选时回到双拼分段。
+    #[test]
+    fn continuous_aux_preedit_shape() {
+        let (dir, _f) = fixture("co_shape", "shuangpin", ON);
+        let (c, _) = coord("co_shape", &dir);
+        let fp = fp_after(&c, "nitwhc");
+        assert_eq!(
+            fp.first().map(String::as_str),
+            Some("拟好/6/nihao"),
+            "{fp:?}"
+        );
+        assert_eq!(c.debug_preedit(), "ni tw'hc");
+        let fp = fp_after(&c, "nihchn");
+        assert_eq!(
+            fp.first().map(String::as_str),
+            Some("你好/6/nihao"),
+            "{fp:?}"
+        );
+        assert_eq!(c.debug_preedit(), "ni'hc hn");
+        // 高亮移到第一条不带辅码的候选。
+        let plain = {
+            let st = c.state.lock().unwrap();
+            st.candidates
+                .iter()
+                .position(|x| x.meta.aux_keys.is_none() && !x.is_direct_aux)
+                .expect("应有不带辅码的候选")
+        };
+        for _ in 0..plain {
+            press(&c, keymap::VK_DOWN);
+        }
+        assert_eq!(c.debug_preedit(), "ni'hc'hn");
+    }
+
+    /// 编码栏辅码分隔符走方案内部项 `preedit_separator`：引擎辅码整句与串尾直接辅助同一项；
+    /// 空串时辅码直接贴在音节后；白名单外的值（字母、`'`、`;`）不用、退回默认空格。
+    #[test]
+    fn continuous_preedit_separator_setting() {
+        for (tag, line, mid, tail) in [
+            (
+                "co_sep_empty",
+                "preedit_separator = \"\"\n",
+                "nitw'hc",
+                "ui'duy",
+            ),
+            (
+                "co_sep_dash",
+                "preedit_separator = \"-\"\n",
+                "ni-tw'hc",
+                "ui'du-y",
+            ),
+            (
+                "co_sep_bad",
+                "preedit_separator = \"x\"\n",
+                "ni tw'hc",
+                "ui'du y",
+            ),
+            (
+                "co_sep_quote",
+                "preedit_separator = \"'\"\n",
+                "ni tw'hc",
+                "ui'du y",
+            ),
+            (
+                "co_sep_semicolon",
+                "preedit_separator = \";\"\n",
+                "ni tw'hc",
+                "ui'du y",
+            ),
+        ] {
+            let (dir, _f) = fixture(tag, "shuangpin", &format!("{ON}{line}"));
+            let (c, _) = coord(tag, &dir);
+            fp_after(&c, "nitwhc");
+            assert_eq!(c.debug_preedit(), mid, "{tag}");
+            let t = fp_after(&c, "uiduy");
+            assert_eq!(t.first().map(String::as_str), Some("试读/5/shidu"), "{tag}");
+            assert_eq!(c.debug_preedit(), tail, "{tag}");
+        }
+        // 逃生口下的串尾直接辅助同样走这一项。
+        let (dir, _f) = fixture(
+            "co_sep_tail",
+            "shuangpin",
+            &format!("{TAIL_ONLY}preedit_separator = \"\"\n"),
+        );
+        let (c, _) = coord("co_sep_tail", &dir);
+        type_str(&c, "uidup");
+        assert_eq!(c.debug_preedit(), "ui'dup");
+    }
+
+    /// 带辅码候选高亮时，光标在缓冲里逐位移动，编码栏里的插入符位置单调前进，且插入符之前的
+    /// 显示串去掉分隔符后恰是缓冲的那一段。
+    #[test]
+    fn aux_preedit_cursor_maps() {
+        let (dir, _f) = fixture("co_caret", "shuangpin", ON);
+        let (c, _) = coord("co_caret", &dir);
+        type_str(&c, "nitwhc");
+        let mut st = c.state.lock().unwrap();
+        assert_eq!(st.preedit, "ni tw'hc");
+        let mut last = None;
+        for pos in 0..=st.input_buffer.len() {
+            st.input_cursor_pos = pos;
+            let d = c.ui_caret_bytes(&st);
+            assert!(last.is_none_or(|l| d > l), "pos {pos}: {d} 不单调");
+            last = Some(d);
+            let shown: String = st.preedit[..d]
+                .chars()
+                .filter(|&ch| ch != '\'' && ch != ' ')
+                .collect();
+            assert_eq!(shown, st.input_buffer[..pos], "pos {pos}");
+        }
+    }
+
+    /// 分段上屏（钉现状，待确认 #5）：`nirxhc` 首选「你好」把 `rx` 当「你」的辅码；改选不带辅码的
+    /// 单字「你」时不连带吞掉 `rx`，剩余缓冲 `rxhc` 照普通输入重解（候选同单打 `rxhc`）。
+    #[test]
+    fn partial_commit_leaves_aux_letters() {
+        let (dir, _f) = fixture("co_partial", "shuangpin", ON);
+        let (c, _) = coord("co_partial", &dir);
+        let fresh = fp_after(&c, "rxhc");
+        let fp = fp_after(&c, "nirxhc");
+        assert_eq!(
+            fp.first().map(String::as_str),
+            Some("你好/6/nihao"),
+            "{fp:?}"
+        );
+        let mut st = c.state.lock().unwrap();
+        let (idx, ni) = st
+            .candidates
+            .iter()
+            .enumerate()
+            .find(|(_, x)| x.text == "你" && x.consumed_length == 2)
+            .map(|(i, x)| (i, x.clone()))
+            .expect("单字「你」");
+        assert!(ni.meta.aux_keys.is_none());
+        c.commit_selected(&mut st, &ni, idx as i32);
+        assert_eq!(st.committed_text, "你");
+        assert_eq!(st.input_buffer, "rxhc");
+        let rest: Vec<String> = st
+            .candidates
+            .iter()
+            .map(|x| format!("{}/{}/{}", x.text, x.consumed_length, x.code))
+            .collect();
+        assert_eq!(rest, fresh);
+    }
+
+    /// 候选调整按输入的归一码（`shadow_code`）记、按文字匹配，与候选 `code` 无关：对辅码整句
+    /// 置顶 / 让别的词置顶都照常生效，置顶后的辅码整句身份（消费数、码、编码栏）不变。
+    #[test]
+    fn continuous_shadow_pin_on_aux_sentence() {
+        let (dir, _f) = fixture("co_shadow", "shuangpin", ON);
+        let (c, store) = coord("co_shadow", &dir);
+        fp_after(&c, "nitwhc");
+        let (schema, key) = {
+            let st = c.state.lock().unwrap();
+            (c.engine_mgr.data_schema_id("sp"), st.shadow_code.clone())
+        };
+        assert!(!key.is_empty());
+        store.pin_shadow(&schema, &key, "你", None, 0).unwrap();
+        let fp = fp_after(&c, "nitwhc");
+        assert_eq!(fp.first().map(String::as_str), Some("你/2/ni"), "{fp:?}");
+        store.pin_shadow(&schema, &key, "拟好", None, 0).unwrap();
+        let fp = fp_after(&c, "nitwhc");
+        assert_eq!(
+            fp.first().map(String::as_str),
+            Some("拟好/6/nihao"),
+            "{fp:?}"
+        );
+        assert_eq!(c.debug_preedit(), "ni tw'hc");
+    }
+
+    /// 上屏带辅码的合成整句后，自动造的词记在去辅码的拼音码下（`hcnirx` → 好你，记 `haoni`）。
+    #[test]
+    fn learn_code_has_no_aux_letters() {
+        let (dir, _f) = fixture("co_learn", "shuangpin", ON);
+        let (c, store) = coord_with("co_learn", &dir, |cfg| {
+            cfg.schema.pinyin.auto_learn.enabled = true;
+        });
+        type_str(&c, "hcnirx");
+        let top = {
+            let st = c.state.lock().unwrap();
+            st.candidates.first().cloned().expect("应有候选")
+        };
+        assert_eq!(
+            (top.text.as_str(), top.consumed_length, top.code.as_str()),
+            ("好你", 6, "haoni"),
+            "前提：串尾辅码 rx 属「你」"
+        );
+        assert!(top.is_synthesized && top.meta.aux_keys.is_some());
+        match press(&c, keymap::VK_SPACE) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, "好你"),
+            other => panic!("应整体上屏：{other:?}"),
+        }
+        let learned = store.get_temp_words("pinyin", "haoni").unwrap();
+        assert!(learned.iter().any(|w| w.text == "好你"), "{learned:?}");
+        for code in ["haoniruan", "haonirua", "haonir"] {
+            assert!(
+                store.get_temp_words("pinyin", code).unwrap().is_empty(),
+                "{code}"
+            );
+        }
+        assert!(store.get_freq("pinyin", "haoni", "好你").unwrap().is_some());
     }
 
     /// 连续模式下串尾一步只认**末字**（辅码限定紧挨在它前面的那个字，与万象 Pro 同）：
@@ -830,13 +1061,13 @@ mod tests {
         let (c, _) = coord("co_split", &dir);
         type_str(&c, "n");
         let st = c.state.lock().unwrap();
-        let lk = c.continuous_aux_lookup(&st).expect("连续模式生效");
+        let lk = c.continuous_aux_lookup(&st).expect("连续模式生效").lookup;
         drop(st);
         for input in ["nitwhc", "uiduy", "xlrn", "goqkgd", "nitwh"] {
             let plain = c.engine_mgr.convert(input, 50).preedit_pinyin;
             let cont = c
                 .engine_mgr
-                .convert_active_with_opts(input, 50, super::continuous_opts(&lk))
+                .convert_active_with_opts(input, 50, super::continuous_opts(&lk, None))
                 .preedit_pinyin;
             assert_eq!(cont, plain, "{input}");
         }
@@ -1765,9 +1996,12 @@ mod real_data_tests {
             "tuuugrkd", "nihc", "nihcnz", "nirxhc", "qiddn", "qiddnb",
         ] {
             let lk = Arc::new(rt.lookup(&cont.engine_mgr));
-            let r =
-                cont.engine_mgr
-                    .convert_with_opts(&active, input, 50, super::continuous_opts(&lk));
+            let r = cont.engine_mgr.convert_with_opts(
+                &active,
+                input,
+                50,
+                super::continuous_opts(&lk, None),
+            );
             let eng: Vec<String> = r
                 .candidates
                 .iter()
