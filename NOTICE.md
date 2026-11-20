@@ -90,6 +90,8 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
   `opencc/emoji.txt` 与 `opencc/others.txt`（emoji 附加模块；`others.txt` 构建期按分组剔除
   `FROST_OTHERS_EXCLUDE` 所列的组后分发）
 - **另用于**: 笔画输入方案词库的权重（取 `cn_dicts/8105`、`41448` 的单字字频，见 rime-stroke 条目）
+- **五笔补充库**: 从 `cn_dicts/base.dict.yaml` 中筛选高频缺词并生成五笔编码，产物
+  `wubi86_frost.dict.yaml` 默认关闭；该派生词库适用 GPL-3.0。
 
 #### ECDICT
 

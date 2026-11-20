@@ -27,6 +27,15 @@
 
 ---
 
+## 2026-11-20 · 五笔白霜高频补充词库
+
+- 合入：待填；范围：五笔方案。
+- 变化：启用补充词库后，原词库缺失的白霜高频词可按五笔词组编码召回，例如 `rvtf` 的「招行」。
+- 触发条件：在方案扩展词库中启用「白霜高频补充」；出厂关闭。
+- 回退旧行为：关闭该扩展词库。
+- 钉住的测试：`wind-tools` 的 `gen_dict::frost::tests::generates_only_missing_high_frequency_words_with_full_codes`；
+  `wind-engine/tests/engine_manager.rs::wubi_frost_supplement_is_opt_in`。
+
 ## 2026-11-15 · 码表整句不再混入直通命令/模板源码（0.132）
 
 - 合入：待填（push 前回填）；范围：码表整句模式

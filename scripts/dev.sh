@@ -1321,6 +1321,7 @@ verify_dist_data() {
         # 五笔词库为 gen_dict 生成物、不入版本库 —— 忘跑 gen-data 时必须在此拦下
         "schemas/wubi86/wubi86_jidian.dict.yaml|1000000"
         "schemas/wubi86/wubi86_jidian_extra.dict.yaml|10000"
+        "schemas/wubi86/wubi86_frost.dict.yaml|100"
         "schemas/wubi86/wubi86_jidian_emoji.dict.yaml|1000"
         "schemas/wubi86/wubi86_jidian_extra_district.dict.yaml|10000"
         # 笔画方案词库同为 gen_aux_code 生成物（实测约 1MB）；全拼默认辅助码经 schema:stroke

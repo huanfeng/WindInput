@@ -313,6 +313,7 @@ stdenv.mkDerivation {
       "$data/schemas/pinyin/cn_dicts/base.dict.yaml" \
       "$data/schemas/wubi86/wubi86_jidian.dict.yaml" \
       "$data/schemas/wubi86/wubi86_jidian_extra.dict.yaml" \
+      "$data/schemas/wubi86/wubi86_frost.dict.yaml" \
       "$data/schemas/stroke/stroke.dict.yaml" \
       "$data/opencc/STCharacters.octrie" \
       "$data/emoji/emoji_word.txt" \
