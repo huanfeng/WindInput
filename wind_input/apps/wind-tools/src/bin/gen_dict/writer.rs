@@ -43,6 +43,25 @@ fn atomic_write(
     Ok(())
 }
 
+pub fn write_frost_dict(path: &Path, entries: &[Entry], version: &str) -> anyhow::Result<()> {
+    atomic_write(path, |w| {
+        writeln!(w, "# 白霜拼音基础词库生成的五笔补充词库，GPL-3.0")?;
+        writeln!(w, "# 来源: https://github.com/gaboolic/rime-frost")?;
+        writeln!(w, "---")?;
+        writeln!(w, "name: wubi86_frost")?;
+        writeln!(w, "version: \"{version}\"")?;
+        writeln!(w, "columns:")?;
+        writeln!(w, "  - code")?;
+        writeln!(w, "  - text")?;
+        writeln!(w, "  - weight")?;
+        writeln!(w, "...")?;
+        for e in entries {
+            writeln!(w, "{}\t{}\t{}", e.code, e.text, e.weight)?;
+        }
+        Ok(())
+    })
+}
+
 /// 写出五笔主词库。
 pub fn write_main_dict(
     path: &Path,

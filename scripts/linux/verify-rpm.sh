@@ -60,6 +60,7 @@ check_min() {
 }
 check_min schemas/pinyin/cn_dicts/base.dict.yaml 1000000
 check_min schemas/wubi86/wubi86_jidian.dict.yaml 1000000
+check_min schemas/wubi86/wubi86_frost.dict.yaml 100
 check_min schemas/pinyin/cn_dicts/8105.dict.yaml 10000
 check_min schemas/english/en.dict.yaml 1000
 check_min opencc/STPhrases.octrie 100000
