@@ -1449,7 +1449,7 @@ function Deploy-Full ([string]$profile = "release") {
         $exe = Join-Path $targetDir "wind_input$suffix.exe"
         Start-Process -FilePath $exe; Gray "  - 已启动 wind_input$suffix.exe"
         Say "`n系统安装完成 ($profile) → $targetDir"
-        Say "提示: 按 Win+Space 切换到清风输入法$(if($suffix){' (Dev)'})。"
+        Say "提示: 按 Win+Space 切换到$(if ($suffix) {'大明哥专用版'} else {'清风输入法'})。"
         return $true
     }
     finally {
@@ -1848,8 +1848,8 @@ function Set-TomlKeysInSection ([string]$text, [string]$section, [hashtable]$kv)
 # 不会被 packer 递归打进包)。GUID 必须与 wind_tsf\src\Globals.cpp 一致 (dev=DEB0/DEB1, release=EE30/EE31)。
 function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPath, [string]$assetsDir) {
     if ($profile -eq "dev") {
-        $id = "WindInputDev"; $disp = "清风输入法 (开发版)"; $mainExe = "wind_input_dev.exe"
-        $menu = "清风输入法 (开发版)"; $title = "清风输入法 (开发版) 安装向导"; $proto = "windinputdev"
+        $id = "WindInputDev"; $disp = "大明哥专用版"; $mainExe = "wind_input_dev.exe"
+        $menu = "大明哥专用版"; $title = "大明哥专用版 安装向导"; $proto = "windinputdev"
         $settingExe = "wind_setting_dev.exe"
         $procs = '["wind_setting_dev", "wind_portable", "wind_input_dev", "wind_input_ext_dev"]'
         $acl   = '["wind_tsf_dev.dll", "wind_tsf_x86_dev.dll"]'

@@ -177,8 +177,8 @@ extern const GUID c_guidDisplayAttributeConverted;
 
 // 输入法名称
 #ifdef WIND_DEV_VARIANT
-#define TEXTSERVICE_NAME        L"清风输入法 (开发版)"
-#define TEXTSERVICE_DESC        L"清风输入法 Dev (WindInputDev)"
+#define TEXTSERVICE_NAME        L"大明哥专用版"
+#define TEXTSERVICE_DESC        L"大明哥专用版"
 #else
 #define TEXTSERVICE_NAME        L"清风输入法"
 #define TEXTSERVICE_DESC        L"清风输入法 (WindInput)"
