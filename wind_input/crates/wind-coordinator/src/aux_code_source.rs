@@ -166,10 +166,20 @@ impl wind_engine::AuxCharLookup for AuxLookupNow {
     fn is_empty(&self) -> bool {
         AuxCodeLookup::is_empty(self)
     }
+
+    /// 各层（文件层、方案层的系统 + 用户层）的码各过一遍，零分配。
+    fn letter_mask(&self, ch: char) -> u32 {
+        let mut mask = 0;
+        AuxCodeLookup::any_code(self, ch, &mut |code| {
+            mask |= wind_engine::engine::aux_code_letter_bit(code);
+            false
+        });
+        mask
+    }
 }
 
 #[cfg(test)]
-mod aux_char_lookup_tests {
+pub(crate) mod aux_char_lookup_tests {
     use super::*;
     use wind_engine::AuxCharLookup;
 
@@ -204,11 +214,23 @@ mod aux_char_lookup_tests {
             AuxCharLookup::is_empty(&lk),
             AuxCodeLookup::is_empty(&reference)
         );
+        for ch in ['好', '是', '无'] {
+            assert_eq!(lk.letter_mask(ch), default_mask(&lk, ch), "{ch}");
+        }
+    }
+
+    /// 掩码的默认实现（逐字母 `any_code_starts_with`），作快速实现的参照。
+    pub(crate) fn default_mask(lk: &dyn AuxCharLookup, ch: char) -> u32 {
+        let mut buf = [0u8; 4];
+        (b'a'..=b'z').enumerate().fold(0, |m, (i, b)| {
+            let one = char::from(b).encode_utf8(&mut buf);
+            m | (u32::from(lk.any_code_starts_with(ch, one)) << i)
+        })
     }
 
     #[test]
     fn matches_aux_code_lookup_on_small_table() {
-        check(vec![('好', "hn"), ('是', "uu")]);
+        check(vec![('好', "hn"), ('好', "nv"), ('是', "uu"), ('是', "Ux")]);
     }
 
     #[test]

@@ -2026,6 +2026,47 @@ mod tests {
         assert_eq!(kept(&st), vec!["嗨"]);
     }
 
+    /// 连续辅助码的首字母掩码（`AuxLookupNow::letter_mask`）把方案层用户词库的码算进去，
+    /// 与逐字母 `any_code_starts_with` 逐位相同。
+    #[test]
+    fn aux_lookup_now_mask_includes_user_layer() {
+        use wind_engine::AuxCharLookup;
+        let id = wbx_id("mask");
+        let files = format!(r#"["schema:{id}", "aux_code/flypy_test.txt"]"#);
+        let (dir, _g) = data_dir_with_files("mask", &files, &id);
+        let c = coord_with_data("schema_mask", dir);
+        c.store
+            .as_ref()
+            .unwrap()
+            .add_user_word(&id, "zzzz", "嗨", 0, 0)
+            .unwrap();
+        c.store
+            .as_ref()
+            .unwrap()
+            .add_user_word(&id, "xwyy", "工", 0, 0)
+            .unwrap();
+        c.engine_mgr.prewarm_text_codes(&id);
+        let settings = c.engine_mgr.aux_code_settings();
+        let rt = c.ensure_aux_code_runtime(&settings.sources);
+        let lk = rt.lookup(&c.engine_mgr);
+        assert!(lk.unready_schemas().is_empty(), "系统层已就绪");
+        let bit = |b: u8| 1u32 << (b - b'a');
+        assert_eq!(lk.letter_mask('嗨'), bit(b'z'), "只在用户层的字");
+        assert_eq!(
+            lk.letter_mask('工'),
+            bit(b'a') | bit(b'x'),
+            "系统层 + 用户层"
+        );
+        assert_eq!(lk.letter_mask('河'), bit(b's'), "文件层");
+        for ch in ['嗨', '工', '攻', '公', '河', '李', '无'] {
+            assert_eq!(
+                lk.letter_mask(ch),
+                crate::aux_code_source::aux_char_lookup_tests::default_mask(&lk, ch),
+                "{ch}"
+            );
+        }
+    }
+
     /// ★ 系统层没就绪：不进入、不吞键——按键线程绝不现建反查索引。
     #[test]
     fn schema_source_not_ready_does_not_enter() {

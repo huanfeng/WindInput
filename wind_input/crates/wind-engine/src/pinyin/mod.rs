@@ -3651,7 +3651,9 @@ impl Engine for PinyinEngine {
             // 与改动前逐位相同。
             let (show_n, pool_k) = self.config.sentence_counts();
             let mut seen: Vec<String> = Vec::new();
+            let step2_t = crate::prof::span(crate::prof::Stage::Step2Decode);
             let mut results = self.viterbi.decode_nbest(&lattice, input_len, pool_k);
+            drop(step2_t);
             // 整句恰为被屏蔽的文字（由更小的块拼成）：多取几条，剔掉它，首选仍覆盖整串。
             // 没撞上屏蔽词时不多解一次，循环与原来逐条相同。
             let blocked = self.blocked_words();
@@ -3680,7 +3682,14 @@ impl Engine for PinyinEngine {
                 })
                 && results[i].pieces.iter().flatten().any(|p| p.aux > 0)
             {
-                let plain = self.decode_unblocked(&base.plain_lattice(), input_len);
+                let plain_lattice = {
+                    let _t = crate::prof::span(crate::prof::Stage::GatePlainLattice);
+                    base.plain_lattice()
+                };
+                let plain = {
+                    let _t = crate::prof::span(crate::prof::Stage::GateDecode);
+                    self.decode_unblocked(&plain_lattice, input_len)
+                };
                 let rival = !plain.words.is_empty() && plain.log_prob.is_finite();
                 #[cfg(test)]
                 raw_lattice::note_gate_gap(raw_lattice::GateGap {
@@ -3837,7 +3846,10 @@ impl Engine for PinyinEngine {
             if let Some(base) = raw_base.as_ref().and_then(Option::as_ref)
                 && let Some(n) = base.tail_end()
             {
-                let result = self.decode_unblocked(base.lattice(), n);
+                let result = {
+                    let _t = crate::prof::span(crate::prof::Stage::SnDecode);
+                    self.decode_unblocked(base.lattice(), n)
+                };
                 if !result.words.is_empty()
                     && result.log_prob.is_finite()
                     && let Some(pieces) = &result.pieces
@@ -3874,7 +3886,14 @@ impl Engine for PinyinEngine {
                         raw_lattice::note_gate_gap(gap(None, None));
                     }
                     let pass = margin.is_some_and(|m| {
-                        let plain = self.decode_unblocked(&base.plain_lattice(), n);
+                        let plain_lattice = {
+                            let _t = crate::prof::span(crate::prof::Stage::GatePlainLattice);
+                            base.plain_lattice()
+                        };
+                        let plain = {
+                            let _t = crate::prof::span(crate::prof::Stage::GateDecode);
+                            self.decode_unblocked(&plain_lattice, n)
+                        };
                         let rival = !plain.words.is_empty() && plain.log_prob.is_finite();
                         #[cfg(test)]
                         raw_lattice::note_gate_gap(gap(
@@ -4034,6 +4053,7 @@ impl Engine for PinyinEngine {
                     let base = raw_base
                         .get_or_insert_with(|| self.raw_base_lattice(raw_input, edges, raw_aux))
                         .take()?;
+                    let _t = crate::prof::span(crate::prof::Stage::Step2c);
                     self.raw_partial_lattice(raw_input, base, partial)
                 }))
             }
@@ -4091,7 +4111,10 @@ impl Engine for PinyinEngine {
                 }
                 (lattice, full_len)
             };
-            let result = self.decode_unblocked(&lattice, full_len);
+            let result = {
+                let _t = crate::prof::span(crate::prof::Stage::Step2c);
+                self.decode_unblocked(&lattice, full_len)
+            };
             if !result.words.is_empty() && result.log_prob.is_finite() {
                 let sentence: String = result.words.join("");
                 #[cfg(test)]

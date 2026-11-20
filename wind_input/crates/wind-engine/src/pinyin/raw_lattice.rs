@@ -45,6 +45,7 @@ use super::lattice::{
 use super::shuangpin::RawEdge;
 use super::viterbi::{ViterbiResult, WordNode};
 use crate::engine::AuxCharLookup;
+use crate::prof::{self, Counter, Stage};
 
 /// 每个辅码字母扣的分（对数概率轴，与 [`FUZZY_SYLLABLE_LOG_PENALTY`] 同轴）：1 位扣 2.0，2 位扣 4.0。
 pub(crate) const AUX_LETTER_LOG_PENALTY: f64 = 2.0;
@@ -268,7 +269,13 @@ impl std::hash::Hasher for SpanHasher {
     fn write_usize(&mut self, v: usize) {
         self.write_u64(v as u64);
     }
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(u64::from(v));
+    }
 }
+
+/// 键为整数的小表：哈希走 [`SpanHasher`]。
+type CheapMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<SpanHasher>>;
 
 /// 一个节点的 `(词, 辅码)`。
 type WordAux = (String, Vec<AuxSpan>);
@@ -306,30 +313,78 @@ impl AuxSpans {
     }
 }
 
-/// 单次建图内的辅码查表：`(字, 前缀)` 结果缓存，只查实际出现的组合。
+/// 单次建图内的辅码查表：按字缓存首字母掩码（[`AuxCharLookup::letter_mask`]），1 位前缀只比掩码；
+/// 2 位前缀只对首字母已过的字查 `(字, 前缀)`（前缀单调：2 位命中 ⊆ 首字母命中），结果同样缓存。
 ///
-/// 不做「(音节, 前缀) 是否有任一字合法」的预剪：接口只给逐字查询，算它要先枚举该音节的字。
+/// 同一码的命中在接 1 / 2 位辅码的各终点上逐条再判，99% 被拒；按字取一次掩码后，这些判定
+/// 大多是一次廉价哈希查找加一次位与。
 pub(crate) struct AuxCtx<'a> {
     lookup: &'a dyn AuxCharLookup,
-    cache: RefCell<HashMap<(char, [u8; 2]), bool>>,
+    masks: RefCell<CheapMap<char, u32>>,
+    cache: RefCell<CheapMap<(char, [u8; 2]), bool>>,
+    /// 测试参照：不用掩码、逐字查 `(字, 前缀)`（批量判定之前的实现）
+    #[cfg(test)]
+    per_char: bool,
 }
 
 impl<'a> AuxCtx<'a> {
     pub(crate) fn new(lookup: &'a dyn AuxCharLookup) -> Self {
         Self {
             lookup,
-            cache: RefCell::new(HashMap::new()),
+            masks: RefCell::default(),
+            cache: RefCell::default(),
+            #[cfg(test)]
+            per_char: false,
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_per_char(mut self, per_char: bool) -> Self {
+        self.per_char = per_char;
+        self
+    }
+
     fn hit(&self, ch: char, prefix: &str) -> bool {
+        prof::count(Counter::CharChecks, 1);
+        #[cfg(test)]
+        if self.per_char {
+            return self.hit_exact(ch, prefix);
+        }
+        let bit = crate::engine::aux_code_letter_bit(prefix);
+        if bit == 0 {
+            return self.hit_exact(ch, prefix);
+        }
+        let t0 = prof::fine_now();
+        let mask = *self.masks.borrow_mut().entry(ch).or_insert_with(|| {
+            prof::count(Counter::TraitCalls, 1);
+            let t1 = prof::fine_now();
+            let m = self.lookup.letter_mask(ch);
+            prof::fine_add(Stage::FineTrait, t1);
+            m
+        });
+        // 含 trait 调用，`prof::take` 时扣掉。
+        prof::fine_add(Stage::FineCache, t0);
+        if mask & bit == 0 {
+            return false;
+        }
+        prefix.len() == 1 || self.hit_exact(ch, prefix)
+    }
+
+    /// `(字, 前缀)` 逐个查表（缓存结果）。
+    fn hit_exact(&self, ch: char, prefix: &str) -> bool {
+        let t0 = prof::fine_now();
         let b = prefix.as_bytes();
         let key = (ch, [b[0], b.get(1).copied().unwrap_or(0)]);
-        *self
-            .cache
-            .borrow_mut()
-            .entry(key)
-            .or_insert_with(|| self.lookup.any_code_starts_with(ch, prefix))
+        let r = *self.cache.borrow_mut().entry(key).or_insert_with(|| {
+            prof::count(Counter::TraitCalls, 1);
+            let t1 = prof::fine_now();
+            let r = self.lookup.any_code_starts_with(ch, prefix);
+            prof::fine_add(Stage::FineTrait, t1);
+            r
+        });
+        // 含 trait 调用，`prof::take` 时扣掉。
+        prof::fine_add(Stage::FineCache, t0);
+        r
     }
 
     /// 读法 `shape` 的辅码对词 `word` 是否成立（无辅码恒成立）。
@@ -337,11 +392,21 @@ impl<'a> AuxCtx<'a> {
         if shape.aux.is_empty() {
             return true;
         }
-        word.chars().count() == shape.syllables.len()
-            && shape
-                .aux
-                .iter()
-                .all(|(i, p)| word.chars().nth(*i).is_some_and(|c| self.hit(c, p)))
+        prof::count(Counter::Admits, 1);
+        let t0 = prof::fine_now();
+        let n = word.chars().count();
+        prof::fine_add(Stage::FineNth, t0);
+        let ok = n == shape.syllables.len()
+            && shape.aux.iter().all(|(i, p)| {
+                let t0 = prof::fine_now();
+                let c = word.chars().nth(*i);
+                prof::fine_add(Stage::FineNth, t0);
+                c.is_some_and(|c| self.hit(c, p))
+            });
+        if ok {
+            prof::count(Counter::Admitted, 1);
+        }
+        ok
     }
 }
 
@@ -672,7 +737,10 @@ impl LatticeBuilder {
                 c.clear();
             }
             // 对精确组合也剪：只是省查询，与旧精确分支不剪枝的结果相同。
-            let spans = chain.spans_from(i, self.max_word_len(), &|c| dict.has_longer_code(c));
+            let spans = {
+                let _t = prof::span(Stage::Spans);
+                chain.spans_from(i, self.max_word_len(), &|c| dict.has_longer_code(c))
+            };
             let mut groups: Vec<_> = spans.iter().collect();
             // 缓存时：同一码最后用到的那一组才能把命中文本移进节点（之前的组只能拷）。按终点降序走，
             // 不带辅码的终点（最靠前、节点最多）就排在最后；终点内码序不变，`nodes[q]` 的次序同升序。
@@ -697,6 +765,7 @@ impl LatticeBuilder {
                     *n -= 1;
                     *n > 0
                 });
+                let search = prof::span(Stage::Search);
                 let hits: &mut Vec<DictHit> = match &mut hit_cache {
                     Some(c) => c
                         .entry(code.clone())
@@ -706,6 +775,16 @@ impl LatticeBuilder {
                         &mut owned
                     }
                 };
+                drop(search);
+                let with_aux = shapes.iter().any(|s| !s.aux.is_empty());
+                let _t = prof::span(if with_aux {
+                    Stage::HitsAux
+                } else {
+                    Stage::HitsPlain
+                });
+                if with_aux {
+                    prof::count(Counter::AuxHits, hits.len() as u64);
+                }
                 for hit in hits.iter_mut() {
                     let fits = |s: &Shape| hit.boundary == 0 || s.mask == hit.boundary;
                     let Some(shape) = pick_shape(shapes, fits, &hit.text, aux) else {
@@ -1120,6 +1199,7 @@ impl PinyinEngine {
         edges: &[RawEdge],
         aux: Option<AuxInput>,
     ) -> Option<RawBase> {
+        let _base = prof::span(Stage::Base);
         let fuzzy = Some(&self.fuzzy_config);
         let ctx = aux.map(|a| AuxCtx::new(a.lookup));
         let graph_edges = aux.map_or(edges, |a| a.edges_all);
@@ -1141,6 +1221,7 @@ impl PinyinEngine {
             && let Some(r) = &node_reach
             && r[keys.len()]
         {
+            let _t = prof::span(Stage::TailCompletion);
             self.lattice_builder.add_tail_completion_raw(
                 keys,
                 a.edges_all,
@@ -1154,6 +1235,7 @@ impl PinyinEngine {
         if self.config.sentence_uses_user_words
             && let Some(store) = &self.store_layers
         {
+            let _t = prof::span(Stage::Store);
             self.lattice_builder.add_store_nodes_raw_aux(
                 keys,
                 graph_edges,
@@ -1165,6 +1247,7 @@ impl PinyinEngine {
                 &mut aux_spans,
             );
         }
+        let _t = prof::span(Stage::ToWordNodes);
         self.drop_blocked_nodes(&mut nodes);
         // 辅码模式才有：单链时 `aux_spans` 为空。
         let tail_aux = nodes[keys.len()]
@@ -1979,6 +2062,80 @@ mod tests {
         // 辅码打在「好」后：表里没有「好」→ 不成立。
         let (nodes, _) = build_aux("nihcrma", words, &table, None);
         assert!(at(&nodes, "你好吗", (0, 7)).is_none());
+    }
+
+    /// 批量判定（首字母掩码）与逐字判定产出的节点与辅码位置逐项相同：P2 的小词库夹具 + 多处辅码。
+    #[test]
+    fn aux_admits_batch_equals_per_char() {
+        let fz = super::super::fuzzy::FuzzyConfig {
+            zh_z: true,
+            n_l: true,
+            ..Default::default()
+        };
+        let multi: &[(&str, &str, i32)] = &[
+            ("nihaoma", "你好吗", 50000),
+            ("ni", "你", 9000),
+            ("ni", "泥", 3000),
+            ("hao", "好", 9000),
+            ("ma", "吗", 8000),
+            ("ma", "妈", 7000),
+        ];
+        let table = FakeAux(vec![
+            ('是', "uu"),
+            ('是', "ri"),
+            ('你', "rx"),
+            ('泥', "sh"),
+            ('吗', "xy"),
+            ('妈', "nm"),
+            ('好', "nz"),
+            ('好', "zn"),
+            ('气', "qr"),
+            ('启', "hu"),
+            ('候', "rh"),
+            ('和', "hk"),
+        ]);
+        type Case = (&'static str, &'static [(&'static str, &'static str, i32)]);
+        let cases: &[Case] = &[
+            ("uiuu", SHI),
+            ("uiu", SHI),
+            ("uio", SHI),
+            ("nihcz", NIHAO_H),
+            ("nizhcn", NIHAO_H),
+            ("nirhcmax", multi),
+            ("nirxhcmaxy", multi),
+            ("nirhcmaz", multi),
+            ("nishcnmamn", multi),
+            ("uir", SHI),
+            ("qiqhz", QIHOU),
+            ("qihzr", QIHOU),
+            ("qiqrhzrh", QIHOU),
+            ("qihhz", QIHOU),
+        ];
+        for &(keys, words) in cases {
+            for fuzzy in [None, Some(&fz)] {
+                let mut conv = xiaohe();
+                if let Some(f) = fuzzy {
+                    conv.set_fuzzy(f);
+                }
+                let edges = conv.pair_edges_all(keys);
+                let d = dict(words);
+                let run = |per_char: bool| {
+                    let ctx = super::AuxCtx::new(&table).with_per_char(per_char);
+                    LatticeBuilder::new().build_raw_aux(keys, &edges, &d, fuzzy, true, Some(&ctx))
+                };
+                let (want, want_spans) = run(true);
+                let (got, got_spans) = run(false);
+                assert_eq!(format!("{got:?}"), format!("{want:?}"), "{keys} {fuzzy:?}");
+                for n in want.iter().flatten() {
+                    assert_eq!(
+                        aux_of(&got_spans, &n.word, (n.start, n.end)),
+                        aux_of(&want_spans, &n.word, (n.start, n.end)),
+                        "{keys} {}",
+                        n.word
+                    );
+                }
+            }
+        }
     }
 
     /// 无辅码表时节点与 P1 单链逐项相同（`p1_reference` 是改造前的实现）。
