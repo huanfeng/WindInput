@@ -571,7 +571,7 @@ public final class CandidatePanelHost {
                 DispatchQueue.main.async { responder?.invalidateDigitTracking(); KeySynthesizer.sequence(p.combos) }
             }
         case DownstreamCmd.commitText, DownstreamCmd.updateComposition, DownstreamCmd.clearComposition,
-             DownstreamCmd.keyType:
+             DownstreamCmd.commitThenDefer, DownstreamCmd.keyType:
             // 鼠标选词的 commit / composition 及命令直通车 key.type / clip.paste 文本上屏
             // 经 push 通道异步到达, 路由到当前焦点 controller (其 router 调 client.insertText)。
             let responder = activeResponder

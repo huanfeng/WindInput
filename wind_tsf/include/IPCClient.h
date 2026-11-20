@@ -311,7 +311,7 @@ public:
     using ActivationPushCallback = std::function<void(const ServiceResponse&)>;
 
     // Callback type for commit text from Go (mouse click on candidate)
-    using CommitTextCallback = std::function<void(const std::wstring&)>;
+    using CommitTextCallback = std::function<void(const ServiceResponse&)>;
 
     // Callback type for clear composition from Go (mode toggle via menu)
     using ClearCompositionCallback = std::function<void()>;

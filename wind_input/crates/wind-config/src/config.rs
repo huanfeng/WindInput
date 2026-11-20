@@ -2068,8 +2068,7 @@ pub enum SessionAction {
     /// 编码区光标左移一字符（`input_buffer` 内，已转换前缀进不去）。
     ///
     /// 服务的交互形态（GH#234，C2-97）：「← 从编码末尾进入编辑编码」。底层是
-    /// `preedit_cursor::BufEdit::move_left`——光标是**编辑位置**，不参与引擎查询，
-    /// 中间改码后按整串重算候选，与末尾输入无差别。
+    /// `preedit_cursor::BufEdit::move_left`，普通拼音方案按光标前的编码重算候选。
     ///
     /// 边界：已在开头 = 吞键（方向键有宿主原义，但组合进行中把 ← 交给宿主会让宿主光标
     /// 与组合区错位，macOS 同款行为也是吞）；**无会话 = 放行**（空闲 ← 是宿主的 ←）。
@@ -2083,6 +2082,10 @@ pub enum SessionAction {
     /// 绑 `commit_highlighted` 就永远移动不了光标，绑移动就永远选不了词。无候选时末尾
     /// 那一下纯吞键（没有可上屏的东西，也不该把 → 交给宿主）。其余边界同 [`Self::CaretLeft`]。
     CaretRight(CaretEnd),
+    /// 组合区光标前移到分段边界，无码段时前移一个码元。
+    SyllablePrev,
+    /// 组合区光标后移到下一分段边界或末尾，已在末尾时从头查找。
+    SyllableNext,
     /// 开 / 关高亮候选的悬停提示气泡（反查编码、拆字等），不用鼠标悬停（t372）。
     ///
     /// 走鼠标悬停同一条通路（悬停目标 = 高亮项），气泡内容与定位完全一致；再按一次收起，
@@ -2234,6 +2237,8 @@ impl SessionAction {
             "commit_highlighted" => Self::CommitHighlighted,
             "caret_left" => Self::CaretLeft,
             "caret_right" => Self::CaretRight(CaretEnd::Commit),
+            "syllable_prev" => Self::SyllablePrev,
+            "syllable_next" => Self::SyllableNext,
             "toggle_tip" => Self::ToggleTip,
             "commit_code" => Self::CommitCode,
             // `clear` 是 `cancel` 的别名（同一个动作，两种心智），见 `Cancel` 的文档。
@@ -2271,6 +2276,8 @@ impl SessionAction {
                 | Self::CommitCode
                 | Self::CaretLeft
                 | Self::CaretRight(_)
+                | Self::SyllablePrev
+                | Self::SyllableNext
         )
     }
 
@@ -2353,6 +2360,8 @@ impl std::fmt::Display for SessionAction {
                 p => write!(f, "caret_right:{p}"),
             },
             Self::ToggleTip => f.write_str("toggle_tip"),
+            Self::SyllablePrev => f.write_str("syllable_prev"),
+            Self::SyllableNext => f.write_str("syllable_next"),
             Self::CommitCode => f.write_str("commit_code"),
             Self::Command(expr) => write!(f, "{COMMAND_VERB_PREFIX}{expr}"),
         }
@@ -5974,6 +5983,12 @@ pub struct KeysConfig {
     /// 高亮移动键组。同 [`Self::page_keys`]，折算进 `session_actions` 后消费。
     #[serde(default = "default_highlight_keys")]
     pub highlight_keys: Vec<String>,
+    /// 按音节跳转键组。出厂为空，所选组优先于翻页和高亮键组。
+    #[serde(default)]
+    pub syllable_jump_keys: Vec<String>,
+    /// 光标位于编码中间时，按光标前的编码查询候选。
+    #[serde(default)]
+    pub caret_scoped_candidates: bool,
     #[serde(default)]
     pub select_char_keys: Vec<String>,
     /// 候选无效按键策略（数字键/次选三选键/以词定字键超出候选范围时的处理）。
@@ -6166,11 +6181,11 @@ fn select_char_group_binds(group: &str) -> &'static [(&'static str, SessionActio
 }
 
 impl KeysConfig {
-    /// **有效**的会话态按键表：四组键组配置的展开结果 ⊕ `session_actions`（后者优先）。
+    /// **有效**的会话态按键表：候选操作键组的展开结果 ⊕ `session_actions`（后者优先）。
     ///
     /// # ★ 这是消费层的视图，不是存储层的改写
     ///
-    /// 四组键组（`page_keys` / `highlight_keys` / `select_key_groups` / `select_char_keys`）
+    /// 候选操作键组（翻页、高亮、音节跳转、次选/三选、以词定字）
     /// 与 `session_actions` 在配置文件里**各自保持原样**，只在这里合并成运行时的单一真相。
     ///
     /// 曾经的做法是在 `normalize()` 里折算并 `clear()` 掉四个原字段，后果是**存储层被视图
@@ -6187,7 +6202,7 @@ impl KeysConfig {
     /// # 优先级（两层，都必须保持）
     ///
     /// 1. **组间**：折算顺序 = 消费点的判定顺序，撞键时先折的赢。主输入路径上是
-    ///    以词定字（`select_char_index`）→ 翻页/高亮（`apply_session_action`）
+    ///    以词定字（`select_char_index`）→ 音节跳转 → 翻页/高亮（`apply_session_action`）
     ///    → 二三候选（`select_key_offset`），故这里必须同序。`comma_period` 同时是选词键组
     ///    与以词定字键组的合法值，顺序就是唯一的裁决依据——搞反了的表现是「一直用的 `,`
     ///    突然从取字变成选次选」，而用户什么都没改。
@@ -6197,6 +6212,19 @@ impl KeysConfig {
         let mut folded: Vec<(&'static str, SessionAction)> = Vec::new();
         for g in &self.select_char_keys {
             folded.extend_from_slice(select_char_group_binds(g));
+        }
+        for g in &self.syllable_jump_keys {
+            folded.extend(
+                highlight_key_group_binds(g)
+                    .iter()
+                    .map(|&(key, ref action)| {
+                        let jump = match action {
+                            SessionAction::HighlightUp => SessionAction::SyllablePrev,
+                            _ => SessionAction::SyllableNext,
+                        };
+                        (key, jump)
+                    }),
+            );
         }
         for g in &self.page_keys {
             folded.extend_from_slice(page_key_group_binds(g));
@@ -6250,6 +6278,8 @@ impl Default for KeysConfig {
             select_key_groups: default_select_key_groups(),
             page_keys: default_page_keys(),
             highlight_keys: default_highlight_keys(),
+            syllable_jump_keys: Vec::new(),
+            caret_scoped_candidates: false,
             select_char_keys: Vec::new(),
             overflow: OverflowConfig::default(),
         }
@@ -9948,7 +9978,7 @@ impl Config {
         // 这里看到的 trigger_keys 已只剩符号键。
         self.migrate_trigger_keys_into_key_actions();
         self.warn_legacy_schema_hotkeys();
-        // ⛔ 这里**不再**把四组键组配置折算进 `session_actions`。折算是**消费层的视图**，
+        // ⛔ 这里**不再**把候选操作键组折算进 `session_actions`。折算是**消费层的视图**，
         // 不是存储层的改写——见 `KeysConfig::effective_session_actions` 的文档。
         self.warn_legacy_special_modes();
     }
@@ -11666,6 +11696,27 @@ mod tests {
             Some("page_next"),
             "显式配置应压过默认 highlight_keys 折算出的 highlight_down"
         );
+    }
+
+    /// 音节键组出厂关闭，勾选才优先接管，逐键绑定仍优先。
+    #[test]
+    fn syllable_jump_groups_override_navigation_until_cleared() {
+        let mut keys = KeysConfig::default();
+        assert!(keys.syllable_jump_keys.is_empty());
+        assert_eq!(keys.effective_session_actions()["tab"], "highlight_down");
+        keys.page_keys.push("shift_tab".into());
+        keys.syllable_jump_keys = vec!["arrows".into(), "tab".into()];
+        let effective = keys.effective_session_actions();
+        assert_eq!(effective["up"], "syllable_prev");
+        assert_eq!(effective["down"], "syllable_next");
+        assert_eq!(effective["shift+tab"], "syllable_prev");
+        assert_eq!(effective["tab"], "syllable_next");
+        keys.session_actions.insert("tab".into(), "none".into());
+        assert_eq!(keys.effective_session_actions()["tab"], "none");
+        keys.session_actions.clear();
+        keys.syllable_jump_keys.clear();
+        assert_eq!(keys.effective_session_actions()["tab"], "page_next");
+        assert_eq!(keys.effective_session_actions()["down"], "highlight_down");
     }
 
     /// ★★ 用户把 `page_keys` 清成 `[]` 的**意图不能丢**。

@@ -265,7 +265,8 @@ public:
     // `CommitText(text, TRUE)` 直接异步提交，保证至少不丢字；**配对那条还必须自己补一次
     // `_ApplyPairCommitTail`**，漏掉就是 DLL 少记一层、core 那层成孤儿。
     BOOL QueueAsyncCommitViaSyntheticKey(const std::wstring& text, BOOL replacingHeld,
-                                         BOOL pairCommit = FALSE, uint32_t moveLeft = 0);
+                                         BOOL pairCommit = FALSE, uint32_t moveLeft = 0,
+                                         const std::wstring& continuation = {}, UINT timeoutMs = 0);
 
 private:
     static constexpr uint32_t ENGLISH_STATS_REPORT_COUNT = 5;
@@ -798,6 +799,8 @@ private:
         // **跟着提交一起排队**，才能保证左移与提交落在同一个按键上下文里——理由见
         // HandlePairCommitPush。
         uint32_t moveLeft = 0;
+        std::wstring continuation;
+        UINT timeoutMs = 0;
     };
     // 队列而非单槽：鼠标可能连续快速点选，多个 push 可能在上一个触发键送达前叠加。
     // 上限只是防御性上界，避免目标窗口已经失焦、触发键永远送不达时无限增长。

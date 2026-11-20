@@ -1227,6 +1227,9 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
                                   pending.moveLeft);
             }
             _ApplyPairCommitTail(pending.pairCommit, pending.moveLeft);
+            if (!pending.continuation.empty())
+                _pTextService->StashDeferredComposition(pending.continuation, pending.timeoutMs,
+                                                        static_cast<UINT>(wParam));
             if (!_pendingAsyncCommits.empty())
             {
                 // 队列里还有后续提交（连续快速点选）：再次自注入触发键，让它在自己的
@@ -3828,7 +3831,8 @@ BOOL CKeyEventSink::_SendAsyncCommitTriggerKey()
 }
 
 BOOL CKeyEventSink::QueueAsyncCommitViaSyntheticKey(const std::wstring& text, BOOL replacingHeld,
-                                                    BOOL pairCommit, uint32_t moveLeft)
+                                                    BOOL pairCommit, uint32_t moveLeft,
+                                                    const std::wstring& continuation, UINT timeoutMs)
 {
     if (text.empty())
     {
@@ -3850,7 +3854,8 @@ BOOL CKeyEventSink::QueueAsyncCommitViaSyntheticKey(const std::wstring& text, BO
         WIND_LOG_WARN(L"QueueAsyncCommitViaSyntheticKey: pending queue full, dropping all pending commits\n");
         _DropPendingAsyncCommits();
     }
-    _pendingAsyncCommits.push_back(PendingAsyncCommit{text, replacingHeld, pairCommit, moveLeft});
+    _pendingAsyncCommits.push_back(
+        PendingAsyncCommit{text, replacingHeld, pairCommit, moveLeft, continuation, timeoutMs});
 
     if (!_SendAsyncCommitTriggerKey())
     {

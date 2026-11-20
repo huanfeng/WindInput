@@ -1389,6 +1389,7 @@ key_actions = {}
 #           都一样。只在有候选时生效，没候选时这个键照常。临时英文里开了「空格作输入」
 #           时它仍是上屏高亮——想用别的键代替空格选词，就绑这个。联想候选跟随
 #           [input.association] space_commits：那里关掉时它也不选联想)
+#       syllable_prev / syllable_next(向左 / 右跳到分段边界，向右找不到下一段时移到末尾)
 #       commit_code(上屏编码，同回车上屏编码，但不看 [input] enter_behavior：那里设成
 #           清空编码时，这个键仍上屏编码。打了码没出候选时也能按，没在打字、联想候选时
 #           这个键照常。极点 / 小鸭的习惯是 lctrl = "commit_code")
@@ -1400,11 +1401,8 @@ key_actions = {}
 #   session_actions = { tab = "aux_code:page_next" }
 # 例（嫌 Esc 太远，用 Tab 放弃这一段）：
 #   session_actions = { tab = "cancel" }
-# 本表只存**你显式配的**键。下面四项 page_keys / highlight_keys / select_key_groups /
-# select_char_keys 各自独立保存，**运行时**才与本表合并（本表写了的键优先）——两边都
-# 保持原样，改一处不会动到另一处。出厂默认留在那四项里、不写在这，这样把它们清成 []
-# 就真的能关掉对应功能。
-# 撞键时按消费顺序裁决：以词定字 > 翻页/高亮 > 二三候选。
+# 候选键组单独保存，运行时与本表合并，逐键绑定优先。将键组设为 [] 可取消该项的键组绑定。
+# 键组冲突时优先级：以词定字 > 音节跳转 > 翻页 > 高亮 > 二三候选。
 # ⚠ capslock 与其它键不同：Windows 的大小写锁定状态在输入法拿到按键之前就已翻转，
 #   压不住。故本项一旦配了 capslock，程序会安装一个全局键盘钩子，在系统改状态之前
 #   拦下它（打字时才拦，空闲时 CapsLock 照常切大小写）。**不配 capslock 就完全不装
@@ -1418,6 +1416,10 @@ session_actions = {}
 select_key_groups = ["semicolon_quote"]
 page_keys = ["pageupdown", "minus_equal"]
 highlight_keys = ["arrows", "tab"]
+# 按音节跳转键组：arrows（↑/↓）、tab（Shift+Tab/Tab）。
+syllable_jump_keys = []
+# 光标移动重算候选：开启后按光标前的编码选词，余码留在输入框继续选。
+caret_scoped_candidates = false
 # 以词定字：用成对标点键从当前高亮候选词中逐字上屏（第1键取第1字、第2键取第2字）。
 # 可选键组 comma_period(,/.) / minus_equal(-/=) / brackets([/])；空数组=禁用。
 # 词长不足时按 [keys.overflow].select_char_key 策略处理。

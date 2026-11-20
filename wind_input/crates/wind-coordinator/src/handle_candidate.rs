@@ -2808,24 +2808,65 @@ impl Coordinator {
         }
     }
 
-    /// 根据输入缓冲更新候选（动态分级加载：首次小批量，翻页到边界再扩展）。
-    /// 返回输入结局（全码自动上屏 / 满码空码清空）；多数调用方忽略，仅正向输入字母时消费。
-    /// 光标限定查询的截断位（字节）：`Some(n)` = 本轮候选只按 `input_buffer[..n]` 去问引擎。
-    ///
-    /// 手机端的拼音「中间修正」：光标挪到某个音节后面，候选就只剩这个音节（及其前缀）的字，
-    /// 选中后上屏、后半截留在编码栏续打（复用分步上屏，见 `partial`）。
-    ///
-    /// ⚠️ **默认关**（[`cursor_by_syllable`]）：电脑端 ←/→ 移光标**不改候选**是既有行为
-    /// （`State::input_cursor_pos` 注释：光标不参与引擎查询）。这是给电脑端「移光标改拼音」准备的
-    /// 机制，打开它之前不会改变任何现有行为；手机端不走它，用 [`crate::leading_reading`]。
-    /// 电脑端接入时只需调 [`set_cursor_by_syllable`]（由配置项驱动），下游无需再动。
-    /// 仅限普通输入的拼音方案；overlay 模式（临时拼音等）与码表方案不进。
+    /// 判断主输入会话是否支持按编码位置限定候选。
+    pub(crate) fn supports_caret_query(&self, state: &State) -> bool {
+        state.active.is_none()
+            && matches!(
+                self.engine_mgr
+                    .loaded_engine_type(&self.engine_mgr.active_schema_id()),
+                Some(
+                    wind_engine::EngineType::Pinyin
+                        | wind_engine::EngineType::CodeTable
+                        | wind_engine::EngineType::Mixed
+                )
+            )
+    }
+
+    /// 当前会话是否启用了按光标分段选词。
+    pub(crate) fn uses_caret_query(&self, state: &State) -> bool {
+        self.rt().config.keys.caret_scoped_candidates && self.supports_caret_query(state)
+    }
+
+    /// 光标严格位于编码中间时，以该字节位置限定候选查询。
     fn query_cut(&self, state: &State) -> Option<usize> {
         cut_position(
-            cursor_by_syllable(),
             &state.input_buffer,
             state.input_cursor_pos,
-            Self::overlay_caret_parts(state).is_none() && self.engine_mgr.is_pinyin(),
+            self.uses_caret_query(state),
+        )
+    }
+
+    /// 从当前缓冲和切分计算跳转的字节位置。向左无切分时交给调用方逐码移动。
+    pub(crate) fn syllable_caret_target(&self, state: &State, next: bool) -> Option<usize> {
+        let cursor = state.input_cursor_pos;
+        let buffer = &state.input_buffer;
+        let body = self.effective_preedit_body(state);
+        let spans = [
+            body,
+            &state.preedit_split_body,
+            &state.preedit_codetable_body,
+        ]
+        .into_iter()
+        .filter(|split| split.contains('\''))
+        .find_map(|split| preedit_cursor::syllable_spans(buffer, split));
+        if !next {
+            return spans.map(|spans| preedit_cursor::syllable_left(&spans, cursor));
+        }
+
+        let search_start = if cursor == buffer.len() { 0 } else { cursor };
+        // 手敲的分隔符停在符号之后；同一个边界无需在符号前再停一次。
+        let split_ends = spans
+            .into_iter()
+            .flatten()
+            .map(|(_, end)| end)
+            .filter(|&end| !buffer[end..].starts_with('\''));
+        let typed_ends = buffer.match_indices('\'').map(|(at, sep)| at + sep.len());
+        Some(
+            split_ends
+                .chain(typed_ends)
+                .filter(|&end| end > search_start)
+                .min()
+                .unwrap_or(buffer.len()),
         )
     }
 
@@ -2860,32 +2901,23 @@ impl Coordinator {
         if cased_ok {
             state.input_buffer_cased.truncate(cut);
         }
-        let result = self.build_candidates(state, limit);
+        let (engine_count, _) = self.build_candidates(state, limit);
+        if state.shadow_code.is_empty() {
+            state.shadow_code.clone_from(&state.input_buffer);
+        }
         state.input_buffer = full;
         state.input_buffer_cased = full_cased;
-        for c in &mut state.candidates {
+        // 命令和分组导航会替换整段组合，光标限域时只提供可上屏的字词。
+        state.candidates.retain(|c| !c.is_group && !c.is_command);
+        for c in state.candidates.iter_mut().chain(&mut state.sentence_pool) {
             if c.consumed_length == 0 || c.consumed_length > cut {
                 c.consumed_length = cut;
             }
         }
-        let body = self
-            .engine_mgr
-            .convert(&state.input_buffer, 1)
-            .preedit_pinyin;
-        if !body.is_empty() {
-            // 候选自带的切分（`meta.preedit_split`）只覆盖被查询的前缀，且显示时优先于整串拆分：
-            // 不补后半截，编码栏就只剩光标前那几个字母（`fang` 吞掉 `xiang`）。
-            let tail = tail_after_letters(&body, cut);
-            if !tail.is_empty() {
-                for c in &mut state.candidates {
-                    if let Some(own) = c.meta.preedit_split.as_deref() {
-                        c.meta.preedit_split = Some(format!("{own}'{tail}").into());
-                    }
-                }
-            }
-            state.preedit_split_body = body;
-        }
-        result
+        let full = self.engine_mgr.convert(&state.input_buffer, 1);
+        state.preedit_split_body = full.preedit_pinyin;
+        state.preedit_codetable_body = full.preedit_codetable;
+        (engine_count, InputOutcome::Normal)
     }
 
     pub(crate) fn update_candidates(&self, state: &mut State) -> InputOutcome {
@@ -3502,6 +3534,13 @@ impl Coordinator {
     ///   （preedit_split_body，如 baoan 的拼音 / saaa 的 sa'a'a）。
     /// - 高亮候选为码表/五笔（或短语等非拼音）→ 原始码（input_buffer，如 saaa 选「模式」时不拆）。
     fn effective_preedit_body<'a>(&self, state: &'a State) -> &'a str {
+        // 限域候选自带的切分只覆盖前半截，组合区仍显示整串。
+        if self.query_cut(state).is_some() {
+            return [&state.preedit_split_body, &state.preedit_codetable_body]
+                .into_iter()
+                .find(|body| !body.is_empty())
+                .unwrap_or(&state.input_buffer);
+        }
         // 码表整句：高亮到整句候选时按**编码单元**切分显示（`aawt'aawt`）。
         //
         // ★ 必须排在 `preedit_split_body.is_empty()` 那道守卫**之前**：码表方案下拼音
@@ -4440,15 +4479,25 @@ impl Coordinator {
         // 判据统一是来源，与短语「有文本无码位、恒不记词频」同一先例。
         let from_assoc = cand.source == CandidateSource::Assoc;
         let total = state.input_buffer.len();
-        let consumed = cand.consumed_length;
-        let code = Self::cand_code(&state.input_buffer, cand);
+        let cut = self.query_cut(state);
+        let input = &state.input_buffer[..cut.unwrap_or(total)];
+        let code = Self::cand_code(input, cand);
+        let mut consumed = cand.consumed_length;
+        if cut.is_some()
+            && let Some(tail) = state.input_buffer.get(consumed..)
+        {
+            let rest = tail.trim_start_matches('\'');
+            if !rest.is_empty() {
+                consumed += tail.len() - rest.len();
+            }
+        }
         let partial =
             consumed > 0 && consumed < total && state.input_buffer.is_char_boundary(consumed);
         // 词频记账走 `freq_code` 而非上面的 `code`：码表按**输入码**（码位独立），
         // 拼音/英文按候选码（分段时为前缀码，如「ni」而非整串「nihao」）。
         // 上面的 `code` 仍供 `record_commit` 统计码长使用，那是另一套语义。
         if !from_assoc {
-            self.record_selection_cand(&self.main_freq_code(&state.input_buffer, cand), cand);
+            self.record_selection_cand(&self.main_freq_code(input, cand), cand);
         }
         // 下一词学习的上文：`record_commit` 一律清上文（默认断开），选词是唯一接得上的
         // 出口，故先取出来——分步选的前段放回去，整体上屏交给 `learn_next_word`。
@@ -4462,7 +4511,7 @@ impl Coordinator {
             wind_store::stats::CommitSource::Candidate,
         );
         let raw_code = Self::raw_consumed_code(&state.input_buffer, consumed, partial);
-        if partial {
+        if partial && cut.is_none() {
             self.restore_next_word_prev(next_word_prev);
             state.committed_segs.push(CommittedSeg {
                 raw_code,
@@ -4588,7 +4637,29 @@ impl Coordinator {
             } else {
                 final_simplified.clone()
             };
+            let remainder = partial.then(|| {
+                (
+                    state.input_buffer.split_off(consumed),
+                    std::mem::take(&mut state.input_buffer_cased),
+                )
+            });
             self.reset_pinyin_composition(state);
+            if let Some((buffer, cased)) = remainder {
+                state.input_buffer = buffer;
+                state.input_buffer_cased = cased;
+                preedit_cursor::keep_cased_tail(&state.input_buffer, &mut state.input_buffer_cased);
+                state.input_cursor_pos = state.input_buffer.len();
+                state.grid_keep = false;
+                state.clear_comment_flips();
+                self.update_candidates(state);
+                self.reset_first_show();
+                self.notify_ui_update(state);
+                return KeyAction::CommitThenDeferComposition {
+                    commit_text: out,
+                    deferred_composition: state.preedit.clone(),
+                    timeout_ms: DEFERRED_COMPOSITION_FALLBACK_MS,
+                };
+            }
             // 联想入口。**位置即契约**：`reset_pinyin_composition` 刚把缓冲与候选清空，
             // 正是 `maybe_enter_assoc` 往 `candidates` 里填之前要的状态；再往后就只剩返回。
             //
@@ -6360,11 +6431,12 @@ impl Coordinator {
     /// 键盘选词把 KeyAction 交回 TSF 按键管线应答，**鼠标点击**（不在 OnKeyDown 的应答里）
     /// 与 **CapsLock 全局钩子**（`handle_capslock_hook_press`，事件根本不经 TSF）都没有那个
     /// 上下文，只能自行编码经 push 管道投递——两者是同一处境，故共用本函数而不是各写一份。
-    /// 仅覆盖 `commit_selected` 的两种返回：
+    /// 覆盖 `commit_selected` 的组合更新、整串提交及先提交再续组合：
     /// - `UpdateComposition`（分步提交 / 二级选择）→ `CMD_UPDATE_COMPOSITION`，组合区留活。
     ///   C++ 侧 IPCClient 异步 reader 与 TextService 的 `SetUpdateCompositionCallback` 自 Go 版
     ///   起就在位（注释即写 "mouse click partial confirm"），Rust 侧此前从未发过此包。
     /// - `InsertText`（整串提交）→ `CMD_COMMIT_TEXT`。
+    /// - `CommitThenDeferComposition` → 把提交和余码一并交给宿主处理。
     ///
     /// 两者均带副作用，故一律 `push_commit_to_active` 定向投递（非广播），避免多个 TSF 端重复。
     ///
@@ -6406,6 +6478,20 @@ impl Coordinator {
                 self.push_server.push_commit_to_active(&encoded);
                 self.hook_commit(&text, "candidate");
                 debug!("push_no_key_ctx: committed '{}'", text);
+            }
+            KeyAction::CommitThenDeferComposition {
+                commit_text,
+                deferred_composition,
+                timeout_ms,
+            } => {
+                let text = self.convert_commit_newline(commit_text.clone());
+                let encoded = wind_ipc::codec::encode_commit_then_defer(
+                    *timeout_ms,
+                    &text,
+                    deferred_composition,
+                );
+                self.push_server.push_commit_to_active(&encoded);
+                self.hook_commit(&text, "candidate");
             }
             other => {
                 debug!("push_no_key_ctx: 无需推送的 KeyAction {:?}", other);
@@ -9377,26 +9463,10 @@ mod expand_stop_tests {
     }
 }
 
-/// 移动端拼音单字母收紧首批上限；桌面、多字母、其它引擎一律不动。
-/// 拼音拆分串（`fang'xiang`）里，跳过前 `letters` 个字母（及随后的隔音符）之后剩下的部分。
-/// `tail_after_letters("fang'xiang", 4)` = `xiang`；字母数用尽 → 空串。
-pub(crate) fn tail_after_letters(body: &str, letters: usize) -> String {
-    let mut seen = 0usize;
-    for (i, ch) in body.char_indices() {
-        if seen >= letters {
-            return body[i..].trim_start_matches('\'').to_string();
-        }
-        if ch != '\'' {
-            seen += 1;
-        }
-    }
-    String::new()
-}
-
 static CURSOR_BY_SYLLABLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 打开 / 关闭「拼音按音节移光标、候选只查光标前一段」。默认关；电脑端的配置项接入时调用。
+/// 设置裸左键是否按音节移动。
 pub fn set_cursor_by_syllable(on: bool) {
     CURSOR_BY_SYLLABLE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
@@ -9405,20 +9475,10 @@ pub(crate) fn cursor_by_syllable() -> bool {
     CURSOR_BY_SYLLABLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// [`Coordinator::query_cut`] 的判据（纯函数，便于测试）：只有手机端、光标严格落在编码中间
-/// 且在字符边界、普通拼音输入时才截断。
-pub(crate) fn cut_position(
-    mobile: bool,
-    buffer: &str,
-    cursor: usize,
-    plain_pinyin: bool,
-) -> Option<usize> {
-    (mobile
-        && plain_pinyin
-        && cursor > 0
-        && cursor < buffer.len()
-        && buffer.is_char_boundary(cursor))
-    .then_some(cursor)
+/// 支持分段选词且光标严格位于编码中间的字符边界时，返回截断位置。
+pub(crate) fn cut_position(buffer: &str, cursor: usize, enabled: bool) -> Option<usize> {
+    (enabled && cursor > 0 && cursor < buffer.len() && buffer.is_char_boundary(cursor))
+        .then_some(cursor)
 }
 
 #[cfg(test)]
@@ -9456,49 +9516,31 @@ mod mobile_limit_tests {
     }
 
     #[test]
-    fn cut_position_only_for_mobile_pinyin_with_cursor_inside() {
+    fn cut_position_only_inside_supported_input() {
         assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 4, true),
+            crate::handle_candidate::cut_position("fangxiang", 4, true),
             Some(4)
         );
         assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 9, true),
+            crate::handle_candidate::cut_position("fangxiang", 9, true),
             None,
             "光标在末尾 = 整串"
         );
         assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 0, true),
+            crate::handle_candidate::cut_position("fangxiang", 0, true),
             None,
             "光标在开头无前缀可查"
         );
         assert_eq!(
-            crate::handle_candidate::cut_position(false, "fangxiang", 4, true),
+            crate::handle_candidate::cut_position("fangxiang", 4, false),
             None,
-            "电脑端不改既有行为"
+            "未支持的输入路径不截断"
         );
         assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 4, false),
-            None,
-            "码表 / overlay 不进"
-        );
-        assert_eq!(
-            crate::handle_candidate::cut_position(true, "你好", 1, true),
+            crate::handle_candidate::cut_position("你好", 1, true),
             None,
             "非字符边界"
         );
-    }
-
-    #[test]
-    fn tail_after_letters_skips_separators() {
-        use crate::handle_candidate::tail_after_letters;
-        assert_eq!(tail_after_letters("fang'xiang", 4), "xiang");
-        assert_eq!(
-            tail_after_letters("fang'xiang", 6),
-            "ang",
-            "光标在音节中间：余下半个音节"
-        );
-        assert_eq!(tail_after_letters("fang'xiang", 9), "");
-        assert_eq!(tail_after_letters("ni'hao'a", 2), "hao'a");
     }
 }
 

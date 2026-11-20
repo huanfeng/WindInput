@@ -2216,11 +2216,8 @@ impl MessageHandler for Coordinator {
                         _ => ed.end(),
                     };
                     if moved {
-                        // 光标移动**不重算候选**（不调 update_candidates）：光标不参与引擎查询，
-                        // 候选与 preedit 文本均不变，只是 caret 位置变了。但仍须 notify_ui_update
-                        // ——自绘编码栏要据新 caret 重画插入符（"不重算候选" ≠ "不刷新 UI"）。
-                        // 手机端例外：光标在中间时候选只查光标前一段（`query_cut`），移动后必须重算。
-                        if crate::handle_candidate::cursor_by_syllable() {
+                        // 支持分段选词的方案按光标重查，其余方案只同步插入符。
+                        if self.uses_caret_query(&state) {
                             self.update_candidates(&mut state);
                         }
                         let display = state.preedit.clone();

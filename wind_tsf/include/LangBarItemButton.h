@@ -75,7 +75,7 @@ public:
 
     // Thread-safe commit text from async thread (posts message to UI thread)
     // This ensures EndComposition is called before InsertText on the correct thread
-    void PostCommitText(const std::wstring& text);
+    void PostCommitText(const ServiceResponse& response);
 
     // Thread-safe replace-backward from async thread (undo commit push):
     // delete `count` chars before caret then insert text on the UI thread
@@ -166,6 +166,8 @@ private:
     // Data for commit text message
     struct CommitTextData {
         std::wstring text;
+        std::wstring continuation;
+        UINT timeoutMs;
     };
 
     // Data for replace-backward message (undo commit)

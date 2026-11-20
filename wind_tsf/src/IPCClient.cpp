@@ -2905,7 +2905,7 @@ void CIPCClient::_AsyncReaderLoop()
                 if (srCallback)
                     srCallback();
             }
-            else if (header.command == CMD_COMMIT_TEXT)
+            else if (header.command == CMD_COMMIT_TEXT || header.command == CMD_COMMIT_THEN_DEFER)
             {
                 // Parse commit text (from Go - mouse click on candidate)
                 std::vector<uint8_t> payload;
@@ -2927,7 +2927,7 @@ void CIPCClient::_AsyncReaderLoop()
 
                     if (callback && !response.text.empty())
                     {
-                        callback(response.text);
+                        callback(response);
                     }
                 }
             }
