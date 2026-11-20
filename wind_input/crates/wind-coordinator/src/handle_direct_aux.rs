@@ -472,6 +472,17 @@ mod tests {
 
     /// `aux` 是 `[engine.aux_code]` 里 `files` 之外的行（enabled / direct）；`scheme` 空 = 全拼。
     fn fixture(tag: &str, scheme: &str, aux: &str) -> (std::path::PathBuf, Fixture) {
+        fixture_with(tag, scheme, aux, "", "")
+    }
+
+    /// [`fixture`]，词库与码表各追加几行。
+    fn fixture_with(
+        tag: &str,
+        scheme: &str,
+        aux: &str,
+        more_dict: &str,
+        more_aux: &str,
+    ) -> (std::path::PathBuf, Fixture) {
         let dir =
             std::env::temp_dir().join(format!("wind_direct_aux_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -484,10 +495,10 @@ mod tests {
         std::fs::copy(layout, schemas.join("shuangpin/xiaohe.toml")).unwrap();
         std::fs::write(
             schemas.join("sp/mini.dict.yaml"),
-            format!("---\nname: mini\nversion: \"1\"\nsort: by_weight\n...\n{DICT}"),
+            format!("---\nname: mini\nversion: \"1\"\nsort: by_weight\n...\n{DICT}{more_dict}"),
         )
         .unwrap();
-        std::fs::write(schemas.join("aux_code/t.txt"), AUX).unwrap();
+        std::fs::write(schemas.join("aux_code/t.txt"), format!("{AUX}{more_aux}")).unwrap();
         let pinyin = if scheme.is_empty() {
             String::new()
         } else {
@@ -745,6 +756,102 @@ mod tests {
         let (c, _) = coord("co_mid_tail", &dir);
         type_str(&c, "nitwhc");
         assert_ne!(top_tc(&c).as_deref(), Some("拟好/6"));
+    }
+
+    /// 整句切换键（露 2 算 3）：过闸的整串整句（`nihhc`：你 + 辅码 h + 好）是池里第 1 名、界面首选
+    /// （整句块按名次摆，它不带名次时会被末槽整句「你航 / 你行」压到第 3）；切换键把它换走，
+    /// 转到末一格时从池里换进来的那条照样消费整串，上屏后缓冲为空（辅码字母不滞留）。
+    #[test]
+    fn continuous_sn_in_sentence_pool() {
+        let (dir, _f) = fixture_with(
+            "co_pool",
+            "shuangpin",
+            ON,
+            "行\thang\t5000\n藏\tcang\t3000\n才\tcai\t3000\n你航\tni hang\t3000\n",
+            "你=hz\n",
+        );
+        let (c, _) = coord_with("co_pool", &dir, |cfg| {
+            cfg.schema.pinyin.sentence_count = 2;
+            cfg.schema.pinyin.sentence_max_count = 3;
+            cfg.schema.pinyin.sentence_cycle_key = "tab".into();
+        });
+        type_str(&c, "nihhc");
+        let pool: Vec<(String, usize)> = {
+            let s = c.state.lock().unwrap();
+            s.sentence_pool
+                .iter()
+                .map(|c| (c.text.clone(), c.consumed_length))
+                .collect()
+        };
+        assert_eq!(pool.first(), Some(&("你好".to_string(), 5)), "{pool:?}");
+        assert!(pool.len() >= 2, "前提：池里另有整句：{pool:?}");
+        assert_eq!(top_tc(&c).as_deref(), Some("你好/5"));
+        // 转一圈：每一步都有一条从池里换进来的「你好」，它消费整串。
+        for _ in 1..pool.len() {
+            press(&c, keymap::VK_TAB);
+            assert_ne!(top_tc(&c).as_deref(), Some("你好/5"), "切换键换走了首位");
+        }
+        let at = c
+            .state
+            .lock()
+            .unwrap()
+            .candidates
+            .iter()
+            .position(|x| x.text == "你好")
+            .expect("末一格窗口里池首那条在候选里");
+        assert_eq!(fingerprint(&c)[at], "你好/5/nihao");
+        match press(&c, keymap::VK_1 + at as u32) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, "你好"),
+            other => panic!("应整体上屏：{other:?}"),
+        }
+        assert!(c.state.lock().unwrap().input_buffer.is_empty());
+    }
+
+    /// 整串整句进池后，露 N 算 3（N = 1、2）：带名次的候选不多于 N（整句块与切换窗口都按它算），
+    /// 每按一次切换键窗口仍是 N 条，转满一圈回到「你好/5」居首。
+    #[test]
+    fn continuous_sn_pool_window_keeps_show_count() {
+        let (dir, _f) = fixture_with(
+            "co_pool_show",
+            "shuangpin",
+            ON,
+            "行\thang\t5000\n藏\tcang\t3000\n才\tcai\t3000\n你航\tni hang\t3000\n",
+            "你=hz\n",
+        );
+        for show in [1u8, 2] {
+            let (c, _) = coord_with(&format!("co_pool_show{show}"), &dir, |cfg| {
+                cfg.schema.pinyin.sentence_count = show;
+                cfg.schema.pinyin.sentence_max_count = 3;
+                cfg.schema.pinyin.sentence_cycle_key = "tab".into();
+            });
+            type_str(&c, "nihhc");
+            let ranked = || -> Vec<(String, u8)> {
+                let s = c.state.lock().unwrap();
+                s.candidates
+                    .iter()
+                    .filter(|x| x.sentence_rank > 0)
+                    .map(|x| (x.text.clone(), x.sentence_rank))
+                    .collect()
+            };
+            let k = c.state.lock().unwrap().sentence_pool.len();
+            assert!(k > show as usize, "前提：池比露的多（露 {show}）：{k}");
+            assert_eq!(top_tc(&c).as_deref(), Some("你好/5"), "露 {show}");
+            let r = ranked();
+            assert!(r.len() <= show as usize, "露 {show}：{r:?}");
+            for step in 1..=k {
+                press(&c, keymap::VK_TAB);
+                let r = ranked();
+                assert!(r.len() <= show as usize, "露 {show} 第 {step} 次：{r:?}");
+                if step < k {
+                    assert_ne!(
+                        top_tc(&c).as_deref(),
+                        Some("你好/5"),
+                        "露 {show} 第 {step} 次"
+                    );
+                }
+            }
+            assert_eq!(top_tc(&c).as_deref(), Some("你好/5"), "露 {show}：转满一圈");
+        }
     }
 
     /// 连续模式整句候选的 code 去掉了辅码（`nitwhc` → `nihao`，不是双拼转换读出的 `niteihao`），

@@ -349,4 +349,8 @@ impl Grammar for OctagramGrammar {
         // 理由见类型注释「两条约束」。分寸完全由 `weight` 控制。
         self.config.weight * (hit - self.config.baseline)
     }
+
+    fn weight(&self) -> Option<f64> {
+        Some(self.config.weight)
+    }
 }

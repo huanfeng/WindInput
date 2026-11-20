@@ -24,6 +24,12 @@ pub trait Grammar: Send + Sync {
     ///
     /// 返回值直接加进路径分，**正值是奖励、负值是惩罚**。
     fn query(&self, context: &str, word: &str, is_rear: bool) -> f64;
+
+    /// 打分的尺度系数（octagram 的 `weight`：转移分 = weight × (…)）。连续辅助码的闸门裕度
+    /// 随它缩放；`None` = 实现不按这个系数打分（按 0.5 处理）。
+    fn weight(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// 恒返回 `0.0` 的空实现。

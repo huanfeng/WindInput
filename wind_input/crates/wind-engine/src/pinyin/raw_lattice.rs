@@ -84,20 +84,27 @@ fn aux_cost(s: &Shape) -> f64 {
 /// 整串正当辅码除 2 例外最小 4.98（有 2 条恰好被 5 挡住）；两侧有重叠，5 是折中。模型开时假读法 ≤ 9.0，正当辅码除 2 例外
 /// 都 ≥ 10.8（另 1 条 8.7）。
 pub(crate) const AUX_GATE_MARGIN: f64 = 5.0;
-/// 语法模型开时的 [`AUX_GATE_MARGIN`]。
+/// 语法模型开、权重为 [`AUX_GATE_REF_WEIGHT`] 时的 [`AUX_GATE_MARGIN`]。
 pub(crate) const AUX_GATE_MARGIN_GRAMMAR: f64 = 10.0;
+/// [`AUX_GATE_MARGIN_GRAMMAR`] 标定时的 `grammar.weight`（移动端出厂值；桌面出厂不挂模型，勾上后同值）。
+pub(crate) const AUX_GATE_REF_WEIGHT: f64 = 0.5;
 
-fn default_gate_margin(grammar: bool) -> f64 {
-    if grammar {
-        AUX_GATE_MARGIN_GRAMMAR
-    } else {
-        AUX_GATE_MARGIN
+/// 出厂裕度。`grammar`：没挂模型 = `None`；挂了 = 其权重（`Some(None)` = 不报权重，按 0.5）。
+/// 模型的转移分是 `weight × (…)`，分差尺度随权重放大，裕度按权重线性缩放：权重 0 退回模型关
+/// 的 5，0.5（移动端出厂）时为 10。
+fn default_gate_margin(grammar: Option<Option<f64>>) -> f64 {
+    match grammar {
+        None => AUX_GATE_MARGIN,
+        Some(w) => {
+            let w = w.unwrap_or(AUX_GATE_REF_WEIGHT).max(0.0);
+            AUX_GATE_MARGIN + (AUX_GATE_MARGIN_GRAMMAR - AUX_GATE_MARGIN) * w / AUX_GATE_REF_WEIGHT
+        }
     }
 }
 
 #[cfg(not(test))]
 #[inline(always)]
-pub(super) fn aux_gate_margin(grammar: bool) -> f64 {
+pub(super) fn aux_gate_margin(grammar: Option<Option<f64>>) -> f64 {
     default_gate_margin(grammar)
 }
 
@@ -107,7 +114,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(super) fn aux_gate_margin(grammar: bool) -> f64 {
+pub(super) fn aux_gate_margin(grammar: Option<Option<f64>>) -> f64 {
     GATE_MARGIN
         .with(std::cell::Cell::get)
         .unwrap_or_else(|| default_gate_margin(grammar))
@@ -119,27 +126,36 @@ pub(crate) fn set_aux_gate_margin(v: Option<f64>) -> Option<f64> {
     GATE_MARGIN.with(|c| c.replace(v))
 }
 
-/// 落单（末键在 P1 读法里落单、被当成末字的 1 位辅码）时的放行裕度：`None` = 一律不放行。
+/// 落单（末键在 P1 读法里落单、被当成末字的 1 位辅码）时的裕度。落单读法常是「下一字的声母」
+/// 被借作辅码，假读法分差比非落单高。两份语料 × 三布局 × 模型关 / 开（权重 0.3～0.8）逐键前缀上，
+/// 排除文字仍是原句前缀的（文字对，只吞了下一字的声母；模型关最高 12.5），假读法分差 ≤ 8.1；
+/// 且不随权重放大，模型开关同取一值。
+pub(crate) const AUX_DANGLING_MARGIN: f64 = 12.0;
+
+/// 落单时的放行裕度：`None` = 一律不放行。
 #[cfg(not(test))]
 #[inline(always)]
 pub(super) fn aux_dangling_margin() -> Option<f64> {
-    None
+    Some(AUX_DANGLING_MARGIN)
 }
 
 #[cfg(test)]
 thread_local! {
-    static DANGLING_MARGIN: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+    /// `None` = 出厂；`Some(None)` = 一律不放行；`Some(Some(v))` = 按 v 比分。
+    static DANGLING_MARGIN: std::cell::Cell<Option<Option<f64>>> = const { std::cell::Cell::new(None) };
     static GATE_GAPS: RefCell<Vec<GateGap>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
 pub(super) fn aux_dangling_margin() -> Option<f64> {
-    DANGLING_MARGIN.with(std::cell::Cell::get)
+    DANGLING_MARGIN
+        .with(std::cell::Cell::get)
+        .unwrap_or(Some(AUX_DANGLING_MARGIN))
 }
 
-/// 测试里放宽落单裁决（落单时也按这个裕度比分），返回旧值。
+/// 测试里覆写本线程的落单裕度（`None` = 出厂，`Some(None)` = 一律不放行），返回旧值。
 #[cfg(test)]
-pub(crate) fn set_aux_dangling_margin(v: Option<f64>) -> Option<f64> {
+pub(crate) fn set_aux_dangling_margin(v: Option<Option<f64>>) -> Option<Option<f64>> {
     DANGLING_MARGIN.with(|c| c.replace(v))
 }
 
@@ -151,7 +167,7 @@ pub(crate) struct GateGap {
     /// `'n'` = 终点整串的辅码整句 S_n，`'e'` = 用了辅码的末槽整句 S_e
     pub kind: char,
     pub dangling: bool,
-    /// 辅码整句的分；没比分（落单直接不放行）时为 `None`
+    /// 辅码整句的分；没比分（落单一律不放行时）为 `None`
     pub score: Option<f64>,
     /// 同终点不用辅码的最优路径的分；`None` = 没有对手
     pub rival: Option<f64>,
@@ -1585,6 +1601,23 @@ mod tests {
     use wind_dict::codetable::CodetableDict;
     use wind_store::Store;
 
+    /// 闸门裕度护栏：没挂模型走模型关那档；挂了按权重缩放，权重 0.5 时仍是标定值 10，权重调高
+    /// 裕度随之放大（转移分整体放大）；模型不报权重时按 0.5。
+    #[test]
+    fn gate_margin_guard() {
+        use super::super::viterbi::ViterbiDecoder;
+        assert_eq!(super::default_gate_margin(None), 5.0);
+        assert_eq!(super::default_gate_margin(Some(Some(0.5))), 10.0);
+        assert_eq!(super::default_gate_margin(Some(None)), 10.0);
+        assert_eq!(super::default_gate_margin(Some(Some(0.0))), 5.0);
+        assert!((super::default_gate_margin(Some(Some(0.8))) - 13.0).abs() < 1e-9);
+        assert!((super::default_gate_margin(Some(Some(0.3))) - 8.0).abs() < 1e-9);
+        // 引擎从解码器读：没挂模型 = None，挂了不报权重的 = Some(None)。
+        assert_eq!(ViterbiDecoder::new().grammar_weight(), None);
+        let null = ViterbiDecoder::with_grammar(Arc::new(super::super::grammar::NullGrammar));
+        assert_eq!(null.grammar_weight(), Some(None));
+    }
+
     fn xiaohe() -> ShuangpinConverter {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../data/schemas/shuangpin/xiaohe.toml");
@@ -2769,10 +2802,14 @@ mod lambda_sweep {
 
     /// 界面序首选（同 `pinyin_eval::ui_candidates`）。
     fn ui_top(mut c: Vec<wind_candidate::Candidate>, input: &str) -> Option<String> {
-        wind_candidate::drop_corrected_duplicates(&mut c);
-        c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, input));
-        wind_candidate::protect_top_from_corrected(&mut c, input.len());
+        ui_sort(&mut c, input);
         c.into_iter().next().map(|c| c.text)
+    }
+
+    fn ui_sort(c: &mut Vec<wind_candidate::Candidate>, input: &str) {
+        wind_candidate::drop_corrected_duplicates(c);
+        c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, input));
+        wind_candidate::protect_top_from_corrected(c, input.len());
     }
 
     /// k=0 逐键前缀上开辅码表后首选 `(文字, 消费数)` 与不给表时不同的前缀，按奇偶、文字是否相同、
@@ -3046,9 +3083,12 @@ mod lambda_sweep {
             .collect()
     }
 
-    /// 内置 `shuangpin` 方案经 override 换布局；`grammar` 时挂 mini 模型（权重 0.5）。
-    fn sweep_manager(dir: &Path, layout: &str, grammar: bool) -> EngineManager {
-        let ov = std::env::temp_dir().join(format!("wind_aux_sweep_ov_{layout}"));
+    /// 内置 `shuangpin` 方案经 override 换布局；`grammar` 为模型权重时挂 mini 模型。
+    fn sweep_manager(dir: &Path, layout: &str, grammar: Option<f64>) -> EngineManager {
+        let ov = std::env::temp_dir().join(format!(
+            "wind_aux_sweep_{}/ov_{layout}_{grammar:?}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&ov);
         std::fs::create_dir_all(&ov).unwrap();
         std::fs::write(
@@ -3059,9 +3099,9 @@ mod lambda_sweep {
         let mut cfg = wind_config::Config::default();
         cfg.schema.available = vec!["shuangpin".to_string()];
         cfg.schema.active = "shuangpin".to_string();
-        if grammar {
+        if let Some(w) = grammar {
             cfg.schema.pinyin.grammar.enabled = true;
-            cfg.schema.pinyin.grammar.weight = 0.5;
+            cfg.schema.pinyin.grammar.weight = w;
             cfg.schema.pinyin.grammar.model = "wanxiang-mini.gram".to_string();
         }
         let mgr = EngineManager::with_store_override(&cfg, Some(dir), None, Some(ov));
@@ -3080,9 +3120,11 @@ mod lambda_sweep {
     /// ```
     ///
     /// `WIND_AUX_SWEEP_MARGINS`：`none` = 出厂两档（模型关 / 开各用各的，默认），数字 = 两档同取该值。
-    /// `WIND_AUX_SWEEP_DANGLING`：`none` = 落单一律不放行（出厂），数字 = 落单时也按该裕度比分。
+    /// `WIND_AUX_SWEEP_DANGLING`：`default` = 出厂，`none` = 落单一律不放行，数字 = 落单时按该裕度比分。
+    /// `WIND_AUX_SWEEP_UI=1`：首选按界面序（协调器同款排序）取。
     /// `WIND_AUX_SWEEP_SE`：末槽辅码整句的闸门裕度（`none` = 不设闸）；
-    /// `WIND_AUX_SWEEP_GAPS=<文件>`：逐条写出闸门比分（两侧都写）。
+    /// `WIND_AUX_SWEEP_GAPS=<文件>`：逐条写出闸门比分（两侧都写）；
+    /// `WIND_AUX_SWEEP_WEIGHTS`：模型开时的 `grammar.weight`（默认 `0.5`，可列多个）。
     #[test]
     #[ignore = "P2 扫参：慢，依赖 build_dev 真实词库、辅码表与语法模型"]
     fn p2_sweep() {
@@ -3109,7 +3151,15 @@ mod lambda_sweep {
                 .collect()
         };
         let margins = opt_list("WIND_AUX_SWEEP_MARGINS");
-        let danglings = opt_list("WIND_AUX_SWEEP_DANGLING");
+        // `default` = 出厂，`none` = 一律不放行，数字 = 按该裕度比分。
+        let danglings: Vec<Option<Option<f64>>> = env_list("WIND_AUX_SWEEP_DANGLING", "default")
+            .iter()
+            .map(|v| match v.as_str() {
+                "default" => None,
+                "none" => Some(None),
+                v => Some(Some(v.parse().expect("数字"))),
+            })
+            .collect();
         let ses = opt_list("WIND_AUX_SWEEP_SE");
         let mut configs = Vec::new();
         for &l in &lambdas {
@@ -3130,6 +3180,7 @@ mod lambda_sweep {
             other => panic!("未知语料 {other}"),
         };
         let dump = std::env::var("WIND_AUX_SWEEP_DUMP").ok();
+        let ui = std::env::var("WIND_AUX_SWEEP_UI").is_ok_and(|v| v == "1");
         let mut dump_rows = String::new();
         let table_arc: Arc<dyn AuxCharLookup> = Arc::new(Table(table.0.clone()));
         for layout in env_list("WIND_AUX_SWEEP_LAYOUTS", "xiaohe") {
@@ -3151,18 +3202,35 @@ mod lambda_sweep {
                 })
                 .filter(|(p, _, _)| seen.insert(p.clone()))
                 .collect();
-            for gram in env_list("WIND_AUX_SWEEP_GRAMMAR", "off") {
-                let mgr = sweep_manager(&dir, &layout, gram == "on");
+            let weights = nums("WIND_AUX_SWEEP_WEIGHTS", "0.5");
+            let grams: Vec<(String, Option<f64>)> = env_list("WIND_AUX_SWEEP_GRAMMAR", "off")
+                .into_iter()
+                .flat_map(|g| {
+                    if g == "on" {
+                        weights
+                            .iter()
+                            .map(|&w| (format!("on{w}"), Some(w)))
+                            .collect()
+                    } else {
+                        vec![(g, None)]
+                    }
+                })
+                .collect();
+            for (gram, weight) in grams {
+                let mgr = sweep_manager(&dir, &layout, weight);
                 let top = |keys: &str, aux: bool| {
                     let opts = ConvertOptions {
                         sp_raw_lattice: true,
                         aux_continuous: aux.then(|| table_arc.clone()),
                         ..Default::default()
                     };
-                    mgr.convert_with_opts("shuangpin", keys, 300, opts)
-                        .candidates
-                        .first()
-                        .map(|c| (c.text.clone(), c.consumed_length))
+                    let mut c = mgr
+                        .convert_with_opts("shuangpin", keys, 300, opts)
+                        .candidates;
+                    if ui {
+                        ui_sort(&mut c, keys);
+                    }
+                    c.first().map(|c| (c.text.clone(), c.consumed_length))
                 };
                 let base: Vec<_> = prefixes.iter().map(|p| top(&p.0, false)).collect();
                 let ok = |t: &Option<(String, usize)>, src: &str, full: bool| {
@@ -3292,5 +3360,8 @@ mod lambda_sweep {
             std::fs::write(&p, gap_rows).expect("写分差 TSV");
             eprintln!("# gaps → {p}");
         }
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("wind_aux_sweep_{}", std::process::id())),
+        );
     }
 }

@@ -250,6 +250,12 @@ impl ViterbiDecoder {
         self.grammar.is_some()
     }
 
+    /// 挂着的上下文模型的尺度系数（[`Grammar::weight`]）；没挂 = `None`，挂了但不报系数 =
+    /// `Some(None)`。
+    pub fn grammar_weight(&self) -> Option<Option<f64>> {
+        self.grammar.as_ref().map(|g| g.weight())
+    }
+
     /// 构造某条线的上下文串：**回看两个词**。
     ///
     /// 语义逐条对齐 librime `Line::context()`（`poet.cc:52-58`）：句首为空串，
