@@ -54,6 +54,12 @@ fn type_keys(coord: &Coordinator, input: &str) {
 fn open(active: &str) -> Arc<Coordinator> {
     let mut c = Config::default();
     c.schema.available = vec!["wubi86".into(), "pinyin".into(), "wubi86_pinyin".into()];
+    if active == "shuangpin" {
+        // 双拼 + 直接辅助码（连续辅助码）：辅码表与击键图都要在预热那一遍就位。
+        c.schema.available.push("shuangpin".into());
+        c.schema.pinyin.aux_code.enabled = true;
+        c.schema.pinyin.aux_code.direct = true;
+    }
     c.schema.active = active.into();
     c.input.default.chinese_mode = true;
     let path = std::env::temp_dir().join(format!("wind_no_disk_reads_{active}.redb"));
@@ -125,4 +131,25 @@ fn codetable_scheme_typing_reads_no_schema_files() {
         return;
     }
     assert_second_pass_reads_nothing("wubi86", "wqvb !ggtt !a !");
+}
+
+#[test]
+fn shuangpin_direct_aux_typing_reads_no_schema_files() {
+    if !has_schemas() || !data_dir().join("schemas/shuangpin.schema.toml").exists() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    // 词中辅码、末字 1 位、单字 1 位、长句、手打分隔符（小鹤 + 小鹤形码）。
+    let script = "gokqk !uiduy !xlr !womfyiqiqui  !ni'hc !";
+    assert_second_pass_reads_nothing_with("shuangpin", script, |c| {
+        type_keys(c, "nirxhc");
+        let texts = c.debug_all_candidate_texts();
+        assert_eq!(
+            texts.first().map(String::as_str),
+            Some("你好"),
+            "前提：走的是连续辅助码（你 = rx）：{texts:?}"
+        );
+        type_keys(c, " ");
+        type_keys(c, script);
+    });
 }

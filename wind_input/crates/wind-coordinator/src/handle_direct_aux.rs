@@ -1,4 +1,6 @@
 //! 直接辅助码（双拼）：不按引导键，输入末 1～2 位自动当辅码，字形对得上的字词提到前面。
+//! 连续辅助码（`docs/design/aux-code-continuous.md`）开着时（出厂随 `direct`），主转换已带辅码，
+//! 本模块的串尾一步只做奇数长末字 1 位（`DirectPhraseRule::Last`）；下述完整行为是逃生口下的。
 //! 设计见 `docs/design/aux-code-direct.md`；切分 / 匹配 / 并入的纯逻辑在
 //! `wind_aux_code::direct`，本模块只做协调器那一半：
 //!

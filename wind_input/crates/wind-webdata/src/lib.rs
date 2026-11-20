@@ -8794,6 +8794,58 @@ moved = [{ id = 'date.lunar', position = 0 }]
         assert!(saved.contains("schema:wubi86"), "用户的选择保留：{saved}");
     }
 
+    /// 连续辅助码的内部项（`continuous`、`preedit_separator`）不进设置页，手写在 override 里；
+    /// 设置页改别的项（这里关 `direct`）走 getConfig → saveConfig 时不能把它们抹掉。
+    #[test]
+    fn save_config_keeps_internal_aux_keys() {
+        let dir =
+            std::env::temp_dir().join(format!("wind_webdata_aux_internal_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let schemas = dir.join("schemas");
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::write(
+            schemas.join("zz_sp.schema.toml"),
+            "[schema]\nid = \"zz_sp\"\nname = \"双\"\n[engine]\ntype = \"pinyin\"\n\
+             [engine.pinyin]\nscheme = \"shuangpin\"\n\
+             [engine.aux_code]\nfiles = [\"aux_code/t.txt\"]\n",
+        )
+        .unwrap();
+        let ov = dir.join("overrides");
+        std::fs::create_dir_all(&ov).unwrap();
+        std::fs::write(
+            ov.join("zz_sp.toml"),
+            "[engine.aux_code]\nenabled = true\ndirect = true\n\
+             continuous = false\npreedit_separator = \"\"\n",
+        )
+        .unwrap();
+        let store = std::sync::Arc::new(wind_store::Store::open(dir.join("s.redb")).unwrap());
+        let c = Coordinator::new_headless_with_store_override(
+            wind_config::Config::default(),
+            Some(&dir),
+            store,
+            Some(ov.clone()),
+        );
+        let mut v = c
+            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_sp" }))
+            .unwrap();
+        assert_eq!(v["engine"]["aux_code"]["continuous"], json!(false));
+        assert_eq!(v["engine"]["aux_code"]["preedit_separator"], json!(""));
+        v["engine"]["aux_code"]["direct"] = json!(false);
+        c.web_data_rpc("schema.saveConfig", &json!({ "id": "zz_sp", "cfg": v }))
+            .unwrap();
+        let saved: toml::Value =
+            toml::from_str(&std::fs::read_to_string(ov.join("zz_sp.toml")).unwrap()).unwrap();
+        let aux = &saved["engine"]["aux_code"];
+        assert_eq!(aux.get("direct").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(aux.get("continuous").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            aux.get("preedit_separator").and_then(|v| v.as_str()),
+            Some(""),
+            "{saved}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 三态控件的读侧契约：`getConfig` 必须让设置页分得清「作者写的」与「用户改的」。
     ///
     /// 场景：某方案在自己的文件里声明了 `short_code_yield_level`（作者基线），用户又在

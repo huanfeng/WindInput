@@ -25,7 +25,7 @@ layout = "xiaohe"
 #     enabled = true
 # 行为字段（enabled / max_phrase_len / direct）在此留空 = 回落全局，见 schema-config-layering.md §4。
 #
-# 直接辅助码（不按引导键，末 1～2 位自动当辅码：uidu + p → 「释读」）同样出厂关，开启写：
+# 直接辅助码（不按引导键，任一音节后 1～2 位自动当该字辅码：gokqk → 「国情」）同样出厂关，开启写：
 #     [engine.aux_code]
 #     enabled = true
 #     direct = true

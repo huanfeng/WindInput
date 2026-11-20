@@ -1321,11 +1321,12 @@ pub struct AuxCodeGlobal {
     /// 单字恒参与匹配，不受此限。
     #[serde(default)]
     pub max_phrase_len: usize,
-    /// 直接辅助码（**仅双拼**）：不按引导键，输入末 1～2 位自动当辅码，字形对得上的字词
-    /// 提到前面（`docs/design/aux-code-direct.md`）。**出厂 `false`**。
+    /// 直接辅助码（**仅双拼**）：不按引导键，任一音节后直接敲 1～2 位形码当该字的辅码，
+    /// 长句中间也可以（连续辅助码：`gokqk` → 国情，国 = ky；`docs/design/aux-code-continuous.md`）。
+    /// 串尾末字 1 位照旧提前（`docs/design/aux-code-direct.md`）。**出厂 `false`**。
     ///
     /// 只在 [`Self::enabled`] 也生效时起作用：`enabled` 是总闸（码表加载），本项只决定
-    /// 「末尾字母要不要自动判为辅码」。它改变了末尾字母的语义，要用户表态，故出厂关——
+    /// 「音节后的字母要不要自动判为辅码」。它改变了字母的语义，要用户表态，故出厂关——
     /// 与 `enabled` 同一条「默认什么都不发生」。全拼方案写了也不生效（`lim` 既可能是
     /// li+m 也可能是「厘米」简拼），见 `EngineManager::aux_code_settings_of`。
     #[serde(default)]

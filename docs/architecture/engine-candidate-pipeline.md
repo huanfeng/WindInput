@@ -1171,6 +1171,10 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 （`handle_direct_aux.rs::apply_direct_aux`）按奇偶把输入拆成「前缀 + 末 1～2 位」，前缀候选里
 字形对得上的并入主候选；纯逻辑（切分 / 任意字匹配 / 并入排序）在 `wind-aux-code/src/direct.rs`。
 
+> 连续辅助码（`docs/design/aux-code-continuous.md`）接管后：主转换带辅码表走击键图（`convert_active_with_opts`），
+> 辅码可在任一音节后；本步只做奇数长末字 1 位（`DirectPhraseRule::Last`），2 位交给引擎。下面描述的「任一字 /
+> 2 位」行为只在逃生口 `[engine.aux_code] continuous = false` 下仍然成立。
+
 - **门卫**：主输入路（`state.active == None`；临拼 / 混输 / 引导键态都不做）、`enabled` 且 `direct`
   （`AuxCodeSettings::direct` 已折叠「只认双拼」）、输入 ≥ 3 键、不含 `'`、前缀恰好切成完整双拼音节
   （`Engine::shuangpin_full_syllable_count`，纯内存；全拼 / 码表 / 混输恒 `None`）、方案来源系统层

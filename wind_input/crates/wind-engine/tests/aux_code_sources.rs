@@ -164,3 +164,73 @@ fn cached_settings_follow_override_writes_and_reload() {
     assert!(m.aux_code_settings_cached().direct, "重载全局后立即生效");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 连续辅助码的内部项（不进设置页）：`continuous` 默认随 `direct`、`continuous = false` 是逃生口、
+/// `direct` 不生效时恒假；`preedit_separator` 合格值原样取、空串可用、不合格退回空格。
+#[test]
+fn continuous_and_preedit_separator_resolve() {
+    let dir = std::env::temp_dir().join(format!("wind_aux_cont_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let schemas = dir.join("schemas");
+    std::fs::create_dir_all(schemas.join("aux_code")).unwrap();
+    std::fs::write(schemas.join("aux_code/t.txt"), "李=mz\n").unwrap();
+    let write = |id: &str, scheme: &str, aux: &str| {
+        std::fs::write(
+            schemas.join(format!("{id}.schema.toml")),
+            format!(
+                "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"pinyin\"\n\
+                 [engine.pinyin]\nscheme = \"{scheme}\"\n\
+                 [engine.aux_code]\nfiles = [\"aux_code/t.txt\"]\nenabled = true\n{aux}"
+            ),
+        )
+        .unwrap();
+    };
+    write("sp_on", "shuangpin", "direct = true\n");
+    write(
+        "sp_hatch",
+        "shuangpin",
+        "direct = true\ncontinuous = false\n",
+    );
+    write("sp_cont_only", "shuangpin", "continuous = true\n");
+    write("qp_on", "", "direct = true\n");
+    write(
+        "sp_empty",
+        "shuangpin",
+        "direct = true\npreedit_separator = \"\"\n",
+    );
+    write(
+        "sp_dot",
+        "shuangpin",
+        "direct = true\npreedit_separator = \"·\"\n",
+    );
+    write(
+        "sp_bad",
+        "shuangpin",
+        "direct = true\npreedit_separator = \"'\"\n",
+    );
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["sp_on".into()];
+    cfg.schema.active = "sp_on".into();
+    let m = EngineManager::with_store_override(&cfg, Some(&dir), None, None::<PathBuf>);
+
+    let s = m.aux_code_settings_of("sp_on");
+    assert!(s.direct && s.continuous, "开 direct 的双拼默认走连续");
+    assert_eq!(s.preedit_separator, None);
+    assert_eq!(s.preedit_separator(), " ", "默认空格");
+    let s = m.aux_code_settings_of("sp_hatch");
+    assert!(s.direct && !s.continuous, "逃生口：仍是直接辅助，只做串尾");
+    assert!(
+        !m.aux_code_settings_of("sp_cont_only").continuous,
+        "continuous 不是开关：direct 没开就不生效"
+    );
+    assert!(
+        !m.aux_code_settings_of("qp_on").continuous,
+        "全拼 direct 不生效，连续也不生效"
+    );
+    assert_eq!(m.aux_code_settings_of("sp_empty").preedit_separator(), "");
+    assert_eq!(m.aux_code_settings_of("sp_dot").preedit_separator(), "·");
+    let s = m.aux_code_settings_of("sp_bad");
+    assert_eq!(s.preedit_separator, None, "不合格值不用");
+    assert_eq!(s.preedit_separator(), " ");
+    let _ = std::fs::remove_dir_all(&dir);
+}

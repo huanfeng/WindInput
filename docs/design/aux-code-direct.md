@@ -1,6 +1,9 @@
 # 直接辅助码（双拼）
 
 状态：三期均已实施并合入 main（2026-09-29，提交见 §10），与本文的出入见 §12。
+**双拼开 `direct` 后由连续辅助码接管**（`aux-code-continuous.md`）：辅码可打在任一音节后，串尾一步只留末字 1 位
+（规则由「任一字」改「末字」，2 位不再提前）；本文的串尾行为只在内部逃生口 `[engine.aux_code] continuous = false`
+下原样保留（见该文 §5.4 盘点表）。
 来源：[GH#129](https://github.com/huanfeng/WindInput/issues/129)、论坛 [t181](https://forum.windinput.com/topic/181)。
 前置：`aux-code-schema-source.md`（取码接口 `AuxCodeLookup`、方案来源、后台预热），其附录 A 是本文的调研输入。
 
