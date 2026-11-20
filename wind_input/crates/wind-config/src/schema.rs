@@ -342,6 +342,11 @@ pub struct AuxCodeSpec {
     /// `true` 不生效、日志告警一次。见 `docs/design/aux-code-direct.md` §7。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct: Option<bool>,
+    /// 内部逃生口（不进设置页、无全局键）：`Some(false)` 让直接辅助码退回只做串尾，不走
+    /// 连续辅助码（`docs/design/aux-code-continuous.md` §6）。`None` / `true` = 开着 `direct`
+    /// 的双拼走连续模式。连续模式稳定后删除。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuous: Option<bool>,
 }
 
 impl AuxCodeSpec {

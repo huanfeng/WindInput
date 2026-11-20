@@ -30,16 +30,19 @@ pub const ODD_KEEP_TOP_MIN_SYLLABLES: usize = 3;
 /// 偶数长度下保留在命中项之前的「覆盖全部输入的完整候选」个数上限（全音节解析优先）。
 pub const EVEN_KEEP_FULL_COVER: usize = 2;
 
-/// 词组的辅码匹配规则。首版只实现 [`Self::Any`]（自然码做法）。
+/// 词组的辅码匹配规则。
 ///
-/// 预留 `First` / `Last`（手心可选）：加分支 + 配置值即可，筛选入口 [`direct_matches`] 不变。
+/// 预留 `First`（手心可选）：加分支即可，筛选入口 [`direct_matches`] 不变。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DirectPhraseRule {
     /// 1 位 `a`：任一字某码以 `a` 开头。
     /// 2 位 `ab`：① 任一字某码以 `ab` 开头；或 ② 存在 i < j，第 i 字某码以 `a` 开头、
-    /// 第 j 字某码以 `b` 开头。
+    /// 第 j 字某码以 `b` 开头。只做串尾时用（自然码做法）。
     #[default]
     Any,
+    /// 末字某码以 `aux` 开头：辅码限定紧挨在它前面的那个字。连续辅助码下串尾一步用，
+    /// 与词中辅码同一语义（万象 Pro 同）。
+    Last,
 }
 
 /// 输入按奇偶切出的前缀与辅码。
@@ -149,6 +152,10 @@ pub fn direct_matches(
                     && it.any(|ch| lookup.any_code_starts_with_char(ch, b))
             }
         },
+        DirectPhraseRule::Last => text
+            .chars()
+            .last()
+            .is_some_and(|ch| lookup.any_code_starts_with(ch, aux)),
     }
 }
 
@@ -364,6 +371,21 @@ mod tests {
         assert!(m("湿度", "dg"));
     }
 
+    /// 末字规则：只看最后一个字（单字即其本身），1 / 2 位都按码开头。
+    #[test]
+    fn last_rule_checks_final_char_only() {
+        let last =
+            |text: &str, aux: &str| direct_matches(text, &table(), aux, DirectPhraseRule::Last, 0);
+        assert!(last("释读", "y"), "读=yd");
+        assert!(last("释读", "yd"));
+        assert!(!last("释读", "p"), "释是首字");
+        assert!(!last("释读", "py"), "不做跨字配对");
+        assert!(last("国庆", "gd"));
+        assert!(!last("国情", "k"));
+        assert!(last("释", "pl"), "单字同 Any");
+        assert!(!last("释读", ""));
+    }
+
     #[test]
     fn unknown_char_and_empty_lookup_do_not_match() {
         assert!(!m("李", "m"), "表里无码");
@@ -403,8 +425,9 @@ mod tests {
             for a in letters {
                 for b in letters {
                     let ab: String = [a, b].iter().collect();
-                    for max in [0, 2] {
-                        let r = DirectPhraseRule::Any;
+                    for (max, r) in [0, 2].into_iter().flat_map(|m| {
+                        [DirectPhraseRule::Any, DirectPhraseRule::Last].map(|r| (m, r))
+                    }) {
                         if direct_matches(text, &t, &ab, r, max) {
                             two_letter_hits += 1;
                             assert!(

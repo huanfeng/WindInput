@@ -345,6 +345,9 @@ pub struct AuxCodeSettings {
     /// **是双拼**（`[engine] type = "pinyin"` + `[engine.pinyin] scheme = "shuangpin"`）。
     /// 全拼写了 `direct = true` 这里为 false 并告警一次（设计 §7）。
     pub direct: bool,
+    /// 直接辅助码走连续辅助码（击键图 + 辅码表）：`direct` 为真且方案没写内部逃生口
+    /// `[engine.aux_code] continuous = false`。
+    pub continuous: bool,
     /// 已解析的来源，顺序即优先级。**`enabled == false` 时恒空**（关闭即不解析）。
     pub sources: Vec<AuxSource>,
 }
@@ -1971,6 +1974,20 @@ impl EngineManager {
             return false;
         }
         self.reverse_index_for(schema_id).is_some()
+    }
+
+    /// 测试用：把方案标成「反查索引已被放弃」，之后不会起后台构建，用来把「未就绪」状态钉死。
+    #[doc(hidden)]
+    pub fn mark_reverse_index_skipped_for_test(&self, schema_id: &str, skipped: bool) {
+        let mut set = self
+            .reverse_index_skipped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if skipped {
+            set.insert(schema_id.to_string());
+        } else {
+            set.remove(schema_id);
+        }
     }
 
     /// 该方案的反查索引本次进程是否已被 build_guard 放弃（直到缓存失效前不再尝试）。
@@ -4784,22 +4801,45 @@ impl EngineManager {
     /// `recheck_auto_commit` / `handle_top_code` 三条通路的收口点，一处接线即覆盖拼音、
     /// 码表及以后任何新引擎。详见 [`crate::english_merge`] 模块文档。
     pub fn convert(&self, input: &str, max_candidates: usize) -> ConvertResult {
+        self.convert_active(input, max_candidates, None)
+    }
+
+    /// 同 [`Self::convert`]（含英文混入），但把 [`ConvertOptions`] 交给活跃引擎。
+    /// 主输入路的连续辅助码用（击键图 + 辅码表）。
+    pub fn convert_active_with_opts(
+        &self,
+        input: &str,
+        max_candidates: usize,
+        opts: ConvertOptions,
+    ) -> ConvertResult {
+        self.convert_active(input, max_candidates, Some(opts))
+    }
+
+    /// `opts = None` 走 `convert_unblocked`（与引入 opts 之前逐条一致）。
+    fn convert_active(
+        &self,
+        input: &str,
+        max_candidates: usize,
+        opts: Option<ConvertOptions>,
+    ) -> ConvertResult {
         let mut timer = crate::pinyin::ConvertStageTimer::new();
         let Some(engine) = self.active_engine() else {
             return ConvertResult::default();
         };
         self.push_blocked_words(engine.as_ref());
-        let mut r = self
-            .convert_unblocked(
+        let r = match opts {
+            None => self.convert_unblocked(
                 engine.as_ref(),
                 &self.active_schema_id(),
                 input,
                 max_candidates,
-            )
-            .unwrap_or_else(|e| {
-                warn!("convert error: {}", e);
-                ConvertResult::default()
-            });
+            ),
+            Some(opts) => engine.convert_with_opts(input, max_candidates, opts),
+        };
+        let mut r = r.unwrap_or_else(|e| {
+            warn!("convert error: {}", e);
+            ConvertResult::default()
+        });
         timer.mark("engine");
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
             // ★ 判据**只有一个**：中文侧有没有候选。它本身就完整表达了「用户在打中文
@@ -6111,6 +6151,12 @@ impl EngineManager {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
+    /// 辅码设置缓存的失效代次：辅码来源 / 设置变了就推进，供外部缓存判断自己是否过期。
+    pub fn aux_settings_generation(&self) -> u64 {
+        self.aux_settings_gen
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// 清 `aux_settings_cache` 并推进失效代次（持锁完成，见 `aux_settings_gen`）。
     fn invalidate_aux_settings_cache(&self) {
         let mut cache = self
@@ -6150,6 +6196,7 @@ impl EngineManager {
             tracing::warn!("直接辅助码只支持双拼方案，方案 {schema_id} 的 direct = true 不生效");
         }
         let direct = direct && is_shuangpin;
+        let continuous = direct && spec.as_ref().and_then(|s| s.continuous) != Some(false);
         // 关闭时不解析路径：省掉 N 次目录探测，也避免为一个用不上的功能刷 warn。
         let sources = if resolved.enabled {
             spec.map(|c| {
@@ -6195,6 +6242,7 @@ impl EngineManager {
             enabled: resolved.enabled,
             max_phrase_len: resolved.max_phrase_len,
             direct,
+            continuous,
             sources,
         }
     }

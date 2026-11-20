@@ -1019,6 +1019,7 @@ impl Coordinator {
         // 认记录 ⇒ 结果表的键另收一份 `text`，与 probe 一一对应。两者只在模板展开 /
         // 大小写投影过的候选上不同（GH#177）。
         let mut rec_keys: Vec<&str> = Vec::new();
+        let continuous_aux = self.continuous_aux_on();
         for c in candidates.iter() {
             // 短语不参与词频维度（写入端 `record_selection` 对称跳过）：其次序由短语定义的
             // weight/position 决定，且求值型短语的文本逐日变化，点查恒 miss——白花一次
@@ -1054,7 +1055,10 @@ impl Coordinator {
             };
             probe.push((
                 sid.to_string(),
-                Self::freq_code_with(code, c, settings.english_code_by_input),
+                Self::continuous_aux_free_code(c, continuous_aux).map_or_else(
+                    || Self::freq_code_with(code, c, settings.english_code_by_input),
+                    str::to_string,
+                ),
                 c.freq_text().to_string(),
             ));
             rec_keys.push(&c.text);
@@ -1640,6 +1644,11 @@ impl Coordinator {
         let wildcard_pattern = self.wildcard_pattern_of(state);
         // ★ 分段续转排在通配之前（spec §10）：续转态的剩余串是拼音后半截。
         // `wildcard_pattern_of` 在续转态本就给 `None`，这里的先后是第二道保险。
+        // 连续辅助码（双拼 + 直接辅助码）：只接主转换。分段续转走的是混输的拼音子方案、
+        // 通配不建整句图，两条都不接。未就绪 / 不适用 = `None`，整条走旧路径。
+        let continuous = (pinyin_schema.is_none() && wildcard_pattern.is_none())
+            .then(|| self.continuous_aux_lookup(state))
+            .flatten();
         let t_convert = std::time::Instant::now();
         let faults0 = crate::process_memory::page_faults();
         let result = match pinyin_schema {
@@ -1647,12 +1656,17 @@ impl Coordinator {
                 self.engine_mgr
                     .convert_with(&ps, &state.input_buffer, limit)
             }
-            _ => match &wildcard_pattern {
-                Some(p) => self
+            _ => match (&wildcard_pattern, &continuous) {
+                (Some(p), _) => self
                     .engine_mgr
                     .convert_wildcard(&state.input_buffer, p, limit)
                     .unwrap_or_default(),
-                None => self.engine_mgr.convert(&state.input_buffer, limit),
+                (None, Some(lookup)) => self.engine_mgr.convert_active_with_opts(
+                    &state.input_buffer,
+                    limit,
+                    crate::handle_direct_aux::continuous_opts(lookup),
+                ),
+                (None, None) => self.engine_mgr.convert(&state.input_buffer, limit),
             },
         };
         let t_convert = t_convert.elapsed();
@@ -2089,7 +2103,13 @@ impl Coordinator {
         // 直接辅助码（双拼，末 1～2 位自动当辅码）：命中项并入主候选。位置钉在全部重排
         // **之后**、shadow **之前**（设计 §6）：插在重排之前会被按消费长度 / 调频重新排走；
         // 而本函数也被翻页扩容调用，放进 `update_candidates` 会在翻页时丢失命中项。
-        self.apply_direct_aux(state, &mut candidates, limit, engine_count >= limit);
+        self.apply_direct_aux(
+            state,
+            &mut candidates,
+            limit,
+            engine_count >= limit,
+            continuous.as_ref(),
+        );
         let shadow_code = Self::shadow_code_of(state).to_string();
         // Shadow 规则：删除过滤 + 置顶/移动重排（优先级最高，排序后应用）。
         //
@@ -4300,11 +4320,28 @@ impl Coordinator {
     /// ⚠️ **读写两侧必须同口径**：写入端 `record_selection` 与读取端 `apply_freq_rerank`
     /// 都要经本函数，否则记了查不到、或查到不该查的。
     pub(crate) fn freq_code(&self, buf: &str, cand: &Candidate) -> String {
+        if let Some(code) = Self::continuous_aux_free_code(cand, self.continuous_aux_on()) {
+            return code.to_string();
+        }
         Self::freq_code_with(
             buf,
             cand,
             self.engine_mgr.freq_settings().english_code_by_input,
         )
+    }
+
+    /// 临时防护（T2 收尾前）：连续辅助码下拼音候选的 `code` 含辅码读音（`nitwhc` → `niteihao`），
+    /// 不能进词频；取引擎给的造词码（无辅码，`nihao`）。非连续模式 / 无造词码时 `None`，照旧。
+    /// 读写两侧（`freq_code`、`apply_freq_rerank_in`）同口径。
+    fn continuous_aux_free_code(cand: &Candidate, continuous: bool) -> Option<&str> {
+        if !continuous || cand.source != CandidateSource::Pinyin {
+            return None;
+        }
+        cand.meta.learn_code.as_ref().map(|(c, _)| c.as_str())
+    }
+
+    fn continuous_aux_on(&self) -> bool {
+        self.engine_mgr.aux_code_settings_cached().continuous
     }
 
     /// [`Self::freq_code`] 的显式传参版本，供**热路径**使用。
