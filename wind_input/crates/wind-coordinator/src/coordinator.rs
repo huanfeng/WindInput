@@ -1447,6 +1447,10 @@ pub(crate) enum CapsCancelSwitch {
     /// **恒按请求落地**、不吃 `mode_after_cancel` 的改写——宿主请求「中文」时 CapsLock
     /// 恰好开着被取消，不能因为用户选了 `english` 就落成英文。
     Host(bool),
+    /// 定向切换（`ime.set("cn-en", …)`）：用户**明确点了目标**，取消锁定只是附带动作，
+    /// 模式必须直达目标——出厂 `mode_after_cancel` 只该管「切一下」这种没有方向的翻转
+    /// （Shift / 切换键）。
+    Directed(bool),
 }
 
 impl CapsCancelSwitch {
@@ -4449,6 +4453,7 @@ impl Coordinator {
     ) -> bool {
         match (setting, switch) {
             (_, CapsCancelSwitch::Host(requested)) => requested,
+            (_, CapsCancelSwitch::Directed(requested)) => requested,
             ("english", _) => false,
             ("toggle", CapsCancelSwitch::Toggle) => !current,
             (_, CapsCancelSwitch::System(requested)) => requested,
@@ -7466,8 +7471,9 @@ impl Coordinator {
     }
 
     /// `ime.set` 的输入状态开关（`cn-en` / `fullshape` / `s2t` / `t2s` / `toolbar`）：已是目标
-    /// 状态只提示（同数据开关），否则走 `ime.toggle` 同一条切换路径——那条路径自带状态气泡
-    /// 与工具栏刷新，这里不另弹提示，免得一次切换两个浮窗。
+    /// 状态只提示（同数据开关）。`cn-en` 是**直达**路径（置到目标态，CapsLock 取消后也按
+    /// 目标落地）；其余走 `ime.toggle` 同一条切换路径——那条路径自带状态气泡与工具栏刷新，
+    /// 这里不另弹提示，免得一次切换两个浮窗。
     ///
     /// `cn-en` 读的是 `chinese_mode`（用户选的中英），不含 CapsLock 临时英文：`set` 回答的是
     /// 「切到中文」，CapsLock 松开后自然回到中文。
@@ -7507,6 +7513,15 @@ impl Coordinator {
                 self.notify_set_unchanged(target, &text);
             }
             return Ok(false);
+        }
+        if target == "cn-en" {
+            // 中英开关走**直达**路径，不吃 ime.toggle 的翻转语义：ime.set 的契约是
+            // 「置为目标态」，已在目标态根本到不了这里（上面已 return）。
+            // CapsLock 开着时取消锁定并直达目标（Directed，不吃 mode_after_cancel 归位）；
+            // 待编码经 push 出口交还宿主，避免丢字（见 [`SwitchCommit`]）。
+            let (_, commit) = self.cn_en_set_with_commit(on);
+            self.push_switch_commit(&commit);
+            return Ok(true);
         }
         self.cmd_ime_toggle(target);
         Ok(true)
@@ -9391,6 +9406,21 @@ impl Coordinator {
     ) -> (Option<StatusUpdateData>, SwitchCommit) {
         let had_pending = self.has_pending_composition();
         let (status, text) = self.handle_toggle_mode_cased(upper);
+        (status, SwitchCommit { text, had_pending })
+    }
+
+    /// `ime.set("cn-en", …)` 的执行体：**置**中英态为目标值（区别于 toggle 的翻转）。
+    ///
+    /// 调用方保证「已在目标态」根本不会进来（`ime_state_set` 先判，只提示不动作），
+    /// 待编码零扰动的问题不存在；走到这里必然真切换，编码按 toggle 同一策略交还宿主。
+    /// CapsLock 开着时走 [`CapsCancelSwitch::Directed`]：取消锁定的同时直达目标，
+    /// 不吃 `mode_after_cancel` 的归位改写。
+    pub(crate) fn cn_en_set_with_commit(
+        &self,
+        chinese: bool,
+    ) -> (Option<StatusUpdateData>, SwitchCommit) {
+        let had_pending = self.has_pending_composition();
+        let (status, text) = self.handle_switch_mode_cased(Some(chinese), false);
         (status, SwitchCommit { text, had_pending })
     }
 
@@ -17897,7 +17927,7 @@ mod initial_mode_tests {
     /// Ctrl+空格 按它自己请求的方向；`english` 两条路都进英文（楼主要的就是这个）。
     #[test]
     fn mode_after_caps_cancel_matrix() {
-        use super::CapsCancelSwitch::{System, Toggle};
+        use super::CapsCancelSwitch::{Directed, System, Toggle};
         let f = Coordinator::mode_after_caps_cancel;
         for cur in [true, false] {
             // 出厂：Shift 归位中文（不看当前模式），Ctrl+空格 按请求。
@@ -17920,6 +17950,20 @@ mod initial_mode_tests {
             }
             assert!(!f("english", Toggle, cur), "english/Shift 应进英文");
             assert_eq!(f("toggle", Toggle, cur), !cur, "toggle/Shift 应照常翻转");
+            // 定向切换（ime.set）：带明确目标，归位配置怎么配都直达目标。
+            assert!(
+                f("chinese", Directed(true), cur),
+                "Directed(true) 应直达中文"
+            );
+            assert!(
+                !f("chinese", Directed(false), cur),
+                "Directed(false) 应直达英文"
+            );
+            assert!(
+                f("english", Directed(true), cur),
+                "Directed(true) 压过 english 归位"
+            );
+            assert!(!f("bogus", Directed(false), cur), "Directed 不吃归位改写");
             // 认不出的值回落出厂语义（设置端 options 与 core 值域脱节时不至于乱跳）。
             assert!(f("bogus", Toggle, cur));
             assert!(f("", Toggle, cur));
