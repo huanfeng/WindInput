@@ -1,0 +1,13 @@
+keys	len	full	source	off_top	off_consumed	on_top	on_consumed	verdict	off_top3	on_top3
+womfgssivgzdv	13	false	我们公司正在招人	我们公司正在	12	我们公司勾兑	13	new_worse	我们公司正在/12 我们公司正在中/13 我/2	我们公司勾兑/13 我们公司正在/12 我们公司正在中/13
+wopdl	5	false	我拍了很多照片	握拍	4	我	4	new_better	握拍/4 握拍了/5 我/2	我/4 我了/5 喔/2
+wopdle	6	false	我拍了很多照片	我拍了	6	我了	6	new_worse	我拍了/6 我/2 喔/2	我了/6 我/2 喔/2
+wopdleh	7	false	我拍了很多照片	我拍了	6	我了	6	new_worse	我拍了/6 我拍了和/7 我/2	我了/6 我了和/7 我/2
+wopdlehf	8	false	我拍了很多照片	我拍了很	8	我了很	8	new_worse	我拍了很/8 我/2 喔/2	我了很/8 我/2 喔/2
+wopdlehfd	9	false	我拍了很多照片	我拍了很	8	我了很	8	new_worse	我拍了很/8 我拍了很的/9 我/2	我了很/8 我了很的/9 我/2
+wopdlehfdo	10	false	我拍了很多照片	我拍了很多	10	我了很多	10	new_worse	我拍了很多/10 我/2 喔/2	我了很多/10 我/2 喔/2
+wopdlehfdov	11	false	我拍了很多照片	我拍了很多	10	我了很多种	11	new_worse	我拍了很多/10 我拍了很多中/11 我/2	我了很多种/11 我了很多/10 我拍了很多中/11
+wopdlehfdovc	12	false	我拍了很多照片	我拍了很多找	12	我了很多找	12	neither	我拍了很多找/12 我/2 喔/2	我了很多找/12 我/2 喔/2
+wopdlehfdovcp	13	false	我拍了很多照片	我拍了很多找	12	我了很多找	12	neither	我拍了很多找/12 我拍了很多找拍/13 我/2	我了很多找/12 我拍了很多找拍/13 我/2
+vecidehodshfig	14	false	这次的活动很成功	这次的活动很成	14	这次的活动很	14	neither	这次的活动很成/14 这/2 这次/4	这次的活动很/14 这/2 这次/4
+vecidehodshfigg	15	false	这次的活动很成功	这次的活动很成	14	这次的活动很	14	neither	这次的活动很成/14 这次的活动很成个/15 这/2	这次的活动很/14 这次的活动很成个/15 这/2

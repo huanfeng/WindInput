@@ -424,6 +424,25 @@ impl Coordinator {
             .collect()
     }
 
+    /// 全部候选的 `(text, consumed_length, is_direct_aux)`（测试/诊断用）。连续辅助码的界面序
+    /// 评测要区分「串尾一步提上来的」与「引擎整句」，并看消费数分档。
+    pub fn debug_candidate_consumed(&self) -> Vec<(String, usize, bool)> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .candidates
+            .iter()
+            .map(|c| (c.text.clone(), c.consumed_length, c.is_direct_aux))
+            .collect()
+    }
+
+    /// 对当前状态跑一次连续辅助码的生效判定（取设置 + 建本键辅码视图，与按键路径同一函数），
+    /// 返回是否生效（测试/诊断用）。耗时评测把这一步单列。
+    pub fn debug_continuous_aux_lookup(&self) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.continuous_aux_lookup(&s).is_some()
+    }
+
     /// 全部候选的 `(text, is_command, is_group, phrase_template)`（测试/诊断用）。
     /// `$SS`/`$AA` 展开态与命令成员的断言要看这几位，`debug_all_candidate_texts` 看不到。
     pub fn debug_candidate_shapes(&self) -> Vec<(String, bool, bool, String)> {

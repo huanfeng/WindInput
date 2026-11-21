@@ -1,0 +1,109 @@
+# out=spike-results/aux-continuous seed=20261118
+[a_xiaohe_gramoff] targeted (hard, aux on wrong chars): 1-letter top1=18/25 (72.0%) top3=21 (84.0%) | 2-letter top1=22/25 (88.0%) top3=22 (88.0%)
+[a_xiaohe_gramoff] sentences=189 samples=756 prefixes=1687 (odd 810)
+[a_xiaohe_gramoff] k0 prefix engine-top1 differs=5 (odd 2) {"neither": 3, "new_better": 2}
+[a_xiaohe_gramoff] k=0 n=189 top1=164 (86.8%) top3=164 (86.8%) ui=164 (86.8%) | None top1=164 (86.8%)
+[a_xiaohe_gramoff] k=1 n=189 top1=165 (87.3%) top3=166 (87.8%) ui=157 (83.1%) | None top1=13 (6.9%)
+[a_xiaohe_gramoff] k=2 n=189 top1=164 (86.8%) top3=170 (89.9%) ui=160 (84.7%) | None top1=0 (0.0%)
+[a_xiaohe_gramoff] k=3 n=189 top1=166 (87.8%) top3=172 (91.0%) ui=165 (87.3%) | None top1=0 (0.0%)
+[a_xiaohe_gramoff] top1 misses (P1 chain < 2 syllables) k=1 24(0) k=2 25(1) k=3 23(2)
+[a_xiaohe_gramoff] hard sentences=25 | k>=1 samples=75 fixed top1=20 (26.7%) top3=20 (26.7%) | per k top1 2/25 7/25 11/25
+[a_xiaohe_gramon] targeted (hard, aux on wrong chars): 1-letter top1=12/17 (70.6%) top3=14 (82.4%) | 2-letter top1=14/17 (82.4%) top3=14 (82.4%)
+[a_xiaohe_gramon] sentences=189 samples=756 prefixes=1687 (odd 810)
+[a_xiaohe_gramon] k0 prefix engine-top1 differs=4 (odd 2) {"neither": 4}
+[a_xiaohe_gramon] k=0 n=189 top1=172 (91.0%) top3=172 (91.0%) ui=172 (91.0%) | None top1=172 (91.0%)
+[a_xiaohe_gramon] k=1 n=189 top1=169 (89.4%) top3=172 (91.0%) ui=163 (86.2%) | None top1=11 (5.8%)
+[a_xiaohe_gramon] k=2 n=189 top1=171 (90.5%) top3=174 (92.1%) ui=164 (86.8%) | None top1=0 (0.0%)
+[a_xiaohe_gramon] k=3 n=189 top1=166 (87.8%) top3=169 (89.4%) ui=162 (85.7%) | None top1=0 (0.0%)
+[a_xiaohe_gramon] top1 misses (P1 chain < 2 syllables) k=1 20(0) k=2 18(2) k=3 23(1)
+[a_xiaohe_gramon] hard sentences=17 | k>=1 samples=51 fixed top1=14 (27.5%) top3=14 (27.5%) | per k top1 3/17 7/17 4/17
+[a_ziranma_gramoff] targeted (hard, aux on wrong chars): 1-letter top1=19/25 (76.0%) top3=22 (88.0%) | 2-letter top1=21/25 (84.0%) top3=21 (84.0%)
+[a_ziranma_gramoff] sentences=189 samples=756 prefixes=1687 (odd 810)
+[a_ziranma_gramoff] k0 prefix engine-top1 differs=3 (odd 1) {"neither": 3}
+[a_ziranma_gramoff] k=0 n=189 top1=164 (86.8%) top3=164 (86.8%) ui=164 (86.8%) | None top1=164 (86.8%)
+[a_ziranma_gramoff] k=1 n=189 top1=164 (86.8%) top3=165 (87.3%) ui=156 (82.5%) | None top1=10 (5.3%)
+[a_ziranma_gramoff] k=2 n=189 top1=161 (85.2%) top3=170 (89.9%) ui=156 (82.5%) | None top1=0 (0.0%)
+[a_ziranma_gramoff] k=3 n=189 top1=164 (86.8%) top3=169 (89.4%) ui=163 (86.2%) | None top1=0 (0.0%)
+[a_ziranma_gramoff] top1 misses (P1 chain < 2 syllables) k=1 25(2) k=2 28(4) k=3 25(4)
+[a_ziranma_gramoff] hard sentences=25 | k>=1 samples=75 fixed top1=19 (25.3%) top3=19 (25.3%) | per k top1 2/25 7/25 10/25
+[a_ziranma_gramon] targeted (hard, aux on wrong chars): 1-letter top1=12/17 (70.6%) top3=14 (82.4%) | 2-letter top1=14/17 (82.4%) top3=14 (82.4%)
+[a_ziranma_gramon] sentences=189 samples=756 prefixes=1687 (odd 810)
+[a_ziranma_gramon] k0 prefix engine-top1 differs=2 (odd 1) {"neither": 2}
+[a_ziranma_gramon] k=0 n=189 top1=172 (91.0%) top3=172 (91.0%) ui=172 (91.0%) | None top1=172 (91.0%)
+[a_ziranma_gramon] k=1 n=189 top1=168 (88.9%) top3=171 (90.5%) ui=162 (85.7%) | None top1=8 (4.2%)
+[a_ziranma_gramon] k=2 n=189 top1=169 (89.4%) top3=174 (92.1%) ui=160 (84.7%) | None top1=0 (0.0%)
+[a_ziranma_gramon] k=3 n=189 top1=164 (86.8%) top3=167 (88.4%) ui=161 (85.2%) | None top1=0 (0.0%)
+[a_ziranma_gramon] top1 misses (P1 chain < 2 syllables) k=1 21(1) k=2 20(3) k=3 25(6)
+[a_ziranma_gramon] hard sentences=17 | k>=1 samples=51 fixed top1=13 (25.5%) top3=13 (25.5%) | per k top1 3/17 7/17 3/17
+[a_mspy_gramoff] targeted (hard, aux on wrong chars): 1-letter top1=19/25 (76.0%) top3=22 (88.0%) | 2-letter top1=21/25 (84.0%) top3=21 (84.0%)
+[a_mspy_gramoff] sentences=189 samples=756 prefixes=1687 (odd 810)
+[a_mspy_gramoff] k0 prefix engine-top1 differs=1 (odd 0) {"neither": 1}
+[a_mspy_gramoff] k=0 n=189 top1=164 (86.8%) top3=164 (86.8%) ui=164 (86.8%) | None top1=164 (86.8%)
+[a_mspy_gramoff] k=1 n=189 top1=163 (86.2%) top3=165 (87.3%) ui=155 (82.0%) | None top1=12 (6.3%)
+[a_mspy_gramoff] k=2 n=189 top1=162 (85.7%) top3=170 (89.9%) ui=159 (84.1%) | None top1=0 (0.0%)
+[a_mspy_gramoff] k=3 n=189 top1=166 (87.8%) top3=170 (89.9%) ui=165 (87.3%) | None top1=0 (0.0%)
+[a_mspy_gramoff] top1 misses (P1 chain < 2 syllables) k=1 26(3) k=2 27(4) k=3 23(4)
+[a_mspy_gramoff] hard sentences=25 | k>=1 samples=75 fixed top1=20 (26.7%) top3=20 (26.7%) | per k top1 2/25 7/25 11/25
+[a_mspy_gramon] targeted (hard, aux on wrong chars): 1-letter top1=12/17 (70.6%) top3=14 (82.4%) | 2-letter top1=14/17 (82.4%) top3=14 (82.4%)
+[a_mspy_gramon] sentences=189 samples=756 prefixes=1687 (odd 810)
+[a_mspy_gramon] k0 prefix engine-top1 differs=0 (odd 0) {}
+[a_mspy_gramon] k=0 n=189 top1=172 (91.0%) top3=172 (91.0%) ui=172 (91.0%) | None top1=172 (91.0%)
+[a_mspy_gramon] k=1 n=189 top1=167 (88.4%) top3=171 (90.5%) ui=162 (85.7%) | None top1=11 (5.8%)
+[a_mspy_gramon] k=2 n=189 top1=169 (89.4%) top3=174 (92.1%) ui=163 (86.2%) | None top1=0 (0.0%)
+[a_mspy_gramon] k=3 n=189 top1=165 (87.3%) top3=168 (88.9%) ui=163 (86.2%) | None top1=0 (0.0%)
+[a_mspy_gramon] top1 misses (P1 chain < 2 syllables) k=1 22(1) k=2 20(3) k=3 24(6)
+[a_mspy_gramon] hard sentences=17 | k>=1 samples=51 fixed top1=14 (27.5%) top3=14 (27.5%) | per k top1 3/17 7/17 4/17
+[b_xiaohe_gramoff] targeted (hard, aux on wrong chars): 1-letter top1=25/40 (62.5%) top3=32 (80.0%) | 2-letter top1=33/40 (82.5%) top3=33 (82.5%)
+[b_xiaohe_gramoff] sentences=164 samples=656 prefixes=1924 (odd 927)
+[b_xiaohe_gramoff] k0 prefix engine-top1 differs=12 (odd 7) {"neither": 4, "new_better": 1, "new_worse": 7}
+[b_xiaohe_gramoff] k=0 n=164 top1=124 (75.6%) top3=124 (75.6%) ui=124 (75.6%) | None top1=124 (75.6%)
+[b_xiaohe_gramoff] k=1 n=164 top1=126 (76.8%) top3=128 (78.0%) ui=122 (74.4%) | None top1=8 (4.9%)
+[b_xiaohe_gramoff] k=2 n=164 top1=128 (78.0%) top3=134 (81.7%) ui=125 (76.2%) | None top1=0 (0.0%)
+[b_xiaohe_gramoff] k=3 n=164 top1=138 (84.1%) top3=141 (86.0%) ui=136 (82.9%) | None top1=0 (0.0%)
+[b_xiaohe_gramoff] top1 misses (P1 chain < 2 syllables) k=1 38(1) k=2 36(1) k=3 26(2)
+[b_xiaohe_gramoff] hard sentences=40 | k>=1 samples=120 fixed top1=32 (26.7%) top3=35 (29.2%) | per k top1 4/40 10/40 18/40
+[b_xiaohe_gramon] targeted (hard, aux on wrong chars): 1-letter top1=16/22 (72.7%) top3=17 (77.3%) | 2-letter top1=17/22 (77.3%) top3=17 (77.3%)
+[b_xiaohe_gramon] sentences=164 samples=656 prefixes=1924 (odd 927)
+[b_xiaohe_gramon] k0 prefix engine-top1 differs=12 (odd 6) {"neither": 6, "new_worse": 6}
+[b_xiaohe_gramon] k=0 n=164 top1=141 (86.0%) top3=141 (86.0%) ui=141 (86.0%) | None top1=142 (86.6%)
+[b_xiaohe_gramon] k=1 n=164 top1=141 (86.0%) top3=142 (86.6%) ui=136 (82.9%) | None top1=10 (6.1%)
+[b_xiaohe_gramon] k=2 n=164 top1=145 (88.4%) top3=146 (89.0%) ui=138 (84.1%) | None top1=0 (0.0%)
+[b_xiaohe_gramon] k=3 n=164 top1=145 (88.4%) top3=147 (89.6%) ui=141 (86.0%) | None top1=0 (0.0%)
+[b_xiaohe_gramon] top1 misses (P1 chain < 2 syllables) k=1 23(1) k=2 19(2) k=3 19(1)
+[b_xiaohe_gramon] hard sentences=22 | k>=1 samples=66 fixed top1=20 (30.3%) top3=20 (30.3%) | per k top1 2/22 9/22 9/22
+[b_ziranma_gramoff] targeted (hard, aux on wrong chars): 1-letter top1=26/40 (65.0%) top3=32 (80.0%) | 2-letter top1=33/40 (82.5%) top3=33 (82.5%)
+[b_ziranma_gramoff] sentences=164 samples=656 prefixes=1924 (odd 927)
+[b_ziranma_gramoff] k0 prefix engine-top1 differs=3 (odd 2) {"neither": 3}
+[b_ziranma_gramoff] k=0 n=164 top1=124 (75.6%) top3=124 (75.6%) ui=124 (75.6%) | None top1=124 (75.6%)
+[b_ziranma_gramoff] k=1 n=164 top1=125 (76.2%) top3=128 (78.0%) ui=121 (73.8%) | None top1=8 (4.9%)
+[b_ziranma_gramoff] k=2 n=164 top1=130 (79.3%) top3=132 (80.5%) ui=127 (77.4%) | None top1=0 (0.0%)
+[b_ziranma_gramoff] k=3 n=164 top1=138 (84.1%) top3=139 (84.8%) ui=136 (82.9%) | None top1=0 (0.0%)
+[b_ziranma_gramoff] top1 misses (P1 chain < 2 syllables) k=1 39(2) k=2 34(6) k=3 26(8)
+[b_ziranma_gramoff] hard sentences=40 | k>=1 samples=120 fixed top1=34 (28.3%) top3=36 (30.0%) | per k top1 4/40 11/40 19/40
+[b_ziranma_gramon] targeted (hard, aux on wrong chars): 1-letter top1=16/22 (72.7%) top3=17 (77.3%) | 2-letter top1=17/22 (77.3%) top3=17 (77.3%)
+[b_ziranma_gramon] sentences=164 samples=656 prefixes=1924 (odd 927)
+[b_ziranma_gramon] k0 prefix engine-top1 differs=2 (odd 1) {"neither": 2}
+[b_ziranma_gramon] k=0 n=164 top1=142 (86.6%) top3=142 (86.6%) ui=142 (86.6%) | None top1=142 (86.6%)
+[b_ziranma_gramon] k=1 n=164 top1=143 (87.2%) top3=144 (87.8%) ui=138 (84.1%) | None top1=10 (6.1%)
+[b_ziranma_gramon] k=2 n=164 top1=147 (89.6%) top3=147 (89.6%) ui=143 (87.2%) | None top1=0 (0.0%)
+[b_ziranma_gramon] k=3 n=164 top1=144 (87.8%) top3=145 (88.4%) ui=141 (86.0%) | None top1=0 (0.0%)
+[b_ziranma_gramon] top1 misses (P1 chain < 2 syllables) k=1 21(2) k=2 17(4) k=3 20(5)
+[b_ziranma_gramon] hard sentences=22 | k>=1 samples=66 fixed top1=20 (30.3%) top3=20 (30.3%) | per k top1 2/22 9/22 9/22
+[b_mspy_gramoff] targeted (hard, aux on wrong chars): 1-letter top1=26/40 (65.0%) top3=32 (80.0%) | 2-letter top1=33/40 (82.5%) top3=33 (82.5%)
+[b_mspy_gramoff] sentences=164 samples=656 prefixes=1924 (odd 927)
+[b_mspy_gramoff] k0 prefix engine-top1 differs=3 (odd 2) {"neither": 3}
+[b_mspy_gramoff] k=0 n=164 top1=124 (75.6%) top3=124 (75.6%) ui=124 (75.6%) | None top1=124 (75.6%)
+[b_mspy_gramoff] k=1 n=164 top1=125 (76.2%) top3=128 (78.0%) ui=121 (73.8%) | None top1=8 (4.9%)
+[b_mspy_gramoff] k=2 n=164 top1=130 (79.3%) top3=132 (80.5%) ui=127 (77.4%) | None top1=0 (0.0%)
+[b_mspy_gramoff] k=3 n=164 top1=137 (83.5%) top3=139 (84.8%) ui=136 (82.9%) | None top1=0 (0.0%)
+[b_mspy_gramoff] top1 misses (P1 chain < 2 syllables) k=1 39(2) k=2 34(6) k=3 27(9)
+[b_mspy_gramoff] hard sentences=40 | k>=1 samples=120 fixed top1=33 (27.5%) top3=36 (30.0%) | per k top1 4/40 11/40 18/40
+[b_mspy_gramon] targeted (hard, aux on wrong chars): 1-letter top1=16/22 (72.7%) top3=17 (77.3%) | 2-letter top1=18/22 (81.8%) top3=18 (81.8%)
+[b_mspy_gramon] sentences=164 samples=656 prefixes=1924 (odd 927)
+[b_mspy_gramon] k0 prefix engine-top1 differs=2 (odd 1) {"neither": 2}
+[b_mspy_gramon] k=0 n=164 top1=142 (86.6%) top3=142 (86.6%) ui=142 (86.6%) | None top1=142 (86.6%)
+[b_mspy_gramon] k=1 n=164 top1=143 (87.2%) top3=144 (87.8%) ui=138 (84.1%) | None top1=10 (6.1%)
+[b_mspy_gramon] k=2 n=164 top1=147 (89.6%) top3=147 (89.6%) ui=143 (87.2%) | None top1=0 (0.0%)
+[b_mspy_gramon] k=3 n=164 top1=144 (87.8%) top3=145 (88.4%) ui=141 (86.0%) | None top1=0 (0.0%)
+[b_mspy_gramon] top1 misses (P1 chain < 2 syllables) k=1 21(2) k=2 17(4) k=3 20(5)
+[b_mspy_gramon] hard sentences=22 | k>=1 samples=66 fixed top1=20 (30.3%) top3=20 (30.3%) | per k top1 2/22 9/22 9/22
