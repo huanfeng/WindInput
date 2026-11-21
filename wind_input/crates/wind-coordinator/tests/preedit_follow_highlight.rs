@@ -305,12 +305,8 @@ fn caret_tracks_form_switch() {
     for (enter, prefix) in cases {
         let active = if enter.is_some() { "wubi86" } else { "pinyin" };
         let coord = typed(in_ing(cfg(active)), enter, "pinan");
-        // 主路：末尾是音节边界，← 整音节跳一次就到 `pin|an`（rime 导航语义）。
-        // overlay（临拼等）有自己的光标臂，仍按单字符，要两次。
+        // 末尾是音节边界，← 整音节跳一次就到 `pin|an`（rime 导航语义；临拼 overlay 同）。
         press(&coord, VK_LEFT);
-        if enter.is_some() {
-            press(&coord, VK_LEFT);
-        }
         let p = prefix.len();
         assert_eq!(coord.debug_preedit(), format!("{prefix}pin'an"));
         assert_eq!(coord.debug_ui_caret_bytes(), p + 3, "{prefix:?}：pin| 'an");

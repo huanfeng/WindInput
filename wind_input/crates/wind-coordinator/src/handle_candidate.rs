@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use wind_bridge::handler::{KeyAction, KeyEventData};
 use wind_candidate::{Candidate, CandidateMeta, CandidateSource};
 use wind_engine::manager::ENGLISH_SCHEMA;
-use wind_ipc::protocol::MOD_SHIFT;
+use wind_ipc::protocol::{MOD_SHIFT, MOD_SHORTCUT};
 use wind_keys::keymap;
 use wind_store::freq::FreqRecord;
 use wind_ui_types::CandidateOp;
@@ -3720,6 +3720,29 @@ impl Coordinator {
         }
     }
 
+    /// overlay 的音节停靠点：只有临拼 / 混输（显示串 `overlay_body` 带引擎拆的 `'`）有；
+    /// 对不上缓冲时 `None`，调用方退回单字符。
+    pub(crate) fn overlay_syllable_stops(state: &State) -> Option<Vec<usize>> {
+        let buffer = match state.active? {
+            ModeKind::TempPinyin => &state.temp_pinyin_buffer,
+            ModeKind::Mix(_) => &state.mix_buffer,
+            // 其余 overlay 没有音节切分，恒单字符。
+            ModeKind::TempEnglish
+            | ModeKind::Url
+            | ModeKind::Email
+            | ModeKind::Unicode
+            | ModeKind::Special(_)
+            | ModeKind::RareChar
+            | ModeKind::Reverse
+            | ModeKind::AuxCode => return None,
+        };
+        state
+            .overlay_body
+            .contains('\'')
+            .then(|| preedit_cursor::syllable_stops(buffer, &state.overlay_body))
+            .flatten()
+    }
+
     /// overlay 模式的编码区光标移动（左右 / Home / End）。`None` = 该键不是光标移动键，
     /// 调用方继续分派。
     ///
@@ -3736,13 +3759,30 @@ impl Coordinator {
         ) {
             return None;
         }
+        let arrow = matches!(data.key_code, keymap::VK_LEFT | keymap::VK_RIGHT);
+        // ←/→ 与主输入路径同一套 rime 语义（见 `move_caret_syllable`）：默认「边界整音节 / 中间单字符」，
+        // Ctrl 总是整音节，Shift 总是单字符。只有临拼 / 混输有音节切分，其余 overlay 恒单字符。
+        let stops = if arrow && data.modifiers & MOD_SHIFT == 0 {
+            Self::overlay_syllable_stops(state)
+        } else {
+            None
+        };
+        let smart = data.modifiers & MOD_SHORTCUT == 0;
         let moved = {
             let mut ed = Self::overlay_buf_edit(state)?;
-            match data.key_code {
-                keymap::VK_LEFT => ed.move_left(),
-                keymap::VK_RIGHT => ed.move_right(),
-                keymap::VK_HOME => ed.home(),
-                _ => ed.end(),
+            let right = data.key_code == keymap::VK_RIGHT;
+            let jump = stops
+                .and_then(|stops| preedit_cursor::syllable_jump(&stops, ed.pos(), right, smart));
+            if let Some(pos) = jump {
+                ed.set_pos(pos);
+                true
+            } else {
+                match data.key_code {
+                    keymap::VK_LEFT => ed.move_left(),
+                    keymap::VK_RIGHT => ed.move_right(),
+                    keymap::VK_HOME => ed.home(),
+                    _ => ed.end(),
+                }
             }
         };
         // 已在边界（含缓冲空、只剩只读前缀）：吃掉不透传，否则宿主光标会跳出组合区。

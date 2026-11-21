@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use wind_bridge::handler::{KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
+use wind_ipc::protocol::MOD_SHIFT;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_CTRL};
-use wind_keys::keymap::{VK_LEFT, VK_RIGHT};
+use wind_keys::keymap::{VK_BACKTICK, VK_LEFT, VK_RIGHT};
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
@@ -156,5 +157,58 @@ fn ctrl_left_without_composition_passes_through() {
     assert!(
         matches!(act, wind_bridge::handler::KeyAction::PassThrough),
         "没有编码时 Ctrl+← 归宿主（按词移动），实际: {act:?}"
+    );
+}
+
+/// Shift+←/→：总是单字符，是走到音节中间的精调通路。
+#[test]
+fn shift_arrows_step_one_char() {
+    if !data_ready() {
+        return;
+    }
+    let c = coord();
+    type_code(&c, "nihao");
+    c.handle_key_event(&key(VK_LEFT, MOD_SHIFT));
+    assert_eq!(c.debug_ui_caret_bytes(), 5, "ni'ha|o：单字符");
+    c.handle_key_event(&key(VK_LEFT, MOD_SHIFT));
+    assert_eq!(c.debug_ui_caret_bytes(), 4, "ni'h|ao：单字符");
+    left(&c); // 缓冲 nih| 在音节中间 → 单字符，落到 ni|hao（显示串里在 ' 之前）
+    assert_eq!(c.debug_ui_caret_bytes(), 2, "音节中间 ← 仍是单字符");
+}
+
+fn overlay_coord() -> std::sync::Arc<Coordinator> {
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
+    cfg.schema.active = "wubi86".into();
+    cfg.input.default.chinese_mode = true;
+    Coordinator::new_headless(cfg, Some(&data_dir()))
+}
+
+/// 临拼 overlay（`` ` `` 引导）与主路同一套：边界整音节跳、Ctrl 总是整音节、Shift 单字符。
+#[test]
+fn temp_pinyin_overlay_follows_same_rules() {
+    if !data_ready() || !data_dir().join("schemas/wubi86.schema.toml").exists() {
+        return;
+    }
+    let c = overlay_coord();
+    c.handle_key_event(&key(VK_BACKTICK, 0));
+    type_code(&c, "nihao");
+    let end = c.debug_ui_caret_bytes();
+    left(&c);
+    assert_eq!(
+        c.debug_ui_caret_bytes(),
+        3,
+        "`ni|hao：边界整音节（前缀 ` 占 1）"
+    );
+    assert!(end > 3);
+    c.handle_key_event(&key(VK_RIGHT, MOD_SHIFT));
+    assert_eq!(c.debug_ui_caret_bytes(), 5, "Shift+→ 单字符（`ni'h|）");
+    c.handle_key_event(&key(VK_LEFT, MOD_CTRL));
+    assert_eq!(c.debug_ui_caret_bytes(), 3, "Ctrl+← 音节中间也跳到边界");
+    c.handle_key_event(&key(VK_LEFT, MOD_CTRL));
+    assert_eq!(c.debug_ui_caret_bytes(), 1, "再 Ctrl+← 到开头");
+    assert!(
+        c.debug_preedit().starts_with('`'),
+        "仍在临拼里，组合没被清掉"
     );
 }

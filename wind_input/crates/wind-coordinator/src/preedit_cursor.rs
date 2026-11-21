@@ -256,9 +256,13 @@ impl<'a> BufEdit<'a> {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn pos(&self) -> usize {
         *self.cursor
+    }
+
+    /// 直接落到 `pos`（调用方保证是字符边界，如 [`syllable_jump`] 的停靠点）。
+    pub(crate) fn set_pos(&mut self, pos: usize) {
+        *self.cursor = floor_boundary(self.buf, pos);
     }
 
     /// 在光标处插入字符，光标随之后移（光标在末尾时等价于原来的 `push`）。

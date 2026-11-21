@@ -90,5 +90,7 @@ macOS 的 → 在末尾是「切到下一个候选词」，本仓出厂语义是
 - 两端回绕（开头再 ← 到最后一个音节起点，末尾再 → 到第一个边界）。
 - 切分取引擎对整串缓冲的拆分（`preedit_split_body` / `preedit_codetable_body`），不随高亮候选变；
   不足两个音节、双拼等对不回缓冲时退回单字符。
-- 只在主输入路径；临拼等 overlay 仍是单字符。macOS 的 `caret_left` / `caret_right` 动词不变。
+- **Shift+←/→**：总是单字符，是走进音节中间做精调的通路（rime 的 `left_by_char` 对应物）。
+- 主输入路径与临拼 / 混输 overlay 同一套；其余 overlay（临英、URL、Email、Unicode、特殊）没有音节，恒单字符。
+  macOS 的 `caret_left` / `caret_right` 动词不变。
 - `syllable_prev` / `syllable_next` 动词可绑到普通键（会话键表只认键 + Shift，不带 Ctrl）。

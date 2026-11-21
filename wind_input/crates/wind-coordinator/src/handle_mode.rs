@@ -3100,6 +3100,16 @@ impl Coordinator {
         if data.modifiers & MOD_SHORTCUT == 0 {
             return None;
         }
+        // Ctrl+←/→：临拼 / 混输里同主输入路径整音节跳（rime 同款）。其余 overlay 无音节，
+        // 仍按宿主快捷键处理。用户写了 `ctrl+left = "none"` 则不拦。
+        if has_pending
+            && data.modifiers & (MOD_SHORTCUT | MOD_SHIFT) == wind_ipc::protocol::MOD_CTRL
+            && matches!(data.key_code, keymap::VK_LEFT | keymap::VK_RIGHT)
+            && matches!(state.active, Some(ModeKind::TempPinyin | ModeKind::Mix(_)))
+            && self.ctrl_syllable_enabled(data.key_code)
+        {
+            return self.overlay_cursor_key(state, data);
+        }
         if has_pending {
             exit(self, state);
             self.notify_ui_hide();

@@ -8962,17 +8962,13 @@ fn test_temp_pinyin_cursor_maps_through_separator() {
     assert_eq!(action_text(&act).as_deref(), Some("`ni'hao"));
     assert_eq!(action_caret(&act), Some(7), "引导符 1 + 显示串 6");
 
-    // 左移三次：`ni'ha|o → `ni'h|ao → `ni|'hao（跨过分隔符，6 → 5 → 3）
-    assert_eq!(action_caret(&tap(&coord, VK_LEFT)), Some(6));
-    assert_eq!(action_caret(&tap(&coord, VK_LEFT)), Some(5));
+    // ← 在音节边界上整音节跳（rime 语义）：`ni'hao| → `ni|'hao（跨过分隔符，7 → 3）。
     assert_eq!(action_caret(&tap(&coord, VK_LEFT)), Some(3));
 
     // Home 只到剩余拼音开头（引导符之后），不进只读前缀
     assert_eq!(action_caret(&tap(&coord, VK_HOME)), Some(1));
-    assert!(
-        matches!(tap(&coord, VK_LEFT), KeyAction::Consumed),
-        "已在最左：吃掉，不得退进引导符"
-    );
+    // 已在最左再 ←：rime 回绕到最后一个音节起点（`ni|'hao 的 3），不得退进引导符。
+    assert_eq!(action_caret(&tap(&coord, VK_LEFT)), Some(3));
 }
 
 // ── 全角（英文模式 / 中文模式数字）─────────────────────────────────────────────

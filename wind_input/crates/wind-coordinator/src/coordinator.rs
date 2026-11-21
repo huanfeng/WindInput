@@ -6006,6 +6006,23 @@ impl Coordinator {
 
     /// 编码区光标移动后的返回：刷新候选窗，并带上组合区新插入符位置（与默认 ←/→ 臂同形）。
     /// 只回 `Consumed` 的话宿主里的插入符不会跟着动。
+    /// Ctrl+←/→ 整音节跳是否启用：`session_actions` 里写了 `ctrl+left` / `ctrl+right = "none"` 即关
+    /// （同时热键编译器也不再向宿主转发该键）。
+    pub(crate) fn ctrl_syllable_enabled(&self, vk: u32) -> bool {
+        let name = if vk == keymap::VK_LEFT {
+            "ctrl+left"
+        } else {
+            "ctrl+right"
+        };
+        !self
+            .rt()
+            .config
+            .keys
+            .session_actions
+            .get(name)
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("none"))
+    }
+
     /// 编码区的音节停靠点（缓冲内字节位置，见 [`preedit_cursor::syllable_stops`]）。
     ///
     /// 拆分串取引擎对**整串缓冲**的切分（`preedit_split_body` / 码表整句的 `preedit_codetable_body`），

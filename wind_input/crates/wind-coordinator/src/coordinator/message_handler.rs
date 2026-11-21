@@ -1641,17 +1641,7 @@ impl MessageHandler for Coordinator {
         if data.modifiers & (MOD_SHORTCUT | MOD_SHIFT) == wind_ipc::protocol::MOD_CTRL
             && matches!(data.key_code, keymap::VK_LEFT | keymap::VK_RIGHT)
             && !state.input_buffer.is_empty()
-            && !self
-                .rt()
-                .config
-                .keys
-                .session_actions
-                .get(if data.key_code == keymap::VK_LEFT {
-                    "ctrl+left"
-                } else {
-                    "ctrl+right"
-                })
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case("none"))
+            && self.ctrl_syllable_enabled(data.key_code)
         {
             let moved =
                 Self::move_caret_syllable(&mut state, data.key_code == keymap::VK_RIGHT, false);
@@ -2236,6 +2226,7 @@ impl MessageHandler for Coordinator {
                     // （见 `move_caret_syllable`）；无切分（双拼 / 单音节 / 码表单码）自然退回单字符。
                     // 手机端的按音节左移（上面的 `syllable_jump`）优先，保持原样。
                     let smart = (syllable_jump.is_none()
+                        && data.modifiers & MOD_SHIFT == 0
                         && matches!(data.key_code, keymap::VK_LEFT | keymap::VK_RIGHT))
                     .then(|| {
                         Self::move_caret_syllable(st, data.key_code == keymap::VK_RIGHT, true)
