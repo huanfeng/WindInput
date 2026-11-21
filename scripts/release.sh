@@ -99,7 +99,7 @@ manifest_branch() {
 
 # ---------- 版本号 ----------
 # tag 是版本的唯一真源 (CI 用 GITHUB_REF_NAME 覆盖 docs/VERSION), 所以「当前版本」要问
-# 远端的 tag, 而不是读本机 docs/VERSION —— 后者是开发占位, 经常领先或落后于已发版本。
+# 远端的 tag; docs/VERSION 由 push 在打 tag 前提交为同一版本 (Nix 打包读它), 别手改。
 latest_remote_version() {
     git -C "$PRODUCT_ROOT" ls-remote --tags --refs origin 'v*' 2>/dev/null \
         | sed 's#.*refs/tags/v##' \
@@ -337,6 +337,19 @@ release_overwritable() {
     return 0
 }
 
+# 打 tag 前把主仓 docs/VERSION 提交为目标版本, 让 tag 落在这个提交上。
+# CI 以 tag 名为准, 但 Nix 打包 (flake.nix) 直接读 docs/VERSION, 不提交就会永远落后。
+# --only 只收这一个文件, 暂存区里别人的改动原样不动。
+commit_version_file() {
+    local v="$1" cur
+    cur="$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null)"
+    [ "$cur" = "$v" ] && { gray "  docs/VERSION 已是 $v, 无需提交"; return 0; }
+    printf '%s\n' "$v" > "$VERSION_FILE"
+    git -C "$PRODUCT_ROOT" commit -q --only -m "chore(version): docs/VERSION 置为 $v" -- docs/VERSION \
+        || { err "  ✗ 提交 docs/VERSION 失败"; return 1; }
+    say "  ✓ docs/VERSION $cur → $v 已提交"
+}
+
 # $2 = 1 时 --force: 覆盖已存在的同名 tag (本地 -f + 远端 --force)。
 do_push() {
     local v="$1" force="${2:-0}" br tag name mode d done_list=() main_tag_kept=0
@@ -373,7 +386,8 @@ do_push() {
     warn "即将按下面的顺序推送 —— 主仓的 tag 一到远端就会【立刻】触发 CI 构建:"
     for r in "${RELEASE_REPOS[@]}"; do
         name="${r%%:*}"; mode="${r##*:}"
-        if [ "$mode" = tag ]; then gray "    $name  → push $br + tag $tag"
+        if [ "$name" = "$MAIN_REPO" ]; then gray "    $name  → 提交 docs/VERSION=$v, push $br + tag $tag"
+        elif [ "$mode" = tag ]; then gray "    $name  → push $br + tag $tag"
         else                       gray "    $name  → 只 push $br (自有版本线, 不打本产品的 tag)"; fi
     done
     printf '\n'
@@ -385,6 +399,10 @@ do_push() {
         name="${r%%:*}"; mode="${r##*:}"; d="$WORK_ROOT/$name"
         printf '\n'
         cyan "── $name ──"
+
+        if [ "$name" = "$MAIN_REPO" ] && [ "$mode" = tag ]; then
+            commit_version_file "$v" || { push_abort_hint "${done_list[@]}"; return 1; }
+        fi
 
         # ⚠️ 仓库可能装有 pre-push hook (wind-ui-rust 会跑 clippy + 全量测试), 推送会很慢。
         #    耐心等, 别用 --no-verify 绕过。

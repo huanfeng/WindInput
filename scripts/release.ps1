@@ -11,10 +11,9 @@
 #   【tag 才是发布版本的唯一真源】。release.yml 在 tag 触发时执行
 #   V="${GITHUB_REF_NAME#v}" 并写入 docs/VERSION, 即 CI 完全以 tag 名为准。
 #   docs/VERSION 只用于两处: 本地 dev.ps1 构建, 以及 workflow_dispatch 手动触发时的
-#   开发占位版本。因此发布【不需要】为改版本号单独提交 commit ——
-#   bump 只是选一个新的 tag 名。发布成功后脚本会把 docs/VERSION 同步为新版本
-#   (仅写文件, 不 commit), 让本地构建的产物版本号跟上, 你可以顺手带进下次提交,
-#   也可以 git checkout 丢弃。
+#   开发占位版本, 以及 Nix 打包(flake.nix 直接读它)。因此打 tag 前脚本会把
+#   docs/VERSION 单独提交为新版本(git commit --only), tag 落在这个提交上,
+#   Nix 包版本才不会落后于发布版本。
 #
 # 用法:
 #   .\scripts\release.ps1                  # 交互菜单
@@ -44,7 +43,7 @@
 # 注意:
 #   - 所有仓库必须【处于目标分支上】。repo sync 后会停在游离 HEAD, 此时脚本中断
 #     并提示切换命令 —— 游离状态下推送等同盲推, 不适合发布。
-#   - 本脚本【不做 commit】。工作区有未提交改动时逐仓提示, 由你决定是否继续。
+#   - 本脚本只在打 tag 前提交主仓 docs/VERSION 这一个文件; 其余未提交改动逐仓提示, 由你决定是否继续。
 
 param(
     # 子命令; 留空进交互菜单
@@ -391,7 +390,7 @@ function Get-RepoState ([pscustomobject]$repo, [string]$branch, [string]$tag, [b
     }
 
     # -------- 工作区 --------
-    # WindInput 的 docs/VERSION 是本地版本占位文件(release 末尾会自动写它、常态不提交),
+    # WindInput 的 docs/VERSION 由 release 在打 tag 前自动提交,
     # 不计入脏工作区确认, 避免每次发布都为它多按一次 y。porcelain 格式为 "XY path",
     # 路径从第 4 个字符起(Substring(3))。
     $porcelain = Get-GitValue $path @("status", "--porcelain")
@@ -595,6 +594,22 @@ function Invoke-Release {
         Write-Host ""
         Write-Host "── $($st.Name)" -ForegroundColor White
         try {
+            # 打 tag 前把主仓 docs/VERSION 提交为目标版本, 让 tag 落在这个提交上。
+            # CI 以 tag 为准, 但 Nix 打包 (flake.nix) 直接读 docs/VERSION, 不提交就会落后。
+            # --only 只收这一个文件, 暂存区里别人的改动原样不动。
+            if ($needTag -and $st.Tag -and -not $dryRun -and $st.Name -eq $MainRepo) {
+                $want = $tag -replace '^v', ''
+                $cur = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { "" }
+                if ($cur -ne $want) {
+                    Set-Content -Path $VersionFile -Value $want
+                    Invoke-GitOrDie $st.Path @("commit", "-q", "--only", "-m", "chore(version): docs/VERSION 置为 $want", "--", "docs/VERSION") "提交 docs/VERSION" | Out-Null
+                    $st.Head      = Get-GitValue $st.Path @("rev-parse", "HEAD")
+                    $st.HeadShort = Get-GitValue $st.Path @("rev-parse", "--short", "HEAD")
+                    $st.Ahead++
+                    $st.TagUpToDate = $false; $st.LocalTagOnHead = $false
+                    Say "  [OK] docs/VERSION $cur → $want 已提交"
+                }
+            }
             # 预检已确保处于目标分支。无新提交(Ahead=0)时跳过 push ——
             # 远端已含 HEAD(Behind 已在预检拦截), 再 push 只是空操作, 却会触发 pre-push
             # hook(如 wind-ui-rust 跑 clippy + 全量测试)白白变慢; 预检已 fetch 过, 无意义。
@@ -1431,7 +1446,7 @@ function Show-Menu ([string]$branch) {
     Cyan "==================== WindInput 发布 ===================="
     Write-Host "  最新已发布 tag : " -NoNewline
     if ($latest) { Say "v$($latest.Raw)" } else { Warn "(无)" }
-    Write-Host "  docs\VERSION   : $fileVer" -NoNewline; Gray "   (本地构建占位, 非版本真源)"
+    Write-Host "  docs\VERSION   : $fileVer" -NoNewline; Gray "   (发布时自动提交为 tag 同版本)"
     Write-Host "  主仓待推提交   : $ahead 个"
     Cyan "========================================================"
     Write-Host ""
