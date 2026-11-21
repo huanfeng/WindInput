@@ -26,11 +26,11 @@
     "wind-setting": {
       "flake": false,
       "locked": {
-        "lastModified": 1792927632,
-        "narHash": "sha256-fYeNs3libF7d8uXZim0kXb0Tg55TSzp+i0raLWuw6vU=",
+        "lastModified": 1794669694,
+        "narHash": "sha256-MUnarmxLMiL8nwF+Gh6Qp2jwnWv/vl7s/K9Q0FPJrqI=",
         "owner": "huanfeng",
         "repo": "wind-setting",
-        "rev": "8b9740c73528c50caa91b16b0442322794623f42",
+        "rev": "9bca68ce55839b570c9a3c3b521e20c581f7a262",
         "type": "github"
       },
       "original": {
@@ -42,11 +42,11 @@
     "wind-ui-rust": {
       "flake": false,
       "locked": {
-        "lastModified": 1793092150,
-        "narHash": "sha256-bz5lspPJEKBTcHt6DLe3QWFn/LdgjGXzEqb9O0+DCwc=",
+        "lastModified": 1794671420,
+        "narHash": "sha256-rdl9mdkAL7ZfXQn47rXDWWEHRIAqdTdei4R6HqkuGGI=",
         "owner": "huanfeng",
         "repo": "wind-ui-rust",
-        "rev": "57391b6446eb027d1129d3c47519a159d937c7cb",
+        "rev": "b6a4933b6024ea77e74644ba406dfb2bf87684f2",
         "type": "github"
       },
       "original": {
