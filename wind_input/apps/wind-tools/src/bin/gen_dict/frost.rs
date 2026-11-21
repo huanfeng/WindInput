@@ -3,7 +3,6 @@
 use crate::entry::{Entry, is_valid_code};
 use crate::reverse::{CharCodes, encode_phrase};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const MIN_FREQUENCY: u64 = 1000;
@@ -17,8 +16,9 @@ pub fn generate(
     if main_floor <= 1 {
         anyhow::bail!("主词库最低权重必须大于 1，才能生成低权重补充词库");
     }
-    let file = std::fs::File::open(source)
-        .map_err(|e| anyhow::anyhow!("打开白霜基础词库失败 {}: {e}", source.display()))?;
+    let content = std::fs::read_to_string(source)
+        .map_err(|e| anyhow::anyhow!("读取白霜基础词库失败 {}: {e}", source.display()))?;
+    let normalized = wind_utils::text::normalize_input(&content);
     let mut best: HashMap<char, &Entry> = HashMap::new();
     for entry in main.iter().chain(extra) {
         let mut chars = entry.text.chars();
@@ -47,8 +47,7 @@ pub fn generate(
     let mut frequencies: HashMap<String, u64> = HashMap::new();
     let mut in_body = false;
     let mut eligible = 0usize;
-    for line in BufReader::new(file).lines() {
-        let line = line?;
+    for line in normalized.lines() {
         if !in_body {
             if line.trim() == "..." {
                 in_body = true;
@@ -143,6 +142,21 @@ mod tests {
         let result = generate(&path, &[e("招行", "rvtf", 100)], &[], 120).unwrap();
         std::fs::remove_file(path).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn normalizes_bom_and_lone_cr_line_endings() {
+        let path = std::env::temp_dir().join(format!("wind-frost-cr-{}.yaml", std::process::id()));
+        std::fs::write(
+            &path,
+            "\u{feff}---\rname: base\r...\r招行\tzhao hang\t1348\r",
+        )
+        .unwrap();
+        let main = [e("招", "rvk", 100), e("行", "tfhh", 10)];
+        let result = generate(&path, &main, &[], 120).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!((&result[0].text[..], &result[0].code[..]), ("招行", "rvtf"));
     }
 
     #[test]

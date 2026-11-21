@@ -2534,6 +2534,7 @@ dependencies = [
  "serde",
  "toml 0.8.23",
  "wind-candidate",
+ "wind-utils",
 ]
 
 [[package]]
