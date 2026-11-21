@@ -723,6 +723,27 @@ impl Compiler {
             }
         }
 
+        // ── Ctrl+←/→：组码中整音节跳（rime 同款），仅在有会话时转发 ──
+        // 会话键表不带 Ctrl，故单独登记；协调器侧的 Ctrl 分支与这里同看
+        // `session_actions` 里的 `ctrl+left` / `ctrl+right = "none"`（写了就既不转发也不处理）。
+        for (name, vk) in [("ctrl+left", VK_LEFT), ("ctrl+right", VK_RIGHT)] {
+            if self
+                .config
+                .keys
+                .session_actions
+                .get(name)
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("none"))
+            {
+                continue;
+            }
+            let raw = key_hash(MOD_CTRL, vk);
+            result.key_down.push(HotkeyEntry {
+                tsf_hash: raw | HOTKEY_POLICY_FORWARD_ONLY,
+                match_hash: raw,
+                action: String::new(),
+            });
+        }
+
         // ── KeyUp：toggle 模式键（Shift/Ctrl/CapsLock） ──
         // 关键：必须带通用位+具体位，与 Go compileToggleModeKey 一致，
         // 因为 C++ GetCurrentModifiers() 对修饰键同时返回通用与具体位。
@@ -1269,6 +1290,25 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_arrow_forward_registration_can_be_disabled() {
+        let mut cfg = Config::default();
+        let has = |c: &Config, vk: u32| {
+            Compiler::new(c.clone())
+                .compile()
+                .key_down
+                .iter()
+                .any(|e| e.match_hash == key_hash(MOD_CTRL, vk))
+        };
+        assert!(
+            has(&cfg, VK_LEFT) && has(&cfg, VK_RIGHT),
+            "出厂转发 Ctrl+←/→"
+        );
+        cfg.keys.session_actions = session_actions(&[("ctrl+left", "none")]);
+        assert!(!has(&cfg, VK_LEFT), "写 none 后 Ctrl+← 不再转发");
+        assert!(has(&cfg, VK_RIGHT), "另一个方向不受影响");
+    }
+
+    #[test]
     fn forward_only_bit_marks_page_and_select_keys_only() {
         let mut cfg = Config::default();
         only_explicit(&mut cfg);
@@ -1297,11 +1337,14 @@ mod tests {
             key_hash(0, VK_OEM_7),
             // 出厂注释切换键 F1 补进会话按键表，同样只是转发登记。
             key_hash(0, 0x70),
+            // Ctrl+←/→ 整音节跳：会话键表不带 Ctrl，由编译器单独登记转发。
+            key_hash(MOD_CTRL, VK_LEFT),
+            key_hash(MOD_CTRL, VK_RIGHT),
         ];
         assert_eq!(
             forward_only_raw.len(),
-            7,
-            "样例绑定应展开出 6 个键，另加 F1"
+            9,
+            "样例绑定应展开出 6 个键，另加 F1 与 Ctrl+←/→"
         );
 
         for e in &compiled.key_down {

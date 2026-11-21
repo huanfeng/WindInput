@@ -156,6 +156,78 @@ pub(crate) fn syllable_left(spans: &[(usize, usize)], cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// 把拆分串（`ni'hao`）对回缓冲，得到**音节起点**在缓冲内的字节位置（升序、含 0 与缓冲末尾）。
+///
+/// 与 [`syllable_spans`] 的区别：缓冲里手敲的分隔符 `'` 也算数——拆分串里有没有这个 `'` 都行，
+/// 起点取分隔符**之后**（rime 默认 `after_delimiter`），故 `ni'hao` 的停靠点是 `{0, 3, 6}`，
+/// 光标在 `ni|'hao`（分隔符之前）不是停靠点。对不上（双拼、缓冲里混了拆分串没有的字符）返回
+/// `None`，调用方退回按字符移动。
+pub(crate) fn syllable_stops(buffer: &str, split: &str) -> Option<Vec<usize>> {
+    let (b, mut at) = (buffer.as_bytes(), 0usize);
+    let mut stops = vec![0usize];
+    for ch in split.chars() {
+        if ch == '\'' {
+            if b.get(at) == Some(&b'\'') {
+                at += 1;
+            }
+            stops.push(at);
+        } else {
+            if b.get(at) == Some(&b'\'') {
+                at += 1;
+                stops.push(at);
+            }
+            let len = ch.len_utf8();
+            let piece = buffer.get(at..at + len)?;
+            if !piece.eq_ignore_ascii_case(ch.encode_utf8(&mut [0; 4])) {
+                return None;
+            }
+            at += len;
+        }
+    }
+    if at != buffer.len() {
+        return None;
+    }
+    stops.push(at);
+    stops.dedup();
+    Some(stops)
+}
+
+/// rime 的音节跳转（`Navigator::JumpLeft` / `JumpRight`，`syllable_jump_position: after_delimiter`）。
+///
+/// - 向左：落到前一个停靠点；已在开头则**回绕**到最后一个音节的起点；
+/// - 向右：落到后一个停靠点；已在末尾则**回绕**到第一个音节之后的停靠点；
+/// - 不足两个音节（`stops` 少于 3 个）没有「跳」可言，返回 `None`。
+///
+/// `smart` = 真：rime 默认的 ←/→（`Rewind` / `Forward`）——**光标不在停靠点上（音节中间）时返回
+/// `None`**，由调用方按单字符移动；假：Ctrl+←/→（`left_by_syllable` / `right_by_syllable`），
+/// 音节中间也直接跳到最近的停靠点。
+pub(crate) fn syllable_jump(
+    stops: &[usize],
+    cursor: usize,
+    right: bool,
+    smart: bool,
+) -> Option<usize> {
+    if stops.len() < 3 {
+        return None;
+    }
+    let (first, last) = (stops[0], stops[stops.len() - 1]);
+    if smart && !stops.contains(&cursor) {
+        return None;
+    }
+    let target = if right {
+        if cursor >= last {
+            stops[1]
+        } else {
+            *stops.iter().find(|&&p| p > cursor)?
+        }
+    } else if cursor <= first {
+        stops[stops.len() - 2]
+    } else {
+        *stops.iter().rfind(|&&p| p < cursor)?
+    };
+    (target != cursor).then_some(target)
+}
+
 impl<'a> BufEdit<'a> {
     pub(crate) fn new(buf: &'a mut String, cursor: &'a mut usize) -> Self {
         *cursor = floor_boundary(buf, *cursor);
@@ -487,6 +559,64 @@ mod tests {
         assert_eq!(syllable_spans("vs", "zhong"), None);
         assert_eq!(syllable_spans("fangxiangx", "fang'xiang"), None);
         assert_eq!(syllable_spans("", ""), None);
+    }
+
+    #[test]
+    fn stops_align_engine_split_and_typed_delimiter() {
+        assert_eq!(syllable_stops("nihao", "ni'hao"), Some(vec![0, 2, 5]));
+        assert_eq!(syllable_stops("ni'hao", "ni'hao"), Some(vec![0, 3, 6]));
+        assert_eq!(syllable_stops("ni'hao", "nihao"), Some(vec![0, 3, 6]));
+        assert_eq!(
+            syllable_stops("woxihuan", "wo'xi'huan"),
+            Some(vec![0, 2, 4, 8])
+        );
+        assert_eq!(syllable_stops("NiHao", "ni'hao"), Some(vec![0, 2, 5]));
+        assert_eq!(syllable_stops("nihao", "ni'ha"), None, "没对满缓冲");
+        assert_eq!(syllable_stops("nhk", "ni'hao"), None, "双拼：字母对不上");
+    }
+
+    #[test]
+    fn smart_jump_only_on_stops_else_char_step() {
+        let s = [0, 3, 6]; // ni'hao
+        assert_eq!(
+            syllable_jump(&s, 0, true, true),
+            Some(3),
+            "头部边界 → 整音节"
+        );
+        assert_eq!(syllable_jump(&s, 3, true, true), Some(6));
+        assert_eq!(syllable_jump(&s, 6, false, true), Some(3));
+        assert_eq!(syllable_jump(&s, 3, false, true), Some(0));
+        assert_eq!(syllable_jump(&s, 1, true, true), None, "音节中间 → 单字符");
+        assert_eq!(
+            syllable_jump(&s, 2, false, true),
+            None,
+            "分隔符之前不是停靠点"
+        );
+    }
+
+    #[test]
+    fn jump_wraps_around_like_rime() {
+        let s = [0, 3, 6];
+        assert_eq!(
+            syllable_jump(&s, 0, false, true),
+            Some(3),
+            "开头再左 → 最后音节起点"
+        );
+        assert_eq!(
+            syllable_jump(&s, 6, true, true),
+            Some(3),
+            "末尾再右 → 第一个停靠点"
+        );
+    }
+
+    #[test]
+    fn ctrl_jump_works_mid_syllable_and_needs_two_syllables() {
+        let s = [0, 2, 5]; // ni hao
+        assert_eq!(syllable_jump(&s, 1, false, false), Some(0));
+        assert_eq!(syllable_jump(&s, 1, true, false), Some(2));
+        assert_eq!(syllable_jump(&s, 3, false, false), Some(2));
+        assert_eq!(syllable_jump(&s, 3, true, false), Some(5));
+        assert_eq!(syllable_jump(&[0, 5], 2, true, false), None, "单音节不跳");
     }
 
     #[test]

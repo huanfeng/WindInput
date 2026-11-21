@@ -2084,6 +2084,14 @@ pub enum SessionAction {
     /// 绑 `commit_highlighted` 就永远移动不了光标，绑移动就永远选不了词。无候选时末尾
     /// 那一下纯吞键（没有可上屏的东西，也不该把 → 交给宿主）。其余边界同 [`Self::CaretLeft`]。
     CaretRight(CaretEnd),
+    /// 编码区光标**整音节**左跳（rime `left_by_syllable`）：落到前一个音节起点，已在开头则回绕到
+    /// 最后一个音节起点。分隔符 `'` 之后算起点。无可用切分（双拼、码表单码等）时退回左移一字符。
+    /// 可绑到普通键（会话键表只认键 + Shift）。Ctrl+← 是内建的另一条通路（见
+    /// `Compiler` 的 Ctrl+←/→ 转发登记与协调器的 Ctrl 分支），不经本动词。
+    SyllablePrev,
+    /// 编码区光标**整音节**右跳（rime `right_by_syllable`），已在末尾则回绕到第一个音节边界。
+    /// 其余同 [`Self::SyllablePrev`]。
+    SyllableNext,
     /// 开 / 关高亮候选的悬停提示气泡（反查编码、拆字等），不用鼠标悬停（t372）。
     ///
     /// 走鼠标悬停同一条通路（悬停目标 = 高亮项），气泡内容与定位完全一致；再按一次收起，
@@ -2235,6 +2243,8 @@ impl SessionAction {
             "commit_highlighted" => Self::CommitHighlighted,
             "caret_left" => Self::CaretLeft,
             "caret_right" => Self::CaretRight(CaretEnd::Commit),
+            "syllable_prev" => Self::SyllablePrev,
+            "syllable_next" => Self::SyllableNext,
             "toggle_tip" => Self::ToggleTip,
             "commit_code" => Self::CommitCode,
             // `clear` 是 `cancel` 的别名（同一个动作，两种心智），见 `Cancel` 的文档。
@@ -2272,6 +2282,8 @@ impl SessionAction {
                 | Self::CommitCode
                 | Self::CaretLeft
                 | Self::CaretRight(_)
+                | Self::SyllablePrev
+                | Self::SyllableNext
         )
     }
 
@@ -2349,6 +2361,8 @@ impl std::fmt::Display for SessionAction {
             },
             Self::CommitHighlighted => f.write_str("commit_highlighted"),
             Self::CaretLeft => f.write_str("caret_left"),
+            Self::SyllablePrev => f.write_str("syllable_prev"),
+            Self::SyllableNext => f.write_str("syllable_next"),
             Self::CaretRight(a) => match a.as_payload() {
                 "" => f.write_str("caret_right"),
                 p => write!(f, "caret_right:{p}"),

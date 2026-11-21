@@ -1634,6 +1634,34 @@ impl MessageHandler for Coordinator {
             return act;
         }
 
+        // Ctrl+←/→：整音节跳（rime `left_by_syllable` / `right_by_syllable`）。
+        // 会话键表只认 vk+shift、不带 Ctrl，所以这里单独认；用户要关就写
+        // `session_actions = { "ctrl+left" = "none" }`（同时也不再向宿主转发该键）。
+        // 只在组码中（有编码）吃：无编码时 Ctrl+←/→ 是宿主的按词移动。
+        if data.modifiers & (MOD_SHORTCUT | MOD_SHIFT) == wind_ipc::protocol::MOD_CTRL
+            && matches!(data.key_code, keymap::VK_LEFT | keymap::VK_RIGHT)
+            && !state.input_buffer.is_empty()
+            && !self
+                .rt()
+                .config
+                .keys
+                .session_actions
+                .get(if data.key_code == keymap::VK_LEFT {
+                    "ctrl+left"
+                } else {
+                    "ctrl+right"
+                })
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("none"))
+        {
+            let moved =
+                Self::move_caret_syllable(&mut state, data.key_code == keymap::VK_RIGHT, false);
+            return if moved {
+                self.caret_moved_action(&mut state)
+            } else {
+                KeyAction::Consumed
+            };
+        }
+
         // Ctrl/Alt/Cmd 组合（非热键）：有输入则清空并隐藏候选窗，否则透传。
         // 必须 notify_ui_hide：否则候选窗残留（如 Ctrl+A 时卡死，需再输入才复位）。
         //
@@ -2204,16 +2232,28 @@ impl MessageHandler for Coordinator {
                         st.input_cursor_pos =
                             preedit_cursor::syllable_left(spans, st.input_cursor_pos);
                     }
-                    let mut ed = preedit_cursor::BufEdit::new(
-                        &mut st.input_buffer,
-                        &mut st.input_cursor_pos,
-                    );
-                    let moved = match data.key_code {
-                        keymap::VK_LEFT if syllable_jump.is_some() => true,
-                        keymap::VK_LEFT => ed.move_left(),
-                        keymap::VK_RIGHT => ed.move_right(),
-                        keymap::VK_HOME => ed.home(),
-                        _ => ed.end(),
+                    // ←/→ 按 rime 导航器语义：光标在音节边界上整音节跳，在音节中间按单字符
+                    // （见 `move_caret_syllable`）；无切分（双拼 / 单音节 / 码表单码）自然退回单字符。
+                    // 手机端的按音节左移（上面的 `syllable_jump`）优先，保持原样。
+                    let smart = (syllable_jump.is_none()
+                        && matches!(data.key_code, keymap::VK_LEFT | keymap::VK_RIGHT))
+                    .then(|| {
+                        Self::move_caret_syllable(st, data.key_code == keymap::VK_RIGHT, true)
+                    });
+                    let moved = if let Some(moved) = smart {
+                        moved
+                    } else {
+                        let mut ed = preedit_cursor::BufEdit::new(
+                            &mut st.input_buffer,
+                            &mut st.input_cursor_pos,
+                        );
+                        match data.key_code {
+                            keymap::VK_LEFT if syllable_jump.is_some() => true,
+                            keymap::VK_LEFT => ed.move_left(),
+                            keymap::VK_RIGHT => ed.move_right(),
+                            keymap::VK_HOME => ed.home(),
+                            _ => ed.end(),
+                        }
                     };
                     if moved {
                         // 光标移动**不重算候选**（不调 update_candidates）：光标不参与引擎查询，

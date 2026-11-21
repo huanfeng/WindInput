@@ -290,7 +290,7 @@ fn mix_text_lens_pinan_follows_highlight() {
     assert_eq!(composed(&act), Some(";pin'an"));
 }
 
-/// 光标在缓冲中间（`pin|an`，左移两次）：形态切换后插入符按新形态换算，回传宿主的位置与
+/// 光标在缓冲中间（`pin|an`，左移一次整音节）：形态切换后插入符按新形态换算，回传宿主的位置与
 /// 自绘编码栏的位置一致。`pin'an` 里在 `pin` 之后，`pi'nan` 里在 `pi'n` 之后。
 #[test]
 fn caret_tracks_form_switch() {
@@ -305,8 +305,12 @@ fn caret_tracks_form_switch() {
     for (enter, prefix) in cases {
         let active = if enter.is_some() { "wubi86" } else { "pinyin" };
         let coord = typed(in_ing(cfg(active)), enter, "pinan");
+        // 主路：末尾是音节边界，← 整音节跳一次就到 `pin|an`（rime 导航语义）。
+        // overlay（临拼等）有自己的光标臂，仍按单字符，要两次。
         press(&coord, VK_LEFT);
-        press(&coord, VK_LEFT);
+        if enter.is_some() {
+            press(&coord, VK_LEFT);
+        }
         let p = prefix.len();
         assert_eq!(coord.debug_preedit(), format!("{prefix}pin'an"));
         assert_eq!(coord.debug_ui_caret_bytes(), p + 3, "{prefix:?}：pin| 'an");
@@ -374,7 +378,8 @@ fn sentence_cycle_caret_tracks_form_switch() {
     c.schema.pinyin.sentence_max_count = 5;
     c.schema.pinyin.sentence_cycle_key = "tab".into();
     let coord = typed(c, None, "xianjiaotongdaxue");
-    for _ in 0.."jiaotongdaxue".len() {
+    // ← 在音节边界上整音节跳：`xi'an'jiao'tong'da'xue` 从末尾四次落在 `xian|`。
+    for _ in 0..4 {
         press(&coord, VK_LEFT);
     }
     assert_top(&coord, "西安交通大学", "xi'an'jiao'tong'da'xue");

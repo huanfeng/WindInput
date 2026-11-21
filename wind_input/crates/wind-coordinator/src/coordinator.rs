@@ -6006,7 +6006,45 @@ impl Coordinator {
 
     /// 编码区光标移动后的返回：刷新候选窗，并带上组合区新插入符位置（与默认 ←/→ 臂同形）。
     /// 只回 `Consumed` 的话宿主里的插入符不会跟着动。
-    fn caret_moved_action(&self, state: &mut State) -> KeyAction {
+    /// 编码区的音节停靠点（缓冲内字节位置，见 [`preedit_cursor::syllable_stops`]）。
+    ///
+    /// 拆分串取引擎对**整串缓冲**的切分（`preedit_split_body` / 码表整句的 `preedit_codetable_body`），
+    /// 不随高亮候选变——否则高亮一动，光标的停靠点就跟着变。对不上缓冲（双拼等）→ `None`。
+    fn caret_syllable_stops(state: &State) -> Option<Vec<usize>> {
+        [&state.preedit_split_body, &state.preedit_codetable_body]
+            .into_iter()
+            .filter(|split| split.contains('\''))
+            .find_map(|split| preedit_cursor::syllable_stops(&state.input_buffer, split))
+    }
+
+    /// 编码区光标左 / 右移一步（rime 导航器语义）。返回是否真的动了。
+    ///
+    /// - `smart` = 真（默认 ←/→，rime `Rewind` / `Forward`）：光标在音节边界上整音节跳，
+    ///   在音节中间按单字符；
+    /// - `smart` = 假（Ctrl+←/→，rime `left_by_syllable` / `right_by_syllable`）：总是整音节跳。
+    ///
+    /// 不足两个音节或拆分对不上缓冲时都退回单字符。左右两端按 rime 回绕（仅音节跳时）。
+    pub(crate) fn move_caret_syllable(state: &mut State, right: bool, smart: bool) -> bool {
+        let jump = Self::caret_syllable_stops(state).and_then(|stops| {
+            preedit_cursor::syllable_jump(&stops, state.input_cursor_pos, right, smart)
+        });
+        if let Some(pos) = jump {
+            state.input_cursor_pos = pos;
+            return true;
+        }
+        let mut ed = preedit_cursor::BufEdit::new_cased(
+            &mut state.input_buffer,
+            &mut state.input_cursor_pos,
+            &mut state.input_buffer_cased,
+        );
+        if right {
+            ed.move_right()
+        } else {
+            ed.move_left()
+        }
+    }
+
+    pub(crate) fn caret_moved_action(&self, state: &mut State) -> KeyAction {
         let text = state.preedit.clone();
         let caret_pos = self.composition_caret(state);
         self.notify_ui_update(state);
@@ -6248,6 +6286,19 @@ impl Coordinator {
                 } else {
                     return Some(KeyAction::Consumed);
                 }
+            }
+            // 整音节跳（出厂绑 Ctrl+←/→，rime `left_by_syllable` / `right_by_syllable`）。
+            // 门卫同 `CaretLeft`：overlay 让位、无会话放行；无切分时退回单字符。
+            wind_config::SessionAction::SyllablePrev | wind_config::SessionAction::SyllableNext => {
+                if state.active.is_some() || !Self::has_input_session(state) {
+                    return None;
+                }
+                let right = matches!(action, wind_config::SessionAction::SyllableNext);
+                return Some(if Self::move_caret_syllable(state, right, false) {
+                    self.caret_moved_action(state)
+                } else {
+                    KeyAction::Consumed
+                });
             }
             // 上屏编码：这里只登记、吞键，持锁的这一层没法重入分派；由出口
             // `redispatch_commit_code` 把这个键当回车再走一遍。

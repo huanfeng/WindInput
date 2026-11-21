@@ -1397,6 +1397,8 @@ key_actions = {}
 #       commit_code(上屏编码，同回车上屏编码，但不看 [input] enter_behavior：那里设成
 #           清空编码时，这个键仍上屏编码。打了码没出候选时也能按，没在打字、联想候选时
 #           这个键照常。极点 / 小鸭的习惯是 lctrl = "commit_code")
+#       syllable_prev / syllable_next(编码区光标整音节左 / 右跳，两端回绕；没有可用切分时
+#           退回单字符。内建的 Ctrl+←/→ 已是这个效果，不用绑；要关它写 "ctrl+left" = "none"）
 #       command:<表达式>(执行一段命令，写法同上面 key_actions 的 command:。正在打的码原样
 #           留着，不上屏也不清空；打了码还没出候选时也能按，没在打字时这个键照常)
 # 例（Tab 向下翻页、CapsLock 向上翻页）：

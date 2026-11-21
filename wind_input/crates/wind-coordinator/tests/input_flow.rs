@@ -8388,6 +8388,8 @@ fn select_by_text(coord: &Coordinator, text: &str) -> KeyAction {
 
 /// 光标左移跨过引擎插入的音节分隔符时，caret 需按**显示串**位置换算（buffer "nihao" 的第 2
 /// 字节 → 显示 "ni'hao" 的第 2 位，一次左移跨两个显示位）。这是 buffer→display 映射的核心用例。
+///
+/// ←/→ 是 rime 导航语义：光标在音节边界上整音节跳（末尾 → `ni|hao`），音节中间才单字符。
 #[test]
 fn test_pinyin_cursor_maps_through_separator() {
     if !has_schemas() {
@@ -8398,17 +8400,14 @@ fn test_pinyin_cursor_maps_through_separator() {
     assert_eq!(action_text(&last).as_deref(), Some("ni'hao"));
     assert_eq!(action_caret(&last), Some(6), "初始光标在末尾");
 
-    // ni'ha|o → ni'h|ao：缓冲内左移一字符，显示位同步左移一位
-    assert_eq!(action_caret(&tap(&coord, VK_LEFT)), Some(5));
-    assert_eq!(action_caret(&tap(&coord, VK_LEFT)), Some(4));
-    // ni'h|ao → ni|'hao：缓冲从 "nih|ao" 退到 "ni|hao"，显示上跨过分隔符 '（4 → 2）
+    // 末尾是音节边界 → 整音节左跳：缓冲 "nihao|" → "ni|hao"，显示上落在分隔符 ' 之前（6 → 2）
     assert_eq!(action_caret(&tap(&coord, VK_LEFT)), Some(2));
 
     // Home / End 到两端
     assert_eq!(action_caret(&tap(&coord, VK_HOME)), Some(0));
     assert_eq!(action_caret(&tap(&coord, VK_END)), Some(6));
-    // 右移到边界后再右移：无位可动 → 吃掉，不透传给宿主
-    assert!(matches!(tap(&coord, VK_RIGHT), KeyAction::Consumed));
+    // 末尾再右：rime 回绕到第一个音节边界（ni|hao），不透传给宿主
+    assert_eq!(action_caret(&tap(&coord, VK_RIGHT)), Some(2));
 }
 
 /// 光标移动不改变组合区文本，也不重算候选（光标不参与引擎查询）。
