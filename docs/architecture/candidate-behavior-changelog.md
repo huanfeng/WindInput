@@ -27,6 +27,56 @@
 
 ---
 
+## 2026-11-20 · 直接辅助码：退格重打不再冒出连打时没有的生僻字（0.133）
+
+- 合入：待填（push 前回填）；范围：双拼方案，`direct` 开（连续模式与逃生口下的串尾直接辅助都受影响），
+  检索范围为智能档（出厂）
+- 变化：`ugho` 退格到 `ugh` 前：首选「焺」（h 是它的辅码，生僻）→ 后：与连打 `ugh` 相同，首选「生活」。
+  前缀快照缺失时的兜底解码只准入辅码命中项，同码位的常用字不在池里，生僻命中被检索范围当孤儿码位放行
+- 触发条件：前缀快照不可用（退格、光标中间编辑、前缀那一键被截断过）且同码位有常用字时
+- 回退旧行为：无（缺陷修复）
+- 钉住的测试：`wind-coordinator/src/handle_direct_aux.rs::real_data_tests::retyped_hits_respect_scope_filter`、
+  `wind-coordinator/tests/aux_continuous_e2e.rs::backspace_matches_typing`
+- 来源：内部（连续辅助码 P3 端到端）
+
+## 2026-11-20 · 双拼直接辅助码改为连续辅助码：辅码可打在任一音节后（0.133）
+
+- 合入：待填（push 前回填）；范围：双拼方案，且辅助码 `enabled` 与直接辅助码 `direct` 都开着、有辅码来源
+  （出厂两者都关，不开的用户无变化）
+- 变化：
+  - 辅码可打在长句**任一音节**之后，由引擎整句解码 前：只认串尾 → 后：`gokqk`（国 = ky）→ 国情、
+    `nirxhc`（你 = rx）→ 你好，上屏连辅码一起吃掉，词频与造词记在去辅码的拼音下（如 `nihao`）。
+    不打辅码的输入也走同一条解码，逐键首选与旧路径基本一致，偶有差异（附录「P3 界面序」：k=0 前缀上
+    每格 0～10 条，余下的「新更差」只有「我拍了 → 我了」一族）
+  - 串尾的「任一字」规则改为只认**末字** 前：`uidup` → 释读（释 = pl，首字）、`goqkk` → 国庆 国情（国 = ky）、
+    `uidupl` → 释读（2 位跨字）都提前 → 后：三者都不再提前；想定首字就把辅码打在它后面（`gokqk`）
+  - 单字 / 末字 **2 位**不再由串尾一步提前 前：`xlrn` → 像（像 = rn）、`jxlm` → 架 提前 → 后：不提前，按引擎自然序
+    （与万象 Pro 一致：它要补 `/` 才定位）；词组末字 2 位由引擎辅码整句给出（`goqkgd` → 国庆 首位，只出一次）
+  - 串尾末字 1 位保留：`uiduy` → 试读 释读、`goqkg` → 国庆、`goqkx` → 国情、单字 `xlr` → 像，照旧提前
+  - 编码栏出现辅码段：音节之间 `'`、辅码前一个空格，词中 `ni hn'hc`、串尾 `ni'hc hn`（与已发布的 `ui'du p`
+    同一形态）；分隔符是方案内部项 `[engine.aux_code] preedit_separator`（默认空格）
+  - 奇数键闪动：长句打到奇数键时，那一键可能被临时读成辅码（`qiddn` → 漆雕），再打一键恢复（`qiddnb` → 期待您）；
+    想强制按音节切分可手打 `'`
+  - 分段上屏：选中不带辅码的前缀候选（`nirxhc` 选单字「你」）后，其后的辅码字母**不吞掉**，剩余 `rxhc`
+    按普通输入重解
+  - 耗时：相对「旧路径 + 串尾直接辅助」整体每键均值 模型关 +14～+16%、模型开 +12～+14%，偶数长均值 +301～+367 µs、P95 +0.8～+1.0 ms
+    （附录「P3 端到端」，安静机器口径）；增量建图另立项
+- 已知限制：1 位辅码定点修复 72～76%（常见音节可选字多）；高频词的辅码读法闪动挡不住；多字残码补全不展开
+  模糊音、不接用户词；对偶声母本义读音提示（`hint_literal`）对辅码候选可能少一条
+- 触发条件：双拼 + `schema.pinyin.aux_code.enabled = true` + `direct = true`（全局或方案 `[engine.aux_code]`）+
+  有辅码来源；方案来源的反查索引未就绪时本键整条走旧路径、派后台构建
+- 回退旧行为：方案 `[engine.aux_code] continuous = false`（内部项，不进设置页；回到 0.124 起的串尾直接辅助，
+  除「退格重打时生僻命中被当孤儿码位放行」那条缺陷修复外逐字节不变）；或 `direct = false` 关掉直接辅助
+- 钉住的测试：`wind-coordinator/src/handle_direct_aux.rs::tests`（`continuous_off_is_byte_identical`、
+  `continuous_escape_hatch_restores_tail`、`continuous_mid_sentence_aux`、`tail_rules_in_continuous_are_last_char`、
+  `tail_dedup_with_engine_sentence`、`continuous_aux_preedit_shape`、`continuous_preedit_separator_setting`、
+  `partial_commit_leaves_aux_letters`、`learn_code_has_no_aux_letters`、`continuous_sn_in_sentence_pool`、
+  `real_data_tests::xiaohe_examples_continuous`）；`wind-engine` 的 `aux_preedit_mid_and_tail`、
+  `aux_candidate_consistent_*`、`ui_gate_blocks_failed_sn`、`aux_gate_dangling_*`、`gate_margin_guard`；
+  `wind-engine/tests/aux_code_sources.rs::continuous_and_preedit_separator_resolve`；
+  `wind-coordinator/tests/input_flow_no_disk_reads.rs::shuangpin_direct_aux_typing_reads_no_schema_files`
+- 来源：内部（连续辅助码 P3，设计 [`aux-code-continuous.md`](../design/aux-code-continuous.md) §5.4 盘点表）
+
 ## 2026-11-19 · 配对插入可改走 Unicode 按键注入（未发版）
 
 - 合入：待填（push 前回填）；范围：全部方案的配对插入（中文标点 / 英文配对四条路径共用）
