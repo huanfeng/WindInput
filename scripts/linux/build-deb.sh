@@ -70,6 +70,18 @@ if [ "$1" = configure ]; then
     # （已加载进 fcitx5 的旧 addon 需重启 fcitx5 或重新登录才换新。）
     pkill -x -f '/usr/lib/windinput/wind_input( --restarted)?' 2>/dev/null || true
     echo "清风输入法已安装。在 Fcitx5 配置的输入法列表里添加「清风输入法」即可使用（首次安装需注销并重新登录；升级只需重启 fcitx5：fcitx5 -rd）。"
+    # GNOME 的 Wayland 会话没有输入法窗口定位接口，候选窗要靠随包的 Shell 扩展才跟得准光标，
+    # 而扩展装完默认不启用（系统包碰不到用户的桌面配置）——这里只能提示。仅本机有 gnome-shell 时才说。
+    if command -v gnome-shell >/dev/null 2>&1; then
+        echo ""
+        echo "【GNOME 用户请注意】若使用 Wayland 会话（Ubuntu 默认），候选窗需要启用随包的 GNOME 扩展才会跟随光标："
+        echo "  1. 注销并重新登录（GNOME 只在登录时扫描新装的扩展）；"
+        echo "  2. 打开「清风输入法设置」→ 高级 → 系统集成，点「GNOME 候选窗定位扩展」的「启用」；"
+        echo "     或在终端执行（GNOME 45 及以上）：gnome-extensions enable windinput-caret@windinput"
+        echo "     （GNOME 42–44：gnome-extensions enable windinput-caret-legacy@windinput）；"
+        echo "  3. 再注销重登一次。"
+        echo "  X11 会话（Ubuntu on Xorg）不需要这一步。"
+    fi
 fi
 exit 0
 POSTINST
