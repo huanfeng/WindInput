@@ -323,7 +323,7 @@ impl Coordinator {
     /// 后 DLL 重拉，宿主看到的就是新的一页。
     pub(crate) fn uielement_page_snapshot(&self) -> UiElementPage {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let pp = self.per_page(state.active).max(1);
+        let pp = self.page_size(&state).max(1);
         // **只带当页**（Weasel / 微软拼音 / 搜狗同形状）。★★★ 2026-09-05 Dota 2 实测教训：
         // v3 曾改成「整条列表」（想让 CUAS 桥认出可翻页列表、开宿主候选盒），实测彻底反了——
         // ① Dota 读走全部 100 条却**并不据此开候选盒**（getter 日志 GetString 0..99 全读、
@@ -421,7 +421,7 @@ impl Coordinator {
 
     /// 把高亮移到当页**页内**下标（0..pageSize）；越界或当页无此条则不动。返回是否变化。
     fn set_highlight_page_local(&self, state: &mut State, local: usize) -> bool {
-        let pp = self.per_page(state.active).max(1);
+        let pp = self.page_size(state).max(1);
         if local >= pp {
             return false;
         }

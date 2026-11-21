@@ -3500,7 +3500,7 @@ impl Coordinator {
 
     /// 当前页候选切片的 [start, end) 区间
     pub(crate) fn page_range(&self, state: &State) -> (usize, usize) {
-        let pp = self.per_page(state.active);
+        let pp = self.page_size(state);
         let len = state.candidates.len();
         // 起点也夹到 len：页码万一越界（本应由 `clamp_candidate_view` 挡住），得到空页而不是
         // `start > end` 的切片 panic。页码在范围内时 start < len，行为不变。
@@ -6375,7 +6375,7 @@ impl Coordinator {
             // 出口（记统计、学后缀 / 网址历史）。出口按高亮取候选，故先把高亮移到被点的那条
             // （移动端不翻页、`idx` 可越出当页，页码一并换算）。
             Some(ModeKind::Url) | Some(ModeKind::Email) => {
-                let pp = self.per_page(state.active).max(1);
+                let pp = self.page_size(&state).max(1);
                 state.current_page = idx / pp;
                 state.selected_index = idx % pp;
                 if state.active == Some(ModeKind::Url) {

@@ -588,6 +588,7 @@ static REGISTRY: &[ConfigField] = &[
     f("input.cmdbar.enabled", Bool),
     f("input.cmdbar.candidate_prefix", Str),
     f("input.cmdbar.backspace_collapse_group", Bool),
+    f("input.cmdbar.group_per_page", Int),
     // 短语前缀列举（原 dict.phrase）
     f("input.phrase.prefix_match", Bool),
     f("input.phrase.min_prefix", Int),

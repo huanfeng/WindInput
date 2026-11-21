@@ -167,7 +167,7 @@ impl Coordinator {
         let grid_range = self.grid_visible_range(state);
         let (start, end) = grid_range.unwrap_or_else(|| self.page_range(state));
         let n_items = end - start;
-        let per_page = self.per_page(state.active);
+        let per_page = self.page_size(state);
         let grid_index = self.grid_index_of(state, grid_range);
         let highlight_row = state
             .grid_top

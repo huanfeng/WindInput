@@ -1275,6 +1275,8 @@ enabled = false
 candidate_prefix = "⚡"
 # 选中重码折叠的 $SS/$AA 组进入展开态后，Backspace 先退回折叠视图（不删码）；false = 直接删码。
 backspace_collapse_group = true
+# $SS/$AA 组展开后（候选全是该组成员）每页候选数；0 = 跟随 [ui.candidate] per_page。
+group_per_page = 0
 
 # 短语前缀列举（原 [dict.phrase]）
 [input.phrase]

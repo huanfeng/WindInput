@@ -430,7 +430,7 @@ impl Coordinator {
     /// 可见区覆盖的候选绝对下标范围 `[start, end)`；没展开返回 `None`。
     pub(crate) fn grid_visible_range(&self, state: &State) -> Option<(usize, usize)> {
         let top = state.grid_top?;
-        let pp = self.per_page(state.active);
+        let pp = self.page_size(state);
         let len = state.candidates.len();
         let start = (top * pp).min(len);
         let end = ((top + self.grid_rows()) * pp).min(len);
@@ -456,7 +456,7 @@ impl Coordinator {
     fn grid_index_span(&self, state: &State) -> usize {
         // 数字键 1–9、0 一共十个。
         const DIGITS: usize = 10;
-        let pp = self.per_page(state.active);
+        let pp = self.page_size(state);
         let top = state.grid_top.unwrap_or(state.current_page);
         let rows_below = (top + self.grid_rows())
             .saturating_sub(state.current_page)
@@ -584,7 +584,7 @@ impl Coordinator {
         }
         let rare_known = self.rare_known();
         if tab != GridTab::All {
-            let want = 2 * self.grid_rows() * self.per_page(state.active);
+            let want = 2 * self.grid_rows() * self.page_size(state);
             // 补加载最多两次：每次扩容都是整份重建且在按键线程上（TSF 那边同步等着）。分类稀疏
             // 时一路翻倍到上限要重建五次，而这时多半也凑不满——标签已保证当前列表里至少有一条。
             for _ in 0..2 {
@@ -649,7 +649,7 @@ impl Coordinator {
             .iter()
             .position(|c| c.text == anchor.text)
             .unwrap_or(0);
-        let pp = self.per_page(state.active);
+        let pp = self.page_size(state);
         // 直接写页码、不经 `turn_page`：切分类不是翻页，不该改变 `-` 键的翻页身份（同整句切换）。
         state.current_page = idx / pp;
         state.selected_index = idx % pp;
@@ -827,7 +827,7 @@ impl Coordinator {
         if start + flat >= end {
             return None;
         }
-        let pp = self.per_page(state.active);
+        let pp = self.page_size(state);
         let abs = start + flat;
         Some((abs / pp, abs % pp))
     }

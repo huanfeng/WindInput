@@ -26,9 +26,26 @@ impl Coordinator {
         }
     }
 
+    /// 当前候选列表实际使用的每页条数：候选全是同一批 `$SS`/`$AA` 组成员（展开视图）且配了
+    /// `input.cmdbar.group_per_page`(>0) 时用它，否则同 [`Self::per_page`]。
+    /// 混有非成员候选时一页内不能两种页长，仍按 `per_page`。
+    pub(crate) fn page_size(&self, state: &State) -> usize {
+        let gp = self.rt().config.input.cmdbar.group_per_page;
+        if gp > 0
+            && !state.candidates.is_empty()
+            && state
+                .candidates
+                .iter()
+                .all(|c| !c.is_group && !c.group_template.is_empty())
+        {
+            return gp;
+        }
+        self.per_page(state.active)
+    }
+
     /// 总页数（至少 1）
     pub(crate) fn total_pages(&self, state: &State) -> usize {
-        let pp = self.per_page(state.active);
+        let pp = self.page_size(state);
         state.candidates.len().div_ceil(pp).max(1)
     }
 

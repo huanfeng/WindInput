@@ -2431,7 +2431,7 @@ impl Coordinator {
         let cand = state.candidates.get(idx)?.clone();
         let word = cand.text.clone();
         let pos = self.reorder_positions(&state, idx);
-        let per_page = self.per_page(state.active);
+        let per_page = self.page_size(&state);
         let pin_slots = self.pin_at_slots(&state, idx);
         let scope = self.candidate_op_scope(&state);
         // 快捷输入的格式候选：判据独立于 candidate_op_scope（后者问「有没有词库落点」，

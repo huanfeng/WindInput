@@ -6071,7 +6071,7 @@ impl Coordinator {
     /// 开 / 关高亮项的悬停提示：悬停目标设为高亮项，已是则清掉。
     /// 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
     fn toggle_hover_tip(&self, state: &mut State) -> KeyAction {
-        let per_page = self.per_page(state.active);
+        let per_page = self.page_size(state);
         let flat = match state.grid_top {
             Some(top) => state.current_page.saturating_sub(top) * per_page,
             None => 0,
@@ -8032,7 +8032,7 @@ impl Coordinator {
         // 展开态推送可见区内的几页、逐行平铺（一行一页），见 `candidate_grid`。
         let grid_range = self.grid_visible_range(state);
         let (start, end) = grid_range.unwrap_or_else(|| self.page_range(state));
-        let per_page = self.per_page(state.active);
+        let per_page = self.page_size(state);
         // 展开态一帧有好几页候选，悬停气泡**只为鼠标下的那一格**渲染——每格各渲染一份会把
         // 持锁热路径上的开销放大成行数倍，而 UI 本来就只显示悬停那一格的气泡（悬停一变，
         // `mouse_hover` 就会重新下发）。
@@ -10018,7 +10018,7 @@ impl Coordinator {
         // 高亮落到窗口首条上：空格上屏的就是用户刚切到的那种解读。
         // 直接写页码而**不经 `turn_page`**：那个会置 `paged`（「这批候选被翻过页」），
         // 而切换整句不是翻页，`-` 键的翻页身份不该因此改变。
-        let per_page = self.per_page(state.active);
+        let per_page = self.page_size(state);
         state.current_page = first / per_page;
         state.selected_index = first % per_page;
         // 展开态下页码变了，可见区要跟上，否则高亮行落在可见区外（屏幕上高亮错格）。

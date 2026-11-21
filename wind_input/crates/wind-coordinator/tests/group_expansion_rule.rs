@@ -352,3 +352,44 @@ fn pinyin_abbrev_words_do_not_fold_group() {
         "同码简拼词必须还在: {got:?}"
     );
 }
+
+fn fixture_with_group_pp(tag: &str, body: &str, per_page: usize, group_pp: usize) -> Fixture {
+    let dir = make_data_dir(tag, body);
+    let mut c = Config::default();
+    c.schema.available = vec!["st".into()];
+    c.schema.active = "st".into();
+    c.input.default.chinese_mode = true;
+    c.ui.candidate.per_page = per_page;
+    c.input.cmdbar.group_per_page = group_pp;
+    let ov = std::env::temp_dir().join(format!("wind_grp_rule_ov_{tag}"));
+    let _ = std::fs::remove_dir_all(&ov);
+    std::fs::create_dir_all(&ov).unwrap();
+    let coord = Coordinator::new_headless_with_override(c, Some(&dir), Some(ov.clone()));
+    Fixture { coord, dir, ov }
+}
+
+const SS6: &str = r#"$SS("六项", "一", "二", "三", "四", "五", "六")"#;
+
+/// `group_per_page` 默认 0 = 跟随 `per_page`；配了之后只对组展开视图生效。
+#[test]
+fn group_per_page_follows_by_default_and_overrides_when_set() {
+    let body = format!("阿\ta\n{SS6}\tuu\n");
+    let f = fixture_with_group_pp("gpp_follow", &body, 3, 0);
+    type_keys(&f.coord, "uu");
+    assert_eq!(f.coord.debug_page_texts().len(), 3, "默认跟随 per_page");
+    assert_eq!(f.coord.debug_page_info().2, 2);
+
+    let f = fixture_with_group_pp("gpp_set", &body, 3, 5);
+    type_keys(&f.coord, "uu");
+    assert_eq!(
+        f.coord.debug_page_texts().len(),
+        5,
+        "展开组按 group_per_page 分页"
+    );
+    assert_eq!(f.coord.debug_page_info().2, 2);
+
+    // 非组候选（折回前的普通输入）不受影响。
+    let f = fixture_with_group_pp("gpp_plain", &body, 3, 5);
+    type_keys(&f.coord, "a");
+    assert!(f.coord.debug_page_texts().len() <= 3);
+}

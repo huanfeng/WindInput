@@ -5828,6 +5828,9 @@ pub struct CmdbarConfig {
     /// 选中折叠组进入展开态后，Backspace 先退回折叠视图（不删码）；关闭则直接删一个码。
     #[serde(default = "default_true")]
     pub backspace_collapse_group: bool,
+    /// `$SS`/`$AA` 组展开后（候选全是该组成员）每页候选数；0 = 跟随 `per_page`。
+    #[serde(default)]
+    pub group_per_page: usize,
 }
 
 fn default_candidate_prefix() -> String {
@@ -5840,6 +5843,7 @@ impl Default for CmdbarConfig {
             enabled: false,
             candidate_prefix: default_candidate_prefix(),
             backspace_collapse_group: true,
+            group_per_page: 0,
         }
     }
 }
