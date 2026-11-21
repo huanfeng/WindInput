@@ -92,7 +92,7 @@ if command -v gnome-shell >/dev/null 2>&1; then
     echo ""
     echo "【GNOME 用户请注意】若使用 Wayland 会话（Ubuntu 默认），候选窗需要启用随包的 GNOME 扩展才会跟随光标："
     echo "  1. 注销并重新登录（GNOME 只在登录时扫描新装的扩展）；"
-    echo "  2. 打开「清风输入法设置」→ 高级 → 系统集成，点「GNOME 候选窗定位扩展」的「启用」；"
+    echo "  2. 打开「清风输入法设置」，点窗口顶部黄色提示条里的「启用」；"
     echo "     或在终端执行（GNOME 45 及以上）：gnome-extensions enable windinput-caret@windinput"
     echo "     （GNOME 42–44：gnome-extensions enable windinput-caret-legacy@windinput）；"
     echo "  3. 再注销重登一次。"
