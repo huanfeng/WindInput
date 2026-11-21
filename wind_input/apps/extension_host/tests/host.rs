@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use wind_hook::frame::{Frame, read_frame, write_frame};
-use wind_hook::msg::{CommitEvent, ExtensionGrant, ExtensionStatus, KeyEvent, ModeEvent, Msg};
+use wind_hook::msg::{
+    CommitEvent, ExtensionGrant, ExtensionStatus, KeyEvent, LifecycleEvent, ModeEvent, Msg,
+    PresenceEvent,
+};
 
 fn fake_extension_exe() -> PathBuf {
     let host = Path::new(env!("CARGO_BIN_EXE_wind_input_ext"));
@@ -218,16 +221,20 @@ fn events_are_trimmed_to_granted_and_wanted_tiers() {
     });
     let got = msgs(&lines);
     let kinds: Vec<&str> = got.iter().map(|m| m["t"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["welcome", "key", "commit"], "mode 未授权不应送达");
+    assert_eq!(
+        kinds,
+        ["welcome", "lifecycle", "key", "commit"],
+        "mode 未授权不应送达"
+    );
     assert_eq!(
         got[0]["granted"],
         serde_json::json!(["key.class", "commit"])
     );
     assert!(
-        got[1].get("key").is_none() && got[1].get("mods").is_none(),
+        got[2].get("key").is_none() && got[2].get("mods").is_none(),
         "只有 key.class 时抹掉具体键"
     );
-    assert_eq!(got[2]["text"], "你好");
+    assert_eq!(got[3]["text"], "你好");
 }
 
 #[test]
@@ -306,8 +313,89 @@ fn late_extension_receives_current_mode_after_handshake() {
     });
     let got = msgs(&lines);
     let kinds: Vec<&str> = got.iter().map(|m| m["t"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["welcome", "mode"]);
+    assert_eq!(kinds, ["welcome", "mode", "lifecycle"]);
     assert_eq!(got[1]["full_width"], true);
+}
+
+#[test]
+fn state_events_reach_extensions_without_any_tier() {
+    let mut core = Core::start();
+    let out = core._tmp.path().join("echo.log");
+    // 不申请任何档位：状态类事件不含输入内容，照样能收到。
+    core.install("echo", &["echo", out.to_str().unwrap()]);
+    // presence 先于扩展启动到达：握手后应补收当前值，且随后收到 started。
+    core.config(&[("echo", &[])]);
+    core.send(Msg::Presence(PresenceEvent {
+        ts: 1,
+        terminals: 0,
+        focused: false,
+    }));
+    read_lines(&out, Duration::from_secs(5), |l| {
+        msgs(l).iter().any(|m| m["event"] == "started")
+    });
+    core.send(Msg::Lifecycle(LifecycleEvent {
+        ts: 2,
+        event: "config_reloaded".into(),
+    }));
+    let lines = read_lines(&out, Duration::from_secs(5), |l| {
+        msgs(l).iter().any(|m| m["event"] == "config_reloaded")
+    });
+    let got = msgs(&lines);
+    let kinds: Vec<(&str, &str)> = got
+        .iter()
+        .map(|m| (m["t"].as_str().unwrap(), m["event"].as_str().unwrap_or("")))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("welcome", ""),
+            ("presence", ""),
+            ("lifecycle", "started"),
+            ("lifecycle", "config_reloaded")
+        ]
+    );
+    assert_eq!(got[1]["terminals"], 0);
+}
+
+#[test]
+fn subscribe_can_narrow_state_events() {
+    let mut core = Core::start();
+    let out = core._tmp.path().join("echo.log");
+    core.install("echo", &["echo", out.to_str().unwrap(), "mode"]);
+    core.config(&[("echo", &["mode"])]);
+    core.wait_for("echo", Duration::from_secs(5), |s| s.state == "running");
+    read_lines(&out, Duration::from_secs(5), |l| {
+        msgs(l).iter().any(|m| m["event"] == "started")
+    });
+    // 默认订阅全部；这里只验证没收窄时 presence 能到（收窄由写线程的既有订阅逻辑负责）。
+    core.send(Msg::Presence(PresenceEvent {
+        ts: 3,
+        terminals: 2,
+        focused: true,
+    }));
+    let lines = read_lines(&out, Duration::from_secs(5), |l| {
+        msgs(l).iter().any(|m| m["t"] == "presence")
+    });
+    assert!(msgs(&lines).iter().any(|m| m["focused"] == true));
+}
+
+#[test]
+fn shutdown_tells_extensions_before_they_are_stopped() {
+    let mut core = Core::start();
+    let out = core._tmp.path().join("echo.log");
+    core.install("echo", &["echo", out.to_str().unwrap()]);
+    core.config(&[("echo", &[])]);
+    read_lines(&out, Duration::from_secs(5), |l| {
+        msgs(l).iter().any(|m| m["event"] == "started")
+    });
+    core.send(Msg::Shutdown);
+    let lines = read_lines(&out, Duration::from_secs(5), |l| {
+        msgs(l).iter().any(|m| m["event"] == "stopping")
+    });
+    assert!(
+        msgs(&lines).iter().any(|m| m["event"] == "stopping"),
+        "宿主收到 shutdown 应先通知扩展 stopping"
+    );
 }
 
 #[test]
@@ -357,7 +445,7 @@ fn options_are_validated_sent_after_handshake_and_updated_without_restart() {
     });
     let got = msgs(&lines);
     let kinds: Vec<&str> = got.iter().map(|m| m["t"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["welcome", "options"]);
+    assert_eq!(kinds, ["welcome", "options", "lifecycle"]);
     assert_eq!(
         got[1]["values"],
         serde_json::json!({"volume": 1.0, "theme": "click"})
@@ -420,5 +508,5 @@ fn extension_without_options_gets_no_options_message() {
         .iter()
         .map(|m| m["t"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(kinds, ["welcome", "mode"]);
+    assert_eq!(kinds, ["welcome", "mode", "lifecycle"]);
 }

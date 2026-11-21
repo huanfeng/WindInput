@@ -37,6 +37,10 @@ pub enum Msg {
     Composition(CompositionEvent),
     Candidates(CandidatesEvent),
     Commit(CommitEvent),
+    /// 终端在线与焦点状态。不含输入内容，不受授权档位管。
+    Presence(PresenceEvent),
+    /// 输入法服务的生命周期。不含输入内容，不受授权档位管。
+    Lifecycle(LifecycleEvent),
 
     // ── 控制（核心 ↔ 宿主） ──
     /// 核心 → 宿主：启用的扩展与各自的授权。启动时与配置变更时下发，宿主据此增量启停。
@@ -71,6 +75,8 @@ impl Msg {
             Msg::Composition(_) => Some("composition"),
             Msg::Candidates(_) => Some("candidates"),
             Msg::Commit(_) => Some("commit"),
+            Msg::Presence(_) => Some("presence"),
+            Msg::Lifecycle(_) => Some("lifecycle"),
             _ => None,
         }
     }
@@ -150,6 +156,38 @@ pub struct CommitEvent {
     pub rect: Option<[i32; 4]>,
 }
 
+/// 终端在线与焦点状态，变化时发一次，握手后补发当前值。
+///
+/// `terminals == 0`：没有任何应用在使用输入法（都关了、或切到了别的输入法）；
+/// `focused == false`：有终端在线，但没有输入焦点（桌面、锁屏、焦点不在可编辑控件里）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PresenceEvent {
+    pub ts: u64,
+    /// 当前连着核心的终端（宿主应用进程）数。
+    #[serde(default)]
+    pub terminals: u32,
+    /// 是否有终端正持有可编辑的输入焦点。
+    #[serde(default)]
+    pub focused: bool,
+}
+
+/// 生命周期事件名。
+pub mod lifecycle {
+    /// 扩展随核心（重新）启动：握手后发给每个扩展。
+    pub const STARTED: &str = "started";
+    /// 核心即将停止（重启、退出）：扩展随后会被结束，可借此收尾。尽力而为，核心崩溃时不会发。
+    pub const STOPPING: &str = "stopping";
+    /// 配置已热重载。扩展不重启，选项变化另有 `options` 消息。
+    pub const CONFIG_RELOADED: &str = "config_reloaded";
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleEvent {
+    pub ts: u64,
+    /// 见 [`lifecycle`]。
+    pub event: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionGrant {
     pub id: String,
@@ -196,6 +234,28 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn presence_and_lifecycle_are_events() {
+        let p = Msg::Presence(PresenceEvent {
+            ts: 1,
+            terminals: 0,
+            focused: false,
+        });
+        let l = Msg::Lifecycle(LifecycleEvent {
+            ts: 2,
+            event: lifecycle::STOPPING.into(),
+        });
+        assert_eq!(p.event_kind(), Some("presence"));
+        assert_eq!(l.event_kind(), Some("lifecycle"));
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"t":"presence","ts":1,"terminals":0,"focused":false}"#
+        );
+        let back: Msg = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, p);
     }
 
     #[test]

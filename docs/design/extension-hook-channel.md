@@ -162,6 +162,22 @@ key 事件带具体按键，敏感度等同键盘记录器。以下全部是**�
   产出随中英、Shift、标点设置变化，按键位配音效要的是物理键。只有 `key.class` 档时，`key` 字段省略。
 - 键名由 VK 推导：三平台前端送到核心的 `keyCode` 都已统一换算为 Windows VK，`scanCode`
   在 macOS/Linux 恒为 0，不可用。
+- 状态类事件（不含输入内容，不受授权档位管，任何已启用的扩展都能收）：
+
+  ```jsonc
+  {"t":"presence","seq":6,"ts":140,"terminals":0,"focused":false}
+  {"t":"lifecycle","seq":7,"ts":150,"event":"started"}     // started / stopping / config_reloaded
+  ```
+
+  - `presence`：`terminals` 为连着核心的终端数（push 客户端），`focused` 为 `ime_active && has_edit_context`。
+    服务进程的扩展监护线程约每 200ms 调协调器的 `hook_presence`，只在「有无终端 / 有无焦点」变化时发；
+    不在每个焦点处理函数里埋点，免得漏掉连接断开这类没有处理函数的变化。宿主缓存最近一条，握手后补发。
+  - `lifecycle.started`：宿主在握手、补发状态、选项之后发给每个扩展；服务重启时旧宿主连同扩展一起结束，
+    新服务拉起全新的一批，所以「重启」对扩展就是新握手 + `started`，不需要单独的事件。
+  - `lifecycle.stopping`：宿主收到 `shutdown`（服务重启/退出，或扩展全部停用）时先广播再收走扩展；
+    队列关闭时会写完已入队消息，扩展有宽限期收尾。崩溃或被强杀时发不出。
+  - `lifecycle.config_reloaded`：核心配置热重载后发（与 `[extensions]` 是否变化无关）。
+  - 不加新档位：位图已用 7/8 位，且这些事件不含输入内容。代价是用户无法单独关掉它们，可接受。
 - `key` 只表示**按下**，没有抬起事件（理由见 §8.2）。
 - `key.handled`：输入法是否吃掉了这个键。
 - `key.observed`：该键输入法本不处理，是前端为扩展额外上报的旁路通知（见 §8.1）。

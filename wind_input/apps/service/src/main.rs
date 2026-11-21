@@ -440,11 +440,19 @@ fn main() {
     let coord_for_exit = coordinator.clone();
     coordinator.install_exit_flush();
     // 扩展程序：按 `[extensions]` 配置拉起扩展宿主，配置热重载时增量调整（注册即按当前值生效）。
-    let extensions = extensions::Extensions::start(coordinator.hook_tap(), {
-        let c = coordinator.clone();
-        Box::new(move || c.hook_changed())
-    });
+    let extensions = extensions::Extensions::start(
+        coordinator.hook_tap(),
+        {
+            let c = coordinator.clone();
+            Box::new(move || c.hook_changed())
+        },
+        {
+            let c = coordinator.clone();
+            Box::new(move || c.hook_presence())
+        },
+    );
     let extensions_for_rpc = extensions.clone();
+    let extensions_for_exit = extensions.clone();
     coordinator.set_extensions_config_hook(Box::new(move |c| extensions.apply_config(c)));
     deferred.set_ready(coordinator);
 
@@ -588,6 +596,7 @@ fn main() {
 
         if RESTART.load(Ordering::SeqCst) {
             info!("Restart requested, relaunching service...");
+            extensions_for_exit.stop();
             coord_for_exit.flush_user_data_before_exit();
             drop(_singleton_guard);
             relaunch_self();
@@ -602,6 +611,7 @@ fn main() {
     match restart_rx.recv() {
         Ok(()) => {
             info!("Restart requested, relaunching service...");
+            extensions_for_exit.stop();
             coord_for_exit.flush_user_data_before_exit();
             // 先释放单例 Named Mutex（关闭句柄），让新实例可获取所有权，避免竞争
             drop(_singleton_guard);

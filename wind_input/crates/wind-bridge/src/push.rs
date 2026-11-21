@@ -301,6 +301,11 @@ impl PushServer {
         self.gained_token.load(Ordering::Relaxed)
     }
 
+    /// 已连接的客户端（宿主应用进程）数。
+    pub fn client_count(&self) -> usize {
+        self.clients.lock().unwrap().len()
+    }
+
     /// 是否有已连接的 TSF 客户端（用于决定是否经 IPC 让宿主执行前台操作）
     pub fn has_clients(&self) -> bool {
         !self.clients.lock().unwrap().is_empty()

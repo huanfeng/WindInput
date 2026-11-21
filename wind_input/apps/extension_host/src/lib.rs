@@ -23,9 +23,10 @@ use wind_hook::PROTOCOL_VERSION;
 use wind_hook::backoff::{Backoff, Decision};
 use wind_hook::frame::{Frame, read_frame, write_frame};
 use wind_hook::manifest::{self, Manifest};
-use wind_hook::msg::{ExtensionGrant, ExtensionStatus, Msg};
+use wind_hook::msg::{ExtensionGrant, ExtensionStatus, LifecycleEvent, Msg, lifecycle};
 use wind_hook::options;
 use wind_hook::queue::{DropOldest, Pop};
+use wind_hook::tap::now_ms;
 use wind_hook::tier::{Grants, trim};
 
 /// 每个扩展的待写队列长度。按键再快每秒也就几十条，几百条够扛住一两秒的卡顿。
@@ -212,9 +213,18 @@ pub struct Host {
     /// 核心最近发来的模式事件。模式不常变，后连上（或重启后）的扩展握手完立即补发一份，
     /// 否则它要等到用户下次切中英才知道当前状态。
     last_mode: Arc<Mutex<Option<Msg>>>,
+    /// 核心最近发来的终端在线/焦点状态，补发理由同 `last_mode`。
+    last_presence: Arc<Mutex<Option<Msg>>>,
     stop: AtomicBool,
     #[cfg(windows)]
     job: Option<job::Job>,
+}
+
+fn lifecycle_msg(event: &str) -> Msg {
+    Msg::Lifecycle(LifecycleEvent {
+        ts: now_ms(),
+        event: event.into(),
+    })
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -228,6 +238,7 @@ impl Host {
             out: Mutex::new(out),
             slots: Mutex::new(BTreeMap::new()),
             last_mode: Arc::new(Mutex::new(None)),
+            last_presence: Arc::new(Mutex::new(None)),
             stop: AtomicBool::new(false),
             #[cfg(windows)]
             job: job::Job::kill_on_close()
@@ -240,26 +251,43 @@ impl Host {
     fn on_core(&self, msg: Msg) -> bool {
         match msg {
             Msg::Config { extensions } => self.apply_config(extensions),
-            Msg::Shutdown => return false,
+            Msg::Shutdown => {
+                // 先告知再收走：队列关闭时会把已入队的消息写完，扩展有机会收尾。
+                self.broadcast_keep(lifecycle_msg(lifecycle::STOPPING));
+                return false;
+            }
             Msg::Key(_)
             | Msg::Mode(_)
             | Msg::Composition(_)
             | Msg::Candidates(_)
-            | Msg::Commit(_) => self.dispatch(&msg),
+            | Msg::Commit(_)
+            | Msg::Presence(_)
+            | Msg::Lifecycle(_) => self.dispatch(&msg),
             _ => {}
         }
         true
     }
 
     fn dispatch(&self, msg: &Msg) {
-        if matches!(msg, Msg::Mode(_)) {
-            *lock(&self.last_mode) = Some(msg.clone());
+        match msg {
+            Msg::Mode(_) => *lock(&self.last_mode) = Some(msg.clone()),
+            Msg::Presence(_) => *lock(&self.last_presence) = Some(msg.clone()),
+            _ => {}
         }
         for slot in lock(&self.slots).values() {
             if let Some(run) = &slot.run
                 && trim(msg, run.link.config_grants()).is_some()
             {
                 run.link.queue.push(msg.clone());
+            }
+        }
+    }
+
+    /// 给全部运行中的扩展发一条不可淘汰的状态消息（经写线程按授权/订阅过滤）。
+    fn broadcast_keep(&self, msg: Msg) {
+        for slot in lock(&self.slots).values() {
+            if let Some(run) = &slot.run {
+                run.link.queue.push_keep(msg.clone());
             }
         }
     }
@@ -455,6 +483,7 @@ impl Host {
             self.opts.core_version.clone(),
             m.protocol.clone(),
             self.last_mode.clone(),
+            self.last_presence.clone(),
         );
         Ok(Running { child, link })
     }
@@ -590,6 +619,7 @@ fn spawn_reader(
     core_version: String,
     manifest_protocol: Vec<u32>,
     last_mode: Arc<Mutex<Option<Msg>>>,
+    last_presence: Arc<Mutex<Option<Msg>>>,
 ) {
     let id = id.to_string();
     let _ = std::thread::Builder::new()
@@ -626,7 +656,12 @@ fn spawn_reader(
                         if let Some(m) = lock(&last_mode).clone() {
                             link.queue.push_keep(m);
                         }
+                        if let Some(m) = lock(&last_presence).clone() {
+                            link.queue.push_keep(m);
+                        }
                         link.send_options();
+                        // 最后发 started：此时扩展已拿到授权、当前状态与选项，可以开始工作。
+                        link.queue.push_keep(lifecycle_msg(lifecycle::STARTED));
                     }
                     Msg::Subscribe { events } => {
                         *lock(&link.subscribed) = Some(events.into_iter().collect());

@@ -144,6 +144,8 @@ pub fn trim(msg: &Msg, grants: Grants) -> Option<Msg> {
         Msg::Composition(_) => grants.has(Tier::Composition).then(|| msg.clone()),
         Msg::Candidates(_) => grants.has(Tier::Candidates).then(|| msg.clone()),
         Msg::Commit(_) => grants.has(Tier::Commit).then(|| msg.clone()),
+        // 状态类事件不含输入内容，任何已启用的扩展都能收（扩展自行用 `subscribe` 收窄）。
+        Msg::Presence(_) | Msg::Lifecycle(_) => Some(msg.clone()),
         _ => Some(msg.clone()),
     }
 }
@@ -220,6 +222,16 @@ mod tests {
         let g = Grants::NONE.with(Tier::KeyDetail).with(Tier::Mode);
         assert_eq!(trim(&commit, g), None);
         assert_eq!(trim(&key(), Grants::NONE.with(Tier::Mode)), None);
+    }
+
+    #[test]
+    fn state_events_need_no_tier() {
+        let p = Msg::Presence(crate::msg::PresenceEvent {
+            ts: 1,
+            terminals: 2,
+            focused: true,
+        });
+        assert_eq!(trim(&p, Grants::NONE), Some(p));
     }
 
     #[test]

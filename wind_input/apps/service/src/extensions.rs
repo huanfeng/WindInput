@@ -75,7 +75,11 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Extensions {
-    pub fn start(tap: Arc<Tap>, on_hook_changed: Box<dyn Fn() + Send + Sync>) -> Arc<Extensions> {
+    pub fn start(
+        tap: Arc<Tap>,
+        on_hook_changed: Box<dyn Fn() + Send + Sync>,
+        on_poll: Box<dyn Fn() + Send + Sync>,
+    ) -> Arc<Extensions> {
         let rx = tap.connect(Grants::NONE, TAP_CAP);
         let p = Arc::new(Extensions {
             tap,
@@ -111,11 +115,38 @@ impl Extensions {
                 .spawn(move || {
                     loop {
                         p.tick(Instant::now());
+                        on_poll();
                         std::thread::sleep(TICK);
                     }
                 });
         }
         p
+    }
+
+    /// 服务即将重启或退出：关宿主，扩展会先收到 `lifecycle: stopping`（宿主发），有机会收尾。
+    /// 最多等 `STOP_GRACE`，宿主退出即返回；没有宿主时立即返回。
+    pub fn stop(&self) {
+        let host = {
+            let mut st = lock(&self.state);
+            st.want.clear();
+            st.next_start = None;
+            st.host.take()
+        };
+        let Some(mut h) = host else {
+            return;
+        };
+        // 宿主收到 shutdown 会先向各扩展发 `lifecycle: stopping`，再收走它们。
+        h.queue.push_keep(Msg::Shutdown);
+        h.queue.close();
+        let deadline = Instant::now() + STOP_GRACE;
+        while Instant::now() < deadline {
+            if matches!(h.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = h.child.kill();
+        let _ = h.child.wait();
     }
 
     /// 配置变化（含启动时的初值）。授权有变时通知协调器（放锁之后）。

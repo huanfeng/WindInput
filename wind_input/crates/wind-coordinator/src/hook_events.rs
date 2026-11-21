@@ -16,7 +16,9 @@
 use std::sync::Arc;
 
 use wind_bridge::handler::{KeyAction, KeyEventData};
-use wind_hook::msg::{CommitEvent, KeyEvent, ModeEvent, Msg};
+use wind_hook::msg::{
+    CommitEvent, KeyEvent, LifecycleEvent, ModeEvent, Msg, PresenceEvent, lifecycle,
+};
 use wind_hook::tap::{Tap, now_ms};
 use wind_hook::tier::Tier;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN};
@@ -33,6 +35,8 @@ pub(crate) struct HookSession {
     sid: u64,
     next_sid: u64,
     last_mode: Option<(bool, bool, String)>,
+    /// 上次发出的 (有终端在线, 有输入焦点)；终端数本身的增减不重发。
+    last_presence: Option<(bool, bool)>,
 }
 
 impl HookSession {
@@ -115,6 +119,45 @@ impl Coordinator {
         if let Some(f) = self.extensions_config_hook.get() {
             f(&self.rt().config.extensions);
         }
+        self.hook_lifecycle(lifecycle::CONFIG_RELOADED);
+    }
+
+    /// 生命周期事件。不含输入内容，没有扩展在跑时不构造。
+    pub(crate) fn hook_lifecycle(&self, event: &str) {
+        if self.hook.grants().is_empty() {
+            return;
+        }
+        self.hook.emit(Msg::Lifecycle(LifecycleEvent {
+            ts: now_ms(),
+            event: event.into(),
+        }));
+    }
+
+    /// 终端在线与焦点状态，变化时发一条。由服务进程的扩展监护线程周期调用（约 200ms）：
+    /// 连接增减、焦点与激活变化散在多处，轮询比在每处埋点更不易漏，延迟对扩展足够。
+    /// 没有扩展在跑时只读一次原子量。
+    pub fn hook_presence(&self) {
+        if self.hook.grants().is_empty() {
+            return;
+        }
+        let terminals = self.push_server.client_count();
+        let focused = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.ime_active && s.has_edit_context
+        };
+        let cur = (terminals > 0, focused);
+        {
+            let mut s = self.hook_session.lock().unwrap_or_else(|e| e.into_inner());
+            if s.last_presence == Some(cur) {
+                return;
+            }
+            s.last_presence = Some(cur);
+        }
+        self.hook.emit(Msg::Presence(PresenceEvent {
+            ts: now_ms(),
+            terminals: terminals as u32,
+            focused,
+        }));
     }
 
     /// 焦点上下文：(是否密码框, 应用进程名)。只取 `last_input_diag` 一把锁，且它是叶子锁
@@ -212,6 +255,10 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .last_mode = None;
+        self.hook_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_presence = None;
         let _ = self.build_status();
         #[cfg(windows)]
         self.push_extension_key_observe_config(0);
@@ -379,6 +426,64 @@ mod tests {
             "空闲时逗号直接上屏中文标点，不属于任何组合: {got:?}"
         );
         assert_ne!(keys[1].sid, 0, "字母开启组合会话");
+    }
+
+    #[test]
+    fn presence_is_emitted_on_change_only() {
+        let c = coord("presence");
+        let rx = connect(&c, &["mode"]);
+        c.hook_presence();
+        c.hook_presence();
+        let got = drain(&rx);
+        assert!(
+            matches!(got.as_slice(), [Msg::Presence(p)] if p.terminals == 0 && !p.focused),
+            "无终端、无焦点；重复轮询不重发: {got:?}"
+        );
+        {
+            let mut s = c.state.lock().unwrap();
+            s.ime_active = true;
+            s.has_edit_context = true;
+        }
+        c.hook_presence();
+        let got = drain(&rx);
+        assert!(
+            matches!(got.as_slice(), [Msg::Presence(p)] if p.focused),
+            "{got:?}"
+        );
+        c.state.lock().unwrap().has_edit_context = false;
+        c.hook_presence();
+        assert!(matches!(
+            drain(&rx).as_slice(),
+            [Msg::Presence(p)] if !p.focused
+        ));
+    }
+
+    #[test]
+    fn hook_changed_replays_presence() {
+        let c = coord("presence_replay");
+        let rx = connect(&c, &["mode"]);
+        c.hook_presence();
+        drain(&rx);
+        c.hook_changed();
+        c.hook_presence();
+        let n = drain(&rx)
+            .iter()
+            .filter(|m| matches!(m, Msg::Presence(_)))
+            .count();
+        assert_eq!(n, 1, "宿主重新就绪后应再发一次当前状态");
+    }
+
+    #[test]
+    fn config_reload_emits_lifecycle_only_when_extensions_run() {
+        let c = coord("lifecycle");
+        c.notify_extensions_config();
+        let rx = connect(&c, &["mode"]);
+        c.notify_extensions_config();
+        let got = drain(&rx);
+        assert!(
+            matches!(got.as_slice(), [Msg::Lifecycle(l)] if l.event == "config_reloaded"),
+            "{got:?}"
+        );
     }
 
     #[test]
