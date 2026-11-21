@@ -19,8 +19,8 @@ const VK_LSHIFT: u32 = 0xA0;
 const VK_RSHIFT: u32 = 0xA1;
 
 fn data_dir() -> PathBuf {
-    // 相对测试 crate（crates/wind-coordinator）上两级 = wind_input/，build_dev 词库在那里。
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build_dev/data")
+    // 相对测试 crate（crates/wind-coordinator）上三级 = 仓库根，build_dev 词库在那里。
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
 fn has_data() -> bool {
