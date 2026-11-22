@@ -721,7 +721,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "correction.conflictExample" => correction_conflict_example(params),
 
         // ── theme.* ──────────────────────────────────────────
-        "theme.list" => h.web_theme_list(),
+        "theme.list" => h.web_theme_list(params),
         "theme.resolved" => Ok(serde_json::to_value(h.theme_follow_values())?),
         "theme.accent" => {
             let name = params
@@ -4621,12 +4621,21 @@ pub trait WebDataRpc: WebDataHost {
         }))
     }
 
-    fn web_theme_list(&self) -> anyhow::Result<Value> {
+    /// `theme.list`。`skin`（默认假）为真时才补 `skin` / `animated`：它们要对每个主题做一次
+    /// 完整解析（占整条 RPC 的九成），而设置端启动时列表是必取项、这两项只有「主题信息」
+    /// 才用。`id` 非空时只回那一项。
+    fn web_theme_list(&self, params: &Value) -> anyhow::Result<Value> {
+        let with_skin = params.get("skin").and_then(Value::as_bool).unwrap_or(false);
+        let only = params
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
         // 复用右键菜单的 list_themes_full 顺序，保证与菜单一致 (#5/主题)。
         let dirs = self.theme_search_dirs();
         let out: Vec<Value> = self
             .list_themes_full()
             .into_iter()
+            .filter(|(id, _, _)| only.is_none_or(|o| o == id))
             .map(|(id, display, builtin)| {
                 let meta = wind_theme::read_meta(&dirs, &id);
                 let dir = wind_theme::theme::find_theme_dir(&dirs, &id);
@@ -4638,10 +4647,7 @@ pub trait WebDataRpc: WebDataHost {
                     .and_then(|t| t.parse::<toml::Value>().ok())
                     .and_then(|v| v.get("base")?.as_str().map(str::to_string))
                     .unwrap_or_default();
-                let (skin, animated) = wind_theme::load_resolved_dirs(&dirs, &id, false)
-                    .map(|t| theme_skin_summary(&t))
-                    .unwrap_or_default();
-                json!({
+                let mut item = json!({
                     "name": id,
                     "display_name": display,
                     "author": meta.as_ref().map(|m| m.author.clone()).unwrap_or_default(),
@@ -4653,9 +4659,15 @@ pub trait WebDataRpc: WebDataHost {
                         .map(|d| d.display().to_string())
                         .unwrap_or_default(),
                     "base": base,
-                    "skin": skin,
-                    "animated": animated,
-                })
+                });
+                if with_skin {
+                    let (skin, animated) = wind_theme::load_resolved_dirs(&dirs, &id, false)
+                        .map(|t| theme_skin_summary(&t))
+                        .unwrap_or_default();
+                    item["skin"] = json!(skin);
+                    item["animated"] = json!(animated);
+                }
+                item
             })
             .collect();
         Ok(json!(out))
@@ -11776,7 +11788,7 @@ mod theme_list_tests {
             wind_config::Config::default(),
             Some(&data_dir()),
         );
-        let list = c.web_theme_list().unwrap();
+        let list = c.web_theme_list(&json!({})).unwrap();
         let def = list
             .as_array()
             .unwrap()
@@ -11786,8 +11798,27 @@ mod theme_list_tests {
         assert_eq!(def["builtin"], true);
         assert_eq!(def["dir"], "");
         assert_eq!(def["base"], "_qingfeng");
-        assert_eq!(def["skin"], false);
-        assert_eq!(def["animated"], false);
+        // 默认不算皮肤概要（要整份解析主题，拖慢设置端启动）：键不在。
+        assert!(def.get("skin").is_none() && def.get("animated").is_none());
+    }
+
+    /// `skin:true` 补皮肤字段；`id` 只回那一项。
+    #[test]
+    fn list_skin_flag_and_id_filter() {
+        let c = wind_coordinator::Coordinator::new_headless(
+            wind_config::Config::default(),
+            Some(&data_dir()),
+        );
+        let one = c
+            .web_theme_list(&json!({ "skin": true, "id": "default" }))
+            .unwrap();
+        let arr = one.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "default");
+        assert_eq!(arr[0]["skin"], false);
+        assert_eq!(arr[0]["animated"], false);
+        let all = c.web_theme_list(&json!({})).unwrap();
+        assert!(all.as_array().unwrap().len() > 1);
     }
 
     #[test]

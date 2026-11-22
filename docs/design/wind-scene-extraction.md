@@ -113,7 +113,7 @@
 回执：`{ ok: true, path, width, height, hash, cached }`（`path` 是缓存里的 PNG，设置端同机直接读）
 或 `{ ok: false, error }`。
 
-`theme.list` 每项：`{ name, display_name, author, version, builtin, dir, base, skin, animated }`——`dir` 只给用户主题（内置为空串），`base` 是主题文件自己写的继承名（没写为空串），`skin` 是否带异形皮肤，`animated` 皮肤是否会动（装饰写了事件状态机，或框图 / 装饰图含 srcset 各档的文件头是动画格式；只读头部，GIF 一律按动图算）。
+`theme.list` 每项：`{ name, display_name, author, version, builtin, dir, base }`，传 `skin: true` 才补 `skin`、`animated`（要整份解析主题，占整条 RPC 九成，设置端启动不取；设置端「主题信息」按需取），传 `id` 只回那一项——`dir` 只给用户主题（内置为空串），`base` 是主题文件自己写的继承名（没写为空串），`skin` 是否带异形皮肤，`animated` 皮肤是否会动（装饰写了事件状态机，或框图 / 装饰图含 srcset 各档的文件头是动画格式；只读头部，GIF 一律按动图算）。
 
 ### 7.3 缓存
 
