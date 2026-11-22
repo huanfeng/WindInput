@@ -17,30 +17,30 @@ type Layers = [Option<String>; 2];
 // ───────────────────────── 文件形态（serde） ─────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct RawFile {
+pub(crate) struct RawFile {
     #[serde(default)]
-    pages: Vec<RawPage>,
+    pub(crate) pages: Vec<RawPage>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawPage {
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RawPage {
     #[serde(default)]
-    id: String,
+    pub(crate) id: String,
     #[serde(default)]
-    name: String,
+    pub(crate) name: String,
     /// 基础层画布。**`None` 与 `Some(vec![])` 语义不同**——前者是「用户没写这一项」
     /// （只打补丁），后者是「显式给了一张空画布」（整面替换成空）。用户覆盖的三态
     /// 判据就架在这个区别上，见 [`SoftKeyboardTable::merge_user`]。
-    rows: Option<Vec<String>>,
+    pub(crate) rows: Option<Vec<String>>,
     /// 第二层画布。省略即第二层整层为空。
-    rows_shift: Option<Vec<String>>,
+    pub(crate) rows_shift: Option<Vec<String>>,
     /// 单键补丁，压在画布之上。键名形如 `q` / `shift+q`。
     #[serde(default)]
-    keys: BTreeMap<String, String>,
+    pub(crate) keys: BTreeMap<String, String>,
     /// 这一面**发送按键**而不是直接上屏符号。
     ///
     /// `None` = 用户没写这一项（合并时沿用出厂值），与 `Some(false)` 不同。
-    send_keys: Option<bool>,
+    pub(crate) send_keys: Option<bool>,
 }
 
 // ───────────────────────── 运行时形态 ─────────────────────────
@@ -281,6 +281,14 @@ impl SoftKeyboardTable {
     /// 程序不回写——写侧纪律见设计文档 §2.2，破坏它就是「整体替换 ⊕ 稀疏 diff」的数据丢失。
     pub fn merge_user(&mut self, toml_text: &str) -> Result<(), toml::de::Error> {
         let raw: RawFile = toml::from_str(toml_text)?;
+        self.merge_raw(&raw, false);
+        Ok(())
+    }
+
+    /// [`Self::merge_user`] 的本体。`keep_empty` 只给编辑视图用（[`crate::admin`]）：
+    /// 用户刚新建、还没填任何键的面在运行时不该出现在标签行里，但编辑器必须看得见它，
+    /// 否则「新建 → 应用 → 重开对话框」那张空面就凭空消失了。
+    pub(crate) fn merge_raw(&mut self, raw: &RawFile, keep_empty: bool) {
         for rp in &raw.pages {
             if rp.id.trim().is_empty() {
                 warn!("软键盘用户覆盖: 跳过一个没有 id 的面");
@@ -310,7 +318,7 @@ impl SoftKeyboardTable {
                 }
                 None => {
                     let page = Page::from_raw(rp);
-                    if page.is_empty() {
+                    if page.is_empty() && !keep_empty {
                         warn!("软键盘用户覆盖: 跳过新增面 {} —— 一个键位都没有映射", rp.id);
                         continue;
                     }
@@ -318,7 +326,6 @@ impl SoftKeyboardTable {
                 }
             }
         }
-        Ok(())
     }
 
     /// 代码内置的兜底表（出厂文件缺失/损坏时用）。

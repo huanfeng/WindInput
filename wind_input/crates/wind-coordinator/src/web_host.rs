@@ -156,6 +156,15 @@ pub trait WebDataHost {
     /// 兼容规则（`compat.toml`）被设置端写过之后调：重载规则表并让前台进程立即生效。
     fn reload_compat(&self);
 
+    /// 软键盘编辑视图（设置 › 输入 › 软键盘）：`{ pages: [...] }`。
+    fn softkeyboard_view(&self) -> anyhow::Result<serde_json::Value>;
+
+    /// 软键盘整批编辑：稀疏写用户层并热重载，返回新视图。
+    fn softkeyboard_apply(
+        &self,
+        ops: &[wind_softkeyboard::admin::Op],
+    ) -> anyhow::Result<serde_json::Value>;
+
     /// 清理压在某个类上的冗余逐条覆盖（方向与当前默认相同的那些）。
     fn charset_clear_redundant(
         &self,
@@ -421,6 +430,15 @@ impl WebDataHost for Coordinator {
     }
     fn reload_compat(&self) {
         Coordinator::reload_compat_and_refresh(self)
+    }
+    fn softkeyboard_view(&self) -> anyhow::Result<serde_json::Value> {
+        Coordinator::softkeyboard_editor_view(self)
+    }
+    fn softkeyboard_apply(
+        &self,
+        ops: &[wind_softkeyboard::admin::Op],
+    ) -> anyhow::Result<serde_json::Value> {
+        Coordinator::softkeyboard_editor_apply(self, ops)
     }
     fn charset_clear_redundant(
         &self,

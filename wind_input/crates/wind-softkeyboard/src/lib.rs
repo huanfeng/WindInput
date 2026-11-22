@@ -24,6 +24,7 @@
 //! 补丁层只做稀疏 diff、永不整表回写。本仓所有覆盖类事故都是同一个根因——
 //! 两个写入者对同一份整表各写各的。
 
+pub mod admin;
 pub mod layout;
 mod table;
 

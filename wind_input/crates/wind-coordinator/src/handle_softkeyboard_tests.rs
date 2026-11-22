@@ -567,7 +567,7 @@ fn every_close_path_clears_the_toolbar_icon() {
 #[test]
 fn page_to_persist_uses_the_id_and_skips_redundant_writes() {
     let c = coord();
-    let Some(first) = c.softkeyboard.pages().first().map(|p| p.id.clone()) else {
+    let Some(first) = c.softkeyboard_table().pages().first().map(|p| p.id.clone()) else {
         return; // 兜底表为空（不该发生），无从验证
     };
     let set_mirror = |v: &str| {
@@ -629,7 +629,7 @@ fn headless_never_touches_the_real_state_toml() {
     // 前置：确认这条路真的走到了落盘登记那一步（镜像已更新为当前面），
     // 否则上面那条 `is_noop` 断言测的就只是构造形态，与软键盘无关。
     let current = c
-        .softkeyboard
+        .softkeyboard_table()
         .pages()
         .get(c.softkeyboard_page_idx())
         .map(|p| p.id.clone())
@@ -688,7 +688,8 @@ mod linux_host {
 
     /// 当前面上第一个有符号的键位及其上屏文本。
     fn first_symbol_slot(c: &Coordinator) -> (&'static str, String) {
-        let page = &c.softkeyboard.pages()[c.softkeyboard_page_idx()];
+        let table = c.softkeyboard_table();
+        let page = &table.pages()[c.softkeyboard_page_idx()];
         wind_softkeyboard::all_slots()
             .find_map(|slot| page.output(slot, false).map(|t| (slot, t.to_string())))
             .expect("前置：兜底面至少有一个符号键位")

@@ -4346,7 +4346,8 @@ impl Coordinator {
     pub(crate) fn soft_keyboard_menu_item(&self) -> wind_ui_types::MenuItemSpec {
         use wind_ui_types::MenuItemSpec as M;
         let on = self.softkeyboard_is_open();
-        let pages = self.softkeyboard.pages();
+        let table = self.softkeyboard_table();
+        let pages = table.pages();
         if pages.len() < 2 {
             return M::leaf(
                 "软键盘",
@@ -4366,7 +4367,8 @@ impl Coordinator {
     pub(crate) fn soft_keyboard_menu_children(&self) -> Vec<wind_ui_types::MenuItemSpec> {
         use wind_ui_types::MenuItemSpec as M;
         let on = self.softkeyboard_is_open();
-        let pages = self.softkeyboard.pages();
+        let table = self.softkeyboard_table();
+        let pages = table.pages();
         let cur = self.softkeyboard_page_idx();
         let mut children = vec![M::leaf(
             if on { "关闭面板" } else { "打开面板" },

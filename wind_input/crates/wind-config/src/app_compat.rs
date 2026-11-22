@@ -76,7 +76,7 @@ pub fn lock_user_compat() -> std::sync::MutexGuard<'static, ()> {
 /// 只 rename 不 `fsync` 的话，断电后可能留下 0 长度或半截的正式文件；而运行时对语法错的
 /// compat.toml 是**整份静默跳过**，下一次菜单操作还会按空集重写，等于用户层全丢。
 /// 临时名带 pid 与序号，两个写入方即便没经过 [`lock_user_compat`] 也不会写同一个临时文件。
-pub(crate) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);

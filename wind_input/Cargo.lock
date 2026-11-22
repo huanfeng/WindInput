@@ -2491,6 +2491,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "toml 0.8.23",
+ "toml_edit",
  "tracing",
  "wind-keys",
 ]
@@ -2662,6 +2663,7 @@ dependencies = [
  "wind-keys",
  "wind-quick-input",
  "wind-reverse",
+ "wind-softkeyboard",
  "wind-store",
  "wind-theme",
  "wind-transfer",

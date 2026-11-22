@@ -353,8 +353,8 @@ impl Coordinator {
     /// ★ 暴露它是因为 `data < data_custom < %APPDATA%` 的按面合并在候选面/菜单上不可
     /// 观察：定制层被整层忽略、或叠加顺序反了（用户改的键被定制版盖回去），现象都只是
     /// 「某个键出的字不对」，与「面写错了」无从区分。
-    pub fn debug_softkeyboard(&self) -> &wind_softkeyboard::SoftKeyboardTable {
-        &self.softkeyboard
+    pub fn debug_softkeyboard(&self) -> std::sync::Arc<wind_softkeyboard::SoftKeyboardTable> {
+        self.softkeyboard_table()
     }
 
     /// 翻转「仅本次候选窗」的注释态（测试/诊断用）：直通 [`Self::toggle_comment_session`]。

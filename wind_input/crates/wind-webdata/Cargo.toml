@@ -16,6 +16,8 @@ wind-store = { path = "../wind-store" }
 # 短语分发导入的能力分级（`phrase.previewImportText`）读 cmdbar 的函数 registry。
 wind-cmdbar = { path = "../wind-cmdbar" }
 wind-reverse = { path = "../wind-reverse" }
+# softkeyboard.apply 的操作形态（admin::Op）在这里反序列化。
+wind-softkeyboard = { path = "../wind-softkeyboard" }
 wind-theme = { path = "../wind-theme" }
 wind-candidate = { path = "../wind-candidate" }
 wind-keys = { path = "../wind-keys" }

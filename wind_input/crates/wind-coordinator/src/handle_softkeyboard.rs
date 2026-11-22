@@ -52,6 +52,70 @@ use wind_keys::keymap;
 use wind_ui_types::{SoftKeyCap, UiCommand, slot_layer};
 
 use crate::coordinator::{Coordinator, State};
+use wind_config::Config;
+
+/// 加载软键盘映射表：出厂画布 ⊕ 定制层按面覆盖 ⊕ 用户层按面覆盖。
+///
+/// `with_user = false` 只叠到定制层为止——设置端编辑器的「下层」（恢复默认回到哪里）。
+///
+/// ⚠️ 这里**不走** `resolve_data_file`：那个函数的语义是「靠前的层存在就整份取代
+/// 出厂」，而软键盘要的是按面合并——用户只想改一个键时不该失去其余 12 个面，
+/// 更不该在出厂新增面之后永远看不到它们（同 `system.quick.toml` 的用户设置分文件
+/// 那条理由）。故显式取各层路径，出厂铺底、逐层叠加。定制者由此也能只改几个面，
+/// 不必整份复制（同 `config.toml` 的四层深合并、`compat.toml` 的按条目合并）。
+pub(crate) fn load_softkeyboard_table(
+    data_dir: Option<&std::path::Path>,
+    with_user: bool,
+) -> wind_softkeyboard::SoftKeyboardTable {
+    let layers = Config::resource_layers_named_with(data_dir);
+    // 出厂画布只认 data 层：缺了就回落内置兜底表（部署损坏时软键盘仍可用）。
+    // 定制层不接这个位置——它的语义是叠加，把它当画布会让「只改一个面」的定制包
+    // 丢掉出厂其余 12 个面，正是本段一开始就拒绝掉的那种整份取代。
+    let system = layers
+        .iter()
+        .find(|l| l.name == "data")
+        .map(|l| l.path.join(wind_softkeyboard::FILE_NAME));
+    let mut table = wind_softkeyboard::SoftKeyboardTable::load(system.as_deref());
+    // ⚠️ 层序方向：`resource_layers_named_with` 返回的是**优先级从高到低**的
+    // `[user, custom, data]`，而按面合并必须**从低到高**依次叠加（出厂铺底、
+    // 定制层次之、用户层最后）。故 `.rev()`。反过来叠的现象是
+    // 「用户改了一个键，定制版把它盖回去」。
+    for layer in layers
+        .iter()
+        .rev()
+        .filter(|l| l.name != "data" && (with_user || l.name != "user"))
+    {
+        let path = layer.path.join(wind_softkeyboard::FILE_NAME);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match table.merge_user(&text) {
+                Ok(()) => Config::log_layer_override(
+                    layer.name,
+                    "softkeyboard",
+                    wind_softkeyboard::FILE_NAME,
+                    &path,
+                    // 按面合并里每一层都真的生效（不是「谁赢了」），恒是覆盖。
+                    true,
+                ),
+                Err(e) => warn!(
+                    "软键盘: [{}]层覆盖解析失败，已忽略 {}: {}",
+                    layer.name,
+                    path.display(),
+                    e
+                ),
+            },
+            Err(e) => warn!(
+                "软键盘: [{}]层覆盖读取失败 {}: {}",
+                layer.name,
+                path.display(),
+                e
+            ),
+        }
+    }
+    table
+}
 
 /// 虚拟键码 → 软键盘键位名。
 ///
@@ -102,7 +166,7 @@ impl Coordinator {
 
     /// 当前面的下标（已按表长夹取）。
     pub(crate) fn softkeyboard_page_idx(&self) -> usize {
-        let n = self.softkeyboard.len();
+        let n = self.softkeyboard_table().len();
         if n == 0 {
             return 0;
         }
@@ -111,7 +175,7 @@ impl Coordinator {
 
     /// 当前面是不是**键盘面**（按键交还输入法）。
     pub(crate) fn softkeyboard_send_keys(&self) -> bool {
-        self.softkeyboard
+        self.softkeyboard_table()
             .pages()
             .get(self.softkeyboard_page_idx())
             .is_some_and(|p| p.send_keys)
@@ -119,7 +183,7 @@ impl Coordinator {
 
     /// 当前面名（日志与 UI 用；表为空时给空串）。
     pub(crate) fn softkeyboard_page_name(&self) -> String {
-        self.softkeyboard
+        self.softkeyboard_table()
             .pages()
             .get(self.softkeyboard_page_idx())
             .map(|p| p.name.clone())
@@ -173,7 +237,7 @@ impl Coordinator {
             return None;
         }
         let id = self
-            .softkeyboard
+            .softkeyboard_table()
             .pages()
             .get(self.softkeyboard_page_idx())
             .map(|p| p.id.clone())?;
@@ -297,7 +361,7 @@ impl Coordinator {
             debug!("软键盘: 宿主没声明面板能力，忽略开启请求");
             return KeyAction::PassThrough;
         }
-        if self.softkeyboard.is_empty() {
+        if self.softkeyboard_table().is_empty() {
             warn!("软键盘: 映射表为空，忽略开启请求");
             return KeyAction::Consumed;
         }
@@ -444,7 +508,7 @@ impl Coordinator {
     /// `softkeyboard:math` 而表里没有 math 时，静默会表现成「按了没反应」，
     /// 与「这个键根本没绑上」完全同形，用户无从分辨。
     fn softkeyboard_goto(&self, id: &str) -> bool {
-        match self.softkeyboard.index_of(id) {
+        match self.softkeyboard_table().index_of(id) {
             Some(idx) => {
                 self.softkeyboard_page.store(idx, Ordering::Relaxed);
                 // 切面可能把键盘面换成符号面（或反之），`STATUS_SOFT_KEYBOARD_KEYS`
@@ -456,7 +520,7 @@ impl Coordinator {
                 warn!(
                     "软键盘: 面 {:?} 不存在（可用: {}）",
                     id,
-                    self.softkeyboard
+                    self.softkeyboard_table()
                         .pages()
                         .iter()
                         .map(|p| p.id.as_str())
@@ -470,7 +534,7 @@ impl Coordinator {
 
     /// 相对切面（翻页键用）。空表时空转。
     fn softkeyboard_cycle_page(&self, delta: i32) {
-        let n = self.softkeyboard.len();
+        let n = self.softkeyboard_table().len();
         if n == 0 {
             return;
         }
@@ -542,10 +606,8 @@ impl Coordinator {
         let slot = *vk_to_slot().get(&vk)?;
         let shift = data.modifiers & MOD_SHIFT != 0;
         self.softkeyboard_press_feedback(slot, shift);
-        let page = self
-            .softkeyboard
-            .pages()
-            .get(self.softkeyboard_page_idx())?;
+        let table = self.softkeyboard_table();
+        let page = table.pages().get(self.softkeyboard_page_idx())?;
         // ★ 取档与面板显示**同一份判据**（`slot_layer`）：面板画着 A，敲下去就得出 A。
         // 各写一份的症状是显示与输出分叉，比不支持 CapsLock 更糟。
         let layer = slot_layer(slot, shift, state.caps_lock);
@@ -602,12 +664,13 @@ impl Coordinator {
     pub(crate) fn push_softkeyboard_view(&self) {
         let idx = self.softkeyboard_page_idx();
         let pages: Vec<String> = self
-            .softkeyboard
+            .softkeyboard_table()
             .pages()
             .iter()
             .map(|p| p.name.clone())
             .collect();
-        let page = self.softkeyboard.pages().get(idx);
+        let table = self.softkeyboard_table();
+        let page = table.pages().get(idx);
         let keys: Vec<SoftKeyCap> = wind_softkeyboard::all_slots()
             .map(|slot| SoftKeyCap {
                 slot: slot.to_string(),
@@ -640,7 +703,8 @@ impl Coordinator {
     /// ⚠️ 走 `push_commit_text` 而不是返回 `KeyAction`：UI 事件不在按键路径上，没有那条
     /// 回程通道（同点击候选那条路）。文本仍要过 `maybe_convert`——上屏出口只有一个。
     pub(crate) fn ui_softkeyboard_key(&self, slot: &str, shift: bool, ctrl: bool) {
-        let Some(page) = self.softkeyboard.pages().get(self.softkeyboard_page_idx()) else {
+        let table = self.softkeyboard_table();
+        let Some(page) = table.pages().get(self.softkeyboard_page_idx()) else {
             return;
         };
         // ── Ctrl 粘滞：一律合成组合键，**不看当前是哪种面** ──
@@ -691,10 +755,10 @@ impl Coordinator {
 
     /// 面板上点了标签行 / 面名键。
     pub(crate) fn ui_softkeyboard_page(&self, idx: usize) {
-        if idx >= self.softkeyboard.len() {
+        if idx >= self.softkeyboard_table().len() {
             warn!(
                 "软键盘: 面下标 {idx} 越界（共 {} 面）",
-                self.softkeyboard.len()
+                self.softkeyboard_table().len()
             );
             return;
         }
@@ -751,6 +815,125 @@ impl Coordinator {
         #[cfg(not(any(windows, ext_presenter)))]
         {
             let _ = combo;
+        }
+    }
+}
+
+// ───────────────────────── 映射表的读取、重载与设置端编辑 ─────────────────────────
+
+/// 设置端编辑器的整批写入互斥：读用户层 → 改 → 写回全程持锁。设置端可能开着不止一个
+/// 连接（主窗 + 冷启动的子页面），交错时后写的会把先写的整份覆盖掉。
+static SOFTKEYBOARD_EDIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl Coordinator {
+    /// 当前映射表的快照。取完即放锁；持有期间即便发生重载，手里这份仍完整可用。
+    pub(crate) fn softkeyboard_table(
+        &self,
+    ) -> std::sync::Arc<wind_softkeyboard::SoftKeyboardTable> {
+        self.softkeyboard
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn softkeyboard_data_dir(&self) -> Option<&std::path::Path> {
+        self.compat_dirs.0.as_deref()
+    }
+
+    /// 用户层文件路径（与加载同一口径：`resource_layers_named_with` 的 user 层）。
+    fn softkeyboard_user_file(&self) -> Option<std::path::PathBuf> {
+        Config::resource_layers_named_with(self.softkeyboard_data_dir())
+            .into_iter()
+            .find(|l| l.name == "user")
+            .map(|l| l.path.join(wind_softkeyboard::FILE_NAME))
+    }
+
+    /// 重新加载映射表（设置端编辑器写完用户层后）。
+    ///
+    /// 当前面按 **id** 找回（编辑可能在它前面增删了面）；找不到就回第一面。面板开着时当场
+    /// 重发视图，表空了就关掉——与 `open_softkeyboard` 拒开空表同理。
+    pub(crate) fn reload_softkeyboard(&self) {
+        // 与按键路径同一个收口：面的类型（send_keys）可能变了，C++ 吃键判定要跟上。
+        let _push = SoftKeyboardPushOnDrop(self);
+        let fresh = load_softkeyboard_table(self.softkeyboard_data_dir(), true);
+        let cur_id = self
+            .softkeyboard_table()
+            .pages()
+            .get(self.softkeyboard_page_idx())
+            .map(|p| p.id.clone());
+        let idx = cur_id.and_then(|id| fresh.index_of(&id)).unwrap_or(0);
+        let empty = fresh.is_empty();
+        *self.softkeyboard.write().unwrap_or_else(|e| e.into_inner()) = std::sync::Arc::new(fresh);
+        self.softkeyboard_page.store(idx, Ordering::Relaxed);
+        self.softkeyboard_dirty.store(true, Ordering::Relaxed);
+        debug!("softkeyboard: 映射表已重载，当前面 {idx}");
+        if self.softkeyboard_is_open() {
+            if empty {
+                self.close_softkeyboard();
+            } else {
+                self.push_softkeyboard_view();
+            }
+        }
+    }
+
+    /// 编辑视图（`softkeyboard.get`）：下层 ⊕ 用户层，逐键标出默认值与改动。
+    pub(crate) fn softkeyboard_editor_view(&self) -> anyhow::Result<serde_json::Value> {
+        let lower = load_softkeyboard_table(self.softkeyboard_data_dir(), false);
+        let text = self.read_softkeyboard_user_file()?;
+        let pages = wind_softkeyboard::admin::view(&lower, &text).map_err(anyhow::Error::msg)?;
+        Ok(serde_json::json!({ "pages": pages }))
+    }
+
+    /// 整批编辑（`softkeyboard.apply`）：稀疏写用户层 → 重载 → 返回新视图。
+    ///
+    /// 任何一步失败整批作废、文件不动（`admin::apply` 不产出半成品）。
+    pub(crate) fn softkeyboard_editor_apply(
+        &self,
+        ops: &[wind_softkeyboard::admin::Op],
+    ) -> anyhow::Result<serde_json::Value> {
+        {
+            let _guard = SOFTKEYBOARD_EDIT_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let path = self
+                .softkeyboard_user_file()
+                .ok_or_else(|| anyhow::anyhow!("无用户配置目录，无法保存软键盘"))?;
+            // 拿不到用户配置目录时的兜底可能让「用户层」落在出厂目录上：写进去就改了出厂文件。
+            if let Some(data) = self.softkeyboard_data_dir()
+                && path.parent() == Some(data)
+            {
+                anyhow::bail!("用户配置目录与系统预置目录相同，拒绝改写软键盘文件");
+            }
+            let lower = load_softkeyboard_table(self.softkeyboard_data_dir(), false);
+            let text = self.read_softkeyboard_user_file()?;
+            let out =
+                wind_softkeyboard::admin::apply(&lower, &text, ops).map_err(anyhow::Error::msg)?;
+            if out != text {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                wind_config::app_compat::write_atomic(&path, &out)
+                    .map_err(|e| anyhow::anyhow!("写入 {} 失败：{e}", path.display()))?;
+                tracing::info!(
+                    "软键盘: 设置端写入用户层 {}（{} 项操作）",
+                    path.display(),
+                    ops.len()
+                );
+            }
+        }
+        self.reload_softkeyboard();
+        self.softkeyboard_editor_view()
+    }
+
+    /// 用户层原文；文件不存在 = 空串（还没改过任何东西）。
+    fn read_softkeyboard_user_file(&self) -> anyhow::Result<String> {
+        let Some(path) = self.softkeyboard_user_file() else {
+            return Ok(String::new());
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(t) => Ok(t),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(anyhow::anyhow!("读取 {} 失败：{e}", path.display())),
         }
     }
 }

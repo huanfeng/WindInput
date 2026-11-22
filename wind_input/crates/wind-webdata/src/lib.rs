@@ -643,6 +643,9 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "quick.delete" => h.web_quick_delete(params),
         // ── compat.*：应用兼容规则的分层管理（逻辑全在 wind_config::compat_admin）──
         m if m.starts_with("compat.") => h.web_compat_rpc(m, params),
+        // ── softkeyboard.*：软键盘编辑器（逻辑在 wind_softkeyboard::admin）──
+        "softkeyboard.get" => h.softkeyboard_view(),
+        "softkeyboard.apply" => h.web_softkeyboard_apply(params),
         "quick.export" => h.web_quick_export(),
         "quick.import" => h.web_quick_import(params),
         "quick.previewImport" => h.web_quick_preview_import(params),
@@ -3636,6 +3639,19 @@ pub trait WebDataRpc: WebDataHost {
         let (kind, id) = (str_param(params, "kind")?, str_param(params, "id")?);
         self.quick_format_delete(kind, id)?;
         Ok(json!({ "ok": true }))
+    }
+
+    /// `softkeyboard.apply`：`{ ops: [{ op: "setKey", ... }, ...] }`，操作形态见
+    /// `wind_softkeyboard::admin::Op`。
+    fn web_softkeyboard_apply(&self, params: &Value) -> anyhow::Result<Value> {
+        let ops: Vec<wind_softkeyboard::admin::Op> = serde_json::from_value(
+            params
+                .get("ops")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("缺少参数 ops"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("ops 格式无效：{e}"))?;
+        self.softkeyboard_apply(&ops)
     }
 
     /// `compat.*` 的薄分派：纯逻辑在 `compat_admin::rpc`，这里只负责取目录、
