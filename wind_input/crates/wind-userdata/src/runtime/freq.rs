@@ -136,6 +136,15 @@ impl Runtime {
         Ok(())
     }
 
+    /// 一批 [`Self::delete_freq`]：不存在的跳过，其余一次 `apply_batch`。
+    pub fn delete_freqs(&self, schema: &str, keys: &[(String, String)]) -> anyhow::Result<()> {
+        let ops = super::delete_ops(&self.ud, Target::Freq, schema, keys);
+        if !ops.is_empty() {
+            self.ud.apply_batch(&ops)?;
+        }
+        Ok(())
+    }
+
     pub fn clear_freq(&self, schema: &str) -> anyhow::Result<usize> {
         self.clear_target(Target::Freq, schema)
     }

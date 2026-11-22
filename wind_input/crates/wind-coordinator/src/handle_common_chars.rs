@@ -316,6 +316,49 @@ impl crate::Coordinator {
         Ok(())
     }
 
+    /// 一批 [`Self::common_char_edit`]（`Set` / `Reset`）：先校验整批（任一个字不合法整批不写），
+    /// 一次提交、镜像只回灌一次。「设回出厂方向即删覆盖」与单字写端
+    /// [`Self::apply_common_target`] 同一判据。与单字不同，写库失败报错而不是只记日志——
+    /// 整批要么全成要么不动，调用方得知道是哪一种。
+    pub(crate) fn common_char_edit_batch(
+        &self,
+        chars: &[String],
+        edit: CommonCharEdit,
+    ) -> anyhow::Result<()> {
+        let Some(store) = self.store.as_ref() else {
+            anyhow::bail!("无持久化存储");
+        };
+        if chars.is_empty() {
+            return Ok(());
+        }
+        let plan: Vec<(String, Option<bool>)> = match edit {
+            CommonCharEdit::ClearAll => anyhow::bail!("清空全部覆盖没有批量形式"),
+            CommonCharEdit::Reset => chars.iter().map(|c| (c.clone(), None)).collect(),
+            CommonCharEdit::Set(common) => {
+                if let Some(bad) = chars
+                    .iter()
+                    .find(|c| wind_candidate::single_markable_char(c).is_none())
+                {
+                    anyhow::bail!("只能登记单个字符（空白与控制字符除外）：「{bad}」");
+                }
+                let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
+                let cs = self.engine_mgr.charsets();
+                chars
+                    .iter()
+                    .map(|c| {
+                        let dir =
+                            (cc.is_cluster_common_by_default(c, &cs) != common).then_some(common);
+                        (c.clone(), dir)
+                    })
+                    .collect()
+            }
+        };
+        store.apply_common_char_overrides(&plan)?;
+        debug!("常用字覆盖: 批量 {} 字", plan.len());
+        self.reload_common_chars();
+        Ok(())
+    }
+
     /// 页内第 `page_local` 个候选的标记状态（测试/诊断用）：`(字, 当前是否判常用)`；
     /// `None` = 右键菜单不给「设为生僻字 / 设为常用字」这一项。
     ///

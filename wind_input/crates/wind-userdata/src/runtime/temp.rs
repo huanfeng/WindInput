@@ -190,6 +190,58 @@ impl Runtime {
         Ok(())
     }
 
+    /// 一批 [`Self::remove_temp`]：不存在的跳过，其余一次 `apply_batch`。
+    pub fn remove_temps(&self, schema: &str, keys: &[(String, String)]) -> anyhow::Result<()> {
+        let ops = super::delete_ops(&self.ud, T, schema, keys);
+        if !ops.is_empty() {
+            self.ud.apply_batch(&ops)?;
+            self.bump_words(schema);
+        }
+        Ok(())
+    }
+
+    /// 一批转正：存在的临时词以 `weight` 合并进用户词（同 `add_user_word`：权重取 max、0 边界
+    /// 补上），再删掉临时词——用户词的写在前、临时词的删在后，与逐条转正同序，**同一次**
+    /// `apply_batch`。不存在的跳过。返回转正了的 `(code, text)`。
+    pub fn promote_temps(
+        &self,
+        schema: &str,
+        keys: &[(String, String)],
+        weight: i32,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rows = Vec::new();
+        for (c, t) in keys {
+            if !seen.insert((c.as_str(), t.as_str())) {
+                continue;
+            }
+            if let Some(tw) = self.temp_word(schema, c, t) {
+                super::user::check_len(c, t)?;
+                rows.push(super::UserWord {
+                    code: c.clone(),
+                    text: t.clone(),
+                    weight,
+                    boundary: tw.boundary,
+                    order: 0,
+                });
+            }
+        }
+        let promoted: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| (r.code.clone(), r.text.clone()))
+            .collect();
+        let mut ops: Vec<Op> = rows
+            .iter()
+            .filter_map(|r| self.user_upsert_op(schema, &r.code, &r.text, r.weight, r.boundary))
+            .collect();
+        ops.extend(super::delete_ops(&self.ud, T, schema, &promoted));
+        if !ops.is_empty() {
+            self.ud.apply_batch(&ops)?;
+        }
+        self.bump_words(schema);
+        Ok(promoted)
+    }
+
     pub fn clear_temp(&self, schema: &str) -> anyhow::Result<usize> {
         let n = self.ud.clear(T, schema)?;
         self.bump_words(schema);

@@ -25,6 +25,31 @@ pub struct Runtime {
     count_gen: AtomicU64,
 }
 
+/// 一批「删除这些键」的操作：只收现存的键，同批重复的只删一次（逐条删除的结果与之相同）。
+pub(crate) fn delete_ops(
+    ud: &UserData,
+    target: crate::record::Target,
+    schema: &str,
+    keys: &[(String, String)],
+) -> Vec<crate::engine::Op> {
+    let mut seen = BTreeSet::new();
+    keys.iter()
+        .filter(|(c, t)| seen.insert((c.as_str(), t.as_str())))
+        .filter(|(c, t)| ud.get(target, schema, c, t).is_some())
+        .map(|(c, t)| {
+            crate::engine::Op::new(
+                target,
+                schema,
+                crate::record::OpKind::Delete,
+                c,
+                t,
+                crate::record::Payload::None,
+                0,
+            )
+        })
+        .collect()
+}
+
 pub(crate) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

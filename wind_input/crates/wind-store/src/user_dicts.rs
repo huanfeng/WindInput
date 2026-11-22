@@ -498,32 +498,33 @@ impl Store {
         code: &str,
         text: &str,
     ) -> anyhow::Result<bool> {
+        self.remove_user_dict_entries(ds, name, &[(code.to_string(), text.to_string())])
+    }
+
+    /// 一批 [`Self::remove_user_dict_entry`]（`(code, text)`）：一次按行补丁、一次提交。返回文件
+    /// 改没改（一条都没删到 ⇒ `false`）。
+    pub fn remove_user_dict_entries(
+        &self,
+        ds: &str,
+        name: &str,
+        keys: &[(String, String)],
+    ) -> anyhow::Result<bool> {
         self.ensure_writable()?;
         let p = self.existing_lib(ds, name)?;
         self.check_not_editing(&p)?;
         let Some((bytes, mtime)) = fold::read_text(&p)? else {
             anyhow::bail!("分库不存在：{name}");
         };
-        let op = wind_userdata::text::PatchOp::Delete {
-            code: code.to_string(),
-            text: text.to_string(),
-        };
-        let out = wind_userdata::text::patch_with_banner(
-            &bytes,
-            &p,
-            false,
-            &[op],
-            mtime,
-            name,
-            ds == PINYIN_DS,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("分库 {name} 无法解析：{e:?}"))?;
-        if out == bytes {
-            return Ok(false);
-        }
-        fold::commit_text(&p, &out, Some(&fold::fingerprint(Some(&bytes))))?;
-        Ok(true)
+        let mut seen = std::collections::HashSet::new();
+        let ops: Vec<_> = keys
+            .iter()
+            .filter(|k| seen.insert(*k))
+            .map(|(code, text)| wind_userdata::text::PatchOp::Delete {
+                code: code.clone(),
+                text: text.clone(),
+            })
+            .collect();
+        self.commit_lib_patch(ds, name, &p, &bytes, mtime, &ops)
     }
 
     /// 按行补丁加一条，按 (词, 码) 去重：已有 ⇒ 改成 `weight`（没给就不动）；没有 ⇒ 追加（没给权重
@@ -537,67 +538,127 @@ impl Store {
         boundary: u64,
         weight: Option<i32>,
     ) -> anyhow::Result<bool> {
+        self.add_user_dict_entries(
+            ds,
+            name,
+            &[(code.to_string(), text.to_string(), boundary, weight)],
+        )
+    }
+
+    /// 一批 [`Self::add_user_dict_entry`]（`(code, text, boundary, weight)`）：先全部校验（任一条
+    /// 不合法整批不写），一次按行补丁、一次提交。同批重复的 (词, 码) 按逐条加的结果合并：边界取
+    /// 第一次的，权重取最后一个给了的。返回文件改没改。
+    pub fn add_user_dict_entries(
+        &self,
+        ds: &str,
+        name: &str,
+        rows: &[(String, String, u64, Option<i32>)],
+    ) -> anyhow::Result<bool> {
         use wind_userdata::text::PatchOp;
         self.ensure_writable()?;
-        validate_entry(code, text)?;
+        for (code, text, _, _) in rows {
+            validate_entry(code, text)?;
+        }
         let p = self.existing_lib(ds, name)?;
         self.check_not_editing(&p)?;
         let Some((bytes, mtime)) = fold::read_text(&p)? else {
             anyhow::bail!("分库不存在：{name}");
         };
-        let pinyin = ds == PINYIN_DS;
-        let (flat, spaced, norm_text) = wind_userdata::text::normalize_key(code, text, false);
-        let boundary = if boundary != 0 { boundary } else { spaced };
         let dict = wind_userdata::text::parse(&bytes, &p, false)
             .map_err(|e| anyhow::anyhow!("分库 {name} 无法解析：{e:?}"))?;
-        if weight.is_some() {
+        if rows.iter().any(|r| r.3.is_some()) {
             let body = std::str::from_utf8(&bytes)?;
             let body = body.strip_prefix('\u{feff}').unwrap_or(body);
             if wind_dict::rime_layout(body, &p).is_none_or(|l| l.weight_col.is_none()) {
                 anyhow::bail!("分库 {name} 没有权重列，不能设权重");
             }
         }
-        let existing = dict
+        // (扁平码, 词) → (边界, 权重)，保留首次出现的次序
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut merged: std::collections::HashMap<(String, String), (u64, Option<i32>)> =
+            std::collections::HashMap::new();
+        for (code, text, boundary, weight) in rows {
+            let (flat, spaced, norm_text) = wind_userdata::text::normalize_key(code, text, false);
+            let boundary = if *boundary != 0 { *boundary } else { spaced };
+            let key = (flat, norm_text);
+            match merged.get_mut(&key) {
+                Some(m) => {
+                    if weight.is_some() {
+                        m.1 = *weight;
+                    }
+                }
+                None => {
+                    order.push(key.clone());
+                    merged.insert(key, (boundary, *weight));
+                }
+            }
+        }
+        let existing: std::collections::HashMap<(&str, &str), i32> = dict
             .entries
             .iter()
-            .find(|e| e.code == flat && e.text == norm_text);
-        let op = match (existing, weight) {
-            (Some(_), None) => return Ok(false),
-            (Some(e), Some(w)) if e.weight == w => return Ok(false),
-            (Some(_), Some(w)) => PatchOp::SetWeight {
-                code: flat,
-                text: norm_text,
-                weight: w,
-                // 界面的显式修改：不受「早于文件修改时间的视为被手改覆盖」限制
-                ts_secs: i64::MAX,
-            },
-            (None, Some(w)) => PatchOp::Upsert {
-                code: flat,
-                text: norm_text,
-                boundary,
-                weight: w,
-            },
-            (None, None) => PatchOp::Insert {
-                code: flat,
-                text: norm_text,
-                boundary,
-            },
-        };
+            .map(|e| ((e.code.as_str(), e.text.as_str()), e.weight))
+            .collect();
+        let mut ops = Vec::new();
+        for (flat, norm_text) in order {
+            let (boundary, weight) = merged[&(flat.clone(), norm_text.clone())];
+            let op = match (existing.get(&(flat.as_str(), norm_text.as_str())), weight) {
+                (Some(_), None) => continue,
+                (Some(&w0), Some(w)) if w0 == w => continue,
+                (Some(_), Some(w)) => PatchOp::SetWeight {
+                    code: flat,
+                    text: norm_text,
+                    weight: w,
+                    // 界面的显式修改：不受「早于文件修改时间的视为被手改覆盖」限制
+                    ts_secs: i64::MAX,
+                },
+                (None, Some(w)) => PatchOp::Upsert {
+                    code: flat,
+                    text: norm_text,
+                    boundary,
+                    weight: w,
+                },
+                (None, None) => PatchOp::Insert {
+                    code: flat,
+                    text: norm_text,
+                    boundary,
+                },
+            };
+            ops.push(op);
+        }
+        if ops.is_empty() {
+            return Ok(false);
+        }
+        self.commit_lib_patch(ds, name, &p, &bytes, mtime, &ops)
+    }
+
+    /// 分库按行补丁并提交（指纹复核 + 原子替换）。补丁后内容没变 ⇒ `Ok(false)`、不写。
+    fn commit_lib_patch(
+        &self,
+        ds: &str,
+        name: &str,
+        p: &Path,
+        bytes: &[u8],
+        mtime: i64,
+        ops: &[wind_userdata::text::PatchOp],
+    ) -> anyhow::Result<bool> {
+        if ops.is_empty() {
+            return Ok(false);
+        }
         let out = wind_userdata::text::patch_with_banner(
-            &bytes,
-            &p,
+            bytes,
+            p,
             false,
-            &[op],
+            ops,
             mtime,
             name,
-            pinyin,
+            ds == PINYIN_DS,
             None,
         )
         .map_err(|e| anyhow::anyhow!("分库 {name} 无法解析：{e:?}"))?;
         if out == bytes {
             return Ok(false);
         }
-        fold::commit_text(&p, &out, Some(&fold::fingerprint(Some(&bytes))))?;
+        fold::commit_text(p, &out, Some(&fold::fingerprint(Some(bytes))))?;
         Ok(true)
     }
 

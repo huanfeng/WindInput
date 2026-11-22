@@ -314,6 +314,45 @@ impl Store {
         Ok(())
     }
 
+    /// 一批 [`Self::add_user_word`]（`(code, text, weight, boundary)`）：任一条过长整批不写；
+    /// 引擎一次 `apply_batch`，代次与维护各推进一次。同批重复的键按逐条加词的结果合并。
+    pub fn add_user_words(
+        &self,
+        schema: &str,
+        rows: &[(String, String, i32, u64)],
+    ) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.ensure_user_text(schema);
+        let rows: Vec<UserWord> = rows
+            .iter()
+            .map(|(code, text, weight, boundary)| UserWord {
+                code: code.clone(),
+                text: text.clone(),
+                weight: *weight,
+                boundary: *boundary,
+                order: 0,
+            })
+            .collect();
+        self.runtime().add_user_words(schema, &rows)?;
+        self.bump_words_gen(schema);
+        self.after_write();
+        Ok(())
+    }
+
+    /// 一批 [`Self::remove_user_word`]（`(code, text)`，不存在的跳过）：引擎一次 `apply_batch`。
+    pub fn remove_user_words(&self, schema: &str, keys: &[(String, String)]) -> anyhow::Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.ensure_user_text(schema);
+        self.runtime().remove_user_words(schema, keys)?;
+        self.bump_words_gen(schema);
+        self.after_write();
+        Ok(())
+    }
+
     /// 把一段文字从某数据方案的用户数据里抹掉：所有编码下的用户词与临时词、词频，以及以它为
     /// 上文或选中词的联想记录。返回删掉的用户词 + 临时词条数。拼音右键删多字用户词 / 临时词用
     /// （「当作没输入过」，不留屏蔽记录）。

@@ -189,6 +189,13 @@ pub trait WebDataHost {
         edit: crate::handle_common_chars::CommonCharEdit,
     ) -> anyhow::Result<()>;
 
+    /// 一批 [`Self::common_char_edit`]（`Set` / `Reset`）：整批校验、一次写库、镜像回灌一次。
+    fn common_char_edit_batch(
+        &self,
+        chars: &[String],
+        edit: crate::handle_common_chars::CommonCharEdit,
+    ) -> anyhow::Result<()>;
+
     /// 按某个字所属的 Unicode 块整类设常用/生僻；`apply=false` 只预览不写库。
     fn common_char_bulk_by_block(
         &self,
@@ -224,6 +231,17 @@ pub trait WebDataHost {
         id: &str,
         edit: crate::handle_quick_format::QuickFormatEdit,
     ) -> anyhow::Result<()>;
+
+    /// 一批 [`Self::quick_format_edit`]（`(kind, id)`，可跨类别；只收 `SetEnabled` / `ResetEntry`）：
+    /// 类别先全部解析（有未知的整批报错），写库一次、回灌一次。
+    fn quick_format_edit_batch(
+        &self,
+        items: &[(String, String)],
+        edit: crate::handle_quick_format::QuickFormatEdit,
+    ) -> anyhow::Result<()>;
+
+    /// 一批 [`Self::quick_format_delete`]：任一条未知类别或是出厂条目 ⇒ 整批不删。
+    fn quick_format_delete_batch(&self, items: &[(String, String)]) -> anyhow::Result<()>;
 
     /// 每个类别可用的模板变量清单：`[(kind, [(变量名, 说明)])]`。
     ///
@@ -471,6 +489,13 @@ impl WebDataHost for Coordinator {
     ) -> anyhow::Result<crate::handle_common_chars::CommonCharBulkOutcome> {
         Coordinator::common_char_bulk_by_block(self, ch, common, apply)
     }
+    fn common_char_edit_batch(
+        &self,
+        chars: &[String],
+        edit: crate::handle_common_chars::CommonCharEdit,
+    ) -> anyhow::Result<()> {
+        Coordinator::common_char_edit_batch(self, chars, edit)
+    }
     fn common_chars_export(&self) -> anyhow::Result<String> {
         Coordinator::export_common_chars(self)
     }
@@ -496,6 +521,16 @@ impl WebDataHost for Coordinator {
         let kind = wind_quick_input::FormatKind::parse(kind)
             .ok_or_else(|| anyhow::anyhow!("未知的快捷输入类别: {kind}"))?;
         Coordinator::edit_quick_format(self, kind, id, edit)
+    }
+    fn quick_format_edit_batch(
+        &self,
+        items: &[(String, String)],
+        edit: crate::handle_quick_format::QuickFormatEdit,
+    ) -> anyhow::Result<()> {
+        Coordinator::edit_quick_formats(self, &parse_quick_items(items)?, edit)
+    }
+    fn quick_format_delete_batch(&self, items: &[(String, String)]) -> anyhow::Result<()> {
+        Coordinator::delete_quick_formats(self, &parse_quick_items(items)?)
     }
     fn quick_format_var_hints(&self) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
         wind_quick_input::FormatKind::ALL
@@ -553,4 +588,18 @@ impl WebDataHost for Coordinator {
     ) -> Result<(), String> {
         Coordinator::ui_toast(self, text, kind, color, pos, duration_ms)
     }
+}
+
+/// `(kind, id)` 的类别整批先解析：有未知的整批报错，什么都不写。
+fn parse_quick_items(
+    items: &[(String, String)],
+) -> anyhow::Result<Vec<(wind_quick_input::FormatKind, String)>> {
+    items
+        .iter()
+        .map(|(kind, id)| {
+            wind_quick_input::FormatKind::parse(kind)
+                .map(|k| (k, id.clone()))
+                .ok_or_else(|| anyhow::anyhow!("未知的快捷输入类别: {kind}"))
+        })
+        .collect()
 }

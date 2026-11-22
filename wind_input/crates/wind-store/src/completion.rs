@@ -354,6 +354,25 @@ impl Store {
         Ok(existed)
     }
 
+    /// 一批 [`Self::remove_completion`]：一次取锁。返回本来在的条数。
+    pub fn remove_completions(
+        &self,
+        kind: CompletionKind,
+        texts: &[String],
+    ) -> anyhow::Result<usize> {
+        if texts.is_empty() {
+            return Ok(0);
+        }
+        let mut g = self.completions();
+        let mut n = 0;
+        for t in texts {
+            n += usize::from(g.map.remove(&(kind.as_str(), t.clone())).is_some());
+        }
+        g.dirty |= n > 0;
+        g.generation += 1;
+        Ok(n)
+    }
+
     /// 清空某 kind 的全部记录，返回删除条数。
     ///
     /// **只清这一类**：用户在设置里点「清空网址历史」不该顺带把邮箱后缀学习也抹掉。

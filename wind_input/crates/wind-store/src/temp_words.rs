@@ -270,6 +270,38 @@ impl Store {
         Ok(())
     }
 
+    /// 一批 [`Self::remove_temp_word`]（不存在的跳过）：引擎一次 `apply_batch`。
+    pub fn remove_temp_words(&self, schema: &str, keys: &[(String, String)]) -> anyhow::Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.check_learned_not_held(wind_userdata::record::Target::Temp, schema)?;
+        self.runtime().remove_temps(schema, keys)?;
+        self.bump_words_gen(schema);
+        self.after_write();
+        Ok(())
+    }
+
+    /// 一批 [`Self::promote_temp_word`]：写用户词与删临时词在**同一次** `apply_batch` 里（用户词
+    /// 在前），不存在的跳过。返回转正了的 `(code, text)`。
+    pub fn promote_temp_words(
+        &self,
+        schema: &str,
+        keys: &[(String, String)],
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.check_learned_not_held(wind_userdata::record::Target::Temp, schema)?;
+        self.ensure_user_text(schema);
+        let promoted = self
+            .runtime()
+            .promote_temps(schema, keys, PROMOTED_WEIGHT)?;
+        self.bump_words_gen(schema);
+        self.after_write();
+        Ok(promoted)
+    }
+
     /// 晋升：把临时词移入用户词库，并从临时库删除。返回是否发生晋升。
     /// 权重统一取 `PROMOTED_WEIGHT`（与已存在的用户词权重取 max，不覆盖手动加词的更高权重，
     /// 不再沿用临时词自身权重）；count=temp+user，created_at 优先保留 user 旧值。

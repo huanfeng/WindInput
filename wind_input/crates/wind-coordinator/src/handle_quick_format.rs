@@ -516,6 +516,61 @@ impl Coordinator {
         Ok(())
     }
 
+    /// 一批对单条格式的编辑（`SetEnabled` / `ResetEntry`，可跨类别）：写库一次、回灌一次。
+    /// 整类 / 移动这类不按条的编辑没有批量形式。
+    pub fn edit_quick_formats(
+        &self,
+        items: &[(FormatKind, String)],
+        edit: QuickFormatEdit,
+    ) -> anyhow::Result<()> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        if items.is_empty() {
+            return Ok(());
+        }
+        let items: Vec<(String, String)> = items
+            .iter()
+            .map(|(k, id)| (k.as_str().to_string(), id.clone()))
+            .collect();
+        match edit {
+            QuickFormatEdit::SetEnabled(enabled) => {
+                store.edit_quick_formats(&items, &mut |rec, id| {
+                    rec.set_enabled(id, enabled);
+                    Ok(())
+                })?
+            }
+            QuickFormatEdit::ResetEntry => store.edit_quick_formats(&items, &mut |rec, id| {
+                rec.apply_reset(id);
+                Ok(())
+            })?,
+            QuickFormatEdit::MoveTo(_) | QuickFormatEdit::ResetKind => {
+                anyhow::bail!("这类编辑没有批量形式")
+            }
+        }
+        self.reload_quick_adjust();
+        Ok(())
+    }
+
+    /// 一批 [`Self::delete_quick_format`]：任一条是出厂条目 ⇒ 整批不删。
+    pub fn delete_quick_formats(&self, items: &[(FormatKind, String)]) -> anyhow::Result<()> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        if items.is_empty() {
+            return Ok(());
+        }
+        let items: Vec<(String, String)> = items
+            .iter()
+            .map(|(k, id)| (k.as_str().to_string(), id.clone()))
+            .collect();
+        store.delete_quick_formats(&items)?;
+        self.reload_quick_adjust();
+        Ok(())
+    }
+
     /// 新增一条用户自定义格式，返回分配到的 id。
     ///
     /// ## 为什么没有「编辑出厂条目」的对应方法

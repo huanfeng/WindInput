@@ -2,7 +2,10 @@
 //! 增删改名、导入与开关。文件操作在 `wind_store::user_dicts`，开关与 `schema.setDictEnabled`
 //! 同一实现；改了文件或开关都失效用到该数据方案的方案（同 `dict.reload` 的 `dicts:<数据方案>`）。
 
-use super::{WebDataRpc, parse_sort, resolve_engine_type, store_text, str_param, ui_text};
+use super::{
+    WebDataRpc, batch_done, code_text_item, items_or_single, parse_sort, resolve_engine_type,
+    store_text, str_param, ui_text,
+};
 use serde_json::{Value, json};
 use wind_store::user_dicts::ID_PREFIX;
 use wind_store::user_words::USER_DICTS_CHANGED;
@@ -123,42 +126,75 @@ pub(super) fn entries<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow::
 }
 
 /// `userDicts.removeEntry {schemaId, name, code, text}` → `{ok, removed}`。
+/// 带 `items`（`[{code, text}]`）时一次补丁删一批 → `{ok, count}`。
 pub(super) fn remove_entry<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow::Result<Value> {
     let (_, ds, store) = writable(h, params)?;
     let name = str_param(params, "name")?;
-    let (code, text) = (str_param(params, "code")?, str_param(params, "text")?);
-    let removed = store.remove_user_dict_entry(&ds, name, code, &store_text(text))?;
+    let (keys, batch) = items_or_single(params, code_text_item)?;
+    if keys.is_empty() {
+        return Ok(batch_done(0));
+    }
+    let removed = store.remove_user_dict_entries(&ds, name, &keys)?;
     if removed {
         changed(h, &ds);
     }
-    Ok(json!({ "ok": true, "removed": removed }))
+    Ok(if batch {
+        batch_done(keys.len())
+    } else {
+        json!({ "ok": true, "removed": removed })
+    })
 }
 
 /// `userDicts.addEntry {schemaId, name, text, code, weight?}` → `{ok}`。按 (词, 码) 去重：已有的
 /// 改成给的权重，没给权重就不动；新词没给权重时权重列留空（按方案默认）。
+/// 带 `items`（`[{code, text, weight?}]`）时整批校验、一次补丁 → `{ok, count}`。
 pub(super) fn add_entry<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow::Result<Value> {
     let (schema_id, ds, store) = writable(h, params)?;
     let name = str_param(params, "name")?;
-    let text = store_text(str_param(params, "text")?);
-    let code = str_param(params, "code")?;
-    let weight = match params.get("weight") {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(
-            v.as_i64()
-                .and_then(|w| i32::try_from(w).ok())
-                .ok_or_else(|| anyhow::anyhow!("权重须是整数：{v}"))?,
-        ),
-    };
-    // 拼音码同加词界面：ü 归一、补音节边界（码表原样）
-    let (code, boundary) = if code.contains(['\t', '\n', '\r']) {
-        (code.to_string(), 0)
-    } else {
-        wind_coordinator::user_words_api::normalize_add_code(h, schema_id, code, &text)
-    };
-    if store.add_user_dict_entry(&ds, name, &code, &text, boundary, weight)? {
+    let (raw, batch) = items_or_single(params, |p| {
+        let text = store_text(str_param(p, "text")?);
+        let code = str_param(p, "code")?.to_string();
+        let weight = match p.get("weight") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_i64()
+                    .and_then(|w| i32::try_from(w).ok())
+                    .ok_or_else(|| anyhow::anyhow!("权重须是整数：{v}"))?,
+            ),
+        };
+        Ok((code, text, weight))
+    })?;
+    if raw.is_empty() {
+        return Ok(batch_done(0));
+    }
+    // 拼音码同加词界面：ü 归一、补音节边界（码表原样）。带制表符 / 换行的码不规范化，留给
+    // 存储层的校验报错。
+    let plain: Vec<(&str, &str)> = raw
+        .iter()
+        .filter(|(c, _, _)| !c.contains(['\t', '\n', '\r']))
+        .map(|(c, t, _)| (c.as_str(), t.as_str()))
+        .collect();
+    let mut normalized =
+        wind_coordinator::user_words_api::normalize_add_codes(h, schema_id, &plain).into_iter();
+    let rows: Vec<(String, String, u64, Option<i32>)> = raw
+        .into_iter()
+        .map(|(code, text, weight)| {
+            let (code, boundary) = if code.contains(['\t', '\n', '\r']) {
+                (code, 0)
+            } else {
+                normalized.next().expect("与 plain 同序等长")
+            };
+            (code, text, boundary, weight)
+        })
+        .collect();
+    if store.add_user_dict_entries(&ds, name, &rows)? {
         changed(h, &ds);
     }
-    Ok(json!({ "ok": true }))
+    Ok(if batch {
+        batch_done(rows.len())
+    } else {
+        json!({ "ok": true })
+    })
 }
 
 /// `userDicts.clear {schemaId, name}` → `{ok, removed}`：删光词条，保留文件头。
@@ -540,6 +576,161 @@ mod tests {
         assert_eq!(r, json!({"ok": true, "removed": 2}));
         assert_eq!(f.texts(&ct, "b"), Vec::<String>::new(), "清空后失效重建");
         assert_eq!(f.texts(&ct, "a")[0], "工");
+    }
+
+    /// 本线程在 `f` 里提交了几次文本文件。
+    fn commits_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let me = std::thread::current().id();
+        let n = Arc::new(AtomicUsize::new(0));
+        let n2 = n.clone();
+        let _g = wind_userdata::text::fold::add_before_rename_hook(Box::new(move || {
+            if std::thread::current().id() == me {
+                n2.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let r = f();
+        (r, n.load(Ordering::SeqCst))
+    }
+
+    /// 分库条目全表（按码排序），比批量与逐条的结果用。
+    fn lib_rows(f: &Fx, schema: &str) -> Value {
+        f.rpc(
+            "userDicts.entries",
+            json!({"schemaId": schema, "name": "我的", "offset": 0, "limit": 100, "sortBy": "code"}),
+        )
+        .unwrap()
+    }
+
+    /// 建分库并放两条（`a 戈 100`、`b 新` 无权重）。
+    fn seeded(tag: &str) -> Fx {
+        let f = fx(tag);
+        let ct = f.ct.clone();
+        f.rpc("userDicts.create", json!({"schemaId": ct, "name": "我的"}))
+            .unwrap();
+        for p in [
+            json!({"code": "a", "text": "戈", "weight": 100}),
+            json!({"code": "b", "text": "新"}),
+        ] {
+            let mut p = p;
+            p["schemaId"] = json!(ct);
+            p["name"] = json!("我的");
+            f.rpc("userDicts.addEntry", p).unwrap();
+        }
+        f
+    }
+
+    /// `items` 批量：与逐条结果一致、一次提交、有一条非法整批不写、空 items 不写。
+    #[test]
+    fn add_and_remove_entry_batch() {
+        let items = json!([
+            {"code": "a", "text": "戈", "weight": 7},
+            {"code": "c", "text": "丙", "weight": 3},
+            {"code": "d", "text": "丁"},
+            {"code": "c", "text": "丙", "weight": 5},
+            {"code": "b", "text": "新"},
+        ]);
+        let one = |f: &Fx, m: &str, it: &Value| {
+            let mut p = it.clone();
+            p["schemaId"] = json!(f.ct);
+            p["name"] = json!("我的");
+            f.rpc(m, p)
+        };
+
+        let seq = seeded("batch_seq");
+        for it in items.as_array().unwrap() {
+            one(&seq, "userDicts.addEntry", it).unwrap();
+        }
+        let bat = seeded("batch_bat");
+        let (r, n) = commits_during(|| {
+            bat.rpc(
+                "userDicts.addEntry",
+                json!({"schemaId": bat.ct, "name": "我的", "items": items}),
+            )
+        });
+        assert_eq!(r.unwrap(), json!({"ok": true, "count": 5}));
+        assert_eq!(n, 1, "整批应只提交一次分库文件");
+        assert_eq!(lib_rows(&bat, &bat.ct), lib_rows(&seq, &seq.ct));
+        assert_eq!(lib_rows(&bat, &bat.ct)["total"], 4);
+        assert_eq!(bat.texts(&bat.ct, "c")[0], "丙", "批量写完失效重建");
+
+        // 有一条非法（码里有制表符、权重不是整数）⇒ 整批不写
+        let before = lib_rows(&bat, &bat.ct);
+        for bad in [
+            json!({"code": "e\tx", "text": "戊"}),
+            json!({"code": "e", "text": "戊", "weight": "9"}),
+            json!({"code": "e"}),
+        ] {
+            let r = bat.rpc(
+                "userDicts.addEntry",
+                json!({"schemaId": bat.ct, "name": "我的", "items": [
+                    {"code": "f", "text": "己"}, bad,
+                ]}),
+            );
+            assert!(r.is_err(), "{r:?}");
+            assert_eq!(lib_rows(&bat, &bat.ct), before);
+        }
+
+        // 删：与逐条一致、一次提交、不存在的跳过
+        let del = json!([
+            {"code": "a", "text": "戈"},
+            {"code": "zz", "text": "无"},
+            {"code": "c", "text": "丙"},
+        ]);
+        for it in del.as_array().unwrap() {
+            one(&seq, "userDicts.removeEntry", it).unwrap();
+        }
+        let (r, n) = commits_during(|| {
+            bat.rpc(
+                "userDicts.removeEntry",
+                json!({"schemaId": bat.ct, "name": "我的", "items": del}),
+            )
+        });
+        assert_eq!(r.unwrap(), json!({"ok": true, "count": 3}));
+        assert_eq!(n, 1);
+        assert_eq!(lib_rows(&bat, &bat.ct), lib_rows(&seq, &seq.ct));
+        assert_eq!(lib_rows(&bat, &bat.ct)["total"], 2);
+        let before = lib_rows(&bat, &bat.ct);
+        let r = bat.rpc(
+            "userDicts.removeEntry",
+            json!({"schemaId": bat.ct, "name": "我的", "items": [{"code": "b", "text": "新"}, {"code": "d"}]}),
+        );
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(lib_rows(&bat, &bat.ct), before);
+
+        for m in ["userDicts.addEntry", "userDicts.removeEntry"] {
+            let (r, n) = commits_during(|| {
+                bat.rpc(m, json!({"schemaId": bat.ct, "name": "我的", "items": []}))
+            });
+            assert_eq!(r.unwrap(), json!({"ok": true, "count": 0}), "{m}");
+            assert_eq!(n, 0, "{m}");
+        }
+        assert_eq!(lib_rows(&bat, &bat.ct), before);
+    }
+
+    /// 拼音分库：批量加词同样补音节边界、拆空格码（与单条 `normalize_add_code` 同一条路）。
+    #[test]
+    fn add_entry_batch_normalizes_pinyin_codes() {
+        let f = fx("batch_py");
+        let py = f.py.clone();
+        f.rpc("userDicts.create", json!({"schemaId": py, "name": "我的"}))
+            .unwrap();
+        f.rpc(
+            "userDicts.addEntry",
+            json!({"schemaId": py, "name": "我的", "items": [
+                {"code": "nihao", "text": "你好"},
+                {"code": "nv hai", "text": "女孩"},
+            ]}),
+        )
+        .unwrap();
+        let rows = lib_rows(&f, &py);
+        let codes: Vec<&str> = rows["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["ni hao", "nv hai"], "{rows}");
     }
 
     /// 删除方案的全部用户数据：用户词、分库、方案覆盖都没了、引擎随之重建；拼音族共用数据拒绝。

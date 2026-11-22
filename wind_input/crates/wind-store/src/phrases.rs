@@ -126,6 +126,12 @@ fn split_phrase_key(key: &str) -> Option<(&str, &str)> {
     Some((it.next()?, it.next()?))
 }
 
+/// 去重（保留首次出现的次序）：同一组键在一次补丁里出现两次，新行会被追加两遍。
+fn dedup_keys(keys: &[(String, String)]) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    keys.iter().filter(|k| seen.insert(*k)).cloned().collect()
+}
+
 /// 短语文件的列（设计 §2.2）。
 pub const PHRASE_COLS: &[&str] = &[
     "code",
@@ -327,7 +333,12 @@ impl Store {
 
     /// 删除一条短语的文件行（不存在静默成功）。删的是用户行或修改行；系统条目随之恢复默认。
     pub fn remove_phrase(&self, code: &str, text: &str) -> anyhow::Result<()> {
-        self.put_phrase_rows(vec![((code.into(), text.into()), None)])
+        self.remove_phrases(&[(code.into(), text.into())])
+    }
+
+    /// 一批 [`Self::remove_phrase`]（`(code, text)`）：一次提交。
+    pub fn remove_phrases(&self, keys: &[(String, String)]) -> anyhow::Result<()> {
+        self.put_phrase_rows(dedup_keys(keys).into_iter().map(|k| (k, None)).collect())
     }
 
     /// 编辑短语：可改 code/text/position/weight，保留 enabled 与分类。系统条目不改键 ⇒ 写修改行
@@ -381,27 +392,52 @@ impl Store {
 
     /// 设置启停。系统条目写修改行；都不存在 ⇒ 写一条用户行（同旧语义）。
     pub fn set_phrase_enabled(&self, code: &str, text: &str, enabled: bool) -> anyhow::Result<()> {
-        let row = match self.find_phrase(code, text) {
-            Some(c) => FileRow {
-                code: code.into(),
-                text: text.into(),
-                weight: c.weight,
-                position: c.position,
-                enabled,
-                category: c.category,
-                overrides_system: c.is_system,
-            },
-            None => FileRow {
-                code: code.into(),
-                text: text.into(),
-                weight: 0,
-                position: 0,
-                enabled,
-                category: String::new(),
-                overrides_system: false,
-            },
-        };
-        self.put_phrase_rows(vec![((code.into(), text.into()), Some(row))])
+        self.set_phrases_enabled(&[(code.into(), text.into())], enabled)
+    }
+
+    /// 一批 [`Self::set_phrase_enabled`]（`(code, text)`）：叠加视图只算一次，一次提交。
+    pub fn set_phrases_enabled(
+        &self,
+        keys: &[(String, String)],
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        let keys = dedup_keys(keys);
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.phrase_table().sync();
+        let cur: std::collections::HashMap<(String, String), PhraseRecord> =
+            overlay(&self.system_phrases(), &self.file_phrase_rows())
+                .into_iter()
+                .map(|p| ((p.code.clone(), p.text.clone()), p))
+                .collect();
+        let rows = keys
+            .into_iter()
+            .map(|(code, text)| {
+                let row = match cur.get(&(code.clone(), text.clone())) {
+                    Some(c) => FileRow {
+                        code: code.clone(),
+                        text: text.clone(),
+                        weight: c.weight,
+                        position: c.position,
+                        enabled,
+                        category: c.category.clone(),
+                        overrides_system: c.is_system,
+                    },
+                    None => FileRow {
+                        code: code.clone(),
+                        text: text.clone(),
+                        weight: 0,
+                        position: 0,
+                        enabled,
+                        category: String::new(),
+                        overrides_system: false,
+                    },
+                };
+                ((code, text), Some(row))
+            })
+            .collect();
+        self.put_phrase_rows(rows)
     }
 
     /// 系统短语同步哈希的文件：`<text_dir>/phrases.sys_hash`。它描述的是「短语文件里的修改行

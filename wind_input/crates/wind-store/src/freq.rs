@@ -264,6 +264,15 @@ impl Store {
         self.runtime().delete_freq(schema, code, text)
     }
 
+    /// 一批 [`Self::delete_freq`]（不存在的跳过）：引擎一次 `apply_batch`。
+    pub fn delete_freqs(&self, schema: &str, keys: &[(String, String)]) -> anyhow::Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.check_learned_not_held(wind_userdata::record::Target::Freq, schema)?;
+        self.runtime().delete_freqs(schema, keys)
+    }
+
     /// 清空某方案全部词频，返回删除条数。
     pub fn clear_freq(&self, schema: &str) -> anyhow::Result<usize> {
         self.check_learned_not_held(wind_userdata::record::Target::Freq, schema)?;

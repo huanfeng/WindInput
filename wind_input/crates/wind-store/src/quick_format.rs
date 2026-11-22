@@ -235,6 +235,50 @@ impl Store {
         Ok(())
     }
 
+    /// 一批对单条格式的编辑（`(kind, id)`，可跨类别）：读改写整份文件**一次**。`f` 对任一条报错
+    /// ⇒ 整批不写。
+    pub fn edit_quick_formats(
+        &self,
+        items: &[(String, String)],
+        f: &mut dyn FnMut(&mut QuickFormatRecord, &str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let doc = self.quick_doc();
+        self.check_not_editing(doc.path())?;
+        doc.modify(&mut |cur| {
+            let mut qf = cur
+                .map(parse_quick)
+                .transpose()
+                .map_err(|e| crate::last_good::broken_file_error(doc, e))?
+                .unwrap_or_default();
+            for (kind, id) in items {
+                f(qf.kinds.entry(kind.clone()).or_default(), id)?;
+            }
+            qf.kinds.retain(|_, r| !r.is_empty());
+            if qf.kinds.is_empty() {
+                return Ok(None);
+            }
+            render_quick(&qf).map(Some)
+        })?;
+        self.quick_file();
+        Ok(())
+    }
+
+    /// 一批 [`Self::delete_quick_format`]：任一条不是用户条目 ⇒ 整批不写、报出它的 id。
+    pub fn delete_quick_formats(&self, items: &[(String, String)]) -> anyhow::Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        let items: Vec<(String, String)> =
+            items.iter().filter(|k| seen.insert(*k)).cloned().collect();
+        self.edit_quick_formats(&items, &mut |rec, id| {
+            if !rec.remove_entry(id) {
+                anyhow::bail!("{id} 不是自定义条目，出厂条目只能停用");
+            }
+            Ok(())
+        })
+    }
+
     /// 读改写一类格式的调整；改完为空则删除该类。
     fn modify_quick_format(
         &self,

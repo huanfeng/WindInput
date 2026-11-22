@@ -2668,6 +2668,7 @@ dependencies = [
  "wind-theme",
  "wind-transfer",
  "wind-ui-types",
+ "wind-userdata",
  "zip",
 ]
 

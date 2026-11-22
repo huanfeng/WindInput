@@ -168,6 +168,38 @@ pub fn add<H: WebDataHost + ?Sized>(
     Ok(())
 }
 
+/// 一批 [`add`]（`(code, text, weight)`，同方案）：编码规范化与边界求解整批一次，落库一次
+/// （`Store::add_user_words`：任一条过长整批不写），撤删除规则一次。
+pub fn add_batch<H: WebDataHost + ?Sized>(
+    h: &H,
+    schema_id: &str,
+    rows: &[(String, String, i32)],
+) -> anyhow::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let schema = h.engine_mgr().data_schema_id(schema_id); // 拼音族折叠到 "pinyin"
+    let store = h
+        .user_store()
+        .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+    let pairs: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(c, t, _)| (c.as_str(), t.as_str()))
+        .collect();
+    let words: Vec<(String, String, i32, u64)> = normalize_add_codes(h, &schema, &pairs)
+        .into_iter()
+        .zip(rows)
+        .map(|((code, boundary), (_, text, weight))| (code, text.clone(), *weight, boundary))
+        .collect();
+    store.add_user_words(&schema, &words)?;
+    let added: Vec<(&str, &str)> = words
+        .iter()
+        .map(|(c, t, _, _)| (c.as_str(), t.as_str()))
+        .collect();
+    clear_deleted_for_added(h, &schema, &added);
+    Ok(())
+}
+
 /// **单条显式**加词（加词对话框 / 快捷加词 / 命令栏 `dict.add`、设置页加词改词、单条手动转正）
 /// 成功后的收口：撤掉同 (数据方案, 编码, 文本) 的候选调整删除规则。
 ///
@@ -291,6 +323,26 @@ pub fn remove<H: WebDataHost + ?Sized>(
     store.remove_user_word(&schema, &code, text)
 }
 
+/// 一批 [`remove`]（`(code, text)`，同方案）：落库一次。不存在的静默跳过。
+pub fn remove_batch<H: WebDataHost + ?Sized>(
+    h: &H,
+    schema_id: &str,
+    keys: &[(String, String)],
+) -> anyhow::Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let schema = h.engine_mgr().data_schema_id(schema_id); // 拼音族折叠到 "pinyin"
+    let store = h
+        .user_store()
+        .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+    let keys: Vec<(String, String)> = keys
+        .iter()
+        .map(|(code, text)| (wind_store::wdict::split_spaced_code(code).0, text.clone()))
+        .collect();
+    store.remove_user_words(&schema, &keys)
+}
+
 /// 清空该方案（折叠后的数据方案）的全部用户词，返回删除条数。
 pub fn clear<H: WebDataHost + ?Sized>(h: &H, schema_id: &str) -> anyhow::Result<usize> {
     let schema = h.engine_mgr().data_schema_id(schema_id); // 拼音族折叠到 "pinyin"
@@ -321,38 +373,69 @@ pub fn normalize_add_code<H: WebDataHost + ?Sized>(
     code: &str,
     text: &str,
 ) -> (String, u64) {
-    let (flat, explicit) = wind_store::wdict::split_spaced_code(code);
-    // ü 拼写归一（`xv` → `xu`、`nue` → `nve`）。**落库 key 与查询侧必须同域**：
-    // 查询侧 `PinyinEngine::convert` 已把击键归一成正字法形态，key 若停在 `xv`
-    // 就成了「加得进、打不出」——用户看得见这条词，永远召不回。
-    //
-    // ⚠️ 必须先于 `explicit` 那条早退：带空格的码（`nue yao`）走的是另一条 return，
-    // 漏了它就只有「手打空格声明切分」的用户中招，而那恰恰是最难复现的一档。
-    // 归一化是等长替换，故 `explicit` 这个按位置算的 bitmask 不受影响。
-    let flat = normalize_pinyin_code(h, schema, flat);
-    if explicit != 0 {
-        return (flat, explicit);
+    normalize_add_codes(h, schema, &[(code, text)])
+        .pop()
+        .expect("一条进一条出")
+}
+
+/// 一批 [`normalize_add_code`]（`(code, text)`），与入参同序等长；边界求解链整批走一次。
+pub fn normalize_add_codes<H: WebDataHost + ?Sized>(
+    h: &H,
+    schema: &str,
+    pairs: &[(&str, &str)],
+) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = pairs
+        .iter()
+        .map(|(code, _)| {
+            let (flat, explicit) = wind_store::wdict::split_spaced_code(code);
+            // ü 拼写归一（`xv` → `xu`、`nue` → `nve`）。**落库 key 与查询侧必须同域**：
+            // 查询侧 `PinyinEngine::convert` 已把击键归一成正字法形态，key 若停在 `xv`
+            // 就成了「加得进、打不出」——用户看得见这条词，永远召不回。
+            //
+            // ⚠️ 必须先于下面「显式边界不求解」的分流：带空格的码（`nue yao`）漏了它就只有
+            // 「手打空格声明切分」的用户中招，而那恰恰是最难复现的一档。
+            // 归一化是等长替换，故 `explicit` 这个按位置算的 bitmask 不受影响。
+            (normalize_pinyin_code(h, schema, flat), explicit)
+        })
+        .collect();
+    let todo: Vec<usize> = (0..out.len()).filter(|&i| out[i].1 == 0).collect();
+    if todo.is_empty() {
+        return out;
     }
-    let res = h
-        .engine_mgr()
-        .resolve_boundaries(schema, &[(flat.as_str(), text)])
-        .into_iter()
-        .next()
-        .unwrap_or(wind_engine::BoundaryResolution::NoInfo);
-    // 探测器：手输码落在契约之外时留一条痕。**不改变行为**（照旧落 boundary=0），
-    // 它是「有多少手输码求解不出」的唯一观测点——这类词的简拼会退化成 DAG 现猜，
-    // 而那在歧义码上必错，用户侧的表现是「加了词但简拼召不回」，无从追溯。
-    //
-    // ⚠️ 用 `debug!` 而非 `info!`：本行含 code 与 text，属用户词库内容。
-    // INFO 生产默认开启，不得记录用户输入类信息。
-    if res == wind_engine::BoundaryResolution::Unresolvable {
-        tracing::debug!(
-            "加词：拼音码求解失败，按无边界落库 code={} text={}",
-            flat,
-            text
-        );
+    let ask: Vec<(&str, &str)> = todo
+        .iter()
+        .map(|&i| (out[i].0.as_str(), pairs[i].1))
+        .collect();
+    let res = h.engine_mgr().resolve_boundaries(schema, &ask);
+    let resolved: Vec<(usize, wind_engine::BoundaryResolution)> = todo
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| {
+            (
+                i,
+                res.get(k)
+                    .copied()
+                    .unwrap_or(wind_engine::BoundaryResolution::NoInfo),
+            )
+        })
+        .collect();
+    for (i, r) in resolved {
+        // 探测器：手输码落在契约之外时留一条痕。**不改变行为**（照旧落 boundary=0），
+        // 它是「有多少手输码求解不出」的唯一观测点——这类词的简拼会退化成 DAG 现猜，
+        // 而那在歧义码上必错，用户侧的表现是「加了词但简拼召不回」，无从追溯。
+        //
+        // ⚠️ 用 `debug!` 而非 `info!`：本行含 code 与 text，属用户词库内容。
+        // INFO 生产默认开启，不得记录用户输入类信息。
+        if r == wind_engine::BoundaryResolution::Unresolvable {
+            tracing::debug!(
+                "加词：拼音码求解失败，按无边界落库 code={} text={}",
+                out[i].0,
+                pairs[i].1
+            );
+        }
+        out[i].1 = r.boundary();
     }
-    (flat, res.boundary())
+    out
 }
 
 /// 目标方案是否拼音族——决定归一化策略与是否执行准入判据。

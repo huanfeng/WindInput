@@ -36,6 +36,8 @@ siphasher = "1"
 base64 = "0.22"
 
 [dev-dependencies]
+# 批量写测试数文本文件的提交次数（`text::fold` 的测试钩子）、取长度上限常量。
+wind-userdata = { path = "../wind-userdata" }
 # 只供测试对照内置格式表条数（quick.list 不该漏条目）。
 wind-quick-input = { path = "../wind-quick-input" }
 wind-bridge = { path = "../wind-bridge" }

@@ -81,7 +81,29 @@ fn merge_row(existing: Option<(i32, u64)>, row: &UserWord) -> (RowEffect, (i32, 
     }
 }
 
-fn check_len(code: &str, text: &str) -> anyhow::Result<()> {
+/// 同批重复的键按逐条加词的结果合并：权重取 max、边界取第一个非 0 的；保留首次出现的次序。
+pub(crate) fn merge_same_keys(rows: &[UserWord]) -> Vec<UserWord> {
+    let mut at: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+    let mut out: Vec<UserWord> = Vec::with_capacity(rows.len());
+    for r in rows {
+        match at.get(&(r.code.as_str(), r.text.as_str())) {
+            Some(&i) => {
+                let m = &mut out[i];
+                m.weight = m.weight.max(r.weight);
+                if m.boundary == 0 {
+                    m.boundary = r.boundary;
+                }
+            }
+            None => {
+                at.insert((r.code.as_str(), r.text.as_str()), out.len());
+                out.push(r.clone());
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn check_len(code: &str, text: &str) -> anyhow::Result<()> {
     let n = text.chars().count();
     if n > USER_TEXT_MAX_CHARS {
         anyhow::bail!("词条文本过长：{n} 字（上限 {USER_TEXT_MAX_CHARS}）");
@@ -95,7 +117,7 @@ fn check_len(code: &str, text: &str) -> anyhow::Result<()> {
 
 impl Runtime {
     /// 新增或合并一个用户词的操作：已存在 ⇒ 权重取 max、旧边界为 0 时补上（无变化返回 None）。
-    fn user_upsert_op(
+    pub(crate) fn user_upsert_op(
         &self,
         schema: &str,
         code: &str,
@@ -149,6 +171,33 @@ impl Runtime {
         if self.ud.get(U, schema, code, text).is_some() {
             self.ud
                 .apply(U, schema, OpKind::Delete, code, text, Payload::None, 0)?;
+        }
+        self.bump_words(schema);
+        Ok(())
+    }
+
+    /// 一批 [`Self::add_user_word`]：先全部校验长度（任一条过长整批不写），再一次 `apply_batch`。
+    /// 同批重复的键先按逐条调用的结果合并（权重取 max、边界取第一个非 0 的）。
+    pub fn add_user_words(&self, schema: &str, rows: &[UserWord]) -> anyhow::Result<()> {
+        for r in rows {
+            check_len(&r.code, &r.text)?;
+        }
+        let ops: Vec<Op> = merge_same_keys(rows)
+            .iter()
+            .filter_map(|r| self.user_upsert_op(schema, &r.code, &r.text, r.weight, r.boundary))
+            .collect();
+        if !ops.is_empty() {
+            self.ud.apply_batch(&ops)?;
+        }
+        self.bump_words(schema);
+        Ok(())
+    }
+
+    /// 一批 [`Self::remove_user_word`]：不存在的跳过，其余一次 `apply_batch`。
+    pub fn remove_user_words(&self, schema: &str, keys: &[(String, String)]) -> anyhow::Result<()> {
+        let ops = super::delete_ops(&self.ud, U, schema, keys);
+        if !ops.is_empty() {
+            self.ud.apply_batch(&ops)?;
         }
         self.bump_words(schema);
         Ok(())

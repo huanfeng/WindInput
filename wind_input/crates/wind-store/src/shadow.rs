@@ -378,6 +378,32 @@ impl Store {
         self.modify_shadow(schema, code, |rec| rec.apply_remove(word, cand_id))
     }
 
+    /// 一批 [`Self::remove_shadow_rule`]（`(code, word, cand_id)`）：按编码分组，一次提交。
+    pub fn remove_shadow_rules(
+        &self,
+        schema: &str,
+        rules: &[(String, String, Option<String>)],
+    ) -> anyhow::Result<()> {
+        if rules.is_empty() {
+            return Ok(());
+        }
+        // 同一编码只能出现一次：`modify_shadows` 对每个编码都从文件现状读起，重复的后一组会盖掉前一组
+        let mut codes: Vec<&str> = Vec::new();
+        let mut groups: HashMap<&str, Vec<(&str, Option<&str>)>> = HashMap::new();
+        for (code, word, id) in rules {
+            let g = groups.entry(code.as_str()).or_insert_with(|| {
+                codes.push(code.as_str());
+                Vec::new()
+            });
+            g.push((word.as_str(), id.as_deref()));
+        }
+        self.modify_shadows(schema, &codes, &mut |code, rec| {
+            for (word, id) in groups.get(code).into_iter().flat_map(|v| v.iter()) {
+                rec.apply_remove(word, *id);
+            }
+        })
+    }
+
     /// `words`（存储域的 `(扁平码, 文本)`）命中的删除规则，每条为 `(规则键, 文本, 命中的词条码)`。
     ///
     /// 规则键是**输入码**，与词条码不一定同形（全拼保留手动分隔符 `'`、ü 可能敲成 `v`），由
