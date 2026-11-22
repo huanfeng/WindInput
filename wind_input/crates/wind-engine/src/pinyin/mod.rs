@@ -1569,7 +1569,15 @@ impl PinyinEngine {
         // 纠错召回的整串候选：主切分不走纠错边，`completed` 覆盖不到它（`gognping` → 空串），
         // 按所打码切分显示成 `gogn'ping`。
         // 只认纠错候选：关纠错时这一支结构上不可达。
-        if c.is_corrected && boundary != 0 && c.code == raw_input && !c.is_abbrev && !c.is_sentence
+        // 末尾半截纠错（`konglon` 的「恐龙」，`lon` 对齐判作前缀、不标纠错）同样是纠错召回的整串候选，
+        // 码即所打码、边界在击键空间，不跟上就退回主切分显示成 `kong'lo'n`，与它吃满整串自相矛盾。
+        let recalled_by_correction =
+            c.is_corrected || (c.is_fuzzy && c.meta.fuzzy_typed_boundary != 0);
+        if recalled_by_correction
+            && boundary != 0
+            && c.code == raw_input
+            && !c.is_abbrev
+            && !c.is_sentence
         {
             return Some(cache.get((3, boundary, raw_input.len()), || {
                 render_preedit(raw_input, boundary, "")

@@ -20,6 +20,11 @@ fn has_data() -> bool {
 
 /// 敲入 `input` 后的全部候选文字（界面序，不含标记）。
 fn all_texts(input: &str) -> Vec<String> {
+    run(input).0
+}
+
+/// 敲入 `input` 后的（全部候选文字，编码栏）。
+fn run(input: &str) -> (Vec<String>, String) {
     let mut c = Config::default();
     c.schema.available = vec!["pinyin".into()];
     c.schema.active = "pinyin".into();
@@ -38,7 +43,7 @@ fn all_texts(input: &str) -> Vec<String> {
             seq_char: 0,
         });
     }
-    coord.debug_all_candidate_texts()
+    (coord.debug_all_candidate_texts(), coord.debug_preedit())
 }
 
 fn rank(all: &[String], text: &str) -> Option<usize> {
@@ -85,4 +90,16 @@ fn corrected_full_reading_beats_same_text_abbrev_reading() {
         let all = all_texts(input);
         assert_eq!(rank(&all, text), Some(0), "{input}: {text} 应居首：{all:?}");
     }
+}
+
+/// 首选是吃满整串的纠错候选时，编码栏按所打码切分：`konglon` 的「恐龙」显示 `kong'lon`，
+/// 不能退回主切分的 `kong'lo'n`（候选吃满 7 键、编码栏却拆成三段）。
+#[test]
+fn preedit_follows_a_trailing_partial_correction_candidate() {
+    if !has_data() {
+        return;
+    }
+    let (all, preedit) = run("konglon");
+    assert_eq!(rank(&all, "恐龙"), Some(0), "{all:?}");
+    assert_eq!(preedit, "kong'lon");
 }
