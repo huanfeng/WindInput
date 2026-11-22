@@ -487,6 +487,19 @@ mod tests {
     }
 
     #[test]
+    fn in_memory_config_refresh_emits_config_reloaded() {
+        let c = coord("refresh_lifecycle");
+        let rx = connect(&c, &["mode"]);
+        c.refresh_config_in_memory(|cfg| cfg.input.s2t.enabled = true);
+        let got = drain(&rx);
+        assert!(
+            got.iter()
+                .any(|m| matches!(m, Msg::Lifecycle(l) if l.event == "config_reloaded")),
+            "托盘 / 菜单改配置也要通知扩展: {got:?}"
+        );
+    }
+
+    #[test]
     fn key_class_grant_hides_key_name() {
         let c = coord("class");
         let rx = connect(&c, &["key.class"]);

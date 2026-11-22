@@ -5236,6 +5236,8 @@ impl Coordinator {
         self.engine_mgr.rebuild_charsets(&bundle.config);
         self.rebuild_comment_lib(&bundle.config);
         *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
+        // 托盘 / 右键菜单 / 命令栏改配置走这里而不经 `reload_user_config`，扩展同样要知道。
+        self.hook_lifecycle(wind_hook::msg::lifecycle::CONFIG_RELOADED);
         // 状态气泡去重缓存只在"内容配置不变"的前提下有效：改了 ui.status.items 之类后，
         // 同一状态该合成出不同文本，留着旧缓存会把改动后的第一次显示误判成"内容没变"而吞掉。
         self.last_status_text

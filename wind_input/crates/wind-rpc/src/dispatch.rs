@@ -236,11 +236,13 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
         // 单字段当前值（含四层合并）：补 config.get 只能整份的缺口。
         "config.getItem" => get_item(params),
         "config.reload" => {
-            // 变更通知：广播一个 config 变更事件，供订阅者（TSF/UI）刷新。
-            state
-                .events
-                .emit_config_changed(json!({ "reason": "reload" }));
-            Ok(json!({ "ok": true }))
+            // 手改 `config.toml` 或被别的工具改过之后，请求核心重读并应用（core 不监听文件）；
+            // 随后广播变更事件，供订阅者（TSF/UI）刷新。
+            let needs_restart = state.core.apply_config();
+            state.events.emit_config_changed(
+                json!({ "reason": "reload", "needsRestart": needs_restart }),
+            );
+            Ok(json!({ "ok": true, "needsRestart": needs_restart }))
         }
         // compat.*：转发到宿主；写方法成功后广播 compat.changed（右键菜单的写入不经这里，
         // 不广播，设置页靠重获焦点时重新拉取兜底）。
@@ -843,6 +845,18 @@ mod tests {
         assert!(entries[0].get("warning").is_none(), "寻常键不应有 warning");
         // 只读：不得触发热重载（也证明未走落盘通路）。
         assert!(!core.config_applied.load(Ordering::SeqCst));
+    }
+
+    /// 手改 config.toml 之后靠它让核心重读：只广播不重载的话，改动要等下次保存才生效。
+    #[test]
+    fn config_reload_applies_config_and_broadcasts() {
+        let core = FakeCore::new();
+        let st = DispatchState::new(core.clone(), "dev").expect("capabilities 应能加载");
+        let resp = dispatch(&st, req("config.reload", json!({})));
+        let r = resp.result.unwrap();
+        assert_eq!(r["ok"], json!(true));
+        assert_eq!(r["needsRestart"], json!(false));
+        assert!(core.config_applied.load(Ordering::SeqCst), "应触发热重载");
     }
 
     /// 风险提示要真的过得了 RPC 面——`warning` 是 core 侧 `PatchEntry` 的新字段，

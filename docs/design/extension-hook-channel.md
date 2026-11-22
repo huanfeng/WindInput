@@ -176,7 +176,7 @@ key 事件带具体按键，敏感度等同键盘记录器。以下全部是**�
     新服务拉起全新的一批，所以「重启」对扩展就是新握手 + `started`，不需要单独的事件。
   - `lifecycle.stopping`：宿主收到 `shutdown`（服务重启/退出，或扩展全部停用）时先广播再收走扩展；
     队列关闭时会写完已入队消息，扩展有宽限期收尾。崩溃或被强杀时发不出。
-  - `lifecycle.config_reloaded`：核心配置热重载后发（与 `[extensions]` 是否变化无关）。
+  - `lifecycle.config_reloaded`：配置变化后发，与 `[extensions]` 是否变化无关。覆盖三条路径：`reload_user_config`（设置端应用、`config set`/`applyPatch`、`config.reload`）、`refresh_config_in_memory`（托盘 / 右键菜单 / 命令栏改配置）。扩展选项变了另有 `options` 消息。手改 `config.toml` 需调 `config.reload` 才会触发（core 不监听文件）。
   - 不加新档位：位图已用 7/8 位，且这些事件不含输入内容。代价是用户无法单独关掉它们，可接受。
 - `key` 只表示**按下**，没有抬起事件（理由见 §8.2）。
 - `key.handled`：输入法是否吃掉了这个键。
