@@ -17,6 +17,19 @@ fn data_dir() -> Option<PathBuf> {
 }
 
 fn texts(dir: &std::path::Path, correction: bool, input: &str, limit: usize) -> Vec<String> {
+    cands(dir, correction, input, limit)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
+}
+
+/// (文字, 是否经纠错)。
+fn cands(
+    dir: &std::path::Path,
+    correction: bool,
+    input: &str,
+    limit: usize,
+) -> Vec<(String, bool)> {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["pinyin".to_string()];
     cfg.schema.active = "pinyin".to_string();
@@ -26,12 +39,15 @@ fn texts(dir: &std::path::Path, correction: bool, input: &str, limit: usize) -> 
     mgr.convert_with("pinyin", input, limit)
         .candidates
         .into_iter()
-        .map(|c| c.text)
+        .map(|c| (c.text, c.is_corrected))
         .collect()
 }
 
 /// 关纠错时前 50 条里的每条候选，开纠错后：(a) 仍在（允许被挤到 50 条之后，故开纠错侧取
 /// 1000 条）；(b) 彼此相对顺序不变。
+///
+/// (b) 不含开纠错后改走纠错读法的文字：同文的简拼读法只吃前几个键，纠错读法吃满整串时
+/// 换成后者（`gogn` 的「工」），它从简拼层挪到纠错层是有意的。
 #[test]
 fn correction_never_removes_candidates() {
     let Some(dir) = data_dir() else {
@@ -47,14 +63,25 @@ fn correction_never_removes_candidates() {
     ];
     for input in inputs {
         let off = texts(&dir, false, input, 50);
-        let on = texts(&dir, true, input, 1000);
+        let on_all = cands(&dir, true, input, 1000);
+        let on: Vec<String> = on_all.iter().map(|(t, _)| t.clone()).collect();
+        let moved: Vec<&String> = on_all.iter().filter(|(_, c)| *c).map(|(t, _)| t).collect();
         for t in &off {
             if !on.contains(t) {
                 lost.push(format!("{input}: {t}"));
             }
         }
-        let kept: Vec<&String> = on.iter().filter(|t| off.contains(t)).collect();
-        let expect: Vec<&String> = off.iter().filter(|t| on.contains(t)).collect();
+        let stays = |t: &&String| !moved.contains(t);
+        let kept: Vec<&String> = on
+            .iter()
+            .filter(|t| off.contains(t))
+            .filter(stays)
+            .collect();
+        let expect: Vec<&String> = off
+            .iter()
+            .filter(|t| on.contains(t))
+            .filter(stays)
+            .collect();
         if kept != expect {
             reordered.push(input);
         }

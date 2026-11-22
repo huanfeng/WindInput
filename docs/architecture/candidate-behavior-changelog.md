@@ -581,3 +581,16 @@
 - 钉住的测试：`shortcut_ownership_tests`、`wind_tsf/tests/ctrl_alt_cleanup_policy_test.cpp`，
   以及 `input_flow` 的 Ctrl 组合守卫、`quick_input_select_key` 的候选快捷键回归。
 - 来源：论坛 t398、Windows 记事本 TSF 日志。
+
+## 2026-11-22 · 拼音纠错：纠错读法吃满整串时不再被同文简拼读法挡掉
+
+- 变化：简拼开着时，`buyogn`（不用）、`konglon`（恐龙）这类「非首字写错」的输入，此前同文的简拼读法
+  （`bu`+`y`，只吃前几个键）先占位，纠错读法被去重挡掉，想打的词沉在简拼层第 3 位；
+  现在纠错读法吃满整串时换掉同文的简拼读法，排到首位。
+- 触发条件：开启拼音纠错，且输入含纠错规则命中的音节、同文词同时有简拼读法。同文的精确读法仍优先。
+- 回退配置：无单独开关；关闭 `input.correction.enabled` 可停用纠错。
+- 钉住的测试：`wind-coordinator/tests/pinyin_correction_visibility.rs`
+  （`corrected_full_reading_beats_same_text_abbrev_reading`）。
+- 评测（`pinyin_eval`，界面序）：出厂规则下 A–F 逐位不变，G 类首选 21.4%→22.6%；八条规则全开时
+  G 类首选 71.6%→82.7%、首页 98.2%→99.2%，F 类（合法简拼与纠错冲突）首选 67.0%→66.7%（−6/2079）。
+- 来源：GH#375。

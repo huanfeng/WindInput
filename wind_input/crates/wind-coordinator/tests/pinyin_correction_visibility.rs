@@ -73,3 +73,16 @@ fn xign_shows_correction_and_keeps_abbrev() {
     assert!(rank(&all, "型").is_some(), "{all:?}");
     assert!(rank(&all, "习惯").is_some(), "{all:?}");
 }
+
+/// 非首字的纠错读法吃满整串，不被同文的简拼读法（`bu`+`y`）去重挡掉：
+/// 简拼开（出厂）时「不用」「恐龙」也要排在简拼候选之前，而不是沉到第 3 位。
+#[test]
+fn corrected_full_reading_beats_same_text_abbrev_reading() {
+    if !has_data() {
+        return;
+    }
+    for (input, text) in [("buyogn", "不用"), ("konglon", "恐龙")] {
+        let all = all_texts(input);
+        assert_eq!(rank(&all, text), Some(0), "{input}: {text} 应居首：{all:?}");
+    }
+}

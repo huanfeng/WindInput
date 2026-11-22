@@ -5590,6 +5590,15 @@ impl Engine for PinyinEngine {
                     for h in self.lookup_corrected(&code, &corr_syls[..end]) {
                         let learn = h.dict.clone();
                         let typed = h.typed_boundary;
+                        // 同文的简拼读法只吃了前几个键（`buyogn` 的「不用」= `bu`+`y`），纠错读法吃满
+                        // 整段：换掉它，否则纠错读法被 `push_unique` 的同文占位挡掉，想打的词沉在
+                        // 简拼层。同文的非简拼候选（精确读法）仍照旧优先。
+                        candidates.retain(|c| {
+                            !(c.text == h.text
+                                && c.is_abbrev
+                                && c.consumed_length != 0
+                                && c.consumed_length < code.len())
+                        });
                         let before = candidates.len();
                         push_unique(
                             &mut candidates,
