@@ -71,6 +71,15 @@ base_order = 3
 # 整库同权 ⟹ 库内自动按 natural_order（文件顺序）排列，即该库 yaml 里 `sort: original` 的本意。
 default_weight = 500
 
+[[dictionaries]]
+id = "wubi86_frost"
+label = "白霜高频补充"
+description = "从白霜拼音基础词库生成的五笔高频缺词，默认关闭"
+path = "wubi86/wubi86_frost.dict.yaml"
+type = "rime_codetable"
+default_enabled = false
+base_order = 4
+
 [encoder]
 max_word_length = 10
 

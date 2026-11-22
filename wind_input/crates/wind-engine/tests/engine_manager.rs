@@ -32,6 +32,66 @@ fn schema_exists(dir: &std::path::Path, id: &str) -> bool {
         || dir.join(format!("schemas/{}.schema.yaml", id)).exists()
 }
 
+#[test]
+fn wubi_frost_supplement_is_opt_in() {
+    let id = format!(
+        "wubi_frost_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let dir = std::env::temp_dir().join(&id);
+    let schemas = dir.join("schemas");
+    let dict_dir = schemas.join("wubi86");
+    std::fs::create_dir_all(&dict_dir).unwrap();
+    let schema = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas/wubi86.schema.toml"),
+    )
+    .unwrap()
+    .replacen("id = \"wubi86\"", &format!("id = \"{id}\""), 1);
+    let schema_path = schemas.join(format!("{id}.schema.toml"));
+    std::fs::write(&schema_path, &schema).unwrap();
+    let dict = |body: &str| {
+        format!("---\nname: test\ncolumns:\n  - code\n  - text\n  - weight\n...\n{body}")
+    };
+    std::fs::write(
+        dict_dir.join("wubi86_jidian.dict.yaml"),
+        dict("rvtf\t其他\t150\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        dict_dir.join("wubi86_frost.dict.yaml"),
+        dict("rvtf\t招行\t31\n"),
+    )
+    .unwrap();
+    let cfg = make_config(&[&id]);
+    let mgr =
+        EngineManager::with_store_override(&cfg, Some(&dir), None, Some(dir.join("overrides")));
+    let has_word = |m: &EngineManager| {
+        m.convert("rvtf", 50)
+            .candidates
+            .iter()
+            .any(|c| c.text == "招行")
+    };
+    assert!(!has_word(&mgr), "补充库默认关闭");
+
+    let overrides = dir.join("overrides");
+    std::fs::create_dir_all(&overrides).unwrap();
+    std::fs::write(
+        overrides.join(format!("{id}.toml")),
+        "[[dictionaries]]\nid = \"wubi86_frost\"\nenabled = true\n",
+    )
+    .unwrap();
+    mgr.set_dict_enabled_live(&id, "wubi86_frost", true);
+    let result = mgr.convert("rvtf", 50);
+    assert!(result.candidates.iter().any(|c| c.text == "招行"));
+    assert_eq!(result.candidates[0].text, "其他");
+    drop(mgr);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// english 方案（隐藏，懒加载）：ensure_schema 应可加载，convert_with 前缀查词命中，
 /// 候选来源标记为 English，且无自动上屏。词库/schema 缺失时跳过。
 #[test]

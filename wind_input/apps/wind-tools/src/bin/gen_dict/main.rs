@@ -14,6 +14,7 @@ mod boost;
 mod config;
 mod entry;
 mod extra;
+mod frost;
 mod order_report;
 mod parse;
 mod reverse;
@@ -136,10 +137,10 @@ fn main() -> anyhow::Result<()> {
     }
     eprintln!();
 
-    run(&cfg, &paths, &version)
+    run(&cfg, &paths, &version, &args.cache)
 }
 
-fn run(cfg: &Config, paths: &config::Paths, version: &str) -> anyhow::Result<()> {
+fn run(cfg: &Config, paths: &config::Paths, version: &str, cache: &Path) -> anyhow::Result<()> {
     let mut log = |s: String| eprintln!("{s}");
 
     // ── 1. unigram ────────────────────────────────────
@@ -367,10 +368,30 @@ fn run(cfg: &Config, paths: &config::Paths, version: &str) -> anyhow::Result<()>
         .unwrap_or(0);
     eprintln!("      完成: {} 条，{size_kb} KB", kept.len());
 
-    if cfg.extra.enabled
-        && let Err(e) = process_extra(cfg, paths, &unigram, log_median, &char_codes, version)
-    {
-        eprintln!("      [警告] extra 处理失败: {e}");
+    if cfg.extra.enabled {
+        let input = paths
+            .extra_input
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("extra.input_path 未配置"))?;
+        if !input.is_file() {
+            anyhow::bail!("五笔扩展词库不存在: {}", input.display());
+        }
+        process_extra(cfg, paths, &unigram, log_median, &char_codes, version)?;
+        let extra_path = extra::extra_output_path(&paths.output, &cfg.output_name, "extra");
+        let existing_extra = parse::parse_jidian(&extra_path)?;
+        let source = cache
+            .join("rime-frost")
+            .join("cn_dicts")
+            .join("base.dict.yaml");
+        let supplement =
+            frost::generate(&source, &kept, &existing_extra, cfg.fallback.priority_10)?;
+        let supplement_path = paths.output.with_file_name("wubi86_frost.dict.yaml");
+        writer::write_frost_dict(&supplement_path, &supplement, version)?;
+        eprintln!(
+            "      白霜补充词库: {} 条 → {}",
+            supplement.len(),
+            supplement_path.display()
+        );
     }
 
     // 原样透传的词库：只清洗头部，条目顺序即数据，不得重排

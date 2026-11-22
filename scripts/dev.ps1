@@ -828,6 +828,7 @@ function Verify-DistData ([string]$outdir = $BuildDir) {
         # 否则打出来的包五笔方案整个不可用
         @{ Path = "schemas\wubi86\wubi86_jidian.dict.yaml";       Min = 1000000 },
         @{ Path = "schemas\wubi86\wubi86_jidian_extra.dict.yaml"; Min = 10000 },
+        @{ Path = "schemas\wubi86\wubi86_frost.dict.yaml";        Min = 100 },
         @{ Path = "schemas\wubi86\wubi86_jidian_emoji.dict.yaml"; Min = 1000 },
         @{ Path = "schemas\wubi86\wubi86_jidian_extra_district.dict.yaml"; Min = 10000 },
         # 辅助码表同为生成物、同样不入库。功能虽出厂关闭, 缺表的后果仍是「用户在设置里

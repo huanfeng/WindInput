@@ -94,6 +94,18 @@
 - 来源：内部（2026-11-18 靶机日志定位，`wind_tsf.acad.8056.log`）
 - 分析与试过的写法：[`pair-commit-host-compat-notes.md`](pair-commit-host-compat-notes.md)
 
+## 2026-11-20 · 五笔白霜高频补充词库（0.133）
+
+- 合入：待填（push 前回填）；范围：五笔方案。
+- 变化：启用补充词库后，原词库缺失的白霜高频词可按五笔词组编码召回，例如 `rvtf` 的「招行」。
+  实测（Frost 基础词库，频次 ≥ 1000）生成 9,885 词、约 0.18 MB（yaml）；权重 30～56，低于主库最低权重 120，
+  同码时排在主库词之后。其中约一半与主库已有词**同码**（重码），也含少量短语片段（如「也可以用」「三年后」），
+  这是出厂关闭的原因。
+- 触发条件：在方案扩展词库中启用「白霜高频补充」；出厂关闭。
+- 回退旧行为：关闭该扩展词库。
+- 钉住的测试：`wind-tools` 的 `gen_dict::frost::tests::generates_only_missing_high_frequency_words_with_full_codes`；
+  `wind-engine/tests/engine_manager.rs::wubi_frost_supplement_is_opt_in`。
+
 ## 2026-11-15 · 码表整句不再混入直通命令/模板源码；纯文本直通除外（0.132）
 
 - 合入：待填（push 前回填）；范围：码表整句模式
