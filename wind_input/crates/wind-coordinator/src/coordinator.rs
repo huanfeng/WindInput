@@ -16582,6 +16582,35 @@ mod caret_compat_tests {
         }
     }
 
+    /// 组合期间的普通 caret_update 与 probe 同源：该宿主的组合坐标恒不可信，
+    /// 首显用了空闲坐标后，这一帧不得把缓存换成陈旧值、也不得重锁候选窗。
+    #[test]
+    fn stale_probe_guard_host_ignores_caret_update_during_composition() {
+        let c = coord_with_idle_report();
+        c.handle_caret_update(&probe_at(473, 224, 35));
+        let st = c.state.lock().unwrap();
+        assert_eq!(
+            (st.caret_x, st.caret_y, st.caret_height),
+            (745, 1007, 20),
+            "组合期的 caret_update 不得覆盖组合前的空闲坐标"
+        );
+        assert!(
+            c.caret_cache_is_idle_report
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "空闲上报标记要保留，后续帧才继续被挡"
+        );
+    }
+
+    /// 没配守卫的宿主：组合期的 caret_update 照常采信（行为一字不差）。
+    #[test]
+    fn caret_update_during_composition_is_trusted_without_the_guard() {
+        let c = coord_with_idle_report();
+        c.active_compat.lock().unwrap().stale_probe_guard = false;
+        c.handle_caret_update(&probe_at(473, 224, 35));
+        let st = c.state.lock().unwrap();
+        assert_eq!((st.caret_x, st.caret_y), (473, 224));
+    }
+
     /// 判据的前提是**手上有宿主刚报的空闲坐标**。没有它时缓存本身也是旧的，
     /// 没有更好的选择，probe 应照常参与——否则该宿主会退化成「永远等权威坐标」。
     #[test]

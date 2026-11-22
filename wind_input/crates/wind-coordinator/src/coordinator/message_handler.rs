@@ -3763,6 +3763,27 @@ impl MessageHandler for Coordinator {
             );
             return;
         }
+        // `stale_probe_guard` 宿主的组合期坐标整条来源都不可信（见 `handle_caret_probe` 的同名
+        // 判据），probe 已拒，普通 caret_update 同源，必须一并挡掉，否则首显用对了空闲坐标，
+        // 几十毫秒后第一帧 caret_update 就把候选窗重锁回错位（Beyond Compare 实测：
+        // 组合起点恒为 (473,224)，与真实位置无关）。把上面已写入的缓存还原，空闲坐标继续当锚点。
+        // 没有空闲上报时不生效——那时缓存本身也是旧的，没有更好的依据。
+        if wind_ipc::protocol::caret_source::is_tsf(data.source)
+            && active_compat.stale_probe_guard
+            && self
+                .caret_cache_is_idle_report
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            debug!(
+                "caret_update → 忽略: 该宿主组合期坐标恒不可信，沿用组合前空闲上报 ({},{})（本帧 ({},{})）",
+                prev_x, prev_y, data.x, data.y
+            );
+            state.caret_x = prev_x;
+            state.caret_y = prev_y;
+            state.caret_height = prev_height;
+            state.caret_source = prev_source;
+            return;
+        }
         if wind_ipc::protocol::caret_source::is_tsf(data.source) {
             self.tsf_frame_seen_in_composition
                 .store(true, std::sync::atomic::Ordering::Relaxed);

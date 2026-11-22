@@ -226,6 +226,11 @@ comment = "QQNT：长组合时交替上报组合起点与插入点，不当作�
 composition_start_pair_guard = true
 
 [[apps]]
+process = "BCompare.exe"
+comment = "Beyond Compare：组合起点之后的矩形恒为窗口左上角的固定值，组合前上报的空闲坐标才对"
+stale_probe_guard = true
+
+[[apps]]
 process = "Code.exe"
 comment = "VS Code：同 QQNT 的组合起点交替上报"
 composition_start_pair_guard = true
