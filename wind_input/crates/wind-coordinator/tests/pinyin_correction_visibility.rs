@@ -103,3 +103,19 @@ fn preedit_follows_a_trailing_partial_correction_candidate() {
     assert_eq!(rank(&all, "恐龙"), Some(0), "{all:?}");
     assert_eq!(preedit, "kong'lon");
 }
+
+/// 纠错音节后接简拼尾：`yogny`（yogn→yong + 声母 y）出「拥有」，编码栏按所打击键切成 `yogn'y`；
+/// 纠错音节在中间（`buyognx`）同样可用（纠错不占首选，合法的整句读法仍在前）。
+#[test]
+fn corrected_syllable_followed_by_abbrev_tail() {
+    if !has_data() {
+        return;
+    }
+    for (input, text, preedit) in [("yogny", "拥有", "yogn'y"), ("gognp", "公平", "gogn'p")] {
+        let (all, pre) = run(input);
+        assert_eq!(rank(&all, text), Some(0), "{input}: {text} 应居首：{all:?}");
+        assert_eq!(pre, preedit, "{input} 的编码栏");
+    }
+    let all = all_texts("buyognx");
+    assert!(rank(&all, "不用心").is_some_and(|r| r < 5), "{all:?}");
+}

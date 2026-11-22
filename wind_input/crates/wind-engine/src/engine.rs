@@ -255,6 +255,8 @@ pub struct ConvertOptions {
     /// （见其文档里 Viterbi 整句绕过的说明），而简拼候选另有两条 push 路径；且
     /// `rare_admit_fn` 只对生僻字模式给闭包，overlay 引用拼音方案时依然漏。
     pub no_abbrev_quota: bool,
+    /// 不做「纠错音节 + 简拼尾」的二次转换（纠错召回步内部递归用，防止替换后的串再触发一次）。
+    pub no_correction_tail: bool,
     /// 覆写 [`crate::pinyin::Config::enable_partial_final`]（尾部残码参与整句解码，step 2c）。
     /// `None` = 不覆写，用引擎自身配置。
     ///

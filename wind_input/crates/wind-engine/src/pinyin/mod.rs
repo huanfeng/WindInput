@@ -1556,6 +1556,14 @@ impl PinyinEngine {
         partial: &str,
         cache: &mut PreeditSplitCache,
     ) -> Option<Arc<str>> {
+        // 纠错音节 + 简拼尾：边界本就在所打击键域（含尾巴起点），整串直接渲染。
+        if c.meta.tail_typed_boundary != 0 {
+            return Some(
+                cache.get((4, c.meta.tail_typed_boundary, raw_input.len()), || {
+                    render_preedit(raw_input, c.meta.tail_typed_boundary, "")
+                }),
+            );
+        }
         let boundary = if c.boundary != 0 {
             c.boundary
         } else {
@@ -5587,6 +5595,9 @@ impl Engine for PinyinEngine {
         // 经本步新增的文字：截断时只占非纠错候选用剩的名额（见下方截断处）。不能只看
         // `is_corrected`——末尾打字途中的半截（`zhon`）对齐判作前缀、不标纠错。
         let mut correction_added: std::collections::HashSet<String> = Default::default();
+        // 经「纠错音节 + 简拼尾」并入的文字：`fill_pinyin_hints` 按候选自身的码判纠错、会把它们判成
+        // 非纠错，收尾处要补标回来（界面的 `*` 前缀、低置信待遇都看 `is_corrected`）。
+        let mut tail_corrected: std::collections::HashSet<String> = Default::default();
         if !self.fuzzy_config.correction.is_empty() && sp_result.is_none() && !has_sep {
             let corr_syls = Dag::build(query, trie).maximum_match_with_correction();
             let first_corr = corr_syls
@@ -5623,6 +5634,73 @@ impl Engine for PinyinEngine {
                             candidates[before].meta.learn_code = learn;
                             candidates[before].meta.fuzzy_typed_boundary = typed;
                             correction_added.insert(candidates[before].text.clone());
+                        }
+                    }
+                }
+            }
+            // 纠错音节后接简拼尾（`yogny` = yogn + y）：整串没有音节解释、上面只查得到完整音节，
+            // 尾巴没人认。把纠错拼写换成正确音节（`yongy`），交给同一套转换（混合简拼）再走一遍，
+            // 只收吃满整串的候选（混合简拼、前缀补全），按纠错计罚并入。替换后的串不再含纠错拼写，二次转换里
+            // 用 `no_correction_tail` 兜底防递归。
+            let prefix_len: usize = corr_syls.iter().map(String::len).sum();
+            if !opts.no_correction_tail
+                && first_corr.is_some()
+                && prefix_len < query.len()
+                && query.starts_with(&corr_syls.concat())
+            {
+                let fixed: Option<String> = corr_syls
+                    .iter()
+                    .map(|s| {
+                        if trie.is_correction_spelling(s) {
+                            self.fuzzy_config
+                                .correction
+                                .corrections_of(s)
+                                .first()
+                                .cloned()
+                        } else {
+                            Some(s.clone())
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .map(|v| v.concat() + &query[prefix_len..]);
+                // 各段起点（含尾巴起点）的击键域 bitmask，供编码栏切分。
+                let tail_boundary: u64 = corr_syls
+                    .iter()
+                    .scan(0usize, |pos, s| {
+                        *pos += s.len();
+                        Some(*pos)
+                    })
+                    .filter(|&p| p < 64)
+                    .fold(0u64, |m, p| m | (1u64 << p));
+                if let Some(fixed) = fixed {
+                    let mut sub = opts.clone();
+                    sub.no_correction_tail = true;
+                    if let Ok(r) = self.convert_with_opts(&fixed, max_candidates, sub) {
+                        for mut c in r.candidates {
+                            if c.is_partial || c.consumed_length != fixed.len() {
+                                continue;
+                            }
+                            // 同文已有吃满整串的候选就不换（精确读法优先）；只有更短的才被它顶掉。
+                            if candidates.iter().any(|e| {
+                                e.text == c.text
+                                    && (!e.is_abbrev
+                                        || e.consumed_length == 0
+                                        || e.consumed_length >= query.len())
+                            }) {
+                                continue;
+                            }
+                            candidates.retain(|e| e.text != c.text);
+                            c.weight = fuzzy_penalized(c.weight, correction::CORRECTION_EDITS);
+                            c.is_fuzzy = true;
+                            // 并入简拼层，与合法的简拼候选按（罚过的）权重竞争：前缀补全层本身压着
+                            // 简拼层，纠错尾巴凭它会越过用户真打的简拼词（`nagnd` 的「那个年代」）。
+                            c.is_abbrev = true;
+                            c.is_prefix = false;
+                            c.consumed_length = query.len();
+                            c.meta.tail_typed_boundary = tail_boundary;
+                            correction_added.insert(c.text.clone());
+                            tail_corrected.insert(c.text.clone());
+                            candidates.push(c);
                         }
                     }
                 }
@@ -5783,6 +5861,11 @@ impl Engine for PinyinEngine {
         let correction_on = !self.fuzzy_config.correction.is_empty();
         if correction_on {
             self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
+            for c in candidates.iter_mut() {
+                if tail_corrected.contains(&c.text) {
+                    c.is_corrected = true;
+                }
+            }
             wind_candidate::drop_corrected_duplicates(&mut candidates);
         }
         candidates.sort_by(engine_order);

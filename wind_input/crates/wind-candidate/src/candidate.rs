@@ -112,6 +112,11 @@ pub struct CandidateMeta {
     /// 不是 `maximum_match` 的 `pi|nan`。只服务编码栏切分（见 `preedit_split`），排序/造词/边界核对一律不读。
     #[serde(skip)]
     pub fuzzy_typed_boundary: u64,
+    /// 「纠错音节 + 简拼尾」候选的编码栏切分：**整串所打击键**的各段起点 bitmask（纠错前缀的
+    /// 各音节起点、外加尾巴的起点）。`0` = 不是这类候选。候选 `code` 是词典码、与所打击键不同域，
+    /// 取 `boundary` 切不对（`yogny` 显示成 `yo'gny`）。只服务编码栏切分。
+    #[serde(skip)]
+    pub tail_typed_boundary: u64,
     /// 高亮到这条候选时编码栏的拼音正文（`pi'nan`）：在本次 `convert` 的输入串里按这条候选
     /// 自己走的切分插 `'`，候选只覆盖前缀时尾部按最大匹配接着切。`None` = 拿不到可信切分
     /// （手动分隔符、双拼击键候选、无边界真值、补全等），编码栏退回首选那份。双拼下只有全拼

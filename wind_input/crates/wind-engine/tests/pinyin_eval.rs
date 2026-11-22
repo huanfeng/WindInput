@@ -293,6 +293,7 @@ enum Class {
     E,
     F,
     G,
+    H,
 }
 
 impl Class {
@@ -305,6 +306,7 @@ impl Class {
             Class::E => "E_short_abbrev",
             Class::F => "F_abbrev_correction_conflict",
             Class::G => "G_transposition_typo",
+            Class::H => "H_typo_abbrev_tail",
         }
     }
 
@@ -317,6 +319,7 @@ impl Class {
             Class::E => "E 短简拼 (zhge / zhy / baichx)",
             Class::F => "F 简拼/混合简拼撞纠错拼写 (xign / dnu)",
             Class::G => "G 换位错拼 (gognping / dignyue)",
+            Class::H => "H 错拼音节后接简拼尾 (yogny / gognp)",
         }
     }
 
@@ -328,7 +331,7 @@ impl Class {
     fn col4_meaning(self) -> &'static str {
         match self {
             Class::D => "首词命中",
-            Class::E | Class::F | Class::G => "无（击键不是音节）",
+            Class::E | Class::F | Class::G | Class::H => "无（击键不是音节）",
             _ => "切分正确",
         }
     }
@@ -797,6 +800,53 @@ fn build_transposition_samples(pool: &[Sample], rule: &'static str) -> Vec<Sampl
     out
 }
 
+/// H 类样本：**错拼音节 + 简拼尾**，期望 = 该词。同 G 取词里第一个有该规则错误拼写的音节，
+/// 换成错拼；其后各音节取声母（至少一个），其前各音节写全。同键留词频最高者。
+fn build_typo_abbrev_samples(pool: &[Sample], rule: &'static str) -> Vec<Sample> {
+    let rules = rules_only(rule);
+    let common = common_words(pool);
+    let mut by_input: HashMap<String, Sample> = HashMap::new();
+    for w in common
+        .iter()
+        .filter(|s| (2..=4).contains(&s.true_syls.len()))
+    {
+        let syls = &w.true_syls;
+        let Some((i, wrong)) = syls
+            .iter()
+            .enumerate()
+            .find_map(|(i, s)| rules.wrong_spellings_of(s).first().map(|x| (i, x.clone())))
+        else {
+            continue;
+        };
+        if i + 1 >= syls.len() {
+            continue;
+        }
+        let stroke: String = syls
+            .iter()
+            .enumerate()
+            .map(|(k, s)| match k {
+                k if k < i => s.clone(),
+                k if k == i => wrong.clone(),
+                _ => abbrev_initial(s).to_string(),
+            })
+            .collect();
+        by_input.entry(stroke.clone()).or_insert_with(|| Sample {
+            text: w.text.clone(),
+            input: stroke,
+            true_syls: syls.clone(),
+            mm: Vec::new(),
+            weight: w.weight,
+            unigram: w.unigram,
+            class: Class::H,
+            parts: Vec::new(),
+            form: rule,
+        });
+    }
+    let mut out: Vec<Sample> = by_input.into_values().collect();
+    out.sort_by(|a, b| a.input.cmp(&b.input));
+    out
+}
+
 // ---------------------------------------------------------------- 抽样
 
 /// 按词频分三层等量抽样，保证不全是低频词。
@@ -1074,7 +1124,7 @@ fn pinyin_eval_report() {
     *class_totals.entry(Class::E.key()).or_default() += e_pool.len();
     pools.insert(Class::E.key(), e_pool);
     // F/G 按规则分组构造，构造用的规则表与本轮引擎开哪几条无关——各档样本集相同才能逐条比。
-    let (f_by_rule, g_by_rule) = {
+    let (f_by_rule, g_by_rule, h_by_rule) = {
         let a_pool = pools
             .get(Class::A.key())
             .map(|v| v.as_slice())
@@ -1089,9 +1139,14 @@ fn pinyin_eval_report() {
         (
             by_rule(build_abbrev_conflict_samples),
             by_rule(build_transposition_samples),
+            by_rule(build_typo_abbrev_samples),
         )
     };
-    for (c, groups) in [(Class::F, &f_by_rule), (Class::G, &g_by_rule)] {
+    for (c, groups) in [
+        (Class::F, &f_by_rule),
+        (Class::G, &g_by_rule),
+        (Class::H, &h_by_rule),
+    ] {
         let pop: Vec<String> = groups
             .iter()
             .map(|(r, v)| format!("{r} {}", v.len()))
@@ -1151,6 +1206,13 @@ fn pinyin_eval_report() {
             .flat_map(|(_, v)| stratified_sample(v, per_rule, seed))
             .collect(),
     ));
+    samples.push((
+        Class::H,
+        h_by_rule
+            .into_iter()
+            .flat_map(|(_, v)| stratified_sample(v, per_rule, seed))
+            .collect(),
+    ));
     for (c, set) in &samples {
         println!("  抽样 {:<44} {:>6}", c.label(), set.len());
     }
@@ -1192,7 +1254,7 @@ fn pinyin_eval_report() {
                 }
                 sc.ui_mrr_sum += 1.0 / (r as f64 + 1.0);
             }
-            if misread_eval() && *class != Class::G {
+            if misread_eval() && !matches!(*class, Class::G | Class::H) {
                 mr[0] += 1;
                 let marked: Vec<(String, bool)> = ui
                     .iter()
@@ -1278,7 +1340,7 @@ fn pinyin_eval_report() {
             }
             // E/F/G 类击键不是音节（`zhge` 的 `zh` 是声母），切分判据无从成立，不计。
             match cands.first() {
-                _ if matches!(s.class, Class::E | Class::F | Class::G) => {}
+                _ if matches!(s.class, Class::E | Class::F | Class::G | Class::H) => {}
                 Some(top) if top.code == s.input && top.boundary != 0 && top.boundary == tm => {
                     sc.seg_ok += 1;
                 }
@@ -1352,7 +1414,10 @@ fn pinyin_eval_report() {
         println!("\n=== 误读表：打对的输入上首页（{PAGE} 条）的误读提示 ===");
         println!("类\t样本\t有提示的样本\t提示候选\t期望词被标");
         let mut tot = [0usize; 4];
-        for (class, m) in misread_stats.iter().filter(|(c, _)| *c != Class::G) {
+        for (class, m) in misread_stats
+            .iter()
+            .filter(|(c, _)| !matches!(c, Class::G | Class::H))
+        {
             println!("{}\t{}\t{}\t{}\t{}", class.key(), m[0], m[1], m[2], m[3]);
             for i in 0..4 {
                 tot[i] += m[i];
@@ -1579,7 +1644,7 @@ fn pinyin_eval_report() {
     }
 
     for (c, sc, _) in &scores {
-        if !matches!(c, Class::E | Class::F | Class::G) {
+        if !matches!(c, Class::E | Class::F | Class::G | Class::H) {
             continue;
         }
         println!("\n--- {} 界面序非首选明细（前 {}）---", c.label(), dump);
@@ -1937,7 +2002,7 @@ fn pinyin_eval_shuangpin() {
     }
 }
 
-const ALL_CLASSES: [Class; 7] = [
+const ALL_CLASSES: [Class; 8] = [
     Class::A,
     Class::B,
     Class::C,
@@ -1945,6 +2010,7 @@ const ALL_CLASSES: [Class; 7] = [
     Class::E,
     Class::F,
     Class::G,
+    Class::H,
 ];
 
 /// 只跑分类统计，不加载引擎（秒级）。用于核对 B 类总量是否与设计文档的 1110 条吻合。
