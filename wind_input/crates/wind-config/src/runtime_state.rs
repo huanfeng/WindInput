@@ -86,6 +86,13 @@ pub struct RuntimeState {
     /// 界面便利，与 [`Self::toolbar_anchors`] 同类：没有人会想要「每次都跳回第一面」。
     #[serde(default)]
     pub last_softkeyboard_page: String,
+    /// 软键盘钉住（焦点怎么变都不自动关闭）。跨开合、跨重启保留，直到用户再点一次图钉。
+    ///
+    /// 只记偏好，**不记面板开着**：重启后面板不会自己弹出来，所以「忘了钉的面板一直挡在
+    /// 屏上」这种担心落不到实处——它挡着时用户刚亲手打开过它，Esc / 关闭按钮照样能收。
+    /// 与 [`Self::last_softkeyboard_page`] 同理不受 `remember_last_state` 门控：界面偏好，不是输入态。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub softkeyboard_pinned: bool,
     /// 按应用方案的记忆表：进程名（小写；macOS 为 bundle id）→ 方案 id。
     ///
     /// 只服务 compat.toml 里 `schema = "@remember"` 的应用（C0-7 / C3-3，GH#80）：
@@ -109,6 +116,7 @@ impl Default for RuntimeState {
             toolbar_anchors: HashMap::new(),
             softkeyboard_anchors: HashMap::new(),
             last_softkeyboard_page: String::new(),
+            softkeyboard_pinned: false,
             app_schemas: HashMap::new(),
         }
     }
@@ -324,6 +332,23 @@ last_softkeyboard_page = "symbols"
         let back: RuntimeState = toml::from_str(&s).unwrap();
         assert_eq!(back.toolbar_anchors.get(&key), Some(&(2548, 1380)));
         assert_eq!(back.softkeyboard_anchors.get(&key), Some(&(1800, 1380)));
+    }
+
+    /// 钉住偏好 roundtrip；未钉住时不写这个键（老文件、新文件都不多一行噪声）。
+    #[test]
+    fn softkeyboard_pinned_roundtrip() {
+        let rs = RuntimeState {
+            softkeyboard_pinned: true,
+            ..Default::default()
+        };
+        let s = toml::to_string_pretty(&rs).unwrap();
+        assert!(
+            toml::from_str::<RuntimeState>(&s)
+                .unwrap()
+                .softkeyboard_pinned
+        );
+        let plain = toml::to_string_pretty(&RuntimeState::default()).unwrap();
+        assert!(!plain.contains("softkeyboard_pinned"), "{plain}");
     }
 
     /// 三字段 roundtrip。

@@ -296,9 +296,14 @@ WS_EX_TOPMOST`（候选窗与工具栏已在用，`wind-ui/src/window.rs`）。
 面板左上角的图钉按钮（`SOFT_TAG_PIN`，与右上角关闭按钮对称）。两态各一张 SVG（`res/icons/pin_off.svg` 描边斜放 / `pin_on.svg` 实心竖直），不用 emoji 字符——各平台字体里形状与彩色与否都不一致。钉住后焦点怎么变都不自动关闭，
 含整应用失焦、换宿主；Esc / 关闭按钮 / 工具栏 / 菜单仍可关。
 
-- **只对本次打开有效**：任何一条关闭路径都复位，不持久化——忘了钉的面板会一直挡在屏上。
+- **持久偏好**（此前是「只对本次打开有效」）：关闭不复位，下次打开照旧钉着，
+  跨重启记在 `state.toml` 的 `softkeyboard_pinned`。只记偏好、不记面板开着——重启后面板
+  不会自己弹出来，原先「忘了钉的面板一直挡在屏上」的顾虑落不到实处：挡着时用户刚亲手
+  打开过它。打开时先下发 `SoftKeyboardPinned` 再 Show（UI 隐藏时复位按钮外观，隐藏态
+  `set_pinned` 只记值不重画，故不闪）。点图钉经异步 `state_writer` 落盘：鼠标点击，
+  不在按键路径上。
 - ⚠️ 钉住跨应用后，点符号面的文本按**活动 token** 投递；若前台应用不发 focus_gained（别家输入法、桌面），可能送进后台旧宿主，待靶机验证。
-- 真相在协调器 `softkeyboard_pinned`，UI 只管高亮（`UiCommand::SoftKeyboardPinned`，面板隐藏时自行复位）。
+- 真相在协调器 `softkeyboard_pinned`，UI 只管高亮（`UiCommand::SoftKeyboardPinned`，面板隐藏时复位外观，每次打开由协调器重发）。
 - ★ **唯一入口是 `Coordinator::toggle_softkeyboard_pin()`**。要给钉住绑快捷键，只调它，别再写一份翻转逻辑。
   快捷键本身尚未接线（配置项、`key_actions` 动词、设置页都没有）。
 

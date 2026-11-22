@@ -304,9 +304,6 @@ impl Coordinator {
         if let Some(id) = page {
             self.softkeyboard_goto(id);
         }
-        // 与关闭处的复位成对：UI 事件线程的钉住切换可能夹在「判开着」与关闭之间，
-        // 把已关闭的面板翻成钉住，这里兜底保证每次打开都从未钉住开始。
-        self.softkeyboard_pinned.store(false, Ordering::Relaxed);
         self.softkeyboard_active.store(true, Ordering::Relaxed);
         self.softkeyboard_dirty.store(true, Ordering::Relaxed);
         *self
@@ -323,6 +320,11 @@ impl Coordinator {
             self.softkeyboard_page_idx(),
             self.softkeyboard_page_name()
         );
+        // 钉住是持久偏好，UI 侧隐藏时会把按钮复位，故每次打开都把真相下发一次。
+        // 排在 Show 之前：面板隐藏时 `set_pinned` 只记值不重画，Show 那一帧就画对，不闪。
+        let _ = self.ui_tx.send(UiCommand::SoftKeyboardPinned(
+            self.softkeyboard_pinned.load(Ordering::Relaxed),
+        ));
         self.push_softkeyboard_view();
         KeyAction::Consumed
     }
@@ -332,8 +334,7 @@ impl Coordinator {
     /// 保留当前面下标：再开时停在同一面，符合「面板是把工具，放下再拿起来还是刚才那把」。
     pub(crate) fn close_softkeyboard(&self) -> KeyAction {
         if self.softkeyboard_active.swap(false, Ordering::Relaxed) {
-            // 钉住只对本次打开有效：UI 侧 `hide` 自己复位按钮，这里只复位真相。
-            self.softkeyboard_pinned.store(false, Ordering::Relaxed);
+            // 钉住是持久偏好，关闭不复位（UI 侧 `hide` 只复位按钮外观，下次打开再下发）。
             self.softkeyboard_dirty.store(true, Ordering::Relaxed);
             debug!("softkeyboard: closed");
             let _ = self.ui_tx.send(UiCommand::HideSoftKeyboard);
@@ -343,7 +344,9 @@ impl Coordinator {
 
     /// 开关「钉住」，返回切换后的状态；面板没开时不动、返回 `false`。
     ///
-    /// 钉住 = 焦点怎么变都不自动关闭（Esc / 关闭按钮 / 工具栏仍可关）。
+    /// 钉住 = 焦点怎么变都不自动关闭（Esc / 关闭按钮 / 工具栏仍可关）。是持久偏好：
+    /// 关闭不复位，经 `state.toml` 跨重启保留。落盘走异步 `state_writer`——这是鼠标点击，
+    /// 不在按键路径上，也没有 auto-repeat，无需像换面那样攒到关闭时再写。
     ///
     /// ★ **这是钉住的唯一入口**：面板按钮（`UiEvent::SoftKeyboardPin`）经此处，将来要给
     /// 钉住绑快捷键（热键 / 面板内按键）也应只调它，不要再各写一份翻转逻辑。
@@ -354,6 +357,10 @@ impl Coordinator {
         let pinned = !self.softkeyboard_pinned.fetch_xor(true, Ordering::Relaxed);
         debug!("softkeyboard: pinned={pinned}");
         let _ = self.ui_tx.send(UiCommand::SoftKeyboardPinned(pinned));
+        self.state_writer
+            .schedule("softkeyboard_pinned", move |rs| {
+                rs.softkeyboard_pinned = pinned;
+            });
         pinned
     }
 

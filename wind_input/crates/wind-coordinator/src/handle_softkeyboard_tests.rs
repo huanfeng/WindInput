@@ -333,15 +333,15 @@ fn toggling_pin_twice_unpins() {
     assert!(!c.softkeyboard_is_open(), "取消钉住后恢复自动关闭");
 }
 
-/// 钉住只对本次打开有效：手动关掉再开，不能还钉着。
+/// 钉住是持久偏好：手动关掉再开，仍然钉着（直到再点一次图钉）。
 #[test]
-fn pin_does_not_survive_a_close() {
+fn pin_survives_a_close() {
     let c = coord();
     c.open_softkeyboard(None);
     c.toggle_softkeyboard_pin();
     c.close_softkeyboard();
     c.open_softkeyboard(None);
-    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
+    assert!(c.softkeyboard_pinned.load(Ordering::Relaxed));
 }
 
 /// 钉住期间跟着用户去了别的应用，取消钉住后那个应用就是宿主：
@@ -377,13 +377,24 @@ fn unknown_host_is_adopted_on_first_gained() {
     assert!(!c.softkeyboard_is_open());
 }
 
-/// 竞态兜底：关闭后残留的钉住标志，在下次打开时必须清掉。
+/// 打开时把钉住状态告诉 UI（UI 隐藏时会复位按钮），且排在 Show 之前——
+/// 面板隐藏时 `set_pinned` 只记值，Show 那一帧就画成钉住，不闪一下。
 #[test]
-fn open_always_starts_unpinned() {
-    let c = coord();
+fn open_tells_the_ui_the_pin_before_showing() {
+    let (c, rx) = coord_with_ui();
     c.softkeyboard_pinned.store(true, Ordering::Relaxed);
     c.open_softkeyboard(None);
-    assert!(!c.softkeyboard_pinned.load(Ordering::Relaxed));
+    let cmds: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let pin = cmds
+        .iter()
+        .position(|m| matches!(m, UiCommand::SoftKeyboardPinned(true)));
+    let show = cmds
+        .iter()
+        .position(|m| matches!(m, UiCommand::ShowSoftKeyboard { .. }));
+    assert!(
+        matches!((pin, show), (Some(p), Some(s)) if p < s),
+        "应先下发钉住再 Show: {cmds:?}"
+    );
 }
 
 /// 开启时按活动 token 高 32 位记宿主 pid——接线本身，不是手工 store。

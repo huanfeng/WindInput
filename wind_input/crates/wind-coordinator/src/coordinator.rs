@@ -1696,8 +1696,9 @@ pub struct Coordinator {
     /// 换文档都不算「用户离开」（Excel 退出单元格再切到下一格就是这样），只有换了宿主才算。
     /// 与开启成对写入，见 `open_softkeyboard`。
     pub(crate) softkeyboard_host_pid: std::sync::atomic::AtomicU32,
-    /// 钉住：面板不随焦点变化自动关闭（跨应用也留着）。**只对本次打开有效**，任何一条
-    /// 关闭路径都复位（见 `close_softkeyboard`），不持久化——忘了钉的面板会一直挡在屏上。
+    /// 钉住：面板不随焦点变化自动关闭（跨应用也留着）。是**用户偏好**：关闭不复位，
+    /// 下次打开照旧钉着，跨重启经 `RuntimeState::softkeyboard_pinned` 还原。
+    /// 唯一的翻转入口是 `toggle_softkeyboard_pin`。
     pub(crate) softkeyboard_pinned: std::sync::atomic::AtomicBool,
     /// 快捷输入格式表的**用户调整**（右键调序 / 停用）运行时镜像，键为格式类别。
     ///
@@ -3315,7 +3316,9 @@ impl Coordinator {
             hotkey_session_force_push: std::sync::atomic::AtomicBool::new(false),
             softkeyboard_opened_at: std::sync::Mutex::new(None),
             softkeyboard_host_pid: std::sync::atomic::AtomicU32::new(0),
-            softkeyboard_pinned: std::sync::atomic::AtomicBool::new(false),
+            softkeyboard_pinned: std::sync::atomic::AtomicBool::new(
+                runtime_state.softkeyboard_pinned,
+            ),
             // 空初值：真正的装载在 new() 里经 `reload_quick_adjust` 完成（需要 store，
             // 而 store 在本结构体构造之后才可用）。headless 无 store 时保持空 = 出厂顺序。
             quick_adjust: std::sync::RwLock::new(std::collections::HashMap::new()),
