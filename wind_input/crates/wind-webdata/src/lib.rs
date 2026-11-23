@@ -16,8 +16,6 @@
 
 mod theme_render;
 pub use theme_render::set_preview_build_id;
-#[cfg(test)]
-mod batch_tests;
 mod user_dicts;
 
 use serde_json::{Value, json};
@@ -11856,3 +11854,8 @@ mod theme_list_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+// 放在文件最末：`schema_key_gate_wiring_tests` 的源码守卫只扫第一个 `#[cfg(test)]` 之前的部分，
+// 声明在文件头会把整个生产代码截没。
+#[cfg(test)]
+mod batch_tests;
