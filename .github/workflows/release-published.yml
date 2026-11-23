@@ -35,6 +35,11 @@ on:
         description: "要补同步的 Release tag(如 v0.109.0)"
         required: true
         type: string
+      r2_only:
+        description: "只补同步 R2(不通知文档仓、不提 winget、不通知 Scoop;已发布版本补传产物时用)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read          # gh release download / view
@@ -42,6 +47,7 @@ permissions:
 jobs:
   notify-docs:
     name: 通知文档仓同步更新记录
+    if: ${{ !inputs.r2_only }}
     runs-on: ubuntu-latest
     env:
       DOCS_REPO: ${{ vars.DOCS_REPO }}
@@ -450,6 +456,7 @@ jobs:
 
   winget:
     name: 提交 winget 清单
+    if: ${{ !inputs.r2_only }}
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -508,6 +515,7 @@ jobs:
   # 官方 Nonportable 桶(若收录)由其机器人按 checkver/autoupdate 跟进,与此无关。
   scoop:
     name: 通知 Scoop 桶
+    if: ${{ !inputs.r2_only }}
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
