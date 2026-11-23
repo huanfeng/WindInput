@@ -13,7 +13,7 @@ fn store(tag: &str) -> Store {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("建目录");
-    Store::open(&dir.join("user.redb")).expect("开库")
+    Store::open(dir.join("user.redb")).expect("开库")
 }
 
 fn keys(v: &[(&str, &str)]) -> Vec<(String, String)> {
