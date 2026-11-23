@@ -1,0 +1,8 @@
+// 清风输入法的 Fcitx5 条目被部分桌面（如 Deepin）当作键盘布局名写进会话（Default Layout=windinput）。
+// 没有这份文件时 Chromium / Electron / QtWebEngine 应用编译 keymap 失败、启动即崩，
+// 这里给它一个等价于 us 的布局，只改显示名。
+default partial alphanumeric_keys
+xkb_symbols "windinput" {
+    include "us"
+    name[Group1]="WindInput";
+};

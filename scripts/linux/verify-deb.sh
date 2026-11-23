@@ -46,7 +46,7 @@ done
 for f in usr/lib/windinput/wind_input usr/lib/windinput/wind_setting \
          usr/share/fcitx5/addon/windinput.conf usr/share/fcitx5/inputmethod/windinput.conf \
          usr/share/applications/windinput-setting.desktop usr/share/mime/packages/windinput.xml \
-         usr/lib/windinput/data/compat.toml; do
+         usr/lib/windinput/data/compat.toml usr/share/X11/xkb/symbols/windinput; do
     [[ -e "$R/$f" ]] || bad "缺文件: $f"
 done
 addon="$(find "$R/usr/lib" -name libwindinput.so -path '*fcitx5*' | head -1)"

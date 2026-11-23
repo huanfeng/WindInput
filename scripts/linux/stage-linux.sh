@@ -63,6 +63,8 @@ bash "$SRC_DIR/scripts/lib/gen-compat.sh" linux "$DATA_DIR/compat.toml" "$S/usr/
 # addon / 输入法描述：cmake 只装了库，描述文件（构建目录里 configure_file 出来的）补进去。
 install -Dm644 $WORK_DIR/cmake/share/fcitx5/addon/windinput.conf "$S/usr/share/fcitx5/addon/windinput.conf"
 install -Dm644 $WORK_DIR/cmake/share/fcitx5/inputmethod/windinput.conf "$S/usr/share/fcitx5/inputmethod/windinput.conf"
+# 部分桌面（Deepin）把输入法条目名当键盘布局名写进会话，缺这份 symbols 时 Chromium 系应用启动即崩。
+install -Dm644 $SRC_DIR/wind_linux/data/xkb-symbols-windinput "$S/usr/share/X11/xkb/symbols/windinput"
 install -Dm755 $SETTING_TARGET/release/wind_setting "$S/usr/lib/windinput/wind_setting"
 install -Dm644 $SRC_DIR/scripts/linux/pkg/windinput-setting.desktop "$S/usr/share/applications/windinput-setting.desktop"
 install -Dm644 $SRC_DIR/scripts/linux/pkg/windinput-import.desktop "$S/usr/share/applications/windinput-import.desktop"

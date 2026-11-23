@@ -42,7 +42,8 @@ for f in usr/lib/windinput/wind_input usr/lib/windinput/wind_setting \
          usr/lib64/fcitx5/libwindinput.so \
          usr/share/fcitx5/addon/windinput.conf usr/share/fcitx5/inputmethod/windinput.conf \
          usr/share/applications/windinput-setting.desktop usr/share/mime/packages/windinput.xml \
-         usr/lib/windinput/data/compat.toml usr/share/licenses/windinput/LICENSE; do
+         usr/lib/windinput/data/compat.toml usr/share/licenses/windinput/LICENSE \
+         usr/share/X11/xkb/symbols/windinput; do
     [[ -e "$R/$f" ]] || bad "缺文件: $f"
 done
 [[ ! -e "$R/DEBIAN" ]] || bad "包里混进了 DEBIAN/"
