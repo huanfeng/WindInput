@@ -146,16 +146,6 @@ pub(crate) fn syllable_spans(buffer: &str, split: &str) -> Option<Vec<(usize, us
     (at == buffer.len() && !spans.is_empty()).then_some(spans)
 }
 
-/// 左移到「上一个音节的起点」：光标在音节中间 → 该音节起点；恰在起点 → 前一个音节起点；
-/// 已在最左 → 0。`fang'xiang` 光标在末尾，按一下落到 `xiang` 前，再按落到 `fang` 前。
-pub(crate) fn syllable_left(spans: &[(usize, usize)], cursor: usize) -> usize {
-    spans
-        .iter()
-        .map(|&(start, _)| start)
-        .rfind(|&start| start < cursor)
-        .unwrap_or(0)
-}
-
 /// 把拆分串（`ni'hao`）对回缓冲，得到**音节起点**在缓冲内的字节位置（升序、含 0 与缓冲末尾）。
 ///
 /// 与 [`syllable_spans`] 的区别：缓冲里手敲的分隔符 `'` 也算数——拆分串里有没有这个 `'` 都行，
@@ -621,15 +611,5 @@ mod tests {
         assert_eq!(syllable_jump(&s, 3, false, false), Some(2));
         assert_eq!(syllable_jump(&s, 3, true, false), Some(5));
         assert_eq!(syllable_jump(&[0, 5], 2, true, false), None, "单音节不跳");
-    }
-
-    #[test]
-    fn syllable_left_jumps_to_previous_syllable_start() {
-        let spans = [(0, 4), (4, 9), (9, 12)]; // fang xiang yao
-        assert_eq!(syllable_left(&spans, 12), 9);
-        assert_eq!(syllable_left(&spans, 9), 4, "恰在起点 → 前一个音节");
-        assert_eq!(syllable_left(&spans, 7), 4, "在音节中间 → 该音节起点");
-        assert_eq!(syllable_left(&spans, 4), 0);
-        assert_eq!(syllable_left(&spans, 0), 0);
     }
 }
