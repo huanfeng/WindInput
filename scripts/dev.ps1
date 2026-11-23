@@ -1870,6 +1870,9 @@ function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPat
         Warn "未找到 $outdir\$settingExe, 本次打包不含设置程序 (setting_exe 置空)"
         $settingExe = ""
     }
+    # 便携启动器两个变体共用 wind_portable.exe；缺产物时置空，完成页就不提供「打开启动器」
+    $launcherExe = "wind_portable.exe"
+    if (-not (Test-Path (Join-Path $outdir $launcherExe))) { $launcherExe = "" }
     $srcFwd  = $outdir.Replace('\', '/')
     $distFwd = $DistDir.Replace('\', '/')
     $logoFwd = (Join-Path $assetsDir "logo.png").Replace('\', '/')
@@ -1893,6 +1896,7 @@ publisher         = "清风输入法 项目"
 description       = "轻量开源输入法"
 main_exe          = "$mainExe"
 setting_exe       = "$settingExe"
+launcher_exe      = "$launcherExe"
 start_menu_folder = "$menu"
 window_title      = "$title"
 url_protocol      = "$proto"
