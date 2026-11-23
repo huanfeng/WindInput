@@ -143,11 +143,26 @@ jobs:
                --pattern "WindInput-${VERSION}-linux-*.deb*" --dir ./dl 2>/dev/null \
              && [ -f "./dl/WindInput-${VERSION}-linux-amd64.deb" ] \
              && [ -f "./dl/WindInput-${VERSION}-linux-arm64.deb" ]; then
+            LINUX_OK=1
             echo "linux=true" >> "$GITHUB_OUTPUT"
           else
+            LINUX_OK=0
             rm -f ./dl/WindInput-*-linux-*.deb*
             echo "::warning::该 Release 没有完整的 Linux 安装包(amd64 + arm64),跳过 Linux 同步。"
             echo "linux=false" >> "$GITHUB_OUTPUT"
+          fi
+          # rpm(试验性)同样「有则同步」,但不是硬依赖:缺了只是 latest-linux.json 没有 rpms 字段,
+          # deb 照发(与 release.yml 里 rpm 缺了只告警同口径)。两个架构一起要,缺一个就整组不推。
+          if [ "$LINUX_OK" = "1" ] \
+             && gh release download "$TAG" --repo "${{ github.repository }}" \
+                  --pattern "WindInput-${VERSION}-linux-*.rpm*" --dir ./dl 2>/dev/null \
+             && [ -f "./dl/WindInput-${VERSION}-linux-x86_64.rpm" ] \
+             && [ -f "./dl/WindInput-${VERSION}-linux-aarch64.rpm" ]; then
+            echo "rpm=true" >> "$GITHUB_OUTPUT"
+          else
+            rm -f ./dl/WindInput-*-linux-*.rpm*
+            echo "::notice::该 Release 没有完整的 rpm(x86_64 + aarch64),latest-linux.json 不带 rpms。"
+            echo "rpm=false" >> "$GITHUB_OUTPUT"
           fi
           # 升级元数据里的 releaseNotesUrl 指向它(命名口径见 dev.ps1 New-UpdateManifest)
           gh release view "$TAG" --repo "${{ github.repository }}" --json body -q .body \
@@ -287,14 +302,37 @@ jobs:
             DEBS=$(jq -c --arg a "$ARCH" --arg url "${R2_BASE_URL}/$F" --arg sha "$SHA" --argjson size "$SIZE" \
               '. + {($a): {url: $url, sha256: $sha, size: $size}}' <<<"$DEBS")
           done
+          # rpm(试验性):键 rpms 按 rpm 的架构名(x86_64 / aarch64)给出,与 debs 并列。
+          # 没有 rpm 时不写这个键(客户端与下载页都按「缺失 = 不提供」处理)。
+          RPMS='{}'
+          if [ "${{ steps.dl.outputs.rpm }}" = "true" ]; then
+            for ARCH in x86_64 aarch64; do
+              F="WindInput-${VERSION}-linux-${ARCH}.rpm"
+              SHA=$(awk '{print $1}' "./dl/$F.sha256")
+              ACTUAL=$(sha256sum "./dl/$F" | awk '{print $1}')
+              if [ "$SHA" != "$ACTUAL" ]; then
+                echo "ERROR: $F 的 sha256 sidecar($SHA) 与实际值($ACTUAL) 不符" >&2
+                exit 1
+              fi
+              SIZE=$(stat -c %s "./dl/$F")
+              wrangler r2 object put --remote "$R2_BUCKET/$F" --file "./dl/$F" \
+                --content-type "application/x-rpm"
+              wrangler r2 object put --remote "$R2_BUCKET/$F.sha256" --file "./dl/$F.sha256" \
+                --content-type "text/plain; charset=utf-8"
+              RPMS=$(jq -c --arg a "$ARCH" --arg url "${R2_BASE_URL}/$F" --arg sha "$SHA" --argjson size "$SIZE" \
+                '. + {($a): {url: $url, sha256: $sha, size: $size}}' <<<"$RPMS")
+            done
+          fi
           jq -n \
             --arg version "$VERSION" \
             --arg tag "$TAG" \
             --argjson debs "$DEBS" \
+            --argjson rpms "$RPMS" \
             --arg releaseNotesUrl "${R2_BASE_URL}/WindInput-${VERSION}-Release.md" \
             --arg publishedAt "$PUBLISHED_AT" \
-            '{version: $version, tag: $tag, channel: "stable", debs: $debs,
-              releaseNotesUrl: $releaseNotesUrl, publishedAt: $publishedAt}' > latest-linux.json
+            '{version: $version, tag: $tag, channel: "stable", debs: $debs}
+              + (if ($rpms | length) > 0 then {rpms: $rpms} else {} end)
+              + {releaseNotesUrl: $releaseNotesUrl, publishedAt: $publishedAt}' > latest-linux.json
           cat latest-linux.json
           wrangler r2 object put --remote "$R2_BUCKET/latest-linux.json" \
             --file latest-linux.json --content-type "application/json; charset=utf-8"
@@ -343,6 +381,13 @@ jobs:
               check "${R2_BASE_URL}/$F" "$(stat -c %s "./dl/$F")"
               check "${R2_BASE_URL}/$F.sha256" ""
             done
+            if [ "${{ steps.dl.outputs.rpm }}" = "true" ]; then
+              for ARCH in x86_64 aarch64; do
+                F="WindInput-${VERSION}-linux-${ARCH}.rpm"
+                check "${R2_BASE_URL}/$F" "$(stat -c %s "./dl/$F")"
+                check "${R2_BASE_URL}/$F.sha256" ""
+              done
+            fi
             check "${R2_BASE_URL}/latest-linux.json" ""
           fi
           echo "R2 对象全部校验通过。"
@@ -393,6 +438,11 @@ jobs:
             for ARCH in amd64 arm64; do
               wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_LINUX}-linux-${ARCH}.deb" || true
               wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_LINUX}-linux-${ARCH}.deb.sha256" || true
+            done
+            # 旧版若没发过 rpm,删不存在的对象只是 || true 吞掉的无害失败。
+            for ARCH in x86_64 aarch64; do
+              wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_LINUX}-linux-${ARCH}.rpm" || true
+              wrangler r2 object delete --remote "$R2_BUCKET/WindInput-${PREV_LINUX}-linux-${ARCH}.rpm.sha256" || true
             done
           else
             echo "Linux: 无需清理(本次同步=${LINUX_SYNCED:-false}, 前一版本=${PREV_LINUX:-<none>})"

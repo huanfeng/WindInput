@@ -60,6 +60,12 @@ package-rpm.sh      本机入口：package-deb.sh 之后，用其安装树出 rp
 - 不签名、不建 yum / zypper 仓库：与 apt 现状一致，签名密钥与托管另立项。`dnf install ./x.rpm` 本地文件默认不校验签名；
   zypper 需 `--no-gpg-checks`（`smoke-rpm.sh` 已带）。
 - RHEL / Rocky（无 fcitx5）、SUSE 的 fcitx5 前端包名差异不专门处理。
-- 在线升级（设置程序目前只会 `pkexec apt-get`）：需要按 `/etc/os-release` 或 `rpm -q windinput` 判断包格式，
-  改走 `pkexec dnf install -y <rpm>` / zypper，且 `latest-linux.json` 要加 `rpms.<arch>`。在 wind-setting 仓单独排期，
-  首版 rpm 用户手动更新。
+- 签名：见上，在线升级装 rpm 时对本地文件跳过签名检查（dnf `--nogpgcheck` / zypper `--allow-unsigned-rpm`）。
+
+## 6. 发布链路与在线升级
+
+- R2：`release-published.yml` 的 Linux 步在 deb 之外「有则同步」rpm（x86_64 + aarch64 两个都在才推，缺了只提示，不拖垮 deb），
+  `latest-linux.json` 在 `debs` 旁新增 `rpms.<x86_64|aarch64>`（`{url, sha256, size}`）；没有 rpm 时不写该键。清理旧版时一并删旧 rpm。
+- dl 网关：`WindInputSite/worker` 的 `ARTIFACTS` 与镜像白名单认 rpm，平台名 `linux-rpm-x86_64` / `linux-rpm-aarch64`。
+- 文档站：`sync_release_notes.py` 组装 `rpms`，下载页给出 rpm 入口（实验性）。
+- 设置程序：按本机包格式（dpkg / rpm）选 `debs` 或 `rpms`，rpm 用 `pkexec dnf install` / `zypper` 安装。
