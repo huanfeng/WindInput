@@ -520,7 +520,7 @@ english 由「用户 available 里排第一」那个子场景负责。把 `zz_hu
    - 文档站 `WindInputDocs` 新增「定制版制作指南」：层序、manifest 格式、
      「不要改 data，只写 data_custom」、「只写差异键」
    - `wind-installer`：确认覆盖式解包不会删 `data_custom`（当前只有 legacy 迁移会删东西，
-     应当安全，但需显式测试）；卸载时 `cleanup.rs` 的清理范围要覆盖它
+     应当安全，但需显式测试）；卸载**保留** `data_custom`（它不在安装包内，卸载只删包内顶层条目，见下方契约表）
    - ⚠️ 这是**跨仓单向契约、无编译期约束**，两侧各写各的测试证明不了接线。
      必须有一个**真的建出 `data_custom` 再跑完整解析**的端到端用例。
 
@@ -532,7 +532,7 @@ english 由「用户 available 里排第一」那个子场景负责。把 `zz_hu
 | 契约 | 结论 | 证据 |
 |---|---|---|
 | 升级/覆盖安装不删 `data_custom/` | ✅ 成立，且比原文的说法更强 | `installer/plan.rs:16-88` 是安装计划的唯一真相；解包前四个前置步骤里只有 `CleanupLegacy` 碰文件系统，而它是**逐条点名的黑名单**（`installer/legacy.rs:14-42`），没有递归扫描或通配。更进一步：本仓 `config/app.toml:29-30` 的 `legacy_files`/`legacy_dirs` **都是空的**，`plan.rs:40` 的门控使 `CleanupLegacy` 当前根本不入计划。`PrepareArchive`（`steps.rs:153-157`）只 `create_dir_all`、无前置清空；`ExtractFiles`（`steps.rs:170-188`）只正向遍历**包内条目**，从不 `read_dir(install_dir)` 反查差集 |
-| 卸载清得掉 `data_custom/` | ✅ 成立，不残留 | `uninstaller/cleanup.rs:242-246` 是**整目录递归删**（`remove_dir_all(install_dir)`），不是按清单逐项。前面那段逐项删（含显式点名的 `data/`，`cleanup.rs:215-218`）只是为这一刀解锁的预处理。GUI 路径还有第二道：卸载器把自己复制到 `%TEMP%` 后回头再删一次（`uninstaller/selfdelete.rs:48-53`） |
+| 卸载**保留** `data_custom/` | ✅ 已改（不再清掉） | 卸载只删安装包的顶层条目（打包器写入清单 `app.owned_entries`，卸载与自删除两条路径都按它删），`data_custom` 不在包内，原样留下；目录因此非空，安装目录本身也保留。原先的整目录 `remove_dir_all` 仅在旧包（清单无该字段）上沿用 |
 
 ⚠️ **一个既有缺口（不是 `data_custom` 引入的，知晓即可）**：`cleanup.rs:242` 的
 `remove_dir_all` 失败时兜底是 `schedule_delete_on_reboot(install_dir)`，而 `MoveFileExW`
