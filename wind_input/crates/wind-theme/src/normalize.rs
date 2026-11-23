@@ -31,6 +31,8 @@ const VIEW_NODE_KEYS: &[&str] = &[
     "footer_bar",
     "mode_label",
     "divider",
+    "grid_row",
+    "grid_divider",
     "status",
     "tooltip",
     "toast",

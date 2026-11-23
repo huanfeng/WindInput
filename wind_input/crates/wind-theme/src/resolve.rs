@@ -488,6 +488,8 @@ fn resolve_views(v: &Views, palette: &HashMap<String, Rgba>, is_dark: bool) -> R
         footer_bar: build(&v.footer_bar, None, None, None),
         mode_label: build(&v.mode_label, None, None, tk("text_hint")),
         divider: build(&v.divider, tk("separator"), None, None),
+        grid_row: build(&v.grid_row, None, None, None),
+        grid_divider: build(&v.grid_divider, None, None, None),
         shadow_color: tk("shadow"),
         ..Default::default()
     };
@@ -554,6 +556,13 @@ fn resolve_views(v: &Views, palette: &HashMap<String, Rgba>, is_dark: bool) -> R
     }
     rv.divider_enabled = v.divider.enabled;
     rv.divider_height = v.divider.height;
+    rv.grid_divider_enabled = v.grid_divider.enabled;
+    rv.grid_divider_height = v.grid_divider.height;
+    rv.grid_row_align = v.grid_row.align.clone();
+    // 整行状态：不设默认底色（缺省透明），否则会叠在格子自己的选中底色上。
+    rv.grid_row.selected =
+        resolve_state(v.grid_row.selected.as_deref(), palette, is_dark, None, None);
+    rv.grid_row.hover = resolve_state(v.grid_row.hover.as_deref(), palette, is_dark, None, None);
     // accent_bar 启用 + 几何。
     rv.accent_bar_enabled = v.accent_bar.enabled.unwrap_or(false);
     rv.accent_bar_width = v.accent_bar.width;

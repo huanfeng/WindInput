@@ -176,10 +176,12 @@ pub enum NodeKey {
     Index,
     CommentAbove,
     FooterBar,
+    GridRow,
+    GridDivider,
 }
 
 impl NodeKey {
-    const ALL: [NodeKey; 8] = [
+    const ALL: [NodeKey; 10] = [
         NodeKey::Window,
         NodeKey::PreeditBar,
         NodeKey::Divider,
@@ -188,6 +190,8 @@ impl NodeKey {
         NodeKey::Index,
         NodeKey::CommentAbove,
         NodeKey::FooterBar,
+        NodeKey::GridRow,
+        NodeKey::GridDivider,
     ];
 
     pub fn from_id(id: u8) -> Option<Self> {
@@ -205,6 +209,8 @@ impl NodeKey {
             NodeKey::Index => "index",
             NodeKey::CommentAbove => "comment_above",
             NodeKey::FooterBar => "footer_bar",
+            NodeKey::GridRow => "grid_row",
+            NodeKey::GridDivider => "grid_divider",
         }
     }
 }
@@ -2343,6 +2349,7 @@ impl CandidateScene {
 
         // 展开态的格子先收集起来，装配完再按列数切成行（见循环后）。
         let mut grid_cells: Vec<View> = Vec::new();
+        let grid_center = grid.is_some() && v.grid_row_align.as_deref() == Some("center");
         // `order` 与每候选的文字预算 `cand_text_budgets` 已在上方预扫阶段算好（k 与之同序）。
         for (k, (i, cand)) in order.into_iter().enumerate() {
             let is_sel = i == inp.selected;
@@ -2367,6 +2374,11 @@ impl CandidateScene {
             // 网格：格宽不小于所在列宽，各行的格子上下对齐，高亮底色也一样宽。
             if grid.is_some() {
                 item = item.min_w(grid_col_w[i % grid_cols]);
+                // 格内居中（`grid_row.align = "center"`）：内容两侧各垫一个弹性占位，
+                // 格宽已被抬到列宽，富余平分。收尾那个在注释装配之前追加（见下）。
+                if grid_center {
+                    item = item.child(View::spacer().grow());
+                }
             }
             // 序号节点：no_index 项（如快捷加词提示行）完全跳过，避免空圆圈占位。
             if !cand.no_index {
@@ -2570,6 +2582,9 @@ impl CandidateScene {
                 }
                 item = item.child(cleaf);
             }
+            if grid_center {
+                item = item.child(View::spacer().grow());
+            }
             // 上方注释条：左缩进到候选文字字形起点；超出宽度上限（见 `above_cols`）时截断加 `…`，
             // 截的是显示副本，颜色区间随 `cut_with_mark` 一起裁。
             if has_above {
@@ -2720,12 +2735,64 @@ impl CandidateScene {
                 }
                 grid_tab_bar = Some(bar);
             }
+            // 行间分隔线（`views.grid_divider`）：只有显式配了 `background` 才画，不回退调色板
+            // `separator`（默认主题有它，回退会让所有现有主题的网格多出线、窗口变高）。
+            // 夹在相邻两行之间（含占位行：它们与真实行同高，分隔线也得同样占位，否则
+            // 末屏行数不足时窗口会变矮）。线粗取整，同编码栏分隔线。
+            let grid_sep_col = v.grid_divider.bg_color.unwrap_or([0, 0, 0, 0]);
+            let grid_sep_on = grid_sep_col[3] > 0 && v.grid_divider_enabled != Some(false);
+            let grid_sep_thick = v
+                .grid_divider_height
+                .map(|d| d.resolve(s, 0.0))
+                .unwrap_or(s)
+                .round()
+                .max(1.0);
+            let grid_sep = || {
+                let mut line = View::container(Layout::Row)
+                    .node(NodeKey::GridDivider as u8)
+                    .bg(grid_sep_col)
+                    .fixed_h(grid_sep_thick)
+                    .fill_cross()
+                    .margin(edges_or(&v.grid_divider.margin, [0.0; 4]));
+                if let Some(r) = v.grid_divider.border_radius {
+                    line = line.radius(r.resolve(s, 0.0));
+                }
+                line
+            };
+            let row_decorated = [&v.grid_row]
+                .into_iter()
+                .chain(v.grid_row.selected.as_deref())
+                .chain(v.grid_row.hover.as_deref())
+                .any(|n| n.bg_color.is_some() || n.border_color.is_some());
             let mut cells = grid_cells.into_iter().peekable();
             let mut shown = 0usize;
             while cells.peek().is_some() {
+                if shown > 0 && grid_sep_on {
+                    list = list.child(grid_sep());
+                }
+                let is_hl = shown == g.highlight_row as usize;
+                // 悬停行 = 鼠标所在格的那一行；与 item 一样，高亮行优先于悬停行。
+                let is_hov = inp.hover >= 0 && inp.hover as usize / grid_cols == shown;
                 let mut row = View::container(Layout::Row)
                     .gap(box_gap)
-                    .cross(Align::Center);
+                    .cross(Align::Center)
+                    .node(NodeKey::GridRow as u8)
+                    .pad(edges_or(&v.grid_row.padding, [0.0; 4]))
+                    .margin(edges_or(&v.grid_row.margin, [0.0; 4]));
+                // 撑满列宽只在有装饰或居中时才需要（行底色要铺满、居中要有富余可分）；
+                // 平白加会改动未配主题的布局树。
+                if grid_center || row_decorated {
+                    row = row.fill_cross();
+                }
+                if let Some(c) = eff_bg(&v.grid_row, is_hl, !is_hl && is_hov) {
+                    row = row.bg(c);
+                }
+                if let Some(r) = v.grid_row.border_radius {
+                    row = row.radius(r.resolve(s, 0.0));
+                }
+                if let Some((bc, bw, _)) = eff_border(&v.grid_row, is_hl, !is_hl && is_hov) {
+                    row = row.border(bc, bw);
+                }
                 for cell in cells.by_ref().take(grid_cols) {
                     row = row.child(cell);
                 }
@@ -2733,7 +2800,18 @@ impl CandidateScene {
                 shown += 1;
             }
             for _ in shown..g.rows as usize {
-                list = list.child(placeholder_row());
+                // 占位行一律排在真实行之后（候选非空才进网格，`shown` ≥ 1），故前面总有分隔线可夹。
+                if grid_sep_on {
+                    list = list.child(grid_sep());
+                }
+                // 占位行同样要带上整行的内外边距，否则末屏窗口比满屏矮。
+                list = list.child(
+                    View::container(Layout::Column)
+                        .pad(edges_or(&v.grid_row.padding, [0.0; 4]))
+                        .margin(edges_or(&v.grid_row.margin, [0.0; 4]))
+                        .fill_cross()
+                        .child(placeholder_row()),
+                );
             }
         }
         // 正常顺序：占位行补在候选之后（窗口下方留白，候选 1 恒在顶部）。

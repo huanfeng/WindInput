@@ -299,8 +299,10 @@ pub struct ViewNode {
     pub offset: Option<Dim>,
     /// 仅 accent_bar：条高 = ItemHeight × 此比例。
     pub height_ratio: Option<f32>,
-    /// 仅 divider：线粗（dp）。None=1。
+    /// 仅 divider / grid_divider：线粗（dp）。None=1。
     pub height: Option<Dim>,
+    /// 仅 grid_row：格内内容水平对齐，`left`（默认）| `center`。None/其它=left。
+    pub align: Option<String>,
     /// 仅 footer_bar：上/下翻页箭头图（可 SVG + tint 随主题变色）。
     pub prev_image: Option<ViewImage>,
     pub next_image: Option<ViewImage>,
@@ -463,6 +465,15 @@ pub struct Views {
     /// 线粗 = `height`、`margin` 控制间距与左右缩进、`enabled = false` 强制不画。
     #[serde(default)]
     pub divider: ViewNode,
+    /// 展开网格的整行容器：`background` / `border` / `padding` / `margin` 给基态，
+    /// `selected` = 高亮行（数字键作用的那一行），`hover` = 鼠标所在行；`align` 控制格内对齐。
+    /// 只在展开态生效，缺省透明、左对齐（与引入前一致）。
+    #[serde(default)]
+    pub grid_row: ViewNode,
+    /// 展开网格的行间分隔线，写法同 `divider`：颜色 = `background`（**必须显式配**，不回退调色板，
+    /// 否则现有主题的网格会凭空多出线）、线粗 = `height`、`margin` 控制左右缩进、`enabled = false` 强制不画。
+    #[serde(default)]
+    pub grid_divider: ViewNode,
     pub status: Option<ViewNode>,
     pub tooltip: Option<ViewNode>,
     pub toast: Option<ViewNode>,

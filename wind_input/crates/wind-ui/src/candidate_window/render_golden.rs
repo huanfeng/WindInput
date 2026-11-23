@@ -1506,3 +1506,107 @@ fn skin_anim_golden_covers_the_timeline() {
     assert!(!off.contains("-- 下次换帧"), "关动画不登记换帧");
     assert!(got.contains("-- 下次换帧 +50ms"), "帧中离下次换帧 50 ms");
 }
+
+// ── 展开网格整行 / 行间分隔线 / 格内居中（views.grid_row / grid_divider）──
+
+/// 展开网格（2 列 × 3 行，其中 2 行有候选、1 行占位），按给定改动调整主题后出树 dump。
+/// `hover` 是平铺下标，-1 无悬停；选中恒为 0（落在第 0 行）。
+fn grid_dump(tweak: impl FnOnce(&mut wind_theme::RvViews), hover: i32) -> String {
+    let mut theme = default_theme();
+    tweak(&mut theme.views);
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
+    w.scale = 1.0;
+    w.set_theme(theme);
+    w.set_orientation(false, false, false);
+    w.set_grid(Some(wind_ui_types::CandidateGrid {
+        cols: 2,
+        rows: 3,
+        highlight_row: 0,
+        index_start: 0,
+        index_count: 2,
+        tabs: 0,
+        active_tab: 0,
+    }));
+    w.update("ping", 4, "", fuzzy_candidates(), 0, hover, 1, 1);
+    let mut root = w.scene.build_tree(&w.scene_input(false));
+    root.layout(0.0, 0.0, &w.text_renderer);
+    root.debug_dump()
+}
+
+fn rgba_node(c: [u8; 4]) -> wind_theme::RvNode {
+    wind_theme::RvNode {
+        bg_color: Some(c),
+        ..Default::default()
+    }
+}
+
+fn count(dump: &str, needle: &str) -> usize {
+    dump.matches(needle).count()
+}
+
+/// 整行底色：基态给每一行，高亮行换成 selected 色；高亮行优先于悬停行。
+#[test]
+fn grid_row_base_and_highlight_backgrounds() {
+    let dump = grid_dump(
+        |v| {
+            v.grid_row.bg_color = Some([1, 2, 3, 255]);
+            v.grid_row.selected = Some(Box::new(rgba_node([9, 9, 9, 255])));
+        },
+        1, // 悬停在第 0 行（也是高亮行）：不得盖过高亮色
+    );
+    assert!(
+        dump.find("bg=Some([9, 9, 9, 255])") < dump.find("bg=Some([1, 2, 3, 255])"),
+        "高亮行（第 0 行）在基态行（第 1 行）之前"
+    );
+    assert_eq!(count(&dump, "bg=Some([9, 9, 9, 255])"), 1, "只有高亮行");
+    assert_eq!(
+        count(&dump, "bg=Some([1, 2, 3, 255])"),
+        1,
+        "第 1 行是基态；占位行不上色"
+    );
+}
+
+/// 悬停行：鼠标在第 1 行的格子上时，那一行用 hover 色，高亮行仍是 selected 色。
+#[test]
+fn grid_row_hover_row_background() {
+    let dump = grid_dump(
+        |v| {
+            v.grid_row.selected = Some(Box::new(rgba_node([9, 9, 9, 255])));
+            v.grid_row.hover = Some(Box::new(rgba_node([5, 5, 5, 255])));
+        },
+        2, // 平铺下标 2 = 第 1 行第 0 列
+    );
+    assert_eq!(count(&dump, "bg=Some([9, 9, 9, 255])"), 1);
+    assert_eq!(count(&dump, "bg=Some([5, 5, 5, 255])"), 1);
+}
+
+/// 行间分隔线：显式配色才画，夹在相邻两行之间，占位行也占位（3 行 → 2 条），
+/// 因此窗口高度与「满屏」一致。
+#[test]
+fn grid_divider_between_rows_only_when_configured() {
+    let line = "fixed_h=Some(1.0) bg=Some([7, 7, 7, 255])";
+    let off = grid_dump(|_| {}, -1);
+    assert_eq!(count(&off, line), 0, "没配就不画：现有主题零变化");
+    let on = grid_dump(|v| v.grid_divider.bg_color = Some([7, 7, 7, 255]), -1);
+    assert_eq!(count(&on, line), 2, "3 行之间 2 条");
+    let disabled = grid_dump(
+        |v| {
+            v.grid_divider.bg_color = Some([7, 7, 7, 255]);
+            v.grid_divider_enabled = Some(false);
+        },
+        -1,
+    );
+    assert_eq!(count(&disabled, line), 0, "enabled=false 强制不画");
+}
+
+/// 格内居中：每个有候选的格子两侧各多一个弹性占位。
+#[test]
+fn grid_row_align_center_pads_each_cell() {
+    let base = count(&grid_dump(|_| {}, -1), "grow=true");
+    let centered = count(
+        &grid_dump(|v| v.grid_row_align = Some("center".into()), -1),
+        "grow=true",
+    );
+    assert_eq!(centered, base + 2 * 4, "4 个格子 × 左右各一个");
+}

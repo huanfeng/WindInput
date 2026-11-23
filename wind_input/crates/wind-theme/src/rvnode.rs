@@ -192,6 +192,13 @@ pub struct RvViews {
     pub mode_label: RvNode,
     /// 编码栏分隔线（`views.divider`）：`bg_color` 缺省已回退调色板 `separator`。
     pub divider: RvNode,
+    /// 展开网格整行（`views.grid_row`），含 selected（高亮行）/ hover 状态 patch。
+    pub grid_row: RvNode,
+    /// `grid_row.align`：`center` 时格内居中，其余左对齐。
+    pub grid_row_align: Option<String>,
+    /// 展开网格行间分隔线（`views.grid_divider`）：不回退调色板 `separator`——默认主题有这个色，
+    /// 回退会让所有现有主题的网格凭空多出分隔线；只有显式配了 `background` 才画。
+    pub grid_divider: RvNode,
     pub status: Option<RvNode>,
     pub tooltip: Option<RvNode>,
     pub toast: Option<RvNode>,
@@ -218,6 +225,9 @@ pub struct RvViews {
     pub divider_enabled: Option<bool>,
     /// `divider.height`：线粗（None=1dp）。
     pub divider_height: Option<Dim>,
+    /// `grid_divider.enabled` / `.height`：语义同 divider。
+    pub grid_divider_enabled: Option<bool>,
+    pub grid_divider_height: Option<Dim>,
     pub accent_bar_enabled: bool,
     pub accent_bar_width: Option<Dim>,
     pub accent_bar_offset: Option<Dim>,
