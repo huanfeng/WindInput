@@ -129,6 +129,13 @@ CI 承接）、CI 另有 `cargo tree` 断言 coordinator 无 wind-ui 依赖边�
 
 跨 crate / 跨语言边界的立约级不变量集中在此；crate 内部细节归 crate 级 `AGENTS.md`。
 
+- **windui 按 crates.io 版本号依赖，先发版再更新下游**：`wind-setting`、`wind-installer`、
+  `wind-portable`、`wind-dict` 都写版本号（如 `windui = "0.35"`），不得再用 path / git 指向
+  `wind-ui-rust` 的最新代码。windui 有改动要用上，先在 `wind-ui-rust` 发版（`chore(release)` +
+  标签，CI 发布到 crates.io），再改各下游的版本号并刷新 `Cargo.lock`。临时联调本地 windui 用
+  `cargo … --config 'patch.crates-io.windui.path="../wind-ui-rust"'`（不能加 `--locked`，联调完
+  `git checkout -- Cargo.lock`），**不得提交**；下游 `pre-commit` 钩子会拦住误提交。细节见
+  `wind-ui-rust` 的 `AGENTS.md` §6.1。
 - **C++ 吃键集必须 ⊆ Rust 出字集**：`wind_tsf` 在 `OnTestKeyDown` 就决定是否吃键，早于 IPC
   往返；Rust 侧事后回 PassThrough 已来不及。凡 C++ 吃掉而 Rust 最终不出字的键，在严格 TSF
   宿主上直接丢失（历史案例：全角模式丢键、密码框丢键；指纹＝「有些应用打不出、有些出半角」）。
