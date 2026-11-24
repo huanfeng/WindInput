@@ -91,14 +91,10 @@ struct LevelRender {
 /// 增量判定：`prev`（上一帧基线，None=窗口不可见）对 `want`（本帧目标）需要做什么。
 ///
 /// 返回 `(需要重绘, 需要重新摆位)`，两者独立：
-/// - **重绘**（`update`）只推像素，不碰 z 序——高亮变化走这条路；
-/// - **摆位**（`show`）会 `SetWindowPos(HWND_TOPMOST)`，**副作用是把窗口提到 topmost 组最前**，
-///   所以只在首显或几何真变了时才做。
-///
-/// 这个拆分是本模块修掉「子菜单闪烁」的关键：过去 reconcile 每帧无条件对每一层
-/// 都 `show()` 一次，于是每帧的 z 序都要经历「一级在最上 → 二级在最上 → 三级在最上」
-/// 的中间态。三级子菜单因右侧空间不足翻到左侧、压在一级面板上时，这个中间态就是
-/// 肉眼可见的一帧遮挡（DWM 异步合成，故不是每次都能撞上）。
+/// - 重绘（`update`）只推像素，不碰 z 序——高亮变化走这条路；
+/// - 摆位（`show`）会 `SetWindowPos(HWND_TOPMOST)`，副作用是把窗口提到 topmost 组最前，
+///   所以只在首显或几何真变了时才做。每帧都 `show()` 会让各层 z 序反复交替，
+///   子菜单翻到左侧压在父面板上时就会闪一帧遮挡。
 fn plan_render(prev: Option<&LevelRender>, want: &LevelRender) -> (bool, bool) {
     match prev {
         // 窗口当前不可见：必须画满并摆位。
@@ -135,9 +131,8 @@ fn press_edge(was_down: bool, now_down: bool) -> bool {
 
 /// 左/中/右任一鼠标键当前是否按着。
 ///
-/// ⚠️ 只取 `0x8000`（当前按下）位。返回值最低位 `0x0001`（"自上次调用以来按过"）是
-/// **进程级共享**状态，任何一次调用都会把它清零——多处消费必然互相偷事件，绝不能用；
-/// 边沿一律由调用方自己保存上一轮状态来判定。
+/// 只取 `0x8000`（当前按下）位。最低位 `0x0001`（自上次调用以来按过）是进程级共享状态，
+/// 任何调用都会清零它，多处消费会互相偷事件；边沿一律由调用方保存上一轮状态来判定。
 fn any_mouse_button_down() -> bool {
     [VK_LBUTTON, VK_MBUTTON, VK_RBUTTON]
         .iter()
@@ -149,10 +144,8 @@ fn key_down(vk: i32) -> bool {
     unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
 }
 
-/// 这次按下是不是**逻辑上的**右键（只按了右键；左右同按算左键，只关菜单）。
-///
-/// `GetAsyncKeyState` 问的是**物理**键位：左右手互换（`SM_SWAPBUTTON`）后，物理左键
-/// 才是逻辑右键。单独成函数是为了让这条换算可测。
+/// 这次按下是不是逻辑上的右键（只按了右键；左右同按算左键，只关菜单）。
+/// `GetAsyncKeyState` 问的是物理键位，左右手互换（`SM_SWAPBUTTON`）后物理左键才是逻辑右键。
 fn is_right_press(phys_left: bool, phys_right: bool, swapped: bool) -> bool {
     let (left, right) = if swapped {
         (phys_right, phys_left)
@@ -177,9 +170,8 @@ fn mouse_buttons_swapped() -> bool {
 
 /// 一次关掉了菜单的「菜单外按下」：屏幕坐标 + 是否逻辑右键。
 ///
-/// 菜单开着时同线程的其它窗口收不到鼠标消息（见 [`PopupMenu::poll_outside_press`]），
-/// 这次按下就只有轮询看得见。交给 UI 循环转给气泡：在气泡上右键要当作「重新右键」，
-/// 否则用户第二次右键只会把菜单关掉，气泡自己一无所知。
+/// 菜单开着时同线程其它窗口收不到鼠标消息（见 [`PopupMenu::poll_outside_press`]），只有轮询看得见。
+/// UI 循环把它转给气泡：在气泡上右键要当作「重新右键」，否则第二次右键只会关掉菜单。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutsidePress {
     pub x: i32,
@@ -187,10 +179,9 @@ pub struct OutsidePress {
     pub right: bool,
 }
 
-/// 菜单请求的回应时限：右键发出菜单请求到菜单可见要走一个 UI → 协调器 → UI 的来回，正常是
-/// 毫秒级；协调器处理鼠标事件的线程可能短暂卡在状态锁上（重载配置、建反查索引），1.5 秒足够
-/// 宽。再久多半是请求被丢了（候选已清空时协调器不弹菜单），据此放弃等待的一方不该把状态
-/// 一直挂着。候选窗的右键压制（`candidate_window::TipHold`）与气泡的「请求在途」共用。
+/// 菜单请求的回应时限。UI → 协调器 → UI 来回正常是毫秒级，协调器可能短暂卡在状态锁上，
+/// 1.5 秒足够宽；再久多半是请求被丢了（候选已清空时不弹菜单），等待方不该一直挂着。
+/// 候选窗的右键压制（`candidate_window::TipHold`）与气泡的「请求在途」共用。
 pub(crate) const MENU_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 thread_local! {
@@ -198,9 +189,8 @@ thread_local! {
     static MENU_VISIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// 弹出菜单此刻是否可见。候选窗 / 气泡在 wnd_proc 里就要问（菜单开着时它们的右键由菜单
-/// 轮询那一路接管），故做成线程局部而非由 UI 循环每轮传值：传值要到下一轮 tick 才更新，
-/// 菜单关掉后紧跟着的那条鼠标消息会读到过时的「开着」。菜单与这些窗口同在 UI 线程。
+/// 弹出菜单此刻是否可见。候选窗 / 气泡在 wnd_proc 里就要问，故做成线程局部（同在 UI 线程）
+/// 而非由 UI 循环每轮传值：传值要到下一轮 tick 才更新，菜单刚关时的鼠标消息会读到过时值。
 pub(crate) fn menu_visible() -> bool {
     MENU_VISIBLE.with(|v| v.get())
 }
@@ -267,12 +257,8 @@ impl MenuState {
         self.dirty = true;
     }
 
-    /// 取消第 k 层高亮。**仅当 k 为最深层时才生效**：更浅的层意味着它的某个子菜单
-    /// 正开着，那个父项必须保持高亮以指示展开路径，灭掉它会让菜单看起来断了链。
-    ///
-    /// 三个调用点：鼠标落到不可选条目（禁用项）、落到面板内非条目处、移出菜单外。
-    /// 只改 `selected`，不动 `levels`——灭高亮从不收起子菜单。
-    /// `levels` 为空时 `k + 1 == len` 不成立，短路保护了下面的索引。
+    /// 取消第 k 层高亮，仅当 k 为最深层时生效：更浅的层有子菜单开着，父项须保持高亮指示展开路径。
+    /// 只改 `selected`，不动 `levels`——灭高亮从不收起子菜单。`levels` 为空时短路保护了索引。
     fn clear_hover(&mut self, k: usize) {
         if k + 1 == self.levels.len() && self.levels[k].selected != NONE_SEL {
             self.levels[k].selected = NONE_SEL;
@@ -408,13 +394,8 @@ impl MenuState {
 
     // —— 指针（屏幕坐标）：Windows 的 wnd_proc 与 Linux 宿主转来的事件共用 ——
 
-    /// 高亮跟手：鼠标指向哪个条目就亮哪个，没指向条目就灭。
-    /// 三条分支都只动 `selected`（不碰 `levels`），所以任何一条都不会收起
-    /// 已展开的子菜单；而 `clear_hover` 只对最深层生效，父项高亮始终保留着
-    /// 「当前展开路径」的指示作用。
-    ///
-    /// 灭高亮是廉价的：它只让对应层 `update()` 推一次像素，不会触发
-    /// `show()`（见 `plan_render`），因此不会重排 z 序、不会造成窗口闪烁。
+    /// 高亮跟手：指向条目就亮，没指向就灭。只动 `selected`，不会收起已展开的子菜单。
+    /// 灭高亮只触发 `update()`、不触发 `show()`（见 `plan_render`），不会重排 z 序。
     fn pointer_move(&mut self, sx: i32, sy: i32) {
         match self.find_hit(sx, sy) {
             Some((k, Some(r))) => self.hover(k, r),
@@ -470,7 +451,7 @@ pub struct PopupMenu {
     /// 已应用主题（DPI 变化时按新缩放重解析几何）。
     theme: Option<wind_theme::Resolved>,
     /// 上一轮轮询看到的「有鼠标键按着」状态，供 [`Self::poll_outside_press`] 做边沿检测。
-    /// **必须在 `show()` 里按当前真实状态初始化**，理由见该处注释。
+    /// 必须在 `show()` 里按当前真实状态初始化，理由见该处注释。
     mouse_was_down: bool,
     /// 最近一次关掉菜单的菜单外按下，待 UI 循环经 [`Self::take_outside_press`] 取走。
     outside_press: Option<OutsidePress>,
@@ -560,10 +541,8 @@ impl PopupMenu {
     /// 应用主题（菜单各色）。
     pub fn set_theme(&mut self, theme: &wind_theme::Resolved) {
         self.theme = Some(theme.clone());
-        // 先取 palette 兜底，随后被视图节点覆盖。
-        // 节点色在 resolve 阶段已是「主题显式值 ⊕ palette 默认」的合成结果
-        // （resolve.rs build(&m.root, tk("menu_bg"), …)），所以此处只要节点存在就以它为准，
-        // 与候选窗/状态窗保持同一套优先级；节点缺席（主题没写 [menu]）才落回 token。
+        // 先取 palette 兜底，随后被视图节点覆盖。节点色在 resolve 阶段已合成了 palette 默认，
+        // 故节点存在就以它为准（与候选窗/状态窗同一优先级），缺席才落回 token。
         self.bg = theme.color("menu_bg", BG);
         self.fg = theme.color("menu_text", FG);
         self.disabled = theme.color("menu_disabled", DISABLED);
@@ -643,9 +622,8 @@ impl PopupMenu {
             self.radius = 6.0 * s;
             self.shadow = None;
         }
-        // 颜色/字号/几何全变了，但 items 与 selected 一个都没动——增量判据看不见这种变化，
-        // 必须显式作废基线，否则换主题（或跨屏改 DPI，经 ensure_scale 走到这里）后
-        // 已显示的层会一直停在旧像素上。
+        // 颜色/字号/几何变了但 items/selected 没动，增量判据看不见，必须显式作废基线，
+        // 否则换主题或跨屏改 DPI 后已显示的层停在旧像素上。
         self.invalidate_rendered();
     }
 
@@ -684,34 +662,24 @@ impl PopupMenu {
         self.visible = true;
         set_menu_visible(true);
         unsafe {
-            // 捕获前先把光标掰正：SetCapture 期间系统不再发 WM_SETCURSOR，光标会
-            // 冻结在捕获瞬间的形状，下方 wnd_proc 的 WM_SETCURSOR 分支收不到消息。
-            // 任务栏语言栏图标触发时，那一刻的光标归宿主 (explorer) 管——服务重启后
-            // 它正忙着刷图标状态（State push → UpdateFullStatus → GetIcon），光标为
-            // 忙碌态，一旦冻结整个菜单期间都在转圈。工具栏触发无此问题：那一刻的光标
-            // 已被我们自己的 WM_SETCURSOR 设成箭头。
+            // 捕获前先把光标设成箭头：SetCapture 期间不再发 WM_SETCURSOR，光标会冻结在捕获瞬间
+            // 的形状（从语言栏图标唤出时可能是 explorer 的忙碌态）。
+            // 见 docs/architecture/ui-platform-notes.md 的「弹出菜单」。
             if let Ok(c) = LoadCursorW(None, IDC_ARROW) {
                 SetCursor(c);
             }
             SetCapture(self.windows[0].hwnd());
         }
-        // 边沿检测的初态**必须取当前真实按键状态，不能填 false**：菜单几乎总是由一次
-        // 尚未抬起的点击唤出的（工具栏左键、候选区右键、任务栏语言栏图标），此刻对应的
-        // 键正按着。填 false 会让下一轮轮询把这枚"旧"按下当成一次新的菜单外点击，
-        // 表现为菜单弹出即消失。
+        // 边沿检测初态必须取当前真实按键状态、不能填 false：菜单几乎总是由尚未抬起的点击唤出，
+        // 填 false 会把这次按下当成菜单外点击，菜单弹出即消失。
         self.mouse_was_down = any_mouse_button_down();
         self.outside_press = None;
     }
 
-    /// UI 循环每轮调用：轮询菜单外点击；脏则协调重绘；请求关闭则隐藏。
     /// 下一次需要 [`Self::tick`] 的时刻；菜单不可见时 `None`。
     ///
-    /// ⚠ **菜单是整个 UI 里唯一仍需定期轮询的部分**，因为 [`Self::poll_outside_press`]
-    /// 读的是 `GetAsyncKeyState` 这个瞬时状态，没有对应的消息可以等——理由见那个函数的
-    /// 文档：菜单显示期间服务进程从来不是前台进程，`SetCapture` 收不到菜单外的鼠标消息。
-    ///
-    /// 周期沿用消息循环改事件驱动之前的 8ms，使点击响应与那时完全一致。这不影响本次改动
-    /// 的目标：菜单打开是短暂的主动交互，而要消灭的是**静态时**的持续唤醒。
+    /// 菜单是 UI 里唯一需要定期轮询的部分：[`Self::poll_outside_press`] 读 `GetAsyncKeyState`
+    /// 瞬时状态，没有消息可等。周期 8ms；菜单打开是短暂交互，不影响静态时零唤醒。
     pub fn next_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
         if !self.visible {
             return None;
@@ -741,30 +709,17 @@ impl PopupMenu {
 
     /// 轮询「点在菜单外」并关闭菜单。
     ///
-    /// **为什么不能靠 `SetCapture` + `WM_LBUTTONDOWN`**：Win32 规定只有前台窗口才能真正
-    /// 捕获鼠标；菜单窗口是 `WS_EX_NOACTIVATE`（见 `window.rs`），服务进程在菜单显示期间
-    /// **从来不是前台进程**，捕获于是退化成「光标位于窗口可见区内时才收得到鼠标消息」。
-    /// 结果恰好反了：光标在面板上时（hover / 点条目）一切正常，掩盖了问题；而点任务栏、
-    /// 点别的应用、点回原文本框——正是最需要关菜单的时刻——一条消息都收不到，
-    /// `on_message` 里 `None => self.close()` 那条分支形同虚设。
+    /// 不能靠 `SetCapture` + `WM_LBUTTONDOWN`：服务进程不是前台进程，捕获退化成「光标在窗口
+    /// 可见区内才收得到消息」，点菜单外恰好一条都收不到（见 docs/architecture/ui-platform-notes.md
+    /// 的「弹出菜单」）。`GetAsyncKeyState` 直接问物理按键状态，绕开这条规则。
     ///
-    /// `GetAsyncKeyState` 不经消息队列，直接问系统按键的物理状态，绕开了上述捕获规则。
-    ///
-    /// ⚠️ 我们**吞不掉**这一次点击（它早已投递给了目标窗口），只能跟着关菜单。这与 Win32
-    /// 原生菜单「点外面只关菜单、不穿透」的行为有别，但正是此处想要的：点任务栏则任务栏
-    /// 响应、菜单一并收起。
-    ///
-    /// ⚠️ **点我们自己的工具栏同样算「外面」，这是有意的**。上述失效是按线程生效的：捕获
-    /// 期间同线程的工具栏窗口也收不到鼠标消息，所以菜单开着时工具栏本就是点不动的。本轮询
-    /// 关闭菜单会顺带 `ReleaseCapture`，抬起的 `WM_LBUTTONUP` 才第一次能投递到工具栏——
-    /// 于是「菜单开着时切中英」这类操作从"没反应"变成可用。代价是工具栏设置键（它的主菜单
-    /// 是在**抬起**时才发 `RequestMainMenu` 的）表现为「关闭后立刻重新弹出」而非 toggle。
-    /// 没有为此加特例：真 toggle 要么猜时间窗、要么比对锚点，两者都比这点闪烁更容易出错。
+    /// 这次点击吞不掉（早已投递给目标窗口），只能跟着关菜单——点任务栏则任务栏响应、菜单收起。
+    /// 点自家工具栏同样算「外面」，是有意的：关菜单会 `ReleaseCapture`，抬起才能投递到工具栏。
+    /// 代价是工具栏设置键（抬起时才请求主菜单）表现为「关闭后立刻重新弹出」而非 toggle，接受。
     fn poll_outside_press(&mut self) {
         let now_down = any_mouse_button_down();
         let was_down = std::mem::replace(&mut self.mouse_was_down, now_down);
-        // 仅按下沿触发：按住不放期间每轮都是 down，不做边沿检测会反复关闭（本身幂等，
-        // 但会把「按住拖拽」这类操作也算成点击）；抬起沿更不该关。
+        // 仅按下沿触发：否则按住拖拽也会被当成点击；抬起沿更不该关。
         if !press_edge(was_down, now_down) {
             return;
         }
@@ -774,8 +729,7 @@ impl PopupMenu {
                 return;
             }
         }
-        // 命中判定与 `on_message` 共用 `find_hit`（同为屏幕坐标），故两条路径的覆盖面
-        // 严格互补、不会重复关闭：捕获收得到消息的情形必然命中面板。
+        // 与 `on_message` 共用 `find_hit`：捕获收得到消息的情形必然命中面板，两路互补不重复关闭。
         if self.state.borrow().find_hit(p.x, p.y).is_some() {
             return;
         }
@@ -789,9 +743,8 @@ impl PopupMenu {
                 mouse_buttons_swapped(),
             ),
         });
-        // 走 MenuState::close() 而非直接 self.hide()：它会发 UiEvent::MenuClose，
-        // 协调器据此复位服务端的 menu_open。少了这一步，菜单窗口没了但键仍被
-        // forward_menu_key 吞掉（同类不一致见 coordinator 的 clears_input 分支注释）。
+        // 走 MenuState::close() 而非直接 hide()：它发 UiEvent::MenuClose 让协调器复位 menu_open，
+        // 否则菜单没了但键仍被 forward_menu_key 吞掉。
         self.state.borrow_mut().close();
     }
 
@@ -882,11 +835,7 @@ impl PopupMenu {
             } else {
                 content_hits.clone()
             };
-            // 增量提交：重绘与摆位是两件独立的事，必须分开判断。
-            // `show()` 走的是 SetWindowPos(HWND_TOPMOST)，副作用是把窗口顶到 topmost 组最前——
-            // 每帧对每层都调一次的话，z 序每帧都要经历「一级最上 → 二级最上 → 三级最上」的
-            // 中间态；子菜单翻到左侧压住一级面板时，那个中间态就是一帧可见的遮挡。
-            // 所以：像素变了只 update（不碰 z 序），只有首显/几何真变了才 show。
+            // 增量提交：像素变了只 update（不碰 z 序），首显/几何真变了才 show，见 `plan_render`。
             let want = LevelRender {
                 items: items.clone(),
                 selected: *selected,
@@ -975,8 +924,7 @@ impl PopupMenu {
         };
         // item 高亮圆角：menu.item.border_radius 优先，默认 4。
         let hover_radius = resolve_dim(mi.and_then(|n| n.border_radius), 4.0);
-        // root 四边内边距：menu.root.padding（取 left 代表）优先，默认 4。
-        // root 四边内边距独立可配；未写的边回退到 left（保持既有主题的对称外观）。
+        // root 四边内边距独立可配，默认 4；未写的边回退到 left（保持既有主题的对称外观）。
         let root_pad_l = resolve_dim(mroot.and_then(|n| n.padding.left), 4.0);
         let root_pad = Edges {
             l: root_pad_l,
@@ -1107,8 +1055,7 @@ impl PopupMenu {
             }
             self.visible = false;
             set_menu_visible(false);
-            // 全部窗口已 SW_HIDE，基线随之作废——否则下次弹出时内容碰巧相同的层
-            // 会被判为「无变化」而跳过 show，结果是根本不出现。
+            // 窗口已全部隐藏，基线须作废，否则下次弹出时内容相同的层会跳过 show、根本不出现。
             self.invalidate_rendered();
             let mut st = self.state.borrow_mut();
             st.levels.clear();
@@ -1158,9 +1105,8 @@ pub(crate) struct LevelKey(LevelRender);
 /// 报来（[`set_host_work_area`]）。
 #[cfg(ext_presenter)]
 impl PopupMenu {
-    /// 宿主报来的指针事件（屏幕坐标）。语义对齐 Windows：移动与左键走 wnd_proc 的同一套
-    /// 处理；右键在哪都只关菜单（`WM_RBUTTONDOWN`）；中键只有落在菜单外才关（菜单外按下
-    /// 轮询看的是任意键，菜单内的中键 wnd_proc 不处理）。
+    /// 宿主报来的指针事件（屏幕坐标）。语义对齐 Windows：移动与左键同 wnd_proc；右键在哪都只关菜单；
+    /// 中键只有落在菜单外才关。
     pub(crate) fn on_pointer(&mut self, event: crate::manager::MenuPointerEvent, x: i32, y: i32) {
         use crate::manager::MenuPointerEvent as E;
         if !self.visible {
@@ -1354,12 +1300,10 @@ pub fn set_clipboard_text(text: &str) {
     }
 }
 
-/// `pbcopy` / `pbpaste` 的命令，**强制 UTF-8 locale**。
+/// `pbcopy` / `pbpaste` 的命令，强制 UTF-8 locale。
 ///
-/// 两者按 locale 决定文本编码；服务进程由 LaunchAgent 拉起，环境里没有 `LANG`，于是按
-/// 非 UTF-8 编码转换——中文写进去、读出来都是乱码（t274：加词 Tab 取剪贴板出乱码）。
-/// 终端里起的 dev 服务继承了 shell 的 `LANG`，所以开发机上永远复现不出来。
-/// `LC_ALL` 一并设：它优先级最高，环境里若残留 `LC_ALL=C` 会盖掉 `LANG`。
+/// 两者按 locale 决定文本编码；LaunchAgent 拉起的服务没有 `LANG`，中文读写都会乱码
+/// （终端起的 dev 服务继承了 shell 的 `LANG`，开发机上复现不出）。`LC_ALL` 优先级最高，一并设。
 #[cfg(target_os = "macos")]
 fn pasteboard_command(path: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(path);
@@ -1413,11 +1357,8 @@ pub fn try_set_clipboard_text(_text: &str) -> anyhow::Result<()> {
 
 /// 剪贴板文本缓存 `(序列号, 文本)`，失效判据见 [`get_clipboard_text`]。
 ///
-/// 内存权衡：缓存会持有剪贴板全文副本，直到剪贴板下次变化。刻意**不设大小上限**——
-/// 超限就不缓存的话，超大剪贴板下每次按键都要重跑一遍整段 UTF-16→UTF-8 转换，那比
-/// 多占一份内存糟得多；而不加上限的最坏内存占用等于剪贴板本身，且任何情况下都不比
-/// 改造前（每次真读、读完即弃）更慢。若日后内存成为问题，正确的做法是给显示路径缓存
-/// 截断版、执行路径仍真读，而不是简单地超限不缓存。
+/// 缓存持有剪贴板全文副本，刻意不设大小上限：超限不缓存会让超大剪贴板下每次按键都重跑整段转换，
+/// 比多占一份内存糟。若内存成问题，应给显示路径缓存截断版、执行路径仍真读，而非超限不缓存。
 #[cfg(windows)]
 static CLIP_CACHE: std::sync::Mutex<Option<(u32, String)>> = std::sync::Mutex::new(None);
 
@@ -1453,27 +1394,21 @@ fn clip_cache_stale() -> String {
         .unwrap_or_default()
 }
 
-/// 读剪贴板文本（CF_UNICODETEXT），**带序列号缓存**。失败/无文本返回空串。
+/// 读剪贴板文本（CF_UNICODETEXT），带序列号缓存。失败/无文本返回空串。
 ///
-/// `GetClipboardSequenceNumber` 只读窗口站上的一个计数器：不需要 `OpenClipboard`、
-/// 不参与剪贴板全局锁竞争、不会被别的进程挡住。内容没变时据此直接复用上次结果，
-/// 把「开剪贴板 + 整段 UTF-16→UTF-8 转换」整个省掉。
-///
-/// 这对**候选构建期**尤其要紧：含 `{clip()}` 的短语（如 `coad`、`ojs`）每次按键都要
-/// 求值 display 标签，若每次都真开剪贴板，`open_clipboard_retry` 最坏 5×10ms 的 sleep
-/// 就直接摊在按键线程上。但该场景应改用 [`get_clipboard_text_cached`]——本函数在缓存
-/// 未命中时仍会重试等待。
+/// `GetClipboardSequenceNumber` 只读窗口站计数器，不需要 `OpenClipboard`、不被别的进程挡住；
+/// 内容没变时直接复用上次结果。缓存未命中时仍会重试等待，按键线程上的显示路径应改用
+/// [`get_clipboard_text_cached`]。
 #[cfg(windows)]
 pub fn get_clipboard_text() -> String {
     read_clipboard(true)
 }
 
-/// 同 [`get_clipboard_text`]，但**绝不阻塞调用线程**：缓存未命中且剪贴板正被其它进程
-/// 占用时，直接返回上次缓存的文本（从未读到过则空串），不做 sleep 重试。
+/// 同 [`get_clipboard_text`]，但绝不阻塞：缓存未命中且剪贴板被占用时直接返回上次缓存的文本
+/// （从未读到过则空串），不做 sleep 重试。
 ///
-/// 专供**只用于显示**的场景（候选标签）：标签短暂陈旧一拍无害，按键线程卡 40ms 则
-/// 用户直接可感。**执行动作的路径不可用本函数**——那里拿到陈旧内容会粘错东西，必须用
-/// [`get_clipboard_text`]，它在打不开时返回空串而非旧值。
+/// 专供只用于显示的场景（候选标签），陈旧一拍无害。执行动作的路径不可用本函数——陈旧内容
+/// 会粘错东西，须用 [`get_clipboard_text`]（打不开时返回空串而非旧值）。
 #[cfg(windows)]
 pub fn get_clipboard_text_cached() -> String {
     read_clipboard(false)
@@ -1507,8 +1442,7 @@ fn read_clipboard(allow_retry: bool) -> String {
             let hglobal = HGLOBAL(h.0);
             let ptr = GlobalLock(hglobal) as *const u16;
             if !ptr.is_null() {
-                // 读到 NUL 结尾的宽字符串；以 GlobalSize 为上界，防异常生产者
-                // 未写 NUL 时越界读（CF_UNICODETEXT 规范要求 NUL 结尾，此为防御）。
+                // 读到 NUL 结尾；以 GlobalSize 为上界，防生产者未写 NUL 时越界读。
                 let max_len = GlobalSize(hglobal) / std::mem::size_of::<u16>();
                 let mut len = 0usize;
                 while len < max_len && *ptr.add(len) != 0 {
@@ -1523,8 +1457,7 @@ fn read_clipboard(allow_retry: bool) -> String {
         out
     };
 
-    // 以**读之前**的 seq 作键：若期间剪贴板恰好变了，这份缓存下次会因 seq 不等而被弃用，
-    // 顶多多读一次；反过来用读之后的 seq 则可能把旧内容盖上新序号，那才是错的方向。
+    // 以读之前的 seq 作键：期间剪贴板变了顶多下次多读一次；用读之后的 seq 会把旧内容盖上新序号。
     clip_cache_put(seq, &out);
     out
 }
@@ -1540,18 +1473,13 @@ pub fn get_clipboard_text() -> String {
 
 // ── macOS 剪贴板缓存读取（Carbon Pasteboard Manager，免子进程） ──────────────
 //
-// `get_clipboard_text` 走 `pbpaste`，一次 fork+exec 数毫秒；而
-// [`get_clipboard_text_cached`] 的调用点在**每次按键的候选构建期**，那里绝不能
-// spawn 进程。故显示路径另走 Pasteboard Manager 的 C API 直读，并按变更计数缓存。
-//
-// 用 `PasteboardCopyItemFlavorData` 而不是「变更计数 + pbpaste」：既然都要 FFI 拿
-// 计数，顺手把内容也读了，省掉子进程这一层。
+// `get_clipboard_text` 走 `pbpaste`（一次 fork+exec）；[`get_clipboard_text_cached`] 在每次按键的
+// 候选构建期调用，不能 spawn 进程，故另走 Pasteboard Manager C API 直读并按变更计数缓存。
 
 /// macOS 剪贴板缓存：长生命周期的 `PasteboardRef` + 上次读到的文本。
 ///
-/// **`PasteboardRef` 必须常驻**：变更判据是 `PasteboardSynchronize` 返回的
-/// `kPasteboardModified`，其语义是「自**该 ref** 上次同步以来是否被改过」。每次新建 ref
-/// 就没有"上次"可比（实测新建后首次同步恒返回 0），判据直接失效。
+/// `PasteboardRef` 必须常驻：`kPasteboardModified` 的语义是「自该 ref 上次同步以来是否被改过」，
+/// 新建的 ref 首次同步恒返回 0，每次新建判据就失效。
 ///
 /// 裸指针跨线程：Pasteboard Manager 的调用全部收在本模块的 Mutex 之内，无并发访问。
 #[cfg(target_os = "macos")]
@@ -1615,10 +1543,8 @@ unsafe fn cfstr(s: &str) -> core_foundation_sys::string::CFStringRef {
     }
 }
 
-/// 同 [`get_clipboard_text`]，但**不 spawn 子进程**：经 Pasteboard Manager 直读，
-/// 并按变更计数缓存，剪贴板没变时是一次纯内存查表。
-///
-/// 专供**只用于显示**的场景（候选标签）。执行动作的路径请用 [`get_clipboard_text`]。
+/// 同 [`get_clipboard_text`]，但不 spawn 子进程：经 Pasteboard Manager 直读并按变更计数缓存。
+/// 专供只用于显示的场景（候选标签）；执行动作的路径请用 [`get_clipboard_text`]。
 #[cfg(target_os = "macos")]
 pub fn get_clipboard_text_cached() -> String {
     use pasteboard::*;
@@ -1655,11 +1581,8 @@ pub fn get_clipboard_text_cached() -> String {
         }
 
         let mut text = String::new();
-        // 这一轮是否**读到了确定的答案**。要与「读到了空」区分开：剪贴板里放的是图片时
-        // 枚举成功但没有文本 flavor，空串就是正确答案，该缓存；而 API 本身失败（拿不到
-        // flavor 名 / 取项数失败）时空串只是"没读成"，一旦把它连同 primed=true 提交，
-        // 下一次 PasteboardSynchronize 会说"未变更"而直接命中缓存 —— 候选标签里的剪贴板
-        // 内容就此恒为空，直到用户重新复制一次才恢复。
+        // 这一轮是否读到了确定的答案，须与「读到了空」区分：剪贴板是图片时空串是正确答案；
+        // API 失败时的空串若连同 primed=true 提交，下次同步报「未变更」，标签就恒为空直到重新复制。
         let mut read_ok = false;
         let flavor = cfstr(UTF8_FLAVOR);
         let mut n: u64 = 0;
@@ -1691,8 +1614,7 @@ pub fn get_clipboard_text_cached() -> String {
             CFRelease(flavor as _);
         }
         if !read_ok {
-            // 没读成：**不动缓存**（也不置 primed），下次调用照常重试。返回上一次的已知值，
-            // 比返回空串更接近事实——剪贴板内容并没有因为一次 API 失败而消失。
+            // 没读成：不动缓存也不置 primed，下次照常重试；返回上次已知值。
             tracing::debug!("剪贴板读取失败，沿用上次缓存值");
             return cache.text.clone();
         }
@@ -1710,11 +1632,9 @@ pub fn get_clipboard_text() -> String {
 
 /// Linux 外部宿主形态：返回空串（同 Windows / macOS 以外的「拿不到就空」）。
 ///
-/// 调用点在**每次按键的候选构建期**（候选含 `{clip()}` 时拼显示标签），这里读一次就要起一个
-/// `wl-paste` / `xclip` 子进程，剪贴板持有方挂住时按键线程跟着挂（最长到命令超时）。
-/// Linux 没有 Windows 的剪贴板序列号 / macOS 的 changeCount 可做廉价失效判定，缓存无从谈起。
-/// 代价：Linux 上这类候选的显示标签里剪贴板那段为空；执行动作走的是 [`get_clipboard_text`]，
-/// 不受影响。
+/// 调用点在每次按键的候选构建期，读一次就要起 `wl-paste` / `xclip` 子进程，持有方挂住时按键线程跟着挂；
+/// Linux 又没有廉价的变更计数可做缓存。代价是这类候选的显示标签里剪贴板那段为空；
+/// 执行动作走 [`get_clipboard_text`]，不受影响。
 #[cfg(all(target_os = "linux", ext_presenter))]
 pub fn get_clipboard_text_cached() -> String {
     String::new()
@@ -1756,12 +1676,8 @@ const SIDE_GAP_DP: f32 = 6.0;
 
 /// 按 `placement` 把菜单摆到锚点旁，返回菜单左上角（**尚未钳制**到工作区）。
 ///
-/// `ax`/`ay` 是解析过 `i32::MIN`（取光标位）之后的锚点左上角；`wa` 为该点所在显示器的
-/// 工作区，取不到时一律按「首选方向装得下」处理——让首选方向生效，越界交给调用方的
-/// `clamp_to_work_area` 兜底，而不是凭空翻转。
-///
-/// 抽成纯函数是为了可单测：`show` 余下部分要建 View 树、量 DPI、开 Win32 窗口，
-/// 非 Windows 覆盖不到。
+/// `ax`/`ay` 是解析过 `i32::MIN`（取光标位）之后的锚点左上角；`wa` 为该点所在显示器的工作区，
+/// 取不到时按「首选方向装得下」处理，越界交给调用方的 `clamp_to_work_area` 兜底。
 fn place_menu(
     anchor: &MenuAnchor,
     ax: i32,
@@ -1780,16 +1696,10 @@ fn place_menu(
             (ax, if fits_up { up } else { anchor.bottom })
         }
         MenuPlacement::Side => {
-            // 两侧留同样宽的间隙。`w` 是**内容**宽（软投影的四向外扩在 reconcile 里另算，
-            // 不进这里），故左右紧贴时几何上本就对称——但投影带方向性偏移，贴着摆时那道
-            // 半透明暗边会落在菜单与工具栏之间，看着就成了「一侧紧贴、一侧有缝」。
-            // 留出间隙后两侧观感一致，也不再依赖某个主题的投影参数。
+            // 两侧留同样宽的间隙：投影带方向性偏移，紧贴时会显得一侧紧贴、一侧有缝。
             let gap = (SIDE_GAP_DP * scale).round() as i32;
-            // 右侧装得下走右侧，否则走左侧。间隙要一并计入判据，否则边界上会选出
-            // 一个「算得下、加了间隙却出界」的方向。
-            //
-            // 两侧都装不下时仍取右侧：左侧会把菜单推成负坐标，钳回来后正好压在工具栏
-            // 上——那是本分支要避免的事；贴右边缘至少还留着工具栏可见。
+            // 右侧装得下走右侧，否则走左侧；间隙一并计入判据。两侧都装不下仍取右侧：
+            // 左侧钳回来后会正好压在工具栏上。
             let fits_right = wa
                 .map(|(_, _, right, _)| anchor.right + gap + w as i32 <= right)
                 .unwrap_or(true);
@@ -1801,15 +1711,8 @@ fn place_menu(
             } else {
                 ax - gap - w as i32
             };
-            // 纵坐标与锚点**底边**对齐（菜单贴着工具栏往上长，同任务栏菜单）。
-            //
-            // 不能用顶边对齐：纵条只有百来像素高、菜单常有三四百，顶边对齐后底边顶出
-            // 工作区，钳回来就把整个菜单推到条顶之上老远——正是「在左边了但还在上方」
-            // 那个观感的由来。钳制只会把越界的部分推回来，它救不了一个从一开始就选错
-            // 的对齐边。
-            //
-            // 底边对齐同样可能顶出工作区**上**边（纵条被拖到屏幕顶部时），那时改回顶边
-            // 对齐向下展开——与 `Above` 分支同样的「首选 + 越界回退」结构。
+            // 纵坐标与锚点底边对齐（贴着工具栏往上长，同任务栏菜单）。顶边对齐会让高菜单底边
+            // 顶出工作区、钳回后整个推到条顶之上。底边对齐顶出上边时改回顶边对齐向下展开。
             let up = anchor.bottom - h as i32;
             let fits_up = wa.map(|(_, top, _, _)| up >= top).unwrap_or(true);
             (x, if fits_up { up } else { ay })
@@ -1871,10 +1774,8 @@ fn clamp_to_work_area(x: i32, y: i32, w: u32, h: u32) -> (i32, i32) {
 
 /// 子菜单定位：贴父面板右缘展开，纵向对齐父高亮项；某侧放不下则翻到另一侧；最后钳制工作区。
 ///
-/// `prefer_left`：本次展开链此前是否已经翻到左侧。菜单本身贴在屏幕右侧时，二级子菜单会
-/// 因右侧无空间翻到左侧——此时三级、四级子菜单如果继续各自独立判断（它们贴着二级的左侧
-/// 展开，往右侧仍然装得下），就会翻回右侧压在二级面板上面，出现"二级在左、三级在右"的
-/// 锯齿重叠。所以一旦翻过一次左，后续层级要延续这个方向，除非左侧也真的没空间了才翻回右侧。
+/// `prefer_left`：本次展开链此前是否已翻到左侧。一旦翻过，后续层级延续左侧（左侧也放不下才翻回），
+/// 否则更深层会翻回右侧压在上一层面板上，形成锯齿重叠。
 /// 返回值第三项是本层实际选定的方向，供调用方串成下一层的 `prefer_left`（见 `reconcile`）。
 fn place_child(
     parent_origin: (i32, i32),
@@ -1898,10 +1799,7 @@ fn place_child(
 
 /// [`place_child`] 的纯逻辑部分：工作区矩形由调用方传入，而非在函数内部现查。
 ///
-/// 拆出这一层是为了让单元测试能注入固定的工作区——`work_area_of` 只在 Windows 上
-/// 才会真正调用 `GetMonitorInfoW`，其余平台恒返回 `None`，若测试直接调用
-/// [`place_child`]，在非 Windows CI（Linux/macOS）上永远走不到本函数里
-/// `Some(..)` 分支的翻转判断，只会原样透传 `prefer_left`。
+/// 拆出来让测试能注入工作区：`work_area_of` 在非 Windows 上恒为 `None`，测不到翻转分支。
 fn place_child_in_area(
     parent_origin: (i32, i32),
     parent_size: (u32, u32),
@@ -1954,16 +1852,13 @@ fn place_child_in_area(
 
 /// 「点菜单外面就关」的判据（见 [`PopupMenu::poll_outside_press`]）。
 ///
-/// 这条路是纯轮询驱动的——没有消息可依赖，错了不会编译失败也不会 panic，只会表现为
-/// 「菜单一弹就没」或「点外面关不掉」这类难复现的时序问题，所以两半判据都锁在这里。
+/// 纯轮询驱动，错了只会表现为「菜单一弹就没」或「点外面关不掉」这类难复现的时序问题。
 #[cfg(test)]
 mod outside_press_tests {
     use super::*;
     use std::sync::mpsc::channel;
 
-    /// 菜单几乎总是由一次**尚未抬起**的点击唤出的（工具栏左键 / 候选区右键 / 任务栏
-    /// 语言栏图标）。若 `show()` 把 `mouse_was_down` 填成 false，弹出后的第一轮轮询
-    /// 就会把这枚旧按下当成新的菜单外点击 —— 菜单弹出即消失。
+    /// 菜单几乎总是由尚未抬起的点击唤出；把这枚旧按下当新点击，菜单会弹出即消失。
     #[test]
     fn already_held_button_is_not_a_new_press() {
         assert!(!press_edge(true, true));
@@ -1986,8 +1881,7 @@ mod outside_press_tests {
         assert!(!press_edge(false, false));
     }
 
-    /// `menu_visible()` 随菜单显隐：候选窗 / 气泡在 wnd_proc 里据它决定右键归谁，
-    /// hide 后不复位的话它们会一直以为菜单开着，右键永远被当成「由轮询接手」而丢掉。
+    /// `menu_visible()` 随菜单显隐：hide 后不复位，候选窗 / 气泡的右键会一直被当成「由轮询接手」而丢掉。
     #[test]
     fn menu_visible_tracks_show_and_hide() {
         let (tx, _rx) = channel();
@@ -2033,12 +1927,8 @@ mod outside_press_tests {
         }
     }
 
-    /// 轮询传给 `find_hit` 的**必须是屏幕坐标**。
-    ///
-    /// 易错点：`on_message` 那条路先经 `self.screen(x, y)` 把捕获窗口的客户区坐标换算成
-    /// 屏幕坐标，而 `GetCursorPos` 拿到的**本来就是**屏幕坐标，再转一次就会平移
-    /// `capture_origin`。此处 `capture_origin` 特意设成 (777, 888)：若谁日后在轮询里补上
-    /// 了那次转换，光标就会被算到面板外，这条先红。
+    /// 轮询传给 `find_hit` 的必须是屏幕坐标：`GetCursorPos` 本来就是屏幕坐标，不能再像
+    /// `on_message` 那样经 `screen()` 平移。`capture_origin` 特意非零，补上那次转换这条就红。
     #[test]
     fn cursor_inside_panel_hits_in_screen_coords() {
         let st = state_with_panel_at(100, 100, 80, 40);
@@ -2077,18 +1967,14 @@ mod render_plan_tests {
         assert_eq!(plan_render(None, &base()), (true, true));
     }
 
-    /// 完全没变 → 一步都不做。这是消除无谓 SetWindowPos 的地基。
+    /// 完全没变 → 一步都不做。
     #[test]
     fn unchanged_level_does_nothing() {
         let prev = base();
         assert_eq!(plan_render(Some(&prev), &base()), (false, false));
     }
 
-    /// **本修复的核心断言**：只有高亮行变了时，重绘但**绝不**重新摆位。
-    ///
-    /// `show()` 会 `SetWindowPos(HWND_TOPMOST)` 把窗口顶到 topmost 组最前。若这里返回
-    /// `replace = true`，那么每次鼠标在任意一层移动，父层都会被顶到子菜单前面一瞬，
-    /// 子菜单翻到左侧压住父面板时就表现为「闪一下」。回归了就是这条先红。
+    /// 只有高亮行变了时，重绘但绝不重新摆位：摆位会把父层顶到子菜单前面一瞬，表现为闪烁。
     #[test]
     fn selection_change_repaints_without_restacking() {
         let prev = base();
@@ -2134,16 +2020,9 @@ mod hover_tests;
 mod clipboard_tests {
     use super::*;
 
-    /// 缓存必须随剪贴板内容变更而失效——**这是本缓存唯一会伤到用户的失败模式**：
-    /// 若序列号判据失灵，`clip()` 会一直吐上一次的剪贴板内容，短语 `ojs`/`coad` 就会
-    /// 粘错东西。
+    /// 缓存必须随剪贴板内容变更而失效，否则 `clip()` 会一直吐旧内容、粘错东西。
     ///
-    /// 标 `#[ignore]` 的理由（两条，缺一都不该 ignore）：
-    /// 1. 它**真写系统剪贴板**，会覆盖跑测试者当下的剪贴板内容（末尾尽力恢复，但进程
-    ///    被中断就恢复不了）——不该混进 `cargo test` 的日常批次；
-    /// 2. CI 是 Linux 宿主，`#[cfg(windows)]` 下本测试根本不参与编译，进日常批次也只是
-    ///    个不会执行的摆设。
-    ///
+    /// 标 `#[ignore]`：它真写系统剪贴板，会覆盖跑测试者当下的内容。
     /// 改动 `read_clipboard` / 缓存判据后，请在 Windows 本机手动跑一次：
     /// `cargo test -p wind-ui --lib clipboard_cache -- --ignored --nocapture`
     #[test]
@@ -2186,8 +2065,8 @@ mod tests;
 mod clipboard_tests_macos {
     use super::*;
 
-    /// pbcopy/pbpaste 必须带 UTF-8 locale 跑：LaunchAgent 拉起的服务进程没有 `LANG`，
-    /// 少了这两个变量中文就成乱码（t274）。终端里跑测试有 `LANG`，往返测试抓不到这条，故直接看命令。
+    /// pbcopy/pbpaste 必须带 UTF-8 locale（见 `pasteboard_command`）。终端里跑测试有 `LANG`，
+    /// 往返测试抓不到，故直接看命令。
     #[test]
     fn pasteboard_command_forces_utf8_locale() {
         let cmd = pasteboard_command("/usr/bin/pbpaste");
@@ -2204,10 +2083,7 @@ mod clipboard_tests_macos {
 
     /// macOS 版的同一条不变量：缓存必须随剪贴板变更失效。
     ///
-    /// `#[ignore]` 的理由与 Windows 版同：**它真写系统剪贴板**，会覆盖跑测试者当下的
-    /// 内容（末尾尽力恢复，进程被中断则恢复不了），不该混进 `cargo test` 日常批次。
-    ///
-    /// 改动 `get_clipboard_text_cached` 的 macOS 实现后手动跑：
+    /// 标 `#[ignore]`：真写系统剪贴板。改动 `get_clipboard_text_cached` 的 macOS 实现后手动跑：
     /// `env -u LANG -u LC_ALL -u LC_CTYPE cargo test -p wind-ui --lib clipboard_cache -- --ignored --nocapture`
     #[test]
     #[ignore = "真写系统剪贴板，会覆盖使用者当前内容；须在 macOS 本机手动跑"]
@@ -2229,7 +2105,7 @@ mod clipboard_tests_macos {
             "缓存未随剪贴板变更失效（候选标签会显示旧内容）"
         );
 
-        // 中文往返（t274）：在**没有 LANG** 的环境里跑才有意义，那正是 LaunchAgent 下的服务：
+        // 中文往返：在没有 LANG 的环境里跑才有意义（模拟 LaunchAgent 下的服务）：
         // `env -u LANG -u LC_ALL -u LC_CTYPE cargo test ... -- --ignored`
         const ZH: &str = "清风输入法剪贴板中文";
         set_clipboard_text(ZH);

@@ -2,37 +2,17 @@
 //!
 //! 一块常驻的符号面板：按物理键盘布局画出当前面的键位，鼠标可点、物理按键会高亮。
 //!
-//! # 布局零配置
+//! 设计见 docs/design/soft-keyboard.md。
 //!
-//! **软键盘的布局就是键盘的布局**——键位坐标由键名唯一决定，配置里没有行列。
-//! 本文件的 [`ROW_SLOTS`] 是那份坐标表在渲染端的镜像：它只描述「第几行有几个键位」，
-//! 键位名本身随 [`SoftKeyCap`] 一起从协调器下发，两边不各存一份名字。
-//!
-//! # 绘制成本
-//!
-//! 面板内容几乎恒定，每帧只有一两个键在变（hover / 按下 / 切层），但当前实现是
-//! **每次都重建整棵 View 树再整块重绘**——没有做「底板烘焙 + 单键重绘」。
-//!
-//! 这样够用的前提是文本测量在 `TextRenderer` 里已有缓存：47 个键帽都是
-//! `fixed_w`/`fixed_h`，重排只是算矩形，真正贵的字形测量走的是缓存。
-//! ⚠️ 若哪天把键帽改成按内容自适应宽度，或去掉测量缓存，这条前提就不成立了，
-//! 鼠标划过面板会明显发烫——那时再上单键重绘，别提前优化。
-//!
-//! # 不抢焦点是承重墙
-//!
-//! 窗口沿用浮层那组样式（Windows 的 `WS_EX_NOACTIVATE`，macOS 的
-//! `NSWindowStyleMask::NonactivatingPanel`）。「切换焦点自动关闭」这条行为完全依赖它：
-//! 面板一旦可激活，用户点它上面任何一个键都是在改变焦点，它会把自己关掉。
-//!
-//! # 三个平台共用这一份
-//!
-//! 布局、绘制、命中、交互状态机全部在本文件里且不带 `cfg`——它们建立在 tiny-skia 与
-//! [`View`] 之上，本就与平台无关。分叉只有两处，都收在文件末尾：
-//!
-//! - **窗口壳**：`PanelWindow` 别名。Windows 是 `LayeredWindow`（`UpdateLayeredWindow`），
-//!   macOS 是 [`crate::mac_panel::MacPanel`]（服务进程自己的 NSPanel），Linux 是 mock。
-//! - **鼠标来源**：Windows 走 `mouse_impl`（Win32 消息），macOS 走 `mouse_macos`
-//!   （AppKit 事件）。两者写的是同一个 [`SoftMouse`] 状态机，只是喂法不同。
+//! - 布局零配置：键位坐标由键名唯一决定。[`ROW_SLOTS`] 只描述每行几个键位，键位名随
+//!   [`SoftKeyCap`] 从协调器下发，两边不各存一份名字。
+//! - 每次都重建整棵 View 树再整块重绘，没做单键重绘。够用的前提是键帽都是固定宽高、
+//!   字形测量走 `TextRenderer` 缓存；若改成按内容自适应宽度或去掉缓存，再上单键重绘。
+//! - 不抢焦点是承重墙：窗口用 `WS_EX_NOACTIVATE` / `NonactivatingPanel`，面板一旦可激活，
+//!   点任何键都会改变焦点、触发「切换焦点自动关闭」把自己关掉。
+//! - 三平台共用：布局、绘制、命中、状态机都不带 `cfg`。分叉只在文件末尾两处：窗口壳
+//!   `PanelWindow`（Windows `LayeredWindow`、macOS [`crate::mac_panel::MacPanel`]、Linux mock），
+//!   以及鼠标来源（`mouse_impl` / `mouse_macos`，写同一个 [`SoftMouse`] 状态机）。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -41,11 +21,10 @@ use std::sync::mpsc::Sender;
 use crate::text::dwrite::TextRenderer;
 use crate::view::{Align, Edges, Layout, Rect, View};
 
-/// 面板的窗口壳。三个平台的方法集**逐位同形**，故本文件其余部分无需分叉。
+/// 面板的窗口壳。三个平台的方法集同形，故本文件其余部分无需分叉。
 ///
-/// ⚠️ macOS 上刻意**不**复用 `window::LayeredWindow`：那个类型在 macOS 上是纯像素
-/// 缓冲（`candidate_window.rs` 正靠它光栅化后写 SHM），把它改成真窗口会给候选窗凭空
-/// 开出一个 NSPanel，砸掉现有的 host-render 管线。
+/// macOS 上刻意不复用 `window::LayeredWindow`：它在 macOS 上是纯像素缓冲（候选窗靠它光栅化
+/// 后写 SHM），改成真窗口会给候选窗凭空开出一个 NSPanel，砸掉 host-render 管线。
 #[cfg(target_os = "macos")]
 use crate::mac_panel::MacPanel as PanelWindow;
 #[cfg(not(target_os = "macos"))]
@@ -97,7 +76,7 @@ fn pin_icon(pinned: bool, tint: [u8; 4], size: f32) -> crate::view::ViewImage {
 
 /// 每行的键位个数，与 `wind_softkeyboard::KEY_ROWS` 同构（数字行 / QWERTY / ASDF / ZXCV）。
 ///
-/// 只存**个数**不存键位名：名字随 `SoftKeyCap` 下发，渲染端再存一份就会分叉。
+/// 只存个数不存键位名：名字随 `SoftKeyCap` 下发，渲染端再存一份就会分叉。
 const ROW_SLOTS: [usize; 4] = [13, 13, 11, 10];
 
 /// 键位单元（dp）。设计稿定的 42，下限约 34——再小 CJK 符号就不准了。
@@ -110,8 +89,8 @@ const PAD_DP: f32 = 12.0;
 /// 标签行与底行都按它对齐，面板宽度就只由键盘决定。
 const KBD_UNITS: f32 = 16.0;
 const KBD_GAPS: f32 = 14.0;
-/// 标签行度量（dp）。**必须是模块常量而不是两个函数各写一份**——
-/// [`SoftKeyboard::visible_tabs`] 与 [`SoftKeyboard::build_tabs`] 靠它们算出同一个可见集。
+/// 标签行度量（dp）。必须是模块常量：[`SoftKeyboard::visible_tabs`] 与
+/// [`SoftKeyboard::build_tabs`] 靠它们算出同一个可见集。
 const TAB_GAP_DP: f32 = 2.0;
 const TAB_PAD_X_DP: f32 = 9.0;
 const TAB_FONT_DP: f32 = 12.5;
@@ -121,38 +100,32 @@ const TAB_CLOSE_W_DP: f32 = 27.0;
 const GRIP_ROW_H_DP: f32 = 9.0;
 /// 关闭按钮悬停框的高度（dp）。
 ///
-/// ⚠️ 它**比拖动条行高**（`GRIP_ROW_H_DP`）——后者是给那根横线定的，拿它当亮框的
-/// 基准会得到一个又扁又偏上的框。亮框靠向上溢出到面板的顶部内边距里补足高度。
+/// 它比拖动条行高（`GRIP_ROW_H_DP`）大：后者是给横线定的，拿来当亮框基准会又扁又偏上。
+/// 亮框靠向上溢出到面板顶部内边距里补足高度。
 const CLOSE_H_DP: f32 = 16.0;
 const GRIP_W_DP: f32 = 46.0;
 const GRIP_H_DP: f32 = 3.5;
 
 /// 长按重复：首次延迟与间隔（毫秒）。
 ///
-/// ⚠️ 真实实现应读 `SPI_GETKEYBOARDDELAY` / `SPI_GETKEYBOARDSPEED`——自定常数一定会和
-/// 物理键长按的手感对不上。这里取一组接近 Windows 默认的值，读系统设置见 [`repeat_params`]。
+/// 只是读不到系统设置时的兜底，取接近 Windows 默认的值；正常路径见 [`repeat_params`]。
 const REPEAT_DELAY_MS: u64 = 500;
 const REPEAT_RATE_MS: u64 = 33;
 /// 物理按键高亮的持续时间（毫秒）。长按时被连发的 keydown 不断续期。
 const KEY_FLASH_MS: u64 = 140;
-/// 物理 Shift / 大写锁定的跟随节奏（毫秒）。**仅面板可见期间生效**。
+/// 物理 Shift / 大写锁定的跟随节奏（毫秒），仅面板可见期间生效。
 const MODIFIER_POLL_MS: u64 = 40;
-/// 本平台读得到物理 Shift / 大写锁定（见 [`read_shift_caps`]）。读不到时不登记上面那个节奏——
-/// 醒来也无事可做，只是白白把线程叫起来（Linux 外部宿主形态）。
+/// 本平台读得到物理 Shift / 大写锁定（见 [`read_shift_caps`]）。读不到时（Linux 外部宿主）
+/// 不登记上面那个节奏，免得白白唤醒线程。
 const MODIFIER_POLLS: bool = cfg!(any(windows, target_os = "macos"));
 
 /// 面板上的 Caps 键点了能不能翻转系统大写锁定。
 ///
-/// ⛔ **macOS 上恒为 false，且不是我们漏改了什么**：大写锁定的状态由 HID 层持有，
-/// 而合成按键是从它**上面**的 CGEvent tap 层注进去的，够不着——这一层差别只影响这一个键，
-/// 别的键全都照常。三条路都实测过（见 `docs/design/soft-keyboard.md` §11.9）：
-/// CGEvent 敲 `kVK_CapsLock` 无效（由**有**辅助功能授权的 `.app` 实测，不是假阴性）；
-/// `IOHIDSetModifierLockState` 受理了然后忽略——返回 `KERN_SUCCESS` 而状态纹丝不动；
-/// `kIOHIDServerConnectType` 要 root，服务不以 root 跑。真要做到只剩装虚拟 HID 驱动
-/// （Karabiner 那条路：DriverKit 系统扩展 + 用户批准），为一个键帽不值当。
+/// macOS 上恒为 false，不是漏改：大写锁定状态由 HID 层持有，合成按键从其上的 CGEvent 层注入
+/// 够不着，三条路都证伪过（见 docs/design/soft-keyboard.md §11.9）。
 ///
-/// ⚠️ 禁掉的**只是「点它去翻转」这一半**：读是好的，物理 CapsLock 的状态照常轮询回来
-/// 并高亮，所以禁用态下它仍是个如实的指示灯——见 [`SoftKeyboard::caps_key`]。
+/// 禁掉的只是「点它去翻转」：物理 CapsLock 状态照常轮询回来并高亮，禁用态下它仍是如实的
+/// 指示灯，见 [`SoftKeyboard::caps_key`]。
 const CAPS_CLICKABLE: bool = !cfg!(target_os = "macos");
 
 /// 面板配色（全部走主题键，未配则回落到与候选窗同族的中性色）。
@@ -164,7 +137,7 @@ struct Colors {
     keycap_dead: [u8; 4],
     line: [u8; 4],
     ink: [u8; 4],
-    /// 角标色。**必须比正文更淡**，又要在深色底上仍可读——直接沿用 `dim` 会偏亮。
+    /// 角标色。必须比正文更淡，又要在深色底上仍可读——直接沿用 `dim` 会偏亮。
     hint: [u8; 4],
     accent: [u8; 4],
     accent_soft: [u8; 4],
@@ -172,14 +145,12 @@ struct Colors {
     /// 顶部拖动条的颜色。取工具栏那根同款（`toolbar_grip`）——两处是同一件事：
     /// 「这块东西可以拖」。
     grip: [u8; 4],
-    /// 悬停底色。**必须比按下态轻得多**——悬停只是「鼠标在这」，按下才是「就是它」。
-    /// 两者都用主色系会让人分不清自己有没有点下去。取主题的 `toolbar_hover`：
-    /// 一层很淡的半透明叠加，深浅主题各有其值。
+    /// 悬停底色。必须比按下态轻得多，否则分不清有没有点下去。取主题的 `toolbar_hover`
+    /// （很淡的半透明叠加，深浅主题各有其值）。
     hover: [u8; 4],
     /// 功能键（Tab/Enter/Shift/空格…）的文字色。
     ///
-    /// 比正文淡一档、但比角标深：功能键是**能按的键**，用角标那种淡色会让整排看着像
-    /// 禁用状态。这正是「Enter / 空格这类显得突兀」的一半原因，另一半是底色。
+    /// 比正文淡一档、但比角标深：功能键是能按的键，用角标那种淡色会让整排看着像禁用。
     fn_ink: [u8; 4],
 }
 
@@ -238,10 +209,8 @@ impl Colors {
                 "key_pressed_bg",
                 theme.color("accent_soft", d.accent_soft),
             ),
-            // 激活键是「强调色底上的字」：第二级取 on_accent，不取 accent_text。
-            // accent_text 是「在普通底上可读的强调色文字」，拿来压强调色底就是同色字压同色底——
-            // _base 提供了 accent_text（= accent，分段着色的标准色契约）之后，_base / msime 的
-            // 激活键字会整个消失在底色里；清风系此前就是 accent_text 字压 accent 底。
+            // 激活键是「强调色底上的字」：第二级取 on_accent，不取 accent_text——
+            // accent_text 是普通底上的强调色文字，常等于 accent，压在 accent 底上会整个消失。
             on_accent: pick(
                 "softkb_active_text",
                 "on_accent",
@@ -273,10 +242,8 @@ struct SoftMouse {
     dirty: bool,
     /// 窗口句柄（`isize` 存，避免让本结构在非 Windows 上依赖 HWND 类型）。0 = 未装配。
     ///
-    /// ⚠️ 本字段连同下面的拖动三件套与 `leave_armed`，读者只有 `#[cfg(windows)]` 的
-    /// `mouse_impl` 和 `refresh_hover`。非 Windows 目标编 **lib** target 时它们确实无人
-    /// 读（CI 的 darwin clippy 会拦）。⛔ 别改成 `#[cfg(windows)]` 字段：本结构刻意保持
-    /// 在非 Windows 上也能构造，理由见 `hwnd_handle`。
+    /// 非 Windows 的 lib target 里它无人读，故有 `allow(dead_code)`。别改成 `#[cfg(windows)]`
+    /// 字段：本结构刻意保持在非 Windows 上也能构造。
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: isize,
     /// 拖动中；`anchor` 是按下时的屏幕光标，`origin` 是按下时的窗口左上。
@@ -287,19 +254,15 @@ struct SoftMouse {
     anchor: (i32, i32),
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     origin: (i32, i32),
-    /// 拖动落点（左上角），供窗口在 tick 里收回去记住位置。拖动**途中**每次
-    /// `WM_MOUSEMOVE` 都更新——面板要实时跟着光标走。
+    /// 拖动落点（左上角），供窗口在 tick 里收回去。拖动途中每次 `WM_MOUSEMOVE` 都更新。
     moved_to: Option<(i32, i32)>,
     /// 拖动**结束**时的面板右下角，供窗口在 tick 里上报协调器持久化。
     ///
-    /// ⚠️ 与 `moved_to` 分开是要害：持久化只能在抬起时发生。若照着 `moved_to` 的时机
-    /// 上报，一次拖动就是几十上百条 IPC + 同样多次 `state.toml` 读改写。
-    /// 同理它存的是**右下角**而非左上角——记的是锚点，而面板尺寸会随切面变
-    /// （各面键数不同）。
+    /// 与 `moved_to` 分开：持久化只能在抬起时发生，否则一次拖动就是上百条 IPC 与 `state.toml` 读改写。
+    /// 存右下角而非左上角：记的是锚点，面板尺寸会随切面变。
     #[cfg_attr(not(windows), allow(dead_code))]
     dropped_at: Option<(i32, i32)>,
-    /// 未消费的滚轮量（单位：一格）。窗口过程只累加，真正滚动在 `tick` 里做——
-    /// 滚动要改 `tab_scroll` 并重绘，而窗口过程拿不到 `&mut SoftKeyboard`。
+    /// 未消费的滚轮量（单位：一格）。窗口过程只累加，滚动在 `tick` 里做（要 `&mut SoftKeyboard`）。
     wheel: f32,
     /// 是否已向系统订阅过 `WM_MOUSELEAVE`（一次性，收到后要重订）。
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -358,7 +321,7 @@ impl SoftMouse {
 
 /// 长按重复参数：优先取系统的键盘重复设置。
 ///
-/// ★ 不自定常数——鼠标长按与物理键长按必须同一个手感，而物理那条走的就是系统设置。
+/// 不自定常数：鼠标长按与物理键长按必须同一个手感。
 pub(crate) fn repeat_params() -> (u64, u64) {
     #[cfg(windows)]
     unsafe {
@@ -412,8 +375,7 @@ pub struct SoftKeyboard {
     shift_held: bool,
     /// 面板上的 Shift 键被点亮（锁定切层，再点还原）。
     ///
-    /// 与 `shift_held` 分开存：物理是临时的、点击是锁定的，合成一个布尔就无法表达
-    /// 「按住物理 Shift 松开后该回哪一层」。有效层取两者的或。
+    /// 与 `shift_held` 分开存：合成一个布尔就无法表达「松开物理 Shift 后该回哪一层」。有效层取两者的或。
     shift_locked: bool,
     /// 系统大写锁定当前是否开着（Caps 键据此高亮）。
     caps_on: bool,
@@ -423,40 +385,31 @@ pub struct SoftKeyboard {
     pinned: bool,
     /// 面板上的 Ctrl 处于粘滞状态：下一次点键位合成 `ctrl+键`，然后自动熄灭。
     ///
-    /// ★ 与 Shift 的锁定不同，它**不是层选择器**——Ctrl 不改变键帽上画什么，
-    /// 只改变那一次点击发出去的是符号还是组合键。
+    /// 它不是层选择器：不改变键帽上画什么，只改变那一次点击发出去的是符号还是组合键。
     ctrl_latched: bool,
-    /// 标签行第一个可见标签的下标（面多到一行放不下时才非 0）。
-    /// 标签行的水平滚动量（设备像素）。
-    ///
-    /// 从「按项取舍」改成按像素，是因为项宽不一时按项永远对不齐容器边缘——右侧那个
-    /// 箭头会随着当前显示了哪几项而左右跳。有了 [`View::clipped`] 就没必要迁就了。
+    /// 标签行的水平滚动量（设备像素）。按像素而非按项滚：项宽不一时按项对不齐容器边缘。
     tab_scroll: f32,
     /// 上一次已经「滚到可见」的面。
     ///
-    /// ★ 只在**面变了**的时候才把当前面拉进视野。无条件每帧拉一次的后果是用户根本
-    /// 滚不动标签行——手一松就被拽回当前面那里。滚动是用户的意图，换面才是我们的。
+    /// 只在面变了时才把当前面拉进视野；每帧都拉的话用户滚不动标签行，一松手就被拽回。
     last_shown_page: usize,
     /// 物理按键按下中的键位名 + 该高亮的到期时刻。
     ///
-    /// ★ 高亮**不靠 keyup 配对**：协调器只在 keydown 被调用，物理抬起根本不经过我们。
-    /// 改为「按下即高亮、到期自清」——物理长按会连发 keydown 不断续期，视觉上就是
-    /// 持续按下，松开后一个周期内自然熄灭。
+    /// 高亮不靠 keyup 配对（物理抬起不经过协调器），而是按下即高亮、到期自清；
+    /// 长按连发的 keydown 不断续期。
     down_slot: Option<(String, std::time::Instant)>,
 
     visible: bool,
     /// 上一帧的实际落点（左上角）；None = 还没摆过。`ensure_scale` 也用它问所在屏的 DPI。
     origin: Option<(i32, i32)>,
-    /// 记忆锚点：面板**右下角**屏幕坐标；None = 这块屏没记录过，落默认位置。
+    /// 记忆锚点：面板右下角屏幕坐标；None = 这块屏没记录过，落默认位置。
     ///
-    /// 与 `origin` 的分工同工具栏的 `anchor_br`/`pos`：这个是**意图**（用户把面板摆在哪），
-    /// `origin` 是**本帧落点**（意图减当前尺寸再钳进工作区）。切面会改面板尺寸，
-    /// 每帧现算才能让右下角纹丝不动。钳制结果只写回 `origin`，不回写这里。
+    /// 这是意图，`origin` 是本帧落点（意图减当前尺寸再钳进工作区），分工同工具栏。
+    /// 切面会改尺寸，每帧现算才能让右下角不动。钳制结果只写回 `origin`。
     anchor_br: Option<(i32, i32)>,
     /// 焦点显示器工作区 `(left, top, right, bottom)`，随 `ShowSoftKeyboard` 下发。
     ///
-    /// 默认位置（底部居中）据此算。`None` 时才回退 `SPI_GETWORKAREA`——那取的恒是
-    /// **主屏**，多显示器下会让面板开在用户没在打字的那块屏上。
+    /// 默认位置（底部居中）据此算。`None` 时才回退 `SPI_GETWORKAREA`（恒为主屏）。
     work_area: Option<(i32, i32, i32, i32)>,
 }
 
@@ -506,22 +459,11 @@ impl SoftKeyboard {
     }
 
     /// 协调器下发的摆放依据：焦点屏记过的锚点 + 该屏工作区。随每条 `ShowSoftKeyboard`
-    /// 到来——而那一条**打开面板和切面刷新都会发**，两者要区别对待。
+    /// 到来，而打开面板和切面刷新都会发。
     ///
-    /// # ★ 只在「真正打开面板」时采纳下发的锚点
-    ///
-    /// 判据是面板当前**不可见**。理由是两个方向的错都真会发生：
-    ///
-    /// - **切面时采纳** ⇒ 面板会跳屏。面板开着的时候用户可以切到另一块屏上继续打字
-    ///   （面板是 topmost 工具窗，不抢焦点），此时按一下切面键，下发的就是**新焦点屏**的
-    ///   锚点，整块面板凭空飞到另一块屏上。软键盘刻意不跟随焦点（它由用户显式开关），
-    ///   切个面更不该顺带搬家。
-    /// - **打开时不采纳** ⇒ 面板会开在错的屏上。上一次在副屏拖过面板，`anchor_br` 就
-    ///   留着副屏坐标；之后在主屏打字打开面板，协调器给的是主屏的"没有记录"（`None`），
-    ///   若因此保留旧值，面板就开到用户没在用的那块屏去了。
-    ///
-    /// 所以打开时**连 `None` 一起采纳**（清空 ⇒ 落该屏默认位置），切面时则完全不看
-    /// 下发值——那期间 `anchor_br` 的真相源是 UI 侧自己（拖动结束时更新）。
+    /// 只在面板不可见（真正打开）时采纳锚点，且连 `None` 一起采纳（落该屏默认位置）：
+    /// 切面时采纳会让面板跳到新焦点屏；打开时不采纳会开在上次拖过的那块屏上。
+    /// 面板开着期间 `anchor_br` 的真相源是 UI 侧自己（拖动结束时更新）。
     pub fn set_placement(
         &mut self,
         anchor: Option<(i32, i32)>,
@@ -529,19 +471,13 @@ impl SoftKeyboard {
     ) {
         if !self.visible {
             self.anchor_br = anchor;
-            // ⚠️ 清 `anchor_br` 还不够：`render` 的落点顺序是 `anchor_br` > `origin` >
-            // 默认位置，而 `origin` 是**上一帧的落点**——上次在副屏摆过就还留着副屏坐标，
-            // 光清锚点的话它顶上来，面板照样开在那块屏上。这一屏没有记录 = 该按这一屏
-            // 重新落默认位置，两个"旧位置"都得让开。
-            //
-            // 同屏重开不受影响：那时重算出的默认位置与 `origin` 本来就是同一个点
-            // （除非中间切过面改了尺寸，而那种情况下重算才是对的）。
+            // 光清 `anchor_br` 不够：`render` 落点顺序是 `anchor_br` > `origin` > 默认位置，
+            // 上一帧的 `origin` 会顶上来，面板照样开在旧屏上。同屏重开时重算结果与 `origin` 相同。
             if anchor.is_none() {
                 self.origin = None;
             }
         }
-        // 工作区无条件跟新：它只在"没有锚点可用"时参与算默认位置，跟着焦点屏走是对的，
-        // 且不会造成上面那种跳屏（有 `origin` 时轮不到它）。
+        // 工作区无条件跟新：只在没有锚点和 `origin` 时参与算默认位置，不会造成跳屏。
         if let Some(w) = work_area {
             self.work_area = Some(w);
         }
@@ -549,16 +485,10 @@ impl SoftKeyboard {
 
     /// 取主题色。
     ///
-    /// ★ **复用主题里已有的「键盘域」语义色**（`key_bg` / `key_text` / `key_hint` /
-    /// `key_special_bg` / `key_pressed_bg` / `keyboard_bg`），不另立一套。那几个键本是
-    /// 给 Android 软键盘定的，注释还写着「桌面没有这些控件」——现在桌面有了，而它们
-    /// 描述的是同一件东西：一块键盘长什么样。
-    ///
-    /// 这一步不是洁癖：键盘域的值一律以 `${var}` 引用主色，派生主题（amber/jade/violet）
-    /// 只覆盖 primary/accent 系就能让键盘跟着变。自立门户的 `softkb_*` 在任何主题文件里
-    /// 都没有定义，于是**永远落到硬编码兜底**——换成橙色主题，软键盘还是蓝的。
-    ///
-    /// `softkb_*` 仍留在链首，给「只想单独调桌面软键盘」的人一个口子。
+    /// 复用主题里已有的「键盘域」语义色（`key_bg` / `key_text` / `key_hint` / `key_special_bg` /
+    /// `key_pressed_bg` / `keyboard_bg`，原为 Android 软键盘定义），不另立一套：它们以 `${var}`
+    /// 引用主色，派生主题只覆盖 primary/accent 就能让键盘跟着变。`softkb_*` 留在链首，
+    /// 给只想单独调桌面软键盘的人一个口子。
     pub fn set_theme(&mut self, theme: &wind_theme::Resolved) {
         self.colors = Colors::from_theme(theme);
         if self.visible {
@@ -568,9 +498,8 @@ impl SoftKeyboard {
 
     /// 当前 Shift 档：物理按住 或 面板上锁定，任一即可。
     ///
-    /// ★ **不含 CapsLock**。它同时是点击回送给协调器的 `shift`，而那边会据此合成
-    /// `shift+q`——Caps 开着再加 Shift 在真实键盘上出的是**小写**，把 caps 混进来
-    /// 会让「Caps 开时点字母」恰好出反。CapsLock 只影响显示，见 [`Self::cap_layer`]。
+    /// 不含 CapsLock：它也是键盘面点击回送的 `shift`，Caps 开着再合成 `shift+q` 会出小写，恰好反了。
+    /// CapsLock 只影响显示，见 [`Self::cap_layer`]。
     fn layer_shift(&self) -> bool {
         self.shift_held || self.shift_locked
     }
@@ -582,10 +511,8 @@ impl SoftKeyboard {
 
     /// 点击这个键位时回送给协调器的 `shift`。
     ///
-    /// ★ 两种面语义不同，而这正是「显示与输出不分叉」的落点：
-    /// - **符号面**查表直接上屏 ⇒ 回送**显示档**，画着什么就出什么。
-    /// - **键盘面**合成真实按键 ⇒ 回送**物理 Shift**，CapsLock 由系统自己应用；
-    ///   把 caps 混进来，Caps 开时合成的 `shift+q` 恰好出小写，正好是反的。
+    /// - 符号面查表直接上屏 ⇒ 回送显示档，画着什么就出什么。
+    /// - 键盘面合成真实按键 ⇒ 回送物理 Shift，CapsLock 由系统自己应用（理由见 [`Self::layer_shift`]）。
     fn click_shift(&self, slot: &str) -> bool {
         if self.send_keys {
             self.layer_shift()
@@ -604,8 +531,7 @@ impl SoftKeyboard {
     ) {
         self.pages = pages;
         self.send_keys = send_keys;
-        // 面的类型直接决定点击是「上屏符号」还是「合成按键」，值得留一行——
-        // 「CapsLock 不生效」那次排查，正是这一行一眼指出用户当时在符号面。
+        // 面的类型决定点击是「上屏符号」还是「合成按键」，排查按键行为时先看这一行。
         tracing::debug!("软键盘: show page={current} send_keys={send_keys}");
         self.current = current;
         // 标签窗口的校正统一在 `render` 里做（见 [`Self::ensure_current_visible`]）：
@@ -640,10 +566,8 @@ impl SoftKeyboard {
 
     /// 清掉悬停/按下残留。
     ///
-    /// ⚠️ 初版这里写着「面板不追 `WM_MOUSELEAVE`，为一格高亮残留多接一条消息不划算，
-    /// 改为在显示/隐藏这两个边界上重置——残留最多活到下次打开前，看不见」。**那个判断
-    /// 是错的**：面板一直开着，鼠标快速划出去时最后那一格高亮就一直亮在那儿，用户看得
-    /// 一清二楚。现在照 `status_tip` 的做法订阅 LEAVE（见 `SoftMouse::arm_leave`）。
+    /// 只在显示/隐藏边界重置不够：面板常开，鼠标划出去时的最后一格高亮要靠订阅
+    /// `WM_MOUSELEAVE` 清（见 `SoftMouse::arm_leave`）。
     fn reset_mouse(&self) {
         let mut m = self.mouse.borrow_mut();
         m.hover = -1;
@@ -737,9 +661,7 @@ impl SoftKeyboard {
         if let Some(pos) = self.mouse.borrow_mut().moved_to.take() {
             self.origin = Some(pos);
         }
-        // 拖动**结束**：记下锚点并上报协调器落盘，位置由此跨重启存活。
-        // 只在抬起时发一次——`moved_to` 那条是拖动全程每帧更新的，照它发会把一次拖动
-        // 变成几十条 IPC + 同样多次 state.toml 读改写。
+        // 拖动结束：记下锚点并上报协调器落盘（只在抬起时发一次，见 `SoftMouse::dropped_at`）。
         if let Some((right, bottom)) = self.mouse.borrow_mut().dropped_at.take() {
             self.anchor_br = Some((right, bottom));
             let _ = self
@@ -756,21 +678,11 @@ impl SoftKeyboard {
             }
         }
 
-        // 物理 Shift 与大写锁定的跟随。
-        //
-        // ★ 为什么要轮询：单独按 Shift 不出字，那个 keydown 根本不会转发到协调器——
-        // 我们只在「Shift+某键」时才从修饰位里知道它按住了。而用户要的是「一按 Shift
-        // 面板立刻切显上档」。故面板可见期间以固定节奏查一次键盘状态。
-        //
-        // ⚠️ 这是本仓「UI 已改事件驱动、不做空转轮询」的一处**有意例外**，边界写死在
-        // 「面板可见时」：面板一关，`next_deadline` 立即不再登记这个节奏，线程回到全静默。
+        // 物理 Shift 与大写锁定的跟随。单独按 Shift 的 keydown 不会转发到协调器，故面板可见期间
+        // 以固定节奏轮询键盘状态。这是 UI 事件驱动的有意例外，面板一关 `next_deadline` 就不再登记。
         if let Some((held, caps)) = read_shift_caps() {
             if held != self.shift_held {
-                // 松开物理 Shift 时把面板上的锁定一并解除。
-                //
-                // 两个来源本可以各管各的，但那样会出现「点了面板 Shift 锁在上档，又按了
-                // 一下物理 Shift，松开后仍停在上档」——用户刚做完一个「按下又松开」的
-                // 完整动作，界面却没回来，看起来就是卡住了。以物理动作为准更符合直觉。
+                // 松开物理 Shift 时把面板上的锁定一并解除：按下又松开后界面仍停在上档，看起来像卡住。
                 if !held {
                     self.shift_locked = false;
                 }
@@ -868,14 +780,12 @@ impl SoftKeyboard {
             }
             return;
         }
-        // 区域标记，不是控件：视口进命中表只为让滚轮知道「鼠标在标签行上」，命中到它
-        // 说明点的是标签行**留白**，真正的响应是拖动整块面板（`drags_panel`，在
-        // `WM_LBUTTONDOWN` 里就接走了，压根到不了这里）。留这一句是把「它不是控件」
-        // 写成代码，而不是指望它掉到最后一条键位分支里靠下标越界变成空操作。
+        // 区域标记，不是控件：视口进命中表只为让滚轮知道鼠标在标签行上；点留白是拖动面板
+        // （`drags_panel` 在按下时就接走了）。显式返回，别指望它在键位分支里靠下标越界变空操作。
         if tag == SOFT_TAG_TAB_VIEWPORT {
             return;
         }
-        // ⛔ 判据用 `is_page_tag` 而不是 `tag >= SOFT_TAG_PAGE_BASE`：理由见那个函数。
+        // 判据用 `is_page_tag` 而不是 `tag >= SOFT_TAG_PAGE_BASE`：理由见那个函数。
         if is_page_tag(tag) {
             let i = (tag - SOFT_TAG_PAGE_BASE) as usize;
             let _ = self.events.send(UiEvent::SoftKeyboardPage(i));
@@ -883,10 +793,8 @@ impl SoftKeyboard {
         }
         // 键位：tag 即下标。
         if let Some(cap) = self.keys.get(tag as usize) {
-            // 空键位不回送：面板上它是灰的，点了什么都不该发生。
-            // 判空用**显示档**——与键帽画成灰的那条判据同源。
-            // Ctrl 粘滞时**空键位也要放行**：Ctrl+某个键是组合键，跟这一面在那个位置
-            // 画没画符号没有关系。
+            // 空键位不回送（判空用显示档，与键帽画成灰同源）。Ctrl 粘滞时空键位也放行：
+            // Ctrl+键是组合键，与这一面在该位置画没画符号无关。
             let ctrl = self.ctrl_latched;
             if ctrl || cap.output(self.cap_layer(&cap.slot)).is_some() {
                 let _ = self.events.send(UiEvent::SoftKeyboardKey {
@@ -903,7 +811,7 @@ impl SoftKeyboard {
         }
     }
 
-    /// 这一帧面板该落在哪。**三级优先级的唯一定义处**，见 [`Placement`]。
+    /// 这一帧面板该落在哪。三级优先级的唯一定义处，见 [`Placement`]。
     fn placement(&self) -> Placement {
         Placement::pick(self.anchor_br, self.origin, self.work_area)
     }
@@ -969,13 +877,11 @@ impl SoftKeyboard {
         if !self.visible || self.keys.is_empty() {
             return;
         }
-        // 缩放与落点取自**同一个** `Placement`：先定"这一帧落在哪块屏"，再按那块屏的
-        // DPI 排版，最后用同一判据算落点。分两次各问一遍就会像修复前那样跑偏。
+        // 缩放与落点取自同一个 `Placement`：先定落在哪块屏，按那块屏的 DPI 排版，再用同一判据算落点。
         let at = self.placement();
         self.ensure_scale(at);
         let s = self.scale;
-        // ★ 只在**换面**时把当前面拉进视野。每帧无条件拉的后果是用户滚不动标签行——
-        // 手一松就被拽回当前面。滚动是用户的意图，换面才是我们的。
+        // 只在换面时把当前面拉进视野，见 `last_shown_page`。
         if self.current != self.last_shown_page {
             self.scroll_current_into_view(s);
             self.last_shown_page = self.current;
@@ -984,11 +890,8 @@ impl SoftKeyboard {
         root.layout(0.0, 0.0, &self.renderer);
         self.publish_hits(&root);
 
-        // ★ 命中区更新后、**落笔之前**，按当前光标位置校正一次悬停；变了就重排一遍。
-        //
-        // `WM_MOUSEMOVE` 只在光标移动时到达；内容在鼠标**底下**动过（标签滚动、切面）
-        // 时不会有任何消息，高亮就留在原来那个位置上——用户看到的是「滚走了还亮着」。
-        // 收在这里而不是让每个滚动点自己调，是因为「内容动了」的来路不止一条。
+        // 命中区更新后、落笔之前按当前光标校正悬停（见 `refresh_hover`）；收在这里是因为
+        // 「内容动了」的来路不止一条。
         if self.refresh_hover() {
             root = self.build(s);
             root.layout(0.0, 0.0, &self.renderer);
@@ -1016,16 +919,13 @@ impl SoftKeyboard {
             let _ = self.events.send(UiEvent::SoftKeyboardClose);
             return;
         }
-        // 落点每帧现算：锚右下角减去**当前**尺寸。切面会改面板尺寸（各面键数不同），
-        // 存左上角的话切一次面就朝右下长一截，再被钳回来——「切个面板还跑位」。
+        // 落点每帧现算：锚右下角减去当前尺寸（切面会改尺寸）。
         let raw = match at {
             Placement::Anchor { right, bottom } => origin_from_anchor(right, bottom, w, h),
             Placement::LastOrigin { x, y } => (x, y),
             Placement::DefaultIn { work } => default_origin(w, h, s, work),
         };
-        // 恢复的锚点必须过一次钳制：记录跨重启存活，而这中间显示器可能换了、
-        // 缩放可能改了（缩放变会让 key 失配落回默认，但分辨率相同、缩放相同、
-        // 主题字号变大也会撑大面板）。钳制结果只落到 `origin`，不回写 `anchor_br`。
+        // 恢复的锚点必须过一次钳制：跨重启期间显示器或面板尺寸可能变了。钳制结果只落到 `origin`。
         let (x, y) = crate::sys::clamp_to_work_area(raw.0, raw.1, w, h);
         self.origin = Some((x, y));
         self.window.show(x, y);
@@ -1046,14 +946,8 @@ impl SoftKeyboard {
             .border(c.line, (1.0 * s).max(1.0))
             .radius(8.0 * s);
 
-        // 顶部拖动条：一根居中的短横，明示「这块面板可以拖」。
-        //
-        // ★ 它**不带 tag**，于是落进 `hit_at < 0` 那条空白分支——也就是拖动分支。
-        // 换句话说它不是一个"控件"，而是给本来就能拖的空白处加了个记号，
-        // 与工具栏那根 grip 同源。
-        //
-        // 关闭按钮也放这一行的右端：它和拖动条一样属于「这块窗口本身」，而不是标签行
-        // 里的一项。左端放一个与它等宽的透明占位，拖动条才是**精确**居中的。
+        // 顶部拖动条：一根居中的短横。它不带 tag，落进 `hit_at < 0` 的拖动分支，只是给本就能拖的
+        // 空白处加了记号。钉住与关闭按钮分居这一行左右两端且等宽，拖动条才精确居中。
         let close_w = TAB_CLOSE_W_DP * s;
         let close_h = CLOSE_H_DP * s;
         let close_inset = PAD_DP * 0.5 * s;
@@ -1100,12 +994,8 @@ impl SoftKeyboard {
                             (1.0 * s).max(1.0),
                         )
                         .tag(SOFT_TAG_PIN)
-                        // 图标两态各一张 SVG（未钉住=描边斜放，已钉住=实心竖直），按文字色 tint；
-                        // 不用字符：emoji 在各平台字体里形状、彩色与否都不一致，且看不出开关。
-                        //
-                        // ★ 图直接挂在这个**有固定宽高**的按钮节点上，不要套一层无内容的子容器：
-                        // 定位图按 host 节点盒居中并裁到节点盒内，空容器的高度会塌成 0，
-                        // 结果只剩顶上一条线（实测）。
+                        // 图标两态各一张 SVG，按文字色 tint；不用 emoji（各平台形状不一、看不出开关）。
+                        // 图直接挂在这个有固定宽高的节点上：套一层空子容器高度会塌成 0，只剩一条线。
                         .bg_image(pin_icon(self.pinned, pin_fg, PIN_ICON_DP * s)),
                 )
                 .child(View::spacer().grow())
@@ -1118,17 +1008,9 @@ impl SoftKeyboard {
                 )
                 .child(View::spacer().grow())
                 .child(
-                    // 关闭按钮向右上**溢出到面板的内边距里**，得到一个宽扁的胶囊热区,
-                    // 像标题栏那样整块可点。
-                    //
-                    // 面板有 `PAD_DP` 的内边距，按内容大小画出来的悬停框会「浮」在角落里，
-                    // 既小又对不齐边。用负 margin 把这块内边距吃回来一部分：
-                    //   宽 +inset / margin.r -inset，高 +rise / margin.t -rise
-                    //   ⇒ margin_box 与原来一模一样（宽=close_w，高=行高），
-                    //   于是**不影响同行其它元素的排布**（拖动条仍精确居中），
-                    //   只有这个节点自己向上、向右长出去。
-                    // ⚠️ 右侧只吃半个 PAD，不吃满：面板是圆角浮层不是有物理边框的标题栏，
-                    // 顶到物理边缘会盖掉圆角、显得「卡在角上」，留半格才有呼吸感。
+                    // 关闭按钮用负 margin 向右上溢出到面板内边距里，得到宽扁的胶囊热区：
+                    // 宽 +inset / margin.r -inset，高 +rise / margin.t -rise ⇒ margin_box 不变，
+                    // 不影响同行排布。右侧只吃半个 PAD：顶到边缘会盖掉圆角。
                     View::container(Layout::Row)
                         .fixed_w(close_w + close_inset)
                         .fixed_h(close_h)
@@ -1155,10 +1037,7 @@ impl SoftKeyboard {
         );
         root = root.child(self.build_tabs(s, u, gap, hover, pressed));
 
-        // 键位行：4 行画布 + 各行两端的功能键。
-        //
-        // 行尾那个功能键一律 `grow`：各行的键位数与间隙数都不同，按固定单位数排出来
-        // 右边缘会差几个像素，参差不齐。让它吃掉本行的富余，四行右缘就自动对齐。
+        // 键位行：4 行画布 + 各行两端的功能键。行尾功能键一律 `grow` 吃掉本行富余，四行右缘才对齐。
         let mut idx = 0usize;
         for (r, count) in ROW_SLOTS.iter().copied().enumerate() {
             let mut row = View::container(Layout::Row).gap(gap).fill_cross();
@@ -1191,12 +1070,8 @@ impl SoftKeyboard {
             root = root.child(row);
         }
 
-        // 底行：**左组贴左、控制键组贴右**（Ctrl / 空格 ┄┄ ◀ ▶ Esc）。
-        //
-        // 「左固定 + 中间自由 + 右固定」不需要新的布局原语：`fill_cross` 把本行撑到列的
-        // 内容宽（= 最宽那行键盘的宽度），中间的 `spacer().grow()` 吃掉富余，右组就恒
-        // 贴右缘。少了 `fill_cross`，行宽只等于自身内容宽，spacer 分不到一个像素，右组
-        // 就跟着左组浮动——面板越宽错得越明显。
+        // 底行：左组贴左、控制键组贴右（Ctrl / 空格 ┄┄ ◀ ▶ Esc）。`fill_cross` 把本行撑到键盘宽，
+        // 中间 spacer 才分得到富余；少了它右组会跟着左组浮动。
         let mut bottom = View::container(Layout::Row).gap(gap).fill_cross();
         bottom = bottom.child(self.ctrl_key_latch(1.75, u, gap, s, hover));
         bottom = bottom.child(self.fn_key(3, "", 8.0, u, gap, s, hover, pressed));
@@ -1222,9 +1097,8 @@ impl SoftKeyboard {
 
     /// 标签行的度量：`(各标签宽, 内容总宽, 视口宽, 要不要滚动箭头)`。
     ///
-    /// ★ 视口宽是**先于内容**定下来的：整行宽度对齐键盘区，减去关闭按钮与（需要时的）
-    /// 两个箭头，剩下的就是视口。所以右侧那些控件的位置只由键盘宽度决定，**与有多少个
-    /// 面、当前显示了哪几个都无关**——上一版它们跟着内容宽度漂，正是因为没有这一步。
+    /// 视口宽先于内容定下：整行宽度对齐键盘区，减去（需要时的）两个箭头即视口。
+    /// 箭头位置因此只由键盘宽度决定，与有多少个面无关。
     fn tab_metrics(&self, s: f32, u: f32, gap: f32) -> (Vec<f32>, f32, f32, bool) {
         let widths = self.tab_widths(s);
         let n = widths.len();
@@ -1266,10 +1140,8 @@ impl SoftKeyboard {
         true
     }
 
-    /// 按**当前光标位置**重算悬停。
-    ///
-    /// ★ 内容在鼠标底下动了（滚动、切面）时必须重算：`WM_MOUSEMOVE` 只在光标移动时到达，
-    /// 鼠标不动而内容动，高亮就留在原来那个标签上——滚走了还亮着。
+    /// 按当前光标位置重算悬停。内容在鼠标底下动了（滚动、切面）时必须调：
+    /// `WM_MOUSEMOVE` 只在光标移动时到达，否则高亮留在原位。
     #[cfg(windows)]
     fn refresh_hover(&self) -> bool {
         use crate::sys::{GetCursorPos, POINT};
@@ -1293,10 +1165,7 @@ impl SoftKeyboard {
         true
     }
 
-    /// macOS 版：光标与面板左上角都问得到，换算成客户区坐标即可。
-    ///
-    /// 与 Windows 分支同一职责（内容在鼠标底下动了要重算高亮），只是 macOS 没有
-    /// `ScreenToClient`，减一次面板原点就是。
+    /// macOS 版：没有 `ScreenToClient`，光标减面板原点即客户区坐标。
     #[cfg(target_os = "macos")]
     fn refresh_hover(&self) -> bool {
         let (ox, oy) = self.window.origin_px();
@@ -1312,8 +1181,7 @@ impl SoftKeyboard {
 
     /// Linux 外部宿主形态：照 macOS 的算法，光标（addon 最近报来的指针）减面板左上角。
     ///
-    /// ⚠️ 先问指针还在不在面板里：「最后指针」在 LEAVE 后保持不动，不看这一位的话，
-    /// 指针离开后的任何一次重绘（切面、物理按键高亮）都会把它最后停过的那个键重新点亮。
+    /// 先问指针还在不在面板里：「最后指针」在 LEAVE 后不动，否则离开后的重绘会把最后停过的键重新点亮。
     #[cfg(all(target_os = "linux", ext_presenter))]
     fn refresh_hover(&self) -> bool {
         use crate::sys::{GetCursorPos, GetWindowRect, POINT, RECT};
@@ -1341,7 +1209,7 @@ impl SoftKeyboard {
         false
     }
 
-    /// 把当前面滚进视野。**只在换面时调用**，见 [`Self::last_shown_page`]。
+    /// 把当前面滚进视野。只在换面时调用，见 [`Self::last_shown_page`]。
     fn scroll_current_into_view(&mut self, s: f32) {
         if self.pages.is_empty() {
             return;
@@ -1357,15 +1225,10 @@ impl SoftKeyboard {
         );
     }
 
-    /// 标签行：**一个裁剪视口 + 固定在右侧的控件**。
+    /// 标签行：一个裁剪视口，需要滚动时两侧加箭头：`‹` │ 视口 │ `›`（关闭按钮在拖动条那一行）。
     ///
-    /// 结构（从左到右）：`‹` │ 视口（clip，内容按像素左移） │ `›` │ `✕`
-    ///
-    /// 视口用 `fixed_w(0) + grow` 吃掉中间全部剩余宽度：measure 时它宽度为 0，所以
-    /// **整行的宽度与标签内容完全无关**；arrange 时才把富余分给它。右侧三个控件因此
-    /// 恒定贴在同一个位置——上一版它们随内容漂，就是因为行宽被内容撑着走。
-    ///
-    /// 内容用负 margin 左移实现滚动，超出视口的部分由 [`View::clipped`] 裁掉。
+    /// 视口用 `fixed_w(0) + grow` 吃掉剩余宽度：measure 时宽为 0，整行宽度与标签内容无关，
+    /// 箭头位置恒定。内容用负 margin 左移实现滚动，超出部分由 [`View::clipped`] 裁掉。
     fn build_tabs(&self, s: f32, u: f32, gap: f32, hover: i32, pressed: i32) -> View {
         let c = &self.colors;
         let tab_gap = TAB_GAP_DP * s;
@@ -1421,7 +1284,7 @@ impl SoftKeyboard {
         }
         row = row.child(
             View::container(Layout::Row)
-                // ★ 宽度 0 + grow：整行宽度不被内容撑开，富余在 arrange 时才分进来。
+                // 宽度 0 + grow：整行宽度不被内容撑开，富余在 arrange 时才分进来。
                 .fixed_w(0.0)
                 .grow()
                 .clipped()
@@ -1463,11 +1326,8 @@ impl SoftKeyboard {
         let (bg, fg) = if down {
             (c.accent_soft, c.accent)
         } else if !live {
-            // 到头了：淡化**正常态的文字色**，而不是拿 `line`（边框色）当前景。
-            //
-            // ⚠️ border 在浅色主题里几乎等于面板底色（213 vs 251），箭头会看着像整个
-            // 消失，用户实测反馈「不可点击时完全隐藏了」。而箭头是常驻占位的，突然
-            // 不见等于布局变了。淡化才是「这里有个键，只是现在按不动」，且自动跟随主题。
+            // 到头了：淡化正常态文字色，不拿 `line` 当前景——边框色在浅色主题里几乎等于
+            // 面板底色，箭头会像整个消失。
             ([0, 0, 0, 0], faded(c.hint, 150))
         } else if hover == tag {
             (c.hover, c.ink)
@@ -1493,10 +1353,8 @@ impl SoftKeyboard {
         v
     }
 
-    /// 一个符号键帽：角标（原物理键）+ **两档符号同时显示**。
-    ///
-    /// 上排小字是另一档，下排大字是当前档，切层时两者互换视觉权重——这样用户不按 Shift
-    /// 也知道上档是什么，而当前能打出的是哪一个仍然一眼可辨（靠字号与颜色，不是靠记）。
+    /// 一个符号键帽：角标（原物理键）+ 两档符号同时显示。上排小字是另一档，下排大字是当前档，
+    /// 切层时两者互换视觉权重。
     fn key_cap(
         &self,
         tag: i32,
@@ -1517,13 +1375,7 @@ impl SoftKeyboard {
         let down = phys_down || pressed == tag;
 
         // 三档轻重：普通 → 悬停（底色微亮）→ 按下（柔和主色 + 主色描边 + 主色字）。
-        //
-        // ⛔ 按下**不用纯 accent 实心填充**：那让一个键在一片浅色键帽里突然变成深色方块，
-        // 角标与另一档的字也被迫反白，一眼看去像是「这个键坏了」而不是「按下了」。
-        // 描边加上换字色已经足够指认，而且相邻键的视觉重量不会被打乱。
-        //
-        // 角标（`hint`）在按下态**保持原色**：它是键位名与另一档，不是被按的那个字符，
-        // 跟着变蓝只会让一个小小的键帽里出现三种蓝。
+        // 按下不用实心 accent 填充（深色方块像坏键）；角标在按下态保持原色。
         let (bg, border, fg, hint) = if down {
             (c.accent_soft, c.accent, c.accent, c.hint)
         } else if dead {
@@ -1598,11 +1450,8 @@ impl SoftKeyboard {
         self.flat_key(tag, text, units, u, gap, s, hover, down)
     }
 
-    /// Ctrl：**粘滞修饰键**。点一下亮起，下一次点键位就合成 `ctrl+键`，然后自动熄灭。
-    ///
-    /// ★ 不能做成「tap 一次 Ctrl」：单独敲一下 Ctrl 什么也不会发生，组合键的意义全在
-    /// 「按住 Ctrl 的同时按另一个键」。而面板不抢焦点，也没法真的「按住」——粘滞是
-    /// 软键盘表达修饰键的通行做法。
+    /// Ctrl：粘滞修饰键。点一下亮起，下一次点键位就合成 `ctrl+键`，然后自动熄灭。
+    /// 单独 tap 一次 Ctrl 没有意义，面板又没法「按住」，粘滞是软键盘表达修饰键的通行做法。
     fn ctrl_key_latch(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32) -> View {
         let c = &self.colors;
         let on = self.ctrl_latched;
@@ -1648,24 +1497,16 @@ impl SoftKeyboard {
 
     /// Caps 键：显示系统大写锁定，并在够得着的平台上切换它。
     ///
-    /// ⛔ 这不违反「不拦截 CapsLock」那条禁令。禁的是**拦截物理键**——toggle 键的
-    /// keydown/keyup 处理有坑，「翻转再回敲复原」已被删除且不得重来。这里是用户点面板时
-    /// 我们**主动敲一次** `vk:0x14`，与用户自己按下没有区别；物理 CapsLock 仍然完全
-    /// 不接管，它的状态由下面的轮询如实读回来。
+    /// 这不违反「不拦截 CapsLock」：禁的是拦截物理键（「翻转再回敲复原」已删除且不得重来）；
+    /// 这里是用户点面板时主动敲一次 `vk:0x14`，物理 CapsLock 仍不接管，状态由轮询读回。
     ///
-    /// [`CAPS_CLICKABLE`] 为假时（macOS）画成禁用态：
-    /// - **键位留着，尺寸不变**——少画一个键会让两个平台的底行布局分家，而这一行是
-    ///   固定单位排的，抽掉一个就得两套排布；
-    /// - **不进命中表**，与面板上的空键位同一个做法：不 hover、不按下、更不合成，
-    ///   免得点了没反应还以为是卡了；
-    /// - **`caps_on` 的高亮照旧**——读那一半是好的，禁用不该把指示灯一起关掉。
+    /// [`CAPS_CLICKABLE`] 为假时（macOS）画成禁用态：键位留着、尺寸不变（否则两平台布局分家）；
+    /// 不进命中表（同空键位）；`caps_on` 的高亮照旧。
     fn caps_key(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32, pressed: i32) -> View {
         let tag = SOFT_TAG_FN_BASE + SOFT_FN_CAPS_INDEX as i32;
         let c = &self.colors;
-        // 大写锁定是**持续态**，要一眼看见但不该盖过正在打的那个键：与标签行的
-        // 「当前面」同一套（柔和底 + 主色字 + 主色描边），而不是整块实心主色。
-        //
-        // ★ `caps_on` 排在禁用之前：亮着的锁定态比「这个键点不了」更要紧，也更该被看见。
+        // 大写锁定是持续态：与标签行「当前面」同一套（柔和底 + 主色字 + 主色描边）。
+        // `caps_on` 排在禁用之前：亮着的锁定态更该被看见。
         let (bg, fg) = if self.caps_on {
             (c.accent_soft, c.accent)
         } else if !CAPS_CLICKABLE {
@@ -1698,13 +1539,8 @@ impl SoftKeyboard {
         if CAPS_CLICKABLE { cell.tag(tag) } else { cell }
     }
 
-    /// Shift 键：**可点**（锁定/解锁第二层），同时反映物理按住状态。
-    ///
-    /// 两种来源分开存（`shift_held` / `shift_locked`）：物理按住是临时的、松开还原，
-    /// 点击是锁定的、再点才还原。合成一个布尔就无法回答「松开物理 Shift 后该回哪一层」。
-    ///
-    /// ⛔ 仍然**不拦截物理 Shift 的按键事件**——面板只是跟随显示，切层判据取自每次按键
-    /// 携带的修饰位与一次轻量的键盘状态查询，不去接管这个键本身。
+    /// Shift 键：可点（锁定/解锁第二层），同时反映物理按住状态（两来源分开存，见 `shift_locked`）。
+    /// 不拦截物理 Shift 的按键事件，面板只是跟随显示。
     fn shift_key(&self, units: f32, u: f32, gap: f32, s: f32, hover: i32) -> View {
         let c = &self.colors;
         let on = self.layer_shift();
@@ -1723,14 +1559,12 @@ impl SoftKeyboard {
             .bg(bg)
             .radius(4.0 * s)
             .border(if on { c.accent } else { c.line }, (1.0 * s).max(1.0))
-            // ⚠️ 必须给内边距：本容器有边框，而子节点是从**边缘**开始排的——
-            // 不留内边距时，最右那个标记位正好压在边框上，看起来像是漏到了键外面。
+            // 必须给内边距：子节点从边缘开始排，否则最右的标记位压在边框上。
             .pad(Edges::xy(5.0 * s, 0.0))
             .cross(Align::Center)
             .tag(SOFT_TAG_SHIFT)
-            // 锁定标记**不能拼进文字里**：`"Shift ●"` 整串居中会把 Shift 三个字往左推,
-            // 锁定/解锁之间文字来回跳。改成三段——左侧等宽的透明占位 + 居中的文字 +
-            // 右侧的标记位，布局与是否锁定完全无关，只有标记的颜色在变。
+            // 锁定标记不拼进文字（整串居中会让文字来回跳）：左透明占位 + 居中文字 + 右标记位，
+            // 只有标记颜色在变。
             .child(
                 View::container(Layout::Row)
                     .fixed_w(dot_w)
@@ -1770,8 +1604,7 @@ impl SoftKeyboard {
         down: bool,
     ) -> View {
         let c = &self.colors;
-        // 与符号键帽同一套三档（见 key_cap）。功能键此前按下用实心主色、平时文字用 `hint`,
-        // 在一排浅色键帽里显得突兀——它们和字母键是同一块键盘上的东西，只是底色略深。
+        // 与符号键帽同一套三档（见 key_cap），只是底色略深。
         let (bg, border, fg) = if down {
             (c.accent_soft, c.accent, c.accent)
         } else if hover == tag {
@@ -1818,11 +1651,7 @@ fn read_shift_caps() -> Option<(bool, bool)> {
     }
 }
 
-/// 改变状态的键不重复——按住翻页键会让面飞速乱切。
-/// 让第 `cur` 个标签完整露出所需的滚动量。
-///
-/// 纯函数——宽度已量好，这里只做算术。抽出来是为了能单测，`scroll_current_into_view`
-/// 只负责把渲染器测出的宽度喂进来。
+/// 让第 `cur` 个标签完整露出所需的滚动量（纯算术，宽度由 `scroll_current_into_view` 量好喂进来）。
 fn scroll_to_show(widths: &[f32], gap: f32, cur: usize, scroll: f32, view_w: f32) -> f32 {
     if widths.is_empty() {
         return 0.0;
@@ -1843,51 +1672,33 @@ fn scroll_to_show(widths: &[f32], gap: f32, cur: usize, scroll: f32, view_w: f32
     next.clamp(0.0, max)
 }
 
-/// 这个控件在**抬起**时才触发，而不是按下就动手。
-///
-/// 只给「关掉整块面板」这一类不可撤销的动作用。普通键位必须按下即出字——打字要跟手，
-/// 长按重复也建立在按下就开始之上。而关闭按钮按下即关，手感上像是「还没点就没了」，
-/// 且中途反悔（按住挪开）也来不及。
-/// 把颜色淡化到指定不透明度（禁用态用）。
-///
-/// 文字色的 alpha 由 `TextRenderer` 在选择性回写那一步混合（`dwrite.rs` 有像素级
-/// 测试守着），所以这里只改 alpha 通道即可，不必知道底色是什么。
+/// 把颜色淡化到指定不透明度（禁用态用）。文字色 alpha 由 `TextRenderer` 回写时混合，
+/// 这里只改 alpha 通道，不必知道底色。
 fn faded(c: [u8; 4], alpha: u8) -> [u8; 4] {
     [c[0], c[1], c[2], alpha]
 }
 
-/// 这个 tag 是不是标签行里的**某一个面**（`SOFT_TAG_PAGE_BASE + 下标`）。
+/// 这个 tag 是不是标签行里的某一个面（`SOFT_TAG_PAGE_BASE + 下标`）。
 ///
-/// ★★★ 判据必须是**闭区间**。tag 空间是一段一段分配的（键位 0.. / 翻页 200_000 /
-/// 关闭 300_000 / 标签行控件 330_000 / 功能键 400_000），写成开区间 `tag >=
-/// SOFT_TAG_PAGE_BASE` 就等于宣称「200_000 以上全是面」——后加的 330_000 段于是被
-/// 整段吞进来。`SOFT_TAG_TAB_VIEWPORT`（330_002）就这么掉进过翻页分支，算出
-/// `i = 130_002` 发了个 `SoftKeyboardPage(130002)`，被协调器的越界检查挡下，只留一条
-/// 「面下标越界」warn，用户看到的是点了标签行留白**什么都没发生**。
-///
-/// 收成一个函数是因为这个判据在本文件有四处用（`dispatch`、[`fires_on_release`]、
-/// 滚轮的 `on_tabs`、以及本函数自己），此前只有 `dispatch` 那处写成了开区间——
-/// 三对一，正是「同一判据抄了四份」的典型下场。⛔ 别再就地展开成 `>=`。
+/// 判据必须是闭区间：tag 空间分段分配（键位 / 翻页 / 关闭 / 标签行控件 / 功能键），
+/// 写成 `tag >= SOFT_TAG_PAGE_BASE` 会把后面的段（如 `SOFT_TAG_TAB_VIEWPORT`）整段吞进来。
+/// 多处共用此判据，别就地展开成 `>=`。
 fn is_page_tag(tag: i32) -> bool {
     (SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE).contains(&tag)
 }
 
 /// 按下这里是「抓住面板拖动」而不是「点了某个控件」。
 ///
-/// 两种情形：`-1`（没命中任何命中区，即键位之间的缝）与 `SOFT_TAG_TAB_VIEWPORT`。
-/// 后者是**区域标记而非控件**——视口进命中表只为让滚轮知道「鼠标在标签行上」，标签
-/// 自己的命中区在它之后收集、盖在上面，所以命中到视口就说明点的是标签行的**留白**。
-/// 而 `WM_LBUTTONDOWN` 那条拖动分支的注释一直写着「空白处（标签行留白、键位之间的
-/// 缝）→ 拖动整块面板」，此前却只判 `h < 0`，留白根本走不到——注释与代码相矛盾。
+/// 两种情形：`-1`（键位之间的缝）与 `SOFT_TAG_TAB_VIEWPORT`。后者是区域标记而非控件：
+/// 标签的命中区盖在它上面，命中到视口就说明点的是标签行留白。
 fn drags_panel(tag: i32) -> bool {
     tag < 0 || tag == SOFT_TAG_TAB_VIEWPORT
 }
 
 /// `w × h` 面板里按下会拖动的区域，切成互不重叠的矩形（位图内 `x, y, w, h`）。
 ///
-/// ★ 不另写一套几何：按命中区的边把面板切成网格，每格取中心点问一次
-/// `drags_panel(hit_at(..))`——与鼠标状态机按下时的判据是同一行代码。再把同一行带里相邻
-/// 的格并成一段、上下两行带里同宽同位的段并成一块，矩形数就压到几十个。
+/// 不另写一套几何：按命中区的边把面板切成网格，每格中心问一次 `drags_panel(hit_at(..))`
+/// （与按下时的判据同源），再合并相邻格，矩形数压到几十个。
 fn drag_regions_of(m: &SoftMouse, w: u32, h: u32) -> Vec<[i32; 4]> {
     let edges = |pick: fn(&Rect) -> (f32, f32), max: u32| {
         let mut v = vec![0, max as i32];
@@ -1944,27 +1755,26 @@ fn drag_regions_of(m: &SoftMouse, w: u32, h: u32) -> Vec<[i32; 4]> {
 }
 
 // 调用点在 mouse_impl（Windows / Linux 外部宿主）与 mouse_macos；其余形态（开发机不带 linux-host）无人调
+/// 这个控件在抬起时才触发，而不是按下就动手。普通键位必须按下即出字（打字跟手、长按重复）。
 #[cfg_attr(
     not(any(windows, target_os = "macos", all(target_os = "linux", ext_presenter))),
     allow(dead_code)
 )]
 fn fires_on_release(tag: i32) -> bool {
-    // 关闭：不可撤销，按下即关像「还没点就没了」。
+    // 关闭：不可撤销，按下即关像「还没点就没了」，中途也来不及反悔。
     if tag == SOFT_TAG_CLOSE || tag == SOFT_TAG_ESC {
         return true;
     }
-    // ★ 切面类：按下即切面会**重建整块面板**，而重建顺手清掉了按下态（`show` 里的
-    // `reset_mouse`）——用户看到的是按下态「闪一下就没了」。改成抬起触发，按住期间
-    // 状态稳稳留着，松手才切。
+    // 切面类：按下即切面会重建面板并清掉按下态（`reset_mouse`），按下态闪一下就没了。
     tag == SOFT_TAG_PAGE_PREV || tag == SOFT_TAG_PAGE_NEXT || is_page_tag(tag)
 }
 
+/// 改变状态的键不重复——按住翻页键会让面飞速乱切。
 fn repeats(tag: i32) -> bool {
     if let Some(idx) = tag.checked_sub(SOFT_TAG_FN_BASE)
         && idx >= 0
     {
-        // 功能键里只有大写锁定不重复——它是 toggle，按住会飞速开关，
-        // 松手时是开是关全凭运气。判据在 types 里，与键表同处。
+        // 功能键里只有大写锁定（toggle）不重复。判据在 types 里，与键表同处。
         return fn_key_repeats(idx as usize);
     }
     (0..SOFT_TAG_PAGE_BASE).contains(&tag)
@@ -2000,30 +1810,17 @@ fn slot_label(slot: &str) -> String {
     }
 }
 
-/// 记忆锚点（面板**右下角**）→ 本帧落点（左上角）。
-///
-/// 与 `Toolbar::origin_from_anchor` 同一个减法、同一个理由：面板尺寸会变（软键盘是
-/// 切面改键数，工具栏是换向/增删格），锚右下角让这些变化朝屏幕内侧展开。
-/// 必须每帧用**当前**的 `w`/`h` 现算，不能把结果存下来复用。
+/// 记忆锚点（面板右下角）→ 本帧落点（左上角）。同 `Toolbar::origin_from_anchor`：
+/// 锚右下角让尺寸变化朝屏幕内侧展开；必须每帧用当前 `w`/`h` 现算。
 fn origin_from_anchor(right: i32, bottom: i32, w: u32, h: u32) -> (i32, i32) {
     (right - w as i32, bottom - h as i32)
 }
 
-/// 这一帧面板落在哪——**三级优先级只此一处**。
+/// 这一帧面板落在哪——三级优先级只此一处。
 ///
-/// 有两个消费者问的是同一个问题："这一帧的面板在哪块屏上"：
-/// - [`SoftKeyboard::ensure_scale`] 要一个屏内的点去查 DPI；
-/// - [`SoftKeyboard::render`] 要算左上角落点。
-///
-/// ⚠️ 两者**不能共用一个函数**：算落点要先知道面板尺寸，而尺寸取决于缩放，缩放又
-/// 取决于在哪块屏——是个鸡生蛋。所以只能各自分派，但**优先级本身只写一次**（就是本
-/// 枚举的构造函数 [`SoftKeyboard::placement`]）。
-///
-/// 各写一遍的下场已经发生过一次：`ensure_scale` 当时只判 `anchor_br`/`origin` 两级，
-/// 漏掉的第三级恰好是"副屏首次打开、还没有位置记忆"——两个 `None` 一路落到 `(0, 0)`
-/// 即主屏，于是按主屏 DPI 排出的尺寸落到副屏上。症状很迷惑：鼠标一碰就好了（hover
-/// 重绘时 `origin` 已是上一帧落在副屏的落点，够到了第二级），拖动过一次也永久好了
-/// （有了 `anchor_br`，够到第一级）——**唯独第一次打开是错的**。
+/// 两个消费者：[`SoftKeyboard::ensure_scale`] 要屏内一点查 DPI，[`SoftKeyboard::render`] 要算落点。
+/// 两者不能共用一个函数（落点依赖尺寸，尺寸依赖缩放，缩放依赖在哪块屏），但优先级只写一次；
+/// 各写一遍漏掉一级时，副屏首次打开会按主屏 DPI 排版。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Placement {
     /// 用户摆过的位置，锚面板右下角（跨重启记忆）。
@@ -2035,27 +1832,22 @@ enum Placement {
 }
 
 impl Placement {
-    /// 三级优先级的**唯一实现**。`SoftKeyboard::placement` 只是把三个字段喂进来——
-    /// 拆成自由函数是为了让守门测试打到真身：`SoftKeyboard` 要真窗口才能构造，测试里
-    /// 造不出来，而把 `match` 在测试里抄一遍就成了"判据问自己"，改错了也照样绿。
+    /// 三级优先级的唯一实现。拆成自由函数让测试打到真身（`SoftKeyboard` 要真窗口才能构造）。
     fn pick(
         anchor_br: Option<(i32, i32)>,
         origin: Option<(i32, i32)>,
         work_area: Option<(i32, i32, i32, i32)>,
     ) -> Self {
         match (anchor_br, origin) {
-            // 锚点是用户的**意图**，压过 `origin`（那只是上一帧的结果）。
+            // 锚点是用户的意图，压过 `origin`（那只是上一帧的结果）。
             (Some((right, bottom)), _) => Placement::Anchor { right, bottom },
             (None, Some((x, y))) => Placement::LastOrigin { x, y },
             (None, None) => Placement::DefaultIn { work: work_area },
         }
     }
 
-    /// 取一个**落在目标屏内**的点，供 DPI 查询。
-    ///
-    /// ⚠️ `right`/`bottom` 无论来自锚点还是工作区都是**排他**边界（等同 Win32 `RECT`
-    /// 语义），必须退 1px 才在屏内。不退的后果是屏幕右/下边缘的面板查到**相邻那块屏**
-    /// 的 DPI——多屏横排时尤其容易踩到，且只在贴边时复现。
+    /// 取一个落在目标屏内的点，供 DPI 查询。`right`/`bottom` 是排他边界，必须退 1px，
+    /// 否则贴边时会查到相邻那块屏的 DPI。
     fn probe_point(self) -> (i32, i32) {
         match self {
             Placement::Anchor { right, bottom } => (right - 1, bottom - 1),
@@ -2064,9 +1856,7 @@ impl Placement {
             Placement::DefaultIn {
                 work: Some((_, _, right, bottom)),
             } => (right - 1, bottom - 1),
-            // 协调器都没查到显示器（非 Windows／查询失败），没有比主屏更好的猜测。
-            // `default_origin` 在同样的缺席下退回 `SPI_GETWORKAREA`，那个 API 取的也是主屏——
-            // 两处兜底落在同一块屏上，是一致的。
+            // 协调器没查到显示器：猜主屏，与 `default_origin` 退回 `SPI_GETWORKAREA` 的兜底一致。
             Placement::DefaultIn { work: None } => (0, 0),
         }
     }
@@ -2074,10 +1864,8 @@ impl Placement {
 
 /// 首次显示的位置：工作区底部居中，留一点边距。
 ///
-/// `work` 是协调器按**焦点显示器**给的工作区 `(left, top, right, bottom)`。
-/// 只有在它缺席（协调器查不到显示器、非 Windows）时才回退 `SPI_GETWORKAREA`——
-/// ⚠️ 那个 API 取的恒是**主屏**，多显示器下拿它定位就是"在副屏打字、面板开在主屏"。
-/// 工具栏那边（`Toolbar::corner_position`）的文档写着同一条警告，是同一个坑。
+/// `work` 是协调器按焦点显示器给的工作区 `(left, top, right, bottom)`。只有它缺席时才回退
+/// `SPI_GETWORKAREA`，那个 API 恒取主屏（同 `Toolbar::corner_position`）。
 fn default_origin(w: u32, h: u32, s: f32, work: Option<(i32, i32, i32, i32)>) -> (i32, i32) {
     let margin = (16.0 * s).round() as i32;
     let bottom_centered = |left: i32, top: i32, right: i32, bottom: i32| {
@@ -2193,8 +1981,7 @@ mod mouse_impl {
                         self.hover = h;
                         self.dirty = true;
                     }
-                    // 按住后移出该键：停止长按重复。SetCapture 在后台窗口按线程失效
-                    // （本仓已有记录），所以这里靠「移出即停」+ 抬起兜底，不用 capture。
+                    // 按住后移出该键：停止长按重复。后台窗口的 SetCapture 不可靠，靠「移出即停」+ 抬起兜底。
                     if self.pressed >= 0 && h != self.pressed {
                         self.pressed = -1;
                         self.repeat_at = None;
@@ -2207,16 +1994,9 @@ mod mouse_impl {
                     let (x, y) = pos(lparam);
                     let h = self.hit_at(x, y);
                     if drags_panel(h) {
-                        // 空白处（标签行留白、键位之间的缝）→ 拖动整块面板。
-                        //
-                        // 判据是 `drags_panel` 而不是 `h < 0`：标签行留白命中的是
-                        // `SOFT_TAG_TAB_VIEWPORT`（一个区域标记，>= 0），此前落到下面的
-                        // 按键分支去了，于是留白点了既不拖动也没反应。
-                        //
-                        // 这里用 SetCapture 是安全的：按下发生在本窗口内，捕获的是本线程的
-                        // 鼠标。本仓记过「后台窗口 SetCapture 按线程失效」，那说的是拿它去
-                        // **侦听窗口外的点击**（菜单关闭），与拖动不是一回事——工具栏的拖动
-                        // 一直就是这么做的。
+                        // 空白处（标签行留白、键位之间的缝）→ 拖动整块面板，判据见 `drags_panel`。
+                        // 这里用 SetCapture 是安全的：按下发生在本窗口内；它失效的是侦听窗口外的
+                        // 点击（见 docs/architecture/ui-platform-notes.md 的「弹出菜单」），工具栏拖动同理。
                         let mut p = POINT::default();
                         unsafe {
                             let _ = GetCursorPos(&mut p);
@@ -2258,10 +2038,7 @@ mod mouse_impl {
                     }
                     Some(LRESULT(0))
                 }
-                // 光标离开面板：清掉悬停高亮。
-                //
-                // ★ 没有这一条，鼠标快速划出面板时最后那一格会一直亮着——`WM_MOUSEMOVE`
-                // 只在光标**还在窗口内**时到达，出界那一下没有任何消息。
+                // 光标离开面板：清掉悬停高亮（出界那一下没有 `WM_MOUSEMOVE`）。
                 WM_MOUSELEAVE => {
                     self.leave_armed = false;
                     if self.hover != -1 {
@@ -2277,14 +2054,8 @@ mod mouse_impl {
                     }
                     Some(LRESULT(0))
                 }
-                // 滚轮在标签行上横向滚动。
-                //
-                // ⚠️ WM_MOUSEWHEEL 的 lparam 是**屏幕坐标**（其它鼠标消息是客户区坐标），
-                // 不换算会永远命中不到。
-                //
-                // 面板是 WS_EX_NOACTIVATE、永远拿不到焦点，而滚轮消息按规矩发给焦点窗口——
-                // 我们能收到它，靠的是 Win10 起默认开启的「悬停即滚动非活动窗口」。
-                // 用户若关掉那个设置就滚不动，故箭头必须一直留着，滚轮只是快捷方式。
+                // 滚轮在标签行上横向滚动。WM_MOUSEWHEEL 的 lparam 是屏幕坐标，须换算。
+                // 不抢焦点的面板能收到滚轮全靠系统的「悬停即滚动非活动窗口」，故箭头必须一直留着。
                 WM_MOUSEWHEEL => {
                     let mut p = POINT {
                         x: (lparam.0 & 0xFFFF) as i16 as i32,
@@ -2320,8 +2091,7 @@ mod mouse_impl {
                         }
                     }
                     if self.pressed >= 0 {
-                        // 抬起才触发：必须仍停在按下的那个控件上——按下后挪开再松手
-                        // 是「反悔」，不该执行。
+                        // 抬起才触发：必须仍停在按下的那个控件上，挪开再松手是反悔。
                         let (x, y) = pos(lparam);
                         if fires_on_release(self.pressed) && self.hit_at(x, y) == self.pressed {
                             self.clicked.push(self.pressed);
@@ -2345,12 +2115,7 @@ mod mouse_macos {
     use crate::mac_panel::{MouseEvent, MouseKind, PanelGeom, PanelMouse};
     use wind_ui_types::{SOFT_TAG_TAB_LEFT, SOFT_TAG_TAB_RIGHT, SOFT_TAG_TAB_VIEWPORT};
 
-    /// AppKit 事件 → 同一个 [`SoftMouse`] 状态机。
-    ///
-    /// # 与 Windows 版（`mouse_impl`）的对应关系
-    ///
-    /// 状态机本身**一模一样**，逐条对位；差别只在事件从哪来、以及三件 Win32 特有的事
-    /// 在这里不需要做：
+    /// AppKit 事件 → 同一个 [`SoftMouse`] 状态机，与 Windows 版（`mouse_impl`）逐条对位：
     ///
     /// | Win32 | macOS | 说明 |
     /// |---|---|---|
@@ -2363,8 +2128,7 @@ mod mouse_macos {
     impl PanelMouse for SoftMouse {
         fn on_mouse(&mut self, ev: MouseEvent, geom: PanelGeom) -> Option<(i32, i32)> {
             match ev.kind {
-                // 拖动中：跟着光标走。落点由 `mac_panel` 钳进可见区，真实位置经
-                // `on_moved` 回来——面板比候选窗大得多，拖出屏幕就再也抓不回来了。
+                // 拖动中：跟着光标走。落点由 `mac_panel` 钳进可见区，真实位置经 `on_moved` 回来。
                 MouseKind::Drag if self.dragging => {
                     let nx = self.origin.0 + (ev.sx - self.anchor.0);
                     let ny = self.origin.1 + (ev.sy - self.anchor.1);
@@ -2419,8 +2183,7 @@ mod mouse_macos {
                 MouseKind::Up => {
                     self.dragging = false;
                     if self.pressed >= 0 {
-                        // 抬起才触发：必须仍停在按下的那个控件上——按下后挪开再松手
-                        // 是「反悔」，不该执行。
+                        // 抬起才触发：必须仍停在按下的那个控件上，挪开再松手是反悔。
                         let h = self.hit_at(ev.x, ev.y);
                         if fires_on_release(self.pressed) && h == self.pressed {
                             self.clicked.push(self.pressed);
@@ -2432,10 +2195,7 @@ mod mouse_macos {
                     self.repeating = false;
                     None
                 }
-                // 光标离开面板：清掉悬停高亮。
-                //
-                // ★ 没有这一条，鼠标快速划出面板时最后那一格会一直亮着——移动事件只在
-                // 光标还在视图内时到达，出界那一下没有任何事件。
+                // 光标离开面板：清掉悬停高亮（出界那一下没有移动事件）。
                 MouseKind::Leave => {
                     if self.hover != -1 {
                         self.hover = -1;
@@ -2450,8 +2210,7 @@ mod mouse_macos {
                     }
                     None
                 }
-                // 滚轮只在标签行上有意义（横向滚动标签）。这里只累加格数，真正的滚动
-                // 在 `tick` 里做——滚动要改 `tab_scroll` 并重绘，而本函数拿不到面板。
+                // 滚轮只在标签行上有意义。这里只累加格数，滚动在 `tick` 里做。
                 MouseKind::Wheel => {
                     let h = self.hit_at(ev.x, ev.y);
                     let on_tabs = h == SOFT_TAG_TAB_VIEWPORT
@@ -2611,9 +2370,7 @@ mod mouse_macos {
             assert_eq!(want, Some((130, 180)), "100+30, 200-20");
         }
 
-        /// ★ `moved_to` 记的必须是**钳制后**的真实落点，不是想去的那个。
-        /// 记错的症状是「往屏幕边上一拖，松手后面板自己跳走」——下一帧 `render`
-        /// 拿它调 `show`，就把面板送回了屏外。
+        /// `moved_to` 记的必须是钳制后的真实落点，否则下一帧 `render` 会把面板送回屏外。
         #[test]
         fn on_moved_records_the_clamped_position() {
             let mut m = mk();
@@ -2686,10 +2443,8 @@ mod mouse_macos {
 
 #[cfg(not(any(windows, all(target_os = "linux", ext_presenter))))]
 impl crate::window::WindowMouse for SoftMouse {
-    // 句柄类型走 `crate::sys::`（真源，`sys.rs` 有 `pub use imp::*`）而非
-    // `crate::window::`——后者那行 `use crate::sys::{...}` 是**私有** import，隔着模块
-    // 引用它是 E0603。本 impl 是 `cfg(not(windows))` 专属，Windows 上根本不编译，故这个
-    // 错只在 macOS/Linux 现形，本机 Windows 怎么跑都测不出。
+    // 句柄类型走 `crate::sys::` 而非 `crate::window::`：后者是私有 import，引用会 E0603，
+    // 且只在非 Windows 上编译时才现形。
     fn on_message(
         &mut self,
         _hwnd: crate::sys::HWND,
@@ -2705,8 +2460,7 @@ impl crate::window::WindowMouse for SoftMouse {
 #[path = "soft_keyboard_tests.rs"]
 mod tests;
 
-// 激活键文字色：强调色底上的字取 on_accent（分段着色给 _base 加了 accent_text 之后，
-// 旧的第二级 accent_text 会让 _base / msime 的激活键同色字压同色底）。
+// 激活键文字色：强调色底上的字取 on_accent，不能与底色相同（见 `Colors::from_theme`）。
 #[cfg(test)]
 mod active_key_color_tests {
     use super::Colors;

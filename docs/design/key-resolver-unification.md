@@ -628,6 +628,23 @@ KeyResolver
 14. **⚠️ 每个模式的用例必须先断言「确实进了该模式」**，否则触发键没生效、按键落回主输入路径，
     测试照样绿。
 
+### 按键总览（`keysOverview`）的段级降级判据
+
+实现在 wind-webdata 的 `keys_overview` / `keys_overview_of`。
+
+- `Config::load` 遇坏键不整份失败，而是把坏段换成 L1 出厂值再返回 `Ok`。此时照原样渲染全局层，
+  就是把出厂绑定当成用户的真实绑定展示。处置：不可信的那一层不列（不是列出来再打标），另经
+  `keysOverviewDegraded` 说明哪张表缺了、因哪些段降级。只标不删的话，设置端漏读一个字段就退回误导形态。
+- 判据按表分别取，每张表问它的全部来源路径（并集），不是同名字段：`narrow_bad_section` 对坏段的
+  每个直接子键都做探针（标量也试得出），例如 `[keys] page_keys = 5` 只会记 `keys.page_keys`，
+  只问 `keys.session_actions` 会漏判。给 `KeysConfig::effective_session_actions` 加新的折算来源时，
+  这张来源表要一起加，漏了没有编译期或测试信号。
+- 刻意不进判据：`migrate_trigger_keys_into_key_actions` 把 `input` 段的字段跨段折算进 `key_actions`，
+  但只对存量用户跑一次，是过渡态；为它把整个 `input` 段纳入判据，代价（`input` 一坏总览整片消失）大于收益。
+- `keysOverviewDegraded.sections` 只列真正导致表被判不可信的段（复用 `taints` 判定），不列本次加载的
+  全部降级段，免得设置端给出「字体坏了所以按键表不全」这类错误解释。
+- 读不到全局配置时与 `total_fallback` 合流：仍列方案层（不受 `Config` 降级影响），全局层不列。
+
 ## 9. 明确不做
 
 - ⛔ **不**把 `keys.toggle_full_width` 等散字段并进 `key_actions`——方向相反（一功能一键 vs

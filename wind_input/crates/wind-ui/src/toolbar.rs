@@ -1,8 +1,7 @@
-//! 工具栏窗口：常驻状态指示器（中英 / 方案 / 标点 / 全半角）。
+//! 工具栏窗口：常驻状态指示器（中英 / 方案 / 标点 / 全半角 / 简繁 / 软键盘 / 设置 / 自定义按钮）。
 //!
-//! 与 Go 版本 `wind_input/internal/ui/toolbar_window.go` 对齐（简化版）。
-//! 横向圆角小条，每格一个状态；中文模式格高亮。固定显示于工作区右下角。
-//! 点击切换暂未实现（后续 UI 统一优化阶段补齐拖动 + 命中），当前为展示用。
+//! 横排或纵排的圆角小条，每格一个状态，点击切换、右键弹该格菜单、拖动柄（或格上越过阈值）拖动整条。
+//! 位置锚窗口右下角记忆，见 [`Placement`]。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -33,9 +32,7 @@ pub(crate) struct Cell {
     action: ToolbarAction,
 }
 
-// 标点状态图标：外部 SVG 文件（res/icons/）编译期嵌入（include_str!）。
-// SVG 仅作 alpha 蒙版（形状黑色填充即可），颜色由工具栏按主题 tint；位置精确、不受字体基线影响。
-// 要调整符号样式，直接编辑这两个 svg 文件即可（无需改 Rust 代码）。
+// 状态图标：`res/icons/` 下的 SVG 编译期嵌入，只作 alpha 蒙版，颜色由工具栏按主题 tint。
 /// 全角（中文）标点 。，
 const PUNCT_FULL_SVG: &str = include_str!("../res/icons/punct_full.svg");
 /// 半角（英文）标点 .,
@@ -46,9 +43,7 @@ const WIDTH_FULL_SVG: &str = include_str!("../res/icons/width_full.svg");
 const WIDTH_HALF_SVG: &str = include_str!("../res/icons/width_half.svg");
 /// 设置齿轮图标。
 const SETTING_SVG: &str = include_str!("../res/icons/setting.svg");
-/// 软键盘图标。**只有一张**：开关态由格底高亮表达（同 `Mode` 格的做法），而不像
-/// 标点 / 全半角那样两态两张图——那两格切换的是**输出形态**，两个状态各有自己的样子；
-/// 软键盘格切换的是**面板开合**，图标始终代表同一个东西。
+/// 软键盘图标，只有一张：这一格切换的是面板开合，开关态由格底高亮表达。
 const SOFT_KEYBOARD_SVG: &str = include_str!("../res/icons/soft_keyboard.svg");
 
 /// 工具栏窗口
@@ -72,21 +67,11 @@ pub struct Toolbar {
     vertical: bool,
 
     /// 显示哪些格、按什么顺序（`ui.toolbar.items`，经 `SetToolbarLayout` 下发）。
-    ///
-    /// 初值取全集而非空：`SetToolbarLayout` 在 `apply_ui_config` 里下发，而工具栏可能在
-    /// 那之前就被 `UpdateToolbar` 拉起来渲染一帧——初值为空的话那一帧是条只剩拖动柄的
-    /// 空条，随后才"长出"各格，视觉上是一次凭空抖动。
+    /// 初值取全集：`UpdateToolbar` 可能先于 `SetToolbarLayout` 到达，初值为空会先闪一帧空条。
     layout: Vec<ToolbarItem>,
     /// 待落的「某显示器右下角」请求：`(工作区右边界, 下边界)`，由 `render` 消费。
-    ///
-    /// 存边界而不是直接算坐标，是因为落点要减去工具栏自身尺寸，而**尺寸在 `render` 之前
-    /// 不可信**——窗口以 `create(160, 40)` 的占位尺寸起步，`set_vertical` 在隐藏期间又
-    /// 不重排（不出图），于是首次渲染前 `window.size()` 既不是横条真值也不是纵条真值。
-    ///
-    /// **跨 `hide` 存活**：隐藏不该丢弃「下次该落到哪块屏」这个意图，重新显示时由
-    /// `render` 消费。清除它的只有 `render` 的 `take()` 与 `set_anchor`（后到的显式锚点覆盖）。
-    /// 边界过时不必担心：这对数值正是协调器 `sync_toolbar_monitor` 的去重 key 本身，
-    /// 边界一变 key 必变，下一次 sync 会重新下发覆盖。
+    /// 存边界而不算坐标：落点要减去自身尺寸，而尺寸在 `render` 之前不可信（占位 160×40、隐藏期间不重排）。
+    /// 跨 `hide` 存活，只由 `render` 消费或被 `set_anchor` 覆盖；边界过时会由协调器 `sync_toolbar_monitor` 重新下发。
     pending_corner: Option<(i32, i32)>,
     /// 最近一帧的拖动柄区域（设备像素，相对窗口左上角）；`render` 从 `bar_layout` 取。
     /// 外部宿主据此在本地拖动，见 [`Self::drag_regions`]。
@@ -102,12 +87,8 @@ pub(crate) struct BarLayout {
     cells: Vec<Rect>,
 }
 
-/// 按朝向铺开整条工具栏。**纵向恒为横向的转置**：`thickness`（主题 `[toolbar] height`）
-/// 在横条里是条高、在纵条里是条宽；`cell`（`button_width`）在横条里是格宽、纵条里是格高。
-/// 于是同一套主题几何在两个朝向下都成立，不必为纵向另配一套尺寸。
-///
-/// 抽成纯函数是为了可单测：`render` 的其余部分要拿 DirectWrite 测文字、要提交 Layered
-/// Window，在非 Windows 上是 mock/空实现，覆盖不到。
+/// 按朝向铺开整条工具栏。纵向恒为横向的转置：`thickness`（主题 `[toolbar] height`）在横条里是条高、
+/// 纵条里是条宽；`cell`（`button_width`）同理。同一套主题几何两个朝向都成立。抽成纯函数以便单测。
 fn bar_layout(vertical: bool, thickness: f32, grip_len: f32, cell: f32, n: usize) -> BarLayout {
     let long = grip_len + cell * n as f32;
     let (w, h) = if vertical {
@@ -159,20 +140,14 @@ fn grip_region(r: &Rect) -> Option<[i32; 4]> {
     (w > 0 && h > 0).then(|| [r.x.round() as i32, r.y.round() as i32, w, h])
 }
 
-/// 整条外框圆角的兜底半径（主题 `[toolbar] border.radius` 未配时）：**短边**×0.30。
-///
-/// 必须取短边而非 `h`：`bar_layout` 把纵条画成横条的转置，`h` 在横条里是厚度、在纵条里
-/// 却是整条长度。用 `h` 算出的纵条半径恒远超厚度，被 `push_round_rect` 的
-/// `min(w*0.5)` 静默钳成满胶囊——错误被下游钳制吸收，只表现为「纵排圆角明显更大」。
-/// 取短边后两个朝向同为厚度×0.30，横条行为与原来逐字节相同。
+/// 整条外框圆角的兜底半径（主题 `[toolbar] border.radius` 未配时）：短边×0.30。
+/// 须取短边：纵条的 `h` 是整条长度，用它算会被下游静默钳成满胶囊。
 fn default_border_radius(w: f32, h: f32) -> f32 {
     w.min(h) * 0.30
 }
 
 /// 工具栏配色（默认浅色；`set_theme` 加载主题后覆盖）。
-///
-/// 与几何（[`ToolbarDims`]）一道从窗口抽成纯值对象：设置端预览不构造窗口，也能按同一份
-/// 折算画出工具栏（见 [`paint_toolbar`]），不让配色逻辑长第二份。
+/// 与 [`ToolbarDims`] 一起抽成纯值对象，设置端预览不构造窗口也能经 [`paint_toolbar`] 按同一份折算画出。
 #[derive(Clone, Copy)]
 pub(crate) struct ToolbarSkin {
     pub bg: [u8; 4],
@@ -275,8 +250,7 @@ pub(crate) struct ToolbarFrame {
     pub button_radius: u32,
 }
 
-/// 按主题几何 + 缩放 + 格数算出一帧的排布与各处圆角 / 线宽。抽出来是为了窗口路径与
-/// 预览共用：两边都必须「先排布、知道尺寸、再进画板」。
+/// 按主题几何 + 缩放 + 格数算出一帧的排布与各处圆角 / 线宽。窗口路径与预览共用。
 pub(crate) fn toolbar_frame(
     dims: &ToolbarDims,
     scale: f32,
@@ -291,14 +265,12 @@ pub(crate) fn toolbar_frame(
     // 纵向下这两个值转 90°：thickness 成条宽、grip_len 成顶端拖动区高度。
     let thickness = dim(dims.height, ToolbarDims::HEIGHT).ceil();
     let grip_len = dim(dims.grip_width, ToolbarDims::GRIP_W).ceil();
-    // 每格等长（默认 30dp≈方形）：标点/简繁等图标与文字均居中于等长格，
-    // 状态切换不改变格尺寸，工具栏整体长度稳定不抖动。主题可配 button_width 覆盖。
+    // 每格等长（默认 30dp≈方形），状态切换不改变格尺寸，整条长度不抖。
     let cell_len = dim(dims.button_width, ToolbarDims::BUTTON_W);
     let layout = bar_layout(vertical, thickness, grip_len, cell_len, n);
     let w = layout.w.ceil() as u32;
     let h = layout.h.ceil() as u32;
-    // 整条圆角：主题 [toolbar] border.radius 优先，未配则 = 条**短边**×0.30
-    // （见 `default_border_radius`）。配 0 即直角——硬边缘风格靠这条实现。
+    // 整条圆角：主题 border.radius 优先，未配则见 `default_border_radius`；配 0 即直角。
     let radius = dims
         .border_radius
         .map(|d| d.resolve(scale, 0.0))
@@ -310,9 +282,8 @@ pub(crate) fn toolbar_frame(
         .unwrap_or(1.0 * scale)
         .max(1.0);
     let inset = dim(dims.button_padding, ToolbarDims::BUTTON_PAD) as u32;
-    // 高亮格圆角：主题 button_radius 优先，否则 = 高亮块内**短边**×0.3。高亮块沿长轴内缩
-    // inset/2、厚度方向内缩 inset——即下式两支，纵条是横条的转置。u32 截断与取 min 的
-    // 顺序照旧（先截后缩），与 `paint_toolbar` 里真正的内缩矩形同源。
+    // 高亮格圆角：主题 button_radius 优先，否则 = 高亮块内短边×0.3。
+    // 内缩算法须与 `paint_toolbar` 里真正的高亮矩形一致（长轴缩 inset/2、厚度方向缩 inset，纵条转置）。
     let (rw, rh) = match layout.cells.first() {
         Some(r) => (r.w as u32, r.h as u32),
         None => (w, h),
@@ -387,22 +358,14 @@ impl Toolbar {
 
     /// 应用主题（工具栏各色，跟随语义）。
     pub fn set_theme(&mut self, theme: &wind_theme::Resolved) {
-        // 背景色/边框色：[toolbar] 节点值优先（resolve 已合成 palette 默认），
-        // 未配才落回 token —— 与其它窗口一致。折算在 [`ToolbarSkin::from_theme`]，
-        // 预览用同一份（不复制第二处）。
+        // 折算在 [`ToolbarSkin::from_theme`]，预览共用。
         self.skin = ToolbarSkin::from_theme(theme);
         self.dims = ToolbarDims::from_theme(theme);
     }
 
-    /// 配置纵向排列（`ui.toolbar.vertical`，经 SetToolbarVertical 下发）。
-    ///
-    /// 换向会改窗口尺寸，故可见时立即用缓存状态重绘——否则要等下一次状态推送（切中英等）
-    /// 才换向，设置页里改完看着像没生效。
-    ///
-    /// ⚠️ 重绘必须受 `visible` 门控：`repaint`→`render` 末尾无条件 `show`，对隐藏中的
-    /// 工具栏调用会把它显形，绕过 `toolbar_gate` 的显示迟滞（同 `SetTheme` 分支的约束）。
-    /// 隐藏期间换向不必出图——朝向已存好，而所有重新显示的路径都经 `update`→`render`
-    /// 重算尺寸，不会留下旧朝向的残帧。
+    /// 配置纵向排列（`ui.toolbar.vertical`，经 SetToolbarVertical 下发）。可见时立即用缓存状态重绘。
+    /// 重绘须受 `visible` 门控：`render` 末尾无条件 `show`，对隐藏中的工具栏调用会绕过 `toolbar_gate` 的显示迟滞。
+    /// 隐藏期间不必出图，重新显示都经 `render` 重算尺寸。
     pub fn set_vertical(&mut self, vertical: bool) {
         if self.vertical == vertical {
             return;
@@ -433,26 +396,9 @@ impl Toolbar {
     }
 
     /// 设置工具栏位置（启动恢复持久化位置 / 运行期跟随焦点换屏）。
-    ///
-    /// **只登记原始坐标，一律不在这里钳制**——钳制要拿工具栏尺寸比对工作区边界，而这一刻
-    /// 尺寸不可信，且**钳制有损不可逆**：错误尺寸钳出来的坐标一旦写回，正确值就永远回不来。
-    /// 两个时机都会踩到：
-    ///
-    /// - **启动**：窗口以 `create` 的占位尺寸 160×40 起步，位置在 `init_toolbar_pos` 下发、
-    ///   朝向要到其后的 `apply_ui_config` 才下发，且 `set_vertical` 隐藏期间不重排。纵条
-    ///   于是被按 160 宽钳制，贴右保存的坐标被判越界拉回 `右边界-160`，重启后左移 100+px。
-    /// - **跨 DPI 换屏**：`window.size()` 还是**上一块屏** DPI 下的尺寸（`ensure_scale` 要到
-    ///   随后的 `render` 才跑）。真机实测：右屏 100% 的纵条 48×212 贴死右下角存 (2512,1156)，
-    ///   切到 133% 的左屏再切回来时按 64×282 钳，被拉到 (2496,1086)——左移 16、上移 70，
-    ///   且因为结果写回了 `mouse.pos`，之后用正确尺寸重钳也已不越界，位置永久走样。
-    ///
-    /// 落点与钳制统一由 `render` 做：那里 `ensure_scale` 已按目标屏定好 scale、`resize`
-    /// 也已按当前朝向排完版，`w`/`h` 才是真值。数值本体见 `sys::clamp_rect_tests`。
-    ///
-    /// 不做 alpha 恢复与计时重置：`render` 末尾以 alpha=255 提交并 `on_shown`。
-    ///
-    /// ⚠️ `repaint` 受 `visible` 门控：`render` 末尾无条件 `show`，对隐藏中的工具栏调用会把
-    /// 它显形，绕过 `toolbar_gate` 的显示迟滞（同 `set_vertical` 的约束）。
+    /// 只登记原始坐标、不在这里钳制：此刻尺寸不可信（启动时是占位 160×40，跨 DPI 换屏时还是旧屏尺寸），
+    /// 而钳制有损不可逆，错尺寸钳出的坐标写回后就回不来了。落点与钳制统一由 `render` 做，数值见 `sys::clamp_rect_tests`。
+    /// `repaint` 受 `visible` 门控，理由同 `set_vertical`。
     pub fn set_anchor(&mut self, right: i32, bottom: i32) {
         // 显式位置优先于待落的角落请求，否则 render 会拿 pending 覆盖掉这次设定。
         self.pending_corner = None;
@@ -462,21 +408,10 @@ impl Toolbar {
         }
     }
 
-    /// 移到指定显示器工作区的右下角——焦点切到一块**从未拖过工具栏**的屏时用。
-    ///
-    /// 由协调器传工作区右/下边界、这边算落点，而不是协调器直接算坐标下发：右下角要减去
-    /// 工具栏自身的 w/h，而尺寸只有 UI 侧知道（随主题/朝向/DPI 变）。留边同 `corner_position`。
-    ///
-    /// **无论可见与否都只登记意图**，落点由 `render` 计算。隐藏期间是因为尺寸还是占位值
-    /// （见 `set_anchor`）；可见期间则是因为目标屏 DPI 可能与当前屏不同——`render` 里
-    /// `ensure_scale` 先按目标屏定 scale、再排版出尺寸，只有那一刻两者才同时正确。
-    /// 若在这里用当前 `window.size()` 算，跨 DPI 换屏首帧会按旧屏尺寸定位。
-    ///
-    /// 可见时自己 `repaint` 兜底：协调器当前总是紧跟一条 `UpdateToolbar`（`notify_toolbar`
-    /// 里 `sync_toolbar_monitor` 之后必然下发），但那是**调用方的时序契约**，不该由它
-    /// 决定本次请求是否生效——多渲染一帧在换屏这种低频事件上无关紧要。
-    /// ⚠️ `repaint` 必须受 `visible` 门控：`render` 末尾无条件 `show`，对隐藏中的工具栏
-    /// 调用会把它显形，绕过 `toolbar_gate` 的显示迟滞（同 `set_vertical` 的约束）。
+    /// 移到指定显示器工作区的右下角（焦点切到一块从未拖过工具栏的屏时用）。
+    /// 协调器只传工作区边界，落点由这边算：要减去的尺寸只有 UI 侧知道。
+    /// 无论可见与否都只登记意图、由 `render` 算：目标屏 DPI 可能不同，只有 `ensure_scale` 之后尺寸才对。
+    /// 可见时自己 `repaint`，不依赖协调器紧跟一条 `UpdateToolbar`；`visible` 门控同 `set_vertical`。
     pub fn set_corner(&mut self, work_right: i32, work_bottom: i32) {
         self.pending_corner = Some((work_right, work_bottom));
         if self.visible {
@@ -485,12 +420,7 @@ impl Toolbar {
     }
 
     /// 配置显示哪些格、按什么顺序（`ui.toolbar.items`，经 SetToolbarLayout 下发）。
-    ///
-    /// 格数变化会改窗口尺寸，故可见时立即用缓存状态重绘——否则要等下一次状态推送
-    /// （切中英等）才生效，设置页里改完看着像没生效。同 `set_vertical` 的理由。
-    ///
-    /// ⚠️ 重绘必须受 `visible` 门控：`repaint`→`render` 末尾无条件 `show`，对隐藏中的
-    /// 工具栏调用会把它显形，绕过 `toolbar_gate` 的显示迟滞（同 `set_vertical` 的约束）。
+    /// 可见时立即重绘，`visible` 门控同 `set_vertical`。
     pub fn set_layout(&mut self, items: Vec<ToolbarItem>) {
         if self.layout == items {
             return;
@@ -501,68 +431,34 @@ impl Toolbar {
         }
     }
 
-    /// 根据配置的项序列 + 当前状态构建单元格。
-    /// 布局：拖动条 | 各项按 `self.layout` 的顺序展开
-    ///
-    /// 项序列来自配置（`self.layout`），而本 crate 读不到配置，只消费协调器解析好的结果。
-    /// 同 `mode_text` 那处的分工——判据与取值都归协调器。
-    ///
-    /// 真正的展开逻辑在自由函数 [`expand_cells`]，本方法只是取 `self.layout` 转发：
-    /// 构造 `Toolbar` 需要真窗口（非 Windows 上是 mock），挂在它上面的逻辑测不到。
-    /// 同 `bar_layout` 被抽成自由函数的理由。
+    /// 根据配置的项序列 + 当前状态构建单元格（拖动条之后按 `self.layout` 顺序展开）。
+    /// 展开逻辑在自由函数 [`expand_cells`]，便于不构造窗口就能测。
     fn cells(&self, state: &ToolbarState) -> Vec<Cell> {
         expand_cells(&self.layout, state)
     }
 }
 
-/// 把配置的项序列 + 当前状态展开成单元格序列。
-///
-/// # 空结果必须回落，且这道闸门只能装在这里
-///
-/// 协调器的 `parse_toolbar_items` 已保证**项序列**非空，但那只保证「配置里写了东西」，
-/// 保证不了「展开后还剩几格」——决定画几格的是这里。
-///
-/// ⚠️ 触发这条的路径**变过一次**：原先是 `S2t` 带运行时合取（简繁没开就不产格），
-/// 配 `items = ["s2t"]` 而简繁关着即整条空掉。那层合取已删（见 `S2t` 分支的说明），
-/// 于是当下所有内置项都无条件产格，只剩「全是 `Custom` 且全被 `enabled = false` 关掉」
-/// 这一条路能走到空——协调器侧那种情况已在 `push_custom_item` 里跳过，故理论上到不了。
-///
-/// 兜底照留：**闸门要装在产出最终结果的那一环**，而不是靠上游当下恰好不会送空进来。
-/// 一旦日后又给某个内置项加回运行时条件（那正是上一轮发生过的事），这里不必跟着改。
-///
-/// 不 panic 也不返回空：`bar_layout` 在 n=0 下数学上安全（无除法），但「安全」不等于
-/// 「可接受」——回落全量条至少是个能用的工具栏，且与 `visible=false` 那条真正的
-/// 「不要工具栏」路径不冲突。
-///
+/// 把配置的项序列 + 当前状态展开成单元格序列；展开为空时回落全集。
+/// 协调器只保证项序列非空，保证不了展开后还剩几格，闸门装在产出最终结果的这一环。
+/// 当前内置项都无条件产格，理论上到不了空；兜底留着防日后给某项加回运行时条件。
 /// `pub(crate)`：设置端工具栏预览（`candidate_window::preview`）用同一份展开逻辑。
 pub(crate) fn expand_cells(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
     let cells = expand_cells_raw(layout, state);
     if !cells.is_empty() {
         return cells;
     }
-    // 回落走 `expand_cells_raw` 而不是直接构造全集的 Cell：状态相关的取值（简繁字面、
-    // 高亮）只该有一份实现，绕开它就是把同一套判断抄第二遍。
-    //
-    // ⚠️ **这一步不可能再空，不必加第二层兜底**：全集里的内置项在 `expand_cells_raw`
-    // 里全是无条件 push。若日后给某个内置项加运行时条件，这条论证就失效了——
-    // 那时要么改这里，要么保证至少一项恒存。
+    // 回落仍走 `expand_cells_raw`，状态相关的取值只有一份实现。
+    // 全集内置项都无条件产格所以不会再空；若日后给内置项加运行时条件，这里要跟着改。
     expand_cells_raw(&wind_ui_types::DEFAULT_TOOLBAR_ITEMS, state)
 }
 
-/// [`expand_cells`] 的无兜底内核。单独一层是为了让兜底自身可测——否则「回落」与
-/// 「本来就该有格」两种结果长得一样，测不出兜底有没有生效。
+/// [`expand_cells`] 的无兜底内核，单独一层让兜底本身可测。
 fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
     {
-        // 有效中文：中文模式且大写锁定未开（对齐 Go effectiveChinese = chineseMode && !capsLockOn）。
-        // 密码框强制英文时同样不算「有效中文」——此刻键已全部透传给宿主，高亮着中文格
-        // 会与实际行为相反。⚠ 这是纯呈现判断，输入闸在 coordinator 的 password_suppress
-        // 分支，两者各管各的，勿把本行的结论回灌给任何状态。
+        // 有效中文：中文模式、大写锁定未开、且不在密码框强制英文。纯呈现判断，输入闸在 coordinator 的
+        // password_suppress 分支，别把这里的结论回灌给状态。
         let effective_chinese = state.chinese_mode && !state.caps_lock && !state.input_blocked;
-        // 显示标签**完全**由协调器预计算存入 icon_label，此处直接使用、不再有任何例外。
-        //
-        // 不可输入（密码框等）时曾在这里覆盖成字面量 "英"。标签可配（`[ui.labels]`）之后
-        // 那条覆盖必须撤掉：本 crate 读不到配置，留着它的唯一结果是"用户把英文标签改成
-        // En，一进密码框又变回英"。判据归协调器、取值也归协调器，这里只负责画。
+        // 显示标签完全由协调器预计算（`[ui.labels]` 可配，本 crate 读不到配置），这里不做任何覆盖。
         let mode_text: &str = &state.icon_label;
 
         let mut cells = Vec::with_capacity(layout.len());
@@ -581,59 +477,43 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
                     dim: false,
                     action: ToolbarAction::TogglePunct,
                 }),
-                // 全/半角格：文本留空，渲染时按状态画月亮 SVG（满月=全角 / 弯月=半角，对齐微软五笔）。
+                // 全/半角格：文本留空，渲染时按状态画月亮 SVG（满月=全角 / 弯月=半角）。
                 ToolbarItem::FullWidth => cells.push(Cell {
                     text: String::new(),
                     highlight: false,
                     dim: false,
                     action: ToolbarAction::ToggleWidth,
                 }),
-                // 简繁格：**只由 layout 决定显隐**，与 `state.s2t_enabled` 无关。
-                //
-                // 曾额外合取一个运行时条件（`s2t_shown`，取值就是「当前是否简入繁出」），
-                // 理由是「没开简繁却常驻一个『简』格不是状态指示器该干的事」。真机推翻：
-                // 那让开关**自锁**——关着时格子不画，于是工具栏上再也开不回来，而这一格
-                // 恰恰是它唯一的鼠标入口。显隐本来就有 `ui.toolbar.items` 这个开关，
-                // 运行时那层是第二个开关，方向还与用户意图相反。
-                //
-                // 与全半角 / 标点两格现在是同一套呈现逻辑：格子恒在，状态只由字与高亮表达，
-                // 不淡显——`dim` 曾跟着 `!s2t_enabled` 走，是上一轮从「合取显隐」改成
-                // 「恒显示」时漏摘的半成品，导致简体态这一格比 Mode/Punct/FullWidth 三格更透。
+                // 简繁格：显隐只由 layout 决定，与 `state.s2t_enabled` 无关。这一格是简入繁出唯一的鼠标入口，
+                // 跟着运行时状态隐藏会自锁（关着就再也开不回来）。状态只由字与高亮表达，不淡显。
                 ToolbarItem::S2t => cells.push(Cell {
                     text: if state.s2t_enabled { "繁" } else { "简" }.to_string(),
                     highlight: state.s2t_enabled,
                     dim: false,
                     action: ToolbarAction::ToggleS2t,
                 }),
-                // 繁简格：恒显「简」，开合只由高亮表达（见 `ToolbarItem::T2s` 的说明——
-                // 与上面那格的轮换不同构是刻意的，否则两格都关时一起显「简」）。
-                // 显隐同样只由 layout 决定：这一格是繁入简出的唯一鼠标入口，跟着运行时
-                // 状态走就会自锁（S2t 格真机栽过一次）。
+                // 繁简格：恒显「简」，开合只由高亮表达（见 `ToolbarItem::T2s`）。显隐同样只由 layout 决定，避免自锁。
                 ToolbarItem::T2s => cells.push(Cell {
                     text: "简".to_string(),
                     highlight: state.t2s_enabled,
                     dim: false,
                     action: ToolbarAction::ToggleT2s,
                 }),
-                // 软键盘格：文本留空，渲染时画矢量键盘（同齿轮/月亮，不依赖字体字形）。
-                // 开着时高亮——图标只有一张，开合由格底表达。
+                // 软键盘格：文本留空，渲染时画 SVG 图标；开着时高亮。
                 ToolbarItem::SoftKeyboard => cells.push(Cell {
                     text: String::new(),
                     highlight: state.soft_keyboard_on,
                     dim: false,
                     action: ToolbarAction::ToggleSoftKeyboard,
                 }),
-                // 设置格：文本留空，渲染时画矢量齿轮（不依赖字体字形）。
-                // 位置随配置，不再固定末尾；隐藏它也不会锁死用户——右键工具栏任意位置
-                // 同样弹主菜单（见 `ToolbarMouse::on_message` 的 WM_RBUTTONDOWN）。
+                // 设置格：文本留空，渲染时画齿轮。隐藏它也不会锁死用户：右键任意位置同样弹菜单（见 WM_RBUTTONDOWN）。
                 ToolbarItem::Settings => cells.push(Cell {
                     text: String::new(),
                     highlight: false,
                     dim: false,
                     action: ToolbarAction::OpenSettings,
                 }),
-                // 自定义按钮：label 已由协调器按显示宽度截好（本 crate 读不到配置，
-                // 也就不该在这里判断"多宽算宽"）。无状态可言，故不高亮不淡显。
+                // 自定义按钮：label 已由协调器按显示宽度截好。无状态，不高亮不淡显。
                 ToolbarItem::Custom { index, label, .. } => cells.push(Cell {
                     text: label.clone(),
                     highlight: false,
@@ -647,14 +527,11 @@ fn expand_cells_raw(layout: &[ToolbarItem], state: &ToolbarState) -> Vec<Cell> {
     }
 }
 
-/// 把整条工具栏画进 `buf`（尺寸 `w`×`h`，预乘 BGRA）。**窗口路径与预览共用的唯一绘制实现**：
-/// 实时窗口（[`Toolbar::render`]）与设置端工具栏预览（`candidate_window::preview`）各出各的
-/// 缓冲区，配色 / 几何 / 图标 / 命中矩形全部出自同一份——本仓在同构双实现漂移上反复吃亏，
-/// 绘制代码禁止再抄第二份。
+/// 把整条工具栏画进 `buf`（尺寸 `w`×`h`，预乘 BGRA）。实时窗口（[`Toolbar::render`]）与设置端预览
+/// （`candidate_window::preview`）共用的唯一绘制实现，别再抄第二份。
 ///
-/// `state` 只提供**像素状态**（标点全半角图、英文态固定半角、软键盘开着用什么 tint）；
-/// 排布已由 `frame`（[`toolbar_frame`]）定好，格数必须与 `cells` 一致。返回命中矩形
-/// `[(动作, 矩形)]`（窗口路径给鼠标处理器，预览够不着鼠标就丢弃）。
+/// `state` 只提供像素状态（标点图、软键盘 tint 等）；排布由 `frame` 定好，格数须与 `cells` 一致。
+/// 返回命中矩形 `[(动作, 矩形)]`（预览路径丢弃）。
 // 参数都是同一帧的独立事实（缓冲区 / 排布 / 格子 / 状态 / 皮肤），强行聚成结构体只是搬家。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_toolbar(
@@ -671,12 +548,11 @@ pub(crate) fn paint_toolbar(
 ) -> Vec<(ToolbarAction, Rect)> {
     debug_assert_eq!(frame.layout.cells.len(), cells.len());
     let s = frame.scale;
-    // 清底（透明）后铺：实时窗口的缓冲区是复用的，不清会留残影；预览缓冲区是新的，无害。
+    // 清底：实时窗口的缓冲区是复用的，不清会留残影。
     let buf_size = (w as usize) * (h as usize) * 4;
     let clear_len = buf_size.min(buf.len());
     buf[..clear_len].fill(0);
-    // 背景 + 细边框（与背景同弧度），增强浅色背景下的轮廓（对齐设计稿胶囊外框）。
-    // 线宽：主题 border.width 优先，未配落 1dp（原字面量），取值在 [`toolbar_frame`]。
+    // 背景 + 同弧度细边框。
     let layout = &frame.layout;
     fill_rounded(buf, w, h, 0, 0, w, h, skin.bg, frame.radius);
     crate::view::fill_ring(
@@ -702,12 +578,8 @@ pub(crate) fn paint_toolbar(
     for (i, c) in cells.iter().enumerate() {
         let r = layout.cells[i];
         hits.push((c.action, r));
-        // 分隔线：仅「拖动柄之后」(首格前) 与「齿轮的边界」绘制（对齐设计稿，状态格之间不画）。
-        //
-        // 齿轮的边界是**哪一边**取决于它在哪：默认排末尾时画它的起始边；`ui.toolbar.items`
-        // 允许把它排到首位后，那条线与首格前的线重合成同一条，齿轮反而没了边界——
-        // 于是这种情况改画**下一格**的起始边（= 齿轮的结束边），齿轮自成一区的意图两种
-        // 排列下都成立。齿轮既在首位又是唯一一格时不画（没有"下一格"，也无需分区）。
+        // 分隔线只画在首格前与齿轮的边界。齿轮排在首位时两条线重合，改画下一格的起始边，
+        // 让齿轮在两种排列下都自成一区；齿轮是唯一一格时不画。
         let is_settings = matches!(c.action, ToolbarAction::OpenSettings);
         let sep_at = if i == 0 && is_settings {
             layout
@@ -734,8 +606,7 @@ pub(crate) fn paint_toolbar(
         };
         if let Some(bgc) = cell_bg {
             let inset = frame.inset;
-            // 长轴方向两端各缩 inset/2、厚度方向两端各缩 inset（横条既有比例，纵条转置
-            // 施加）——高亮块因此在两个朝向下都是"沿条身更瘦"的胶囊，而非贴边方块。
+            // 长轴两端各缩 inset/2、厚度方向各缩 inset，纵条转置施加。
             let (hx, hy, hw, hh) = if vertical {
                 (
                     r.x as u32 + inset,
@@ -765,9 +636,7 @@ pub(crate) fn paint_toolbar(
                 | ToolbarAction::ToggleWidth
                 | ToolbarAction::ToggleSoftKeyboard
         ) {
-            // 标点 / 全半角 / 软键盘：渲染内联 SVG 图标，主题色 tint，居中于方格。
-            // 前两者按状态换图，软键盘只有一张（开合由格底高亮表达）。
-            // 英文模式下标点固定半角（不可切换），无论 chinese_punct 状态如何。
+            // 标点 / 全半角 / 软键盘：SVG 图标按主题色 tint，居中于方格。英文模式下标点固定半角。
             let svg = match (
                 c.action,
                 effective_chinese && state.chinese_punct,
@@ -782,8 +651,7 @@ pub(crate) fn paint_toolbar(
             let size = font_h * 0.80;
             let dx = r.x + (r.w - size) * 0.5;
             let dy = r.y + (r.h - size) * 0.5;
-            // 高亮格（软键盘开着）要用 hl_fg：hl_bg 是主题色实底，用常态 fg 画图标
-            // 会与底色撞成一团。文字分支下面本来就按 highlight 选色，这里补齐同一条。
+            // 高亮格要用 hl_fg，常态 fg 会与主题色实底撞在一起。
             let tint = if c.highlight { skin.hl_fg } else { skin.fg };
             crate::view::draw_svg_icon(buf, w, h, svg, dx, dy, size, tint);
         } else {
@@ -805,16 +673,9 @@ pub(crate) fn paint_toolbar(
 }
 
 impl Toolbar {
-    /// DPI 动态化：按工具栏当前位置所在显示器实时取缩放（拖到别的显示器后自动适配）。
-    /// 工具栏仅颜色随主题、几何随 scale 现算，故只需更新 scale 与字号。
-    ///
-    /// 有待落的换屏请求时按**目标屏**取：此刻 `mouse.pos` 还停在上一块屏上，用它会让
-    /// 这一帧按旧屏 DPI 排版，而 `render` 末尾又拿这套尺寸去算目标屏的落点——两屏 DPI
-    /// 不同则整条大小与位置都偏，要等下一帧才自愈（视觉上是一跳）。
-    ///
-    /// 取点与 `render` 算落点同出一个 [`Placement`]（见其文档），`set_anchor` 恢复记忆
-    /// 位置那条路径尤其要走 `Anchor`：它**不**更新 `mouse.pos`（那是上一帧的落点），
-    /// 换屏恢复时用 `pos` 取到的是旧屏 DPI。
+    /// DPI 动态化：按这一帧要落的那块屏取缩放，只需更新 scale 与字号。
+    /// 取点与 `render` 算落点同出一个 [`Placement`]：有换屏请求时 `mouse.pos` 还在上一块屏，
+    /// `set_anchor` 恢复记忆位置时也不更新 `mouse.pos`，用它会按旧屏 DPI 排版。
     fn ensure_scale(&mut self, at: Placement) {
         let (x, y) = at.probe_point();
         let sc = crate::dpi::scale_for_point(x, y);
@@ -841,9 +702,7 @@ impl Toolbar {
 
     /// 实际渲染（hover_idx=当前悬停格下标，-1 无）。update 与 tick 均经此单点渲染。
     fn render(&mut self, state: &ToolbarState, hover_idx: i32) {
-        // 缩放与落点取自**同一个** `Placement`：先定"这一帧落在哪块屏"，再按那块屏的
-        // DPI 排版，最后用同一判据算落点。⚠️ 这里只取快照、**不消费** `pending_corner`：
-        // 它在末尾真正用掉时才清（见落点计算处），中途若提前返回，换屏请求要留到下一帧。
+        // 缩放与落点取自同一个 `Placement`。这里只取快照、不消费 `pending_corner`，中途提前返回时请求留到下一帧。
         let at = self.placement();
         self.ensure_scale(at);
         let s = self.scale;
@@ -873,24 +732,15 @@ impl Toolbar {
             tracing::warn!("Toolbar update failed: {}", e);
         }
 
-        // 位置：优先用持久化/拖动后的位置；首次落在工作区右下角（避开任务栏）。
-        // 钳制到当前显示器工作区内——避免切换显示器/远程后旧坐标落在屏外不可见。
-        //
-        // 一切依赖尺寸的落点计算都收口在这里：上面刚按当前朝向/主题/DPI 排完版并 resize，
-        // `w`/`h` 此刻才是真值。`set_anchor`/`set_corner` 在隐藏期间只登记意图、不算坐标，
-        // 就是为了不在 `window.size()` 仍是占位值 160×40 时下判断（见 `set_anchor` 文档）。
+        // 落点计算都收口在这里：刚按当前朝向/主题/DPI 排完版，`w`/`h` 此刻才是真值。最后钳进当前显示器工作区。
         let (px, py) = {
             let mut m = self.mouse.borrow_mut();
             m.hits = hits; // 同步命中矩形给鼠标处理器
-            // 菜单锚点要用的尺寸/朝向，与命中矩形同源同刻更新——分开更新迟早错位。
+            // 菜单锚点要用的尺寸/朝向，与命中矩形同刻更新。
             m.size = (w, h);
             m.vertical = self.vertical;
-            // 优先级：待落的「某屏右下角」请求 > 记忆锚点 > 主屏右下角兜底。
-            //
-            // 记忆锚点每帧现算落点（`右下角 - 当前尺寸`）而不是存现成坐标，正是"锚右下角"
-            // 全部的意义所在：横纵切换、增删格子都只改 `w`/`h`，落点自动跟着变，
-            // 而条的右下角纹丝不动。存左上角时这些尺寸变化会朝右下顶出工作区，
-            // 再被 `clamp_to_work_area` 拉回来，于是每切一次挪一次。
+            // 优先级见 [`Placement`]。记忆锚点每帧按「右下角 - 当前尺寸」现算：横纵切换、增删格子只改尺寸，
+            // 右下角不动；存左上角的话每次尺寸变化都会被顶出工作区再拉回。
             let raw = match at {
                 Placement::PendingCorner {
                     work_right,
@@ -902,10 +752,7 @@ impl Toolbar {
                 Placement::LastPos { x, y } => (x, y),
                 Placement::PrimaryCorner => Self::corner_position(w, h),
             };
-            // 换屏请求在这里消费掉（原先是取值处 `.take()`）。`at` 是本帧开头的快照，
-            // 而 `PendingCorner` 是第一优先级 ⇒ `at` 不是它就说明字段本来就是 `None`，
-            // 故无条件清空与 `.take()` 等价。放到用掉之后清，是为了让"中途提前返回则
-            // 请求留到下一帧"这件事不依赖 render 当前恰好没有提前返回。
+            // 换屏请求用掉之后才清。`at` 不是 `PendingCorner` 说明它本来就是 `None`，无条件清空等价于 `.take()`。
             self.pending_corner = None;
             let clamped = clamp_to_work_area(raw.0, raw.1, w, h);
             m.pos = Some(clamped);
@@ -914,18 +761,12 @@ impl Toolbar {
         self.window.show(px, py);
         self.visible = true;
         self.rendered_hover = hover_idx;
-        // 任何显示/状态刷新（render 是所有显示路径的单点）都重置自动隐藏计时。
-        // window.update() 以 alpha=255 提交，天然恢复不透明。
+        // render 是所有显示路径的单点，在此重置自动隐藏计时；window.update() 以 alpha=255 提交，天然恢复不透明。
         self.auto_hide.on_shown(std::time::Instant::now());
     }
 
-    /// UI 循环每轮调用：消费鼠标处理器的悬停脏标记（由 WM_MOUSEMOVE/WM_MOUSELEAVE 事件置位），
-    /// 仅在悬停格变化时本地重绘（无需协调器往返、不轮询光标）。与菜单 dirty→tick 重绘模式一致。
     /// 下一次需要 [`Self::tick`] 的时刻；`None` = 无需为工具栏安排唤醒。
-    ///
-    /// 只转发自动隐藏的计时。**悬停重绘不在此列**：`dirty` 由 `WM_MOUSEMOVE` /
-    /// `WM_MOUSELEAVE` 置位，那两条消息本身就会唤醒消息循环，而 `tick` 排在消息泵之后，
-    /// 同一轮即可消费——不需要额外的到期时刻。
+    /// 只转发自动隐藏的计时：悬停重绘由 `WM_MOUSEMOVE` / `WM_MOUSELEAVE` 唤醒消息循环，同一轮 `tick` 即可消费。
     pub fn next_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
         if !self.visible {
             return None;
@@ -933,6 +774,7 @@ impl Toolbar {
         self.auto_hide.next_deadline(now)
     }
 
+    /// UI 循环每轮调用：消费悬停脏标记（仅悬停格变化时本地重绘），并推进自动隐藏。
     pub fn tick(&mut self) {
         if !self.visible {
             return;
@@ -951,8 +793,7 @@ impl Toolbar {
                 }
             }
         }
-        // 自动隐藏推进。快速路径：未启用/无活动计时时 is_active()=false 直接跳过，
-        // 不取 Instant::now()、无系统调用（开关关闭时零开销的硬约束）。
+        // 自动隐藏推进。未启用时 is_active()=false 直接跳过，不取时间（开关关闭时零开销）。
         if self.auto_hide.is_active() {
             let (inside, dragging) = {
                 let m = self.mouse.borrow();
@@ -972,8 +813,7 @@ impl Toolbar {
                     }
                 }
                 AutoHideAction::Hide => self.hide(),
-                // 假隐藏：窗口留在原位、`visible` 仍为 true（tick 与鼠标处理照常），只把整窗
-                // alpha 压到几乎不可见。光标移入时由上面的 Restore 分支亮回来。
+                // 假隐藏：窗口留在原位、`visible` 仍为 true，只把整窗 alpha 压到几乎不可见；光标移入时由 Restore 亮回来。
                 AutoHideAction::Ghost => {
                     if let Err(e) = self.window.update_with_alpha(crate::auto_hide::GHOST_ALPHA) {
                         tracing::warn!("Toolbar ghost: {}", e);
@@ -983,23 +823,16 @@ impl Toolbar {
         }
     }
 
-    // 曾有一个 `show()`（用缓存 pos 直接显示、不重绘），长期无调用者。删除而非保留：
-    // 它绕开 `render`，既不消费 `pending_corner`（显示完再被下一次 render 取出算落点，
-    // 视觉上凭空跳一次），也不按当前朝向/DPI 重排尺寸。所有显示路径收口于 `render` 是
-    // 本模块的既有约定，一个不走 render 的显示入口只会是下一个人的陷阱。
-    // 若将来真需要「不改状态地重新显形」，用 `repaint()`（受 `visible` 门控）。
+    // 所有显示路径收口于 `render`，不提供绕开它的 `show()`：那样既不消费 `pending_corner`，也不按当前朝向/DPI
+    // 重排尺寸。要「不改状态地重新显形」用 `repaint()`（受 `visible` 门控）。
 
-    /// 按下即拖动整条工具栏的区域（位图内 `x, y, w, h`）：拖动柄。
-    ///
-    /// 与 `ToolbarMouse` 的判据同源——它在「没命中任何格」时开始拖动，而 `bar_layout`
-    /// 里格子铺满了拖动柄以外的整条，所以这块就是拖动柄本身。首帧之前为空。
+    /// 按下即拖动整条工具栏的区域（位图内 `x, y, w, h`）：拖动柄（格子铺满了其余部分）。首帧之前为空。
     pub fn drag_regions(&self) -> Vec<[i32; 4]> {
         grip_region(&self.drag_rect).into_iter().collect()
     }
 
-    /// 外部宿主本地拖完：等同 Windows 拖动结束时 `WM_LBUTTONUP` 那一步——记下落点与右下角锚点，
-    /// 并把锚点上报协调器落盘。宿主只报左上角，换算右下角要用尺寸，而尺寸只有这里知道。
-    /// 下一帧据此落位，不跳回旧处。
+    /// 外部宿主本地拖完：等同 Windows 拖动结束时 `WM_LBUTTONUP` 那一步——记下落点与右下角锚点并上报落盘。
+    /// 宿主只报左上角，换算右下角要用只有这里知道的尺寸。
     #[cfg(all(target_os = "linux", ext_presenter))]
     pub fn on_host_moved(&mut self, x: i32, y: i32) {
         let mut m = self.mouse.borrow_mut();
@@ -1039,29 +872,19 @@ impl Toolbar {
         self.auto_hide.on_hidden();
     }
 
-    /// 这一帧工具栏该落在哪。**四级优先级的唯一定义处**，见 [`Placement`]。
-    ///
-    /// ⚠️ 纯读，**不消费** `pending_corner`——它在 `render` 末尾真正用掉时才清。
+    /// 这一帧工具栏该落在哪，见 [`Placement`]。纯读，不消费 `pending_corner`。
     fn placement(&self) -> Placement {
         let m = self.mouse.borrow();
         Placement::pick(self.pending_corner, m.anchor_br, m.pos)
     }
 
-    /// 记忆锚点（窗口**右下角**）→ 本帧落点（左上角）。
-    ///
-    /// 纯几何，抽出来是为了可单测：`render` 的其余部分要测文字、要提交 Layered Window，
-    /// 在非 Windows 上是 mock/空实现。这个减法本身正是"锚右下角"的全部内容——
-    /// 它必须每帧用**当前**的 `w`/`h` 现算，而不是把结果存下来复用。
+    /// 记忆锚点（窗口右下角）→ 本帧落点（左上角）。必须每帧用当前 `w`/`h` 现算，不能存结果复用。
     fn origin_from_anchor(right: i32, bottom: i32, w: u32, h: u32) -> (i32, i32) {
         (right - w as i32, bottom - h as i32)
     }
 
     /// 给定工作区右/下边界，算工具栏右下角落点（右/下各留 12px 边距）。
-    ///
-    /// 纯几何、无系统调用，故可被任意显示器复用——`corner_position` 喂主屏，
-    /// `set_corner` 喂焦点所在屏。`max(0)` 的下限只在单屏（工作区从 0 起）时有意义，
-    /// 副屏的工作区左/上边界可为负，钳到 0 会把工具栏推回主屏；真正的越界回收交给
-    /// `render` 里的 `clamp_to_work_area`（它按落点解析显示器，不预设原点）。
+    /// 纯几何，可用于任意显示器；不在这里钳到 0（副屏边界可为负），越界回收交给 `clamp_to_work_area`。
     fn corner_in_work_area(work_right: i32, work_bottom: i32, w: u32, h: u32) -> (i32, i32) {
         const MARGIN: i32 = 12;
         (
@@ -1071,11 +894,7 @@ impl Toolbar {
     }
 
     /// 主显示器工作区右下角位置（避开任务栏）。
-    ///
-    /// **仅在协调器那侧 `focus_monitor()` 失败时才轮得到**——它正常总能给出焦点所在屏，
-    /// 于是首帧要么走 `pending_corner`（该屏无记忆位置）、要么走 `mouse.pos`（有记忆位置），
-    /// 两条路都不经过这里。`SPI_GETWORKAREA` 取的恒是主屏，用它给多屏定位是错的；
-    /// 别照着这个函数名去调它。
+    /// 仅在协调器 `focus_monitor()` 失败时才轮得到；`SPI_GETWORKAREA` 恒取主屏，别拿它做多屏定位。
     #[cfg_attr(not(windows), allow(unused_variables))]
     fn corner_position(w: u32, h: u32) -> (i32, i32) {
         #[cfg(windows)]
@@ -1126,22 +945,12 @@ pub struct ToolbarMouse {
     events: Sender<UiEvent>,
     hwnd: HWND,
     /// 当前位置（屏幕坐标）；None = 尚未定位。
-    ///
-    /// ⚠️ **首次 `render` 之前可能是未钳制的原始值**：`Toolbar::set_anchor` 在隐藏期间不钳制
-    /// （那时窗口尺寸还是占位值，钳了反而错——见其文档），要到 `render` 才按真实尺寸钳并
-    /// 回写。今天安全，因为本结构体的其余读者（`rect`/`menu_anchor`/拖动 `origin`）全部
-    /// 挂在鼠标消息上，而隐藏窗口收不到鼠标消息。**若日后新增不依赖鼠标消息的读路径，
-    /// 先确认它是否可能在首帧之前触发。**（`size` 在首帧前同为 `(0,0)`，同一道门挡住。）
+    /// 首次 `render` 之前可能是未钳制的原始值（`size` 同为 `(0,0)`）。现有读者都挂在鼠标消息上，隐藏窗口收不到，
+    /// 故安全；新增不依赖鼠标消息的读路径前先确认这一点。
     pos: Option<(i32, i32)>,
-    /// 记忆锚点：窗口**右下角**屏幕坐标；None = 该屏没记录过（首帧落默认右下角）。
-    ///
-    /// 与 `pos` 的分工：`anchor_br` 是**意图**（用户把这条工具栏摆在哪），`pos` 是
-    /// **本帧的落点**（意图减去当前尺寸、再钳进工作区）。所以每帧由前者算出后者，
-    /// 而不是反过来——尺寸一变（横纵切换、增删格子）落点就该跟着变，意图不变。
-    ///
-    /// ⚠️ `render` 的钳制结果**只写回 `pos`，不回写这里**：钳制是对"当前这块屏放不下"的
-    /// 临时妥协（临时接了台小屏、远程桌面改了分辨率），把它写回意图就等于让一次妥协
-    /// 永久顶掉用户原本摆的位置——回到大屏也回不来了。让意图留在原处，每帧重算即可。
+    /// 记忆锚点：窗口右下角屏幕坐标；None = 该屏没记录过。
+    /// 它是意图，`pos` 是本帧落点（意图减当前尺寸再钳进工作区）。`render` 的钳制结果只写回 `pos`、不回写这里，
+    /// 否则临时接小屏的一次妥协会永久顶掉用户摆的位置。
     anchor_br: Option<(i32, i32)>,
     dragging: bool,
     /// 在格上按下、尚未移过拖动阈值：再移过阈值就转成拖动，原地抬起仍是点击。
@@ -1157,32 +966,16 @@ pub struct ToolbarMouse {
     /// 光标是否在工具栏窗口内（WM_MOUSEMOVE 置 true / WM_MOUSELEAVE 置 false）；
     /// 自动隐藏顺延判据——不能用 hover_idx（拖动柄区为 -1 但光标仍在窗内）。
     cursor_inside: bool,
-    /// 最近一次渲染的窗口尺寸与朝向，由 `render` 同步（与 `hits` 同一处）。
-    /// 菜单锚点据此计算——比现取 `GetWindowRect` 准（渲染刚定的尺寸，无需等窗口生效）
-    /// 且无系统调用。`render` 必先于任何鼠标事件发生，故不存在 (0,0) 被用到的时机。
+    /// 最近一次渲染的窗口尺寸与朝向，由 `render` 与 `hits` 同处同步，菜单锚点据此计算（无系统调用）。
     size: (u32, u32),
     vertical: bool,
 }
 
-/// 这一帧工具栏落在哪——**四级优先级只此一处**。
-///
-/// 与 `soft_keyboard::Placement` 是同一个模式的两个实例（同名、不同级），两处都有两个
-/// 消费者问同一个问题："这一帧的窗口在哪块屏上"：
-/// - [`Toolbar::ensure_scale`] 要一个屏内的点去查 DPI；
-/// - [`Toolbar::render`] 要算左上角落点。
-///
-/// ⚠️ 两者**不能共用一个函数**：算落点要先知道窗口尺寸，而尺寸取决于缩放，缩放又取决
-/// 于在哪块屏——鸡生蛋。所以只能各自分派，但**优先级本身只写一次**（[`Placement::pick`]）。
-///
-/// ★ 各写一遍的下场在软键盘上真发生过：它的 `ensure_scale` 曾只写到第二级，漏掉的第三级
-/// 恰好是"副屏首次打开、还没有位置记忆"，于是按主屏 DPI 排版。工具栏当时侥幸没中，是
-/// 因为它把工作区做成了**第一级** `PendingCorner`（软键盘却把工作区藏在默认位置的兜底
-/// 参数里，在优先级链**之外**）——同一个信息在链里还是链外，决定了会不会漏。
-/// ⇒ 收成枚举后，漏掉一级从"忘写一行"变成"match 不穷尽"，编译器直接拦。
-///
-/// ⚠️ 比软键盘多出来的是**第一级**：协调器换屏时下发"去这块屏的右下角"，它必须压过记忆
-/// 锚点（`Anchor`），否则跟随焦点换屏会被上一块屏的记忆位置顶回去。软键盘刻意不跟随焦点
-/// （由用户显式开关），所以没有这一级。
+/// 这一帧工具栏落在哪，四级优先级只在 [`Placement::pick`] 定义一次。
+/// [`Toolbar::ensure_scale`]（要一个屏内点查 DPI）与 [`Toolbar::render`]（要算左上角落点）都消费它；
+/// 两者不能合成一个函数（落点要尺寸，尺寸要缩放，缩放要屏），但优先级只写一次，漏一级就是 match 不穷尽。
+/// 比 `soft_keyboard::Placement` 多出第一级：协调器换屏时下发的右下角请求必须压过记忆锚点，
+/// 否则跟随焦点换屏会被上一块屏的记忆位置顶回去。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Placement {
     /// 待落的换屏请求：协调器给的**目标屏**工作区右下角。压过一切记忆位置。
@@ -1196,9 +989,7 @@ enum Placement {
 }
 
 impl Placement {
-    /// 四级优先级的**唯一实现**。[`Toolbar::placement`] 只是把三个来源喂进来——
-    /// 拆成自由函数是为了让守门测试打到真身：`Toolbar` 要真窗口才能构造，测试里造不
-    /// 出来，而把 `match` 在测试里抄一遍就成了"判据问自己"，改错了也照样绿。
+    /// 四级优先级的唯一实现。拆成自由函数让测试打到真身（`Toolbar` 要真窗口才能构造）。
     fn pick(
         pending_corner: Option<(i32, i32)>,
         anchor_br: Option<(i32, i32)>,
@@ -1215,11 +1006,8 @@ impl Placement {
         }
     }
 
-    /// 取一个**落在目标屏内**的点，供 DPI 查询。
-    ///
-    /// ⚠️ `right`/`bottom` 无论来自工作区还是锚点都是**排他**边界（Win32 `RECT` 语义），
-    /// 必须退 1px 才在屏内。不退的后果是贴屏幕右/下边缘时查到**相邻那块屏**的 DPI——
-    /// `MonitorFromPoint` 用的是 `DEFAULTTONEAREST`，错法不报错，只在多屏横排贴边时复现。
+    /// 取一个落在目标屏内的点，供 DPI 查询。
+    /// `right`/`bottom` 是排他边界（Win32 `RECT` 语义），须退 1px，否则贴边时 `MonitorFromPoint` 会查到相邻屏。
     fn probe_point(self) -> (i32, i32) {
         match self {
             Placement::PendingCorner {
@@ -1229,8 +1017,7 @@ impl Placement {
             Placement::Anchor { right, bottom } => (right - 1, bottom - 1),
             // 左上角是包含边界，本身就在窗口内，不必退。
             Placement::LastPos { x, y } => (x, y),
-            // 兜底主屏：`render` 那一级走 `corner_position`，它用的 `SPI_GETWORKAREA`
-            // 取的也恒是主屏——两处兜底落在同一块屏上，是一致的。
+            // 兜底主屏，与 `corner_position` 的 `SPI_GETWORKAREA` 一致。
             Placement::PrimaryCorner => (0, 0),
         }
     }
@@ -1243,8 +1030,7 @@ impl ToolbarMouse {
         (x, y, x + self.size.0 as i32, y + self.size.1 as i32)
     }
 
-    /// 主菜单锚点：横条向上弹（避免压住工具栏），纵条向侧面弹——竖条上仍向上弹会让
-    /// 菜单飘到条顶之上老远，与点击位置差出整条的高度。
+    /// 主菜单锚点：横条向上弹（避免压住工具栏），纵条向侧面弹。
     fn menu_anchor(&self) -> MenuAnchor {
         let (l, t, r, b) = self.rect();
         if self.vertical {
@@ -1261,20 +1047,9 @@ impl ToolbarMouse {
             .map(|(a, _)| *a)
     }
 
-    /// 右键某一格时的菜单锚点：与 [`Self::menu_anchor`] 同一套展开方向，但**贴到那一格**
-    /// 而不是整条的起点。
-    ///
-    /// 分格菜单只有几项，锚在整条起点会让它落在离点击位置半条远的地方——尤其是齿轮
-    /// 排末尾的横条上。方向仍由朝向决定，只替换**沿条身**那一维，另一维仍取整条的边
-    /// （菜单该贴的是条身的外沿，不是格的）。
-    ///
-    /// ⚠️ **沿条身那一维是哪个字段，两种朝向不一样**，得照 `place_menu` 实际读哪个来传：
-    ///
-    /// - 横条（`Above`）：横向位置读 `x` ⇒ 传格的左缘；纵向恒在整条顶边之上。
-    /// - 纵条（`Side`）：纵向位置读 **`bottom`**（底边对齐、向上展开），`y` 只在上方
-    ///   装不下时作回退 ⇒ **两个都要传格的**，否则菜单仍按整条底边对齐、贴格等于没做。
-    ///
-    /// 命中不到格（拖动柄区）时退回整条锚点。
+    /// 右键某一格时的菜单锚点：展开方向同 [`Self::menu_anchor`]，但沿条身那一维贴到那一格。
+    /// 沿条身是哪个字段取决于 `place_menu` 读哪个：横条读 `x`；纵条读 `bottom`（向上展开）、
+    /// 上方装不下时回退读 `y`，故两个都要传格的。命中不到格（拖动柄区）时退回整条锚点。
     fn cell_menu_anchor(&self, x: f32, y: f32) -> MenuAnchor {
         let (l, t, r, b) = self.rect();
         let Some((_, cell)) = self.hits.iter().find(|(_, cr)| cr.contains(x, y)) else {
@@ -1466,18 +1241,13 @@ impl WindowMouse for ToolbarMouse {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
-                    // 取实际窗口矩形回报，供持久化。
-                    //
-                    // 报**右下角**：持久化的是锚点，而工具栏尺寸会随朝向/格数变化
-                    // （见 `ToolbarMouse::anchor_br`）。`GetWindowRect` 本来就同时给出
-                    // 四条边，取 right/bottom 与取 left/top 一样直接，无需另算。
+                    // 取实际窗口矩形回报右下角锚点供持久化（见 `ToolbarMouse::anchor_br`）。
                     let mut r = RECT::default();
                     let (l, t, right, bottom) = unsafe {
                         if GetWindowRect(self.hwnd, &mut r).is_ok() {
                             (r.left, r.top, r.right, r.bottom)
                         } else {
-                            // 极罕见的失败兜底：用上一帧落点 + 渲染时同步过来的尺寸补出四边，
-                            // 免得把 (0,0) 当成用户摆放的位置存进去。
+                            // 失败兜底：用上一帧落点 + 尺寸补出四边，免得把 (0,0) 存成用户位置。
                             let (x, y) = self.pos.unwrap_or((0, 0));
                             (x, y, x + self.size.0 as i32, y + self.size.1 as i32)
                         }
@@ -1499,31 +1269,22 @@ impl WindowMouse for ToolbarMouse {
                 Some(LRESULT(0))
             }
             WM_RBUTTONDOWN => {
-                // 右键工具栏 → 该格的快捷菜单，贴着工具栏弹出（避免遮挡工具栏）。
-                // 认不认得这一格由协调器判断（它才读得到方案/软键盘/开关态），
-                // 认不得就回落完整主菜单——这里只负责报出点在哪一格上。
+                // 右键 → 该格的快捷菜单。认不认得这一格由协调器判断，认不得就回落主菜单；这里只报点在哪一格。
                 let _ = self.events.send(UiEvent::RequestToolbarMenu {
                     action: self.cell_at(cx, cy),
                     anchor: self.cell_menu_anchor(cx, cy),
                 });
                 Some(LRESULT(0))
             }
-            // 中键点中英格 = 直接切到下一个方案，省掉「右键 → 找到方案 → 点」三步。
-            //
-            // 只认这一格：其余格中键无动作。中键是**没有视觉提示**的入口，绑在语义
-            // 最直白的那一格上还能靠「这格本来就管方案」猜到；散给每一格就成了记忆负担，
-            // 且误触代价不一（在简繁格上误触会改动正文的输出形态）。
-            //
-            // 落在 UP 而非 DOWN，与左键一致：按下再挪开取消，是鼠标交互的通行预期。
+            // 中键点中英格 = 直接切到下一个方案。只认这一格：中键没有视觉提示，绑在管方案的格上才猜得到，
+            // 散给每一格误触代价不一。落在 UP 与左键一致。
             WM_MBUTTONUP => {
-                // 拖动中不触发格动作，与左键 UP 同一条守卫：拖着工具栏走时命中矩形照样
-                // 命中，没有这道判断就会在挪动过程中顺手切了方案。
+                // 拖动中不触发格动作，与左键 UP 同一条守卫。
                 if self.dragging {
                     return Some(LRESULT(0));
                 }
                 if let Some(ToolbarAction::ToggleMode) = self.cell_at(cx, cy) {
-                    // 复用既有的 SwitchEngine（协调器映射到 `switch_engine` → `cycle_schema`），
-                    // 不新增动作：这里要的正是它，另起一个只会多一条要各自维护的路径。
+                    // 复用既有的 SwitchEngine（协调器映射到 `cycle_schema`）。
                     let _ = self
                         .events
                         .send(UiEvent::Toolbar(ToolbarAction::SwitchEngine));
@@ -1575,12 +1336,12 @@ fn fill_rounded(
     );
 }
 
-/// 次要状态文字淡显：alpha 降至 ~65%（半角/未启用简繁等次要态比正常文字更弱）。
+/// 次要状态文字淡显：alpha 降至 ~65%。
 fn dim_color(c: [u8; 4]) -> [u8; 4] {
     [c[0], c[1], c[2], (c[3] as f32 * 0.65) as u8]
 }
 
-/// 格间分隔线：横条画竖线（`pos` 是 x），纵条画横线（`pos` 是 y）；线两端各内缩 6px。
+/// 格间分隔线：横条画竖线（`pos` 是 x），纵条画横线（`pos` 是 y）；线两端各内缩 6 逻辑像素。
 fn draw_sep(
     buf: &mut [u8],
     buf_w: u32,
@@ -1608,8 +1369,7 @@ fn draw_sep(
     crate::view::fill_rounded(buf, buf_w, buf_h, x, y, w, h, color, 0.0);
 }
 
-/// 拖动柄点阵，居中于 `grip` 区。横条 2 列×3 行、纵条转置为 3 列×2 行——点阵的长边
-/// 始终垂直于条身，看着才像「抓手」而不是顺着条身的一道装饰线。
+/// 拖动柄点阵，居中于 `grip` 区。横条 2 列×3 行、纵条 3 列×2 行，长边始终垂直于条身。
 fn draw_grip(
     buf: &mut [u8],
     buf_w: u32,

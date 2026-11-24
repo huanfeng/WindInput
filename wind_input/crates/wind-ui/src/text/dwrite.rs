@@ -1,16 +1,12 @@
 //! 文本渲染后端（DirectWrite 实现）
 //!
-//! 与 Go 版本 `wind_input/internal/ui/dwrite_text.go` 对齐。
-//!
 //! 管线：IDWriteFactory → IDWriteTextFormat/IDWriteTextLayout（测量）
 //!      → IDWriteGdiInterop::CreateBitmapRenderTarget（内存 DC 上的 32bpp 顶端向下 DIB）
 //!      → 自定义 IDWriteTextRenderer 回调里调 IDWriteBitmapRenderTarget::DrawGlyphRun
 //!      → 预乘 alpha 选择性回写到调用方 BGRA 缓冲区。
 //!
-//! 透明度正确性（修复 GDI 旧实现"黑字被当背景吞掉、抗锯齿丢失"）：
-//! 先把目标缓冲区按"不透明"复制进 DIB（GDI 对不透明背景做抗锯齿混合），渲染后
-//! 逐像素对比——RGB 未变 = 背景，保留原 alpha；RGB 变了 = 文字像素，按窗口原
-//! alpha 预乘（R' = R×A/255），使其成为合法预乘像素，与背景共享同一透明度。
+//! 透明度：先把目标缓冲区按不透明复制进 DIB（GDI 只对不透明背景做抗锯齿混合），渲染后
+//! 逐像素对比——RGB 未变是背景，保留原 alpha；变了是文字像素，按窗口原 alpha 预乘。
 
 // 平台无关的文字公共类型在 wind-scene，原路径再导出（调用方不改）。
 #[cfg_attr(not(windows), allow(unused_imports))]
@@ -20,26 +16,16 @@ pub use wind_scene::text::{ColorRun, TextBackend, TextMetrics, TextStyle};
 
 /// 测量缓存容量上限；超过即整体清空。
 ///
-/// 不做 LRU：候选窗每帧的文本集合高度重复（同一批候选、序号、注释反复测量），
-/// 命中率本就极高，淘汰策略的簿记开销换不回收益。整体清空的最坏情况是一帧全 miss，
-/// 等价于没有缓存时的行为。
+/// 不做 LRU：候选窗每帧的文本高度重复，命中率本就极高；整体清空的最坏情况是一帧全 miss。
 #[cfg_attr(not(windows), allow(dead_code))]
 const MEASURE_CACHE_CAP: usize = 4096;
 
 /// 扫描 UTF-16 序列，返回私用区（PUA）字符的连续段 `[(起始下标, 码元长度)]`，
-/// 下标/长度均以 **UTF-16 码元** 计，可直接用作 `DWRITE_TEXT_RANGE`。
+/// 下标/长度均以 UTF-16 码元计，可直接用作 `DWRITE_TEXT_RANGE`。
 ///
-/// 三段私用区缺一不可——不同拆字库用的区不同：内置 wubi86 字根在 BMP 私用区
-/// （U+E0E1 等），而 986 等第三方码表的字根在补充私用区 A（U+F00FD 等）。
-/// 早期只判 BMP 一段，导致后者从不切字体、渲染成方框。
-///
-/// - BMP 私用区 `U+E000..=U+F8FF`：单码元，`u16` 值即码位。
-/// - 补充私用区 A/B `U+F0000..=U+10FFFD`：UTF-16 下是代理对。高位代理恰好占满
-///   `0xDB80..=0xDBFF`（`0xDB80..=0xDBBF` → 第 15 平面，`0xDBC0..=0xDBFF` → 第 16
-///   平面），不多不少，故判「高位代理落在该段 + 后随合法低位代理」即可，无需还原码位。
-///
-/// 相邻的 BMP 与补充私用区字符合并进同一段——它们目标字体族相同，合并只减少
-/// `SetFontFamilyName` 调用次数，不改变渲染结果。
+/// BMP 私用区与补充私用区 A/B 都要判：内置 wubi86 字根在 BMP 区，第三方码表的字根可能在
+/// 补充区 A。补充区的高位代理恰好占满 `0xDB80..=0xDBFF`，故判「高位代理在该段 + 后随低位
+/// 代理」即可。相邻的两类字符合并进同一段（目标字体相同）。
 #[cfg_attr(not(windows), allow(dead_code))]
 fn pua_runs(wide: &[u16]) -> Vec<(usize, usize)> {
     /// 单码元即为私用区码位（BMP PUA）。
@@ -180,9 +166,8 @@ mod imp {
         formats: RefCell<HashMap<u32, IDWriteTextFormat>>,
         /// 文本测量缓存（键见 `measure_key`）：避免每帧重建 `IDWriteTextLayout`。
         ///
-        /// 盒模型对同一段文本会测两到三次（measure 阶段一次、paint 阶段为算对齐再一次、
-        /// 有 caret 时再测前半段），上翻布局生效时整棵树还会重建重测。没有这层缓存时，
-        /// 每一次都是一个新的 COM 对象 + 一次完整排版。
+        /// 盒模型对同一段文本会测两到三次（measure、paint 算对齐、caret 前半段），
+        /// 没有这层缓存时每次都是一个新 COM 对象加一次完整排版。
         measure_cache: RefCell<HashMap<u64, TextMetrics>>,
         /// 当前位图渲染表面（按需重建）
         surface: RefCell<Option<Surface>>,
@@ -190,14 +175,12 @@ mod imp {
         chaizi: Option<ChaiziFont>,
         /// 全局字体方案（来自 `ui.font`）：默认链 + 按脚本的字体指派。
         ///
-        /// 零配置时两处短路各管一半、与升级前逐位等价：`declared().is_empty()` 跳过切段，
-        /// `needs_fallback()` 跳过自定义回退对象。
+        /// 零配置时 `declared().is_empty()` 跳过切段、`needs_fallback()` 跳过自定义回退对象。
         plan: FontPlan,
         /// 由 [`Self::plan`] 构建的自定义回退对象；`None` = 尚未构建或本方案不需要。
         /// 换方案时必须 take 掉（见 [`TextRenderer::set_font_plan`]）。
         fallback: RefCell<Option<IDWriteFontFallback>>,
-        /// 回退对象构建失败过。失败是持久性的（工厂拿不到 `IDWriteFactory2` 等），
-        /// 不记就会每次绘制重建一遍 builder 与全部映射。换方案时随 `fallback` 一起复位。
+        /// 回退对象构建失败过。失败是持久性的，不记就会每次绘制重建一遍；换方案时随 `fallback` 复位。
         fallback_failed: std::cell::Cell<bool>,
         /// 基准字族在各字号/字重下的自然 (行高, 基线)，供 [`Self::line_height_for`] 钉 UNIFORM
         /// 行距用。键 = (字号取整, 字重, base family)；与 `measure_cache` 同步清空
@@ -259,28 +242,11 @@ mod imp {
             }
         }
 
-        /// 加载拆字字根字体（TTF）建自定义字体集，后续渲染中 PUA 码位字符回退到它。
-        /// `family` 为方案配置的 DWrite 家族名（空则回退默认 `CHAIZI_FAMILY`）。
-        /// 失败返回 Err（不影响普通文本渲染）。
-        /// 把「配置里声明的家族名」解析成**这个自定义字体集里真实存在**的家族名。
+        /// 把配置里声明的家族名解析成这个自定义字体集里真实存在的家族名。
         ///
-        /// # ★★ 为什么必须解析，不能直接用声明值
-        ///
-        /// `create_layout` 里给 PUA 段做的是 `SetFontCollection(自定义集)` +
-        /// `SetFontFamilyName(声明名)`。后者在集里匹配不上时**不报错**——DirectWrite 静默
-        /// 回落，于是「词库自带字体」整个没生效。这个失败有两副完全不像的面孔：
-        ///
-        /// - 机器上**装了**同一款字体：系统回退把字形兜住，画面上「有字」，但字形来自另一个
-        ///   字体，与上屏后宿主挑的不一致 ⇒ 用户报「候选和实际有差异」；
-        /// - 机器上**没装**：PUA 码位无处可取 ⇒ 那一段直接是**空白**。
-        ///
-        /// 实测（Toli 蒙古文方案，声明 `"Menk字体"`、字体自报 `"Menk Qagan StdEx Tig"`）：
-        /// 声明名与「压根不设词库字体」的测量宽度和着墨像素**逐位相同**（110.03×22.86 / 424），
-        /// 而真实家族名是 110.67×22.86 / 413 ⇒ 声明名一路没生效。
-        ///
-        /// ⚠️ 找不到时退回集里的**第一个**家族：字体文件是方案自带的、通常只含一个家族，
-        /// 「作者把名字写成了别名或文件名」远比「集里真有好几个家族而他指了个不存在的」常见。
-        /// 退回的同时 warn，否则修好了显示、却把「配置写错了」这件事一并藏起来。
+        /// 不能直接用声明值：`SetFontFamilyName` 在集里匹配不上时不报错、静默回落，词库字体
+        /// 整个不生效（见 docs/architecture/ui-platform-notes.md 的「DirectWrite 文字渲染」）。
+        /// 找不到时退回集里第一个家族（方案自带字体通常只含一个家族），同时 warn 暴露配置错误。
         fn resolve_family_in(collection: &IDWriteFontCollection1, declared: &str) -> String {
             unsafe {
                 let w: Vec<u16> = declared.encode_utf16().chain(std::iter::once(0)).collect();
@@ -322,12 +288,12 @@ mod imp {
             }
         }
 
-        /// `path` 为空 = 撤掉字根字体：私用区段不再被切到任何自定义字体集。
+        /// 加载拆字字根字体（TTF）建自定义字体集，后续渲染中 PUA 码位字符回退到它。
+        /// `family` 为方案配置的 DWrite 家族名（空则用 `CHAIZI_FAMILY`）；`path` 为空 = 撤掉字根字体。
+        /// 失败返回 Err（不影响普通文本渲染）。
         ///
-        /// ★ 先撤旧的再加载新的：加载失败时的结局必须是「没有字根字体」，而不是「沿用上一个
-        /// 方案的」——协调器已把新路径记为已下发、不会重发，旧字体会一直接管新方案的私用区。
-        /// 字根字体决定 PUA 字符的字形来源 → 测量宽度随之变，缓存一并清掉（不清的话切换拆字
-        /// 方案后字根仍按旧字体的宽度布局，表现为字根格错位/重叠）。
+        /// 先撤旧的再加载新的：协调器已把新路径记为已下发、不会重发，加载失败时若沿用旧字体，
+        /// 它会一直接管新方案的私用区。字根字体改变测量宽度，缓存一并清掉，否则字根格错位。
         pub fn set_chaizi_font(&mut self, path: &str, family: &str) -> Result<(), String> {
             self.chaizi = None;
             self.measure_cache.borrow_mut().clear();
@@ -412,14 +378,9 @@ mod imp {
 
         /// 换字体方案（`ui.font` 的默认链与脚本指派变更时调用）。
         ///
-        /// ⚠️ 两处缓存必须一起失效，各自的漏法不同：
-        /// - **测量缓存**：方案不在 [`measure_key`] 里（它是渲染器级状态，与 `family` 同理），
-        ///   不清就会拿旧方案的宽度布局新方案的文字——表现是候选框宽度对不上文字。
-        /// - **回退对象**：`IDWriteFontFallback` 是按旧链构建的不可变 COM 对象，
-        ///   不 take 掉就永远用旧链。
-        ///
-        /// `formats` **不需要**清：TextFormat 只承载字号与全局字族，而方案的 base family
-        /// 是在 layout 层用 `SetFontFamilyName` 覆盖的，不经过 format。
+        /// 测量缓存与回退对象必须一起失效：方案不在 [`measure_key`] 里，不清就按旧宽度布局；
+        /// `IDWriteFontFallback` 是按旧链构建的不可变对象，不 take 掉就永远用旧链。
+        /// `formats` 不用清：方案的 base family 在 layout 层覆盖，不经过 TextFormat。
         pub fn set_font_plan(&mut self, plan: FontPlan) {
             if self.plan == plan {
                 return;
@@ -439,16 +400,8 @@ mod imp {
         /// 系统字体集里有没有这个字族名。`None` = 查不了（拿不到字体集），
         /// `Some(false)` = 系统里确实没有。
         ///
-        /// # ★ 它补的是一处**没有任何信号**的失败
-        ///
-        /// [`Self::create_layout`] 里的 `SetFontFamilyName` 对不存在的字族**不报错**——
-        /// DirectWrite 静默回落到默认字体，调用点连返回值都无从判断（那里本就写作
-        /// `let _ = …`，因为有返回值也不知道该不该当失败）。用户把字体名写错、或填成了
-        /// 字体的**全名/文件名**而不是家族名时，画面上只表现为「字体不对、字看着小了一圈」，
-        /// 日志里一片安静。
-        ///
-        /// ⚠️ 只在**设置字体时**查（每次配置变更一次），不在热路径：`create_layout` 是
-        /// 每帧每个文本叶子各走一遍的，那里加一次 COM 查询是按帧计费的。
+        /// `SetFontFamilyName` 对不存在的字族不报错、静默回落，这里给设置字体时补一个信号。
+        /// 只在配置变更时调，别放进 `create_layout`（每帧每个文本叶子都走一遍）。
         pub fn family_exists(&self, family: &str) -> Option<bool> {
             let name = family.trim();
             if name.is_empty() {
@@ -470,19 +423,14 @@ mod imp {
             }
         }
 
-        /// 按字体 **face** 的名字（GDI family 名 / 全名）在系统字体集里找，返回它所属的
+        /// 按字体 face 的名字（GDI family 名 / 全名）在系统字体集里找，返回它所属的
         /// DirectWrite family 名（本地化名，zh-cn 优先）与该 face 的字重。
         ///
-        /// 给存量配置里的旧 GDI face name 兜底（看板 A2-1）：「思源宋体 SemiBold」这类
-        /// 剥字重词就能解析的走不到这里（见 `font_resolve::resolve_font_name` 的顺序），
-        /// 这里接的是字重词表之外的写法、以及 family 名与 GDI 名根本不同的字体。
+        /// 给存量配置里的旧 GDI face name 兜底：剥字重词就能解析的走不到这里（见
+        /// `font_resolve::resolve_font_name`），这里接字重词表之外的写法与 family 名和 GDI 名不同的字体。
+        /// 不用 `CreateFontFromLOGFONT`：它对查不到的名字做模糊匹配，且 `lfFaceName` 只有 31 字符。
         ///
-        /// 比对的是字体**自报**的名字，不用 `IDWriteGdiInterop::CreateFontFromLOGFONT`：
-        /// 后者对查不到的名字做 GDI 模糊匹配、返回「最近似」的字体，正是要避免的静默纠错；
-        /// 且 `LOGFONTW.lfFaceName` 只有 31 个字符，长名字会被截断。
-        ///
-        /// ⚠️ 全量遍历系统字体集（几千个 face），只在名字**已确认**不是 family 名时才调，
-        /// 且调用方按名字缓存结果——不在渲染热路径。
+        /// 全量遍历系统字体集（几千个 face），只在确认不是 family 名时调，调用方按名字缓存。
         pub fn find_face(&self, name: &str) -> Option<(String, i32)> {
             use wind_config::font_name::{font_name_eq, pick_localized_name};
             let name = name.trim();
@@ -538,10 +486,8 @@ mod imp {
             }
         }
 
-        /// 按与 [`Self::draw`] 相同的 layout 排一遍 `text`，报出每段字形**实际**用到的字体。
-        ///
-        /// 诊断用（`examples/font_weight_probe.rs`）：「字重设了没效果」到底是配置没传到、
-        /// 还是字体本身没有那个字重、或被系统回退换成了别的字体，只有渲染端自己的说法算数。
+        /// 按与 [`Self::draw`] 相同的 layout 排一遍 `text`，报出每段字形实际用到的字体。
+        /// 诊断用（`examples/font_weight_probe.rs`），分辨字重没生效是配置、字体还是回退的问题。
         pub fn probe_glyph_runs(
             &self,
             text: &str,
@@ -598,56 +544,18 @@ mod imp {
             }
         }
 
-        /// 取（或构建）本方案的自定义字体回退对象。方案不需要回退时返回 `None`——
-        /// 不设自定义回退 = 走系统默认回退 = 与升级前逐位等价，故这条路径零回归。
+        /// 取（或构建）本方案的自定义字体回退对象。方案不需要回退时返回 `None`（走系统默认回退）。
         ///
-        /// # ★★ 实测得到的 `AddMapping` 语义（推翻过一版猜测，别再按猜测改）
+        /// `AddMapping` 语义：base font 先被问，target 列表是 base 缺字时的接续（见
+        /// docs/design/mongolian-vertical-candidates.md 的「已否决 / 已踩过」）；改这段前先跑
+        /// `fallback_chain_is_applied`、`default_chain_fallback_does_not_swallow_a_script_assignment`、
+        /// `leaf_family_survives_a_non_empty_default_chain`、`fallback_chain_picks_the_chain_of_its_own_base`。
+        /// target 列表含链首自己是刻意的冗余，让整条链写在一处。
         ///
-        /// **base font 先被问；映射的 target 列表是「base 缺这个字时」的接续。**
-        /// 三条实测互相印证：
-        /// - `fallback_chain_is_applied`：base 缺字时链尾决定字形 ⇒ target 列表确实生效；
-        /// - `default_chain_fallback_does_not_swallow_a_script_assignment`：
-        ///   拉丁段（base=Consolas）在默认链兜底映射存在时仍是 Consolas ⇒ base 优先；
-        /// - `leaf_family_survives_a_non_empty_default_chain`：叶子级字族同理不被换掉。
-        ///
-        /// ⚠️ 曾经写成「它不问 base font、每个字符都会被映射到 target」——**那是错的**，
-        /// 并且按那条错误前提推导会得出「兜底映射会把脚本指派和方案级字体整个吃掉」
-        /// 这个吓人但不存在的结论。改这段前先跑上面三条测量。
-        ///
-        /// target 列表**含链首自己**是刻意的：base 已被优先问过，重复一次是无害的冗余，
-        /// 但它让「这条链完整地写在一处」，读代码时不必再去脑补 base 是谁。
-        ///
-        /// # ⚠️ 依赖 `baseFamilyName` 作为筛选条件
-        ///
-        /// 多条链（默认链 + 各脚本指派链）共存时，靠 `baseFamilyName` 区分「这一段该走哪条
-        /// 链」——而段的 base family 正是由 `SetFontFamilyName` 按 [`font_runs`] 的切段设定的，
-        /// 两者天然对齐。这条假设由 `fallback_chain_picks_the_chain_of_its_own_base`
-        /// 直接验证（**单渲染器、双链、链尾不同**）；`fallback_chain_is_applied` 只证明
-        /// 「自定义回退挂上了」，证不了筛选——两条缺一不可。
-        ///
-        /// # 映射的添加顺序承重（`AddMapping` 取首个匹配的映射）
-        ///
-        /// 实际顺序由 [`FontPlan::chains`] 决定：**默认链在前、各脚本指派链其次**，
-        /// 然后才是下面单独追加的两条。四段的相对位置都不能随手调：
-        ///
-        /// 1. 默认链（`baseFamilyName` = 它的链首）；
-        /// 2. 各脚本指派链（`baseFamilyName` = 各自链首）；
-        /// 3. 默认链的**兜底**映射（`baseFamilyName` = None，匹配任意 base）——必须在
-        ///    全部具名映射之后，否则它会先匹配上、让具名链永远轮不到；
-        /// 4. 系统表。
-        ///
-        /// ⚠️ 第 1、2 段的先后是 `heads` 去重「第一条胜出」语义的依据（同链首的后来者被
-        /// warn 并丢弃）。照「最具体的最先」去重排会改掉那条语义。
-        ///
-        /// 第 3 段是为**叶子级字族**存在的：主题给节点配了 `font_family`（或方案级
-        /// `[candidate] font_family`）时，该段的 base 与任何链首都不匹配。没有它，
-        /// 用户配的 `ui.font.fallback` 对那些节点整条失效——而 macOS 侧
-        /// （cascade list 是字体级属性）在同样情形下链照常生效，同一份配置两平台结果相反。
-        ///
-        /// 第 2 条是为了**主题节点字族**：主题给某个节点配了 `font_family`（如宋体）时，
-        /// 该段的 base 是宋体，与任何一条链的链首都不匹配。没有这条兜底的话，用户配的
-        /// `ui.font.fallback` 会**整条静默失效**——而 macOS 侧（CoreText 的 cascade list
-        /// 是字体级属性）在同样情形下链照常生效，同一份配置两平台结果相反且都不吭声。
+        /// 映射取首个匹配，添加顺序承重：1. 默认链、2. 各脚本指派链（均以链首为 `baseFamilyName`，
+        /// 先后决定 `heads` 去重「第一条胜出」）；3. 默认链的兜底映射（base = None，必须在全部具名
+        /// 映射之后）；4. 系统表。第 3 条为叶子级字族（主题节点或方案级 `font_family`）而设：其 base
+        /// 不匹配任何链首，没有它 `ui.font.fallback` 对这些节点静默失效，与 macOS 结果相反。
         fn ensure_fallback(&self) -> Option<IDWriteFontFallback> {
             if !self.plan.needs_fallback() {
                 return None;
@@ -655,8 +563,7 @@ mod imp {
             if let Some(fb) = self.fallback.borrow().as_ref() {
                 return Some(fb.clone());
             }
-            // 构建失败是持久性的（工厂能力问题），不记哨兵就会每次绘制重建一遍 builder
-            // 与全部映射——一次失败变成每帧的开销。
+            // 构建失败是持久性的，不记哨兵就会每帧重建一遍。
             if self.fallback_failed.get() {
                 return None;
             }
@@ -702,8 +609,7 @@ mod imp {
                     if chain.len() < 2 {
                         continue; // 单项链无回退可言，建映射只会拖慢查表
                     }
-                    // 两条链共用同一个链首时，靠 baseFamilyName 分不开——后加的那条永远
-                    // 匹配不到（取首个匹配）。这是配置层的问题，静默丢掉会让用户查不出来。
+                    // 同链首的两条链靠 baseFamilyName 分不开，后加的永远匹配不到；warn 让用户查得到。
                     if heads.contains(&chain[0].as_str()) {
                         tracing::warn!(
                             "字体方案里有多条链以「{}」开头，只有第一条的回退顺序会生效",
@@ -719,8 +625,7 @@ mod imp {
                 if default_chain.len() > 1 {
                     add(default_chain, None);
                 }
-                // 系统表兜底放最后：不接的话，凡是自定义映射没覆盖到的字符（emoji、少数民族
-                // 文字、符号）全部退化成缺字方框——自定义回退是**整体替换**系统回退，不是叠加。
+                // 系统表兜底放最后：自定义回退是整体替换系统回退，不接的话未覆盖字符全成方框。
                 if let Ok(sys) = f2.GetSystemFontFallback() {
                     let _ = builder.AddMappings(&sys);
                 }
@@ -757,26 +662,14 @@ mod imp {
             }
         }
 
-        /// 基准字族在该字号/字重下的**自然 (行高, 基线)**（按 (字号, 字重, 字族) 缓存）。
+        /// 基准字族在该字号/字重下的自然 (行高, 基线)，按 (字号, 字重, 字族) 缓存。
         ///
-        /// 供 [`Self::create_layout`] 把每个 layout 的行距钉成 UNIFORM：不钉的话 DirectWrite 取
-        /// 该行所有字体里最大的 line metrics，含 emoji 的候选行（回退到 Segoe UI Emoji）比
-        /// 纯汉字行高 5%（雅黑 25.40 → 26.67）到 17%（宋体 22.81 → 26.60），基线也跟着挪，
-        /// 候选窗高度随 emoji 出没而抖。
+        /// 供 [`Self::create_layout`] 把行距钉成 UNIFORM：不钉的话 DirectWrite 取该行所有字体里
+        /// 最大的 line metrics，含 emoji 的候选行更高、基线也挪，候选窗高度随 emoji 出没而抖。
+        /// 探针「中a」带一个拉丁字母，使基准字族缺汉字的方案也量到与汉字行一致的值；探针走同一套
+        /// 回退对象与字重设置，度量口径与正式 layout 一致。
         ///
-        /// 探针文本取「中a」：与今天纯汉字行的自然高度逐位相同（零回归）；带一个拉丁字母，
-        /// 是让「基准字族缺汉字、汉字回退到别家」的方案也量到与汉字行一致的值。探针本身
-        /// **不**钉行距，但走同一套回退对象，度量口径与正式 layout 一致。
-        ///
-        /// 缓存键里的字族是 layout 层实际设的 base（叶子字族 / 方案链首），与 `ensure_format`
-        /// 只按字号缓存的 TextFormat 不同——同一字号下换字族行高就不同，所以钉在 layout 上。
-        /// 字重同理：探针与正式 layout 一样 `SetFontWeight`，粗体字面纵向指标不同的字族
-        /// 才不会被钉上常规字面的行框（键与 [`measure_key`] 覆盖同一组影响高度的输入）。
-        ///
-        /// 基线**必须**从探针的 line metrics 里读，不能写成行高的固定比例：各字族的
-        /// ascent/(ascent+descent+lineGap) 从等线 0.78、雅黑 0.80、Segoe UI 0.81 到宋体
-        /// （lineGap 非零，取决于 DirectWrite 把 lineGap 放在基线上方还是均分）不等。
-        /// 写死一个比例，换基准字族后行高不变、字却整体上下漂，行底/行顶多出一条空白。
+        /// 基线必须从探针读，不能写成行高的固定比例：各字族 ascent 占比不同，写死会让字整体上下漂。
         fn line_height_for(
             &self,
             fmt: &IDWriteTextFormat,
@@ -828,17 +721,13 @@ mod imp {
 
         /// 为给定文本/样式创建布局对象。
         ///
-        /// 字体的三层合成，**从弱到强**依次覆盖（后者赢过前者）：
+        /// 字体的三层合成，从弱到强依次覆盖：
         /// 1. TextFormat 自带的全局字族（`ui.font.family`）；
         /// 2. 方案默认链的链首 → 叶子级 `ts.family`（主题节点的 `font_family`），作用于全文；
         /// 3. 按脚本的指派（[`font_runs`] 切段）→ 最后是拆字字根的私用区段。
         ///
-        /// ★ 第 3 层赢过第 2 层是刻意的：脚本指派回答的是「**哪些字符**用什么字体」，
-        /// 比「这个节点用什么字体」更具体。主题给候选文字配了宋体、全局又指派
-        /// 「拉丁用 Segoe UI」时，结果是汉字宋体 + 拉丁 Segoe UI——这正是想要的。
-        ///
-        /// 参数收成 `&TextStyle` 而非散开：本文件开头已经为同一个理由写过一次
-        /// （散开时每加一项都要改所有签名，而参数越多传错顺序编译器越抓不到）。
+        /// 第 3 层赢过第 2 层是刻意的：脚本指派回答「哪些字符」用什么字体，比节点级更具体
+        /// （节点配宋体、拉丁指派 Segoe UI 时，结果是汉字宋体 + 拉丁 Segoe UI）。
         fn create_layout(
             &self,
             text: &str,
@@ -849,14 +738,11 @@ mod imp {
             self.create_layout_with(text, ts, max_w, max_h, true)
         }
 
-        /// [`Self::create_layout`] 的全参版本。`uniform_spacing = false` 只给测试用：
-        /// 回退链的那几条测试靠「哪款字体渲染了『中』」的**自然行高**做判据，钉了行距就
-        /// 看不出来了；生产路径恒为 `true`。
+        /// [`Self::create_layout`] 的全参版本。`uniform_spacing = false` 只给测试用（回退链测试
+        /// 靠自然行高分辨字体）；生产路径恒为 `true`。
         ///
-        /// ⚠️ layout 目前**不缓存**：测量未命中与每次绘制各建一个，[`Self::draw_runs`] 的
-        /// drawing effect 只设在绘制那个一次性 layout 上、用完即弃。将来若给绘制加 layout
-        /// 缓存，effect 必须每次取出后重设、用后清掉，或带 effect 的 layout 不入缓存——否则
-        /// 上一帧的颜色会残留到下一帧同一段文字上。
+        /// layout 不缓存，[`Self::draw_runs`] 的 drawing effect 设在一次性 layout 上。将来若给绘制
+        /// 加 layout 缓存，effect 必须每次重设、用后清掉，否则上一帧的颜色会残留到下一帧。
         fn create_layout_with(
             &self,
             text: &str,
@@ -873,24 +759,16 @@ mod imp {
                     .factory
                     .CreateTextLayout(&wide, &fmt, max_w.max(1.0), max_h.max(1.0))
                     .map_err(|e| format!("CreateTextLayout: {e}"))?;
-                // 关闭自动换行：本 View 引擎是单行盒模型，容不下 DirectWrite 自作主张的折行。
-                //
-                // 测量与绘制传的 max_w 本就不同——测量传 f32::MAX（不换行），绘制传缓冲宽度。
-                // 于是文本一旦宽过缓冲，布局按单行高度排、绘制却折成多行，多出来的行直接画到
-                // 节点框外，盖住相邻候选。竖排的 behavior.vertical_max_width（出厂默认 0=不限，
-                // 用户/主题可显式配正值）或渲染层恒生效的屏幕安全钳制都会把窗口宽度钳掉，
-                // 触发这条路径。
-                //
-                // NO_WRAP 只关**自动**换行，`\n` 硬换行照旧生效（实测：含 \n 的文本仍返回
-                // 2 倍行高）——candidate_window 依赖后者做多行候选，不能一起关掉。
+                // 关闭自动换行：测量传 f32::MAX、绘制传缓冲宽度，文本宽过缓冲时布局按单行排、
+                // 绘制却折成多行，画到节点框外。NO_WRAP 只关自动换行，`\n` 硬换行照旧生效
+                // （candidate_window 的多行候选依赖它）。
                 let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
                 // 节点级字重/字体族覆盖（作用于全文；下方 chaizi PUA 段会再覆盖字体族）。
                 let full = DWRITE_TEXT_RANGE {
                     startPosition: 0,
                     length: wide.len() as u32,
                 };
-                // 与 TextFormat 自带的默认字重比，而不是与 400 比：全局设了 600 时，
-                // 节点显式写的 400 也得真的落下去。
+                // 与 TextFormat 自带的默认字重比而不是与 400 比：全局设了 600 时节点写的 400 也要落下去。
                 if weight > 0 && weight != self.format_weight() {
                     let _ = layout.SetFontWeight(DWRITE_FONT_WEIGHT(weight), full);
                 }
@@ -904,12 +782,8 @@ mod imp {
                 }
                 // 按脚本指派：只有被显式声明了字体的类才会切出独立段（见 `font_runs`）。
                 //
-                // 外层的 `is_empty` 判定挡的是「没有任何声明」的方案：`font_runs` 在无声明时
-                // 也会**分配**一个单段 Vec，而本函数是每次绘制每个文本叶子各走一遍的热路径。
-                // Windows 出厂会注入 emoji 类的指派（`candidate_window::build_font_plan`），
-                // 这条短路在 Windows 上通常走不到——每叶子每帧跑一遍 `font_runs`（几个字、
-                // 微秒级）是为了 1️⃣ 与 Emoji 16.0 新码位付的账；用户写 `emoji = []` 关掉
-                // 指派、以及 macOS，仍从这里短路。
+                // `is_empty` 短路避免热路径上无声明时 `font_runs` 也分配 Vec。Windows 出厂注入
+                // emoji 指派（`candidate_window::build_font_plan`），通常走不到这条短路，接受这点开销。
                 if !self.plan.declared().is_empty() {
                     for run in font_runs(&wide, self.plan.declared()) {
                         let Some(fam) =
@@ -926,20 +800,14 @@ mod imp {
                     }
                 }
                 // 回退链：让每一段在自己的 base family 缺字时按用户声明的顺序找下一个。
-                // 方案没有任何多项链时 `ensure_fallback` 返回 None，走系统默认回退。
-                // 短路顺序承重：`ensure_fallback` 先判、`cast` 后做——没有方案时连一次
-                // QueryInterface 都不该付（这是每次绘制都会走到的热路径）。
+                // 无多项链时返回 None 走系统默认回退；先判再 `cast`，热路径上省一次 QueryInterface。
                 if let Some(fb) = self.ensure_fallback() {
                     let _ = layout
                         .cast::<IDWriteTextLayout2>()
                         .and_then(|l2| l2.SetFontFallback(&fb));
                 }
-                // 行距钉成 UNIFORM：行高与基线都取基准字族自己的自然值，不随行内回退字体
-                // 起伏（理由与数据见 `line_height_for`）。DirectWrite 的 UNIFORM 模式要求显式
-                // 给基线，没有按比例自动分配的选项，所以基线也由探针实测而非写死比例。
-                // 只影响高度：宽度、连字、彩色层都不经过这里；`\n` 硬换行仍按行数翻倍
-                // （candidate_window 的多行候选依赖）。比基准字族高的字形（emoji、字根字体）
-                // 按 overhang 画出行框，不裁切。
+                // 行距钉成 UNIFORM（见 `line_height_for`，该模式要求显式给基线）：只影响高度，
+                // `\n` 仍按行数翻倍；比基准字族高的字形按 overhang 画出行框，不裁切。
                 let size_key = size.max(1.0).round() as u32;
                 if uniform_spacing
                     && let Some((line, baseline)) =
@@ -948,9 +816,8 @@ mod imp {
                     let _ =
                         layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line, baseline);
                 }
-                // 拆字字根：把私用区（BMP PUA + 补充私用区 A/B）的连续段切到字根字体集，
-                // 级联回退渲染字根字符。段划分见 `super::pua_runs`——测量与绘制共用本函数，
-                // 故字根段的字体在两条路径上必然一致（否则宽度按主字体缺字宽算，布局出错）。
+                // 拆字字根：私用区连续段（`super::pua_runs`）切到字根字体集。测量与绘制共用本函数，
+                // 两条路径的字根字体必然一致。
                 if let Some(cf) = &self.chaizi {
                     for (start, len) in super::pua_runs(&wide) {
                         let range = DWRITE_TEXT_RANGE {
@@ -987,9 +854,7 @@ mod imp {
             if let Some(m) = self.measure_cache.borrow().get(&key) {
                 return m.clone();
             }
-            // 排版失败走等宽近似回退，且**不入缓存**：失败多是暂时性的（资源紧张、
-            // 字体集正在切换），一旦把回退值固化，这段文本就会一直按错误宽度布局
-            // 直到下次整体清空——而清空只在换字体/换字根时发生，可能永远等不到。
+            // 排版失败走等宽近似回退且不入缓存：失败多是暂时性的，固化后要等换字体才会清掉。
             let Some(m) = self.measure_layout(text, ts) else {
                 return TextMetrics {
                     width: text.chars().count() as f32 * ts.size * 0.6,
@@ -1186,9 +1051,7 @@ mod imp {
                 let dc = DrawCtx::solid(colorref(color));
                 let layout = self.create_layout(text, ts, buf_width as f32, buf_height as f32)?;
 
-                // 关键优化：用文本度量算出包围盒，后续两遍逐像素操作只在盒内进行
-                // （原实现每次绘制都遍历整窗，单帧十余次 × 整窗 → paint 高达 ~100ms）。
-                // ClearType/抗锯齿可能轻微外溢，留 2px 余量。
+                // 逐像素操作只在文本包围盒内进行（整窗遍历一帧十余次代价很高）；抗锯齿可能外溢，留 2px。
                 let mut tm = DWRITE_TEXT_METRICS::default();
                 let _ = layout.GetMetrics(&mut tm);
                 const MARGIN: f32 = 2.0;
@@ -1228,16 +1091,10 @@ mod imp {
 
                 // 3) 选择性预乘回写：RGB 变动的像素视为文字，按窗口原 alpha 预乘（仅包围盒）。
                 //
-                // 文字自身的 alpha（`color[3]`）在这一步才混进来，而非交给 DirectWrite：
-                // `BitmapRenderTarget::DrawGlyphRun` 只接受不含 alpha 的 COLORREF，半透明
-                // 文字色根本传不进去。DirectWrite 已把**字形覆盖率**（含抗锯齿/ClearType）
-                // 算进 (nr,ng,nb)——那是"文字色完全不透明"时的合成结果；此处再按 fa 与原
-                // 背景混一次，等效于把 fa 乘进有效覆盖率。
-                //
-                // fa=255 时 mix 退化为 n 本身，逐像素等同旧逻辑 → 不透明文字零回归。
+                // 文字自身的 alpha 在这一步才混进来：`DrawGlyphRun` 只接受不含 alpha 的 COLORREF。
+                // (nr,ng,nb) 已含字形覆盖率，再按 fa 与原背景混一次，等效把 fa 乘进覆盖率。
                 let fa = color[3] as u32;
-                // 背景侧取 buf 的现有预乘值当直通用——与步骤 1 拷进 DIB 的口径一致，
-                // 两处必须同源，否则半透明背景上的文字会与 DirectWrite 的混合基准错位。
+                // 背景侧取 buf 现有值，必须与步骤 1 拷进 DIB 的口径同源，否则与混合基准错位。
                 let mix = |n: u8, b: u8| ((n as u32 * fa + b as u32 * (255 - fa)) / 255) as u8;
                 for row in cy0..cy1 {
                     let sbase = row * w * 4;
@@ -1252,8 +1109,7 @@ mod imp {
                             continue; // 背景未变
                         }
                         let a = buf[s + 3] as u32;
-                        // 先按 fa 混合（读原 buf 值），再按窗口 alpha 预乘写回——顺序承重：
-                        // mix 的背景侧必须是尚未被本像素写覆盖的原值。
+                        // 先混合再预乘写回：mix 的背景侧必须是尚未被覆盖的原值。
                         let fb = mix(nb, buf[s]);
                         let fg = mix(ng, buf[s + 1]);
                         let fr = mix(nr, buf[s + 2]);
@@ -1279,28 +1135,15 @@ mod imp {
         }
 
         /// 分段着色绘制：`runs` 覆盖的区间改用各自的颜色，其余用 `color`。`runs` 为空（或全被
-        /// 判为非法区间）时就是 [`Self::draw`]——出厂路径一个字节都不变。
+        /// 判为非法区间）时就是 [`Self::draw`]。
         ///
-        /// # 按区间上色：drawing effect
+        /// 每种颜色建一个 effect（借 `CreateTypography` 造的轻量 `IUnknown`）`SetDrawingEffect` 到
+        /// 区间，[`GlyphRenderer`] 按指针身份在 [`DrawCtx`] 表里反查颜色。effect 不参与整形，
+        /// 字形位置与测量 layout 相同（`span_color_tests` 钉住）。
         ///
-        /// 每种颜色建一个 effect 对象、`SetDrawingEffect` 到它的区间；[`GlyphRenderer`] 的
-        /// `DrawGlyphRun` 拿到 effect 后按**指针身份**在 [`DrawCtx`] 的表里反查颜色。effect 是
-        /// 格式属性，不参与整形——带 effect 的 layout 与测量用的 layout 字形位置相同（像素测试
-        /// `span_color_tests` 钉住）。不必自定义 COM 接口：effect 只要是个活着的 `IUnknown`，
-        /// 这里借 `CreateTypography` 造一个最轻的对象，只活到本次绘制结束。
-        ///
-        /// # 按 alpha 分组、多遍绘制
-        ///
-        /// 文字 alpha 不交给 DirectWrite（`DrawGlyphRun` 只收不含 alpha 的 COLORREF），而是在
-        /// 回写时按 `fa` 与底色再混一次（见 [`Self::draw`] 步骤 3）；那一步已分不出哪个像素属于
-        /// 哪段。故按 alpha 分组，每组一遍 `Draw`（不属本组的字形在回调里跳过）。不透明色与
-        /// 基色同组，常见情形仍是一遍。
-        ///
-        /// ⚠️ 多遍时**不能**每遍都「拷底 → 预乘回写缓冲」：回写的是按窗口 alpha 预乘后的值，
-        /// 下一遍又把它当直通值拷进 DIB，半透明底（`_base` 气泡 `F0`）上已画的字会被二次预乘、
-        /// 发暗。做法：包围盒内的底先拷进一块直通值草稿区，各遍都在草稿区上「画 → 按本组 `fa`
-        /// 混合」累积，最后统一按窗口 alpha 预乘、回写缓冲**一次**。被任一遍改动过的像素才回写
-        /// ——单遍时与 [`Self::draw`] 的判据、算术逐字节相同。
+        /// 文字 alpha 在回写时才混（见 [`Self::draw`] 步骤 3），那一步分不出像素属于哪段，故按
+        /// alpha 分组、每组一遍 `Draw`。多遍时不能每遍都预乘回写缓冲（下一遍会把预乘值当直通值，
+        /// 半透明底上的字二次预乘发暗）：各遍在直通值草稿区上累积，最后统一预乘回写一次。
         #[allow(clippy::too_many_arguments)]
         pub fn draw_runs(
             &self,
@@ -1514,12 +1357,8 @@ mod imp {
 
         /// 某个字形段该用的颜色；`None` = 本遍不画它。
         ///
-        /// 表里查不到的 effect（理论上不会出现：effect 只有 `draw_runs` 设；真出现了多半是
-        /// 运行时把 effect 包了一层、指针变了）按基色、在第一遍画，宁可颜色不对也不丢字。
-        ///
-        /// ⚠️ 第一遍是按**首个 alpha 组**混合的：基色的 alpha 与首组不同时（例如基色半透明、
-        /// 区间全覆盖且首组不透明），兜底画出的字用的是首组的 alpha，而不是基色自己的。
-        /// 这只影响「反查失败」这个本不该发生的兜底，不为它多画一遍。
+        /// 表里查不到的 effect（运行时把 effect 包了一层、指针变了）按基色在第一遍画，宁可颜色
+        /// 不对也不丢字。第一遍按首个 alpha 组混合，兜底字可能用错 alpha；本不该发生，不为它多画一遍。
         fn pick(&self, effect: Option<&windows::core::IUnknown>) -> Option<u32> {
             if let Some(e) = effect {
                 let p = e.as_raw() as usize;
@@ -1849,17 +1688,8 @@ mod imp {
     /// [`TextRenderer::resolve_family_in`] 的两条语义。用 Windows 自带字体建集，
     /// 不依赖任何外部资源，故是常规用例而非 `#[ignore]` 探针。
     ///
-    /// # ⚠️ 判据必须落在**返回值**上，不能落在测量宽度上
-    ///
-    /// 系统里往往也装着同一款字体：解析一旦失效，系统回退会挑中它、量出与解析成功时
-    /// 相同的宽度 ⇒ 按宽度断言必然假绿。真机上正是这条掩盖了 Toli 方案的家族名错误——
-    /// 装了 Menk 字体的机器画面「看着是好的」。
-    ///
-    /// # ⚠️ CI 跑不到它
-    ///
-    /// 它住在 `#[cfg(windows)] mod imp` 里，而 CI 的 test job 跑 Linux、clippy job 只做
-    /// 交叉编译不运行用例 ⇒ **本用例只在本地 Windows `cargo test` 时执行**。改这块前
-    /// 请在 Windows 上跑一遍，别指望 CI 拦下回归。
+    /// 判据必须落在返回值上而非测量宽度：系统装了同款字体时，解析失效也会量出相同宽度，必然假绿。
+    /// CI 跑不到它（只在 Windows 上执行），改这块前请在 Windows 上跑一遍。
     #[cfg(test)]
     mod family_resolve_tests {
         use super::*;
@@ -1905,9 +1735,8 @@ mod imp {
     /// wine 与真 Windows 的 DirectWrite 都得把 drawing effect 原样传进 `DrawGlyphRun`，
     /// 且按 effect 边界切开字形段——[`TextRenderer::draw_runs`] 整个建立在这一点上。
     ///
-    /// 断言落在**指针身份**上：反查表按 `as_raw()` 比对，若运行时把 effect 包了一层或
-    /// QueryInterface 出另一个指针，颜色会整段退回基色而不报错。本仓 2026-09-27 在
-    /// wine 9.0 上实测通过（effect 原样传入，两段各 2 个字形）。
+    /// 断言落在指针身份上：反查表按 `as_raw()` 比对，若运行时把 effect 包了一层，颜色会
+    /// 整段退回基色而不报错。
     #[cfg(test)]
     mod effect_passthrough_tests {
         use super::*;
@@ -2105,8 +1934,7 @@ mod imp {
         default_weight: i32,
         /// 绘制调用记录（每次 draw 一行），供渲染 golden 对拍。见 [`Self::take_draw_log`]。
         ///
-        /// mock 不出像素，「画了什么、画在哪、用什么色」就只剩这份记录能对拍；只在测试构建
-        /// 存在，生产路径（Linux 本就没有真实渲染）不付任何代价。
+        /// mock 不出像素，只有这份记录能对拍；只在测试构建存在。
         #[cfg(test)]
         draw_log: std::cell::RefCell<Vec<String>>,
     }
@@ -2176,11 +2004,8 @@ mod imp {
             &self.plan
         }
 
-        /// mock：没有系统字体集可问，一律「不知道」——调用方据此不发 warn。
-        ///
-        /// 但**问过什么要记下来**：mock 答不了「系统里有没有」，而「有没有真的去问」正是
-        /// 接线测试唯一能钉住的那一半。字体缺失告警此前就是因为无人验证，在 CoreText 上
-        /// 空转了很久没被发现（那边同样恒返回 `None`）。见 [`Self::asked_families`]。
+        /// mock：未注入 [`Self::set_mock_families`] 时一律「不知道」（调用方据此不发 warn）。
+        /// 问过什么都记下来，接线测试靠它钉住「确实去问了」。见 [`Self::asked_families`]。
         pub fn family_exists(&self, family: &str) -> Option<bool> {
             self.asked_families.borrow_mut().push(family.to_string());
             self.mock_families.as_ref().map(|fs| {
@@ -2371,9 +2196,8 @@ mod wrapping_tests {
 
     /// 自动换行必须关闭：宽过缓冲的文本只画一行（超出部分裁掉），不得折行。
     ///
-    /// 折行的后果不是「看不全」而是「画到别处」——多出来的行落在节点框外，盖住相邻候选。
-    /// 竖排 `vertical_max_width`（用户/主题显式配置正值时）或渲染层恒生效的屏幕安全钳制
-    /// 都会钳窗口宽度，触发这条路径（出厂默认值为 0=不限，此处直接构造窄缓冲区复现）。
+    /// 折行会把多出来的行画到节点框外、盖住相邻候选。`vertical_max_width` 或屏幕安全钳制
+    /// 钳掉窗口宽度时触发，此处直接构造窄缓冲区复现。
     #[test]
     fn long_text_clips_instead_of_wrapping() {
         let r = tr();
@@ -2426,7 +2250,7 @@ mod wrapping_tests {
     }
 }
 
-// 文字色 alpha 的**像素级**验证：混合公式改的是逐像素算术，只靠逻辑推导不算验过。
+// 文字色 alpha 的像素级验证：混合公式是逐像素算术，只靠推导不算验过。
 // 需要真实 DirectWrite 出字形，故 gate 到 Windows。
 #[cfg(all(test, windows))]
 mod alpha_text_tests {
@@ -2478,8 +2302,7 @@ mod alpha_text_tests {
 
     /// alpha=128：同一个全块应落在中灰，而非近黑。
     ///
-    /// 这是修复前后的分水岭——旧实现丢弃 `color[3]`，此处会与上一条同样得到近黑。
-    /// 区间放宽到 96..=176 以容纳字体覆盖率与 ClearType 的差异；判据是"明显不是黑"。
+    /// 丢弃 `color[3]` 的实现在此会得到近黑。区间放宽到 96..=176 以容纳覆盖率与 ClearType 差异。
     #[test]
     fn half_alpha_text_blends_to_midtone() {
         let d = darkest_r(&draw_block(128));
@@ -2502,10 +2325,8 @@ mod alpha_text_tests {
     }
 }
 
-// 分段着色的**像素级**验证（设计 text-span-colors.md §13.2 P1）：需要真实 DirectWrite 出字形，
-// gate 到 Windows。wine 9.0 的 DirectWrite 会把 drawing effect 传进回调（见
-// `imp::effect_passthrough_tests`），故本组在 Linux 上可经 `cargo xwin test` + wine 跑
-// （wine 下须 `--test-threads=1`：多线程并发建 COM 工厂会让 wine 进程异常退出）。
+// 分段着色的像素级验证（见 docs/design/text-span-colors.md）：需要真实 DirectWrite，gate 到 Windows。
+// 可在 Linux 上经 `cargo xwin test` + wine 跑，须 `--test-threads=1`（并发建 COM 工厂会让 wine 崩）。
 #[cfg(all(test, windows))]
 mod span_color_tests {
     use super::{ColorRun, TextRenderer, TextStyle};
@@ -2563,9 +2384,8 @@ mod span_color_tests {
 
     /// ② 多个 effect 全取基色 ⇒ 与不带 effect 的 `draw` 逐字节相同，不透明底与半透明底都比。
     ///
-    /// 区间边界落在空格上：effect 会把一个字形段切成几段分别光栅化，相邻两字的抗锯齿边若
-    /// 落进同一像素，「一段一次混合」与「两段先后混合」在那一个像素上可以差 1——那是
-    /// DirectWrite 自身的分段行为，不是本实现要守的东西。空格隔开后字形墨迹互不相邻。
+    /// 区间边界落在空格上：effect 切段后相邻两字的抗锯齿边若落进同一像素可差 1，那是
+    /// DirectWrite 自身的分段行为；空格隔开后墨迹互不相邻。
     #[test]
     fn base_color_effects_equal_plain_draw() {
         let r = tr();
@@ -2594,8 +2414,7 @@ mod span_color_tests {
 
     /// ③ 色相：红 `ab` + 蓝 `cd`，各自字形的 x 区间内，改动像素以本段颜色为主。
     ///
-    /// 这条挡的是「effect 设上了但颜色反查错位 / 全退回基色」——那种情况下两半同色，
-    /// ①②都照样绿。
+    /// 挡「effect 设上了但颜色反查错位或全退回基色」，那种情况下①②照样绿。
     #[test]
     fn each_run_is_drawn_in_its_own_hue() {
         let r = tr();
@@ -2635,17 +2454,10 @@ mod span_color_tests {
 
     /// ④ 半透明底 + 两种 alpha：多遍绘制 ≡ 「逐段单独画在不透明底上、合成后再统一预乘一次」。
     ///
-    /// 守的是 `draw_runs` 文档里的二次预乘：每遍都「拷底 → 预乘回写」的实现，下一遍会把
-    /// 已预乘的字当直通值再混一次。参照全程在不透明底（预乘即直通）上合成，最后一次性
-    /// 按窗口 alpha 预乘，不经过这个坑。
-    ///
-    /// 底取「半透明黑」：预乘值恒为 0，参照里「被改动过」与「终值 ≠ 底」两种判据重合，
-    /// 比对可以逐字节。
-    ///
-    /// 二次预乘只在「后一遍碰到前一遍的像素」处显形，没有这种像素本用例就测不出东西，
-    /// 故先断言它存在，再断言错误做法确实会被抓到。文本取 `_j`：`j` 的下伸部回勾到
-    /// 下划线底下，墨迹必然相交。别换成「两个全块字紧挨着、从半像素起画」——wine 的
-    /// DirectWrite 不做抗锯齿，字形按整像素落位，那样一个共同像素都没有（实测）。
+    /// 守 `draw_runs` 文档里的二次预乘。参照在不透明底上合成、最后一次性预乘；底取半透明黑
+    /// （预乘值恒为 0），比对可逐字节。二次预乘只在后一遍碰到前一遍的像素处显形，故先断言
+    /// 共同像素存在。文本取 `_j`（`j` 下伸部回勾到下划线下）；别换成两个紧挨的全块字，wine 的
+    /// DirectWrite 不做抗锯齿，那样一个共同像素都没有。
     #[test]
     fn multi_pass_equals_per_run_composite() {
         let r = tr();
@@ -2702,8 +2514,7 @@ mod span_color_tests {
 
     /// effect 反查全部失败（运行时换了指针）且区间全覆盖时，字仍按基色画出来。
     ///
-    /// 全覆盖时基色那组不存在，只靠「反查不到按基色」兜底；这条兜底若只挂在基色组上，
-    /// 整段文字会一个像素都不画——宁可颜色不对也不丢字。
+    /// 全覆盖时基色组不存在，兜底若只挂在基色组上整段文字一个像素都不画。
     #[test]
     fn failed_effect_lookup_still_draws_in_base_color() {
         let r = tr();
@@ -2746,12 +2557,8 @@ mod span_color_tests {
     }
 }
 
-// 测量缓存的**接线**测试：键函数再正确，没接进 `TextRenderer::measure` 也是白搭，
-// 而 `measure_key_tests` 直接调键函数，接线断了它照样全绿。这里从公开的测量入口进，
-// 用缓存条目数确认它真的被查过、被写过。
-//
-// 需要真实 DirectWrite（`TextRenderer::new` 建 COM 工厂），故 gate 到 Windows；
-// 键本身的正确性由跨平台的 `measure_key_tests` 在 Linux CI 上守。
+// 测量缓存的接线测试：从公开测量入口进，用缓存条目数确认真的被查过、写过（键本身由跨平台的
+// `measure_key_tests` 守）。需要真实 DirectWrite，gate 到 Windows。
 #[cfg(all(test, windows))]
 mod measure_cache_tests {
     use super::{TextRenderer, TextStyle};
@@ -2841,8 +2648,7 @@ mod pua_runs_tests {
         assert_eq!(runs("\u{100000}\u{10FFFD}"), vec![(0, 4)]);
     }
 
-    /// 非私用区的**代理对不得命中**——CJK 扩展 B（U+20000）等生僻字若被误切到字根
-    /// 字体集，反而会变成方框。这是判据不能只看"是不是代理对"的原因。
+    /// 非私用区的代理对不得命中：CJK 扩展 B 等生僻字若被误切到字根字体集会变成方框。
     #[test]
     fn non_pua_supplementary_chars_are_excluded() {
         assert!(runs("\u{20000}\u{2A6DF}\u{1F600}").is_empty());
@@ -2881,12 +2687,9 @@ mod pua_runs_tests {
     }
 }
 
-// 字体方案（脚本指派 + 回退链）的接线测试。**必须用真实 DirectWrite**：切段与回退是否
-// 真的作用到排版上，只有度量能回答——`font_runs` 本身的正确性另有 `text::script` 的
-// 平台无关单测覆盖，两层缺一不可（同 `pua_runs` 的分层）。
-//
-// ⚠️ 依赖本机装有 Consolas / 宋体 / Microsoft YaHei UI——中文 Windows 上三者恒在，
-// 与既有测试用 "Microsoft YaHei UI" 的假设同级。
+// 字体方案（脚本指派 + 回退链）的接线测试：切段与回退是否真的作用到排版上只有真实 DirectWrite
+// 的度量能回答（`font_runs` 本身由 `text::script` 单测覆盖）。依赖本机装有 Consolas / 宋体 /
+// Microsoft YaHei UI。
 #[cfg(all(test, windows))]
 mod font_plan_tests {
     use super::super::script::{FontPlan, ScriptClass};
@@ -2900,8 +2703,7 @@ mod font_plan_tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// ★ 行高不随 emoji 起伏：含 emoji 的候选行与纯汉字行等高（UNIFORM 行距，
-    /// 见 `line_height_for`）。不钉行距时雅黑下高 5%、宋体下高 17%，候选窗随之抖动。
+    /// 行高不随 emoji 起伏：含 emoji 的候选行与纯汉字行等高（UNIFORM 行距，见 `line_height_for`）。
     #[test]
     fn emoji_row_is_as_tall_as_cjk_row() {
         let r = tr();
@@ -2937,10 +2739,8 @@ mod font_plan_tests {
         );
     }
 
-    /// ★ 键帽序列在 emoji 指派下连成一个字形：宽度是 emoji 的整宽，而非「一个 1 + 零宽框」。
-    ///
-    /// 这是 `font_runs` 回溯改写的真排版验证——单元测试只能证明切段对，连字有没有真的
-    /// 形成得问 DirectWrite。未指派 emoji 时基准字体自带「1」，回退不触发，宽度等于单个「1」。
+    /// 键帽序列在 emoji 指派下连成一个字形：宽度是 emoji 的整宽，而非「一个 1 + 零宽框」。
+    /// 未指派 emoji 时基准字体自带「1」，回退不触发，宽度等于单个「1」。
     #[test]
     fn keycap_ligates_under_emoji_assignment() {
         let ts = TextStyle::new(20.0);
@@ -2976,10 +2776,8 @@ mod font_plan_tests {
         assert_eq!(base.height, with.height);
     }
 
-    /// ★ 脚本指派真的作用到排版上：把拉丁指派给等宽的 Consolas 后，纯拉丁串的宽度必须变。
-    ///
-    /// 反向对照同样重要：**汉字串的宽度不得变**——只断言「变了」的话，一个「把整串都换成
-    /// Consolas」的错误实现照样通过，而那正是切段没生效的表现。
+    /// 脚本指派真的作用到排版上：把拉丁指派给 Consolas 后纯拉丁串宽度必须变，汉字串不得变
+    /// （否则「整串都换成 Consolas」的错误实现也能通过）。
     #[test]
     fn latin_assignment_applies_to_latin_only() {
         let text_latin = "illillill";
@@ -3011,9 +2809,8 @@ mod font_plan_tests {
             "汉字宽度不该受拉丁指派影响——切段没生效，整串都被换了字体"
         );
 
-        // ★ 上面两条都是**纯单脚本**串，一个「只在整串同脚本时才应用指派」的实现能通过。
-        // 混合串才真正走切段：拉丁那半的宽度变化量必须与纯拉丁串完全一致，
-        // 汉字那半不贡献任何变化。
+        // 上面两条是纯单脚本串，「只在整串同脚本时才应用指派」的实现也能通过；混合串才真正
+        // 走切段：宽度变化量必须与纯拉丁串完全一致。
         let mixed = "illillill中文候选";
         let delta_mixed = r.measure(mixed, &ts).width - plain.measure(mixed, &ts).width;
         let delta_latin = w_latin1 - w_latin0;
@@ -3023,15 +2820,9 @@ mod font_plan_tests {
         );
     }
 
-    /// ★★ 单渲染器、双链、链尾不同——直接验 `baseFamilyName` **筛选**是否生效。
-    ///
-    /// 这是多链设计的载重假设：靠 base family 区分「这一段该走哪条链」。
-    /// 「中」是 Cjk 类、被声明并指派了 Consolas（无汉字字形）⇒ 由 cjk 链的链尾决定字形。
-    /// 若 DWrite 不按 `baseFamilyName` 区分，第一条映射（默认链）会吃掉全部匹配，
-    /// 两次都用默认链的链尾「宋体」⇒ 高度相等 ⇒ 红。
-    ///
-    /// ⚠️ 与 `fallback_chain_is_applied` 缺一不可：那条只证明「自定义回退挂上了」，
-    /// 它的两个渲染器各只有一条映射，筛不筛选都不改变结果。
+    /// 单渲染器、双链、链尾不同：直接验 `baseFamilyName` 筛选是否生效（多链设计的载重假设）。
+    /// 「中」被指派给 Consolas（无汉字字形），由 cjk 链尾决定字形；若不按 base 筛选，默认链会
+    /// 吃掉全部匹配、两次高度相等。`fallback_chain_is_applied` 每个渲染器只有一条映射，验不到这点。
     #[test]
     fn fallback_chain_picks_the_chain_of_its_own_base() {
         let ts = TextStyle::new(16.0);
@@ -3052,12 +2843,7 @@ mod font_plan_tests {
         );
     }
 
-    /// ★★ 主题节点配了 `font_family` 时，用户配的默认回退链**仍须生效**。
-    ///
-    /// 叶子级字族让该段的 base 与任何一条链的链首都不匹配，若没有那条
-    /// `baseFamilyName = None` 的兜底映射，`ui.font.fallback` 会整条静默失效——
-    /// 而 macOS 侧（cascade list 是字体级属性）同样情形下链照常生效，
-    /// 同一份配置两平台结果相反且都不吭声。
+    /// 主题节点配了 `font_family` 时，默认回退链仍须生效（守 `baseFamilyName = None` 的兜底映射）。
     #[test]
     fn default_chain_still_applies_under_a_leaf_family_override() {
         // 叶子级把 base 换成 Consolas（无汉字字形），默认链的链尾决定「中」的字形。
@@ -3074,11 +2860,8 @@ mod font_plan_tests {
         );
     }
 
-    /// ★★ 回退链真的生效：Consolas 没有汉字字形，链尾决定「中」用什么字体渲染。
-    /// 两条链的链尾字体行高不同（宋体 ≈1.16 em、雅黑 ≈1.33 em），故高度必须不同。
-    ///
-    /// ⚠️ 它**只**证明「自定义回退对象被挂上了」。筛选由
-    /// `fallback_chain_picks_the_chain_of_its_own_base` 验证——这里每个渲染器只有一条映射。
+    /// 回退链真的生效：Consolas 没有汉字字形，链尾决定「中」的字体，宋体与雅黑行高不同。
+    /// 只证明回退对象挂上了；筛选由 `fallback_chain_picks_the_chain_of_its_own_base` 验证。
     #[test]
     fn fallback_chain_is_applied() {
         let ts = TextStyle::new(16.0);
@@ -3097,12 +2880,8 @@ mod font_plan_tests {
         );
     }
 
-    /// ★★★ 判决性测量：默认链的兜底映射会不会把**脚本指派**整个吃掉。
-    ///
-    /// 配置形态取的就是 C 的样例：主字体有回退链、拉丁指派只有一项。
-    /// 那条指派链因 `len < 2` 不建具名映射，于是拉丁段的 base 与任何具名 `baseFamilyName`
-    /// 都不匹配——若它落到 `base = None` 的兜底映射上，就会被整段换成默认链的字体，
-    /// **拉丁指派完全不生效**，而这正是本功能存在的理由。
+    /// 默认链的兜底映射不得吃掉脚本指派。拉丁指派只有一项、不建具名映射，其段只能落到
+    /// `base = None` 的兜底映射上；若兜底映射替换 base 而非接续，拉丁指派完全不生效。
     #[test]
     fn default_chain_fallback_does_not_swallow_a_script_assignment() {
         let ts = TextStyle::new(16.0);
@@ -3129,13 +2908,9 @@ mod font_plan_tests {
         );
     }
 
-    /// ★★★ 同上，换成**叶子级字族**（方案级 `[candidate] font_family` 走的就是它）。
-    ///
-    /// 与 `default_chain_still_applies_under_a_leaf_family_override` 互补、缺一不可：
-    /// 那条测的是「叶子字体**缺字**时链要接上」（量的是 Consolas 没有的汉字），
-    /// 本条测的是「叶子字体**有这个字**时不能被链抢走」（量的是 Consolas 有的拉丁）。
-    /// 只有前者的话，一个「兜底映射把每个字符都换成默认链」的实现照样通过——
-    /// 而那会让方案级字体在配了 `ui.font.fallback` 时静默失效。
+    /// 同上，换成叶子级字族（方案级 `[candidate] font_family` 走它）。与
+    /// `default_chain_still_applies_under_a_leaf_family_override` 互补：那条测叶子缺字时链接上，
+    /// 本条测叶子有这个字时不被链抢走。
     #[test]
     fn leaf_family_survives_a_non_empty_default_chain() {
         let ts_leaf = TextStyle::new(16.0).with_family(Some("Consolas"));
@@ -3157,8 +2932,7 @@ mod font_plan_tests {
     /// 换方案必须清空测量缓存——方案不在 `measure_key` 里（它是渲染器级状态），
     /// 不清就会拿旧方案的宽度布局新方案的文字。
     ///
-    /// ★ 断言落在**条目数**上：只断言「宽度变了」的话，缓存完全没接线（每次重算）
-    /// 时也照样通过，而缓存正是这里唯一要验的东西。
+    /// 断言落在条目数上：只断言宽度变了，缓存没接线时也照样通过。
     #[test]
     fn set_font_plan_clears_measure_cache() {
         let mut r = tr();
@@ -3171,13 +2945,8 @@ mod font_plan_tests {
         assert_eq!(r.measure_cache_len(), 0, "换字体方案须清空测量缓存");
     }
 
-    /// ★★ 换方案必须让**已构建的回退对象**跟着失效。
-    ///
-    /// 三条缓存测试断言的都是 `measure_cache_len()`，而回退对象是另一份派生状态：
-    /// 删掉 `set_font_plan` 里的 `fallback.take()`，那三条照样绿。真实后果是用户在设置页
-    /// 改一次 `ui.font.fallback`，新链要到**重启**才生效——正是最容易复发的那颗雷。
-    /// 判据必须落在**同一个渲染器**上换第二次方案（`fallback_chain_is_applied` 用的是两个
-    /// 各只 set 一次的渲染器，碰不到这条路径）。
+    /// 换方案必须让已构建的回退对象跟着失效（守 `set_font_plan` 里的 `fallback.take()`，
+    /// 缓存条目数测试验不到它）；否则改 `ui.font.fallback` 要重启才生效。判据须在同一渲染器上换第二次方案。
     #[test]
     fn changing_the_plan_rebuilds_the_fallback_object() {
         let ts = TextStyle::new(16.0);
@@ -3205,7 +2974,7 @@ mod font_plan_tests {
     }
 
     /// 叶子级字族（主题节点的 `font_family`）仍然赢过方案默认链的链首，
-    /// 但**赢不过脚本指派**——三层合成的次序，见 `create_layout` 的文档。
+    /// 但赢不过脚本指派——三层合成的次序，见 `create_layout` 的文档。
     #[test]
     fn leaf_family_beats_plan_default_but_not_script_assignment() {
         let mut r = tr();
@@ -3222,8 +2991,7 @@ mod font_plan_tests {
         leaf_only.set_font_plan(FontPlan::new(chain(&["Microsoft YaHei UI"]), vec![]));
         let h_songti = only_plan.measure("中", &TextStyle::new(16.0)).height;
         let h_yahei = leaf_only.measure("中", &TextStyle::new(16.0)).height;
-        // ★ 没有这条对照的话，一个**把 plan.base_family() 整个忽略**的实现照样通过：
-        // `tr()` 本身就是用雅黑建的 TextFormat，右边的期望值与「什么都没做」不可区分。
+        // 对照：`tr()` 本身用雅黑建 TextFormat，没有这条的话忽略 plan.base_family() 的实现照样通过。
         assert_ne!(
             h_songti, h_yahei,
             "宋体与雅黑量出同样的行高，本用例的对照失效、下面那条断言等于没测"
@@ -3247,7 +3015,7 @@ mod font_plan_tests {
 
 // 非 Windows mock 文本渲染器的冒烟测试：验证 mock 的等宽近似测量契约
 // （字符数 × 字号 × 0.6）与 draw_text 空操作。
-// 边界：真实字形宽度/渲染由 Windows + DirectWrite 决定，**不在此覆盖，须 Windows 实测**。
+// 边界：真实字形宽度/渲染由 Windows + DirectWrite 决定，不在此覆盖，须在 Windows 上测。
 #[cfg(all(test, mock_text))]
 mod tests {
     use super::TextRenderer;
@@ -3303,18 +3071,10 @@ mod tests {
 
 /// 方案自带字体（`[engine.chaizi]` 的 `font_path` / `font_family`）的家族名探针。
 ///
-/// # 为什么需要它
+/// 把「家族名写对」与「写错」两种情形的测量宽度和着墨像素数并排量出来，判断某个方案的字体
+/// 有没有真的生效（`SetFontFamilyName` 匹配不上时静默回落，见 [`TextRenderer::set_chaizi_font`]）。
 ///
-/// 词库级字体走的是 [`TextRenderer::set_chaizi_font`] 那条**自定义字体集**通路：
-/// PUA 段先 `SetFontCollection(自定义集)`，再 `SetFontFamilyName(方案里写的家族名)`。
-/// 后者在集里找不到该家族名时**不报错**——`create_layout` 里连返回值都没接。方案作者把
-/// `font_family` 写成了字体文件名、或写成自己起的别名（而不是 TTF `name` 表里的家族名）时，
-/// 画面上只表现为「这一段字没画出来 / 尺寸不对」，日志里一片安静。
-///
-/// 本用例把「家族名写对」与「写错」两种情形的**测量宽度**和**实际着墨像素数**并排量出来，
-/// 一次就能判断某个方案的字体到底有没有真的生效。
-///
-/// ⚠️ 需要真实字体文件，故 `#[ignore]`；用环境变量喂参数，不把任何用户路径写进仓库。
+/// 需要真实字体文件，故 `#[ignore]`；用环境变量喂参数，不把用户路径写进仓库。
 /// ```text
 /// $env:WIND_TEST_FONT        = "…\toli\Menk Qagan StdEx Tig.ttf"
 /// $env:WIND_TEST_FAMILY      = "Menk字体"                  # 方案里声明的
@@ -3328,8 +3088,7 @@ mod dict_font_probe {
 
     /// 缓冲区里「着了墨」的像素数（背景全白，取蓝通道判暗）。
     ///
-    /// ★ 判据用**着墨像素**而不是测量宽度：字族名没匹配上时，测量仍可能回落到某个字体
-    /// 而返回一个像模像样的宽度——只有真去画一遍，才分得开「量出来有」与「画出来有」。
+    /// 判据用着墨像素而非测量宽度：字族名没匹配上时测量仍可能回落到某个字体、返回像样的宽度。
     fn inked(buf: &[u8], w: u32, h: u32) -> usize {
         (0..(w * h) as usize)
             .filter(|i| buf[i * 4 + 2] < 200)
@@ -3338,9 +3097,7 @@ mod dict_font_probe {
 
     /// 最右侧着墨列的 x（无墨返回 `None`）。
     ///
-    /// ★★ 它是「测量说多宽」与「实际画到哪」的**对照量**：两者接近 = 画全了；
-    /// 实际远小于测量 = 字形在中途丢了（缺字、字体没生效、或上游把串截短了）。
-    /// 只看着墨总数分不开这两种——字形密的短串与字形疏的长串可以数出同一个总数。
+    /// 与测量宽度对照：接近 = 画全了，远小于 = 字形中途丢了（只看着墨总数分不开）。
     fn rightmost_ink(buf: &[u8], w: u32, h: u32) -> Option<u32> {
         (0..w)
             .rev()
@@ -3378,9 +3135,8 @@ mod dict_font_probe {
                     continue;
                 }
             }
-            // ★ 字重是独立一维：词库自带字体通常**只含 Regular 一个字重**，而候选窗的选中态
-            // 常被主题配成加粗（`[text.selected] font_weight`）。自定义字体集里找不到 Bold 时
-            // 会发生什么，只有量一次才知道——「首候选空白、其余正常」正是这个形状。
+            // 字重是独立一维：词库自带字体通常只含 Regular，而选中态常被主题配成加粗
+            // （`[text.selected] font_weight`），「首候选空白、其余正常」就是这个形状。
             let weight: i32 = std::env::var("WIND_TEST_WEIGHT")
                 .ok()
                 .and_then(|s| s.parse().ok())
