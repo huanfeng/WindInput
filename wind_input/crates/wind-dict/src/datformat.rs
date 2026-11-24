@@ -1,8 +1,6 @@
 //! DAT 格式 (wdat) — Double-Array Trie 词典
 //!
-//! 与 Go 版 `wind_input/internal/dict/datformat/` 对齐（主 DAT；暂不含简拼 AbbrevSection，
-//! 与现 wdb 内容对等——全拼/全码）。前缀查询为「数组跳转 + 子树 DFS」，较 wdb 的键索引
-//! 二分更省更快，适合拼音大词库逐键前缀检索。
+//! 前缀查询为「数组跳转 + 子树 DFS / 分支限界」，适合拼音大词库逐键前缀检索。
 //!
 //! 文件布局（小端）：
 //! ```text
@@ -11,17 +9,16 @@
 //! [LeafTable: leaf_count*8]   每条 {entry_off u32, entry_len u16, _ u16}
 //! [EntryRecords: entry_count*22]  每条 {text_off u32, text_len u16, weight i32, order u32, boundary u64}
 //! [StringPool]
+//! [AbbrevSection(可选)]  24B 自描述头 + DAT/MaxW/Leaf/Entry + 简拼 CharMap，共享 StringPool
 //! [CharMap 1028B]  {max_code i32, char_map[256] i32}
 //! [Meta(可选) 4B len + bytes]
 //! ```
 //! DAT 查询：`base[s]+c=t`（状态 s 经紧凑码 c 转移到 t），`check[t]==s` 校验；
 //! `base[t]<0` 表叶节点，`-base[t]-1` 为 LeafTable 索引；`c=0` 为终止符。
 //!
-//! **MaxW 段**（v6）：`maxw[s]` = 以状态 s 为根的子树内所有条目 weight 的最大值，
-//! `NO_MAXW`（= i32::MIN）表示子树无条目。它是前缀 Top-K 查询的**剪枝上界**，
-//! 使查询成本随 K 而非随子树规模 M 增长（见 `search_prefix`）。
-//! 段位置紧跟 Check 之后，无需 Header 新字段——`maxw_off = dat_off + dat_size*4*2` 可直接算出，
-//! 其后各段偏移（leaf/entry/str）本就在 Header 中显式存储。
+//! MaxW 段（v6）：`maxw[s]` = 以状态 s 为根的子树内所有条目 weight 的最大值，`NO_MAXW`
+//! （= i32::MIN）表示子树无条目。它是前缀 Top-K 查询的剪枝上界（见 `search_prefix`）。
+//! 段位置紧跟 Check 之后，偏移可直接算出，无需 Header 新字段。
 
 use crate::binformat::DictEntry;
 use crate::mapping::Mapped;
@@ -31,27 +28,19 @@ use std::path::Path;
 use tracing::info;
 
 const MAGIC: [u8; 4] = *b"WDAT";
-// v3：EntryRecord 增加 order u32（全局自然序，10→14B），跨编码等权时按词库出现顺序排序，
-// 不再退化为叶内序号致编码字母序。旧 v2 缓存 mtime/指纹不匹配自动重建。
-// v4：EntryRecord 增加 boundary u64（音节起始位 bitmask，14→22B）。源数据 rime `ni hao` 的
-// 空格本就是音节真值边界，此前在解析期被 replace(' ',"") 丢弃，迫使查询侧用 DAG 重新猜切分
-// （xi'an vs xian 无从分辨）、造词侧靠 410 音节暴力反推。key 仍为扁平串，故 DAT/前缀查询
-// 语义完全不变——边界只作为 entry 侧元数据随查询结果返回。旧缓存同样靠指纹不匹配自动重建。
-// v5：AbbrevSection 的条目文本从「词」改为「全拼码」——二级索引指向主键而非复制数据。
-// 简拼查询因此变成「查索引拿码 → 走主表装配候选」，候选得到真实的 code 与 boundary，
-// 词频不再因简拼/全拼分裂成两份计数。**二进制结构完全未变**，变的是那个字符串字段的
-// 语义，故必须 bump：旧 v4 缓存若按新逻辑读，会把词当成码拿去查主表、简拼全数落空。
-// 旧缓存靠内容指纹不匹配自动重建，无迁移代码。
-// v6：新增 MaxW 段（每状态 4B，子树最大 weight），前缀 Top-K 查询改为分支限界。
-// 旧 v5 缓存缺该段，且 leaf/entry 偏移整体前移，按新布局读必然错位，故必须 bump。
-// 旧缓存靠版本不匹配自动重建，无迁移代码。
+// 版本史（旧缓存一律靠版本/指纹不匹配自动重建，无迁移代码）：
+// v3：EntryRecord 加 order u32（全局出现序），等权候选跨编码按出现顺序而非编码字母序。
+// v4：EntryRecord 加 boundary u64（音节起始位 bitmask），key 仍为扁平串，查询语义不变。
+// v5：AbbrevSection 的条目文本从「词」改为「全拼码」。二进制结构未变但语义变了，旧缓存
+//     按新逻辑读会把词当码查主表，故必须 bump。
+// v6：新增 MaxW 段，leaf/entry 偏移整体后移。
 const VERSION: u32 = 6;
 const HEADER_SIZE: usize = 48;
 const LEAF_SIZE: usize = 8;
 const ENTRY_SIZE: usize = 22;
 const CHARMAP_SIZE: usize = 4 + 256 * 4; // 1028
 
-/// `maxw[s]` 的空子树哨兵。**刻意不复用 `i32::MIN` 之外的值**：weight 为 i32，
+/// `maxw[s]` 的空子树哨兵。刻意不复用 `i32::MIN` 之外的值：weight 为 i32，
 /// 任何真实条目的 weight 都 > i32::MIN，故该哨兵不会与真实值混淆。
 /// （当前词库最小 weight 为 0，但不依赖该事实。）
 const NO_MAXW: i32 = i32::MIN;
@@ -69,11 +58,10 @@ struct Dat {
     max_code: i32,
 }
 
-/// 从**已按字典序排好、唯一**的编码列表**直接构建 DAT**——不建中间 trie，峰值内存仅 base/check。
-/// `data_index` = 编码在列表中的下标（= LeafTable 索引）。这是相对「先建几百万小节点 trie 再转双数组」
-/// 的关键省内存改造：trie 那几百万个小分配会把堆撑高、碎片化、不还给系统（低配设备 OOM 风险）。
+/// 从已按字典序排好、唯一的编码列表直接构建 DAT，不建中间 trie（几百万小节点会把堆撑高、
+/// 碎片化）。`data_index` = 编码在列表中的下标（= LeafTable 索引）。
 ///
-/// 原理：一个 trie 节点 ⇔ 一段**共享前缀**的连续编码区间 `[lo,hi)`（前缀 = codes[lo][..depth]）。
+/// 原理：一个 trie 节点 ⇔ 一段共享前缀的连续编码区间 `[lo,hi)`（前缀 = codes[lo][..depth]）。
 /// BFS 处理 (state, lo, hi, depth)：终止符 = 区间内 len==depth 的那个唯一编码（排序在最前）；
 /// 其余编码按第 depth 字节连续分组即各子节点的子区间。
 fn build_dat_from_sorted(codes: &[&str]) -> Dat {
@@ -94,14 +82,9 @@ fn build_dat_from_sorted(codes: &[&str]) -> Dat {
         }
     }
 
-    // 2) base/check 初始化（check=-1 表空闲），root 占位 0；空闲位置(1..)串成链表，
-    //    见 FreeList 顶部说明——这是解决大规模 key 集合构建退化为平方级耗时的关键。
-    //    按键数预留：实测 dat_size ≈ 2.3–5.2 × 键数（雾凇主表 52.5 万键 → 271 万，简拼 18.4 万
-    //    → 43 万），按 6× 预留就不再翻倍扩容——扩容要把 base/check/next/prev 四个数组各拷一遍，
-    //    那是构建期约 80 MB 瞬时峰值的来源；尾部多余的空闲最后一步裁掉，不进文件。
-    //    预留本身的常驻是 16 B × 槽数（check/next/prev 都实际写满）。它不比旧做法差：旧做法
-    //    翻倍扩容最终停在 ≥ dat_size 的 2 的幂上，即 (1–2) × dat_size ≈ (2.3–10.4) × 键数，
-    //    6× 落在这个区间里；低比例词库（简拼类 2.3×）多留一些，裁掉后 shrink_to_fit 归还。
+    // 2) base/check 初始化（check=-1 表空闲），root 占位 0；空闲位置(1..)串成链表（见 FreeList）。
+    //    按 6× 键数预留：dat_size 实际约 2.3–5.2 × 键数，预留够就不再翻倍扩容（扩容要拷四个
+    //    数组，是构建期瞬时峰值的来源）；尾部多余空闲最后裁掉、shrink_to_fit 归还。
     let cap = (codes.len().saturating_mul(6)).max(256);
     let mut base = vec![0i32; cap];
     let mut check = vec![-1i32; cap];
@@ -196,15 +179,8 @@ fn build_dat_from_sorted(codes: &[&str]) -> Dat {
 /// 空闲槽位链表：把 base/check 中未占用的位置（`check[i]==-1`）串成一条按位置升序的
 /// 双向链表。位置 0 恒为根状态的占位，永不入链。
 ///
-/// **它解决的问题**：旧实现里 `find_base` 从一个整数游标逐个探测候选 base 值，游标只在
-/// "已确认占用"的前缀上推进——一次探测中途放弃、试过但没用上的大段位置不会被记住，
-/// 下一次调用又要把同一片已知大概率冲突的区间从头探一遍。在大规模（百万级 key）、编码
-/// 集中在小字母表（如本项目 a-z）的码表下，这片"重复无效探测"随构建推进线性变长，
-/// 总代价退化为 O(状态数²)——真实词库（146 万 key）上实测数分钟不收敛、内存伴随大量
-/// "探测失败也触发扩容"的调用被撑到 GB 级。
-///
-/// 改为只在**当前确实空闲**的位置间跳转，代价与空闲位置数成正比、不受历史已占用区间
-/// 影响，是双数组树构建的标准解法（darts-clone / cedar 等实现均采用同类机制）。
+/// `find_base` 只在当前确实空闲的位置间跳转，代价与空闲位置数成正比。若改回整数游标逐个
+/// 探测，大规模小字母表码表的构建会退化为 O(状态数²)。这是 darts-clone / cedar 的标准做法。
 struct FreeList {
     /// next[i] = 位置 i 之后第一个空闲位置，0 表示链尾（0 本身不会是空闲位置）。
     next: Vec<u32>,
@@ -275,11 +251,9 @@ impl FreeList {
 
 /// 子节点数达到这个值的节点按「稀疏游标」安放（[`find_base_sparse`]）。
 ///
-/// 从空闲链表头起首次适配，对小节点很好（填满头部的空洞），对高分支节点是灾难：每个候选
-/// 位置都要查全部子节点，而头部区域早被小节点填得七零八落，几十个子节点同时落空的概率
-/// 极低，于是一路试到很远——雾凇简拼 DAT 只有主表 1/3 的键，构建却比主表慢一半，正是
-/// 这个退化。darts-clone / cedar 的做法是分两个游标：高分支节点去数组尾部的稀疏区，
-/// 小节点继续填头部的洞。阈值取 4：拼音与简拼树里 ≥4 个子节点的节点占比不高但耗时占大头。
+/// 首次适配从链表头找位置，对小节点好（填头部空洞），对高分支节点是灾难：头部早被填得
+/// 七零八落，几十个子节点同时落空的位置要试到很远。故仿 darts-clone / cedar 分两个游标，
+/// 高分支节点去尾部稀疏区。取 4：≥4 个子节点的节点占比不高但耗时占大头。
 const HIGH_FANOUT: usize = 4;
 
 /// 高分支节点的 base：从 `cursor`（上一个高分支节点落下的位置）起向后找，不回头。
@@ -351,12 +325,9 @@ fn find_base(codes: &[i32], base: &mut Vec<i32>, check: &mut Vec<i32>, free: &mu
         }
         // 候选 base：令最小编码的目标落在这个空闲位置上。
         //
-        // `b` 必须 ≥1（不能只满足 `b+min_code>=1`）：`base[s]<0` 是整个格式用来判定
-        // "s 是叶子"的符号约定（见 compute_maxw 与读取侧多处），只有真正的叶子节点会被
-        // 显式写入负的 `-(leaf)-1`；任何**非叶状态**（走到这里、正在为其子节点找 base 的
-        // 节点）的 base 若意外为负，会被这些判定误当成叶子，其整棵子树从此在自顶向下的
-        // 遍历里"消失"（点查询仍能用，因为它按字节走 check[] 链、不看符号——这正是本 bug
-        // 曾经的隐蔽之处：exact match 全绿，只有 MaxW/前缀分支限界会跳过整棵子树）。
+        // `b` 必须 ≥1（不能只满足 `b+min_code>=1`）：`base[s]<0` 是格式判定叶子的符号约定，
+        // 非叶状态的 base 若为负，整棵子树会在 MaxW/前缀分支限界的遍历里消失（点查按 check[]
+        // 走、不看符号，所以精确匹配测试测不出来）。
         let b = pos as i32 - min_code;
         if b < 1 {
             pos = free.next[pos as usize];
@@ -410,23 +381,17 @@ fn pool_hash(bytes: &[u8]) -> u64 {
     // 长度混进去：否则 "ab\0" 与 "ab" 在补零后同哈希（相等性仍由 slot_of 逐字节判，
     // 这里只是少一次探测冲突）。
     let h = (h.rotate_left(5) ^ bytes.len() as u64).wrapping_mul(SEED);
-    // ★ 终混：把高位转到低位。乘法积的低 k 位只取决于两个乘数的低 k 位，而 `slot_of` 取
-    // 槽用的恰恰是低位（`h & mask`）——不转的话，短中文串的落点几乎只由头两个字节决定。
-    // 拿拼音词库全部 64 万个唯一文本模拟，最终 2^21 槽：不转时平均探测 7.4 次、最坏 300+，
-    // 只落在 28.5 万个不同的槽；转过之后平均 1.2、最坏十几，与理想哈希持平。
-    // rustc-hash 2.x 在 `finish` 里补的也是这一下（同样是 26）。
+    // 终混：把高位转到低位。`slot_of` 取槽用低位（`h & mask`），而乘法积的低位只取决于乘数
+    // 低位，不转的话短中文串的落点几乎只由头两个字节决定，探测次数暴涨。rustc-hash 2.x 的
+    // `finish` 补的也是这一下（同样是 26）。
     h.rotate_left(26)
 }
 
 /// 字符串池（去重）。
 ///
-/// **索引里不存字符串副本**：槽位存的是 `(池内偏移, 字节长)`，判等时回 `buf` 取那段字节。
-/// 从前是 `HashMap<String, u32>`，每个唯一文本要在索引里再留一份 `String`，而同一份字节
-/// 已经躺在 `buf` 里了——雾凇 65 万条那次实测，这份副本白占 54 MB（`String` 头 24 字节 +
-/// 内容 + HashMap 自身的桶开销）。换成开放寻址后索引恒为 `8 字节 × 槽数`。
-///
-/// 顺带比 `HashMap<String, u32>` 快：省掉每个唯一文本一次堆分配 + memcpy，查找也不必
-/// 顺着 `String` 的指针跳到堆上另一处。
+/// 索引里不存字符串副本：槽位存 `(池内偏移, 字节长)`，判等时回 `buf` 取字节。比
+/// `HashMap<String, u32>` 省掉每个唯一文本一份 `String`（大词库上几十 MB）和一次堆分配，
+/// 索引恒为 `8 字节 × 槽数`。
 struct StringPool {
     buf: Vec<u8>,
     /// 开放寻址（线性探测）表，槽位 `(offset, len)`，`len == POOL_EMPTY` 为空。
@@ -528,11 +493,8 @@ fn rss_mb() -> u64 {
 
 /// 构建完成、待落盘的 .wdat 各段（含全部区段偏移）。由 [`WdatWriter::build`] 产出。
 ///
-/// 与 [`WdatWriter`] 分开，是为了**让条目数据早点死**：`build` 消费 writer，文本进池即
-/// 释放，走到这里时那批数据已经还给分配器了（雾凇 65 万条构建期实测占 130 MB）。
-///
-/// 可以 [`emit`](Self::emit) 多次：落盘失败要退到别的目录、或写成了却打不开要换个地方
-/// 重来时，需要的只是这些字节，不是条目。
+/// 与 [`WdatWriter`] 分开是为了让条目数据早点释放。可以 [`emit`](Self::emit) 多次：
+/// 落盘失败要退到别的目录或换个地方重来时，需要的只是这些字节。
 pub struct WdatBlob {
     dat: Dat,
     leaves: Vec<DatLeafRow>,
@@ -682,14 +644,9 @@ impl WdatBlob {
 
 /// 计算 MaxW 段（v6）：`maxw[s]` = 以状态 s 为根的子树中所有条目 weight 的最大值。
 ///
-/// 这是前缀 Top-K 查询的剪枝上界，须满足**不变量**：
-/// 对任意状态 s 与任意 `e ∈ subtree(s)`，有 `weight(e) <= maxw[s]`。
-/// 上界只需保守（偏大无害、偏小会漏结果），故任何"取 max"的实现错误方向都是危险的，
-/// 单元测试须逐状态对拍暴力计算的结果。
-///
-/// **实现为两趟而非递归**：DAT 深度等于最长编码长度，用户词库可能出现极长编码，
-/// 递归有栈溢出风险。第一趟前序 DFS 收集访问序（父必先于子出现），第二趟逆序回填
-/// （于是子必先于父被算出），等价于后序遍历且无递归。
+/// 不变量：对任意状态 s 与任意 `e ∈ subtree(s)`，`weight(e) <= maxw[s]`。偏大无害、偏小会漏
+/// 结果，单元测试须逐状态对拍暴力结果。实现为两趟而非递归（极长编码有栈溢出风险）：前序 DFS
+/// 收集访问序，再逆序回填，等价于后序遍历。
 fn compute_maxw(dat: &Dat, leaves: &[DatLeafRow], entries: &[DatEntryRow]) -> Vec<i32> {
     let n = dat.base.len();
     let mut maxw = vec![NO_MAXW; n];
@@ -763,12 +720,12 @@ fn compute_maxw(dat: &Dat, leaves: &[DatLeafRow], entries: &[DatEntryRow]) -> Ve
     maxw
 }
 
-/// wdat 写入器：与 binformat::DictWriter 同样接口（add(code, entries)），输出 DAT 格式。
-/// `add_abbrev` 追加简拼（声母缩写）表，写入独立 AbbrevSection（与全拼查询互不污染）。
 /// 写入侧的一条候选：`(text, weight, order, boundary)`。
 /// boundary 见 [`DictEntry::boundary`]（音节起始位 bitmask，0=无边界信息）。
 type WriteEntry = (String, i32, u32, u64);
 
+/// wdat 写入器：`add(code, entries)` 收集全部条目后一次构建。`add_abbrev` 追加简拼表，
+/// 写入独立 AbbrevSection（与全拼查询互不污染）。
 pub struct WdatWriter {
     keys: Vec<(String, Vec<WriteEntry>)>,
     abbrevs: Vec<(String, Vec<WriteEntry>)>,
@@ -796,14 +753,14 @@ impl WdatWriter {
     }
 
     /// 追加一个 code 的候选（`(text, weight)`）。order 按 code 内序号自动补全（向后兼容旧语义）。
-    /// 需要**跨编码全局自然序**（无权重按词库出现顺序）时改用 [`add_with_order`]。
+    /// 需要跨编码全局自然序（无权重按词库出现顺序）时改用 [`add_with_order`]。
     pub fn add(&mut self, code: String, entries: Vec<(String, i32)>) {
         if !entries.is_empty() {
             self.keys.push((code, with_local_order(entries)));
         }
     }
 
-    /// 追加一个 code 的候选，携带**显式全局 order**（`(text, weight, order)`）。
+    /// 追加一个 code 的候选，携带显式全局 order（`(text, weight, order)`）。
     /// order 为词库文件内的全局出现序（跨编码单调），使等权候选跨编码按出现顺序排列。
     /// order 须 < `composite::PER_LAYER_NO_OFFSET`（1e7），否则会溢出到层序偏移带。
     /// boundary 置 0（无边界信息）；拼音全量构建请用 [`Self::add_with_boundary`]。
@@ -819,7 +776,7 @@ impl WdatWriter {
         }
     }
 
-    /// 追加一个 code 的候选，携带 order **与音节边界**（`(text, weight, order, boundary)`）。
+    /// 追加一个 code 的候选，携带 order 与音节边界（`(text, weight, order, boundary)`）。
     /// 供拼音词典构建路径使用——边界取自 rime 源数据 `ni hao` 的空格（真值，非 DAG 猜测）。
     /// boundary 语义见 [`DictEntry::boundary`]。
     pub fn add_with_boundary(&mut self, code: String, entries: Vec<WriteEntry>) {
@@ -828,9 +785,8 @@ impl WdatWriter {
         }
     }
 
-    /// 追加简拼条目：`abbrev`=声母序列（`nh`），`entries` 每条 `(全拼码, weight)`
-    /// —— **存的是码不是词**（v5，见文件头版本说明）。空条目忽略；order 按叶内序号补全。
-    ///
+    /// 追加简拼条目：`abbrev`=声母序列（`nh`），`entries` 每条 `(全拼码, weight)`，
+    /// 存的是码不是词（v5）。空条目忽略；order 按叶内序号补全。
     /// `weight` 只决定该简拼下截断时保留哪些码，候选自身的权重来自主表。
     pub fn add_abbrev(&mut self, abbrev: String, entries: Vec<(String, i32)>) {
         if !entries.is_empty() {
@@ -846,25 +802,18 @@ impl WdatWriter {
         self.keys.len()
     }
 
-    /// 构建各段并原子写 .wdat（tmp+pid+seq → rename，与 binformat 一致，仅防读到半文件）。
-    ///
-    /// **消费 `self`**：文本进池即释放，写盘时条目数据已经还给分配器了（雾凇 65 万条那次
-    /// 实测，这批数据在构建期间占 130 MB）。
-    ///
-    /// 要在多个目标之间回退的调用方用 [`Self::build`] 拿到 [`WdatBlob`]，它可以落盘多次。
+    /// 构建各段并原子写 .wdat（tmp+pid+seq → rename，防读到半文件）。消费 `self`，让条目数据
+    /// 早点释放。要在多个目标之间回退的调用方用 [`Self::build`] 拿到可多次落盘的 [`WdatBlob`]。
     pub fn write(self, path: impl AsRef<Path>) -> anyhow::Result<()> {
         self.build().emit(path.as_ref())
     }
 
-    /// 排序 + 建 DAT + 入池，产出待落盘的 [`WdatBlob`]。消费 `self`。
-    ///
-    /// 想落盘多次（正式路径写不进去要退到临时目录、或写成了但打不开要换个地方重来）就用
-    /// 这个：条目数据在这一步结束时已经释放，而 `WdatBlob::emit` 只碰那些字节。
+    /// 排序 + 建 DAT + 入池，产出待落盘的 [`WdatBlob`]。消费 `self`，条目数据在这一步结束时
+    /// 已释放；想落盘多次就用这个。
     pub fn build(mut self) -> WdatBlob {
-        // 按 code 排序（确定性 + DAT key 唯一）。排的是 owned 元组：下面要逐 code 把
-        // entries 喂进流式写入器后立刻释放，持引用做不到。
-        // 两条路径共用一套构建：排好序喂给流式写入器。同一输入两条路径逐字节相同，
-        // 这是 S3 对拍的基础（`stream_writer_matches_batch_writer_byte_for_byte`）。
+        // 按 code 排序（确定性 + DAT key 唯一）后喂给流式写入器，与流式路径共用一套构建，
+        // 同一输入逐字节相同（`stream_writer_matches_batch_writer_byte_for_byte`）。排 owned
+        // 元组是为了逐 code 喂完立刻释放。
         let t_all = std::time::Instant::now();
         let mut keys = std::mem::take(&mut self.keys);
         keys.sort_by(|a, b| a.0.cmp(&b.0));
@@ -888,9 +837,8 @@ impl WdatWriter {
     }
 }
 
-/// 流式写入器（S3）：code **按字节序严格递增**喂入，text 字节直接进池、不建 `String`；
-/// 码存进一个连续字节缓冲加偏移表，而不是几十万个 `String`。常驻 ≈ 池 + 条目行 + 码缓冲，
-/// 取代 [`WdatWriter`] 那份把全部条目以 owned 元组收满内存的做法。
+/// 流式写入器：code 按字节序严格递增喂入，text 字节直接进池、不建 `String`，码存进连续
+/// 字节缓冲加偏移表。常驻 ≈ 池 + 条目行 + 码缓冲，不像 [`WdatWriter`] 那样收满 owned 元组。
 ///
 /// 喂入顺序就是 DAT 的键序（由段的 [`WdatReader::codes`] 游标或排好序的内存表保证）；
 /// 简拼键同样按序喂入，各简拼下的条目顺序照原样写（调用方负责「权重降序、码升序」）。
@@ -970,7 +918,7 @@ impl WdatStreamWriter {
         self.code_spans
             .push((self.codes_buf.len() as u32, code.len() as u16));
         self.codes_buf.extend_from_slice(code.as_bytes());
-        // 叶的计数是 u16：超过 65535 条只截断**计数**，条目区偏移仍按实际条数前进——
+        // 叶的计数是 u16：超过 65535 条只截断计数，条目区偏移仍按实际条数前进——
         // 与从前 `build_section` 一致，后续叶的偏移才不会错位（release 不查溢出，
         // 用 u16 累加会回绕）。
         self.leaves
@@ -1223,14 +1171,11 @@ pub struct PrefixSearchStats {
     pub entries_read: usize,
 }
 
-/// 前缀查询的排序键。`Ord` 定义为「**越差越大**」，故堆顶恒为当前最差的入选者，
+/// 前缀查询的排序键。`Ord` 定义为「越差越大」，故堆顶恒为当前最差的入选者，
 /// 且 `into_sorted_vec()`（升序）直接给出最优→最差的最终顺序。
 ///
-/// 三、四级 tie-break 取 `(leaf, slot)`（LeafTable 索引 + 叶内序号）而**不是遍历序**。
-/// 这一点是必须的：`with_local_order` 写入的词库（`export_to_writer` / combined 合并路径）
-/// order 是「code 内序号 0,1,2」，等权时会大量打平；若拿遍历序做 tie-break，DFS 与分支限界
-/// 两种遍历顺序会给出不同结果——既无法对拍验证，也会让候选顺序随实现改动而抖动。
-/// `leaf` 是构建期按 code 字典序分配的稳定编号，任何遍历顺序下答案唯一。
+/// 三、四级 tie-break 取 `(leaf, slot)` 而不是遍历序：局部 order 的词库等权时大量打平，
+/// 拿遍历序会让 DFS 与分支限界给出不同结果，既无法对拍也会随实现改动抖动。
 #[derive(PartialEq, Eq)]
 struct RankKey {
     weight: i32,
@@ -1305,10 +1250,8 @@ impl PartialOrd for Pending {
     }
 }
 
-/// 路径链节点：`(父节点索引, 该步字节)`。
-///
-/// **入队时不拼 String**：入队状态数可能远大于最终产出条目数，且绝大多数入队项会被剪枝
-/// 丢弃，给它们各分配一个 code 字符串是纯浪费。只在真正要产出条目时才回溯拼接。
+/// 路径链节点：`(父节点索引, 该步字节)`。入队时不拼 String（多数入队项会被剪枝），
+/// 只在真正产出条目时才回溯拼接。
 struct PathNode {
     parent: u32,
     byte: u8,
@@ -1377,11 +1320,8 @@ impl Iterator for CodeCursor<'_> {
 
 pub struct WdatReader {
     mmap: Mapped,
-    /// 本 reader 映射的文件路径。
-    ///
-    /// 不是给日志用的：**二级缓存要靠它认出「我是从哪几个文件派生出来的」**
-    /// （见 `reverseidx` 的 `.wridx` 指纹）。自己在调用方那边重新推导一遍那些路径，
-    /// 就是本仓反复出现的「同一份推导写两处、其中一处悄悄过时」。
+    /// 本 reader 映射的文件路径。二级缓存（`.wridx` 指纹）靠它认出派生源，不要在调用方
+    /// 重新推导一遍。
     path: std::path::PathBuf,
     leaf_count: u32,
     str_off: usize, // 共享字符串池（主表与简拼共用）
@@ -1660,16 +1600,11 @@ impl WdatReader {
         self.abbrev.is_some()
     }
 
-    /// 是否存在**严格长于** `prefix` 的编码（trie 上即：prefix 状态还有非终止后继）。
+    /// 是否存在严格长于 `prefix` 的编码（trie 上即：prefix 状态还有非终止后继）。
     ///
-    /// 成本 O(max_code)（≤ 出现过的字节种数，码表约 26）次数组读，**不触碰 LeafTable /
-    /// StringPool**。这是给「更长后继」这类**存在性**判据用的——此前调用方一律走
-    /// `search_prefix(input, 64)` 再 `.any(code 更长)`，等于为一个 bool 遍历整棵子树，
-    /// 在 `ok` 拼字这类单前缀 8.8 万条的词库上单次即 20ms 级。
-    ///
-    /// 注意语义比「search_prefix 后 any」**更严格也更正确**：后者的结果先经权重排序截断
-    /// （长码候选权重低时会被挤出而漏判），跨层合并时还会因「同 text 取最短码」抹掉长码；
-    /// 本函数直接问 trie，不受二者影响。
+    /// 成本 O(max_code) 次数组读，不触碰 LeafTable / StringPool，供「更长后继」这类存在性判据用。
+    /// 别改回「`search_prefix` 后 `.any(更长)`」：那要遍历整棵子树，且结果经权重截断与跨层去重
+    /// 后会漏判长码。
     pub fn has_longer_code(&self, prefix: &str) -> bool {
         let v = &self.main;
         if v.dat_size == 0 {
@@ -1705,42 +1640,23 @@ impl WdatReader {
         s
     }
 
-    /// 前缀查找：按权重降序、order 升序取前 `limit` 条（与 binformat::DictReader 对齐）。
+    /// 前缀查找：按权重降序、order 升序取前 `limit` 条。
     ///
-    /// **v6 起为分支限界（branch and bound）**，成本随 `limit` 而非随子树规模增长。
-    /// 借助 v6 的 MaxW 段（`maxw[s]` = 子树内最大 weight）按上界降序展开状态，一旦
-    /// 「结果已满 且 当前出队项的上界严格劣于第 `limit` 名」即可终止——此时优先队列中
-    /// 剩余各项的上界都不高于它，其子树内条目全部不可能入选。
-    ///
-    /// 改此实现前请先读 `docs/design/prefix-topk-branch-and-bound.md` 的正确性论证。两处要害：
-    ///
-    /// 1. **剪枝判据必须是严格小于**。上界只覆盖 RankKey 的首要键 weight；`bound == 第 limit 名
-    ///    的 weight` 时，子树内仍可能有同 weight 而 order 更小的条目应当取代它。放宽成 `<=`
-    ///    会静默漏结果——没有崩溃、没有日志，只是候选少了几条。
-    /// 2. **`NO_MAXW` 子树直接跳过**：空子树无条目可贡献，入队只是浪费。
-    ///
-    /// 旧的全遍历实现保留为 [`search_prefix_scan`](Self::search_prefix_scan)，仅供对拍验证。
+    /// 分支限界：借 MaxW 段按上界降序展开状态，「结果已满且出队项上界严格劣于第 `limit` 名」
+    /// 即终止，成本随 `limit` 而非子树规模增长。改前先读
+    /// `docs/design/prefix-topk-branch-and-bound.md`。两处要害：剪枝判据必须是严格小于
+    /// （上界只覆盖 weight，同 weight 的条目仍可能按 order 胜出，放宽成 `<=` 会静默漏结果）；
+    /// `NO_MAXW` 子树直接跳过。全遍历参考实现见 [`search_prefix_scan`](Self::search_prefix_scan)。
     pub fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<DictEntry> {
         self.search_prefix_stats(prefix, limit).0
     }
 
-    /// 前缀查找，只取**音节数不超过 `max_syllables`** 且**在 `completed_len` 处音节边界
-    /// 对齐**的条目（拼音短输入严格档，判据见 [`crate::cached::prefix_entry_keep`]）。
+    /// 前缀查找，只取音节数不超过 `max_syllables` 且在 `completed_len` 处音节边界对齐的条目
+    /// （拼音短输入严格档，判据见 [`crate::cached::prefix_entry_keep`]）。
     ///
-    /// ## 为什么必须下推到这一层，而不是查完再过滤
-    ///
-    /// 过滤放在调用方时，`limit` 配额会被**注定要丢弃**的条目吃光：实测单字母 `d` 取
-    /// 1000 条补全，过闸门的只有 68 条单字，其余 932 条白占名额 —— 且把上限提到 5000
-    /// 也没用（`MAX_COMPLETION_CANDIDATES` clamp 在 1000），只是让 `push_unique` 的
-    /// O(n²) 查重陪跑。下推之后 top-N 直接就是 N 条合格条目。
-    ///
-    /// ## 剪枝仍然正确
-    ///
-    /// 过滤与分支限界的终止判据**正交**：`node.bound` 是子树内最大 weight 的上界，
-    /// `bound < worst.key.weight` 意味着该子树内**所有**条目（合格与否）都劣于当前第
-    /// `limit` 名，故合格条目也不可能入选，`break` 依然安全。代价在效率而非正确性 ——
-    /// 合格条目稀疏时堆更晚填满、剪枝更晚生效，扫描量上升。另按码长上限剪掉过深的子树，
-    /// 见 [`crate::cached::prefix_code_len_cap`]。
+    /// 过滤必须下推到这一层：放在调用方时 `limit` 配额会被注定丢弃的条目吃光。过滤与分支限界
+    /// 的终止判据正交（上界覆盖子树内全部条目），剪枝依然正确，代价只在合格条目稀疏时扫描量
+    /// 上升。另按码长上限剪掉过深子树，见 [`crate::cached::prefix_code_len_cap`]。
     pub fn search_prefix_syllable_capped(
         &self,
         prefix: &str,
@@ -1852,7 +1768,7 @@ impl WdatReader {
                         return;
                     }
                     if heap.len() >= limit {
-                        // 堆顶是最差的入选者：不严格优于它就丢弃——**先比较后分配**，
+                        // 堆顶是最差的入选者：不严格优于它就丢弃——先比较后分配，
                         // 绝大多数条目走到这里即返回，不触碰 code/text 的 to_string()。
                         match heap.peek() {
                             Some(worst) if key >= worst.key => return,
@@ -1911,12 +1827,12 @@ impl WdatReader {
     }
 
     /// 通配查询（`docs/design/codetable-wildcard.md` §5.1）：`pattern` 中等于 `wildcard`
-    /// 的字节位匹配**恰好一个**任意码元，其余位字面匹配。
+    /// 的字节位匹配恰好一个任意码元，其余位字面匹配。
     ///
-    /// 1. **逐位推进前沿**：通配位遍历该状态全部有效转移（`1..=max_code`，稀疏，`NO_MAXW`
+    /// 1. 逐位推进前沿：通配位遍历该状态全部有效转移（`1..=max_code`，稀疏，`NO_MAXW`
     ///    子树直接跳过），字面位走一次转移；
-    /// 2. **等长档**：前沿各状态的终止叶按 `RankKey` 取前 `limit`；
-    /// 3. **更长档**（`with_prefix`）：余额 `limit - 等长条数` 交给 [`Self::bnb_collect`]，
+    /// 2. 等长档：前沿各状态的终止叶按 `RankKey` 取前 `limit`；
+    /// 3. 更长档（`with_prefix`）：余额 `limit - 等长条数` 交给 [`Self::bnb_collect`]，
     ///    以全部前沿状态的子节点为多起点入队。
     ///
     /// 两档分开取额的理由见 [`crate::layer::DictLayer::search_pattern`]。首位即通配时
@@ -2063,13 +1979,10 @@ impl WdatReader {
         out
     }
 
-    /// 前缀查找的**全遍历参考实现**（v6 之前的行为）：DFS 整棵子树 + top-N 堆。
+    /// 前缀查找的全遍历参考实现：DFS 整棵子树 + top-N 堆。
     ///
-    /// 保留它只为验证：[`search_prefix`](Self::search_prefix) 的分支限界结果必须与本函数
-    /// **逐条一致**（测试 `bnb_matches_full_scan`）。剪枝一旦写错就是静默漏候选，
-    /// 唯有对拍能可靠地发现。
-    ///
-    /// 生产路径不应调用——它的成本随子树规模而非 `limit` 增长。
+    /// 只为对拍：[`search_prefix`](Self::search_prefix) 的结果必须与它逐条一致
+    /// （`bnb_matches_full_scan`）。生产路径不应调用，成本随子树规模增长。
     pub fn search_prefix_scan(&self, prefix: &str, limit: usize) -> Vec<DictEntry> {
         let v = &self.main;
         if v.dat_size == 0 || limit == 0 {
@@ -2115,10 +2028,8 @@ impl WdatReader {
             .collect()
     }
 
-    /// 遍历全部条目（供反查索引构建）：DFS 全树**流式**回调 (code,text,weight)，
-    /// 不累积全量 Vec——避免在大词库反查时堆起数十万 DictEntry（私有堆峰值/碎片）。
-    /// 主表全部 code 的**有序游标**（字节序递增，短码在长码前），每项 `(code, leaf)`；
-    /// 配合 [`Self::leaf_entries`] 读候选。供多段 k 路归并（S4）用：拉式迭代，不像
+    /// 主表全部 code 的有序游标（字节序递增，短码在长码前），每项 `(code, leaf)`；
+    /// 配合 [`Self::leaf_entries`] 读候选。供多段 k 路归并用：拉式迭代，不像
     /// [`Self::for_each_entry`] 那样要把整段推完。
     pub fn codes(&self) -> CodeCursor<'_> {
         CodeCursor {
@@ -2179,6 +2090,7 @@ impl WdatReader {
         }
     }
 
+    /// 遍历全部条目（供反查索引构建）：DFS 全树流式回调 (code,text,weight)，不累积全量 Vec。
     pub fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {
         if self.main.dat_size == 0 {
             return;
@@ -2192,7 +2104,7 @@ impl WdatReader {
         });
     }
 
-    /// DFS 子树：对每个叶**流式**调用 on_leaf(完整code, leaf_idx)，不累积候选。
+    /// DFS 子树：对每个叶流式调用 on_leaf(完整code, leaf_idx)，不累积候选。
     /// 用显式栈避免深递归；path 随进出栈增删。
     fn for_each_leaf(
         &self,

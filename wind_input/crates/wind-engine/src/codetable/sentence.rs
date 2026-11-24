@@ -1,29 +1,13 @@
 //! 码表整句：把一长串码切成多个编码单元并组句。
 //!
-//! 设计文档：`docs/design/codetable-sentence-input.md`。
+//! 设计文档：`docs/design/codetable-sentence-input.md`（取值依据见 §11、§12）。
 //!
-//! # 与拼音整句的关系
+//! 解码器完全复用 [`ViterbiDecoder`]：它收的是按结束位置分桶的字节跨度节点（[`WordNode`]），
+//! 不含拼音语义。不复用的是切分图（码表任何位置切开都合法，直接枚举 `q - p ∈ [1, max_code_length]`
+//! 的跨度，剪枝交给词典命中与简码策略）和打分函数（见 [`score_code_node`]）。
 //!
-//! **解码器完全复用**——[`ViterbiDecoder`] 收的是「按结束位置分桶的字节跨度节点」
-//! ([`WordNode`])，不含任何拼音语义。本模块只负责产出那批节点，Viterbi 一行都不用改。
-//!
-//! 不复用的是两样东西：
-//!
-//! 1. **切分图**。拼音有 417 个合法音节构成的先验（`SyllableTrie` + `SegGraph`），
-//!    码表没有——任何位置切开都「合法」。故这里直接枚举跨度 `(p, q)`，
-//!    `q - p ∈ [1, max_code_length]`，剪枝全部交给词典命中与简码策略。
-//!    （原设计想给 `SegGraph` 加一个 `from_fixed_len` 构造器，实现时发现用不上：
-//!    `SegGraph` 的价值在 `reachable` 剪枝与歧义接缝惩罚，码表两者都没有——
-//!    全位置可达、没有「同一段又能拆成两段」的音节学含义。）
-//!
-//! 2. **打分函数**。见 [`score_code_node`]：不给单字虚词优待，理由在那里。
-//!
-//! # 为什么需要一张索引
-//!
-//! 极点五笔词库的 `weight` **是层级带，不是词频**：一简 9999 / 二简 9950 / 三简 9000 /
-//! 全码均值 851。直接拿它当整句分，`ln(9999) − ln(851) ≈ 2.46` 的落差会让任何输入
-//! 都被切成一串简码字。[`ShortCodeIndex`] 同时解决两件事：判定「这条是不是简码」，
-//! 以及给简码条目换上**它自己全码位置的权重**（那才是真实词频量纲）。
+//! 码表词库的 `weight` 是按码长发的层级带而不是词频，直接当整句分会让任何输入都被切成一串
+//! 简码字。故整句词频优先取拼音词库（[`SentenceFreq`]），退路是 [`ShortCodeIndex`]。
 
 use crate::pinyin::grammar::Grammar;
 use crate::pinyin::viterbi::{ViterbiDecoder, ViterbiResult, WordNode};
@@ -33,65 +17,34 @@ use wind_candidate::Candidate;
 use wind_dict::DictManager;
 use wind_dict::cached::CachedDict;
 
-/// 词频归一化基准——**标定系数，非精确的词库总权重**（同 `pinyin::lattice::DICT_TOTAL`
-/// 的性质，理由见那里的长注释）。
+/// 词频归一化基准，是标定系数而非精确的词库总权重（同 `pinyin::lattice::DICT_TOTAL` 的性质）。
 ///
-/// 取值来自本仓极点五笔词库的实测：4 码带 82469 条 × 均值 851 ≈ 7.0e7。
-/// 它与 [`WORD_PENALTY`] 共同构成「每词固定罚」这**一个**旋钮
-/// （`Σ ln(f/T) = Σ ln(f) − n·ln T`），换词库导致的漂移只等价于该罚值的微调，
-/// 故不必随词库精确浮动。
-///
-/// ⚠️ 与拼音侧的 `DICT_TOTAL`(2.4e8) **不同域**，两者不可互换：码表整句用的是
-/// 「全码带权重」（120~7999），拼音用的是词库原始词频（百万级）。
+/// 取值为极点五笔 4 码带条数 × 均值。它与 [`WORD_PENALTY`] 共同构成「每词固定罚」这一个旋钮
+/// （`Σ ln(f/T) = Σ ln(f) − n·ln T`），换词库的漂移只等价于该罚值微调。与拼音侧 `DICT_TOTAL`
+/// 不同域，不可互换。
 const CODE_DICT_TOTAL: f64 = 70_000_000.0;
 
-/// 走**拼音词频**时的归一化基准，取拼音侧 `pinyin::lattice::DICT_TOTAL` 的同一个值。
+/// 走拼音词频时的归一化基准，取拼音侧 `pinyin::lattice::DICT_TOTAL` 的同一个值。
 ///
-/// ⚠️ **两个 TOTAL 必须分开，不能混用**：`weight_of` 有两条来源——拼音真实词频（百万级）
-/// 与码表自身权重（百位级）。同一个基准套两套量纲，等于给其中一条平白加/减一个常数罚
-/// （`Σ ln(f/T) = Σ ln(f) − n·ln T`，n 是边数 ⇒ 影响的是「切几段」的判断，不是平移）。
+/// 两个 TOTAL 必须分开：`weight_of` 的两条来源量纲不同，同一基准套两套量纲等于给其中一条按
+/// 边数加罚，影响的是「切几段」的判断。
 const PINYIN_DICT_TOTAL: f64 = 242_154_693.0;
 
-/// 每条边的固定惩罚。语义与量纲同 `pinyin::lattice::WORD_PENALTY`：
-/// Viterbi 的路径分是各节点之和，「每节点减 W」等价于「按边数罚 k·W」——
-/// 把一个词打碎成几个高频字不再免费。
-///
-/// **这是压制简码切碎的主力**，而非 [`SHORT_CODE_PENALTY`]：一条 4 码词边对上
-/// 四条 1 码简码边，后者要多付 3 份本罚 + 3 份单字罚，量级远大于任何词频差。
+/// 每条边的固定惩罚。语义与量纲同 `pinyin::lattice::WORD_PENALTY`：「每节点减 W」等价于
+/// 「按边数罚 k·W」，把一个词打碎成几个高频字不再免费。这是压制简码切碎的主力，
+/// 而非 [`SHORT_CODE_PENALTY`]。
 const WORD_PENALTY: f64 = 3.0;
 
 /// 「这个权重是不是真实词频」的分界线。
 ///
-/// # 极点五笔词库按**码长**发权重带，不按频率
+/// 极点五笔词库按码长发权重带：9999 / 9950 / 9000 是一简 / 二简 / 三简，8000–8999 是
+/// `protected_codes` 保护带，只有 120–7999 是真实词频折算的。分界即 `gen_dict` 普通带的上沿。
 ///
-/// | 区间 | 含义 |
-/// |---|---|
-/// | 9999 / 9950 / 9000 | 一简 / 二简 / 三简 —— 简码带，纯粹的展示序 |
-/// | 8000–8999 | `protected_codes` 保护带 = 上游键位约定（四叠码等） |
-/// | 120–7999 | 主库普通带 —— **只有这一段是真实 unigram 词频折算的** |
-/// | 1–119 | 扩展库带 |
-///
-/// 分界取 8000（= `gen_dict` 的 `regular_weight_max=8999` 之上那一档的起点），
-/// 不是魔法数：它就是 `gen_dict` 分带契约里普通带的上沿。
-///
-/// # 为什么必须挡
-///
-/// [`ShortCodeIndex`] 把简码换成「它全码位置的权重」，但**全码位置的权重也可能是带**：
-/// 「八」的最长码 `wty` 是 3 码，拿的是 9000 简码带；「人」的最长码 `wwww` 是四叠保护带
-/// 8010。于是「八」以 9000 压过「人」的 8010，`khlgw` 解成「中国八」。
-///
-/// # ⚠️ 这只是止血，不是修复
-///
-/// 落回中性值等于承认「这个字的真实频率，这份词库里没有」——它在一简位是 9999、
-/// 在四叠位是键位约定，两处都不是词频。真正的修法是设计文档 §6.2 的方案 ②：
-/// `gen_dict` 给词库**增列真实词频**（它本来就有 unigram 数据源，只是折算后被带覆盖了）。
-/// 在那之前，同带内的字之间只能靠词典返回序裁决。
+/// [`ShortCodeIndex`] 换来的全码位置权重也可能是带（「八」最长码 3 码拿 9000，「人」最长码
+/// 四叠拿 8010），不挡就会 `khlgw` 解成「中国八」。落回中性值只是止血，根治见设计文档 §6.2。
 const SENTENCE_TRUSTED_WEIGHT_MAX: i32 = 7999;
 
-/// 带内权重的中性替身：普通带（120–7999）的实测均值。
-///
-/// 取均值而非上沿/下沿：它要与**普通带里的真实词频**放在一起比较，落在中间才不会
-/// 系统性地压过或压不过它们。
+/// 带内权重的中性替身：普通带（120–7999）的实测均值，落在中间才不会系统性压过或压不过真实词频。
 const NEUTRAL_WEIGHT: i32 = 851;
 
 /// 把「带」换成中性值，普通带原样放行。见 [`SENTENCE_TRUSTED_WEIGHT_MAX`]。
@@ -103,62 +56,30 @@ fn trusted_weight(raw: i32) -> i32 {
     }
 }
 
-// ⛔ **这里没有单字惩罚 / 多字词加成**（拼音侧的 `SINGLE_CHAR_PENALTY` /
-// `BASE_CONTENT_WORD_BONUS`），理由见 `score_code_node`。这不是遗漏，
-// 是实测推翻了照搬——首版照搬后 `ggll` 上「一」(2831) 输给「来来回回」(1298)、
-// `trnt` 上「我」(3371) 输给「特性」(1812)。
+// 这里刻意没有单字惩罚 / 多字词加成（拼音侧的 `SINGLE_CHAR_PENALTY` / `BASE_CONTENT_WORD_BONUS`），
+// 理由见 `score_code_node`。
 
-/// 简码边的对数惩罚（**串中**位置）。
+/// 简码边的对数惩罚（串中位置）。
 ///
-/// # 它罚的是什么
-///
-/// 不是「这个字冷门」——简码条目的整句权重已经由 [`ShortCodeIndex`] 换成了它全码位置
-/// 的真实词频，冷热已经如实表达。本罚针对的是**结构性的不确定性**：简码是「用户本可以
-/// 打得更长却停在这里」，在一串连打的中间出现，比全码单元更可能是切分算法自作多情。
-///
-/// # 取值
-///
-/// 2.0（概率域 ≈ ×0.135），初值，**待实测标定**。标定方式见设计文档 §8：拿真实句子的
-/// 码串做参数扫描，而不是拿词库条目回测（那恒能正确切分，是假绿）。
-///
-/// ⚠️ 改这个值之前先确认问题真的出在它身上：多数「切碎」的直觉问题其实由
-/// [`WORD_PENALTY`] 与 [`SINGLE_CHAR_PENALTY`] 决定，本罚只是精调。
+/// 冷热已由整句权重表达，本罚针对结构性不确定：简码在连打中间出现，更可能是切分算法自作多情。
+/// 2.0 是初值，待按设计文档 §8 用真实句子码串扫参标定。多数「切碎」问题其实由 [`WORD_PENALTY`]
+/// 决定，本罚只是精调。
 const SHORT_CODE_PENALTY: f64 = 2.0;
 
-/// 简码边的对数惩罚（**串尾**位置）。
-///
-/// 串尾恒是「用户还没打完的那个编码」——此刻它长度不足是常态，不是投机拆分。
-/// 故轻罚而非重罚，取 `ln 2`（概率域 ×0.5），与拼音侧 `PARTIAL_FINAL_PENALTY`
-/// 对残码位的处置同一量级、同一理由。
+/// 简码边的对数惩罚（串尾位置）。串尾恒是还没打完的编码，长度不足是常态，故轻罚 `ln 2`，
+/// 与拼音侧 `PARTIAL_FINAL_PENALTY` 同量级、同理由。
 const SHORT_CODE_TAIL_PENALTY: f64 = std::f64::consts::LN_2;
 
-/// 每条边保留几条同码词条。对齐 librime `table_translator` 的 `max_homographs`
-/// （默认 1，墨奇五笔整句方案配 2）。
+/// 每条边保留几条同码词条（对应 librime `table_translator` 的 `max_homographs`）。
 ///
-/// 边上不放全部候选：排在后面的同码词几乎不可能赢下整句路径，却会让节点数与
-/// Viterbi 的边数一起膨胀。
-///
-/// ⚠️ **取 8 而不是 librime 的 1~2**：`dm.search(code, N)` 是按**码表 weight** 降序取前 N，
-/// 而码表 weight 是层级带、与真实词频无关（见 [`SentenceFreq`]）。取前 2 会在「码表序」
-/// 里就把真实高频的那条筛掉，后面用真实词频打分也救不回来——**筛选与排序不在同一个
-/// 量纲上时，筛选口必须放宽**。8 是「够覆盖一个 4 码位上的常见词条」的经验值。
+/// 取 8 而不是 librime 的 1~2：`dm.search(code, N)` 按码表 weight（层级带）取前 N，而打分用真实
+/// 词频。筛选与排序不在同一个量纲上时筛选口必须放宽，否则真实高频的那条在筛选时就丢了。
 const MAX_HOMOGRAPHS: usize = 8;
 
 /// 词典组词表收几个词：拼音词库里按词频取前 N 个多字词。
 ///
-/// 组词解决的是「这个词码表里没有」——五笔词库只收了约 8 万条，句子里大量的词只能逐字打，
-/// 各字按单字词频各算各的，切分就很容易出错（逐字最短码打法首选仅 7.7%）。
-///
-/// 规模是实测扫出来的（3000 句 Tatoeba，「组词 + 语法」首选，词组最短码 / 逐字最短码）：
-///
-/// | 规模 | 首选 | 内存（紧凑表） |
-/// |---|---|---|
-/// | 3 万 | 84.0% / 77.2% | ~0.6 MB |
-/// | 10 万 | 88.1% / 86.4% | ~2 MB |
-/// | **20 万** | **89.9% / 89.2%** | ~4 MB |
-/// | 全量 60 万 | 90.9% / 89.9% | ~12 MB |
-///
-/// 20 万之后边际收益不到 1 个点，内存却要翻三倍。
+/// 组词解决「这个词码表里没有，只能逐字打」。20 万之后边际收益不到 1 个点、内存却翻三倍，
+/// 扫参表见设计文档 §12.4。
 const COMPOSE_LEXICON_SIZE: usize = 200_000;
 
 /// 组词最多跨几个编码单元。
@@ -173,45 +94,22 @@ const COMPOSE_PER_SPAN: usize = 3;
 
 /// 码表整句用的语法模型文件（`<schemas>/pinyin/grammar/` 下，随安装包分发）。
 ///
-/// 与拼音的 `schema.pinyin.grammar.model` **不共用配置**：拼音桌面端出厂不挂模型，码表整句
-/// 实测挂上收益大得多（词组最短码首选 56.8% → 79.5%）——两边的取舍不同，不能互相牵连。
+/// 与拼音的 `schema.pinyin.grammar.model` 不共用配置：拼音桌面端出厂不挂，码表整句挂上收益大得多。
 pub const GRAMMAR_MODEL: &str = "wanxiang-mini.gram";
 
-/// 整句候选的权重基数。
+/// 整句候选的权重基数。只需高于码表任何词条权重（上限 9999），且远低于拼音侧
+/// `SENTENCE_WEIGHT_BASE`(3e7)，两者不在同一列表里比较。
 ///
-/// 取值只需满足「高于码表任何词条权重」——本仓词库上限是简码带的 9999。
-/// 给到 1e6 留足余量，同时**远低于**拼音侧 `SENTENCE_WEIGHT_BASE`(3e7)：
-/// 两者不在同一个候选列表里比较，各自只需压过自己那一路的常规候选。
-///
-/// ⚠️ 顶部锚定**不靠这个数值**，靠 `Candidate::is_sentence` 标记
-/// （`freq_rerank` 按标记判定，见该字段文档「此前该判定靠 weight >= 20_000_000 的
-/// 数值阈值实现」的历史注记）。这里的权重只表达「在引擎内部排序时排前面」。
+/// 顶部锚定不靠这个数值，靠 `Candidate::is_sentence` 标记；这里只表达引擎内部排序时排前面。
 pub const SENTENCE_WEIGHT_BASE: i32 = 1_000_000;
 
-/// 整句词频表：`text → 真实词频`，取自**拼音词库**。
+/// 整句词频表：`text → 真实词频`，取自拼音词库。
 ///
-/// # 为什么必须外借一份词频
+/// 码表 weight 是层级带，连 [`ShortCodeIndex`] 换来的全码位置权重也可能是带（3 码全码字拿
+/// 9000），会让低频字压过极高频字。拼音词库存的是真实语料词频，且与码表共享「文本」这个键。
 ///
-/// 码表词库的 `weight` 是按**码长**发的层级带（一简 9999 / 二简 9950 / 三简 9000 /
-/// 全码均值 851），不是词频。[`ShortCodeIndex`] 把简码换成「它全码位置的权重」只解决了
-/// 一半——**全码位置的权重也可能是带**：3 码条目里有 1604 条其实是全码（字根不足 4 个
-/// 的字），它们跟三级简码一起拿了 9000 带。实测后果：「个」(`whj`=9000 ⇒ 被当带) 输给
-/// 「修」(`whte`=2135 普通带)，低频字压过极高频字。
-///
-/// 拼音词库（`rime_frost` + `cn_dicts`）里存的是**真实语料词频**，且与码表词库共享
-/// 「文本」这一个键。实测覆盖率：码表 83640 个 text 里 66392 个能查到（79.4%），
-/// 其中多字词 94.0%、单字 35.7%。
-///
-/// # 查不到怎么办
-///
-/// 单字覆盖率低是因为码表收了大量生僻字（拼音库的字表只有 8105 + 41448 扩展）。
-/// **查不到本身就等于「罕见」**，故兜底给 [`OOV_FREQ`] 而不是中性值——把生僻字按中位数
-/// 计价会让它们在整句里与常用字平起平坐。
-///
-/// # 只留交集
-///
-/// 拼音库 60 万条 text 全收进内存要 20~30 MB，而码表整句只可能用到码表里有的那些。
-/// 构建时先扫码表建 text 集合，再扫拼音库只留交集 ⇒ 6.6 万条、约 3 MB。
+/// 查不到即「罕见」，兜底 [`OOV_FREQ`] 而不是中性值。构建时只留与码表 text 的交集，免得
+/// 60 万条全进内存。覆盖率数据见设计文档 §11.9。
 #[derive(Debug, Default)]
 pub struct SentenceFreq {
     freq: HashMap<String, i32>,
@@ -222,9 +120,7 @@ pub struct SentenceFreq {
 }
 
 /// 紧凑的 `text → 词频` 表：所有文本拼进一个 `String`，索引按文本排序后二分查找。
-///
-/// 不用 `HashMap<String, i32>`：20 万条下那要 20 万次堆分配、约 10 MB；这里两次分配、约 4 MB。
-/// 表建好后只读，用不上哈希表的增删。
+/// 比 `HashMap<String, i32>` 省掉每条一次堆分配；表建好后只读。
 #[derive(Debug, Default)]
 pub struct ComposeLexicon {
     blob: String,
@@ -280,17 +176,14 @@ impl ComposeLexicon {
     }
 }
 
-/// 拼音库查不到的 text 的兜底词频。
-///
-/// 取 1（而非中性值）：码表收的生僻字在真实语料里本就罕见，按中位数计价等于让
-/// 「兲」和「的」在整句里平起平坐。`score_code_node` 对 `w > 0` 走 `ln(w/T)`，
-/// 1 会得到很低的分，正是想要的。
+/// 拼音库查不到的 text 的兜底词频。取 1 而非中性值：码表收的生僻字在真实语料里本就罕见，
+/// `ln(w/T)` 得到很低的分正是想要的。
 const OOV_FREQ: i32 = 1;
 
 impl SentenceFreq {
     /// 从拼音词库构建，只保留 `codetable` 里出现过的 text。
     ///
-    /// ⚠️ O(码表 + 拼音库) 的全表扫描（合计约 70 万条），**只在首次整句解码时一次**。
+    /// ⚠️ O(码表 + 拼音库) 的全表扫描（合计约 70 万条），只在首次整句解码时一次。
     pub fn build(codetable: &DictManager, pinyin_dict: &CachedDict) -> Self {
         let mut wanted: std::collections::HashSet<String> = std::collections::HashSet::new();
         codetable.for_each_entry(&mut |_code, text, _w| {
@@ -325,11 +218,8 @@ impl SentenceFreq {
 
     /// 组词表：拼音库里词频前 [`COMPOSE_LEXICON_SIZE`] 的多字词。返回 `(表, 入表门槛词频)`。
     ///
-    /// 两遍扫描：先只收词频找出门槛，再收门槛以上的文本。一遍做完得先把 60 万条文本全部
-    /// 装进内存再排序，峰值多出二三十 MB（虽然在后台线程上，也是实打实的高水位）。
-    ///
-    /// 码表收了的多字词（`codetable_freq` 里那份）无论排第几都一并收进来：逐字打出来也该认得，
-    /// 且组词表要能回答「是不是某个词的前缀」（剪枝用），词就不能分散在两张表里。
+    /// 两遍扫描（先找门槛、再收文本），免得把 60 万条文本全装进内存排序。码表收了的多字词无论
+    /// 排第几都一并收进来：组词表要能回答「是不是某个词的前缀」（剪枝用），词不能分散在两张表里。
     fn build_compose(
         pinyin_dict: &CachedDict,
         codetable_freq: &HashMap<String, i32>,
@@ -377,9 +267,8 @@ impl SentenceFreq {
 
     /// 用户词 / 临时词在拼音库查不到时的词频下限：取组词表的入表门槛。
     ///
-    /// 查不到词频的用户词多是人名、新词——正是用户特意造的。按 [`OOV_FREQ`] 计价会让它
-    /// 在整句里几乎永远输给逐字拆开（t134 拼音侧同一个病）。门槛的含义是「至少和组词表里
-    /// 最冷的那个词一样常用」：用户造过它，这个待遇不算高估；再往上就是在替用户猜词频了。
+    /// 这类词多是用户特意造的人名、新词，按 [`OOV_FREQ`] 计价会几乎永远输给逐字拆开。门槛的含义
+    /// 是「至少和组词表里最冷的那个词一样常用」，再往上就是在替用户猜词频了。
     pub fn user_floor(&self) -> i32 {
         self.user_floor
     }
@@ -395,34 +284,22 @@ impl SentenceFreq {
 
 /// 简码索引：回答「这条词条是不是简码」+「它的整句权重该取多少」。
 ///
-/// # 判据
-///
 /// ```text
 /// is_short_code(code, text) := len(code) < max{ len(c) : c 是 text 的任一编码 }
 /// ```
 ///
-/// 五笔的简码定义就是全码的前 N 码，故这个判据**不需要 text→code 反查索引**
-/// （同 `docs/design/codetable-short-code-yields-full.md` §2 论证过的性质）。
-///
-/// # 规模
-///
-/// 本仓极点五笔词库实测：一简 50 条**全部**是简码、二简 654/655 是简码、
-/// 三简 3748/5352 是简码——合计 4452 条进表。剩下的 1604 条 3 码条目是**全码**
-/// （「皮 hci」「线 xgt」这类字根不足 4 个的字），它们必须照常参与整句，
-/// 这正是「整句只认 4 码单元」那条捷径走不通的原因。
+/// 五笔的简码就是全码的前 N 码，故不需要 text→code 反查索引。三码条目里有相当一部分是全码
+/// （「皮 hci」这类字根不足 4 个的字），必须照常参与整句，「整句只认 4 码单元」走不通。
 #[derive(Debug, Default)]
 pub struct ShortCodeIndex {
-    /// `(code, text)` → 该 text 全码条目的权重。**只收录简码条目**，
+    /// `(code, text)` → 该 text 全码条目的权重。只收录简码条目，
     /// 故查不到即「不是简码」，无需再存一份布尔。
     short: HashMap<(String, String), i32>,
 }
 
 impl ShortCodeIndex {
-    /// 扫全表构建。**O(全表 × 2 遍)，只在首次整句解码时调用一次**
-    /// （由 [`CodeSentenceDecoder`] 的 `OnceLock` 守着）。
-    ///
-    /// 两遍而非一遍：一遍需要把全部条目缓存下来才能回头判「谁比谁长」，
-    /// 8.8 万条的 `Vec<(String,String,i32)>` 比第二次遍历贵得多。
+    /// 扫全表构建，O(全表 × 2 遍)，只在首次整句解码时调用一次（`OnceLock` 守着）。
+    /// 两遍而非一遍：一遍需要把全部条目缓存下来才能回头判「谁比谁长」，那比再遍历一次贵。
     pub fn build(dm: &DictManager) -> Self {
         // 第一遍：每个 text 的最长码长 + 该长度上的最高权重。
         let mut longest: HashMap<String, (usize, i32)> = HashMap::new();
@@ -461,11 +338,8 @@ impl ShortCodeIndex {
         Self { short }
     }
 
-    /// 该条目的整句权重与「是不是简码」。
-    ///
-    /// 非简码走 `raw`——全码带（120~7999）本就是真实词频折算的量纲。
-    /// （25 个 `protected_codes` 保护带条目 8000+ 是上游键位约定而非词频，
-    /// 数量太少不值得单独处理，留作已知偏差。）
+    /// 该条目的整句权重与「是不是简码」。非简码走 `raw`（全码带本就是词频折算的量纲）；
+    /// 少数 `protected_codes` 保护带条目是键位约定而非词频，留作已知偏差。
     pub fn resolve(&self, code: &str, text: &str, raw: i32) -> (i32, bool) {
         match self.short.get(&(code.to_string(), text.to_string())) {
             Some(&full) => (full, true),
@@ -483,33 +357,15 @@ impl ShortCodeIndex {
     }
 }
 
-/// 节点对数概率打分：**纯词频 + 每边固定罚**，没有任何按词性/字数的调整。
+/// 节点对数概率打分：纯词频 + 每边固定罚，没有任何按词性/字数的调整。
 ///
-/// 拼音侧 `score_node` 的三项调整逐条都不适用，且照搬会实测出错：
+/// 拼音侧 `score_node` 的三项调整都不适用，照搬会出错：
+/// - 多字词加成补偿的是「n 字词占 n 个音节、拆开要多扣 n 次 `ln(TOTAL)`」，码表 4 码词组与
+///   4 码单字占同一条边，加成退化成白送（`ggll` 上「一」输给「来来回回」）；
+/// - 单字惩罚同理，跨度不同的比较已由 [`WORD_PENALTY`] 承担；
+/// - 单字虚词优待会把五笔一简里「是 / 在 / 不 / 了…」这批最危险的简码字整体提权。
 ///
-/// # ① 多字词加成（`BASE_CONTENT_WORD_BONUS`）——没有补偿对象
-///
-/// 拼音里 n 字词占 **n 个音节**，加成补偿的是「unigram 独立性假设对路径上每个词
-/// 各扣一次 `ln(TOTAL)`」的过度惩罚：一个 3 字整词只扣一次，拆成 3 个字要扣三次。
-///
-/// 码表没有这回事——**4 码词组与 4 码单字占同一条边**，都只扣一次。过度惩罚不存在，
-/// 加成便退化成「凡是词组一律白送 3.0×√字数」。实测后果（真实词库探针）：
-/// `ggll` 上「一」(w=2831) 输给「来来回回」(w=1298)，`trnt` 上「我」(w=3371) 输给
-/// 「特性」(w=1812) —— 两条都是**同码同跨度**的比较，本该纯按词频。
-///
-/// # ② 单字惩罚（`SINGLE_CHAR_PENALTY`）——同理
-///
-/// 它在拼音里罚的是「把词拆成单字」，而跨度相同就无所谓拆不拆。跨度不同的比较
-/// 已经由 [`WORD_PENALTY`]（每边固定罚）承担。
-///
-/// # ③ 单字虚词优待（`FUNCTION_WORD_BONUS`）——会精准帮倒忙
-///
-/// 五笔一简 25 键对应的字里「是 / 在 / 要 / 不 / 了 / 有 / 我」全都在拼音侧的虚词表内，
-/// 该优待合计 5.0（加成 2.0 + 豁免每词罚 3.0）恰好把**最危险的那批简码字**整体提权，
-/// 正是本模块要压制的东西。
-///
-/// 三条合起来是同一句话：**同一条加成，在两套编码结构里前提不同**。这与拼音侧
-/// `score_node_partial_final` 为残码位去掉虚词优待是同一条判据的又一次应用。
+/// 同一条加成在两套编码结构里前提不同，与拼音侧 `score_node_partial_final` 同一条判据。
 fn score_code_node(weight: i32, total: f64) -> f64 {
     // w ≤ 0 等价于「频次 0.5」，同 librime 用 DBL_EPSILON 让存疑条目排不上去的思路。
     let log_prob = if weight > 0 {
@@ -541,10 +397,8 @@ pub const SPLIT_SEPARATOR: char = '\'';
 impl SentenceResult {
     /// 把输入码按整句实际采用的切分插入分隔符：`aawtaawt` → `aawt'aawt`。
     ///
-    /// 数据源是 [`Self::boundary`]（Viterbi 回溯出来的**实际**路径），不是重新按词长猜
-    /// —— 同一串码可有多种切法，整句是按哪条拼出来的只有解码器知道。这与拼音侧
-    /// `ViterbiResult::boundary` 存在的理由完全相同（那里记过一次「谎报切分」的教训）。
-    ///
+    /// 数据源是 [`Self::boundary`]（Viterbi 回溯的实际路径），不能按词长重猜：同一串码可有多种
+    /// 切法，只有解码器知道用的是哪条（同拼音侧 `ViterbiResult::boundary`）。
     pub fn split_code(&self, input: &str) -> String {
         if self.boundary == 0 || input.len() > 64 {
             return String::new();
@@ -568,48 +422,32 @@ impl SentenceResult {
     }
 }
 
-/// 码表整句解码器：持简码索引 + Viterbi。
-///
-/// 两张表都是懒构建（`OnceLock`）——只有真正用到整句的方案才付代价，且同一解码器只付一次。
-/// 但「懒」只解决**要不要付**，不解决**在哪条线程上付**：见 [`LazyTables`]。
+/// 码表整句解码器：持简码索引 + Viterbi。两张表懒构建（`OnceLock`），只有用到整句的方案才付
+/// 代价；在哪条线程上付见 [`LazyTables`]。
 pub struct CodeSentenceDecoder {
     max_code_length: usize,
-    /// 两张懒表连同它们的来源。**单独装在 `Arc` 里**，为的是 [`Self::prewarm`] 能把它
+    /// 两张懒表连同它们的来源。单独装在 `Arc` 里，为的是 [`Self::prewarm`] 能把它
     /// 整份交给后台线程去填——解码器本身挂在引擎上，不便跨线程共享。
     tables: std::sync::Arc<LazyTables>,
     viterbi: ViterbiDecoder,
 }
 
-/// 首次整句解码要付的两笔一次性开销，连同它们的来源。
+/// 首次整句解码要付的两笔一次性开销（码表全表扫描建简码索引、打开拼音 merged.wdat 全表扫建
+/// 词频），合计数百毫秒，其后每次解码不到 0.2 ms。
 ///
-/// # ⚠️ 懒加载会把开销挪到按键线程上
-///
-/// 本机实测（`codetable_sentence_latency_probe`，页缓存已热）：
-///
-/// | 项 | 耗时 |
-/// |---|---|
-/// | [`ShortCodeIndex::build`]：码表全表扫描 | ~90 ms |
-/// | 打开 82 MB `rime_frost.merged.wdat` + 全表扫建词频 | ~570 ms |
-/// | **首次解码合计** | **~660 ms** |
-/// | 其后每次解码 | < 0.2 ms |
-///
-/// 这 0.66 秒原本恰好落在**用户敲下第 5 个码**的那一刻（整句的触发闸门就是「超过码长且
-/// 无精确匹配」），且冷页缓存下只会更久、`merged.wdat` 过期还要现场重建（数秒）。
-/// 所以 [`CodeSentenceDecoder::prewarm`] 在引擎构建完成时就把这两张表推给后台线程去填。
-///
-/// 预热**不改变任何取值**，只改变谁来等：`OnceLock::get_or_init` 保证两条线程抢到同一份
-/// 结果。极端情况（预热还没跑完用户就打到了超码长）按键线程仍会在 `get_or_init` 上等，
-/// 但那是与「不预热」持平的最坏情况，不会更差。
+/// 懒加载会把这笔开销挪到用户敲下超码长那一键上，故 [`CodeSentenceDecoder::prewarm`] 在引擎构建
+/// 完成时把两张表推给后台线程。预热不改变任何取值，`OnceLock::get_or_init` 保证两条线程拿到
+/// 同一份；预热未完成时按键线程仍会等，与不预热持平。实测见设计文档 §11.14。
 struct LazyTables {
     index: std::sync::OnceLock<ShortCodeIndex>,
     /// 语法模型来源。`None` = 不挂（权重为 0 或未配）。
     grammar_source: Option<GrammarSource>,
-    /// 挂了语法模型的解码器。**内层 `None` 表示「试过了但没成」**（模型文件缺失等），同 `freq`。
+    /// 挂了语法模型的解码器。内层 `None` 表示「试过了但没成」（模型文件缺失等），同 `freq`。
     grammar: std::sync::OnceLock<Option<ViterbiDecoder>>,
     /// 整句词频的来源。`None` = 没配 ⇒ 退回码表自身权重那套
     /// （见 [`CodeSentenceDecoder::weight_of`]），功能仍可用、只是没那么准。
     freq_source: Option<FreqSource>,
-    /// 词频表。**内层 `Option` 表示「试过了但没成」**——加载失败要记住，
+    /// 词频表。内层 `Option` 表示「试过了但没成」——加载失败要记住，
     /// 否则每次解码都会重试一遍那个必然失败的加载。
     freq: std::sync::OnceLock<Option<SentenceFreq>>,
 }
@@ -674,13 +512,9 @@ impl LazyTables {
 
 /// 整句词频的来源。
 ///
-/// 两个变体的差别只在**什么时候把词库读进来**：
-///
-/// - [`Self::SchemasDir`]（生产路径）：只存目录，词库到首次整句解码时才加载。
-///   ★ 这一层懒**不能省**：混输方案的主引擎同样走码表分支构建，但它的整句永远不会被
-///   调用到（`MixedEngine::convert` 超码长直接走 `convert_overflow`，不经 primary），
-///   构建期就加载等于白读一份 60 万条的词库；纯五笔用户若从没用过拼音方案，那次加载
-///   还要现场构建 `merged.wdat`，直接体现为「切到五笔卡一下」。
+/// - [`Self::SchemasDir`]（生产路径）：只存目录，词库到首次整句解码时才加载。这一层懒不能省：
+///   混输方案的主引擎也走码表分支构建，但它的整句永远不会被调用到，构建期加载就是白读，
+///   没用过拼音方案的用户还要现场构建 `merged.wdat`。
 /// - [`Self::Dict`]（测试路径）：已经拿在手上的词库，直接用。
 enum FreqSource {
     SchemasDir(std::path::PathBuf),
@@ -753,13 +587,13 @@ impl CodeSentenceDecoder {
         Arc::get_mut(&mut self.tables).expect("整句解码器的数据来源须在 prewarm 之前配置")
     }
 
-    /// 注入**数据目录**作为词频来源：词库到预热线程（或首次整句解码）时才读。生产路径走这个。
+    /// 注入数据目录作为词频来源：词库到预热线程（或首次整句解码）时才读。生产路径走这个。
     pub fn with_schemas_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.tables_mut().freq_source = Some(FreqSource::SchemasDir(dir));
         self
     }
 
-    /// 注入**已加载的**拼音词库作为词频来源。测试与探针走这个。
+    /// 注入已加载的拼音词库作为词频来源。测试与探针走这个。
     pub fn with_pinyin_dict(mut self, dict: std::sync::Arc<CachedDict>) -> Self {
         self.tables_mut().freq_source = Some(FreqSource::Dict(dict));
         self
@@ -779,9 +613,7 @@ impl CodeSentenceDecoder {
     }
 
     /// 把两张懒表推给后台线程去填，使按键线程不必为首次整句解码等上数百毫秒。
-    ///
-    /// 由引擎在构建完成时调用（`CodeTableEngine::prewarm_sentence`）。开销与判据见
-    /// [`LazyTables`] 上的表——**只搬运，不改变任何取值**。
+    /// 由 `CodeTableEngine::prewarm_sentence` 在构建完成时调用，只搬运、不改变取值。
     pub fn prewarm(&self, dm: std::sync::Arc<DictManager>) {
         let tables = std::sync::Arc::clone(&self.tables);
         let spawned = std::thread::Builder::new()
@@ -809,18 +641,13 @@ impl CodeSentenceDecoder {
         self.tables.freq_table(dm)
     }
 
-    /// 一条词典命中的整句权重。
+    /// 一条词典命中的整句权重。两条来源，优先拼音词频：
     ///
-    /// **两条来源，优先拼音词频**：
+    /// 1. 有拼音词库 ⇒ 查 `text` 的真实词频（查不到给 `OOV_FREQ`），完全不看码表 weight；
+    /// 2. 没有 ⇒ 简码换成全码位置的权重（[`ShortCodeIndex`]），再用 [`trusted_weight`] 把「带」
+    ///    落回中性值，功能可用但精度回落。
     ///
-    /// 1. 有拼音词库 ⇒ 直接查 `text` 的真实词频（查不到给 `OOV_FREQ`，等于「罕见」）。
-    ///    此时**完全不看码表 weight**——它是层级带，掺进来只会污染。
-    /// 2. 没有 ⇒ 退回原方案：简码换成全码位置的权重（[`ShortCodeIndex`]），
-    ///    再用 [`trusted_weight`] 把「带」落回中性值。功能可用，但 §11.4 记的那些
-    ///    错例会回来。
-    ///
-    /// 用户词 / 临时词在拼音库查不到时不按 [`OOV_FREQ`] 计价，而是给
-    /// [`SentenceFreq::user_floor`]，理由见那里。
+    /// 用户词 / 临时词查不到时给 [`SentenceFreq::user_floor`]。
     fn weight_of(&self, dm: &DictManager, code: &str, hit: &Candidate) -> (i32, f64, bool) {
         let (text, raw) = (hit.text.as_str(), hit.weight);
         // 「是不是简码」两条路都要问：惩罚与词频是两件事。
@@ -850,10 +677,8 @@ impl CodeSentenceDecoder {
         self.tables.index(dm)
     }
 
-    /// 建词图：逐跨度 `(p, q)` 查词典。
-    ///
-    /// 跨度数 = `len × max_code_length`（≤ 4n），每跨度一次精确查询。
-    /// 20 码输入 ⇒ ≤ 80 次，与拼音整句同量级。
+    /// 建词图：逐跨度 `(p, q)` 查词典。跨度数 ≤ `len × max_code_length`，每跨度一次精确查询，
+    /// 与拼音整句同量级。
     fn build_nodes(&self, input: &str, dm: &DictManager) -> Vec<Vec<WordNode>> {
         let bytes = input.len();
         let mut nodes: Vec<Vec<WordNode>> = vec![Vec::new(); bytes + 1];
@@ -866,10 +691,9 @@ impl CodeSentenceDecoder {
             for q in (p + 1)..=(p + self.max_code_length).min(bytes) {
                 let code = &input[p..q];
                 for mut hit in dm.search(code, MAX_HOMOGRAPHS) {
-                    // 特殊语法词条整句里不能求值也不能执行动作，拼进去就是把源码当文本显示/
-                    // 上屏（AtomGit#1）。例外：纯文本直通 `$CC("标签", type("字"))` 上屏什么在
-                    // 解析期就定了，按「字」当普通词条用；其余剔除，剔光的段视同无码。
-                    // 打分仍按词库原文（词频/简码索引都以原文为键），打完分再换文本。
+                    // 特殊语法词条整句里不能求值也不能执行动作，拼进去就是把源码当文本。例外：
+                    // 纯文本直通 `$CC("标签", type("字"))` 解析期已定，按「字」当普通词条用；其余剔除，
+                    // 剔光的段视同无码。打分仍按词库原文（词频/简码索引以原文为键），打完分再换文本。
                     let Some(plain) = sentence_text(&hit.text) else {
                         continue;
                     };
@@ -913,41 +737,21 @@ impl CodeSentenceDecoder {
         nodes
     }
 
-    /// 解码。返回 `None` 表示**没有覆盖整串的解**或解只有一个词。
+    /// 解码。返回 `None` 表示没有覆盖整串的解或解只有一个词。
     ///
-    /// # 为什么必须覆盖整串
-    ///
-    /// [`ViterbiDecoder::decode`] 在 `dp[input_len]` 不可达时会「从最远可达位置回溯」
-    /// 并返回一条**部分路径**，而 `log_prob` 字段仍是 `dp[input_len]`（此时为 `-inf`）。
-    /// 判据因此是 `log_prob.is_finite()`，不是 `words.is_empty()`。
-    ///
-    /// 只收整串解，换来的是**整句候选恒消费整串**⇒ `consumed_length` 可以留 0，
-    /// 不打破全仓「码表候选 `consumed_length` 恒 0」的约定（设计文档 §7.1 列的四处
-    /// 依赖点因此一处都不用动）。分段上屏留到后续阶段。
-    ///
-    /// # 为什么排除单词解
-    ///
-    /// 对齐 librime `Poet::MakeSentenceWithStrategy` 的
-    /// `if (start_pos == 0 && end_pos == total_length) continue;`——整串本身若在码表里
-    /// 有词，那条候选由精确/前缀路径产出，整句不重复产，否则同一个词会以两种身份
-    /// 进候选列表再被去重逻辑合并。**例外**是词典组词出的单词解，见 [`Self::accepts`]。
+    /// 只收整串解：整句候选因此恒消费整串，`consumed_length` 可留 0，不打破「码表候选
+    /// `consumed_length` 恒 0」的约定（设计文档 §7.1）。排除单词解对齐 librime
+    /// `Poet::MakeSentenceWithStrategy`：整串在码表里有词时由精确/前缀路径产出，整句不重复产。
+    /// 例外是词典组词出的单词解，见 [`Self::accepts`]。
     pub fn decode(&self, input: &str, dm: &DictManager) -> Option<SentenceResult> {
         self.decode_nbest(input, dm, 1).into_iter().next()
     }
 
     /// 至多 `k` 条整句解，按名次排好、已按文本去重。`k <= 1` 等价于 [`Self::decode`]。
     ///
-    /// # 挂了语法模型时怎么出备选
-    ///
-    /// [`ViterbiDecoder::decode_nbest`] 在有语法模型时只给一条（理由见那里：beam 按末词分组，
-    /// 前几条往往只差最后一个词）。故名次 1 取**挂模型**的解，名次 2 起取**不挂模型**的
-    /// N-best 补位、与名次 1 同文的跳过。实测这样拼出来的前 3 / 前 5 与纯无模型 N-best
-    /// 几乎一样高，首选却是挂模型的那个（词组最短码：前 3 86.1% vs 76.1%）。
-    ///
-    /// # 手动分隔符
-    ///
-    /// 输入含分隔符时只出一条：各段独立解码，段间的 N-best 组合是乘积级的，而用户敲分隔符
-    /// 本就是在消歧——此时再给备选意义不大。
+    /// 挂语法模型时 [`ViterbiDecoder::decode_nbest`] 只给一条，故名次 1 取挂模型的解，名次 2 起由
+    /// 不挂模型的 N-best 补位（与名次 1 同文的跳过）。输入含分隔符时只出一条：段间组合是乘积级的，
+    /// 且用户敲分隔符本就是在消歧。
     pub fn decode_nbest(&self, input: &str, dm: &DictManager, k: usize) -> Vec<SentenceResult> {
         if input.is_empty() || !input.is_ascii() {
             return Vec::new();
@@ -1011,9 +815,8 @@ impl CodeSentenceDecoder {
 
     /// 这条解能不能当整句：覆盖整串，且不是「一个码表词条就覆盖了整串」。
     ///
-    /// 单词解只在**超码长**时放行——码表词条的码不超过满码长，超码长还能一个词覆盖整串的，
-    /// 必是词典组词边（`hcigaawt` → 「皮衣工作」之外，逐字打出的「喃喃自语」）。它在精确路径
-    /// 上产不出来，排除它就是把这条候选整个弄丢。
+    /// 单词解只在超码长时放行：码表词条的码不超过满码长，超码长的单词解必是词典组词边（逐字打出的
+    /// 「喃喃自语」），它在精确路径上产不出来。
     fn accepts(&self, r: &ViterbiResult, len: usize) -> bool {
         r.log_prob.is_finite()
             && !r.words.is_empty()
@@ -1027,7 +830,7 @@ impl CodeSentenceDecoder {
         let mut boundary = 0u64;
         let expressible = input.len() <= 64;
 
-        // 手动分隔符把输入切成若干**硬边界**段，各段独立解码后拼起来。
+        // 手动分隔符把输入切成若干硬边界段，各段独立解码后拼起来。
         let mut offset = 0usize;
         // 最长一段的码长：只有一个词时据此套 `accepts` 的超码长放行（组词出的单词解）。
         let mut longest_seg = 0usize;
@@ -1049,10 +852,8 @@ impl CodeSentenceDecoder {
             offset += seg.len() + 1; // +1 = 被 split 吃掉的那个分隔符
         }
 
-        // ★ **「至少两个词」是整体判据，不是段级判据**：`aawt'aawt` 每段恰好一个词，
-        //   正是用户敲分隔符时最典型的形态。段级判会把它整个否掉。
-        //   单词解与无分隔符时同一条规矩（见 `accepts`）：`hcigaawt'` 多敲的尾部分隔符
-        //   不该让组词出的单词整句消失。
+        // 「至少两个词」是整体判据，不是段级判据：`aawt'aawt` 每段恰好一个词，段级判会整个否掉。
+        // 单词解与无分隔符时同一条规矩（见 `accepts`），多敲的尾部分隔符不该让它消失。
         if words.is_empty() || (words.len() < 2 && longest_seg <= self.max_code_length) {
             return None;
         }
@@ -1064,13 +865,10 @@ impl CodeSentenceDecoder {
         })
     }
 
-    /// 解一个**不含分隔符**的段。返回 `None` = 没有覆盖该段的解。
+    /// 解一个不含分隔符的段。返回 `None` = 没有覆盖该段的解。
     ///
-    /// # 为什么判据是 `log_prob.is_finite()`
-    ///
-    /// [`ViterbiDecoder::decode`] 在 `dp[len]` 不可达时会「从最远可达位置回溯」并返回一条
-    /// **部分路径**，而 `log_prob` 仍是 `dp[len]`（此时 `-inf`）。只看 `words.is_empty()`
-    /// 会把部分解误判为有解。
+    /// 判据是 `log_prob.is_finite()` 而不是 `words.is_empty()`：[`ViterbiDecoder::decode`] 在终点
+    /// 不可达时会从最远可达位置回溯出一条部分路径，`log_prob` 此时为 `-inf`。
     fn decode_segment(&self, seg: &str, dm: &DictManager) -> Option<ViterbiResult> {
         let nodes = self.build_nodes(seg, dm);
         let viterbi = self.tables.grammar_viterbi().unwrap_or(&self.viterbi);
@@ -1091,23 +889,9 @@ struct Unit {
 
 /// 词典组词：2~[`COMPOSE_MAX_UNITS`] 个相邻编码单元拼出的文本若是词，补一条跨这些单元的词边。
 ///
-/// # 为什么需要
-///
-/// 码表整句的边只来自码表词条，码表没收的词只能逐字成边，各字按**单字**词频各算各的——
-/// 解码器看不出「这几个字连起来是个词」，于是常被别的切法压过。实测（3000 句）：
-///
-/// | 打法 | 无组词 | 有组词 |
-/// |---|---|---|
-/// | 逐字最短码 | 7.7% | 70.4% |
-/// | 逐字全码 | 83.5% | 98.6% |
-/// | 词组最短码 | 56.8% | 75.2% |
-///
-/// # 怎么打分
-///
-/// 组出的词按它**自己的**词频打分（同一个 `score_code_node`，同一份每边罚），再扣掉各组成
-/// 单元的简码罚之和：简码罚表达的是「这个字母可能本该属于别的码」，它不会因为拼出了词就消失。
-///
-/// 组成单元的边原样保留：组词是多给解码器一个选项，不替它做决定。
+/// 码表没收的词只能逐字成边、各按单字词频计价，解码器看不出几个字连起来是个词（效果见设计文档
+/// §12.2）。组出的词按它自己的词频打分（同一个 `score_code_node`、同一份每边罚），再扣掉各组成
+/// 单元的简码罚之和：简码罚不会因为拼出了词就消失。组成单元的边原样保留，只多给解码器一个选项。
 fn add_composed_nodes(nodes: &mut [Vec<WordNode>], units: &[Unit], freq: &SentenceFreq) {
     let bytes = nodes.len() - 1;
     // 每个跨度只留分最高的 COMPOSE_PER_SPAN 条，按起点分桶。

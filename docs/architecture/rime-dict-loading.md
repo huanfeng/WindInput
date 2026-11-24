@@ -419,6 +419,35 @@ derived_fingerprint(digests, tag) =
 - 任一词库处于内存模式（wdat 写失败）→ **不落盘**：它没有稳定的磁盘产物，
   下次启动无从校验，只会复用一份来历不明的缓存。
 
+### 5.4 reader 共享池（`reader_pool.rs`）
+
+同一缓存文件常被多个方案引用（拼音、双拼、混输子引擎都解析到同一个 `pinyin/rime_frost.merged.wdat`），
+未加池时 62 MB 的 merged 会被 mmap 三份。池按缓存文件路径复用 reader，覆盖 `.wdat` / `.wcmt` / `.wemj`。
+
+- **池存 `Weak`**：最后一个引擎释放即解除映射。Windows 上被 mmap 的文件不能删除；内容寻址之后
+  重建虽不再覆盖旧文件，旧文件仍要等最后的持有者放手才能被 `prune_slot` 删掉。`EngineManager`
+  的 `engines.clear()` / `remove()` 因此仍是有效释放点，不必再叠手工引用计数。
+- **key 不 canonicalize**：缓存路径都由 `cache_path`（纯函数）生成，同一文件必得同一字符串；
+  万一出现不同写法只会退化成各开一份，不会取错 reader。
+- **复用前比对 `(大小, mtime, 替换代数)`**：tmp + rename 在 Windows 上对正被 mmap 的目标也会
+  成功（`File::open` 带 `FILE_SHARE_DELETE`，旧文件转 pending-delete），旧映射仍指向旧数据，
+  仅凭路径复用就是「改了词库不生效，重启才行」。这里要察觉的是「文件被替换」，与 `cache_fp`
+  拒绝 mtime（那里判的是「要不要重建」）不矛盾。
+- **为什么要替换代数**：同大小重建时只剩 mtime 可判，而 Linux inode 时间戳取自粗粒度时钟，
+  同一刻度内两次写入的 mtime 逐纳秒相同（`rebuilt_file_is_not_served_from_stale_entry` 稳定复现）。
+  全量哈希 62 MB 太贵；采样头尾会漏掉只改中段权重/文本的重建；Windows 上取 `file_index` 要
+  未稳定的 `windows_by_handle`。于是由替换方用 `replacing()` 守卫宣告替换。不走守卫的替换
+  （别的进程、用户手动覆盖）与本进程上次读取隔着人的操作时间，不会撞进同一刻度。
+- **守卫前后各 +1**：只在替换后记一次，`rename` 与 `+1` 之间读到「旧代数 + 新 metadata」就命中
+  陈旧条目；前后各记一次，窗口里读到的是中间代数，两侧都拒绝复用。替换失败也照样 +2（多开一份
+  映射，安全方向）。不依赖调用方持 `file_lock`：sidecar `open_wdat`、方案导入与备份还原都不在锁下。
+- **用代数而不是删池中条目**：线程 A 取完 stamp 正在 open 旧文件时，B 完成替换并删条目，A 随后
+  插入的陈旧条目就再无人清理；代数则让 A 带着旧代数，自然不被复用。代数表因此**不能清理**——
+  清回 0 可能恰好等于池中条目记的 0。
+- **`file_lock` 按文件而非 schema 加锁**：`pinyin` 与 `shuangpin` 是两把 schema 锁却争同一个
+  merged 文件；冷启动并发重建时第二次 rename 会撞上刚 mmap 的文件、落到 `temp_fallback` 临时
+  副本，副本路径不同，池也无法合并。
+
 ---
 
 ## 6. 已知缺口与风险台账

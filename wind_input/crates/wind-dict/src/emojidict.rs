@@ -1,36 +1,19 @@
 //! `.wemj`：mmap 零拷贝的 emoji 扩展表（词 → emoji 列表）
 //!
-//! 「打出词组后在候选里追加对应 emoji」的查表数据。设计见
-//! `docs/design/emoji-suggestion.md`，本模块只负责**存储格式与构建**，不含任何候选逻辑。
-//!
-//! # 为什么走 mmap 而不是内存表
-//!
-//! 与 [`crate::commentdict`] 同一条理由，那份模块文档已论证过：输入法是常驻进程，
-//! **全解析进内存意味着容量直接变成常驻内存**，而这是个出厂关闭的可选功能。
-//! ★ 判据不是「这次数据小」（上游现为 4668 行 / 126KB）——那是每个功能都能说的话；
-//! 真正的代价是一旦走内存表，就会长出一条平行的加载/失效/降级路径（指纹怎么算、
-//! 转换失败怎么办、换表后怎么清、多实例怎么共享），每条都要重答一遍，且迟早与词库
-//! 那套分叉。
-//!
-//! # 为什么另建格式而不直接用 `.wcmt`
-//!
-//! `.wcmt` 的 Row 是 `text | comment | code`，把 emoji 塞进 comment 段确实能跑。但仓里
-//! 已有一次同样的取舍并给出了答案——[`crate::reverseidx`] 的模块文档：「本格式的骨架取自
-//! `commentdict`（`.wcmt`：排序数组 + 二分），**数据语义**不同」。即**骨架复用、格式独立**。
-//! 本表随设计还会长出分类维度（`emoji_category.txt`）与来源标记，挤在 comment 段里迟早要拆。
-//!
-//! 索引同样只做**精确点查**（每次只查当前页那 5~9 条候选），排序数组 + 二分即可，不需要 DAT。
+//! 「打出词组后在候选里追加对应 emoji」的查表数据，本模块只负责存储格式与构建，不含候选逻辑。
+//! 设计见 `docs/design/emoji-suggestion.md`（§3.4 为什么不进内存表，§4 为什么另建格式）。
+//! 骨架取自 [`crate::commentdict`]（排序数组 + 二分，只做精确点查），数据语义独立。
 //!
 //! # 文件布局
 //!
 //! - Header (24B)：magic `WEMJ` + version u32 + entry_count u32 + index_off u32
 //!   + str_off u32 + reserved u32
-//! - Entry[entry_count] (8B 每条，**按 text 升序**)：off u32（相对 str_off）
+//! - Entry[entry_count] (8B 每条，按 text 升序)：off u32（相对 str_off）
 //!   + text_len u16 + emoji_len u16
-//! - StringPool：每条连续存 `text | emojis`，`emojis` 为**空格分隔**的 UTF-8
+//! - StringPool：每条连续存 `text | emojis`，`emojis` 为空格分隔的 UTF-8
 //!
-//! ★ 与 `.wcmt` 不同，**同一 text 至多一条**——重复键在 [`write_emoji_wemj`] 构建时就已合并
-//! （见该函数关于繁→简撞键的说明）。查询端因此不需要组迭代。
+//! 与 `.wcmt` 不同，同一 text 至多一条：重复键在 [`write_emoji_wemj`] 构建时已合并，
+//! 查询端不需要组迭代。
 
 use crate::mapping::Mapped;
 use std::fs::File;
@@ -100,7 +83,7 @@ impl EmojiReader {
         self.entry_count == 0
     }
 
-    /// 读第 `i` 条的两段文本。越界 / UTF-8 损坏 → None（当作该条不存在，**不 panic**：
+    /// 读第 `i` 条的两段文本。越界 / UTF-8 损坏 → None（当作该条不存在，不 panic：
     /// 缓存文件可能被外部破坏或半写，功能降级好过崩进程。同 `.wcmt` 的处置）。
     fn row(&self, i: u32) -> Option<Row<'_>> {
         let off = self.index_off as usize + i as usize * ENTRY_SIZE;
@@ -138,10 +121,9 @@ impl EmojiReader {
         lo
     }
 
-    /// 查该词的 emoji 串（**空格分隔**，调用方按需 `split_whitespace`）。
+    /// 查该词的 emoji 串（空格分隔，调用方按需 `split_whitespace`）。
     ///
-    /// 返回原始串而非 `Vec<String>`：查询在按键热路径上，每次只用得到前 `max_per_word` 个，
-    /// 先整串借出、由调用方惰性切分，可完全避免这次分配。
+    /// 返回原始串而非 `Vec<String>`：热路径上只用得到前 `max_per_word` 个，由调用方惰性切分以免分配。
     pub fn lookup(&self, text: &str) -> Option<&str> {
         let r = self.row(self.lower_bound(text))?;
         if r.text == text && !r.emojis.is_empty() {
@@ -152,26 +134,13 @@ impl EmojiReader {
     }
 }
 
-/// 构建 `.wemj`：排序 + **同键合并** + 写盘（tmp + rename 原子替换）。
+/// 构建 `.wemj`：排序 + 同键合并 + 写盘（tmp + rename 原子替换）。
 ///
-/// # 同键合并（不是去重，更不是覆盖）
+/// 同键必须合并（保序去重，先到的排前面），不能覆盖：两张上游表的同键内容各不相同，覆盖会
+/// 整组丢数据；繁→简撞键今天恰好无害只是数据巧合。见 `docs/design/emoji-suggestion.md` §3.6。
 ///
-/// 同键有两个来源，**两者的后果完全不同，别把它们当成一回事**：
-///
-/// 1. **繁→简归一的撞键**（见 [`parse_upstream`]）。归一是多对一，原本不同的两行会撞到
-///    同一个简体键：实测 4669 行 → 4657 键，12 组。但这 12 组**全是异体字对**
-///    （煙/菸、台/臺、機/昇）指向同一个 emoji ⇒ 此处合并与覆盖结果相同，**当前数据下
-///    看不出差别**。
-/// 2. **两张上游表的同键**（`emoji_word.txt` × `emoji_category.txt`）。实测交集 14 个键，
-///    且**14 个的内容全都不同**：「奖项」在 word 表只有 `🏅`，在 category 表是
-///    `🏅 🎖️ 🥇 🥈 🥉 🏆`；「帽」`🧢` vs `👒 🧢 🎩 🎓 ⛑️ 🪖`。
-///
-/// ⚠️ **覆盖会在第 2 类上整组丢数据**。第 1 类今天恰好无害，但那是上游数据的巧合而非
-/// 保证——判据只能是「合并」，不能是「反正现在一样」。合并保序去重：先到的排前面。
-///
-/// 排序用稳定的 `sort_by`：组内相对顺序若不稳定，「先到先得」会随输入规模抖动
-/// （`sort_unstable_by` 在小数组走插入排序恰好稳定，大数组不稳定，测试因此抓不到）。
-/// 这条与 [`crate::commentdict::write_comment_wcmt`] 是同一个教训。
+/// 排序必须用稳定的 `sort_by`，否则「先到先得」会随输入规模抖动（小数组恰好稳定，测试抓不到），
+/// 与 [`crate::commentdict::write_comment_wcmt`] 同理。
 pub fn write_emoji_wemj(
     path: impl AsRef<Path>,
     rows: &[(String, Vec<String>)],
@@ -266,18 +235,11 @@ pub fn write_emoji_wemj(
 
 /// 解析上游 rime-emoji 词表（`emoji_word.txt` / `emoji_category.txt`），键经 `normalize` 归一。
 ///
-/// # 上游格式契约
+/// 上游行形如 `键<TAB>键 emoji1 emoji2 …`，值的首项恒等于键（OpenCC simplifier 的约定），
+/// 故丢弃值的首项。判据必须是位置而不是内容：归一后键已是简体、首项仍是繁体，按「等于键」
+/// 过滤会把首项当成 emoji 收进去。
 ///
-/// 行形如 `键<TAB>键 emoji1 emoji2 …`，且上游 `check.py` 强制**值的首项与键完全相同**
-/// （正则 `(\S+)\t(\S+)( \S+)+` 且 `group(1) == group(2)`）。这是 OpenCC `simplifier`
-/// 组件的要求：它把值当作候选集，rime 跳过与原文相同的那个，其余作为新候选。
-///
-/// ⇒ 我们**丢弃值的首项**，只取其后的 emoji。⚠️ 不能改成「过滤掉等于键的项」：归一之后
-/// 键已经是简体，而首项仍是原繁体，两者不再相等，那样写会把首项当成 emoji 收进去。
-/// 判据必须是**位置**（首项），不是**内容**。
-///
-/// `normalize` 由调用方注入（繁→简），因为本 crate 不依赖 `wind-transform`。传恒等闭包
-/// 即为「不归一」。
+/// `normalize` 由调用方注入（繁→简），因为本 crate 不依赖 `wind-transform`；传恒等闭包即不归一。
 pub fn parse_upstream(
     content: &str,
     normalize: impl Fn(&str) -> String,
@@ -298,7 +260,7 @@ pub fn parse_upstream(
         if key.is_empty() {
             continue;
         }
-        // 值区按空格切分，**跳过首项**（上游契约：首项 == 键）。
+        // 值区按空格切分，跳过首项（上游契约：首项 == 键）。
         let emojis: Vec<String> = line[tab + 1..]
             .split(' ')
             .filter(|v| !v.is_empty())
@@ -313,7 +275,7 @@ pub fn parse_upstream(
     out
 }
 
-/// 一般 OpenCC 文本表（`键<Tab>值1 值2 …`）：键不归一，值首项**等于键时**丢弃（rime 生态
+/// 一般 OpenCC 文本表（`键<Tab>值1 值2 …`）：键不归一，值首项等于键时丢弃（rime 生态
 /// 「首项重复键」的约定，见 `docs/design/opencc-conversions.md` §2），否则全收。
 ///
 /// 与 [`parse_upstream`] 的分别只在丢首项的判据：那边的键要归一、归一后与首项不再相等，
@@ -349,7 +311,7 @@ pub fn parse_opencc(content: &str) -> Vec<(String, Vec<String>)> {
 /// 分组标题行形如 `----------偏旁部首\t----------`：OpenCC 文本词典没有注释语法，rime-frost
 /// 借「键不可重复」把标题写成一条键、值都是破折号的假词条。标题之后到下一个标题之前的行
 /// 归该组；第一个标题之前的行不属于任何组，丢弃。`----------（太短了不启用了）谬\t谬 mu μ`
-/// 这种值不是破折号的行是**被注释掉的词条**，不是标题，也丢弃。
+/// 这种值不是破折号的行是被注释掉的词条，不是标题，也丢弃。
 ///
 /// `sections` 为空时原样返回整份内容（不分组的表）。
 pub fn select_sections<'a>(content: &'a str, sections: &[String]) -> std::borrow::Cow<'a, str> {
@@ -380,24 +342,17 @@ pub fn select_sections<'a>(content: &'a str, sections: &[String]) -> std::borrow
 
 /// 加载 emoji 扩展表：优先 mmap `.wemj` 缓存，不新鲜则从上游 txt 重建。
 ///
-/// - `tables`：要解析的上游文本表，**按顺序合并**（先 `emoji_word.txt` 后
-///   `emoji_category.txt`）。顺序即优先级——同键时精确词表的 emoji 排在分类表之前。
-///   不存在的文件跳过（分类表是可选的，出厂关）。
-/// - `fp_extra`：**只参与指纹、不参与解析**的源。归一表（`TSCharactersDerived.octrie`）
-///   必须放这里：本表的产出取决于它，换一版归一表就得重建，而它不是要解析的词表。
-///   漏传的后果是 OpenCC 数据升级后旧缓存被永久复用（见 [`cache_fp::EMOJI_TAG`]）。
-///
-/// # 为什么失败不降级成内存表
-///
-/// 注释库在缓存这条路走不通时会退回内存表（「功能继续，只是这一库常驻内存」）。**本表
-/// 刻意不这样做**：emoji 扩展是纯锦上添花的可选功能，而「常驻内存随功能数量累积」正是
-/// 本设计要避开的东西（见模块文档与 `docs/design/emoji-suggestion.md` §3.4）。缓存建不了
-/// （目录只读、磁盘满）就让这个功能不可用并告警，不偷偷占着内存。
+/// - `tables`：要解析的上游文本表，按顺序合并，顺序即优先级（同键时精确词表的 emoji 在前）。
+///   不存在的文件跳过（分类表可选）。
+/// - `fp_extra`：只参与指纹、不参与解析的源。归一表（`TSCharactersDerived.octrie`）必须放这里，
+///   漏传会让 OpenCC 数据升级后旧缓存被永久复用（见 [`cache_fp::EMOJI_TAG`]）。
 /// - `sections`：只取这些分组（见 [`select_sections`]），空 = 整表。分组决定解析结果却不在
-///   源文件字节里，故并入指纹 tag——同一份 `others.txt` 拆成多个模块，各模块的缓存互不冒认。
-/// - `normalize`：`Some` = rime-emoji 上游表（键是繁体）：按**位置**丢值首项再归一键，见
-///   [`parse_upstream`]。`None` = 一般 OpenCC 表（rime-frost / 用户放置）：键不归一，值首项
-///   **等于键时**才丢，见 [`parse_opencc`]——用户的表未必遵守「首项重复键」的约定。
+///   源文件字节里，故并入指纹 tag，同一份 `others.txt` 拆出的各模块缓存互不冒认。
+/// - `normalize`：`Some` = rime-emoji 上游表（键是繁体），按位置丢值首项再归一键，见
+///   [`parse_upstream`]；`None` = 一般 OpenCC 表，键不归一，值首项等于键时才丢，见 [`parse_opencc`]。
+///
+/// 缓存建不了（目录只读、磁盘满）时不降级成内存表，而是让功能不可用并告警：这是可选功能，
+/// 不该常驻内存（见 `docs/design/emoji-suggestion.md` §3.4）。
 pub fn load_or_build(
     tables: &[std::path::PathBuf],
     fp_extra: &[std::path::PathBuf],
