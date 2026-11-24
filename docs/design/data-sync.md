@@ -102,7 +102,8 @@
 ```
 meta.json                      明文：格式版本、KDF 参数、盐、口令封装的 DEK、密钥校验值
 devices/<dev>/manifest.<gen>   密文：该设备的清单，gen 单调递增；保留最近 2 代
-blobs/<id>                     密文：文件内容，id = HMAC(DEK, 明文 SHA-256) 的 base32
+devices/<dev>/info             密文（devinfo 子密钥）：设备名册条目 {name, platform, app_version, caps, last_seen}
+blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥, 明文 SHA-256) 的 base32
 ```
 
 - **每设备只写自己的目录**（`<dev>` 为同步专用的随机设备号，存在同步状态里，与日志的 device_id 无关）。
@@ -110,7 +111,7 @@ blobs/<id>                     密文：文件内容，id = HMAC(DEK, 明文 SHA
 - **清单条目**：`path → {hash, base, deleted, lamport, device}`。`base` 是本设备上次同步时该文件的 hash，
   用来判断「谁在谁之后」以及三方合并的公共祖先。路径与内容都在密文里，服务端只看到设备号、代数和 blob 名。
 - **blob 内容寻址**：同内容同名，上传天然幂等；先传 blob、后写清单，清单写成功才算提交。中途失败只会留下无主 blob。
-- **回收**：任一设备最新两代清单都不引用、且超过 7 天的 blob 由下次同步删除。
+- **回收**：任一设备最新两代清单都不引用、且超过 7 天的 blob 由下次同步删除；只扫 `blobs/`，不碰 `devices/*/info`。
 
 ## 5. 加密
 

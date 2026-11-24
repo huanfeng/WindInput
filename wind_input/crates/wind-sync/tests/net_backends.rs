@@ -8,6 +8,7 @@
 
 use wind_sync::backend::{Backend, BackendError};
 use wind_sync::crypto::KdfParams;
+use wind_sync::devices::{DeviceInfo, list_devices, put_device_info, remove_device};
 use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::local::MemLocal;
 use wind_sync::net::{S3Backend, S3Config, WebDavBackend, WebDavConfig};
@@ -130,6 +131,27 @@ fn sync_roundtrip(b: &dyn Backend) {
     // 稳态：无动作
     let r = sync_once(b, &mut la, &mut sa, &dek, &ctx).unwrap();
     assert!(r.uploaded.is_empty() && r.downloaded.is_empty(), "{r:?}");
+
+    // 设备名册：info 与清单同在设备目录下，移除即整目录清掉
+    let info = |name: &str| DeviceInfo {
+        name: name.into(),
+        platform: "linux".into(),
+        app_version: "0.0.1".into(),
+        caps: vec!["files".into()],
+        last_seen: 1_795_478_400,
+    };
+    put_device_info(b, &dek.devinfo_key(), "devA", &info("甲")).unwrap();
+    put_device_info(b, &dek.devinfo_key(), "devB", &info("乙")).unwrap();
+    let l = list_devices(b, &dek.devinfo_key()).unwrap();
+    let got: Vec<_> = l
+        .iter()
+        .map(|(d, i)| (d.as_str(), i.as_ref().unwrap().name.as_str()))
+        .collect();
+    assert_eq!(got, [("devA", "甲"), ("devB", "乙")]);
+    assert!(remove_device(b, "devB").unwrap() >= 2, "各代清单 + info");
+    let l = list_devices(b, &dek.devinfo_key()).unwrap();
+    assert_eq!(l.len(), 1);
+    assert_eq!(l[0].0, "devA");
 }
 
 #[test]
