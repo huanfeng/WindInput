@@ -1,17 +1,9 @@
 //! Web 设置数据 RPC：schema/dict/temp/freq/shadow/stats/theme/phrase/quick/commonChars 命名空间。
 //!
-//! 经 wind-rpc 的 `CoreRpc::data_rpc` 转发到此（service 的 RpcCore 适配）。
-//! 方法名与前端 `contract.ts` 1:1 一致。
+//! 经 wind-rpc 的 `CoreRpc::data_rpc` 转发到此，方法名与前端 `contract.ts` 1:1 一致。
+//! `schema.references` 暂返 `{}`；无 store/themes 时各方法返回合法空集（降级，不报错）。
 //!
-//! 接入进度：契约全部数据域方法均接通真实 store/engine/theme：
-//! - schema.*（含三层合并 getConfig/saveConfig/resetConfig/setDictEnabled/delete）
-//! - dict.*（含 encode/genPinyin 反查出码）、temp.*、freq.*、shadow.*、phrase.*、stats.*、theme.*
-//! - sysDict.categories / header / entries（词库窗的系统词库表、单库头部与只读词条）
-//! - `schema.references` 暂返 `{}`（删除安全检查未用，前端宽松消费）；
-//!   无 store/themes 时各方法返回合法空集（降级，不报错）。
-//!
-//! 本 crate 由 wind-coordinator 的 webdata 模块独立而来：它只经
-//! [`WebDataHost`] 窄面（定义在 wind-coordinator::web_host）触宿主，
+//! 只经 [`WebDataHost`] 窄面（wind-coordinator::web_host）触宿主，
 //! 把 wind-transfer/fontdb 等重依赖挡在 Android 闭包之外。
 
 mod theme_render;
@@ -89,26 +81,12 @@ fn kind_id_item(p: &Value) -> anyhow::Result<(String, String)> {
     ))
 }
 
-/// 导入类方法的文本来源：**`path` 优先，`content` 回落**。
+/// 导入类方法的文本来源：`path` 优先，`content` 回落。
 ///
-/// ## 为什么要有 `path` 这条路
-///
-/// 走 `content` 时整份词库要塞进一帧 JSON-RPC，而设置端的读帧上限是 16MB
-/// （`wind-setting::rpc::MAX_FRAME`）。按每条约 30 字节（含 JSON 对 `\t\n` 的转义）算，
-/// 单是用户词库就在 55 万条左右撞墙，带上词频/候选调整等段则 25 万条起——**这是随词库
-/// 增长必然撞上的墙，不是偶发**。见 issue #101（用户实测报「帧长超限」）。
-///
-/// `path` 让 payload 从 O(词库大小) 降到 O(1)，上限**消失**而不是提高。这不是新花样：
-/// `backup.*` 一直就是这么传的（见 [`WebData::web_backup_create`]），本函数只是把
-/// `dict.*` 拉齐到同一套做法。
-///
-/// ## 为什么 `content` 必须留着
-///
-/// 两类调用方没有文件可指：命令行的管道用法，以及设置端「纯词列表」那条路——它把用户
-/// 的词表分批送去出码、在内存里拼成 TSV 再导入，那份 TSV 从来不落盘。
-///
-/// ⚠️ 路径不做额外校验，与 `backup.*` 保持一致：它来自用户在本机文件对话框里的选择，
-/// 与 core 同权限同用户。在这一处单独立一套规矩，只会让两条路的行为解释不通。
+/// 走 `content` 时整份词库塞进一帧 JSON-RPC，会撞设置端 16MB 读帧上限
+/// （`wind-setting::rpc::MAX_FRAME`，约数十万条即触顶）；`path` 让 payload 与词库大小无关，
+/// 与 `backup.*` 同一做法。`content` 留给没有文件可指的调用方：命令行管道、设置端
+/// 「纯词列表」在内存里拼出的 TSV。路径不做额外校验，与 `backup.*` 一致（来自本机文件对话框，与 core 同权限）。
 fn dict_source_text(params: &Value) -> anyhow::Result<std::borrow::Cow<'_, str>> {
     if let Some(path) = params.get("path").and_then(|v| v.as_str())
         && !path.is_empty()
@@ -122,17 +100,9 @@ fn dict_source_text(params: &Value) -> anyhow::Result<std::borrow::Cow<'_, str>>
 
 /// 按设置页点选的列给常用字列表排序。`sort_by` 为空 = 不动，保持字表原序。
 ///
-/// ## 为什么 `"text"` 也要认
-///
-/// 「字」那一列复用了 `WordField::Text`（`cell_text` 取它正好得到那个字），于是设置页发来的
-/// `sortBy` 是 `"text"`，而这张表的 json 字段名是 `"char"`。两个都收下——只认一个的后果是
-/// 点了列头毫无反应，**且不报错**。
-///
-/// ## 稳定排序，不用 `reverse()`
-///
-/// 降序走 `Ordering::reverse` 而不是排完再整体反转：后者会把同值组内的顺序也倒过来，
-/// 于是按「当前」排序时，同为生僻的那一批会从字表原序变成倒序——用户看到的是一列
-/// 莫名其妙乱序的字。稳定排序则让同值组保持字表原序。
+/// `"text"` 与 `"char"` 都认：「字」列复用 `WordField::Text`，设置页发 `"text"`，而 json 字段名是
+/// `"char"`；只认一个会让点列头静默无反应。降序用 `Ordering::reverse` 而非排完整体反转，
+/// 保证同值组仍保持字表原序。
 fn sort_common_char_rows(
     rows: &mut [wind_coordinator::handle_common_chars::CommonCharRow],
     sort_by: &str,
@@ -155,14 +125,9 @@ fn sort_common_char_rows(
     });
 }
 
-/// 参数里取一个**单字**。
+/// 参数里取一个字符，按字素簇校验（`⚽️`、`👨‍👩‍👧`、`🇨🇳` 各算一个）。
 ///
-/// 多字符 / 空串一律拒绝，而不是取首字符：「常用」是字级属性，悄悄截取会让用户以为
-/// 自己给整个词做了标记，而实际上只标了第一个字。
-/// 读取「一个字符」参数——按**字素簇**校验，不是按 `char`。
-///
-/// `⚽️`(2 个码位)、`👨‍👩‍👧`(5 个)、`🇨🇳`(2 个) 在屏幕上都只有一个图形，按 `char` 数校验会把
-/// 它们当成词组拒掉，用户看到的是候选右键里根本没有「设为生僻字」这一项。
+/// 多字符 / 空串一律拒绝而不是取首字符：「常用」是字级属性，悄悄截取会让用户误以为标了整个词。
 fn char_param(p: &Value, key: &str) -> anyhow::Result<String> {
     let s = str_param(p, key)?;
     if s.is_empty() {
@@ -185,11 +150,8 @@ fn dict_sections_param(p: &Value) -> Option<Vec<wind_store::dict_export::DictSec
 }
 
 /// 导入结果 → JSON（`{sections:[{key, added/updated/unchanged | imported, skipped, …}]}`）。
-/// 过了准入契约的段（用户词 / 临时词）再并进分类统计——两种格式字段名一致，UI 两条路径
-/// 共用同一套渲染。
-///
-/// ⚠️ `rejectedSamples` 只有 WindDict 多段路径带：Rime/TSV 路径历来不回这个字段，
-/// 下沉到 `dict_transfer_api` 时保持原形状不变。
+/// 过了准入契约的段（用户词 / 临时词）再并进分类统计，两种格式字段名一致，UI 共用一套渲染。
+/// `rejectedSamples` 只有 WindDict 多段路径带，Rime/TSV 路径不回。
 fn dict_report_json(out: &dict_transfer_api::DictImportOutcome) -> Value {
     let wind_dict = out.format == wind_store::import_formats::DictFormat::WindDict;
     let sections: Vec<Value> = out
@@ -262,16 +224,11 @@ const FULL_SCAN_METHODS: &[&str] = &[
     "shadow.clear",
 ];
 
-/// **全表规模的写**：成功之后立即回收页缓存（`drop_page_cache_after_bulk_write`）。
+/// 全表规模的写：成功之后立即回收页缓存（`drop_page_cache_after_bulk_write`）。
 ///
-/// redb 刷盘时会把脏页直接晋升进读缓存并长期不还（本机实测 19 万词的库因此常驻 41 MB，
-/// 50 万词约 90 MB）——用户反馈「导入大词库之后内存占用变高」就是它。写是一次性的，不必等
-/// 空闲：做完就还。只在**成功**时丢：格式不符 / 引擎类型不匹配那些 early-return Err 一个字节
-/// 都没落库，没必要付关库重开这一趟；丢缓存失败也不把一次成功的写报成失败（只记日志）。
-/// 放在分发出口而不是各 handler 里：handler 内多条分支各自返回，将来多一条就会漏。
-///
-/// `schema.delete` 级联清该方案的用户词 / 临时词 / 草稿 / 词频 / 联想历史 / shadow 六张表，
-/// 动的页与 `dict.clear` 同量级。
+/// redb 刷盘会把脏页晋升进读缓存且长期不还，大词库导入后常驻内存明显上涨。只在成功时丢
+/// （失败路径没落库，不必付关库重开的代价）；丢缓存失败只记日志，不把成功的写报成失败。
+/// 放在分发出口而非各 handler 里，免得新增分支漏掉。`schema.delete` 级联清六张表，量级同 `dict.clear`。
 const BULK_WRITE_METHODS: &[&str] = &[
     "backup.restore",
     "dict.clear",
@@ -320,8 +277,7 @@ fn parse_sort<'a>(params: &'a Value, valid_fields: &[&str]) -> Option<(&'a str, 
 ///
 /// - `process`：`{bytes, kind}`，口径见 `wind_coordinator::process_memory`（Windows Private、
 ///   Linux / Android RssAnon；macOS 两者皆 `null`）。
-/// - `redb`：redb 不暴露页缓存的在用量，只给上限与「空闲回收」已发生的次数；旧库没打开（迁移
-///   全部完成后运行期不再打开它）或无 store 时 `null`。
+/// - `redb`：redb 不暴露页缓存的在用量，只给上限与「空闲回收」已发生的次数；库已暂停或无 store 时 `null`。
 /// - 字节数都是各结构按容量自报、不含分配器开销，只用来回答「是哪一档涨了」。
 fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
     let process = wind_coordinator::process_memory::private_memory();
@@ -376,11 +332,8 @@ fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
     })
 }
 
-/// 设置页数据 RPC 本体：全部方法为默认实现，只能经 [`WebDataHost`] 窄面触宿主——
-/// 默认方法看不见 Coordinator 字段，窄面约束由编译期保证。调用方
-/// `use 本 trait` 后在 Coordinator 上直接调 `web_data_rpc`。
-/// 数据类 RPC 的分派体。**模块私有**：外部只能经 [`WebDataRpc::web_data_rpc`] 进来，那里统一
-/// 做扫描标记与批量写之后的回收——绕过它就漏了。（trait 的默认方法没有私有可见性，故不放进 trait。）
+/// 数据类 RPC 的分派体。模块私有：外部只能经 [`WebDataRpc::web_data_rpc`] 进来，那里统一
+/// 做扫描标记与批量写之后的回收（trait 默认方法没有私有可见性，故不放进 trait）。
 fn web_data_dispatch<H: WebDataRpc + ?Sized>(
     h: &H,
     method: &str,
@@ -414,8 +367,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "schema.invalidate" => {
             let id = str_param(params, "id")?;
             h.engine_mgr().invalidate_schema(id);
-            // CLI 直接写 override 后走这里，与 saveConfig 同形（GH#144）：吃键集等跨方案
-            // 派生集合不重建，方案自定义标点 / 引导键要等重启才生效。
+            // CLI 直接写 override 后走这里，与 saveConfig 同形：不重建吃键集等跨方案派生集合，
+            // 方案自定义标点 / 引导键要等重启才生效。
             h.refresh_schema_derived_config();
             Ok(json!({ "ok": true }))
         }
@@ -425,9 +378,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
             let (removed, failed) = h.engine_mgr().rebuild_all_caches();
             Ok(json!({ "removed": removed, "failed": failed }))
         }
-        // 重启服务（CLI `wind_input restart`）：与托盘菜单同一条 request_restart
-        // 流程。延迟发信号——main 收到即释放单例并 exit，先让本条 RPC 响应写回
-        // 客户端，避免 CLI 读响应与进程退出竞争。
+        // 重启服务（CLI `wind_input restart`），与托盘菜单同一流程。延迟发信号：main 收到即 exit，
+        // 先让本条响应写回客户端。
         "system.restart" => {
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -437,11 +389,9 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         }
         // 内存诊断（只读，设置端「高级 → 性能 → 内存占用」与「复制诊断信息」）。
         "system.memoryStats" => Ok(memory_stats_json(h)),
-        // 存储状态（设置页提示「只读模式」）：用户数据设计 §7.1 降级保护。
-        // `issues`：用户数据目录下的文件问题（设计 §2.5），路径相对数据目录。
-        // `format_version` 是 meta.toml 里的实际值，`known_format_version` 是本版本认识的上限；
-        // `write_error`：最近一次写用户数据失败的原因（磁盘满、目录只读…），成功写入后清空。
-        // 用户数据锁不可用 / 被别的进程占用时引擎只读，同样报 readonly。
+        // 存储状态（设置页提示「只读模式」，用户数据设计 §7.1）。`issues` 路径相对数据目录；
+        // `format_version` 是 meta.toml 实际值，`known_format_version` 是本版本认识的上限；
+        // `write_error` 为最近一次写失败原因，成功写入后清空。用户数据锁不可用时同样报 readonly。
         "system.storageStatus" => {
             let store = h.user_store();
             let engine_readonly = store.is_some_and(|s| s.runtime().data().readonly());
@@ -464,12 +414,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 "issues": store.map(|s| storage_issues_json(s)).unwrap_or_default(),
             }))
         }
-        // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
-        // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
-        //
-        // ⚠️ 刻意**不**在 dict.import / config.set 这类干活的方法里弹提示：那会连
-        // 设置页的按钮一起弹（设置页自己已有 UI 反馈），把"要不要提示"的决定权
-        // 从调用方手里夺走。要提示的调用方显式打这一条。
+        // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 的 UI 线程渲染。
+        // 刻意不在 dict.import / config.set 等方法里自动弹：设置页已有自己的反馈，要提示的调用方显式调这条。
         "ui.toast" => {
             let text = str_param(params, "text")?;
             let s = |k: &str| {
@@ -549,7 +495,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "dict.clear" => h.web_dict_clear(params),
         "dict.stats" => h.web_dict_stats(),
         // 系统词库统计（设置页「词库统计」）：本体在 `wind_coordinator::dict_stats_api`。
-        // 扫的是 mmap 词库不是 redb，故**不**进 `FULL_SCAN_METHODS`（那张表管页缓存回收）。
+        // 扫的是 mmap 词库不是 redb，故不进 `FULL_SCAN_METHODS`（那张表管页缓存回收）。
         "dict.systemStats" => wind_coordinator::dict_stats_api::system_stats(
             h,
             str_param(params, "schemaId")?,
@@ -581,9 +527,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
             usize_param(params, "offset", 0) as u64,
             usize_param(params, "limit", 100),
         ),
-        // 加词界面的默认上下文：设置端 `--add-word` 裸启动（不经输入法热键，故没有
-        // --schema / --text）时据此把窗口填成可用状态，以及窗内「最近输入」按钮的取值。
-        // 深链带了参数就不会调它——那时用户的意图已经明确。
+        // 加词界面的默认上下文：设置端 `--add-word` 裸启动（无 --schema / --text）时用它填窗口，
+        // 也是窗内「最近输入」按钮的取值。深链带了参数就不调它。
         "dict.addWordContext" => {
             let ctx = h.add_word_context();
             Ok(json!({
@@ -597,7 +542,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         // 批量出码：纯词列表导入按批调用（设置端每批约 1000 词）。
         "dict.encodeWords" => h.web_dict_encode_words(params),
         "dict.genPinyin" => {
-            // 取码要按**真实文本**算：转义形态里的 `\` `n` 会被当成两个待取码的字符。
+            // 取码要按真实文本算：转义形态里的 `\` `n` 会被当成两个待取码的字符。
             let text = str_param(params, "text")?;
             Ok(json!(h.gen_pinyin_word(&store_text(text))))
         }
@@ -645,9 +590,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "freq.clear" => h.web_freq_clear(params),
 
         // ── mailSuffix.* / urlHistory.*（补全学习数据）──
-        // 两组共用一份实现，只差 `CompletionKind`：存储层本就是一张表两个分区，
-        // RPC 再各写一遍等于把「同形态」这件事在第三处重新论证一遍。
-        // 命名空间分开是给设置端用的——「清空网址历史」不该顺带抹掉邮箱学习。
+        // 两组共用一份实现，只差 `CompletionKind`（存储层是一张表两个分区）。
+        // 命名空间分开是为了「清空网址历史」不顺带抹掉邮箱学习。
         "mailSuffix.listPaged" => h.web_completion_list_paged(CompletionKind::EmailSuffix, params),
         "mailSuffix.delete" => h.web_completion_delete(CompletionKind::EmailSuffix, params),
         "mailSuffix.clear" => h.web_completion_clear(CompletionKind::EmailSuffix),
@@ -665,8 +609,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "shadow.list" => h.web_shadow_list(params),
         // 分页版（设置页列表走这条；`shadow.list` 保留给全量取用方）。
         "shadow.listPaged" => h.web_shadow_list_paged(params),
-        // 整表撤销。此前设置端靠「逐条 remove_rule」凑出清空，分页之后它手上
-        // 只剩当前页，那条路会静默只清一页。
+        // 整表撤销。设置端分页后手上只有当前页，不能靠逐条 remove_rule 凑出清空。
         "shadow.clear" => h.web_shadow_clear(params),
         "shadow.pin" => h.web_shadow_pin(params),
         "shadow.delete" => h.web_shadow_delete(params),
@@ -689,8 +632,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "phrase.resetSystem" => h.web_phrase_reset_system(),
 
         // ── quick.*（快捷输入格式表的用户调整，全局）──
-        // 基表（模板与出厂顺序）在 system.quick.toml，**RPC 一律不写它**：
-        // 那会抢走高级用户手写文件的所有权，见 handle_quick_format 模块文档。
+        // 基表（模板与出厂顺序）在 system.quick.toml，RPC 一律不写它（会抢走手写文件的所有权，
+        // 见 handle_quick_format 模块文档）。
         "charset.list" => h.web_charset_list(),
         "charset.set" => h.web_charset_set(params),
         "charset.reset" => h.web_charset_reset(params),
@@ -819,6 +762,8 @@ fn issue_json(root: &std::path::Path, i: &wind_store::issues::FileIssue) -> Valu
     v
 }
 
+/// 设置页数据 RPC 本体：全部方法为默认实现，只能经 [`WebDataHost`] 窄面触宿主（默认方法看不见
+/// Coordinator 字段，窄面约束由编译期保证）。调用方 `use` 本 trait 后在 Coordinator 上调 `web_data_rpc`。
 pub trait WebDataRpc: WebDataHost {
     /// 枚举本机字体：返回 (family, display_name)。family 为匹配/渲染用名(通常英文),
     /// display_name 优先取该字体含 CJK 字符的本地化名(如"微软雅黑"),否则同 family。
@@ -857,13 +802,10 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 数据类 RPC 总分派。方法名以 `<ns>.<method>` 形式分组；未知方法返回 Err。
     ///
-    /// 会扫整张用户词 / 临时词 / 词频 / shadow 表的方法做完之后标记「有扫描待回收」：
-    /// 库空闲 3 秒后回收 redb 读缓存（`Store::mark_scan_pending`，
-    /// `docs/design/memory-footprint.md` §6）。不立即回收——设置页连续翻页时每页都扫一遍，
-    /// 逐页回收等于每页都从冷缓存起扫。放在这里而不是各个 handler 里：出口只有一个，
-    /// 各 handler 内的多条分流 / early-return 漏不掉。出错也标记：扫描可能已走了一半。
-    ///
-    /// 批量写（[`BULK_WRITE_METHODS`]）成功之后则**立即**回收，见那张表的文档。
+    /// 全表扫描的方法做完后标记「有扫描待回收」，库空闲 3 秒后回收 redb 读缓存
+    /// （`Store::mark_scan_pending`，`docs/design/memory-footprint.md` §6）；不立即回收，免得连续翻页
+    /// 每页都冷启动。放在唯一出口免得分支漏掉；出错也标记（扫描可能已走了一半）。
+    /// 批量写（[`BULK_WRITE_METHODS`]）成功后则立即回收。
     fn web_data_rpc(&self, method: &str, params: &Value) -> anyhow::Result<Value> {
         let r = web_data_dispatch(self, method, params);
         if r.is_ok() && BULK_WRITE_METHODS.contains(&method) {
@@ -878,10 +820,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `schema.list` —— 方案全集（含元信息），供设置页方案管理与主方案下拉。
     ///
-    /// `params.includeHidden = true` 时把隐藏方案（英文、快符这类 `[schema].hidden`）
-    /// 也列出来，供设置页的「显示特殊方案」开关。默认不含——它们对大多数用户是噪音。
-    /// 每项都带 `hidden` 字段，前端据此区分该行能配什么（隐藏方案配引导键，
-    /// 普通方案配直达热键）。
+    /// `params.includeHidden = true` 时也列出隐藏方案（`[schema].hidden`，如英文、快符），默认不含。
+    /// 每项带 `hidden` 字段，前端据此区分该行能配什么（隐藏方案配引导键，普通方案配直达热键）。
     fn web_schema_list(&self, params: &Value) -> anyhow::Result<Value> {
         use std::collections::HashMap;
 
@@ -890,11 +830,9 @@ pub trait WebDataRpc: WebDataHost {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // 设置页方案下拉的显示顺序（三段式，段间固定先后）：
-        //   ① 已启用的拼音方案（数量少、最常用，置顶）
-        //   ② 其余已启用方案，按 config.schema.available 配置顺序
-        //   ③ 未启用方案（磁盘扫到但不在 available），按类型分组「拼音→码表→混输→英文」，组内按 id 字典序
-        // 底层 installed_schemas() 仍返回 id 字典序全集（做稳定去重锚点），排序只在此展示层重排。
+        // 显示顺序三段：① 已启用的拼音方案；② 其余已启用方案，按 available 配置顺序；
+        // ③ 未启用方案，按类型「拼音→码表→混输→英文」分组、组内 id 字典序。
+        // installed_schemas() 仍返回 id 字典序全集，排序只在此展示层做。
 
         // 已启用方案 → 配置位置索引，供段①②保持配置顺序。
         let available = self.engine_mgr().available_schemas();
@@ -904,8 +842,7 @@ pub trait WebDataRpc: WebDataHost {
             .map(|(i, s)| (s.as_str(), i))
             .collect();
 
-        // 未启用段的类型分组顺序：拼音→码表→混输→英文。
-        // 英文排最后：它是给需要长时间打英文的人用的，绝大多数人不会启用。
+        // 未启用段的类型分组顺序：拼音→码表→混输→英文（英文方案极少有人启用）。
         fn type_rank(t: &str) -> i64 {
             match t {
                 "pinyin" => 0,
@@ -922,8 +859,7 @@ pub trait WebDataRpc: WebDataHost {
             .engine_mgr()
             .installed_schemas()
             .iter()
-            // 隐藏方案默认不列；已启用的隐藏方案是例外——用户既然把它放进了 available，
-            // 藏起来只会让人找不到怎么停用它。
+            // 隐藏方案默认不列；已启用的例外，否则用户找不到怎么停用它。
             .filter(|id| {
                 include_hidden
                     || avail_pos.contains_key(id.as_str())
@@ -954,13 +890,9 @@ pub trait WebDataRpc: WebDataHost {
                     "hidden": self.engine_mgr().schema_is_hidden(id),
                     // 方案角色（空 / "aux"）：aux = 辅助码专用码表方案，默认不进方案管理常规区。
                     "role": info.map(|i| i.role.clone()).unwrap_or_default(),
-                    // 是否为 **overlay 方案**（方案文件带 `[overlay]` 段）：可由引导键/直达
-                    // 热键临时叠加进入（快符/生僻字那类）。设置页据此枚举 `special:<id>`
-                    // 动词的可选项，并决定要不要显示 overlay 那一节配置。
-                    //
-                    // ⚠️ 与 `hidden` **正交**，不可互推：hidden 只说「不列进方案切换列表」，
-                    // 隐藏的码表方案也可能只是 mix 成员、没有 overlay
-                    // 生命周期；反过来一个 overlay 方案也可以不隐藏。
+                    // 是否为 overlay 方案（带 `[overlay]` 段，可由引导键/直达热键临时叠加进入）：
+                    // 设置页据此枚举 `special:<id>` 的可选项、决定是否显示 overlay 配置。
+                    // 与 `hidden` 正交不可互推：隐藏的码表方案可能只是 mix 成员，overlay 方案也可不隐藏。
                     "overlay": merged.as_ref().is_some_and(|s| s.overlay.is_some()),
                     "description": info.map(|i| i.description.clone()).unwrap_or_default(),
                     "version": info.map(|i| i.version.clone()).unwrap_or_default(),
@@ -998,15 +930,11 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!(items))
     }
 
-    /// 注释词库的**可选来源**：自动派生项 + `schemas/comments/` 下扫到的文件（`.dict.yaml` 与
+    /// 注释词库的可选来源：自动派生项 + `schemas/comments/` 下扫到的文件（`.dict.yaml` 与
     /// OpenCC 文本词典 `.txt`）。
     ///
-    /// 设置页据此把「填路径」换成「挑一个」——路径要相对 `schemas/`、分隔符怎么写、文件到底
-    /// 放没放对，这三件事以前全靠用户自己对，错了的表现是「配了没反应」（core 只 warn 一行）。
-    ///
-    /// `files` 里带 `hasComment`：**扫到但没有 comment 列**的文件仍然列出而不是滤掉。
-    /// 滤掉的话，用户放了个格式不对的文件进去，界面上看到的是「我的文件不见了」，
-    /// 那比「列出来并标一句缺 comment 列」难查得多。
+    /// 设置页据此让用户挑选而不是手填路径（填错的表现是静默不生效）。
+    /// 没有 comment 列的文件也列出、以 `hasComment` 标出，而不是滤掉让用户以为文件不见了。
     fn web_comment_sources(&self) -> anyhow::Result<Value> {
         let data_dir = wind_config::Config::data_dir();
         let auto: Vec<Value> = self
@@ -1035,9 +963,8 @@ pub trait WebDataRpc: WebDataHost {
             })
         })
         .chain(
-            // OpenCC 文本词典（`词<Tab>值…`，rime 生态常见 `.txt`）：没有 YAML 头就没有 columns
-            // 可判，按约定恒为「词 → 注释」两列，故 `hasComment` 直接给 true（解析见
-            // `wind_reverse::parse_comment_dict` 的裸表分支）。
+            // OpenCC 文本词典（`词<Tab>值…`）没有 YAML 头可判 columns，约定恒为「词 → 注释」，
+            // 故 `hasComment` 直接给 true（解析见 `wind_reverse::parse_comment_dict` 的裸表分支）。
             wind_config::Config::list_schema_resource_dir(data_dir.as_deref(), "comments", ".txt")
                 .into_iter()
                 .map(|(rel, abs)| {
@@ -1099,8 +1026,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// emoji 附加模块清单（内置 + 用户放进 `emoji/` 的 OpenCC 表），供设置页对话框列出。
     ///
-    /// 只给清单与出厂值，不给开关状态：状态在 `input.emoji.modules`，设置端随整份配置已拿到，
-    /// 按 `配置值 ?? defaultOn` 自己算——两处各算一遍的话，未保存的勾选会被这里的旧值盖掉。
+    /// 只给清单与出厂值，不给开关状态：设置端按 `input.emoji.modules ?? defaultOn` 自己算，
+    /// 否则未保存的勾选会被这里的旧值盖掉。
     fn web_emoji_modules(&self) -> anyhow::Result<Value> {
         let items: Vec<Value> =
             wind_config::Config::emoji_modules(wind_config::Config::data_dir().as_deref())
@@ -1153,7 +1080,7 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         // 列表显示的是带空格的音节码（见 word_item），用户很可能照着搜。key 是扁平的，
         // 不拆则 `ni ha` 一条也匹配不到。拆完仍是前缀语义（`ni ha` → `niha`）。
-        // 末尾再过一道 ü 归一，理由同 `user_words_api::list_paged` 里的 ★。
+        // 末尾再过一道 ü 归一，理由见 `user_words_api::list_paged`。
         let (query, _) = wind_store::wdict::split_spaced_code(query);
         let query = user_words_api::normalize_pinyin_code(self, &schema, query);
         let items: Vec<Value> = store
@@ -1186,8 +1113,7 @@ pub trait WebDataRpc: WebDataHost {
         let schema = str_param(params, "schemaId")?;
         let schema = self.engine_mgr().data_schema_id(schema); // 拼音族折叠到 "pinyin"
         let (code, text) = (str_param(params, "code")?, str_param(params, "text")?);
-        // text 在这里是**查找键**（update_user_word_weight 按它匹配记录），
-        // 不还原就查不到 → 「改了没反应」。见 [`store_text`]。
+        // text 在这里是查找键（update_user_word_weight 按它匹配记录），须还原，见 [`store_text`]。
         let text = &store_text(text);
         let weight = i32_param(params, "weight");
         let store = self
@@ -1382,9 +1308,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 导出方案数据为单个多段 wdict 文件。`sections` 参数选类型；缺省按引擎类型取默认适用段。
     ///
-    /// 带 `path` 时**由 core 直接写盘**、只回报字节数；缺省仍回 `{content}`。理由同
-    /// [`dict_source_text`]：整库走一帧 JSON 会在几十万条上撞设置端的 16MB 读帧上限
-    /// （issue #101 就是在这里报的「帧长超限」）。
+    /// 带 `path` 时由 core 直接写盘、只回报字节数；缺省仍回 `{content}`。理由同
+    /// [`dict_source_text`]（整库一帧 JSON 会撞设置端 16MB 读帧上限）。
     fn web_dict_export(&self, params: &Value) -> anyhow::Result<Value> {
         let schema_id = str_param(params, "schemaId")?;
         // 本体（数据方案折叠、engine_type 写头、缺省段按引擎类型）在
@@ -1416,8 +1341,7 @@ pub trait WebDataRpc: WebDataHost {
                 .and_then(|v| v.as_str())
                 .unwrap_or(""),
         ) == Strategy::Replace;
-        // 导入对话框的二选一（§5）。**缺省 true**：旧客户端与命令行不传这个参数，
-        // 行为必须与本参数出现之前完全一致。
+        // 导入对话框的二选一（§5）。缺省 true：旧客户端与命令行不传这个参数。
         let fill_boundary = params
             .get("fillBoundary")
             .and_then(|v| v.as_bool())
@@ -1456,7 +1380,7 @@ pub trait WebDataRpc: WebDataHost {
                         let (rows, sk) = wind_store::wdict::parse_words_wdict(content)
                             .map_err(|e| anyhow::anyhow!(e))?;
                         let total = rows.len();
-                        // 预览必须跑与导入**完全相同**的准入判据，否则「预计入库 N 条」会骗人。
+                        // 预览必须跑与导入完全相同的准入判据，否则「预计入库 N 条」会骗人。
                         let (rows, ct) = dict_transfer_api::apply_pinyin_entry_contract(
                             self, schema_id, rows, true,
                         );
@@ -1526,7 +1450,7 @@ pub trait WebDataRpc: WebDataHost {
             )
             .map_err(|e| anyhow::anyhow!(e))?;
             let total = rows.len();
-            // 预览必须跑与导入**完全相同**的准入判据，否则「预计入库 N 条」会骗人。
+            // 预览必须跑与导入完全相同的准入判据，否则「预计入库 N 条」会骗人。
             let (rows, contract) =
                 dict_transfer_api::apply_pinyin_entry_contract(self, schema_id, rows, true);
             let (c, samples) = store.preview_import_user_words(&data_schema, &rows)?;
@@ -1545,27 +1469,20 @@ pub trait WebDataRpc: WebDataHost {
                     "boundaryAmbiguous": contract.ambiguous,
                     "boundaryNoReading": contract.no_reading,
                     "noBoundary": contract.no_boundary,
-                    // ⚠️ 预览恒按「补充」求解（`fill = true`），故这里没有 boundarySkipped：
-                    // 那个选择在预览之后、由用户在对话框里做。预览的职责是告诉他
-                    // **有多少条要做这个选择**（= boundaryFilled），不是替他先选一个。
+                    // 预览恒按「补充」求解，故没有 boundarySkipped：那个选择由用户在预览后做，
+                    // 预览只报有多少条要做这个选择（= boundaryFilled）。
                 } ],
                 "compatible": true,
             }))
         }
     }
 
-    /// 一次**全表规模的写**做完之后，把 redb 那笔只涨不落的读缓存还回去。
+    /// 全表规模的写做完之后，把 redb 只涨不落的读缓存还回去（redb 刷盘时脏页晋升进堆上读缓存，
+    /// 上界约 min(配额, 库文件大小)，见 wind-store 的 `tests/redb_cache_high_water.rs`）。
     ///
-    /// redb 2.x 不是 mmap，页是堆上的 `Arc<[u8]>`，刷盘时脏页会被直接晋升进读缓存，
-    /// 之后只涨不落（上界 ≈ min(配额, 库文件大小)，19 万词实测 41 MB）——「导入大词库
-    /// 之后内存占用变高」就是它。见 wind-store 的 `tests/redb_cache_high_water.rs`。
-    ///
-    /// ⚠️ **失败是真故障，不是「内存没回落」**：`drop_page_cache` 内部重试过一次仍失败时，
-    /// store 已经停在暂停态，此后每一次读写都会报 `store is paused`，用户词 / 临时词 /
-    /// 词频 / shadow 全线失效到重启。所以这里 `error!` 而不是 `warn!`。
-    ///
-    /// 仍然不把它变成调用方的 `Err`：写已经成功落库了，把一次成功的导入报成失败会让用户
-    /// 重来一遍（那只会再触发一次同样的故障）。日志是唯一的诊断出口，故文案必须说清后果。
+    /// 失败是真故障：`drop_page_cache` 重试后仍失败时 store 停在暂停态，此后读写全报
+    /// `store is paused` 直到重启，故记 `error!`。仍不转成调用方的 `Err`：写已成功落库，
+    /// 报失败只会让用户重做；日志是唯一诊断出口，文案须说清后果。
     fn drop_page_cache_after_bulk_write(&self, op: &str) {
         let Some(store) = self.user_store() else {
             return;
@@ -1585,22 +1502,11 @@ pub trait WebDataRpc: WebDataHost {
         };
         let mut out = Vec::new();
         for id in self.engine_mgr().available_schemas().iter() {
-            // ⚠️ 只要条数就用 `count_*`，别 `list(..).len()`：那会把整张表物化一遍
-            // （19 万条 × 两个 `String`，本机实测几十 MB 峰值）**只为了读一个数字**，
-            // 而且这里对**每个方案**各来一遍。口径与列表逐条一致，守门见
-            // wind-store 的 `tests/counts_match_listings.rs`。
-            // 三个计数**同走 `data_schema_id`**，与 `dict.listPaged` / `dict.search` /
-            // `shadow.list` 等 23 处读路径同源。直传原始 id 会恒得 0：拼音族折叠后才是
-            // "pinyin"，拿 `shuangpin` 去查的是一个空桶——连全拼自己都是 0，只有方案 id
-            // 恰好等于 "pinyin" 时才碰巧对上。
-            //
-            // 由此可见的两件**设计使然、不是缺陷**的事：
-            // - 全拼与双拼显示**同一个数**：拼音族共享同一份用户词/临时词（`data_schema_id`
-            //   把 `engine.type == "pinyin"` 的方案统一折叠到 "pinyin"）。
-            // - 混输方案通常显示 **0**：混输本身不存用户词，引擎写端按来源落到它的目标方案里
-            //   （主码表方案 / "pinyin"，见 `write_data_schema_id`）。但 `data_schema_id` 对混输
-            //   返回它自己的 id，所以若真有入口直接以混输方案调 `dict.add`，词会落进混输自己
-            //   的桶，这里也会如实报出——与 `dict.listPaged` 同源，口径不会分叉。
+            // 只要条数就用 `count_*`，别 `list(..).len()`：那会为一个数字把整张表物化一遍，且每个方案各一遍。
+            // 口径与列表一致，见 wind-store 的 `tests/counts_match_listings.rs`。
+            // 三个计数同走 `data_schema_id`（与 `dict.listPaged` 等读路径同源），直传原始 id 会查空桶恒得 0。
+            // 因此全拼与双拼显示同一个数（拼音族共享数据）；混输方案通常为 0（写端按来源落到目标方案，
+            // 见 `write_data_schema_id`），这都是设计使然。
             let data_schema = self.engine_mgr().data_schema_id(id);
             let user_words = store.count_user_words(&data_schema).unwrap_or(0);
             let temp_words = store.count_temp_words(&data_schema).unwrap_or(0);
@@ -1633,21 +1539,15 @@ pub trait WebDataRpc: WebDataHost {
                 if let Some(eng) = v.get_mut("engine").and_then(|e| e.as_object_mut()) {
                     eng.insert("type".to_string(), json!(etype));
                 }
-                // 码表方案附带「当前生效值」旁路字段：`engine.codetable` 的行为字段是
-                // Option，未设置时是 null，设置页无法把 null 显示成开关——它需要知道
-                // 「不设置的话实际是什么」。基线又分普通/特殊两种（见 codetable_baseline），
-                // UI 侧算不出来，故由此处随配置一并给出。
-                //
-                // 与 `engine.codetable` 平级但**不同名**：那份是「显式写了什么」（可为 null，
-                // 决定 saveConfig 该不该落盘），这份是「实际按什么跑」（恒为实值，只作 UI 初值）。
-                // 合并成一份会让「跟随基线」与「显式等于基线值」无从区分。
+                // 码表方案附带「当前生效值」旁路字段：`engine.codetable` 的行为字段未设置时为 null，
+                // 设置页需要知道实际按什么跑，而基线分普通/特殊两种（见 codetable_baseline），UI 算不出来。
+                // 与 `engine.codetable`（显式写了什么，决定是否落盘）分开放，否则「跟随基线」与
+                // 「显式等于基线值」无从区分。
                 if etype == "codetable" {
                     let eff = self.engine_mgr().effective_codetable(id);
                     // 「取消覆盖后会变成什么」——设置页每一项的三态控件未勾选时显示它。
                     let followed = self.engine_mgr().followed_codetable(id);
-                    // 「哪些项是用户自己改的」。判勾选状态**只能**问 override 层：上面那份
-                    // `engine.codetable` 是方案文件 ⊕ override 的合并结果，里面一个
-                    // `Some(3)` 既可能是方案作者写的、也可能是用户改的，合并值答不了这个问题。
+                    // 「哪些项是用户自己改的」只能问 override 层：合并值分不清是方案作者写的还是用户改的。
                     let ov = self
                         .engine_mgr()
                         .get_schema_override(id)
@@ -1667,12 +1567,9 @@ pub trait WebDataRpc: WebDataHost {
                         obj.insert("codetableOverride".to_string(), ov);
                     }
                 }
-                // override 层的 `[punct]` 段。据此分辨自定义标点表的**来源**：
-                // 合并值有、这里没有 ⇒ 方案作者写的；两边都有 ⇒ 用户自己改的。
-                // ⚠️ 设置页当前还没用上这个区别，见 `READONLY_SIDECAR_FIELDS` 里的说明。
-                //
-                // 不给「跟随全局时表里是什么」的旁路字段——那就是全局 `input.punct`，
-                // 设置页手里本来就有整份全局配置，再从这里发一遍就是第二个真相源。
+                // override 层的 `[punct]` 段，用来分辨自定义标点表的来源（合并值有、这里没有 ⇒ 方案作者写的）。
+                // 设置页当前还没用上，见 `READONLY_SIDECAR_FIELDS`。不给「跟随全局时」的旁路字段：
+                // 那就是全局 `input.punct`，设置页已有，再发一遍就是第二个真相源。
                 let punct_ov = self
                     .engine_mgr()
                     .get_schema_override(id)
@@ -1682,19 +1579,10 @@ pub trait WebDataRpc: WebDataHost {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("punctOverride".to_string(), punct_ov);
                 }
-                // 首码集里的符号键（键名形式）。给设置页判「按键功能表绑的这个键，是不是
-                // 同一方案的码元首码」——两者同层冲突，内核裁决是绑定优先，于是该符号
-                // 起头的编码在本方案静默失效（见 schema-key-actions.md §4.3）。
-                //
-                // 给**键名**而不是字符集原文：`input_chars` 有区间语法（`a-x/`），设置页
-                // 再写一份解析器就是两处慢慢漂移——跨仓契约无编译期约束，本仓已栽过。
-                // 边界上传语义结果，不传待解析的原料。
-                //
-                // 组装放在协调器而不是引擎：引擎层不该依赖 `wind-keys`（层次倒置）。
-                // 引擎只出「字符集」，键名↔字符的对照表归按键层。
-                //
-                // 只报符号键：字母恒在默认码元集里，全列出来是噪音；「字母绑功能键」那条
-                // 冲突内核另有活码前缀裁决（`bound_action_key_yields`），不归本判据管。
+                // 首码集里的符号键（键名形式），给设置页判按键功能绑定是否与本方案码元首码冲突
+                // （内核绑定优先，该符号起头的编码会静默失效，见 schema-key-actions.md §4.3）。
+                // 给键名而不是 `input_chars` 原文，免得设置端再写一份区间语法解析器。组装放这里而不在引擎，
+                // 因为引擎不该依赖 `wind-keys`。只报符号键：字母绑功能键另有 `bound_action_key_yields` 裁决。
                 let leading_keys: Vec<&str> = match self.engine_mgr().schema_code_char_set(id) {
                     Some(set) => wind_keys::keymap::symbol_keys()
                         .filter(|(_, ch)| set.contains_leading(*ch))
@@ -1715,9 +1603,8 @@ pub trait WebDataRpc: WebDataHost {
                     // 方案对话框「跟随全局（值）」要显示的值（R8.2）：方案没覆盖时实际按什么跑。
                     // 不让设置页自己从全局配置里拼：字体那一档要回落到主题，而主题解析只在内核。
                     obj.insert("followedBehavior".to_string(), self.followed_behavior());
-                    // 方案文件**自己**声明的辅助码来源（不含 override 层）。设置页据此区分
-                    // 「跟随方案」与「用户选的」：`engine.aux_code.files` 是合并值，两种来源
-                    // 给出的都是一个数组，答不了「这是谁写的」。
+                    // 方案文件自己声明的辅助码来源（不含 override 层），设置页据此区分「跟随方案」与
+                    // 「用户选的」（合并值 `engine.aux_code.files` 分不清）。
                     let base_files = self
                         .engine_mgr()
                         .schema_base(id)
@@ -1733,10 +1620,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `schema.overrideSummary`：`{ "<全局键>": ["<方案 id>", ...] }`。
     ///
-    /// 只数 `available_schemas()`（用户启用、且未被定制版 hide 的方案）——没启用的方案
-    /// 覆盖了什么，用户在全局页上不需要被提醒。按方案**合并后**的配置判（方案文件 ⊕
-    /// override 层）：两层写同一个键是同一次覆盖，一个方案对一个键至多计一次；
-    /// 数组顺序即方案列表顺序。
+    /// 只数 `available_schemas()`（用户启用、未被定制版 hide 的方案）。按合并后的配置判
+    /// （方案文件 ⊕ override），一个方案对一个键至多计一次；数组顺序即方案列表顺序。
     fn web_schema_override_summary(&self) -> anyhow::Result<Value> {
         let mgr = self.engine_mgr();
         let mut out = serde_json::Map::new();
@@ -1776,15 +1661,10 @@ pub trait WebDataRpc: WebDataHost {
         let base_json = serde_json::to_value(&base)?;
         // 稀疏 diff（仅变化项）写入 override 层，让方案文件后续更新仍能透传未改项。
         let mut diff = json_diff(&base_json, cfg).unwrap_or(json!({}));
-        // ★ `dictionaries` 不经本入口写：附加词库开关的唯一写入口是 setDictEnabled，
-        // 这里只把既有 override 里的那份原样带过去（论坛 t281）。
-        //
-        // 回传的 cfg 是设置页**打开对话框时**的 getConfig 快照，而设置端一次保存是先
-        // setDictEnabled 再 saveConfig。快照的 dictionaries 只要与方案文件基线不同（之前
-        // 翻过任一扩展库开关就是如此），`json_diff` 对数组整体比较，就会把整份**旧**数组
-        // 写进 override：刚落盘的 `enabled = false` 被冲回去，还顺带冻结了整份词库定义
-        // （path/label/顺序，见 `schema_dicts_api` 的 `sparse_dict_overrides`）。在入口剥掉，
-        // 而不是指望每个调用方记得先刷新快照——CLI、旧版设置端都走这里。
+        // `dictionaries` 不经本入口写（唯一写入口是 setDictEnabled），只把既有 override 里的那份原样带过去。
+        // 传入的 cfg 是打开对话框时的快照，而设置端先 setDictEnabled 再 saveConfig；若照 diff 写，
+        // 旧数组会冲掉刚落盘的开关并冻结整份词库定义（见 `schema_dicts_api` 的 `sparse_dict_overrides`）。
+        // 在入口剥掉，不指望每个调用方（CLI、旧版设置端）先刷新快照。
         if let Some(o) = diff.as_object_mut() {
             o.remove("dictionaries");
         }
@@ -1797,7 +1677,7 @@ pub trait WebDataRpc: WebDataHost {
         }
         self.engine_mgr().write_schema_override(id, &ov)?;
         // 吃键集等跨方案派生集合只在 ConfigBundle 构建时算；方案 override 不在 config.toml
-        // 里，不在此重建就要等重启 / 下次改全局设置才生效（GH#144）。
+        // 里，不在此重建就要等重启 / 下次改全局设置才生效。
         self.refresh_schema_derived_config();
         Ok(json!({ "ok": true }))
     }
@@ -1876,17 +1756,14 @@ pub trait WebDataRpc: WebDataHost {
         // 级联清词库数据:仅清数据域=方案自身的(拼音族数据在共享 pinyin 域,
         // data_schema_id≠自身时跳过;文件已删读不到类型时回落自身,清空域无害)。
         //
-        // 清库出错**不得跳过下方收尾**:文件此时已删,forget / 吃键集重建不跑的话,运行时
-        // 状态要到重启才与磁盘一致。故先记下错误,收尾做完再返回。
+        // 清库出错不得跳过下方收尾（文件已删，不收尾则运行时状态到重启才与磁盘一致）：先记错误，收尾后再返回。
         let cleared: anyhow::Result<()> = (|| {
             if let Some(store) = self.user_store() {
                 for sid in &r.schema_ids {
                     if self.engine_mgr().data_schema_id(sid) == *sid {
                         store.clear_user_words(sid)?;
                         store.clear_temp_words(sid)?;
-                        // 草稿层同属该方案的数据域：方案都删了，它记下的猜测就是垃圾。
-                        // 漏掉这一条不会立刻出错（草稿带 TTL，启动清理终会收走），
-                        // 但在那之前它们仍会被召回并跃迁——往一个已不存在的方案的临时词库里写。
+                        // 草稿层同属该方案的数据域；不清的话 TTL 到期前仍会被召回并跃迁进已不存在的方案的临时词库。
                         store.clear_drafts(sid)?;
                         store.clear_freq(sid)?;
                         store.clear_assoc_history(sid)?;
@@ -1899,9 +1776,8 @@ pub trait WebDataRpc: WebDataHost {
         for sid in &r.schema_ids {
             self.engine_mgr().forget_deleted_schema(sid);
         }
-        // 被删方案的自定义标点 / 码元首码 / `[key_actions]` 引导键仍在吃键集里（GH#144 同根）：
-        // 不重建的话，英文态下 DLL 会继续吃它配过英半列的键、再原样吐回 ASCII（非 TSF 宿主上
-        // 即「吃了再吐」），直到重启。
+        // 被删方案的自定义标点 / 码元首码 / 引导键仍在吃键集里：不重建的话，DLL 会继续吃这些键
+        // 再原样吐回（非 TSF 宿主上即「吃了再吐」），直到重启。
         self.refresh_schema_derived_config();
         cleared?;
         Ok(json!({
@@ -1998,13 +1874,11 @@ pub trait WebDataRpc: WebDataHost {
         Ok(dir)
     }
 
-    /// **系统** schemas 根目录们：非用户层的每一层（`data_custom` 在前、`data` 在后）的
+    /// 系统 schemas 根目录们：非用户层的每一层（`data_custom` 在前、`data` 在后）的
     /// `schemas/`，只保留真实存在的（测试环境可能一个都没有）。
     ///
-    /// 复数不是随手写的：定制版里只存在于 `data_custom` 的方案，只传 data 层时会被
-    /// `wind_transfer::scheme::locate` 判成 `Missing` ⇒ 导出成功但包是空的/全进 missing，
-    /// 用户拿它装不回去；删除路径则连 `system_refs` 都记不上。定制层与出厂层在这里同类：
-    /// 导出一并打包（自包含），删除永不触碰。
+    /// 必须含 `data_custom`：否则只存在于定制层的方案会被 `wind_transfer::scheme::locate` 判成
+    /// `Missing`，导出空包、删除记不上 `system_refs`。定制层与出厂层同类：导出一并打包，删除永不触碰。
     fn system_schemas_dirs() -> Vec<std::path::PathBuf> {
         wind_config::Config::resource_layers_named()
             .into_iter()
@@ -2057,9 +1931,8 @@ pub trait WebDataRpc: WebDataHost {
         for id in &r.schema_ids {
             self.engine_mgr().invalidate_schema(id);
         }
-        // 吃键集随之重建（GH#144 同根）：进了 `available` 的方案稍后会经 config.setItems 自愈，
-        // 但 overlay 方案（快符等）不进 `available`，它的自定义标点 / 符号码元 / 引导键会一直
-        // 被透传，直到重启。
+        // 吃键集随之重建：进了 `available` 的方案稍后会经 config.setItems 自愈，但 overlay 方案
+        // 不进 `available`，不在此重建的话它的自定义标点 / 符号码元 / 引导键会一直被透传到重启。
         if !r.schema_ids.is_empty() {
             self.refresh_schema_derived_config();
         }
@@ -2087,7 +1960,7 @@ pub trait WebDataRpc: WebDataHost {
     }
 
     /// `scheme.importText { text, strategy? }`：文本信封落盘。响应形状与
-    /// `scheme.importPackage` 一致；同样**不**应用包内配置片段（设置端两步编排）。
+    /// `scheme.importPackage` 一致；同样不应用包内配置片段（设置端两步编排）。
     fn web_scheme_import_text(&self, params: &Value) -> anyhow::Result<Value> {
         use wind_transfer::merge::Strategy;
         let text = str_param(params, "text")?;
@@ -2115,10 +1988,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 预览响应的公共形状(zip 与文本信封共用,两条路复用同一个确认对话框)。
     ///
-    /// **包级说明**(`title` / `description`,来自 package.toml / 信封 `[package]`)提到
-    /// 顶层:确认对话框在顶部显示它。空则不输出该字段——前端不必区分"没写"与"写了空串"。
-    /// 它与 `configPatch.info`(片段自带的说明)**各显各的、不合并**:包级说的是"这个包
-    /// 是什么",片段级说的是"这段配置改了什么"(§2.3)。
+    /// 包级说明(`title` / `description`,来自 package.toml / 信封 `[package]`)提到顶层供对话框显示,
+    /// 空则不输出。与 `configPatch.info`(片段自带说明)各显各的、不合并(§2.3)。
     fn scheme_preview_json(
         p: &wind_transfer::scheme::SchemeImportPreview,
     ) -> anyhow::Result<Value> {
@@ -2143,11 +2014,9 @@ pub trait WebDataRpc: WebDataHost {
     }
 
     /// 包内配置片段的逐键 diff(`{ text, ok, entries, info? }`),形状与 `config.previewPatch`
-    /// 同源。`info` 是**该片段自己**的说明(来自 config_patch.toml 的 `[package]` 段),
-    /// 与包级 title/description 无关,不合并也不做优先级判定。
+    /// 同源。`info` 是该片段自己的说明(config_patch.toml 的 `[package]` 段),与包级说明不合并。
     ///
-    /// 只预览、**不应用**:应用编排在设置端(导入方案文件 → `config.applyPatch`),那条路
-    /// 才有热重载与镜像回灌。在文件层复刻它们就是第二份真相源。
+    /// 只预览不应用:应用编排在设置端(导入方案文件 → `config.applyPatch`),那条路才有热重载与镜像回灌。
     fn config_patch_diff(text: &str) -> anyhow::Result<Value> {
         let fragment = wind_config::patch::parse_fragment(text)
             .map_err(|e| anyhow::anyhow!("包内配置片段无法解析: {e}"))?;
@@ -2159,9 +2028,8 @@ pub trait WebDataRpc: WebDataHost {
         let degradation = cfg.degradation.clone();
         let current = cfg.to_toml_value()?;
         let mut entries = wind_config::patch::preview(&fragment, &current);
-        // 与 `config.previewPatch` 同判据：本函数只预览，但预览要显示的正是「应用后会
-        // 变成什么」，降级时 Map 键的当前表是出厂值 ⇒ 不标出来，用户看到的 diff 是假的，
-        // 且会照着它去点应用（真正的落盘闸在 `config.applyPatch`，两处必须同判据）。
+        // 与 `config.previewPatch` 同判据（落盘闸在 `config.applyPatch`，两处须一致）：降级时
+        // Map 键的当前表是出厂值，不标出来用户看到的 diff 就是假的。
         wind_config::patch::mark_degraded_seeds(&mut entries, &degradation);
         let ok = entries.iter().all(|e| e.error.is_none());
         let mut out = json!({ "text": text, "ok": ok, "entries": entries });
@@ -2260,8 +2128,8 @@ pub trait WebDataRpc: WebDataHost {
             user_themes_dir: themes_dir.as_deref(),
             state_file: state_file.as_deref(),
         };
-        // 还原期间挂起统计收集器：它后台 30 秒那次 flush 若落在「还原写完、resume 之前」，会把
-        // 还原前的今天与总计写回去（P4a 审查 I-5）。还原失败也要解除挂起。
+        // 还原期间挂起统计收集器：后台 flush 若落在「还原写完、resume 之前」，会把还原前的
+        // 今天与总计写回去。还原失败也要解除挂起。
         let collector = self.stat_collector();
         if let Some(c) = collector {
             c.suspend();
@@ -2296,8 +2164,7 @@ pub trait WebDataRpc: WebDataHost {
             {
                 self.engine_mgr().invalidate_schema(id);
             }
-            // schema_overrides/<id>.toml 同样是「方案配置合并层」的一部分，改动后
-            // 必须失效该方案引擎缓存，否则还原后仍沿用还原前的旧 override 跑。
+            // schema_overrides/<id>.toml 也是方案配置合并层，改动后须失效该方案引擎缓存。
             if let Some(rel) = p.strip_prefix("schema_overrides/")
                 && let Some(id) = rel.strip_suffix(".toml")
                 && !id.contains('/')
@@ -2306,16 +2173,14 @@ pub trait WebDataRpc: WebDataHost {
             }
         }
         if touched_phrase {
-            // Replace 还原会先 `reset_user_phrases`（见 restore_backup 的 "phrase" 分支），
-            // 遮蔽了系统条目的用户行随之被删、那些系统短语一并消失 → 补回缺失的。
-            // 与设置页「清空用户短语」同一条约束，漏在这里就是备份还原后系统短语静默少几条。
+            // Replace 还原会先 `reset_user_phrases`，遮蔽系统条目的用户行被删时那些系统短语也一并消失，
+            // 须补回（与设置页「清空用户短语」同一约束）。
             self.restore_missing_system_phrases("备份还原");
             self.rebuild_phrases();
         }
-        // 方案文件 / 方案 override 变了：吃键集的跨方案并集随之过期（GH#144 同根）。只看这两个
-        // 前缀——`r.schemas_touched` 收的是词库 / 词频 / shadow 等**数据域**，不进并集。
-        // `reload_user_config` 成功时自带同一套重建与推送，故二者择一；它返回 `true` 表示
-        // **加载失败**（只报错、bundle 未重建），那时方案这一侧仍要单独补一次。
+        // 方案文件 / 方案 override 变了：吃键集的跨方案并集随之过期。只看这两个前缀
+        // （`r.schemas_touched` 是数据域，不进并集）。`reload_user_config` 成功时自带同一套重建，
+        // 故二者择一；它返回 `true` 表示加载失败（bundle 未重建），那时仍要单独补一次。
         let touched_schemas = r
             .restored
             .iter()
@@ -2328,7 +2193,7 @@ pub trait WebDataRpc: WebDataHost {
             self.reload_charsets();
         }
         // 常用字 / 快捷格式的内存镜像、统计收集器都要跟着还原后的数据重载：收集器不 resume 的话，
-        // 它下一次写盘会把还原前的「今天」和总计写回去（P4a Review Focus 4）。
+        // 它下一次写盘会把还原前的「今天」和总计写回去。
         let touched = |p: &str| r.restored.iter().any(|x| x == p);
         let mut changed = Vec::new();
         if touched("userdata/common_chars.jsonl") {
@@ -2376,9 +2241,8 @@ pub trait WebDataRpc: WebDataHost {
     /// 批量出码（纯词列表导入）。规则与 `dict.encode` 完全一致——两者共用
     /// [`Self::encode_texts`]，避免两条出码口径各自漂移。
     ///
-    /// 契约：`codes` 与入参 `texts` **同序等长**，出不了码的位置为空串。
-    /// 调用方靠下标把码配回词，跳过失败项会让其后所有词错位配到别人的码上。
-    /// 故非字符串元素也要占位（按空串处理），不能 filter 掉。
+    /// 契约：`codes` 与入参 `texts` 同序等长，出不了码的位置为空串；调用方靠下标配回词，
+    /// 故非字符串元素也要占位，不能 filter 掉。
     fn web_dict_encode_words(&self, params: &Value) -> anyhow::Result<Value> {
         let schema = str_param(params, "schemaId")?;
         let texts: Vec<String> = params
@@ -2394,11 +2258,8 @@ pub trait WebDataRpc: WebDataHost {
     }
 
     /// 出码统一入口：拼音类方案出拼音码，其余（码表/混输）按方案 `[[encoder.rules]]` 出词组码，
-    /// **单字直取其全码**（词组公式不接受单字，见 `EngineManager::encode_words`）。
-    /// 返回与 `texts` 同序等长，失败位置为空串。
-    ///
-    /// 一次性准备（读方案 / 取引擎句柄）都在这一层之下完成，故传一个词与传一万个词
-    /// 的固定开销相同——`dict.encode` 走单元素切片没有额外代价。
+    /// 单字直取其全码（词组公式不接受单字，见 `EngineManager::encode_words`）。
+    /// 返回与 `texts` 同序等长，失败位置为空串。一次性准备在这一层之下完成，单元素切片无额外代价。
     fn encode_texts(&self, schema: &str, texts: &[String]) -> Vec<String> {
         if texts.is_empty() {
             return Vec::new();
@@ -2410,16 +2271,13 @@ pub trait WebDataRpc: WebDataHost {
             .map(|t| t == "pinyin")
             .unwrap_or(false);
         if !is_pinyin {
-            // 与自动造词/快捷加词同一取码入口（码源=码表词库自身，规则=方案声明的公式）。
-            // 原走 wubi_word_code：拆字表码源 + 硬编码五笔 86 规则，未配拆字的方案恒空、
-            // 非五笔方案静默出错。见 docs/design/codetable-auto-phrase.md §2「码源统一」。
+            // 与自动造词/快捷加词同一取码入口（码源=码表词库自身，规则=方案声明的公式），
+            // 见 docs/design/codetable-auto-phrase.md §2「码源统一」。
             return self.engine_mgr().encode_words(schema, &refs);
         }
         // 优先词级消歧（多音字按词典权重），引擎无果时回退逐字反查表。
-        // 回的是**带空格的音节码**，让用户看清拼音词库的音节格式（与 word_item 同形）。
-        // 安全前提：写入侧 normalize_add_code 会拆回扁平 key，并把空格当作**显式声明的
-        // 切分**采信。逐字反查表回退同样以空格分隔（`gen_pinyin` 以 `.join(" ")` 收尾），
-        // 故两条路出来的都是同形的音节码，无需再做区分。
+        // 两条路都回带空格的音节码（与 word_item 同形）；写入侧 normalize_add_code 会拆回扁平 key，
+        // 并把空格当作显式切分采信。
         let generated = self.engine_mgr().generate_words_pinyin(schema, &refs);
         // 反查表的读锁在循环外取一次：逐词加锁在万级批量上纯属浪费。
         let reverse = self
@@ -2472,15 +2330,8 @@ pub trait WebDataRpc: WebDataHost {
                 // 只排序不搜索：排序是跨页全局的，只能全量物化。
                 store.list_freq_paged(&schema, &code_prefix, 0, 0)?.0
             } else {
-                // **一遍**扫描分两组，编码前缀命中在前、其余命中在后：
-                //   ① 词条内容包含搜索词（拿汉字匹配 text，用原串）
-                //   ② **编码中段包含**搜索词 —— 前缀扫描只能命中开头，`haoya` 搜 `ya`
-                //      一条也出不来，而用户并不知道搜索框只认前缀。
-                //
-                // 从前这里与 `web_dict_list_paged` 同款：扫两遍全表（一遍前缀、一遍全量）
-                // 再拿一个全量 clone 的 `HashSet<(String,String)>` 去重。前缀命中本就是
-                // 全量扫描的子集，第二遍纯属重复；分两组天然互斥，去重结构一并不需要了。
-                // 顺序与从前逐条相同。
+                // 一遍扫描分两组，编码前缀命中在前、其余命中（词条内容包含、编码中段包含）在后。
+                // 两组天然互斥，无需去重。
                 let q = prefix.to_lowercase();
                 let code_q = code_prefix.to_lowercase();
                 let mut head = Vec::new();
@@ -2525,15 +2376,10 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 词频列表的编码显示：反查音节边界后渲染成带空格的音节码，与用户词库/临时词库列表同形。
     ///
-    /// **词频表是唯一不带 boundary 的持久层**（value 仅 `count + last_used`），边界只能反查。
-    /// 三处依次问：系统词典（mmap 点查，最快也最可能命中）→ 用户词表 → 临时词表。
-    /// 都查不到即原样返回扁平码——存量的简拼码记录、码表方案、以及词条已被删除的
-    /// 遗留记录都会落到这里，属正常降级。
-    ///
-    /// 只对**当前页**（≤ limit 条）反查，开销与词频表总规模无关。
-    ///
-    /// 之所以选反查而非给词频表扩容加 boundary 字段：词频是长期积累的数据，扩容只能让
-    /// 此后新写入的记录带边界，用户会看到「新词有空格、老词没有」的混杂列表。
+    /// 词频表是唯一不带 boundary 的持久层，边界只能反查：系统词典 → 用户词表 → 临时词表，
+    /// 都查不到原样返回扁平码（简拼码、码表方案、已删词条的遗留记录，属正常降级）。
+    /// 只对当前页反查，开销与总规模无关。不给词频表加 boundary 字段，是因为存量记录补不上，
+    /// 列表会新旧混杂。
     fn freq_display_code(&self, schema: &str, code: &str, text: &str) -> String {
         let mut b = self.engine_mgr().syllable_boundary_of(schema, code, text);
         if b == 0
@@ -2581,15 +2427,15 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        // 联想历史（t185）同是「用出来的」使用数据，随「清空词频」一并清。
+        // 联想历史同是「用出来的」使用数据，随「清空词频」一并清。
         store.clear_assoc_history(&schema)?;
         Ok(json!(store.clear_freq(&schema)?))
     }
 
     /// 补全学习数据的分页列表（邮箱后缀 / 网址历史共用）。
     ///
-    /// 不分方案：这两类都是全局属性（见 `wind_store::completion` 模块文档），故参数里
-    /// **没有** `schemaId`——设置端那侧对应 `CategorySpec::scoped_by_schema = false`。
+    /// 不分方案（全局属性，见 `wind_store::completion`），参数里没有 `schemaId`；
+    /// 设置端对应 `CategorySpec::scoped_by_schema = false`。
     fn web_completion_list_paged(
         &self,
         kind: CompletionKind,
@@ -2608,9 +2454,8 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         let sort = parse_sort(params, &["text", "count", "lastUsed"]);
 
-        // 搜索是**包含**而非前缀：用户记得的多半是网址中段（搜 `example` 要能找出
-        // `www.example.com`），而 store 侧只提供前缀扫描。故有搜索词或要自定义排序时
-        // 全量拉取后在内存里过滤/排序——这两类数据有 `history_max` 封顶，规模可控。
+        // 搜索是包含而非前缀（用户记得的多半是网址中段），store 只提供前缀扫描，故有搜索或排序时
+        // 全量拉取后内存过滤/排序；这两类数据有 `history_max` 封顶，规模可控。
         let (page, total) = if query.is_empty() && sort.is_none() {
             store.list_completions(kind, "", offset, limit)?
         } else {
@@ -2661,8 +2506,7 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 清空某一类补全学习数据，返回删除条数。
     ///
-    /// 无内存镜像要一并清（不像 `stats.clear` 那样还要 `stat_collector().reset()`）：
-    /// 补全候选每次刷新都现查库，没有缓存层。
+    /// 无内存镜像要一并清：补全候选每次刷新都现查库。
     fn web_completion_clear(&self, kind: CompletionKind) -> anyhow::Result<Value> {
         let store = self
             .user_store()
@@ -2678,8 +2522,7 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 影子规则的展平行集：一条 `ShadowRecord` 里的每个 pinned / deleted 各占一行。
     ///
-    /// [`Self::web_shadow_list`] 与 [`Self::web_shadow_list_paged`] 共用同一份展平——
-    /// 两处各写一遍的话，加字段时必漏一边，而症状是「不分页时看得到、分页后这一列空着」。
+    /// [`Self::web_shadow_list`] 与 [`Self::web_shadow_list_paged`] 共用，加字段只改这一处。
     fn shadow_rows(&self, schema: &str) -> anyhow::Result<Vec<Value>> {
         let store = self
             .user_store()
@@ -2709,10 +2552,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 影子规则分页列表（`{items,total}`，与 dict/freq 同形）。
     ///
-    /// 规则数随使用量单调增长且没有上限，一次全取要把整份 json 推过 IPC，设置端再把
-    /// 每条都建成表格行 widget（那张表不做虚拟化），条目上万时开页即卡。
-    ///
-    /// 搜索/排序都在切片**之前**做，故是跨页全局的——只对当页那几十条排序毫无意义。
+    /// 规则数没有上限，一次全取会让 IPC 与设置端表格（不做虚拟化）在上万条时卡住。
+    /// 搜索/排序都在切片之前做，故跨页全局有效。
     fn web_shadow_list_paged(&self, params: &Value) -> anyhow::Result<Value> {
         let schema = str_param(params, "schemaId")?;
         let schema = self.engine_mgr().data_schema_id(schema); // 拼音族折叠到 "pinyin"
@@ -2724,9 +2565,8 @@ pub trait WebDataRpc: WebDataHost {
         let offset = usize_param(params, "offset", 0);
         let limit = usize_param(params, "limit", 50);
         let mut all = self.shadow_rows(&schema)?;
-        // 「词」这一列显示的是 candId 里的模板原文而非 `word`（见 [`shadow_display_text`]），
-        // 故搜索与排序都得按显示文本来：不然用户照着屏幕上的 `{time("HH:mm")}` 去搜，
-        // 一条也搜不到。
+        // 「词」列显示的是 candId 里的模板原文而非 `word`（见 [`shadow_display_text`]），
+        // 搜索与排序都按显示文本。
         if !query.is_empty() {
             let q = query.to_lowercase();
             all.retain(|r| {
@@ -2836,10 +2676,8 @@ pub trait WebDataRpc: WebDataHost {
     /// 候选调整手动添加/编辑：type="hide" 转屏蔽；否则（pin）按 position 置顶。
     /// 匹配设置端候选调整对话框契约。
     ///
-    /// **编辑既有规则时设置端会回传 `candId`，必须透传下去**：短语规则靠稳定 id 跨日命中，
-    /// 而这条路会先按 `same_target` 匹配掉同一条旧规则再插入新规则——不带 id 就等于
-    /// 把原规则的 id 擦掉（退化成按当日文本匹配，次日必失配）。用户侧表现为
-    /// 「在设置页改了一下位置，第二天整条规则就不生效了」。
+    /// 编辑既有规则时设置端回传的 `candId` 必须透传：这条路先按 `same_target` 删旧规则再插入，
+    /// 不带 id 就擦掉了短语规则跨日命中所需的稳定 id（次日失配）。
     fn web_shadow_add_rule(&self, params: &Value) -> anyhow::Result<Value> {
         let (schema, code, word) = (
             str_param(params, "schemaId")?,
@@ -2867,9 +2705,8 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        // code 带音节空格，与用户词库列表（word_item）同形。remove/promote 两个入口
-        // 会收到这个串，各自拆回扁平码——三处必须同改，否则「显示得了、删不掉」。
-        // text 同理：出口投影成转义形态、两个入口用 `store_text` 还原，缺一即同样症状。
+        // code 带音节空格、text 投影成转义形态（与 word_item 同形）；remove/promote 两个入口各自
+        // 拆回扁平码、用 `store_text` 还原。三处须同改，否则「显示得了、删不掉」。
         let items: Vec<Value> = store
             .search_temp_words_prefix(&schema, "", 0)?
             .into_iter()
@@ -2883,9 +2720,7 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 临时词分页列表（`{items,total}`，与 dict/freq 同形）。
     ///
-    /// 临时词是打字过程中自动攒下的，只增不减直到用户转正或清空，量级与用户词库同级，
-    /// 一次全取同样会把整份 json 推过 IPC 并让设置端建出上万个表格行 widget。
-    ///
+    /// 临时词量级与用户词库同级，不宜一次全取。
     /// 搜索语义与 [`Self::web_dict_list_paged`] 对齐（编码前缀 ∪ 编码中段 ∪ 词条内容），
     /// 排序同样在切片前做，故跨页全局有效。
     fn web_temp_list_paged(&self, params: &Value) -> anyhow::Result<Value> {
@@ -2904,9 +2739,7 @@ pub trait WebDataRpc: WebDataHost {
         // 列表显示的是带音节空格的码（见 web_temp_list），用户很可能照着搜；key 是扁平的。
         let (code_prefix, _) = wind_store::wdict::split_spaced_code(prefix);
         let mut all = store.search_temp_words_prefix(&schema, &code_prefix, 0)?;
-        // 并入两类补充命中（与编码前缀取并集，去重），与 web_dict_list_paged 同款：
-        //   ① 词条内容包含搜索词；② 编码**中段**包含搜索词——前缀扫描只能命中开头，
-        // 而用户并不知道搜索框只认前缀。仅在有搜索词时才付出这次全量扫描。
+        // 并入两类补充命中（词条内容包含、编码中段包含），与 web_dict_list_paged 同款；仅在有搜索词时全量扫描。
         if !prefix.is_empty() {
             let q = prefix.to_lowercase();
             let code_q = code_prefix.to_lowercase();
@@ -2922,9 +2755,8 @@ pub trait WebDataRpc: WebDataHost {
                 }
             }
         }
-        // 最近使用（t63「筛出长期没再输入的」）：词频表里的 last_used 与加入时间取大者。
-        // 只取词频那份不行——从没被选中过的临时词（count==1 那批，正是要清理的主力）
-        // 在词频表里根本没有记录，会全部并列成「从未使用」而丢掉新旧之分。
+        // 最近使用：词频表的 last_used 与加入时间取大者。从没被选中过的临时词在词频表里没有记录，
+        // 只看词频会全部并列成「从未使用」。
         let keys: Vec<(String, String, String)> = all
             .iter()
             .map(|w| (schema.to_string(), w.code.clone(), w.text.clone()))
@@ -2980,8 +2812,7 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        // 手动转正是显式动作（自动晋升走 `maybe_promote_temp`，不清）。批量选中转正同样是
-        // 用户逐条点选的显式动作，与「全部转正」不同，照单条撤规则。
+        // 手动转正（含批量选中）是显式动作，照单条撤规则；自动晋升 `maybe_promote_temp` 与「全部转正」不撤。
         let promoted = if batch {
             store.promote_temp_words(&schema, &keys)?
         } else {
@@ -3141,9 +2972,8 @@ pub trait WebDataRpc: WebDataHost {
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         store.remove_phrases(&keys)?;
-        // 删掉的可能是一条**遮蔽了系统条目**的用户短语（`overrides_system`）——主键只有
-        // 一把，删掉它等于把那条系统短语也删了。用户的预期恰恰相反：删掉自己加的那条
-        // 就该露出系统默认那条。故补回缺失的系统条目。
+        // 删掉的可能是遮蔽了系统条目的用户短语（`overrides_system`，同一主键），删后要补回系统条目，
+        // 让系统默认那条重新露出来。
         self.restore_missing_system_phrases("删除短语");
         self.rebuild_phrases();
         Ok(if batch {
@@ -3265,8 +3095,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 逐行短语文本（`wind:p1` 分发格式）的导入预览。
     ///
-    /// 与 `phrase.import`（wdict，备份还原语义）分开是刻意的：那条是整表 upsert、原样写回
-    /// position；本条只新增、位置本地重算，且预览要回答「会不会动到我已有的短语」。
+    /// 与 `phrase.import`（wdict，整表 upsert、原样写回 position）分开：本条只新增、位置本地重算，
+    /// 预览要回答「会不会动到已有的短语」。
     fn web_phrase_preview_import_text(&self, params: &Value) -> anyhow::Result<Value> {
         let content = str_param(params, "content")?;
         let (doc, items, checks, plan) = self.phrase_text_plan(content)?;
@@ -3288,8 +3118,7 @@ pub trait WebDataRpc: WebDataHost {
                 json!({
                     "line": e.line,
                     "code": e.code,
-                    // 回显分发原文：分发域与设置页显示域同形，用户在预览里看到的
-                    // 与他在群里读到的、在短语列表里看到的是同一串。
+                    // 回显分发原文：分发域与设置页显示域同形。
                     "text": e.text,
                     "status": match st {
                         S::New => "new",
@@ -3325,10 +3154,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 应用逐行短语文本。
     ///
-    /// `accept` = 要导入的**源行号**数组（来自预览的 `line`）；**缺省导入全部可导入条目**。
-    ///
-    /// 语法错的条目无论是否被 `accept` 列出都不装——它们装进去只会在触发时失败，
-    /// 而失败点离导入很远。
+    /// `accept` = 要导入的源行号数组（来自预览的 `line`），缺省导入全部可导入条目。
+    /// 语法错的条目无论是否列出都不装（装进去只会在触发时失败）。
     fn web_phrase_import_text(&self, params: &Value) -> anyhow::Result<Value> {
         let content = str_param(params, "content")?;
         let (doc, items, checks, _) = self.phrase_text_plan(content)?;
@@ -3369,8 +3196,7 @@ pub trait WebDataRpc: WebDataHost {
         }))
     }
 
-    /// 解析 + 存储域投影 + 静态检查 + 落点判定。预览与应用共用，保证两次看到的是
-    /// 同一份判定——各算各的会让「预览一个样、应用装了另一个」成为可能。
+    /// 解析 + 存储域投影 + 静态检查 + 落点判定。预览与应用共用，保证两者判定一致。
     #[allow(clippy::type_complexity)]
     fn phrase_text_plan(
         &self,
@@ -3386,8 +3212,7 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        // 存储域投影与手动新增（`web_phrase_add`）走同一个 `store_text`——新增一条入口
-        // 就得配一对转换，否则同一条短语经不同入口进库会变成两个字符串。
+        // 存储域投影与手动新增（`web_phrase_add`）走同一个 `store_text`，否则同一条短语经不同入口进库会不同。
         let items: Vec<(String, String)> = doc
             .entries
             .iter()
@@ -3406,11 +3231,10 @@ pub trait WebDataRpc: WebDataHost {
 
     // ───────── quick.*（快捷输入格式表）─────────
 
-    /// 全部格式条目，**含被停用的**。
+    /// 全部格式条目，含被停用的。
     ///
-    /// `displayPos` 与 `moveIndex` 是两个不同的下标，别混用：前者是列表行号（停用项也占
-    /// 一行，只给人看），后者是这条在候选里的位置、也是 `quick.move` 唯一认的口径。
-    /// 停用项 `moveIndex` 为 null——它不在候选里，移动没有意义。
+    /// `displayPos` 是列表行号（停用项也占一行，只给人看）；`moveIndex` 是候选里的位置，
+    /// 也是 `quick.move` 唯一认的口径，停用项为 null。别混用。
     fn web_quick_list(&self) -> anyhow::Result<Value> {
         let rows: Vec<Value> = self
             .quick_format_rows()
@@ -3441,16 +3265,13 @@ pub trait WebDataRpc: WebDataHost {
 
     // ── 常用字表（右键「设为生僻字/常用字」的设置页一侧）────────────────────
     //
-    // 列表是**全表**（出厂字 + 用户加的），不是只列改过的那几条：用户来这个页面最常问的
-    // 是「这个字现在算不算常用」，只列改动答不了。改过的行带 `adjusted` 标记，
+    // 列表是全表（出厂字 + 用户加的），用来回答「这个字现在算不算常用」；改过的行带 `adjusted`，
     // 「恢复默认」据此只对它们放行。
 
     /// 全表 + 搜索 + 分页。
     ///
-    /// **分页而不是一次全发**：8104 条约 400KB JSON，每次刷新都整份过一遍 IPC 不划算，
-    /// 而且设置页那套表格框架本就有服务端分页（`dict`/`freq` 走的同一条）。
-    /// 故返回 `{items,total}` 而不是裸数组——与非分页类别的形状**刻意不同**，
-    /// 由 spec 的 `paged: true` 决定走哪个解析分支。
+    /// 返回 `{items,total}`（全表约 8 千条，不宜每次刷新整份过 IPC），与非分页类别的裸数组
+    /// 形状刻意不同，由设置端 spec 的 `paged: true` 决定解析分支。
     fn web_common_chars_list(&self, params: &Value) -> anyhow::Result<Value> {
         let query = params
             .get("prefix")
@@ -3483,24 +3304,17 @@ pub trait WebDataRpc: WebDataHost {
                 json!({
                     "char": r.text,
                     "common": r.common,
-                    // 默认判定要一起给：界面靠它显示「默认 → 现在」的对照。
-                    // 只给 common 的话，用户看到一行「的 · 生僻」不知道自己改的是什么。
+                    // 默认判定一起给：界面靠它显示「默认 → 现在」的对照。
                     "baseCommon": r.base_common,
                     // 这一行改过没有。设置页据此决定「恢复默认」灰不灰。
                     "adjusted": r.overridden,
-                    // 类型：所属 Unicode 块。光看字形分不清 ⺡(部首) 与 氵(基本汉字)、
-                    // ℃(字母式符号) 与 ㎡(CJK 兼容符号)，而它们的处置方式完全不同。
+                    // 类型：所属 Unicode 块（字形相近的 ⺡/氵、℃/㎡ 处置方式完全不同）。
                     "block": r.block,
                     "blockRange": wind_candidate::block_of_cluster(&r.text).range_text(),
                     // 整类批量能不能点。汉字块恒 false——见 `block_allows_bulk_edit`。
                     "blockBulkEditable": r.block_bulk_editable,
-                    // **决定这个字常用性的那个字符类**（null = 没有类命中它）。
-                    //
-                    // ⚠️ 与 `block` 是两个不同的问题，各自绑着一个不同的操作：
-                    // `block` 决定「整类批量」扫哪个码位区间（写上千条 redb 覆盖），
-                    // `class` 决定「改类的 default」影响谁（写一行 yaml，作用于整个类）。
-                    // 拿后者顶掉前者，用户就会看着「emoji」去点一个按「表情符号」块
-                    // 工作的按钮。
+                    // 决定这个字常用性的字符类（null = 没有类命中它）。与 `block` 不可互替：
+                    // `block` 决定「整类批量」扫哪个码位区间，`class` 决定「改类的 default」影响谁。
                     "class": r.class,
                 })
             })
@@ -3538,15 +3352,9 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({ "ok": true }))
     }
 
-    /// 按当前行所属的 Unicode 块整类设常用/生僻。`apply` 缺省为 `false`（只预览）。
-    ///
-    /// ★ 预览与执行**走同一个方法、同一次扫描**，只差一个 `apply` 开关。分成两条实现的话，
-    /// 预览说「43 个字」而执行写了别的数目，用户没法察觉——两条路各扫一遍词库，中间还隔着
-    /// 用户的思考时间，方案切换、词库热插拔都能让它们对不上。
     /// `charset.list` —— 字符类全表。
     ///
-    /// ⚠️ `overrideCount` **界面必须显示**：用户曾整类点过生僻的话，库里躺着上千条逐条
-    /// 覆盖压着这个类，他改 `default` 会一点反应都没有（设计文档 §7.2）。
+    /// `overrideCount` 界面必须显示：类上压着大量逐条覆盖时，改 `default` 看不出任何效果（设计文档 §7.2）。
     fn web_charset_list(&self) -> anyhow::Result<Value> {
         let items: Vec<Value> = self
             .charset_rows()
@@ -3570,9 +3378,7 @@ pub trait WebDataRpc: WebDataHost {
                 })
             })
             .collect();
-        // ⚠️ **裸数组**，不是 `{items,total}`。设置页的 `parse_list` 按「分页与否」分流：
-        // 分页类收 `{items,total}`，其余收裸数组。字符类只有几十个、spec 里 `paged: false`
-        // ——包成对象的话客户端解析出 0 行，表现是「暂无数据」，没有报错也没有日志。
+        // 裸数组而非 `{items,total}`：设置端 spec 里 `paged: false`，包成对象会静默解析出 0 行。
         Ok(Value::Array(items))
     }
 
@@ -3583,8 +3389,7 @@ pub trait WebDataRpc: WebDataHost {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("缺少参数 key"))?;
         let edit = wind_coordinator::handle_charset::CharsetEdit {
-            // "common" / "rare" / "inherit"——后者是「本层不表态」，与显式设成常用
-            // 不是一回事：它跟随出厂更新，显式值会钉死。
+            // "common" / "rare" / "inherit"；inherit 是本层不表态、跟随出厂更新，与显式常用不同。
             default_common: params
                 .get("default")
                 .and_then(|v| v.as_str())
@@ -3648,6 +3453,9 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({ "ok": true }))
     }
 
+    /// 按当前行所属的 Unicode 块整类设常用/生僻。`apply` 缺省为 `false`（只预览）。
+    ///
+    /// 预览与执行走同一个方法、同一次扫描，只差 `apply` 开关，保证预览报的条数就是执行写的条数。
     fn web_common_chars_bulk(&self, params: &Value) -> anyhow::Result<Value> {
         let ch = char_param(params, "char")?;
         let common = params
@@ -3662,8 +3470,7 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({
             "block": o.block,
             "chars": o.chars,
-            // ★ 界面**必须**把它显示出来：`，` 只是 1 个字符却出现在 326 条词条里。
-            // 只报 chars，用户会严重低估一键操作的影响面。
+            // 界面必须显示它：一个字符可能出现在数百条词条里，只报 chars 会低估影响面。
             "entries": o.entries,
             "written": o.written,
             "sample": o.sample,
@@ -3714,8 +3521,7 @@ pub trait WebDataRpc: WebDataHost {
         let o = self.common_chars_import(content, replace)?;
         Ok(json!({
             "imported": o.imported,
-            // 与默认同向、无需落库的字。设置页文案必须把它说出来：否则「导入 100 条
-            // 只写了 30 条」看起来就像丢了数据。
+            // 与默认同向、无需落库的字。设置页须说明，否则写入条数少于导入条数像是丢了数据。
             "sameAsDefault": o.same_as_default,
             "skipped": o.skipped,
         }))
@@ -3762,8 +3568,7 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 每类可用的模板变量清单，供设置页的模板输入框提示。
     ///
-    /// 静态数据，一次取完即可缓存。真相源在 core 的 `FormatKind::var_hints`——设置仓自己
-    /// 硬编码一份会在加新变量时静默过时（照提示写的模板反被拒，或提示里的变量已删）。
+    /// 静态数据，一次取完即可缓存。真相源在 core 的 `FormatKind::var_hints`，设置端别自己硬编码。
     fn web_quick_vars(&self) -> anyhow::Result<Value> {
         let kinds: Vec<Value> = self
             .quick_format_var_hints()
@@ -4005,10 +3810,7 @@ pub trait WebDataRpc: WebDataHost {
     /// 主题查找目录：各资源层的 `themes/`，按层序 `user > custom > data`
     /// （宿主的 `theme_search_dirs()` 是唯一真相源）。
     fn theme_dirs(&self) -> Vec<std::path::PathBuf> {
-        // 直接复用宿主的搜索链，**不再自己拼一份**：此前这里是「用户目录 + 安装目录」
-        // 的第二份实现，与 `theme_search_dirs` 逐字重复。加 data_custom 层时两份各改各的
-        // ⇒ 设置页列表与实际生效的主题解析用的不是同一条链，现象是「主题列表里有它、
-        // 选了却没变化」。
+        // 直接复用宿主的搜索链，别自己拼一份：两份链不一致会出现「列表里有、选了却没变化」。
         self.theme_search_dirs()
     }
 
@@ -4027,16 +3829,11 @@ pub trait WebDataRpc: WebDataHost {
         Ok(serde_json::to_value(&normalized)?)
     }
 
-    /// 按 slug 在主题搜索链里定位主题目录 —— **读取主题的入口共用这一套判据**。
+    /// 按 slug 在主题搜索链里定位主题目录，读取主题的入口（`getText`、导出）共用这一套判据。
     ///
-    /// 与 [`Self::theme_target_dir`]（写入侧）分开是刻意的：写入只认用户目录，读取要
-    /// 跨整条链（内置主题也读得到）。但读取侧自己**不该有第二份**——slug 合法性、
-    /// 找哪一层、找不到怎么报，`getText` 与导出各写一遍的话，迟早出现「能导出却读不
-    /// 到原文」这种只在某一层成立的分歧。
-    ///
-    /// 定制版 `[themes] hide` 掉的 id 按**不存在**处理，与列表（`list_themes_full` 滤掉）
-    /// 和导入（`theme_target_dir` 当场拒）一致：`custom_hides_theme` 的绝对性是写死在
-    /// 那边的文档里的，读取侧放行就意味着「列表里看不见、却导得出一个装不回去的包」。
+    /// 与 [`Self::theme_target_dir`]（写入侧，只认用户目录）分开：读取要跨整条链。
+    /// 定制版 `[themes] hide` 掉的 id 按不存在处理，与列表（`list_themes_full`）和导入
+    /// （`theme_target_dir`）一致。
     fn theme_dir_of(&self, slug: &str) -> anyhow::Result<std::path::PathBuf> {
         if !wind_theme::is_plain_slug(slug) {
             anyhow::bail!("非法主题 slug");
@@ -4098,20 +3895,15 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({ "ok": true }))
     }
 
-    /// 主题落到哪个目录 id —— **文本导入与包导入共用这一套判据**。
-    ///
-    /// 两条路各写一份的话，「哪个 id 能用、落到哪个目录」迟早会各说各话，而那种分歧
-    /// 只有在用户那边表现为「导入成功却哪儿都找不到」。
+    /// 主题落到哪个目录 id，文本导入与包导入共用这一套判据。
     ///
     /// - 传了 `slug`（主题唯一 id）：目录已存在则就地写回（不新建），否则以 slug 建目录；
     ///   slug 不合法直接报错；
     /// - 未传（设置端的粘贴 / 文件 / 链接 / 包导入都不传）：从显示名（`meta.name` / 包名）
     ///   派生合法 id（[`wind_theme::slug_from_name`]），「Nord: Dark」「黑/白」也导得进来。
     ///
-    /// 定制版 `[themes] hide` 掉的 id **当场拒掉，不给成功回执**：hide 是绝对的（用户层
-    /// 同名主题也不复活，见 `Config::custom_hides_theme` 的取舍说明），而导入是用户唯一
-    /// 能主动撞上这个 id 的入口——放行的话文件写下去了、回执是 ok，但它永远不进列表、
-    /// 选它也会被 `push_theme` 兜底掉，用户只看到「导入成功了却哪儿都找不到」。
+    /// 定制版 `[themes] hide` 掉的 id 当场拒掉：hide 是绝对的（见 `Config::custom_hides_theme`），
+    /// 放行的话导入回执 ok，主题却永远不进列表。
     fn theme_target_dir(
         &self,
         params: &Value,
@@ -4120,10 +3912,8 @@ pub trait WebDataRpc: WebDataHost {
         let user_dir = self
             .user_themes_dir()
             .ok_or_else(|| anyhow::anyhow!("无用户主题目录"))?;
-        // ⚠️ id 来自调用方（slug）或主题文本自身（meta.name / package 的 name），都不可信，
-        // 落盘前必须是普通名字：不然 `../../x`、绝对路径、`C:x` 会让目标跳出用户主题目录，
-        // 而导入失败的回滚会对目标做 remove_dir_all。显示名只是名字，派生成合法 id；
-        // 给了不合法的 slug 则报错，不再静默退回用显示名。
+        // id 来自调用方或主题文本，都不可信，落盘前必须是普通名字：否则 `../../x`、绝对路径、`C:x`
+        // 会跳出用户主题目录，而导入失败的回滚会对目标 remove_dir_all。不合法的 slug 直接报错。
         let theme_id = match params
             .get("slug")
             .and_then(|v| v.as_str())
@@ -4151,12 +3941,9 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 「同名已存在」的机器可读回执。
     ///
-    /// 这是**可预期的业务性失败**：客户端拿它去弹「是否覆盖」再以 force=true 重推，因此走
-    /// result 字段而非 error 通道——error 通道只有一个 String，客户端只能靠匹配文案来认
-    /// 冲突，改一次文案，设置端的覆盖确认就会静默退化成一条普通报错（没有任何测试或编译
-    /// 期检查看得见这种耦合）。
-    /// 撞目录的回执。文案用**已有**主题的显示名：id 从显示名派生后，不同名字可能落到
-    /// 同一目录（`a/b` 与 `a-b`），只报新名字会让用户不知道覆盖的是谁。
+    /// 可预期的业务性失败：客户端据此弹「是否覆盖」再以 force=true 重推，故走 result 字段而非
+    /// error 通道（那样只能靠匹配文案认冲突）。文案用已有主题的显示名：不同名字可能派生出
+    /// 同一目录（`a/b` 与 `a-b`）。
     fn theme_conflict_json(theme_id: &str, display_name: &str, target: &std::path::Path) -> Value {
         let existing = std::fs::read_to_string(target.join("theme.toml"))
             .ok()
@@ -4182,11 +3969,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 推的正好是当前生效主题 → 立刻重解析下发，编辑器里改完即见效。返回是否重载了。
     ///
-    /// 不做则只落盘，用户得手动切走再切回来（或重启）才看得到自己刚推的改动。
-    ///
-    /// 判据是**目录 id 相同**，不比对文件内容：主题可能被 base 继承链间接影响，且重解析
-    /// 一次远比误判便宜。用户目录优先于安装目录，所以推一个与内置主题同 id 的用户主题
-    /// （如 slug=default）同样会改变实际生效外观，这里一并覆盖。
+    /// 判据是目录 id 相同，不比对内容（base 继承链可能间接影响，重解析一次很便宜）。
+    /// 用户目录优先于安装目录，故与内置主题同 id 的用户主题同样算。
     fn theme_reload_if_current(&self, theme_id: &str) -> bool {
         if self.current_theme_name() != theme_id {
             return false;
@@ -4258,15 +4042,14 @@ pub trait WebDataRpc: WebDataHost {
             "ok": true,
             "slug": theme_id,
             "display_name": meta.name,
-            // 供设置层如实回报给编辑器（此前那一层硬编码 false）。
+            // 供设置层如实回报给编辑器。
             "reloaded": reloaded,
         }))
     }
 
     /// `theme.previewPackage { path }`：只读预览一个 `.wtheme`，不落任何盘。
     ///
-    /// 设置端拿它弹「要导入这个主题吗」——双击文件关联进来的包，用户在确认之前有权
-    /// 知道自己要装的是什么。
+    /// 设置端据此弹「要导入这个主题吗」的确认。
     fn web_theme_preview_package(&self, params: &Value) -> anyhow::Result<Value> {
         let path = str_param(params, "path")?;
         let p = wind_transfer::theme::preview_package(std::path::Path::new(path))?;
@@ -4281,8 +4064,7 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `theme.importPackage { path, slug?, force? }`：主题包落盘。
     ///
-    /// 回执形状与 `theme.importFromText` 一致（ok/slug/display_name/reloaded/conflict），
-    /// 设置端的覆盖确认与「已生效」提示因此是同一套，不必为包再写一份。
+    /// 回执形状与 `theme.importFromText` 一致（ok/slug/display_name/reloaded/conflict）。
     fn web_theme_import_package(&self, params: &Value) -> anyhow::Result<Value> {
         let path = str_param(params, "path")?;
         let package = std::path::Path::new(path);
@@ -4301,10 +4083,8 @@ pub trait WebDataRpc: WebDataHost {
             ));
         }
 
-        // 依赖链校验交给 transfer 的校验回调：它要在新目录**已就位、旧目录还没删**的
-        // 那一刻跑，失败才回滚得掉。单文件那条路是自己备份原文再校验的——两者落盘形态
-        // 不同（整目录 vs 单文件），回滚共用不了，但判据（能不能按 base 链加载起来）
-        // 是同一条。
+        // 依赖链校验交给 transfer 的校验回调：要在新目录已就位、旧目录未删时跑，失败才回滚得掉。
+        // 与单文件导入回滚方式不同，判据（能否按 base 链加载）相同。
         let dirs = self.theme_dirs();
         let id_for_verify = theme_id.clone();
         let out = wind_transfer::theme::import_package(package, &target, move |_| {
@@ -4327,17 +4107,11 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `theme.exportPackage { slug, path }`：把一个已装主题打成 `.wtheme`。
     ///
-    /// 源目录走整条搜索链而不是只认用户目录——把内置主题改了色想发给别人，是主题包
-    /// 最常见的来路；只让用户层导得出，那份改动就得先手工复制一遍目录才能分享。
+    /// 源目录走整条搜索链（内置主题也导得出）。落点由调用方给全路径（与 `scheme.exportPackage` 同形）。
     ///
-    /// 落点由调用方给全路径（与 `scheme.exportPackage` 同形）：core 不猜「导到哪」，
-    /// 那是设置端的文件对话框与 CLI 的参数各自该管的事。
-    ///
-    /// ⚠️ `path` **不做任何校验**，这条成立的前提是 `path` 永远不由网页或远端决定：
-    /// 这条 RPC 只经本机 ctrl 通道调用——设置端「导出…」的路径来自原生保存框，CLI 来自
-    /// 命令行参数。设置端的主题编辑器连接（本机网页路由）若要出包，`path` 必须是设置端
-    /// 在自己的私有临时目录里以独占方式（O_EXCL）新建的文件，网页只能给 slug。
-    /// 哪天要让网页或远端影响 `path`，它就是一个任意写——**那时必须先加落点白名单**。
+    /// `path` 不做任何校验，前提是它永远不由网页或远端决定：本 RPC 只经本机 ctrl 通道调用，
+    /// 路径来自原生保存框或 CLI 参数；主题编辑器连接若要出包，`path` 须是设置端在私有临时目录
+    /// 以 O_EXCL 新建的文件。哪天让网页或远端影响 `path`，必须先加落点白名单（否则是任意写）。
     fn web_theme_export_package(&self, params: &Value) -> anyhow::Result<Value> {
         let slug = str_param(params, "slug")?;
         let out = str_param(params, "path")?;
@@ -4345,27 +4119,19 @@ pub trait WebDataRpc: WebDataHost {
         let png = self.theme_preview_png(&dir);
         let out_path = std::path::Path::new(out);
 
-        // **先写 `.tmp` 兄弟文件，自检通过才 rename 到位**——与导入侧同一条纪律
-        // （见 `wind_transfer::theme::import_package` 的「中途失败目标原封不动」）。
-        // 直接往 `out_path` 上写的话，超限的主题（条目数 / 解压体积越过包格式上限）
-        // 会走成这样：包已经完整落盘 → 自检报错 → 调用方看到失败，但磁盘上留着一个
-        // core 自己都不认的包；而 `File::create` 是截断写，那个路径上原有的好包已经
-        // 被毁了——**一次报错的导出销毁用户数据**，比不给导出严重得多。
+        // 先写 `.tmp` 兄弟文件，自检通过才 rename 到位（与导入侧「中途失败目标原封不动」同一纪律）：
+        // 直接截断写 `out_path` 的话，自检失败会毁掉该路径上原有的好包。
         let tmp = out_path.with_extension("wtheme.tmp");
         let done = (|| -> anyhow::Result<wind_transfer::theme::ThemePreview> {
             wind_transfer::theme::export_package(&dir, &tmp, png.as_deref())?;
-            // 读回自检：刚打出来的包必须能被自己的解析器认出来。这一步不是多余的仪式——
-            // 导出与导入各有一套条目判据（收什么 vs 认什么），哪天两边走岔了，这里当场
-            // 就报，而不是等用户把包发出去之后在对方机器上报。
+            // 读回自检：导出与导入各有一套条目判据，两边走岔时在这里当场报出。
             wind_transfer::theme::preview_package(&tmp)
         })();
         let p = match done {
             Ok(p) => p,
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
-                // 用户做的是「导出我的主题」，收到的却是包格式的限额措辞；补一句主语，
-                // 否则他不知道该去改自己的哪个主题。底下那层原因不会丢——RPC 出口
-                // （`wind-rpc::dispatch`）按 `{:#}` 展开整条链发给客户端。
+                // 补一句主语（哪个主题），底层原因由 RPC 出口按 `{:#}` 展开整条链发给客户端。
                 return Err(e.context(format!("导出主题「{slug}」失败")));
             }
         };
@@ -4385,10 +4151,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// 主题目录下的市场预览图，没有或读不动就当没有。
     ///
-    /// 有界读取：`wind-transfer` 对导入侧的每个条目都立了限额，导出侧把一张来路不明的
-    /// 图整个吃进内存则没人拦——而这是常驻的输入法服务进程，一张误拷进主题目录的
-    /// 原图就能把它撑爆。超限与读失败都只是「这个包没有预览图」，但都要留下痕迹：
-    /// 静默的话，用户只会看到导出回执里少了「含市场预览图」而无从追查。
+    /// 有界读取：常驻服务进程不能被一张误放的原图撑爆。超限与读失败都按「没有预览图」处理，
+    /// 但要记日志，否则用户无从追查回执里为何少了预览图。
     fn theme_preview_png(&self, dir: &std::path::Path) -> Option<Vec<u8>> {
         /// 与 `wind-transfer` 给主题文本的限额同档（4 MiB）：预览图是分发用的缩略图，
         /// 越过这个量级的必然是误放的原图。
@@ -4428,8 +4192,8 @@ pub trait WebDataRpc: WebDataHost {
     /// ```
     /// `swatches` 给设置页「插入颜色」的色块着色：求法与模板里的内联色完全相同（气泡场景先查
     /// `tooltip_<名>`），色块因此就是插进去以后的样子。
-    /// ⚠️ 两类区间坐标系不同：`runs` 是**输出偏移**（`text` 里的 UTF-8 字节区间，给预览上色）；
-    /// `problems` 是**模板偏移**（入参 `template` 里的 UTF-8 字节区间，给输入框标位置）。设置端
+    /// 两类区间坐标系不同：`runs` 是输出偏移（`text` 里的 UTF-8 字节区间，给预览上色）；
+    /// `problems` 是模板偏移（入参 `template` 里的 UTF-8 字节区间，给输入框标位置）。设置端
     /// 的输入框显示转义后的模板（`\t` 以两个字符显示），要把 `problems` 换算到显示文本上再标。
     /// 颜色一律 `[R, G, B, A]`。等于正文色的区间不下发（与渲染层同一口径）。
     fn web_appearance_preview_template(&self, params: &Value) -> anyhow::Result<Value> {
@@ -4477,9 +4241,8 @@ pub trait WebDataRpc: WebDataHost {
         let preset = wind_coordinator::template_preview::find_sample(sample_id)
             .ok_or_else(|| anyhow::anyhow!("未知样例：{}", sample_id.unwrap_or_default()))?;
         let sample = self.template_sample(template, &scene, preset);
-        // 主题现取：与候选窗同一条搜索链、同一个当前主题与明暗。每次预览都从磁盘解析一次
-        // （设计 §11 已知局限：低频的设置页操作，不值得为它挂一份缓存）。取不到（主题文件坏了）
-        // 时退化为兜底色的预览，并给一条总的提示——不逐个把颜色名误报成「当前主题没有」。
+        // 主题现取：与候选窗同一条搜索链、主题与明暗，每次从磁盘解析（低频操作，不挂缓存，设计 §11）。
+        // 取不到时退化为兜底色预览并给一条总提示，不逐个把颜色名误报成「当前主题没有」。
         let loaded = wind_theme::load_resolved_dirs(
             &self.theme_search_dirs(),
             &self.current_theme_name(),
@@ -4757,27 +4520,17 @@ impl WebDataRpc for wind_coordinator::Coordinator {}
 /// 存储域 → 设置页显示域：真实文本投影为可编辑的转义形态（真换行→`\n`、制表→`\t`、
 /// 反斜杠→`\\`）。
 ///
-/// 设置页是**文本编辑界面**，而编辑界面里"看不见的字符"是不可编辑的：一条含真换行的
-/// 短语在输入框里只显示成一个断行，用户既分不清那是换行还是别的空白，也无从表达
-/// "我要一个字面反斜杠"。投影成转义形态后，所见即所得。
-///
-/// 与 [`word_item`] 里 `code` 的处理同源——那里也是把存储域的扁平码投影成带空格的
-/// 音节码给人看。**存储域与显示域本就该分开**，此处只是把同一原则用到 text 上。
-///
-/// 命令栏语法条目只投影换行/制表、反斜杠原样——见 [`wind_store::wdict::escape_text_field`]。
-/// 设置页是这类条目最主要的书写入口，双重转义在这里最致命：文档写「路径要写 `\\`」，
-/// 照做却因为本层先吃掉一个而在 lexer 里变成换行。
+/// 编辑框里看不见的字符不可编辑，投影成转义形态后所见即所得（与 [`word_item`] 的 `code` 同一原则：
+/// 存储域与显示域分开）。命令栏语法条目只投影换行/制表、反斜杠原样，免得双重转义，
+/// 见 [`wind_store::wdict::escape_text_field`]。
 fn ui_text(s: &str) -> String {
     wind_store::wdict::escape_text_field(s)
 }
 
-/// 影子规则行的**显示文本**：`candId` 形如 `phrase:{code}:{模板}` 时取模板原文，否则回落 `word`。
+/// 影子规则行的显示文本：`candId` 形如 `phrase:{code}:{模板}` 时取模板原文，否则回落 `word`。
 ///
-/// 与设置端 `pages::dict::spec::WordRow::display_text` 同一判据——那边决定列表显示什么，
-/// 这边决定搜索/排序按什么算，两者一旦漂移就成了「看得见却搜不着、点了排序顺序对不上」。
-///
-/// ⚠️ 取的是**第二个冒号之后的全部内容**，不能按冒号切三段取第三段：模板自身常含冒号
-/// （`{time("HH:mm:ss")}`），按段取会把它截断成 `{time("HH`。
+/// 与设置端 `pages::dict::spec::WordRow::display_text` 同一判据（那边定显示，这边定搜索/排序）。
+/// 取第二个冒号之后的全部内容，不能按冒号切三段：模板自身常含冒号（`{time("HH:mm:ss")}`）。
 fn shadow_display_text(row: &Value) -> String {
     let word = row.get("word").and_then(|v| v.as_str()).unwrap_or("");
     row.get("candId")
@@ -4804,66 +4557,45 @@ fn hint_json(h: &wind_cmdbar::Hint) -> Value {
 
 /// 设置页显示域 → 存储域：[`ui_text`] 的逆。
 ///
-/// **凡是从设置页收 text 的 RPC 都必须先过它**，不只是写入类：`dict.remove`/`update`、
-/// `freq.delete`、`temp.promote` 等拿 text 当 **key** 去匹配记录，若拿转义形态去查
-/// 真实文本的库，结果是查不到——表现为「删了没反应」，且不报错。
+/// 凡是从设置页收 text 的 RPC 都必须先过它，包括拿 text 当 key 匹配的 `dict.remove`、
+/// `freq.delete`、`temp.promote` 等，否则静默查不到。
 fn store_text(s: &str) -> String {
     wind_store::wdict::unescape_text_field(s)
 }
 
-/// UserWordRecord → 前端 UserWordItem。
-/// 用户词 → 设置页列表项。
+/// 用户词 → 设置页列表项（前端 UserWordItem）。
 ///
-/// `code` 输出**带空格的音节码**（`ni hao`），与 `dict.encode` 的出码结果同形，
-/// 让用户直观看到拼音词库的音节格式。存储侧 key 仍是扁平的——设置页把这个串原样回传
-/// 给 add/update/remove 时，由 `user_words_api` 的 `normalize_add_code` / `remove` 拆回扁平码。
-/// 无边界（旧数据/手输码/五笔码）则不含空格，与改动前一致。
+/// `code` 输出带空格的音节码（`ni hao`），与 `dict.encode` 同形；回传给 add/update/remove 时由
+/// `user_words_api` 的 `normalize_add_code` / `remove` 拆回扁平码。无边界的码不含空格。
 fn word_item(r: wind_store::user_words::UserWordRecord) -> Value {
     let code = user_words_api::display_code(&r);
     json!({ "code": code, "text": ui_text(&r.text), "weight": r.weight, "enabled": true })
 }
 
-/// 稀疏 diff：返回 `cfg` 相对 `base` 的变化项（仅含改动的叶子/键）；无变化返回 None。
 /// `appearance.previewTemplate` 的模板长度上限（字节）。设置页输入框是单行，真实模板几十字节。
 pub const PREVIEW_TEMPLATE_MAX: usize = 4096;
 /// `appearance.previewTemplate` 一次最多求几个色块（设置页用 8 个）。
 pub const PREVIEW_SWATCHES_MAX: usize = 32;
 
-/// 对象逐键递归；数组/标量按整体比较（不同则取 cfg）。用于 schema override 最小化。
-/// `getConfig` 附带的只读旁路字段——回传 `saveConfig` 时必须剥掉。
+/// `getConfig` 附带的只读旁路字段，回传 `saveConfig` 时必须剥掉。
 ///
-/// 它们是「当前生效值」的快照，不是方案配置的一部分。设置页的做法是拿整份 getConfig
-/// 结果、改几个字段、原样回传；若不剥，`json_diff` 会认定方案文件缺这个键，于是把整份
-/// 快照写进 override——从此该方案的行为被**冻结在打开设置页那一刻**，之后改全局配置对
-/// 它再无影响，而用户根本没动过这些项。
-///
-/// 在服务端剥而不是要求调用方自觉：这是契约边界，任何客户端都该受保护。
+/// 它们是当前生效值的快照；设置页拿整份 getConfig 改几项原样回传，不剥的话 `json_diff` 会把
+/// 快照写进 override，方案行为从此冻结在打开设置页那一刻。在服务端剥，任何客户端都受保护。
 pub const READONLY_SIDECAR_FIELDS: &[&str] = &[
     "effectiveCodetable",
-    // 取消覆盖后的回落值 + override 层原文。前者若不剥会把一整份实值快照写进 override
-    // （＝上面说的冻结），后者若不剥会在 override 里多出一段 `[codetableOverride]`——
-    // 方案照常能用，但那一段从此谁也不读、也没人会想到去删。
+    // 取消覆盖后的回落值 + override 层原文（后者不剥会在 override 里留下无人读的一段）。
     "followedCodetable",
     "codetableOverride",
-    // override 层的 `[punct]` 段原文。回答「这张自定义标点表是方案作者写的还是我改的」——
-    // 合并值里的 `Some(表)` 两种来源给不出区别。
-    //
-    // ⚠️ **当前设置页尚未消费它**：整表替换下 UI 只有开/关两态，还没有像码表那节一样标出
-    // 「方案自带」。留着是因为那个区别对用户可见——作者写了表时取消勾选回到的是**作者的
-    // 表**而不是全局。要做那一档时直接用它，别再去合并值里猜。登记在此则是无论用不用都
-    // 不能让它随 saveConfig 落回 override。
+    // override 层的 `[punct]` 段原文，回答自定义标点表是方案作者写的还是用户改的。
+    // 设置页尚未消费它（作者写了表时取消勾选回到的是作者的表而非全局）；要做那一档时直接用它。
     "punctOverride",
     "leadingCodeKeys",
     "keysOverview",
-    // 「这张总览的全局层不完整」的说明（段级降级时非 null）。与 `keysOverview` 同进同出：
-    // 漏登记的话它会随 saveConfig 落进 override，从此方案文件里带着一段**某次启动的**
-    // 降级快照，谁也不读、也没人会想到去删。
+    // 「总览的全局层不完整」的说明（段级降级时非 null），与 `keysOverview` 同进同出。
     "keysOverviewDegraded",
-    // 「跟随全局」时的实际值（布局/字体/辅助码）。不剥的话一整份全局快照会落进 override，
-    // 方案从此把这几项钉死在打开设置页那一刻——正是上面说的冻结。
+    // 「跟随全局」时的实际值（布局/字体/辅助码）。
     "followedBehavior",
-    // 方案文件自己的辅助码来源（设置页判「跟随方案」用）。不剥的话一份基线快照会落进
-    // override，从此方案作者改了推荐码表也透不过来。
+    // 方案文件自己的辅助码来源（设置页判「跟随方案」用）；不剥则方案作者后续改的推荐码表透不过来。
     "auxCodeBaseFiles",
 ];
 
@@ -4889,42 +4621,15 @@ fn followed_behavior_of(cfg: &wind_config::Config, theme_font: Option<String>) -
     })
 }
 
-/// 按键总览：这个方案下每个绑过的键**当前**干什么、来自哪一层。
+/// 按键总览：这个方案下每个绑过的键当前干什么、来自哪一层。
 ///
-/// # 为什么由内核组装
+/// 由内核组装：组名展开（`page_keys = ["minus_equal"]` → `minus` / `equal`）住在
+/// `KeysConfig::effective_session_actions`，设置端不另写一份。只读：反写就要决定写哪一层，
+/// 设置页据此展示并跳转到对应编辑处（`docs/design/key-resolver-unification.md` §4.3）。
+/// 动词给原值（`page_prev`）不翻译，翻译归 UI。
 ///
-/// 设置页读得到两层的原始表，却算不出全局那份的**折算结果**：`page_keys = ["minus_equal"]`
-/// 这类组名要展开成 `minus` / `equal`，展开规则住在 `KeysConfig::effective_session_actions`。
-/// 设置页再写一份组名展开表就是两处慢慢漂移——跨仓契约无编译期约束，本仓已栽过
-/// （同 `leadingCodeKeys` 那条：边界上传语义结果，不传待解析的原料）。
-///
-/// # 为什么只读
-///
-/// 一个键的当前动作可能来自折算、也可能来自方案层，反写就要决定写哪一层，那就是第二个
-/// 真相源，会重蹈 `trigger_keys` 五处并存的覆辙。设置页据此展示并**跳转**到对应编辑处。
-/// 判据见 `docs/design/key-resolver-unification.md` §4.3。
-///
-/// # 动词不翻译
-///
-/// 给动词原值（`page_prev`）而不是中文名：文案值域已经在设置页的下拉里（两处各一份中文名
-/// 必然漂移），而这里给的是**语义结果**——哪个键、什么动作、来自哪层。翻译归 UI。
-///
-/// # 段级降级时这张表会骗人
-///
-/// `Config::load` 不再因为一个坏键整份失败（P0 的段级降级），而是把坏段换成 **L1 出厂值**
-/// 再返回 `Ok`。于是「读不到全局配置就整表不给」这条老判据够不着新的失效形态：`keys` 段
-/// 降级时 `load()` 成功、`cfg.keys.key_actions` 是一张**只有出厂绑定的表**，照原样渲染
-/// 出去就是把出厂默认当成「用户的真实绑定」展示——用户看着一张对的表，却怎么也对不上
-/// 实际按键行为，而唯一的线索埋在日志里。
-///
-/// 处置与老判据同构、只是判得更细：**不可信的那一层就不列**（不是列出来再打个标），
-/// 同时经第二个返回值说明「哪张表的全局层缺了、因为哪些段降级」。只标不删的话，设置页
-/// 那侧漏读一个字段就退化成「把出厂表当真实绑定展示」，而那正是要防的事。
-///
-/// 判据按**表**分别取，不是「keys 段一坏两张表全清」：两张表互不相干，一起清会把本来
-/// 完好的那张也变成空白。每张表问的是它的**全部来源路径**，见 [`keys_overview_of`] 里
-/// 那张表——那不是形式，漏一条就退回本节开头描述的失效形态。
-///
+/// 段级降级时不可信的全局层不列，并经第二个返回值说明缺了哪张表、因哪些段降级；判据见
+/// `docs/design/key-resolver-unification.md` 的「按键总览（`keysOverview`）的段级降级判据」。
 /// 返回 `(总览, 不完整说明)`；后者无降级时为 `Value::Null`。
 fn keys_overview(schema_cfg: &Value) -> (Vec<Value>, Value) {
     let cfg = match wind_config::Config::load(wind_config::Config::data_dir().as_deref()) {
@@ -4934,18 +4639,8 @@ fn keys_overview(schema_cfg: &Value) -> (Vec<Value>, Value) {
             cfg.normalize();
             cfg
         }
-        // 读不到全局配置：整个全局层不可信，与 `total_fallback` 是同一件事，故合流到
-        // 同一套处置（下面的 taints 对每张表都成立 ⇒ 全局层一律不列）。
-        //
-        // ⚠️ 这**是一处行为变更**（不是等价重构）：老行为是整表不给（`return Vec::new()`，
-        // 连方案层也不列），新行为是列出方案层 + 给标记。改的理由是老行为对调用方而言与
-        // 「这个方案一个键都没绑」无从区分；方案层的数据来自方案文件、不受 `Config` 降级
-        // 影响，扣着不给并不更安全。
-        //
-        // ⚠️ 且这条分支在 P0 之后**已基本不可达**：`Config::load` 内部的反序列化失败已由
-        // 段级降级接住，`?` 只剩 `toml::Value::try_from(Config::default())` 那一处（默认值
-        // 序列化失败，实际上不会发生）。留着是防御性的——不留就得写 `unwrap`，而
-        // 「不可达」这个判断依赖的是下层实现，不该在这里钉死。
+        // 读不到全局配置：与 `total_fallback` 合流，全局层一律不列，方案层照列（不受 `Config` 降级影响，
+        // 整表不给会与「一个键都没绑」无从区分）。段级降级之后这条分支基本不可达，留作防御。
         Err(_) => {
             let mut cfg = wind_config::Config::default();
             cfg.degradation.total_fallback = true;
@@ -4957,11 +4652,8 @@ fn keys_overview(schema_cfg: &Value) -> (Vec<Value>, Value) {
 
 /// [`keys_overview`] 的纯函数内核：配置由调用方给定，不碰磁盘也不碰环境变量。
 ///
-/// 拆出来是为了让「降级时全局层不列 + 带出不完整标记」这条判据能被**普通单测**盯住：
-/// 走 [`keys_overview`] 的话，要造一份真会降级的配置就得重定向 `WIND_INSTALL_ROOT` /
-/// `WIND_DATADIR_CONF`，那两个杠杆经 OnceLock、同一测试二进制里只认第一次，于是这条
-/// 判据要么单独占一个测试二进制，要么静默测到错误的目标。而 `degradation` 是 `Config`
-/// 上的公开字段，直接置上去就是等价的输入。
+/// 拆出来让降级判据能被普通单测覆盖：`WIND_INSTALL_ROOT` / `WIND_DATADIR_CONF` 经 OnceLock
+/// 只认第一次，走 [`keys_overview`] 造降级配置不可靠；直接置 `Config::degradation` 即等价输入。
 fn keys_overview_of(cfg: &wind_config::Config, schema_cfg: &Value) -> (Vec<Value>, Value) {
     let schema_table = |key: &str| -> std::collections::BTreeMap<String, String> {
         schema_cfg
@@ -4979,29 +4671,10 @@ fn keys_overview_of(cfg: &wind_config::Config, schema_cfg: &Value) -> (Vec<Value
     let session = cfg.keys.effective_session_actions();
     let mut out = Vec::new();
     let mut tainted: Vec<(&str, &[&str])> = Vec::new();
-    // 每张表：(总览表名, 方案文件里的字段名, **全部来源路径**, 全局层的值)。
-    //
-    // 表名与字段名刻意不同（总览面向用户，方案文件里是 `key_actions` / `session_actions`），
-    // 故写在同一行里配对，别再另设一处映射。
-    //
-    // ★★ 来源路径是**并集**，不是「同名字段」。这里曾经只问 `keys.session_actions`，
-    // 理由写的是「折算来源是标量/列表键，出问题会整段记 `keys`，祖先判据照样成立」——
-    // **那条理由是错的**：`narrow_bad_section`（wind-config）对坏段的**每一个直接子键**
-    // 都做探针，不分子表还是标量/数组（`probe_section` 把待测值贴到全默认骨架上试，
-    // 标量一样试得出来）。实测 `[keys] page_keys = 5` ⇒ `sections = ["keys.page_keys"]`、
-    // `taints("keys.session_actions") == false`，而 `page_keys` 已被换成出厂值 ⇒ 总览
-    // 照常列出折算自出厂组名的翻页键、标记还是 `null`，正是本函数要消灭的那个形态。
-    //
-    // ⚠️ **通用形状，别只记住这一个例子**：折算型数据的降级判据必须覆盖**全部来源路径**，
-    // 而不是同名字段。给 `KeysConfig::effective_session_actions` 加新的折算来源时，这张表
-    // 要一起加——漏一个没有任何编译期或测试信号，只会让那一格悄悄退回「把出厂值当成
-    // 用户的真实绑定展示」。
-    //
-    // ⚠️ 同一形状还有一处更窄的，**刻意不进判据**：`normalize()` 里的
-    // `migrate_trigger_keys_into_key_actions` 把 `input.temp_english.trigger_keys` 等
-    // **跨段**折算进 `key_actions`，于是 `input` 段降级也能污染 lead 表。它只对
-    // `key_actions_materialized < VERSION` 的存量用户跑一次，是过渡态；为它把整个 `input`
-    // 段拉进按键表的判据，代价（存量用户 `input` 一坏，按键总览整片消失）大于收益。
+    // 每张表：(总览表名, 方案文件里的字段名, 全部来源路径, 全局层的值)。
+    // 来源路径是并集而非同名字段（坏段按直接子键定位）：给 `KeysConfig::effective_session_actions`
+    // 加折算来源时这里要一起加，漏了无任何信号。`input` 段的跨段迁移刻意不进判据，
+    // 见 docs/design/key-resolver-unification.md 的「按键总览（`keysOverview`）的段级降级判据」。
     for (table, field, sources, global) in [
         (
             "lead",
@@ -5032,17 +4705,11 @@ fn keys_overview_of(cfg: &wind_config::Config, schema_cfg: &Value) -> (Vec<Value
     }
 
     let degraded = if tainted.is_empty() {
-        // ★ 恒在的字段、无降级时显式 `null`（不是「不给字段」）：跨仓契约无编译期约束，
-        // 「字段不存在」与「这版 core 还没实现」在设置端看来完全一样。
+        // 字段恒在、无降级时显式 `null`：否则设置端分不清「无降级」与「这版 core 还没实现」。
         Value::Null
     } else {
-        // ★ 只列**真正导致上面这些表被判不可信**的降级段，不是本次加载的全部降级段。
-        // 全量传出去的话，`ui.font` 坏了也会出现在按键总览的「缺失原因」里，设置端照
-        // 字面渲染就成了「字体那格坏了所以按键表不全」——一条自信的错误解释比不解释更糟。
-        //
-        // 判定复用生产判据本身（单段构造一份 `ConfigDegradation` 去问 `taints`），而不是
-        // 在这里重写一遍「相等 / 祖先 / 后代」那三种关系：重写就是第二个真相源，一旦
-        // 与 `taints` 分叉，标记会指向一组没导致任何事情发生的段。
+        // 只列真正导致上面这些表被判不可信的降级段（如 `ui.font` 坏了不该出现在这里）。
+        // 判定复用 `taints`（单段构造一份 `ConfigDegradation`），不重写一遍路径关系。
         let causes: Vec<&String> = cfg
             .degradation
             .sections
@@ -5059,7 +4726,7 @@ fn keys_overview_of(cfg: &wind_config::Config, schema_cfg: &Value) -> (Vec<Value
             })
             .collect();
         json!({
-            // 这些表的**全局层未列出**；表名与 `keysOverview` 条目里的 `table` 同域。
+            // 这些表的全局层未列出；表名与 `keysOverview` 条目里的 `table` 同域。
             "tables": tainted.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
             // 点分路径原样传出（`keys.page_keys`），与 `config.degradation` 同一份来源。
             // `totalFallback` 时本表为空——那种情形下 `sections` 本来就定位不到任何段。
@@ -5072,23 +4739,13 @@ fn keys_overview_of(cfg: &wind_config::Config, schema_cfg: &Value) -> (Vec<Value
 
 /// 一张表的两层仲裁：方案层表了态就用方案的，否则用全局的。
 ///
-/// ★ 方案层的**显式 `none` 也是表态**（＝本方案禁用），不回落全局。这与内核
-/// `Coordinator::session_action_for` / `bound_action_with_source` 的处置逐条一致；
-/// 若在这里改成「none 视同没配」，总览显示的就与实际行为相反。
+/// 方案层的显式 `none` 也是表态（本方案禁用），不回落全局，与内核
+/// `Coordinator::session_action_for` / `bound_action_with_source` 一致。
 ///
-/// # `ineffective`：方案层 `[key_actions]` 的组合键**没有消费通路**
-///
-/// 组合键只由 `Compiler::compile` 从全局 `keys.key_actions` 编进热键表；方案层那张表只在
-/// 按键链上按**单键** VK 查（修饰键轻敲 / 有字符的引导键）。于是方案文件里写的
-/// `"ctrl+alt+j" = …` 按下去什么都不发生——对**所有**动词都成立。补这条通路要让方案级组合键
-/// 进 C++ 的转发集并按活跃方案分派，会破「C++ 吃键集 ⊆ Rust 出字集」，故不补，只如实标出。
-///
-/// 这类条目带 `ineffective: true` 照常列出（用户写了什么就显示什么），且**不遮盖**同名的
-/// 全局条目——全局那条照常列出，它才是实际生效的那一条。判据用 core 的
-/// `route_of_key_action`（与热键编译器同一个分流口），设置端不另判。
-///
-/// ★ 字段恒在（其余条目为 `false`）：跨仓契约无编译期约束，「字段不存在」与「这版 core
-/// 还没实现」在设置端看来完全一样。
+/// `ineffective`：方案层 `[key_actions]` 的组合键没有消费通路（组合键只从全局 `keys.key_actions`
+/// 编进热键表，方案层只按单键查）。补通路会破「C++ 吃键集 ⊆ Rust 出字集」，故只如实标出：
+/// 这类条目带 `ineffective: true` 照常列出且不遮盖同名全局条目。判据用 core 的
+/// `route_of_key_action`。字段恒在（其余条目为 `false`），设置端才分得清「没实现」。
 fn push_overview_layer(
     out: &mut Vec<Value>,
     table: &str,
@@ -5145,21 +4802,17 @@ fn strip_readonly_fields(cfg: &Value) -> Value {
     Value::Object(o)
 }
 
+/// 稀疏 diff：返回 `cfg` 相对 `base` 的变化项（仅含改动的叶子/键）；无变化返回 None。
+/// 对象逐键递归；数组/标量按整体比较（不同则取 cfg）。用于 schema override 最小化。
 fn json_diff(base: &Value, cfg: &Value) -> Option<Value> {
     match (base, cfg) {
         (Value::Object(b), Value::Object(c)) => {
             let mut out = serde_json::Map::new();
             for (k, cv) in c {
                 match b.get(k) {
-                    // ★★ `custom_mappings` 必须作**原子叶子**，与 `merge_toml` 那侧的整体
-                    // 替换例外配对。逐键下钻的话，用户改一行 ⇒ override 里只有那一行 ⇒
-                    // 读侧整体替换 ⇒ **方案作者写的其余行全部丢失**。
-                    //
-                    // ⇒ 可复用判据：**改了合并语义（读侧），必须同步查产生 override 的写侧。**
-                    // 「整体替换 + 稀疏 diff」这个组合是数据丢失，而两侧各自看都合理。
-                    //
-                    // 键空间是用户数据（标点 token 可含 `.`/`/`），本就不该按路径下钻——
-                    // 全局配置那侧早有同一条铁律（`Capabilities::map_keys` 的原子叶子）。
+                    // `custom_mappings` 必须作原子叶子，与 `merge_toml` 读侧的整体替换配对：逐键下钻的话
+                    // override 只剩改动那一行，读侧整体替换后方案作者写的其余行全部丢失。
+                    // 改合并语义（读侧）时必须同步查写侧。键空间是用户数据，本就不该按路径下钻。
                     Some(bv) if k == "custom_mappings" => {
                         if bv != cv {
                             out.insert(k.clone(), cv.clone());
@@ -5224,5786 +4877,12 @@ fn json_to_toml(v: &Value) -> toml::Value {
 }
 
 #[cfg(test)]
-mod tests {
-    //! 数据域 RPC 契约测试：真实 Coordinator + 临时 redb store，断言 web_data_rpc 输出形状
-    //! 与 WindInputSetting 的 mock.ts / models.ts 一致。
-    use super::*;
-    use std::sync::Arc;
-    use wind_config::Config;
-    use wind_coordinator::Coordinator;
-    use wind_store::Store;
-
-    // 拼音准入契约的处置表测试随 `dispose_contract_rows` 搬到了
-    // `wind_coordinator::dict_transfer_api`（contract_disposition_table_covers_both_fill_choices）。
-
-    /// 导入导出的**文件路径通道**：`dict.export` 直接写盘、`dict.*Import` 直接读盘。
-    ///
-    /// ★ 这条守的是 issue #101 的修法。走 `content` 时整库要穿过一帧 JSON-RPC，而设置端
-    /// 读帧上限 16MB，几十万条必撞（用户实测报「帧长超限」）。传路径后 payload 是 O(1)。
-    ///
-    /// ⚠️ **必须真做一次往返**，不能只断言「没报错」：`path` 参数被忽略、退回读 `content`
-    /// 是最可能的回归形态，而那时缺 `content` 只会报「缺少参数」——看起来像别的毛病。
-    /// 这里 import 一侧**只传 path 不传 content**，正是为了让那种退化立刻现形。
-    #[test]
-    fn dict_io_round_trips_through_file_path() {
-        let c = coord("dictpath");
-        c.web_data_rpc(
-            "dict.add",
-            &json!({ "schemaId": "wb", "code": "a", "text": "工", "weight": 100 }),
-        )
-        .unwrap();
-
-        let out = std::env::temp_dir().join("wind_webdata_dictpath_export.wdict.yaml");
-        let _ = std::fs::remove_file(&out);
-        let path = out.to_string_lossy().to_string();
-
-        // 导出：回的是落点与字节数，**不再回全文**
-        let exp = c
-            .web_data_rpc("dict.export", &json!({ "schemaId": "wb", "path": path }))
-            .unwrap();
-        assert!(
-            exp.get("content").is_none(),
-            "带 path 时不该再回全文：{exp}"
-        );
-        assert_eq!(
-            exp.get("path").and_then(|v| v.as_str()),
-            Some(path.as_str())
-        );
-        let written = std::fs::read_to_string(&out).expect("core 应已把文件写出来");
-        assert!(
-            written.contains("--- !words"),
-            "写出来的得是 wdict：{written}"
-        );
-        assert_eq!(
-            exp.get("bytes").and_then(|v| v.as_u64()),
-            Some(written.len() as u64),
-            "回报的字节数要与落盘一致"
-        );
-
-        // 预览 + 导入：只给路径
-        let prev = c
-            .web_data_rpc(
-                "dict.previewImport",
-                &json!({ "schemaId": "wb2", "path": path }),
-            )
-            .unwrap();
-        assert_eq!(
-            sec(&prev, "userWords")
-                .get("willAdd")
-                .and_then(|v| v.as_u64()),
-            Some(1),
-            "★ 预览必须从文件里读到内容，而不是把 path 当没看见"
-        );
-        let imported = c
-            .web_data_rpc("dict.import", &json!({ "schemaId": "wb2", "path": path }))
-            .unwrap();
-        assert_eq!(
-            sec(&imported, "userWords")
-                .get("added")
-                .and_then(|v| v.as_u64()),
-            Some(1)
-        );
-
-        // 反向对照：路径不存在要**报错**，不能静默当成空文件导入 0 条。
-        let bad = c.web_data_rpc(
-            "dict.import",
-            &json!({ "schemaId": "wb2", "path": "Z:\\no\\such\\file.yaml" }),
-        );
-        assert!(
-            bad.is_err(),
-            "读不到的路径必须报错，否则用户看到「导入 0 条」会以为文件坏了"
-        );
-
-        let _ = std::fs::remove_file(&out);
-    }
-
-    /// 构造一个带临时 store 的无头 Coordinator。
-    /// 造一个只带 `common_han` 类的临时数据目录。
-    ///
-    /// # ⚠️ 为什么测试装置必须有它
-    ///
-    /// 常用性判定已归 `CharsetRegistry`：没有 `common_han` 类就**没有人表态**，一切兜底
-    /// 判常用。而本文件多条用例的前提是「域内的汉字默认判生僻」（好让 `common: true`
-    /// 与默认相反、真的落一条记录）——那个前提正是 `common_han` 类的
-    /// `scope: han` + `outside: rare` 给出的。
-    ///
-    /// 名单只放几个字：够用来区分「在表内 ⇒ 常用」和「域内表外 ⇒ 生僻」即可，
-    /// 不必搬 8104 字进来。
-    /// ⚠️ 用 `ranges` 而不是列名单：本文件多条用例假定「初始是空表」，而全表列的正是
-    /// **表态类的成员**——列了名单，那几个字就会出现在列表里。给一段用不到的 PUA 码位，
-    /// 既让这个类有内容（不触发「名单为空就撤销表态」那道安全阀），又不往全表里塞东西。
-    fn charsets_data_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("wind_webdata_data_{tag}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("charsets")).unwrap();
-        std::fs::write(
-            d.join("charsets").join("common_han.yaml"),
-            "---
-key: common_han
-name: 常用汉字
-order: 50
-scope: han
-ranges:
-  - U+E000-U+E001
-default: common
-outside: rare
-",
-        )
-        .unwrap();
-        d
-    }
-
-    fn coord(tag: &str) -> Arc<Coordinator> {
-        let path =
-            std::env::temp_dir().join(format!("wind_webdata_{tag}_{}.redb", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(Store::open(&path).unwrap());
-        let data = charsets_data_dir(tag);
-        Coordinator::new_headless_with_store(Config::default(), Some(&data), store)
-    }
-
-    /// 在 `{sections:[{key,...}]}` 响应里按 key 取某段（无则 Null）。
-    fn sec(v: &Value, key: &str) -> Value {
-        v.get("sections")
-            .and_then(|s| s.as_array())
-            .and_then(|a| {
-                a.iter()
-                    .find(|x| x.get("key").and_then(|k| k.as_str()) == Some(key))
-                    .cloned()
-            })
-            .unwrap_or(Value::Null)
-    }
-
-    /// **设置页显示带空格的音节码，存储 key 保持扁平**——两个域在 RPC 边界上的往返契约。
-    ///
-    /// 用户在设置页看到 `ni hao`（`dict.encode` / 列表回显同形），把它原样提交回来时，
-    /// 写入侧必须拆成扁平 key，否则 `niha` 前缀匹配不到这条记录、逐键出候选就废了。
-    /// 反过来 remove/search 收到带空格的串也必须拆，不然删不掉、搜不着。
-    ///
-    /// 顺带确认一条增益：用户打的空格被当作**显式声明的切分**采信，优先于
-    /// `normalize_add_code` 的求解链。
-    #[test]
-    fn dict_spaced_code_display_flat_storage_roundtrip() {
-        let c = coord("spaced_roundtrip");
-        let p = |code: &str| {
-            serde_json::json!({
-                "schemaId": "pinyin", "code": code, "text": "你好", "weight": 500
-            })
-        };
-
-        // 提交带空格的码（模拟用户从「出码」按钮拿到后直接保存）
-        c.web_data_rpc("dict.add", &p("ni hao")).unwrap();
-
-        // 存储侧：key 扁平、边界由空格得来（ni|hao → {0,2}）
-        let store = c.user_store().expect("有 store");
-        let recs = store.get_user_words("pinyin", "nihao").unwrap();
-        assert_eq!(recs.len(), 1, "key 必须是扁平的 nihao，不能带空格");
-        assert_eq!(recs[0].boundary, 0b101, "用户打的空格即显式切分，须被采信");
-
-        // 显示侧：列表与搜索都回带空格的码
-        let items = c
-            .web_data_rpc(
-                "dict.search",
-                &serde_json::json!({ "schemaId": "pinyin", "query": "ni hao" }),
-            )
-            .unwrap();
-        assert_eq!(
-            items[0].get("code").and_then(|v| v.as_str()),
-            Some("ni hao"),
-            "列表回显须与出码同形；搜索词带空格也要能命中（查询侧同样拆）"
-        );
-
-        // 删除：带空格的码同样要能删掉
-        c.web_data_rpc("dict.remove", &p("ni hao")).unwrap();
-        assert!(
-            store.get_user_words("pinyin", "nihao").unwrap().is_empty(),
-            "remove 收到带空格的码须先拆再删"
-        );
-    }
-
-    /// 设置页改词（`dict.update` 的 upsert）与单条手动转正（`temp.promote`）是显式加词：撤掉同码
-    /// 同文的删除规则，别的词的删除规则不动。全部转正（`temp.promoteAll`）是批量操作：不撤，报数。
-    #[test]
-    fn single_update_and_promote_clear_but_promote_all_only_counts() {
-        let c = coord("readd_clear");
-        let store = c.user_store().expect("有 store");
-        for (code, text) in [("nihao", "你好"), ("haoya", "好呀"), ("shijie", "世界")] {
-            store.delete_shadow("pinyin", code, text).unwrap();
-        }
-        store.delete_shadow("pinyin", "nihao", "拟好").unwrap();
-        store
-            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0b1001)
-            .unwrap();
-        store
-            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
-            .unwrap();
-        let deleted = |code: &str| {
-            store
-                .get_shadow_rules("pinyin", code)
-                .unwrap()
-                .map(|r| r.deleted)
-                .unwrap_or_default()
-        };
-
-        c.web_data_rpc(
-            "dict.update",
-            &serde_json::json!({ "schemaId": "pinyin", "code": "ni hao", "text": "你好", "weight": 5 }),
-        )
-        .unwrap();
-        assert_eq!(deleted("nihao"), vec!["拟好".to_string()], "只撤「你好」");
-
-        c.web_data_rpc(
-            "temp.promote",
-            &serde_json::json!({ "schemaId": "pinyin", "code": "hao ya", "text": "好呀" }),
-        )
-        .unwrap();
-        assert!(deleted("haoya").is_empty(), "手动转正应撤删除规则");
-
-        // 全部转正是批量操作：不撤，只报数
-        let r = c
-            .web_data_rpc(
-                "temp.promoteAll",
-                &serde_json::json!({ "schemaId": "pinyin" }),
-            )
-            .unwrap();
-        assert_eq!(
-            r,
-            serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }),
-            "转正 1 条、其中 1 条被隐藏"
-        );
-        assert_eq!(
-            deleted("shijie"),
-            vec!["世界".to_string()],
-            "全部转正不撤删除规则"
-        );
-    }
-
-    /// 拼音「屏蔽这个词」行（`code = *`）在候选调整列表里照常列出、能按 `shadow.removeRule` 删；
-    /// 全部转正的计数按文字算上它。
-    #[test]
-    fn block_row_listed_removable_and_counted() {
-        let c = coord("block_row");
-        let store = c.user_store().expect("有 store");
-        store.block_word("pinyin", "世界").unwrap();
-        let list = c
-            .web_data_rpc("shadow.list", &serde_json::json!({ "schemaId": "pinyin" }))
-            .unwrap();
-        let arr = list.as_array().expect("数组");
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["code"], "*");
-        assert_eq!(arr[0]["word"], "世界");
-        assert_eq!(arr[0]["type"], "delete");
-
-        store
-            .learn_temp_word("pinyin", "shijie", "世界", 500, 0b101)
-            .unwrap();
-        let r = c
-            .web_data_rpc(
-                "temp.promoteAll",
-                &serde_json::json!({ "schemaId": "pinyin" }),
-            )
-            .unwrap();
-        assert_eq!(r, serde_json::json!({ "promoted": 1, "hiddenByShadow": 1 }));
-        assert!(
-            store.blocked_words("pinyin").unwrap().contains("世界"),
-            "全部转正不撤屏蔽"
-        );
-
-        c.web_data_rpc(
-            "shadow.removeRule",
-            &serde_json::json!({ "schemaId": "pinyin", "code": "*", "word": "世界" }),
-        )
-        .unwrap();
-        assert!(store.blocked_words("pinyin").unwrap().is_empty());
-    }
-
-    /// 临时词库与用户词库同款：列表显示带空格，remove / promote 收到后各自拆回扁平码。
-    /// **三处必须同改**——只改列表就成了「显示得了、删不掉、也晋升不了」。
-    #[test]
-    fn temp_word_spaced_code_roundtrip() {
-        let c = coord("temp_spaced");
-        let store = c.user_store().expect("有 store");
-        // hao|ya → 起始字节位 {0,3}
-        store
-            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0b1001)
-            .unwrap();
-        store
-            .learn_temp_word("pinyin", "nihao", "你好", 500, 0b101)
-            .unwrap();
-
-        let items = c
-            .web_data_rpc("temp.list", &serde_json::json!({ "schemaId": "pinyin" }))
-            .unwrap();
-        let codes: Vec<&str> = items
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.get("code").and_then(|c| c.as_str()))
-            .collect();
-        assert!(
-            codes.contains(&"hao ya") && codes.contains(&"ni hao"),
-            "临时词库列表须显示带空格的音节码，实际 {codes:?}"
-        );
-
-        // 晋升：带空格的 code 要能查到 temp 记录并写进用户词库
-        c.web_data_rpc(
-            "temp.promote",
-            &serde_json::json!({ "schemaId": "pinyin", "code": "ni hao", "text": "你好" }),
-        )
-        .unwrap();
-        assert!(
-            !store.get_user_words("pinyin", "nihao").unwrap().is_empty(),
-            "promote 收到带空格的码须先拆再晋升"
-        );
-
-        // 删除：同理
-        c.web_data_rpc(
-            "temp.remove",
-            &serde_json::json!({ "schemaId": "pinyin", "code": "hao ya", "text": "好呀" }),
-        )
-        .unwrap();
-        assert!(
-            store
-                .get_temp_words("pinyin", "haoya")
-                .unwrap_or_default()
-                .is_empty(),
-            "remove 收到带空格的码须先拆再删"
-        );
-    }
-
-    /// ★ 两张回收名单里的每个方法名都必须真在分派表里：改名而忘了改名单，回收就静默失效。
-    /// 拿空参数逐个调一遍：分派表认得的方法会因缺参报错（或照常返回），只有不认得的才报
-    /// `unknown method`。名单里的方法都只读或缺参即返回，空参数调用不会动数据。
-    #[test]
-    fn rpc_name_tables_match_the_dispatch_table() {
-        let c = coord("rpc_name_tables");
-        for &m in FULL_SCAN_METHODS
-            .iter()
-            .chain(BULK_WRITE_METHODS)
-            .chain(&["dict.search"])
-        {
-            if let Err(e) = c.web_data_rpc(m, &json!({})) {
-                assert!(
-                    !e.to_string().contains("unknown method"),
-                    "{m} 不在分派表里（改名了？同步更新名单）"
-                );
-            }
-        }
-    }
-
-    /// ime.get / set / toggle：中英切换幂等、取反回新值、未知目标报错，且 get 不带目标回全部。
-    #[test]
-    fn ime_state_rpcs_set_toggle_get() {
-        let c = coord("ime_state_rpcs");
-        let call = |m: &str, p: Value| c.web_data_rpc(m, &p);
-
-        let all = call("ime.get", json!({})).unwrap();
-        for t in ["cn-en", "fullshape", "s2t", "t2s", "toolbar"] {
-            assert!(all.get(t).is_some_and(Value::is_boolean), "{t}: {all}");
-        }
-
-        let cur = call("ime.get", json!({"target": "cn-en"})).unwrap()["on"]
-            .as_bool()
-            .unwrap();
-        // 设成当前值：不改动
-        let r = call("ime.set", json!({"target": "cn-en", "on": cur})).unwrap();
-        assert_eq!(r["changed"], json!(false), "{r}");
-        // 设成另一值：改动，且 get 读到新值
-        let r = call("ime.set", json!({"target": "cn-en", "on": !cur})).unwrap();
-        assert_eq!(r["changed"], json!(true), "{r}");
-        assert_eq!(
-            call("ime.get", json!({"target": "cn-en"})).unwrap()["on"],
-            json!(!cur)
-        );
-        // toggle 回到原值，并回报切换后的值
-        let r = call("ime.toggle", json!({"target": "cn-en"})).unwrap();
-        assert_eq!(r["on"], json!(cur), "{r}");
-
-        assert!(call("ime.get", json!({"target": "layout"})).is_err());
-        assert!(call("ime.toggle", json!({"target": "layout"})).is_err());
-        assert!(
-            call("ime.set", json!({"target": "cn-en"})).is_err(),
-            "缺 on"
-        );
-    }
-
-    /// dict.reload / dict.flush：分派在表里；reload 越界路径报错。
-    #[test]
-    fn dict_reload_and_flush_are_dispatched() {
-        let c = coord("dict_reload_flush");
-        let r = c.web_data_rpc("dict.reload", &json!({})).unwrap();
-        assert!(r.get("reloaded").is_some_and(|v| v.is_array()), "{r}");
-        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
-        assert_eq!(r, json!({"ok": true, "held": []}));
-        assert!(
-            c.web_data_rpc("dict.reload", &json!({"paths": ["/etc/passwd"]}))
-                .is_err()
-        );
-    }
-
-    /// 外部编辑（设计 user-dict-libraries-and-external-edit §4.2）：begin 返回路径与类别，编辑期间
-    /// 界面改同一张表被拒，end 载入手改并重建镜像，之后照常可改；越界与程序维护的文件拒绝。
-    #[test]
-    fn data_edit_session_rpcs() {
-        let c = coord("data_edit");
-        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
-        let r = c
-            .web_data_rpc("data.beginEdit", &json!({"path": "phrases.dict.yaml"}))
-            .unwrap();
-        let abs = root.join("phrases.dict.yaml");
-        assert_eq!(r["path"], abs.to_string_lossy().as_ref(), "{r}");
-        assert_eq!(r["file"], "phrases.dict.yaml");
-        assert_eq!(r["kind"], "phrases");
-        let s = c.web_data_rpc("data.editSessions", &json!({})).unwrap();
-        assert_eq!(s[0]["file"], "phrases.dict.yaml", "{s}");
-        assert!(s[0]["since_secs"].is_u64(), "{s}");
-        let e = c
-            .web_data_rpc("phrase.add", &json!({"code": "dz", "text": "地址"}))
-            .unwrap_err();
-        assert!(e.to_string().contains("正在外部编辑"), "{e}");
-        std::fs::write(
-            &abs,
-            std::fs::read_to_string(&abs).unwrap() + "yx\tme@x.com\t1\n",
-        )
-        .unwrap();
-        let r = c
-            .web_data_rpc("data.endEdit", &json!({"path": abs.to_string_lossy()}))
-            .unwrap();
-        assert_eq!(r, json!({"changed": true, "issues": []}));
-        assert!(c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()));
-        c.web_data_rpc("phrase.add", &json!({"code": "dz", "text": "地址"}))
-            .unwrap();
-        assert_eq!(
-            c.web_data_rpc("data.editSessions", &json!({})).unwrap(),
-            json!([])
-        );
-        assert!(
-            c.web_data_rpc("data.beginEdit", &json!({"path": "/etc/passwd"}))
-                .is_err()
-        );
-        assert!(
-            c.web_data_rpc("data.beginEdit", &json!({"path": "../user.dict.yaml"}))
-                .is_err()
-        );
-        let e = c
-            .web_data_rpc("data.beginEdit", &json!({"path": "pinyin/draft.dict.yaml"}))
-            .unwrap_err();
-        assert!(e.to_string().contains("自动维护"), "{e}");
-    }
-
-    /// 用户词会话：dict.flush 跳过暂停写回的文件并在返回里列出；endEdit 带回坏行。
-    #[test]
-    fn data_edit_words_holds_flush_and_reports_issues() {
-        let c = coord("data_edit_words");
-        let r = c
-            .web_data_rpc("data.beginEdit", &json!({"path": "pinyin/user.dict.yaml"}))
-            .unwrap();
-        assert_eq!(r["kind"], "words");
-        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
-        assert_eq!(r, json!({"ok": true, "held": ["pinyin/user.dict.yaml"]}));
-        let f = std::path::PathBuf::from(
-            c.web_data_rpc("data.locate", &json!({"path": "pinyin/user.dict.yaml"}))
-                .unwrap()["path"]
-                .as_str()
-                .unwrap(),
-        );
-        std::fs::write(&f, std::fs::read_to_string(&f).unwrap() + "只有一列\n").unwrap();
-        let r = c
-            .web_data_rpc("data.endEdit", &json!({"path": "pinyin/user.dict.yaml"}))
-            .unwrap();
-        assert_eq!(r["issues"][0]["path"], "pinyin/user.dict.yaml", "{r}");
-        assert_eq!(r["issues"][0]["kind"], "bad_lines", "{r}");
-        assert_eq!(r["issues"][0]["lines"], 1, "{r}");
-        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
-        assert_eq!(r, json!({"ok": true, "held": []}));
-        wind_store::issues::clear(&f);
-    }
-
-    /// 租约到期按 end 处理：手改的短语载入，输入期短语层随之重建（协调器装的回调）。
-    #[test]
-    fn expired_edit_session_rebuilds_phrase_layer() {
-        let c = coord("data_edit_lease");
-        let store = c.user_store().cloned().unwrap();
-        c.web_data_rpc("data.beginEdit", &json!({"path": "phrases.dict.yaml"}))
-            .unwrap();
-        let f = store.phrases_path();
-        std::fs::write(
-            &f,
-            std::fs::read_to_string(&f).unwrap() + "yx\tme@x.com\t1\n",
-        )
-        .unwrap();
-        assert!(
-            !c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()),
-            "前置：镜像未变"
-        );
-        assert_eq!(store.expire_edit_sessions(std::time::Duration::ZERO), 1);
-        assert!(c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()));
-        assert_eq!(
-            c.web_data_rpc("data.editSessions", &json!({})).unwrap(),
-            json!([])
-        );
-    }
-
-    /// 编辑目标按类别给：用户词 / 候选调整带方案（拼音族折叠到 pinyin），小表只给类别；
-    /// begin 与 end 两种参数形式指向同一会话；locate 认方案。
-    #[test]
-    fn data_edit_accepts_kind_and_schema() {
-        let tag = "data_edit_kind";
-        let path =
-            std::env::temp_dir().join(format!("wind_webdata_{tag}_{}.redb", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(Store::open(&path).unwrap());
-        let data = charsets_data_dir(tag);
-        std::fs::create_dir_all(data.join("schemas")).unwrap();
-        std::fs::write(
-            data.join("schemas/double_pinyin.schema.toml"),
-            "[engine]\ntype = \"pinyin\"\n",
-        )
-        .unwrap();
-        let c = Coordinator::new_headless_with_store(Config::default(), Some(&data), store);
-        let begin = |p: Value| c.web_data_rpc("data.beginEdit", &p);
-        let r = begin(json!({"schemaId": "double_pinyin", "kind": "words"})).unwrap();
-        assert_eq!(
-            (&r["file"], &r["kind"]),
-            (&json!("pinyin/user.dict.yaml"), &json!("words"))
-        );
-        let r = begin(json!({"schemaId": "wubi86", "kind": "shadow"})).unwrap();
-        assert_eq!(
-            (&r["file"], &r["kind"]),
-            (&json!("wubi86/shadow.dict.yaml"), &json!("shadow"))
-        );
-        for (kind, file) in [
-            ("phrases", "phrases.dict.yaml"),
-            ("quick_format", "quick_format.toml"),
-            ("common_chars", "common_chars.yaml"),
-        ] {
-            let r = begin(json!({"kind": kind})).unwrap();
-            assert_eq!(
-                (&r["file"], &r["kind"]),
-                (&json!(file), &json!(kind)),
-                "{r}"
-            );
-        }
-        for (kind, file) in [
-            ("temp", "pinyin/temp.dict.yaml"),
-            ("freq", "pinyin/freq.table.yaml"),
-        ] {
-            let r = begin(json!({"schemaId": "double_pinyin", "kind": kind})).unwrap();
-            assert_eq!(
-                (&r["file"], &r["kind"]),
-                (&json!(file), &json!(kind)),
-                "{r}"
-            );
-        }
-        assert!(begin(json!({"kind": "words"})).is_err(), "用户词要带方案");
-        assert!(begin(json!({"kind": "temp"})).is_err(), "临时词要带方案");
-        assert!(begin(json!({"kind": "draft", "schemaId": "wubi86"})).is_err());
-        assert!(begin(json!({"schemaId": "../x", "kind": "words"})).is_err());
-        assert_eq!(
-            c.web_data_rpc("data.editSessions", &json!({}))
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            7
-        );
-        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
-        let mut held: Vec<String> = serde_json::from_value(r["held"].clone()).unwrap();
-        held.sort();
-        assert_eq!(
-            held,
-            [
-                "pinyin/freq.table.yaml",
-                "pinyin/temp.dict.yaml",
-                "pinyin/user.dict.yaml"
-            ]
-        );
-        let end = |p: Value| c.web_data_rpc("data.endEdit", &p).unwrap();
-        end(json!({"schemaId": "double_pinyin", "kind": "words"}));
-        end(json!({"schemaId": "double_pinyin", "kind": "temp"}));
-        end(json!({"schemaId": "double_pinyin", "kind": "freq"}));
-        end(json!({"schemaId": "wubi86", "kind": "shadow"}));
-        for kind in ["phrases", "quick_format", "common_chars"] {
-            end(json!({"kind": kind}));
-        }
-        assert_eq!(
-            c.web_data_rpc("data.editSessions", &json!({})).unwrap(),
-            json!([])
-        );
-        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
-        let at = |p: Value| c.web_data_rpc("data.locate", &p).unwrap()["path"].clone();
-        assert_eq!(
-            at(json!({"schemaId": "double_pinyin"})),
-            root.join("pinyin").to_string_lossy().as_ref()
-        );
-        assert_eq!(
-            at(json!({"schemaId": "wubi86"})),
-            root.join("wubi86").to_string_lossy().as_ref()
-        );
-    }
-
-    /// 字符分类按 key 编辑：没有个人调整就先建一份只带 key 的；不认识的 key 拒绝。结束时格式坏
-    /// 报 invalid、改出厂范围 / 整表替换被忽略并报 invalid，修好后问题消失。
-    #[test]
-    fn data_edit_charsets_by_key_and_reports_invalid() {
-        let c = coord("data_edit_cs");
-        let store = c.user_store().cloned().unwrap();
-        let p = store.charset_path("common_han").unwrap();
-        assert!(!p.exists());
-        let begin =
-            |k: &str| c.web_data_rpc("data.beginEdit", &json!({"kind": "charsets", "key": k}));
-        let end = || {
-            c.web_data_rpc(
-                "data.endEdit",
-                &json!({"kind": "charsets", "key": "common_han"}),
-            )
-            .unwrap()
-        };
-        let e = begin("nope").unwrap_err().to_string();
-        assert!(e.contains("字符分类"), "{e}");
-        let r = begin("common_han").unwrap();
-        assert_eq!(
-            (&r["file"], &r["kind"]),
-            (&json!("charsets/common_han.yaml"), &json!("charsets"))
-        );
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(
-            text.starts_with(wind_config::charset_def::STORED_DOC_BANNER),
-            "{text}"
-        );
-        assert!(text.contains("key: common_han"), "{text}");
-        assert_eq!(end(), json!({"changed": false, "issues": []}));
-
-        begin("common_han").unwrap();
-        std::fs::write(&p, "---\nkey: common_han\nname: [\n").unwrap();
-        let r = end();
-        assert_eq!(r["issues"][0]["kind"], "invalid", "{r}");
-        assert_eq!(r["issues"][0]["file"], "charsets/common_han.yaml", "{r}");
-        assert!(
-            r["issues"][0]["message"].as_str().unwrap().contains("格式"),
-            "{r}"
-        );
-
-        begin("common_han").unwrap();
-        std::fs::write(
-            &p,
-            "---\nkey: common_han\nname: 我的常用\nranges: [U+4E00-U+4E01]\nreplace: true\n",
-        )
-        .unwrap();
-        let r = end();
-        assert_eq!(r["issues"][0]["kind"], "invalid", "{r}");
-        assert!(
-            r["issues"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("出厂字符分类的范围不能改"),
-            "{r}"
-        );
-        assert!(
-            c.engine_mgr()
-                .charsets()
-                .class_by_key("common_han")
-                .is_some()
-        );
-
-        begin("common_han").unwrap();
-        std::fs::write(&p, "---\nkey: common_han\nname: 我的常用\n").unwrap();
-        assert_eq!(end()["issues"], json!([]));
-    }
-
-    /// data.locate：数据目录、方案目录、数据文件；越界拒绝。
-    #[test]
-    fn data_locate_returns_paths_inside_data_dir() {
-        let c = coord("data_locate");
-        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
-        let at = |p: Value| c.web_data_rpc("data.locate", &p);
-        assert_eq!(
-            at(json!({})).unwrap()["path"],
-            root.to_string_lossy().as_ref()
-        );
-        assert_eq!(
-            at(json!({"path": "wubi86"})).unwrap()["path"],
-            root.join("wubi86").to_string_lossy().as_ref()
-        );
-        assert!(at(json!({"path": "/etc"})).is_err());
-        assert!(at(json!({"path": "../x"})).is_err());
-        std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(at(json!({})).unwrap()["exists"], true);
-        assert_eq!(at(json!({"path": "wubi86"})).unwrap()["exists"], false);
-        assert_eq!(
-            at(json!({"path": "wubi86/user.dict.yaml"})).unwrap()["exists"],
-            false
-        );
-        assert_eq!(
-            at(json!({"path": "pinyin_misread.yaml"})).unwrap()["path"],
-            root.join("pinyin_misread.yaml").to_string_lossy().as_ref(),
-            "设置端「误读表 → 打开文件」"
-        );
-    }
-
-    /// `correction.conflictExample`：设置页自定义纠错规则行的冲突示例。
-    #[test]
-    fn correction_conflict_example_contract() {
-        let c = coord("correction_conflict");
-        let call = |rule: &str| {
-            c.web_data_rpc("correction.conflictExample", &json!({ "rule": rule }))
-                .unwrap()
-        };
-        let r = call("uen=un");
-        assert_eq!(r["valid"], true, "{r}");
-        assert!(r["example"].as_str().unwrap().ends_with("u+en"), "{r}");
-        assert_eq!(call("ioa=iao"), json!({ "valid": true, "example": null }));
-        let bad = call("ogn");
-        assert_eq!(bad["valid"], false, "{bad}");
-        assert!(
-            bad["reason"].as_str().is_some_and(|s| !s.is_empty()),
-            "{bad}"
-        );
-        assert!(
-            c.web_data_rpc("correction.conflictExample", &json!({}))
-                .is_err()
-        );
-    }
-
-    /// ★ S3 复审 M3：这些方法也扫整表 / 是批量写，名单里不能缺。
-    #[test]
-    fn rpc_name_tables_cover_reviewed_methods() {
-        for m in ["dict.previewImport", "freq.clear", "shadow.clear"] {
-            assert!(scans_whole_table(m, &json!({})), "{m} 应标记扫描待回收");
-        }
-        assert!(
-            BULK_WRITE_METHODS.contains(&"schema.delete"),
-            "schema.delete 级联清六张表，应与 dict.clear 一样立即回收"
-        );
-    }
-
-    /// 协调器起来就迁完了全部旧数据、放下了 redb：设置页翻页（`dict.listPaged`）与窄查询照常，
-    /// 不再触发 redb 页缓存回收（无缓存可回收）。
-    #[test]
-    fn dict_list_paged_after_migration_has_no_redb_to_reclaim() {
-        use std::time::Duration;
-        const TICK: Duration = Duration::from_millis(20);
-        const SCAN_IDLE: Duration = Duration::from_millis(300);
-        const NEVER: Duration = Duration::from_secs(3600);
-        let wait_drops = |store: &Store, n: u64, timeout: Duration| {
-            let t0 = std::time::Instant::now();
-            while t0.elapsed() < timeout {
-                if store.page_cache_drops() >= n {
-                    return true;
-                }
-                std::thread::sleep(TICK / 2);
-            }
-            false
-        };
-
-        // 窄查询：只访问、不标记 ⇒ 长档一小时，短档不生效。
-        let c = coord("scan_reclaim_narrow");
-        let store = c.user_store().expect("有 store").clone();
-        store.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
-        c.web_data_rpc(
-            "dict.search",
-            &json!({ "schemaId": "pinyin", "query": "ni", "limit": 50 }),
-        )
-        .unwrap();
-        std::thread::sleep(SCAN_IDLE * 3);
-        assert_eq!(store.page_cache_drops(), 0, "窄查询不触发回收");
-
-        let c = coord("scan_reclaim");
-        let store = c.user_store().expect("有 store").clone();
-        store
-            .add_user_word("pinyin", "nihao", "你好", 100, 0)
-            .unwrap();
-        store.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
-        let page = json!({ "schemaId": "pinyin", "offset": 0, "limit": 50 });
-        let first = c.web_data_rpc("dict.listPaged", &page).unwrap();
-        let second = c.web_data_rpc("dict.listPaged", &page).unwrap();
-        assert!(store.is_paused(), "迁完即放下旧库");
-        assert!(
-            !wait_drops(&store, 1, SCAN_IDLE * 3),
-            "没有 redb 页缓存可回收"
-        );
-        let after = c.web_data_rpc("dict.listPaged", &page).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first, after);
-        assert_eq!(after["total"], json!(1));
-    }
-
-    /// 临时词分页：切片、跨页 total、服务端搜索（含编码中段命中）、跨页排序。
-    ///
-    /// 分页之前设置端是「一次全取 + 客户端过滤」，条目上万时开页即卡；搬到服务端后
-    /// 这四件事都得由 core 兑现，缺一样的症状分别是：翻页翻不动 / 页数算错 /
-    /// 搜索搜不全 / 排序只排当页那几十条。
-    /// ★ `dict.listPaged` 的三条路必须给出彼此自洽的结果。
-    ///
-    /// 这个入口被拆成了三条分流（不搜不排序走流式、只物化一页；要排序走全量；搜索走
-    /// 一遍扫描分两组），而它们从前是同一段代码。拆开之后最容易坏的不是某一条本身，
-    /// 而是**它们彼此不一致**——分页拼起来少一条、搜索路径的 total 与列表对不上、
-    /// 排序路径把某些条目漏掉。逐条比对是唯一测得到这些的办法。
-    #[test]
-    fn dict_list_paged_stays_consistent_across_its_three_paths() {
-        let c = coord("dict_paged");
-        let store = c.user_store().expect("有 store");
-        // `ni*` 三条供前缀命中；`haoya` 只能由「编码中段含 ya」命中；
-        // 「你好呀」只能由「词条内容含 你」命中。
-        for (code, text) in [
-            ("ni hao", "你好"),
-            ("ni men", "你们"),
-            ("ni hao ya", "你好呀"),
-            ("hao ya", "好呀"),
-            ("wo men", "我们"),
-        ] {
-            store
-                .add_user_word("pinyin", &code.replace(' ', ""), text, 100, 0)
-                .unwrap();
-        }
-        let call = |p: Value| c.web_data_rpc("dict.listPaged", &p).unwrap();
-        let texts = |v: &Value| -> Vec<String> {
-            v["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|it| it["text"].as_str().unwrap_or("").to_string())
-                .collect()
-        };
-
-        // ── ① 流式路（不搜不排序）：分页拼起来必须等于一次取全部 ──────────────
-        let all = call(json!({ "schemaId": "pinyin", "offset": 0, "limit": 100 }));
-        assert_eq!(all["total"], json!(5));
-        let whole = texts(&all);
-        assert_eq!(whole.len(), 5);
-
-        let mut stitched = Vec::new();
-        for off in [0, 2, 4] {
-            let page = call(json!({ "schemaId": "pinyin", "offset": off, "limit": 2 }));
-            assert_eq!(page["total"], json!(5), "翻页不得改变总数");
-            stitched.extend(texts(&page));
-        }
-        assert_eq!(stitched, whole, "分页拼接必须逐条等于一次取全部");
-
-        // offset 越界给空页，但 total 照旧——分页器靠它算页数。
-        let over = call(json!({ "schemaId": "pinyin", "offset": 99, "limit": 2 }));
-        assert_eq!(over["total"], json!(5));
-        assert!(texts(&over).is_empty());
-
-        // ── ② 排序路：集合与 ① 相同，只是次序不同 ───────────────────────────
-        let sorted = call(json!({
-            "schemaId": "pinyin", "offset": 0, "limit": 100, "sortBy": "text", "sortDesc": false
-        }));
-        assert_eq!(sorted["total"], json!(5), "排序不得改变总数");
-        let mut a = texts(&sorted);
-        let mut b = whole.clone();
-        a.sort();
-        b.sort();
-        assert_eq!(a, b, "排序路与流式路必须是同一批条目");
-
-        // ── ③ 搜索路：前缀命中在前，其余命中在后，且不重复 ──────────────────
-        let hit = call(json!({ "schemaId": "pinyin", "query": "ni", "offset": 0, "limit": 100 }));
-        let got = texts(&hit);
-        assert_eq!(
-            hit["total"].as_u64().unwrap() as usize,
-            got.len(),
-            "total 必须等于实际条数"
-        );
-        let mut dedup = got.clone();
-        dedup.sort();
-        dedup.dedup();
-        assert_eq!(dedup.len(), got.len(), "同一条不得同时进两组");
-        // `ni*` 三条靠编码前缀命中，必须排在最前。
-        assert_eq!(
-            &got[..3],
-            // key 序（扁平码字典序）：nihao < nihaoya < nimen。
-            &["你好".to_string(), "你好呀".to_string(), "你们".to_string()],
-            "编码前缀命中必须在前，实际 {got:?}"
-        );
-
-        // 只能由「编码中段」命中的那条：搜 `ya` 要捞到 `haoya`。
-        let mid = texts(&call(
-            json!({ "schemaId": "pinyin", "query": "ya", "offset": 0, "limit": 100 }),
-        ));
-        assert!(
-            mid.contains(&"好呀".to_string()),
-            "编码中段命中丢了：{mid:?}"
-        );
-        assert!(
-            mid.contains(&"你好呀".to_string()),
-            "编码中段命中丢了：{mid:?}"
-        );
-
-        // 只能由「词条内容」命中的：搜汉字。
-        let by_text = texts(&call(
-            json!({ "schemaId": "pinyin", "query": "我", "offset": 0, "limit": 100 }),
-        ));
-        assert_eq!(by_text, vec!["我们".to_string()], "按词条内容搜不到");
-    }
-
-    #[test]
-    fn temp_list_paged_slices_searches_and_sorts() {
-        let c = coord("temp_paged");
-        let store = c.user_store().expect("有 store");
-        // hao|ya → 起始字节位 {0,3}；另两条用于凑够三条好切片。
-        store
-            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0b1001)
-            .unwrap();
-        store
-            .learn_temp_word("pinyin", "nihao", "你好", 500, 0b101)
-            .unwrap();
-        store
-            .learn_temp_word("pinyin", "women", "我们", 500, 0)
-            .unwrap();
-
-        let call = |params: Value| c.web_data_rpc("temp.listPaged", &params).unwrap();
-        let codes = |v: &Value| -> Vec<String> {
-            v["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|it| it["code"].as_str().unwrap_or("").to_string())
-                .collect()
-        };
-
-        // ① 切片：total 是全集大小而非当页长度，否则设置端算出来的页数恒是 1。
-        let page1 = call(json!({ "schemaId": "pinyin", "offset": 0, "limit": 2 }));
-        assert_eq!(page1["total"], json!(3));
-        assert_eq!(codes(&page1).len(), 2);
-        let page2 = call(json!({ "schemaId": "pinyin", "offset": 2, "limit": 2 }));
-        assert_eq!(page2["total"], json!(3), "翻页不改变总数");
-        assert_eq!(codes(&page2).len(), 1, "末页只剩一条");
-
-        // ② 编码仍带音节空格（与 temp.list 同形，remove/promote 那两个入口靠它往返）。
-        let all = call(json!({ "schemaId": "pinyin", "offset": 0, "limit": 100 }));
-        assert!(
-            codes(&all).contains(&"hao ya".to_string()),
-            "分页版也得显示带空格的音节码，实际 {:?}",
-            codes(&all)
-        );
-
-        // ③ 搜索：编码**中段**命中。前缀扫描找不到 `haoya` 里的 `ya`，而用户并不知道
-        //    搜索框只认前缀。
-        let mid = call(json!({ "schemaId": "pinyin", "prefix": "ya", "offset": 0, "limit": 100 }));
-        assert_eq!(mid["total"], json!(1), "中段命中要算进 total");
-        assert_eq!(codes(&mid), vec!["hao ya".to_string()]);
-
-        // ④ 搜索：词条内容命中（拿汉字搜）。
-        let by_text =
-            call(json!({ "schemaId": "pinyin", "prefix": "我们", "offset": 0, "limit": 100 }));
-        assert_eq!(by_text["total"], json!(1));
-
-        // ⑤ 排序在切片**之前**做，故第一页拿到的是全局最大者，不是当页最大者。
-        let desc = call(json!({
-            "schemaId": "pinyin", "offset": 0, "limit": 1,
-            "sortBy": "code", "sortOrder": "desc"
-        }));
-        // `women` 那条 boundary 传的是 0（无切分信息），故显示码不插空格。
-        assert_eq!(codes(&desc), vec!["women".to_string()], "全局倒序的头一条");
-    }
-
-    /// 临时词筛选（t63）：按次数上限 / 最近使用截止时刻过滤，按最近使用排序；
-    /// 过滤在切片前做，`total` 是过滤后的全集大小（设置端据此翻页、按筛选结果批量删）。
-    #[test]
-    fn temp_list_paged_filters_by_count_and_last_used() {
-        let c = coord("temp_filter");
-        let store = c.user_store().expect("有 store");
-        store
-            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0)
-            .unwrap();
-        store
-            .learn_temp_word("pinyin", "nihao", "你好", 500, 0)
-            .unwrap();
-        for _ in 0..2 {
-            store
-                .learn_temp_word("pinyin", "women", "我们", 500, 0)
-                .unwrap();
-        }
-        let call = |params: Value| c.web_data_rpc("temp.listPaged", &params).unwrap();
-        let texts = |v: &Value| -> Vec<String> {
-            v["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|it| it["text"].as_str().unwrap_or("").to_string())
-                .collect()
-        };
-
-        // ① 次数上限：count ≤ 1 的只有两条（「我们」学了三次）。
-        let low = call(json!({ "schemaId": "pinyin", "maxCount": 1, "offset": 0, "limit": 1 }));
-        assert_eq!(low["total"], json!(2), "total 须是过滤后的全集而非全表");
-        assert_eq!(texts(&low).len(), 1, "过滤后照样切片");
-
-        // ② 每条都带 lastUsed（无词频记录时回落到加入时间，恒 > 0）。
-        let all = call(json!({ "schemaId": "pinyin", "offset": 0, "limit": 100 }));
-        for it in all["items"].as_array().unwrap() {
-            assert!(
-                it["lastUsed"].as_i64().unwrap_or(0) > 0,
-                "缺 lastUsed：{it}"
-            );
-        }
-
-        // ③ 最近使用截止：截止在未来 ⇒ 全中；截止在很久以前 ⇒ 一条不中。
-        let now = chrono::Utc::now().timestamp();
-        let future = call(
-            json!({ "schemaId": "pinyin", "usedBefore": now + 3600, "offset": 0, "limit": 100 }),
-        );
-        assert_eq!(future["total"], json!(3));
-        let past = call(
-            json!({ "schemaId": "pinyin", "usedBefore": now - 86400, "offset": 0, "limit": 100 }),
-        );
-        assert_eq!(past["total"], json!(0));
-
-        // ④ 词频记录里的最近使用优先于加入时间：选过一次的那条 lastUsed 取词频那份。
-        //    写一个确定的、远在加入时间之后的时间戳，才能断言「取的就是词频那份」——
-        //    用 record_freq 取当前时间，与加入时间常落在同一秒，`>=` 恒真、测不出东西。
-        let freq_ts = now + 7 * 86400;
-        store
-            .import_freq_rows(
-                "pinyin",
-                &[wind_store::wdict::FreqIo {
-                    code: "nihao".into(),
-                    text: "你好".into(),
-                    count: 1,
-                    last_used: freq_ts,
-                }],
-            )
-            .unwrap();
-        let v = call(json!({ "schemaId": "pinyin", "offset": 0, "limit": 100,
-            "sortBy": "lastUsed", "sortOrder": "desc" }));
-        assert_eq!(texts(&v).len(), 3);
-        let last = |t: &str| {
-            v["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|it| it["text"] == json!(t))
-                .unwrap()["lastUsed"]
-                .as_i64()
-                .unwrap()
-        };
-        assert_eq!(last("你好"), freq_ts, "有词频记录时 lastUsed 须取词频那份");
-        assert!(last("好呀") < freq_ts, "无词频记录的仍取加入时间");
-
-        // ⑤ 两个过滤条件取交集。
-        let both = call(
-            json!({ "schemaId": "pinyin", "maxCount": 1, "usedBefore": now - 86400,
-            "offset": 0, "limit": 100 }),
-        );
-        assert_eq!(both["total"], json!(0));
-    }
-
-    /// 影子规则分页：切片 + total，以及**按显示文本搜索/排序**。
-    ///
-    /// ★ 要害在显示文本：设置页「词」那一列显示的是 `candId` 里的模板原文，而 `word`
-    /// 存的是最后一次调整时的候选文本（`date`/`time` 这类求值型短语次日即过期）。
-    /// core 若只按 `word` 匹配，用户照着屏幕上的模板去搜会一条也搜不到——列表里明明
-    /// 就摆着那一行。
-    #[test]
-    fn shadow_list_paged_searches_by_display_text() {
-        let c = coord("shadow_paged");
-        let store = c.user_store().expect("有 store");
-        // 短语规则：word 是**过期的**候选文本，模板原文只存在于 candId 里。
-        store
-            .pin_shadow(
-                "pinyin",
-                "sj",
-                "2026-07-30",
-                Some("phrase:sj:{time(\"HH:mm:ss\")}"),
-                0,
-            )
-            .unwrap();
-        store.pin_shadow("pinyin", "nh", "你好", None, 1).unwrap();
-        store.delete_shadow("pinyin", "wm", "我们").unwrap();
-        // ★ 这一条是排序断言的支点：它的 word（`zzz`）与显示文本（模板 `阿`）在排序里
-        //   落在相反的两端。少了它，两种排法的头尾恰好重合，断言就成了摆设。
-        store
-            .pin_shadow("pinyin", "zz", "zzz", Some("phrase:zz:阿"), 0)
-            .unwrap();
-
-        let call = |params: Value| c.web_data_rpc("shadow.listPaged", &params).unwrap();
-        let words = |v: &Value| -> Vec<String> {
-            v["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|it| it["word"].as_str().unwrap_or("").to_string())
-                .collect()
-        };
-
-        // ① 切片与 total（pin + delete 展平后共四行）。
-        let page1 = call(json!({ "schemaId": "pinyin", "offset": 0, "limit": 3 }));
-        assert_eq!(page1["total"], json!(4), "total 是全集大小，不是当页长度");
-        assert_eq!(words(&page1).len(), 3);
-        let page2 = call(json!({ "schemaId": "pinyin", "offset": 3, "limit": 3 }));
-        assert_eq!(page2["total"], json!(4), "翻页不改变总数");
-        assert_eq!(words(&page2).len(), 1, "末页只剩一条");
-
-        // ② 按模板原文搜（用户照着屏幕上看到的那串搜）。
-        let by_tpl =
-            call(json!({ "schemaId": "pinyin", "prefix": "HH:mm", "offset": 0, "limit": 9 }));
-        assert_eq!(
-            by_tpl["total"],
-            json!(1),
-            "模板原文必须可搜——它才是列表显示的东西"
-        );
-        assert_eq!(words(&by_tpl), vec!["2026-07-30".to_string()]);
-
-        // ③ 按 word 搜仍然命中（两条路都留着）。
-        let by_word =
-            call(json!({ "schemaId": "pinyin", "prefix": "你好", "offset": 0, "limit": 9 }));
-        assert_eq!(by_word["total"], json!(1));
-
-        // ④ 按编码搜。
-        let by_code =
-            call(json!({ "schemaId": "pinyin", "prefix": "wm", "offset": 0, "limit": 9 }));
-        assert_eq!(by_code["total"], json!(1));
-        assert_eq!(by_code["items"][0]["type"], json!("delete"));
-
-        // ⑤ 排序：`text` 是设置端列模型里「词」列的字段名，落到**显示文本**上。
-        //    `zz` 那条的 word 是 `zzz`、显示文本是模板 `阿`(U+963F)——按显示文本升序它
-        //    排在最后，按 word 升序它排在 `你好` 之前。断言取末位即可分辨两种实现。
-        let sorted = call(json!({
-            "schemaId": "pinyin", "offset": 0, "limit": 9,
-            "sortBy": "text", "sortOrder": "asc"
-        }));
-        assert_eq!(
-            words(&sorted).last().map(String::as_str),
-            Some("zzz"),
-            "按显示文本排序：比的是 candId 里的模板，不是 word"
-        );
-    }
-
-    /// 整表撤销。设置端此前靠「逐条 remove_rule」凑出清空，改服务端分页后它手上只剩
-    /// 当前页，那条路会**静默只清一页**——故 clear 必须是 core 侧的一次调用。
-    #[test]
-    fn shadow_clear_removes_every_rule() {
-        let c = coord("shadow_clear");
-        let store = c.user_store().expect("有 store");
-        for i in 0..3 {
-            store
-                .pin_shadow("pinyin", &format!("c{i}"), "词", None, 0)
-                .unwrap();
-        }
-        store.delete_shadow("pinyin", "d0", "词").unwrap();
-
-        let n = c
-            .web_data_rpc("shadow.clear", &json!({ "schemaId": "pinyin" }))
-            .unwrap();
-        assert!(n.as_u64().unwrap_or(0) > 0, "返回撤销条数");
-        let left = c
-            .web_data_rpc("shadow.listPaged", &json!({ "schemaId": "pinyin" }))
-            .unwrap();
-        assert_eq!(left["total"], json!(0), "一条不剩");
-    }
-
-    /// 词频列表的编码显示带音节空格 —— 边界靠**反查**，因为词频表自己不存 boundary。
-    ///
-    /// 三处来源依次问：系统词典 → 用户词表 → 临时词表。这里用后两者（无真实词库时
-    /// 系统词典为空，正好把反查降级链走一遍）。查不到的记录原样保持扁平，不得报错。
-    ///
-    /// 同时锁住 freq.delete：列表给的是带空格的 code，不拆就删不掉。
-    #[test]
-    fn freq_list_shows_spaced_code_via_boundary_lookup() {
-        let c = coord("freq_spaced");
-        let store = c.user_store().expect("有 store");
-        // 用户词提供边界：ni|hao
-        store
-            .add_user_word("pinyin", "nihao", "你好", 500, 0b101)
-            .unwrap();
-        // 临时词提供边界：hao|ya
-        store
-            .learn_temp_word("pinyin", "haoya", "好呀", 500, 0b1001)
-            .unwrap();
-        // 无处可查 → 保持扁平（存量简拼记录/已删词条的遗留记录都是这种）
-        store.record_freq("pinyin", "nihao", "你好").unwrap();
-        store.record_freq("pinyin", "haoya", "好呀").unwrap();
-        store.record_freq("pinyin", "wubian", "无边").unwrap();
-
-        let r = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &serde_json::json!({ "schemaId": "pinyin" }),
-            )
-            .unwrap();
-        let items = r.get("items").and_then(|v| v.as_array()).unwrap().clone();
-        let code_of = |text: &str| -> String {
-            items
-                .iter()
-                .find(|x| x.get("text").and_then(|t| t.as_str()) == Some(text))
-                .and_then(|x| x.get("code").and_then(|c| c.as_str()))
-                .unwrap_or_default()
-                .to_string()
-        };
-
-        assert_eq!(code_of("你好"), "ni hao", "边界应从用户词表反查到");
-        assert_eq!(code_of("好呀"), "hao ya", "边界应从临时词表反查到");
-        assert_eq!(
-            code_of("无边"),
-            "wubian",
-            "三处都查不到 → 保持扁平码，不得报错"
-        );
-
-        // 删除：列表给的是带空格的 code
-        c.web_data_rpc(
-            "freq.delete",
-            &serde_json::json!({ "schemaId": "pinyin", "code": "ni hao", "text": "你好" }),
-        )
-        .unwrap();
-        let r2 = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &serde_json::json!({ "schemaId": "pinyin" }),
-            )
-            .unwrap();
-        let left = r2.get("total").and_then(|v| v.as_u64()).unwrap();
-        assert_eq!(left, 2, "带空格的 code 须先拆再删，否则删不掉");
-    }
-
-    /// 词频列表的编码搜索同样要能命中中段（与用户词库同款，两处是各自独立的实现）。
-    #[test]
-    fn freq_search_matches_code_middle_segment() {
-        let c = coord("freq_search_middle");
-        let store = c.user_store().expect("有 store");
-        store.record_freq("pinyin", "haoya", "好呀").unwrap();
-        store.record_freq("pinyin", "nihao", "你好").unwrap();
-
-        let hits = |q: &str| -> Vec<String> {
-            let r = c
-                .web_data_rpc(
-                    "freq.listPaged",
-                    &serde_json::json!({ "schemaId": "pinyin", "prefix": q }),
-                )
-                .unwrap();
-            r.get("items")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
-                        .map(String::from)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        assert!(
-            hits("hao").contains(&"好呀".to_string()),
-            "前缀命中（原有行为）"
-        );
-        assert!(
-            hits("ya").contains(&"好呀".to_string()),
-            "中段命中：haoya 搜 ya 须能找到"
-        );
-        assert!(
-            hits("hao").contains(&"你好".to_string()),
-            "nihao 的中段 hao 同样要命中"
-        );
-        // 词频 key 是扁平码，但用户可能从用户词库列表复制带空格的串来搜
-        assert!(
-            hits("ni hao").contains(&"你好".to_string()),
-            "带空格的搜索词须先拆再匹配"
-        );
-    }
-
-    /// 编码搜索须能命中**中段**，不能只认前缀。
-    ///
-    /// redb 前缀扫描只覆盖开头，`haoya` 搜 `ya` 一条也出不来——而搜索框并没有告诉用户
-    /// 它只认前缀。词条内容搜索本就在做全量扫描，编码子串搭同一趟车，不增加扫描次数。
-    #[test]
-    fn dict_search_matches_code_middle_segment() {
-        let c = coord("search_middle");
-        let add = |code: &str, text: &str| {
-            c.web_data_rpc(
-                "dict.add",
-                &serde_json::json!({
-                    "schemaId": "pinyin", "code": code, "text": text, "weight": 500
-                }),
-            )
-            .unwrap();
-        };
-        add("hao ya", "好呀");
-        add("ni hao", "你好");
-
-        let hits = |q: &str| -> Vec<String> {
-            let r = c
-                .web_data_rpc(
-                    "dict.listPaged",
-                    &serde_json::json!({ "schemaId": "pinyin", "prefix": q }),
-                )
-                .unwrap();
-            r.get("items")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
-                        .map(String::from)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        assert!(
-            hits("hao").contains(&"好呀".to_string()),
-            "前缀命中（原有行为）"
-        );
-        assert!(
-            hits("ya").contains(&"好呀".to_string()),
-            "中段命中：haoya 搜 ya 须能找到"
-        );
-        assert!(
-            hits("hao").contains(&"你好".to_string()),
-            "nihao 的中段 hao 同样要命中"
-        );
-        // 带空格的搜索词照样走中段匹配（先拆再比）
-        assert!(
-            hits("hao ya").contains(&"好呀".to_string()),
-            "带空格的搜索词须先拆再匹配"
-        );
-    }
-
-    /// 逐行短语文本（`wind:p1`）导入契约：预览落点 → 缺省全部导入 → 重导跳过。
-    ///
-    /// 命令短语不再受任何额外门控——它本就是短语的主要用途，且不会自行执行。
-    #[test]
-    fn phrase_text_import_contract() {
-        let q = char::from_u32(34).unwrap();
-        let nl = char::from_u32(10).unwrap();
-        let c = coord("phrasetext");
-        let text = format!(
-            "wind:p1 我的直通车{nl}kx (＾▽＾){nl}\
-             zd $CC({q}记事本{q}, proc.run({q}notepad.exe{q})){nl}\
-             sh $CC({q}跑{q}, proc.shell({q}echo hi{q})){nl}\
-             编码 缺少合法编码的一行{nl}"
-        );
-
-        let prev = c
-            .web_data_rpc("phrase.previewImportText", &json!({ "content": text }))
-            .unwrap();
-        assert_eq!(
-            prev.get("title").and_then(|v| v.as_str()),
-            Some("我的直通车")
-        );
-        let entries = prev.get("entries").unwrap().as_array().unwrap();
-        assert_eq!(entries.len(), 3, "非法行不进 entries");
-        assert_eq!(entries[0].get("line").and_then(|v| v.as_u64()), Some(2));
-        assert_eq!(
-            entries[0].get("status").and_then(|v| v.as_str()),
-            Some("new")
-        );
-
-        // 能力分级已移除：预览不再携带这三个字段。
-        for e in entries {
-            assert!(e.get("capability").is_none(), "不应再有 capability");
-            assert!(e.get("highRisk").is_none(), "不应再有 highRisk");
-            assert!(e.get("effects").is_none(), "不应再有 effects");
-        }
-
-        assert_eq!(
-            prev.get("problems").unwrap().as_array().unwrap().len(),
-            1,
-            "非法编码的行进 problems"
-        );
-        assert_eq!(
-            prev.get("counts")
-                .unwrap()
-                .get("new")
-                .and_then(|v| v.as_u64()),
-            Some(3)
-        );
-
-        // ★ 缺省全导：含 proc.shell 的那条也直接装进去。
-        let out = c
-            .web_data_rpc("phrase.importText", &json!({ "content": text }))
-            .unwrap();
-        assert_eq!(
-            out.get("added").and_then(|v| v.as_u64()),
-            Some(3),
-            "不传 accept 就全部导入，命令短语不再需要额外确认"
-        );
-
-        // 再来一次：已存在的原样跳过。
-        let again = c
-            .web_data_rpc("phrase.importText", &json!({ "content": text }))
-            .unwrap();
-        assert_eq!(again.get("added").and_then(|v| v.as_u64()), Some(0));
-        assert_eq!(
-            again.get("skippedExisting").and_then(|v| v.as_u64()),
-            Some(3)
-        );
-
-        // accept 仍可用于选择性导入。
-        let c2 = coord("phrasetextsel");
-        let sel = c2
-            .web_data_rpc(
-                "phrase.importText",
-                &json!({ "content": text, "accept": [2] }),
-            )
-            .unwrap();
-        assert_eq!(sel.get("added").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(
-            sel.get("skippedUnselected").and_then(|v| v.as_u64()),
-            Some(2)
-        );
-
-        // position 依次追加。
-        let list = c.web_data_rpc("phrase.listUser", &json!({})).unwrap();
-        let mut got: Vec<(&str, i64)> = list
-            .get("items")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| {
-                (
-                    x.get("code").and_then(|v| v.as_str()).unwrap(),
-                    x.get("position").and_then(|v| v.as_i64()).unwrap(),
-                )
-            })
-            .collect();
-        got.sort_by_key(|(_, p)| *p);
-        let codes: Vec<&str> = got.iter().map(|(c, _)| *c).collect();
-        assert_eq!(codes, vec!["kx", "zd", "sh"], "position 按导入顺序递增");
-    }
-
-    /// 语法坏掉的条目一律不装——无论有没有被 accept 选中。
-    #[test]
-    fn phrase_text_rejects_broken_syntax() {
-        let c = coord("phrasetextbad");
-        let text = "wind:p1\nbad $CC(\"未闭合\nok 好\n";
-        let out = c
-            .web_data_rpc(
-                "phrase.importText",
-                &json!({ "content": text, "accept": [2, 3] }),
-            )
-            .unwrap();
-        assert_eq!(out.get("added").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(
-            out.get("skippedInvalid").and_then(|v| v.as_u64()),
-            Some(1),
-            "显式 accept 也不能让语法错误的条目进库"
-        );
-    }
-
-    /// ★ 分发文本 / 设置页手动新增 / wdict 文件导入，三条路径对同一段文本必须落到
-    /// **同一形态**。分发格式没有、也不该有自己的一套反斜杠规则——用户在任一处学到的
-    /// 写法要能照搬，这条断言就是那个承诺。
-    #[test]
-    fn phrase_text_escape_domain_matches_manual_add() {
-        let bs = char::from_u32(92).unwrap();
-        let q = char::from_u32(34).unwrap();
-        let tab = char::from_u32(9).unwrap();
-        let nl = char::from_u32(10).unwrap();
-        let c = coord("phraseesc");
-
-        // 按约定写法：一个字面反斜杠写两个。目录名刻意取 `notes`——单写时反斜杠
-        // 紧跟 n 会变成换行，是最典型的静默损坏。
-        let plain = format!("D:{bs}{bs}notes");
-        let cmd = format!("$CC({q}x{q}, proc.run({q}D:{bs}{bs}notes{bs}{bs}a.exe{q}))");
-
-        c.web_data_rpc("phrase.add", &json!({ "code": "m1", "text": plain }))
-            .unwrap();
-        c.web_data_rpc("phrase.add", &json!({ "code": "m2", "text": cmd }))
-            .unwrap();
-        c.web_data_rpc(
-            "phrase.importText",
-            &json!({ "content": format!("wind:p1{nl}d1 {plain}{nl}d2 {cmd}{nl}") }),
-        )
-        .unwrap();
-        let hdr = format!(
-            "wind_dict:{nl}  version: 1{nl}  sections:{nl}    phrases:{nl}      columns: [code, text, weight, position, enabled]{nl}{nl}--- !phrases{nl}"
-        );
-        c.web_data_rpc(
-            "phrase.import",
-            &json!({ "content": format!("{hdr}w1{tab}{plain}{tab}1800{tab}9{tab}1{nl}w2{tab}{cmd}{tab}1800{tab}10{tab}1{nl}") }),
-        )
-        .unwrap();
-
-        let list = c.web_data_rpc("phrase.listUser", &json!({})).unwrap();
-        let text_of = |src: &Value, code: &str| -> String {
-            src.get("items")
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|it| it.get("code").and_then(|v| v.as_str()) == Some(code))
-                .and_then(|it| it.get("text").and_then(|v| v.as_str()))
-                .unwrap_or_default()
-                .to_string()
-        };
-
-        assert_eq!(
-            text_of(&list, "m1"),
-            text_of(&list, "d1"),
-            "普通短语：手动新增与分发导入须同形"
-        );
-        assert_eq!(
-            text_of(&list, "m1"),
-            text_of(&list, "w1"),
-            "普通短语：手动新增与 wdict 导入须同形"
-        );
-        assert_eq!(
-            text_of(&list, "m2"),
-            text_of(&list, "d2"),
-            "命令短语：手动新增与分发导入须同形"
-        );
-        assert_eq!(
-            text_of(&list, "m2"),
-            text_of(&list, "w2"),
-            "命令短语：手动新增与 wdict 导入须同形"
-        );
-
-        // 双写确实得到**字面反斜杠**：回显是 escape 后的形态，字面反斜杠会再次双写。
-        // 若存进去的是换行（单写的后果），回显只会有一个反斜杠。
-        assert_eq!(
-            text_of(&list, "d1"),
-            plain,
-            "双写往返后仍是双写 ⇒ 存的是字面反斜杠"
-        );
-        assert_eq!(
-            text_of(&list, "d1").matches(bs).count(),
-            2,
-            "期望两个反斜杠，实得 {:?}",
-            text_of(&list, "d1")
-        );
-
-        // 对照：单写一个反斜杠时它紧跟 n 会变成换行，回显与双写**不同**。
-        // 这正是文档要求一律写两个的原因，也保证上面的断言不是恒真。
-        c.web_data_rpc(
-            "phrase.importText",
-            &json!({ "content": format!("wind:p1{nl}s1 D:{bs}notes{nl}") }),
-        )
-        .unwrap();
-        let list2 = c.web_data_rpc("phrase.listUser", &json!({})).unwrap();
-        assert_ne!(
-            text_of(&list2, "s1"),
-            plain,
-            "单写与双写必须落到不同内容，否则上面的断言证明不了什么"
-        );
-    }
-
-    /// 路径里反斜杠写少了 ⇒ 预览里给一句提示，但**不阻止导入**（轻微提示）。
-    #[test]
-    fn phrase_text_hints_single_backslash_path() {
-        let bs = char::from_u32(92).unwrap();
-        let q = char::from_u32(34).unwrap();
-        let nl = char::from_u32(10).unwrap();
-        let c = coord("phrasehint");
-
-        let bad = format!("$CC({q}x{q}, proc.run({q}D:{bs}notes{bs}a.exe{q}))");
-        let good = format!("$CC({q}x{q}, proc.run({q}D:{bs}{bs}notes{bs}{bs}a.exe{q}))");
-        let text = format!("wind:p1{nl}b1 {bad}{nl}g1 {good}{nl}");
-
-        let prev = c
-            .web_data_rpc("phrase.previewImportText", &json!({ "content": text }))
-            .unwrap();
-        let entries = prev.get("entries").unwrap().as_array().unwrap();
-        let hints_of = |i: usize| entries[i].get("hints").unwrap().as_array().unwrap();
-
-        assert_eq!(hints_of(0).len(), 1, "单写路径应有提示");
-        assert_eq!(
-            hints_of(0)[0].get("kind").and_then(|v| v.as_str()),
-            Some("controlCharInPath")
-        );
-        assert!(hints_of(1).is_empty(), "双写路径不该有提示");
-
-        // 轻微提示：不抦导入。
-        let out = c
-            .web_data_rpc(
-                "phrase.importText",
-                &json!({ "content": text, "accept": [2, 3] }),
-            )
-            .unwrap();
-        assert_eq!(
-            out.get("added").and_then(|v| v.as_u64()),
-            Some(2),
-            "带提示的条目照样可以导入"
-        );
-    }
-
-    /// 没有格式标记 ⇒ 整段拒绝。侦测「不猜」，报错优于误装。
-    #[test]
-    fn phrase_text_requires_marker() {
-        let c = coord("phrasetextmark");
-        assert!(
-            c.web_data_rpc("phrase.previewImportText", &json!({ "content": "kx 好\n" }))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn dict_export_import_preview_contract() {
-        let c = coord("dictio");
-        c.web_data_rpc(
-            "dict.add",
-            &json!({ "schemaId": "wb", "code": "a", "text": "工", "weight": 100 }),
-        )
-        .unwrap();
-
-        // export → {content} 且是 wdict words 文本
-        let exp = c
-            .web_data_rpc("dict.export", &json!({ "schemaId": "wb" }))
-            .unwrap();
-        let content = exp
-            .get("content")
-            .and_then(|v| v.as_str())
-            .expect("content 字符串");
-        assert!(content.contains("--- !words"));
-
-        // preview 到空 schema:userWords 段全 willAdd
-        let prev = c
-            .web_data_rpc(
-                "dict.previewImport",
-                &json!({ "schemaId": "wb2", "content": content }),
-            )
-            .unwrap();
-        assert_eq!(
-            prev.get("format").and_then(|v| v.as_str()),
-            Some("winddict")
-        );
-        let uw = sec(&prev, "userWords");
-        assert_eq!(uw.get("willAdd").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(uw.get("willUpdate").and_then(|v| v.as_u64()), Some(0));
-        assert_eq!(uw.get("unchanged").and_then(|v| v.as_u64()), Some(0));
-        assert!(uw.get("samples").and_then(|v| v.as_array()).is_some());
-
-        // import(缺省 merge)→ sections[userWords]{added,skipped}
-        let out = c
-            .web_data_rpc(
-                "dict.import",
-                &json!({ "schemaId": "wb2", "content": content }),
-            )
-            .unwrap();
-        let uw = sec(&out, "userWords");
-        assert_eq!(uw.get("added").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(uw.get("skipped").and_then(|v| v.as_u64()), Some(0));
-
-        // 同内容再 import:权重相等 ⇒ 全 unchanged,added=updated=0
-        let out2 = c
-            .web_data_rpc(
-                "dict.import",
-                &json!({ "schemaId": "wb2", "content": content }),
-            )
-            .unwrap();
-        let uw2 = sec(&out2, "userWords");
-        assert_eq!(uw2.get("added").and_then(|v| v.as_u64()), Some(0));
-        assert_eq!(uw2.get("updated").and_then(|v| v.as_u64()), Some(0));
-        // preview 同内容 ⇒ unchanged=1,与落盘一致
-        let prev2 = c
-            .web_data_rpc(
-                "dict.previewImport",
-                &json!({ "schemaId": "wb2", "content": content }),
-            )
-            .unwrap();
-        assert_eq!(
-            sec(&prev2, "userWords")
-                .get("unchanged")
-                .and_then(|v| v.as_u64()),
-            Some(1)
-        );
-
-        // replace:先加一条杂词,replace 导入后只剩导入内容
-        c.web_data_rpc(
-            "dict.add",
-            &json!({ "schemaId": "wb2", "code": "x", "text": "另", "weight": 1 }),
-        )
-        .unwrap();
-        let out3 = c
-            .web_data_rpc(
-                "dict.import",
-                &json!({ "schemaId": "wb2", "content": content, "strategy": "replace" }),
-            )
-            .unwrap();
-        assert_eq!(
-            sec(&out3, "userWords")
-                .get("added")
-                .and_then(|v| v.as_u64()),
-            Some(1),
-            "清空后全部计 added"
-        );
-        let listed = c
-            .web_data_rpc("dict.listPaged", &json!({ "schemaId": "wb2", "limit": 10 }))
-            .unwrap();
-        assert_eq!(
-            listed.get("total").and_then(|v| v.as_u64()),
-            Some(1),
-            "replace 应清掉 x"
-        );
-    }
-
-    #[test]
-    fn dict_import_rime_and_tsv_auto_detect() {
-        let c = coord("dictio_fmt");
-
-        // Rime:默认列 [text, code, weight],拼音码去空格;preview 回报 format + userWords 段
-        let rime = "# Rime dictionary\n---\nname: demo\nversion: \"1.0\"\n...\n你好\tni hao\t100\n世界\tshi jie\t50\n";
-        let prev = c
-            .web_data_rpc(
-                "dict.previewImport",
-                &json!({ "schemaId": "pinyin", "content": rime }),
-            )
-            .unwrap();
-        assert_eq!(prev.get("format").and_then(|v| v.as_str()), Some("rime"));
-        let uw = sec(&prev, "userWords");
-        assert_eq!(uw.get("willAdd").and_then(|v| v.as_u64()), Some(2));
-        assert_eq!(uw.get("skipped").and_then(|v| v.as_u64()), Some(0));
-        let out = c
-            .web_data_rpc(
-                "dict.import",
-                &json!({ "schemaId": "pinyin", "content": rime }),
-            )
-            .unwrap();
-        assert_eq!(
-            sec(&out, "userWords").get("added").and_then(|v| v.as_u64()),
-            Some(2)
-        );
-        let listed = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "pinyin", "prefix": "nihao", "limit": 10 }),
-            )
-            .unwrap();
-        assert_eq!(
-            listed.get("total").and_then(|v| v.as_u64()),
-            Some(1),
-            "拼音码应去空格入库(ni hao→nihao)"
-        );
-
-        // TSV:code\ttext\t[weight];坏行计入 skipped
-        let tsv = "a\t工\t10\nbadline\nab\t好\n";
-        let prev = c
-            .web_data_rpc(
-                "dict.previewImport",
-                &json!({ "schemaId": "wb", "content": tsv }),
-            )
-            .unwrap();
-        assert_eq!(prev.get("format").and_then(|v| v.as_str()), Some("tsv"));
-        let uw = sec(&prev, "userWords");
-        assert_eq!(uw.get("willAdd").and_then(|v| v.as_u64()), Some(2));
-        assert_eq!(uw.get("skipped").and_then(|v| v.as_u64()), Some(1));
-        let out = c
-            .web_data_rpc("dict.import", &json!({ "schemaId": "wb", "content": tsv }))
-            .unwrap();
-        let uw = sec(&out, "userWords");
-        assert_eq!(uw.get("added").and_then(|v| v.as_u64()), Some(2));
-        assert_eq!(uw.get("skipped").and_then(|v| v.as_u64()), Some(1));
-
-        // 不可识别内容 → 错误
-        assert!(
-            c.web_data_rpc(
-                "dict.previewImport",
-                &json!({ "schemaId": "wb", "content": "没有制表符的纯文本\n" }),
-            )
-            .is_err(),
-            "未知格式应报错"
-        );
-    }
-
-    #[test]
-    fn dict_import_rejects_engine_type_mismatch() {
-        let c = coord("dict_engine");
-        // 手工构造「拼音」来源的 wdict；导入到默认解析为码表的方案 → 应拒绝（防编码错乱）。
-        let content = "# x\nwind_dict:\n  version: 1\n  engine_type: pinyin\n  sections:\n    words:\n      columns: [code, text, weight, count]\n\n--- !words\nnihao\t你好\t0\t0\n";
-        let r = c.web_data_rpc(
-            "dict.import",
-            &json!({ "schemaId": "wb", "content": content }),
-        );
-        assert!(r.is_err(), "拼音来源导入码表方案应被拒绝");
-        // previewImport 回报 compatible=false + 来源引擎，供 UI 提前拦。
-        let prev = c
-            .web_data_rpc(
-                "dict.previewImport",
-                &json!({ "schemaId": "wb", "content": content }),
-            )
-            .unwrap();
-        assert_eq!(
-            prev.get("compatible").and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        assert_eq!(
-            prev.get("sourceEngine").and_then(|v| v.as_str()),
-            Some("pinyin")
-        );
-    }
-
-    #[test]
-    fn shadow_roundtrip_shape() {
-        let c = coord("shadow");
-        // pin + delete 两条规则
-        c.web_data_rpc(
-            "shadow.pin",
-            &json!({ "schemaId": "wb", "code": "aaaa", "word": "恭恭敬敬", "candId": "c1", "position": 0 }),
-        )
-        .unwrap();
-        c.web_data_rpc(
-            "shadow.delete",
-            &json!({ "schemaId": "wb", "code": "bbbb", "word": "某词" }),
-        )
-        .unwrap();
-
-        let list = c
-            .web_data_rpc("shadow.list", &json!({ "schemaId": "wb" }))
-            .unwrap();
-        let arr = list.as_array().expect("shadow.list 应为数组");
-        assert_eq!(arr.len(), 2, "应有 pin/delete 两条");
-        // 每条形状对齐 ShadowRuleItem {code, word, candId, type, position?}
-        for it in arr {
-            assert!(it.get("code").is_some());
-            assert!(it.get("word").is_some());
-            assert!(it.get("candId").is_some());
-            let ty = it["type"].as_str().unwrap();
-            assert!(ty == "pin" || ty == "delete");
-        }
-        let pin = arr.iter().find(|i| i["type"] == "pin").unwrap();
-        assert_eq!(pin["candId"], "c1");
-        assert_eq!(pin["position"], 0);
-
-        // removeRule 后清空
-        c.web_data_rpc(
-            "shadow.removeRule",
-            &json!({ "schemaId": "wb", "code": "aaaa", "word": "恭恭敬敬" }),
-        )
-        .unwrap();
-        c.web_data_rpc(
-            "shadow.removeRule",
-            &json!({ "schemaId": "wb", "code": "bbbb", "word": "某词" }),
-        )
-        .unwrap();
-        let list2 = c
-            .web_data_rpc("shadow.list", &json!({ "schemaId": "wb" }))
-            .unwrap();
-        assert_eq!(list2.as_array().unwrap().len(), 0, "removeRule 后应清空");
-    }
-
-    #[test]
-    fn shadow_add_rule_routes_pin_and_hide() {
-        let c = coord("shadow_add_rule");
-        // pin：带 position
-        c.web_data_rpc(
-            "shadow.addRule",
-            &json!({ "schemaId": "wb", "code": "aaaa", "word": "恭恭敬敬", "type": "pin", "position": 2 }),
-        )
-        .unwrap();
-        let list = c
-            .web_data_rpc("shadow.list", &json!({ "schemaId": "wb" }))
-            .unwrap();
-        let arr = list.as_array().unwrap();
-        // aaaa 应有一条 pin，position=2
-        assert!(arr.iter().any(|e| e["code"] == "aaaa"));
-        // hide：转为 delete
-        c.web_data_rpc(
-            "shadow.addRule",
-            &json!({ "schemaId": "wb", "code": "bbbb", "word": "某词", "type": "hide" }),
-        )
-        .unwrap();
-        let list2 = c
-            .web_data_rpc("shadow.list", &json!({ "schemaId": "wb" }))
-            .unwrap();
-        assert!(
-            list2
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|e| e["code"] == "bbbb")
-        );
-    }
-
-    #[test]
-    fn stats_summary_daily_shape() {
-        let c = coord("stats");
-        let today = wind_store::stats_report::today_str();
-        // 采集器记录今日：中文 2（码长 4，首选）。
-        c.debug_record_commit("你好", 4, 0, wind_store::stats::CommitSource::Candidate);
-
-        // stats.summary 形状对齐富 StatsSummary（17 字段）。
-        let sum = c.web_data_rpc("stats.summary", &json!({})).unwrap();
-        for k in [
-            "today_chars",
-            "today_chinese",
-            "today_english",
-            "total_chars",
-            "active_days",
-            "daily_avg",
-            "streak_current",
-            "streak_max",
-            "week_chars",
-            "month_chars",
-            "max_day_chars",
-            "avg_code_len",
-            "first_select_rate",
-            "today_speed",
-            "overall_speed",
-            "max_speed",
-        ] {
-            assert!(sum.get(k).is_some(), "summary 缺 {k}");
-        }
-        assert_eq!(sum["today_chars"], 2);
-
-        // flush 落库后 stats.daily 形状对齐 DailyStatItem。
-        c.stat_collector().unwrap().flush();
-        let daily = c
-            .web_data_rpc("stats.daily", &json!({ "from": &today, "to": &today }))
-            .unwrap();
-        let arr = daily.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["d"], json!(today));
-        assert_eq!(arr[0]["tc"], 2);
-        assert_eq!(arr[0]["cc"], 2);
-
-        // pruneBefore(days) 返回 {pruned}。
-        let pr = c
-            .web_data_rpc("stats.pruneBefore", &json!({ "days": 0 }))
-            .unwrap();
-        assert!(pr.get("pruned").and_then(|v| v.as_u64()).is_some());
-
-        // clear 后 summary 归零（含采集器内存）。
-        c.web_data_rpc("stats.clear", &json!({})).unwrap();
-        let sum2 = c.web_data_rpc("stats.summary", &json!({})).unwrap();
-        assert_eq!(sum2["today_chars"], 0);
-        assert_eq!(sum2["total_chars"], 0);
-    }
-
-    #[test]
-    fn freq_list_delete_clear_shape() {
-        let c = coord("freq");
-        let store = c.user_store().unwrap();
-        store.record_freq("py", "de", "的").unwrap();
-        store.record_freq("py", "shi", "是").unwrap();
-
-        // freq.listPaged 形状对齐 PagedResult<FreqItem{code,text,count,lastUsed}>
-        let r = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "limit": 50, "offset": 0 }),
-            )
-            .unwrap();
-        assert_eq!(r["total"], 2);
-        let it = &r["items"][0];
-        for k in ["code", "text", "count", "lastUsed"] {
-            assert!(it.get(k).is_some(), "FreqItem 缺 {k}");
-        }
-        // delete
-        c.web_data_rpc(
-            "freq.delete",
-            &json!({ "schemaId": "py", "code": "de", "text": "的" }),
-        )
-        .unwrap();
-        let r2 = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "limit": 50, "offset": 0 }),
-            )
-            .unwrap();
-        assert_eq!(r2["total"], 1);
-        // clear 返回删除数（number）
-        let cleared = c
-            .web_data_rpc("freq.clear", &json!({ "schemaId": "py" }))
-            .unwrap();
-        assert_eq!(cleared, json!(1));
-    }
-
-    /// **转义形态只活在设置页边界上**：库里存真实文本，RPC 出口投影成 `\n`、
-    /// 入口还原回真实文本。
-    ///
-    /// 出入口必须**成对**。出口投影了而某个入口漏了还原，那个操作就会拿转义形态
-    /// 去匹配真实文本的 key —— 查不到、不报错、静默失败，表现为「删了没反应」。
-    /// 本测试逐个入口用「列表回什么就拿什么去操作」的方式走一遍，正是为了让漏接
-    /// 在这里失败，而不是等用户发现。
-    /// 设置端正文框是原文，出门前过 `escape_text_field`；core 还原后候选须逐字等于原文。
-    /// 字符画里的 `\\`、行尾 `\` 连换行，曾被当成转义符吃掉、变出明文 `\n`。
-    #[test]
-    fn phrase_raw_backslash_text_roundtrips_to_candidate() {
-        let c = coord("phrase_art");
-        let art = "  /  \\\\|||  :  |||//  \\\n /  _||||| -:- |||||-  \\\n |   | \\\\\\  -  /// |";
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": "cott", "text": wind_store::wdict::escape_text_field(art) }),
-        )
-        .unwrap();
-        c.rebuild_phrases();
-        assert_eq!(c.debug_phrase_texts("cott"), [art]);
-    }
-
-    #[test]
-    fn phrase_ui_escape_boundary_roundtrips() {
-        let c = coord("phrase_esc");
-        // 设置页提交转义形态：`\n` 表示换行（用户在输入框里看到并编辑的就是它）
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": "duo", "text": r"甲\n乙", "position": 0, "weight": 1 }),
-        )
-        .unwrap();
-
-        // 存储域：真实文本（含真换行），转义形态不入库
-        let store = c.user_store().unwrap();
-        assert!(
-            store
-                .list_phrases()
-                .unwrap()
-                .iter()
-                .any(|p| p.code == "duo" && p.text == "甲\n乙"),
-            "库里应是真换行；若这里失败说明入口没还原、把字面 \\n 存进去了"
-        );
-
-        // 出口：列表回转义形态，用户可继续编辑
-        let list = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        assert_eq!(
-            list[0]["text"],
-            json!(r"甲\n乙"),
-            "列表应回转义形态而非真换行——真换行在输入框里没法编辑"
-        );
-
-        // 候选侧：短语走 PhraseLayer（比用户词多一层 rebuild + cmdbar/模板分派），
-        // 拿到的必须是真实文本。用户词与短语两条路径不同，须各自锁住。
-        c.rebuild_phrases();
-        let hits = c.debug_phrase_texts("duo");
-        assert_eq!(hits.len(), 1, "短语候选应命中一条：{hits:?}");
-        assert_eq!(
-            hits[0], "甲\n乙",
-            "短语候选须是真实文本（含真换行），不是转义形态"
-        );
-
-        // 入口 setEnabled：拿列表回的形态去操作，必须命中
-        c.web_data_rpc(
-            "phrase.setEnabled",
-            &json!({ "code": "duo", "text": r"甲\n乙", "enabled": false }),
-        )
-        .unwrap();
-        let list2 = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        assert_eq!(
-            list2[0]["enabled"],
-            json!(false),
-            "setEnabled 未命中 → 该入口漏了 store_text"
-        );
-
-        // 入口 remove：同理
-        c.web_data_rpc(
-            "phrase.remove",
-            &json!({ "code": "duo", "text": r"甲\n乙" }),
-        )
-        .unwrap();
-        let after = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        assert!(
-            after.as_array().unwrap().is_empty(),
-            "remove 未命中 → 该入口漏了 store_text"
-        );
-    }
-
-    /// **命令栏语法条目在这条边界上原样穿过**：它的反斜杠归 cmdbar lexer 独占。
-    ///
-    /// 修复前本层与 lexer 各吃一个：用户按文档写 `open("D:\\notes")`，落库剩
-    /// `D:\notes`，lexer 再把 `\n` 解成换行 —— 路径静默损坏，只弹一句「命令执行失败」。
-    /// 判据是「用户在输入框里写的与库里的逐字相同」，出口回显同样不得改写。
-    #[test]
-    fn cmdbar_phrase_backslash_survives_ui_boundary() {
-        let c = coord("phrase_cmd_esc");
-        let src = r#"$CC("[打开临时目录]", open("D:\\notes\\temp"))"#;
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": "cotmp", "text": src, "position": 0, "weight": 1 }),
-        )
-        .unwrap();
-
-        let store = c.user_store().unwrap();
-        assert!(
-            store
-                .list_phrases()
-                .unwrap()
-                .iter()
-                .any(|p| p.code == "cotmp" && p.text == src),
-            "库里应与用户所写逐字相同；失败即本层又吃掉了一个反斜杠"
-        );
-
-        let list = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        assert_eq!(list[0]["text"], json!(src), "出口回显不得再加反斜杠");
-
-        // 入口 remove 拿列表回的形态操作，仍须命中（出入口成对）
-        c.web_data_rpc("phrase.remove", &json!({ "code": "cotmp", "text": src }))
-            .unwrap();
-        assert!(
-            c.web_data_rpc("phrase.list", &json!({}))
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .is_empty(),
-            "remove 未命中 → 出入口分流判据不一致"
-        );
-    }
-
-    /// 用户词库侧的同一契约（见 [`phrase_ui_escape_boundary_roundtrips`]）。
-    #[test]
-    fn user_word_ui_escape_boundary_roundtrips() {
-        let c = coord("word_esc");
-        c.web_data_rpc(
-            "dict.add",
-            &json!({ "schemaId": "wb", "code": "a", "text": r"甲\n乙", "weight": 100 }),
-        )
-        .unwrap();
-
-        // 存储域是真实文本
-        let store = c.user_store().unwrap();
-        let recs = store.get_user_words("wb", "a").unwrap();
-        assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].text, "甲\n乙", "库里应是真换行");
-
-        // 出口投影
-        let list = c
-            .web_data_rpc("dict.listPaged", &json!({ "schemaId": "wb" }))
-            .unwrap();
-        let item = &list["items"][0];
-        assert_eq!(item["text"], json!(r"甲\n乙"), "列表应回转义形态");
-
-        // 入口：拿列表回的形态删除，必须命中
-        c.web_data_rpc(
-            "dict.remove",
-            &json!({ "schemaId": "wb", "code": "a", "text": r"甲\n乙" }),
-        )
-        .unwrap();
-        assert!(
-            store.get_user_words("wb", "a").unwrap().is_empty(),
-            "remove 未命中 → 该入口漏了 store_text"
-        );
-    }
-
-    /// 字面反斜杠必须能表达：用户写 `\\n` 表示"反斜杠加字母 n"，不是换行。
-    /// 没有这条，`C:\note` 这类内容就会被存成 `C:` + 换行 + `ote`。
-    #[test]
-    fn literal_backslash_survives_ui_boundary() {
-        let c = coord("backslash_esc");
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": "p", "text": r"C:\\note", "position": 0, "weight": 1 }),
-        )
-        .unwrap();
-        let store = c.user_store().unwrap();
-        assert!(
-            store
-                .list_phrases()
-                .unwrap()
-                .iter()
-                .any(|p| p.code == "p" && p.text == r"C:\note"),
-            "`\\\\n` 应还原为字面反斜杠加 n，而非换行"
-        );
-        let list = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        assert_eq!(list[0]["text"], json!(r"C:\\note"), "出口须重新转义反斜杠");
-    }
-
-    #[test]
-    fn phrase_crud_shape() {
-        let c = coord("phrase");
-        // add → list 形状对齐 PhraseItem{code,text,position,weight,enabled}
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": "rq", "text": "2026-06-20", "position": 0, "weight": 1 }),
-        )
-        .unwrap();
-        let list = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        let arr = list.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        for k in ["code", "text", "position", "weight", "enabled"] {
-            assert!(arr[0].get(k).is_some(), "PhraseItem 缺 {k}");
-        }
-        assert_eq!(arr[0]["enabled"], json!(true));
-
-        // setEnabled
-        c.web_data_rpc(
-            "phrase.setEnabled",
-            &json!({ "code": "rq", "text": "2026-06-20", "enabled": false }),
-        )
-        .unwrap();
-        let list2 = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        assert_eq!(list2[0]["enabled"], json!(false));
-
-        // update 改 code（键迁移）
-        c.web_data_rpc(
-            "phrase.update",
-            &json!({ "code": "rq", "text": "2026-06-20", "newCode": "date", "weight": 5 }),
-        )
-        .unwrap();
-        let list3 = c.web_data_rpc("phrase.list", &json!({})).unwrap();
-        assert_eq!(list3[0]["code"], json!("date"));
-
-        // remove + resetDefault
-        c.web_data_rpc(
-            "phrase.remove",
-            &json!({ "code": "date", "text": "2026-06-20" }),
-        )
-        .unwrap();
-        assert_eq!(
-            c.web_data_rpc("phrase.list", &json!({}))
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            0
-        );
-        c.web_data_rpc("phrase.resetDefault", &json!({})).unwrap();
-    }
-
-    /// 回归：phrase.resetDefault 只删用户短语，系统短语必须保留。
-    #[test]
-    fn phrase_reset_default_keeps_system() {
-        use wind_store::phrases::SystemPhrase;
-
-        let path = std::env::temp_dir().join("wind_webdata_phrase_reset_keeps_system.redb");
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(Store::open(&path).unwrap());
-
-        // 先同步一条系统短语（is_system=true）
-        store
-            .sync_system_phrases(&[SystemPhrase {
-                code: "rq".into(),
-                text: "$date".into(),
-                weight: 1000,
-                position: 0,
-                category: String::new(),
-                enabled: true,
-            }])
-            .unwrap();
-
-        // 构造 coordinator（共享同一个 Arc<Store>）
-        let c = Coordinator::new_headless_with_store(Config::default(), None, Arc::clone(&store));
-
-        // 加一条用户短语
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": "me", "text": "自定义", "position": 0, "weight": 1 }),
-        )
-        .unwrap();
-
-        // 执行用户"清空"操作
-        c.web_data_rpc("phrase.resetDefault", &json!({})).unwrap();
-
-        // 系统短语应保留
-        let sys = c.web_data_rpc("phrase.listSystem", &json!({})).unwrap();
-        let sys_arr = sys.as_array().expect("listSystem 应返回数组");
-        assert_eq!(sys_arr.len(), 1, "系统短语应保留，不应被 resetDefault 删除");
-        assert_eq!(sys_arr[0]["code"], json!("rq"));
-
-        // 用户短语应为 0
-        let user = c.web_data_rpc("phrase.listUser", &json!({})).unwrap();
-        assert_eq!(user["total"], json!(0), "用户短语应被 resetDefault 清空");
-    }
-
-    // ───────── quick.*（快捷输入格式表）─────────
-
-    /// headless coordinator + 独立 redb（redb 是单写者，共用文件会让并发测试互相阻塞）。
-    /// 格式表走 `FormatTable::load(None)` → 内置出厂表。
-    fn quick_coord(tag: &str) -> (Arc<Coordinator>, std::path::PathBuf) {
-        let path = std::env::temp_dir().join(format!("wind_webdata_quick_{tag}.redb"));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(Store::open(&path).unwrap());
-        (
-            Coordinator::new_headless_with_store(Config::default(), None, store),
-            path,
-        )
-    }
-
-    /// `commonChars.list` 是**分页**类别：返回 `{items,total}`，不是裸数组。
-    /// 形状由 spec 的 `paged: true` 决定走哪个解析分支，两边对不上会解析出空表且不报错。
-    fn common_char_rows_rpc(c: &Coordinator, params: Value) -> (Vec<Value>, usize) {
-        let v = c.web_data_rpc("commonChars.list", &params).unwrap();
-        let items = v
-            .get("items")
-            .and_then(|x| x.as_array())
-            .expect("commonChars.list 应返回 {items,total}")
-            .clone();
-        let total = v.get("total").and_then(|x| x.as_u64()).unwrap() as usize;
-        (items, total)
-    }
-
-    /// `commonChars.*` 五个方法的往返契约。
-    ///
-    /// ⚠️ 本装置没有 data_dir ⇒ 默认字表为空 ⇒ 全表里只剩用户加的字。故这里只测
-    /// `common:true` 方向：设成 `false` 与默认同向，按设计会**删覆盖**而不是写记录
-    /// （见 `Coordinator::apply_common_target`），在这个装置下等于无操作。
-    /// 「全表按字表原序 + 追加」那部分在 `wind-candidate` 的 `list_all` 用例里测。
-    #[test]
-    fn common_chars_rpc_roundtrip() {
-        let c = coord("commonchars");
-        assert_eq!(common_char_rows_rpc(&c, json!({})).1, 0, "初始应为空表");
-
-        c.web_data_rpc("commonChars.set", &json!({ "char": "槮", "common": true }))
-            .unwrap();
-        let (rows, total) = common_char_rows_rpc(&c, json!({}));
-        assert_eq!((rows.len(), total), (1, 1));
-        assert_eq!(rows[0]["char"], json!("槮"));
-        assert_eq!(rows[0]["common"], json!(true));
-        assert!(
-            rows[0].get("baseCommon").is_some(),
-            "默认判定必须一起给：界面靠它显示「默认 → 现在」的对照"
-        );
-        assert_eq!(
-            rows[0]["adjusted"],
-            json!(true),
-            "改过的行要标出来——设置页靠它决定「恢复默认」灰不灰"
-        );
-
-        let q = c
-            .web_data_rpc("commonChars.query", &json!({ "char": "槮" }))
-            .unwrap();
-        assert_eq!(q["governed"], json!(true));
-        assert_eq!(q["override"], json!(true));
-        assert_eq!(q["effective"], json!(true));
-
-        // 默认字表管不着的字符：`governed` 如实报 false（纯提示），但 set **必须放行**
-        // ——issue #83 起词库管理全范围放开，用户要能把字根、注音、假名这些关掉。
-        let q2 = c
-            .web_data_rpc("commonChars.query", &json!({ "char": "、" }))
-            .unwrap();
-        assert_eq!(q2["governed"], json!(false), "默认字表确实管不着它");
-        assert_eq!(
-            q2["effective"],
-            json!(true),
-            "没覆盖时域外字符照常放行，故当前判定是「常用」"
-        );
-        c.web_data_rpc("commonChars.set", &json!({ "char": "、", "common": false }))
-            .expect("域外字符必须可登记");
-        let q3 = c
-            .web_data_rpc("commonChars.query", &json!({ "char": "、" }))
-            .unwrap();
-        assert_eq!(
-            q3["effective"],
-            json!(false),
-            "设了就得生效——写得进去却不生效，就是一条静默的死记录"
-        );
-        c.web_data_rpc("commonChars.reset", &json!({ "char": "、" }))
-            .unwrap();
-
-        // 多字符一律拒绝，不取首字符：悄悄截取会让用户以为整个词都标记了。
-        assert!(
-            c.web_data_rpc("commonChars.query", &json!({ "char": "我们" }))
-                .is_err()
-        );
-
-        c.web_data_rpc("commonChars.reset", &json!({ "char": "槮" }))
-            .unwrap();
-        assert_eq!(
-            common_char_rows_rpc(&c, json!({})).1,
-            0,
-            "恢复默认后该行回落默认判定；本装置默认表为空，故整行消失"
-        );
-
-        for ch in ["槮", "鬱"] {
-            c.web_data_rpc("commonChars.set", &json!({ "char": ch, "common": true }))
-                .unwrap();
-        }
-        assert_eq!(common_char_rows_rpc(&c, json!({})).1, 2);
-
-        // 搜索：只留出现在查询串里的字。用户既可以只打一个字，也可以粘一整句。
-        let (rows, total) = common_char_rows_rpc(&c, json!({ "prefix": "槮" }));
-        assert_eq!((rows.len(), total), (1, 1), "搜一个字应只剩它");
-        assert_eq!(rows[0]["char"], json!("槮"));
-        assert_eq!(
-            common_char_rows_rpc(&c, json!({ "prefix": "槮鬱" })).1,
-            2,
-            "整句搜索列出句中所有命中的字"
-        );
-        assert_eq!(common_char_rows_rpc(&c, json!({ "prefix": "的" })).1, 0);
-
-        // 分页：total 是**过滤后的总数**，不是当页条数——设置页靠它算总页数。
-        let (page, total) = common_char_rows_rpc(&c, json!({ "offset": 0, "limit": 1 }));
-        assert_eq!((page.len(), total), (1, 2), "当页 1 条、总数仍是 2");
-        let (page2, _) = common_char_rows_rpc(&c, json!({ "offset": 1, "limit": 1 }));
-        assert_ne!(page2[0]["char"], page[0]["char"], "第二页要换一条");
-
-        // 「只看已修改」这一档的**独立作用**在这个装置下测不出来（默认表为空 ⇒ 全表本就
-        // 只剩改过的那些，两个口径等价）。真正的用例在
-        // `wind-coordinator/tests/common_chars_override.rs`，那里有真实的 8104 字表。
-        // 这里只确认参数被认得、不报错。
-        assert_eq!(
-            common_char_rows_rpc(&c, json!({ "onlyModified": true })).1,
-            2
-        );
-
-        c.web_data_rpc("commonChars.clear", &json!({})).unwrap();
-        assert_eq!(common_char_rows_rpc(&c, json!({})).1, 0, "整表恢复默认");
-        assert_eq!(
-            common_char_rows_rpc(&c, json!({ "onlyModified": true })).1,
-            0
-        );
-    }
-
-    /// 列表每行要带类型（Unicode 块名）与「这一类能不能整类批量」。
-    ///
-    /// 类型列的价值在于光看字形分不清东西：issue #83 的用户为此把整张码表喂给 AI 分类、
-    /// 再手工逐个试，才弄明白哪些会显示哪些不会。
-    #[test]
-    fn list_rows_carry_block_type_and_bulk_flag() {
-        let c = coord("commonchars_block");
-        // 一个汉字、一个注音——两类的 bulk 标志必须相反。
-        //
-        // ⚠️ 两者的方向刻意相反，都是为了让记录**真的落库**（否则不进列表）：本装置无
-        // data_dir ⇒ 默认字表为空 ⇒ 域内的「我」默认判生僻，域外的「ㄅ」默认判常用。
-        // 各自设成与默认相反的那一边，才不会被「同向即删覆盖」吃掉。
-        c.web_data_rpc("commonChars.set", &json!({ "char": "我", "common": true }))
-            .unwrap();
-        c.web_data_rpc("commonChars.set", &json!({ "char": "ㄅ", "common": false }))
-            .unwrap();
-        let (rows, _) = common_char_rows_rpc(&c, json!({}));
-        let find = |ch: &str| {
-            rows.iter()
-                .find(|r| r["char"] == json!(ch))
-                .unwrap_or_else(|| panic!("{ch} 不在列表里"))
-        };
-        let han = find("我");
-        assert_eq!(han["block"], json!("基本汉字"));
-        assert_eq!(han["blockRange"], json!("4E00-9FFF"));
-        assert_eq!(
-            han["blockBulkEditable"],
-            json!(false),
-            "汉字块必须禁止整类操作——放行就是一个一键作废整张默认字表的按钮"
-        );
-        let bopo = find("ㄅ");
-        assert_eq!(bopo["block"], json!("注音符号"));
-        assert_eq!(bopo["blockRange"], json!("3100-312F"));
-        assert_eq!(bopo["blockBulkEditable"], json!(true));
-    }
-
-    /// 整类批量：汉字块拒绝、域外块放行，且预览不写库。
-    ///
-    /// ⚠️ 本装置没有 data_dir ⇒ 扫不到任何词库 ⇒ 命中恒 0。这里锁的是**闸门与形态**，
-    /// 「真的扫得出 43 个注音」要靠带真实词库的装置，不在本层。
-    #[test]
-    fn bulk_by_block_refuses_han_blocks() {
-        let c = coord("commonchars_bulk");
-
-        // ⛔ 汉字块：一次误点就是七千多条覆盖，必须在 core 就拒绝，不能只靠界面灰显。
-        let err = c
-            .web_data_rpc(
-                "commonChars.bulkByBlock",
-                &json!({ "char": "我", "common": false, "apply": true }),
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("基本汉字"), "报错要说清是哪一类: {err}");
-        assert!(err.contains("逐字"), "要给出替代做法: {err}");
-
-        // 域外块：放行，返回预览形态。
-        let o = c
-            .web_data_rpc(
-                "commonChars.bulkByBlock",
-                &json!({ "char": "ㄅ", "common": false }),
-            )
-            .unwrap();
-        assert_eq!(o["block"], json!("注音符号"));
-        assert!(
-            o.get("entries").is_some(),
-            "命中条目数必须给——`，` 只有 1 个字符却在 326 条词条里"
-        );
-        assert_eq!(o["written"], json!(0), "apply 缺省为 false，预览不得写库");
-        assert_eq!(
-            common_char_rows_rpc(&c, json!({})).1,
-            0,
-            "预览之后库里必须还是空的"
-        );
-    }
-
-    /// issue #83 的实际用法：一份 TOML 关掉整块表意文字描述符（IDC，U+2FF0–U+2FFF）。
-    ///
-    /// 用户的虎码码表给这 16 个记号整块编了码（`⿰`=rgs、`⿱`=rfi…），它们描述汉字间架
-    /// 结构、不是字，因而**不在默认字表的管辖域内**——放开准入前既滤不掉也加不进表。
-    /// 这条把「16 个字符一次导入并真的生效」端到端钉住：逐个点右键要点 16 次，导入是
-    /// 现实中会走的那条路，而它此前只有 parse 层的覆盖。
-    #[test]
-    fn ideographic_description_chars_can_be_hidden_via_import() {
-        let c = coord("commonchars_idc");
-        // 整块 16 个，与用户贴出的清单逐字对应。
-        let idc = "⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻⿼⿽⿾⿿";
-        assert_eq!(idc.chars().count(), 16);
-
-        let o = c
-            .web_data_rpc(
-                "commonChars.import",
-                &json!({ "content": format!("wind_common_chars = 1\nrare = \"{idc}\"\n") }),
-            )
-            .unwrap();
-        assert_eq!(o["imported"], json!(16), "16 个应全部落库：{o:?}");
-        assert_eq!(
-            o["sameAsDefault"],
-            json!(0),
-            "默认放行 ⇒ 设为生僻是反向 ⇒ 一条都不该被当成「与默认同向」而丢掉"
-        );
-        assert!(
-            o["skipped"].as_array().unwrap().is_empty(),
-            "{:?}",
-            o["skipped"]
-        );
-
-        // 逐个查：登记后当前判定必须真的翻过来，否则就是一批静默的死记录。
-        for ch in idc.chars() {
-            let q = c
-                .web_data_rpc("commonChars.query", &json!({ "char": ch.to_string() }))
-                .unwrap();
-            assert_eq!(q["governed"], json!(false), "{ch} 本就不受默认字表管辖");
-            assert_eq!(q["baseCommon"], json!(true), "{ch} 默认是放行的");
-            assert_eq!(q["effective"], json!(false), "{ch} 设了就得生效");
-        }
-    }
-
-    /// 导出格式：单字符走文本段，多码位走数组段，**数组段为空时整段不出现**。
-    ///
-    /// 用户诉求原话：从不配置多码位的人，不该在文件里看到自己用不上的格式。
-    #[test]
-    fn export_omits_array_sections_when_no_multi_code_point_entries() {
-        let c = coord("commonchars_fmt");
-        // ⚠️ 方向各取「与本装置默认相反」的那一边，记录才留得下：本装置无 data_dir ⇒
-        // 域内的「槮」默认判生僻、域外的「ㄅ」默认判常用（见 `is_base_common`）。
-        c.web_data_rpc("commonChars.set", &json!({ "char": "槮", "common": true }))
-            .unwrap();
-        c.web_data_rpc("commonChars.set", &json!({ "char": "ㄅ", "common": false }))
-            .unwrap();
-        let text = c
-            .web_data_rpc("commonChars.export", &json!({}))
-            .unwrap()
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
-        assert!(text.contains("common = "), "单字符要走文本段: {text}");
-        assert!(
-            !text.contains("_seq"),
-            "没有多码位条目时不该出现数组段: {text}"
-        );
-
-        // 加一条 emoji 序列后，数组段才出现，且文本段仍在。
-        let ball = "\u{26BD}\u{FE0F}";
-        c.web_data_rpc("commonChars.set", &json!({ "char": ball, "common": false }))
-            .unwrap();
-        let text2 = c
-            .web_data_rpc("commonChars.export", &json!({}))
-            .unwrap()
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
-        assert!(
-            text2.contains("rare_seq = ["),
-            "多码位条目要走数组段: {text2}"
-        );
-        assert!(text2.contains(ball), "{text2}");
-
-        // 导到另一台机器：四个段都要读得回来。
-        let c2 = coord("commonchars_fmt2");
-        let o = c2
-            .web_data_rpc("commonChars.import", &json!({ "content": text2 }))
-            .unwrap();
-        assert_eq!(o["imported"], json!(3), "两个单字符 + 一条序列: {o:?}");
-        assert!(
-            o["skipped"].as_array().unwrap().is_empty(),
-            "{:?}",
-            o["skipped"]
-        );
-    }
-
-    /// `commonChars.export` / `previewImport` / `import` 的往返契约。
-    ///
-    /// ⚠️ 本装置没有 data_dir ⇒ 默认字表为空 ⇒ **域内（汉字/PUA）的字默认判「生僻」**，
-    /// 而**域外字符默认判「常用」**（没覆盖时读端一律放行，见 `is_base_common`）。
-    /// 这恰好把导入的两条分支都摆到台面上：与默认相反的真的落库；与默认同向的按设计
-    /// **删覆盖而不写记录**（`sameAsDefault`）。后者若被误实现成照单全收，`total` 会多出行来。
-    #[test]
-    fn common_chars_import_export_roundtrip() {
-        let c = coord("commonchars_io");
-        for ch in ["槮", "鬱"] {
-            c.web_data_rpc("commonChars.set", &json!({ "char": ch, "common": true }))
-                .unwrap();
-        }
-
-        let text = c
-            .web_data_rpc("commonChars.export", &json!({}))
-            .unwrap()
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
-        assert!(
-            text.contains("wind_common_chars = 1"),
-            "导出必须带格式标记，导入端靠它认出选错了文件：{text}"
-        );
-        assert!(text.contains('槮') && text.contains('鬱'), "{text}");
-
-        // 导到第二台「机器」（另一份 store）。
-        let c2 = coord("commonchars_io2");
-        let p = c2
-            .web_data_rpc("commonChars.previewImport", &json!({ "content": text }))
-            .unwrap();
-        assert_eq!(p["common"], json!(2));
-        assert_eq!(p["rare"], json!(0));
-        assert_eq!(
-            common_char_rows_rpc(&c2, json!({})).1,
-            0,
-            "预览不能写库——用户还没点确认"
-        );
-
-        let o = c2
-            .web_data_rpc("commonChars.import", &json!({ "content": text }))
-            .unwrap();
-        assert_eq!(o["imported"], json!(2));
-        assert_eq!(common_char_rows_rpc(&c2, json!({})).1, 2);
-
-        // 手写文件：与本装置默认同向的不写记录；非汉字照收（issue #83 放开后不再跳过）。
-        //
-        // 本装置无 data_dir ⇒ 默认表为空 ⇒ 域内的字默认全判生僻，而**域外字符默认判常用**
-        // （没覆盖时读端一律放行，见 `is_base_common`）。于是同为 rare 段：
-        // 「畢」与默认同向、不留记录，「、」与默认相反、必须留下——否则用户想隐藏顿号
-        // 会得到「导入成功但毫无变化」。
-        let hand = "wind_common_chars = 1\ncommon = \"玥\"\nrare = \"畢、\"\n";
-        let o2 = c2
-            .web_data_rpc("commonChars.import", &json!({ "content": hand }))
-            .unwrap();
-        assert_eq!(o2["imported"], json!(2), "「玥」与「、」都与默认相反");
-        assert_eq!(
-            o2["sameAsDefault"],
-            json!(1),
-            "与默认同向的字不该留记录——照单全收会把它钉死在当前判定上"
-        );
-        assert!(
-            o2["skipped"].as_array().unwrap().is_empty(),
-            "非汉字不再被跳过：{:?}",
-            o2["skipped"]
-        );
-        assert_eq!(common_char_rows_rpc(&c2, json!({})).1, 4);
-
-        // JSONL（备份包 `userdata/common_chars.jsonl` 那一段的原始形态）也认。
-        let c3 = coord("commonchars_io3");
-        let jsonl = "{\"ch\":\"槮\",\"common\":true}\n不是 json\n";
-        let o3 = c3
-            .web_data_rpc("commonChars.import", &json!({ "content": jsonl }))
-            .unwrap();
-        assert_eq!(o3["imported"], json!(1));
-        assert_eq!(o3["skipped"].as_array().unwrap().len(), 1, "坏行如实上报");
-
-        // replace：用文件里的状态覆盖现状，而不是「文件里的 + 我原有的」。
-        let only_yue = "wind_common_chars = 1\ncommon = \"玥\"\n";
-        c2.web_data_rpc(
-            "commonChars.import",
-            &json!({ "content": only_yue, "strategy": "replace" }),
-        )
-        .unwrap();
-        assert_eq!(common_char_rows_rpc(&c2, json!({})).1, 1);
-
-        // 选错文件：缺标记直接拒绝，而不是「已导入 0 条」那种让人以为文件坏了的回话。
-        assert!(
-            c2.web_data_rpc(
-                "commonChars.import",
-                &json!({ "content": "[quick]\nfoo = 1\n" })
-            )
-            .is_err()
-        );
-    }
-
-    /// 列头排序：三列都要认，且**降序不能破坏同值组内的顺序**。
-    ///
-    /// 用纯函数直接验，不经 RPC：webdata 的装置没有 data_dir，默认字表为空，凑不出
-    /// 「同值多行」的样本，而那正是稳定性要考察的东西。
-    #[test]
-    fn common_chars_sorting_is_stable_and_accepts_both_char_keys() {
-        use wind_coordinator::handle_common_chars::CommonCharRow;
-        let row = |ch: char, base: bool, now: bool| {
-            let blk = wind_candidate::block_of(ch);
-            CommonCharRow {
-                text: ch.to_string(),
-                common: now,
-                base_common: base,
-                overridden: base != now,
-                block: blk.name,
-                // 本条测的是排序稳定性，与字符类无关。
-                class: None,
-                block_bulk_editable: wind_candidate::block_allows_bulk_edit(&blk),
-            }
-        };
-        // 入参顺序 = 字表原序，刻意不按码位排。
-        let seed = vec![
-            row('一', true, true),
-            row('乙', true, false),
-            row('二', true, true),
-            row('槮', false, true),
-        ];
-
-        // 不给 sortBy：原序不动。
-        let mut r = seed.clone();
-        sort_common_char_rows(&mut r, "", false);
-        assert_eq!(chars(&r), "一乙二槮", "无排序时须保持字表原序");
-
-        // 「字」那一列发来的是 `text`（复用 WordField::Text），也要认 `char`。
-        for key in ["text", "char"] {
-            let mut r = seed.clone();
-            sort_common_char_rows(&mut r, key, false);
-            let asc = chars(&r);
-            let mut expect: Vec<String> = seed.iter().map(|x| x.text.clone()).collect();
-            expect.sort_unstable();
-            assert_eq!(asc, expect.concat(), "sortBy={key} 应按码位升序");
-        }
-
-        // 按「当前」升序：生僻(false) 在前；同值组内保持字表原序。
-        let mut r = seed.clone();
-        sort_common_char_rows(&mut r, "common", false);
-        assert_eq!(chars(&r), "乙一二槮", "生僻的「乙」提前，其余保持原序");
-
-        // 降序：整体翻面，但**同值组内仍是字表原序**（这正是不能用 reverse() 的原因）。
-        let mut r = seed.clone();
-        sort_common_char_rows(&mut r, "common", true);
-        assert_eq!(
-            chars(&r),
-            "一二槮乙",
-            "常用的那组内部仍按字表原序，不能连同值一起倒过来"
-        );
-
-        // 未知字段一律不动，别把列表搅乱。
-        let mut r = seed.clone();
-        sort_common_char_rows(&mut r, "weight", false);
-        assert_eq!(chars(&r), "一乙二槮");
-    }
-
-    fn chars(rows: &[wind_coordinator::handle_common_chars::CommonCharRow]) -> String {
-        rows.iter().map(|r| r.text.as_str()).collect()
-    }
-
-    fn quick_rows(c: &Coordinator) -> Vec<Value> {
-        c.web_data_rpc("quick.list", &json!({}))
-            .unwrap()
-            .as_array()
-            .expect("quick.list 应返回数组")
-            .clone()
-    }
-
-    fn quick_row(rows: &[Value], id: &str) -> Value {
-        rows.iter()
-            .find(|r| r["id"] == json!(id))
-            .unwrap_or_else(|| panic!("列表里找不到 {id}"))
-            .clone()
-    }
-
-    /// 某类**启用**条目的 id 序（= 候选顺序）。
-    fn quick_enabled_ids(c: &Coordinator, kind: &str) -> Vec<String> {
-        quick_rows(c)
-            .iter()
-            .filter(|r| r["kind"] == json!(kind) && r["enabled"] == json!(true))
-            .map(|r| r["id"].as_str().unwrap().to_string())
-            .collect()
-    }
-
-    #[test]
-    fn quick_list_covers_every_entry_with_samples() {
-        let (c, p) = quick_coord("list");
-        let rows = quick_rows(&c);
-        // 出厂表全部条目都在（含各类别）。
-        //
-        // 条数**对照内置表现取**，不写死数字：headless 无 data 目录 ⇒ 格式表回落
-        // `FormatTable::builtin()`，两边本就是同一份。写死数字的话，每次往出厂表加
-        // 条目这里都会红，而人只会把数字加一——那既没验证「有没有漏」，还平白多一次
-        // 无意义的改动。现在验的是真正该验的：**RPC 转换没吞掉也没重复任何条目**。
-        let builtin_count = wind_quick_input::FormatTable::builtin().entries().len();
-        assert_eq!(
-            rows.len(),
-            builtin_count,
-            "quick.list 应逐条转换出厂表，实际 {} 条对 {} 条",
-            rows.len(),
-            builtin_count
-        );
-        for kind in ["date", "month_day", "year_month", "number", "calc"] {
-            assert!(
-                rows.iter().any(|r| r["kind"] == json!(kind)),
-                "缺类别 {kind}"
-            );
-        }
-        // 示例是「用示例输入跑真实候选生成」得到的，故出厂条目必须都有示例——
-        // 空示例说明那条渲染不出来，对出厂表而言就是缺陷。
-        let cn = quick_row(&rows, "date.cn");
-        let sample = cn["sample"].as_str().unwrap();
-        assert!(!sample.is_empty(), "date.cn 应有示例");
-        assert!(sample.ends_with('日'), "示例应是完整日期: {sample}");
-        // 金额示例用 1234.5 渲染，必然带「元」。
-        let amt = quick_row(&rows, "number.amount");
-        assert!(
-            amt["sample"].as_str().unwrap().contains('元'),
-            "金额示例: {}",
-            amt["sample"]
-        );
-        // 未调整时的初始状态
-        assert_eq!(cn["enabled"], json!(true));
-        assert_eq!(cn["adjusted"], json!(false));
-        assert_eq!(cn["moveIndex"], json!(0), "date.cn 是 date 组首条");
-        assert_eq!(cn["displayPos"], json!(1));
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// ★★ 停用后条目**留在列表里**（否则用户再也开不回来），且 `moveIndex` 为 null
-    /// ——它不在候选里，移动没有意义。这正是设置页要补的那个缺口。
-    #[test]
-    fn quick_disabled_entry_stays_listed_and_unmovable() {
-        let (c, p) = quick_coord("disable");
-        let before = quick_rows(&c).len();
-        c.web_data_rpc(
-            "quick.setEnabled",
-            &json!({ "kind": "date", "id": "date.basic", "enabled": false }),
-        )
-        .unwrap();
-        let rows = quick_rows(&c);
-        assert_eq!(rows.len(), before, "管理列表条数不减");
-        let row = quick_row(&rows, "date.basic");
-        assert_eq!(row["enabled"], json!(false));
-        assert_eq!(row["adjusted"], json!(true));
-        assert_eq!(row["moveIndex"], Value::Null, "停用项不可移动");
-        // 候选那边确实少了一条
-        assert!(!quick_enabled_ids(&c, "date").contains(&"date.basic".to_string()));
-
-        // 双向：再开回来，且恢复原位（记录清空 → 回到基表位置）
-        c.web_data_rpc(
-            "quick.setEnabled",
-            &json!({ "kind": "date", "id": "date.basic", "enabled": true }),
-        )
-        .unwrap();
-        let row = quick_row(&quick_rows(&c), "date.basic");
-        assert_eq!(row["enabled"], json!(true));
-        assert_eq!(row["adjusted"], json!(false), "开回来即无残留规则");
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 移动落到候选顺序上，并被 `moveIndex` 如实反映（UI 的上/下移就是 ±1 这个值）。
-    #[test]
-    fn quick_move_changes_candidate_order() {
-        let (c, p) = quick_coord("move");
-        assert_ne!(quick_enabled_ids(&c, "date")[0], "date.lunar");
-        c.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.lunar", "index": 0 }),
-        )
-        .unwrap();
-        assert_eq!(quick_enabled_ids(&c, "date")[0], "date.lunar");
-        assert_eq!(
-            quick_row(&quick_rows(&c), "date.lunar")["moveIndex"],
-            json!(0)
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 单条恢复只清这一条（store 的 `reset_quick_format_entry` 此前无调用点，
-    /// 注释写着「单条恢复要等设置页」——就是这个 RPC）。
-    #[test]
-    fn quick_reset_entry_only_clears_that_entry() {
-        let (c, p) = quick_coord("reset_entry");
-        c.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.lunar", "index": 0 }),
-        )
-        .unwrap();
-        c.web_data_rpc(
-            "quick.setEnabled",
-            &json!({ "kind": "date", "id": "date.basic", "enabled": false }),
-        )
-        .unwrap();
-        c.web_data_rpc(
-            "quick.resetEntry",
-            &json!({ "kind": "date", "id": "date.lunar" }),
-        )
-        .unwrap();
-        let rows = quick_rows(&c);
-        assert_eq!(quick_row(&rows, "date.lunar")["adjusted"], json!(false));
-        assert_eq!(
-            quick_row(&rows, "date.basic")["enabled"],
-            json!(false),
-            "不该连累别的条目"
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn quick_reset_kind_clears_whole_kind_only() {
-        let (c, p) = quick_coord("reset_kind");
-        c.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.lunar", "index": 0 }),
-        )
-        .unwrap();
-        c.web_data_rpc(
-            "quick.setEnabled",
-            &json!({ "kind": "number", "id": "number.digits", "enabled": false }),
-        )
-        .unwrap();
-        c.web_data_rpc("quick.resetKind", &json!({ "kind": "date" }))
-            .unwrap();
-        let rows = quick_rows(&c);
-        assert!(
-            rows.iter()
-                .filter(|r| r["kind"] == json!("date"))
-                .all(|r| r["adjusted"] == json!(false)),
-            "date 全类恢复"
-        );
-        assert_eq!(
-            quick_row(&rows, "number.digits")["enabled"],
-            json!(false),
-            "别的类别不动"
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// ★★ 端到端往返：导出 → 到一台干净的机器上导入 → 状态必须一致。
-    ///
-    /// 这是导入导出唯一真正要保证的事，也是最容易在"部分字段没写出去"时静默失守的地方。
-    #[test]
-    fn quick_export_import_roundtrip_restores_state() {
-        let (a, pa) = quick_coord("export_src");
-        // 造一组有代表性的改动：移动两条（含 LIFO 关系）+ 停用一条 + 跨类别
-        a.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.iso", "index": 1 }),
-        )
-        .unwrap();
-        a.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.lunar", "index": 0 }),
-        )
-        .unwrap();
-        a.web_data_rpc(
-            "quick.setEnabled",
-            &json!({ "kind": "number", "id": "number.digits", "enabled": false }),
-        )
-        .unwrap();
-        let content = a.web_data_rpc("quick.export", &json!({})).unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let expect_date = quick_enabled_ids(&a, "date");
-
-        let (b, pb) = quick_coord("export_dst");
-        let out = b
-            .web_data_rpc("quick.import", &json!({ "content": content }))
-            .unwrap();
-        assert_eq!(out["moved"], json!(2));
-        assert_eq!(out["disabled"], json!(1));
-        assert_eq!(out["skipped"].as_array().unwrap().len(), 0);
-
-        assert_eq!(
-            quick_enabled_ids(&b, "date"),
-            expect_date,
-            "★ 导入后 date 顺序必须与导出前一致（LIFO 顺序不能在往返中反转）"
-        );
-        assert_eq!(
-            quick_row(&quick_rows(&b), "number.digits")["enabled"],
-            json!(false),
-            "停用状态也要带过来"
-        );
-        let _ = std::fs::remove_file(&pa);
-        let _ = std::fs::remove_file(&pb);
-    }
-
-    /// `strategy = "replace"` 先清空既有调整；缺省（合并）则保留未被文件提到的。
-    #[test]
-    fn quick_import_replace_clears_existing() {
-        let (c, p) = quick_coord("import_replace");
-        c.web_data_rpc(
-            "quick.setEnabled",
-            &json!({ "kind": "calc", "id": "calc.equation", "enabled": false }),
-        )
-        .unwrap();
-        let file = "[[adjust]]\nkind = 'date'\ndisabled = ['date.basic']\n";
-
-        // 合并：两处改动并存
-        c.web_data_rpc("quick.import", &json!({ "content": file }))
-            .unwrap();
-        let rows = quick_rows(&c);
-        assert_eq!(quick_row(&rows, "calc.equation")["enabled"], json!(false));
-        assert_eq!(quick_row(&rows, "date.basic")["enabled"], json!(false));
-
-        // 替换：文件没提到的 calc 改动被清掉
-        c.web_data_rpc(
-            "quick.import",
-            &json!({ "content": file, "strategy": "replace" }),
-        )
-        .unwrap();
-        let rows = quick_rows(&c);
-        assert_eq!(
-            quick_row(&rows, "calc.equation")["enabled"],
-            json!(true),
-            "replace 应先清空"
-        );
-        assert_eq!(quick_row(&rows, "date.basic")["enabled"], json!(false));
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 坏条目**如实报告**，不静默丢弃：用户看到「导入成功」却少了规则，
-    /// 无从判断是文件坏了还是程序吃了。
-    #[test]
-    fn quick_preview_import_reports_skipped() {
-        let (c, p) = quick_coord("preview");
-        let file = "\
-[[formats]]
-id = 'my.one'
-kind = 'date'
-text = '$YY.$MM'
-
-[[adjust]]
-kind = 'weather'
-disabled = ['x']
-
-[[adjust]]
-kind = 'date'
-moved = [{ id = 'date.lunar', position = 0 }]
-";
-        let pv = c
-            .web_data_rpc("quick.previewImport", &json!({ "content": file }))
-            .unwrap();
-        assert_eq!(pv["moved"], json!(1));
-        assert_eq!(pv["formats"], json!(1), "自定义条目如实计数");
-        assert_eq!(
-            pv["skipped"].as_array().unwrap().len(),
-            1,
-            "未知类别要报出来"
-        );
-        assert_eq!(pv["kinds"], json!(["date"]));
-        // 预览不得写库
-        assert!(
-            quick_rows(&c).iter().all(|r| r["adjusted"] == json!(false)),
-            "previewImport 必须是只读的"
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 未知类别在 RPC 边界就被挡住，且错误信息带上那个类别名。
-    #[test]
-    fn quick_edit_rejects_unknown_kind() {
-        let (c, p) = quick_coord("bad_kind");
-        let e = c
-            .web_data_rpc(
-                "quick.setEnabled",
-                &json!({ "kind": "weather", "id": "x", "enabled": false }),
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("weather"), "错误应指出是哪个类别: {e}");
-        let _ = std::fs::remove_file(&p);
-    }
-
-    // ───────── quick.* 自定义条目（P2）─────────
-
-    /// 变量提示覆盖全部五类，且 year_month **不含**农历变量。
-    ///
-    /// 后一条是真实的分工（农历月与公历月不一一对应），提示里放了农历，用户照着给年月写
-    /// `$LMD`，保存时才会被拒——错误发生在他已经写完之后。
-    #[test]
-    fn quick_vars_covers_all_kinds_without_lunar_in_year_month() {
-        let (c, p) = quick_coord("vars");
-        let v = c.web_data_rpc("quick.vars", &json!({})).unwrap();
-        let arr = v.as_array().unwrap();
-        let kinds: Vec<&str> = arr.iter().map(|k| k["kind"].as_str().unwrap()).collect();
-        assert_eq!(
-            kinds,
-            vec!["date", "month_day", "year_month", "number", "calc"],
-            "五类齐全且按 ALL 序"
-        );
-        let names_of = |kind: &str| -> Vec<String> {
-            arr.iter().find(|k| k["kind"] == json!(kind)).unwrap()["vars"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|x| x["name"].as_str().unwrap().to_string())
-                .collect()
-        };
-        assert!(names_of("date").contains(&"LMD".to_string()));
-        assert!(
-            !names_of("year_month").contains(&"LMD".to_string()),
-            "年月不该提供农历变量"
-        );
-        assert!(names_of("calc").contains(&"RESULT".to_string()));
-        // 每条都得有说明，否则界面上是一列空白
-        for k in arr {
-            for var in k["vars"].as_array().unwrap() {
-                assert!(
-                    var["desc"].as_str().is_some_and(|d| !d.is_empty()),
-                    "kind={} 的 {} 缺说明",
-                    k["kind"],
-                    var["name"]
-                );
-            }
-        }
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 新增的条目立刻是一个**完整的**列表行：能列出、有示例、可调序、标着 user。
-    ///
-    /// 示例列尤其要验：它由「只清 moved/disabled、保留 added」的那份调整渲染，若沿用 P1 的
-    /// 空调整，用户条目的示例会恒为空——其它行都好，看着像是模板写错了。
-    #[test]
-    fn quick_add_yields_a_complete_row() {
-        let (c, p) = quick_coord("add");
-        let r = c
-            .web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        assert_eq!(r["id"], json!("date.u1"), "首条用户条目的 id");
-
-        let rows = quick_rows(&c);
-        let row = quick_row(&rows, "date.u1");
-        assert_eq!(row["user"], json!(true), "标记为用户条目");
-        assert_eq!(row["enabled"], json!(true));
-        assert!(row["moveIndex"].is_number(), "启用的条目可调序");
-        assert!(
-            row["sample"].as_str().is_some_and(|s| s.contains('/')),
-            "★ 示例必须渲染出来，实际: {:?}",
-            row["sample"]
-        );
-        // 出厂条目不该被误标
-        assert_eq!(quick_row(&rows, "date.cn")["user"], json!(false));
-
-        // 第二条接着排号，且落在本类末尾
-        let r2 = c
-            .web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$D-$M-$Y" }))
-            .unwrap();
-        assert_eq!(r2["id"], json!("date.u2"));
-        let rows = quick_rows(&c);
-        let date_ids: Vec<&str> = rows
-            .iter()
-            .filter(|r| r["kind"] == json!("date"))
-            .map(|r| r["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            &date_ids[date_ids.len() - 2..],
-            &["date.u1", "date.u2"],
-            "用户条目排在出厂条目之后"
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 校验在**保存前**拒绝并说明原因（与文件加载「剔除 + warn」相反：那边用户看不到日志）。
-    #[test]
-    fn quick_add_rejects_invalid_template() {
-        let (c, p) = quick_coord("add_bad");
-        // year_month 没有 $D 系列
-        let e = c
-            .web_data_rpc(
-                "quick.add",
-                &json!({ "kind": "year_month", "text": "$Y-$M-$D" }),
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(
-            e.contains("$D") || e.contains('D'),
-            "错误要指出是哪个变量: {e}"
-        );
-
-        let e = c
-            .web_data_rpc("quick.add", &json!({ "kind": "date", "text": "   " }))
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("为空"), "纯空白模板要拒绝: {e}");
-
-        assert!(
-            quick_rows(&c).iter().all(|r| r["user"] == json!(false)),
-            "被拒绝的条目不得落库"
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 模板逐字相同就拒绝，并**指出撞的是哪一条**——两行长得一模一样时用户看不到 id，
-    /// 只说「重复了」他还得自己一行行找。
-    #[test]
-    fn quick_add_rejects_duplicate_template() {
-        let (c, p) = quick_coord("add_dup");
-        let e = c
-            .web_data_rpc(
-                "quick.add",
-                &json!({ "kind": "date", "text": "$Y年$M月$D日" }),
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("date.cn"), "要指出撞的是哪条: {e}");
-
-        c.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        let e = c
-            .web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("date.u1"), "也要认出撞的是用户条目: {e}");
-
-        // 同一串模板在别的类别里不算撞车（各类各一张表）
-        c.web_data_rpc(
-            "quick.add",
-            &json!({ "kind": "month_day", "text": "$Y/$M/$D" }),
-        )
-        .unwrap();
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// ★★ 出厂条目的模板不可改、不可删——这是 P2 的核心设计决策，由 store 的数据结构
-    /// 兜住（模板只存在 `added` 里）。这条测试是那个决策的守门。
-    #[test]
-    fn quick_factory_entries_refuse_edit_and_delete() {
-        let (c, p) = quick_coord("factory_ro");
-        let e = c
-            .web_data_rpc(
-                "quick.setText",
-                &json!({ "kind": "date", "id": "date.cn", "text": "$Y.$M.$D" }),
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("不可修改"), "要说清为什么: {e}");
-
-        let e = c
-            .web_data_rpc("quick.delete", &json!({ "kind": "date", "id": "date.cn" }))
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("只能停用"), "要指出替代做法: {e}");
-
-        // 模板没被动过
-        assert_eq!(
-            quick_row(&quick_rows(&c), "date.cn")["text"],
-            json!("$Y年$M月$D日")
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn quick_set_text_updates_user_entry_and_its_sample() {
-        let (c, p) = quick_coord("set_text");
-        // 模板不能与出厂条目逐字相同（`$CNL` 就是出厂的 number.cn_lower），否则被查重拦下
-        c.web_data_rpc("quick.add", &json!({ "kind": "number", "text": "约$CNL" }))
-            .unwrap();
-        c.web_data_rpc(
-            "quick.setText",
-            &json!({ "kind": "number", "id": "number.u1", "text": "共$THOU元" }),
-        )
-        .unwrap();
-        let row = quick_row(&quick_rows(&c), "number.u1");
-        assert_eq!(row["text"], json!("共$THOU元"));
-        assert!(
-            row["sample"].as_str().is_some_and(|s| s.starts_with('共')),
-            "示例要跟着变: {:?}",
-            row["sample"]
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 改写时把自己排除掉：只改了个错别字、模板本身没动，不该被判成「与自己重复」。
-    #[test]
-    fn quick_set_text_to_the_same_value_is_allowed() {
-        let (c, p) = quick_coord("set_same");
-        c.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        c.web_data_rpc(
-            "quick.setText",
-            &json!({ "kind": "date", "id": "date.u1", "text": "$Y/$M/$D" }),
-        )
-        .expect("模板没变也该允许保存");
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 删除连带清掉它的调序规则，否则重加一条同 id 的条目会被旧规则挪到意外的位置。
-    #[test]
-    fn quick_delete_also_drops_its_move_rule() {
-        let (c, p) = quick_coord("del");
-        c.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        c.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.u1", "index": 0 }),
-        )
-        .unwrap();
-        assert_eq!(quick_rows(&c)[0]["id"], json!("date.u1"));
-
-        c.web_data_rpc("quick.delete", &json!({ "kind": "date", "id": "date.u1" }))
-            .unwrap();
-        let rows = quick_rows(&c);
-        assert!(
-            !rows.iter().any(|r| r["id"] == json!("date.u1")),
-            "已从列表消失"
-        );
-        // 重新加一条：不该继承已删条目的位置，而要落回本类末尾。
-        //
-        // 这里刻意**不断言 id 是什么**：删掉唯一一条后 id 会复用 `date.u1`，而那是安全的
-        // ——删除已连带清掉它的全部规则，没有任何东西还引用这个 id。真正要防的「删中间
-        // 一条后撞上仍存在的 id」由 `next_user_id_survives_a_deletion_in_the_middle` 覆盖。
-        // 断言 id 不复用会把一个无害的实现细节钉死。
-        let r = c
-            .web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        let fresh = r["id"].as_str().unwrap().to_string();
-        let rows = quick_rows(&c);
-        assert_ne!(rows[0]["id"], json!(fresh), "★ 不得继承已删条目的首位");
-        let date_ids: Vec<&str> = rows
-            .iter()
-            .filter(|r| r["kind"] == json!("date"))
-            .map(|r| r["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(*date_ids.last().unwrap(), fresh, "落回本类末尾");
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// ★★ 「恢复默认」清调序与停用，**保留用户条目**。
-    ///
-    /// 端到端守门：store 那层已有同名测试，这里再钉一次 RPC 全链路——右键菜单的
-    /// `resetKind` 与设置页共用这条路径，而它一度是 `t.remove(kind)`（会删穿用户条目）。
-    #[test]
-    fn quick_reset_kind_keeps_user_entries() {
-        let (c, p) = quick_coord("reset_keep");
-        c.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        c.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.u1", "index": 0 }),
-        )
-        .unwrap();
-        c.web_data_rpc(
-            "quick.setEnabled",
-            &json!({ "kind": "date", "id": "date.cn", "enabled": false }),
-        )
-        .unwrap();
-
-        c.web_data_rpc("quick.resetKind", &json!({ "kind": "date" }))
-            .unwrap();
-
-        let rows = quick_rows(&c);
-        let row = quick_row(&rows, "date.u1");
-        assert_eq!(row["user"], json!(true), "★ 用户条目必须还在");
-        assert_eq!(row["adjusted"], json!(false), "它的调序规则被清掉了");
-        assert_eq!(quick_row(&rows, "date.cn")["enabled"], json!(true));
-        let date_ids: Vec<&str> = rows
-            .iter()
-            .filter(|r| r["kind"] == json!("date"))
-            .map(|r| r["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            *date_ids.last().unwrap(),
-            "date.u1",
-            "回到「用户条目在末尾」的初始位置"
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 导出/导入往返带上用户条目本身（不只是调整）。
-    #[test]
-    fn quick_roundtrip_carries_user_entries() {
-        let (a, pa) = quick_coord("rt_user_a");
-        a.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        a.web_data_rpc(
-            "quick.add",
-            &json!({ "kind": "calc", "text": "结果是$RESULT" }),
-        )
-        .unwrap();
-        a.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.u1", "index": 0 }),
-        )
-        .unwrap();
-        let content = a.web_data_rpc("quick.export", &json!({})).unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let (b, pb) = quick_coord("rt_user_b");
-        let o = b
-            .web_data_rpc("quick.import", &json!({ "content": content }))
-            .unwrap();
-        assert_eq!(o["formats"], json!(2), "两条自定义条目都导入了");
-        assert!(
-            o["skipped"].as_array().unwrap().is_empty(),
-            "不该有跳过项: {:?}",
-            o["skipped"]
-        );
-
-        let rows = quick_rows(&b);
-        assert_eq!(rows[0]["id"], json!("date.u1"), "调序规则也带过来了");
-        assert_eq!(rows[0]["text"], json!("$Y/$M/$D"));
-        assert_eq!(quick_row(&rows, "calc.u1")["text"], json!("结果是$RESULT"));
-        let _ = std::fs::remove_file(&pa);
-        let _ = std::fs::remove_file(&pb);
-    }
-
-    /// ★★ 导入时 id 冲突：换新 id 之后，**引用它的 `moved` 规则必须一起改写**。
-    ///
-    /// 场景是两台机器各有一条 `date.u1`（内容不同）。若只改 `[[formats]]` 侧不改 `moved` 侧，
-    /// 那条移动规则会指向本机原有的 `date.u1`——症状是「导入后顺序不对」，两条条目都在、
-    /// 都没报错。与漏 `.rev()` 同属导入重放的引用完整性。
-    #[test]
-    fn quick_import_remaps_conflicting_id_and_its_move_rule() {
-        // A 机：date.u1 = $Y/$M/$D，并把它移到首位
-        let (a, pa) = quick_coord("remap_a");
-        a.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        a.web_data_rpc(
-            "quick.move",
-            &json!({ "kind": "date", "id": "date.u1", "index": 0 }),
-        )
-        .unwrap();
-        let content = a.web_data_rpc("quick.export", &json!({})).unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        // B 机：已有一条**内容不同**的 date.u1
-        let (b, pb) = quick_coord("remap_b");
-        b.web_data_rpc(
-            "quick.add",
-            &json!({ "kind": "date", "text": "本机原有$Y" }),
-        )
-        .unwrap();
-
-        let o = b
-            .web_data_rpc("quick.import", &json!({ "content": content }))
-            .unwrap();
-        assert_eq!(o["formats"], json!(1));
-
-        let rows = quick_rows(&b);
-        // 本机原有那条内容不变
-        assert_eq!(quick_row(&rows, "date.u1")["text"], json!("本机原有$Y"));
-        // 导入的那条换了 id
-        let fresh = quick_row(&rows, "date.u2");
-        assert_eq!(fresh["text"], json!("$Y/$M/$D"), "导入的条目改用 u2");
-        // ★ 移动规则跟着改写：排首位的是导入的那条，不是本机原有的
-        assert_eq!(
-            rows[0]["id"],
-            json!("date.u2"),
-            "★ moved 必须一起改写，否则规则会指向本机原有的 date.u1"
-        );
-        let _ = std::fs::remove_file(&pa);
-        let _ = std::fs::remove_file(&pb);
-    }
-
-    /// 重复导入同一份文件是幂等的：模板相同的条目按「撞车」跳过并如实报告，
-    /// 而不是每导一次就多出一条一模一样的候选。
-    #[test]
-    fn quick_import_twice_does_not_duplicate_entries() {
-        let (a, pa) = quick_coord("idem_a");
-        a.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "$Y/$M/$D" }))
-            .unwrap();
-        let content = a.web_data_rpc("quick.export", &json!({})).unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let (b, pb) = quick_coord("idem_b");
-        b.web_data_rpc("quick.import", &json!({ "content": &content }))
-            .unwrap();
-        let o = b
-            .web_data_rpc("quick.import", &json!({ "content": &content }))
-            .unwrap();
-        assert_eq!(o["formats"], json!(0), "第二次一条都不该写入");
-        assert_eq!(
-            o["skipped"].as_array().unwrap().len(),
-            1,
-            "跳过要如实报告: {:?}",
-            o["skipped"]
-        );
-        assert_eq!(
-            quick_rows(&b)
-                .iter()
-                .filter(|r| r["user"] == json!(true))
-                .count(),
-            1,
-            "只有一条用户条目"
-        );
-        let _ = std::fs::remove_file(&pa);
-        let _ = std::fs::remove_file(&pb);
-    }
-
-    /// `strategy = "replace"` 连用户条目一起清（语义是「用文件覆盖现状」），
-    /// 与面向用户的「恢复默认」刻意相反。
-    #[test]
-    fn quick_import_replace_clears_user_entries_too() {
-        let (a, pa) = quick_coord("repl_user_a");
-        a.web_data_rpc("quick.add", &json!({ "kind": "calc", "text": "得$RESULT" }))
-            .unwrap();
-        let content = a.web_data_rpc("quick.export", &json!({})).unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let (b, pb) = quick_coord("repl_user_b");
-        b.web_data_rpc("quick.add", &json!({ "kind": "date", "text": "本机的$Y" }))
-            .unwrap();
-        b.web_data_rpc(
-            "quick.import",
-            &json!({ "content": content, "strategy": "replace" }),
-        )
-        .unwrap();
-
-        let rows = quick_rows(&b);
-        assert!(
-            !rows.iter().any(|r| r["text"] == json!("本机的$Y")),
-            "replace 应清掉本机原有的用户条目"
-        );
-        assert_eq!(quick_row(&rows, "calc.u1")["text"], json!("得$RESULT"));
-        let _ = std::fs::remove_file(&pa);
-        let _ = std::fs::remove_file(&pb);
-    }
-
-    /// 用一份 system.phrases.toml 起一个带 data_dir 的 headless coordinator。
-    fn coord_with_phrase_toml(tag: &str, toml: &str) -> (Arc<Coordinator>, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("wind_phrase_reread_{tag}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("system.phrases.toml"), toml).unwrap();
-        let store = Arc::new(Store::open(dir.join("store.redb")).unwrap());
-        let c = Coordinator::new_headless_with_store(Config::default(), Some(&dir), store);
-        (c, dir)
-    }
-
-    fn system_codes(c: &Coordinator) -> Vec<(String, String)> {
-        c.web_data_rpc("phrase.listSystem", &json!({}))
-            .unwrap()
-            .as_array()
-            .expect("listSystem 应返回数组")
-            .iter()
-            .map(|v| {
-                (
-                    v["code"].as_str().unwrap().to_string(),
-                    v["text"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect()
-    }
-
-    /// phrase.resetSystem 应重读 TOML：手工编辑后无需重启服务即可生效。
-    #[test]
-    fn phrase_reset_system_rereads_toml() {
-        let (c, dir) = coord_with_phrase_toml("ok", "[[phrases]]\ncode = 'rq'\ntext = '$date'\n");
-
-        assert_eq!(system_codes(&c), vec![("rq".into(), "$date".into())]);
-
-        // 手工编辑：改文本 + 增一条
-        std::fs::write(
-            dir.join("system.phrases.toml"),
-            "[[phrases]]\ncode = 'rq'\ntext = '$datetime'\n\n[[phrases]]\ncode = 'xx'\ntext = '新增'\n",
-        )
-        .unwrap();
-
-        c.web_data_rpc("phrase.resetSystem", &json!({})).unwrap();
-
-        let mut got = system_codes(&c);
-        got.sort();
-        assert_eq!(
-            got,
-            vec![
-                ("rq".to_string(), "$datetime".to_string()),
-                ("xx".to_string(), "新增".to_string()),
-            ],
-            "重读后应取到编辑后的文本并含新增条目"
-        );
-    }
-
-    /// TOML 语法错误时必须回退到启动缓存，绝不能把库里系统短语清空。
-    #[test]
-    fn phrase_reset_system_falls_back_on_broken_toml() {
-        let (c, dir) =
-            coord_with_phrase_toml("broken", "[[phrases]]\ncode = 'rq'\ntext = '$date'\n");
-
-        // 写坏 TOML（未闭合引号）
-        std::fs::write(
-            dir.join("system.phrases.toml"),
-            "[[phrases]]\ncode = 'rq\ntext = ",
-        )
-        .unwrap();
-
-        c.web_data_rpc("phrase.resetSystem", &json!({})).unwrap();
-
-        assert_eq!(
-            system_codes(&c),
-            vec![("rq".to_string(), "$date".to_string())],
-            "解析失败应沿用启动缓存，不得清空系统短语"
-        );
-    }
-
-    #[test]
-    fn json_diff_sparse() {
-        let base = json!({ "a": 1, "t": { "x": 1, "y": 2 }, "same": "v" });
-        let cfg = json!({ "a": 9, "t": { "x": 1, "y": 20 }, "same": "v" });
-        let d = json_diff(&base, &cfg).unwrap();
-        // 仅含变化项：a + t.y
-        assert_eq!(d, json!({ "a": 9, "t": { "y": 20 } }));
-        // 完全相同 → None
-        assert!(json_diff(&base, &base).is_none());
-    }
-
-    /// ★★ `custom_mappings` 必须整表进 override，不能只写变化的那一行。
-    ///
-    /// 读侧 `merge_toml` 对它是**整体替换**（否则用户删不掉方案作者写的行）。写侧若照常
-    /// 逐键下钻，两条各自合理的规则合起来就是数据丢失：用户改一行 ⇒ override 只有那一行
-    /// ⇒ 整体替换 ⇒ 作者写的其余行全没了。
-    ///
-    /// 断言落在「**没被改的那一行在不在 diff 里**」——只断言「改的那行在」的话，
-    /// 逐键下钻的实现照样通过。
-    #[test]
-    fn json_diff_keeps_custom_mappings_atomic() {
-        let base = json!({
-            "punct": { "mode": "follow", "custom_mappings": { ".": ["。"], ",": ["，"] } }
-        });
-        // 用户只改了 `.` 那一行，`,` 原样不动。
-        let cfg = json!({
-            "punct": { "mode": "follow", "custom_mappings": { ".": ["·"], ",": ["，"] } }
-        });
-        let d = json_diff(&base, &cfg).unwrap();
-        assert_eq!(
-            d.pointer("/punct/custom_mappings"),
-            Some(&json!({ ".": ["·"], ",": ["，"] })),
-            "★ 整张表都要进 override——逐键 diff 只会写 `.` 那一行，读侧整体替换后 `,` 丢失"
-        );
-        // 表没变时不该无谓地写进 override（否则每次打开设置页保存都在冻结一份快照）。
-        assert!(json_diff(&base, &base).is_none(), "未改动时不得产生 diff");
-        // 同层的其余键仍走稀疏 diff——原子只对 `custom_mappings` 一个键成立。
-        let mode_only = json!({
-            "punct": { "mode": "english", "custom_mappings": { ".": ["。"], ",": ["，"] } }
-        });
-        assert_eq!(
-            json_diff(&base, &mode_only).unwrap(),
-            json!({ "punct": { "mode": "english" } }),
-            "只改 mode 时不该把整表也写进 override"
-        );
-    }
-
-    /// 只读旁路字段不得随 saveConfig 落进 override。
-    ///
-    /// 失败形态很隐蔽：override 里多一段 `[effectiveCodetable]`，方案照常能用，但该方案
-    /// 的所有码表行为从此被冻结在用户打开设置页那一刻——之后改全局配置对它不再有效，
-    /// 而用户从没动过那些项。
-    #[test]
-    fn save_config_strips_readonly_sidecar() {
-        let cfg = json!({
-            "schema": { "id": "wubi86" },
-            "engine": { "type": "codetable", "codetable": { "punct_commit": true } },
-            "effectiveCodetable": { "punct_commit": true, "z_key_repeat": false },
-        });
-        let stripped = strip_readonly_fields(&cfg);
-        assert!(
-            stripped.get("effectiveCodetable").is_none(),
-            "旁路字段应被剥掉，实际 {stripped}"
-        );
-        // 其余内容原样保留——剥错了会静默丢配置。
-        assert_eq!(
-            stripped.pointer("/engine/codetable/punct_commit"),
-            Some(&json!(true))
-        );
-        assert_eq!(stripped.pointer("/schema/id"), Some(&json!("wubi86")));
-
-        // 没有旁路字段时原样返回（不因为多一次 clone 就改变结构）。
-        let plain = json!({ "engine": { "type": "codetable" } });
-        assert_eq!(strip_readonly_fields(&plain), plain);
-
-        // 与 diff 串起来看：剥之后，方案文件没写过的旁路键不会被判成「新增」。
-        let base = json!({ "schema": { "id": "wubi86" }, "engine": { "type": "codetable" } });
-        let d = json_diff(&base, &stripped).unwrap_or(json!({}));
-        assert!(
-            d.get("effectiveCodetable").is_none(),
-            "diff 里不该出现旁路字段，实际 {d}"
-        );
-
-        // ★ 逐个覆盖 READONLY_SIDECAR_FIELDS，而不是只测其中一个：新增旁路字段却忘了
-        // 登记，正是这个坑的复发形态，只测 effectiveCodetable 的话照样全绿。
-        for f in READONLY_SIDECAR_FIELDS {
-            let mut one = json!({ "schema": { "id": "wubi86" } });
-            one.as_object_mut()
-                .unwrap()
-                .insert((*f).to_string(), json!("任意值"));
-            let s = strip_readonly_fields(&one);
-            assert!(s.get(*f).is_none(), "旁路字段 {f} 未被剥掉，实际 {s}");
-            assert_eq!(
-                s.pointer("/schema/id"),
-                Some(&json!("wubi86")),
-                "剥 {f} 时误伤了真实配置"
-            );
-        }
-    }
-
-    /// `[overlay]` 段经 getConfig → 改 → saveConfig 往返，并**立即体现在 overlay 注册表里**。
-    ///
-    /// 这条锁的是「设置页把一个普通方案变成 overlay 方案（快符）」的整条通路。它之所以
-    /// 几乎不需要新代码，正是这次下沉的收益：`[overlay]` 住在方案文件里，于是方案配置
-    /// 已有的读（getConfig 三层合并）、写（saveConfig 稀疏 diff 落 override）、生效
-    /// （read_schema 的 merge_toml）三条通路全部现成——原先它住在 config.toml 的
-    /// StructList 数组里，这三样一样都够不着。
-    #[test]
-    fn schema_overlay_section_roundtrips_through_save_config() {
-        let dir = std::env::temp_dir().join("wind_webdata_overlay_rt");
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        // 出厂是个**普通**码表方案：没有 [overlay] 段。
-        std::fs::write(
-            schemas.join("zz_rt.schema.toml"),
-            "[schema]\nid = \"zz_rt\"\nname = \"往返\"\n\
-             [engine]\ntype = \"codetable\"\n[engine.codetable]\nmax_code_length = 4\n",
-        )
-        .unwrap();
-        let ov_dir = dir.join("overrides");
-        std::fs::create_dir_all(&ov_dir).unwrap();
-
-        let store_path = std::env::temp_dir().join("wind_webdata_overlay_rt.redb");
-        let _ = std::fs::remove_file(&store_path);
-        let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
-        let c = Coordinator::new_headless_with_store_override(
-            wind_config::Config::default(),
-            Some(&dir),
-            store,
-            Some(ov_dir.clone()),
-        );
-
-        // 起点：不是 overlay 方案。
-        assert!(
-            c.engine_mgr().overlay_index_of("zz_rt").is_none(),
-            "出厂无 [overlay] 段，不该在注册表里"
-        );
-        let mut cfg = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_rt" }))
-            .unwrap();
-        assert!(
-            cfg.get("overlay").is_none_or(|v| v.is_null()),
-            "未配置时 overlay 应缺省/为 null，实际 {cfg}"
-        );
-
-        // 设置页动作：加上 [overlay] 段并保存。
-        cfg.as_object_mut().unwrap().insert(
-            "overlay".to_string(),
-            json!({ "kind": "special", "show_all_on_enter": true, "candidate_layout": "vertical" }),
-        );
-        c.web_data_rpc("schema.saveConfig", &json!({ "id": "zz_rt", "cfg": cfg }))
-            .unwrap();
-
-        // 落盘的是**稀疏 diff**：只有改动项进 override，方案文件的其余定义仍可透传。
-        let written = std::fs::read_to_string(ov_dir.join("zz_rt.toml")).unwrap();
-        assert!(
-            written.contains("[overlay]"),
-            "override 未写入 [overlay]：{written}"
-        );
-
-        // 生效：注册表整表随 invalidate 重建，该方案成为 overlay 方案。
-        c.engine_mgr().invalidate_schema("zz_rt");
-        let idx = c
-            .engine_mgr()
-            .overlay_index_of("zz_rt")
-            .expect("保存后应进 overlay 注册表");
-        let e = c.engine_mgr().overlay_modes()[idx as usize].clone();
-        assert!(e.spec.show_all_on_enter);
-        assert_eq!(e.spec.candidate_layout, wind_config::LayoutIntent::Vertical);
-        assert_eq!(e.name, "往返", "override 未提及的字段仍来自方案文件");
-
-        let _ = std::fs::remove_file(&store_path);
-    }
-
-    /// 设置页区分「跟随方案」与「用户选的来源」要看方案文件自己的 files——合并值答不了。
-    #[test]
-    fn get_config_exposes_aux_code_base_files_and_strips_it_on_save() {
-        let dir =
-            std::env::temp_dir().join(format!("wind_webdata_aux_base_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        std::fs::write(
-            schemas.join("zz_py.schema.toml"),
-            "[schema]\nid = \"zz_py\"\nname = \"拼\"\n[engine]\ntype = \"pinyin\"\n\
-             [engine.aux_code]\nfiles = [\"aux_code/stroke.txt\"]\n",
-        )
-        .unwrap();
-        let ov = dir.join("overrides");
-        std::fs::create_dir_all(&ov).unwrap();
-        std::fs::write(
-            ov.join("zz_py.toml"),
-            "[engine.aux_code]\nfiles = [\"schema:wubi86\"]\n",
-        )
-        .unwrap();
-        let store = std::sync::Arc::new(wind_store::Store::open(dir.join("s.redb")).unwrap());
-        let c = Coordinator::new_headless_with_store_override(
-            wind_config::Config::default(),
-            Some(&dir),
-            store,
-            Some(ov.clone()),
-        );
-        let v = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_py" }))
-            .unwrap();
-        assert_eq!(
-            v["auxCodeBaseFiles"],
-            json!(["aux_code/stroke.txt"]),
-            "方案文件自己的 files"
-        );
-        assert_eq!(
-            v["engine"]["aux_code"]["files"],
-            json!(["schema:wubi86"]),
-            "合并值是 override 的"
-        );
-        // 原样回传不能把旁路字段写进 override。
-        c.web_data_rpc("schema.saveConfig", &json!({ "id": "zz_py", "cfg": v }))
-            .unwrap();
-        let saved = std::fs::read_to_string(ov.join("zz_py.toml")).unwrap();
-        assert!(
-            !saved.contains("auxCodeBaseFiles"),
-            "旁路字段必须剥掉：{saved}"
-        );
-        assert!(saved.contains("schema:wubi86"), "用户的选择保留：{saved}");
-    }
-
-    /// 连续辅助码的内部项（`continuous`、`preedit_separator`）不进设置页，手写在 override 里；
-    /// 设置页改别的项（这里关 `direct`）走 getConfig → saveConfig 时不能把它们抹掉。
-    #[test]
-    fn save_config_keeps_internal_aux_keys() {
-        let dir =
-            std::env::temp_dir().join(format!("wind_webdata_aux_internal_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        std::fs::write(
-            schemas.join("zz_sp.schema.toml"),
-            "[schema]\nid = \"zz_sp\"\nname = \"双\"\n[engine]\ntype = \"pinyin\"\n\
-             [engine.pinyin]\nscheme = \"shuangpin\"\n\
-             [engine.aux_code]\nfiles = [\"aux_code/t.txt\"]\n",
-        )
-        .unwrap();
-        let ov = dir.join("overrides");
-        std::fs::create_dir_all(&ov).unwrap();
-        std::fs::write(
-            ov.join("zz_sp.toml"),
-            "[engine.aux_code]\nenabled = true\ndirect = true\n\
-             continuous = false\npreedit_separator = \"\"\n",
-        )
-        .unwrap();
-        let store = std::sync::Arc::new(wind_store::Store::open(dir.join("s.redb")).unwrap());
-        let c = Coordinator::new_headless_with_store_override(
-            wind_config::Config::default(),
-            Some(&dir),
-            store,
-            Some(ov.clone()),
-        );
-        let mut v = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_sp" }))
-            .unwrap();
-        assert_eq!(v["engine"]["aux_code"]["continuous"], json!(false));
-        assert_eq!(v["engine"]["aux_code"]["preedit_separator"], json!(""));
-        v["engine"]["aux_code"]["direct"] = json!(false);
-        c.web_data_rpc("schema.saveConfig", &json!({ "id": "zz_sp", "cfg": v }))
-            .unwrap();
-        let saved: toml::Value =
-            toml::from_str(&std::fs::read_to_string(ov.join("zz_sp.toml")).unwrap()).unwrap();
-        let aux = &saved["engine"]["aux_code"];
-        assert_eq!(aux.get("direct").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(aux.get("continuous").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(
-            aux.get("preedit_separator").and_then(|v| v.as_str()),
-            Some(""),
-            "{saved}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 三态控件的读侧契约：`getConfig` 必须让设置页分得清「作者写的」与「用户改的」。
-    ///
-    /// 场景：某方案在自己的文件里声明了 `short_code_yield_level`（作者基线），用户又在
-    /// 设置页把它改成别的值（override 层）。三份数据各答一个问题：
-    ///
-    /// ⚠️ 用自造的 `zz_ct` 而不是 wubi86 是**刻意的**：内置方案从 0.119 起一项都不声明
-    /// （理由见 `data/schemas/wubi86.schema.toml`），拿它当夹具会让这条随出厂配置的调整
-    /// 而失效。这个形态如今只出现在用户自己装的第三方码表上，夹具必须自己造出来。
-    ///
-    /// | 字段 | 回答的问题 | 本例取值 |
-    /// | --- | --- | --- |
-    /// | `engine.codetable`（合并值） | 现在按什么跑 | 2 |
-    /// | `followedCodetable` | 取消覆盖后变成什么 | 3（作者值） |
-    /// | `codetableOverride` | 这一项是不是用户改的 | 有 ⇒ 是 |
-    ///
-    /// ⚠️ 缺了 `followedCodetable` 就只能拿合并值当回落值，于是「取消覆盖」在界面上
-    /// 什么都不变（仍显示 2），用户以为没生效；缺了 `codetableOverride` 则分不清作者值
-    /// 与用户值，方案自带的那一项会被显示成「用户已改」。
-    #[test]
-    fn schema_get_config_separates_author_baseline_from_user_override() {
-        let dir = std::env::temp_dir().join("wind_webdata_ct_tristate");
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        // 方案作者基线：出简让全 3；顶码那一项作者没写 ⇒ 该跟随全局。
-        std::fs::write(
-            schemas.join("zz_ct.schema.toml"),
-            "[schema]
-id = \"zz_ct\"
-name = \"三态\"
-             [engine]
-type = \"codetable\"
-             [engine.codetable]
-max_code_length = 4
-short_code_yield_level = 3
-",
-        )
-        .unwrap();
-        // 用户覆盖层：把它改成 2。
-        let ov_dir = dir.join("overrides");
-        std::fs::create_dir_all(&ov_dir).unwrap();
-        std::fs::write(
-            ov_dir.join("zz_ct.toml"),
-            "[engine.codetable]
-short_code_yield_level = 2
-",
-        )
-        .unwrap();
-
-        let mut cfg = wind_config::Config::default();
-        // 全局基线给顶码一个与结构体零值不同的取值，好让「跟随全局」这一路可被断言。
-        cfg.schema.codetable.top_code_commit = true;
-        let c = Coordinator::new_headless_with_override(cfg, Some(&dir), Some(ov_dir.clone()));
-        let got = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_ct" }))
-            .unwrap();
-
-        assert_eq!(
-            got.pointer("/engine/codetable/short_code_yield_level"),
-            Some(&json!(2)),
-            "合并值应是用户改后的那个，实际 {got}"
-        );
-        assert_eq!(
-            got.pointer("/effectiveCodetable/short_code_yield_level"),
-            Some(&json!(2)),
-            "当前生效值同上"
-        );
-        assert_eq!(
-            got.pointer("/followedCodetable/short_code_yield_level"),
-            Some(&json!(3)),
-            "回落值必须是**作者基线**，不含 override 层"
-        );
-        assert_eq!(
-            got.pointer("/codetableOverride/short_code_yield_level"),
-            Some(&json!(2)),
-            "override 层原文要原样给出（判某项是不是用户改的）"
-        );
-
-        // 作者没写、用户也没改的那一项：回落值来自全局，且不在 override 层里。
-        assert_eq!(
-            got.pointer("/followedCodetable/top_code_commit"),
-            Some(&json!(true)),
-            "作者没写时回落值取全局基线"
-        );
-        assert!(
-            got.pointer("/codetableOverride/top_code_commit").is_none(),
-            "没改过的项不该出现在 override 层，实际 {}",
-            got.pointer("/codetableOverride").unwrap()
-        );
-
-        // 反向对照：没有 override 文件时，回落值与生效值一致（否则上面的差异可能来自
-        // 别的原因，而不是「剥掉了 override 层」）。
-        std::fs::remove_file(ov_dir.join("zz_ct.toml")).unwrap();
-        c.engine_mgr().invalidate_schema("zz_ct");
-        let got2 = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_ct" }))
-            .unwrap();
-        assert_eq!(
-            got2.pointer("/effectiveCodetable/short_code_yield_level"),
-            Some(&json!(3)),
-            "删掉 override 后生效值回到作者值"
-        );
-        assert_eq!(
-            got2.pointer("/followedCodetable/short_code_yield_level"),
-            Some(&json!(3))
-        );
-        assert_eq!(
-            got2.pointer("/codetableOverride"),
-            Some(&json!({})),
-            "无 override 文件时给空对象而不是缺字段——UI 少一次 null 分支"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 写侧：回传 `null` 就是「取消覆盖」——该键从 override 里消失，该项回到方案作者的值。
-    ///
-    /// 这条链**不需要 core 添任何东西**：`json_to_toml` 跳过 null，而 `saveConfig` 是拿
-    /// **方案文件基线**（不含 override）做 diff，两条既有性质合起来正好是三态要的语义。
-    /// 正因为它是「两个无关性质凑出来的」，改任一侧都会静默破坏它，故必须端到端钉住。
-    ///
-    /// 同时验稀疏性：同一次保存里另一项照常写入，不因为有人被取消而受牵连。
-    #[test]
-    fn save_config_null_cancels_one_override_and_keeps_the_others() {
-        let dir = std::env::temp_dir().join("wind_webdata_ct_cancel");
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        std::fs::write(
-            schemas.join("zz_cx.schema.toml"),
-            "[schema]\nid = \"zz_cx\"\nname = \"取消\"\n\
-             [engine]\ntype = \"codetable\"\n\
-             [engine.codetable]\nmax_code_length = 4\nshort_code_yield_level = 3\n",
-        )
-        .unwrap();
-        let ov_dir = dir.join("overrides");
-        std::fs::create_dir_all(&ov_dir).unwrap();
-        std::fs::write(
-            ov_dir.join("zz_cx.toml"),
-            "[engine.codetable]\nshort_code_yield_level = 2\npunct_commit = false\n",
-        )
-        .unwrap();
-
-        let c = Coordinator::new_headless_with_override(
-            wind_config::Config::default(),
-            Some(&dir),
-            Some(ov_dir.clone()),
-        );
-        let mut cfg = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_cx" }))
-            .unwrap();
-
-        // 设置页动作：取消「出简让全」的覆盖（写 null），另一项照旧勾着（写实值）。
-        let ct = cfg
-            .pointer_mut("/engine/codetable")
-            .and_then(|v| v.as_object_mut())
-            .expect("码表段应在");
-        ct.insert("short_code_yield_level".to_string(), Value::Null);
-        ct.insert("punct_commit".to_string(), json!(false));
-        c.web_data_rpc("schema.saveConfig", &json!({ "id": "zz_cx", "cfg": cfg }))
-            .unwrap();
-
-        let written = std::fs::read_to_string(ov_dir.join("zz_cx.toml")).unwrap();
-        assert!(
-            !written.contains("short_code_yield_level"),
-            "取消覆盖的键必须从 override 里消失，实际:\n{written}"
-        );
-        assert!(
-            written.contains("punct_commit"),
-            "同一次保存里仍勾着的项不该被牵连，实际:\n{written}"
-        );
-
-        // 生效面：该项回到**方案作者**的 3（不是全局的默认值），另一项仍是用户的 false。
-        c.engine_mgr().invalidate_schema("zz_cx");
-        let got = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_cx" }))
-            .unwrap();
-        assert_eq!(
-            got.pointer("/effectiveCodetable/short_code_yield_level"),
-            Some(&json!(3)),
-            "取消覆盖后应回到方案作者写的值"
-        );
-        assert!(
-            got.pointer("/codetableOverride/short_code_yield_level")
-                .is_none(),
-            "override 层不该再有它（否则设置页下次打开仍显示为已勾选）"
-        );
-        assert_eq!(
-            got.pointer("/codetableOverride/punct_commit"),
-            Some(&json!(false)),
-            "另一项的覆盖要原样留着"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn schema_get_config_graceful_without_data_dir() {
-        // data_dir=None（coord helper）→ 无方案文件 → getConfig 返回 {}，saveConfig 报错（无基础）。
-        let c = coord("schema");
-        let r = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "pinyin" }))
-            .unwrap();
-        assert!(r.is_object() && r.as_object().unwrap().is_empty());
-        assert!(
-            c.web_data_rpc("schema.saveConfig", &json!({ "id": "pinyin", "cfg": {} }))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn stats_summary_rich_fields() {
-        use wind_store::stats::CommitSource;
-        let c = coord("stats_summary_rich");
-        // 今日：中文 2(码长4,首选) + 英文 2(临英,次选)
-        c.debug_record_commit("你好", 4, 0, CommitSource::Candidate);
-        c.debug_record_commit("ab", 0, 1, CommitSource::TempEnglish);
-        let r = c.web_data_rpc("stats.summary", &json!({})).unwrap();
-        assert_eq!(r["today_chinese"], 2);
-        assert_eq!(r["today_english"], 2);
-        assert_eq!(r["today_chars"], 4);
-        assert_eq!(r["total_chars"], 4);
-        assert_eq!(r["active_days"], 1);
-        assert!((r["avg_code_len"].as_f64().unwrap() - 4.0).abs() < 1e-9);
-        assert!(
-            (r["first_select_rate"].as_f64().unwrap() - 0.5).abs() < 1e-9,
-            "首选率=首选1/总选2=0.5"
-        );
-    }
-
-    #[test]
-    fn stats_daily_rich_shape() {
-        use wind_store::stats::CommitSource;
-        let c = coord("stats_daily_rich");
-        c.debug_record_commit("你好", 4, 0, CommitSource::Candidate);
-        c.stat_collector().unwrap().flush(); // 落库才能被 daily 区间读到
-        let today = wind_store::stats_report::today_str();
-        let r = c
-            .web_data_rpc("stats.daily", &json!({ "from": today, "to": today }))
-            .unwrap();
-        let arr = r.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        let d = &arr[0];
-        assert_eq!(d["d"], today);
-        assert_eq!(d["tc"], 2);
-        assert_eq!(d["cc"], 2);
-        assert_eq!(d["cls"], 4);
-        assert_eq!(d["h"].as_array().unwrap().len(), 24);
-        assert_eq!(d["cpd"][0], 1);
-    }
-
-    /// Task 2：拼音类方案（pinyin_simp / double_pinyin）写入共享 "pinyin" 存储，
-    /// 跨方案 id 互读能取到同一份用户词。
-    #[test]
-    fn pinyin_and_shuangpin_share_userdict() {
-        use std::io::Write;
-        // 写两个拼音类方案 schema.toml，让 data_schema_id 折叠到 "pinyin"
-        let base_dir = std::env::temp_dir().join("wind_coord_share_userdict_test");
-        let schemas = base_dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        for name in ["pinyin_simp", "double_pinyin"] {
-            let mut f = std::fs::File::create(schemas.join(format!("{name}.schema.toml"))).unwrap();
-            write!(f, "[engine]\ntype = \"pinyin\"\n").unwrap();
-        }
-
-        let db_path = std::env::temp_dir().join("wind_coord_share_userdict.redb");
-        let _ = std::fs::remove_file(&db_path);
-        let store = Arc::new(Store::open(&db_path).unwrap());
-        let c = Coordinator::new_headless_with_store(
-            Config::default(),
-            Some(base_dir.as_path()),
-            Arc::clone(&store),
-        );
-
-        // 用拼音方案加词
-        c.web_data_rpc(
-            "dict.add",
-            &json!({ "schemaId": "pinyin_simp", "code": "nihao", "text": "你好", "weight": 5 }),
-        )
-        .unwrap();
-
-        // 用双拼方案读，应读到同一条（共享 "pinyin" 存储键）
-        let list = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "double_pinyin", "offset": 0, "limit": 100 }),
-            )
-            .unwrap();
-        let items = list["items"].as_array().unwrap();
-        assert!(
-            items.iter().any(|it| it["text"] == "你好"),
-            "双拼应读到拼音下加的词（data_schema_id 共享）"
-        );
-    }
-
-    /// `dict.stats` 的**三个计数**（userWords / tempWords / shadowRules）都必须走
-    /// `data_schema_id` 折叠，与 `dict.listPaged` / `dict.search` / `shadow.list` 同源。
-    ///
-    /// 两次踩的是同一个坑。shadow 那次：统计拿 `double_pinyin` 去查，而写端 `candidate_op`
-    /// 折叠到 `"pinyin"`，于是双拼的规则计数恒显示 0。user_words / temp_words 那次更隐蔽
-    /// ——它们直传原始 id 一直留到 2026-09-23，理由写在注释里：「刻意保持原始 id，走
-    /// `write_data_schema_id` 的按来源分桶」。**那条理由不成立**：`manager.rs` 的
-    /// `write_data_schema_id` 对非混输方案直接返回 `data_schema_id(自身)`，不按来源分桶，
-    /// 分桶只发生在混输。实测 `dict.add(pinyin_simp)` 后 `listPaged(double_pinyin).total = 1`
-    /// 而 stats 两行都是 0——连全拼自己都是 0，只有方案 id 恰好等于 `"pinyin"` 时才碰巧对上。
-    ///
-    /// 本测试守两个方向，**缺一不可**：
-    /// - **正向**：拼音族折叠 ⇒ 全拼与双拼报同一个数（它们共享同一份词，是设计）。
-    /// - **反向**：码表方案 `wubi_like` 报自己的数，**不等于**拼音族那个数。没有这一条，
-    ///   把 `data_schema_id(id)` 误写成常量 `"pinyin"` 也能让正向断言全绿。
-    #[test]
-    fn dict_stats_counts_all_follow_data_schema_folding() {
-        use std::io::Write;
-        let base_dir = std::env::temp_dir().join("wind_coord_stats_fold_all");
-        let schemas = base_dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        for name in ["pinyin_simp", "double_pinyin"] {
-            let mut f = std::fs::File::create(schemas.join(format!("{name}.schema.toml"))).unwrap();
-            write!(f, "[engine]\ntype = \"pinyin\"\n").unwrap();
-        }
-        // 反向对照方案：非拼音族 ⇒ `data_schema_id` 返回自身 id，不参与折叠。
-        {
-            let mut f = std::fs::File::create(schemas.join("wubi_like.schema.toml")).unwrap();
-            write!(f, "[engine]\ntype = \"codetable\"\n").unwrap();
-        }
-
-        let db_path = std::env::temp_dir().join("wind_coord_stats_fold_all.redb");
-        let _ = std::fs::remove_file(&db_path);
-        let store = Arc::new(Store::open(&db_path).unwrap());
-        // `dict.stats` 遍历的是**已启用方案**（`config.schema.available`），不是目录扫描结果
-        // ——只写 schema.toml 不够，方案都得在这份清单里才会出现在统计中。
-        let mut cfg = Config::default();
-        cfg.schema.available = vec![
-            "pinyin_simp".into(),
-            "double_pinyin".into(),
-            "wubi_like".into(),
-        ];
-        cfg.schema.active = "pinyin_simp".into();
-        let c =
-            Coordinator::new_headless_with_store(cfg, Some(base_dir.as_path()), Arc::clone(&store));
-
-        // 全拼下写一条用户词 + 置顶一条（写端都折叠 → 落在 "pinyin"）。
-        c.web_data_rpc(
-            "dict.add",
-            &json!({ "schemaId": "pinyin_simp", "code": "nihao", "text": "你好", "weight": 5 }),
-        )
-        .unwrap();
-        c.web_data_rpc(
-            "shadow.pin",
-            &json!({ "schemaId": "pinyin_simp", "code": "hao", "word": "好", "position": 0 }),
-        )
-        .unwrap();
-        // 码表方案下写两条，数量**刻意与拼音族不同**——相等的话反向断言就退化成恒真。
-        for (code, text) in [("aaaa", "工"), ("bbbb", "王")] {
-            c.web_data_rpc(
-                "dict.add",
-                &json!({ "schemaId": "wubi_like", "code": code, "text": text, "weight": 5 }),
-            )
-            .unwrap();
-        }
-
-        // 临时词没有设置页写入口，由引擎写端落库——那里走 `write_data_schema_id`，拼音族
-        // 已经折叠成 "pinyin"，所以这里直接写折叠后的桶。条数与用户词**刻意错开**
-        // （拼音族 2 条、码表 3 条），免得 tempWords 的断言碰巧与 userWords 同值而放过串线。
-        for (code, text) in [("haoya", "好呀"), ("nihao", "你好")] {
-            store.learn_temp_word("pinyin", code, text, 500, 0).unwrap();
-        }
-        for (code, text) in [("cccc", "又"), ("dddd", "大"), ("eeee", "月")] {
-            store
-                .learn_temp_word("wubi_like", code, text, 500, 0)
-                .unwrap();
-        }
-
-        let stats = c.web_data_rpc("dict.stats", &json!({})).unwrap();
-        let rows = stats.as_array().expect("stats 是数组");
-        let row_of = |id: &str| -> Value {
-            rows.iter()
-                .find(|r| r["schemaId"] == id)
-                .cloned()
-                .unwrap_or(Value::Null)
-        };
-
-        // tempWords：只把 `count_temp_words(&data_schema)` 退回 `count_temp_words(id)` 时，
-        // 只有这三条会红——userWords 与 shadowRules 的断言对它全绿。
-        assert_eq!(
-            row_of("pinyin_simp")["tempWords"],
-            2,
-            "全拼须报出拼音桶里的临时词"
-        );
-        assert_eq!(
-            row_of("double_pinyin")["tempWords"],
-            2,
-            "双拼与全拼共享临时词，须报同一个数"
-        );
-        assert_eq!(
-            row_of("wubi_like")["tempWords"],
-            3,
-            "码表方案报自己桶里的临时词"
-        );
-
-        // 正向：拼音族两行报同一个数。
-        assert_eq!(
-            row_of("pinyin_simp")["userWords"],
-            1,
-            "全拼须报出自己加的那条词"
-        );
-        assert_eq!(
-            row_of("double_pinyin")["userWords"],
-            1,
-            "双拼与全拼共享同一份用户词（data_schema_id 折叠到 \"pinyin\"），须报同一个数"
-        );
-        assert_eq!(row_of("pinyin_simp")["shadowRules"], 1, "全拼报 1 条规则");
-        assert_eq!(
-            row_of("double_pinyin")["shadowRules"],
-            1,
-            "双拼须报出折叠后的规则数（与全拼共享同一条）"
-        );
-
-        // 反向：码表方案不参与折叠，报自己的 2 条。
-        assert_eq!(
-            row_of("wubi_like")["userWords"],
-            2,
-            "码表方案须报自己桶里的条数，不受拼音族折叠影响"
-        );
-    }
-
-    // 默认导出段的测试随 `default_dict_sections` 搬到了 `wind_coordinator::dict_transfer_api`
-    // （pinyin_default_export_sections_include_shadow）。
-
-    /// ★★ 论坛 t281：在设置里关掉扩展词库，保存后它仍在出词。
-    ///
-    /// 设置端一次保存先 `setDictEnabled(x, false)`，再 `saveConfig(打开对话框时的快照)`。
-    /// 快照里的 `dictionaries` 只要与方案文件基线不同（之前翻过任一扩展库开关就是如此），
-    /// `json_diff` 就会把整份**旧**数组写进 override，冲掉刚落盘的 `enabled = false`。
-    /// 词库开关的唯一写入口是 `setDictEnabled`，`saveConfig` 不得经由快照改它。
-    #[test]
-    fn save_config_snapshot_does_not_clobber_dict_toggle() {
-        let dir =
-            std::env::temp_dir().join(format!("wind_webdata_dict_toggle_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        std::fs::write(
-            schemas.join("zz_en.schema.toml"),
-            "[schema]\nid = \"zz_en\"\nname = \"英\"\n[engine]\ntype = \"english\"\n\
-             [[dictionaries]]\nid = \"main\"\npath = \"en/main.dict.yaml\"\ndefault = true\n\
-             [[dictionaries]]\nid = \"en_it\"\npath = \"en/it.dict.yaml\"\ndefault_enabled = true\n\
-             [[dictionaries]]\nid = \"en_x\"\npath = \"en/x.dict.yaml\"\ndefault_enabled = true\n",
-        )
-        .unwrap();
-        let ov = dir.join("overrides");
-        std::fs::create_dir_all(&ov).unwrap();
-        let store = std::sync::Arc::new(wind_store::Store::open(dir.join("s.redb")).unwrap());
-        let c = Coordinator::new_headless_with_store_override(
-            wind_config::Config::default(),
-            Some(&dir),
-            store,
-            Some(ov.clone()),
-        );
-        let toggle = |dict: &str, on: bool| {
-            c.web_data_rpc(
-                "schema.setDictEnabled",
-                &json!({ "id": "zz_en", "dictId": dict, "enabled": on }),
-            )
-            .unwrap();
-        };
-        // 早先翻过另一个扩展库 ⇒ 合并值的 dictionaries 已与方案文件基线不同。
-        toggle("en_x", false);
-        let snapshot = c
-            .web_data_rpc("schema.getConfig", &json!({ "id": "zz_en" }))
-            .unwrap();
-
-        // 同一次保存：先关 en_it，再回传打开对话框时的旧快照（顺带改一个普通字段）。
-        toggle("en_it", false);
-        let mut cfg = snapshot.clone();
-        cfg["schema"]["name"] = json!("英文改名");
-        c.web_data_rpc("schema.saveConfig", &json!({ "id": "zz_en", "cfg": cfg }))
-            .unwrap();
-
-        let merged = c.engine_mgr().schema_merged("zz_en").expect("方案在");
-        let enabled_of = |id: &str| {
-            merged
-                .dictionaries
-                .iter()
-                .find(|d| d.id == id)
-                .and_then(|d| d.enabled)
-        };
-        let saved = std::fs::read_to_string(ov.join("zz_en.toml")).unwrap();
-        assert_eq!(
-            enabled_of("en_it"),
-            Some(false),
-            "刚关掉的 en_it 被快照冲掉了：{saved}"
-        );
-        assert_eq!(
-            enabled_of("en_x"),
-            Some(false),
-            "早先关掉的 en_x 仍关：{saved}"
-        );
-        assert_eq!(merged.schema.name, "英文改名", "普通字段照常保存");
-        assert!(
-            !saved.contains("path"),
-            "override 的 dictionaries 只许 {{id, enabled}} 稀疏项，不得冻结整份定义：{saved}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Task 3：schema.list 每个拼音方案应携带 scheme 字段（full/shuangpin），非拼音方案为空串。
-    #[test]
-    fn schema_list_exposes_scheme() {
-        use std::io::Write;
-        let base_dir = std::env::temp_dir().join("wind_coord_schema_list_scheme_test");
-        let schemas = base_dir.join("schemas");
-        std::fs::create_dir_all(&schemas).unwrap();
-        // 创建全拼方案
-        {
-            let mut f = std::fs::File::create(schemas.join("pinyin_full.schema.toml")).unwrap();
-            write!(
-                f,
-                "[engine]\ntype = \"pinyin\"\n[engine.pinyin]\nscheme = \"full\"\n"
-            )
-            .unwrap();
-        }
-        // 创建双拼方案
-        {
-            let mut f =
-                std::fs::File::create(schemas.join("double_pinyin_sp.schema.toml")).unwrap();
-            write!(
-                f,
-                "[engine]\ntype = \"pinyin\"\n[engine.pinyin]\nscheme = \"shuangpin\"\n"
-            )
-            .unwrap();
-        }
-        let db_path = std::env::temp_dir().join("wind_webdata_schema_list_scheme.redb");
-        let _ = std::fs::remove_file(&db_path);
-        let store = Arc::new(Store::open(&db_path).unwrap());
-        let c = Coordinator::new_headless_with_store(
-            Config::default(),
-            Some(base_dir.as_path()),
-            Arc::clone(&store),
-        );
-
-        let list = c.web_data_rpc("schema.list", &json!({})).unwrap();
-        let arr = list.as_array().unwrap();
-
-        // 必须有方案
-        assert!(!arr.is_empty(), "schema.list 应返回非空数组");
-        // 每项都应有 scheme 键
-        for item in arr.iter() {
-            assert!(
-                item.get("scheme").is_some(),
-                "每个方案项应有 scheme 字段，缺失于: {item}"
-            );
-        }
-        // 全拼方案 scheme="full"
-        let full = arr.iter().find(|s| s["id"] == "pinyin_full");
-        assert!(full.is_some(), "应有 pinyin_full 方案");
-        assert_eq!(full.unwrap()["scheme"], "full", "全拼方案 scheme 应为 full");
-        // 双拼方案 scheme="shuangpin"
-        let sp = arr.iter().find(|s| s["id"] == "double_pinyin_sp");
-        assert!(sp.is_some(), "应有 double_pinyin_sp 方案");
-        assert_eq!(
-            sp.unwrap()["scheme"],
-            "shuangpin",
-            "双拼方案 scheme 应为 shuangpin"
-        );
-    }
-
-    /// 英文方案是可切换方案：出现在 schema.list 里，且 engineType 自成一档。
-    ///
-    /// `is_pinyin()` 对 `type = "english"` 走的是「主词库 dict_type 是不是 rime_pinyin」
-    /// 那条兜底分支，英文词库是 `type = "english"`，于是会一路落到 `"codetable"`——
-    /// 设置页的类型徽章就会把英文标成「码表」。故 `resolve_engine_type` 必须显式分流。
-    #[test]
-    fn english_schema_listed_with_its_own_engine_type() {
-        use std::io::Write;
-        let base_dir = std::env::temp_dir().join("wind_coord_schema_list_english_test");
-        let schemas = base_dir.join("schemas");
-        let _ = std::fs::remove_dir_all(&base_dir);
-        std::fs::create_dir_all(&schemas).unwrap();
-        {
-            let mut f = std::fs::File::create(schemas.join("en_test.schema.toml")).unwrap();
-            write!(
-                f,
-                "[schema]\nid = \"en_test\"\n[engine]\ntype = \"english\"\n"
-            )
-            .unwrap();
-        }
-        // 反向对照：显式 hidden 的方案必须仍被挡在列表外。少了这条，上面的断言在
-        // 「hidden 过滤整个失效」时也会通过——那才是去掉 english 的 hidden 时最该防的回归。
-        {
-            let mut f = std::fs::File::create(schemas.join("en_hidden.schema.toml")).unwrap();
-            write!(
-                f,
-                "[schema]\nid = \"en_hidden\"\nhidden = true\n[engine]\ntype = \"english\"\n"
-            )
-            .unwrap();
-        }
-        let db_path = std::env::temp_dir().join("wind_webdata_schema_list_english.redb");
-        let _ = std::fs::remove_file(&db_path);
-        let store = Arc::new(Store::open(&db_path).unwrap());
-        let c = Coordinator::new_headless_with_store(
-            Config::default(),
-            Some(base_dir.as_path()),
-            Arc::clone(&store),
-        );
-
-        let list = c.web_data_rpc("schema.list", &json!({})).unwrap();
-        let arr = list.as_array().unwrap();
-
-        let en = arr.iter().find(|s| s["id"] == "en_test");
-        assert!(en.is_some(), "英文方案应出现在 schema.list 中：{arr:?}");
-        assert_eq!(
-            en.unwrap()["engineType"],
-            "english",
-            "英文方案的 engineType 应为 english，落成 codetable 会让类型徽章显示为「码表」"
-        );
-        assert!(
-            !arr.iter().any(|s| s["id"] == "en_hidden"),
-            "hidden = true 的方案默认不得出现在列表中：{arr:?}"
-        );
-
-        // includeHidden = true：隐藏方案出现，且带 hidden 标志供设置页区分该行能配什么。
-        let list2 = c
-            .web_data_rpc("schema.list", &json!({ "includeHidden": true }))
-            .unwrap();
-        let arr2 = list2.as_array().unwrap();
-        let hid = arr2
-            .iter()
-            .find(|s| s["id"] == "en_hidden")
-            .expect("includeHidden 时隐藏方案应出现");
-        assert_eq!(hid["hidden"], true, "隐藏方案应带 hidden = true");
-        let vis = arr2.iter().find(|s| s["id"] == "en_test").unwrap();
-        assert_eq!(vis["hidden"], false, "非隐藏方案的 hidden 应为 false");
-    }
-
-    /// 设置页「辅助码来源」的可选项：码表方案（不含请求方自己、不含非码表方案）+ aux_code/*.txt。
-    #[test]
-    fn schema_aux_code_sources_lists_codetable_schemas_and_tables() {
-        let dir = std::env::temp_dir().join(format!("wind_webdata_aux_src_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("schemas");
-        std::fs::create_dir_all(schemas.join("aux_code")).unwrap();
-        std::fs::write(
-            schemas.join("pinyin.schema.toml"),
-            "[schema]\nid = \"pinyin\"\nname = \"拼\"\n[engine]\ntype = \"pinyin\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("zz_wb.schema.toml"),
-            "[schema]\nid = \"zz_wb\"\nname = \"测五\"\nhidden = true\n[engine]\ntype = \"codetable\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("aux_code/zz_named.txt"),
-            "# name: 小鹤\n李=mz\n",
-        )
-        .unwrap();
-        std::fs::write(schemas.join("aux_code/zz_plain.txt"), "李=mz\n").unwrap();
-        let store_path = dir.join("s.redb");
-        let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
-        let c = Coordinator::new_headless_with_store_override(
-            wind_config::Config::default(),
-            Some(&dir),
-            store,
-            None,
-        );
-        let v = c
-            .web_data_rpc("schema.auxCodeSources", &json!({ "id": "pinyin" }))
-            .unwrap();
-        let schemas_v = v["schemas"].as_array().unwrap();
-        assert!(
-            schemas_v
-                .iter()
-                .any(|s| s["id"] == "zz_wb" && s["name"] == "测五"),
-            "隐藏的码表方案也列出"
-        );
-        assert!(
-            !schemas_v.iter().any(|s| s["id"] == "pinyin"),
-            "请求方自己 / 非码表不列"
-        );
-        let files = v["files"].as_array().unwrap();
-        assert!(
-            files
-                .iter()
-                .any(|f| f["path"] == "aux_code/zz_named.txt" && f["label"] == "小鹤")
-        );
-        assert!(
-            files
-                .iter()
-                .any(|f| f["path"] == "aux_code/zz_plain.txt" && f["label"] == "zz_plain"),
-            "无头时退回文件名"
-        );
-    }
-
-    #[test]
-    fn dict_list_paged_sort() {
-        let c = coord("dict_sort");
-        for (code, text, weight) in [("ab", "B词", 10i32), ("aa", "A词", 30), ("ac", "C词", 5)] {
-            c.web_data_rpc(
-                "dict.add",
-                &json!({ "schemaId": "wb", "code": code, "text": text, "weight": weight }),
-            )
-            .unwrap();
-        }
-        // weight asc：5 → 10 → 30
-        let r = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "wb", "offset": 0, "limit": 10,
-                          "sortBy": "weight", "sortOrder": "asc" }),
-            )
-            .unwrap();
-        let items = r["items"].as_array().unwrap();
-        assert_eq!(items[0]["weight"], 5, "asc 首项应为最小权重");
-        assert_eq!(items[2]["weight"], 30, "asc 末项应为最大权重");
-        // weight desc：30 → 10 → 5
-        let r2 = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "wb", "offset": 0, "limit": 10,
-                          "sortBy": "weight", "sortOrder": "desc" }),
-            )
-            .unwrap();
-        assert_eq!(r2["items"][0]["weight"], 30, "desc 首项应为最大权重");
-        // 跨页切片：asc offset=1 limit=1 取排序后第 2 条（weight=10）
-        let r3 = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "wb", "offset": 1, "limit": 1,
-                          "sortBy": "weight", "sortOrder": "asc" }),
-            )
-            .unwrap();
-        assert_eq!(r3["total"], 3, "跨页切片 total 不变");
-        assert_eq!(r3["items"][0]["weight"], 10, "offset=1 asc 应取 weight=10");
-        // 不传 sortBy 行为不变（total 正确）
-        let r4 = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "wb", "offset": 0, "limit": 10 }),
-            )
-            .unwrap();
-        assert_eq!(r4["total"], 3, "不传 sortBy 应保持原有行为");
-    }
-
-    /// ★ `freq.listPaged` 的三条路必须彼此自洽（与 `dict.listPaged` 同款判据）。
-    ///
-    /// 这个入口和 `dict.listPaged` 是同一个模式、同一次改造：不搜不排序走 store 的流式
-    /// 分页，要排序走全量，搜索走一遍扫描分两组。拆开之后最容易坏的同样是**三条彼此不
-    /// 一致**，而不是某一条本身。
-    #[test]
-    fn freq_list_paged_stays_consistent_across_its_three_paths() {
-        let c = coord("freq_paths");
-        let store = c.user_store().unwrap();
-        for (code, text) in [
-            ("nihao", "你好"),
-            ("nimen", "你们"),
-            ("haoya", "好呀"),
-            ("women", "我们"),
-        ] {
-            store.record_freq("py", code, text).unwrap();
-        }
-        let call = |p: Value| c.web_data_rpc("freq.listPaged", &p).unwrap();
-        let texts = |v: &Value| -> Vec<String> {
-            v["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|it| it["text"].as_str().unwrap_or("").to_string())
-                .collect()
-        };
-
-        // ① 流式路：分页拼接 == 一次取全部。
-        let all = call(json!({ "schemaId": "py", "offset": 0, "limit": 100 }));
-        assert_eq!(all["total"], json!(4));
-        let whole = texts(&all);
-        let mut stitched = Vec::new();
-        for off in [0, 2] {
-            let page = call(json!({ "schemaId": "py", "offset": off, "limit": 2 }));
-            assert_eq!(page["total"], json!(4), "翻页不得改变总数");
-            stitched.extend(texts(&page));
-        }
-        assert_eq!(stitched, whole, "分页拼接必须逐条等于一次取全部");
-
-        // ② 排序路：集合与 ① 相同。
-        let sorted = call(json!({
-            "schemaId": "py", "offset": 0, "limit": 100, "sortBy": "text", "sortDesc": false
-        }));
-        assert_eq!(sorted["total"], json!(4), "排序不得改变总数");
-        let (mut a, mut b) = (texts(&sorted), whole.clone());
-        a.sort();
-        b.sort();
-        assert_eq!(a, b, "排序路与流式路必须是同一批条目");
-
-        // ③ 搜索路：前缀命中在前、不重复；编码中段与词条内容也要能捞到。
-        let hit = call(json!({ "schemaId": "py", "prefix": "ni", "offset": 0, "limit": 100 }));
-        let got = texts(&hit);
-        assert_eq!(
-            hit["total"].as_u64().unwrap() as usize,
-            got.len(),
-            "total 必须等于实际条数"
-        );
-        let mut dedup = got.clone();
-        dedup.sort();
-        dedup.dedup();
-        assert_eq!(dedup.len(), got.len(), "同一条不得同时进两组");
-        assert_eq!(
-            &got[..2],
-            &["你好".to_string(), "你们".to_string()],
-            "编码前缀命中必须在前，实际 {got:?}"
-        );
-        // 只能由编码中段命中的那条。
-        let mid = texts(&call(
-            json!({ "schemaId": "py", "prefix": "ya", "offset": 0, "limit": 100 }),
-        ));
-        assert!(
-            mid.contains(&"好呀".to_string()),
-            "编码中段命中丢了：{mid:?}"
-        );
-        // 只能由词条内容命中的那条。
-        let by_text = texts(&call(
-            json!({ "schemaId": "py", "prefix": "我", "offset": 0, "limit": 100 }),
-        ));
-        assert_eq!(by_text, vec!["我们".to_string()], "按词条内容搜不到");
-    }
-
-    #[test]
-    fn freq_list_paged_sort() {
-        let c = coord("freq_sort");
-        let store = c.user_store().unwrap();
-        // de=1次, ta=2次, shi=3次
-        store.record_freq("py", "de", "的").unwrap();
-        store.record_freq("py", "ta", "他").unwrap();
-        store.record_freq("py", "ta", "他").unwrap();
-        store.record_freq("py", "shi", "是").unwrap();
-        store.record_freq("py", "shi", "是").unwrap();
-        store.record_freq("py", "shi", "是").unwrap();
-        // count asc：1 → 2 → 3
-        let r = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "offset": 0, "limit": 10,
-                          "sortBy": "count", "sortOrder": "asc" }),
-            )
-            .unwrap();
-        let items = r["items"].as_array().unwrap();
-        assert_eq!(items[0]["count"], 1, "asc 首项应为 count=1");
-        assert_eq!(items[2]["count"], 3, "asc 末项应为 count=3");
-        // count desc：3 → 2 → 1
-        let r2 = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "offset": 0, "limit": 10,
-                          "sortBy": "count", "sortOrder": "desc" }),
-            )
-            .unwrap();
-        assert_eq!(r2["items"][0]["count"], 3, "desc 首项应为 count=3");
-        // 跨页切片：asc offset=1 limit=1 取第 2 条（count=2）
-        let r3 = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "offset": 1, "limit": 1,
-                          "sortBy": "count", "sortOrder": "asc" }),
-            )
-            .unwrap();
-        assert_eq!(r3["total"], 3, "跨页切片 total 不变");
-        assert_eq!(r3["items"][0]["count"], 2, "offset=1 asc 应取 count=2");
-        // 不传 sortBy 行为不变
-        let r4 = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "offset": 0, "limit": 10 }),
-            )
-            .unwrap();
-        assert_eq!(r4["total"], 3, "不传 sortBy 应保持原有行为");
-    }
-
-    #[test]
-    fn dict_list_paged_text_query() {
-        let c = coord("dict_text_query");
-        for (code, text, weight) in [
-            ("wghg", "程序", 3i32),
-            ("ggkg", "王中", 5),
-            ("aaaa", "工", 0),
-        ] {
-            c.web_data_rpc(
-                "dict.add",
-                &json!({ "schemaId": "wb", "code": code, "text": text, "weight": weight }),
-            )
-            .unwrap();
-        }
-        // 按词条内容搜索：编码 "wghg" 不以 "程" 开头，命中应来自 text 包含匹配。
-        let r = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "wb", "prefix": "程", "offset": 0, "limit": 10 }),
-            )
-            .unwrap();
-        assert_eq!(r["total"], 1, "词条内容搜索应命中 1 条");
-        assert_eq!(r["items"][0]["text"], "程序", "应按 text 内容命中");
-        // 按编码前缀搜索仍生效。
-        let r2 = c
-            .web_data_rpc(
-                "dict.listPaged",
-                &json!({ "schemaId": "wb", "prefix": "wg", "offset": 0, "limit": 10 }),
-            )
-            .unwrap();
-        assert_eq!(r2["total"], 1, "编码前缀搜索应命中 1 条");
-        assert_eq!(r2["items"][0]["code"], "wghg", "应按 code 前缀命中");
-    }
-
-    #[test]
-    fn freq_list_paged_text_query() {
-        let c = coord("freq_text_query");
-        let store = c.user_store().unwrap();
-        store.record_freq("py", "nihao", "你好").unwrap();
-        store.record_freq("py", "women", "我们").unwrap();
-        // 按词条内容搜索：编码 "nihao" 不以 "你" 开头，命中应来自 text 包含匹配。
-        let r = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "prefix": "你", "offset": 0, "limit": 10 }),
-            )
-            .unwrap();
-        assert_eq!(r["total"], 1, "词条内容搜索应命中 1 条");
-        assert_eq!(r["items"][0]["text"], "你好", "应按 text 内容命中");
-        // 按编码前缀搜索仍生效。
-        let r2 = c
-            .web_data_rpc(
-                "freq.listPaged",
-                &json!({ "schemaId": "py", "prefix": "women", "offset": 0, "limit": 10 }),
-            )
-            .unwrap();
-        assert_eq!(r2["total"], 1, "编码前缀搜索应命中 1 条");
-        assert_eq!(r2["items"][0]["text"], "我们", "应按 code 前缀命中对应词条");
-    }
-
-    #[test]
-    fn phrase_list_user_sort() {
-        let c = coord("phrase_sort");
-        for (code, text, weight) in [("b", "乙", 20i32), ("a", "甲", 50), ("c", "丙", 5)] {
-            c.web_data_rpc(
-                "phrase.add",
-                &json!({ "code": code, "text": text, "position": 0, "weight": weight }),
-            )
-            .unwrap();
-        }
-        // weight asc：5 → 20 → 50
-        let r = c
-            .web_data_rpc(
-                "phrase.listUser",
-                &json!({ "offset": 0, "limit": 10,
-                          "sortBy": "weight", "sortOrder": "asc" }),
-            )
-            .unwrap();
-        let items = r["items"].as_array().unwrap();
-        assert_eq!(items[0]["weight"], 5, "asc 首项应为 weight=5");
-        assert_eq!(items[2]["weight"], 50, "asc 末项应为 weight=50");
-        // weight desc：50 → 20 → 5
-        let r2 = c
-            .web_data_rpc(
-                "phrase.listUser",
-                &json!({ "offset": 0, "limit": 10,
-                          "sortBy": "weight", "sortOrder": "desc" }),
-            )
-            .unwrap();
-        assert_eq!(r2["items"][0]["weight"], 50, "desc 首项应为 weight=50");
-        // 跨页切片：asc offset=1 limit=1 取第 2 条（weight=20）
-        let r3 = c
-            .web_data_rpc(
-                "phrase.listUser",
-                &json!({ "offset": 1, "limit": 1,
-                          "sortBy": "weight", "sortOrder": "asc" }),
-            )
-            .unwrap();
-        assert_eq!(r3["total"], 3, "跨页切片 total 不变");
-        assert_eq!(r3["items"][0]["weight"], 20, "offset=1 asc 应取 weight=20");
-        // 不传 sortBy 行为不变
-        let r4 = c
-            .web_data_rpc("phrase.listUser", &json!({ "offset": 0, "limit": 10 }))
-            .unwrap();
-        assert_eq!(r4["total"], 3, "不传 sortBy 应保持原有行为");
-    }
-
-    #[test]
-    fn scheme_package_rpc_contract() {
-        let c = coord("schemepkg");
-        // exportPackage:不存在的方案 id → 错误
-        assert!(
-            c.web_data_rpc(
-                "scheme.exportPackage",
-                &json!({ "id": "zz_no_such_schema", "path": std::env::temp_dir().join("zz_no.zip").to_string_lossy() }),
-            )
-            .is_err(),
-            "不存在的方案应报错"
-        );
-        // previewImport:不存在的包路径 → 错误
-        assert!(
-            c.web_data_rpc(
-                "scheme.previewImport",
-                &json!({ "path": std::env::temp_dir().join("zz_no_such_pkg.zip").to_string_lossy() }),
-            )
-            .is_err()
-        );
-        // previewImport:真实构造的包 → 只读预览成功,形状正确
-        let t = std::env::temp_dir().join("wind_schemepkg_test");
-        let _ = std::fs::remove_dir_all(&t);
-        let (user, system) = (t.join("u"), t.join("s"));
-        std::fs::create_dir_all(user.join("my")).unwrap();
-        std::fs::create_dir_all(&system).unwrap();
-        std::fs::write(
-            user.join("my.schema.toml"),
-            "[schema]\nid=\"my\"\n[[dictionaries]]\npath=\"my/d.yaml\"\n",
-        )
-        .unwrap();
-        std::fs::write(user.join("my/d.yaml"), "d").unwrap();
-        let pkg = t.join("my.zip");
-        wind_transfer::scheme::export_package(
-            "my",
-            &user,
-            std::slice::from_ref(&system),
-            None,
-            &pkg,
-            "1.0.0",
-            "windows",
-            "t",
-        )
-        .unwrap();
-        let prev = c
-            .web_data_rpc(
-                "scheme.previewImport",
-                &json!({ "path": pkg.to_string_lossy() }),
-            )
-            .unwrap();
-        assert_eq!(
-            prev.get("package")
-                .and_then(|p| p.get("schema"))
-                .and_then(|s| s.get("id"))
-                .and_then(|v| v.as_str()),
-            Some("my"),
-            "v2 预览返回 package 元信息"
-        );
-        assert!(prev.get("willAdd").and_then(|v| v.as_array()).is_some());
-        assert!(prev.get("conflicts").and_then(|v| v.as_array()).is_some());
-        let _ = std::fs::remove_dir_all(&t);
-        // importPackage:不存在的包路径 → 错误
-        assert!(
-            c.web_data_rpc(
-                "scheme.importPackage",
-                &json!({ "path": std::env::temp_dir().join("zz_no_such_pkg.zip").to_string_lossy() }),
-            )
-            .is_err()
-        );
-    }
-
-    /// 主题包三个 RPC 的边界契约:导出→预览的闭环,以及各自的拒绝路径。
-    ///
-    /// **只测不写用户目录的那两条。** `theme.importPackage` 落盘到真实的用户主题目录
-    /// (`user_config_dir()/themes`),在测试进程里跑它会改开发机上真在用的配置——
-    /// scheme 那边的契约测试同样只测到「不存在的包报错」为止,取舍一致。导入本身的
-    /// 落盘/回滚语义由 `wind-transfer::theme` 的单测覆盖,那里目标目录是临时的。
-    ///
-    /// 导出取 data 层的主题:`coord()` 的 data 目录进得了主题搜索链,于是整条
-    /// 「按 slug 找目录 → 打包 → 读回」都在临时目录里闭合。
-    ///
-    /// ⚠️ 本用例**读**整条搜索链,而链首是真实的用户主题目录(`user_config_dir()/themes`,
-    /// 优先级高于测试的 data 层)。夹具 slug 因此必须取一个开发机上撞不上的名字——取
-    /// `mo` 那种通用名的话,谁的机器上恰好装了同名主题,断言就拿到别人的主题元信息,
-    /// 现象是「这台机器上恒红且报错指不到原因」。
-    #[test]
-    fn theme_package_rpc_contract() {
-        // 目录名带 pid:多 worktree / 多会话并行跑测试时固定名会互删夹具
-        // (同 `tests/custom_layer_hide_theme_import.rs` 的纪律)。
-        let tag = format!("themepkg{}", std::process::id());
-        let c = coord(&tag);
-        let data = std::env::temp_dir().join(format!("wind_webdata_data_{tag}"));
-        let out_dir =
-            std::env::temp_dir().join(format!("wind_themepkg_out-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out_dir);
-        std::fs::create_dir_all(&out_dir).unwrap();
-        let slug = "wind_test_themepkg_mo";
-
-        // exportPackage:穿越形态的 slug → **在碰盘之前**按 slug 拒掉。
-        //
-        // 断的是错误文案而不是 `is_err()`:这几个 slug 拼出来的路径本来就不存在,只断
-        // `is_err()` 的话,把守卫整段删掉也照样绿(全部落到「主题不存在」),那这条用例
-        // 就一个字节都没测到它声称要测的东西。
-        for bad in ["../evil", "a/b", r"a\b", ""] {
-            let e = c
-                .web_data_rpc(
-                    "theme.exportPackage",
-                    &json!({ "slug": bad, "path": out_dir.join("x.wtheme").to_string_lossy() }),
-                )
-                .unwrap_err()
-                .to_string();
-            assert!(
-                e.contains("非法主题 slug"),
-                "应在碰盘前按 slug 拒掉 {bad:?}，实际报的是: {e}"
-            );
-        }
-        // 反过来:合法但不存在的 slug 走的是**另一条**路(找不到),两条合起来才证明
-        // 守卫与「找不到」没有混成一条。
-        let e = c
-            .web_data_rpc(
-                "theme.exportPackage",
-                &json!({ "slug": "zz_no_such_theme", "path": out_dir.join("x.wtheme").to_string_lossy() }),
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(
-            e.contains("主题不存在") && !e.contains("非法主题 slug"),
-            "不存在的主题应报「主题不存在」，实际: {e}"
-        );
-
-        // 在 data 层造一个主题:theme.toml + 两个资源 + 预览图 + 一个无关文件。
-        let src = data.join("themes").join(slug);
-        std::fs::create_dir_all(src.join("assets/sub")).unwrap();
-        std::fs::write(
-            src.join("theme.toml"),
-            "[meta]\nname = \"水墨\"\nauthor = \"某人\"\nversion = \"1.2\"\n\n[window]\nbackground = { image = { ref = \"assets/bg.png\" } }\n",
-        )
-        .unwrap();
-        std::fs::write(src.join("assets/bg.png"), b"bg").unwrap();
-        std::fs::write(src.join("assets/sub/x.png"), b"x").unwrap();
-        std::fs::write(src.join("preview.png"), b"fake-png").unwrap();
-        std::fs::write(src.join("Thumbs.db"), b"junk").unwrap();
-
-        let pkg = out_dir.join("mo.wtheme");
-        let r = c
-            .web_data_rpc(
-                "theme.exportPackage",
-                &json!({ "slug": slug, "path": pkg.to_string_lossy() }),
-            )
-            .unwrap();
-        assert_eq!(r["ok"], json!(true));
-        assert_eq!(r["display_name"], json!("水墨"), "展示名取自主题 meta");
-        // 无关文件不计入,预览图不算资源(它由 has_preview 单独表达)。
-        assert_eq!(
-            r["asset_count"],
-            json!(2),
-            "只有 assets/** 下的两个文件算资源"
-        );
-        assert_eq!(
-            r["has_preview"],
-            json!(true),
-            "主题目录里的 preview.png 要带进包——这一步是 RPC 层独有的,crate 层的 export_package 不读它"
-        );
-        assert!(pkg.is_file(), "包要真的落在给定路径上");
-
-        // previewPackage:刚导出的包读得回来,且与导出回执逐字对得上(导出与导入两套
-        // 条目判据走岔时,这里当场炸)。
-        let prev = c
-            .web_data_rpc(
-                "theme.previewPackage",
-                &json!({ "path": pkg.to_string_lossy() }),
-            )
-            .unwrap();
-        assert_eq!(prev["display_name"], r["display_name"]);
-        assert_eq!(prev["asset_count"], r["asset_count"]);
-        assert_eq!(prev["has_preview"], r["has_preview"]);
-        assert_eq!(prev["author"], json!("某人"));
-        assert_eq!(prev["version"], json!("1.2"));
-
-        // 没有 preview.png 的主题:导出照样成,has_preview 如实为 false。
-        std::fs::remove_file(src.join("preview.png")).unwrap();
-        let bare = out_dir.join("mo-bare.wtheme");
-        let r2 = c
-            .web_data_rpc(
-                "theme.exportPackage",
-                &json!({ "slug": slug, "path": bare.to_string_lossy() }),
-            )
-            .unwrap();
-        assert_eq!(r2["has_preview"], json!(false));
-
-        // 导出失败不留残骸,更不毁掉落点上原有的包:拿一个必然过不了自检的主题
-        // (条目数越过包格式上限)去打到一个已有好包的路径上。
-        let many = data.join("themes").join("wind_test_themepkg_many");
-        std::fs::create_dir_all(many.join("assets")).unwrap();
-        std::fs::write(many.join("theme.toml"), "[meta]\nname = \"太多\"\n").unwrap();
-        for i in 0..=wind_transfer::theme::MAX_THEME_ENTRIES {
-            std::fs::write(many.join("assets").join(format!("{i}.png")), b"x").unwrap();
-        }
-        let good_before = std::fs::read(&bare).unwrap();
-        let e = c
-            .web_data_rpc(
-                "theme.exportPackage",
-                &json!({ "slug": "wind_test_themepkg_many", "path": bare.to_string_lossy() }),
-            )
-            .unwrap_err();
-        // `{:#}` 与 RPC 出口同口径:`dispatch` 就是按这个格式把错误发给设置端与 CLI 的
-        // （出口本身不许退回 `to_string()`,那条由 `dispatch` 自己的用例钉着）。
-        let e = format!("{e:#}");
-        // 断文案:否则哪天这个夹具因为别的原因(比如主题本身没通过 validate)提前失败,
-        // 下面那两条「旧包还在」就会在一个根本没走到打包的路径上假绿。
-        assert!(
-            e.contains("主题资源过多"),
-            "应因条目数越过上限而失败（导出前就按导入口径拦下），实际: {e}"
-        );
-        assert!(
-            e.contains("导出主题"),
-            "错误链要带上「导出主题」这层主语，实际: {e}"
-        );
-        assert_eq!(
-            std::fs::read(&bare).unwrap(),
-            good_before,
-            "失败的导出必须原封不动地留下落点上那份旧包"
-        );
-        assert!(
-            !bare.with_extension("wtheme.tmp").exists(),
-            "失败后不留 .tmp 残骸"
-        );
-
-        // previewPackage / importPackage:不存在的包路径 → 错误
-        let missing = out_dir.join("zz_no_such.wtheme");
-        for m in ["theme.previewPackage", "theme.importPackage"] {
-            assert!(
-                c.web_data_rpc(m, &json!({ "path": missing.to_string_lossy() }))
-                    .is_err(),
-                "{m} 对不存在的包应报错"
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&out_dir);
-    }
-
-    /// 分发包的说明元信息:包级 title/description 提到响应顶层,片段自带的说明进
-    /// `configPatch.info`。两者在本测试里**取不同的值**——取错了源也照绿是这类
-    /// "两个来源同名字段"最容易漏的假绿。
-    #[test]
-    fn scheme_preview_import_separates_package_and_patch_info() {
-        let c = coord("schemepkginfo");
-        let t = std::env::temp_dir().join("wind_schemepkginfo_test");
-        let _ = std::fs::remove_dir_all(&t);
-        std::fs::create_dir_all(&t).unwrap();
-        let pkg = t.join("info.wpkg");
-        {
-            let f = std::fs::File::create(&pkg).unwrap();
-            let mut w = zip::ZipWriter::new(f);
-            let opts = zip::write::SimpleFileOptions::default();
-            for (name, body) in [
-                (
-                    "package.toml",
-                    "[package]\nformat_version = 2\ntitle = \"包级标题\"\ndescription = \"包级说明\"\n",
-                ),
-                (
-                    "zz_info_probe.schema.toml",
-                    "[schema]\nid=\"zz_info_probe\"\n",
-                ),
-                (
-                    "config_patch.toml",
-                    "[package]\ntitle = \"片段级标题\"\ndescription = \"片段级说明\"\n\
-                     [ui.candidate]\nper_page = 9\n",
-                ),
-            ] {
-                use std::io::Write;
-                w.start_file(name, opts).unwrap();
-                w.write_all(body.as_bytes()).unwrap();
-            }
-            w.finish().unwrap();
-        }
-        let prev = c
-            .web_data_rpc(
-                "scheme.previewImport",
-                &json!({ "path": pkg.to_string_lossy() }),
-            )
-            .unwrap();
-        assert_eq!(prev["title"], json!("包级标题"), "包级说明提到顶层");
-        assert_eq!(prev["description"], json!("包级说明"));
-        let cp = prev.get("configPatch").expect("含 config_patch 应附 diff");
-        assert_eq!(
-            cp["info"]["title"],
-            json!("片段级标题"),
-            "片段自带的说明进 configPatch.info,不与包级混淆"
-        );
-        assert_eq!(cp["info"]["description"], json!("片段级说明"));
-        // 保留段不产出配置条目:entries 只有真配置键那一条。
-        let entries = cp["entries"].as_array().expect("entries 应为数组");
-        assert_eq!(entries.len(), 1, "{entries:?}");
-        assert_eq!(entries[0]["key"], json!("ui.candidate.per_page"));
-        let _ = std::fs::remove_dir_all(&t);
-    }
-
-    /// 信封路径的两形:写了说明 → 顶层带出(只写 title 时 description 不出现);
-    /// 没写 → 顶层与 configPatch 都没有说明字段。
-    #[test]
-    fn scheme_preview_import_text_info_present_and_absent() {
-        let c = coord("schemetextinfo");
-        let with_info = "[package]\nformat_version = 2\nkind = \"schema_text\"\n\
-                         title = \"快符方案\"\n\
-                         [[files]]\npath = \"zz_kf_info.schema.toml\"\ncontent = \"[schema]\\nid = 'kf'\\n\"\n";
-        let prev = c
-            .web_data_rpc("scheme.previewImportText", &json!({ "text": with_info }))
-            .unwrap();
-        assert_eq!(prev["title"], json!("快符方案"));
-        assert!(
-            prev.get("description").is_none(),
-            "没写的字段不输出: {prev}"
-        );
-
-        let without_info = "[package]\nformat_version = 2\nkind = \"schema_text\"\n\
-                            [[files]]\npath = \"zz_kf_info.schema.toml\"\ncontent = \"[schema]\\nid = 'kf'\\n\"\n\
-                            [[files]]\npath = \"config_patch.toml\"\ncontent = \"ui.candidate.per_page = 9\\n\"\n";
-        let prev = c
-            .web_data_rpc("scheme.previewImportText", &json!({ "text": without_info }))
-            .unwrap();
-        assert!(prev.get("title").is_none(), "无说明不输出 title: {prev}");
-        assert!(prev.get("description").is_none());
-        let cp = prev.get("configPatch").expect("含 config_patch 应附 diff");
-        assert!(cp.get("info").is_none(), "片段没写说明就没有 info: {cp}");
-    }
-
-    /// 文本信封 RPC 契约(只测只读与错误路径:importText 会真写用户 schemas 目录,
-    /// 落盘语义已在 wind-transfer::envelope 层覆盖——与 importPackage 同一取舍)。
-    #[test]
-    fn scheme_text_envelope_rpc_contract() {
-        let c = coord("schemetext");
-        let envelope = "[package]\nformat_version = 2\nkind = \"schema_text\"\n\
-                        [schema]\nid = \"kf\"\nversion = \"1.00.0\"\n\
-                        [[files]]\npath = \"zz_kf_probe.schema.toml\"\ncontent = \"[schema]\\nid = 'kf'\\n\"\n\
-                        [[files]]\npath = \"config_patch.toml\"\ncontent = \"ui.candidate.per_page = 9\\n\"\n";
-        let prev = c
-            .web_data_rpc("scheme.previewImportText", &json!({ "text": envelope }))
-            .unwrap();
-        // 形状与 path 版一致
-        assert_eq!(
-            prev.get("package")
-                .and_then(|p| p.get("schema"))
-                .and_then(|s| s.get("id"))
-                .and_then(|v| v.as_str()),
-            Some("kf")
-        );
-        assert!(prev.get("willAdd").and_then(|v| v.as_array()).is_some());
-        assert!(prev.get("conflicts").and_then(|v| v.as_array()).is_some());
-        // 配置片段随预览附带逐键 diff(不落盘、不应用)
-        let cp = prev.get("configPatch").expect("含 config_patch 应附 diff");
-        assert_eq!(cp["ok"], json!(true));
-        let entries = cp["entries"].as_array().expect("entries 应为数组");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["key"], json!("ui.candidate.per_page"));
-        assert_eq!(entries[0]["next"], json!(9));
-        assert!(
-            prev.get("willAdd")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().all(|v| v != "config_patch.toml"))
-                .unwrap_or(false),
-            "config_patch 不进文件清单"
-        );
-
-        // 非信封文本 → 错误带 not_schema_text: 前缀(设置端据此回落片段管线),两个方法一致。
-        for method in ["scheme.previewImportText", "scheme.importText"] {
-            let err = c
-                .web_data_rpc(method, &json!({ "text": "ui.candidate.per_page = 9\n" }))
-                .unwrap_err()
-                .to_string();
-            assert!(
-                err.contains(wind_transfer::envelope::NOT_SCHEMA_TEXT),
-                "{method} 对非信封文本须带回落前缀: {err}"
-            );
-        }
-        // 缺 text 参数 → 错误
-        assert!(
-            c.web_data_rpc("scheme.previewImportText", &json!({}))
-                .is_err()
-        );
-    }
-
-    /// P4a Review Focus 4：Replace 还原统计后，收集器下一次写盘不覆盖还原值。
-    #[test]
-    fn restore_stats_resets_collector() {
-        use wind_store::stat_collector::StatEvent;
-        let c = coord("restore_stats");
-        let store = c.user_store().cloned().unwrap();
-        let col = c.stat_collector().expect("采集器");
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        store
-            .put_daily_stat(
-                &today,
-                &wind_store::stats::DailyStats {
-                    chinese: 5,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        col.resume();
-        let out =
-            std::env::temp_dir().join(format!("wind_restore_stats_{}.zip", std::process::id()));
-        let _ = std::fs::remove_file(&out);
-        c.web_data_rpc(
-            "backup.create",
-            &json!({ "path": out.to_string_lossy(), "includeStats": true }),
-        )
-        .unwrap();
-        col.record(StatEvent {
-            timestamp: chrono::Local::now(),
-            chinese: 100,
-            english: 0,
-            punct: 0,
-            other: 0,
-            code_len: 2,
-            candidate_pos: 0,
-            keystrokes: 2,
-            schema_id: "wb".into(),
-            source: Default::default(),
-        });
-        c.web_data_rpc(
-            "backup.restore",
-            &json!({ "path": out.to_string_lossy(), "sections": ["stats"], "strategy": "replace" }),
-        )
-        .unwrap();
-        col.flush();
-        assert_eq!(
-            store.get_daily_stat(&today).unwrap().chinese,
-            5,
-            "收集器不得覆盖还原值"
-        );
-        let _ = std::fs::remove_file(&out);
-    }
-
-    #[test]
-    fn backup_rpc_contract() {
-        let c = coord("backuprpc");
-        // 种一条数据,create 到临时路径(coord 的 store 是临时 redb;文件域目录真实但只读不写:
-        // create 只读取 config/schemas/themes,不写入它们)
-        c.web_data_rpc(
-            "dict.add",
-            &json!({ "schemaId": "wb", "code": "a", "text": "工", "weight": 100 }),
-        )
-        .unwrap();
-        let out = std::env::temp_dir().join("wind_backup_rpc_test.zip");
-        let _ = std::fs::remove_file(&out);
-        let r = c
-            .web_data_rpc(
-                "backup.create",
-                &json!({ "path": out.to_string_lossy(), "includeStats": false }),
-            )
-            .unwrap();
-        assert!(r.get("manifest").is_some());
-        // inspect
-        let ins = c
-            .web_data_rpc("backup.inspect", &json!({ "path": out.to_string_lossy() }))
-            .unwrap();
-        assert_eq!(
-            ins.get("manifest")
-                .and_then(|m| m.get("kind"))
-                .and_then(|v| v.as_str()),
-            Some("backup")
-        );
-        // inspect 不存在的包 → 错误
-        assert!(
-            c.web_data_rpc(
-                "backup.inspect",
-                &json!({ "path": std::env::temp_dir().join("zz_no.zip").to_string_lossy() }),
-            )
-            .is_err()
-        );
-        // restore 仅数据域 sections(dict):写临时 store,不碰真实用户文件
-        c.web_data_rpc("dict.clear", &json!({ "schemaId": "wb" }))
-            .unwrap();
-        let rr = c
-            .web_data_rpc(
-                "backup.restore",
-                &json!({ "path": out.to_string_lossy(), "sections": ["dict"] }),
-            )
-            .unwrap();
-        assert!(
-            rr.get("restored")
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-        );
-        let listed = c
-            .web_data_rpc("dict.listPaged", &json!({ "schemaId": "wb", "limit": 10 }))
-            .unwrap();
-        assert_eq!(listed.get("total").and_then(|v| v.as_u64()), Some(1));
-        let _ = std::fs::remove_file(&out);
-    }
-
-    /// 按键总览的**降级标记**：`keys.key_actions` 段回落出厂值时，那张表的全局层
-    /// **不列出**，并经 `keysOverviewDegraded` 说明缺了什么。
-    ///
-    /// 不这么做的后果不是「少了点信息」，而是**把出厂默认当成用户的真实绑定展示**：
-    /// 用户对着一张看起来完全正常的表，怎么也对不上实际按键行为，唯一的线索埋在日志里。
-    ///
-    /// ★ 三条判据互相兜底，故都写进同一个用例：
-    /// ① 坏表的全局层消失；② 好表的全局层**一条不少**（一起清会把完好的那张也变空白）；
-    /// ③ 方案层照常列出（它来自方案文件，不受 `Config` 降级影响）。
-    /// 只测 ① 的话，「两张表全清」这种过头的实现照样绿。
-    /// ★ 方案层 `[key_actions]` 的组合键没有消费通路：列出但标 `ineffective: true`，且
-    /// **不遮盖**同名全局条目（全局那条照常列出、`ineffective: false`）。
-    ///
-    /// 对照：方案层的单键 / 修饰键条目照旧遮盖全局（`semicolon`）；会话表不受影响。
-    #[test]
-    fn keys_overview_marks_schema_combo_keys_ineffective_without_shadowing_global() {
-        let schema_cfg = json!({
-            "key_actions": {
-                "ctrl+alt+shift+j": "command:open(\"https://example.com\")",
-                "ctrl+shift+r": "toggle_mode",
-                "semicolon": "special:emoji",
-            },
-            "session_actions": { "comma": "page_prev" },
-        });
-        let mut cfg = wind_config::Config::default();
-        cfg.keys
-            .key_actions
-            .insert("ctrl+alt+shift+j".into(), "toggle_punct".into());
-        cfg.keys
-            .key_actions
-            .insert("semicolon".into(), "mix:quick_mix".into());
-
-        let (rows, _) = keys_overview_of(&cfg, &schema_cfg);
-        let pick = |key: &str| -> Vec<&Value> {
-            rows.iter()
-                .filter(|r| r["table"] == json!("lead") && r["key"] == json!(key))
-                .collect()
-        };
-
-        // 同名组合键：全局那条照常列出且生效，方案那条列出但不生效。
-        let j = pick("ctrl+alt+shift+j");
-        assert_eq!(j.len(), 2, "全局与方案两条都应列出：{j:?}");
-        assert!(
-            j.iter().any(|r| r["from"] == json!("global")
-                && r["action"] == json!("toggle_punct")
-                && r["ineffective"] == json!(false)),
-            "全局那条不得被遮盖：{j:?}"
-        );
-        assert!(
-            j.iter()
-                .any(|r| r["from"] == json!("schema") && r["ineffective"] == json!(true)),
-            "方案那条应标不生效：{j:?}"
-        );
-
-        // 只有方案层有的组合键：同样标不生效。
-        let r = pick("ctrl+shift+r");
-        assert_eq!(r.len(), 1);
-        assert_eq!(r[0]["ineffective"], json!(true));
-
-        // 对照：方案层单键照旧遮盖全局，且生效。
-        let semi = pick("semicolon");
-        assert_eq!(semi.len(), 1, "单键方案条目照旧遮盖全局：{semi:?}");
-        assert_eq!(semi[0]["from"], json!("schema"));
-        assert_eq!(semi[0]["ineffective"], json!(false));
-
-        // 字段恒在：每一条都带 `ineffective`（布尔）。
-        assert!(
-            rows.iter().all(|r| r["ineffective"].is_boolean()),
-            "ineffective 须恒在：{rows:?}"
-        );
-        // 会话表不受影响。
-        assert!(
-            rows.iter()
-                .filter(|r| r["table"] == json!("session"))
-                .all(|r| r["ineffective"] == json!(false))
-        );
-    }
-
-    #[test]
-    fn keys_overview_marks_degraded_table_and_spares_the_healthy_one() {
-        let schema_cfg = json!({
-            "key_actions": { "semicolon": "special:emoji" },
-            "session_actions": { "comma": "page_prev" },
-        });
-
-        let mut cfg = wind_config::Config::default();
-        cfg.keys
-            .key_actions
-            .insert("F7".into(), "special:number".into());
-        cfg.keys
-            .session_actions
-            .insert("apostrophe".into(), "none".into());
-
-        // 前置：无降级时两层都在，且**全局层确实非空**——否则下面「消失了」的断言
-        // 会因为它本来就是空的而恒绿。
-        let (clean, marker) = keys_overview_of(&cfg, &schema_cfg);
-        assert_eq!(marker, Value::Null, "无降级时标记须为显式 null");
-        let global_of = |rows: &[Value], table: &str| -> Vec<String> {
-            rows.iter()
-                .filter(|r| r["table"] == json!(table) && r["from"] == json!("global"))
-                .map(|r| r["key"].as_str().unwrap_or_default().to_string())
-                .collect()
-        };
-        assert!(
-            global_of(&clean, "lead").contains(&"F7".to_string()),
-            "前置：无降级时全局层的 F7 须在表里\n{clean:?}"
-        );
-        assert!(
-            global_of(&clean, "session").contains(&"apostrophe".to_string()),
-            "前置：无降级时全局层的 apostrophe 须在表里\n{clean:?}"
-        );
-
-        // 只有 `keys.key_actions` 降级（同段的 `session_actions` 完好）。
-        cfg.degradation = wind_config::config::ConfigDegradation {
-            sections: vec!["keys.key_actions".into()],
-            total_fallback: false,
-            unparsable: Vec::new(),
-        };
-        let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
-
-        assert!(
-            global_of(&rows, "lead").is_empty(),
-            "★ 不可信的全局层必须不列，而不是把出厂表当用户绑定展示\n{rows:?}"
-        );
-        assert!(
-            global_of(&rows, "session").contains(&"apostrophe".to_string()),
-            "★ 完好的那张表不该被牵连\n{rows:?}"
-        );
-        assert!(
-            rows.iter()
-                .any(|r| r["table"] == json!("lead") && r["from"] == json!("schema")),
-            "方案层来自方案文件，不受 Config 降级影响，须照常列出\n{rows:?}"
-        );
-
-        assert_eq!(
-            marker,
-            json!({
-                "tables": ["lead"],
-                "sections": ["keys.key_actions"],
-                "totalFallback": false,
-            }),
-            "★ 调用方须看得出「哪张表不完整、因为哪些段降级」；点分路径原样传出"
-        );
-
-        // 整份回落：两张表的全局层都不可信。
-        cfg.degradation = wind_config::config::ConfigDegradation {
-            sections: Vec::new(),
-            total_fallback: true,
-            unparsable: Vec::new(),
-        };
-        let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
-        assert!(
-            global_of(&rows, "lead").is_empty() && global_of(&rows, "session").is_empty(),
-            "整份回落时两张表的全局层都不该列\n{rows:?}"
-        );
-        assert_eq!(marker["tables"], json!(["lead", "session"]), "{marker}");
-        assert_eq!(marker["totalFallback"], json!(true), "{marker}");
-    }
-
-    /// ★★ session 表的判据必须覆盖**折算来源**，不只是同名的 `keys.session_actions`。
-    ///
-    /// 这条是审查退回的那个洞：`effective_session_actions()` 把 `page_keys` /
-    /// `select_char_keys` / `highlight_keys` / `select_key_groups` 四个组名列表折算成
-    /// 具体绑定，而段级降级**能**把它们单独定位（`narrow_bad_section` 对坏段的每个直接
-    /// 子键都做探针，不分子表还是标量/数组）。于是 `[keys] page_keys = "brackets"`
-    /// 这类手误 ⇒ `sections = ["keys.page_keys"]` ⇒ 只问 `keys.session_actions` 的旧判据
-    /// 返回 false ⇒ 总览照常列出折算自**出厂**组名的翻页键、标记还是 `null`。
-    ///
-    /// 逐个来源分别断言，不是只测 `page_keys`：四条共用一个 `any`，只测一条的话另外
-    /// 三条从列表里删掉用例照样绿。
-    #[test]
-    fn session_table_judgement_covers_every_folded_source() {
-        let schema_cfg = json!({ "session_actions": { "comma": "page_prev" } });
-        let mut cfg = wind_config::Config::default();
-        cfg.keys
-            .key_actions
-            .insert("F7".into(), "special:number".into());
-
-        let global_of = |rows: &[Value], table: &str| -> Vec<String> {
-            rows.iter()
-                .filter(|r| r["table"] == json!(table) && r["from"] == json!("global"))
-                .map(|r| r["key"].as_str().unwrap_or_default().to_string())
-                .collect()
-        };
-
-        // 前置：出厂 `page_keys` 等折算出的全局绑定确实非空，否则「消失了」恒真。
-        let (clean, _) = keys_overview_of(&cfg, &schema_cfg);
-        assert!(
-            !global_of(&clean, "session").is_empty(),
-            "前置：折算来的全局 session 绑定须非空\n{clean:?}"
-        );
-
-        for src in [
-            "keys.session_actions",
-            "keys.page_keys",
-            "keys.select_char_keys",
-            "keys.highlight_keys",
-            "keys.select_key_groups",
-        ] {
-            cfg.degradation = wind_config::config::ConfigDegradation {
-                sections: vec![src.into()],
-                total_fallback: false,
-                unparsable: Vec::new(),
-            };
-            let (rows, marker) = keys_overview_of(&cfg, &schema_cfg);
-            assert!(
-                global_of(&rows, "session").is_empty(),
-                "★ {src} 降级时 session 表的全局层必须不列——它是这张表的折算来源\n{rows:?}"
-            );
-            assert_eq!(marker["tables"], json!(["session"]), "{src}: {marker}");
-            assert_eq!(marker["sections"], json!([src]), "{src}: {marker}");
-            // lead 表与这些来源无关，一条都不该被牵连。
-            assert!(
-                global_of(&rows, "lead").contains(&"F7".to_string()),
-                "★ {src} 与 lead 表无关，不该牵连它\n{rows:?}"
-            );
-        }
-    }
-
-    /// `keysOverviewDegraded.sections` 只列**真正导致这些表不可信**的降级段。
-    ///
-    /// 传全量的话，`ui.font` 坏了也会出现在按键总览的「缺失原因」里，设置端照字面渲染
-    /// 就成了「字体那格坏了所以按键表不全」——一条自信的错误解释比不解释更糟。
-    #[test]
-    fn degraded_marker_lists_only_the_sections_that_caused_it() {
-        let schema_cfg = json!({});
-        let mut cfg = wind_config::Config::default();
-        cfg.keys
-            .key_actions
-            .insert("F7".into(), "special:number".into());
-        cfg.degradation = wind_config::config::ConfigDegradation {
-            // 一条相关（导致 lead 表不可信）、两条无关。
-            sections: vec!["keys.key_actions".into(), "ui.font".into(), "schema".into()],
-            total_fallback: false,
-            unparsable: Vec::new(),
-        };
-
-        let (_, marker) = keys_overview_of(&cfg, &schema_cfg);
-        assert_eq!(marker["tables"], json!(["lead"]), "{marker}");
-        assert_eq!(
-            marker["sections"],
-            json!(["keys.key_actions"]),
-            "★ 与按键表无关的降级段不得混进「缺失原因」\n{marker}"
-        );
-    }
-
-    /// 标记字段必须登记进 [`READONLY_SIDECAR_FIELDS`]，否则它会随 saveConfig 落进
-    /// override——方案文件里从此带着一段**某次启动的**降级快照，谁也不读、也没人会
-    /// 想到去删。（剥离行为本身由 `strip_readonly_fields` 那条用例逐字段覆盖。）
-    #[test]
-    fn keys_overview_degraded_is_registered_as_sidecar() {
-        assert!(
-            READONLY_SIDECAR_FIELDS.contains(&"keysOverviewDegraded"),
-            "旁路字段漏登记：{READONLY_SIDECAR_FIELDS:?}"
-        );
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;
 
 #[cfg(test)]
-mod phrase_shadowing_tests {
-    //! 「用户短语遮蔽系统条目」的可逆性：主键只有 `(code, text)` 一把，遮蔽行归属用户，
-    //! 于是**任何删掉该行的操作都会连带删掉那条系统短语**。每条这样的路径都必须补回缺失的
-    //! 系统条目，漏一条就是「系统短语莫名少了一条」——正是本特性早期版本的原始 bug。
-    use super::*;
-    use std::sync::Arc;
-    use wind_config::config::Config;
-    use wind_coordinator::Coordinator;
-    use wind_store::Store;
-
-    const SYS_CODE: &str = "date";
-    const SYS_TEXT: &str = "$Y年$M月$D日";
-
-    /// 带真实 `system.phrases.toml` 的无头协调器（`data_dir=None` 时补齐逻辑会整体早退，
-    /// 那样测出来的「通过」是假的——它根本没跑到被测代码）。
-    fn coord_with_sys_phrase(tag: &str) -> (Arc<Coordinator>, std::path::PathBuf) {
-        coord_with_sys_toml(tag, "")
-    }
-
-    /// `extra`：追加在 TOML 末尾的更多 `[[phrases]]` 条目。
-    fn coord_with_sys_toml(tag: &str, extra: &str) -> (Arc<Coordinator>, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!("wind_phrase_shadow_{tag}"));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        std::fs::write(
-            base.join("system.phrases.toml"),
-            format!(
-                "[[phrases]]\ncode = '{SYS_CODE}'\ntext = '{SYS_TEXT}'\nweight = 1000\nposition = 1\n{extra}"
-            ),
-        )
-        .unwrap();
-        let db = base.join("s.redb");
-        let store = Arc::new(Store::open(&db).unwrap());
-        let c = Coordinator::new_headless_with_store(Config::default(), Some(&base), store);
-        (c, base)
-    }
-
-    fn system_phrase_count(c: &Coordinator) -> usize {
-        c.user_store().unwrap().list_system_phrases().unwrap().len()
-    }
-
-    fn user_phrase_count(c: &Coordinator) -> usize {
-        c.user_store()
-            .unwrap()
-            .list_user_phrases_paged(None, 0, 99)
-            .unwrap()
-            .1
-    }
-
-    /// 前置校验：启动即完成系统短语入库，否则下面每个用例都在空库上跑、结论无意义。
-    #[test]
-    fn sanity_system_phrase_seeded_on_startup() {
-        let (c, base) = coord_with_sys_phrase("seed");
-        assert_eq!(system_phrase_count(&c), 1, "启动应把 TOML 系统短语同步入库");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// P3 审查 I2：`dict.reload` 载入手改的短语文件后，输入期短语层随之重建。
-    #[test]
-    fn dict_reload_rebuilds_phrase_layer() {
-        let (c, base) = coord_with_sys_phrase("reload_phrases");
-        let store = c.user_store().cloned().unwrap();
-        store.add_phrase("yx", "me@x.com", 0, 1800).unwrap();
-        c.web_data_rpc("phrase.list", &json!({})).ok();
-        let f = store.phrases_path();
-        std::fs::write(
-            &f,
-            std::fs::read_to_string(&f).unwrap() + "dzdz\t地址\t1800\n",
-        )
-        .unwrap();
-        let r = c.web_data_rpc("dict.reload", &json!({})).unwrap();
-        assert!(
-            r["reloaded"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v == "phrases"),
-            "{r}"
-        );
-        assert!(c.debug_phrase_texts("dzdz").contains(&"地址".to_string()));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// P3 审查 I1：数据目录里没有 system.phrases.toml 时短语迁移照样做（没有 TOML 就没有系统行），
-    /// 用户短语不能因此看不见。
-    #[test]
-    fn phrase_migration_runs_without_system_toml() {
-        let base = std::env::temp_dir().join("wind_phrase_no_toml");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
-        store
-            .legacy_put_phrase("yx", "me@x.com", 1800, 0, true, false, false, "")
-            .unwrap();
-        let c = Coordinator::new_headless_with_store(Config::default(), Some(&base), store.clone());
-        assert!(store.migrated_p3());
-        assert!(store.list_phrases().unwrap().iter().any(|p| p.code == "yx"));
-        assert!(c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// 删除遮蔽行 → 系统条目露出来（用户预期：删掉我加的那条，就该回到系统默认）。
-    #[test]
-    fn removing_shadowing_phrase_restores_system_entry() {
-        let (c, base) = coord_with_sys_phrase("remove");
-        let p = json!({ "code": SYS_CODE, "text": SYS_TEXT, "weight": 5000, "position": 9 });
-        c.web_data_rpc("phrase.add", &p).unwrap();
-        assert_eq!(user_phrase_count(&c), 1, "遮蔽行归用户");
-        assert_eq!(system_phrase_count(&c), 0, "系统条目被遮蔽");
-
-        c.web_data_rpc(
-            "phrase.remove",
-            &json!({ "code": SYS_CODE, "text": SYS_TEXT }),
-        )
-        .unwrap();
-        assert_eq!(user_phrase_count(&c), 0);
-        assert_eq!(
-            system_phrase_count(&c),
-            1,
-            "删掉遮蔽行后系统条目必须回来，而不是两条一起消失"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// 「清空用户短语」同理，且**不得**顺带重置用户对系统短语的编辑。
-    #[test]
-    fn clearing_user_phrases_restores_system_entry_without_resetting_edits() {
-        let (c, base) = coord_with_sys_toml(
-            "clear",
-            "[[phrases]]\ncode = 'other'\ntext = '别的'\nweight = 1\nposition = 0\n",
-        );
-        let store = c.user_store().cloned().unwrap();
-        // 另一条系统短语由用户改过权重（在系统短语列表里调过）
-        store
-            .update_phrase("other", "别的", None, None, Some(7), Some(4321))
-            .unwrap();
-
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": SYS_CODE, "text": SYS_TEXT, "weight": 5000, "position": 9 }),
-        )
-        .unwrap();
-        c.web_data_rpc("phrase.resetDefault", &json!({})).unwrap();
-
-        assert_eq!(user_phrase_count(&c), 0, "用户短语已清空");
-        assert!(
-            store
-                .list_system_phrases()
-                .unwrap()
-                .iter()
-                .any(|p| p.code == SYS_CODE),
-            "被遮蔽的系统条目须补回"
-        );
-        let other = store
-            .list_system_phrases()
-            .unwrap()
-            .into_iter()
-            .find(|p| p.code == "other")
-            .expect("另一条系统短语仍在");
-        assert_eq!(
-            (other.weight, other.position),
-            (4321, 7),
-            "清空用户短语不得重置用户对系统短语的编辑（补齐必须只补缺失，不能走 sync）"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// 改遮蔽行的编码 → 旧键被 remove，系统条目同样要补回。
-    #[test]
-    fn rekeying_shadowing_phrase_restores_system_entry() {
-        let (c, base) = coord_with_sys_phrase("rekey");
-        c.web_data_rpc(
-            "phrase.add",
-            &json!({ "code": SYS_CODE, "text": SYS_TEXT, "weight": 5000, "position": 0 }),
-        )
-        .unwrap();
-        assert_eq!(system_phrase_count(&c), 0);
-
-        c.web_data_rpc(
-            "phrase.update",
-            &json!({ "code": SYS_CODE, "text": SYS_TEXT, "newCode": "rq2" }),
-        )
-        .unwrap();
-        assert_eq!(
-            system_phrase_count(&c),
-            1,
-            "改键腾出原 (code,text) 后系统条目须补回"
-        );
-        assert_eq!(user_phrase_count(&c), 1, "改键后的用户短语仍在");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-}
+#[path = "phrase_shadowing_tests.rs"]
+mod phrase_shadowing_tests;
 
 /// 从 `.dict.yaml` 的 YAML 头读 `name:`，读不到返回空串（调用方回落文件名）。
 ///
@@ -11030,868 +4909,32 @@ fn dict_yaml_name(path: &std::path::Path) -> String {
 }
 
 #[cfg(test)]
-mod schema_key_gate_wiring_tests {
-    //! 改动方案文件 / 方案 override 的每个 RPC 落盘后都必须重建吃键集（GH#144 及同根）。
-    //!
-    //! 吃键集（DLL 据以决定哪些标点键交给 core）只在 `ConfigBundle` 构建时算一次，其中的
-    //! 跨方案并集读的正是方案文件与 override。这几个 RPC 都不经 `config.setItems`，漏接
-    //! `refresh_schema_derived_config` 的表现是「改了要重启才生效」，零日志。
-    //!
-    //! 为什么是**源码守卫**而不是端到端：导入 / 删除 / 还原写的是真实用户目录
-    //! （`Config::user_config_dir()`，由安装器的 datadir.conf 决定，测试进程改不了），跑起来
-    //! 会改开发机上正在用的配置——本文件的 scheme / theme 契约测试同样只测到「包不存在即报错」
-    //! 为止。重建本身的正确性由 wind-coordinator 的 `schema_punct_custom_mixed.rs` 端到端覆盖
-    //! （saveConfig / invalidate 两条路），这里只钉「每个入口都接上了」。
-
-    /// 取 `fn <name>(` 起到其首个 4 格缩进的闭合 `}` 为止的函数体（trait 默认方法都在 4 格
-    /// 缩进上闭合），不会越界带上下一个函数的文档注释。只扫文件中**第一个** `#[cfg(test)]`
-    /// 之前的部分——被守护的函数若挪到那之后，这里会报「找不到」而不是假绿。
-    fn fn_body(name: &str) -> &'static str {
-        let src = include_str!("lib.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
-        let head = format!("fn {name}(");
-        let start = prod.find(&head).unwrap_or_else(|| {
-            panic!("找不到 {head}——改名了，或挪到了第一个 #[cfg(test)] 之后？同步更新本守卫")
-        });
-        let rest = &prod[start + head.len()..];
-        let end = rest
-            .find("\n    }\n")
-            .unwrap_or_else(|| panic!("{head} 找不到函数体的闭合行"));
-        &rest[..end]
-    }
-
-    #[test]
-    fn schema_mutating_rpcs_refresh_key_gate() {
-        for name in [
-            "web_schema_save_config",
-            "web_schema_reset_config",
-            "web_schema_delete",
-            "web_scheme_import_package",
-            "web_scheme_import_text",
-            "web_backup_restore",
-        ] {
-            assert!(
-                fn_body(name).contains("refresh_schema_derived_config()"),
-                "{name} 改了方案文件 / override，却没重建吃键集（GH#144 同根）"
-            );
-        }
-    }
-
-    /// CLI `schema set/reset` 写完 override 后调的 `schema.invalidate` 在分派表里就地实现。
-    #[test]
-    fn schema_invalidate_arm_refreshes_key_gate() {
-        let src = include_str!("lib.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
-        let start = prod
-            .find("\"schema.invalidate\" =>")
-            .expect("分派表里找不到 schema.invalidate");
-        let arm_len = prod[start..]
-            .find("\n            }")
-            .expect("schema.invalidate 臂不再是块形式？同步更新本守卫");
-        let arm = &prod[start..start + arm_len];
-        assert!(arm.contains("refresh_schema_derived_config()"));
-    }
-}
+#[path = "lib_schema_key_gate_wiring_tests.rs"]
+mod schema_key_gate_wiring_tests;
 
 #[cfg(test)]
-mod followed_behavior_tests {
-    use super::*;
-
-    #[test]
-    fn followed_behavior_reads_global_values() {
-        let mut cfg = wind_config::Config::default();
-        cfg.ui.candidate.layout = "vertical".into();
-        cfg.ui.font.family = "霞鹜文楷".into();
-        cfg.ui.candidate.per_page = 9;
-        cfg.schema.pinyin.aux_code.enabled = true;
-        cfg.schema.pinyin.aux_code.max_phrase_len = 3;
-        cfg.schema.pinyin.aux_code.direct = true;
-        let v = followed_behavior_of(&cfg, Some("主题字体".into()));
-        assert_eq!(
-            v,
-            json!({
-                "layout": "vertical",
-                "fontFamily": "霞鹜文楷",
-                "perPage": 9,
-                "auxEnabled": true,
-                "auxMaxPhraseLen": 3,
-                "auxDirect": true,
-            })
-        );
-    }
-
-    /// 全局字体空 = 跟随主题 ⇒ 给主题的字体；主题也没给 ⇒ 空串（不是「默认」之类的占位词）。
-    #[test]
-    fn followed_behavior_font_falls_back_to_theme_then_empty() {
-        let mut cfg = wind_config::Config::default();
-        cfg.ui.font.family = String::new();
-        let v = followed_behavior_of(&cfg, Some("主题字体".into()));
-        assert_eq!(v["fontFamily"], "主题字体");
-        let v = followed_behavior_of(&cfg, None);
-        assert_eq!(v["fontFamily"], "");
-    }
-
-    /// 全局 layout 只认横竖两档：空串/未知值按运行时同一裁决落到横排。
-    #[test]
-    fn followed_behavior_layout_is_horizontal_or_vertical() {
-        let mut cfg = wind_config::Config::default();
-        cfg.ui.candidate.layout = String::new();
-        assert_eq!(followed_behavior_of(&cfg, None)["layout"], "horizontal");
-    }
-
-    #[test]
-    fn followed_behavior_is_a_readonly_sidecar() {
-        assert!(
-            READONLY_SIDECAR_FIELDS.contains(&"followedBehavior"),
-            "旁路字段漏登记：{READONLY_SIDECAR_FIELDS:?}"
-        );
-    }
-}
+#[path = "lib_followed_behavior_tests.rs"]
+mod followed_behavior_tests;
 
 #[cfg(test)]
-mod memory_stats_tests {
-    //! `system.memoryStats`（只读诊断）的回包形态。设置端「高级 → 性能 → 内存占用」卡片与
-    //! 「复制诊断信息」按它取数：字段恒在（缺数给 `null` / 空数组），客户端可无条件渲染。
-    use super::*;
-    use std::sync::Arc;
-    use wind_config::Config;
-    use wind_coordinator::Coordinator;
-    use wind_store::Store;
-
-    /// 一个自造码表方案 `zm1` 的数据目录 + store（不依赖 build_dev，不会静默跳过）。
-    /// `tag` 让并行的用例各用各的夹具目录——redb 是独占锁，两条用例同时开同一个 `s.redb`
-    /// 必有一条失败。
-    fn coord(tag: &str) -> Arc<Coordinator> {
-        let base = std::env::temp_dir().join(format!("wind_memstats-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let schemas = base.join("schemas");
-        std::fs::create_dir_all(schemas.join("zm1")).unwrap();
-        std::fs::write(
-            schemas.join("zm1.schema.toml"),
-            "[schema]\nid = \"zm1\"\nname = \"zm1\"\n[engine]\ntype = \"codetable\"\n\
-             [engine.codetable]\nmax_code_length = 4\n\
-             [[dictionaries]]\nid = \"main\"\npath = \"zm1/zm1.dict.yaml\"\ndefault = true\n",
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("zm1/zm1.dict.yaml"),
-            "---\nname: zm1\nversion: \"1\"\n...\n甲\ta\n",
-        )
-        .unwrap();
-        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
-        let mut cfg = Config::default();
-        cfg.schema.active = "zm1".into();
-        cfg.schema.available = vec!["zm1".into()];
-        Coordinator::new_headless_with_store(cfg, Some(&base), store)
-    }
-
-    /// storageStatus 报 meta.toml 里的实际格式版本，并带上写失败原因（没有时为 null）。
-    #[test]
-    fn storage_status_reports_actual_format_version_and_write_error() {
-        let c = coord("storage_status_actual");
-        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
-        assert_eq!(
-            v["format_version"],
-            wind_config::user_meta::KNOWN_FORMAT_VERSION
-        );
-        assert!(v["write_error"].is_null());
-        let dir = c
-            .user_store()
-            .unwrap()
-            .path()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        std::fs::write(
-            dir.join("meta.toml"),
-            "format_version = 3\ndir_id = \"x\"\n",
-        )
-        .unwrap();
-        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
-        assert_eq!(v["format_version"], 3, "报文件里的实际值");
-        assert_eq!(
-            v["known_format_version"],
-            wind_config::user_meta::KNOWN_FORMAT_VERSION
-        );
-    }
-
-    /// §2.5：数据文件的问题（坏行 / 隔离 / 已重建 / 未迁移）经 storageStatus 交给设置页。
-    #[test]
-    fn storage_status_lists_data_file_issues() {
-        let c = coord("storage_status_issues");
-        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
-        let f = root.join("pinyin").join("freq.table.yaml");
-        let g = root.join("stats").join("2026-10.toml");
-        wind_store::issues::report(&f, wind_store::issues::IssueKind::BadLines(3));
-        wind_store::issues::report(
-            &g,
-            wind_store::issues::IssueKind::Rebuilt {
-                kept_as: "2026-10.toml.corrupt-x".into(),
-            },
-        );
-        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
-        let issues = v["issues"].as_array().unwrap();
-        assert_eq!(issues.len(), 2, "{v}");
-        assert_eq!(issues[0]["path"], "pinyin/freq.table.yaml");
-        assert_eq!(issues[0]["kind"], "bad_lines");
-        assert_eq!(issues[0]["lines"], 3);
-        assert_eq!(issues[1]["path"], "stats/2026-10.toml");
-        assert_eq!(issues[1]["kind"], "rebuilt");
-        assert_eq!(issues[1]["kept_as"], "2026-10.toml.corrupt-x");
-        wind_store::issues::clear(&f);
-        wind_store::issues::clear(&g);
-    }
-
-    /// 用户数据设计 §7.1：`system.storageStatus` 报只读标志、原因与格式版本。正常构造的
-    /// 协调器不是只读；只读路径（meta.toml 版本更高）由 wind-coordinator 的
-    /// `tests/storage_readonly.rs` 验（trait 在那边不可调，这里验的是 RPC 的形状）。
-    #[test]
-    fn storage_status_reports_readonly_flag_and_versions() {
-        let c = coord("storage_status_reports_r");
-        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
-        assert_eq!(v["readonly"], false);
-        assert!(v["reason"].is_null());
-        assert_eq!(
-            v["format_version"],
-            wind_config::user_meta::KNOWN_FORMAT_VERSION
-        );
-        assert_eq!(
-            v["known_format_version"],
-            wind_config::user_meta::KNOWN_FORMAT_VERSION
-        );
-    }
-
-    #[test]
-    fn memory_stats_reports_process_schemas_and_structures() {
-        let c = coord("memory_stats_reports_pro");
-        let v = c.web_data_rpc("system.memoryStats", &json!({})).unwrap();
-
-        let p = &v["process"];
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            assert_eq!(p["kind"], "rss_anon");
-            assert!(p["bytes"].as_u64().unwrap() > 0);
-        }
-        #[cfg(windows)]
-        {
-            assert_eq!(p["kind"], "private");
-            assert!(p["bytes"].as_u64().unwrap() > 0);
-        }
-        assert!(p.get("bytes").is_some() && p.get("kind").is_some());
-
-        let schemas = v["schemas"].as_array().expect("schemas 是数组");
-        assert_eq!(schemas.len(), 1, "只有当前方案已加载：{v}");
-        assert_eq!(schemas[0]["id"], "zm1");
-        assert_eq!(schemas[0]["type"], "CodeTable");
-        assert!(schemas[0]["parts"].is_array());
-
-        assert!(v["reverseIndex"].is_array());
-        assert!(v["userText"].is_array());
-        assert!(v.get("userAssoc").is_some());
-        assert!(v.get("singleChar").is_some());
-        for k in ["chaiziBytes", "pinyinBytes", "commentBytes"] {
-            assert!(v["reverseLookup"][k].is_u64(), "reverseLookup.{k}：{v}");
-        }
-        assert!(
-            v["redb"].is_null(),
-            "全新用户目录不打开旧库，不该报它的缓存上限：{v}"
-        );
-        assert!(
-            v["dictCache"]["policy"].is_string(),
-            "dictCache.policy：{v}"
-        );
-        for k in [
-            "lockedBytes",
-            "lockFailedBytes",
-            "preloadedBytes",
-            "overBudgetBytes",
-        ] {
-            assert!(v["dictCache"][k].is_u64(), "dictCache.{k}：{v}");
-        }
-    }
-}
+#[path = "memory_stats_tests.rs"]
+mod memory_stats_tests;
 
 #[cfg(test)]
-mod system_stats_tests {
-    //! `dict.systemStats` 的回包形态：码表方案出各库分行 / 码长 / 重码，混输按成员并排。
-    use super::*;
-    use std::sync::Arc;
-    use wind_config::Config;
-    use wind_coordinator::Coordinator;
-    use wind_store::Store;
-
-    /// 码表 `zm1`（主库 + 停用扩展）+ 混输 `mx`（主码表 zm1，无拼音成员）。
-    fn coord(tag: &str) -> Arc<Coordinator> {
-        let base = std::env::temp_dir().join(format!("wind_sysstats-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let schemas = base.join("schemas");
-        std::fs::create_dir_all(schemas.join("zm1")).unwrap();
-        std::fs::write(
-            schemas.join("zm1.schema.toml"),
-            "[schema]\nid = \"zm1\"\nname = \"码一\"\n[engine]\ntype = \"codetable\"\n\
-             [engine.codetable]\nmax_code_length = 4\n\
-             [[dictionaries]]\nid = \"main\"\npath = \"zm1/zm1.dict.yaml\"\ndefault = true\n\
-             [[dictionaries]]\nid = \"ext\"\npath = \"zm1/ext.dict.yaml\"\ndefault_enabled = false\n",
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("zm1/zm1.dict.yaml"),
-            "---\nname: zm1\nversion: \"1\"\n...\n甲\ta\t9\n乙\ta\t5\n甲乙\taaaa\t1\n",
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("mx.schema.toml"),
-            "[schema]\nid = \"mx\"\nname = \"混\"\n[engine]\ntype = \"mixed\"\n\
-             [engine.mixed]\nprimary_schema = \"zm1\"\n",
-        )
-        .unwrap();
-        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
-        let mut cfg = Config::default();
-        cfg.schema.active = "zm1".into();
-        cfg.schema.available = vec!["zm1".into(), "mx".into()];
-        Coordinator::new_headless_with_store(cfg, Some(&base), store)
-    }
-
-    #[test]
-    fn codetable_shape_and_cache_flag() {
-        let c = coord("ct");
-        let v = c
-            .web_data_rpc("dict.systemStats", &json!({"schemaId": "zm1"}))
-            .unwrap();
-        assert_eq!(v["engineType"], "codetable");
-        assert_eq!(v["schemaName"], "码一");
-        assert_eq!(v["cached"], false);
-        assert_eq!(v["layers"][0]["kind"], "main");
-        assert_eq!(v["layers"][0]["entries"], 3);
-        assert_eq!(v["layers"][1]["enabled"], false);
-        assert!(v["layers"][1].get("entries").is_none(), "停用库只列不计");
-        assert_eq!(v["total"]["byLen"]["2"], 1);
-        assert_eq!(v["dup"]["groups"], 1);
-        assert_eq!(v["dup"]["top"][0]["texts"], json!(["甲", "乙"]));
-        assert_eq!(v["codeLen"]["char"]["1"], 2);
-        assert_eq!(v["user"], json!({"userWords": 0, "tempWords": 0}));
-        let v = c
-            .web_data_rpc("dict.systemStats", &json!({"schemaId": "zm1"}))
-            .unwrap();
-        assert_eq!(v["cached"], true);
-        let v = c
-            .web_data_rpc(
-                "dict.systemStats",
-                &json!({"schemaId": "zm1", "refresh": true}),
-            )
-            .unwrap();
-        assert_eq!(v["cached"], false);
-    }
-
-    #[test]
-    fn mixed_lists_members_and_unknown_schema_errors() {
-        let c = coord("mx");
-        let v = c
-            .web_data_rpc("dict.systemStats", &json!({"schemaId": "mx"}))
-            .unwrap();
-        assert_eq!(v["engineType"], "mixed");
-        let members = v["members"].as_array().unwrap();
-        assert_eq!(members.len(), 1, "没配拼音成员就只有主码表");
-        assert_eq!(members[0]["schemaId"], "zm1");
-        assert!(
-            c.web_data_rpc("dict.systemStats", &json!({"schemaId": "nope"}))
-                .is_err()
-        );
-        assert!(c.web_data_rpc("dict.systemStats", &json!({})).is_err());
-    }
-}
+#[path = "lib_system_stats_tests.rs"]
+mod system_stats_tests;
 
 #[cfg(test)]
-mod sys_dict_categories_tests {
-    //! `sysDict.categories / header / entries`：一级表的形状与先后（主库最先、按 base_order），
-    //! 停用库也有条数，发现目录登记的库 source 为 dir，开关后再取即反映新状态；二级头部卡片与
-    //! 词条分页 / 搜索。
-    use super::*;
-    use std::sync::Arc;
-    use wind_config::Config;
-    use wind_coordinator::Coordinator;
-    use wind_store::Store;
-
-    /// 夹具：协调器 + 临时数据根；离开作用域（含断言失败）即删临时目录。
-    struct Fixture {
-        c: Arc<Coordinator>,
-        base: std::path::PathBuf,
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.base);
-        }
-    }
-
-    /// 码表 `zm2`：主库 + 停用的分组库 + 文件缺失的库 + `zm2/ext/` 下一张未登记的库；
-    /// 混输 `mx2` 没有自己的附加库。
-    fn coord(tag: &str) -> Fixture {
-        let base = std::env::temp_dir().join(format!("wind_syscats-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let schemas = base.join("schemas");
-        std::fs::create_dir_all(schemas.join("zm2/ext")).unwrap();
-        std::fs::write(
-            schemas.join("zm2.schema.toml"),
-            "[schema]\nid = \"zm2\"\nname = \"码二\"\n[engine]\ntype = \"codetable\"\n\
-             [engine.codetable]\nmax_code_length = 4\n\
-             [[dictionaries]]\nid = \"main\"\npath = \"zm2/zm2.dict.yaml\"\ndefault = true\n\
-             [[dictionaries]]\nid = \"term\"\nlabel = \"术语\"\ndescription = \"专业词\"\n\
-             group = \"专业术语\"\npath = \"zm2/term.dict.yaml\"\ndefault_enabled = false\nbase_order = 1\n\
-             [[dictionaries]]\nid = \"ghost\"\nlabel = \"缺文件\"\npath = \"zm2/ghost.dict.yaml\"\n\
-             default_enabled = true\n",
-        )
-        .unwrap();
-        let head = "---\nname: x\nversion: \"1\"\n...\n";
-        std::fs::write(
-            schemas.join("zm2/zm2.dict.yaml"),
-            "---\nname: x\nversion: \"1\"\nimport_tables:\n  - sub/more\n...\n甲\ta\t9\n乙\tb\t5\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(schemas.join("zm2/sub")).unwrap();
-        std::fs::write(
-            schemas.join("zm2/sub/more.dict.yaml"),
-            format!("{head}丁\taa\t3\n戊\tab\t2\n己\tc\t1\n"),
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("zm2/term.dict.yaml"),
-            format!("{head}算法\taaaa\t1\n# 注释\n\n编译\tbbbb\t1\n"),
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("zm2/ext/mine.dict.yaml"),
-            "---\nname: 我的词\n...\n丙\tc\t1\n",
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("mx2.schema.toml"),
-            "[schema]\nid = \"mx2\"\nname = \"混\"\n[engine]\ntype = \"mixed\"\n\
-             [engine.mixed]\nprimary_schema = \"zm2\"\n",
-        )
-        .unwrap();
-        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
-        let mut cfg = Config::default();
-        cfg.schema.active = "zm2".into();
-        cfg.schema.available = vec!["zm2".into(), "mx2".into()];
-        // override 落临时目录：开关测试会写它，不能碰本机配置。
-        let c = Coordinator::new_headless_with_store_override(
-            cfg,
-            Some(&base),
-            store,
-            Some(base.join("overrides")),
-        );
-        Fixture { c, base }
-    }
-
-    fn item<'a>(v: &'a Value, id: &str) -> &'a Value {
-        v.as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["id"] == id)
-            .unwrap_or_else(|| panic!("清单里没有 {id}: {v}"))
-    }
-
-    #[test]
-    fn lists_main_first_with_order_sources_and_counts() {
-        let f = coord("shape");
-        let c = &f.c;
-        let v = c
-            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
-            .unwrap();
-        let ids: Vec<(&str, u64)> = v
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|d| (d["id"].as_str().unwrap(), d["order"].as_u64().unwrap()))
-            .collect();
-        assert_eq!(
-            ids,
-            [
-                ("main", 1),
-                ("ghost", 2),
-                ("term", 3),
-                ("dir:zm2/ext/mine", 4)
-            ],
-            "主库最先，其余按 base_order（ghost 0 < term 1 < 发现目录），同值按方案块序"
-        );
-        assert_eq!(
-            item(&v, "main"),
-            &json!({
-                "id": "main", "label": "zm2", "description": "", "group": null,
-                "enabled": true, "source": "main", "count": 2, "order": 1, "togglable": false,
-            }),
-            "主库：没写 label 取文件名，关不掉；码表库的 import_tables 加载器不读、不计"
-        );
-        assert_eq!(
-            item(&v, "term"),
-            &json!({
-                "id": "term", "label": "术语", "description": "专业词",
-                "group": "专业术语", "enabled": false, "source": "bundled", "count": 2,
-                "order": 3, "togglable": true,
-            }),
-            "停用的库也有条数"
-        );
-        let ghost = item(&v, "ghost");
-        assert_eq!(
-            (&ghost["enabled"], &ghost["count"]),
-            (&json!(true), &Value::Null)
-        );
-        assert_eq!(ghost["group"], Value::Null, "没写 group 给 null");
-        let mine = item(&v, "dir:zm2/ext/mine");
-        assert_eq!(
-            (
-                &mine["source"],
-                &mine["label"],
-                &mine["count"],
-                &mine["group"]
-            ),
-            (&json!("dir"), &json!("我的词"), &json!(1), &Value::Null)
-        );
-    }
-
-    #[test]
-    fn codetable_imports_do_not_affect_main_count() {
-        let f = coord("subgone");
-        std::fs::remove_file(f.base.join("schemas/zm2/sub/more.dict.yaml")).unwrap();
-        let v =
-            f.c.web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
-                .unwrap();
-        assert_eq!(item(&v, "main")["count"], 2, "子表在不在都只算本文件");
-    }
-
-    #[test]
-    fn header_card_and_errors() {
-        let f = coord("header");
-        let c = &f.c;
-        let h = c
-            .web_data_rpc(
-                "sysDict.header",
-                &json!({"schema": "zm2", "dictId": "main"}),
-            )
-            .unwrap();
-        assert_eq!(
-            (
-                &h["id"],
-                &h["label"],
-                &h["source"],
-                &h["name"],
-                &h["version"]
-            ),
-            (
-                &json!("main"),
-                &json!("zm2"),
-                &json!("main"),
-                &json!("x"),
-                &json!("1")
-            )
-        );
-        assert_eq!(h["importTables"], json!(["sub/more"]), "声明原样列");
-        assert_eq!(h["count"], 2);
-        assert_eq!(h["tables"], json!([]), "码表库不加载子表");
-        assert!(h["path"].as_str().unwrap().ends_with("zm2.dict.yaml"));
-        assert!(h["mtimeMs"].as_u64().is_some());
-        let t = c
-            .web_data_rpc(
-                "sysDict.header",
-                &json!({"schema": "zm2", "dictId": "term"}),
-            )
-            .unwrap();
-        assert_eq!(
-            (&t["source"], &t["tables"]),
-            (&json!("bundled"), &json!([]))
-        );
-        // 未知 id / 文件缺失 / 缺参
-        for p in [
-            json!({"schema": "zm2", "dictId": "nope"}),
-            json!({"schema": "zm2", "dictId": "ghost"}),
-            json!({"schema": "nope", "dictId": "main"}),
-            json!({"schema": "zm2"}),
-        ] {
-            assert!(c.web_data_rpc("sysDict.header", &p).is_err(), "{p}");
-        }
-    }
-
-    #[test]
-    fn entries_pages_and_searches() {
-        let f = coord("entries");
-        let c = &f.c;
-        let get = |p: Value| c.web_data_rpc("sysDict.entries", &p).unwrap();
-        let v = get(json!({"schema": "zm2", "dictId": "main", "offset": 1, "limit": 2}));
-        assert_eq!(v["total"], 2);
-        assert_eq!(
-            v["rows"],
-            json!([{"code": "b", "text": "乙", "weight": 5, "table": "zm2"}]),
-            "码表库不混入 import_tables 子表"
-        );
-        assert_eq!(v["note"], Value::Null);
-        let v = get(json!({"schema": "zm2", "dictId": "main", "query": "a", "mode": "code"}));
-        let texts: Vec<&str> = v["rows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r["text"].as_str().unwrap())
-            .collect();
-        assert_eq!((v["total"].as_u64(), texts), (Some(1), vec!["甲"]));
-        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "编", "mode": "text"}));
-        assert_eq!(v["total"], 1);
-        let v = get(json!({"schema": "zm2", "dictId": "term", "offset": 9}));
-        assert_eq!(
-            (&v["total"], &v["rows"]),
-            (&json!(2), &json!([])),
-            "越界给空页"
-        );
-        // 不给 mode：编码前缀或词子串
-        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "b"}));
-        assert_eq!(v["rows"][0]["text"], "编译");
-        let v = get(json!({"schema": "zm2", "dictId": "term", "query": "算"}));
-        assert_eq!(v["rows"][0]["text"], "算法");
-        // sort / order：排序后分页
-        let texts_of = |v: &Value| -> Vec<String> {
-            v["rows"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|r| r["text"].as_str().unwrap().to_string())
-                .collect()
-        };
-        let v = get(json!({"schema": "zm2", "dictId": "main", "sort": "weight"}));
-        assert_eq!(texts_of(&v), ["乙", "甲"]);
-        let v = get(json!({
-            "schema": "zm2", "dictId": "main", "sort": "weight", "order": "desc",
-            "offset": 1, "limit": 1
-        }));
-        assert_eq!(
-            (v["total"].as_u64(), texts_of(&v)),
-            (Some(2), vec!["乙".into()])
-        );
-        let v = get(json!({"schema": "zm2", "dictId": "term", "sort": "code", "order": "desc"}));
-        assert_eq!(texts_of(&v), ["编译", "算法"]);
-        for p in [
-            json!({"schema": "zm2", "dictId": "nope"}),
-            json!({"schema": "zm2", "dictId": "main", "mode": "pinyin"}),
-            json!({"schema": "zm2", "dictId": "main", "sort": "count"}),
-            json!({"schema": "zm2", "dictId": "main", "sort": "code", "order": "up"}),
-            json!({"schema": "zm2", "dictId": "ghost"}),
-        ] {
-            assert!(c.web_data_rpc("sysDict.entries", &p).is_err(), "{p}");
-        }
-    }
-
-    #[test]
-    fn reflects_toggle_and_rejects_bad_input() {
-        let f = coord("toggle");
-        let c = &f.c;
-        c.web_data_rpc(
-            "schema.setDictEnabled",
-            &json!({"id": "zm2", "dictId": "term", "enabled": true}),
-        )
-        .unwrap();
-        let v = c
-            .web_data_rpc("sysDict.categories", &json!({"schema": "zm2"}))
-            .unwrap();
-        assert_eq!(item(&v, "term")["enabled"], true);
-        let mx = c
-            .web_data_rpc("sysDict.categories", &json!({"schema": "mx2"}))
-            .unwrap();
-        assert_eq!(mx, json!([]), "混输没有自己的附加库");
-        assert!(
-            c.web_data_rpc("sysDict.categories", &json!({"schema": "nope"}))
-                .is_err()
-        );
-        assert!(c.web_data_rpc("sysDict.categories", &json!({})).is_err());
-    }
-}
+#[path = "sys_dict_categories_tests.rs"]
+mod sys_dict_categories_tests;
 
 #[cfg(test)]
-mod comment_library_tests {
-    //! `comment.library`：模板表带来源，总表每格给出实际生效的模板与所在层。
-    use super::*;
-    use std::sync::Arc;
-    use wind_config::Config;
-    use wind_coordinator::Coordinator;
-    use wind_store::Store;
-
-    fn coord(tag: &str) -> Arc<Coordinator> {
-        let base = std::env::temp_dir().join(format!("wind_cmtlib-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("schemas")).unwrap();
-        std::fs::copy(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../data/system.comments.toml"
-            ),
-            base.join("system.comments.toml"),
-        )
-        .unwrap();
-        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
-        Coordinator::new_headless_with_store(Config::default(), Some(&base), store)
-    }
-
-    fn cell<'a>(v: &'a Value, scope: &str, state: &str, vertical: bool) -> &'a Value {
-        v["effective"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["scope"] == scope && e["state"] == state && e["vertical"] == vertical)
-            .unwrap_or_else(|| panic!("effective 缺 {scope}/{state}/{vertical}: {v}"))
-    }
-
-    #[test]
-    fn builtin_templates_and_global_effective() {
-        let v = coord("base")
-            .web_data_rpc("comment.library", &json!({}))
-            .unwrap();
-        let code = v["templates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["id"] == "code")
-            .expect("templates 应含 code");
-        assert_eq!(code["origin"], "builtin");
-        assert_eq!(code["name"], "编码（自动）");
-        assert!(code["desc"].as_str().is_some_and(|d| !d.is_empty()));
-        let g = cell(&v, "global", "default", true);
-        assert_eq!(g["template_id"], "code");
-        assert_eq!(g["from_scope"], "global");
-        assert_eq!(
-            v["system_assign"]["type"]["codetable"]["detail_horizontal"],
-            "chaizi_pinyin"
-        );
-        for vertical in [false, true] {
-            let e = cell(&v, "mode:temp_english", "default", vertical);
-            assert_eq!(e["template_id"], "none");
-            assert_eq!(e["from_scope"], "mode:temp_english");
-        }
-        let t = cell(&v, "type:codetable", "default", false);
-        assert_eq!(t["template_id"], "code");
-        assert_eq!(t["from_scope"], "global");
-    }
-
-    #[test]
-    fn draft_comment_param_drives_rows_and_origins() {
-        let v = coord("draft")
-            .web_data_rpc(
-                "comment.library",
-                &json!({"comment": {
-                    "templates": [
-                        {"id": "code", "name": "改", "text": "X"},
-                        {"id": "mine", "name": "我的", "text": "Y"}
-                    ],
-                    "assign": {"schema": {"wubi86": {"detail_horizontal": "mine"}}}
-                }}),
-            )
-            .unwrap();
-        let origin = |id: &str| {
-            v["templates"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|t| t["id"] == id)
-                .map(|t| t["origin"].clone())
-        };
-        assert_eq!(origin("code"), Some(json!("user_overrides_builtin")));
-        let ch = v["templates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["id"] == "code")
-            .unwrap();
-        assert_eq!(ch["builtin"]["name"], "编码（自动）");
-        assert_eq!(origin("mine"), Some(json!("user")));
-        for vertical in [false, true] {
-            let s = cell(&v, "schema:wubi86", "detail", vertical);
-            assert_eq!(s["template_id"], "mine", "竖排没写同本行横排");
-            assert_eq!(s["from_scope"], "schema:wubi86");
-        }
-        let s = cell(&v, "schema:wubi86", "default", true);
-        assert_eq!(s["from_scope"], "global");
-    }
-}
+#[path = "comment_library_tests.rs"]
+mod comment_library_tests;
 
 #[cfg(test)]
-mod theme_list_tests {
-    use super::*;
-
-    fn data_dir() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data")
-    }
-
-    /// 内置主题不给目录，`base` 取主题文件自己写的那一级。
-    #[test]
-    fn list_reports_base_and_hides_builtin_dir() {
-        let c = wind_coordinator::Coordinator::new_headless(
-            wind_config::Config::default(),
-            Some(&data_dir()),
-        );
-        let list = c.web_theme_list(&json!({})).unwrap();
-        let def = list
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["name"] == "default")
-            .expect("列出 default");
-        assert_eq!(def["builtin"], true);
-        assert_eq!(def["dir"], "");
-        assert_eq!(def["base"], "_qingfeng");
-        // 默认不算皮肤概要（要整份解析主题，拖慢设置端启动）：键不在。
-        assert!(def.get("skin").is_none() && def.get("animated").is_none());
-    }
-
-    /// `skin:true` 补皮肤字段；`id` 只回那一项。
-    #[test]
-    fn list_skin_flag_and_id_filter() {
-        let c = wind_coordinator::Coordinator::new_headless(
-            wind_config::Config::default(),
-            Some(&data_dir()),
-        );
-        let one = c
-            .web_theme_list(&json!({ "skin": true, "id": "default" }))
-            .unwrap();
-        let arr = one.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["name"], "default");
-        assert_eq!(arr[0]["skin"], false);
-        assert_eq!(arr[0]["animated"], false);
-        let all = c.web_theme_list(&json!({})).unwrap();
-        assert!(all.as_array().unwrap().len() > 1);
-    }
-
-    #[test]
-    fn skin_summary_flags_animated_decor() {
-        let root = std::env::temp_dir().join(format!("wind_skin_summary_{}", std::process::id()));
-        let write = |slug: &str, decor: &str| {
-            let d = root.join(slug);
-            std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(
-                d.join(wind_transfer::theme::THEME_ENTRY_NAME),
-                format!(
-                    "[skin.horizontal.frame]\nimage = \"f.png\"\n[[skin.horizontal.decor]]\nimage = \"{decor}\"\n"
-                ),
-            )
-            .unwrap();
-        };
-        write("still", "d.png");
-        write("moving", "d.gif");
-        // 扩展名不算数，看文件头：静态的 .webp 不是动图，GIF 签名才是。
-        std::fs::write(root.join("still/d.png"), b"\x89PNG\r\n\x1a\n\0\0\0\0IDAT").unwrap();
-        std::fs::write(root.join("moving/d.gif"), b"GIF89a").unwrap();
-        write("webp", "d.webp");
-        std::fs::write(root.join("webp/d.webp"), b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0").unwrap();
-        let dirs = vec![root.clone()];
-        let sum = |slug: &str| {
-            theme_skin_summary(&wind_theme::load_resolved_dirs(&dirs, slug, false).unwrap())
-        };
-        assert_eq!(sum("still"), (true, false));
-        assert_eq!(sum("moving"), (true, true));
-        assert_eq!(sum("webp"), (true, false));
-        assert_eq!(
-            theme_skin_summary(&wind_theme::Resolved::default()),
-            (false, false)
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-}
+#[path = "lib_theme_list_tests.rs"]
+mod theme_list_tests;
 
 // 放在文件最末：`schema_key_gate_wiring_tests` 的源码守卫只扫第一个 `#[cfg(test)]` 之前的部分，
 // 声明在文件头会把整个生产代码截没。

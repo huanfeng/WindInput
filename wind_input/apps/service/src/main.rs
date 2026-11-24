@@ -15,9 +15,8 @@ use wind_bridge::push::{PushConfig, PushServer};
 use wind_bridge::server::{BridgeConfig, BridgeServer};
 use wind_webdata::WebDataRpc;
 
-// 启动轨迹下沉在 wind-config，好让 UI 线程等下层也能打点（见该模块文档）。
-// 时间戳格式一并取自那里：与主日志、wind_tsf 的 `CFileLogger::_FormatTimestamp`
-// 共用一处定义，三份日志才能归并排序，也避免两边各写一份而漂移。
+// 启动轨迹下沉在 wind-config，好让 UI 线程等下层也能打点。时间戳格式一并取自那里，
+// 与 wind_tsf 的 `CFileLogger::_FormatTimestamp` 共用一处定义，三份日志才能归并排序。
 use wind_config::startup_trace::{self, LOG_TIME_FORMAT};
 
 mod backup_cli;
@@ -147,11 +146,8 @@ fn main() {
         )
     ) || (cfg!(windows) && sub == Some("system"))
     {
-        // GUI 子系统下附着父控制台，让输出回到调用的终端（详见 attach_parent_console）。
-        //
-        // 被 `wind.cli` 拉起时**必须跳过**：那条路上父进程是服务自己，输出该走它接好的
-        // 管道（服务要读回来变成 toast）。开发期从终端启动服务时不跳过的话，子进程会
-        // attach 到那个终端，管道永远读空——「开发机没提示、装机版有」的那种幽灵。
+        // GUI 子系统下附着父控制台，让输出回到调用的终端。被 `wind.cli` 拉起时必须跳过：
+        // 输出该走服务接好的管道（读回来变成 toast），attach 到终端会让管道读空。
         #[cfg(windows)]
         if std::env::var_os(wind_coordinator::handle_cmdbar::WIND_CLI_PIPED_ENV).is_none() {
             attach_parent_console();
@@ -190,14 +186,8 @@ fn main() {
         std::process::exit(code);
     }
 
-    // 拼错的子命令必须当场说"不认识"，不能穿到下面的服务启动路径。
-    //
-    // 穿过去的后果比"没反应"更坏：它会**以第二个服务实例的身份启动**，被单例检查
-    // 挡掉后打一句「另一个实例已在运行中」。经 `wind.cli("log tail")` 这类词条调用时，
-    // 用户看到的 toast 就是这句——把一个拼写错误报成了实例冲突。
-    //
-    // 判据只认"不以 `-` 开头的首个参数"：真正的启动路径要么无参，要么只带
-    // `--restarted`（`spawn_detached_self`），位置参数一个都没有。
+    // 拼错的子命令必须当场说"不认识"，不能穿到服务启动路径（会被单例挡掉，报成实例冲突）。
+    // 判据只认不以 `-` 开头的首个参数：真正的启动路径要么无参，要么只带 `--restarted`。
     if let Some(first) = sub
         && !first.starts_with('-')
     {
@@ -221,21 +211,14 @@ fn main() {
     // 「究竟有没有走到日志初始化」本身就是要回答的问题。
     startup_trace::stage("begin");
 
-    // 0.5 启动上下文自检（B）：核心必须跑在交互用户上下文。若被错误地拉起在
-    // SYSTEM/服务账户或 AppContainer 里（TSF DLL 从早期系统/UWP 宿主 CreateProcessW
-    // 拉核心时不换令牌），当场退出——绝不带着系统预置（五笔）去占坑、供错配置。
-    // 早于单例与日志：错上下文的进程连日志目录都未必写得了。
+    // 0.5 启动上下文自检：被错误地拉起在 SYSTEM/服务账户或 AppContainer 里（TSF DLL 拉核心时
+    // 不换令牌）就当场退出，不带着系统预置去占坑。早于单例与日志：错上下文未必写得了日志目录。
     guard_process_context();
 
     // 1. 单例检查（与 Go 版 checkSingleton 对齐）
     //
-    // **必须早于 init_logger**：后者会滚动日志（rotate_on_startup），而一个注定要退出的
-    // 重复实例不该有权改动正在运行实例的日志。此前顺序相反，于是形成了恶性反馈——
-    // 用户遇到故障 → 尝试重启输入法 → 新实例先把故障现场的日志顶到 .1.log、再写下一个
-    // 两行空壳、然后被单例挡掉退出。越排查，现场越少。
-    //
-    // 代价是此处无法用 tracing（subscriber 尚未装），改用启动轨迹 + stderr：
-    // 反正 `exit(1)` 也刷不出 tracing 的 non_blocking 缓冲，同步落盘的轨迹反而更可靠。
+    // 必须早于 init_logger：后者会滚动日志，注定要退出的重复实例不该把运行实例的故障现场
+    // 日志顶走。代价是此处只能用启动轨迹 + stderr（`exit(1)` 本也刷不出 tracing 的缓冲）。
     let _singleton_guard = match check_singleton() {
         SingletonCheck::Acquired(guard) => guard,
         SingletonCheck::AlreadyRunning => {
@@ -243,13 +226,9 @@ fn main() {
             eprintln!("WindInput: 另一个实例已在运行中");
             std::process::exit(1);
         }
-        // 够不着单例对象：本进程多半继承了受限的宿主上下文（TSF DLL 用
-        // `CreateProcessW` 拉起服务时不换令牌，宿主是 AppContainer/低完整性，
-        // 子进程就跟着受限）。这种进程也建不了命名管道、写不了日志目录，
-        // 撑不起服务，退出是对的——但绝不能声称「另一实例已在运行」，
-        // 那会把「服务根本没起来」伪装成「服务已经在跑」。
-        // 注：改 `Local\` + 默认 DACL 后，同会话进程通常都够得着自己会话的对象，
-        // 加上前置的 guard_process_context 已拦掉多数错上下文，此分支已近乎兜底。
+        // 够不着单例对象：多半继承了受限的宿主上下文，撑不起服务，退出是对的；但不能声称
+        // 「另一实例已在运行」，那会把服务没起来伪装成已在跑。有 guard_process_context 在前，
+        // 此分支近乎兜底。
         SingletonCheck::Inaccessible(err) => {
             startup_trace::stage(&format!(
                 "singleton-INACCESSIBLE err={err} 打不开单例对象（本进程上下文受限），\
@@ -272,9 +251,8 @@ fn main() {
     );
     startup_trace::stage("logger-ready");
 
-    // 词库缓存策略（`schema.dict_cache_policy`）：锁定 / 预加载 / 关闭。须在加载任何词库之前
-    // 设定；运行期改键不生效（已映射的文件不会回头处理），设置页提示需重启。
-    // 读不到配置时取出厂值，与 `Config::default()` 同源。
+    // 词库缓存策略（`schema.dict_cache_policy`）须在加载任何词库之前设定；运行期改键不生效
+    // （设置页提示需重启）。读不到配置时取出厂值。
     let policy_name = startup_cfg.as_ref().map_or_else(
         || wind_config::Config::default().schema.dict_cache_policy,
         |c| c.schema.dict_cache_policy.clone(),
@@ -307,64 +285,32 @@ fn main() {
     );
     info!("Singleton check passed");
 
-    // 定制版身份摘要：非定制版一行都不打（绝大多数装机走这一条）。
-    //
-    // 放在版本行之后、任何配置加载之前：报障时贴上来的日志开头必须能一眼看出
-    // 「他装的是不是定制版、是哪一版」——否则后面所有「我的方案不见了 / 打不出字」
-    // 都无从归因（`data_custom` 的减法清单能让内置方案整个消失）。
-    //
-    // 文案与 `system.info` 的 `customEdition` 同源（`wind_rpc::custom_edition`）：
-    // 日志与关于页是报障的两条线索，两处各写一份格式化必然分叉。
-    //
-    // 隐私：只打定制者声明的元信息（id/名称/版本），**不打定制层路径**——路径是用户机器
-    // 信息，只在 `load_custom_manifest` 的 DEBUG/WARN 分支出现。
-    //
-    // ★ 面向用户的定制版摘要**只有这一处 INFO**。`wind-config` 的 `load_custom_manifest`
-    // 另有一行同类文案，已刻意压到 DEBUG——两行 INFO 会让读日志的人以为定制层被加载了
-    // 两次，而它们内容还不完全一样（那一行少显示名，触发点取决于谁先问 `custom_manifest()`）。
-    // 要再加一条「本机是不是定制版」的 INFO 之前，先想清楚它与这一行的关系。
+    // 定制版身份摘要（非定制版不打）：放在版本行之后，报障日志开头就能看出装的是哪个定制版
+    // （定制层能让内置方案整个消失）。文案与 `system.info` 的 `customEdition` 同源；只打元信息，
+    // 不打定制层路径。面向用户的定制版 INFO 只有这一处，`load_custom_manifest` 那行刻意是 DEBUG。
     if let Some(summary) = wind_rpc::custom_edition::startup_summary() {
         info!("{summary}");
     }
 
     // 2.5 等待用户配置目录就绪。
     //
-    // 开机自启时服务可能跑在登录会话很早的阶段，此时漫游 known folder（%APPDATA%）
-    // 未必已解析/挂载完成，而日志目录走的是另一个 known folder（%LOCALAPPDATA%，
-    // 见 Config::log_dir vs user_config_dir）——两者独立解析，于是会出现
-    // 「日志正常写出、用户配置却像不存在一样」，配置静默退化为系统预置，
-    // 用户表现为「设置成全拼，重启后工具栏又变回五笔」。
-    //
-    // 必须在 init_logger() 之后：探测过程本身要留下日志。
+    // 开机自启早期漫游 known folder（%APPDATA%）未必已挂载，而日志目录在 %LOCALAPPDATA%，
+    // 不等的话配置会静默退化为系统预置。必须在 init_logger() 之后：探测过程要留日志。
     wind_config::Config::wait_user_config_ready(std::time::Duration::from_secs(10));
     startup_trace::stage("config-ready");
 
-    // D：若本用户此刻确有 config.toml（定制过设置），落一个本地标记（幂等）。
-    // 下次开机 `probe_user_config` 用它区分「默认用户（永不等）」与「定制用户但漫游
-    // 未挂载（要等，别退回系统五笔）」。只在服务启动路径写，不进 load()（见其文档）。
+    // 本用户确有 config.toml 时落一个本地标记（幂等），下次开机 `probe_user_config` 据此区分
+    // 「默认用户（不等）」与「定制用户但漫游未挂载（要等）」。只在服务启动路径写，不进 load()。
     wind_config::Config::mark_user_config_seen_if_present();
 
-    // D2：清理用户层里的陈旧键（幂等，`Config::prune_user_config` 自带日志），两类：
-    //  - **冗余键**：取值与出厂默认（L1⊕L2⊕L2.5）相同。它们是「默认值升级的死区」——写入时与
-    //    默认一致、看似无害，日后默认改了用户却一直停在旧值。set_user_value 已收口不再
-    //    产生新的，此处清掉存量。
-    //  - **退役键**（`RETIRED_KEYS`）：结构体里已删除、serde 读取时静默丢弃，但写回走原始
-    //    toml::Value 故会永久留存。留着会误导用户以为它还在生效。
-    //
-    // 必须在 wait_user_config_ready 之后：漫游未挂载时用户层「看起来是空的」，那时清理
-    // 无事可做（返回 0），但也绝不会误删。
+    // 清理用户层里的陈旧键（幂等）：与出厂默认相同的冗余键（否则日后默认改了用户仍停在旧值）
+    // 与 `RETIRED_KEYS` 退役键。须在 wait_user_config_ready 之后。
     if let Err(e) = wind_config::Config::prune_user_config() {
         warn!("Prune user config failed: {e}");
     }
 
-    // D3：把引导键绑定物化进用户层 `keys.key_actions`（一次性，靠版本号幂等）。
-    //
-    // 在此之前，五处 `trigger_keys` 的出厂值住在 L2 且每次 load 都折算进 key_actions，
-    // 而设置页只写 key_actions ⇒ 用户删掉某个出厂绑定后，下次加载又被折算灌回去，
-    // 且备份/还原都带不走「我删过它」。物化之后 key_actions 是唯一真相源。
-    //
-    // 排在 prune 之后：物化是终态写入，应基于已清理干净的用户层。两道安全闸
-    // （漫游未挂载 / data/config.toml 缺席）都退化为「什么都不做」，见函数文档。
+    // 把引导键绑定物化进用户层 `keys.key_actions`（一次性，靠版本号幂等），此后它是唯一真相源，
+    // 用户删掉的出厂绑定不会被折算灌回。排在 prune 之后：物化是终态写入。
     if let Err(e) = wind_config::Config::materialize_key_actions() {
         warn!("Materialize key_actions failed: {e}");
     }
@@ -425,9 +371,8 @@ fn main() {
     startup_trace::stage("coordinator-begin");
     let coordinator = wind_coordinator::Coordinator::new(push_server.clone());
     startup_trace::stage("coordinator-done");
-    // 语言栏图标：状态推送只在状态**变化**时发生，这里补一次初始发布，否则开机后到
-    // 用户第一次切换中英/标点之前，DLL 都读不到共享内存、只能本地绘制（图标正常但
-    // 没有标点角标）。非 Windows 桌面形态下是空操作。
+    // 语言栏图标：状态推送只在变化时发生，这里补一次初始发布，否则首次切换前 DLL 读不到
+    // 共享内存（没有标点角标）。非 Windows 桌面形态下是空操作。
     coordinator.publish_initial_langbar_icon();
     // 注入 host-render 管理器（与 BridgeServer 共享同一实例），供后续写帧/隐藏使用。
     #[cfg(windows)]
@@ -460,12 +405,8 @@ fn main() {
     coordinator.set_extensions_config_hook(Box::new(move |c| extensions.apply_config(c)));
     deferred.set_ready(coordinator);
 
-    // 三步顺序不能动（见 `PushServer::mark_ready`）：
-    // ① set_ready 在前——DLL 收到 SERVICE_READY 就发 IME_ACTIVATED，得有真处理器接；
-    // ② mark_ready 给就绪前连上的 DLL 补发 SERVICE_READY（改了词库要重建缓存时，协调器
-    //    构造要好几秒，DLL 几乎必然在这段窗口里重连；不补发则工具栏要等切焦点才出来，t254）；
-    // ③ hook 注册在后——补跑推的握手配置必须排在 SERVICE_READY 之后，否则 DLL 收到
-    //    SERVICE_READY 时清零的会话级开关会冲掉刚推来的新值。
+    // 三步顺序不能动（见 `PushServer::mark_ready`）：set_ready → mark_ready（给就绪前连上的
+    // DLL 补发 SERVICE_READY）→ hook 注册（补跑推的握手配置必须排在 SERVICE_READY 之后）。
     push_server.mark_ready();
     // push 客户端注册回调：host-render 白名单受限宿主（SearchHost 等 transient DocMgr）
     // 服务重启重连时不发任何激活事件，由此回调补推 activation 握手使 DLL 重新 setup。
@@ -497,10 +438,8 @@ fn main() {
     });
     match wind_rpc::RpcServer::new(core_rpc.clone(), variant, pipe_suffix) {
         Ok(rpc_server) => {
-            // 活跃方案变更 → RPC 事件广播。EngineManager 位于 wind-rpc 之下，无法直接
-            // 持有 EventSink，故在此接线——这里是唯一同时看得见两者的地方。接上后，
-            // 快捷键/托盘/RPC 任一路径切方案，设置界面都能收到通知（此前只有候选窗的
-            // push 通道收得到，而那条载荷里没有方案 id）。
+            // 活跃方案变更 → RPC 事件广播。EngineManager 位于 wind-rpc 之下、无法持有 EventSink，
+            // 这里是唯一同时看得见两者的地方。
             let sink = rpc_server.event_sink();
             // 同步进程的状态广播与受限请求：请求走与设置端同一个分发器，
             // 这样 config.changed / compat.changed 等事件照常发出。
@@ -542,11 +481,8 @@ fn main() {
                     sink.broadcast("schema.activeChanged", serde_json::json!({ "id": id }));
                 }
             }));
-            // 配置落盘 → 广播。托盘/右键菜单、快捷键、命令栏改配置都不经 RPC，
-            // 设置界面此前无从得知（「显示工具栏」「简入繁出」「主题」「常驻显示」等
-            // 都会显示陈旧值）。带上 key 与新值，订阅方可直接更新对应字段，无需回查。
-            // 经 RPC setItems 的写入同样会走到这里，属预期内的自我回声：设置端此时
-            // 值已相同，更新是幂等的。
+            // 配置落盘 → 广播（带 key 与新值）：托盘、快捷键、命令栏改配置都不经 RPC，设置端靠它
+            // 刷新。经 RPC setItems 的写入也会回声到这里，订阅方更新是幂等的。
             wind_config::change_hook::set_config_change_hook(std::sync::Arc::new(
                 move |path: &[&str], value: &toml::Value| {
                     let key = path.join(".");
@@ -578,19 +514,12 @@ fn main() {
         coord_for_restart_toast.show_restart_toast();
     }
 
-    // 配置文件语法不合法 ⇒ 弹一次提示（带文件路径与行号）。
-    //
-    // 排在这里而不是更早：toast 由本进程 wind-ui 窗口渲染，service-ready 之前窗口线程
-    // 未必起得来，发出去也没人画（同 `show_restart_toast` 的时机理由）。
-    //
-    // 这条提示是「配置被静默重写」那个 bug 的**用户可见**那一半：写盘一侧已由
-    // `ConfigDegradation::unparsable` 在 wind-config 里堵死，但堵住损坏不等于告诉用户——
-    // 不提示的话他的设置照样失效，只是这次文件还在盘上。
+    // 配置文件语法不合法 ⇒ 弹一次提示（带文件路径与行号）。排在 service-ready 之后：toast 由
+    // 本进程窗口渲染，之前窗口线程未必起得来。写盘一侧由 `ConfigDegradation::unparsable` 防护，
+    // 这里负责让用户知道。
     coord_for_restart_toast.notify_config_syntax_error();
 
-    // 当前方案有段被降级（方案文件 / schema_overrides 里某项写错了值）⇒ 同样提示一次。
-    // 与上面那条是两类故障：那条是**语法**读不完，这条是语法合法但**值不在取值范围内**，
-    // 后者会静默回落出厂值——不说的话用户只会看到「我写的设置没生效」。
+    // 当前方案有段被降级（值不在取值范围内，静默回落出厂值）⇒ 同样提示一次。
     {
         let active = coord_for_restart_toast.active_schema_id();
         coord_for_restart_toast.notify_schema_degradation(&active);
@@ -598,10 +527,8 @@ fn main() {
 
     // 10. 阻塞主线程，直到菜单触发"重启服务"
     //
-    // macOS 例外：主线程改跑 CFRunLoop。Carbon 全局热键的事件只投递到**主线程**的
-    // 事件队列，辅助线程自己跑 run loop 收不到（见 wind_ui::global_hotkey_macos 模块头）。
-    // 「重启服务」的等待挪到辅助线程，收到信号后停 run loop，主线程回到这里走原重启路径
-    // ——语义与其它平台一致，只是等待的姿势不同。
+    // macOS 例外：主线程改跑 CFRunLoop（Carbon 全局热键事件只投递到主线程），重启等待挪到
+    // 辅助线程，收到信号后停 run loop、主线程回到这里走原重启路径。
     #[cfg(target_os = "macos")]
     {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -618,9 +545,8 @@ fn main() {
             })
             .expect("spawn restart waiter");
 
-        // 软键盘面板的主线程宿主。**必须在进事件循环之前**装一次：面板是服务进程自己
-        // 开的 NSPanel，而 AppKit 只能在主线程碰，下发命令的 forwarder 却是工作线程。
-        // 装配前 forwarder 已经发过的命令留在队列里，由这一步顺带 drain。
+        // 软键盘面板的主线程宿主，必须在进事件循环之前装：AppKit 只能在主线程碰，而下发命令的
+        // forwarder 是工作线程。装配前已发的命令由这一步顺带 drain。
         wind_ui::softkeyboard_host_macos::install_on_main();
 
         wind_ui::global_hotkey_macos::run_main_loop();
@@ -708,11 +634,9 @@ fn relaunch_self() {
     }
 }
 
-/// 以脱离父进程的方式拉起自身（服务启动形态）。服务重启（[`relaunch_self`]）与
-/// CLI `restart` 的离线启动共用：不脱离时子进程会继承父控制台（用户关终端窗口
-/// 广播 CTRL_CLOSE_EVENT 连带杀掉刚起的服务）与 kill-on-job-close 作业对象
-/// （IME/TSF 宿主进程常见，父进程退出即连带杀子进程——症状：重启只退出、新进程
-/// 不存活）。stdio 一律接 null：服务日志走文件，不该喷进调用方终端。
+/// 以脱离父进程的方式拉起自身，服务重启（[`relaunch_self`]）与 CLI `restart` 共用。不脱离时
+/// 子进程会继承父控制台（关终端连带杀掉服务）与 kill-on-job-close 作业对象（父进程退出即连带
+/// 杀子进程）。stdio 一律接 null。
 #[cfg(windows)]
 fn spawn_detached_self(restarted: bool) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
@@ -756,23 +680,12 @@ fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
     // RUST_LOG 最优先，其次 debug.log_level，默认 info。
     // info 级别日志不得包含用户输入内容、词库词条等隐私数据。
     //
-    // ★ 优先级链由 `startup_trace::effective_log_level_from` 独家实现：启动轨迹的关闭
-    // 门控读的是同一个函数。两边各算一遍必然漂移成「主日志写着、轨迹停了」，而这两份
-    // 日志恰恰是用来互相印证的（轨迹存在的全部意义就是主日志失效时仍留痕）。
-    //
-    // 用 `_from` 变体而不是自己加载的那个：配置在 main 里刚 load 过，`Config::load` 是一次
-    // 多层合并 + 多个文件读取，为一个字段再走一遍白占启动时间。
+    // 优先级链由 `startup_trace::effective_log_level_from` 独家实现，启动轨迹的关闭门控读同一个
+    // 函数，两份日志才能互相印证。用 `_from` 变体是因为配置在 main 里刚 load 过。
     let level = startup_trace::effective_log_level_from(&cfg_debug.log_level);
 
-    // ★ 关闭档（level = off）：一个文件都不建，直接返回。
-    //
-    // 光靠 `EnvFilter("off")` 不够——下面的 `SelfHealingLog::new`（内含启动轮转）
-    // 会创建并轮转 `wind_input.1.log`，于是用户选了"关闭"却仍在磁盘上看到日志文件
-    // （空的，但带着时间戳与文件名）。用户要的是"这台机器上别留输入法的痕迹",
-    // 空文件同样是痕迹。`startup_stage.log` 由 `startup_trace` 自己的门控挡住。
-    //
-    // 仍然装一个 no-op subscriber：不装的话每条 `tracing` 宏都要走一遍
-    // 「有没有全局 subscriber」的查找，且别处若再 `init()` 一次会 panic。
+    // 关闭档（level = off）：一个文件都不建（空文件也是痕迹），光靠 `EnvFilter("off")` 不够，
+    // `SelfHealingLog::new` 会建出文件。仍装一个 no-op subscriber，免得别处再 `init()` 时 panic。
     if level.eq_ignore_ascii_case("off") {
         let _ = tracing_subscriber::fmt()
             .with_writer(std::io::sink)
@@ -791,17 +704,10 @@ fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
         .unwrap_or_else(|| std::path::PathBuf::from("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
 
-    // 滚动命名：wind_input.1.log（本次运行）→ .2.log → … → .N.log
-    //
-    // ★ 当前这份**也带序号**，规则就一句话「数字越小越新，1 是最新」。此前当前那份
-    // 叫 wind_input.log（无序号），收日志时用户认不出它才是最新的——发来的包里常常
-    // 只有 .1.log。与设置程序的 wind_setting.1.log 同一规则，见 log_rotate 模块文档。
-    // 序号在扩展名之前，滚动后仍是 .log，编辑器认得、按 *.log 也搜得到。
+    // 滚动命名：wind_input.1.log（本次运行）→ .2.log → … → .N.log，见 log_rotate 模块文档。
     let log_path = log_dir.join(format!("wind_input.{}.log", log_rotate::CURRENT_INDEX));
 
-    // 升级路径：把前两代命名迁成现在这套，否则新的扫描认不出它们，会永久滞留在目录里
-    // （更要紧的是二代那份"最新"会被当成历史）。须在 SelfHealingLog::new 之前——构造时
-    // 就会扫描既存序号。
+    // 把前两代命名迁成现在这套。须在 SelfHealingLog::new 之前：构造时就会扫描既存序号。
     log_rotate::migrate_legacy_suffix(&log_path);
 
     // 自愈写端：日志被设置页「清理」或用户手动删掉后自己接回来，见 SelfHealingLog。
@@ -811,9 +717,7 @@ fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
         cfg_debug.log_max_size_mb * 1024 * 1024,
     );
 
-    // 顺带回收 TSF DLL 留下的过期日志。它按进程拆文件（每宿主 × pid 一个，落在
-    // `logs/tsf_log/`），文件数会累积，而 DLL 自己在 loader lock 下没法做目录遍历。
-    // 传的是 logs 根目录，函数会连老版本平铺在这一层的存量一并扫——见 prune_stale_tsf_logs。
+    // 顺带回收 TSF DLL 留下的过期日志，见 prune_stale_tsf_logs。
     let pruned = log_rotate::prune_stale_tsf_logs(
         &log_dir,
         std::time::Duration::from_secs(60 * 60 * 24 * 7),
@@ -824,12 +728,8 @@ fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
     // 日志，`wind_input.1.log` 就永久停在某一行而进程照常运行。守护线程据此留痕。
     let dropped = writer.error_counter();
 
-    // 时间戳用本地时区，且格式与 wind_tsf 的 FileLogger 完全一致
-    // （`GetLocalTime` → `%04d-%02d-%02d %02d:%02d:%02d.%03d`），
-    // 两份日志才能直接按时间对齐排查。默认的 SystemTime timer 输出 UTC，
-    // 与 TSF 日志差一个时区，务必不要退回默认值。
-    // 注意：不能用 fmt::time::LocalTime —— 它依赖 time crate，
-    // 而 time 在多线程进程中会拒绝获取本地时区偏移，导致时间戳静默变空。
+    // 时间戳用本地时区、格式与 wind_tsf 的 FileLogger 一致，两份日志才能按时间对齐（默认 timer
+    // 输出 UTC）。不能用 fmt::time::LocalTime：time crate 在多线程进程里拒绝取本地时区，时间戳会变空。
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_ansi(false)
@@ -846,8 +746,7 @@ fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
 
     info!(
         log_dir = %log_dir.display(),
-        // 顺带报出清掉了几个 TSF 旧日志：这是唯一能看出「清理确实在跑」的地方，
-        // 不打的话它坏掉了也没人知道（目录里文件变多是很久以后才察觉的事）。
+        // 唯一能看出 TSF 日志清理确实在跑的地方。
         pruned_tsf_logs = pruned,
         level = %level,
         max_size_mb = cfg_debug.log_max_size_mb,
@@ -861,11 +760,8 @@ fn init_logger(cfg_debug: wind_config::config::DebugConfig) {
 
 /// 带必达落盘的致命退出。
 ///
-/// `std::process::exit` 不运行析构，也不刷 `tracing_appender` 的 non_blocking 缓冲——
-/// 退出原因能否落进主日志纯看 worker 线程有没有抢在进程消失前刷一次盘。这曾直接误导过
-/// 排查：同一条退出路径，有的日志里三条俱全，有的只剩一行，让人误以为是两种不同的故障。
-///
-/// 故退出原因先同步写进启动轨迹（必达），再给 worker 一点时间尽力刷出主日志。
+/// `std::process::exit` 不刷 `tracing_appender` 的 non_blocking 缓冲，故退出原因先同步写进
+/// 启动轨迹（必达），再给 worker 一点时间尽力刷出主日志。
 fn fatal_exit(stage: &str, msg: &str) -> ! {
     error!("{}", msg);
     startup_trace::stage(&format!("{stage}: {msg}"));
@@ -877,12 +773,9 @@ fn fatal_exit(stage: &str, msg: &str) -> ! {
 
 /// 守护主日志的健康：丢弃计数一旦增长就写进启动轨迹。
 ///
-/// 解决的是「观测工具自己成了故障的一部分」——`tracing_appender::non_blocking` 的
-/// worker 线程出事后，`NonBlocking` 在 lossy 模式下会**静默丢弃**其后每一条日志。
-/// 主日志因此停在某一行，而进程仍在正常跑，极易被误读成「进程卡在那一行」。
-/// 轨迹文件不经 tracing，故此时仍写得出去。
-///
-/// 30 秒一次、且只在计数**变化**时落笔：正常运行零写入，不会撑大轨迹文件。
+/// non_blocking 的 worker 线程出事后 lossy 模式会静默丢弃其后每一条日志，主日志停在某一行
+/// 而进程照常运行，极易误读成「卡在那一行」。轨迹文件不经 tracing，此时仍写得出去。
+/// 30 秒一次、只在计数变化时落笔。
 fn spawn_log_health_watch(dropped: tracing_appender::non_blocking::ErrorCounter) {
     std::thread::Builder::new()
         .name("log-health".into())
@@ -904,21 +797,17 @@ fn spawn_log_health_watch(dropped: tracing_appender::non_blocking::ErrorCounter)
 
 /// 单例检查的三种结局。
 ///
-/// **必须分开。** 此前 `CreateMutexW` 返回空句柄与「名字已存在」共用一个出口，
-/// 都被翻译成「另一实例已在运行」——可空句柄的含义是*拿不到那个对象*，
-/// 与*另一实例存在*根本是两回事。2026-07-23 客户日志里 10 个被挡实例有 8 个
-/// 走的是空句柄分支，日志却异口同声说「另一实例已在运行」，
-/// 于是"服务到底起没起来"这个最基本的问题反而查不出来。
-/// 后两个分支只有 `cfg(windows)` 的 `check_singleton` 会构造（非 Windows 暂不做单例检查，
-/// 恒返回 `Acquired`），但消费侧的 match 是跨平台的，不能删。
+/// 必须分开：`CreateMutexW` 返回空句柄是「拿不到那个对象」，与「另一实例存在」是两回事，
+/// 混在一起会让「服务到底起没起来」查不出来。`Inaccessible` 只有 Windows 构造，
+/// 但消费侧的 match 是跨平台的。
 #[cfg_attr(not(windows), allow(dead_code))]
 enum SingletonCheck {
     /// 拿到所有权，本实例可以继续启动。
     Acquired(SingletonGuard),
     /// 确认另一实例持有互斥体。
     AlreadyRunning,
-    /// 连最小权限的 `OpenMutexW(SYNCHRONIZE)` 都打不开：本进程够不着这个全局对象
-    /// （AppContainer / 低完整性 / 异账户上下文），**无从判断**另一实例是否存在。
+    /// 连最小权限的 `OpenMutexW(SYNCHRONIZE)` 都打不开：本进程够不着这个对象
+    /// （AppContainer / 低完整性 / 异账户上下文），无从判断另一实例是否存在。
     /// 携带 `CreateMutexW` 的 `GetLastError()`（5 = ERROR_ACCESS_DENIED）。
     Inaccessible(u32),
 }
@@ -926,8 +815,7 @@ enum SingletonCheck {
 /// 启动上下文自检：核心服务被拉起在错误上下文时立即退出。
 ///
 /// 对齐 Weasel `WeaselServer.cpp` 的 `GetUserName()=="SYSTEM"` 守卫，并扩到 AppContainer。
-/// 与「单例改 `Local\` 命名空间」互补：命名空间隔离让错上下文实例挡不住正确实例，
-/// 本自检再让它**当场自杀**而非常驻占着管道/供错配置。
+/// 与单例的 `Local\` 命名空间互补：后者让错上下文实例挡不住正确实例，本自检让它当场退出。
 ///
 /// 前提假设：核心永远应以交互用户身份运行（每用户登录自启 / 正常宿主拉起）。
 /// 目前没有「以 SYSTEM 服务身份运行核心」的部署；若将来引入，需在此放行。
@@ -1034,17 +922,9 @@ fn wrong_process_context() -> Option<&'static str> {
 
 /// 单例检查：通过 Windows Named Mutex 确保**每个登录会话**只有一个实例运行
 ///
-/// 命名空间从 `Global\` 改为 **`Local\`**（每会话隔离），这是多用户/开机竞态的要害：
-/// - `Local\` 由 Windows 按登录会话分隔，错会话（如 SYSTEM 的 session 0）里抢先建的
-///   单例落在别的命名空间，**挡不住**用户会话里的正确实例——旧 `Global\` 会被它长期占位。
-/// - `Global\` 命名空间的创建需要 `SeCreateGlobalPrivilege`，**普通用户没有**；
-///   `Local\` 谁都能建，多用户设备上才不会因权限而失败。
-/// - 隔离靠**命名空间**而非放宽 ACL：因此这里回到令牌默认 DACL（不再挂共享安全描述符），
-///   与 Weasel 的 `CreateMutex(NULL, FALSE, <per-session name>)` 同构。跨上下文冒占问题
-///   由「命名空间隔离 + 启动上下文自检（guard_process_context）」两道解决，不靠宽 ACL。
-///
-/// 注：管道名仍是机器级、暂未 per-user（见 guard_process_context 附近说明），
-/// 那属于另一条针对「多会话跨用户串扰」的后续，需真机 AppContainer 回归。
+/// 用 `Local\` 命名空间（每会话隔离）：错会话（如 SYSTEM 的 session 0）里抢先建的单例挡不住
+/// 用户会话里的正确实例；`Global\` 还需要普通用户没有的 `SeCreateGlobalPrivilege`。
+/// 隔离靠命名空间而非放宽 ACL，故用令牌默认 DACL，与 Weasel 同构。
 #[cfg(windows)]
 fn check_singleton() -> SingletonCheck {
     // 直接调用 kernel32 的 CreateMutexW，绕过 windows crate 的 Result 包装。
@@ -1067,21 +947,14 @@ fn check_singleton() -> SingletonCheck {
         .chain(std::iter::once(0))
         .collect();
 
-    // 令牌默认 DACL（不挂共享安全描述符）：单例互斥体只由核心进程触碰，
-    // 无需对 AppContainer/异账户开放，隔离已由 `Local\` 命名空间承担。
-    // 曾经为了让全局对象跨上下文可达而放宽 ACL，恰恰是「错上下文也能占坑」的成因，
-    // 改 per-session 命名后不再需要，故回到 NULL 安全属性。
+    // 令牌默认 DACL：单例互斥体只由核心进程触碰。别放宽 ACL，那会让错上下文也能占坑。
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide_name.as_ptr()) };
 
     if handle.is_invalid() {
         // GetLastError 必须紧贴失败的调用读，中间不能夹任何 Win32 调用。
         let create_err = unsafe { windows::Win32::Foundation::GetLastError() }.0;
-        // 空句柄本身不区分「另一实例存在但本进程够不着」和「全局命名空间不可达」。
-        // 退到最小权限 SYNCHRONIZE 再探一次：能打开就说明那个互斥体确实存在。
-        // 同会话的普通进程即便被默认 DACL 拒了 MUTEX_ALL_ACCESS，登录会话那条 ACE
-        // 通常仍给 SYNCHRONIZE，所以这一步真能把两种情况分开。
-        //
-        // 本函数早于 init_logger 运行，tracing 尚无 subscriber，只能走启动轨迹。
+        // 空句柄不区分「另一实例存在但够不着」与「命名空间不可达」，退到最小权限 SYNCHRONIZE
+        // 再探一次（登录会话 ACE 通常仍给它）。本函数早于 init_logger，只能走启动轨迹。
         if open_existing_mutex(&wide_name) {
             startup_trace::stage(&format!(
                 "singleton-CreateMutexW-DENIED err={create_err}（互斥体确实存在，本进程权限不足以参与竞争）"
@@ -1207,9 +1080,8 @@ struct SingletonGuard {
     _lock: Option<std::fs::File>,
 }
 
-/// 非 Windows 没有 Named Mutex，guard 是空壳；这里仍显式实现 `Drop`，是为了让调用点的
-/// `drop(_singleton_guard)`（重启前先释放单例，让新实例能拿到所有权）在两个平台上表达
-/// 同一件事——否则那两行在非 Windows 下会被判成「drop 一个没有 Drop 的值」。
+/// 显式实现 `Drop`，让调用点的 `drop(_singleton_guard)`（重启前先释放单例）在各平台表达同一件事
+/// （Linux 上释放的是 flock，macOS 上是空壳），否则会被判成「drop 一个没有 Drop 的值」。
 #[cfg(not(windows))]
 impl Drop for SingletonGuard {
     fn drop(&mut self) {}

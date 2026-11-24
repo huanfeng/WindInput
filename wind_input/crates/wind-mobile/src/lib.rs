@@ -1,27 +1,17 @@
 //! wind-mobile：移动端形态的核心门面（headless Coordinator 的收口）。
 //!
-//! # 这一层为什么存在
-//!
-//! 平台绑定层（Android 的 UniFFI 包装、将来 iOS 的 Swift 包装）此前直接 path 依赖
-//! **七个**核心 crate（coordinator/host/bridge/config/ipc/keys/ui-types），等于把绑定层
-//! 焊在核心的内部结构上：核心一次内部重构就打断平台仓的构建，而平台仓在另一个仓库、
-//! 另一条 CI 上，断了往往过几天才发现。
-//!
-//! 本 crate 把移动端要用的能力聚合成**一条依赖边**。平台仓只依赖 `wind-mobile`，
-//! 核心怎么重构由这里吸收。
+//! 平台绑定层（Android 的 UniFFI 包装、将来 iOS 的 Swift 包装）只依赖本 crate 这一条边，
+//! 核心内部重构由这里吸收，不打断另一个仓、另一条 CI 上的平台构建。
 //!
 //! # 边界划在哪
 //!
-//! 判据不是「Android 用不用得上」，而是「**换成 iOS 还成不成立**」：
+//! 判据是「换成 iOS 还成不成立」：
 //!
-//! - **留在这里**（移动端形态，与绑定框架无关）：四层配置加载、已装方案扫描与
-//!   激活校正、`preedit_display` 覆盖、`SessionEvent` 泵线程、预热闸门、吃键判定转发，
-//!   以及按键翻译与英文自动空格（`press`，见 `touch.rs`）。
-//! - **归平台仓**（平台专属）：UniFFI/Swift 的类型投影、日志接到 logcat/oslog、
-//!   `cdylib` 产物形态、绑定生成器。
+//! - 留在这里（与绑定框架无关）：四层配置加载、已装方案扫描与激活校正、`preedit_display`
+//!   覆盖、`SessionEvent` 泵线程、预热闸门、吃键判定转发、按键翻译与英文自动空格（`touch.rs`）。
+//! - 归平台仓：UniFFI/Swift 的类型投影、日志接到 logcat/oslog、`cdylib` 产物形态、绑定生成器。
 //!
-//! 所以本 crate 的依赖表里不该出现任何绑定框架——一旦沾上，「接口层」就退化成
-//! 「那个平台的实现层」，第二个平台再来只能复制粘贴。
+//! 所以本 crate 的依赖表里不该出现任何绑定框架，否则第二个平台只能复制粘贴。
 //!
 //! - 同样留在这里：数据同步门面 `sync.rs`（`MobileSync`，JSON 进出、进程内跑同步 Runner，
 //!   重载直接调核心）。绑定层只做字符串透传与线程调度，不碰同步逻辑。
@@ -34,22 +24,20 @@
 //!   宿主只按序执行）。直出场景（密码框）宿主不得调用 `press`
 //! - 反向：`Receiver<SessionEvent>`（`View`/`Hide`/`Status`/`Notice`）泵线程 →
 //!   [`MobileEventSink`] 回调（候选/状态/提示）
-//! - 候选：推送帧 [`CandidateFrame`] 只给**当页**（够画编码栏与页码），列表本身由宿主按窗口
-//!   [`MobileCore::candidates`] 拉、按绝对下标 [`MobileCore::select_candidate`] 选。
-//!   这两个口取代了骨架期「合成页内数字键」的做法——那把点选限死在前 9 个，
-//!   于是候选栏的滚动也没有意义（一帧才 6~9 条）。桌面鼠标点选走 push 通道上屏，
-//!   headless 没有消费端，所以这里改走「返回编辑指令流」，与 `key_down` 同一种形状。
+//! - 候选：推送帧 [`CandidateFrame`] 只给当页（够画编码栏与页码），列表由宿主按窗口
+//!   [`MobileCore::candidates`] 拉、按绝对下标 [`MobileCore::select_candidate`] 选，
+//!   不受页内数字键只能选前 9 个的限制。桌面鼠标点选走 push 通道上屏，headless 没有消费端，
+//!   所以这里返回编辑指令流，与 `key_down` 同一种形状。
 //!
 //! # 工具栏与功能菜单的呈现不属于这一层
 //!
-//! 桌面那棵功能菜单树（截图、打开日志目录、诊断 HUD、语言栏图标调试…）大半在手机上
-//! 无意义，照搬过来只会把桌面形态的包袱带进移动端。此处只提供两样东西：
+//! 桌面功能菜单树大半在手机上无意义，此处只提供：
 //!
-//! - [`MobileCommand`] —— **能调到**引擎的哪些开关（展示什么、怎么排、叫什么由宿主定）
-//! - [`InputStatus`] —— 引擎当前的模式真值（中英/标点/全半角/简繁/方案短称）
+//! - [`MobileCommand`]：能调到引擎的哪些开关（展示什么、怎么排、叫什么由宿主定）；
+//! - [`InputStatus`]：引擎当前的模式真值（中英/标点/全半角/简繁/方案短称）。
 //!
-//! 状态**必须**由引擎推送而不是宿主自己记：方案切换会改写方案短称，密码框会强制
-//! 英文，这些都发生在引擎内部；宿主侧自记一份开关态必然与引擎漂移。
+//! 状态必须由引擎推送而不是宿主自己记：方案切换、密码框强制英文都发生在引擎内部，
+//! 宿主自记一份必然漂移。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -73,15 +61,14 @@ use wind_ui_types::{CandidateOp, MenuCmd, MenuItemSpec, MenuKind, UiEvent};
 
 /// 宿主直接消费的接缝类型，从 [`wind_host`] 原样透出。
 ///
-/// 不在这里另立一套投影：`EditOp`/`KeyOutcome` 本就是给宿主用的接缝，多包一层就多一张
-/// 要跟着核心同步的映射表，而这张表的漏项是静默的（少接一个变体 = 那个动作在移动端
-/// 悄悄消失，不报错、不掉键，单纯功能没有）。
+/// 不另立投影：多包一层就多一张要跟核心同步的映射表，漏接一个变体时那个动作在移动端
+/// 静默消失。
 pub use wind_host::{EditOp, KeyOutcome, TimingHint};
 
 /// 候选窗口与它的核心侧硬上限，从协调器原样透出。
 ///
-/// [`MAX_WINDOW`] 要跟着透出而不是让宿主自己记一份：宿主传的 `limit` 超过它会被
-/// 核心静默截断，宿主若按自记的数字判断「还有没有更多」，就会在边界上反复拉空窗口。
+/// [`MAX_WINDOW`] 跟着透出：`limit` 超过它会被静默截断，宿主按自记的数字判断「还有没有更多」
+/// 会在边界上反复拉空窗口。
 pub use wind_coordinator::candidate_pull::{CandidateWindow, MAX_WINDOW, TextSegment};
 /// 展开页「首单元读法」的数据类型，见 [`MobileCore::leading_readings`]。
 pub use wind_coordinator::leading_reading::LeadingReading;
@@ -91,13 +78,12 @@ pub use wind_transfer;
 
 /// 候选帧：编码栏与候选栏一次渲染所需的全部数据。
 ///
-/// 拆成结构体而非长参数列表——它还会继续加字段（翻页栏、注释行），每加一个都改
-/// trait 方法签名会连带宿主侧实现全部返工。
+/// 用结构体而非长参数列表：加字段时不必改 trait 方法签名、连带宿主实现返工。
 #[derive(Debug, Clone)]
 pub struct CandidateFrame {
     /// 编码区串（五笔码 / 拼音串），编码栏正文
     pub preedit: String,
-    /// 编码区插入符位置：`preedit` 内的**字节**偏移（恒在字符边界）
+    /// 编码区插入符位置：`preedit` 内的字节偏移（恒在字符边界）
     pub preedit_caret: usize,
     /// 模式指示文本（五/拼/英/符…），编码栏左侧角标；空 = 不显示
     pub mode_label: String,
@@ -105,7 +91,7 @@ pub struct CandidateFrame {
     pub composing: bool,
     /// 当前页是否有候选。候选文本不在帧里，宿主按需经 `candidates` 拉取
     pub has_candidates: bool,
-    /// 键盘选中项（**页内**下标），空格上屏目标
+    /// 键盘选中项（页内下标），空格上屏目标
     pub selected: usize,
     /// 当前页（1 起）
     pub page: usize,
@@ -113,14 +99,14 @@ pub struct CandidateFrame {
     pub total_pages: usize,
 }
 
-/// 引擎当前模式真值。**数据，不是界面**——工具栏画几个格、放哪、什么图标由宿主决定。
+/// 引擎当前模式真值。是数据不是界面：工具栏怎么画由宿主决定。
 #[derive(Debug, Clone)]
 pub struct InputStatus {
     pub chinese_mode: bool,
     /// 键是否按拉丁字母直出：英文方案、中文模式关闭、或不可输入（密码框等）
     pub latin_input: bool,
     /// 模式主字，最多 2 个字符。中文态取方案的 `[schema] icon_label`（"五"/"拼"），
-    /// 非中文态取 `[ui.labels]`（出厂 "英"/"A"，**用户可配**）。
+    /// 非中文态取 `[ui.labels]`（出厂 "英"/"A"，用户可配）。
     pub icon_label: String,
     pub full_width: bool,
     pub chinese_punct: bool,
@@ -153,8 +139,7 @@ pub struct ThemeEntry {
 
 /// 一个求值后的语义色。
 ///
-/// `${var}` 递归与 `{light, dark}` 变体都已在核心侧展开完毕，这里是**终值**——
-/// 宿主不该也不需要自己存两套色表，切明暗时重新取一次即可。
+/// `${var}` 递归与 `{light, dark}` 变体已在核心侧展开，这里是终值；宿主切明暗时重新取一次即可。
 #[derive(Debug, Clone)]
 pub struct PaletteColor {
     /// 语义名：`bg` / `surface` / `text` / `accent_soft` / `toolbar_background` …
@@ -186,7 +171,7 @@ pub struct DailyTotal {
 /// 一条用户词（设置页「词库」列表项）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserWord {
-    /// **带音节空格的显示码**（`ni hao`）；码表方案、无边界信息的旧词没有空格。
+    /// 带音节空格的显示码（`ni hao`）；码表方案、无边界信息的旧词没有空格。
     /// 原样回传给 [`MobileCore::user_word_remove`] 即可删掉——拆回扁平码由核心做。
     pub code: String,
     /// 真实文本（存储域，不做桌面设置页那层 `\n` 转义——移动端直接显示原文）
@@ -393,7 +378,7 @@ fn flatten_candidate_menu(items: &[MenuItemSpec], out: &mut Vec<CandidateMenuIte
 
 /// 宿主可下达的引擎命令。
 ///
-/// 刻意是一张**手工挑选的小表**而非桌面 `MenuCmd` 的镜像：后者含截图、打开目录、
+/// 刻意是一张手工挑选的小表而非桌面 `MenuCmd` 的镜像：后者含截图、打开目录、
 /// 诊断 HUD、语言栏图标等一批桌面专属项，暴露给移动端只会制造调不通的入口。
 /// 新增移动端要用的开关时在此显式加一条。
 #[derive(Debug, Clone)]
@@ -417,7 +402,7 @@ pub enum MobileCommand {
     SetShuangpinLayout(String),
 }
 
-/// 反向通道接收端（由 SessionEvent 泵线程调用，**非宿主主线程**，实现方自行切回）。
+/// 反向通道接收端（由 SessionEvent 泵线程调用，非宿主主线程，实现方自行切回）。
 pub trait MobileEventSink: Send + Sync {
     /// 候选/编码区更新
     fn on_candidates(&self, frame: CandidateFrame);
@@ -434,9 +419,7 @@ pub struct MobileCore {
     coord: Arc<Coordinator>,
     /// 预热进行中：泵线程据此丢弃预热产生的候选帧，不让它们闪到用户界面上
     warming: Arc<AtomicBool>,
-    /// 出厂数据目录。留着是为了配置快照能走**与构造期同一条**四层加载路径
-    /// （见 [`MobileCore::config_snapshot`]）——少了它只能读代码默认值，
-    /// 设置页会把出厂 config.toml 里的取值显示成默认值。
+    /// 出厂数据目录：配置快照要走与构造期同一条四层加载路径（见 [`MobileCore::config_snapshot`]）。
     data_dir: std::path::PathBuf,
     /// 刚由 [`Self::press`] / [`Self::select_candidate`] 在英文词后补过一个空格，
     /// 且此后没有别的输入动作（光标没动、没换框、没按别的键）。句末标点据此把空格挪到标点后面。
@@ -454,7 +437,7 @@ impl MobileCore {
     /// - `user_root`: 用户目录（核心的「用户配置目录」：config.toml、schemas/、用户词库…，
     ///   布局同桌面；Android 上放 `Android/data/<包名>/files`，用户可经文件管理器直接编辑）
     /// - `local_root`: 本地目录（词库编译缓存与日志，可再生，不进用户视野；Android 上在私有 filesDir 下）
-    /// - `fallback_schema`: **首装兜底**方案 id；用户上次选过的优先，见下方说明
+    /// - `fallback_schema`: 首装兜底方案 id；用户上次选过的优先
     pub fn new(
         data_dir: &Path,
         user_root: &Path,
@@ -464,22 +447,15 @@ impl MobileCore {
     ) -> Arc<Self> {
         mount_dirs(data_dir, user_root, local_root);
 
-        // 四层配置加载（代码默认 ⊕ data/config.toml ⊕ data_custom/config.toml ⊕ 用户层），
-        // 与桌面同一条路径——移动端没有定制版包时 L2.5 自然缺席，不需要分支——
-        // 「配置格式三端统一」是移植的硬约束（多端同步的前提），这里若退回
-        // `Config::default()`，出厂 config.toml 里的短语/命令栏/候选行为全部失效。
+        // 四层配置加载，与桌面同一条路径（没有定制版包时 L2.5 自然缺席）。配置格式三端统一
+        // 是多端同步的前提；退回 `Config::default()` 会让出厂 config.toml 的设置全部失效。
         let mut cfg = Config::load(Some(data_dir)).unwrap_or_else(|e| {
             tracing::warn!("配置加载失败，回落代码默认值: {e}");
             Config::default()
         });
 
-        // 可选方案 = **assets 里实际装了的方案**，而不是 config.toml 里列的那份。
-        //
-        // 两个方向都要修正：
-        // - 删：出厂清单列的是桌面全量，装不出来的条目会在方案选择器里变成死项；
-        // - 加：清单**没列但装了**的照样要能用（英文方案就是这样——桌面把它当作
-        //   临时英文的目标引擎、不放进 available，移动端却要把它当一等方案切换）。
-        // 移动端的语义就是「装了什么就能用什么」，以文件系统为准最省心。
+        // 可选方案以 assets 里实际装了的为准，不用 config.toml 列的那份：出厂清单是桌面全量，
+        // 装不出来的会成死项；而没列但装了的（如英文方案，桌面不放进 available）也要能用。
         let mut installed = scan_installed_schemas(data_dir);
         if !installed.iter().any(|s| s == fallback_schema) {
             installed.push(fallback_schema.to_string());
@@ -490,14 +466,9 @@ impl MobileCore {
         // 重载时覆盖钩子按同一规则重算
         let available = config_api::enabled_schemas();
 
-        // 激活方案：**用户上次选的优先**，`fallback_schema` 只是首装兜底。
-        //
-        // ⚠ 此前这里无条件用参数覆盖，把三层加载刚读出来的用户层选择直接冲掉——
-        // `select_schema` 明明把 `schema.active` 写进了用户层，表现却是「切到拼音，
-        // 杀掉进程再进来又回五笔」，而且切换当场是好的，只有重启才复现，极难归因。
-        //
-        // 仍要校验「装了没有」：用户层可能留着上一版装过、这一版删掉的方案 id，
-        // 照用会让引擎起不来（可选方案里没有它，`select_schema` 也选不回去）。
+        // 激活方案：用户上次选的（用户层 `schema.active`）优先，`fallback_schema` 只是首装兜底，
+        // 别无条件用参数覆盖，否则重启后回到兜底方案。仍要校验装了没有：用户层可能留着
+        // 这一版已删掉的方案 id，照用会让引擎起不来。
         let active = if cfg.schema.active.is_empty() || !available.contains(&cfg.schema.active) {
             fallback_schema.to_string()
         } else {
@@ -507,13 +478,10 @@ impl MobileCore {
         cfg.schema.available = available;
         cfg.schema.active = active;
 
-        // 移动端强制改写项（编码显示位置等）。**与设置页快照共用同一个函数**：
-        // 两处若各写一份，构造时改了、快照没改，设置页就会显示一个引擎没在用的值，
-        // 用户还能去「改」它、改完毫无反应。
+        // 移动端强制改写项，与设置页快照共用同一个函数，两处才能一致。
         config_api::apply_mobile_overrides(&mut cfg);
 
-        // 用户数据根：redb 落在这里。**不能传 None**——那样系统短语层会整段为空
-        // （详见 `new_session` 的说明），词频与自造词也不落盘。
+        // 用户数据根不能传 None：那样系统短语层整段为空（见 `new_session`），词频与自造词也不落盘。
         //
         // 显式声明移动 Profile：平台差异由运行期 Profile 决定，不再靠 `cfg!(target_os)`，
         // 这样主机上的测试与 Android 产物走同一条移动分支。
@@ -527,17 +495,9 @@ impl MobileCore {
         coord.set_quiet_reload_toast(true);
         // 强制改写项在每次重载配置后也要再套上（设置页每改一项就重载一次）
         coord.set_config_overlay(config_api::apply_mobile_overrides);
-        // ⚠ 这里**保持开启**启动预热（`set_eager_prewarm(true)` 是默认值）。
-        //
-        // 曾经关掉过，理由是「手机上编译所有方案要几秒 CPU、会撞上用户打字」——那个
-        // 判断错了两次：ANR 的真根因是**核心构造在宿主主线程**（已由宿主侧挪到后台），
-        // 与预热无关；而关掉预热的代价远超收益——未预热的方案**不会变成「按需加载一次」，
-        // 而是每次查询都重解析整份 yaml**（`CachedDict` 写不出 wdat 缓存时退化为内存模式），
-        // 实测每次按键多花 200ms，触摸事件因此堆积、连点被误判成上滑。
-        //
-        // 要改回按需加载，先确认词库能落成 wdat 缓存，否则就是把一次性开销摊成永久开销。
-        // 惰性构建搬到后台（真机冷启动首键实测阻塞 2.8 秒）。走核心的就绪契约，
-        // 宿主不再自己猜「喂哪几个键能触发惰性构建」。
+        // 保持启动预热开启（`set_eager_prewarm(true)` 是默认值）：`CachedDict` 写不出 wdat 缓存时
+        // 未预热的方案每次查询都重解析整份 yaml，关掉就把一次性开销摊成每键开销。要改回按需加载，
+        // 先确认词库能落成 wdat 缓存。惰性构建经核心的就绪契约搬到后台，避免冷启动首键阻塞。
         coord.prepare();
         // 拼音类方案：各声母第一次查询的一次性开销提前在后台付掉（见该函数说明）
         coord.prewarm_single_initials();
@@ -556,14 +516,12 @@ impl MobileCore {
     ///
     /// 抬起事件骨架期不喂（协调器按键链以 down 为主）。
     pub fn key_down(&self, vk: u32, modifiers: u32) -> KeyOutcome {
-        // 用户真按键了 → 预热窗口立即关闭。没有这一行，用户在预热完成前抢先打字时，
-        // 他的**真实候选帧**会被泵线程当成预热帧丢掉（表现为「打了字没候选」）。
-        // 预热线程末尾那次 store(false) 因此是幂等的补充，不是唯一出口。
+        // 用户真按键了就关闭预热窗口，否则预热完成前打的字，其候选帧会被泵线程当预热帧丢掉。
+        // 预热线程末尾的 store(false) 只是幂等补充。
         self.warming.store(false, Ordering::Relaxed);
 
-        // ★ 吃键判定走**核心的唯一真相源**（`wind_coordinator::key_gate`）。
-        // 此处曾有一份手写谓词，一个会话里被同形 bug 打脸三次（空缓冲功能键失效、
-        // 英文模式字母失效…），根因就是它与核心判据漂移。宿主不再自己判。
+        // 吃键判定走核心的唯一真相源（`wind_coordinator::key_gate`），别在这里另写谓词，
+        // 手写的一份必然与核心判据漂移。
         let probe = KeyProbe::new(vk).with_modifiers(Modifiers(modifiers));
         if !self.coord.should_handle_key(&probe) {
             // 交还宿主的键（空缓冲退格、方向键、回车…）动的是宿主里的正文，
@@ -582,7 +540,7 @@ impl MobileCore {
     /// 报告光标前的正文（不含组合区；末尾几十个字就够，多给的只留末尾）。
     ///
     /// 联想据此把逐字上屏拆开的词凑回来（五笔打「今」「天」，接「今天」的下一词）。
-    /// 宿主在**光标被挪动或正文被别人改过之后**报（Android `onUpdateSelection` 里
+    /// 宿主在光标被挪动或正文被别人改过之后报（Android `onUpdateSelection` 里
     /// `getTextBeforeCursor`）、换输入框时报一次；本核心自己的上屏不必等报告，
     /// [`Self::key_down`] / [`Self::select_candidate`] 已按下发的编辑指令跟上。
     /// 读不到就报空串：联想退回只看刚上屏的那段。
@@ -627,10 +585,10 @@ impl MobileCore {
     }
 
     /// 暂停 / 恢复学习（隐私 / 无痕输入）。暂停期间照常出候选、照常上屏，但这次输入
-    /// **不写进任何用户数据**：词频、自动造词、联想与下一词、英文造词、输入统计、各类历史。
+    /// 不写进任何用户数据：词频、自动造词、联想与下一词、英文造词、输入统计、各类历史。
     /// 用户在设置页 / 候选菜单里的显式操作（加词、删词、置顶）不受影响。
     ///
-    /// 宿主在**每次** `onStartInput`（[`Self::focus_gained`] 前后均可）按当前输入框重新声明：
+    /// 宿主在每次 `onStartInput`（[`Self::focus_gained`] 前后均可）按当前输入框重新声明：
     /// `EditorInfo.imeOptions` 带 `IME_FLAG_NO_PERSONALIZED_LEARNING`（无痕浏览器、私密
     /// 聊天框），或 `inputType` 是密码类（`TYPE_TEXT_VARIATION_PASSWORD` /
     /// `VISIBLE_PASSWORD` / `WEB_PASSWORD` / `TYPE_NUMBER_VARIATION_PASSWORD`）时传 `true`，
@@ -700,12 +658,12 @@ impl MobileCore {
     ///
     /// 宿主界面的「分词」键发这个字符，引擎侧按同一条规则认它（单一真相源，
     /// 见 `Coordinator::manual_separator_char`）。取值随方案、`separator` 设置、
-    /// 码表方案的整句开关变化，**每次要用时再问**，别缓存。纯读。
+    /// 码表方案的整句开关变化，每次要用时再问，别缓存。纯读。
     pub fn separator_key(&self) -> Option<char> {
         self.coord.manual_separator_char()
     }
 
-    /// 拉取候选全量的一个窗口。**纯读**，不改状态，可随时调。
+    /// 拉取候选全量的一个窗口。纯读，不改状态，可随时调。
     ///
     /// 别在每次按键都拉一大段：序列化与宿主侧的文字测量都在宿主主线程上。
     /// 起手拉够铺满一两屏即可，用户滚到尾部再续取。
@@ -722,10 +680,7 @@ impl MobileCore {
         self.coord.candidate_window_growing(offset, limit, true)
     }
 
-    /// 按**绝对下标**选词，返回编辑指令流（与 [`Self::key_down`] 同一种形状）。
-    ///
-    /// 取代此前「合成数字键」的做法——那条路把选词限死在页内 1-9，第 10 个及以后
-    /// 永远点不到。
+    /// 按绝对下标选词，返回编辑指令流（与 [`Self::key_down`] 同一种形状）。
     ///
     /// 英文方案组码中选词，结果后追加补的空格（见 [`Self::press`]）。
     pub fn select_candidate(&self, index: usize) -> KeyOutcome {
@@ -738,7 +693,7 @@ impl MobileCore {
         outcome
     }
 
-    /// 同 [`Self::select_candidate`]，但**不补空格、不动 `auto_spaced`**。
+    /// 同 [`Self::select_candidate`]，但不补空格、不动 `auto_spaced`。
     ///
     /// 宿主自己要紧接着上屏别的东西（表情、符号、数字键盘的字符）时用：先把首选顶上屏，
     /// 再接宿主的字符，中间不该夹一个空格。
@@ -749,7 +704,7 @@ impl MobileCore {
     }
 
     /// 首单元的几种读法（展开页左栏画它）：同一串字母的不同切分、模糊音兄弟、只取声母。
-    /// 没得选 / 非全拼 / 无编码 → 空。**不改编码**，只影响候选。
+    /// 没得选 / 非全拼 / 无编码 → 空。不改编码，只影响候选。
     pub fn leading_readings(&self) -> Vec<LeadingReading> {
         self.coord.leading_readings()
     }
@@ -762,7 +717,7 @@ impl MobileCore {
         Some(outcome)
     }
 
-    /// 第 `index`（**绝对下标**，与 [`Self::candidates`] 同一口径）个候选的长按菜单；
+    /// 第 `index`（绝对下标，与 [`Self::candidates`] 同一口径）个候选的长按菜单；
     /// 无候选 / 越界 → 空。
     ///
     /// 菜单项与桌面右键同源（`Coordinator::candidate_menu_items`），文案与启用态逐字一致。
@@ -840,7 +795,7 @@ impl MobileCore {
 
     /// 求值后的语义色表。
     ///
-    /// ⚠ `system_dark` **必须由宿主给**：核心的系统明暗探测只实现了 Windows 与 macOS，
+    /// `system_dark` 必须由宿主给：核心的系统明暗探测只实现了 Windows 与 macOS，
     /// 其余平台恒 false，移动端若指望核心自己探测，「跟随系统」会静默变成恒亮色。
     /// Android 传 `Configuration.uiMode` 的 `UI_MODE_NIGHT_YES`，iOS 传
     /// `traitCollection.userInterfaceStyle == .dark`。
@@ -859,28 +814,22 @@ impl MobileCore {
         self.coord.theme_dark_with(system_dark)
     }
 
-    /// **键面字符 → 按法** `(字符, VK, 是否按 Shift)`。宿主启动时取一次。
+    /// 键面字符 → 按法 `(字符, VK, 是否按 Shift)`。宿主启动时取一次。
     ///
-    /// 含可打印 ASCII 与中文标点两部分，后者登记的是其 ASCII 源键的按法——引擎那边
-    /// 不存在直接产出中文标点的键。详见 `key_convert::char_strokes`。
-    ///
-    /// 软键盘手里只有「用户点了键面上的哪个字符」，引擎的入口却是键事件。宿主自己写
-    /// 这张表就是第二份真相源，漏掉的字符会**绕过引擎直接上屏**——智能符号、标点配对、
-    /// 自定义标点映射、中英标点切换对它统统失效，而设置页里那些开关照样摆着、
-    /// 点了没反应也不报错。
+    /// 含可打印 ASCII 与中文标点两部分，后者登记的是其 ASCII 源键的按法（详见
+    /// `key_convert::char_strokes`）。宿主别自己写这张表：漏掉的字符会绕过引擎直接上屏，
+    /// 智能符号、标点配对、自定义标点映射、中英标点切换对它统统失效。
     pub fn char_strokes(&self) -> Vec<(char, u32, bool)> {
         wind_coordinator::key_convert::char_strokes()
     }
 
-    /// 可作**引导键**的符号键：`(规范名, 该键的字符)`。
+    /// 可作引导键的符号键：`(规范名, 该键的字符)`。
     ///
-    /// 触发键类配置（`input.temp_pinyin.trigger_keys` 等）存的是**键名**（如 `"backtick"`），
-    /// 而界面要显示的是那个键长什么样（`` ` ``）。两者的对照表由核心给：设置端自己拼一份的话，
-    /// 核心增删引导键时它不会跟着改，新键的选项永远不出现（`symbol_keys` 的文档里记着这条）。
+    /// 触发键类配置（`input.temp_pinyin.trigger_keys` 等）存的是键名（如 `"backtick"`），界面要显示
+    /// 键的样子（`` ` ``）；对照表由核心给，设置端自拼的会跟不上核心增删引导键。
     ///
-    /// 宿主的第二个用途是**把名字还原成按键**：名字 → 字符 → [`Self::char_strokes`] 里的按法。
-    /// 于是「点工具栏图标进入某模式」与「上滑打出那个符号进入」走的是同一条路——
-    /// 模式的进入语义（写引导符进编码区等）只有引擎那一份实现。
+    /// 宿主还可把名字还原成按键（名字 → 字符 → [`Self::char_strokes`]），让「点工具栏图标进入
+    /// 某模式」与「上滑打出符号进入」走同一条路，模式的进入语义只有引擎一份实现。
     pub fn symbol_keys(&self) -> Vec<(String, char)> {
         wind_keys::keymap::symbol_keys()
             .map(|(name, ch)| (name.to_string(), ch))
@@ -889,9 +838,8 @@ impl MobileCore {
 
     // ── 配置读写（设置页）────────────────────────────────────────────
     //
-    // 这三个口一起构成设置页的数据面：注册表说「有哪些键、什么类型」，快照说
-    // 「现在各是什么值」，写入把用户的选择落到用户层。落盘的所有讲究都在
-    // `Config::set_user_value` 里，本层不自己写一行——理由见 `config_api` 模块文档。
+    // 注册表说「有哪些键、什么类型」，快照说「现在各是什么值」，写入把用户的选择落到用户层。
+    // 落盘逻辑全在 `Config::set_user_value`，理由见 `config_api` 模块文档。
 
     /// 当前生效配置的全量快照（TOML 文本），含移动端强制改写项。
     pub fn config_snapshot(&self) -> String {
@@ -905,13 +853,12 @@ impl MobileCore {
 
     /// core 的配置字段注册表：键 → 类型（+ 枚举值域）。
     ///
-    /// 宿主用它校验自己的设置清单。清单里写错一个键的后果是「这个开关点了没反应」
-    /// 且不报错，把注册表交出去就能在加载清单时当场比对出来。
+    /// 宿主用它在加载设置清单时比对出写错的键。
     pub fn config_registry(&self) -> Vec<config_api::ConfigFieldInfo> {
         config_api::registry()
     }
 
-    /// 写一个配置键到用户层。**只写盘**，生效要另发
+    /// 写一个配置键到用户层。只写盘，生效要另发
     /// [`MobileCommand::ReloadConfig`]——分开是为了让宿主把连改若干项合成一次重载。
     pub fn config_set(&self, key: &str, value: config_api::ConfigValue) -> Result<(), String> {
         config_api::set(key, value)
@@ -953,7 +900,7 @@ impl MobileCore {
     /// 2. 重扫各层 `schemas/` 刷新已装方案列表（规则同构造期：扫描结果 + 首装兜底方案）；
     /// 3. 重建跨方案派生配置（吃键集等）。
     ///
-    /// 之后另发 [`MobileCommand::ReloadConfig`] 让可选方案跟上。导入 / 删除**中途失败**也要调
+    /// 之后另发 [`MobileCommand::ReloadConfig`] 让可选方案跟上。导入 / 删除中途失败也要调
     /// （`changed_ids` 可空）：落盘是逐文件的，失败时磁盘可能已经变了一部分。
     pub fn on_schemes_changed(&self, changed_ids: &[String]) {
         use wind_coordinator::web_host::WebDataHost;
@@ -1354,7 +1301,7 @@ impl MobileCore {
     /// 英文方案一份，混输方案 `members` 并排各成员）。`top_n` 为重码 Top 列表条数（上限
     /// [`wind_coordinator::dict_stats_api::TOP_N_MAX`]），`refresh` 绕过缓存重算。
     ///
-    /// ⚠️ O(全表)：拼音大词库一遍几十 MB 峰值、百毫秒级以上，宿主须在后台线程调用。
+    /// O(全表)：拼音大词库一遍几十 MB 峰值、百毫秒级以上，宿主须在后台线程调用。
     /// 未知方案 / 混输未配成员 → Err(原因)。
     pub fn dict_stats(&self, schema_id: &str, top_n: u32, refresh: bool) -> Result<String, String> {
         wind_coordinator::dict_stats_api::system_stats(
@@ -1413,7 +1360,7 @@ impl MobileCore {
     /// 写口的前置闸：只读模式（用户数据由更新版本写入 / meta.toml 读不出）拒绝。
     ///
     /// 桌面那边只读模式下 store 根本不打开，写 RPC 靠「无持久化存储」间接挡住；这里显式
-    /// 先查，是为了把**原因**（要升级 / 要从备份还原）原样交给用户，而不是一句看不懂的
+    /// 先查，是为了把原因（要升级 / 要从备份还原）原样交给用户，而不是一句看不懂的
     /// 「无持久化存储」。
     fn ensure_writable(&self) -> Result<(), String> {
         match self.coord.storage_readonly_reason() {
@@ -1422,7 +1369,7 @@ impl MobileCore {
         }
     }
 
-    /// 可选双拼布局。清单由核心扫描目录得出，**宿主不要硬编码**——
+    /// 可选双拼布局。清单由核心扫描目录得出，宿主不要硬编码：
     /// 用户可以往 `schemas` 的 `shuangpin` 子目录里丢自己的布局文件，硬编码清单看不见它。
     pub fn shuangpin_layouts(&self) -> Vec<LayoutEntry> {
         let active = self.coord.active_shuangpin_layout();
@@ -1446,42 +1393,20 @@ impl MobileCore {
 /// 移动端词库页不提供权重输入（手机上没人会去调它），故固定取这个值。
 pub const USER_WORD_ADD_WEIGHT: i32 = 1200;
 
-/// 把用户目录、本地目录与**安装根**钉到宿主给的路径。
+/// 把用户目录、本地目录与安装根钉到宿主给的路径。
 ///
-/// 用户目录（`user_root`）= 核心的「用户配置目录」，config.toml / schemas / 用户词库都在里面，
-/// 布局与桌面一致；本地目录（`local_root`）放缓存与日志。两者经
-/// `Config::set_dir_override` 显式注入，不再靠改 `XDG_*` 环境变量骗 `dirs` crate。
+/// 用户目录（`user_root`，布局同桌面）与本地目录（`local_root`，缓存与日志）经
+/// `Config::set_dir_override` 显式注入，不靠改 `XDG_*` 环境变量。
 ///
-/// # 为什么安装根也必须钉
+/// 安装根也必须钉：没有 `WIND_INSTALL_ROOT` 时它取 `current_exe().parent()`，安卓上是
+/// `/system/bin`，核心找不到出厂 config.toml。后果是静默的：`set_user_value` 的「等于出厂默认
+/// 不落盘」（`preset_for_pruning()`）永久降级为照常写入，每次保存都把当前默认钉进用户层，
+/// 「恢复默认」也删不掉键。
 ///
-/// `Config::data_dir()` = `install_root()/data`，而 `install_root()` 在没有
-/// `WIND_INSTALL_ROOT` 时取 `current_exe().parent()`——安卓上那是
-/// `/system/bin`，于是核心**找不到出厂 config.toml**。
-///
-/// 后果不是报错，是一个功能整体静默失效：`set_user_value` 的「等于出厂默认就不落盘」
-/// 那道收口靠 `preset_for_pruning()` 拿出厂默认做比对，取不到时安全降级为「照常写入」。
-/// 桌面上那是偶发降级，安卓上是**永久**的——每一次保存都会把当前默认钉死进用户层，
-/// 将来核心改默认值，这些用户一个也收不到（`schema.mix.auto_commit_block_on_pinyin`
-/// 就是这么引爆的，真机一份配置 105 键里 62 键是这样来的）。
-///
-/// 它同时让「恢复默认」看起来没生效：写回默认值本该把该键从用户层删掉，降级后变成
-/// 老老实实写一遍，用户层里那个键一直在。
-///
-/// ⚠ 传入的 `data_dir` 必须就是 `<安装根>/data`——这是核心那边的固定关系，
-/// 不是本函数能选择的。目录名不对时只警告不猜：猜错会让核心去另一个目录读出厂配置，
-/// 比找不到更难查。
-///
-/// # 关于 `WIND_INSTALL_ROOT` 标着"生产严禁设置"
-///
-/// 那条告诫针对的是桌面：那里 `current_exe().parent()` 本就是正确答案，设它只会把
-/// 安装根指到别处。移动端没有这个前提——`current_exe()` 是 `/system/bin/app_process64`，
-/// 与 App 私有目录毫无关系，不设它就没有任何正确答案。
-///
-/// 移动端进程只有本函数一个写入方，也只有一个核心实例，不存在两处争抢的问题。
-///
-/// 顺带确认过的一个连带风险：`is_portable()` 也读这个根，判据是根目录下有
-/// `portable_mode` 标记文件。App 私有的 `filesDir` 下只有 `data`/`user`/`rust`
-/// 三个目录，不会有这个文件；真有的话用户配置会改落 `filesDir/userdata`。
+/// `data_dir` 必须就是 `<安装根>/data`（核心的固定关系）；形状不对时只警告不猜，猜错会让核心
+/// 去另一个目录读出厂配置，更难查。`WIND_INSTALL_ROOT`「生产严禁设置」的告诫只针对桌面；移动端
+/// `current_exe()` 是 `app_process64`，不设就没有正确答案，且进程内只有本函数一个写入方。
+/// `is_portable()` 也读这个根（看 `portable_mode` 标记文件），App 私有目录下不会有它。
 fn mount_dirs(data_dir: &Path, user_root: &Path, local_root: &Path) {
     Config::set_dir_override(user_root.to_path_buf(), local_root.to_path_buf());
     unsafe {
@@ -1563,14 +1488,11 @@ fn spawn_session_pump(
         .expect("spawn wind-session-pump");
 }
 
-/// 扫描**各资源层**（user / custom / data）的 `schemas/*.schema.toml`，返回已安装的方案 id。
+/// 扫描各资源层（user / custom / data）的 `schemas/*.schema.toml`，返回已安装的方案 id。
 ///
-/// 与桌面端 `EngineManager::installed_schemas` 同语义：**合并去重**，各层都贡献 id
-/// （不是「靠前层胜出」——那是双拼布局的语义）。层序见
-/// [`wind_config::Config::resource_layers_with`]。
-///
-/// 顺序按文件名排序以保证**稳定**：方案下标要回送给引擎选择（`SelectSchema`），
-/// 顺序随目录遍历漂移会让「上次选的第 2 个」这次指向另一个方案。
+/// 与桌面端 `EngineManager::installed_schemas` 同语义：各层合并去重（不是双拼布局那种靠前层胜出）。
+/// 层序见 [`wind_config::Config::resource_layers_with`]。按文件名排序保证稳定，否则回送给
+/// `SelectSchema` 的下标会随目录遍历顺序漂移。
 fn scan_installed_schemas(data_dir: &Path) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for base in Config::resource_layers_with(Some(data_dir)) {
@@ -1580,9 +1502,8 @@ fn scan_installed_schemas(data_dir: &Path) -> Vec<String> {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if let Some(id) = name.strip_suffix(".schema.toml") {
-                // 定制版 `[schemas] hide` 删掉的方案在任何层都不存在（与桌面端
-                // `EngineManager::scan_layer_schema_ids` 同判据）。不滤的话移动端方案列表里
-                // 会留一个选了也切不过去的空条目——引擎侧 `read_schema` 早已对它返回 None。
+                // 定制版 `[schemas] hide` 删掉的方案视为不存在（同 `EngineManager::scan_layer_schema_ids`），
+                // 否则列表里会留一个切不过去的空条目。
                 if Config::custom_hides_schema(id) {
                     continue;
                 }
@@ -1595,19 +1516,13 @@ fn scan_installed_schemas(data_dir: &Path) -> Vec<String> {
     ids
 }
 
-/// 喂键。**不喂合成 caret**：`new_session` 通道没有桌面的首显闸门，候选帧不依赖光标坐标。
+/// 喂键。不喂合成 caret：`new_session` 通道没有桌面的首显闸门，候选帧不依赖光标坐标。
 fn dispatch_key(coord: &Coordinator, vk: u32, modifiers: u32) -> BridgeKeyAction {
     coord.handle_key_event(&KeyEventData {
         key_code: vk,
         scan_code: 0,
-        // ⚠ 必须原样透传，**不能写死 0**。此前这里是 0，而吃键判定
-        // （`should_handle_key`）却收到了真实的 modifiers——判定看得见 Shift、
-        // 派发看不见，两边对同一次按键的认知不一致。
-        //
-        // 后果不是崩溃而是功能缺失：宿主为了让 Shift+字母出大写，只能在 K 侧
-        // 绕过引擎直接上屏一个大写字母，于是中文输入中途按 Shift 会**打断组合**
-        // ——用户看到的是「按了 Shift 就只出一个英文字母」。修好这里之后，
-        // Shift 的语义交还给核心按键链（它本就有完整的修饰键转换，见 key_convert.rs）。
+        // 必须原样透传，不能写死 0：吃键判定（`should_handle_key`）收到的是真实 modifiers，
+        // 两边要对同一次按键认知一致；Shift 的语义归核心按键链（见 key_convert.rs）。
         modifiers,
         event_type: EVENT_KEY_DOWN,
         toggles: 0,
@@ -1620,1029 +1535,42 @@ fn dispatch_key(coord: &Coordinator, vk: u32, modifiers: u32) -> BridgeKeyAction
 /// 词库门面：形状转换（显示码、`u64` 总数）与只读闸。存储语义本身在 wind-coordinator 的
 /// `tests/user_words_api.rs` 验，这里不重复。
 #[cfg(test)]
-mod user_words_tests {
-    use super::*;
-
-    /// 直接拼 [`MobileCore`]：`MobileCore::new` 要挂环境变量与出厂目录，测这几个口用不着。
-    /// ⚠️ 目录名带 pid：多会话并行跑测试时固定名会互删夹具。
-    fn core(tag: &str, meta: Option<&str>) -> (MobileCore, std::path::PathBuf) {
-        let user =
-            std::env::temp_dir().join(format!("wind_mobile_uw_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        if let Some(m) = meta {
-            std::fs::write(user.join("meta.toml"), m).unwrap();
-        }
-        let (coord, _rx) =
-            Coordinator::new_session(Config::default(), None, Some(&user), InputProfile::mobile());
-        let core = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        (core, user)
-    }
-
-    #[test]
-    fn add_list_search_remove_clear() {
-        let (m, dir) = core("crud", None);
-        m.user_word_add("pinyin", "ni hao", "你好").unwrap();
-        m.user_word_add("pinyin", "wo men", "我们").unwrap();
-
-        let page = m.user_words("pinyin", "", 0, 50);
-        assert_eq!(page.total, 2);
-        assert_eq!(
-            page.items[0],
-            UserWord {
-                code: "ni hao".into(),
-                text: "你好".into(),
-                weight: USER_WORD_ADD_WEIGHT,
-            },
-            "显示码带音节空格、权重取桌面加词默认值"
-        );
-
-        let hits = m.user_words("pinyin", "们", 0, 50);
-        assert_eq!((hits.total, hits.items[0].text.as_str()), (1, "我们"));
-
-        // 列表给的显示码原样回传即可删掉
-        m.user_word_remove("pinyin", &page.items[0].code, "你好")
-            .unwrap();
-        assert_eq!(m.user_words("pinyin", "", 0, 50).total, 1);
-
-        assert_eq!(m.user_words_clear("pinyin"), Ok(1));
-        assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 预览走候选同一条求值：日期模板按此刻展开、组展开成各项、纯文本原样。
-    #[test]
-    fn phrase_preview_expands_like_a_candidate() {
-        use chrono::TimeZone;
-        let now = chrono::Local
-            .with_ymd_and_hms(2026, 10, 21, 9, 5, 0)
-            .unwrap();
-        assert_eq!(
-            phrase_preview("date", "$Y年$M月$D日", now),
-            "2026年10月21日"
-        );
-        assert_eq!(phrase_preview("dz", "北京市朝阳区", now), "北京市朝阳区");
-        assert_eq!(
-            phrase_preview("zzhf", r#"$SS("常用回复", "好的", "收到")"#, now),
-            "好的 · 收到",
-            "组打全码时展开成各项"
-        );
-        assert_eq!(
-            phrase_preview("x", r#"$SS("g", "1", "2", "3", "4", "5")"#, now),
-            "1 · 2 · 3 · 4 · …",
-            "多了只列前几个"
-        );
-    }
-
-    /// 命令短语：加 / 列 / 开关 / 删用户短语；只读时拒写。系统短语的叠加与出厂开关语义在
-    /// wind-store 的测试里验，这里只验门面这一层。
-    #[test]
-    fn phrase_add_list_toggle_remove() {
-        let (m, dir) = core("phrases", None);
-        m.phrase_add(" dz ", " 北京市朝阳区 ").unwrap();
-        let mine = |m: &MobileCore| {
-            m.phrases()
-                .into_iter()
-                .filter(|p| p.code == "dz")
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            mine(&m),
-            [Phrase {
-                code: "dz".into(),
-                text: "北京市朝阳区".into(),
-                enabled: true,
-                is_system: false,
-                preview: "北京市朝阳区".into(),
-            }],
-            "编码与内容去掉首尾空白、默认启用、归属用户"
-        );
-        m.phrase_set_enabled("dz", "北京市朝阳区", false).unwrap();
-        assert!(!mine(&m)[0].enabled);
-        m.phrase_remove("dz", "北京市朝阳区").unwrap();
-        assert!(mine(&m).is_empty());
-        assert!(m.phrase_add("dz", "  ").is_err(), "空内容拒收");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 暂停学习只是转发：开关落到协调器上（学习路径的覆盖在 wind-coordinator 的
-    /// `tests/learning_suspended.rs` 验）。
-    #[test]
-    fn learning_suspended_forwards_to_coordinator() {
-        let (m, dir) = core("suspend", None);
-        assert!(!m.coord.learning_suspended(), "默认不暂停");
-        m.set_learning_suspended(true);
-        assert!(m.coord.learning_suspended());
-        m.set_learning_suspended(false);
-        assert!(!m.coord.learning_suspended());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 只读模式：写口带着原因拒绝；读口照约定返回空页（不 panic）。
-    #[test]
-    fn readonly_rejects_writes_with_reason() {
-        let (m, dir) = core("ro", Some("format_version = 99\ndir_id = \"x\"\n"));
-        let err = m.user_word_add("pinyin", "ni hao", "你好").unwrap_err();
-        assert!(err.contains("99"), "要把只读原因交给用户: {err}");
-        assert!(m.user_word_remove("pinyin", "ni hao", "你好").is_err());
-        assert!(m.user_words_clear("pinyin").is_err());
-        assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
-        assert!(m.phrase_add("dz", "地址").is_err(), "短语写入同样受只读闸");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-}
+#[path = "user_words_tests.rs"]
+mod user_words_tests;
 
 /// 词库导出 / 导入门面：往返、跨引擎类型拒收、Rime/TSV、只读闸、导完立即打得出。
 /// 段交集与准入契约的本体在 wind-coordinator 的 `dict_transfer_api`，桌面 JSON 形状在
 /// wind-webdata 的测试里验，这里只验门面这一层。要 `build_dev/data` 的用例缺失时打印跳过。
 #[cfg(test)]
-mod dict_transfer_tests {
-    use super::*;
-
-    fn data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
-    }
-
-    fn dict_ready() -> bool {
-        data_dir()
-            .join("schemas/wubi86/wubi86_jidian.dict.yaml")
-            .exists()
-            && data_dir().join("schemas/pinyin.schema.toml").exists()
-    }
-
-    /// 带真词库的 [`MobileCore`]，当前方案五笔。⚠️ 目录名带 pid：多会话并行跑测试时固定名会互删夹具。
-    fn core(tag: &str) -> (MobileCore, std::path::PathBuf) {
-        let user =
-            std::env::temp_dir().join(format!("wind_mobile_dt_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
-        cfg.schema.active = "wubi86".into();
-        cfg.input.default.chinese_mode = true;
-        cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) =
-            Coordinator::new_session(cfg, Some(&data_dir()), Some(&user), InputProfile::mobile());
-        let core = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        (core, user)
-    }
-
-    /// 打一串码，返回全部候选文本，再 Esc 清掉组合。
-    fn type_code(m: &MobileCore, code: &str) -> Vec<String> {
-        for ch in code.chars() {
-            dispatch_key(&m.coord, ch.to_ascii_uppercase() as u32, 0);
-        }
-        let items = m.candidates(0, MAX_WINDOW).items;
-        dispatch_key(&m.coord, 0x1B, 0);
-        items
-    }
-
-    /// 加词 → 导出（头部带 engine_type、含该词）→ 清空 → 导入导出的文本 → 词回来且立即打得出。
-    #[test]
-    fn export_clear_import_round_trip_is_typable() {
-        if !dict_ready() {
-            eprintln!("!!! 跳过：build_dev 词库不存在");
-            return;
-        }
-        let (m, dir) = core("rt");
-        // 先打一遍把这个码的候选算进缓存——验的正是导入后缓存会不会挡住新词。
-        assert!(
-            !type_code(&m, "aaaa").iter().any(|t| t == "风起测词"),
-            "前提：词库里没有"
-        );
-        m.user_word_add("wubi86", "aaaa", "风起测词").unwrap();
-
-        let text = m.dict_export("wubi86").unwrap();
-        assert!(
-            text.contains("engine_type: codetable"),
-            "头部要写引擎类型，导入端据此拒收跨类型文件:\n{text}"
-        );
-        assert!(text.contains("风起测词"), "导出要含刚加的词:\n{text}");
-
-        assert_eq!(m.user_words_clear("wubi86"), Ok(1));
-        assert!(!type_code(&m, "aaaa").iter().any(|t| t == "风起测词"));
-
-        let r = m.dict_import("wubi86", &text, false).unwrap();
-        let uw = r
-            .sections
-            .iter()
-            .find(|s| s.key == "userWords")
-            .expect("要有用户词段");
-        assert_eq!((uw.added, uw.skipped, uw.rejected), (1, 0, 0), "{r:?}");
-        assert_eq!(m.user_words("wubi86", "", 0, 50).total, 1);
-        let after = type_code(&m, "aaaa");
-        assert!(
-            after.iter().any(|t| t == "风起测词"),
-            "导完立即可打，实得 {after:?}"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 五笔导出的文件导入拼音方案：按引擎类型拒收，且一条都不落库。
-    #[test]
-    fn codetable_file_rejected_by_pinyin_schema() {
-        if !dict_ready() {
-            eprintln!("!!! 跳过：build_dev 词库不存在");
-            return;
-        }
-        let (m, dir) = core("cross");
-        m.user_word_add("wubi86", "aaaa", "风起测词").unwrap();
-        let text = m.dict_export("wubi86").unwrap();
-        let err = m.dict_import("pinyin", &text, false).unwrap_err();
-        assert!(err.contains("码表") && err.contains("拼音"), "{err}");
-        assert_eq!(m.user_words("pinyin", "", 0, 50).total, 0, "拒收不落库");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 第三方纯文本：Rime（`---`/`...` 头，`词\t编码`）与 TSV（`编码\t词`）都只进用户词。
-    #[test]
-    fn rime_and_tsv_text_import_into_user_words() {
-        if !dict_ready() {
-            eprintln!("!!! 跳过：build_dev 词库不存在");
-            return;
-        }
-        let (m, dir) = core("rime");
-        let rime = "---\nname: t\nversion: \"1\"\n...\n风起甲词\taaaa\t100\n风起乙词\taaab\n";
-        let r = m.dict_import("wubi86", rime, false).unwrap();
-        assert_eq!(r.sections.len(), 1, "{r:?}");
-        assert_eq!(
-            (r.sections[0].key.as_str(), r.sections[0].added),
-            ("userWords", 2)
-        );
-        assert!(type_code(&m, "aaab").iter().any(|t| t == "风起乙词"));
-
-        let r = m.dict_import("wubi86", "aaac\t风起丙词\n", false).unwrap();
-        assert_eq!(r.sections[0].added, 1, "{r:?}");
-
-        // replace：先清空再导入
-        let r = m.dict_import("wubi86", "aaad\t风起丁词\n", true).unwrap();
-        assert_eq!(r.sections[0].added, 1, "{r:?}");
-        let page = m.user_words("wubi86", "", 0, 50);
-        assert_eq!(
-            page.items
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect::<Vec<_>>(),
-            ["风起丁词"],
-            "replace 要先清空"
-        );
-
-        // 拼音方案：无空格的码过准入契约，由程序补上音节边界（显示码带空格即证）。
-        let r = m
-            .dict_import("pinyin", "fengqihaha\t风起哈哈\n", false)
-            .unwrap();
-        assert_eq!(
-            (r.sections[0].added, r.sections[0].boundary_filled),
-            (1, 1),
-            "{r:?}"
-        );
-        let page = m.user_words("pinyin", "", 0, 50);
-        assert_eq!(page.items[0].code, "feng qi ha ha");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 只读模式：导入带着原因拒绝（不碰数据）；导出读不到存储也报错而不是给空文件。
-    #[test]
-    fn readonly_rejects_import_with_reason() {
-        let user = std::env::temp_dir().join(format!("wind_mobile_dt_ro_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        std::fs::write(
-            user.join("meta.toml"),
-            "format_version = 99\ndir_id = \"x\"\n",
-        )
-        .unwrap();
-        let (coord, _rx) =
-            Coordinator::new_session(Config::default(), None, Some(&user), InputProfile::mobile());
-        let m = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        let err = m.dict_import("pinyin", "aa\t工\n", false).unwrap_err();
-        assert!(err.contains("99"), "要把只读原因交给用户: {err}");
-        assert!(m.dict_export("pinyin").is_err());
-        let _ = std::fs::remove_dir_all(&user);
-    }
-}
+#[path = "dict_transfer_tests.rs"]
+mod dict_transfer_tests;
 
 /// 方案附加词库门面：字段映射、错误转成原因串、只读闸、重建后仍是新值。列表口径与
 /// live 生效在 wind-coordinator 的 `tests/schema_dicts_api.rs` 验，这里只验门面这一层。
 /// 要 `build_dev/data`，缺失时打印跳过。
 #[cfg(test)]
-mod schema_dicts_tests {
-    use super::*;
-
-    fn data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
-    }
-
-    /// 以 `root` 下的 redb 与 override 目录拼 [`MobileCore`]；同一个 `root` 再调 = 重启。
-    /// 不走 `MobileCore::new`：它改进程环境变量，与并行测试互相踩。
-    fn core_at(root: &Path) -> MobileCore {
-        let store = Arc::new(wind_store::Store::open(root.join("s.redb")).unwrap());
-        let coord = Coordinator::new_headless_with_store_override(
-            Config::default(),
-            Some(&data_dir()),
-            store,
-            Some(root.join("overrides")),
-        );
-        MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: data_dir(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        }
-    }
-
-    #[test]
-    fn list_toggle_persist_and_errors() {
-        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
-            eprintln!("!!! 跳过：build_dev 词库不存在");
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("wind_mobile_sd_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let idiom = |m: &MobileCore| {
-            m.schema_dicts("pinyin")
-                .into_iter()
-                .find(|d| d.id == "cell_idiom")
-        };
-
-        let m = core_at(&root);
-        assert_eq!(
-            idiom(&m),
-            Some(SchemaDictInfo {
-                id: "cell_idiom".into(),
-                label: "成语".into(),
-                description: "成语、俗语与古诗文名句".into(),
-                enabled: false,
-            })
-        );
-        assert!(
-            m.schema_dicts("pinyin")
-                .iter()
-                .all(|d| d.id != "pinyin_main"),
-            "不列主库"
-        );
-        m.set_schema_dict_enabled("pinyin", "cell_idiom", true)
-            .unwrap();
-        assert!(idiom(&m).unwrap().enabled);
-        drop(m);
-        let m = core_at(&root);
-        assert!(idiom(&m).unwrap().enabled, "重建 MobileCore 后仍开");
-
-        let err = m
-            .set_schema_dict_enabled("pinyin", "no_such_dict", true)
-            .unwrap_err();
-        assert!(err.contains("no_such_dict"), "原因要点名: {err}");
-        assert!(
-            m.set_schema_dict_enabled("nope", "cell_idiom", true)
-                .is_err()
-        );
-        assert!(m.schema_dicts("nope").is_empty(), "未知方案列空、不 panic");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// 词库统计门面：回包是桌面 `dict.systemStats` 同形态的 JSON，第二次命中缓存；
-    /// 未知方案带原因报错。统计口径在 wind-engine / wind-webdata 的用例里验。
-    #[test]
-    fn dict_stats_returns_json_and_caches() {
-        if !data_dir().join("schemas/wubi86.schema.toml").exists() {
-            eprintln!("!!! 跳过：build_dev 词库不存在");
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("wind_mobile_ds_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let m = core_at(&root);
-        let first = m.dict_stats("wubi86", 5, false).unwrap();
-        assert!(first.contains(r#""schemaId":"wubi86""#), "{first}");
-        assert!(first.contains(r#""engineType":"codetable""#), "{first}");
-        assert!(first.contains(r#""total":{"#), "{first}");
-        let again = m.dict_stats("wubi86", 5, false).unwrap();
-        assert!(again.contains(r#""cached":true"#), "第二次走缓存: {again}");
-        let fresh = m.dict_stats("wubi86", 5, true).unwrap();
-        assert!(fresh.contains(r#""cached":false"#), "refresh 绕过缓存");
-        let err = m.dict_stats("no_such_schema", 5, false).unwrap_err();
-        assert!(err.contains("no_such_schema"), "原因要点名: {err}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// 联想学习数据：计数跨方案合计，清空后归零、返回删除条数。
-    #[test]
-    fn assoc_history_count_and_clear() {
-        if !data_dir().join("schemas/wubi86.schema.toml").exists() {
-            eprintln!("!!! 跳过：build_dev 词库不存在");
-            return;
-        }
-        use wind_coordinator::web_host::WebDataHost;
-        let root = std::env::temp_dir().join(format!("wind_mobile_ah_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let m = core_at(&root);
-        assert_eq!(m.assoc_history_count(), 0);
-        let store = m.coord.user_store().expect("有持久化存储");
-        // 一个启用的方案、一个没启用的（停用了的方案下学到的也要清得掉）
-        store.record_assoc_pick("wubi86", "我们", "一起").unwrap();
-        store.record_assoc_pick("wubi86", "我们", "一起").unwrap();
-        store.record_assoc_pick("pinyin", "谢谢", "大家").unwrap();
-        assert_eq!(m.assoc_history_count(), 2, "按条计、跨方案合计");
-        assert_eq!(m.assoc_history_clear().unwrap(), 2);
-        assert_eq!(m.assoc_history_count(), 0);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// 只读模式：带着原因拒绝，且先于方案校验（不论方案在不在）。
-    #[test]
-    fn readonly_rejects_with_reason() {
-        let user = std::env::temp_dir().join(format!("wind_mobile_sd_ro_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        std::fs::write(
-            user.join("meta.toml"),
-            "format_version = 99\ndir_id = \"x\"\n",
-        )
-        .unwrap();
-        let (coord, _rx) =
-            Coordinator::new_session(Config::default(), None, Some(&user), InputProfile::mobile());
-        let m = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        let err = m
-            .set_schema_dict_enabled("pinyin", "cell_idiom", true)
-            .unwrap_err();
-        assert!(err.contains("99"), "要把只读原因交给用户: {err}");
-        let _ = std::fs::remove_dir_all(&user);
-    }
-}
+#[path = "schema_dicts_tests.rs"]
+mod schema_dicts_tests;
 
 /// 候选长按菜单门面：扁平化、action 映射、准入。菜单内容本身与绝对下标执行在
 /// wind-coordinator 的 `tests/candidate_menu_abs_index.rs` 验，这里只验门面这一层。
 #[cfg(test)]
-mod candidate_menu_tests {
-    use super::*;
-
-    #[test]
-    fn flatten_keeps_op_and_copy_leaves_and_inlines_submenus() {
-        let items = vec![
-            MenuItemSpec::leaf("置顶", MenuKind::Op(CandidateOp::MoveTop), false, false),
-            MenuItemSpec::leaf(
-                "在此编码下隐藏",
-                MenuKind::Op(CandidateOp::HideHere),
-                true,
-                false,
-            ),
-            MenuItemSpec::separator(),
-            MenuItemSpec::label("标题"),
-            MenuItemSpec::leaf(
-                "命令",
-                MenuKind::Command(MenuCmd::OpenSettings),
-                true,
-                false,
-            ),
-            MenuItemSpec {
-                label: "更多".into(),
-                kind: MenuKind::Submenu,
-                enabled: true,
-                checked: false,
-                children: vec![MenuItemSpec::leaf(
-                    "设为生僻字",
-                    MenuKind::Op(CandidateOp::ToggleCommon),
-                    true,
-                    false,
-                )],
-            },
-            MenuItemSpec::leaf("复制", MenuKind::Copy, true, false),
-        ];
-        let mut out = Vec::new();
-        flatten_candidate_menu(&items, &mut out);
-        let got: Vec<(&str, &str, bool)> = out
-            .iter()
-            .map(|i| (i.label.as_str(), i.action.as_str(), i.enabled))
-            .collect();
-        assert_eq!(
-            got,
-            [
-                ("置顶", "move_top", false),
-                ("在此编码下隐藏", "hide_here", true),
-                ("设为生僻字", "toggle_common", true),
-                ("复制", "copy", true),
-            ]
-        );
-    }
-
-    /// 「固定到第 N 位」子菜单摊平成 `pin_at_N`，文案补全；动作名能解析回原操作。
-    #[test]
-    fn pin_at_submenu_flattens_to_pin_at_n() {
-        let items = vec![MenuItemSpec::submenu(
-            "固定到第 N 位",
-            vec![
-                MenuItemSpec::leaf("第 1 位", MenuKind::Op(CandidateOp::PinAt(1)), true, false),
-                MenuItemSpec::leaf("第 2 位", MenuKind::Op(CandidateOp::PinAt(2)), false, false),
-            ],
-        )];
-        let mut out = Vec::new();
-        flatten_candidate_menu(&items, &mut out);
-        let got: Vec<(&str, &str, bool)> = out
-            .iter()
-            .map(|i| (i.label.as_str(), i.action.as_str(), i.enabled))
-            .collect();
-        assert_eq!(
-            got,
-            [
-                ("固定到第 1 位", "pin_at_1", true),
-                ("固定到第 2 位", "pin_at_2", false),
-            ]
-        );
-        for n in 1..=wind_ui_types::PIN_AT_MAX {
-            let op = CandidateOp::PinAt(n);
-            assert_eq!(
-                candidate_menu_action(op)
-                    .as_deref()
-                    .and_then(candidate_menu_op),
-                Some(op)
-            );
-        }
-        assert_eq!(candidate_menu_op("pin_at_x"), None);
-    }
-
-    /// 移动端只摊平前 9 个「第 N 位」。
-    #[test]
-    fn pin_at_capped_to_nine_on_mobile() {
-        let kids = (1..=12)
-            .map(|n| {
-                MenuItemSpec::leaf(
-                    format!("第 {n} 位"),
-                    MenuKind::Op(CandidateOp::PinAt(n)),
-                    true,
-                    false,
-                )
-            })
-            .collect();
-        let mut out = Vec::new();
-        flatten_candidate_menu(&[MenuItemSpec::submenu("固定到第 N 位", kids)], &mut out);
-        let got: Vec<&str> = out.iter().map(|i| i.action.as_str()).collect();
-        assert_eq!(
-            got,
-            (1..=9).map(|n| format!("pin_at_{n}")).collect::<Vec<_>>()
-        );
-    }
-
-    /// 真词库下走一遍门面：第二页候选取得到菜单、置顶生效；copy / 未知 action / 灰显项 /
-    /// 越界都返回 false 或空。词典缺失时跳过（计数照绿）。
-    #[test]
-    fn menu_and_run_by_absolute_index() {
-        let data =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
-        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
-            eprintln!("跳过：词库不存在");
-            return;
-        }
-        let user = std::env::temp_dir().join(format!("wind_mobile_cm_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86".into()];
-        cfg.schema.active = "wubi86".into();
-        cfg.input.default.chinese_mode = true;
-        cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) =
-            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
-        let m = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        assert!(m.candidate_menu(0).is_empty(), "无候选时菜单为空");
-        for ch in ['A', 'A'] {
-            dispatch_key(&m.coord, ch as u32, 0);
-        }
-        let pp = m.coord.debug_page_texts().len();
-        let all = m.candidates(0, MAX_WINDOW);
-        assert!(all.total > pp + 1, "前提：aa 有第二页");
-        let n = pp + 1;
-        let target = all.items[n].clone();
-
-        let menu = m.candidate_menu(n);
-        let actions: Vec<&str> = menu.iter().map(|i| i.action.as_str()).collect();
-        assert_eq!(actions.first(), Some(&"move_top"), "{menu:?}");
-        assert_eq!(actions.last(), Some(&"copy"), "{menu:?}");
-        assert!(!actions.contains(&""), "分隔线不应出现: {menu:?}");
-
-        assert!(!m.candidate_menu_run(n, "copy"), "复制归宿主");
-        assert!(!m.candidate_menu_run(n, "bogus"), "未知 action");
-        assert!(
-            !m.candidate_menu_run(0, "move_top"),
-            "首位置顶是灰的，不执行"
-        );
-        assert!(!m.candidate_menu_run(all.total, "move_top"), "越界");
-        assert!(m.candidate_menu(all.total).is_empty(), "越界菜单为空");
-
-        assert!(m.candidate_menu_run(n, "move_top"));
-        assert_eq!(m.candidates(0, 1).items, [target], "置顶后成首选");
-        let _ = std::fs::remove_dir_all(&user);
-    }
-}
+#[path = "candidate_menu_tests.rs"]
+mod candidate_menu_tests;
 
 /// 候选提示门面：与桌面气泡同一份段模板。段内容本身在 wind-coordinator 的 tooltip 测试里验，
 /// 这里只验「按绝对下标取得到、越界为空、编码段在索引建好后出现」。
 #[cfg(test)]
-mod candidate_tooltip_tests {
-    use super::*;
-
-    #[test]
-    fn tooltip_by_absolute_index() {
-        let data =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
-        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
-            eprintln!("跳过：词库不存在");
-            return;
-        }
-        let user = std::env::temp_dir().join(format!("wind_mobile_tip_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86".into()];
-        cfg.schema.active = "wubi86".into();
-        cfg.input.default.chinese_mode = true;
-        cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) =
-            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
-        let m = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        assert!(m.candidate_tooltip(0).is_empty(), "无候选时为空");
-        for ch in ['W', 'Q', 'V', 'B'] {
-            dispatch_key(&m.coord, ch as u32, 0);
-        }
-        let all = m.candidates(0, MAX_WINDOW);
-        assert!(all.total > 0, "前提：wqvb 有候选");
-        assert!(m.candidate_tooltip(all.total).is_empty(), "越界为空");
-        // 编码段靠反查索引，第一次取时才在后台建：轮询到它出现（模拟器外通常一两百毫秒）
-        let mut code_line = None;
-        for _ in 0..100 {
-            let tip = m.candidate_tooltip(0);
-            assert!(
-                tip.iter().all(|s| !s.lines.is_empty()),
-                "段不应为空: {tip:?}"
-            );
-            code_line = tip
-                .iter()
-                .find(|s| s.title.as_deref().is_some_and(|t| t.starts_with("编码")))
-                .map(|s| s.lines.join(" "));
-            if code_line.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let code_line = code_line.expect("编码段应在索引建好后出现");
-        assert!(
-            code_line.contains("wqvb"),
-            "首选的编码里应有 wqvb: {code_line}"
-        );
-        let _ = std::fs::remove_dir_all(&user);
-    }
-
-    /// 候选窗带注释：五笔打 a，有剩余编码的候选注释非空；不带注释的接口恒空、文本两边一致。
-    #[test]
-    fn window_with_comments_matches_items() {
-        let data =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
-        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
-            eprintln!("跳过：词库不存在");
-            return;
-        }
-        let user = std::env::temp_dir().join(format!("wind_mobile_cmt_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86".into()];
-        cfg.schema.active = "wubi86".into();
-        cfg.input.default.chinese_mode = true;
-        cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) =
-            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
-        let m = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        dispatch_key(&m.coord, 'A' as u32, 0);
-        let plain = m.candidates(0, 20);
-        let rich = m.candidates_with_comments(0, 20);
-        assert!(plain.comments.is_empty(), "不带注释的接口不该算注释");
-        assert_eq!(plain.items, rich.items, "两个接口的候选文本应一致");
-        assert_eq!(rich.comments.len(), rich.items.len(), "注释与候选一一对应");
-        assert!(
-            rich.comments.iter().any(|c| !c.is_empty()),
-            "五笔单码 a 的候选里应有带剩余编码的: {:?}",
-            rich.items.iter().zip(&rich.comments).collect::<Vec<_>>()
-        );
-        let _ = std::fs::remove_dir_all(&user);
-    }
-
-    /// 滑到尾部再取：五笔单码首批 100 条（has_more），要第 90～150 条时核心扩容重建、
-    /// 标 rebuilt，总数变多；要的范围在已加载之内时不重建。
-    #[test]
-    fn window_grows_past_loaded_candidates() {
-        let data =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
-        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
-            eprintln!("跳过：词库不存在");
-            return;
-        }
-        let user = std::env::temp_dir().join(format!("wind_mobile_grow_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86".into()];
-        cfg.schema.active = "wubi86".into();
-        cfg.input.default.chinese_mode = true;
-        cfg.schema.codetable.auto_commit_at_full = false;
-        let (coord, _rx) =
-            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
-        let m = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        dispatch_key(&m.coord, 'A' as u32, 0);
-        let first = m.candidates(0, 24);
-        assert!(!first.rebuilt, "首屏在已加载范围内，不该重建");
-        let loaded = first.total;
-        assert!(loaded >= 90, "前提：五笔单码首批至少 90 条，实得 {loaded}");
-        let more = m.candidates(loaded - 10, 60);
-        assert!(more.rebuilt, "要的范围超出已加载且还有更多，应扩容重建");
-        assert!(
-            more.total > loaded,
-            "扩容后总数应变多：{loaded} → {}",
-            more.total
-        );
-        assert_eq!(more.items.len(), 60, "扩容后这一段应取满");
-        let again = m.candidates(0, 24);
-        assert!(!again.rebuilt, "已加载范围内再取不重建");
-        let _ = std::fs::remove_dir_all(&user);
-    }
-
-    /// 单字母预热只查引擎、不碰输入状态：预热完没有残留编码 / 候选，接着照常打字。
-    /// 码表方案直接跳过（函数自己判引擎类型）。
-    #[test]
-    fn prewarm_leaves_no_composition() {
-        let data =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
-        if !data.join("schemas/pinyin.schema.toml").exists() {
-            eprintln!("跳过：拼音方案不存在");
-            return;
-        }
-        let user = std::env::temp_dir().join(format!("wind_mobile_warm_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["pinyin".into()];
-        cfg.schema.active = "pinyin".into();
-        cfg.input.default.chinese_mode = true;
-        let (coord, _rx) =
-            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
-        let m = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        m.coord.prewarm_single_initials();
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        assert_eq!(
-            m.candidates(0, 5).total,
-            0,
-            "预热不该留下候选（它不走按键路径）"
-        );
-        dispatch_key(&m.coord, 'N' as u32, 0);
-        dispatch_key(&m.coord, 'I' as u32, 0);
-        assert!(m.candidates(0, 5).total > 0, "预热后照常打字出候选");
-        let _ = std::fs::remove_dir_all(&user);
-    }
-}
+#[path = "candidate_tooltip_tests.rs"]
+mod candidate_tooltip_tests;
 
 /// 正确拼音提示的分段透传：核心按 `hint.enabled` / 来源 / `hint.scope` 给候选生成带提示正文，这里只验
 /// 「拉取窗口带出分段、提示段角色 `pinyin_hint`、关掉即空」。哪些候选该标在协调器测试里验。
 #[cfg(test)]
-mod pinyin_hint_tests {
-    use super::*;
-    use wind_config::HintScope;
-
-    /// 自造夹具：`pinguo` 精确命中「拼过」，in/ing 模糊命中「苹果」「平过」。
-    /// ⚠️ 目录名带 pid：多会话并行跑测试时固定名会互删夹具。
-    fn core(tag: &str, hint: bool, scope: HintScope) -> (MobileCore, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("wind_mobile_fh_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let schemas = dir.join("data/schemas");
-        std::fs::create_dir_all(schemas.join("fh")).unwrap();
-        std::fs::create_dir_all(dir.join("user")).unwrap();
-        std::fs::write(
-            schemas.join("fh/mini.dict.yaml"),
-            "---\nname: mini\nversion: \"1\"\nsort: by_weight\n...\n\
-             拼过\tpin guo\t5000\n苹果\tping guo\t3000\n平过\tping guo\t100\n",
-        )
-        .unwrap();
-        std::fs::write(
-            schemas.join("fh.schema.toml"),
-            "[schema]\nid = \"fh\"\nname = \"fh\"\n[engine]\ntype = \"pinyin\"\n\
-             [[dictionaries]]\nid = \"mini\"\npath = \"fh/mini.dict.yaml\"\n\
-             type = \"rime_pinyin\"\ndefault = true\n",
-        )
-        .unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["fh".into()];
-        cfg.schema.active = "fh".into();
-        cfg.input.default.chinese_mode = true;
-        let fz = &mut cfg.schema.pinyin.fuzzy;
-        fz.enabled = true;
-        fz.in_ing = true;
-        let h = &mut cfg.input.correction.hint;
-        h.enabled = hint;
-        h.scope = scope;
-        let (coord, _rx) = Coordinator::new_session(
-            cfg,
-            Some(&dir.join("data")),
-            Some(&dir.join("user")),
-            InputProfile::mobile(),
-        );
-        let core = MobileCore {
-            coord,
-            warming: Arc::new(AtomicBool::new(false)),
-            data_dir: dir.join("user"),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        (core, dir)
-    }
-
-    fn pinguo(tag: &str, hint: bool, scope: HintScope) -> CandidateWindow {
-        let (m, dir) = core(tag, hint, scope);
-        for ch in "pinguo".chars() {
-            dispatch_key(&m.coord, ch.to_ascii_uppercase() as u32, 0);
-        }
-        let w = m.candidates(0, MAX_WINDOW);
-        let _ = std::fs::remove_dir_all(dir);
-        w
-    }
-
-    fn joined(segs: &[TextSegment]) -> String {
-        segs.iter().map(|s| s.text.as_str()).collect()
-    }
-
-    #[test]
-    fn candidates_carry_hint_segments() {
-        let w = pinguo("on", true, HintScope::First);
-        assert_eq!(w.text_segments.len(), w.items.len(), "与 items 一一对应");
-        assert_eq!(w.items[0], "拼过", "前提：首选是精确命中：{:?}", w.items);
-        assert!(w.text_segments[0].is_empty(), "精确命中不分段");
-        let at = w
-            .items
-            .iter()
-            .position(|t| t == "苹果")
-            .expect("应有「苹果」");
-        let segs = &w.text_segments[at];
-        assert_eq!(joined(segs), "苹(ping)果");
-        assert_eq!(
-            segs.iter()
-                .map(|s| (s.text.as_str(), s.role.as_deref()))
-                .collect::<Vec<_>>(),
-            vec![("苹", None), ("(ping)", Some("pinyin_hint")), ("果", None)]
-        );
-        let later = w
-            .items
-            .iter()
-            .position(|t| t == "平过")
-            .expect("应有「平过」");
-        assert!(w.text_segments[later].is_empty(), "first：之后的不标");
-    }
-
-    #[test]
-    fn candidates_hint_scope_all_segments_every_fuzzy() {
-        let w = pinguo("all", true, HintScope::All);
-        let at = w
-            .items
-            .iter()
-            .position(|t| t == "平过")
-            .expect("应有「平过」");
-        assert_eq!(joined(&w.text_segments[at]), "平(ping)过");
-    }
-
-    #[test]
-    fn candidates_hint_off_no_segments() {
-        let w = pinguo("off", false, HintScope::All);
-        assert!(w.items.iter().any(|t| t == "苹果"), "{:?}", w.items);
-        assert!(w.text_segments.iter().all(Vec::is_empty));
-    }
-}
+#[path = "pinyin_hint_tests.rs"]
+mod pinyin_hint_tests;
 
 /// 泵线程的预热闸门：只拦 `View` / `Hide`，用户真按键后帧必须到达宿主。
 #[cfg(test)]
-mod session_pump_tests {
-    use super::*;
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    #[derive(Default)]
-    struct Frames(Mutex<Vec<CandidateFrame>>);
-
-    impl MobileEventSink for Frames {
-        fn on_candidates(&self, frame: CandidateFrame) {
-            self.0.lock().unwrap().push(frame);
-        }
-        fn on_hide_candidates(&self) {}
-        fn on_status(&self, _status: InputStatus) {}
-        fn on_toast(&self, _text: String) {}
-    }
-
-    /// warming=true 时调 `key_down`：它会先关掉预热闸门，所以含 preedit 的帧仍要到达 sink。
-    #[test]
-    fn typing_during_warmup_keeps_frames() {
-        let data =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
-        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
-            eprintln!("跳过：词库不存在");
-            return;
-        }
-        let user = std::env::temp_dir().join(format!("wind_mobile_pump_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&user);
-        std::fs::create_dir_all(&user).unwrap();
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86".into()];
-        cfg.schema.active = "wubi86".into();
-        cfg.input.default.chinese_mode = true;
-        let (coord, rx) =
-            Coordinator::new_session(cfg, Some(&data), Some(&user), InputProfile::mobile());
-        let warming = Arc::new(AtomicBool::new(true));
-        let sink = Arc::new(Frames::default());
-        spawn_session_pump(rx, sink.clone(), Arc::clone(&warming));
-        let core = MobileCore {
-            coord,
-            warming,
-            data_dir: user.clone(),
-            auto_spaced: AtomicBool::new(false),
-            auto_space: AtomicBool::new(true),
-            touch_quick_trigger: AtomicBool::new(false),
-        };
-        core.key_down('A' as u32, 0);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if sink
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|f| f.preedit == "a" && f.composing)
-            {
-                break;
-            }
-            assert!(Instant::now() < deadline, "预热期间按键的帧被丢了");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let _ = std::fs::remove_dir_all(&user);
-    }
-}
+#[path = "lib_session_pump_tests.rs"]
+mod session_pump_tests;

@@ -10,15 +10,14 @@ use serde_json::{Value, json};
 use wind_config::Config;
 use wind_ipc::rpc::{Request, Response};
 
-// 产品版本取 build.rs 从 docs/VERSION 注入的 WIND_APP_VERSION（= 0.100.0），
-// 而非 workspace 的 CARGO_PKG_VERSION（兜底 0.x）。上报进 system_info.version / engine / appVersion。
+// 产品版本取 build.rs 从 docs/VERSION 注入的 WIND_APP_VERSION，而非 workspace 的
+// CARGO_PKG_VERSION。上报进 system_info.version / engine / appVersion。
 pub(crate) const APP_VERSION: &str = env!("WIND_APP_VERSION");
 
 /// 构建标识（git 短哈希[-dirty]），由宿主启动时注入一次，`system.info.build` 上报。
 ///
-/// 选注入而非 build.rs 自取：本 crate 是 lib，增量构建时 build.rs 不会随 HEAD 变化重跑，
-/// 哈希会滞后；service 的 build.rs 每次构建强制重跑，且预览缓存键用的就是同一份
-/// `WIND_GIT_HASH`，由它注入可与主题预览的构建标识严格同源。
+/// 由宿主注入而非本 crate 的 build.rs 自取：lib 增量构建时 build.rs 不随 HEAD 重跑，哈希会
+/// 滞后；service 的 build.rs 每次强制重跑，且与主题预览缓存键同用 `WIND_GIT_HASH`。
 static BUILD_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// 注入构建标识（仅首次生效）。未注入时 `system.info.build` 为 `null`。
@@ -81,15 +80,9 @@ impl DispatchState {
 
 /// 分发一条请求，返回 JSON-RPC 响应（成功/错误均为 200 等价的 Response）。
 ///
-/// 错误用 `{e:#}` **展开整条 anyhow 链**，不是 `to_string()`。这条通道是 core 向设置端与
-/// CLI 传递失败原因的**唯一**出口，而 `to_string()` 只给最外层那一句：谁在路上给错误套了
-/// 一层 `.context("导出失败")`，底下「条目过多（211 个，上限 200）」这类真正能指导用户
-/// 动作的信息就在这里被静默抹掉，客户端只剩一句正确但无用的话。
-///
-/// 与 `{}` 逐字相同的条件是「**最内层那个错误自己没有 `source()`**」——`bail!` / `anyhow!`
-/// 造的错误都满足，本仓绝大多数如此，所以这不是给所有错误加噪音。反例是从带 `source()`
-/// 的外部错误类型 `?` 进来的那些（如 `zip::result::ZipError::Io`，它的 Display 里已经嵌了
-/// 一遍 io 错误，链上会再追加一遍），那类会重复一句——观感问题，不影响判读。
+/// 错误用 `{e:#}` 展开整条 anyhow 链，不用 `to_string()`：这是 core 向设置端与 CLI 传递
+/// 失败原因的唯一出口，`to_string()` 只给最外层 context，底下能指导用户的原因会被抹掉。
+/// 代价是带 `source()` 的外部错误（如 `ZipError::Io`）会重复一句，不影响判读。
 pub fn dispatch(state: &DispatchState, req: Request) -> Response {
     dispatch_as(state, req, true)
 }
@@ -132,56 +125,25 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
             "variant": state.variant,
             "activeSchema": state.core.active_schema_id(),
             // 定制版身份（`data_custom/custom.toml` 的 `[custom]`），非定制版为 `null`。
-            //
-            // ★ 落点选 `system.info` 而不是 `system.capabilities`，三条理由：
-            // ① 语义同类——这里已经是「我这台机器装的是什么」（version/variant/dataDir），
-            //    定制版身份正是同一个问题的一部分，而 capabilities 回答的是「配置键有哪些」；
-            // ② capabilities 在 `DispatchState::new` 时**生成一次并缓存**，身份混进去会让
-            //    「静态能力清单」与「本机装了什么」共用一个缓存，日后任一方要刷新都会牵连另一方；
-            // ③ 设置端启动时本就并发拉 `system.info`（wind-setting `state.rs` 的 `h_info`），
-            //    加字段是零额外往返，而新开一个 RPC 方法要在那个扇出里再加一条线程。
-            //
-            // 代价（不留白）：CLI 若只想问身份，也得拉一份完整 system.info。那份很小、
-            // 且不做磁盘 IO，代价可忽略——这正是不把**降级**也塞进来的原因，见 `config.degradation`。
+            // 放这里而不放 `system.capabilities`：同属「本机装的是什么」，capabilities 是
+            // 构造时缓存的静态配置键清单；设置端启动本就拉 `system.info`，零额外往返。
             "customEdition": crate::custom_edition::identity_json(),
         })),
         "system.capabilities" => Ok(state.capabilities.clone()),
         // 段级降级记录：哪些段解析失败、已回落出厂值。
         //
-        // ★ 语义是「**此刻盘上**的配置试加载一遍会不会降级」，**不是**「正在跑的这份
-        // 配置降没降级」。每次调用现读四层文件、现算一次，故用户把报错的键改好之后，
-        // 下一次调用就返回 `degraded=false`——横幅能自己消失，不必等重启，这正是选它的
-        // 理由。反过来说，**别拿它当运行时快照用**：服务当前生效的那份 `Config` 是启动
-        // 时加载的，与这里的答案可以不同（用户刚把配置改坏、还没重载时最明显）。要那种
-        // 语义得让协调器把自己那份 `degradation` 报上来，是另一件事。
-        //
-        // 不变量 6（`docs/design/data-custom-layer.md` §4）要求降级「必须 WARN 且在 UI 可见」。
-        // 日志那一半 P0 已做，这里补上「可见」——没有它，用户看到的只是「我的按键设置怎么
-        // 变回默认了」，而唯一的线索埋在日志文件里。
-        //
-        // ★ 为什么独立成方法，而不是并进 `system.info` 或 `config.get`：
-        // - 并进 `system.info`：那个方法当前**不碰磁盘**，而降级记录只能由一次真实的
-        //   `Config::load()`（读四层 TOML）产生。让一个轻量状态查询变成磁盘 IO，
-        //   代价会落在每一个只想知道版本号的调用方头上。
-        // - 并进 `config.get`：它返回的是 `Config` 本身的序列化结果，而 `degradation` 是
-        //   `#[serde(skip)]` 的运行期元信息、**刻意**不出现在配置命名空间里（否则设置端
-        //   diff 回传时它会被当成一个配置键写进 config.toml）。
-        //
-        // 形态恒为四个字段的对象（不是「没降级就不给」）：客户端据此可以无条件渲染，
-        // 「字段缺失」在跨仓契约里与「这版 core 还没实现」无从区分。
+        // 语义是「此刻盘上的配置试加载一遍会不会降级」（每次现读四层），不是运行中那份
+        // 配置的快照，别拿它当后者用。形态恒为固定字段的对象。为何独立成方法见
+        // `docs/design/data-custom-layer.md`「连带闸门」后的说明。
         "config.degradation" => {
             let d = Config::load(Config::data_dir().as_deref())?.degradation;
             Ok(json!({
                 "degraded": d.is_degraded(),
-                // 点分路径**原样**传出（`ui.font` 而不是 `ui`）：降级粒度细到子表正是
-                // 「缩小爆炸半径」的产物，在边界上截成顶层段名等于把这份精度扔掉，
-                // 用户会以为整个界面设置都回了默认。
+                // 点分路径原样传出（`ui.font` 而不是 `ui`），别截成顶层段名丢掉精度。
                 "sections": d.sections,
                 "totalFallback": d.total_fallback,
-                // 文件**语法**不合法（重复键、漏引号……），与 `sections` 是两类故障：
-                // 那个发生在四层合并**之后**的类型检查，这个发生在合并**之前**的单文件
-                // 解析。设置端要分开讲——修法不同（改那一行 vs 改那个键的类型），
-                // 混成一句会把用户支使到错误的地方。
+                // 文件语法不合法（重复键、漏引号……）：发生在合并之前的单文件解析，与合并后
+                // 类型检查的 `sections` 修法不同，设置端分开讲。
                 "unparsable": d.unparsable.iter().map(|u| json!({
                     "layer": u.layer,
                     "path": u.path.display().to_string(),
@@ -204,20 +166,11 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
                 .collect(),
         )),
         "system.notifyReload" => Ok(json!({ "ok": true })),
-        // 返回**整份**配置（四层合并后），不按键取值。
+        // 返回整份配置（四层合并后），不按键取值。
         //
-        // 多余的 `key` 参数**当场拒掉**而不是无视：无视它的代价是调用方写
-        // `config.get {"key": "ui.theme.name"}` 再读回执的 `value` —— 那个字段不存在，
-        // 拿到 None 却**不报错**，于是功能静默失效。CLI 的主题列表（`*` 标记恒不显示）
-        // 与设置端的主题导出（「没有当前主题可导出」）先后踩的都是这一个坑，后者直到
-        // 用户点了按钮才暴露。取单个键请拉整份下来按点路径下钻。
-        //
-        // ⚠️ 命令栏里那个同名的 `config.get(key)` 函数**是**按 key 取值的（见
-        // `wind-cmdbar::funcs::config`）——同名不同源，这正是这个坑好踩的原因。
-        //
-        // 取单个键的正解是隔壁的 [`get_item`]（`config.getItem`），它当年加进来的理由
-        // 原话就是「补 config.get 只能整份的缺口」，回执 `{key, value}` 恰好就是那个错
-        // 写法想要的形状——踩坑的人其实是把 getItem 的用法安在了 get 上。
+        // 多余的 `key` 参数当场拒掉而不是无视：无视会让读回执 `value` 的调用方静默拿到
+        // None。取单个键用 [`get_item`]（`config.getItem`）。命令栏里同名的 `config.get(key)`
+        // 函数是按 key 取值的（`wind-cmdbar::funcs::config`），同名不同源，易混。
         "config.get" => {
             if params.get("key").is_some() {
                 anyhow::bail!(
@@ -233,13 +186,10 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
             // data_custom/config.toml L2.5），与 capability 的 default 同源
             // （system_preset_value）。
             //
-            // ⚠️ 定制版上「出厂默认」因此是**定制默认值**，设置页的「恢复默认」会落到
-            // 定制者设的值而不是原版值。这是正确语义（定制版用户要恢复的就是定制版的默认），
-            // 不是 bug——见 `Config::system_preset_value` 的文档。
+            // 定制版上「恢复默认」因此落到定制者设的值，这是预期语义。
             //
-            // 不可用 toml::from_str("") 的纯 L1：
-            // 顶码上屏/拼音自动学习等键出厂经 L2 置开、L1 为关，二者分叉会让设置端
-            // 「恢复默认」把这些项误关。
+            // 不可用 toml::from_str("") 的纯 L1：顶码上屏/拼音自动学习等键出厂经 L2 置开、
+            // L1 为关，用 L1 会让「恢复默认」把这些项误关。
             let v = Config::system_preset_value(Config::data_dir().as_deref())?;
             Ok(serde_json::to_value(v)?)
         }
@@ -328,8 +278,7 @@ fn platform_name() -> &'static str {
 
 /// 惰性取本次的降级记录（首次调用才真去 `Config::load()`）。
 ///
-/// 单独抽出来是为了让「只有遇到 Map 键才付这份代价」这件事在调用点一眼可见，
-/// 而不是散成一段 `if slot.is_none() { … }`。
+/// 只有遇到整值覆盖型键才付这份代价。
 fn degradation_for_write_back(
     slot: &mut Option<wind_config::config::ConfigDegradation>,
 ) -> anyhow::Result<&wind_config::config::ConfigDegradation> {
@@ -344,12 +293,12 @@ fn set_items(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
         .get("items")
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow::anyhow!("invalid_params: items missing"))?;
-    // 第一遍：解析 + 按注册表校验。合法项收集待写；未知键/类型/枚举错的项**跳过并记录**，
+    // 第一遍：解析 + 按注册表校验。合法项收集待写；未知键/类型/枚举错的项跳过并记录，
     // 不让整批因一个旧字段失败（保护沿用旧字段的 webview）。malformed item（无 key）仍为硬错误。
     let mut writes: Vec<(String, toml::Value)> = Vec::with_capacity(items.len());
     let mut skipped: Vec<Value> = Vec::new();
-    // 降级记录**按需**加载：绝大多数 setItems 一个 Map 键都没有，不该为此多跑一次
-    // `Config::load()`（它要读四层文件）。`None` = 还没问过。
+    // 降级记录按需加载：绝大多数 setItems 没有整值覆盖型键，不该为此多读一遍四层文件。
+    // `None` = 还没问过。
     let mut degradation: Option<wind_config::config::ConfigDegradation> = None;
     for it in items {
         let key = it
@@ -368,22 +317,10 @@ fn set_items(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
             skipped.push(json!({ "key": key, "reason": e.to_string() }));
             continue;
         }
-        // ★ 降级闸（第四条同形状路径）。**只拦「整值覆盖」型键**，判据在
-        // `FieldType::is_whole_value_leaf`：
-        //
-        // 设置端发来的是「base ⊕ 本次编辑」的**整份值**（wind-setting 的 `diff_config`
-        // 把 map 作原子叶子整体发送；数组根本不是对象，走叶子分支同样整份发送），而
-        // base 来自 `config.get` ⇒ 本次加载降级时 base 是出厂值 ⇒ 用户改一条自定义标点、
-        // 或在工具栏里勾掉一格，就把他原有的整张表 / 整个数组抹掉，永久且无痕。
-        // 这与 `applyPatch` 的 Map 合并种子是同一个失效模式，只是入口不同。
-        //
-        // ⚠️ 第一版这里只写了 `FieldType::Map(_)`，于是 `ui.toolbar.items`、
-        // `ui.langbar.badges`、`ui.toolbar.buttons`、`schema.mix_modes` 这些数组型键全部
-        // 漏在门外——它们与 Map 同为整值覆盖，失效形态一模一样。判据因此收进
-        // `is_whole_value_leaf`，加新类型时去那里回答一次，别在这里重新展开 matches。
-        //
-        // 标量键不拦：它的落盘值是设置端发来的**显式单值**，与降级后的 base 无关，
-        // 拦掉只会让降级期间整个设置页无法保存，代价远大于收益。
+        // 降级闸：只拦整值覆盖型键（Map 与数组，判据在 `FieldType::is_whole_value_leaf`，
+        // 别在这里另写 matches）。设置端发的是「base ⊕ 本次编辑」的整份值，降级时 base 是
+        // 出厂值，写回会抹掉用户原有的整张表。标量键不拦，否则降级期间整页无法保存。
+        // 见 `docs/design/data-custom-layer.md`「连带闸门」。
         if wind_config::config_schema::field(key).is_some_and(|f| f.ty.is_whole_value_leaf())
             && degradation_for_write_back(&mut degradation)?.taints(key)
         {
@@ -434,9 +371,8 @@ fn apply_writes(
 /// 一并返回当前配置树：applyPatch 折算 Map 键的落盘整表要用它作合并种子，
 /// 重新加载一次会引入「预览用 A 树、落盘用 B 树」的窗口。
 ///
-/// 说明元信息（保留段 `[package]`）在此一并提取：**非法即整体 Err**，与 TOML 解析失败
-/// 同级，不是逐条 error。预览与应用共走本函数，判据只有一套——预览放行、应用才拒绝
-/// （或反之）是分发者最难自查的一类不一致。
+/// 说明元信息（保留段 `[package]`）在此一并提取，非法即整体 Err（与 TOML 解析失败同级）。
+/// 预览与应用共走本函数，判据只有一套。
 fn patch_entries(
     params: &Value,
 ) -> anyhow::Result<(
@@ -453,14 +389,12 @@ fn patch_entries(
     let info = wind_config::patch::extract_info(&fragment)
         .map_err(|e| anyhow::anyhow!("invalid_patch: {e}"))?;
     let cfg = Config::load(Config::data_dir().as_deref())?;
-    // 降级记录必须在序列化成 `toml::Value` **之前**留下来：`degradation` 是 `#[serde(skip)]`，
-    // 转成值树那一刻就没了，而下面的 Map 合并种子正是从这棵树上取的。
+    // 降级记录必须在序列化成 `toml::Value` 之前留下来：`degradation` 是 `#[serde(skip)]`。
     let degradation = cfg.degradation.clone();
     let current = cfg.to_toml_value()?;
     let mut entries = wind_config::patch::preview(&fragment, &current);
-    // ★ 降级闸，preview 与 apply 共用这一处判据（见 `mark_degraded_seeds`）：坏段处的
-    // 生效表是出厂值，拿它当 Map 合并种子会把用户已有条目整表抹掉。标成条目级 error 之后，
-    // 预览直接显示原因、applyPatch 既有的「有错即整体拒绝」自动生效。
+    // 降级闸，preview 与 apply 共用（见 `mark_degraded_seeds`）：坏段的生效表是出厂值，
+    // 当 Map 合并种子会抹掉用户条目。标成条目级 error 后 applyPatch 自然整体拒绝。
     wind_config::patch::mark_degraded_seeds(&mut entries, &degradation);
     Ok((entries, current, info))
 }
@@ -471,9 +405,8 @@ fn patch_entries(
 /// `info` = 片段 `[package]` 段的说明元信息，供导入对话框在预览列表上方显示；
 /// 两字段都缺省时整个 `info` 不出现（前端不必区分「没写」与「写了空串」）。
 ///
-/// `warning` = 该条**可以应用但导入界面须显著提示**（如会往工具栏放一个能启动程序的
-/// 按钮）。与 `error` 是两回事，且**不影响 `ok`**——`ok` 只回答「全都合法吗」，
-/// 要不要因为提示而不导入是用户的决定，不是校验结果。
+/// `warning` = 该条可以应用但导入界面须显著提示（如会往工具栏放能启动程序的按钮）。
+/// 不影响 `ok`：`ok` 只回答「全都合法吗」，是否因提示而不导入由用户决定。
 fn preview_patch(params: &Value) -> anyhow::Result<Value> {
     let (entries, _, info) = patch_entries(params)?;
     let ok = entries.iter().all(|e| e.error.is_none());
@@ -488,13 +421,11 @@ fn preview_patch(params: &Value) -> anyhow::Result<Value> {
 /// 不做半应用；全部合法 → 走 setItems 的批量落盘通路（继承 prune 与生效通知）。
 /// 0 条目视为成功 no-op（不落盘、不触发热重载）。
 ///
-/// `written` = **落盘后的最终键值**，Map 父键携带合并后的整表。设置端用它回灌配置镜像：
-/// Map 合并后客户端无法从 entries 自行拼出整表（它手里没有 core 的当前表），必须由此回传。
-/// `applied` 计的是**片段条目数**（Map 逐条目各计一条），与 preview 的 entries 条数对得上；
-/// 落盘键数（`written.len()`）因 Map 合并而更少，两者刻意分开报。
+/// `written` = 落盘后的最终键值，Map 父键携带合并后的整表，供设置端回灌配置镜像（客户端
+/// 没有 core 的当前表，拼不出整表）。`applied` 计片段条目数（Map 逐条目各计一条），与
+/// preview 的 entries 条数对得上；落盘键数因 Map 合并而更少，两者刻意分开报。
 ///
-/// 说明元信息（`[package]`）在 [`patch_entries`] 里与预览同判据地校验，非法即整体拒绝；
-/// 响应本身**不**回带 `info`——它是给导入界面看的，落盘阶段没有消费者。
+/// 响应不回带 `info`（`[package]` 只给导入界面看，校验在 [`patch_entries`]）。
 fn apply_patch(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
     let (entries, current, _) = patch_entries(params)?;
     let bad: Vec<String> = entries
@@ -605,685 +536,5 @@ fn json_to_toml(v: &Value) -> anyhow::Result<toml::Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    //! dispatch 单测：构造假 CoreRpc，发 system.info / config.get 等，断言 Response 形状。
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    struct FakeCore {
-        config_applied: AtomicBool,
-    }
-    impl FakeCore {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                config_applied: AtomicBool::new(false),
-            })
-        }
-    }
-    impl CoreRpc for FakeCore {
-        fn is_chinese_mode(&self) -> bool {
-            true
-        }
-        fn active_schema_id(&self) -> String {
-            "wubi86".to_string()
-        }
-        fn apply_config(&self) -> bool {
-            self.config_applied.store(true, Ordering::SeqCst);
-            false // needsRestart=false
-        }
-        fn data_rpc(&self, method: &str, _params: &Value) -> anyhow::Result<Value> {
-            match method {
-                "dict.stats" => Ok(json!([])),
-                "compat.list" | "compat.schema" | "compat.export" => Ok(json!({ "ok": true })),
-                "compat.upsert" | "compat.import" | "compat.reset" | "compat.reload" => {
-                    Ok(json!({ "ok": true }))
-                }
-                "compat.broken" => anyhow::bail!("写入失败"),
-                "schema.setDictEnabled"
-                | "schema.saveConfig"
-                | "schema.getConfig"
-                | "scheme.importPackage" => Ok(json!({ "ok": true })),
-                // 两层错误：外层是人话主语，内层才是真正的原因。用来钉住出口不截断
-                // （见 `dispatch` 的文档注释）。
-                "test.layered" => Err(anyhow::anyhow!("底层真正的原因").context("外层的人话")),
-                _ => anyhow::bail!("unknown method: {}", method),
-            }
-        }
-        fn fonts(&self) -> Vec<(String, String)> {
-            vec![("Sans".to_string(), "Sans".to_string())]
-        }
-    }
-
-    fn state() -> DispatchState {
-        DispatchState::new(FakeCore::new(), "dev").expect("capabilities 应能加载")
-    }
-
-    fn req(method: &str, params: Value) -> Request {
-        Request {
-            version: 1,
-            id: 7,
-            method: method.to_string(),
-            params,
-        }
-    }
-
-    /// `config.get` 传了 `key` 要**当场报错**，不能无视后照常返回整份配置。
-    ///
-    /// 无视的代价是调用方拿不到想要的那个键、却也收不到任何错误：它读回执里的 `value`
-    /// 得到 `None`，功能静默失效。CLI 的主题列表与设置端的主题导出先后栽在这上面，
-    /// 后者一直到用户点了导出按钮才暴露。
-    #[test]
-    fn config_get_rejects_a_key_param_instead_of_silently_ignoring_it() {
-        let e = dispatch(
-            &state(),
-            req("config.get", json!({ "key": "ui.theme.name" })),
-        )
-        .error
-        .expect("传了 key 必须报错");
-        assert!(e.contains("key"), "报错要点明是 key 这个参数的问题：{e}");
-
-        // 正向对照：不传 key 照常返回整份配置。没有这条，上面那条在「config.get 整个
-        // 坏掉」时也会绿。
-        let ok = dispatch(&state(), req("config.get", json!({})));
-        assert!(ok.error.is_none(), "不传 key 不该失败：{:?}", ok.error);
-        assert!(
-            ok.result.is_some_and(|v| v.get("ui").is_some()),
-            "回执该是整份配置（含 ui 段）"
-        );
-    }
-
-    /// **出口不许把错误的因果链截断。**
-    ///
-    /// 这条通道是 core 向设置端与 CLI 传递失败原因的唯一出口。写成 `e.to_string()` 的话
-    /// 只剩最外层那句人话，底下真正能指导用户动作的原因（「条目过多（211 个，上限 200）」
-    /// 那类）就在这里被静默抹掉——客户端拿到一句正确但无用的话，而日志里什么都没有。
-    ///
-    /// 断的是**两层**错误：单层错误下 `{:#}` 与 `{}` 输出逐字相同，拿单层来测这条等于没测。
-    ///
-    /// ⚠️ `wind-webdata` 的 `theme_package_rpc_contract` **依赖本用例**：它断言的是
-    /// `{:#}`，而那与「客户端实际看到什么」等价的前提，正是出口这边不退回 `to_string()`。
-    /// 删掉本用例，那条会安静地退化成测不到客户端所见。
-    #[test]
-    fn error_response_keeps_the_whole_cause_chain() {
-        let resp = dispatch(&state(), req("test.layered", json!({})));
-        let e = resp.error.expect("该方法必然失败");
-        assert!(
-            e.contains("底层真正的原因"),
-            "出口把内层原因截断了，客户端只会看到一句无用的话：{e}"
-        );
-        assert!(e.contains("外层的人话"), "外层主语也要在，别只剩原因：{e}");
-    }
-
-    #[test]
-    fn system_info_shape() {
-        set_build_id("abc1234-dirty");
-        let resp = dispatch(&state(), req("system.info", json!({})));
-        assert_eq!(resp.id, 7);
-        assert!(resp.error.is_none());
-        let r = resp.result.unwrap();
-        for k in ["version", "platform", "dataDir", "running"] {
-            assert!(r.get(k).is_some(), "system.info 缺字段 {k}");
-        }
-        assert_eq!(r["build"], json!("abc1234-dirty"));
-        assert_eq!(r["variant"], json!("dev"));
-        assert_eq!(r["activeSchema"], json!("wubi86"));
-    }
-
-    #[test]
-    fn system_status_shape() {
-        let resp = dispatch(&state(), req("system.status", json!({})));
-        let r = resp.result.unwrap();
-        assert_eq!(r["running"], json!(true));
-        assert_eq!(r["mode"], json!("chinese"));
-    }
-
-    #[test]
-    fn config_get_defaults_is_object() {
-        let resp = dispatch(&state(), req("config.getDefaults", json!({})));
-        let r = resp.result.unwrap();
-        assert!(r.is_object());
-        assert!(r["input"].is_object(), "默认配置应含 input 段");
-    }
-
-    #[test]
-    fn capabilities_shape() {
-        let resp = dispatch(&state(), req("system.capabilities", json!({})));
-        let r = resp.result.expect("system.capabilities 应成功");
-        assert!(
-            r.get("configKeys").and_then(|v| v.as_array()).is_some(),
-            "capabilities 应含 configKeys 数组"
-        );
-        assert!(
-            r.get("appVersion").is_some(),
-            "capabilities 应含 appVersion"
-        );
-    }
-
-    #[test]
-    fn fonts_shape() {
-        let resp = dispatch(&state(), req("system.fonts", json!({})));
-        let r = resp.result.unwrap();
-        assert!(r.is_array());
-        assert_eq!(r[0]["family"], json!("Sans"));
-    }
-
-    #[test]
-    fn unknown_method_returns_error() {
-        let resp = dispatch(&state(), req("bogus.method", json!({})));
-        assert!(resp.result.is_none());
-        assert!(resp.error.is_some());
-    }
-
-    #[test]
-    fn untrusted_caller_cannot_reach_sync_methods() {
-        for m in ["sync.command", "sync.setSettings", "sync.status"] {
-            let r = dispatch_as(&state(), req(m, json!({})), false);
-            assert_eq!(r.error.as_deref(), Some(DENY_UNTRUSTED), "{m}");
-        }
-        // 对照：可信调用方放行（假 core 对未知方法报 unknown method，说明确实转发了）。
-        let r = dispatch_as(&state(), req("sync.status", json!({})), true);
-        assert!(r.error.unwrap().contains("unknown method"));
-        // 非 sync 方法不受影响。
-        let r = dispatch_as(&state(), req("dict.stats", json!({})), false);
-        assert!(r.error.is_none());
-    }
-
-    #[test]
-    fn data_rpc_forwarded() {
-        let resp = dispatch(&state(), req("dict.stats", json!({})));
-        assert!(resp.error.is_none());
-        assert!(resp.result.unwrap().is_array());
-    }
-
-    // ── Stage 2/4: registry 校验 + config.schema / config.getItem ──
-    // 容错策略：未知键/类型/枚举错的键被「跳过并在响应 skipped 里报告」，合法项照常应用，
-    // 整批不因一个旧字段失败（保护沿用旧字段的 webview）。下列测试单项无合法键，故不写盘。
-
-    /// 取响应里 skipped 数组中的 key 列表。
-    fn skipped_keys(resp: &Response) -> Vec<String> {
-        resp.result
-            .as_ref()
-            .and_then(|r| r.get("skipped"))
-            .and_then(|s| s.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|it| it.get("key").and_then(|k| k.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn set_items_skips_unknown_key() {
-        let resp = dispatch(
-            &state(),
-            req(
-                "config.setItems",
-                json!({ "items": [{ "key": "ui.candidate.bogus", "value": 1 }] }),
-            ),
-        );
-        assert!(resp.error.is_none(), "整批不应失败");
-        let r = resp.result.clone().unwrap();
-        assert_eq!(r["applied"], json!(0));
-        assert!(skipped_keys(&resp).contains(&"ui.candidate.bogus".to_string()));
-    }
-
-    #[test]
-    fn set_items_skips_enum_out_of_range() {
-        let resp = dispatch(
-            &state(),
-            req(
-                "config.setItems",
-                json!({ "items": [{ "key": "ui.candidate.layout", "value": "diagonal" }] }),
-            ),
-        );
-        assert!(resp.error.is_none());
-        assert!(skipped_keys(&resp).contains(&"ui.candidate.layout".to_string()));
-    }
-
-    #[test]
-    fn set_items_skips_type_mismatch() {
-        let resp = dispatch(
-            &state(),
-            req(
-                "config.setItems",
-                json!({ "items": [{ "key": "ui.candidate.per_page", "value": "seven" }] }),
-            ),
-        );
-        assert!(resp.error.is_none());
-        assert!(skipped_keys(&resp).contains(&"ui.candidate.per_page".to_string()));
-    }
-
-    // ── config.previewPatch / applyPatch 契约（照 scheme.previewImport 先例：只测
-    // 只读与错误路径）。applyPatch 的成功写路径**刻意不在此测**——它会真写用户层
-    // config.toml（%APPDATA%），校验+展平的纯逻辑已在 wind-config::patch 层覆盖。
-
-    #[test]
-    fn preview_patch_reports_entries_readonly() {
-        let core = FakeCore::new();
-        let st = DispatchState::new(core.clone(), "dev").unwrap();
-        let resp = dispatch(
-            &st,
-            req(
-                "config.previewPatch",
-                json!({ "text": "[ui.candidate]\nper_page = 9\n" }),
-            ),
-        );
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let r = resp.result.unwrap();
-        assert_eq!(r["ok"], json!(true));
-        let entries = r["entries"].as_array().expect("entries 应为数组");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["key"], json!("ui.candidate.per_page"));
-        assert_eq!(entries[0]["next"], json!(9));
-        assert!(entries[0].get("error").is_none(), "合法条目不应有 error");
-        assert!(entries[0].get("warning").is_none(), "寻常键不应有 warning");
-        // 只读：不得触发热重载（也证明未走落盘通路）。
-        assert!(!core.config_applied.load(Ordering::SeqCst));
-    }
-
-    /// 手改 config.toml 之后靠它让核心重读：只广播不重载的话，改动要等下次保存才生效。
-    #[test]
-    fn config_reload_applies_config_and_broadcasts() {
-        let core = FakeCore::new();
-        let st = DispatchState::new(core.clone(), "dev").expect("capabilities 应能加载");
-        let resp = dispatch(&st, req("config.reload", json!({})));
-        let r = resp.result.unwrap();
-        assert_eq!(r["ok"], json!(true));
-        assert_eq!(r["needsRestart"], json!(false));
-        assert!(core.config_applied.load(Ordering::SeqCst), "应触发热重载");
-    }
-
-    /// 风险提示要真的过得了 RPC 面——`warning` 是 core 侧 `PatchEntry` 的新字段，
-    /// 序列化漏了的话设置端拿不到，而「提示没出现」没有任何信号。
-    ///
-    /// 同时钉住 `ok` 与 `warning` 正交：有提示 ≠ 不合法，导入按钮不该因此被禁用。
-    #[test]
-    fn preview_patch_surfaces_risk_warning_without_blocking() {
-        let core = FakeCore::new();
-        let st = DispatchState::new(core.clone(), "dev").unwrap();
-        let text =
-            "[[ui.toolbar.buttons]]\nid = \"x\"\nlabel = \"符\"\naction = 'proc.run(\"x.exe\")'\n";
-        let resp = dispatch(&st, req("config.previewPatch", json!({ "text": text })));
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let r = resp.result.unwrap();
-        assert_eq!(r["ok"], json!(true), "有风险提示不代表不合法");
-        let entries = r["entries"].as_array().expect("entries 应为数组");
-        let e = entries
-            .iter()
-            .find(|e| e["key"] == json!("ui.toolbar.buttons"))
-            .expect("应含该键");
-        let w = e["warning"].as_str().expect("危险键必须带 warning");
-        assert!(w.contains("启动程序"), "提示要说清后果，实际：{w}");
-    }
-
-    /// Map 键在 RPC 面上逐条目呈现：`key` = 父 Map 键，条目名走 `mapEntry`（serde rename）。
-    /// 设置端的确认对话框据此逐条列出「哪个绑定改成了什么」。
-    #[test]
-    fn preview_patch_reports_map_entries_with_map_entry_field() {
-        let core = FakeCore::new();
-        let st = DispatchState::new(core.clone(), "dev").unwrap();
-        let resp = dispatch(
-            &st,
-            req(
-                "config.previewPatch",
-                json!({ "text": "[keys.key_actions]\nf4 = \"english\"\nf5 = \"半角\"\n" }),
-            ),
-        );
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let r = resp.result.unwrap();
-        assert_eq!(r["ok"], json!(true));
-        let entries = r["entries"].as_array().expect("entries 应为数组");
-        assert_eq!(entries.len(), 2, "Map 两个条目应各占一行: {entries:?}");
-        for e in entries {
-            assert_eq!(e["key"], json!("keys.key_actions"), "key 恒为父 Map 键");
-            assert!(e.get("mapEntry").is_some(), "Map 条目须带 mapEntry: {e}");
-        }
-        assert_eq!(entries[0]["mapEntry"], json!("f4"));
-        assert_eq!(entries[0]["next"], json!("english"));
-        assert!(!core.config_applied.load(Ordering::SeqCst), "预览只读");
-    }
-
-    #[test]
-    fn preview_patch_flags_unknown_and_invalid_values() {
-        let resp = dispatch(
-            &state(),
-            req(
-                "config.previewPatch",
-                json!({ "text": "[ui.candidate]\nlayout = \"diagonal\"\n[input.foo]\nbar = 1\n" }),
-            ),
-        );
-        assert!(resp.error.is_none(), "逐键错误不是 RPC 错误");
-        let r = resp.result.unwrap();
-        assert_eq!(r["ok"], json!(false));
-        let entries = r["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 2);
-        assert!(
-            entries.iter().all(|e| e.get("error").is_some()),
-            "两条都应带 error: {entries:?}"
-        );
-    }
-
-    #[test]
-    fn preview_patch_rejects_invalid_toml_as_whole() {
-        let resp = dispatch(
-            &state(),
-            req("config.previewPatch", json!({ "text": "= not toml =" })),
-        );
-        assert!(resp.result.is_none());
-        assert!(resp.error.is_some(), "整体解析失败应为 RPC 错误");
-    }
-
-    #[test]
-    fn apply_patch_rejects_fragment_with_any_error() {
-        let core = FakeCore::new();
-        let st = DispatchState::new(core.clone(), "dev").unwrap();
-        // 一条合法 + 一条未知键：整体拒绝，不做半应用。
-        let resp = dispatch(
-            &st,
-            req(
-                "config.applyPatch",
-                json!({ "text": "[ui.candidate]\nper_page = 9\nbogus = 1\n" }),
-            ),
-        );
-        assert!(resp.result.is_none());
-        let err = resp.error.expect("应整体拒绝");
-        assert!(err.contains("bogus"), "错误应点名出错的键: {err}");
-        assert!(
-            !core.config_applied.load(Ordering::SeqCst),
-            "整体拒绝不得触发热重载（也证明未走落盘通路）"
-        );
-    }
-
-    /// 片段自带的说明元信息随预览上浮：`info` 与 `entries` 各说各的——保留段既不产出
-    /// 配置条目，也不影响真配置键的展平。
-    #[test]
-    fn preview_patch_carries_package_info() {
-        let core = FakeCore::new();
-        let st = DispatchState::new(core.clone(), "dev").unwrap();
-        let resp = dispatch(
-            &st,
-            req(
-                "config.previewPatch",
-                json!({ "text": "[package]\ntitle = \"九列候选\"\ndescription = \"把候选窗改成每页 9 个。\"\n[ui.candidate]\nper_page = 9\n" }),
-            ),
-        );
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let r = resp.result.unwrap();
-        assert_eq!(r["ok"], json!(true));
-        let entries = r["entries"].as_array().expect("entries 应为数组");
-        assert_eq!(entries.len(), 1, "保留段不产出配置条目: {entries:?}");
-        assert_eq!(entries[0]["key"], json!("ui.candidate.per_page"));
-        assert_eq!(r["info"]["title"], json!("九列候选"));
-        assert_eq!(r["info"]["description"], json!("把候选窗改成每页 9 个。"));
-        assert!(!core.config_applied.load(Ordering::SeqCst), "预览只读");
-    }
-
-    /// 只写 title 时 `info` 里**没有** description 字段（逐字段 skip，不是整个 info 全有全无）。
-    #[test]
-    fn preview_patch_info_omits_unwritten_field() {
-        let resp = dispatch(
-            &state(),
-            req(
-                "config.previewPatch",
-                json!({ "text": "[package]\ntitle = \"只有标题\"\n[ui.candidate]\nper_page = 9\n" }),
-            ),
-        );
-        let r = resp.result.expect("应成功");
-        assert_eq!(r["info"]["title"], json!("只有标题"));
-        assert!(
-            r["info"].get("description").is_none(),
-            "没写的字段不输出: {}",
-            r["info"]
-        );
-    }
-
-    /// 无 `[package]` 段（或段内两字段都缺省）→ 响应里**没有** info 字段，
-    /// 前端不必区分「没写」与「写了空串」。
-    #[test]
-    fn preview_patch_omits_info_when_absent() {
-        for text in [
-            "[ui.candidate]\nper_page = 9\n",
-            "[package]\nkind = \"schema_text\"\n[ui.candidate]\nper_page = 9\n",
-            "[package]\ntitle = \"   \"\n[ui.candidate]\nper_page = 9\n",
-        ] {
-            let resp = dispatch(
-                &state(),
-                req("config.previewPatch", json!({ "text": text })),
-            );
-            let r = resp.result.expect("应成功");
-            assert!(
-                r.get("info").is_none(),
-                "不该出现 info 字段: {r} ({text:?})"
-            );
-        }
-    }
-
-    /// 说明非法 → preview 与 apply **都**整体拒绝（同一套判据）。
-    /// 只在其中一处拒绝，分发者就会遇到「预览好好的、装的时候炸了」。
-    #[test]
-    fn invalid_package_info_rejects_preview_and_apply() {
-        let bad = [
-            // title 不许换行
-            "[package]\ntitle = \"第一行\\n第二行\"\n[ui.candidate]\nper_page = 9\n",
-            // 类型不对
-            "[package]\ntitle = 5\n[ui.candidate]\nper_page = 9\n",
-            // C0 控制字符
-            "[package]\ndescription = \"说明\\u0007\"\n[ui.candidate]\nper_page = 9\n",
-        ];
-        for text in bad {
-            let core = FakeCore::new();
-            let st = DispatchState::new(core.clone(), "dev").unwrap();
-            for method in ["config.previewPatch", "config.applyPatch"] {
-                let resp = dispatch(&st, req(method, json!({ "text": text })));
-                assert!(resp.result.is_none(), "{method} 应整体拒绝: {text:?}");
-                let err = resp.error.expect("应有错误");
-                assert!(err.contains("package."), "错误须点名字段: {err}");
-            }
-            assert!(
-                !core.config_applied.load(Ordering::SeqCst),
-                "整体拒绝不得触发热重载（也证明未走落盘通路）"
-            );
-        }
-    }
-
-    #[test]
-    fn apply_patch_empty_fragment_is_noop_success() {
-        let core = FakeCore::new();
-        let st = DispatchState::new(core.clone(), "dev").unwrap();
-        let resp = dispatch(&st, req("config.applyPatch", json!({ "text": "" })));
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let r = resp.result.unwrap();
-        assert_eq!(r["ok"], json!(true));
-        assert_eq!(r["applied"], json!(0));
-        // written 恒在场（空数组），设置端回灌逻辑不必分「有没有这个字段」。
-        assert_eq!(r["written"], json!([]));
-        assert!(
-            !core.config_applied.load(Ordering::SeqCst),
-            "no-op 不落盘也不热重载"
-        );
-    }
-
-    #[test]
-    fn config_schema_lists_registered_fields() {
-        let resp = dispatch(&state(), req("config.schema", json!({})));
-        assert!(resp.error.is_none());
-        let r = resp.result.unwrap();
-        let fields = r["fields"].as_array().expect("fields 应为数组");
-        let layout = fields
-            .iter()
-            .find(|f| f["key"] == json!("ui.candidate.layout"))
-            .expect("应含 ui.candidate.layout");
-        assert_eq!(layout["type"], json!("enum"));
-        assert!(
-            layout["options"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v == &json!("vertical")),
-            "enum 应带 options"
-        );
-    }
-
-    #[test]
-    fn config_get_item_known_returns_value_unknown_errors() {
-        let ok = dispatch(
-            &state(),
-            req("config.getItem", json!({ "key": "ui.candidate.per_page" })),
-        );
-        assert!(ok.error.is_none(), "已登记键应成功");
-        assert!(ok.result.unwrap()["value"].is_number());
-
-        let bad = dispatch(
-            &state(),
-            req("config.getItem", json!({ "key": "no.such.key" })),
-        );
-        assert!(bad.result.is_none());
-        assert!(bad.error.is_some());
-    }
-
-    // ── compat.changed：写方法成功后广播，只读 / dryRun / 失败都不广播 ──
-
-    fn state_with_events() -> (DispatchState, std::sync::mpsc::Receiver<Vec<u8>>) {
-        let sink = crate::events::EventSink::new();
-        let rx = sink.subscribe();
-        let st = DispatchState::with_events(FakeCore::new(), "dev", sink)
-            .expect("capabilities 应能加载");
-        (st, rx)
-    }
-
-    /// 取走已广播的事件名（帧 = 4 字节长度前缀 + JSON）。
-    fn drain_events(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<String> {
-        rx.try_iter()
-            .map(|b| {
-                let v: Value = serde_json::from_slice(&b[4..]).expect("事件应是合法 JSON");
-                v["event"].as_str().unwrap_or_default().to_string()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn compat_write_method_emits_compat_changed_and_forwards_the_result() {
-        let (st, rx) = state_with_events();
-        for m in [
-            "compat.upsert",
-            "compat.reset",
-            "compat.import",
-            "compat.reload",
-        ] {
-            let resp = dispatch(&st, req(m, json!({})));
-            assert!(resp.error.is_none(), "{m}");
-            assert_eq!(resp.result.unwrap()["ok"], json!(true), "结果要原样透传");
-        }
-        assert_eq!(
-            drain_events(&rx),
-            vec!["compat.changed"; 4],
-            "每次写入各广播一次"
-        );
-    }
-
-    #[test]
-    fn compat_read_methods_and_dry_run_import_do_not_emit() {
-        let (st, rx) = state_with_events();
-        for m in ["compat.list", "compat.schema", "compat.export"] {
-            assert!(dispatch(&st, req(m, json!({}))).error.is_none());
-        }
-        let dry = dispatch(&st, req("compat.import", json!({ "dryRun": true })));
-        assert!(dry.error.is_none());
-        assert!(drain_events(&rx).is_empty(), "只读与 dryRun 不应广播");
-    }
-
-    #[test]
-    fn compat_failed_write_does_not_emit() {
-        let (st, rx) = state_with_events();
-        let resp = dispatch(&st, req("compat.broken", json!({})));
-        assert!(resp.error.is_some());
-        assert!(drain_events(&rx).is_empty(), "失败的写入不应广播");
-    }
-
-    // ── schema.configChanged：改方案配置的写方法成功后广播，带方案 id ──
-
-    #[test]
-    fn schema_config_write_emits_with_id() {
-        let (st, rx) = state_with_events();
-        let p = json!({ "id": "wubi86", "dictId": "ext", "enabled": false });
-        let resp = dispatch(&st, req("schema.setDictEnabled", p));
-        assert_eq!(resp.result.unwrap()["ok"], json!(true), "结果要原样透传");
-        assert!(
-            dispatch(&st, req("schema.saveConfig", json!({ "id": "py" })))
-                .error
-                .is_none()
-        );
-        let got: Vec<(String, Value)> = rx
-            .try_iter()
-            .map(|b| {
-                let v: Value = serde_json::from_slice(&b[4..]).unwrap();
-                (
-                    v["event"].as_str().unwrap().to_string(),
-                    v["data"]["id"].clone(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                ("schema.configChanged".to_string(), json!("wubi86")),
-                ("schema.configChanged".to_string(), json!("py")),
-            ]
-        );
-    }
-
-    /// 导入方案包可能动多个方案：载荷不带 id，订阅方按「全部」处理。
-    #[test]
-    fn multi_schema_write_emits_without_id() {
-        let (st, rx) = state_with_events();
-        let resp = dispatch(&st, req("scheme.importPackage", json!({ "path": "x.zip" })));
-        assert!(resp.error.is_none());
-        let data: Vec<Value> = rx
-            .try_iter()
-            .map(|b| serde_json::from_slice::<Value>(&b[4..]).unwrap())
-            .map(|v| {
-                assert_eq!(v["event"], json!("schema.configChanged"));
-                v["data"].clone()
-            })
-            .collect();
-        assert_eq!(data, vec![json!({ "method": "scheme.importPackage" })]);
-    }
-
-    #[test]
-    fn schema_config_write_methods_and_ids() {
-        let p = json!({ "id": "a", "schemaId": "b" });
-        for (m, want) in [
-            ("schema.saveConfig", Some(Some("a"))),
-            ("schema.resetConfig", Some(Some("a"))),
-            ("schema.setDictEnabled", Some(Some("a"))),
-            ("schema.delete", Some(Some("a"))),
-            ("userDicts.setEnabled", Some(Some("b"))),
-            ("userdata.purgeSchema", Some(Some("b"))),
-            ("scheme.importPackage", Some(None)),
-            ("scheme.importText", Some(None)),
-            ("backup.restore", Some(None)),
-            ("schema.reloadFiles", Some(None)),
-            ("schema.getConfig", None),
-            ("scheme.previewImport", None),
-        ] {
-            assert_eq!(schema_config_write_id(m, &p), want, "{m}");
-        }
-    }
-
-    #[test]
-    fn schema_config_read_or_failed_write_does_not_emit() {
-        let (st, rx) = state_with_events();
-        assert!(
-            dispatch(&st, req("schema.getConfig", json!({ "id": "a" })))
-                .error
-                .is_none()
-        );
-        assert!(
-            dispatch(&st, req("schema.resetConfig", json!({ "id": "a" })))
-                .error
-                .is_some()
-        );
-        assert!(drain_events(&rx).is_empty());
-    }
-}
+#[path = "dispatch_tests.rs"]
+mod tests;
