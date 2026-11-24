@@ -30,5 +30,5 @@ pub use error::SyncError;
 pub use local::{LocalError, LocalStore, MemLocal};
 #[cfg(feature = "net")]
 pub use net::{S3Backend, S3Config, WebDavBackend, WebDavConfig};
-pub use scope::{ScopeFlags, in_scope};
+pub use scope::{DeviceClass, ScopeFlags, in_scope};
 pub use state::SyncState;

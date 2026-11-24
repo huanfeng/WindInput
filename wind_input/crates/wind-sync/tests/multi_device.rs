@@ -656,5 +656,5 @@ fn lamport_advances_past_remote_lamports() {
         d[1].state.lamport > remote_max,
         "接收清单后 lamport 要越过对方"
     );
-    assert!(d[1].state.files["themes/b.json"].lamport > remote_max);
+    assert!(d[1].state.files["desktop/themes/b.json"].lamport > remote_max);
 }

@@ -1,5 +1,6 @@
 //! 本地文件集抽象（用户目录里范围内的文件）。S4 的真实实现负责 `data.beginEdit`/原子写入/重载。
 
+use crate::scope::{DeviceClass, to_local, to_remote};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,5 +56,51 @@ impl LocalStore for MemLocal {
             self.files.remove(p);
         }
         Ok(())
+    }
+}
+
+/// 引擎看到的是远端逻辑路径（平台相关文件带类别前缀）；本适配器在读写本机时映射回本机路径。
+pub struct ClassLocal<'a> {
+    pub inner: &'a mut dyn LocalStore,
+    pub class: DeviceClass,
+}
+
+fn unmapped(p: &str) -> LocalError {
+    LocalError(format!("路径不属于本机类别: {p}"))
+}
+
+impl LocalStore for ClassLocal<'_> {
+    fn list(&self) -> Result<Vec<String>, LocalError> {
+        Ok(self
+            .inner
+            .list()?
+            .iter()
+            .map(|p| to_remote(p, self.class))
+            .collect())
+    }
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>, LocalError> {
+        match to_local(path, self.class) {
+            Some(l) => self.inner.read(&l),
+            None => Ok(None),
+        }
+    }
+    fn write_batch(&mut self, files: &[(String, Vec<u8>)]) -> Result<(), LocalError> {
+        let mapped = files
+            .iter()
+            .map(|(p, b)| {
+                Ok((
+                    to_local(p, self.class).ok_or_else(|| unmapped(p))?,
+                    b.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, LocalError>>()?;
+        self.inner.write_batch(&mapped)
+    }
+    fn delete(&mut self, paths: &[String]) -> Result<(), LocalError> {
+        let mapped = paths
+            .iter()
+            .map(|p| to_local(p, self.class).ok_or_else(|| unmapped(p)))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.inner.delete(&mapped)
     }
 }

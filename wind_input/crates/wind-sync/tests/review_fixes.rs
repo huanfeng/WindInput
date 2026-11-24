@@ -152,7 +152,7 @@ fn crash_rerun_with_idle_observer_keeps_lamport_monotonic() {
     d[0].state = snapshot;
     d[0].local.set("themes/x.json", "v2");
     d[0].ok(&b);
-    assert!(d[0].state.files["themes/x.json"].lamport >= 2);
+    assert!(d[0].state.files["desktop/themes/x.json"].lamport >= 2);
     d[1].ok(&b);
     assert_eq!(d[1].local.text("themes/x.json").unwrap(), "v2");
 }
