@@ -1,6 +1,6 @@
 //! S3 兼容后端：`rusty-s3` 做 SigV4 预签名，`ureq` 发请求。
 
-use super::{new_agent, parse_iso_date, read_body, send};
+use super::{new_agent, parse_http_date, parse_iso_date, read_body, send};
 use crate::backend::{Backend, BackendError, ObjMeta};
 use rusty_s3::actions::ListObjectsV2;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
@@ -77,6 +77,15 @@ impl S3Backend {
     }
 }
 
+/// HEAD 响应头 → 元信息。
+fn meta_from_headers(key: &str, last_modified: Option<&str>, length: Option<&str>) -> ObjMeta {
+    ObjMeta {
+        key: key.to_string(),
+        size: length.and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+        modified: last_modified.and_then(|v| parse_http_date(v.trim())),
+    }
+}
+
 impl Backend for S3Backend {
     fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
         let full_prefix = self.full(prefix);
@@ -113,6 +122,26 @@ impl Backend for S3Backend {
             }
         }
         Ok(out)
+    }
+
+    fn stat(&self, key: &str) -> Result<Option<ObjMeta>, BackendError> {
+        let url = self
+            .bucket
+            .head_object(Some(&self.creds), &self.full(key))
+            .sign(SIGN_TTL);
+        match send(
+            self.agent.head(url.as_str()),
+            None,
+            &format!("S3 HEAD {key}"),
+        ) {
+            Ok(r) => Ok(Some(meta_from_headers(
+                key,
+                r.header("Last-Modified"),
+                r.header("Content-Length"),
+            ))),
+            Err(BackendError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
@@ -178,6 +207,14 @@ mod tests {
     #[test]
     fn key_decoding() {
         assert_eq!(decode_key("a+b/%E4%B8%AD%2B%26"), "a b/中+&");
+    }
+
+    #[test]
+    fn head_headers_parse() {
+        let m = meta_from_headers("k", Some("Sun, 06 Nov 1994 08:49:37 GMT"), Some("12"));
+        assert_eq!((m.size, m.modified), (12, Some(784111777)));
+        let m = meta_from_headers("k", None, None);
+        assert_eq!((m.size, m.modified), (0, None));
     }
 
     #[test]

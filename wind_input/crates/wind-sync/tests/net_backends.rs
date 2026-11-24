@@ -87,8 +87,19 @@ fn crud(b: &dyn Backend) {
         m[0]
     );
 
+    // stat：存在 / 不存在 / 中文路径 / 目录不是对象
+    let m = b.stat("a/b/c.bin").unwrap().unwrap();
+    assert_eq!((m.key.as_str(), m.size), ("a/b/c.bin", 2));
+    assert!(m.modified.is_some_and(|t| t > 1_700_000_000), "{m:?}");
+    let m = b.stat(weird).unwrap().unwrap();
+    assert_eq!((m.key.as_str(), m.size), (weird, 2));
+    assert_eq!(b.stat("a/b/none.bin").unwrap(), None);
+    assert_eq!(b.stat("none/none.bin").unwrap(), None);
+    assert_eq!(b.stat("a/b").unwrap(), None);
+
     b.delete("a/b/c.bin").unwrap();
     b.delete(weird).unwrap();
+    assert_eq!(b.stat("a/b/c.bin").unwrap(), None);
     assert_eq!(b.get("a/b/c.bin").unwrap(), None);
     assert_eq!(keys("a/"), ["a/x.txt"]);
     b.delete("a/x.txt").unwrap();

@@ -4,7 +4,7 @@
 //! 「两边结果相同」（领养）或再次得到同样的合并结果，blob 内容寻址、重复上传被跳过，
 //! 清单只在全部 blob 就位后才写。
 
-use crate::backend::Backend;
+use crate::backend::{Backend, ObjMeta};
 use crate::crypto::{self, Dek, ObjKind, content_hash};
 use crate::error::SyncError;
 use crate::local::{LocalError, LocalStore};
@@ -23,6 +23,8 @@ pub const GC_MIN_AGE_SECS: u64 = 7 * 86400;
 pub const MASS_DELETE_MIN: usize = 20;
 /// 已存在 blob 的修改时间早于此（秒）则重传刷新。
 const BLOB_REFRESH_SECS: u64 = 86400;
+/// 待传 blob 数不超过它时逐个 stat 判存在，超过则一次 list。
+const STAT_THRESHOLD: usize = 32;
 /// 条目继承的 `absorbed` 上限（超出丢最旧）。
 const ABSORBED_CAP: usize = 64;
 
@@ -634,16 +636,33 @@ fn run(
     }
     if !blobs.is_empty() {
         // 已存在但很旧（或时间未知）的 blob 也重传一次刷新时间：它可能无人引用、即将被回收。
-        let fresh: BTreeSet<String> = backend
-            .list(&manifest::blobs_prefix())?
+        let is_fresh = |m: &ObjMeta| m.modified.is_some_and(|t| t + BLOB_REFRESH_SECS > ctx.now);
+        let items: Vec<(String, String, &[u8])> = blobs
             .into_iter()
-            .filter(|o| o.modified.is_some_and(|t| t + BLOB_REFRESH_SECS > ctx.now))
-            .map(|o| o.key)
+            .map(|(hash, bytes)| {
+                let id = crypto::blob_id(dek, hash);
+                (manifest::blob_key(&id), id, bytes)
+            })
             .collect();
-        for (hash, bytes) in blobs {
-            let id = crypto::blob_id(dek, hash);
-            let key = manifest::blob_key(&id);
-            if !fresh.contains(&key) {
+        // 少量逐个 stat（避免列举整个 blobs/ 目录）；很多（如首次同步）一次 list 更省请求。
+        let fresh: Option<BTreeSet<String>> = if items.len() > STAT_THRESHOLD {
+            Some(
+                backend
+                    .list(&manifest::blobs_prefix())?
+                    .iter()
+                    .filter(|o| is_fresh(o))
+                    .map(|o| o.key.clone())
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        for (key, id, bytes) in items {
+            let skip = match &fresh {
+                Some(set) => set.contains(&key),
+                None => backend.stat(&key)?.is_some_and(|m| is_fresh(&m)),
+            };
+            if !skip {
                 backend.put(&key, &crypto::seal(dek, ObjKind::Blob, &id, bytes))?;
             }
         }

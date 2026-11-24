@@ -157,6 +157,23 @@ fn parse_multistatus(xml: &str, base_path: &str) -> Result<Vec<Entry>, BackendEr
     Ok(out)
 }
 
+/// Depth:0 响应里取出 `key` 对应的文件条目；不是文件（集合或缺失）返回 None。
+fn stat_from_multistatus(
+    xml: &str,
+    base_path: &str,
+    key: &str,
+) -> Result<Option<ObjMeta>, BackendError> {
+    let want = key.trim_matches('/');
+    Ok(parse_multistatus(xml, base_path)?
+        .into_iter()
+        .find(|e| e.key == want && !e.is_dir)
+        .map(|e| ObjMeta {
+            key: key.to_string(),
+            size: e.size,
+            modified: e.modified,
+        }))
+}
+
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>"#;
 
 impl WebDavBackend {
@@ -303,6 +320,21 @@ impl Backend for WebDavBackend {
         Ok(out)
     }
 
+    fn stat(&self, key: &str) -> Result<Option<ObjMeta>, BackendError> {
+        let what = format!("PROPFIND {key}");
+        let req = self
+            .req("PROPFIND", key)
+            .set("Depth", "0")
+            .set("Content-Type", "application/xml; charset=utf-8");
+        let resp = match send(req, Some(PROPFIND_BODY.as_bytes()), &what) {
+            Ok(r) => r,
+            Err(BackendError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let body = read_body(resp, &what)?;
+        stat_from_multistatus(&String::from_utf8_lossy(&body), &self.base_path, key)
+    }
+
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
         let what = format!("GET {key}");
         match send(self.req("GET", key), None, &what) {
@@ -360,6 +392,30 @@ mod tests {
         assert!(!v[1].is_dir);
         assert_eq!(v[2].key, "sub");
         assert!(v[2].is_dir);
+    }
+
+    #[test]
+    fn stat_picks_the_file_entry() {
+        let m = stat_from_multistatus(XML, "dav/wind input", "中文.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            m,
+            ObjMeta {
+                key: "中文.txt".into(),
+                size: 12,
+                modified: Some(784111777)
+            }
+        );
+        // 集合不算对象；响应里没有该键也是 None
+        assert_eq!(
+            stat_from_multistatus(XML, "dav/wind input", "sub").unwrap(),
+            None
+        );
+        assert_eq!(
+            stat_from_multistatus(XML, "dav/wind input", "no").unwrap(),
+            None
+        );
     }
 
     #[test]

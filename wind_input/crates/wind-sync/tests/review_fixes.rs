@@ -212,6 +212,84 @@ fn old_existing_blob_is_refreshed_on_upload() {
     assert_eq!(blobs[0].modified, Some(T0), "旧 blob 要刷新时间，防被 GC");
 }
 
+fn blobs_listed(b: &MemBackend) -> usize {
+    b.calls()
+        .list_prefixes
+        .iter()
+        .filter(|p| **p == manifest::blobs_prefix())
+        .count()
+}
+
+#[test]
+fn few_blobs_use_stat_not_list() {
+    let (b, mut d) = setup(1);
+    for i in 0..3 {
+        d[0].local
+            .set(&format!("themes/t{i}.json"), &format!("v{i}"));
+    }
+    b.reset_calls();
+    d[0].ok(&b);
+    assert_eq!(blobs_listed(&b), 0, "少量 blob 不应列举 blobs/");
+    assert_eq!(b.calls().stat, 3, "每个待传 blob 一次 stat");
+    assert_eq!(b.keys(&manifest::blobs_prefix()).len(), 3);
+}
+
+#[test]
+fn many_blobs_use_one_list_not_stat() {
+    let (b, mut d) = setup(1);
+    for i in 0..40 {
+        d[0].local
+            .set(&format!("themes/t{i}.json"), &format!("v{i}"));
+    }
+    b.reset_calls();
+    d[0].ok(&b);
+    assert_eq!(blobs_listed(&b), 1, "超过阈值一次 list");
+    assert_eq!(b.calls().stat, 0);
+    assert_eq!(b.keys(&manifest::blobs_prefix()).len(), 40);
+}
+
+#[test]
+fn fresh_existing_blob_is_not_reuploaded_by_stat_path() {
+    let (b, mut d) = setup(1);
+    b.set_now(T0);
+    d[0].local.set("themes/x.json", "v1");
+    let snapshot = d[0].state.clone();
+    d[0].ok(&b);
+    d[0].state = snapshot;
+    let blob_puts = b.calls().put;
+    b.reset_calls();
+    d[0].ok(&b);
+    assert_eq!(b.calls().stat, 1);
+    // 只可能多出清单的 put，blob 不重传
+    assert!(b.calls().put <= 1, "{:?} (前次 {blob_puts})", b.calls());
+    let blobs = b.list(&manifest::blobs_prefix()).unwrap();
+    assert_eq!(blobs[0].modified, Some(T0));
+}
+
+#[test]
+fn old_existing_blob_is_refreshed_on_list_path() {
+    // 超过阈值走 list 路径：旧 blob 同样要刷新
+    let (b, mut d) = setup(1);
+    b.set_now(1000);
+    for i in 0..40 {
+        d[0].local
+            .set(&format!("themes/t{i}.json"), &format!("v{i}"));
+    }
+    let snapshot = d[0].state.clone();
+    d[0].ok(&b);
+    d[0].state = snapshot;
+    b.set_now(T0);
+    b.reset_calls();
+    d[0].ok(&b);
+    assert_eq!(blobs_listed(&b), 1);
+    let blobs = b.list(&manifest::blobs_prefix()).unwrap();
+    assert_eq!(blobs.len(), 40);
+    assert!(
+        blobs.iter().all(|o| o.modified == Some(T0)),
+        "旧 blob 要刷新"
+    );
+}
+
 // ───────── 5. 冲突副本不覆盖 ─────────
 
 #[test]

@@ -40,6 +40,12 @@ pub trait Backend {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError>;
     fn delete(&self, key: &str) -> Result<(), BackendError>;
 
+    /// 单个对象的元信息；不存在返回 `None`。
+    /// 默认用 `list(key)` 过滤出精确等于 key 的项（兼容自定义后端）；真实后端应覆盖为单对象请求。
+    fn stat(&self, key: &str) -> Result<Option<ObjMeta>, BackendError> {
+        Ok(self.list(key)?.into_iter().find(|o| o.key == key))
+    }
+
     /// 连通性与读写权限检查：写入、读回并删除一个探测对象。
     /// 凭据错误返回 `Auth`，网络/超时返回 `Transient`，可据此给用户不同提示。
     fn test_connection(&self) -> Result<(), BackendError> {
@@ -58,9 +64,23 @@ struct MemInner {
     objs: BTreeMap<String, (Vec<u8>, u64)>,
     now: u64,
     puts: u64,
+    /// 各方法调用次数（含失败的）；list 另记前缀。
+    calls: Calls,
     /// (还剩几次 put 后失败, 错误)：计到 1 时这一次 put 失败，且只失败一次。
     fail_put: Option<(u64, BackendError)>,
     fail_all: Option<BackendError>,
+}
+
+/// 各方法的调用计数。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Calls {
+    pub list: u64,
+    pub get: u64,
+    pub put: u64,
+    pub delete: u64,
+    pub stat: u64,
+    /// 每次 `list` 的前缀，按调用顺序。
+    pub list_prefixes: Vec<String>,
 }
 
 /// 内存后端；`clone` 共享同一份存储（模拟多台设备连同一个远端）。
@@ -88,6 +108,14 @@ impl MemBackend {
     pub fn fail_all(&self, err: Option<BackendError>) {
         self.g().fail_all = err;
     }
+    /// 方法调用计数快照。
+    pub fn calls(&self) -> Calls {
+        self.g().calls.clone()
+    }
+    /// 计数清零（测试里隔开准备阶段与被测阶段）。
+    pub fn reset_calls(&self) {
+        self.g().calls = Calls::default();
+    }
     pub fn put_count(&self) -> u64 {
         self.g().puts
     }
@@ -111,7 +139,9 @@ impl MemBackend {
 
 impl Backend for MemBackend {
     fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
-        let g = self.g();
+        let mut g = self.g();
+        g.calls.list += 1;
+        g.calls.list_prefixes.push(prefix.to_string());
         if let Some(e) = &g.fail_all {
             return Err(e.clone());
         }
@@ -126,14 +156,28 @@ impl Backend for MemBackend {
             .collect())
     }
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
-        let g = self.g();
+        let mut g = self.g();
+        g.calls.get += 1;
         if let Some(e) = &g.fail_all {
             return Err(e.clone());
         }
         Ok(g.objs.get(key).map(|v| v.0.clone()))
     }
+    fn stat(&self, key: &str) -> Result<Option<ObjMeta>, BackendError> {
+        let mut g = self.g();
+        g.calls.stat += 1;
+        if let Some(e) = &g.fail_all {
+            return Err(e.clone());
+        }
+        Ok(g.objs.get(key).map(|(v, t)| ObjMeta {
+            key: key.to_string(),
+            size: v.len() as u64,
+            modified: Some(*t),
+        }))
+    }
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
         let mut g = self.g();
+        g.calls.put += 1;
         if let Some(e) = &g.fail_all {
             return Err(e.clone());
         }
@@ -150,6 +194,7 @@ impl Backend for MemBackend {
     }
     fn delete(&self, key: &str) -> Result<(), BackendError> {
         let mut g = self.g();
+        g.calls.delete += 1;
         if let Some(e) = &g.fail_all {
             return Err(e.clone());
         }
