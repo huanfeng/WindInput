@@ -1,4 +1,4 @@
-//! Linux 托盘 / 面板的模式图标：**按模式主字运行时渲染**，同 Windows 语言栏图标。
+//! Linux 托盘 / 面板的模式图标：按模式主字运行时渲染，同 Windows 语言栏图标。
 //!
 //! 主字就是 Windows 语言栏用的那一份（`Coordinator::mode_icon_label`：有效中文取方案
 //! `icon_label`，英文取 `[ui.labels] english`，大写锁定取 `caps_lock`），所以切方案、自定义方案、
@@ -9,7 +9,7 @@
 //!
 //! 图形：带底色的圆角方块 + 白字（底色按状态：中文蓝、英文灰、大写锁定橙），深浅面板都立得住。
 //! 与 [`crate::langbar_icon::IconRenderer`] 不是一种图（那边透明底、任务栏明暗两套字色、Light 字重），
-//! 借的是它的两条策略：**按墨迹盒居中**；**小字号按「会不会发虚」定字重**——这里底色是实心色块、
+//! 借的是它的两条策略：按墨迹盒居中；小字号按「会不会发虚」定字重——这里底色是实心色块、
 //! 白字要从色块里抠出来，Light 在 16px 上只剩一层灰雾，故取 Bold。
 //!
 //! 清晰度（本仓 Linux 文本后端没有 hinting，直接栅格会把 16px「英」的笔画间隙糊成灰带）：
@@ -36,7 +36,7 @@ pub enum Variant {
 }
 
 impl Variant {
-    /// 图标名里的状态段。**与 addon 的 `ModeIndicator` 对齐**。
+    /// 图标名里的状态段。与 addon 的 `ModeIndicator` 对齐。
     pub fn tag(self) -> &'static str {
         match self {
             Variant::Chinese => "zh",
@@ -66,7 +66,7 @@ impl Variant {
 ///   16 位十六进制（文件名上限 255 字节，`[ui.labels]` 可以配很长；十六进制恒为偶数位、只含 0-9a-f，
 ///   `h` 开头不会与之混淆）。
 ///
-/// **这是与 addon 的契约**（`HostUi.cpp` 的 `dynamicIconName`，`host_ui_test` 读本文件核对同一组样例）。
+/// 这是与 addon 的契约（`HostUi.cpp` 的 `dynamicIconName`，`host_ui_test` 读本文件核对同一组样例）。
 /// 用十六进制而不是主字本身：图标名要进 kimpanel 以冒号分段的属性串、进文件名，只用 ASCII 最稳。
 pub fn icon_name(dev: bool, variant: Variant, label: &str) -> String {
     let mut s = format!("{}{}-", icon_prefix(dev), variant.tag());
@@ -126,7 +126,7 @@ fn owns(prefix: &str, stem: &str) -> bool {
 
 /// 渲染的尺寸档（hicolor 的 `<N>x<N>`）。托盘常见 16/22/24，HiDPI 取 32/48，64 给面板大图标。
 ///
-/// **按从小到大写**，最后写的是 [`LAST_SIZE`]：addon 以它在不在判断这一组是否写完。
+/// 按从小到大写，最后写的是 [`LAST_SIZE`]：addon 以它在不在判断这一组是否写完。
 pub const SIZES: &[usize] = &[16, 22, 24, 32, 48, 64];
 /// 一组图标里最后写出的尺寸，见 [`SIZES`]。
 pub const LAST_SIZE: usize = 64;
@@ -638,7 +638,7 @@ impl TrayIcons {
     /// 建好全部尺寸档的 `apps` 目录。
     ///
     /// 要赶在宿主构建图标主题之前：Fcitx5 的 `IconTheme`（classicui 托盘）与 Qt 的 `QIconTheme`
-    /// 在构造时把**不存在**的主题目录永久排除，KIconLoader 只为构造时已存在的子目录建索引——
+    /// 在构造时把不存在的主题目录永久排除，KIconLoader 只为构造时已存在的子目录建索引——
     /// 目录晚一步出现，里面的文件就再也找不到，直到宿主重启。addon 在 Fcitx5 加载它时也建一次。
     pub fn create_dirs(&self) -> Result<(), String> {
         for &n in SIZES {

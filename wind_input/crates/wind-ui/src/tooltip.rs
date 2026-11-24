@@ -5,42 +5,30 @@
 //!
 //! # 右键命中
 //!
-//! 整块文本仍是**一个**叶节点（`TooltipDoc::to_plain_text` 画出来的那串），外观与段列表
-//! 引入前逐像素相同。命中不靠逐行布局，而是量出文本块的矩形（与 `View` 绘制同一套定位
-//! 公式），再按行数均分——渲染器的行距钉成 UNIFORM（见 `text::dwrite` 的
-//! `create_layout_with`），每行等高。点中的行经 `TooltipDoc::hit_at_line` 换算回
-//! `(段, 原始行)`，随 `RequestTooltipMenu` 交给协调器。
+//! 整块文本仍是一个叶节点（`TooltipDoc::to_plain_text`）。命中量出文本块矩形（与 `View` 绘制
+//! 同一套定位公式）再按行数均分（渲染器行距钉成 UNIFORM，见 `text::dwrite` 的
+//! `create_layout_with`），点中的行经 `TooltipDoc::hit_at_line` 换算回 `(段, 原始行)`，随
+//! `RequestTooltipMenu` 交给协调器。
 //!
 //! # 右键菜单打开期间
 //!
-//! 菜单一开就 `SetCapture`，同线程的气泡从此收不到鼠标消息（`WM_MOUSEMOVE` / 按键都没有），
-//! 而鼠标移向菜单时 `WM_MOUSELEAVE` 已经把 `mouse_over` 清掉、离开跟踪也随之失效。所以
-//! 菜单关闭时 `mouse_over` 是**陈旧**的，不能拿来判「鼠标还在不在气泡上」——点回气泡关菜单
-//! 时气泡会被当成「鼠标已离开」而隐藏。几件事因此都改问真实光标（[`menu_step`] 是判据）：
+//! 菜单持有捕获期间气泡收不到鼠标消息，关闭时 `mouse_over` 是陈旧的，故几件事都改问真实光标
+//! （[`menu_step`] 是判据；Win32 细节见 `docs/architecture/ui-platform-notes.md` 的「悬停提示气泡」）：
 //! - 菜单关闭（任何方式）：光标在气泡上就留下并重挂离开跟踪，否则隐藏；
-//! - 菜单外按下落在气泡上且是右键、关掉的正是气泡的菜单：菜单轮询看见了这次按下（气泡
-//!   自己收不到），转给这里按新位置重新请求菜单，相当于「重新右键」；
-//! - 气泡自己的 `WM_RBUTTONDOWN` 在**任何**菜单打开期间一律不理，只认轮询那一路，免得
-//!   同一次右键请求两遍菜单；工具栏 / 状态菜单开着时右键气泡也就只关菜单。
+//! - 菜单外按下落在气泡上且是右键、关掉的正是气泡的菜单：菜单轮询转给这里按新位置重新请求菜单；
+//! - 气泡自己的 `WM_RBUTTONDOWN` 在任何菜单打开期间一律不理，只认轮询那一路，免得请求两遍。
 //!
-//! 重挂离开跟踪会招来一条**伪** `WM_MOUSELEAVE`：菜单持有捕获期间，系统记的「鼠标所在窗口」
-//! 是菜单；`ReleaseCapture` 后还没处理过一次鼠标移动时就 `TrackMouseEvent`，系统认定光标
-//! 不在气泡上，当场投递离开——而此刻抑制刚解除，照旧处理就会把刚决定留下的气泡藏掉（靶机
-//! 实测：左键点气泡关菜单、菜单开着时右键气泡另一处，气泡都随之消失）。故「离开」也问真实
-//! 光标：光标仍在气泡上就不是离开，只清掉跟踪，等下一次真实 `WM_MOUSEMOVE` 再挂。光标若一次
-//! 都没在气泡上移动就离开，那条移动永远不来，故另起复查定时器（[`RECHECK_MS`]），且跟踪没
-//! 挂着时 [`Tooltip::hide`] 改问真实光标，不按 `mouse_over` 推迟。
+//! 重挂离开跟踪会招来一条伪 `WM_MOUSELEAVE`，故「离开」也问真实光标：仍在气泡上就只清跟踪，
+//! 另起复查定时器（[`RECHECK_MS`]）；跟踪没挂着时 [`Tooltip::hide`] 改问真实光标。
 //!
 //! # 悬停宽限与强制隐藏（设计 §7.6 C）
 //!
-//! 真实离开气泡不当场藏，开 [`LEAVE_GRACE_MS`] 宽限：光标穿过空隙回到所属候选行时，悬停值
-//! 没变、协调器不重绘，当场藏了气泡就不回来。候选窗收起走 [`Tooltip::hide_force`]，光标停在
-//! 气泡上也照收。
+//! 真实离开气泡不当场藏，开 [`LEAVE_GRACE_MS`] 宽限。候选窗收起走 [`Tooltip::hide_force`]，
+//! 光标停在气泡上也照收。
 //!
-//! 「关掉的正是气泡的菜单」看 `suppress_hide`。它由协调器的 `SetTooltipMenuOpen` 维护，
-//! 但协调器有几条收菜单的路（打字、失焦、切走输入法、组合被终止）走的是 `HideMenu` /
-//! `HideCandidates`，不一定补发 `SetTooltipMenuOpen(false)`。故 UI 循环在这两条命令真把一个
-//! 可见的菜单收掉时调 [`Tooltip::on_menu_dismissed`]，按「菜单已关闭」处理，标志不会残留。
+//! 「关掉的正是气泡的菜单」看 `suppress_hide`，由协调器的 `SetTooltipMenuOpen` 维护。协调器
+//! 有几条收菜单的路走 `HideMenu` / `HideCandidates` 不补发 false，故 UI 循环在这两条命令真收掉
+//! 可见菜单时调 [`Tooltip::on_menu_dismissed`]，标志不会残留。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -170,11 +158,9 @@ enum MenuStep {
     Idle,
 }
 
-/// 真实离开气泡后的宽限期（毫秒）。从气泡移回它所属的候选行要穿过两者之间的空隙
-/// （阴影扩边、内边距）；一离开就藏，光标回到候选行时悬停值没变、协调器不重绘，气泡就再也
-/// 不回来，看上去是「移回去气泡没了」。280ms 覆盖正常手速穿过十几到几十像素的空隙，又短到
-/// 移到别处时气泡的逗留不显得拖沓（常见 hover-intent 取 200–300ms）。与候选窗那侧的
-/// `candidate_window::TIP_GRACE` 同值，两侧对称。
+/// 真实离开气泡后的宽限期（毫秒）。移回所属候选行要穿过空隙，而那时悬停值没变、协调器不重绘，
+/// 一离开就藏气泡就不回来了。280ms 覆盖正常手速穿过空隙（常见 hover-intent 取 200–300ms）。
+/// 与 `candidate_window::TIP_GRACE` 同值，两侧对称。
 pub(crate) const LEAVE_GRACE_MS: u32 = 280;
 
 /// 连续伪离开的上限：到达后按真实离开处理。每条伪离开之后复查补挂一次跟踪，若系统始终
@@ -881,7 +867,7 @@ impl Tooltip {
 
     /// 记下当前内容（命中换算要用），求好分段颜色，返回要画的纯文本。
     ///
-    /// 颜色在这里按**当前**主题现求：片段带的是角色 / 颜色引用，换主题、切明暗后重画即取到
+    /// 颜色在这里按当前主题现求：片段带的是角色 / 颜色引用，换主题、切明暗后重画即取到
     /// 新颜色。正文色兜底与 [`Self::set_theme`] 同源（palette `tooltip_text` → 节点文字色）。
     fn set_doc(&mut self, doc: &Arc<TooltipDoc>, candidate: i32) -> String {
         // 伪离开后等复查期间换了内容（光标移到别的候选，协调器重绘直接 show 新气泡，不经
@@ -1141,7 +1127,7 @@ fn dpi_scale() -> f32 {
     }
 }
 
-/// 竖排模式：tooltip 显示在候选窗**右侧**（空间不足时改左侧），纵向对齐悬停候选行。
+/// 竖排模式：tooltip 显示在候选窗右侧（空间不足时改左侧），纵向对齐悬停候选行。
 /// `win_left`/`win_right` 为候选窗左右边界（含阴影）；`row_top`/`row_bottom` 为候选行上下边界。
 #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
 fn clamp_beside(
@@ -1196,7 +1182,7 @@ fn clamp_beside(
 }
 
 /// 钳位 tooltip 到工作区：默认候选行下方（anchor_bottom + gap）；下方放不下则上翻到候选行
-/// **上方**（anchor_top − gap − h，让出整行高度避免遮挡候选）；左右越界贴边。
+/// 上方（anchor_top − gap − h，让出整行高度避免遮挡候选）；左右越界贴边。
 #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
 fn clamp_to_work_area(x: i32, anchor_top: i32, anchor_bottom: i32, w: u32, h: u32) -> (i32, i32) {
     let gap = 2;

@@ -1,9 +1,9 @@
 //! 主题包（`.wtheme`）—— 主题的 zip 分发格式。
 //!
 //! ```text
-//! package.toml      元信息：format_version / kind / name / author / version（**不落盘**）
+//! package.toml      元信息：format_version / kind / name / author / version（不落盘）
 //! theme.toml        主题本体（根条目，识别主题的依据）
-//! preview.png       市场预览图（可选，**不落盘**）
+//! preview.png       市场预览图（可选，不落盘）
 //! assets/bg.png     主题引用的图片等资源
 //! ```
 //!
@@ -12,23 +12,20 @@
 //! `[skin]` 里的图片引用（`frame.image`、`frame.srcset`、`decor.image`、`states` / `on`
 //! 片段里的 `image`，或指向 `[resources]` 的键）一律写成 `assets/…`：包里只有 `assets/**`
 //! 能装资源。导出时引用越界或文件不存在就报错（不自动搬运改写），导入时包里缺引用的
-//! 资源同样报错——缺图的皮肤装上去只会画出一个残缺的窗体。
+//! 资源同样报错。
 //!
 //! ## 为什么不与方案包（`.wpkg`）共用一个后缀
 //!
-//! 扩展名是**路由判据**：设置端靠它分派意图、靠它给 ProgId 挂图标与「打开方式」名称，
-//! 关联的注册/解除开关也是 per-扩展名的。合成一个后缀的话，路由得先解压才知道手上
-//! 是什么，错误面从「这不是主题包」扩成「包坏了 / 类型不对 / 解压失败」三种。
+//! 扩展名是路由判据：设置端靠它分派意图、给 ProgId 挂图标与「打开方式」，文件关联也是
+//! per-扩展名的；共用后缀的话得先解压才知道是什么。
 //!
-//! 但扩展名只是**提示**——文件随时能被改名，权威判据是包内 `package.toml` 的 `kind`。
-//! 没有 `package.toml` 的包（手工打的）退回看根目录有没有 `theme.toml`，与 `.wpkg`
-//! 容忍手工打包同一套取舍。
+//! 但扩展名只是提示，权威判据是包内 `package.toml` 的 `kind`。没有 `package.toml` 的手工包
+//! 退回看根目录有没有 `theme.toml`，与 `.wpkg` 同一套取舍。
 //!
 //! ## 只落该落的
 //!
-//! `package.toml` 与 `preview.png` 按名识别、**不写进主题目录**：它们不是主题资源，
-//! 落盘只会在每个主题目录里多两个死文件。同 [`crate::scheme`] 对 `config_patch.toml`
-//! 的处理。
+//! `package.toml` 与 `preview.png` 按名识别、不写进主题目录（不是主题资源），同
+//! [`crate::scheme`] 对 `config_patch.toml` 的处理。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -55,7 +52,7 @@ pub const THEME_FORMAT_VERSION: u32 = 1;
 /// 那边要给「一个包带多套混输子方案 + 全量词库」留余量，主题没有那种形态。
 pub const MAX_THEME_ENTRIES: usize = 200;
 
-/// 包内解压后**总**字节上限。
+/// 包内解压后总字节上限。
 ///
 /// 皮肤主题带高倍率窗体图与动画装饰，几张 APNG / 动画 WebP 就是十几 MiB；64 MiB 给它们
 /// 留够余量，同时把 zip 炸弹挡在把服务进程撑爆之前。
@@ -64,7 +61,7 @@ pub const MAX_THEME_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 /// 单个图片条目（`assets/**`、`preview.png`）解压后的上限。
 pub const MAX_THEME_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// `theme.toml` / `package.toml` 这类**文本**条目的单条上限。
+/// `theme.toml` / `package.toml` 这类文本条目的单条上限。
 ///
 /// 单独给一个小上限，免得走总额那条时要先把几十 MB 读进来才发现不对。取值对齐设置端
 /// 下载主题的 2 MiB 再留一倍余量——历史上内嵌 base64 图片的主题正好在这个量级。
@@ -86,7 +83,7 @@ pub struct ThemeMeta {
 pub struct ThemePackageInfo {
     #[serde(default = "legacy_format_version")]
     pub format_version: u32,
-    /// 包类型的**权威判据**。空 = 手工打包，退回按根条目推断。
+    /// 包类型的权威判据。空 = 手工打包，退回按根条目推断。
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
@@ -130,7 +127,7 @@ pub struct ThemeImportOutcome {
     pub files: Vec<String>,
 }
 
-/// 扫描结果：条目分类 + 元信息。**不读载荷**。
+/// 扫描结果：条目分类 + 元信息。不读载荷。
 struct Scanned {
     meta: ThemeMeta,
     /// zip 原名 → 归一化相对路径。只含要落盘的条目。
@@ -174,11 +171,8 @@ fn scan(package: &Path) -> anyhow::Result<Scanned> {
     let file = std::fs::File::open(package)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
-    // 规模门禁只读**中央目录**，不解压任何内容，故排在逐条校验之前——限额要挡的正是
-    // 「先把整个包处理一遍再说它太大」那份开销。
-    //
-    // ⚠️ 这里的「解压后大小」是归档自己声明的，撒谎的包骗得过它。真正的界画在
-    // `import_package` 的逐条有界读取上，本段只是廉价前筛。
+    // 规模门禁只读中央目录，排在逐条校验之前。这里的「解压后大小」是归档自己声明的，
+    // 只是廉价前筛；真正的界在 `import_package` 的逐条有界读取上。
     if archive.len() > MAX_THEME_ENTRIES {
         anyhow::bail!(
             "主题包条目过多（{} 个，上限 {MAX_THEME_ENTRIES}）",
@@ -398,14 +392,11 @@ pub fn preview_package(package: &Path) -> anyhow::Result<ThemePreview> {
 
 /// 解包到 `target_dir`（= `<主题目录>/<id>`）。
 ///
-/// **整目录替换**而不是逐文件覆盖：资源可能改名，逐文件写会把上一版的图留成垃圾，
-/// 而主题目录是按 id 独占的，没有「用户往里手工放了东西」这种用法。
-/// 先写 `.tmp` 兄弟目录、成功后才动目标，中途失败目标原封不动。
+/// 整目录替换而不是逐文件覆盖（资源可能改名，主题目录按 id 独占）。先写 `.tmp` 兄弟目录，
+/// 成功后才动目标，中途失败目标原封不动。
 ///
-/// `verify` 在**新目录已就位、旧目录尚未删除**的那一刻被调用，失败则整体回滚到旧内容。
-/// 它存在是因为有些校验只有看得到真实目录才做得了——比如主题的 `base` 继承链要在
-/// 主题目录群里定位被继承的那个。把这一步交给调用方，回滚逻辑就只有这里一份；
-/// 让调用方自己在事后校验的话，它手上已经没有旧内容可回滚了。
+/// `verify` 在新目录已就位、旧目录尚未删除时调用，失败则回滚到旧内容。有些校验（如 `base`
+/// 继承链）要看得到真实目录才做得了，放在这里回滚逻辑才只有一份。
 pub fn import_package<V>(
     package: &Path,
     target_dir: &Path,
@@ -427,8 +418,7 @@ where
 
     // 读取阶段：全部载荷入内存，任何坏条目在写盘前失败。
     //
-    // 逐条**有界**读取，且预算是整包共享的余额——`scan` 那道前筛读的是归档自己声明的
-    // 大小，撒谎的包骗得过它（声明 1 KB、解压 10 GB）。
+    // 逐条有界读取，预算是整包共享的余额：`scan` 的前筛信的是归档自己声明的大小。
     let mut remaining = MAX_THEME_UNCOMPRESSED_BYTES;
     let mut staged: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, rel) in &s.payload {
@@ -506,12 +496,10 @@ fn sibling_with_suffix(dir: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
 /// 只收 `theme.toml` 与 `assets/**`——主题目录里可能还有别的东西（编辑器的草稿、
 /// 系统生成的缩略图数据库），一并打进去既胀包又泄露无关文件。
 ///
-/// `assets/**` 的收集**不跟随符号链接**：链接（指向文件或目录都算，`assets` 本身是链接
-/// 也算）既不进包也不递归，因此链接成环不会无限递归，指向主题目录外（比如家目录）的
-/// 文件也不会被打进可分发的包里。皮肤引用了被跳过的链接时按「文件不存在」报错。
+/// `assets/**` 的收集不跟随符号链接（`assets` 本身是链接也算）：不会因成环无限递归，也不会
+/// 把主题目录外的文件打进包。皮肤引用了被跳过的链接时按「文件不存在」报错。
 ///
-/// 写包前先按导入侧的规则全部过一遍（条目名、只差大小写的重名、条目数、单条 / 总量
-/// 上限、皮肤引用），任何一条不过就报错并指出是哪个文件，不做出导入时必然被拒的包。
+/// 写包前按导入侧的全部规则过一遍，不做出导入时必然被拒的包。
 pub fn export_package(
     theme_dir: &Path,
     out_path: &Path,
@@ -598,7 +586,7 @@ pub fn export_package(
         anyhow::bail!("主题资源总量过大（{total} 字节，上限 {MAX_THEME_UNCOMPRESSED_BYTES}）");
     }
 
-    // 皮肤引用按**实际收集到的条目名**精确比对，不用 `is_file()`：大小写不敏感的文件系统上
+    // 皮肤引用按实际收集到的条目名精确比对，不用 `is_file()`：大小写不敏感的文件系统上
     // `assets/Frame.png` 能打开 `frame.png`，导出过了，导入却按包内名严格比对而失败。
     for (orig, rel) in skin_asset_refs(&text)? {
         if assets.iter().any(|(e, _)| *e == rel) {

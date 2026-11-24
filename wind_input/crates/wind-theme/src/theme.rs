@@ -17,10 +17,9 @@ pub const THEME_FILE: &str = "theme.toml";
 
 /// 在多个主题目录中定位 `<name>` 的主题目录（靠前目录优先；用户目录可覆盖内置）。
 ///
-/// 命中后**不立即返回**，而是继续看后面的目录有没有同名——只为确证「这是覆盖而非
-/// 用户独有主题」并打一条日志。主题定位的全部路径（`read_meta` / `load_typed_dirs` /
-/// `theme_chain_dirs`）都经过这里，故打点放此处不会漏。措辞与 `Config::log_user_override`
-/// 一致，便于按 `用户覆盖生效` 一次 grep 出全部生效的覆盖。
+/// 命中后继续看后面的目录有没有同名，确证是覆盖时打一条日志（措辞同
+/// `Config::log_user_override`，可按 `用户覆盖生效` 一次 grep 出全部覆盖）。主题定位的全部
+/// 路径都经过这里，打点不会漏。
 pub fn find_theme_dir(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     // 名字来自 `base = "…"`（不可信主题文本）与 RPC 参数：只认普通 slug，别让 `..` /
     // 绝对路径把查找带出主题目录群。主题定位全都经过这里，一处挡住全部入口。
@@ -284,7 +283,7 @@ fn type_merged(merged: Value, name: &str) -> anyhow::Result<Theme> {
 /// 能写 `vertical` 的视图节点：候选窗自己的那一套。tooltip / status / toast / toolbar / menu
 /// 是别的窗口，不随候选窗方向换样式；写在它们下面的 `vertical` 被忽略。
 ///
-/// ⚠ 主题编辑器 `merge.ts` 的 `VERTICAL_NODES` 是同一份清单，改一边必须改另一边。
+/// 主题编辑器 `merge.ts` 的 `VERTICAL_NODES` 是同一份清单，改一边必须改另一边。
 pub const VERTICAL_NODES: [&str; 12] = [
     "window",
     "preedit_bar",
@@ -303,10 +302,8 @@ pub const VERTICAL_NODES: [&str; 12] = [
 /// 竖排变体：把 `views.<节点>.vertical` 子表深合并进该节点，其余原样。没有任何节点写
 /// `vertical` 返回 `None`（绝大多数主题，零开销）。
 ///
-/// 只认 [`VERTICAL_NODES`] 下的 `vertical`；节点里的状态补丁（selected / hover）写在
-/// `vertical` 里一并合并。合并语义同 base 链：表逐字段深合并，标量覆盖；翻页箭头同样
-/// 遵守「本层写了字符就让位继承来的图」（见 [`drop_inherited_arrow_images`]）——竖排里写
-/// `prev_char`，横排的 `prev_image` 不能把它挡死。
+/// 只认 [`VERTICAL_NODES`] 下的 `vertical`，其中的状态补丁一并合并。合并语义同 base 链；
+/// 翻页箭头同样遵守「本层写了字符就让位继承来的图」（见 [`drop_inherited_arrow_images`]）。
 fn vertical_variant(normalized: &Value) -> Option<Value> {
     let views = table_at(normalized, &["views"])?;
     if !VERTICAL_NODES.iter().any(|k| {
@@ -342,10 +339,9 @@ pub fn load_merged(themes_dir: &Path, name: &str, depth: usize) -> anyhow::Resul
 
 /// 多目录 base 深合并（base 在下、派生在上）。防御循环继承（最多 8 层）。
 ///
-/// 返回的 Value **已逐层过一遍 [`normalize_theme_for_merge`]**：视图节点都已收进 `views`、
-/// edges/radius 这类简写已展开，但 fill（background/icon/hole）与 shape 仍是人写形态 ——
-/// 那两样要等合并完才展开（理由见 `normalize_theme_for_merge` 的文档）。
-/// 跨 crate 的调用方若要完整嵌套形态，自己再跑一次 [`normalize_theme`]（幂等）。
+/// 返回的 Value 已逐层过一遍 [`normalize_theme_for_merge`]：视图节点已收进 `views`、简写已
+/// 展开，但 fill 与 shape 仍是人写形态（理由见其文档）。要完整嵌套形态，再跑一次
+/// [`normalize_theme`]（幂等）。
 pub fn load_merged_dirs(dirs: &[PathBuf], name: &str, depth: usize) -> anyhow::Result<Value> {
     load_merged_dirs_at(dirs, name, depth)
 }
@@ -375,18 +371,9 @@ fn merge_layer(
     depth: usize,
     load_base: &mut dyn FnMut(&str, usize) -> anyhow::Result<Value>,
 ) -> anyhow::Result<Value> {
-    // **归一化在合并之前，逐层各做一次**（`normalize_theme` 对已归一化的输入幂等）。
-    //
-    // 顺序反过来（先合并整条链、最后归一化一次）会坏两处，两处都静默：
-    //
-    // 1. 简写遇上部分覆盖丢值：base 写 `padding = [6, 8]`、派生写 `padding = { left = 20 }`,
-    //    合并时是「非表 vs 表」→ 整个取派生那张表 → 归一化后只剩 left, 上右下没了。
-    //    而 `_base` 里简写用得到处都是, 这条撞上的概率远比下面那条高。
-    // 2. 两种书写形态混用时整块丢表：扁平 `[item]` 与规范嵌套 `[views.item]` 在合并阶段是
-    //    两个互不相干的键, 谁也盖不住谁, 最后归一化时才被 views 表的整块替换吃掉一边 ——
-    //    而那时已经分不清哪半来自 base、哪半来自派生了。
-    //
-    // 归一化提前之后, 进 merge 的两边形态一致、简写都已展开, 深合并才是逐字段的。
+    // 归一化在合并之前逐层各做一次。先合并再归一化会静默坏两处：简写遇部分覆盖丢值
+    // （base `padding = [6, 8]` + 派生 `padding = { left = 20 }` 只剩 left）；扁平 `[item]` 与
+    // 嵌套 `[views.item]` 混用时整块丢表。提前归一化后两边形态一致，深合并才是逐字段的。
     let value = normalize_theme_for_merge(value);
 
     // base 链继承：先加载 base，再用本主题覆盖（merge）。
@@ -408,20 +395,11 @@ const ARROW_PAIRS: [(&str, &str); 2] = [("prev_char", "prev_image"), ("next_char
 
 /// 合并前：把「本主题显式写了字符、却只从 base 继承来的那张箭头图」丢掉。
 ///
-/// 同层优先级不变 —— 一个主题自己同时写了图和字符，仍是图优先（字符留作图 `ref` 解析
-/// 不出时的兜底，见 `candidate_window.rs` 的三档）。变的只是**跨层**：
+/// 同层仍是图优先（字符作图解析不出时的兜底，见 `candidate_window.rs`）；只改跨层：派生
+/// 主题写了 `prev_char = "$"`，要的就是 `$`，不该被 `_base` 继承来的 chevron 图挡死、逼作者
+/// 再写 `prev_image = { ref = "" }` 抵消。判据是「本层写没写」而不是值。
 ///
-/// `_base` 给了 chevron SVG，而派生主题写 `[footer_bar] prev_char = "$"` 时，它要的显然
-/// 是那个 `$`；让继承来的图把它挡死，作者就必须再补一行 `prev_image = { ref = "" }` 去
-/// 抵消一个自己从没写过的默认值 —— 这个动作没有人猜得到（2026-09-20 的用户反馈正是如此，
-/// 而 `_base` 那张图偏偏又是七个内置主题全都清掉、从未真正示人的一张）。
-///
-/// 判据是「本层写没写」而不是「值是什么」：显式写的压过继承来的，与 `ref = ""` 这种
-/// 显式清空并不冲突（那是本层写的，照样生效）。
-///
-/// 只看规范嵌套形态（`views.footer_bar`）：本函数跑在 merge 之前，而那时两边都已各自
-/// 归一化过（见上方 `load_merged_dirs_at` 里提前调用 `normalize_theme` 的理由），扁平
-/// 形态的 `[footer_bar]` 早已被收进 `views` 了。
+/// 只看规范嵌套形态（`views.footer_bar`）：两边在 [`merge_layer`] 里已各自归一化过。
 fn drop_inherited_arrow_images(base: &mut Value, over: &Value) {
     const PATH: [&str; 2] = ["views", "footer_bar"];
     let (Some(o), Some(b)) = (table_at(over, &PATH), table_at_mut(base, &PATH)) else {

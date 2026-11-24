@@ -31,24 +31,18 @@ const SHM_MAX: usize = MAX_SHARED_RENDER_SIZE;
 
 /// 把截图的慢活扔到后台线程。
 ///
-/// **forwarder 线程绝不能在这里阻塞**：它按序处理**全部** `UiCommand`（候选更新、主题、
-/// 工具栏…），卡住多久，输入法就有多久不响应。而截图这条路上的三件事都不快：
-///   · PNG 编码（候选窗 Retina 下上千像素宽）；
-///   · 写临时文件；
-///   · `copy_bgra_to_clipboard` 在 macOS 要 **spawn 一个 `osascript` 进程**（几十到
-///     几百毫秒）——服务进程不链接 AppKit，拿不到 NSPasteboard，只能走这条外部路。
-/// 三者叠起来实测能让候选窗肉眼可见地冻住。
+/// forwarder 线程绝不能在这里阻塞：它按序处理全部 `UiCommand`，卡住多久输入法就多久不响应。
+/// 截图要 PNG 编码、写文件，macOS 上复制到剪贴板还要 spawn `osascript`（服务进程不链接
+/// AppKit），合起来会让候选窗明显冻住。
 ///
-/// 每次截图起一个线程（而不是常驻工作线程）是刻意的：截图是用户偶发动作，频率以分钟计，
-/// 一个线程的创建成本完全淹没在上面那几十毫秒里，不值得为它引入一条队列和它的生命周期。
+/// 每次截图起一个线程而不是常驻工作线程：截图是偶发动作，不值得为它引入队列与生命周期。
 fn spawn_screenshot_work(tag: &'static str, work: impl FnOnce() + Send + 'static) {
     if let Err(e) = std::thread::Builder::new()
         .name(format!("windinput-screenshot-{tag}"))
         .spawn(work)
     {
-        // 起不了线程（资源耗尽）→ 本次截图丢弃。**不能退回同步执行**：`Builder::spawn`
-        // 已经把闭包吃掉了，这里拿不回来；何况系统连线程都起不出来时，更不该由 forwarder
-        // 线程去扛一个几百毫秒的 osascript。记一条 warn，用户会发现"截了没反应"时有据可查。
+        // 起不了线程 → 本次截图丢弃，不退回同步执行（闭包已被 `Builder::spawn` 吃掉，且不该
+        // 让 forwarder 线程去扛）。
         tracing::warn!("截图线程创建失败({tag}): {e}，本次截图已放弃");
     }
 }
@@ -62,7 +56,7 @@ pub struct Forwarder {
     suffix: String,
     /// 回协调器的事件通道（全局热键触发、右键悬停提示等）。
     ev_tx: Sender<UiEvent>,
-    /// 候选窗当前是否有帧在显示。外观类命令（主题/字号/布局…）只在**显示中**才重推帧。
+    /// 候选窗当前是否有帧在显示。外观类命令（主题/字号/布局…）只在显示中才重推帧。
     visible: bool,
     /// 状态气泡 / Toast / tooltip 的光栅浮层。
     overlays: crate::overlay_host::Overlays,
@@ -212,7 +206,7 @@ impl Panels {
 
     /// addon 的 push 连接（重）建立：此前宿主报上来的状态一律作废。新 addon（fcitx5 重启）各项
     /// 初值都是默认，与默认相同的不会再报；旧 addon 崩溃时报到一半的（按住的键、指针在面板里）
-    /// 也没人再来收尾。⚠ 以后新增「宿主上报的状态」，都要在这里复位，并配测试。
+    /// 也没人再来收尾。以后新增「宿主上报的状态」，都要在这里复位，并配测试。
     ///
     /// - 全屏 → 不全屏：addon 只在变化时报，仍全屏会补报（`FullscreenReporter::resyncAfterRestart`）。
     /// - 两块面板各补一次离开：停连发、收按下态与悬停、清「指针在面板里」。
@@ -369,7 +363,7 @@ impl Forwarder {
         self.shm.as_mut()
     }
 
-    /// 该命令是否只改**外观**而不改内容。
+    /// 该命令是否只改外观而不改内容。
     ///
     /// 这类命令在 Windows 上由窗口自己重绘，macOS 却是「渲染在服务进程、像素经 SHM 推给
     /// `.app`」——不主动重推一帧，已经显示着的候选窗就停在旧样子，直到下一次按键 / 鼠标
@@ -602,9 +596,8 @@ impl Forwarder {
             UiCommand::SetPreeditEmbedded(v) => self.win.set_preedit_embedded(v),
             UiCommand::SetCandidateFontSize(s) => self.win.set_font_size_override(s),
             // 两步顺序同 Windows 侧 manager：链首必须是刚设进去的那个字族。
-            // ⚠️ CoreText 后端只实现了回退链那一半，脚本指派尚未实现（见 coretext.rs 的
-            // `plan` 字段说明）——这里照常下发，是为了让两平台的**配置通路**一致，
-            // 补上 macOS 侧渲染时不必再改接线。
+            // CoreText 后端尚未实现脚本指派（见 coretext.rs 的 `plan` 字段），照常下发是为了让
+            // 两平台配置通路一致。
             UiCommand::SetCandidateFont {
                 family,
                 fallback,
@@ -649,7 +642,7 @@ impl Forwarder {
                 // 只入队 + 唤醒主线程；真正的 Carbon 注册在主线程做（见该模块头「线程约定」）。
                 crate::global_hotkey_macos::apply(entries, self.ev_tx.clone());
             }
-            // 「截图所有窗口」：截**我们自己渲染的**每一个可见浮窗——候选窗与各浮层的像素都在
+            // 「截图所有窗口」：截我们自己渲染的每一个可见浮窗——候选窗与各浮层的像素都在
             // 本进程（后者在各自的 SHM 段里），就地编码存盘。
             //
             // 菜单不截：菜单开着时用户正点着菜单项，而「截图所有窗口」本身就是菜单项。
@@ -657,7 +650,7 @@ impl Forwarder {
                 use wind_ipc::protocol::overlay::*;
                 let dir = std::path::PathBuf::from(&dir);
                 let ts = crate::screenshot::timestamp();
-                // 取像素要 `&self`（读候选窗当前帧 / 浮层 SHM），必须在本线程；**其余全部挪走**，
+                // 取像素要 `&self`（读候选窗当前帧 / 浮层 SHM），必须在本线程；其余全部挪走，
                 // 理由见 `spawn_screenshot_work`。
                 let candidate = self.capture_candidate();
                 let overlays = [
@@ -762,9 +755,8 @@ impl Forwarder {
             // 协调器把定位方式切到 fixed 时问「你现在在哪」，好把当前位置落盘成 custom_x/y
             // ——否则窗口会跳到上次保存（往往是 0,0）的坐标。
             //
-            // 两者都转成一次**下行询问**而不是在本进程记账：浮窗的落位在 `.app` 侧，
-            // 服务进程推下去的只是建议落点，实际位置还会被那边的屏幕钳制 / 下方放不下时上翻 /
-            // 用户本次组合内的拖动落位改掉。答案经上行 `pos.*` 回来（见 `handle_ext`）。
+            // 两者都转成一次下行询问而不是在本进程记账：实际落位在 `.app` 侧（钳制 / 上翻 /
+            // 拖动都会改掉建议落点）。答案经上行 `pos.*` 回来（见 `handle_ext`）。
             UiCommand::ReportCandidatePos => {
                 self.sink
                     .push_frame(&encode_ext(ext_kind::POS_CANDIDATE_QUERY, b""));
@@ -775,7 +767,7 @@ impl Forwarder {
             }
             // ── 软键盘面板 ──
             //
-            // 与其余浮窗相反，它**不走 SHM + `.app` 那条路**：面板由服务进程自己开窗
+            // 与其余浮窗相反，它不走 SHM + `.app` 那条路：面板由服务进程自己开窗
             // （macOS 上唯一一处），理由见 `crate::mac_panel` 模块头。这里只负责把命令
             // 从本工作线程转运到主线程——AppKit 碰不得工作线程。
             // Linux 的软键盘是 `ext_panel` 窗口壳，见下面那组 Linux 臂。
@@ -785,15 +777,10 @@ impl Forwarder {
                 current,
                 keys,
                 send_keys,
-                // 多屏摆放依据,macOS 上用不到:协调器的 `focus_monitor()` 在
-                // `#[cfg(not(target_os = "windows"))]` 下恒返回 `None`,于是
-                // `softkeyboard_placement()` 走早返回分支,这两个字段恒是 `None`。
-                // 面板位置由 `mac_panel` 自己定,不经这条路。
+                // 多屏摆放依据,macOS 上恒是 `None`(协调器 `focus_monitor()` 非 Windows 恒 `None`),
+                // 面板位置由 `mac_panel` 自己定。
                 //
-                // ⚠️ 刻意逐个写出而不用 `..`:用 `..` 的话,将来 `ShowSoftKeyboard`
-                //    再加 macOS 也该处理的字段会被**静默忽略**——而本行当初漏掉这
-                //    两个字段正是同一类事故(编译期报错才把它暴露出来)。显式列出,
-                //    下次加字段时这里会再次编译失败,强制过一遍 review。
+                // 刻意逐个写出而不用 `..`:将来加字段时这里会编译失败,不会被静默忽略。
                 anchor: _,
                 work_area: _,
             } => self.push_softkeyboard(sk::SkCmd::Show {
@@ -1365,7 +1352,7 @@ mod tests {
             no_index: false,
         }
     }
-    /// 事件通道的接收端在测试里不消费，但必须**持有**——drop 掉会让 forwarder 里的
+    /// 事件通道的接收端在测试里不消费，但必须持有，drop 掉会让 forwarder 里的
     /// `ev_tx.send` 立刻报错。故连同 Forwarder 一起返回。
     fn mk(
         cap: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -1454,9 +1441,8 @@ mod tests {
 
     /// 固定位置模式：帧坐标就是配置里的 custom_x/y，且带 FLAG_ABSOLUTE_POS。
     ///
-    /// 回归：这条路径此前被 `fixed: _` 显式丢弃——「候选窗固定位置」在 macOS 上整个是死的，
-    /// 设置里改了没有任何反应。标志位不能省：`.app` 收到普通帧会自作主张做「下方放不下就
-    /// 翻到光标上方」，固定点靠近屏幕底边时窗口会被莫名弹到顶上。
+    /// 钉住 `fixed` 不被丢弃。标志位不能省：`.app` 收到普通帧会做「下方放不下就翻到光标上方」，
+    /// 固定点靠近屏幕底边时窗口会被弹到顶上。
     #[test]
     fn fixed_position_frame_carries_absolute_flag_and_coords() {
         let cap = Arc::new(Mutex::new(Vec::new()));
@@ -3059,7 +3045,7 @@ mod tests {
             assert_eq!((m[0].margin, m[0].duration), (12, 2000));
         }
 
-        /// 复制类操作的结果反馈也走浮层（此前 Linux 上这条 Toast 被 addon 丢弃）。
+        /// 复制类操作的结果反馈也走浮层，Linux addon 才收得到。
         #[test]
         fn copy_tooltip_text_reports_empty_when_no_tip() {
             let cap = Arc::new(Mutex::new(Vec::new()));

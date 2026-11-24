@@ -2,7 +2,7 @@
 //!
 //! Windows 上直接复用 `windows` crate 的真实类型与 API；其它平台（Linux/macOS）
 //! 提供 mock 占位，使 UI 层（候选窗/工具栏/菜单）的鼠标消息处理代码能够在非
-//! Windows 平台上**编译并跑测试**。这些 mock 在非 Windows 上属于死代码——平台没有
+//! Windows 平台上编译并跑测试。这些 mock 在非 Windows 上属于死代码——平台没有
 //! Win32 消息泵，on_message 不会被触发——仅用于满足类型/链接。
 //!
 //! 真正的平台行为差异（LayeredWindow、DirectWrite 文本、剪贴板、消息循环）由各模块
@@ -26,7 +26,7 @@ mod imp {
     pub const WM_ENDSESSION: u32 = 0x0016;
 }
 
-// 下面四条 allow 同源：本模块的 mock 是**照抄 `windows` crate 的形状**的——PascalCase 函数名、
+// 下面四条 allow 同源：本模块的 mock 是照抄 `windows` crate 的形状的——PascalCase 函数名、
 // `VIRTUAL_KEY` 这类全大写类型名、`unsafe fn` 不写 `# Safety`（它不解引用任何指针）、错误类型
 // 用 `Result<_, ()>`。把它们改成「更 Rust」的写法，本模块就失去了存在的意义：调用点在两个
 // 平台上必须一字不差，否则 UI 层每个鼠标处理函数都要再分叉一次 cfg。
@@ -183,19 +183,16 @@ mod imp {
 
 pub use imp::*;
 
-/// 按**内容矩形**把窗口钳制在所在显示器内——软阴影允许溢出屏幕。
+/// 按内容矩形把窗口钳制在所在显示器内——软阴影允许溢出屏幕。
 ///
 /// 与 [`clamp_to_work_area`] 有两处刻意的差别：
 ///
-/// 1. **按内容而非窗口矩形**。软阴影画在窗口缓冲里，窗口矩形四周比可见内容大一圈
-///    （`blur=8` 的主题约 29px）。若按窗口矩形钳制，可见内容离屏幕边缘还有整整一个
-///    阴影宽度时就被拦下，用户感受是「明明还没到边就拖不过去了」。阴影是视觉修饰，
-///    溢出屏幕不会有任何问题。
-/// 2. **钳到 `rcMonitor` 而非 `rcWork`**，即允许摆到任务栏上方。候选窗是临时浮层，
-///    用户可能正需要把它挪到任务栏那条让开正文区域；工具栏是常驻的，仍应避开任务栏，
-///    故那边继续用 [`clamp_to_work_area`]。
+/// 1. 按内容而非窗口矩形：窗口矩形含软阴影，按它钳制会让内容离屏幕边还有一个阴影宽度
+///    就拖不过去。阴影溢出屏幕无妨。
+/// 2. 钳到 `rcMonitor` 而非 `rcWork`，允许摆到任务栏上方：候选窗是临时浮层，用户可能正要
+///    挪开让出正文；常驻的工具栏仍用 [`clamp_to_work_area`] 避开任务栏。
 ///
-/// 入参与返回都是**窗口**左上（含阴影），`margin` = (left, top, right, bottom) 扩边。
+/// 入参与返回都是窗口左上（含阴影），`margin` = (left, top, right, bottom) 扩边。
 // 非 Windows 下无显示器查询，除 x/y 外的参数仅 Windows 分支使用。
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn clamp_content_to_monitor(
@@ -243,15 +240,13 @@ pub fn clamp_content_to_monitor(
     (x, y)
 }
 
-/// [`clamp_content_to_monitor`] 的纯几何内核：把内容矩形钳进 `bounds`，返回**窗口**左上。
+/// [`clamp_content_to_monitor`] 的纯几何内核：把内容矩形钳进 `bounds`，返回窗口左上。
 ///
-/// 抽出来是为了可测——真正要锁住的性质是「内容贴边时窗口左上可以为负」，即阴影被允许
-/// 溢出屏幕。旧的按窗口矩形钳制永远算不出负值，那正是「拖不到边」的直接原因。
+/// 抽出来是为了可测，要锁住的性质是「内容贴边时窗口左上可以为负」（阴影允许溢出屏幕）。
 ///
 /// `bounds` = (left, top, right, bottom)；`content` = (宽, 高)。
 ///
-/// 非 Windows 下唯一的调用者是本模块的测试（生产调用点在 `cfg(windows)` 内），
-/// 故 lib 单独编译时它无人使用——测试本身仍跨平台跑，不能删。
+/// 非 Windows 下只有测试调用它（生产调用点在 `cfg(windows)` 内），不能删。
 #[cfg_attr(not(windows), allow(dead_code))]
 fn clamp_content_in_bounds(
     x: i32,
@@ -272,9 +267,8 @@ fn clamp_content_in_bounds(
 
 /// [`clamp_to_work_area`] 的纯几何内核：把 `w×h` 的窗口钳进 `bounds`，返回窗口左上。
 ///
-/// `bounds` = 工作区 (left, top, right, bottom)。抽出来是为了可测——真正要锁住的性质是
-/// **钳制有损且不可逆**：拿错误的 `w/h` 钳一次，正确坐标就再也回不来了（见本模块测试
-/// `stale_size_destroys_a_flush_corner_position`）。
+/// `bounds` = 工作区 (left, top, right, bottom)。钳制有损且不可逆：拿错误的 `w/h` 钳一次，
+/// 正确坐标就再也回不来了（测试 `stale_size_destroys_a_flush_corner_position`）。
 ///
 /// 也是状态气泡锚点落点（`status_tip::place_anchor`）的夹回步骤。
 pub(crate) fn clamp_rect_in_bounds(
@@ -308,10 +302,8 @@ pub(crate) fn clamp_rect_in_bounds(
 /// 用于拖动窗口时防止拖出桌面/拖入任务栏，以及切换显示器 / 远程连接后旧坐标落到屏外时拉回。
 /// 多显示器下 `MonitorFromPoint(NEAREST)` 会随光标过界切到目标显示器。
 ///
-/// ⚠️ **`w`/`h` 必须是当前真实尺寸**。本函数无从校验传入的尺寸是否属于目标屏，而错误尺寸
-/// 会把本来合法的坐标钳走且**无法复原**——跨 DPI 换屏时若用上一块屏的尺寸钳新屏的记忆
-/// 位置，贴边位置就会被永久拉离边缘。调用方须确保此刻已按目标屏排版（见
-/// `Toolbar::set_pos` 的文档）。
+/// `w`/`h` 必须是当前真实尺寸：错误尺寸会把合法坐标钳走且无法复原（跨 DPI 换屏时用上一块屏
+/// 的尺寸，贴边位置会被永久拉离边缘）。调用方须确保已按目标屏排版（见 `Toolbar::set_pos`）。
 // 非 Windows 下无显示器工作区查询，w/h 仅 Windows 分支使用。
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn clamp_to_work_area(x: i32, y: i32, w: u32, h: u32) -> (i32, i32) {
@@ -361,12 +353,10 @@ pub fn work_area_at(x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
     None
 }
 
-/// 给定屏幕坐标所在显示器的工作区宽度（设备 px），供候选窗内容宽度的「屏幕安全上限」使用——
-/// 防止异常长候选把窗口撑出屏幕外。与 [`clamp_to_work_area`] 同源（同一套 `MonitorFromPoint` +
-/// `rcWork` 查询），但那两个函数钳的是**窗口位置**，本函数给的是**宽度**上限，用途不同故不合并。
+/// 给定屏幕坐标所在显示器的工作区宽度（设备 px），作候选窗内容宽度的屏幕安全上限。
+/// 与 [`clamp_to_work_area`] 同源，但给的是宽度上限而非位置。
 ///
-/// 非 Windows 下无显示器查询能力，返回 `None`——调用方需自行给一个保守的兜底值（当前唯一调用点
-/// [`CandidateWindow::screen_safety_max_width_px`] 已处理）。
+/// 非 Windows 返回 `None`，调用方自给兜底值（见 [`CandidateWindow::screen_safety_max_width_px`]）。
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn monitor_work_area_width_at(x: i32, y: i32) -> Option<u32> {
     #[cfg(windows)]
@@ -390,7 +380,7 @@ pub fn monitor_work_area_width_at(x: i32, y: i32) -> Option<u32> {
     None
 }
 
-/// 同 [`monitor_work_area_width_at`]，取工作区**高度**。
+/// 同 [`monitor_work_area_width_at`]，取工作区高度。
 ///
 /// 旋转态的候选列沿屏幕纵向延伸，其长度上限要问高度而不是宽度——拿宽度当上限，
 /// 长候选会长到屏幕外，而那道钳制恒生效正是为了防这件事。
@@ -421,7 +411,7 @@ pub fn monitor_work_area_height_at(x: i32, y: i32) -> Option<u32> {
 mod clamp_rect_tests {
     use super::clamp_rect_in_bounds;
 
-    /// 真机日志（2026-08-10）里的两块屏：右屏 100%、左屏约 133%，工具栏纵向。
+    /// 两块屏：右屏 100%、左屏约 133%，工具栏纵向。
     /// 右屏工作区右下 (2560, 1368)，纵条 48×212，用户拖到贴死右下角 → 存 (2512, 1156)。
     /// 左屏工作区右下 (0, 1704)，同一条在该屏 DPI 下是 64×282。
     const RIGHT_SCREEN: (i32, i32, i32, i32) = (0, 0, 2560, 1368);
@@ -429,7 +419,7 @@ mod clamp_rect_tests {
     const SIZE_ON_RIGHT: (u32, u32) = (48, 212);
     const SIZE_ON_LEFT: (u32, u32) = (64, 282);
 
-    /// 用**目标屏**的尺寸钳贴边位置：恰好不越界，原样保留。
+    /// 用目标屏的尺寸钳贴边位置：恰好不越界，原样保留。
     /// 边界是闭合的 —— `x + w == right` 不算越界，否则贴边永远保不住。
     #[test]
     fn flush_corner_survives_clamp_with_correct_size() {
@@ -443,12 +433,9 @@ mod clamp_rect_tests {
         assert_eq!(got, FLUSH_POS, "贴边位置不该被钳走");
     }
 
-    /// 回归：用**上一块屏**的尺寸钳，会把贴边位置永久拉离边缘。
-    ///
-    /// 这是「从左屏切回右屏后位置不再贴边」的算术本体：`2512+64=2576 > 2560` → 2496；
-    /// `1156+282=1438 > 1368` → 1086。左移 16、上移 70，与用户实测一致。
-    /// 关键在于**结果会被写回记忆位置**，而钳制不可逆——随后即便用正确尺寸重钳，
-    /// (2496,1086) 也已不越界，原值再也回不来。故调用方必须保证尺寸属于目标屏。
+    /// 用上一块屏的尺寸钳，会把贴边位置永久拉离边缘：`2512+64 > 2560` → 2496，
+    /// `1156+282 > 1368` → 1086。结果写回记忆位置后用正确尺寸重钳也回不来，故调用方必须
+    /// 保证尺寸属于目标屏。
     #[test]
     fn stale_size_destroys_a_flush_corner_position() {
         let damaged = clamp_rect_in_bounds(
@@ -491,8 +478,7 @@ mod clamp_tests {
     const CONTENT: (i32, i32) = (420, 44);
     const SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
 
-    /// 内容贴左边缘时，**窗口左上必须为负**——阴影溢出屏幕正是本次修复的要点。
-    /// 按窗口矩形钳制的旧实现永远算不出负值，内容会被卡在离屏幕边 29px 处。
+    /// 内容贴左边缘时，窗口左上必须为负（阴影溢出屏幕），否则内容会被卡在离屏幕边 29px 处。
     #[test]
     fn content_can_touch_screen_edge_with_shadow_overflowing() {
         // 试图拖到窗口左上为 (-200,-200)（远超边界）
@@ -535,7 +521,7 @@ mod clamp_tests {
         assert_eq!(wy, 500, "垂直方向未越界，保持不动");
     }
 
-    /// 内容比可用区域还大时，优先保证**左上角**可见（否则窗口会被推到区域外）。
+    /// 内容比可用区域还大时，优先保证左上角可见（否则窗口会被推到区域外）。
     /// 取 300×30，使 420×44 的内容在两个方向都放不下。
     #[test]
     fn oversized_content_keeps_top_left_visible() {

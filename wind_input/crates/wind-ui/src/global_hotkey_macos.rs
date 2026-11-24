@@ -5,36 +5,23 @@
 //!
 //! # 为什么是 Carbon，不是 CGEventTap / NSEvent 全局监听
 //!
-//! 后两者都要「辅助功能」(Accessibility) 授权——ad-hoc 签名重部署时 cdhash 一变旧授权就
-//! 失效（`KeySynthesizer` 已经踩过这个坑），而全局热键的语义是「本输入法没激活时也得生效」，
-//! 一旦授权掉了就是静默失灵。且那两条路要接管全局按键流，为了几个组合键去过一遍所有按键，
-//! 量级不对。Carbon 热键免授权，只在命中组合时回调。
+//! 后两者要「辅助功能」授权，ad-hoc 签名重部署时 cdhash 一变授权即失效，全局热键会静默失灵；
+//! 且要接管全局按键流。Carbon 热键免授权，只在命中组合时回调。
 //!
 //! # 三个前提，缺一条都表现为「注册成功但从不触发」
 //!
-//! 这条路上有三个坑，**共同点是返回码全部正常**——`InstallEventHandler` 与
-//! `RegisterEventHotKey` 一律回 `noErr`，日志里写着「N/N 条生效」，按下去却毫无反应。
-//! 别把其中任何一条当成可以"顺手"简化的样板代码。
+//! 返回码全部正常（`noErr`、日志「N/N 条生效」），按下去却毫无反应。别当成可顺手简化的样板。
 //!
-//! 1. **进程要是 app**。服务是 LaunchAgent 拉起的裸可执行文件，默认无窗口服务器连接，
-//!    收不到经窗口服务器投递的事件。故 [`run_main_loop`] 开头先
-//!    `TransformProcessType(kProcessTransformToUIElementApplication)`。
+//! 1. 进程要是 app：LaunchAgent 拉起的裸可执行文件没有窗口服务器连接。故 [`run_main_loop`]
+//!    开头先 `TransformProcessType(kProcessTransformToUIElementApplication)`。
 //!    判据：不调时进程不出现在 `lsappinfo list` 里。
-//! 2. **要跑会派发主事件队列的循环**。事件先落进 Carbon 主事件队列，需有人
-//!    `ReceiveNextEvent` 取出再派发。`[NSApp run]`（以及已弃用的
-//!    `RunApplicationEventLoop`）做这件事，裸 `CFRunLoopRun` **不做**。
-//!
-//!    本函数跑的是 **`[NSApp run]`**。2026-09-05 从 `RunApplicationEventLoop` 换过来，
-//!    换的理由不在热键这边而在软键盘：Carbon 那个循环**从不让 NSApplication 跑起来**
-//!    （实测 `NSApp.isRunning == false`），于是没有人调 `NSApp.sendEvent:`，服务进程
-//!    自绘的 NSPanel 一个鼠标事件都收不到——窗口画得出来、CFRunLoop 的 source 与 timer
-//!    也照常转，唯独点不动。两条循环对**热键**是等价的，判据见
-//!    `cargo run -p wind-ui --example mac_panel_smoke`：它往 Carbon 主事件队列投一个
-//!    `kEventHotKeyPressed`，确认 handler 在新循环下仍被派发。
-//! 3. **注册要在主线程**。热键事件只投递到主线程的 Carbon 事件队列。故
-//!    **forwarder 线程**调 [`apply`] 时只把热键表塞进 `PENDING` 并唤醒主线程，真正的
-//!    `RegisterEventHotKey` / `UnregisterEventHotKey` 一律在主线程的 perform 回调里执行。
-//!    放在 forwarder 线程同样能编过，症状是热键**时灵时不灵**——比彻底不灵更难查。
+//! 2. 要跑会派发主事件队列的循环：`[NSApp run]`（或已弃用的 `RunApplicationEventLoop`）会
+//!    `ReceiveNextEvent` 取出再派发，裸 `CFRunLoopRun` 不做。本模块跑 `[NSApp run]`：Carbon
+//!    那个循环从不让 NSApplication 跑起来，服务自绘的 NSPanel 会收不到鼠标事件。两者对热键
+//!    等价，回归门是 `cargo run -p wind-ui --example mac_panel_smoke`。
+//! 3. 注册要在主线程：forwarder 线程调 [`apply`] 只把热键表塞进 `PENDING` 并唤醒主线程，
+//!    `RegisterEventHotKey` / `UnregisterEventHotKey` 一律在主线程 perform 回调里执行。
+//!    放在 forwarder 线程症状是热键时灵时不灵。
 //!
 //! 服务的 `main` 在 macOS 上最后停在 [`run_main_loop`]，取代原先的 `restart_rx.recv()` 阻塞。
 
@@ -149,7 +136,7 @@ struct ProcessSerialNumber {
 /// `kCurrentProcess`（`{0, 2}`）。
 const CURRENT_PROCESS: ProcessSerialNumber = ProcessSerialNumber { high: 0, low: 2 };
 /// `kProcessTransformToUIElementApplication`：提升为「UI 元素应用」——有窗口服务器连接，
-/// 但**不进 Dock、不占菜单栏**。
+/// 但不进 Dock、不占菜单栏。
 const TRANSFORM_TO_UI_ELEMENT: u32 = 4;
 
 // ── Carbon 修饰键掩码（Events.h）──
@@ -166,9 +153,8 @@ const MOD_WIN: u32 = 0x0008;
 
 /// Win32 修饰位 → Carbon 修饰掩码。
 ///
-/// 按物理键直译：Alt→Option、Win→Command。**不做"Ctrl 自动换 Command"的贴心翻译**——
-/// 配置里写的是哪个键就注册哪个键，否则用户在设置界面看到的与实际生效的不是一回事，
-/// 且与按键注入侧（`key_inject` 的 `win`→Command 映射）口径分叉。
+/// 按物理键直译：Alt→Option、Win→Command。不做「Ctrl 自动换 Command」：设置界面看到的要与
+/// 实际生效的一致，也与按键注入侧（`key_inject` 的 `win`→Command）口径相同。
 fn win32_mods_to_carbon(m: u32) -> u32 {
     let mut out = 0;
     if m & MOD_ALT != 0 {
@@ -244,8 +230,8 @@ pub fn apply(entries: Vec<GlobalHotkeyEntry>, ev_tx: Sender<UiEvent>) {
 
 /// 请求主循环退出（服务重启路径）。可从任意线程调用。
 ///
-/// `QuitApplicationEventLoop` 要在**主线程**调，故这里只置标志 + 叫醒主线程，
-/// 真正的退出在 [`wake_perform`] 里做（与热键注册同一套「入队 + 唤醒」的约定）。
+/// [`stop_app`] 要在主线程调，故这里只置标志 + 叫醒主线程，真正的退出在 [`wake_perform`]
+/// 里做（与热键注册同一套「入队 + 唤醒」的约定）。
 pub fn stop_main_loop() {
     SHOULD_EXIT.store(true, Ordering::SeqCst);
     if let Some(src) = WAKE_SOURCE.get() {
@@ -260,21 +246,15 @@ pub fn stop_main_loop() {
     }
 }
 
-/// 主线程入口：装 Carbon handler、建唤醒源，然后跑 CFRunLoop 直到 [`stop_main_loop`]。
+/// 主线程入口：装 Carbon handler、建唤醒源，然后跑 `[NSApp run]` 直到 [`stop_main_loop`]。
 ///
-/// **必须在进程主线程调用**（见模块头「线程约定」）。
+/// 必须在进程主线程调用（见模块头「三个前提」）。
 pub fn run_main_loop() {
     unsafe {
         // 0. 把本进程提升为「UI 元素应用」。
         //
-        // ⚠️ **这一步不能省，且它的缺失极难从返回码上看出来**：服务是 LaunchAgent 拉起的
-        // 裸可执行文件，默认是后台进程，没有窗口服务器连接。此时 `InstallEventHandler` 与
-        // `RegisterEventHotKey` **都照常返回 noErr**（日志里赫然写着「N/N 条生效」），
-        // 但热键事件经由窗口服务器投递到应用事件队列，而这个进程根本没有那个队列——
-        // 回调于是一次也不会触发。
-        //
-        // 实测判据：不做本调用时进程不出现在 `lsappinfo list` 里，做了才出现。
-        // UIElement 形态不进 Dock、不占菜单栏，对一个输入法服务没有可见副作用。
+        // 不能省，缺了返回码也看不出来（见模块头前提 1）。UIElement 形态不进 Dock、不占菜单栏，
+        // 对输入法服务没有可见副作用。
         let st = TransformProcessType(&CURRENT_PROCESS, TRANSFORM_TO_UI_ELEMENT);
         if st != 0 {
             tracing::warn!("全局热键: TransformProcessType 失败 OSStatus={st}，热键可能收不到事件");
@@ -301,10 +281,8 @@ pub fn run_main_loop() {
 
         // 2. 建唤醒源，挂到主 run loop 的 common modes。
         //
-        // ⚠️ 逐字段构造，**不能**用 `mem::zeroed()`：`perform` 是非空函数指针
-        // （不是 `Option<fn>`），全零对它是非法值——真机上会在启动时
-        // 「attempted to zero-initialize type ... which is invalid」直接 abort，
-        // 且 `cargo check`/`cargo test` 都看不出来（只在跑到这一行才炸）。
+        // 逐字段构造，不能用 `mem::zeroed()`：`perform` 是非空函数指针，全零是非法值，
+        // 运行到这里会直接 abort，编译与测试都看不出来。
         let mut ctx = CFRunLoopSourceContext {
             version: 0 as CFIndex,
             info: std::ptr::null_mut(),
@@ -329,40 +307,26 @@ pub fn run_main_loop() {
         //    先 drain 一次，避免那批热键要等到下一次配置变更才生效。
         drain_pending();
 
-        // 4. 跑 **Carbon 应用事件循环**，而不是裸 CFRunLoop。
+        // 4. 下面跑 `[NSApp run]` 而不是裸 CFRunLoop（见模块头前提 2）。它内部照常驱动
+        // CFRunLoop，唤醒源与 system_theme_macos 的通知观察者不受影响。
         //
-        // ⚠️ 这是第二个「看返回码完全看不出来」的坑，与上面的 TransformProcessType 叠在一起：
-        // 热键事件先落进 Carbon 的**主事件队列**，要有人调 `ReceiveNextEvent` 把它取出来再
-        // `SendEventToEventTarget` 派发给 handler。`RunApplicationEventLoop`（以及 AppKit 的
-        // `[NSApp run]`）做的正是这件事；裸 `CFRunLoopRun`/`CFRunLoopRunInMode` **不做**——
-        // 于是注册成功、handler 装上、事件也进了队列，但永远没人派发，回调一次都不触发。
-        //
-        // 它内部照常驱动 CFRunLoop，故上面建的唤醒源、以及 system_theme_macos 的分发通知
-        // 观察者都不受影响（已实测：RunApplicationEventLoop 里 CFRunLoopTimer 正常触发）。
-        // 进循环**之前**再查一次退出标志，否则「重启服务」有几率永远等不到。
-        //
-        // 竞态窗口：等重启信号的辅助线程比本函数先起跑。若信号在 WAKE_SOURCE 建好之前就到，
-        // `stop_main_loop` 拿不到唤醒源（或对一个还没跑起来的循环调 CFRunLoopStop），那一下
-        // 就是空操作；而 SHOULD_EXIT 已经是 true，此后再没有人会去戳唤醒源 —— 循环起来后
-        // 无事可做地空转，重启命令挂死。这里补一次检查即可闭合窗口。
+        // 进循环之前再查一次退出标志：重启信号若在 WAKE_SOURCE 建好之前到达，`stop_main_loop`
+        // 那一下是空操作，此后再没人戳唤醒源，重启命令会挂死。
         if SHOULD_EXIT.load(Ordering::SeqCst) {
             tracing::info!("全局热键: 进主循环前已收到退出请求，直接返回");
             return;
         }
         tracing::info!("全局热键: 主线程 AppKit 事件循环启动");
     }
-    // ⚠️ 在 `unsafe` 块**之外**跑：`NSApp.run()` 一去不回（直到 stop），把它留在上面那个
+    // 在 `unsafe` 块之外跑：`NSApp.run()` 一去不回（直到 stop），把它留在上面那个
     // 大 unsafe 块里会让「哪些语句是 unsafe 的」失去意义。
     crate::mac_panel::ensure_app().run();
     tracing::info!("全局热键: 主线程 AppKit 事件循环退出");
 }
 
-/// 往 Carbon 主事件队列投一个 `kEventHotKeyPressed`，用于**验证事件循环仍在派发**。
+/// 往 Carbon 主事件队列投一个 `kEventHotKeyPressed`，用于验证事件循环仍在派发。
 ///
-/// ⚠️ 它不模拟按键，只把事件塞进队列——这正是要测的那一环：有没有人
-/// `ReceiveNextEvent` + `SendEventToEventTarget`。用它而不是合成真实按键，是因为
-/// 后者要「辅助功能」授权，非交互会话拿不到，实测**任何**循环下都得到「没反应」，
-/// 是个假阴性（`CGEventPost` 那条路已经踩过）。
+/// 不合成真实按键：那要「辅助功能」授权，非交互会话拿不到，会假阴性。
 ///
 /// 仅供 `examples/mac_panel_smoke` 调用。
 #[doc(hidden)]
@@ -409,12 +373,10 @@ extern "C" fn wake_perform(_info: *const c_void) {
     unsafe { drain_pending() };
 }
 
-/// 结束 `[NSApp run]`。**须在主线程调用**（本文件的两个调用点都在 perform 回调里）。
+/// 结束 `[NSApp run]`。须在主线程调用（两个调用点都在 perform 回调里）。
 ///
-/// ⚠️ 只调 `stop:` 是不够的：它设的是一个标志，**要等下一个事件处理完**才真正退出循环。
-/// 服务空闲时可能很久没有事件，于是「重启服务」会挂在这里——与换循环之前
-/// `QuitApplicationEventLoop` 的即时语义不同。补投一个 ApplicationDefined 事件把循环
-/// 推进一轮，标志才被读到。
+/// 只调 `stop:` 不够：它设的标志要等下一个事件处理完才生效，服务空闲时「重启服务」会挂住。
+/// 补投一个 ApplicationDefined 事件把循环推进一轮。
 fn stop_app() {
     use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
     use objc2_foundation::NSPoint;
@@ -440,7 +402,7 @@ fn stop_app() {
     }
 }
 
-/// 应用 `PENDING` 里的热键表：先撤全部旧的，再注册新的。**只在主线程调用**。
+/// 应用 `PENDING` 里的热键表：先撤全部旧的，再注册新的。只在主线程调用。
 unsafe fn drain_pending() {
     let pending = {
         let mut guard = match PENDING.lock() {
@@ -454,7 +416,7 @@ unsafe fn drain_pending() {
         return;
     };
 
-    // 顺带在此装系统明暗观察者（幂等）。分发通知投递到**添加观察者那个线程**的 run loop，
+    // 顺带在此装系统明暗观察者（幂等）。分发通知投递到添加观察者那个线程的 run loop，
     // 而本函数是唯一一处「已在主线程、又拿得到 ev_tx」的地方：协调器构造期必定 sync 一次
     // 热键表（空表也下发），所以这里必然会被走到。
     crate::system_theme_macos::ensure_installed(ev_tx.clone());

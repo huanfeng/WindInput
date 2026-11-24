@@ -1,4 +1,4 @@
-//! 短语的**逐行文本**分发格式（聊天窗口即贴即装）。
+//! 短语的逐行文本分发格式（聊天窗口即贴即装）。
 //!
 //! ```text
 //! wind:p1 我的直通车
@@ -6,26 +6,17 @@
 //! zd $CC("知典 {sub(reverse(last(1)), 1, 1)}", proc.run("D:\\知典\\知典.exe", "--query", "{...}"))
 //! ```
 //!
-//! **行内零解析**是这个格式的全部要点。短语正文可以是 cmdbar 命令，里面有引号、括号、
-//! 逗号、花括号和反斜杠——任何行内分隔符方案都会被它打穿，而叠一层转义会直接改坏
-//! cmdbar 语法（`wdict::escape_text_field` 对命令类短语刻意不转义 `\` 就是同一个原因）。
-//! 所以这里只认两个位置：**行首到第一个空白**是 code，**其余到行尾**原样是 text。
+//! 行内零解析：正文可以是 cmdbar 命令，含引号、括号、逗号和反斜杠，任何行内分隔符都会
+//! 被打穿，叠一层转义又会改坏 cmdbar 语法。所以只认行首到第一个空白为 code，其余到行尾
+//! 原样为 text。
 //!
-//! ## 反斜杠一律写两个
+//! 反斜杠一律写两个（`\\` 即字面 `\`）：设置页、方案词库、wdict、本格式四条路径都经同一个
+//! `unescape_text_field` 落库，写法通用。单反斜杠遇未知转义会原样保留，看似能用，但碰上
+//! `\n` `\t` 就静默损坏路径。回归测试见 `wind-webdata` 的
+//! `phrase_text_escape_domain_matches_manual_add`，权威表述在用户文档 `guides/command-bar.mdx#backslash`。
 //!
-//! `\\` 表示一个字面 `\`，UNC 路径开头因此是四个（`\\\\nas\\share`）。这**不是本格式的新
-//! 规定，恰恰是它没有引入新规定**：设置页输入框、方案词库文件、wdict 备份文件、本格式
-//! 四条路径都经同一个 `unescape_text_field` 落库，用户在任一处学到的写法照搬即可，
-//! 不用换算。回归测试见 `wind-webdata` 的 `phrase_text_escape_domain_matches_manual_add`。
-//!
-//! 之所以要一律写两个而不是「看情况」：单反斜杠**不报错**——cmdbar lexer 对未知转义
-//! （`\我`、`\x`）原样保留，于是 `D:\我的文档` 恰好能用，让人以为单个没问题；直到路径里
-//! 出现 `\notes` / `\tools`，`\n` `\t` 当场变成换行与制表符，路径静默损坏，且失败点在
-//! 触发短语时而不是导入时。用户文档 `guides/command-bar.mdx#backslash` 是权威表述。
-//!
-//! 与 [`crate::wdict`] 的分工：wdict 是**备份/整机迁移**格式（TSV 多段，带 weight /
-//! position / enabled / 词频 / 候选调整），本格式是**分发**格式，只承载内容三元组里的
-//! `code` 与 `text`。position 刻意不进格式——照抄分发者的位置会打乱接收者的短语顺序。
+//! 与 [`crate::wdict`] 的分工：wdict 是备份/整机迁移格式，本格式是分发格式，只承载
+//! `code` 与 `text`。position 刻意不进格式，照抄会打乱接收者的短语顺序。
 
 use wind_utils::text::normalize_input;
 
@@ -86,12 +77,11 @@ pub struct PhraseTextDoc {
     /// 首行标记之后的可选标题，无则空串。
     pub title: String,
     pub entries: Vec<PhraseTextEntry>,
-    /// 跳过的行。**不是致命错误**——预览如实列出，用户自行判断是不是要的。
+    /// 跳过的行。不是致命错误，预览如实列出，用户自行判断是不是要的。
     pub problems: Vec<PhraseTextProblem>,
 }
 
-/// 这段文本是否带本格式的标记。用于导入侦测分派：**前缀匹配零歧义，应当先于
-/// TOML 系（信封 / 配置片段）判定**，判不中再回落原有的侦测链。
+/// 这段文本是否带本格式的标记。前缀匹配零歧义，导入侦测应先于 TOML 系（信封 / 配置片段）判定。
 pub fn is_phrase_text(text: &str) -> bool {
     let normalized = normalize_input(text);
     let text = normalized.as_ref();
@@ -100,9 +90,8 @@ pub fn is_phrase_text(text: &str) -> bool {
 
 /// 解析逐行短语文本。
 ///
-/// 返回 `Err` 只在**整段不可用**时：没有标记、版本过高。个别行的毛病进
-/// `problems`，不牵连其余条目——群聊里粘贴掉一行格式是常态，为一行拒绝整段
-/// 会让用户无从下手。
+/// 只在整段不可用（无标记、版本过高）时返回 `Err`；个别行的毛病进 `problems`，
+/// 不牵连其余条目。
 pub fn parse_phrase_text(text: &str) -> Result<PhraseTextDoc, String> {
     let normalized = normalize_input(text);
     let text = normalized.as_ref();
@@ -172,7 +161,7 @@ pub fn parse_phrase_text(text: &str) -> Result<PhraseTextDoc, String> {
     Ok(doc)
 }
 
-/// 拆一行为 `(code, text)`。**只认第一个空白**，其后原样。
+/// 拆一行为 `(code, text)`。只认第一个空白，其后原样。
 fn split_entry(line: &str) -> Result<(String, String), ProblemReason> {
     let Some(pos) = line.find(char::is_whitespace) else {
         return Err(ProblemReason::MissingSeparator);
@@ -205,10 +194,9 @@ fn first_content_line(text: &str) -> Option<&str> {
 /// 一条短语的静态检查结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryCheck {
-    /// 疑似笔误（路径里的反斜杠写少了）。**不阻止导入**，只在预览里提一句。
+    /// 疑似笔误（路径里的反斜杠写少了）。不阻止导入，只在预览里提一句。
     pub hints: Vec<wind_cmdbar::Hint>,
-    /// cmdbar 语法错误。非 `None` 的条目**一律不可导入**——语法坏掉的短语装进去
-    /// 只会在触发时失败，而失败点离导入很远，用户无从关联。
+    /// cmdbar 语法错误。非 `None` 的条目不可导入：否则要到触发时才失败，用户无从关联。
     pub error: Option<String>,
 }
 
@@ -220,12 +208,9 @@ impl EntryCheck {
 
 /// 逐条做静态检查。
 ///
-/// ⚠️ 传入的必须是**存储域**文本（调用方已过 `unescape_text_field`）——运行时 cmdbar
-/// 拿到的就是库里那一份，拿显示域文本去查等于查了另一个字符串。
+/// 传入的必须是存储域文本（已过 `unescape_text_field`），即运行时 cmdbar 拿到的那一份。
 ///
-/// **只查笔误与语法，不判断「危不危险」**：命令直通车本来就是短语的主要用途，而短语
-/// 不会自行执行——要触发得先打出编码、再从候选里选中。把常态当异常来设门槛，只会让
-/// 每次导入都多两步无意义的确认。
+/// 只查笔误与语法，不判断「危不危险」：命令本是短语的主要用途，且要打出编码并选中才会触发。
 pub fn check_entries(texts: &[String]) -> Vec<EntryCheck> {
     texts
         .iter()

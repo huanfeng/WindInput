@@ -94,16 +94,12 @@ pub(crate) fn split_key(key: &str) -> Option<(&str, &str, &str)> {
 
 /// value: 定长 24 字节 —— `weight i32 | count u32 | created_at i64 | boundary u64`
 ///
-/// v1 为 16 字节（无 boundary）。**惰性升级、无需 migration**：`dec_val` 按实际长度取值，
-/// 旧的 16B 记录读出 boundary=0（无边界信息，消费方降级回 DAG），下次写入时自然补齐为 24B。
+/// v1 为 16 字节（无 boundary），惰性升级：`dec_val` 按实际长度取值，旧记录读出 boundary=0
+/// （消费方降级回 DAG），下次写入补齐。
 ///
-/// ⚠️ **凡是写 `USER_WORDS` 表的路径一律不得用它**：写出的 24B 记录不含 `order`，会把该
-/// 词条既有的入库序号抹成「无」，于是它跳到该 code 下所有词之前 —— 且只在「用过一阵子」
-/// 后显形。本函数只给 `TEMP_WORDS`（临时词库本就没有入库序号）用。
-///
-/// ⚠️ **别按文件名去数写入点**：`temp_words.rs::promote_temp_word` 写的就是 `USER_WORDS`
-/// （晋升住在临时词模块里）。本次改动第一版正是漏了它 —— 而那处注释早写着同样的警告，
-/// 上一次栽的是简拼索引。
+/// 写 `USER_WORDS` 表的路径一律不得用它：24B 记录不含 `order`，会把入库序号抹成「无」，
+/// 该词跳到同 code 所有词之前。本函数只给 `TEMP_WORDS` 用。注意 `temp_words.rs::promote_temp_word`
+/// 写的也是 `USER_WORDS`，别按文件名去数写入点。
 pub(crate) fn enc_val(weight: i32, count: u32, created_at: i64, boundary: u64) -> [u8; 24] {
     let mut b = [0u8; 24];
     b[0..4].copy_from_slice(&weight.to_le_bytes());
@@ -115,24 +111,13 @@ pub(crate) fn enc_val(weight: i32, count: u32, created_at: i64, boundary: u64) -
 
 /// value(v3): 定长 28 字节 —— `weight i32 | count u32 | created_at i64 | boundary u64 | order u32`
 ///
-/// `order` 是**入库先后序号**，由 [`take_word_orders`] 统一发号。同一个 code 下的多条
-/// 词条等权时按它升序排，于是「导入文件里的先后」得以保留。
+/// `order` 是入库先后序号，由 [`take_word_orders`] 统一发号。同 code 词条等权时按它升序排，
+/// 保留导入文件里的先后（与 dict 侧二进制格式的 `order` 对齐）；没有它，`better()` 会退化成
+/// `code → text` 字典序，迁来的词序就丢了。
 ///
-/// # 为什么需要它（t80）
-///
-/// dict 侧的二进制格式本就带 `order u32`，`RankKey` 拿它做 weight 之后的二级键，所以文本
-/// 码表不写权重时，同码词条按**词库出现顺序**出。wdict 这边此前没有任何顺序字段：
-/// `record_to_candidate` 造候选时 `natural_order` 取 `Default`（恒 0），全部打平，`better()`
-/// 退化到按 `code → text` 字典序 —— 从别的平台迁词库过来，原有词序就这么丢了。
-///
-/// # 版本沿革与惰性升级
-///
-/// v1=16B（无 boundary）→ v2=24B → v3=28B（追加 order）。[`dec_val_ordered`] 按**实际长度**
-/// 取值，读不到的字段取 0，下次写入自然补齐 —— 与 v1→v2 那次同一条路，不需要 migration。
-/// `order = 0` 的语义是「没有序号」（v1/v2 旧库记录）。它**不做特殊处理**，原样进
-/// `Candidate::natural_order` 参与升序比较 —— 于是旧记录彼此保持现状（全 0、打平，
-/// 由 `better()` 的后续键 `code → text` 决定），新词（order ≥ 1）接在它们后面。
-/// 这是刻意选的最小改变：让旧记录改沉到队尾同样自洽，但会平白挪动所有老用户的既有词序。
+/// v1=16B → v2=24B → v3=28B，[`dec_val_ordered`] 按实际长度取值，缺的字段取 0，免 migration。
+/// `order = 0`（旧记录）不做特殊处理，原样参与升序比较：旧记录彼此保持现状，新词接在后面。
+/// 让旧记录沉到队尾同样自洽，但会挪动老用户的既有词序，故不取。
 pub(crate) fn enc_val_ordered(
     weight: i32,
     count: u32,
@@ -159,9 +144,8 @@ pub(crate) fn dec_val(b: &[u8]) -> Option<(i32, u32, i64, u64)> {
 
 /// 解码 value → (weight, count, created_at, boundary, order)
 ///
-/// 长度守卫刻意宽松（`< 16` 而非 `!= 28`）：v1 的 16B 记录仍能解出前三项，v2 的 24B 记录
-/// 再多解出 boundary。直接切 `b[16..24]` / `b[24..28]` 会在旧记录上越界，故必须按长度分支
-/// ——这是惰性升级免 migration 的前提，v1→v2 那次就是这么过来的。
+/// 长度守卫刻意宽松（`< 16` 而非 `!= 28`）：旧记录按长度分支解出能解的字段，直接切
+/// `b[16..24]` / `b[24..28]` 会越界。这是惰性升级免 migration 的前提。
 pub(crate) fn dec_val_ordered(b: &[u8]) -> Option<(i32, u32, i64, u64, u32)> {
     if b.len() < 16 {
         return None;
@@ -593,18 +577,15 @@ impl Store {
 
     /// 收集某方案全部用户词为 wdict WordIo 行(code/text/weight/count)。
     ///
-    /// code 列输出**带空格的音节码**（`ni hao`），边界随之流出——此前导出的是扁平码，
-    /// 边界在文本里无处安放，于是「导出→清空→导入」一轮就把 boundary 全清零
-    /// （备份还原正是这条路径）。见 [`wdict::join_code_by_boundary`]。
+    /// code 列输出带空格的音节码（`ni hao`），让边界随备份往返保留，
+    /// 见 [`wdict::join_code_by_boundary`]。
     pub(crate) fn collect_user_word_rows(
         &self,
         schema: &str,
     ) -> anyhow::Result<Vec<wdict::WordIo>> {
         let mut recs = self.search_user_words_prefix(schema, "", 0)?;
-        // 按入库序号导出，于是「导出 → 再导入」往返一圈词序不变（t80）——否则
-        // `search_user_words_prefix` 给的是 key 字典序，一次往返就把原有词序洗掉了。
-        // `sort_by_key` 是**稳定**排序：order 相同的（尤其全为 0 的旧库记录）保持
-        // 搜索给出的相对次序，不会因为导出而彼此重排。
+        // 按入库序号导出，往返一圈词序不变（搜索给的是 key 字典序）。`sort_by_key` 是稳定
+        // 排序，order 相同的旧记录保持相对次序。
         recs.sort_by_key(|r| r.order);
         Ok(recs
             .into_iter()

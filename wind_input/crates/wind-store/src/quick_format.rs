@@ -1,15 +1,14 @@
-//! 快捷输入格式表的**用户调整**（右键菜单调序 / 停用）。
+//! 快捷输入格式表的用户调整（右键菜单调序 / 停用）。
 //!
-//! 与 [`crate::shadow`] 是**两套**东西，别混：
+//! 与 [`crate::shadow`] 是两套东西，别混：
 //!
 //! | | 作用域 | 键 |
 //! |---|---|---|
 //! | shadow（候选调整） | 一次输入（这个码下的这些字） | `(方案, 输入码)` |
 //! | 本模块（格式调整） | 一类输入（所有日期 / 所有数字） | `格式类别` |
 //!
-//! 快捷输入的「输入码」是 `2026.6.19` 这种具体值。若把格式调整存进 shadow，用户右键
-//! 把农历排到最前，存下的键就是那一天；次日打 `2026.6.20` 键不匹配，调整凭空消失。
-//! 症状是「当时有效、隔天失效」，间歇性发作，极难排查。故另起一张表，键只到类别。
+//! 快捷输入的「输入码」是 `2026.6.19` 这种具体值，若存进 shadow，调整只对那一天有效、
+//! 次日即失效。故另起一张表，键只到类别。
 //!
 //! ## 与格式表文件的关系
 //!
@@ -21,18 +20,15 @@
 //! 最终候选
 //! ```
 //!
-//! 两类用户各写各的落点，互不干扰。**GUI 调整绝不回写 `system.quick.toml`**——那会
-//! 抢走高级用户手写文件的所有权（重写丢注释），更糟的是让普通用户点两下右键就
-//! 永久脱离出厂更新，而他毫不知情（整份覆盖的代价必须是知情选择）。
+//! 两类用户各写各的落点。GUI 调整绝不回写 `system.quick.toml`：那会抢走手写文件的所有权
+//! （重写丢注释），也让普通用户不知情地永久脱离出厂更新。
 //!
 //! ## 为什么存稀疏的 (id, position) 而不是完整顺序
 //!
-//! 完整 id 序列存下来后，将来出厂新增一条格式，它不在序列里，就得再定一条
-//! 「新增格式排哪」的规则——怎么定都会让人意外。稀疏记录下**没被碰过的条目不出现在
-//! 存储里**，于是新增格式自然落在它的基表位置。
+//! 存完整序列的话，出厂新增的格式不在序列里，还得另定「排哪」的规则。稀疏记录只存被碰过的
+//! 条目，新增格式自然落在基表位置。
 //!
-//! 规则的「应用」由调用方完成（`wind_quick_input::FormatAdjust`），本模块只管存取——
-//! 与 shadow 同一条纪律：store 不依赖业务类型。
+//! 规则的应用由调用方完成（`wind_quick_input::FormatAdjust`），本模块只管存取：store 不依赖业务类型。
 
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -46,9 +42,8 @@ pub struct QuickFormatMove {
 
 /// 用户自己加的一条格式。
 ///
-/// 没有 `position` 字段：顺序由 `Vec` 的插入序表达（新条目落本类末尾），
-/// 之后要挪位置走 [`QuickFormatRecord::moved`] 那套现成规则——出厂条目与用户条目
-/// 共用同一个调序机制，不给用户条目另开一条「它自己的顺序」。
+/// 没有 `position` 字段：插入序即顺序（新条目落本类末尾），调序与出厂条目共用
+/// [`QuickFormatRecord::moved`]。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickFormatAdded {
     pub id: String,
@@ -57,29 +52,24 @@ pub struct QuickFormatAdded {
 
 /// 某一类（`date` / `month_day` / `year_month` / `number` / `calc`）的用户数据。
 ///
-/// 三个字段分两种性质，**清理时必须区别对待**：`moved`/`disabled` 是对基表的**调整**
-/// （清掉即回到出厂），`added` 是用户**自己的内容**（清掉就没了，不可逆）。
+/// 清理时须区别对待：`moved`/`disabled` 是对基表的调整（清掉即回到出厂），`added` 是用户
+/// 自己的内容（清掉不可逆）。
 /// 见 [`Store::reset_quick_format_kind`] 与 [`Store::clear_quick_format_kind`]。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickFormatRecord {
-    /// 被移动过的格式。**LIFO，index 0 = 最新**，应用时逆序遍历（最新的最后应用、
+    /// 被移动过的格式。LIFO，index 0 = 最新，应用时逆序遍历（最新的最后应用、
     /// 优先级最高），与 [`crate::shadow::ShadowRecord::pinned`] 同构。
     #[serde(default)]
     pub moved: Vec<QuickFormatMove>,
     /// 被停用的格式 id。
     ///
-    /// 叫 disabled 而不是 hidden 是刻意的：设置页的既有能力是 `set_enabled`（启用开关），
-    /// 被停用的行**在管理界面里仍然可见**、能再打开。若语义定成「隐藏」，那一行就该从
-    /// 列表消失，用户便再也点不到它——右键菜单里它本来就已经不出现了。
+    /// 叫 disabled 不叫 hidden：被停用的行在设置页里仍可见、能再打开；若是「隐藏」，
+    /// 用户就再也点不到它了。
     #[serde(default)]
     pub disabled: Vec<String>,
     /// 用户自己加的条目（不在 `system.quick.toml` 里）。
     ///
-    /// 落在这张表而不是回写格式表文件：回写会抢走高级用户手写文件的所有权，
-    /// 也会让普通用户永久脱离出厂更新（见模块头）。放这里则两类用户各写各的落点。
-    ///
-    /// ⚠️ 与 `moved`/`disabled` 不同，它**不是**「对出厂的调整」而是用户的内容本身，
-    /// 所以「恢复默认」不得删它。
+    /// 不回写格式表文件的理由见模块头。它是用户的内容而非对出厂的调整，「恢复默认」不得删它。
     #[serde(default)]
     pub added: Vec<QuickFormatAdded>,
 }
@@ -99,8 +89,7 @@ impl QuickFormatRecord {
 
     /// 改写用户条目的模板；`false` = 没有这条（不是用户条目，或已被删）。
     ///
-    /// 出厂条目走不到这里：它们不在 `added` 里，故返回 `false`——「不许编辑出厂模板」
-    /// 这条约束由数据结构本身兜住，不靠调用方自觉。
+    /// 出厂条目不在 `added` 里，故返回 `false`：「不许编辑出厂模板」由数据结构兜住。
     pub fn set_text(&mut self, id: &str, text: &str) -> bool {
         match self.added.iter_mut().find(|a| a.id == id) {
             Some(a) => {
@@ -111,10 +100,8 @@ impl QuickFormatRecord {
         }
     }
 
-    /// 删除用户条目，**连带清掉它的调序与停用规则**；`false` = 没有这条。
-    ///
-    /// 不清规则的话会留下指向已删条目的孤儿：本身无害（应用时找不到目标即跳过），
-    /// 但用户重新加一条同 id 的条目时，那条旧规则会突然复活并把它挪到意外的位置。
+    /// 删除用户条目，连带清掉它的调序与停用规则；`false` = 没有这条。
+    /// 不清的话，日后重加同 id 条目时旧规则会复活。
     pub fn remove_entry(&mut self, id: &str) -> bool {
         let before = self.added.len();
         self.added.retain(|a| a.id != id);
@@ -235,7 +222,7 @@ impl Store {
         Ok(())
     }
 
-    /// 一批对单条格式的编辑（`(kind, id)`，可跨类别）：读改写整份文件**一次**。`f` 对任一条报错
+    /// 一批对单条格式的编辑（`(kind, id)`，可跨类别）：读改写整份文件一次。`f` 对任一条报错
     /// ⇒ 整批不写。
     pub fn edit_quick_formats(
         &self,
@@ -332,15 +319,11 @@ impl Store {
         Ok(hit)
     }
 
-    /// 恢复某一类的默认顺序与显示：清 `moved`/`disabled`，**保留用户自定义条目**。
+    /// 恢复某一类的默认顺序与显示：清 `moved`/`disabled`，保留用户自定义条目。
+    /// 没有设置页时，这是停用之后的唯一出口（被停用的格式右键点不到）。
     ///
-    /// 这也是**停用之后的唯一出口**（在没有设置页时）：被停用的格式不出现在候选里，
-    /// 右键点不到，只能整类重置。
-    ///
-    /// ⚠️ 曾经是 `t.remove(kind)`（整键删除）。`added` 落进同一条记录后，那个写法会让
-    /// 用户点一下右键的「恢复默认」就永久丢掉手写的模板——不可逆、无预警，而且症状会被
-    /// 归因成「我的自定义条目自己消失了」。要连用户条目一起清的场合走
-    /// [`Self::clear_quick_format_kind`]，那是导入 replace 的语义，不是「恢复默认」的。
+    /// 别改成整键删除：那会让「恢复默认」丢掉用户手写的模板。连用户条目一起清走
+    /// [`Self::clear_quick_format_kind`]。
     pub fn reset_quick_format_kind(&self, kind: &str) -> anyhow::Result<()> {
         self.modify_quick_format(kind, |rec| {
             rec.moved.clear();
@@ -348,10 +331,7 @@ impl Store {
         })
     }
 
-    /// 清空某一类的**全部**用户数据，含自定义条目。
-    ///
-    /// 只给「导入并替换」用：那个动作的语义是「用文件里的状态覆盖我现在的状态」，
-    /// 留着旧的自定义条目会得到「文件里的 + 我原有的」，那不叫替换。
+    /// 清空某一类的全部用户数据，含自定义条目。只给「导入并替换」用。
     /// 面向用户的「恢复默认」一律走 [`Self::reset_quick_format_kind`]。
     pub fn clear_quick_format_kind(&self, kind: &str) -> anyhow::Result<()> {
         self.modify_quick_file(&mut |qf| {

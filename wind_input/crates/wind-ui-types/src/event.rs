@@ -15,16 +15,14 @@ pub enum UiEvent {
     Toolbar(ToolbarAction),
     /// 工具栏被拖动到新位置，供协调器持久化。
     ///
-    /// 报的是窗口**右下角**屏幕坐标（`GetWindowRect` 的 `right`/`bottom`），不是左上角：
-    /// 持久化的是锚点，而工具栏尺寸会随朝向/格数变（见 `UiCommand::SetToolbarAnchor`）。
-    /// 只在 `WM_LBUTTONUP` 拖动结束时发一次，拖动途中不发——落盘频次由此天然收敛到
-    /// 「一次拖动一次」，协调器侧的合并写只用来吸收连续微调。
+    /// 报的是窗口右下角屏幕坐标（`GetWindowRect` 的 `right`/`bottom`）：持久化的是锚点，
+    /// 工具栏尺寸会随朝向/格数变（见 `UiCommand::SetToolbarAnchor`）。只在拖动结束
+    /// （`WM_LBUTTONUP`）时发一次。
     ToolbarMoved { right: i32, bottom: i32 },
-    /// 软键盘面板被拖动到新位置，供协调器持久化（**右下角**屏幕坐标）。
+    /// 软键盘面板被拖动到新位置，供协调器持久化（右下角屏幕坐标）。
     ///
-    /// 与 [`Self::ToolbarMoved`] 完全同构，包括「抬起才发一次」这条：软键盘的拖动实现
-    /// 是在 `WM_MOUSEMOVE` 里持续更新落点的，若照着那里发事件会变成拖动全程每帧一次
-    /// IPC + 一次 state.toml 读改写。
+    /// 与 [`Self::ToolbarMoved`] 同构，也是抬起才发一次；别在 `WM_MOUSEMOVE` 里发，
+    /// 那会每帧一次 IPC + state.toml 读改写。
     SoftKeyboardMoved { right: i32, bottom: i32 },
     /// 候选词条操作（页内下标 + 动作）
     CandidateOp { op: CandidateOp, page_local: usize },
@@ -32,15 +30,11 @@ pub enum UiEvent {
     RequestCandidateMenu { page_local: usize, x: i32, y: i32 },
     /// 请求功能主菜单；来自候选窗空白或工具栏的设置键。
     RequestMainMenu(MenuAnchor),
-    /// 右键工具栏：请求**该格**的快捷菜单。
+    /// 右键工具栏：请求该格的快捷菜单。
     ///
-    /// `action` 是命中格的动作（拖动柄区右键为 `None`）。协调器据它决定给哪一份精简
-    /// 菜单——中英格给方案切换、软键盘格给面切换、标点/全半角格给输出形态开关；
-    /// **没有定制的格一律回落完整主菜单**，这条回落不可省：隐藏了齿轮时，右键工具栏
-    /// 是主菜单仅剩的鼠标入口。
-    ///
-    /// 判据留在协调器而不是 UI 侧：菜单内容本来就要读方案列表 / 软键盘面 / 各开关态，
-    /// 那些 UI 侧一概读不到。这里只回报「点在哪一格上」这个 UI 侧独有的事实。
+    /// `action` 是命中格的动作（拖动柄区为 `None`），协调器据它给精简菜单。没有定制的格
+    /// 一律回落完整主菜单，不可省：隐藏了齿轮时这是主菜单仅剩的鼠标入口。UI 侧只报点在
+    /// 哪一格，菜单内容由协调器决定。
     RequestToolbarMenu {
         action: Option<ToolbarAction>,
         anchor: MenuAnchor,
@@ -51,14 +45,10 @@ pub enum UiEvent {
     MenuClose,
     /// 全局热键触发（线程级 RegisterHotKey 的 WM_HOTKEY），携带热键动作名
     GlobalHotkey(String),
-    /// 点击软键盘键帽：键位名 + 当时是否在第二层。
+    /// 点击软键盘键帽：键位名 + 当时是否在第二层（`shift`）。
     ///
-    /// 回送键位名而不是下标：下标依赖「面板与协调器对键位顺序的理解一致」，
-    /// 而键位名是两侧共同的那套拼写，错了会当场报警而不是静默错位。
-    /// 点了一个符号键帽。
-    ///
-    /// `ctrl` = 面板上的 Ctrl 处于粘滞状态。此时**一律走合成按键**，不管当前是哪种面：
-    /// Ctrl+C 要的是复制，跟这一面画着什么符号没有关系。
+    /// 回送键位名而不是下标：键位名是两侧共同的拼写，错了会当场报警而不是静默错位。
+    /// `ctrl` = 面板上的 Ctrl 处于粘滞状态，此时不论哪种面一律走合成按键（Ctrl+C 要的是复制）。
     SoftKeyboardKey {
         slot: String,
         shift: bool,
@@ -70,18 +60,16 @@ pub enum UiEvent {
     SoftKeyboardClose,
     /// 点击软键盘左上角的钉住按钮（切换钉住状态，真相在协调器）。
     SoftKeyboardPin,
-    /// 点击软键盘上的**特殊键**（退格 / Tab / 回车 / 空格 / Ins / Del）。
+    /// 点击软键盘上的特殊键（退格 / Tab / 回车 / 空格 / Ins / Del）。
     ///
-    /// 键名取 `wind_keys::key_inject` 认得的那套（`backspace` / `tab` / `enter` …），
-    /// 协调器收到后合成一次真实按键。物理键不走这里——它们本就透传给宿主，
-    /// 连我们都不经过。
+    /// 键名取 `wind_keys::key_inject` 认得的那套，协调器收到后合成一次真实按键。
     SoftKeyboardFunctionKey(String),
     /// 状态提示气泡被拖动到新位置（内容左上屏幕坐标），供协调器持久化
     StatusTipMoved { x: i32, y: i32 },
     /// 候选窗被拖动到新位置（内容左上屏幕坐标）。协调器仅在 fixed 模式下持久化；
     /// follow_caret 模式的拖动是"本次组合内临时挪开"，不落盘。
     CandidateWindowMoved { x: i32, y: i32 },
-    /// 候选窗**空白处**（编码栏 / 内边距）被双击。协调器按 `ui.candidate.double_click_screenshot`
+    /// 候选窗空白处（编码栏 / 内边距）被双击。协调器按 `ui.candidate.double_click_screenshot`
     /// 决定是否截图——UI 侧读不到配置，只报事实。候选项与翻页键不产生本事件（按下即动作）。
     CandidateDoubleClick,
     /// 右键状态提示气泡请求弹出菜单（屏幕坐标）

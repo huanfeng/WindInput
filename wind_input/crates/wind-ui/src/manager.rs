@@ -20,9 +20,8 @@ pub use wind_ui_types::HostRenderArc;
 
 /// 显示任何浮窗前的最后一道闸：前台此刻是 D3D 独占全屏就不显示（改为 hide）。
 ///
-/// 协调器那份判据是事件驱动的缓存（焦点/激活时探一次），游戏**在激活之后**才切进独占
-/// 全屏时它就过期了，显示命令照发；而独占全屏的游戏被别的进程的窗口盖一下就会被踢出
-/// 独占态，处理不好的直接卡死（Dota 2 实测）。故谁显示窗口谁再判一次。
+/// 协调器那份判据是焦点/激活时探一次的缓存，游戏在激活之后才切进独占全屏时就过期了；
+/// 独占全屏的游戏被别的窗口盖一下会被踢出独占态，处理不好直接卡死。故谁显示窗口谁再判一次。
 /// 带 300ms TTL（见 `wind_keys::foreground`），连打时不会每键跨进程问一次。
 fn blocked_by_exclusive_fullscreen(what: &str) -> bool {
     let blocked = wind_keys::foreground::exclusive_fullscreen_recent();
@@ -74,10 +73,8 @@ impl UiManager {
 
     /// 唤醒 UI 线程的句柄。
     ///
-    /// ⚠ **必须与 [`Self::sender`] 配对**：投递命令后要调用 `wake()`，否则 UI 线程会一直
-    /// 睡到下一个计时器到期（可能永不到期）才看见那条命令。裸用这两者容易漏，故生产路径
-    /// 一律经 `wind_coordinator::UiSender` —— 它把「先投递、再唤醒」固化进一次 `send`，
-    /// 调用方无从写错。
+    /// 必须与 [`Self::sender`] 配对：投递命令后要调 `wake()`，否则 UI 线程可能一直睡下去。
+    /// 生产路径一律经 `wind_coordinator::UiSender`，它把「先投递、再唤醒」固化进一次 `send`。
     pub fn waker(&self) -> crate::wake::UiWaker {
         self.waker.clone()
     }
@@ -89,11 +86,9 @@ impl UiManager {
 
     /// UI 线程主循环
     ///
-    /// 注意 [`UiManager::new`] 只负责 spawn 本线程即返回 `Ok`——窗口创建成功与否**不影响**
-    /// 它的返回值。因此本函数一旦提前 `return`，主线程毫不知情：服务照常启动、输入照常工作，
-    /// 而候选窗/工具栏/托盘/状态气泡**全部消失**。开机早期窗口站尚未就绪时
-    /// `CreateWindowExW` 失败正是这种场景，且唯一痕迹是下面那条 `error!`——
-    /// 偏偏主日志的 non_blocking worker 也可能已经死了。故这些分支同时写启动轨迹。
+    /// [`UiManager::new`] spawn 本线程即返回 `Ok`，本函数提前 `return` 时主线程毫不知情：
+    /// 输入照常、所有浮窗全部消失（开机早期 `CreateWindowExW` 失败即此场景）。主日志的
+    /// worker 那时也可能已死，故这些分支同时写启动轨迹。
     fn ui_thread(
         rx: mpsc::Receiver<UiCommand>,
         event_tx: mpsc::Sender<UiEvent>,
@@ -151,8 +146,7 @@ impl UiManager {
         let mut toast_hide_at: Option<std::time::Instant> = None;
         // 软键盘面板（惰性创建：首次 ShowSoftKeyboard 时构造，best-effort）
         let mut soft_keyboard: Option<crate::soft_keyboard::SoftKeyboard> = None;
-        // 最近一次主题。**惰性创建的窗口靠它补课**——`SetTheme` 一般只在启动时发一次，
-        // 而软键盘可能在那之后很久才第一次打开，不缓存就会永远停在内置默认配色。
+        // 最近一次主题。惰性创建的窗口（如软键盘）靠它补课：`SetTheme` 一般只在启动时发一次。
         let mut last_theme: Option<wind_theme::Resolved> = None;
         // 状态提示防抖：合并快速连续的提示（如连按切换），避免气泡闪烁
         // 载荷：(text, x, y, caret_height, duration_ms, placement)
@@ -210,14 +204,12 @@ impl UiManager {
         let mut previews = crate::candidate_window::PreviewQueue::default();
         'main: loop {
             // 状态提示气泡到期自动隐藏。
-            // 用户正在与气泡交互（拖动 / 悬停其上 / 右键菜单打开）时**顺延**而非隐藏：
-            // 否则气泡会在被操作的过程中凭空消失。交互结束后重新获得完整一份时长。
+            // 用户正在与气泡交互（拖动 / 悬停其上 / 右键菜单打开）时顺延而非隐藏，
+            // 交互结束后重新获得完整一份时长。
             if let Some(deadline) = tip_hide_at {
                 let interacting = status_tip.as_ref().is_some_and(|t| t.interacting());
-                // 「交互刚结束」这一沿：也要重新给满一份时长。轮询年代两次 tick 只差 ~8ms，
-                // 「交互期间每轮顺延」自然就让结束时刻成了计时起点；事件驱动下 tick 变稀疏，
-                // 不显式处理就会按**最后一次唤醒**的时刻算，气泡提前消失。
-                // 与 `auto_hide` 的 `was_engaged` 同构。
+                // 「交互刚结束」这一沿要显式给满时长：事件驱动下 tick 稀疏，否则会按最后一次
+                // 唤醒的时刻算，气泡提前消失。与 `auto_hide` 的 `was_engaged` 同构。
                 let just_ended = tip_was_interacting && !interacting;
                 tip_was_interacting = interacting;
                 if interacting || just_ended {
@@ -267,10 +259,8 @@ impl UiManager {
                         // 熬过窗口期没被 HideToolbar 撤销 → 真正显示。
                         // Toolbar::update → render 是所有显示路径的单点，末尾必 show。
                         //
-                        // 这条日志不可省：`UI: UpdateToolbar` 打在闸门判定**之前**，命令到达
-                        // 不等于工具栏出现（Deferred 的那些可能被撤销）。少了本行，日志里就
-                        // 只剩「命令到了」和「撤销了」，唯独看不到「到底显示了没有」——排查
-                        // 闪烁时最需要的恰恰是这个时刻。
+                        // 这条日志不可省：`UI: UpdateToolbar` 打在闸门判定之前，命令到达不等于
+                        // 工具栏出现；排查闪烁要看的正是「到底显示了没有」。
                         debug!("UI: 工具栏显示（迟滞到期）");
                         if let (Some(t), Some(st)) = (&mut toolbar, &toolbar_pending_state) {
                             if blocked_by_exclusive_fullscreen("toolbar") {
@@ -852,9 +842,8 @@ impl UiManager {
                         duration_ms,
                         accent,
                     } => {
-                        // ⚠️ 只记形状不记内容：toast 文案现在可能来自 `wind.cli` 转述的
-                        // CLI 输出（词库路径、条目计数, 个别子命令还会带词），而 debug
-                        // 日志是落盘的。见 handle_cmdbar::run_self 立的那条隐私不变量。
+                        // 只记形状不记内容：toast 文案可能来自 `wind.cli` 转述的 CLI 输出（可能带词），
+                        // 而 debug 日志落盘。见 handle_cmdbar::run_self 的隐私不变量。
                         debug!(
                             "UI: ShowToast {} 字 ({:?},{:?})",
                             text.chars().count(),
@@ -872,7 +861,7 @@ impl UiManager {
                     UiCommand::UpdateToolbar(tb_state) => {
                         debug!("UI: UpdateToolbar {:?}", tb_state);
                         candidate_window.note_skin_mode(tb_state.chinese_mode);
-                        // 传当前可见性：**内容更新与可见性提升是两件事**。本命令同时承担
+                        // 传当前可见性：内容更新与可见性提升是两件事。本命令同时承担
                         // 「更新中英·标点·全半角」与「让工具栏出现」，整条延迟会让已显示
                         // 时按 Shift 切中英也慢一档，手感明显退化。
                         let visible = toolbar.as_ref().is_some_and(|t| t.is_visible());
@@ -963,7 +952,6 @@ impl UiManager {
                             tb.set_theme(&t);
                             // 仅在可见时重绘：repaint→render 末尾无条件 show，对隐藏中的
                             // 工具栏调用会把它显形，绕过 toolbar_gate 的显示迟滞。
-                            // （启动时 last_state 为 None，repaint 本就是 no-op，故此前不显形。）
                             if tb.is_visible() {
                                 tb.repaint();
                             }
@@ -1191,14 +1179,10 @@ impl UiManager {
                 // 本循环唯一的休眠点：睡到「最近的计时器到期」，或被唤醒（新命令 /
                 // Win32 消息）提前叫醒。
                 //
-                // 取代的是原先无条件的 8ms 休眠。那一版让 UI 线程在完全空闲时也每秒醒
-                // 64~125 次（`Sleep` 被对齐到系统时钟粒度，而本进程不调 `timeBeginPeriod`，
-                // 故实际频率还随别的进程改动全局粒度而浮动），是服务静态 CPU 占用的唯一
-                // 来源，也让 CPU 无法进入深度 C-state。
+                // 别改回固定间隔轮询：空闲时每秒醒几十上百次，是服务静态 CPU 占用的来源。
                 //
-                // ⚠ **新增任何「靠每轮被调用才能推进」的状态，都必须在下面登记它的到期
-                // 时刻**。漏登记的后果不是变慢，而是它在这里睡下去就再也不会被推进——
-                // 除非碰巧有别的事把线程叫醒。这类 bug 表现为「偶尔不生效」，极难复现。
+                // 新增任何「靠每轮被调用才能推进」的状态，都必须在下面登记它的到期时刻。
+                // 漏登记不是变慢，而是睡下去再也不被推进，表现为「偶尔不生效」。
                 let now = std::time::Instant::now();
                 let next_deadline = [
                     // 状态气泡自动隐藏
@@ -1239,7 +1223,7 @@ impl Drop for UiManager {
     }
 }
 
-/// 协调器命令收菜单（`HideMenu` / `HideCandidates`）。真收掉了一个**可见**菜单时告诉气泡：
+/// 协调器命令收菜单（`HideMenu` / `HideCandidates`）。真收掉了一个可见菜单时告诉气泡：
 /// 协调器有几条收菜单的路不补发 `SetTooltipMenuOpen(false)`，气泡的抑制标志要在这里收口
 /// （见 `Tooltip::on_menu_dismissed`）。菜单已由自己 tick 收起（点了菜单项）时不算——那条路
 /// 协调器会在派发完菜单命令后才解除，「截图此窗口」靠的就是这个先后。
@@ -1577,12 +1561,9 @@ pub(crate) fn open_app(_path: &str, _args: &str) {}
 
 #[cfg(test)]
 mod wakeup_registration_tests {
-    /// `next_deadline` 那张清单漏登记一项，UI 线程就会睡过它——后果不是变慢，而是那件事
-    /// 再也不被推进，表现为「偶尔不生效」，极难复现（见 `ui_thread` 里那段注释）。
-    ///
-    /// 这条护栏守的是**那条规则本身**而不是某一个实例：新加计时器的人把名字添进来，
-    /// 就继续起作用。手段粗糙（对自己的源文本做匹配），但驱动整个 `ui_thread` 的集成
-    /// 测试所需的脚手架，成本远超它能守住的这一行。
+    /// `next_deadline` 那张清单漏登记一项，那件事就再也不被推进（见 `ui_thread` 里的注释）。
+    /// 守的是规则本身：新加计时器的人把名字添进来即可。手段是匹配自己的源文本，驱动整个
+    /// `ui_thread` 的集成测试成本远超于此。
     #[test]
     fn every_timer_source_is_registered_for_wakeup() {
         let src = include_str!("manager.rs");

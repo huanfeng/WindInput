@@ -15,17 +15,17 @@
 //!
 //! 走「小依赖」路线：不链接 HarfBuzz / FreeType（C 库，构建机要装 -dev 包），编译期不需要
 //! 任何系统库。代价写在明处：
-//! - **不做复杂文字整形**：没有连字、阿拉伯文连写、印度系字形重排、蒙古文变形；从左到右
+//! - 不做复杂文字整形：没有连字、阿拉伯文连写、印度系字形重排、蒙古文变形；从左到右
 //!   逐字排。中文 / 西文 / 日文 / 韩文候选足够。唯一的例外是 emoji 簇（见下）。
-//! - **无 hinting**：灰度抗锯齿 + 4 档亚像素横向定位，观感接近 macOS 而非 ClearType。
+//! - 无 hinting：灰度抗锯齿 + 4 档亚像素横向定位，观感接近 macOS 而非 ClearType。
 //! - 字距只读旧式 `kern` 表；只放在 GPOS 里的字距不生效（CJK 字体几乎都只有 GPOS，
 //!   对汉字无影响）。
 //! - 字体缺粗体字面时合成（水平加粗）。
-//! - **彩色 emoji**：CBDT/CBLC 位图（Noto Color Emoji、EmojiOne）、COLR v0（Twemoji Mozilla）、
+//! - 彩色 emoji：CBDT/CBLC 位图（Noto Color Emoji、EmojiOne）、COLR v0（Twemoji Mozilla）、
 //!   COLR v1（Noto-COLRv1）、OpenType-SVG（Twitter Color Emoji SVGinOT）四种格式都有真字体
 //!   实测；sbix（Apple）与 CBDT 同一条代码路径，但手头没有字体、未实测。COLR v1 的扫掠渐变
 //!   按色标均值填纯色、线性渐变的第三控制点不参与，见 `color.rs`。
-//! - **emoji 序列**：肤色修饰、ZWJ 组合、国旗、键帽、子区旗、VS15/VS16 按 `emoji.rs` 切簇、
+//! - emoji 序列：肤色修饰、ZWJ 组合、国旗、键帽、子区旗、VS15/VS16 按 `emoji.rs` 切簇、
 //!   整簇交给字体的 GSUB 连字；字体没有这个组合就拆成几个 emoji 画（与字体自身能力一致）。
 //!   切簇用区段近似 emoji 属性，个别「默认文本呈现」的符号可能判错呈现方式；带了 VS15 /
 //!   VS16 的判定是精确的。整形只用在 emoji 簇上，簇内的 GPOS 偏移不生效（emoji 字体不用）。
@@ -65,7 +65,7 @@ const MAX_GLYPH_DIM: i32 = 2048;
 
 /// 覆盖 `text` 全部字符的一款字体文件（fontconfig 按 `sans-serif` + 字重 + 简中排序后的第一个）。
 ///
-/// 给不走排版、直接读轮廓的调用方（托盘图标 `tray_icon`）用：它要的是**一个**文件，而不是回退链。
+/// 给不走排版、直接读轮廓的调用方（托盘图标 `tray_icon`）用：它要的是一个文件，而不是回退链。
 /// 返回（路径, 集合内序号）；fontconfig 不可用或没有字体覆盖全部字符时为 `None`。
 pub(crate) fn font_file_covering(text: &str, weight: u16) -> Option<(std::path::PathBuf, u32)> {
     fontconfig::sort("sans-serif", weight, "zh-cn")?
@@ -156,7 +156,7 @@ struct Shaped {
     /// `None` = 不绘制（控制字符、零宽格式字符）。
     glyph: Option<(FaceId, u16)>,
     adv: f32,
-    /// 按字形**所属字体**判的合成粗体：回退字体可能有真粗体而主字体没有。
+    /// 按字形所属字体判的合成粗体：回退字体可能有真粗体而主字体没有。
     bold: bool,
     /// 字形出自彩色字体（见 `store::FaceData::color`）：绘制时不分亚像素相位、不合成粗体。
     color: bool,

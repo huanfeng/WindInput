@@ -42,6 +42,16 @@
   须显式设 `LANG`/`LC_ALL` 为 UTF-8。Pasteboard Manager 的 `kPasteboardModified` 语义是「自该 ref
   上次同步以来是否改过」，新建 ref 首次同步恒为 0，所以 ref 必须常驻；项索引从 1 起。
 
+## 悬停提示气泡（tooltip.rs）
+
+- 右键菜单一开就 `SetCapture`，同线程的气泡从此收不到任何鼠标消息；鼠标移向菜单时 `WM_MOUSELEAVE`
+  已清掉 `mouse_over`、离开跟踪也失效。所以菜单关闭时 `mouse_over` 是陈旧的，判「光标在不在气泡上」
+  要问真实光标。
+- 菜单释放捕获后、还没处理过一次鼠标移动时就 `TrackMouseEvent`，系统按捕获期间记的「鼠标所在窗口」
+  （菜单）判断，会当场投递一条伪 `WM_MOUSELEAVE`。表现：点气泡关菜单、或菜单开着时右键气泡另一处，
+  气泡随之消失。对策是「离开」也问真实光标，仍在气泡上就只清跟踪；光标一次都没在气泡上移动时那条
+  移动永远不来，需定时复查。
+
 ## 软键盘（soft_keyboard.rs）
 
 设计、焦点契约、长按重复、macOS 大写锁定的证伪记录见 docs/design/soft-keyboard.md。补充几条 Win32 事实：

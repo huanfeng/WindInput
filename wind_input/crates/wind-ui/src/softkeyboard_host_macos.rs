@@ -1,26 +1,17 @@
-//! 软键盘面板的 **macOS 主线程宿主**。
+//! 软键盘面板的 macOS 主线程宿主。
 //!
-//! # 它解决的是线程问题，不是功能问题
+//! 它解决的是线程问题：面板（[`SoftKeyboard`]）必须住在主线程（AppKit 只能在主线程改动，
+//! 且 `SoftKeyboard` 内部是非 `Send` 的 `Rc<RefCell<..>>`），而下发命令的
+//! `manager_macos::forwarder_thread` 是工作线程，既不能碰 AppKit 也不驱动面板的 `tick`。
+//! 形制照抄 [`crate::global_hotkey_macos`]（同一个主线程、同一套「入队 + 唤醒源」约定）：
 //!
-//! 面板的一切（[`SoftKeyboard`]）都必须住在主线程：AppKit 的窗口/视图只能在主线程创建
-//! 与改动，而 `SoftKeyboard` 内部又是 `Rc<RefCell<..>>`（非 `Send`），本来也过不了线程。
-//! 但下发命令的 `manager_macos::forwarder_thread` 是一条**工作线程**，且它是个
-//! `for cmd in rx` 的阻塞循环——既不能在那儿碰 AppKit，也没法顺带驱动面板的 `tick`。
+//! 1. 转运：forwarder 线程调 [`apply`] 只把命令塞进 `PENDING` 并戳唤醒源，建窗/绘制在主线程
+//!    的 perform 回调里做。
+//! 2. 驱动：面板可见期间挂一个 `CFRunLoopTimer` 周期性调 `tick()`（长按重复、修饰键跟随、
+//!    按键高亮熄灭），面板一关就撤掉定时器。
 //!
-//! 于是本模块做两件事，形制照抄 [`crate::global_hotkey_macos`]（同一个主线程、同一套
-//! 「入队 + 唤醒源」约定，那边已实测可用）：
-//!
-//! 1. **转运**：forwarder 线程调 [`apply`] 只把命令塞进 `PENDING` 并戳一下唤醒源；
-//!    真正的建窗/绘制在主线程的 perform 回调里做。
-//! 2. **驱动**：面板可见期间挂一个 `CFRunLoopTimer` 周期性调 `tick()`——鼠标长按重复、
-//!    物理 Shift/CapsLock 跟随、按键高亮到期熄灭都靠它。**面板一关就撤掉定时器**，
-//!    线程回到全静默。
-//!
-//! # ⚠️ 装配时机
-//!
-//! [`install_on_main`] 必须由**主线程**在进 `RunApplicationEventLoop` 之前调用一次
-//! （见 `apps/service/src/main.rs`）。在那之前 forwarder 可能已经发过命令了——那些命令
-//! 留在 `PENDING` 里，装配时主动 drain 一次补上，与 `global_hotkey_macos` 的做法一致。
+//! [`install_on_main`] 必须由主线程在进主事件循环（`global_hotkey_macos::run_main_loop`）之前
+//! 调用一次。在那之前 forwarder 发过的命令留在 `PENDING` 里，装配时 drain 一次补上。
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -41,19 +32,17 @@ use wind_ui_types::{SoftKeyCap, UiEvent};
 
 /// 面板 `tick` 的驱动周期（毫秒）。
 ///
-/// 取 20ms 是为了同时盖住面板里两个更慢的节奏：物理 Shift/CapsLock 的轮询
-/// （`MODIFIER_POLL_MS` = 40）与鼠标长按的重复（`REPEAT_RATE_MS` = 33）。比它们都快
-/// 一档，两者才不会被采样节拍拖成肉眼可见的迟滞。
+/// 比面板里更慢的两个节奏（修饰键轮询 `MODIFIER_POLL_MS`、长按重复 `REPEAT_RATE_MS`）都快
+/// 一档，才不会被采样节拍拖出可见迟滞。
 ///
-/// ⚠️ 这是本仓「UI 事件驱动、不做空转轮询」的一处**有意例外**，边界与 `SoftKeyboard::tick`
-/// 里那条注释写的完全一致：**只在面板可见时**。面板一关，[`sync_timer`] 立刻撤掉定时器。
+/// 这是「UI 事件驱动、不做空转轮询」的有意例外，只在面板可见时；面板一关 [`sync_timer`]
+/// 立刻撤掉定时器。
 const TICK_MS: f64 = 0.020;
 
 /// 转运给主线程的软键盘命令。
 ///
-/// 刻意**不直接传 `UiCommand`**：那个枚举有 46 个变体，本模块只关心其中 4 个加一个
-/// 主题，用它做队列元素等于让读者以为这里还会处理别的。字段与 `UiCommand` 的对应
-/// 变体逐位一致。
+/// 刻意不直接传 `UiCommand`：本模块只关心其中几个变体，用它做队列元素会让读者以为这里
+/// 还会处理别的。字段与 `UiCommand` 的对应变体逐位一致。
 pub enum SkCmd {
     Show {
         pages: Vec<String>,
@@ -72,9 +61,8 @@ pub enum SkCmd {
     Pinned(bool),
     /// 主题变更。
     ///
-    /// ★ 面板是**惰性创建**的（首次 `Show` 才建窗），而 `SetTheme` 一般只在启动时发一次。
-    /// 不把最近一份主题留住，面板就会永远停在内置默认配色——与 Windows 侧 `manager.rs`
-    /// 用 `last_theme` 给惰性窗口"补课"是同一件事，这里换成在本模块留底。
+    /// 面板惰性创建，而 `SetTheme` 一般只在启动时发一次，故在本模块留住最近一份主题给它补课
+    /// （同 Windows 侧 `manager.rs` 的 `last_theme`）。
     Theme(Box<wind_theme::Resolved>),
 }
 
@@ -97,7 +85,7 @@ unsafe impl<T> Sync for SendPtr<T> {}
 static WAKE_SOURCE: OnceLock<SendPtr<c_void>> = OnceLock::new();
 
 thread_local! {
-    /// 面板本体。**只在主线程访问**（`thread_local` 把这条约定焊进类型系统之外的另一层：
+    /// 面板本体。只在主线程访问（`thread_local` 把这条约定焊进类型系统之外的另一层：
     /// 别的线程即使拿到本模块也只会看到一个空 `RefCell`，而不是数据竞争）。
     static PANEL: RefCell<Option<SoftKeyboard>> = const { RefCell::new(None) };
     /// 最近一份主题，给惰性建窗补课用。见 [`SkCmd::Theme`]。
@@ -106,7 +94,7 @@ thread_local! {
     static TIMER: RefCell<Option<CFRunLoopTimerRef>> = const { RefCell::new(None) };
 }
 
-/// 从**任意线程**提交一条软键盘命令。
+/// 从任意线程提交一条软键盘命令。
 ///
 /// 只入队 + 唤醒，不碰 AppKit。主线程尚未 [`install_on_main`] 时也可调用——命令留在
 /// `PENDING` 里，等装配后的第一次 drain 一并处理。
@@ -136,15 +124,14 @@ pub fn apply(cmd: SkCmd, ev_tx: &Sender<UiEvent>) {
 
 /// 主线程装配：建唤醒源、挂上主 run loop，并补做一次 drain。
 ///
-/// **必须在主线程、且在 `RunApplicationEventLoop` 之前调用一次。**
+/// 必须在主线程、且在进主事件循环之前调用一次。
 pub fn install_on_main() {
     if WAKE_SOURCE.get().is_some() {
         return;
     }
     unsafe {
-        // 逐字段构造，**不能**用 `mem::zeroed()`：`perform` 是非空函数指针，全零对它是
-        // 非法值，真机上会在启动时直接 abort 且 `cargo check` 看不出来。
-        // 这一条是 `global_hotkey_macos` 已经踩过并写进注释的坑，此处照办。
+        // 逐字段构造，不能用 `mem::zeroed()`：`perform` 是非空函数指针，全零是非法值，
+        // 运行时直接 abort 且编译看不出来。
         let mut ctx = CFRunLoopSourceContext {
             version: 0 as CFIndex,
             info: std::ptr::null_mut(),
@@ -183,7 +170,7 @@ extern "C" fn tick_fire(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
     sync_timer();
 }
 
-/// 取走队列并逐条应用。**只在主线程调用。**
+/// 取走队列并逐条应用。只在主线程调用。
 fn drain_pending() {
     loop {
         let batch: Vec<SkCmd> = {
@@ -224,12 +211,10 @@ fn handle(cmd: SkCmd) {
     }
 }
 
-/// 借出面板做一件事。借不到就**跳过**。
+/// 借出面板做一件事。借不到就跳过。
 ///
-/// ⚠️ 用 `try_borrow_mut` 而不是 `borrow_mut`，理由与 `mac_panel::PanelView::dispatch`
-/// 里那段完全相同：命令 drain 与 tick 定时器同在主线程，某些 AppKit 调用会重入
-/// run loop，于是有可能在面板已借出时再进来一次。那一下若 panic，输入法服务整个进程
-/// 就没了——而跳过的代价只是少画一帧，下一次 tick 就补回来。
+/// 用 `try_borrow_mut`（同 `mac_panel::PanelView::dispatch`）：某些 AppKit 调用会重入
+/// run loop，可能在面板已借出时再进来；panic 会带走整个服务，跳过只少画一帧。
 fn with_panel(f: impl FnOnce(&mut SoftKeyboard)) {
     PANEL.with(|p| match p.try_borrow_mut() {
         Ok(mut g) => {
@@ -243,8 +228,7 @@ fn with_panel(f: impl FnOnce(&mut SoftKeyboard)) {
 
 /// 惰性建窗。返回面板是否可用。
 ///
-/// 建窗失败只记一条 error 并返回 false——**不 panic**：软键盘建不出来，输入法其余部分
-/// 照常工作，这是 `manager.rs` 对所有惰性窗口的一贯处置（best-effort）。
+/// 建窗失败只记 error 并返回 false，不 panic（同 `manager.rs` 对惰性窗口的 best-effort）。
 fn ensure_panel() -> bool {
     if PANEL.with(|p| p.try_borrow().is_ok_and(|p| p.is_some())) {
         return true;
@@ -281,19 +265,16 @@ fn ensure_panel() -> bool {
 
 /// 按面板当前可见性挂上/撤掉 tick 定时器。
 ///
-/// 幂等，每次处理完命令与每轮 tick 后都调一次——面板的显隐有好几条来路（协调器下发的
-/// Show/Hide、面板自己的关闭按钮），让每条来路各记一次注定要漏，漏的表现是「面板关了
-/// 但 CPU 一直在跑」或「面板开着却不响应长按」。
+/// 幂等，每次处理完命令与每轮 tick 后都调一次：显隐有好几条来路，让每条来路各记一次
+/// 注定要漏。
 fn sync_timer() {
     let visible = PANEL.with(|p| {
         p.try_borrow()
             .is_ok_and(|p| p.as_ref().is_some_and(|k| k.is_visible()))
     });
     TIMER.with(|t| {
-        // 这里用裸 `borrow_mut` 而非 `try_borrow_mut`（与本模块其余各处相反）是**有据的**：
-        // 借出期间只调 CFRunLoopTimer 的创建/挂载/失效，三者都不驱动 run loop，故本函数
-        // 不可能在自身借出期间被重入。改动这段时若引入任何会转一次 run loop 的调用，
-        // 这条前提就没了，得跟着换成 try_borrow_mut。
+        // 这里可用裸 `borrow_mut`：借出期间只调 CFRunLoopTimer 的创建/挂载/失效，都不驱动
+        // run loop，不会重入。若引入会转 run loop 的调用，得换成 try_borrow_mut。
         let mut t = t.borrow_mut();
         match (visible, *t) {
             (true, None) => unsafe {

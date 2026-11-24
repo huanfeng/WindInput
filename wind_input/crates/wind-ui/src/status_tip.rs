@@ -29,7 +29,7 @@ struct StatusTipMouse {
     drag_pin: Option<(i32, i32)>,
     /// 光标是否在气泡窗口内（`WM_MOUSEMOVE` 置 true / `WM_MOUSELEAVE` 置 false）。
     mouse_over: bool,
-    /// 上次**物理**光标屏幕坐标——过滤气泡自身出现/移动到光标下方引起的伪 `WM_MOUSEMOVE`。
+    /// 上次物理光标屏幕坐标——过滤气泡自身出现/移动到光标下方引起的伪 `WM_MOUSEMOVE`。
     /// 与候选窗 `CandidateMouse::last_cursor` 同构，见 [`StatusTipMouse::reset_hover`]。
     last_cursor: (i32, i32),
     /// 是否已注册过 `WM_MOUSELEAVE` 追踪（一次性，收到 LEAVE 后需重新注册）。
@@ -77,15 +77,15 @@ impl StatusTipMouse {
         true
     }
 
-    /// 复位悬停状态，并**以当前物理光标位重建基线**。
+    /// 复位悬停状态，并以当前物理光标位重建基线。
     ///
     /// 两个调用点，职责不同，缺一不可（与候选窗 `CandidateMouse::reset_hover` 同构）：
-    /// - [`StatusTip::mark_visible`]（不可见 → 可见）：**基线在这里才有意义**。判据问的是
+    /// - [`StatusTip::mark_visible`]（不可见 → 可见）：基线在这里才有意义。判据问的是
     ///   「气泡出现之后鼠标动没动」，基准就必须取自气泡出现那一刻。
     /// - [`StatusTip::hide`]：清掉悬停残留。隐藏时系统未必投出 `WM_MOUSELEAVE`，
     ///   不清则 `mouse_over` 一直挂着 true，之后每次显示都被判成「交互中」而永不自动隐藏；
     ///   `leave_armed` 同样残留会让 [`Self::arm_leave`] 一直早退，`WM_MOUSELEAVE` 再不会来。
-    ///   它顺带采的那次基线到下次显示时多半已过时，**不能当作基线的来源**。
+    ///   它顺带采的那次基线到下次显示时多半已过时，不能当作基线的来源。
     fn reset_hover(&mut self) {
         self.mouse_over = false;
         self.leave_armed = false;
@@ -301,14 +301,14 @@ impl StatusTip {
         })
     }
 
-    /// 标记气泡已显示；仅在**不可见 → 可见**这一沿重采悬停基线。
+    /// 标记气泡已显示；仅在不可见 → 可见这一沿重采悬停基线。
     ///
     /// 基线要回答的是「气泡出现之后鼠标动没动」，基准就只能取自气泡出现那一刻：
     /// - 取自 `hide()`（上一次显示结束）必然过时——这期间用户多半移动过鼠标，气泡再弹出时
     ///   系统投来的进入消息坐标与陈旧基线不同 → 被判成「用户真实移动了鼠标」；
     /// - 取构造初值则进程内第一次显示必不相等，同样误判。
     ///
-    /// 反过来，**已可见时不得重采**：连续切换状态时气泡只更新内容/位置，用户可能正悬停其上，
+    /// 反过来，已可见时不得重采：连续切换状态时气泡只更新内容/位置，用户可能正悬停其上，
     /// 此时重采基线会连同 `mouse_over` 一起清掉，把真实悬停也抹平。
     fn mark_visible(&self) {
         if !self.visible.get() {
@@ -500,7 +500,7 @@ impl StatusTip {
             above,
             self.cand_rect,
         );
-        // 基线采样刻意排在 `show` **之前**：窗口出现不会移动鼠标，两处取值物理上相同，
+        // 基线采样刻意排在 `show` 之前：窗口出现不会移动鼠标，两处取值物理上相同，
         // 但排在前面就完全不依赖「`show` 内部不会泵到 WM_MOUSEMOVE」这个前提。
         self.mark_visible();
         // 内容锚点 − 左/上 margin，阴影向四周溢出。
@@ -528,12 +528,12 @@ impl StatusTip {
         self.window.show(ax - ml as i32, ay - mt as i32);
     }
 
-    /// 锚点显示（C2-33 / GH#148）：前台窗口所在屏的工作区 / 前台窗口边框上的锚点，不跟随光标。
+    /// 锚点显示：前台窗口所在屏的工作区 / 前台窗口边框上的锚点，不跟随光标。
     /// `caret_*` 只在取不到前台窗口时用于选屏，见 [`anchor_frames`]。
     pub fn show_anchor(&mut self, text: &str, anchor: StatusTipAnchor, caret_x: i32, caret_y: i32) {
         let frames = anchor_frames(caret_x, caret_y);
         let (probe_x, probe_y) = anchor_probe_point(frames, caret_x, caret_y);
-        // ★ 顺序契约同 `show_fixed`：scale → 尺寸 → 落点。
+        // 顺序契约同 `show_fixed`：scale → 尺寸 → 落点。
         self.ensure_scale(probe_x, probe_y);
         let margin = (ANCHOR_MARGIN_DP * self.scale).round() as i32;
         let (cw, ch, ml, mt) = self.render_bubble(text);
@@ -589,7 +589,7 @@ impl StatusTip {
         self.mouse.borrow_mut().menu_open = open;
     }
 
-    /// 当前气泡**内容左上**屏幕坐标（窗口左上 + 阴影扩边）。
+    /// 当前气泡内容左上屏幕坐标（窗口左上 + 阴影扩边）。
     /// 供「固定位置」开关把当前实际位置落盘成 custom_x/custom_y。
     pub fn content_origin(&self) -> (i32, i32) {
         let m = self.mouse.borrow();
@@ -763,7 +763,7 @@ impl StatusTip {
                     gap,
                     above,
                 );
-                // 挡住候选窗：按候选窗**建议**落点算避让位置，交宿主随候选窗实际落点平移
+                // 挡住候选窗：按候选窗建议落点算避让位置，交宿主随候选窗实际落点平移
                 // （候选窗被宿主翻到光标上方时，提示泡跟着走）。没挡住就照旧翻转落位。
                 let avoid = self.cand_rect.map(|c| {
                     place_caret_tip(
@@ -820,7 +820,7 @@ const ANCHOR_MARGIN_DP: f32 = 16.0;
 type AnchorFrames = Option<((i32, i32, i32, i32), Option<(i32, i32, i32, i32)>)>;
 
 /// 取锚点的参照矩形（平台层）：前台窗口所在屏的工作区 + 前台窗口可见边框。
-/// 取不到前台窗口时退到**光标所在屏**的工作区（无窗口边框 ⇒ 窗口锚点降级为屏幕锚点）；
+/// 取不到前台窗口时退到光标所在屏的工作区（无窗口边框 ⇒ 窗口锚点降级为屏幕锚点）；
 /// 连工作区都查不到时返回 `None`，调用方按光标点夹回。非 Windows 恒 `None`（macOS 的气泡在
 /// `.app` 侧定位，不走本模块）。
 #[cfg_attr(not(windows), allow(unused_variables))]
@@ -904,13 +904,12 @@ fn place_anchor(
     crate::sys::clamp_rect_in_bounds(x, y, size.0, size.1, work)
 }
 
-/// `custom_x/custom_y` 的「从未设定」哨兵。配置默认即 0，而 (0,0) 恰是**主显示器**左上角
-/// —— 固定位置模式下这正是「气泡永远在主屏」的另一条通路：用户刚打开开关还没拖过，
-/// 气泡就钉死在主屏角上，且此前 fixed 路径完全不做屏幕钳制，副屏拔掉后再也拖不回来。
+/// `custom_x/custom_y` 的「从未设定」哨兵。配置默认即 0，而 (0,0) 恰是主显示器左上角，
+/// 不特判的话刚打开固定位置还没拖过，气泡就钉死在主屏角上。
 const FIXED_UNSET: (i32, i32) = (0, 0);
 
-/// `ensure_scale` 的探测点：未设定固定位置时，DPI 必须按**光标所在屏**取，
-/// 否则会拿主屏缩放去排版一个即将落在副屏的气泡（★ 顺序契约：scale → 尺寸 → 落点）。
+/// `ensure_scale` 的探测点：未设定固定位置时，DPI 必须按光标所在屏取，
+/// 否则会拿主屏缩放去排版一个即将落在副屏的气泡（顺序契约：scale → 尺寸 → 落点）。
 fn anchor_probe(fx: i32, fy: i32, caret_x: i32, caret_y: i32) -> (i32, i32) {
     if (fx, fy) == FIXED_UNSET {
         (caret_x, caret_y)
@@ -919,14 +918,13 @@ fn anchor_probe(fx: i32, fy: i32, caret_x: i32, caret_y: i32) -> (i32, i32) {
     }
 }
 
-/// 固定位置模式的**内容左上**锚点。
+/// 固定位置模式的内容左上锚点。
 ///
 /// - 已设定：原样使用用户拖定的绝对坐标（「固定」就该是固定，不跟随焦点换屏）。
-/// - 未设定（(0,0) 哨兵）：落到**光标所在屏**，而不是主屏左上角。
+/// - 未设定（(0,0) 哨兵）：落到光标所在屏，而不是主屏左上角。
 ///
 /// 两种情况都过一次 [`crate::sys::clamp_to_work_area`]：它按落点反查显示器、不预设原点，
-/// 所以既不会把副屏的合法负坐标拽回主屏，又能在副屏被拔掉后把气泡拉回可见区域
-/// （否则那对绝对坐标已不属于任何显示器，气泡不可见也就无法再拖动纠正）。
+/// 不会把副屏的合法负坐标拽回主屏，副屏拔掉后也能把气泡拉回可见区域。
 fn fixed_anchor(fx: i32, fy: i32, caret_x: i32, caret_y: i32, cw: u32, ch: u32) -> (i32, i32) {
     let (ax, ay) = if (fx, fy) == FIXED_UNSET {
         (caret_x, caret_y)
@@ -942,10 +940,8 @@ fn fixed_anchor(fx: i32, fy: i32, caret_x: i32, caret_y: i32, cw: u32, ch: u32) 
 /// 与引入避让前一致）。`x` 已含水平偏移；`off_y` 只加在首选侧。`bounds` 为 `None`（外部宿主
 /// 拿不到屏幕几何）时只看候选窗。
 ///
-/// 抽出来是为了可测——平台取工作区的部分埋在 `#[cfg(windows)]` + unsafe 里，Linux CI 上跑不到。
-/// 要锁住的性质之一是**坐标不得假设桌面原点为 (0,0)**：主显示器左上角才是虚拟桌面原点，
-/// 摆在主屏左侧/上方的副屏工作区坐标为负，任何 `max(0)` 都会把气泡推回主屏
-/// （见本模块测试 `left_monitor_negative_x_survives`）。
+/// 抽出来是为了在 Linux CI 上可测。坐标不得假设桌面原点为 (0,0)：主屏左侧/上方的副屏坐标为负，
+/// 任何 `max(0)` 都会把气泡推回主屏（测试 `left_monitor_negative_x_survives`）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn place_caret_tip(
     x: i32,
@@ -1022,8 +1018,8 @@ fn place_below_or_above(
 
 /// 跟随光标落位：取光标所在显示器工作区，交 [`place_caret_tip`]。
 ///
-/// 显示器按 **caret 点**反查（`MONITOR_DEFAULTTONEAREST`），故天然跟随光标所在屏；
-/// 查不到工作区时只按候选窗避让，**不得**再做任何以 0 为下界的兜底钳制。
+/// 显示器按 caret 点反查（`MONITOR_DEFAULTTONEAREST`），故天然跟随光标所在屏；
+/// 查不到工作区时只按候选窗避让，不得再做任何以 0 为下界的兜底钳制。
 #[allow(clippy::too_many_arguments)]
 fn clamp_caret_tip(
     x: i32,
@@ -1096,7 +1092,7 @@ impl StatusTip {
 
 #[cfg(test)]
 mod hover_gate_tests {
-    //! 悬停防抖：**「收到 WM_MOUSEMOVE」不等于「用户动了鼠标」**。
+    //! 悬停防抖：「收到 WM_MOUSEMOVE」不等于「用户动了鼠标」。
     //!
     //! 该消息的语义是「鼠标与本窗口的相对位置变了」，气泡自己弹到静止的指针下方同样满足。
     //! 少了物理坐标门控，气泡一弹在鼠标上就被判成悬停中，`interacting()` 恒真，

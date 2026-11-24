@@ -64,12 +64,11 @@ const CASCADE_FALLBACK: &[&str] = &[
     "Apple Color Emoji", // emoji 彩色字形（sbix）
 ];
 
-/// 内置回退链里**本机确实装着**的族名（保持原顺序）。
+/// 内置回退链里本机确实装着的族名（保持原顺序）。
 ///
-/// 为什么不直接逐个 `CTFontCreateWithName` 探测：Hiragino Sans GB / STHeiti 这类在新系统上
-/// 是「按需下载」字体，本机没装时 CoreText 不是立刻返回失败，而是去请求下载并**同步等**
-/// FontRegistryUI 应答；没有 GUI 会话（CI runner、登录前）时没人应答，一次调用能阻塞十几分钟。
-/// 先查家族名表（只读名表，不触发下载），没装的直接跳过。
+/// 不直接逐个 `CTFontCreateWithName` 探测：「按需下载」字体（Hiragino Sans GB / STHeiti）
+/// 没装时 CoreText 会请求下载并同步等应答，无 GUI 会话时能阻塞十几分钟。先查家族名表
+/// （不触发下载），没装的直接跳过。
 /// 只用于内置常量链——用户配置的字体名可能是 PostScript 名，不在家族名表里，不能这样筛。
 fn installed_among(cands: &[&'static str]) -> Vec<&'static str> {
     let names: Vec<String> = font_collection::get_family_names()
@@ -91,13 +90,11 @@ pub struct TextRenderer {
     font_size: f32,
     /// 拆字字根字体描述符（可选）：设置后构造级联回退，PUA 码位回退到它。
     chaizi: Option<CTFontDescriptor>,
-    /// 全局字体方案。**本后端只实现「默认回退链」这一半**：链尾各项进 cascade list，
+    /// 全局字体方案。本后端只实现「默认回退链」这一半：链尾各项进 cascade list，
     /// 语义与 DirectWrite 侧的自定义 fallback 一致。
     ///
-    /// ⚠️ **按脚本的字体指派（`FontPlan::declared`）在 macOS 上尚未实现**——它要按
-    /// `font_runs` 的分段构造 attributed string 的分段字体属性，而本后端目前是整行
-    /// 单字体（`make_line`）。蒙古文用户在 Windows 上，故先补 Windows 侧；这里如实标注，
-    /// 不做「声明未实现」的假接线。
+    /// 按脚本的字体指派（`FontPlan::declared`）在 macOS 上尚未实现：它要按 `font_runs` 分段
+    /// 设字体属性，而本后端是整行单字体（`make_line`）。
     plan: FontPlan,
     /// CTFont 缓存：按取整 px keyed，避免每次测量/绘制重建。
     fonts: RefCell<HashMap<u32, CTFont>>,
@@ -147,8 +144,7 @@ impl TextRenderer {
         if self.plan == plan {
             return;
         }
-        // 脚本指派在本后端是**静默无效**的。不吭一声的话，用户看到的是「配了没反应」，
-        // 要靠一轮误诊才查到平台差异——一行日志省掉那一轮。
+        // 脚本指派在本后端无效，记一行日志免得用户对着「配了没反应」误诊。
         if !plan.declared().is_empty() {
             tracing::warn!(
                 "ui.font.scripts 的按脚本字体指派在 macOS 上尚未实现，本次声明的 {} 个脚本类不生效（回退链仍生效）",
@@ -166,22 +162,12 @@ impl TextRenderer {
 
     /// 系统字体集里有没有这个字族名。`None` = 查不了（名字为空）。
     ///
-    /// 语义与 Windows 侧 `dwrite.rs` 的同名方法对齐：问的是**家族名表**里有没有这个名字
-    /// （`CTFontManagerCopyAvailableFontFamilyNames`），而不是「能不能凑出一款字体」——
-    /// 后者（`font_collection::create_for_family` 那条路）对写错的名字也会匹配出最近似的
-    /// 一款，那恰好是这条告警要抓的情形，用它等于自废。
-    /// 大小写不敏感，同 DirectWrite 的 `FindFamilyName`。
+    /// 语义同 Windows 侧 `dwrite.rs` 的同名方法：问家族名表里有没有这个名字，而不是「能不能
+    /// 凑出一款字体」（`font_collection::create_for_family` 对写错的名字也会匹配出近似款，
+    /// 恰好漏掉告警要抓的情形）。大小写不敏感。别改回恒返回 `None`：调用方
+    /// `CandidateWindow::resolve_and_report` 靠 `Some(false)` 才报字体缺失。
     ///
-    /// # ⚠️ 此前这里恒返回 `None`
-    ///
-    /// 理由写的是「先一律不知道，宁可少一条提示也不误报」，而调用方
-    /// （`CandidateWindow::resolve_and_report`）按 `Some(false)` 才判缺失
-    /// ⇒ **整条字体缺失告警在 macOS 上空转**：`ui.font.family` / 方案级 `[candidate]
-    /// font_family` / 主题节点写错字族名，画面静默回落、日志一个字都没有，而 macOS 上
-    /// 写错的概率比 Windows 还高（主题多半是在 Windows 上做的，字体名照抄过来就不存在）。
-    ///
-    /// 成本：一次全量家族名拷贝（本机几百条）。调用点都是换字体 / 换方案 / 换主题这类
-    /// 低频事件，不在渲染热路径——同 Windows 侧那条 `⚠️ 只在设置字体时查` 的约束。
+    /// 成本是一次全量家族名拷贝，只在换字体 / 方案 / 主题这类低频事件调用。
     pub fn family_exists(&self, family: &str) -> Option<bool> {
         let name = family.trim();
         if name.is_empty() {
@@ -201,8 +187,8 @@ impl TextRenderer {
         None
     }
 
-    /// 全局默认字重（`ui.font.weight`）：**本后端尚未实现**——与节点字重一样被
-    /// [`Self::font_styled`] 忽略（平台限制，见看板 A2-1）。保留接口是为了两平台配置通路一致。
+    /// 全局默认字重（`ui.font.weight`）：本后端尚未实现——与节点字重一样被
+    /// [`Self::font_styled`] 忽略（平台限制）。保留接口是为了两平台配置通路一致。
     pub fn set_default_weight(&mut self, _weight: i32) {}
 
     /// 加载拆字字根字体（TTF）作级联回退；失败返回 Err（不影响普通文本渲染）。
@@ -247,7 +233,7 @@ impl TextRenderer {
     /// 拆字字根（PUA，若已加载）→ 符号 → CJK 备选 → 彩色 emoji。
     ///
     /// 必须显式构链而非依赖系统默认级联：一旦设过拆字字体，若只放拆字 descriptor 会
-    /// **覆盖**系统默认级联，导致 emoji/符号丢失（渲染成方框）。故这里把符号 / CJK /
+    /// 覆盖系统默认级联，导致 emoji/符号丢失（渲染成方框）。故这里把符号 / CJK /
     /// Apple Color Emoji 一并纳入 cascade，使这些码位都能解析到对应字形。
     fn apply_cascade(&self, base: CTFont, pt: f64) -> CTFont {
         let mut descs: Vec<CTFontDescriptor> = Vec::new();
@@ -301,13 +287,10 @@ impl TextRenderer {
     /// 带字体族覆盖的 CTFont 解析（styled 路径）。family=None 时走缓存的基准族；
     /// family=Some 时按覆盖族即时构建（不入缓存，覆盖族通常少量出现）。
     ///
-    /// ⚠️ 「通常少量出现」这个前提在**方案级候选字体**下不再成立：方案一旦声明
-    /// `[candidate] font_family`，每个候选文字叶子的每次测量与每次绘制都走这条不缓存的路
-    /// （`resolve_base` + `apply_cascade`，后者内含一串 `new_from_name`）。
-    /// 蒙文用户在 Windows，故暂不改；macOS 上真用起这个功能时应加一个按 (族, 字号) 的缓存。
+    /// 方案声明 `[candidate] font_family` 时「少量出现」不再成立，每个候选叶子每次测量与绘制
+    /// 都走这条不缓存的路；macOS 上真用起来时应加按 (族, 字号) 的缓存。
     ///
-    /// weight 当前
-    /// 不合成粗体（CoreText 合成粗体涉及 symbolic traits，纯视觉差异，留待后续）。
+    /// weight 当前不合成粗体（涉及 symbolic traits，留待后续）。
     fn font_styled(&self, size: f32, _weight: i32, family: Option<&str>) -> CTFont {
         match family {
             None => self.font_for(size),
@@ -321,10 +304,9 @@ impl TextRenderer {
 
     /// 基准字体的自然行高：ascent + descent + leading。
     ///
-    /// 行高与基线都只看**基准字体**，不看 `CTLine` 的 typographic bounds——后者取行内所有
-    /// 回退字体（Apple Color Emoji 等）里最大的那个，含 emoji 的候选行会比纯汉字行高一截、
-    /// 候选窗高度随之抖动。与 dwrite 后端钉 UNIFORM 行距是同一条约定，两端必须一致，
-    /// 否则同一份配置两平台行高不同。比基准字体高的字形按溢出画，不裁切。
+    /// 行高与基线都只看基准字体，不看 `CTLine` 的 typographic bounds（取行内最大的回退字体，
+    /// 含 emoji 的行会更高、候选窗高度抖动）。与 dwrite 后端的 UNIFORM 行距是同一条约定，
+    /// 两端必须一致。比基准字体高的字形按溢出画，不裁切。
     fn line_height(font: &CTFont) -> f64 {
         font.ascent() + font.descent() + font.leading()
     }
@@ -373,9 +355,7 @@ impl TextRenderer {
         }
         let line = make_line(text, &font, None);
         let b = line.get_typographic_bounds();
-        // 行高取**基准字体**自身的度量，不取这一行的 typographic bounds：后者是行内所有
-        // 回退字体里最大的那个，含 emoji 的候选会比纯汉字行高出一截，候选窗高度随之抖动。
-        // 与 dwrite 后端的 UNIFORM 行距同一条约定（见 `dwrite.rs` 的 `line_height_for`）。
+        // 行高取基准字体自身的度量，理由见 `line_height`。
         let height = Self::line_height(&font) as f32;
         TextMetrics {
             width: b.width as f32,
@@ -429,7 +409,7 @@ impl TextRenderer {
             color[3] as f64 / 255.0,
         );
         let line = make_line(text, &font, Some(&cg_color));
-        // 基线按**基准字体**的 ascent 放，与 `measure` 取的行高同一口径：行高不再跟着
+        // 基线按基准字体的 ascent 放，与 `measure` 取的行高同一口径：行高不再跟着
         // 行内最高的回退字体走，基线也不能跟着走，否则 emoji 行里的汉字会整体下沉。
         let ascent = font.ascent();
         let space = CGColorSpace::create_device_rgb();
@@ -445,7 +425,7 @@ impl TextRenderer {
                 bitmap_info,
             );
             // 不翻转上下文：CGBitmapContext 默认 bottom-left 原点、CTLine 字形自然朝上；
-            // translate(0,h)+scale(1,-1) 会让字形上下颠倒（实测候选字倒置）。缓冲是 top-down
+            // translate(0,h)+scale(1,-1) 会让字形上下颠倒。缓冲是 top-down
             // （row0=顶，与 tiny-skia 框同向），故把基线的 top-down 坐标 y+ascent 换成 CG 的
             // bottom-left 坐标 h-(y+ascent)，文字即正立且落在正确行。
             ctx.set_text_position(x as f64, (h as f32 - (y + ascent as f32)) as f64);
@@ -463,7 +443,7 @@ impl TextRenderer {
     /// 属性不同的区间会被 CoreText 切成不同的 CTRun，跨边界的字距与连字可能因此变化——带色
     /// line 的宽度就不再等于 [`Self::measure`] 量出的宽度，布局与绘制对不上。
     ///
-    /// 做法是**整形只做一次**：整串设 `kCTForegroundColorFromContextAttributeName`（字色取
+    /// 做法是整形只做一次：整串设 `kCTForegroundColorFromContextAttributeName`（字色取
     /// 上下文填充色），这个 line 除此之外与测量用的完全同构；绘制时逐个 CTRun，用
     /// `string_indices` 把颜色区间换算成字形子区间，逐段换填充色再 `CTRunDraw`。字形位置
     /// 来自同一次整形，度量一致由构造保证。CoreGraphics 原生处理填充色的 alpha，无需像

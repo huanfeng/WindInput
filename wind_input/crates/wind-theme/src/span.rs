@@ -1,7 +1,7 @@
 //! 分段着色的求色（设计 `docs/design/text-span-colors.md` §4.2、§6）。
 //!
 //! 片段带的是「角色 / 颜色引用」而不是 RGBA：悬停态只有 UI 知道、明暗切换时 UI 拿手里的候选
-//! 直接重绘，所以颜色必须在**每次画**的时候按当前主题现求。求色是纯函数、只依赖本 crate 的
+//! 直接重绘，所以颜色必须在每次画的时候按当前主题现求。求色是纯函数、只依赖本 crate 的
 //! 类型，候选窗、自绘气泡、macOS 气泡的 runs、设置页预览四处共用同一个口径。
 
 use std::sync::Arc;
@@ -24,7 +24,7 @@ pub struct ColorRef {
     pub dark: Atom,
 }
 
-/// 颜色原子。十六进制在**解析时**就校验（坏值即 [`Atom::Invalid`]）；名字只能在求色时
+/// 颜色原子。十六进制在解析时就校验（坏值即 [`Atom::Invalid`]）；名字只能在求色时
 /// 按当前主题查。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Atom {
@@ -38,9 +38,8 @@ impl Atom {
     fn parse(s: &str) -> Self {
         let s = s.trim();
         if let Some(hex) = s.strip_prefix('#') {
-            // 恰好一个 `#`、其后全是十六进制位，才交给 parse_hex 换算。不能直接喂它：它为兼容
-            // 老主题会削掉**全部**前导 `#`（`##C00000` 照认）、也认不带 `#` 的 6 / 8 位裸写——
-            // 内联色要的是写法严格。（`from_str_radix` 认前导 `+` 的问题 parse_hex 已自己挡掉。）
+            // 恰好一个 `#`、其后全是十六进制位，才交给 parse_hex。不能直接喂它：它为兼容老主题
+            // 会削掉全部前导 `#`、也认不带 `#` 的裸写，内联色要的是写法严格。
             let strict =
                 matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit());
             return if strict {
@@ -83,7 +82,7 @@ impl ColorRef {
 }
 
 impl InlineColor {
-    /// `SPEC := COLOR ( ',' KEY '=' COLOR )*`，记号两侧空白忽略。**不失败**：坏值落
+    /// `SPEC := COLOR ( ',' KEY '=' COLOR )*`，记号两侧空白忽略。不失败：坏值落
     /// [`Atom::Invalid`]（该段按正文色显示，§4.5）；`KEY` 目前只认 `selected`，其余忽略——
     /// 前向兼容，将来加 `hover=` 时老版本不至于把整段判非法。
     pub fn parse(spec: &str) -> Self {
@@ -129,10 +128,8 @@ pub fn body_color(node: &RvNode, state: TextState, fallback: Rgba) -> Rgba {
 /// 按当前明暗解析一个颜色引用。`None` = 非法或当前主题查不到（调用方回落正文色）。
 ///
 /// 气泡里的名字先查 `tooltip_<名>`、查不到再查同名：为白底调的亮档色放进深色气泡会看不清
-/// （§5.4）。`transparent` 占着宽度却看不见，只会是误用，按查不到处理（§4.5）。
-///
-/// 解析出来 alpha 为 0 的一律按查不到处理（字面 `#RRGGBB00`、alpha 为 0 的 token 同理）：
-/// 文字占着宽度却看不见，只会是误用，与 `transparent` 同一口径（§4.5）。
+/// （§5.4）。`transparent` 及任何 alpha 为 0 的结果都按查不到处理：占着宽度却看不见，只会是
+/// 误用（§4.5）。
 fn resolve_ref(theme: &Resolved, is_tooltip: bool, r: &ColorRef) -> Option<Rgba> {
     let c = match if theme.is_dark { &r.dark } else { &r.light } {
         Atom::Rgba(c) => Some(*c),
@@ -161,9 +158,9 @@ fn resolve_ref(theme: &Resolved, is_tooltip: bool, r: &ColorRef) -> Option<Rgba>
 /// → ② 该状态单列的角色色 → 规则 3（状态改了正文色 ⇒ 正文色）→ ③ 常态角色色 →
 /// ④ 段名里的变量回落 `title` → ⑤ 正文色。
 ///
-/// 「状态改了正文色」按**有效色值**比（该状态正文色 ≠ 常态正文色），不按主题写没写
-/// `[comment.selected] color`：派生主题常把 base 的选中色写回常态色，按「写没写」判会让它
-/// 在选中态无端丢掉全部分色（§6.3，2026-09-27 确认）。
+/// 「状态改了正文色」按有效色值比（该状态正文色 ≠ 常态正文色），不按主题写没写
+/// `[comment.selected] color`：派生主题常把选中色写回常态色，按「写没写」判会在选中态
+/// 无端丢掉全部分色（§6.3）。
 #[allow(clippy::too_many_arguments)]
 pub fn span_color(
     theme: &Resolved,

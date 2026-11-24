@@ -21,14 +21,11 @@ pub enum UiCommand {
     /// 更新候选列表
     UpdateCandidates {
         preedit: String,
-        /// 编码区插入符位置：`preedit` 内的**字节**偏移（恒在字符边界）。自绘 preedit 栏据此
+        /// 编码区插入符位置：`preedit` 内的字节偏移（恒在字符边界）。自绘 preedit 栏据此
         /// 画竖线；等于 `preedit.len()` 即光标在末尾。
         preedit_caret: usize,
-        /// 编码区**由宿主自绘**（`preedit_display = app_inline`：编码嵌在宿主组合区里）。
-        ///
-        /// ⚠ 它只回答「谁来画」，**不影响 `preedit` 是否下发**——后者恒有值。
-        /// 此前是「不画就不发」，把渲染策略焊在了数据通道上：自绘编码栏的宿主
-        /// （Android）想拿数据，只能去改一个显示模式配置项。
+        /// 编码区由宿主自绘（`preedit_display = app_inline`：编码嵌在宿主组合区里）。
+        /// 它只回答「谁来画」，不影响 `preedit` 是否下发（后者恒有值，Android 等自绘宿主要用）。
         preedit_host_owned: bool,
         /// 是否在「打字中」：有编码、不在联想态（同中立通道 `CompositionView::composing`）。
         /// 联想标识、上屏后的空串都不算——渲染端据此区分打字与上屏后的换帧（皮肤装饰事件）。
@@ -57,7 +54,7 @@ pub enum UiCommand {
         caret_valid: bool,
         /// 固定位置模式（ui.candidate.position_mode=fixed）：忽略光标，用 fixed_x/fixed_y 定位。
         fixed: bool,
-        /// 固定位置的**内容左上**屏幕坐标；(0,0) 表示尚未设定，由 UI 侧落到屏幕默认锚点。
+        /// 固定位置的内容左上屏幕坐标；(0,0) 表示尚未设定，由 UI 侧落到屏幕默认锚点。
         fixed_x: i32,
         fixed_y: i32,
     },
@@ -70,8 +67,7 @@ pub enum UiCommand {
         kind: ToastKind,
         duration_ms: u64,
         /// 自定义强调色（`ui.toast(color=…)`）。None = 按 `kind` 取内置色。
-        /// 给了值就**压过主题配的 toast 边框色**：写这个参数的人是在为这一条提示
-        /// 指定含义（如"危险操作已执行"），主题不该把它抹平。
+        /// 给了值就压过主题配的 toast 边框色：这是为这一条提示指定的含义，主题不该抹平。
         accent: Option<[u8; 4]>,
     },
     /// 显示状态提示气泡（中英/标点/全半角/方案切换），约 1 秒后自动隐藏。
@@ -98,7 +94,7 @@ pub enum UiCommand {
     /// 隐藏输入诊断 HUD。
     HideInputDiag,
     /// 复制输入诊断 HUD 当前显示的文本到剪贴板（右键菜单）。
-    /// 走 UI 线程而非协调器直接写剪贴板：文本以**实际渲染的行**为准（含分区隐藏结果），
+    /// 走 UI 线程而非协调器直接写剪贴板：文本以实际渲染的行为准（含分区隐藏结果），
     /// 那份只有 UI 侧有。
     CopyInputDiagText,
     /// 更新常驻工具栏状态（中英/方案/标点/全半角）
@@ -107,10 +103,8 @@ pub enum UiCommand {
     HideToolbar,
     /// 设置工具栏锚点（启动恢复持久化位置 / 焦点换屏后落到该屏的记忆位置）。
     ///
-    /// 传的是窗口**右下角**的屏幕坐标，不是左上角：工具栏的尺寸会在位置不变的前提下
-    /// 变化（横纵切换是宽高对调、增删格子改条长），锚右下角才能让这些变化朝屏幕内侧
-    /// 展开而不是把条顶出工作区。落点 `(right - w, bottom - h)` 由 UI 侧在排版之后算——
-    /// 与 [`Self::SetToolbarCorner`] 同一个理由，`w`/`h` 只有那一刻才可信。
+    /// 传窗口右下角屏幕坐标：工具栏尺寸会变（横纵切换、增删格子），锚右下角才能让变化朝
+    /// 屏幕内侧展开。落点 `(right - w, bottom - h)` 由 UI 侧排版之后算，`w`/`h` 那时才可信。
     SetToolbarAnchor { right: i32, bottom: i32 },
     /// 把工具栏落到指定显示器工作区的右下角——焦点切到一块从未拖过工具栏的屏时下发。
     /// 传边界而非坐标：右下角要减工具栏自身尺寸，那只有 UI 侧知道。
@@ -129,20 +123,16 @@ pub enum UiCommand {
     /// 工具栏显示哪些格、按什么顺序（顺序即渲染顺序）。来自 ui.toolbar.items，
     /// 协调器 apply_ui_config（启动 + 配置重载）下发，解析与告警都在那侧。
     ///
-    /// **不并进 `UpdateToolbar`**：那条是随按键高频推送的动态状态、靠 `PartialEq` 去重，
-    /// 把这份配置塞进去等于每次切中英都 clone 一遍列表再深比较——去重反成开销。
-    /// 同 `SetToolbarVertical` / `SetToolbarAutoHide` 的分界。
+    /// 不并进 `UpdateToolbar`：那条随按键高频推送、靠 `PartialEq` 去重，塞进配置列表会让
+    /// 去重反成开销。
     SetToolbarLayout(Vec<ToolbarItem>),
     /// 应用主题（协调器加载解析后下发）
     SetTheme(Box<wind_theme::Resolved>),
     /// 候选布局方向。来自 ui.candidate.layout（叠加方案级与模式级意图后的结果）。
     ///
-    /// 两位刻意分开而不是一个四值枚举：旋转态的 `vertical` 是 **false**（屏幕上候选确是
-    /// 并列的），于是渲染端所有按方向分叉的既有判据自动走横排那一支，一处不用改；
-    /// 只有「列表怎么构造」这一件事额外判 `rotated`。
-    /// `upright` 再往下一层，只改「叶子怎么搭」，排列与 `rotated` 完全一致。
-    /// ⚠️ 合法组合只有四个：`vertical && rotated` 不合法（竖排再转 90° 就是横排），
-    /// `upright && !rotated` 也不合法（字直立是旋转态内部的取舍）。
+    /// 刻意分成几位而不是一个枚举：旋转态的 `vertical` 是 false（候选确是并列的），渲染端
+    /// 按方向分叉的判据自动走横排；只有列表构造额外判 `rotated`，`upright` 只改叶子怎么搭。
+    /// 合法组合只有四个：`vertical && rotated`、`upright && !rotated` 都不合法。
     SetCandidateLayout {
         /// 候选纵向堆叠。
         vertical: bool,
@@ -158,14 +148,10 @@ pub enum UiCommand {
     SetCandidateFontSize(f32),
     /// 候选字体：主字体 + 回退链 + 按脚本的字体指派。来自 `[ui.font]`。
     ///
-    /// 三项合成一条命令而非各发各的：`fallback` 的语义是「`family` 缺字时找谁」，
-    /// 链首就是 `family` 本身 —— 拆成两条命令就产生了**到达顺序依赖**（先收到链、
-    /// 后收到主字体时，链首是错的），而命令通道不保证接线方按发送顺序消费每一类。
-    /// 同 `SetCandidateMinSize` 把五个值并一条的理由。
+    /// 三项合成一条命令：链首就是 `family`，拆开会产生到达顺序依赖。
     ///
-    /// `scripts` 的键是**字符串**而不是枚举：脚本类的定义与它的 Unicode 区间表同住
-    /// wind-ui（`text::script`），把枚举拆到本协议 crate 会让「加一个类」变成改两个 crate，
-    /// 而区间表才是那个类真正的定义。未知键由渲染端记一条 warn 后忽略——配置是用户手写的。
+    /// `scripts` 的键是字符串而不是枚举：脚本类的定义与它的 Unicode 区间表同住 wind-ui
+    /// （`text::script`），加一个类不必改两个 crate。未知键由渲染端 warn 后忽略。
     SetCandidateFont {
         /// `ui.font.family`，空 = 用渲染端的内置默认字族。
         family: String,
@@ -176,19 +162,17 @@ pub enum UiCommand {
         /// `ui.font.weight`，0 = 不指定（旧 GDI 字体名里带的字重 / 常规）。
         weight: i32,
     },
-    /// 候选**文字节点**的字族覆盖（方案级 `[candidate] font_family`）；空 = 不覆盖。
+    /// 候选文字节点的字族覆盖（方案级 `[candidate] font_family`）；空 = 不覆盖。
     ///
-    /// ⚠️ 与 [`Self::SetCandidateFont`] 的**下发节奏不同**，故是两条命令而不是一个字段：
-    /// 前者来自 `ui.font`、随配置重载推一次；本条的归属是**数据方案**
-    /// （临英/快符叠加时会切走），随输入语境逐次按键变化，故在 `UpdateCandidates`
-    /// 的两个发送点之前重算。合成一条会让配置重载那条路每次按键都重推整份字体方案。
+    /// 与 [`Self::SetCandidateFont`] 下发节奏不同，故分两条：本条归属数据方案（临英/快符叠加
+    /// 时会切走），在 `UpdateCandidates` 的两个发送点之前重算；前者只随配置重载推一次。
     SetCandidateTextFamily(String),
     /// 候选窗尺寸下限（抗抖动）。来自 ui.candidate.min_window_width_horizontal /
     /// min_window_width_vertical / min_window_height_horizontal /
     /// min_window_height_vertical / min_rows。
     ///
-    /// 五值合成一条命令而非各发各的：每条命令都要在两个平台的 manager 各接一条分发臂、
-    /// 在启动与热重载两处各发一次，合并后这四个接线点只需记住一次。
+    /// 五值合成一条命令：每条命令都要在各平台 manager 接分发臂、在启动与热重载各发一次，
+    /// 合并后接线点只记一次。
     SetCandidateMinSize {
         /// 横排时窗口最小宽度，单位 dp（0=不限）。
         width_horizontal: u32,
@@ -219,18 +203,16 @@ pub enum UiCommand {
     SetPagerInPreedit(bool),
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。
     ///
-    /// ★ **横竖各下发一份**，由渲染端按自己的排布取：排布是渲染端的状态（随
-    /// `set_orientation` 变，还有旋转态），协调器发出这条的那一刻并不知道稍后会用哪一档。
-    /// 与既有的最小窗口尺寸一次下发四个值是同一套做法。
+    /// 横竖各下发一份，由渲染端按自己的排布取：排布是渲染端的状态，协调器下发时不知道
+    /// 稍后用哪一档。
     SetPagerDisplay { h: String, v: String },
     /// 页码文字显示覆盖（""跟随主题/"show"/"hide"）。来自 ui.candidate.page_number_display。
     /// 同样横竖各一份，理由见上。
     SetPageNumberDisplay { h: String, v: String },
     /// 拆字字根字体（PUA 字根字符渲染）：TTF 文件路径 + DWrite 家族名（取自方案 [engine.chaizi]）。
     ///
-    /// `path` 为空 = **撤掉**字根字体。渲染端的私用区字体位只有一个，且优先于方案级
-    /// `[candidate] font_family`：切到不带字根字体的方案时不撤，上一个方案的字根字体就会
-    /// 接管新方案的全部私用区文字（五笔 → Toli 蒙古文：蒙文被画成字根或空白）。
+    /// `path` 为空 = 撤掉字根字体。渲染端的私用区字体位只有一个且优先于方案级
+    /// `[candidate] font_family`，切方案不撤的话，上一个方案的字根字体会接管新方案的私用区文字。
     SetTooltipChaiziFont { path: String, family: String },
     /// 显示菜单（候选右键菜单 / 功能主菜单；UI 自管导航与子菜单）。
     ShowCandidateMenu {
@@ -280,7 +262,7 @@ pub enum UiCommand {
     ScreenshotStatusTip { dir: std::path::PathBuf },
     /// 把悬停提示的内容复制到剪贴板并 Toast 结果（其右键菜单的各「复制」项）。
     ///
-    /// 文本由协调器按**原始行**拼好（未截断、未折行，见 `RenderedTooltip`）——气泡上画的是
+    /// 文本由协调器按原始行拼好（未截断、未折行，见 `RenderedTooltip`）——气泡上画的是
     /// 显示行，UI 侧手里没有原文。空串 = 没有可复制的内容，UI 提示「为空」。
     CopyTooltipText(String),
     /// 截图悬停提示到文件（其右键菜单「截图此窗口」）。
@@ -301,7 +283,7 @@ pub enum UiCommand {
     RegisterGlobalHotkeys(Vec<GlobalHotkeyEntry>),
     /// 软键盘：显示面板，或整块刷新它（切面也走这一条）。
     ///
-    /// 只带**当前面**的键位，不带全部 13 面，理由见 [`crate::softkeyboard`]。
+    /// 只带当前面的键位，不带全部 13 面，理由见 [`crate::softkeyboard`]。
     ShowSoftKeyboard {
         /// 各面显示名，用来画标签行。
         pages: Vec<String>,
@@ -309,24 +291,18 @@ pub enum UiCommand {
         current: usize,
         /// 当前面的键位表，顺序即键盘上的行列顺序。
         keys: Vec<SoftKeyCap>,
-        /// 当前面是**键盘面**（`send_keys`）：画的是键盘本来就有的键。
-        ///
-        /// 面板只用它做一件事：**让 CapsLock 参与字母键的档位显示**。键盘面上
-        /// Caps 开着敲 `q` 出的是 `Q`，键帽就该显示 `Q`；符号面上 CapsLock 没有
-        /// 「大写」这个语义，按键处理也只认 Shift，跟着变只会让显示与实际不符。
+        /// 当前面是键盘面（`send_keys`）：画的是键盘本来就有的键。面板只用它让 CapsLock
+        /// 参与字母键的档位显示；符号面上按键只认 Shift，跟着 Caps 变会与实际不符。
         send_keys: bool,
-        /// 该屏记忆的面板**右下角**屏幕坐标；`None` = 这块屏没记录过。
+        /// 该屏记忆的面板右下角屏幕坐标；`None` = 这块屏没记录过。
         ///
-        /// 随每一条 `ShowSoftKeyboard` 重发（含切面刷新），而不是只在首次打开时发一次：
-        /// 各面键数不同 ⇒ 切面会改面板尺寸，锚右下角正是为了让那次尺寸变化朝屏幕内侧
-        /// 展开。协调器侧的内存镜像是这份锚点的真相源（拖动上报即更新），故这里每次
-        /// 都带上最新值不会与用户刚拖到的位置打架。
+        /// 每条都重发（含切面刷新）：切面会改面板尺寸，锚右下角让变化朝屏幕内侧展开。真相源是
+        /// 协调器的内存镜像（拖动上报即更新），不会与刚拖到的位置打架。
         anchor: Option<(i32, i32)>,
         /// 焦点显示器工作区 `(left, top, right, bottom)`；`None` = 协调器查不到
         /// （非 Windows / 查询失败），UI 侧自行回退到主屏。
         ///
-        /// ⚠️ 传边界而非现成坐标，与 [`Self::SetToolbarCorner`] 同一个理由：默认位置
-        /// （底部居中）要减去面板自身的 w/h，而尺寸只有 UI 侧知道，且要等排版之后才可信。
+        /// 传边界而非现成坐标，理由同 [`Self::SetToolbarCorner`]：默认位置要减面板自身尺寸。
         work_area: Option<(i32, i32, i32, i32)>,
     },
     /// 软键盘：隐藏面板。

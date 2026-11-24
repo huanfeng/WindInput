@@ -1,45 +1,20 @@
-//! macOS 软键盘面板的**冒烟验证**：裸可执行文件到底开不开得出窗口。
+//! macOS 软键盘面板的冒烟验证：LaunchAgent 拉起的裸可执行文件（非 .app bundle）能否开出窗口。
 //!
-//! # 它验证的是哪一条假设
+//! 这条路上的坑清一色是「返回码正常但功能不生效」，所以判据一律不取「调用没报错」。背景见
+//! `docs/design/soft-keyboard.md` 的「11.2 主线程必须跑 `[NSApp run]`」。四项判定：
 //!
-//! 服务是 LaunchAgent 拉起的**非 .app bundle 的裸可执行文件**。它能注册 Carbon 全局
-//! 热键（说明有窗口服务器连接），但本仓此前**从未在服务进程里开过窗**——AppKit 的
-//! NSPanel 在这种进程形态下是否真的能上屏，是「服务端自绘软键盘」这条路唯一无法靠
-//! 编译和单测证伪的假设。本例就为它而写。
+//! 1. 窗口在不在屏：问窗口服务器（`CGWindowListCopyWindowInfo` 里属于本进程且
+//!    `kCGWindowIsOnscreen` 为真的窗口）。不用截图：`CGWindowListCreateImage` 要「屏幕录制」授权。
+//! 2. 鼠标事件到不到得了视图：往 `NSApp` 队列投一个鼠标 NSEvent，看上行通道收不收得到
+//!    `SoftKeyboardKey`。钉的是主线程跑 Carbon `RunApplicationEventLoop()` 时 NSApp 从不运行、
+//!    鼠标一次都不来的缺陷。
+//! 3. Carbon 全局热键有没有被换循环带坏：往 Carbon 主事件队列投 `kEventHotKeyPressed`，看
+//!    handler 还在不在被派发。
+//! 4. 「重启服务」还退不退得出来：`NSApp.stop:` 要等下一个事件处理完才生效，本例卡住不退
+//!    说明补投的唤醒事件没起作用。
 //!
-//! # 判据不是「没报错」
-//!
-//! `orderFront:` 对一个拿不到窗口服务器的进程同样不报错——这正是 `global_hotkey_macos`
-//! 模块头列的那三个坑的共同特征（返回码全部正常，功能全部不生效）。所以判据取
-//! **窗口服务器自己的说法**：`CGWindowListCopyWindowInfo` 里有没有一个属于本进程、
-//! 且 `kCGWindowIsOnscreen` 为真的窗口。
-//!
-//! 用它而不是截图，是因为窗口**元数据**不需要授权，而 `CGWindowListCreateImage` 自
-//! macOS 14 起要「屏幕录制」——本输入法申请的是「辅助功能」，为一次冒烟去要一项更
-//! 敏感的授权不成比例（与 `PanelCapture` 不走截图那条路是同一个判断）。
-//!
-//! # 三项判定
-//!
-//! 判据一律**不取「调用没报错」**——这条路上的坑清一色是*返回码正常但功能不生效*
-//! （`global_hotkey_macos` 模块头列了三个同型的）。
-//!
-//! 1. **窗口在不在屏**：问窗口服务器（`CGWindowListCopyWindowInfo`），不是问我们自己。
-//! 2. **鼠标事件到不到得了视图**：往 `NSApp` 队列投一个鼠标 NSEvent，看上行事件通道
-//!    收不收得到 `SoftKeyboardKey`。这一条钉的是 2026-09-05 那个缺陷：窗口画得出来、
-//!    CFRunLoop 的 source 与 timer 也在跑，鼠标却一次都不来——因为当时主线程跑的是
-//!    Carbon 的 `RunApplicationEventLoop()`，它**从不让 NSApplication 跑起来**
-//!    （实测 `NSApp.isRunning == false`），于是没有人调 `NSApp.sendEvent:`。
-//! 3. **Carbon 全局热键有没有被换循环带坏**：往 Carbon 主事件队列投一个
-//!    `kEventHotKeyPressed`，看 handler 还在不在被派发。换事件循环动的是热键**唯一**
-//!    的宿主，这一条是它的回归门。
-//! 4. **「重启服务」还退不退得出来**：调 `stop_main_loop()` 看 `run_main_loop()` 会不会
-//!    返回。`NSApp.stop:` 与旧的 `QuitApplicationEventLoop()` 语义不同——它只设一个标志，
-//!    **要等下一个事件处理完**才生效，服务空闲时可能很久没有事件。本例若卡住不退，
-//!    说明那个补投的唤醒事件没起作用。
-//!
-//! ⚠️ 二、三两项都用「往队列里投事件」而不是合成真实输入：`CGEventPost` 在现代 macOS
-//! 要「辅助功能」授权，非交互会话拿不到——实测光标纹丝不动，于是**任何**事件循环下都
-//! 得到「没反应」，是个假阴性。这个坑本例踩过一次，别再踩回去。
+//! 二、三两项用「往队列里投事件」而不是 `CGEventPost` 合成真实输入：后者要「辅助功能」授权，
+//! 非交互会话拿不到，任何事件循环下都会假阴性。
 //!
 //! # 跑法
 //!
@@ -47,7 +22,7 @@
 //! cargo run -p wind-ui --example mac_panel_smoke
 //! ```
 //!
-//! 走的是服务 `main.rs` macOS 分支的**同一条路**（`install_on_main` + `run_main_loop`）。
+//! 走的是服务 `main.rs` macOS 分支的同一条路（`install_on_main` + `run_main_loop`）。
 //! 面板会在屏幕上出现几秒，随后自行退出并打印判定结果。
 
 fn main() {
@@ -142,9 +117,8 @@ mod imp {
             wind_ui::global_hotkey_macos::apply(
                 vec![wind_ui_types::GlobalHotkeyEntry {
                     id: 1,
-                    // ⚠️ 故意取一个**没人会占**的冷门组合（ctrl+alt+shift+F12）：注册成功是
-                    // 判定三的前提（`ACTIONS` 只登记注册成功的条目），而本例又会把它真的
-                    // 注册成系统级热键几秒钟——占用常用键既失礼，也会让判定假失败。
+                    // 故意取冷门组合（ctrl+alt+shift+F12）：注册成功是判定三的前提（`ACTIONS`
+                    // 只登记成功的条目），占用常用键会让判定假失败。
                     modifiers: 0x1 | 0x2 | 0x4, // MOD_ALT | MOD_CONTROL | MOD_SHIFT
                     vk: 0x7B,                   // VK_F12
                     action: "smoke_probe".into(),
@@ -206,8 +180,7 @@ mod imp {
 
             // ── 判定四：走「重启服务」那条退出路径 ──
             //
-            // 刻意**不用 `process::exit`**：那样测不到 `stop_main_loop`。看门狗兜底，
-            // 卡住就是判定失败，而不是让 CI/开发者对着一个挂死的进程干等。
+            // 刻意不用 `process::exit`：那样测不到 `stop_main_loop`。看门狗兜底，卡住即判定失败。
             println!("请求退出事件循环…");
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_secs(5));
@@ -217,7 +190,7 @@ mod imp {
             wind_ui::global_hotkey_macos::stop_main_loop();
         });
 
-        // 与服务 `main.rs` 里 macOS 分支的收尾**完全同构**。
+        // 与服务 `main.rs` 里 macOS 分支的收尾完全同构。
         sk::install_on_main();
         wind_ui::global_hotkey_macos::run_main_loop();
         println!("✅ 退出判定通过：stop_main_loop() 让事件循环正常返回");
@@ -229,12 +202,10 @@ mod imp {
         DispatchQueue::main().exec_async(f);
     }
 
-    /// 把一个鼠标 NSEvent **直接投进 `NSApp` 的事件队列**，看事件循环派不派发它。
+    /// 把一个鼠标 NSEvent 直接投进 `NSApp` 的事件队列，看事件循环派不派发它。
     ///
-    /// ⚠️ 刻意不用 `CGEventPost` 合成真实鼠标：那条路在现代 macOS 要「辅助功能」授权，
-    /// 非交互会话拿不到，实测光标纹丝不动 —— 用它做判据会在**任何**事件循环下都得到
-    /// 「没反应」，是个假阴性。`postEvent:atStart:` 不需要任何授权，而且它测的正好是
-    /// 本次要问的那件事：**有没有人在 `sendEvent:`**。
+    /// 不用 `CGEventPost`（要「辅助功能」授权，会假阴性，见模块头）。`postEvent:atStart:`
+    /// 无需授权，测的正好是「有没有人在 `sendEvent:`」。
     fn post_synthetic_click(win_number: isize, b: (f64, f64, f64, f64)) {
         use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
         use objc2_foundation::{MainThreadMarker, NSPoint};
@@ -247,7 +218,7 @@ mod imp {
         println!("NSApp.isRunning = {}", app.isRunning());
 
         let (_, _, w, h) = b;
-        // 窗口坐标：AppKit 的窗口坐标原点在**左下**，键盘区在面板下半部分 ⇒ 取窗口坐标
+        // 窗口坐标：AppKit 的窗口坐标原点在左下，键盘区在面板下半部分 ⇒ 取窗口坐标
         // 的偏下位置，也就是 y 偏小。
         for (fx, fy) in [(0.30, 0.30), (0.50, 0.30), (0.70, 0.30), (0.50, 0.15)] {
             let loc = NSPoint::new(w * fx, h * fy);

@@ -1,7 +1,7 @@
 //! 临时词存储（redb）—— 自动学习的临时词库
 //!
 //! 与 Go 版本 `wind_input/internal/store/temp_words.go` 对齐。复用 user_words 的 key/value 编码。
-//! 权重上限 `TEMP_WORD_MAX_WEIGHT=10000`。淘汰（evict）在**单写事务**内完成（修 Go 的 view→update
+//! 权重上限 `TEMP_WORD_MAX_WEIGHT=10000`。淘汰（evict）在单写事务内完成（修 Go 的 view→update
 //! TOCTOU，store.md §7.4）。晋升条件（count≥promote_count）由调用方（dict StoreTempLayer）判定。
 //!
 //! 词频重构后 count 与权重解耦：count 只用于晋升判定（不再随复选驱动权重增长），
@@ -37,7 +37,7 @@ impl Store {
     /// promote_count 比较决定是否晋升）。
     ///
     /// `boundary`：该 code 的音节边界（见 `wind_dict::binformat::DictEntry::boundary`），
-    /// 0=无信息。已存在的记录**沿用旧 boundary**——同 (schema,code,text) 的切分是确定的，
+    /// 0=无信息。已存在的记录沿用旧 boundary：同 (schema,code,text) 的切分是确定的，
     /// 不因再次学习而变；且旧值可能来自更可靠的来源。
     pub fn learn_temp_word(
         &self,
@@ -104,11 +104,9 @@ impl Store {
     ///
     /// 与 [`Store::for_each_user_word`] 同构：`code` / `text` 直接借 redb 的页，不物化。
     ///
-    /// **它是本模块「哪些记录算数」的唯一一份判据**——[`Self::count_temp_words`] 与
-    /// [`Self::search_temp_words_prefix`] 都走它。此前那两个各抄了一遍过滤条件，于是
-    /// 「计数与列表口径一致」只能靠测试去比，而**在全是好记录的库上比两条路相等，测不出
-    /// 坏记录上的分叉**（`tests/counts_match_listings.rs` 当时确实漏掉了这个：把计数那份
-    /// 的过滤删成无条件 `n += 1`，测试照样绿）。结构上只留一份，分叉就不可能发生。
+    /// 它是本模块「哪些记录算数」的唯一判据，[`Self::count_temp_words`] 与
+    /// [`Self::search_temp_words_prefix`] 都走它。别再各抄一份过滤条件：好记录上的测试
+    /// 测不出坏记录上的分叉。
     pub fn for_each_temp_word(
         &self,
         schema: &str,
@@ -131,11 +129,8 @@ impl Store {
 
     /// 某方案下的临时词条数。只数不抄。
     ///
-    /// 口径与 [`Self::search_temp_words_prefix`] 一致**是结构保证的**：两者都走
-    /// [`Self::for_each_temp_word`]，不存在第二份过滤判据可供分叉。
-    ///
-    /// ⚠️ 它省的是 Rust 侧的物化峰值（19 万条 × 两个 `String`），**不省 redb 读缓存**：
-    /// range 迭代照样把走过的叶子页读进缓存。见 [`Store::drop_page_cache`]。
+    /// 口径与 [`Self::search_temp_words_prefix`] 一致由结构保证（都走 [`Self::for_each_temp_word`]）。
+    /// 它省的是 Rust 侧的物化峰值，不省 redb 读缓存，见 [`Store::drop_page_cache`]。
     pub fn count_temp_words(&self, schema: &str) -> anyhow::Result<usize> {
         Ok(self.runtime().count_temp(schema))
     }
@@ -158,15 +153,11 @@ impl Store {
     /// 淘汰：保留 max_keep 条，删除其余（按 `(count, created_at, weight)` 升序淘汰）。
     /// 单写事务完成（先在事务内收集快照再删除，无 TOCTOU）。返回淘汰条数。
     ///
-    /// **排序键必须以 `count` 打头**：自动造词写入的 weight 恒为 `LEARN_ADD_WEIGHT`
-    /// （协调器 `coordinator.rs`），只按 weight 排会让整库并列，实际顺序退化成 redb 的
-    /// key 字典序 —— 用过 500 次的词与造出来没用过的词被淘汰的概率一样。`count` 是真正的
-    /// 使用计数：造词写入记 1，之后每次选中该临时词由 `handle_candidate` 再 `learn_temp_word`
-    /// 一次（count++）。
+    /// 排序键必须以 `count` 打头：自动造词的 weight 恒为 `LEARN_ADD_WEIGHT`，按 weight 排会
+    /// 整库并列、退化成 key 字典序。`count` 才是使用计数（造词记 1，每次选中再加 1）。
     ///
-    /// 次键取 `created_at` 而非 FREQ 表的 `last_used`，**是为了不退化**：淘汰的主力是
-    /// `count == 1`（造出来从未被选中）那批，它们在 FREQ 里根本没有记录，跨表读只会回落到
-    /// 同一个默认值、重新并列。`created_at` 对每条都是确定值，先淘汰最老的没用过的词。
+    /// 次键取 `created_at` 而非 FREQ 表的 `last_used`：淘汰主力是 `count == 1` 那批，它们在
+    /// FREQ 里没有记录，跨表读会重新并列。
     pub fn evict_temp_words(&self, schema: &str, max_keep: usize) -> anyhow::Result<usize> {
         let n = self.runtime().evict_temp(schema, max_keep)?;
         // 没删到就不动代次：代次一变下游就整表重建索引（见测试
@@ -222,7 +213,7 @@ impl Store {
         Ok((rows.len(), skipped))
     }
 
-    /// 从 wdict `WordIo` 行导入临时词，**保留 count 晋升进度**（Merge：weight 取 max、count 取 max；
+    /// 从 wdict `WordIo` 行导入临时词，保留 count 晋升进度（Merge：weight 取 max、count 取 max；
     /// 权重仍受 `TEMP_WORD_MAX_WEIGHT` 约束）。返回导入条数。
     /// 与 `import_temp_words_wdict`（走 learn_temp_word，count 归 1）不同，本方法用于多段词库导入以保真 count。
     pub fn import_temp_word_rows(
@@ -235,7 +226,7 @@ impl Store {
             .iter()
             .map(|r| {
                 // code 列可能是带空格的音节码 → 拆成扁平码 + 边界。
-                // ★ `WordIo::boundary` 优先于空格载体：导入闸口的求解结果走这个字段送进来，
+                // `WordIo::boundary` 优先于空格载体：导入闸口的求解结果走这个字段送进来，
                 // 而空格表达不了单音节（`xian` 的 0b1 join 后无空格，split 回来是 0）。
                 let (code, spaced_b) = wdict::split_spaced_code(&r.code);
                 wind_userdata::runtime::TempWord {
@@ -282,7 +273,7 @@ impl Store {
         Ok(())
     }
 
-    /// 一批 [`Self::promote_temp_word`]：写用户词与删临时词在**同一次** `apply_batch` 里（用户词
+    /// 一批 [`Self::promote_temp_word`]：写用户词与删临时词在同一次 `apply_batch` 里（用户词
     /// 在前），不存在的跳过。返回转正了的 `(code, text)`。
     pub fn promote_temp_words(
         &self,

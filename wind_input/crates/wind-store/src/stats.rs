@@ -1,6 +1,6 @@
 //! 输入统计存储（redb，按日期键）
 //!
-//! 与 Go 版本 `wind_input/internal/store/stats.go` **完整对齐**：每日聚合 `DailyStats`
+//! 与 Go 版本 `wind_input/internal/store/stats.go` 完整对齐：每日聚合 `DailyStats`
 //! （字符分类 / 24 小时分布 / 码长 / 选重 / 活跃时间 / 按方案 / 按来源）+ 全局 `StatsMeta`
 //! （累计 / 首日 / 连续天数 / 最快速度）。采集器见 `stat_collector.rs`。
 //!
@@ -11,18 +11,10 @@
 //!
 //! # 速度模型（v2）
 //!
-//! 速度 = `speed_chars × 60000 / active_millis × speed_factor`，**四个量都与实际字数统计
-//! 分开**。v1 用「全部字符 / 整秒活跃时间」，四条单向正偏差叠乘，实测偏高一倍以上：
-//!
-//! | 偏差 | 成因 | v2 的对策 |
-//! |---|---|---|
-//! | ① 整秒截断 | `num_seconds()` 向零截断，0.8s 的间隔记 0s；手越快砍得越狠 | 分母改毫秒（`active_millis`） |
-//! | ② 口径不对称 | 间隔 ≥ 阈值时**时间丢弃、字数照计** | 段首事件的字数也不进分子 |
-//! | ③ 一次上屏 = 一个时间点 | 4 键出 7 字、1 键出一整条快捷指令 | [`speed_chars_of`] 按击键数封顶 |
-//! | ④ 打错字无从感知 | 退格重打的字符计两遍、耗时算一遍 | `speed_factor` 经验修正 |
-//!
-//! ①②③ 是结构性的，必须在采集期修；只有 ④ 无法从输入法内部观测，才交给系数。
-//! **不要指望系数能替代 ①②③** —— 那等于用一个魔法数去掩盖三个可以精确修掉的量。
+//! 速度 = `speed_chars × 60000 / active_millis × speed_factor`，四个量都与实际字数统计分开。
+//! 整秒截断、段首口径不对称、一次上屏多字三条偏差在采集期结构性修掉，只有打错字无从观测
+//! 才交给系数；别指望系数替代前三条。旧口径的偏差分析见
+//! `docs/architecture/input-stats-speed-model.md`。
 
 use crate::store::{META, STATS_DAILY, Store};
 use chrono::{Duration, NaiveDate};
@@ -55,9 +47,8 @@ pub enum CommitSource {
 impl CommitSource {
     /// 来源总数（by_source 数组长度）。
     ///
-    /// ⚠️ 加变体即改本值。存量的每日统计记录里 `by_source` 只有旧长度，
-    /// `stat_collector::Shared::record` 读回后会先 `resize` 到本值再索引——那道
-    /// resize 是加变体的前提，别把它优化掉。
+    /// 加变体即改本值。存量记录的 `by_source` 只有旧长度，`stat_collector::Shared::record`
+    /// 读回后先 `resize` 到本值再索引，那道 resize 别优化掉。
     pub const COUNT: usize = 13;
     /// 数组索引。
     pub fn index(self) -> usize {
@@ -112,17 +103,15 @@ pub struct DailyStats {
     #[serde(default)]
     pub active_seconds: u32,
     // ── 速度统计专用量（v2 模型，见模块文档「速度模型」）──
-    // 速度分子：与 `total()` **刻意分开**。上屏字数要如实计（用户看的是产出），
-    // 而速度分子要扣掉「短码打长词/一键出一串」这类字符（见 `speed_chars_of`），
-    // 以及段首那些无法测量耗时的字符。两个量纲不同，共用一个累加器必错。
+    // 速度分子：与 `total()` 刻意分开。它扣掉封顶后多出的字符（`speed_chars_of`）与段首
+    // 无法计时的字符，量纲不同，不能共用累加器。
     #[serde(default)]
     pub speed_chars: u32,
-    // 速度分母（毫秒）。`active_seconds` 用 `num_seconds()` 整秒截断，间隔 0.8s 记 0s，
-    // 打得越快分母被砍得越狠（单向偏差），故速度另存毫秒。
+    // 速度分母（毫秒）。`active_seconds` 整秒截断会单向砍小分母，故另存毫秒。
     #[serde(default)]
     pub active_millis: u64,
     // 本记录是否由 v2 速度模型写过。旧库记录没有上面两个量，读回时要回退到旧口径；
-    // 不能用「speed_chars == 0」判断——新模型下它合法地可以是 0（当天全是段首上屏）。
+    // 不能用「speed_chars == 0」判断：新模型下它可以合法为 0（当天全是段首上屏）。
     #[serde(default)]
     pub speed_v2: bool,
     // 按方案分类
@@ -144,9 +133,8 @@ impl DailyStats {
 
     /// 速度的 (分子字符数, 分母毫秒)。区间速度把多天的两个分量分别累加后再除。
     ///
-    /// v2 之前的记录没有这两个量，只能按旧口径（全部字符 / 整秒活跃时间）回退——
-    /// 那个口径系统性偏高，故历史曲线与新数据之间会有一道台阶，这是无法回补的：
-    /// 逐次上屏的击键数与毫秒间隔当时就没存下来。
+    /// v2 之前的记录只能按旧口径（全部字符 / 整秒活跃时间）回退，系统性偏高；
+    /// 历史曲线因此有一道无法回补的台阶。
     pub fn speed_parts(&self) -> (u32, u64) {
         if self.speed_v2 {
             (self.speed_chars, self.active_millis)
@@ -188,15 +176,13 @@ pub const SPEED_SHORT_KEYSTROKES: u32 = 4;
 /// 触发封顶时单次上屏最多计入速度分子的字符数。
 pub const SPEED_SHORT_CHAR_CAP: u32 = 4;
 
-/// 单次上屏计入**速度分子**的字符数（实际字数统计不走这里，如实计全部）。
+/// 单次上屏计入速度分子的字符数（实际字数统计不走这里）。
 ///
-/// 一次上屏在时间轴上只占一个间隔，可产出的字符数却不封顶：4 键出「中华人民共和国」、
-/// 1 键触发快捷指令出二十几个字符——这些字符全额进分子会把速度顶到荒谬的值。
-/// 故击键数 ≤ [`SPEED_SHORT_KEYSTROKES`] 时按 [`SPEED_SHORT_CHAR_CAP`] 封顶。
+/// 一次上屏只占一个时间间隔，短码出长词、快捷指令出一串会把速度顶到荒谬值，故击键数
+/// ≤ [`SPEED_SHORT_KEYSTROKES`] 时按 [`SPEED_SHORT_CHAR_CAP`] 封顶。
 ///
-/// `keystrokes == 0` 表示**未知**（该上屏路径没有编码可依据），此时不封顶：
-/// 宁可漏封（速度偏高一点）也不能误伤——TSF 英文批量上报一次就是几十个 1:1 击键的字符，
-/// 误判成「一键出一串」会把英文速度直接砍到 4。
+/// `keystrokes == 0` 表示未知，不封顶：TSF 英文批量上报一次就是几十个 1:1 击键的字符，
+/// 误封会把英文速度砍到个位数。
 pub fn speed_chars_of(rune_count: u32, keystrokes: u32) -> u32 {
     if keystrokes > 0 && keystrokes <= SPEED_SHORT_KEYSTROKES {
         rune_count.min(SPEED_SHORT_CHAR_CAP)
@@ -210,12 +196,10 @@ const MIN_SPEED_WINDOW_MS: u64 = 5_000;
 
 /// 每分钟字数 = 分子 × 60000 / 分母(ms) × 修正系数。
 ///
-/// `factor` 是经验修正（见 `StatsConfig::speed_factor`）：输入法无从知道用户打错了没有，
-/// 打错后退格重打的字符会被计两遍、耗时却只算一遍，方向恒为正偏差，故出厂取 < 1。
-/// 非有限值或 ≤ 0 一律当 1.0 处理（配置写坏不该把速度清零）。
+/// `factor` 是打错字重打的经验修正（见 `StatsConfig::speed_factor`），出厂取 < 1；
+/// 非有限值或 ≤ 0 当 1.0 处理，配置写坏不该把速度清零。
 ///
-/// 分母小时结果仍是**外推值**而非实测速度，展示当日/区间速度尚可（分母通常够大），
-/// 但绝不可直接拿去刷新历史最快——那个是永久记录，见 [`qualifies_for_max_speed`]。
+/// 分母小时结果是外推值，不可直接拿去刷新历史最快，见 [`qualifies_for_max_speed`]。
 pub fn speed_per_minute_ms(chars: u64, active_millis: u64, factor: f32) -> u32 {
     if chars == 0 || active_millis == 0 {
         return 0;
@@ -237,10 +221,8 @@ const MIN_SPEED_SAMPLE_CHARS: u32 = 100;
 
 /// 该样本是否够格刷新「历史最快」。
 ///
-/// 活跃时间只累加**相邻两次上屏的间隔**，段首那次不计时（见 `StatCollector::record`），
-/// 于是每天开头必然出现「字数已有几十上百、活跃时间还是几秒」的窗口；
-/// 此时 [`speed_per_minute_ms`] 会外推出上千字/分。而 `max_speed` 是永久记录，
-/// 一旦被这种样本污染就再也降不回来（除非重算），故这里要求样本量足够才参与比较。
+/// 段首上屏不计时（见 `StatCollector::record`），每天开头会有「字数已多、活跃时间才几秒」
+/// 的窗口，外推出上千字/分。`max_speed` 是永久记录，被污染就降不回来，故要求样本量足够。
 pub fn qualifies_for_max_speed(chars: u32, active_millis: u64) -> bool {
     active_millis >= MIN_SPEED_SAMPLE_MS && chars >= MIN_SPEED_SAMPLE_CHARS
 }
@@ -256,8 +238,8 @@ struct MonthFile {
 /// 旧表里的每日统计与元数据（迁移用）。
 pub(crate) type LegacyStats = (Vec<(String, DailyStats)>, Option<StatsMeta>);
 
-/// `YYYY-MM-DD` 的月份部分；格式不对（含非 ASCII 数字）⇒ `None`。按字节切之前先验形态——
-/// 直接 `&date[..7]` 遇到全角数字会切在字符中间 panic，而 release 下 panic 会带走整个服务。
+/// `YYYY-MM-DD` 的月份部分；格式不对（含非 ASCII 数字）⇒ `None`。先验形态再按字节切：
+/// 直接 `&date[..7]` 遇全角数字会切在字符中间 panic，带走整个服务。
 fn month_of(date: &str) -> Option<&str> {
     let b = date.as_bytes();
     let ok = b.len() == 10

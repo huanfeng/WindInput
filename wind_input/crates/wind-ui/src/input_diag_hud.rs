@@ -178,8 +178,7 @@ fn window_origin(hwnd: crate::sys::HWND) -> (i32, i32) {
     (r.left, r.top)
 }
 
-/// 每次刷新时如何给窗口定位。抽成纯枚举是为了让"三档"本身可单测——
-/// 真正的坐标计算依赖 Win32（显示器/工作区），但**选哪一档**是纯逻辑。
+/// 每次刷新时如何给窗口定位。抽成纯枚举让「选哪一档」可单测（坐标计算依赖 Win32）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PositionPlan {
     /// 首次显示：落屏幕右下角。
@@ -192,12 +191,8 @@ enum PositionPlan {
 
 /// 定位档位决策。
 ///
-/// `ClampCurrent` 这一档是内容变长时不被屏幕边缘吞掉的关键：分区展开会让高度显著增长，
-/// 左上角还在屏内、右下角却已出界。钳制保持左上角尽量贴近原位，只把溢出部分推回来
-/// ——比整个复位到右下角温和，用户挑的位置基本还在。
-///
-/// 拖动过程不经过这里（`wnd_proc` 直接 `SetWindowPos`），所以拖到哪当次就是哪；
-/// 下一次内容更新才钳回屏内。这正是「手动移动当次不管、下次更新自动恢复」。
+/// `ClampCurrent` 让内容变长（分区展开）时不被屏幕边缘吞掉：保持左上角贴近原位，只把溢出
+/// 部分推回来。拖动过程不经过这里，拖到哪当次就是哪，下次内容更新才钳回屏内。
 fn plan_position(positioned: bool, visible: bool) -> PositionPlan {
     if !positioned {
         PositionPlan::InitialCorner
@@ -212,10 +207,8 @@ fn plan_position(positioned: bool, visible: bool) -> PositionPlan {
 ///
 /// `applied` = 上次已应用的置顶态（`None` = 还没显示过），`want` = 本次期望的。
 ///
-/// ★ **非置顶下的后续刷新必须 `Keep`**，这是本函数存在的全部理由：`LayeredWindow::show`
-/// 无条件 `HWND_TOPMOST`，若非置顶时每次都走 `NoTopmost`，窗口会被反复插到「非置顶组
-/// 顶部」——于是每刷新一次就重新盖住记事本，用户看到的是「置顶开关没用」。只有第一次
-/// 需要真的移出置顶组，之后放手不管，别的窗口被激活时自然就盖过来了。
+/// 非置顶下的后续刷新必须 `Keep`：`LayeredWindow::show` 无条件 `HWND_TOPMOST`，每次都走
+/// `NoTopmost` 会把窗口反复插到非置顶组顶部、盖住别的窗口。只有第一次需要真的移出置顶组。
 fn plan_zorder(applied: Option<bool>, want: bool) -> crate::window::ShowZOrder {
     use crate::window::ShowZOrder;
     if want {
@@ -243,9 +236,8 @@ pub struct InputDiagHud {
     positioned: bool,
     /// 已应用的置顶态。`None` = 还没显示过。
     ///
-    /// 记住它是为了区分「切换到非置顶的那一次」和「后续刷新」：前者要真的把窗口移出置顶组
-    /// 并沉下去，后者必须**完全不动 z 序**——否则每次刷新都把它顶回所有普通窗口之上，
-    /// 用户看到的就是「置顶开关没用」。
+    /// 用来区分「切换到非置顶的那一次」（要移出置顶组）和「后续刷新」（完全不动 z 序），
+    /// 见 [`plan_zorder`]。
     applied_topmost: Option<bool>,
 }
 
@@ -303,17 +295,8 @@ impl InputDiagHud {
         if let Err(e) = self.window.update() {
             tracing::warn!("InputDiagHud update failed: {}", e);
         }
-        // 定位三档（每次更新都重算，故"手动拖动"只在**当次**说了算）：
-        //   1. 首次      → 右下角
-        //   2. 已被拖出屏幕外（可见余量不足）→ 复位右下角，保证还能被抓回来
-        //   3. 其余      → 以窗口**当前实际位置**为基准钳回工作区
-        //
-        // 第 3 档是内容变长时不被屏幕边缘吞掉的关键：分区展开会让高度显著增长，
-        // 原来的左上角还在屏内、右下角却已经出界了。钳制保持左上角尽量贴近原位，
-        // 只把溢出的部分推回来——比"整个复位到右下角"温和得多，用户挑的位置基本还在。
-        //
-        // 拖动过程本身不经过这里（wnd_proc 里直接 SetWindowPos），所以拖到哪就是哪；
-        // 下一次内容更新才会把它钳回屏内。这正是「手动移动当次不管、下次更新恢复」。
+        // 定位三档（见 `plan_position`）：首次落右下角；拖出屏外复位右下角；其余以窗口当前
+        // 实际位置为基准钳回工作区。
         let (cx, cy) = window_origin(self.window.hwnd());
         self.pos = match plan_position(
             self.positioned,
@@ -325,13 +308,10 @@ impl InputDiagHud {
             PositionPlan::ClampCurrent => crate::sys::clamp_to_work_area(cx, cy, w, h),
         };
         self.positioned = true;
-        // z 序三档。**关键在于非置顶时后续刷新必须 Keep**：`show()` 无条件插入置顶组，
-        // 每次刷新都会把窗口顶回所有普通窗口之上——那正是「关了置顶却仍压着记事本」的成因。
+        // z 序三档，非置顶时后续刷新必须 Keep（见 `plan_zorder`）。
         let plan = plan_zorder(self.applied_topmost, v.topmost);
         self.window.show_z(self.pos.0, self.pos.1, plan);
-        // 刚移出置顶组时再补一步：直接插到当前前台窗口之后，立刻沉下去。
-        // 否则窗口停在「非置顶组顶部」，用户得先去点一下记事本才看得出效果，
-        // 而在那之前他多半已经认定开关坏了。
+        // 刚移出置顶组时再插到当前前台窗口之后，立刻沉下去，否则要等用户点别的窗口才看得出效果。
         if plan == crate::window::ShowZOrder::NoTopmost {
             self.sink_below_foreground();
         }
@@ -340,9 +320,8 @@ impl InputDiagHud {
 
     /// 把窗口插到当前前台窗口之后（仅在刚取消置顶时调用）。
     ///
-    /// ⚠ 前台窗口若**自身是置顶窗口**则跳过：`SetWindowPos` 的语义是「插到 topmost 窗口
-    /// 之后的窗口也会变成 topmost」，那样刚清掉的 `WS_EX_TOPMOST` 会当场被重新戴上，
-    /// 净效果与没关一样。
+    /// 前台窗口若自身是置顶窗口则跳过：插到 topmost 窗口之后的窗口也会变成 topmost，
+    /// 刚清掉的 `WS_EX_TOPMOST` 会当场被重新戴上。
     fn sink_below_foreground(&self) {
         #[cfg(windows)]
         unsafe {
@@ -503,9 +482,7 @@ mod tests {
         assert!(rect_visible(-1800, 200, 240, 120, -1920, 0, 3840, 1080, 24));
     }
 
-    /// 定位三档。**关键是第二条**：窗口在屏内时也要走钳制，而不是原样沿用当前坐标
-    /// ——内容变长（展开分区）后左上角还在屏内、右下角已经出界，原样沿用就会被屏幕边缘
-    /// 吞掉一截。这是本次「窗口变大时自动调整位置」需求的落点。
+    /// 定位三档。窗口在屏内时也要走钳制而不是原样沿用坐标，否则内容变长后会被屏幕边缘吞掉。
     #[test]
     fn position_plan_three_cases() {
         assert_eq!(plan_position(false, true), PositionPlan::InitialCorner);
@@ -514,9 +491,7 @@ mod tests {
         assert_eq!(plan_position(true, false), PositionPlan::ResetCorner);
     }
 
-    /// z 序档位。**第三条是这次修的 bug**：非置顶下的后续刷新必须 `Keep`，
-    /// 否则 `show()` 的无条件 `HWND_TOPMOST` 会让每次刷新都把窗口顶回普通窗口之上，
-    /// 表现为「关掉置顶却仍压着记事本」。
+    /// z 序档位。非置顶下的后续刷新必须 `Keep`，否则每次刷新都把窗口顶回普通窗口之上。
     #[test]
     fn zorder_plan_covers_switch_and_steady_state() {
         use crate::window::ShowZOrder;

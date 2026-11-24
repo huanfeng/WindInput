@@ -10,9 +10,8 @@ pub enum ToolbarAction {
     ToggleMode,
     /// 切换到下一个输入方案（`cycle_schema`）。
     ///
-    /// **没有自己的格子**——它由中英格的**中键**产出（0.120 起），以及外部调用。
-    /// 故它不会出现在任何 `ToolbarItem` 的展开结果里，但仍是一个合法的
-    /// `ToolbarAction`：`mouse_toolbar` 与 `build_toolbar_cell_menu` 都要认得它。
+    /// 没有自己的格子：由中英格的中键产出，以及外部调用。`mouse_toolbar` 与
+    /// `build_toolbar_cell_menu` 都要认得它。
     SwitchEngine,
     /// 中/英标点切换
     TogglePunct,
@@ -28,9 +27,8 @@ pub enum ToolbarAction {
     OpenSettings,
     /// 自定义按钮：执行 `ui.toolbar.buttons[i]` 的 cmdbar 表达式。
     ///
-    /// 载荷是**下标**而不是 id 字符串，因为 `ToolbarAction` 必须保持 `Copy`——
-    /// `Toolbar` 的命中表 `Vec<(ToolbarAction, Rect)>` 与 `cell_at` / `hover_at`
-    /// 全建立在这个前提上，带 `String` 会让整条命中链路改签名。
+    /// 载荷是下标而不是 id 字符串：`ToolbarAction` 必须保持 `Copy`（命中表与
+    /// `cell_at` / `hover_at` 都建立在这个前提上）。
     ///
     /// 下标失配（配置重载与 UI 侧 spec 之间的一瞬）最坏是执行了相邻按钮的动作，
     /// 非破坏性；协调器侧按下标取不到就忽略。
@@ -65,7 +63,7 @@ pub enum CandidateOp {
     /// 固定到第 N 位：N 为 1 基界面名次（1..=[`PIN_AT_MAX`]），写下的规则位置是 N-1。
     /// 拼音也给（前移/后移拼音不给）；菜单只列到每页条数。
     PinAt(u8),
-    /// 常用/生僻互切（**全局字级**，不限本方案本码）。
+    /// 常用/生僻互切（全局字级，不限本方案本码）。
     ///
     /// 与上面五项不是一类：那些落在 shadow（键 = 方案 + 输入码），这个落在常用字覆盖表
     /// （键 = 那个字）。菜单只给一项，文案按当前判定二选一——「设为生僻字」/「设为常用字」，
@@ -98,7 +96,7 @@ pub enum MenuCmd {
     ToggleSoftKeyboard,
     /// 打开软键盘并切到第 N 面
     SoftKeyboardPage(usize),
-    /// 从工具栏的**分格快捷菜单**回到完整功能主菜单。
+    /// 从工具栏的分格快捷菜单回到完整功能主菜单。
     ///
     /// 存在的理由是一条不变量：隐藏齿轮后，右键工具栏是主菜单仅剩的鼠标入口
     /// （`toolbar-customization.md` §2.2 判据③）。分格右键把大部分格子的右键让给了
@@ -162,7 +160,7 @@ pub enum MenuCmd {
     /// 为当前焦点应用设置候选窗首显策略（compat.toml 的 first_show_mode）。
     /// 参数：0=跟随全局（清除规则）1=fast 2=wait 3=instant。三档互斥，UI 上呈现为子菜单单选。
     FirstShowMode(u8),
-    /// 启用 / 禁用当前焦点应用的**整条**兼容规则（compat.toml 的 `disabled`）。
+    /// 启用 / 禁用当前焦点应用的整条兼容规则（compat.toml 的 `disabled`）。
     /// 参数：0=禁用 1=启用。与设置端「应用兼容」里的「禁用 / 启用」同一件事：字段都留着，
     /// 只是整条不生效，方便排查「是不是兼容规则导致的」。
     CompatRuleEnabled(u8),
@@ -176,19 +174,19 @@ pub enum MenuCmd {
     /// 参数：0=跟随全局（清除规则）1=启用 2=禁用。
     ///
     /// 「禁用」主要给表格类宿主用：Excel / WPS 表格在「输入态」下把方向键解释成
-    /// 「确认单元格并移动」，配对后的光标回退无法实现（TSF 路线已实测失败）。
+    /// 「确认单元格并移动」，配对后的光标回退无法实现（TSF 路线不可行）。
     AutoPairRule(u8),
     /// 为当前焦点应用设置候选窗定位方式（compat.toml 的 candidate_position_mode）。
     /// 参数：0=跟随全局（清除规则）1=跟随光标 2=固定位置。
     ///
     /// 「固定位置」给那些 caret 坐标本就报不准的宿主（自绘控件、坐标系错、多进程窗口
-    /// 偏移）：位置由用户拖一次定下，存在该应用**自己**的规则里，不与别的应用共用。
+    /// 偏移）：位置由用户拖一次定下，存在该应用自己的规则里，不与别的应用共用。
     CandidatePositionRule(u8),
     /// 为当前焦点应用设置「软件切换中英」（compat.toml 的 ignore_host_ime_switch）。
     /// 参数：0=跟随全局（清除规则）1=忽略 2=采纳。
     ///
     /// 给自作主张写 compartment 的宿主：WinForms `ImeMode.Disable` / WPF
-    /// `IsInputMethodEnabled=False` 在焦点落到按钮时关掉**全局**中英状态（「点一下按钮就变成
+    /// `IsInputMethodEnabled=False` 在焦点落到按钮时关掉全局中英状态（「点一下按钮就变成
     /// 英文」），也有宿主在内部焦点切换时把它打开（英文态被切成中文）。开和关两个方向都管。
     IgnoreHostImeSwitchRule(u8),
     /// 为当前焦点应用设置「密码框强制英文」（compat.toml 的 password_force_english）。
@@ -196,12 +194,12 @@ pub enum MenuCmd {
     ///
     /// 给「宿主把普通输入框误报成密码框」的应用单独关掉，全局仍保护真密码框（A2-37）。
     PasswordForceEnglishRule(u8),
-    /// 为当前焦点应用设置输入方案（compat.toml 的 schema，C0-7 / GH#80）。
+    /// 为当前焦点应用设置输入方案（compat.toml 的 schema）。
     /// 参数：0=跟随全局（清除规则）1=记住上次（`@remember`）2+i=固定为可用方案表第 i 个。
     ///
     /// 下标而非 id：菜单 id 是整数（macOS 经 `NSMenuItem.tag` 回传），与 `SchemaSelect` 同理。
     AppSchemaRule(u16),
-    /// 为当前焦点应用设置状态气泡定位（compat.toml 的 status_position_mode，C2-33 / GH#148）。
+    /// 为当前焦点应用设置状态气泡定位（compat.toml 的 status_position_mode）。
     /// 参数：0=跟随全局（清除规则）1=跟随光标 2=固定（取气泡当前位置）3+i=锚点表第 i 个
     /// （`wind_config::app_compat::StatusAnchor::ALL` 的顺序）。
     StatusPositionRule(u8),
@@ -218,8 +216,7 @@ pub enum MenuCmd {
     IconToggleSizeMarks,
     /// 语言栏图标（Dev 调试）：外圈跑马灯演示动画。
     ///
-    /// 与上面两项不同，它**不持久化**——那两项是「图标长什么样」的偏好，它是一段持续
-    /// 占用 CPU 与 IPC 的演示，重启后自己关掉才是对的默认。
+    /// 与上面两项不同，它不持久化：这是持续占用 CPU 与 IPC 的演示，重启后该自己关掉。
     IconToggleDemoAnim,
     /// 切换候选窗定位调试浮窗（仅 Dev 变体的菜单里出现）。
     ToggleCaretOverlay,
@@ -408,8 +405,7 @@ impl MenuKind {
 
 /// 菜单相对锚点的展开方向。
 ///
-/// 取代早先的 `above: bool`——加入侧向后就是三态，布尔位表达不了，硬塞会变成
-/// `above`/`side` 两个互斥布尔而类型不作担保。
+/// 三态枚举而非布尔位：拆成 `above`/`side` 两个互斥布尔的话类型不作担保。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuPlacement {
     /// 顶边贴锚点顶边向下展开（光标处右键：候选/状态泡/Tooltip/诊断 HUD）。
@@ -424,9 +420,8 @@ pub enum MenuPlacement {
 
 /// 菜单锚点：屏幕坐标矩形 + 展开方向。
 ///
-/// 聚合成一个类型而非散落的 `x/y/right/bottom/placement` 五个参数：**哪些边参与定位是
-/// 由 `placement` 决定的**（`Below` 只看左上、`Above` 还要下边、`Side` 还要右边），
-/// 这份知识只有收在一处才不会在某个调用点被漏填成 0 而静默错位。
+/// 聚合成一个类型：哪些边参与定位由 `placement` 决定（`Below` 只看左上、`Above` 还要下边、
+/// `Side` 还要右边），收在一处才不会在某个调用点漏填成 0 而静默错位。
 #[derive(Debug, Clone, Copy)]
 pub struct MenuAnchor {
     /// 锚点左边（`i32::MIN` = 由 UI 取当前光标位，此时其余边同样退化为该点）。
