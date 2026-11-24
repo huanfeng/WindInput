@@ -68,31 +68,14 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// 读设置文件。缺失用默认值；损坏记日志后用默认值（不覆盖原文件，留给用户处理）。
 fn load_settings(path: &Path) -> SyncSettings {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SyncSettings::default(),
-        Err(e) => {
-            warn!("读取同步设置 {} 失败: {e}", path.display());
-            return SyncSettings::default();
-        }
-    };
-    match toml::from_str::<SyncSettings>(&text) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("同步设置 {} 解析失败，按默认值处理: {e}", path.display());
-            SyncSettings::default()
-        }
-    }
+    wind_sync_ipc::load_settings_file(path).unwrap_or_else(|e| {
+        warn!("{e}，按默认值处理");
+        SyncSettings::default()
+    })
 }
 
-/// 同目录临时文件 + rename，写一半不会留下半个设置文件。
 fn save_settings(path: &Path, s: &SyncSettings) -> Result<(), String> {
-    let text = toml::to_string_pretty(s).map_err(|e| format!("序列化同步设置失败: {e}"))?;
-    let dir = path.parent().ok_or("设置路径无父目录")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+    wind_sync_ipc::save_settings_file(path, s)
 }
 
 struct Paths {

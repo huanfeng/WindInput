@@ -183,6 +183,26 @@ fn check_url(label: &str, url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 读设置文件（TOML）。文件不存在 = 默认值；读不了或解析失败返回错误文案（调用方决定是否降级为默认值）。
+pub fn load_settings_file(path: &std::path::Path) -> Result<SyncSettings, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SyncSettings::default()),
+        Err(e) => return Err(format!("读取同步设置 {} 失败: {e}", path.display())),
+    };
+    toml::from_str(&text).map_err(|e| format!("同步设置 {} 解析失败: {e}", path.display()))
+}
+
+/// 写设置文件：同目录临时文件 + rename，写一半不会留下半个文件。
+pub fn save_settings_file(path: &std::path::Path, s: &SyncSettings) -> Result<(), String> {
+    let text = toml::to_string_pretty(s).map_err(|e| format!("序列化同步设置失败: {e}"))?;
+    let dir = path.parent().ok_or("设置路径无父目录")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+}
+
 /// 设置端经 `sync.command` 发起的操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
