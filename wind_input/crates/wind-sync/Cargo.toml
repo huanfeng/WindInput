@@ -19,7 +19,7 @@ getrandom = { workspace = true }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
 # 真实后端（feature `net`，默认关闭，同步进程启用）
-ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
+ureq = { version = "2", default-features = false, features = ["tls", "socks-proxy"], optional = true }
 rusty-s3 = { version = "0.8", optional = true }
 quick-xml = { version = "0.37", optional = true }
 percent-encoding = { version = "2", optional = true }

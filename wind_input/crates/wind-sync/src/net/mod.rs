@@ -1,8 +1,8 @@
 //! 真实后端（feature `net`）：WebDAV 与 S3，共用一个同步 HTTP 客户端（ureq 2 + rustls）。
 //!
 //! 超时：连接 15 秒、整体 60 秒。不跟随重定向（重定向多半是 URL 写错或 http→https，
-//! 当作错误报出来比悄悄把 PUT 变成 GET 好）。环境代理默认读取（`HTTP_PROXY` / `HTTPS_PROXY`），
-//! 配置里 `proxy_from_env = false` 可关闭。
+//! 当作错误报出来比悄悄把 PUT 变成 GET 好）。环境代理默认读取（`ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`，
+//! 支持 http、socks4/4a/5、socks5h），不支持的写法记警告后直连；配置里 `proxy_from_env = false` 可关闭。
 
 mod s3;
 mod webdav;
@@ -17,12 +17,115 @@ use std::time::Duration;
 const MAX_BODY: u64 = 512 * 1024 * 1024;
 
 pub(crate) fn new_agent(proxy_from_env: bool) -> ureq::Agent {
-    ureq::AgentBuilder::new()
+    let mut b = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))
         .redirects(0)
-        .try_proxy_from_env(proxy_from_env)
-        .build()
+        // 代理由下面自行解析：ureq 内置的环境读取会静默丢弃它不认的写法。
+        .try_proxy_from_env(false);
+    if proxy_from_env {
+        match proxy_from_vars(|k| std::env::var(k).ok()) {
+            Ok(Some(p)) => b = b.proxy(p),
+            Ok(None) => {}
+            Err(w) => eprintln!("[wind-sync] {w}，改为直连"),
+        }
+    }
+    b.build()
+}
+
+/// 按 curl 的习惯顺序取第一个非空的代理变量并解析；没有则 `Ok(None)`。
+fn proxy_from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Option<ureq::Proxy>, String> {
+    const KEYS: [&str; 6] = [
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ];
+    let Some((key, raw)) = KEYS
+        .iter()
+        .find_map(|k| get(k).filter(|v| !v.trim().is_empty()).map(|v| (*k, v)))
+    else {
+        return Ok(None);
+    };
+    let url = normalize_proxy_url(raw.trim()).ok_or_else(|| format!("{key} 的代理写法不受支持"))?;
+    ureq::Proxy::new(&url)
+        .map(Some)
+        .map_err(|_| format!("{key} 的代理地址无法解析"))
+}
+
+/// socks5h（代理端解析域名）并入 socks5；ureq 的 socks5 本就把域名交给代理。
+/// 其余不认识的 scheme（含 https 代理）返回 `None`。
+fn normalize_proxy_url(raw: &str) -> Option<String> {
+    let Some((scheme, rest)) = raw.split_once("://") else {
+        return Some(raw.to_string()); // 无 scheme，ureq 按 http 处理
+    };
+    let scheme = match scheme.to_ascii_lowercase().as_str() {
+        "http" => "http",
+        "socks" | "socks5" | "socks5h" => "socks5",
+        "socks4" => "socks4",
+        "socks4a" => "socks4a",
+        _ => return None,
+    };
+    Some(format!("{scheme}://{rest}"))
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| m.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn accepts_http_and_socks_schemes() {
+        for u in [
+            "http://127.0.0.1:7890",
+            "socks5://127.0.0.1:1080",
+            "socks5h://u:p@127.0.0.1:1080",
+            "socks4://h:1",
+            "socks4a://h:1",
+            "SOCKS5://h:1/",
+            "127.0.0.1:8080",
+        ] {
+            assert!(
+                matches!(proxy_from_vars(env(&[("ALL_PROXY", u)])), Ok(Some(_))),
+                "{u}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_scheme_is_an_error_not_a_panic() {
+        assert!(proxy_from_vars(env(&[("ALL_PROXY", "https://p:1")])).is_err());
+        assert!(proxy_from_vars(env(&[("HTTP_PROXY", "ftp://p:1")])).is_err());
+    }
+
+    #[test]
+    fn unset_or_blank_means_direct() {
+        assert!(matches!(proxy_from_vars(env(&[])), Ok(None)));
+        assert!(matches!(
+            proxy_from_vars(env(&[("ALL_PROXY", "  "), ("http_proxy", "http://h:1")])),
+            Ok(Some(_))
+        ));
+    }
+
+    #[test]
+    fn all_proxy_wins_over_http_proxy() {
+        let p = proxy_from_vars(env(&[
+            ("HTTP_PROXY", "http://a:1"),
+            ("ALL_PROXY", "socks5h://b:2"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert!(format!("{p:?}").contains("\"b\""), "{p:?}");
+    }
 }
 
 /// HTTP 状态码 → 错误分类。
