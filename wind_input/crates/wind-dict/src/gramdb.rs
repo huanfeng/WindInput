@@ -1,3 +1,4 @@
+// Portions derived from librime / librime-octagram, Copyright (c) 2014 RIME Developers, BSD-3-Clause (see NOTICE.md).
 //! librime-octagram `.gram` 语法模型读取（darts-clone double-array trie）。
 //!
 //! 格式依据与实测结论全部记在 `docs/design/language-model-integration.md` §2.2，

@@ -1,3 +1,4 @@
+// Portions derived from librime / librime-octagram, Copyright (c) 2014 RIME Developers, BSD-3-Clause (see NOTICE.md).
 //! 用 librime-octagram `.gram` 模型实现 [`Grammar`]。
 //!
 //! 查询流程复刻 `ref/librime-octagram/src/octagram.cc::Query`：

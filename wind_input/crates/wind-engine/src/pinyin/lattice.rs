@@ -1,3 +1,4 @@
+// Portions derived from librime / librime-octagram, Copyright (c) 2014 RIME Developers, BSD-3-Clause (see NOTICE.md).
 //! 格子构建（Lattice）+ 多切分评分
 //!
 //! 与 Go 版本 `wind_input/internal/engine/pinyin/lattice.go` 对齐。

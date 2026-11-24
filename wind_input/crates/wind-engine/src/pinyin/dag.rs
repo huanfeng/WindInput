@@ -1,3 +1,4 @@
+// Portions derived from librime / librime-octagram, Copyright (c) 2014 RIME Developers, BSD-3-Clause (see NOTICE.md).
 //! DAG 构建与最大匹配
 //!
 //! 与 Go 版本 `wind_input/internal/engine/pinyin/dag.go` 对齐。

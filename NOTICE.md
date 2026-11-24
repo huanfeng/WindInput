@@ -241,9 +241,23 @@ gitignore），用于生成词库数据文件，其各自适用原项目的许�
 ### RIME / librime
 
 - **仓库**: https://github.com/rime/librime
-- **许可证**: BSD-3-Clause
+- **许可证**: BSD-3-Clause，`Copyright (c) 2014, RIME Developers`
 - **用途**: 方案与词库格式（`.dict.yaml` 列序与元数据语义）、候选排序层级、
-  整句解码与补全策略（`enable_completion`）、词频权重模型的设计参考
+  词频权重模型的设计参考；整句解码（Viterbi / 格子 / DAG 构建）与补全策略
+  （`enable_completion`）的算法依其实现移植为 Rust，相关源文件头部已标注
+
+### librime-octagram
+
+- **仓库**: https://github.com/lotem/librime-octagram
+- **许可证**: BSD-3-Clause，`Copyright (c) 2014, RIME Developers`
+- **用途**: 语法模型 `.gram` 文件格式（darts-clone double-array trie）的读取与
+  `octagram.cc::Query` 查询流程依其实现移植为 Rust
+  （`wind-dict/src/gramdb.rs`、`wind-engine/src/pinyin/octagram.rs`）。模型数据见上文
+  rime-octagram-data（LGPL-3.0）
+
+BSD-3-Clause 许可要点：再分发源码须保留上述版权声明、条件清单与免责声明；
+再分发二进制须在随附文档中复现上述声明；未经书面许可不得以版权持有人或贡献者的名义
+为衍生产品背书。许可全文见 https://github.com/lotem/librime-octagram/blob/main/LICENSE 。
 
 ### 小狼毫 (Weasel)
 

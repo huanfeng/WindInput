@@ -13,7 +13,7 @@
 - **"您"** 指签署本协议的个人贡献者。
 - **"维护者"** 指 GitHub 账号 [@huanfeng](https://github.com/huanfeng) 的持有人，以及其书面指定的继受者或其控制的法律实体。
 - **"贡献"** 指您有意提交给本项目的任何原创作品，包括但不限于源代码、文档、配置文件、测试用例等。
-- **"项目"** 指清风输入法 (WindInput) 及其组件，包括 [github.com/huanfeng](https://github.com/huanfeng) 下属于清风输入法的各个仓库（如 WindInput、wind-setting、wind-installer、wind-portable 等）。
+- **"项目"** 指清风输入法 (WindInput) 及其组件，包括 [github.com/huanfeng](https://github.com/huanfeng) 下属于清风输入法的各个仓库（如 WindInput、WindInputAndroid、wind-setting、wind-installer、wind-portable 等）。
 
 ### 2. 版权许可授予
 

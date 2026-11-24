@@ -1,3 +1,4 @@
+// Portions derived from librime / librime-octagram, Copyright (c) 2014 RIME Developers, BSD-3-Clause (see NOTICE.md).
 //! 上下文语言模型（n-gram）接口。
 //!
 //! 形态对齐 librime 的 `Grammar`（`ref/weasel/librime/src/rime/gear/grammar.h`）：
