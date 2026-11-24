@@ -9272,8 +9272,8 @@ fn test_codetable_auto_phrase_single_char_is_not_a_word() {
 /// 挂钩，故前缀命中一律避让、不占首位——码表下与更长编码补全按权重同档，拼音/混输下降到拼音
 /// 精确候选之下。不按语法类型区分（`$CC`/`$SS`/静态同规则）。
 ///
-/// marker 来自 `lookup_prefix`（码严格更长），须 `is_exact_code=false` + `is_prefix=!codetable`
-/// + `weight=hit.weight`。低权重（1）让 marker 可靠沉到码表候选之下，隔离出「避让」这一断言。
+/// marker 来自 `lookup_prefix`（码严格更长），须 `is_exact_code=false`、`is_prefix=!codetable`、
+/// `weight=hit.weight`。低权重（1）让 marker 可靠沉到码表候选之下，隔离出「避让」这一断言。
 /// 组短语码 `nia` 严格长于输入 `ni` → 前缀枚举命中。
 fn coord_with_group_phrase(schema: &str, tag: &str) -> std::sync::Arc<Coordinator> {
     let store_path = std::env::temp_dir().join(format!("wind_group_marker_{tag}.redb"));
