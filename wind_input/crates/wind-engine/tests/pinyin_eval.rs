@@ -32,6 +32,9 @@
 //! - `WIND_PINYIN_EVAL_SHUANGPIN=1` 只对 `pinyin_eval_shuangpin` 生效：A/B/C 抽样按真值音节转成
 //!   小鹤击键，比较双拼击键坐标图开关关 / 开，写 `<out>.sp.json` 与 `<out>.sp.ranks.tsv`；
 //!   不设时该测试直接跳过，`pinyin_eval_report` 不受影响
+//! - `WIND_PINYIN_EVAL_T9=1` 只对 `pinyin_eval_t9` 生效：A/B/C 抽样按真值拼音转成九宫格数字串，
+//!   与同一批样本的 26 键全拼对比命中率，另按键数分桶统计 `convert` 耗时；写 `<out>.t9.json`
+//!   与 `<out>.t9.ranks.tsv`
 //!
 //! 除 JSON 外还写 `<out>.ranks.tsv`：每条样本的引擎序 / 界面序位次与界面首页。两档之间逐位比对
 //! 用它；与协调器对拍见 `wind-coordinator/tests/pinyin_eval_ui_parity.rs`（读同一份 TSV）。
@@ -83,6 +86,7 @@ use wind_config::Config;
 use wind_engine::pinyin::dag::Dag;
 use wind_engine::pinyin::shuangpin::{Layout, ShuangpinConverter};
 use wind_engine::pinyin::syllable::SyllableTrie;
+use wind_engine::pinyin::t9::KeypadMap;
 use wind_engine::{ConvertOptions, EngineManager};
 
 // ---------------------------------------------------------------- 基础设施
@@ -1948,6 +1952,184 @@ fn pinyin_eval_shuangpin() {
     for (path, body) in [
         (out.with_extension("sp.json"), &j),
         (out.with_extension("sp.ranks.tsv"), &tsv),
+    ] {
+        match std::fs::write(&path, body) {
+            Ok(()) => println!("已写入 {}", path.display()),
+            Err(e) => eprintln!("写入 {} 失败: {e}", path.display()),
+        }
+    }
+}
+
+/// 九宫格变体：A/B/C 抽样（同种子、同抽法）按真值拼音转成数字串，同一进程里与 26 键全拼
+/// 对比（同一批样本、同一条界面序管线）。耗时只计九宫格那次 `convert`。
+#[test]
+#[ignore = "批量评测：慢，且依赖 build_dev 真实词库。用 --ignored 显式运行"]
+fn pinyin_eval_t9() {
+    if !std::env::var("WIND_PINYIN_EVAL_T9").is_ok_and(|v| v == "1") {
+        eprintln!("跳过：未设 WIND_PINYIN_EVAL_T9=1");
+        return;
+    }
+    let Some(dir) = data_dir() else {
+        eprintln!("跳过：build_dev 拼音词库不存在");
+        return;
+    };
+    let n_per_class = env_usize("WIND_PINYIN_EVAL_N", 1000);
+    let seed = std::env::var("WIND_PINYIN_EVAL_SEED")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(20_260_721);
+    let out = match std::env::var("WIND_PINYIN_EVAL_OUT") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/pinyin_eval")
+            .join("latest.json"),
+    };
+
+    let raw = read_all_dicts(&dir);
+    let unigram = collect_word_freqs(&raw);
+    let trie = SyllableTrie::new();
+    let mut reject: HashMap<&'static str, usize> = HashMap::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut pools: HashMap<&'static str, Vec<Sample>> = HashMap::new();
+    for (text, code, weight) in &raw {
+        if let Some(mut s) = classify(text, code, *weight, &trie, &mut reject) {
+            if !seen.insert((s.text.clone(), s.input.clone())) {
+                continue;
+            }
+            s.unigram = unigram.get(&s.text).copied().unwrap_or(0);
+            pools.entry(s.class.key()).or_default().push(s);
+        }
+    }
+
+    let mgr = manager(&dir);
+    let keypad = std::sync::Arc::new(KeypadMap::t9());
+    let to_digits = |input: &str| -> String {
+        input
+            .bytes()
+            .map(|b| match b {
+                b'a'..=b'c' => '2',
+                b'd'..=b'f' => '3',
+                b'g'..=b'i' => '4',
+                b'j'..=b'l' => '5',
+                b'm'..=b'o' => '6',
+                b'p'..=b's' => '7',
+                b't'..=b'v' => '8',
+                _ => '9',
+            })
+            .collect()
+    };
+    let ranks = |keys: &str, text: &str, t9: bool| {
+        let opts = ConvertOptions {
+            keypad: t9.then(|| keypad.clone()),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut c = mgr
+            .convert_with_opts("pinyin", keys, UI_LIMIT, opts)
+            .candidates;
+        let us = t0.elapsed().as_micros() as u64;
+        let engine = c.iter().take(TOP_N).position(|x| x.text == text);
+        wind_candidate::drop_corrected_duplicates(&mut c);
+        c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, keys));
+        let mut seen = std::collections::HashSet::new();
+        c.retain(|x| seen.insert(x.text.clone()));
+        wind_candidate::protect_top_from_corrected(&mut c, keys.len());
+        let ui = c.iter().position(|x| x.text == text);
+        (
+            engine,
+            ui,
+            c.first().map(|x| x.text.clone()).unwrap_or_default(),
+            us,
+        )
+    };
+
+    let fmt_rank = |r: Option<usize>| r.map_or("-".to_string(), |r| r.to_string());
+    // 按键数分桶的耗时（微秒）：2–4 / 5–8 / 9–12 / 13+
+    let bucket = |n: usize| match n {
+        0..=4 => 0,
+        5..=8 => 1,
+        9..=12 => 2,
+        _ => 3,
+    };
+    let mut lat: [Vec<u64>; 4] = Default::default();
+    let mut tsv = String::from(
+        "class\tkeys\texpect\tqwerty_ui_rank\tt9_engine_rank\tt9_ui_rank\tt9_ui_top1\tt9_us\n",
+    );
+    let mut j = format!("{{\n  \"seed\": {seed},\n  \"classes\": {{\n");
+    let classes = [Class::A, Class::B, Class::C];
+    for (ci, c) in classes.iter().enumerate() {
+        let set = stratified_sample(pools.remove(c.key()).unwrap_or_default(), n_per_class, seed);
+        let (mut qwerty, mut t9) = (SpScore::default(), SpScore::default());
+        for s in &set {
+            let keys = to_digits(&s.input);
+            let (qe, qu, _, _) = ranks(&s.input, &s.text, false);
+            let (te, tu, tt, us) = ranks(&keys, &s.text, true);
+            qwerty.add(qe, qu);
+            t9.add(te, tu);
+            lat[bucket(keys.len())].push(us);
+            let _ = writeln!(
+                tsv,
+                "{}\t{keys}\t{}\t{}\t{}\t{}\t{tt}\t{us}",
+                c.key(),
+                s.text,
+                fmt_rank(qu),
+                fmt_rank(te),
+                fmt_rank(tu),
+            );
+        }
+        println!(
+            "{:<46} 26键 {}  九宫格 {}",
+            c.label(),
+            qwerty.json(),
+            t9.json()
+        );
+        let _ = writeln!(
+            j,
+            "    \"{}\": {{\"qwerty\": {}, \"t9\": {}}}{}",
+            c.key(),
+            qwerty.json(),
+            t9.json(),
+            if ci + 1 == classes.len() { "" } else { "," }
+        );
+    }
+    j.push_str("  },\n  \"latency_us\": {\n");
+    let names = ["2-4", "5-8", "9-12", "13+"];
+    for (i, v) in lat.iter_mut().enumerate() {
+        v.sort_unstable();
+        let pct = |p: f64| {
+            if v.is_empty() {
+                0
+            } else {
+                v[((v.len() - 1) as f64 * p).round() as usize]
+            }
+        };
+        println!(
+            "耗时 {:>5} 键：n={:<5} p50={}us p90={}us p99={}us max={}us",
+            names[i],
+            v.len(),
+            pct(0.5),
+            pct(0.9),
+            pct(0.99),
+            v.last().copied().unwrap_or(0)
+        );
+        let _ = writeln!(
+            j,
+            "    \"{}\": {{\"n\": {}, \"p50\": {}, \"p90\": {}, \"p99\": {}}}{}",
+            names[i],
+            v.len(),
+            pct(0.5),
+            pct(0.9),
+            pct(0.99),
+            if i + 1 == names.len() { "" } else { "," }
+        );
+    }
+    j.push_str("  }\n}\n");
+    if let Some(p) = out.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    for (path, body) in [
+        (out.with_extension("t9.json"), &j),
+        (out.with_extension("t9.ranks.tsv"), &tsv),
     ] {
         match std::fs::write(&path, body) {
             Ok(()) => println!("已写入 {}", path.display()),
