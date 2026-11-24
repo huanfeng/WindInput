@@ -207,6 +207,8 @@ pub struct Status {
     pub conflict_paths: Vec<String>,
     /// 本机是否已有机密（凭据与密钥）。
     pub has_secret: bool,
+    /// 本机已持有 DEK（已设置口令或导入密钥）。设置端据此区分「设置口令」与「修改口令」。
+    pub joined: bool,
 }
 
 /// 同步进程 → core。

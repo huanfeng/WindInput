@@ -451,6 +451,7 @@ impl SyncHost {
             "conflicts": inner.status.conflicts,
             "conflict_paths": inner.status.conflict_paths,
             "has_secret": inner.status.has_secret,
+            "joined": inner.status.joined,
         })
     }
 
@@ -702,12 +703,14 @@ mod tests {
             conflicts: 1,
             conflict_paths: vec!["config.conflict-a-1.toml".into()],
             has_secret: true,
+            joined: true,
             ..Default::default()
         }));
         wait_for(|| phase(&r.host) == "idle");
         let st = r.host.rpc("sync.status", &Value::Null).unwrap();
         assert_eq!(st["pending"], 2);
         assert_eq!(st["conflicts"], 1);
+        assert_eq!(st["joined"], true);
         assert_eq!(st["conflict_paths"][0], "config.conflict-a-1.toml");
         assert_eq!(st["last_ok"], 100);
         assert_eq!(st["running"], true);
@@ -729,6 +732,7 @@ mod tests {
             conflicts: 1,
             conflict_paths: vec!["config.conflict-a-1.toml".into()],
             has_secret: true,
+            joined: true,
             ..Default::default()
         }));
         std::thread::sleep(Duration::from_millis(100));

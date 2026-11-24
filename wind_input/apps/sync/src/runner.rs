@@ -185,6 +185,7 @@ impl Runner {
                 .cloned()
                 .collect(),
             has_secret: self.ready(),
+            joined: self.secrets.dek.is_some(),
         }
     }
 

@@ -326,6 +326,26 @@ fn begin_edit_refusal_blocks_the_batch_then_recovers() {
 }
 
 #[test]
+fn joined_flag_and_passphrase_change_without_old_passphrase() {
+    let remote = MemBackend::new();
+    let mut a = Node::new(&remote, false);
+    assert!(!a.status().joined);
+    a.setup("p1");
+    a.sync();
+    assert!(a.status().joined);
+    // 已持有 DEK：只给新口令即可修改
+    let r = a
+        .cmd(Op::SetPassphrase, json!({"passphrase": "p2"}))
+        .unwrap();
+    assert_eq!(r["mode"], "change");
+    let mut b = Node::new(&remote, false);
+    b.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
+    b.cmd(Op::SetPassphrase, json!({"passphrase": "p2"}))
+        .unwrap();
+    assert!(b.status().joined);
+}
+
+#[test]
 fn conflict_paths_are_reported_capped_and_vanish_when_deleted() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
